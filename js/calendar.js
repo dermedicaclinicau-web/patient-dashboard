@@ -1,4 +1,5 @@
 import { fetchDayAppointments } from "./appointments.js";
+import { fetchDayBadges } from "./calendar-badges.js";
 import { logout } from "./auth.js";
 import {
   escapeHtml, hueFromString, toDateKey, parseDateKey, addDays,
@@ -20,6 +21,7 @@ const ICON_REFRESH = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
 export function mountCalendar(container, param) {
   let dateKey = parseDateKey(param) ? param : toDateKey();
   const cache = new Map(); // dateKey -> data, for this visit only
+  const badgeCache = new Map(); // dateKey -> badgesFor(), for this visit only
   let seq = 0;
 
   container.innerHTML = `
@@ -72,6 +74,7 @@ export function mountCalendar(container, param) {
 
   async function load(force = false) {
     const mySeq = ++seq;
+    if (force) badgeCache.delete(dateKey);
     renderHeader();
 
     if (!force && cache.has(dateKey)) {
@@ -110,6 +113,7 @@ export function mountCalendar(container, param) {
       return;
     }
 
+    appts.forEach((a, i) => { a._i = i; }); // lets badges find their card later
     const byStaff = new Map();
     for (const a of appts) {
       if (!byStaff.has(a.staff)) byStaff.set(a.staff, []);
@@ -119,6 +123,30 @@ export function mountCalendar(container, param) {
     board.innerHTML = `<div class="cal-columns">${
       sortStaff([...byStaff.keys()]).map((name) => staffColumn(name, byStaff.get(name))).join("")
     }</div>`;
+    
+    loadBadges(appts);
+  }
+
+    // Badges load after the schedule is shown, so they never slow it down
+  async function loadBadges(appts) {
+    const key = dateKey;
+    const mySeq = seq;
+    try {
+      let badgesFor = badgeCache.get(key);
+      if (!badgesFor) {
+        badgesFor = await fetchDayBadges(key, appts);
+        badgeCache.set(key, badgesFor);
+      }
+      if (mySeq !== seq || !board.isConnected) return; // user moved to another day
+
+      board.querySelectorAll(".appt[data-i]").forEach((card) => {
+        const a = appts[Number(card.dataset.i)];
+        const slot = card.querySelector(".appt-badges");
+        if (a && slot) slot.innerHTML = badgesFor(a).map(badgeHtml).join("");
+      });
+    } catch (err) {
+      console.warn("Calendar badges failed:", err);
+    }
   }
 
   // Navigation
@@ -198,6 +226,19 @@ function parseBalance(b) {
   return isFinite(n) ? n : 0;
 }
 
+const BADGES = {
+  plan: ["Plan", "cb-plan"],
+  summary: ["Summary", "cb-summary"],
+  tx: ["TxR", "cb-tx"],
+  consent: ["ConsentR", "cb-consent"],
+  rx: ["Prex", "cb-rx"],
+};
+
+function badgeHtml(type) {
+  const [label, cls] = BADGES[type];
+  return `<span class="cb ${cls}">${label}</span>`;
+}
+
 function apptCard(a) {
   const services = (a.services || [])
     .map((s) => `<span class="appt-service">${escapeHtml(s)}</span>`)
@@ -213,15 +254,17 @@ function apptCard(a) {
   const inner = `
     <span class="appt-time">${escapeHtml(a.time || "—")}</span>
     <span class="appt-name">${escapeHtml(a.patientName || "Unknown patient")}</span>
+    <span class="appt-badges"></span>
     ${services ? `<span class="appt-services">${services}</span>` : ""}
     ${extras ? `<span class="appt-extras">${extras}</span>` : ""}`;
 
   const title = escapeHtml([a.timeRange || a.time, a.resources].filter(Boolean).join(" · "));
   const classes = `appt ${cls}`.trim();
+  const idx = Number.isInteger(a._i) ? ` data-i="${a._i}"` : "";
 
   return a.patientId
-    ? `<a class="${classes}" href="#/patient/${encodeURIComponent(a.patientId)}" title="${title}">${inner}</a>`
-    : `<div class="${classes}" title="${title}">${inner}</div>`;
+    ? `<a class="${classes}"${idx} href="#/patient/${encodeURIComponent(a.patientId)}" title="${title}">${inner}</a>`
+    : `<div class="${classes}"${idx} title="${title}">${inner}</div>`;
 }
 
 function skeletonBoard() {
