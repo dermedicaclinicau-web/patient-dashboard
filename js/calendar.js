@@ -185,20 +185,43 @@ function staffColumn(name, appts) {
     </div>`;
 }
 
+// Cancelled / no-show = greyed out; completed / arrived = green
+function statusClass(s) {
+  const v = String(s || "").toLowerCase();
+  if (/cancel|no.?show|\bdna\b|did not attend/.test(v)) return "is-cancelled";
+  if (/complete|arrived|checked|attended|paid/.test(v)) return "is-done";
+  return "";
+}
+
+function parseBalance(b) {
+  const n = Number(String(b || "").replace(/[^0-9.-]/g, ""));
+  return isFinite(n) ? n : 0;
+}
+
 function apptCard(a) {
   const services = (a.services || [])
     .map((s) => `<span class="appt-service">${escapeHtml(s)}</span>`)
     .join("");
 
+  const cls = statusClass(a.status);
+  const balance = parseBalance(a.balance);
+  const extras = [
+    a.status ? `<span class="appt-status ${cls}">${escapeHtml(a.status)}</span>` : "",
+    balance > 0 ? `<span class="appt-balance">$${balance.toFixed(2)} owing</span>` : "",
+  ].join("");
+
   const inner = `
     <span class="appt-time">${escapeHtml(a.time || "—")}</span>
     <span class="appt-name">${escapeHtml(a.patientName || "Unknown patient")}</span>
-    ${services ? `<span class="appt-services">${services}</span>` : ""}`;
+    ${services ? `<span class="appt-services">${services}</span>` : ""}
+    ${extras ? `<span class="appt-extras">${extras}</span>` : ""}`;
 
-  const title = escapeHtml(a.timeRange || a.time || "");
+  const title = escapeHtml([a.timeRange || a.time, a.resources].filter(Boolean).join(" · "));
+  const classes = `appt ${cls}`.trim();
+
   return a.patientId
-    ? `<a class="appt" href="#/patient/${encodeURIComponent(a.patientId)}" title="${title}">${inner}</a>`
-    : `<div class="appt" title="${title}">${inner}</div>`;
+    ? `<a class="${classes}" href="#/patient/${encodeURIComponent(a.patientId)}" title="${title}">${inner}</a>`
+    : `<div class="${classes}" title="${title}">${inner}</div>`;
 }
 
 function skeletonBoard() {
