@@ -17,4 +17,3 @@ export const LOGIN_ENDPOINT = "https://script.google.com/macros/s/AKfycbzKmMFcYH
 export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
-import { getFirestore } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
