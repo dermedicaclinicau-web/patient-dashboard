@@ -107,3 +107,78 @@ export function toBullets(text) {
     .map((s) => s.replace(/^\s*[-•*]\s+/, "").trim())
     .filter(Boolean);
 }
+
+// Every record with a "!!TREATMENT PLAN", newest first, with the plan parsed into concerns
+export function allTreatmentPlans(records) {
+  return records
+    .map((r) => ({ ...r, plan: extractSection(r.soap, "TREATMENT PLAN") }))
+    .filter((r) => r.plan)
+    .map((r) => ({ ...r, parsed: parsePlan(r.plan) }));
+}
+
+const CONCERN_RE = /^CONCERN\s+([A-Z0-9]{1,3})\s*[:.)\-–—]\s*(.*)$/i;
+const LABEL_RE = /^(AREAS?|TREATMENTS?|FREQUENCY\s*\/\s*INTERVAL|FREQUENCY|INTERVAL|QUOTE|COSTS?|PRICING|COMMENTS?|NOTES?|SUGGESTED\s+TIMELINE|TIMELINE)\s*:\s*(.*)$/i;
+
+function labelKey(label) {
+  const l = label.toUpperCase().replace(/\s+/g, " ");
+  if (l.startsWith("AREA")) return "area";
+  if (l.startsWith("TREATMENT")) return "treatment";
+  if (l.startsWith("FREQUENCY") || l === "INTERVAL") return "frequency";
+  if (l === "QUOTE" || l.startsWith("COST") || l === "PRICING") return "quote";
+  if (l.includes("TIMELINE")) return "timeline";
+  return "comments";
+}
+
+// "Redness / Sensitive Skin — Facial redness and flushing" -> title + description
+function newConcern(letter, heading) {
+  const m = /^(.*?)\s+[—–-]\s+(.*)$/.exec(heading || "");
+  return {
+    letter,
+    title: (m ? m[1] : heading || "").trim(),
+    description: m ? [m[2].trim()] : [],
+    area: [], treatment: [], frequency: [], quote: [], comments: [],
+  };
+}
+
+// Turns the plan text into { intro: [], concerns: [...], timeline: [] }
+export function parsePlan(text) {
+  const plan = { intro: [], concerns: [], timeline: [] };
+  let current = null;
+  let field = null;
+
+  String(text || "").split(/\r?\n/).forEach((raw) => {
+    const line = raw.trim().replace(/^[-•*]\s+/, "");
+    if (!line) return;
+    let m;
+
+    if ((m = CONCERN_RE.exec(line))) {
+      current = newConcern(m[1].toUpperCase(), m[2]);
+      plan.concerns.push(current);
+      field = null;
+      return;
+    }
+
+    if ((m = LABEL_RE.exec(line))) {
+      const key = labelKey(m[1]);
+      if (key === "timeline") {
+        field = "timeline";
+        if (m[2]) plan.timeline.push(m[2].trim());
+        return;
+      }
+      if (!current) { // a field with no "CONCERN X:" heading before it
+        current = newConcern("", "");
+        plan.concerns.push(current);
+      }
+      field = key;
+      if (m[2]) current[field].push(m[2].trim());
+      return;
+    }
+
+    // Continuation lines belong to whatever came before
+    if (field === "timeline") plan.timeline.push(line);
+    else if (current) current[field || "description"].push(line);
+    else plan.intro.push(line);
+  });
+
+  return plan;
+}

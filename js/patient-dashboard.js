@@ -1,7 +1,9 @@
 import { getPatient, updatePatient } from "./patients.js";
 import { fetchDayAppointments, fetchPreconsult } from "./appointments.js";
 import { fetchOpenReminders } from "./reminders.js";
-import { fetchTranscriptRecords, latestTreatmentPlan, socialHistoryEntries, toBullets } from "./transcripts.js";
+import {
+  fetchTranscriptRecords, latestTreatmentPlan, socialHistoryEntries, toBullets, allTreatmentPlans,
+} from "./transcripts.js";
 import {
   escapeHtml, getInitials, hueFromString, formatDobLong, calcAge,
   formatMobile, toTelHref, toDateKey, showToast, formatUpdated,
@@ -181,6 +183,8 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
 
     ${preConsultHtml()}
 
+    ${treatmentPlansSectionHtml()}
+
     ${dialogHtml()}`;
 
   const bar = root.querySelector(".patient-bar");
@@ -278,9 +282,13 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
           entries.length ? socialHistoryHtml(entries) : `<p class="empty-note">No social history recorded.</p>`,
           !entries.length);
       }
+
+      renderTreatmentPlans(root, records);
     } catch (err) {
       if (!root.isConnected) return;
       console.error("Transcript sections failed:", err);
+      const tpBody = root.querySelector(".tp-body");
+      if (tpBody) tpBody.innerHTML = `<p class="empty-note error">Couldn't load treatment plans.</p>`;
       const msg = err.code === "permission-denied"
         ? "Consultation records aren't accessible. Check the Firestore rules."
         : "Couldn't load consultation records.";
@@ -667,4 +675,118 @@ function socialHistoryHtml(entries) {
         <ul class="pc-list">${bullets.map((b) => `<li>${escapeHtml(b)}</li>`).join("")}</ul>
       </div>`;
   }).join("")}</div>`;
+}
+
+/* ===================== Treatment Plan section ===================== */
+
+function treatmentPlansSectionHtml() {
+  return `
+    <details class="section-card tp-card" data-key="tp-section" ${isOpen("tp-section", true) ? "open" : ""}>
+      <summary>
+        <span class="pc-head">${ICONS.chev}<span class="pc-title">Treatment Plan</span><span class="hint tp-count">…</span></span>
+      </summary>
+      <div class="section-body tp-body"><div class="skeleton sm"></div></div>
+    </details>`;
+}
+
+function renderTreatmentPlans(root, records) {
+  const section = root.querySelector('details[data-key="tp-section"]');
+  if (!section) return;
+
+  const plans = allTreatmentPlans(records);
+  section.querySelector(".tp-count").textContent = plans.length
+    ? `${plans.length} ${plans.length === 1 ? "plan" : "plans"}`
+    : "No record";
+
+  const body = section.querySelector(".tp-body");
+  if (!plans.length) {
+    body.innerHTML = `<p class="empty-note">No treatment plans on record.</p>`;
+    return;
+  }
+
+  // Group by record date (records are already newest first)
+  const groups = new Map();
+  plans.forEach((p) => {
+    const key = p.date ? toDateKey(p.date) : `undated-${p.dateText}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(p);
+  });
+
+  body.innerHTML = [...groups.values()].map((g, i) => planGroupHtml(g, i === 0)).join("");
+}
+
+function planGroupHtml(group, isLatest) {
+  const first = group[0];
+  const dateText = first.date ? formatShortDate(first.date) : (first.dateText || "Undated");
+  const staff = [...new Set(group.map((p) => p.staff).filter(Boolean))].join(", ");
+  const concerns = group.reduce((n, p) => n + p.parsed.concerns.length, 0);
+  const pill = concerns ? `${concerns} ${concerns === 1 ? "concern" : "concerns"}` : "Review";
+
+  return `
+    <details class="tp-record" ${isLatest ? "open" : ""}>
+      <summary>
+        <span class="sum-left">
+          <span class="tp-date">${escapeHtml(dateText)}</span>
+          ${staff ? `<span class="tp-by">${escapeHtml(staff)}</span>` : ""}
+          <span class="hint">${pill}</span>
+          ${isLatest ? `<span class="tp-latest">Latest</span>` : ""}
+          ${group.some((p) => p.matchedByName) ? `<span class="task-flag neutral">Matched by name</span>` : ""}
+        </span>
+        ${ICONS.chev}
+      </summary>
+      <div class="tp-record-body">${group.map(planBodyHtml).join("")}</div>
+    </details>`;
+}
+
+function planBodyHtml(p) {
+  const { intro, concerns, timeline } = p.parsed;
+
+  // Unstructured plans (e.g. "REVIEW OF EXISTING PLAN") show as a clean note
+  if (!concerns.length && !timeline.length) {
+    return `<div class="tp-note">${escapeHtml(p.plan)}</div>`;
+  }
+
+  return `
+    ${intro.length ? `<div class="tp-note">${intro.map(escapeHtml).join("<br>")}</div>` : ""}
+    ${concerns.map(concernHtml).join("")}
+    ${timeline.length ? timelineHtml(timeline) : ""}`;
+}
+
+function fieldHtml(lines) {
+  if (!lines.length) return `<span class="missing">—</span>`;
+  if (lines.length === 1) return escapeHtml(lines[0]);
+  return `<ul class="pc-list">${lines.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul>`;
+}
+
+function concernHtml(c) {
+  return `
+    <article class="concern">
+      <header class="concern-head">
+        ${c.letter ? `<span class="concern-badge">${escapeHtml(c.letter)}</span>` : ""}
+        <div class="concern-titles">
+          <h4>${escapeHtml(c.title || "Concern")}</h4>
+          ${c.description.length ? `<p>${c.description.map(escapeHtml).join(" ")}</p>` : ""}
+        </div>
+        ${c.area.length ? `<span class="concern-area">${escapeHtml(c.area.join(", "))}</span>` : ""}
+      </header>
+      <dl class="concern-grid">
+        <div><dt>Treatment</dt><dd>${fieldHtml(c.treatment)}</dd></div>
+        <div><dt>Frequency / interval</dt><dd>${fieldHtml(c.frequency)}</dd></div>
+        <div><dt>Quote</dt><dd>${fieldHtml(c.quote)}</dd></div>
+        <div class="full"><dt>Comments</dt><dd>${fieldHtml(c.comments)}</dd></div>
+      </dl>
+    </article>`;
+}
+
+function timelineHtml(lines) {
+  return `
+    <div class="tp-timeline">
+      <p class="tp-label">${ICONS.clock}<span>Suggested timeline</span></p>
+      <ol class="timeline">${lines.map((l) => {
+        const m = /^([^:]{1,30}):\s*(.+)$/.exec(l); // "Week 0: Genesis Glow"
+        return m
+          ? `<li><span class="tl-when">${escapeHtml(m[1])}</span><span class="tl-what">${escapeHtml(m[2])}</span></li>`
+          : `<li><span class="tl-what">${escapeHtml(l)}</span></li>`;
+      }).join("")}</ol>
+    </div>`;
 }

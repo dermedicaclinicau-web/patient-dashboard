@@ -407,6 +407,54 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .sh-sep { color: var(--muted); font-weight: 400; }
 .sh-staff { color: var(--muted); font-weight: 400; }
 
+/* ---------- Treatment Plan section ---------- */
+.tp-card { background: #ede9fe; border-color: #ddd6fe; border-radius: 18px; }
+.tp-card > summary { padding: 1rem 1.35rem; }
+.tp-card .pc-head .sum-chev { color: var(--text); transform: rotate(-90deg); }
+.tp-card[open] > summary .pc-head .sum-chev { transform: rotate(0deg); }
+.tp-card .tp-count { background: #fff; border: none; color: #6d28d9; }
+.tp-body { gap: .75rem; padding: 0 1.1rem 1.1rem; }
+
+.tp-record { background: #fff; border: 1px solid #e4defc; border-radius: 12px; }
+.tp-record > summary { list-style: none; display: flex; align-items: center; justify-content: space-between;
+  gap: .75rem; padding: .85rem 1rem; cursor: pointer; user-select: none; }
+.tp-record > summary::-webkit-details-marker { display: none; }
+.tp-record[open] > summary { border-bottom: 1px solid #efeafd; }
+.tp-date { font-weight: 700; color: #5b21b6; }
+.tp-by { font-size: .82rem; color: var(--muted); }
+.tp-record .hint { background: #f5f3ff; border-color: #e4defc; color: #6d28d9; }
+.tp-latest { font-size: .68rem; font-weight: 600; padding: .1rem .5rem; border-radius: 999px; background: #6d28d9; color: #fff; }
+.tp-record-body { padding: 1rem; display: flex; flex-direction: column; gap: .85rem; }
+.tp-note { padding: .75rem .9rem; border-radius: 10px; background: #faf8ff; border: 1px dashed #ddd6fe;
+  font-size: .9rem; line-height: 1.6; white-space: pre-line; }
+
+.concern { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.concern-head { display: flex; align-items: flex-start; gap: .75rem; padding: .85rem 1rem;
+  background: #faf8ff; border-bottom: 1px solid #efeafd; }
+.concern-badge { width: 30px; height: 30px; flex-shrink: 0; border-radius: 8px; display: grid; place-items: center;
+  background: #6d28d9; color: #fff; font-weight: 700; font-size: .85rem; }
+.concern-titles { flex: 1; min-width: 0; }
+.concern-titles h4 { font-size: .98rem; font-weight: 600; }
+.concern-titles p { font-size: .85rem; color: var(--muted); margin-top: .1rem; }
+.concern-area { font-size: .75rem; font-weight: 500; padding: .2rem .6rem; border-radius: 999px; white-space: nowrap;
+  background: #fff; border: 1px solid #e4defc; color: #6d28d9; }
+.concern-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .9rem 1.25rem; padding: .9rem 1rem; }
+.concern-grid .full { grid-column: 1 / -1; }
+.concern-grid dt { font-size: .7rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  color: #94a3b8; margin-bottom: .25rem; }
+.concern-grid dd { font-size: .9rem; line-height: 1.55; }
+
+.tp-timeline { padding: .9rem 1rem; border-radius: 12px; background: #f5f3ff; border: 1px solid #e4defc; }
+.tp-label { display: flex; align-items: center; gap: .45rem; margin-bottom: .7rem; font-size: .75rem;
+  font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: #6d28d9; }
+.tp-label svg { width: 15px; height: 15px; }
+.timeline { list-style: none; position: relative; padding-left: 1.1rem; display: flex; flex-direction: column; gap: .6rem; }
+.timeline::before { content: ""; position: absolute; left: .3rem; top: .35rem; bottom: .35rem; width: 2px; background: #ddd6fe; }
+.timeline li { position: relative; display: flex; flex-wrap: wrap; gap: .25rem .6rem; font-size: .9rem; }
+.timeline li::before { content: ""; position: absolute; left: -1.05rem; top: .45rem; width: 10px; height: 10px;
+  border-radius: 50%; background: #fff; border: 2px solid #7c3aed; }
+.tl-when { font-weight: 600; color: #5b21b6; min-width: 90px; }
+
 /* ---------- Responsive ---------- */
 @media (max-width: 860px) {
   .shell-body { flex-direction: column; }
@@ -421,7 +469,7 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
   .patient-bar { position: static; }
   .pb-top { flex-wrap: wrap; }
   .pb-actions { width: 100%; }
-  .pc-grid.pairs, .field-grid { grid-template-columns: 1fr; }
+  .pc-grid.pairs, .field-grid, .concern-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 560px) {
   .topbar { padding: 0 1rem; }
