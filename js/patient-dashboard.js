@@ -19,29 +19,39 @@ const DOC_ACTIONS = [
   ["Personal note", "lock"],
 ];
 
-// "field" = connected to a pcn_results column. No field = not connected yet ("Soon").
+// Order and look of the Pre-Consultation section.
+// field = pcn_results column | unit = pill wording ("one|many", or "value" to show the value itself)
+// tone = colour style | action = [button label, "coming soon" name]
 const PRECONSULT_SECTIONS = [
-  { key: "overdue", title: "Overdue treatments", field: "overdue", alert: true },
-  { key: "reminders", title: "Reminders", custom: true },
-  { key: "personal-notes", title: "Personal notes", empty: "No personal notes yet." },
-  { key: "social-history", title: "Social history", empty: "No social history recorded." },
-  { key: "past-appts", title: "Past appointments", empty: "No past appointments to show." },
-  { key: "future-visits", title: "Future visits", field: "futureVisits" },
-  { key: "packages", title: "Customer packages", field: "packages" },
-  { key: "skin-script", title: "Skin script protocol", field: "skinScriptDate" },
-  { key: "treatment-plan", title: "Treatment plan", empty: "No treatment plan recorded." },
+  { key: "reminders", title: "Reminders", icon: "bell", custom: true },
+  { key: "today", today: true },
+  { key: "personal-notes", title: "Personal notes", icon: "pin", pill: "No record",
+    empty: "No personal notes on record.", action: ["+ Add", "Add personal note"] },
+  { key: "social-history", title: "Social history", icon: "user", pill: "None recorded",
+    empty: "No social history recorded." },
+  { key: "past-appts", title: "Past appointments", icon: "clock", field: "other", unit: "visit|visits", tone: "green" },
+  { key: "recent-visits", visits: true },
+  { key: "future-visits", title: "Future visits", icon: "calendar", field: "futureVisits", unit: "visit|visits", tone: "purple" },
+  { key: "overdue", title: "Overdue treatments", icon: "alert", field: "overdue", unit: "overdue|overdue", tone: "red" },
+  { key: "packages", title: "Customer packages", icon: "box", field: "packages", unit: "active|active" },
+  { key: "skin-script", title: "Skin script protocol", icon: "file", field: "skinScriptDate", unit: "value",
+    action: ["Create new SSP", "Create new SSP"] },
+  { key: "treatment-plan", title: "Treatment plan", icon: "check", pill: "No record",
+    empty: "No treatment plan recorded." },
 ];
 
 // Each inner array is one row; two items sit side by side
 const VISIT_CATEGORIES = [
-  [{ title: "Wrinkle Relaxer", field: "wrinkleRelaxer" }, { title: "Filler / Radiesse", field: "fillerRadiesse" }],
-  [{ title: "HydraRepair / Skin Remodelling / Collagen Growth", field: "hydraRepair" }, { title: "Other Injectables", field: "otherInjectables" }],
-  [{ title: "RestoraGlow / RF / DermaGlow / Skin Needling", field: "restoraGlow" }, { title: "Collagen Activator", field: "collagenActivator" }],
-  [{ title: "Laser / OPL / Peel", field: "laserOplPeel" }, { title: "Firm / Ulthera / eST", field: "firmUlthera" }],
-  [{ title: "Body Sculpting", field: "bodySculpting" }],
-  [{ title: "Other", field: "other" }],
+  [{ title: "Wrinkle Relaxer", field: "wrinkleRelaxer", color: "mint" },
+   { title: "Filler / Radiesse", field: "fillerRadiesse", color: "blue" }],
+  [{ title: "Hydra Repair / Skin Remodelling / Collagen Growth", field: "hydraRepair", color: "pink" },
+   { title: "Other Injectables", field: "otherInjectables", color: "grey" }],
+  [{ title: "RestoraGlow / RF / DermaGlow / Skin Needling", field: "restoraGlow", color: "lavender" },
+   { title: "Collagen Activator", field: "collagenActivator", color: "cream" }],
+  [{ title: "Laser / OPL / Peel", field: "laserOplPeel", color: "peach" },
+   { title: "Firm / Ulthera / eST", field: "firmUlthera", color: "tan" }],
+  [{ title: "Body Sculpting", field: "bodySculpting", color: "rose" }],
 ];
-
 /* ===================== Icons ===================== */
 
 const svg = (paths, cls = "") =>
@@ -64,6 +74,15 @@ const ICONS = {
   summary: svg('<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="16" x2="13" y2="16"/>'),
   note: svg('<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>'),
   lock: svg('<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>'),
+  pin: svg('<line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/>'),
+  user: svg('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
+  clock: svg('<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>'),
+  layers: svg('<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>'),
+  alert: svg('<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>'),
+  box: svg('<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>'),
+  file: svg(FILE + '<line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>'),
+  check: svg('<polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'),
+  refresh: svg('<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>'),
   chev: svg('<polyline points="6 9 12 15 18 9"/>', "sum-chev"),
 };
 
@@ -101,6 +120,10 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
 
   root.addEventListener("click", (e) => {
     const t = e.target;
+    // Buttons inside a section header must not also open/close that section
+    if (t.closest("summary button")) e.preventDefault();
+    const refreshBtn = t.closest("[data-action='refresh-pc']");
+    if (refreshBtn) { refreshAll(refreshBtn); return; }
     if (t.closest(".back-btn, [data-action='back']")) { if (onBack) onBack(); return; }
     const soon = t.closest("[data-soon]");
     if (soon) { showToast(`${soon.dataset.soon}: coming soon`); return; }
@@ -219,6 +242,18 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   loadPreconsultData();
   loadReminders();
 
+  // Refresh button: reload all pre-consultation data in place
+  async function refreshAll(btn) {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.classList.add("is-loading");
+    await Promise.allSettled([loadToday(), loadPreconsultData(), loadReminders()]);
+    if (btn.isConnected) {
+      btn.disabled = false;
+      btn.classList.remove("is-loading");
+    }
+  }
+
   // Reminders from Firestore 'staff-task-list' (open/not completed only)
   async function loadReminders() {
     const card = root.querySelector('details[data-key="reminders"]');
@@ -230,7 +265,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       const tasks = await fetchOpenReminders(patient);
       if (!root.isConnected) return;
 
-      hint.textContent = tasks.length ? `${tasks.length} pending` : "None";
+      hint.textContent = `${tasks.length} pending`;
       body.innerHTML = tasks.length
         ? remindersHtml(tasks)
         : `<p class="empty-note">No pending reminders for this patient.</p>`;
@@ -261,7 +296,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       const msg = err.code === "UNAUTHORIZED"
         ? "Session expired. Log out and back in to see today's appointments."
         : "Couldn't load today's appointments.";
-      todaySlot.innerHTML = `<div class="today-empty error">${ICONS.calendar}<span>${msg}</span></div>`;
+      todaySlot.innerHTML = todayHtml([], msg);
     }
   }
 
@@ -328,65 +363,89 @@ function barHtml(p, today = [], pre = null) {
     </dl>`;
 }
 
-function subCard(key, title, body, { hint = "", open = false, extraClass = "", field = "", alert = false } = {}) {
+function subCard({ key, title, icon = "", body = "", pill = "", tone = "", action = null,
+                   field = "", unit = "", extraClass = "", open = false }) {
   return `
-    <details class="sub-card ${extraClass}" data-key="${escapeHtml(key)}"${field ? ` data-field="${escapeHtml(field)}"` : ""}${alert ? ` data-alert="true"` : ""} ${isOpen(key, open) ? "open" : ""}>
+    <details class="sub-card ${tone ? `tone-${tone}` : ""} ${extraClass}" data-key="${escapeHtml(key)}"${
+      field ? ` data-field="${escapeHtml(field)}"` : ""}${unit ? ` data-unit="${escapeHtml(unit)}"` : ""} ${
+      isOpen(key, open) ? "open" : ""}>
       <summary>
-        <span>${escapeHtml(title)}</span>
-        <span class="sum-right">${hint ? `<span class="hint">${escapeHtml(hint)}</span>` : ""}${ICONS.chev}</span>
+        <span class="sum-left">
+          ${icon ? `<span class="sum-icon">${ICONS[icon]}</span>` : ""}
+          <span class="sum-label">${escapeHtml(title)}</span>
+          <span class="hint"${pill ? "" : " hidden"}>${escapeHtml(pill)}</span>
+        </span>
+        <span class="sum-right">
+          ${action ? `<button type="button" class="sum-action" data-soon="${escapeHtml(action[1])}">${escapeHtml(action[0])}</button>` : ""}
+          ${ICONS.chev}
+        </span>
       </summary>
       <div class="sub-body">${body}</div>
     </details>`;
 }
 
 function preConsultHtml() {
-  const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-");
   const loading = `<div class="skeleton xs"></div>`;
 
-  const sections = PRECONSULT_SECTIONS.map((s) => {
-    if (s.custom) return subCard(s.key, s.title, loading, { hint: "…" }); // filled by its own loader
-    return s.field
-      ? subCard(s.key, s.title, loading, { hint: "…", field: s.field, alert: s.alert })
-      : subCard(s.key, s.title, `<p class="empty-note">${escapeHtml(s.empty)}</p>`, { hint: "Soon" });
+  const blocks = PRECONSULT_SECTIONS.map((s) => {
+    if (s.today) return `<div class="today-slot">${todayHtml(null)}</div>`;
+    if (s.visits) return visitsHtml();
+    const loads = s.field || s.custom;
+    return subCard({
+      key: s.key, title: s.title, icon: s.icon, tone: s.tone, action: s.action,
+      field: s.field, unit: s.unit,
+      pill: loads ? "…" : s.pill,
+      body: loads ? loading : `<p class="empty-note">${escapeHtml(s.empty)}</p>`,
+    });
   }).join("");
 
-  const visits = VISIT_CATEGORIES.flatMap((row) =>
-    row.map((c) =>
-      subCard(`visit-${slug(c.title)}`, c.title, loading, {
-        hint: "…",
-        field: c.field,
-        extraClass: row.length === 1 ? "full" : "",
-      })
-    )
-  ).join("");
-
   return `
-    <details class="section-card" data-key="preconsult" ${isOpen("preconsult", true) ? "open" : ""}>
+    <details class="section-card pc-card" data-key="preconsult" ${isOpen("preconsult", true) ? "open" : ""}>
       <summary>
-        <span class="pc-head"><span class="section-title serif">Pre-consultation</span><span class="pc-updated"></span></span>
-        ${ICONS.chev}
+        <span class="pc-head">${ICONS.chev}<span class="pc-title">Pre-Consultation Information</span><span class="pc-updated"></span></span>
+        <button type="button" class="pc-refresh" data-action="refresh-pc">${ICONS.refresh}<span>Refresh</span></button>
       </summary>
-      <div class="section-body">
-        <div class="today-slot"><div class="skeleton sm"></div></div>
-        <div class="pc-grid">${sections}</div>
-        <p class="eyebrow pc-sub">Recent visits by category</p>
-        <div class="pc-grid pairs">${visits}</div>
-      </div>
+      <div class="section-body pc-body">${blocks}</div>
     </details>`;
 }
 
-function todayHtml(list) {
-  if (!list.length) {
-    return `<div class="today-empty">${ICONS.calendar}<span>Today's appointment: no scheduled appointments today</span></div>`;
+function visitsHtml() {
+  const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  const cards = VISIT_CATEGORIES.flatMap((row) =>
+    row.map((c) => subCard({
+      key: `visit-${slug(c.title)}`, title: c.title, tone: c.color,
+      field: c.field, unit: "visit|visits", extraClass: "visit-card",
+      body: `<div class="skeleton xs"></div>`,
+    }))
+  ).join("");
+
+  return `
+    <div class="visits-block">
+      <p class="visits-label">${ICONS.layers}<span>Recent visits by category</span></p>
+      <div class="pc-grid pairs">${cards}</div>
+    </div>`;
+}
+
+// list: null = loading, [] = none, [..] = appointments. errorMsg shows an error state.
+function todayHtml(list, errorMsg = "") {
+  let text;
+  if (errorMsg) text = escapeHtml(errorMsg);
+  else if (list === null) text = "Loading…";
+  else if (!list.length) text = "No scheduled appointments today";
+  else {
+    text = list.map((a) =>
+      [a.time, a.staff, (a.services || []).join(", ")].filter(Boolean).map(escapeHtml).join(" · ")
+    ).join("<br>");
   }
-  return list.map((a) => {
-    const services = (a.services || []).map(escapeHtml).join(", ");
-    return `
-      <div class="today-appt">
-        <div class="ta-time">Today · ${escapeHtml(a.time || "")}</div>
-        <div class="ta-info"><strong>${escapeHtml(a.staff || "")}</strong>${services ? ` · ${services}` : ""}</div>
-      </div>`;
-  }).join("");
+
+  return `
+    <div class="today-card${errorMsg ? " error" : ""}">
+      <span class="today-icon">${ICONS.calendar}</span>
+      <div>
+        <p class="today-label">Today's appointment</p>
+        <p class="today-text">${text}</p>
+      </div>
+    </div>`;
 }
 
 function dialogHtml() {
@@ -438,11 +497,14 @@ function toLines(value) {
   return String(value || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
 }
 
-// Short single values (like a date) show in the pill; otherwise a count
-function hintFor(lines) {
-  if (!lines.length) return "None";
-  if (lines.length === 1 && lines[0].length <= 22) return lines[0];
-  return `${lines.length} ${lines.length === 1 ? "entry" : "entries"}`;
+// Pill wording per section: "3 visits", "0 overdue", "1 active", or the value itself
+function pillText(lines, unit) {
+  if (unit === "value") {
+    if (!lines.length) return "No record";
+    return lines.length === 1 && lines[0].length <= 22 ? lines[0] : `${lines.length} records`;
+  }
+  const [one, many] = (unit || "entry|entries").split("|");
+  return `${lines.length} ${lines.length === 1 ? one : many}`;
 }
 
 function valueHtml(lines) {
@@ -456,12 +518,15 @@ function fillPreconsult(root, data, lastUpdated) {
 
   root.querySelectorAll("details[data-field]").forEach((d) => {
     const lines = toLines(data ? data[d.dataset.field] : "");
-    d.querySelector(".hint").textContent = hintFor(lines);
+    const hint = d.querySelector(".hint");
+    hint.textContent = pillText(lines, d.dataset.unit);
+    // Category bars only show a count when there's something in them
+    hint.hidden = d.classList.contains("visit-card") && !lines.length;
+
     d.querySelector(".sub-body").innerHTML = lines.length
       ? valueHtml(lines)
       : `<p class="empty-note">${data ? "Nothing recorded." : "No pre-consultation record found for this patient."}</p>`;
     d.classList.toggle("is-empty", !lines.length);
-    d.classList.toggle("is-alert", d.dataset.alert === "true" && lines.length > 0);
   });
 }
 
@@ -470,7 +535,9 @@ function fillPreconsultError(root, err) {
     ? "Session expired. Log out and back in to load this."
     : "Couldn't load pre-consultation data.";
   root.querySelectorAll("details[data-field]").forEach((d) => {
-    d.querySelector(".hint").textContent = "—";
+    const hint = d.querySelector(".hint");
+    hint.textContent = "—";
+    hint.hidden = false;
     d.querySelector(".sub-body").innerHTML = `<p class="empty-note error">${msg}</p>`;
   });
 }
