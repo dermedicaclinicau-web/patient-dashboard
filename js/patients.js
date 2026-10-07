@@ -1,5 +1,5 @@
 import { db, auth } from "./firebase-config.js";
-import { formatDobLong } from "./utils.js";
+import { formatDobLong, toDateKeyLoose } from "./utils.js";
 import {
   collection, query, where, orderBy, limit, startAfter, getDocs,
   doc, getDoc, updateDoc, serverTimestamp,
@@ -72,8 +72,9 @@ function toPatient(snap) {
     email: d.Email || "",
     mobile: d.Mobile || "",
     address: d.Address || "",
-    dobKey: d.DobKey || "",
-    dob: d.DOB || "",
+    // Use DobKey if it's readable, otherwise work it out from DOB (any common format)
+    dobKey: toDateKeyLoose(d.DobKey) || toDateKeyLoose(d.DOB),
+    dob: typeof d.DOB === "string" ? d.DOB : "",
   };
 }
 

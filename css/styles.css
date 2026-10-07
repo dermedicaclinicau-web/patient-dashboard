@@ -423,9 +423,9 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .plan-block.expanded .plan-toggle svg { transform: rotate(90deg); }
 .plan-text { padding: .8rem 1rem; border: 1px solid #e4defc; border-radius: 10px; background: #fff;
   font-size: .9rem; line-height: 1.6; }
-.plan-clamp { white-space: pre-line; display: -webkit-box; -webkit-line-clamp: 6;
+.plan-clamp { white-space: pre-line; display: -webkit-box; -webkit-line-clamp: 6; line-clamp: 6;
   -webkit-box-orient: vertical; overflow: hidden; }
-.plan-block.expanded .plan-clamp { display: block; -webkit-line-clamp: unset; overflow: visible; }
+.plan-block.expanded .plan-clamp { display: block; -webkit-line-clamp: unset; line-clamp: unset; overflow: visible; }
 .plan-meta { display: flex; align-items: center; gap: .5rem; font-size: .78rem; }
 
 

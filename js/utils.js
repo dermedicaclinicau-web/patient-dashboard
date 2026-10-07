@@ -126,3 +126,46 @@ export function showToast(message) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove("show"), 2500);
 }
+
+const MONTH_INDEX = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+
+function validKey(y, mo, d) {
+  const key = `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+  return parseDateKey(key) ? key : ""; // rejects impossible dates like 1986-02-31
+}
+
+// Any common date format -> "YYYY-MM-DD" (or "" if it can't be read safely)
+export function toDateKeyLoose(value) {
+  if (value === null || value === undefined || value === "") return "";
+  if (typeof value.toDate === "function") value = value.toDate(); // Firestore Timestamp
+  if (value instanceof Date) return isNaN(value) ? "" : toDateKey(value);
+
+  const s = String(value).trim();
+  let m;
+
+  // ISO timestamp with timezone, e.g. "1986-02-06T16:00:00.000Z" -> LOCAL date (7 Feb in Perth)
+  if (/^\d{4}-\d{2}-\d{2}T.*(Z|[+-]\d{2}:?\d{2})$/i.test(s)) {
+    const d = new Date(s);
+    return isNaN(d) ? "" : toDateKey(d);
+  }
+
+  // 1986-02-07 / 1986-2-7 / 1986/02/07 / "1986-02-07 00:00:00"
+  if ((m = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/.exec(s))) return validKey(m[1], m[2], m[3]);
+
+  // 07/02/1986 -> Australian day/month/year
+  if ((m = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})$/.exec(s))) return validKey(m[3], m[2], m[1]);
+
+  // February 7, 1986 / Feb 7 1986
+  if ((m = /^([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})$/.exec(s))) {
+    const mo = MONTH_INDEX[m[1].slice(0, 3).toLowerCase()];
+    return mo === undefined ? "" : validKey(m[3], mo + 1, m[2]);
+  }
+
+  // 7 February 1986 / 7 Feb, 1986
+  if ((m = /^(\d{1,2})\s+([A-Za-z]{3,9})\.?,?\s+(\d{4})$/.exec(s))) {
+    const mo = MONTH_INDEX[m[2].slice(0, 3).toLowerCase()];
+    return mo === undefined ? "" : validKey(m[3], mo + 1, m[1]);
+  }
+
+  return "";
+}
