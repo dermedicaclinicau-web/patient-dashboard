@@ -9,7 +9,7 @@ const firebaseConfig = {
   apiKey: "AIzaSyCHGXFwaFmJFrSPgts2qxTOZxhpZVMd_I8",
   authDomain: "disco-serenity-428708-t8.firebaseapp.com",
   projectId: "disco-serenity-428708-t8",
-  storageBucket: "gs://disco-serenity-428708-t8.firebasestorage.app/transcription_audio",
+  storageBucket: "disco-serenity-428708-t8.firebasestorage.app",
   appId: "1:827152098304:web:2d038feb11a1eedec2e4e5",
 };
 
