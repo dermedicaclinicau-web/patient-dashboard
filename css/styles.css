@@ -548,6 +548,57 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
   color: #9f1239; font-size: .82rem; font-weight: 600; cursor: pointer; }
 .pur-more:hover { background: #fff1f2; }
 
+/* ---------- Treatment + Consent records ---------- */
+.rc-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; align-items: start; }
+.rc-card { background: #fff; border: 1px solid var(--border); border-radius: 18px; padding: .6rem;
+  box-shadow: 0 6px 20px rgba(15, 23, 42, .05); }
+.rc-card > summary { list-style: none; display: flex; align-items: center; justify-content: space-between; gap: .75rem;
+  padding: .8rem 1rem; border: 1px solid var(--border); border-radius: 12px; cursor: pointer; user-select: none; }
+.rc-card > summary::-webkit-details-marker { display: none; }
+.rc-title { display: inline-flex; align-items: center; gap: .5rem; font-weight: 700; }
+.rc-title .sum-chev { transform: rotate(-90deg); }
+.rc-card[open] > summary .rc-title .sum-chev { transform: rotate(0deg); }
+.rc-card .sk-badge { background: #f1f5f4; color: var(--text); }
+.rc-body { margin-top: .6rem; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+
+.rc-cat + .rc-cat { border-top: 1px solid var(--border); }
+.rc-cat > summary { list-style: none; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  gap: .5rem .75rem; padding: .7rem 1rem; background: #f8fafb; cursor: pointer; user-select: none; }
+.rc-cat > summary::-webkit-details-marker { display: none; }
+.rc-cat > summary:hover { background: #f1f5f7; }
+.rc-cat-left { display: inline-flex; align-items: center; gap: .55rem; min-width: 0; }
+.rc-chev { width: 14px; height: 14px; color: var(--muted); flex-shrink: 0; transition: transform .2s; }
+.rc-cat[open] > summary .rc-chev { transform: rotate(90deg); }
+.rc-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.rc-cat-name { font-size: .8rem; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; }
+.rc-cat-count { font-size: .8rem; color: #94a3b8; }
+.rc-cat-actions { display: inline-flex; align-items: center; gap: .6rem; }
+.rc-link { display: inline-flex; align-items: center; gap: .3rem; padding: 0; border: none; background: none;
+  color: var(--primary); font-size: .82rem; font-weight: 600; cursor: pointer; }
+.rc-link svg { width: 13px; height: 13px; }
+.rc-link:hover { text-decoration: underline; }
+.rc-sep { color: #cbd5e1; }
+.rc-cat-body { padding: .6rem; display: flex; flex-direction: column; gap: .6rem; background: #fff; }
+.rc-empty { color: var(--muted); font-size: .85rem; font-style: italic; padding: .3rem .4rem; }
+.rc-empty.pad { padding: 1rem; }
+
+.rc-item { display: flex; flex-direction: column; gap: .4rem; padding: .85rem 1rem; border: 1px solid var(--border); border-radius: 12px; }
+.rc-item-top { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+.rc-item h4 { font-size: .98rem; font-weight: 600; }
+.rc-date { font-size: .82rem; color: var(--muted); white-space: nowrap; }
+.rc-staff { font-size: .86rem; color: #334155; }
+.rc-badge { align-self: flex-start; font-size: .75rem; font-weight: 600; padding: .15rem .6rem; border-radius: 999px; border: 1px solid; }
+.rc-badge.ok { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
+.rc-badge.warn { background: #fffbeb; color: #b45309; border-color: #fde68a; }
+.rc-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .3rem; }
+.rc-act { display: inline-flex; align-items: center; gap: .35rem; padding: .3rem .75rem; border-radius: 999px;
+  border: 1px solid var(--border); background: #fff; color: #334155; font-size: .8rem; text-decoration: none; cursor: pointer; }
+.rc-act svg { width: 13px; height: 13px; }
+.rc-act:hover { border-color: var(--primary); color: var(--primary); }
+.rc-act.danger { color: #dc2626; border-color: #fecaca; background: #fef2f2; }
+.rc-act.danger:hover { border-color: #dc2626; color: #dc2626; }
+.rc-act.is-disabled { opacity: .45; pointer-events: none; }
+
 /* ---------- Responsive ---------- */
 @media (max-width: 860px) {
   .shell-body { flex-direction: column; }
@@ -562,7 +613,7 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
   .patient-bar { position: static; }
   .pb-top { flex-wrap: wrap; }
   .pb-actions { width: 100%; }
-  .pc-grid.pairs, .field-grid, .concern-grid, .sk-grid, .pur-stats { grid-template-columns: 1fr; }
+  .pc-grid.pairs, .field-grid, .concern-grid, .sk-grid, .pur-stats, .rc-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 560px) {
   .topbar { padding: 0 1rem; }

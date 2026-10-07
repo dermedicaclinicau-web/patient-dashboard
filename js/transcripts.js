@@ -5,7 +5,7 @@ import { collection, query, where, getDocs, FieldPath }
 const COLLECTION = "appointment_transcripts";
 
 // Spellings to try for the name match ("Ashley Hanna #1", "Ashley Hanna", "Jan BRAY"...)
-function nameVariants(patient) {
+export function nameVariants(patient) {
   const clean = (s) => String(s || "").replace(/[^\p{L}\s'-]/gu, " ").replace(/\s+/g, " ").trim();
   const title = (s) => s.toLowerCase().replace(/(^|[\s'-])\p{L}/gu, (m) => m.toUpperCase());
 
@@ -34,7 +34,7 @@ export function extractSection(soap, heading) {
 }
 
 // "January 16, 2026" / "January 16, 2026 10:30 AM" / "16/01/2026"
-function parseRecordDate(s) {
+export function parseRecordDate(s) {
   const str = String(s || "").trim();
   const dmy = /^(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(str); // Australian day/month/year
   if (dmy) return new Date(Number(dmy[3]), Number(dmy[2]) - 1, Number(dmy[1]));
