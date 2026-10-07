@@ -675,6 +675,14 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
   background: #fff; color: var(--primary); font-size: .82rem; font-weight: 600; cursor: pointer; }
 .bp-more:hover { border-color: var(--primary); }
 
+.ir-grid, .ph-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; align-items: start; }
+.bp-icon.inj { background: #ffe4e6; color: #be123c; }
+.bp-icon.ref { background: #e2e8f0; color: #334155; }
+.bp-icon.interest { background: #fef3c7; color: #b45309; }
+.bp-icon.comms { background: #ccfbf1; color: #0f766e; }
+.ph-badge { font-size: .7rem; font-weight: 600; padding: .15rem .55rem; border-radius: 999px;
+  background: var(--surface-2); border: 1px solid var(--border); color: var(--muted); }
+
 /* ---------- Social History / Medication / Medical Conditions / Allergies ---------- */
 .hx-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; align-items: start; }
 .hx-icon { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; flex-shrink: 0; }
@@ -728,7 +736,7 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
   .patient-bar { position: static; }
   .pb-top { flex-wrap: wrap; }
   .pb-actions { width: 100%; }
-  .pc-grid.pairs, .field-grid, .concern-grid, .sk-grid, .pur-stats, .rc-grid, .bp-grid, .hx-grid { grid-template-columns: 1fr; }
+  .pc-grid.pairs, .field-grid, .concern-grid, .sk-grid, .pur-stats, .rc-grid, .bp-grid, .hx-grid, .ir-grid, .ph-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 560px) {
   .topbar { padding: 0 1rem; }

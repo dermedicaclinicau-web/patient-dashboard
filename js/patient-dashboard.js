@@ -4,7 +4,9 @@ import { fetchOpenReminders } from "./reminders.js";
 import { skincareSectionHtml, mountSkincare } from "./skincare-view.js";
 import { recordsSectionHtml, mountRecords } from "./records-view.js";
 import { historySectionHtml, mountHistory } from "./history-view.js";
-import { billingRxSectionHtml, mountBillingRx } from "./billing-rx-view.js";
+import {
+  billingRxSectionHtml, mountBillingRx, injectableReferralSectionHtml, interestsCommsSectionHtml,
+} from "./billing-rx-view.js";
 import {
   clinicalHistorySectionHtml, mountClinicalHistory, renderClinicalHistory, renderClinicalHistoryError,
 } from "./clinical-history-view.js";
@@ -204,6 +206,10 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     ${billingRxSectionHtml()}
     
     ${clinicalHistorySectionHtml()}
+    
+    ${injectableReferralSectionHtml()}
+
+    ${interestsCommsSectionHtml()}
 
     ${dialogHtml()}`;
 

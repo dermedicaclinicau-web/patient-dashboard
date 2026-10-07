@@ -17,12 +17,19 @@ const ICONS = {
   file: svg('<path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/>'),
   edit: svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>'),
   trash: svg('<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>'),
+  syringe: svg('<path d="m18 2 4 4"/><path d="m17 7 3-3"/><path d="M19 9 8.7 19.3a2.4 2.4 0 0 1-3.4 0l-.6-.6a2.4 2.4 0 0 1 0-3.4L15 5"/><path d="m9 11 4 4"/><path d="m5 19-3 3"/><path d="m14 4 6 6"/>'),
+  send: svg('<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>'),
+  star: svg('<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>'),
+  message: svg('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>'),
 };
 
 const fmt = (it) => (it.date ? `${MONTHS[it.date.getMonth()]} ${it.date.getDate()}, ${it.date.getFullYear()}` : (it.dateText || "Undated"));
 const byDateDesc = (a, b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0);
 const isArchived = (v) => /^(true|yes|y|1|archived)$/i.test(String(v || "").trim());
 const driveLink = (id) => (/^[\w-]{10,}$/.test(String(id || "")) ? `https://drive.google.com/file/d/${id}/view` : "");
+// Injectable prescription types (everything else stays in the "Prescription" card)
+const INJECTABLE_RE = /xeomin|botox|dysport|letybo|relatox|wrinkle|toxin|\bha\b|hyaluronic|filler|radiesse|sculptra|rejuran|profhilo|skin\s?booster|hyalase|polynucleotide|injectable/i;
+const isInjectable = (r) => INJECTABLE_RE.test(r.title);
 
 function isOpenSaved(key, fallback) {
   try {
@@ -74,7 +81,11 @@ async function fetchBillingAndRx(patient) {
     : null;
 
   [scanRes, rxRes].forEach((r) => { if (r.status === "rejected") console.error("Billing/Rx load failed:", r.reason); });
-  return { billing, rx, errors: [scanRes, rxRes].filter((r) => r.status === "rejected").map((r) => r.reason) };
+  return {
+    billing,
+    rx: rx ? rx.filter((r) => !isInjectable(r)) : null,
+    injectables: rx ? rx.filter(isInjectable) : null,
+  };
 }
 
 /* ===================== Layout ===================== */
@@ -106,13 +117,21 @@ export function billingRxSectionHtml() {
 export function mountBillingRx(root, patient) {
   const grid = root.querySelector(".bp-grid");
   if (!grid) return;
-  const [billCard, rxCard] = grid.querySelectorAll(".rc-card");
-  const billBody = grid.querySelector(".bp-billing-body");
-  const rxBody = grid.querySelector(".bp-rx-body");
+  const irGrid = root.querySelector(".ir-grid");
+  const phGrid = root.querySelector(".ph-grid");
+
+  const VIEWS = {
+    billing: { scope: grid, body: ".bp-billing-body", count: ".bp-billing-count", item: billingHtml,
+               empty: "No billing sheets on file.", what: "billing sheets" },
+    rx: { scope: grid, body: ".bp-rx-body", count: ".bp-rx-count", item: rxHtml,
+          empty: "No other prescriptions on file.", what: "prescriptions" },
+    injectables: irGrid && { scope: irGrid, body: ".ir-body", count: ".ir-count", item: rxHtml,
+                             empty: "No injectable prescriptions on file.", what: "injectable prescriptions" },
+  };
 
   let data = null;
   let loading = false;
-  const shown = { billing: PAGE, rx: PAGE };
+  const shown = { billing: PAGE, rx: PAGE, injectables: PAGE };
 
   async function load() {
     if (data || loading) return;
@@ -120,53 +139,106 @@ export function mountBillingRx(root, patient) {
     try {
       data = await fetchBillingAndRx(patient);
       if (!grid.isConnected) return;
-      render("billing");
-      render("rx");
+      Object.keys(VIEWS).forEach((k) => { if (VIEWS[k]) render(k); });
     } finally {
       loading = false;
     }
   }
 
   function render(kind) {
+    const v = VIEWS[kind];
     const items = data[kind];
-    const body = kind === "billing" ? billBody : rxBody;
-    grid.querySelector(kind === "billing" ? ".bp-billing-count" : ".bp-rx-count").textContent = items ? items.length : "!";
+    const body = v.scope.querySelector(v.body);
+    v.scope.querySelector(v.count).textContent = items ? items.length : "!";
 
     if (!items) {
-      body.innerHTML = `<p class="rc-empty">Couldn't load ${kind === "billing" ? "billing sheets" : "prescriptions"}. Check the Firestore rules.</p>`;
+      body.innerHTML = `<p class="rc-empty">Couldn't load ${v.what}. Check the Firestore rules.</p>`;
       return;
     }
     if (!items.length) {
-      body.innerHTML = `<p class="rc-empty">${kind === "billing" ? "No billing sheets on file." : "No prescriptions on file."}</p>`;
+      body.innerHTML = `<p class="rc-empty">${v.empty}</p>`;
       return;
     }
 
     const remaining = items.length - shown[kind];
     body.innerHTML =
-      items.slice(0, shown[kind]).map((it) => (kind === "billing" ? billingHtml(it) : rxHtml(it))).join("") +
+      items.slice(0, shown[kind]).map(v.item).join("") +
       (remaining > 0
         ? `<button type="button" class="bp-more" data-bp-more="${kind}">Load ${Math.min(PAGE, remaining)} more · ${remaining} remaining</button>`
         : "");
   }
 
-  // Opening/closing one card does the same to the other
-  grid.addEventListener("toggle", (e) => {
+  // Each row opens/closes together; opening a data row loads the data
+  syncRow(grid, load);
+  if (irGrid) syncRow(irGrid, load);
+  if (phGrid) syncRow(phGrid);
+
+  [grid, irGrid].filter(Boolean).forEach((g) =>
+    g.addEventListener("click", (e) => {
+      const more = e.target.closest("[data-bp-more]");
+      if (!more) return;
+      const kind = more.dataset.bpMore;
+      shown[kind] += PAGE;
+      render(kind);
+    })
+  );
+
+  const anyOpen = [grid, irGrid].filter(Boolean).some((g) => g.querySelector(":scope > details[open]"));
+  if (anyOpen) load();
+}
+
+// Cards in the same row open/close together; onOpen runs when the row is opened
+function syncRow(row, onOpen) {
+  const cards = [...row.querySelectorAll(":scope > details")];
+  row.addEventListener("toggle", (e) => {
     const card = e.target;
-    if (!card.classList || !card.classList.contains("rc-card")) return;
-    const other = card === billCard ? rxCard : billCard;
-    if (other.open !== card.open) other.open = card.open;
-    if (card.open) load();
+    if (!cards.includes(card)) return;
+    cards.forEach((c) => { if (c !== card && c.open !== card.open) c.open = card.open; });
+    if (card.open && onOpen) onOpen();
   }, true);
+}
 
-  grid.addEventListener("click", (e) => {
-    const more = e.target.closest("[data-bp-more]");
-    if (!more) return;
-    const kind = more.dataset.bpMore;
-    shown[kind] += PAGE;
-    render(kind);
-  });
+/* ===================== New rows: Injectables + Referral, Interests + Communication ===================== */
 
-  if (billCard.open) load();
+function placeholderCard(rowKey, open, icon, iconClass, title, message, addLabel) {
+  return `
+    <details class="rc-card" data-key="${rowKey}" ${open}>
+      <summary>
+        <span class="rc-title">${ICONS.chev}<span class="bp-icon ${iconClass}">${ICONS[icon]}</span>${title}</span>
+        <span class="sk-tools">
+          ${addLabel ? `<button type="button" class="rc-link" data-soon="${addLabel}">+ Add</button>` : ""}
+          <span class="ph-badge">Soon</span>
+        </span>
+      </summary>
+      <div class="rc-body"><p class="rc-empty pad">${message}</p></div>
+    </details>`;
+}
+
+export function injectableReferralSectionHtml() {
+  const open = isOpenSaved("inj-referral", true) ? "open" : "";
+  return `
+    <div class="ir-grid">
+      <details class="rc-card ir-card" data-key="inj-referral" ${open}>
+        <summary>
+          <span class="rc-title">${ICONS.chev}<span class="bp-icon inj">${ICONS.syringe}</span>Injectable Prescription Records</span>
+          <span class="sk-badge ir-count">–</span>
+        </summary>
+        <div class="rc-body"><div class="bp-list ir-body"><div class="skeleton sm"></div></div></div>
+      </details>
+      ${placeholderCard("inj-referral", open, "send", "ref", "Referral Letter",
+        "Referral letters will appear here once connected.", "Add referral letter")}
+    </div>`;
+}
+
+export function interestsCommsSectionHtml() {
+  const open = isOpenSaved("interests-comms", true) ? "open" : "";
+  return `
+    <div class="ph-grid">
+      ${placeholderCard("interests-comms", open, "star", "interest", "Treatment Interested In",
+        "Treatments the patient is interested in will appear here once connected.", "Add treatment interest")}
+      ${placeholderCard("interests-comms", open, "message", "comms", "Communication Log",
+        "Calls, emails and SMS with this patient will appear here once connected.", "Log communication")}
+    </div>`;
 }
 
 /* ===================== Templates ===================== */
