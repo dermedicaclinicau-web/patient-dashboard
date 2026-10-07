@@ -29,6 +29,7 @@ export async function loginWithPin(pin) {
 
   const data = await res.json().catch(() => ({ ok: false, error: "SERVER_ERROR" }));
   if (!data.ok) throw new Error(ERROR_MESSAGES[data.error] || ERROR_MESSAGES.SERVER_ERROR);
+    sessionStorage.setItem("appSession", data.session || "");
 
   // Session-only login: closing the tab/browser logs out (safer on shared clinic PCs)
   await setPersistence(auth, browserSessionPersistence);

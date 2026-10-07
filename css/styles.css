@@ -152,6 +152,57 @@ button, input { font: inherit; color: inherit; }
 .form-error { color: var(--danger); font-size: .85rem; min-height: 1rem; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; }
 
+/* ---------- Calendar ---------- */
+.page.wide { max-width: none; }
+
+.cal-toolbar { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 1rem;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 1rem 1.25rem; margin-bottom: 1rem; box-shadow: 0 1px 2px rgba(15, 23, 42, .04); }
+.cal-nav { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.cal-nav .btn-ghost { height: 40px; }
+.icon-only { width: 40px; padding: 0 !important; font-size: 1.25rem; line-height: 1; }
+.btn-ghost.is-today { border-color: var(--primary); color: var(--primary); }
+
+.date-picker { position: relative; display: inline-flex; align-items: center; gap: .5rem; height: 40px;
+  padding: 0 .9rem; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); cursor: pointer; font-weight: 500; user-select: none; }
+.date-picker:hover { background: var(--surface-2); }
+.date-picker:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.date-picker svg { width: 18px; height: 18px; color: var(--primary); }
+.date-input { position: absolute; left: 0; bottom: 0; width: 100%; height: 100%; opacity: 0; pointer-events: none; }
+
+.cal-title { text-align: center; }
+.cal-heading { font-size: 1.35rem; font-weight: 700; letter-spacing: -.01em; }
+.cal-updated { font-size: .8rem; color: var(--muted); margin-top: .2rem; min-height: 1rem; }
+.cal-actions { display: flex; justify-content: flex-end; }
+.cal-refresh { display: inline-flex; align-items: center; gap: .45rem; height: 40px; }
+.cal-refresh svg { width: 16px; height: 16px; color: var(--primary); }
+.cal-refresh:disabled svg { animation: spin .8s linear infinite; }
+
+.cal-board { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: auto; min-height: 320px; max-height: calc(100vh - var(--topbar-h) - 230px); }
+.cal-board > .state { margin: 1.5rem; }
+.cal-columns { display: flex; min-width: max-content; }
+.cal-col { width: 270px; flex-shrink: 0; border-right: 1px solid var(--border); }
+.cal-col-head { position: sticky; top: 0; z-index: 2; padding: .9rem 1rem; text-align: center;
+  font-weight: 700; background: var(--col-bg); border-bottom: 3px solid var(--col-line); }
+.cal-col-body { padding: .75rem; display: flex; flex-direction: column; gap: .6rem; }
+
+.appt { display: flex; flex-direction: column; gap: .1rem; padding: .7rem .85rem; border-radius: 10px;
+  background: #f2fbf9; border: 1px solid #d3eee8; color: var(--text); text-decoration: none;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .04); transition: border-color .15s, box-shadow .15s, transform .15s; }
+a.appt:hover { border-color: var(--primary); box-shadow: var(--shadow-md); transform: translateY(-1px); }
+a.appt:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.appt-time { font-weight: 700; font-size: .9rem; }
+.appt-name { font-weight: 700; }
+.appt-services { display: flex; flex-direction: column; margin-top: .45rem; font-size: .85rem; color: #475569; }
+.appt-service::before { content: "• "; }
+
+.skel-col { width: 270px; flex-shrink: 0; padding: .75rem; display: flex; flex-direction: column;
+  gap: .6rem; border-right: 1px solid var(--border); }
+.skel-col .skeleton { height: 92px; }
+.skel-col .skeleton.head { height: 44px; border-radius: 8px; }
+
 /* ---------- Responsive ---------- */
 @media (max-width: 860px) {
   .shell-body { flex-direction: column; }
@@ -159,6 +210,10 @@ button, input { font: inherit; color: inherit; }
     padding: .5rem .75rem; border-right: none; border-bottom: 1px solid var(--border); overflow-x: auto; }
   .nav-item { padding: .5rem .8rem; white-space: nowrap; }
   .content { padding: 1.25rem 1rem; }
+  .cal-toolbar { grid-template-columns: 1fr; text-align: center; }
+  .cal-nav, .cal-actions { justify-content: center; }
+  .cal-board { max-height: none; }
+  .cal-col, .skel-col { width: 240px; }
 }
 @media (max-width: 560px) {
   .topbar { padding: 0 1rem; }

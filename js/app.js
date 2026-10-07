@@ -1,5 +1,6 @@
 import { loginWithPin, logout, watchAuth, updateStaffName } from "./auth.js";
 import { mountPatientList } from "./patient-list.js";
+import { mountCalendar } from "./calendar.js";
 import { escapeHtml, getInitials } from "./utils.js";
 
 const PIN_LENGTH = 4; // change to 6 if you move to 6-digit PINs
@@ -153,9 +154,7 @@ function placeholderPage(title, message, backLink = "") {
 
 const PAGES = {
   patients: (el) => mountPatientList(el),
-  calendar: (el) => {
-    el.innerHTML = placeholderPage("Calendar", "The appointments calendar will live here.");
-  },
+  calendar: (el, param) => mountCalendar(el, param),
   patient: (el, id) => {
     el.innerHTML = placeholderPage(
       "Patient profile",
