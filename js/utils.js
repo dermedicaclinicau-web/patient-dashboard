@@ -8,7 +8,8 @@ export function escapeHtml(value = "") {
 
 // "Johnny Cooney" -> "JC", "Mary Anne Smith" -> "MS"
 export function getInitials(name = "") {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
+  // Ignore numbers/symbols, so "Ashley Hanna #1" -> "AH"
+  const parts = name.replace(/[^\p{L}\s'-]/gu, " ").trim().split(/\s+/).filter(Boolean);
   if (!parts.length) return "?";
   const first = parts[0][0];
   const last = parts.length > 1 ? parts[parts.length - 1][0] : "";
