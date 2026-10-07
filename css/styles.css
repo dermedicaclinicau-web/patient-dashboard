@@ -661,6 +661,20 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 /* Jump targets land below the sticky patient bar */
 .tp-card, .sk-grid { scroll-margin-top: calc(var(--topbar-h) + 150px); }
 
+/* ---------- Billing Sheet + Prescription ---------- */
+.bp-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; align-items: start; }
+.bp-icon { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; flex-shrink: 0; }
+.bp-icon svg { width: 16px; height: 16px; }
+.bp-icon.billing { background: #e0f2fe; color: #0369a1; }
+.bp-icon.rx { background: #f3e8ff; color: #7c3aed; }
+.bp-list { display: flex; flex-direction: column; gap: .6rem; padding: .6rem; }
+.bp-file { display: flex; align-items: center; gap: .35rem; font-size: .78rem; color: var(--muted); overflow-wrap: anywhere; }
+.bp-file svg { width: 13px; height: 13px; flex-shrink: 0; }
+.bp-id { font-size: .75rem; color: #94a3b8; }
+.bp-more { align-self: center; padding: .35rem 1rem; border-radius: 999px; border: 1px solid var(--border);
+  background: #fff; color: var(--primary); font-size: .82rem; font-weight: 600; cursor: pointer; }
+.bp-more:hover { border-color: var(--primary); }
+
 /* ---------- Responsive ---------- */
 @media (max-width: 860px) {
   .shell-body { flex-direction: column; }
@@ -675,7 +689,7 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
   .patient-bar { position: static; }
   .pb-top { flex-wrap: wrap; }
   .pb-actions { width: 100%; }
-  .pc-grid.pairs, .field-grid, .concern-grid, .sk-grid, .pur-stats, .rc-grid { grid-template-columns: 1fr; }
+  .pc-grid.pairs, .field-grid, .concern-grid, .sk-grid, .pur-stats, .rc-grid, .bp-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 560px) {
   .topbar { padding: 0 1rem; }
