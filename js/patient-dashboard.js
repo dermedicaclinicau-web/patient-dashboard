@@ -3,6 +3,7 @@ import { fetchDayAppointments, fetchPreconsult } from "./appointments.js";
 import { fetchOpenReminders } from "./reminders.js";
 import {
   fetchTranscriptRecords, latestTreatmentPlan, socialHistoryEntries, toBullets, allTreatmentPlans,
+  parseTimeline,
 } from "./transcripts.js";
 import {
   escapeHtml, getInitials, hueFromString, formatDobLong, calcAge,
@@ -87,6 +88,7 @@ const ICONS = {
   check: svg('<polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'),
   refresh: svg('<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>'),
   chevRight: svg('<polyline points="9 18 15 12 9 6"/>'),
+  route: svg('<circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/>'),
   chev: svg('<polyline points="6 9 12 15 18 9"/>', "sum-chev"),
 };
 
@@ -778,15 +780,61 @@ function concernHtml(c) {
     </article>`;
 }
 
+// "August 2026" -> "Aug 2026" (other labels unchanged)
+function shortMonth(label) {
+  const m = /^([A-Za-z]{3})[a-z]*\.?\s+(\d{4})$/.exec(label || "");
+  return m ? `${m[1][0].toUpperCase()}${m[1].slice(1).toLowerCase()} ${m[2]}` : (label || "");
+}
+
+// [1] -> "visit 1", [1, 4] -> "visits 1 and 4", [1, 2, 4] -> "visits 1, 2 and 4"
+function visitList(nums) {
+  if (nums.length === 1) return `visit ${nums[0]}`;
+  return `visits ${nums.slice(0, -1).join(", ")} and ${nums[nums.length - 1]}`;
+}
+
 function timelineHtml(lines) {
+  const { visits, notes } = parseTimeline(lines);
+  if (!visits.length) return "";
+
+  const labelled = visits.filter((v) => v.label);
+  const span = labelled.length > 1
+    ? `${shortMonth(labelled[0].label)} to ${shortMonth(labelled[labelled.length - 1].label)}`
+    : "";
+  const summary = `${visits.length} ${visits.length === 1 ? "visit" : "visits"}${span ? ` · ${span}` : ""}`;
+
+  const notesHtml = notes.map((n) => `
+    <div class="tl-note">
+      ${ICONS.alert}
+      <div>
+        <strong>${escapeHtml(n.label)}</strong>
+        <span class="tl-applies">(${visitList(n.visits)})</span>
+        <div>${escapeHtml(n.text)}</div>
+      </div>
+    </div>`).join("");
+
+  const stepsHtml = visits.map((v, i) => `
+    <div class="tl-step">
+      <span class="tl-num">${i + 1}</span>
+      <span class="tl-mon">${escapeHtml(shortMonth(v.label) || "Planned")}</span>
+      <div class="tl-card">
+        ${v.items.map((it) => `
+          <div class="tl-tx">
+            <b>${escapeHtml(it.name)}</b>
+            ${it.detail ? `<span>${escapeHtml(it.detail)}</span>` : ""}
+          </div>`).join("")}
+        ${v.notes.length ? `<span class="tl-warn">${ICONS.alert}Instructions</span>` : ""}
+      </div>
+    </div>`).join("");
+
   return `
     <div class="tp-timeline">
-      <p class="tp-label">${ICONS.clock}<span>Suggested timeline</span></p>
-      <ol class="timeline">${lines.map((l) => {
-        const m = /^([^:]{1,30}):\s*(.+)$/.exec(l); // "Week 0: Genesis Glow"
-        return m
-          ? `<li><span class="tl-when">${escapeHtml(m[1])}</span><span class="tl-what">${escapeHtml(m[2])}</span></li>`
-          : `<li><span class="tl-what">${escapeHtml(l)}</span></li>`;
-      }).join("")}</ol>
+      <div class="tl-top">
+        <p class="tp-label">${ICONS.route}<span>Suggested timeline</span></p>
+        <span class="tl-count">${escapeHtml(summary)}</span>
+      </div>
+      ${notesHtml}
+      <div class="tl-scroll">
+        <div class="tl-steps" style="--steps:${visits.length}">${stepsHtml}</div>
+      </div>
     </div>`;
 }

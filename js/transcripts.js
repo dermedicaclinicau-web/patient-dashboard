@@ -182,3 +182,71 @@ export function parsePlan(text) {
 
   return plan;
 }
+
+/* ===================== Suggested timeline parsing ===================== */
+
+const MONTH_NAMES = "jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?";
+// "August 2026", "Aug 2026:", "August 2026 - Wrinkle Relaxer"
+const MONTH_HEAD_RE = new RegExp(`^((?:${MONTH_NAMES})\\.?\\s+\\d{4})\\s*(?:[:\\-–—]\\s*(.*))?$`, "i");
+// "Week 2", "Month 3", "Visit 1: Genesis Glow", "Weeks 2-4"
+const PERIOD_HEAD_RE = /^((?:weeks?|months?|days?|visit|session)\s*\d+(?:\s*[-–]\s*\d+)?)\s*(?::\s*(.*))?$/i;
+const INSTR_RE = /^special\s+instructions?\b/i;
+
+// "Collagen Activator (1 of 3)" -> { name: "Collagen Activator", detail: "1 of 3" }
+function addTimelineItem(visit, text) {
+  const m = /^(.+?)\s*\(([^()]+)\)\s*$/.exec(text);
+  const detail = m ? m[2].trim() : "";
+  visit.items.push({
+    name: (m ? m[1] : text).trim(),
+    detail: detail ? detail[0].toUpperCase() + detail.slice(1) : "",
+  });
+}
+
+// Turns timeline lines into visits + de-duplicated special instructions
+export function parseTimeline(lines) {
+  const visits = [];
+  const notes = []; // { label, text, visits: [visit numbers] }
+  let current = null;
+
+  const ensureVisit = () => {
+    if (!current) {
+      current = { label: "", items: [], notes: [] };
+      visits.push(current);
+    }
+    return current;
+  };
+
+  (lines || []).forEach((raw) => {
+    const line = String(raw).trim();
+    if (!line) return;
+
+    const head = MONTH_HEAD_RE.exec(line) || PERIOD_HEAD_RE.exec(line);
+    if (head) {
+      current = { label: head[1].trim(), items: [], notes: [] };
+      visits.push(current);
+      if (head[2]) addTimelineItem(current, head[2].trim());
+      return;
+    }
+
+    if (INSTR_RE.test(line)) {
+      const visit = ensureVisit();
+      const idx = line.indexOf(":");
+      const label = idx > -1 ? line.slice(0, idx).trim() : "Special instructions";
+      const text = idx > -1 ? line.slice(idx + 1).trim() : line;
+
+      let note = notes.find((n) => n.label.toLowerCase() === label.toLowerCase() && n.text === text);
+      if (!note) {
+        note = { label, text, visits: [] };
+        notes.push(note);
+      }
+      const visitNo = visits.indexOf(visit) + 1;
+      if (!note.visits.includes(visitNo)) note.visits.push(visitNo);
+      if (!visit.notes.includes(note)) visit.notes.push(note);
+      return;
+    }
+
+    addTimelineItem(ensureVisit(), line);
+  });
+
+  return { visits, notes };
+}
