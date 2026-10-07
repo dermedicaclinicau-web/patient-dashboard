@@ -75,3 +75,12 @@ export async function updateStaffName(newName) {
   sessionStorage.setItem(`staffName:${user.uid}`, name);
   return name;
 }
+
+// Wakes the Apps Script up (and pre-loads the staff list) while the PIN is being typed.
+// Fire-and-forget: errors are ignored, the real login still works without it.
+let warmedAt = 0;
+export function warmUpLogin() {
+  if (Date.now() - warmedAt < 60_000) return; // at most once a minute
+  warmedAt = Date.now();
+  fetch(`${LOGIN_ENDPOINT}?warm=1`, { method: "GET" }).catch(() => {});
+}

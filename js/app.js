@@ -1,10 +1,8 @@
-import { loginWithPin, logout, watchAuth, updateStaffName } from "./auth.js";
+import { loginWithPin, logout, watchAuth, updateStaffName, warmUpLogin } from "./auth.js";
 import { mountPatientList } from "./patient-list.js";
 import { mountCalendar } from "./calendar.js";
 import { mountPatientDashboard } from "./patient-dashboard.js";
 import { escapeHtml, getInitials } from "./utils.js";
-
-const PIN_LENGTH = 4; // change to 6 if you move to 6-digit PINs
 
 const $ = (id) => document.getElementById(id);
 
@@ -16,9 +14,12 @@ const views = {
 
 const els = {
   // login
-  pinDots: $("pin-dots"),
+  loginCard: document.querySelector(".login-card"),
+  loginForm: $("login-form"),
+  pinInput: $("pin-input"),
+  pinToggle: $("pin-toggle"),
+  loginBtn: $("login-btn"),
   loginError: $("login-error"),
-  keypad: $("keypad"),
   // top bar
   staffName: $("staff-name"),
   staffRole: $("staff-role"),
@@ -46,56 +47,72 @@ function showView(name) {
 
 /* ===================== PIN LOGIN ===================== */
 
-let pin = "";
+const PIN_MIN = 4;
+const PIN_MAX = 8; // must match the Apps Script check (/^\d{4,8}$/)
 let busy = false;
-
-function renderDots(state = "") {
-  els.pinDots.className = `pin-dots ${state}`.trim();
-  els.pinDots.innerHTML = Array.from({ length: PIN_LENGTH }, (_, i) =>
-    `<span class="dot${i < pin.length ? " filled" : ""}"></span>`
-  ).join("");
-}
 
 function setBusy(value) {
   busy = value;
-  els.keypad.querySelectorAll("button").forEach((b) => (b.disabled = value));
+  els.pinInput.disabled = value;
+  els.loginBtn.disabled = value;
+  els.loginBtn.textContent = value ? "Checking…" : "Log in";
 }
 
-function handleKey(key) {
-  if (busy) return;
-  if (key === "back") pin = pin.slice(0, -1);
-  else if (key === "clear") pin = "";
-  else if (/^\d$/.test(key) && pin.length < PIN_LENGTH) pin += key;
+function showLoginError(msg) {
+  els.loginError.textContent = msg;
+  els.loginCard.classList.remove("shake");
+  void els.loginCard.offsetWidth; // restarts the shake animation
+  els.loginCard.classList.add("shake");
+}
+
+function resetLogin() {
+  els.pinInput.value = "";
+  els.pinInput.type = "password";
+  els.pinToggle.classList.remove("is-on");
+  els.pinToggle.setAttribute("aria-label", "Show PIN");
   els.loginError.textContent = "";
-  renderDots();
-  if (pin.length === PIN_LENGTH) submitPin();
+  els.loginCard.classList.remove("shake");
+  setBusy(false);
 }
 
-async function submitPin() {
-  setBusy(true);
-  renderDots("checking");
-  try {
-    await loginWithPin(pin);
-    pin = "";
-  } catch (err) {
-    pin = "";
-    els.loginError.textContent = err.message;
-    renderDots("error");
-  } finally {
-    setBusy(false);
-  }
-}
-
-els.keypad.addEventListener("click", (e) => {
-  const btn = e.target.closest("button[data-key]");
-  if (btn) handleKey(btn.dataset.key);
+// Digits only, max 8
+els.pinInput.addEventListener("input", () => {
+  const clean = els.pinInput.value.replace(/\D/g, "").slice(0, PIN_MAX);
+  if (clean !== els.pinInput.value) els.pinInput.value = clean;
+  els.loginError.textContent = "";
 });
 
-document.addEventListener("keydown", (e) => {
-  if (views.login.hidden) return;
-  if (/^\d$/.test(e.key)) handleKey(e.key);
-  else if (e.key === "Backspace") handleKey("back");
-  else if (e.key === "Escape") handleKey("clear");
+// Show / hide PIN
+els.pinToggle.addEventListener("click", () => {
+  const show = els.pinInput.type === "password";
+  els.pinInput.type = show ? "text" : "password";
+  els.pinToggle.classList.toggle("is-on", show);
+  els.pinToggle.setAttribute("aria-label", show ? "Hide PIN" : "Show PIN");
+  els.pinInput.focus();
+});
+
+els.loginForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (busy) return;
+
+  const pin = els.pinInput.value.trim();
+  if (pin.length < PIN_MIN) {
+    showLoginError(`Enter your ${PIN_MIN}–${PIN_MAX} digit PIN.`);
+    els.pinInput.focus();
+    return;
+  }
+
+  setBusy(true);
+  try {
+    await loginWithPin(pin);
+    els.pinInput.value = ""; // watchAuth switches to the dashboard
+  } catch (err) {
+    els.pinInput.value = "";
+    showLoginError(err.message);
+  } finally {
+    setBusy(false);
+    if (!views.login.hidden) els.pinInput.focus();
+  }
 });
 
 /* ===================== TOP BAR ===================== */
@@ -195,8 +212,6 @@ function goBack() {
 
 /* ===================== START ===================== */
 
-renderDots();
-
 watchAuth((staff) => {
   if (staff) {
     currentStaff = staff;
@@ -208,9 +223,9 @@ watchAuth((staff) => {
     els.content.innerHTML = ""; // remove patient data from the page on logout
     if (els.profileDialog.open) els.profileDialog.close();
     if (location.hash) history.replaceState(null, "", location.pathname + location.search);
-    pin = "";
-    renderDots();
-    els.loginError.textContent = "";
+    resetLogin();
     showView("login");
+    warmUpLogin(); // start Apps Script while the PIN is being typed
+    setTimeout(() => els.pinInput.focus(), 50); // ready to type
   }
 });
