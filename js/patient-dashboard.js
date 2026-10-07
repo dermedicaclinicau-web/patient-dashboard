@@ -3,6 +3,7 @@ import { fetchDayAppointments, fetchPreconsult } from "./appointments.js";
 import { fetchOpenReminders } from "./reminders.js";
 import { skincareSectionHtml, mountSkincare } from "./skincare-view.js";
 import { recordsSectionHtml, mountRecords } from "./records-view.js";
+import { historySectionHtml, mountHistory } from "./history-view.js";
 import {
   fetchTranscriptRecords, latestTreatmentPlan, socialHistoryEntries, toBullets, allTreatmentPlans,
   parseTimeline,
@@ -192,6 +193,8 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     ${skincareSectionHtml()}
     
     ${recordsSectionHtml()}
+    
+    ${historySectionHtml()}
 
     ${dialogHtml()}`;
 
@@ -265,6 +268,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   loadTranscriptSections();
   mountSkincare(root, patient);
   mountRecords(root, patient);
+  mountHistory(root, patient);  
 
   // Treatment plan + Social history, both from appointment_transcripts (fetched once)
   async function loadTranscriptSections() {

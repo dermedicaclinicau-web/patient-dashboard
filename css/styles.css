@@ -478,7 +478,7 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .tl-warn svg { width: 12px; height: 12px; }
 
 /* ---------- Skincare: SSP + Product purchases ---------- */
-.sk-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 1rem; align-items: start; }
+.sk-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; align-items: start; }
 .sk-card { background: #fbd5d5; border: 1px solid #f5b8b8; border-radius: 18px; padding: .6rem; }
 .sk-card > summary { list-style: none; display: flex; align-items: center; justify-content: space-between; gap: .75rem;
   padding: .75rem 1rem; border-radius: 12px; background: #f6aeae; cursor: pointer; user-select: none; }
@@ -598,6 +598,68 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .rc-act.danger { color: #dc2626; border-color: #fecaca; background: #fef2f2; }
 .rc-act.danger:hover { border-color: #dc2626; color: #dc2626; }
 .rc-act.is-disabled { opacity: .45; pointer-events: none; }
+
+/* ---------- Appointment History / Notes ---------- */
+.hv-section { background: #fff; border: 1px solid #fde68a; border-radius: 18px; overflow: hidden; }
+.hv-section > summary { list-style: none; display: flex; align-items: center; justify-content: space-between; gap: .75rem;
+  padding: 1rem 1.25rem; background: #fef9e7; border-bottom: 1px solid transparent; cursor: pointer; user-select: none; }
+.hv-section > summary::-webkit-details-marker { display: none; }
+.hv-section[open] > summary { border-bottom-color: #fde68a; }
+.hv-section > summary .sum-chev { color: #92400e; }
+.hv-head-left { display: inline-flex; align-items: center; gap: .75rem; }
+.hv-icon { width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center; background: #f59e0b; color: #fff; }
+.hv-icon svg { width: 20px; height: 20px; }
+.hv-title { font-weight: 700; font-size: 1.05rem; }
+.hv-count { font-size: .75rem; font-weight: 700; padding: .1rem .55rem; border-radius: 999px; background: #f59e0b; color: #fff; }
+.hv-body { padding: 1rem 1.25rem 1.25rem; display: flex; flex-direction: column; gap: 1rem; }
+
+.hv-search { position: relative; display: block; }
+.hv-search svg { position: absolute; left: .85rem; top: 50%; transform: translateY(-50%); width: 17px; height: 17px;
+  color: var(--muted); pointer-events: none; }
+.hv-search input { width: 100%; padding: .7rem .9rem .7rem 2.5rem; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface-2); outline: none; transition: border-color .15s, box-shadow .15s; }
+.hv-search input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); background: #fff; }
+
+.hv-grid { column-width: 290px; column-gap: 1rem; }
+.hv-card { break-inside: avoid; margin-bottom: 1rem; padding: .9rem 1rem; background: #fff;
+  border: 1px solid var(--border); border-left: 4px solid #10b981; border-radius: 12px; }
+.hv-card.hv-today { border-left-color: #f59e0b; }
+.hv-card.hv-upcoming { border-left-color: #3b82f6; }
+.hv-head { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; margin-bottom: .55rem; }
+.hv-head h4 { font-size: 1rem; font-weight: 600; }
+.hv-tag { font-size: .72rem; font-weight: 600; padding: .1rem .55rem; border-radius: 999px; }
+.hv-tag-past { background: #ecfdf5; color: #047857; }
+.hv-tag-today { background: #fef3c7; color: #b45309; }
+.hv-tag-upcoming { background: #eff6ff; color: #1d4ed8; }
+.hv-edit { margin-left: auto; padding: 0; border: none; background: none; color: #cbd5e1; cursor: pointer; }
+.hv-edit svg { width: 16px; height: 16px; }
+.hv-edit:hover { color: var(--primary); }
+
+.hv-services { list-style: none; display: flex; flex-direction: column; gap: .35rem; margin-bottom: .6rem; }
+.hv-services li { display: flex; align-items: flex-start; gap: .45rem; font-size: .88rem; }
+.hv-services svg { width: 14px; height: 14px; color: #94a3b8; flex-shrink: 0; margin-top: .2rem; }
+.hv-svc b { font-weight: 600; }
+.hv-staff { color: var(--muted); }
+
+.hv-badges { display: flex; flex-wrap: wrap; gap: .4rem; }
+.hv-badge { display: inline-flex; align-items: center; gap: .35rem; padding: .3rem .65rem; border-radius: 8px;
+  border: 1px solid; font-size: .8rem; font-weight: 500; text-decoration: none; cursor: pointer; }
+.hv-badge svg { width: 14px; height: 14px; flex-shrink: 0; }
+.hv-badge:hover { filter: brightness(.96); }
+.b-tx { color: #0369a1; border-color: #bae6fd; background: #f0f9ff; }
+.b-consent { color: #c2410c; border-color: #fed7aa; background: #fff7ed; }
+.b-summary { color: #fff; border-color: #d97706; background: #d97706; }
+.b-plan { color: #7c3aed; border-color: #ddd6fe; background: #f5f3ff; }
+.b-ssp { color: #047857; border-color: #a7f3d0; background: #ecfdf5; }
+
+.hv-more { width: 100%; padding: .7rem; border-radius: 10px; border: 1px solid var(--border);
+  background: var(--surface-2); font-weight: 600; cursor: pointer; }
+.hv-more:hover { background: #eef2f4; }
+.hv-empty { color: var(--muted); font-style: italic; }
+.hv-note { font-size: .8rem; color: #b45309; }
+
+/* Jump targets land below the sticky patient bar */
+.tp-card, .sk-grid { scroll-margin-top: calc(var(--topbar-h) + 150px); }
 
 /* ---------- Responsive ---------- */
 @media (max-width: 860px) {
