@@ -55,7 +55,7 @@ function setBusy(value) {
   busy = value;
   els.pinInput.disabled = value;
   els.loginBtn.disabled = value;
-  els.loginBtn.textContent = value ? "Checking…" : "Log in";
+  els.loginBtn.textContent = value ? "Checking…" : "Login";
 }
 
 function showLoginError(msg) {
