@@ -5,6 +5,9 @@ import { skincareSectionHtml, mountSkincare } from "./skincare-view.js";
 import { recordsSectionHtml, mountRecords } from "./records-view.js";
 import { historySectionHtml, mountHistory } from "./history-view.js";
 import { billingRxSectionHtml, mountBillingRx } from "./billing-rx-view.js";
+import {
+  clinicalHistorySectionHtml, mountClinicalHistory, renderClinicalHistory, renderClinicalHistoryError,
+} from "./clinical-history-view.js";
 
 import {
   fetchTranscriptRecords, latestTreatmentPlan, socialHistoryEntries, toBullets, allTreatmentPlans,
@@ -199,6 +202,8 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     ${historySectionHtml()}
     
     ${billingRxSectionHtml()}
+    
+    ${clinicalHistorySectionHtml()}
 
     ${dialogHtml()}`;
 
@@ -274,6 +279,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   mountRecords(root, patient);
   mountHistory(root, patient);  
   mountBillingRx(root, patient);
+  mountClinicalHistory(root);
 
   // Treatment plan + Social history, both from appointment_transcripts (fetched once)
   async function loadTranscriptSections() {
@@ -303,11 +309,13 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       }
 
       renderTreatmentPlans(root, records);
+      renderClinicalHistory(root, records);
     } catch (err) {
       if (!root.isConnected) return;
       console.error("Transcript sections failed:", err);
       const tpBody = root.querySelector(".tp-body");
       if (tpBody) tpBody.innerHTML = `<p class="empty-note error">Couldn't load treatment plans.</p>`;
+      renderClinicalHistoryError(root);
       const msg = err.code === "permission-denied"
         ? "Consultation records aren't accessible. Check the Firestore rules."
         : "Couldn't load consultation records.";

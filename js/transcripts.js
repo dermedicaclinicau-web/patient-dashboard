@@ -22,24 +22,24 @@ export function nameVariants(patient) {
   return [...v].filter(Boolean).slice(0, 30); // Firestore "in" allows up to 30 values
 }
 
-// Text after "!!TREATMENT PLAN:" up to the next "!!HEADING" (or the end)
+// Text after "!!HEADING:" up to the next "!!Heading" (any capitalisation), or the end
 export function extractSection(soap, heading) {
   const text = String(soap || "");
-  const re = new RegExp(`!!\\s*${heading.replace(/\s+/g, "\\s+")}\\s*:?`, "i");
+  const re = new RegExp(`!!\\s*${heading.replace(/\s+/g, "\\s+")}\\b\\s*:?`, "i");
   const m = re.exec(text);
   if (!m) return "";
   const rest = text.slice(m.index + m[0].length);
-  const next = rest.search(/!!\s*[A-Z][A-Z &/()-]{2,}:?/);
+  const next = rest.search(/!!\s*[A-Za-z][A-Za-z &/()-]{2,}:?/);
   return (next === -1 ? rest : rest.slice(0, next)).trim();
 }
 
-// "January 16, 2026" / "January 16, 2026 10:30 AM" / "16/01/2026"
-export function parseRecordDate(s) {
-  const str = String(s || "").trim();
-  const dmy = /^(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(str); // Australian day/month/year
-  if (dmy) return new Date(Number(dmy[3]), Number(dmy[2]) - 1, Number(dmy[1]));
-  const t = Date.parse(str.replace(/\s+at\s+/i, " "));
-  return isNaN(t) ? null : new Date(t);
+// First heading that exists, e.g. ["MEDICATIONS", "MEDICATION"]
+export function extractAny(soap, headings) {
+  for (const h of headings) {
+    const text = extractSection(soap, h);
+    if (text) return text;
+  }
+  return "";
 }
 
 // All of a patient's transcript records (matched by ID, then name), newest first.

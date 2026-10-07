@@ -675,6 +675,45 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
   background: #fff; color: var(--primary); font-size: .82rem; font-weight: 600; cursor: pointer; }
 .bp-more:hover { border-color: var(--primary); }
 
+/* ---------- Social History / Medication / Medical Conditions / Allergies ---------- */
+.hx-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; align-items: start; }
+.hx-icon { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; flex-shrink: 0; }
+.hx-icon svg { width: 16px; height: 16px; }
+.hx-teal .hx-icon { background: #ccfbf1; color: #0f766e; }
+.hx-blue .hx-icon { background: #dbeafe; color: #1d4ed8; }
+.hx-amber .hx-icon { background: #fef3c7; color: #b45309; }
+.hx-red .hx-icon { background: #fee2e2; color: #b91c1c; }
+.hx-body { padding: .75rem; display: flex; flex-direction: column; gap: .6rem; }
+
+.hx-latest { padding: .8rem .9rem; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--border); }
+.hx-meta { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem; margin-bottom: .5rem; font-size: .78rem; color: var(--muted); }
+.hx-meta strong { color: var(--text); font-weight: 600; }
+.hx-tag { font-size: .66rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; padding: .1rem .5rem;
+  border-radius: 999px; background: var(--primary-soft); color: var(--primary-hover); }
+.hx-same { font-size: .7rem; padding: .05rem .45rem; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); }
+
+.hx-list { list-style: none; display: flex; flex-direction: column; gap: .4rem; font-size: .9rem; }
+.hx-list li { position: relative; padding-left: 1rem; line-height: 1.5; }
+.hx-list li::before { content: ""; position: absolute; left: 0; top: .6em; width: 6px; height: 6px; border-radius: 50%; background: #94a3b8; }
+.hx-teal .hx-list li::before { background: #14b8a6; }
+.hx-blue .hx-list li::before { background: #3b82f6; }
+.hx-amber .hx-list li::before { background: #f59e0b; }
+.hx-list b { font-weight: 600; }
+
+.hx-chips { display: flex; flex-wrap: wrap; gap: .4rem; }
+.hx-chip { font-size: .85rem; font-weight: 500; padding: .3rem .7rem; border-radius: 999px;
+  background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+.hx-chip.none, .hx-none { display: inline-block; font-size: .85rem; font-weight: 500; padding: .3rem .7rem; border-radius: 999px;
+  background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
+
+.hx-older { border: 1px solid var(--border); border-radius: 10px; }
+.hx-older > summary { list-style: none; display: flex; align-items: center; gap: .4rem; padding: .6rem .8rem;
+  font-size: .82rem; font-weight: 600; color: var(--muted); cursor: pointer; user-select: none; }
+.hx-older > summary::-webkit-details-marker { display: none; }
+.hx-older[open] > summary .rc-chev { transform: rotate(90deg); }
+.hx-older-list { padding: 0 .8rem .8rem; display: flex; flex-direction: column; gap: .75rem; }
+.hx-entry + .hx-entry { padding-top: .75rem; border-top: 1px dashed var(--border); }
+
 /* ---------- Responsive ---------- */
 @media (max-width: 860px) {
   .shell-body { flex-direction: column; }
@@ -689,7 +728,7 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
   .patient-bar { position: static; }
   .pb-top { flex-wrap: wrap; }
   .pb-actions { width: 100%; }
-  .pc-grid.pairs, .field-grid, .concern-grid, .sk-grid, .pur-stats, .rc-grid, .bp-grid { grid-template-columns: 1fr; }
+  .pc-grid.pairs, .field-grid, .concern-grid, .sk-grid, .pur-stats, .rc-grid, .bp-grid, .hx-grid { grid-template-columns: 1fr; }
 }
 @media (max-width: 560px) {
   .topbar { padding: 0 1rem; }
