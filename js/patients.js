@@ -2,7 +2,7 @@ import { db, auth } from "./firebase-config.js";
 import { formatDobLong, toDateKeyLoose } from "./utils.js";
 import {
   collection, query, where, orderBy, limit, startAfter, getDocs,
-  doc, getDoc, updateDoc, serverTimestamp,
+  doc, getDoc, updateDoc, serverTimestamp, getCountFromServer,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const COLLECTION = "patient_list";
@@ -145,4 +145,62 @@ export async function updatePatient(current, input, staff) {
 
   await updateDoc(doc(db, COLLECTION, current.id), updates);
   return { changed: true };
+}
+
+/* ===================== Patient list helpers ===================== */
+
+// Total number of patients (a cheap aggregation, not a full read)
+export async function countPatients() {
+  const snap = await getCountFromServer(collection(db, COLLECTION));
+  return snap.data().count;
+}
+
+// Exact ID match: PttID (as typed or upper-case) or the Firestore document ID
+export async function findPatientsById(term) {
+  const t = String(term || "").trim();
+  if (!t || /\s/.test(t) || t.length > 64) return [];
+
+  const variants = [...new Set([t, t.toUpperCase()])];
+  const [byPtt, byDoc] = await Promise.all([
+    getDocs(query(collection(db, COLLECTION), where("PttID", "in", variants), limit(10))),
+    /^[\w-]+$/.test(t) ? getDoc(doc(db, COLLECTION, t)) : null,
+  ]);
+
+  const out = new Map();
+  byPtt.forEach((d) => out.set(d.id, toPatient(d)));
+  if (byDoc && byDoc.exists()) out.set(byDoc.id, toPatient(byDoc));
+  return [...out.values()];
+}
+
+// "+61 417 153 855" / "0417153855" / "417153855" -> "417153855"
+export function phoneCore(s) {
+  let d = String(s || "").replace(/\D/g, "");
+  if (d.startsWith("61")) d = d.slice(2);
+  else if (d.startsWith("0")) d = d.slice(1);
+  return d;
+}
+
+// Phone search that copes with numbers stored as 61…, 0… or without the leading 0
+export async function searchPatientsByPhone(term) {
+  const core = phoneCore(term);
+  if (core.length < 3) return [];
+
+  const variants = [core, `0${core}`, `61${core}`];
+  const snaps = await Promise.all(variants.map((v) =>
+    getDocs(query(collection(db, COLLECTION),
+      where("PhoneKey", ">=", v), where("PhoneKey", "<=", v + "\uf8ff"),
+      orderBy("PhoneKey"), limit(20)))
+  ));
+
+  const out = new Map();
+  snaps.forEach((s) => s.forEach((d) => out.set(d.id, toPatient(d))));
+  return [...out.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// Every patient (only used by Duplicates / Birthday / Age filters, then kept in memory)
+export async function fetchAllPatients() {
+  const snap = await getDocs(collection(db, COLLECTION));
+  return snap.docs
+    .map(toPatient)
+    .sort((a, b) => (a.nameKey || a.name.toLowerCase()).localeCompare(b.nameKey || b.name.toLowerCase()));
 }
