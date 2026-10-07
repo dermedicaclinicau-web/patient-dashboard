@@ -266,8 +266,7 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .today-empty svg { width: 16px; height: 16px; flex-shrink: 0; }
 .today-empty.error { border-color: #fecaca; color: #991b1b; background: #fef2f2; }
 
-.pc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  grid-auto-flow: row dense; gap: .6rem; align-items: start; }
+.pc-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: .6rem; align-items: start; }
 .pc-grid:not(.pairs) > details[open] { grid-column: 1 / -1; }
 .pc-grid.pairs { grid-template-columns: 1fr 1fr; }
 .pc-grid > .full { grid-column: 1 / -1; }
