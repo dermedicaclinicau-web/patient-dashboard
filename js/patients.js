@@ -1,6 +1,8 @@
-import { db } from "./firebase-config.js";
+import { db, auth } from "./firebase-config.js";
+import { formatDobLong } from "./utils.js";
 import {
   collection, query, where, orderBy, limit, startAfter, getDocs,
+  doc, getDoc, updateDoc, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const COLLECTION = "patient_list";
@@ -63,9 +65,83 @@ function toPatient(snap) {
   return {
     id: snap.id,
     pttId: d.PttID || "",
+    firstName: d["First Name"] || "",
+    lastName: d["Last Name"] || "",
     name: d["Patient Name"] || [d["First Name"], d["Last Name"]].filter(Boolean).join(" ") || "Unnamed patient",
+    nameKey: d.NameKey || "",
     email: d.Email || "",
+    mobile: d.Mobile || "",
+    address: d.Address || "",
     dobKey: d.DobKey || "",
     dob: d.DOB || "",
   };
+}
+
+// Load one patient. Accepts the Firestore doc ID (from the patient list)
+// OR the PttID (from calendar cards, which use the sheet's Patient ID).
+export async function getPatient(id) {
+  if (!id) return null;
+
+  if (!id.includes("/")) {
+    const snap = await getDoc(doc(db, COLLECTION, id));
+    if (snap.exists()) return toPatient(snap);
+  }
+
+  const res = await getDocs(query(collection(db, COLLECTION), where("PttID", "==", id), limit(1)));
+  return res.empty ? null : toPatient(res.docs[0]);
+}
+
+// Save edits. Only changed fields are written, and the search keys
+// (NameKey, EmailKey, etc.) are kept in sync so search keeps working.
+export async function updatePatient(current, input, staff) {
+  const clean = (v) => String(v ?? "").trim().replace(/\s+/g, " ");
+  const first = clean(input.firstName);
+  const last = clean(input.lastName);
+  const email = clean(input.email).replace(/\s/g, "");
+  const mobile = String(input.mobile ?? "").replace(/\D/g, "");
+  const address = clean(input.address);
+  const dobKey = clean(input.dobKey);
+
+  if (!first || !last) throw new Error("First and last name are required.");
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Please enter a valid email address.");
+  if (dobKey && !/^\d{4}-\d{2}-\d{2}$/.test(dobKey)) throw new Error("Please enter a valid date of birth.");
+
+  const updates = {};
+  const nameChanged = first !== current.firstName || last !== current.lastName;
+  const dobChanged = dobKey !== current.dobKey;
+  let nameKey = current.nameKey;
+
+  if (nameChanged) {
+    nameKey = `${last} ${first}`.toLowerCase();
+    Object.assign(updates, {
+      "First Name": first,
+      "Last Name": last,
+      "Patient Name": `${first} ${last}`,
+      NameKey: nameKey,
+    });
+  }
+  if (dobChanged) {
+    Object.assign(updates, { DobKey: dobKey, DOB: dobKey ? formatDobLong(dobKey) : "" });
+  }
+  if (nameChanged || dobChanged) {
+    updates.IdentityKey = dobKey ? `${nameKey}|${dobKey}` : nameKey;
+  }
+  if (email !== current.email) {
+    Object.assign(updates, { Email: email, EmailKey: email.toLowerCase() });
+  }
+  if (mobile !== String(current.mobile).replace(/\D/g, "")) {
+    Object.assign(updates, { Mobile: mobile, PhoneKey: mobile });
+  }
+  if (address !== current.address) updates.Address = address;
+
+  if (!Object.keys(updates).length) return { changed: false };
+
+  Object.assign(updates, {
+    UpdatedAt: serverTimestamp(),
+    UpdatedBy: (staff && staff.name) || "",
+    UpdatedByUid: auth.currentUser ? auth.currentUser.uid : "",
+  });
+
+  await updateDoc(doc(db, COLLECTION, current.id), updates);
+  return { changed: true };
 }

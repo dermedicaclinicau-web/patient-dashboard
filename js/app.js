@@ -1,6 +1,7 @@
 import { loginWithPin, logout, watchAuth, updateStaffName } from "./auth.js";
 import { mountPatientList } from "./patient-list.js";
 import { mountCalendar } from "./calendar.js";
+import { mountPatientDashboard } from "./patient-dashboard.js";
 import { escapeHtml, getInitials } from "./utils.js";
 
 const PIN_LENGTH = 4; // change to 6 if you move to 6-digit PINs
@@ -155,13 +156,7 @@ function placeholderPage(title, message, backLink = "") {
 const PAGES = {
   patients: (el) => mountPatientList(el),
   calendar: (el, param) => mountCalendar(el, param),
-  patient: (el, id) => {
-    el.innerHTML = placeholderPage(
-      "Patient profile",
-      `The dashboard for record ${id} is the next thing we'll build.`,
-      `<a class="back-link" href="#/patients">← Back to patient list</a>`
-    );
-  },
+  patient: (el, id) => mountPatientDashboard(el, id, { staff: currentStaff, onBack: goBack }),
 };
 
 function router() {
@@ -188,7 +183,15 @@ function router() {
   PAGES[page](els.content, param);
 }
 
-window.addEventListener("hashchange", router);
+// Count in-app page changes so "Back" returns to wherever you came from
+// (patient list or the calendar day). If the page was opened directly, go to the list.
+let inAppNavs = 0;
+window.addEventListener("hashchange", () => { inAppNavs++; router(); });
+
+function goBack() {
+  if (inAppNavs > 0) history.back();
+  else location.hash = "#/patients";
+}
 
 /* ===================== START ===================== */
 

@@ -74,3 +74,54 @@ export function formatUpdated(d) {
   const ampm = d.getHours() < 12 ? "am" : "pm";
   return `${WEEKDAYS_LONG[d.getDay()].slice(0, 3)}, ${d.getDate()} ${MONTHS[d.getMonth()]}, ${h}:${mins} ${ampm}`;
 }
+
+// "1992-11-23" -> "November 23, 1992"
+export function formatDobLong(dobKey) {
+  const d = parseDateKey(dobKey);
+  return d ? `${MONTHS_LONG[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}` : "";
+}
+
+// Age in whole years (accounts for birthdays not yet reached this year)
+export function calcAge(dobKey, today = new Date()) {
+  const d = parseDateKey(dobKey);
+  if (!d) return null;
+  let age = today.getFullYear() - d.getFullYear();
+  const m = today.getMonth() - d.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < d.getDate())) age--;
+  return age >= 0 ? age : null;
+}
+
+// "409401995" -> "0409 401 995" (restores the leading 0 spreadsheets often drop)
+export function formatMobile(raw = "") {
+  let d = String(raw).replace(/\D/g, "");
+  if (d.startsWith("61") && d.length === 11) d = "0" + d.slice(2);
+  if (d.length === 9 && d.startsWith("4")) d = "0" + d;
+  if (d.length === 10 && d.startsWith("04")) return `${d.slice(0, 4)} ${d.slice(4, 7)} ${d.slice(7)}`;
+  return String(raw).trim();
+}
+
+// Phone number for tel:/sms: links, in international format
+export function toTelHref(raw = "") {
+  const d = String(raw).replace(/\D/g, "");
+  if (!d) return "";
+  if (d.startsWith("61")) return `+${d}`;
+  if (d.startsWith("0")) return `+61${d.slice(1)}`;
+  if (d.length === 9) return `+61${d}`; // e.g. 409401995
+  return d;
+}
+
+// Small pop-up message at the bottom of the screen
+let toastTimer;
+export function showToast(message) {
+  let el = document.querySelector(".toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "toast";
+    el.setAttribute("role", "status");
+    document.body.appendChild(el);
+  }
+  el.textContent = message;
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 2500);
+}
