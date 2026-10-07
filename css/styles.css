@@ -883,6 +883,54 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .sod-btn:hover { background: #45a99f; }
 .sod-btn:active { transform: translateY(1px); }
 
+/* ---------- Recording bar ---------- */
+.rec-bar { position: sticky; top: var(--topbar-h); z-index: 9; display: flex; align-items: center; flex-wrap: wrap;
+  gap: .9rem; min-height: 52px; padding: .55rem 1.5rem; background: #fff; border-bottom: 1px solid var(--border);
+  box-shadow: 0 4px 12px -8px rgba(15, 23, 42, .15); font-size: .9rem; }
+.rec-bar.is-idle { background: #f8fafc; }
+.rec-bar.is-recording { background: #fff1f2; border-bottom-color: #fecdd3; }
+.rec-bar.is-paused { background: #fffbeb; border-bottom-color: #fde68a; }
+.rec-bar.is-busy { background: #eff6ff; border-bottom-color: #bfdbfe; }
+.rec-bar.is-done { background: #ecfdf5; border-bottom-color: #a7f3d0; }
+.rec-bar.is-error { background: #fef2f2; border-bottom-color: #fecaca; }
+.rec-bar.is-recovered { background: #fffbeb; border-bottom-color: #fde68a; }
+
+.rec-icon { width: 32px; height: 32px; flex-shrink: 0; border-radius: 50%; display: grid; place-items: center;
+  background: var(--primary-soft); color: var(--primary); }
+.rec-icon svg { width: 16px; height: 16px; }
+.rec-dot { width: 12px; height: 12px; flex-shrink: 0; border-radius: 50%; background: #e11d48; animation: rec-pulse 1.4s infinite; }
+.is-paused .rec-dot { background: #d97706; animation: none; }
+@keyframes rec-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(225, 29, 72, .55); }
+  70% { box-shadow: 0 0 0 10px rgba(225, 29, 72, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(225, 29, 72, 0); }
+}
+.rec-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.rec-text strong { font-weight: 600; }
+.rec-text small { font-size: .78rem; color: var(--muted); }
+.rec-text a { color: inherit; }
+.rec-timer { min-width: 72px; font-size: 1.15rem; font-weight: 700; color: #be123c; font-variant-numeric: tabular-nums; }
+.is-paused .rec-timer { color: #b45309; }
+.rec-consent { display: inline-flex; align-items: center; gap: .45rem; font-size: .85rem; color: #334155; cursor: pointer; }
+.rec-consent input { width: 16px; height: 16px; accent-color: var(--primary); }
+.rec-actions { margin-left: auto; display: flex; align-items: center; gap: .5rem; }
+.rec-btn { display: inline-flex; align-items: center; gap: .4rem; height: 36px; padding: 0 .95rem; border-radius: 10px;
+  border: 1px solid var(--border); background: #fff; font-size: .85rem; font-weight: 600; cursor: pointer; }
+.rec-btn svg { width: 14px; height: 14px; }
+.rec-btn:disabled { opacity: .5; cursor: not-allowed; }
+.rec-btn.primary { background: #e11d48; border-color: #e11d48; color: #fff; }
+.rec-btn.primary:hover:not(:disabled) { background: #be123c; }
+.rec-btn.go { background: var(--primary); border-color: var(--primary); color: #fff; }
+.rec-btn.go:hover { background: var(--primary-hover); }
+.rec-link { padding: 0; border: none; background: none; color: var(--muted); font-size: .8rem; text-decoration: underline; cursor: pointer; }
+.rec-progress { flex: 1; min-width: 140px; max-width: 320px; height: 8px; border-radius: 999px; background: #dbeafe; overflow: hidden; }
+.rec-progress span { display: block; height: 100%; background: #3b82f6; transition: width .2s; }
+.rec-pct { font-weight: 600; color: #1d4ed8; font-variant-numeric: tabular-nums; }
+
+/* Sticky elements sit below the recording bar when it's showing */
+.patient-bar { top: calc(var(--topbar-h) + var(--recbar-h, 0px)); }
+.sidebar { top: calc(var(--topbar-h) + var(--recbar-h, 0px)); height: calc(100vh - var(--topbar-h) - var(--recbar-h, 0px)); }
+
 /* ---------- Responsive ---------- */
 @media (max-width: 860px) {
   .shell-body { flex-direction: column; }
@@ -895,6 +943,9 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
   .cal-board { max-height: none; }
   .cal-col, .skel-col { width: 240px; }
   .patient-bar { position: static; }
+  .sidebar { top: calc(var(--topbar-h) + var(--recbar-h, 0px)); }
+  .rec-bar { padding: .55rem 1rem; }
+  .rec-actions { margin-left: 0; width: 100%; }
   .pb-top { flex-wrap: wrap; }
   .pb-actions { width: 100%; }
   .pc-grid.pairs, .field-grid, .concern-grid, .sk-grid, .pur-stats, .rc-grid, .bp-grid, .hx-grid, .ir-grid, .ph-grid { grid-template-columns: 1fr; }

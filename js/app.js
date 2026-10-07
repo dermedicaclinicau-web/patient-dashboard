@@ -4,6 +4,8 @@ import { mountCalendar } from "./calendar.js";
 import { mountPatientDashboard } from "./patient-dashboard.js";
 import { escapeHtml, getInitials } from "./utils.js";
 import { maybeShowStartOfDay, closeStartOfDay } from "./start-of-day.js";
+import { initRecordingBar, setRecordingPatient } from "./recording-bar.js";
+import { isRecorderBusy, suspendRecorder } from "./recorder.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -127,7 +129,12 @@ function renderStaff(staff) {
 }
 
 els.staffPhoto.addEventListener("error", () => { els.staffPhoto.hidden = true; });
-els.logoutBtn.addEventListener("click", () => logout());
+els.logoutBtn.addEventListener("click", () => {
+  if (isRecorderBusy() && !confirm(
+    "A recording is in progress. Log out anyway?\n\nThe recording will stay saved on this computer and can be uploaded at your next login."
+  )) return;
+  logout();
+});
 
 /* ===================== EDIT PROFILE ===================== */
 
@@ -198,6 +205,7 @@ function router() {
   });
 
   window.scrollTo(0, 0);
+  if (page !== "patient") setRecordingPatient(null); // "Ready to record" only shows on a patient page
   PAGES[page](els.content, param);
 }
 
@@ -218,6 +226,7 @@ watchAuth((staff) => {
     currentStaff = staff;
     renderStaff(staff);
     showView("dashboard");
+    initRecordingBar(staff);
     router();
     maybeShowStartOfDay(staff);
   } else {
@@ -225,6 +234,7 @@ watchAuth((staff) => {
     els.content.innerHTML = ""; // remove patient data from the page on logout
     clearPatientCache();
     closeStartOfDay();
+    suspendRecorder(); // stops the mic; any audio stays on this device for upload at next login
     if (els.profileDialog.open) els.profileDialog.close();
     if (location.hash) history.replaceState(null, "", location.pathname + location.search);
     resetLogin();

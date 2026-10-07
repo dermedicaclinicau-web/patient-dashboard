@@ -3,6 +3,7 @@ import { fetchDayAppointments, fetchPreconsult } from "./appointments.js";
 import { fetchOpenReminders } from "./reminders.js";
 import { skincareSectionHtml, mountSkincare } from "./skincare-view.js";
 import { recordsSectionHtml, mountRecords } from "./records-view.js";
+import { setRecordingPatient } from "./recording-bar.js";
 import { historySectionHtml, mountHistory } from "./history-view.js";
 import {
   billingRxSectionHtml, mountBillingRx, injectableReferralSectionHtml, interestsCommsSectionHtml,
@@ -278,6 +279,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
 
   // Load everything in parallel
   loadToday();
+  setRecordingPatient(patient); // shows "Ready to record" for this patient
   loadPreconsultData();
   loadReminders();
   loadTranscriptSections();
