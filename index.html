@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Patient Dashboard</title>
+  <link rel="stylesheet" href="./css/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>My Health Portal</h1>
+    <span class="welcome">Welcome, <strong id="patient-name">…</strong></span>
+  </header>
+
+  <main class="container">
+    <div id="error-banner" class="error" hidden>
+      Couldn't load your appointments. Please refresh the page.
+    </div>
+
+    <section class="summary">
+      <div class="card">
+        <span class="label">Upcoming</span>
+        <span class="value" id="upcoming-count">–</span>
+      </div>
+      <div class="card">
+        <span class="label">Past visits</span>
+        <span class="value" id="past-count">–</span>
+      </div>
+      <div class="card wide">
+        <span class="label">Next appointment</span>
+        <span class="value small" id="next-appointment">–</span>
+      </div>
+    </section>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab active" role="tab" aria-selected="true" data-target="upcoming-panel">Upcoming</button>
+      <button class="tab" role="tab" aria-selected="false" data-target="past-panel">History</button>
+    </nav>
+
+    <section id="upcoming-panel" class="panel">
+      <ul id="upcoming-list" class="appt-list"><li class="empty">Loading…</li></ul>
+    </section>
+
+    <section id="past-panel" class="panel" hidden>
+      <ul id="past-list" class="appt-list"><li class="empty">Loading…</li></ul>
+    </section>
+  </main>
+
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>
