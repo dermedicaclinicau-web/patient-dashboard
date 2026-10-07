@@ -613,7 +613,7 @@ function treatmentPlanHtml(p) {
   const dateText = p.date
     ? `${p.date.getDate()} ${p.date.toLocaleString("en-AU", { month: "long" })} ${p.date.getFullYear()}`
     : p.dateText;
-  const isLong = p.plan.length > 300 || p.plan.split(/\n/).length > 3;
+  const isLong = p.plan.length > 450 || p.plan.split(/\n/).length > 6;
 
   return `
     <div class="plan-block">
@@ -621,7 +621,7 @@ function treatmentPlanHtml(p) {
         <span class="plan-date">Most recent${dateText ? ` — ${escapeHtml(dateText)}` : ""}</span>
         ${isLong ? `<button type="button" class="plan-toggle" data-action="toggle-plan">${ICONS.chevRight}<span>View full plan</span></button>` : ""}
       </div>
-      <div class="plan-text">${escapeHtml(p.plan)}</div>
+      <div class="plan-text"><div class="plan-clamp">${escapeHtml(p.plan)}</div></div>
       <div class="plan-meta">
         ${p.staff ? `<span>By ${escapeHtml(p.staff)}</span>` : ""}
         ${p.matchedByName ? `<span class="task-flag neutral">Matched by name</span>` : ""}
