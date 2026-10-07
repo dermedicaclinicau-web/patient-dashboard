@@ -382,6 +382,21 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .visit-card.tone-tan { background: #ead6c4; }
 .visit-card.tone-rose { background: #fce4ef; }
 
+.sub-card.tone-purple .sub-body { background: #fbfaff; }
+.plan-block { display: flex; flex-direction: column; gap: .55rem; }
+.plan-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.plan-date { font-size: .75rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: #6d28d9; }
+.plan-toggle { display: inline-flex; align-items: center; gap: .25rem; padding: 0; border: none; background: none;
+  color: #6d28d9; font-size: .85rem; cursor: pointer; }
+.plan-toggle:hover { text-decoration: underline; }
+.plan-toggle svg { width: 14px; height: 14px; transition: transform .2s; }
+.plan-block.expanded .plan-toggle svg { transform: rotate(90deg); }
+.plan-text { padding: .8rem 1rem; border: 1px solid #e4defc; border-radius: 10px; background: #fff;
+  font-size: .9rem; line-height: 1.6; white-space: pre-line;
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+.plan-block.expanded .plan-text { display: block; -webkit-line-clamp: unset; }
+.plan-meta { display: flex; align-items: center; gap: .5rem; font-size: .78rem; }
+
 /* ---------- Responsive ---------- */
 @media (max-width: 860px) {
   .shell-body { flex-direction: column; }

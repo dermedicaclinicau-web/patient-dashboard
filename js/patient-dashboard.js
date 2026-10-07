@@ -1,6 +1,7 @@
 import { getPatient, updatePatient } from "./patients.js";
 import { fetchDayAppointments, fetchPreconsult } from "./appointments.js";
 import { fetchOpenReminders } from "./reminders.js";
+import { fetchLatestTreatmentPlan } from "./transcripts.js";
 import {
   escapeHtml, getInitials, hueFromString, formatDobLong, calcAge,
   formatMobile, toTelHref, toDateKey, showToast, formatUpdated,
@@ -32,12 +33,12 @@ const PRECONSULT_SECTIONS = [
   { key: "past-appts", title: "Past appointments", icon: "clock", field: "other", unit: "visit|visits", tone: "green" },
   { key: "recent-visits", visits: true },
   { key: "future-visits", title: "Future visits", icon: "calendar", field: "futureVisits", unit: "visit|visits", tone: "purple" },
-  { key: "overdue", title: "Overdue treatments", icon: "alert", field: "overdue", unit: "overdue|overdue", tone: "red" },
+  //{ key: "overdue", title: "Overdue treatments", icon: "alert", field: "overdue", unit: "overdue|overdue", tone: "red" },
   { key: "packages", title: "Customer packages", icon: "box", field: "packages", unit: "active|active" },
   { key: "skin-script", title: "Skin script protocol", icon: "file", field: "skinScriptDate", unit: "value",
     action: ["Create new SSP", "Create new SSP"] },
-  { key: "treatment-plan", title: "Treatment plan", icon: "check", pill: "No record",
-    empty: "No treatment plan recorded." },
+  { key: "treatment-plan", title: "Treatment plan", icon: "check", custom: true, tone: "purple",
+    remember: false }, // always starts collapsed
 ];
 
 // Each inner array is one row; two items sit side by side
@@ -83,6 +84,7 @@ const ICONS = {
   file: svg(FILE + '<line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>'),
   check: svg('<polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'),
   refresh: svg('<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>'),
+  chevRight: svg('<polyline points="9 18 15 12 9 6"/>'),
   chev: svg('<polyline points="6 9 12 15 18 9"/>', "sum-chev"),
 };
 
@@ -125,6 +127,13 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     const refreshBtn = t.closest("[data-action='refresh-pc']");
     if (refreshBtn) { refreshAll(refreshBtn); return; }
     if (t.closest(".back-btn, [data-action='back']")) { if (onBack) onBack(); return; }
+    const planToggle = t.closest("[data-action='toggle-plan']");
+    if (planToggle) {
+      const block = planToggle.closest(".plan-block");
+      const expanded = block.classList.toggle("expanded");
+      planToggle.querySelector("span").textContent = expanded ? "Show less" : "View full plan";
+      return;
+    }
     const soon = t.closest("[data-soon]");
     if (soon) { showToast(`${soon.dataset.soon}: coming soon`); return; }
     if (t.closest(".pb-edit")) { openEdit(); return; }
@@ -241,13 +250,41 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   loadToday();
   loadPreconsultData();
   loadReminders();
+  loadTreatmentPlan();
+
+  // Most recent "!!TREATMENT PLAN" from appointment_transcripts (Gemini SOAP)
+  async function loadTreatmentPlan() {
+    const card = root.querySelector('details[data-key="treatment-plan"]');
+    if (!card) return;
+    const hint = card.querySelector(".hint");
+    const body = card.querySelector(".sub-body");
+
+    try {
+      const { latest } = await fetchLatestTreatmentPlan(patient);
+      if (!root.isConnected) return;
+      hint.textContent = latest ? "On file" : "No record";
+      body.innerHTML = latest
+        ? treatmentPlanHtml(latest)
+        : `<p class="empty-note">No treatment plan on record.</p>`;
+      card.classList.toggle("is-empty", !latest);
+    } catch (err) {
+      if (!root.isConnected) return;
+      console.error("Treatment plan failed:", err);
+      hint.textContent = "—";
+      body.innerHTML = `<p class="empty-note error">${
+        err.code === "permission-denied"
+          ? "Treatment plans aren't accessible. Check the Firestore rules."
+          : "Couldn't load the treatment plan."
+      }</p>`;
+    }
+  }
 
   // Refresh button: reload all pre-consultation data in place
   async function refreshAll(btn) {
     if (btn.disabled) return;
     btn.disabled = true;
     btn.classList.add("is-loading");
-    await Promise.allSettled([loadToday(), loadPreconsultData(), loadReminders()]);
+    await Promise.allSettled([loadToday(), loadPreconsultData(), loadReminders(), loadTreatmentPlan()]);
     if (btn.isConnected) {
       btn.disabled = false;
       btn.classList.remove("is-loading");
@@ -364,11 +401,11 @@ function barHtml(p, today = [], pre = null) {
 }
 
 function subCard({ key, title, icon = "", body = "", pill = "", tone = "", action = null,
-                   field = "", unit = "", extraClass = "", open = false }) {
+                   field = "", unit = "", extraClass = "", open = false, remember = true }) {
   return `
     <details class="sub-card ${tone ? `tone-${tone}` : ""} ${extraClass}" data-key="${escapeHtml(key)}"${
       field ? ` data-field="${escapeHtml(field)}"` : ""}${unit ? ` data-unit="${escapeHtml(unit)}"` : ""} ${
-      isOpen(key, open) ? "open" : ""}>
+      (remember ? isOpen(key, open) : open) ? "open" : ""}>
       <summary>
         <span class="sum-left">
           ${icon ? `<span class="sum-icon">${ICONS[icon]}</span>` : ""}
@@ -393,7 +430,7 @@ function preConsultHtml() {
     const loads = s.field || s.custom;
     return subCard({
       key: s.key, title: s.title, icon: s.icon, tone: s.tone, action: s.action,
-      field: s.field, unit: s.unit,
+      field: s.field, unit: s.unit, remember: s.remember !== false,
       pill: loads ? "…" : s.pill,
       body: loads ? loading : `<p class="empty-note">${escapeHtml(s.empty)}</p>`,
     });
@@ -568,4 +605,26 @@ function remindersHtml(tasks) {
         <span class="task-meta">${meta}${flags}</span>
       </li>`;
   }).join("")}</ul>`;
+}
+
+/* ===================== Treatment plan ===================== */
+
+function treatmentPlanHtml(p) {
+  const dateText = p.date
+    ? `${p.date.getDate()} ${p.date.toLocaleString("en-AU", { month: "long" })} ${p.date.getFullYear()}`
+    : p.dateText;
+  const isLong = p.plan.length > 300 || p.plan.split(/\n/).length > 3;
+
+  return `
+    <div class="plan-block">
+      <div class="plan-head">
+        <span class="plan-date">Most recent${dateText ? ` — ${escapeHtml(dateText)}` : ""}</span>
+        ${isLong ? `<button type="button" class="plan-toggle" data-action="toggle-plan">${ICONS.chevRight}<span>View full plan</span></button>` : ""}
+      </div>
+      <div class="plan-text">${escapeHtml(p.plan)}</div>
+      <div class="plan-meta">
+        ${p.staff ? `<span>By ${escapeHtml(p.staff)}</span>` : ""}
+        ${p.matchedByName ? `<span class="task-flag neutral">Matched by name</span>` : ""}
+      </div>
+    </div>`;
 }
