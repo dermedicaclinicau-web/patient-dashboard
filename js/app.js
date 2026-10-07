@@ -3,6 +3,7 @@ import { mountPatientList, clearPatientCache } from "./patient-list.js";
 import { mountCalendar } from "./calendar.js";
 import { mountPatientDashboard } from "./patient-dashboard.js";
 import { escapeHtml, getInitials } from "./utils.js";
+import { maybeShowStartOfDay, closeStartOfDay } from "./start-of-day.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -218,10 +219,12 @@ watchAuth((staff) => {
     renderStaff(staff);
     showView("dashboard");
     router();
+    maybeShowStartOfDay(staff);
   } else {
     currentStaff = null;
     els.content.innerHTML = ""; // remove patient data from the page on logout
     clearPatientCache();
+    closeStartOfDay();
     if (els.profileDialog.open) els.profileDialog.close();
     if (location.hash) history.replaceState(null, "", location.pathname + location.search);
     resetLogin();
