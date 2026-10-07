@@ -1,5 +1,5 @@
 import { loginWithPin, logout, watchAuth, updateStaffName, warmUpLogin } from "./auth.js";
-import { mountPatientList } from "./patient-list.js";
+import { mountPatientList, clearPatientCache } from "./patient-list.js";
 import { mountCalendar } from "./calendar.js";
 import { mountPatientDashboard } from "./patient-dashboard.js";
 import { escapeHtml, getInitials } from "./utils.js";
@@ -221,6 +221,7 @@ watchAuth((staff) => {
   } else {
     currentStaff = null;
     els.content.innerHTML = ""; // remove patient data from the page on logout
+    clearPatientCache();
     if (els.profileDialog.open) els.profileDialog.close();
     if (location.hash) history.replaceState(null, "", location.pathname + location.search);
     resetLogin();

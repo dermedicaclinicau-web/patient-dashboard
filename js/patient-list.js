@@ -1,97 +1,278 @@
-import { fetchPatients } from "./patients.js";
-import { escapeHtml, getInitials, formatDob, hueFromString } from "./utils.js";
+import {
+  fetchPatients, countPatients, findPatientsById, searchPatientsByPhone, fetchAllPatients, phoneCore,
+} from "./patients.js";
+import {
+  escapeHtml, getInitials, hueFromString, formatDobLong, calcAge, formatMobile, showToast, parseDateKey,
+} from "./utils.js";
 
-const ICON_SEARCH = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>`;
-const ICON_CHEVRON = `<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>`;
+const CLIENT_PAGE = 24;
+const GROUP_PAGE = 15;
+
+const svg = (p) =>
+  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+const ICONS = {
+  search: svg('<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>'),
+  refresh: svg('<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>'),
+  plus: svg('<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>'),
+  mail: svg('<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>'),
+  phone: svg('<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>'),
+};
 
 const PLACEHOLDERS = {
-  name: "Search by surname, e.g. Cooney",
-  email: "Search by email address",
+  name: "Search by name or ID…",
+  phone: "Search by phone number…",
+  dupes: "Filter duplicates by name, email or phone…",
 };
+
+/* ===================== In-memory caches (cleared on logout) ===================== */
+
+let allCache = null;
+let allPromise = null;
+let countCache = null;
+let cacheGen = 0;
+
+export function clearPatientCache() {
+  cacheGen++;
+  allCache = null;
+  allPromise = null;
+  countCache = null;
+}
+
+function loadAll() {
+  if (allCache) return Promise.resolve(allCache);
+  if (!allPromise) {
+    const gen = cacheGen;
+    allPromise = fetchAllPatients()
+      .then((list) => { if (gen === cacheGen) allCache = list; return list; })
+      .catch((err) => { allPromise = null; throw err; });
+  }
+  return allPromise;
+}
+
+/* ===================== Page ===================== */
 
 export function mountPatientList(container) {
   container.innerHTML = `
-    <section class="page">
-      <div class="page-head">
-        <h2>Patients</h2>
-        <p class="muted">Search for a patient to review their profile.</p>
-      </div>
-
-      <div class="toolbar">
-        <label class="search-box">
-          ${ICON_SEARCH}
-          <input type="search" placeholder="${PLACEHOLDERS.name}" autocomplete="off"
-                 spellcheck="false" aria-label="Search patients" />
-        </label>
-        <div class="segmented" role="group" aria-label="Search by">
-          <button type="button" data-mode="name" class="active" aria-pressed="true">Name</button>
-          <button type="button" data-mode="email" aria-pressed="false">Email</button>
+    <section class="page wide pt-page">
+      <div class="pt-head">
+        <div class="pt-title"><h2>Patients</h2><span class="pt-total"></span></div>
+        <div class="pt-actions">
+          <button type="button" class="icon-btn pt-refresh" title="Refresh" aria-label="Refresh">${ICONS.refresh}</button>
+          <button type="button" class="pt-new">${ICONS.plus}New Patient</button>
         </div>
       </div>
 
-      <p class="result-meta" aria-live="polite"></p>
-      <ul class="patient-list"></ul>
-
-      <div class="list-footer">
-        <button type="button" class="btn-ghost load-more" hidden>Load more</button>
+      <div class="pt-toolbar">
+        <label class="pt-search">${ICONS.search}
+          <input type="search" placeholder="${PLACEHOLDERS.name}" autocomplete="off" spellcheck="false" aria-label="Search patients" />
+        </label>
+        <div class="pt-tabs" role="group" aria-label="Search mode">
+          <button type="button" data-mode="name" class="active" aria-pressed="true">Name / ID</button>
+          <button type="button" data-mode="phone" aria-pressed="false">Phone</button>
+          <button type="button" data-mode="dupes" class="dupes" aria-pressed="false">Duplicates</button>
+        </div>
+        <select class="pt-select" data-filter="birthday" aria-label="Birthday filter">
+          <option value="all">All Birthdays</option>
+          <option value="today">Birthdays today</option>
+          <option value="week">Next 7 days</option>
+          <option value="month">This month</option>
+        </select>
+        <select class="pt-select" data-filter="age" aria-label="Age filter">
+          <option value="all">All Ages</option>
+          <option value="0-24">Under 25</option>
+          <option value="25-34">25–34</option>
+          <option value="35-44">35–44</option>
+          <option value="45-54">45–54</option>
+          <option value="55-200">55+</option>
+        </select>
       </div>
+
+      <p class="pt-meta" aria-live="polite"></p>
+      <div class="pt-results"></div>
+      <div class="pt-footer"><button type="button" class="btn-ghost pt-more" hidden>Load more</button></div>
     </section>`;
 
-  const input = container.querySelector(".search-box input");
-  const modeBtns = container.querySelectorAll(".segmented button");
-  const meta = container.querySelector(".result-meta");
-  const list = container.querySelector(".patient-list");
-  const moreBtn = container.querySelector(".load-more");
+  const q = (s) => container.querySelector(s);
+  const input = q(".pt-search input");
+  const tabs = container.querySelectorAll(".pt-tabs button");
+  const selects = container.querySelectorAll(".pt-select");
+  const total = q(".pt-total");
+  const meta = q(".pt-meta");
+  const results = q(".pt-results");
+  const moreBtn = q(".pt-more");
+  const refreshBtn = q(".pt-refresh");
 
-  const state = { mode: "name", term: "", activeTerm: "", cursor: null, count: 0, loading: false, seq: 0 };
+  const state = {
+    mode: "name", term: "", birthday: "all", age: "all", seq: 0,
+    server: { cursor: null, hasMore: false, term: "", seen: new Set() },
+    client: { list: [], shown: CLIENT_PAGE, groups: null, shownGroups: GROUP_PAGE },
+  };
 
-  async function load(reset) {
-    if (!reset && state.loading) return;
+  const needsAll = () => state.mode === "dupes" || state.birthday !== "all" || state.age !== "all";
 
-    // seq makes sure a slow, outdated search can't overwrite newer results
-    const seq = reset ? ++state.seq : state.seq;
-    if (reset) {
-      state.cursor = null;
-      state.count = 0;
-      state.activeTerm = state.term;
-      list.innerHTML = skeletons(5);
-      moreBtn.hidden = true;
-      meta.textContent = "";
+  /* ---------- total count ---------- */
+  async function loadCount() {
+    try {
+      if (countCache === null) countCache = await countPatients();
+      if (total.isConnected) total.textContent = `${countCache.toLocaleString()} patients`;
+    } catch (err) {
+      console.warn("Patient count failed:", err);
     }
+  }
 
-    state.loading = true;
-    moreBtn.disabled = true;
-    moreBtn.textContent = "Loading…";
+  /* ---------- main loader ---------- */
+  async function run() {
+    const seq = ++state.seq;
+    results.innerHTML = skeletonGrid(8);
+    moreBtn.hidden = true;
+    meta.textContent = needsAll() && !allCache ? "Loading all patients for filtering…" : "";
 
     try {
-      const res = await fetchPatients({ mode: state.mode, term: state.activeTerm, cursor: state.cursor });
-      if (seq !== state.seq) return;
-
-      if (reset) list.innerHTML = "";
-      state.activeTerm = res.term;
-      state.cursor = res.cursor;
-      state.count += res.patients.length;
-
-      list.insertAdjacentHTML("beforeend", res.patients.map(patientCard).join(""));
-      if (state.count === 0) list.innerHTML = emptyState(state.term, state.mode);
-
-      moreBtn.hidden = !res.hasMore;
-      meta.textContent = metaText(state.count, state.term);
+      if (needsAll()) {
+        const all = await loadAll();
+        if (seq !== state.seq) return;
+        clientRender(all);
+      } else {
+        await serverFirstPage(seq);
+      }
     } catch (err) {
       if (seq !== state.seq) return;
       console.error("Patient list failed:", err);
-      if (state.count === 0) list.innerHTML = errorState(err);
-      else meta.textContent = "Couldn't load more patients. Please try again.";
+      meta.textContent = "";
+      results.innerHTML = errorState(err);
+    }
+  }
+
+  /* ---------- server mode: browse / name / ID / phone ---------- */
+  async function serverFirstPage(seq) {
+    const t = state.term;
+
+    if (state.mode === "phone" && t) {
+      if (phoneCore(t).length < 3) {
+        results.innerHTML = `<div class="state"><strong>Keep typing</strong>Enter at least 3 digits of the phone number.</div>`;
+        return;
+      }
+      const list = await searchPatientsByPhone(t);
+      if (seq !== state.seq) return;
+      renderCards(list, false);
+      meta.textContent = `${list.length} result${list.length === 1 ? "" : "s"} for “${t}”`;
+      return;
+    }
+
+    const [page, idHits] = await Promise.all([
+      fetchPatients({ mode: "name", term: t }),
+      state.mode === "name" && t ? findPatientsById(t) : Promise.resolve([]),
+    ]);
+    if (seq !== state.seq) return;
+
+    const seen = new Set(idHits.map((p) => p.id));
+    const list = [...idHits, ...page.patients.filter((p) => !seen.has(p.id))];
+    list.forEach((p) => seen.add(p.id));
+    state.server = { cursor: page.cursor, hasMore: page.hasMore, term: page.term, seen };
+
+    renderCards(list, false);
+    moreBtn.hidden = !page.hasMore;
+    meta.textContent = t ? `${list.length}${page.hasMore ? "+" : ""} result${list.length === 1 ? "" : "s"} for “${t}”` : "";
+  }
+
+  async function serverMore() {
+    const seq = state.seq;
+    moreBtn.disabled = true;
+    moreBtn.textContent = "Loading…";
+    try {
+      const page = await fetchPatients({ mode: "name", term: state.server.term, cursor: state.server.cursor });
+      if (seq !== state.seq) return;
+      const list = page.patients.filter((p) => !state.server.seen.has(p.id));
+      list.forEach((p) => state.server.seen.add(p.id));
+      renderCards(list, true);
+      state.server.cursor = page.cursor;
+      state.server.hasMore = page.hasMore;
+      moreBtn.hidden = !page.hasMore;
+    } catch (err) {
+      console.error("Load more failed:", err);
+      showToast("Couldn't load more patients");
     } finally {
       if (seq === state.seq) {
-        state.loading = false;
         moreBtn.disabled = false;
         moreBtn.textContent = "Load more";
       }
     }
   }
 
-  // Search as you type (waits 300ms after the last keystroke)
+  /* ---------- client mode: duplicates / birthdays / ages ---------- */
+  function matchesTerm(p) {
+    const term = state.term.toLowerCase();
+    if (!term) return true;
+    const digits = phoneCore(state.term);
+    const phoneHit = digits.length >= 3 && phoneCore(p.mobile).includes(digits);
+    if (state.mode === "phone") return phoneHit;
+    const textHit = [p.name, p.pttId, p.id, p.email].some((v) => String(v || "").toLowerCase().includes(term));
+    return state.mode === "dupes" ? textHit || phoneHit : textHit;
+  }
+
+  function clientRender(all) {
+    const today = new Date();
+    let list = all.filter((p) => birthdayOk(p, state.birthday, today) && ageOk(p, state.age));
+
+    if (state.mode === "dupes") {
+      let groups = findDuplicates(list);
+      if (state.term) groups = groups.filter((g) => g.list.some(matchesTerm));
+      state.client.groups = groups;
+      state.client.shownGroups = GROUP_PAGE;
+      renderGroups();
+      return;
+    }
+
+    list = list.filter(matchesTerm);
+    if (state.birthday !== "all") list.sort((a, b) => nextBirthday(a, today) - nextBirthday(b, today));
+    state.client.list = list;
+    state.client.shown = CLIENT_PAGE;
+    renderClientPage();
+  }
+
+  function renderClientPage() {
+    const { list, shown } = state.client;
+    results.innerHTML = list.length
+      ? `<ul class="pt-grid">${list.slice(0, shown).map(cardHtml).join("")}</ul>`
+      : emptyState();
+    moreBtn.hidden = list.length <= shown;
+    meta.textContent = `${list.length.toLocaleString()} patient${list.length === 1 ? "" : "s"} match`;
+  }
+
+  function renderGroups() {
+    const { groups, shownGroups } = state.client;
+    results.innerHTML = groups.length
+      ? groups.slice(0, shownGroups).map((g) => `
+          <section class="pt-dupe">
+            <p class="pt-dupe-head">
+              <span class="pt-dupe-tag">${escapeHtml(g.label)}</span>
+              <span>${escapeHtml(g.display)}</span>
+              <span class="pt-dupe-count">· ${g.list.length} records</span>
+            </p>
+            <ul class="pt-grid">${g.list.map(cardHtml).join("")}</ul>
+          </section>`).join("")
+      : `<div class="state"><strong>No duplicates found</strong>No patients share the same name and date of birth, email or phone.</div>`;
+    moreBtn.hidden = groups.length <= shownGroups;
+    meta.textContent = `${groups.length} possible duplicate group${groups.length === 1 ? "" : "s"}`;
+  }
+
+  /* ---------- rendering ---------- */
+  function renderCards(list, append) {
+    if (append) {
+      const grid = results.querySelector(".pt-grid");
+      if (grid) { grid.insertAdjacentHTML("beforeend", list.map(cardHtml).join("")); return; }
+    }
+    results.innerHTML = list.length ? `<ul class="pt-grid">${list.map(cardHtml).join("")}</ul>` : emptyState();
+  }
+
+  function emptyState() {
+    const tip = state.mode === "phone"
+      ? "Check the number, or try fewer digits."
+      : needsAll() ? "Try a different filter or search." : "Try the surname first, e.g. “Cooney”, or an exact patient ID.";
+    return `<div class="state"><strong>No patients found</strong>${tip}</div>`;
+  }
+
+  /* ---------- events ---------- */
   let debounce;
   input.addEventListener("input", () => {
     clearTimeout(debounce);
@@ -99,80 +280,143 @@ export function mountPatientList(container) {
       const term = input.value.trim();
       if (term === state.term) return;
       state.term = term;
-      load(true);
+      run();
     }, 300);
   });
 
-  // Name / Email toggle
-  modeBtns.forEach((btn) =>
-    btn.addEventListener("click", () => {
-      if (btn.dataset.mode === state.mode) return;
-      state.mode = btn.dataset.mode;
-      modeBtns.forEach((b) => {
-        const active = b === btn;
-        b.classList.toggle("active", active);
-        b.setAttribute("aria-pressed", String(active));
-      });
-      input.placeholder = PLACEHOLDERS[state.mode];
-      input.focus();
-      load(true);
-    })
-  );
+  tabs.forEach((btn) => btn.addEventListener("click", () => {
+    if (btn.dataset.mode === state.mode) return;
+    state.mode = btn.dataset.mode;
+    tabs.forEach((b) => {
+      const active = b === btn;
+      b.classList.toggle("active", active);
+      b.setAttribute("aria-pressed", String(active));
+    });
+    input.placeholder = PLACEHOLDERS[state.mode];
+    input.focus();
+    run();
+  }));
 
-  // Open a patient / retry after an error
-  list.addEventListener("click", (e) => {
-    if (e.target.closest("[data-action='retry']")) return load(true);
-    const card = e.target.closest(".patient-card");
-    if (card) location.hash = `#/patient/${encodeURIComponent(card.dataset.id)}`;
+  selects.forEach((sel) => sel.addEventListener("change", () => {
+    state[sel.dataset.filter] = sel.value;
+    sel.classList.toggle("active", sel.value !== "all");
+    run();
+  }));
+
+  moreBtn.addEventListener("click", () => {
+    if (!needsAll()) return serverMore();
+    if (state.mode === "dupes") { state.client.shownGroups += GROUP_PAGE; renderGroups(); }
+    else { state.client.shown += CLIENT_PAGE; renderClientPage(); }
   });
 
-  moreBtn.addEventListener("click", () => load(false));
+  refreshBtn.addEventListener("click", async () => {
+    refreshBtn.classList.add("is-loading");
+    refreshBtn.disabled = true;
+    clearPatientCache();
+    await Promise.allSettled([loadCount(), run()]);
+    refreshBtn.classList.remove("is-loading");
+    refreshBtn.disabled = false;
+  });
 
-  load(true);
+  q(".pt-new").addEventListener("click", () => showToast("New patient: coming soon"));
+
+  results.addEventListener("click", (e) => {
+    if (e.target.closest("[data-action='retry']")) run();
+  });
+
+  loadCount();
+  run();
 }
 
-/* ---------- templates ---------- */
+/* ===================== Filters ===================== */
 
-function patientCard(p) {
-  const details = [p.email, formatDob(p.dobKey) || p.dob]
-    .filter(Boolean)
-    .map(escapeHtml)
-    .join(" – ");
+function nextBirthday(p, today) {
+  const d = parseDateKey(p.dobKey);
+  if (!d) return Infinity;
+  const start = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  let b = new Date(today.getFullYear(), d.getMonth(), d.getDate());
+  if (b < start) b = new Date(today.getFullYear() + 1, d.getMonth(), d.getDate());
+  return b.getTime();
+}
 
+function birthdayOk(p, filter, today) {
+  if (filter === "all") return true;
+  const d = parseDateKey(p.dobKey);
+  if (!d) return false;
+  if (filter === "today") return d.getMonth() === today.getMonth() && d.getDate() === today.getDate();
+  if (filter === "month") return d.getMonth() === today.getMonth();
+  if (filter === "week") {
+    const start = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+    const days = (nextBirthday(p, today) - start) / 86_400_000;
+    return days >= 0 && days < 7;
+  }
+  return true;
+}
+
+function ageOk(p, filter) {
+  if (filter === "all") return true;
+  const [lo, hi] = filter.split("-").map(Number);
+  const age = calcAge(p.dobKey);
+  return age !== null && age >= lo && age <= hi;
+}
+
+function findDuplicates(list) {
+  const rules = [
+    ["Same name & date of birth", (p) => (p.nameKey && p.dobKey ? `${p.nameKey}|${p.dobKey}` : ""),
+      (p) => `${p.name} · ${formatDobLong(p.dobKey)}`],
+    ["Same email", (p) => String(p.email || "").trim().toLowerCase(), (p) => p.email],
+    ["Same phone", (p) => { const c = phoneCore(p.mobile); return c.length >= 8 ? c : ""; },
+      (p) => formatMobile(p.mobile)],
+  ];
+
+  const groups = [];
+  rules.forEach(([label, keyFn, displayFn]) => {
+    const map = new Map();
+    list.forEach((p) => {
+      const k = keyFn(p);
+      if (!k) return;
+      if (!map.has(k)) map.set(k, []);
+      map.get(k).push(p);
+    });
+    map.forEach((members) => {
+      if (members.length > 1) groups.push({ label, display: displayFn(members[0]), list: members });
+    });
+  });
+  return groups;
+}
+
+/* ===================== Templates ===================== */
+
+function cardHtml(p) {
+  const age = calcAge(p.dobKey);
+  const dob = p.dobKey ? `${formatDobLong(p.dobKey)}${age !== null ? ` · ${age} yrs` : ""}` : "";
   return `
     <li>
-      <button type="button" class="patient-card" data-id="${escapeHtml(p.id)}">
-        <span class="p-avatar" style="--h:${hueFromString(p.name)}">${escapeHtml(getInitials(p.name))}</span>
-        <span class="p-info">
-          <span class="p-name">${escapeHtml(p.name)}</span>
-          <span class="p-sub">${details || "No contact details"}</span>
-        </span>
-        ${ICON_CHEVRON}
-      </button>
+      <a class="pt-card" href="#/patient/${encodeURIComponent(p.id)}">
+        <div class="pt-card-top">
+          <span class="pt-avatar" style="--h:${hueFromString(p.name)}">${escapeHtml(getInitials(p.name))}</span>
+          <div class="pt-ident">
+            <span class="pt-name">${escapeHtml(p.name)}</span>
+            <span class="pt-id">ID ${escapeHtml(p.pttId || p.id)}</span>
+          </div>
+        </div>
+        <div class="pt-contact">
+          <span>${ICONS.mail}<span class="t">${p.email ? escapeHtml(p.email) : "<em>No email</em>"}</span></span>
+          <span>${ICONS.phone}<span class="t">${p.mobile ? escapeHtml(formatMobile(p.mobile)) : "<em>No mobile</em>"}</span></span>
+        </div>
+        <div class="pt-foot">${escapeHtml(dob)}</div>
+      </a>
     </li>`;
 }
 
-function skeletons(n) {
-  return Array.from({ length: n }, () => `<li class="skeleton"></li>`).join("");
-}
-
-function metaText(count, term) {
-  const s = count === 1 ? "" : "s";
-  return term ? `${count} result${s} for “${term}”` : `Showing ${count} patient${s}`;
-}
-
-function emptyState(term, mode) {
-  if (!term) {
-    return `<li class="state"><strong>No patients yet</strong>Patients added to the system will appear here.</li>`;
-  }
-  const tip = mode === "name" ? "Try the surname first, e.g. “Cooney”." : "Check the spelling of the email address.";
-  return `<li class="state"><strong>No patients found</strong>No match for “${escapeHtml(term)}”. ${tip}</li>`;
+function skeletonGrid(n) {
+  return `<ul class="pt-grid">${`<li class="skeleton pt-skel"></li>`.repeat(n)}</ul>`;
 }
 
 function errorState(err) {
   const msg = err && err.code === "permission-denied"
     ? "You don't have permission to view patients. Check the Firestore rules."
     : "Couldn't load patients. Check your connection and try again.";
-  return `<li class="state error"><strong>Something went wrong</strong>${msg}<br>
-    <button type="button" class="btn-ghost sm retry" data-action="retry">Try again</button></li>`;
+  return `<div class="state error"><strong>Something went wrong</strong>${msg}<br>
+    <button type="button" class="btn-ghost sm retry" data-action="retry">Try again</button></div>`;
 }
