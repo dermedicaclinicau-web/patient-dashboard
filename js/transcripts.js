@@ -42,8 +42,9 @@ function parseRecordDate(s) {
   return isNaN(t) ? null : new Date(t);
 }
 
-// Most recent treatment plan for a patient, or null
-export async function fetchLatestTreatmentPlan(patient) {
+// All of a patient's transcript records (matched by ID, then name), newest first.
+// Fetched ONCE per patient page and shared by Treatment plan + Social history.
+export async function fetchTranscriptRecords(patient) {
   const ids = [...new Set([patient.pttId, patient.id].filter(Boolean))];
   const names = nameVariants(patient);
   const col = collection(db, COLLECTION);
@@ -53,12 +54,11 @@ export async function fetchLatestTreatmentPlan(patient) {
     names.length ? getDocs(query(col, where(new FieldPath("Patient Name"), "in", names))) : null,
   ]);
 
-  // Merge results; remember which ones matched by ID
   const docs = new Map();
   if (idSnap) idSnap.forEach((d) => docs.set(d.id, { d, byId: true }));
   if (nameSnap) nameSnap.forEach((d) => { if (!docs.has(d.id)) docs.set(d.id, { d, byId: false }); });
 
-  const plans = [];
+  const records = [];
   for (const { d, byId } of docs.values()) {
     const data = d.data();
 
@@ -66,12 +66,9 @@ export async function fetchLatestTreatmentPlan(patient) {
     const pid = String(data["Patient ID"] || "").trim();
     if (!byId && pid && !ids.includes(pid)) continue;
 
-    const plan = extractSection(data["Gemini SOAP"], "TREATMENT PLAN");
-    if (!plan) continue;
-
-    plans.push({
+    records.push({
       id: d.id,
-      plan,
+      soap: String(data["Gemini SOAP"] || ""),
       date: parseRecordDate(data["Record Date and Time"]),
       dateText: String(data["Record Date and Time"] || ""),
       staff: String(data["Staff Name"] || ""),
@@ -80,6 +77,33 @@ export async function fetchLatestTreatmentPlan(patient) {
     });
   }
 
-  plans.sort((a, b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0));
-  return { latest: plans[0] || null, count: plans.length };
+  records.sort((a, b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0));
+  return records;
+}
+
+// Most recent record that has a "!!TREATMENT PLAN" section
+export function latestTreatmentPlan(records) {
+  for (const r of records) {
+    const plan = extractSection(r.soap, "TREATMENT PLAN");
+    if (plan) return { ...r, plan };
+  }
+  return null;
+}
+
+// Every record with a "!!SOCIAL HISTORY" section, newest first
+export function socialHistoryEntries(records) {
+  return records
+    .map((r) => ({ ...r, text: extractSection(r.soap, "SOCIAL HISTORY") }))
+    .filter((r) => r.text);
+}
+
+// Splits notes into bullet points:
+//  - one item per line
+//  - inline items like "…today. - Smoker: no. - Alcohol: socially"
+// Ordinary hyphens ("Filler - Lips") are NOT split.
+export function toBullets(text) {
+  return String(text || "")
+    .split(/\n|(?<=[.!?:;])\s+[-•*]\s+/)
+    .map((s) => s.replace(/^\s*[-•*]\s+/, "").trim())
+    .filter(Boolean);
 }

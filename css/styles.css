@@ -398,6 +398,15 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .plan-block.expanded .plan-clamp { display: block; -webkit-line-clamp: unset; overflow: visible; }
 .plan-meta { display: flex; align-items: center; gap: .5rem; font-size: .78rem; }
 
+
+.sh-list { display: flex; flex-direction: column; gap: .9rem; }
+.sh-entry + .sh-entry { padding-top: .9rem; border-top: 1px dashed var(--border); }
+.sh-head { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem; margin-bottom: .45rem;
+  font-size: .8rem; font-weight: 600; }
+.sh-date { color: var(--primary); }
+.sh-sep { color: var(--muted); font-weight: 400; }
+.sh-staff { color: var(--muted); font-weight: 400; }
+
 /* ---------- Responsive ---------- */
 @media (max-width: 860px) {
   .shell-body { flex-direction: column; }

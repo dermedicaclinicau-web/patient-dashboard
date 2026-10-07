@@ -1,7 +1,7 @@
 import { getPatient, updatePatient } from "./patients.js";
 import { fetchDayAppointments, fetchPreconsult } from "./appointments.js";
 import { fetchOpenReminders } from "./reminders.js";
-import { fetchLatestTreatmentPlan } from "./transcripts.js";
+import { fetchTranscriptRecords, latestTreatmentPlan, socialHistoryEntries, toBullets } from "./transcripts.js";
 import {
   escapeHtml, getInitials, hueFromString, formatDobLong, calcAge,
   formatMobile, toTelHref, toDateKey, showToast, formatUpdated,
@@ -28,8 +28,8 @@ const PRECONSULT_SECTIONS = [
   { key: "today", today: true },
   { key: "personal-notes", title: "Personal notes", icon: "pin", pill: "No record",
     empty: "No personal notes on record.", action: ["+ Add", "Add personal note"] },
-  { key: "social-history", title: "Social history", icon: "user", pill: "None recorded",
-    empty: "No social history recorded." },
+  { key: "social-history", title: "Social history", icon: "user", custom: true,
+    remember: false }, // always starts collapsed
   { key: "past-appts", title: "Past appointments", icon: "clock", field: "other", unit: "visit|visits", tone: "green" },
   { key: "recent-visits", visits: true },
   { key: "future-visits", title: "Future visits", icon: "calendar", field: "futureVisits", unit: "visit|visits", tone: "purple" },
@@ -250,33 +250,48 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   loadToday();
   loadPreconsultData();
   loadReminders();
-  loadTreatmentPlan();
+  loadTranscriptSections();
 
-  // Most recent "!!TREATMENT PLAN" from appointment_transcripts (Gemini SOAP)
-  async function loadTreatmentPlan() {
-    const card = root.querySelector('details[data-key="treatment-plan"]');
-    if (!card) return;
-    const hint = card.querySelector(".hint");
-    const body = card.querySelector(".sub-body");
+  // Treatment plan + Social history, both from appointment_transcripts (fetched once)
+  async function loadTranscriptSections() {
+    const planCard = root.querySelector('details[data-key="treatment-plan"]');
+    const socialCard = root.querySelector('details[data-key="social-history"]');
+    const cards = [planCard, socialCard].filter(Boolean);
+    if (!cards.length) return;
 
     try {
-      const { latest } = await fetchLatestTreatmentPlan(patient);
+      const records = await fetchTranscriptRecords(patient);
       if (!root.isConnected) return;
-      hint.textContent = latest ? "On file" : "No record";
-      body.innerHTML = latest
-        ? treatmentPlanHtml(latest)
-        : `<p class="empty-note">No treatment plan on record.</p>`;
-      card.classList.toggle("is-empty", !latest);
+
+      if (planCard) {
+        const latest = latestTreatmentPlan(records);
+        fillCard(planCard,
+          latest ? "On file" : "No record",
+          latest ? treatmentPlanHtml(latest) : `<p class="empty-note">No treatment plan on record.</p>`,
+          !latest);
+      }
+
+      if (socialCard) {
+        const entries = socialHistoryEntries(records);
+        fillCard(socialCard,
+          entries.length ? `${entries.length} ${entries.length === 1 ? "entry" : "entries"}` : "None recorded",
+          entries.length ? socialHistoryHtml(entries) : `<p class="empty-note">No social history recorded.</p>`,
+          !entries.length);
+      }
     } catch (err) {
       if (!root.isConnected) return;
-      console.error("Treatment plan failed:", err);
-      hint.textContent = "—";
-      body.innerHTML = `<p class="empty-note error">${
-        err.code === "permission-denied"
-          ? "Treatment plans aren't accessible. Check the Firestore rules."
-          : "Couldn't load the treatment plan."
-      }</p>`;
+      console.error("Transcript sections failed:", err);
+      const msg = err.code === "permission-denied"
+        ? "Consultation records aren't accessible. Check the Firestore rules."
+        : "Couldn't load consultation records.";
+      cards.forEach((c) => fillCard(c, "—", `<p class="empty-note error">${msg}</p>`, false));
     }
+  }
+
+  function fillCard(card, pill, html, isEmpty) {
+    card.querySelector(".hint").textContent = pill;
+    card.querySelector(".sub-body").innerHTML = html;
+    card.classList.toggle("is-empty", isEmpty);
   }
 
   // Refresh button: reload all pre-consultation data in place
@@ -284,7 +299,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     if (btn.disabled) return;
     btn.disabled = true;
     btn.classList.add("is-loading");
-    await Promise.allSettled([loadToday(), loadPreconsultData(), loadReminders(), loadTreatmentPlan()]);
+    await Promise.allSettled([loadToday(), loadPreconsultData(), loadReminders(), loadTranscriptSections()]);
     if (btn.isConnected) {
       btn.disabled = false;
       btn.classList.remove("is-loading");
@@ -627,4 +642,29 @@ function treatmentPlanHtml(p) {
         ${p.matchedByName ? `<span class="task-flag neutral">Matched by name</span>` : ""}
       </div>
     </div>`;
+}
+
+/* ===================== Social history ===================== */
+
+// "Aug 13, 2026"
+function shortDate(r) {
+  if (!r.date) return r.dateText || "Undated";
+  return `${r.date.toLocaleString("en-US", { month: "short" })} ${r.date.getDate()}, ${r.date.getFullYear()}`;
+}
+
+function socialHistoryHtml(entries) {
+  return `<div class="sh-list">${entries.map((e) => {
+    const bullets = toBullets(e.text);
+    return `
+      <div class="sh-entry">
+        <p class="sh-head">
+          <span class="sh-date">${escapeHtml(shortDate(e))}</span>
+          <span class="sh-sep">—</span>
+          <span>Social history</span>
+          ${e.staff ? `<span class="sh-staff">· ${escapeHtml(e.staff)}</span>` : ""}
+          ${e.matchedByName ? `<span class="task-flag neutral">Matched by name</span>` : ""}
+        </p>
+        <ul class="pc-list">${bullets.map((b) => `<li>${escapeHtml(b)}</li>`).join("")}</ul>
+      </div>`;
+  }).join("")}</div>`;
 }
