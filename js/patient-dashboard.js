@@ -1,8 +1,8 @@
 import { getPatient, updatePatient } from "./patients.js";
-import { fetchDayAppointments } from "./appointments.js";
+import { fetchDayAppointments, fetchPreconsult } from "./appointments.js";
 import {
   escapeHtml, getInitials, hueFromString, formatDobLong, calcAge,
-  formatMobile, toTelHref, toDateKey, showToast,
+  formatMobile, toTelHref, toDateKey, showToast, formatUpdated,
 } from "./utils.js";
 
 /* ===================== Config ===================== */
@@ -17,24 +17,27 @@ const DOC_ACTIONS = [
   ["Personal note", "lock"],
 ];
 
+// "field" = connected to a pcn_results column. No field = not connected yet ("Soon").
 const PRECONSULT_SECTIONS = [
+  { key: "overdue", title: "Overdue treatments", field: "overdue", alert: true },
   { key: "reminders", title: "Reminders", empty: "No reminders yet." },
   { key: "personal-notes", title: "Personal notes", empty: "No personal notes yet." },
   { key: "social-history", title: "Social history", empty: "No social history recorded." },
   { key: "past-appts", title: "Past appointments", empty: "No past appointments to show." },
-  { key: "future-visits", title: "Future visits", empty: "No future visits to show." },
-  { key: "packages", title: "Customer packages", empty: "No packages to show." },
-  { key: "skin-script", title: "Skin script protocol", empty: "No protocol recorded." },
+  { key: "future-visits", title: "Future visits", field: "futureVisits" },
+  { key: "packages", title: "Customer packages", field: "packages" },
+  { key: "skin-script", title: "Skin script protocol", field: "skinScriptDate" },
   { key: "treatment-plan", title: "Treatment plan", empty: "No treatment plan recorded." },
 ];
 
 // Each inner array is one row; two items sit side by side
 const VISIT_CATEGORIES = [
-  ["Wrinkle Relaxer", "Filler / Radiesse"],
-  ["HydraRepair / Skin Remodelling / Collagen Growth", "Other Injectables"],
-  ["RestoraGlow / RF / DermaGlow / Skin Needling", "Collagen Activator"],
-  ["Laser / OPL / Peel", "Firm / Ulthera / eST"],
-  ["Body Sculpting"],
+  [{ title: "Wrinkle Relaxer", field: "wrinkleRelaxer" }, { title: "Filler / Radiesse", field: "fillerRadiesse" }],
+  [{ title: "HydraRepair / Skin Remodelling / Collagen Growth", field: "hydraRepair" }, { title: "Other Injectables", field: "otherInjectables" }],
+  [{ title: "RestoraGlow / RF / DermaGlow / Skin Needling", field: "restoraGlow" }, { title: "Collagen Activator", field: "collagenActivator" }],
+  [{ title: "Laser / OPL / Peel", field: "laserOplPeel" }, { title: "Firm / Ulthera / eST", field: "firmUlthera" }],
+  [{ title: "Body Sculpting", field: "bodySculpting" }],
+  [{ title: "Other", field: "other" }],
 ];
 
 /* ===================== Icons ===================== */
@@ -91,6 +94,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
 
   let patient = null;
   let todayAppts = [];
+  let preData = null;
   let dialog, form, formError, saveBtn;
 
   root.addEventListener("click", (e) => {
@@ -153,7 +157,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   saveBtn = dialog.querySelector("[type='submit']");
 
   function renderTop() {
-    bar.innerHTML = barHtml(patient, todayAppts);
+    bar.innerHTML = barHtml(patient, todayAppts, preData);
   }
 
   function openEdit() {
@@ -208,19 +212,40 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
 
   renderTop();
 
+  // Load both in parallel
+  loadToday();
+  loadPreconsultData();
+
   // Today's appointment: fills the highlight block AND the "Appt today" chip
-  try {
-    todayAppts = await loadTodayAppts(patient);
-    if (!root.isConnected) return;
-    todaySlot.innerHTML = todayHtml(todayAppts);
-    renderTop();
-  } catch (err) {
-    if (!root.isConnected) return;
-    console.error("Today's appointment failed:", err);
-    const msg = err.code === "UNAUTHORIZED"
-      ? "Session expired. Log out and back in to see today's appointments."
-      : "Couldn't load today's appointments.";
-    todaySlot.innerHTML = `<div class="today-empty error">${ICONS.calendar}<span>${msg}</span></div>`;
+  async function loadToday() {
+    try {
+      todayAppts = await loadTodayAppts(patient);
+      if (!root.isConnected) return;
+      todaySlot.innerHTML = todayHtml(todayAppts);
+      renderTop();
+    } catch (err) {
+      if (!root.isConnected) return;
+      console.error("Today's appointment failed:", err);
+      const msg = err.code === "UNAUTHORIZED"
+        ? "Session expired. Log out and back in to see today's appointments."
+        : "Couldn't load today's appointments.";
+      todaySlot.innerHTML = `<div class="today-empty error">${ICONS.calendar}<span>${msg}</span></div>`;
+    }
+  }
+
+  // Pre-consultation data from pcn_results
+  async function loadPreconsultData() {
+    try {
+      const res = await fetchPreconsult(patient);
+      if (!root.isConnected) return;
+      preData = res.found ? res.data : null;
+      fillPreconsult(root, preData, res.lastUpdated);
+      renderTop();
+    } catch (err) {
+      if (!root.isConnected) return;
+      console.error("Pre-consultation load failed:", err);
+      fillPreconsultError(root, err);
+    }
   }
 }
 
@@ -236,15 +261,15 @@ function roundLink(href, icon, label, missingMsg) {
     : `<span class="round-btn is-disabled" aria-disabled="true" title="${missingMsg}">${ICONS[icon]}</span>`;
 }
 
-function barHtml(p, today = []) {
+function barHtml(p, today = [], pre = null) {
   const age = calcAge(p.dobKey);
   const dobText = formatDobLong(p.dobKey) || p.dob;
   const tel = toTelHref(p.mobile);
 
   const chips = [
     p.pttId && `<span class="chip">ID ${escapeHtml(p.pttId)}</span>`,
-    age !== null && `<span class="chip">${age} yrs</span>`,
     today.length && `<span class="chip chip-today">Appt today ${escapeHtml(today[0].time || "")}</span>`,
+    pre && pre.overdue && `<span class="chip chip-alert">Overdue treatments</span>`,
   ].filter(Boolean).join("");
 
   return `
@@ -264,7 +289,7 @@ function barHtml(p, today = []) {
       </div>
     </div>
     <dl class="pb-details">
-      <div><dt>Date of birth</dt><dd>${show(dobText)}</dd></div>
+      <div><dt>Date of birth</dt><dd>${show(dobText, `${escapeHtml(dobText)}${age !== null ? ` <span class="pb-age">(${age} yrs)</span>` : ""}`)}</dd></div>
       <div><dt>Mobile</dt><dd>${show(p.mobile, escapeHtml(formatMobile(p.mobile)))}</dd></div>
       <div><dt>Email</dt><dd>${show(p.email)}</dd></div>
       <div><dt>Address</dt><dd>${show(p.address)}</dd></div>
