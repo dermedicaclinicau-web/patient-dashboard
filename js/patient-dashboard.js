@@ -1,8 +1,10 @@
 import { getPatient, updatePatient } from "./patients.js";
 import { fetchDayAppointments, fetchPreconsult } from "./appointments.js";
+import { fetchOpenReminders } from "./reminders.js";
 import {
   escapeHtml, getInitials, hueFromString, formatDobLong, calcAge,
   formatMobile, toTelHref, toDateKey, showToast, formatUpdated,
+  parseDateKey, formatShortDate,
 } from "./utils.js";
 
 /* ===================== Config ===================== */
@@ -20,7 +22,7 @@ const DOC_ACTIONS = [
 // "field" = connected to a pcn_results column. No field = not connected yet ("Soon").
 const PRECONSULT_SECTIONS = [
   { key: "overdue", title: "Overdue treatments", field: "overdue", alert: true },
-  { key: "reminders", title: "Reminders", empty: "No reminders yet." },
+  { key: "reminders", title: "Reminders", custom: true },
   { key: "personal-notes", title: "Personal notes", empty: "No personal notes yet." },
   { key: "social-history", title: "Social history", empty: "No social history recorded." },
   { key: "past-appts", title: "Past appointments", empty: "No past appointments to show." },
@@ -212,9 +214,39 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
 
   renderTop();
 
-  // Load both in parallel
+  // Load everything in parallel
   loadToday();
   loadPreconsultData();
+  loadReminders();
+
+  // Reminders from Firestore 'staff-task-list' (open/not completed only)
+  async function loadReminders() {
+    const card = root.querySelector('details[data-key="reminders"]');
+    if (!card) return;
+    const hint = card.querySelector(".hint");
+    const body = card.querySelector(".sub-body");
+
+    try {
+      const tasks = await fetchOpenReminders(patient);
+      if (!root.isConnected) return;
+
+      hint.textContent = tasks.length ? `${tasks.length} pending` : "None";
+      body.innerHTML = tasks.length
+        ? remindersHtml(tasks)
+        : `<p class="empty-note">No pending reminders for this patient.</p>`;
+      card.classList.toggle("is-empty", !tasks.length);
+      card.open = tasks.length > 0; // open when there's something to see, collapsed when empty
+    } catch (err) {
+      if (!root.isConnected) return;
+      console.error("Reminders failed:", err);
+      hint.textContent = "—";
+      body.innerHTML = `<p class="empty-note error">${
+        err.code === "permission-denied"
+          ? "Reminders aren't accessible. Check the Firestore rules."
+          : "Couldn't load reminders."
+      }</p>`;
+    }
+  }
 
   // Today's appointment: fills the highlight block AND the "Appt today" chip
   async function loadToday() {
@@ -311,11 +343,12 @@ function preConsultHtml() {
   const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-");
   const loading = `<div class="skeleton xs"></div>`;
 
-  const sections = PRECONSULT_SECTIONS.map((s) =>
-    s.field
+  const sections = PRECONSULT_SECTIONS.map((s) => {
+    if (s.custom) return subCard(s.key, s.title, loading, { hint: "…" }); // filled by its own loader
+    return s.field
       ? subCard(s.key, s.title, loading, { hint: "…", field: s.field, alert: s.alert })
-      : subCard(s.key, s.title, `<p class="empty-note">${escapeHtml(s.empty)}</p>`, { hint: "Soon" })
-  ).join("");
+      : subCard(s.key, s.title, `<p class="empty-note">${escapeHtml(s.empty)}</p>`, { hint: "Soon" });
+  }).join("");
 
   const visits = VISIT_CATEGORIES.flatMap((row) =>
     row.map((c) =>
@@ -440,4 +473,32 @@ function fillPreconsultError(root, err) {
     d.querySelector(".hint").textContent = "—";
     d.querySelector(".sub-body").innerHTML = `<p class="empty-note error">${msg}</p>`;
   });
+}
+
+/* ===================== Reminders ===================== */
+
+function remindersHtml(tasks) {
+  const today = toDateKey();
+
+  return `<ul class="task-list">${tasks.map((t) => {
+    const dueKey = String(t.dueDate || "").trim();
+    const due = parseDateKey(dueKey);
+    const overdue = !!due && dueKey < today;
+    const status = String(t.status || "").trim();
+
+    const meta = [
+      due ? `Due ${formatShortDate(due)}` : (dueKey ? `Due ${dueKey}` : "No due date"),
+      t.createdBy ? `Added by ${t.createdBy}` : "",
+    ].filter(Boolean).map(escapeHtml).join(" · ");
+
+    const flags =
+      (overdue ? `<span class="task-flag">Overdue</span>` : "") +
+      (status && status.toLowerCase() !== "open" ? `<span class="task-flag neutral">${escapeHtml(status)}</span>` : "");
+
+    return `
+      <li class="task${overdue ? " is-overdue" : ""}">
+        <span class="task-text">${escapeHtml(t.taskText || "Untitled reminder")}</span>
+        <span class="task-meta">${meta}${flags}</span>
+      </li>`;
+  }).join("")}</ul>`;
 }
