@@ -296,9 +296,9 @@ function barHtml(p, today = [], pre = null) {
     </dl>`;
 }
 
-function subCard(key, title, body, { hint = "", open = false, extraClass = "" } = {}) {
+function subCard(key, title, body, { hint = "", open = false, extraClass = "", field = "", alert = false } = {}) {
   return `
-    <details class="sub-card ${extraClass}" data-key="${escapeHtml(key)}" ${isOpen(key, open) ? "open" : ""}>
+    <details class="sub-card ${extraClass}" data-key="${escapeHtml(key)}"${field ? ` data-field="${escapeHtml(field)}"` : ""}${alert ? ` data-alert="true"` : ""} ${isOpen(key, open) ? "open" : ""}>
       <summary>
         <span>${escapeHtml(title)}</span>
         <span class="sum-right">${hint ? `<span class="hint">${escapeHtml(hint)}</span>` : ""}${ICONS.chev}</span>
@@ -309,15 +309,19 @@ function subCard(key, title, body, { hint = "", open = false, extraClass = "" } 
 
 function preConsultHtml() {
   const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  const loading = `<div class="skeleton xs"></div>`;
 
   const sections = PRECONSULT_SECTIONS.map((s) =>
-    subCard(s.key, s.title, `<p class="empty-note">${escapeHtml(s.empty)}</p>`, { hint: "Soon" })
+    s.field
+      ? subCard(s.key, s.title, loading, { hint: "…", field: s.field, alert: s.alert })
+      : subCard(s.key, s.title, `<p class="empty-note">${escapeHtml(s.empty)}</p>`, { hint: "Soon" })
   ).join("");
 
   const visits = VISIT_CATEGORIES.flatMap((row) =>
-    row.map((cat) =>
-      subCard(`visit-${slug(cat)}`, cat, `<p class="empty-note">No recent visits in this category.</p>`, {
-        hint: "Soon",
+    row.map((c) =>
+      subCard(`visit-${slug(c.title)}`, c.title, loading, {
+        hint: "…",
+        field: c.field,
         extraClass: row.length === 1 ? "full" : "",
       })
     )
@@ -325,7 +329,10 @@ function preConsultHtml() {
 
   return `
     <details class="section-card" data-key="preconsult" ${isOpen("preconsult", true) ? "open" : ""}>
-      <summary><span class="section-title serif">Pre-consultation</span>${ICONS.chev}</summary>
+      <summary>
+        <span class="pc-head"><span class="section-title serif">Pre-consultation</span><span class="pc-updated"></span></span>
+        ${ICONS.chev}
+      </summary>
       <div class="section-body">
         <div class="today-slot"><div class="skeleton sm"></div></div>
         <div class="pc-grid">${sections}</div>
@@ -389,4 +396,48 @@ async function loadTodayAppts(patient) {
       ? ids.includes(a.patientId.toLowerCase())
       : (a.patientName || "").toLowerCase() === name) // name fallback only when the row has no ID
     .sort((a, b) => a.sortMinutes - b.sortMinutes);
+}
+
+/* ===================== Pre-consultation data ===================== */
+
+// A cell with several entries on separate lines becomes a list
+function toLines(value) {
+  return String(value || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+}
+
+// Short single values (like a date) show in the pill; otherwise a count
+function hintFor(lines) {
+  if (!lines.length) return "None";
+  if (lines.length === 1 && lines[0].length <= 22) return lines[0];
+  return `${lines.length} ${lines.length === 1 ? "entry" : "entries"}`;
+}
+
+function valueHtml(lines) {
+  if (lines.length === 1) return `<p class="pc-value">${escapeHtml(lines[0])}</p>`;
+  return `<ul class="pc-list">${lines.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul>`;
+}
+
+function fillPreconsult(root, data, lastUpdated) {
+  const updated = root.querySelector(".pc-updated");
+  if (updated) updated.textContent = lastUpdated ? `Updated ${formatUpdated(new Date(lastUpdated))}` : "";
+
+  root.querySelectorAll("details[data-field]").forEach((d) => {
+    const lines = toLines(data ? data[d.dataset.field] : "");
+    d.querySelector(".hint").textContent = hintFor(lines);
+    d.querySelector(".sub-body").innerHTML = lines.length
+      ? valueHtml(lines)
+      : `<p class="empty-note">${data ? "Nothing recorded." : "No pre-consultation record found for this patient."}</p>`;
+    d.classList.toggle("is-empty", !lines.length);
+    d.classList.toggle("is-alert", d.dataset.alert === "true" && lines.length > 0);
+  });
+}
+
+function fillPreconsultError(root, err) {
+  const msg = err.code === "UNAUTHORIZED"
+    ? "Session expired. Log out and back in to load this."
+    : "Couldn't load pre-consultation data.";
+  root.querySelectorAll("details[data-field]").forEach((d) => {
+    d.querySelector(".hint").textContent = "—";
+    d.querySelector(".sub-body").innerHTML = `<p class="empty-note error">${msg}</p>`;
+  });
 }
