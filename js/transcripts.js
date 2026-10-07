@@ -42,6 +42,16 @@ export function extractAny(soap, headings) {
   return "";
 }
 
+
+// "January 16, 2026" / "January 16, 2026 10:30 AM" / "16/01/2026" / "2026-05-05" / ISO timestamps
+export function parseRecordDate(s) {
+  const str = String(s || "").trim();
+  const dmy = /^(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(str); // Australian day/month/year
+  if (dmy) return new Date(Number(dmy[3]), Number(dmy[2]) - 1, Number(dmy[1]));
+  const t = Date.parse(str.replace(/\s+at\s+/i, " "));
+  return isNaN(t) ? null : new Date(t);
+}
+
 // All of a patient's transcript records (matched by ID, then name), newest first.
 // Fetched ONCE per patient page and shared by Treatment plan + Social history.
 export async function fetchTranscriptRecords(patient) {
