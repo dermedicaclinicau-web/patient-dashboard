@@ -1,4 +1,5 @@
-import { auth, LOGIN_ENDPOINT } from "./firebase-config.js";
+import { auth, db, LOGIN_ENDPOINT } from "./firebase-config.js";
+import { doc, updateDoc, FieldPath } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   signInWithCustomToken,
   signOut,
@@ -34,7 +35,10 @@ export async function loginWithPin(pin) {
   await signInWithCustomToken(auth, data.token);
 }
 
-export const logout = () => signOut(auth);
+export function logout() {
+  sessionStorage.clear();
+  return signOut(auth);
+}
 
 // Calls back with a staff profile (from the token's custom claims), or null if logged out
 export function watchAuth(callback) {
@@ -44,7 +48,7 @@ export function watchAuth(callback) {
       const { claims } = await user.getIdTokenResult();
       callback({
         uid: user.uid,
-        name: claims.staffName || "Staff",
+        name: sessionStorage.getItem(`staffName:${user.uid}`) || claims.staffName || "Staff",
         role: claims.staffRole || "",
         photo: claims.staffPhoto || "",
         email: claims.staffEmail || "",
@@ -54,4 +58,19 @@ export function watchAuth(callback) {
       await signOut(auth);
     }
   });
+}
+
+// Updates ONLY this staff member's 'Staff Name' (enforced by Firestore rules)
+export async function updateStaffName(newName) {
+  const user = auth.currentUser;
+  if (!user) throw new Error("You're not signed in.");
+
+  const name = String(newName || "").trim().replace(/\s+/g, " ");
+  if (!name) throw new Error("Please enter a name.");
+  if (name.length > 60) throw new Error("Name must be 60 characters or fewer.");
+
+  // FieldPath is needed because the field name contains a space
+  await updateDoc(doc(db, "staff_access", user.uid), new FieldPath("Staff Name"), name);
+  sessionStorage.setItem(`staffName:${user.uid}`, name);
+  return name;
 }

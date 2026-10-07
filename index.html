@@ -43,57 +43,61 @@
   </section>
 
   <!-- ============ DASHBOARD ============ -->
-  <div id="dashboard-view" hidden>
+  <div id="dashboard-view" class="app-shell" hidden>
+
     <header class="topbar">
-      <h1>Dermedica Portal</h1>
-      <div class="staff-chip">
+      <div class="brand-inline">
+        <div class="brand-mark sm">D</div>
+        <span class="brand-name">Dermedica</span>
+      </div>
+
+      <div class="topbar-right">
+        <div class="greeting">
+          <span class="greeting-text">Welcome, <strong id="staff-name"></strong></span>
+          <span class="greeting-role" id="staff-role"></span>
+        </div>
         <div class="avatar">
           <span id="staff-initials"></span>
           <img id="staff-photo" alt="" referrerpolicy="no-referrer" hidden />
         </div>
-        <div class="staff-info">
-          <strong id="staff-name"></strong>
-          <span id="staff-role"></span>
-        </div>
-        <button id="logout-btn" class="logout-btn">Log out</button>
+        <button id="edit-profile-btn" class="icon-btn" title="Edit profile" aria-label="Edit profile">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+        </button>
+        <button id="logout-btn" class="btn-ghost sm">Log out</button>
       </div>
     </header>
 
-    <main class="container">
-      <div id="error-banner" class="error" hidden>
-        Couldn't load appointments. Please refresh the page.
-      </div>
-
-      <p class="patient-line">Patient: <strong id="patient-name">…</strong></p>
-
-      <section class="summary">
-        <div class="card">
-          <span class="label">Upcoming</span>
-          <span class="value" id="upcoming-count">–</span>
-        </div>
-        <div class="card">
-          <span class="label">Past visits</span>
-          <span class="value" id="past-count">–</span>
-        </div>
-        <div class="card wide">
-          <span class="label">Next appointment</span>
-          <span class="value small" id="next-appointment">–</span>
-        </div>
-      </section>
-
-      <nav class="tabs" role="tablist">
-        <button class="tab active" role="tab" aria-selected="true" data-target="upcoming-panel">Upcoming</button>
-        <button class="tab" role="tab" aria-selected="false" data-target="past-panel">History</button>
+    <div class="shell-body">
+      <nav class="sidebar" aria-label="Main">
+        <a href="#/patients" class="nav-item" data-page="patients">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span>Patient List</span>
+        </a>
+        <a href="#/calendar" class="nav-item" data-page="calendar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+          <span>Calendar</span>
+        </a>
       </nav>
 
-      <section id="upcoming-panel" class="panel">
-        <ul id="upcoming-list" class="appt-list"><li class="empty">Loading…</li></ul>
-      </section>
-      <section id="past-panel" class="panel" hidden>
-        <ul id="past-list" class="appt-list"><li class="empty">Loading…</li></ul>
-      </section>
-    </main>
-  </div>
+      <main id="content" class="content"></main>
+    </div>
+
+    <dialog id="profile-dialog" class="dialog">
+      <form id="profile-form" class="dialog-body">
+        <h2>Edit profile</h2>
+        <label class="field">
+          <span>Display name</span>
+          <input id="profile-name" maxlength="60" required autocomplete="name" />
+        </label>
+        <p id="profile-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button type="button" id="profile-cancel" class="btn-ghost">Cancel</button>
+          <button type="submit" id="profile-save" class="btn-primary">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+  </div> <!-- end dashboard-view -->
 
   <script type="module" src="./js/app.js"></script>
 </body>

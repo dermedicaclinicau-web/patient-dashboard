@@ -1,5 +1,6 @@
-import { getCurrentPatient, getAppointments } from "./data.js";
-import { loginWithPin, logout, watchAuth } from "./auth.js";
+import { loginWithPin, logout, watchAuth, updateStaffName } from "./auth.js";
+import { mountPatientList } from "./patient-list.js";
+import { escapeHtml, getInitials } from "./utils.js";
 
 const PIN_LENGTH = 4; // change to 6 if you move to 6-digit PINs
 
@@ -16,22 +17,26 @@ const els = {
   pinDots: $("pin-dots"),
   loginError: $("login-error"),
   keypad: $("keypad"),
-  // header
+  // top bar
   staffName: $("staff-name"),
   staffRole: $("staff-role"),
   staffPhoto: $("staff-photo"),
   staffInitials: $("staff-initials"),
   logoutBtn: $("logout-btn"),
-  // dashboard
-  patientName: $("patient-name"),
-  upcomingList: $("upcoming-list"),
-  pastList: $("past-list"),
-  upcomingCount: $("upcoming-count"),
-  pastCount: $("past-count"),
-  nextAppt: $("next-appointment"),
-  errorBanner: $("error-banner"),
-  tabs: document.querySelectorAll(".tab"),
+  editProfileBtn: $("edit-profile-btn"),
+  // layout
+  content: $("content"),
+  navItems: document.querySelectorAll(".nav-item"),
+  // profile dialog
+  profileDialog: $("profile-dialog"),
+  profileForm: $("profile-form"),
+  profileName: $("profile-name"),
+  profileError: $("profile-error"),
+  profileCancel: $("profile-cancel"),
+  profileSave: $("profile-save"),
 };
+
+let currentStaff = null;
 
 function showView(name) {
   for (const [key, el] of Object.entries(views)) el.hidden = key !== name;
@@ -59,7 +64,6 @@ function handleKey(key) {
   if (key === "back") pin = pin.slice(0, -1);
   else if (key === "clear") pin = "";
   else if (/^\d$/.test(key) && pin.length < PIN_LENGTH) pin += key;
-
   els.loginError.textContent = "";
   renderDots();
   if (pin.length === PIN_LENGTH) submitPin();
@@ -70,7 +74,7 @@ async function submitPin() {
   renderDots("checking");
   try {
     await loginWithPin(pin);
-    pin = ""; // watchAuth switches to the dashboard
+    pin = "";
   } catch (err) {
     pin = "";
     els.loginError.textContent = err.message;
@@ -92,132 +96,116 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "Escape") handleKey("clear");
 });
 
-/* ===================== STAFF HEADER ===================== */
-
-function getInitials(name) {
-  return name.trim().split(/\s+/).map((p) => p[0]).join("").slice(0, 2).toUpperCase();
-}
+/* ===================== TOP BAR ===================== */
 
 function renderStaff(staff) {
   els.staffName.textContent = staff.name;
   els.staffRole.textContent = staff.role;
   els.staffInitials.textContent = getInitials(staff.name);
-  if (staff.photo) {
-    els.staffPhoto.hidden = false;
-    els.staffPhoto.src = staff.photo;
-  } else {
-    els.staffPhoto.hidden = true;
-  }
+  els.staffPhoto.hidden = !staff.photo;
+  if (staff.photo) els.staffPhoto.src = staff.photo;
 }
 
-// If the photo URL is broken, fall back to initials
 els.staffPhoto.addEventListener("error", () => { els.staffPhoto.hidden = true; });
-
 els.logoutBtn.addEventListener("click", () => logout());
 
-/* ===================== DASHBOARD ===================== */
+/* ===================== EDIT PROFILE ===================== */
 
-const dateFmt = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
-const timeFmt = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
-const monthFmt = new Intl.DateTimeFormat(undefined, { month: "short" });
+els.editProfileBtn.addEventListener("click", () => {
+  els.profileName.value = currentStaff ? currentStaff.name : "";
+  els.profileError.textContent = "";
+  els.profileDialog.showModal();
+  els.profileName.select();
+});
 
-function escapeHtml(value = "") {
-  return String(value).replace(/[&<>"']/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
-  );
-}
+els.profileCancel.addEventListener("click", () => els.profileDialog.close());
 
-function splitAppointments(appts, now = new Date()) {
-  const isUpcoming = (a) => a.dateTime >= now && a.status === "scheduled";
-  return {
-    upcoming: appts.filter(isUpcoming).sort((a, b) => a.dateTime - b.dateTime),
-    past: appts.filter((a) => !isUpcoming(a)).sort((a, b) => b.dateTime - a.dateTime),
-  };
-}
-
-function appointmentCard(a) {
-  return `
-    <li class="appt-card">
-      <div class="appt-date">
-        <span class="day">${a.dateTime.getDate()}</span>
-        <span class="month">${monthFmt.format(a.dateTime)}</span>
-      </div>
-      <div class="appt-body">
-        <h3>${escapeHtml(a.department)}</h3>
-        <p>${escapeHtml(a.doctor)} · ${timeFmt.format(a.dateTime)}</p>
-        ${a.notes ? `<p class="notes">${escapeHtml(a.notes)}</p>` : ""}
-      </div>
-      <span class="status status-${escapeHtml(a.status)}">${escapeHtml(a.status)}</span>
-    </li>`;
-}
-
-function renderList(listEl, appts, emptyMsg) {
-  listEl.innerHTML = appts.length
-    ? appts.map(appointmentCard).join("")
-    : `<li class="empty">${emptyMsg}</li>`;
-}
-
-function setupTabs() {
-  els.tabs.forEach((tab) =>
-    tab.addEventListener("click", () => {
-      els.tabs.forEach((t) => {
-        const active = t === tab;
-        t.classList.toggle("active", active);
-        t.setAttribute("aria-selected", String(active));
-        $(t.dataset.target).hidden = !active;
-      });
-    })
-  );
-}
-
-// Guards against a slow load finishing AFTER logout and re-filling the page
-let loadSeq = 0;
-
-function resetDashboard() {
-  loadSeq++;
-  els.patientName.textContent = "…";
-  els.upcomingCount.textContent = els.pastCount.textContent = els.nextAppt.textContent = "–";
-  els.upcomingList.innerHTML = els.pastList.innerHTML = '<li class="empty">Loading…</li>';
-  els.errorBanner.hidden = true;
-}
-
-async function loadDashboard() {
-  const seq = ++loadSeq;
+els.profileForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  els.profileSave.disabled = true;
+  els.profileSave.textContent = "Saving…";
+  els.profileError.textContent = "";
   try {
-    const patient = await getCurrentPatient();
-    if (seq !== loadSeq) return;
-    els.patientName.textContent = patient.name;
-
-    const appts = await getAppointments(patient.id);
-    if (seq !== loadSeq) return;
-
-    const { upcoming, past } = splitAppointments(appts);
-    els.upcomingCount.textContent = upcoming.length;
-    els.pastCount.textContent = past.length;
-    els.nextAppt.textContent = upcoming[0]
-      ? `${dateFmt.format(upcoming[0].dateTime)}, ${timeFmt.format(upcoming[0].dateTime)}`
-      : "None scheduled";
-
-    renderList(els.upcomingList, upcoming, "No upcoming appointments.");
-    renderList(els.pastList, past, "No past appointments yet.");
+    const name = await updateStaffName(els.profileName.value);
+    currentStaff = { ...currentStaff, name };
+    renderStaff(currentStaff);
+    els.profileDialog.close();
   } catch (err) {
-    console.error("Dashboard load failed:", err);
-    if (seq === loadSeq) els.errorBanner.hidden = false;
+    console.error("Profile update failed:", err);
+    // Firestore errors have a .code; our own validation errors have a friendly message
+    els.profileError.textContent = err.code ? "Couldn't save your name. Please try again." : err.message;
+  } finally {
+    els.profileSave.disabled = false;
+    els.profileSave.textContent = "Save";
   }
+});
+
+/* ===================== ROUTER ===================== */
+
+function placeholderPage(title, message, backLink = "") {
+  return `
+    <section class="page">
+      ${backLink}
+      <div class="page-head"><h2>${escapeHtml(title)}</h2></div>
+      <div class="state"><strong>Coming soon</strong>${escapeHtml(message)}</div>
+    </section>`;
 }
+
+const PAGES = {
+  patients: (el) => mountPatientList(el),
+  calendar: (el) => {
+    el.innerHTML = placeholderPage("Calendar", "The appointments calendar will live here.");
+  },
+  patient: (el, id) => {
+    el.innerHTML = placeholderPage(
+      "Patient profile",
+      `The dashboard for record ${id} is the next thing we'll build.`,
+      `<a class="back-link" href="#/patients">← Back to patient list</a>`
+    );
+  },
+};
+
+function router() {
+  if (!currentStaff) return;
+
+  const [, page = "", ...rest] = location.hash.split("/");
+  if (!PAGES[page]) {
+    location.replace("#/patients"); // fires hashchange → router runs again
+    return;
+  }
+
+  let param = "";
+  try { param = decodeURIComponent(rest.join("/")); } catch { /* malformed URL, ignore */ }
+
+  const navKey = page === "patient" ? "patients" : page;
+  els.navItems.forEach((a) => {
+    const active = a.dataset.page === navKey;
+    a.classList.toggle("active", active);
+    if (active) a.setAttribute("aria-current", "page");
+    else a.removeAttribute("aria-current");
+  });
+
+  window.scrollTo(0, 0);
+  PAGES[page](els.content, param);
+}
+
+window.addEventListener("hashchange", router);
 
 /* ===================== START ===================== */
 
-setupTabs();
 renderDots();
 
 watchAuth((staff) => {
   if (staff) {
+    currentStaff = staff;
     renderStaff(staff);
     showView("dashboard");
-    loadDashboard();
+    router();
   } else {
-    resetDashboard(); // clear data from the page on logout
+    currentStaff = null;
+    els.content.innerHTML = ""; // remove patient data from the page on logout
+    if (els.profileDialog.open) els.profileDialog.close();
+    if (location.hash) history.replaceState(null, "", location.pathname + location.search);
     pin = "";
     renderDots();
     els.loginError.textContent = "";
