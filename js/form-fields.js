@@ -252,11 +252,10 @@ export function cleanField(f) {
       out.block = f.block === true;
       break;
   }
-  return out;
-}
-
   const sw = cleanCondition(f);
   if (sw) out.showWhen = sw;
+  return out;
+}
 
 /* ===================== Calculations: checking ===================== */
 
