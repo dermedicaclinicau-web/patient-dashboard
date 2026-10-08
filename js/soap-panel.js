@@ -4,7 +4,7 @@ from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { SECTIONS, parseSoap, assembleSoap, transcriptHtml, cleanPlaceholders } from "./soap.js";
 import {
   readSidecar, buildSidecar, planFromSidecar, planToSidecarPlan, planToText, priorCategories,
-  planCardHtml, fieldHtml, getPlanValue, setPlanValue, refFrom, catKey,
+  planCardHtml, fieldHtml, getPlanValue, setPlanValue, refFrom, catKey, planFromText,
 } from "./plan-editor.js";
 import { fetchTranscriptRecords, parseRecordDate } from "./transcripts.js";
 
@@ -180,9 +180,11 @@ async function load(id) {
     SECTIONS.forEach((s) => { original[s.key] = cleanPlaceholders(parsed.sections[s.key]); });
 
     const sidecarObj = readSidecar(data["Gemini SOAP"]);
+    // Prefer the recorder's sidecar; for older records, read the plan text instead
+    const plan = planFromSidecar(sidecarObj) || planFromText(parsed.sections.plan);
     current = {
       id, data, parsed, original, extras: parsed.extras.map((x) => ({ ...x })), dirty: false,
-      sidecarObj, plan: planFromSidecar(sidecarObj), priorCats: null,
+      sidecarObj, plan, planSnapshot: JSON.stringify(plan), priorCats: null,
     };
     try { sessionStorage.setItem(STORE_KEY, JSON.stringify({ id, mode })); } catch { /* ignore */ }
     render();
@@ -353,9 +355,14 @@ async function save(status, btn) {
   let sidecar = "";
   let keepSidecar = false;
 
-  if (current.plan) {
+  if (current.plan) panel.querySelectorAll("textarea.pe-input").forEach(commitPlanEdit);
+
+  if (current.plan && current.plan.fromText && JSON.stringify(current.plan) === current.planSnapshot) {
+    // Older record whose plan wasn't touched: keep its original text exactly
+    values.plan = current.parsed.sections.plan || "";
+    keepSidecar = !changed("email");
+  } else if (current.plan) {
     // Structured plan: rebuild BOTH the plan text and a matching sidecar
-    panel.querySelectorAll("textarea.pe-input").forEach(commitPlanEdit);
     values.plan = planToText(current.plan);
     const sc = { plan: planToSidecarPlan(current.plan) };
     const oldEmail = current.sidecarObj && Array.isArray(current.sidecarObj.email) ? current.sidecarObj.email : null;
@@ -393,7 +400,8 @@ async function save(status, btn) {
     current.extras = current.parsed.extras.map((x) => ({ ...x }));
     current.dirty = false;
     current.sidecarObj = readSidecar(soap);
-    current.plan = planFromSidecar(current.sidecarObj);
+    current.plan = planFromSidecar(current.sidecarObj) || planFromText(current.parsed.sections.plan);
+    current.planSnapshot = JSON.stringify(current.plan);
     render();
     loadPersonalNotes();
     updateTab();

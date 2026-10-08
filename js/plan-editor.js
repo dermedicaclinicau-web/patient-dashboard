@@ -1,4 +1,5 @@
 import { escapeHtml } from "./utils.js";
+import { parsePlan, parseTimeline } from "./transcripts.js";
 
 /* ===================== Constants ===================== */
 
@@ -308,4 +309,53 @@ export function planCardHtml(plan, priorCats) {
         <button type="button" class="pe-btn solid" data-soon="Create Treatment Plan">${I.filePlus}Create Treatment Plan</button>
       </div>
     </div>`;
+}
+
+/* ===================== Older records (no sidecar): read the plan text ===================== */
+
+// "!!TREATMENT PLAN" text -> editable model, or null if it can't be structured safely
+export function planFromText(text) {
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+
+  const parsed = parsePlan(raw);
+  const intro = parsed.intro.map(str).filter(Boolean);
+
+  // "REVIEW OF EXISTING PLAN (no new plan generated)" + notes
+  if (intro.length && /^REVIEW OF EXISTING PLAN/i.test(intro[0]) && !parsed.concerns.length) {
+    return {
+      intent: "reviewing_existing", discussion_notes: intro.slice(1).join("\n"),
+      concerns: [], timeline: [], booking_comments: "", fromText: true,
+    };
+  }
+
+  // Anything we can't place cleanly -> keep the plain text box (nothing lost)
+  if (intro.length || (!parsed.concerns.length && !parsed.timeline.length)) return null;
+
+  const concerns = parsed.concerns.map((c) => {
+    // Newer text starts with an official category ("Skin Laxity — …"); older text doesn't
+    const cat = CATEGORIES.find((x) => catKey(x) === catKey(c.title)) || "";
+    const description = cat ? c.description.join(" ") : [c.title, ...c.description].filter(Boolean).join(" ");
+    return {
+      description: str(description),
+      concern_category: cat,
+      area: c.area.join(", "),
+      treatment: c.treatment.join("\n"),
+      frequency_interval: c.frequency.join("\n"),
+      quote: c.quote.join("\n"),
+      comments: c.comments.join("\n"),
+    };
+  });
+
+  const { visits } = parseTimeline(parsed.timeline);
+  const timeline = visits.map((v) => ({
+    date: v.label,
+    treatment: v.items.map((it) => (it.detail ? `${it.name} (${it.detail})` : it.name)).join("\n"),
+    pretreatment_instructions: v.notes.map((n) => `${n.label}: ${n.text}`).join("\n"),
+  })).filter((t) => t.date || t.treatment);
+
+  return {
+    intent: concerns.length ? "new_plan" : "none",
+    discussion_notes: "", concerns, timeline, booking_comments: "", fromText: true,
+  };
 }
