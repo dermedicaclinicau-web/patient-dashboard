@@ -67,8 +67,8 @@ export async function mountFormEditor(container, { templateId, staff }) {
     return;
   }
   if (!root.isConnected) return;
-  if (!tpl) {
-    root.innerHTML = back + '<div class="state"><strong>Form not found</strong>It may have been removed. Go back to the list to choose another.</div>';
+  if (!tpl || tpl.status === "archived") {
+    root.innerHTML = back + '<div class="state"><strong>This form has been deleted</strong>Go back to the list to choose another form.</div>';
     return;
   }
 

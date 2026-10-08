@@ -1,6 +1,6 @@
 import { db, auth } from "./firebase-config.js";
 import {
-  collection, getDocs, getDoc, addDoc, updateDoc, doc, query, where, serverTimestamp,
+  collection, getDocs, getDoc, addDoc, updateDoc, setDoc, doc, query, where, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { cleanField } from "./form-fields.js";
 import { normaliseLetterhead, DEFAULT_LETTERHEAD } from "./form-letterhead.js";
@@ -38,6 +38,7 @@ function normalise(snap) {
     status: d.status || "draft",
     fields: Array.isArray(d.fields) ? d.fields : [],
     fieldCount: Array.isArray(d.fields) ? d.fields.length : 0,
+    settings: d.settings && typeof d.settings === "object" ? d.settings : {},
     version: Number(d.version || 0),
     updatedAt: toDate(d.updatedAt) || toDate(d.createdAt),
     updatedBy: d.updatedBy || "",
@@ -80,7 +81,7 @@ export async function createFormTemplate({ name, category }, staff) {
     category,
     status: "draft",
     fields: [],
-    settings: { letterhead: true, showTitle: true },
+    settings: { showLetterhead: true },
     version: 0,
     createdAt: serverTimestamp(),
     createdBy: staffName,
@@ -93,9 +94,7 @@ export async function createFormTemplate({ name, category }, staff) {
   return ref.id;
 }
 
-// ---------- Saving the editor's work ----------
-
-
+/* ===================== Saving the editor's work ===================== */
 
 export async function saveFormTemplate(id, { name, fields, settings, status }, staff) {
   const cleanName = String(name || "").trim().replace(/\s+/g, " ");
@@ -111,12 +110,11 @@ export async function saveFormTemplate(id, { name, fields, settings, status }, s
   await updateDoc(doc(db, COLLECTION, id), {
     name: cleanName,
     fields: clean,
+    settings: { showLetterhead: !(settings && settings.showLetterhead === false) },
+    ...(status === "archived" ? { status: "archived" } : {}),
     updatedAt: serverTimestamp(),
     updatedBy: (staff && staff.name) || "",
     updatedByUid: uid,
-    settings: { showLetterhead: !(settings && settings.showLetterhead === false) },
-    ...(status === "archived" ? { status: "archived" } : {}),
-    updatedAt: serverTimestamp()
   });
   cache = null;
 }
