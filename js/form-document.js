@@ -5,6 +5,7 @@
 import { esc, normaliseField, patientParts, INLINE_TYPES } from "./form-fields.js";
 import { formatCalc } from "./form-calc.js";
 import { visibleIds } from "./form-conditions.js";
+import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle } from "./form-fields.js";
 
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
 const LOGO_RE = /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/;
@@ -138,22 +139,35 @@ export function buildFormDocument({ sub, ver, letterhead: lh }) {
   const showLh = !(ver.settings && ver.settings.showLetterhead === false);
   const shown = visibleIds(fields, sub.answers);
 
-  const body = fields.map((f) => {
+    const body = fields.map((f) => {
     if (!shown.has(f.id)) return "";
     if (f.type === "watermark" || f.type === "photo") return "";
     if (f.type === "space") return `<div style="height:${{ small: 8, medium: 20, large: 40 }[f.size] || 20}px"></div>`;
     if (f.type === "letterhead") return letterhead(lh);
+
+    const st = fieldStyle(f);
+    const after = { normal: 0, more: 12, most: 24 }[st.space] || 0;
+    const box = `text-align:${st.align} !important;${after ? `margin-bottom:${after}px;` : ""}`;
+
     if (f.type === "text_block") {
-      return `<div class="block">${f.label ? `<h2>${esc(f.label)}</h2>` : ""}${
-        f.text ? `<p>${esc(f.text).replace(/\n/g, "<br>")}</p>` : ""}</div>`;
+      const fs = { small: 9, normal: 10, large: 11.5 }[st.textSize] || 10;
+      return `<div class="block" style="${box}">${f.label ? `<h2>${esc(f.label)}</h2>` : ""}${
+        f.text ? `<p style="font-size:${fs}pt;">${esc(f.text).replace(/\n/g, "<br>")}</p>` : ""}</div>`;
     }
+
     const v = sub.answers[f.id];
     const sig = sub.signatures[f.id];
-    if (f.inline && INLINE_TYPES.includes(f.type)) {
-      return `<div class="q"><table class="qi"><tr><td class="ql">${esc(f.label || "")}</td>` +
-        `<td class="qa">${answer(f, v, sig, true)}</td></tr></table></div>`;
+    const label = st.hideLabel ? "" : esc(f.label || "");
+    const gap = { tight: 2, normal: 4, wide: 10 }[st.gap] || 4;
+
+    if (st.pos === "beside" && INLINE_TYPES.includes(f.type)) {
+      const qw = { narrow: "25%", medium: "40%", wide: "55%" }[st.qWidth]; // "Fit" = as wide as the question
+      return `<div class="q" style="${box}"><table class="qi"><tr>` +
+        `<td class="ql" style="${qw ? `width:${qw};` : "width:1%;white-space:nowrap;"}padding-right:${gap * 4}px;text-align:${st.align} !important;">${label}</td>` +
+        `<td class="qa" style="text-align:${st.align} !important;">${answer(f, v, sig, true)}</td></tr></table></div>`;
     }
-    return `<div class="q"><div class="ql">${esc(f.label || "")}</div><div class="qa">${answer(f, v, sig, false)}</div></div>`;
+    return `<div class="q" style="${box}">${label ? `<div class="ql" style="margin-bottom:${gap}px;">${label}</div>` : ""}` +
+      `<div class="qa">${answer(f, v, sig, false)}</div></div>`;
   }).join("");
 
   const fileName = `${sub.templateName} - ${sub.patientName} - ${niceDate(sub.recordDate)}.pdf`

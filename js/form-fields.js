@@ -72,6 +72,27 @@ export const CHOICE_TYPES = ["single_choice", "checkboxes", "checkbox_notes", "d
 const LAYOUT_TYPES = ["single_choice", "checkboxes", "checkbox_notes"];
 const PLACEHOLDER_TYPES = ["short_text", "long_text", "email", "number", "dropdown"];
 export const INLINE_TYPES = ["short_text", "email", "number", "date", "record_date", "dropdown", "single_choice", "checkboxes", "calculation"];
+// Fields with a question and an answer: these get the Layout settings
+const ANSWER_TYPES = ["patient", "short_text", "long_text", "email", "number", "date", "record_date", "single_choice",
+  "checkboxes", "checkbox_notes", "sub_checks", "dropdown", "table", "calculation", "signature", "photo", "consent_status"];
+const BOX_TYPES = ["short_text", "email", "number", "date", "record_date", "dropdown"];
+const opt = (v, list, dflt) => (list.includes(v) ? v : dflt);
+
+// A field's layout settings, with defaults. The older "inline" tick counts as "beside".
+export function fieldStyle(f) {
+  const s = (f && f.style) || {};
+  const beside = s.pos ? s.pos === "beside" : !!(f && f.inline);
+  return {
+    pos: beside && f && INLINE_TYPES.includes(f.type) ? "beside" : "below",
+    qWidth: opt(s.qWidth, ["auto", "narrow", "medium", "wide"], "medium"),
+    gap: opt(s.gap, ["tight", "normal", "wide"], "normal"),
+    align: opt(s.align, ["left", "center", "right"], "left"),
+    width: opt(s.width, ["full", "half", "third"], "full"),
+    space: opt(s.space, ["normal", "more", "most"], "normal"),
+    hideLabel: s.hideLabel === true,
+    textSize: opt(s.textSize, ["small", "normal", "large"], "normal"),
+  };
+}
 
 // Which patient details the Patient details block can show
 export const PATIENT_PARTS = [
@@ -201,7 +222,7 @@ export function cleanField(f) {
   }
   if (LAYOUT_TYPES.includes(f.type)) out.layout = pick(f.layout, ["list", "columns", "inline"], "list");
   if (PLACEHOLDER_TYPES.includes(f.type)) out.placeholder = clip(f.placeholder, 100);
-  if (INLINE_TYPES.includes(f.type)) out.inline = f.inline === true;
+  if (ANSWER_TYPES.includes(f.type) || f.type === "text_block") out.style = fieldStyle(f);
   if (FILLS_FOR[f.type] && f.fill && FILLS_FOR[f.type].includes(f.fill)) out.fill = f.fill;
 
   switch (f.type) {
@@ -321,11 +342,8 @@ export function renderField(f, ctx = {}) {
         f.required ? '<span class="fe-req" aria-label="required">*</span>' : ""}</div>`
     : "";
   const help = f.help && hasHelp(f.type) ? `<div class="fe-help">${esc(f.help)}</div>` : "";
-  // "Show the answer beside the question": question on the left, answer on the right
-  if (f.inline && INLINE_TYPES.includes(f.type) && !ctx.noHead) {
-    return `<div class="fe-inline"><div class="fe-inline-q">${q}${help}</div>` +
-      `<div class="fe-inline-a">${renderField(f, { ...ctx, noHead: true })}</div></div>`;
-  }
+  // Layout settings (answer below or beside, gap, alignment, width, spacing) wrap the field
+  if (!ctx.raw && (ANSWER_TYPES.includes(f.type) || f.type === "text_block")) return layoutField(f, ctx, q, help);
   const head = ctx.noHead ? "" : q + help;
   const opts = Array.isArray(f.options) && f.options.length ? f.options : ["Option 1"];
   const box = (type) => `<input type="${type}"${inert} />`;
@@ -593,16 +611,69 @@ function typeSettings(f, ctx = {}) {
 }
 
 export function fieldSettings(f, ctx = {}) {
-  return typeSettings(f, ctx) + (INLINE_TYPES.includes(f.type)
-    ? `<label class="fe-check"><input type="checkbox" data-k="inline"${f.inline ? " checked" : ""} /> Show the answer beside the question</label>`
-    : "");
+  return typeSettings(f, ctx) + layoutSettings(f);
 }
 
+/* ===================== Layout ===================== */
+
+// Draws the question and its answer according to the field's Layout settings
+function layoutField(f, ctx, q, help) {
+  const s = fieldStyle(f);
+  const cls = `fe-lay al-${s.align} gap-${s.gap} sp-${s.space}${BOX_TYPES.includes(f.type) ? ` w-${s.width}` : ""}`;
+  if (f.type === "text_block") {
+    return `<div class="${cls} ts-${s.textSize}">${renderField(f, { ...ctx, raw: true })}</div>`;
+  }
+  const control = renderField(f, { ...ctx, raw: true, noHead: true });
+  const label = s.hideLabel ? "" : q;
+  if (s.pos === "beside") {
+    return `<div class="${cls} is-beside qw-${s.qWidth}"><div class="fe-lay-q">${label}${help}</div>` +
+      `<div class="fe-lay-a">${control}</div></div>`;
+  }
+  const top = label + help;
+  return `<div class="${cls}">${top ? `<div class="fe-lay-q">${top}</div>` : ""}<div class="fe-lay-a">${control}</div></div>`;
+}
+
+function layoutSettings(f) {
+  if (!ANSWER_TYPES.includes(f.type) && f.type !== "text_block") return "";
+  const s = fieldStyle(f);
+  const seg = (key, items, cur, rerender = false) =>
+    `<div class="fe-seg" role="radiogroup">${items.map(([v, l]) =>
+      `<label class="fe-seg-btn"><input type="radio" name="st-${key}-${esc(f.id)}" data-st="${key}" value="${v}"${
+        cur === v ? " checked" : ""}${rerender ? ' data-rerender=""' : ""} /><span>${l}</span></label>`).join("")}</div>`;
+  const row = (label, control) => `<div class="fe-lay-row"><span class="fe-lay-lbl">${label}</span>${control}</div>`;
+  const isText = f.type === "text_block";
+
+  return `<div class="fe-insp-field fe-layout">
+    <span class="fe-insp-label">Layout</span>
+    ${!isText && hasLabel(f.type)
+      ? `<label class="fe-check"><input type="checkbox" data-st="showLabel"${s.hideLabel ? "" : " checked"} /> Show the question</label>` : ""}
+    ${INLINE_TYPES.includes(f.type)
+      ? row("Answer", seg("pos", [["below", "Under the question"], ["beside", "Beside the question"]], s.pos, true)) : ""}
+    ${s.pos === "beside"
+      ? row("Question width", seg("qWidth", [["auto", "Fit"], ["narrow", "Narrow"], ["medium", "Medium"], ["wide", "Wide"]], s.qWidth)) : ""}
+    ${!isText ? row("Gap", seg("gap", [["tight", "Tight"], ["normal", "Normal"], ["wide", "Wide"]], s.gap)) : ""}
+    ${row("Align", seg("align", [["left", "Left"], ["center", "Centre"], ["right", "Right"]], s.align))}
+    ${BOX_TYPES.includes(f.type)
+      ? row("Answer box width", seg("width", [["full", "Full"], ["half", "Half"], ["third", "Third"]], s.width)) : ""}
+    ${isText ? row("Text size", seg("textSize", [["small", "Small"], ["normal", "Normal"], ["large", "Large"]], s.textSize)) : ""}
+    ${row("Space below", seg("space", [["normal", "Normal"], ["more", "More"], ["most", "Extra"]], s.space))}
+    ${s.pos === "beside" && s.qWidth === "auto"
+      ? '<small class="fe-note">Fit puts the answer straight after the question. Best for short questions.</small>' : ""}
+  </div>`;
+}
 /* ===================== Settings that edit lists inside a field ===================== */
 
 // Typing in table columns, sub-option groups and patient detail ticks.
 // Returns true if it changed something.
 export function applyInput(f, el) {
+  if (el.dataset.st !== undefined) {
+    const s = fieldStyle(f);
+    if (el.dataset.st === "showLabel") s.hideLabel = !el.checked;
+    else s[el.dataset.st] = el.value;
+    f.style = s;
+    delete f.inline; // replaced by style.pos
+    return true;
+  }
   if (el.dataset.part !== undefined) {
     const on = new Set(patientParts(f).map(([k]) => k));
     if (el.checked) on.add(el.dataset.part);
