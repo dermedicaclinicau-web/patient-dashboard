@@ -6,7 +6,6 @@ import { getPatient } from "./patients.js";
 import { getPrintSettings, savePrintSettings, getFormTemplate, getFormVersion, getLetterhead } from "./form-templates.js";
 import { esc } from "./form-fields.js";
 import { buildFormDocument, niceDate } from "./form-document.js";
-import { showToast, formatDobLong } from "./utils.js";
 import { bankImage } from "./image-bank-api.js";
 import { DEFAULT_LETTERHEAD } from "./form-letterhead.js";
 import { formatDobLong } from "./utils.js";
