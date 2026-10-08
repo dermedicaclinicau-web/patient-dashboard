@@ -144,6 +144,8 @@ export async function updatePatient(current, input, staff) {
   });
 
   await updateDoc(doc(db, COLLECTION, current.id), updates);
+  // Lets the Patient List refresh its in-memory copy (new name / email shows up in search)
+  window.dispatchEvent(new CustomEvent("patient-updated", { detail: { id: current.id } }));
   return { changed: true };
 }
 

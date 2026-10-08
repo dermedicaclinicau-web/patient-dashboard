@@ -1,6 +1,4 @@
-import {
-  fetchPatients, countPatients, findPatientsById, searchPatientsByPhone, fetchAllPatients, phoneCore,
-} from "./patients.js";
+import { countPatients, fetchAllPatients, phoneCore } from "./patients.js";
 import {
   escapeHtml, getInitials, hueFromString, formatDobLong, calcAge, formatMobile, showToast, parseDateKey,
 } from "./utils.js";
@@ -19,12 +17,11 @@ const ICONS = {
 };
 
 const PLACEHOLDERS = {
-  name: "Search by name or ID…",
-  phone: "Search by phone number…",
-  dupes: "Filter duplicates by name, email or phone…",
+  name: "Search by name or email…",
+  dupes: "Filter duplicates by name or email…",
 };
 
-/* ===================== In-memory caches (cleared on logout) ===================== */
+/* ===================== In-memory cache (cleared on logout, refresh, or a patient edit) ===================== */
 
 let allCache = null;
 let allPromise = null;
@@ -38,15 +35,65 @@ export function clearPatientCache() {
   countCache = null;
 }
 
+// A patient's name or email was edited somewhere in the app: reload the list next time
+window.addEventListener("patient-updated", clearPatientCache);
+
 function loadAll() {
   if (allCache) return Promise.resolve(allCache);
   if (!allPromise) {
     const gen = cacheGen;
     allPromise = fetchAllPatients()
-      .then((list) => { if (gen === cacheGen) allCache = list; return list; })
+      .then((list) => {
+        list.forEach(indexPatient);
+        if (gen === cacheGen) allCache = list;
+        return list;
+      })
       .catch((err) => { allPromise = null; throw err; });
   }
   return allPromise;
+}
+
+/* ===================== Search ===================== */
+
+// "  O'Brien-Smith, Zoë " -> "obrien smith zoe"
+function normName(s) {
+  return String(s || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")  // accents
+    .replace(/['’`.]/g, "")                             // apostrophes, full stops
+    .replace(/[^a-z0-9]+/g, " ")                        // commas, hyphens, etc. -> space
+    .trim();
+}
+
+// Pre-computed once per patient so typing stays instant
+function indexPatient(p) {
+  p._name = normName(p.name);                                       // "tamara poletti"
+  p._alt = normName(p.nameKey) || normName(`${p.lastName} ${p.firstName}`); // "poletti tamara"
+  p._words = [...new Set(`${p._name} ${p._alt}`.split(" ").filter(Boolean))];
+  p._email = String(p.email || "").toLowerCase().replace(/\s+/g, "");
+}
+
+function buildQuery(term) {
+  const text = normName(term);
+  return {
+    text,
+    tokens: text ? text.split(" ") : [],
+    email: String(term || "").toLowerCase().replace(/\s+/g, ""),
+  };
+}
+
+// Lower = better match. Infinity = no match.
+function scorePatient(p, q) {
+  if (!q.text && !q.email) return 0;
+
+  if (q.text) {
+    if (p._name === q.text || p._alt === q.text) return 0;                         // exact name
+    if (p._name.startsWith(q.text) || p._alt.startsWith(q.text)) return 1;         // starts with
+    if (q.tokens.every((t) => p._words.some((w) => w.startsWith(t)))) return 2;    // "tam pol", any order
+    if (q.tokens.every((t) => p._name.includes(t) || p._alt.includes(t))) return 3; // anywhere in the name
+  }
+  if (q.email.length >= 2 && p._email && p._email.includes(q.email)) return 4;     // any part of the email
+  return Infinity;
 }
 
 /* ===================== Page ===================== */
@@ -67,8 +114,7 @@ export function mountPatientList(container) {
           <input type="search" placeholder="${PLACEHOLDERS.name}" autocomplete="off" spellcheck="false" aria-label="Search patients" />
         </label>
         <div class="pt-tabs" role="group" aria-label="Search mode">
-          <button type="button" data-mode="name" class="active" aria-pressed="true">Name / ID</button>
-          <button type="button" data-mode="phone" aria-pressed="false">Phone</button>
+          <button type="button" data-mode="name" class="active" aria-pressed="true">Name / Email</button>
           <button type="button" data-mode="dupes" class="dupes" aria-pressed="false">Duplicates</button>
         </div>
         <select class="pt-select" data-filter="birthday" aria-label="Birthday filter">
@@ -104,11 +150,8 @@ export function mountPatientList(container) {
 
   const state = {
     mode: "name", term: "", birthday: "all", age: "all", seq: 0,
-    server: { cursor: null, hasMore: false, term: "", seen: new Set() },
     client: { list: [], shown: CLIENT_PAGE, groups: null, shownGroups: GROUP_PAGE },
   };
-
-  const needsAll = () => state.mode === "dupes" || state.birthday !== "all" || state.age !== "all";
 
   /* ---------- total count ---------- */
   async function loadCount() {
@@ -123,18 +166,16 @@ export function mountPatientList(container) {
   /* ---------- main loader ---------- */
   async function run() {
     const seq = ++state.seq;
-    results.innerHTML = skeletonGrid(8);
-    moreBtn.hidden = true;
-    meta.textContent = needsAll() && !allCache ? "Loading all patients for filtering…" : "";
+    if (!allCache) {
+      results.innerHTML = skeletonGrid(8);
+      moreBtn.hidden = true;
+      meta.textContent = "Loading patients…";
+    }
 
     try {
-      if (needsAll()) {
-        const all = await loadAll();
-        if (seq !== state.seq) return;
-        clientRender(all);
-      } else {
-        await serverFirstPage(seq);
-      }
+      const all = await loadAll();
+      if (seq !== state.seq || !results.isConnected) return;
+      render(all);
     } catch (err) {
       if (seq !== state.seq) return;
       console.error("Patient list failed:", err);
@@ -143,88 +184,31 @@ export function mountPatientList(container) {
     }
   }
 
-  /* ---------- server mode: browse / name / ID / phone ---------- */
-  async function serverFirstPage(seq) {
-    const t = state.term;
-
-    if (state.mode === "phone" && t) {
-      if (phoneCore(t).length < 3) {
-        results.innerHTML = `<div class="state"><strong>Keep typing</strong>Enter at least 3 digits of the phone number.</div>`;
-        return;
-      }
-      const list = await searchPatientsByPhone(t);
-      if (seq !== state.seq) return;
-      renderCards(list, false);
-      meta.textContent = `${list.length} result${list.length === 1 ? "" : "s"} for “${t}”`;
-      return;
-    }
-
-    const [page, idHits] = await Promise.all([
-      fetchPatients({ mode: "name", term: t }),
-      state.mode === "name" && t ? findPatientsById(t) : Promise.resolve([]),
-    ]);
-    if (seq !== state.seq) return;
-
-    const seen = new Set(idHits.map((p) => p.id));
-    const list = [...idHits, ...page.patients.filter((p) => !seen.has(p.id))];
-    list.forEach((p) => seen.add(p.id));
-    state.server = { cursor: page.cursor, hasMore: page.hasMore, term: page.term, seen };
-
-    renderCards(list, false);
-    moreBtn.hidden = !page.hasMore;
-    meta.textContent = t ? `${list.length}${page.hasMore ? "+" : ""} result${list.length === 1 ? "" : "s"} for “${t}”` : "";
-  }
-
-  async function serverMore() {
-    const seq = state.seq;
-    moreBtn.disabled = true;
-    moreBtn.textContent = "Loading…";
-    try {
-      const page = await fetchPatients({ mode: "name", term: state.server.term, cursor: state.server.cursor });
-      if (seq !== state.seq) return;
-      const list = page.patients.filter((p) => !state.server.seen.has(p.id));
-      list.forEach((p) => state.server.seen.add(p.id));
-      renderCards(list, true);
-      state.server.cursor = page.cursor;
-      state.server.hasMore = page.hasMore;
-      moreBtn.hidden = !page.hasMore;
-    } catch (err) {
-      console.error("Load more failed:", err);
-      showToast("Couldn't load more patients");
-    } finally {
-      if (seq === state.seq) {
-        moreBtn.disabled = false;
-        moreBtn.textContent = "Load more";
-      }
-    }
-  }
-
-  /* ---------- client mode: duplicates / birthdays / ages ---------- */
-  function matchesTerm(p) {
-    const term = state.term.toLowerCase();
-    if (!term) return true;
-    const digits = phoneCore(state.term);
-    const phoneHit = digits.length >= 3 && phoneCore(p.mobile).includes(digits);
-    if (state.mode === "phone") return phoneHit;
-    const textHit = [p.name, p.pttId, p.id, p.email].some((v) => String(v || "").toLowerCase().includes(term));
-    return state.mode === "dupes" ? textHit || phoneHit : textHit;
-  }
-
-  function clientRender(all) {
+  function render(all) {
     const today = new Date();
+    const query = buildQuery(state.term);
     let list = all.filter((p) => birthdayOk(p, state.birthday, today) && ageOk(p, state.age));
 
     if (state.mode === "dupes") {
       let groups = findDuplicates(list);
-      if (state.term) groups = groups.filter((g) => g.list.some(matchesTerm));
+      if (state.term) groups = groups.filter((g) => g.list.some((p) => scorePatient(p, query) < Infinity));
       state.client.groups = groups;
       state.client.shownGroups = GROUP_PAGE;
       renderGroups();
       return;
     }
 
-    list = list.filter(matchesTerm);
-    if (state.birthday !== "all") list.sort((a, b) => nextBirthday(a, today) - nextBirthday(b, today));
+    if (state.term) {
+      // Best matches first, then A–Z by surname
+      list = list
+        .map((p) => ({ p, s: scorePatient(p, query) }))
+        .filter((x) => x.s < Infinity)
+        .sort((a, b) => a.s - b.s || a.p._alt.localeCompare(b.p._alt))
+        .map((x) => x.p);
+    } else if (state.birthday !== "all") {
+      list.sort((a, b) => nextBirthday(a, today) - nextBirthday(b, today));
+    }
+
     state.client.list = list;
     state.client.shown = CLIENT_PAGE;
     renderClientPage();
@@ -236,7 +220,12 @@ export function mountPatientList(container) {
       ? `<ul class="pt-grid">${list.slice(0, shown).map(cardHtml).join("")}</ul>`
       : emptyState();
     moreBtn.hidden = list.length <= shown;
-    meta.textContent = `${list.length.toLocaleString()} patient${list.length === 1 ? "" : "s"} match`;
+
+    const n = list.length.toLocaleString();
+    const filtered = state.birthday !== "all" || state.age !== "all";
+    meta.textContent = state.term
+      ? `${n} result${list.length === 1 ? "" : "s"} for “${state.term}”`
+      : filtered ? `${n} patient${list.length === 1 ? "" : "s"} match` : "";
   }
 
   function renderGroups() {
@@ -256,19 +245,10 @@ export function mountPatientList(container) {
     meta.textContent = `${groups.length} possible duplicate group${groups.length === 1 ? "" : "s"}`;
   }
 
-  /* ---------- rendering ---------- */
-  function renderCards(list, append) {
-    if (append) {
-      const grid = results.querySelector(".pt-grid");
-      if (grid) { grid.insertAdjacentHTML("beforeend", list.map(cardHtml).join("")); return; }
-    }
-    results.innerHTML = list.length ? `<ul class="pt-grid">${list.map(cardHtml).join("")}</ul>` : emptyState();
-  }
-
   function emptyState() {
-    const tip = state.mode === "phone"
-      ? "Check the number, or try fewer digits."
-      : needsAll() ? "Try a different filter or search." : "Try the surname first, e.g. “Cooney”, or an exact patient ID.";
+    const tip = state.term
+      ? "Check the spelling, or try part of the first name, surname or email."
+      : "Try a different filter.";
     return `<div class="state"><strong>No patients found</strong>${tip}</div>`;
   }
 
@@ -281,7 +261,7 @@ export function mountPatientList(container) {
       if (term === state.term) return;
       state.term = term;
       run();
-    }, 300);
+    }, 150);
   });
 
   tabs.forEach((btn) => btn.addEventListener("click", () => {
@@ -304,7 +284,6 @@ export function mountPatientList(container) {
   }));
 
   moreBtn.addEventListener("click", () => {
-    if (!needsAll()) return serverMore();
     if (state.mode === "dupes") { state.client.shownGroups += GROUP_PAGE; renderGroups(); }
     else { state.client.shown += CLIENT_PAGE; renderClientPage(); }
   });
