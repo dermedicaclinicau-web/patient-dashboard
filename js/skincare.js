@@ -1,6 +1,7 @@
 import { db } from "./firebase-config.js";
 import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { parseDateKey } from "./utils.js";
+import { patientIds, patientNames } from "./patients.js";
 
 // Must match docId_() in Apps Script
 const toDocId = (s) => String(s || "").trim().replace(/\//g, "_");
@@ -9,11 +10,10 @@ export const normProduct = (s) => String(s || "").toLowerCase().replace(/\s+/g, 
 
 // Protocols + purchases for a patient (by Patient ID; rows without an ID by name)
 export async function fetchSkincare(patient) {
-  const ids = [...new Set([patient.pttId, patient.id].map(toDocId).filter(Boolean))];
-  const nameKey = normProduct(patient.name); // same normalisation as the sync
-  const nameDoc = nameKey ? toDocId(`name__${nameKey}`) : "";
-
-  const keys = [...ids, nameDoc].filter(Boolean);
+  const ids = [...new Set(patientIds(patient).map(toDocId).filter(Boolean))];
+  // Same normalisation as the sync; includes merged-in names
+  const nameDocs = patientNames(patient).map(normProduct).filter(Boolean).map((k) => toDocId(`name__${k}`));
+  const keys = [...new Set([...ids, ...nameDocs])];
   const snaps = await Promise.all(keys.map((k) => getDoc(doc(db, "skincare", k))));
 
   const protocols = new Map();
@@ -23,7 +23,7 @@ export async function fetchSkincare(patient) {
   snaps.forEach((snap, i) => {
     if (!snap.exists()) return;
     const d = snap.data();
-    if (keys[i] === nameDoc && ((d.protocols || []).length || (d.purchases || []).length)) matchedByName = true;
+    if (keynameDocs.includes(keys[i]) && ((d.protocols || []).length || (d.purchases || []).length)) matchedByName = true;
 
     (d.protocols || []).forEach((p) => {
       if (protocols.has(p.recordId)) protocols.get(p.recordId).items.push(...(p.items || []));

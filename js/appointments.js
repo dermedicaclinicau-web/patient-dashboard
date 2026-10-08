@@ -1,6 +1,7 @@
 import { LOGIN_ENDPOINT, db } from "./firebase-config.js";
 import { doc, getDoc, collection, query, where, limit, getDocs }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { patientIds } from "./patients.js";
 
 // "Data last uploaded" info, cached for 60 seconds
 let syncMeta = null;
@@ -79,7 +80,7 @@ export async function callApi(payload) {
 // Pre-consultation record from Firestore 'pcn_results' (matched by Patient ID, then unique name)
 export async function fetchPreconsult(patient) {
   try {
-    const ids = [...new Set([patient.pttId, patient.id].map(toDocId).filter(Boolean))];
+          const ids = [...new Set(patientIds(patient).map(toDocId).filter(Boolean))];
 
     const [snaps, meta] = await Promise.all([
       Promise.all(ids.map((id) => getDoc(doc(db, "pcn_results", id)))),

@@ -2,6 +2,7 @@ import { db, auth } from "./firebase-config.js";
 import { collection, query, where, getDocs, addDoc, updateDoc, doc }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { toDateKey } from "./utils.js";
+import { patientIds } from "./patients.js";
 
 const COL = "patient_personal_notes";
 
@@ -15,7 +16,7 @@ export function noteDate(n) {
 
 // All visible notes for a patient, newest first
 export async function fetchPersonalNotes(patient) {
-  const ids = [...new Set([patient.pttId, patient.id].filter(Boolean).map(String))];
+      const ids = patientIds(patient);
   if (!ids.length) return [];
   const snap = await getDocs(query(collection(db, COL), where("patientId", "in", ids)));
   return snap.docs

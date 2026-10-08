@@ -1,5 +1,7 @@
 import { countPatients, fetchAllPatients, phoneCore } from "./patients.js";
 import { openNewPatientDialog } from "./new-patient.js";
+import { openMergeDialog } from "./merge-dialog.js";
+import { isAdminUser } from "./merge-patients.js";
 import {
   escapeHtml, getInitials, hueFromString, formatDobLong, calcAge, formatMobile, showToast, parseDateKey,
 } from "./utils.js";
@@ -157,12 +159,20 @@ export function mountPatientList(container) {
   /* ---------- total count ---------- */
   async function loadCount() {
     try {
-      if (countCache === null) countCache = await countPatients();
-      if (total.isConnected) total.textContent = `${countCache.toLocaleString()} patients`;
+      const all = await loadAll(); // merged duplicates are already excluded
+      if (total.isConnected) total.textContent = `${all.length.toLocaleString()} patients`;
     } catch (err) {
       console.warn("Patient count failed:", err);
     }
   }
+
+  // Merge buttons only show for Admins
+  let isAdmin = false;
+  isAdminUser().then((v) => {
+    isAdmin = v;
+    if (state.mode === "dupes" && state.client.groups) renderGroups();
+  });
+
 
   /* ---------- main loader ---------- */
   async function run() {
@@ -232,12 +242,13 @@ export function mountPatientList(container) {
   function renderGroups() {
     const { groups, shownGroups } = state.client;
     results.innerHTML = groups.length
-      ? groups.slice(0, shownGroups).map((g) => `
+      ? groups.slice(0, shownGroups).map((g, i) => `
           <section class="pt-dupe">
             <p class="pt-dupe-head">
               <span class="pt-dupe-tag">${escapeHtml(g.label)}</span>
               <span>${escapeHtml(g.display)}</span>
               <span class="pt-dupe-count">· ${g.list.length} records</span>
+              ${isAdmin ? `<button type="button" class="pt-merge" data-merge="${i}">Merge…</button>` : ""}
             </p>
             <ul class="pt-grid">${g.list.map(cardHtml).join("")}</ul>
           </section>`).join("")
@@ -305,8 +316,19 @@ export function mountPatientList(container) {
     location.hash = `#/patient/${encodeURIComponent(created.id)}`; // open the new patient
   });
 
-  results.addEventListener("click", (e) => {
-    if (e.target.closest("[data-action='retry']")) run();
+  results.addEventListener("click", async (e) => {
+    if (e.target.closest("[data-action='retry']")) { run(); return; }
+    const mergeBtn = e.target.closest("[data-merge]");
+    if (!mergeBtn) return;
+    e.preventDefault();
+    const group = state.client.groups && state.client.groups[Number(mergeBtn.dataset.merge)];
+    if (!group) return;
+    const merged = await openMergeDialog(group.list);
+    if (merged) {
+      showToast("Records merged");
+      loadCount();
+      run(); // the list reloads without the merged duplicate
+    }
   });
 
   loadCount();

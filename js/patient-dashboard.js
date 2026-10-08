@@ -1,4 +1,4 @@
-import { getPatient, updatePatient } from "./patients.js";
+import { getPatient, updatePatient, patientIds } from "./patients.js";
 import { fetchDayAppointments, fetchPreconsult } from "./appointments.js";
 import { fetchOpenReminders, completeReminder } from "./reminders.js";
 import { openReminderDialog } from "./reminder-dialog.js";
@@ -7,6 +7,8 @@ import { skincareSectionHtml, mountSkincare } from "./skincare-view.js";
 import { recordsSectionHtml, mountRecords } from "./records-view.js";
 import { setRecordingPatient } from "./recording-bar.js";
 import { historySectionHtml, mountHistory } from "./history-view.js";
+import { latestMerge, undoMerge } from "./merge-patients.js";
+import { confirmDialog, alertDialog } from "./dialog.js";
 import {
   billingRxSectionHtml, mountBillingRx, injectableReferralSectionHtml, interestsCommsSectionHtml,
 } from "./billing-rx-view.js";
@@ -146,6 +148,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     if (t.closest("summary button")) e.preventDefault();
     const refreshBtn = t.closest("[data-action='refresh-pc']");
     if (refreshBtn) { refreshAll(refreshBtn); return; }
+    if (t.closest("[data-action='merge-info']")) { mergeInfo(); return; }
     if (t.closest("[data-action='add-reminder']")) { addReminderFlow(); return; }
     const doneBtn = t.closest("[data-action='task-done']");
     if (doneBtn) { completeTask(doneBtn); return; }
@@ -389,6 +392,44 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       }</p>`;
     }
   }
+  async function mergeInfo() {
+    const ids = patient.mergedIds.join(", ");
+    const admin = /^admin$/i.test(String((staff && staff.role) || ""));
+    let m = null;
+    try { m = await latestMerge(patient.id); } catch (err) { console.warn("Merge lookup failed:", err); }
+
+    if (!admin || !m) {
+      await alertDialog({
+        title: "Merged record",
+        message: `This patient also includes records stored under: ${ids}.` +
+          (admin ? "" : "\n\nOnly an Admin can undo a merge."),
+      });
+      return;
+    }
+
+    const when = m.mergedAt ? new Date(m.mergedAt).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
+    const names = (m.duplicates || []).map((d) => `${d.name} (${d.pttId || d.id})`).join(", ");
+    const ok = await confirmDialog({
+      title: "Undo the latest merge?",
+      message: `Merged${when ? ` on ${when}` : ""}${m.mergedBy ? ` by ${m.mergedBy}` : ""}: ${names}.\n\n` +
+        "Undoing makes them separate patients again, and puts this patient's details and clinical lists back as they were " +
+        "before the merge. Edits made to those since the merge will be lost.",
+      confirmLabel: "Undo merge",
+      tone: "danger",
+    });
+    if (!ok) return;
+
+    try {
+      await undoMerge(m);
+      showToast("Merge undone");
+      window.dispatchEvent(new HashChangeEvent("hashchange")); // reload this page
+    } catch (err) {
+      console.error("Undo merge failed:", err);
+      showToast(err.code === "not-admin" || err.code === "permission-denied"
+        ? "Only Admins can undo a merge."
+        : "Couldn't undo the merge. Please try again.");
+    }
+  }
   async function addReminderFlow() {
     const saved = await openReminderDialog({ patient, staff });
     if (!saved || !root.isConnected) return;
@@ -470,6 +511,9 @@ function barHtml(p, today = [], pre = null) {
     p.pttId && `<span class="chip">ID ${escapeHtml(p.pttId)}</span>`,
     today.length && `<span class="chip chip-today">Appt today ${escapeHtml(today[0].time || "")}</span>`,
     pre && pre.overdue && `<span class="chip chip-alert">Overdue treatments</span>`,
+    p.mergedIds && p.mergedIds.length &&
+      `<button type="button" class="chip chip-merged" data-action="merge-info">Merged · ${p.mergedIds.length} other ID${p.mergedIds.length > 1 ? "s" : ""}</button>`,
+    p.redirectedFrom && `<span class="chip">Opened from merged record ${escapeHtml(p.redirectedFrom)}</span>`,
   ].filter(Boolean).join("");
 
   return `
@@ -615,7 +659,7 @@ function stateHtml(title, msg) {
 
 async function loadTodayAppts(patient) {
   const data = await fetchDayAppointments(toDateKey());
-  const ids = [patient.pttId, patient.id].filter(Boolean).map((s) => s.toLowerCase());
+  const ids = patientIds(patient).map((s) => s.toLowerCase());
   const name = patient.name.toLowerCase();
 
   return (data.appointments || [])

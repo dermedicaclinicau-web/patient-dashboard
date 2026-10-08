@@ -75,21 +75,32 @@ function toPatient(snap) {
     // Use DobKey if it's readable, otherwise work it out from DOB (any common format)
     dobKey: toDateKeyLoose(d.DobKey) || toDateKeyLoose(d.DOB),
     dob: typeof d.DOB === "string" ? d.DOB : "",
+    mergedIds: Array.isArray(d.MergedIds) ? d.MergedIds.map(String) : [],
+    mergedNames: Array.isArray(d.MergedNames) ? d.MergedNames.map(String) : [],
+    mergedInto: String(d.MergedInto || ""),
   };
 }
 
 // Load one patient. Accepts the Firestore doc ID (from the patient list)
-// OR the PttID (from calendar cards, which use the sheet's Patient ID).
-export async function getPatient(id) {
+// OR the PttID (from calendar cards). A merged duplicate opens the patient it was merged into.
+export async function getPatient(id, hops = 0) {
   if (!id) return null;
+  let p = null;
 
   if (!id.includes("/")) {
     const snap = await getDoc(doc(db, COLLECTION, id));
-    if (snap.exists()) return toPatient(snap);
+    if (snap.exists()) p = toPatient(snap);
+  }
+  if (!p) {
+    const res = await getDocs(query(collection(db, COLLECTION), where("PttID", "==", id), limit(1)));
+    p = res.empty ? null : toPatient(res.docs[0]);
   }
 
-  const res = await getDocs(query(collection(db, COLLECTION), where("PttID", "==", id), limit(1)));
-  return res.empty ? null : toPatient(res.docs[0]);
+  if (p && p.mergedInto && hops < 3) {
+    const kept = await getPatient(p.mergedInto, hops + 1);
+    if (kept) return { ...kept, redirectedFrom: p.pttId || p.id };
+  }
+  return p;
 }
 
 // Save edits. Only changed fields are written, and the search keys
@@ -204,6 +215,7 @@ export async function fetchAllPatients() {
   const snap = await getDocs(collection(db, COLLECTION));
   return snap.docs
     .map(toPatient)
+    .filter((p) => !p.mergedInto) // merged duplicates are hidden
     .sort((a, b) => (a.nameKey || a.name.toLowerCase()).localeCompare(b.nameKey || b.name.toLowerCase()));
 }
 
@@ -231,7 +243,10 @@ export async function findPossibleDuplicates({ nameKey, email, mobile }) {
   }
 
   const out = new Map();
-  (await Promise.all(checks)).forEach((snap) => snap.forEach((d) => out.set(d.id, toPatient(d))));
+  (await Promise.all(checks)).forEach((snap) => snap.forEach((d) => {
+    const p = toPatient(d);
+    if (!p.mergedInto) out.set(d.id, p);
+  }));
   return [...out.values()];
 }
 
@@ -280,4 +295,17 @@ export async function createPatient(input) {
 
   window.dispatchEvent(new CustomEvent("patient-updated", { detail: { id: pttId } }));
   return { id: pttId, pttId, name: `${first} ${last}` };
+}
+
+/* ===================== Merged records ===================== */
+
+// Every ID this patient's data may be stored under: their own, plus any merged-in records
+export function patientIds(p) {
+  return [...new Set([p.pttId, p.id, ...(p.mergedIds || [])]
+    .map((s) => String(s || "").trim()).filter(Boolean))].slice(0, 30); // Firestore "in" max is 30
+}
+
+// Their name, plus the names of any merged-in records (for records matched by name)
+export function patientNames(p) {
+  return [...new Set([p.name, ...(p.mergedNames || [])].map((s) => String(s || "").trim()).filter(Boolean))];
 }

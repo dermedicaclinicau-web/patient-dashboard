@@ -1,11 +1,12 @@
 import { db, auth } from "./firebase-config.js";
 import { collection, query, where, getDocs, addDoc, updateDoc, doc }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { patientIds } from "./patients.js";
 
 // Open (not completed) reminders for one patient, soonest due first.
 // Matches on the patient's Firestore doc ID OR their PttID.
 export async function fetchOpenReminders(patient) {
-  const ids = [...new Set([patient.id, patient.pttId].filter(Boolean))];
+  const ids = patientIds(patient);
   if (!ids.length) return [];
 
   const snap = await getDocs(

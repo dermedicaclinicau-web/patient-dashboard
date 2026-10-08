@@ -1,6 +1,7 @@
 import { db } from "./firebase-config.js";
 import { collection, query, where, getDocs, FieldPath }
-  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { patientIds, patientNames } from "./patients.js";
 
 const COLLECTION = "appointment_transcripts";
 
@@ -55,8 +56,9 @@ export function parseRecordDate(s) {
 // All of a patient's transcript records (matched by ID, then name), newest first.
 // Fetched ONCE per patient page and shared by Treatment plan + Social history.
 export async function fetchTranscriptRecords(patient) {
-  const ids = [...new Set([patient.pttId, patient.id].filter(Boolean))];
-  const names = nameVariants(patient);
+    const ids = patientIds(patient);
+    const names = [...new Set(patientNames(patient).flatMap((n, i) =>
+      nameVariants(i === 0 ? patient : { name: n })))].slice(0, 30);
   const col = collection(db, COLLECTION);
 
   const [idSnap, nameSnap] = await Promise.all([

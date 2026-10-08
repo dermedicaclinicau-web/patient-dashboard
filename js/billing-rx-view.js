@@ -3,6 +3,7 @@ import { collection, query, where, getDocs, FieldPath }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { escapeHtml } from "./utils.js";
 import { parseRecordDate } from "./transcripts.js";
+import { patientIds } from "./patients.js";
 
 const PAGE = 6;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -41,7 +42,7 @@ function isOpenSaved(key, fallback) {
 /* ===================== Data ===================== */
 
 async function fetchBillingAndRx(patient) {
-  const ids = [...new Set([patient.pttId, patient.id].filter(Boolean))];
+  const ids = patientIds(patient);
   if (!ids.length) return { billing: [], rx: [], errors: [] };
 
   const [scanRes, rxRes] = await Promise.allSettled([

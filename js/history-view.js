@@ -4,6 +4,7 @@ import { fetchTranscriptRecords, extractSection } from "./transcripts.js";
 import { fetchSkincare } from "./skincare.js";
 import { escapeHtml, toDateKey, parseDateKey } from "./utils.js";
 import { showSoapPanel } from "./soap-panel.js";
+import { patientIds } from "./patients.js";
 
 const PAGE = 10;
 const MONTHS_LONG = ["January", "February", "March", "April", "May", "June", "July",
@@ -112,7 +113,7 @@ async function buildVisits(patient) {
   }
 
   // Today's appointment from the live schedule
-  const ids = [patient.pttId, patient.id].filter(Boolean).map((s) => s.toLowerCase());
+      const ids = patientIds(patient).map((s) => s.toLowerCase());
   ((day && day.appointments) || [])
     .filter((a) => a.patientId
       ? ids.includes(a.patientId.toLowerCase())

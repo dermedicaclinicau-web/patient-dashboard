@@ -24,6 +24,10 @@ function doPost(e) {
     if (body.action === 'appointments') return json_(handleAppointments_(body));
     if (body.action === 'preconsult') return json_(handlePreconsult_(body));
     if (body.action === 'processRecording') return json_(handleProcessRecording_(body));
+    if (body.action === 'deleteRecording') return json_(handleDeleteRecording_(body));
+    if (body.action === 'sendTreatmentEmail') return json_(handleSendTreatmentEmail_(body));
+    if (body.action === 'regenerateSoap') return json_(handleRegenerateSoap_(body));
+    if (body.action === 'emailFromPlan') return json_(handleEmailFromPlan_(body));
 
     const pin = String(body.pin || '').trim();
 
@@ -142,13 +146,13 @@ function signJwt_(payload, cfg) {
 // OAuth access token for the Firestore REST API (cached ~50 min)
 function getAccessToken_(cfg) {
   const cache = CacheService.getScriptCache();
-  const cached = cache.get('sa_access_token_v2');
+  const cached = cache.get('sa_access_token_v3');
   if (cached) return cached;
 
   const now = Math.floor(Date.now() / 1000);
   const assertion = signJwt_({
     iss: cfg.email,
-    scope: 'https://www.googleapis.com/auth/datastore https://www.googleapis.com/auth/devstorage.read_only',
+    scope: 'https://www.googleapis.com/auth/datastore https://www.googleapis.com/auth/devstorage.read_write',
     aud: 'https://oauth2.googleapis.com/token',
     iat: now,
     exp: now + 3600,
@@ -162,7 +166,7 @@ function getAccessToken_(cfg) {
   const data = JSON.parse(res.getContentText());
   if (!data.access_token) throw new Error('Access token error: ' + res.getContentText());
 
-  cache.put('sa_access_token_v2', data.access_token, 3000);
+  cache.put('sa_access_token_v3', data.access_token, 3000);
   return data.access_token;
 }
 
@@ -819,9 +823,12 @@ function clearStaffCache() {
 }
 
 
-// ===================== Consultation recordings: Deepgram -> Gemini -> Firestore =====================
+// ===================== Consultation recordings: Deepgram -> Gemini (Recorder prompts) -> Firestore =====================
+// Two separate runs per recording (transcribe, then write notes) so each stays well under 6 minutes.
+// The prompts, schema and formatting come from Soap.gs (copied from the Recorder app).
 
-const STUCK_AFTER_MS_ = 15 * 60 * 1000; // a job "in progress" this long is assumed to have crashed
+const STUCK_AFTER_MS_ = 15 * 60 * 1000; // a stage "in progress" this long is assumed to have crashed
+const REC_TZ_ = 'Australia/Perth';
 
 function handleProcessRecording_(body) {
   if (!getSession_(String(body.session || ''))) return { ok: false, error: 'UNAUTHORIZED' };
@@ -830,7 +837,7 @@ function handleProcessRecording_(body) {
   return processJob_(id, true);
 }
 
-// Runs every 5 minutes: finishes any uploaded / stalled / failed jobs
+// Runs every 5 minutes: finishes any waiting / stalled / failed jobs
 function processPendingRecordings() {
   const cfg = getConfig_();
   const started = Date.now();
@@ -843,7 +850,7 @@ function processPendingRecordings() {
         from: [{ collectionId: 'recording_jobs' }],
         where: { fieldFilter: {
           field: { fieldPath: 'status' }, op: 'IN',
-          value: { arrayValue: { values: ['uploaded', 'failed', 'transcribing', 'writing']
+          value: { arrayValue: { values: ['uploaded', 'transcribed', 'failed', 'transcribing', 'writing']
             .map(function (s) { return { stringValue: s }; }) } },
         } },
         limit: 10,
@@ -855,8 +862,10 @@ function processPendingRecordings() {
 
   JSON.parse(res.getContentText()).forEach(function (row) {
     if (!row.document) return;
-    if (Date.now() - started > 4 * 60 * 1000) return; // leave time before the 6-minute limit
-    processJob_(row.document.name.split('/').pop(), false);
+    const id = row.document.name.split('/').pop();
+    if (Date.now() - started > 3 * 60 * 1000) return; // leave room before the 6-minute limit
+    const r = processJob_(id, false);
+    if (r.next && Date.now() - started < 3 * 60 * 1000) processJob_(id, false); // write notes straight after
   });
 }
 
@@ -873,30 +882,37 @@ function processJob_(id, manual) {
   const cfg = getConfig_();
   const job = claimJob_(cfg, id, manual);
   if (!job) return { ok: false, error: 'NOT_CLAIMABLE' };
-  const path = 'recording_jobs/' + id;
+
+  const jobPath = 'recording_jobs/' + id;
+  const stage = job._stage;
 
   try {
-    const audio = downloadAudio_(cfg, job.audioPath);
-    const dg = deepgram_(audio, job.mimeType);
-    if (!dg.transcript) throw new Error('No speech was detected in the recording.');
+    if (stage === 'transcribing') {
+      transcribeStage_(cfg, job);
+      fsPatch_(cfg, jobPath, { status: 'transcribed', stageAt: new Date().toISOString() });
+      return { ok: true, next: true }; // notes are written in a separate run
+    }
 
-    fsPatch_(cfg, path, { status: 'writing', stageAt: new Date().toISOString() });
-    const soap = gemini_(dg.transcript, job);
-
-    const transcriptId = saveTranscript_(cfg, job, dg, soap);
-    fsPatch_(cfg, path, { status: 'ready', stageAt: new Date().toISOString(), transcriptId: transcriptId, error: '' });
-    return { ok: true, transcriptId: transcriptId };
+    writeNotesStage_(cfg, job);
+    fsPatch_(cfg, jobPath, { status: 'ready', stageAt: new Date().toISOString(), transcriptId: id, error: '' });
+    return { ok: true, transcriptId: id };
   } catch (err) {
-    console.error('Recording ' + id + ' failed: ' + (err && err.stack ? err.stack : err));
-    fsPatch_(cfg, path, {
-      status: 'failed', stageAt: new Date().toISOString(),
-      error: String((err && err.message) || err).slice(0, 300),
-    });
+    console.error('Recording ' + id + ' failed at ' + stage + ': ' + (err && err.stack ? err.stack : err));
+    const failedStage = (stage === 'writing' && !err.retranscribe) ? 'writing' : 'transcribing';
+    try {
+      fsPatch_(cfg, jobPath, {
+        status: 'failed', failedStage: failedStage, stageAt: new Date().toISOString(),
+        error: String((err && err.message) || err).slice(0, 300),
+      });
+    } catch (e2) { console.error('Could not mark job failed: ' + e2); }
+    if (stage === 'writing') {
+      try { fsPatch_(cfg, 'appointment_transcripts/' + id, { 'Status': 'Transcribed - SOAP Failed (regenerate available)' }); } catch (e3) { }
+    }
     return { ok: false, error: 'FAILED' };
   }
 }
 
-// Marks a job as in progress so two runs never process the same recording
+// Decides which stage to run and marks it in progress (so two runs never do the same work)
 function claimJob_(cfg, id, manual) {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(20000)) return null;
@@ -907,22 +923,92 @@ function claimJob_(cfg, id, manual) {
     const attempts = Number(job.attempts || 0);
     const stuck = (job.status === 'transcribing' || job.status === 'writing') &&
       job.stageAt && (Date.now() - Date.parse(job.stageAt) > STUCK_AFTER_MS_);
-    const retryable = job.status === 'failed' && (manual || attempts < 3);
 
-    if (job.status !== 'uploaded' && !retryable && !stuck) return null;
+    let stage = null;
+    if (job.status === 'uploaded') stage = 'transcribing';
+    else if (job.status === 'transcribed') stage = 'writing';
+    else if (stuck) stage = job.status;
+    else if (job.status === 'failed' && (manual || attempts < 4)) {
+      stage = job.failedStage === 'writing' ? 'writing' : 'transcribing';
+    }
+    if (!stage) return null;
 
     fsPatch_(cfg, 'recording_jobs/' + id, {
-      status: 'transcribing', stageAt: new Date().toISOString(), attempts: attempts + 1, error: '',
+      status: stage, stageAt: new Date().toISOString(), attempts: attempts + 1, error: '',
     });
+    job._stage = stage;
     return job;
   } finally {
     lock.releaseLock();
   }
 }
 
+// STEP 1: audio -> Deepgram -> appointment_transcripts (Status: "Transcribed - Processing SOAP")
+function transcribeStage_(cfg, job) {
+  const audio = downloadAudio_(cfg, job.audioPath);
+  const dg = deepgram_(audio, job.mimeType, job.staffName);
+  const started = job.startedAt ? new Date(job.startedAt) : new Date();
+  const id = job.recordingId;
+
+  commitWrites_(cfg, [updateWrite_(cfg, 'appointment_transcripts/' + id, {
+    'Record ID': id,
+    'Status': 'Transcribed - Processing SOAP',
+    'Record Date and Time': Utilities.formatDate(started, REC_TZ_, 'MMMM d, yyyy h:mm a'),
+    'Patient ID': job.patientId || job.patientDocId || '',
+    'Patient Doc ID': job.patientDocId || '',
+    'Patient Name': job.patientName || '',
+    'Staff Name': job.staffName || '',
+    'DeepGram Transcript': dg.formatted,  // same as the Recorder: formatted, speaker-labelled transcript
+    'Full Raw Transcript': dg.formatted,
+    'DeepGram Summary': dg.summary || '',
+    'Gemini SOAP': '',
+    'Audio Path': job.audioPath || '',
+    'Duration Sec': Number(job.durationSec || 0),
+    'Consent Recorded': true,
+    'Source': 'Dashboard recording',
+    'Created At': new Date().toISOString(),
+  })]);
+}
+
+// STEP 2: transcript -> Recorder's callGeminiComplex + formatSoapFromJSON -> Status "Draft"
+function writeNotesStage_(cfg, job) {
+  const id = job.recordingId;
+  const docPath = 'appointment_transcripts/' + id;
+  const rec = fsGetDoc_(cfg, docPath);
+  const transcript = rec ? String(rec['Full Raw Transcript'] || '') : '';
+  if (!transcript) {
+    const e = new Error('Transcript missing. It will be transcribed again.');
+    e.retranscribe = true;
+    throw e;
+  }
+
+  const dateObj = job.startedAt ? new Date(job.startedAt) : new Date();
+  const soapJson = cleanSoapJson_(callGeminiComplex(transcript.replace(/<[^>]*>?/gm, '\n'), dateObj));
+  const formattedSoap = formatSoapFromJSON(soapJson);
+
+  fsPatch_(cfg, docPath, {
+    'Status': 'Draft',
+    'Gemini SOAP': formattedSoap,
+    // Personal preferences Gemini picked up. Offered as suggestions in the review panel.
+    'Suggested Personal Notes': Array.isArray(soapJson.personal_notes)
+      ? soapJson.personal_notes.map(String).filter(Boolean) : [],
+  });
+
+  // Same referral email as the Recorder (non-fatal if it fails)
+  sendReferralNotification_(job.patientName || '', job.patientId || job.patientDocId || '',
+    soapJson.referral, job.staffName || '');
+}
+
 function downloadAudio_(cfg, audioPath) {
-  if (!/^appointment_audio\//.test(String(audioPath || ''))) throw new Error('Unexpected audio path.');
-  const bucket = PropertiesService.getScriptProperties().getProperty('STORAGE_BUCKET');
+  if (!/^appointment_audio\//.test(String(audioPath || ''))) {
+    throw new Error('Unexpected audio path: ' + audioPath);
+  }
+
+  // Tolerates "gs://", a trailing folder, or stray spaces in the Script Property
+  const bucket = String(PropertiesService.getScriptProperties().getProperty('STORAGE_BUCKET') || '')
+    .trim()
+    .replace(/^gs:\/\//i, '')
+    .split('/')[0];
   if (!bucket) throw new Error('Missing STORAGE_BUCKET script property.');
 
   const url = 'https://storage.googleapis.com/storage/v1/b/' + encodeURIComponent(bucket) +
@@ -931,115 +1017,98 @@ function downloadAudio_(cfg, audioPath) {
     headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) },
     muteHttpExceptions: true,
   });
-  if (res.getResponseCode() !== 200) throw new Error('Audio download failed (' + res.getResponseCode() + ').');
+
+  const code = res.getResponseCode();
+  if (code !== 200) {
+    let reason = '';
+    try {
+      const j = JSON.parse(res.getContentText());
+      reason = j.error && j.error.message ? j.error.message : '';
+    } catch (e) { /* not JSON */ }
+    throw new Error('Audio download failed (' + code + ')' + (reason ? ': ' + reason : '') +
+                    ' [bucket "' + bucket + '"]');
+  }
   return res.getBlob();
 }
 
-function deepgram_(blob, mime) {
+// Same Deepgram settings + formatting as the Recorder, but the audio is sent privately (not as a public URL)
+function deepgram_(blob, mime, staffName) {
   const props = PropertiesService.getScriptProperties();
   const key = props.getProperty('DEEPGRAM_API_KEY');
   if (!key) throw new Error('Missing DEEPGRAM_API_KEY script property.');
-  const model = props.getProperty('DEEPGRAM_MODEL') || 'nova-3';
+  const model = props.getProperty('DEEPGRAM_MODEL') || 'nova-2-medical';
 
-  const params = [
-    'model=' + encodeURIComponent(model), 'language=en', 'smart_format=true', 'punctuate=true',
-    'diarize=true', 'paragraphs=true', 'summarize=v2',
-    'mip_opt_out=true', // don't let Deepgram use this audio to improve their models
-  ].join('&');
+  const url = 'https://api.deepgram.com/v1/listen?model=' + encodeURIComponent(model) +
+    '&smart_format=true&summarize=v2&diarize=true' +
+    '&mip_opt_out=true'; // don't let Deepgram use this audio to improve their models
 
-  const res = UrlFetchApp.fetch('https://api.deepgram.com/v1/listen?' + params, {
+  const res = UrlFetchApp.fetch(url, {
     method: 'post',
     contentType: String(mime || 'audio/webm'),
     headers: { Authorization: 'Token ' + key },
     payload: blob.getBytes(),
     muteHttpExceptions: true,
   });
-  if (res.getResponseCode() !== 200) {
-    throw new Error('Deepgram ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
+
+  const httpCode = res.getResponseCode();
+  const bodyText = res.getContentText();
+  let json;
+  try { json = JSON.parse(bodyText); }
+  catch (e) { throw new Error('Deepgram: HTTP ' + httpCode + ' returned non-JSON: ' + bodyText.substring(0, 300)); }
+
+  const dgRequestId = json.request_id || (json.metadata && json.metadata.request_id) || '';
+  if (dgRequestId) console.log('Deepgram request_id: ' + dgRequestId + ' (HTTP ' + httpCode + ')');
+
+  if (httpCode < 200 || httpCode >= 300 || json.err_code || json.error) {
+    const dgMsg = json.err_msg || json.reason || (json.error && (json.error.message || json.error)) || bodyText.substring(0, 300);
+    let hint = '';
+    if (httpCode === 400) hint = ' (audio format not accepted, or the model name is retired)';
+    else if (httpCode === 401) hint = ' (API key invalid or rotated)';
+    else if (httpCode === 402) hint = ' (OUT OF CREDIT: top up in Deepgram Console > Billing)';
+    else if (httpCode === 429) hint = ' (rate limited)';
+    else if (httpCode >= 500) hint = ' (Deepgram-side outage: check status.deepgram.com)';
+    throw new Error('Deepgram HTTP ' + httpCode + hint + ': ' + dgMsg + (dgRequestId ? ' [request_id: ' + dgRequestId + ']' : ''));
   }
 
-  const data = JSON.parse(res.getContentText());
-  const results = data.results || {};
+  const results = json.results || {};
   const channel = (results.channels || [])[0] || {};
   const alt = (channel.alternatives || [])[0] || {};
-  const transcript = alt.paragraphs && alt.paragraphs.transcript
-    ? String(alt.paragraphs.transcript).trim()
-    : String(alt.transcript || '').trim();
-  const summary = results.summary && results.summary.short ? String(results.summary.short) : '';
-  return { transcript: transcript, summary: summary };
-}
 
-function gemini_(transcript, job) {
-  const props = PropertiesService.getScriptProperties();
-  const key = props.getProperty('GEMINI_API_KEY');
-  if (!key) throw new Error('Missing GEMINI_API_KEY script property.');
-  const model = props.getProperty('GEMINI_MODEL') || 'gemini-2.5-flash';
-  const prompt = props.getProperty('SOAP_PROMPT') || DEFAULT_SOAP_PROMPT_;
+  let rawTranscript = String(alt.transcript || '');
+  if (!rawTranscript.trim()) {
+    throw new Error('Deepgram returned an EMPTY transcript. The recording contained no recognisable speech' +
+      (json.metadata && json.metadata.duration ? ' (duration ' + json.metadata.duration + 's)' : '') + '.');
+  }
+  rawTranscript = applyTranscriptCorrections_(rawTranscript);
 
-  const tz = Session.getScriptTimeZone();
-  const when = job.startedAt ? new Date(job.startedAt) : new Date();
-
-  const generationConfig = { temperature: 0.2, maxOutputTokens: 8192 };
-  if (/2\.5-flash/.test(model)) generationConfig.thinkingConfig = { thinkingBudget: 0 }; // faster for note-writing
-
-  const body = {
-    systemInstruction: { parts: [{ text: prompt }] },
-    contents: [{
-      role: 'user',
-      parts: [{ text:
-        'Consultation date: ' + Utilities.formatDate(when, tz, 'MMMM d, yyyy') + '\n' +
-        'Clinician: ' + (job.staffName || 'Unknown') + '\n\n' +
-        'TRANSCRIPT:\n' + transcript,
-      }],
-    }],
-    generationConfig: generationConfig,
-  };
-
-  const res = UrlFetchApp.fetch(
-    'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent', {
-      method: 'post',
-      contentType: 'application/json',
-      headers: { 'x-goog-api-key': key },
-      payload: JSON.stringify(body),
-      muteHttpExceptions: true,
-    });
-  if (res.getResponseCode() !== 200) {
-    throw new Error('Gemini ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
+  // Speaker-labelled transcript, formatted exactly like the Recorder's
+  let formatted = rawTranscript;
+  const paragraphs = alt.paragraphs ? alt.paragraphs.paragraphs : null;
+  if (paragraphs && paragraphs.length) {
+    formatted = paragraphs.map(function (p) {
+      let label = 'Speaker ' + p.speaker;
+      let colorClass = 'text-gray-700';
+      if (p.speaker === 0) { label = staffName || 'Staff'; colorClass = 'text-blue-800'; }
+      else if (p.speaker === 1) { label = 'Patient'; colorClass = 'text-teal-700'; }
+      const sentences = (p.sentences || []).map(function (s) { return applyTranscriptCorrections_(s.text); }).join(' ');
+      return '<div>\n                <b class="' + colorClass + '">' + label + ':</b> \n                <span class="text-gray-800">' +
+        sentences + '</span>\n              </div><br>';
+    }).join('');
   }
 
-  const data = JSON.parse(res.getContentText());
-  const cand = (data.candidates || [])[0] || {};
-  const text = ((cand.content || {}).parts || []).map(function (p) { return p.text || ''; }).join('').trim();
-  if (!text) throw new Error('Gemini returned no notes' + (cand.finishReason ? ' (' + cand.finishReason + ')' : '') + '.');
-  return text;
-}
-
-function saveTranscript_(cfg, job, dg, soap) {
-  const tz = Session.getScriptTimeZone();
-  const started = job.startedAt ? new Date(job.startedAt) : new Date();
-  const id = job.recordingId;
-
-  const data = {
-    'Record ID': id,
-    'Record Date and Time': Utilities.formatDate(started, tz, 'MMMM d, yyyy h:mm a'), // e.g. October 8, 2026 10:32 AM
-    'Patient ID': job.patientId || job.patientDocId || '',
-    'Patient Doc ID': job.patientDocId || '',
-    'Patient Name': job.patientName || '',
-    'Staff Name': job.staffName || '',
-    'DeepGram Transcript': dg.summary || '',
-    'Full Raw Transcript': dg.transcript,
-    'Gemini SOAP': soap,
-    'Status': 'Draft',
-    'Audio Path': job.audioPath || '',
-    'Duration Sec': Number(job.durationSec || 0),
-    'Source': 'Dashboard recording',
-    'Created At': new Date().toISOString(),
+  return {
+    transcript: rawTranscript,
+    formatted: formatted,
+    summary: results.summary && results.summary.short ? String(results.summary.short) : '',
   };
-  commitWrites_(cfg, [updateWrite_(cfg, 'appointment_transcripts/' + id, data)]);
-  return id;
 }
 
-// ---- Small Firestore REST helpers ----
+// ---- Firestore REST helpers ----
+
+// Field names with spaces must be `quoted` in field paths
+function quoteField_(k) {
+  return /^[A-Za-z_][A-Za-z_0-9]*$/.test(k) ? k : '`' + String(k).replace(/`/g, '\\`') + '`';
+}
 
 function fsGetDoc_(cfg, path) {
   const res = UrlFetchApp.fetch('https://firestore.googleapis.com/v1/' + fsBase_(cfg) + '/' + path, {
@@ -1051,9 +1120,11 @@ function fsGetDoc_(cfg, path) {
   return fromFields_(JSON.parse(res.getContentText()).fields || {});
 }
 
-// Updates only the given (simple-named) fields
+// Updates only the given fields
 function fsPatch_(cfg, path, obj) {
-  const mask = Object.keys(obj).map(function (k) { return 'updateMask.fieldPaths=' + encodeURIComponent(k); }).join('&');
+  const mask = Object.keys(obj).map(function (k) {
+    return 'updateMask.fieldPaths=' + encodeURIComponent(quoteField_(k));
+  }).join('&');
   const res = UrlFetchApp.fetch('https://firestore.googleapis.com/v1/' + fsBase_(cfg) + '/' + path + '?' + mask, {
     method: 'patch',
     contentType: 'application/json',
@@ -1062,6 +1133,30 @@ function fsPatch_(cfg, path, obj) {
     muteHttpExceptions: true,
   });
   if (res.getResponseCode() !== 200) throw new Error('Firestore patch ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
+}
+
+// Lists every document in a collection (optionally only some fields)
+function fsListAll_(cfg, collectionId, maskFields) {
+  const mask = (maskFields || []).map(function (f) {
+    return '&mask.fieldPaths=' + encodeURIComponent(quoteField_(f));
+  }).join('');
+  const docs = [];
+  let pageToken = '';
+  let pages = 0;
+  do {
+    const url = 'https://firestore.googleapis.com/v1/' + fsBase_(cfg) + '/' + encodeURIComponent(collectionId) +
+      '?pageSize=300' + mask + (pageToken ? '&pageToken=' + encodeURIComponent(pageToken) : '');
+    const res = UrlFetchApp.fetch(url, {
+      headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) },
+      muteHttpExceptions: true,
+    });
+    if (res.getResponseCode() !== 200) throw new Error('Firestore list ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
+    const body = JSON.parse(res.getContentText());
+    (body.documents || []).forEach(function (d) { docs.push(d); });
+    pageToken = body.nextPageToken || '';
+    pages++;
+  } while (pageToken && pages < 200);
+  return docs;
 }
 
 function fromFields_(fields) {
@@ -1083,64 +1178,423 @@ function fromValue_(v) {
   return null;
 }
 
-// ---- Default SOAP prompt (override by pasting your own into the SOAP_PROMPT script property) ----
+// ---- Editor helper ----
+// Re-writes the notes for an existing recording using the Recorder prompts.
+// Copy the ID from Firestore > recording_jobs (e.g. "REC-20261008-ABC123"), then Run.
+function regenerateNotes() {
+  const id = 'PASTE_RECORDING_ID_HERE';
+  const cfg = getConfig_();
+  fsPatch_(cfg, 'recording_jobs/' + id, { status: 'transcribed', error: '' });
+  console.log('Result: ' + JSON.stringify(processJob_(id, true)));
+}
 
-const DEFAULT_SOAP_PROMPT_ = [
-  'You are a clinical scribe for Dermedica, an Australian cosmetic and dermatology clinic.',
-  'You will receive a transcript of a consultation between a clinician and a patient. Speakers are labelled',
-  '"Speaker 0", "Speaker 1", etc.; work out who is the clinician from context.',
+// ===================== Delete a recording (wrong patient / accidental recording) =====================
+
+function handleDeleteRecording_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+
+  const id = String(body.recordId || '').trim();
+  const reason = String(body.reason || '').trim().slice(0, 300);
+  if (!/^[A-Za-z0-9_-]{3,80}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
+  if (reason.length < 3) return { ok: false, error: 'REASON_REQUIRED' };
+
+  const cfg = getConfig_();
+  const rec = fsGetDoc_(cfg, 'appointment_transcripts/' + id);
+  if (!rec) return { ok: false, error: 'NOT_FOUND' };
+
+  // Signed-off notes are never deleted from the dashboard
+  if (/^reviewed$/i.test(String(rec['Status'] || ''))) return { ok: false, error: 'REVIEWED' };
+
+  // Only the clinician who recorded it, or an Admin
+  const job = fsGetDoc_(cfg, 'recording_jobs/' + id);
+  const isOwner = !!(job && job.createdByUid && job.createdByUid === session.uid);
+  const isAdmin = /^admin$/i.test(String(session.role || ''));
+  if (!isOwner && !isAdmin) return { ok: false, error: 'FORBIDDEN' };
+
+  // 1) Audio first: if this fails, nothing else is removed
+  const audioPath = String(rec['Audio Path'] || (job && job.audioPath) || '');
+  const audioDeleted = /^appointment_audio\//.test(audioPath) ? deleteAudio_(cfg, audioPath) : false;
+
+  // 2) Audit entry (no clinical content) + remove the record and its job, in one commit
+  const writes = [
+    updateWrite_(cfg, 'deleted_records/' + id, {
+      recordId: id,
+      patientId: String(rec['Patient ID'] || ''),
+      patientName: String(rec['Patient Name'] || ''),
+      recordDate: String(rec['Record Date and Time'] || ''),
+      recordedBy: String(rec['Staff Name'] || ''),
+      deletedBy: String(session.name || ''),
+      deletedByUid: String(session.uid || ''),
+      deletedAt: new Date().toISOString(),
+      reason: reason,
+      audioDeleted: audioDeleted,
+      source: String(rec['Source'] || ''),
+    }),
+    deleteWrite_(cfg, 'appointment_transcripts/' + id),
+  ];
+  if (job) writes.push(deleteWrite_(cfg, 'recording_jobs/' + id));
+  commitWrites_(cfg, writes);
+
+  console.log('Recording ' + id + ' deleted by ' + session.name + ' (' + reason + ')');
+  return { ok: true, audioDeleted: audioDeleted };
+}
+
+// Deletes one audio file from Storage. A missing file counts as already deleted.
+function deleteAudio_(cfg, audioPath) {
+  const bucket = String(PropertiesService.getScriptProperties().getProperty('STORAGE_BUCKET') || '')
+    .trim().replace(/^gs:\/\//i, '').split('/')[0];
+  if (!bucket) throw new Error('Missing STORAGE_BUCKET script property.');
+
+  const res = UrlFetchApp.fetch('https://storage.googleapis.com/storage/v1/b/' + encodeURIComponent(bucket) +
+    '/o/' + encodeURIComponent(audioPath), {
+    method: 'delete',
+    headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) },
+    muteHttpExceptions: true,
+  });
+  const code = res.getResponseCode();
+  if (code === 200 || code === 204) return true;
+  if (code === 404) return false;
+  throw new Error('Audio delete failed (' + code + '): ' + res.getContentText().slice(0, 200));
+}
+
+// ===================== Remove "Nil" / "Not discussed" filler so empty sections stay empty =====================
+
+// A line that is ONLY a placeholder. "Smoking: None" (a real answer) is kept.
+const PLACEHOLDER_RE_ = /^(?:nil|none|n\/?a|nkda|nkfa|unknown|not (?:discussed|mentioned|stated|applicable|recorded|provided|specified)|no (?:known )?(?:drug )?(?:allergies|medications?|(?:medical )?conditions?)(?: reported| known)?|nothing (?:to report|recorded|discussed|noted))\.?$/i;
+
+function cleanSoapJson_(v) {
+  if (typeof v === 'string') {
+    return v.split('\n').filter(function (line) {
+      const t = line.replace(/^\s*[-•*]\s*/, '').trim();
+      return !t || !PLACEHOLDER_RE_.test(t);
+    }).join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  }
+  if (Array.isArray(v)) {
+    return v.map(cleanSoapJson_).filter(function (x) { return !isEmptyValue_(x); });
+  }
+  if (v && typeof v === 'object') {
+    const out = {};
+    Object.keys(v).forEach(function (k) { out[k] = cleanSoapJson_(v[k]); });
+    return out;
+  }
+  return v;
+}
+
+function isEmptyValue_(x) {
+  if (x === null || x === undefined) return true;
+  if (typeof x === 'string') return !x.trim();
+  if (Array.isArray(x)) return x.length === 0;
+  if (typeof x === 'object') return Object.keys(x).every(function (k) { return isEmptyValue_(x[k]); });
+  return false;
+}
+
+// ===================== Email treatment information to the patient =====================
+
+const MAIL_LIMIT_PER_HOUR_ = 30; // per staff member
+
+function handleSendTreatmentEmail_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+
+  const recordId = String(body.recordId || '').trim();
+  const to = String(body.to || '').trim();
+  const subject = String(body.subject || '').trim().slice(0, 200) || 'Dermedica: Treatment Information';
+  const html = sanitizeEmailHtml_(body.html);
+  const treatments = (Array.isArray(body.treatments) ? body.treatments : [])
+    .map(function (t) { return String(t).trim().slice(0, 120); })
+    .filter(Boolean)
+    .slice(0, 20);
+
+  if (!/^[A-Za-z0-9_-]{3,80}$/.test(recordId)) return { ok: false, error: 'BAD_REQUEST' };
+  if (to.length > 254 || !/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(to)) return { ok: false, error: 'BAD_EMAIL' };
+  if (!html || html.length > 100000) return { ok: false, error: 'BAD_REQUEST' };
+
+  // Rate limit per staff member + Gmail's daily allowance
+  const cache = CacheService.getScriptCache();
+  const rlKey = 'mail_' + session.uid;
+  const sentThisHour = Number(cache.get(rlKey) || 0);
+  if (sentThisHour >= MAIL_LIMIT_PER_HOUR_) return { ok: false, error: 'RATE_LIMITED' };
+  if (MailApp.getRemainingDailyQuota() < 1) return { ok: false, error: 'QUOTA' };
+
+  // The patient + record details for the logs come from the record itself, not the browser
+  const cfg = getConfig_();
+  const rec = fsGetDoc_(cfg, 'appointment_transcripts/' + recordId);
+  if (!rec) return { ok: false, error: 'NOT_FOUND' };
+
+  MailApp.sendEmail({ to: to, subject: subject, htmlBody: html, name: 'Dermedica Clinic' });
+  cache.put(rlKey, String(sentThisHour + 1), 3600);
+
+  const entry = {
+    sentAt: new Date().toISOString(),
+    sentBy: String(session.name || ''),
+    to: to,
+    treatments: treatments,
+  };
+
+  // Log on the consultation record (powers the "Emailed" badges)
+  try {
+    const log = Array.isArray(rec['Treatment Emails Sent']) ? rec['Treatment Emails Sent'] : [];
+    fsPatch_(cfg, 'appointment_transcripts/' + recordId, { 'Treatment Emails Sent': log.concat([entry]) });
+  } catch (e) { console.warn('Email sent, but saving the record log failed: ' + e); }
+
+  // Log in the same sheet the Recorder uses (so the Recorder shows SENT badges too)
+  try {
+    const sheet = SpreadsheetApp.openById(EMAIL_LOG_SHEET_ID).getSheetByName(EMAIL_LOG_SHEET_NAME);
+    if (!sheet) throw new Error('Sheet not found: ' + EMAIL_LOG_SHEET_NAME);
+    sheet.appendRow([
+      Utilities.formatDate(new Date(), REC_TZ_, 'yyyy-MM-dd HH:mm:ss'), // A Timestamp
+      entry.sentBy,                                                    // B Staff Name
+      String(rec['Patient Name'] || ''),                              // C Patient Name
+      String(rec['Patient ID'] || ''),                                // D Patient ID
+      treatments.join('\n'),                                          // E Treatment Info Emailed
+      emailHtmlToText_(html),                                         // F Content
+      recordId,                                                       // G Record ID
+    ]);
+  } catch (e) { console.warn('Email sent, but the sheet log failed: ' + e); }
+
+  return { ok: true, entry: entry };
+}
+
+// Removes anything unsafe from the staff-edited message
+function sanitizeEmailHtml_(html) {
+  return String(html || '')
+    .replace(/<\s*(script|style|iframe|object|embed|form|input|button|textarea|select|link|meta)\b[\s\S]*?(<\s*\/\s*\1\s*>|\/?>)/gi, '')
+    .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/(href|src)\s*=\s*("|')\s*javascript:[^"']*\2/gi, '$1="#"')
+    .trim();
+}
+
+// Readable plain text for the audit sheet
+function emailHtmlToText_(html) {
+  return String(html || '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div)>/gi, '\n\n')
+    .replace(/<li[^>]*>/gi, '• ')
+    .replace(/<\/li>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#8599;/g, '↗')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// ===================== Regenerate notes from the saved transcript =====================
+
+function handleRegenerateSoap_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+
+  const id = String(body.recordId || '').trim();
+  if (!/^[A-Za-z0-9_-]{3,80}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
+
+  const cfg = getConfig_();
+  const docPath = 'appointment_transcripts/' + id;
+  const rec = fsGetDoc_(cfg, docPath);
+  if (!rec) return { ok: false, error: 'NOT_FOUND' };
+
+  // Signed-off notes are never overwritten
+  if (/^reviewed$/i.test(String(rec['Status'] || ''))) return { ok: false, error: 'REVIEWED' };
+
+  const transcript = String(rec['Full Raw Transcript'] || '');
+  if (!transcript.trim()) return { ok: false, error: 'NO_TRANSCRIPT' };
+
+  // One regeneration at a time per record
+  const cache = CacheService.getScriptCache();
+  const busyKey = 'regen_' + id;
+  if (cache.get(busyKey)) return { ok: false, error: 'BUSY' };
+  cache.put(busyKey, '1', 600);
+
+  try {
+    // Dates in the plan ("in 2 weeks") are worked out from the consultation date, not today
+    const recordDate = new Date(String(rec['Record Date and Time'] || '').replace(/\s+at\s+/i, ' '));
+    const dateObj = isNaN(recordDate) ? new Date() : recordDate;
+
+    let soapJson;
+    try {
+      soapJson = cleanSoapJson_(callGeminiComplex(transcript.replace(/<[^>]*>?/gm, '\n'), dateObj));
+    } catch (err) {
+      console.error('Regenerate ' + id + ' failed: ' + (err && err.stack ? err.stack : err));
+      return { ok: false, error: 'GEMINI_FAILED' };
+    }
+
+    fsPatch_(cfg, docPath, {
+      'Status': 'Draft',
+      'Gemini SOAP': formatSoapFromJSON(soapJson),
+      'Previous Gemini SOAP': String(rec['Gemini SOAP'] || ''), // kept so it can be restored
+      'Suggested Personal Notes': Array.isArray(soapJson.personal_notes)
+        ? soapJson.personal_notes.map(String).filter(Boolean) : [],
+      'Last Regenerated': Utilities.formatDate(new Date(), REC_TZ_, 'MMMM d, yyyy h:mm a'),
+      'Regenerated By': String(session.name || ''),
+    });
+    // Note: the referral email is NOT sent again on a regenerate (avoids duplicates)
+
+    console.log('Notes regenerated for ' + id + ' by ' + session.name);
+    return { ok: true };
+  } finally {
+    cache.remove(busyKey);
+  }
+}
+
+
+// ===================== Rebuild "Treatment Info to Email" from the treatment plan =====================
+
+function clip_(v, max) {
+  return String(v == null ? '' : v).trim().slice(0, max || 1500);
+}
+
+function handleEmailFromPlan_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+
+  const concerns = (Array.isArray(body.plan) ? body.plan : []).slice(0, 6)
+    .map(function (c) {
+      c = c || {};
+      return {
+        category: clip_(c.category, 100), area: clip_(c.area, 300), treatment: clip_(c.treatment),
+        frequency: clip_(c.frequency), quote: clip_(c.quote), comments: clip_(c.comments),
+      };
+    })
+    .filter(function (c) { return c.treatment; });
+  if (!concerns.length) return { ok: false, error: 'BAD_REQUEST' };
+
+  const currentList = (Array.isArray(body.current) ? body.current : []).slice(0, 20)
+    .map(function (it) {
+      it = it || {};
+      return {
+        name: clip_(it.name, 120),
+        areas: (Array.isArray(it.areas) ? it.areas : []).slice(0, 10).map(function (a) {
+          a = a || {};
+          return { areaName: clip_(a.areaName, 300), quote: clip_(a.quote), comment: clip_(a.comment) };
+        }),
+      };
+    })
+    .filter(function (it) { return it.name; });
+
+  try {
+    const items = geminiEmailFromPlan_(concerns, currentList, getOfficialTreatmentNames_());
+    return { ok: true, items: items };
+  } catch (err) {
+    console.error('Email from plan failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: false, error: 'GEMINI_FAILED' };
+  }
+}
+
+// Official names from TREATMENT-CONFIGURATIONS (cached 10 minutes)
+function getOfficialTreatmentNames_() {
+  const cache = CacheService.getScriptCache();
+  const cached = cache.get('treatment_names_v1');
+  if (cached) return JSON.parse(cached);
+
+  const names = fsListAll_(getConfig_(), 'TREATMENT-CONFIGURATIONS', ['Treatment Name'])
+    .map(function (d) {
+      const f = d.fields && d.fields['Treatment Name'];
+      return f && f.stringValue ? String(f.stringValue).trim() : '';
+    })
+    .filter(Boolean)
+    .sort();
+
+  try { cache.put('treatment_names_v1', JSON.stringify(names), 600); } catch (e) { /* too big to cache */ }
+  return names;
+}
+
+const EMAIL_FROM_PLAN_PROMPT_ = [
+  'You update the "Treatment Info to Email" list for Dermedica, an Australian cosmetic clinic,',
+  'using the clinician\'s EDITED treatment plan. The list is sent to the patient, so it must be accurate and patient-friendly.',
   '',
-  'Write concise, professional clinical notes in Australian English. Use ONLY information stated in the transcript.',
-  'Never invent findings, doses, prices or plans. If a section was not discussed, write "Not discussed."',
-  '',
-  'Output plain text only (no markdown, no asterisks, no tables). Use EXACTLY these section headings, each on its own line, in this order:',
-  '',
-  '!!CLINICAL NOTES:',
-  '- Age (if mentioned)',
-  '- Reasons for visit / chief complaints',
-  '- Aggravating/alleviating factors',
-  '- Relevant history / contributing factors',
-  '- Examination findings mentioned by the clinician',
-  '- Treatment performed today (product, area, units/volume, batch if stated)',
-  '- Advice given / aftercare',
-  '',
-  '!!SOCIAL HISTORY:',
-  'One item per line starting with "- " (e.g. occupation, smoking, alcohol, sun exposure, exercise, upcoming events).',
-  '',
-  '!!PERSONALITY:',
-  'Brief, respectful notes useful for rapport (e.g. "- Prefers natural results", "- Anxious about needles").',
-  '',
-  '!!MEDICATION:',
-  'One medication per line starting with "- ", with dose if stated. Write "Nil" if the patient takes none.',
-  '',
-  '!!MEDICAL CONDITIONS:',
-  'One per line starting with "- ". Write "Nil" if none.',
-  '',
-  '!!ALLERGIES:',
-  'One per line starting with "- ". Write "NKDA" if the patient reports no known allergies.',
-  '',
-  '!!TREATMENT PLAN:',
-  'For each concern use exactly this structure:',
-  'CONCERN A: <concern> — <short description>',
-  'AREA: <area>',
-  'TREATMENT:',
-  '- <treatment>',
-  'FREQUENCY/INTERVAL:',
-  '- <frequency>',
-  'QUOTE:',
-  '- <price as stated, or "Not discussed">',
-  'COMMENTS:',
-  '- <comments>',
-  'Repeat as CONCERN B, CONCERN C and so on for further concerns. Then:',
-  'SUGGESTED TIMELINE:',
-  '<Month Year>',
-  '<treatment (n of N)>',
-  'Special instructions BEFORE your treatment: <instruction>   (only if stated)',
-  'If no new plan was made, write "REVIEW OF EXISTING PLAN (no new plan generated)" followed by a one-paragraph summary.',
-  '',
-  '!!TREATMENT INFO TO EMAIL:',
-  'A short, friendly patient-facing summary of the recommended treatments and aftercare, addressed to the patient.',
-  '',
-  '!!BOOK NEXT APPOINTMENT:',
-  'What should be booked next and when (e.g. "Review in 2 weeks"), or "Not discussed."',
+  'RULES',
+  '1. Create one item for each distinct treatment in treatment_plan (the "treatment" field). If one concern lists several',
+  '   treatments, create one item for each. If the same treatment appears in several concerns, create ONE item with one',
+  '   dynamic_areas entry per concern.',
+  '2. "name" MUST be copied exactly from official_treatment_names: choose the official treatment that the plan treatment refers to.',
+  '   Only if nothing fits, use the plan\'s own wording.',
+  '3. If current_email_list already has an item for the same treatment, keep its exact name, and keep its comment wording',
+  '   for any detail the plan did not change.',
+  '4. areaName = the concern\'s area. quote = the plan\'s quote for that treatment, copied exactly (keep $ amounts and inclusions).',
+  '   Use "" if the plan has no quote. Never invent or change a price.',
+  '5. comment = short patient-friendly lines separated by "\\n": the frequency/number of treatments, plus any comment the',
+  '   patient needs to know (preparation, test patch, downtime). Leave out internal clinical notes. Use "" if nothing applies.',
+  '6. Do NOT include treatments that are not in treatment_plan (items removed from the plan must be dropped).',
+  '7. Australian English. No markdown.',
 ].join('\n');
+
+function geminiEmailFromPlan_(concerns, currentList, names) {
+  const key = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  if (!key) throw new Error('Missing GEMINI_API_KEY script property.');
+
+  const schema = {
+    type: 'OBJECT',
+    properties: {
+      items: {
+        type: 'ARRAY',
+        items: {
+          type: 'OBJECT',
+          properties: {
+            name: { type: 'STRING' },
+            dynamic_areas: {
+              type: 'ARRAY',
+              items: {
+                type: 'OBJECT',
+                properties: { areaName: { type: 'STRING' }, quote: { type: 'STRING' }, comment: { type: 'STRING' } },
+                required: ['areaName', 'quote', 'comment'],
+              },
+            },
+          },
+          required: ['name', 'dynamic_areas'],
+        },
+      },
+    },
+    required: ['items'],
+  };
+
+  const res = UrlFetchApp.fetch(
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'x-goog-api-key': key },
+      payload: JSON.stringify({
+        systemInstruction: { parts: [{ text: EMAIL_FROM_PLAN_PROMPT_ }] },
+        contents: [{
+          role: 'user',
+          parts: [{ text: JSON.stringify({
+            official_treatment_names: names,
+            treatment_plan: concerns,
+            current_email_list: currentList,
+          }) }],
+        }],
+        generationConfig: {
+          temperature: 0.1,
+          responseMimeType: 'application/json',
+          responseSchema: schema,
+          thinkingConfig: { thinkingBudget: 0 },
+        },
+      }),
+      muteHttpExceptions: true,
+    });
+  if (res.getResponseCode() !== 200) {
+    throw new Error('Gemini ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 300));
+  }
+
+  const data = JSON.parse(res.getContentText());
+  const cand = (data.candidates || [])[0] || {};
+  const text = ((cand.content || {}).parts || []).map(function (p) { return p.text || ''; }).join('');
+  const parsed = JSON.parse(text || '{}');
+
+  // Tidy: exact official spelling where it matches, drop empties
+  const byLower = {};
+  names.forEach(function (n) { byLower[n.toLowerCase()] = n; });
+
+  return (Array.isArray(parsed.items) ? parsed.items : [])
+    .map(function (it) {
+      const name = clip_(it && it.name, 120);
+      return {
+        name: byLower[name.toLowerCase()] || name,
+        dynamic_areas: (Array.isArray(it && it.dynamic_areas) ? it.dynamic_areas : [])
+          .map(function (a) {
+            return { areaName: clip_(a && a.areaName, 300), quote: clip_(a && a.quote), comment: clip_(a && a.comment) };
+          })
+          .filter(function (a) { return a.areaName || a.quote || a.comment; }),
+      };
+    })
+    .filter(function (it) { return it.name; });
+}
