@@ -73,6 +73,10 @@ export function formSnapshot({ name, fields, settings }) {
     settings: {
       showLetterhead: !(settings && settings.showLetterhead === false),
       group: settings && GROUP_KEYS.includes(settings.group) ? settings.group : "",
+      showTitle: !(settings && settings.showTitle === false),
+      titleAlign: settings && ["left", "center", "right"].includes(settings.titleAlign) ? settings.titleAlign : "left",
+      titleSize: settings && ["small", "medium", "large"].includes(settings.titleSize) ? settings.titleSize : "medium",
+      showMeta: !(settings && settings.showMeta === false),
     },
   };
 }

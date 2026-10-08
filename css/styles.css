@@ -1923,3 +1923,62 @@ ul.ff-log { display: flex; flex-direction: column; gap: .2rem; margin: 0 0 1rem;
 }
 .fp-note { padding: 0 .9rem .5rem; font-size: .8rem; color: var(--muted); }
 .rc-link[aria-expanded="true"] { text-decoration: underline; }
+
+/* ---------- Form title settings ---------- */
+.fe-title.is-left { text-align: left; }
+.fe-title.is-center { text-align: center; }
+.fe-title.is-right { text-align: right; }
+.fe-title.is-small { font-size: 1.15rem; }
+.fe-title.is-large { font-size: 2rem; }
+.fe-shell.is-build .fe-title.is-clickable { cursor: pointer; border-radius: 6px; }
+.fe-shell.is-build .fe-title.is-clickable:hover { outline: 1px dashed var(--primary); outline-offset: 6px; }
+.fe-title.is-selected, .fe-shell.is-build .fe-title.is-clickable:focus-visible { outline: 2px solid var(--primary); outline-offset: 6px; }
+.fe-title-settings { gap: .45rem; }
+
+/* ---------- Fill-in / saved form page: floating action bar ---------- */
+.ff-wrap { max-width: 920px; margin: 0 auto; }
+.ff-bar { position: sticky; top: .75rem; z-index: 30; margin: 0 0 1.25rem; border: 1px solid var(--border);
+  border-radius: 14px; background: rgba(255, 255, 255, .92); -webkit-backdrop-filter: saturate(1.4) blur(10px);
+  backdrop-filter: saturate(1.4) blur(10px); box-shadow: 0 6px 24px rgba(15, 23, 42, .07); }
+.ff-bar-inner { display: flex; flex-wrap: wrap; align-items: center; gap: .85rem; padding: .7rem .85rem; }
+.ff-back { display: inline-grid; place-items: center; flex-shrink: 0; width: 38px; height: 38px; border: 1px solid var(--border);
+  border-radius: 10px; background: #fff; color: var(--text); text-decoration: none; }
+.ff-back:hover { border-color: var(--primary); color: var(--primary); }
+.ff-back svg { width: 18px; height: 18px; }
+.ff-bar-title { display: flex; flex: 1 1 220px; flex-direction: column; min-width: 0; }
+.ff-bar-title strong { overflow: hidden; font-size: 1.02rem; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.ff-bar-title span { overflow: hidden; font-size: .8rem; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.ff-progress, .ff-saved-pill { display: inline-flex; align-items: center; gap: .3rem; padding: .3rem .7rem; border-radius: 999px;
+  font-size: .78rem; font-weight: 600; white-space: nowrap; }
+.ff-progress { background: #fff7ed; color: #9a3412; }
+.ff-progress.is-done, .ff-saved-pill { background: #ecfdf5; color: #047857; }
+.ff-saved-pill svg { width: 14px; height: 14px; }
+.ff-bar-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.ff-btn { display: inline-flex; align-items: center; justify-content: center; gap: .45rem; height: 38px; padding: 0 .9rem;
+  border: 1px solid var(--border); border-radius: 10px; background: #fff; color: var(--text); font: inherit; font-size: .88rem;
+  font-weight: 600; text-decoration: none; white-space: nowrap; cursor: pointer;
+  transition: border-color .15s, background .15s, color .15s, box-shadow .15s; }
+.ff-btn:hover { border-color: var(--primary); color: var(--primary); }
+.ff-btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+.ff-btn.is-primary { padding: 0 1.2rem; border-color: var(--primary); background: var(--primary); color: #fff;
+  box-shadow: 0 2px 8px rgba(15, 118, 110, .25); }
+.ff-btn.is-primary:hover { background: var(--primary-hover); color: #fff; }
+.ff-btn.is-quiet { border-color: transparent; background: transparent; color: var(--muted); }
+.ff-btn.is-quiet:hover { color: var(--text); }
+.ff-btn:disabled { opacity: .6; cursor: default; }
+.ff-btn:focus-visible, .ff-back:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.ff-msg { margin: 0; padding: 0 .9rem .7rem 4rem; font-size: .82rem; font-weight: 600; color: var(--danger); }
+.ff-msg:empty { display: none; }
+
+/* The form itself, as a sheet of paper */
+.ff-sheet { border-radius: 16px; box-shadow: 0 1px 2px rgba(15, 23, 42, .04), 0 14px 36px rgba(15, 23, 42, .07); }
+.ff-view ul.ff-log { margin-bottom: 1.25rem; }
+
+@media (max-width: 760px) {
+  .ff-bar { top: .5rem; }
+  .ff-bar-actions { width: 100%; }
+  .ff-bar-actions .ff-btn { flex: 1 1 auto; }
+  .ff-bar-actions .ff-btn.is-quiet { flex: 0 0 auto; }
+  .ff-msg { padding-left: .9rem; }
+}
+@media print { .ff-bar { display: none !important; } }

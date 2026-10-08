@@ -12,6 +12,16 @@ import { queueDelivery, takeDelivery, openEmailComposer, sendToPrinter, deliveri
 import { conditionPasses, visibleIds } from "./form-conditions.js";
 import { formGroup } from "./form-templates.js";
 import { highlightRecord } from "./records-view.js";
+import { formTitleHtml } from "./form-fields.js";
+
+const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+const BAR_ICONS = {
+  back: ic('<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>'),
+  print: ic('<polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/>'),
+  mail: ic('<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>'),
+  check: ic('<polyline points="20 6 9 17 4 12"/>'),
+  send: ic('<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>'),
+};
 
 const LAYOUT = ["text_block", "space", "letterhead", "watermark"];
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
@@ -33,7 +43,7 @@ function sheetHtml({ name, fields, settings, letterhead }) {
   return `
     ${watermarkHtml(fields, letterhead)}
     ${showLh ? `<div class="fe-lh-wrap">${letterheadHtml(letterhead)}</div>` : ""}
-    <h3 class="fe-title">${esc(name)}</h3>
+    ${formTitleHtml(name, settings || {})}
     <div class="fe-fields">${fields.map((f) => {
       const body = renderField(f, ctx);
       return body ? `<div class="fe-field" data-fid="${esc(f.id)}">${body}</div>` : "";
@@ -334,26 +344,30 @@ export async function mountFormFill(container, param, { staff } = {}) {
   const fields = ver.fields.map(normaliseField).filter(Boolean);
 
   root.innerHTML = `
-    ${back}
     <div class="ff-wrap">
-      <div class="ff-top">
-        <div>
-          <h2>${esc(ver.name)}</h2>
-          <p class="muted">For <strong>${esc(patient.name)}</strong> · ${esc(categoryLabel(tpl.category))} · Version ${ver.version}</p>
+      <div class="ff-bar" role="region" aria-label="Form actions">
+        <div class="ff-bar-inner">
+          <a class="ff-back" href="${patientHref}" aria-label="Back to patient" title="Back to patient">${BAR_ICONS.back}</a>
+          <div class="ff-bar-title">
+            <strong>${esc(ver.name)}</strong>
+            <span>${esc(patient.name)} · ${esc(categoryLabel(tpl.category))} · Version ${ver.version}</span>
+          </div>
+          <span class="ff-progress" data-role="progress" hidden></span>
+          <div class="ff-bar-actions">
+            <a class="ff-btn is-quiet" href="${patientHref}">Cancel</a>
+            <button type="button" class="ff-btn" data-save="print">${BAR_ICONS.print}<span>Save &amp; print</span></button>
+            <button type="button" class="ff-btn" data-save="email">${BAR_ICONS.mail}<span>Save &amp; email</span></button>
+            <button type="button" class="ff-btn is-primary" data-save="save">${BAR_ICONS.check}<span>Save</span></button>
+          </div>
         </div>
+        <p class="ff-msg" data-role="msg" aria-live="polite"></p>
       </div>
       <div class="fe-sheet ff-sheet" data-role="sheet">${sheetHtml({ name: ver.name, fields, settings: ver.settings, letterhead })}</div>
-      <div class="ff-actions">
-        <p class="muted" data-role="msg" aria-live="polite"></p>
-        <a class="btn-ghost" href="${patientHref}">Cancel</a>
-        <button type="button" class="btn-ghost" data-save="print">Save &amp; print</button>
-        <button type="button" class="btn-ghost" data-save="email">Save &amp; email</button>
-        <button type="button" class="btn-primary" data-save="save">Save</button>
-      </div>
     </div>`;
 
   const sheet = root.querySelector('[data-role="sheet"]');
   const msgEl = root.querySelector('[data-role="msg"]');
+  const progressEl = root.querySelector('[data-role="progress"]');
   const saveBtns = $all(root, "[data-save]");
   const wrap = (id) => sheet.querySelector(`[data-fid="${CSS.escape(id)}"]`);
   const pads = {};
@@ -444,7 +458,24 @@ export async function mountFormFill(container, param, { staff } = {}) {
     shown = applyVisibility(sheet, fields, rctx());
     updateCalcs();
     shown = applyVisibility(sheet, fields, rctx());
+    updateProgress();
   };
+
+  // "2 of 4 required" in the top bar (only questions that are showing count)
+  function updateProgress() {
+    let need = 0, done = 0;
+    fields.forEach((f) => {
+      if (!f.required || !canRequire(f.type) || LAYOUT.includes(f.type) || f.type === "photo") return;
+      if (!shown.has(f.id)) return;
+      const w = wrap(f.id);
+      if (!w) return;
+      need++;
+      if (!isBlank(readField(f, w, rctx()))) done++;
+    });
+    progressEl.hidden = !need;
+    progressEl.classList.toggle("is-done", done === need);
+    progressEl.textContent = done === need ? "All required answered" : `${done} of ${need} required`;
+  }
   refresh();
 
   // Consent checks run in the background
@@ -553,10 +584,10 @@ export async function mountFormFill(container, param, { staff } = {}) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(recordDate || "")) recordDate = todayIso();
 
     const btn = saveBtns.find((b) => b.dataset.save === kind);
-    const label = btn ? btn.textContent : "";
+    const lbl = btn && btn.querySelector("span"); const label = lbl ? lbl.textContent : "";
     saving = true;
     saveBtns.forEach((b) => { b.disabled = true; });
-    if (btn) btn.textContent = "Saving…";
+    if (lbl) lbl.textContent = "Saving…";
     msgEl.textContent = "";
     try {
       const id = await saveSubmission({
@@ -589,7 +620,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
         ? "Couldn't save. Check the Firestore rules for form_submissions have been published."
         : err.code ? "Couldn't save. Check your connection and try again." : err.message;
       saveBtns.forEach((b) => { b.disabled = false; });
-      if (btn) btn.textContent = label;
+      if (lbl) lbl.textContent = label;
     } finally {
       saving = false;
     }
@@ -650,19 +681,21 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
   if (!ver) { fail("Couldn't show this form", "The version it was filled in on is missing.", patientHref); return; }
 
   const fields = ver.fields.map(normaliseField).filter(Boolean);
-  root.innerHTML = `
-    <a class="back-link" href="${patientHref}">← Back to patient</a>
+    root.innerHTML = `
     <div class="ff-wrap ff-view">
-      <div class="ff-top">
-        <div>
-          <h2>${esc(sub.templateName)}</h2>
-          <p class="muted">For <strong>${esc(sub.patientName)}</strong> · ${esc(niceDate(sub.recordDate))}${
-            sub.createdBy ? ` · Filled in by ${esc(sub.createdBy)}` : ""} · Version ${sub.version}</p>
-        </div>
-        <div class="ff-top-actions">
-          <button type="button" class="btn-ghost" data-act="email">Email</button>
-          <button type="button" class="btn-ghost" data-act="printer">Send to printer</button>
-          <button type="button" class="btn-ghost" data-act="print">Print here</button>
+      <div class="ff-bar" role="region" aria-label="Form actions">
+        <div class="ff-bar-inner">
+          <a class="ff-back" href="${patientHref}" aria-label="Back to patient" title="Back to patient">${BAR_ICONS.back}</a>
+          <div class="ff-bar-title">
+            <strong>${esc(sub.templateName)}</strong>
+            <span>${esc(sub.patientName)} · ${esc(niceDate(sub.recordDate))}${sub.createdBy ? ` · by ${esc(sub.createdBy)}` : ""} · Version ${sub.version}</span>
+          </div>
+          <span class="ff-saved-pill">${BAR_ICONS.check}Saved</span>
+          <div class="ff-bar-actions">
+            <button type="button" class="ff-btn" data-act="email">${BAR_ICONS.mail}<span>Email</span></button>
+            <button type="button" class="ff-btn" data-act="printer">${BAR_ICONS.send}<span>Send to printer</span></button>
+            <button type="button" class="ff-btn" data-act="print">${BAR_ICONS.print}<span>Print here</span></button>
+          </div>
         </div>
       </div>
       <div data-role="log">${deliveriesHtml(sub.deliveries)}</div>
@@ -715,7 +748,7 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
   const printerFlow = async () => {
     if (printerBtn.disabled) return;
     printerBtn.disabled = true;
-    printerBtn.textContent = "Sending…";
+    printerBtn.querySelector("span").textContent = "Sending…";
     try {
       addEntry(await sendToPrinter({ sub, ver, letterhead }));
       showToast("Sent to the printer");
@@ -723,7 +756,7 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
       console.error("Send to printer failed:", err);
       showToast(deliveryError(err));
     } finally {
-      if (printerBtn.isConnected) { printerBtn.disabled = false; printerBtn.textContent = "Send to printer"; }
+      if (printerBtn.isConnected) { printerBtn.disabled = false; printerBtn.querySelector("span").textContent = "Send to printer"; }
     }
   };
 

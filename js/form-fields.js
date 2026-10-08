@@ -664,3 +664,19 @@ export function watermarkHtml(fields, letterhead) {
   }
   return inner ? `<div class="fe-wm" aria-hidden="true">${inner}</div>` : "";
 }
+
+/* ===================== Form title ===================== */
+
+// The title at the top of a form, following its Form settings.
+// In the builder it's clickable (opens Form settings), and a hidden title shows a placeholder.
+export function formTitleHtml(name, s = {}, { build = false, selected = false } = {}) {
+  const align = ["left", "center", "right"].includes(s.titleAlign) ? s.titleAlign : "left";
+  const size = ["small", "medium", "large"].includes(s.titleSize) ? s.titleSize : "medium";
+  if (s.showTitle === false) {
+    return build
+      ? `<button type="button" class="fe-lh-off${selected ? " is-selected" : ""}" data-role="title">The form title is hidden. Click to change.</button>`
+      : "";
+  }
+  return `<h3 class="fe-title is-${align} is-${size}${build ? " is-clickable" : ""}${build && selected ? " is-selected" : ""}"${
+    build ? ' data-role="title" tabindex="0" role="button" aria-label="Form title. Open form settings"' : ""}>${esc(name)}</h3>`;
+}

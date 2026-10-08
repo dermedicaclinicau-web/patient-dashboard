@@ -159,10 +159,16 @@ export function buildFormDocument({ sub, ver, letterhead: lh }) {
   const fileName = `${sub.templateName} - ${sub.patientName} - ${niceDate(sub.recordDate)}.pdf`
     .replace(/[\\/:*?"<>|]+/g, "-");
 
+  const s = ver.settings || {};
+  const align = ["left", "center", "right"].includes(s.titleAlign) ? s.titleAlign : "left";
+  const pt = { small: 15, medium: 19, large: 24 }[s.titleSize] || 19;
   const inner = `
     ${showLh ? letterhead(lh) : ""}
-    <h1>${esc(ver.name)}</h1>
-    <p class="meta">${esc(sub.patientName)}${sub.recordDate ? ` · ${esc(niceDate(sub.recordDate))}` : ""}</p>
+    ${s.showTitle !== false
+      ? `<h1 style="text-align:${align} !important;font-size:${pt}pt;">${esc(ver.name)}</h1>` : ""}
+    ${s.showMeta !== false
+      ? `<p class="meta" style="text-align:${align} !important;">${esc(sub.patientName)}${
+          sub.recordDate ? ` · ${esc(niceDate(sub.recordDate))}` : ""}</p>` : ""}
     ${body}`;
 
   const previewHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(fileName)}</title><style>

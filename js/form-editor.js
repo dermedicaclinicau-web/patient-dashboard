@@ -13,6 +13,7 @@ import { openPrinterDialog } from "./form-delivery.js";
 import { conditionSettingsHtml, applyConditionInput, applyConditionClick, conditionSummary, conditionProblem } from "./form-conditions.js";
 import { applyVisibility } from "./form-fill.js";
 import { CATEGORIES, categorize } from "./records.js";
+import { formTitleHtml } from "./form-fields.js";
 
 const UI = {
   up: '<polyline points="18 15 12 9 6 15"/>',
@@ -402,7 +403,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
       <div class="fe-sheet" data-role="sheet">
         ${watermarkHtml(fields, letterhead)}
         ${lhBlock}
-        <h3 class="fe-title">${esc(name || "Untitled form")}</h3>
+        ${formTitleHtml(name || "Untitled form", settings, { build, selected: formSel })}
         <div class="fe-fields" data-role="fields">${items || empty}</div>
       </div>`;
 
@@ -436,6 +437,25 @@ export async function mountFormEditor(container, { templateId, staff }) {
         </select>
         <small class="fe-note">Where saved forms appear on the patient's page, and which Create Consent / Create Tx buttons offer this form.</small>
       </label>` : ""}
+      <div class="fe-insp-field fe-title-settings">
+        <span class="fe-insp-label">Form title</span>
+        <label class="fe-check"><input type="checkbox" data-s="showTitle"${settings.showTitle !== false ? " checked" : ""} /> Show the form title</label>
+        <div class="fe-two">
+          <label class="fe-insp-field"><span class="fe-insp-label">Position</span>
+            <select class="fb-select" data-s="titleAlign">
+              ${[["left", "Left"], ["center", "Centre"], ["right", "Right"]].map(([v, l]) =>
+                `<option value="${v}"${(settings.titleAlign || "left") === v ? " selected" : ""}>${l}</option>`).join("")}
+            </select>
+          </label>
+          <label class="fe-insp-field"><span class="fe-insp-label">Size</span>
+            <select class="fb-select" data-s="titleSize">
+              ${[["small", "Small"], ["medium", "Medium"], ["large", "Large"]].map(([v, l]) =>
+                `<option value="${v}"${(settings.titleSize || "medium") === v ? " selected" : ""}>${l}</option>`).join("")}
+            </select>
+          </label>
+        </div>
+        <label class="fe-check"><input type="checkbox" data-s="showMeta"${settings.showMeta !== false ? " checked" : ""} /> Show the patient's name and date under the title on saved forms and PDFs</label>
+      </div>
       <label class="fe-check"><input type="checkbox" data-s="showLetterhead"${settings.showLetterhead !== false ? " checked" : ""} /> Show the letterhead at the top</label>
       <div class="fe-insp-field">
         <span class="fe-insp-label">Letterhead</span>
@@ -630,7 +650,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
   stage.addEventListener("click", (e) => {
     if (mode !== "build") return;
-    if (e.target.closest('[data-role="lh"]')) { select(FORM); return; }
+    if (e.target.closest('[data-role="lh"], [data-role="title"]')) { select(FORM); return; }
     const fieldEl = e.target.closest(".fe-field[data-id]");
     if (!fieldEl) return;
     const t = e.target.closest("[data-tool]");
@@ -640,7 +660,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
   stage.addEventListener("keydown", (e) => {
     if (e.key !== "Enter" && e.key !== " ") return;
-    if (e.target.matches('.fe-lh-wrap[data-role="lh"]')) {
+    if (e.target.matches('.fe-lh-wrap[data-role="lh"], .fe-title[data-role="title"]')) {
       e.preventDefault();
       select(FORM);
       return;
