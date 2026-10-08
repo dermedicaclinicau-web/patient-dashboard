@@ -1,5 +1,6 @@
 // Emailing a saved form as a PDF, sending it to the clinic printer,
 // the send log, and the printer address setting.
+// The PDF is made in the browser so it looks exactly like the preview.
 import { callApi } from "./appointments.js";
 import { getPatient } from "./patients.js";
 import { getPrintSettings, savePrintSettings } from "./form-templates.js";
@@ -9,6 +10,7 @@ import { showToast } from "./utils.js";
 
 const EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
 const PDF_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+const HTML2PDF_URL = "https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js";
 
 /* ---------- Hand-over from the fill-in page ("Save & email" / "Save & print") ---------- */
 
@@ -32,8 +34,14 @@ export function deliveryError(err) {
     case "QUOTA": return "The clinic's email limit for today has been reached. Try again tomorrow.";
     case "PDF_FAILED": return "Couldn't create the PDF. Try again.";
     case "NOT_FOUND": return "This saved form couldn't be found.";
+    case "INVALID_PIN":
+      return "The server hasn't been updated yet. In Apps Script, deploy a new version (Deploy → Manage deployments → Edit → New version).";
+    case "SERVER_ERROR":
+      return "The server hit an error while sending. Check Apps Script → Executions for details.";
     default:
-      return err && err.message && !err.code ? err.message : "Couldn't send. Check your connection and try again.";
+      return err && err.message && !err.code
+        ? err.message
+        : `Couldn't send${err && err.code ? ` (${err.code})` : ""}. Check your connection and try again.`;
   }
 }
 
@@ -51,17 +59,94 @@ export function deliveriesHtml(list) {
   </ul>`;
 }
 
-function previewDocument(html) {
-  const url = URL.createObjectURL(new Blob([html], { type: "text/html" }));
-  window.open(url, "_blank", "noopener");
-  setTimeout(() => URL.revokeObjectURL(url), 60000);
+/* ---------- Making the PDF in the browser ---------- */
+
+let libPromise = null;
+function loadHtml2Pdf() {
+  if (window.html2pdf) return Promise.resolve(window.html2pdf);
+  if (!libPromise) {
+    libPromise = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = HTML2PDF_URL;
+      s.async = true;
+      s.onload = () => (window.html2pdf ? resolve(window.html2pdf) : reject(new Error("PDF tool didn't load")));
+      s.onerror = () => { libPromise = null; reject(new Error("PDF tool didn't load")); };
+      document.head.appendChild(s);
+    });
+  }
+  return libPromise;
+}
+
+async function renderPdf(doc) {
+  const html2pdf = await loadHtml2Pdf();
+  const holder = document.createElement("div");
+  holder.setAttribute("aria-hidden", "true");
+  holder.style.cssText = "position:fixed;left:-10000px;top:0;";
+  holder.innerHTML = `<style>${doc.css}</style><div class="pdfdoc">${doc.inner}</div>`;
+  document.body.appendChild(holder);
+  try {
+    return await html2pdf().set({
+      margin: [12, 12, 12, 12],
+      filename: doc.fileName,
+      image: { type: "jpeg", quality: 0.92 },
+      html2canvas: { scale: 2, backgroundColor: "#ffffff", logging: false },
+      jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
+      pagebreak: { mode: ["css", "legacy"], avoid: [".q", ".block", "tr", ".sig"] },
+    }).from(holder.querySelector(".pdfdoc")).outputPdf("blob");
+  } finally {
+    holder.remove();
+  }
+}
+
+const blobToBase64 = (blob) => new Promise((resolve, reject) => {
+  const r = new FileReader();
+  r.onload = () => resolve(String(r.result).split(",")[1] || "");
+  r.onerror = () => reject(r.error);
+  r.readAsDataURL(blob);
+});
+
+// One saved form's PDF, made once and reused (preview, then send)
+function formPdf({ sub, ver, letterhead }) {
+  const doc = buildFormDocument({ sub, ver, letterhead });
+  let job = null;
+  return {
+    doc,
+    blob() {
+      if (!job) job = renderPdf(doc).catch((err) => { job = null; throw err; });
+      return job;
+    },
+  };
+}
+
+// What gets sent to Apps Script: the finished PDF, or (if the browser couldn't
+// make one) the document, which the server then turns into a PDF itself
+async function pdfPayload(p) {
+  try {
+    return { pdf: await blobToBase64(await p.blob()), fileName: p.doc.fileName };
+  } catch (err) {
+    console.warn("Browser PDF failed; the server will make it instead:", err);
+    return { html: p.doc.printHtml, fileName: p.doc.fileName };
+  }
+}
+
+async function previewPdf(p) {
+  const w = window.open("", "_blank");
+  if (w) w.document.write('<p style="font-family:Arial,sans-serif;padding:2rem;color:#475569">Preparing the PDF…</p>');
+  try {
+    const url = URL.createObjectURL(await p.blob());
+    if (w) w.location.href = url; else window.open(url, "_blank");
+    setTimeout(() => URL.revokeObjectURL(url), 120000);
+  } catch (err) {
+    console.warn("PDF preview failed, showing the page instead:", err);
+    if (w) { w.document.open(); w.document.write(p.doc.previewHtml); w.document.close(); }
+  }
 }
 
 /* ---------- Send to printer ---------- */
 
 export async function sendToPrinter({ sub, ver, letterhead }) {
-  const { html, fileName } = buildFormDocument({ sub, ver, letterhead });
-  const res = await callApi({ action: "sendFormPdf", submissionId: sub.id, kind: "print", html, fileName });
+  const payload = await pdfPayload(formPdf({ sub, ver, letterhead }));
+  const res = await callApi({ action: "sendFormPdf", submissionId: sub.id, kind: "print", ...payload });
   return res.entry;
 }
 
@@ -73,7 +158,9 @@ export async function openEmailComposer({ sub, ver, letterhead, staff }) {
   try { patient = await getPatient(sub.patientId); } catch (err) { console.warn("Couldn't load patient email:", err); }
   const onFile = String((patient && patient.email) || "").trim();
   const first = (patient && patient.firstName) || String(sub.patientName || "").split(" ")[0] || "";
-  const { html, fileName } = buildFormDocument({ sub, ver, letterhead });
+  const p = formPdf({ sub, ver, letterhead });
+  p.blob().catch(() => {}); // start making the PDF now, so sending is quick
+  const fileName = p.doc.fileName;
 
   const message =
     `Hi ${first || "there"},\n\n` +
@@ -133,7 +220,7 @@ export async function openEmailComposer({ sub, ver, letterhead, staff }) {
 
     dlg.addEventListener("click", (e) => {
       if (e.target.closest('[data-act="cancel"]') && !sending) dlg.close();
-      if (e.target.closest('[data-act="preview"]')) previewDocument(html);
+      if (e.target.closest('[data-act="preview"]')) previewPdf(p);
     });
     dlg.addEventListener("cancel", (e) => { if (sending) e.preventDefault(); });
 
@@ -149,12 +236,14 @@ export async function openEmailComposer({ sub, ver, letterhead, staff }) {
 
       sending = true;
       sendBtn.disabled = true;
-      sendBtn.textContent = "Sending…";
+      sendBtn.textContent = "Preparing PDF…";
       showErr("");
       try {
+        const payload = await pdfPayload(p);
+        sendBtn.textContent = "Sending…";
         const res = await callApi({
           action: "sendFormPdf", submissionId: sub.id, kind: "email",
-          to, cc, subject, message: msg, html, fileName,
+          to, cc, subject, message: msg, ...payload,
         });
         result = res.entry;
         sending = false;

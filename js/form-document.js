@@ -1,7 +1,8 @@
-// The print / PDF version of a saved form: questions with written answers,
-// tables, signatures, the letterhead and a footer. Simple tables and
-// inline-friendly CSS, so the Apps Script PDF converter renders it reliably.
-import { esc, normaliseField, patientParts } from "./form-fields.js";
+// The PDF version of a saved form: questions with written answers, tables,
+// signatures and the letterhead. The browser turns this into the PDF, so it
+// looks exactly like the preview. (Simple tables are used so the server's
+// backup PDF converter can render it too.)
+import { esc, normaliseField, patientParts, INLINE_TYPES } from "./form-fields.js";
 import { formatCalc } from "./form-calc.js";
 import { visibleIds } from "./form-conditions.js";
 
@@ -14,21 +15,54 @@ export function niceDate(key) {
   return new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" });
 }
 
+// A4 width minus 12 mm margins on each side, at 96 dpi
+const CSS = `
+  .pdfdoc { width: 703px; font-family: Arial, Helvetica, sans-serif; font-size: 11pt; color: #1e293b; background: #fff; }
+  .pdfdoc * { box-sizing: border-box; }
+  .pdfdoc .lh { width: 100%; border-collapse: collapse; border-bottom: 2px solid #0f766e; margin-bottom: 16px; }
+  .pdfdoc .lh td { padding: 0 0 10px 0; vertical-align: middle; }
+  .pdfdoc .lh img { vertical-align: middle; }
+  .pdfdoc .lh-name { font-family: Georgia, serif; font-size: 16pt; color: #0f172a; vertical-align: middle; }
+  .pdfdoc .lh-lines { font-size: 8.5pt; color: #64748b; line-height: 1.5; }
+  .pdfdoc h1 { font-family: Georgia, serif; font-size: 19pt; font-weight: normal; color: #0f172a; margin: 4px 0 4px; }
+  .pdfdoc .meta { font-size: 9.5pt; color: #64748b; margin: 0 0 14px; }
+  .pdfdoc .q { padding: 9px 0; border-bottom: 1px solid #e2e8f0; page-break-inside: avoid; }
+  .pdfdoc .ql { font-size: 9.5pt; font-weight: bold; color: #475569; margin-bottom: 4px; }
+  .pdfdoc .qa { font-size: 11pt; line-height: 1.45; }
+  .pdfdoc table.qi { width: 100%; border-collapse: collapse; }
+  .pdfdoc table.qi td { padding: 0; vertical-align: top; }
+  .pdfdoc table.qi td.ql { width: 40%; padding: 2px 14px 0 0; margin: 0; }
+  .pdfdoc .none { color: #94a3b8; font-style: italic; }
+  .pdfdoc .note { color: #475569; }
+  .pdfdoc ul { margin: 2px 0; padding-left: 18px; }
+  .pdfdoc table.grid { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
+  .pdfdoc table.grid th, .pdfdoc table.grid td { border: 1px solid #cbd5e1; padding: 5px 7px; text-align: left; }
+  .pdfdoc table.grid th { background: #f1f5f9; }
+  .pdfdoc table.kv { border-collapse: collapse; font-size: 10.5pt; }
+  .pdfdoc table.kv td { padding: 3px 18px 3px 0; vertical-align: top; }
+  .pdfdoc table.kv td.k { color: #64748b; font-size: 9.5pt; }
+  .pdfdoc .block { padding: 10px 0; page-break-inside: avoid; }
+  .pdfdoc .block h2 { font-size: 11.5pt; margin: 0 0 5px; }
+  .pdfdoc .block p { margin: 0; font-size: 10pt; line-height: 1.55; }
+  .pdfdoc .sig img { height: 70px; }
+  .pdfdoc .sigmeta { font-size: 9pt; color: #475569; margin-top: 2px; }
+`;
+
 function letterhead(lh) {
   if (!lh) return "";
   const h = { small: 36, medium: 56, large: 80 }[lh.logoSize] || 56;
-  const logo = LOGO_RE.test(lh.logo || "") ? `<img src="${lh.logo}" height="${h}" alt="" style="vertical-align:middle">` : "";
+  const logo = LOGO_RE.test(lh.logo || "") ? `<img src="${lh.logo}" height="${h}" alt="">` : "";
   const name = lh.showName !== false && lh.name ? `<span class="lh-name">${esc(lh.name)}</span>` : "";
   const lines = [lh.line1, lh.line2].filter(Boolean).map(esc).join("<br>");
   if (lh.layout === "centre") {
-    return `<table class="lh" width="100%"><tr><td align="center">${logo}${logo && name ? "<br>" : ""}${name}${
+    return `<table class="lh"><tr><td align="center">${logo}${logo && name ? "<br>" : ""}${name}${
       lines ? `<div class="lh-lines">${lines}</div>` : ""}</td></tr></table>`;
   }
-  return `<table class="lh" width="100%"><tr><td>${logo}${logo && name ? "&nbsp;&nbsp;" : ""}${name}</td>` +
+  return `<table class="lh"><tr><td>${logo}${logo && name ? "&nbsp;&nbsp;" : ""}${name}</td>` +
     `<td align="right" class="lh-lines">${lines}</td></tr></table>`;
 }
 
-function answer(f, v, sig) {
+function answer(f, v, sig, inline) {
   const none = '<span class="none">Not answered</span>';
   switch (f.type) {
     case "short_text": case "long_text": case "email": case "dropdown": case "single_choice":
@@ -38,8 +72,8 @@ function answer(f, v, sig) {
     case "number":
       return v === null || v === undefined || v === "" ? none : esc(`${v}${f.unit ? " " + f.unit : ""}`);
     case "checkboxes":
-      return Array.isArray(v) && v.length
-        ? `<ul>${v.map((o) => `<li>${esc(o)}</li>`).join("")}</ul>` : '<span class="none">None ticked</span>';
+      if (!Array.isArray(v) || !v.length) return '<span class="none">None ticked</span>';
+      return inline ? v.map(esc).join(", ") : `<ul>${v.map((o) => `<li>${esc(o)}</li>`).join("")}</ul>`;
     case "checkbox_notes":
       return Array.isArray(v) && v.length
         ? `<ul>${v.map((r) => `<li>${esc(r.option)}${r.note ? ` <span class="note">(${esc(r.note)})</span>` : ""}</li>`).join("")}</ul>`
@@ -81,11 +115,17 @@ function answer(f, v, sig) {
   return none;
 }
 
+// Returns:
+//   inner       the document itself (inside <div class="pdfdoc">)
+//   css         its styling (all scoped to .pdfdoc)
+//   previewHtml a full page that looks like a sheet of paper (for Preview)
+//   printHtml   a plain page, used only if the browser can't make the PDF
+//   fileName
 export function buildFormDocument({ sub, ver, letterhead: lh }) {
   const fields = (ver.fields || []).map(normaliseField).filter(Boolean);
   const showLh = !(ver.settings && ver.settings.showLetterhead === false);
-
   const shown = visibleIds(fields, sub.answers);
+
   const body = fields.map((f) => {
     if (!shown.has(f.id)) return "";
     if (f.type === "watermark" || f.type === "photo") return "";
@@ -95,52 +135,34 @@ export function buildFormDocument({ sub, ver, letterhead: lh }) {
       return `<div class="block">${f.label ? `<h2>${esc(f.label)}</h2>` : ""}${
         f.text ? `<p>${esc(f.text).replace(/\n/g, "<br>")}</p>` : ""}</div>`;
     }
-    return `<div class="q"><div class="ql">${esc(f.label || "")}</div>` +
-      `<div class="qa">${answer(f, sub.answers[f.id], sub.signatures[f.id])}</div></div>`;
+    const v = sub.answers[f.id];
+    const sig = sub.signatures[f.id];
+    if (f.inline && INLINE_TYPES.includes(f.type)) {
+      return `<div class="q"><table class="qi"><tr><td class="ql">${esc(f.label || "")}</td>` +
+        `<td class="qa">${answer(f, v, sig, true)}</td></tr></table></div>`;
+    }
+    return `<div class="q"><div class="ql">${esc(f.label || "")}</div><div class="qa">${answer(f, v, sig, false)}</div></div>`;
   }).join("");
 
   const fileName = `${sub.templateName} - ${sub.patientName} - ${niceDate(sub.recordDate)}.pdf`
     .replace(/[\\/:*?"<>|]+/g, "-");
 
-  const footer = [
-    sub.patientName && `Patient: ${esc(sub.patientName)}`,
-    sub.recordDate && `Record date: ${esc(niceDate(sub.recordDate))}`,
-    sub.createdBy && `Completed by ${esc(sub.createdBy)}`,
-    `Form version ${sub.version}`,
-  ].filter(Boolean).join(" &nbsp;·&nbsp; ");
-
-  const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(fileName)}</title><style>
-    body { font-family: Arial, Helvetica, sans-serif; font-size: 11pt; color: #1e293b; margin: 0; }
-    .lh { border-collapse: collapse; border-bottom: 2px solid #0f766e; margin-bottom: 14px; }
-    .lh td { padding: 0 0 8px 0; vertical-align: middle; }
-    .lh-name { font-family: Georgia, serif; font-size: 16pt; color: #0f172a; vertical-align: middle; }
-    .lh-lines { font-size: 8.5pt; color: #64748b; line-height: 1.5; }
-    h1 { font-family: Georgia, serif; font-size: 18pt; font-weight: normal; margin: 6px 0 4px; }
-    .meta { font-size: 9pt; color: #64748b; margin: 0 0 12px; }
-    .q { padding: 8px 0; border-bottom: 1px solid #e2e8f0; page-break-inside: avoid; }
-    .ql { font-size: 9pt; font-weight: bold; color: #475569; margin-bottom: 3px; }
-    .qa { font-size: 11pt; line-height: 1.45; }
-    .none { color: #94a3b8; font-style: italic; }
-    .note { color: #475569; }
-    ul { margin: 2px 0; padding-left: 18px; }
-    table.grid { border-collapse: collapse; width: 100%; font-size: 9.5pt; }
-    table.grid th, table.grid td { border: 1px solid #cbd5e1; padding: 4px 6px; text-align: left; }
-    table.grid th { background: #f1f5f9; }
-    table.kv { border-collapse: collapse; font-size: 10.5pt; }
-    table.kv td { padding: 2px 16px 2px 0; vertical-align: top; }
-    table.kv td.k { color: #64748b; font-size: 9pt; }
-    .block { padding: 10px 0; page-break-inside: avoid; }
-    .block h2 { font-size: 11.5pt; margin: 0 0 4px; }
-    .block p { margin: 0; font-size: 10pt; line-height: 1.5; }
-    .sigmeta { font-size: 9pt; color: #475569; margin-top: 2px; }
-    .foot { margin-top: 22px; padding-top: 8px; border-top: 1px solid #e2e8f0; font-size: 8pt; color: #94a3b8; }
-  </style></head><body>
+  const inner = `
     ${showLh ? letterhead(lh) : ""}
     <h1>${esc(ver.name)}</h1>
     <p class="meta">${esc(sub.patientName)}${sub.recordDate ? ` · ${esc(niceDate(sub.recordDate))}` : ""}</p>
-    ${body}
-    <div class="foot">${footer}</div>
-  </body></html>`;
+    ${body}`;
 
-  return { html, fileName };
+  const previewHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(fileName)}</title><style>
+    body { margin: 0; background: #e2e8f0; }
+    .page { width: 703px; margin: 24px auto; padding: 45px; background: #fff; box-shadow: 0 4px 24px rgba(15, 23, 42, .15); }
+    ${CSS}
+  </style></head><body><div class="page"><div class="pdfdoc">${inner}</div></div></body></html>`;
+
+  const printHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(fileName)}</title><style>
+    body { margin: 0; }
+    ${CSS}
+  </style></head><body><div class="pdfdoc">${inner}</div></body></html>`;
+
+  return { inner, css: CSS, previewHtml, printHtml, fileName };
 }

@@ -71,6 +71,7 @@ export const FIELD_GROUPS = [
 export const CHOICE_TYPES = ["single_choice", "checkboxes", "checkbox_notes", "dropdown"];
 const LAYOUT_TYPES = ["single_choice", "checkboxes", "checkbox_notes"];
 const PLACEHOLDER_TYPES = ["short_text", "long_text", "email", "number", "dropdown"];
+export const INLINE_TYPES = ["short_text", "email", "number", "date", "record_date", "dropdown", "single_choice", "checkboxes", "calculation"];
 
 // Which patient details the Patient details block can show
 export const PATIENT_PARTS = [
@@ -200,6 +201,7 @@ export function cleanField(f) {
   }
   if (LAYOUT_TYPES.includes(f.type)) out.layout = pick(f.layout, ["list", "columns", "inline"], "list");
   if (PLACEHOLDER_TYPES.includes(f.type)) out.placeholder = clip(f.placeholder, 100);
+  if (INLINE_TYPES.includes(f.type)) out.inline = f.inline === true;
   if (FILLS_FOR[f.type] && f.fill && FILLS_FOR[f.type].includes(f.fill)) out.fill = f.fill;
 
   switch (f.type) {
@@ -319,7 +321,12 @@ export function renderField(f, ctx = {}) {
         f.required ? '<span class="fe-req" aria-label="required">*</span>' : ""}</div>`
     : "";
   const help = f.help && hasHelp(f.type) ? `<div class="fe-help">${esc(f.help)}</div>` : "";
-  const head = q + help;
+  // "Show the answer beside the question": question on the left, answer on the right
+  if (f.inline && INLINE_TYPES.includes(f.type) && !ctx.noHead) {
+    return `<div class="fe-inline"><div class="fe-inline-q">${q}${help}</div>` +
+      `<div class="fe-inline-a">${renderField(f, { ...ctx, noHead: true })}</div></div>`;
+  }
+  const head = ctx.noHead ? "" : q + help;
   const opts = Array.isArray(f.options) && f.options.length ? f.options : ["Option 1"];
   const box = (type) => `<input type="${type}"${inert} />`;
   const ph = f.placeholder ? ` placeholder="${esc(f.placeholder)}"` : "";
@@ -446,7 +453,7 @@ const layoutSetting = (f) =>
   setting("Layout", choose("layout", [["list", "One per line"], ["columns", "Two columns"], ["inline", "Side by side"]], f.layout || "list"),
     "Side by side suits short choices like Yes / No.");
 
-export function fieldSettings(f, ctx = {}) {
+function typeSettings(f, ctx = {}) {
   switch (f.type) {
     case "patient": {
       const on = patientParts(f).map(([k]) => k);
@@ -583,6 +590,12 @@ export function fieldSettings(f, ctx = {}) {
     }
   }
   return "";
+}
+
+export function fieldSettings(f, ctx = {}) {
+  return typeSettings(f, ctx) + (INLINE_TYPES.includes(f.type)
+    ? `<label class="fe-check"><input type="checkbox" data-k="inline"${f.inline ? " checked" : ""} /> Show the answer beside the question</label>`
+    : "");
 }
 
 /* ===================== Settings that edit lists inside a field ===================== */
