@@ -11,6 +11,7 @@ import { confirmDialog } from "./dialog.js";
 import { mountFormBuilder } from "./form-builder.js";
 import { mountFormFill, mountFormRecord } from "./form-fill.js";
 import { initFormPicker, closeFormPicker } from "./form-picker.js";
+import { mountImageBank } from "./image-bank.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -204,6 +205,7 @@ const PAGES = {
   patient: (el, id) => mountPatientDashboard(el, id, { staff: currentStaff, onBack: goBack }),
   fill: (el, param) => mountFormFill(el, param, { staff: currentStaff }),
       "form-record": (el, id) => mountFormRecord(el, id, { staff: currentStaff }),
+      "image-bank": (el) => mountImageBank(el, { isAdmin: /^admin$/i.test(String(currentStaff.role || "")) }),
 };
 
 function router() {
@@ -218,7 +220,8 @@ function router() {
   let param = "";
   try { param = decodeURIComponent(rest.join("/")); } catch { /* malformed URL, ignore */ }
 
-  const navKey = ["patient", "fill", "form-record"].includes(page) ? "patients" : page;
+  const navKey = ["patient", "fill", "form-record"].includes(page) ? "patients"
+    : page === "image-bank" ? "forms" : page;
     els.navItems.forEach((a) => {
     const active = a.dataset.page === navKey;
     a.classList.toggle("active", active);
