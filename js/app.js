@@ -210,6 +210,7 @@ const PAGES = {
       tasks: (el, param) => mountTaskManager(el, {
         param,
         isAdmin: /^admin$/i.test(String(currentStaff.role || "")),
+        staff: currentStaff,
       }),
 };
 
