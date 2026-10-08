@@ -1,4 +1,5 @@
 import { countPatients, fetchAllPatients, phoneCore } from "./patients.js";
+import { openNewPatientDialog } from "./new-patient.js";
 import {
   escapeHtml, getInitials, hueFromString, formatDobLong, calcAge, formatMobile, showToast, parseDateKey,
 } from "./utils.js";
@@ -297,7 +298,12 @@ export function mountPatientList(container) {
     refreshBtn.disabled = false;
   });
 
-  q(".pt-new").addEventListener("click", () => showToast("New patient: coming soon"));
+  q(".pt-new").addEventListener("click", async () => {
+    const created = await openNewPatientDialog({ loadAll });
+    if (!created) return;
+    showToast(`${created.name} added`);
+    location.hash = `#/patient/${encodeURIComponent(created.id)}`; // open the new patient
+  });
 
   results.addEventListener("click", (e) => {
     if (e.target.closest("[data-action='retry']")) run();

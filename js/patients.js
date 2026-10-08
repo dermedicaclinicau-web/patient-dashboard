@@ -2,7 +2,7 @@ import { db, auth } from "./firebase-config.js";
 import { formatDobLong, toDateKeyLoose } from "./utils.js";
 import {
   collection, query, where, orderBy, limit, startAfter, getDocs,
-  doc, getDoc, updateDoc, serverTimestamp, getCountFromServer,
+  doc, getDoc, setDoc, updateDoc, serverTimestamp, getCountFromServer,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const COLLECTION = "patient_list";
@@ -205,4 +205,79 @@ export async function fetchAllPatients() {
   return snap.docs
     .map(toPatient)
     .sort((a, b) => (a.nameKey || a.name.toLowerCase()).localeCompare(b.nameKey || b.name.toLowerCase()));
+}
+
+/* ===================== New patients ===================== */
+
+// "PAT-" + milliseconds, the same format as existing system-generated IDs
+async function newPatientId() {
+  for (let i = 0; i < 5; i++) {
+    const id = `PAT-${Date.now() + i}`;
+    const snap = await getDoc(doc(db, COLLECTION, id));
+    if (!snap.exists()) return id;
+  }
+  throw new Error("Couldn't create a patient ID. Please try again.");
+}
+
+// Exact-match check straight from Firestore (catches patients added since the list was loaded)
+export async function findPossibleDuplicates({ nameKey, email, mobile }) {
+  const col = collection(db, COLLECTION);
+  const checks = [];
+  if (nameKey) checks.push(getDocs(query(col, where("NameKey", "==", nameKey), limit(10))));
+  if (email) checks.push(getDocs(query(col, where("EmailKey", "==", email.toLowerCase()), limit(10))));
+  const core = phoneCore(mobile);
+  if (core.length >= 8) {
+    checks.push(getDocs(query(col, where("PhoneKey", "in", [core, `0${core}`, `61${core}`]), limit(10))));
+  }
+
+  const out = new Map();
+  (await Promise.all(checks)).forEach((snap) => snap.forEach((d) => out.set(d.id, toPatient(d))));
+  return [...out.values()];
+}
+
+// Creates a patient with the same fields (and search keys) as existing records
+export async function createPatient(input) {
+  const clean = (v) => String(v ?? "").trim().replace(/\s+/g, " ");
+  const first = clean(input.firstName);
+  const last = clean(input.lastName);
+  const email = clean(input.email).replace(/\s/g, "");
+  const mobile = String(input.mobile ?? "").replace(/\D/g, "");
+  const address = clean(input.address);
+  const dobKey = clean(input.dobKey);
+
+  if (!first || !last) throw new Error("First and last name are required.");
+  if (phoneCore(mobile).length < 8) throw new Error("Please enter a valid mobile number.");
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error("Please enter a valid email address.");
+  if (dobKey && !/^\d{4}-\d{2}-\d{2}$/.test(dobKey)) throw new Error("Please enter a valid date of birth.");
+
+  const user = auth.currentUser;
+  if (!user) throw new Error("Please log in again.");
+  let staffName = "";
+  try { staffName = (await user.getIdTokenResult()).claims.staffName || ""; } catch { /* optional */ }
+
+  const pttId = await newPatientId();
+  const nameKey = `${last} ${first}`.toLowerCase();
+
+  await setDoc(doc(db, COLLECTION, pttId), {
+    PttID: pttId,
+    "First Name": first,
+    "Last Name": last,
+    "Patient Name": `${first} ${last}`,
+    NameKey: nameKey,
+    Email: email,
+    EmailKey: email.toLowerCase(),
+    Mobile: mobile,
+    PhoneKey: mobile,
+    Address: address,
+    DobKey: dobKey,
+    DOB: dobKey ? formatDobLong(dobKey) : "",
+    IdentityKey: dobKey ? `${nameKey}|${dobKey}` : nameKey,
+    CreatedAt: serverTimestamp(),
+    CreatedBy: staffName,
+    CreatedByUid: user.uid,
+    Source: "Staff dashboard",
+  });
+
+  window.dispatchEvent(new CustomEvent("patient-updated", { detail: { id: pttId } }));
+  return { id: pttId, pttId, name: `${first} ${last}` };
 }

@@ -1291,6 +1291,38 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .hx-sug-add { border: none; background: #4f46e5; color: #fff; }
 .hx-sug-no { border: 1px solid #c7d2fe; background: #fff; color: #4338ca; }
 
+/* ---------- New patient ---------- */
+.np-dialog .em-form { max-height: calc(100vh - 2rem); overflow-y: auto; }
+.np-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; }
+.np-grid .full { grid-column: 1 / -1; }
+.np-note { margin-top: -.2rem; color: var(--muted); font-size: .78rem; }
+
+.np-dupes { padding: .75rem .85rem; border: 1px solid; border-radius: 12px; }
+.np-dupes.is-strong { border-color: #fecaca; background: #fef2f2; }
+.np-dupes.is-possible { border-color: #fde68a; background: #fffbeb; }
+.np-dupes-head { display: flex; align-items: center; gap: .45rem; margin-bottom: .5rem; font-size: .85rem; font-weight: 700; }
+.np-dupes.is-strong .np-dupes-head { color: #b91c1c; }
+.np-dupes.is-possible .np-dupes-head { color: #b45309; }
+.np-dupes-head svg { width: 16px; height: 16px; flex-shrink: 0; }
+.np-dupes ul { list-style: none; display: flex; flex-direction: column; gap: .4rem; }
+.np-dupe { display: flex; align-items: center; gap: .75rem; padding: .55rem .7rem; border-radius: 10px; background: #fff; }
+.np-dupe-main { flex: 1; min-width: 0; }
+.np-dupe-name { display: flex; align-items: center; flex-wrap: wrap; gap: .45rem; font-size: .9rem; font-weight: 600; }
+.np-dupe-name small { color: var(--muted); font-size: .72rem; font-weight: 500; }
+.np-tag { padding: .05rem .45rem; border-radius: 999px; background: #fee2e2; color: #b91c1c; font-size: .66rem;
+  font-style: normal; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.np-dupe-meta { display: flex; flex-wrap: wrap; gap: .3rem .8rem; margin-top: .15rem; color: var(--muted); font-size: .78rem; }
+.np-dupe .hit { padding: 0 .25rem; border-radius: 4px; background: #fef08a; color: #713f12; font-weight: 600; }
+.np-dupe-why { margin-top: .15rem; color: var(--muted); font-size: .72rem; font-style: italic; }
+.np-open { flex-shrink: 0; padding: .35rem .8rem; border: 1px solid var(--border); border-radius: 8px; background: #fff;
+  color: var(--primary); font-size: .8rem; font-weight: 700; text-decoration: none; }
+.np-open:hover { border-color: var(--primary); }
+.np-more { margin-top: .35rem; color: var(--muted); font-size: .75rem; }
+
+@media (max-width: 560px) {
+  .np-grid { grid-template-columns: 1fr; }
+}
+
 /* ---------- Confirm dialog ---------- */
 .cd-dialog { margin: auto; padding: 0; border: none; border-radius: 20px; width: min(420px, calc(100% - 2rem));
   background: #fff; box-shadow: 0 30px 70px -20px rgba(15, 23, 42, .45); }
