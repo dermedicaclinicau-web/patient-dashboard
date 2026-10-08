@@ -296,7 +296,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   mountRecords(root, patient);
   mountHistory(root, patient);  
   mountBillingRx(root, patient);
-  mountClinicalHistory(root);
+  mountClinicalHistory(root, patient, staff);
 
   // Treatment plan + Social history, both from appointment_transcripts (fetched once)
   async function loadTranscriptSections() {

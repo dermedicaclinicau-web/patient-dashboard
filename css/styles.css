@@ -1249,6 +1249,48 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .rm-chip:hover { border-color: #a5b4fc; color: #4338ca; }
 .rm-chip.active { background: #4f46e5; border-color: #4f46e5; color: #fff; }
 
+/* ---------- Editable clinical sections ---------- */
+.hx-sum-right { display: inline-flex; align-items: center; gap: .5rem; margin-left: auto; }
+.hx-edit-btn { display: inline-flex; align-items: center; gap: .3rem; height: 28px; padding: 0 .6rem;
+  border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--muted);
+  font-size: .75rem; font-weight: 600; cursor: pointer; }
+.hx-edit-btn:hover:not(:disabled) { color: var(--primary); border-color: var(--primary); }
+.hx-edit-btn:disabled { opacity: .45; cursor: default; }
+.hx-edit-btn svg { width: 13px; height: 13px; }
+.hx-tag.edited { background: #dcfce7; color: #15803d; }
+
+.hx-editor { display: flex; flex-direction: column; gap: .5rem; padding: .9rem 1rem; }
+.hx-edit-list { list-style: none; display: flex; flex-direction: column; gap: .4rem; }
+.hx-edit-list li { display: flex; align-items: center; gap: .4rem; }
+.hx-input { flex: 1; min-width: 0; height: 38px; padding: 0 .7rem; border: 1px solid var(--border); border-radius: 8px;
+  background: #fff; font: inherit; font-size: .9rem; outline: none; }
+.hx-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(15, 118, 110, .12); }
+.hx-x { width: 30px; height: 30px; flex-shrink: 0; display: grid; place-items: center; border: 1px solid var(--border);
+  border-radius: 50%; background: #fff; color: #94a3b8; cursor: pointer; }
+.hx-x:hover { color: #dc2626; border-color: #fecaca; background: #fef2f2; }
+.hx-x svg { width: 13px; height: 13px; }
+.hx-add { align-self: flex-start; padding: .3rem .75rem; border: 1px dashed var(--border); border-radius: 8px;
+  background: #fff; color: var(--primary); font-size: .8rem; font-weight: 600; cursor: pointer; }
+.hx-add:hover { border-color: var(--primary); }
+.hx-edit-hint { color: var(--muted); font-size: .74rem; }
+.hx-edit-btns { display: flex; justify-content: flex-end; gap: .4rem; padding-top: .25rem; }
+.hx-foot-note { margin-top: .4rem; color: var(--muted); font-size: .74rem; font-style: italic; }
+
+.hx-suggest { margin: .75rem 1rem 0; padding: .65rem .8rem; border: 1px solid #c7d2fe; border-radius: 10px; background: #eef2ff; }
+.hx-suggest-head { display: flex; align-items: center; gap: .4rem; margin-bottom: .4rem; color: #3730a3;
+  font-size: .72rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.hx-suggest-head svg { width: 14px; height: 14px; }
+.hx-sug-all { margin-left: auto; padding: .15rem .55rem; border: 1px solid #a5b4fc; border-radius: 6px; background: #fff;
+  color: #4338ca; font-size: .72rem; font-weight: 700; letter-spacing: 0; text-transform: none; cursor: pointer; }
+.hx-suggest ul { list-style: none; display: flex; flex-direction: column; gap: .35rem; }
+.hx-suggest li { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.hx-sug-text { flex: 1; min-width: 0; font-size: .86rem; color: var(--text); }
+.hx-sug-text small { margin-left: .4rem; color: var(--muted); font-size: .72rem; }
+.hx-sug-btns { display: inline-flex; gap: .3rem; }
+.hx-sug-add, .hx-sug-no { height: 26px; padding: 0 .6rem; border-radius: 6px; font-size: .74rem; font-weight: 600; cursor: pointer; }
+.hx-sug-add { border: none; background: #4f46e5; color: #fff; }
+.hx-sug-no { border: 1px solid #c7d2fe; background: #fff; color: #4338ca; }
+
 /* ---------- Confirm dialog ---------- */
 .cd-dialog { margin: auto; padding: 0; border: none; border-radius: 20px; width: min(420px, calc(100% - 2rem));
   background: #fff; box-shadow: 0 30px 70px -20px rgba(15, 23, 42, .45); }
