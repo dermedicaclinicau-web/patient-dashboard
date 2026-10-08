@@ -193,9 +193,10 @@ function placeholderPage(title, message, backLink = "") {
 const PAGES = {
   patients: (el) => mountPatientList(el),
   calendar: (el, param) => mountCalendar(el, param),
-  forms: (el) => mountFormBuilder(el, {
+  forms: (el, param) => mountFormBuilder(el, {
     isAdmin: /^admin$/i.test(String(currentStaff.role || "")),
-    staffName: currentStaff.name,
+    staff: currentStaff,
+    templateId: param,
   }),
   patient: (el, id) => mountPatientDashboard(el, id, { staff: currentStaff, onBack: goBack }),
 };

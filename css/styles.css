@@ -1452,3 +1452,60 @@ body.sp-dragging .sp-head { cursor: grabbing; }
 .fbp-empty-icon { font-size: 30px; margin-bottom: 10px; }
 .fbp-empty-title { font-size: 17px; font-weight: 600; margin: 0 0 6px; }
 .fbp-empty-text { margin: 0 auto; max-width: 440px; color: var(--text-2, #475569); font-size: 14px; line-height: 1.6; }
+
+/* ---------- Form Builder ---------- */
+.fb-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
+.fb-head h2 { font-size: 1.6rem; font-weight: 700; letter-spacing: -.01em; }
+.fb-head p { margin-top: .2rem; }
+.fb-new { display: inline-flex; align-items: center; gap: .45rem; height: 44px; padding: 0 1.15rem; border-radius: 12px; }
+.fb-new svg { width: 16px; height: 16px; }
+
+.fb-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 1.5rem; align-items: start; }
+.fb-cats { position: sticky; top: calc(var(--topbar-h) + var(--recbar-h, 0px) + 1rem); display: flex; flex-direction: column; gap: 2px; }
+.fb-cat { display: flex; align-items: center; gap: .65rem; width: 100%; padding: .6rem .75rem; border: none;
+  border-radius: var(--radius-sm); background: none; color: var(--muted); font-weight: 500; text-align: left;
+  cursor: pointer; transition: background .15s, color .15s; }
+.fb-cat svg { width: 17px; height: 17px; flex-shrink: 0; }
+.fb-cat span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fb-cat em { font-style: normal; font-size: .78rem; color: #94a3b8; }
+.fb-cat:hover { background: var(--surface-2); color: var(--text); }
+.fb-cat.active { background: var(--primary-soft); color: var(--primary); }
+.fb-cat.active em { color: var(--primary); }
+.fb-cat:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+.fb-tools { display: flex; flex-wrap: wrap; gap: .65rem; margin-bottom: 1rem; }
+.fb-search { flex: 1 1 280px; }
+
+.fb-list { display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); overflow: hidden; }
+.fb-row { display: flex; align-items: center; gap: .9rem; padding: .9rem 1.1rem; color: var(--text);
+  text-decoration: none; transition: background .15s; }
+.fb-row + .fb-row { border-top: 1px solid var(--border); }
+.fb-row:hover { background: var(--surface-2); }
+.fb-row:hover .chev { color: var(--primary); }
+.fb-row:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.fb-row-icon { width: 38px; height: 38px; flex-shrink: 0; border-radius: 10px; display: grid; place-items: center;
+  background: var(--primary-soft); color: var(--primary); }
+.fb-row-icon svg { width: 18px; height: 18px; }
+.fb-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .15rem; }
+.fb-row-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fb-row-meta { display: flex; flex-wrap: wrap; align-items: center; font-size: .8rem; color: var(--muted); }
+.fb-row-meta span + span::before { content: ""; display: inline-block; width: 3px; height: 3px; margin: 0 .55rem;
+  border-radius: 50%; background: #cbd5e1; vertical-align: middle; }
+
+.fb-pill { flex-shrink: 0; font-size: .72rem; font-weight: 600; padding: .15rem .6rem; border-radius: 999px; border: 1px solid; }
+.fb-pill.is-live { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
+.fb-pill.is-draft { background: var(--surface-2); color: var(--muted); border-color: var(--border); }
+
+.fb-skel { height: 66px; border-radius: 0; }
+.fb-skel + .fb-skel { border-top: 1px solid var(--border); }
+.fb-select { padding: .65rem .8rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: #fff;
+  font: inherit; font-size: 1rem; color: var(--text); outline: none; }
+.fb-select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+
+@media (max-width: 860px) {
+  .fb-layout { grid-template-columns: 1fr; }
+  .fb-cats { position: static; flex-direction: row; overflow-x: auto; padding-bottom: .25rem; }
+  .fb-cat { width: auto; white-space: nowrap; }
+  .fb-cat span { overflow: visible; }
+}
