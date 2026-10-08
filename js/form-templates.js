@@ -3,6 +3,7 @@ import {
   collection, getDocs, getDoc, addDoc, updateDoc, doc, query, where, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { cleanField } from "./form-fields.js";
+import { normaliseLetterhead, DEFAULT_LETTERHEAD } from "./form-letterhead.js";
 
 // Keys MUST match the list in the Firestore rules (validFormTemplate).
 export const FORM_CATEGORIES = [
@@ -96,7 +97,7 @@ export async function createFormTemplate({ name, category }, staff) {
 
 
 
-export async function saveFormTemplate(id, { name, fields }, staff) {
+export async function saveFormTemplate(id, { name, fields, settings }, staff) {
   const cleanName = String(name || "").trim().replace(/\s+/g, " ");
   if (!cleanName) throw new Error("Give the form a name.");
   if (cleanName.length > 120) throw new Error("Keep the name under 120 characters.");
@@ -113,6 +114,29 @@ export async function saveFormTemplate(id, { name, fields }, staff) {
     updatedAt: serverTimestamp(),
     updatedBy: (staff && staff.name) || "",
     updatedByUid: uid,
+    settings: { showLetterhead: !(settings && settings.showLetterhead === false) },
   });
   cache = null;
+}
+
+/* ===================== Shared letterhead ===================== */
+
+let letterheadCache = null;
+
+export async function getLetterhead({ force = false } = {}) {
+  if (letterheadCache && !force) return letterheadCache;
+  const snap = await getDoc(doc(db, "form_settings", "letterhead"));
+  letterheadCache = normaliseLetterhead(snap.exists() ? snap.data() : DEFAULT_LETTERHEAD);
+  return letterheadCache;
+}
+
+export async function saveLetterhead(letterhead, staff) {
+  const clean = normaliseLetterhead(letterhead);
+  await setDoc(doc(db, "form_settings", "letterhead"), {
+    ...clean,
+    updatedAt: serverTimestamp(),
+    updatedBy: String((staff && (staff.name || staff.email)) || "").slice(0, 120),
+  });
+  letterheadCache = clean;
+  return clean;
 }

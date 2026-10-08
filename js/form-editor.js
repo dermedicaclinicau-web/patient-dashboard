@@ -1,10 +1,11 @@
-import { categoryLabel, getFormTemplate, saveFormTemplate, listFormTemplates } from "./form-templates.js";
+import { categoryLabel, getFormTemplate, saveFormTemplate, listFormTemplates, getLetterhead, saveLetterhead } from "./form-templates.js";
 import {
   esc, svg, ICONS, FIELD_TYPES, FIELD_GROUPS, CHOICE_TYPES, FILLS, FILLS_FOR,
   createField, normaliseField, renderField, fieldSettings, applyInput, applyClick,
   calcStatusHtml, canRequire, hasLabel, hasHelp,
 } from "./form-fields.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
+import { DEFAULT_LETTERHEAD, letterheadHtml, openLetterheadDialog } from "./form-letterhead.js";
 
 const UI = {
   up: '<polyline points="18 15 12 9 6 15"/>',
@@ -14,6 +15,8 @@ const UI = {
   user: '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
   x: ICONS.x,
 };
+
+const FORM = "__form"; // "selected" value meaning the form settings panel is open
 
 function newId() {
   const r = (window.crypto && crypto.randomUUID)
@@ -48,15 +51,17 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
   /* ---------- State ---------- */
   let name = tpl.name;
+  const settings = { showLetterhead: true, ...(tpl.settings || {}) };
   const fields = (tpl.fields || [])
     .map((f) => normaliseField(f && f.id ? f : { ...f, id: newId() }))
     .filter(Boolean);
-  let sel = fields.length ? fields[0].id : null;
+  let sel = fields.length ? fields[0].id : FORM;
   let mode = "build";
   let consentForms = [];
+  let letterhead = DEFAULT_LETTERHEAD;
   let dirty = false, saving = false, saveTimer = null;
 
-  const ctx = (live) => ({ live, fields, consentForms, calcValues: null });
+  const ctx = (live) => ({ live, fields, consentForms, letterhead, calcValues: null });
   const current = () => fields.find((f) => f.id === sel) || null;
 
   root.innerHTML = `
@@ -93,7 +98,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
         <p class="fe-pal-none" data-role="palnone" hidden>No fields match that search.</p>
       </aside>
       <div class="fe-stage" data-role="stage"></div>
-      <aside class="fe-inspector" data-role="inspector" aria-label="Question settings"></aside>
+      <aside class="fe-inspector" data-role="inspector" aria-label="Settings"></aside>
     </div>`;
 
   const $ = (s) => root.querySelector(s);
@@ -127,7 +132,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     dirty = false;
     setState("saving");
     try {
-      await saveFormTemplate(templateId, { name, fields }, staff);
+      await saveFormTemplate(templateId, { name, fields, settings }, staff);
       setState(dirty ? "dirty" : "saved");
     } catch (err) {
       console.error("Form save failed:", err);
@@ -163,6 +168,20 @@ export async function mountFormEditor(container, { templateId, staff }) {
     });
   }
 
+  function watermarkHtml() {
+    const wm = fields.find((f) => f.type === "watermark");
+    if (!wm) return "";
+    const size = esc(wm.size || "large");
+    const style = `opacity:${(Number(wm.opacity) || 10) / 100};transform:rotate(${Number(wm.angle) || 0}deg)`;
+    let inner = "";
+    if (wm.source === "logo") {
+      if (letterhead.logo) inner = `<img class="is-${size}" src="${esc(letterhead.logo)}" alt="" style="${style}" />`;
+    } else if (String(wm.text || "").trim()) {
+      inner = `<span class="is-${size}" style="${style}">${esc(wm.text)}</span>`;
+    }
+    return inner ? `<div class="fe-wm" aria-hidden="true">${inner}</div>` : "";
+  }
+
   function renderStage() {
     const build = mode === "build";
     const c = ctx(!build);
@@ -189,19 +208,19 @@ export async function mountFormEditor(container, { templateId, staff }) {
       ? '<div class="fe-empty">Add your first question from the panel on the left, or drag one onto the page.</div>'
       : '<div class="fe-empty">This form has no questions yet.</div>';
 
-    const wm = fields.find((f) => f.type === "watermark" && String(f.text || "").trim());
-    const wmHtml = wm
-      ? `<div class="fe-wm" aria-hidden="true"><span class="is-${esc(wm.size || "large")}" style="opacity:${
-          (Number(wm.opacity) || 10) / 100};transform:rotate(${Number(wm.angle) || 0}deg)">${esc(wm.text)}</span></div>`
-      : "";
+    const lhOn = settings.showLetterhead !== false;
+    const formSel = build && sel === FORM;
+    const lhBlock = lhOn
+      ? `<div class="fe-lh-wrap${formSel ? " is-selected" : ""}" data-role="lh"${
+          build ? ' tabindex="0" role="button" aria-label="Letterhead. Open form settings"' : ""}>${letterheadHtml(letterhead)}</div>`
+      : build
+        ? `<button type="button" class="fe-lh-off${formSel ? " is-selected" : ""}" data-role="lh">Letterhead is hidden on this form. Click to change.</button>`
+        : "";
 
     stage.innerHTML = `
       <div class="fe-sheet" data-role="sheet">
-        ${wmHtml}
-        <div class="fe-letter">
-          <span class="fe-brand">Dermedica</span>
-          <span class="fe-addr">Unit 4/91 Scarborough Beach Rd, Scarborough WA 6019</span>
-        </div>
+        ${watermarkHtml()}
+        ${lhBlock}
         <h3 class="fe-title">${esc(name || "Untitled form")}</h3>
         <div class="fe-fields" data-role="fields">${items || empty}</div>
       </div>`;
@@ -214,14 +233,23 @@ export async function mountFormEditor(container, { templateId, staff }) {
     `<label class="fe-insp-field"><span class="fe-insp-label">${label}</span>${control}${
       note ? `<small class="fe-note">${note}</small>` : ""}</label>`;
 
+  function renderFormSettings() {
+    insp.innerHTML = `
+      <div class="fe-insp-head">${svg(ICONS.letterhead)}<span>Form settings</span></div>
+      <label class="fe-check"><input type="checkbox" data-s="showLetterhead"${settings.showLetterhead !== false ? " checked" : ""} /> Show the letterhead at the top</label>
+      <div class="fe-insp-field">
+        <span class="fe-insp-label">Letterhead</span>
+        <button type="button" class="lh-btn" data-act="edit-lh">Edit letterhead and logo</button>
+        <small class="fe-note">One letterhead is shared by every form, so changes show on all of them.</small>
+      </div>
+      <p class="fe-note fe-pad">Click a question on the page to change it.</p>`;
+  }
+
   function renderInspector() {
     const f = current();
-    if (!f) {
-      insp.innerHTML = '<div class="fe-insp-empty"><strong>No question selected</strong>Click a question on the page to change it.</div>';
-      return;
-    }
-    let h = `<div class="fe-insp-head">${svg(ICONS[f.type])}<span>${esc(FIELD_TYPES[f.type].name)}</span></div>`;
+    if (!f) { renderFormSettings(); return; }
 
+    let h = `<div class="fe-insp-head">${svg(ICONS[f.type])}<span>${esc(FIELD_TYPES[f.type].name)}</span></div>`;
     if (hasLabel(f.type)) {
       const lbl = f.type === "text_block" ? "Heading" : f.type === "table" ? "Table title" : "Question";
       h += setting(lbl, `<input class="fe-input" data-k="label" maxlength="300" value="${esc(f.label)}" />`);
@@ -238,9 +266,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
           </li>`).join("")}</ul>
         <button type="button" class="hx-add" data-act="optadd">+ Add a choice</button></div>`;
     }
-
     h += fieldSettings(f, ctx(false));
-
     if (FILLS_FOR[f.type]) {
       h += setting("Fill in automatically",
         `<select class="fb-select" data-k="fill">${FILLS_FOR[f.type].map((k) =>
@@ -283,6 +309,10 @@ export async function mountFormEditor(container, { templateId, staff }) {
       showToast("This form already has a record date.");
       return;
     }
+    if (type === "watermark" && fields.some((f) => f.type === "watermark")) {
+      showToast("This form already has a watermark.");
+      return;
+    }
     const f = createField(type, newId());
     let i = at;
     if (i === undefined || i === null) {
@@ -308,14 +338,14 @@ export async function mountFormEditor(container, { templateId, staff }) {
     } else if (action === "down" && i < fields.length - 1) {
       [fields[i + 1], fields[i]] = [fields[i], fields[i + 1]];
     } else if (action === "copy") {
-      if (fields[i].type === "record_date") { showToast("A form can only have one record date."); return; }
+      if (["record_date", "watermark"].includes(fields[i].type)) { showToast("A form can only have one of these."); return; }
       const c = JSON.parse(JSON.stringify(fields[i]));
       c.id = newId();
       fields.splice(i + 1, 0, c);
       sel = c.id;
     } else if (action === "remove") {
       const [gone] = fields.splice(i, 1);
-      sel = fields[i] ? fields[i].id : fields[i - 1] ? fields[i - 1].id : null;
+      sel = fields[i] ? fields[i].id : fields[i - 1] ? fields[i - 1].id : FORM;
       showToast("Removed", () => {
         fields.splice(Math.min(i, fields.length), 0, gone);
         sel = gone.id;
@@ -329,6 +359,18 @@ export async function mountFormEditor(container, { templateId, staff }) {
     changed();
     renderStage();
     renderInspector();
+  }
+
+  function editLetterhead() {
+    openLetterheadDialog({
+      letterhead,
+      onSave: async (lh) => {
+        letterhead = await saveLetterhead(lh, staff);
+        if (!root.isConnected) return;
+        renderStage();
+        renderInspector();
+      },
+    });
   }
 
   /* ---------- Events ---------- */
@@ -365,6 +407,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
   stage.addEventListener("click", (e) => {
     if (mode !== "build") return;
+    if (e.target.closest('[data-role="lh"]')) { select(FORM); return; }
     const fieldEl = e.target.closest(".fe-field[data-id]");
     if (!fieldEl) return;
     const t = e.target.closest("[data-tool]");
@@ -373,8 +416,14 @@ export async function mountFormEditor(container, { templateId, staff }) {
   });
 
   stage.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    if (e.target.matches('.fe-lh-wrap[data-role="lh"]')) {
+      e.preventDefault();
+      select(FORM);
+      return;
+    }
     const fieldEl = e.target.closest(".fe-field[data-id]");
-    if (fieldEl && e.target === fieldEl && (e.key === "Enter" || e.key === " ")) {
+    if (fieldEl && e.target === fieldEl) {
       e.preventDefault();
       select(fieldEl.dataset.id);
       const first = insp.querySelector("input, textarea, select");
@@ -385,9 +434,15 @@ export async function mountFormEditor(container, { templateId, staff }) {
   stage.addEventListener("input", () => { if (mode === "preview") updateCalcs(); });
 
   insp.addEventListener("input", (e) => {
+    const el = e.target;
+    if (el.dataset.s) {
+      settings[el.dataset.s] = el.type === "checkbox" ? el.checked : el.value;
+      changed();
+      renderStage();
+      return;
+    }
     const f = current();
     if (!f) return;
-    const el = e.target;
     if (el.dataset.opt !== undefined) {
       f.options[Number(el.dataset.opt)] = el.value;
     } else if (el.dataset.k) {
@@ -397,7 +452,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
       } else if (el.dataset.num !== undefined) {
         const optional = el.dataset.num === "optional";
         if (el.value === "") {
-          if (!optional) return;     // wait for a number to be typed
+          if (!optional) return;
           f[k] = null;
         } else {
           let n = Number(el.value);
@@ -415,13 +470,13 @@ export async function mountFormEditor(container, { templateId, staff }) {
     }
     changed();
     renderStage();
+    if (el.dataset.rerender !== undefined) { renderInspector(); return; }
     if (f.type === "calculation") {
       const st = insp.querySelector('[data-role="calc-status"]');
       if (st) st.innerHTML = calcStatusHtml(f, fields);
     }
   });
 
-  // When a number box loses focus, show the value that was actually kept (e.g. 50 rows -> 30)
   insp.addEventListener("change", (e) => {
     const f = current();
     const el = e.target;
@@ -430,12 +485,12 @@ export async function mountFormEditor(container, { templateId, staff }) {
     }
   });
 
-  // Keep the formula box's cursor position when tapping an insert button
   insp.addEventListener("mousedown", (e) => {
     if (e.target.closest("[data-calcins]")) e.preventDefault();
   });
 
   insp.addEventListener("click", (e) => {
+    if (e.target.closest('[data-act="edit-lh"]')) { editLetterhead(); return; }
     const f = current();
     if (!f) return;
 
@@ -561,7 +616,16 @@ export async function mountFormEditor(container, { templateId, staff }) {
   renderStage();
   renderInspector();
 
-  // Consent forms for the Consent check field (loaded in the background)
+  getLetterhead()
+    .then((lh) => {
+      letterhead = lh;
+      if (!root.isConnected) return;
+      renderStage();
+      const f = current();
+      if (f && f.type === "watermark") renderInspector();
+    })
+    .catch((err) => console.warn("Couldn't load the letterhead:", err));
+
   listFormTemplates({ isAdmin: true })
     .then((list) => {
       consentForms = list

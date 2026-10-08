@@ -1,4 +1,5 @@
 import { runCalc, calcRefs, formatCalc } from "./form-calc.js";
+import { letterheadHtml } from "./form-letterhead.js";
 
 export const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -63,7 +64,7 @@ export const FIELD_GROUPS = [
   ["Choices", ["single_choice", "checkboxes", "checkbox_notes", "sub_checks", "dropdown"]],
   ["Tables and calculations", ["table", "calculation"]],
   ["Clinical", ["signature", "photo", "consent_status"]],
-  ["Page layout", ["text_block", "letterhead", "watermark", "space"]],
+  ["Page layout", ["text_block", "watermark", "space"]],
 ];
 
 export const CHOICE_TYPES = ["single_choice", "checkboxes", "checkbox_notes", "dropdown"];
@@ -118,7 +119,7 @@ export function createField(type, id) {
     case "table": f.columns = [{ label: "Column 1", type: "text" }, { label: "Column 2", type: "text" }]; f.rows = 3; break;
     case "calculation": f.formula = ""; f.decimals = 2; f.prefix = ""; f.suffix = ""; f.blank = "zero"; break;
     case "photo": f.max = 1; break;
-    case "watermark": f.text = "DRAFT"; f.opacity = 10; f.angle = -30; f.size = "large"; break;
+    case "watermark": f.source = "text"; f.text = "DRAFT"; f.opacity = 10; f.angle = -30; f.size = "large"; break;
     case "letterhead": f.line1 = LETTERHEAD[0]; f.line2 = LETTERHEAD[1]; break;
     case "consent_status": f.consentFormId = ""; f.months = 12; f.block = false; break;
   }
@@ -191,6 +192,7 @@ export function cleanField(f) {
       break;
     case "photo": out.max = int(f.max, 1, 10, 1); break;
     case "watermark":
+      out.source = pick(f.source, ["text", "logo"], "text");
       out.text = clip(f.text, 40);
       out.opacity = int(f.opacity, 5, 40, 10);
       out.angle = int(f.angle, -60, 60, -30);
@@ -350,10 +352,15 @@ export function renderField(f, ctx = {}) {
         f.text ? `<p>${esc(f.text).replace(/\n/g, "<br>")}</p>`
                : live ? "" : '<p class="fe-ph">Click to write the information patients need to read.</p>'}</div>`;
     case "letterhead":
-      return `<div class="fe-lh"><span class="fe-lh-brand">Dermedica</span><span class="fe-lh-lines">${
-        esc(f.line1)}${f.line2 ? `<br>${esc(f.line2)}` : ""}</span></div>`;
-    case "watermark":
-      return live ? "" : `<div class="fe-wm-marker">${svg(ICONS.watermark)}Watermark “${esc(f.text || "")}” sits behind the whole page</div>`;
+      return letterheadHtml(ctx.letterhead);
+    case "watermark": {
+      if (live) return "";
+      const hasLogo = !!(ctx.letterhead && ctx.letterhead.logo);
+      const what = f.source === "logo"
+        ? (hasLogo ? "The clinic logo" : "The clinic logo (add one to the letterhead first)")
+        : `“${esc(f.text || "")}”`;
+      return `<div class="fe-wm-marker">${svg(ICONS.watermark)}${what} sits faded behind the whole page</div>`;
+    }
     case "space":
       return `<div class="fe-space is-${esc(f.size || "medium")}"></div>`;
   }
@@ -366,8 +373,8 @@ const setting = (label, control, note = "") =>
   `<label class="fe-insp-field"><span class="fe-insp-label">${label}</span>${control}${
     note ? `<small class="fe-note">${note}</small>` : ""}</label>`;
 
-const choose = (key, items, current, numeric = false) =>
-  `<select class="fb-select" data-k="${key}"${numeric ? ' data-num=""' : ""}>${items.map(([v, l]) =>
+const choose = (key, items, current, numeric = false, rerender = false) =>
+  `<select class="fb-select" data-k="${key}"${numeric ? ' data-num=""' : ""}${rerender ? ' data-rerender=""' : ""}>${items.map(([v, l]) =>
     `<option value="${esc(v)}"${String(current) === String(v) ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
 
 export function fieldSettings(f, ctx = {}) {
@@ -444,15 +451,20 @@ export function fieldSettings(f, ctx = {}) {
       return setting("Photos allowed", choose("max", Array.from({ length: 10 }, (_, i) => [i + 1, String(i + 1)]), f.max || 1, true),
         "On iPad and phones this opens the camera.");
 
-    case "watermark":
-      return setting("Text", `<input class="fe-input" data-k="text" maxlength="40" value="${esc(f.text || "")}" />`) +
+        case "watermark": {
+      const logo = f.source === "logo";
+      const hasLogo = !!(ctx.letterhead && ctx.letterhead.logo);
+      return setting("Show", choose("source", [["text", "Text"], ["logo", "Clinic logo"]], f.source || "text", false, true)) +
+        (logo
+          ? (hasLogo ? "" : '<p class="fe-note fe-pad">There\'s no logo yet. Click the letterhead at the top of the page, then Edit letterhead and logo.</p>')
+          : setting("Text", `<input class="fe-input" data-k="text" maxlength="40" value="${esc(f.text || "")}" />`)) +
         setting("Size", choose("size", [["small", "Small"], ["medium", "Medium"], ["large", "Large"]], f.size || "large")) +
         setting("Strength", `<input class="fe-range" type="range" min="5" max="40" step="1" data-k="opacity" data-num="" value="${Number(f.opacity) || 10}" />`) +
         setting("Angle", `<input class="fe-range" type="range" min="-60" max="60" step="5" data-k="angle" data-num="" value="${Number(f.angle) || 0}" />`);
+    }
 
     case "letterhead":
-      return setting("Address line", `<input class="fe-input" data-k="line1" maxlength="150" value="${esc(f.line1 || "")}" />`) +
-        setting("Contact line", `<input class="fe-input" data-k="line2" maxlength="150" value="${esc(f.line2 || "")}" />`);
+      return '<p class="fe-note fe-pad">The letterhead now sits at the top of every form, so you can remove this. To change it, click the letterhead at the top of the page.</p>';
 
     case "consent_status": {
       const forms = ctx.consentForms || [];

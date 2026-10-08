@@ -1723,3 +1723,60 @@ textarea.fe-input { resize: vertical; line-height: 1.5; }
 .fe-bad { color: var(--danger); font-weight: 600; }
 .fe-reads { color: var(--muted); overflow-wrap: anywhere; }
 .fe-range { width: 100%; accent-color: var(--primary); }
+
+/* ---------- Letterhead ---------- */
+.lh { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem;
+  padding-bottom: .75rem; border-bottom: 2px solid var(--primary); }
+.lh.is-centre { flex-direction: column; justify-content: center; gap: .4rem; text-align: center; }
+.lh-brand { display: flex; align-items: center; gap: .75rem; min-width: 0; }
+.lh.is-centre .lh-brand { flex-direction: column; gap: .35rem; }
+.lh-logo { display: block; width: auto; object-fit: contain; }
+.lh-logo.is-small { max-height: 36px; max-width: 140px; }
+.lh-logo.is-medium { max-height: 56px; max-width: 220px; }
+.lh-logo.is-large { max-height: 84px; max-width: 320px; }
+.lh-name { font-family: var(--font-serif); font-size: 1.25rem; }
+.lh-lines { text-align: right; font-size: .75rem; line-height: 1.6; color: var(--muted); }
+.lh.is-centre .lh-lines { text-align: center; }
+
+.fe-lh-wrap { position: relative; z-index: 1; margin-bottom: 1.5rem; border-radius: 6px; }
+.fe-shell.is-build .fe-lh-wrap { cursor: pointer; }
+.fe-shell.is-build .fe-lh-wrap:hover { outline: 1px dashed var(--primary); outline-offset: 8px; }
+.fe-lh-wrap.is-selected, .fe-lh-wrap:focus-visible { outline: 2px solid var(--primary); outline-offset: 8px; }
+.fe-lh-off { position: relative; z-index: 1; display: block; width: 100%; margin-bottom: 1.25rem; padding: .6rem;
+  border: 1px dashed #cbd5e1; border-radius: 8px; background: transparent; color: var(--muted); font: inherit;
+  font-size: .82rem; cursor: pointer; }
+.fe-lh-off:hover, .fe-lh-off.is-selected { border-color: var(--primary); color: var(--primary); }
+
+.fe-wm img { display: block; height: auto; }
+.fe-wm img.is-small { width: 30%; }
+.fe-wm img.is-medium { width: 50%; }
+.fe-wm img.is-large { width: 70%; }
+
+/* ---------- Letterhead window ---------- */
+.lh-dialog { width: min(560px, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); padding: 0; border: none;
+  border-radius: 14px; box-shadow: 0 20px 50px rgba(15, 23, 42, .25); }
+.lh-dialog::backdrop { background: rgba(15, 23, 42, .45); }
+.lh-form { display: flex; flex-direction: column; gap: .85rem; padding: 1.4rem; }
+.lh-dialog-head h3 { margin: 0; font-size: 1.1rem; }
+.lh-dialog-head p { margin: .2rem 0 0; font-size: .85rem; color: var(--muted); }
+.lh-preview { padding: 1rem 1.1rem; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+.lh-field { display: flex; flex-direction: column; gap: .3rem; }
+.lh-label { font-size: .78rem; font-weight: 600; color: var(--muted); }
+.lh-form input[type="text"], .lh-form select { width: 100%; padding: .55rem .7rem; border: 1px solid var(--border);
+  border-radius: 8px; background: #fff; font: inherit; font-size: .9rem; }
+.lh-form input[type="text"]:focus, .lh-form select:focus { outline: 2px solid var(--primary); outline-offset: -1px; border-color: var(--primary); }
+.lh-two { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; }
+.lh-check { display: flex; align-items: center; gap: .5rem; font-size: .88rem; }
+.lh-check input { width: 16px; height: 16px; accent-color: var(--primary); }
+.lh-logo-row { display: flex; flex-wrap: wrap; gap: .5rem; }
+.lh-note { font-size: .75rem; color: var(--muted); }
+.lh-btn { display: inline-flex; align-items: center; justify-content: center; padding: .5rem .9rem; border: 1px solid var(--border);
+  border-radius: 8px; background: #fff; color: var(--text); font: inherit; font-size: .88rem; font-weight: 600; cursor: pointer; }
+.lh-btn:hover { border-color: var(--primary); color: var(--primary); }
+.lh-btn.is-primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+.lh-btn.is-primary:hover { background: var(--primary-hover); color: #fff; }
+.lh-btn.is-quiet { border-color: transparent; color: var(--muted); }
+.lh-btn:disabled { opacity: .6; cursor: default; }
+.lh-error { margin: 0; font-size: .85rem; color: var(--danger); }
+.lh-actions { display: flex; justify-content: flex-end; gap: .5rem; padding-top: .25rem; }
+@media (max-width: 520px) { .lh-two { grid-template-columns: 1fr; } }
