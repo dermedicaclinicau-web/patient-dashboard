@@ -97,7 +97,7 @@ export async function createFormTemplate({ name, category }, staff) {
 
 
 
-export async function saveFormTemplate(id, { name, fields, settings }, staff) {
+export async function saveFormTemplate(id, { name, fields, settings, status }, staff) {
   const cleanName = String(name || "").trim().replace(/\s+/g, " ");
   if (!cleanName) throw new Error("Give the form a name.");
   if (cleanName.length > 120) throw new Error("Keep the name under 120 characters.");
@@ -115,6 +115,8 @@ export async function saveFormTemplate(id, { name, fields, settings }, staff) {
     updatedBy: (staff && staff.name) || "",
     updatedByUid: uid,
     settings: { showLetterhead: !(settings && settings.showLetterhead === false) },
+    ...(status === "archived" ? { status: "archived" } : {}),
+    updatedAt: serverTimestamp()
   });
   cache = null;
 }

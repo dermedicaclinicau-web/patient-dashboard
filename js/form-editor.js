@@ -24,6 +24,29 @@ function newId() {
     : Math.random().toString(36).slice(2) + Date.now().toString(36);
   return "f_" + r.slice(0, 10);
 }
+function confirmDialog({ title, message, confirm }) {
+  return new Promise((resolve) => {
+    let result = false;
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog fe-confirm";
+    dlg.innerHTML = `
+      <div class="lh-form">
+        <div class="lh-dialog-head"><h3>${esc(title)}</h3><p>${esc(message)}</p></div>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="no">Cancel</button>
+          <button type="button" class="lh-btn is-danger" data-act="yes">${esc(confirm)}</button>
+        </div>
+      </div>`;
+    dlg.addEventListener("click", (e) => {
+      if (e.target.closest('[data-act="yes"]')) { result = true; dlg.close(); }
+      else if (e.target.closest('[data-act="no"]')) dlg.close();
+    });
+    dlg.addEventListener("close", () => { dlg.remove(); resolve(result); });
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    dlg.querySelector('[data-act="no"]').focus();
+  });
+}
 
 export async function mountFormEditor(container, { templateId, staff }) {
   const back = '<a class="back-link" href="#/forms">← All forms</a>';
@@ -242,7 +265,10 @@ export async function mountFormEditor(container, { templateId, staff }) {
         <button type="button" class="lh-btn" data-act="edit-lh">Edit letterhead and logo</button>
         <small class="fe-note">One letterhead is shared by every form, so changes show on all of them.</small>
       </div>
-      <p class="fe-note fe-pad">Click a question on the page to change it.</p>`;
+      <p class="fe-note fe-pad">Click a question on the page to change it.</p>
+      <div class="fe-danger">
+        <button type="button" class="fe-remove" data-act="delete-form">${svg(UI.trash)}Delete this form</button>
+      </div>`;
   }
 
   function renderInspector() {
@@ -373,6 +399,26 @@ export async function mountFormEditor(container, { templateId, staff }) {
     });
   }
 
+    async function deleteForm() {
+    const ok = await confirmDialog({
+      title: `Delete “${name || "Untitled form"}”?`,
+      message: "It will be removed from the form list and from the patient dashboard. Forms already filled in for patients are kept.",
+      confirm: "Delete form",
+    });
+    if (!ok || !root.isConnected) return;
+    clearTimeout(saveTimer);
+    while (saving) await new Promise((r) => setTimeout(r, 100));
+    try {
+      await saveFormTemplate(templateId, { name, fields, settings, status: "archived" }, staff);
+      dirty = false;
+      await listFormTemplates({ isAdmin: true, force: true }).catch(() => {});
+      location.hash = "#/forms";
+    } catch (err) {
+      console.error("Delete failed:", err);
+      showToast(err.code === "permission-denied" ? "You don't have permission to delete this form." : "Couldn't delete. Try again.");
+    }
+  }
+
   /* ---------- Events ---------- */
   root.addEventListener("click", (e) => {
     const m = e.target.closest("[data-mode]");
@@ -491,6 +537,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
   insp.addEventListener("click", (e) => {
     if (e.target.closest('[data-act="edit-lh"]')) { editLetterhead(); return; }
+    if (e.target.closest('[data-act="delete-form"]')) { deleteForm(); return; }
     const f = current();
     if (!f) return;
 
