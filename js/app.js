@@ -8,6 +8,7 @@ import { initRecordingBar, setRecordingPatient } from "./recording-bar.js";
 import { isRecorderBusy, suspendRecorder } from "./recorder.js";
 import { initSoapPanel, closeSoapPanel, hasUnsavedNotes } from "./soap-panel.js";
 import { confirmDialog } from "./dialog.js";
+import { mountFormBuilder } from "./form-builder.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -192,6 +193,10 @@ function placeholderPage(title, message, backLink = "") {
 const PAGES = {
   patients: (el) => mountPatientList(el),
   calendar: (el, param) => mountCalendar(el, param),
+  forms: (el) => mountFormBuilder(el, {
+    isAdmin: /^admin$/i.test(String(currentStaff.role || "")),
+    staffName: currentStaff.name,
+  }),
   patient: (el, id) => mountPatientDashboard(el, id, { staff: currentStaff, onBack: goBack }),
 };
 

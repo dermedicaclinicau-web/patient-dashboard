@@ -210,12 +210,6 @@ function unlockLogins() {
   console.log('Login lockout cleared.');
 }
 
-function testLookup() {
-  const staff = findStaffByPin_('3768'); // test PIN. Remove after testing.
-  console.log(staff ? 'Found: ' + staff.name + ' (' + staff.role + ')' : 'No match');
-}
-
-
 
 // ===================== Response helper =====================
 
@@ -937,6 +931,7 @@ function claimJob_(cfg, id, manual) {
       status: stage, stageAt: new Date().toISOString(), attempts: attempts + 1, error: '',
     });
     job._stage = stage;
+    job._id = id; // always use the job's own document ID, never a value inside it
     return job;
   } finally {
     lock.releaseLock();
@@ -948,7 +943,13 @@ function transcribeStage_(cfg, job) {
   const audio = downloadAudio_(cfg, job.audioPath);
   const dg = deepgram_(audio, job.mimeType, job.staffName);
   const started = job.startedAt ? new Date(job.startedAt) : new Date();
-  const id = job.recordingId;
+  const id = job._id;
+
+  // Never overwrite a record this pipeline didn't create (e.g. an older or Reviewed consultation)
+  const existing = fsGetDoc_(cfg, 'appointment_transcripts/' + id);
+  if (existing && String(existing['Source'] || '') !== 'Dashboard recording') {
+    throw new Error('A different record already uses this ID. It was not overwritten.');
+  }
 
   commitWrites_(cfg, [updateWrite_(cfg, 'appointment_transcripts/' + id, {
     'Record ID': id,
