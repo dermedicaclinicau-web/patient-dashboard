@@ -5,6 +5,16 @@ import {
 import { cleanField } from "./form-fields.js";
 import { normaliseLetterhead, DEFAULT_LETTERHEAD } from "./form-letterhead.js";
 
+import { CATEGORIES, categorize } from "./records.js";
+
+const GROUP_KEYS = [...CATEGORIES.map((c) => c.key), "other"];
+
+// Which treatment group a form belongs to: chosen in Form settings, or worked out from its name
+export function formGroup(t) {
+  const g = t && t.settings && t.settings.group;
+  return GROUP_KEYS.includes(g) ? g : categorize(t && t.name);
+}
+
 // Keys MUST match the list in the Firestore rules (validFormTemplate).
 export const FORM_CATEGORIES = [
   { key: "consent",      label: "Consent forms" },
@@ -60,7 +70,10 @@ export function formSnapshot({ name, fields, settings }) {
   return {
     name: String(name || "").trim().replace(/\s+/g, " ").slice(0, 120) || "Untitled form",
     fields: (Array.isArray(fields) ? fields : []).map(cleanField).filter(Boolean),
-    settings: { showLetterhead: !(settings && settings.showLetterhead === false) },
+    settings: {
+      showLetterhead: !(settings && settings.showLetterhead === false),
+      group: settings && GROUP_KEYS.includes(settings.group) ? settings.group : "",
+    },
   };
 }
 

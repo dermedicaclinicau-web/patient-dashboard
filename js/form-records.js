@@ -25,7 +25,7 @@ export function formRecordsSectionHtml() {
   return `
     <details class="section-card fr-card" data-key="form-records" ${startsOpen() ? "open" : ""}>
       <summary>
-        <span class="pc-head">${icon('<polyline points="6 9 12 15 18 9"/>', "sum-chev")}<span class="pc-title">Completed forms</span><span class="hint fr-count">…</span></span>
+        <span class="pc-head">${icon('<polyline points="6 9 12 15 18 9"/>', "sum-chev")}<span class="pc-title">Other forms</span><span class="hint fr-count">…</span></span>
       </summary>
       <div class="section-body fr-body"><div class="skeleton sm"></div></div>
     </details>`;
@@ -38,7 +38,9 @@ export async function mountFormRecords(root, patient) {
   const body = section.querySelector(".fr-body");
 
   try {
-    const list = await listSubmissionsForPatient([patient.id, ...patientIds(patient)]);
+    // Consent forms and treatment records show under Treatment / Consent Records instead
+    const list = (await listSubmissionsForPatient([patient.id, ...patientIds(patient)]))
+      .filter((s) => s.category !== "consent" && s.category !== "treatment");
     if (!section.isConnected) return;
     count.textContent = list.length ? `${list.length} ${list.length === 1 ? "form" : "forms"}` : "None yet";
     body.innerHTML = list.length
@@ -50,7 +52,7 @@ export async function mountFormRecords(root, patient) {
             </span>
             ${icon('<polyline points="9 18 15 12 9 6"/>')}
           </a>`).join("")}</div>`
-      : '<p class="empty-note">No forms filled in yet. Use Consent record, Treatment record or Prescription above to start one.</p>';
+      : '<p class="empty-note">No other forms yet. Consent forms and treatment records appear under Treatment Records and Consent Records.</p>'
   } catch (err) {
     if (!section.isConnected) return;
     console.error("Completed forms failed:", err);

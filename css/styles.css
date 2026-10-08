@@ -1912,3 +1912,14 @@ ul.ff-log { display: flex; flex-direction: column; gap: .2rem; margin: 0 0 1rem;
   .fe-inline { grid-template-columns: 1fr; }
   .fe-inline-q .fe-q { padding-top: 0; }
 }
+
+/* ---------- Portal forms inside Treatment / Consent Records ---------- */
+.rc-badges { display: flex; flex-wrap: wrap; gap: .35rem; }
+.rc-badge.portal { background: #eef2ff; color: #4338ca; }
+.rc-item.is-new { animation: rc-new 2.6s ease-out 1; border-radius: 10px; }
+@keyframes rc-new {
+  0%, 35% { background: var(--primary-soft); box-shadow: 0 0 0 3px var(--primary); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+.fp-note { padding: 0 .9rem .5rem; font-size: .8rem; color: var(--muted); }
+.rc-link[aria-expanded="true"] { text-decoration: underline; }

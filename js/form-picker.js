@@ -1,6 +1,8 @@
-// Turns the Consent record / Treatment record / Prescription tiles on the
-// patient dashboard into dropdowns of published forms.
-import { listPublishedForms, categoryLabel } from "./form-templates.js";
+// Dropdowns of published forms on the patient dashboard:
+// - the Consent record / Treatment record / Prescription tiles
+// - "+ Create Consent" / "+ Create Tx" on each treatment group (only that group's forms)
+import { listPublishedForms, categoryLabel, formGroup } from "./form-templates.js";
+import { CATEGORIES } from "./records.js";
 import { esc } from "./form-fields.js";
 
 // Tile label (its data-soon value) -> form category
@@ -18,6 +20,8 @@ function patientIdFromHash() {
   if (!m) return "";
   try { return decodeURIComponent(m[1]); } catch { return ""; }
 }
+
+const fillHref = (pid, id) => `#/fill/${encodeURIComponent(pid)}/${encodeURIComponent(id)}`;
 
 export function closeFormPicker(returnFocus = false) {
   if (menu) { menu.remove(); menu = null; }
@@ -52,15 +56,18 @@ function items() {
   return menu ? [...menu.querySelectorAll(".fp-item:not([hidden])")] : [];
 }
 
-async function open(tile, category, staff) {
+async function open(trigger, category, staff, group) {
   closeFormPicker();
   const patientId = patientIdFromHash();
   if (!patientId) return;
 
-  anchor = tile;
-  tile.setAttribute("aria-expanded", "true");
-  const label = categoryLabel(category);
+  anchor = trigger;
+  trigger.setAttribute("aria-expanded", "true");
   const isAdmin = /^admin$/i.test(String((staff && staff.role) || ""));
+  const groupInfo = group ? CATEGORIES.find((c) => c.key === group) || { key: "other", title: "Other" } : null;
+  const kind = category === "consent" ? "consent forms"
+    : category === "treatment" ? "treatment records" : categoryLabel(category).toLowerCase();
+  const label = groupInfo ? `${groupInfo.title}: ${kind}` : categoryLabel(category);
 
   const thisMenu = document.createElement("div");
   menu = thisMenu;
@@ -83,16 +90,30 @@ async function open(tile, category, staff) {
   }
   if (menu !== thisMenu) return; // closed or replaced while loading
 
+  // From a treatment group: only that group's forms. Just one? Open it straight away.
+  let note = "";
+  if (groupInfo) {
+    const inGroup = forms.filter((t) => formGroup(t) === groupInfo.key);
+    if (inGroup.length === 1) {
+      closeFormPicker();
+      location.hash = fillHref(patientId, inGroup[0].id);
+      return;
+    }
+    if (inGroup.length) forms = inGroup;
+    else if (forms.length) note = `No ${groupInfo.title} ${kind} are published yet. Choose from all ${kind}:`;
+  }
+
   const body = menu.querySelector(".fp-body");
   if (!forms.length) {
-    body.innerHTML = `<div class="fp-empty">No ${esc(label.toLowerCase())} are published yet.${
+    body.innerHTML = `<div class="fp-empty">No ${esc(kind)} are published yet.${
       isAdmin ? ' <a href="#/forms">Open Form Builder</a>' : " Ask an admin to publish one in Form Builder."}</div>`;
     position();
     return;
   }
 
   body.innerHTML = `
-    ${forms.length > 6 ? `<input type="search" class="fp-search" placeholder="Search ${esc(label.toLowerCase())}" aria-label="Search ${esc(label.toLowerCase())}" />` : ""}
+    ${note ? `<div class="fp-note">${esc(note)}</div>` : ""}
+    ${forms.length > 6 ? `<input type="search" class="fp-search" placeholder="Search ${esc(kind)}" aria-label="Search ${esc(kind)}" />` : ""}
     <div class="fp-list" role="menu">
       ${forms.map((t) => `
         <button type="button" class="fp-item" role="menuitem" data-fill="${esc(t.id)}" data-find="${esc(t.name.toLowerCase())}">
@@ -124,7 +145,7 @@ async function open(tile, category, staff) {
     if (!item) return;
     const id = item.dataset.fill;
     closeFormPicker();
-    location.hash = `#/fill/${encodeURIComponent(patientId)}/${encodeURIComponent(id)}`;
+    location.hash = fillHref(patientId, id);
   });
 
   menu.addEventListener("keydown", (e) => {
@@ -141,17 +162,19 @@ async function open(tile, category, staff) {
 }
 
 export function initFormPicker(contentEl, { getStaff }) {
-  // Capture phase, so the tiles' old "coming soon" handler never runs
+  // Capture phase, so the old "coming soon" handlers never run
   contentEl.addEventListener("click", (e) => {
-    const tile = e.target.closest(".doc-tile[data-soon]");
-    if (!tile) return;
-    const category = TILE_CATEGORY[tile.dataset.soon];
+    const create = e.target.closest("[data-create]");
+    const tile = create ? null : e.target.closest(".doc-tile[data-soon]");
+    const trigger = create || tile;
+    if (!trigger) return;
+    const category = create ? create.dataset.create : TILE_CATEGORY[tile.dataset.soon];
     if (!category) return;
-    e.preventDefault();
+    e.preventDefault();  // also stops the group from opening/closing
     e.stopPropagation();
-    if (menu && anchor === tile) { closeFormPicker(); return; }
-    tile.setAttribute("aria-haspopup", "true");
-    open(tile, category, getStaff());
+    if (menu && anchor === trigger) { closeFormPicker(); return; }
+    trigger.setAttribute("aria-haspopup", "true");
+    open(trigger, category, getStaff(), create ? create.dataset.group || "" : "");
   }, true);
 
   document.addEventListener("pointerdown", (e) => {

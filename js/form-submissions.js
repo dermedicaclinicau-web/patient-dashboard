@@ -18,6 +18,7 @@ function normalise(snap) {
     templateId: d.templateId || "",
     templateName: d.templateName || "Untitled form",
     category: d.category || "",
+    group: d.group || "",
     version: Number(d.version || 0),
     patientId: d.patientId || "",
     patientPttId: d.patientPttId || "",

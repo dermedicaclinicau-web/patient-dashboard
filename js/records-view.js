@@ -25,6 +25,10 @@ function isOpenSaved(key, fallback) {
   } catch { return fallback; }
 }
 
+// Set by the fill-in page after saving, so the new record is opened and highlighted
+let highlightId = null;
+export function highlightRecord(submissionId) { highlightId = submissionId; }
+
 /* ===================== Layout ===================== */
 
 export function recordsSectionHtml() {
@@ -61,6 +65,20 @@ export function mountRecords(root, patient) {
   let loaded = false;
   let loading = null;
 
+  function showHighlight() {
+    const id = highlightId;
+    highlightId = null;
+    if (!id) return;
+    const item = grid.querySelector(`[data-sub="${CSS.escape(id)}"]`);
+    if (!item) return;
+    const cat = item.closest("details.rc-cat");
+    if (cat) cat.open = true;
+    requestAnimationFrame(() => {
+      item.scrollIntoView({ block: "center", behavior: "smooth" });
+      item.classList.add("is-new");
+    });
+  }
+
   function load() {
     if (loaded || loading) return loading;
     loading = (async () => {
@@ -72,6 +90,7 @@ export function mountRecords(root, patient) {
         grid.querySelector(".rc-cs-count").textContent = consents.length;
         txBody.innerHTML = treatmentsHtml(treatments);
         csBody.innerHTML = consentsHtml(consents);
+        showHighlight();
       } catch (err) {
         if (!grid.isConnected) return;
         console.error("Records load failed:", err);
@@ -95,6 +114,7 @@ export function mountRecords(root, patient) {
     if (card.open) load();
   }, true);
 
+  if (highlightId && !txCard.open) txCard.open = true; // just saved a record: show it
   if (txCard.open) load();
 }
 
@@ -102,7 +122,7 @@ export function mountRecords(root, patient) {
 
 function groupBy(items) {
   const map = new Map(ALL_CATS.map((c) => [c.key, []]));
-  items.forEach((it) => map.get(it.category).push(it));
+  items.forEach((it) => (map.get(it.category) || map.get("other")).push(it));
   return map;
 }
 
@@ -111,6 +131,9 @@ function viewLink(link) {
     ? `<a class="rc-act" href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">${ICONS.view}View</a>`
     : `<span class="rc-act is-disabled" title="No file attached">${ICONS.view}View</span>`;
 }
+
+const portalView = (r) =>
+  `<a class="rc-act" href="#/form-record/${encodeURIComponent(r.portalId)}">${ICONS.view}View</a>`;
 
 function categoryHtml(cat, items, inner, actions = "") {
   return `
@@ -134,9 +157,9 @@ function treatmentsHtml(treatments) {
     .filter((c) => c.key !== "other" || groups.get("other").length) // "Other" only when used
     .map((cat) => categoryHtml(cat, groups.get(cat.key), txItemHtml, `
       <span class="rc-cat-actions">
-        <button type="button" class="rc-link" data-soon="Create consent: ${escapeHtml(cat.title)}">${ICONS.plus}Create Consent</button>
+        <button type="button" class="rc-link" data-create="consent" data-group="${cat.key}">${ICONS.plus}Create Consent</button>
         <span class="rc-sep">|</span>
-        <button type="button" class="rc-link" data-soon="Create treatment record: ${escapeHtml(cat.title)}">${ICONS.plus}Create Tx</button>
+        <button type="button" class="rc-link" data-create="treatment" data-group="${cat.key}">${ICONS.plus}Create Tx</button>
       </span>`))
     .join("");
 }
@@ -150,16 +173,26 @@ function consentsHtml(consents) {
     .join("");
 }
 
-function txItemHtml(t) {
-  let badge;
-  if (t.consent === undefined) badge = `<span class="rc-badge warn">Consent status unknown (no record date)</span>`;
-  else if (t.consent) badge = `<span class="rc-badge ok">✓ Consent on file · ${escapeHtml(fmt(t.consent))}</span>`;
-  else badge = `<span class="rc-badge warn">⚠ No consent found</span>`;
+function consentBadge(t) {
+  if (t.consent === undefined) return `<span class="rc-badge warn">Consent status unknown (no record date)</span>`;
+  if (t.consent) return `<span class="rc-badge ok">✓ Consent on file · ${escapeHtml(fmt(t.consent))}</span>`;
+  return `<span class="rc-badge warn">⚠ No consent found</span>`;
+}
 
+function txItemHtml(t) {
+  if (t.portalId) {
+    return `
+      <article class="rc-item" data-sub="${escapeHtml(t.portalId)}">
+        <div class="rc-item-top"><h4>${escapeHtml(t.title)}</h4><span class="rc-date">${escapeHtml(fmt(t))}</span></div>
+        <div class="rc-badges"><span class="rc-badge portal">Portal form</span>${consentBadge(t)}</div>
+        ${t.staff ? `<p class="rc-staff">${escapeHtml(t.staff)}</p>` : ""}
+        <div class="rc-actions">${portalView(t)}</div>
+      </article>`;
+  }
   return `
     <article class="rc-item">
       <div class="rc-item-top"><h4>${escapeHtml(t.title)}</h4><span class="rc-date">${escapeHtml(fmt(t))}</span></div>
-      ${badge}
+      ${consentBadge(t)}
       ${t.staff ? `<p class="rc-staff">${escapeHtml(t.staff)}</p>` : ""}
       ${t.matchedByName ? `<span class="task-flag neutral">Matched by name</span>` : ""}
       <div class="rc-actions">
@@ -173,6 +206,15 @@ function txItemHtml(t) {
 }
 
 function consentItemHtml(c) {
+  if (c.portalId) {
+    return `
+      <article class="rc-item" data-sub="${escapeHtml(c.portalId)}">
+        <div class="rc-item-top"><h4>${escapeHtml(c.title)}</h4><span class="rc-date">${escapeHtml(fmt(c))}</span></div>
+        <div class="rc-badges"><span class="rc-badge portal">Portal form</span></div>
+        ${c.staff ? `<p class="rc-staff">${escapeHtml(c.staff)}</p>` : ""}
+        <div class="rc-actions">${portalView(c)}</div>
+      </article>`;
+  }
   return `
     <article class="rc-item">
       <div class="rc-item-top"><h4>${escapeHtml(c.title)}</h4><span class="rc-date">${escapeHtml(fmt(c))}</span></div>

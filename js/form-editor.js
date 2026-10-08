@@ -12,6 +12,7 @@ import { DEFAULT_LETTERHEAD, letterheadHtml, openLetterheadDialog } from "./form
 import { openPrinterDialog } from "./form-delivery.js";
 import { conditionSettingsHtml, applyConditionInput, applyConditionClick, conditionSummary, conditionProblem } from "./form-conditions.js";
 import { applyVisibility } from "./form-fill.js";
+import { CATEGORIES, categorize } from "./records.js";
 
 const UI = {
   up: '<polyline points="18 15 12 9 6 15"/>',
@@ -426,6 +427,15 @@ export async function mountFormEditor(container, { templateId, staff }) {
               ? "Not on the patient dashboard. Publish to make it available again."
               : "Not published yet. Click Publish at the top when it's ready."}</small>`}
       </div>
+      ${["consent", "treatment"].includes(tpl.category) ? `
+      <label class="fe-insp-field"><span class="fe-insp-label">Treatment group</span>
+        <select class="fb-select" data-s="group">
+          <option value="">Automatic, from the form name (${esc((CATEGORIES.find((c) => c.key === categorize(name)) || { title: "Other" }).title)})</option>
+          ${CATEGORIES.map((c) => `<option value="${c.key}"${settings.group === c.key ? " selected" : ""}>${esc(c.title)}</option>`).join("")}
+          <option value="other"${settings.group === "other" ? " selected" : ""}>Other</option>
+        </select>
+        <small class="fe-note">Where saved forms appear on the patient's page, and which Create Consent / Create Tx buttons offer this form.</small>
+      </label>` : ""}
       <label class="fe-check"><input type="checkbox" data-s="showLetterhead"${settings.showLetterhead !== false ? " checked" : ""} /> Show the letterhead at the top</label>
       <div class="fe-insp-field">
         <span class="fe-insp-label">Letterhead</span>

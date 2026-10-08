@@ -2,6 +2,8 @@ import { db } from "./firebase-config.js";
 import { collection, query, where, getDocs, FieldPath }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { nameVariants, parseRecordDate } from "./transcripts.js";
+import { listSubmissionsForPatient } from "./form-submissions.js";
+import { patientIds } from "./patients.js";
 
 // Order = display order. First match wins, so more specific patterns come first.
 export const CATEGORIES = [
@@ -21,6 +23,7 @@ export const CATEGORIES = [
     match: /body|sculpt/i },
 ];
 export const OTHER_CATEGORY = { key: "other", title: "Other", color: "#94a3b8" };
+const GROUP_KEYS = [...CATEGORIES.map((c) => c.key), "other"];
 
 export function categorize(text) {
   const cat = CATEGORIES.find((c) => c.match.test(String(text || "")));
@@ -50,12 +53,45 @@ async function byPatient(colName, patient, nameField) {
   return [...out.values()];
 }
 
+// "2026-10-08" -> a date at midday (so it never slips to the day before)
+function keyDate(key) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
+  return m ? new Date(+m[1], +m[2] - 1, +m[3], 12) : null;
+}
+
+// Consent forms and treatment records filled in on the portal.
+// A problem here never stops the sheet records from showing.
+async function portalRecords(patient) {
+  try {
+    const subs = await listSubmissionsForPatient([patient.id, patient.pttId, ...patientIds(patient)]);
+    return subs
+      .filter((s) => s.category === "consent" || s.category === "treatment")
+      .map((s) => ({
+        id: `form-${s.id}`,
+        portalId: s.id,
+        kind: s.category,
+        title: s.templateName,
+        category: GROUP_KEYS.includes(s.group) ? s.group : categorize(s.templateName),
+        date: keyDate(s.recordDate),
+        dateText: s.recordDate,
+        staff: s.createdBy,
+        link: "",
+        recordId: s.id,
+        matchedByName: false,
+      }));
+  } catch (err) {
+    console.warn("Portal forms couldn't be added to the records:", err);
+    return [];
+  }
+}
+
 const byDateDesc = (a, b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0);
 
 export async function fetchPatientRecords(patient) {
-  const [txDocs, consentDocs] = await Promise.all([
+  const [txDocs, consentDocs, portal] = await Promise.all([
     byPatient("treatment_records", patient, "Patient Name"),
     byPatient("consent_records", patient, null),
+    portalRecords(patient),
   ]);
 
   const consents = consentDocs.map(({ id, data, byName }) => {
@@ -70,7 +106,7 @@ export async function fetchPatientRecords(patient) {
       recordId: String(data["Record ID"] || ""),
       matchedByName: byName,
     };
-  }).sort(byDateDesc);
+  }).concat(portal.filter((p) => p.kind === "consent")).sort(byDateDesc);
 
   const treatments = txDocs.map(({ id, data, byName }) => {
     const title = String(data["Treatment Record Type"] || "Treatment record");
@@ -84,7 +120,7 @@ export async function fetchPatientRecords(patient) {
       recordId: String(data["Record ID"] || ""),
       matchedByName: byName,
     };
-  }).sort(byDateDesc);
+  }).concat(portal.filter((p) => p.kind === "treatment")).sort(byDateDesc);
 
   // Consent on file = most recent consent in the SAME category dated on/before the treatment day
   treatments.forEach((t) => {

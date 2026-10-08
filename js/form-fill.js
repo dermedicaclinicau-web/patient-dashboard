@@ -10,6 +10,8 @@ import { confirmDialog } from "./dialog.js";
 import { showToast, formatDobLong, formatMobile } from "./utils.js";
 import { queueDelivery, takeDelivery, openEmailComposer, sendToPrinter, deliveriesHtml, deliveryError } from "./form-delivery.js";
 import { conditionPasses, visibleIds } from "./form-conditions.js";
+import { formGroup } from "./form-templates.js";
+import { highlightRecord } from "./records-view.js";
 
 const LAYOUT = ["text_block", "space", "letterhead", "watermark"];
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
@@ -561,6 +563,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
         templateId: tid,
         templateName: ver.name,
         category: tpl.category,
+        group: formGroup({ name: ver.name, settings: ver.settings }),
         version: ver.version,
         patientId: patient.id,
         patientPttId: patient.pttId || "",
@@ -571,6 +574,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
       }, staff);
       dirty = false;
       if (kind === "save") {
+        if (tpl.category === "consent" || tpl.category === "treatment") highlightRecord(id);
         location.hash = patientHref;
         showToast(`${ver.name} saved to ${patient.name}'s record`);
       } else {

@@ -48,19 +48,31 @@ const CSS = `
   .pdfdoc .sigmeta { font-size: 9pt; color: #475569; margin-top: 2px; }
 `;
 
+// Alignment is set directly on each element so the portal's own page styles
+// (which are present while the PDF is drawn) can't move anything.
 function letterhead(lh) {
   if (!lh) return "";
   const h = { small: 36, medium: 56, large: 80 }[lh.logoSize] || 56;
-  const logo = LOGO_RE.test(lh.logo || "") ? `<img src="${lh.logo}" height="${h}" alt="">` : "";
-  const name = lh.showName !== false && lh.name ? `<span class="lh-name">${esc(lh.name)}</span>` : "";
+  const img = LOGO_RE.test(lh.logo || "")
+    ? `<img src="${lh.logo}" alt="" style="display:inline-block !important;height:${h}px !important;width:auto !important;max-width:none !important;margin:0 !important;vertical-align:middle">`
+    : "";
+  const name = lh.showName !== false && lh.name
+    ? `<span class="lh-name" style="vertical-align:middle">${esc(lh.name)}</span>` : "";
   const lines = [lh.line1, lh.line2].filter(Boolean).map(esc).join("<br>");
+  const rule = "border-bottom:2px solid #0f766e;margin:0 0 16px 0;";
+
   if (lh.layout === "centre") {
-    return `<table class="lh"><tr><td align="center">${logo}${logo && name ? "<br>" : ""}${name}${
-      lines ? `<div class="lh-lines">${lines}</div>` : ""}</td></tr></table>`;
+    return `<div class="lh-c" style="${rule}padding:0 0 12px 0;text-align:center !important;">
+      <div style="text-align:center !important;">${img}${img && name ? "<br>" : ""}${name}</div>
+      ${lines ? `<div class="lh-lines" style="text-align:center !important;margin-top:6px;">${lines}</div>` : ""}
+    </div>`;
   }
-  return `<table class="lh"><tr><td>${logo}${logo && name ? "&nbsp;&nbsp;" : ""}${name}</td>` +
-    `<td align="right" class="lh-lines">${lines}</td></tr></table>`;
+  return `<table style="width:100% !important;border-collapse:collapse;${rule}"><tr>
+    <td style="text-align:left !important;vertical-align:middle;padding:0 0 12px 0;">${img}${img && name ? "&nbsp;&nbsp;" : ""}${name}</td>
+    <td class="lh-lines" style="text-align:right !important;vertical-align:middle;padding:0 0 12px 0;">${lines}</td>
+  </tr></table>`;
 }
+
 
 function answer(f, v, sig, inline) {
   const none = '<span class="none">Not answered</span>';
@@ -97,8 +109,8 @@ function answer(f, v, sig, inline) {
       return esc(formatCalc(v, f) || "—");
     case "signature": {
       if (!(typeof sig === "string" && PNG_RE.test(sig))) return '<span class="none">Not signed</span>';
-      const meta = v && typeof v === "object"
-        ? [v.name && `Signed by ${esc(v.name)}`, v.date && `on ${esc(niceDate(v.date))}`].filter(Boolean).join(" ")
+      const meta = v && typeof v === "object" && (v.name || v.date)
+        ? `Signed${v.name ? ` by ${esc(v.name)}` : ""}${v.date ? ` on ${esc(niceDate(v.date))}` : ""}`
         : "";
       return `<div class="sig"><img src="${sig}" height="70" alt="Signature"></div>${meta ? `<div class="sigmeta">${meta}</div>` : ""}`;
     }
