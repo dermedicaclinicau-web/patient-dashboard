@@ -1,6 +1,7 @@
 import { storage, db, auth } from "./firebase-config.js";
 import { ref, uploadBytesResumable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
-import { doc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { doc, setDoc, serverTimestamp, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { callApi } from "./appointments.js";
 import { toDateKey } from "./utils.js";
 
 /* ===================== State ===================== */
@@ -135,6 +136,7 @@ function stopTick() {
 }
 
 function reset() {
+  stopWatching();
   Object.assign(state, {
     status: "idle", recId: null, patient: null, staff: null,
     elapsedMs: 0, startedAt: null, mime: "", progress: 0, error: "",
@@ -304,8 +306,7 @@ async function uploadRecording(recId) {
     });
 
     await deleteRecording(recId); // the device copy is no longer needed
-    Object.assign(state, { status: "done", progress: 1 });
-    emit();
+    startProcessing(recId);
   } catch (err) {
     console.error("Recording upload failed:", err);
     state.status = "error";
@@ -321,7 +322,7 @@ export function retryUpload() {
 }
 
 export function dismiss() {
-  if (state.status === "done") reset();
+  if (state.status === "done" || state.status === "ready") reset();
 }
 
 /* ===================== Recovery after a crash / closed tab / logout ===================== */
@@ -366,3 +367,50 @@ document.addEventListener("visibilitychange", () => {
     acquireWakeLock(); // wake lock is dropped when the tab is hidden
   }
 });
+
+/* ===================== Phase 2: processing (Deepgram -> Gemini) ===================== */
+
+let jobUnsub = null;
+
+function stopWatching() {
+  if (jobUnsub) { jobUnsub(); jobUnsub = null; }
+}
+
+// Live progress from the server via the recording_jobs document
+function watchJob(recId) {
+  stopWatching();
+  jobUnsub = onSnapshot(doc(db, "recording_jobs", recId), (snap) => {
+    if (!snap.exists() || state.recId !== recId) return;
+    const job = snap.data();
+    if (job.status === "ready") {
+      stopWatching();
+      Object.assign(state, { status: "ready", transcriptId: job.transcriptId || recId, error: "" });
+    } else if (job.status === "failed") {
+      Object.assign(state, { status: "failed", error: job.error || "Processing failed." });
+    } else {
+      Object.assign(state, { status: "processing", stage: job.status });
+    }
+    emit();
+  }, (err) => console.warn("Watching the recording job failed:", err));
+}
+
+// Step 1 (transcribe) and step 2 (write notes) run as separate server calls
+async function kickProcessing(recId, round = 0) {
+  try {
+    const res = await callApi({ action: "processRecording", recordingId: recId });
+    if (res && res.next && round < 3 && state.recId === recId) kickProcessing(recId, round + 1);
+  } catch (err) {
+    console.warn("Process request didn't complete (the 5-minute sweeper will continue it):", err);
+  }
+}
+
+function startProcessing(recId) {
+  Object.assign(state, { status: "processing", stage: "uploaded", error: "", progress: 1 });
+  emit();
+  watchJob(recId);
+  kickProcessing(recId);
+}
+
+export function retryProcessing() {
+  if (state.status === "failed" && state.recId) startProcessing(state.recId);
+}

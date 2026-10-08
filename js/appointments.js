@@ -50,7 +50,7 @@ export async function fetchDayAppointments(dateKey) {
 }
 
 // Shared Apps Script caller
-async function callApi(payload) {
+export async function callApi(payload) {
   const session = sessionStorage.getItem("appSession");
   if (!session) throw unauthorized();
 

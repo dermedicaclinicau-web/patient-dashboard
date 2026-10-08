@@ -1,6 +1,7 @@
 import {
   subscribe, getState, startRecording, pauseRecording, resumeRecording, completeRecording,
   cancelRecording, uploadRecovered, discardRecording, retryUpload, dismiss, checkForUnfinished,
+  retryProcessing,
 } from "./recorder.js";
 import { escapeHtml, showToast } from "./utils.js";
 
@@ -63,7 +64,7 @@ export function setRecordingPatient(patient) {
 
 function render(s) {
   if (!bar) return;
-  const key = [s.status, s.recId, context && context.id].join("|");
+  const key = [s.status, s.stage, s.recId, context && context.id].join("|");
 
   // Same state: just update the live numbers (keeps the consent box / focus intact)
   if (key === lastKey) {
@@ -141,6 +142,47 @@ function render(s) {
       break;
 
     case "error":
+          case "processing": {
+      cls = "is-busy";
+      const stages = [
+        ["upload", "Uploaded"],
+        ["transcribe", "Transcribing"],
+        ["notes", "Writing notes"],
+      ];
+      const current = (s.stage === "writing" || s.stage === "transcribed") ? 2 : s.stage === "transcribing" ? 1 : 0;
+      const label = current === 2 ? "Writing clinical notes…" : current === 1 ? "Transcribing the consultation…" : "Starting processing…";
+      html = `
+        <span class="rec-spin"></span>
+        <span class="rec-text"><strong>${label} · ${patientLink(s.patient)}</strong>
+          <small>This usually takes under a minute. You can keep working.</small></span>
+        <span class="rec-steps">${stages.map(([, name], i) =>
+          `<span class="rec-step ${i < current ? "done" : i === current ? "active" : ""}">${name}</span>`).join("")}</span>`;
+      break;
+    }
+
+    case "ready":
+      cls = "is-done";
+      html = `
+        <span class="rec-icon">${ICONS.check}</span>
+        <span class="rec-text"><strong>Clinical notes ready · ${patientLink(s.patient)}</strong>
+          <small>Saved as Draft. Open the patient to see the notes in their record.</small></span>
+        <span class="rec-actions">
+          <button type="button" class="rec-btn go" data-rec="open">Open patient</button>
+          <button type="button" class="rec-btn" data-rec="dismiss">Done</button>
+        </span>`;
+      break;
+
+    case "failed":
+      cls = "is-error";
+      html = `
+        <span class="rec-icon">${ICONS.upload}</span>
+        <span class="rec-text"><strong>Couldn't create notes · ${patientLink(s.patient)}</strong>
+          <small>${escapeHtml(s.error)} The recording is saved securely, so nothing is lost.</small></span>
+        <span class="rec-actions">
+          <button type="button" class="rec-btn go" data-rec="retry-process">Try again</button>
+          <button type="button" class="rec-btn" data-rec="dismiss-failed">Hide</button>
+        </span>`;
+      break;
       cls = "is-error";
       html = `
         <span class="rec-icon">${ICONS.upload}</span>
@@ -197,6 +239,19 @@ async function onClick(e) {
     } else if (action === "discard") {
       if (confirm("Delete this recording permanently? This can't be undone.")) await discardRecording();
     } else if (action === "dismiss") {
+      dismiss();
+    } else if (action === "retry-process") {
+      retryProcessing();
+    } else if (action === "dismiss-failed") {
+      // The server keeps retrying in the background; this just hides the bar
+      bar.hidden = true;
+      document.documentElement.style.setProperty("--recbar-h", "0px");
+    } else if (action === "open") {
+      const id = getState().patient && getState().patient.id;
+      if (!id) return;
+      const target = `#/patient/${encodeURIComponent(id)}`;
+      if (location.hash === target) window.dispatchEvent(new HashChangeEvent("hashchange")); // reload the page's data
+      else location.hash = target;
       dismiss();
     }
   } catch (err) {

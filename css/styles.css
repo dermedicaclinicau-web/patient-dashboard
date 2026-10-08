@@ -927,6 +927,14 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .rec-progress span { display: block; height: 100%; background: #3b82f6; transition: width .2s; }
 .rec-pct { font-weight: 600; color: #1d4ed8; font-variant-numeric: tabular-nums; }
 
+.rec-spin { width: 22px; height: 22px; flex-shrink: 0; border-radius: 50%; border: 3px solid #bfdbfe;
+  border-top-color: #2563eb; animation: spin .8s linear infinite; }
+.rec-steps { margin-left: auto; display: flex; align-items: center; gap: .35rem; }
+.rec-step { font-size: .72rem; font-weight: 600; padding: .2rem .6rem; border-radius: 999px;
+  background: #fff; border: 1px solid #dbeafe; color: #94a3b8; }
+.rec-step.active { border-color: #2563eb; color: #1d4ed8; background: #eff6ff; }
+.rec-step.done { border-color: #a7f3d0; color: #047857; background: #ecfdf5; }
+
 /* Sticky elements sit below the recording bar when it's showing */
 .patient-bar { top: calc(var(--topbar-h) + var(--recbar-h, 0px)); }
 .sidebar { top: calc(var(--topbar-h) + var(--recbar-h, 0px)); height: calc(100vh - var(--topbar-h) - var(--recbar-h, 0px)); }
