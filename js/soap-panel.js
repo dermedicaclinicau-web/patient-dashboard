@@ -737,7 +737,7 @@ async function regenerate() {
     updateTab();
     showToast("Notes regenerated");
   } catch (err) {
-    console.error("Regenerate failed:", err);
+    console.error("Regenerate failed:", err.code || "(no code)", err);
     if (current && current.id === id) hideBusy();
     const messages = {
       REVIEWED: "Reviewed notes can't be regenerated. Save as Draft first if you really need to.",
