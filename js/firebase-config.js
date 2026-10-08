@@ -15,6 +15,7 @@ const firebaseConfig = {
 
 // Apps Script web app URL (ends with /exec)
 export const LOGIN_ENDPOINT = "https://script.google.com/macros/s/AKfycbzKmMFcYHcGZ2xOZdOaONyH4sNzeGOEntzhl76BjuaIpCFmTTpudcrBJi9SgUX3to3abg/exec";
+export const FORM_BUILDER_URL = "https://script.google.com/macros/s/AKfycbz9zMmfaSwAEmnnbLby1TFxyce48SlwbQCcv-hwZl0CKpjvyF33FZg2R-LcNsCeY6wR/exec";
 
 export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
