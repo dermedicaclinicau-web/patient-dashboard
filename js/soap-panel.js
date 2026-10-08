@@ -7,6 +7,7 @@ import {
   planCardHtml, fieldHtml, getPlanValue, setPlanValue, refFrom, catKey, planFromText,
 } from "./plan-editor.js";
 import { fetchTranscriptRecords, parseRecordDate } from "./transcripts.js";
+import { emailItemsFrom, emailCardHtml, openEmailComposer } from "./email-composer.js";
 
 import { callApi } from "./appointments.js";
 import { escapeHtml, showToast, toDateKey } from "./utils.js";
@@ -103,6 +104,13 @@ function ensureDom() {
   panel.addEventListener("focusout", (e) => {
     if (e.target.matches && e.target.matches("textarea.pe-input")) commitPlanEdit(e.target);
   });
+  // Enable "Draft Email" only when at least one treatment is ticked
+  panel.addEventListener("change", (e) => {
+    if (!e.target.matches("[data-em-check]")) return;
+    const btn = panel.querySelector(".em-draft");
+    if (btn) btn.disabled = !panel.querySelector("[data-em-check]:checked");
+  });
+
   panel.addEventListener("change", (e) => {
     if (!e.target.matches("select.pe-cat") || !current || !current.plan) return;
     const c = current.plan.concerns[Number(e.target.dataset.ci)];
@@ -186,6 +194,7 @@ async function load(id) {
       id, data, parsed, original, extras: parsed.extras.map((x) => ({ ...x })), dirty: false,
       sidecarObj, plan, planSnapshot: JSON.stringify(plan), priorCats: null,
     };
+     current.emailItems = emailItemsFrom(sidecarObj, parsed.sections.email);
     try { sessionStorage.setItem(STORE_KEY, JSON.stringify({ id, mode })); } catch { /* ignore */ }
     render();
     loadPersonalNotes();
@@ -272,6 +281,10 @@ function sectionHtml(s, value) {
   if (s.key === "plan" && current && current.plan) {
     return `<section class="sp-card sp-tone-green full" data-plan-card>${planCardHtml(current.plan, current.priorCats)}</section>`;
   }
+    // Treatment Info to Email: checklist + composer
+  if (s.key === "email" && current && current.emailItems && current.emailItems.length) {
+    return `<section class="sp-card sp-tone-indigo" data-email-card>${emailCardHtml(current.emailItems, current.data["Treatment Emails Sent"])}</section>`;
+  }
   const planActions = s.key === "plan" ? `
     <span class="sp-card-actions">
       <button type="button" class="sp-mini" data-soon="Update email from plan">Update email from plan</button>
@@ -323,6 +336,7 @@ async function onClick(e) {
   else if (action === "save-draft") save("Draft", btn);
   else if (action === "save-reviewed") save("Reviewed", btn);
   else if (action === "save-note") saveNote(btn);
+  else if (action === "email-draft") draftEmail();
   else if (action === "delete") showDeleteConfirm();
   else if (action === "delete-cancel") hideDeleteConfirm();
   else if (action === "delete-confirm") doDelete(btn);
@@ -350,7 +364,8 @@ async function save(status, btn) {
     const ta = panel.querySelector(`textarea[data-extra="${i}"]`);
     return { heading: x.heading, text: ta ? ta.value : x.text };
   });
-
+  // The email card isn't a text box: keep that section's text as it was
+  if (current.emailItems && current.emailItems.length) values.email = current.original.email;
   const changed = (k) => String(values[k] || "").trim() !== String(current.original[k] || "").trim();
   let sidecar = "";
   let keepSidecar = false;
@@ -402,6 +417,7 @@ async function save(status, btn) {
     current.sidecarObj = readSidecar(soap);
     current.plan = planFromSidecar(current.sidecarObj) || planFromText(current.parsed.sections.plan);
     current.planSnapshot = JSON.stringify(current.plan);
+    current.emailItems = emailItemsFrom(current.sidecarObj, current.parsed.sections.email);
     render();
     loadPersonalNotes();
     updateTab();
@@ -645,4 +661,35 @@ async function loadPriorCategories() {
   } catch (err) {
     console.warn("Couldn't work out NEW / UPDATE badges:", err);
   }
+}
+
+/* ===================== Treatment Info to Email ===================== */
+
+function rerenderEmail() {
+  const card = panel.querySelector("[data-email-card]");
+  if (card && current && current.emailItems) {
+    card.innerHTML = emailCardHtml(current.emailItems, current.data["Treatment Emails Sent"]);
+  }
+}
+
+function draftEmail() {
+  if (!current || !current.emailItems) return;
+  const picked = [...panel.querySelectorAll("[data-em-check]:checked")]
+    .map((cb) => current.emailItems[Number(cb.dataset.emCheck)])
+    .filter(Boolean);
+  if (!picked.length) { showToast("Tick at least one treatment"); return; }
+
+  const id = current.id;
+  openEmailComposer({
+    items: picked,
+    recordId: id,
+    record: current.data,
+    staff,
+    onSent: (entry) => {
+      if (!current || current.id !== id) return;
+      const log = Array.isArray(current.data["Treatment Emails Sent"]) ? current.data["Treatment Emails Sent"] : [];
+      current.data["Treatment Emails Sent"] = [...log, entry];
+      rerenderEmail();
+    },
+  });
 }

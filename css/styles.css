@@ -1121,6 +1121,60 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .pe-btn.solid { background: #16a34a; border-color: #16a34a; color: #fff; }
 .pe-btn:hover { filter: brightness(.97); }
 
+/* ---------- Review panel: Treatment Info to Email ---------- */
+.em-body { display: flex; flex-direction: column; gap: .7rem; padding: .9rem; background: #f8f9ff; }
+.em-list { list-style: none; display: flex; flex-direction: column; gap: .55rem; }
+.em-item { background: #fff; border: 1px solid #e0e7ff; border-radius: 10px; }
+.em-check { display: flex; gap: .65rem; padding: .7rem .85rem; cursor: pointer; }
+.em-check input { width: 18px; height: 18px; margin-top: .15rem; flex-shrink: 0; accent-color: #2563eb; }
+.em-main { display: flex; flex-direction: column; gap: .1rem; min-width: 0; }
+.em-name { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem; color: #1e1b4b; font-size: .98rem; font-weight: 500; }
+.em-sent { display: inline-flex; align-items: center; gap: .2rem; padding: .05rem .45rem; border-radius: 999px;
+  background: #dcfce7; color: #15803d; font-size: .68rem; font-weight: 700; }
+.em-sent svg { width: 11px; height: 11px; }
+.em-area { display: flex; flex-direction: column; }
+.em-area + .em-area { margin-top: .35rem; padding-top: .35rem; border-top: 1px dashed #e0e7ff; }
+.em-line { color: #475569; font-size: .8rem; }
+.em-line b { color: #64748b; font-weight: 700; }
+.em-note { color: #64748b; font-size: .8rem; font-style: italic; }
+.em-draft { display: flex; align-items: center; justify-content: center; gap: .5rem; width: 100%; height: 44px;
+  border: none; border-radius: 10px; background: #4338ca; color: #fff; font-size: .95rem; font-weight: 700; cursor: pointer; }
+.em-draft:hover { background: #3730a3; }
+.em-draft:disabled { opacity: .5; cursor: not-allowed; }
+.em-draft svg { width: 17px; height: 17px; }
+
+/* Email composer overlay */
+.em-dialog { margin: auto; padding: 0; border: none; border-radius: 20px; width: min(620px, calc(100% - 2rem));
+  max-height: calc(100vh - 2rem); box-shadow: 0 30px 70px -20px rgba(15, 23, 42, .45); }
+.em-dialog::backdrop { background: rgba(15, 23, 42, .5); backdrop-filter: blur(3px); }
+.em-loading { display: grid; place-items: center; gap: .75rem; padding: 3rem; color: var(--muted); }
+.em-form { display: flex; flex-direction: column; gap: 1rem; padding: 1.4rem 1.5rem; }
+.em-head { display: flex; align-items: center; gap: .6rem; padding-bottom: .9rem; border-bottom: 1px solid var(--border); }
+.em-head > svg { width: 24px; height: 24px; color: #4f46e5; }
+.em-head h2 { flex: 1; font-size: 1.3rem; font-weight: 700; }
+.em-close { width: 34px; height: 34px; display: grid; place-items: center; border: none; border-radius: 8px;
+  background: none; color: #64748b; cursor: pointer; }
+.em-close:hover { background: #f1f5f9; }
+.em-close svg { width: 18px; height: 18px; }
+.em-field { display: flex; flex-direction: column; gap: .35rem; }
+.em-field > span { color: #64748b; font-size: .72rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.em-field input { height: 44px; padding: 0 .85rem; border: 1px solid var(--border); border-radius: 10px;
+  background: #f8fafc; font-size: .95rem; outline: none; }
+.em-field input:focus { border-color: #6366f1; box-shadow: 0 0 0 3px #e0e7ff; background: #fff; }
+.em-preview { min-height: 220px; max-height: 42vh; overflow-y: auto; padding: 1rem 1.1rem; border: 1px solid var(--border);
+  border-radius: 10px; background: #fff; outline: none; }
+.em-preview:focus { border-color: #6366f1; box-shadow: 0 0 0 3px #e0e7ff; }
+.em-field small { color: var(--muted); font-size: .75rem; }
+.em-warn { padding: .5rem .7rem; border: 1px solid #fde68a; border-radius: 8px; background: #fffbeb; color: #b45309; font-size: .82rem; }
+.em-error { min-height: 1rem; color: var(--danger); font-size: .85rem; }
+.em-foot { display: flex; justify-content: flex-end; gap: .6rem; padding-top: .9rem; border-top: 1px solid var(--border); }
+.em-foot .btn-ghost { height: 46px; padding: 0 1.3rem; }
+.em-send { display: inline-flex; align-items: center; gap: .5rem; height: 46px; padding: 0 1.3rem; border: none;
+  border-radius: 12px; background: #4f46e5; color: #fff; font-weight: 700; cursor: pointer; }
+.em-send:hover { background: #4338ca; }
+.em-send:disabled { opacity: .6; cursor: wait; }
+.em-send svg { width: 17px; height: 17px; }
+
 @media (max-width: 560px) {
   .pe-row { grid-template-columns: 1fr; gap: .2rem; }
 }
