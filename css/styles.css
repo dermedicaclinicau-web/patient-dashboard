@@ -1019,7 +1019,8 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .sp-note span { display: block; margin-top: .2rem; font-size: .72rem; color: var(--muted); }
 .sp-empty { font-size: .85rem; color: var(--muted); font-style: italic; }
 
-.sp-foot { display: flex; align-items: center; gap: .5rem; padding: .8rem 1rem; background: #fff; border-top: 1px solid var(--border); }
+.sp-foot { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; padding: .8rem 1rem; background: #fff; border-top: 1px solid var(--border); }
+.sp-foot .sp-save-state { min-width: 140px; }
 .sp-save-state { flex: 1; font-size: .78rem; color: var(--muted); }
 .sp-save-state.dirty { color: #b45309; font-weight: 600; }
 .sp-foot button { height: 40px; }
