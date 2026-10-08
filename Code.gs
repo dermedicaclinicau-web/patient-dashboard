@@ -29,6 +29,8 @@ function doPost(e) {
     if (body.action === 'regenerateSoap') return json_(handleRegenerateSoap_(body));
     if (body.action === 'emailFromPlan') return json_(handleEmailFromPlan_(body));
     if (body.action === 'sendFormPdf') return json_(handleSendFormPdf_(body));
+    if (body.action === 'imageBank') return json_(handleImageBank_(body));
+    if (body.action === 'staffList') return json_(handleStaffList_(body));
 
     const pin = String(body.pin || '').trim();
 
@@ -1611,8 +1613,11 @@ function handleSendFormPdf_(body) {
   const kind = body.kind === 'print' ? 'print' : 'email';
   if (!/^[A-Za-z0-9_-]{10,40}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
 
-  const html = sanitizePdfHtml_(body.html);
-  if (!html || html.length > 4000000) return { ok: false, error: 'BAD_REQUEST' };
+  // The browser normally sends the finished PDF (it looks exactly like the preview).
+  // If it couldn't make one, it sends the document and the PDF is made here instead.
+  const pdfBytes = pdfBytes_(body.pdf);
+  const html = pdfBytes ? '' : sanitizePdfHtml_(body.html);
+  if (!pdfBytes && (!html || html.length > 4000000)) return { ok: false, error: 'BAD_REQUEST' };
 
   // The saved form must really exist (the browser can't invent one)
   const cfg = getConfig_();
@@ -1644,7 +1649,9 @@ function handleSendFormPdf_(body) {
 
   let pdf;
   try {
-    pdf = Utilities.newBlob(html, 'text/html', 'form.html').getAs(MimeType.PDF).setName(fileName);
+    pdf = pdfBytes
+      ? Utilities.newBlob(pdfBytes, MimeType.PDF, fileName)
+      : Utilities.newBlob(html, 'text/html', 'form.html').getAs(MimeType.PDF).setName(fileName);
   } catch (err) {
     console.error('Form PDF failed for ' + id + ': ' + (err && err.stack ? err.stack : err));
     return { ok: false, error: 'PDF_FAILED' };
@@ -1684,6 +1691,16 @@ function handleSendFormPdf_(body) {
   return { ok: true, entry: entry };
 }
 
+// A real PDF from the browser (must start with "%PDF", max ~15 MB), or null
+function pdfBytes_(b64) {
+  if (typeof b64 !== 'string' || !b64 || b64.length > 20000000) return null;
+  let bytes;
+  try { bytes = Utilities.base64Decode(b64); } catch (e) { return null; }
+  if (bytes.length < 5 || bytes[0] !== 37 || bytes[1] !== 80 || bytes[2] !== 68 || bytes[3] !== 70) return null;
+  return bytes;
+}
+
+
 function isEmail_(s) {
   return typeof s === 'string' && s.length <= 254 && /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(s);
 }
@@ -1712,4 +1729,272 @@ function sanitizePdfHtml_(html) {
     .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
     .replace(/(href|src)\s*=\s*(["'])(?!\s*(?:data:image\/(?:png|jpeg);base64,|#))[^"']*\2/gi, '$1="#"')
     .trim();
+}
+
+// ===================== Image Bank (a Google Drive folder) =====================
+// The folder ID lives in Script Properties as IMAGE_BANK_FOLDER_ID.
+// Everything here is limited to that folder and its subfolders.
+
+const IMG_MIME_ = { 'image/png': true, 'image/jpeg': true, 'image/gif': true, 'image/webp': true };
+const IMG_MAX_BYTES_ = 8 * 1024 * 1024;
+const DRIVE_ID_RE_ = /^[A-Za-z0-9_-]{10,80}$/;
+const BANK_PAGE_ = 120; // images per folder page (names only, so this is quick)
+
+function handleImageBank_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  const rootId = String(PropertiesService.getScriptProperties().getProperty('IMAGE_BANK_FOLDER_ID') || '').trim();
+  if (!rootId) return { ok: false, error: 'NO_IMAGE_BANK' };
+
+  const op = String(body.op || '');
+  const isAdmin = /^admin$/i.test(String(session.role || ''));
+  if (['mkdir', 'upload', 'rename', 'trash'].indexOf(op) !== -1 && !isAdmin) return { ok: false, error: 'FORBIDDEN' };
+
+  try {
+    switch (op) {
+      case 'list':   return bankList_(rootId, String(body.folderId || rootId), Number(body.offset || 0));
+      case 'thumbs': return bankThumbs_(rootId, body.ids);
+      case 'search': return bankSearch_(rootId, String(body.q || ''));
+      case 'get':    return bankGet_(rootId, String(body.fileId || ''));
+      case 'mkdir':  return bankMkdir_(rootId, String(body.parentId || rootId), body.name);
+      case 'upload': return bankUpload_(rootId, String(body.parentId || rootId), body);
+      case 'rename': return bankRename_(rootId, String(body.id || ''), body.kind === 'folder', body.name);
+      case 'trash':  return bankTrash_(rootId, String(body.id || ''), body.kind === 'folder', session);
+    }
+    return { ok: false, error: 'BAD_REQUEST' };
+  } catch (err) {
+    console.error('Image bank ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: false, error: 'SERVER_ERROR' };
+  }
+}
+
+/* ---------- Is it inside the bank? Climb up through the parents (answers remembered for an hour) ---------- */
+
+function bankInside_(rootId, folder) {
+  const cache = CacheService.getScriptCache();
+  const seen = [];
+  let f = folder;
+  let guard = 0;
+  while (f && guard++ < 25) {
+    const id = f.getId();
+    if (id === rootId || cache.get('bank_in_' + id) === '1') {
+      if (seen.length) {
+        const mark = {};
+        seen.forEach(function (s) { mark['bank_in_' + s] = '1'; });
+        try { cache.putAll(mark, 3600); } catch (e) { /* not essential */ }
+      }
+      return true;
+    }
+    seen.push(id);
+    const ps = f.getParents();
+    f = ps.hasNext() ? ps.next() : null;
+  }
+  return false;
+}
+function inBankFolder_(rootId, id) {
+  if (id === rootId) return true;
+  if (!DRIVE_ID_RE_.test(id)) return false;
+  let f;
+  try { f = DriveApp.getFolderById(id); } catch (e) { return false; }
+  return !f.isTrashed() && bankInside_(rootId, f);
+}
+function inBankFile_(rootId, file) {
+  const ps = file.getParents();
+  while (ps.hasNext()) if (bankInside_(rootId, ps.next())) return true;
+  return false;
+}
+function bankFile_(rootId, id) {
+  if (!DRIVE_ID_RE_.test(id)) return null;
+  let f;
+  try { f = DriveApp.getFileById(id); } catch (e) { return null; }
+  if (f.isTrashed() || !IMG_MIME_[f.getMimeType()] || !inBankFile_(rootId, f)) return null;
+  return f;
+}
+
+/* ---------- Helpers ---------- */
+
+function bankCleanName_(s, max) {
+  return String(s || '').replace(/[\\/:*?"<>|\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max || 120);
+}
+function bankItem_(f) {
+  return { kind: 'image', id: f.getId(), name: f.getName(), mime: f.getMimeType(), size: f.getSize(),
+    updated: f.getLastUpdated().getTime() };
+}
+const bankByName_ = function (a, b) { return String(a.name).localeCompare(String(b.name)); };
+function bankPath_(rootId, folder) {
+  const path = [];
+  let f = folder;
+  let guard = 0;
+  while (f && f.getId() !== rootId && guard++ < 20) {
+    path.unshift({ id: f.getId(), name: f.getName() });
+    const ps = f.getParents();
+    f = ps.hasNext() ? ps.next() : null;
+  }
+  path.unshift({ id: rootId, name: 'Image Bank' });
+  return path;
+}
+
+// A small preview image, remembered for 6 hours (until the image changes)
+function bankThumb_(f) {
+  const cache = CacheService.getScriptCache();
+  const key = 'bank_th_' + f.getId() + '_' + f.getLastUpdated().getTime();
+  const hit = cache.get(key);
+  if (hit) return hit;
+  let url = '';
+  try {
+    const t = f.getThumbnail();
+    if (t) url = 'data:' + (t.getContentType() || 'image/png') + ';base64,' + Utilities.base64Encode(t.getBytes());
+  } catch (e) { /* Drive hasn't made a thumbnail yet */ }
+  if (!url && f.getSize() < 200000) {
+    url = 'data:' + f.getMimeType() + ';base64,' + Utilities.base64Encode(f.getBlob().getBytes());
+  }
+  if (url && url.length < 95000) { try { cache.put(key, url, 21600); } catch (e) { /* too big to remember */ } }
+  return url;
+}
+
+/* ---------- Actions ---------- */
+
+function bankList_(rootId, folderId, offset) {
+  if (!inBankFolder_(rootId, folderId)) return { ok: false, error: 'NOT_FOUND' };
+  const folder = DriveApp.getFolderById(folderId);
+  const start = Math.max(0, Math.floor(offset) || 0);
+
+  const folders = [];
+  if (!start) {
+    const fi = folder.getFolders();
+    while (fi.hasNext()) {
+      const f = fi.next();
+      if (!f.isTrashed()) folders.push({ kind: 'folder', id: f.getId(), name: f.getName() });
+    }
+    folders.sort(bankByName_);
+  }
+  const files = [];
+  const it = folder.getFiles();
+  while (it.hasNext()) {
+    const f = it.next();
+    if (!f.isTrashed() && IMG_MIME_[f.getMimeType()]) files.push(f);
+  }
+  files.sort(function (a, b) { return a.getName().localeCompare(b.getName()); });
+
+  return {
+    ok: true,
+    folder: { id: folderId, name: folderId === rootId ? 'Image Bank' : folder.getName() },
+    path: bankPath_(rootId, folder),
+    folders: folders,
+    images: files.slice(start, start + BANK_PAGE_).map(bankItem_),
+    next: start + BANK_PAGE_ < files.length ? start + BANK_PAGE_ : null,
+  };
+}
+
+function bankThumbs_(rootId, ids) {
+  const out = {};
+  (Array.isArray(ids) ? ids : []).slice(0, 12).forEach(function (raw) {
+    const id = String(raw || '');
+    const f = bankFile_(rootId, id);
+    out[id] = f ? bankThumb_(f) : '';
+  });
+  return { ok: true, thumbs: out };
+}
+
+function bankSearch_(rootId, q) {
+  q = String(q || '').trim().slice(0, 60);
+  if (q.length < 2) return { ok: true, folders: [], images: [] };
+  const safe = q.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+  const images = [];
+  const it = DriveApp.searchFiles("title contains '" + safe + "' and trashed = false");
+  while (it.hasNext() && images.length < 60) {
+    const f = it.next();
+    if (IMG_MIME_[f.getMimeType()] && inBankFile_(rootId, f)) images.push(bankItem_(f));
+  }
+  const folders = [];
+  const fi = DriveApp.searchFolders("title contains '" + safe + "' and trashed = false");
+  while (fi.hasNext() && folders.length < 20) {
+    const f = fi.next();
+    if (f.getId() !== rootId && bankInside_(rootId, f)) folders.push({ kind: 'folder', id: f.getId(), name: f.getName() });
+  }
+  return { ok: true, folders: folders.sort(bankByName_), images: images.sort(bankByName_) };
+}
+
+function bankGet_(rootId, id) {
+  const f = bankFile_(rootId, id);
+  if (!f) return { ok: false, error: 'NOT_FOUND' };
+  if (f.getSize() > IMG_MAX_BYTES_) return { ok: false, error: 'TOO_LARGE' };
+  return { ok: true, id: id, name: f.getName(), mime: f.getMimeType(), data: Utilities.base64Encode(f.getBlob().getBytes()) };
+}
+
+function bankMkdir_(rootId, parentId, rawName) {
+  const name = bankCleanName_(rawName, 80);
+  if (!name) return { ok: false, error: 'BAD_NAME' };
+  if (!inBankFolder_(rootId, parentId)) return { ok: false, error: 'NOT_FOUND' };
+  const f = DriveApp.getFolderById(parentId).createFolder(name);
+  return { ok: true, folder: { kind: 'folder', id: f.getId(), name: f.getName() } };
+}
+
+function bankUpload_(rootId, parentId, body) {
+  if (!inBankFolder_(rootId, parentId)) return { ok: false, error: 'NOT_FOUND' };
+  const mime = String(body.mime || '');
+  if (!IMG_MIME_[mime]) return { ok: false, error: 'BAD_TYPE' };
+  let bytes;
+  try { bytes = Utilities.base64Decode(String(body.data || '')); } catch (e) { return { ok: false, error: 'BAD_REQUEST' }; }
+  if (!bytes.length || bytes.length > IMG_MAX_BYTES_) return { ok: false, error: 'TOO_LARGE' };
+  const name = bankCleanName_(body.name, 120) || 'Image';
+  const f = DriveApp.getFolderById(parentId).createFile(Utilities.newBlob(bytes, mime, name));
+  return { ok: true, image: bankItem_(f) };
+}
+
+function bankRename_(rootId, id, isFolder, rawName) {
+  let name = bankCleanName_(rawName, 120);
+  if (!name) return { ok: false, error: 'BAD_NAME' };
+  if (!DRIVE_ID_RE_.test(id) || id === rootId) return { ok: false, error: 'BAD_REQUEST' };
+  if (isFolder) {
+    if (!inBankFolder_(rootId, id)) return { ok: false, error: 'NOT_FOUND' };
+    DriveApp.getFolderById(id).setName(name);
+    return { ok: true, name: name };
+  }
+  const f = bankFile_(rootId, id);
+  if (!f) return { ok: false, error: 'NOT_FOUND' };
+  const ext = (f.getName().match(/\.[A-Za-z0-9]{2,5}$/) || [''])[0];
+  if (ext && !/\.[A-Za-z0-9]{2,5}$/.test(name)) name += ext; // keep the file type
+  f.setName(name);
+  return { ok: true, name: name };
+}
+
+function bankTrash_(rootId, id, isFolder, session) {
+  if (!DRIVE_ID_RE_.test(id) || id === rootId) return { ok: false, error: 'BAD_REQUEST' };
+  try {
+    if (isFolder) {
+      if (!inBankFolder_(rootId, id)) return { ok: false, error: 'NOT_FOUND' };
+      DriveApp.getFolderById(id).setTrashed(true);
+    } else {
+      const f = bankFile_(rootId, id);
+      if (!f) return { ok: false, error: 'NOT_FOUND' };
+      f.setTrashed(true);
+    }
+  } catch (err) {
+    console.warn('Image bank delete refused for ' + id + ': ' + err);
+    return { ok: false, error: 'CANT_DELETE' };
+  }
+  console.log('Image bank: ' + (isFolder ? 'folder ' : 'image ') + id + ' moved to Bin by ' + session.name);
+  return { ok: true };
+}
+
+// Run from the editor to check the folder is reachable
+function testImageBank() {
+  const s = createSession_({ id: 'test', name: 'Test', role: 'Admin' });
+  const r = handleImageBank_({ session: s, op: 'list' });
+  console.log(JSON.stringify({ ok: r.ok, error: r.error, folder: r.folder,
+    folders: (r.folders || []).length, images: (r.images || []).length }));
+}
+
+// ===================== Staff list (names and roles only, for Task Manager) =====================
+
+function handleStaffList_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  const staff = getStaffDocs_()
+    .filter(function (s) { return s.name; })
+    .map(function (s) { return { id: s.id, name: s.name, role: s.role, hasEmail: !!s.email }; })
+    .sort(function (a, b) { return a.name.localeCompare(b.name); });
+  return { ok: true, staff: staff };
 }

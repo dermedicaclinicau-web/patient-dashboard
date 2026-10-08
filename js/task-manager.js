@@ -2,8 +2,11 @@
 // Routes: #/tasks                -> Create new task
 //         #/tasks/new/<category> -> the tasks in that category
 //         #/tasks/history        -> Task history (coming next)
-//         #/tasks/types          -> Task types, admins only (coming next)
+//         #/tasks/types          -> Task types (admins)
+//         #/tasks/types/<id>     -> edit a task type (admins)
 import { listPublishedForms } from "./form-templates.js";
+import { listTaskTypes } from "./task-types.js";
+import { mountTaskTypes, mountTaskEditor } from "./task-builder.js";
 import { showToast } from "./utils.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -17,8 +20,6 @@ const I = {
   staff: ic('<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>'),
   print: ic('<polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/>'),
   mail: ic('<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>'),
-  bell: ic('<path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>'),
-  calendar: ic('<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>'),
   doc: ic('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>'),
   chev: ic('<polyline points="9 18 15 12 9 6"/>'),
   back: ic('<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>'),
@@ -33,24 +34,22 @@ const CATEGORIES = [
     blurb: "Print a document from the Printables in Form Builder." },
 ];
 
-// Shown until real task types are set up (next step)
-const EXAMPLES = {
-  patient: [
-    { name: "Send Treatment Info", blurb: "Information and aftercare for the treatments discussed.", icon: I.mail },
-    { name: "Send Schedule", blurb: "The patient's upcoming appointments and treatment plan.", icon: I.calendar },
-  ],
-  staff: [
-    { name: "Staff reminder", blurb: "A reminder email to chosen staff members.", icon: I.bell },
-  ],
-};
-
-export function mountTaskManager(container, { param = "", isAdmin = false } = {}) {
+export function mountTaskManager(container, { param = "", isAdmin = false, staff = null } = {}) {
   const parts = String(param || "").split("/").filter(Boolean);
   const view = parts[0] || "new";
   const sub = parts[1] || "";
 
+  // Editing one task type gets the whole page
+  if (view === "types" && sub) {
+    if (isAdmin) { mountTaskEditor(container, { id: sub, staff }); return; }
+    container.innerHTML = '<section class="page"><div class="state"><strong>Admins only</strong>Only admins can edit task types.</div></section>';
+    return;
+  }
+
   const root = document.createElement("section");
   root.className = "page wide";
+  const link = (key, href, icon, label) =>
+    `<a class="tm-link${view === key ? " active" : ""}" href="${href}"${view === key ? ' aria-current="page"' : ""}>${icon}<span>${label}</span></a>`;
   root.innerHTML = `
     <div class="fb-head">
       <div>
@@ -60,24 +59,27 @@ export function mountTaskManager(container, { param = "", isAdmin = false } = {}
     </div>
     <div class="tm-layout">
       <nav class="tm-menu" aria-label="Task Manager">
-        <a class="tm-link${view === "new" ? " active" : ""}" href="#/tasks/new"${view === "new" ? ' aria-current="page"' : ""}>${I.plus}<span>Create new task</span></a>
-        <a class="tm-link${view === "history" ? " active" : ""}" href="#/tasks/history"${view === "history" ? ' aria-current="page"' : ""}>${I.history}<span>Task history</span></a>
-        ${isAdmin ? `<a class="tm-link${view === "types" ? " active" : ""}" href="#/tasks/types"${view === "types" ? ' aria-current="page"' : ""}>${I.types}<span>Task types</span></a>` : ""}
+        ${link("new", "#/tasks/new", I.plus, "Create new task")}
+        ${link("history", "#/tasks/history", I.history, "Task history")}
+        ${isAdmin ? link("types", "#/tasks/types", I.types, "Task types") : ""}
       </nav>
       <div class="tm-main" data-role="main"></div>
     </div>`;
   container.replaceChildren(root);
   const main = root.querySelector('[data-role="main"]');
 
-  if (view === "history") return renderComingSoon(main, "Task history",
-    "Every task you run will be listed here: what was sent, to whom, by whom and when.");
-  if (view === "types") {
-    if (!isAdmin) return renderComingSoon(main, "Task types", "Only admins can set up task types.");
-    return renderComingSoon(main, "Task types",
-      "This is where admins will set up To Patient and To Staff tasks in a few simple steps: who it goes to, the message, and anything to attach.");
+  if (view === "history") {
+    main.innerHTML = `<h3 class="tm-h">Task history</h3>
+      <div class="tm-empty"><strong>Coming next</strong><br>Every task you run will be listed here: what was sent, to whom, by whom and when.</div>`;
+    return;
   }
-  if (sub && CATEGORIES.some((c) => c.key === sub)) return renderCategory(main, sub, isAdmin);
-  return renderCategories(main);
+  if (view === "types") {
+    if (!isAdmin) { main.innerHTML = '<div class="tm-empty">Only admins can set up task types.</div>'; return; }
+    mountTaskTypes(main, { staff });
+    return;
+  }
+  if (sub && CATEGORIES.some((c) => c.key === sub)) { renderCategory(main, sub, isAdmin); return; }
+  renderCategories(main);
 }
 
 /* ===================== Create new task: choose a category ===================== */
@@ -111,11 +113,17 @@ async function renderCategory(main, key, isAdmin) {
     <a class="tm-back" href="#/tasks/new">${I.back}<span>All task types</span></a>
     <h3 class="tm-h"><span class="tm-h-icon tone-${cat.tone}">${cat.icon}</span>${esc(cat.title)}</h3>
     <p class="muted tm-sub">${esc(cat.blurb)}</p>
-    <div class="tm-tasks" data-role="tasks">${key === "print" ? '<div class="skeleton tm-skel"></div><div class="skeleton tm-skel"></div>' : ""}</div>`;
+    <div class="tm-tasks" data-role="tasks"><div class="skeleton tm-skel"></div><div class="skeleton tm-skel"></div></div>`;
   const list = main.querySelector('[data-role="tasks"]');
 
-  if (key === "print") {
-    try {
+  list.addEventListener("click", (e) => {
+    if (e.target.closest("[data-run]") || e.target.closest("[data-print]")) {
+      showToast("Running tasks is the next step we'll build.");
+    }
+  });
+
+  try {
+    if (key === "print") {
       const printables = (await listPublishedForms()).filter((t) => t.category === "printable");
       if (!list.isConnected) return;
       list.innerHTML = printables.length
@@ -128,34 +136,23 @@ async function renderCategory(main, key, isAdmin) {
         : `<div class="tm-empty">No printables are published yet.${isAdmin
             ? ' Create one in <a href="#/forms">Form Builder</a> under <strong>Printables</strong>, then publish it.'
             : " Ask an admin to publish one in Form Builder."}</div>`;
-    } catch (err) {
-      console.error("Couldn't load printables:", err);
-      if (list.isConnected) list.innerHTML = '<div class="tm-empty is-error">Couldn\'t load the printables. Check your connection and try again.</div>';
+      return;
     }
-    list.addEventListener("click", (e) => {
-      if (e.target.closest("[data-print]")) showToast("Choosing who it's for and printing is the next step we'll build.");
-    });
-    return;
+
+    const tasks = (await listTaskTypes({ isAdmin: false })).filter((t) => t.category === key);
+    if (!list.isConnected) return;
+    list.innerHTML = tasks.length
+      ? tasks.map((t) => `
+          <button type="button" class="tm-task" data-run="${esc(t.id)}">
+            <span class="tm-task-icon">${I.mail}</span>
+            <span class="tm-task-main"><strong>${esc(t.name)}</strong><small>${esc(t.description || "Email")}</small></span>
+            <span class="tm-task-go">${I.chev}</span>
+          </button>`).join("")
+      : `<div class="tm-empty">No ${esc(cat.title)} tasks are published yet.${isAdmin
+          ? ' Set them up in <strong>Task types</strong>.<div class="tm-empty-act"><a class="ff-btn is-primary" href="#/tasks/types">Go to Task types</a></div>'
+          : " Ask an admin to set some up."}</div>`;
+  } catch (err) {
+    console.error("Task list failed:", err);
+    if (list.isConnected) list.innerHTML = '<div class="tm-empty is-error">Couldn\'t load the tasks. Check your connection and try again.</div>';
   }
-
-  // To Patient / To Staff: examples until task types are set up
-  list.innerHTML = `
-    ${(EXAMPLES[key] || []).map((x) => `
-      <div class="tm-task is-example" aria-disabled="true">
-        <span class="tm-task-icon">${x.icon}</span>
-        <span class="tm-task-main"><strong>${esc(x.name)}</strong><small>${esc(x.blurb)}</small></span>
-        <span class="tm-badge">Not set up yet</span>
-      </div>`).join("")}
-    <div class="tm-empty">
-      ${key === "patient" ? "To Patient" : "To Staff"} tasks are set up once in <strong>Task types</strong>, then anyone can run them here.
-      ${isAdmin ? '<div class="tm-empty-act"><a class="ff-btn is-primary" href="#/tasks/types">Go to Task types</a></div>' : ""}
-    </div>`;
-}
-
-/* ===================== Placeholder pages ===================== */
-
-function renderComingSoon(main, title, message) {
-  main.innerHTML = `
-    <h3 class="tm-h">${esc(title)}</h3>
-    <div class="tm-empty"><strong>Coming next</strong><br>${esc(message)}</div>`;
 }
