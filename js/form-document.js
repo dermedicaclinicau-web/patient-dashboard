@@ -2,10 +2,9 @@
 // signatures and the letterhead. The browser turns this into the PDF, so it
 // looks exactly like the preview. (Simple tables are used so the server's
 // backup PDF converter can render it too.)
-import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle } from "./form-fields.js";
+import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing } from "./form-fields.js";
 import { formatCalc } from "./form-calc.js";
 import { visibleIds } from "./form-conditions.js";
-import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing } from "./form-fields.js";
 
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
 const LOGO_RE = /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/;
@@ -174,7 +173,7 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {} }) {
       return `<div class="block" style="${box}">${pic}${
         f.caption ? `<div style="font-size:9pt;color:#64748b;margin-top:4px;">${esc(f.caption)}</div>` : ""}</div>`;
     }
-    
+
     if (st.pos === "beside" && INLINE_TYPES.includes(f.type)) {
       const qw = { narrow: "25%", medium: "40%", wide: "55%" }[st.qWidth]; // "Fit" = as wide as the question
       return `<div class="q" style="${box}"><table class="qi"><tr>` +
