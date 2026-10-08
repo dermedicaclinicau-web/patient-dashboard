@@ -6,6 +6,7 @@ import { escapeHtml, getInitials } from "./utils.js";
 import { maybeShowStartOfDay, closeStartOfDay } from "./start-of-day.js";
 import { initRecordingBar, setRecordingPatient } from "./recording-bar.js";
 import { isRecorderBusy, suspendRecorder } from "./recorder.js";
+import { initSoapPanel, closeSoapPanel, hasUnsavedNotes } from "./soap-panel.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -133,6 +134,7 @@ els.logoutBtn.addEventListener("click", () => {
   if (isRecorderBusy() && !confirm(
     "A recording is in progress. Log out anyway?\n\nThe recording will stay saved on this computer and can be uploaded at your next login."
   )) return;
+  if (hasUnsavedNotes() && !confirm("You have unsaved changes to clinical notes. Log out and discard them?")) return;
   logout();
 });
 
@@ -227,6 +229,7 @@ watchAuth((staff) => {
     renderStaff(staff);
     showView("dashboard");
     initRecordingBar(staff);
+    initSoapPanel(staff);
     router();
     maybeShowStartOfDay(staff);
   } else {
@@ -235,6 +238,7 @@ watchAuth((staff) => {
     clearPatientCache();
     closeStartOfDay();
     suspendRecorder(); // stops the mic; any audio stays on this device for upload at next login
+    closeSoapPanel();
     if (els.profileDialog.open) els.profileDialog.close();
     if (location.hash) history.replaceState(null, "", location.pathname + location.search);
     resetLogin();

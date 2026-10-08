@@ -3,6 +3,7 @@ import { fetchPatientRecords } from "./records.js";
 import { fetchTranscriptRecords, extractSection } from "./transcripts.js";
 import { fetchSkincare } from "./skincare.js";
 import { escapeHtml, toDateKey, parseDateKey } from "./utils.js";
+import { showSoapPanel } from "./soap-panel.js";
 
 const PAGE = 10;
 const MONTHS_LONG = ["January", "February", "March", "April", "May", "June", "July",
@@ -133,7 +134,7 @@ async function buildVisits(patient) {
   (transcripts || []).forEach((t) => {
     if (!t.date) return;
     const v = visit(toDateKey(t.date));
-    v.badges.push({ type: "summary", label: `Summary${t.staff ? ` · ${t.staff}` : ""}` });
+    v.badges.push({ type: "summary", label: `Summary${t.staff ? ` · ${t.staff}` : ""}`, id: t.id });
     if (extractSection(t.soap, "TREATMENT PLAN")) v.badges.push({ type: "plan", label: "Treatment plan" });
   });
   ((skincare && skincare.protocols) || []).forEach((p) => {
@@ -247,6 +248,8 @@ export function mountHistory(root, patient) {
       render();
       return;
     }
+    const summary = e.target.closest("[data-hv-summary]");
+    if (summary && summary.dataset.hvSummary) { showSoapPanel(summary.dataset.hvSummary); return; }
     const jump = e.target.closest("[data-hv-jump]");
     if (jump) jumpTo(root, jump.dataset.hvJump);
   });
@@ -279,7 +282,7 @@ function badgeHtml(b) {
   }
   if (b.type === "plan") return `<button type="button" class="hv-badge b-plan" data-hv-jump="plan">${inner}</button>`;
   if (b.type === "ssp") return `<button type="button" class="hv-badge b-ssp" data-hv-jump="ssp">${inner}</button>`;
-  if (b.type === "summary") return `<button type="button" class="hv-badge b-summary" data-soon="View summary">${inner}</button>`;
+  if (b.type === "summary") return `<button type="button" class="hv-badge b-summary" data-hv-summary="${escapeHtml(b.id || "")}">${inner}</button>`;
   return `<span class="hv-badge b-${b.type}">${inner}</span>`;
 }
 

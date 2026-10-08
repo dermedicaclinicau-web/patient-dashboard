@@ -4,6 +4,7 @@ import {
   retryProcessing,
 } from "./recorder.js";
 import { escapeHtml, showToast } from "./utils.js";
+import { showSoapPanel } from "./soap-panel.js";
 
 const svg = (p) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -20,6 +21,7 @@ let staff = null;
 let context = null;   // the patient page currently open (for the "Ready" state)
 let consent = false;
 let lastKey = "";
+let announcedNotes = ""; // so the notes tab only pops out once per recording
 
 const fmt = (ms) => {
   const total = Math.floor(ms / 1000);
@@ -162,12 +164,16 @@ function render(s) {
 
     case "ready":
       cls = "is-done";
+      if (s.transcriptId && s.transcriptId !== announcedNotes) {
+        announcedNotes = s.transcriptId;
+        showSoapPanel(s.transcriptId, { mode: "min" }); // the notes tab slides out on the right
+      }
       html = `
         <span class="rec-icon">${ICONS.check}</span>
         <span class="rec-text"><strong>Clinical notes ready · ${patientLink(s.patient)}</strong>
-          <small>Saved as Draft. Open the patient to see the notes in their record.</small></span>
+          <small>Saved as Draft. Review and save them as Reviewed when you're happy.</small></span>
         <span class="rec-actions">
-          <button type="button" class="rec-btn go" data-rec="open">Open patient</button>
+          <button type="button" class="rec-btn go" data-rec="review">Review notes</button>
           <button type="button" class="rec-btn" data-rec="dismiss">Done</button>
         </span>`;
       break;
@@ -240,6 +246,9 @@ async function onClick(e) {
       if (confirm("Delete this recording permanently? This can't be undone.")) await discardRecording();
     } else if (action === "dismiss") {
       dismiss();
+    } else if (action === "review") {
+      const id = getState().transcriptId;
+      if (id) showSoapPanel(id, { mode: "open" });  
     } else if (action === "retry-process") {
       retryProcessing();
     } else if (action === "dismiss-failed") {
