@@ -80,6 +80,19 @@ const ANSWER_TYPES = ["patient", "short_text", "long_text", "email", "number", "
 const BOX_TYPES = ["short_text", "email", "number", "date", "record_date", "dropdown"];
 const DRIVE_ID = /^[A-Za-z0-9_-]{10,80}$/;
 const opt = (v, list, dflt) => (list.includes(v) ? v : dflt);
+// An Image field's size: width as a % of the page, and an optional maximum height in px.
+// Pictures staff can draw on always keep their natural shape (so markings line up).
+export function imageSizing(f) {
+  const presets = { small: 30, medium: 50, large: 75, full: 100 };
+  const pct = f.size === "custom"
+    ? Math.max(10, Math.min(100, parseInt(f.widthPct, 10) || 50))
+    : (presets[f.size] || 50);
+  const raw = f.heightPx;
+  const maxH = f.annotate || raw === null || raw === undefined || raw === "" || !Number.isFinite(Number(raw))
+    ? null
+    : Math.max(40, Math.min(1200, Math.round(Number(raw))));
+  return { pct, maxH };
+}
 
 // A field's layout settings, with defaults. The older "inline" tick counts as "beside".
 export function fieldStyle(f) {
@@ -178,7 +191,7 @@ export function createField(type, id) {
     case "calculation": f.formula = ""; f.decimals = 2; f.prefix = ""; f.suffix = ""; f.blank = "zero"; break;
     case "image":
       f.source = "bank"; f.fileId = ""; f.fileName = ""; f.size = "medium"; f.caption = ""; f.alt = ""; f.max = 1;
-      f.annotate = false;
+      f.annotate = false; f.widthPct = 50; f.heightPx = null;
       break;
     case "watermark": f.source = "text"; f.text = "DRAFT"; f.opacity = 10; f.angle = -30; f.size = "large"; break;
     case "letterhead": f.line1 = LETTERHEAD[0]; f.line2 = LETTERHEAD[1]; break;
@@ -272,7 +285,9 @@ export function cleanField(f) {
       out.source = pick(f.source, ["bank", "staff"], "bank");
       out.fileId = DRIVE_ID.test(f.fileId || "") ? f.fileId : "";
       out.fileName = clip(f.fileName, 120);
-      out.size = pick(f.size, ["small", "medium", "large", "full"], "medium");
+      out.size = pick(f.size, ["small", "medium", "large", "full", "custom"], "medium");
+      out.widthPct = int(f.widthPct, 10, 100, 50);
+      out.heightPx = numOrNull(f.heightPx) === null ? null : int(f.heightPx, 40, 1200, 300);
       out.caption = clip(f.caption, 200);
       out.alt = clip(f.alt, 200);
       out.max = int(f.max, 1, 10, 1);
@@ -448,8 +463,9 @@ export function renderField(f, ctx = {}) {
       const hook = f.annotate && live
         ? `data-annot-img="${id}"`
         : `data-bank-img="${esc(f.fileId)}" data-alt="${esc(f.alt || "")}"`;
-      return `<figure class="fe-img is-${esc(f.size || "medium")}${f.annotate ? " can-draw" : ""}">` +
-        `<span class="fe-img-box" ${hook}><span class="fe-img-loading">${svg(ICONS.image)}</span></span>` +
+      const { pct, maxH } = imageSizing(f);
+      return `<figure class="fe-img${maxH ? " has-max-h" : ""}${f.annotate ? " can-draw" : ""}">` +
+        `<span class="fe-img-box" style="width:${pct}%;${maxH ? `--img-max-h:${maxH}px;` : ""}" ${hook}><span class="fe-img-loading">${svg(ICONS.image)}</span></span>` +
         (!live && f.annotate ? `<span class="fe-img-draw-tag">${svg(ICONS.signature)}Staff can draw on this</span>` : "") +
         `${cap}</figure>`;
     }
@@ -558,8 +574,16 @@ function typeSettings(f, ctx = {}) {
             ${f.fileId ? '<button type="button" class="lh-btn is-quiet" data-act="img-clear">Remove</button>' : ""}
           </div>
           <small class="fe-note">Uploads are saved into the Image Bank so you can reuse them.</small></div>` +
-          setting("Size", choose("size", [["small", "Small"], ["medium", "Medium"], ["large", "Large"], ["full", "Full width"]], f.size || "medium")) +
-          `<label class="fe-check"><input type="checkbox" data-k="annotate"${f.annotate ? " checked" : ""} /> Staff can draw on it while filling in</label>` +
+          setting("Size", choose("size", [["small", "Small"], ["medium", "Medium"], ["large", "Large"], ["full", "Full width"], ["custom", "Custom size"]],
+            f.size || "medium", false, true)) +
+          (f.size === "custom"
+            ? setting("Width", `<div class="fe-num"><input class="fe-input" type="number" min="10" max="100" step="5" data-k="widthPct" data-num="" value="${Number(f.widthPct) || 50}" /><span>% of the page width</span></div>`)
+            : "") +
+          (f.annotate
+            ? '<small class="fe-note fe-pad">The height follows the picture\'s shape when staff can draw on it, so the markings always line up.</small>'
+            : setting("Maximum height", `<div class="fe-num"><input class="fe-input" type="number" min="40" max="1200" step="10" data-k="heightPx" data-num="optional" placeholder="Automatic" value="${f.heightPx ?? ""}" /><span>pixels</span></div>`,
+                "Leave empty to keep the picture's natural shape. Pictures are never stretched.")) +
+          `<label class="fe-check"><input type="checkbox" data-k="annotate" data-rerender=""${f.annotate ? " checked" : ""} /> Staff can draw on it while filling in</label>` +
           '<small class="fe-note fe-pad">For face charts and injection points. The markings are saved with the patient\'s form; the picture in the Image Bank never changes.</small>' +
           caption +
           setting("Description", `<input class="fe-input" data-k="alt" maxlength="200" value="${esc(f.alt || "")}" />`,

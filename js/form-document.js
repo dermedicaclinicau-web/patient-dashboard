@@ -5,6 +5,7 @@
 import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle } from "./form-fields.js";
 import { formatCalc } from "./form-calc.js";
 import { visibleIds } from "./form-conditions.js";
+import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing } from "./form-fields.js";
 
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
 const LOGO_RE = /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/;
@@ -160,17 +161,20 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {} }) {
     const gap = { tight: 2, normal: 4, wide: 10 }[st.gap] || 4;
     if (f.type === "image") {
       if (f.source === "staff" || !f.fileId || !images[f.fileId]) return "";
-      const w = { small: "30%", medium: "50%", large: "75%", full: "100%" }[f.size] || "50%";
+      const { pct, maxH } = imageSizing(f);
       const drawing = f.annotate && v && typeof v === "object" && PNG_RE.test(v.drawing || "") ? v.drawing : "";
       const pic = drawing
-        ? `<span style="position:relative;display:inline-block !important;width:${w};max-width:100%;">` +
+        ? `<span style="position:relative;display:inline-block !important;width:${pct}%;max-width:100%;">` +
             `<img src="${images[f.fileId]}" alt="" style="display:block !important;width:100%;height:auto;">` +
             `<img src="${drawing}" alt="" style="position:absolute;left:0;top:0;width:100%;height:100%;"></span>`
-        : `<img src="${images[f.fileId]}" alt="" style="display:inline-block !important;width:${w};max-width:100%;height:auto;">`;
+        : maxH
+          ? `<span style="display:inline-block !important;width:${pct}%;max-width:100%;">` +
+              `<img src="${images[f.fileId]}" alt="" style="display:inline-block !important;width:auto;height:auto;max-width:100%;max-height:${maxH}px;"></span>`
+          : `<img src="${images[f.fileId]}" alt="" style="display:inline-block !important;width:${pct}%;max-width:100%;height:auto;">`;
       return `<div class="block" style="${box}">${pic}${
         f.caption ? `<div style="font-size:9pt;color:#64748b;margin-top:4px;">${esc(f.caption)}</div>` : ""}</div>`;
     }
-
+    
     if (st.pos === "beside" && INLINE_TYPES.includes(f.type)) {
       const qw = { narrow: "25%", medium: "40%", wide: "55%" }[st.qWidth]; // "Fit" = as wide as the question
       return `<div class="q" style="${box}"><table class="qi"><tr>` +

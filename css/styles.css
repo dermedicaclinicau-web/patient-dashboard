@@ -2197,3 +2197,8 @@ ul.ff-log { display: flex; flex-direction: column; gap: .2rem; margin: 0 0 1rem;
 .an-view { position: relative; display: block; line-height: 0; }
 .an-view img { display: block; width: 100%; height: auto; border-radius: 6px; }
 .an-view .an-over { position: absolute; inset: 0; height: 100%; }
+
+/* ---------- Image size: maximum height, never stretched ---------- */
+.fe-img.has-max-h .fe-img-box img { display: inline-block; width: auto; max-width: 100%; max-height: var(--img-max-h); }
+.fe-img.has-max-h .fe-img-loading { max-height: var(--img-max-h); }
+@media (max-width: 640px) { .fe-img .fe-img-box { width: 100% !important; } }
