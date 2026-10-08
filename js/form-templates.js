@@ -1,6 +1,6 @@
 import { db, auth } from "./firebase-config.js";
 import {
-  collection, getDocs, getDoc, addDoc, doc, query, where, serverTimestamp,
+  collection, getDocs, getDoc, addDoc, updateDoc, doc, query, where, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 // Keys MUST match the list in the Firestore rules (validFormTemplate).
@@ -89,4 +89,52 @@ export async function createFormTemplate({ name, category }, staff) {
   });
   cache = null; // the list must show the new form straight away
   return ref.id;
+}
+
+// ---------- Saving the editor's work ----------
+
+export const FIELD_TYPES = [
+  "patient", "short_text", "long_text", "date",
+  "single_choice", "checkboxes", "dropdown",
+  "signature", "text_block", "space",
+];
+
+const clip = (v, max) => String(v == null ? "" : v).slice(0, max);
+
+// Firestore rejects `undefined`, and only known keys should ever be stored.
+function cleanField(f) {
+  if (!f || !FIELD_TYPES.includes(f.type)) return null;
+  const out = {
+    id: clip(f.id, 40),
+    type: f.type,
+    label: clip(f.label, 300),
+    help: clip(f.help, 500),
+    required: f.required === true,
+  };
+  if (Array.isArray(f.options)) out.options = f.options.map((o) => clip(o, 200)).slice(0, 50);
+  if (f.fill) out.fill = clip(f.fill, 40);
+  if (f.type === "text_block") out.text = clip(f.text, 5000);
+  if (f.type === "space") out.size = ["small", "medium", "large"].includes(f.size) ? f.size : "medium";
+  return out;
+}
+
+export async function saveFormTemplate(id, { name, fields }, staff) {
+  const cleanName = String(name || "").trim().replace(/\s+/g, " ");
+  if (!cleanName) throw new Error("Give the form a name.");
+  if (cleanName.length > 120) throw new Error("Keep the name under 120 characters.");
+
+  const uid = auth.currentUser && auth.currentUser.uid;
+  if (!uid) throw new Error("Your session has ended. Log in again.");
+
+  const clean = (Array.isArray(fields) ? fields : []).map(cleanField).filter(Boolean);
+  if (clean.length > 300) throw new Error("A form can have up to 300 questions.");
+
+  await updateDoc(doc(db, COLLECTION, id), {
+    name: cleanName,
+    fields: clean,
+    updatedAt: serverTimestamp(),
+    updatedBy: (staff && staff.name) || "",
+    updatedByUid: uid,
+  });
+  cache = null;
 }

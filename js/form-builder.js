@@ -2,6 +2,7 @@ import { escapeHtml } from "./utils.js";
 import {
   FORM_CATEGORIES, categoryLabel, listFormTemplates, getFormTemplate, createFormTemplate,
 } from "./form-templates.js";
+import { mountFormEditor } from "./form-editor.js";
 
 const svg = (p) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -44,10 +45,13 @@ function loadError(err, what) {
 }
 
 export function mountFormBuilder(container, { isAdmin = false, staff = null, templateId = "" } = {}) {
-  if (templateId) return mountTemplatePage(container, { isAdmin, templateId });
+  if (templateId) {
+    return isAdmin
+      ? mountFormEditor(container, { templateId, staff })
+      : mountTemplatePage(container, { isAdmin, templateId });
+  }
   return mountLibrary(container, { isAdmin, staff });
 }
-
 /* ===================== Library ===================== */
 
 function mountLibrary(container, { isAdmin, staff }) {
