@@ -161,7 +161,13 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {} }) {
     if (f.type === "image") {
       if (f.source === "staff" || !f.fileId || !images[f.fileId]) return "";
       const w = { small: "30%", medium: "50%", large: "75%", full: "100%" }[f.size] || "50%";
-      return `<div class="block" style="${box}"><img src="${images[f.fileId]}" alt="" style="display:inline-block !important;width:${w};max-width:100%;height:auto;">${
+      const drawing = f.annotate && v && typeof v === "object" && PNG_RE.test(v.drawing || "") ? v.drawing : "";
+      const pic = drawing
+        ? `<span style="position:relative;display:inline-block !important;width:${w};max-width:100%;">` +
+            `<img src="${images[f.fileId]}" alt="" style="display:block !important;width:100%;height:auto;">` +
+            `<img src="${drawing}" alt="" style="position:absolute;left:0;top:0;width:100%;height:100%;"></span>`
+        : `<img src="${images[f.fileId]}" alt="" style="display:inline-block !important;width:${w};max-width:100%;height:auto;">`;
+      return `<div class="block" style="${box}">${pic}${
         f.caption ? `<div style="font-size:9pt;color:#64748b;margin-top:4px;">${esc(f.caption)}</div>` : ""}</div>`;
     }
 

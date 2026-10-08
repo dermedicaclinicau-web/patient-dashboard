@@ -178,6 +178,7 @@ export function createField(type, id) {
     case "calculation": f.formula = ""; f.decimals = 2; f.prefix = ""; f.suffix = ""; f.blank = "zero"; break;
     case "image":
       f.source = "bank"; f.fileId = ""; f.fileName = ""; f.size = "medium"; f.caption = ""; f.alt = ""; f.max = 1;
+      f.annotate = false;
       break;
     case "watermark": f.source = "text"; f.text = "DRAFT"; f.opacity = 10; f.angle = -30; f.size = "large"; break;
     case "letterhead": f.line1 = LETTERHEAD[0]; f.line2 = LETTERHEAD[1]; break;
@@ -275,6 +276,7 @@ export function cleanField(f) {
       out.caption = clip(f.caption, 200);
       out.alt = clip(f.alt, 200);
       out.max = int(f.max, 1, 10, 1);
+      out.annotate = f.annotate === true;
       break;
     case "watermark":
       out.source = pick(f.source, ["text", "logo"], "text");
@@ -442,8 +444,14 @@ export function renderField(f, ctx = {}) {
       if (!f.fileId) {
         return live ? "" : `<div class="fe-img-empty">${svg(ICONS.image)}<span>Choose a picture in the settings panel</span></div>`;
       }
-      return `<figure class="fe-img is-${esc(f.size || "medium")}"><span class="fe-img-box" data-bank-img="${esc(f.fileId)}" data-alt="${esc(f.alt || "")}">` +
-        `<span class="fe-img-loading">${svg(ICONS.image)}</span></span>${cap}</figure>`;
+      // When filling in, a drawable picture is set up by form-annotate.js instead
+      const hook = f.annotate && live
+        ? `data-annot-img="${id}"`
+        : `data-bank-img="${esc(f.fileId)}" data-alt="${esc(f.alt || "")}"`;
+      return `<figure class="fe-img is-${esc(f.size || "medium")}${f.annotate ? " can-draw" : ""}">` +
+        `<span class="fe-img-box" ${hook}><span class="fe-img-loading">${svg(ICONS.image)}</span></span>` +
+        (!live && f.annotate ? `<span class="fe-img-draw-tag">${svg(ICONS.signature)}Staff can draw on this</span>` : "") +
+        `${cap}</figure>`;
     }
     case "consent_status": {
       if (live) return head + `<div class="fe-consent">${svg(ICONS.consent_status)}Checked automatically when this form is filled in for a patient.</div>`;
@@ -551,6 +559,8 @@ function typeSettings(f, ctx = {}) {
           </div>
           <small class="fe-note">Uploads are saved into the Image Bank so you can reuse them.</small></div>` +
           setting("Size", choose("size", [["small", "Small"], ["medium", "Medium"], ["large", "Large"], ["full", "Full width"]], f.size || "medium")) +
+          `<label class="fe-check"><input type="checkbox" data-k="annotate"${f.annotate ? " checked" : ""} /> Staff can draw on it while filling in</label>` +
+          '<small class="fe-note fe-pad">For face charts and injection points. The markings are saved with the patient\'s form; the picture in the Image Bank never changes.</small>' +
           caption +
           setting("Description", `<input class="fe-input" data-k="alt" maxlength="200" value="${esc(f.alt || "")}" />`,
             "Optional. Read aloud by screen readers; not shown on the form.");

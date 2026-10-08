@@ -14,6 +14,8 @@ import { formGroup } from "./form-templates.js";
 import { highlightRecord } from "./records-view.js";
 import { formTitleHtml } from "./form-fields.js";
 import { hydrateBankImages } from "./image-bank-api.js";
+import { attachAnnotators } from "./form-annotate.js";
+import { bankImage } from "./image-bank-api.js";
 
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const BAR_ICONS = {
@@ -143,7 +145,7 @@ function signaturePad(host) {
 
 /* ===================== Reading and writing answers ===================== */
 
-export function readField(f, w, { pads = {}, calc = {}, consent = {} } = {}) {
+export function readField(f, w, { pads = {}, calc = {}, consent = {}, annots = {} } = {}) {
   switch (f.type) {
     case "short_text": case "long_text": case "email": case "date": case "record_date": {
       const el = w.querySelector(".fe-in");
@@ -198,6 +200,10 @@ export function readField(f, w, { pads = {}, calc = {}, consent = {} } = {}) {
       const out = {};
       $all(w, "[data-part]").forEach((el) => { out[el.dataset.part] = el.value; });
       return out;
+    }
+    case "image": {
+      const a = annots[f.id];
+      return a && !a.isEmpty() ? { drawn: true } : "";
     }
     case "consent_status":
       return consent[f.id] || { found: false, date: "", submissionId: "", name: "" };
@@ -368,6 +374,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
 
   const sheet = root.querySelector('[data-role="sheet"]');
   hydrateBankImages(sheet);
+  const annots = attachAnnotators(sheet, fields);
   const msgEl = root.querySelector('[data-role="msg"]');
   const progressEl = root.querySelector('[data-role="progress"]');
   const saveBtns = $all(root, "[data-save]");
@@ -438,7 +445,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
   });
 
   /* ---------- Calculations + which questions show ---------- */
-  const rctx = () => ({ pads, calc, consent });
+  const rctx = () => ({ pads, calc, consent, annots });
 
   const updateCalcs = () => {
     calc = evaluateCalcs(fields, (f) => {
@@ -579,6 +586,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
       const w = wrap(f.id);
       if (!w) return;
       answers[f.id] = readField(f, w, rctx());
+      if (f.type === "image" && annots[f.id] && !annots[f.id].isEmpty()) answers[f.id] = { drawing: annots[f.id].toDataURL() };
       if (f.type === "signature" && pads[f.id] && !pads[f.id].isEmpty()) signatures[f.id] = pads[f.id].toDataURL();
     });
     const rd = fields.find((f) => f.type === "record_date" && shown.has(f.id));
@@ -731,6 +739,20 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
     if (f.type === "photo") {
       const el = w.querySelector(".fe-photo");
       if (el) el.outerHTML = '<p class="fe-help">No photos.</p>';
+      return;
+    }
+    if (f.type === "image" && f.annotate && f.source !== "staff" && f.fileId) {
+      const box = w.querySelector("[data-annot-img]");
+      const v = sub.answers[f.id];
+      const drawing = v && typeof v === "object" && PNG_RE.test(v.drawing || "") ? v.drawing : "";
+      if (box) {
+        bankImage(f.fileId)
+          .then((src) => {
+            if (box.isConnected) box.innerHTML = `<span class="an-view"><img src="${esc(src)}" alt="" />${
+              drawing ? `<img class="an-over" src="${esc(drawing)}" alt="Markings" />` : ""}</span>`;
+          })
+          .catch(() => { if (box.isConnected) box.innerHTML = '<span class="fe-img-missing">This picture is missing from the Image Bank</span>'; });
+      }
       return;
     }
     writeField(f, w, sub.answers[f.id]);

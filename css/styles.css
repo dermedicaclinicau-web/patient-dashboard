@@ -2167,3 +2167,33 @@ ul.ff-log { display: flex; flex-direction: column; gap: .2rem; margin: 0 0 1rem;
 .fe-img-btns { display: flex; flex-wrap: wrap; gap: .4rem; }
 .fe-img-btns .lh-btn { font-size: .8rem; padding: .4rem .7rem; }
 .fe-img-btns .is-busy { opacity: .6; pointer-events: none; }
+
+/* ---------- Drawing on a picture ---------- */
+.fe-img.can-draw .fe-img-box { min-width: min(100%, 380px); }
+.fe-img-draw-tag { display: inline-flex; align-items: center; gap: .3rem; margin-top: .4rem; padding: .2rem .55rem;
+  border-radius: 999px; background: #eef2ff; color: #4338ca; font-size: .75rem; font-weight: 600; }
+.fe-img-draw-tag svg { width: 13px; height: 13px; }
+
+.fe-img-box.is-drawing { display: flex; flex-direction: column; gap: .45rem; }
+.an-tools { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; padding: .4rem; border: 1px solid var(--border);
+  border-radius: 10px; background: #fff; text-align: left; }
+.an-seg { display: flex; gap: 2px; padding: 2px; border-radius: 8px; background: var(--surface-2); }
+.an-btn { display: inline-flex; align-items: center; gap: .3rem; height: 30px; padding: 0 .55rem; border: none; border-radius: 6px;
+  background: transparent; color: var(--muted); font: inherit; font-size: .78rem; font-weight: 600; cursor: pointer; }
+.an-btn svg { width: 14px; height: 14px; }
+.an-btn.is-on { background: #fff; color: var(--text); box-shadow: 0 1px 3px rgba(15, 23, 42, .12); }
+.an-btn:disabled { opacity: .4; cursor: default; }
+.an-tools > .an-btn { border: 1px solid var(--border); background: #fff; color: var(--text); }
+.an-colours { display: flex; gap: .3rem; }
+.an-swatch { width: 24px; height: 24px; padding: 0; border: 2px solid #fff; border-radius: 50%; background: var(--c);
+  box-shadow: 0 0 0 1px var(--border); cursor: pointer; }
+.an-swatch.is-on { box-shadow: 0 0 0 2px var(--c); }
+.an-spacer { flex: 1; }
+.an-stage { position: relative; border-radius: 8px; overflow: hidden; line-height: 0; }
+.an-stage img { display: block; width: 100%; height: auto; user-select: none; -webkit-user-select: none; }
+.an-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: crosshair; }
+
+/* Saved form: picture with its markings on top */
+.an-view { position: relative; display: block; line-height: 0; }
+.an-view img { display: block; width: 100%; height: auto; border-radius: 6px; }
+.an-view .an-over { position: absolute; inset: 0; height: 100%; }

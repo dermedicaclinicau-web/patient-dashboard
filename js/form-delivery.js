@@ -158,7 +158,7 @@ async function previewPdf(p) {
 /* ---------- Send to printer ---------- */
 
 export async function sendToPrinter({ sub, ver, letterhead }) {
-  const payload = await pdfPayload(formPdf({ sub, ver, letterhead }));
+  const payload = await pdfPayload(await formPdf({ sub, ver, letterhead }));
   const res = await callApi({ action: "sendFormPdf", submissionId: sub.id, kind: "print", ...payload });
   return res.entry;
 }
@@ -171,7 +171,7 @@ export async function openEmailComposer({ sub, ver, letterhead, staff }) {
   try { patient = await getPatient(sub.patientId); } catch (err) { console.warn("Couldn't load patient email:", err); }
   const onFile = String((patient && patient.email) || "").trim();
   const first = (patient && patient.firstName) || String(sub.patientName || "").split(" ")[0] || "";
-  const p = formPdf({ sub, ver, letterhead });
+  const p = await formPdf({ sub, ver, letterhead });
   p.blob().catch(() => {}); // start making the PDF now, so sending is quick
   const fileName = p.doc.fileName;
 

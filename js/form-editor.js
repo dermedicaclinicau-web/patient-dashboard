@@ -16,6 +16,7 @@ import { CATEGORIES, categorize } from "./records.js";
 import { formTitleHtml } from "./form-fields.js";
 import { openImagePicker } from "./image-bank.js";
 import { bankUpload, bankError, hydrateBankImages } from "./image-bank-api.js";
+import { attachAnnotators } from "./form-annotate.js";
 
 const UI = {
   up: '<polyline points="18 15 12 9 6 15"/>',
@@ -411,6 +412,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
     if (!build) refreshPreview();
     hydrateBankImages(stage);
+    if (!build) attachAnnotators(stage, fields);
   }
 
   /* ---------- Settings panel ---------- */
