@@ -32,6 +32,8 @@ const ICONS = {
   chev: svg('<polyline points="9 18 15 12 9 6"/>'),
   max: svg('<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>'),
   restore: svg('<polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/>'),
+  popout: svg('<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>'),
+  dock: svg('<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="15" y1="3" x2="15" y2="21"/>'),
   minimise: svg('<polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/>'),
   close: svg('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
   trash: svg('<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>'),
@@ -45,6 +47,7 @@ const STORE_KEY = "soapPanel"; // { id, mode }, per browser tab
 let staff = null;
 let panel = null;
 let tab = null;
+let content = null; // the panel's re-rendered area (resize handles live outside it)
 let mode = "min";
 let current = null; // { id, data, parsed, original, extras, dirty }
 
@@ -66,7 +69,7 @@ export function hasUnsavedNotes() {
 // On logout: close without asking
 export function closeSoapPanel() {
   current = null;
-  if (panel) { panel.hidden = true; panel.innerHTML = ""; }
+  if (panel) { panel.hidden = true; content.innerHTML = ""; }
   if (tab) tab.hidden = true;
   try { sessionStorage.removeItem(STORE_KEY); } catch { /* ignore */ }
 }
@@ -97,6 +100,11 @@ function ensureDom() {
   panel.className = "sp";
   panel.hidden = true;
   panel.setAttribute("aria-label", "Consultation notes");
+  content = document.createElement("div");
+  content.className = "sp-content";
+  panel.appendChild(content);
+  panel.insertAdjacentHTML("beforeend", ["l", "r", "t", "b", "tl", "tr", "bl", "br"]
+    .map((d) => `<div class="sp-rz sp-rz-${d}" data-rz="${d}" aria-hidden="true"></div>`).join(""));
   document.body.appendChild(panel);
 
   tab = document.createElement("button");
@@ -107,6 +115,15 @@ function ensureDom() {
 
   tab.addEventListener("click", () => setMode("open"));
   panel.addEventListener("click", onClick);
+  // Move + resize
+  panel.addEventListener("pointerdown", onPointerDown);
+  panel.addEventListener("pointermove", onPointerMove);
+  panel.addEventListener("pointerup", onPointerUp);
+  panel.addEventListener("pointercancel", onPointerUp);
+  panel.addEventListener("dblclick", (e) => {
+    if (e.target.closest(".sp-head") && !e.target.closest("button, a, input, select, textarea")) toggleDock();
+  });
+  window.addEventListener("resize", () => applyLayout());
 
     // Treatment Plan card: finish an inline edit, category drop-down, keyboard
   panel.addEventListener("focusout", (e) => {
@@ -148,6 +165,7 @@ function setMode(next) {
   mode = next;
   panel.hidden = mode === "min";
   panel.classList.toggle("is-max", mode === "max");
+  applyLayout();
   updateTab();
   if (!panel.hidden) requestAnimationFrame(autosizeAll);
   try {
@@ -183,7 +201,7 @@ function autosizeAll() {
 async function load(id) {
   current = { id, data: null };
   updateTab();
-  panel.innerHTML = `<div class="sp-loading"><div class="spinner"></div><p>Loading notes…</p></div>`;
+  content.innerHTML = `<div class="sp-loading"><div class="spinner"></div><p>Loading notes…</p></div>`;
 
   try {
     const snap = await getDoc(doc(db, "appointment_transcripts", id));
@@ -210,7 +228,7 @@ async function load(id) {
   } catch (err) {
     if (!current || current.id !== id) return;
     console.error("Loading notes failed:", err);
-    panel.innerHTML = `
+    content.innerHTML = `
       <div class="sp-loading">
         <p>${escapeHtml(err.code === "permission-denied" ? "You don't have permission to view these notes." : err.message || "Couldn't load the notes.")}</p>
         <button type="button" class="btn-ghost sm" data-sp="close">Close</button>
@@ -229,7 +247,7 @@ function render() {
   const keepPn = panel.querySelector("[data-pn]") ? panel.querySelector("[data-pn]").value : null;
   const suggestions = Array.isArray(d["Suggested Personal Notes"]) ? d["Suggested Personal Notes"] : [];
 
-  panel.innerHTML = `
+  content.innerHTML = `
     <div class="sp-head">
       <div class="sp-head-main">
         <p class="sp-eyebrow">Consultation notes</p>
@@ -238,6 +256,7 @@ function render() {
       </div>
       <span class="sp-status ${reviewed ? "is-reviewed" : "is-draft"}">${escapeHtml(reviewed ? "Reviewed" : status)}</span>
       <div class="sp-head-actions">
+        <button type="button" class="sp-icon-btn" data-sp="float" title="${layout.docked ? "Pop out (move anywhere)" : "Dock to the right"}" aria-label="Pop out or dock">${layout.docked ? ICONS.popout : ICONS.dock}</button>
         <button type="button" class="sp-icon-btn" data-sp="max" title="${mode === "max" ? "Restore" : "Maximise"}" aria-label="Maximise">${mode === "max" ? ICONS.restore : ICONS.max}</button>
         <button type="button" class="sp-icon-btn" data-sp="min" title="Minimise" aria-label="Minimise">${ICONS.minimise}</button>
         <button type="button" class="sp-icon-btn" data-sp="close" title="Close" aria-label="Close">${ICONS.close}</button>
@@ -342,6 +361,7 @@ async function onClick(e) {
 
   if (action === "max") { setMode(mode === "max" ? "open" : "max"); if (current && current.data) refreshHeaderIcon(); }
   else if (action === "min") setMode("min");
+  else if (action === "float") toggleDock();
   else if (action === "close") {
     if (hasUnsavedNotes() && !(await confirmDialog({
       title: "Close without saving?",
@@ -872,4 +892,127 @@ async function emailFromPlan(btn) {
   } finally {
     if (btn.isConnected) { btn.disabled = false; btn.innerHTML = label; }
   }
+}
+
+/* ===================== Move & resize ===================== */
+
+const LAYOUT_KEY = "sp-layout"; // size/position only, never patient data
+const MIN_W = 380;
+const MIN_H = 320;
+const DEFAULT_LAYOUT = { docked: true, width: 560, x: 80, y: 90, w: 560, h: 640 };
+let layout = loadLayout();
+let drag = null;
+
+function loadLayout() {
+  try { return { ...DEFAULT_LAYOUT, ...(JSON.parse(localStorage.getItem(LAYOUT_KEY)) || {}) }; }
+  catch { return { ...DEFAULT_LAYOUT }; }
+}
+
+function saveLayout() {
+  try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout)); } catch { /* ignore */ }
+}
+
+const isSmall = () => window.innerWidth < 860;
+const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), Math.max(lo, hi));
+
+// Keeps the panel usable when the browser window changes size
+function fitToViewport() {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  layout.width = clamp(layout.width, MIN_W, vw - 80);
+  layout.w = clamp(layout.w, MIN_W, vw - 16);
+  layout.h = clamp(layout.h, MIN_H, vh - 16);
+  layout.x = clamp(layout.x, 120 - layout.w, vw - 120); // at least 120px stays on screen
+  layout.y = clamp(layout.y, 8, vh - 56);               // the header is always reachable
+}
+
+function applyLayout() {
+  if (!panel) return;
+  const floating = !layout.docked && mode !== "max" && !isSmall();
+  panel.classList.toggle("is-floating", floating);
+
+  const s = panel.style;
+  s.left = s.top = s.width = s.height = s.right = s.bottom = "";
+  if (mode !== "max" && !isSmall()) {
+    fitToViewport();
+    if (floating) {
+      Object.assign(s, {
+        left: `${layout.x}px`, top: `${layout.y}px`, width: `${layout.w}px`, height: `${layout.h}px`,
+        right: "auto", bottom: "auto",
+      });
+    } else {
+      s.width = `${layout.width}px`;
+    }
+  }
+
+  const btn = panel.querySelector('[data-sp="float"]');
+  if (btn) {
+    btn.innerHTML = layout.docked ? ICONS.popout : ICONS.dock;
+    btn.title = layout.docked ? "Pop out (move anywhere)" : "Dock to the right";
+  }
+}
+
+function toggleDock() {
+  if (isSmall()) return;
+  if (mode === "max") setMode("open");
+  layout.docked = !layout.docked;
+  applyLayout();
+  saveLayout();
+}
+
+function onPointerDown(e) {
+  if (e.button !== 0 || isSmall() || mode === "max") return;
+  const handle = e.target.closest(".sp-rz");
+  const head = !handle && e.target.closest(".sp-head");
+  if (!handle && !head) return;
+  if (head && e.target.closest("button, a, input, select, textarea")) return;
+  e.preventDefault();
+
+  // Pulling the header of the docked panel pops it out right where it is
+  if (head && layout.docked) {
+    const r = panel.getBoundingClientRect();
+    Object.assign(layout, {
+      docked: false, x: r.left, y: r.top, w: r.width, h: Math.min(r.height, window.innerHeight - 40),
+    });
+    applyLayout();
+  }
+
+  drag = { kind: handle ? handle.dataset.rz : "move", sx: e.clientX, sy: e.clientY, start: { ...layout }, pid: e.pointerId };
+  panel.setPointerCapture(e.pointerId);
+  document.body.classList.add("sp-dragging");
+}
+
+function onPointerMove(e) {
+  if (!drag || e.pointerId !== drag.pid) return;
+  const dx = e.clientX - drag.sx;
+  const dy = e.clientY - drag.sy;
+  const st = drag.start;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+
+  if (drag.kind === "move") {
+    layout.x = st.x + dx;
+    layout.y = st.y + dy;
+    panel.classList.toggle("sp-snap", e.clientX > vw - 24); // hint: drop here to dock
+  } else if (layout.docked) {
+    layout.width = clamp(vw - e.clientX, MIN_W, vw - 80); // docked: only the left edge resizes
+  } else {
+    const k = drag.kind;
+    if (k.includes("r")) layout.w = clamp(st.w + dx, MIN_W, vw - st.x - 8);
+    if (k.includes("b")) layout.h = clamp(st.h + dy, MIN_H, vh - st.y - 8);
+    if (k.includes("l")) { const w = clamp(st.w - dx, MIN_W, st.x + st.w - 8); layout.x = st.x + st.w - w; layout.w = w; }
+    if (k.includes("t")) { const h = clamp(st.h - dy, MIN_H, st.y + st.h - 8); layout.y = st.y + st.h - h; layout.h = h; }
+  }
+  applyLayout();
+}
+
+function onPointerUp(e) {
+  if (!drag || e.pointerId !== drag.pid) return;
+  if (drag.kind === "move" && e.clientX > window.innerWidth - 24) layout.docked = true; // dropped on the right edge
+  panel.classList.remove("sp-snap");
+  try { panel.releasePointerCapture(drag.pid); } catch { /* already released */ }
+  drag = null;
+  document.body.classList.remove("sp-dragging");
+  applyLayout();
+  saveLayout();
 }
