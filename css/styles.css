@@ -2341,3 +2341,16 @@ button.tm-task:hover { border-color: var(--primary); }
   .tb-preview { position: static; }
 }
 @media (max-width: 640px) { .tb-two { grid-template-columns: 1fr; } }
+
+/* ---------- Task Builder: choice lists ---------- */
+.tb-opts { display: flex; flex-direction: column; gap: .35rem; }
+.tb-opt { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto; align-items: center; gap: .35rem; }
+.tb-opt-link { display: flex; align-items: center; gap: .3rem; margin: 0; color: var(--muted); }
+.tb-opt-link svg { width: 15px; height: 15px; flex-shrink: 0; }
+.tb-opt-link .fe-input { flex: 1; min-width: 0; }
+.tb-src-sample { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .45rem; }
+.tb-src-sample span { display: inline-flex; align-items: center; gap: .25rem; padding: .2rem .5rem; border-radius: 999px;
+  background: #fff; border: 1px solid var(--border); font-size: .75rem; }
+.tb-src-sample svg { width: 12px; height: 12px; color: var(--primary); }
+.tb-bad { color: var(--danger); }
+@media (max-width: 640px) { .tb-opt { grid-template-columns: 1fr auto; } .tb-opt-link { grid-column: 1 / 2; } }

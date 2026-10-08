@@ -2,6 +2,7 @@
 import { TASK_CHOICE_TYPES } from "./task-types.js";
 
 export const EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
+const URL_RE = /^https?:\/\/\S+$/i;
 const OPEN = "\u0001";  // marks a field's sample in the preview
 const CLOSE = "\u0002";
 
@@ -19,9 +20,23 @@ export function clinicDetails(lh) {
   return { address: line1.trim(), phone: phone.trim(), email };
 }
 
+// How chosen options appear in a message. Links are written as [[name|https://…]].
+export function formatChoice(field, chosen) {
+  const items = (chosen || []).filter((o) => o && o.label);
+  if (!items.length) return "";
+  const safe = (s) => String(s).replace(/[|\]]/g, " ");
+  const display = field.display || "inline";
+  if (display === "links") {
+    return items.map((o) => "• " + (o.link && URL_RE.test(o.link) ? `[[${safe(o.label)}|${o.link}]]` : o.label)).join("\n");
+  }
+  if (display === "bullets") return items.map((o) => "• " + o.label).join("\n");
+  const n = items.map((o) => o.label);
+  return n.length < 2 ? n[0] : `${n.slice(0, -1).join(", ")} and ${n[n.length - 1]}`;
+}
+
 const SMART = {
   "Upcoming appointments": {
-    hint: "Their upcoming appointments, from the appointment book",
+    hint: "Their future visits from the appointment book (updated each morning)",
     sample: "• Tue 14 Oct 2026, 10:00 am: Wrinkle Relaxer\n• Tue 11 Nov 2026, 2:30 pm: Review",
   },
   "Treatment plan": {
@@ -29,8 +44,8 @@ const SMART = {
     sample: "Visit 1 (Oct 2026): Wrinkle Relaxer, forehead\nVisit 2 (Jan 2027): Review",
   },
   "Treatment info": {
-    hint: "Information and links for the treatments ticked in the Treatments field",
-    sample: "Wrinkle Relaxer\nhttps://www.dermedica.com.au/\n\nSkin Needling\nhttps://www.dermedica.com.au/",
+    hint: "The treatments ticked in your Treatment information field, as clickable links",
+    sample: "",
   },
 };
 
@@ -38,8 +53,21 @@ const BUILT_IN = ["first name", "full name", "email", "mobile", "date of birth",
   "patient mobile", "patient email", "today", "staff name", "clinic phone", "clinic email", "clinic address",
   ...Object.keys(SMART).map((k) => k.toLowerCase())];
 
+const treatmentsField = (task) => (task.fields || []).find((f) => TASK_CHOICE_TYPES.includes(f.type) && f.source === "treatments");
+
+// A field's sample for the preview: real choices where we have them
+function fieldSample(f, sources) {
+  if (TASK_CHOICE_TYPES.includes(f.type)) {
+    const opts = f.source === "list" ? (f.options || []) : ((sources && sources[f.source]) || []);
+    const pick = f.type === "checkboxes" ? opts.slice(0, 2) : opts.slice(0, 1);
+    const text = formatChoice(f, pick);
+    if (text) return OPEN + text + CLOSE;
+  }
+  return OPEN + f.label.trim() + CLOSE;
+}
+
 // The blanks available to a task, in groups, each with a sample value for the preview
-export function tokenGroups(task, { staffName = "", letterhead = null } = {}) {
+export function tokenGroups(task, { staffName = "", letterhead = null, sources = {} } = {}) {
   const c = clinicDetails(letterhead);
   const tok = (name, sample, kind = "", hint = "") => ({ name, sample, kind, hint });
   const aboutPatient = task.category === "patient" || (task.recipients && task.recipients.aboutPatient);
@@ -67,13 +95,13 @@ export function tokenGroups(task, { staffName = "", letterhead = null } = {}) {
 
   const fields = (task.fields || []).filter((f) => String(f.label || "").trim());
   if (fields.length) {
-    groups.push({ title: "Your fields", tokens: fields.map((f) => tok(f.label.trim(), OPEN + f.label.trim() + CLOSE, "field")) });
+    groups.push({ title: "Your fields", tokens: fields.map((f) => tok(f.label.trim(), fieldSample(f, sources), "field")) });
   }
   if (aboutPatient) {
-    const hasTx = (task.fields || []).some((f) => f.type === "treatments");
+    const tx = treatmentsField(task);
     groups.push({ title: "Smart blocks", tokens: Object.entries(SMART)
-      .filter(([n]) => n !== "Treatment info" || hasTx)
-      .map(([n, s]) => tok(n, s.sample, "smart", s.hint)) });
+      .filter(([n]) => n !== "Treatment info" || tx)
+      .map(([n, s]) => tok(n, n === "Treatment info" ? fieldSample({ ...tx, display: "links" }, sources) : s.sample, "smart", s.hint)) });
   }
   return groups;
 }
@@ -99,11 +127,20 @@ export function taskProblems(task) {
   (task.fields || []).forEach((f, i) => {
     const l = String(f.label || "").trim();
     const lower = l.toLowerCase();
+    const name = l || `Field ${i + 1}`;
     if (!l) out.push(`Field ${i + 1} needs a name.`);
     else if (seen.has(lower)) out.push(`Two fields are called “${l}”. Give each field its own name.`);
     else if (BUILT_IN.includes(lower)) out.push(`“${l}” is already a built-in blank. Choose a different field name.`);
     seen.add(lower);
-    if (TASK_CHOICE_TYPES.includes(f.type) && !(f.options || []).length) out.push(`“${l || `Field ${i + 1}`}” needs at least one choice.`);
+    if (TASK_CHOICE_TYPES.includes(f.type) && (f.source || "list") === "list") {
+      const opts = (f.options || []).filter((o) => String(o.label || "").trim());
+      if (!opts.length) out.push(`“${name}” needs at least one choice.`);
+      (f.options || []).forEach((o) => {
+        if (o.link && !URL_RE.test(String(o.link).trim())) {
+          out.push(`In “${name}”, the link for “${o.label || "a choice"}” should start with https://`);
+        }
+      });
+    }
   });
 
   if (!String(task.subject || "").trim()) out.push("Add a subject.");
@@ -112,7 +149,7 @@ export function taskProblems(task) {
   const known = new Set(tokenGroups(task).flatMap((g) => g.tokens.map((t) => t.name.toLowerCase())));
   [...tokensIn(task.subject), ...tokensIn(task.body)].forEach((n) => {
     if (known.has(n.toLowerCase())) return;
-    if (n.toLowerCase() === "treatment info") out.push("Add a Treatments field so staff can choose which treatments {Treatment info} lists.");
+    if (n.toLowerCase() === "treatment info") out.push("Add a Treatments field (connected to Treatment information) to use {Treatment info}.");
     else if (BUILT_IN.includes(n.toLowerCase()) && task.category === "staff") {
       out.push(`{${n}} needs a patient. Tick “This is about a patient” in step 2, or remove it.`);
     } else out.push(`The message uses {${n}}, which isn't a blank this task has.`);
@@ -136,11 +173,20 @@ export function fillTemplate(text, values) {
 
 const marks = (html) => html.replace(/\u0001([^\u0002]*)\u0002/g, '<mark class="tb-mark">$1</mark>');
 
-// Plain text -> email HTML (paragraphs, line breaks, clickable links)
+// Plain text -> email HTML: paragraphs, line breaks, [[name|link]] as clickable names, bare links clickable
 export function emailBodyHtml(text) {
-  let h = esc(text).replace(/https?:\/\/[^\s<]+/g, (u) => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
+  const links = [];
+  const withSlots = String(text || "").replace(/\[\[([^|\]]{1,200})\|(https?:\/\/[^\]\s]{1,500})\]\]/g, (_, label, url) => {
+    links.push([label, url]);
+    return `\u0003${links.length - 1}\u0003`;
+  });
+  let h = esc(withSlots).replace(/https?:\/\/[^\s<]+/g, (u) => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
+  h = h.replace(/\u0003(\d+)\u0003/g, (_, i) => {
+    const [label, url] = links[Number(i)];
+    return `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(label)}</a>`;
+  });
   h = marks(h);
   return h.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean).map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`).join("");
 }
 
-export const subjectHtml = (text) => marks(esc(text));
+export const subjectHtml = (text) => marks(esc(String(text || "").replace(/\[\[([^|\]]+)\|[^\]]+\]\]/g, "$1")));

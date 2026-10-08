@@ -21,15 +21,23 @@ export const TASK_FIELD_TYPES = {
   dropdown: "Dropdown",
   single_choice: "Single choice",
   checkboxes: "Checkboxes",
-  treatments: "Treatments",
 };
 export const TASK_CHOICE_TYPES = ["dropdown", "single_choice", "checkboxes"];
+export const CHOICE_DISPLAYS = {
+  inline: "In a sentence (A, B and C)",
+  bullets: "As a list",
+  links: "As a list with links",
+};
+const SOURCE_KEYS = ["list", "treatments", "staff", "printables"];
 
 const clip = (v, n) => String(v ?? "").slice(0, n);
 const toDate = (v) => (v && typeof v.toDate === "function" ? v.toDate() : null);
 
 export function cleanTaskField(f) {
-  if (!f || !TASK_FIELD_TYPES[f.type]) return null;
+  if (!f) return null;
+  // The earlier "Treatments" field is now Checkboxes connected to Treatment information
+  if (f.type === "treatments") f = { ...f, type: "checkboxes", source: "treatments", display: "links" };
+  if (!TASK_FIELD_TYPES[f.type]) return null;
   const out = {
     id: clip(f.id, 40),
     type: f.type,
@@ -39,10 +47,18 @@ export function cleanTaskField(f) {
     placeholder: clip(f.placeholder, 100),
   };
   if (TASK_CHOICE_TYPES.includes(f.type)) {
-    out.options = (Array.isArray(f.options) ? f.options : []).map((o) => clip(o, 120).trim()).filter(Boolean).slice(0, 40);
+    out.source = SOURCE_KEYS.includes(f.source) ? f.source : "list";
+    out.display = Object.keys(CHOICE_DISPLAYS).includes(f.display)
+      ? f.display : (f.type === "checkboxes" ? "bullets" : "inline");
+    out.options = (Array.isArray(f.options) ? f.options : [])
+      .map((o) => (typeof o === "string" ? { label: o, link: "" } : { label: o && o.label, link: o && o.link }))
+      .map((o) => ({ label: clip(o.label, 120).trim(), link: clip(o.link, 500).trim() }))
+      .filter((o) => o.label || o.link)
+      .slice(0, 60);
   }
   return out;
 }
+
 
 // The saved shape of a task type (everything except status and the who/when stamps)
 export function taskSnapshot(t = {}) {

@@ -1,9 +1,10 @@
 // Task Builder: the Task types list and the task editor.
 import {
   listTaskTypes, getTaskType, createTaskType, saveTaskType, taskSnapshot, fetchStaffList,
-  TASK_FIELD_TYPES, TASK_CHOICE_TYPES,
+  TASK_FIELD_TYPES, TASK_CHOICE_TYPES, CHOICE_DISPLAYS,
 } from "./task-types.js";
 import { tokenGroups, taskProblems, fillTemplate, sampleValues, emailBodyHtml, subjectHtml } from "./task-tokens.js";
+import { SOURCES, loadSource } from "./task-sources.js";
 import { listPublishedForms, getLetterhead } from "./form-templates.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
@@ -18,6 +19,8 @@ const I = {
   up: ic('<polyline points="18 15 12 9 6 15"/>'),
   down: ic('<polyline points="6 9 12 15 18 9"/>'),
   trash: ic('<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>'),
+  x: ic('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
+  link: ic('<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>'),
   chev: ic('<polyline points="9 18 15 12 9 6"/>'),
   back: ic('<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>'),
   copy: ic('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'),
@@ -29,10 +32,17 @@ const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const newId = () => "t_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 
 function blankField(type) {
-  return {
-    id: newId(), type, label: "", required: false, help: "", placeholder: "",
-    ...(TASK_CHOICE_TYPES.includes(type) ? { options: ["Option 1", "Option 2"] } : {}),
-  };
+  const f = { id: newId(), type, label: "", required: false, help: "", placeholder: "" };
+  if (TASK_CHOICE_TYPES.includes(type)) {
+    f.source = "list";
+    f.display = type === "checkboxes" ? "bullets" : "inline";
+    f.options = [{ label: "Option 1", link: "" }, { label: "Option 2", link: "" }];
+  }
+  return f;
+}
+function treatmentsField() {
+  return { ...blankField("checkboxes"), label: "Treatments", required: true, source: "treatments", display: "links",
+    options: [], help: "Tick the treatments to send information about." };
 }
 
 function editedAgo(date) {
@@ -53,10 +63,10 @@ function starters() {
       name: "Send Treatment Info",
       description: "Email the patient information about the treatments discussed.",
       category: "patient", channel: "email",
-      fields: [{ ...blankField("treatments"), label: "Treatments", required: true, help: "Tick the treatments to send information about." }],
+      fields: [treatmentsField()],
       recipients: { mode: "patient", staffIds: [], cc: "", aboutPatient: false },
       subject: "Your treatment information - Dermedica",
-      body: "Hi {First name},\n\nThank you for visiting Dermedica. Here is the information about the treatments we discussed:\n\n{Treatment info}\n\nIf you have any questions, just reply to this email or call us on {Clinic phone}.\n\nKind regards,\n{Staff name}\nDermedica",
+      body: "Hi {First name},\n\nThank you for visiting Dermedica. Here is the information about the treatments we discussed:\n\n{Treatments}\n\nIf you have any questions, just reply to this email or call us on {Clinic phone}.\n\nKind regards,\n{Staff name}\nDermedica",
       attachments: [],
     },
     {
@@ -164,9 +174,8 @@ export async function mountTaskTypes(main, { staff } = {}) {
       } catch (err) {
         console.error("Starter tasks failed:", err);
         showToast(err.code === "permission-denied" ? "Only admins can add task types." : "Couldn't add the starter tasks. Try again.");
-        s.disabled = false;
-        s.textContent = "Add starter tasks";
       }
+      if (s.isConnected) { s.disabled = false; s.textContent = "Add starter tasks"; }
     }
   });
 
@@ -259,6 +268,8 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   const task = taskSnapshot(loaded);
   let status = loaded.status;
   let letterhead = null, printables = null, staffList = null, staffError = false;
+  const sources = {};          // source key -> options, or null if it failed to load
+  const sourceRequested = new Set();
   let dirty = false, saving = false, saveTimer = null;
   let lastText = null;
 
@@ -292,6 +303,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   const stateEl = $('[data-role="state"]');
   const msgEl = $('[data-role="msg"]');
   const pubBtn = $('[data-act="publish"]');
+  const tokenOpts = () => ({ staffName: staff && staff.name, letterhead, sources });
 
   /* ---------- Saving ---------- */
   function setState(s) {
@@ -337,6 +349,19 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   };
   window.addEventListener("beforeunload", onBeforeUnload);
   window.addEventListener("hashchange", onHashChange);
+
+  /* ---------- Connected lists ---------- */
+  function loadSources() {
+    task.fields.forEach((f) => {
+      const src = f.source;
+      if (!TASK_CHOICE_TYPES.includes(f.type) || !src || src === "list" || sourceRequested.has(src)) return;
+      sourceRequested.add(src);
+      loadSource(src)
+        .then((opts) => { sources[src] = opts; })
+        .catch((err) => { console.warn(`Couldn't load ${src}:`, err); sources[src] = null; })
+        .finally(() => { if (root.isConnected) { renderForm(); renderPreview(); } });
+    });
+  }
 
   /* ---------- The top bar ---------- */
   function renderBar() {
@@ -403,6 +428,43 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
       </section>`;
   }
 
+  function choiceHtml(f, i) {
+    const src = f.source || "list";
+    let body;
+    if (src === "list") {
+      body = `
+        <div class="tb-opts">${(f.options || []).map((o, oi) => `
+          <div class="tb-opt">
+            <input class="fe-input" data-fi="${i}" data-oi="${oi}" data-ok="label" maxlength="120" placeholder="Choice ${oi + 1}" value="${esc(o.label)}" aria-label="Choice ${oi + 1}" />
+            <label class="tb-opt-link">${I.link}<input class="fe-input" data-fi="${i}" data-oi="${oi}" data-ok="link" maxlength="500" placeholder="Link (optional)" value="${esc(o.link)}" aria-label="Link for choice ${oi + 1}" /></label>
+            <button type="button" class="ib-tool is-danger" data-odel="${i}:${oi}" aria-label="Remove choice ${oi + 1}" title="Remove">${I.x}</button>
+          </div>`).join("")}</div>
+        <button type="button" class="hx-add" data-oadd="${i}">+ Add a choice</button>`;
+    } else {
+      const items = sources[src];
+      if (items === undefined) body = '<p class="tb-none">Loading the list…</p>';
+      else if (items === null) body = '<p class="tb-none tb-bad">Couldn\'t load this list. Check your connection and refresh.</p>';
+      else {
+        const linked = items.filter((x) => x.link).length;
+        body = `<div class="tb-info">
+          <strong>${items.length} choice${items.length === 1 ? "" : "s"}</strong> from ${esc(SOURCES[src].name)}${
+            src === "treatments" ? `, ${linked} with information links` : ""}. This list stays up to date automatically.
+          <div class="tb-src-sample">${items.slice(0, 6).map((x) => `<span>${esc(x.label)}${x.link ? ` ${I.link}` : ""}</span>`).join("")}${
+            items.length > 6 ? `<span>+${items.length - 6} more</span>` : ""}</div></div>`;
+      }
+    }
+    return `
+      <div class="tb-two">
+        <label class="tb-field"><span>Choices come from</span>
+          <select class="fb-select" data-fi="${i}" data-fk="source" data-rerender="">${Object.entries(SOURCES).map(([k, s]) =>
+            `<option value="${k}"${src === k ? " selected" : ""}>${esc(s.name)}</option>`).join("")}</select></label>
+        <label class="tb-field"><span>In the message, show the answer</span>
+          <select class="fb-select" data-fi="${i}" data-fk="display">${Object.entries(CHOICE_DISPLAYS).map(([k, l]) =>
+            `<option value="${k}"${(f.display || "inline") === k ? " selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
+      </div>
+      ${body}`;
+  }
+
   function fieldCard(f, i) {
     const choice = TASK_CHOICE_TYPES.includes(f.type);
     return `
@@ -415,22 +477,22 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
           <button type="button" class="ib-tool" data-fmove="${i}" data-dir="1"${i === task.fields.length - 1 ? " disabled" : ""} aria-label="Move down" title="Move down">${I.down}</button>
           <button type="button" class="ib-tool is-danger" data-fdel="${i}" aria-label="Remove field" title="Remove">${I.trash}</button>
         </div>
-        ${choice ? `<textarea class="fe-input" data-fi="${i}" data-fk="options" rows="3" placeholder="One choice per line">${esc((f.options || []).join("\n"))}</textarea>` : ""}
-        ${f.type === "treatments" ? '<small class="muted">Staff tick treatments from your treatment list. Use {Treatment info} in the message to include each one\'s information and link.</small>' : ""}
+        ${choice ? choiceHtml(f, i) : ""}
         <input class="fe-input tb-help" data-fi="${i}" data-fk="help" maxlength="300" placeholder="Help text for staff (optional)" value="${esc(f.help)}" />
       </div>`;
   }
 
   function fieldsHtml() {
-    const hasTx = task.fields.some((f) => f.type === "treatments");
+    const hasTx = task.fields.some((f) => f.source === "treatments");
     return `
       <section class="tb-card">
         <h4><span class="tb-num">3</span>Fields to fill in when running <small>(optional)</small></h4>
         <p class="muted tb-note">Questions staff answer each time. Use the answers in the message, like {Due date}.</p>
         <div class="tb-fields">${task.fields.map(fieldCard).join("") || '<p class="tb-none">No fields yet.</p>'}</div>
-        <div class="tb-add">${Object.entries(TASK_FIELD_TYPES)
-          .filter(([k]) => k !== "treatments" || !hasTx)
-          .map(([k, l]) => `<button type="button" class="fe-ins" data-addfield="${k}">+ ${esc(l)}</button>`).join("")}</div>
+        <div class="tb-add">
+          ${Object.entries(TASK_FIELD_TYPES).map(([k, l]) => `<button type="button" class="fe-ins" data-addfield="${k}">+ ${esc(l)}</button>`).join("")}
+          ${hasTx ? "" : '<button type="button" class="fe-ins is-smart" data-addfield="treatments">+ Treatments (from Treatment information)</button>'}
+        </div>
       </section>`;
   }
 
@@ -469,7 +531,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   function renderChips() {
     const box = form.querySelector('[data-role="chips"]');
     if (!box) return;
-    box.innerHTML = tokenGroups(task, { staffName: staff && staff.name, letterhead }).map((g) => `
+    box.innerHTML = tokenGroups(task, tokenOpts()).map((g) => `
       <div class="tb-chipgroup"><span>${esc(g.title)}</span>
         <div class="fe-chiprow">${g.tokens.map((t) => `<button type="button" class="fe-ins${
           t.kind === "smart" ? " is-smart" : t.kind === "field" ? " is-field" : ""}" data-token="${esc(t.name)}"${
@@ -483,7 +545,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
 
   /* ---------- Preview ---------- */
   function renderPreview() {
-    const values = sampleValues(task, { staffName: staff && staff.name, letterhead });
+    const values = sampleValues(task, tokenOpts());
     const problems = taskProblems(task);
     const r = task.recipients;
     let to;
@@ -507,7 +569,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
           <div class="tb-mail-body">${emailBodyHtml(fillTemplate(task.body, values)) || "<em>No message yet</em>"}</div>
           ${attNames.length ? `<div class="tb-mail-att">${attNames.map((p) => `<span class="tb-att">${I.doc}${esc(p.name)}.pdf</span>`).join("")}</div>` : ""}
         </div>
-        <small class="muted">Highlighted words are filled in from the fields when the task is run.</small>
+        <small class="muted">Highlighted parts are filled in from the fields when the task is run. Choices show real examples from your lists.</small>
       </div>`;
   }
 
@@ -534,13 +596,23 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
         renderForm();
         if (el.dataset.set === "recipients.mode" && task.recipients.mode === "fixed") loadStaff();
       }
+    } else if (el.dataset.oi !== undefined) {
+      const f = task.fields[Number(el.dataset.fi)];
+      const o = f && f.options && f.options[Number(el.dataset.oi)];
+      if (!o) return;
+      o[el.dataset.ok] = el.value;
     } else if (el.dataset.fi !== undefined) {
       const f = task.fields[Number(el.dataset.fi)];
       if (!f) return;
       const k = el.dataset.fk;
       if (k === "required") f.required = el.checked;
-      else if (k === "options") f.options = el.value.split("\n").map((s) => s.trim()).filter(Boolean);
       else f[k] = el.value;
+      if (k === "source") {
+        if (f.source === "list" && !(f.options || []).length) f.options = [{ label: "Option 1", link: "" }];
+        if (f.source === "treatments") f.display = "links";
+        renderForm();
+        loadSources();
+      }
       if (k === "label") renderChips();
     } else if (el.dataset.staff !== undefined) {
       const ids = new Set(task.recipients.staffIds);
@@ -572,13 +644,34 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     }
     const add = e.target.closest("[data-addfield]");
     if (add) {
-      task.fields.push(blankField(add.dataset.addfield));
-      if (add.dataset.addfield === "treatments") task.fields[task.fields.length - 1].label = "Treatments";
+      task.fields.push(add.dataset.addfield === "treatments" ? treatmentsField() : blankField(add.dataset.addfield));
       renderForm();
+      loadSources();
       changed();
       const inputs = form.querySelectorAll('[data-fk="label"]');
       const last = inputs[inputs.length - 1];
       if (last) { last.focus(); last.select(); }
+      return;
+    }
+    const oadd = e.target.closest("[data-oadd]");
+    if (oadd) {
+      const f = task.fields[Number(oadd.dataset.oadd)];
+      if (!f) return;
+      f.options = [...(f.options || []), { label: "", link: "" }];
+      renderForm();
+      changed();
+      const rows = form.querySelectorAll(`[data-fi="${oadd.dataset.oadd}"][data-ok="label"]`);
+      if (rows.length) rows[rows.length - 1].focus();
+      return;
+    }
+    const odel = e.target.closest("[data-odel]");
+    if (odel) {
+      const [fi, oi] = odel.dataset.odel.split(":").map(Number);
+      const f = task.fields[fi];
+      if (!f || !f.options) return;
+      f.options.splice(oi, 1);
+      renderForm();
+      changed();
       return;
     }
     const mv = e.target.closest("[data-fmove]");
@@ -670,6 +763,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   renderBar();
   renderForm();
   renderPreview();
+  loadSources();
 
   getLetterhead().then((lh) => { letterhead = lh; if (root.isConnected) { renderChips(); renderPreview(); } }).catch(() => {});
   listPublishedForms()
