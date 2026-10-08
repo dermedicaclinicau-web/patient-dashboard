@@ -306,3 +306,29 @@ async function onSubmit(e) {
     btn.innerHTML = `${I.send}Send Email Now`;
   }
 }
+
+/* ===================== Saving an edited list ===================== */
+
+// Back to the recorder's text format for "!!TREATMENT INFORMATION TO EMAIL"
+export function emailItemsToText(items) {
+  return (items || []).map((it) => {
+    let t = it.name;
+    it.areas.forEach((a) => {
+      t += `\n  * Area: ${a.areaName}`;
+      if (a.quote) t += `\n    Quote: ${a.quote}`;
+      const lines = splitComment(a.comment);
+      if (lines.length) t += `\n    Comment: ${lines.join(" | ")}`;
+    });
+    return t;
+  }).join("\n\n");
+}
+
+// Back to the recorder's sidecar shape
+export function emailItemsToSidecar(items) {
+  return (items || []).map((it) => ({
+    name: it.name,
+    dynamic_areas: it.areas.map((a) => ({
+      areaName: a.areaName || "", quote: a.quote || "", comment: splitComment(a.comment).join("\n"),
+    })),
+  }));
+}

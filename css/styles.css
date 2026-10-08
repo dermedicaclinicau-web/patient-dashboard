@@ -1155,6 +1155,9 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .em-draft:hover { background: #3730a3; }
 .em-draft:disabled { opacity: .5; cursor: not-allowed; }
 .em-draft svg { width: 17px; height: 17px; }
+.em-flash { animation: em-flash 1.6s ease-out; }
+@keyframes em-flash { 0%, 30% { box-shadow: 0 0 0 4px #c7d2fe; } 100% { box-shadow: 0 0 0 0 transparent; } }
+.pe-btn:disabled { opacity: .6; cursor: wait; }
 
 /* Email composer overlay */
 .em-dialog { margin: auto; padding: 0; border: none; border-radius: 20px; width: min(620px, calc(100% - 2rem));

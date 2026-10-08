@@ -7,7 +7,9 @@ import {
   planCardHtml, fieldHtml, getPlanValue, setPlanValue, refFrom, catKey, planFromText,
 } from "./plan-editor.js";
 import { fetchTranscriptRecords, parseRecordDate } from "./transcripts.js";
-import { emailItemsFrom, emailCardHtml, openEmailComposer } from "./email-composer.js";
+import {
+  emailItemsFrom, emailCardHtml, openEmailComposer, emailItemsToText, emailItemsToSidecar,
+} from "./email-composer.js";
 
 import { callApi } from "./appointments.js";
 import { escapeHtml, showToast, toDateKey } from "./utils.js";
@@ -345,6 +347,7 @@ async function onClick(e) {
   else if (action === "regenerate") regenerate();
   else if (action === "undo-regen") undoRegenerate();
   else if (action === "email-draft") draftEmail();
+  else if (action === "email-from-plan") emailFromPlan(btn);
   else if (action === "delete") showDeleteConfirm();
   else if (action === "delete-cancel") hideDeleteConfirm();
   else if (action === "delete-confirm") doDelete(btn);
@@ -372,8 +375,9 @@ async function save(status, btn) {
     const ta = panel.querySelector(`textarea[data-extra="${i}"]`);
     return { heading: x.heading, text: ta ? ta.value : x.text };
   });
-  // The email card isn't a text box: keep that section's text as it was
-  if (current.emailItems && current.emailItems.length) values.email = current.original.email;
+  // The email card isn't a text box: use the rebuilt list, or keep the text as it was
+  if (current.emailEdited) values.email = emailItemsToText(current.emailItems);
+  else if (current.emailItems && current.emailItems.length) values.email = current.original.email;
   const changed = (k) => String(values[k] || "").trim() !== String(current.original[k] || "").trim();
   let sidecar = "";
   let keepSidecar = false;
@@ -390,7 +394,10 @@ async function save(status, btn) {
     const sc = { plan: planToSidecarPlan(current.plan) };
     const oldEmail = current.sidecarObj && Array.isArray(current.sidecarObj.email) ? current.sidecarObj.email : null;
     // Keep the recorder's email items only if the email text wasn't edited (otherwise they'd be out of date)
-    sidecar = buildSidecar(oldEmail && !changed("email") ? { email: oldEmail, plan: sc.plan } : sc);
+    const emailForSidecar = current.emailEdited
+      ? emailItemsToSidecar(current.emailItems)         // rebuilt from the plan
+      : (oldEmail && !changed("email") ? oldEmail : null);
+    sidecar = buildSidecar(emailForSidecar ? { email: emailForSidecar, plan: sc.plan } : sc);
   } else {
     // Plain-text plan: if the plan or email text changed, the old sidecar would be out of date, so drop it
     keepSidecar = !changed("plan") && !changed("email");
@@ -426,6 +433,7 @@ async function save(status, btn) {
     current.plan = planFromSidecar(current.sidecarObj) || planFromText(current.parsed.sections.plan);
     current.planSnapshot = JSON.stringify(current.plan);
     current.emailItems = emailItemsFrom(current.sidecarObj, current.parsed.sections.email);
+    current.emailEdited = false;
     render();
     loadPersonalNotes();
     updateTab();
@@ -777,5 +785,62 @@ async function undoRegenerate() {
     showToast(err.code === "permission-denied"
       ? "You don't have permission to change these notes."
       : "Couldn't restore. Please try again.");
+  }
+}
+
+/* ===================== Update email from plan ===================== */
+
+async function emailFromPlan(btn) {
+  if (!current || !current.plan) return;
+  panel.querySelectorAll("textarea.pe-input").forEach(commitPlanEdit); // include an edit still in progress
+
+  const concerns = current.plan.concerns.filter((c) => String(c.treatment || "").trim());
+  if (!concerns.length) { showToast("Add a treatment to the plan first"); return; }
+
+  if (current.emailItems && current.emailItems.length &&
+      !confirm("Rebuild the Treatment Info to Email list from the treatment plan?\n\n" +
+               "The current list will be replaced. Nothing is saved until you click Save.")) return;
+
+  const id = current.id;
+  const label = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = "Updating…";
+
+  try {
+    const res = await callApi({
+      action: "emailFromPlan",
+      plan: concerns.map((c) => ({
+        category: c.concern_category, area: c.area, treatment: c.treatment,
+        frequency: c.frequency_interval, quote: c.quote, comments: c.comments,
+      })),
+      current: current.emailItems || [],
+    });
+    if (!current || current.id !== id) return;
+
+    const items = emailItemsFrom({ email: res.items || [] }, "");
+    if (!items.length) { showToast("No treatments could be matched from the plan."); return; }
+
+    current.emailItems = items;
+    current.emailEdited = true;
+    markDirty();
+
+    // Replace just the email card (other unsaved edits stay as they are)
+    const html = `<section class="sp-card sp-tone-indigo em-flash" data-email-card>${emailCardHtml(items, current.data["Treatment Emails Sent"])}</section>`;
+    const existing = panel.querySelector("[data-email-card]") ||
+      (panel.querySelector('textarea[data-key="email"]') || {}).closest?.(".sp-card");
+    if (existing) existing.outerHTML = html;
+    const card = panel.querySelector("[data-email-card]");
+    if (card) card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+
+    showToast("Treatment Info to Email updated. Review it, then Save.");
+  } catch (err) {
+    console.error("Update email from plan failed:", err.code || "(no code)", err);
+    const messages = {
+      GEMINI_FAILED: "Gemini couldn't update the list just now. Please try again.",
+      UNAUTHORIZED: "Your session has expired. Please log in again.",
+    };
+    showToast(messages[err.code] || "Couldn't update the email list. Please try again.");
+  } finally {
+    if (btn.isConnected) { btn.disabled = false; btn.innerHTML = label; }
   }
 }
