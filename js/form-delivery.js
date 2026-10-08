@@ -3,11 +3,13 @@
 // The PDF is made in the browser so it looks exactly like the preview.
 import { callApi } from "./appointments.js";
 import { getPatient } from "./patients.js";
-import { getPrintSettings, savePrintSettings } from "./form-templates.js";
+import { getPrintSettings, savePrintSettings, getFormTemplate, getFormVersion, getLetterhead } from "./form-templates.js";
 import { esc } from "./form-fields.js";
 import { buildFormDocument, niceDate } from "./form-document.js";
-import { showToast } from "./utils.js";
+import { showToast, formatDobLong } from "./utils.js";
 import { bankImage } from "./image-bank-api.js";
+import { DEFAULT_LETTERHEAD } from "./form-letterhead.js";
+import { formatDobLong } from "./utils.js";
 
 const EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
 const PDF_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
@@ -330,4 +332,40 @@ export async function openPrinterDialog(staff) {
   document.body.appendChild(dlg);
   dlg.showModal();
   input.focus();
+}
+
+/* ---------- A published Printable as a PDF, with the patient's details filled in (Task Manager) ---------- */
+
+export async function printablePdf({ templateId, patient }) {
+  const tpl = await getFormTemplate(templateId);
+  if (!tpl || tpl.status !== "live" || !tpl.version) throw new Error("One of the attachments isn't published any more.");
+  const [ver, letterhead] = await Promise.all([
+    getFormVersion(templateId, tpl.version),
+    getLetterhead().catch(() => DEFAULT_LETTERHEAD),
+  ]);
+  if (!ver) throw new Error(`Couldn't open the attachment "${tpl.name}".`);
+
+  const d = new Date();
+  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const p = patient || {};
+  const fills = {
+    "patient.name": p.name, "patient.firstName": p.firstName, "patient.lastName": p.lastName,
+    "patient.dob": p.dobKey, "patient.email": p.email, "patient.mobile": p.mobile,
+    "patient.address": p.address, "today": today,
+  };
+  const answers = {};
+  (ver.fields || []).forEach((f) => {
+    if (f.type === "patient") {
+      answers[f.id] = { name: p.name || "", dob: formatDobLong(p.dobKey) || p.dob || "", mobile: p.mobile || "",
+        email: p.email || "", address: p.address || "", pttId: p.pttId || "" };
+    } else if (f.fill && fills[f.fill]) {
+      answers[f.id] = fills[f.fill];
+    }
+  });
+
+  const sub = { answers, signatures: {}, templateName: ver.name, patientName: p.name || "", recordDate: today, version: ver.version, createdBy: "" };
+  const job = await formPdf({ sub, ver, letterhead });
+  const payload = await pdfPayload(job);
+  if (!payload.pdf) throw new Error(`Couldn't make the PDF for "${ver.name}". Try again.`);
+  return { name: payload.fileName, pdf: payload.pdf };
 }

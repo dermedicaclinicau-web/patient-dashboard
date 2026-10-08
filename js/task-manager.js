@@ -1,12 +1,14 @@
 // Task Manager: repeated jobs in a few clicks (emails to patients, reminders to staff, printing).
-// Routes: #/tasks                -> Create new task
-//         #/tasks/new/<category> -> the tasks in that category
-//         #/tasks/history        -> Task history (coming next)
-//         #/tasks/types          -> Task types (admins)
-//         #/tasks/types/<id>     -> edit a task type (admins)
+// Routes: #/tasks                        -> Create new task
+//         #/tasks/new/<category>         -> the tasks in that category
+//         #/tasks/run/<taskId>[/<patient>] -> run a task
+//         #/tasks/history                -> Task history
+//         #/tasks/types[/<id>]           -> Task types (admins)
 import { listPublishedForms } from "./form-templates.js";
 import { listTaskTypes } from "./task-types.js";
 import { mountTaskTypes, mountTaskEditor } from "./task-builder.js";
+import { mountTaskRunner } from "./task-runner.js";
+import { mountTaskHistory } from "./task-history.js";
 import { showToast } from "./utils.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -39,7 +41,8 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
   const view = parts[0] || "new";
   const sub = parts[1] || "";
 
-  // Editing one task type gets the whole page
+  // Full-page screens
+  if (view === "run" && sub) { mountTaskRunner(container, { taskId: sub, patientId: parts[2] || "", staff }); return; }
   if (view === "types" && sub) {
     if (isAdmin) { mountTaskEditor(container, { id: sub, staff }); return; }
     container.innerHTML = '<section class="page"><div class="state"><strong>Admins only</strong>Only admins can edit task types.</div></section>';
@@ -68,11 +71,7 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
   container.replaceChildren(root);
   const main = root.querySelector('[data-role="main"]');
 
-  if (view === "history") {
-    main.innerHTML = `<h3 class="tm-h">Task history</h3>
-      <div class="tm-empty"><strong>Coming next</strong><br>Every task you run will be listed here: what was sent, to whom, by whom and when.</div>`;
-    return;
-  }
+  if (view === "history") { mountTaskHistory(main, { patientId: sub }); return; }
   if (view === "types") {
     if (!isAdmin) { main.innerHTML = '<div class="tm-empty">Only admins can set up task types.</div>'; return; }
     mountTaskTypes(main, { staff });
@@ -117,9 +116,9 @@ async function renderCategory(main, key, isAdmin) {
   const list = main.querySelector('[data-role="tasks"]');
 
   list.addEventListener("click", (e) => {
-    if (e.target.closest("[data-run]") || e.target.closest("[data-print]")) {
-      showToast("Running tasks is the next step we'll build.");
-    }
+    const run = e.target.closest("[data-run]");
+    if (run) { location.hash = `#/tasks/run/${encodeURIComponent(run.dataset.run)}`; return; }
+    if (e.target.closest("[data-print]")) showToast("Printing from Task Manager is coming next. For now, open the patient and use Consent record or Treatment record.");
   });
 
   try {

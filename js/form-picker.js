@@ -4,6 +4,7 @@
 import { listPublishedForms, categoryLabel, formGroup } from "./form-templates.js";
 import { CATEGORIES } from "./records.js";
 import { esc } from "./form-fields.js";
+import { listTaskTypes } from "./task-types.js";
 
 // Tile label (its data-soon value) -> form category
 const TILE_CATEGORY = {
@@ -161,9 +162,69 @@ async function open(trigger, category, staff, group) {
   });
 }
 
+// The patient page's Email button: published "To Patient" tasks, plus "Write my own email"
+async function openTasks(trigger, staff) {
+  closeFormPicker();
+  const patientId = patientIdFromHash();
+  if (!patientId) return;
+  anchor = trigger;
+  trigger.setAttribute("aria-expanded", "true");
+  const isAdmin = /^admin$/i.test(String((staff && staff.role) || ""));
+  const email = trigger.dataset.email || "";
+
+  const thisMenu = document.createElement("div");
+  menu = thisMenu;
+  menu.className = "fp-menu";
+  menu.setAttribute("role", "dialog");
+  menu.setAttribute("aria-label", "Email the patient");
+  menu.innerHTML = '<div class="fp-head">Email the patient</div><div class="fp-body"><div class="fp-loading">Loading tasks…</div></div>';
+  document.body.appendChild(menu);
+  position();
+
+  let tasks = [];
+  try {
+    tasks = (await listTaskTypes({ isAdmin: false })).filter((t) => t.category === "patient" && t.channel === "email");
+  } catch (err) {
+    console.error("Couldn't load tasks:", err);
+  }
+  if (menu !== thisMenu) return;
+
+  menu.querySelector(".fp-body").innerHTML = `
+    <div class="fp-list" role="menu">
+      ${tasks.map((t) => `
+        <button type="button" class="fp-item" role="menuitem" data-runtask="${esc(t.id)}">
+          <span>${esc(t.name)}</span>${t.description ? `<small>${esc(t.description)}</small>` : ""}
+        </button>`).join("")}
+      ${tasks.length ? "" : `<div class="fp-empty">No patient email tasks are published yet.${
+        isAdmin ? ' <a href="#/tasks/types">Set them up in Task types</a>' : ""}</div>`}
+      ${email ? `<a class="fp-item fp-plain" role="menuitem" href="mailto:${esc(email)}">
+        <span>Write my own email</span><small>Opens your email app</small></a>` : ""}
+    </div>`;
+  position();
+
+  menu.addEventListener("click", (e) => {
+    const item = e.target.closest("[data-runtask]");
+    if (!item) return;
+    const id = item.dataset.runtask;
+    closeFormPicker();
+    location.hash = `#/tasks/run/${encodeURIComponent(id)}/${encodeURIComponent(patientId)}`;
+  });
+  const first = menu.querySelector(".fp-item");
+  if (first) first.focus();
+}
+
 export function initFormPicker(contentEl, { getStaff }) {
   // Capture phase, so the old "coming soon" handlers never run
   contentEl.addEventListener("click", (e) => {
+    const taskBtn = e.target.closest("[data-task-picker]");
+    if (taskBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (menu && anchor === taskBtn) { closeFormPicker(); return; }
+      taskBtn.setAttribute("aria-haspopup", "true");
+      openTasks(taskBtn, getStaff());
+      return;
+    }
     const create = e.target.closest("[data-create]");
     const tile = create ? null : e.target.closest(".doc-tile[data-soon]");
     const trigger = create || tile;

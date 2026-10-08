@@ -531,7 +531,7 @@ function barHtml(p, today = [], pre = null) {
       <div class="pb-actions">
         ${roundLink(tel && `tel:${tel}`, "phone", "Call", "No mobile number on file")}
         ${roundLink(tel && `sms:${tel}`, "sms", "SMS", "No mobile number on file")}
-        ${roundLink(p.email && `mailto:${p.email}`, "mail", "Email", "No email address on file")}
+        <button type="button" class="round-btn" data-task-picker="patient" data-email="${escapeHtml(p.email || "")}" aria-label="Email" title="Email">${ICONS.mail}</button>
         <button type="button" class="round-btn" data-action="add-reminder" aria-label="Add reminder" title="Add reminder">${ICONS.bell}</button>
         <button type="button" class="btn-ghost sm pb-edit">${ICONS.edit}<span>Edit</span></button>
       </div>
