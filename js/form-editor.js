@@ -1,8 +1,11 @@
-import { categoryLabel, getFormTemplate, saveFormTemplate, listFormTemplates, getLetterhead, saveLetterhead } from "./form-templates.js";
+import {
+  categoryLabel, getFormTemplate, getFormVersion, saveFormTemplate, publishFormTemplate,
+  formSnapshot, listFormTemplates, getLetterhead, saveLetterhead,
+} from "./form-templates.js";
 import {
   esc, svg, ICONS, FIELD_TYPES, FIELD_GROUPS, CHOICE_TYPES, FILLS, FILLS_FOR,
   createField, normaliseField, renderField, fieldSettings, applyInput, applyClick,
-  calcStatusHtml, canRequire, hasLabel, hasHelp,
+  calcStatusHtml, checkFormula, canRequire, hasLabel, hasHelp, watermarkHtml,
 } from "./form-fields.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { DEFAULT_LETTERHEAD, letterheadHtml, openLetterheadDialog } from "./form-letterhead.js";
@@ -17,6 +20,9 @@ const UI = {
 };
 
 const FORM = "__form"; // "selected" value meaning the form settings panel is open
+const LAYOUT_ONLY = ["text_block", "space", "letterhead", "watermark"];
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const fmtDate = (d) => d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" });
 
 function newId() {
   const r = (window.crypto && crypto.randomUUID)
@@ -24,7 +30,8 @@ function newId() {
     : Math.random().toString(36).slice(2) + Date.now().toString(36);
   return "f_" + r.slice(0, 10);
 }
-function confirmDialog({ title, message, confirm }) {
+
+function confirmDialog({ title, message, confirm, tone = "danger" }) {
   return new Promise((resolve) => {
     let result = false;
     const dlg = document.createElement("dialog");
@@ -34,7 +41,7 @@ function confirmDialog({ title, message, confirm }) {
         <div class="lh-dialog-head"><h3>${esc(title)}</h3><p>${esc(message)}</p></div>
         <div class="lh-actions">
           <button type="button" class="lh-btn is-quiet" data-act="no">Cancel</button>
-          <button type="button" class="lh-btn is-danger" data-act="yes">${esc(confirm)}</button>
+          <button type="button" class="lh-btn ${tone === "danger" ? "is-danger" : "is-primary"}" data-act="yes">${esc(confirm)}</button>
         </div>
       </div>`;
     dlg.addEventListener("click", (e) => {
@@ -84,8 +91,16 @@ export async function mountFormEditor(container, { templateId, staff }) {
   let letterhead = DEFAULT_LETTERHEAD;
   let dirty = false, saving = false, saveTimer = null;
 
+  // Publishing
+  let status = tpl.status;
+  let version = tpl.version;
+  let publishedAt = tpl.publishedAt || null;
+  let publishedSig = version > 0 ? null : ""; // null = still loading the published copy
+  let publishing = false;
+
   const ctx = (live) => ({ live, fields, consentForms, letterhead, calcValues: null });
   const current = () => fields.find((f) => f.id === sel) || null;
+  const signature = () => JSON.stringify(formSnapshot({ name, fields, settings }));
 
   root.innerHTML = `
     ${back}
@@ -94,13 +109,17 @@ export async function mountFormEditor(container, { templateId, staff }) {
         <input class="fe-name" data-role="name" maxlength="120" aria-label="Form name" value="${esc(name)}" />
         <div class="fe-sub">
           <span>${esc(categoryLabel(tpl.category))}</span>
-          <span class="fb-pill ${tpl.status === "live" ? "is-live" : "is-draft"}">${tpl.status === "live" ? "Live" : "Draft"}</span>
+          <span class="fb-pill" data-role="pill"></span>
           <span class="fe-state" data-role="state">All changes saved</span>
         </div>
       </div>
-      <div class="pt-tabs fe-modes" role="group" aria-label="View">
-        <button type="button" data-mode="build" class="active">Build</button>
-        <button type="button" data-mode="preview">Preview</button>
+      <div class="fe-top-actions">
+        <div class="pt-tabs fe-modes" role="group" aria-label="View">
+          <button type="button" data-mode="build" class="active">Build</button>
+          <button type="button" data-mode="preview">Preview</button>
+        </div>
+        <button type="button" class="btn-ghost fe-savenow" data-act="save-now" data-role="savenow" disabled>Save draft</button>
+        <button type="button" class="btn-primary fe-publish" data-act="publish" data-role="publish">Publish</button>
       </div>
     </div>
     <div class="fe-shell is-build" data-role="shell">
@@ -139,11 +158,14 @@ export async function mountFormEditor(container, { templateId, staff }) {
       s === "dirty" ? "Unsaved changes" :
       s === "error" ? `${esc(msg || "Couldn't save.")} <button type="button" class="fe-retry" data-act="retry">Try again</button>` :
       "All changes saved";
+    const sn = root.querySelector('[data-role="savenow"]');
+    if (sn) { sn.disabled = s === "saved" || s === "saving"; sn.textContent = s === "saving" ? "Saving…" : s === "saved" ? "Saved" : "Save draft"; }
   }
 
   function changed() {
     dirty = true;
     setState("dirty");
+    renderPublish();
     clearTimeout(saveTimer);
     saveTimer = setTimeout(flush, 900);
   }
@@ -168,7 +190,12 @@ export async function mountFormEditor(container, { templateId, staff }) {
     }
   }
 
-  const onBeforeUnload = (e) => { if (dirty || saving) { e.preventDefault(); e.returnValue = ""; } };
+  async function settle() {
+    clearTimeout(saveTimer);
+    while (saving) await wait(100);
+  }
+
+  const onBeforeUnload = (e) => { if (dirty || saving || publishing) { e.preventDefault(); e.returnValue = ""; } };
   const onHashChange = () => {
     if (root.isConnected) return;
     flush();
@@ -178,7 +205,127 @@ export async function mountFormEditor(container, { templateId, staff }) {
   window.addEventListener("beforeunload", onBeforeUnload);
   window.addEventListener("hashchange", onHashChange);
 
+  /* ---------- Publishing ---------- */
+  function renderPublish() {
+    const live = status === "live";
+    const pill = $('[data-role="pill"]');
+    pill.className = "fb-pill " + (live ? "is-live" : "is-draft");
+    pill.textContent = live ? `Live · version ${version}` : "Draft";
+
+    const btn = $('[data-role="publish"]');
+    let label = "Publish", disabled = false, title = "";
+    if (publishing) { label = "Publishing…"; disabled = true; }
+    else if (!live) { label = "Publish"; title = "Put this form on the patient dashboard"; }
+    else if (publishedSig === null) { label = "Publish changes"; disabled = true; }
+    else if (signature() !== publishedSig) { label = "Publish changes"; title = "Staff are still using version " + version; }
+    else { label = "Published"; disabled = true; title = "Staff are using the latest version"; }
+    btn.textContent = label;
+    btn.disabled = disabled;
+    btn.title = title;
+    btn.classList.toggle("is-done", label === "Published");
+  }
+
+  // The first thing that would stop the form working for staff, or null
+  function publishProblem() {
+    if (!fields.some((f) => !LAYOUT_ONLY.includes(f.type))) {
+      return { msg: "Add at least one question before publishing." };
+    }
+    for (const f of fields) {
+      const label = String(f.label || "").trim();
+      if (hasLabel(f.type) && f.type !== "text_block" && !label) {
+        return { id: f.id, msg: "Every question needs a name. Add one to the highlighted question." };
+      }
+      if (CHOICE_TYPES.includes(f.type) && !f.options.some((o) => String(o).trim())) {
+        return { id: f.id, msg: `“${label}” needs at least one answer choice.` };
+      }
+      if (f.type === "calculation") {
+        const c = checkFormula(f, fields);
+        if (!c.ok) return { id: f.id, msg: `“${label || "Calculation"}”: ${c.error}` };
+      }
+      if (f.type === "consent_status" && !f.consentFormId) {
+        return { id: f.id, msg: "Choose which consent form the Consent check looks for." };
+      }
+    }
+    return null;
+  }
+
+  async function publish() {
+    if (publishing) return;
+    const problem = publishProblem();
+    if (problem) {
+      if (problem.id) {
+        setMode("build");
+        sel = problem.id;
+        renderStage();
+        renderInspector();
+        const el = stage.querySelector(`[data-id="${problem.id}"]`);
+        if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+      showToast(problem.msg);
+      return;
+    }
+    if (status === "live") {
+      const ok = await confirmDialog({
+        title: "Publish these changes?",
+        message: `Staff will use version ${version + 1} straight away. Forms already filled in keep the version they were filled from.`,
+        confirm: "Publish changes",
+        tone: "primary",
+      });
+      if (!ok || !root.isConnected) return;
+    }
+
+    publishing = true;
+    renderPublish();
+    await settle();
+    const sigAtPublish = signature();
+    try {
+      version = await publishFormTemplate(templateId, { name, fields, settings }, staff, version);
+      status = "live";
+      publishedAt = new Date();
+      publishedSig = sigAtPublish;
+      if (signature() === sigAtPublish) { dirty = false; setState("saved"); }
+      showToast(`Published. Version ${version} is now on the patient dashboard.`);
+    } catch (err) {
+      console.error("Publish failed:", err);
+      showToast(err.code === "conflict" ? err.message
+        : err.code === "permission-denied" ? "Couldn't publish. Check the new Firestore rules for form versions have been published."
+        : err.code ? "Couldn't publish. Check your connection and try again." : err.message);
+    } finally {
+      publishing = false;
+      if (root.isConnected) { renderPublish(); if (sel === FORM) renderInspector(); }
+    }
+  }
+
+  async function unpublish() {
+    const ok = await confirmDialog({
+      title: "Take this form off the patient dashboard?",
+      message: "Staff won't be able to choose it until you publish it again. It stays here as a draft, and forms already filled in are kept.",
+      confirm: "Unpublish",
+    });
+    if (!ok || !root.isConnected) return;
+    await settle();
+    try {
+      await saveFormTemplate(templateId, { name, fields, settings, status: "draft" }, staff);
+      status = "draft";
+      dirty = false;
+      setState("saved");
+      renderPublish();
+      renderInspector();
+      showToast("Unpublished. It's no longer on the patient dashboard.");
+    } catch (err) {
+      console.error("Unpublish failed:", err);
+      showToast("Couldn't unpublish. Try again.");
+    }
+  }
+
   /* ---------- Page ---------- */
+  function setMode(m) {
+    mode = m;
+    root.querySelectorAll("[data-mode]").forEach((b) => b.classList.toggle("active", b.dataset.mode === m));
+    shell.classList.toggle("is-build", m === "build");
+    shell.classList.toggle("is-preview", m === "preview");
+  }
+
   function updateCalcs() {
     const values = evaluateCalcs(fields, (f) => {
       const el = stage.querySelector(`input[data-in="${f.id}"]`);
@@ -189,20 +336,6 @@ export async function mountFormEditor(container, { templateId, staff }) {
       const f = fields.find((x) => x.id === id);
       if (out && f) out.textContent = formatCalc(values[id], f) || "—";
     });
-  }
-
-  function watermarkHtml() {
-    const wm = fields.find((f) => f.type === "watermark");
-    if (!wm) return "";
-    const size = esc(wm.size || "large");
-    const style = `opacity:${(Number(wm.opacity) || 10) / 100};transform:rotate(${Number(wm.angle) || 0}deg)`;
-    let inner = "";
-    if (wm.source === "logo") {
-      if (letterhead.logo) inner = `<img class="is-${size}" src="${esc(letterhead.logo)}" alt="" style="${style}" />`;
-    } else if (String(wm.text || "").trim()) {
-      inner = `<span class="is-${size}" style="${style}">${esc(wm.text)}</span>`;
-    }
-    return inner ? `<div class="fe-wm" aria-hidden="true">${inner}</div>` : "";
   }
 
   function renderStage() {
@@ -242,7 +375,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
     stage.innerHTML = `
       <div class="fe-sheet" data-role="sheet">
-        ${watermarkHtml()}
+        ${watermarkHtml(fields, letterhead)}
         ${lhBlock}
         <h3 class="fe-title">${esc(name || "Untitled form")}</h3>
         <div class="fe-fields" data-role="fields">${items || empty}</div>
@@ -257,8 +390,18 @@ export async function mountFormEditor(container, { templateId, staff }) {
       note ? `<small class="fe-note">${note}</small>` : ""}</label>`;
 
   function renderFormSettings() {
+    const live = status === "live";
     insp.innerHTML = `
       <div class="fe-insp-head">${svg(ICONS.letterhead)}<span>Form settings</span></div>
+      <div class="fe-insp-field">
+        <span class="fe-insp-label">Patient dashboard</span>
+        ${live
+          ? `<small class="fe-note">Version ${version} is available to staff${publishedAt ? `, published ${esc(fmtDate(publishedAt))}` : ""}.</small>
+             <button type="button" class="lh-btn" data-act="unpublish">Unpublish</button>`
+          : `<small class="fe-note">${version
+              ? "Not on the patient dashboard. Publish to make it available again."
+              : "Not published yet. Click Publish at the top when it's ready."}</small>`}
+      </div>
       <label class="fe-check"><input type="checkbox" data-s="showLetterhead"${settings.showLetterhead !== false ? " checked" : ""} /> Show the letterhead at the top</label>
       <div class="fe-insp-field">
         <span class="fe-insp-label">Letterhead</span>
@@ -320,7 +463,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     toastEl.innerHTML = `<span>${esc(message)}</span>${undo ? '<button type="button">Undo</button>' : ""}`;
     if (undo) toastEl.querySelector("button").addEventListener("click", () => { hideToast(); undo(); });
     root.appendChild(toastEl);
-    toastTimer = setTimeout(hideToast, undo ? 7000 : 4000);
+    toastTimer = setTimeout(hideToast, undo ? 7000 : 5000);
   }
 
   function select(id) {
@@ -399,15 +542,14 @@ export async function mountFormEditor(container, { templateId, staff }) {
     });
   }
 
-    async function deleteForm() {
+  async function deleteForm() {
     const ok = await confirmDialog({
       title: `Delete “${name || "Untitled form"}”?`,
       message: "It will be removed from the form list and from the patient dashboard. Forms already filled in for patients are kept.",
       confirm: "Delete form",
     });
     if (!ok || !root.isConnected) return;
-    clearTimeout(saveTimer);
-    while (saving) await new Promise((r) => setTimeout(r, 100));
+    await settle();
     try {
       await saveFormTemplate(templateId, { name, fields, settings, status: "archived" }, staff);
       dirty = false;
@@ -422,14 +564,9 @@ export async function mountFormEditor(container, { templateId, staff }) {
   /* ---------- Events ---------- */
   root.addEventListener("click", (e) => {
     const m = e.target.closest("[data-mode]");
-    if (m) {
-      mode = m.dataset.mode;
-      root.querySelectorAll("[data-mode]").forEach((b) => b.classList.toggle("active", b === m));
-      shell.classList.toggle("is-build", mode === "build");
-      shell.classList.toggle("is-preview", mode === "preview");
-      renderStage();
-      return;
-    }
+    if (m) { setMode(m.dataset.mode); renderStage(); return; }
+    if (e.target.closest('[data-act="publish"]')) { publish(); return; }
+    if (e.target.closest('[data-act="save-now"]')) { dirty = true; flush(); return; }
     if (e.target.closest('[data-act="retry"]')) { dirty = true; flush(); return; }
     const add = e.target.closest("[data-add]");
     if (add) addField(add.dataset.add);
@@ -538,6 +675,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   insp.addEventListener("click", (e) => {
     if (e.target.closest('[data-act="edit-lh"]')) { editLetterhead(); return; }
     if (e.target.closest('[data-act="delete-form"]')) { deleteForm(); return; }
+    if (e.target.closest('[data-act="unpublish"]')) { unpublish(); return; }
     const f = current();
     if (!f) return;
 
@@ -662,6 +800,15 @@ export async function mountFormEditor(container, { templateId, staff }) {
   /* ---------- Start ---------- */
   renderStage();
   renderInspector();
+  renderPublish();
+
+  // The published copy, to tell whether there are unpublished changes
+  if (version > 0) {
+    getFormVersion(templateId, version)
+      .then((v) => { publishedSig = v ? JSON.stringify(formSnapshot(v)) : ""; })
+      .catch((err) => { console.warn("Couldn't load the published version:", err); publishedSig = ""; })
+      .finally(() => { if (root.isConnected) renderPublish(); });
+  }
 
   getLetterhead()
     .then((lh) => {

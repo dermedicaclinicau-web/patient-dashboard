@@ -9,6 +9,8 @@ import { isRecorderBusy, suspendRecorder } from "./recorder.js";
 import { initSoapPanel, closeSoapPanel, hasUnsavedNotes } from "./soap-panel.js";
 import { confirmDialog } from "./dialog.js";
 import { mountFormBuilder } from "./form-builder.js";
+import { mountFormFill } from "./form-fill.js";
+import { initFormPicker, closeFormPicker } from "./form-picker.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -46,6 +48,7 @@ const els = {
 };
 
 let currentStaff = null;
+initFormPicker(els.content, { getStaff: () => currentStaff });
 
 function showView(name) {
   for (const [key, el] of Object.entries(views)) el.hidden = key !== name;
@@ -199,6 +202,7 @@ const PAGES = {
     templateId: param,
   }),
   patient: (el, id) => mountPatientDashboard(el, id, { staff: currentStaff, onBack: goBack }),
+  fill: (el, param) => mountFormFill(el, param, { staff: currentStaff }),
 };
 
 function router() {
@@ -213,7 +217,7 @@ function router() {
   let param = "";
   try { param = decodeURIComponent(rest.join("/")); } catch { /* malformed URL, ignore */ }
 
-  const navKey = page === "patient" ? "patients" : page;
+  const navKey = page === "patient" || page === "fill" ? "patients" : page;
   els.navItems.forEach((a) => {
     const active = a.dataset.page === navKey;
     a.classList.toggle("active", active);
@@ -254,6 +258,7 @@ watchAuth((staff) => {
     closeStartOfDay();
     suspendRecorder(); // stops the mic; any audio stays on this device for upload at next login
     closeSoapPanel();
+    closeFormPicker();
     if (els.profileDialog.open) els.profileDialog.close();
     if (location.hash) history.replaceState(null, "", location.pathname + location.search);
     resetLogin();

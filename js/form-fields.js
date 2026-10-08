@@ -522,3 +522,19 @@ export function applyClick(f, target) {
   }
   return false;
 }
+
+/* ===================== Watermark behind the page ===================== */
+
+export function watermarkHtml(fields, letterhead) {
+  const wm = (fields || []).find((f) => f.type === "watermark");
+  if (!wm) return "";
+  const size = esc(wm.size || "large");
+  const style = `opacity:${(Number(wm.opacity) || 10) / 100};transform:rotate(${Number(wm.angle) || 0}deg)`;
+  let inner = "";
+  if (wm.source === "logo") {
+    if (letterhead && letterhead.logo) inner = `<img class="is-${size}" src="${esc(letterhead.logo)}" alt="" style="${style}" />`;
+  } else if (String(wm.text || "").trim()) {
+    inner = `<span class="is-${size}" style="${style}">${esc(wm.text)}</span>`;
+  }
+  return inner ? `<div class="fe-wm" aria-hidden="true">${inner}</div>` : "";
+}
