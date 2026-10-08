@@ -2,6 +2,12 @@ import { db, auth } from "./firebase-config.js";
 import { doc, getDoc, updateDoc, collection, query, where, getDocs, addDoc }
 from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { SECTIONS, parseSoap, assembleSoap, transcriptHtml, cleanPlaceholders } from "./soap.js";
+import {
+  readSidecar, buildSidecar, planFromSidecar, planToSidecarPlan, planToText, priorCategories,
+  planCardHtml, fieldHtml, getPlanValue, setPlanValue, refFrom, catKey,
+} from "./plan-editor.js";
+import { fetchTranscriptRecords, parseRecordDate } from "./transcripts.js";
+
 import { callApi } from "./appointments.js";
 import { escapeHtml, showToast, toDateKey } from "./utils.js";
 
@@ -92,6 +98,26 @@ function ensureDom() {
 
   tab.addEventListener("click", () => setMode("open"));
   panel.addEventListener("click", onClick);
+
+    // Treatment Plan card: finish an inline edit, category drop-down, keyboard
+  panel.addEventListener("focusout", (e) => {
+    if (e.target.matches && e.target.matches("textarea.pe-input")) commitPlanEdit(e.target);
+  });
+  panel.addEventListener("change", (e) => {
+    if (!e.target.matches("select.pe-cat") || !current || !current.plan) return;
+    const c = current.plan.concerns[Number(e.target.dataset.ci)];
+    if (c) { c.concern_category = e.target.value; markDirty(); rerenderPlan(); }
+  });
+  panel.addEventListener("keydown", (e) => {
+    if (e.target.matches && e.target.matches("textarea.pe-input") && e.key === "Escape") {
+      e.target.value = getPlanValue(current.plan, refFrom(e.target)); // cancel
+      e.target.blur();
+      return;
+    }
+    const field = e.target.closest && e.target.closest(".pe-field");
+    if (field && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); startPlanEdit(field); }
+  });
+
   panel.addEventListener("input", (e) => {
     if (e.target.matches("textarea")) autosize(e.target);
     if (e.target.matches("textarea[data-key], textarea[data-extra]")) markDirty();
@@ -128,7 +154,8 @@ function updateTab() {
 
 function autosize(ta) {
   ta.style.height = "auto";
-  ta.style.height = `${Math.max(ta.scrollHeight, 72)}px`;
+  const min = ta.classList.contains("pe-input") ? 0 : 72; // inline plan fields stay compact
+  ta.style.height = `${Math.max(ta.scrollHeight, min)}px`;
 }
 
 function autosizeAll() {
@@ -152,10 +179,15 @@ async function load(id) {
     const original = {};
     SECTIONS.forEach((s) => { original[s.key] = cleanPlaceholders(parsed.sections[s.key]); });
 
-    current = { id, data, parsed, original, extras: parsed.extras.map((x) => ({ ...x })), dirty: false };
+    const sidecarObj = readSidecar(data["Gemini SOAP"]);
+    current = {
+      id, data, parsed, original, extras: parsed.extras.map((x) => ({ ...x })), dirty: false,
+      sidecarObj, plan: planFromSidecar(sidecarObj), priorCats: null,
+    };
     try { sessionStorage.setItem(STORE_KEY, JSON.stringify({ id, mode })); } catch { /* ignore */ }
     render();
     loadPersonalNotes();
+    loadPriorCategories();
   } catch (err) {
     if (!current || current.id !== id) return;
     console.error("Loading notes failed:", err);
@@ -234,6 +266,10 @@ function render() {
 }
 
 function sectionHtml(s, value) {
+  // Structured Treatment Plan card when the record has the recorder's sidecar
+  if (s.key === "plan" && current && current.plan) {
+    return `<section class="sp-card sp-tone-green full" data-plan-card>${planCardHtml(current.plan, current.priorCats)}</section>`;
+  }
   const planActions = s.key === "plan" ? `
     <span class="sp-card-actions">
       <button type="button" class="sp-mini" data-soon="Update email from plan">Update email from plan</button>
@@ -262,6 +298,13 @@ function markDirty() {
 /* ===================== Actions ===================== */
 
 async function onClick(e) {
+  // Treatment Plan card: click a line to edit, or add/remove items
+  if (current && current.plan) {
+    const field = e.target.closest(".pe-field");
+    if (field) { startPlanEdit(field); return; }
+    const pe = e.target.closest("[data-pe]");
+    if (pe) { planAction(pe); return; }
+  }
   const soon = e.target.closest("[data-soon]");
   if (soon) { showToast(`${soon.dataset.soon}: coming soon`); return; }
 
@@ -306,10 +349,24 @@ async function save(status, btn) {
     return { heading: x.heading, text: ta ? ta.value : x.text };
   });
 
-  // If the plan or email text changed, the recorder's structured sidecar would be out of date: drop it
   const changed = (k) => String(values[k] || "").trim() !== String(current.original[k] || "").trim();
-  const keepSidecar = !changed("plan") && !changed("email");
-  const soap = assembleSoap(current.parsed, values, extras, { keepSidecar });
+  let sidecar = "";
+  let keepSidecar = false;
+
+  if (current.plan) {
+    // Structured plan: rebuild BOTH the plan text and a matching sidecar
+    panel.querySelectorAll("textarea.pe-input").forEach(commitPlanEdit);
+    values.plan = planToText(current.plan);
+    const sc = { plan: planToSidecarPlan(current.plan) };
+    const oldEmail = current.sidecarObj && Array.isArray(current.sidecarObj.email) ? current.sidecarObj.email : null;
+    // Keep the recorder's email items only if the email text wasn't edited (otherwise they'd be out of date)
+    sidecar = buildSidecar(oldEmail && !changed("email") ? { email: oldEmail, plan: sc.plan } : sc);
+  } else {
+    // Plain-text plan: if the plan or email text changed, the old sidecar would be out of date, so drop it
+    keepSidecar = !changed("plan") && !changed("email");
+  }
+
+  const soap = assembleSoap(current.parsed, values, extras, { keepSidecar, sidecar });
 
   const now = new Date();
   const update = {
@@ -335,6 +392,8 @@ async function save(status, btn) {
     SECTIONS.forEach((s) => { current.original[s.key] = cleanPlaceholders(current.parsed.sections[s.key]); });
     current.extras = current.parsed.extras.map((x) => ({ ...x }));
     current.dirty = false;
+    current.sidecarObj = readSidecar(soap);
+    current.plan = planFromSidecar(current.sidecarObj);
     render();
     loadPersonalNotes();
     updateTab();
@@ -478,5 +537,104 @@ async function doDelete(btn) {
     showToast(messages[err.code] || "Couldn't delete. Please try again.");
     btn.disabled = false;
     btn.innerHTML = `${ICONS.trash}Delete permanently`;
+  }
+}
+
+/* ===================== Treatment Plan card ===================== */
+
+function rerenderPlan() {
+  const card = panel.querySelector("[data-plan-card]");
+  if (card && current && current.plan) card.innerHTML = planCardHtml(current.plan, current.priorCats);
+}
+
+function startPlanEdit(field) {
+  if (!current || !current.plan) return;
+  const ref = refFrom(field);
+  const ta = document.createElement("textarea");
+  ta.className = "pe-input";
+  ta.dataset.pf = ref.pf;
+  if (ref.ci !== undefined) ta.dataset.ci = ref.ci;
+  if (ref.ti !== undefined) ta.dataset.ti = ref.ti;
+  ta.placeholder = field.dataset.ph || "";
+  ta.value = getPlanValue(current.plan, ref);
+  field.replaceWith(ta);
+  autosize(ta);
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+}
+
+function commitPlanEdit(ta) {
+  if (!current || !current.plan || ta.dataset.done) return;
+  ta.dataset.done = "1";
+  const ref = refFrom(ta);
+  const before = String(getPlanValue(current.plan, ref)).trim();
+  const after = ta.value.trim();
+  if (after !== before) { setPlanValue(current.plan, ref, after); markDirty(); }
+  const tpl = document.createElement("template");
+  tpl.innerHTML = fieldHtml(ref, after).trim();
+  if (ta.isConnected) ta.replaceWith(tpl.content.firstElementChild);
+}
+
+function planAction(btn) {
+  const plan = current.plan;
+  const open = panel.querySelector("textarea.pe-input");
+  if (open) commitPlanEdit(open);
+  const action = btn.dataset.pe;
+
+  if (action === "remove-concern") {
+    const i = Number(btn.dataset.ci);
+    const c = plan.concerns[i];
+    const name = `concern ${String.fromCharCode(65 + i)}${c && c.concern_category ? ` (${c.concern_category})` : ""}`;
+    if (!confirm(`Remove ${name} from the plan?`)) return;
+    plan.concerns.splice(i, 1);
+  } else if (action === "add-concern") {
+    plan.concerns.push({ description: "", concern_category: "", area: "", treatment: "", frequency_interval: "", quote: "", comments: "" });
+    if (plan.intent !== "new_plan") plan.intent = "new_plan";
+  } else if (action === "remove-step") {
+    plan.timeline.splice(Number(btn.dataset.ti), 1);
+  } else if (action === "add-step") {
+    plan.timeline.push({ date: "", treatment: "", pretreatment_instructions: "" });
+  } else {
+    return;
+  }
+
+  markDirty();
+  rerenderPlan();
+
+  // Jump straight into editing the new item
+  if (action === "add-concern") {
+    const f = panel.querySelector(`.pe-field[data-pf="description"][data-ci="${plan.concerns.length - 1}"]`);
+    if (f) startPlanEdit(f);
+  }
+  if (action === "add-step") {
+    const f = panel.querySelector(`.pe-field[data-pf="date"][data-ti="${plan.timeline.length - 1}"]`);
+    if (f) startPlanEdit(f);
+  }
+}
+
+// NEW vs UPDATE: categories this patient already had a plan for in EARLIER consultations
+async function loadPriorCategories() {
+  if (!current || !current.plan) return;
+  const id = current.id;
+  const d = current.data;
+  const thisDate = parseRecordDate(d["Record Date and Time"]);
+
+  try {
+    const records = await fetchTranscriptRecords({
+      id: String(d["Patient Doc ID"] || ""), pttId: String(d["Patient ID"] || ""),
+      name: String(d["Patient Name"] || ""), firstName: "", lastName: "",
+    });
+    if (!current || current.id !== id) return;
+
+    const cats = new Set();
+    records.forEach((r) => {
+      if (r.id === id) return;
+      if (thisDate && r.date && r.date >= thisDate) return; // only consultations before this one
+      priorCategories(r.soap).forEach((c) => cats.add(catKey(c)));
+    });
+    current.priorCats = cats;
+    rerenderPlan();
+  } catch (err) {
+    console.warn("Couldn't work out NEW / UPDATE badges:", err);
   }
 }

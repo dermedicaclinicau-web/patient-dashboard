@@ -60,7 +60,7 @@ export function parseSoap(raw) {
 }
 
 // Edited values -> SOAP text in the recorder's format
-export function assembleSoap(parsed, values, extras, { keepSidecar }) {
+export function assembleSoap(parsed, values, extras, { keepSidecar, sidecar }) {
   const parts = [];
   if (parsed.preamble) parts.push(parsed.preamble);
 
@@ -77,7 +77,8 @@ export function assembleSoap(parsed, values, extras, { keepSidecar }) {
   });
 
   let out = parts.join("\n\n");
-  if (keepSidecar && parsed.sidecar) out += "\n\n" + parsed.sidecar;
+  if (sidecar) out += "\n\n" + sidecar;                         // freshly rebuilt (plan edited in the card)
+  else if (keepSidecar && parsed.sidecar) out += "\n\n" + parsed.sidecar;
   return out.trim();
 }
 
