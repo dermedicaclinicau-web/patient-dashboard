@@ -68,7 +68,11 @@ function mountLibrary(container, { isAdmin, staff }) {
         <h2>Form Builder</h2>
         <p class="muted">Consent forms, treatment records and printables for the clinic.</p>
       </div>
-      ${isAdmin ? `<button type="button" class="btn-primary fb-new" data-act="new">${svg(ICONS.plus)}New form</button>` : ""}
+      ${isAdmin ? `
+      <div class="fb-head-actions">
+        <a class="btn-ghost fb-imgbank" href="#/image-bank">${svg(ICONS.image)}Image Bank</a>
+        <button type="button" class="btn-primary fb-new" data-act="new">${svg(ICONS.plus)}New form</button>
+      </div>` : ""}
     </div>
     <div class="fb-layout">
       <nav class="fb-cats" data-role="cats" aria-label="Form categories"></nav>
