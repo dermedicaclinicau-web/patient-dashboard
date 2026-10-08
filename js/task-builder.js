@@ -95,7 +95,10 @@ export async function mountTaskTypes(main, { staff } = {}) {
         <h3 class="tm-h">Task types</h3>
         <p class="muted tm-sub">Set a task up once, then anyone can run it from Create new task.</p>
       </div>
-      <button type="button" class="ff-btn is-primary" data-act="new">${I.plus}<span>New task type</span></button>
+      <div class="ff-bar-actions">
+        <button type="button" class="ff-btn" data-act="starters">Add starter tasks</button>
+        <button type="button" class="ff-btn is-primary" data-act="new">${I.plus}<span>New task type</span></button>
+      </div>
     </div>
     <div class="pt-tabs tb-tabs" role="group" aria-label="Show">
       <button type="button" data-tab="all" class="active">All</button>
