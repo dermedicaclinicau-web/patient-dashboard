@@ -7,10 +7,9 @@ import { letterheadHtml, DEFAULT_LETTERHEAD } from "./form-letterhead.js";
 import { getPatient, patientIds } from "./patients.js";
 import { saveSubmission, getSubmission, listSubmissionsForPatient } from "./form-submissions.js";
 import { confirmDialog } from "./dialog.js";
-import { showToast, formatDobLong } from "./utils.js";
+import { showToast, formatDobLong, formatMobile } from "./utils.js";
 
 const LAYOUT = ["text_block", "space", "letterhead", "watermark"];
-const TEXT_TYPES = ["short_text", "long_text", "email", "date", "record_date"];
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -174,11 +173,15 @@ function readField(f, w, { pads, calc, consent }) {
     }
     case "signature": {
       const p = pads[f.id];
-      return p && !p.isEmpty() ? "signed" : "";
+      if (!p || p.isEmpty()) return "";
+      const n = w.querySelector("[data-sig-name]");
+      const d = w.querySelector("[data-sig-date]");
+      return { signed: true, name: n ? n.value.trim().slice(0, 120) : "", date: d ? d.value : todayIso() };
     }
     case "patient": {
-      const ins = $all(w, "input");
-      return { name: ins[0] ? ins[0].value : "", dob: ins[1] ? ins[1].value : "", address: ins[2] ? ins[2].value : "" };
+      const out = {};
+      $all(w, "[data-part]").forEach((el) => { out[el.dataset.part] = el.value; });
+      return out;
     }
     case "consent_status":
       return consent[f.id] || { found: false, date: "", submissionId: "", name: "" };
@@ -236,12 +239,9 @@ function writeField(f, w, v) {
       if (out) out.textContent = formatCalc(v, f) || "—";
       break;
     }
-    case "patient": {
-      const ins = $all(w, "input");
-      const d = v || {};
-      set(ins[0], d.name); set(ins[1], d.dob); set(ins[2], d.address);
+    case "patient":
+      $all(w, "[data-part]").forEach((el) => { el.value = (v && v[el.dataset.part]) || ""; });
       break;
-    }
   }
 }
 
@@ -337,13 +337,23 @@ export async function mountFormFill(container, param, { staff } = {}) {
   let calc = {};
   let dirty = false, saving = false;
 
-  // Signature pads; photos come in the next update
+  // Signature pads (with name + date), and photos (coming next)
   fields.forEach((f) => {
     const w = wrap(f.id);
     if (!w) return;
     if (f.type === "signature") {
       const host = w.querySelector(".fe-sig");
-      if (host) pads[f.id] = signaturePad(host);
+      if (!host) return;
+      pads[f.id] = signaturePad(host);
+      if (f.showNameDate !== false) {
+        const fixed = f.signer === "practitioner" ? ((staff && staff.name) || "")
+          : (f.signer || "patient") === "patient" ? (patient.name || "") : "";
+        host.insertAdjacentHTML("afterend", `
+          <div class="sig-meta">
+            <label><small>Name</small><input class="fe-in" type="text" data-sig-name maxlength="120" value="${esc(fixed)}"${fixed ? " readonly" : ' placeholder="Name of the person signing"'} /></label>
+            <label><small>Date</small><input class="fe-in" type="date" data-sig-date value="${todayIso()}" readonly /></label>
+          </div>`);
+      }
     }
     if (f.type === "photo") {
       const el = w.querySelector(".fe-photo");
@@ -363,6 +373,14 @@ export async function mountFormFill(container, param, { staff } = {}) {
     "today": todayIso(),
     "staff.name": (staff && staff.name) || "",
   };
+  const PART_VALUES = {
+    name: patient.name,
+    dob: formatDobLong(patient.dobKey) || patient.dob,
+    mobile: patient.mobile ? formatMobile(patient.mobile) : "",
+    email: patient.email,
+    address: patient.address,
+    pttId: patient.pttId || patient.id,
+  };
   fields.forEach((f) => {
     const w = wrap(f.id);
     if (!w) return;
@@ -371,9 +389,9 @@ export async function mountFormFill(container, param, { staff } = {}) {
       if (el) el.value = P[f.fill];
     }
     if (f.type === "patient") {
-      const ins = $all(w, "input");
-      [patient.name, formatDobLong(patient.dobKey) || patient.dob, patient.address].forEach((val, i) => {
-        if (ins[i]) { ins[i].value = val || ""; ins[i].readOnly = true; }
+      $all(w, "[data-part]").forEach((el) => {
+        el.value = PART_VALUES[el.dataset.part] || "";
+        el.readOnly = true;
       });
     }
   });
@@ -427,6 +445,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
 
   function problems() {
     const out = [];
+    const t = todayIso();
     fields.forEach((f) => {
       if (LAYOUT.includes(f.type) || f.type === "photo") return;
       const w = wrap(f.id);
@@ -437,9 +456,16 @@ export async function mountFormFill(container, param, { staff } = {}) {
         return;
       }
       if (f.type === "email" && v && !EMAIL_RE.test(v)) out.push({ id: f.id, msg: "Enter a valid email address." });
+      if (f.type === "date" && v) {
+        if (f.range === "past" && v > t) out.push({ id: f.id, msg: "Choose today or an earlier date." });
+        if (f.range === "future" && v < t) out.push({ id: f.id, msg: "Choose today or a later date." });
+      }
       if (f.type === "number" && v !== null) {
         if (f.min !== null && f.min !== undefined && v < Number(f.min)) out.push({ id: f.id, msg: `Enter ${f.min} or more.` });
         else if (f.max !== null && f.max !== undefined && v > Number(f.max)) out.push({ id: f.id, msg: `Enter ${f.max} or less.` });
+      }
+      if (f.type === "signature" && v && f.showNameDate !== false && !v.name) {
+        out.push({ id: f.id, msg: "Add the name of the person signing." });
       }
       if (f.type === "consent_status" && f.block && !(consent[f.id] && consent[f.id].found)) {
         out.push({ id: f.id, msg: "There's no valid consent on file, so this form can't be saved yet." });
@@ -594,9 +620,13 @@ export async function mountFormRecord(container, submissionId) {
     if (f.type === "signature") {
       const host = w.querySelector(".fe-sig");
       const src = sub.signatures[f.id];
-      if (host) host.outerHTML = src && PNG_RE.test(src)
+      const v = sub.answers[f.id];
+      const meta = v && typeof v === "object" && (v.name || v.date)
+        ? `<p class="fe-help fe-help-after">Signed${v.name ? ` by ${esc(v.name)}` : ""}${v.date ? ` on ${esc(niceDate(v.date))}` : ""}</p>`
+        : "";
+      if (host) host.outerHTML = (src && PNG_RE.test(src)
         ? `<img class="sig-img" src="${esc(src)}" alt="Signature" />`
-        : '<div class="fe-sig"><span>Not signed</span></div>';
+        : '<div class="fe-sig"><span>Not signed</span></div>') + meta;
       return;
     }
     if (f.type === "consent_status") {

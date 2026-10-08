@@ -68,6 +68,31 @@ export const FIELD_GROUPS = [
 ];
 
 export const CHOICE_TYPES = ["single_choice", "checkboxes", "checkbox_notes", "dropdown"];
+const LAYOUT_TYPES = ["single_choice", "checkboxes", "checkbox_notes"];
+const PLACEHOLDER_TYPES = ["short_text", "long_text", "email", "number", "dropdown"];
+
+// Which patient details the Patient details block can show
+export const PATIENT_PARTS = [
+  ["name", "Full name"],
+  ["dob", "Date of birth"],
+  ["mobile", "Mobile"],
+  ["email", "Email"],
+  ["address", "Address"],
+  ["pttId", "Patient ID"],
+];
+const PART_KEYS = PATIENT_PARTS.map((p) => p[0]);
+const DEFAULT_PARTS = ["name", "dob", "address"];
+export function patientParts(f) {
+  const keys = Array.isArray(f.parts) && f.parts.length ? f.parts : DEFAULT_PARTS;
+  return PATIENT_PARTS.filter(([k]) => keys.includes(k));
+}
+
+export const SIGNERS = {
+  patient: "Patient",
+  practitioner: "Practitioner",
+  guardian: "Parent or guardian",
+  witness: "Witness",
+};
 
 export const FILLS = {
   "": "Nothing, staff type it",
@@ -110,8 +135,15 @@ function todayIso() {
 export function createField(type, id) {
   const f = { id, type, label: FIELD_TYPES[type].label, help: "", required: false };
   if (CHOICE_TYPES.includes(type)) f.options = ["Option 1", "Option 2"];
+  if (LAYOUT_TYPES.includes(type)) f.layout = "list";
+  if (PLACEHOLDER_TYPES.includes(type)) f.placeholder = type === "dropdown" ? "Choose one" : "";
+  if (["patient", "signature", "record_date"].includes(type)) f.required = true;
+
   switch (type) {
-    case "patient": case "signature": case "record_date": f.required = true; break;
+    case "patient": f.parts = [...DEFAULT_PARTS]; break;
+    case "long_text": f.size = "medium"; break;
+    case "date": f.range = "any"; break;
+    case "signature": f.signer = "patient"; f.showNameDate = true; break;
     case "text_block": f.text = ""; break;
     case "space": f.size = "medium"; break;
     case "number": f.min = null; f.max = null; f.unit = ""; break;
@@ -134,6 +166,7 @@ export function normaliseField(f) {
   if (CHOICE_TYPES.includes(out.type) && !(Array.isArray(out.options) && out.options.length)) out.options = ["Option 1"];
   if (out.type === "sub_checks" && !(Array.isArray(out.groups) && out.groups.length)) out.groups = [{ label: "Option A", subs: [] }];
   if (out.type === "table" && !(Array.isArray(out.columns) && out.columns.length)) out.columns = [{ label: "Column 1", type: "text" }];
+  if (out.type === "patient" && !(Array.isArray(out.parts) && out.parts.length)) out.parts = [...DEFAULT_PARTS];
   return out;
 }
 
@@ -164,9 +197,22 @@ export function cleanField(f) {
   if (CHOICE_TYPES.includes(f.type)) {
     out.options = (Array.isArray(f.options) ? f.options : []).map((o) => clip(o, 200)).slice(0, 50);
   }
+  if (LAYOUT_TYPES.includes(f.type)) out.layout = pick(f.layout, ["list", "columns", "inline"], "list");
+  if (PLACEHOLDER_TYPES.includes(f.type)) out.placeholder = clip(f.placeholder, 100);
   if (FILLS_FOR[f.type] && f.fill && FILLS_FOR[f.type].includes(f.fill)) out.fill = f.fill;
 
   switch (f.type) {
+    case "patient": {
+      const parts = (Array.isArray(f.parts) ? f.parts : []).filter((k) => PART_KEYS.includes(k));
+      out.parts = parts.length ? PART_KEYS.filter((k) => parts.includes(k)) : ["name"];
+      break;
+    }
+    case "long_text": out.size = pick(f.size, ["small", "medium", "large"], "medium"); break;
+    case "date": out.range = pick(f.range, ["any", "past", "future"], "any"); break;
+    case "signature":
+      out.signer = pick(f.signer, Object.keys(SIGNERS), "patient");
+      out.showNameDate = f.showNameDate !== false;
+      break;
     case "text_block": out.text = clip(f.text, 5000); break;
     case "space": out.size = pick(f.size, ["small", "medium", "large"], "medium"); break;
     case "number": out.min = numOrNull(f.min); out.max = numOrNull(f.max); out.unit = clip(f.unit, 20); break;
@@ -260,7 +306,7 @@ export function calcStatusHtml(f, fields) {
 
 /* ===================== Drawing a field on the page ===================== */
 
-// ctx: { live, fields, consentForms, calcValues }
+// ctx: { live, fields, consentForms, letterhead, calcValues }
 export function renderField(f, ctx = {}) {
   const live = !!ctx.live;
   const inert = live ? "" : ' tabindex="-1"';
@@ -273,31 +319,40 @@ export function renderField(f, ctx = {}) {
   const head = q + help;
   const opts = Array.isArray(f.options) && f.options.length ? f.options : ["Option 1"];
   const box = (type) => `<input type="${type}"${inert} />`;
+  const ph = f.placeholder ? ` placeholder="${esc(f.placeholder)}"` : "";
+  const optsClass = `fe-opts is-${esc(f.layout || "list")}`;
 
   switch (f.type) {
-    case "short_text": return head + `<input class="fe-in" type="text"${inert} />`;
-    case "email": return head + `<input class="fe-in" type="email" autocomplete="off"${inert} />`;
-    case "long_text": return head + `<textarea class="fe-in" rows="3"${inert}></textarea>`;
-    case "date": return head + `<input class="fe-in fe-in-date" type="date"${inert} />`;
+    case "short_text": return head + `<input class="fe-in" type="text"${ph}${inert} />`;
+    case "email": return head + `<input class="fe-in" type="email" autocomplete="off"${ph}${inert} />`;
+    case "long_text": {
+      const rows = { small: 2, medium: 4, large: 8 }[f.size] || 4;
+      return head + `<textarea class="fe-in" rows="${rows}"${ph}${inert}></textarea>`;
+    }
+    case "date": {
+      const t = todayIso();
+      const limit = f.range === "past" ? ` max="${t}"` : f.range === "future" ? ` min="${t}"` : "";
+      return head + `<input class="fe-in fe-in-date" type="date"${limit}${inert} />`;
+    }
     case "record_date":
       return head + `<input class="fe-in fe-in-date" type="date" value="${todayIso()}"${inert} />` +
         (live ? "" : '<div class="fe-help fe-help-after">Starts as today\'s date. Staff can change it.</div>');
     case "number":
-      return head + `<div class="fe-num"><input class="fe-in" type="number" data-in="${id}"${
+      return head + `<div class="fe-num"><input class="fe-in" type="number" data-in="${id}"${ph}${
         f.min !== null && f.min !== undefined ? ` min="${Number(f.min)}"` : ""}${
         f.max !== null && f.max !== undefined ? ` max="${Number(f.max)}"` : ""}${inert} />${
         f.unit ? `<span>${esc(f.unit)}</span>` : ""}</div>`;
     case "dropdown":
-      return head + `<select class="fe-in"${inert}><option value="">Choose one</option>${
+      return head + `<select class="fe-in"${inert}><option value="">${esc(f.placeholder || "Choose one")}</option>${
         opts.map((o) => `<option>${esc(o)}</option>`).join("")}</select>`;
     case "single_choice":
     case "checkboxes": {
       const t = f.type === "single_choice" ? "radio" : "checkbox";
-      return head + `<div class="fe-opts">${opts.map((o) =>
+      return head + `<div class="${optsClass}">${opts.map((o) =>
         `<label class="fe-opt"><input type="${t}" name="${id}"${inert} /><span>${esc(o)}</span></label>`).join("")}</div>`;
     }
     case "checkbox_notes":
-      return head + `<div class="fe-opts">${opts.map((o) => `
+      return head + `<div class="${optsClass}">${opts.map((o) => `
         <div class="fe-optnote">
           <label class="fe-opt">${box("checkbox")}<span>${esc(o)}</span></label>
           <input class="fe-in fe-note-in" type="text" placeholder="Add a note"${inert} />
@@ -328,8 +383,11 @@ export function renderField(f, ctx = {}) {
         '<span class="fe-calc-tag">Calculated</span></div>' +
         (live ? "" : `<div class="fe-help fe-help-after">${reads ? "= " + esc(reads) : "No formula yet"}</div>`);
     }
-    case "signature":
-      return head + '<div class="fe-sig"><span>Sign here</span></div>';
+    case "signature": {
+      const who = SIGNERS[f.signer] || SIGNERS.patient;
+      return head + `<div class="fe-sig"><span>${esc(who)} signs here</span></div>` +
+        (!live && f.showNameDate !== false ? '<div class="fe-sig-preview"><span>Name</span><span>Date</span></div>' : "");
+    }
     case "photo": {
       const max = Math.max(1, Math.min(10, parseInt(f.max, 10) || 1));
       return head + `<label class="fe-photo">${svg(ICONS.photo)}<span>${max > 1 ? `Take photos (up to ${max})` : "Take photo"}</span>` +
@@ -344,9 +402,9 @@ export function renderField(f, ctx = {}) {
         : `<div class="fe-consent is-warn">${svg(ICONS.consent_status)}Choose which consent form to check.</div>`);
     }
     case "patient":
-      return head + `<div class="fe-patient">${["Full name", "Date of birth", "Address"].map((l) =>
-        `<label><small>${l}</small><input class="fe-in" type="text"${inert} /></label>`).join("")}</div>` +
-        '<div class="fe-help fe-help-after">Filled in from the patient\'s record.</div>';
+      return head + `<div class="fe-patient">${patientParts(f).map(([k, l]) =>
+        `<label${k === "address" ? ' class="is-wide"' : ""}><small>${l}</small><input class="fe-in" type="text" data-part="${k}"${inert} /></label>`).join("")}</div>` +
+        (live ? "" : '<div class="fe-help fe-help-after">Filled in from the patient\'s record.</div>');
     case "text_block":
       return `<div class="fe-block">${f.label ? `<div class="fe-block-h">${esc(f.label)}</div>` : ""}${
         f.text ? `<p>${esc(f.text).replace(/\n/g, "<br>")}</p>`
@@ -377,8 +435,51 @@ const choose = (key, items, current, numeric = false, rerender = false) =>
   `<select class="fb-select" data-k="${key}"${numeric ? ' data-num=""' : ""}${rerender ? ' data-rerender=""' : ""}>${items.map(([v, l]) =>
     `<option value="${esc(v)}"${String(current) === String(v) ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
 
+const placeholderSetting = (f, example) =>
+  setting("Hint inside the box", `<input class="fe-input" data-k="placeholder" maxlength="100" placeholder="${esc(example)}" value="${esc(f.placeholder || "")}" />`,
+    "Grey example text that disappears when staff start typing.");
+
+const layoutSetting = (f) =>
+  setting("Layout", choose("layout", [["list", "One per line"], ["columns", "Two columns"], ["inline", "Side by side"]], f.layout || "list"),
+    "Side by side suits short choices like Yes / No.");
+
 export function fieldSettings(f, ctx = {}) {
   switch (f.type) {
+    case "patient": {
+      const on = patientParts(f).map(([k]) => k);
+      return `<div class="fe-insp-field"><span class="fe-insp-label">Details to show</span>
+        <div class="fe-parts">${PATIENT_PARTS.map(([k, l]) =>
+          `<label class="fe-check"><input type="checkbox" data-part="${k}" data-rerender=""${on.includes(k) ? " checked" : ""} /> ${esc(l)}</label>`).join("")}</div>
+        <small class="fe-note">Filled in from the patient's record. At least one detail is always shown.</small></div>`;
+    }
+
+    case "short_text":
+      return placeholderSetting(f, "e.g. Dr Smith");
+
+    case "email":
+      return placeholderSetting(f, "e.g. name@example.com");
+
+    case "long_text":
+      return placeholderSetting(f, "e.g. Describe any reactions") +
+        setting("Box size", choose("size", [["small", "Small (2 lines)"], ["medium", "Medium (4 lines)"], ["large", "Large (8 lines)"]], f.size || "medium"));
+
+    case "date":
+      return setting("Allowed dates", choose("range", [["any", "Any date"], ["past", "Today or earlier"], ["future", "Today or later"]], f.range || "any"),
+        "For example, today or earlier for a date of birth.");
+
+    case "dropdown":
+      return setting("Text before a choice is made", `<input class="fe-input" data-k="placeholder" maxlength="100" value="${esc(f.placeholder || "")}" />`);
+
+    case "single_choice":
+    case "checkboxes":
+    case "checkbox_notes":
+      return layoutSetting(f);
+
+    case "signature":
+      return setting("Who signs", choose("signer", Object.entries(SIGNERS), f.signer || "patient")) +
+        `<label class="fe-check"><input type="checkbox" data-k="showNameDate"${f.showNameDate !== false ? " checked" : ""} /> Show name and date under the signature</label>` +
+        '<small class="fe-note fe-pad">The name fills in for the patient or the practitioner. For a guardian or witness, staff type it in.</small>';
+
     case "text_block":
       return setting("Text", `<textarea class="fe-input" data-k="text" rows="9" maxlength="5000" placeholder="Information patients need to read before signing">${esc(f.text || "")}</textarea>`);
 
@@ -386,7 +487,8 @@ export function fieldSettings(f, ctx = {}) {
       return setting("Height", choose("size", [["small", "Small"], ["medium", "Medium"], ["large", "Large"]], f.size || "medium"));
 
     case "number":
-      return setting("Unit", `<input class="fe-input" data-k="unit" maxlength="20" placeholder="units" value="${esc(f.unit || "")}" />`,
+      return placeholderSetting(f, "e.g. 20") +
+        setting("Unit", `<input class="fe-input" data-k="unit" maxlength="20" placeholder="units" value="${esc(f.unit || "")}" />`,
           "Shown after the box, for example units or mL.") +
         `<div class="fe-two">${
           setting("Lowest allowed", `<input class="fe-input" type="number" data-k="min" data-num="optional" value="${f.min ?? ""}" />`)}${
@@ -451,7 +553,7 @@ export function fieldSettings(f, ctx = {}) {
       return setting("Photos allowed", choose("max", Array.from({ length: 10 }, (_, i) => [i + 1, String(i + 1)]), f.max || 1, true),
         "On iPad and phones this opens the camera.");
 
-        case "watermark": {
+    case "watermark": {
       const logo = f.source === "logo";
       const hasLogo = !!(ctx.letterhead && ctx.letterhead.logo);
       return setting("Show", choose("source", [["text", "Text"], ["logo", "Clinic logo"]], f.source || "text", false, true)) +
@@ -482,8 +584,16 @@ export function fieldSettings(f, ctx = {}) {
 
 /* ===================== Settings that edit lists inside a field ===================== */
 
-// Typing in table columns and sub-option groups. Returns true if it changed something.
+// Typing in table columns, sub-option groups and patient detail ticks.
+// Returns true if it changed something.
 export function applyInput(f, el) {
+  if (el.dataset.part !== undefined) {
+    const on = new Set(patientParts(f).map(([k]) => k));
+    if (el.checked) on.add(el.dataset.part);
+    else if (on.size > 1) on.delete(el.dataset.part); // always keep at least one
+    f.parts = PART_KEYS.filter((k) => on.has(k));
+    return true;
+  }
   if (el.dataset.col !== undefined) {
     const c = f.columns && f.columns[Number(el.dataset.col)];
     if (!c) return false;

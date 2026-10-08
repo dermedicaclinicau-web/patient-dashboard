@@ -1854,3 +1854,22 @@ textarea.fe-input { resize: vertical; line-height: 1.5; }
 .fr-name { font-weight: 600; }
 .fr-meta { font-size: .78rem; color: var(--muted); }
 .fr-row svg { width: 16px; height: 16px; flex-shrink: 0; color: var(--muted); }
+
+/* ---------- Field settings: layouts and details ---------- */
+.fe-opts.is-inline { display: flex; flex-direction: row; flex-wrap: wrap; gap: .5rem 1.5rem; }
+.fe-opts.is-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem 1.5rem; }
+@media (max-width: 600px) { .fe-opts.is-columns { grid-template-columns: 1fr; } }
+
+.fe-patient { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: .6rem .75rem; }
+.fe-patient label { display: flex; flex-direction: column; gap: .25rem; }
+.fe-patient label.is-wide { grid-column: 1 / -1; }
+.fe-patient small, .sig-meta small { font-size: .75rem; color: var(--muted); }
+
+.fe-parts { display: grid; grid-template-columns: 1fr 1fr; gap: .35rem .5rem; }
+
+/* Signature name + date */
+.sig-meta, .fe-sig-preview { display: grid; grid-template-columns: minmax(0, 1fr) 170px; gap: .6rem; max-width: 520px; margin-top: .5rem; }
+.sig-meta label { display: flex; flex-direction: column; gap: .25rem; }
+.sig-meta input[readonly] { background: var(--surface-2); }
+.fe-sig-preview span { padding: .45rem 0; border-bottom: 1px solid var(--border); font-size: .8rem; color: var(--muted); }
+@media (max-width: 520px) { .sig-meta, .fe-sig-preview { grid-template-columns: 1fr; } }
