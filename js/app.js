@@ -9,7 +9,7 @@ import { isRecorderBusy, suspendRecorder } from "./recorder.js";
 import { initSoapPanel, closeSoapPanel, hasUnsavedNotes } from "./soap-panel.js";
 import { confirmDialog } from "./dialog.js";
 import { mountFormBuilder } from "./form-builder.js";
-import { mountFormFill } from "./form-fill.js";
+import { mountFormFill, mountFormRecord } from "./form-fill.js";
 import { initFormPicker, closeFormPicker } from "./form-picker.js";
 
 const $ = (id) => document.getElementById(id);
@@ -203,6 +203,7 @@ const PAGES = {
   }),
   patient: (el, id) => mountPatientDashboard(el, id, { staff: currentStaff, onBack: goBack }),
   fill: (el, param) => mountFormFill(el, param, { staff: currentStaff }),
+    "form-record": (el, id) => mountFormRecord(el, id),
 };
 
 function router() {
@@ -217,8 +218,8 @@ function router() {
   let param = "";
   try { param = decodeURIComponent(rest.join("/")); } catch { /* malformed URL, ignore */ }
 
-  const navKey = page === "patient" || page === "fill" ? "patients" : page;
-  els.navItems.forEach((a) => {
+  const navKey = ["patient", "fill", "form-record"].includes(page) ? "patients" : page;
+    els.navItems.forEach((a) => {
     const active = a.dataset.page === navKey;
     a.classList.toggle("active", active);
     if (active) a.setAttribute("aria-current", "page");

@@ -1817,3 +1817,40 @@ textarea.fe-input { resize: vertical; line-height: 1.5; }
 .ff-top p { margin: .25rem 0 0; }
 .ff-actions { display: flex; align-items: center; justify-content: flex-end; gap: 1rem; flex-wrap: wrap; margin-top: 1rem; }
 .ff-actions p { margin: 0; font-size: .85rem; }
+
+
+/* ---------- Signature pad ---------- */
+.sig-pad { display: flex; flex-direction: column; gap: .35rem; max-width: 520px; }
+.sig-canvas { display: block; width: 100%; height: 160px; border: 1.5px dashed #cbd5e1; border-radius: 10px;
+  background: #fff; touch-action: none; cursor: crosshair; }
+.sig-pad.is-signed .sig-canvas { border-style: solid; border-color: var(--primary); }
+.sig-bar { display: flex; align-items: center; justify-content: space-between; font-size: .78rem; color: var(--muted); }
+.sig-clear { padding: .2rem .4rem; border: none; background: none; color: var(--primary); font: inherit; font-weight: 600; cursor: pointer; }
+.sig-img { display: block; max-width: 320px; max-height: 120px; border-bottom: 1px solid var(--border); }
+
+/* ---------- Fill in: problems ---------- */
+.ff-sheet .fe-field.is-invalid { background: #fef2f2; border-radius: 8px; box-shadow: inset 3px 0 0 var(--danger); }
+.ff-err { margin: .4rem 0 0; font-size: .82rem; font-weight: 600; color: var(--danger); }
+.ff-sheet .fe-patient input[readonly] { background: var(--surface-2); }
+.ff-actions [data-role="msg"] { flex: 1; color: var(--danger); }
+
+/* ---------- Viewing a saved form ---------- */
+.ff-view .fe-in:disabled, .ff-view select:disabled, .ff-view textarea:disabled, .ff-view .fe-table input:disabled {
+  background: #fff; color: var(--text); -webkit-text-fill-color: var(--text); opacity: 1; }
+.ff-view input[type="checkbox"]:disabled, .ff-view input[type="radio"]:disabled { opacity: 1; }
+
+@media print {
+  body * { visibility: hidden !important; }
+  .ff-print, .ff-print * { visibility: visible !important; }
+  .ff-print { position: absolute; top: 0; left: 0; width: 100%; margin: 0 !important; border: none !important; box-shadow: none !important; }
+}
+
+/* ---------- Completed forms list ---------- */
+.fr-list { display: flex; flex-direction: column; gap: .4rem; }
+.fr-row { display: flex; align-items: center; gap: .75rem; padding: .7rem .85rem; border: 1px solid var(--border);
+  border-radius: 10px; background: #fff; color: inherit; text-decoration: none; }
+.fr-row:hover { border-color: var(--primary); }
+.fr-main { display: flex; flex: 1; flex-direction: column; gap: .15rem; min-width: 0; }
+.fr-name { font-weight: 600; }
+.fr-meta { font-size: .78rem; color: var(--muted); }
+.fr-row svg { width: 16px; height: 16px; flex-shrink: 0; color: var(--muted); }

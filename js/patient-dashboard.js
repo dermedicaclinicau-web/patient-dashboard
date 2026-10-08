@@ -5,6 +5,7 @@ import { openReminderDialog } from "./reminder-dialog.js";
 import { mountPersonalNotes } from "./personal-notes-view.js";
 import { skincareSectionHtml, mountSkincare } from "./skincare-view.js";
 import { recordsSectionHtml, mountRecords } from "./records-view.js";
+import { formRecordsSectionHtml, mountFormRecords } from "./form-records.js";
 import { setRecordingPatient } from "./recording-bar.js";
 import { historySectionHtml, mountHistory } from "./history-view.js";
 import { latestMerge, undoMerge } from "./merge-patients.js";
@@ -212,6 +213,8 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     ${skincareSectionHtml()}
     
     ${recordsSectionHtml()}
+
+    ${formRecordsSectionHtml()}
     
     ${historySectionHtml()}
     
@@ -297,6 +300,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   loadTranscriptSections();
   mountSkincare(root, patient);
   mountRecords(root, patient);
+  mountFormRecords(root, patient);
   mountHistory(root, patient);  
   mountBillingRx(root, patient);
   mountClinicalHistory(root, patient, staff);
