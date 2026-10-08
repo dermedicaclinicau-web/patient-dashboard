@@ -1,6 +1,8 @@
 import { getPatient, updatePatient } from "./patients.js";
 import { fetchDayAppointments, fetchPreconsult } from "./appointments.js";
-import { fetchOpenReminders } from "./reminders.js";
+import { fetchOpenReminders, completeReminder } from "./reminders.js";
+import { openReminderDialog } from "./reminder-dialog.js";
+import { mountPersonalNotes } from "./personal-notes-view.js";
 import { skincareSectionHtml, mountSkincare } from "./skincare-view.js";
 import { recordsSectionHtml, mountRecords } from "./records-view.js";
 import { setRecordingPatient } from "./recording-bar.js";
@@ -31,17 +33,18 @@ const DOC_ACTIONS = [
   ["Skin script (SSP)", "ssp"],
   ["Summary", "summary"],
   ["General note", "note"],
-  ["Personal note", "lock"],
+  ["Personal note", "lock", "add-note"],
 ];
 
 // Order and look of the Pre-Consultation section.
 // field = pcn_results column | unit = pill wording ("one|many", or "value" to show the value itself)
 // tone = colour style | action = [button label, "coming soon" name]
 const PRECONSULT_SECTIONS = [
-  { key: "reminders", title: "Reminders", icon: "bell", custom: true },
+  { key: "reminders", title: "Reminders", icon: "bell", custom: true,
+    action: ["+ Add", "Add reminder", "add-reminder"] },
   { key: "today", today: true },
-  { key: "personal-notes", title: "Personal notes", icon: "pin", pill: "No record",
-    empty: "No personal notes on record.", action: ["+ Add", "Add personal note"] },
+  { key: "personal-notes", title: "Personal notes", icon: "pin", custom: true,
+    action: ["+ Add", "Add personal note", "add-note"] },
   { key: "social-history", title: "Social history", icon: "user", custom: true,
     remember: false }, // always starts collapsed
   { key: "past-appts", title: "Past appointments", icon: "clock", field: "other", unit: "visit|visits", tone: "green" },
@@ -99,6 +102,7 @@ const ICONS = {
   check: svg('<polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'),
   refresh: svg('<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>'),
   chevRight: svg('<polyline points="9 18 15 12 9 6"/>'),
+  tick: svg('<polyline points="20 6 9 17 4 12"/>'),
   route: svg('<circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/>'),
   chev: svg('<polyline points="6 9 12 15 18 9"/>', "sum-chev"),
 };
@@ -133,6 +137,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   let patient = null;
   let todayAppts = [];
   let preData = null;
+  let notesView = null;
   let dialog, form, formError, saveBtn;
 
   root.addEventListener("click", (e) => {
@@ -141,6 +146,9 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     if (t.closest("summary button")) e.preventDefault();
     const refreshBtn = t.closest("[data-action='refresh-pc']");
     if (refreshBtn) { refreshAll(refreshBtn); return; }
+    if (t.closest("[data-action='add-reminder']")) { addReminderFlow(); return; }
+    const doneBtn = t.closest("[data-action='task-done']");
+    if (doneBtn) { completeTask(doneBtn); return; }
     if (t.closest(".back-btn, [data-action='back']")) { if (onBack) onBack(); return; }
     const planToggle = t.closest("[data-action='toggle-plan']");
     if (planToggle) {
@@ -188,8 +196,8 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     <div>
       <p class="eyebrow">Clinical documentation</p>
       <div class="doc-tiles">
-        ${DOC_ACTIONS.map(([label, icon]) =>
-          `<button type="button" class="doc-tile" data-soon="${escapeHtml(label)}">${ICONS[icon]}<span>${escapeHtml(label)}</span></button>`
+        ${DOC_ACTIONS.map(([label, icon, action]) =>
+          `<button type="button" class="doc-tile" ${action ? `data-action="${action}"` : `data-soon="${escapeHtml(label)}"`}>${ICONS[icon]}<span>${escapeHtml(label)}</span></button>`
         ).join("")}
       </div>
     </div>
@@ -282,6 +290,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   setRecordingPatient(patient); // shows "Ready to record" for this patient
   loadPreconsultData();
   loadReminders();
+  notesView = mountPersonalNotes(root, patient, staff);
   loadTranscriptSections();
   mountSkincare(root, patient);
   mountRecords(root, patient);
@@ -342,7 +351,10 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     if (btn.disabled) return;
     btn.disabled = true;
     btn.classList.add("is-loading");
-    await Promise.allSettled([loadToday(), loadPreconsultData(), loadReminders(), loadTranscriptSections()]);
+    await Promise.allSettled([
+      loadToday(), loadPreconsultData(), loadReminders(), loadTranscriptSections(),
+      notesView ? notesView.reload() : null,
+    ]);
     if (btn.isConnected) {
       btn.disabled = false;
       btn.classList.remove("is-loading");
@@ -375,6 +387,32 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
           ? "Reminders aren't accessible. Check the Firestore rules."
           : "Couldn't load reminders."
       }</p>`;
+    }
+  }
+  async function addReminderFlow() {
+    const saved = await openReminderDialog({ patient, staff });
+    if (!saved || !root.isConnected) return;
+    showToast("Reminder added");
+    const pc = root.querySelector('details[data-key="preconsult"]');
+    if (pc) pc.open = true;
+    await loadReminders(); // opens the Reminders card when it has tasks
+  }
+
+  async function completeTask(btn) {
+    const id = btn.dataset.id;
+    if (!id || btn.disabled) return;
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+    try {
+      await completeReminder(id, staff);
+      showToast("Reminder marked as done");
+      await loadReminders();
+    } catch (err) {
+      console.error("Completing reminder failed:", err);
+      showToast(err.code === "permission-denied"
+        ? "You don't have permission to update reminders."
+        : "Couldn't update the reminder.");
+      if (btn.isConnected) { btn.disabled = false; btn.innerHTML = `${ICONS.tick}Done`; }
     }
   }
 
@@ -446,7 +484,7 @@ function barHtml(p, today = [], pre = null) {
         ${roundLink(tel && `tel:${tel}`, "phone", "Call", "No mobile number on file")}
         ${roundLink(tel && `sms:${tel}`, "sms", "SMS", "No mobile number on file")}
         ${roundLink(p.email && `mailto:${p.email}`, "mail", "Email", "No email address on file")}
-        <button type="button" class="round-btn" data-soon="Add reminder" aria-label="Add reminder" title="Add reminder">${ICONS.bell}</button>
+        <button type="button" class="round-btn" data-action="add-reminder" aria-label="Add reminder" title="Add reminder">${ICONS.bell}</button>
         <button type="button" class="btn-ghost sm pb-edit">${ICONS.edit}<span>Edit</span></button>
       </div>
     </div>
@@ -471,7 +509,9 @@ function subCard({ key, title, icon = "", body = "", pill = "", tone = "", actio
           <span class="hint"${pill ? "" : " hidden"}>${escapeHtml(pill)}</span>
         </span>
         <span class="sum-right">
-          ${action ? `<button type="button" class="sum-action" data-soon="${escapeHtml(action[1])}">${escapeHtml(action[0])}</button>` : ""}
+          ${action ? `<button type="button" class="sum-action" ${action[2]
+            ? `data-action="${escapeHtml(action[2])}"`
+            : `data-soon="${escapeHtml(action[1])}"`}>${escapeHtml(action[0])}</button>` : ""}
           ${ICONS.chev}
         </span>
       </summary>
@@ -658,9 +698,12 @@ function remindersHtml(tasks) {
       (status && status.toLowerCase() !== "open" ? `<span class="task-flag neutral">${escapeHtml(status)}</span>` : "");
 
     return `
-      <li class="task${overdue ? " is-overdue" : ""}">
-        <span class="task-text">${escapeHtml(t.taskText || "Untitled reminder")}</span>
-        <span class="task-meta">${meta}${flags}</span>
+      <li class="task has-action${overdue ? " is-overdue" : ""}">
+        <div class="task-main">
+          <span class="task-text">${escapeHtml(t.taskText || "Untitled reminder")}</span>
+          <span class="task-meta">${meta}${flags}</span>
+        </div>
+        <button type="button" class="task-done" data-action="task-done" data-id="${escapeHtml(t.id)}" title="Mark as done">${ICONS.tick}Done</button>
       </li>`;
   }).join("")}</ul>`;
 }

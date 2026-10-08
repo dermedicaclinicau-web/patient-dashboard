@@ -473,7 +473,7 @@ async function loadPersonalNotes() {
   try {
     const snap = await getDocs(query(collection(db, "patient_personal_notes"), where("patientId", "in", ids)));
     if (!current || current.id !== id) return;
-    const notes = snap.docs.map((x) => x.data())
+    const notes = snap.docs.map((x) => x.data()).filter((n) => !n.deleted)
       .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
     box.innerHTML = notes.length
       ? notes.map((n) => {

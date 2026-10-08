@@ -1205,6 +1205,50 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .sp-tab.pulse { animation: sp-pulse 1.6s ease-in-out 3; }
 @keyframes sp-pulse { 50% { transform: translateY(-50%) translateX(-5px); box-shadow: -8px 8px 26px -6px rgba(15, 118, 110, .6); } }
 
+/* ---------- Personal notes ---------- */
+.pn-compose, .pn-item.is-editing { display: flex; flex-direction: column; gap: .5rem; }
+.pn-compose { margin-bottom: .75rem; }
+.pn-input { width: 100%; min-height: 84px; padding: .65rem .8rem; border: 1px solid var(--border); border-radius: 10px;
+  background: #fff; font: inherit; font-size: .9rem; line-height: 1.5; resize: vertical; outline: none; }
+.pn-input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(15, 118, 110, .12); }
+.pn-btns { display: flex; align-items: center; justify-content: flex-end; gap: .4rem; }
+.pn-btns small { margin-right: auto; color: var(--muted); font-size: .72rem; }
+.pn-btn { height: 34px; padding: 0 .9rem; border: 1px solid var(--border); border-radius: 8px; background: #fff;
+  font-size: .82rem; font-weight: 600; cursor: pointer; }
+.pn-btn.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+.pn-btn:disabled { opacity: .6; cursor: wait; }
+.pn-list { list-style: none; display: flex; flex-direction: column; gap: .5rem; }
+.pn-item { padding: .65rem .8rem; border: 1px solid #f5e6bf; border-radius: 10px; background: #fdf8ec; }
+.pn-text { color: var(--text); font-size: .9rem; white-space: pre-line; }
+.pn-meta { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; margin-top: .3rem; color: var(--muted); font-size: .74rem; }
+.pn-actions { margin-left: auto; display: inline-flex; gap: .25rem; }
+.pn-actions button { padding: .15rem .45rem; border: none; border-radius: 6px; background: none; color: var(--primary);
+  font-size: .74rem; font-weight: 600; cursor: pointer; }
+.pn-actions button:hover { background: rgba(15, 118, 110, .08); }
+.pn-actions button[data-pn="remove"] { color: #dc2626; }
+
+/* ---------- Reminders ---------- */
+.task.has-action { display: flex; align-items: center; gap: .75rem; }
+.task-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .15rem; }
+.task-done { flex-shrink: 0; display: inline-flex; align-items: center; gap: .3rem; height: 32px; padding: 0 .75rem;
+  border: 1px solid #bbf7d0; border-radius: 8px; background: #f0fdf4; color: #15803d; font-size: .8rem; font-weight: 600; cursor: pointer; }
+.task-done:hover { background: #dcfce7; }
+.task-done svg { width: 14px; height: 14px; }
+.task-done:disabled { opacity: .6; cursor: wait; }
+
+.rm-dialog { width: min(480px, calc(100% - 2rem)); }
+.rm-for { margin-top: -.3rem; color: var(--muted); font-size: .88rem; }
+.rm-for strong { color: var(--text); }
+.em-field textarea { padding: .7rem .85rem; border: 1px solid var(--border); border-radius: 10px; background: #f8fafc;
+  font: inherit; font-size: .95rem; line-height: 1.5; resize: vertical; outline: none; }
+.em-field textarea:focus { border-color: #6366f1; box-shadow: 0 0 0 3px #e0e7ff; background: #fff; }
+.em-field input[type="date"] { margin-top: .4rem; }
+.rm-quick { display: flex; flex-wrap: wrap; gap: .35rem; }
+.rm-chip { padding: .3rem .7rem; border: 1px solid var(--border); border-radius: 999px; background: #fff;
+  color: var(--muted); font-size: .78rem; font-weight: 600; cursor: pointer; }
+.rm-chip:hover { border-color: #a5b4fc; color: #4338ca; }
+.rm-chip.active { background: #4f46e5; border-color: #4f46e5; color: #fff; }
+
 /* ---------- Confirm dialog ---------- */
 .cd-dialog { margin: auto; padding: 0; border: none; border-radius: 20px; width: min(420px, calc(100% - 2rem));
   background: #fff; box-shadow: 0 30px 70px -20px rgba(15, 23, 42, .45); }
