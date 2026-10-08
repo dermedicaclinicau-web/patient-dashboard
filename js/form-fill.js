@@ -8,6 +8,7 @@ import { getPatient, patientIds } from "./patients.js";
 import { saveSubmission, getSubmission, listSubmissionsForPatient } from "./form-submissions.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast, formatDobLong, formatMobile } from "./utils.js";
+import { queueDelivery, takeDelivery, openEmailComposer, sendToPrinter, deliveriesHtml, deliveryError } from "./form-delivery.js";
 
 const LAYOUT = ["text_block", "space", "letterhead", "watermark"];
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
@@ -324,13 +325,15 @@ export async function mountFormFill(container, param, { staff } = {}) {
       <div class="ff-actions">
         <p class="muted" data-role="msg" aria-live="polite"></p>
         <a class="btn-ghost" href="${patientHref}">Cancel</a>
-        <button type="button" class="btn-primary" data-act="save">Save to patient record</button>
+        <button type="button" class="btn-ghost" data-save="print">Save &amp; print</button>
+        <button type="button" class="btn-ghost" data-save="email">Save &amp; email</button>
+        <button type="button" class="btn-primary" data-save="save">Save</button>
       </div>
     </div>`;
 
   const sheet = root.querySelector('[data-role="sheet"]');
   const msgEl = root.querySelector('[data-role="msg"]');
-  const saveBtn = root.querySelector('[data-act="save"]');
+  const saveBtns = $all(root, "[data-save]");
   const wrap = (id) => sheet.querySelector(`[data-fid="${CSS.escape(id)}"]`);
   const pads = {};
   const consent = {};
@@ -492,7 +495,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
     }
   }
 
-  async function save() {
+  async function save(kind) {
     if (saving) return;
     if (!consentReady) { msgEl.textContent = "Still checking consent records. Try again in a moment."; return; }
     updateCalcs();
@@ -512,12 +515,14 @@ export async function mountFormFill(container, param, { staff } = {}) {
     let recordDate = rd ? answers[rd.id] : "";
     if (!/^\d{4}-\d{2}-\d{2}$/.test(recordDate || "")) recordDate = todayIso();
 
+    const btn = saveBtns.find((b) => b.dataset.save === kind);
+    const label = btn ? btn.textContent : "";
     saving = true;
-    saveBtn.disabled = true;
-    saveBtn.textContent = "Saving…";
+    saveBtns.forEach((b) => { b.disabled = true; });
+    if (btn) btn.textContent = "Saving…";
     msgEl.textContent = "";
     try {
-      await saveSubmission({
+      const id = await saveSubmission({
         templateId: tid,
         templateName: ver.name,
         category: tpl.category,
@@ -530,20 +535,29 @@ export async function mountFormFill(container, param, { staff } = {}) {
         signatures,
       }, staff);
       dirty = false;
-      location.hash = patientHref;
-      showToast(`${ver.name} saved to ${patient.name}'s record`);
+      if (kind === "save") {
+        location.hash = patientHref;
+        showToast(`${ver.name} saved to ${patient.name}'s record`);
+      } else {
+        // Open the saved form, which then emails or prints it
+        queueDelivery(id, kind);
+        location.hash = `#/form-record/${encodeURIComponent(id)}`;
+        showToast(`${ver.name} saved`);
+      }
     } catch (err) {
       console.error("Save form failed:", err);
       msgEl.textContent = err.code === "permission-denied"
         ? "Couldn't save. Check the Firestore rules for form_submissions have been published."
         : err.code ? "Couldn't save. Check your connection and try again." : err.message;
-      saveBtn.disabled = false;
-      saveBtn.textContent = "Save to patient record";
+      saveBtns.forEach((b) => { b.disabled = false; });
+      if (btn) btn.textContent = label;
     } finally {
       saving = false;
     }
   }
-  saveBtn.addEventListener("click", save);
+  saveBtns.forEach((b) => b.addEventListener("click", () => save(b.dataset.save)));
+  
+  
 
   /* ---------- Don't lose answers by accident ---------- */
   const onBeforeUnload = (e) => { if (dirty && root.isConnected) { e.preventDefault(); e.returnValue = ""; } };
@@ -571,7 +585,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
 
 /* ===================== View a saved form ===================== */
 
-export async function mountFormRecord(container, submissionId) {
+export async function mountFormRecord(container, submissionId, { staff } = {}) {
   const root = document.createElement("section");
   root.className = "page wide";
   root.innerHTML = '<a class="back-link" href="#/patients">← Back</a><div class="skeleton" style="height:420px;border-radius:14px"></div>';
@@ -608,8 +622,13 @@ export async function mountFormRecord(container, submissionId) {
           <p class="muted">For <strong>${esc(sub.patientName)}</strong> · ${esc(niceDate(sub.recordDate))}${
             sub.createdBy ? ` · Filled in by ${esc(sub.createdBy)}` : ""} · Version ${sub.version}</p>
         </div>
-        <button type="button" class="btn-ghost" data-act="print">Print</button>
+        <div class="ff-top-actions">
+          <button type="button" class="btn-ghost" data-act="email">Email</button>
+          <button type="button" class="btn-ghost" data-act="printer">Send to printer</button>
+          <button type="button" class="btn-ghost" data-act="print">Print here</button>
+        </div>
       </div>
+      <div data-role="log">${deliveriesHtml(sub.deliveries)}</div>
       <div class="fe-sheet ff-sheet ff-print" data-role="sheet">${sheetHtml({ name: ver.name, fields, settings: ver.settings, letterhead })}</div>
     </div>`;
 
@@ -643,5 +662,40 @@ export async function mountFormRecord(container, submissionId) {
   });
   $all(sheet, "input, textarea, select").forEach((el) => { el.disabled = true; });
 
-  root.querySelector('[data-act="print"]').addEventListener("click", () => window.print());
+  /* ---------- Email / send to printer / print here ---------- */
+  const logEl = root.querySelector('[data-role="log"]');
+  const printerBtn = root.querySelector('[data-act="printer"]');
+  const addEntry = (entry) => {
+    if (!entry || !root.isConnected) return;
+    sub.deliveries.push(entry);
+    logEl.innerHTML = deliveriesHtml(sub.deliveries);
+  };
+
+  const emailFlow = async () => addEntry(await openEmailComposer({ sub, ver, letterhead, staff }));
+
+  const printerFlow = async () => {
+    if (printerBtn.disabled) return;
+    printerBtn.disabled = true;
+    printerBtn.textContent = "Sending…";
+    try {
+      addEntry(await sendToPrinter({ sub, ver, letterhead }));
+      showToast("Sent to the printer");
+    } catch (err) {
+      console.error("Send to printer failed:", err);
+      showToast(deliveryError(err));
+    } finally {
+      if (printerBtn.isConnected) { printerBtn.disabled = false; printerBtn.textContent = "Send to printer"; }
+    }
+  };
+
+  root.addEventListener("click", (e) => {
+    if (e.target.closest('[data-act="email"]')) emailFlow();
+    else if (e.target.closest('[data-act="printer"]')) printerFlow();
+    else if (e.target.closest('[data-act="print"]')) window.print();
+  });
+
+  // Arrived here from "Save & email" or "Save & print"
+  const next = takeDelivery(submissionId);
+  if (next === "email") emailFlow();
+  else if (next === "print") printerFlow();
 }

@@ -1873,3 +1873,19 @@ textarea.fe-input { resize: vertical; line-height: 1.5; }
 .sig-meta input[readonly] { background: var(--surface-2); }
 .fe-sig-preview span { padding: .45rem 0; border-bottom: 1px solid var(--border); font-size: .8rem; color: var(--muted); }
 @media (max-width: 520px) { .sig-meta, .fe-sig-preview { grid-template-columns: 1fr; } }
+
+/* ---------- Email / print a saved form ---------- */
+.ff-top-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+ul.ff-log { display: flex; flex-direction: column; gap: .2rem; margin: 0 0 1rem; padding: .6rem .85rem; list-style: none;
+  border-radius: 10px; background: var(--primary-soft); font-size: .82rem; color: var(--text); }
+
+.ec-dialog { width: min(620px, calc(100vw - 2rem)); }
+.ec-form input[type="email"], .ec-form textarea { width: 100%; padding: .55rem .7rem; border: 1px solid var(--border);
+  border-radius: 8px; background: #fff; font: inherit; font-size: .9rem; }
+.ec-form textarea { resize: vertical; line-height: 1.5; }
+.ec-form input:focus, .ec-form textarea:focus { outline: 2px solid var(--primary); outline-offset: -1px; border-color: var(--primary); }
+.ec-warn { margin: -.4rem 0 0; font-size: .8rem; color: #92400e; }
+.ec-attach { display: flex; align-items: center; gap: .6rem; padding: .6rem .75rem; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--surface-2); font-size: .85rem; }
+.ec-attach svg { width: 18px; height: 18px; flex-shrink: 0; color: var(--danger); }
+.ec-attach span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

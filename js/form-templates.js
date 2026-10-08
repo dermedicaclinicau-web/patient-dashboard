@@ -248,3 +248,18 @@ export async function saveLetterhead(letterhead, staff) {
   letterheadCache = clean;
   return clean;
 }
+
+/* ===================== Printer address ===================== */
+
+export async function getPrintSettings() {
+  const snap = await getDoc(doc(db, "form_settings", "printing"));
+  return { printerEmail: snap.exists() ? String(snap.data().printerEmail || "") : "" };
+}
+
+export async function savePrintSettings({ printerEmail }, staff) {
+  await setDoc(doc(db, "form_settings", "printing"), {
+    printerEmail: String(printerEmail || "").trim().slice(0, 254),
+    updatedAt: serverTimestamp(),
+    updatedBy: String((staff && staff.name) || "").slice(0, 120),
+  });
+}

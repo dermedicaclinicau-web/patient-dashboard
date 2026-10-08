@@ -25,6 +25,7 @@ function normalise(snap) {
     recordDate: d.recordDate || "",
     answers: d.answers && typeof d.answers === "object" ? d.answers : {},
     signatures: d.signatures && typeof d.signatures === "object" ? d.signatures : {},
+    deliveries: Array.isArray(d.deliveries) ? d.deliveries : [],
     createdAt: toDate(d.createdAt),
     createdBy: d.createdBy || "",
   };

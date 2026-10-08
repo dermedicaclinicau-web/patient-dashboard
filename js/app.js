@@ -203,7 +203,7 @@ const PAGES = {
   }),
   patient: (el, id) => mountPatientDashboard(el, id, { staff: currentStaff, onBack: goBack }),
   fill: (el, param) => mountFormFill(el, param, { staff: currentStaff }),
-    "form-record": (el, id) => mountFormRecord(el, id),
+      "form-record": (el, id) => mountFormRecord(el, id, { staff: currentStaff }),
 };
 
 function router() {

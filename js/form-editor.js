@@ -9,6 +9,7 @@ import {
 } from "./form-fields.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { DEFAULT_LETTERHEAD, letterheadHtml, openLetterheadDialog } from "./form-letterhead.js";
+import { openPrinterDialog } from "./form-delivery.js";
 
 const UI = {
   up: '<polyline points="18 15 12 9 6 15"/>',
@@ -408,6 +409,11 @@ export async function mountFormEditor(container, { templateId, staff }) {
         <button type="button" class="lh-btn" data-act="edit-lh">Edit letterhead and logo</button>
         <small class="fe-note">One letterhead is shared by every form, so changes show on all of them.</small>
       </div>
+      <div class="fe-insp-field">
+        <span class="fe-insp-label">Printer</span>
+        <button type="button" class="lh-btn" data-act="printer">Printer email address</button>
+        <small class="fe-note">Used by Save &amp; print. Shared by every form.</small>
+      </div>
       <p class="fe-note fe-pad">Click a question on the page to change it.</p>
       <div class="fe-danger">
         <button type="button" class="fe-remove" data-act="delete-form">${svg(UI.trash)}Delete this form</button>
@@ -674,6 +680,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
   insp.addEventListener("click", (e) => {
     if (e.target.closest('[data-act="edit-lh"]')) { editLetterhead(); return; }
+    if (e.target.closest('[data-act="printer"]')) { openPrinterDialog(staff); return; }
     if (e.target.closest('[data-act="delete-form"]')) { deleteForm(); return; }
     if (e.target.closest('[data-act="unpublish"]')) { unpublish(); return; }
     const f = current();
