@@ -1,5 +1,6 @@
 import { runCalc, calcRefs, formatCalc } from "./form-calc.js";
 import { letterheadHtml } from "./form-letterhead.js";
+import { cleanCondition } from "./form-conditions.js";
 
 export const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -253,6 +254,9 @@ export function cleanField(f) {
   }
   return out;
 }
+
+  const sw = cleanCondition(f);
+  if (sw) out.showWhen = sw;
 
 /* ===================== Calculations: checking ===================== */
 

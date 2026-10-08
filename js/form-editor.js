@@ -10,6 +10,8 @@ import {
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { DEFAULT_LETTERHEAD, letterheadHtml, openLetterheadDialog } from "./form-letterhead.js";
 import { openPrinterDialog } from "./form-delivery.js";
+import { conditionSettingsHtml, applyConditionInput, applyConditionClick, conditionSummary, conditionProblem } from "./form-conditions.js";
+import { applyVisibility } from "./form-fill.js";
 
 const UI = {
   up: '<polyline points="18 15 12 9 6 15"/>',
@@ -232,6 +234,8 @@ export async function mountFormEditor(container, { templateId, staff }) {
       return { msg: "Add at least one question before publishing." };
     }
     for (const f of fields) {
+      const cp = conditionProblem(f, fields);
+      if (cp) return { id: f.id, msg: `“${label || FIELD_TYPES[f.type].name}”: ${cp}` };
       const label = String(f.label || "").trim();
       if (hasLabel(f.type) && f.type !== "text_block" && !label) {
         return { id: f.id, msg: "Every question needs a name. Add one to the highlighted question." };
@@ -329,28 +333,47 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
   function updateCalcs() {
     const values = evaluateCalcs(fields, (f) => {
-      const el = stage.querySelector(`input[data-in="${f.id}"]`);
+      const w = stage.querySelector(`[data-fid="${CSS.escape(f.id)}"]`);
+      if (w && w.hidden) return null; // hidden questions count as unanswered
+      const el = stage.querySelector(`input[data-in="${CSS.escape(f.id)}"]`);
       return el ? el.value : null;
     });
     Object.keys(values).forEach((id) => {
-      const out = stage.querySelector(`[data-calc="${id}"]`);
+      const out = stage.querySelector(`[data-calc="${CSS.escape(id)}"]`);
       const f = fields.find((x) => x.id === id);
       if (out && f) out.textContent = formatCalc(values[id], f) || "—";
     });
+    return values;
+  }
+
+  // Preview: questions appear and disappear as answers change, like the real form
+  function refreshPreview() {
+    if (mode !== "preview") return;
+    let calc = updateCalcs();
+    applyVisibility(stage, fields, { pads: {}, calc, consent: {} });
+    calc = updateCalcs();
+    applyVisibility(stage, fields, { pads: {}, calc, consent: {} });
   }
 
   function renderStage() {
     const build = mode === "build";
     const c = ctx(!build);
+    const BRANCH = '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>';
     const items = fields.map((f, i) => {
       const body = renderField(f, c);
-      if (!build) return body ? `<div class="fe-field">${body}</div>` : "";
+      if (!build) return body ? `<div class="fe-field" data-fid="${esc(f.id)}">${body}</div>` : "";
       const on = f.id === sel;
+      const cond = conditionSummary(f, fields);
+      const condBad = cond ? conditionProblem(f, fields) : "";
+      const chips = [
+        f.fill && `<span class="fe-chip">${svg(UI.user)}Auto-filled: ${esc(FILLS[f.fill] || f.fill)}</span>`,
+        cond && `<span class="fe-chip is-cond${condBad ? " is-bad" : ""}">${svg(BRANCH)}${esc(condBad || cond)}</span>`,
+      ].filter(Boolean).join("");
       return `
-        <div class="fe-field${on ? " is-selected" : ""}" data-id="${esc(f.id)}" draggable="true" tabindex="0"
+        <div class="fe-field${on ? " is-selected" : ""}${cond ? " is-conditional" : ""}" data-id="${esc(f.id)}" draggable="true" tabindex="0"
              aria-label="${esc(FIELD_TYPES[f.type].name)}${f.label ? ": " + esc(f.label) : ""}">
           ${body}
-          ${f.fill ? `<div class="fe-chips"><span class="fe-chip">${svg(UI.user)}Auto-filled: ${esc(FILLS[f.fill] || f.fill)}</span></div>` : ""}
+          ${chips ? `<div class="fe-chips">${chips}</div>` : ""}
           ${on ? `
           <div class="fe-tools">
             <button type="button" data-tool="up" aria-label="Move up"${i === 0 ? " disabled" : ""}>${svg(UI.up)}</button>
@@ -382,7 +405,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
         <div class="fe-fields" data-role="fields">${items || empty}</div>
       </div>`;
 
-    if (!build) updateCalcs();
+    if (!build) refreshPreview();
   }
 
   /* ---------- Settings panel ---------- */
@@ -448,6 +471,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
           `<option value="${k}"${(f.fill || "") === k ? " selected" : ""}>${esc(FILLS[k])}</option>`).join("")}</select>`,
         f.fill ? "Staff can still change it before saving." : "");
     }
+    h += conditionSettingsHtml(f, fields);
     if (canRequire(f.type)) {
       h += `<label class="fe-check"><input type="checkbox" data-k="required"${f.required ? " checked" : ""} /> Answer required</label>`;
     }
@@ -620,7 +644,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     }
   });
 
-  stage.addEventListener("input", () => { if (mode === "preview") updateCalcs(); });
+  stage.addEventListener("input", refreshPreview);
 
   insp.addEventListener("input", (e) => {
     const el = e.target;
@@ -654,6 +678,8 @@ export async function mountFormEditor(container, { templateId, staff }) {
       } else {
         f[k] = el.value;
       }
+    } else if (el.dataset.cond !== undefined || el.dataset.rule !== undefined) {
+      if (!applyConditionInput(f, el, fields)) return;
     } else if (!applyInput(f, el)) {
       return;
     }
@@ -721,6 +747,10 @@ export async function mountFormEditor(container, { templateId, staff }) {
       const inputs = insp.querySelectorAll("[data-opt]");
       const last = inputs[inputs.length - 1];
       if (last) { last.focus(); last.select(); }
+      return;
+    }
+    if (applyConditionClick(f, e.target, fields)) {
+      changed(); renderStage(); renderInspector();
       return;
     }
     if (applyClick(f, e.target)) {

@@ -9,6 +9,7 @@ import { saveSubmission, getSubmission, listSubmissionsForPatient } from "./form
 import { confirmDialog } from "./dialog.js";
 import { showToast, formatDobLong, formatMobile } from "./utils.js";
 import { queueDelivery, takeDelivery, openEmailComposer, sendToPrinter, deliveriesHtml, deliveryError } from "./form-delivery.js";
+import { conditionPasses, visibleIds } from "./form-conditions.js";
 
 const LAYOUT = ["text_block", "space", "letterhead", "watermark"];
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
@@ -117,6 +118,7 @@ function signaturePad(host) {
     g.restore();
     empty = true;
     host.classList.remove("is-signed");
+    host.dispatchEvent(new Event("input", { bubbles: true }));
   });
 
   new ResizeObserver(setup).observe(canvas);
@@ -128,7 +130,7 @@ function signaturePad(host) {
 
 /* ===================== Reading and writing answers ===================== */
 
-function readField(f, w, { pads, calc, consent }) {
+export function readField(f, w, { pads = {}, calc = {}, consent = {} } = {}) {
   switch (f.type) {
     case "short_text": case "long_text": case "email": case "date": case "record_date": {
       const el = w.querySelector(".fe-in");
@@ -188,6 +190,23 @@ function readField(f, w, { pads, calc, consent }) {
       return consent[f.id] || { found: false, date: "", submissionId: "", name: "" };
   }
   return null;
+}
+
+// Hides / shows questions on a live page from the current answers. Returns the shown ids.
+// Questions are worked out top to bottom, so each one only depends on answers above it.
+export function applyVisibility(sheet, fields, ctx) {
+  const byId = new Map(fields.map((f) => [f.id, f]));
+  const answers = {};
+  const shown = new Set();
+  fields.forEach((f) => {
+    const w = sheet.querySelector(`[data-fid="${CSS.escape(f.id)}"]`);
+    const ok = conditionPasses(f, answers, byId, shown);
+    if (ok) shown.add(f.id);
+    if (!w) return;
+    w.hidden = !ok;
+    if (ok && !LAYOUT.includes(f.type) && f.type !== "photo") answers[f.id] = readField(f, w, ctx);
+  });
+  return shown;
 }
 
 function writeField(f, w, v) {
@@ -338,6 +357,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
   const pads = {};
   const consent = {};
   let calc = {};
+  let shown = new Set(fields.map((f) => f.id));
   let dirty = false, saving = false;
 
   // Signature pads (with name + date), and photos (coming next)
@@ -399,8 +419,13 @@ export async function mountFormFill(container, param, { staff } = {}) {
     }
   });
 
+  /* ---------- Calculations + which questions show ---------- */
+  const rctx = () => ({ pads, calc, consent });
+
   const updateCalcs = () => {
     calc = evaluateCalcs(fields, (f) => {
+      const w = wrap(f.id);
+      if (w && w.hidden) return null; // hidden questions count as unanswered
       const el = sheet.querySelector(`input[data-in="${CSS.escape(f.id)}"]`);
       return el ? el.value : null;
     });
@@ -410,7 +435,15 @@ export async function mountFormFill(container, param, { staff } = {}) {
       if (out && f) out.textContent = formatCalc(calc[id], f) || "—";
     });
   };
-  updateCalcs();
+
+  // Twice, because a calculation can depend on what's shown and decide what's shown
+  const refresh = () => {
+    updateCalcs();
+    shown = applyVisibility(sheet, fields, rctx());
+    updateCalcs();
+    shown = applyVisibility(sheet, fields, rctx());
+  };
+  refresh();
 
   // Consent checks run in the background
   const consentFields = fields.filter((f) => f.type === "consent_status");
@@ -429,12 +462,13 @@ export async function mountFormFill(container, param, { staff } = {}) {
           const el = wrap(f.id) && wrap(f.id).querySelector(".fe-consent");
           if (el) el.outerHTML = consentHtml(f, consent[f.id]);
         });
+        refresh();
       });
   }
 
   sheet.addEventListener("input", (e) => {
     dirty = true;
-    updateCalcs();
+    refresh();
     const w = e.target.closest("[data-fid]");
     if (w && w.classList.contains("is-invalid")) {
       w.classList.remove("is-invalid");
@@ -444,13 +478,12 @@ export async function mountFormFill(container, param, { staff } = {}) {
   });
 
   /* ---------- Checking and saving ---------- */
-  const rctx = () => ({ pads, calc, consent });
-
   function problems() {
     const out = [];
     const t = todayIso();
     fields.forEach((f) => {
       if (LAYOUT.includes(f.type) || f.type === "photo") return;
+      if (!shown.has(f.id)) return; // hidden questions are never required
       const w = wrap(f.id);
       if (!w) return;
       const v = readField(f, w, rctx());
@@ -498,20 +531,22 @@ export async function mountFormFill(container, param, { staff } = {}) {
   async function save(kind) {
     if (saving) return;
     if (!consentReady) { msgEl.textContent = "Still checking consent records. Try again in a moment."; return; }
-    updateCalcs();
+    refresh();
     const list = problems();
     showProblems(list);
     if (list.length) return;
 
+    // Only questions that are showing are saved
     const answers = {}, signatures = {};
     fields.forEach((f) => {
       if (LAYOUT.includes(f.type) || f.type === "photo") return;
+      if (!shown.has(f.id)) return;
       const w = wrap(f.id);
       if (!w) return;
       answers[f.id] = readField(f, w, rctx());
       if (f.type === "signature" && pads[f.id] && !pads[f.id].isEmpty()) signatures[f.id] = pads[f.id].toDataURL();
     });
-    const rd = fields.find((f) => f.type === "record_date");
+    const rd = fields.find((f) => f.type === "record_date" && shown.has(f.id));
     let recordDate = rd ? answers[rd.id] : "";
     if (!/^\d{4}-\d{2}-\d{2}$/.test(recordDate || "")) recordDate = todayIso();
 
@@ -556,8 +591,6 @@ export async function mountFormFill(container, param, { staff } = {}) {
     }
   }
   saveBtns.forEach((b) => b.addEventListener("click", () => save(b.dataset.save)));
-  
-  
 
   /* ---------- Don't lose answers by accident ---------- */
   const onBeforeUnload = (e) => { if (dirty && root.isConnected) { e.preventDefault(); e.returnValue = ""; } };
@@ -633,9 +666,11 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
     </div>`;
 
   const sheet = root.querySelector('[data-role="sheet"]');
+  const shownIds = visibleIds(fields, sub.answers);
   fields.forEach((f) => {
     const w = sheet.querySelector(`[data-fid="${CSS.escape(f.id)}"]`);
     if (!w) return;
+    if (!shownIds.has(f.id)) { w.hidden = true; return; } // wasn't shown when it was filled in
     if (f.type === "signature") {
       const host = w.querySelector(".fe-sig");
       const src = sub.signatures[f.id];

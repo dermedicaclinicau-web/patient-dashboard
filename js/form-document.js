@@ -3,6 +3,7 @@
 // inline-friendly CSS, so the Apps Script PDF converter renders it reliably.
 import { esc, normaliseField, patientParts } from "./form-fields.js";
 import { formatCalc } from "./form-calc.js";
+import { visibleIds } from "./form-conditions.js";
 
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
 const LOGO_RE = /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/;
@@ -84,7 +85,9 @@ export function buildFormDocument({ sub, ver, letterhead: lh }) {
   const fields = (ver.fields || []).map(normaliseField).filter(Boolean);
   const showLh = !(ver.settings && ver.settings.showLetterhead === false);
 
+  const shown = visibleIds(fields, sub.answers);
   const body = fields.map((f) => {
+    if (!shown.has(f.id)) return "";
     if (f.type === "watermark" || f.type === "photo") return "";
     if (f.type === "space") return `<div style="height:${{ small: 8, medium: 20, large: 40 }[f.size] || 20}px"></div>`;
     if (f.type === "letterhead") return letterhead(lh);
