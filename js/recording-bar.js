@@ -19,7 +19,7 @@ const ICONS = {
 let bar = null;
 let staff = null;
 let context = null;   // the patient page currently open (for the "Ready" state)
-let consent = false;
+let consent = true; // consent forms are signed at check-in
 let lastKey = "";
 let announcedNotes = ""; // so the notes tab only pops out once per recording
 
@@ -51,6 +51,10 @@ export function initRecordingBar(currentStaff) {
       }
     });
     subscribe(render);
+    // If the notes for the finished recording are deleted, clear the "notes ready" bar
+    window.addEventListener("recording-deleted", (e) => {
+      if (getState().transcriptId === e.detail.id) dismiss();
+    });
   }
   checkForUnfinished();
   render(getState());
@@ -58,7 +62,7 @@ export function initRecordingBar(currentStaff) {
 
 // Called by the patient page (patient) or other pages (null)
 export function setRecordingPatient(patient) {
-  if ((context && context.id) !== (patient && patient.id)) consent = false;
+  if ((context && context.id) !== (patient && patient.id)) consent = true; // reset to the default for each patient
   context = patient;
   lastKey = "";
   if (bar) render(getState());
@@ -92,7 +96,7 @@ function render(s) {
         <span class="rec-text"><strong>Ready to record</strong><small>${escapeHtml(context.name)}</small></span>
         <label class="rec-consent">
           <input type="checkbox" data-rec-consent ${consent ? "checked" : ""} />
-          Patient has consented to this consultation being recorded
+          Recording consent on file (signed at check-in)
         </label>
         <span class="rec-actions">
           <button type="button" class="rec-btn primary" data-rec="start" ${consent ? "" : "disabled"}>${ICONS.mic}Start Appointment</button>

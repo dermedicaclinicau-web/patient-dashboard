@@ -69,7 +69,9 @@ export async function callApi(payload) {
   if (!data) throw new Error("Unexpected response from the server.");
   if (!data.ok) {
     if (data.error === "UNAUTHORIZED") throw unauthorized();
-    throw new Error("Couldn't load data. Please try again.");
+    const e = new Error("Couldn't load data. Please try again.");
+    e.code = data.error;
+    throw e;
   }
   return data;
 }

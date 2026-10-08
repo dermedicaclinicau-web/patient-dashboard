@@ -1024,6 +1024,20 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .sp-save-state.dirty { color: #b45309; font-weight: 600; }
 .sp-foot button { height: 40px; }
 
+.sp-del { display: inline-flex; align-items: center; gap: .35rem; padding: 0 .85rem; border-radius: 10px;
+  border: 1px solid #fecaca; background: #fff; color: #dc2626; font-size: .85rem; font-weight: 600; cursor: pointer; }
+.sp-del svg { width: 15px; height: 15px; }
+.sp-del:hover { background: #fef2f2; }
+.sp-del.solid { background: #dc2626; border-color: #dc2626; color: #fff; }
+.sp-del.solid:hover { background: #b91c1c; }
+.sp-del:disabled { opacity: .6; cursor: wait; }
+.sp-foot.is-confirm { flex-direction: column; align-items: stretch; background: #fef2f2; border-top-color: #fecaca; }
+.sp-del-confirm p { font-size: .86rem; color: #7f1d1d; line-height: 1.5; }
+.sp-del-reason { width: 100%; margin-top: .6rem; padding: .6rem .75rem; border: 1px solid #fecaca; border-radius: 10px;
+  background: #fff; outline: none; }
+.sp-del-reason:focus { border-color: #dc2626; box-shadow: 0 0 0 3px rgba(220, 38, 38, .12); }
+.sp-del-actions { display: flex; justify-content: flex-end; gap: .5rem; margin-top: .6rem; }
+
 .sp-tab { position: fixed; top: 50%; right: 0; z-index: 39; display: flex; align-items: center; gap: .45rem;
   padding: .9rem .55rem; border: none; border-radius: 12px 0 0 12px; background: var(--primary); color: #fff;
   font-weight: 700; font-size: .82rem; letter-spacing: .04em; cursor: pointer; writing-mode: vertical-rl;

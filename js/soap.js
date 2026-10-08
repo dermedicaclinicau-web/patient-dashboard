@@ -102,3 +102,19 @@ export function transcriptHtml(raw, escapeHtml) {
     return `<p class="sp-line ${who}"><b>${escapeHtml(label)}</b>${escapeHtml(text)}</p>`;
   }).join("");
 }
+
+// Hides lines that are ONLY a placeholder ("Nil", "Not discussed", "N/A"…).
+// Real answers such as "Smoking: None" are kept.
+const PLACEHOLDER_RE = /^(?:nil|none|n\/?a|nkda|nkfa|unknown|not (?:discussed|mentioned|stated|applicable|recorded|provided|specified)|no (?:known )?(?:drug )?(?:allergies|medications?|(?:medical )?conditions?)(?: reported| known)?|nothing (?:to report|recorded|discussed|noted))\.?$/i;
+
+export function cleanPlaceholders(text) {
+  return String(text || "")
+    .split("\n")
+    .filter((line) => {
+      const t = line.replace(/^\s*[-•*]\s*/, "").trim();
+      return !t || !PLACEHOLDER_RE.test(t);
+    })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}

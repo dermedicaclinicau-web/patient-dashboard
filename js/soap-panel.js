@@ -1,7 +1,8 @@
 import { db, auth } from "./firebase-config.js";
 import { doc, getDoc, updateDoc, collection, query, where, getDocs, addDoc }
-  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { SECTIONS, parseSoap, assembleSoap, transcriptHtml } from "./soap.js";
+from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { SECTIONS, parseSoap, assembleSoap, transcriptHtml, cleanPlaceholders } from "./soap.js";
+import { callApi } from "./appointments.js";
 import { escapeHtml, showToast, toDateKey } from "./utils.js";
 
 const svg = (p) =>
@@ -23,6 +24,7 @@ const ICONS = {
   restore: svg('<polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/>'),
   minimise: svg('<polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/>'),
   close: svg('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
+  trash: svg('<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>'),
 };
 
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July",
@@ -148,7 +150,7 @@ async function load(id) {
     const data = snap.data();
     const parsed = parseSoap(data["Gemini SOAP"]);
     const original = {};
-    SECTIONS.forEach((s) => { original[s.key] = parsed.sections[s.key] || ""; });
+    SECTIONS.forEach((s) => { original[s.key] = cleanPlaceholders(parsed.sections[s.key]); });
 
     current = { id, data, parsed, original, extras: parsed.extras.map((x) => ({ ...x })), dirty: false };
     try { sessionStorage.setItem(STORE_KEY, JSON.stringify({ id, mode })); } catch { /* ignore */ }
@@ -222,6 +224,7 @@ function render() {
     </div>
 
     <div class="sp-foot">
+      ${reviewed ? "" : `<button type="button" class="sp-del" data-sp="delete" title="Delete this recording">${ICONS.trash}Delete</button>`}
       <span class="sp-save-state">${saveStateText()}</span>
       <button type="button" class="btn-ghost" data-sp="save-draft">Save as Draft</button>
       <button type="button" class="btn-primary" data-sp="save-reviewed">Save as Reviewed</button>
@@ -275,6 +278,9 @@ async function onClick(e) {
   else if (action === "save-draft") save("Draft", btn);
   else if (action === "save-reviewed") save("Reviewed", btn);
   else if (action === "save-note") saveNote(btn);
+  else if (action === "delete") showDeleteConfirm();
+  else if (action === "delete-cancel") hideDeleteConfirm();
+  else if (action === "delete-confirm") doDelete(btn);
 }
 
 function refreshHeaderIcon() {
@@ -326,7 +332,7 @@ async function save(status, btn) {
     await updateDoc(doc(db, "appointment_transcripts", current.id), update);
     Object.assign(current.data, update);
     current.parsed = parseSoap(soap);
-    SECTIONS.forEach((s) => { current.original[s.key] = current.parsed.sections[s.key] || ""; });
+    SECTIONS.forEach((s) => { current.original[s.key] = cleanPlaceholders(current.parsed.sections[s.key]); });
     current.extras = current.parsed.extras.map((x) => ({ ...x }));
     current.dirty = false;
     render();
@@ -407,5 +413,70 @@ async function saveNote(btn) {
   } finally {
     btn.disabled = false;
     btn.textContent = "Save Note";
+  }
+}
+
+/* ===================== Delete ===================== */
+
+function showDeleteConfirm() {
+  const foot = panel.querySelector(".sp-foot");
+  if (!foot || foot.classList.contains("is-confirm")) return;
+  foot.dataset.prev = foot.innerHTML; // restore on Cancel, keeping any unsaved edits above intact
+  foot.classList.add("is-confirm");
+  foot.innerHTML = `
+    <div class="sp-del-confirm">
+      <p><strong>Delete this recording?</strong> The notes, transcript and audio will be permanently removed.
+        This can't be undone. A record of who deleted it, when and why is kept.</p>
+      <input type="text" class="sp-del-reason" maxlength="300"
+             placeholder="Reason, e.g. wrong patient or test recording" aria-label="Reason for deleting" />
+      <div class="sp-del-actions">
+        <button type="button" class="btn-ghost" data-sp="delete-cancel">Cancel</button>
+        <button type="button" class="sp-del solid" data-sp="delete-confirm">${ICONS.trash}Delete permanently</button>
+      </div>
+    </div>`;
+  foot.querySelector(".sp-del-reason").focus();
+}
+
+function hideDeleteConfirm() {
+  const foot = panel.querySelector(".sp-foot");
+  if (!foot || !foot.classList.contains("is-confirm")) return;
+  foot.classList.remove("is-confirm");
+  foot.innerHTML = foot.dataset.prev || "";
+}
+
+async function doDelete(btn) {
+  if (!current || !current.id) return;
+  const reasonEl = panel.querySelector(".sp-del-reason");
+  const reason = reasonEl ? reasonEl.value.trim() : "";
+  if (reason.length < 3) {
+    showToast("Please give a short reason");
+    if (reasonEl) reasonEl.focus();
+    return;
+  }
+
+  const id = current.id;
+  btn.disabled = true;
+  btn.innerHTML = "Deleting…";
+
+  try {
+    await callApi({ action: "deleteRecording", recordId: id, reason });
+    current.dirty = false;
+    closeSoapPanel();
+    showToast("Recording deleted");
+    window.dispatchEvent(new CustomEvent("recording-deleted", { detail: { id } }));
+    // Refresh the patient page so the deleted notes disappear from its sections
+    if (location.hash.startsWith("#/patient/")) window.dispatchEvent(new HashChangeEvent("hashchange"));
+  } catch (err) {
+    console.error("Delete failed:", err);
+    const messages = {
+      FORBIDDEN: "Only the clinician who recorded this, or an Admin, can delete it.",
+      REVIEWED: "Reviewed notes can't be deleted.",
+      NOT_FOUND: "This recording has already been deleted.",
+      REASON_REQUIRED: "Please give a short reason.",
+      UNAUTHORIZED: "Your session has expired. Please log in again.",
+    };
+    showToast(messages[err.code] || "Couldn't delete. Please try again.");
+    btn.disabled = false;
+    btn.innerHTML = `${ICONS.trash}Delete permanently`;
   }
 }
