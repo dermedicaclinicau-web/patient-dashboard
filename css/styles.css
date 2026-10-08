@@ -1205,6 +1205,30 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .sp-tab.pulse { animation: sp-pulse 1.6s ease-in-out 3; }
 @keyframes sp-pulse { 50% { transform: translateY(-50%) translateX(-5px); box-shadow: -8px 8px 26px -6px rgba(15, 118, 110, .6); } }
 
+/* ---------- Confirm dialog ---------- */
+.cd-dialog { margin: auto; padding: 0; border: none; border-radius: 20px; width: min(420px, calc(100% - 2rem));
+  background: #fff; box-shadow: 0 30px 70px -20px rgba(15, 23, 42, .45); }
+.cd-dialog[open] { animation: cd-in .18s ease-out; }
+@keyframes cd-in { from { opacity: 0; transform: translateY(8px) scale(.98); } to { opacity: 1; transform: none; } }
+.cd-dialog::backdrop { background: rgba(15, 23, 42, .5); backdrop-filter: blur(3px); }
+.cd-box { padding: 1.6rem 1.5rem 1.3rem; text-align: center; }
+.cd-icon { width: 52px; height: 52px; margin: 0 auto .9rem; display: grid; place-items: center; border-radius: 50%;
+  background: var(--cd-bg); color: var(--cd-fg); }
+.cd-icon svg { width: 26px; height: 26px; }
+.cd-title { font-size: 1.15rem; font-weight: 700; color: var(--text); }
+.cd-message { margin-top: .5rem; color: var(--muted); font-size: .92rem; line-height: 1.55; }
+.cd-message p + p { margin-top: .5rem; }
+.cd-actions { display: flex; gap: .6rem; margin-top: 1.4rem; }
+.cd-btn { flex: 1; height: 44px; border-radius: 12px; font-size: .92rem; font-weight: 700; cursor: pointer; }
+.cd-cancel { border: 1px solid var(--border); background: #fff; color: var(--text); }
+.cd-cancel:hover { background: #f8fafc; }
+.cd-ok { border: none; background: var(--cd-btn); color: #fff; }
+.cd-ok:hover { filter: brightness(.94); }
+.cd-btn:focus-visible { outline: 3px solid var(--cd-ring); outline-offset: 2px; }
+.cd-tone-warning { --cd-bg: #fef3c7; --cd-fg: #b45309; --cd-btn: #d97706; --cd-ring: #fde68a; }
+.cd-tone-danger  { --cd-bg: #fee2e2; --cd-fg: #dc2626; --cd-btn: #dc2626; --cd-ring: #fecaca; }
+.cd-tone-info    { --cd-bg: #e0e7ff; --cd-fg: #4338ca; --cd-btn: #4f46e5; --cd-ring: #c7d2fe; }
+
 /* ---------- Responsive ---------- */
 @media (max-width: 860px) {
   .shell-body { flex-direction: column; }

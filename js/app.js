@@ -7,6 +7,7 @@ import { maybeShowStartOfDay, closeStartOfDay } from "./start-of-day.js";
 import { initRecordingBar, setRecordingPatient } from "./recording-bar.js";
 import { isRecorderBusy, suspendRecorder } from "./recorder.js";
 import { initSoapPanel, closeSoapPanel, hasUnsavedNotes } from "./soap-panel.js";
+import { confirmDialog } from "./dialog.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -130,11 +131,19 @@ function renderStaff(staff) {
 }
 
 els.staffPhoto.addEventListener("error", () => { els.staffPhoto.hidden = true; });
-els.logoutBtn.addEventListener("click", () => {
-  if (isRecorderBusy() && !confirm(
-    "A recording is in progress. Log out anyway?\n\nThe recording will stay saved on this computer and can be uploaded at your next login."
-  )) return;
-  if (hasUnsavedNotes() && !confirm("You have unsaved changes to clinical notes. Log out and discard them?")) return;
+els.logoutBtn.addEventListener("click", async () => {
+  if (isRecorderBusy() && !(await confirmDialog({
+    title: "A recording is in progress",
+    message: "Log out anyway? The recording stays saved on this computer and can be uploaded at your next login.",
+    confirmLabel: "Log out",
+    tone: "warning",
+  }))) return;
+  if (hasUnsavedNotes() && !(await confirmDialog({
+    title: "Unsaved clinical notes",
+    message: "You have unsaved changes to clinical notes. Logging out will discard them.",
+    confirmLabel: "Log out and discard",
+    tone: "warning",
+  }))) return;
   logout();
 });
 

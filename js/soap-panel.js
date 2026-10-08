@@ -12,6 +12,7 @@ import {
 } from "./email-composer.js";
 
 import { callApi } from "./appointments.js";
+import { confirmDialog } from "./dialog.js";
 import { escapeHtml, showToast, toDateKey } from "./utils.js";
 
 const svg = (p) =>
@@ -73,8 +74,12 @@ export function closeSoapPanel() {
 export async function showSoapPanel(recordId, { mode: wanted = "open" } = {}) {
   if (!recordId) return;
   ensureDom();
-  if (current && current.id !== recordId && current.dirty &&
-      !confirm("You have unsaved changes to the notes that are open. Discard them?")) return;
+  if (current && current.id !== recordId && current.dirty && !(await confirmDialog({
+    title: "Discard unsaved changes?",
+    message: "You have unsaved changes to the notes that are open. Opening other notes will discard them.",
+    confirmLabel: "Discard changes",
+    tone: "warning",
+  }))) return;
 
   if (!current || current.id !== recordId) {
     setMode(wanted);
@@ -338,7 +343,12 @@ async function onClick(e) {
   if (action === "max") { setMode(mode === "max" ? "open" : "max"); if (current && current.data) refreshHeaderIcon(); }
   else if (action === "min") setMode("min");
   else if (action === "close") {
-    if (hasUnsavedNotes() && !confirm("Close without saving your changes?")) return;
+    if (hasUnsavedNotes() && !(await confirmDialog({
+      title: "Close without saving?",
+      message: "Your changes to these notes haven't been saved yet.",
+      confirmLabel: "Close without saving",
+      tone: "warning",
+    }))) return;
     closeSoapPanel();
   }
   else if (action === "save-draft") save("Draft", btn);
@@ -615,7 +625,7 @@ function commitPlanEdit(ta) {
   if (ta.isConnected) ta.replaceWith(tpl.content.firstElementChild);
 }
 
-function planAction(btn) {
+async function planAction(btn) {
   const plan = current.plan;
   const open = panel.querySelector("textarea.pe-input");
   if (open) commitPlanEdit(open);
@@ -625,7 +635,12 @@ function planAction(btn) {
     const i = Number(btn.dataset.ci);
     const c = plan.concerns[i];
     const name = `concern ${String.fromCharCode(65 + i)}${c && c.concern_category ? ` (${c.concern_category})` : ""}`;
-    if (!confirm(`Remove ${name} from the plan?`)) return;
+    if (!(await confirmDialog({
+      title: `Remove ${name}?`,
+      message: "It will be taken out of the treatment plan. Nothing is saved until you click Save.",
+      confirmLabel: "Remove",
+      tone: "danger",
+    }))) return;
     plan.concerns.splice(i, 1);
   } else if (action === "add-concern") {
     plan.concerns.push({ description: "", concern_category: "", area: "", treatment: "", frequency_interval: "", quote: "", comments: "" });
@@ -729,10 +744,15 @@ function hideBusy() {
 
 async function regenerate() {
   if (!current || !current.data) return;
-  const msg = "Regenerate the notes from the transcript?\n\n" +
-    "This replaces the current notes with a new Draft. The current version is kept so you can restore it." +
-    (hasUnsavedNotes() ? "\n\nYour unsaved edits will be lost." : "");
-  if (!confirm(msg)) return;
+  const ok = await confirmDialog({
+    title: "Regenerate the notes?",
+    message: "Gemini will write the notes again from the transcript and replace them with a new Draft.\n\n" +
+      "The current version is kept, so you can restore it if you prefer it." +
+      (hasUnsavedNotes() ? "\n\nYour unsaved edits will be lost." : ""),
+    confirmLabel: "Regenerate",
+    tone: hasUnsavedNotes() ? "warning" : "info",
+  });
+  if (!ok) return;
 
   const id = current.id;
   showBusy("Regenerating the notes…", "This can take a minute or two. You can minimise this panel and keep working.");
@@ -763,7 +783,12 @@ async function undoRegenerate() {
   if (!current || !current.data) return;
   const prev = current.data["Previous Gemini SOAP"];
   if (!prev) return;
-  if (!confirm("Restore the previous version of the notes?\n\nThe regenerated version will be replaced.")) return;
+  if (!(await confirmDialog({
+    title: "Restore the previous version?",
+    message: "The regenerated notes will be replaced by the version from before you regenerated.",
+    confirmLabel: "Restore",
+    tone: "info",
+  }))) return;
 
   const user = auth.currentUser;
   if (!user || !staff) { showToast("Please log in again."); return; }
@@ -797,9 +822,13 @@ async function emailFromPlan(btn) {
   const concerns = current.plan.concerns.filter((c) => String(c.treatment || "").trim());
   if (!concerns.length) { showToast("Add a treatment to the plan first"); return; }
 
-  if (current.emailItems && current.emailItems.length &&
-      !confirm("Rebuild the Treatment Info to Email list from the treatment plan?\n\n" +
-               "The current list will be replaced. Nothing is saved until you click Save.")) return;
+  if (current.emailItems && current.emailItems.length && !(await confirmDialog({
+    title: "Update the email list from the plan?",
+    message: "The Treatment Info to Email list will be rebuilt from the treatment plan, including any quotes or treatments you've changed.\n\n" +
+      "Nothing is saved until you click Save.",
+    confirmLabel: "Update list",
+    tone: "info",
+  }))) return;
 
   const id = current.id;
   const label = btn.innerHTML;
