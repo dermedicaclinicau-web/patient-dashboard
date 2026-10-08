@@ -1,7 +1,8 @@
 // The Image Bank: browse, upload, organise and choose images.
-// Used as its own page (#/image-bank) and, in the next step, as the picker for the Image field.
+// Used as its own page (#/image-bank) and as the picker for the Image field.
 import {
-  bankList, bankSearch, bankMkdir, bankRename, bankTrash, bankUpload, bankImage, bankError,
+  bankList, cachedList, rememberList, bankSearch, bankMkdir, bankRename, bankTrash,
+  bankUpload, bankImage, bankError, thumbFor,
 } from "./image-bank-api.js";
 import { listFormTemplates } from "./form-templates.js";
 import { confirmDialog } from "./dialog.js";
@@ -66,6 +67,7 @@ function createBank(host, { mode = "manage", isAdmin = false, onPick = null } = 
   const canEdit = isAdmin;
   const state = { folderId: "", path: [], folders: [], images: [], next: null, q: "", searching: false };
   let token = 0;
+  let observer = null;
 
   host.innerHTML = `
     <div class="ib${picking ? " is-picking" : ""}">
@@ -113,7 +115,8 @@ function createBank(host, { mode = "manage", isAdmin = false, onPick = null } = 
   const imageTile = (m) => `
     <div class="ib-tile is-image">
       <button type="button" class="ib-hit" data-img="${esc(m.id)}" title="${esc(m.name)}">
-        <span class="ib-thumb">${m.thumb ? `<img src="${esc(m.thumb)}" alt="" loading="lazy" />` : I.image}</span>
+        <span class="ib-thumb${m.localThumb ? " is-loaded" : ""}" data-thumb="${esc(m.id)}">${
+          m.localThumb ? `<img src="${esc(m.localThumb)}" alt="" />` : I.image}</span>
         <span class="ib-name">${esc(m.name)}</span>
       </button>${tools("image", m)}
     </div>`;
@@ -139,6 +142,10 @@ function createBank(host, { mode = "manage", isAdmin = false, onPick = null } = 
       grid.innerHTML = state.folders.map(folderTile).join("") + state.images.map(imageTile).join("");
     }
     more.innerHTML = state.next !== null ? '<button type="button" class="ff-btn" data-act="more">Show more images</button>' : "";
+    if (!state.searching && state.path.length) {
+      rememberList({ folder: { id: state.folderId }, path: state.path, folders: state.folders, images: state.images, next: state.next });
+    }
+    watchThumbs();
   }
 
   function renderLoading() {
@@ -151,22 +158,61 @@ function createBank(host, { mode = "manage", isAdmin = false, onPick = null } = 
       <button type="button" class="ff-btn" data-act="retry">Try again</button></div>`;
   }
 
+  /* ---------- Thumbnails: only for tiles on screen ---------- */
+  function loadThumb(span) {
+    const m = state.images.find((x) => x.id === span.dataset.thumb);
+    if (!m) return;
+    span.classList.add("is-loading");
+    thumbFor(m)
+      .then((url) => {
+        if (!url || !span.isConnected) return;
+        span.innerHTML = `<img src="${esc(url)}" alt="" />`;
+        span.classList.add("is-loaded");
+      })
+      .catch(() => { /* leave the picture icon */ })
+      .finally(() => span.classList.remove("is-loading"));
+  }
+
+  function watchThumbs() {
+    if (observer) observer.disconnect();
+    const spans = grid.querySelectorAll(".ib-thumb[data-thumb]:not(.is-loaded)");
+    if (!spans.length) return;
+    if (!("IntersectionObserver" in window)) { spans.forEach(loadThumb); return; }
+    observer = new IntersectionObserver((entries) => {
+      entries.forEach((e) => {
+        if (!e.isIntersecting) return;
+        observer.unobserve(e.target);
+        loadThumb(e.target);
+      });
+    }, { root: picking ? host : null, rootMargin: "300px" });
+    spans.forEach((s) => observer.observe(s));
+  }
+
   /* ---------- Loading ---------- */
+  const apply = (r) => Object.assign(state, {
+    folderId: r.folder.id, path: r.path, folders: [...r.folders], images: [...r.images], next: r.next,
+  });
+  const sig = (r) => JSON.stringify([
+    r.folders.map((f) => f.id + f.name),
+    r.images.map((m) => m.id + m.name + m.updated),
+    r.next,
+  ]);
+
   async function open(folderId) {
     const t = ++token;
     state.searching = false;
     state.q = "";
     qInput.value = "";
-    renderLoading();
+    const cached = cachedList(folderId);
+    if (cached) { apply(cached); render(); } else renderLoading();
     try {
       const r = await bankList(folderId);
       if (t !== token) return;
-      Object.assign(state, { folderId: r.folder.id, path: r.path, folders: r.folders, images: r.images, next: r.next });
-      render();
+      if (!cached || sig(cached) !== sig(r)) { apply(r); render(); } // only redraw if Drive changed
     } catch (err) {
       if (t !== token) return;
       console.error("Image bank list failed:", err);
-      renderError(err);
+      if (cached) showToast(bankError(err)); else renderError(err);
     }
   }
 
@@ -266,7 +312,7 @@ function createBank(host, { mode = "manage", isAdmin = false, onPick = null } = 
     dlg.innerHTML = `
       <div class="ib-prev-head"><strong title="${esc(m.name)}">${esc(m.name)}</strong>
         <button type="button" class="lh-btn is-quiet" data-act="close">Close</button></div>
-      <div class="ib-prev-body"><div class="skeleton" style="height:320px;border-radius:10px"></div></div>`;
+      <div class="ib-prev-body"><div class="skeleton" style="height:320px;width:100%;border-radius:10px"></div></div>`;
     dlg.querySelector('[data-act="close"]').addEventListener("click", () => dlg.close());
     dlg.addEventListener("click", (e) => { if (e.target === dlg) dlg.close(); });
     dlg.addEventListener("close", () => dlg.remove());
@@ -299,6 +345,7 @@ function createBank(host, { mode = "manage", isAdmin = false, onPick = null } = 
       try {
         const r = await bankUpload(target, file);
         row.done();
+        r.image.localThumb = URL.createObjectURL(file); // show it straight away
         if (state.folderId === target && !state.searching) {
           state.images.push(r.image);
           state.images.sort(byName);
@@ -332,8 +379,7 @@ function createBank(host, { mode = "manage", isAdmin = false, onPick = null } = 
     if (!act) return;
     if (act.dataset.act === "mkdir") makeFolder();
     else if (act.dataset.act === "more") loadMore();
-    else if (act.dataset.act === "clear") open(state.folderId);
-    else if (act.dataset.act === "retry") open(state.folderId);
+    else if (act.dataset.act === "clear" || act.dataset.act === "retry") open(state.folderId);
   });
 
   let searchTimer = null;
@@ -348,7 +394,9 @@ function createBank(host, { mode = "manage", isAdmin = false, onPick = null } = 
 
     const area = $('[data-role="area"]');
     let depth = 0;
-    area.addEventListener("dragenter", (e) => { if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) { depth++; area.classList.add("is-dragging"); } });
+    area.addEventListener("dragenter", (e) => {
+      if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) { depth++; area.classList.add("is-dragging"); }
+    });
     area.addEventListener("dragleave", () => { depth = Math.max(0, depth - 1); if (!depth) area.classList.remove("is-dragging"); });
     area.addEventListener("dragover", (e) => { if (area.classList.contains("is-dragging")) e.preventDefault(); });
     area.addEventListener("drop", (e) => {
@@ -382,7 +430,7 @@ export function mountImageBank(container, { isAdmin = false } = {}) {
   createBank(root.querySelector('[data-role="bank"]'), { mode: "manage", isAdmin });
 }
 
-/* ===================== Picker (used by the Image field next) ===================== */
+/* ===================== Picker (used by the Image field) ===================== */
 
 // Resolves with { id, name } or null if cancelled
 export function openImagePicker({ isAdmin = false } = {}) {

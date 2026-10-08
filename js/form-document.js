@@ -133,7 +133,7 @@ function answer(f, v, sig, inline) {
 //   previewHtml a full page that looks like a sheet of paper (for Preview)
 //   printHtml   a plain page, used only if the browser can't make the PDF
 //   fileName
-export function buildFormDocument({ sub, ver, letterhead: lh }) {
+export function buildFormDocument({ sub, ver, letterhead: lh, images = {} }) {
   const fields = (ver.fields || []).map(normaliseField).filter(Boolean);
   const showLh = !(ver.settings && ver.settings.showLetterhead === false);
   const shown = visibleIds(fields, sub.answers);
@@ -158,6 +158,12 @@ export function buildFormDocument({ sub, ver, letterhead: lh }) {
     const sig = sub.signatures[f.id];
     const label = st.hideLabel ? "" : esc(f.label || "");
     const gap = { tight: 2, normal: 4, wide: 10 }[st.gap] || 4;
+    if (f.type === "image") {
+      if (f.source === "staff" || !f.fileId || !images[f.fileId]) return "";
+      const w = { small: "30%", medium: "50%", large: "75%", full: "100%" }[f.size] || "50%";
+      return `<div class="block" style="${box}"><img src="${images[f.fileId]}" alt="" style="display:inline-block !important;width:${w};max-width:100%;height:auto;">${
+        f.caption ? `<div style="font-size:9pt;color:#64748b;margin-top:4px;">${esc(f.caption)}</div>` : ""}</div>`;
+    }
 
     if (st.pos === "beside" && INLINE_TYPES.includes(f.type)) {
       const qw = { narrow: "25%", medium: "40%", wide: "55%" }[st.qWidth]; // "Fit" = as wide as the question

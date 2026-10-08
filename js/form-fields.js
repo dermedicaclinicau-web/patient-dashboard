@@ -26,6 +26,7 @@ export const ICONS = {
   table: '<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="12" y1="3" x2="12" y2="21"/>',
   calculation: '<rect x="4" y="2" width="16" height="20" rx="2"/><line x1="8" y1="6" x2="16" y2="6"/><line x1="8" y1="11" x2="8" y2="11.01"/><line x1="12" y1="11" x2="12" y2="11.01"/><line x1="16" y1="11" x2="16" y2="11.01"/><line x1="8" y1="15" x2="8" y2="15.01"/><line x1="12" y1="15" x2="12" y2="15.01"/><line x1="16" y1="15" x2="16" y2="18"/><line x1="8" y1="18" x2="12" y2="18"/>',
   signature: '<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>',
+  image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>',
   photo: '<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>',
   consent_status: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/>',
   text_block: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>',
@@ -46,13 +47,13 @@ export const FIELD_TYPES = {
   record_date:    { name: "Record date", was: "Record Date", label: "Record date" },
   single_choice:  { name: "Single choice", was: "1 Choice", label: "Untitled question" },
   checkboxes:     { name: "Checkboxes", was: "Multi-Checkbox", label: "Untitled question" },
-  checkbox_notes: { name: "Checkboxes with notes", was: "Multi-Check+Comments", label: "Untitled question" },
-  sub_checks:     { name: "Checkboxes with sub-options", was: "Sub-Checks", label: "Untitled question" },
+  checkbox_notes: { name: "Checkboxes + notes", was: "Multi-Check+Comments", label: "Untitled question" },
+  sub_checks:     { name: "Checkboxes + sub-options", was: "Sub-Checks", label: "Untitled question" },
   dropdown:       { name: "Dropdown", was: "Dropdown", label: "Untitled question" },
   table:          { name: "Table", was: "Table", label: "Untitled table" },
   calculation:    { name: "Calculation", was: "Calculation", label: "Total" },
   signature:      { name: "Signature", was: "Signature", label: "Patient signature" },
-  photo:          { name: "Photo", was: "Photo Capture", label: "Photo" },
+  image:          { name: "Image", was: "Image Photo Capture picture", label: "" },
   consent_status: { name: "Consent check", was: "Consent Status", label: "Consent on file" },
   text_block:     { name: "Text block", was: "Paragraph", label: "Information" },
   letterhead:     { name: "Letterhead", was: "Letterhead", label: "" },
@@ -61,21 +62,23 @@ export const FIELD_TYPES = {
 };
 
 export const FIELD_GROUPS = [
-  ["Patient and visit", ["patient", "short_text", "long_text", "email", "number", "date", "record_date"]],
-  ["Choices", ["single_choice", "checkboxes", "checkbox_notes", "sub_checks", "dropdown"]],
-  ["Tables and calculations", ["table", "calculation"]],
-  ["Clinical", ["signature", "photo", "consent_status"]],
-  ["Page layout", ["text_block", "watermark", "space"]],
+  ["Patient and visit", ["patient", "record_date", "date"]],
+  ["Answers", ["short_text", "long_text", "number", "email"]],
+  ["Choices", ["single_choice", "dropdown", "checkboxes", "checkbox_notes", "sub_checks"]],
+  ["Clinical", ["signature", "consent_status", "image"]],
+  ["Tables and maths", ["table", "calculation"]],
+  ["Page layout", ["text_block", "space", "watermark"]],
 ];
 
 export const CHOICE_TYPES = ["single_choice", "checkboxes", "checkbox_notes", "dropdown"];
 const LAYOUT_TYPES = ["single_choice", "checkboxes", "checkbox_notes"];
 const PLACEHOLDER_TYPES = ["short_text", "long_text", "email", "number", "dropdown"];
 export const INLINE_TYPES = ["short_text", "email", "number", "date", "record_date", "dropdown", "single_choice", "checkboxes", "calculation"];
-// Fields with a question and an answer: these get the Layout settings
+// Fields that get the Layout settings
 const ANSWER_TYPES = ["patient", "short_text", "long_text", "email", "number", "date", "record_date", "single_choice",
-  "checkboxes", "checkbox_notes", "sub_checks", "dropdown", "table", "calculation", "signature", "photo", "consent_status"];
+  "checkboxes", "checkbox_notes", "sub_checks", "dropdown", "table", "calculation", "signature", "image", "consent_status"];
 const BOX_TYPES = ["short_text", "email", "number", "date", "record_date", "dropdown"];
+const DRIVE_ID = /^[A-Za-z0-9_-]{10,80}$/;
 const opt = (v, list, dflt) => (list.includes(v) ? v : dflt);
 
 // A field's layout settings, with defaults. The older "inline" tick counts as "beside".
@@ -136,9 +139,9 @@ export const FILLS_FOR = {
   date: ["", "today", "patient.dob"],
 };
 
-const NO_LABEL = ["space", "letterhead", "watermark"];
-const NO_HELP = ["patient", "text_block", "space", "letterhead", "watermark"];
-const NO_REQUIRED = ["text_block", "space", "letterhead", "watermark", "calculation", "consent_status"];
+const NO_LABEL = ["space", "letterhead", "watermark", "image"];
+const NO_HELP = ["patient", "text_block", "space", "letterhead", "watermark", "image"];
+const NO_REQUIRED = ["text_block", "space", "letterhead", "watermark", "calculation", "consent_status", "image"];
 export const hasLabel = (t) => !NO_LABEL.includes(t);
 export const hasHelp = (t) => !NO_HELP.includes(t);
 export const canRequire = (t) => !NO_REQUIRED.includes(t);
@@ -173,7 +176,9 @@ export function createField(type, id) {
     case "sub_checks": f.groups = [{ label: "Option A", subs: ["Sub-option 1", "Sub-option 2"] }]; break;
     case "table": f.columns = [{ label: "Column 1", type: "text" }, { label: "Column 2", type: "text" }]; f.rows = 3; break;
     case "calculation": f.formula = ""; f.decimals = 2; f.prefix = ""; f.suffix = ""; f.blank = "zero"; break;
-    case "photo": f.max = 1; break;
+    case "image":
+      f.source = "bank"; f.fileId = ""; f.fileName = ""; f.size = "medium"; f.caption = ""; f.alt = ""; f.max = 1;
+      break;
     case "watermark": f.source = "text"; f.text = "DRAFT"; f.opacity = 10; f.angle = -30; f.size = "large"; break;
     case "letterhead": f.line1 = LETTERHEAD[0]; f.line2 = LETTERHEAD[1]; break;
     case "consent_status": f.consentFormId = ""; f.months = 12; f.block = false; break;
@@ -184,6 +189,7 @@ export function createField(type, id) {
 // Fills in anything a saved field is missing, so older forms keep working
 // as new settings are added. Unknown types are dropped.
 export function normaliseField(f) {
+  if (f && f.type === "photo") f = { ...f, type: "image", source: "staff" }; // the old Photo field
   if (!f || !FIELD_TYPES[f.type]) return null;
   const out = { ...createField(f.type, f.id), ...f };
   if (CHOICE_TYPES.includes(out.type) && !(Array.isArray(out.options) && out.options.length)) out.options = ["Option 1"];
@@ -209,6 +215,7 @@ const pick = (v, allowed, dflt) => (allowed.includes(v) ? v : dflt);
 
 // Only known keys are stored, and never `undefined` (Firestore rejects it).
 export function cleanField(f) {
+  if (f && f.type === "photo") f = { ...f, type: "image", source: "staff" };
   if (!f || !FIELD_TYPES[f.type]) return null;
   const out = {
     id: clip(f.id, 40),
@@ -260,7 +267,15 @@ export function cleanField(f) {
       out.suffix = clip(f.suffix, 20);
       out.blank = pick(f.blank, ["zero", "wait"], "zero");
       break;
-    case "photo": out.max = int(f.max, 1, 10, 1); break;
+    case "image":
+      out.source = pick(f.source, ["bank", "staff"], "bank");
+      out.fileId = DRIVE_ID.test(f.fileId || "") ? f.fileId : "";
+      out.fileName = clip(f.fileName, 120);
+      out.size = pick(f.size, ["small", "medium", "large", "full"], "medium");
+      out.caption = clip(f.caption, 200);
+      out.alt = clip(f.alt, 200);
+      out.max = int(f.max, 1, 10, 1);
+      break;
     case "watermark":
       out.source = pick(f.source, ["text", "logo"], "text");
       out.text = clip(f.text, 40);
@@ -416,10 +431,19 @@ export function renderField(f, ctx = {}) {
       return head + `<div class="fe-sig"><span>${esc(who)} signs here</span></div>` +
         (!live && f.showNameDate !== false ? '<div class="fe-sig-preview"><span>Name</span><span>Date</span></div>' : "");
     }
-    case "photo": {
-      const max = Math.max(1, Math.min(10, parseInt(f.max, 10) || 1));
-      return head + `<label class="fe-photo">${svg(ICONS.photo)}<span>${max > 1 ? `Take photos (up to ${max})` : "Take photo"}</span>` +
-        `<input type="file" accept="image/*" capture="environment"${max > 1 ? " multiple" : ""}${inert} /></label>`;
+    case "image": {
+      const cap = f.caption ? `<figcaption>${esc(f.caption)}</figcaption>` : "";
+      if (f.source === "staff") {
+        const max = Math.max(1, Math.min(10, parseInt(f.max, 10) || 1));
+        return `<div class="fe-img-staff">${svg(ICONS.photo)}<span>${live
+          ? "Adding photos while filling in is coming soon."
+          : `Staff add ${max > 1 ? `up to ${max} photos` : "a photo"} while filling in`}</span></div>${cap}`;
+      }
+      if (!f.fileId) {
+        return live ? "" : `<div class="fe-img-empty">${svg(ICONS.image)}<span>Choose a picture in the settings panel</span></div>`;
+      }
+      return `<figure class="fe-img is-${esc(f.size || "medium")}"><span class="fe-img-box" data-bank-img="${esc(f.fileId)}" data-alt="${esc(f.alt || "")}">` +
+        `<span class="fe-img-loading">${svg(ICONS.image)}</span></span>${cap}</figure>`;
     }
     case "consent_status": {
       if (live) return head + `<div class="fe-consent">${svg(ICONS.consent_status)}Checked automatically when this form is filled in for a patient.</div>`;
@@ -508,6 +532,36 @@ function typeSettings(f, ctx = {}) {
         `<label class="fe-check"><input type="checkbox" data-k="showNameDate"${f.showNameDate !== false ? " checked" : ""} /> Show name and date under the signature</label>` +
         '<small class="fe-note fe-pad">The name fills in for the patient or the practitioner. For a guardian or witness, staff type it in.</small>';
 
+    case "image": {
+      const staff = f.source === "staff";
+      let h = setting("Where the image comes from", choose("source", [
+        ["bank", "A set picture, the same on every form"],
+        ["staff", "Photos staff add while filling in"],
+      ], staff ? "staff" : "bank", false, true));
+      const caption = setting("Caption", `<input class="fe-input" data-k="caption" maxlength="200" value="${esc(f.caption || "")}" />`,
+        "Optional. Shown under the picture.");
+      if (!staff) {
+        h += `<div class="fe-insp-field"><span class="fe-insp-label">Picture</span>
+          ${f.fileId ? `<div class="fe-img-pick"><span class="fe-img-thumb" data-bank-img="${esc(f.fileId)}"></span>
+            <span class="fe-img-name" title="${esc(f.fileName || "")}">${esc(f.fileName || "Chosen picture")}</span></div>` : ""}
+          <div class="fe-img-btns">
+            <button type="button" class="lh-btn" data-act="img-pick">${f.fileId ? "Change" : "Choose from Image Bank"}</button>
+            <label class="lh-btn">Upload from computer<input type="file" data-img-upload accept="image/png,image/jpeg,image/webp,image/gif" hidden /></label>
+            ${f.fileId ? '<button type="button" class="lh-btn is-quiet" data-act="img-clear">Remove</button>' : ""}
+          </div>
+          <small class="fe-note">Uploads are saved into the Image Bank so you can reuse them.</small></div>` +
+          setting("Size", choose("size", [["small", "Small"], ["medium", "Medium"], ["large", "Large"], ["full", "Full width"]], f.size || "medium")) +
+          caption +
+          setting("Description", `<input class="fe-input" data-k="alt" maxlength="200" value="${esc(f.alt || "")}" />`,
+            "Optional. Read aloud by screen readers; not shown on the form.");
+      } else {
+        h += setting("Photos allowed", choose("max", Array.from({ length: 10 }, (_, i) => [i + 1, String(i + 1)]), f.max || 1, true)) +
+          caption +
+          '<p class="fe-note fe-pad">Coming in the next update: staff will be able to take a photo, upload one from the device, or choose from the Image Bank while filling in. Each patient\'s photos are saved with their form.</p>';
+      }
+      return h;
+    }
+
     case "text_block":
       return setting("Text", `<textarea class="fe-input" data-k="text" rows="9" maxlength="5000" placeholder="Information patients need to read before signing">${esc(f.text || "")}</textarea>`);
 
@@ -577,10 +631,6 @@ function typeSettings(f, ctx = {}) {
           setting("After the result", `<input class="fe-input" data-k="suffix" maxlength="20" placeholder=" units" value="${esc(f.suffix || "")}" />`)}</div>`;
     }
 
-    case "photo":
-      return setting("Photos allowed", choose("max", Array.from({ length: 10 }, (_, i) => [i + 1, String(i + 1)]), f.max || 1, true),
-        "On iPad and phones this opens the camera.");
-
     case "watermark": {
       const logo = f.source === "logo";
       const hasLogo = !!(ctx.letterhead && ctx.letterhead.logo);
@@ -642,6 +692,7 @@ function layoutSettings(f) {
         cur === v ? " checked" : ""}${rerender ? ' data-rerender=""' : ""} /><span>${l}</span></label>`).join("")}</div>`;
   const row = (label, control) => `<div class="fe-lay-row"><span class="fe-lay-lbl">${label}</span>${control}</div>`;
   const isText = f.type === "text_block";
+  const isImage = f.type === "image";
 
   return `<div class="fe-insp-field fe-layout">
     <span class="fe-insp-label">Layout</span>
@@ -651,7 +702,7 @@ function layoutSettings(f) {
       ? row("Answer", seg("pos", [["below", "Under the question"], ["beside", "Beside the question"]], s.pos, true)) : ""}
     ${s.pos === "beside"
       ? row("Question width", seg("qWidth", [["auto", "Fit"], ["narrow", "Narrow"], ["medium", "Medium"], ["wide", "Wide"]], s.qWidth)) : ""}
-    ${!isText ? row("Gap", seg("gap", [["tight", "Tight"], ["normal", "Normal"], ["wide", "Wide"]], s.gap)) : ""}
+    ${!isText && !isImage ? row("Gap", seg("gap", [["tight", "Tight"], ["normal", "Normal"], ["wide", "Wide"]], s.gap)) : ""}
     ${row("Align", seg("align", [["left", "Left"], ["center", "Centre"], ["right", "Right"]], s.align))}
     ${BOX_TYPES.includes(f.type)
       ? row("Answer box width", seg("width", [["full", "Full"], ["half", "Half"], ["third", "Third"]], s.width)) : ""}
@@ -661,9 +712,10 @@ function layoutSettings(f) {
       ? '<small class="fe-note">Fit puts the answer straight after the question. Best for short questions.</small>' : ""}
   </div>`;
 }
+
 /* ===================== Settings that edit lists inside a field ===================== */
 
-// Typing in table columns, sub-option groups and patient detail ticks.
+// Typing in table columns, sub-option groups, patient detail ticks and layout buttons.
 // Returns true if it changed something.
 export function applyInput(f, el) {
   if (el.dataset.st !== undefined) {

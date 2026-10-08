@@ -13,6 +13,7 @@ import { conditionPasses, visibleIds } from "./form-conditions.js";
 import { formGroup } from "./form-templates.js";
 import { highlightRecord } from "./records-view.js";
 import { formTitleHtml } from "./form-fields.js";
+import { hydrateBankImages } from "./image-bank-api.js";
 
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const BAR_ICONS = {
@@ -366,6 +367,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
     </div>`;
 
   const sheet = root.querySelector('[data-role="sheet"]');
+  hydrateBankImages(sheet);
   const msgEl = root.querySelector('[data-role="msg"]');
   const progressEl = root.querySelector('[data-role="progress"]');
   const saveBtns = $all(root, "[data-save]");
@@ -703,6 +705,7 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
     </div>`;
 
   const sheet = root.querySelector('[data-role="sheet"]');
+  hydrateBankImages(sheet);
   const shownIds = visibleIds(fields, sub.answers);
   fields.forEach((f) => {
     const w = sheet.querySelector(`[data-fid="${CSS.escape(f.id)}"]`);

@@ -14,6 +14,8 @@ import { conditionSettingsHtml, applyConditionInput, applyConditionClick, condit
 import { applyVisibility } from "./form-fill.js";
 import { CATEGORIES, categorize } from "./records.js";
 import { formTitleHtml } from "./form-fields.js";
+import { openImagePicker } from "./image-bank.js";
+import { bankUpload, bankError, hydrateBankImages } from "./image-bank-api.js";
 
 const UI = {
   up: '<polyline points="18 15 12 9 6 15"/>',
@@ -408,6 +410,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
       </div>`;
 
     if (!build) refreshPreview();
+    hydrateBankImages(stage);
   }
 
   /* ---------- Settings panel ---------- */
@@ -507,6 +510,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     }
     h += `<button type="button" class="fe-remove" data-tool="remove">${svg(UI.trash)}Remove</button>`;
     insp.innerHTML = h;
+    hydrateBankImages(insp);
   }
 
   /* ---------- Actions ---------- */
@@ -600,6 +604,37 @@ export async function mountFormEditor(container, { templateId, staff }) {
         renderInspector();
       },
     });
+  }
+
+    async function pickImage(f) {
+    const img = await openImagePicker({ isAdmin: true });
+    if (!img || !root.isConnected) return;
+    const target = fields.find((x) => x.id === f.id);
+    if (!target) return;
+    target.fileId = img.id;
+    target.fileName = img.name;
+    if (!target.alt) target.alt = img.name.replace(/\.[^.]+$/, "");
+    changed(); renderStage(); renderInspector();
+  }
+
+  async function uploadImage(f, input) {
+    const file = input.files && input.files[0];
+    input.value = "";
+    if (!f || !file) return;
+    const lbl = input.closest("label");
+    if (lbl) { lbl.classList.add("is-busy"); lbl.firstChild.textContent = "Uploading…"; }
+    try {
+      const r = await bankUpload("", file); // saved in the top folder of the Image Bank
+      f.fileId = r.image.id;
+      f.fileName = r.image.name;
+      if (!f.alt) f.alt = r.image.name.replace(/\.[^.]+$/, "");
+      changed(); renderStage(); renderInspector();
+      showToast("Uploaded to the Image Bank");
+    } catch (err) {
+      console.error("Image upload failed:", err);
+      showToast(bankError(err));
+      renderInspector();
+    }
   }
 
   async function deleteForm() {
@@ -723,6 +758,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   });
 
   insp.addEventListener("change", (e) => {
+    if (e.target.matches('input[type="file"][data-img-upload]')) { uploadImage(current(), e.target); return; }
     const f = current();
     const el = e.target;
     if (f && el.dataset.k && el.dataset.num !== undefined && el.type !== "range" && el.tagName === "INPUT") {
@@ -741,6 +777,13 @@ export async function mountFormEditor(container, { templateId, staff }) {
     if (e.target.closest('[data-act="unpublish"]')) { unpublish(); return; }
     const f = current();
     if (!f) return;
+
+    if (e.target.closest('[data-act="img-pick"]')) { pickImage(f); return; }
+    if (e.target.closest('[data-act="img-clear"]')) {
+      f.fileId = ""; f.fileName = "";
+      changed(); renderStage(); renderInspector();
+      return;
+    }
 
     const ins = e.target.closest("[data-calcins]");
     if (ins) {

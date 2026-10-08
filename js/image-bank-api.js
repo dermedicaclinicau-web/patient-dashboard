@@ -1,9 +1,29 @@
-// Talking to the Image Bank (Google Drive folder) through the portal's Apps Script
+// Talking to the Image Bank (Google Drive folder) through the portal's Apps Script.
+// Folder listings and thumbnails are remembered so the bank opens quickly.
 import { callApi } from "./appointments.js";
 
 const api = (op, extra = {}) => callApi({ action: "imageBank", op, ...extra });
 
-export const bankList = (folderId = "", offset = 0) => api("list", { folderId, offset });
+/* ---------- Folder listings: show the last one instantly, then refresh ---------- */
+
+const listCache = new Map(); // folderId ("" = the top folder) -> listing
+
+export function cachedList(folderId) {
+  return listCache.get(folderId || "") || null;
+}
+
+export function rememberList(listing) {
+  if (!listing || !listing.folder) return;
+  listCache.set(listing.folder.id, listing);
+  if (listing.path && listing.path.length === 1) listCache.set("", listing); // the top folder
+}
+
+export async function bankList(folderId = "", offset = 0) {
+  const r = await api("list", { folderId, offset });
+  if (!offset) rememberList(r);
+  return r;
+}
+
 export const bankSearch = (q) => api("search", { q });
 export const bankMkdir = (parentId, name) => api("mkdir", { parentId, name });
 export const bankRename = (id, kind, name) => api("rename", { id, kind, name });
@@ -11,6 +31,78 @@ export async function bankTrash(id, kind) {
   const res = await api("trash", { id, kind });
   imageCache.delete(id);
   return res;
+}
+
+/* ---------- Thumbnails: remembered on this computer, fetched in small batches ---------- */
+
+const DB_NAME = "dermedica-image-bank";
+const STORE = "thumbs";
+let dbPromise = null;
+
+function openDb() {
+  if (!dbPromise) {
+    dbPromise = new Promise((resolve) => {
+      if (!("indexedDB" in window)) { resolve(null); return; }
+      const req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(STORE);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    });
+  }
+  return dbPromise;
+}
+async function idbGet(key) {
+  const db = await openDb();
+  if (!db) return null;
+  return new Promise((resolve) => {
+    try {
+      const r = db.transaction(STORE).objectStore(STORE).get(key);
+      r.onsuccess = () => resolve(r.result || null);
+      r.onerror = () => resolve(null);
+    } catch { resolve(null); }
+  });
+}
+async function idbPut(key, value) {
+  const db = await openDb();
+  if (!db) return;
+  try { db.transaction(STORE, "readwrite").objectStore(STORE).put(value, key); } catch { /* not essential */ }
+}
+
+const thumbCache = new Map(); // "id:updated" -> Promise<data URL>
+let queue = [];
+let timer = null;
+let active = 0;
+const BATCH = 10;
+const PARALLEL = 4;
+
+function schedule() { if (!timer) timer = setTimeout(pump, 30); }
+function pump() {
+  timer = null;
+  while (queue.length && active < PARALLEL) {
+    const batch = queue.splice(0, BATCH);
+    active++;
+    api("thumbs", { ids: batch.map((b) => b.id) })
+      .then((r) => batch.forEach((b) => b.resolve((r.thumbs || {})[b.id] || "")))
+      .catch((err) => batch.forEach((b) => b.reject(err)))
+      .finally(() => { active--; if (queue.length) schedule(); });
+  }
+}
+
+// The thumbnail for one image (an image in a listing: { id, updated })
+export function thumbFor(item) {
+  const key = `${item.id}:${item.updated || 0}`;
+  if (!thumbCache.has(key)) {
+    const job = (async () => {
+      const saved = await idbGet(key);
+      if (saved) return saved;
+      const url = await new Promise((resolve, reject) => { queue.push({ id: item.id, resolve, reject }); schedule(); });
+      if (url) idbPut(key, url);
+      return url;
+    })();
+    thumbCache.set(key, job);
+    job.catch(() => thumbCache.delete(key));
+  }
+  return thumbCache.get(key);
 }
 
 /* ---------- Full-size images, remembered for this session ---------- */
@@ -96,4 +188,24 @@ export function bankError(err) {
       return err && err.message && !err.code ? err.message
         : `Something went wrong${err && err.code ? ` (${err.code})` : ""}. Check your connection and try again.`;
   }
+}
+
+/* ---------- Pictures on forms ---------- */
+
+const escAttr = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+// Fills in every [data-bank-img] placeholder inside an element with its Image Bank picture
+export function hydrateBankImages(root) {
+  if (!root) return;
+  root.querySelectorAll("[data-bank-img]:not([data-ready])").forEach((el) => {
+    el.setAttribute("data-ready", "1");
+    bankImage(el.dataset.bankImg)
+      .then((src) => {
+        if (el.isConnected) el.innerHTML = `<img src="${escAttr(src)}" alt="${escAttr(el.dataset.alt || "")}" />`;
+      })
+      .catch(() => {
+        if (el.isConnected) el.innerHTML = '<span class="fe-img-missing">This picture is missing from the Image Bank</span>';
+      });
+  });
 }
