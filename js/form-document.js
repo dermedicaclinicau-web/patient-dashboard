@@ -2,10 +2,9 @@
 // signatures and the letterhead. The browser turns this into the PDF, so it
 // looks exactly like the preview. (Simple tables are used so the server's
 // backup PDF converter can render it too.)
-import { esc, normaliseField, patientParts, INLINE_TYPES } from "./form-fields.js";
+import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle } from "./form-fields.js";
 import { formatCalc } from "./form-calc.js";
 import { visibleIds } from "./form-conditions.js";
-import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle } from "./form-fields.js";
 
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
 const LOGO_RE = /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/;
