@@ -23,7 +23,7 @@ export async function fetchSkincare(patient) {
   snaps.forEach((snap, i) => {
     if (!snap.exists()) return;
     const d = snap.data();
-    if (keynameDocs.includes(keys[i]) && ((d.protocols || []).length || (d.purchases || []).length)) matchedByName = true;
+    if (nameDocs.includes(keys[i]) && ((d.protocols || []).length || (d.purchases || []).length)) matchedByName = true;
 
     (d.protocols || []).forEach((p) => {
       if (protocols.has(p.recordId)) protocols.get(p.recordId).items.push(...(p.items || []));

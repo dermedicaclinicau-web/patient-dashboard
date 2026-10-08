@@ -28,6 +28,7 @@ function doPost(e) {
     if (body.action === 'sendTreatmentEmail') return json_(handleSendTreatmentEmail_(body));
     if (body.action === 'regenerateSoap') return json_(handleRegenerateSoap_(body));
     if (body.action === 'emailFromPlan') return json_(handleEmailFromPlan_(body));
+    if (body.action === 'sendFormPdf') return json_(handleSendFormPdf_(body));
 
     const pin = String(body.pin || '').trim();
 
@@ -1598,4 +1599,117 @@ function geminiEmailFromPlan_(concerns, currentList, names) {
       };
     })
     .filter(function (it) { return it.name; });
+}
+
+// ===================== Completed forms: email a PDF / send to the printer =====================
+
+function handleSendFormPdf_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+
+  const id = String(body.submissionId || '').trim();
+  const kind = body.kind === 'print' ? 'print' : 'email';
+  if (!/^[A-Za-z0-9_-]{10,40}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
+
+  const html = sanitizePdfHtml_(body.html);
+  if (!html || html.length > 4000000) return { ok: false, error: 'BAD_REQUEST' };
+
+  // The saved form must really exist (the browser can't invent one)
+  const cfg = getConfig_();
+  const sub = fsGetDoc_(cfg, 'form_submissions/' + id);
+  if (!sub) return { ok: false, error: 'NOT_FOUND' };
+
+  // Printed copies ONLY go to the printer address saved in Form Builder
+  let to = '';
+  let cc = '';
+  if (kind === 'print') {
+    const ps = fsGetDoc_(cfg, 'form_settings/printing');
+    to = String((ps && ps.printerEmail) || '').trim();
+    if (!isEmail_(to)) return { ok: false, error: 'NO_PRINTER' };
+  } else {
+    to = String(body.to || '').trim();
+    cc = String(body.cc || '').trim();
+    if (!isEmail_(to) || (cc && !isEmail_(cc))) return { ok: false, error: 'BAD_EMAIL' };
+  }
+
+  // Same limits as treatment emails
+  const cache = CacheService.getScriptCache();
+  const rlKey = 'mail_' + session.uid;
+  const sentThisHour = Number(cache.get(rlKey) || 0);
+  if (sentThisHour >= MAIL_LIMIT_PER_HOUR_) return { ok: false, error: 'RATE_LIMITED' };
+  if (MailApp.getRemainingDailyQuota() < 1) return { ok: false, error: 'QUOTA' };
+
+  const fileName = cleanFileName_(body.fileName,
+    String(sub.templateName || 'Form') + ' - ' + String(sub.patientName || 'Patient'));
+
+  let pdf;
+  try {
+    pdf = Utilities.newBlob(html, 'text/html', 'form.html').getAs(MimeType.PDF).setName(fileName);
+  } catch (err) {
+    console.error('Form PDF failed for ' + id + ': ' + (err && err.stack ? err.stack : err));
+    return { ok: false, error: 'PDF_FAILED' };
+  }
+
+  const mail = { to: to, name: 'Dermedica Clinic', attachments: [pdf] };
+  if (kind === 'print') {
+    mail.subject = 'Print: ' + fileName;
+    mail.body = 'Sent from the Dermedica staff portal for printing.';
+  } else {
+    const message = String(body.message || '').slice(0, 5000);
+    mail.subject = String(body.subject || '').trim().slice(0, 200) ||
+      ('Your ' + String(sub.templateName || 'form') + ' - Dermedica');
+    mail.body = message;
+    mail.htmlBody = textToEmailHtml_(message);
+    if (cc) mail.cc = cc;
+  }
+  MailApp.sendEmail(mail);
+  cache.put(rlKey, String(sentThisHour + 1), 3600);
+
+  const entry = {
+    kind: kind,
+    to: to,
+    cc: cc,
+    sentAt: new Date().toISOString(),
+    sentBy: String(session.name || ''),
+    sentByUid: String(session.uid || ''),
+  };
+
+  // Log on the saved form (shows "Emailed to... / Sent to the printer" in the portal)
+  try {
+    const log = Array.isArray(sub.deliveries) ? sub.deliveries : [];
+    fsPatch_(cfg, 'form_submissions/' + id, { deliveries: log.concat([entry]).slice(-50) });
+  } catch (e) { console.warn('Sent, but saving the send log failed: ' + e); }
+
+  console.log('Form ' + id + ' ' + (kind === 'print' ? 'sent to printer' : 'emailed to ' + to) + ' by ' + session.name);
+  return { ok: true, entry: entry };
+}
+
+function isEmail_(s) {
+  return typeof s === 'string' && s.length <= 254 && /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(s);
+}
+
+function cleanFileName_(name, fallback) {
+  const clean = function (s) {
+    return String(s || '').replace(/[\\/:*?"<>|\r\n\t]+/g, '-').replace(/\s+/g, ' ').trim();
+  };
+  let s = clean(name).slice(0, 120) || clean(fallback).slice(0, 115) || 'Form';
+  if (!/\.pdf$/i.test(s)) s += '.pdf';
+  return s;
+}
+
+function textToEmailHtml_(text) {
+  const safe = String(text || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/\n/g, '<br>');
+  return '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5;color:#1e293b">' + safe + '</div>';
+}
+
+// Keeps the document's own styling, removes anything active,
+// and only allows embedded images (no outside links or tracking images)
+function sanitizePdfHtml_(html) {
+  return String(html || '')
+    .replace(/<\s*(script|iframe|object|embed|form|link|meta|base)\b[\s\S]*?(<\s*\/\s*\1\s*>|\/?>)/gi, '')
+    .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/(href|src)\s*=\s*(["'])(?!\s*(?:data:image\/(?:png|jpeg);base64,|#))[^"']*\2/gi, '$1="#"')
+    .trim();
 }
