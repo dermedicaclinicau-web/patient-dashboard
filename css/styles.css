@@ -2537,3 +2537,34 @@ select.fe-in + .fe-xin, .fe-xin + .fe-xin { margin-top: .5rem; }
 
 .fe-grp-other { margin-top: .2rem; font-size: .82rem; }
 .fe-sub-opts .fe-optx { display: flex; }
+
+/* ---------- Checkboxes + sub-options: tidy two-column grid ---------- */
+.fe-opts .fe-sub {
+  display: grid;
+  grid-template-columns: minmax(180px, 36%) minmax(0, 1fr);
+  align-items: start;
+  column-gap: 1rem;
+  padding: .55rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.fe-opts .fe-sub:last-child { border-bottom: none; }
+.fe-opts .fe-sub > .fe-opt { padding-top: .1rem; }
+.fe-opts .fe-sub > .fe-sub-opts {
+  display: flex;
+  flex-direction: column;
+  gap: .3rem;
+  margin: 0;
+  padding: 0 0 0 1rem;
+  border-left: 2px solid var(--border);
+}
+.fe-opts .fe-sub > .fe-sub-opts .fe-optx { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .6rem; }
+.fe-opts .fe-sub > .fe-sub-opts .fe-xin { flex: 1 1 100%; max-width: 360px; }
+
+/* The question's own "Other" row spans the full width */
+.fe-opts .fe-sub.is-other { display: block; }
+
+/* Phones: stack the sub-options under their option */
+@media (max-width: 640px) {
+  .fe-opts .fe-sub { grid-template-columns: 1fr; row-gap: .4rem; }
+  .fe-opts .fe-sub > .fe-sub-opts { margin-left: 1.6rem; }
+}
