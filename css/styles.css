@@ -3006,3 +3006,23 @@ select.fe-in + .fe-xin, .fe-xin + .fe-xin { margin-top: .5rem; }
   .ssd-body { grid-template-columns: 1fr; grid-template-rows: auto 420px; overflow: auto; }
   .ssd-form { border-right: none; border-bottom: 1px solid var(--border); overflow: visible; }
 }
+
+/* ---------- Header buttons: icons stay icon-sized (Aftercare Bank, Image Bank, Skin Script Products…) ---------- */
+.btn-primary > svg,
+.btn-ghost > svg,
+.lh-btn > svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+.fb-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: .75rem 1rem; }
+.fb-head .btn-primary,
+.fb-head .btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: .45rem;
+  height: 40px;
+  padding: 0 1rem;
+  white-space: nowrap;
+}
+.fb-head-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
