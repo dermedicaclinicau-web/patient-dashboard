@@ -201,7 +201,10 @@ export function createField(type, id) {
     case "text_block": f.text = ""; f.html = ""; break;
     case "space": f.size = "medium"; break;
     case "number": f.min = null; f.max = null; f.unit = ""; break;
-    case "sub_checks": f.groups = [{ label: "Option A", subs: ["Sub-option 1", "Sub-option 2"] }]; break;
+    case "sub_checks":
+      f.groups = [{ label: "Option A", subs: ["Sub-option 1", "Sub-option 2"] }];
+      f.subCols = 1; f.subLayout = "list";
+      break;
     case "table": f.columns = [{ label: "Column 1", type: "text" }, { label: "Column 2", type: "text" }]; f.rows = 3; break;
     case "calculation": f.formula = ""; f.decimals = 2; f.prefix = ""; f.suffix = ""; f.blank = "zero"; break;
     case "image":
@@ -289,6 +292,8 @@ export function cleanField(f) {
       break;
     case "space": out.size = pick(f.size, ["small", "medium", "large"], "medium"); break;
     case "number": out.min = numOrNull(f.min); out.max = numOrNull(f.max); out.unit = clip(f.unit, 20); break;
+      out.subCols = int(f.subCols, 1, 4, 1);
+      out.subLayout = pick(f.subLayout, ["list", "inline"], "list");
     case "sub_checks":
       out.groups = (Array.isArray(f.groups) ? f.groups : []).slice(0, 30).map((g) => ({
         label: clip(g && g.label, 200),
@@ -478,7 +483,7 @@ export function renderField(f, ctx = {}) {
       }).join("")}</div>`;
     }
     case "sub_checks":
-      return head + `<div class="fe-opts">${(f.groups || []).map((g) => `
+      return head + `<div class="fe-opts fe-subgrid cols-${int(f.subCols, 1, 4, 1)} sub-${f.subLayout === "inline" ? "inline" : "list"}">${(f.groups || []).map((g) => `
         <div class="fe-sub">
           <label class="fe-opt">${box("checkbox")}<span>${esc(g.label)}</span></label>
           ${(g.subs && g.subs.length) || g.other ? `<div class="fe-sub-opts">${(g.subs || []).map((s) =>
@@ -702,7 +707,11 @@ function typeSettings(f, ctx = {}) {
       return '<p class="fe-note fe-pad">Starts as today\'s date. Staff can change it to backdate a record, and it becomes the date on the saved record.</p>';
 
     case "sub_checks":
-      return `<div class="fe-insp-field"><span class="fe-insp-label">Options and their sub-options</span>${
+      return `<div class="fe-two">${
+        setting("Groups per row", choose("subCols", [[1, "1"], [2, "2"], [3, "3"], [4, "4"]], f.subCols || 1, true))}${
+        setting("Sub-options", choose("subLayout", [["list", "One per line"], ["inline", "Side by side"]], f.subLayout || "list"))}</div>` +
+        `<small class="fe-note fe-pad">1 per row puts each option beside its sub-options. 2 or more shows each group as a card.</small>` +
+        `<div class="fe-insp-field"><span class="fe-insp-label">Options and their sub-options</span>${
         f.groups.map((g, i) => `
           <div class="fe-grp">
             <div class="fe-grp-head">

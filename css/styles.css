@@ -2568,3 +2568,40 @@ select.fe-in + .fe-xin, .fe-xin + .fe-xin { margin-top: .5rem; }
   .fe-opts .fe-sub { grid-template-columns: 1fr; row-gap: .4rem; }
   .fe-opts .fe-sub > .fe-sub-opts { margin-left: 1.6rem; }
 }
+
+/* ---------- Checkboxes + sub-options: groups per row ---------- */
+.fe-subgrid:not(.cols-1) { display: grid; gap: .75rem; }
+.fe-subgrid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.fe-subgrid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.fe-subgrid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+/* Each group as a card */
+.fe-subgrid:not(.cols-1) > .fe-sub {
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+  padding: .75rem .85rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+}
+.fe-subgrid:not(.cols-1) > .fe-sub:last-child { border-bottom: 1px solid var(--border); }
+.fe-subgrid:not(.cols-1) > .fe-sub > .fe-opt { padding-top: 0; font-weight: 600; }
+.fe-subgrid:not(.cols-1) > .fe-sub > .fe-sub-opts {
+  padding: .5rem 0 0 .25rem;
+  border-left: none;
+  border-top: 1px solid var(--border);
+}
+.fe-subgrid:not(.cols-1) > .fe-sub.is-other { grid-column: 1 / -1; }
+
+/* Sub-options side by side */
+.fe-subgrid.sub-inline .fe-sub-opts { flex-direction: row; flex-wrap: wrap; gap: .3rem 1rem; }
+.fe-subgrid.sub-inline .fe-sub-opts .fe-optx { flex-basis: 100%; }
+
+/* Smaller screens */
+@media (max-width: 900px) {
+  .fe-subgrid.cols-3, .fe-subgrid.cols-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .fe-subgrid:not(.cols-1) { grid-template-columns: 1fr; }
+}
