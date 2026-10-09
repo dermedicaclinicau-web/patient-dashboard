@@ -2912,3 +2912,49 @@ select.fe-in + .fe-xin, .fe-xin + .fe-xin { margin-top: .5rem; }
 .ssp-item-main { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .6rem; min-width: 0; }
 .ssp-item-main small { flex-basis: 100%; font-size: .8rem; color: var(--muted); }
 .ssp-item-main .ssp-sent { color: #047857; }
+
+/* ---------- Email windows (Skin Script + aftercare): tidy inputs and toolbar ---------- */
+.ac-mail .lh-field input {
+  width: 100%;
+  height: 40px;
+  padding: 0 .75rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  font: inherit;
+  font-size: .95rem;
+  color: var(--text);
+  box-sizing: border-box;
+}
+.ac-mail .lh-field input:focus {
+  border-color: var(--primary);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+.ac-mail .ac-ed-two { gap: .75rem 1rem; }
+.ac-mail .lh-field { gap: .35rem; }
+
+/* The editor toolbar's own dropdowns stay compact, inside any dialog */
+.lh-dialog .re .re-bar { flex-wrap: wrap; }
+.lh-dialog .re .re-bar select.re-block,
+.lh-dialog .re .re-bar select.re-size {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 0;
+  height: 32px;
+  padding: 0 1.6rem 0 .55rem;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background-color: #fff;
+  font: inherit;
+  font-size: .82rem;
+  line-height: normal;
+}
+.lh-dialog .re .re-bar select.re-block { min-width: 120px; }
+.lh-dialog .re .re-bar select.re-size { min-width: 80px; }
+
+/* The message area: a little more room, and the attachment chip lined up */
+.ac-mail .tr-canvas { padding: .6rem; }
+.ac-mail .re-area { min-height: 260px; }
+.ac-mail .ec-attach { margin-top: .25rem; }
