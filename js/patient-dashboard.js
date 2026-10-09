@@ -150,6 +150,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     const refreshBtn = t.closest("[data-action='refresh-pc']");
     if (refreshBtn) { refreshAll(refreshBtn); return; }
     if (t.closest("[data-action='merge-info']")) { mergeInfo(); return; }
+    if (t.closest("[data-action='add-reminder']")) { addReminderFlow(); return; }
     if (t.closest("[data-action='create-ssp']")) { location.hash = `#/ssp/new/${encodeURIComponent(patient.id)}`; return; }
     const doneBtn = t.closest("[data-action='task-done']");
     if (doneBtn) { completeTask(doneBtn); return; }

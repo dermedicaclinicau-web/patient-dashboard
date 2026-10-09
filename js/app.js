@@ -218,6 +218,14 @@ const PAGES = {
         isAdmin: /^admin$/i.test(String(currentStaff.role || "")),
         staff: currentStaff,
       }),
+      ssp: (el, param) => {
+        const [, pid = ""] = String(param || "").split("/"); // #/ssp/new/<patientId>
+        mountSspBuilder(el, {
+          patientId: pid,
+          staff: currentStaff,
+          isAdmin: /^admin$/i.test(String(currentStaff.role || "")),
+        });
+      },
       tasks: (el, param) => mountTaskManager(el, {
         param,
         isAdmin: /^admin$/i.test(String(currentStaff.role || "")),
