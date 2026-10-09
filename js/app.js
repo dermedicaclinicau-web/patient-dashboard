@@ -18,6 +18,7 @@ import { mountSspProductsPage } from "./ssp-products.js";
 import { mountSspBuilder } from "./ssp-builder.js";
 import { mountStaffManager } from "./staff-manager.js";
 import { setPerms, can, isAdmin as isAdminNow, refreshAccess } from "./perms.js";
+import { initUpdateCheck } from "./updates.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -339,4 +340,6 @@ watchAuth((staff) => {
     warmUpLogin(); // start Apps Script while the PIN is being typed
     setTimeout(() => els.pinInput.focus(), 50); // ready to type
   }
+  // New version deployed? Logged-in staff get a "Refresh" bar; the login screen refreshes itself.
+  initUpdateCheck({ canAutoReload: () => !currentStaff });
 });
