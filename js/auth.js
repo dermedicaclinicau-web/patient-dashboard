@@ -11,6 +11,7 @@ import {
 const ERROR_MESSAGES = {
   INVALID_PIN: "Incorrect PIN. Please try again.",
   LOCKED: "Too many attempts. Please wait 15 minutes or contact an admin.",
+  INACTIVE: "This account is turned off. Please contact an admin.",
   SERVER_ERROR: "Something went wrong. Please try again.",
 };
 

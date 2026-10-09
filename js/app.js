@@ -16,6 +16,7 @@ import { mountTaskManager } from "./task-manager.js";
 import { mountAftercareBank } from "./aftercare-bank.js";
 import { mountSspProductsPage } from "./ssp-products.js";
 import { mountSspBuilder } from "./ssp-builder.js";
+import { mountStaffManager } from "./staff-manager.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -137,6 +138,7 @@ function renderStaff(staff) {
   els.staffInitials.textContent = getInitials(staff.name);
   els.staffPhoto.hidden = !staff.photo;
   if (staff.photo) els.staffPhoto.src = staff.photo;
+  document.querySelectorAll("[data-admin-only]").forEach((el) => { el.hidden = !/^admin$/i.test(String(staff.role || "")); });
 }
 
 els.staffPhoto.addEventListener("error", () => { els.staffPhoto.hidden = true; });
@@ -231,6 +233,10 @@ const PAGES = {
         isAdmin: /^admin$/i.test(String(currentStaff.role || "")),
         staff: currentStaff,
       }),
+      staff: (el) => {
+        if (!/^admin$/i.test(String(currentStaff.role || ""))) { location.replace("#/patients"); return; }
+        mountStaffManager(el, { staff: currentStaff });
+      },
 };
 
 function router() {
