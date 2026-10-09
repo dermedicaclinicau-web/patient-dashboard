@@ -2534,3 +2534,6 @@ select.fe-in + .fe-xin, .fe-xin + .fe-xin { margin-top: .5rem; }
   color: var(--primary); font-size: .7rem; font-style: normal; font-weight: 600; }
 .fe-extras .fe-insp-sub { display: flex; flex-direction: column; gap: .25rem; margin-top: .35rem; }
 .fe-extras .fe-insp-sub small { font-size: .76rem; font-weight: 600; color: var(--muted); }
+
+.fe-grp-other { margin-top: .2rem; font-size: .82rem; }
+.fe-sub-opts .fe-optx { display: flex; }

@@ -293,6 +293,7 @@ export function cleanField(f) {
       out.groups = (Array.isArray(f.groups) ? f.groups : []).slice(0, 30).map((g) => ({
         label: clip(g && g.label, 200),
         subs: (Array.isArray(g && g.subs) ? g.subs : []).map((s) => clip(s, 200)).slice(0, 30),
+        other: !!(g && g.other === true),
       }));
       break;
     case "table":
@@ -480,8 +481,10 @@ export function renderField(f, ctx = {}) {
       return head + `<div class="fe-opts">${(f.groups || []).map((g) => `
         <div class="fe-sub">
           <label class="fe-opt">${box("checkbox")}<span>${esc(g.label)}</span></label>
-          ${g.subs && g.subs.length ? `<div class="fe-sub-opts">${g.subs.map((s) =>
-            `<label class="fe-opt">${box("checkbox")}<span>${esc(s)}</span></label>`).join("")}</div>` : ""}
+          ${(g.subs && g.subs.length) || g.other ? `<div class="fe-sub-opts">${(g.subs || []).map((s) =>
+            `<label class="fe-opt">${box("checkbox")}<span>${esc(s)}</span></label>`).join("")}${g.other ? `
+            <span class="fe-optx"><label class="fe-opt">${box("checkbox")}<span>${esc(otherLabel(f))}</span></label>
+              <input class="fe-in fe-xin" type="text" data-subother maxlength="300" placeholder="Please specify"${live ? " hidden" : ""}${inert} /></span>` : ""}</div>` : ""}
         </div>`).join("")}${f.allowOther ? `
         <div class="fe-sub is-other"><span class="fe-optx">
           <label class="fe-opt">${box("checkbox")}<span>${esc(otherLabel(f))}</span></label>
@@ -707,7 +710,9 @@ function typeSettings(f, ctx = {}) {
               <button type="button" class="hx-x" data-grpdel="${i}" aria-label="Remove option ${i + 1}">${svg(ICONS.x)}</button>
             </div>
             <textarea class="fe-input" data-grp="${i}" data-grpk="subs" rows="3" placeholder="One sub-option per line">${esc((g.subs || []).join("\n"))}</textarea>
-          </div>`).join("")}
+            <label class="fe-check fe-grp-other"><input type="checkbox" data-grp="${i}" data-grpk="other"${g.other ? " checked" : ""} />
+              Add “${esc(otherLabel(f))}” to these sub-options</label>
+            </div>`).join("")}
         <button type="button" class="hx-add" data-act="grpadd">+ Add an option</button>
         <small class="fe-note">Sub-options appear when their option is ticked.</small></div>` + extrasSettings(f, false);
 
@@ -868,6 +873,7 @@ export function applyInput(f, el) {
     const g = f.groups && f.groups[Number(el.dataset.grp)];
     if (!g) return false;
     if (el.dataset.grpk === "subs") g.subs = el.value.split("\n").map((s) => s.trim()).filter(Boolean);
+    else if (el.dataset.grpk === "other") g.other = el.checked;
     else g.label = el.value;
     return true;
   }
@@ -948,7 +954,7 @@ export function syncChoiceExtras(f, w) {
   }
   w.querySelectorAll(".fe-optx").forEach((row) => {
     const box = row.querySelector('input[type="radio"], input[type="checkbox"]');
-    showBox(row.querySelector("[data-other], [data-cmt]"), !!(box && box.checked));
+    showBox(row.querySelector("[data-other], [data-cmt], [data-subother]"), !!(box && box.checked));
   });
 }
 

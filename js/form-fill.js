@@ -188,7 +188,11 @@ export function readField(f, w, { pads = {}, calc = {}, consent = {}, annots = {
           return [{ option: otherLabel(f), subs: [], other: o ? o.value.trim().slice(0, 500) : "" }];
         }
         const grp = f.groups[i] || { label: "", subs: [] };
-        return [{ option: grp.label, subs: boxes.slice(1).flatMap((b, j) => (b.checked ? [grp.subs[j] ?? ""] : [])) }];
+        const subList = [...(grp.subs || []), ...(grp.other ? [otherLabel(f)] : [])];
+        const out = { option: grp.label, subs: boxes.slice(1).flatMap((b, j) => (b.checked ? [subList[j] ?? ""] : [])) };
+        const so = row.querySelector("[data-subother]");
+        if (so && !so.hidden && so.value.trim()) out.subOther = so.value.trim().slice(0, 300);
+        return [out];
       });
     case "table": // Firestore can't store lists inside lists, so each row is { cells: [...] }
       return $all(w, "tbody tr").map((tr) => ({
@@ -281,8 +285,11 @@ function writeField(f, w, v) {
         }
         const grp = f.groups[i] || { label: "", subs: [] };
         const subs = m.get(grp.label);
+        const subList = [...(grp.subs || []), ...(grp.other ? [otherLabel(f)] : [])];
         if (boxes[0]) boxes[0].checked = !!subs;
-        boxes.slice(1).forEach((b, j) => { b.checked = !!subs && subs.has(grp.subs[j]); });
+        boxes.slice(1).forEach((b, j) => { b.checked = !!subs && subs.has(subList[j]); });
+        const hit = rows.find((r) => r.option === grp.label);
+        set(row.querySelector("[data-subother]"), (hit && hit.subOther) || "");
       });
       syncChoiceExtras(f, w);
       break;
@@ -581,7 +588,8 @@ export async function mountFormFill(container, param, { staff } = {}) {
       const ob = w.querySelector("[data-other]");
       const onRow = w.querySelector(".fe-optnote.is-other");
       const onTicked = onRow && onRow.querySelector('input[type="checkbox"]').checked;
-      if ((ob && !ob.hidden && !ob.value.trim()) || (onTicked && !onRow.querySelector(".fe-note-in").value.trim())) {
+      const subOtherEmpty = $all(w, "[data-subother]").some((x) => !x.hidden && !x.value.trim());
+      if ((ob && !ob.hidden && !ob.value.trim()) || (onTicked && !onRow.querySelector(".fe-note-in").value.trim()) || subOtherEmpty) {
         out.push({ id: f.id, msg: `Type the “${otherLabel(f)}” answer.` });
       } else if (f.commentRequired && $all(w, "[data-cmt]").some((c) => !c.hidden && !c.value.trim())) {
         out.push({ id: f.id, msg: "Add the details for the ticked answer." });

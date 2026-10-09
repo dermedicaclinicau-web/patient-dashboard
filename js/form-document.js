@@ -116,11 +116,16 @@ function answer(f, v, sig, inline, x) {
             : `${esc(r.option)}${r.note ? ` <span class="note">(${esc(r.note)})</span>` : ""}`}</li>`).join("")}</ul>`
         : '<span class="none">None ticked</span>';
     }
-    case "sub_checks":
+    case "sub_checks": {
+      const oLbl = String(f.otherLabel || "").trim() || "Other";
       return Array.isArray(v) && v.length
-        ? `<ul>${v.map((r) => `<li>${esc(r.option)}${r.other ? `: ${esc(r.other)}`
-            : r.subs && r.subs.length ? `: ${r.subs.map(esc).join(", ")}` : ""}</li>`).join("")}</ul>`
+        ? `<ul>${v.map((r) => {
+            if (r.other) return `<li>${esc(r.option)}: ${esc(r.other)}</li>`;
+            const subs = (r.subs || []).map((s) => (s === oLbl && r.subOther ? `${esc(s)}: ${esc(r.subOther)}` : esc(s)));
+            return `<li>${esc(r.option)}${subs.length ? `: ${subs.join(", ")}` : ""}</li>`;
+          }).join("")}</ul>`
         : '<span class="none">None ticked</span>';
+    }
     case "table": {
       const cols = f.columns || [];
       const rows = (Array.isArray(v) ? v : [])
