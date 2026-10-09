@@ -295,14 +295,14 @@ export function cleanField(f) {
       break;
     case "space": out.size = pick(f.size, ["small", "medium", "large"], "medium"); break;
     case "number": out.min = numOrNull(f.min); out.max = numOrNull(f.max); out.unit = clip(f.unit, 20); break;
-      out.subCols = int(f.subCols, 1, 4, 1);
-      out.subLayout = pick(f.subLayout, ["list", "inline"], "list");
     case "sub_checks":
       out.groups = (Array.isArray(f.groups) ? f.groups : []).slice(0, 30).map((g) => ({
         label: clip(g && g.label, 200),
         subs: (Array.isArray(g && g.subs) ? g.subs : []).map((s) => clip(s, 200)).slice(0, 30),
         other: !!(g && g.other === true),
       }));
+      out.subCols = int(f.subCols, 1, 4, 1);
+      out.subLayout = pick(f.subLayout, ["list", "inline"], "list");
       break;
     case "table":
       out.columns = (Array.isArray(f.columns) ? f.columns : []).slice(0, 12).map((c) => ({

@@ -40,7 +40,13 @@ export function createAnnotator(box, src, { base = "" } = {}) {
   let tool = "pen", colour = COLOURS[0][0], size = "thin";
   const ops = [];
   let current = null;
-  
+    // Earlier markings to keep drawing on top of
+  let baseImg = null;
+  if (base) {
+    const b = new Image();
+    b.onload = () => { baseImg = b; redraw(); };
+    b.src = base;
+  }
 
   const scale = () => (W || 1000) / 1000;
   const penWidth = () => (size === "thick" ? 7 : 3) * scale();
