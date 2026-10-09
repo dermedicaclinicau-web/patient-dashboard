@@ -237,9 +237,19 @@ export function thumbFor(item) {
       const saved = await idbGet(key);
       if (saved) return saved;
       const meta = (all && all.images.get(item.id)) || item;
-      const path = meta.thumbPath || meta.fullPath;
-      if (!path) return "";
-      const url = await blobToDataUrl(await getBlob(sref(storage, path)));
+      // The small copy first; if that's missing, the full picture
+      let blob = null;
+      let lastErr = null;
+      for (const path of [meta.thumbPath, meta.fullPath].filter(Boolean)) {
+        try { blob = await getBlob(sref(storage, path)); break; }
+        catch (err) { lastErr = err; console.warn(`Image Bank: couldn't load ${path}:`, (err && err.code) || err); }
+      }
+      if (!blob) {
+        // Older Google Drive picture (not moved yet)
+        if (!meta.fullPath) return bankImage(item.id);
+        throw lastErr || new Error("Thumbnail unavailable");
+      }
+      const url = await blobToDataUrl(blob);
       idbPut(key, url);
       return url;
     })();
@@ -248,7 +258,6 @@ export function thumbFor(item) {
   }
   return thumbCache.get(key);
 }
-
 /* ---------- Full-size pictures (by new ID or an older Google Drive ID) ---------- */
 
 async function findMeta(id) {
