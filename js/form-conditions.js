@@ -40,14 +40,12 @@ const opLabel = (kind, op) => {
 
 function choicesOf(f) {
   if (!f) return null;
-  if (f.type === "sub_checks") return (f.groups || []).map((g) => g.label).filter((s) => String(s).trim());
+  const other = f.allowOther ? [String(f.otherLabel || "").trim() || "Other"] : [];
+  if (f.type === "sub_checks") {
+    return [...(f.groups || []).map((g) => g.label).filter((s) => String(s).trim()), ...other];
+  }
   if (["single_choice", "dropdown", "checkboxes", "checkbox_notes"].includes(f.type)) {
-    const list = (f.options || []).filter((o) => String(o).trim());
-    // The "Other" choice can be used in conditions too
-    if (f.allowOther && ["single_choice", "dropdown", "checkboxes"].includes(f.type)) {
-      list.push(String(f.otherLabel || "").trim() || "Other");
-    }
-    return list;
+    return [...(f.options || []).filter((o) => String(o).trim()), ...other];
   }
   return null;
 }

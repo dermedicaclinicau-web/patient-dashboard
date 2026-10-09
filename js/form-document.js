@@ -108,13 +108,18 @@ function answer(f, v, sig, inline, x) {
       return inline
         ? v.map((o) => choiceText(f, o, x)).join(", ")
         : `<ul>${v.map((o) => `<li>${choiceText(f, o, x)}</li>`).join("")}</ul>`;
-    case "checkbox_notes":
+    case "checkbox_notes": {
+      const oLbl = String(f.otherLabel || "").trim() || "Other";
       return Array.isArray(v) && v.length
-        ? `<ul>${v.map((r) => `<li>${esc(r.option)}${r.note ? ` <span class="note">(${esc(r.note)})</span>` : ""}</li>`).join("")}</ul>`
+        ? `<ul>${v.map((r) => `<li>${f.allowOther && r.option === oLbl && r.note
+            ? `${esc(r.option)}: ${esc(r.note)}`
+            : `${esc(r.option)}${r.note ? ` <span class="note">(${esc(r.note)})</span>` : ""}`}</li>`).join("")}</ul>`
         : '<span class="none">None ticked</span>';
+    }
     case "sub_checks":
       return Array.isArray(v) && v.length
-        ? `<ul>${v.map((r) => `<li>${esc(r.option)}${r.subs && r.subs.length ? `: ${r.subs.map(esc).join(", ")}` : ""}</li>`).join("")}</ul>`
+        ? `<ul>${v.map((r) => `<li>${esc(r.option)}${r.other ? `: ${esc(r.other)}`
+            : r.subs && r.subs.length ? `: ${r.subs.map(esc).join(", ")}` : ""}</li>`).join("")}</ul>`
         : '<span class="none">None ticked</span>';
     case "table": {
       const cols = f.columns || [];

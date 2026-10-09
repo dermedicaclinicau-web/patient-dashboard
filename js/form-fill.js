@@ -170,18 +170,24 @@ export function readField(f, w, { pads = {}, calc = {}, consent = {}, annots = {
       const list = choiceList(f);
       return $all(w, 'input[type="checkbox"]').flatMap((x, i) => (x.checked ? [list[i] ?? ""] : []));
     }
-    case "checkbox_notes":
+    case "checkbox_notes": {
+      const list = choiceList(f);
       return $all(w, ".fe-optnote").flatMap((row, i) => {
         const box = row.querySelector('input[type="checkbox"]');
         if (!box || !box.checked) return [];
         const note = row.querySelector(".fe-note-in");
-        return [{ option: f.options[i] ?? "", note: note ? note.value.trim().slice(0, 1000) : "" }];
+        return [{ option: list[i] ?? "", note: note ? note.value.trim().slice(0, 1000) : "" }];
       });
+    }
     case "sub_checks":
       return $all(w, ".fe-sub").flatMap((row, i) => {
         const boxes = $all(row, 'input[type="checkbox"]');
-        const grp = f.groups[i] || { label: "", subs: [] };
         if (!boxes[0] || !boxes[0].checked) return [];
+        if (row.classList.contains("is-other")) {
+          const o = row.querySelector("[data-other]");
+          return [{ option: otherLabel(f), subs: [], other: o ? o.value.trim().slice(0, 500) : "" }];
+        }
+        const grp = f.groups[i] || { label: "", subs: [] };
         return [{ option: grp.label, subs: boxes.slice(1).flatMap((b, j) => (b.checked ? [grp.subs[j] ?? ""] : [])) }];
       });
     case "table": // Firestore can't store lists inside lists, so each row is { cells: [...] }
@@ -254,22 +260,31 @@ function writeField(f, w, v) {
     }
     case "checkbox_notes": {
       const m = new Map((Array.isArray(v) ? v : []).map((r) => [r.option, r.note]));
+      const list = choiceList(f);
       $all(w, ".fe-optnote").forEach((row, i) => {
         const box = row.querySelector('input[type="checkbox"]');
-        if (box) box.checked = m.has(f.options[i]);
-        set(row.querySelector(".fe-note-in"), m.get(f.options[i]) || "");
+        if (box) box.checked = m.has(list[i]);
+        set(row.querySelector(".fe-note-in"), m.get(list[i]) || "");
       });
       break;
     }
     case "sub_checks": {
-      const m = new Map((Array.isArray(v) ? v : []).map((r) => [r.option, new Set(r.subs || [])]));
+      const rows = Array.isArray(v) ? v : [];
+      const m = new Map(rows.map((r) => [r.option, new Set(r.subs || [])]));
       $all(w, ".fe-sub").forEach((row, i) => {
+        const boxes = $all(row, 'input[type="checkbox"]');
+        if (row.classList.contains("is-other")) {
+          const hit = rows.find((r) => r.option === otherLabel(f) && "other" in r);
+          if (boxes[0]) boxes[0].checked = !!hit;
+          set(row.querySelector("[data-other]"), hit ? hit.other : "");
+          return;
+        }
         const grp = f.groups[i] || { label: "", subs: [] };
         const subs = m.get(grp.label);
-        const boxes = $all(row, 'input[type="checkbox"]');
         if (boxes[0]) boxes[0].checked = !!subs;
         boxes.slice(1).forEach((b, j) => { b.checked = !!subs && subs.has(grp.subs[j]); });
       });
+      syncChoiceExtras(f, w);
       break;
     }
     case "table":
@@ -564,7 +579,9 @@ export async function mountFormFill(container, param, { staff } = {}) {
         out.push({ id: f.id, msg: "There's no valid consent on file, so this form can't be saved yet." });
       }
       const ob = w.querySelector("[data-other]");
-      if (ob && !ob.hidden && !ob.value.trim()) {
+      const onRow = w.querySelector(".fe-optnote.is-other");
+      const onTicked = onRow && onRow.querySelector('input[type="checkbox"]').checked;
+      if ((ob && !ob.hidden && !ob.value.trim()) || (onTicked && !onRow.querySelector(".fe-note-in").value.trim())) {
         out.push({ id: f.id, msg: `Type the “${otherLabel(f)}” answer.` });
       } else if (f.commentRequired && $all(w, "[data-cmt]").some((c) => !c.hidden && !c.value.trim())) {
         out.push({ id: f.id, msg: "Add the details for the ticked answer." });
