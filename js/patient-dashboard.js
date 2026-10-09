@@ -10,6 +10,7 @@ import { setRecordingPatient } from "./recording-bar.js";
 import { historySectionHtml, mountHistory } from "./history-view.js";
 import { latestMerge, undoMerge } from "./merge-patients.js";
 import { confirmDialog, alertDialog } from "./dialog.js";
+import { sspSectionHtml, mountSspRecords } from "./ssp-records-view.js";
 import {
   billingRxSectionHtml, mountBillingRx, injectableReferralSectionHtml, interestsCommsSectionHtml,
 } from "./billing-rx-view.js";
@@ -212,6 +213,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     ${treatmentPlansSectionHtml()}
     
     ${skincareSectionHtml()}
+    ${sspSectionHtml()}
     
     ${recordsSectionHtml()}
 
@@ -300,6 +302,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   notesView = mountPersonalNotes(root, patient, staff);
   loadTranscriptSections();
   mountSkincare(root, patient);
+  mountSspRecords(root, patient, staff);
   mountRecords(root, patient);
   mountFormRecords(root, patient);
   mountHistory(root, patient);  

@@ -5,9 +5,10 @@ import { createSspRecord, listSspRecords, syncSspToSheet } from "./ssp-api.js";
 import { getPatient, patientIds } from "./patients.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
+import { openSspPreview } from "./ssp-send.js";
+import { getSspSettings, openSspSettings, SSP_DEFAULTS } from "./ssp-settings.js";
 
 const DAYS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
-const VALID_MONTHS = 3;
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const isoOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -39,9 +40,13 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
     if (root.isConnected) root.innerHTML = `<a class="back-link" href="${backHref}">← Back to patient</a><div class="state"><strong>${esc(title)}</strong>${esc(msg)}</div>`;
   };
 
-  let patient, products;
+  let patient, products, settings;
   try {
-    [patient, products] = await Promise.all([getPatient(patientId), listSspProducts({ force: true })]);
+    [patient, products, settings] = await Promise.all([
+      getPatient(patientId),
+      listSspProducts({ force: true }),
+      getSspSettings().catch(() => ({ ...SSP_DEFAULTS })),
+    ]);
   } catch (err) {
     console.error("SSP builder load failed:", err);
     fail("Couldn't open the Skin Script", err && err.code === "permission-denied"
@@ -50,6 +55,9 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
   }
   if (!root.isConnected) return;
   if (!patient) { fail("Patient not found", "Go back to the patient list and try again."); return; }
+
+  const VALID_MONTHS = settings.validMonths || 3;
+  let savedRecord = null; // once saved (from Save or from the preview)
 
   /* ---------- State: one row per product per step ---------- */
   const rows = new Map(); // "STEP:productId" -> row
@@ -103,7 +111,8 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
           <input type="search" class="fe-input ssp-filter" data-role="q" placeholder="Filter products…" aria-label="Filter products" />
           <label class="ssp-toggle"><input type="checkbox" data-role="selonly" /> Show selected only</label>
           <button type="button" class="btn-ghost" data-act="clear">Clear all</button>
-          ${isAdmin ? `<button type="button" class="ssp-config" data-act="config">${I.gear}<span>Products Config</span></button>` : ""}
+          ${isAdmin ? `<button type="button" class="btn-ghost" data-act="settings">SSP Settings</button>
+            <button type="button" class="ssp-config" data-act="config">${I.gear}<span>Products Config</span></button>` : ""}
         </div>
       </div>
       <div data-role="banner"></div>
@@ -321,7 +330,9 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
     } else if (a === "config") {
       openProductsConfig();
     } else if (a === "preview") {
-      showToast("Preview is the next step we'll build. For now, save the protocol.");
+      openPreview();
+    } else if (a === "settings") {
+      openSspSettings({ staff });
     } else if (a === "save") {
       save();
     } else if (a === "use-last") {
@@ -391,42 +402,53 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
       });
   }
 
+  // Saves to Firestore and SSP_NEW. Returns the saved protocol; throws with a readable message.
+  async function doSave() {
+    if (savedRecord) return savedRecord;
+    const list = items();
+    if (!list.length) throw new Error("Tick AM or PM on at least one product.");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(meta.recordDate) || !/^\d{4}-\d{2}-\d{2}$/.test(meta.validUntil)) {
+      throw new Error("Check the record date and valid until date.");
+    }
+    if (meta.validUntil < meta.recordDate) throw new Error("Valid until must be after the record date.");
+    const data = {
+      recordId: `SSP-${meta.recordDate.replace(/-/g, "")}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+      patientId: patient.id,
+      patientPttId: patient.pttId || "",
+      patientName: patient.name || "",
+      recordDate: meta.recordDate,
+      validUntil: meta.validUntil,
+      items: list,
+    };
+    try {
+      const id = await createSspRecord(data, staff);
+      savedRecord = { id, ...data, createdBy: (staff && staff.name) || "" };
+    } catch (err) {
+      throw new Error(err.code === "permission-denied"
+        ? "Couldn't save. Check the ssp_records Firestore rule has been published."
+        : err.code ? "Couldn't save. Check your connection and try again." : err.message);
+    }
+    try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
+    syncSspToSheet(savedRecord.id).catch((err) => console.warn("Saved, but SSP_NEW wasn't updated:", err));
+    return savedRecord;
+  }
+
   async function save() {
     if (saving) return;
-    const list = items();
-    if (!list.length) { msgEl.textContent = "Tick AM or PM on at least one product."; return; }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(meta.recordDate) || !/^\d{4}-\d{2}-\d{2}$/.test(meta.validUntil)) {
-      msgEl.textContent = "Check the record date and valid until date."; return;
-    }
-    if (meta.validUntil < meta.recordDate) { msgEl.textContent = "Valid until must be after the record date."; return; }
+    if (savedRecord) { location.hash = backHref; return; }
     saving = true;
     msgEl.textContent = "";
     const btn = $('[data-act="save"]');
     const lbl = btn.querySelector("span");
     btn.disabled = true;
     lbl.textContent = "Saving…";
-    const recordId = `SSP-${meta.recordDate.replace(/-/g, "")}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
     try {
-      const id = await createSspRecord({
-        recordId,
-        patientId: patient.id,
-        patientPttId: patient.pttId || "",
-        patientName: patient.name || "",
-        recordDate: meta.recordDate,
-        validUntil: meta.validUntil,
-        items: list,
-      }, staff);
-      try { localStorage.removeItem(draftKey); } catch { /* ignore */ }
-      let sheetOk = true;
-      try { await syncSspToSheet(id); } catch (err) { sheetOk = false; console.warn("Saved, but SSP_NEW wasn't updated:", err); }
-      showToast(sheetOk ? `Skin Script Protocol saved (${list.length} product${list.length === 1 ? "" : "s"})`
-        : "Skin Script saved. The SSP_NEW sheet couldn't be updated; tell an admin.");
+      const rec = await doSave();
+      showToast(`Skin Script Protocol saved (${rec.items.length} product${rec.items.length === 1 ? "" : "s"})`);
       location.hash = backHref;
     } catch (err) {
       console.error("SSP save failed:", err);
-      msgEl.textContent = err.code === "permission-denied"
-        ? "Couldn't save. Check the ssp_records Firestore rule has been published."
-        : err.code ? "Couldn't save. Check your connection and try again." : err.message;
+      msgEl.textContent = err.message;
       btn.disabled = false;
       lbl.textContent = "Save protocol";
     } finally {
@@ -434,6 +456,21 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
     }
   }
 
+  async function openPreview() {
+    const list = items();
+    if (!list.length) { msgEl.textContent = "Tick AM or PM on at least one product to preview."; return; }
+    msgEl.textContent = "";
+    const res = await openSspPreview({
+      record: savedRecord || {
+        patientId: patient.id, patientName: patient.name || "",
+        recordDate: meta.recordDate, validUntil: meta.validUntil, items: list,
+      },
+      patient, staff,
+      onSave: savedRecord ? null : doSave,
+    });
+    if (res && res.saved) location.hash = backHref; // saved from the preview: back to the patient
+  }
+  
   /* ---------- Start ---------- */
   let lastRecord = null;
   let draft = null;

@@ -401,3 +401,10 @@ export async function aftercarePdf({ items, patient }) {
   if (!payload.pdf) throw new Error("Couldn't make the PDF. Try again.");
   return payload;
 }
+
+/* ---------- Any document as a PDF (Skin Script Protocol) ---------- */
+
+export async function docToPdf(doc) {
+  const blob = await renderPdf(doc);
+  return { blob, pdf: await blobToBase64(blob), fileName: doc.fileName };
+}

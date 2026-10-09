@@ -14,7 +14,7 @@ const firebaseConfig = {
 };
 
 // Apps Script web app URL (ends with /exec)
-export const LOGIN_ENDPOINT = "https://script.google.com/macros/s/AKfycbzKmMFcYHcGZ2xOZdOaONyH4sNzeGOEntzhl76BjuaIpCFmTTpudcrBJi9SgUX3to3abg/exec";
+export const LOGIN_ENDPOINT = "https://script.google.com/a/macros/dermedica.com.au/s/AKfycbzb4J7itwDNblPVtBbbZoxdcd2DOqmiZTMXeI7lnRIKuCV92YjJ6hHgS74wz3G9uqOuSA/exec";
 
 export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
