@@ -372,3 +372,29 @@ export async function printablePdf({ templateId, patient }) {
   if (!payload.pdf) throw new Error(`Couldn't make the PDF for "${ver.name}". Try again.`);
   return { name: payload.fileName, pdf: payload.pdf };
 }
+
+/* ---------- Aftercare on its own, as a PDF (Print aftercare) ---------- */
+
+export async function aftercarePdf({ items, patient }) {
+  const letterhead = await getLetterhead().catch(() => DEFAULT_LETTERHEAD);
+  const d = new Date();
+  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const ver = {
+    name: "Aftercare instructions",
+    version: 0,
+    fields: [{ id: "ac", type: "aftercare", label: "", mode: "fixed", items: [] }],
+    settings: { showLetterhead: true, showTitle: true, showMeta: true },
+  };
+  const sub = {
+    answers: { ac: { items } },
+    signatures: {},
+    templateName: "Aftercare instructions",
+    patientName: (patient && patient.name) || "",
+    recordDate: today,
+    version: 0,
+    createdBy: "",
+  };
+  const payload = await pdfPayload(await formPdf({ sub, ver, letterhead }));
+  if (!payload.pdf) throw new Error("Couldn't make the PDF. Try again.");
+  return payload;
+}
