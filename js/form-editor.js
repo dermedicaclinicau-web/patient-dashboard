@@ -20,6 +20,7 @@ import { attachAnnotators } from "./form-annotate.js";
 import { createRichEditor } from "./rich-editor.js";
 import { textToRichHtml } from "./rich-html.js";
 import { makeResizable } from "./panel-resize.js";
+import { openDuplicateDialog } from "./form-duplicate.js";
 
 const UI = {
   up: '<polyline points="18 15 12 9 6 15"/>',
@@ -130,6 +131,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
           <button type="button" data-mode="build" class="active">Build</button>
           <button type="button" data-mode="preview">Preview</button>
         </div>
+        <button type="button" class="btn-ghost fe-dup" data-act="duplicate" title="Make a new draft with these questions">Duplicate</button>
         <button type="button" class="btn-ghost fe-savenow" data-act="save-now" data-role="savenow" disabled>Save draft</button>
         <button type="button" class="btn-ghost fe-unpub" data-act="unpublish" data-role="unpublish" hidden>Unpublish</button>
         <button type="button" class="btn-primary fe-publish" data-act="publish" data-role="publish">Publish</button>
@@ -729,7 +731,10 @@ export async function mountFormEditor(container, { templateId, staff }) {
     if (m) { setMode(m.dataset.mode); renderStage(); return; }
     if (e.target.closest('[data-act="publish"]')) { publish(); return; }
     if (e.target.closest('.fe-top [data-act="unpublish"]')) { unpublish(); return; }
-
+    if (e.target.closest('.fe-top [data-act="duplicate"]')) {
+      openDuplicateDialog({ name, category: tpl.category, fields, settings }, staff);
+      return;
+    }
     if (e.target.closest('[data-act="save-now"]')) { dirty = true; flush(); return; }
     if (e.target.closest('[data-act="retry"]')) { dirty = true; flush(); return; }
     const add = e.target.closest("[data-add]");

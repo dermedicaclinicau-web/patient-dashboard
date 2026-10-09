@@ -165,6 +165,25 @@ export async function createFormTemplate({ name, category }, staff) {
   return ref.id;
 }
 
+// A new draft with the same questions and settings as another form.
+// Made the same way as "New form" (so the rules accept it), then filled in.
+export async function duplicateFormTemplate(source, { name, category }, staff) {
+  const id = await createFormTemplate({ name, category }, staff);
+  try {
+    await saveFormTemplate(id, {
+      name,
+      fields: Array.isArray(source.fields) ? source.fields : [],
+      settings: source.settings || {},
+    }, staff);
+  } catch (err) {
+    // Don't leave an empty copy behind
+    await saveFormTemplate(id, { name, fields: [], settings: {}, status: "archived" }, staff).catch(() => {});
+    throw err;
+  }
+  cache = null;
+  return id;
+}
+
 /* ===================== Saving the editor's work ===================== */
 
 // status: leave out for a normal save, "draft" to unpublish, "archived" to delete.

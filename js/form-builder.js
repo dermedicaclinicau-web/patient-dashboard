@@ -3,6 +3,7 @@ import {
   FORM_CATEGORIES, categoryLabel, listFormTemplates, getFormTemplate, createFormTemplate,
 } from "./form-templates.js";
 import { mountFormEditor } from "./form-editor.js";
+import { openDuplicateDialog } from "./form-duplicate.js";
 
 const svg = (p) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -19,6 +20,7 @@ const ICONS = {
   plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
   search: '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
   chevron: '<polyline points="9 18 15 12 9 6"/>',
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
 };
 
 function editedAgo(date) {
@@ -131,19 +133,22 @@ function mountLibrary(container, { isAdmin, staff }) {
     }
 
     list.innerHTML = `<div class="fb-list">${rows.map((t) => `
-      <a class="fb-row" href="#/forms/${encodeURIComponent(t.id)}">
-        <span class="fb-row-icon">${svg(ICONS[t.category] || ICONS.admin)}</span>
-        <span class="fb-row-main">
-          <span class="fb-row-name">${escapeHtml(t.name)}</span>
-          <span class="fb-row-meta">
-            <span>${escapeHtml(categoryLabel(t.category))}</span>
-            <span>${t.fieldCount} question${t.fieldCount === 1 ? "" : "s"}</span>
-            ${t.updatedAt ? `<span>${escapeHtml(editedAgo(t.updatedAt))}</span>` : ""}
+      <div class="fb-rowwrap">
+        <a class="fb-row" href="#/forms/${encodeURIComponent(t.id)}">
+          <span class="fb-row-icon">${svg(ICONS[t.category] || ICONS.admin)}</span>
+          <span class="fb-row-main">
+            <span class="fb-row-name">${escapeHtml(t.name)}</span>
+            <span class="fb-row-meta">
+              <span>${escapeHtml(categoryLabel(t.category))}</span>
+              <span>${t.fieldCount} question${t.fieldCount === 1 ? "" : "s"}</span>
+              ${t.updatedAt ? `<span>${escapeHtml(editedAgo(t.updatedAt))}</span>` : ""}
+            </span>
           </span>
-        </span>
-        ${isAdmin ? statusPill(t.status) : ""}
-        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS.chevron}</svg>
-      </a>`).join("")}</div>`;
+          ${isAdmin ? statusPill(t.status) : ""}
+          <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS.chevron}</svg>
+        </a>
+        ${isAdmin ? `<button type="button" class="fb-dup" data-dup="${escapeHtml(t.id)}" title="Duplicate this form" aria-label="Duplicate ${escapeHtml(t.name)}">${svg(ICONS.copy)}<span>Duplicate</span></button>` : ""}
+      </div>`).join("")}</div>`;
   }
 
   async function load(force = false) {
@@ -232,6 +237,12 @@ function mountLibrary(container, { isAdmin, staff }) {
       ui.status = st.dataset.s;
       root.querySelectorAll("[data-s]").forEach((b) => b.classList.toggle("active", b === st));
       renderList();
+      return;
+    }
+    const dup = e.target.closest("[data-dup]");
+    if (dup) {
+      const t = templates.find((x) => x.id === dup.dataset.dup);
+      if (t) openDuplicateDialog(t, staff);
       return;
     }
     if (e.target.closest('[data-act="new"]')) { openNewForm(); return; }
