@@ -115,6 +115,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
   root.innerHTML = `
     ${back}
+    <div class="fe-top-sentinel" aria-hidden="true"></div>
     <div class="fe-top">
       <div class="fe-top-main">
         <input class="fe-name" data-role="name" maxlength="120" aria-label="Form name" value="${esc(name)}" />
@@ -130,6 +131,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
           <button type="button" data-mode="preview">Preview</button>
         </div>
         <button type="button" class="btn-ghost fe-savenow" data-act="save-now" data-role="savenow" disabled>Save draft</button>
+        <button type="button" class="btn-ghost fe-unpub" data-act="unpublish" data-role="unpublish" hidden>Unpublish</button>
         <button type="button" class="btn-primary fe-publish" data-act="publish" data-role="publish">Publish</button>
       </div>
     </div>
@@ -234,6 +236,13 @@ export async function mountFormEditor(container, { templateId, staff }) {
     btn.disabled = disabled;
     btn.title = title;
     btn.classList.toggle("is-done", label === "Published");
+
+    const unpub = $('[data-role="unpublish"]');
+    if (unpub) {
+      unpub.hidden = !live;
+      unpub.disabled = publishing;
+      unpub.title = "Take this form off the patient dashboard and keep it as a draft";
+    }
   }
 
   // The first thing that would stop the form working for staff, or null
@@ -677,11 +686,50 @@ export async function mountFormEditor(container, { templateId, staff }) {
     }
   }
 
+  /* ---------- Sticky top bar ---------- */
+  function initStickyTop() {
+    const top = $(".fe-top");
+    const sentinel = $(".fe-top-sentinel");
+    if (!top) return;
+    const panels = [$(".fe-palette"), insp];
+
+    const measure = () => {
+      if (!root.isConnected) return;
+      // Sit below the portal's own top bar if that one stays on screen
+      const tb = document.querySelector(".topbar");
+      const tbPos = tb ? getComputedStyle(tb).position : "";
+      const offset = tb && (tbPos === "sticky" || tbPos === "fixed") ? Math.round(tb.getBoundingClientRect().height) : 0;
+      top.style.top = `${offset}px`;
+      const below = offset + Math.round(top.getBoundingClientRect().height);
+      // The side panels start under the bar instead of sliding beneath it
+      panels.forEach((el) => {
+        if (el && getComputedStyle(el).position === "sticky") {
+          el.style.top = `${below + 12}px`;
+          el.style.maxHeight = `calc(100vh - ${below + 24}px)`;
+        }
+      });
+    };
+    new ResizeObserver(measure).observe(top);
+    window.addEventListener("resize", function onResize() {
+      if (!root.isConnected) { window.removeEventListener("resize", onResize); return; }
+      measure();
+    });
+
+    // Compact look once the page has scrolled
+    if (sentinel && "IntersectionObserver" in window) {
+      new IntersectionObserver(([entry]) => top.classList.toggle("is-stuck", !entry.isIntersecting))
+        .observe(sentinel);
+    }
+    measure();
+  }
+
   /* ---------- Events ---------- */
   root.addEventListener("click", (e) => {
     const m = e.target.closest("[data-mode]");
     if (m) { setMode(m.dataset.mode); renderStage(); return; }
     if (e.target.closest('[data-act="publish"]')) { publish(); return; }
+    if (e.target.closest('.fe-top [data-act="unpublish"]')) { unpublish(); return; }
+
     if (e.target.closest('[data-act="save-now"]')) { dirty = true; flush(); return; }
     if (e.target.closest('[data-act="retry"]')) { dirty = true; flush(); return; }
     const add = e.target.closest("[data-add]");
@@ -936,6 +984,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   renderInspector();
   renderPublish();
   makeResizable(root);
+  initStickyTop();
 
   // The published copy, to tell whether there are unpublished changes
   if (version > 0) {
