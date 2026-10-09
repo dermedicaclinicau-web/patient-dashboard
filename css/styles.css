@@ -2730,7 +2730,7 @@ select.fe-in + .fe-xin, .fe-xin + .fe-xin { margin-top: .5rem; }
 .ac-mail .lh-dialog-head p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---------- Photos while filling in ---------- */
-.ph-grid { display: grid; gap: .75rem; margin-bottom: .75rem; }
+.ph-host .ph-grid { display: grid; gap: .75rem; margin-bottom: .75rem; }
 .ph-grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .ph-grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .ph-grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
@@ -2899,20 +2899,7 @@ select.fe-in + .fe-xin, .fe-xin + .fe-xin { margin-top: .5rem; }
 .ssp-prev-msg:not(:empty) { padding: .6rem 1rem; background: #fef2f2; }
 .ssp-prev-body { overflow: auto; padding: 1.25rem; }
 .ssp-paper { width: 794px; max-width: 100%; margin: 0 auto; background: #fff; box-shadow: 0 6px 28px rgba(15, 23, 42, .15); overflow-x: auto; box-sizing: border-box; }
-.ssd-paper { box-sizing: border-box; width: 794px !important; }
-@media (max-width: 860px) { .ssp-paper { padding: 20px; } }
-
-/* Settings */
-.ssp-set { width: min(620px, calc(100vw - 2rem)); }
-.ssp-set textarea { width: 100%; font: inherit; }
-
-/* Patient page section */
-.ssp-list { display: flex; flex-direction: column; gap: .5rem; }
-.ssp-item { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .7rem .9rem;
-  border: 1px solid var(--border); border-radius: 12px; background: #fff; }
-.ssp-item-main { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .6rem; min-width: 0; }
-.ssp-item-main small { flex-basis: 100%; font-size: .8rem; color: var(--muted); }
-.ssp-item-main .ssp-sent { color: #047857; }
+.ssd-paper { box-sizing: border-box; width: 794px; }
 
 /* ---------- Email windows (Skin Script + aftercare): tidy inputs and toolbar ---------- */
 .ac-mail .lh-field input {
@@ -2935,26 +2922,6 @@ select.fe-in + .fe-xin, .fe-xin + .fe-xin { margin-top: .5rem; }
 .ac-mail .ac-ed-two { gap: .75rem 1rem; }
 .ac-mail .lh-field { gap: .35rem; }
 
-/* The editor toolbar's own dropdowns stay compact, inside any dialog */
-.lh-dialog .re .re-bar { flex-wrap: wrap; }
-.lh-dialog .re .re-bar select.re-block,
-.lh-dialog .re .re-bar select.re-size {
-  flex: 0 0 auto;
-  width: auto;
-  min-width: 0;
-  height: 32px;
-  padding: 0 1.6rem 0 .55rem;
-  margin: 0;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background-color: #fff;
-  font: inherit;
-  font-size: .82rem;
-  line-height: normal;
-}
-.lh-dialog .re .re-bar select.re-block { min-width: 120px; }
-.lh-dialog .re .re-bar select.re-size { min-width: 80px; }
-
 /* The message area: a little more room, and the attachment chip lined up */
 .ac-mail .tr-canvas { padding: .6rem; }
 .ac-mail .re-area { min-height: 260px; }
@@ -2965,9 +2932,8 @@ select.fe-in + .fe-xin, .fe-xin + .fe-xin { margin-top: .5rem; }
 .ssp-when-note { margin-top: .2rem; font-size: .78rem; color: var(--muted); }
 
 /* ---------- Skin Script design window ---------- */
-.ssd { width: min(1240px, calc(100vw - 1rem)); height: calc(100vh - 1rem); max-height: none; padding: 0;
-  display: flex; flex-direction: column; overflow: hidden; }
-.ssd[open] { display: flex; }
+.ssd { width: min(1240px, calc(100vw - 1rem)); height: calc(100vh - 1rem); max-height: none; padding: 0; overflow: hidden; }
+.ssd[open] { display: flex; flex-direction: column; }
 .ssd-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: .75rem 1rem;
   padding: 1rem 1.25rem .6rem; }
 .ssd-head h3 { margin: 0; }
@@ -2996,7 +2962,7 @@ select.fe-in + .fe-xin, .fe-xin + .fe-xin { margin-top: .5rem; }
 .ssd-prev-label { padding: .6rem 1rem; font-size: .74rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: #475569; }
 .ssd-stage { flex: 1; overflow: auto; padding: 0 1rem 1.5rem; }
 .ssd-fit { position: relative; margin: 0 auto; }
-.ssd-paper { position: absolute; top: 0; left: 0; width: 793px; padding: 45px; background: #fff;
+.ssd-paper { position: absolute; top: 0; left: 0; background: #fff;
   box-shadow: 0 6px 28px rgba(15, 23, 42, .15); transform-origin: top left; }
 .ssd-subject { margin: 0 auto .6rem; max-width: 680px; padding: .6rem .8rem; border-radius: 10px; background: #fff; }
 .ssd-subject small { display: block; font-size: .72rem; color: var(--muted); }
@@ -3051,26 +3017,101 @@ select.fe-in + .fe-xin, .fe-xin + .fe-xin { margin-top: .5rem; }
 .lh-dialog .lh-field input::placeholder,
 .lh-dialog .lh-field textarea::placeholder { color: #94a3b8; }
 
-/* ---------- Rich text editor toolbar: compact, on one line where it fits ---------- */
-.lh-dialog div:has(> button):has(> select),
-.lh-dialog div:has(> select) + div:has(> button) {
+
+/* ---------- Rich text editor toolbar (rich-editor.js): compact, one line where it fits ---------- */
+.re-bar {
+  display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 2px 4px;
+  gap: 2px;
+  padding: 6px 8px;
 }
-.lh-dialog div:has(> button) > select,
-.lh-dialog div:has(> select):has(> button) select {
+.re-bar .re-block,
+.re-bar .re-size {
   flex: 0 0 auto;
-  width: auto;
-  min-width: 0;
-  max-width: 128px;
+  width: auto !important;
+  min-width: 0 !important;
   height: 32px;
-  margin: 0;
-  padding: 0 1.6rem 0 .55rem;
+  margin: 0 2px 0 0;
+  padding: 0 1.5rem 0 .5rem;
   border: 1px solid var(--border);
   border-radius: 7px;
   background-color: #fff;
   font: inherit;
   font-size: .82rem;
   line-height: normal;
+  cursor: pointer;
+}
+.re-bar .re-block { max-width: 120px; }
+.re-bar .re-size { max-width: 86px; }
+.re-bar .re-btn {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+.re-bar .re-btn svg { width: 16px; height: 16px; }
+.re-bar .re-sep {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 20px;
+  margin: 0 4px;
+  background: var(--border);
+}
+
+/* ---------- Overlays: one consistent look ---------- */
+select, textarea { font: inherit; color: inherit; }
+
+dialog::backdrop {
+  background: rgba(15, 23, 42, .45);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+}
+
+.dialog, .em-dialog, .cd-dialog, .lh-dialog {
+  border-radius: 18px;
+  box-shadow: 0 30px 70px -20px rgba(15, 23, 42, .45);
+}
+.lh-dialog { max-height: calc(100dvh - 2rem); }
+.lh-dialog[open], .dialog[open], .em-dialog[open] { animation: ov-in .18s ease-out; }
+@keyframes ov-in { from { opacity: 0; transform: translateY(8px) scale(.985); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .lh-dialog[open], .dialog[open], .em-dialog[open], .cd-dialog[open] { animation: none; }
+}
+
+/* Titles inside overlays */
+.lh-dialog-head h3, .ssd-head h3, .ssp-cfg-head h3, .th-head h3, .ib-picker-head h3 {
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+
+/* Dropdowns inside overlays match the text boxes */
+.lh-dialog .fb-select {
+  width: 100%;
+  min-height: 40px;
+  padding: .5rem .75rem;
+  border-radius: 10px;
+  font-size: .95rem;
+}
+
+/* Buttons */
+.lh-btn { gap: .4rem; border-radius: 10px; transition: background .15s, border-color .15s, color .15s; }
+.lh-btn:focus-visible, .ff-btn:focus-visible, .btn-primary:focus-visible, .btn-ghost:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+.lh-actions { flex-wrap: wrap; }
+
+/* Full-height overlays fit the visible screen (iPad Safari) */
+.ssd { height: calc(100dvh - 1rem); }
+.ssp-prev { max-height: calc(100dvh - 1rem); }
+
+/* Phones */
+@media (max-width: 640px) {
+  .lh-dialog, .dialog, .em-dialog, .cd-dialog { width: calc(100vw - 1rem); }
+  .lh-form { padding: 1.1rem; }
+  .ssp-prev-acts .lh-btn { flex: 1 1 auto; }
+  .ssd-two, .ssd-checks { grid-template-columns: 1fr; }
 }
