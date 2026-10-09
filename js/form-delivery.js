@@ -10,6 +10,9 @@ import { showToast, formatDobLong } from "./utils.js";
 import { bankImage } from "./image-bank-api.js";
 import { DEFAULT_LETTERHEAD } from "./form-letterhead.js";
 import { photoSrc, photoKey } from "./photo-field.js";
+import { createRichEditor } from "./rich-editor.js";
+import { richText } from "./rich-html.js";
+import { emailShell, clinicDetails } from "./task-tokens.js";
 
 const EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
 const PDF_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
@@ -183,17 +186,17 @@ export async function openEmailComposer({ sub, ver, letterhead, staff }) {
   p.blob().catch(() => {}); // start making the PDF now, so sending is quick
   const fileName = p.doc.fileName;
 
-  const message =
-    `Hi ${first || "there"},\n\n` +
-    `Please find attached a copy of your ${sub.templateName}, completed on ${niceDate(sub.recordDate)}.\n\n` +
-    "If you have any questions, just reply to this email.\n\n" +
-    `Kind regards,\n${(staff && staff.name) || "The team"}\nDermedica`;
+  const messageHtml =
+    `<p>Hi ${esc(first || "there")},</p>` +
+    `<p>Please find attached a copy of your ${esc(sub.templateName)}, completed on ${esc(niceDate(sub.recordDate))}.</p>` +
+    "<p>If you have any questions, just reply to this email.</p>" +
+    `<p>Kind regards,<br>${esc((staff && staff.name) || "The team")}<br>Dermedica</p>`;
 
   return new Promise((resolve) => {
     let result = null;
     let sending = false;
     const dlg = document.createElement("dialog");
-    dlg.className = "lh-dialog ec-dialog";
+    dlg.className = "lh-dialog ec-dialog ac-mail";
     dlg.setAttribute("aria-labelledby", "ec-title");
     dlg.innerHTML = `
       <form class="lh-form ec-form" novalidate>
@@ -211,9 +214,9 @@ export async function openEmailComposer({ sub, ver, letterhead, staff }) {
         <label class="lh-field"><span class="lh-label">Subject</span>
           <input type="text" data-k="subject" maxlength="200" value="${esc(`Your ${sub.templateName} - Dermedica`)}" />
         </label>
-        <label class="lh-field"><span class="lh-label">Message</span>
-          <textarea data-k="message" rows="8" maxlength="5000">${esc(message)}</textarea>
-        </label>
+        <div class="lh-field"><span class="lh-label">Message</span>
+          <div class="tr-canvas" style="background-color:#f1f5f9"><div data-role="editor"></div></div>
+        </div>
         <div class="ec-attach">${PDF_ICON}<span title="${esc(fileName)}">${esc(fileName)}</span>
           <button type="button" class="lh-btn is-quiet" data-act="preview">Preview</button>
         </div>
@@ -230,6 +233,8 @@ export async function openEmailComposer({ sub, ver, letterhead, staff }) {
     const errEl = $('[data-role="error"]');
     const sendBtn = $('[data-role="send"]');
     const showErr = (m) => { errEl.textContent = m || ""; errEl.hidden = !m; };
+    const editor = createRichEditor($('[data-role="editor"]'), { accent: () => "#0f766e" });
+    editor.setHtml(messageHtml);
 
     const checkTo = () => {
       const v = toEl.value.trim().toLowerCase();
@@ -250,10 +255,10 @@ export async function openEmailComposer({ sub, ver, letterhead, staff }) {
       const to = toEl.value.trim();
       const cc = $('[data-k="cc"]').value.trim();
       const subject = $('[data-k="subject"]').value.trim();
-      const msg = $('[data-k="message"]').value;
+      const msgHtml = editor.getHtml();
       if (!EMAIL_RE.test(to)) { showErr("Enter a valid email address in To."); toEl.focus(); return; }
       if (cc && !EMAIL_RE.test(cc)) { showErr("Check the CC email address."); return; }
-      if (!msg.trim()) { showErr("Add a short message."); return; }
+      if (!richText(msgHtml)) { showErr("Add a short message."); return; }
 
       sending = true;
       sendBtn.disabled = true;
@@ -264,7 +269,9 @@ export async function openEmailComposer({ sub, ver, letterhead, staff }) {
         sendBtn.textContent = "Sending…";
         const res = await callApi({
           action: "sendFormPdf", submissionId: sub.id, kind: "email",
-          to, cc, subject, message: msg, ...payload,
+          to, cc, subject,
+          messageHtml: emailShell(msgHtml, {}, { clinic: clinicDetails(letterhead), hasLogo: !!(letterhead && letterhead.logo) }),
+          ...payload,
         });
         result = res.entry;
         sending = false;
@@ -282,7 +289,7 @@ export async function openEmailComposer({ sub, ver, letterhead, staff }) {
     dlg.addEventListener("close", () => { dlg.remove(); resolve(result); });
     document.body.appendChild(dlg);
     dlg.showModal();
-    (onFile ? $('[data-k="message"]') : toEl).focus();
+    (onFile ? $('[data-k="subject"]') : toEl).focus();
   });
 }
 
