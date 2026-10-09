@@ -4,6 +4,7 @@ import {
   collection, getDocs, getDoc, addDoc, updateDoc, doc, query, where, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
+import { cleanRichHtml, textToRichHtml } from "./rich-html.js";
 
 const COL = "task_types";
 const CACHE_MS = 60 * 1000;
@@ -29,6 +30,19 @@ export const CHOICE_DISPLAYS = {
   links: "As a list with links",
 };
 const SOURCE_KEYS = ["list", "treatments", "staff", "printables"];
+
+export const EMAIL_STYLE_DEFAULT = { background: "#f1f5f9", width: 600, logo: true, footer: true, accent: "#0f766e" };
+function cleanEmailStyle(s) {
+  const x = s || {};
+  const hex = /^#[0-9a-fA-F]{6}$/;
+  return {
+    background: hex.test(x.background) ? x.background : EMAIL_STYLE_DEFAULT.background,
+    width: Number(x.width) === 700 ? 700 : 600,
+    logo: x.logo !== false,
+    footer: x.footer !== false,
+    accent: hex.test(x.accent) ? x.accent : EMAIL_STYLE_DEFAULT.accent,
+  };
+}
 
 const clip = (v, n) => String(v ?? "").slice(0, n);
 const toDate = (v) => (v && typeof v.toDate === "function" ? v.toDate() : null);
@@ -77,7 +91,9 @@ export function taskSnapshot(t = {}) {
       aboutPatient: category === "staff" && r.aboutPatient === true,
     },
     subject: clip(t.subject, 200),
-    body: clip(t.body, 10000),
+    format: "rich",
+    body: (t.format === "rich" ? cleanRichHtml(t.body) : textToRichHtml(t.body)).slice(0, 60000),
+    style: cleanEmailStyle(t.style),
     attachments: (Array.isArray(t.attachments) ? t.attachments : [])
       .map(String).filter((id) => /^[A-Za-z0-9]{10,40}$/.test(id)).slice(0, 3),
   };

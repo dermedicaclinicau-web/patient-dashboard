@@ -3,7 +3,6 @@
 //        #/tasks/run/<taskId>/<patientId> (from the patient page's Email button)
 import { getTaskType, fetchStaffList, TASK_CHOICE_TYPES } from "./task-types.js";
 import { loadSource } from "./task-sources.js";
-import { formatChoice, fillTemplate, emailBodyHtml, clinicDetails, EMAIL_RE } from "./task-tokens.js";
 import { getPatient } from "./patients.js";
 import { fetchPreconsult, callApi } from "./appointments.js";
 import { fetchTranscriptRecords, latestTreatmentPlan } from "./transcripts.js";
@@ -12,6 +11,9 @@ import { printablePdf } from "./form-delivery.js";
 import { db } from "./firebase-config.js";
 import { collection, query, where, limit, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { showToast, formatDobLong, formatMobile } from "./utils.js";
+import { formatChoice, fillTemplate, fillTemplateHtml, emailShell, clinicDetails, EMAIL_RE } from "./task-tokens.js";
+import { createRichEditor } from "./rich-editor.js";
+import { openImagePicker } from "./image-bank.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -140,7 +142,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
             <div class="tr-row tr-row-to"><span>To</span><div class="tr-to" data-role="to"></div></div>
             <label class="tr-row"><span>CC</span><input class="fe-input" type="email" data-role="cc" maxlength="254" placeholder="Optional" value="${esc(task.recipients.cc || "")}" /></label>
             <label class="tr-row"><span>Subject</span><input class="fe-input" data-role="subject" maxlength="200" /></label>
-            <div class="tr-body" data-role="body" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message"></div>
+            <div class="tr-canvas" data-role="canvas"><div data-role="body"></div></div>
             <div class="tr-mail-foot">
               <small class="muted" data-role="note">Click into the message to change any wording.</small>
               <button type="button" class="lh-btn is-quiet" data-act="reset" hidden>Reset to the task's wording</button>
@@ -155,7 +157,13 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   const left = $('[data-role="left"]');
   const msgEl = $('[data-role="msg"]');
   const subjectEl = $('[data-role="subject"]');
-  const bodyEl = $('[data-role="body"]');
+  $('[data-role="canvas"]').style.backgroundColor = task.style.background;
+  const editor = createRichEditor($('[data-role="body"]'), {
+    onInput: () => { st.bodyEdited = true; st.touched = true; resetBtn.hidden = false; },
+    pickImage: () => openImagePicker({ isAdmin: false }),
+    accent: () => task.style.accent,
+    logo: () => (st.letterhead && st.letterhead.logo) || "",
+  });
   const ccEl = $('[data-role="cc"]');
   const resetBtn = $('[data-act="reset"]');
   const noteEl = $('[data-role="note"]');
@@ -203,7 +211,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   function renderMessage(force = false) {
     const vals = values();
     if (!st.subjectEdited || force) subjectEl.value = fillTemplate(task.subject, vals).replace(/\[\[([^|\]]+)\|[^\]]+\]\]/g, "$1");
-    if (!st.bodyEdited || force) bodyEl.innerHTML = emailBodyHtml(fillTemplate(task.body, vals));
+    if (!st.bodyEdited || force) editor.setHtml(fillTemplateHtml(task.body, vals));
     if (force) { st.subjectEdited = false; st.bodyEdited = false; }
     resetBtn.hidden = !(st.subjectEdited || st.bodyEdited);
   }
@@ -484,7 +492,6 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   });
   $('[data-role="to"]').addEventListener("input", (e) => { if (e.target.matches('[data-role="to-input"]')) checkTo(); });
   subjectEl.addEventListener("input", () => { st.subjectEdited = true; st.touched = true; resetBtn.hidden = false; });
-  bodyEl.addEventListener("input", () => { st.bodyEdited = true; st.touched = true; resetBtn.hidden = false; });
   resetBtn.addEventListener("click", () => { renderMessage(true); noteEl.textContent = "Click into the message to change any wording."; });
 
   /* ---------- Sending ---------- */
@@ -502,7 +509,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     if (cc && !EMAIL_RE.test(cc)) out.push("Check the CC email address.");
     task.fields.forEach((f) => { if (f.required && isEmpty(st.answers[f.id])) out.push(`Answer “${f.label}”.`); });
     if (!subjectEl.value.trim()) out.push("Add a subject.");
-    if (!bodyEl.textContent.trim()) out.push("The message is empty.");
+    if (!editor.text().trim()) out.push("The message is empty.");
     return out;
   }
 
@@ -534,7 +541,10 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
         cc: ccEl.value.trim(),
         staffIds: fixedStaff ? [] : [...st.staffSel],
         subject: subjectEl.value.trim(),
-        html: bodyEl.innerHTML,
+        html: emailShell(editor.getHtml(), task.style, {
+          clinic: clinicDetails(st.letterhead),
+          hasLogo: !!(st.letterhead && st.letterhead.logo),
+        }),
         attachments,
       });
       st.touched = false;

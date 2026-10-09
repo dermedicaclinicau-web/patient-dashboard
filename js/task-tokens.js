@@ -1,5 +1,6 @@
 // The "blanks" a task message can use, the checks before publishing, and filling them in.
 import { TASK_CHOICE_TYPES } from "./task-types.js";
+import { richText } from "./rich-html.js";
 
 export const EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
 const URL_RE = /^https?:\/\/\S+$/i;
@@ -144,7 +145,7 @@ export function taskProblems(task) {
   });
 
   if (!String(task.subject || "").trim()) out.push("Add a subject.");
-  if (!String(task.body || "").trim()) out.push("Write the message.");
+  if (!richText(task.body)) out.push("Write the message.");
 
   const known = new Set(tokenGroups(task).flatMap((g) => g.tokens.map((t) => t.name.toLowerCase())));
   [...tokensIn(task.subject), ...tokensIn(task.body)].forEach((n) => {
@@ -190,3 +191,60 @@ export function emailBodyHtml(text) {
 }
 
 export const subjectHtml = (text) => marks(esc(String(text || "").replace(/\[\[([^|\]]+)\|[^\]]+\]\]/g, "$1")));
+
+/* ===================== Rich (designed) emails ===================== */
+
+export const EMAIL_BACKGROUNDS = ["#f1f5f9", "#ffffff", "#f0fdfa", "#fdf2f8", "#fefce8", "#eef2ff", "#f5f5f4"];
+export const EMAIL_ACCENTS = ["#0f766e", "#2563eb", "#7c3aed", "#db2777", "#b45309", "#1e293b"];
+
+// A filled-in value as HTML: links clickable, line breaks kept
+export function valueToHtml(v) {
+  const links = [];
+  const t = String(v ?? "").replace(/\[\[([^|\]]{1,200})\|(https?:\/\/[^\]\s]{1,500})\]\]/g, (_, l, u) => {
+    links.push([l, u]);
+    return `\u0003${links.length - 1}\u0003`;
+  });
+  let h = esc(t).replace(/https?:\/\/[^\s<]+/g, (u) => `<a href="${u}" target="_blank" rel="noopener">${u}</a>`);
+  h = h.replace(/\u0003(\d+)\u0003/g, (_, i) => `<a href="${esc(links[+i][1])}" target="_blank" rel="noopener">${esc(links[+i][0])}</a>`);
+  return marks(h).replace(/\n/g, "<br>");
+}
+
+// Fills {blanks} in rich HTML (only in the text, never inside tags)
+export function fillTemplateHtml(html, values) {
+  return String(html || "").split(/(<[^>]*>)/).map((part) => (part.startsWith("<") ? part
+    : part.replace(/\{([^{}\n]{1,80})\}/g, (whole, n) => {
+        const v = values.get(n.trim().toLowerCase());
+        return v === undefined ? whole : valueToHtml(v);
+      }))).join("");
+}
+
+// The designed email: background, white card, optional logo and clinic footer
+export function emailShell(inner, style = {}, { clinic = {}, hasLogo = false, clinicName = "Dermedica" } = {}) {
+  const s = { background: "#f1f5f9", width: 600, logo: true, footer: true, accent: "#0f766e", ...style };
+  const doc = new DOMParser().parseFromString(`<div>${inner || ""}</div>`, "text/html");
+  const box = doc.body.firstElementChild;
+  const add = (sel, css) => box.querySelectorAll(sel).forEach((el) => {
+    el.setAttribute("style", `${css};${el.getAttribute("style") || ""}`);
+  });
+  add("p", "margin:0 0 14px");
+  add("h1", `margin:0 0 14px;font-size:26px;line-height:1.25;color:${s.accent}`);
+  add("h2", `margin:18px 0 10px;font-size:20px;line-height:1.3;color:${s.accent}`);
+  add("h3", "margin:16px 0 8px;font-size:16px;line-height:1.35;color:#1e293b");
+  add("ul,ol", "margin:0 0 14px;padding-left:22px");
+  add("li", "margin:0 0 4px");
+  add("img", "max-width:100%;height:auto");
+  box.querySelectorAll("a").forEach((a) => {
+    if (!/background-color/i.test(a.getAttribute("style") || "")) a.setAttribute("style", `color:${s.accent};${a.getAttribute("style") || ""}`);
+  });
+  const font = "font-family:Arial,Helvetica,sans-serif";
+  const logo = s.logo && hasLogo
+    ? `<p style="margin:0 0 22px;text-align:center"><img data-logo="1" alt="${esc(clinicName)}" width="170" style="max-width:170px;height:auto"></p>`
+    : "";
+  const footText = [clinicName, clinic.address, clinic.phone && `Tel ${clinic.phone}`, clinic.email].filter(Boolean).join("  ·  ");
+  const foot = s.footer
+    ? `<tr><td style="padding:16px 34px 22px;border-top:1px solid #e2e8f0;${font};font-size:12px;line-height:1.5;color:#64748b;text-align:center">${esc(footText)}</td></tr>`
+    : "";
+  return `<div style="margin:0;padding:24px 12px;background-color:${s.background}">` +
+    `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:${s.width}px;margin:0 auto;background-color:#ffffff;border-radius:12px">` +
+    `<tr><td style="padding:30px 34px;${font};font-size:15px;line-height:1.6;color:#1e293b">${logo}${box.innerHTML}</td></tr>${foot}</table></div>`;
+}

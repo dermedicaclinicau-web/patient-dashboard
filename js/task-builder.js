@@ -3,8 +3,14 @@ import {
   listTaskTypes, getTaskType, createTaskType, saveTaskType, taskSnapshot, fetchStaffList,
   TASK_FIELD_TYPES, TASK_CHOICE_TYPES, CHOICE_DISPLAYS,
 } from "./task-types.js";
-import { tokenGroups, taskProblems, fillTemplate, sampleValues, emailBodyHtml, subjectHtml } from "./task-tokens.js";
+import {
+  tokenGroups, taskProblems, fillTemplate, sampleValues, subjectHtml, clinicDetails,
+  fillTemplateHtml, emailShell, EMAIL_BACKGROUNDS, EMAIL_ACCENTS,
+} from "./task-tokens.js";
 import { SOURCES, loadSource } from "./task-sources.js";
+import { createRichEditor } from "./rich-editor.js";
+import { hydrateRichImages } from "./rich-html.js";
+import { openImagePicker } from "./image-bank.js";
 import { listPublishedForms, getLetterhead } from "./form-templates.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
@@ -268,10 +274,10 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   const task = taskSnapshot(loaded);
   let status = loaded.status;
   let letterhead = null, printables = null, staffList = null, staffError = false;
-  const sources = {};          // source key -> options, or null if it failed to load
+  const sources = {};
   const sourceRequested = new Set();
   let dirty = false, saving = false, saveTimer = null;
-  let lastText = null;
+  let lastText = null; // the subject box, or null for the message editor
 
   root.innerHTML = `
     <div class="ff-wrap tb-wrap">
@@ -292,18 +298,40 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
         <p class="ff-msg" data-role="msg" aria-live="polite"></p>
       </div>
       <div class="tb-grid">
-        <div class="tb-form" data-role="form"></div>
+        <div class="tb-form" data-role="form">
+          <div class="tb-sec" data-sec="top"></div>
+          <section class="tb-card" data-sec="message">
+            <h4><span class="tb-num">4</span>Message</h4>
+            <label class="tb-field"><span>Subject</span>
+              <input class="fe-input" data-set="subject" data-tokens maxlength="200" value="${esc(task.subject)}" /></label>
+            <div class="tb-field"><span>Message</span><div data-role="editor"></div></div>
+            <div class="tb-chips" data-role="chips"></div>
+            <small class="muted">Tap a blank to add it where your cursor is. Use the toolbar for headings, colours, pictures, buttons and dividers. Staff can still change the wording before sending.</small>
+          </section>
+          <div class="tb-sec" data-sec="bottom"></div>
+        </div>
         <aside class="tb-preview" data-role="preview" aria-label="Preview"></aside>
       </div>
     </div>`;
 
   const $ = (s) => root.querySelector(s);
   const form = $('[data-role="form"]');
+  const topSec = $('[data-sec="top"]');
+  const bottomSec = $('[data-sec="bottom"]');
   const preview = $('[data-role="preview"]');
   const stateEl = $('[data-role="state"]');
   const msgEl = $('[data-role="msg"]');
   const pubBtn = $('[data-act="publish"]');
   const tokenOpts = () => ({ staffName: staff && staff.name, letterhead, sources });
+
+  const editor = createRichEditor($('[data-role="editor"]'), {
+    onInput: () => { task.body = editor.getHtml(); changed(); },
+    onFocus: () => { lastText = null; },
+    pickImage: () => openImagePicker({ isAdmin: true }),
+    accent: () => task.style.accent,
+    logo: () => (letterhead && letterhead.logo) || "",
+  });
+  editor.setHtml(task.body);
 
   /* ---------- Saving ---------- */
   function setState(s) {
@@ -375,7 +403,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     pubBtn.classList.toggle("is-primary", !live);
   }
 
-  /* ---------- The five steps ---------- */
+  /* ---------- The steps ---------- */
   const seg = (name, items, current, attrs = "") => `<div class="fe-seg">${items.map(([v, l, disabled]) =>
     `<label class="fe-seg-btn${disabled ? " is-soon" : ""}"><input type="radio" name="tb-${name}" value="${v}"${
       current === v ? " checked" : ""}${disabled ? " disabled" : ` ${attrs}`} /><span>${l}</span></label>`).join("")}</div>`;
@@ -496,16 +524,23 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
       </section>`;
   }
 
-  function messageHtml() {
+  function designHtml() {
+    const s = task.style;
+    const sw = (key, list) => `<div class="tb-swatches">${list.map((c) => `
+      <label class="tb-sw" title="${c}"><input type="radio" name="tb-${key}" data-style="${key}" value="${c}"${s[key] === c ? " checked" : ""} />
+        <span style="background:${c}"></span></label>`).join("")}</div>`;
+    const hasLogo = !!(letterhead && letterhead.logo);
     return `
       <section class="tb-card">
-        <h4><span class="tb-num">4</span>Message</h4>
-        <label class="tb-field"><span>Subject</span>
-          <input class="fe-input" data-set="subject" data-tokens maxlength="200" value="${esc(task.subject)}" /></label>
-        <label class="tb-field"><span>Message</span>
-          <textarea class="fe-input tb-body" data-set="body" data-tokens rows="12" maxlength="10000">${esc(task.body)}</textarea></label>
-        <div class="tb-chips" data-role="chips"></div>
-        <small class="muted">Tap a blank to add it where your cursor is. Staff can still change any of the wording before sending.</small>
+        <h4><span class="tb-num">5</span>Email design</h4>
+        <div class="tb-two">
+          <div class="tb-field"><span>Background</span>${sw("background", EMAIL_BACKGROUNDS)}</div>
+          <div class="tb-field"><span>Accent <small>(headings, links and buttons)</small></span>${sw("accent", EMAIL_ACCENTS)}</div>
+        </div>
+        <div class="tb-field"><span>Width</span>${seg("width", [["600", "Standard"], ["700", "Wide"]], String(s.width), 'data-style="width"')}</div>
+        <label class="fe-check"><input type="checkbox" data-style="logo"${s.logo ? " checked" : ""} /> Clinic logo at the top${
+          hasLogo || !letterhead ? "" : ' <small class="muted">(add a logo to the letterhead in Form Builder first)</small>'}</label>
+        <label class="fe-check"><input type="checkbox" data-style="footer"${s.footer ? " checked" : ""} /> Clinic details at the bottom</label>
       </section>`;
   }
 
@@ -522,15 +557,14 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     }
     return `
       <section class="tb-card">
-        <h4><span class="tb-num">5</span>Attachments <small>(optional)</small></h4>
+        <h4><span class="tb-num">6</span>Attachments <small>(optional)</small></h4>
         ${inner}
         <small class="muted">Attached as PDFs, up to 3.</small>
       </section>`;
   }
 
   function renderChips() {
-    const box = form.querySelector('[data-role="chips"]');
-    if (!box) return;
+    const box = $('[data-role="chips"]');
     box.innerHTML = tokenGroups(task, tokenOpts()).map((g) => `
       <div class="tb-chipgroup"><span>${esc(g.title)}</span>
         <div class="fe-chiprow">${g.tokens.map((t) => `<button type="button" class="fe-ins${
@@ -538,8 +572,10 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
           t.hint ? ` title="${esc(t.hint)}"` : ""}>{${esc(t.name)}}</button>`).join("")}</div></div>`).join("");
   }
 
+  // Everything except the message editor, which stays put while you work
   function renderForm() {
-    form.innerHTML = aboutHtml() + recipientsHtml() + fieldsHtml() + messageHtml() + attachmentsHtml();
+    topSec.innerHTML = aboutHtml() + recipientsHtml() + fieldsHtml();
+    bottomSec.innerHTML = designHtml() + attachmentsHtml();
     renderChips();
   }
 
@@ -555,6 +591,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
       to = names.length ? names.join(", ") + (names.length > 1 ? " <small>(each gets their own copy)</small>" : "") : "<em>No one chosen yet</em>";
     } else to = "<em>The staff chosen when it's run</em>";
     const attNames = (printables || []).filter((p) => task.attachments.includes(p.id));
+    const hasLogo = !!(letterhead && letterhead.logo);
 
     preview.innerHTML = `
       <div class="tb-prev">
@@ -566,11 +603,13 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
           <div class="tb-mail-row"><span>To</span><span>${to}</span></div>
           ${r.cc ? `<div class="tb-mail-row"><span>CC</span><span>${esc(r.cc)}</span></div>` : ""}
           <div class="tb-mail-row"><span>Subject</span><strong>${subjectHtml(fillTemplate(task.subject, values)) || "<em>No subject yet</em>"}</strong></div>
-          <div class="tb-mail-body">${emailBodyHtml(fillTemplate(task.body, values)) || "<em>No message yet</em>"}</div>
+          <div class="tb-mail-body tb-mail-shell" data-role="shell">${emailShell(fillTemplateHtml(task.body, values), task.style,
+            { clinic: clinicDetails(letterhead), hasLogo })}</div>
           ${attNames.length ? `<div class="tb-mail-att">${attNames.map((p) => `<span class="tb-att">${I.doc}${esc(p.name)}.pdf</span>`).join("")}</div>` : ""}
         </div>
         <small class="muted">Highlighted parts are filled in from the fields when the task is run. Choices show real examples from your lists.</small>
       </div>`;
+    hydrateRichImages(preview.querySelector('[data-role="shell"]'), { logo: (letterhead && letterhead.logo) || "" });
   }
 
   /* ---------- Editing ---------- */
@@ -590,12 +629,16 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
 
   form.addEventListener("input", (e) => {
     const el = e.target;
+    if (el.closest(".re")) return; // the message editor reports its own changes
     if (el.dataset.set) {
       setValue(el.dataset.set, el.type === "checkbox" ? el.checked : el.value);
       if (el.dataset.rerender !== undefined) {
         renderForm();
         if (el.dataset.set === "recipients.mode" && task.recipients.mode === "fixed") loadStaff();
       }
+    } else if (el.dataset.style !== undefined) {
+      const k = el.dataset.style;
+      task.style[k] = el.type === "checkbox" ? el.checked : k === "width" ? Number(el.value) : el.value;
     } else if (el.dataset.oi !== undefined) {
       const f = task.fields[Number(el.dataset.fi)];
       const o = f && f.options && f.options[Number(el.dataset.oi)];
@@ -632,14 +675,19 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   form.addEventListener("click", (e) => {
     const tokenBtn = e.target.closest("[data-token]");
     if (tokenBtn) {
-      const el = lastText && lastText.isConnected ? lastText : form.querySelector('[data-set="body"]');
-      const tok = `{${tokenBtn.dataset.token}}`;
-      const start = el.selectionStart ?? el.value.length;
-      const end = el.selectionEnd ?? start;
-      el.value = el.value.slice(0, start) + tok + el.value.slice(end);
-      el.focus();
-      el.setSelectionRange(start + tok.length, start + tok.length);
-      el.dispatchEvent(new Event("input", { bubbles: true }));
+      const name = tokenBtn.dataset.token;
+      if (lastText && lastText.isConnected) {
+        const el = lastText;
+        const tok = `{${name}}`;
+        const start = el.selectionStart ?? el.value.length;
+        const end = el.selectionEnd ?? start;
+        el.value = el.value.slice(0, start) + tok + el.value.slice(end);
+        el.focus();
+        el.setSelectionRange(start + tok.length, start + tok.length);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      } else {
+        editor.insertToken(name);
+      }
       return;
     }
     const add = e.target.closest("[data-addfield]");
@@ -765,7 +813,10 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   renderPreview();
   loadSources();
 
-  getLetterhead().then((lh) => { letterhead = lh; if (root.isConnected) { renderChips(); renderPreview(); } }).catch(() => {});
+  getLetterhead()
+    .then((lh) => { letterhead = lh; })
+    .catch(() => { letterhead = {}; })
+    .finally(() => { if (root.isConnected) { renderForm(); renderPreview(); } });
   listPublishedForms()
     .then((list) => { printables = list.filter((t) => t.category === "printable"); })
     .catch(() => { printables = []; })

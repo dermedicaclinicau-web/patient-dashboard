@@ -1,6 +1,8 @@
 // Task history: everything sent from Task Manager, newest first. Read-only.
 import { db } from "./firebase-config.js";
 import { collection, query, orderBy, where, limit, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { bankImage } from "./image-bank-api.js";
+import { getLetterhead } from "./form-templates.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -21,6 +23,21 @@ const toText = (r) => {
   if (names.length <= 2) return names.join(" and ");
   return `${names.slice(0, 2).join(", ")} and ${names.length - 2} more`;
 };
+
+// The pictures and logo in a sent email, for reading it back
+async function withImages(html) {
+  const doc = new DOMParser().parseFromString(`<div>${html}</div>`, "text/html");
+  const box = doc.body.firstElementChild;
+  const imgs = [...box.querySelectorAll("img[data-bank], img[data-logo]")];
+  if (!imgs.length) return html;
+  let logo = "";
+  if (box.querySelector("img[data-logo]")) { try { logo = (await getLetterhead()).logo || ""; } catch { /* no logo */ } }
+  await Promise.all(imgs.map(async (img) => {
+    if (img.hasAttribute("data-logo")) { if (logo) img.src = logo; return; }
+    try { img.src = await bankImage(img.getAttribute("data-bank")); } catch { /* missing picture */ }
+  }));
+  return box.innerHTML;
+}
 
 export async function mountTaskHistory(main, { patientId = "" } = {}) {
   main.innerHTML = `
@@ -68,10 +85,14 @@ export async function mountTaskHistory(main, { patientId = "" } = {}) {
         ${(r.attachments || []).length ? `<div><span>Attached</span>${r.attachments.map((a) => `<span class="tb-att">${I.doc}${esc(a)}</span>`).join(" ")}</div>` : ""}
       </div>
       <iframe class="th-frame" sandbox="allow-popups allow-popups-to-escape-sandbox" title="The email that was sent"></iframe>`;
-    dlg.querySelector(".th-frame").srcdoc =
-      `<!DOCTYPE html><html><head><meta charset="utf-8"><base target="_blank"><style>
-        body{margin:0;padding:18px 20px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.55;color:#1e293b}
-        a{color:#0f766e} p{margin:0 0 12px}</style></head><body>${r.html || ""}</body></html>`;
+    const frame = dlg.querySelector(".th-frame");
+    const write = (html) => {
+      frame.srcdoc = `<!DOCTYPE html><html><head><meta charset="utf-8"><base target="_blank"><style>
+        body{margin:0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.55;color:#1e293b}
+        a{color:#0f766e}</style></head><body>${html}</body></html>`;
+    };
+    write(r.html || "");
+    withImages(r.html || "").then((h) => { if (dlg.open) write(h); }).catch(() => {});
     dlg.querySelector('[data-act="close"]').addEventListener("click", () => dlg.close());
     dlg.addEventListener("close", () => dlg.remove());
     document.body.appendChild(dlg);
