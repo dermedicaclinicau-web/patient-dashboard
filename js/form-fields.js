@@ -72,6 +72,15 @@ export const FIELD_GROUPS = [
 ];
 
 export const CHOICE_TYPES = ["single_choice", "checkboxes", "checkbox_notes", "dropdown"];
+// Choice fields that can have an "Other" choice and/or details boxes
+export const EXTRA_TYPES = ["single_choice", "checkboxes", "dropdown"];
+export const otherLabel = (f) => String((f && f.otherLabel) || "").trim() || "Other";
+export const hasExtras = (f) => !!f && EXTRA_TYPES.includes(f.type) && (f.allowOther === true || (f.commentOn || []).length > 0);
+// The choices as shown on the form: the typed choices, plus "Other" at the end
+export function choiceList(f) {
+  const opts = Array.isArray(f.options) && f.options.length ? f.options : ["Option 1"];
+  return f.allowOther && EXTRA_TYPES.includes(f.type) ? [...opts, otherLabel(f)] : [...opts];
+}
 const LAYOUT_TYPES = ["single_choice", "checkboxes", "checkbox_notes"];
 const PLACEHOLDER_TYPES = ["short_text", "long_text", "email", "number", "dropdown"];
 export const INLINE_TYPES = ["short_text", "email", "number", "date", "record_date", "dropdown", "single_choice", "checkboxes", "calculation"];
@@ -175,6 +184,10 @@ function todayIso() {
 export function createField(type, id) {
   const f = { id, type, label: FIELD_TYPES[type].label, help: "", required: false };
   if (CHOICE_TYPES.includes(type)) f.options = ["Option 1", "Option 2"];
+  if (EXTRA_TYPES.includes(type)) {
+    f.allowOther = false; f.otherLabel = "Other";
+    f.commentOn = []; f.commentHint = "Please give details"; f.commentRequired = false;
+  }
   if (LAYOUT_TYPES.includes(type)) f.layout = "list";
   if (PLACEHOLDER_TYPES.includes(type)) f.placeholder = type === "dropdown" ? "Choose one" : "";
   if (["patient", "signature", "record_date"].includes(type)) f.required = true;
@@ -241,6 +254,14 @@ export function cleanField(f) {
   };
   if (CHOICE_TYPES.includes(f.type)) {
     out.options = (Array.isArray(f.options) ? f.options : []).map((o) => clip(o, 200)).slice(0, 50);
+  }
+  if (EXTRA_TYPES.includes(f.type)) {
+    out.allowOther = f.allowOther === true;
+    out.otherLabel = clip(f.otherLabel, 60).trim() || "Other";
+    out.commentOn = (Array.isArray(f.commentOn) ? f.commentOn : [])
+      .map(String).filter((o) => out.options.includes(o)).slice(0, 50);
+    out.commentHint = clip(f.commentHint, 100);
+    out.commentRequired = f.commentRequired === true;
   }
   if (LAYOUT_TYPES.includes(f.type)) out.layout = pick(f.layout, ["list", "columns", "inline"], "list");
   if (PLACEHOLDER_TYPES.includes(f.type)) out.placeholder = clip(f.placeholder, 100);
@@ -412,15 +433,35 @@ export function renderField(f, ctx = {}) {
         f.min !== null && f.min !== undefined ? ` min="${Number(f.min)}"` : ""}${
         f.max !== null && f.max !== undefined ? ` max="${Number(f.max)}"` : ""}${inert} />${
         f.unit ? `<span>${esc(f.unit)}</span>` : ""}</div>`;
-    case "dropdown":
+    case "dropdown": {
+      const list = choiceList(f);
+      const cmt = (f.commentOn || []).filter((o) => list.includes(o));
       return head + `<select class="fe-in"${inert}><option value="">${esc(f.placeholder || "Choose one")}</option>${
-        opts.map((o) => `<option>${esc(o)}</option>`).join("")}</select>`;
+        list.map((o) => `<option value="${esc(o)}">${esc(o)}</option>`).join("")}</select>` +
+        (f.allowOther ? `<input class="fe-in fe-xin" type="text" data-other maxlength="500" placeholder="Type the ${esc(otherLabel(f).toLowerCase())} answer"${live ? " hidden" : ""}${inert} />` : "") +
+        (cmt.length ? (live
+          ? `<input class="fe-in fe-xin" type="text" data-cmt="dd" maxlength="1000" placeholder="${esc(f.commentHint || "Please give details")}" hidden />`
+          : `<div class="fe-help fe-help-after">Asks for details when: ${esc(cmt.join(", "))}</div>`) : "");
+    }
     case "single_choice":
     case "checkboxes": {
       const t = f.type === "single_choice" ? "radio" : "checkbox";
-      return head + `<div class="${optsClass}">${opts.map((o) =>
-        `<label class="fe-opt"><input type="${t}" name="${id}"${inert} /><span>${esc(o)}</span></label>`).join("")}</div>`;
+      const list = choiceList(f);
+      const cmt = new Set(f.commentOn || []);
+      return head + `<div class="${optsClass}">${list.map((o, i) => {
+        const isOther = f.allowOther && i === list.length - 1;
+        const box = `<label class="fe-opt"><input type="${t}" name="${id}"${inert} /><span>${esc(o)}</span>${
+          !live && !isOther && cmt.has(o) ? '<em class="fe-xtag">+ details</em>' : ""}</label>`;
+        if (isOther) {
+          return `<span class="fe-optx">${box}<input class="fe-in fe-xin" type="text" data-other maxlength="500" placeholder="Please specify"${live ? " hidden" : ""}${inert} /></span>`;
+        }
+        if (live && cmt.has(o)) {
+          return `<span class="fe-optx">${box}<input class="fe-in fe-xin" type="text" data-cmt="${i}" maxlength="1000" placeholder="${esc(f.commentHint || "Please give details")}" hidden /></span>`;
+        }
+        return box;
+      }).join("")}</div>`;
     }
+    
     case "checkbox_notes":
       return head + `<div class="${optsClass}">${opts.map((o) => `
         <div class="fe-optnote">
@@ -530,6 +571,24 @@ const layoutSetting = (f) =>
   setting("Layout", choose("layout", [["list", "One per line"], ["columns", "Two columns"], ["inline", "Side by side"]], f.layout || "list"),
     "Side by side suits short choices like Yes / No.");
 
+function extrasSettings(f) {
+  const cmt = new Set(f.commentOn || []);
+  const opts = (f.options || []).filter((o) => String(o).trim());
+  return `<div class="fe-insp-field fe-extras"><span class="fe-insp-label">Extra answers</span>
+    <label class="fe-check"><input type="checkbox" data-k="allowOther" data-rerender=""${f.allowOther ? " checked" : ""} />
+      Add an “Other” choice where staff type their own answer</label>
+    ${f.allowOther ? `<label class="fe-insp-sub"><small>Label for it</small>
+      <input class="fe-input" data-k="otherLabel" maxlength="60" placeholder="Other" value="${esc(f.otherLabel || "Other")}" /></label>` : ""}
+    <span class="fe-insp-sub"><small>Ask for details when one of these is chosen</small></span>
+    <div class="fe-parts">${opts.map((o) => `<label class="fe-check"><input type="checkbox" data-cmton="${esc(o)}" data-rerender=""${
+      cmt.has(o) ? " checked" : ""} /> ${esc(o)}</label>`).join("") || '<small class="fe-note">Add answer choices first.</small>'}</div>
+    ${cmt.size ? `
+      <label class="fe-insp-sub"><small>Hint in the details box</small>
+        <input class="fe-input" data-k="commentHint" maxlength="100" placeholder="Please give details" value="${esc(f.commentHint || "")}" /></label>
+      <label class="fe-check"><input type="checkbox" data-k="commentRequired"${f.commentRequired ? " checked" : ""} /> Details must be filled in</label>` : ""}
+  </div>`;
+}
+
 function typeSettings(f, ctx = {}) {
   switch (f.type) {
     case "patient": {
@@ -555,13 +614,13 @@ function typeSettings(f, ctx = {}) {
         "For example, today or earlier for a date of birth.");
 
     case "dropdown":
-      return setting("Text before a choice is made", `<input class="fe-input" data-k="placeholder" maxlength="100" value="${esc(f.placeholder || "")}" />`);
+      return setting("Text before a choice is made", `<input class="fe-input" data-k="placeholder" maxlength="100" value="${esc(f.placeholder || "")}" />`) +
+        extrasSettings(f);
 
     case "single_choice":
     case "checkboxes":
     case "checkbox_notes":
-      return layoutSetting(f);
-
+      return layoutSetting(f) + (EXTRA_TYPES.includes(f.type) ? extrasSettings(f) : "");
     case "signature":
       return setting("Who signs", choose("signer", Object.entries(SIGNERS), f.signer || "patient")) +
         `<label class="fe-check"><input type="checkbox" data-k="showNameDate"${f.showNameDate !== false ? " checked" : ""} /> Show name and date under the signature</label>` +
@@ -764,6 +823,12 @@ function layoutSettings(f) {
 // Typing in table columns, sub-option groups, patient detail ticks and layout buttons.
 // Returns true if it changed something.
 export function applyInput(f, el) {
+  if (el.dataset.cmton !== undefined) {
+    const s = new Set(f.commentOn || []);
+    if (el.checked) s.add(el.dataset.cmton); else s.delete(el.dataset.cmton);
+    f.commentOn = (f.options || []).filter((o) => s.has(o));
+    return true;
+  }
   if (el.dataset.st !== undefined) {
     const s = fieldStyle(f);
     if (el.dataset.st === "showLabel") s.hideLabel = !el.checked;
@@ -848,4 +913,54 @@ export function formTitleHtml(name, s = {}, { build = false, selected = false } 
   }
   return `<h3 class="fe-title is-${align} is-${size}${build ? " is-clickable" : ""}${build && selected ? " is-selected" : ""}"${
     build ? ' data-role="title" tabindex="0" role="button" aria-label="Form title. Open form settings"' : ""}>${esc(name)}</h3>`;
+}
+
+/* ===================== "Other" and details boxes on a live form ===================== */
+
+const showBox = (el, on) => {
+  if (!el) return;
+  if (!on && !el.disabled) el.value = ""; // unticked: nothing stray gets saved
+  el.hidden = !on;
+};
+
+// Shows a box only while its choice is picked
+export function syncChoiceExtras(f, w) {
+  if (!hasExtras(f) || !w) return;
+  if (f.type === "dropdown") {
+    const v = (w.querySelector("select") || {}).value || "";
+    showBox(w.querySelector("[data-other]"), !!f.allowOther && v === otherLabel(f));
+    showBox(w.querySelector('[data-cmt="dd"]'), (f.commentOn || []).includes(v));
+    return;
+  }
+  w.querySelectorAll(".fe-optx").forEach((row) => {
+    const box = row.querySelector('input[type="radio"], input[type="checkbox"]');
+    showBox(row.querySelector("[data-other], [data-cmt]"), !!(box && box.checked));
+  });
+}
+
+// { other: "typed answer", notes: { "Yes": "details" } }, or null
+export function readExtras(f, w) {
+  if (!hasExtras(f) || !w) return null;
+  const list = choiceList(f);
+  const out = { other: "", notes: {} };
+  const o = w.querySelector("[data-other]");
+  if (o && !o.hidden) out.other = o.value.trim().slice(0, 500);
+  w.querySelectorAll("[data-cmt]").forEach((c) => {
+    if (c.hidden || !c.value.trim()) return;
+    const label = c.dataset.cmt === "dd" ? (w.querySelector("select") || {}).value : list[Number(c.dataset.cmt)];
+    if (label) out.notes[label] = c.value.trim().slice(0, 1000);
+  });
+  return out.other || Object.keys(out.notes).length ? out : null;
+}
+
+export function writeExtras(f, w, x) {
+  if (!hasExtras(f) || !w) return;
+  const list = choiceList(f);
+  const o = w.querySelector("[data-other]");
+  if (o) o.value = (x && x.other) || "";
+  w.querySelectorAll("[data-cmt]").forEach((c) => {
+    const label = c.dataset.cmt === "dd" ? (w.querySelector("select") || {}).value : list[Number(c.dataset.cmt)];
+    c.value = (x && x.notes && x.notes[label]) || "";
+  });
+  syncChoiceExtras(f, w);
 }

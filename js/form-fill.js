@@ -1,7 +1,8 @@
 // Fill in a published form for a patient: #/fill/<patientId>/<templateId>
 // View a saved one:                      #/form-record/<submissionId>
 import { getFormTemplate, getFormVersion, getLetterhead, categoryLabel } from "./form-templates.js";
-import { esc, svg, ICONS, renderField, normaliseField, watermarkHtml, canRequire } from "./form-fields.js";
+import { esc, svg, ICONS, renderField, normaliseField, watermarkHtml, canRequire,
+  choiceList, otherLabel, syncChoiceExtras, readExtras, writeExtras } from "./form-fields.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { letterheadHtml, DEFAULT_LETTERHEAD } from "./form-letterhead.js";
 import { getPatient, patientIds } from "./patients.js";
@@ -163,10 +164,12 @@ export function readField(f, w, { pads = {}, calc = {}, consent = {}, annots = {
     }
     case "single_choice": {
       const i = $all(w, 'input[type="radio"]').findIndex((x) => x.checked);
-      return i < 0 ? "" : (f.options[i] ?? "");
+      return i < 0 ? "" : (choiceList(f)[i] ?? "");
     }
-    case "checkboxes":
-      return $all(w, 'input[type="checkbox"]').flatMap((x, i) => (x.checked ? [f.options[i] ?? ""] : []));
+    case "checkboxes": {
+      const list = choiceList(f);
+      return $all(w, 'input[type="checkbox"]').flatMap((x, i) => (x.checked ? [list[i] ?? ""] : []));
+    }
     case "checkbox_notes":
       return $all(w, ".fe-optnote").flatMap((row, i) => {
         const box = row.querySelector('input[type="checkbox"]');
@@ -223,6 +226,7 @@ export function applyVisibility(sheet, fields, ctx) {
     if (ok) shown.add(f.id);
     if (!w) return;
     w.hidden = !ok;
+    syncChoiceExtras(f, w);
     if (ok && !LAYOUT.includes(f.type) && f.type !== "photo") answers[f.id] = readField(f, w, ctx);
   });
   return shown;
@@ -237,11 +241,15 @@ function writeField(f, w, v) {
       set(w.querySelector("input[data-in]"), v); break;
     case "dropdown":
       set(w.querySelector("select"), v); break;
-    case "single_choice":
-      $all(w, 'input[type="radio"]').forEach((x, i) => { x.checked = f.options[i] === v; }); break;
+    case "single_choice": {
+      const list = choiceList(f);
+      $all(w, 'input[type="radio"]').forEach((x, i) => { x.checked = list[i] === v; });
+      break;
+    }
     case "checkboxes": {
       const s = new Set(Array.isArray(v) ? v : []);
-      $all(w, 'input[type="checkbox"]').forEach((x, i) => { x.checked = s.has(f.options[i]); });
+      const list = choiceList(f);
+      $all(w, 'input[type="checkbox"]').forEach((x, i) => { x.checked = s.has(list[i]); });
       break;
     }
     case "checkbox_notes": {
@@ -517,6 +525,13 @@ export async function mountFormFill(container, param, { staff } = {}) {
       const err = w.querySelector(".ff-err");
       if (err) err.remove();
     }
+    // Ticking "Other" (or a choice that asks for details) jumps into its box
+    const t = e.target;
+    if (w && t.matches('input[type="radio"], input[type="checkbox"], select') && (t.tagName === "SELECT" || t.checked)) {
+      const row = t.closest(".fe-optx");
+      const box = row ? row.querySelector("[data-other], [data-cmt]") : w.querySelector("[data-other]:not([hidden]), [data-cmt]:not([hidden])");
+      if (box && !box.hidden) box.focus();
+    }
   });
 
   /* ---------- Checking and saving ---------- */
@@ -547,6 +562,12 @@ export async function mountFormFill(container, param, { staff } = {}) {
       }
       if (f.type === "consent_status" && f.block && !(consent[f.id] && consent[f.id].found)) {
         out.push({ id: f.id, msg: "There's no valid consent on file, so this form can't be saved yet." });
+      }
+      const ob = w.querySelector("[data-other]");
+      if (ob && !ob.hidden && !ob.value.trim()) {
+        out.push({ id: f.id, msg: `Type the “${otherLabel(f)}” answer.` });
+      } else if (f.commentRequired && $all(w, "[data-cmt]").some((c) => !c.hidden && !c.value.trim())) {
+        out.push({ id: f.id, msg: "Add the details for the ticked answer." });
       }
     });
     return out;
@@ -586,6 +607,8 @@ export async function mountFormFill(container, param, { staff } = {}) {
       const w = wrap(f.id);
       if (!w) return;
       answers[f.id] = readField(f, w, rctx());
+      const extra = readExtras(f, w);
+      if (extra) answers[`${f.id}__x`] = extra;
       if (f.type === "image" && annots[f.id] && !annots[f.id].isEmpty()) answers[f.id] = { drawing: annots[f.id].toDataURL() };
       if (f.type === "signature" && pads[f.id] && !pads[f.id].isEmpty()) signatures[f.id] = pads[f.id].toDataURL();
     });
@@ -756,6 +779,7 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
       return;
     }
     writeField(f, w, sub.answers[f.id]);
+    writeExtras(f, w, sub.answers[`${f.id}__x`]);
   });
   $all(sheet, "input, textarea, select").forEach((el) => { el.disabled = true; });
 

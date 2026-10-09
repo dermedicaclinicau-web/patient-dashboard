@@ -2523,3 +2523,14 @@ body.is-resizing iframe { pointer-events: none; }
 @media (min-width: 1281px) {
   .fe-palette .fe-pal-group { grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); }
 }
+
+/* ---------- "Other" and details boxes ---------- */
+.fe-optx { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .35rem .6rem; }
+.fe-opts.is-list .fe-optx, .fe-opts:not(.is-inline):not(.is-columns) .fe-optx { display: flex; }
+.fe-xin { flex: 1 1 220px; max-width: 420px; min-width: 0; height: 36px; font-size: .9rem; }
+.fe-xin[hidden] { display: none; }
+select.fe-in + .fe-xin, .fe-xin + .fe-xin { margin-top: .5rem; }
+.fe-xtag { margin-left: .4rem; padding: .05rem .4rem; border-radius: 999px; background: var(--primary-soft);
+  color: var(--primary); font-size: .7rem; font-style: normal; font-weight: 600; }
+.fe-extras .fe-insp-sub { display: flex; flex-direction: column; gap: .25rem; margin-top: .35rem; }
+.fe-extras .fe-insp-sub small { font-size: .76rem; font-weight: 600; color: var(--muted); }

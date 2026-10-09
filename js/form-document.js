@@ -83,18 +83,31 @@ function letterhead(lh) {
 }
 
 
-function answer(f, v, sig, inline) {
+// A chosen answer, with its "Other" text or details
+function choiceText(f, label, x) {
+  const xx = x || {};
+  const isOther = f.allowOther && label === (String(f.otherLabel || "").trim() || "Other");
+  const main = isOther && xx.other ? `${esc(label)}: ${esc(xx.other)}` : esc(label);
+  const note = xx.notes && xx.notes[label];
+  return note ? `${main} <span class="note">(${esc(note)})</span>` : main;
+}
+
+function answer(f, v, sig, inline, x) {
   const none = '<span class="none">Not answered</span>';
   switch (f.type) {
-    case "short_text": case "long_text": case "email": case "dropdown": case "single_choice":
+    case "short_text": case "long_text": case "email":
       return v ? esc(v).replace(/\n/g, "<br>") : none;
+    case "dropdown": case "single_choice":
+      return v ? choiceText(f, v, x) : none;
     case "date": case "record_date":
       return v ? esc(niceDate(v)) : none;
     case "number":
       return v === null || v === undefined || v === "" ? none : esc(`${v}${f.unit ? " " + f.unit : ""}`);
     case "checkboxes":
       if (!Array.isArray(v) || !v.length) return '<span class="none">None ticked</span>';
-      return inline ? v.map(esc).join(", ") : `<ul>${v.map((o) => `<li>${esc(o)}</li>`).join("")}</ul>`;
+      return inline
+        ? v.map((o) => choiceText(f, o, x)).join(", ")
+        : `<ul>${v.map((o) => `<li>${choiceText(f, o, x)}</li>`).join("")}</ul>`;
     case "checkbox_notes":
       return Array.isArray(v) && v.length
         ? `<ul>${v.map((r) => `<li>${esc(r.option)}${r.note ? ` <span class="note">(${esc(r.note)})</span>` : ""}</li>`).join("")}</ul>`
@@ -188,10 +201,10 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {} }) {
       const qw = { narrow: "25%", medium: "40%", wide: "55%" }[st.qWidth]; // "Fit" = as wide as the question
       return `<div class="q" style="${box}"><table class="qi"><tr>` +
         `<td class="ql" style="${qw ? `width:${qw};` : "width:1%;white-space:nowrap;"}padding-right:${gap * 4}px;text-align:${st.align} !important;">${label}</td>` +
-        `<td class="qa" style="text-align:${st.align} !important;">${answer(f, v, sig, true)}</td></tr></table></div>`;
+        `<td class="qa" style="text-align:${st.align} !important;">${answer(f, v, sig, true, sub.answers[`${f.id}__x`])}</td></tr></table></div>`;
     }
     return `<div class="q" style="${box}">${label ? `<div class="ql" style="margin-bottom:${gap}px;">${label}</div>` : ""}` +
-      `<div class="qa">${answer(f, v, sig, false)}</div></div>`;
+      `<div class="qa">${answer(f, v, sig, false, sub.answers[`${f.id}__x`])}</div></div>`;
   }).join("");
 
   const fileName = `${sub.templateName} - ${sub.patientName} - ${niceDate(sub.recordDate)}.pdf`
