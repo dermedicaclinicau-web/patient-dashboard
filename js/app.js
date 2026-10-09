@@ -208,7 +208,10 @@ const PAGES = {
   fill: (el, param) => mountFormFill(el, param, { staff: currentStaff }),
       "form-record": (el, id) => mountFormRecord(el, id, { staff: currentStaff }),
       "image-bank": (el) => mountImageBank(el, { isAdmin: /^admin$/i.test(String(currentStaff.role || "")) }),
-      "aftercare-bank": (el) => mountAftercareBank(el),
+      "aftercare-bank": (el) => mountAftercareBank(el, {
+        isAdmin: /^admin$/i.test(String(currentStaff.role || "")),
+        staff: currentStaff,
+      }),
       tasks: (el, param) => mountTaskManager(el, {
         param,
         isAdmin: /^admin$/i.test(String(currentStaff.role || "")),

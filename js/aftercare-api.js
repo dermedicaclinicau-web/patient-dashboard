@@ -1,6 +1,8 @@
 // The Aftercare Bank: aftercare instructions from Firestore 'Aftercare-instruction' (read-only).
 import { db } from "./firebase-config.js";
-import { collection, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {
+  collection, getDocs, doc, addDoc, updateDoc, deleteDoc,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { cleanRichHtml } from "./rich-html.js";
 
 const COL = "Aftercare-instruction";
@@ -90,4 +92,34 @@ export function bindPanels(el) {
     t.setAttribute("aria-expanded", String(open));
     item.classList.toggle("is-open", open);
   });
+}
+
+/* ===================== Editing (admins) ===================== */
+
+export function forgetAftercare() { cache = null; }
+
+// id: an existing aftercare to update, or "" for a new one. Returns the id.
+export async function saveAftercare(id, { title, treatment, html }, staff) {
+  const t = String(title || "").replace(/\s+/g, " ").trim().slice(0, 200);
+  const tr = String(treatment || "").replace(/\s+/g, " ").trim().slice(0, 120);
+  const body = cleanRichHtml(html).slice(0, 100000);
+  if (!t) throw new Error("Give the aftercare a title.");
+  if (!body.replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").trim()) throw new Error("Write the instructions.");
+  const now = new Date().toISOString();
+  const who = (staff && staff.name) || "";
+  const data = { "Aftercare Title": t, "Associated Treatment": tr, "Instruction": body, "Updated As of": now, "Updated By": who };
+  let outId = id;
+  if (id) {
+    await updateDoc(doc(db, COL, id), data);
+  } else {
+    const ref = await addDoc(collection(db, COL), { ...data, "Created By": who, "Created TimeStamp": now });
+    outId = ref.id;
+  }
+  cache = null;
+  return outId;
+}
+
+export async function deleteAftercare(id) {
+  await deleteDoc(doc(db, COL, id));
+  cache = null;
 }

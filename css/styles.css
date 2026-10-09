@@ -2711,3 +2711,11 @@ select.fe-in + .fe-xin, .fe-xin + .fe-xin { margin-top: .5rem; }
   .ac-body { padding-left: 1rem; }
   .ac-toggle small { display: none; }
 }
+
+/* ---------- Aftercare editor ---------- */
+.ac-editor { width: min(860px, calc(100vw - 2rem)); }
+.ac-editor .lh-form { max-height: calc(100vh - 3rem); overflow: auto; }
+.ac-ed-two { display: grid; grid-template-columns: 1.4fr 1fr; gap: .75rem; }
+.ac-editor .re-area { min-height: 320px; max-height: 52vh; }
+.ac-head .ib-tool { flex-shrink: 0; }
+@media (max-width: 640px) { .ac-ed-two { grid-template-columns: 1fr; } }
