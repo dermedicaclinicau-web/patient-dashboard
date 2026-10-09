@@ -1,10 +1,14 @@
 import { fetchSkincare, lastPurchaseMap, purchaseStatus, normProduct, monthsSince } from "./skincare.js";
 import { escapeHtml, formatDobLong } from "./utils.js";
+import { listSspRecords } from "./ssp-api.js";
+import { openSspPreview } from "./ssp-send.js";
+import { patientIds } from "./patients.js";
 
 const PAGE = 10;
 
 const STEPS = [
   ["A", "Step A - Preparing your Skin"],
+  ["BOOST", "Boost"],
   ["B", "Step B - Prevent & Correct"],
   ["C", "Step C - Hydrating"],
   ["D", "Step D - Eye Care"],
@@ -18,6 +22,7 @@ const ICONS = {
   chev: svg('<polyline points="6 9 12 15 18 9"/>', "sum-chev"),
   mail: svg('<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>'),
   print: svg('<polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/>'),
+  eye: svg('<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>'),
 };
 
 // Shares the dashboard's "remember open sections" storage
@@ -36,7 +41,7 @@ export function skincareSectionHtml() {
           <span class="sk-title">${ICONS.chev}Skin Script Protocol</span>
           <span class="sk-tools">
             <button type="button" class="sk-btn" data-sk-action="refresh">Refresh</button>
-            <button type="button" class="sk-btn" data-soon="Create new SSP">Create new SSP</button>
+            <button type="button" class="sk-btn" data-action="create-ssp">Create new SSP</button>
             <span class="sk-badge sk-ssp-count">–</span>
           </span>
         </summary>
@@ -53,9 +58,47 @@ export function skincareSectionHtml() {
     </div>`;
 }
 
+/* ===================== Data: sheet protocols + portal protocols ===================== */
+
+// A protocol saved in the portal, in the same shape as the sheet ones
+function portalProtocol(r) {
+  return {
+    recordId: r.recordId || r.id,
+    date: r.recordDate || "",
+    dateText: "",
+    createdMs: r.createdMs || 0,
+    portal: r,
+    items: (r.items || []).map((it) => ({
+      product: it.name,
+      step: it.step,
+      am: it.amText || "",
+      pm: it.pmText || "",
+      slotAm: !!it.am,
+      slotPm: !!it.pm,
+      when: [(it.days || []).join(", "), it.notes].filter(Boolean).join(" · "),
+      maintenance: it.maint ? "Yes" : "",
+    })),
+  };
+}
+
+async function fetchAllSkincare(patient) {
+  const [res, portal] = await Promise.all([
+    fetchSkincare(patient),
+    listSspRecords([patient.id, ...patientIds(patient)]).catch((err) => {
+      console.warn("Portal Skin Scripts unavailable:", err);
+      return [];
+    }),
+  ]);
+  const portalIds = new Set(portal.map((r) => r.recordId).filter(Boolean));
+  const fromSheet = (res.protocols || []).filter((p) => !portalIds.has(p.recordId)); // no duplicates
+  const protocols = [...portal.map(portalProtocol), ...fromSheet].sort((a, b) =>
+    String(b.date || "").localeCompare(String(a.date || "")) || (b.createdMs || 0) - (a.createdMs || 0));
+  return { ...res, protocols };
+}
+
 /* ===================== Behaviour ===================== */
 
-export function mountSkincare(root, patient) {
+export function mountSkincare(root, patient, staff = null) {
   const grid = root.querySelector(".sk-grid");
   if (!grid) return;
   const [sspCard, purCard] = grid.querySelectorAll(".sk-card");
@@ -73,7 +116,7 @@ export function mountSkincare(root, patient) {
 
     loading = (async () => {
       try {
-        const res = await fetchSkincare(patient);
+        const res = await fetchAllSkincare(patient);
         if (!grid.isConnected) return;
         data = res;
         shown = PAGE;
@@ -131,6 +174,16 @@ export function mountSkincare(root, patient) {
     if (e.target.closest("[data-sk-action='more']")) {
       shown += PAGE;
       renderPurchases();
+      return;
+    }
+    // View / Email / Print on a protocol saved in the portal
+    const act = e.target.closest("[data-sk-ssp]");
+    if (act) {
+      const p = data && data.protocols.find((x) => x.portal && x.portal.id === act.dataset.id);
+      if (!p) return;
+      const auto = { email: "email", print: "print" }[act.dataset.skSsp] || "";
+      openSspPreview({ record: p.portal, patient, staff, autoAction: auto })
+        .then(() => { if (grid.isConnected) load(true); }); // shows any new email / print
     }
   });
 
@@ -141,12 +194,14 @@ export function mountSkincare(root, patient) {
 
 function stepLetter(step) {
   const s = String(step || "").trim();
+  if (/boost/i.test(s)) return "BOOST";
   const m = /step\s*([A-F])\b/i.exec(s) || /^([A-F])\b/i.exec(s);
   return m ? m[1].toUpperCase() : "";
 }
 
-// Morning / evening placement from the instructions + "WHEN TO USE"
+// Morning / evening placement: portal protocols say exactly; sheet ones are worked out
 function slots(item) {
+  if (item.slotAm !== undefined) return { am: item.slotAm, pm: item.slotPm };
   const when = String(item.whenToUse || "").toLowerCase();
   let am = !!item.am || /\b(am|morning|day|both)\b/.test(when);
   const pm = !!item.pm || /\b(pm|evening|night|both)\b/.test(when);
@@ -176,7 +231,18 @@ function productHtml(item, which, lastMap) {
       ${instr
         ? `<div class="ssp-instr">${escapeHtml(instr)}</div>`
         : `<div class="ssp-instr none">(No instruction available)</div>`}
+      ${item.when ? `<div class="ssp-when-note">${escapeHtml(item.when)}</div>` : ""}
     </div>`;
+}
+
+function portalMeta(r) {
+  const sent = (r.deliveries || []).slice(-2).reverse()
+    .map((d) => (d.kind === "print" ? "Sent to printer" : `Emailed to ${d.to}`));
+  return [
+    r.validUntil ? `Valid until ${formatDobLong(r.validUntil)}` : "",
+    r.createdBy ? `by ${r.createdBy}` : "",
+    ...sent,
+  ].filter(Boolean).map(escapeHtml).join(" · ");
 }
 
 function protocolHtml(p, isLatest, lastMap) {
@@ -194,17 +260,22 @@ function protocolHtml(p, isLatest, lastMap) {
 
   const cell = (list) => (list.length ? list.join("") : `<span class="missing">—</span>`);
   const dateLabel = p.date ? formatDobLong(p.date) : (p.dateText || "Undated");
+  const id = p.portal ? escapeHtml(p.portal.id) : "";
+
+  const actions = p.portal
+    ? `<button type="button" class="ssp-btn" data-sk-ssp="view" data-id="${id}">${ICONS.eye}View</button>
+       <button type="button" class="ssp-btn" data-sk-ssp="email" data-id="${id}">${ICONS.mail}Email to Patient</button>
+       <button type="button" class="ssp-btn" data-sk-ssp="print" data-id="${id}">${ICONS.print}Print</button>`
+    : `<button type="button" class="ssp-btn" data-soon="Email to patient">${ICONS.mail}Email to Patient</button>
+       <button type="button" class="ssp-btn" data-soon="Print protocol">${ICONS.print}Print</button>`;
 
   return `
     <details class="ssp-protocol" ${isLatest ? "open" : ""}>
       <summary>
         <span class="ssp-title">Protocol from ${escapeHtml(dateLabel)}</span>
-        <span class="ssp-actions">
-          <button type="button" class="ssp-btn" data-soon="Email to patient">${ICONS.mail}Email to Patient</button>
-          <button type="button" class="ssp-btn" data-soon="Print protocol">${ICONS.print}Print</button>
-          ${ICONS.chev}
-        </span>
+        <span class="ssp-actions">${actions}${ICONS.chev}</span>
       </summary>
+      ${p.portal ? `<p class="sk-ssp-meta">${portalMeta(p.portal)}</p>` : ""}
       <div class="ssp-table-wrap">
         <table class="ssp-table">
           <thead><tr><th>Step</th><th>Morning</th><th>Evening</th></tr></thead>

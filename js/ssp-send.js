@@ -30,7 +30,7 @@ function sendError(err) {
 
 // record: a saved protocol (has id) or an unsaved one from the builder (then onSave saves it and returns it)
 // Resolves with { saved: true } if it was saved from here.
-export async function openSspPreview({ record, patient = null, staff = null, onSave = null } = {}) {
+export async function openSspPreview({ record, patient = null, staff = null, onSave = null, autoAction = "" } = {}) {
   const [settings, letterhead] = await Promise.all([
     getSspSettings().catch(() => null),
     getLetterhead().catch(() => null),
@@ -129,6 +129,12 @@ export async function openSspPreview({ record, patient = null, staff = null, onS
     dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
     dlg.addEventListener("close", () => { dlg.remove(); resolve({ saved: savedHere }); });
     dlg.showModal();
+    if (autoAction) {
+      setTimeout(() => {
+        const b = $(`[data-act="${autoAction}"]`);
+        if (b && !b.hidden) b.click();
+      }, 0);
+    }
   });
 }
 

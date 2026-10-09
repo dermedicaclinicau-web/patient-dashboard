@@ -34,6 +34,7 @@ function doPost(e) {
     if (body.action === 'sendTaskEmail') return json_(handleSendTaskEmail_(body));
     if (body.action === 'sendAftercareEmail') return json_(handleSendAftercareEmail_(body));
     if (body.action === 'printPdf') return json_(handlePrintPdf_(body));
+    if (body.action === 'ssp') return json_(handleSsp_(body));
 
     const pin = String(body.pin || '').trim();
 
@@ -2282,4 +2283,248 @@ function handlePrintPdf_(body) {
   cache.put(rlKey, String(sentThisHour + 1), 3600);
   console.log('PDF "' + fileName + '" sent to the printer by ' + session.name);
   return { ok: true };
+}
+
+// ===================== Skin Script Protocol: product catalogue =====================
+
+const SSP_PRODUCTS_SHEET_NAME = 'product_info';
+const SSP_STEP_KEYS_ = ['A', 'BOOST', 'B', 'C', 'D', 'E', 'F'];
+const SSP_STEP_LABEL_ = { A: 'Step A', BOOST: 'Boost', B: 'Step B', C: 'Step C', D: 'Step D', E: 'Step E', F: 'Step F' };
+
+function handleSsp_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  const isAdmin = /^admin$/i.test(String(session.role || ''));
+  const op = String(body.op || '');
+  try {
+    if (op === 'appendRecord') return sspAppendRecord_(String(body.recordId || ''));
+    if (op === 'deliver') return sspDeliver_(body, session);
+    if (op === 'importProducts') {
+      if (!isAdmin) return { ok: false, error: 'FORBIDDEN' };
+      return sspImportProducts_();
+    }
+    if (op === 'productToSheet') {
+      if (!isAdmin) return { ok: false, error: 'FORBIDDEN' };
+      return sspProductToSheet_(body.product || {});
+    }
+  } catch (err) {
+    console.error('SSP ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: false, error: 'SERVER_ERROR', detail: String(err && err.message ? err.message : err).slice(0, 300) };
+  }
+  return { ok: false, error: 'BAD_REQUEST' };
+}
+// "Step A, Boost" / "A" / "STEP C" -> ['A', 'BOOST', 'C'] (in step order)
+function sspParseSteps_(raw) {
+  const s = String(raw || '').toLowerCase();
+  const found = {};
+  if (/boost/.test(s)) found.BOOST = true;
+  (s.match(/step\s*([a-f])\b/g) || []).forEach(function (m) { found[m.slice(-1).toUpperCase()] = true; });
+  if (!Object.keys(found).length) {
+    (s.match(/\b([a-f])\b/g) || []).forEach(function (l) { found[l.toUpperCase()] = true; });
+  }
+  return SSP_STEP_KEYS_.filter(function (k) { return found[k]; });
+}
+
+function sspStepsText_(steps) {
+  return (Array.isArray(steps) ? steps : [])
+    .filter(function (k) { return SSP_STEP_LABEL_[k]; })
+    .map(function (k) { return SSP_STEP_LABEL_[k]; })
+    .join(', ');
+}
+
+function sspProductsSheet_() {
+  const sheet = SpreadsheetApp.openById(SSP_SHEET_ID).getSheetByName(SSP_PRODUCTS_SHEET_NAME);
+  if (!sheet) throw new Error('Sheet tab not found: ' + SSP_PRODUCTS_SHEET_NAME);
+  return sheet;
+}
+
+// product_info -> Firestore ssp_products. Matching products are updated, never duplicated.
+function sspImportProducts_() {
+  const cfg = getConfig_();
+  const rows = readRows_(sspProductsSheet_(), 8);
+  const existing = fsListAll_(cfg, 'ssp_products', ['name', 'size', 'sheetRow', 'published', 'createdAt', 'createdBy'])
+    .map(function (d) { return { id: d.name.split('/').pop(), f: fromFields_(d.fields || {}) }; });
+  const byKey = {};
+  const byRow = {};
+  existing.forEach(function (e) {
+    byKey[(String(e.f.name || '') + '|' + String(e.f.size || '')).toLowerCase().trim()] = e;
+    if (e.f.sheetRow) byRow[e.f.sheetRow] = e;
+  });
+
+  const now = new Date().toISOString();
+  const writes = [];
+  let added = 0;
+  let updated = 0;
+  rows.forEach(function (r, i) {
+    const d = r.display;
+    const name = String(d[0] || '').trim();
+    if (!name) return;
+    const rowNum = i + 2;
+    const hit = byKey[(name + '|' + String(d[4] || '').trim()).toLowerCase()] || byRow[rowNum];
+    const id = hit ? hit.id : 'p_' + Utilities.getUuid().replace(/-/g, '').slice(0, 18);
+    if (hit) updated++; else added++;
+    writes.push(updateWrite_(cfg, 'ssp_products/' + id, {
+      name: name.slice(0, 150),
+      steps: sspParseSteps_(d[1]),
+      defaultInstruction: String(d[2] || '').trim().slice(0, 3000),
+      maintenanceInstruction: String(d[3] || '').trim().slice(0, 3000),
+      size: String(d[4] || '').trim().slice(0, 60),
+      price: String(d[5] || '').trim().slice(0, 30),
+      details: String(d[6] || '').trim().slice(0, 3000),
+      shopLink: String(d[7] || '').trim().slice(0, 500),
+      published: hit ? hit.f.published !== false : true,
+      sheetRow: rowNum,
+      createdAt: hit && hit.f.createdAt ? hit.f.createdAt : now,
+      createdBy: hit && hit.f.createdBy ? hit.f.createdBy : 'Imported from product_info',
+      updatedAt: now,
+      updatedBy: 'Imported from product_info',
+      updatedByUid: '',
+    }));
+  });
+  if (writes.length) commitWrites_(cfg, writes, 100);
+  console.log('SSP products imported: ' + added + ' added, ' + updated + ' updated');
+  return { ok: true, added: added, updated: updated, total: added + updated };
+}
+
+// One product saved in the portal -> its row in product_info (or a new row)
+function sspProductToSheet_(p) {
+  const name = String(p.name || '').trim().slice(0, 150);
+  if (!name) return { ok: false, error: 'BAD_REQUEST' };
+  const oldName = String(p.oldName || name).trim().toLowerCase();
+  const oldSize = String(p.oldSize != null ? p.oldSize : (p.size || '')).trim().toLowerCase();
+  const sheet = sspProductsSheet_();
+  const lastRow = sheet.getLastRow();
+
+  let row = 0;
+  const wantRow = Number(p.sheetRow || 0);
+  if (wantRow >= 2 && wantRow <= lastRow &&
+      String(sheet.getRange(wantRow, 1).getDisplayValue()).trim().toLowerCase() === oldName) {
+    row = wantRow;
+  }
+  if (!row && lastRow >= 2) {
+    const vals = sheet.getRange(2, 1, lastRow - 1, 5).getDisplayValues();
+    for (let i = 0; i < vals.length; i++) {
+      if (vals[i][0].trim().toLowerCase() === oldName && vals[i][4].trim().toLowerCase() === oldSize) { row = i + 2; break; }
+    }
+  }
+
+  const values = [
+    name,
+    sspStepsText_(p.steps),
+    String(p.defaultInstruction || '').slice(0, 3000),
+    String(p.maintenanceInstruction || '').slice(0, 3000),
+    String(p.size || '').slice(0, 60),
+    String(p.price || '').slice(0, 30),
+    String(p.details || '').slice(0, 3000),
+    String(p.shopLink || '').slice(0, 500),
+  ];
+  if (row) sheet.getRange(row, 1, 1, 8).setValues([values]);
+  else { sheet.appendRow(values); row = sheet.getLastRow(); }
+  return { ok: true, row: row };
+}
+
+
+// One saved protocol (Firestore ssp_records) -> one row per product in SSP_NEW. Written once only.
+function sspAppendRecord_(id) {
+  if (!/^[A-Za-z0-9_-]{10,40}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) return { ok: false, error: 'BUSY' };
+  try {
+    const cfg = getConfig_();
+    const rec = fsGetDoc_(cfg, 'ssp_records/' + id);
+    if (!rec) return { ok: false, error: 'NOT_FOUND' };
+    if (rec.sheetSynced) return { ok: true, already: true };
+
+    const sheet = SpreadsheetApp.openById(SSP_SHEET_ID).getSheetByName(SSP_SHEET_NAME);
+    if (!sheet) throw new Error('Sheet tab not found: ' + SSP_SHEET_NAME);
+    const when = rec.createdAt ? new Date(rec.createdAt) : new Date();
+    const clipT = function (v, n) { return String(v == null ? '' : v).slice(0, n || 3000); };
+    const rows = (Array.isArray(rec.items) ? rec.items : []).map(function (it) {
+      const days = (Array.isArray(it.days) ? it.days : []).join(', ');
+      const whenToUse = [days, clipT(it.notes, 300)].filter(Boolean).join(' · ');
+      return [
+        clipT(rec.recordId || id, 60),                              // A RECORD ID
+        when,                                                      // B ENCODED DATETIME
+        clipT(rec.patientName, 200),                               // C PATIENT NAME
+        clipT(rec.patientPttId || rec.patientId, 80),              // D Patient ID
+        clipT(it.name, 200),                                       // E PRODUCT NAME
+        it.am && it.pm ? 'AM & PM' : it.am ? 'AM' : 'PM',          // F PROTOCOL
+        it.maint ? 'Yes' : 'No',                                   // G MAINTENANCE
+        '',                                                        // H RATING (not used)
+        '',                                                        // I FULL OR PARTIAL (not used)
+        it.am ? clipT(it.amText) : '',                             // J AM INSTRUCTION
+        it.pm ? clipT(it.pmText) : '',                             // K PM INSTRUCTION
+        whenToUse,                                                 // L WHEN TO USE
+        SSP_STEP_LABEL_[it.step] || clipT(it.step, 20),            // M STEP
+      ];
+    });
+    if (rows.length) sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, 13).setValues(rows);
+    fsPatch_(cfg, 'ssp_records/' + id, { sheetSynced: true, sheetSyncedAt: new Date().toISOString() });
+    console.log('SSP ' + (rec.recordId || id) + ': ' + rows.length + ' row(s) added to ' + SSP_SHEET_NAME);
+    return { ok: true, rows: rows.length };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// A saved protocol's PDF -> the printer address, or emailed to the patient. Logged on the protocol.
+function sspDeliver_(body, session) {
+  const id = String(body.recordId || '');
+  if (!/^[A-Za-z0-9_-]{10,40}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
+  const kind = body.kind === 'print' ? 'print' : 'email';
+  const bytes = pdfBytes_(body.pdf);
+  if (!bytes) return { ok: false, error: 'PDF_FAILED' };
+
+  const cfg = getConfig_();
+  const rec = fsGetDoc_(cfg, 'ssp_records/' + id);
+  if (!rec) return { ok: false, error: 'NOT_FOUND' };
+
+  const cache = CacheService.getScriptCache();
+  const rlKey = 'mail_' + session.uid;
+  const sentThisHour = Number(cache.get(rlKey) || 0);
+  if (sentThisHour >= MAIL_LIMIT_PER_HOUR_) return { ok: false, error: 'RATE_LIMITED' };
+  if (MailApp.getRemainingDailyQuota() < 1) return { ok: false, error: 'QUOTA' };
+
+  const fileName = cleanFileName_(body.fileName, 'Skin Script Protocol - ' + String(rec.patientName || 'Patient'));
+  const pdf = Utilities.newBlob(bytes, MimeType.PDF, fileName);
+  let to = '';
+  let cc = '';
+
+  if (kind === 'print') {
+    const ps = fsGetDoc_(cfg, 'form_settings/printing');
+    to = String((ps && ps.printerEmail) || '').trim();
+    if (!isEmail_(to)) return { ok: false, error: 'NO_PRINTER' };
+    MailApp.sendEmail({
+      to: to, subject: 'Print: ' + fileName, name: 'Dermedica Clinic',
+      body: 'Sent from the Dermedica staff portal for printing.', attachments: [pdf],
+    });
+  } else {
+    to = String(body.to || '').trim();
+    cc = String(body.cc || '').trim();
+    if (!isEmail_(to) || (cc && !isEmail_(cc))) return { ok: false, error: 'BAD_EMAIL' };
+    const subject = String(body.subject || '').trim().slice(0, 200) || 'Your Skin Script Protocol - Dermedica';
+    const htmlRaw = sanitizeEmailHtml_(body.html);
+    if (!htmlRaw || htmlRaw.length > 300000) return { ok: false, error: 'BAD_REQUEST' };
+    const inlined = inlineTaskImages_(cfg, htmlRaw);
+    const mail = { to: to, subject: subject, htmlBody: inlined.html, body: emailHtmlToText_(inlined.html),
+      name: 'Dermedica Clinic', attachments: [pdf] };
+    if (cc) mail.cc = cc;
+    if (Object.keys(inlined.images).length) mail.inlineImages = inlined.images;
+    MailApp.sendEmail(mail);
+  }
+  cache.put(rlKey, String(sentThisHour + 1), 3600);
+
+  const entry = {
+    kind: kind, to: to, cc: cc,
+    sentAt: new Date().toISOString(),
+    sentBy: String(session.name || ''),
+    sentByUid: String(session.uid || ''),
+  };
+  try {
+    const log = Array.isArray(rec.deliveries) ? rec.deliveries : [];
+    fsPatch_(cfg, 'ssp_records/' + id, { deliveries: log.concat([entry]).slice(-50) });
+  } catch (e) { console.warn('SSP sent, but the log failed: ' + e); }
+
+  console.log('SSP ' + (rec.recordId || id) + (kind === 'print' ? ' sent to printer' : ' emailed to ' + to) + ' by ' + session.name);
+  return { ok: true, entry: entry };
 }
