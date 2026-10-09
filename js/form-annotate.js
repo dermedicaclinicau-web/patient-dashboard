@@ -11,7 +11,7 @@ const I = {
 const COLOURS = [["#dc2626", "Red"], ["#2563eb", "Blue"], ["#16a34a", "Green"], ["#111827", "Black"]];
 const MAX_W = 1200; // drawing resolution (wide enough for print, small enough to save)
 
-export function createAnnotator(box, src) {
+export function createAnnotator(box, src, { base = "" } = {}) {
   box.classList.add("is-drawing");
   box.innerHTML = `
     <div class="an-tools" role="toolbar" aria-label="Drawing tools">
@@ -40,6 +40,7 @@ export function createAnnotator(box, src) {
   let tool = "pen", colour = COLOURS[0][0], size = "thin";
   const ops = [];
   let current = null;
+  
 
   const scale = () => (W || 1000) / 1000;
   const penWidth = () => (size === "thick" ? 7 : 3) * scale();
@@ -73,10 +74,12 @@ export function createAnnotator(box, src) {
     if (op.points.length === 1) g.lineTo(op.points[0][0] + 0.1, op.points[0][1]);
     g.stroke();
   }
-  function redraw() {
+    function redraw() {
     g.clearRect(0, 0, W, H);
+    if (baseImg && W) g.drawImage(baseImg, 0, 0, W, H);
     ops.forEach(drawOp);
-    undoBtn.disabled = clearBtn.disabled = !ops.length;
+    undoBtn.disabled = !ops.length;
+    clearBtn.disabled = !ops.length && !baseImg;
   }
   const changed = () => { redraw(); box.dispatchEvent(new Event("input", { bubbles: true })); };
 
@@ -120,12 +123,12 @@ export function createAnnotator(box, src) {
     else if (b.dataset.colour) { colour = b.dataset.colour; pickOne("[data-colour]"); }
     else if (b.dataset.size) { size = b.dataset.size; pickOne("[data-size]"); }
     else if (b.dataset.act === "undo") { ops.pop(); changed(); }
-    else if (b.dataset.act === "clear") { ops.length = 0; changed(); }
+    else if (b.dataset.act === "clear") { ops.length = 0; baseImg = null; changed(); }
   });
 
   return {
-    isEmpty: () => !ops.length,
-    toDataURL: () => (ops.length && W ? canvas.toDataURL("image/png") : ""),
+    isEmpty: () => !ops.length && !baseImg,
+    toDataURL: () => ((ops.length || baseImg) && W ? canvas.toDataURL("image/png") : ""),
   };
 }
 

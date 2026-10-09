@@ -118,7 +118,10 @@ async function preloadImages(fields, answers = {}) {
   const photos = (fields || [])
     .filter((f) => f.type === "image" && f.source === "staff")
     .flatMap((f) => { const v = answers[f.id]; return v && Array.isArray(v.photos) ? v.photos : []; });
-  await Promise.all(photos.map((p) => photoSrc(p).then((src) => { out[photoKey(p)] = src; }).catch(() => {})));
+    await Promise.all(photos.flatMap((p) => [
+    photoSrc(p).then((src) => { out[photoKey(p)] = src; }).catch(() => {}),
+    ...(p.drawingPath ? [photoSrc({ path: p.drawingPath }).then((src) => { out[p.drawingPath] = src; }).catch(() => {})] : []),
+  ]));
   return out;
 }
 

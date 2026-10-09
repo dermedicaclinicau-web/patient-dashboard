@@ -31,6 +31,9 @@ function doPost(e) {
     if (body.action === 'sendFormPdf') return json_(handleSendFormPdf_(body));
     if (body.action === 'imageBank') return json_(handleImageBank_(body));
     if (body.action === 'staffList') return json_(handleStaffList_(body));
+    if (body.action === 'sendTaskEmail') return json_(handleSendTaskEmail_(body));
+    if (body.action === 'sendAftercareEmail') return json_(handleSendAftercareEmail_(body));
+    if (body.action === 'printPdf') return json_(handlePrintPdf_(body));
 
     const pin = String(body.pin || '').trim();
 
@@ -1997,4 +2000,286 @@ function handleStaffList_(body) {
     .map(function (s) { return { id: s.id, name: s.name, role: s.role, hasEmail: !!s.email }; })
     .sort(function (a, b) { return a.name.localeCompare(b.name); });
   return { ok: true, staff: staff };
+}
+// ===================== Task Manager: send a task email =====================
+
+const TASK_MAX_RECIPIENTS_ = 20;
+
+function handleSendTaskEmail_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+
+  const taskId = String(body.taskId || '').trim();
+  if (!/^[A-Za-z0-9_-]{10,40}$/.test(taskId)) return { ok: false, error: 'BAD_REQUEST' };
+
+  const cfg = getConfig_();
+  const task = fsGetDoc_(cfg, 'task_types/' + taskId);
+  if (!task || task.status !== 'live') return { ok: false, error: 'TASK_NOT_LIVE' };
+  if (task.channel !== 'email') return { ok: false, error: 'BAD_REQUEST' };
+
+  const subjectRaw = String(body.subject || '').trim().slice(0, 200);
+  const htmlRaw = sanitizeEmailHtml_(body.html);
+  if (!subjectRaw || !htmlRaw || htmlRaw.length > 200000) return { ok: false, error: 'BAD_REQUEST' };
+  const cc = String(body.cc || '').trim();
+  if (cc && !isEmail_(cc)) return { ok: false, error: 'BAD_EMAIL' };
+
+  // The patient: needed for patient tasks and "about a patient" staff tasks
+  let patient = null;
+  const patientId = String(body.patientId || '').trim();
+  if (patientId) {
+    if (patientId.length > 150 || patientId.indexOf('/') !== -1) return { ok: false, error: 'BAD_REQUEST' };
+    patient = fsGetDoc_(cfg, 'patient_list/' + encodeURIComponent(patientId));
+    if (!patient) return { ok: false, error: 'NO_PATIENT' };
+  }
+  const patientName = patient
+    ? String(patient['Patient Name'] || ((patient['First Name'] || '') + ' ' + (patient['Last Name'] || '')).trim())
+    : '';
+  const recips = task.recipients || {};
+
+  // Who it goes to. Fixed staff lists are taken from the task, never from the browser.
+  const recipients = [];
+  if (task.category === 'patient') {
+    if (!patient) return { ok: false, error: 'NO_PATIENT' };
+    const to = String(body.to || '').trim();
+    if (!isEmail_(to)) return { ok: false, error: 'BAD_EMAIL' };
+    recipients.push({ name: patientName, first: String(patient['First Name'] || patientName.split(' ')[0] || ''), email: to });
+  } else {
+    if (recips.aboutPatient && !patient) return { ok: false, error: 'NO_PATIENT' };
+    const wanted = recips.mode === 'fixed' ? (recips.staffIds || []) : (Array.isArray(body.staffIds) ? body.staffIds : []);
+    const byId = {};
+    getStaffDocs_().forEach(function (s) { byId[s.id] = s; });
+    wanted.slice(0, TASK_MAX_RECIPIENTS_).forEach(function (id) {
+      const s = byId[String(id)];
+      if (s && isEmail_(s.email)) recipients.push({ name: s.name, first: String(s.name || '').split(' ')[0], email: s.email });
+    });
+    if (!recipients.length) return { ok: false, error: 'NO_RECIPIENTS' };
+  }
+
+  // Same limits as the other emails
+  const cache = CacheService.getScriptCache();
+  const rlKey = 'mail_' + session.uid;
+  const sentThisHour = Number(cache.get(rlKey) || 0);
+  if (sentThisHour + recipients.length > MAIL_LIMIT_PER_HOUR_) return { ok: false, error: 'RATE_LIMITED' };
+  if (MailApp.getRemainingDailyQuota() < recipients.length) return { ok: false, error: 'QUOTA' };
+
+  // Attachments: PDFs made in the browser (must be real PDFs)
+  const wantedAtt = Array.isArray(body.attachments) ? body.attachments.slice(0, 3) : [];
+  const attachments = [];
+  for (let i = 0; i < wantedAtt.length; i++) {
+    const bytes = pdfBytes_(wantedAtt[i] && wantedAtt[i].pdf);
+    if (!bytes) return { ok: false, error: 'PDF_FAILED' };
+    attachments.push(Utilities.newBlob(bytes, MimeType.PDF, cleanFileName_(wantedAtt[i].name, 'Attachment')));
+  }
+
+  const escH = function (s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
+
+  // Image Bank pictures and the clinic logo travel inside the email
+  const inlined = inlineTaskImages_(cfg, htmlRaw);
+  const hasImages = Object.keys(inlined.images).length > 0;
+
+  // One email per person, with their own name filled in (staff tasks)
+  recipients.forEach(function (r) {
+    const subject = subjectRaw.replace(/\{First name\}/gi, r.first).replace(/\{Full name\}/gi, r.name);
+    const html = inlined.html.replace(/\{First name\}/gi, escH(r.first)).replace(/\{Full name\}/gi, escH(r.name));
+    const mail = { to: r.email, subject: subject, htmlBody: html, body: emailHtmlToText_(html), name: 'Dermedica Clinic' };
+    if (cc) mail.cc = cc;
+    if (attachments.length) mail.attachments = attachments;
+    if (hasImages) mail.inlineImages = inlined.images;
+    MailApp.sendEmail(mail);
+  });
+  cache.put(rlKey, String(sentThisHour + recipients.length), 3600);
+
+  // Task history (written only here; staff can read it, nobody can change it)
+  const runId = 'run_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20);
+  try {
+    commitWrites_(cfg, [updateWrite_(cfg, 'task_runs/' + runId, {
+      taskId: taskId,
+      taskName: String(task.name || ''),
+      category: String(task.category || ''),
+      patientId: patientId,
+      patientName: patientName,
+      recipients: recipients.map(function (r) { return { name: r.name, email: r.email }; }),
+      cc: cc,
+      subject: subjectRaw,
+      html: htmlRaw.slice(0, 100000),
+      attachments: attachments.map(function (a) { return a.getName(); }),
+      sentAt: new Date().toISOString(),
+      sentBy: String(session.name || ''),
+      sentByUid: String(session.uid || ''),
+    })]);
+  } catch (e) { console.warn('Task sent, but the history log failed: ' + e); }
+
+  console.log('Task "' + task.name + '" sent to ' + recipients.length + ' recipient(s) by ' + session.name);
+  return { ok: true, runId: runId, sent: recipients.length };
+}
+
+// ===================== Task emails: pictures inside the email =====================
+
+// <img data-bank="ID"> -> the Image Bank picture; <img data-logo> -> the letterhead logo
+function inlineTaskImages_(cfg, html) {
+  const images = {};
+  const rootId = String(PropertiesService.getScriptProperties().getProperty('IMAGE_BANK_FOLDER_ID') || '').trim();
+  let n = 0;
+  let logo; // looked up once, only if needed
+  const out = String(html || '').replace(/<img\b[^>]*>/gi, function (tag) {
+    const bankId = (tag.match(/\sdata-bank\s*=\s*["']([A-Za-z0-9_-]{10,80})["']/i) || [])[1];
+    const isLogo = /\sdata-logo\s*=/i.test(tag);
+    let key = '';
+    if (isLogo) {
+      if (logo === undefined) logo = letterheadLogoBlob_(cfg);
+      if (logo) { key = 'logo'; images.logo = logo; }
+    } else if (bankId && n < 12) {
+      // New Image Bank (Firebase Storage) first, then older Google Drive pictures
+      let blob = null;
+      let meta = null;
+      try { meta = fsGetDoc_(cfg, 'image_bank/' + bankId); }
+      catch (e) { console.warn('Image Bank lookup failed for ' + bankId + ': ' + e); }
+      if (meta && meta.fullPath) blob = storageImageBlob_(cfg, String(meta.fullPath), String(meta.name || 'image'));
+      if (!blob && rootId) {
+        const f = bankFile_(rootId, bankId);
+        blob = f ? emailImageBlob_(f) : null;
+      }
+      if (blob) { key = 'img' + n++; images[key] = blob; }
+    }
+    if (!key) return '';
+    return tag
+      .replace(/\s(?:src|data-bank|data-logo)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+      .replace(/^<img/i, '<img src="cid:' + key + '"');
+  });
+  return { html: out, images: images };
+}
+
+// Big photos are sent as a smaller copy (1200px wide) so the email stays light
+function emailImageBlob_(file) {
+  if (file.getSize() <= 1500000) return file.getBlob();
+  try {
+    const res = UrlFetchApp.fetch('https://drive.google.com/thumbnail?sz=w1200&id=' + encodeURIComponent(file.getId()), {
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true,
+      followRedirects: true,
+    });
+    const h = res.getHeaders();
+    const type = String(h['Content-Type'] || h['content-type'] || '');
+    if (res.getResponseCode() === 200 && /^image\//i.test(type)) return res.getBlob().setName(file.getName());
+  } catch (e) { console.warn('Smaller copy failed for ' + file.getId() + ': ' + e); }
+  return file.getSize() <= IMG_MAX_BYTES_ ? file.getBlob() : null;
+}
+
+function letterheadLogoBlob_(cfg) {
+  try {
+    const lh = fsGetDoc_(cfg, 'form_settings/letterhead');
+    const m = /^data:(image\/(?:png|jpeg|gif|webp));base64,(.+)$/.exec(String((lh && lh.logo) || ''));
+    return m ? Utilities.newBlob(Utilities.base64Decode(m[2]), m[1], 'logo') : null;
+  } catch (e) {
+    console.warn('Logo lookup failed: ' + e);
+    return null;
+  }
+}
+
+// A picture from the Image Bank in Firebase Storage (only from the image_bank folder)
+function storageImageBlob_(cfg, path, name) {
+  if (!/^image_bank\/[A-Za-z0-9_-]{10,40}\/full$/.test(path)) return null;
+  const bucket = String(PropertiesService.getScriptProperties().getProperty('STORAGE_BUCKET') || '')
+    .trim().replace(/^gs:\/\//i, '').split('/')[0];
+  if (!bucket) return null;
+  try {
+    const res = UrlFetchApp.fetch('https://storage.googleapis.com/storage/v1/b/' + encodeURIComponent(bucket) +
+      '/o/' + encodeURIComponent(path) + '?alt=media', {
+      headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) },
+      muteHttpExceptions: true,
+    });
+    return res.getResponseCode() === 200 ? res.getBlob().setName(name) : null;
+  } catch (e) {
+    console.warn('Image Bank picture failed: ' + path + ': ' + e);
+    return null;
+  }
+}
+
+// ===================== Aftercare: email it, or send it to the printer =====================
+
+function handleSendAftercareEmail_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+
+  const cfg = getConfig_();
+  const patientId = String(body.patientId || '').trim();
+  if (!patientId || patientId.length > 150 || patientId.indexOf('/') !== -1) return { ok: false, error: 'NO_PATIENT' };
+  const patient = fsGetDoc_(cfg, 'patient_list/' + encodeURIComponent(patientId));
+  if (!patient) return { ok: false, error: 'NO_PATIENT' };
+
+  const to = String(body.to || '').trim();
+  const cc = String(body.cc || '').trim();
+  if (!isEmail_(to) || (cc && !isEmail_(cc))) return { ok: false, error: 'BAD_EMAIL' };
+  const subject = String(body.subject || '').trim().slice(0, 200) || 'Your aftercare instructions - Dermedica';
+  const htmlRaw = sanitizeEmailHtml_(body.html);
+  if (!htmlRaw || htmlRaw.length > 300000) return { ok: false, error: 'BAD_REQUEST' };
+
+  const cache = CacheService.getScriptCache();
+  const rlKey = 'mail_' + session.uid;
+  const sentThisHour = Number(cache.get(rlKey) || 0);
+  if (sentThisHour >= MAIL_LIMIT_PER_HOUR_) return { ok: false, error: 'RATE_LIMITED' };
+  if (MailApp.getRemainingDailyQuota() < 1) return { ok: false, error: 'QUOTA' };
+
+  const inlined = inlineTaskImages_(cfg, htmlRaw);
+  const mail = { to: to, subject: subject, htmlBody: inlined.html, body: emailHtmlToText_(inlined.html), name: 'Dermedica Clinic' };
+  if (cc) mail.cc = cc;
+  if (Object.keys(inlined.images).length) mail.inlineImages = inlined.images;
+  MailApp.sendEmail(mail);
+  cache.put(rlKey, String(sentThisHour + 1), 3600);
+
+  const patientName = String(patient['Patient Name'] || ((patient['First Name'] || '') + ' ' + (patient['Last Name'] || '')).trim());
+  const titles = (Array.isArray(body.titles) ? body.titles : []).map(function (t) { return String(t).slice(0, 200); }).slice(0, 20);
+  try {
+    const runId = 'run_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20);
+    commitWrites_(cfg, [updateWrite_(cfg, 'task_runs/' + runId, {
+      taskId: String(body.templateId || '').slice(0, 40),
+      taskName: 'Aftercare email',
+      category: 'patient',
+      patientId: patientId,
+      patientName: patientName,
+      recipients: [{ name: patientName, email: to }],
+      cc: cc,
+      subject: subject,
+      html: htmlRaw.slice(0, 100000),
+      attachments: [],
+      aftercare: titles,
+      sentAt: new Date().toISOString(),
+      sentBy: String(session.name || ''),
+      sentByUid: String(session.uid || ''),
+    })]);
+  } catch (e) { console.warn('Aftercare sent, but the history log failed: ' + e); }
+
+  console.log('Aftercare emailed to ' + to + ' by ' + session.name);
+  return { ok: true };
+}
+
+// A PDF made in the browser, sent ONLY to the printer address saved in Form Builder
+function handlePrintPdf_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  const bytes = pdfBytes_(body.pdf);
+  if (!bytes) return { ok: false, error: 'PDF_FAILED' };
+
+  const cfg = getConfig_();
+  const ps = fsGetDoc_(cfg, 'form_settings/printing');
+  const to = String((ps && ps.printerEmail) || '').trim();
+  if (!isEmail_(to)) return { ok: false, error: 'NO_PRINTER' };
+
+  const cache = CacheService.getScriptCache();
+  const rlKey = 'mail_' + session.uid;
+  const sentThisHour = Number(cache.get(rlKey) || 0);
+  if (sentThisHour >= MAIL_LIMIT_PER_HOUR_) return { ok: false, error: 'RATE_LIMITED' };
+  if (MailApp.getRemainingDailyQuota() < 1) return { ok: false, error: 'QUOTA' };
+
+  const fileName = cleanFileName_(body.fileName, 'Aftercare instructions');
+  MailApp.sendEmail({
+    to: to,
+    subject: 'Print: ' + fileName,
+    body: 'Sent from the Dermedica staff portal for printing.',
+    name: 'Dermedica Clinic',
+    attachments: [Utilities.newBlob(bytes, MimeType.PDF, fileName)],
+  });
+  cache.put(rlKey, String(sentThisHour + 1), 3600);
+  console.log('PDF "' + fileName + '" sent to the printer by ' + session.name);
+  return { ok: true };
 }

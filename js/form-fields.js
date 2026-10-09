@@ -211,6 +211,7 @@ export function createField(type, id) {
     case "image":
       f.source = "bank"; f.fileId = ""; f.fileName = ""; f.size = "medium"; f.caption = ""; f.alt = ""; f.max = 1;
       f.annotate = false; f.widthPct = 50; f.heightPx = null; f.allowBank = true;
+      f.photoLayout = "grid"; f.perRow = 2;
       break;
     case "watermark": f.source = "text"; f.text = "DRAFT"; f.opacity = 10; f.angle = -30; f.size = "large"; break;
     case "letterhead": f.line1 = LETTERHEAD[0]; f.line2 = LETTERHEAD[1]; break;
@@ -329,6 +330,8 @@ export function cleanField(f) {
       out.max = int(f.max, 1, 10, 1);
       out.annotate = f.annotate === true;
       out.allowBank = f.allowBank !== false;
+      out.photoLayout = pick(f.photoLayout, ["grid", "stack"], "grid");
+      out.perRow = int(f.perRow, 2, 4, 2);
       break;
     case "watermark":
       out.source = pick(f.source, ["text", "logo"], "text");
@@ -534,8 +537,9 @@ export function renderField(f, ctx = {}) {
        if (f.source === "staff") {
         const max = Math.max(1, Math.min(10, parseInt(f.max, 10) || 1));
         if (live) return `<div class="ph-host" data-ph-host></div>${cap}`;
+        const how = f.photoLayout === "stack" ? "one under another" : `side by side, ${Math.max(2, Math.min(4, parseInt(f.perRow, 10) || 2))} per row`;
         return `<div class="fe-img-staff">${svg(ICONS.photo)}<span>Staff take or upload ${
-          max > 1 ? `up to ${max} photos` : "a photo"} while filling in</span></div>${cap}`;
+          max > 1 ? `up to ${max} photos` : "a photo"} while filling in · ${how}${f.annotate ? " · staff can draw on them" : ""}</span></div>${cap}`;
       }
       if (!f.fileId) {
         return live ? "" : `<div class="fe-img-empty">${svg(ICONS.image)}<span>Choose a picture in the settings panel</span></div>`;
@@ -703,10 +707,20 @@ function typeSettings(f, ctx = {}) {
           setting("Description", `<input class="fe-input" data-k="alt" maxlength="200" value="${esc(f.alt || "")}" />`,
             "Optional. Read aloud by screen readers; not shown on the form.");
       } else {
+        const stack = f.photoLayout === "stack";
         h += setting("Photos allowed", choose("max", Array.from({ length: 10 }, (_, i) => [i + 1, String(i + 1)]), f.max || 1, true)) +
+          setting("Layout", choose("photoLayout", [["grid", "Side by side"], ["stack", "One under another"]], stack ? "stack" : "grid", false, true)) +
+          (stack
+            ? setting("Size", choose("size", [["small", "Small"], ["medium", "Medium"], ["large", "Large"], ["full", "Full width"], ["custom", "Custom size"]],
+                f.size || "medium", false, true)) +
+              (f.size === "custom"
+                ? setting("Width", `<div class="fe-num"><input class="fe-input" type="number" min="10" max="100" step="5" data-k="widthPct" data-num="" value="${Number(f.widthPct) || 50}" /><span>% of the page width</span></div>`)
+                : "")
+            : setting("Photos per row", choose("perRow", [[2, "2"], [3, "3"], [4, "4"]], f.perRow || 2, true))) +
+          `<label class="fe-check"><input type="checkbox" data-k="annotate" data-rerender=""${f.annotate ? " checked" : ""} /> Staff can draw on the photos</label>` +
           caption +
           `<label class="fe-check"><input type="checkbox" data-k="allowBank"${f.allowBank !== false ? " checked" : ""} /> Allow choosing from the Image Bank</label>` +
-          '<p class="fe-note fe-pad">On phones and tablets, Take photo opens the camera. Photos are stored privately with the patient\'s saved form.</p>';
+          '<p class="fe-note fe-pad">On phones and tablets, Take photo opens the camera. Photos are stored privately with the patient\'s saved form; markings are saved on top, so the original photo is never changed.</p>';
       }
       return h;
     }

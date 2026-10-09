@@ -202,11 +202,20 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {} }) {
     }
     if (f.type === "image") {
       if (f.source === "staff") {
-        const photos = v && Array.isArray(v.photos) ? v.photos : [];
-        const srcs = photos.map((p) => images[p.path ? p.path : `bank:${p.bankId}`]).filter(Boolean);
-        if (!srcs.length) return "";
+        const photos = (v && Array.isArray(v.photos) ? v.photos : []).filter((p) => images[p.path ? p.path : `bank:${p.bankId}`]);
+        if (!photos.length) return "";
+        const stack = f.photoLayout === "stack";
+        const perRow = Math.max(2, Math.min(4, parseInt(f.perRow, 10) || 2));
+        const width = stack ? `${imageSizing({ ...f, annotate: true }).pct}%` : `${(100 / perRow) - 2}%`;
+        const one = (p) => {
+          const base = images[p.path ? p.path : `bank:${p.bankId}`];
+          const over = p.drawingPath && images[p.drawingPath];
+          return `<span style="position:relative;display:inline-block !important;width:${width};max-width:100%;margin:0 1% 8px;vertical-align:top;">` +
+            `<img src="${base}" alt="" style="display:block !important;width:100%;height:auto;border-radius:4px;">` +
+            (over ? `<img src="${over}" alt="" style="position:absolute;left:0;top:0;width:100%;height:100%;">` : "") + "</span>";
+        };
         return `<div class="block" style="${box}">${label ? `<div class="ql" style="margin-bottom:${gap}px;">${label}</div>` : ""}${
-          srcs.map((s) => `<img src="${s}" alt="" style="display:inline-block !important;width:48%;height:auto;margin:0 1% 8px;vertical-align:top;border-radius:4px;">`).join("")}${
+          photos.map(one).join(stack ? "<br>" : "")}${
           f.caption ? `<div style="font-size:9pt;color:#64748b;margin-top:2px;">${esc(f.caption)}</div>` : ""}</div>`;
       }
       if (!f.fileId || !images[f.fileId]) return "";
