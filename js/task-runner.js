@@ -22,6 +22,8 @@ const I = {
   ext: ic('<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>'),
   search: ic('<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>'),
   doc: ic('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>'),
+  x: ic('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
+  user: ic('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
 };
 const CAT_LABEL = { patient: "To Patient", staff: "To Staff" };
 const todayLong = () => new Date().toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" });
@@ -47,28 +49,40 @@ function runError(err) {
   }
 }
 
+/* ===================== Patient search ===================== */
+
+// Matches first name, last name or full name, in any word order
 async function searchPatients(q) {
   const key = q.toLowerCase().replace(/\s+/g, " ").trim();
   if (key.length < 2) return [];
+  const words = key.split(" ");
   const col = collection(db, "patient_list");
-  const title = titleCase(key);
-  const [a, b] = await Promise.all([
-    getDocs(query(col, where("NameKey", ">=", key), where("NameKey", "<=", key + "\uf8ff"), limit(12))).catch(() => null),
-    getDocs(query(col, where("Patient Name", ">=", title), where("Patient Name", "<=", title + "\uf8ff"), limit(12))).catch(() => null),
+  const prefix = (field, v) =>
+    getDocs(query(col, where(field, ">=", v), where(field, "<=", v + "\uf8ff"), limit(10))).catch(() => null);
+  const first = titleCase(words[0]);
+  const snaps = await Promise.all([
+    prefix("NameKey", key),
+    prefix("Patient Name", titleCase(key)),
+    prefix("First Name", first),
+    prefix("Last Name", first),
   ]);
+
   const seen = new Map();
-  [a, b].forEach((snap) => snap && snap.forEach((d) => {
+  snaps.forEach((snap) => snap && snap.forEach((d) => {
+    if (seen.has(d.id)) return;
     const x = d.data() || {};
-    if (x.MergedInto || seen.has(d.id)) return;
-    seen.set(d.id, {
-      id: d.id,
-      name: x["Patient Name"] || `${x["First Name"] || ""} ${x["Last Name"] || ""}`.trim() || "Unnamed patient",
-      email: x.Email || "",
-      dob: x.DOB || "",
-    });
+    if (x.MergedInto) return;
+    const name = x["Patient Name"] || `${x["First Name"] || ""} ${x["Last Name"] || ""}`.trim() || "Unnamed patient";
+    const lower = name.toLowerCase();
+    if (!words.every((w) => lower.includes(w))) return; // every word typed must be in the name
+    seen.set(d.id, { id: d.id, name, email: x.Email || "", dob: x.DOB || "", starts: lower.startsWith(key) });
   }));
-  return [...seen.values()].sort((p, q2) => p.name.localeCompare(q2.name, "en-AU")).slice(0, 12);
+  return [...seen.values()]
+    .sort((a, b) => (b.starts - a.starts) || a.name.localeCompare(b.name, "en-AU"))
+    .slice(0, 10);
 }
+
+/* ===================== The task screen ===================== */
 
 export async function mountTaskRunner(container, { taskId, patientId = "", staff } = {}) {
   const backHref = patientId ? `#/patient/${encodeURIComponent(patientId)}` : "#/tasks/new";
@@ -94,9 +108,10 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   const aboutPatient = task.category === "patient" || task.recipients.aboutPatient;
   const fixedStaff = task.category === "staff" && task.recipients.mode === "fixed";
   const st = {
-    patient: null, results: [], staffList: null, staffSel: new Set(), answers: {}, sources: {},
+    patient: null, staffList: null, staffSel: new Set(), answers: {}, sources: {},
     smart: { appointments: "", plan: "" }, letterhead: null, printables: null,
     subjectEdited: false, bodyEdited: false, sending: false, touched: false,
+    combo: { results: [], active: -1, status: "", seq: 0 },
   };
   if (patientId) { try { st.patient = await getPatient(patientId); } catch (err) { console.warn("Patient load failed:", err); } }
   if (!root.isConnected) return;
@@ -122,7 +137,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
         <aside class="tr-mail-col">
           <section class="tb-card tr-mail">
             <h4>Email</h4>
-            <div class="tr-row"><span>To</span><div class="tr-to" data-role="to"></div></div>
+            <div class="tr-row tr-row-to"><span>To</span><div class="tr-to" data-role="to"></div></div>
             <label class="tr-row"><span>CC</span><input class="fe-input" type="email" data-role="cc" maxlength="254" placeholder="Optional" value="${esc(task.recipients.cc || "")}" /></label>
             <label class="tr-row"><span>Subject</span><input class="fe-input" data-role="subject" maxlength="200" /></label>
             <div class="tr-body" data-role="body" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message"></div>
@@ -193,50 +208,142 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     resetBtn.hidden = !(st.subjectEdited || st.bodyEdited);
   }
 
+  /* ---------- Searchable patient dropdown ---------- */
+  function comboHtml(label) {
+    return `
+      <div class="pc" data-combo>
+        <div class="pc-field">${I.search}
+          <input type="text" class="pc-input" data-role="psearch" role="combobox" aria-expanded="false"
+            aria-controls="pc-list" aria-autocomplete="list" aria-label="${esc(label)}"
+            placeholder="Search for the patient by name" autocomplete="off" spellcheck="false" />
+        </div>
+        <ul class="pc-list" id="pc-list" role="listbox" aria-label="Matching patients" hidden></ul>
+      </div>`;
+  }
+
+  function renderCombo() {
+    const input = root.querySelector(".pc-input");
+    const list = root.querySelector(".pc-list");
+    if (!input || !list) return;
+    const c = st.combo;
+    let h = "";
+    if (c.status === "short") h = '<li class="pc-status">Type at least 2 letters</li>';
+    else if (c.status === "searching" && !c.results.length) h = '<li class="pc-status">Searching…</li>';
+    else if (c.status === "none") h = '<li class="pc-status">No patients found. Try their last name.</li>';
+    else if (c.status === "error") h = '<li class="pc-status pc-bad">Couldn\'t search. Check your connection.</li>';
+    h += c.results.map((r, i) => `
+      <li class="pc-opt${i === c.active ? " is-active" : ""}" id="pc-opt-${i}" role="option" aria-selected="${i === c.active}" data-pick-patient="${esc(r.id)}">
+        <span class="pc-avatar">${I.user}</span>
+        <span class="pc-text"><strong>${esc(r.name)}</strong><small>${esc([r.dob && `DOB ${r.dob}`, r.email || "No email on file"].filter(Boolean).join(" · "))}</small></span>
+      </li>`).join("");
+    list.innerHTML = h;
+    const open = !!h && document.activeElement === input;
+    list.hidden = !open;
+    input.setAttribute("aria-expanded", String(open));
+    if (c.active >= 0) {
+      input.setAttribute("aria-activedescendant", `pc-opt-${c.active}`);
+      const el = list.querySelector(`#pc-opt-${c.active}`);
+      if (el) el.scrollIntoView({ block: "nearest" });
+    } else input.removeAttribute("aria-activedescendant");
+  }
+
+  let searchTimer = null;
+  function runSearch(q) {
+    clearTimeout(searchTimer);
+    const c = st.combo;
+    if (q.trim().length < 2) { c.results = []; c.active = -1; c.status = q.trim() ? "short" : ""; renderCombo(); return; }
+    c.status = "searching";
+    renderCombo();
+    const seq = ++c.seq;
+    searchTimer = setTimeout(async () => {
+      let results = [];
+      try { results = await searchPatients(q); }
+      catch (err) { console.warn("Patient search failed:", err); if (seq === c.seq) { c.status = "error"; renderCombo(); } return; }
+      if (seq !== c.seq || !root.isConnected) return; // a newer search has started
+      c.results = results;
+      c.active = results.length ? 0 : -1;
+      c.status = results.length ? "" : "none";
+      renderCombo();
+    }, 250);
+  }
+
+  root.addEventListener("input", (e) => { if (e.target.matches(".pc-input")) runSearch(e.target.value); });
+  root.addEventListener("focusin", (e) => { if (e.target.matches(".pc-input")) renderCombo(); });
+  root.addEventListener("focusout", (e) => {
+    if (!e.target.matches(".pc-input")) return;
+    setTimeout(() => { const l = root.querySelector(".pc-list"); if (l && document.activeElement !== e.target) { l.hidden = true; e.target.setAttribute("aria-expanded", "false"); } }, 120);
+  });
+  root.addEventListener("keydown", (e) => {
+    if (!e.target.matches(".pc-input")) return;
+    const c = st.combo;
+    if (e.key === "ArrowDown" && c.results.length) { e.preventDefault(); c.active = (c.active + 1) % c.results.length; renderCombo(); }
+    else if (e.key === "ArrowUp" && c.results.length) { e.preventDefault(); c.active = (c.active - 1 + c.results.length) % c.results.length; renderCombo(); }
+    else if (e.key === "Enter") { e.preventDefault(); if (c.results[c.active]) pickPatient(c.results[c.active].id); }
+    else if (e.key === "Escape") { const l = root.querySelector(".pc-list"); if (l) l.hidden = true; e.target.setAttribute("aria-expanded", "false"); }
+  });
+  // mousedown (not click) so choosing happens before the box loses focus
+  root.addEventListener("mousedown", (e) => {
+    const opt = e.target.closest(".pc-opt");
+    if (!opt) return;
+    e.preventDefault();
+    pickPatient(opt.dataset.pickPatient);
+  });
+
+  async function pickPatient(id) {
+    try { st.patient = await getPatient(id); }
+    catch (err) { console.error(err); showToast("Couldn't open that patient. Try again."); return; }
+    if (!root.isConnected || !st.patient) return;
+    st.combo = { results: [], active: -1, status: "", seq: st.combo.seq + 1 };
+    renderLeft(); renderTo(); loadSmart();
+    const to = $('[data-role="to-input"]');
+    if (to && !to.value) to.focus();
+  }
+
+  function clearPatient() {
+    st.patient = null;
+    renderLeft(); renderTo(); loadSmart();
+    const input = root.querySelector(".pc-input");
+    if (input) input.focus();
+  }
+
   /* ---------- Who it's for ---------- */
+  function patientChip() {
+    const p = st.patient;
+    return `<div class="tr-pchip">
+      <span class="pc-avatar">${I.user}</span>
+      <span class="pc-text"><strong>${esc(p.name)}</strong><small>${esc(formatDobLong(p.dobKey) || p.dob || "")}</small></span>
+      ${patientId ? "" : `<button type="button" class="ib-tool" data-act="change-patient" aria-label="Choose a different patient" title="Choose a different patient">${I.x}</button>`}
+    </div>`;
+  }
+
   function renderTo() {
     const box = $('[data-role="to"]');
     if (task.category === "patient") {
-      const onFile = (st.patient && st.patient.email) || "";
-      const current = box.querySelector("input") ? box.querySelector("input").value : onFile;
-      box.innerHTML = `<input class="fe-input" type="email" data-role="to-input" maxlength="254" placeholder="${st.patient ? "No email on file. Type one in." : "Choose the patient first"}" value="${esc(current)}" />
+      if (!st.patient) { box.innerHTML = comboHtml("Patient"); return; }
+      box.innerHTML = `${patientChip()}
+        <input class="fe-input" type="email" data-role="to-input" maxlength="254" aria-label="Email address"
+          placeholder="No email on file. Type one in." value="${esc(st.patient.email || "")}" />
         <small class="tr-warn" data-role="to-warn" hidden></small>`;
       checkTo();
-    } else {
-      const ids = fixedStaff ? task.recipients.staffIds : [...st.staffSel];
-      const names = (st.staffList || []).filter((s) => ids.includes(s.id)).map((s) => s.name);
-      box.innerHTML = names.length
-        ? `<div class="tr-chips">${names.map((n) => `<span class="tr-chip">${esc(n)}</span>`).join("")}</div>${
-            names.length > 1 ? '<small class="muted">Each person gets their own copy, addressed to them.</small>' : ""}`
-        : `<span class="muted">${st.staffList === null ? "Loading staff…" : "Choose staff on the left"}</span>`;
+      return;
     }
+    const ids = fixedStaff ? task.recipients.staffIds : [...st.staffSel];
+    const names = (st.staffList || []).filter((s) => ids.includes(s.id)).map((s) => s.name);
+    box.innerHTML = names.length
+      ? `<div class="tr-chips">${names.map((n) => `<span class="tr-chip">${esc(n)}</span>`).join("")}</div>${
+          names.length > 1 ? '<small class="muted">Each person gets their own copy, addressed to them.</small>' : ""}`
+      : `<span class="muted">${st.staffList === null ? "Loading staff…" : "Choose staff on the left"}</span>`;
   }
+
   function checkTo() {
     const input = $('[data-role="to-input"]');
     const warn = $('[data-role="to-warn"]');
     if (!input || !warn) return;
     const onFile = ((st.patient && st.patient.email) || "").toLowerCase();
     const v = input.value.trim().toLowerCase();
-    warn.hidden = !st.patient || !v || !onFile || v === onFile;
+    if (!onFile) { warn.textContent = "There's no email on this patient's record. Type one in."; warn.hidden = false; return; }
     warn.textContent = "This isn't the email address on the patient's record.";
-  }
-
-  function patientCard() {
-    const label = task.category === "patient" ? "Patient" : "Patient it's about";
-    if (st.patient) {
-      const p = st.patient;
-      return `<div class="tr-person">
-        <div><strong>${esc(p.name)}</strong><small>${esc([formatDobLong(p.dobKey) || p.dob, p.email || "No email on file"].filter(Boolean).join(" · "))}</small></div>
-        ${patientId ? "" : '<button type="button" class="lh-btn is-quiet" data-act="change-patient">Change</button>'}
-      </div>`;
-    }
-    return `<div class="tb-field"><span>${label}</span>
-      <label class="ib-search tr-psearch">${I.search}<input type="search" data-role="psearch" placeholder="Search patients by name" autocomplete="off" /></label>
-      <div class="tr-results" data-role="results">${st.results.map((r) => `
-        <button type="button" class="tr-result" data-pick-patient="${esc(r.id)}">
-          <strong>${esc(r.name)}</strong><small>${esc([r.dob, r.email].filter(Boolean).join(" · "))}</small>
-        </button>`).join("")}</div>
-      <small class="muted">Can't find them? Open the patient from the Patient List and use the Email button there.</small></div>`;
+    warn.hidden = !v || v === onFile;
   }
 
   function staffCard() {
@@ -266,7 +373,6 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
       case "date":
         return `<label class="tb-field">${head}<input class="fe-input tr-date" type="date" data-ans="${id}" value="${esc(v || "")}" />${help}</label>`;
     }
-    // Choices
     const opts = optionsOf(f);
     if (f.source !== "list" && st.sources[f.source] === undefined) return `<div class="tb-field">${head}<p class="tb-none">Loading the list…</p></div>`;
     if (f.source !== "list" && st.sources[f.source] === null) return `<div class="tb-field">${head}<p class="tb-none tb-bad">Couldn't load this list.</p></div>`;
@@ -288,14 +394,17 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   function renderLeft() {
     let n = 1;
     let h = "";
-    if (task.category === "patient") {
-      h += `<section class="tb-card"><h4><span class="tb-num">${n++}</span>Who it's for</h4>${patientCard()}</section>`;
-    } else {
+    if (task.category === "staff") {
       h += `<section class="tb-card"><h4><span class="tb-num">${n++}</span>Who it goes to</h4>${staffCard()}</section>`;
-      if (aboutPatient) h += `<section class="tb-card"><h4><span class="tb-num">${n++}</span>Which patient</h4>${patientCard()}</section>`;
+      if (aboutPatient) {
+        h += `<section class="tb-card"><h4><span class="tb-num">${n++}</span>Which patient</h4>${
+          st.patient ? patientChip() : comboHtml("Patient this is about")}</section>`;
+      }
     }
     if (task.fields.length) {
       h += `<section class="tb-card"><h4><span class="tb-num">${n++}</span>Details</h4>${task.fields.map(fieldHtml).join("")}</section>`;
+    } else if (task.category === "patient") {
+      h += `<section class="tb-card"><h4>Details</h4><p class="tb-none">Nothing else to fill in. Choose the patient in the <strong>To</strong> box, check the email, then send.</p></section>`;
     }
     left.innerHTML = h;
   }
@@ -343,34 +452,9 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     }
   }
 
-  async function pickPatient(id) {
-    try {
-      st.patient = await getPatient(id);
-    } catch (err) { console.error(err); showToast("Couldn't open that patient. Try again."); return; }
-    if (!root.isConnected) return;
-    st.results = [];
-    const input = $('[data-role="to-input"]');
-    if (input) input.value = (st.patient && st.patient.email) || "";
-    renderLeft(); renderTo(); loadSmart();
-  }
-
   /* ---------- Events ---------- */
-  let searchTimer = null;
   left.addEventListener("input", (e) => {
     const el = e.target;
-    if (el.matches('[data-role="psearch"]')) {
-      clearTimeout(searchTimer);
-      const q = el.value;
-      searchTimer = setTimeout(async () => {
-        try { st.results = await searchPatients(q); } catch { st.results = []; }
-        const box = left.querySelector('[data-role="results"]');
-        if (box) box.innerHTML = st.results.map((r) => `
-          <button type="button" class="tr-result" data-pick-patient="${esc(r.id)}">
-            <strong>${esc(r.name)}</strong><small>${esc([r.dob, r.email].filter(Boolean).join(" · "))}</small>
-          </button>`).join("") || (q.trim().length >= 2 ? '<p class="tb-none">No patients found with that name.</p>' : "");
-      }, 300);
-      return;
-    }
     if (el.dataset.filter !== undefined) {
       const q = el.value.trim().toLowerCase();
       left.querySelectorAll(`[data-opts="${CSS.escape(el.dataset.filter)}"] .tr-opt`).forEach((row) => {
@@ -395,18 +479,10 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     }
   });
 
-  left.addEventListener("click", (e) => {
-    const pick = e.target.closest("[data-pick-patient]");
-    if (pick) { pickPatient(pick.dataset.pickPatient); return; }
-    if (e.target.closest('[data-act="change-patient"]')) {
-      st.patient = null;
-      renderLeft(); renderTo(); loadSmart();
-      const s = left.querySelector('[data-role="psearch"]');
-      if (s) s.focus();
-    }
+  root.addEventListener("click", (e) => {
+    if (e.target.closest('[data-act="change-patient"]')) clearPatient();
   });
-
-  root.querySelector('[data-role="to"]').addEventListener("input", checkTo);
+  $('[data-role="to"]').addEventListener("input", (e) => { if (e.target.matches('[data-role="to-input"]')) checkTo(); });
   subjectEl.addEventListener("input", () => { st.subjectEdited = true; st.touched = true; resetBtn.hidden = false; });
   bodyEl.addEventListener("input", () => { st.bodyEdited = true; st.touched = true; resetBtn.hidden = false; });
   resetBtn.addEventListener("click", () => { renderMessage(true); noteEl.textContent = "Click into the message to change any wording."; });
@@ -414,7 +490,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   /* ---------- Sending ---------- */
   function problems() {
     const out = [];
-    if (aboutPatient && !st.patient) out.push(task.category === "patient" ? "Choose the patient." : "Choose the patient this is about.");
+    if (aboutPatient && !st.patient) out.push(task.category === "patient" ? "Choose the patient in the To box." : "Choose the patient this is about.");
     if (task.category === "patient") {
       const to = ($('[data-role="to-input"]') || {}).value || "";
       if (st.patient && !EMAIL_RE.test(to.trim())) out.push("Enter the patient's email address.");
@@ -435,6 +511,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     const list = problems();
     if (list.length) {
       msgEl.textContent = list[0] + (list.length > 1 ? ` (and ${list.length - 1} more)` : "");
+      if (!st.patient) { const s = root.querySelector(".pc-input"); if (s) s.focus(); }
       return;
     }
     msgEl.textContent = "";
@@ -488,6 +565,10 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   renderTo();
   renderAttachments();
   loadSmart();
+  if (task.category === "patient" && !st.patient) {
+    const s = root.querySelector(".pc-input");
+    if (s) s.focus();
+  }
 
   getLetterhead().then((lh) => { st.letterhead = lh; if (root.isConnected) renderMessage(); }).catch(() => {});
   if (task.attachments.length) {
