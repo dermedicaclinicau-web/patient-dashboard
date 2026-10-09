@@ -75,6 +75,7 @@ function mountLibrary(container, { isAdmin, staff }) {
       <div class="fb-head-actions">
         <a class="btn-ghost fb-imgbank" href="#/image-bank">${svg(ICONS.image)}Image Bank</a>
         <a class="btn-ghost fb-imgbank" href="#/aftercare-bank">${svg(ICONS.heart)}Aftercare Bank</a>
+        <a class="btn-ghost fb-imgbank" href="#/ssp-products">${svg(ICONS.consent)}Skin Script Products</a>
         <button type="button" class="btn-primary fb-new" data-act="new">${svg(ICONS.plus)}New form</button>
       </div>` : ""}
     </div>

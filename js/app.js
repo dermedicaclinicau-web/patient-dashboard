@@ -14,6 +14,7 @@ import { initFormPicker, closeFormPicker } from "./form-picker.js";
 import { mountImageBank } from "./image-bank.js";
 import { mountTaskManager } from "./task-manager.js";
 import { mountAftercareBank } from "./aftercare-bank.js";
+import { mountSspProductsPage } from "./ssp-products.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -212,6 +213,10 @@ const PAGES = {
         isAdmin: /^admin$/i.test(String(currentStaff.role || "")),
         staff: currentStaff,
       }),
+      "ssp-products": (el) => mountSspProductsPage(el, {
+        isAdmin: /^admin$/i.test(String(currentStaff.role || "")),
+        staff: currentStaff,
+      }),
       tasks: (el, param) => mountTaskManager(el, {
         param,
         isAdmin: /^admin$/i.test(String(currentStaff.role || "")),
@@ -232,7 +237,7 @@ function router() {
   try { param = decodeURIComponent(rest.join("/")); } catch { /* malformed URL, ignore */ }
 
   const navKey = ["patient", "fill", "form-record"].includes(page) ? "patients"
-    : page === "image-bank" || page === "aftercare-bank" ? "forms" : page;
+    : ["image-bank", "aftercare-bank", "ssp-products"].includes(page) ? "forms" : page;
     els.navItems.forEach((a) => {
     const active = a.dataset.page === navKey;
     a.classList.toggle("active", active);
