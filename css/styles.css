@@ -3162,3 +3162,50 @@ dialog::backdrop {
   .st-acts { grid-column: 1 / -1; }
   .st-audit li { grid-template-columns: 1fr; gap: .15rem; }
 }
+
+/* ---------- Roles & access ---------- */
+.st-matrix-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 14px; background: #fff; }
+.st-matrix { width: 100%; border-collapse: collapse; font-size: .9rem; }
+.st-matrix th { position: sticky; top: 0; padding: .7rem .9rem; background: var(--surface-2); text-align: center;
+  font-size: .78rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #334155; }
+.st-matrix th:first-child { text-align: left; }
+.st-matrix td { padding: .55rem .9rem; border-top: 1px solid var(--border); text-align: center; }
+.st-matrix td:first-child { text-align: left; }
+.st-matrix input { width: 18px; height: 18px; accent-color: var(--primary); cursor: pointer; }
+.st-matrix input:disabled { cursor: default; opacity: .6; }
+.st-mgroup td { padding-top: .9rem; background: #fafafa; font-size: .72rem; font-weight: 700; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--muted); text-align: left !important; }
+.st-matrix-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .75rem; margin-top: .9rem; }
+.st-edit-dlg { width: min(640px, calc(100vw - 2rem)); }
+.st-access { border: 1px solid var(--border); border-radius: 12px; }
+.st-access > summary { padding: .7rem .9rem; font-weight: 600; cursor: pointer; }
+.st-access > summary small { margin-left: .4rem; font-weight: 400; }
+.st-acc-list { display: flex; flex-direction: column; gap: .3rem; max-height: 46vh; overflow: auto; padding: 0 .9rem .9rem; }
+.st-acc-group { margin-top: .6rem; font-size: .72rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.st-acc-row { display: grid; grid-template-columns: minmax(0, 1fr) 160px; align-items: center; gap: .6rem; font-size: .88rem; }
+.st-acc-row .fb-select { min-height: 34px; padding: .3rem .5rem; font-size: .85rem; }
+@media (max-width: 640px) { .st-acc-row { grid-template-columns: 1fr; } }
+
+/* ---------- Access: hide what someone can't use ---------- */
+body.no-consult-record #rec-bar,
+body.no-consult-record .sp-tab { display: none !important; }
+body.no-clinical-view .tp-card,
+body.no-clinical-view details[data-key="treatment-plan"],
+body.no-clinical-view details[data-key="social-history"],
+body.no-clinical-view .hx-grid,
+body.no-clinical-view .sp,
+body.no-clinical-view .sp-tab { display: none !important; }
+body.no-billing-view .bp-grid { display: none !important; }
+body.no-ssp-create [data-action="create-ssp"] { display: none !important; }
+body.no-patients-edit .pb-edit,
+body.no-patients-edit .pt-new { display: none !important; }
+body.no-patients-merge .pt-merge { display: none !important; }
+body.no-send-patients [data-save="email"],
+body.no-send-patients [data-save="print"],
+body.no-send-patients .ff-bar [data-act="email"],
+body.no-send-patients .ff-bar [data-act="printer"],
+body.no-send-patients .ssp-prev-acts [data-act="email"],
+body.no-send-patients .ssp-prev-acts [data-act="print"],
+body.no-send-patients [data-sk-ssp="email"],
+body.no-send-patients [data-sk-ssp="print"] { display: none !important; }
+body.no-tasks-run [data-task-picker] { display: none !important; }

@@ -54,6 +54,7 @@ export function watchAuth(callback) {
         role: claims.staffRole || "",
         photo: claims.staffPhoto || "",
         email: claims.staffEmail || "",
+        perms: Array.isArray(claims.perms) ? claims.perms : [],
       });
     } catch (err) {
       console.error("Failed to read staff profile:", err);

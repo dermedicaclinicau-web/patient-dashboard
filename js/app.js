@@ -2,7 +2,7 @@ import { loginWithPin, logout, watchAuth, updateStaffName, warmUpLogin } from ".
 import { mountPatientList, clearPatientCache } from "./patient-list.js";
 import { mountCalendar } from "./calendar.js";
 import { mountPatientDashboard } from "./patient-dashboard.js";
-import { escapeHtml, getInitials } from "./utils.js";
+import { escapeHtml, getInitials, showToast } from "./utils.js";
 import { maybeShowStartOfDay, closeStartOfDay } from "./start-of-day.js";
 import { initRecordingBar, setRecordingPatient } from "./recording-bar.js";
 import { isRecorderBusy, suspendRecorder } from "./recorder.js";
@@ -17,6 +17,7 @@ import { mountAftercareBank } from "./aftercare-bank.js";
 import { mountSspProductsPage } from "./ssp-products.js";
 import { mountSspBuilder } from "./ssp-builder.js";
 import { mountStaffManager } from "./staff-manager.js";
+import { setPerms, can, isAdmin as isAdminNow, refreshAccess } from "./perms.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -203,48 +204,50 @@ function placeholderPage(title, message, backLink = "") {
 const PAGES = {
   patients: (el) => mountPatientList(el),
   calendar: (el, param) => mountCalendar(el, param),
-  forms: (el, param) => mountFormBuilder(el, {
-    isAdmin: /^admin$/i.test(String(currentStaff.role || "")),
-    staff: currentStaff,
-    templateId: param,
-  }),
+  forms: (el, param) => mountFormBuilder(el, { isAdmin: can("forms.build"), staff: currentStaff, templateId: param }),
   patient: (el, id) => mountPatientDashboard(el, id, { staff: currentStaff, onBack: goBack }),
   fill: (el, param) => mountFormFill(el, param, { staff: currentStaff }),
-      "form-record": (el, id) => mountFormRecord(el, id, { staff: currentStaff }),
-      "image-bank": (el) => mountImageBank(el, { isAdmin: /^admin$/i.test(String(currentStaff.role || "")) }),
-      "aftercare-bank": (el) => mountAftercareBank(el, {
-        isAdmin: /^admin$/i.test(String(currentStaff.role || "")),
-        staff: currentStaff,
-      }),
-      "ssp-products": (el) => mountSspProductsPage(el, {
-        isAdmin: /^admin$/i.test(String(currentStaff.role || "")),
-        staff: currentStaff,
-      }),
-      ssp: (el, param) => {
-        const [, pid = ""] = String(param || "").split("/"); // #/ssp/new/<patientId>
-        mountSspBuilder(el, {
-          patientId: pid,
-          staff: currentStaff,
-          isAdmin: /^admin$/i.test(String(currentStaff.role || "")),
-        });
-      },
-      tasks: (el, param) => mountTaskManager(el, {
-        param,
-        isAdmin: /^admin$/i.test(String(currentStaff.role || "")),
-        staff: currentStaff,
-      }),
-      staff: (el) => {
-        if (!/^admin$/i.test(String(currentStaff.role || ""))) { location.replace("#/patients"); return; }
-        mountStaffManager(el, { staff: currentStaff });
-      },
+  "form-record": (el, id) => mountFormRecord(el, id, { staff: currentStaff }),
+  "image-bank": (el) => mountImageBank(el, { isAdmin: can("forms.build") }),
+  "aftercare-bank": (el) => mountAftercareBank(el, { isAdmin: can("forms.build"), staff: currentStaff }),
+  "ssp-products": (el) => mountSspProductsPage(el, { isAdmin: can("ssp.config"), staff: currentStaff }),
+  ssp: (el, param) => {
+    const [, pid = ""] = String(param || "").split("/"); // #/ssp/new/<patientId>
+    mountSspBuilder(el, { patientId: pid, staff: currentStaff, isAdmin: can("ssp.config") });
+  },
+  tasks: (el, param) => mountTaskManager(el, { param, isAdmin: can("tasks.build"), staff: currentStaff }),
+  staff: (el) => mountStaffManager(el, { staff: currentStaff }),
 };
+
+// Which permission each page needs ("admin" = Admins only)
+const PAGE_PERM = {
+  patients: "menu.patients", patient: "menu.patients", fill: "menu.patients", "form-record": "menu.patients",
+  ssp: "ssp.create", calendar: "menu.calendar", forms: "menu.forms",
+  "image-bank": "forms.build", "aftercare-bank": "forms.build", "ssp-products": "ssp.config",
+  tasks: "menu.tasks", staff: "admin",
+};
+const pageAllowed = (p) => {
+  const need = PAGE_PERM[p];
+  if (!need) return true;
+  return need === "admin" ? isAdminNow() : can(need);
+};
+const firstAllowedPage = () => ["patients", "calendar", "tasks", "forms", "staff"].find(pageAllowed) || "";
+const currentPage = () => location.hash.split("/")[1] || "";
+
+function applyNav() {
+  els.navItems.forEach((a) => { a.hidden = !pageAllowed(a.dataset.page); });
+}
 
 function router() {
   if (!currentStaff) return;
 
   const [, page = "", ...rest] = location.hash.split("/");
-  if (!PAGES[page]) {
-    location.replace("#/patients"); // fires hashchange → router runs again
+  if (!PAGES[page] || !pageAllowed(page)) {
+    const first = firstAllowedPage();
+    if (first && first !== page) { location.replace(`#/${first}`); return; } // fires hashchange → router runs again
+    els.navItems.forEach((a) => a.classList.remove("active"));
+    els.content.innerHTML = `<section class="page"><div class="state"><strong>No access</strong>
+      Your account doesn't have access to any pages yet. Please ask an Admin.</div></section>`;
     return;
   }
 
@@ -277,16 +280,51 @@ function goBack() {
 
 /* ===================== START ===================== */
 
+let accessTimer = null;
+let lastAccessCheck = 0;
+
+// Picks up access changes made by an Admin (every 5 minutes, and when returning to the tab)
+async function checkAccess() {
+  if (!currentStaff || Date.now() - lastAccessCheck < 60000) return;
+  lastAccessCheck = Date.now();
+  try {
+    const res = await refreshAccess();
+    if (!res.changed || !currentStaff) return;
+    currentStaff = { ...currentStaff, role: res.role, perms: res.perms };
+    setPerms(currentStaff);
+    renderStaff(currentStaff);
+    applyNav();
+    if (!pageAllowed(currentPage())) router();
+    showToast("Your access has been updated");
+  } catch (err) {
+    console.warn("Access check failed:", err);
+  }
+}
+window.addEventListener("focus", checkAccess);
+
 watchAuth((staff) => {
   if (staff) {
+    const sameUser = currentStaff && currentStaff.uid === staff.uid;
     currentStaff = staff;
+    setPerms(staff);
     renderStaff(staff);
+    applyNav();
+    if (sameUser) {
+      // A refreshed login token (access changed): keep the current page unless it's no longer allowed
+      if (!pageAllowed(currentPage())) router();
+      return;
+    }
     showView("dashboard");
     initRecordingBar(staff);
     initSoapPanel(staff);
     router();
     maybeShowStartOfDay(staff);
+    clearInterval(accessTimer);
+    accessTimer = setInterval(checkAccess, 5 * 60 * 1000);
+    lastAccessCheck = 0;
+    setTimeout(checkAccess, 3000);
   } else {
+    clearInterval(accessTimer);
     currentStaff = null;
     els.content.innerHTML = ""; // remove patient data from the page on logout
     clearPatientCache();
