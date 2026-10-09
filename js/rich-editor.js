@@ -73,7 +73,7 @@ const fixUrl = (u) => {
 };
 
 export function createRichEditor(host, {
-  onInput = () => {}, onFocus = () => {}, pickImage = null,
+  onInput = () => {}, onFocus = () => {}, pickImage = null, button: showButton = true,
   accent = () => "#0f766e", logo = () => "",
 } = {}) {
   const btn = (cmd, icon, title) =>
@@ -85,6 +85,10 @@ export function createRichEditor(host, {
           <option value="p">Normal text</option><option value="h1">Title</option>
           <option value="h2">Heading</option><option value="h3">Subheading</option>
         </select>
+        <select class="re-size" aria-label="Text size">
+          <option value="">Size</option><option value="2">Small</option><option value="3">Normal</option>
+          <option value="5">Large</option><option value="6">Extra large</option>
+        </select>
         <span class="re-sep"></span>
         ${btn("bold", I.bold, "Bold")}${btn("italic", I.italic, "Italic")}${btn("underline", I.underline, "Underline")}
         <span class="re-pop-wrap">${btn("colour", I.colour, "Text colour")}
@@ -95,7 +99,7 @@ export function createRichEditor(host, {
         ${btn("insertUnorderedList", I.ul, "Bulleted list")}${btn("insertOrderedList", I.ol, "Numbered list")}
         <span class="re-sep"></span>
         ${btn("link", I.link, "Link")}${pickImage ? btn("image", I.image, "Picture from the Image Bank") : ""}
-        ${btn("button", I.button, "Button")}${btn("divider", I.hr, "Divider line")}${btn("spacer", I.space, "Extra space")}
+        ${showButton ? btn("button", I.button, "Button") : ""}${btn("divider", I.hr, "Divider line")}${btn("spacer", I.space, "Extra space")}
         <span class="re-sep"></span>
         ${btn("removeFormat", I.clear, "Clear formatting")}${btn("undo", I.undo, "Undo")}${btn("redo", I.redo, "Redo")}
       </div>
@@ -138,7 +142,7 @@ export function createRichEditor(host, {
   }
   function exec(cmd, val = null) {
     restore();
-    document.execCommand("styleWithCSS", false, cmd === "foreColor");
+    document.execCommand("styleWithCSS", false, cmd === "foreColor" || cmd === "fontSize");
     document.execCommand(cmd, false, val);
     changed();
     updateState();
@@ -160,6 +164,11 @@ export function createRichEditor(host, {
   /* ---------- Toolbar ---------- */
   bar.addEventListener("mousedown", (e) => { if (e.target.closest("button")) e.preventDefault(); });
   blockSel.addEventListener("change", () => exec("formatBlock", `<${blockSel.value}>`));
+  const sizeSel = host.querySelector(".re-size");
+  sizeSel.addEventListener("change", () => {
+    if (sizeSel.value) exec("fontSize", sizeSel.value);
+    sizeSel.value = "";
+  });
 
   bar.addEventListener("click", async (e) => {
     const sw = e.target.closest("[data-colour]");

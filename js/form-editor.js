@@ -17,6 +17,9 @@ import { formTitleHtml } from "./form-fields.js";
 import { openImagePicker } from "./image-bank.js";
 import { bankUpload, bankError, hydrateBankImages } from "./image-bank-api.js";
 import { attachAnnotators } from "./form-annotate.js";
+import { createRichEditor } from "./rich-editor.js";
+import { textToRichHtml } from "./rich-html.js";
+import { makeResizable } from "./panel-resize.js";
 
 const UI = {
   up: '<polyline points="18 15 12 9 6 15"/>',
@@ -239,9 +242,9 @@ export async function mountFormEditor(container, { templateId, staff }) {
       return { msg: "Add at least one question before publishing." };
     }
     for (const f of fields) {
+      const label = String(f.label || "").trim();
       const cp = conditionProblem(f, fields);
       if (cp) return { id: f.id, msg: `“${label || FIELD_TYPES[f.type].name}”: ${cp}` };
-      const label = String(f.label || "").trim();
       if (hasLabel(f.type) && f.type !== "text_block" && !label) {
         return { id: f.id, msg: "Every question needs a name. Add one to the highlighted question." };
       }
@@ -513,6 +516,22 @@ export async function mountFormEditor(container, { templateId, staff }) {
     h += `<button type="button" class="fe-remove" data-tool="remove">${svg(UI.trash)}Remove</button>`;
     insp.innerHTML = h;
     hydrateBankImages(insp);
+
+    // Text block: rich text editor
+    const tbHost = insp.querySelector('[data-role="tb-editor"]');
+    const tbField = current();
+    if (tbHost && tbField) {
+      const ed = createRichEditor(tbHost, {
+        button: false,
+        onInput: () => {
+          tbField.html = ed.getHtml();
+          tbField.text = ed.text().trim().slice(0, 5000); // plain copy for search and older pages
+          changed();
+          renderStage();
+        },
+      });
+      ed.setHtml(tbField.html || textToRichHtml(tbField.text));
+    }
   }
 
   /* ---------- Actions ---------- */
@@ -714,6 +733,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   stage.addEventListener("input", refreshPreview);
 
   insp.addEventListener("input", (e) => {
+    if (e.target.closest(".re")) return;
     const el = e.target;
     if (el.dataset.s) {
       settings[el.dataset.s] = el.type === "checkbox" ? el.checked : el.value;
@@ -760,6 +780,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   });
 
   insp.addEventListener("change", (e) => {
+    if (e.target.closest(".re")) return;
     if (e.target.matches('input[type="file"][data-img-upload]')) { uploadImage(current(), e.target); return; }
     const f = current();
     const el = e.target;
@@ -773,6 +794,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   });
 
   insp.addEventListener("click", (e) => {
+    if (e.target.closest(".re")) return;
     if (e.target.closest('[data-act="edit-lh"]')) { editLetterhead(); return; }
     if (e.target.closest('[data-act="printer"]')) { openPrinterDialog(staff); return; }
     if (e.target.closest('[data-act="delete-form"]')) { deleteForm(); return; }
@@ -913,6 +935,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   renderStage();
   renderInspector();
   renderPublish();
+  makeResizable(root);
 
   // The published copy, to tell whether there are unpublished changes
   if (version > 0) {

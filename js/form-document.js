@@ -2,9 +2,9 @@
 // signatures and the letterhead. The browser turns this into the PDF, so it
 // looks exactly like the preview. (Simple tables are used so the server's
 // backup PDF converter can render it too.)
-import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing } from "./form-fields.js";
 import { formatCalc } from "./form-calc.js";
 import { visibleIds } from "./form-conditions.js";
+import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing, textBlockHtml } from "./form-fields.js";
 
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
 const LOGO_RE = /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/;
@@ -46,6 +46,15 @@ const CSS = `
   .pdfdoc .block p { margin: 0; font-size: 10pt; line-height: 1.55; }
   .pdfdoc .sig img { height: 70px; }
   .pdfdoc .sigmeta { font-size: 9pt; color: #475569; margin-top: 2px; }
+  .pdfdoc .fe-rich p { margin: 0 0 6px; font-size: inherit; line-height: 1.55; }
+  .pdfdoc .fe-rich p:last-child { margin-bottom: 0; }
+  .pdfdoc .fe-rich h1 { font-family: Arial, Helvetica, sans-serif; font-size: 15pt; font-weight: bold; color: #0f172a; margin: 0 0 6px; }
+  .pdfdoc .fe-rich h2 { font-size: 12.5pt; margin: 8px 0 4px; }
+  .pdfdoc .fe-rich h3 { font-size: 11pt; margin: 6px 0 3px; }
+  .pdfdoc .fe-rich ul, .pdfdoc .fe-rich ol { margin: 0 0 6px; padding-left: 20px; }
+  .pdfdoc .fe-rich li { margin: 0 0 2px; }
+  .pdfdoc .fe-rich hr { border: none; border-top: 1px solid #cbd5e1; margin: 10px 0; }
+  .pdfdoc .fe-rich a { color: #0f766e; }
 `;
 
 // Alignment is set directly on each element so the portal's own page styles
@@ -150,8 +159,9 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {} }) {
 
     if (f.type === "text_block") {
       const fs = { small: 9, normal: 10, large: 11.5 }[st.textSize] || 10;
+      const content = textBlockHtml(f);
       return `<div class="block" style="${box}">${f.label ? `<h2>${esc(f.label)}</h2>` : ""}${
-        f.text ? `<p style="font-size:${fs}pt;">${esc(f.text).replace(/\n/g, "<br>")}</p>` : ""}</div>`;
+        content ? `<div style="font-size:${fs}pt;line-height:1.55;">${content}</div>` : ""}</div>`;
     }
 
     const v = sub.answers[f.id];

@@ -1,6 +1,7 @@
 import { runCalc, calcRefs, formatCalc } from "./form-calc.js";
 import { letterheadHtml } from "./form-letterhead.js";
 import { cleanCondition } from "./form-conditions.js";
+import { cleanRichHtml, richText } from "./rich-html.js";
 
 export const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -183,7 +184,7 @@ export function createField(type, id) {
     case "long_text": f.size = "medium"; break;
     case "date": f.range = "any"; break;
     case "signature": f.signer = "patient"; f.showNameDate = true; break;
-    case "text_block": f.text = ""; break;
+    case "text_block": f.text = ""; f.html = ""; break;
     case "space": f.size = "medium"; break;
     case "number": f.min = null; f.max = null; f.unit = ""; break;
     case "sub_checks": f.groups = [{ label: "Option A", subs: ["Sub-option 1", "Sub-option 2"] }]; break;
@@ -258,7 +259,10 @@ export function cleanField(f) {
       out.signer = pick(f.signer, Object.keys(SIGNERS), "patient");
       out.showNameDate = f.showNameDate !== false;
       break;
-    case "text_block": out.text = clip(f.text, 5000); break;
+    case "text_block":
+      out.text = clip(f.text, 5000);
+      out.html = f.html ? cleanRichHtml(f.html).slice(0, 30000) : "";
+      break;
     case "space": out.size = pick(f.size, ["small", "medium", "large"], "medium"); break;
     case "number": out.min = numOrNull(f.min); out.max = numOrNull(f.max); out.unit = clip(f.unit, 20); break;
     case "sub_checks":
@@ -363,6 +367,12 @@ export function calcStatusHtml(f, fields) {
 }
 
 /* ===================== Drawing a field on the page ===================== */
+
+// A Text block's content: rich text if it has some, otherwise the older plain text
+export function textBlockHtml(f) {
+  if (f.html && richText(f.html)) return `<div class="fe-rich">${cleanRichHtml(f.html)}</div>`;
+  return f.text ? `<p>${esc(f.text).replace(/\n/g, "<br>")}</p>` : "";
+}
 
 // ctx: { live, fields, consentForms, letterhead, calcValues }
 export function renderField(f, ctx = {}) {
@@ -481,10 +491,11 @@ export function renderField(f, ctx = {}) {
       return head + `<div class="fe-patient">${patientParts(f).map(([k, l]) =>
         `<label${k === "address" ? ' class="is-wide"' : ""}><small>${l}</small><input class="fe-in" type="text" data-part="${k}"${inert} /></label>`).join("")}</div>` +
         (live ? "" : '<div class="fe-help fe-help-after">Filled in from the patient\'s record.</div>');
-    case "text_block":
+    case "text_block": {
+      const body = textBlockHtml(f);
       return `<div class="fe-block">${f.label ? `<div class="fe-block-h">${esc(f.label)}</div>` : ""}${
-        f.text ? `<p>${esc(f.text).replace(/\n/g, "<br>")}</p>`
-               : live ? "" : '<p class="fe-ph">Click to write the information patients need to read.</p>'}</div>`;
+        body || (live ? "" : '<p class="fe-ph">Click to write the information patients need to read.</p>')}</div>`;
+    }
     case "letterhead":
       return letterheadHtml(ctx.letterhead);
     case "watermark": {
@@ -597,7 +608,8 @@ function typeSettings(f, ctx = {}) {
     }
 
     case "text_block":
-      return setting("Text", `<textarea class="fe-input" data-k="text" rows="9" maxlength="5000" placeholder="Information patients need to read before signing">${esc(f.text || "")}</textarea>`);
+      return `<div class="fe-insp-field"><span class="fe-insp-label">Text</span><div data-role="tb-editor"></div>
+        <small class="fe-note">Use the toolbar for headings, sizes, colours and lists.</small></div>`;
 
     case "space":
       return setting("Height", choose("size", [["small", "Small"], ["medium", "Medium"], ["large", "Large"]], f.size || "medium"));
