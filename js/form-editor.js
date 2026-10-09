@@ -877,6 +877,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
       });
       return;
     }
+    if (e.target.closest('[data-act="img-pick"]')) { pickImage(f); return; }
     if (e.target.closest('[data-act="img-clear"]')) {
       f.fileId = ""; f.fileName = "";
       changed(); renderStage(); renderInspector();
