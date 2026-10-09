@@ -18,12 +18,15 @@ export function makeResizable(root) {
     const parent = pal.parentElement;
     const sameParent = parent && parent === insp.parentElement;
     if (sameParent) parent.style.gridTemplateColumns = "";
+    // Preview (and small screens) hide the side panels: use the normal layout then
+    const shown = (el) => getComputedStyle(el).display !== "none";
+    const active = isWide() && shown(pal) && shown(insp);
     [["pal", pal], ["insp", insp]].forEach(([k, el]) => {
-      const w = isWide() ? widths[k] : null;
+      const w = active ? widths[k] : null;
       el.style.width = w ? `${w}px` : "";
       el.style.flex = w ? `0 0 ${w}px` : "";
     });
-    if (!isWide() || !sameParent || getComputedStyle(parent).display !== "grid") return;
+    if (!active || !sameParent || getComputedStyle(parent).display !== "grid") return;
 
     // Grid layout: rewrite the column sizes, keeping the middle flexible
     const kids = [...parent.children].filter((c) => {
@@ -38,6 +41,7 @@ export function makeResizable(root) {
       return "minmax(0, 1fr)";
     }).join(" ");
   }
+
 
   function set(key, w) {
     const [lo, hi] = LIMITS[key];
@@ -94,6 +98,10 @@ export function makeResizable(root) {
   addHandle(pal, "pal", "right");
   addHandle(insp, "insp", "left");
   apply();
+
+  // Switching between Build and Preview changes the layout's class: redo the widths
+  const shellEl = pal.parentElement;
+  if (shellEl) new MutationObserver(apply).observe(shellEl, { attributes: true, attributeFilter: ["class"] });
 
   const onResize = () => {
     if (!root.isConnected) { window.removeEventListener("resize", onResize); return; }
