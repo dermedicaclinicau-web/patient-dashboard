@@ -15,6 +15,7 @@ import { mountImageBank } from "./image-bank.js";
 import { mountTaskManager } from "./task-manager.js";
 import { mountAftercareBank } from "./aftercare-bank.js";
 import { mountSspProductsPage } from "./ssp-products.js";
+import { mountSspBuilder } from "./ssp-builder.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -236,7 +237,7 @@ function router() {
   let param = "";
   try { param = decodeURIComponent(rest.join("/")); } catch { /* malformed URL, ignore */ }
 
-  const navKey = ["patient", "fill", "form-record"].includes(page) ? "patients"
+  const navKey = ["patient", "fill", "form-record", "ssp"].includes(page) ? "patients"
     : ["image-bank", "aftercare-bank", "ssp-products"].includes(page) ? "forms" : page;
     els.navItems.forEach((a) => {
     const active = a.dataset.page === navKey;

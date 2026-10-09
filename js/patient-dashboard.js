@@ -33,7 +33,7 @@ const DOC_ACTIONS = [
   ["Consent record", "consent"],
   ["Treatment record", "treatment"],
   ["Prescription", "rx"],
-  ["Skin script (SSP)", "ssp"],
+  ["Skin script (SSP)", "ssp", "create-ssp"],
   ["Summary", "summary"],
   ["General note", "note"],
   ["Personal note", "lock", "add-note"],
@@ -56,7 +56,7 @@ const PRECONSULT_SECTIONS = [
   //{ key: "overdue", title: "Overdue treatments", icon: "alert", field: "overdue", unit: "overdue|overdue", tone: "red" },
   { key: "packages", title: "Customer packages", icon: "box", field: "packages", unit: "active|active" },
   { key: "skin-script", title: "Skin script protocol", icon: "file", field: "skinScriptDate", unit: "value",
-    action: ["Create new SSP", "Create new SSP"] },
+    action: ["Create new SSP", "Create new SSP", "create-ssp"] },
   { key: "treatment-plan", title: "Treatment plan", icon: "check", custom: true, tone: "purple",
     remember: false }, // always starts collapsed
 ];
@@ -150,7 +150,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     const refreshBtn = t.closest("[data-action='refresh-pc']");
     if (refreshBtn) { refreshAll(refreshBtn); return; }
     if (t.closest("[data-action='merge-info']")) { mergeInfo(); return; }
-    if (t.closest("[data-action='add-reminder']")) { addReminderFlow(); return; }
+    if (t.closest("[data-action='create-ssp']")) { location.hash = `#/ssp/new/${encodeURIComponent(patient.id)}`; return; }
     const doneBtn = t.closest("[data-action='task-done']");
     if (doneBtn) { completeTask(doneBtn); return; }
     if (t.closest(".back-btn, [data-action='back']")) { if (onBack) onBack(); return; }
