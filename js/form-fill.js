@@ -443,7 +443,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
   });
   // Aftercare panels
   fields.filter((f) => f.type === "aftercare").forEach((f) => {
-    mountAftercareField(wrap(f.id), f, { onChange: () => { dirty = true; } });
+    mountAftercareField(wrap(f.id), f, { onChange: () => { dirty = true; }, patient, staff, actions: true });
   });
 
   // Fill in from the patient's record

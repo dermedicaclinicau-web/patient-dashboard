@@ -48,6 +48,13 @@ const SMART = {
     hint: "The treatments ticked in your Treatment information field, as clickable links",
     sample: "",
   },
+  "Aftercare": {
+    hint: "The aftercare ticked on a form (filled in when using Email aftercare on a form)",
+    sample: {
+      html: "<h2>IPL Hair Removal Aftercare Instructions</h2><p>Proper aftercare helps your skin heal well:</p><ul><li>Avoid sun exposure for 2 weeks.</li><li>Don't pick any scabs.</li></ul>",
+      text: "IPL Hair Removal Aftercare Instructions",
+    },
+  },
 };
 
 const BUILT_IN = ["first name", "full name", "email", "mobile", "date of birth", "patient name", "patient first name",
@@ -101,7 +108,7 @@ export function tokenGroups(task, { staffName = "", letterhead = null, sources =
   if (aboutPatient) {
     const tx = treatmentsField(task);
     groups.push({ title: "Smart blocks", tokens: Object.entries(SMART)
-      .filter(([n]) => n !== "Treatment info" || tx)
+      .filter(([n]) => (n !== "Treatment info" || tx) && (n !== "Aftercare" || task.category === "patient"))
       .map(([n, s]) => tok(n, n === "Treatment info" ? fieldSample({ ...tx, display: "links" }, sources) : s.sample, "smart", s.hint)) });
   }
   return groups;
@@ -168,7 +175,7 @@ export function sampleValues(task, opts) {
 export function fillTemplate(text, values) {
   return String(text || "").replace(/\{([^{}\n]{1,80})\}/g, (whole, n) => {
     const v = values.get(n.trim().toLowerCase());
-    return v === undefined ? whole : String(v);
+    return v === undefined ? whole : (v && typeof v === "object" ? String(v.text || "") : String(v));
   });
 }
 
@@ -199,6 +206,7 @@ export const EMAIL_ACCENTS = ["#0f766e", "#2563eb", "#7c3aed", "#db2777", "#b453
 
 // A filled-in value as HTML: links clickable, line breaks kept
 export function valueToHtml(v) {
+  if (v && typeof v === "object") return String(v.html || ""); // already-safe HTML (e.g. aftercare)
   const links = [];
   const t = String(v ?? "").replace(/\[\[([^|\]]{1,200})\|(https?:\/\/[^\]\s]{1,500})\]\]/g, (_, l, u) => {
     links.push([l, u]);

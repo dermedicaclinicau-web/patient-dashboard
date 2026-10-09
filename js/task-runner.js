@@ -203,6 +203,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     task.fields.forEach((f) => { if (f.label.trim()) set(f.label.trim(), answerText(f)); });
     set("Upcoming appointments", st.smart.appointments);
     set("Treatment plan", st.smart.plan);
+    set("Aftercare", ""); // only filled in when emailing aftercare from a form
     const tx = task.fields.find((f) => TASK_CHOICE_TYPES.includes(f.type) && f.source === "treatments");
     if (tx) set("Treatment info", formatChoice({ ...tx, display: "links" }, chosen(tx)));
     return m;

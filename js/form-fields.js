@@ -215,7 +215,7 @@ export function createField(type, id) {
     case "watermark": f.source = "text"; f.text = "DRAFT"; f.opacity = 10; f.angle = -30; f.size = "large"; break;
     case "letterhead": f.line1 = LETTERHEAD[0]; f.line2 = LETTERHEAD[1]; break;
     case "consent_status": f.consentFormId = ""; f.months = 12; f.block = false; break;
-    case "aftercare": f.mode = "fixed"; f.items = []; f.preselect = true; break;
+    case "aftercare": f.mode = "fixed"; f.items = []; f.preselect = true; f.emailTemplate = ""; break;
   }
   return f;
 }
@@ -347,6 +347,7 @@ export function cleanField(f) {
       out.items = (Array.isArray(f.items) ? f.items : [])
         .map(String).filter((id) => /^[A-Za-z0-9_-]{1,80}$/.test(id)).slice(0, 20);
       out.preselect = f.preselect !== false;
+      out.emailTemplate = /^[A-Za-z0-9]{10,40}$/.test(f.emailTemplate || "") ? f.emailTemplate : "";
       break;
 }
   const sw = cleanCondition(f);
@@ -815,6 +816,11 @@ function typeSettings(f, ctx = {}) {
         id, title: map && map.get(id) ? map.get(id).title : map ? "Missing aftercare (removed from the list?)" : "Loading…",
       }));
       return setting("How it's chosen", choose("mode", [["fixed", "These aftercare instructions"], ["choose", "Staff choose while filling in"]], f.mode || "fixed", false, true)) +
+        setting("Email template", `<select class="fb-select" data-k="emailTemplate">
+          <option value="">Standard aftercare email</option>
+          ${(ctx.emailTemplates || []).map((t) => `<option value="${esc(t.id)}"${f.emailTemplate === t.id ? " selected" : ""}>${esc(t.name)}${
+            t.status === "live" ? "" : " (draft: publish it in Task Manager)"}</option>`).join("")}
+        </select>`, "Used by the Email aftercare button. Make templates in Task Manager → Task types (To Patient) with the {Aftercare} blank.") +
         `<div class="fe-insp-field"><span class="fe-insp-label">${f.mode === "choose" ? "Start with (optional)" : "Aftercare"}</span>
           ${items.length ? `<ul class="ac-chosen">${items.map((it, i) => `<li><span>${esc(it.title)}</span>
             <button type="button" class="hx-x" data-acdel="${i}" aria-label="Remove ${esc(it.title)}">${svg(ICONS.x)}</button></li>`).join("")}</ul>`

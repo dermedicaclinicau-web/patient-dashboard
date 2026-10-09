@@ -2,12 +2,16 @@
 import { listAftercare, aftercarePanel, bindPanels } from "./aftercare-api.js";
 import { openAftercarePicker } from "./aftercare-bank.js";
 import { cleanRichHtml } from "./rich-html.js";
+import { emailAftercare, printAftercare } from "./aftercare-send.js";
+import { deliveryError } from "./form-delivery.js";
+import { showToast } from "./utils.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-
+const MAIL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>';
+const PRINT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>';
 // saved: the saved answer ({ items: [...] }) when viewing a saved form; leave out when filling in
-export function mountAftercareField(w, f, { saved, onChange = () => {} } = {}) {
+export function mountAftercareField(w, f, { saved, onChange = () => {}, patient = null, staff = null, actions = false } = {}) {
   const host = w && w.querySelector("[data-ac-host]");
   if (!host) return;
   bindPanels(host);
@@ -41,7 +45,13 @@ export function mountAftercareField(w, f, { saved, onChange = () => {} } = {}) {
     host.innerHTML = (rows
       ? `<div class="ac-list">${rows}</div>`
       : `<p class="fe-help">${choose ? "No aftercare added yet." : "This form's aftercare couldn't be found. It may have been removed from the aftercare list."}</p>`)
-      + (choose ? '<button type="button" class="lh-btn ac-add" data-ac-add>+ Add aftercare</button>' : "");
+      + (choose ? '<button type="button" class="lh-btn ac-add" data-ac-add>+ Add aftercare</button>' : "")
+      + (actions && st.picked.length ? `
+        <div class="ac-actions">
+          <button type="button" class="ff-btn" data-ac-email>${MAIL}<span>Email aftercare</span></button>
+          <button type="button" class="ff-btn" data-ac-print>${PRINT}<span>Print aftercare</span></button>
+          <small class="muted">Uses the aftercare ticked “Send &amp; print”.</small>
+        </div>` : "");
   }
 
   host.addEventListener("change", (e) => {
@@ -51,6 +61,32 @@ export function mountAftercareField(w, f, { saved, onChange = () => {} } = {}) {
     onChange();
   });
   host.addEventListener("click", async (e) => {
+    const mailBtn = e.target.closest("[data-ac-email]");
+    const printBtn = e.target.closest("[data-ac-print]");
+    if (mailBtn || printBtn) {
+      const items = w.acRead().items;
+      if (!items.length) { showToast("Tick “Send & print” on at least one aftercare first."); return; }
+      const btn = mailBtn || printBtn;
+      if (btn.disabled) return;
+      if (mailBtn) {
+        await emailAftercare({ items, patient, staff, templateId: f.emailTemplate || "" });
+        return;
+      }
+      const label = btn.querySelector("span");
+      btn.disabled = true;
+      label.textContent = "Preparing…";
+      try {
+        await printAftercare({ items, patient });
+        showToast("Aftercare sent to the printer");
+      } catch (err) {
+        console.error("Print aftercare failed:", err);
+        showToast(deliveryError(err));
+      } finally {
+        btn.disabled = false;
+        label.textContent = "Print aftercare";
+      }
+      return;
+    }
     const rm = e.target.closest("[data-ac-remove]");
     if (rm) {
       st.picked = st.picked.filter((x) => x !== rm.dataset.acRemove);

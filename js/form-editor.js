@@ -24,6 +24,7 @@ import { openDuplicateDialog } from "./form-duplicate.js";
 import { listAftercare } from "./aftercare-api.js";
 import { openAftercarePicker } from "./aftercare-bank.js";
 import { mountAftercareField } from "./aftercare-field.js";
+import { listTaskTypes } from "./task-types.js";
 
 const UI = {
   up: '<polyline points="18 15 12 9 6 15"/>',
@@ -113,8 +114,9 @@ export async function mountFormEditor(container, { templateId, staff }) {
   let publishedSig = version > 0 ? null : ""; // null = still loading the published copy
   let publishing = false;
 
-  let aftercareMap = null; // aftercare id -> aftercare, once loaded
-  const ctx = (live) => ({ live, fields, consentForms, letterhead, calcValues: null, aftercare: aftercareMap });
+  let aftercareMap = null;   // aftercare id -> aftercare, once loaded
+  let emailTemplates = [];   // To Patient task types, for the aftercare email
+  const ctx = (live) => ({ live, fields, consentForms, letterhead, calcValues: null, aftercare: aftercareMap, emailTemplates });
   const current = () => fields.find((f) => f.id === sel) || null;
   const signature = () => JSON.stringify(formSnapshot({ name, fields, settings }));
 
@@ -1049,4 +1051,13 @@ export async function mountFormEditor(container, { templateId, staff }) {
       if (f && f.type === "consent_status") renderInspector();
     })
     .catch((err) => console.warn("Couldn't load consent forms:", err));
+
+  listTaskTypes({ isAdmin: true })
+    .then((list) => {
+      emailTemplates = list.filter((t) => t.category === "patient" && t.channel === "email")
+        .map((t) => ({ id: t.id, name: t.name, status: t.status }));
+      const f = current();
+      if (root.isConnected && f && f.type === "aftercare") renderInspector();
+    })
+    .catch((err) => console.warn("Couldn't load email templates:", err));
 }

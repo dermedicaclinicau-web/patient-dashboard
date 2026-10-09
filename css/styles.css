@@ -2719,3 +2719,12 @@ select.fe-in + .fe-xin, .fe-xin + .fe-xin { margin-top: .5rem; }
 .ac-editor .re-area { min-height: 320px; max-height: 52vh; }
 .ac-head .ib-tool { flex-shrink: 0; }
 @media (max-width: 640px) { .ac-ed-two { grid-template-columns: 1fr; } }
+
+/* ---------- Email / print aftercare ---------- */
+.ac-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem; margin-top: .75rem;
+  padding-top: .75rem; border-top: 1px dashed var(--border); }
+.ac-actions small { font-size: .78rem; }
+.ac-mail { width: min(860px, calc(100vw - 2rem)); }
+.ac-mail .lh-form { max-height: calc(100vh - 3rem); overflow: auto; }
+.ac-mail .re-area { min-height: 300px; max-height: 50vh; }
+.ac-mail .lh-dialog-head p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
