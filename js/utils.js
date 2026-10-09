@@ -111,20 +111,29 @@ export function toTelHref(raw = "") {
   return d;
 }
 
-// Small pop-up message at the bottom of the screen
+// Small pop-up message at the bottom of the screen.
+// Open windows sit above everything else, so while one is open
+// the message is placed inside the top window to stay visible.
 let toastTimer;
+let toastEl = null;
 export function showToast(message) {
-  let el = document.querySelector(".toast");
-  if (!el) {
-    el = document.createElement("div");
-    el.className = "toast";
-    el.setAttribute("role", "status");
-    document.body.appendChild(el);
+  if (!toastEl) {
+    toastEl = document.createElement("div");
+    toastEl.className = "toast";
+    toastEl.setAttribute("role", "status");
+    toastEl.setAttribute("aria-live", "polite");
   }
-  el.textContent = message;
-  el.classList.add("show");
+  const open = [...document.querySelectorAll("dialog[open]")];
+  const host = open.length ? open[open.length - 1] : document.body; // the most recently opened window
+  if (toastEl.parentNode !== host) {
+    toastEl.classList.remove("show");
+    host.appendChild(toastEl);
+    void toastEl.offsetWidth; // lets the slide-in play after moving
+  }
+  toastEl.textContent = message;
+  toastEl.classList.add("show");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove("show"), 2500);
+  toastTimer = setTimeout(() => toastEl.classList.remove("show"), 2500);
 }
 
 const MONTH_INDEX = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
