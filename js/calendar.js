@@ -6,8 +6,10 @@ import {
   formatLongDate, formatShortDate, formatUpdated,
 } from "./utils.js";
 
-// Column order. Names must match Column I EXACTLY. Unlisted staff appear after, A–Z.
-const STAFF_ORDER = ["Dr Joanna Teh", "Jacquie", "Allie", "Dermedica Clinician", "Park Room"];
+// Column order, left to right. Each entry matches any staff name that CONTAINS it as whole words
+// (capitals, dots and spaces don't matter): "Teh" matches "Dr Joanna Teh" and "Dr. Teh".
+// Staff not listed come next, A–Z. "Unassigned" is always last.
+const STAFF_ORDER = ["Teh", "Jacquie", "Allie", "Dermedica Clinician", "Park Room"];
 
 // [header background, header underline]
 const COLUMN_COLOURS = [
@@ -187,9 +189,15 @@ export function mountCalendar(container, param) {
 
 /* ---------- helpers & templates ---------- */
 
+const UNLISTED = 1000;   // staff not in STAFF_ORDER
+const LAST = 2000;       // "Unassigned"
+const normName = (s) => ` ${String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()} `;
+
 function staffRank(name) {
-  const i = STAFF_ORDER.findIndex((s) => s.toLowerCase() === name.toLowerCase());
-  return i === -1 ? Infinity : i;
+  const n = normName(name);
+  if (n.trim() === "unassigned") return LAST;
+  const i = STAFF_ORDER.findIndex((s) => n.includes(normName(s)));
+  return i === -1 ? UNLISTED : i;
 }
 
 function sortStaff(names) {
@@ -199,7 +207,7 @@ function sortStaff(names) {
 // Same staff = same colour every day
 function coloursFor(name) {
   const rank = staffRank(name);
-  const i = rank === Infinity ? hueFromString(name) : rank;
+  const i = rank < STAFF_ORDER.length ? rank : hueFromString(name);
   return COLUMN_COLOURS[i % COLUMN_COLOURS.length];
 }
 
