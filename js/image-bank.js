@@ -2,7 +2,7 @@
 // Used as its own page (#/image-bank) and as the picker for the Image field.
 import {
   bankList, cachedList, rememberList, bankSearch, bankMkdir, bankRename, bankTrash,
-  bankUpload, bankImage, bankError, thumbFor,
+  bankUpload, bankImage, bankError, thumbFor, bankStats, migrateFromDrive,
 } from "./image-bank-api.js";
 import { listFormTemplates } from "./form-templates.js";
 import { confirmDialog } from "./dialog.js";
@@ -283,15 +283,15 @@ function createBank(host, { mode = "manage", isAdmin = false, onPick = null } = 
     const item = findItem(kind, id);
     if (!item) return;
     let message = kind === "folder"
-      ? `Everything inside “${item.name}” goes to the Google Drive Bin too. It can be restored from the Bin for 30 days.`
-      : "It goes to the Google Drive Bin and can be restored from there for 30 days.";
+      ? `Everything inside “${item.name}” is removed from the Image Bank too. Forms and emails already using these pictures keep showing them.`
+      : "It's removed from the Image Bank. Forms and emails already using it keep showing it.";
     if (kind === "image") {
       try {
         const used = (await listFormTemplates({ isAdmin: true }))
-          .filter((t) => (t.fields || []).some((f) => f.type === "image" && f.fileId === id));
+          .filter((t) => (t.fields || []).some((f) => f.type === "image" && (f.fileId === id || (item.driveId && f.fileId === item.driveId))));
         if (used.length) {
           const names = used.slice(0, 3).map((t) => t.name).join(", ") + (used.length > 3 ? ` and ${used.length - 3} more` : "");
-          message = `It's used in ${used.length} form${used.length === 1 ? "" : "s"}: ${names}. Those forms will show a missing image. ${message}`;
+          message = `It's used in ${used.length} form${used.length === 1 ? "" : "s"}: ${names}. ${message}`;
         }
       } catch (err) { console.warn("Couldn't check which forms use this image:", err); }
     }
@@ -302,7 +302,7 @@ function createBank(host, { mode = "manage", isAdmin = false, onPick = null } = 
       if (kind === "folder") state.folders = state.folders.filter((x) => x.id !== id);
       else state.images = state.images.filter((x) => x.id !== id);
       render();
-      showToast("Moved to the Google Drive Bin");
+      showToast("Deleted from the Image Bank");
     } catch (err) { showToast(bankError(err)); }
   }
 
@@ -385,7 +385,7 @@ function createBank(host, { mode = "manage", isAdmin = false, onPick = null } = 
   let searchTimer = null;
   qInput.addEventListener("input", () => {
     clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => runSearch(qInput.value.trim()), 400);
+    searchTimer = setTimeout(() => runSearch(qInput.value.trim()), 150);
   });
 
   if (canEdit) {
@@ -409,6 +409,7 @@ function createBank(host, { mode = "manage", isAdmin = false, onPick = null } = 
   }
 
   open("");
+  return { reload: () => open(state.folderId) };
 }
 
 /* ===================== The Image Bank page ===================== */
@@ -421,14 +422,69 @@ export function mountImageBank(container, { isAdmin = false } = {}) {
     <div class="fb-head">
       <div>
         <h2>Image Bank</h2>
-        <p class="muted">Images for your forms, kept in the clinic's Google Drive folder.${
+        <p class="muted">Diagrams and model pictures for your forms and emails, stored securely in the portal.${
           isAdmin ? " Drag images onto the page to upload them." : " Only admins can add or change images."}</p>
       </div>
     </div>
+    <div data-role="move"></div>
     <div data-role="bank"></div>`;
   container.replaceChildren(root);
-  createBank(root.querySelector('[data-role="bank"]'), { mode: "manage", isAdmin });
+  const bank = createBank(root.querySelector('[data-role="bank"]'), { mode: "manage", isAdmin });
+  if (isAdmin) setupMove(root.querySelector('[data-role="move"]'), bank);
 }
+
+// Admins: move pictures from the Google Drive Image Bank (safe to run again)
+async function setupMove(box, bank) {
+  let stats;
+  try { stats = await bankStats(); } catch (err) { console.warn("Image Bank stats failed:", err); return; }
+  if (!box.isConnected) return;
+  box.innerHTML = !stats.fromDrive ? `
+    <div class="ib-move">
+      <div>
+        <strong>Move your pictures from Google Drive</strong>
+        <p>Copies every folder and picture from the Google Drive Image Bank into the portal, so it opens instantly.
+          Forms and emails that already use them keep working. Nothing is deleted from Google Drive.</p>
+      </div>
+      <button type="button" class="ff-btn is-primary" data-act="move">Move Image Bank to Firebase</button>
+    </div>` : `
+    <div class="ib-move is-small">
+      <span>${stats.fromDrive} picture${stats.fromDrive === 1 ? "" : "s"} moved from Google Drive.</span>
+      <button type="button" class="lh-btn is-quiet" data-act="move">Check Google Drive for pictures not moved yet</button>
+    </div>`;
+
+  box.onclick = async (e) => {
+    const btn = e.target.closest('[data-act="move"]');
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    const card = box.firstElementChild;
+    const status = document.createElement("div");
+    status.className = "ib-move-status";
+    card.appendChild(status);
+    const stay = (ev) => { ev.preventDefault(); ev.returnValue = ""; };
+    window.addEventListener("beforeunload", stay);
+    try {
+      const res = await migrateFromDrive((p) => {
+        if (!status.isConnected) return;
+        status.innerHTML = p.stage === "scan"
+          ? "Looking through Google Drive…"
+          : `<div class="ib-move-bar"><span style="width:${p.total ? Math.round((p.done / p.total) * 100) : 100}%"></span></div>
+             ${p.done} of ${p.total} picture${p.total === 1 ? "" : "s"} copied${p.failed ? ` · ${p.failed} couldn't be copied` : ""}`;
+      });
+      showToast(res.moved || res.folders
+        ? `Moved ${res.moved} picture${res.moved === 1 ? "" : "s"} and ${res.folders} folder${res.folders === 1 ? "" : "s"}${res.failed ? `. ${res.failed} couldn't be copied: try again` : ""}.`
+        : res.failed ? `${res.failed} picture${res.failed === 1 ? "" : "s"} couldn't be copied. Try again.` : "Everything is already moved.");
+      bank.reload();
+      setupMove(box, bank);
+    } catch (err) {
+      console.error("Move from Google Drive failed:", err);
+      status.textContent = bankError(err);
+      btn.disabled = false;
+    } finally {
+      window.removeEventListener("beforeunload", stay);
+    }
+  };
+}
+
 
 /* ===================== Picker (used by the Image field) ===================== */
 

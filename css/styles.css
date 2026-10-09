@@ -2652,3 +2652,13 @@ select.fe-in + .fe-xin, .fe-xin + .fe-xin { margin-top: .5rem; }
   .fb-dup span { display: none; }
   .fb-dup { width: 38px; justify-content: center; padding: 0; }
 }
+
+/* ---------- Image Bank: moving from Google Drive ---------- */
+.ib-move { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .75rem 1rem;
+  margin-bottom: 1rem; padding: 1rem 1.2rem; border: 1px solid #bae6fd; border-radius: 14px; background: #f0f9ff; }
+.ib-move strong { font-size: .98rem; }
+.ib-move p { max-width: 640px; margin: .25rem 0 0; font-size: .86rem; line-height: 1.5; color: var(--muted); }
+.ib-move.is-small { padding: .5rem .9rem; border-color: var(--border); background: var(--surface-2); font-size: .85rem; color: var(--muted); }
+.ib-move-status { flex-basis: 100%; font-size: .85rem; color: var(--muted); }
+.ib-move-bar { height: 8px; margin-bottom: .35rem; overflow: hidden; border-radius: 999px; background: #e0f2fe; }
+.ib-move-bar span { display: block; height: 100%; border-radius: 999px; background: var(--primary); transition: width .25s ease; }
