@@ -256,7 +256,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
       const label = String(f.label || "").trim();
       const cp = conditionProblem(f, fields);
       if (cp) return { id: f.id, msg: `“${label || FIELD_TYPES[f.type].name}”: ${cp}` };
-      if (hasLabel(f.type) && f.type !== "text_block" && !label) {
+      if (hasLabel(f.type) && !["text_block", "image"].includes(f.type) && !label) {
         return { id: f.id, msg: "Every question needs a name. Add one to the highlighted question." };
       }
       if (CHOICE_TYPES.includes(f.type) && !f.options.some((o) => String(o).trim())) {
@@ -498,7 +498,8 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
     let h = `<div class="fe-insp-head">${svg(ICONS[f.type])}<span>${esc(FIELD_TYPES[f.type].name)}</span></div>`;
     if (hasLabel(f.type)) {
-      const lbl = f.type === "text_block" ? "Heading" : f.type === "table" ? "Table title" : "Question";
+      const lbl = f.type === "text_block" ? "Heading" : f.type === "table" ? "Table title"
+        : f.type === "image" ? "Title (optional)" : "Question";
       h += setting(lbl, `<input class="fe-input" data-k="label" maxlength="300" value="${esc(f.label)}" />`);
     }
     if (hasHelp(f.type)) {

@@ -203,7 +203,7 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {} }) {
           ? `<span style="display:inline-block !important;width:${pct}%;max-width:100%;">` +
               `<img src="${images[f.fileId]}" alt="" style="display:inline-block !important;width:auto;height:auto;max-width:100%;max-height:${maxH}px;"></span>`
           : `<img src="${images[f.fileId]}" alt="" style="display:inline-block !important;width:${pct}%;max-width:100%;height:auto;">`;
-      return `<div class="block" style="${box}">${pic}${
+      return `<div class="block" style="${box}">${label ? `<div class="ql" style="margin-bottom:${gap}px;">${label}</div>` : ""}${pic}${
         f.caption ? `<div style="font-size:9pt;color:#64748b;margin-top:4px;">${esc(f.caption)}</div>` : ""}</div>`;
     }
 

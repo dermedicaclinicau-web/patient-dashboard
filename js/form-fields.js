@@ -165,8 +165,8 @@ export const FILLS_FOR = {
   date: ["", "today", "patient.dob"],
 };
 
-const NO_LABEL = ["space", "letterhead", "watermark", "image"];
-const NO_HELP = ["patient", "text_block", "space", "letterhead", "watermark", "image"];
+const NO_LABEL = ["space", "letterhead", "watermark"];
+const NO_HELP = ["patient", "text_block", "space", "letterhead", "watermark"];
 const NO_REQUIRED = ["text_block", "space", "letterhead", "watermark", "calculation", "consent_status", "image"];
 export const hasLabel = (t) => !NO_LABEL.includes(t);
 export const hasHelp = (t) => !NO_HELP.includes(t);
@@ -409,7 +409,7 @@ export function renderField(f, ctx = {}) {
   const live = !!ctx.live;
   const inert = live ? "" : ' tabindex="-1"';
   const id = esc(f.id);
-  const q = hasLabel(f.type) && f.type !== "text_block"
+  const q = hasLabel(f.type) && f.type !== "text_block" && !(f.type === "image" && !String(f.label || "").trim())
     ? `<div class="fe-q">${esc(f.label || FIELD_TYPES[f.type].label || "Untitled question")}${
         f.required ? '<span class="fe-req" aria-label="required">*</span>' : ""}</div>`
     : "";
@@ -835,7 +835,7 @@ function layoutSettings(f) {
       ? row("Answer", seg("pos", [["below", "Under the question"], ["beside", "Beside the question"]], s.pos, true)) : ""}
     ${s.pos === "beside"
       ? row("Question width", seg("qWidth", [["auto", "Fit"], ["narrow", "Narrow"], ["medium", "Medium"], ["wide", "Wide"]], s.qWidth)) : ""}
-    ${!isText && !isImage ? row("Gap", seg("gap", [["tight", "Tight"], ["normal", "Normal"], ["wide", "Wide"]], s.gap)) : ""}
+    ${!isText ? row("Gap", seg("gap", [["tight", "Tight"], ["normal", "Normal"], ["wide", "Wide"]], s.gap)) : ""}
     ${row("Align", seg("align", [["left", "Left"], ["center", "Centre"], ["right", "Right"]], s.align))}
     ${BOX_TYPES.includes(f.type)
       ? row("Answer box width", seg("width", [["full", "Full"], ["half", "Half"], ["third", "Third"]], s.width)) : ""}
