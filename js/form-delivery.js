@@ -9,6 +9,7 @@ import { buildFormDocument, niceDate } from "./form-document.js";
 import { showToast, formatDobLong } from "./utils.js";
 import { bankImage } from "./image-bank-api.js";
 import { DEFAULT_LETTERHEAD } from "./form-letterhead.js";
+import { photoSrc, photoKey } from "./photo-field.js";
 
 const EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
 const PDF_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
@@ -107,19 +108,23 @@ const blobToBase64 = (blob) => new Promise((resolve, reject) => {
   r.readAsDataURL(blob);
 });
 
-// Image Bank pictures used by the form, ready to go into the PDF
-async function preloadImages(fields) {
+// Image Bank pictures and photos used by the form, ready to go into the PDF
+async function preloadImages(fields, answers = {}) {
   const ids = [...new Set((fields || [])
     .filter((f) => f.type === "image" && f.source !== "staff" && f.fileId)
     .map((f) => f.fileId))];
   const out = {};
   await Promise.all(ids.map((id) => bankImage(id).then((src) => { out[id] = src; }).catch(() => {})));
+  const photos = (fields || [])
+    .filter((f) => f.type === "image" && f.source === "staff")
+    .flatMap((f) => { const v = answers[f.id]; return v && Array.isArray(v.photos) ? v.photos : []; });
+  await Promise.all(photos.map((p) => photoSrc(p).then((src) => { out[photoKey(p)] = src; }).catch(() => {})));
   return out;
 }
 
 // One saved form's PDF, made once and reused (preview, then send)
 async function formPdf({ sub, ver, letterhead }) {
-  const images = await preloadImages(ver.fields);
+  const images = await preloadImages(ver.fields, sub.answers);
   const doc = buildFormDocument({ sub, ver, letterhead, images });
   let job = null;
   return {

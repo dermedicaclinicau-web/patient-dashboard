@@ -201,7 +201,15 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {} }) {
           <div class="fe-rich" style="font-size:10pt;line-height:1.55;">${cleanRichHtml(it.html || "")}</div></div>`).join("")}</div>`;
     }
     if (f.type === "image") {
-      if (f.source === "staff" || !f.fileId || !images[f.fileId]) return "";
+      if (f.source === "staff") {
+        const photos = v && Array.isArray(v.photos) ? v.photos : [];
+        const srcs = photos.map((p) => images[p.path ? p.path : `bank:${p.bankId}`]).filter(Boolean);
+        if (!srcs.length) return "";
+        return `<div class="block" style="${box}">${label ? `<div class="ql" style="margin-bottom:${gap}px;">${label}</div>` : ""}${
+          srcs.map((s) => `<img src="${s}" alt="" style="display:inline-block !important;width:48%;height:auto;margin:0 1% 8px;vertical-align:top;border-radius:4px;">`).join("")}${
+          f.caption ? `<div style="font-size:9pt;color:#64748b;margin-top:2px;">${esc(f.caption)}</div>` : ""}</div>`;
+      }
+      if (!f.fileId || !images[f.fileId]) return "";
       const { pct, maxH } = imageSizing(f);
       const drawing = f.annotate && v && typeof v === "object" && PNG_RE.test(v.drawing || "") ? v.drawing : "";
       const pic = drawing

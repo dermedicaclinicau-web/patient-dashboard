@@ -210,7 +210,7 @@ export function createField(type, id) {
     case "calculation": f.formula = ""; f.decimals = 2; f.prefix = ""; f.suffix = ""; f.blank = "zero"; break;
     case "image":
       f.source = "bank"; f.fileId = ""; f.fileName = ""; f.size = "medium"; f.caption = ""; f.alt = ""; f.max = 1;
-      f.annotate = false; f.widthPct = 50; f.heightPx = null;
+      f.annotate = false; f.widthPct = 50; f.heightPx = null; f.allowBank = true;
       break;
     case "watermark": f.source = "text"; f.text = "DRAFT"; f.opacity = 10; f.angle = -30; f.size = "large"; break;
     case "letterhead": f.line1 = LETTERHEAD[0]; f.line2 = LETTERHEAD[1]; break;
@@ -328,6 +328,7 @@ export function cleanField(f) {
       out.alt = clip(f.alt, 200);
       out.max = int(f.max, 1, 10, 1);
       out.annotate = f.annotate === true;
+      out.allowBank = f.allowBank !== false;
       break;
     case "watermark":
       out.source = pick(f.source, ["text", "logo"], "text");
@@ -530,11 +531,11 @@ export function renderField(f, ctx = {}) {
     }
     case "image": {
       const cap = f.caption ? `<figcaption>${esc(f.caption)}</figcaption>` : "";
-      if (f.source === "staff") {
+       if (f.source === "staff") {
         const max = Math.max(1, Math.min(10, parseInt(f.max, 10) || 1));
-        return `<div class="fe-img-staff">${svg(ICONS.photo)}<span>${live
-          ? "Adding photos while filling in is coming soon."
-          : `Staff add ${max > 1 ? `up to ${max} photos` : "a photo"} while filling in`}</span></div>${cap}`;
+        if (live) return `<div class="ph-host" data-ph-host></div>${cap}`;
+        return `<div class="fe-img-staff">${svg(ICONS.photo)}<span>Staff take or upload ${
+          max > 1 ? `up to ${max} photos` : "a photo"} while filling in</span></div>${cap}`;
       }
       if (!f.fileId) {
         return live ? "" : `<div class="fe-img-empty">${svg(ICONS.image)}<span>Choose a picture in the settings panel</span></div>`;
@@ -704,7 +705,8 @@ function typeSettings(f, ctx = {}) {
       } else {
         h += setting("Photos allowed", choose("max", Array.from({ length: 10 }, (_, i) => [i + 1, String(i + 1)]), f.max || 1, true)) +
           caption +
-          '<p class="fe-note fe-pad">Coming in the next update: staff will be able to take a photo, upload one from the device, or choose from the Image Bank while filling in. Each patient\'s photos are saved with their form.</p>';
+          `<label class="fe-check"><input type="checkbox" data-k="allowBank"${f.allowBank !== false ? " checked" : ""} /> Allow choosing from the Image Bank</label>` +
+          '<p class="fe-note fe-pad">On phones and tablets, Take photo opens the camera. Photos are stored privately with the patient\'s saved form.</p>';
       }
       return h;
     }

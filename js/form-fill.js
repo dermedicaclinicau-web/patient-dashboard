@@ -18,6 +18,7 @@ import { hydrateBankImages } from "./image-bank-api.js";
 import { attachAnnotators } from "./form-annotate.js";
 import { bankImage } from "./image-bank-api.js";
 import { mountAftercareField } from "./aftercare-field.js";
+import { mountPhotoField } from "./photo-field.js";
 
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const BAR_ICONS = {
@@ -215,7 +216,8 @@ export function readField(f, w, { pads = {}, calc = {}, consent = {}, annots = {
       $all(w, "[data-part]").forEach((el) => { out[el.dataset.part] = el.value; });
       return out;
     }
-    case "image": {
+     case "image": {
+      if (f.source === "staff") return w.photoRead ? w.photoRead() : { photos: [] };
       const a = annots[f.id];
       return a && !a.isEmpty() ? { drawn: true } : "";
     }
@@ -446,6 +448,11 @@ export async function mountFormFill(container, param, { staff } = {}) {
     mountAftercareField(wrap(f.id), f, { onChange: () => { dirty = true; }, patient, staff, actions: true });
   });
 
+    // Photo questions
+  fields.filter((f) => f.type === "image" && f.source === "staff").forEach((f) => {
+    mountPhotoField(wrap(f.id), f, { patient, onChange: () => { dirty = true; } });
+  });
+
   // Fill in from the patient's record
   const P = {
     "patient.name": patient.name,
@@ -592,6 +599,9 @@ export async function mountFormFill(container, param, { staff } = {}) {
       if (f.type === "consent_status" && f.block && !(consent[f.id] && consent[f.id].found)) {
         out.push({ id: f.id, msg: "There's no valid consent on file, so this form can't be saved yet." });
       }
+      if (w.photoFailed && w.photoFailed()) {
+        out.push({ id: f.id, msg: "A photo didn't upload. Tap Retry on it, or remove it." });
+      }
       const ob = w.querySelector("[data-other]");
       const onRow = w.querySelector(".fe-optnote.is-other");
       const onTicked = onRow && onRow.querySelector('input[type="checkbox"]').checked;
@@ -626,6 +636,13 @@ export async function mountFormFill(container, param, { staff } = {}) {
   async function save(kind) {
     if (saving) return;
     if (!consentReady) { msgEl.textContent = "Still checking consent records. Try again in a moment."; return; }
+    // Let photos that are still uploading finish first
+    const pending = fields.map((f) => { const w = wrap(f.id); return w && w.photoPending ? w.photoPending() : null; }).filter(Boolean);
+    if (pending.length) {
+      msgEl.textContent = "Finishing photo uploads…";
+      await Promise.all(pending);
+      msgEl.textContent = "";
+    }
     refresh();
     const list = problems();
     showProblems(list);
@@ -808,6 +825,10 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
           })
           .catch(() => { if (box.isConnected) box.innerHTML = '<span class="fe-img-missing">This picture is missing from the Image Bank</span>'; });
       }
+      return;
+    }
+    if (f.type === "image" && f.source === "staff") {
+      mountPhotoField(w, f, { saved: sub.answers[f.id] || null });
       return;
     }
     if (f.type === "aftercare") {
