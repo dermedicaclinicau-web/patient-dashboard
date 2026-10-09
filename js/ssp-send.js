@@ -8,6 +8,7 @@ import { fillTemplate, fillTemplateHtml, emailShell, clinicDetails, EMAIL_RE } f
 import { createRichEditor } from "./rich-editor.js";
 import { callApi } from "./appointments.js";
 import { showToast } from "./utils.js";
+import { buildSspDocument, longDate, marginPx } from "./ssp-document.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -59,7 +60,7 @@ export async function openSspPreview({ record, patient = null, staff = null, onS
         </div>
       </div>
       <p class="ssp-prev-msg" data-role="msg" aria-live="polite"></p>
-      <div class="ssp-prev-body"><div class="ssp-paper"><style>${doc.css}</style><div class="pdfdoc">${doc.inner}</div></div></div>`;
+      <div class="ssp-prev-body"><div class="ssp-paper" style="padding:${marginPx(doc.margin)}px;"><style>${doc.css}</style><div class="pdfdoc">${doc.inner}</div></div></div>`;
     document.body.appendChild(dlg);
     const $ = (s) => dlg.querySelector(s);
     const msg = (t) => { $('[data-role="msg"]').textContent = t || ""; };

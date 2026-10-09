@@ -2898,7 +2898,8 @@ select.fe-in + .fe-xin, .fe-xin + .fe-xin { margin-top: .5rem; }
 .ssp-prev-msg { margin: 0; padding: 0 1rem; font-size: .88rem; color: var(--danger); }
 .ssp-prev-msg:not(:empty) { padding: .6rem 1rem; background: #fef2f2; }
 .ssp-prev-body { overflow: auto; padding: 1.25rem; }
-.ssp-paper { width: 793px; max-width: 100%; margin: 0 auto; padding: 45px; background: #fff; box-shadow: 0 6px 28px rgba(15, 23, 42, .15); overflow-x: auto; }
+.ssp-paper { width: 794px; max-width: 100%; margin: 0 auto; background: #fff; box-shadow: 0 6px 28px rgba(15, 23, 42, .15); overflow-x: auto; box-sizing: border-box; }
+.ssd-paper { box-sizing: border-box; width: 794px !important; }
 @media (max-width: 860px) { .ssp-paper { padding: 20px; } }
 
 /* Settings */
@@ -3026,3 +3027,50 @@ select.fe-in + .fe-xin, .fe-xin + .fe-xin { margin-top: .5rem; }
   white-space: nowrap;
 }
 .fb-head-actions { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+
+/* ---------- Dialogs: every text box styled the same ---------- */
+.lh-dialog .lh-field input:not([type="checkbox"]):not([type="radio"]):not([type="color"]):not([type="file"]):not([type="range"]),
+.lh-dialog .lh-field textarea {
+  width: 100%;
+  min-height: 40px;
+  padding: .55rem .75rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--text);
+  font: inherit;
+  font-size: .95rem;
+  box-sizing: border-box;
+}
+.lh-dialog .lh-field input:focus,
+.lh-dialog .lh-field textarea:focus {
+  border-color: var(--primary);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--primary-soft);
+}
+.lh-dialog .lh-field input::placeholder,
+.lh-dialog .lh-field textarea::placeholder { color: #94a3b8; }
+
+/* ---------- Rich text editor toolbar: compact, on one line where it fits ---------- */
+.lh-dialog div:has(> button):has(> select),
+.lh-dialog div:has(> select) + div:has(> button) {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 4px;
+}
+.lh-dialog div:has(> button) > select,
+.lh-dialog div:has(> select):has(> button) select {
+  flex: 0 0 auto;
+  width: auto;
+  min-width: 0;
+  max-width: 128px;
+  height: 32px;
+  margin: 0;
+  padding: 0 1.6rem 0 .55rem;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background-color: #fff;
+  font: inherit;
+  font-size: .82rem;
+  line-height: normal;
+}

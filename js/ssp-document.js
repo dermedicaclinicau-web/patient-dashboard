@@ -9,6 +9,10 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
 const LOGO_RE = /^data:image\/(png|jpeg);base64,/;
 const COLOR = /^#[0-9a-f]{6}$/i;
 const col = (v, d) => (COLOR.test(v || "") ? v : d);
+const MM_PX = 96 / 25.4;
+// Content width (px) for an A4 page with this margin on each side
+export const pageWidthPx = (marginMm) => Math.round((210 - 2 * marginMm) * MM_PX);
+export const marginPx = (marginMm) => Math.round(marginMm * MM_PX);
 
 export function longDate(iso) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso || "");
@@ -37,8 +41,12 @@ const linkify = (h) => h.replace(/((?:https?:\/\/|www\.)[^\s<]+)/g, (u) =>
 function cssFor(P) {
   const fs = P.fontSize;
   return `
-  .pdfdoc { width: 703px; font-family: ${FONTS[P.font] || FONTS.Arial}; font-size: ${fs}pt; color: #1e293b; background: #fff; }
+  .pdfdoc { width: ${pageWidthPx(P.margin)}px; max-width: ${pageWidthPx(P.margin)}px; overflow: hidden;
+    font-family: ${FONTS[P.font] || FONTS.Arial}; font-size: ${fs}pt; color: #1e293b; background: #fff; }
   .pdfdoc * { box-sizing: border-box; }
+  .pdfdoc img { max-width: 100%; }
+  .pdfdoc table { table-layout: fixed; }
+  .pdfdoc td, .pdfdoc th { overflow-wrap: anywhere; word-break: normal; }
   .pdfdoc table.sd-top { width: 100%; border-collapse: collapse; }
   .pdfdoc .sd-title { font-size: ${P.titleSize}pt; font-weight: bold; color: ${P.titleColor}; }
   .pdfdoc .sd-meta { margin: 8px 0 14px; padding-bottom: 12px; border-bottom: 2px solid ${P.accent}; font-size: ${fs - 0.5}pt; color: #334155; }
@@ -47,7 +55,7 @@ function cssFor(P) {
   .pdfdoc table.sd th { padding: 8px 10px; background: ${P.headerBg}; font-size: ${fs - 1.5}pt; font-weight: bold; letter-spacing: .06em;
     text-align: left; text-transform: uppercase; color: #334155; }
   .pdfdoc table.sd td { padding: 9px 10px; border-bottom: 1px solid #ece9e2; font-size: ${fs - 0.5}pt; line-height: 1.45; vertical-align: top; }
-  .pdfdoc td.sd-step { width: 70px; }
+  .pdfdoc td.sd-step, .pdfdoc th.sd-step { width: 12%; }
   .pdfdoc td.sd-step b { display: block; font-size: ${fs - 0.5}pt; }
   .pdfdoc td.sd-step small { display: block; margin-top: 2px; font-size: ${fs - 2}pt; }
   .pdfdoc td.sd-empty { background: #faf9f6; }
@@ -84,6 +92,7 @@ export function buildSspDocument({ record, letterhead = null, settings = null })
     titleSize: Number(raw.titleSize) || PDF_DEFAULTS.titleSize,
     fontSize: Number(raw.fontSize) || PDF_DEFAULTS.fontSize,
     logoSize: Number(raw.logoSize) || PDF_DEFAULTS.logoSize,
+    margin: Math.max(8, Math.min(30, Number(raw.margin) || PDF_DEFAULTS.margin)),
     steps: raw.steps || {},
   };
   const items = Array.isArray(record.items) ? record.items : [];
@@ -103,8 +112,8 @@ export function buildSspDocument({ record, letterhead = null, settings = null })
     for (let i = 0; i < n; i++) {
       h += `<tr>${i === 0 ? `<td class="sd-step" rowspan="${n}" style="background:${tone};">
           <b style="color:${ink};">${esc(label)}</b>${sub ? `<small style="color:${ink};">${esc(sub)}</small>` : ""}</td>` : ""}
-        <td class="${am[i] ? "" : "sd-empty"}" style="width:315px;">${cell(am[i], "am", P)}</td>
-        <td class="${pm[i] ? "" : "sd-empty"}" style="width:315px;">${cell(pm[i], "pm", P)}</td></tr>`;
+        <td class="${am[i] ? "" : "sd-empty"}" style="width:44%;">${cell(am[i], "am", P)}</td>
+        <td class="${pm[i] ? "" : "sd-empty"}" style="width:44%;">${cell(pm[i], "pm", P)}</td></tr>`;
     }
     return h;
   }).join("");
@@ -133,7 +142,7 @@ export function buildSspDocument({ record, letterhead = null, settings = null })
     <table class="sd-top"><tr>${top}</tr></table>
     ${meta ? `<div class="sd-meta">${meta}</div>` : `<div class="sd-meta" style="padding-bottom:0;"></div>`}
     <table class="sd">
-      <tr><th style="width:70px;">Step</th><th>${P.icons ? "☀ " : ""}${esc(P.morning || "Morning")}</th><th>${P.icons ? "✨ " : ""}${esc(P.evening || "Evening")}</th></tr>
+      <tr><th class="sd-step">Step</th><th style="width:44%;">${P.icons ? "☀ " : ""}${esc(P.morning || "Morning")}</th><th style="width:44%;">${P.icons ? "✨ " : ""}${esc(P.evening || "Evening")}</th></tr>
       ${rows || '<tr><td colspan="3">No products on this protocol.</td></tr>'}
     </table>
     <div class="sd-foot">${closing}${sign ? `<div class="sd-sign">${sign}</div>` : ""}</div>
@@ -141,5 +150,5 @@ export function buildSspDocument({ record, letterhead = null, settings = null })
 
   const fileName = `${P.title || "Skin Script Protocol"} - ${record.patientName || "Patient"} - ${longDate(record.recordDate)}.pdf`
     .replace(/[\\/:*?"<>|]+/g, "-");
-  return { inner, css: cssFor(P), fileName };
+  return { inner, css: cssFor(P), fileName, margin: P.margin, widthPx: pageWidthPx(P.margin) };
 }

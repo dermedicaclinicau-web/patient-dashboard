@@ -11,6 +11,7 @@ export const FONTS = {
 
 export const PDF_DEFAULTS = {
   title: "Skin Script Protocol",
+  margin: 15,  
   titleSize: 17,
   titleColor: "#0f172a",
   font: "Arial",

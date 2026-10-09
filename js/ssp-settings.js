@@ -12,6 +12,7 @@ import { SSP_DEFAULTS, PDF_DEFAULTS, FONTS, CLOSING_HTML } from "./ssp-defaults.
 import { buildSspDocument } from "./ssp-document.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
+import { buildSspDocument, marginPx } from "./ssp-document.js";
 
 export { SSP_DEFAULTS };
 
@@ -38,6 +39,7 @@ function cleanPdf(p = {}) {
   });
   return {
     title: clip(p.title ?? D.title, 80).trim() || D.title,
+    margin: num(p.margin, 8, 30, D.margin),
     titleSize: num(p.titleSize, 12, 28, D.titleSize),
     titleColor: col(p.titleColor, D.titleColor),
     font: FONTS[p.font] ? p.font : D.font,
@@ -155,6 +157,9 @@ function pdfSection(st) {
   const p = st.pdf;
   return `
     <section data-sec="pdf">
+      <h4>Page</h4>
+      ${field("Page margin", select("pdf.margin", [[10, "Narrow (10 mm)"], [15, "Normal (15 mm)"], [20, "Wide (20 mm)"], [25, "Extra wide (25 mm)"]], p.margin, true),
+        "Space around the edge of the printed page.")}
       <h4>Title</h4>
       ${field("Title", text("pdf.title", p.title, 80))}
       <div class="ssd-two">
@@ -335,7 +340,7 @@ export async function openSspSettings({ staff = null } = {}) {
     }
     function drawPdf() {
       const d = buildSspDocument({ record: sampleRecord(st.validMonths), letterhead, settings: st });
-      stage.innerHTML = `<div class="ssd-fit"><div class="ssd-paper"><style>${d.css}</style><div class="pdfdoc">${d.inner}</div></div></div>`;
+      stage.innerHTML = `<div class="ssd-fit"><div class="ssd-paper" style="padding:${marginPx(d.margin)}px;"><style>${d.css}</style><div class="pdfdoc">${d.inner}</div></div></div>`;
       requestAnimationFrame(fit);
     }
     function drawEmail() {

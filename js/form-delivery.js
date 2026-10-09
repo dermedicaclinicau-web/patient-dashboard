@@ -83,19 +83,25 @@ function loadHtml2Pdf() {
   return libPromise;
 }
 
-async function renderPdf(doc) {
+// opts (Skin Script): { margin: mm, width: content width in px }. Forms use the defaults.
+async function renderPdf(doc, opts = {}) {
   const html2pdf = await loadHtml2Pdf();
+  const margin = Number(opts.margin) || 12;
+  const width = Number(opts.width) || 703;
   const holder = document.createElement("div");
   holder.setAttribute("aria-hidden", "true");
-  holder.style.cssText = "position:fixed;left:-10000px;top:0;";
+  holder.style.cssText = `position:fixed;left:-10000px;top:0;width:${width}px;`;
   holder.innerHTML = `<style>${doc.css}</style><div class="pdfdoc">${doc.inner}</div>`;
   document.body.appendChild(holder);
   try {
     return await html2pdf().set({
-      margin: [12, 12, 12, 12],
+      margin: [margin, margin, margin, margin],
       filename: doc.fileName,
       image: { type: "jpeg", quality: 0.92 },
-      html2canvas: { scale: 2, backgroundColor: "#ffffff", logging: false },
+      html2canvas: {
+        scale: 2, backgroundColor: "#ffffff", logging: false,
+        scrollX: 0, scrollY: 0, width, windowWidth: width,
+      },
       jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
       pagebreak: { mode: ["css", "legacy"], avoid: [".q", ".block", "tr", ".sig"] },
     }).from(holder.querySelector(".pdfdoc")).outputPdf("blob");
@@ -103,6 +109,7 @@ async function renderPdf(doc) {
     holder.remove();
   }
 }
+
 
 const blobToBase64 = (blob) => new Promise((resolve, reject) => {
   const r = new FileReader();
@@ -412,6 +419,6 @@ export async function aftercarePdf({ items, patient }) {
 /* ---------- Any document as a PDF (Skin Script Protocol) ---------- */
 
 export async function docToPdf(doc) {
-  const blob = await renderPdf(doc);
+  const blob = await renderPdf(doc, doc.margin ? { margin: doc.margin, width: doc.widthPx } : {});
   return { blob, pdf: await blobToBase64(blob), fileName: doc.fileName };
 }
