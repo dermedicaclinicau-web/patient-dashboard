@@ -21,6 +21,7 @@ const ICONS = {
   search: '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
   chevron: '<polyline points="9 18 15 12 9 6"/>',
   copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  heart: '<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78L12 21.23l8.84-8.84a5.5 5.5 0 0 0 0-7.78z"/>',
 };
 
 function editedAgo(date) {
@@ -73,6 +74,7 @@ function mountLibrary(container, { isAdmin, staff }) {
       ${isAdmin ? `
       <div class="fb-head-actions">
         <a class="btn-ghost fb-imgbank" href="#/image-bank">${svg(ICONS.image)}Image Bank</a>
+        <a class="btn-ghost fb-imgbank" href="#/aftercare-bank">${svg(ICONS.heart)}Aftercare Bank</a>
         <button type="button" class="btn-primary fb-new" data-act="new">${svg(ICONS.plus)}New form</button>
       </div>` : ""}
     </div>

@@ -2662,3 +2662,52 @@ select.fe-in + .fe-xin, .fe-xin + .fe-xin { margin-top: .5rem; }
 .ib-move-status { flex-basis: 100%; font-size: .85rem; color: var(--muted); }
 .ib-move-bar { height: 8px; margin-bottom: .35rem; overflow: hidden; border-radius: 999px; background: #e0f2fe; }
 .ib-move-bar span { display: block; height: 100%; border-radius: 999px; background: var(--primary); transition: width .25s ease; }
+
+/* ---------- Aftercare ---------- */
+.ac-search { width: 100%; max-width: 440px; margin-bottom: 1rem; }
+.ac-search input { width: 100%; }
+.ac-group { margin-bottom: 1.25rem; }
+.ac-group h3 { display: flex; align-items: center; gap: .5rem; margin: 0 0 .5rem; font-size: .8rem; font-weight: 700;
+  letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.ac-group h3 em { padding: .05rem .45rem; border-radius: 999px; background: var(--surface-2); font-size: .72rem; font-style: normal; }
+.ac-list { display: flex; flex-direction: column; gap: .45rem; }
+.ac-item { overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: #fff; }
+.ac-item.is-open { border-color: var(--primary); box-shadow: 0 6px 18px rgba(15, 23, 42, .06); }
+.ac-head { display: flex; align-items: center; gap: .5rem; padding: .25rem .5rem .25rem .25rem; }
+.ac-toggle { display: flex; flex: 1; align-items: center; gap: .55rem; min-width: 0; padding: .55rem .5rem; border: none;
+  background: none; font: inherit; text-align: left; cursor: pointer; color: var(--text); }
+.ac-toggle small { flex-shrink: 0; padding: .1rem .5rem; border-radius: 999px; background: var(--primary-soft);
+  color: var(--primary); font-size: .72rem; font-weight: 600; }
+.ac-title { overflow: hidden; font-size: .93rem; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.ac-chev { width: 16px; height: 16px; flex-shrink: 0; color: var(--muted); transition: transform .18s ease; }
+.ac-item.is-open .ac-chev { transform: rotate(90deg); color: var(--primary); }
+.ac-body { padding: .2rem 1.1rem 1rem 2.6rem; font-size: .92rem; line-height: 1.6; }
+.ac-send { display: inline-flex; flex-shrink: 0; align-items: center; gap: .35rem; padding: .3rem .6rem; border: 1px solid var(--border);
+  border-radius: 999px; background: var(--surface-2); font-size: .78rem; font-weight: 600; cursor: pointer; white-space: nowrap; }
+.ac-send:has(input:checked) { border-color: var(--primary); background: var(--primary-soft); color: var(--primary); }
+.ac-x { display: grid; place-items: center; flex-shrink: 0; width: 30px; height: 30px; border: none; border-radius: 8px;
+  background: none; color: var(--muted); font-size: 1.2rem; cursor: pointer; }
+.ac-x:hover { background: #fef2f2; color: var(--danger); }
+.ac-tag { flex-shrink: 0; padding: .2rem .6rem; border-radius: 999px; background: #ecfdf5; color: #047857; font-size: .74rem; font-weight: 600; }
+.ac-add { margin-top: .5rem; }
+.ac-item.is-demo .ac-toggle { cursor: default; }
+.ac-builder { display: flex; align-items: center; gap: .55rem; margin-bottom: .5rem; padding: .8rem 1rem; border: 1.5px dashed var(--primary);
+  border-radius: 10px; background: var(--primary-soft); color: var(--primary); font-size: .88rem; }
+.ac-builder svg { width: 20px; height: 20px; flex-shrink: 0; }
+.ac-chosen { display: flex; flex-direction: column; gap: .3rem; margin: 0 0 .5rem; padding: 0; list-style: none; }
+.ac-chosen li { display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: .4rem .5rem .4rem .7rem;
+  border: 1px solid var(--border); border-radius: 8px; background: #fff; font-size: .85rem; }
+
+/* The chooser */
+.ac-picker { width: min(760px, calc(100vw - 2rem)); }
+.ac-picker .ib-picker-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; padding: 1.1rem 1.2rem .4rem; }
+.ac-picker .ib-picker-head h3 { margin: 0; }
+.ac-picker .ac-search { margin: 0 1.2rem .75rem; width: auto; max-width: none; }
+.ac-pick-list { max-height: 58vh; overflow: auto; padding: 0 1.2rem; }
+.ac-picker .lh-actions { padding: .9rem 1.2rem 1.1rem; border-top: 1px solid var(--border); }
+
+@media (max-width: 640px) {
+  .ac-head { flex-wrap: wrap; }
+  .ac-body { padding-left: 1rem; }
+  .ac-toggle small { display: none; }
+}

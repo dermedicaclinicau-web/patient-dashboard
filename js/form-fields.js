@@ -55,6 +55,7 @@ export const FIELD_TYPES = {
   calculation:    { name: "Calculation", was: "Calculation", label: "Total" },
   signature:      { name: "Signature", was: "Signature", label: "Patient signature" },
   image:          { name: "Image", was: "Image Photo Capture picture", label: "" },
+  aftercare:      { name: "Aftercare", was: "Aftercare instructions", label: "Aftercare instructions" },
   consent_status: { name: "Consent check", was: "Consent Status", label: "Consent on file" },
   text_block:     { name: "Text block", was: "Paragraph", label: "Information" },
   letterhead:     { name: "Letterhead", was: "Letterhead", label: "" },
@@ -66,7 +67,7 @@ export const FIELD_GROUPS = [
   ["Patient and visit", ["patient", "record_date", "date"]],
   ["Answers", ["short_text", "long_text", "number", "email"]],
   ["Choices", ["single_choice", "dropdown", "checkboxes", "checkbox_notes", "sub_checks"]],
-  ["Clinical", ["signature", "consent_status", "image"]],
+  ["Clinical", ["signature", "consent_status", "image", "aftercare"]],
   ["Tables and maths", ["table", "calculation"]],
   ["Page layout", ["text_block", "space", "watermark"]],
 ];
@@ -167,7 +168,7 @@ export const FILLS_FOR = {
 
 const NO_LABEL = ["space", "letterhead", "watermark"];
 const NO_HELP = ["patient", "text_block", "space", "letterhead", "watermark"];
-const NO_REQUIRED = ["text_block", "space", "letterhead", "watermark", "calculation", "consent_status", "image"];
+const NO_REQUIRED = ["text_block", "space", "letterhead", "watermark", "calculation", "consent_status", "image", "aftercare"];
 export const hasLabel = (t) => !NO_LABEL.includes(t);
 export const hasHelp = (t) => !NO_HELP.includes(t);
 export const canRequire = (t) => !NO_REQUIRED.includes(t);
@@ -214,6 +215,7 @@ export function createField(type, id) {
     case "watermark": f.source = "text"; f.text = "DRAFT"; f.opacity = 10; f.angle = -30; f.size = "large"; break;
     case "letterhead": f.line1 = LETTERHEAD[0]; f.line2 = LETTERHEAD[1]; break;
     case "consent_status": f.consentFormId = ""; f.months = 12; f.block = false; break;
+    case "aftercare": f.mode = "fixed"; f.items = []; f.preselect = true; break;
   }
   return f;
 }
@@ -340,7 +342,13 @@ export function cleanField(f) {
       out.months = int(f.months, 1, 60, 12);
       out.block = f.block === true;
       break;
-  }
+    case "aftercare":
+      out.mode = pick(f.mode, ["fixed", "choose"], "fixed");
+      out.items = (Array.isArray(f.items) ? f.items : [])
+        .map(String).filter((id) => /^[A-Za-z0-9_-]{1,80}$/.test(id)).slice(0, 20);
+      out.preselect = f.preselect !== false;
+      break;
+}
   const sw = cleanCondition(f);
   if (sw) out.showWhen = sw;
   return out;
@@ -539,6 +547,18 @@ export function renderField(f, ctx = {}) {
         `<span class="fe-img-box" style="width:${pct}%;${maxH ? `--img-max-h:${maxH}px;` : ""}" ${hook}><span class="fe-img-loading">${svg(ICONS.image)}</span></span>` +
         (!live && f.annotate ? `<span class="fe-img-draw-tag">${svg(ICONS.signature)}Staff can draw on this</span>` : "") +
         `${cap}</figure>`;
+    }
+    case "aftercare": {
+      if (live) return head + '<div class="ac-host" data-ac-host><p class="fe-help">Loading aftercare…</p></div>';
+      const map = ctx.aftercare;
+      const titles = (f.items || []).map((id) => (map && map.get(id) ? map.get(id).title : map ? "Missing aftercare" : "Aftercare"));
+      const list = titles.length
+        ? `<div class="ac-list">${titles.map((t) => `<div class="ac-item is-demo"><div class="ac-head"><span class="ac-toggle"><span class="ac-title">${esc(t)}</span></span></div></div>`).join("")}</div>`
+        : "";
+      if (f.mode === "choose") {
+        return head + `<div class="ac-builder">${svg(ICONS.aftercare)}<span>Staff choose aftercare while filling in${titles.length ? ", starting with these:" : "."}</span></div>${list}`;
+      }
+      return head + (list || `<div class="fe-img-empty">${svg(ICONS.aftercare)}<span>Choose aftercare in the settings panel</span></div>`);
     }
     case "consent_status": {
       if (live) return head + `<div class="fe-consent">${svg(ICONS.consent_status)}Checked automatically when this form is filled in for a patient.</div>`;
@@ -789,6 +809,21 @@ function typeSettings(f, ctx = {}) {
         setting("Valid for", `<div class="fe-num"><input class="fe-input" type="number" min="1" max="60" data-k="months" data-num="" value="${Number(f.months) || 12}" /><span>months</span></div>`) +
         `<label class="fe-check"><input type="checkbox" data-k="block"${f.block ? " checked" : ""} /> Stop the form being saved if there's no valid consent</label>`;
     }
+    case "aftercare": {
+      const map = ctx.aftercare;
+      const items = (f.items || []).map((id) => ({
+        id, title: map && map.get(id) ? map.get(id).title : map ? "Missing aftercare (removed from the list?)" : "Loading…",
+      }));
+      return setting("How it's chosen", choose("mode", [["fixed", "These aftercare instructions"], ["choose", "Staff choose while filling in"]], f.mode || "fixed", false, true)) +
+        `<div class="fe-insp-field"><span class="fe-insp-label">${f.mode === "choose" ? "Start with (optional)" : "Aftercare"}</span>
+          ${items.length ? `<ul class="ac-chosen">${items.map((it, i) => `<li><span>${esc(it.title)}</span>
+            <button type="button" class="hx-x" data-acdel="${i}" aria-label="Remove ${esc(it.title)}">${svg(ICONS.x)}</button></li>`).join("")}</ul>`
+            : '<small class="fe-note">None chosen yet.</small>'}
+          <button type="button" class="lh-btn" data-act="ac-pick">Choose from Aftercare Bank</button>
+        </div>` +
+        `<label class="fe-check"><input type="checkbox" data-k="preselect"${f.preselect !== false ? " checked" : ""} /> Ticked to send and print by default</label>` +
+        '<p class="fe-note fe-pad">Staff can expand each aftercare to read it, and untick any they don\'t want included in the emailed or printed form.</p>';
+    }
   }
   return "";
 }
@@ -891,6 +926,11 @@ export function applyInput(f, el) {
 
 // Add / remove buttons for table columns and sub-option groups.
 export function applyClick(f, target) {
+  const acd = target.closest("[data-acdel]");
+  if (acd) {
+    if (Array.isArray(f.items)) f.items.splice(Number(acd.dataset.acdel), 1);
+    return true;
+  }
   const btn = target.closest('[data-act="coladd"], [data-coldel], [data-act="grpadd"], [data-grpdel]');
   if (!btn) return false;
   if (btn.dataset.act === "coladd") {

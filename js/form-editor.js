@@ -21,6 +21,9 @@ import { createRichEditor } from "./rich-editor.js";
 import { textToRichHtml } from "./rich-html.js";
 import { makeResizable } from "./panel-resize.js";
 import { openDuplicateDialog } from "./form-duplicate.js";
+import { listAftercare } from "./aftercare-api.js";
+import { openAftercarePicker } from "./aftercare-bank.js";
+import { mountAftercareField } from "./aftercare-field.js";
 
 const UI = {
   up: '<polyline points="18 15 12 9 6 15"/>',
@@ -110,7 +113,8 @@ export async function mountFormEditor(container, { templateId, staff }) {
   let publishedSig = version > 0 ? null : ""; // null = still loading the published copy
   let publishing = false;
 
-  const ctx = (live) => ({ live, fields, consentForms, letterhead, calcValues: null });
+  let aftercareMap = null; // aftercare id -> aftercare, once loaded
+  const ctx = (live) => ({ live, fields, consentForms, letterhead, calcValues: null, aftercare: aftercareMap });
   const current = () => fields.find((f) => f.id === sel) || null;
   const signature = () => JSON.stringify(formSnapshot({ name, fields, settings }));
 
@@ -426,7 +430,12 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
     if (!build) refreshPreview();
     hydrateBankImages(stage);
-    if (!build) attachAnnotators(stage, fields);
+    if (!build) {
+      attachAnnotators(stage, fields);
+      fields.filter((f) => f.type === "aftercare").forEach((f) => {
+        mountAftercareField(stage.querySelector(`[data-fid="${CSS.escape(f.id)}"]`), f, { onChange: refreshPreview });
+      });
+    }
   }
 
   /* ---------- Settings panel ---------- */
@@ -856,7 +865,16 @@ export async function mountFormEditor(container, { templateId, staff }) {
     const f = current();
     if (!f) return;
 
-    if (e.target.closest('[data-act="img-pick"]')) { pickImage(f); return; }
+    if (e.target.closest('[data-act="ac-pick"]')) {
+      openAftercarePicker({ selected: f.items || [] }).then((ids) => {
+        if (!ids || !root.isConnected) return;
+        const target = fields.find((x) => x.id === f.id);
+        if (!target) return;
+        target.items = ids;
+        changed(); renderStage(); renderInspector();
+      });
+      return;
+    }
     if (e.target.closest('[data-act="img-clear"]')) {
       f.fileId = ""; f.fileName = "";
       changed(); renderStage(); renderInspector();
@@ -1009,6 +1027,16 @@ export async function mountFormEditor(container, { templateId, staff }) {
       if (f && f.type === "watermark") renderInspector();
     })
     .catch((err) => console.warn("Couldn't load the letterhead:", err));
+
+  listAftercare()
+    .then((list) => {
+      aftercareMap = new Map(list.map((a) => [a.id, a]));
+      if (!root.isConnected) return;
+      renderStage();
+      const f = current();
+      if (f && f.type === "aftercare") renderInspector();
+    })
+    .catch((err) => console.warn("Couldn't load aftercare:", err));
 
   listFormTemplates({ isAdmin: true })
     .then((list) => {

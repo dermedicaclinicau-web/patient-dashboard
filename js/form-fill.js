@@ -17,6 +17,7 @@ import { formTitleHtml } from "./form-fields.js";
 import { hydrateBankImages } from "./image-bank-api.js";
 import { attachAnnotators } from "./form-annotate.js";
 import { bankImage } from "./image-bank-api.js";
+import { mountAftercareField } from "./aftercare-field.js";
 
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const BAR_ICONS = {
@@ -218,6 +219,8 @@ export function readField(f, w, { pads = {}, calc = {}, consent = {}, annots = {
       const a = annots[f.id];
       return a && !a.isEmpty() ? { drawn: true } : "";
     }
+    case "aftercare":
+      return w.acRead ? w.acRead() : { items: [] };
     case "consent_status":
       return consent[f.id] || { found: false, date: "", submissionId: "", name: "" };
   }
@@ -437,6 +440,10 @@ export async function mountFormFill(container, param, { staff } = {}) {
       const el = w.querySelector(".fe-photo");
       if (el) el.outerHTML = '<p class="fe-help">Taking photos on forms is coming soon.</p>';
     }
+  });
+  // Aftercare panels
+  fields.filter((f) => f.type === "aftercare").forEach((f) => {
+    mountAftercareField(wrap(f.id), f, { onChange: () => { dirty = true; } });
   });
 
   // Fill in from the patient's record
@@ -801,6 +808,10 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
           })
           .catch(() => { if (box.isConnected) box.innerHTML = '<span class="fe-img-missing">This picture is missing from the Image Bank</span>'; });
       }
+      return;
+    }
+    if (f.type === "aftercare") {
+      mountAftercareField(w, f, { saved: sub.answers[f.id] || null });
       return;
     }
     writeField(f, w, sub.answers[f.id]);

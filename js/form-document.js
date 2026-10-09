@@ -5,6 +5,7 @@
 import { formatCalc } from "./form-calc.js";
 import { visibleIds } from "./form-conditions.js";
 import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing, textBlockHtml } from "./form-fields.js";
+import { cleanRichHtml } from "./rich-html.js";
 
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
 const LOGO_RE = /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/;
@@ -191,6 +192,14 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {} }) {
     const sig = sub.signatures[f.id];
     const label = st.hideLabel ? "" : esc(f.label || "");
     const gap = { tight: 2, normal: 4, wide: 10 }[st.gap] || 4;
+    if (f.type === "aftercare") {
+      const items = v && Array.isArray(v.items) ? v.items : [];
+      if (!items.length) return "";
+      return `<div style="${box}">${label ? `<div class="ql" style="margin:10px 0 ${gap}px;">${label}</div>` : ""}${
+        items.map((it) => `<div class="ac-pdf" style="margin:0 0 12px;">
+          <h2 style="font-size:12.5pt;margin:8px 0 6px;color:#0f766e;">${esc(it.title || "Aftercare")}</h2>
+          <div class="fe-rich" style="font-size:10pt;line-height:1.55;">${cleanRichHtml(it.html || "")}</div></div>`).join("")}</div>`;
+    }
     if (f.type === "image") {
       if (f.source === "staff" || !f.fileId || !images[f.fileId]) return "";
       const { pct, maxH } = imageSizing(f);
