@@ -9,7 +9,6 @@ import { cleanRichHtml } from "./rich-html.js";
 import { emailShell, fillTemplate, fillTemplateHtml, clinicDetails } from "./task-tokens.js";
 import { SSP_STEPS } from "./ssp-products-api.js";
 import { SSP_DEFAULTS, PDF_DEFAULTS, FONTS, CLOSING_HTML } from "./ssp-defaults.js";
-import { buildSspDocument } from "./ssp-document.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 import { buildSspDocument, marginPx } from "./ssp-document.js";
