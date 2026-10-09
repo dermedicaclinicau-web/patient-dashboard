@@ -1,5 +1,5 @@
 // Skin Script Protocol: preview, download, send to printer, email to patient.
-import { buildSspDocument, longDate } from "./ssp-document.js";
+import { buildSspDocument, longDate, marginPx } from "./ssp-document.js";
 import { getSspSettings } from "./ssp-settings.js";
 import { docToPdf, deliveryError } from "./form-delivery.js";
 import { getLetterhead } from "./form-templates.js";
@@ -8,7 +8,6 @@ import { fillTemplate, fillTemplateHtml, emailShell, clinicDetails, EMAIL_RE } f
 import { createRichEditor } from "./rich-editor.js";
 import { callApi } from "./appointments.js";
 import { showToast } from "./utils.js";
-import { buildSspDocument, longDate, marginPx } from "./ssp-document.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
