@@ -142,11 +142,14 @@ export async function openSspPreview({ record, patient = null, staff = null, onS
 
 async function openSspEmail({ rec, patient, staff, settings, letterhead, pdf }) {
   let tpl = null;
-  if (settings && settings.emailTemplate) {
-    try { const t = await getTaskType(settings.emailTemplate); if (t && t.status === "live") tpl = t; }
-    catch (err) { console.warn("SSP email template unavailable, using the standard email:", err); }
+  const s = settings || {};
+  if (s.emailSource === "template" && s.emailTemplate) {
+    try { const t = await getTaskType(s.emailTemplate); if (t && t.status === "live") tpl = t; }
+    catch (err) { console.warn("SSP email template unavailable, using the email from Skin Script design:", err); }
   }
-  const src = tpl ? { subject: tpl.subject, body: tpl.body, style: tpl.style } : STANDARD;
+  const src = tpl
+    ? { subject: tpl.subject, body: tpl.body, style: tpl.style }
+    : { subject: s.emailSubject || STANDARD.subject, body: s.emailHtml || STANDARD.body, style: s.emailStyle || {} };
   const c = clinicDetails(letterhead);
   const p = patient || {};
   const vals = new Map();

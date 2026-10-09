@@ -111,7 +111,7 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
           <input type="search" class="fe-input ssp-filter" data-role="q" placeholder="Filter products…" aria-label="Filter products" />
           <label class="ssp-toggle"><input type="checkbox" data-role="selonly" /> Show selected only</label>
           <button type="button" class="btn-ghost" data-act="clear">Clear all</button>
-          ${isAdmin ? `<button type="button" class="btn-ghost" data-act="settings">SSP Settings</button>
+          ${isAdmin ? `<button type="button" class="btn-ghost" data-act="settings">Skin Script design</button>
             <button type="button" class="ssp-config" data-act="config">${I.gear}<span>Products Config</span></button>` : ""}
         </div>
       </div>
@@ -470,7 +470,7 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
     });
     if (res && res.saved) location.hash = backHref; // saved from the preview: back to the patient
   }
-  
+
   /* ---------- Start ---------- */
   let lastRecord = null;
   let draft = null;
