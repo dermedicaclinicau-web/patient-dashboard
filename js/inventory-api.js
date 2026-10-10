@@ -141,6 +141,10 @@ export function packText(p) {
   return pack.charAt(0).toUpperCase() + pack.slice(1) + dose;
 }
 
+// What the packaging calls a batch: "Batch", "Lot", "LOT"…
+export const batchName = (p) => (p && p.batchLabel) || "Batch";
+export const batchText = (p, batch) => (batch ? `${batchName(p)} ${batch}` : "");
+
 export function cleanProduct(p = {}) {
   const r = p.reorder || {};
   const dosePer = dosePerOf(p.dosePer);
@@ -160,6 +164,7 @@ export function cleanProduct(p = {}) {
     cost: moneyOrNull(p.cost),
     price: moneyOrNull(p.price),
     tracked: p.tracked === true,
+    batchLabel: clip(p.batchLabel, 20) || "Batch",
     reorder: { shelf: intOrNull(r.shelf), jt: intOrNull(r.jt) },
     notes: clip(p.notes, 1000),
     active: p.active !== false,
@@ -247,7 +252,7 @@ export async function applyStock(product, { type, ops, reason = "", note = "" },
     .filter((l) => l.delta);
   if (!lines.length) throw new Error("Nothing has changed.");
   if (product.tracked && lines.some((l) => !l.batch || !l.expiry)) {
-    throw new Error("This product needs a batch number and an expiry date.");
+    throw new Error(`This product needs a ${batchName(product).toLowerCase()} number and an expiry date.`);
   }
 
   const pRef = doc(db, "inv_products", product.id);
@@ -274,7 +279,7 @@ export async function applyStock(product, { type, ops, reason = "", note = "" },
       const have = snap.exists() ? Number(snap.data().qty) || 0 : 0;
       const next = have + delta;
       if (next < 0) {
-        throw new Error(`Not enough in ${locLabel(line.loc)}${line.batch ? ` (batch ${line.batch})` : ""}: there ${
+        throw new Error(`Not enough in ${locLabel(line.loc)}${line.batch ? ` (${batchText(product, line.batch)})` : ""}: there ${
           have === 1 ? "is" : "are"} only ${plural(have, product.stockUnit)}.`);
       }
       stock[line.loc] = Math.max(0, stock[line.loc] + delta);
@@ -685,7 +690,7 @@ export async function receivePo(poId, receipt, staff) {
       if (!p) { w.splits = []; return; }                       // free-text line: ticked off, no stock
       w.splits = w.splits.map((s) => ({ ...s, batch: p.tracked ? s.batch : "", expiry: p.tracked ? s.expiry : "" }));
       if (p.tracked && w.splits.some((s) => !s.batch || !s.expiry)) {
-        throw new Error(`${p.name} needs a batch number and expiry date for each batch.`);
+        throw new Error(`${p.name} needs a ${batchName(p).toLowerCase()} number and expiry date.`);
       }
     });
 
@@ -1129,8 +1134,9 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
     const total = round1(rows.reduce((a, r) => a + r.amount, 0));
     const short = round1(rows.reduce((a, r) => a + (r.amount - r.taken), 0));
     return { fid: l.fid, productId: clip(l.productId, 60), name: clip(l.name, 150), kind: l.kind === "kit" ? "kit" : "storage",
-      unit: clip(l.unit, 30), doseUnit: clip(l.doseUnit || "", 20), doseTotal: Math.round(rows.reduce((a, r) => a + r.dose, 0) * 100) / 100,
+      unit: clip(l.unit, 30), batchLabel: clip(l.batchLabel || "", 20), doseUnit: clip(l.doseUnit || "", 20), doseTotal: Math.round(rows.reduce((a, r) => a + r.dose, 0) * 100) / 100,
       waste: Math.round(rows.reduce((a, r) => a + r.waste, 0) * 100) / 100,
+      total, short, rows, block: l.block === true };
   });
 
   const blocked = out.find((l) => l.block && l.short > 0);

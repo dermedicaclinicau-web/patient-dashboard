@@ -301,10 +301,10 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
         ? lines.map((l) => (l.rows && l.rows.length ? l.rows : [{ amount: l.total }]).map((r, i) => `<tr>
             <td>${i ? "" : esc(l.name)}</td><td>${esc(l.kind !== "kit" && l.doseUnit && r.dose
               ? `${+Number(r.dose).toFixed(2)} ${l.doseUnit}` : `${+Number(r.amount || 0).toFixed(1)} ${l.unit || ""}`)}</td>
-            <td>${esc(r.batch || "")}</td><td>${esc(r.expiry ? niceDate(r.expiry) : "")}</td></tr>`).join("")).join("")
+                        <td>${esc(r.batch ? `${l.batchLabel || "Batch"} ${r.batch}` : "")}</td><td>${esc(r.expiry ? niceDate(r.expiry) : "")}</td></tr>`).join("")).join("")
         : items.map((it) => `<tr><td>${esc(it.name)}</td><td style="height:24px"></td><td></td><td></td></tr>`).join("");
       return `<div class="q" style="${box}">${label ? `<div class="ql" style="margin-bottom:${gap}px;">${label}</div>` : ""}` +
-        `<table class="grid"><tr><th>Product</th><th>Amount</th><th>Batch</th><th>Expiry</th></tr>${rows}</table></div>`;
+        `<table class="grid"><tr><th>Product</th><th>Amount</th><th>Batch / Lot</th><th>Expiry</th></tr>${rows}</table></div>`;
     }
     if (f.type === "image") {
       if (f.source === "staff") {

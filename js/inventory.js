@@ -1,6 +1,6 @@
 // Inventory (#/inventory/<tab>): stock on the Shelf and in JT storage, products, suppliers and the activity log.
 import {
-  INV_CATEGORIES, LOCATIONS,qtyText, packText, WRITEOFF_REASONS, ADD_REASONS, MOVE_TYPES, REQ_STATUS, PO_STATUS, catLabel, locLabel, plural, unitPlural,
+  INV_CATEGORIES, LOCATIONS, qtyText, packText, batchName, batchText, WRITEOFF_REASONS, ADD_REASONS, MOVE_TYPES, REQ_STATUS, PO_STATUS, catLabel, locLabel, plural, unitPlural,
   expiryState, fefo, reqNumber, myUid, suggestOrder, listProducts, saveProduct, listSuppliers, saveSupplier, listAllLots, listMoves,
   applyStock, listRequests, setRequestStatus, cancelRequest, getRequestSettings, saveRequestSettings,
   listPos, createPo, poTotals, itemOnPo, lineFromProduct, cleanPoLine,
@@ -41,17 +41,17 @@ function openDialog(cls, html) {
   return dlg;
 }
 
-function linesText(m) {
+function linesText(m, label = "Batch") {
   return (m.lines || []).map((l) => `${locLabel(l.loc)} ${l.delta > 0 ? "+" : "−"}${Math.abs(l.delta)}${
-    l.batch ? ` (batch ${l.batch})` : ""}`).join(" · ");
+    l.batch ? ` (${label} ${l.batch})` : ""}`).join(" · ");
 }
-function movesHtml(moves, showProduct = true) {
+function movesHtml(moves, showProduct = true, labelOf = () => "Batch") {
   if (!moves.length) return '<p class="tb-none">No stock changes yet.</p>';
   return `<ul class="inv-moves">${moves.map((m) => `
     <li>
       <span class="inv-m-when">${esc(when(m.at))}</span>
       <span class="inv-m-main"><strong>${esc(MOVE_TYPES[m.type] || m.type)}</strong>${showProduct ? ` · ${esc(m.productName || "")}` : ""}
-        <small>${esc(linesText(m))}${m.reason ? ` · ${esc(m.reason)}` : ""}${m.note ? ` · ${esc(m.note)}` : ""}</small></span>
+        <small>${esc(linesText(m, labelOf(m.productId)))}${m.reason ? ` · ${esc(m.reason)}` : ""}${m.note ? ` · ${esc(m.note)}` : ""}</small></span>
       <span class="inv-m-by">${esc(m.by || "")}</span>
     </li>`).join("")}</ul>`;
 }
@@ -99,6 +99,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   };
   const supplierOf = (id) => st.suppliers.find((s) => s.id === id) || null;
   const lotsOf = (pid) => st.lots.filter((l) => l.productId === pid).sort(fefo);
+  const labelOf = (pid) => batchName(st.products.find((p) => p.id === pid));
   function flags(p) {
     const out = [];
     if (lowAt(p, "shelf")) out.push(["warn", "Low on Shelf"]);
@@ -250,7 +251,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     body.innerHTML = '<div class="skeleton" style="height:240px;border-radius:14px"></div>';
     try {
       const moves = await listMoves({ max: 200 });
-      if (root.isConnected) body.innerHTML = movesHtml(moves, true);
+      if (root.isConnected) body.innerHTML = movesHtml(moves, true, labelOf);
     } catch (err) {
       console.error("Inventory activity failed:", err);
       if (root.isConnected) body.innerHTML = `<div class="tm-empty is-error">${esc(errText(err, "Couldn't load the activity."))}</div>`;
@@ -307,6 +308,10 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         <label class="fe-check"><input type="checkbox" name="tracked"${x.tracked ? " checked" : ""}${hasStock ? " disabled" : ""} />
           Needs a batch number and expiry date (e.g. Xeomin)</label>
         ${hasStock ? '<small class="fe-note">This can only be changed while there is no stock. Count it to zero first.</small>' : ""}
+        <label class="lh-field"><span class="lh-label">What the packaging calls it</span>
+          <input name="batchLabel" maxlength="20" list="inv-batch-names" placeholder="Batch" value="${val(x.batchLabel && x.batchLabel !== "Batch" ? x.batchLabel : "")}" />
+          <datalist id="inv-batch-names"><option value="Batch"></option><option value="Lot"></option><option value="LOT"></option><option value="Batch / Lot"></option></datalist>
+          <small class="fe-note">Used wherever it's entered or printed, e.g. "Lot 12345". Leave empty for "Batch".</small></label>
         <label class="fe-check"><input type="checkbox" name="active"${x.active !== false ? " checked" : ""} /> Active (shown in stock and ordering)</label>
         <label class="lh-field"><span class="lh-label">Notes (optional)</span><textarea name="notes" rows="2" maxlength="1000">${esc(x.notes || "")}</textarea></label>
         <p class="lh-error" role="alert" hidden></p>
@@ -345,6 +350,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           packSize: f.packSize.value, cost: f.cost.value, price: f.price.value, barcode: f.barcode.value,
           dosePer: f.dosePer.value, doseUnit: f.doseUnit.value,
           usage: f.usage.value,
+          batchLabel: f.batchLabel.value,
           reorder: { shelf: f.reShelf.value, jt: f.reJt.value },
           tracked: hasStock ? x.tracked : f.tracked.checked, active: f.active.checked, notes: f.notes.value,
         }, staff);
@@ -421,7 +427,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   function stockAction(p, mode) {
     const lots = lotsOf(p.id);
     const unit = p.stockUnit;
-    const lotLabel = (l) => `${locLabel(l.loc)} · Batch ${l.batch} · Exp ${niceDate(l.expiry)} · ${plural(l.qty, unit)}`;
+    const lotLabel = (l) => `${locLabel(l.loc)} · ${batchText(p, l.batch)} · Exp ${niceDate(l.expiry)} · ${plural(l.qty, unit)}`;
     const qtyField = (label) => `<label class="lh-field"><span class="lh-label">${label}</span>
       <div class="fe-num"><input class="fe-input" name="qty" type="number" min="1" step="1" /><span>${esc(unitPlural(unit))}</span></div></label>`;
     let inner = "";
@@ -434,7 +440,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       inner = `
         <div class="lh-field"><span class="lh-label">Where</span>${seg("loc", LOCATIONS.map((l) => [l.key, l.label]), "shelf")}</div>
         ${p.tracked ? `<div class="inv-two">
-          <label class="lh-field"><span class="lh-label">Batch number</span><input name="batch" maxlength="40" autocomplete="off" /></label>
+        <label class="lh-field"><span class="lh-label">${esc(batchName(p))} number</span><input name="batch" maxlength="40" autocomplete="off" /></label>
           <label class="lh-field"><span class="lh-label">Expiry date</span><input name="expiry" type="date" /></label></div>` : ""}
         ${qtyField("How many")}
         <label class="lh-field"><span class="lh-label">Reason</span><select class="fb-select" name="reason">${ADD_REASONS.map((r) => `<option>${r}</option>`).join("")}</select></label>`;
@@ -442,7 +448,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       title = "Count stock";
       sub = "Enter what's physically there. Any difference is logged.";
       inner = p.tracked
-        ? (lots.length ? `<table class="inv-table"><thead><tr><th>Storage</th><th>Batch</th><th>Expiry</th><th>System</th><th>Counted</th></tr></thead><tbody>${
+            ? (lots.length ? `<table class="inv-table"><thead><tr><th>Storage</th><th>${esc(batchName(p))}</th><th>Expiry</th><th>System</th><th>Counted</th></tr></thead><tbody>${
             lots.map((l, i) => `<tr><td>${esc(locLabel(l.loc))}</td><td>${esc(l.batch)}</td><td>${esc(niceDate(l.expiry))}</td><td>${l.qty}</td>
               <td><input class="fe-input inv-num" type="number" min="0" step="1" data-count="${i}" value="${l.qty}" aria-label="Counted" /></td></tr>`).join("")}</tbody></table>
             <small class="fe-note">A batch that isn't listed? Close this and use Add stock.</small>`
@@ -456,7 +462,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       const from = p.stock.shelf > 0 || p.stock.jt <= 0 ? "shelf" : "jt";
       inner = `
         <div class="lh-field"><span class="lh-label">Direction</span>${seg("from", [["shelf", "Shelf → JT storage"], ["jt", "JT storage → Shelf"]], from)}</div>
-        ${p.tracked ? '<label class="lh-field"><span class="lh-label">Batch</span><select class="fb-select" name="lot"></select></label>' : ""}
+        ${p.tracked ? `<label class="lh-field"><span class="lh-label">${esc(batchName(p))}</span><select class="fb-select" name="lot"></select></label>` : ""}
         ${qtyField("How many")}
         <p class="inv-hint" data-role="avail"></p>`;
     } else {
@@ -464,7 +470,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       sub = "Removes stock that can't be used. The reason is logged.";
       inner = `
         ${p.tracked
-          ? (lots.length ? `<label class="lh-field"><span class="lh-label">Batch</span><select class="fb-select" name="lot">${lots.map((l, i) =>
+          ? (lots.length ? `<label class="lh-field"><span class="lh-label">${esc(batchName(p))}</span><select class="fb-select" name="lot">${lots.map((l, i) =>
               `<option value="${i}">${esc(lotLabel(l))}${expiryState(l.expiry) === "expired" ? " · EXPIRED" : ""}</option>`).join("")}</select></label>`
             : '<p class="tb-none">There is no stock to write off.</p>')
           : `<div class="lh-field"><span class="lh-label">From</span>${seg("loc", LOCATIONS.map((l) => [l.key, `${l.label} (${p.stock[l.key]})`]), p.stock.shelf > 0 ? "shelf" : "jt")}</div>`}
@@ -497,7 +503,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         if (p.tracked) {
           const list = moveLots();
           f.lot.innerHTML = list.length
-            ? list.map((l, i) => `<option value="${i}">${esc(`Batch ${l.batch} · Exp ${niceDate(l.expiry)} · ${plural(l.qty, unit)}`)}</option>`).join("")
+            ? list.map((l, i) => `<option value="${i}">${esc(`${batchText(p, l.batch)} · Exp ${niceDate(l.expiry)} · ${plural(l.qty, unit)}`)}</option>`).join("")
             : '<option value="">Nothing here to move</option>';
           const l = list[Number(f.lot.value)];
           avail = l ? l.qty : 0;
@@ -520,7 +526,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         try {
           if (mode === "add") {
             if (!(qty >= 1)) throw new Error("Enter how many.");
-            if (p.tracked && (!f.batch.value.trim() || !f.expiry.value)) throw new Error("Enter the batch number and expiry date.");
+            if (p.tracked && (!f.batch.value.trim() || !f.expiry.value)) throw new Error(`Enter the ${batchName(p).toLowerCase()} number and expiry date.`);
             ops = [{ loc: f.loc.value, batch: p.tracked ? f.batch.value : "", expiry: p.tracked ? f.expiry.value : "", delta: qty }];
           } else if (mode === "count") {
             if (p.tracked) {
@@ -610,9 +616,9 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
             <button type="button" class="lh-btn" data-stock="writeoff">Write off</button>
             <button type="button" class="lh-btn is-quiet" data-act="edit">Edit product</button>` : ""}
         </div>` : ""}
-        ${p.tracked ? `<div class="inv-pd-sec"><h4>Batches <small>(oldest expiry first)</small></h4>${lots.length
-          ? `<table class="inv-table"><thead><tr><th>Storage</th><th>Batch</th><th>Expiry</th><th>Qty</th></tr></thead><tbody>${lots.map((l) => {
-              const ex = expiryState(l.expiry);
+        ${p.tracked ? `<div class="inv-pd-sec"><h4>Stock by ${esc(batchName(p).toLowerCase())} <small>(oldest expiry first)</small></h4>${lots.length
+          ? `<table class="inv-table"><thead><tr><th>Storage</th><th>${esc(batchName(p))}</th><th>Expiry</th><th>Qty</th></tr></thead><tbody>${lots.map((l) => {
+           const ex = expiryState(l.expiry);
               return `<tr><td>${esc(locLabel(l.loc))}</td><td>${esc(l.batch)}</td>
                 <td>${esc(niceDate(l.expiry))}${ex ? ` <span class="inv-flag is-${ex === "expired" ? "bad" : "warn"}">${ex === "expired" ? "Expired" : "Soon"}</span>` : ""}</td>
                 <td>${esc(qtyText(p, l.qty))}</td></tr>`;
@@ -624,7 +630,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
             .filter(Boolean).map((x) => ` · ${x.startsWith("<") ? x : esc(x)}`).join("")}</p></div>` : ""}
         <div class="inv-pd-sec"><h4>Recent activity</h4><div data-role="moves"><p class="tb-none">Loading…</p></div></div>`;
       listMoves({ productId: id, max: 15 })
-        .then((m) => { const el = box.querySelector('[data-role="moves"]'); if (el) el.innerHTML = movesHtml(m, false); })
+        .then((m) => { const el = box.querySelector('[data-role="moves"]'); if (el) el.innerHTML = movesHtml(m, false, labelOf); })
         .catch(() => { const el = box.querySelector('[data-role="moves"]'); if (el) el.innerHTML = '<p class="tb-none tb-bad">Couldn\'t load the activity.</p>'; });
     }
 

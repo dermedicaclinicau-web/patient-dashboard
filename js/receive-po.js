@@ -3,7 +3,7 @@
 //   #/inventory/receive/<poId> → docket photo, what arrived, where it was put (storage, batch, expiry)
 import {
   LOCATIONS, PO_STATUS, getPo, listPos, listProducts, listReceipts, receivePo, uploadDocket,
-  syncReceivedRequests, plural, unitPlural, locLabel, expiryState,
+  syncReceivedRequests, plural, unitPlural, locLabel, expiryState, batchName,
 } from "./inventory-api.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -74,8 +74,8 @@ export async function mountReceivePo(root, poId, staff) {
     return `<div class="rcv-splits">${s.splits.map((x, i) => `<div class="rcv-split${tr ? " is-tracked" : ""}" data-i="${i}">
         <label><span>Put in</span><select data-f="loc">${LOCATIONS.map((o) =>
           `<option value="${o.key}"${o.key === x.loc ? " selected" : ""}>${esc(o.label)}</option>`).join("")}</select></label>
-        ${tr ? `<label><span>Batch</span><input data-f="batch" value="${esc(x.batch)}" maxlength="40" autocapitalize="characters" autocomplete="off" placeholder="Lot / batch #" /></label>
-          <label><span>Expiry</span><input data-f="expiry" type="date" value="${esc(x.expiry)}" /></label>` : ""}
+        ${tr ? `<label><span>${esc(batchName(prod.get(l.productId)))}</span><input data-f="batch" value="${esc(x.batch)}" maxlength="40" autocapitalize="characters" autocomplete="off" placeholder="${esc(batchName(prod.get(l.productId)))} #" /></label>
+        <label><span>Expiry</span><input data-f="expiry" type="date" value="${esc(x.expiry)}" /></label>` : ""}
         <label><span>${esc(unitPlural(l.stockUnit))}</span><input data-f="qty" type="number" min="0" step="1" inputmode="numeric" value="${x.qty}" /></label>
         ${s.splits.length > 1 ? `<button type="button" class="rcv-x" data-act="rm" aria-label="Remove this row">×</button>` : "<span></span>"}
         <span class="rcv-exp" data-role="exp"></span>
@@ -255,7 +255,7 @@ export async function mountReceivePo(root, poId, staff) {
       const need = s.arrived * l.packSize, put = sumOf(s);
       if (put !== need) return toast(`${l.name}: ${plural(need, l.stockUnit)} arrived, but ${put} have been put away.`, true);
       if (tracked(l) && s.splits.some((x) => int(x.qty) && (!String(x.batch).trim() || !x.expiry))) {
-        return toast(`${l.name} needs a batch number and expiry date.`, true);
+      return toast(`${l.name} needs a ${batchName(prod.get(l.productId)).toLowerCase()} number and expiry date.`, true);
       }
     }
     const expired = picked.filter(({ l, s }) => tracked(l) && s.splits.some((x) => expiryState(x.expiry) === "expired"));

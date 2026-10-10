@@ -447,6 +447,9 @@ export async function mountFormEditor(container, { templateId, staff }) {
       fields.filter((f) => f.type === "aftercare").forEach((f) => {
         mountAftercareField(stage.querySelector(`[data-fid="${CSS.escape(f.id)}"]`), f, { onChange: refreshPreview });
       });
+      stage.querySelectorAll("[data-cs-host]").forEach((h) => {
+        h.innerHTML = '<p class="fe-help">Staff see their kit and Shelf stock here, and record what they used.</p>';
+      });
     }
   }
 

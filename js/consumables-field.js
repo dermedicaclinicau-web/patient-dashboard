@@ -6,7 +6,7 @@
 // Stock only changes when the form is saved, in the same transaction as the record.
 // (Take from Shelf and Borrow happen straight away: they're real handovers, logged on their own.)
 import {
-  listProducts, listAllLots, listKits, isKitProduct, kitUnits, plural, unitPlural, fefo, lotId, INV_CATEGORIES,
+  listProducts, listAllLots, listKits, isKitProduct, kitUnits, plural, unitPlural, fefo, lotId, INV_CATEGORIES, batchName, batchText,
 } from "./inventory-api.js";
 import { takeFromShelfDialog, borrowDialog } from "./inventory-kits.js";
 import { can } from "./perms.js";
@@ -59,8 +59,8 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {} } = {})
     if (isKitProduct(p)) {
       return stock.kits.filter((k) => k.productId === p.id && kitUnits(k) > 0).map((k) => ({
         ref: k.id, batch: k.batch, expiry: k.expiry, avail: kitUnits(k),
-        label: `${k.batch ? `Batch ${k.batch}` : "No batch"} · Exp ${niceDate(k.expiry)} · ${fmt(kitUnits(k))} ${k.doseUnit}${k.open ? ` (${fmt(k.open)} opened)` : ""}`,
-      }));
+        label: `${batchText(p, k.batch) || "No number"} · Exp ${niceDate(k.expiry)} · ${fmt(kitUnits(k))} ${k.doseUnit}${k.open ? ` (${fmt(k.open)} opened)` : ""}`,
+     }));
     }
     if (!p.tracked) {
       const id = lotId(p.id, l.loc, "", "");
@@ -70,8 +70,8 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {} } = {})
     }
     return stock.lots.filter((x) => x.productId === p.id && x.loc === l.loc && x.qty > 0).sort(fefo).map((x) => ({
       ref: x.id, batch: x.batch, expiry: x.expiry, avail: x.qty,
-      label: `Batch ${x.batch} · Exp ${niceDate(x.expiry)} · ${plural(x.qty, p.stockUnit)}`,
-    }));
+      label: `${batchText(p, x.batch)} · Exp ${niceDate(x.expiry)} · ${plural(x.qty, p.stockUnit)}`,
+     }));
   }
 
   // Default amounts from the form, once the product is known
@@ -80,7 +80,13 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {} } = {})
     if (!p) return;
     l.rows.forEach((r) => {
       if (r.preset === null || r.preset === undefined) return;
-      if (dosed(p)) { r.dose = r.preset; r.amount = syringesFor(p, num(r.preset)); }
+      if (dosed(p)) {
+        if (l.rows.some((r) => num(r.dose) > 0 && !(num(r.amount) >= 1))) return `${name}: enter how many ${unitPlural(p.stockUnit)} were opened.`;
+        if (l.rows.some((r) => num(r.amount) > 0 && !(num(r.dose) > 0))) return `${name}: enter how many ${p.doseUnit} were injected.`;
+        if (l.rows.some((r) => num(r.dose) > num(r.amount) * p.dosePer + 0.001)) {
+          return `${name}: ${fmt(clinicalTotal(l, p))} ${p.doseUnit} is more than ${plural(l.rows.reduce((a, r) => a + num(r.amount), 0), p.stockUnit)} hold. Check the ${unitPlural(p.stockUnit)} opened.`;
+        }
+      }
       else r.amount = r.preset;
       r.preset = null;
     });
@@ -184,7 +190,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {} } = {})
           <option value="jt"${l.loc === "jt" ? " selected" : ""}>JT storage</option></select>`}
         ${l.extra ? '<button type="button" class="hx-x" data-cs="remove-line" aria-label="Remove">×</button>' : ""}
       </div>
-      ${dosed(p) ? `<div class="cs-cols"><span>Batch</span><span>${esc(p.doseUnit)} injected</span><span>${esc(unitPlural(p.stockUnit))} opened</span></div>` : ""}
+      ${dosed(p) ? `<div class="cs-cols"><span>${esc(batchName(p))}</span><span>${esc(p.doseUnit)} injected</span><span>${esc(unitPlural(p.stockUnit))} opened</span></div>` : ""}
       ${l.rows.map((r, j) => rowHtml(l, p, src, r, j)).join("")}
       <div class="cs-foot">
         <span data-role="msg">${msgHtml(l)}</span>
@@ -313,7 +319,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {} } = {})
     return {
       fid: f.id, productId: p.id, name: p.name, kind: kit ? "kit" : "storage",
       unit: kit ? p.doseUnit : p.stockUnit, doseUnit: kit || dosed(p) ? p.doseUnit : "",
-      dosePer: dosed(p) ? p.dosePer : 0,
+      dosePer: dosed(p) ? p.dosePer : 0, batchLabel: batchName(p),
       loc: kit ? "kit" : l.loc, block: f.ifShort === "block", rows,
     };
   }).filter(Boolean));
@@ -360,10 +366,10 @@ export function consumablesViewHtml(v) {
   const lines = v && Array.isArray(v.lines) ? v.lines : [];
   if (!lines.length) return '<p class="fe-help">Nothing recorded.</p>';
   const from = (r) => (r.from === "kit" ? "Clinician's kit" : r.from === "jt" ? "JT storage" : "Shelf");
-  return `<table class="inv-table cs-view"><thead><tr><th>Product</th><th>Amount</th><th>Batch</th><th>Expiry</th><th>From</th></tr></thead><tbody>${
-    lines.map((l) => (l.rows && l.rows.length ? l.rows : [{ amount: l.total }]).map((r, i) => `<tr>
+  return `<table class="inv-table cs-view"><thead><tr><th>Product</th><th>Amount</th><th>Batch / Lot</th><th>Expiry</th><th>From</th></tr></thead><tbody>${
+  lines.map((l) => (l.rows && l.rows.length ? l.rows : [{ amount: l.total }]).map((r, i) => `<tr>
       <td>${i ? "" : `<strong>${esc(l.name)}</strong>${l.short > 0 ? ` <span class="inv-flag is-warn">Stock short by ${fmt(l.short)} ${esc(l.kind === "kit" ? l.unit : unitPlural(l.unit))}</span>` : ""}`}</td>
-      <td>${esc(consumableAmountText(l, r))}</td><td>${esc(r.batch || "—")}</td>
+      <td>${esc(consumableAmountText(l, r))}</td>      <td>${esc(r.batch ? `${l.batchLabel || "Batch"} ${r.batch}` : "—")}</td>
       <td>${esc(r.expiry ? niceDate(r.expiry) : "—")}</td><td>${esc(from(r))}</td></tr>`).join("")).join("")}</tbody></table>`;
 }
 

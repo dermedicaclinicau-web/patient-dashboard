@@ -1,7 +1,7 @@
 // Inventory → Kits: injectables each injector carries (e.g. Xeomin), JT storage releases,
 // borrowing between colleagues, and treatment records saved short.
 import {
-  plural, unitPlural, expiryState, fefo, MOVE_TYPES, myUid, listAllLots,
+  plural, unitPlural, expiryState, fefo, MOVE_TYPES, myUid, listAllLots, batchName, batchText,
   isKitProduct, kitUnits, listKits, listMyKitMoves, kitTake, kitOpen, kitReturn, kitDiscard, kitBorrow,
   REL_STATUS, listReleases, requestRelease, approveRelease, declineRelease, cancelRelease,
   LOAN_STATUS, listLoans, answerLoan, listShortUsage,
@@ -81,9 +81,9 @@ export async function takeFromShelfDialog(p, staff, lots = null) {
   return askDialog({
     title: `Take ${p.name} from the Shelf`,
     sub: "Unopened vials go into your kit straight away. The oldest expiry is listed first.",
-    inner: `${p.tracked ? `<label class="lh-field"><span class="lh-label">Batch</span><select class="fb-select" name="lot">${list.map((l, i) =>
-        `<option value="${i}">Batch ${esc(l.batch)} · Exp ${esc(niceDate(l.expiry))} · ${esc(plural(l.qty, p.stockUnit))}</option>`).join("")}</select></label>` : ""}
-      <label class="lh-field"><span class="lh-label">How many ${esc(unitPlural(p.stockUnit))}</span>
+    inner: `${p.tracked ? `<label class="lh-field"><span class="lh-label">${esc(batchName(p))}</span><select class="fb-select" name="lot">${list.map((l, i) =>
+        `<option value="${i}">${esc(batchText(p, l.batch))} · Exp ${esc(niceDate(l.expiry))} · ${esc(plural(l.qty, p.stockUnit))}</option>`).join("")}</select></label>` : ""}
+        <label class="lh-field"><span class="lh-label">How many ${esc(unitPlural(p.stockUnit))}</span>
         <input name="n" type="number" min="1" step="1" value="1" inputmode="numeric" /></label>
       <p class="inv-hint" data-role="hint"></p>`,
     submit: "Take into my kit",
@@ -109,8 +109,8 @@ export async function borrowDialog(p, staff) {
     title: `Borrow ${p.name} from a colleague`,
     sub: "The units move into your kit straight away. Your colleague is asked to confirm.",
     inner: `<label class="lh-field"><span class="lh-label">From</span><select class="fb-select" name="k">${list.map((k, i) =>
-        `<option value="${i}">${esc(k.staffName)} · Batch ${esc(k.batch || "—")} · Exp ${esc(niceDate(k.expiry))} · ${fmt(k.open)} ${esc(k.doseUnit)} left</option>`).join("")}</select></label>
-      <label class="lh-field"><span class="lh-label">How many ${esc(p.doseUnit)} you're taking</span>
+        `<option value="${i}">${esc(k.staffName)} · ${esc(batchText(p, k.batch) || "No number")} · Exp ${esc(niceDate(k.expiry))} · ${fmt(k.open)} ${esc(k.doseUnit)} left</option>`).join("")}</select></label>
+        <label class="lh-field"><span class="lh-label">How many ${esc(p.doseUnit)} you're taking</span>
         <input name="n" type="number" min="0.5" step="0.5" inputmode="decimal" /></label>
       <p class="inv-hint" data-role="hint"></p>`,
     submit: "Borrow",
@@ -182,7 +182,7 @@ export async function renderKits(body, { staff, products, lots, canKit, canJt, c
           <div><h4>${esc(p.name)}</h4><small class="muted">${esc(`${p.dosePer} ${p.doseUnit} per ${p.stockUnit}`)}</small></div>
           <div class="kit-total${total ? "" : " is-empty"}"><strong>${fmt(total)}</strong><span>${esc(p.doseUnit)} in my kit</span></div>
         </div>
-        ${ks.length ? `<table class="inv-table kit-table"><thead><tr><th>Batch</th><th>Expiry</th><th>Opened</th><th>Unopened</th><th></th></tr></thead><tbody>${
+        ${ks.length ? `<table class="inv-table kit-table"><thead><tr><th>${esc(batchName(p))}</th><th>Expiry</th><th>Opened</th><th>Unopened</th><th></th></tr></thead><tbody>${
           ks.map((k) => `<tr>
             <td>${esc(k.batch || "—")}</td><td>${esc(niceDate(k.expiry))}${expFlag(k.expiry)}</td>
             <td>${k.open ? `<strong>${fmt(k.open)}</strong> ${esc(k.doseUnit)} left` : "—"}</td>
@@ -249,7 +249,7 @@ export async function renderKits(body, { staff, products, lots, canKit, canJt, c
 
   const allKitsHtml = () => !canApprove ? "" : `
     <section class="kit-sec"><h3>Everyone's kits</h3>${kits.length
-      ? `<table class="inv-table"><thead><tr><th>Staff</th><th>Product</th><th>Batch</th><th>Expiry</th><th>Opened</th><th>Unopened</th><th>Total</th><th>Updated</th></tr></thead><tbody>${
+      ? `<table class="inv-table"><thead><tr><th>Staff</th><th>Product</th><th>Batch / Lot</th><th>Expiry</th><th>Opened</th><th>Unopened</th><th>Total</th><th>Updated</th></tr></thead><tbody>${
         kits.slice().sort((a, b) => a.staffName.localeCompare(b.staffName) || a.productName.localeCompare(b.productName)).map((k) => `<tr>
           <td>${esc(k.staffName)}</td><td>${esc(k.productName)}</td><td>${esc(k.batch || "—")}</td>
           <td>${esc(niceDate(k.expiry))}${expFlag(k.expiry)}</td>
@@ -321,7 +321,7 @@ export async function renderKits(body, { staff, products, lots, canKit, canJt, c
       title: `Release ${plural(r.qty, r.unit)} of ${r.productName}`,
       sub: `For ${r.requestedBy}. It moves from JT storage to the Shelf, and they're emailed.`,
       inner: `<label class="lh-field"><span class="lh-label">Batch</span><select class="fb-select" name="lot">${list.map((l, i) =>
-        `<option value="${i}">Batch ${esc(l.batch || "—")} · Exp ${esc(niceDate(l.expiry))} · ${esc(plural(l.qty, r.unit))}</option>`).join("")}</select></label>`,
+        `<option value="${i}">${esc(batchText(byId.get(r.productId), l.batch) || "No number")} · Exp ${esc(niceDate(l.expiry))} · ${esc(plural(l.qty, r.unit))}</option>`).join("")}</select></label>`,
       submit: "Approve and move to Shelf",
       onSubmit: async (f) => {
         await approveRelease(r, list[Number(f.lot.value)], staff);
