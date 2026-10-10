@@ -14,6 +14,11 @@ import { openImagePicker } from "./image-bank.js";
 import { listPublishedForms, getLetterhead } from "./form-templates.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
+import {
+  cleanSchedule, describeSchedule, scheduleProblems, nextSlots, FREQS, WEEK_ORDER, DAY_NAMES,
+  fmtTime, fmtSlot, getClosedDays, openClosedDaysDialog, listScheduleStates,
+} from "./task-schedule.js";
+import { callApi } from "./appointments.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -112,6 +117,7 @@ export async function mountTaskTypes(main, { staff } = {}) {
         <p class="muted tm-sub">Set a task up once, then anyone can run it from Create new task.</p>
       </div>
       <div class="ff-bar-actions">
+        <button type="button" class="ff-btn" data-act="closed">Clinic closed days</button>
         <button type="button" class="ff-btn" data-act="starters">Add starter tasks</button>
         <button type="button" class="ff-btn is-primary" data-act="new">${I.plus}<span>New task type</span></button>
       </div>
@@ -124,6 +130,15 @@ export async function mountTaskTypes(main, { staff } = {}) {
     <div class="tm-tasks" data-role="list"><div class="skeleton tm-skel"></div><div class="skeleton tm-skel"></div></div>`;
   const list = main.querySelector('[data-role="list"]');
   let types = [];
+  let states = new Map();
+  let closed = [];
+  const schedLine = (t) => {
+    if (t.category !== "staff" || !t.schedule || !t.schedule.enabled) return "";
+    if (t.schedule.paused) return " · 🔁 Paused";
+    const st = states.get(t.id);
+    const next = st && st.nextMs ? st.nextMs : (nextSlots(t.schedule, { count: 1, closed })[0] || {}).ms;
+    return ` · 🔁 ${next ? `Next ${fmtSlot(next)}` : "No more sends"}${st && st.count ? ` · Sent ${st.count}×` : ""}`;
+  };
 
   function render() {
     if (!types.length) {
@@ -141,7 +156,7 @@ export async function mountTaskTypes(main, { staff } = {}) {
         <span class="tm-task-icon">${t.category === "staff" ? I.staff : I.patient}</span>
         <span class="tm-task-main"><strong>${esc(t.name)}</strong>
           <small>${esc([CAT_LABEL[t.category], t.channel === "sms" ? "SMS" : "Email",
-            `${t.fields.length} field${t.fields.length === 1 ? "" : "s"}`, editedAgo(t.updatedAt)].filter(Boolean).join(" · "))}</small></span>
+            `${t.fields.length} field${t.fields.length === 1 ? "" : "s"}`, editedAgo(t.updatedAt)].filter(Boolean).join(" · ") + schedLine(t))}</small></span>
         <span class="tb-pill ${t.status === "live" ? "is-live" : "is-draft"}">${t.status === "live" ? "Live" : "Draft"}</span>
         <span class="tm-task-go">${I.chev}</span>
       </a>`).join("")
@@ -150,7 +165,9 @@ export async function mountTaskTypes(main, { staff } = {}) {
 
   async function load(force = false) {
     try {
-      types = await listTaskTypes({ isAdmin: true, force });
+      [types, states, closed] = await Promise.all([
+        listTaskTypes({ isAdmin: true, force }), listScheduleStates(), getClosedDays().catch(() => []),
+      ]);
       if (list.isConnected) render();
     } catch (err) {
       console.error("Task types load failed:", err);
@@ -169,6 +186,10 @@ export async function mountTaskTypes(main, { staff } = {}) {
       return;
     }
     if (e.target.closest('[data-act="new"]')) { newTaskDialog(staff); return; }
+    if (e.target.closest('[data-act="closed"]')) {
+      openClosedDaysDialog(staff).then((d) => { if (d) { closed = d; render(); } });
+      return;
+    }
     const s = e.target.closest('[data-act="starters"]');
     if (s) {
       s.disabled = true;
@@ -278,6 +299,9 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   const sourceRequested = new Set();
   let dirty = false, saving = false, saveTimer = null;
   let lastText = null; // the subject box, or null for the message editor
+  let closedDays = [];
+  let schedState = null; // the scheduler's record for this task (count, last send, problems)
+  task.schedule = cleanSchedule(task.schedule);
 
   root.innerHTML = `
     <div class="ff-wrap tb-wrap">
@@ -354,6 +378,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     setState("saving");
     let failed = false;
     try {
+      prepareSchedule();
       await saveTaskType(id, task, staff);
       setState(dirty ? "dirty" : "saved");
     } catch (err) {
@@ -507,7 +532,9 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
         </div>
         ${choice ? choiceHtml(f, i) : ""}
         <input class="fe-input tb-help" data-fi="${i}" data-fk="help" maxlength="300" placeholder="Help text for staff (optional)" value="${esc(f.help)}" />
-      </div>`;
+        ${task.category === "staff" && task.schedule.enabled ? `<input class="fe-input tb-help" data-fi="${i}" data-fk="default" maxlength="500"
+          placeholder="Answer used for automatic sends${f.required ? " (required)" : ""}" value="${esc(f.default || "")}" />` : ""}
+        </div>`;
   }
 
   function fieldsHtml() {
@@ -572,17 +599,149 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
           t.hint ? ` title="${esc(t.hint)}"` : ""}>{${esc(t.name)}}</button>`).join("")}</div></div>`).join("");
   }
 
+    /* ---------- Schedule (To Staff only) ---------- */
+  const pad2 = (n) => String(n).padStart(2, "0");
+  const TIMES = [];
+  for (let h = 0; h < 24; h++) for (const m of [0, 15, 30, 45]) TIMES.push(`${pad2(h)}:${pad2(m)}`);
+
+  function scheduleInfoHtml() {
+    const s = task.schedule;
+    if (!s.enabled) return "";
+    const sent = Number((schedState && schedState.count) || 0);
+    const left = s.end === "count" && s.freq !== "once" ? Math.max(0, s.endCount - sent) : 5;
+    const slots = s.paused ? [] : nextSlots(s, { count: Math.min(5, left), closed: closedDays });
+    return `
+      <p class="tb-sch-sum">🔁 ${esc(describeSchedule(s))}</p>
+      ${s.paused ? '<p class="tb-none">Paused: nothing is sent until you untick Paused.</p>'
+        : slots.length ? `<div class="tb-sch-next"><span>Next sends (Perth time)</span><ul>${slots.map((x) => `
+            <li>${esc(fmtSlot(x.ms))}${x.moved ? ' <small class="muted">(moved from a skipped day)</small>' : ""}</li>`).join("")}</ul>
+            ${s.onlyApptDays ? '<small class="muted">Days without appointments are skipped when the time comes.</small>' : ""}</div>`
+        : '<p class="tb-none">No upcoming sends with these settings.</p>'}
+      ${schedState ? `<small class="muted">Sent ${sent} time${sent === 1 ? "" : "s"}${schedState.lastSentAt
+        ? `, last ${esc(fmtSlot(Date.parse(schedState.lastSentAt)))}` : ""}${schedState.lastError
+        ? ` · <span class="tb-bad">Last problem: ${esc(schedState.lastError)}</span>` : ""}</small>` : ""}`;
+  }
+  function renderScheduleInfo() {
+    const box = form.querySelector('[data-role="sch-info"]');
+    if (box) box.innerHTML = scheduleInfoHtml();
+  }
+
+  function scheduleHtml() {
+    const s = task.schedule;
+    const head = '<h4><span class="tb-num">7</span>Schedule <small>(optional)</small></h4>';
+    const mode = seg("schmode", [["manual", "Only when someone runs it"], ["auto", "Send automatically"]],
+      s.enabled ? "auto" : "manual", 'data-sch="enabled" data-rerender=""');
+    if (!s.enabled) {
+      return `<section class="tb-card">${head}${mode}
+        <small class="muted">Send this to the chosen staff automatically, for example every weekday at 8:00 am.</small></section>`;
+    }
+    const opt = (v, l, cur) => `<option value="${v}"${String(cur) === String(v) ? " selected" : ""}>${esc(l)}</option>`;
+    let extra = "";
+    if (s.freq === "weekly") {
+      extra = `
+        <div class="tb-field"><span>On</span><div class="tb-days">${WEEK_ORDER.map((d) => `
+          <label class="tb-day"><input type="checkbox" data-sch="day" value="${d}"${s.days.includes(d) ? " checked" : ""} /><span>${DAY_NAMES[d]}</span></label>`).join("")}</div></div>
+        <label class="tb-field"><span>Repeat</span><select class="fb-select" data-sch="everyWeeks">
+          ${opt(1, "Every week", s.everyWeeks)}${opt(2, "Every 2 weeks", s.everyWeeks)}</select></label>`;
+    } else if (s.freq === "monthlyDate") {
+      extra = `<label class="tb-field"><span>On day</span><select class="fb-select" data-sch="monthDay">
+        ${Array.from({ length: 31 }, (_, i) => opt(String(i + 1), String(i + 1), s.monthDay)).join("")}${opt("last", "Last day of the month", s.monthDay)}</select>
+        <small class="muted">Months with fewer days use their last day.</small></label>`;
+    } else if (s.freq === "monthlyNth") {
+      extra = `<div class="tb-two">
+        <label class="tb-field"><span>Which</span><select class="fb-select" data-sch="nth">
+          ${[["1", "First"], ["2", "Second"], ["3", "Third"], ["4", "Fourth"], ["last", "Last"]].map(([v, l]) => opt(v, l, s.nth)).join("")}</select></label>
+        <label class="tb-field"><span>Day</span><select class="fb-select" data-sch="nthDay">
+          ${WEEK_ORDER.map((d) => opt(d, DAY_NAMES[d], s.nthDay)).join("")}</select></label></div>`;
+    } else if (s.freq === "everyN") {
+      extra = `<label class="tb-field"><span>Every</span><div class="fe-num">
+        <input class="fe-input" type="number" min="2" max="60" data-sch="everyN" value="${s.everyN}" /><span>days</span></div></label>`;
+    }
+    const canSkipWeekends = !["weekdays", "weekly", "once"].includes(s.freq);
+    return `
+      <section class="tb-card tb-sched">
+        ${head}${mode}
+        <div class="tb-two">
+          <label class="tb-field"><span>How often</span><select class="fb-select" data-sch="freq" data-rerender="">
+            ${FREQS.map(([v, l]) => opt(v, l, s.freq)).join("")}</select></label>
+          <label class="tb-field"><span>Time <small>(Perth)</small></span><select class="fb-select" data-sch="time">
+            ${TIMES.map((t) => opt(t, fmtTime(t), s.time)).join("")}</select></label>
+        </div>
+        ${extra}
+        <label class="tb-field"><span>${s.freq === "once" ? "Send on" : "Starts on"}</span>
+          <input class="fe-input" type="date" data-sch="date" value="${esc(s.date)}" /></label>
+        ${s.freq !== "once" ? `
+        <div class="tb-field"><span>Stops</span>
+          ${seg("schend", [["never", "Never"], ["date", "On a date"], ["count", "After a number of sends"]], s.end, 'data-sch="end" data-rerender=""')}
+          ${s.end === "date" ? `<input class="fe-input" type="date" data-sch="endDate" value="${esc(s.endDate)}" />` : ""}
+          ${s.end === "count" ? `<div class="fe-num"><input class="fe-input" type="number" min="1" max="999" data-sch="endCount" value="${s.endCount}" /><span>sends</span></div>` : ""}
+        </div>` : ""}
+        <div class="tb-field"><span>Conditions</span>
+          ${canSkipWeekends ? `<label class="fe-check"><input type="checkbox" data-sch="skipWeekends" data-rerender=""${s.skipWeekends ? " checked" : ""} /> Skip weekends</label>` : ""}
+          <label class="fe-check"><input type="checkbox" data-sch="skipClosed" data-rerender=""${s.skipClosed ? " checked" : ""} /> Skip clinic closed days
+            <button type="button" class="hx-add tb-closed-btn" data-act="sch-closed">Clinic closed days (${closedDays.length})</button></label>
+          <label class="fe-check"><input type="checkbox" data-sch="onlyApptDays"${s.onlyApptDays ? " checked" : ""} /> Only send on days with appointments</label>
+          ${(s.skipClosed || (canSkipWeekends && s.skipWeekends)) ? `
+          <label class="tb-field"><span>If a send falls on a skipped day</span><select class="fb-select" data-sch="onSkip">
+            ${opt("skip", "Skip that send", s.onSkip)}${opt("next", "Send on the next open day", s.onSkip)}</select></label>` : ""}
+        </div>
+        <label class="fe-check"><input type="checkbox" data-sch="paused"${s.paused ? " checked" : ""} /> Paused</label>
+        <div class="tb-sch-info" data-role="sch-info">${scheduleInfoHtml()}</div>
+        ${status !== "live" ? '<p class="tb-info">Publish the task to start the schedule.</p>' : ""}
+        <div><button type="button" class="ff-btn" data-act="sch-test">Send a test to me</button></div>
+      </section>`;
+  }
+
+  // The finished email for automatic sends: everything filled in except {First name}, {Full name} and {Today}
+  function prepareSchedule() {
+    const s = task.schedule;
+    if (task.category !== "staff" || !s.enabled) { s.renderedHtml = ""; s.renderedSubject = ""; return; }
+    const c = clinicDetails(letterhead);
+    const vals = new Map();
+    const set = (k, v) => vals.set(k.toLowerCase(), v == null ? "" : String(v));
+    set("First name", "{First name}"); set("Full name", "{Full name}"); set("Today", "{Today}");
+    set("Staff name", "The Dermedica team");
+    set("Clinic phone", c.phone); set("Clinic email", c.email); set("Clinic address", c.address);
+    ["Upcoming appointments", "Treatment plan", "Treatment info", "Aftercare", "Treatments"].forEach((k) => set(k, ""));
+    task.fields.forEach((f) => { if (String(f.label || "").trim()) set(f.label.trim(), f.default || ""); });
+    s.renderedSubject = fillTemplate(task.subject, vals).slice(0, 200);
+    s.renderedHtml = emailShell(fillTemplateHtml(task.body, vals), task.style, { clinic: c, hasLogo: !!(letterhead && letterhead.logo) });
+  }
+
+  async function testSend(btn) {
+    const probs = scheduleProblems(task).filter((p) => !/already passed/.test(p));
+    if (probs.length) { showToast(probs[0]); return; }
+    btn.disabled = true;
+    btn.textContent = "Sending…";
+    dirty = true;
+    await flush();
+    await settle();
+    try {
+      const r = await callApi({ action: "scheduledTask", op: "test", taskId: id });
+      showToast(`Test sent to ${r.to}`);
+    } catch (err) {
+      console.error("Test send failed:", err);
+      showToast(err.code === "NO_EMAIL" ? "There's no email address on your staff record. Add one in Staff."
+        : err.code === "FORBIDDEN" ? "Only staff who build task types can send tests."
+        : err.code === "INVALID_PIN" ? "The server hasn't been updated yet. Deploy a new Apps Script version."
+        : "Couldn't send the test. Check Apps Script → Executions.");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Send a test to me";
+    }
+  }
+
   // Everything except the message editor, which stays put while you work
   function renderForm() {
     topSec.innerHTML = aboutHtml() + recipientsHtml() + fieldsHtml();
-    bottomSec.innerHTML = designHtml() + attachmentsHtml();
+    bottomSec.innerHTML = designHtml() + attachmentsHtml() + (task.category === "staff" ? scheduleHtml() : "");
     renderChips();
   }
 
   /* ---------- Preview ---------- */
   function renderPreview() {
     const values = sampleValues(task, tokenOpts());
-    const problems = taskProblems(task);
+    const problems = [...taskProblems(task), ...scheduleProblems(task)];
     const r = task.recipients;
     let to;
     if (task.category === "patient") to = "Jane Citizen &lt;jane@example.com&gt;";
@@ -661,6 +820,25 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
       const ids = new Set(task.recipients.staffIds);
       if (el.checked) ids.add(el.dataset.staff); else ids.delete(el.dataset.staff);
       task.recipients.staffIds = [...ids];
+    } else if (el.dataset.sch !== undefined) {
+      const k = el.dataset.sch;
+      const s = task.schedule;
+      if (k === "day") {
+        const set = new Set(s.days);
+        if (el.checked) set.add(el.value); else set.delete(el.value);
+        s.days = WEEK_ORDER.filter((d) => set.has(d));
+      } else if (k === "enabled") {
+        s.enabled = el.value === "auto";
+        if (s.enabled && task.recipients.mode !== "fixed") { task.recipients.mode = "fixed"; loadStaff(); }
+      } else if (el.type === "checkbox") {
+        s[k] = el.checked;
+      } else if (["everyWeeks", "everyN", "endCount"].includes(k)) {
+        s[k] = Number(el.value);
+      } else {
+        s[k] = el.value;
+      }
+      task.schedule = cleanSchedule(s);
+      if (el.dataset.rerender !== undefined) renderForm(); else renderScheduleInfo();
     } else if (el.dataset.attach !== undefined) {
       const ids = new Set(task.attachments);
       if (el.checked) ids.add(el.dataset.attach); else ids.delete(el.dataset.attach);
@@ -673,6 +851,13 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   });
 
   form.addEventListener("click", (e) => {
+    if (e.target.closest('[data-act="sch-closed"]')) {
+      e.preventDefault();
+      openClosedDaysDialog(staff).then((d) => { if (d) { closedDays = d; renderForm(); } });
+      return;
+    }
+    const st = e.target.closest('[data-act="sch-test"]');
+    if (st) { testSend(st); return; }
     const tokenBtn = e.target.closest("[data-token]");
     if (tokenBtn) {
       const name = tokenBtn.dataset.token;
@@ -754,7 +939,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
         } catch (err) { console.error(err); showToast("Couldn't unpublish. Try again."); }
         return;
       }
-      const problems = taskProblems(task);
+      const problems = [...taskProblems(task), ...scheduleProblems(task)];
       if (problems.length) {
         msgEl.textContent = problems[0] + (problems.length > 1 ? ` (${problems.length - 1} more listed beside the preview)` : "");
         return;
@@ -806,6 +991,8 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
       .then((list) => { staffList = list; })
       .catch((err) => { console.warn("Staff list failed:", err); staffError = true; })
       .finally(() => { if (root.isConnected) { renderForm(); renderPreview(); } });
+      getClosedDays().then((d) => { closedDays = d; }).catch(() => {}).finally(() => { if (root.isConnected) renderForm(); });
+      listScheduleStates().then((m) => { schedState = m.get(id) || null; if (root.isConnected) renderScheduleInfo(); });
   }
 
   renderBar();

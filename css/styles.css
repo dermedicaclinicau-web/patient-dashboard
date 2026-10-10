@@ -3224,3 +3224,25 @@ body.no-tasks-run [data-task-picker] { display: none !important; }
 .upd-btn.is-primary { border-color: #14b8a6; background: #14b8a6; }
 .upd-btn.is-primary:hover { background: #0d9488; }
 .upd-btn:disabled { opacity: .7; cursor: wait; }
+
+/* ---------- Scheduled tasks ---------- */
+.tb-sched .fe-seg { margin-bottom: .2rem; }
+.tb-days { display: flex; flex-wrap: wrap; gap: .3rem; }
+.tb-day { position: relative; }
+.tb-day input { position: absolute; opacity: 0; pointer-events: none; }
+.tb-day span { display: inline-grid; place-items: center; min-width: 46px; height: 34px; padding: 0 .5rem; border: 1px solid var(--border);
+  border-radius: 999px; background: #fff; font-size: .82rem; font-weight: 600; color: var(--muted); cursor: pointer; }
+.tb-day input:checked + span { border-color: var(--primary); background: var(--primary); color: #fff; }
+.tb-day input:focus-visible + span { outline: 2px solid var(--primary); outline-offset: 2px; }
+.tb-closed-btn { margin-left: .4rem; padding: .15rem .55rem; font-size: .76rem; }
+.tb-sch-info { display: flex; flex-direction: column; gap: .4rem; padding: .75rem .9rem; border-radius: 10px; background: var(--surface-2); }
+.tb-sch-sum { margin: 0; font-weight: 600; font-size: .9rem; }
+.tb-sch-next span { display: block; margin-bottom: .2rem; font-size: .72rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.tb-sch-next ul { margin: 0 0 .25rem; padding-left: 1.1rem; font-size: .88rem; }
+.tb-closed-add { display: flex; gap: .5rem; }
+.tb-closed-add .fe-input { flex: 1; }
+.tb-closed { display: flex; flex-wrap: wrap; gap: .35rem; min-height: 2rem; }
+.tb-closed-chip { display: inline-flex; align-items: center; gap: .35rem; padding: .25rem .3rem .25rem .7rem; border-radius: 999px;
+  background: var(--primary-soft); color: var(--primary); font-size: .82rem; font-weight: 600; }
+.tb-closed-chip button { display: grid; place-items: center; width: 20px; height: 20px; border: none; border-radius: 50%;
+  background: rgba(15, 118, 110, .12); color: var(--primary); font: inherit; cursor: pointer; }

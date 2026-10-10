@@ -144,7 +144,8 @@ async function renderCategory(main, key, isAdmin) {
       ? tasks.map((t) => `
           <button type="button" class="tm-task" data-run="${esc(t.id)}">
             <span class="tm-task-icon">${I.mail}</span>
-            <span class="tm-task-main"><strong>${esc(t.name)}</strong><small>${esc(t.description || "Email")}</small></span>
+            <span class="tm-task-main"><strong>${esc(t.name)}</strong><small>${esc(t.description || "Email")}${
+              t.schedule && t.schedule.enabled && !t.schedule.paused ? " · 🔁 Also sends automatically" : ""}</small></span>
             <span class="tm-task-go">${I.chev}</span>
           </button>`).join("")
       : `<div class="tm-empty">No ${esc(cat.title)} tasks are published yet.${isAdmin

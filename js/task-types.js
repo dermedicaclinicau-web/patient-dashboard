@@ -5,6 +5,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
 import { cleanRichHtml, textToRichHtml } from "./rich-html.js";
+import { cleanSchedule } from "./task-schedule.js";
 
 const COL = "task_types";
 const CACHE_MS = 60 * 1000;
@@ -59,6 +60,7 @@ export function cleanTaskField(f) {
     required: f.required === true,
     help: clip(f.help, 300),
     placeholder: clip(f.placeholder, 100),
+    default: clip(f.default, 500),
   };
   if (TASK_CHOICE_TYPES.includes(f.type)) {
     out.source = SOURCE_KEYS.includes(f.source) ? f.source : "list";
@@ -96,6 +98,7 @@ export function taskSnapshot(t = {}) {
     style: cleanEmailStyle(t.style),
     attachments: (Array.isArray(t.attachments) ? t.attachments : [])
       .map(String).filter((id) => /^[A-Za-z0-9]{10,40}$/.test(id)).slice(0, 3),
+    schedule: category === "staff" ? cleanSchedule(t.schedule) : { ...cleanSchedule(null), enabled: false },
   };
 }
 
