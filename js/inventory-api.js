@@ -138,6 +138,7 @@ export function packText(p) {
 
 export function cleanProduct(p = {}) {
   const r = p.reorder || {};
+  const dosePer = dosePerOf(p.dosePer);
   return {
     name: clip(p.name, 150),
     category: INV_CATEGORIES.some((c) => c.key === p.category) ? p.category : "general",
@@ -145,12 +146,10 @@ export function cleanProduct(p = {}) {
     supplierId: clip(p.supplierId, 60),
     supplierCode: clip(p.supplierCode, 60),
     barcode: clip(p.barcode, 60),
-    stockUnit: clip(l.stockUnit, 30) || "unit",
-    dosePer: dosePerOf(l.dosePer),
-    doseUnit: dosePerOf(l.dosePer) ? (clip(l.doseUnit, 20) || "units") : "",    
+    stockUnit: clip(p.stockUnit, 30) || "item",
     orderUnit: clip(p.orderUnit, 30) || "box",
-    dosePer: dosePerOf(p.dosePer),
-    doseUnit: dosePerOf(p.dosePer) ? (clip(p.doseUnit, 20) || "units") : "",
+    dosePer,
+    doseUnit: dosePer ? (clip(p.doseUnit, 20) || "units") : "",
     packSize: Math.max(1, intOrNull(p.packSize) || 1),
     cost: moneyOrNull(p.cost),
     price: moneyOrNull(p.price),
@@ -160,7 +159,6 @@ export function cleanProduct(p = {}) {
     active: p.active !== false,
   };
 }
-
 function normaliseProduct(d) {
   const x = d.data() || {};
   const s = x.stock || {};
@@ -413,6 +411,8 @@ export function cleanPoLine(l = {}) {
     orderUnit: clip(l.orderUnit, 30) || "unit",
     packSize: Math.max(1, parseInt(l.packSize, 10) || 1),
     stockUnit: clip(l.stockUnit, 30) || "unit",
+    dosePer: dosePerOf(l.dosePer),
+    doseUnit: dosePerOf(l.dosePer) ? (clip(l.doseUnit, 20) || "units") : "",
     unitCost: moneyOrNull(l.unitCost),
     loc: LOCATIONS.some((x) => x.key === l.loc) ? l.loc : "shelf",
     received: Math.max(0, parseInt(l.received, 10) || 0),
@@ -427,194 +427,6 @@ export function lineFromProduct(p, qty, loc, sources = []) {
     productId: p.id, name: p.name, supplierCode: p.supplierCode, qty, orderUnit: p.orderUnit,
     packSize: p.packSize, stockUnit: p.stockUnit, dosePer: p.dosePer, doseUnit: p.doseUnit,
     unitCost: p.cost, loc, sources,
-  });
-}
-
-export function poTotals(po) {
-  const lines = (po && po.lines) || [];
-  const subtotal = round2(lines.reduce((s, l) => s + (l.unitCost || 0) * (l.qty || 0), 0));
-  const gst = po && po.gst ? round2(subtotal * 0.1) : 0;
-  return { subtotal, gst, total: round2(subtotal + gst), missing: lines.some((l) => l.unitCost === null || l.unitCost === undefined) };
-}
-
-function normalisePo(d) {
-  const x = d.data() || {};
-  return {
-    id: d.id,
-    number: String(x.number || ""),
-    supplierId: String(x.supplierId || ""),
-    supplier: supplierSnapshot(x.supplier || {}),
-    status: PO_STATUS[x.status] ? x.status : "draft",
-    lines: (Array.isArray(x.lines) ? x.lines : []).map(cleanPoLine),
-    requestIds: Array.isArray(x.requestIds) ? x.requestIds : [],
-    expectedDate: String(x.expectedDate || ""),
-    notesToSupplier: String(x.notesToSupplier || ""),
-    internalNote: String(x.internalNote || ""),
-    gst: x.gst === true,
-    createdBy: String(x.createdBy || ""),
-    sentBy: String(x.sentBy || ""),
-    sentVia: String(x.sentVia || ""),
-    sentTo: String(x.sentTo || ""),
-    cancelReason: String(x.cancelReason || ""),
-    events: Array.isArray(x.events) ? x.events : [],
-    createdAt: toDate(x.createdAt),
-    sentAt: toDate(x.sentAt),
-    updatedAt: toDate(x.updatedAt),
-  };
-}
-
-export async function listPos() {
-  const snap = await getDocs(collection(db, "inv_pos"));
-  return snap.docs.map(normalisePo)
-    .sort((a, b) => (b.createdAt ? b.createdAt.getTime() : 0) - (a.createdAt ? a.createdAt.getTime() : 0));
-}
-
-export async function getPo(id) {
-  const snap = await getDoc(doc(db, "inv_pos", id));
-  return snap.exists() ? normalisePo(snap) : null;
-}
-
-// The PO (not cancelled; optionally only certain statuses) that covers one item of a request
-export function itemOnPo(requestId, index, pos, statuses = null) {
-  return (pos || []).find((po) => po.status !== "cancelled" && (!statuses || statuses.includes(po.status))
-    && po.lines.some((l) => l.sources.some((s) => s.r === requestId && s.i === index))) || null;
-}
-// Every item of the request is on a sent (or received) PO
-export const requestFullyOrdered = (r, pos) => r.items.length > 0 && r.items.every((_, i) => !!itemOnPo(r.id, i, pos, PO_LIVE));
-
-// A new draft PO with the next number. The requests it covers are linked to it.
-export async function createPo({ supplier, lines = [] }, staff) {
-  if (!supplier || !supplier.id) throw new Error("Choose a supplier.");
-  const clean = lines.map(cleanPoLine);
-  const requestIds = [...new Set(clean.flatMap((l) => l.sources.map((s) => s.r)))].slice(0, 50);
-  const by = String((staff && staff.name) || "").slice(0, 120);
-  const byUid = uid();
-  const at = new Date().toISOString();
-  const cRef = doc(db, "inv_settings", "counters");
-  const poRef = doc(collection(db, "inv_pos"));
-  await runTransaction(db, async (tx) => {
-    const c = await tx.get(cRef);
-    const n = (c.exists() ? Number(c.data().po) || 0 : 0) + 1;
-    const number = `PO-${new Date().getFullYear()}-${String(n).padStart(4, "0")}`;
-    tx.set(cRef, { po: n });
-    tx.set(poRef, {
-      number, supplierId: supplier.id, supplier: supplierSnapshot(supplier), status: "draft",
-      lines: clean, requestIds, expectedDate: "", notesToSupplier: "", internalNote: "", gst: false,
-      total: poTotals({ lines: clean }).total,
-      createdBy: by, createdByUid: byUid, createdAt: serverTimestamp(), updatedAt: serverTimestamp(), updatedBy: by,
-      events: [{ at, by, action: "Created", note: requestIds.length ? `From ${requestIds.length} request${requestIds.length === 1 ? "" : "s"}` : "" }],
-    });
-    requestIds.forEach((rid) => tx.update(doc(db, "inv_requests", rid), {
-      poIds: arrayUnion(poRef.id), poNumbers: arrayUnion(number), updatedAt: serverTimestamp(),
-      events: arrayUnion({ at, by, action: "Added to purchase order", note: number }),
-    }));
-  });
-  return poRef.id;
-}
-
-// A draft's editable parts (empty rows are dropped)
-export async function savePo(id, po, staff) {
-  const lines = (po.lines || []).filter((l) => l.productId || String(l.name || "").trim()).map(cleanPoLine);
-  await updateDoc(doc(db, "inv_pos", id), {
-    supplierId: clip(po.supplierId, 60),
-    supplier: supplierSnapshot(po.supplier || {}),
-    lines,
-    expectedDate: KEY_RE.test(po.expectedDate || "") ? po.expectedDate : "",
-    notesToSupplier: clip(po.notesToSupplier, 2000),
-    internalNote: clip(po.internalNote, 1000),
-    gst: po.gst === true,
-    total: poTotals({ lines, gst: po.gst === true }).total,
-    ...stamp(staff),
-  });
-}
-
-// Ordered another way (phone, website). Returns the request ids that became "Ordered".
-export async function markPoSent(po, { via = "", note = "" }, staff) {
-  const by = String((staff && staff.name) || "").slice(0, 120);
-  const at = new Date().toISOString();
-  const all = (await listPos()).map((x) => (x.id === po.id ? { ...x, status: "sent" } : x));
-  const reqSnaps = await Promise.all(po.requestIds.map((rid) => getDoc(doc(db, "inv_requests", rid))));
-  const batch = writeBatch(db);
-  batch.update(doc(db, "inv_pos", po.id), {
-    status: "sent", sentAt: serverTimestamp(), sentBy: by, sentVia: clip(via, 40), updatedAt: serverTimestamp(), updatedBy: by,
-    events: arrayUnion({ at, by, action: "Marked as sent", note: [via, note].filter(Boolean).join(" · ").slice(0, 300) }),
-  });
-  const done = [];
-  reqSnaps.forEach((s) => {
-    if (!s.exists()) return;
-    const r = normaliseRequest(s);
-    if (r.status !== "open" || !requestFullyOrdered(r, all)) return;
-    batch.update(s.ref, {
-      status: "ordered", response: `On purchase order ${po.number}`, handledBy: by, handledByUid: uid(),
-      handledAt: serverTimestamp(), updatedAt: serverTimestamp(),
-      events: arrayUnion({ at, by, action: "Ordered", note: `Purchase order ${po.number}` }),
-    });
-    done.push(r.id);
-  });
-  await batch.commit();
-  return done;
-}
-
-// Cancel a draft, or a sent order where nothing has arrived. Its requests go back to Open.
-export async function cancelPo(po, reason, staff) {
-  if (po.lines.some((l) => l.received > 0)) throw new Error("Stock has already been received on this order, so it can't be cancelled.");
-  const by = String((staff && staff.name) || "").slice(0, 120);
-  const at = new Date().toISOString();
-  const reqSnaps = await Promise.all(po.requestIds.map((rid) => getDoc(doc(db, "inv_requests", rid))));
-  const batch = writeBatch(db);
-  batch.update(doc(db, "inv_pos", po.id), {
-    status: "cancelled", cancelReason: clip(reason, 500), updatedAt: serverTimestamp(), updatedBy: by,
-    events: arrayUnion({ at, by, action: "Cancelled", note: clip(reason, 300) }),
-  });
-  reqSnaps.forEach((s) => {
-    if (!s.exists()) return;
-    const was = s.data().status;
-    batch.update(s.ref, {
-      poIds: arrayRemove(po.id), poNumbers: arrayRemove(po.number), updatedAt: serverTimestamp(),
-      ...(was === "ordered" ? { status: "open", response: "" } : {}),
-      events: arrayUnion({ at, by, action: "Purchase order cancelled", note: po.number }),
-    });
-  });
-  await batch.commit();
-}
-
-/* ===================== Purchase orders ===================== */
-
-export const PO_STATUS = { draft: "Draft", sent: "Sent", part: "Part received", received: "Received", cancelled: "Cancelled" };
-const PO_LIVE = ["sent", "part", "received"];
-const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
-
-export function supplierSnapshot(s = {}) {
-  return {
-    name: clip(s.name, 120), contactName: clip(s.contactName, 120), email: clip(s.email, 254), ccEmail: clip(s.ccEmail, 254),
-    phone: clip(s.phone, 40), accountNo: clip(s.accountNo, 60), address: clip(s.address, 300),
-  };
-}
-
-// One line on a PO. qty is in the supplier's order units. sources = the request items it covers.
-export function cleanPoLine(l = {}) {
-  return {
-    key: clip(l.key, 40) || Math.random().toString(36).slice(2, 10),
-    productId: clip(l.productId, 60),
-    name: clip(l.name, 150),
-    supplierCode: clip(l.supplierCode, 60),
-    qty: Math.min(9999, Math.max(1, parseInt(l.qty, 10) || 1)),
-    orderUnit: clip(l.orderUnit, 30) || "unit",
-    packSize: Math.max(1, parseInt(l.packSize, 10) || 1),
-    stockUnit: clip(l.stockUnit, 30) || "unit",
-    unitCost: moneyOrNull(l.unitCost),
-    loc: LOCATIONS.some((x) => x.key === l.loc) ? l.loc : "shelf",
-    received: Math.max(0, parseInt(l.received, 10) || 0),
-    sources: (Array.isArray(l.sources) ? l.sources : [])
-      .map((s) => ({ r: clip(s && s.r, 40), i: Math.max(0, parseInt(s && s.i, 10) || 0) }))
-      .filter((s) => s.r).slice(0, 30),
-  };
-}
-
-export function lineFromProduct(p, qty, loc, sources = []) {
-  return cleanPoLine({
-    productId: p.id, name: p.name, supplierCode: p.supplierCode, qty, orderUnit: p.orderUnit,
-    packSize: p.packSize, stockUnit: p.stockUnit, unitCost: p.cost, loc, sources,
   });
 }
 
