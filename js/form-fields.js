@@ -30,6 +30,7 @@ export const ICONS = {
   image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>',
   photo: '<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>',
   consent_status: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/>',
+  prescription_status: '<path d="M10.5 20.5 3.5 13.5a4.95 4.95 0 1 1 7-7l7 7a4.95 4.95 0 1 1-7 7z"/><line x1="8.5" y1="8.5" x2="15.5" y2="15.5"/>',
   text_block: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>',
   letterhead: '<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="7" y1="6" x2="11" y2="6"/>',
   watermark: '<path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>',
@@ -57,6 +58,7 @@ export const FIELD_TYPES = {
   image:          { name: "Image", was: "Image Photo Capture picture", label: "" },
   aftercare:      { name: "Aftercare", was: "Aftercare instructions", label: "Aftercare instructions" },
   consent_status: { name: "Consent check", was: "Consent Status", label: "Consent on file" },
+  prescription_status: { name: "Prescription check", was: "Prescription Status", label: "Prescription on file" },
   text_block:     { name: "Text block", was: "Paragraph", label: "Information" },
   letterhead:     { name: "Letterhead", was: "Letterhead", label: "" },
   watermark:      { name: "Watermark", was: "Watermark", label: "" },
@@ -67,7 +69,7 @@ export const FIELD_GROUPS = [
   ["Patient and visit", ["patient", "record_date", "date"]],
   ["Answers", ["short_text", "long_text", "number", "email"]],
   ["Choices", ["single_choice", "dropdown", "checkboxes", "checkbox_notes", "sub_checks"]],
-  ["Clinical", ["signature", "consent_status", "image", "aftercare"]],
+  ["Clinical", ["signature", "consent_status", "prescription_status", "image", "aftercare"]],
   ["Tables and maths", ["table", "calculation"]],
   ["Page layout", ["text_block", "space", "watermark"]],
 ];
@@ -90,7 +92,7 @@ const PLACEHOLDER_TYPES = ["short_text", "long_text", "email", "number", "dropdo
 export const INLINE_TYPES = ["short_text", "email", "number", "date", "record_date", "dropdown", "single_choice", "checkboxes", "calculation"];
 // Fields that get the Layout settings
 const ANSWER_TYPES = ["patient", "short_text", "long_text", "email", "number", "date", "record_date", "single_choice",
-  "checkboxes", "checkbox_notes", "sub_checks", "dropdown", "table", "calculation", "signature", "image", "consent_status"];
+  "checkboxes", "checkbox_notes", "sub_checks", "dropdown", "table", "calculation", "signature", "image", "consent_status", "prescription_status"];
 const BOX_TYPES = ["short_text", "email", "number", "date", "record_date", "dropdown"];
 const DRIVE_ID = /^[A-Za-z0-9_-]{10,80}$/;
 const opt = (v, list, dflt) => (list.includes(v) ? v : dflt);
@@ -168,7 +170,7 @@ export const FILLS_FOR = {
 
 const NO_LABEL = ["space", "letterhead", "watermark"];
 const NO_HELP = ["patient", "text_block", "space", "letterhead", "watermark"];
-const NO_REQUIRED = ["text_block", "space", "letterhead", "watermark", "calculation", "consent_status", "image", "aftercare"];
+const NO_REQUIRED = ["text_block", "space", "letterhead", "watermark", "calculation", "consent_status", "prescription_status", "image", "aftercare"];
 export const hasLabel = (t) => !NO_LABEL.includes(t);
 export const hasHelp = (t) => !NO_HELP.includes(t);
 export const canRequire = (t) => !NO_REQUIRED.includes(t);
@@ -216,7 +218,8 @@ export function createField(type, id) {
     case "watermark": f.source = "text"; f.text = "DRAFT"; f.opacity = 10; f.angle = -30; f.size = "large"; break;
     case "letterhead": f.line1 = LETTERHEAD[0]; f.line2 = LETTERHEAD[1]; break;
     case "consent_status": f.consentFormId = ""; f.months = 12; f.block = false; break;
-    case "aftercare": f.mode = "fixed"; f.items = []; f.preselect = true; f.emailTemplate = ""; break;
+    case "prescription_status": f.consentFormId = ""; f.months = 6; f.block = false; break;
+    case "aftercare": f.mode = "fixed"; f.items = []; f.preselect = true; f.emailTemplate = ""; f.confirm = "each"; break;
   }
   return f;
 }
@@ -342,8 +345,9 @@ export function cleanField(f) {
       break;
     case "letterhead": out.line1 = clip(f.line1, 150); out.line2 = clip(f.line2, 150); break;
     case "consent_status":
+    case "prescription_status":
       out.consentFormId = clip(f.consentFormId, 40);
-      out.months = int(f.months, 1, 60, 12);
+      out.months = int(f.months, 1, 60, f.type === "prescription_status" ? 6 : 12);
       out.block = f.block === true;
       break;
     case "aftercare":
@@ -352,6 +356,7 @@ export function cleanField(f) {
         .map(String).filter((id) => /^[A-Za-z0-9_-]{1,80}$/.test(id)).slice(0, 20);
       out.preselect = f.preselect !== false;
       out.emailTemplate = /^[A-Za-z0-9]{10,40}$/.test(f.emailTemplate || "") ? f.emailTemplate : "";
+      out.confirm = pick(f.confirm, ["each", "all", "off"], "each");
       break;
 }
   const sw = cleanCondition(f);
@@ -566,13 +571,18 @@ export function renderField(f, ctx = {}) {
       }
       return head + (list || `<div class="fe-img-empty">${svg(ICONS.aftercare)}<span>Choose aftercare in the settings panel</span></div>`);
     }
-    case "consent_status": {
-      if (live) return head + `<div class="fe-consent">${svg(ICONS.consent_status)}Checked automatically when this form is filled in for a patient.</div>`;
-      const form = (ctx.consentForms || []).find((c) => c.id === f.consentFormId);
+    case "consent_status":
+    case "prescription_status": {
+      const rx = f.type === "prescription_status";
+      const icon = svg(ICONS[f.type]);
+      if (live) return head + `<div class="fe-consent">${icon}Checked automatically when this form is filled in for a patient.</div>`;
+      const list = (rx ? ctx.prescriptionForms : ctx.consentForms) || [];
+      const form = list.find((c) => c.id === f.consentFormId);
+      const months = Number(f.months) || (rx ? 6 : 12);
       return head + (form
-        ? `<div class="fe-consent">${svg(ICONS.consent_status)}Looks for a signed “${esc(form.name)}” from the last ${Number(f.months) || 12} months${
+        ? `<div class="fe-consent">${icon}Looks for ${rx ? "a" : "a signed"} “${esc(form.name)}” from the last ${months} months${
             f.block ? ", and stops the form being saved if there isn't one" : ""}.</div>`
-        : `<div class="fe-consent is-warn">${svg(ICONS.consent_status)}Choose which consent form to check.</div>`);
+        : `<div class="fe-consent is-warn">${icon}Choose which ${rx ? "prescription" : "consent"} form to check.</div>`);
     }
     case "patient":
       return head + `<div class="fe-patient">${patientParts(f).map(([k, l]) =>
@@ -816,17 +826,22 @@ function typeSettings(f, ctx = {}) {
     case "letterhead":
       return '<p class="fe-note fe-pad">The letterhead now sits at the top of every form, so you can remove this. To change it, click the letterhead at the top of the page.</p>';
 
-    case "consent_status": {
-      const forms = ctx.consentForms || [];
+    case "consent_status":
+    case "prescription_status": {
+      const rx = f.type === "prescription_status";
+      const forms = (rx ? ctx.prescriptionForms : ctx.consentForms) || [];
+      const noun = rx ? "prescription" : "consent";
       return (forms.length
-          ? setting("Consent form to look for", choose("consentFormId",
-              [["", "Choose a consent form"], ...forms.map((c) => [c.id, c.name + (c.status === "live" ? "" : " (draft)")])],
+          ? setting(`${rx ? "Prescription" : "Consent"} form to look for`, choose("consentFormId",
+              [["", `Choose a ${noun} form`], ...forms.map((c) => [c.id, c.name + (c.status === "live" ? "" : " (draft)")])],
               f.consentFormId || ""))
-          : '<p class="fe-note fe-pad">Create a form in Consent forms first, then choose it here.</p>') +
-        setting("Valid for", `<div class="fe-num"><input class="fe-input" type="number" min="1" max="60" data-k="months" data-num="" value="${Number(f.months) || 12}" /><span>months</span></div>`) +
-        `<label class="fe-check"><input type="checkbox" data-k="block"${f.block ? " checked" : ""} /> Stop the form being saved if there's no valid consent</label>`;
+          : `<p class="fe-note fe-pad">Create a form in ${rx ? "Prescriptions" : "Consent forms"} first, then choose it here.</p>`) +
+        setting("Valid for", `<div class="fe-num"><input class="fe-input" type="number" min="1" max="60" data-k="months" data-num="" value="${
+          Number(f.months) || (rx ? 6 : 12)}" /><span>months</span></div>`) +
+        `<label class="fe-check"><input type="checkbox" data-k="block"${f.block ? " checked" : ""} /> Stop the form being saved if there's no valid ${noun}</label>` +
+        `<small class="fe-note fe-pad">If there isn't one, staff get a “Fill in ${noun} now” button that brings them back to this form afterwards.</small>`;
     }
-    case "aftercare": {
+     case "aftercare": {
       const map = ctx.aftercare;
       const items = (f.items || []).map((id) => ({
         id, title: map && map.get(id) ? map.get(id).title : map ? "Missing aftercare (removed from the list?)" : "Loading…",
@@ -843,6 +858,9 @@ function typeSettings(f, ctx = {}) {
             : '<small class="fe-note">None chosen yet.</small>'}
           <button type="button" class="lh-btn" data-act="ac-pick">Choose from Aftercare Bank</button>
         </div>` +
+        setting("Discussed with the patient", choose("confirm", [
+          ["each", "A tick for each aftercare"], ["all", "One tick for all the aftercare"], ["off", "No tick needed"],
+        ], f.confirm || "each"), "Staff must tick it before the form can be saved. Shown on the saved form and PDF with their name and the date.") +
         `<label class="fe-check"><input type="checkbox" data-k="preselect"${f.preselect !== false ? " checked" : ""} /> Ticked to send and print by default</label>` +
         '<p class="fe-note fe-pad">Staff can expand each aftercare to read it, and untick any they don\'t want included in the emailed or printed form.</p>';
     }

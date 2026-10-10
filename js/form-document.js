@@ -16,6 +16,13 @@ export function niceDate(key) {
   return new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" });
 }
 
+const fmtIso = (iso) => {
+  const d = new Date(iso);
+  return isNaN(d) ? "" : d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" });
+};
+const discussedLine = (by, at) =>
+  `<div style="font-size:9pt;color:#047857;margin:0 0 5px;">✓ Discussed with the patient${by ? ` by ${esc(by)}` : ""}${at ? ` on ${esc(fmtIso(at))}` : ""}</div>`;
+
 // A4 width minus 12 mm margins on each side, at 96 dpi
 const CSS = `
   .pdfdoc { width: 703px; font-family: Arial, Helvetica, sans-serif; font-size: 11pt; color: #1e293b; background: #fff; }
@@ -112,7 +119,7 @@ function isUnanswered(f, v, sig) {
     case "signature": return !(typeof sig === "string" && PNG_RE.test(sig));
     case "patient": return !v || !Object.values(v).some((x) => String(x ?? "").trim());
     case "table": return !Array.isArray(v) || !v.some((r) => r && Array.isArray(r.cells) && r.cells.some((c) => c !== "" && c !== false && c != null));
-    case "calculation": case "consent_status": return true;
+    case "calculation": case "consent_status": case "prescription_status": return true;
     default: return v === null || v === undefined || v === "" || (Array.isArray(v) && !v.length);
   }
 }
@@ -163,7 +170,7 @@ function blankAnswer(f) {
     case "patient":
       return `<table class="kv">${patientParts(f).map(([, l]) =>
         `<tr><td class="k">${esc(l)}</td><td><span class="bl-in" style="width:320px"></span></td></tr>`).join("")}</table>`;
-    case "consent_status":
+    case "consent_status": case "prescription_status":
       return "";
     case "calculation":
       return '<span class="bl-in" style="width:140px"></span>';
@@ -233,9 +240,12 @@ function answer(f, v, sig, inline, x, blank = false) {
         `<tr><td class="k">${esc(l)}</td><td>${d[k] ? esc(d[k]) : '<span class="none">—</span>'}</td></tr>`).join("")}</table>`;
     }
     case "consent_status":
+    case "prescription_status": {
+      const rx = f.type === "prescription_status";
       return v && v.found
-        ? `Signed ${v.name ? `“${esc(v.name)}” ` : ""}on ${esc(niceDate(v.date))}`
-        : '<span class="none">No signed consent found</span>';
+        ? `${rx ? "Prescription" : "Signed"} ${v.name ? `“${esc(v.name)}” ` : ""}on ${esc(niceDate(v.date))}`
+        : `<span class="none">No ${rx ? "valid prescription" : "signed consent"} found</span>`;
+    }
   }
   return none;
 }
@@ -278,8 +288,10 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
       if (!items.length) return "";
       return `<div style="${box}">${label ? `<div class="ql" style="margin:10px 0 ${gap}px;">${label}</div>` : ""}${
         items.map((it) => `<div class="ac-pdf" style="margin:0 0 12px;">
-          <h2 style="font-size:12.5pt;margin:8px 0 6px;color:#0f766e;">${esc(it.title || "Aftercare")}</h2>
-          <div class="fe-rich" style="font-size:10pt;line-height:1.55;">${cleanRichHtml(it.html || "")}</div></div>`).join("")}</div>`;
+          <h2 style="font-size:12.5pt;margin:8px 0 4px;color:#0f766e;">${esc(it.title || "Aftercare")}</h2>
+          ${it.discussed ? discussedLine(it.discussedBy, it.discussedAt) : ""}
+          <div class="fe-rich" style="font-size:10pt;line-height:1.55;">${cleanRichHtml(it.html || "")}</div></div>`).join("")}${
+        v.discussed ? discussedLine(v.discussed.by, v.discussed.at) : ""}</div>`;
     }
     if (f.type === "image") {
       if (f.source === "staff") {

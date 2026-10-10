@@ -104,6 +104,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   let sel = fields.length ? fields[0].id : FORM;
   let mode = "build";
   let consentForms = [];
+  let prescriptionForms = [];
   let letterhead = DEFAULT_LETTERHEAD;
   let dirty = false, saving = false, saveTimer = null;
 
@@ -116,7 +117,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
   let aftercareMap = null;   // aftercare id -> aftercare, once loaded
   let emailTemplates = [];   // To Patient task types, for the aftercare email
-  const ctx = (live) => ({ live, fields, consentForms, letterhead, calcValues: null, aftercare: aftercareMap, emailTemplates });
+  const ctx = (live) => ({ live, fields, consentForms, prescriptionForms, letterhead, calcValues: null, aftercare: aftercareMap, emailTemplates });
   const current = () => fields.find((f) => f.id === sel) || null;
   const signature = () => JSON.stringify(formSnapshot({ name, fields, settings }));
 
@@ -274,6 +275,9 @@ export async function mountFormEditor(container, { templateId, staff }) {
       }
       if (f.type === "consent_status" && !f.consentFormId) {
         return { id: f.id, msg: "Choose which consent form the Consent check looks for." };
+      }
+      if (f.type === "prescription_status" && !f.consentFormId) {
+        return { id: f.id, msg: "Choose which prescription form the Prescription check looks for." };
       }
     }
     return null;
@@ -1043,15 +1047,17 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
   listFormTemplates({ isAdmin: true })
     .then((list) => {
-      consentForms = list
-        .filter((t) => t.category === "consent" && t.id !== templateId)
+      const pick = (cat) => list
+        .filter((t) => t.category === cat && t.id !== templateId)
         .map((t) => ({ id: t.id, name: t.name, status: t.status }));
+      consentForms = pick("consent");
+      prescriptionForms = pick("prescription");
       if (!root.isConnected) return;
       renderStage();
       const f = current();
-      if (f && f.type === "consent_status") renderInspector();
+      if (f && (f.type === "consent_status" || f.type === "prescription_status")) renderInspector();
     })
-    .catch((err) => console.warn("Couldn't load consent forms:", err));
+    .catch((err) => console.warn("Couldn't load consent and prescription forms:", err));
 
   listTaskTypes({ isAdmin: true })
     .then((list) => {

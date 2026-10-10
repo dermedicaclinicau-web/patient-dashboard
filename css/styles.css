@@ -3306,3 +3306,14 @@ a.tm-task:hover { border-color: var(--primary); }
 .ff-return-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .6rem 1rem;
   margin: 0 0 1rem; padding: .75rem 1rem; border: 1px solid #bfdbfe; border-radius: 12px; background: #eff6ff; color: #1e40af; font-size: .9rem; }
 @media (max-width: 760px) { .ff-return { padding-left: .9rem; } }
+
+/* ---------- Aftercare: discussed with the patient ---------- */
+.ac-disc { display: inline-flex; flex-shrink: 0; align-items: center; gap: .35rem; padding: .3rem .6rem; border: 1px solid #fcd34d;
+  border-radius: 999px; background: #fffbeb; color: #92400e; font-size: .78rem; font-weight: 600; white-space: nowrap; cursor: pointer; }
+.ac-disc.is-on { border-color: #a7f3d0; background: #ecfdf5; color: #047857; }
+.ac-disc input, .ac-disc-all input { width: 16px; height: 16px; accent-color: var(--primary); }
+.ac-disc-all { display: flex; align-items: center; gap: .5rem; margin-top: .5rem; padding: .6rem .8rem; border: 1px solid #fcd34d;
+  border-radius: 10px; background: #fffbeb; color: #92400e; font-size: .88rem; font-weight: 600; cursor: pointer; }
+.ac-disc-all.is-on { border-color: #a7f3d0; background: #ecfdf5; color: #047857; }
+.ac-tag.is-disc { background: #ecfdf5; color: #047857; }
+.ac-disc-saved { margin: .5rem 0 0; font-size: .86rem; font-weight: 600; color: #047857; }

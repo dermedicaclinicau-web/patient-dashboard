@@ -66,17 +66,22 @@ function sheetHtml({ name, fields, settings, letterhead }) {
     }).join("")}</div>`;
 }
 
+// Consent check and Prescription check: what was found, or a button to fill one in now
 function consentHtml(f, res, { canStart = false } = {}) {
-  const months = Number(f.months) || 12;
+  const rx = f.type === "prescription_status";
+  const months = Number(f.months) || (rx ? 6 : 12);
+  const icon = svg(ICONS[f.type] || ICONS.consent_status);
   if (res && res.found) {
-    return `<div class="fe-consent">${svg(ICONS.consent_status)}<span>Signed ${res.name ? `“${esc(res.name)}” ` : ""}on ${esc(niceDate(res.date))}.${
+    return `<div class="fe-consent">${icon}<span>${rx ? "Prescription" : "Signed"} ${res.name ? `“${esc(res.name)}” ` : ""}on ${esc(niceDate(res.date))}.${
       res.submissionId ? ` <a href="#/form-record/${encodeURIComponent(res.submissionId)}">View it</a>` : ""}</span></div>`;
   }
-  return `<div class="fe-consent is-warn">${svg(ICONS.consent_status)}<span>No signed consent in the last ${months} months.${
-    f.block ? " This form can't be saved until one is signed." : ""}</span>${
+  return `<div class="fe-consent is-warn">${icon}<span>No ${rx ? "prescription" : "signed consent"} in the last ${months} months.${
+    f.block ? ` This form can't be saved until ${rx ? "there's a valid prescription" : "one is signed"}.` : ""}</span>${
     canStart && f.consentFormId
-      ? `<button type="button" class="ff-btn is-primary fe-consent-go" data-consent-go="${esc(f.consentFormId)}">Fill in consent now</button>` : ""}</div>`;
+      ? `<button type="button" class="ff-btn is-primary fe-consent-go" data-consent-go="${esc(f.consentFormId)}" data-kind="${rx ? "Prescription" : "Consent"}">Fill in ${
+          rx ? "prescription" : "consent"} now</button>` : ""}</div>`;
 }
+
 
 /* ===================== Signature pad ===================== */
 
@@ -236,6 +241,7 @@ export function readField(f, w, { pads = {}, calc = {}, consent = {}, annots = {
     case "aftercare":
       return w.acRead ? w.acRead() : { items: [] };
     case "consent_status":
+    case "prescription_status":
       return consent[f.id] || { found: false, date: "", submissionId: "", name: "" };
   }
   return null;
@@ -419,7 +425,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
           </div>
         </div>
         <p class="ff-msg" data-role="msg" aria-live="polite"></p>
-        ${isConsentLeg ? `<p class="ff-return">Consent for <strong>${esc(ret.templateName)}</strong>. When you save, you'll go back to it.</p>` : ""}
+        ${isConsentLeg ? `<p class="ff-return">${esc(ret.kind || "Consent")} for <strong>${esc(ret.templateName)}</strong>. When you save, you'll go back to it.</p>` : ""}
       </div>
       <div class="fe-sheet ff-sheet" data-role="sheet">${sheetHtml({ name: ver.name, fields, settings: ver.settings, letterhead })}</div>
     </div>`;
@@ -565,7 +571,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
   refresh();
 
   // Consent checks run in the background
-  const consentFields = fields.filter((f) => f.type === "consent_status");
+  const consentFields = fields.filter((f) => f.type === "consent_status" || f.type === "prescription_status");
   let consentReady = !consentFields.length;
   if (consentFields.length) {
     checkConsents(consentFields, patient)
@@ -609,7 +615,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
     if (!go) return;
     const draft = {};
     fields.forEach((f) => {
-      if (LAYOUT.includes(f.type) || ["photo", "signature", "image", "aftercare", "consent_status"].includes(f.type)) return;
+      if (LAYOUT.includes(f.type) || ["photo", "signature", "image", "aftercare", "consent_status", "prescription_status"].includes(f.type)) return;
       const w = wrap(f.id);
       if (!w || w.hidden) return;
       draft[f.id] = readField(f, w, rctx());
@@ -619,6 +625,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
     writeReturn({
       at: Date.now(), patientId: pid, templateId: tid, templateName: ver.name,
       consentId: go.dataset.consentGo,
+      kind: go.dataset.kind || "Consent",
       returnHash: `#/fill/${encodeURIComponent(pid)}/${encodeURIComponent(tid)}`,
       answers: draft,
     });
@@ -636,6 +643,10 @@ export async function mountFormFill(container, param, { staff } = {}) {
       const w = wrap(f.id);
       if (!w) return;
       const v = readField(f, w, rctx());
+      if (f.type === "aftercare" && w.acProblem) {
+        const m = w.acProblem();
+        if (m) { out.push({ id: f.id, msg: m }); return; }
+      }
       if (f.required && canRequire(f.type) && isBlank(v)) {
         out.push({ id: f.id, msg: f.type === "signature" ? "Sign here before saving." : "Answer this question." });
         return;
@@ -652,8 +663,10 @@ export async function mountFormFill(container, param, { staff } = {}) {
       if (f.type === "signature" && v && f.showNameDate !== false && !v.name) {
         out.push({ id: f.id, msg: "Add the name of the person signing." });
       }
-      if (f.type === "consent_status" && f.block && !(consent[f.id] && consent[f.id].found)) {
-        out.push({ id: f.id, msg: "There's no valid consent on file, so this form can't be saved yet." });
+      if ((f.type === "consent_status" || f.type === "prescription_status") && f.block && !(consent[f.id] && consent[f.id].found)) {
+        out.push({ id: f.id, msg: f.type === "prescription_status"
+          ? "There's no valid prescription on file, so this form can't be saved yet."
+          : "There's no valid consent on file, so this form can't be saved yet." });
       }
       if (w.photoFailed && w.photoFailed()) {
         out.push({ id: f.id, msg: "A photo didn't upload. Tap Retry on it, or remove it." });
@@ -843,7 +856,7 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
       ${(() => {
         const r = readReturn();
         return r && r.patientId === sub.patientId && r.consentId === sub.templateId
-          ? `<div class="ff-return-bar"><span>Consent saved. Carry on with <strong>${esc(r.templateName)}</strong>.</span>
+          ? `<div class="ff-return-bar"><span>${esc(r.kind || "Consent")} saved. Carry on with <strong>${esc(r.templateName)}</strong>.</span>
               <a class="ff-btn is-primary" href="${esc(r.returnHash)}">Continue with ${esc(r.templateName)} →</a></div>`
           : "";
       })()}
@@ -869,7 +882,7 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
         : '<div class="fe-sig"><span>Not signed</span></div>') + meta;
       return;
     }
-    if (f.type === "consent_status") {
+    if (f.type === "consent_status" || f.type === "prescription_status") {
       const el = w.querySelector(".fe-consent");
       if (el) el.outerHTML = consentHtml(f, sub.answers[f.id]);
       return;
