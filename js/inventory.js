@@ -11,6 +11,7 @@ import { callApi } from "./appointments.js";
 import { confirmDialog } from "./dialog.js";
 import { can } from "./perms.js";
 import { showToast } from "./utils.js";
+import { mountReceivePo } from "./receive-po.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -57,6 +58,13 @@ function movesHtml(moves, showProduct = true) {
 export function mountInventory(container, { param = "", staff = null } = {}) {
   const parts = String(param || "").split("/");
   if (parts[0] === "po" && parts[1]) { mountPurchaseOrder(container, { id: parts[1], staff }); return; }
+  if (parts[0] === "receive") {
+    const page = document.createElement("section");
+    page.className = "page wide";
+    container.replaceChildren(page);
+    mountReceivePo(page, parts[1] ? decodeURIComponent(parts[1]) : "", staff);
+    return;
+  }
   const first = String(param || "").split("/")[0];
   const tab = TABS.some(([k]) => k === first) ? first : "stock";
   const canManage = can("inventory.manage");
@@ -68,9 +76,10 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   root.innerHTML = `
     <div class="fb-head">
       <div><h2>Inventory</h2><p class="muted">Stock on the Shelf and in JT storage, products and suppliers.</p></div>
-      ${canManage ? `<div class="fb-head-actions">
-        <button type="button" class="btn-ghost" data-act="new-supplier">+ New supplier</button>
-        <button type="button" class="btn-primary" data-act="new-product">+ New product</button>
+      ${canMove ? `<div class="fb-head-actions">
+        <a class="btn-ghost inv-head-link" href="#/inventory/receive">Receive delivery</a>
+        ${canManage ? `<button type="button" class="btn-ghost" data-act="new-supplier">+ New supplier</button>
+        <button type="button" class="btn-primary" data-act="new-product">+ New product</button>` : ""}
       </div>` : ""}
     </div>
     <nav class="pt-tabs inv-tabs" aria-label="Inventory">${TABS.map(([k, l]) =>
@@ -408,7 +417,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
     if (mode === "add") {
       title = "Add stock";
-      sub = "For opening balances and stock found. Deliveries are received against a purchase order (coming next).";
+      sub = "For opening balances and stock found. Deliveries go through Receive delivery, so they're matched to their purchase order.";
       inner = `
         <div class="lh-field"><span class="lh-label">Where</span>${seg("loc", LOCATIONS.map((l) => [l.key, l.label]), "shelf")}</div>
         ${p.tracked ? `<div class="inv-two">
@@ -627,12 +636,13 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const counts = {
       open: n((r) => r.status === "open"),
       ordered: n((r) => r.status === "ordered"),
+      received: n((r) => r.status === "received"),
       closed: n((r) => r.status === "declined" || r.status === "cancelled"),
     };
     const segF = (name, items, cur, key) => seg(name, items, cur).replace(new RegExp(`name="${name}"`, "g"), `name="${name}" data-f="${key}"`);
     body.innerHTML = `
       <div class="inv-tools">
-        ${segF("rq-f", [["open", `Open (${counts.open})`], ["ordered", `Ordered (${counts.ordered})`], ["closed", "Declined & cancelled"], ["all", "All"]], st.reqFilter, "reqFilter")}
+        ${segF("rq-f", [["open", `Open (${counts.open})`], ["ordered", `Ordered (${counts.ordered})`], ["received", `Received (${counts.received})`], ["closed", "Declined & cancelled"], ["all", "All"]], st.reqFilter, "reqFilter")}
         ${st.reqFilter === "open" ? segF("rq-v", [["list", "List"], ["supplier", "By supplier"]], st.reqView, "reqView") : ""}
         <span class="inv-spacer"></span>
         ${canManage ? '<button type="button" class="ff-btn" data-act="req-settings">Email settings</button>' : ""}

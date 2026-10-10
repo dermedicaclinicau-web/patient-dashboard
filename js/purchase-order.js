@@ -157,6 +157,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     } else if (canOrder && (po.status === "sent" || po.status === "part")) {
       if (po.status === "sent" && nothingIn) acts.unshift('<button type="button" class="ff-btn is-quiet" data-act="cancel">Cancel PO</button>');
       acts.push(`<button type="button" class="ff-btn" data-act="resend">${I.send}<span>Email again</span></button>`);
+      acts.push(`<a class="ff-btn is-primary" href="#/inventory/receive/${encodeURIComponent(po.id)}">${I.check}<span>Receive stock</span></a>`);
     }
     $('[data-role="acts"]').innerHTML = acts.join("");
   }

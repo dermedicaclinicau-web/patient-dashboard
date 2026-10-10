@@ -7,6 +7,8 @@ import {
   serverTimestamp, arrayUnion, arrayRemove, writeBatch,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
+import { getStorage, ref as sRef, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+
 export const INV_CATEGORIES = [
   { key: "retail", label: "Retail" },
   { key: "general", label: "General consumables" },
@@ -288,7 +290,7 @@ export async function applyStock(product, { type, ops, reason = "", note = "" },
 
 /* ===================== Order requests ===================== */
 
-export const REQ_STATUS = { open: "Open", ordered: "Ordered", declined: "Declined", cancelled: "Cancelled" };
+export const REQ_STATUS = { open: "Open", ordered: "Ordered", received: "Received", declined: "Declined", cancelled: "Cancelled" };
 export const reqNumber = (r) => `R-${String((r && r.id) || "").slice(0, 6).toUpperCase()}`;
 export const myUid = () => (auth.currentUser && auth.currentUser.uid) || "";
 
@@ -576,4 +578,209 @@ export async function cancelPo(po, reason, staff) {
     });
   });
   await batch.commit();
+}
+
+/* ===================== Receiving deliveries ===================== */
+
+// Shrink a photo before upload (iPad photos are 3–5 MB). PDFs, and anything the browser can't decode, go up as they are.
+async function shrinkImage(file, max = 2000, quality = 0.82) {
+  if (!/^image\//.test(file.type)) return file;
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement("canvas");
+    c.width = Math.round(img.naturalWidth * k);
+    c.height = Math.round(img.naturalHeight * k);
+    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+    return await new Promise((res) => c.toBlob((b) => res(b || file), "image/jpeg", quality));
+  } catch {
+    return file;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+export async function uploadDocket(poId, file) {
+  if (!file) return null;
+  if (file.size > 25 * 1024 * 1024) throw new Error("That file is too big. Take a photo instead.");
+  const blob = await shrinkImage(file);
+  const type = blob.type || file.type || "image/jpeg";
+  const isPdf = type === "application/pdf";
+  const ext = isPdf ? "pdf" : type === "image/png" ? "png" : "jpg";
+  const path = `inv_dockets/${poId}/${Date.now()}.${ext}`;
+  const r = sRef(getStorage(), path);
+  await uploadBytes(r, blob, { contentType: type });
+  return { path, url: await getDownloadURL(r), type: isPdf ? "pdf" : "image" };
+}
+
+export async function listReceipts(poId) {
+  const snap = await getDocs(query(collection(db, "inv_receipts"), where("poId", "==", poId)));
+  return snap.docs
+    .map((d) => { const x = d.data() || {}; return { id: d.id, ...x, at: toDate(x.at) }; })
+    .sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0));
+}
+
+// receipt = { docketNo, note, docket: {path,url,type} | null, close,
+//   lines: [{ key, arrived (supplier's order units), splits: [{ loc, batch, expiry, qty (stock units) }] }] }
+// One transaction: batches, product totals, activity log, PO lines + status, and the delivery record.
+export async function receivePo(poId, receipt, staff) {
+  const byUid = uid();
+  const by = String((staff && staff.name) || "").slice(0, 120);
+  const at = new Date().toISOString();
+  const poRef = doc(db, "inv_pos", poId);
+  const recRef = doc(collection(db, "inv_receipts"));
+  const docketNo = clip(receipt.docketNo, 60);
+  const docket = receipt.docket && receipt.docket.url
+    ? { path: clip(receipt.docket.path, 300), url: String(receipt.docket.url).slice(0, 2000), type: receipt.docket.type === "pdf" ? "pdf" : "image" }
+    : null;
+  let result = null;
+
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    const poSnap = await tx.get(poRef);
+    if (!poSnap.exists()) throw new Error("This purchase order no longer exists.");
+    const po = normalisePo(poSnap);
+    if (!["sent", "part"].includes(po.status)) {
+      throw new Error(`This order is ${PO_STATUS[po.status].toLowerCase()}, so stock can't be received on it.`);
+    }
+
+    const work = [];
+    for (const r of receipt.lines || []) {
+      const line = po.lines.find((l) => l.key === r.key);
+      if (!line) throw new Error("This order has been changed by someone else. Reload and try again.");
+      const arrived = Math.min(9999, Math.max(0, parseInt(r.arrived, 10) || 0));
+      if (!arrived) continue;
+      const splits = (Array.isArray(r.splits) ? r.splits : [])
+        .map((s) => ({
+          loc: LOCATIONS.some((x) => x.key === s.loc) ? s.loc : line.loc,
+          batch: clip(s.batch, 40),
+          expiry: KEY_RE.test(s.expiry || "") ? s.expiry : "",
+          qty: Math.max(0, parseInt(s.qty, 10) || 0),
+        }))
+        .filter((s) => s.qty);
+      if (line.productId) {
+        const need = arrived * line.packSize;
+        const put = splits.reduce((a, s) => a + s.qty, 0);
+        if (put !== need) throw new Error(`${line.name}: ${plural(need, line.stockUnit)} arrived but ${put} have been put away.`);
+      }
+      work.push({ line, arrived, splits });
+    }
+    if (!work.length && !receipt.close) throw new Error("Enter what arrived.");
+
+    const pids = [...new Set(work.filter((w) => w.line.productId).map((w) => w.line.productId))];
+    const prod = new Map();
+    for (const id of pids) {
+      const s = await tx.get(doc(db, "inv_products", id));
+      if (!s.exists()) throw new Error("A product on this order no longer exists.");
+      prod.set(id, normaliseProduct(s));
+    }
+    work.forEach((w) => {
+      const p = prod.get(w.line.productId);
+      if (!p) { w.splits = []; return; }                       // free-text line: ticked off, no stock
+      w.splits = w.splits.map((s) => ({ ...s, batch: p.tracked ? s.batch : "", expiry: p.tracked ? s.expiry : "" }));
+      if (p.tracked && w.splits.some((s) => !s.batch || !s.expiry)) {
+        throw new Error(`${p.name} needs a batch number and expiry date for each batch.`);
+      }
+    });
+
+    const lots = new Map();
+    for (const w of work) {
+      for (const s of w.splits) {
+        const id = lotId(w.line.productId, s.loc, s.batch, s.expiry);
+        if (!lots.has(id)) {
+          const ref = doc(db, "inv_lots", id);
+          const snap = await tx.get(ref);
+          lots.set(id, {
+            ref, exists: snap.exists(), have: snap.exists() ? Number(snap.data().qty) || 0 : 0,
+            productId: w.line.productId, loc: s.loc, batch: s.batch, expiry: s.expiry, delta: 0,
+          });
+        }
+        lots.get(id).delta += s.qty;
+      }
+    }
+
+    // ---- Writes ----
+    lots.forEach((l) => tx.set(l.ref, {
+      productId: l.productId, loc: l.loc, batch: l.batch, expiry: l.expiry, qty: l.have + l.delta,
+      updatedAt: serverTimestamp(), ...(l.exists ? {} : { createdAt: serverTimestamp() }),
+    }, { merge: true }));
+
+    prod.forEach((p, id) => {
+      const stock = { ...p.stock };
+      work.filter((w) => w.line.productId === id).forEach((w) => w.splits.forEach((s) => { stock[s.loc] += s.qty; }));
+      tx.update(doc(db, "inv_products", id), { stock, stockAt: serverTimestamp() });
+    });
+
+    work.forEach((w) => {
+      const p = prod.get(w.line.productId);
+      if (!p || !w.splits.length) return;
+      tx.set(doc(collection(db, "inv_moves")), {
+        type: "receive", productId: p.id, productName: p.name, unit: p.stockUnit,
+        lines: w.splits.map((s) => ({ loc: s.loc, batch: s.batch, expiry: s.expiry, delta: s.qty })),
+        reason: "Delivery", note: docketNo ? `Docket ${docketNo}` : "", ref: po.number, poId,
+        by, byUid, at: serverTimestamp(),
+      });
+    });
+
+    const lines = po.lines.map((l) => {
+      const w = work.find((x) => x.line.key === l.key);
+      return w ? { ...l, received: l.received + w.arrived } : l;
+    });
+    const allIn = lines.every((l) => l.received >= l.qty);
+    const status = allIn || receipt.close ? "received" : "part";
+    const summary = work.map((w) => `${w.arrived} × ${w.line.name}`).join(", ");
+    tx.update(poRef, {
+      lines, status, receiptIds: arrayUnion(recRef.id),
+      lastReceivedAt: serverTimestamp(), ...(status === "received" ? { receivedAt: serverTimestamp() } : {}),
+      updatedAt: serverTimestamp(), updatedBy: by,
+      events: arrayUnion({
+        at, by,
+        action: status === "part" ? "Part received" : allIn ? "Received" : "Closed short",
+        note: [docketNo && `Docket ${docketNo}`, summary].filter(Boolean).join(" · ").slice(0, 300),
+      }),
+    });
+
+    tx.set(recRef, {
+      poId, poNumber: po.number, supplierId: po.supplierId, supplierName: po.supplier.name,
+      docketNo, note: clip(receipt.note, 1000), docket, closed: !!receipt.close && !allIn,
+      lines: work.map((w) => ({
+        key: w.line.key, productId: w.line.productId, name: w.line.name, arrived: w.arrived,
+        orderUnit: w.line.orderUnit, packSize: w.line.packSize, stockUnit: w.line.stockUnit, splits: w.splits,
+      })),
+      by, byUid, at: serverTimestamp(),
+    });
+
+    result = { status, number: po.number, requestIds: po.requestIds };
+  });
+  return result;
+}
+
+// After a delivery: requests whose every item has fully arrived become "Received"
+export async function syncReceivedRequests(requestIds, staff) {
+  const ids = [...new Set(requestIds || [])];
+  if (!ids.length) return [];
+  const [pos, snaps] = await Promise.all([
+    listPos(),
+    Promise.all(ids.map((id) => getDoc(doc(db, "inv_requests", id)))),
+  ]);
+  const arrived = (rid, i) => pos.some((po) => po.status !== "cancelled"
+    && po.lines.some((l) => l.received >= l.qty && l.sources.some((s) => s.r === rid && s.i === i)));
+  const by = String((staff && staff.name) || "").slice(0, 120);
+  const at = new Date().toISOString();
+  const batch = writeBatch(db);
+  const done = [];
+  snaps.forEach((s) => {
+    if (!s.exists()) return;
+    const r = normaliseRequest(s);
+    if (!["open", "ordered"].includes(r.status)) return;
+    if (!r.items.length || !r.items.every((_, i) => arrived(r.id, i))) return;
+    batch.update(s.ref, {
+      status: "received", updatedAt: serverTimestamp(),
+      events: arrayUnion({ at, by, action: "Received", note: "Stock has arrived" }),
+    });
+    done.push(r.id);
+  });
+  if (done.length) await batch.commit();
+  return done;
 }
