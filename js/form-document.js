@@ -293,6 +293,18 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
           <div class="fe-rich" style="font-size:10pt;line-height:1.55;">${cleanRichHtml(it.html || "")}</div></div>`).join("")}${
         v.discussed ? discussedLine(v.discussed.by, v.discussed.at) : ""}</div>`;
     }
+    if (f.type === "consumables") {
+      const lines = v && Array.isArray(v.lines) ? v.lines : [];
+      const items = f.items || [];
+      if (!lines.length && !(blank && items.length)) return "";
+      const rows = lines.length
+        ? lines.map((l) => (l.rows && l.rows.length ? l.rows : [{ amount: l.total }]).map((r, i) => `<tr>
+            <td>${i ? "" : esc(l.name)}</td><td>${esc(`${+Number(r.amount || 0).toFixed(1)} ${l.unit || ""}`)}</td>
+            <td>${esc(r.batch || "")}</td><td>${esc(r.expiry ? niceDate(r.expiry) : "")}</td></tr>`).join("")).join("")
+        : items.map((it) => `<tr><td>${esc(it.name)}</td><td style="height:24px"></td><td></td><td></td></tr>`).join("");
+      return `<div class="q" style="${box}">${label ? `<div class="ql" style="margin-bottom:${gap}px;">${label}</div>` : ""}` +
+        `<table class="grid"><tr><th>Product</th><th>Amount</th><th>Batch</th><th>Expiry</th></tr>${rows}</table></div>`;
+    }
     if (f.type === "image") {
       if (f.source === "staff") {
         const photos = (v && Array.isArray(v.photos) ? v.photos : []).filter((p) => images[p.path ? p.path : `bank:${p.bankId}`]);

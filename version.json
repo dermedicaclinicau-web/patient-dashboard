@@ -1,5 +1,5 @@
 ﻿{
-    "version":  "20261010-140927",
+    "version":  "20261010-144449",
     "files":  [
                   "./js/aftercare-api.js",
                   "./js/aftercare-bank.js",
@@ -13,6 +13,7 @@
                   "./js/calendar.js",
                   "./js/clinical-history-view.js",
                   "./js/clinical-profile.js",
+                  "./js/consumables-field.js",
                   "./js/data.js",
                   "./js/dialog.js",
                   "./js/email-composer.js",

@@ -127,6 +127,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     }
   }
 
+  
     function render() {
     if (tab === "stock") renderStock();
     else if (tab === "kits") renderKits(body, { staff, products: st.products, lots: st.lots, canKit, canJt, canManage, reload: load });

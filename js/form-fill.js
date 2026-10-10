@@ -19,6 +19,8 @@ import { attachAnnotators } from "./form-annotate.js";
 import { bankImage } from "./image-bank-api.js";
 import { mountAftercareField } from "./aftercare-field.js";
 import { mountPhotoField } from "./photo-field.js";
+import { mountConsumablesField, consumablesViewHtml } from "./consumables-field.js";
+import { consumeInTx } from "./inventory-api.js";
 
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const BAR_ICONS = {
@@ -238,6 +240,8 @@ export function readField(f, w, { pads = {}, calc = {}, consent = {}, annots = {
       const a = annots[f.id];
       return a && !a.isEmpty() ? { drawn: true } : "";
     }
+    case "consumables":
+      return w.csRead ? w.csRead() : { lines: [] };
     case "aftercare":
       return w.acRead ? w.acRead() : { items: [] };
     case "consent_status":
@@ -476,6 +480,11 @@ export async function mountFormFill(container, param, { staff } = {}) {
     mountPhotoField(wrap(f.id), f, { patient, onChange: () => { dirty = true; } });
   });
 
+    // Products used
+  fields.filter((f) => f.type === "consumables").forEach((f) => {
+    mountConsumablesField(wrap(f.id), f, { staff, onChange: () => { dirty = true; } });
+  });
+
   // Fill in from the patient's record
   const P = {
     "patient.name": patient.name,
@@ -615,7 +624,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
     if (!go) return;
     const draft = {};
     fields.forEach((f) => {
-      if (LAYOUT.includes(f.type) || ["photo", "signature", "image", "aftercare", "consent_status", "prescription_status"].includes(f.type)) return;
+      if (LAYOUT.includes(f.type) || ["photo", "signature", "image", "aftercare", "consumables", "consent_status", "prescription_status"].includes(f.type)) return;
       const w = wrap(f.id);
       if (!w || w.hidden) return;
       draft[f.id] = readField(f, w, rctx());
@@ -645,6 +654,10 @@ export async function mountFormFill(container, param, { staff } = {}) {
       const v = readField(f, w, rctx());
       if (f.type === "aftercare" && w.acProblem) {
         const m = w.acProblem();
+        if (m) { out.push({ id: f.id, msg: m }); return; }
+      }
+      if (f.type === "consumables" && w.csProblem) {
+        const m = w.csProblem();
         if (m) { out.push({ id: f.id, msg: m }); return; }
       }
       if (f.required && canRequire(f.type) && isBlank(v)) {
@@ -734,6 +747,10 @@ export async function mountFormFill(container, param, { staff } = {}) {
     let recordDate = rd ? answers[rd.id] : "";
     if (!/^\d{4}-\d{2}-\d{2}$/.test(recordDate || "")) recordDate = todayIso();
 
+    // Products used: taken off stock in the same save as the record
+    const csLines = fields.filter((f) => f.type === "consumables" && shown.has(f.id))
+      .flatMap((f) => { const w = wrap(f.id); return w && w.csPlan ? w.csPlan() : []; });
+
     const btn = saveBtns.find((b) => b.dataset.save === kind);
     const lbl = btn && btn.querySelector("span"); const label = lbl ? lbl.textContent : "";
     saving = true;
@@ -753,7 +770,12 @@ export async function mountFormFill(container, param, { staff } = {}) {
         recordDate,
         answers,
         signatures,
-      }, staff);
+      }, staff, csLines.length ? {
+        consume: (tx, subId) => consumeInTx(tx, {
+          submissionId: subId, lines: csLines, patientId: patient.id, patientName: patient.name || "",
+          formName: ver.name, recordDate, staff,
+        }),
+      } : undefined);
       dirty = false;
       if (kind === "save" && isConsentLeg) {
         location.hash = ret.returnHash;
@@ -912,6 +934,11 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
     }
     if (f.type === "aftercare") {
       mountAftercareField(w, f, { saved: sub.answers[f.id] || null });
+      return;
+    }
+    if (f.type === "consumables") {
+      const host = w.querySelector("[data-cs-host]");
+      if (host) host.outerHTML = consumablesViewHtml(sub.answers[f.id]);
       return;
     }
     writeField(f, w, sub.answers[f.id]);

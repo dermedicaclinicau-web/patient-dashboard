@@ -2,7 +2,7 @@
 // They're never edited or deleted once saved (enforced by the Firestore rules).
 import { db, auth } from "./firebase-config.js";
 import {
-  collection, addDoc, getDoc, getDocs, doc, query, where, serverTimestamp,
+  collection, addDoc, getDoc, getDocs, doc, query, where, serverTimestamp, runTransaction,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const COL = "form_submissions";
@@ -32,21 +32,26 @@ function normalise(snap) {
   };
 }
 
-export async function saveSubmission(data, staff) {
+// consume(tx, submissionId): optional. Takes stock off in the SAME transaction as the record,
+// so a record is never saved without its stock, or the other way round.
+export async function saveSubmission(data, staff, { consume } = {}) {
   const uid = auth.currentUser && auth.currentUser.uid;
   if (!uid) throw new Error("Your session has ended. Log in again.");
   if (JSON.stringify(data).length > 900000) {
     throw new Error("This form is too large to save. Try clearing the signatures and signing again.");
   }
-  const ref = await addDoc(collection(db, COL), {
-    ...data,
-    createdAt: serverTimestamp(),
-    createdBy: (staff && staff.name) || "",
-    createdByUid: uid,
+  const base = { createdAt: serverTimestamp(), createdBy: (staff && staff.name) || "", createdByUid: uid };
+  if (!consume) {
+    const ref = await addDoc(collection(db, COL), { ...data, ...base });
+    return ref.id;
+  }
+  const ref = doc(collection(db, COL));
+  await runTransaction(db, async (tx) => {
+    const res = await consume(tx, ref.id);
+    tx.set(ref, { ...data, answers: { ...data.answers, ...((res && res.answers) || {}) }, ...base });
   });
   return ref.id;
 }
-
 export async function getSubmission(id) {
   const snap = await getDoc(doc(db, COL, id));
   return snap.exists() ? normalise(snap) : null;

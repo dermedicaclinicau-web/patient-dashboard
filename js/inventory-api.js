@@ -25,6 +25,7 @@ export const MOVE_TYPES = {
   add: "Stock added", count: "Stock count", move: "Moved", writeoff: "Written off", receive: "Received", use: "Used",
   "kit-take": "Taken into kit", "kit-open": "Vial opened", "kit-return": "Returned from kit",
   "kit-discard": "Discarded from kit", "kit-use": "Used in treatment", release: "Released from JT storage",
+  "kit-borrow": "Borrowed from a colleague",
 };
 export const EXPIRY_SOON_DAYS = 60;
 
@@ -1018,4 +1019,163 @@ export async function declineRelease(rel, reason, staff) {
 
 export async function cancelRelease(rel) {
   await updateDoc(doc(db, "inv_releases", rel.id), { status: "cancelled", updatedAt: serverTimestamp() });
+}
+
+/* ---------- Borrowing units from a colleague's opened vial (happens straight away) ---------- */
+
+export const LOAN_STATUS = { unconfirmed: "Waiting for confirmation", confirmed: "Confirmed", disputed: "Disputed" };
+
+export async function kitBorrow(fromKit, units, staff) {
+  const u = round1(units);
+  if (!(u > 0)) throw new Error("Enter how many units you're taking.");
+  const me = uid();
+  if (fromKit.staffUid === me) throw new Error("That's your own kit.");
+  const fromRef = doc(db, "inv_kits", fromKit.id);
+  const toRef = doc(db, "inv_kits", kitId(me, fromKit.productId, fromKit.batch, fromKit.expiry));
+  const loanRef = doc(collection(db, "inv_loans"));
+  await runTransaction(db, async (tx) => {
+    const fSnap = await tx.get(fromRef);
+    const tSnap = await tx.get(toRef);
+    if (!fSnap.exists()) throw new Error("That kit item no longer exists.");
+    const open = round1(fSnap.data().open);
+    if (u > open + 0.01) throw new Error(`${fromKit.staffName} only has ${open} ${fromKit.doseUnit} left in that vial.`);
+    const t = tSnap.exists() ? tSnap.data() : null;
+    tx.update(fromRef, { open: Math.max(0, round1(open - u)), updatedAt: serverTimestamp() });
+    tx.set(toRef, {
+      staffUid: me, staffName: who(staff), productId: fromKit.productId, productName: fromKit.productName,
+      batch: fromKit.batch, expiry: fromKit.expiry, dosePer: fromKit.dosePer, doseUnit: fromKit.doseUnit,
+      sealed: t ? parseInt(t.sealed, 10) || 0 : 0, open: round1((t ? Number(t.open) || 0 : 0) + u),
+      updatedAt: serverTimestamp(), ...(t ? {} : { createdAt: serverTimestamp() }),
+    });
+    tx.set(loanRef, {
+      fromUid: fromKit.staffUid, fromName: fromKit.staffName, toUid: me, toName: who(staff),
+      productId: fromKit.productId, productName: fromKit.productName, batch: fromKit.batch, expiry: fromKit.expiry,
+      units: u, doseUnit: fromKit.doseUnit, status: "unconfirmed", createdAt: serverTimestamp(),
+    });
+    logMove(tx, staff, {
+      type: "kit-borrow", productId: fromKit.productId, productName: fromKit.productName, unit: fromKit.doseUnit,
+      note: `${u} ${fromKit.doseUnit} from ${fromKit.staffName}'s opened vial (batch ${fromKit.batch || "-"})`, ref: loanRef.id,
+    });
+  });
+  return loanRef.id;
+}
+
+export async function listLoans(max = 100) {
+  const snap = await getDocs(query(collection(db, "inv_loans"), orderBy("createdAt", "desc"), limit(max)));
+  return snap.docs.map((d) => {
+    const x = d.data() || {};
+    return { id: d.id, ...x, units: Number(x.units) || 0, status: LOAN_STATUS[x.status] ? x.status : "unconfirmed",
+      createdAt: toDate(x.createdAt), respondedAt: toDate(x.respondedAt) };
+  });
+}
+
+// The lender (or an Admin) confirms or disputes
+export async function answerLoan(loan, ok, note, staff) {
+  await updateDoc(doc(db, "inv_loans", loan.id), {
+    status: ok ? "confirmed" : "disputed", response: clip(note, 500),
+    respondedBy: who(staff), respondedAt: serverTimestamp(),
+  });
+}
+
+/* ===================== Products used in treatments ===================== */
+// lines: [{ fid, productId, name, kind: "kit"|"storage", unit, loc, block, rows: [{ ref, batch, expiry, amount }] }]
+// Runs inside the transaction that saves the treatment record (reads first, then writes).
+// Stock never goes below zero: anything missing is saved as "short" so the team can sort it out.
+// The record always keeps the amount given to the patient.
+export async function consumeInTx(tx, { submissionId, lines, patientId, patientName, formName, recordDate, staff }) {
+  const me = uid();
+  const kitSnaps = new Map(), lotSnaps = new Map(), prodSnaps = new Map();
+  for (const l of lines) {
+    for (const r of l.rows) {
+      if (!r.ref) continue;
+      if (l.kind === "kit") { if (!kitSnaps.has(r.ref)) kitSnaps.set(r.ref, await tx.get(doc(db, "inv_kits", r.ref))); }
+      else if (!lotSnaps.has(r.ref)) lotSnaps.set(r.ref, await tx.get(doc(db, "inv_lots", r.ref)));
+    }
+    if (l.kind !== "kit" && !prodSnaps.has(l.productId)) prodSnaps.set(l.productId, await tx.get(doc(db, "inv_products", l.productId)));
+  }
+
+  const kits = new Map(), lots = new Map();
+  const out = lines.map((l) => {
+    const rows = l.rows.map((r) => {
+      const want = l.kind === "kit" ? round1(r.amount) : Math.max(0, Math.round(Number(r.amount) || 0));
+      let taken = 0, from = l.kind === "kit" ? "kit" : (l.loc === "jt" ? "jt" : "shelf");
+      if (l.kind === "kit") {
+        const snap = r.ref ? kitSnaps.get(r.ref) : null;
+        if (snap && snap.exists() && snap.data().staffUid === me) {
+          const d = snap.data();
+          const s = kits.get(r.ref) || { sealed: parseInt(d.sealed, 10) || 0, open: round1(d.open), dosePer: Number(d.dosePer) || 0, opened: 0 };
+          while (want > s.open + 0.001 && s.sealed > 0 && s.dosePer > 0) { s.sealed -= 1; s.open = round1(s.open + s.dosePer); s.opened += 1; }
+          taken = round1(Math.min(want, s.open));
+          s.open = round1(s.open - taken);
+          kits.set(r.ref, s);
+        }
+      } else {
+        const snap = r.ref ? lotSnaps.get(r.ref) : null;
+        if (snap && snap.exists()) {
+          const d = snap.data();
+          const s = lots.get(r.ref) || { qty: Number(d.qty) || 0, loc: d.loc === "jt" ? "jt" : "shelf" };
+          taken = Math.min(want, s.qty);
+          s.qty -= taken;
+          from = s.loc;
+          lots.set(r.ref, s);
+        }
+      }
+      return { ref: r.ref || "", batch: clip(r.batch, 40), expiry: KEY_RE.test(r.expiry || "") ? r.expiry : "", amount: want, taken, from };
+    });
+    const total = round1(rows.reduce((a, r) => a + r.amount, 0));
+    const short = round1(rows.reduce((a, r) => a + (r.amount - r.taken), 0));
+    return { fid: l.fid, productId: clip(l.productId, 60), name: clip(l.name, 150), kind: l.kind === "kit" ? "kit" : "storage",
+      unit: clip(l.unit, 30), total, short, rows, block: l.block === true };
+  });
+
+  const blocked = out.find((l) => l.block && l.short > 0);
+  if (blocked) throw new Error(`${blocked.name}: not enough in stock (short by ${blocked.short} ${blocked.unit}). This form can't be saved until it's restocked.`);
+
+  // ---- Writes ----
+  kits.forEach((s, ref) => tx.update(doc(db, "inv_kits", ref), {
+    sealed: s.sealed, open: s.open, updatedAt: serverTimestamp(), ...(s.opened ? { openedAt: serverTimestamp() } : {}),
+  }));
+  lots.forEach((s, ref) => tx.update(doc(db, "inv_lots", ref), { qty: s.qty, updatedAt: serverTimestamp() }));
+  prodSnaps.forEach((snap, pid) => {
+    if (!snap.exists()) return;
+    const st = snap.data().stock || {};
+    const stock = { shelf: Number(st.shelf) || 0, jt: Number(st.jt) || 0 };
+    let touched = false;
+    out.filter((l) => l.kind !== "kit" && l.productId === pid).forEach((l) => l.rows.forEach((r) => {
+      if (!r.taken) return;
+      stock[r.from] = Math.max(0, stock[r.from] - r.taken);
+      touched = true;
+    }));
+    if (touched) tx.update(snap.ref, { stock, stockAt: serverTimestamp() });
+  });
+  out.forEach((l) => {
+    const moved = l.rows.filter((r) => r.taken);
+    if (!moved.length) return;
+    logMove(tx, staff, {
+      type: l.kind === "kit" ? "kit-use" : "use", productId: l.productId, productName: l.name, unit: l.unit,
+      lines: moved.map((r) => ({ loc: r.from, batch: r.batch, expiry: r.expiry, delta: -r.taken })),
+      reason: "Treatment", note: `${patientName} · ${formName}`.slice(0, 500), ref: submissionId,
+    });
+  });
+
+  const saved = out.map(({ fid, block, ...l }) => ({ ...l, rows: l.rows.map(({ ref, ...r }) => r) }));
+  tx.set(doc(collection(db, "inv_usage")), {
+    submissionId, patientId: clip(patientId, 150), patientName: clip(patientName, 150), formName: clip(formName, 150),
+    recordDate: KEY_RE.test(recordDate || "") ? recordDate : "", lines: saved, short: saved.some((l) => l.short > 0),
+    by: who(staff), byUid: me, at: serverTimestamp(),
+  });
+
+  const answers = {};
+  out.forEach(({ fid }, i) => { (answers[fid] = answers[fid] || { lines: [] }).lines.push(saved[i]); });
+  return { answers };
+}
+
+// Treatment records saved without enough stock (last 30 days)
+export async function listShortUsage() {
+  const snap = await getDocs(query(collection(db, "inv_usage"), where("short", "==", true)));
+  const since = Date.now() - 30 * 864e5;
+  return snap.docs
+    .map((d) => { const x = d.data() || {}; return { id: d.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [], at: toDate(x.at) }; })
+    .filter((u) => u.at && u.at.getTime() > since)
+    .sort((a, b) => b.at - a.at);
 }

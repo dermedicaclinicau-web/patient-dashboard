@@ -3626,3 +3626,31 @@ a.ff-btn { text-decoration: none; }
   .kit-rel { grid-template-columns: minmax(0, 1fr); }
   .kit-acts { justify-content: flex-start; }
 }
+
+/* ===== Consumables field ===== */
+.cs-host { display: grid; gap: .6rem; }
+.cs-line { border: 1px solid #e3e8ea; border-radius: 12px; padding: .75rem .9rem; background: #fff; display: grid; gap: .5rem; }
+.cs-line.is-short { border-color: #f5c38a; background: #fffaf2; }
+.cs-line.is-missing { opacity: .7; }
+.cs-head { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.cs-head small { color: #64748b; }
+.cs-head .cs-loc { margin-left: auto; width: auto; min-width: 130px; }
+.cs-row { display: grid; grid-template-columns: minmax(0, 1fr) 170px 32px; gap: .5rem; align-items: center; }
+.cs-row select.fe-in { min-width: 0; }
+.cs-src { font-size: .9rem; color: #475569; }
+.cs-foot { display: flex; justify-content: space-between; align-items: center; gap: .75rem; flex-wrap: wrap; font-size: .88rem; }
+.cs-acts { display: flex; gap: .9rem; flex-wrap: wrap; }
+.cs-link { background: none; border: 0; padding: 0; color: #0f766e; font-weight: 600; cursor: pointer; }
+.cs-warn { color: #b45309; font-weight: 600; }
+.cs-ok { color: #15803d; font-weight: 600; }
+.cs-add select { max-width: 360px; }
+.cs-build { display: grid; gap: .35rem; }
+.cs-build-row { display: flex; justify-content: space-between; gap: 1rem; padding: .5rem .7rem; border: 1px dashed #cfd8db; border-radius: 8px; }
+.cs-build-row small { color: #64748b; }
+.cs-set { border: 1px solid #e3e8ea; border-radius: 10px; padding: .6rem; margin-bottom: .5rem; display: grid; gap: .35rem; }
+.cs-set-head { display: flex; align-items: center; gap: .5rem; }
+.cs-set-head small { color: #64748b; margin-right: auto; }
+.cs-pick { max-height: 55vh; overflow: auto; display: grid; gap: .75rem; margin-top: .5rem; }
+.cs-pick-group h4 { margin: 0 0 .3rem; font-size: .85rem; color: #64748b; text-transform: uppercase; letter-spacing: .04em; }
+.cs-view td, .cs-view th { font-size: .92rem; }
+@media (max-width: 640px) { .cs-row { grid-template-columns: minmax(0, 1fr) 120px 28px; } }

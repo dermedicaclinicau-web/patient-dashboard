@@ -36,6 +36,7 @@ export const ICONS = {
   watermark: '<path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>',
   space: '<line x1="12" y1="3" x2="12" y2="21"/><polyline points="8 7 12 3 16 7"/><polyline points="8 17 12 21 16 17"/>',
   x: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
+  consumables: '<path d="m18 2 4 4"/><path d="m17 7 3-3"/><path d="M19 9 8.7 19.3a2.4 2.4 0 0 1-3.4 0l-.6-.6a2.4 2.4 0 0 1 0-3.4L15 5"/><path d="m9 11 4 4"/><path d="m5 19-3 3"/>',
 };
 
 // `was` = the name in the old Apps Script builder (tooltip + search).
@@ -63,13 +64,14 @@ export const FIELD_TYPES = {
   letterhead:     { name: "Letterhead", was: "Letterhead", label: "" },
   watermark:      { name: "Watermark", was: "Watermark", label: "" },
   space:          { name: "Space", was: "Space", label: "" },
+  consumables:    { name: "Consumables", was: "Products used stock inventory", label: "Products used" },
 };
 
 export const FIELD_GROUPS = [
   ["Patient and visit", ["patient", "record_date", "date"]],
   ["Answers", ["short_text", "long_text", "number", "email"]],
   ["Choices", ["single_choice", "dropdown", "checkboxes", "checkbox_notes", "sub_checks"]],
-  ["Clinical", ["signature", "consent_status", "prescription_status", "image", "aftercare"]],
+  ["Clinical", ["signature", "consent_status", "prescription_status", "image", "aftercare", "consumables"]],
   ["Tables and maths", ["table", "calculation"]],
   ["Page layout", ["text_block", "space", "watermark"]],
 ];
@@ -170,7 +172,7 @@ export const FILLS_FOR = {
 
 const NO_LABEL = ["space", "letterhead", "watermark"];
 const NO_HELP = ["patient", "text_block", "space", "letterhead", "watermark"];
-const NO_REQUIRED = ["text_block", "space", "letterhead", "watermark", "calculation", "consent_status", "prescription_status", "image", "aftercare"];
+const NO_REQUIRED = ["text_block", "space", "letterhead", "watermark", "calculation", "consent_status", "prescription_status", "image", "aftercare", "consumables"];
 export const hasLabel = (t) => !NO_LABEL.includes(t);
 export const hasHelp = (t) => !NO_HELP.includes(t);
 export const canRequire = (t) => !NO_REQUIRED.includes(t);
@@ -220,6 +222,7 @@ export function createField(type, id) {
     case "consent_status": f.consentFormId = ""; f.months = 12; f.block = false; break;
     case "prescription_status": f.consentFormId = ""; f.months = 6; f.block = false; break;
     case "aftercare": f.mode = "fixed"; f.items = []; f.preselect = true; f.emailTemplate = ""; f.confirm = "each"; break;
+    case "consumables": f.items = []; f.allowExtra = true; f.ifShort = "flag"; break;
   }
   return f;
 }
@@ -357,6 +360,20 @@ export function cleanField(f) {
       out.preselect = f.preselect !== false;
       out.emailTemplate = /^[A-Za-z0-9]{10,40}$/.test(f.emailTemplate || "") ? f.emailTemplate : "";
       out.confirm = pick(f.confirm, ["each", "all", "off"], "each");
+      break;
+    case "consumables":
+      out.items = (Array.isArray(f.items) ? f.items : [])
+        .filter((it) => it && typeof it === "object" && /^[A-Za-z0-9_-]{1,80}$/.test(it.productId || ""))
+        .slice(0, 25)
+        .map((it) => ({
+          productId: it.productId, name: clip(it.name, 150), unit: clip(it.unit, 30),
+          kind: it.kind === "kit" ? "kit" : "storage",
+          required: it.required === true,
+          amount: Number(it.amount) > 0 ? Number(it.amount) : null,
+          max: Number(it.max) > 0 ? Number(it.max) : null,
+        }));
+      out.allowExtra = f.allowExtra !== false;
+      out.ifShort = pick(f.ifShort, ["flag", "block"], "flag");
       break;
 }
   const sw = cleanCondition(f);
@@ -593,6 +610,16 @@ export function renderField(f, ctx = {}) {
       return `<div class="fe-block">${f.label ? `<div class="fe-block-h">${esc(f.label)}</div>` : ""}${
         body || (live ? "" : '<p class="fe-ph">Click to write the information patients need to read.</p>')}</div>`;
     }
+    case "consumables": {
+      if (live) return head + '<div class="cs-host" data-cs-host><p class="fe-help">Loading stock…</p></div>';
+      const items = f.items || [];
+      return head + (items.length
+        ? `<div class="cs-build">${items.map((it) => `<div class="cs-build-row"><span>${esc(it.name || "Product")}${
+            it.required ? '<span class="fe-req">*</span>' : ""}</span><small>${it.kind === "kit" ? "From the clinician's kit" : "From the Shelf"}${
+            it.amount ? ` · ${esc(it.amount)} ${esc(it.unit)} by default` : ""}${it.max ? ` · up to ${esc(it.max)}` : ""}</small></div>`).join("")}</div>`
+        : `<div class="fe-img-empty">${svg(ICONS.consumables)}<span>Choose products in the settings panel</span></div>`) +
+        (f.allowExtra !== false ? '<div class="fe-help fe-help-after">Staff can add other products while filling in.</div>' : "");
+    }
     case "letterhead":
       return letterheadHtml(ctx.letterhead);
     case "watermark": {
@@ -605,7 +632,8 @@ export function renderField(f, ctx = {}) {
     }
     case "space":
       return `<div class="fe-space is-${esc(f.size || "medium")}"></div>`;
-  }
+    }
+    
   return "";
 }
 
@@ -864,6 +892,24 @@ function typeSettings(f, ctx = {}) {
         `<label class="fe-check"><input type="checkbox" data-k="preselect"${f.preselect !== false ? " checked" : ""} /> Ticked to send and print by default</label>` +
         '<p class="fe-note fe-pad">Staff can expand each aftercare to read it, and untick any they don\'t want included in the emailed or printed form.</p>';
     }
+    case "consumables": {
+      const items = f.items || [];
+      return `<div class="fe-insp-field"><span class="fe-insp-label">Products</span>
+        ${items.length ? items.map((it, i) => `<div class="cs-set">
+          <div class="cs-set-head"><strong>${esc(it.name)}</strong><small>${it.kind === "kit" ? "Kit · in " + esc(it.unit) : "Shelf · in " + esc(it.unit)}</small>
+            <button type="button" class="hx-x" data-cidel="${i}" aria-label="Remove ${esc(it.name)}">${svg(ICONS.x)}</button></div>
+          <label class="fe-check"><input type="checkbox" data-ci="${i}" data-cik="required"${it.required ? " checked" : ""} /> Must be filled in</label>
+          <div class="fe-two">
+            <label class="fe-insp-sub"><small>Default amount</small><div class="fe-num"><input class="fe-input" type="number" min="0" step="any" data-ci="${i}" data-cik="amount" value="${it.amount ?? ""}" placeholder="None" /><span>${esc(it.unit)}</span></div></label>
+            <label class="fe-insp-sub"><small>Most allowed</small><div class="fe-num"><input class="fe-input" type="number" min="0" step="any" data-ci="${i}" data-cik="max" value="${it.max ?? ""}" placeholder="No limit" /><span>${esc(it.unit)}</span></div></label>
+          </div></div>`).join("") : '<small class="fe-note">None chosen yet.</small>'}
+        <button type="button" class="lh-btn" data-act="cs-pick">Choose products</button></div>` +
+        setting("If there isn't enough in stock", choose("ifShort", [
+          ["flag", "Save, and flag it for the ordering team"], ["block", "Don't allow saving"],
+        ], f.ifShort || "flag"), "Flagging is safest for clinical records: the treatment is always recorded.") +
+        `<label class="fe-check"><input type="checkbox" data-k="allowExtra"${f.allowExtra !== false ? " checked" : ""} /> Staff can add other products while filling in</label>` +
+        '<p class="fe-note fe-pad">Stock comes off when the form is saved: kit products (e.g. Xeomin) from the clinician\'s own kit in units, everything else from the Shelf (JT storage for Dr Teh). The batches are saved on the record.</p>';
+    }
   }
   return "";
 }
@@ -926,6 +972,13 @@ function layoutSettings(f) {
 // Typing in table columns, sub-option groups, patient detail ticks and layout buttons.
 // Returns true if it changed something.
 export function applyInput(f, el) {
+  if (el.dataset.ci !== undefined) {
+    const it = f.items && f.items[Number(el.dataset.ci)];
+    if (!it) return false;
+    if (el.dataset.cik === "required") it.required = el.checked;
+    else { const n = Number(el.value); it[el.dataset.cik] = el.value === "" || !(n > 0) ? null : n; }
+    return true;
+  }
   if (el.dataset.cmton !== undefined) {
     const s = new Set(f.commentOn || []);
     if (el.checked) s.add(el.dataset.cmton); else s.delete(el.dataset.cmton);
@@ -966,6 +1019,11 @@ export function applyInput(f, el) {
 
 // Add / remove buttons for table columns and sub-option groups.
 export function applyClick(f, target) {
+  const cd = target.closest("[data-cidel]");
+  if (cd) {
+    if (Array.isArray(f.items)) f.items.splice(Number(cd.dataset.cidel), 1);
+    return true;
+  }
   const acd = target.closest("[data-acdel]");
   if (acd) {
     if (Array.isArray(f.items)) f.items.splice(Number(acd.dataset.acdel), 1);

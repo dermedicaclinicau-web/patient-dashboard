@@ -25,6 +25,8 @@ import { listAftercare } from "./aftercare-api.js";
 import { openAftercarePicker } from "./aftercare-bank.js";
 import { mountAftercareField } from "./aftercare-field.js";
 import { listTaskTypes } from "./task-types.js";
+import { listProducts, isKitProduct } from "./inventory-api.js";
+import { openProductPicker } from "./consumables-field.js";
 
 const UI = {
   up: '<polyline points="18 15 12 9 6 15"/>',
@@ -117,7 +119,8 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
   let aftercareMap = null;   // aftercare id -> aftercare, once loaded
   let emailTemplates = [];   // To Patient task types, for the aftercare email
-  const ctx = (live) => ({ live, fields, consentForms, prescriptionForms, letterhead, calcValues: null, aftercare: aftercareMap, emailTemplates });
+  let products = [];         // inventory products, for the Consumables field
+  const ctx = (live) => ({ live, fields, consentForms, prescriptionForms, letterhead, calcValues: null, aftercare: aftercareMap, emailTemplates, products });
   const current = () => fields.find((f) => f.id === sel) || null;
   const signature = () => JSON.stringify(formSnapshot({ name, fields, settings }));
 
@@ -275,6 +278,9 @@ export async function mountFormEditor(container, { templateId, staff }) {
       }
       if (f.type === "consent_status" && !f.consentFormId) {
         return { id: f.id, msg: "Choose which consent form the Consent check looks for." };
+      }
+      if (f.type === "consumables" && !(f.items || []).length) {
+        return { id: f.id, msg: "Choose at least one product for the Consumables field." };
       }
       if (f.type === "prescription_status" && !f.consentFormId) {
         return { id: f.id, msg: "Choose which prescription form the Prescription check looks for." };
@@ -881,6 +887,26 @@ export async function mountFormEditor(container, { templateId, staff }) {
       });
       return;
     }
+    if (e.target.closest('[data-act="cs-pick"]')) {
+      openProductPicker(products, (f.items || []).map((it) => it.productId)).then((ids) => {
+        if (!ids || !root.isConnected) return;
+        const target = fields.find((x) => x.id === f.id);
+        if (!target) return;
+        const old = new Map((target.items || []).map((it) => [it.productId, it]));
+        target.items = ids.map((id) => {
+          const p = products.find((x) => x.id === id);
+          const o = old.get(id);
+          const kit = isKitProduct(p);
+          return {
+            productId: id, name: p ? p.name : (o && o.name) || "Product", kind: kit ? "kit" : "storage",
+            unit: p ? (kit ? p.doseUnit : p.stockUnit) : (o && o.unit) || "",
+            required: o ? o.required : false, amount: o ? o.amount : null, max: o ? o.max : null,
+          };
+        });
+        changed(); renderStage(); renderInspector();
+      });
+      return;
+    }
     if (e.target.closest('[data-act="img-pick"]')) { pickImage(f); return; }
     if (e.target.closest('[data-act="img-clear"]')) {
       f.fileId = ""; f.fileName = "";
@@ -1067,4 +1093,12 @@ export async function mountFormEditor(container, { templateId, staff }) {
       if (root.isConnected && f && f.type === "aftercare") renderInspector();
     })
     .catch((err) => console.warn("Couldn't load email templates:", err));
+    
+  listProducts()
+    .then((list) => {
+      products = list;
+      const f = current();
+      if (root.isConnected && f && f.type === "consumables") renderInspector();
+    })
+    .catch((err) => console.warn("Couldn't load products:", err));
 }
