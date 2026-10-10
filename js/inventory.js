@@ -12,11 +12,12 @@ import { confirmDialog } from "./dialog.js";
 import { can } from "./perms.js";
 import { showToast } from "./utils.js";
 import { mountReceivePo } from "./receive-po.js";
+import { renderKits } from "./inventory-kits.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const SEARCH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
-const TABS = [["stock", "Stock"], ["requests", "Requests"], ["orders", "Purchase orders"], ["products", "Products"], ["suppliers", "Suppliers"], ["activity", "Activity"]];
+const TABS = [["stock", "Stock"], ["kits", "Kits"], ["requests", "Requests"], ["orders", "Purchase orders"], ["products", "Products"], ["suppliers", "Suppliers"], ["activity", "Activity"]];
 const niceDate = (key) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
@@ -70,6 +71,9 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   const canManage = can("inventory.manage");
   const canMove = canManage || can("inventory.order");
   const canRequest = can("inventory.request");
+  const canKit = can("inventory.kit");
+  const canJt = can("inventory.jt");
+  const showKits = canKit || canJt || canManage;
 
   const root = document.createElement("section");
   root.className = "page wide";
@@ -82,7 +86,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         <button type="button" class="btn-primary" data-act="new-product">+ New product</button>` : ""}
       </div>` : ""}
     </div>
-    <nav class="pt-tabs inv-tabs" aria-label="Inventory">${TABS.map(([k, l]) =>
+    <nav class="pt-tabs inv-tabs" aria-label="Inventory">${TABS.filter(([k]) => k !== "kits" || showKits).map(([k, l]) =>
       `<a href="#/inventory/${k}"${k === tab ? ' class="active" aria-current="page"' : ""}>${l}${
         k === "requests" ? ' <em class="inv-tabcount" data-role="reqcount" hidden></em>' : ""}</a>`).join("")}</nav>
     <div data-role="body"><div class="skeleton" style="height:320px;border-radius:14px"></div></div>`;
@@ -123,8 +127,9 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     }
   }
 
-  function render() {
+    function render() {
     if (tab === "stock") renderStock();
+    else if (tab === "kits") renderKits(body, { staff, products: st.products, lots: st.lots, canKit, canJt, canManage, reload: load });
     else if (tab === "requests") renderRequests();
     else if (tab === "orders") renderOrders();
     else if (tab === "products") renderProducts();
@@ -285,6 +290,12 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
               <input name="doseUnit" maxlength="20" placeholder="units" value="${val(x.doseUnit)}" aria-label="Dose measured in" />
             </div>
             <small class="fe-note">Stock is still counted in whole items. The dose shows alongside, e.g. 3 vials (300 units), and is used later when recording what was used in a treatment.</small></div>
+          <label class="lh-field"><span class="lh-label">How it's used in treatments</span>
+            <select class="fb-select" name="usage">
+              <option value="storage"${x.usage !== "kit" ? " selected" : ""}>Straight from the Shelf (JT storage for Dr Teh)</option>
+              <option value="kit"${x.usage === "kit" ? " selected" : ""}>Carried in injectors' kits (e.g. Xeomin)</option>
+            </select>
+            <small class="fe-note">Kit products need a dose. Injectors take them into their kit and use them in units.</small></label>
           <label class="lh-field"><span class="lh-label">Cost per order unit, $ (optional)</span><input name="cost" type="number" min="0" step="0.01" value="${val(x.cost)}" /></label>
           <label class="lh-field"><span class="lh-label">Retail price, $ (optional)</span><input name="price" type="number" min="0" step="0.01" value="${val(x.price)}" /></label>
           <label class="lh-field"><span class="lh-label">Barcode (optional)</span><input name="barcode" maxlength="60" value="${val(x.barcode)}" /></label>
@@ -332,6 +343,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           supplierCode: f.supplierCode.value, stockUnit: f.stockUnit.value, orderUnit: f.orderUnit.value,
           packSize: f.packSize.value, cost: f.cost.value, price: f.price.value, barcode: f.barcode.value,
           dosePer: f.dosePer.value, doseUnit: f.doseUnit.value,
+          usage: f.usage.value,
           reorder: { shelf: f.reShelf.value, jt: f.reJt.value },
           tracked: hasStock ? x.tracked : f.tracked.checked, active: f.active.checked, notes: f.notes.value,
         }, staff);

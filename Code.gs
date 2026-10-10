@@ -34,6 +34,7 @@ function doPost(e) {
     if (body.action === 'sendTaskEmail') return json_(handleSendTaskEmail_(body));
     if (body.action === 'sendAftercareEmail') return json_(handleSendAftercareEmail_(body));
     if (body.action === 'printPdf') return json_(handlePrintPdf_(body));
+    if (body.action === 'inventory') return json_(handleInventory_(body));
     if (body.action === 'ssp') return json_(handleSsp_(body));
     if (body.action === 'staff') return json_(handleStaff_(body));
     if (body.action === 'scheduledTask') return json_(handleScheduledTask_(body));
@@ -2851,12 +2852,17 @@ const PERMS_ = [
   ['forms.build', 'Building', 'Build forms, Image Bank and Aftercare Bank'],
   ['ssp.create', 'Skin Script', 'Create Skin Script Protocols'],
   ['ssp.config', 'Skin Script', 'Skin Script products and design'],
+  ['menu.inventory', 'Inventory', 'Inventory (see stock, products and suppliers)'],
+  ['inventory.request', 'Inventory', 'Request orders'],
+  ['inventory.order', 'Inventory', 'Ordering team: purchase orders, receiving and moving stock'],
+  ['inventory.manage', 'Inventory', 'Manage products, suppliers and stock counts'],
 ];
 const PERMS_ALL_ = PERMS_.map(function (p) { return p[0]; });
 const ROLE_DEFAULTS_ = {
   Clinician: ['menu.patients', 'menu.calendar', 'menu.tasks', 'patients.edit', 'clinical.view', 'billing.view',
-    'consult.record', 'send.patients', 'tasks.run', 'ssp.create'],
-  Reception: ['menu.patients', 'menu.calendar', 'menu.tasks', 'patients.edit', 'send.patients', 'tasks.run'],
+    'consult.record', 'send.patients', 'tasks.run', 'ssp.create', 'menu.inventory', 'inventory.request'],
+  Reception: ['menu.patients', 'menu.calendar', 'menu.tasks', 'patients.edit', 'send.patients', 'tasks.run',
+    'menu.inventory', 'inventory.request', 'inventory.order'],
 };
 
 function rolesConfig_() {
@@ -3243,4 +3249,193 @@ function handlePrintTask_(body) {
   } catch (e) { console.warn('Printed, but the history log failed: ' + e); }
 
   return { ok: true, sent: copies, printer: printer };
+}
+
+// ===================== Inventory: order request emails =====================
+
+const PORTAL_URL_ = 'https://dermedicaclinicau-web.github.io/patient-dashboard/';
+
+function handleInventory_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  const op = String(body.op || '');
+  const ordering = can_(session, 'inventory.order') || can_(session, 'inventory.manage');
+  const okId = function (v) { return /^[A-Za-z0-9_-]{10,40}$/.test(String(v || '')); };
+  try {
+    if (op === 'notifyRequest') {
+      if (!can_(session, 'inventory.request')) return { ok: false, error: 'FORBIDDEN' };
+      if (!okId(body.requestId)) return { ok: false, error: 'BAD_REQUEST' };
+      return invNotifyRequest_(String(body.requestId), session);
+    }
+    if (op === 'notifyUpdate') {
+      if (!ordering) return { ok: false, error: 'FORBIDDEN' };
+      if (!okId(body.requestId)) return { ok: false, error: 'BAD_REQUEST' };
+      return invNotifyUpdate_(String(body.requestId));
+    }
+    if (op === 'sendPo') {
+      if (!ordering) return { ok: false, error: 'FORBIDDEN' };
+      if (!okId(body.poId)) return { ok: false, error: 'BAD_REQUEST' };
+      return invSendPo_(String(body.poId), body, session);
+    }
+  } catch (err) {
+    console.error('Inventory ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: false, error: 'SERVER_ERROR' };
+  }
+  return { ok: false, error: 'BAD_REQUEST' };
+}
+
+function invReqNumber_(id) { return 'R-' + String(id).slice(0, 6).toUpperCase(); }
+function invEsc_(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function invQty_(n, unit) {
+  const u = String(unit || 'unit');
+  return n + ' ' + (Number(n) === 1 ? u : (/(s|x|ch|sh)$/i.test(u) ? u + 'es' : u + 's'));
+}
+function invItemsHtml_(rec) {
+  return '<ul style="margin:0 0 14px;padding-left:20px">' + (rec.items || []).map(function (it) {
+    return '<li style="margin:0 0 4px"><strong>' + invEsc_(it.name) + '</strong> × ' + invEsc_(invQty_(it.qty, it.unit)) +
+      (it.productId ? '' : ' <em style="color:#64748b">(not on the product list)</em>') + '</li>';
+  }).join('') + '</ul>';
+}
+function invEmailWrap_(inner) {
+  return '<div style="margin:0;padding:24px 12px;background:#f1f5f9"><div style="max-width:600px;margin:0 auto;padding:28px 30px;' +
+    'background:#fff;border-radius:12px;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.6;color:#1e293b">' +
+    inner + '<p style="margin:18px 0 0"><a href="' + PORTAL_URL_ + '#/inventory/requests" style="display:inline-block;padding:10px 18px;' +
+    'border-radius:8px;background:#0f766e;color:#fff;text-decoration:none;font-weight:bold">Open order requests</a></p></div></div>';
+}
+
+// A new request → the staff chosen in Inventory → Requests → Email settings
+function invNotifyRequest_(id, session) {
+  const cfg = getConfig_();
+  const rec = fsGetDoc_(cfg, 'inv_requests/' + id);
+  if (!rec) return { ok: false, error: 'NOT_FOUND' };
+  if (rec.requestedByUid !== session.uid) return { ok: false, error: 'FORBIDDEN' };
+  if (rec.notified === true) return { ok: true, sent: 0 };
+
+  const set = fsGetDoc_(cfg, 'inv_settings/requests') || {};
+  const urgent = rec.urgency === 'urgent';
+  let to = [];
+  if (!(set.urgentOnly === true && !urgent)) {
+    const byId = {};
+    getStaffDocs_().forEach(function (s) { byId[s.id] = s; });
+    to = (Array.isArray(set.notifyIds) ? set.notifyIds : [])
+      .map(function (sid) { return byId[String(sid)]; })
+      .filter(function (s) { return s && s.active !== false && isEmail_(s.email); })
+      .map(function (s) { return s.email; });
+  }
+  if (to.length && MailApp.getRemainingDailyQuota() >= 1) {
+    const num = invReqNumber_(id);
+    const loc = rec.loc === 'jt' ? 'JT storage' : 'Shelf';
+    const html = invEmailWrap_(
+      '<h2 style="margin:0 0 6px;font-size:20px;color:' + (urgent ? '#b91c1c' : '#0f766e') + '">' + (urgent ? 'Urgent order request ' : 'Order request ') + num + '</h2>' +
+      '<p style="margin:0 0 12px;color:#475569">From <strong>' + invEsc_(rec.requestedBy) + '</strong> · for the ' + loc + '</p>' +
+      invItemsHtml_(rec) +
+      (rec.note ? '<p style="margin:0 0 6px;padding:10px 12px;border-radius:8px;background:#f8fafc">“' + invEsc_(rec.note) + '”</p>' : ''));
+    MailApp.sendEmail({
+      to: to.join(','), name: 'Dermedica Clinic',
+      subject: (urgent ? 'URGENT: ' : '') + 'Order request ' + num + ' from ' + String(rec.requestedBy || 'staff'),
+      htmlBody: html, body: emailHtmlToText_(html),
+    });
+  }
+  fsPatch_(cfg, 'inv_requests/' + id, { notified: true });
+  return { ok: true, sent: to.length };
+}
+
+// Ordered or declined → the person who asked
+function invNotifyUpdate_(id) {
+  const cfg = getConfig_();
+  const rec = fsGetDoc_(cfg, 'inv_requests/' + id);
+  if (!rec) return { ok: false, error: 'NOT_FOUND' };
+  if (rec.status !== 'ordered' && rec.status !== 'declined') return { ok: true, sent: 0 };
+  const who = getStaffDocs_().filter(function (s) { return s.id === rec.requestedByUid; })[0];
+  if (!who || !isEmail_(who.email) || MailApp.getRemainingDailyQuota() < 1) return { ok: true, sent: 0 };
+  const num = invReqNumber_(id);
+  const ordered = rec.status === 'ordered';
+  const html = invEmailWrap_(
+    '<h2 style="margin:0 0 6px;font-size:20px;color:' + (ordered ? '#0f766e' : '#b45309') + '">Your order request ' + num + ' was ' + (ordered ? 'ordered' : 'declined') + '</h2>' +
+    '<p style="margin:0 0 12px;color:#475569">By <strong>' + invEsc_(rec.handledBy || 'the ordering team') + '</strong></p>' +
+    invItemsHtml_(rec) +
+    (rec.response ? '<p style="margin:0 0 6px;padding:10px 12px;border-radius:8px;background:#f8fafc">' + invEsc_(rec.response) + '</p>' : ''));
+  MailApp.sendEmail({
+    to: who.email, name: 'Dermedica Clinic',
+    subject: 'Order request ' + num + (ordered ? ' ordered' : ' declined'),
+    htmlBody: html, body: emailHtmlToText_(html),
+  });
+  return { ok: true, sent: 1 };
+}
+
+// ===================== Inventory: purchase orders =====================
+
+// Every item of the request is on a sent (or received) PO. sentPoId counts as sent.
+function invRequestCovered_(cfg, req, rid, sentPoId) {
+  const pos = (Array.isArray(req.poIds) ? req.poIds : []).map(function (pid) {
+    try { const p = fsGetDoc_(cfg, 'inv_pos/' + pid); if (p) p._id = pid; return p; } catch (e) { return null; }
+  }).filter(function (p) {
+    return p && (p._id === sentPoId || ['sent', 'part', 'received'].indexOf(p.status) !== -1);
+  });
+  const items = Array.isArray(req.items) ? req.items : [];
+  return items.length > 0 && items.every(function (_, i) {
+    return pos.some(function (p) {
+      return (p.lines || []).some(function (l) {
+        return (l.sources || []).some(function (s) { return s.r === rid && Number(s.i) === i; });
+      });
+    });
+  });
+}
+
+function invSendPo_(id, body, session) {
+  const cfg = getConfig_();
+  const po = fsGetDoc_(cfg, 'inv_pos/' + id);
+  if (!po) return { ok: false, error: 'NOT_FOUND' };
+  if (['draft', 'sent', 'part'].indexOf(po.status) === -1) return { ok: false, error: 'BAD_REQUEST' };
+
+  const to = String(body.to || '').trim();
+  const cc = String(body.cc || '').trim();
+  if (!isEmail_(to) || (cc && !isEmail_(cc))) return { ok: false, error: 'BAD_EMAIL' };
+  const bytes = pdfBytes_(body.pdf);
+  if (!bytes) return { ok: false, error: 'PDF_FAILED' };
+  const htmlRaw = sanitizeEmailHtml_(body.html);
+  if (!htmlRaw || htmlRaw.length > 300000) return { ok: false, error: 'BAD_REQUEST' };
+  if (MailApp.getRemainingDailyQuota() < 1) return { ok: false, error: 'QUOTA' };
+
+  const fileName = cleanFileName_(body.fileName, String(po.number || 'Purchase order'));
+  const inlined = inlineTaskImages_(cfg, htmlRaw);
+  const mail = {
+    to: to, name: 'Dermedica Clinic',
+    subject: String(body.subject || '').trim().slice(0, 200) || ('Purchase order ' + po.number),
+    htmlBody: inlined.html, body: emailHtmlToText_(inlined.html),
+    attachments: [Utilities.newBlob(bytes, MimeType.PDF, fileName)],
+  };
+  if (cc) mail.cc = cc;
+  if (Object.keys(inlined.images).length) mail.inlineImages = inlined.images;
+  MailApp.sendEmail(mail);
+
+  const now = new Date().toISOString();
+  const who = String(session.name || '');
+  const first = po.status === 'draft';
+  const patch = {
+    sentTo: to + (cc ? ' (cc ' + cc + ')' : ''), lastEmailAt: now, updatedAt: now, updatedBy: who,
+    events: (Array.isArray(po.events) ? po.events : []).concat([{
+      at: now, by: who, action: first ? 'Sent to supplier' : 'Emailed again', note: 'To ' + to,
+    }]).slice(-60),
+  };
+  if (first) { patch.status = 'sent'; patch.sentAt = now; patch.sentBy = who; patch.sentVia = 'Email'; }
+  fsPatch_(cfg, 'inv_pos/' + id, patch);
+
+  // The requests this order completes become "Ordered", and their requesters are emailed
+  if (first) {
+    (Array.isArray(po.requestIds) ? po.requestIds : []).forEach(function (rid) {
+      try {
+        const r = fsGetDoc_(cfg, 'inv_requests/' + rid);
+        if (!r || r.status !== 'open' || !invRequestCovered_(cfg, r, rid, id)) return;
+        fsPatch_(cfg, 'inv_requests/' + rid, {
+          status: 'ordered', response: 'On purchase order ' + po.number, handledBy: who, handledByUid: String(session.uid || ''),
+          handledAt: now, updatedAt: now,
+          events: (Array.isArray(r.events) ? r.events : []).concat([{ at: now, by: who, action: 'Ordered', note: 'Purchase order ' + po.number }]),
+        });
+        invNotifyUpdate_(rid);
+      } catch (e) { console.warn('Request ' + rid + ' not updated: ' + e); }
+    });
+  }
+  console.log(po.number + ' emailed to ' + to + ' by ' + who);
+  return { ok: true, to: to };
 }

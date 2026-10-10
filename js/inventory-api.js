@@ -23,11 +23,13 @@ export const WRITEOFF_REASONS = ["Expired", "Damaged", "Lost", "Other"];
 export const ADD_REASONS = ["Opening balance", "Found stock", "Returned to stock", "Other"];
 export const MOVE_TYPES = {
   add: "Stock added", count: "Stock count", move: "Moved", writeoff: "Written off", receive: "Received", use: "Used",
+  "kit-take": "Taken into kit", "kit-open": "Vial opened", "kit-return": "Returned from kit",
+  "kit-discard": "Discarded from kit", "kit-use": "Used in treatment", release: "Released from JT storage",
 };
 export const EXPIRY_SOON_DAYS = 60;
 
 export const catLabel = (k) => (INV_CATEGORIES.find((c) => c.key === k) || { label: "Other" }).label;
-export const locLabel = (k) => (LOCATIONS.find((l) => l.key === k) || { label: k }).label;
+export const locLabel = (k) => (k === "kit" ? "Kit" : (LOCATIONS.find((l) => l.key === k) || { label: k }).label);
 
 const EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
 const KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -152,6 +154,7 @@ export function cleanProduct(p = {}) {
     orderUnit: clip(p.orderUnit, 30) || "box",
     dosePer,
     doseUnit: dosePer ? (clip(p.doseUnit, 20) || "units") : "",
+    usage: p.usage === "kit" ? "kit" : "storage",
     packSize: Math.max(1, intOrNull(p.packSize) || 1),
     cost: moneyOrNull(p.cost),
     price: moneyOrNull(p.price),
@@ -180,6 +183,7 @@ export async function listProducts() {
 export async function saveProduct(id, data, staff) {
   const clean = cleanProduct(data);
   if (!clean.name) throw new Error("Give the product a name.");
+  if (clean.usage === "kit" && !clean.dosePer) throw new Error("Kit products need a dose, e.g. 100 units in each vial.");
   if (id) {
     await updateDoc(doc(db, "inv_products", id), { ...clean, ...stamp(staff) });
     return id;
@@ -783,4 +787,235 @@ export async function syncReceivedRequests(requestIds, staff) {
   });
   if (done.length) await batch.commit();
   return done;
+}
+
+/* ===================== Injector kits (e.g. Xeomin) ===================== */
+// The Shelf and JT storage count whole vials. Each injector's kit holds, per batch,
+// unopened vials ("sealed") plus the units left in their opened vial ("open").
+
+export const isKitProduct = (p) => !!p && p.usage === "kit" && !!p.dosePer;
+export const kitUnits = (k) => (k.sealed || 0) * (k.dosePer || 0) + (k.open || 0);
+const round1 = (n) => Math.round((Number(n) || 0) * 10) / 10;
+const who = (staff) => String((staff && staff.name) || "").slice(0, 120);
+
+export function kitId(staffUid, productId, batch, expiry) {
+  return [staffUid, productId, slug(batch) || "-", KEY_RE.test(expiry || "") ? expiry : "-"].join("__");
+}
+
+function logMove(tx, staff, data) {
+  tx.set(doc(collection(db, "inv_moves")), {
+    reason: "", note: "", ref: "", lines: [], ...data, by: who(staff), byUid: uid(), at: serverTimestamp(),
+  });
+}
+
+function normaliseKit(d) {
+  const x = d.data() || {};
+  return {
+    id: d.id, staffUid: String(x.staffUid || ""), staffName: String(x.staffName || ""),
+    productId: String(x.productId || ""), productName: String(x.productName || ""),
+    batch: String(x.batch || ""), expiry: String(x.expiry || ""),
+    dosePer: Number(x.dosePer) || 0, doseUnit: String(x.doseUnit || "units"),
+    sealed: Math.max(0, parseInt(x.sealed, 10) || 0), open: Math.max(0, round1(x.open)),
+    updatedAt: toDate(x.updatedAt),
+  };
+}
+
+// mine: only my kit. Otherwise everyone's (for Admin and JT approvers).
+export async function listKits({ mine = false } = {}) {
+  const col = collection(db, "inv_kits");
+  const snap = await getDocs(mine ? query(col, where("staffUid", "==", uid())) : col);
+  return snap.docs.map(normaliseKit)
+    .filter((k) => k.sealed > 0 || k.open > 0)
+    .sort((a, b) => (a.expiry || "9999").localeCompare(b.expiry || "9999"));
+}
+
+export async function listMyKitMoves(max = 30) {
+  const snap = await getDocs(query(collection(db, "inv_moves"), where("byUid", "==", uid())));
+  return snap.docs
+    .map((d) => { const x = d.data() || {}; return { id: d.id, ...x, at: toDate(x.at) }; })
+    .filter((m) => /^kit-/.test(m.type) || m.type === "release")
+    .sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0))
+    .slice(0, max);
+}
+
+// Unopened vials from one Shelf batch into my kit
+export async function kitTake(product, lot, vials, staff) {
+  const n = Math.max(1, parseInt(vials, 10) || 0);
+  if (!isKitProduct(product)) throw new Error("This product isn't carried in kits.");
+  if (!lot || lot.loc !== "shelf") throw new Error("Choose a batch on the Shelf.");
+  const me = uid();
+  const pRef = doc(db, "inv_products", product.id);
+  const lRef = doc(db, "inv_lots", lot.id);
+  const kRef = doc(db, "inv_kits", kitId(me, product.id, lot.batch, lot.expiry));
+  await runTransaction(db, async (tx) => {
+    const pSnap = await tx.get(pRef);
+    const lSnap = await tx.get(lRef);
+    const kSnap = await tx.get(kRef);
+    if (!pSnap.exists()) throw new Error("This product no longer exists.");
+    const have = lSnap.exists() ? Number(lSnap.data().qty) || 0 : 0;
+    if (have < n) throw new Error(`There ${have === 1 ? "is" : "are"} only ${plural(have, product.stockUnit)} of that batch on the Shelf.`);
+    const s = pSnap.data().stock || {};
+    const k = kSnap.exists() ? kSnap.data() : null;
+    tx.update(lRef, { qty: have - n, updatedAt: serverTimestamp() });
+    tx.update(pRef, { stock: { shelf: Math.max(0, (Number(s.shelf) || 0) - n), jt: Number(s.jt) || 0 }, stockAt: serverTimestamp() });
+    tx.set(kRef, {
+      staffUid: me, staffName: who(staff), productId: product.id, productName: product.name,
+      batch: lot.batch, expiry: lot.expiry, dosePer: product.dosePer, doseUnit: product.doseUnit || "units",
+      sealed: (k ? parseInt(k.sealed, 10) || 0 : 0) + n, open: k ? round1(k.open) : 0,
+      updatedAt: serverTimestamp(), ...(k ? {} : { createdAt: serverTimestamp() }),
+    });
+    logMove(tx, staff, {
+      type: "kit-take", productId: product.id, productName: product.name, unit: product.stockUnit,
+      lines: [{ loc: "shelf", batch: lot.batch, expiry: lot.expiry, delta: -n }, { loc: "kit", batch: lot.batch, expiry: lot.expiry, delta: n }],
+      note: `${n * product.dosePer} ${product.doseUnit} into ${who(staff)}'s kit`,
+    });
+  });
+}
+
+// Reconstitute one unopened vial
+export async function kitOpen(kit, staff) {
+  const kRef = doc(db, "inv_kits", kit.id);
+  await runTransaction(db, async (tx) => {
+    const kSnap = await tx.get(kRef);
+    if (!kSnap.exists()) throw new Error("This kit item no longer exists.");
+    const k = kSnap.data();
+    const sealed = parseInt(k.sealed, 10) || 0;
+    if (sealed < 1) throw new Error("There are no unopened vials left in this batch.");
+    tx.update(kRef, { sealed: sealed - 1, open: round1((Number(k.open) || 0) + kit.dosePer), openedAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    logMove(tx, staff, {
+      type: "kit-open", productId: kit.productId, productName: kit.productName, unit: kit.doseUnit,
+      note: `Batch ${kit.batch || "-"}: ${kit.dosePer} ${kit.doseUnit} ready to use`,
+    });
+  });
+}
+
+// Unopened vials back onto the Shelf
+export async function kitReturn(product, kit, vials, staff) {
+  const n = Math.max(1, parseInt(vials, 10) || 0);
+  const kRef = doc(db, "inv_kits", kit.id);
+  const pRef = doc(db, "inv_products", product.id);
+  const lRef = doc(db, "inv_lots", lotId(product.id, "shelf", kit.batch, kit.expiry));
+  await runTransaction(db, async (tx) => {
+    const kSnap = await tx.get(kRef);
+    const pSnap = await tx.get(pRef);
+    const lSnap = await tx.get(lRef);
+    if (!kSnap.exists() || !pSnap.exists()) throw new Error("This kit item no longer exists. Reload and try again.");
+    const sealed = parseInt(kSnap.data().sealed, 10) || 0;
+    if (sealed < n) throw new Error(`There ${sealed === 1 ? "is" : "are"} only ${plural(sealed, product.stockUnit)} unopened in this batch.`);
+    const s = pSnap.data().stock || {};
+    tx.update(kRef, { sealed: sealed - n, updatedAt: serverTimestamp() });
+    tx.set(lRef, {
+      productId: product.id, loc: "shelf", batch: kit.batch, expiry: kit.expiry,
+      qty: (lSnap.exists() ? Number(lSnap.data().qty) || 0 : 0) + n,
+      updatedAt: serverTimestamp(), ...(lSnap.exists() ? {} : { createdAt: serverTimestamp() }),
+    }, { merge: true });
+    tx.update(pRef, { stock: { shelf: (Number(s.shelf) || 0) + n, jt: Number(s.jt) || 0 }, stockAt: serverTimestamp() });
+    logMove(tx, staff, {
+      type: "kit-return", productId: product.id, productName: product.name, unit: product.stockUnit,
+      lines: [{ loc: "kit", batch: kit.batch, expiry: kit.expiry, delta: -n }, { loc: "shelf", batch: kit.batch, expiry: kit.expiry, delta: n }],
+    });
+  });
+}
+
+// Units from the opened vial and/or unopened vials that can't be used
+export async function kitDiscard(kit, { units = 0, vials = 0, reason = "", note = "" }, staff) {
+  const u = round1(Math.max(0, Number(units) || 0));
+  const v = Math.max(0, parseInt(vials, 10) || 0);
+  if (!u && !v) throw new Error("Enter what's being discarded.");
+  const kRef = doc(db, "inv_kits", kit.id);
+  await runTransaction(db, async (tx) => {
+    const kSnap = await tx.get(kRef);
+    if (!kSnap.exists()) throw new Error("This kit item no longer exists.");
+    const k = kSnap.data();
+    const sealed = parseInt(k.sealed, 10) || 0;
+    const open = round1(k.open);
+    if (v > sealed) throw new Error(`There ${sealed === 1 ? "is" : "are"} only ${sealed} unopened in this batch.`);
+    if (u > open + 0.01) throw new Error(`The opened vial only has ${open} ${kit.doseUnit} left.`);
+    tx.update(kRef, { sealed: sealed - v, open: Math.max(0, round1(open - u)), updatedAt: serverTimestamp() });
+    logMove(tx, staff, {
+      type: "kit-discard", productId: kit.productId, productName: kit.productName, unit: kit.doseUnit,
+      lines: v ? [{ loc: "kit", batch: kit.batch, expiry: kit.expiry, delta: -v }] : [],
+      reason: clip(reason, 60),
+      note: [u && `${u} ${kit.doseUnit} from the opened vial`, clip(note, 400)].filter(Boolean).join(" · "),
+    });
+  });
+}
+
+/* ---------- JT storage releases: an injector asks, Dr Teh approves, it moves JT → Shelf ---------- */
+
+export const REL_STATUS = { pending: "Waiting", approved: "On the Shelf", declined: "Declined", cancelled: "Cancelled" };
+
+function normaliseRelease(d) {
+  const x = d.data() || {};
+  return {
+    id: d.id, productId: String(x.productId || ""), productName: String(x.productName || ""), unit: String(x.unit || "unit"),
+    qty: Math.max(1, parseInt(x.qty, 10) || 1), note: String(x.note || ""), response: String(x.response || ""),
+    status: REL_STATUS[x.status] ? x.status : "pending",
+    requestedBy: String(x.requestedBy || ""), requestedByUid: String(x.requestedByUid || ""),
+    handledBy: String(x.handledBy || ""), batch: String(x.batch || ""), expiry: String(x.expiry || ""),
+    createdAt: toDate(x.createdAt), handledAt: toDate(x.handledAt),
+  };
+}
+
+export async function listReleases(max = 100) {
+  const snap = await getDocs(query(collection(db, "inv_releases"), orderBy("createdAt", "desc"), limit(max)));
+  return snap.docs.map(normaliseRelease);
+}
+
+export async function requestRelease(product, qty, note, staff) {
+  const ref = await addDoc(collection(db, "inv_releases"), {
+    productId: product.id, productName: product.name, unit: product.stockUnit,
+    qty: Math.min(10, Math.max(1, parseInt(qty, 10) || 1)), note: clip(note, 500), status: "pending",
+    requestedBy: who(staff), requestedByUid: uid(), createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+  });
+  return ref.id;
+}
+
+// Moves the vials from one JT batch to the Shelf, in one transaction
+export async function approveRelease(rel, lot, staff) {
+  if (!lot || lot.loc !== "jt") throw new Error("Choose a batch in JT storage.");
+  const rRef = doc(db, "inv_releases", rel.id);
+  const pRef = doc(db, "inv_products", rel.productId);
+  const jtRef = doc(db, "inv_lots", lot.id);
+  const shelfRef = doc(db, "inv_lots", lotId(rel.productId, "shelf", lot.batch, lot.expiry));
+  await runTransaction(db, async (tx) => {
+    const rSnap = await tx.get(rRef);
+    const pSnap = await tx.get(pRef);
+    const jSnap = await tx.get(jtRef);
+    const sSnap = await tx.get(shelfRef);
+    if (!rSnap.exists() || rSnap.data().status !== "pending") throw new Error("This request has already been handled.");
+    if (!pSnap.exists()) throw new Error("This product no longer exists.");
+    const q = Math.max(1, parseInt(rSnap.data().qty, 10) || 1);
+    const have = jSnap.exists() ? Number(jSnap.data().qty) || 0 : 0;
+    if (have < q) throw new Error(`That batch only has ${have} in JT storage. Choose another batch.`);
+    const p = pSnap.data();
+    const s = p.stock || {};
+    tx.update(jtRef, { qty: have - q, updatedAt: serverTimestamp() });
+    tx.set(shelfRef, {
+      productId: rel.productId, loc: "shelf", batch: lot.batch, expiry: lot.expiry,
+      qty: (sSnap.exists() ? Number(sSnap.data().qty) || 0 : 0) + q,
+      updatedAt: serverTimestamp(), ...(sSnap.exists() ? {} : { createdAt: serverTimestamp() }),
+    }, { merge: true });
+    tx.update(pRef, { stock: { shelf: (Number(s.shelf) || 0) + q, jt: Math.max(0, (Number(s.jt) || 0) - q) }, stockAt: serverTimestamp() });
+    tx.update(rRef, {
+      status: "approved", batch: lot.batch, expiry: lot.expiry,
+      handledBy: who(staff), handledByUid: uid(), handledAt: serverTimestamp(), updatedAt: serverTimestamp(),
+    });
+    logMove(tx, staff, {
+      type: "release", productId: rel.productId, productName: String(p.name || rel.productName), unit: String(p.stockUnit || rel.unit),
+      lines: [{ loc: "jt", batch: lot.batch, expiry: lot.expiry, delta: -q }, { loc: "shelf", batch: lot.batch, expiry: lot.expiry, delta: q }],
+      reason: `For ${rel.requestedBy}`.slice(0, 60),
+    });
+  });
+}
+
+export async function declineRelease(rel, reason, staff) {
+  await updateDoc(doc(db, "inv_releases", rel.id), {
+    status: "declined", response: clip(reason, 500),
+    handledBy: who(staff), handledByUid: uid(), handledAt: serverTimestamp(), updatedAt: serverTimestamp(),
+  });
+}
+
+export async function cancelRelease(rel) {
+  await updateDoc(doc(db, "inv_releases", rel.id), { status: "cancelled", updatedAt: serverTimestamp() });
 }
