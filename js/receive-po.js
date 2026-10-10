@@ -254,8 +254,13 @@ export async function mountReceivePo(root, poId, staff) {
       if (!l.productId) continue;
       const need = s.arrived * l.packSize, put = sumOf(s);
       if (put !== need) return toast(`${l.name}: ${plural(need, l.stockUnit)} arrived, but ${put} have been put away.`, true);
-      if (tracked(l) && s.splits.some((x) => int(x.qty) && (!String(x.batch).trim() || !x.expiry))) {
-      return toast(`${l.name} needs a ${batchName(prod.get(l.productId)).toLowerCase()} number and expiry date.`, true);
+      if (tracked(l)) {
+        const label = batchName(prod.get(l.productId)).toLowerCase();
+        const card = cardOf(l);
+        const badDate = card && [...card.querySelectorAll('[data-f="expiry"]')].some((i) => i.validity && i.validity.badInput);
+        if (badDate) return toast(`${l.name}: an expiry date doesn't exist. Check the day (e.g. September has 30 days).`, true);
+        if (s.splits.some((x) => int(x.qty) && !String(x.batch).trim())) return toast(`${l.name}: enter the ${label} number.`, true);
+        if (s.splits.some((x) => int(x.qty) && !x.expiry)) return toast(`${l.name}: enter the expiry date.`, true);
       }
     }
     const expired = picked.filter(({ l, s }) => tracked(l) && s.splits.some((x) => expiryState(x.expiry) === "expired"));

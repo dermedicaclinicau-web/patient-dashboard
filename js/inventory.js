@@ -384,7 +384,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     });
     form.elements.name.focus();
   }
-  
+
   /* ---------- Supplier editor ---------- */
   function editSupplier(s) {
     const isNew = !s;
@@ -544,7 +544,12 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         try {
           if (mode === "add") {
             if (!(qty >= 1)) throw new Error("Enter how many.");
-            if (p.tracked && (!f.batch.value.trim() || !f.expiry.value)) throw new Error(`Enter the ${batchName(p).toLowerCase()} number and expiry date.`);
+            if (p.tracked && !f.batch.value.trim()) throw new Error(`Enter the ${batchName(p).toLowerCase()} number.`);
+            if (p.tracked && !f.expiry.value) {
+              throw new Error(f.expiry.validity && f.expiry.validity.badInput
+                ? "That expiry date doesn't exist. Check the day (e.g. September has 30 days). If the box only shows a month and year, use the last day of that month."
+                : "Enter the expiry date.");
+            }
             ops = [{ loc: f.loc.value, batch: p.tracked ? f.batch.value : "", expiry: p.tracked ? f.expiry.value : "", delta: qty }];
           } else if (mode === "count") {
             if (p.tracked) {
