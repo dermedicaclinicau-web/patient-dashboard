@@ -3744,3 +3744,15 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .st-delrole:hover { color: #b42318; background: rgba(180, 35, 24, .08); }
 .st-dirty { color: #b54708; font-size: 13px; font-weight: 600; }
 .st-role { background: #eef2f6; color: #344054; }   /* new roles get a neutral badge */
+
+.rp-count { margin-bottom: 16px; }
+.rp-count-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin-bottom: 10px; }
+.rp-count-head span:not(.inv-flag) { color: var(--muted, #667085); font-size: 13px; }
+.rp-table td { vertical-align: top; }
+.rp-neg { color: #b42318; }
+.rp-pos { color: #027a48; }
+.rp-acts { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+.rp-done small { display: block; color: var(--muted, #667085); font-size: 12px; margin-top: 2px; }
+.rp-from { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; }
+.rq-status.is-accepted { background: #ecfdf3; color: #027a48; }
+.rq-status.is-explained { background: #eff8ff; color: #175cd3; }

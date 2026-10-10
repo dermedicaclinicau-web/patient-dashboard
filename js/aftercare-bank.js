@@ -148,7 +148,7 @@ function openAftercareEditor({ item = null, treatments = [], staff = null }) {
           <label class="lh-field"><span class="lh-label">Associated treatment</span>
             <input name="treatment" maxlength="120" autocomplete="off" list="ac-treatments" placeholder="e.g. Hair Removal" value="${esc(item ? item.treatment : "")}" />
             <datalist id="ac-treatments">${treatments.map((t) => `<option value="${esc(t)}"></option>`).join("")}</datalist></label>
-          <label class="lh-field"><span class="lh-label">Link <small>(optional: makes the name clickable in Task Manager emails)</small></span>
+          <label class="lh-field"><span class="lh-label">Link <small>(optional, must start with https://: makes the name clickable in Task Manager emails)</small></span>
             <input name="link" type="url" maxlength="500" autocomplete="off" inputmode="url"
               placeholder="https://dermedica.com.au/aftercare/ipl-hair-removal" value="${esc(item ? item.link || "" : "")}" /></label>
         </div>
@@ -212,7 +212,7 @@ function openAftercareEditor({ item = null, treatments = [], staff = null }) {
         saveBtn.disabled = false;
         saveBtn.textContent = item ? "Save changes" : "Add aftercare";
         showErr(err.code === "permission-denied"
-          ? "Only admins can change aftercare. If you're an admin, check the Aftercare-instruction rule has been published."
+          ? "The save was blocked. You need Form Builder access, and the Aftercare-instruction rule (with the Link field) must be published in Firebase."
           : err.code ? "Couldn't save. Check your connection and try again." : err.message);
       }
     });

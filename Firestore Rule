@@ -88,6 +88,7 @@ service cloud.firestore {
     function invJt() { return can('inventory.jt') || invManage(); }           // approves JT storage releases
     function invStock() { return invOrder() || invKit() || invJt(); }
     function invUse() { return invStock() || can('consult.record'); }         // records products used in treatments
+    function invReport() { return can('menu.reports'); }                      // reviews count differences
     function kitOk() {
       return request.resource.data.sealed is int && request.resource.data.sealed >= 0
         && request.resource.data.open is number && request.resource.data.open >= 0;
@@ -105,14 +106,16 @@ service cloud.firestore {
       allow create: if invManage() && request.resource.data.name is string
         && request.resource.data.stock.shelf == 0 && request.resource.data.stock.jt == 0;
       allow update: if (invManage() && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['stock', 'stockAt']))
-        || (invUse() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stock', 'stockAt']));
+        || ((invUse() || invReport()) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stock', 'stockAt']));
       allow delete: if false;
     }
+
+    
 
     // Batches on the Shelf and in JT storage
     match /inv_lots/{id} {
       allow read: if isStaff();
-      allow create, update: if invUse() && request.resource.data.qty is int && request.resource.data.qty >= 0;
+      allow create, update: if (invUse() || invReport()) && request.resource.data.qty is int && request.resource.data.qty >= 0;
       allow delete: if false;
     }
 
@@ -121,6 +124,7 @@ service cloud.firestore {
       allow read: if can('menu.inventory') || invOrder() || invKit();
       allow create: if request.resource.data.byUid == request.auth.uid
         && (invManage()
+          || (invReport() && request.resource.data.type in ['count', 'kit-count'])
           || (invOrder() && request.resource.data.type in ['move', 'receive'])
           || (invKit() && request.resource.data.type in ['kit-take', 'kit-open', 'kit-return', 'kit-discard', 'kit-use', 'kit-borrow'])
           || (invJt() && request.resource.data.type == 'release')
@@ -136,6 +140,7 @@ service cloud.firestore {
           (invKit() && resource.data.staffUid == request.auth.uid
             && request.resource.data.staffUid == request.auth.uid)
           || invManage()
+          || (invReport() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['sealed', 'open', 'updatedAt']))
           || (invKit() && resource.data.staffUid != request.auth.uid
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['open', 'updatedAt'])
             && request.resource.data.open < resource.data.open));

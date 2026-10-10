@@ -25,7 +25,7 @@ export const MOVE_TYPES = {
   add: "Stock added", count: "Stock count", move: "Moved", writeoff: "Written off", receive: "Received", use: "Used",
   "kit-take": "Taken into kit", "kit-open": "Vial opened", "kit-return": "Returned from kit",
   "kit-discard": "Discarded from kit", "kit-use": "Used in treatment", release: "Released from JT storage",
-  "kit-borrow": "Borrowed from a colleague",
+  "kit-borrow": "Borrowed from a colleague", "kit-count": "Kit count adjusted",
 };
 export const EXPIRY_SOON_DAYS = 60;
 
@@ -1305,4 +1305,95 @@ export async function saveCount({ kind, lines, note = "" }, staff) {
     note: clip(note, 500), by: who(staff), byUid: me, at: serverTimestamp(),
   });
   return { id: ref.id, lines: out, openCount };
+}
+
+/* ===================== Reporting: count differences ===================== */
+
+export const COUNT_STATUS = { open: "To review", ok: "Matched", accepted: "Accepted", explained: "Explained" };
+
+// Counts with a difference still to review, or every count from a date on (dateKey "YYYY-MM-DD")
+export async function listCounts({ from = "", openOnly = false } = {}) {
+  const col = collection(db, "inv_counts");
+  const snap = await getDocs(openOnly ? query(col, where("openCount", ">", 0)) : query(col, where("dateKey", ">=", from || "0000")));
+  return snap.docs.map((d) => {
+    const x = d.data() || {};
+    return { id: d.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [], openCount: Number(x.openCount) || 0, at: toDate(x.at) };
+  }).sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0));
+}
+
+// Accept: applies the difference to today's stock (not "set to the counted number": stock may have moved since).
+// Explain: a note only. Either way the line is closed once, inside one transaction.
+export async function resolveCountLine(countId, index, { action, note = "" }, staff) {
+  const accept = action === "accept";
+  const text = clip(note, 500);
+  if (!accept && !text) throw new Error("Add a note explaining the difference.");
+  const by = who(staff);
+  const cRef = doc(db, "inv_counts", countId);
+  await runTransaction(db, async (tx) => {
+    const cSnap = await tx.get(cRef);
+    if (!cSnap.exists()) throw new Error("This count no longer exists.");
+    const lines = (Array.isArray(cSnap.data().lines) ? cSnap.data().lines : []).map((l) => ({ ...l }));
+    const l = lines[index];
+    if (!l) throw new Error("This line no longer exists. Reload and try again.");
+    if (l.status !== "open") throw new Error("Someone has already reviewed this difference. Reload to see it.");
+    const diff = Number(l.variance) || 0;
+
+    if (accept && diff) {
+      if (l.loc === "kit") {
+        // Kits: unopened and opened-vial differences are applied separately
+        const kRef = doc(db, "inv_kits", String(l.ref || ""));
+        const kSnap = await tx.get(kRef);
+        if (!kSnap.exists()) throw new Error("This kit item no longer exists.");
+        const k = kSnap.data();
+        const d = l.detail || {};
+        const dS = (parseInt(d.sealed, 10) || 0) - (parseInt(d.systemSealed, 10) || 0);
+        const dO = round1((Number(d.open) || 0) - (Number(d.systemOpen) || 0));
+        const sealed = (parseInt(k.sealed, 10) || 0) + dS;
+        const open = round1((Number(k.open) || 0) + dO);
+        if (sealed < 0 || open < 0) {
+          throw new Error(`${l.staffName || "The injector"}'s kit has changed since this count. Ask them to do a kit check, then review that one instead.`);
+        }
+        tx.update(kRef, { sealed, open, updatedAt: serverTimestamp() });
+        logMove(tx, staff, {
+          type: "kit-count", productId: l.productId, productName: l.productName, unit: l.unit,
+          lines: dS ? [{ loc: "kit", batch: l.batch || "", expiry: l.expiry || "", delta: dS }] : [],
+          reason: "Count difference accepted", ref: countId,
+          note: [`${l.staffName || "Injector"}'s kit`, `${diff > 0 ? "+" : ""}${diff} ${l.unit}`, text].filter(Boolean).join(" · "),
+        });
+      } else {
+        const loc = l.loc === "jt" ? "jt" : "shelf";
+        const pRef = doc(db, "inv_products", l.productId);
+        const lRef = doc(db, "inv_lots", String(l.ref || ""));
+        const pSnap = await tx.get(pRef);
+        const lSnap = await tx.get(lRef);
+        if (!pSnap.exists()) throw new Error("This product no longer exists.");
+        const p = pSnap.data();
+        const s = p.stock || {};
+        const stock = { shelf: Number(s.shelf) || 0, jt: Number(s.jt) || 0 };
+        const lotHave = lSnap.exists() ? Number(lSnap.data().qty) || 0 : 0;
+        const have = p.tracked === true ? lotHave : stock[loc];
+        if (have + diff < 0) {
+          throw new Error(`Stock has been used since this count: only ${have} left in ${locLabel(loc)}, so ${-diff} can't be removed. Do a fresh count instead.`);
+        }
+        stock[loc] = Math.max(0, stock[loc] + diff);
+        tx.set(lRef, {
+          productId: l.productId, loc, batch: l.batch || "", expiry: l.expiry || "", qty: Math.max(0, lotHave + diff),
+          updatedAt: serverTimestamp(), ...(lSnap.exists() ? {} : { createdAt: serverTimestamp() }),
+        }, { merge: true });
+        tx.update(pRef, { stock, stockAt: serverTimestamp() });
+        logMove(tx, staff, {
+          type: "count", productId: l.productId, productName: l.productName, unit: l.unit,
+          lines: [{ loc, batch: l.batch || "", expiry: l.expiry || "", delta: diff }],
+          reason: "Count difference accepted", note: text, ref: countId,
+        });
+      }
+    }
+
+    const at = new Date().toISOString();
+    lines[index] = { ...l, status: accept ? "accepted" : "explained", note: text, resolvedBy: by, resolvedByUid: uid(), resolvedAt: at };
+    tx.update(cRef, {
+      lines, openCount: lines.filter((x) => x.status === "open").length, updatedAt: serverTimestamp(), updatedBy: by,
+      events: arrayUnion({ at, by, action: accept ? "Accepted" : "Explained", note: `${l.productName} · ${locLabel(l.loc)}${text ? ` · ${text}` : ""}`.slice(0, 300) }),
+    });
+  });
 }

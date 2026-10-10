@@ -45,7 +45,7 @@ function toAftercare(d) {
     title: String(x["Aftercare Title"] || "").trim(),
     treatment: String(x["Associated Treatment"] || "").trim(),
     html: quillToHtml(x["Instruction"]),
-    link: /^https?:\/\/\S+$/i.test(String(x["Link"] || "").trim()) ? String(x["Link"]).trim() : "",
+    link: /^https:\/\/\S+$/i.test(String(x["Link"] || "").trim()) ? String(x["Link"]).trim() : "",
     updated: String(x["Updated As of"] || x["Created TimeStamp"] || ""),
   };
 }
@@ -101,7 +101,6 @@ export function bindPanels(el) {
 export function forgetAftercare() { cache = null; }
 
 // id: an existing aftercare to update, or "" for a new one. Returns the id.
-// id: an existing aftercare to update, or "" for a new one. Returns the id.
 export async function saveAftercare(id, { title, treatment, html, link }, staff) {
   const t = String(title || "").replace(/\s+/g, " ").trim().slice(0, 200);
   const tr = String(treatment || "").replace(/\s+/g, " ").trim().slice(0, 120);
@@ -109,7 +108,11 @@ export async function saveAftercare(id, { title, treatment, html, link }, staff)
   const ln = String(link || "").trim().slice(0, 500);
   if (!t) throw new Error("Give the aftercare a title.");
   if (!body.replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").trim()) throw new Error("Write the instructions.");
-  if (ln && !/^https?:\/\/\S+$/i.test(ln)) throw new Error("The link should start with https://");
+  if (ln && !/^https:\/\/\S+$/i.test(ln)) {
+    throw new Error(/^http:\/\//i.test(ln)
+      ? "Use the secure version of the link: it must start with https:// (not http://)."
+      : "The link must be a full web address starting with https:// (no spaces).");
+  }
   const now = new Date().toISOString();
   const who = (staff && staff.name) || "";
   const data = {

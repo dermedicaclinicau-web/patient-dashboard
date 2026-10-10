@@ -2590,7 +2590,9 @@ function sspDeliver_(body, session) {
 
 // ===================== Staff management (Admins only) =====================
 
+// The starting roles. Admins can add more in Staff → Roles & access (stored in staff_roles/config).
 const STAFF_ROLES_ = ['Admin', 'Clinician', 'Reception'];
+const ROLE_NAME_RE_ = /^[A-Za-z][A-Za-z0-9 &'-]{0,39}$/;
 
 // Secret key for PIN hashes. Lives only in Script Properties. Never change or delete it.
 function pinPepper_() {
@@ -2708,7 +2710,7 @@ function handleStaff_(body) {
   if (!/^admin$/i.test(String(session.role || ''))) return { ok: false, error: 'FORBIDDEN' };
   try {
     if (op === 'roles') return rolesGet_();
-    if (op === 'saveRoles') return rolesSave_(body.roles || {}, session);
+    if (op === 'saveRoles') return rolesSave_(body.roles || {}, body.roleNames, session);
     if (op === 'list') return staffList_();
     if (op === 'save') return staffSave_(body.staff || {}, session);
     if (op === 'resetPin') return staffResetPin_(String(body.id || ''), String(body.pin || ''), session);
@@ -2732,14 +2734,14 @@ function staffList_() {
       active: s.active !== false, lastLogin: s.lastLogin || '', hasPin: !!(s.pinHash || s.pin),
       injector: s.injector === true, access: s.access || { allow: [], deny: [] } };
     }).sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
-  return { ok: true, staff: staff, roles: STAFF_ROLES_, locked: isLockedOut_() };
+  return { ok: true, staff: staff, roles: roleNames_(), locked: isLockedOut_() };
 }
 
 function staffSave_(p, session) {
   const cfg = getConfig_();
   const name = staffClean_(p.name, 120);
   if (!name) return { ok: false, error: 'BAD_NAME' };
-  const role = STAFF_ROLES_.filter(function (r) { return r.toLowerCase() === String(p.role || '').toLowerCase(); })[0];
+  const role = roleNames_().filter(function (r) { return r.toLowerCase() === String(p.role || '').toLowerCase(); })[0];
   if (!role) return { ok: false, error: 'BAD_ROLE' };
   const email = String(p.email || '').trim();
   if (email && !isEmail_(email)) return { ok: false, error: 'BAD_EMAIL' };
@@ -2886,21 +2888,39 @@ const ROLE_DEFAULTS_ = {
     'dash.attention', 'dash.appts', 'dash.tasks', 'dash.requests', 'dash.overview'],
 };
 
-function rolesConfig_() {
+// Role names + each role's ticks, from staff_roles/config (defaults until it's first saved).
+// Cached 5 minutes. Not cached if Firestore couldn't be read, so a hiccup doesn't stick.
+function rolesData_() {
   const cache = CacheService.getScriptCache();
-  const hit = cache.get('roles_cfg_v1');
+  const hit = cache.get('roles_cfg_v2');
   if (hit) return JSON.parse(hit);
   let doc = null;
-  try { doc = fsGetDoc_(getConfig_(), 'staff_roles/config'); } catch (e) { console.warn('Roles config not read: ' + e); }
-  const out = {};
-  Object.keys(ROLE_DEFAULTS_).forEach(function (r) {
-    const v = doc && doc.roles && Array.isArray(doc.roles[r]) ? doc.roles[r] : ROLE_DEFAULTS_[r];
-    out[r] = v.filter(function (p) { return PERMS_ALL_.indexOf(p) !== -1; });
+  let readOk = true;
+  try { doc = fsGetDoc_(getConfig_(), 'staff_roles/config'); }
+  catch (e) { readOk = false; console.warn('Roles config not read: ' + e); }
+
+  const seen = { admin: true };
+  const names = ['Admin'];
+  ((doc && Array.isArray(doc.roleNames)) ? doc.roleNames : STAFF_ROLES_).forEach(function (raw) {
+    const n = String(raw == null ? '' : raw).replace(/\s+/g, ' ').trim();
+    if (!n || seen[n.toLowerCase()] || !ROLE_NAME_RE_.test(n)) return;
+    seen[n.toLowerCase()] = true;
+    names.push(n);
   });
-  try { cache.put('roles_cfg_v1', JSON.stringify(out), 300); } catch (e) { /* not essential */ }
+
+  const roles = {};
+  names.forEach(function (r) {
+    if (/^admin$/i.test(r)) return;
+    const v = doc && doc.roles && Array.isArray(doc.roles[r]) ? doc.roles[r] : (ROLE_DEFAULTS_[r] || []);
+    roles[r] = v.filter(function (p) { return PERMS_ALL_.indexOf(p) !== -1; });
+  });
+
+  const out = { names: names, roles: roles };
+  if (readOk) { try { cache.put('roles_cfg_v2', JSON.stringify(out), 300); } catch (e) { /* not essential */ } }
   return out;
 }
-
+function rolesConfig_() { return rolesData_().roles; }
+function roleNames_() { return rolesData_().names; }
 // What a staff member can do: their role's ticks, plus "always allow", minus "always block". Admins: everything.
 function effectivePerms_(s) {
   if (!s) return [];
@@ -2942,29 +2962,67 @@ function staffMe_(session) {
 }
 
 function rolesGet_() {
+  const d = rolesData_();
   return {
     ok: true,
     perms: PERMS_.map(function (p) { return { key: p[0], group: p[1], label: p[2] }; }),
-    roles: rolesConfig_(),
-    roleNames: STAFF_ROLES_,
+    roles: d.roles,
+    roleNames: d.names,
   };
 }
 
-function rolesSave_(roles, session) {
+// roles: { RoleName: [perm keys] }. roleNames: the full list in order (Admin is always kept).
+function rolesSave_(roles, roleNames, session) {
+  const cur = rolesData_();
+  let names = cur.names;
+  if (Array.isArray(roleNames)) {
+    const seen = { admin: true };
+    names = ['Admin'];
+    for (let i = 0; i < roleNames.length; i++) {
+      const n = String(roleNames[i] == null ? '' : roleNames[i]).replace(/\s+/g, ' ').trim();
+      if (/^admin$/i.test(n)) continue;
+      if (!ROLE_NAME_RE_.test(n)) return { ok: false, error: 'BAD_ROLE_NAME' };
+      if (seen[n.toLowerCase()]) return { ok: false, error: 'ROLE_EXISTS' };
+      seen[n.toLowerCase()] = true;
+      names.push(n);
+    }
+    if (names.length > 21) return { ok: false, error: 'BAD_ROLE_NAME' };
+  }
+
+  // A role can't be removed while anyone (including turned-off staff) still has it
+  const keep = {};
+  names.forEach(function (n) { keep[n.toLowerCase()] = true; });
+  const removed = cur.names.filter(function (n) { return !keep[n.toLowerCase()]; });
+  if (removed.length) {
+    const all = staffFresh_();
+    const used = removed.filter(function (r) {
+      return all.some(function (s) { return String(s.role || '').toLowerCase() === r.toLowerCase(); });
+    });
+    if (used.length) return { ok: false, error: 'ROLE_IN_USE', detail: used.join(', ') };
+  }
+  const added = names.filter(function (n) {
+    return !cur.names.some(function (c) { return c.toLowerCase() === n.toLowerCase(); });
+  });
+
   const out = {};
-  Object.keys(ROLE_DEFAULTS_).forEach(function (r) {
+  names.forEach(function (r) {
+    if (/^admin$/i.test(r)) return;
     const v = roles && Array.isArray(roles[r]) ? roles[r] : [];
     out[r] = PERMS_ALL_.filter(function (p) { return v.indexOf(p) !== -1; });
   });
+
   const cfg = getConfig_();
   commitWrites_(cfg, [updateWrite_(cfg, 'staff_roles/config', {
-    roles: out, updatedAt: new Date().toISOString(), updatedBy: String(session.name || ''),
+    roles: out, roleNames: names, updatedAt: new Date().toISOString(), updatedBy: String(session.name || ''),
   })]);
-  CacheService.getScriptCache().remove('roles_cfg_v1');
-  staffAudit_(cfg, session, 'Changed role access', {}, Object.keys(out).map(function (r) { return r + ': ' + out[r].length + ' ticks'; }).join(', '));
-  return { ok: true, roles: out };
+  CacheService.getScriptCache().remove('roles_cfg_v2');
+  staffAudit_(cfg, session, 'Changed role access', {}, [
+    added.length ? 'added ' + added.join(', ') : '',
+    removed.length ? 'removed ' + removed.join(', ') : '',
+    Object.keys(out).map(function (r) { return r + ': ' + out[r].length + ' ticks'; }).join(', '),
+  ].filter(Boolean).join(' · '));
+  return { ok: true, roles: out, roleNames: names };
 }
-
 // ===================== Scheduled staff tasks =====================
 // A trigger runs runScheduledTasks every 15 minutes. Times are Perth (UTC+8, no daylight saving).
 

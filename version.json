@@ -1,5 +1,5 @@
 ﻿{
-    "version":  "20261010-165346",
+    "version":  "20261010-215150",
     "files":  [
                   "./js/aftercare-api.js",
                   "./js/aftercare-bank.js",
@@ -63,6 +63,7 @@
                   "./js/records.js",
                   "./js/reminder-dialog.js",
                   "./js/reminders.js",
+                  "./js/reports.js",
                   "./js/rich-editor.js",
                   "./js/rich-html.js",
                   "./js/skincare-view.js",

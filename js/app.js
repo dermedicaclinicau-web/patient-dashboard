@@ -21,6 +21,7 @@ import { mountInventory } from "./inventory.js";
 import { setPerms, can, isAdmin as isAdminNow, refreshAccess } from "./perms.js";
 import { initUpdateCheck } from "./updates.js";
 import { mountMyDashboard } from "./my-dashboard.js";
+import { mountReports } from "./reports.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -221,6 +222,7 @@ const PAGES = {
   },
   tasks: (el, param) => mountTaskManager(el, { param, isAdmin: can("tasks.build"), staff: currentStaff }),
   inventory: (el, param) => mountInventory(el, { param, staff: currentStaff }),
+  reports: (el, param) => mountReports(el, { param, staff: currentStaff }),
   staff: (el) => mountStaffManager(el, { staff: currentStaff }),
 };
 
@@ -229,14 +231,14 @@ const PAGE_PERM = {
   patients: "menu.patients", patient: "menu.patients", fill: "menu.patients", "form-record": "menu.patients",
   ssp: "ssp.create", calendar: "menu.calendar", forms: "menu.forms",
   "image-bank": "forms.build", "aftercare-bank": "forms.build", "ssp-products": "ssp.config",
-  tasks: "menu.tasks", inventory: "menu.inventory", staff: "admin",
+  tasks: "menu.tasks", inventory: "menu.inventory", reports: "menu.reports", staff: "admin",
 };
 const pageAllowed = (p) => {
   const need = PAGE_PERM[p];
   if (!need) return true;
   return need === "admin" ? isAdminNow() : can(need);
 };
-const firstAllowedPage = () => ["calendar", "patients", "tasks", "inventory", "forms", "staff"].find(pageAllowed) || "";
+const firstAllowedPage = () => ["calendar", "patients", "tasks", "inventory", "reports", "forms", "staff"].find(pageAllowed) || "";
 const currentPage = () => location.hash.split("/")[1] || "";
 
 function applyNav() {
