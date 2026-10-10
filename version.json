@@ -1,5 +1,5 @@
 ﻿{
-    "version":  "20261010-114804",
+    "version":  "20261010-123357",
     "files":  [
                   "./js/aftercare-api.js",
                   "./js/aftercare-bank.js",
@@ -40,6 +40,7 @@
                   "./js/merge-dialog.js",
                   "./js/merge-patients.js",
                   "./js/new-patient.js",
+                  "./js/order-request.js",
                   "./js/panel-resize.js",
                   "./js/patient-dashboard.js",
                   "./js/patient-list.js",
@@ -50,6 +51,7 @@
                   "./js/photo-field.js",
                   "./js/plan-editor.js",
                   "./js/print-task.js",
+                  "./js/purchase-order.js",
                   "./js/recorder.js",
                   "./js/recording-bar.js",
                   "./js/records-view.js",

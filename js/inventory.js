@@ -1,15 +1,21 @@
 // Inventory (#/inventory/<tab>): stock on the Shelf and in JT storage, products, suppliers and the activity log.
 import {
-  INV_CATEGORIES, LOCATIONS, WRITEOFF_REASONS, ADD_REASONS, MOVE_TYPES, catLabel, locLabel, plural, unitPlural,
-  expiryState, fefo, listProducts, saveProduct, listSuppliers, saveSupplier, listAllLots, listMoves, applyStock,
+  INV_CATEGORIES, LOCATIONS, WRITEOFF_REASONS, ADD_REASONS, MOVE_TYPES, REQ_STATUS, PO_STATUS, catLabel, locLabel, plural, unitPlural,
+  expiryState, fefo, reqNumber, myUid, suggestOrder, listProducts, saveProduct, listSuppliers, saveSupplier, listAllLots, listMoves,
+  applyStock, listRequests, setRequestStatus, cancelRequest, getRequestSettings, saveRequestSettings,
+  listPos, createPo, poTotals, itemOnPo, lineFromProduct, cleanPoLine,
 } from "./inventory-api.js";
+import { mountPurchaseOrder } from "./purchase-order.js";
+import { fetchStaffList } from "./task-types.js";
+import { callApi } from "./appointments.js";
+import { confirmDialog } from "./dialog.js";
 import { can } from "./perms.js";
 import { showToast } from "./utils.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const SEARCH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
-const TABS = [["stock", "Stock"], ["products", "Products"], ["suppliers", "Suppliers"], ["activity", "Activity"]];
+const TABS = [["stock", "Stock"], ["requests", "Requests"], ["orders", "Purchase orders"], ["products", "Products"], ["suppliers", "Suppliers"], ["activity", "Activity"]];
 const niceDate = (key) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
@@ -49,10 +55,13 @@ function movesHtml(moves, showProduct = true) {
 }
 
 export function mountInventory(container, { param = "", staff = null } = {}) {
+  const parts = String(param || "").split("/");
+  if (parts[0] === "po" && parts[1]) { mountPurchaseOrder(container, { id: parts[1], staff }); return; }
   const first = String(param || "").split("/")[0];
   const tab = TABS.some(([k]) => k === first) ? first : "stock";
   const canManage = can("inventory.manage");
   const canMove = canManage || can("inventory.order");
+  const canRequest = can("inventory.request");
 
   const root = document.createElement("section");
   root.className = "page wide";
@@ -65,12 +74,16 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       </div>` : ""}
     </div>
     <nav class="pt-tabs inv-tabs" aria-label="Inventory">${TABS.map(([k, l]) =>
-      `<a href="#/inventory/${k}"${k === tab ? ' class="active" aria-current="page"' : ""}>${l}</a>`).join("")}</nav>
+      `<a href="#/inventory/${k}"${k === tab ? ' class="active" aria-current="page"' : ""}>${l}${
+        k === "requests" ? ' <em class="inv-tabcount" data-role="reqcount" hidden></em>' : ""}</a>`).join("")}</nav>
     <div data-role="body"><div class="skeleton" style="height:320px;border-radius:14px"></div></div>`;
   container.replaceChildren(root);
   const body = root.querySelector('[data-role="body"]');
 
-  const st = { products: [], suppliers: [], lots: [], q: "", cat: "", view: "all", flagged: false, showInactive: false };
+  const st = {
+    products: [], suppliers: [], lots: [], requests: [], q: "", cat: "", view: "all", flagged: false, showInactive: false,
+    reqFilter: "open", reqView: "list", pos: [], poFilter: "draft",
+  };
   const supplierOf = (id) => st.suppliers.find((s) => s.id === id) || null;
   const lotsOf = (pid) => st.lots.filter((l) => l.productId === pid).sort(fefo);
   function flags(p) {
@@ -85,8 +98,14 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
   async function load() {
     try {
-      [st.products, st.suppliers, st.lots] = await Promise.all([listProducts(), listSuppliers(), listAllLots()]);
-      if (root.isConnected) render();
+      [st.products, st.suppliers, st.lots, st.requests, st.pos] = await Promise.all([
+        listProducts(), listSuppliers(), listAllLots(), listRequests({ max: 300 }).catch(() => []), listPos().catch(() => []),
+      ]);
+      if (!root.isConnected) return;
+      const open = st.requests.filter((r) => r.status === "open").length;
+      const badge = root.querySelector('[data-role="reqcount"]');
+      if (badge) { badge.textContent = open; badge.hidden = !open; }
+      render();
     } catch (err) {
       console.error("Inventory load failed:", err);
       if (root.isConnected) body.innerHTML = `<div class="tm-empty is-error">${err && err.code === "permission-denied"
@@ -97,6 +116,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
   function render() {
     if (tab === "stock") renderStock();
+    else if (tab === "requests") renderRequests();
+    else if (tab === "orders") renderOrders();
     else if (tab === "products") renderProducts();
     else if (tab === "suppliers") renderSuppliers();
     else renderActivity();
@@ -119,6 +140,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           `<option value="${c.key}"${st.cat === c.key ? " selected" : ""}>${esc(c.label)}</option>`).join("")}</select>
         ${seg("inv-view", [["all", "Both"], ["shelf", "Shelf"], ["jt", "JT storage"]], st.view).replace(/name="inv-view"/g, 'name="inv-view" data-f="view"')}
         <label class="fe-check"><input type="checkbox" data-f="flagged"${st.flagged ? " checked" : ""} /> Only low or expiring</label>
+        ${canRequest ? '<a class="ff-btn" href="#/tasks/order/low">Request low stock</a>' : ""}
       </div>
       <div data-role="list"></div>`;
     renderStockList();
@@ -540,9 +562,10 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           <div class="inv-pd-loc${lowAt(p, l.key) ? " is-low" : ""}"><span>${esc(l.label)}</span>
             <strong>${esc(plural(p.stock[l.key], p.stockUnit))}</strong>
             ${p.reorder[l.key] !== null ? `<small>${lowAt(p, l.key) ? "Low · " : ""}reorder at ${p.reorder[l.key]}</small>` : ""}</div>`).join("")}</div>
-        ${canMove ? `<div class="inv-pd-acts">
+        ${canMove || canRequest ? `<div class="inv-pd-acts">
           ${canManage ? '<button type="button" class="lh-btn is-primary" data-stock="add">Add stock</button>' : ""}
-          <button type="button" class="lh-btn" data-stock="move">Move Shelf ⇄ JT</button>
+          ${canMove ? '<button type="button" class="lh-btn" data-stock="move">Move Shelf ⇄ JT</button>' : ""}
+          ${canRequest ? '<button type="button" class="lh-btn" data-act="request">Request more</button>' : ""}
           ${canManage ? `<button type="button" class="lh-btn" data-stock="count">Count</button>
             <button type="button" class="lh-btn" data-stock="writeoff">Write off</button>
             <button type="button" class="lh-btn is-quiet" data-act="edit">Edit product</button>` : ""}
@@ -570,6 +593,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       const p = st.products.find((x) => x.id === id);
       if (!p) return;
       if (e.target.closest('[data-act="edit"]')) { dlg.close(); editProduct(p); return; }
+      if (e.target.closest('[data-act="request"]')) { dlg.close(); location.hash = `#/tasks/order/${encodeURIComponent(id)}`; return; }
       const s = e.target.closest("[data-stock]");
       if (s && await stockAction(p, s.dataset.stock)) {
         await load();
@@ -579,8 +603,294 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     draw();
   }
 
+  /* ---------- Requests ---------- */
+  function renderRequests() {
+    const n = (fn) => st.requests.filter(fn).length;
+    const counts = {
+      open: n((r) => r.status === "open"),
+      ordered: n((r) => r.status === "ordered"),
+      closed: n((r) => r.status === "declined" || r.status === "cancelled"),
+    };
+    const segF = (name, items, cur, key) => seg(name, items, cur).replace(new RegExp(`name="${name}"`, "g"), `name="${name}" data-f="${key}"`);
+    body.innerHTML = `
+      <div class="inv-tools">
+        ${segF("rq-f", [["open", `Open (${counts.open})`], ["ordered", `Ordered (${counts.ordered})`], ["closed", "Declined & cancelled"], ["all", "All"]], st.reqFilter, "reqFilter")}
+        ${st.reqFilter === "open" ? segF("rq-v", [["list", "List"], ["supplier", "By supplier"]], st.reqView, "reqView") : ""}
+        <span class="inv-spacer"></span>
+        ${canManage ? '<button type="button" class="ff-btn" data-act="req-settings">Email settings</button>' : ""}
+        ${canRequest ? '<a class="ff-btn is-primary" href="#/tasks/order">+ Request order</a>' : ""}
+      </div>
+      <div data-role="reqs"></div>`;
+    const box = body.querySelector('[data-role="reqs"]');
+    const f = st.reqFilter;
+    const rows = st.requests.filter((r) => f === "all" || (f === "closed" ? ["declined", "cancelled"].includes(r.status) : r.status === f));
+    if (!rows.length) {
+      box.innerHTML = `<div class="tm-empty">${f === "open" ? "No open requests. Nice." : "Nothing here yet."}</div>`;
+      return;
+    }
+    box.innerHTML = f === "open" && st.reqView === "supplier"
+      ? bySupplierHtml(rows)
+      : `<div class="rq-list">${rows.map(reqCard).join("")}</div>`;
+  }
+
+  function reqCard(r) {
+    const mine = r.requestedByUid === myUid();
+    const items = r.items.map((it, i) => {
+      const p = st.products.find((x) => x.id === it.productId);
+      const onPo = itemOnPo(r.id, i, st.pos);
+      return `<li><strong>${esc(it.name)}</strong> × ${esc(plural(it.qty, it.unit))}${
+        p ? ` <small>· now Shelf ${p.stock.shelf}, JT ${p.stock.jt}</small>`
+          : it.productId ? "" : ' <span class="inv-flag is-info">Not on the product list</span>'}${
+        onPo ? ` <a class="inv-flag is-info" href="#/inventory/po/${esc(onPo.id)}">On ${esc(onPo.number)} · ${esc(PO_STATUS[onPo.status])}</a>` : ""}</li>`;
+    }).join("");
+    const handled = r.status === "ordered" || r.status === "declined";
+    return `
+      <article class="rq-card${r.urgency === "urgent" && r.status === "open" ? " is-urgent" : ""}">
+        <div class="rq-head">
+          <strong>${esc(reqNumber(r))}</strong>
+          <span class="rq-status is-${r.status}">${esc(REQ_STATUS[r.status])}</span>
+          ${r.urgency === "urgent" ? '<span class="inv-flag is-bad">Urgent</span>' : ""}
+          <span class="rq-meta">For ${esc(locLabel(r.loc))} · ${esc(r.requestedBy || "")} · ${esc(when(r.createdAt))}</span>
+        </div>
+        <ul class="rq-items">${items}</ul>
+        ${r.note ? `<p class="rq-note">“${esc(r.note)}”</p>` : ""}
+        ${handled ? `<p class="rq-resp"><strong>${esc(REQ_STATUS[r.status])}${r.handledBy ? ` by ${esc(r.handledBy)}` : ""}${
+          r.handledAt ? `, ${esc(when(r.handledAt))}` : ""}</strong>${r.response ? `: ${esc(r.response)}` : ""}</p>` : ""}
+        ${r.status === "open" && (canMove || mine) ? `<div class="rq-acts">
+          ${canMove ? `<button type="button" class="lh-btn is-primary" data-req="ordered" data-id="${esc(r.id)}">Mark as ordered</button>
+            <button type="button" class="lh-btn" data-req="declined" data-id="${esc(r.id)}">Decline</button>` : ""}
+          ${mine ? `<button type="button" class="lh-btn is-quiet" data-req="cancel" data-id="${esc(r.id)}">Cancel request</button>` : ""}
+        </div>` : ""}
+      </article>`;
+  }
+
+    // Open items that aren't on a purchase order yet, added up per supplier (in the supplier's order units)
+  function openItemsBySupplier(rows) {
+    const groups = new Map();
+    rows.forEach((r) => r.items.forEach((it, i) => {
+      if (itemOnPo(r.id, i, st.pos)) return;
+      const p = st.products.find((x) => x.id === it.productId) || null;
+      const sid = (p && p.supplierId) || it.supplierId || "";
+      if (!groups.has(sid)) groups.set(sid, new Map());
+      const lines = groups.get(sid);
+      const key = `${it.productId || it.name.toLowerCase()}|${r.loc}`;
+      const line = lines.get(key) || { p, name: it.name, unit: p ? p.orderUnit : it.unit, qty: 0, loc: r.loc, reqs: [], urgent: false, sources: [] };
+      line.qty += p && it.unitKind === "stock" ? Math.ceil(it.qty / Math.max(1, p.packSize)) : it.qty;
+      line.reqs.push(reqNumber(r));
+      line.urgent = line.urgent || r.urgency === "urgent";
+      line.sources.push({ r: r.id, i });
+      lines.set(key, line);
+    }));
+    return groups;
+  }
+
+  function bySupplierHtml(rows) {
+    const groups = openItemsBySupplier(rows);
+    if (!groups.size) return '<div class="tm-empty">Everything requested is already on a purchase order.</div>';
+    const order = [...groups.keys()].sort((a, b) => !a ? 1 : !b ? -1
+      : ((supplierOf(a) || {}).name || "").localeCompare((supplierOf(b) || {}).name || "", "en-AU"));
+    return order.map((sid) => {
+      const s = supplierOf(sid);
+      const lines = [...groups.get(sid).values()];
+      return `
+        <section class="rq-sup">
+          <div class="rq-sup-top">
+            <div class="rq-sup-head"><strong>${esc(s ? s.name : "No supplier set")}</strong>
+              <small>${esc(s ? [s.contactName, s.email, s.phone].filter(Boolean).join(" · ") : "New items, or products without a supplier")}</small></div>
+            ${canMove ? `<button type="button" class="lh-btn is-primary" data-mkpo="${esc(sid)}">${sid ? "Create purchase order" : "Create purchase order…"}</button>` : ""}
+          </div>
+          <table class="inv-table"><thead><tr><th>Product</th><th>Quantity</th><th>For</th><th>Requests</th></tr></thead><tbody>${lines.map((l) => `
+            <tr><td>${esc(l.name)}${l.urgent ? ' <span class="inv-flag is-bad">Urgent</span>' : ""}</td><td>${esc(plural(l.qty, l.unit))}</td>
+              <td>${esc(locLabel(l.loc))}</td><td>${esc([...new Set(l.reqs)].join(", "))}</td></tr>`).join("")}</tbody></table>
+        </section>`;
+    }).join("");
+  }
+
+  /* ---------- Purchase orders ---------- */
+  function renderOrders() {
+    const n = (s) => st.pos.filter((p) => p.status === s).length;
+    const segF = (name, items, cur, key) => seg(name, items, cur).replace(new RegExp(`name="${name}"`, "g"), `name="${name}" data-f="${key}"`);
+    const f = st.poFilter;
+    const rows = st.pos.filter((p) => f === "all" || p.status === f);
+    body.innerHTML = `
+      <div class="inv-tools">
+        ${segF("po-f", [["draft", `Drafts (${n("draft")})`], ["sent", `Sent (${n("sent")})`], ["part", `Part received (${n("part")})`],
+          ["received", "Received"], ["cancelled", "Cancelled"], ["all", "All"]], f, "poFilter")}
+        <span class="inv-spacer"></span>
+        ${canMove ? '<button type="button" class="btn-primary" data-act="new-po">+ New purchase order</button>' : ""}
+      </div>
+      ${rows.length ? `<div class="po-list">${rows.map((po) => {
+        const t = poTotals(po);
+        const bits = [`${po.lines.length} item${po.lines.length === 1 ? "" : "s"}`,
+          po.requestIds.length && `${po.requestIds.length} request${po.requestIds.length === 1 ? "" : "s"}`,
+          po.sentAt ? `Sent ${when(po.sentAt)}` : `Created ${when(po.createdAt)}`, po.createdBy && `by ${po.createdBy}`].filter(Boolean);
+        return `<a class="po-row" href="#/inventory/po/${encodeURIComponent(po.id)}">
+          <span class="inv-name"><strong>${esc(po.number)} · ${esc(po.supplier.name)}</strong><small>${esc(bits.join(" · "))}</small></span>
+          <span class="rq-status is-${po.status}">${esc(PO_STATUS[po.status])}</span>
+          <strong class="po-amt">${esc(money(t.total))}</strong></a>`;
+      }).join("")}</div>`
+        : `<div class="tm-empty">${f === "draft" ? "No drafts. Create one from Requests → By supplier, or with + New purchase order." : "Nothing here."}</div>`}`;
+  }
+
+  function pickSupplier({ title, withLow = false }) {
+    return new Promise((resolve) => {
+      const act = st.suppliers.filter((s) => s.active);
+      if (!act.length) { showToast("Add a supplier first, in the Suppliers tab."); resolve(null); return; }
+      let out = null;
+      const dlg = openDialog("inv-dlg", `
+        <form class="lh-form" novalidate>
+          <div class="lh-dialog-head"><h3>${esc(title)}</h3><p>A draft is created. You can change everything before it's sent.</p></div>
+          <label class="lh-field"><span class="lh-label">Supplier</span><select class="fb-select" name="sid">${act.map((s) =>
+            `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("")}</select></label>
+          ${withLow ? '<label class="fe-check"><input type="checkbox" name="low" checked /> Start with this supplier\'s low stock</label>' : ""}
+          <div class="lh-actions">
+            <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+            <button type="submit" class="lh-btn is-primary">Create draft</button>
+          </div>
+        </form>`);
+      const form = dlg.querySelector("form");
+      dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+      form.addEventListener("submit", (e) => {
+        e.preventDefault();
+        out = { id: form.elements.sid.value, low: withLow && form.elements.low.checked };
+        dlg.close();
+      });
+      dlg.addEventListener("close", () => resolve(out));
+    });
+  }
+
+  async function startPo(supplierId, lines) {
+    const s = st.suppliers.find((x) => x.id === supplierId);
+    if (!s) return;
+    try {
+      const id = await createPo({ supplier: s, lines }, staff);
+      showToast("Draft purchase order created");
+      location.hash = `#/inventory/po/${encodeURIComponent(id)}`;
+    } catch (err) {
+      console.error("Create PO failed:", err);
+      showToast(errText(err, "Couldn't create the purchase order. Try again."));
+    }
+  }
+
+  async function makePoFrom(sid) {
+    let supplierId = sid;
+    if (!supplierId) {
+      const pick = await pickSupplier({ title: "Which supplier is this order for?" });
+      if (!pick) return;
+      supplierId = pick.id;
+    }
+    const g = openItemsBySupplier(st.requests.filter((r) => r.status === "open")).get(sid);
+    if (!g) return;
+    const lines = [...g.values()].map((l) => (l.p
+      ? lineFromProduct(l.p, l.qty, l.loc, l.sources)
+      : cleanPoLine({ name: l.name, qty: l.qty, orderUnit: l.unit, loc: l.loc, sources: l.sources })));
+    startPo(supplierId, lines);
+  }
+
+  async function newPo() {
+    const pick = await pickSupplier({ title: "New purchase order", withLow: true });
+    if (!pick) return;
+    const lines = [];
+    if (pick.low) {
+      st.products.filter((p) => p.active && p.supplierId === pick.id).forEach((p) => LOCATIONS.forEach((l) => {
+        if (lowAt(p, l.key)) lines.push(lineFromProduct(p, suggestOrder(p, l.key), l.key));
+      }));
+    }
+    startPo(pick.id, lines);
+  }
+
+  async function handleReq(id, act) {
+    const r = st.requests.find((x) => x.id === id);
+    if (!r) return;
+    if (act === "cancel") {
+      const ok = await confirmDialog({ title: `Cancel ${reqNumber(r)}?`, message: "It will show as cancelled.", confirmLabel: "Cancel request", tone: "warning" });
+      if (!ok) return;
+      try { await cancelRequest(id, staff); showToast("Request cancelled"); load(); }
+      catch (err) { console.error(err); showToast(errText(err, "Couldn't cancel. Try again.")); }
+      return;
+    }
+    const ordered = act === "ordered";
+    const dlg = openDialog("inv-dlg", `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>${ordered ? "Mark as ordered" : "Decline"}: ${esc(reqNumber(r))}</h3>
+          <p>${esc(r.requestedBy || "The requester")} is emailed${ordered ? " that it's been ordered" : " with your reason"}.</p></div>
+        <label class="lh-field"><span class="lh-label">${ordered ? "Note (optional)" : "Reason"}</span>
+          <textarea name="note" rows="3" maxlength="1000" placeholder="${ordered ? "e.g. Ordered by phone, arriving Friday" : "e.g. We have enough in JT storage. Move some across."}"></textarea></label>
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">${ordered ? "Mark as ordered" : "Decline request"}</button>
+        </div>
+      </form>`);
+    const form = dlg.querySelector("form");
+    const err = dlg.querySelector(".lh-error");
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const note = form.elements.note.value.trim();
+      if (!ordered && !note) { err.textContent = "Give a reason, so they know what to do instead."; err.hidden = false; return; }
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      try {
+        await setRequestStatus(id, act, note, staff);
+        callApi({ action: "inventory", op: "notifyUpdate", requestId: id }).catch((ex) => console.warn("Update email failed:", ex));
+        dlg.close();
+        showToast(ordered ? "Marked as ordered" : "Request declined");
+        load();
+      } catch (ex) {
+        console.error("Request update failed:", ex);
+        err.textContent = errText(ex, "Couldn't save. Try again.");
+        err.hidden = false;
+        btn.disabled = false;
+      }
+    });
+    form.elements.note.focus();
+  }
+
+  async function reqSettings() {
+    let staffList, cur;
+    try { [staffList, cur] = await Promise.all([fetchStaffList(), getRequestSettings()]); }
+    catch (err) { console.error(err); showToast("Couldn't load the email settings. Try again."); return; }
+    const dlg = openDialog("inv-dlg", `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>Order request emails</h3><p>Who gets an email when someone sends an order request.</p></div>
+        <div class="tb-staff">${staffList.map((s) => `
+          <label class="fe-check"><input type="checkbox" name="who" value="${esc(s.id)}"${cur.notifyIds.includes(s.id) ? " checked" : ""}${s.hasEmail ? "" : " disabled"} />
+            ${esc(s.name)} <small class="muted">${esc(s.role || "")}${s.hasEmail ? "" : " · no email on file"}</small></label>`).join("")}</div>
+        <label class="fe-check"><input type="checkbox" name="urgentOnly"${cur.urgentOnly ? " checked" : ""} /> Only email about urgent requests</label>
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">Save</button>
+        </div>
+      </form>`);
+    const form = dlg.querySelector("form");
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try {
+        await saveRequestSettings({
+          notifyIds: [...form.querySelectorAll('[name="who"]:checked')].map((x) => x.value),
+          urgentOnly: form.elements.urgentOnly.checked,
+        }, staff);
+        dlg.close();
+        showToast("Email settings saved");
+      } catch (ex) {
+        const err = dlg.querySelector(".lh-error");
+        err.textContent = errText(ex, "Couldn't save. Try again.");
+        err.hidden = false;
+      }
+    });
+  }
+
   /* ---------- Events ---------- */
   root.addEventListener("click", (e) => {
+    const mk = e.target.closest("[data-mkpo]");
+    if (mk) { makePoFrom(mk.dataset.mkpo); return; }
+    if (e.target.closest('[data-act="new-po"]')) { newPo(); return; }
+    const rq = e.target.closest("[data-req]");
+    if (rq) { handleReq(rq.dataset.id, rq.dataset.req); return; }
+    if (e.target.closest('[data-act="req-settings"]')) { reqSettings(); return; }
     if (e.target.closest('[data-act="new-product"]')) { editProduct(null); return; }
     if (e.target.closest('[data-act="new-supplier"]')) { editSupplier(null); return; }
     const pr = e.target.closest("[data-product]");
@@ -593,6 +903,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   body.addEventListener("input", (e) => {
     const k = e.target.dataset.f;
     if (!k) return;
+    if (k === "reqFilter" || k === "reqView") { st[k] = e.target.value; renderRequests(); return; }
+    if (k === "poFilter") { st.poFilter = e.target.value; renderOrders(); return; }
     if (k === "flagged" || k === "showInactive") st[k] = e.target.checked;
     else st[k] = e.target.value;
     if (k === "showInactive") renderProducts(); else renderStockList();

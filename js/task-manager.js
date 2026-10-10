@@ -12,6 +12,8 @@ import { mountTaskTypes, mountTaskEditor } from "./task-builder.js";
 import { mountTaskRunner } from "./task-runner.js";
 import { mountTaskHistory } from "./task-history.js";
 import { showToast } from "./utils.js";
+import { mountOrderRequest } from "./order-request.js";
+import { can } from "./perms.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -25,6 +27,7 @@ const I = {
   print: ic('<polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/>'),
   mail: ic('<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>'),
   doc: ic('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>'),
+  box: ic('<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/>'),
   chev: ic('<polyline points="9 18 15 12 9 6"/>'),
   back: ic('<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>'),
 };
@@ -36,6 +39,8 @@ const CATEGORIES = [
     blurb: "Email a reminder or a note to one or more staff members." },
   { key: "print", title: "To Print", icon: I.print, tone: "amber",
     blurb: "Print any form: blank, with a patient's details, or a completed copy." },
+  { key: "order", title: "To Order", icon: I.box, tone: "sky", href: "#/tasks/order", perm: "inventory.request",
+    blurb: "Ask the ordering team for stock: products running low, or something new." },
   ];
 
 export function mountTaskManager(container, { param = "", isAdmin = false, staff = null } = {}) {
@@ -46,6 +51,7 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
   // Full-page screens
   if (view === "run" && sub) { mountTaskRunner(container, { taskId: sub, patientId: parts[2] || "", staff }); return; }
   if (view === "print" && sub) { mountPrintTask(container, { templateId: sub, patientId: parts[2] || "", staff }); return; }
+  if (view === "order") { mountOrderRequest(container, { param: sub, staff }); return; }
   if (view === "types" && sub) {
     if (isAdmin) { mountTaskEditor(container, { id: sub, staff }); return; }
     container.innerHTML = '<section class="page"><div class="state"><strong>Admins only</strong>Only admins can edit task types.</div></section>';
@@ -96,8 +102,8 @@ function renderCategories(main) {
   main.innerHTML = `
     ${steps(0)}
     <h3 class="tm-h">What kind of task?</h3>
-    <div class="tm-cats">${CATEGORIES.map((c) => `
-      <a class="tm-cat tone-${c.tone}" href="#/tasks/new/${c.key}">
+    <div class="tm-cats">${CATEGORIES.filter((c) => !c.perm || can(c.perm)).map((c) => `
+      <a class="tm-cat tone-${c.tone}" href="${c.href || `#/tasks/new/${c.key}`}">
         <span class="tm-cat-icon">${c.icon}</span>
         <span class="tm-cat-title">${esc(c.title)}</span>
         <span class="tm-cat-blurb">${esc(c.blurb)}</span>
