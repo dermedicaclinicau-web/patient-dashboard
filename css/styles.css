@@ -3738,3 +3738,9 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
   .sc-row { grid-template-columns: minmax(0, 1fr) 130px 28px; }
   .sc-found, .sc-add, .sc-kitrow { grid-template-columns: 1fr; }
 }
+
+.st-rolehead { display: inline-flex; align-items: center; gap: 4px; }
+.st-delrole { border: 0; background: none; color: var(--muted, #888); font-size: 15px; line-height: 1; cursor: pointer; padding: 0 2px; border-radius: 4px; }
+.st-delrole:hover { color: #b42318; background: rgba(180, 35, 24, .08); }
+.st-dirty { color: #b54708; font-size: 13px; font-weight: 600; }
+.st-role { background: #eef2f6; color: #344054; }   /* new roles get a neutral badge */

@@ -1,0 +1,660 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===================== Helpers =====================
+
+    function isAdmin() {
+      return request.auth != null
+        && request.auth.token.staffRole is string
+        && request.auth.token.staffRole.lower() == 'admin';
+    }
+
+    // Logged in via the staff PIN system (token carries staffRole)
+    function isStaff() {
+      return request.auth != null && request.auth.token.staffRole is string;
+    }
+
+    // A permission from the login token (Admins have everything)
+    function can(p) {
+      return isAdmin() || (isStaff() && request.auth.token.perms is list && p in request.auth.token.perms);
+    }
+
+    function validFormTemplate(d) {
+      return d.keys().hasOnly(['name', 'category', 'status', 'fields', 'settings', 'version',
+                               'createdAt', 'createdBy', 'createdByUid',
+                               'updatedAt', 'updatedBy', 'updatedByUid',
+                               'publishedAt', 'publishedBy'])
+        && d.name is string && d.name.size() > 0 && d.name.size() <= 120
+        && d.category in ['consent', 'treatment', 'prescription', 'printable', 'email', 'admin']
+        && d.status in ['draft', 'live', 'archived']
+        && d.fields is list && d.fields.size() <= 300
+        && d.version is int && d.version >= 0;
+    }
+
+    function validTaskType(d) {
+      return d.keys().hasOnly(['name', 'description', 'category', 'channel', 'status', 'fields',
+                               'recipients', 'subject', 'body', 'format', 'style', 'attachments', 'schedule',
+                               'createdAt', 'createdBy', 'createdByUid',
+                               'updatedAt', 'updatedBy', 'updatedByUid'])
+        && d.name is string && d.name.size() > 0 && d.name.size() <= 120
+        && d.category in ['patient', 'staff']
+        && d.channel in ['email', 'sms']
+        && d.status in ['draft', 'live', 'archived']
+        && d.fields is list && d.fields.size() <= 40
+        && d.attachments is list && d.attachments.size() <= 3
+        && d.subject is string && d.subject.size() <= 200
+        && d.body is string && d.body.size() <= 60000
+        && d.get('format', 'rich') in ['rich', 'text']
+        && d.get('style', {}) is map
+        && d.get('schedule', {}) is map;
+    }
+
+    function validBankImage(d) {
+      return d.keys().hasOnly(['name', 'folderId', 'size', 'mime', 'width', 'height', 'fullPath', 'thumbPath',
+                               'driveId', 'trashed', 'createdAt', 'createdBy', 'createdByUid',
+                               'updatedAt', 'updatedBy', 'updatedByUid'])
+        && d.name is string && d.name.size() > 0 && d.name.size() <= 120
+        && d.folderId is string && d.folderId.size() <= 40
+        && d.mime in ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
+        && d.size is int && d.size <= 10485760
+        && d.width is int && d.height is int
+        && d.get('driveId', '') is string
+        && d.get('trashed', false) is bool;
+    }
+
+    // Aftercare instructions: only these fields are checked, so anything else your existing tool stores is left alone
+    function validAftercare(d) {
+      return d['Aftercare Title'] is string
+        && d['Aftercare Title'].size() > 0 && d['Aftercare Title'].size() <= 200
+        && d['Associated Treatment'] is string && d['Associated Treatment'].size() <= 120
+        && d['Instruction'] is string && d['Instruction'].size() <= 100000;
+    }
+
+    function validSspProduct(d) {
+      return d.keys().hasOnly(['name', 'steps', 'defaultInstruction', 'maintenanceInstruction', 'size', 'price',
+                               'details', 'shopLink', 'published', 'sheetRow',
+                               'createdAt', 'createdBy', 'updatedAt', 'updatedBy', 'updatedByUid'])
+        && d.name is string && d.name.size() > 0 && d.name.size() <= 150
+        && d.steps is list && d.steps.size() <= 7
+        && d.published is bool;
+    }
+
+    // ===================== Inventory =====================
+
+    function invManage() { return can('inventory.manage'); }                  // products, suppliers, counts
+    function invOrder() { return can('inventory.manage') || can('inventory.order'); }  // ordering team
+    function invKit() { return can('inventory.kit'); }                        // injectors who carry a kit
+    function invJt() { return can('inventory.jt') || invManage(); }           // approves JT storage releases
+    function invStock() { return invOrder() || invKit() || invJt(); }
+    function invUse() { return invStock() || can('consult.record'); }         // records products used in treatments
+    function kitOk() {
+      return request.resource.data.sealed is int && request.resource.data.sealed >= 0
+        && request.resource.data.open is number && request.resource.data.open >= 0;
+    }
+
+    match /inv_suppliers/{id} {
+      allow read: if can('menu.inventory') || invOrder();
+      allow create, update: if invManage() && request.resource.data.name is string && request.resource.data.name.size() > 0;
+      allow delete: if false;
+    }
+
+    // Products. Details are edited by managers; stock totals only change alongside a logged stock movement.
+    match /inv_products/{id} {
+      allow read: if isStaff();
+      allow create: if invManage() && request.resource.data.name is string
+        && request.resource.data.stock.shelf == 0 && request.resource.data.stock.jt == 0;
+      allow update: if (invManage() && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['stock', 'stockAt']))
+        || (invUse() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stock', 'stockAt']));
+      allow delete: if false;
+    }
+
+    // Batches on the Shelf and in JT storage
+    match /inv_lots/{id} {
+      allow read: if isStaff();
+      allow create, update: if invUse() && request.resource.data.qty is int && request.resource.data.qty >= 0;
+      allow delete: if false;
+    }
+
+    // Activity log: append-only, stamped with the person who did it
+    match /inv_moves/{id} {
+      allow read: if can('menu.inventory') || invOrder() || invKit();
+      allow create: if request.resource.data.byUid == request.auth.uid
+        && (invManage()
+          || (invOrder() && request.resource.data.type in ['move', 'receive'])
+          || (invKit() && request.resource.data.type in ['kit-take', 'kit-open', 'kit-return', 'kit-discard', 'kit-use', 'kit-borrow'])
+          || (invJt() && request.resource.data.type == 'release')
+          || (invUse() && request.resource.data.type == 'use'));
+      allow update, delete: if false;
+    }
+
+    // Injectors' kits. The owner changes their own; a colleague borrowing can only REDUCE the opened-vial units.
+    match /inv_kits/{id} {
+      allow read: if isStaff();
+      allow create: if invKit() && request.resource.data.staffUid == request.auth.uid && kitOk();
+      allow update: if kitOk() && (
+          (invKit() && resource.data.staffUid == request.auth.uid
+            && request.resource.data.staffUid == request.auth.uid)
+          || invManage()
+          || (invKit() && resource.data.staffUid != request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['open', 'updatedAt'])
+            && request.resource.data.open < resource.data.open));
+      allow delete: if false;
+    }
+
+    // Requests to release stock from JT storage to the Shelf (Dr Teh approves)
+    match /inv_releases/{id} {
+      allow read: if isStaff();
+      allow create: if invKit() && request.resource.data.requestedByUid == request.auth.uid
+        && request.resource.data.status == 'pending' && request.resource.data.qty is int
+        && request.resource.data.qty >= 1 && request.resource.data.qty <= 10;
+      allow update: if resource.data.status == 'pending' && (
+          (invJt() && request.resource.data.status in ['approved', 'declined'])
+          || (resource.data.requestedByUid == request.auth.uid && request.resource.data.status == 'cancelled'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])));
+      allow delete: if false;
+    }
+
+    // Borrowing between colleagues: the borrower records it, the lender (or an Admin) confirms or disputes
+    match /inv_loans/{id} {
+      allow read: if isStaff();
+      allow create: if invKit() && request.resource.data.toUid == request.auth.uid
+        && request.resource.data.status == 'unconfirmed'
+        && request.resource.data.units is number && request.resource.data.units > 0;
+      allow update: if resource.data.status == 'unconfirmed'
+        && (resource.data.fromUid == request.auth.uid || invManage())
+        && request.resource.data.status in ['confirmed', 'disputed']
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'response', 'respondedBy', 'respondedAt']);
+      allow delete: if false;
+    }
+
+    // Products used in treatments: written with the treatment record, never changed
+    match /inv_usage/{id} {
+      allow read: if isStaff();
+      allow create: if invUse() && request.resource.data.byUid == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // Opening counts and kit checks. The system numbers are recorded when saved; Reporting reviews the differences.
+    match /inv_counts/{id} {
+      allow read: if isStaff();
+      allow create: if request.resource.data.byUid == request.auth.uid
+        && request.resource.data.lines is list && request.resource.data.lines.size() <= 400
+        && ((request.resource.data.kind == 'opening' && (can('inventory.count') || invOrder()))
+          || (request.resource.data.kind == 'kit' && invKit()));
+      allow update: if can('menu.reports')
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lines', 'openCount', 'updatedAt', 'updatedBy', 'events']);
+      allow delete: if false;
+    }
+
+    // Order requests: anyone with "Request orders" asks; the ordering team handles them
+    match /inv_requests/{id} {
+      allow read: if can('menu.inventory') || can('inventory.request') || invOrder();
+      allow create: if can('inventory.request')
+        && request.resource.data.requestedByUid == request.auth.uid
+        && request.resource.data.status == 'open'
+        && request.resource.data.items is list
+        && request.resource.data.items.size() > 0 && request.resource.data.items.size() <= 30
+        && !('notified' in request.resource.data);
+      allow update: if (invOrder()
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['requestedBy', 'requestedByUid', 'createdAt', 'items']))
+        || (resource.data.requestedByUid == request.auth.uid && resource.data.status == 'open'
+          && request.resource.data.status == 'cancelled'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt', 'events']));
+      allow delete: if false;
+    }
+
+    // Inventory settings (who gets order request emails)
+    match /inv_settings/{id} {
+      allow read: if isStaff();
+      allow write: if invManage();
+    }
+
+    // PO numbers: only ever counts up by one
+    match /inv_settings/counters {
+      allow create, update: if invOrder()
+        && request.resource.data.keys().hasOnly(['po'])
+        && request.resource.data.po is int
+        && request.resource.data.po == (resource == null ? 1 : resource.data.po + 1);
+    }
+
+    // Purchase orders: the ordering team
+    match /inv_pos/{id} {
+      allow read: if can('menu.inventory') || invOrder();
+      allow create: if invOrder() && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.status == 'draft';
+      allow update: if invOrder() && request.resource.data.number == resource.data.number;
+      allow delete: if false;
+    }
+
+    // Deliveries received against a purchase order
+    match /inv_receipts/{id} {
+      allow read: if can('menu.inventory') || invOrder();
+      allow create: if invOrder() && request.resource.data.byUid == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // ===================== Old Apps Script Form Builder =====================
+
+    match /forms/{formId} {
+      allow read: if isStaff();
+      allow write: if false;            // still written by the Apps Script service account
+
+      match /responses/{subId} {
+        allow read, write: if false;    // raw patient answers stay server-side
+      }
+    }
+
+    match /form_categories/{catId} {
+      allow read: if isStaff();
+      allow write: if false;
+    }
+
+    // ===================== Form Builder (portal) =====================
+
+    match /form_templates/{templateId} {
+      // Form builders see everything; other staff only see published forms
+      allow read: if can('forms.build') || (isStaff() && resource.data.status == 'live');
+
+      allow create: if can('forms.build')
+        && validFormTemplate(request.resource.data)
+        && request.resource.data.status == 'draft'
+        && request.resource.data.version == 0
+        && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.updatedByUid == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+
+      // Normal saves keep the version and can't make a form live.
+      // Publishing raises the version by exactly one AND saves the frozen copy in the same step.
+      allow update: if can('forms.build')
+        && validFormTemplate(request.resource.data)
+        && request.resource.data.createdByUid == resource.data.createdByUid
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedByUid == request.auth.uid
+        && request.resource.data.updatedAt == request.time
+        && (
+          (request.resource.data.version == resource.data.version
+            && (request.resource.data.status != 'live' || resource.data.status == 'live'))
+          ||
+          (request.resource.data.version == resource.data.version + 1
+            && request.resource.data.status == 'live'
+            && existsAfter(/databases/$(database)/documents/form_templates/$(templateId)/versions/$(string(request.resource.data.version))))
+        );
+
+      allow delete: if false;   // forms are archived, never deleted
+
+      // Published copies: anyone on staff can read them, nobody can change or delete them
+      match /versions/{versionId} {
+        allow read: if isStaff();
+        allow create: if can('forms.build')
+          && request.resource.data.keys().hasOnly(['version', 'name', 'category', 'fields', 'settings',
+                                                  'publishedAt', 'publishedBy', 'publishedByUid'])
+          && request.resource.data.version is int
+          && versionId == string(request.resource.data.version)
+          && request.resource.data.fields is list
+          && request.resource.data.publishedByUid == request.auth.uid
+          && request.resource.data.publishedAt == request.time
+          && getAfter(/databases/$(database)/documents/form_templates/$(templateId)).data.version == request.resource.data.version;
+        allow update, delete: if false;
+      }
+    }
+
+    // Shared Form Builder settings: the letterhead, and the printer email address
+    match /form_settings/{docId} {
+      allow read: if isStaff();
+
+      allow write: if can('forms.build') && docId == 'letterhead'
+        && request.resource.data.keys().hasOnly(['logo', 'logoSize', 'name', 'showName',
+                                                'line1', 'line2', 'layout', 'updatedAt', 'updatedBy'])
+        && request.resource.data.logo is string
+        && request.resource.data.logo.size() < 900000
+        && (request.resource.data.logo == ''
+            || request.resource.data.logo.matches('data:image/(png|jpeg);base64,[A-Za-z0-9+/=]+'))
+        && request.resource.data.updatedAt == request.time;
+
+      allow write: if can('forms.build') && docId == 'printing'
+        && request.resource.data.keys().hasOnly(['printerEmail', 'updatedAt', 'updatedBy'])
+        && request.resource.data.printerEmail is string
+        && request.resource.data.printerEmail.size() <= 254
+        && (request.resource.data.printerEmail == ''
+            || request.resource.data.printerEmail.matches('[^ @]+@[^ @]+[.][^ @]+'))
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    // Skin Script design: validity, wording, PDF look and the patient email
+    match /form_settings/ssp {
+      allow read: if isStaff();
+      allow write: if can('ssp.config')
+        && request.resource.data.keys().hasOnly(['validMonths', 'closing', 'closingHtml', 'signature',
+             'emailTemplate', 'emailSource', 'emailSubject', 'emailHtml', 'emailStyle', 'pdf', 'updatedAt', 'updatedBy'])
+        && request.resource.data.validMonths is int
+        && request.resource.data.validMonths >= 1 && request.resource.data.validMonths <= 24
+        && request.resource.data.closing is string && request.resource.data.closing.size() <= 3000
+        && request.resource.data.closingHtml is string && request.resource.data.closingHtml.size() <= 20000
+        && request.resource.data.signature is string && request.resource.data.signature.size() <= 500
+        && request.resource.data.emailSubject is string && request.resource.data.emailSubject.size() <= 200
+        && request.resource.data.emailHtml is string && request.resource.data.emailHtml.size() <= 60000
+        && request.resource.data.emailStyle is map
+        && request.resource.data.pdf is map;
+    }
+
+    // Completed forms. Saved once and never edited or deleted (clinical records).
+    // The send log ('deliveries') is added by Apps Script only, never by the browser.
+    match /form_submissions/{subId} {
+      allow read: if isStaff();
+      allow create: if isStaff()
+        && request.resource.data.keys().hasOnly(['templateId', 'templateName', 'category', 'version',
+             'patientId', 'patientPttId', 'patientName', 'recordDate', 'group',
+             'answers', 'signatures', 'createdAt', 'createdBy', 'createdByUid'])
+        && request.resource.data.get('group', '') is string
+        && request.resource.data.templateId is string
+        && request.resource.data.version is int && request.resource.data.version > 0
+        && exists(/databases/$(database)/documents/form_templates/$(request.resource.data.templateId)/versions/$(string(request.resource.data.version)))
+        && request.resource.data.patientId is string
+        && exists(/databases/$(database)/documents/patient_list/$(request.resource.data.patientId))
+        && request.resource.data.recordDate is string
+        && request.resource.data.recordDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && request.resource.data.answers is map
+        && request.resource.data.signatures is map
+        && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.createdAt == request.time;
+      allow update, delete: if false;
+    }
+
+    // ===================== Task Manager =====================
+
+    // Task types. Task builders build them; other staff can only see live ones.
+    match /task_types/{taskId} {
+      allow read: if can('tasks.build') || (isStaff() && resource.data.status == 'live');
+      allow create: if can('tasks.build') && validTaskType(request.resource.data)
+        && request.resource.data.status == 'draft'
+        && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.updatedByUid == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if can('tasks.build') && validTaskType(request.resource.data)
+        && request.resource.data.createdByUid == resource.data.createdByUid
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedByUid == request.auth.uid
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if false;   // archived, never deleted
+    }
+
+    // Task history. Written only by Apps Script; staff can read it, nobody can change it.
+    match /task_runs/{runId} {
+      allow read: if isStaff();
+      allow write: if false;
+    }
+
+    // Scheduled tasks: their running state (written only by Apps Script)
+    match /task_schedules/{taskId} {
+      allow read: if isStaff();
+      allow write: if false;
+    }
+
+    // Clinic closed days, shared by every scheduled task
+    match /task_settings/{docId} {
+      allow read: if isStaff();
+      allow write: if can('tasks.build') && docId == 'closed'
+        && request.resource.data.keys().hasOnly(['dates', 'updatedAt', 'updatedBy'])
+        && request.resource.data.dates is list
+        && request.resource.data.dates.size() <= 500
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    // ===================== Image Bank =====================
+
+    // The details of each picture (the files are in Storage)
+    match /image_bank/{imageId} {
+      allow read: if isStaff();
+      allow create, update: if can('forms.build') && validBankImage(request.resource.data)
+        && request.resource.data.fullPath == 'image_bank/' + imageId + '/full'
+        && request.resource.data.thumbPath == 'image_bank/' + imageId + '/thumb';
+      allow delete: if false;   // "deleted" pictures are hidden, never removed
+    }
+
+    match /image_folders/{folderId} {
+      allow read: if isStaff();
+      allow create, update: if can('forms.build')
+        && request.resource.data.keys().hasOnly(['name', 'parentId', 'trashed', 'driveId',
+             'createdAt', 'createdBy', 'createdByUid', 'updatedAt', 'updatedBy', 'updatedByUid'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 80
+        && request.resource.data.parentId is string
+        && request.resource.data.parentId != folderId;
+      allow delete: if false;
+    }
+
+    // ===================== Aftercare =====================
+
+    // Staff read; form builders add, edit and delete from the portal
+    match /Aftercare-instruction/{docId} {
+      allow read: if isStaff();
+      allow create: if can('forms.build') && validAftercare(request.resource.data)
+        && request.resource.data.keys().hasOnly(['Aftercare Title', 'Associated Treatment', 'Created By',
+             'Created TimeStamp', 'Instruction', 'Updated As of', 'Updated By']);
+      allow update: if can('forms.build') && validAftercare(request.resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['Aftercare Title', 'Associated Treatment', 'Instruction', 'Updated As of', 'Updated By']);
+      allow delete: if can('forms.build');
+    }
+
+    // ===================== Skin Script Protocol =====================
+
+    // Product catalogue (staff read; Skin Script managers edit)
+    match /ssp_products/{productId} {
+      allow read: if isStaff();
+      allow create, update: if can('ssp.config') && validSspProduct(request.resource.data);
+      allow delete: if false;   // unpublish instead
+    }
+
+    // Protocols. Created by staff who can make Skin Scripts; nobody edits or deletes them from a browser.
+    match /ssp_records/{recordId} {
+      allow read: if isStaff();
+      allow create: if can('ssp.create')
+        && request.resource.data.keys().hasOnly(['recordId', 'patientId', 'patientPttId', 'patientName',
+             'recordDate', 'validUntil', 'items', 'createdAt', 'createdBy', 'createdByUid'])
+        && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.patientId is string
+        && exists(/databases/$(database)/documents/patient_list/$(request.resource.data.patientId))
+        && request.resource.data.items is list
+        && request.resource.data.items.size() > 0 && request.resource.data.items.size() <= 150;
+      allow update, delete: if false;
+    }
+
+    // ===================== Staff =====================
+
+    // PINs are never readable. Staff may only change their OWN 'Staff Name'.
+    // Everything else about staff is managed by Admins through Apps Script.
+    match /staff_access/{staffId} {
+      allow update: if isStaff()
+        && request.auth.uid == staffId
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['Staff Name'])
+        && request.resource.data['Staff Name'] is string
+        && request.resource.data['Staff Name'].size() > 0
+        && request.resource.data['Staff Name'].size() <= 60;
+    }
+
+    // ===================== Synced from Google Sheets (server writes; staff read-only) =====================
+
+    match /pcn_results/{patientId} {
+      allow read: if isStaff();
+    }
+    match /appts_by_day/{dateKey} {
+      allow read: if isStaff();
+    }
+    match /sync_meta/{docId} {
+      allow read: if isStaff();
+    }
+    match /skincare/{patientKey} {
+      allow read: if isStaff();
+    }
+    match /treatment_records/{recordId} {
+      allow read: if isStaff();
+    }
+    match /consent_records/{recordId} {
+      allow read: if isStaff();
+    }
+    match /scanned_file_log/{logId} {
+      allow read: if isStaff();
+    }
+    match /prescription_record/{recordId} {
+      allow read: if isStaff();
+    }
+
+    // Treatment names + info links (used when emailing treatment information)
+    match /TREATMENT-CONFIGURATIONS/{docId} {
+      allow read: if isStaff();
+    }
+
+    // ===================== Consultations =====================
+
+    // Consultation transcripts / SOAP notes
+    match /appointment_transcripts/{recordId} {
+      allow read: if isStaff();
+      // Staff who record consultations may edit the notes and set Draft / Reviewed, stamped with THEIR OWN identity.
+      // Transcript, patient, dates and audio can't be changed from the browser.
+      allow update: if can('consult.record')
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+             'Gemini SOAP', 'Status', 'Last Saved', 'Last Saved By', 'Last Saved By Uid',
+             'Reviewed By', 'Reviewed By Uid', 'Reviewed At'])
+        && request.resource.data['Status'] in ['Draft', 'Reviewed']
+        && request.resource.data['Last Saved By Uid'] == request.auth.uid
+        && (request.resource.data['Status'] != 'Reviewed'
+            || request.resource.data['Reviewed By Uid'] == request.auth.uid);
+    }
+
+    // Recording jobs: staff who record consultations create them (with consent); only the server updates them
+    match /recording_jobs/{jobId} {
+      allow read: if isStaff();
+      allow create: if can('consult.record')
+        && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.status == 'uploaded'
+        && request.resource.data.consent == true;
+      allow update, delete: if false;
+    }
+
+    // Audit log of deleted recordings (written by the server only)
+    match /deleted_records/{recordId} {
+      allow read: if isStaff();
+      allow write: if false;
+    }
+
+    // ===================== Patients =====================
+
+    // Log of patient merges, kept so a merge can be undone
+    match /patient_merges/{mergeId} {
+      allow read: if isStaff();
+      allow create: if can('patients.merge') && request.resource.data.mergedByUid == request.auth.uid;
+      allow update: if can('patients.merge')
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+             'undone', 'undoneAt', 'undoneBy', 'undoneByUid'])
+        && request.resource.data.undoneByUid == request.auth.uid;
+      allow delete: if false;
+    }
+
+    // Personal notes (shared with the recorder app)
+    match /patient_personal_notes/{noteId} {
+      allow read: if isStaff();
+      allow create: if isStaff()
+        && request.resource.data.note is string
+        && request.resource.data.note.size() > 0
+        && request.resource.data.note.size() <= 2000
+        && request.resource.data.createdByUid == request.auth.uid;
+      // The author (or an Admin) can edit or hide a note. Nothing is ever hard-deleted.
+      allow update: if isStaff()
+        && (resource.data.get('createdByUid', '') == request.auth.uid || isAdmin())
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+             'note', 'updatedAt', 'updatedBy', 'updatedByUid',
+             'deleted', 'deletedAt', 'deletedBy', 'deletedByUid'])
+        && request.resource.data.note is string
+        && request.resource.data.note.size() > 0
+        && request.resource.data.note.size() <= 2000;
+      allow delete: if false;
+    }
+
+    // Curated Social History / Medication / Conditions / Allergies (one document per patient)
+    // Read by all staff; edited only by staff who can see clinical information.
+    match /patient_clinical_profile/{patientId} {
+      allow read: if isStaff();
+      allow create, update: if can('clinical.view')
+        && request.resource.data.keys().hasOnly([
+             'social', 'meds', 'conditions', 'allergies',
+             'patientId', 'patientName', 'updatedAt', 'updatedBy', 'updatedByUid'])
+        && request.resource.data.updatedByUid == request.auth.uid;
+      allow delete: if false;
+    }
+
+    // Staff tasks / reminders
+    match /staff-task-list/{taskId} {
+      allow read: if isStaff();
+      allow create: if isStaff()
+        && request.resource.data.keys().hasOnly([
+             'patientId', 'patientName', 'taskText', 'dueDate', 'status',
+             'createdAt', 'createdBy', 'createdByUid'])
+        && request.resource.data.taskText is string
+        && request.resource.data.taskText.size() > 0
+        && request.resource.data.taskText.size() <= 500
+        && request.resource.data.dueDate is string
+        && request.resource.data.dueDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && request.resource.data.status == 'Open'
+        && request.resource.data.createdByUid == request.auth.uid;
+      // Staff can only mark a task as done, stamped with their own identity
+      allow update: if isStaff()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+             'status', 'completedAt', 'completedBy', 'completedByUid'])
+        && request.resource.data.status == 'Completed'
+        && request.resource.data.completedByUid == request.auth.uid;
+      allow delete: if false;
+    }
+
+    // Patient list
+    match /patient_list/{patientId} {
+      allow read: if isStaff();
+
+      // New patients from the dashboard: ID is system-generated, document ID = PttID
+      allow create: if can('patients.edit')
+        && request.resource.data.keys().hasOnly([
+             'PttID', 'First Name', 'Last Name', 'Patient Name', 'NameKey', 'Email', 'EmailKey',
+             'Mobile', 'PhoneKey', 'Address', 'DobKey', 'DOB', 'IdentityKey',
+             'CreatedAt', 'CreatedBy', 'CreatedByUid', 'Source'])
+        && request.resource.data.PttID == patientId
+        && request.resource.data.PttID.matches('^PAT-[0-9]{13,}$')
+        && request.resource.data['First Name'] is string && request.resource.data['First Name'].size() > 0
+        && request.resource.data['Last Name'] is string && request.resource.data['Last Name'].size() > 0
+        && request.resource.data.CreatedByUid == request.auth.uid
+        && request.resource.data.CreatedAt == request.time;
+
+      // Staff who can edit patients can change details, but NEVER PttID, and every edit must be stamped
+      allow update: if can('patients.edit')
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+             'First Name', 'Last Name', 'Patient Name', 'NameKey',
+             'DOB', 'DobKey', 'IdentityKey',
+             'Email', 'EmailKey', 'Mobile', 'PhoneKey', 'Address',
+             'UpdatedAt', 'UpdatedBy', 'UpdatedByUid'])
+        && request.resource.data.UpdatedAt == request.time
+        && request.resource.data.UpdatedByUid == request.auth.uid
+        && request.resource.data['First Name'] is string
+        && request.resource.data['First Name'].size() > 0
+        && request.resource.data['Last Name'] is string
+        && request.resource.data['Last Name'].size() > 0;
+
+      // Merging duplicates: the kept record gains MergedIds; the others get MergedInto
+      allow update: if can('patients.merge')
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+             'First Name', 'Last Name', 'Patient Name', 'NameKey',
+             'DOB', 'DobKey', 'IdentityKey', 'Email', 'EmailKey', 'Mobile', 'PhoneKey', 'Address',
+             'MergedIds', 'MergedNames', 'MergedInto', 'MergedAt', 'MergedBy', 'MergedByUid',
+             'UpdatedAt', 'UpdatedBy', 'UpdatedByUid']);
+    }
+
+    // ===================== Safety net =====================
+    // Anything not allowed by a rule above stays locked
+    // (this includes staff_roles and staff_audit, which only Apps Script writes)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

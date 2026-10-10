@@ -58,6 +58,7 @@ function doPost(e) {
       staffRole: staff.role,
       staffPhoto: staff.photo,
       staffEmail: staff.email,
+      injector: staff.injector === true,
       perms: effectivePerms_(staff),
     });
 
@@ -128,6 +129,7 @@ function getStaffDocs_() {
       active: !(f['Active'] && f['Active'].booleanValue === false),
       lastLogin: field_(f, 'Last Login'),
       access: f['Access'] ? fromValue_(f['Access']) : null,
+      injector: !!(f['Injector'] && f['Injector'].booleanValue === true),
     };
   });
   try {
@@ -2728,8 +2730,8 @@ function staffList_() {
   const staff = staffFresh_().map(function (s) {
     return { id: s.id, name: s.name, role: s.role, email: s.email, photo: s.photo,
       active: s.active !== false, lastLogin: s.lastLogin || '', hasPin: !!(s.pinHash || s.pin),
-      access: s.access || { allow: [], deny: [] } };
-  }).sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
+      injector: s.injector === true, access: s.access || { allow: [], deny: [] } };
+    }).sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
   return { ok: true, staff: staff, roles: STAFF_ROLES_, locked: isLockedOut_() };
 }
 
@@ -2746,6 +2748,8 @@ function staffSave_(p, session) {
   const all = staffFresh_();
   const now = new Date().toISOString();
   const access = cleanAccess_(p.access, role);
+  const injector = p.injector === true;
+
 
   if (p.id) {
     const cur = all.filter(function (s) { return s.id === String(p.id); })[0];
@@ -2755,13 +2759,15 @@ function staffSave_(p, session) {
     }
     fsPatch_(cfg, STAFF_COLLECTION + '/' + cur.id, {
       'Staff Name': name, 'Role': role, 'Email address': email, 'Profile Photo': photo, 'Access': access,
-      'Updated At': now, 'Updated By': String(session.name || ''),
+      'Injector': injector, 'Updated At': now, 'Updated By': String(session.name || ''),
     });
-    const changes = [];
+    
+   const changes = [];
     if (cur.name !== name) changes.push('name');
     if (cur.role !== role) changes.push('role ' + cur.role + ' → ' + role);
     if (cur.email !== email) changes.push('email');
     if (cur.photo !== photo) changes.push('photo');
+    if ((cur.injector === true) !== injector) changes.push(injector ? 'now an injector' : 'no longer an injector');
     if (JSON.stringify(cur.access || { allow: [], deny: [] }) !== JSON.stringify(access)) changes.push('access');
     staffAudit_(cfg, session, 'Edited', { id: cur.id, name: name }, changes.join(', '));
     CacheService.getScriptCache().remove('staff_docs_v1');
@@ -2774,7 +2780,7 @@ function staffSave_(p, session) {
   const id = 'st_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20);
   commitWrites_(cfg, [updateWrite_(cfg, STAFF_COLLECTION + '/' + id, {
     'Staff Name': name, 'Role': role, 'Email address': email, 'Profile Photo': photo,
-    'PIN': '', 'PIN Hash': pinHash_(pin), 'Active': true, 'Access': access,
+    'PIN': '', 'PIN Hash': pinHash_(pin), 'Active': true, 'Access': access, 'Injector': injector,
     'Created At': now, 'Created By': String(session.name || ''),
   })]);
   staffAudit_(cfg, session, 'Added', { id: id, name: name }, 'role ' + role);
@@ -2856,13 +2862,28 @@ const PERMS_ = [
   ['inventory.request', 'Inventory', 'Request orders'],
   ['inventory.order', 'Inventory', 'Ordering team: purchase orders, receiving and moving stock'],
   ['inventory.manage', 'Inventory', 'Manage products, suppliers and stock counts'],
+  ['inventory.kit', 'Inventory', 'Carries a kit (set by the Injector tick on each staff member)'],
+  ['inventory.jt', 'Inventory', 'Approves releases from JT storage'],
+  ['inventory.count', 'Inventory', 'Does the opening count (Shelf and JT storage)'],
+  ['menu.reports', 'Menus', 'Reporting: variance, wastage, kit reconciliation and usage'],
+  ['dash.attention', 'My dashboard', 'Needs my attention'],
+  ['dash.appts', 'My dashboard', 'My appointments today'],
+  ['dash.tasks', 'My dashboard', 'Open staff tasks'],
+  ['dash.kit', 'My dashboard', 'My kit (injectors only)'],
+  ['dash.records', 'My dashboard', 'My records'],
+  ['dash.usage', 'My dashboard', 'What I used'],
+  ['dash.requests', 'My dashboard', 'My requests'],
+  ['dash.stock', 'My dashboard', 'Stock I use'],
+  ['dash.overview', 'My dashboard', 'Clinic overview'],
 ];
 const PERMS_ALL_ = PERMS_.map(function (p) { return p[0]; });
 const ROLE_DEFAULTS_ = {
   Clinician: ['menu.patients', 'menu.calendar', 'menu.tasks', 'patients.edit', 'clinical.view', 'billing.view',
-    'consult.record', 'send.patients', 'tasks.run', 'ssp.create', 'menu.inventory', 'inventory.request'],
+    'consult.record', 'send.patients', 'tasks.run', 'ssp.create', 'menu.inventory', 'inventory.request',
+    'dash.attention', 'dash.appts', 'dash.tasks', 'dash.kit', 'dash.records', 'dash.usage', 'dash.requests', 'dash.stock'],
   Reception: ['menu.patients', 'menu.calendar', 'menu.tasks', 'patients.edit', 'send.patients', 'tasks.run',
-    'menu.inventory', 'inventory.request', 'inventory.order'],
+    'menu.inventory', 'inventory.request', 'inventory.order', 'inventory.count', 'menu.reports',
+    'dash.attention', 'dash.appts', 'dash.tasks', 'dash.requests', 'dash.overview'],
 };
 
 function rolesConfig_() {
@@ -2891,6 +2912,7 @@ function effectivePerms_(s) {
   const acc = s.access || {};
   (Array.isArray(acc.allow) ? acc.allow : []).forEach(function (p) { if (PERMS_ALL_.indexOf(p) !== -1) set[p] = true; });
   (Array.isArray(acc.deny) ? acc.deny : []).forEach(function (p) { delete set[p]; });
+  if (s.injector === true) set['inventory.kit'] = true; else delete set['inventory.kit'];
   return PERMS_ALL_.filter(function (p) { return set[p]; });
 }
 
@@ -2913,9 +2935,10 @@ function staffMe_(session) {
   if (!s) return { ok: false, error: 'UNAUTHORIZED' };
   const perms = effectivePerms_(s);
   const token = createCustomToken_(s.id, {
-    staffName: s.name, staffRole: s.role, staffPhoto: s.photo, staffEmail: s.email, perms: perms,
+    staffName: s.name, staffRole: s.role, staffPhoto: s.photo, staffEmail: s.email,
+    injector: s.injector === true, perms: perms,
   });
-  return { ok: true, role: s.role, name: s.name, perms: perms, token: token };
+  return { ok: true, role: s.role, name: s.name, perms: perms, injector: s.injector === true, token: token };
 }
 
 function rolesGet_() {
@@ -3272,6 +3295,21 @@ function handleInventory_(body) {
       if (!okId(body.requestId)) return { ok: false, error: 'BAD_REQUEST' };
       return invNotifyUpdate_(String(body.requestId));
     }
+    if (op === 'notifyRelease') {
+      if (!can_(session, 'inventory.kit')) return { ok: false, error: 'FORBIDDEN' };
+      if (!okId(body.releaseId)) return { ok: false, error: 'BAD_REQUEST' };
+      return invNotifyRelease_(String(body.releaseId), session);
+    }
+    if (op === 'notifyLoan') {
+      if (!can_(session, 'inventory.kit')) return { ok: false, error: 'FORBIDDEN' };
+      if (!okId(body.loanId)) return { ok: false, error: 'BAD_REQUEST' };
+      return invNotifyLoan_(String(body.loanId), session);
+    }
+    if (op === 'notifyReleaseUpdate') {
+      if (!can_(session, 'inventory.jt') && !can_(session, 'inventory.manage')) return { ok: false, error: 'FORBIDDEN' };
+      if (!okId(body.releaseId)) return { ok: false, error: 'BAD_REQUEST' };
+      return invNotifyReleaseUpdate_(String(body.releaseId));
+    }
     if (op === 'sendPo') {
       if (!ordering) return { ok: false, error: 'FORBIDDEN' };
       if (!okId(body.poId)) return { ok: false, error: 'BAD_REQUEST' };
@@ -3296,13 +3334,15 @@ function invItemsHtml_(rec) {
       (it.productId ? '' : ' <em style="color:#64748b">(not on the product list)</em>') + '</li>';
   }).join('') + '</ul>';
 }
-function invEmailWrap_(inner) {
+
+function invEmailWrap_(inner, hash, label) {
+  hash = hash || 'inventory/requests';
+  label = label || 'Open order requests';
   return '<div style="margin:0;padding:24px 12px;background:#f1f5f9"><div style="max-width:600px;margin:0 auto;padding:28px 30px;' +
     'background:#fff;border-radius:12px;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.6;color:#1e293b">' +
-    inner + '<p style="margin:18px 0 0"><a href="' + PORTAL_URL_ + '#/inventory/requests" style="display:inline-block;padding:10px 18px;' +
-    'border-radius:8px;background:#0f766e;color:#fff;text-decoration:none;font-weight:bold">Open order requests</a></p></div></div>';
+    inner + '<p style="margin:18px 0 0"><a href="' + PORTAL_URL_ + '#/' + hash + '" style="display:inline-block;padding:10px 18px;' +
+    'border-radius:8px;background:#0f766e;color:#fff;text-decoration:none;font-weight:bold">' + label + '</a></p></div></div>';
 }
-
 // A new request → the staff chosen in Inventory → Requests → Email settings
 function invNotifyRequest_(id, session) {
   const cfg = getConfig_();
@@ -3438,4 +3478,93 @@ function invSendPo_(id, body, session) {
   }
   console.log(po.number + ' emailed to ' + to + ' by ' + who);
   return { ok: true, to: to };
+}
+
+// ===================== Inventory: JT storage releases =====================
+
+// Staff given "Approves releases from JT storage". If nobody is, the Admins.
+function invJtApprovers_() {
+  const all = getStaffDocs_().filter(function (s) { return s.active !== false && isEmail_(s.email); });
+  const named = all.filter(function (s) {
+    return !/^admin$/i.test(String(s.role || '')) && effectivePerms_(s).indexOf('inventory.jt') !== -1;
+  });
+  return (named.length ? named : all.filter(function (s) { return /^admin$/i.test(String(s.role || '')); }))
+    .map(function (s) { return s.email; });
+}
+
+function invNotifyRelease_(id, session) {
+  const cfg = getConfig_();
+  const rec = fsGetDoc_(cfg, 'inv_releases/' + id);
+  if (!rec) return { ok: false, error: 'NOT_FOUND' };
+  if (rec.requestedByUid !== session.uid) return { ok: false, error: 'FORBIDDEN' };
+  if (rec.notified === true) return { ok: true, sent: 0 };
+  const to = invJtApprovers_();
+  if (to.length && MailApp.getRemainingDailyQuota() >= 1) {
+    const qty = invQty_(rec.qty, rec.unit);
+    const html = invEmailWrap_(
+      '<h2 style="margin:0 0 6px;font-size:20px;color:#0f766e">JT storage release requested</h2>' +
+      '<p style="margin:0 0 12px;color:#475569"><strong>' + invEsc_(rec.requestedBy) + '</strong> has none left on the Shelf and is asking for:</p>' +
+      '<p style="margin:0 0 12px;font-size:17px"><strong>' + invEsc_(qty) + ' of ' + invEsc_(rec.productName) + '</strong></p>' +
+      (rec.note ? '<p style="margin:0 0 12px;padding:10px 12px;border-radius:8px;background:#f8fafc">“' + invEsc_(rec.note) + '”</p>' : '') +
+      '<p style="margin:0;color:#475569">Approving moves it from JT storage to the Shelf.</p>',
+      'inventory/kits', 'Open JT releases');
+    MailApp.sendEmail({
+      to: to.join(','), name: 'Dermedica Clinic',
+      subject: 'JT storage release: ' + qty + ' of ' + rec.productName + ' for ' + rec.requestedBy,
+      htmlBody: html, body: emailHtmlToText_(html),
+    });
+  }
+  fsPatch_(cfg, 'inv_releases/' + id, { notified: true });
+  return { ok: true, sent: to.length };
+}
+
+function invNotifyReleaseUpdate_(id) {
+  const cfg = getConfig_();
+  const rec = fsGetDoc_(cfg, 'inv_releases/' + id);
+  if (!rec) return { ok: false, error: 'NOT_FOUND' };
+  if (rec.status !== 'approved' && rec.status !== 'declined') return { ok: true, sent: 0 };
+  const who = getStaffDocs_().filter(function (s) { return s.id === rec.requestedByUid; })[0];
+  if (!who || !isEmail_(who.email) || MailApp.getRemainingDailyQuota() < 1) return { ok: true, sent: 0 };
+  const ok = rec.status === 'approved';
+  const qty = invQty_(rec.qty, rec.unit);
+  const html = invEmailWrap_(
+    '<h2 style="margin:0 0 6px;font-size:20px;color:' + (ok ? '#0f766e' : '#b45309') + '">' +
+      (ok ? invEsc_(qty) + ' of ' + invEsc_(rec.productName) + ' is on the Shelf' : 'Your JT storage request was declined') + '</h2>' +
+    '<p style="margin:0 0 12px;color:#475569">By <strong>' + invEsc_(rec.handledBy || 'Dr Teh') + '</strong>' +
+      (ok && rec.batch ? ' · batch ' + invEsc_(rec.batch) : '') + '</p>' +
+    (ok ? '<p style="margin:0">Take it into your kit from Inventory → Kits.</p>'
+        : (rec.response ? '<p style="margin:0;padding:10px 12px;border-radius:8px;background:#f8fafc">' + invEsc_(rec.response) + '</p>' : '')),
+    'inventory/kits', 'Open my kit');
+  MailApp.sendEmail({
+    to: who.email, name: 'Dermedica Clinic',
+    subject: ok ? rec.productName + ' released to the Shelf' : 'JT storage request declined',
+    htmlBody: html, body: emailHtmlToText_(html),
+  });
+  return { ok: true, sent: 1 };
+}
+
+// Borrowed from a colleague's opened vial → the lender is asked to confirm
+function invNotifyLoan_(id, session) {
+  const cfg = getConfig_();
+  const rec = fsGetDoc_(cfg, 'inv_loans/' + id);
+  if (!rec) return { ok: false, error: 'NOT_FOUND' };
+  if (rec.toUid !== session.uid) return { ok: false, error: 'FORBIDDEN' };
+  if (rec.notified === true) return { ok: true, sent: 0 };
+  const lender = getStaffDocs_().filter(function (s) { return s.id === rec.fromUid; })[0];
+  if (lender && isEmail_(lender.email) && MailApp.getRemainingDailyQuota() >= 1) {
+    const html = invEmailWrap_(
+      '<h2 style="margin:0 0 6px;font-size:20px;color:#0f766e">Please confirm: ' + invEsc_(rec.units) + ' ' + invEsc_(rec.doseUnit) +
+        ' of ' + invEsc_(rec.productName) + '</h2>' +
+      '<p style="margin:0 0 12px;color:#475569"><strong>' + invEsc_(rec.toName) + '</strong> recorded taking them from your opened vial' +
+        (rec.batch ? ' (batch ' + invEsc_(rec.batch) + ')' : '') + '. They\'ve already come off your kit.</p>' +
+      '<p style="margin:0">Confirm it, or dispute it if the amount is wrong.</p>',
+      'inventory/kits', 'Confirm on Kits');
+    MailApp.sendEmail({
+      to: lender.email, name: 'Dermedica Clinic',
+      subject: rec.toName + ' borrowed ' + rec.units + ' ' + rec.doseUnit + ' of ' + rec.productName,
+      htmlBody: html, body: emailHtmlToText_(html),
+    });
+  }
+  fsPatch_(cfg, 'inv_loans/' + id, { notified: true });
+  return { ok: true, sent: lender ? 1 : 0 };
 }

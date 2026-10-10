@@ -13,6 +13,9 @@ const ERR = {
   BAD_EMAIL: "Check the email address.",
   BAD_PHOTO: "The photo must be a web address starting with https://",
   BAD_ROLE: "Choose a role.",
+  ROLE_IN_USE: "Someone still has that role. Change their role first, then remove it.",
+  ROLE_EXISTS: "There's already a role with that name.",
+  BAD_ROLE_NAME: "Role names can use letters, numbers, spaces, & and - (up to 40 characters).",
   FORBIDDEN: "Only Admins can manage staff.",
   NOT_FOUND: "That staff member couldn't be found. Refresh and try again.",
   INVALID_PIN: "The server hasn't been updated yet. In Apps Script, deploy a new version.",
@@ -55,6 +58,7 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
   let catalogue = [];   // [{ key, group, label }]
   let roleTicks = {};   // { Clinician: [...], Reception: [...] }
   let tab = "staff";
+  let dirty = false;    // role changes not saved yet
 
   const groups = () => [...new Set(catalogue.map((p) => p.group))];
   const roleHas = (role, key) => /^admin$/i.test(role) || (roleTicks[role] || []).includes(key);
@@ -100,10 +104,13 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
   /* ---------- Roles & access tab ---------- */
   function renderRoles() {
     if (!catalogue.length) { body.innerHTML = '<div class="tm-empty">Loading…</div>'; return; }
+    const inUse = (r) => list.filter((s) => s.role === r).length;
     body.innerHTML = `
       <div class="st-matrix-wrap">
         <table class="st-matrix">
-          <thead><tr><th>Access</th>${roleNames.map((r) => `<th>${esc(r)}</th>`).join("")}</tr></thead>
+          <thead><tr><th>Access</th>${roleNames.map((r) => /^admin$/i.test(r) ? `<th>${esc(r)}</th>`
+            : `<th><span class="st-rolehead">${esc(r)}<button type="button" class="st-delrole" data-delrole="${esc(r)}"
+                title="${inUse(r) ? `${inUse(r)} staff have this role` : "Remove this role"}" aria-label="Remove ${esc(r)}">×</button></span></th>`).join("")}</tr></thead>
           <tbody>${groups().map((g) => `
             <tr class="st-mgroup"><td colspan="${roleNames.length + 1}">${esc(g)}</td></tr>
             ${catalogue.filter((p) => p.group === g).map((p) => `
@@ -114,25 +121,103 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
         </table>
       </div>
       <div class="st-matrix-foot">
+        <button type="button" class="lh-btn" data-act="add-role">+ Add role</button>
         <small class="muted">Admins always have everything. Exceptions for one person are set in their <strong>Edit</strong> window. Changes reach staff within a minute.</small>
+        ${dirty ? '<span class="st-dirty">Unsaved changes</span>' : ""}
         <button type="button" class="lh-btn is-primary" data-act="save-roles">Save role access</button>
       </div>`;
   }
 
+  // Ticks are remembered as you go, so adding or removing a role doesn't lose them
+  body.addEventListener("change", (e) => {
+    const cb = e.target.closest("[data-rrole]");
+    if (!cb) return;
+    const r = cb.dataset.rrole;
+    const set = new Set(roleTicks[r] || []);
+    if (cb.checked) set.add(cb.dataset.perm); else set.delete(cb.dataset.perm);
+    roleTicks[r] = [...set];
+    if (!dirty) { dirty = true; renderRoles(); }
+  });
+
+  function fillRoleFilter() {
+    const sel = $('[data-role="rolefilter"]');
+    const cur = sel.value;
+    sel.innerHTML = `<option value="">All roles</option>${roleNames.map((r) => `<option>${esc(r)}</option>`).join("")}`;
+    sel.value = roleNames.includes(cur) ? cur : "";
+  }
+
+  function addRole() {
+    const others = roleNames.filter((r) => !/^admin$/i.test(r));
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog";
+    dlg.innerHTML = `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>Add a role</h3><p>For example Nurse or Practice Manager. You can adjust its access after adding it.</p></div>
+        <label class="lh-field"><span class="lh-label">Role name</span><input name="name" maxlength="40" autocomplete="off" /></label>
+        <label class="lh-field"><span class="lh-label">Start with the same access as</span>
+          <select class="fb-select" name="from"><option value="">Nothing (I'll tick it myself)</option>${others.map((r) =>
+            `<option${/^clinician$/i.test(r) ? " selected" : ""}>${esc(r)}</option>`).join("")}</select></label>
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">Add role</button>
+        </div>
+      </form>`;
+    const form = dlg.querySelector("form");
+    const err = dlg.querySelector(".lh-error");
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const name = form.elements.name.value.trim().replace(/\s+/g, " ");
+      const fail = (code) => { err.textContent = ERR[code]; err.hidden = false; };
+      if (!/^[A-Za-z][A-Za-z0-9 &'-]{0,39}$/.test(name)) return fail("BAD_ROLE_NAME");
+      if (roleNames.some((r) => r.toLowerCase() === name.toLowerCase())) return fail("ROLE_EXISTS");
+      const from = form.elements.from.value;
+      roleNames = [...roleNames, name];
+      roleTicks[name] = from ? [...(roleTicks[from] || [])] : [];
+      dirty = true;
+      dlg.close();
+      renderRoles();
+      showToast(`${name} added. Check its access, then press Save role access.`);
+    });
+    dlg.addEventListener("close", () => dlg.remove());
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    form.elements.name.focus();
+  }
+
+  async function removeRole(r) {
+    const n = list.filter((s) => s.role === r).length;
+    if (n) { showToast(`${n} staff member${n === 1 ? " has" : "s have"} the ${r} role. Change their role first.`); return; }
+    const ok = await confirmDialog({
+      title: `Remove the ${r} role?`,
+      message: "It's removed when you press Save role access.",
+      confirmLabel: "Remove role",
+      tone: "warning",
+    });
+    if (!ok) return;
+    roleNames = roleNames.filter((x) => x !== r);
+    delete roleTicks[r];
+    dirty = true;
+    renderRoles();
+  }
+
+  
   async function saveRoles(btn) {
     const out = {};
-    roleNames.filter((r) => !/^admin$/i.test(r)).forEach((r) => {
-      out[r] = [...body.querySelectorAll(`input[data-rrole="${CSS.escape(r)}"]:checked`)].map((x) => x.dataset.perm);
-    });
+    roleNames.filter((r) => !/^admin$/i.test(r)).forEach((r) => { out[r] = [...new Set(roleTicks[r] || [])]; });
     btn.disabled = true;
     btn.textContent = "Saving…";
     try {
-      const res = await api("saveRoles", { roles: out });
+      const res = await api("saveRoles", { roles: out, roleNames });
       roleTicks = res.roles || out;
+      if (Array.isArray(res.roleNames)) roleNames = res.roleNames;
+      dirty = false;
+      fillRoleFilter();
+      renderRoles();
       showToast("Role access saved");
     } catch (ex) {
       showToast(errText(ex));
-    } finally {
       btn.disabled = false;
       btn.textContent = "Save role access";
     }
@@ -167,11 +252,12 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
       const [res, rolesRes] = await Promise.all([api("list"), api("roles")]);
       if (!root.isConnected) return;
       list = res.staff || [];
-      roleNames = rolesRes.roleNames || res.roles || roleNames;
+      if (!dirty) {                     // don't throw away a role that hasn't been saved yet
+        roleNames = rolesRes.roleNames || res.roles || roleNames;
+        roleTicks = rolesRes.roles || {};
+      }
       catalogue = (rolesRes.perms || []).filter((p) => p.key !== "inventory.kit");
-      roleTicks = rolesRes.roles || {};
-      const sel = $('[data-role="rolefilter"]');
-      if (sel.options.length === 1) sel.insertAdjacentHTML("beforeend", roleNames.map((r) => `<option>${esc(r)}</option>`).join(""));
+      fillRoleFilter();
       renderLock(res.locked);
       if (tab !== "audit") render();
     } catch (err) {
@@ -380,6 +466,9 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
     if (pn) { resetPin(find(pn.dataset.pin)); return; }
     const tg = t.closest("[data-toggle]");
     if (tg) { toggle(find(tg.dataset.toggle)); return; }
+    if (t.closest('[data-act="add-role"]')) { addRole(); return; }
+    const dr = t.closest("[data-delrole]");
+    if (dr) { removeRole(dr.dataset.delrole); return; }
     const sr = t.closest('[data-act="save-roles"]');
     if (sr) { saveRoles(sr); return; }
     const tb = t.closest("[data-tab]");
