@@ -165,6 +165,11 @@ export function cleanProduct(p = {}) {
     price: moneyOrNull(p.price),
     tracked: p.tracked === true,
     batchLabel: clip(p.batchLabel, 20) || "Batch",
+    countFreq: ["daily", "weekly", "monthly"].includes(p.countFreq) ? p.countFreq : "never",
+    countDay: p.countFreq === "weekly" ? Math.min(6, Math.max(0, parseInt(p.countDay, 10) || 0))
+      : p.countFreq === "monthly" ? (p.countDay === "last" ? "last" : Math.min(28, Math.max(1, parseInt(p.countDay, 10) || 1)))
+      : null,
+    countWhere: ["shelf", "jt"].includes(p.countWhere) ? p.countWhere : "both",
     reorder: { shelf: intOrNull(r.shelf), jt: intOrNull(r.jt) },
     notes: clip(p.notes, 1000),
     active: p.active !== false,
@@ -1203,4 +1208,92 @@ export async function listMyUsage(days = 31) {
     .map((d) => { const x = d.data() || {}; return { id: d.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [], at: toDate(x.at) }; })
     .filter((u) => u.at && u.at.getTime() > since)
     .sort((a, b) => b.at - a.at);
+}
+
+/* ===================== Opening counts and kit checks ===================== */
+
+export const COUNT_FREQ = { never: "Not counted", daily: "Every day", weekly: "Once a week", monthly: "Once a month" };
+export const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+export function dayKey(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// Is this product due to be counted on this day?
+export function countDue(p, d = new Date()) {
+  if (!p || !p.active) return false;
+  if (p.countFreq === "daily") return true;
+  if (p.countFreq === "weekly") return d.getDay() === Number(p.countDay);
+  if (p.countFreq === "monthly") {
+    const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+    const want = p.countDay === "last" ? last : Math.min(Number(p.countDay) || 1, last);
+    return d.getDate() === want;
+  }
+  return false;
+}
+export const countLocs = (p) => (p.countWhere === "shelf" ? ["shelf"] : p.countWhere === "jt" ? ["jt"] : ["shelf", "jt"]);
+
+export async function listCountsOn(key = dayKey()) {
+  const snap = await getDocs(query(collection(db, "inv_counts"), where("dateKey", "==", key)));
+  return snap.docs.map((d) => {
+    const x = d.data() || {};
+    return { id: d.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [], at: toDate(x.at) };
+  });
+}
+
+// Saves a count. The system's numbers are read fresh at the moment of saving (never shown beforehand).
+// Nothing changes stock: differences are saved as "open" for Reporting to review.
+// opening: lines [{ productId, loc, batch, expiry, counted }]
+// kit:     lines [{ ref (kit id), sealed, open }]
+export async function saveCount({ kind, lines, note = "" }, staff) {
+  const me = uid();
+  const out = [];
+  if (kind === "kit") {
+    for (const l of lines) {
+      const snap = await getDoc(doc(db, "inv_kits", l.ref));
+      const k = snap.exists() ? normaliseKit(snap) : null;
+      if (!k || k.staffUid !== me) continue;
+      const sealed = Math.max(0, parseInt(l.sealed, 10) || 0);
+      const open = round1(Math.max(0, Number(l.open) || 0));
+      const system = round1(kitUnits(k));
+      const counted = round1(sealed * k.dosePer + open);
+      out.push({
+        productId: k.productId, productName: k.productName, loc: "kit", ref: k.id, batch: k.batch, expiry: k.expiry,
+        unit: k.doseUnit, system, counted, variance: round1(counted - system),
+        detail: { sealed, open, systemSealed: k.sealed, systemOpen: k.open },
+        status: Math.abs(counted - system) > 0.001 ? "open" : "ok", note: "",
+      });
+    }
+  } else {
+    const [products, lots] = await Promise.all([listProducts(), listAllLots()]);
+    const pById = new Map(products.map((p) => [p.id, p]));
+    const lotById = new Map(lots.map((l) => [l.id, l]));
+    const agg = new Map();
+    lines.forEach((l) => {
+      const p = pById.get(l.productId);
+      if (!p) return;
+      const loc = l.loc === "jt" ? "jt" : "shelf";
+      const batch = p.tracked ? clip(l.batch, 40) : "";
+      const expiry = p.tracked && KEY_RE.test(l.expiry || "") ? l.expiry : "";
+      const ref = lotId(p.id, loc, batch, expiry);
+      const a = agg.get(ref) || { p, loc, batch, expiry, counted: 0 };
+      a.counted += Math.max(0, parseInt(l.counted, 10) || 0);
+      agg.set(ref, a);
+    });
+    agg.forEach((a, ref) => {
+      const system = a.p.tracked ? ((lotById.get(ref) || {}).qty || 0) : (a.p.stock[a.loc] || 0);
+      out.push({
+        productId: a.p.id, productName: a.p.name, loc: a.loc, ref, batch: a.batch, expiry: a.expiry,
+        batchLabel: a.p.batchLabel || "Batch", unit: a.p.stockUnit, system, counted: a.counted,
+        variance: a.counted - system, status: a.counted !== system ? "open" : "ok", note: "",
+      });
+    });
+  }
+  if (!out.length) throw new Error("Nothing was counted.");
+  const openCount = out.filter((l) => l.status === "open").length;
+  const ref = await addDoc(collection(db, "inv_counts"), {
+    kind: kind === "kit" ? "kit" : "opening", dateKey: dayKey(), lines: out, openCount,
+    note: clip(note, 500), by: who(staff), byUid: me, at: serverTimestamp(),
+  });
+  return { id: ref.id, lines: out, openCount };
 }

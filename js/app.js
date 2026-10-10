@@ -205,6 +205,7 @@ function placeholderPage(title, message, backLink = "") {
 }
 
 const PAGES = {
+  home: (el) => mountMyDashboard(el, { staff: currentStaff }),
   patients: (el) => mountPatientList(el),
   calendar: (el, param) => mountCalendar(el, param),
   forms: (el, param) => mountFormBuilder(el, { isAdmin: can("forms.build"), staff: currentStaff, templateId: param }),

@@ -3,7 +3,7 @@
 import { can } from "./perms.js";
 import {
   listProducts, listAllLots, listKits, listLoans, listReleases, listRequests, listMyUsage, listShortUsage, listPos,
-  isKitProduct, kitUnits, expiryState, plural, unitPlural, lowAt, myUid, reqNumber, REQ_STATUS, REL_STATUS,
+  isKitProduct, kitUnits, expiryState, plural, unitPlural, lowAt, myUid, reqNumber, REQ_STATUS, REL_STATUS,countDue, countLocs, dayKey, listCountsOn,
 } from "./inventory-api.js";
 import { listMySubmissions } from "./form-submissions.js";
 
@@ -52,7 +52,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
   const safe = (p, fallback) => Promise.resolve(p).catch((err) => { console.warn("Dashboard:", err); return fallback; });
 
   async function load() {
-    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs] = await Promise.all([
+      const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday] = await Promise.all([
       safe(listProducts(), []),
       safe(listAllLots(), []),
       safe(listKits({ mine: !canJt }), []),
@@ -64,6 +64,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
       canOrder || canJt ? safe(listShortUsage(), []) : [],
       canOrder ? safe(listPos(), []) : [],
       canOrder ? safe(listRequests({ max: 300 }), []) : [],
+      safe(listCountsOn(dayKey()), []),
     ]);
     if (!root.isConnected) return;
 
@@ -76,6 +77,16 @@ export async function mountMyDashboard(container, { staff } = {}) {
 
     /* ---------- Needs my attention ---------- */
     const att = [];
+    if (can("inventory.count") || canOrder) {
+      const counted = new Set(countsToday.filter((c) => c.kind === "opening").flatMap((c) => c.lines.map((l) => `${l.productId}|${l.loc}`)));
+      const left = products.filter((p) => countDue(p)).flatMap((p) => countLocs(p).map((loc) => `${p.id}|${loc}`)).filter((k) => !counted.has(k)).length;
+      if (left) att.push({ tone: "warn", text: `Opening count: ${left} still to count today`, href: "#/tasks/count", act: "Count now" });
+    }
+    if (canKit) {
+      const checked = new Set(countsToday.filter((c) => c.kind === "kit" && c.byUid === me).flatMap((c) => c.lines.map((l) => l.productId)));
+      const due = products.filter((p) => isKitProduct(p) && countDue(p) && myKits.some((k) => k.productId === p.id) && !checked.has(p.id));
+      if (due.length) att.push({ tone: "warn", text: `Kit check due: ${due.map((p) => p.name).join(", ")}`, href: "#/tasks/count/kit", act: "Check kit" });
+    }
     loans.filter((l) => l.fromUid === me && l.status === "unconfirmed").forEach((l) => att.push({
       tone: "warn", text: `${l.toName} took ${fmt(l.units)} ${l.doseUnit} of ${l.productName} from your opened vial`,
       href: "#/inventory/kits", act: "Confirm",

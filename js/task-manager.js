@@ -14,6 +14,7 @@ import { mountTaskHistory } from "./task-history.js";
 import { showToast } from "./utils.js";
 import { mountOrderRequest } from "./order-request.js";
 import { can } from "./perms.js";
+import { mountStockCount } from "./stock-count.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -52,6 +53,7 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
   if (view === "run" && sub) { mountTaskRunner(container, { taskId: sub, patientId: parts[2] || "", staff }); return; }
   if (view === "print" && sub) { mountPrintTask(container, { templateId: sub, patientId: parts[2] || "", staff }); return; }
   if (view === "order") { mountOrderRequest(container, { param: sub, staff }); return; }
+  if (view === "count") { mountStockCount(container, { param: sub, staff }); return; }
   if (view === "types" && sub) {
     if (isAdmin) { mountTaskEditor(container, { id: sub, staff }); return; }
     container.innerHTML = '<section class="page"><div class="state"><strong>Admins only</strong>Only admins can edit task types.</div></section>';
@@ -102,7 +104,7 @@ function renderCategories(main) {
   main.innerHTML = `
     ${steps(0)}
     <h3 class="tm-h">What kind of task?</h3>
-    <div class="tm-cats">${CATEGORIES.filter((c) => !c.perm || can(c.perm)).map((c) => `
+    <div class="tm-cats">${CATEGORIES.filter((c) => !c.perm || [].concat(c.perm).some((k) => can(k))).map((c) => `
       <a class="tm-cat tone-${c.tone}" href="${c.href || `#/tasks/new/${c.key}`}">
         <span class="tm-cat-icon">${c.icon}</span>
         <span class="tm-cat-title">${esc(c.title)}</span>

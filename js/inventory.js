@@ -306,6 +306,19 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           <label class="lh-field"><span class="lh-label">Barcode (optional)</span><input name="barcode" maxlength="60" value="${val(x.barcode)}" /></label>
           <label class="lh-field"><span class="lh-label">Reorder when Shelf is at or below</span><input name="reShelf" type="number" min="0" step="1" placeholder="No alert" value="${val(x.reorder.shelf)}" /></label>
           <label class="lh-field"><span class="lh-label">Reorder when JT storage is at or below</span><input name="reJt" type="number" min="0" step="1" placeholder="No alert" value="${val(x.reorder.jt)}" /></label>
+          <label class="lh-field"><span class="lh-label">Opening count</span>
+            <select class="fb-select" name="countFreq">
+              ${[["never", "Not counted"], ["daily", "Every day"], ["weekly", "Once a week"], ["monthly", "Once a month"]].map(([v, l]) =>
+                `<option value="${v}"${(x.countFreq || "never") === v ? " selected" : ""}>${l}</option>`).join("")}
+            </select>
+            <small class="fe-note">When Reception counts it in Task Manager → Opening count.</small></label>
+          <label class="lh-field" data-role="countdayrow"><span class="lh-label">On</span>
+            <select class="fb-select" name="countDay"></select></label>
+          <label class="lh-field" data-role="countwhererow"><span class="lh-label">Count in</span>
+            <select class="fb-select" name="countWhere">
+              ${[["both", "Shelf and JT storage"], ["shelf", "Shelf only"], ["jt", "JT storage only"]].map(([v, l]) =>
+                `<option value="${v}"${(x.countWhere || "both") === v ? " selected" : ""}>${l}</option>`).join("")}
+            </select></label>
         </div>
         <p class="inv-hint" data-role="pack"></p>
         <label class="fe-check"><input type="checkbox" name="tracked"${x.tracked ? " checked" : ""}${hasStock ? " disabled" : ""} />
@@ -351,6 +364,24 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     packHint();
     form.addEventListener("input", packHint);
     form.addEventListener("change", packHint);
+    // Opening count: the day picker follows the frequency
+    const ord = (n) => n + (n % 10 === 1 && n !== 11 ? "st" : n % 10 === 2 && n !== 12 ? "nd" : n % 10 === 3 && n !== 13 ? "rd" : "th");
+    let dayFor = "";
+    const syncCount = () => {
+      const f = form.elements;
+      const freq = f.countFreq.value;
+      dlg.querySelector('[data-role="countdayrow"]').style.display = freq === "weekly" || freq === "monthly" ? "" : "none";
+      dlg.querySelector('[data-role="countwhererow"]').style.display = freq === "never" ? "none" : "";
+      if (dayFor === freq) return;
+      const keep = f.countDay.value || (x.countFreq === freq && x.countDay !== null && x.countDay !== undefined ? String(x.countDay) : "");
+      const opts = freq === "weekly" ? [1, 2, 3, 4, 5, 6, 0].map((d) => [String(d), WEEKDAYS[d]])
+        : freq === "monthly" ? [...Array.from({ length: 28 }, (_, i) => [String(i + 1), `The ${ord(i + 1)}`]), ["last", "The last day of the month"]] : [];
+      f.countDay.innerHTML = opts.map(([v, l]) => `<option value="${v}">${l}</option>`).join("");
+      if (opts.some(([v]) => v === keep)) f.countDay.value = keep;
+      dayFor = freq;
+    };
+    syncCount();
+    form.elements.countFreq.addEventListener("change", syncCount);
     dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
 
     form.addEventListener("submit", async (e) => {
@@ -369,6 +400,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           dosePer: f.dosePer.value, doseUnit: f.doseUnit.value,
           usage: f.usage.value,
           batchLabel: f.batchLabel.value,
+          countFreq: f.countFreq.value, countDay: f.countDay.value, countWhere: f.countWhere.value,
           reorder: { shelf: f.reShelf.value, jt: f.reJt.value },
           tracked: hasStock ? x.tracked : f.tracked.checked, active: f.active.checked, notes: f.notes.value,
         }, staff);
