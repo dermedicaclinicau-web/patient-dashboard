@@ -28,6 +28,7 @@ function grouped(list) {
 const PENCIL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
 const BIN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>';
 const PLUS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
+const COPY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 
 export function mountAftercareBank(container, { isAdmin = false, staff = null } = {}) {
   const root = document.createElement("section");
@@ -52,6 +53,7 @@ export function mountAftercareBank(container, { isAdmin = false, staff = null } 
 
   const tools = (a) => isAdmin ? `
     <button type="button" class="ib-tool" data-ac-edit="${esc(a.id)}" title="Edit" aria-label="Edit ${esc(a.title)}">${PENCIL}</button>
+    <button type="button" class="ib-tool" data-ac-dup="${esc(a.id)}" title="Duplicate" aria-label="Duplicate ${esc(a.title)}">${COPY}</button>
     <button type="button" class="ib-tool is-danger" data-ac-del="${esc(a.id)}" title="Delete" aria-label="Delete ${esc(a.title)}">${BIN}</button>` : "";
 
   function render() {
@@ -81,9 +83,10 @@ export function mountAftercareBank(container, { isAdmin = false, staff = null } 
     }
   }
 
-  async function edit(item) {
+  // item: the aftercare to edit, or null for a new one. copyFrom: start a new one from this aftercare.
+  async function edit(item, copyFrom = null) {
     const treatments = [...new Set(all.map((a) => a.treatment).filter(Boolean))].sort((a, b) => a.localeCompare(b, "en-AU"));
-    const savedId = await openAftercareEditor({ item, treatments, staff });
+    const savedId = await openAftercareEditor({ item, copyFrom, treatments, staff });
     if (!savedId) return;
     await load(true);
     // Open the one just saved, so it's easy to check
@@ -117,6 +120,8 @@ export function mountAftercareBank(container, { isAdmin = false, staff = null } 
     if (e.target.closest('[data-act="new"]')) { edit(null); return; }
     const ed = e.target.closest("[data-ac-edit]");
     if (ed) { const a = all.find((x) => x.id === ed.dataset.acEdit); if (a) edit(a); return; }
+    const dup = e.target.closest("[data-ac-dup]");
+    if (dup) { const a = all.find((x) => x.id === dup.dataset.acDup); if (a) edit(null, a); return; }
     const del = e.target.closest("[data-ac-del]");
     if (del) { const a = all.find((x) => x.id === del.dataset.acDel); if (a) remove(a); }
   });
@@ -126,31 +131,38 @@ export function mountAftercareBank(container, { isAdmin = false, staff = null } 
 
 /* ===================== Editing one aftercare ===================== */
 
-// Resolves with the saved aftercare's id, or null if cancelled
-function openAftercareEditor({ item = null, treatments = [], staff = null }) {
+// Resolves with the saved aftercare's id, or null if cancelled.
+// item: edit this aftercare. copyFrom: a new aftercare that starts as a copy of this one.
+function openAftercareEditor({ item = null, copyFrom = null, treatments = [], staff = null }) {
   return new Promise((resolve) => {
+    const src = item || copyFrom;
+    const isCopy = !item && !!copyFrom;
     let result = null;
-    let dirty = false;
+    let dirty = isCopy;      // a copy isn't saved yet, so Cancel asks first
     let busy = false;
+    const title = item ? item.title : isCopy ? `${copyFrom.title} (copy)`.slice(0, 200) : "";
     const dlg = document.createElement("dialog");
     dlg.className = "lh-dialog ac-editor";
     dlg.innerHTML = `
       <form class="lh-form" novalidate>
         <div class="lh-dialog-head">
-          <h3>${item ? "Edit aftercare" : "New aftercare"}</h3>
+          <h3>${item ? "Edit aftercare" : isCopy ? "Duplicate aftercare" : "New aftercare"}</h3>
           <p>${item
             ? "Changes show on every form that uses this aftercare. Patient forms already saved keep the copy they were sent."
-            : "Once saved, you can add it to forms with the Aftercare field."}</p>
+            : isCopy
+              ? `A new aftercare, starting from “${esc(copyFrom.title)}”. Change what you need, then press Add aftercare. The original isn't changed.`
+              : "Once saved, you can add it to forms with the Aftercare field."}</p>
         </div>
         <div class="ac-ed-two">
           <label class="lh-field"><span class="lh-label">Title</span>
-            <input name="title" maxlength="200" autocomplete="off" placeholder="e.g. IPL Hair Removal Aftercare Instructions" value="${esc(item ? item.title : "")}" /></label>
+            <input name="title" maxlength="200" autocomplete="off" placeholder="e.g. IPL Hair Removal Aftercare Instructions" value="${esc(title)}" /></label>
           <label class="lh-field"><span class="lh-label">Associated treatment</span>
-            <input name="treatment" maxlength="120" autocomplete="off" list="ac-treatments" placeholder="e.g. Hair Removal" value="${esc(item ? item.treatment : "")}" />
+            <input name="treatment" maxlength="120" autocomplete="off" list="ac-treatments" placeholder="e.g. Hair Removal" value="${esc(src ? src.treatment : "")}" />
             <datalist id="ac-treatments">${treatments.map((t) => `<option value="${esc(t)}"></option>`).join("")}</datalist></label>
           <label class="lh-field"><span class="lh-label">Link <small>(optional, must start with https://: makes the name clickable in Task Manager emails)</small></span>
             <input name="link" type="url" maxlength="500" autocomplete="off" inputmode="url"
-              placeholder="https://dermedica.com.au/aftercare/ipl-hair-removal" value="${esc(item ? item.link || "" : "")}" /></label>
+              placeholder="https://dermedica.com.au/aftercare/ipl-hair-removal" value="${esc(src ? src.link || "" : "")}" />
+            ${isCopy && copyFrom.link ? '<small class="fe-note">Copied from the original. Change it if this aftercare has its own page.</small>' : ""}</label>
         </div>
         <div class="lh-field"><span class="lh-label">Instructions</span><div data-role="editor"></div></div>
         <p class="lh-error" role="alert" hidden></p>
@@ -164,21 +176,23 @@ function openAftercareEditor({ item = null, treatments = [], staff = null }) {
     const form = dlg.querySelector("form");
     const errEl = dlg.querySelector(".lh-error");
     const saveBtn = dlg.querySelector('[data-role="save"]');
+    const saveLabel = item ? "Save changes" : "Add aftercare";
     const showErr = (m) => { errEl.textContent = m || ""; errEl.hidden = !m; };
     const editor = createRichEditor(dlg.querySelector('[data-role="editor"]'), {
       button: false,
       onInput: () => { dirty = true; showErr(""); },
     });
-    editor.setHtml(item && item.html ? item.html : "<p><br></p>");
+    editor.setHtml(src && src.html ? src.html : "<p><br></p>");
     form.addEventListener("input", (e) => { if (!e.target.closest(".re")) { dirty = true; showErr(""); } });
 
     async function close() {
       if (busy) return;
       if (dirty) {
         const ok = await confirmDialog({
-          title: "Discard your changes?",
-          message: "The changes to this aftercare haven't been saved.",
-          confirmLabel: "Discard changes",
+          title: isCopy ? "Discard this copy?" : "Discard your changes?",
+          message: isCopy ? "The copy hasn't been added yet. The original aftercare isn't affected."
+            : "The changes to this aftercare haven't been saved.",
+          confirmLabel: isCopy ? "Discard copy" : "Discard changes",
           tone: "warning",
         });
         if (!ok) return;
@@ -191,6 +205,11 @@ function openAftercareEditor({ item = null, treatments = [], staff = null }) {
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       if (busy) return;
+      if (isCopy && form.elements.title.value.trim().toLowerCase() === copyFrom.title.trim().toLowerCase()) {
+        showErr("Give the copy its own title, so the two can be told apart.");
+        form.elements.title.focus();
+        return;
+      }
       busy = true;
       saveBtn.disabled = true;
       saveBtn.textContent = "Saving…";
@@ -205,12 +224,12 @@ function openAftercareEditor({ item = null, treatments = [], staff = null }) {
         busy = false;
         dirty = false;
         dlg.close();
-        showToast(item ? "Aftercare saved" : "Aftercare added");
+        showToast(item ? "Aftercare saved" : isCopy ? "Copy added" : "Aftercare added");
       } catch (err) {
         console.error("Save aftercare failed:", err);
         busy = false;
         saveBtn.disabled = false;
-        saveBtn.textContent = item ? "Save changes" : "Add aftercare";
+        saveBtn.textContent = saveLabel;
         showErr(err.code === "permission-denied"
           ? "The save was blocked. You need Form Builder access, and the Aftercare-instruction rule (with the Link field) must be published in Firebase."
           : err.code ? "Couldn't save. Check your connection and try again." : err.message);
@@ -220,6 +239,7 @@ function openAftercareEditor({ item = null, treatments = [], staff = null }) {
     dlg.addEventListener("close", () => { dlg.remove(); resolve(result); });
     dlg.showModal();
     form.elements.title.focus();
+    if (isCopy) form.elements.title.select(); // ready to type the new title
   });
 }
 
