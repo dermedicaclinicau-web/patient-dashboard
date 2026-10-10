@@ -278,27 +278,30 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
             <option value="">No supplier yet</option>${st.suppliers.map((s) =>
               `<option value="${esc(s.id)}"${x.supplierId === s.id ? " selected" : ""}>${esc(s.name)}</option>`).join("")}</select></label>
           <label class="lh-field"><span class="lh-label">Supplier's product code (optional)</span><input name="supplierCode" maxlength="60" value="${val(x.supplierCode)}" /></label>
-          <label class="lh-field"><span class="lh-label">Counted on the shelf as</span>
-            <input name="stockUnit" maxlength="30" placeholder="e.g. vial, syringe, tube, item" value="${val(x.stockUnit)}" />
-            <small class="fe-note">What you pick up and count. For Xeomin: vial.</small></label>
-          <label class="lh-field"><span class="lh-label">Ordered from the supplier as</span>
-            <input name="orderUnit" maxlength="30" placeholder="e.g. box, pack, or vial" value="${val(x.orderUnit)}" />
-            <small class="fe-note">Can be the same, e.g. vial.</small></label>
-          <label class="lh-field"><span class="lh-label" data-role="packlbl">How many in each</span>
-            <input name="packSize" type="number" min="1" step="1" value="${val(x.packSize)}" /></label>
-          <div class="lh-field inv-span"><span class="lh-label">Dose in each <span data-role="doseitem">item</span> (optional, for injectables)</span>
+
+          <label class="lh-field"><span class="lh-label">Given to staff as</span>
+            <input name="stockUnit" maxlength="30" placeholder="e.g. vial, syringe, needle" value="${val(x.stockUnit)}" />
+            <small class="fe-note">What someone takes off the Shelf. Xeomin: vial. Belotero: syringe.</small></label>
+          <div class="lh-field inv-dose"><span class="lh-label" data-role="doselbl">Amount in each (injectables)</span>
             <div class="inv-dose-row">
-              <input name="dosePer" type="number" min="0" step="any" placeholder="e.g. 100" value="${val(x.dosePer)}" aria-label="Dose amount" />
-              <input name="doseUnit" maxlength="20" placeholder="units" value="${val(x.doseUnit)}" aria-label="Dose measured in" />
+              <input name="dosePer" type="number" min="0" step="any" placeholder="e.g. 100" value="${val(x.dosePer)}" aria-label="Amount" />
+              <input name="doseUnit" maxlength="20" placeholder="units / mL" value="${val(x.doseUnit)}" aria-label="Measured in" />
             </div>
-            <small class="fe-note">Stock is still counted in whole items. The dose shows alongside, e.g. 3 vials (300 units), and is used later when recording what was used in a treatment.</small></div>
-          <label class="lh-field"><span class="lh-label">How it's used in treatments</span>
+            <small class="fe-note">What's given to patients. Xeomin: 100 units. Belotero: 1 mL. Leave empty for needles, gauze…</small></div>
+          <label class="lh-field"><span class="lh-label">Bought from the supplier as</span>
+            <input name="orderUnit" maxlength="30" placeholder="Same, or e.g. box" value="${val(x.orderUnit)}" />
+            <small class="fe-note">Usually the same (vial). Type box or pack if they come boxed.</small></label>
+          <label class="lh-field" data-role="packrow"><span class="lh-label" data-role="packlbl">How many in each box</span>
+            <input name="packSize" type="number" min="1" step="1" value="${val(x.packSize)}" /></label>
+
+          <label class="lh-field inv-span"><span class="lh-label">How it's used in treatments</span>
             <select class="fb-select" name="usage">
               <option value="storage"${x.usage !== "kit" ? " selected" : ""}>From the Shelf, one per patient (e.g. Belotero, needles)</option>
               <option value="kit"${x.usage === "kit" ? " selected" : ""}>Carried in injectors' kits, shared across patients (e.g. Xeomin)</option>
             </select>
-            <small class="fe-note">From the Shelf with a dose: staff record the dose given, whole items come off stock, and any leftover is logged as discarded. Kit products need a dose and stay in the opened vial for the next patient.</small></label>
-          <label class="lh-field"><span class="lh-label">Cost per order unit, $ (optional)</span><input name="cost" type="number" min="0" step="0.01" value="${val(x.cost)}" /></label>
+            <small class="fe-note">One per patient: the dose given is recorded and any leftover is logged as discarded. Kits: the clinician takes the vial into their own kit and uses it across patients until it's empty.</small></label>
+
+          <label class="lh-field"><span class="lh-label" data-role="costlbl">Cost per vial, $ (optional)</span><input name="cost" type="number" min="0" step="0.01" value="${val(x.cost)}" /></label>
           <label class="lh-field"><span class="lh-label">Retail price, $ (optional)</span><input name="price" type="number" min="0" step="0.01" value="${val(x.price)}" /></label>
           <label class="lh-field"><span class="lh-label">Barcode (optional)</span><input name="barcode" maxlength="60" value="${val(x.barcode)}" /></label>
           <label class="lh-field"><span class="lh-label">Reorder when Shelf is at or below</span><input name="reShelf" type="number" min="0" step="1" placeholder="No alert" value="${val(x.reorder.shelf)}" /></label>
@@ -306,7 +309,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         </div>
         <p class="inv-hint" data-role="pack"></p>
         <label class="fe-check"><input type="checkbox" name="tracked"${x.tracked ? " checked" : ""}${hasStock ? " disabled" : ""} />
-          Needs a batch number and expiry date (e.g. Xeomin)</label>
+          Needs a batch / lot number and expiry date (e.g. Xeomin, Belotero)</label>
         ${hasStock ? '<small class="fe-note">This can only be changed while there is no stock. Count it to zero first.</small>' : ""}
         <label class="lh-field"><span class="lh-label">What the packaging calls it</span>
           <input name="batchLabel" maxlength="20" list="inv-batch-names" placeholder="Batch" value="${val(x.batchLabel && x.batchLabel !== "Batch" ? x.batchLabel : "")}" />
@@ -322,21 +325,34 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       </form>`);
     const form = dlg.querySelector("form");
     const err = dlg.querySelector(".lh-error");
+
+    // Keeps the labels and the summary line in plain words as things are typed
     const packHint = () => {
       const f = form.elements;
-      const n = Math.max(1, parseInt(f.packSize.value, 10) || 1);
       const unit = f.stockUnit.value.trim() || "item";
-      const ou = f.orderUnit.value.trim() || "box";
+      const ou = f.orderUnit.value.trim() || unit;
+      const same = ou.toLowerCase() === unit.toLowerCase();
+      // Bought the same way it's given out (e.g. vial and vial): no pack size needed
+      dlg.querySelector('[data-role="packrow"]').style.display = same ? "none" : "";
+      if (same) f.packSize.value = 1;
+      const n = Math.max(1, parseInt(f.packSize.value, 10) || 1);
       const dp = Number(f.dosePer.value);
       const du = f.doseUnit.value.trim() || "units";
+      const kit = f.usage.value === "kit";
       dlg.querySelector('[data-role="packlbl"]').textContent = `How many ${unitPlural(unit)} in each ${ou}`;
-      dlg.querySelector('[data-role="doseitem"]').textContent = unit;
-      const dose = dp > 0 ? ` (${+(n * dp).toFixed(2)} ${du})` : "";
-      dlg.querySelector('[data-role="pack"]').textContent = `Receiving 1 ${ou} adds ${plural(n, unit)}${dose} to stock.`;
+      dlg.querySelector('[data-role="doselbl"]').textContent = `Amount in each ${unit} (injectables)`;
+      dlg.querySelector('[data-role="costlbl"]').textContent = `Cost per ${ou}, $ (optional)`;
+      const each = dp > 0 ? ` (${+dp.toFixed(2)} ${du})` : "";
+      dlg.querySelector('[data-role="pack"]').textContent =
+        `Staff take 1 ${unit}${each} off the Shelf${kit ? " into their own kit, and use it across patients until it's empty" : ""}. ` +
+        (same ? `Each ${ou} received adds 1 ${unit} to stock.` : `Each ${ou} received adds ${plural(n, unit)} to stock.`) +
+        (kit && !(dp > 0) ? ` Fill in the amount in each ${unit} (e.g. 100 units).` : "");
     };
     packHint();
     form.addEventListener("input", packHint);
+    form.addEventListener("change", packHint);
     dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const f = form.elements;
@@ -346,7 +362,9 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       try {
         await saveProduct(p ? p.id : "", {
           name: f.name.value, category: f.category.value, brand: f.brand.value, supplierId: f.supplierId.value,
-          supplierCode: f.supplierCode.value, stockUnit: f.stockUnit.value, orderUnit: f.orderUnit.value,
+          supplierCode: f.supplierCode.value,
+          stockUnit: f.stockUnit.value,
+          orderUnit: f.orderUnit.value.trim() || f.stockUnit.value,
           packSize: f.packSize.value, cost: f.cost.value, price: f.price.value, barcode: f.barcode.value,
           dosePer: f.dosePer.value, doseUnit: f.doseUnit.value,
           usage: f.usage.value,
@@ -366,7 +384,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     });
     form.elements.name.focus();
   }
-
+  
   /* ---------- Supplier editor ---------- */
   function editSupplier(s) {
     const isNew = !s;
