@@ -200,12 +200,13 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     }
     set("Today", todayLong()); set("Staff name", (staff && staff.name) || "");
     set("Clinic phone", c.phone); set("Clinic email", c.email); set("Clinic address", c.address);
-    task.fields.forEach((f) => { if (f.label.trim()) set(f.label.trim(), answerText(f)); });
     set("Upcoming appointments", st.smart.appointments);
     set("Treatment plan", st.smart.plan);
     set("Aftercare", ""); // only filled in when emailing aftercare from a form
     const tx = task.fields.find((f) => TASK_CHOICE_TYPES.includes(f.type) && f.source === "treatments");
     if (tx) set("Treatment info", formatChoice({ ...tx, display: "links" }, chosen(tx)));
+    // Your own fields last, so a field called "Aftercare" (or "Treatment plan") is never blanked out
+    task.fields.forEach((f) => { if (f.label.trim()) set(f.label.trim(), answerText(f)); });
     return m;
   }
 
@@ -396,7 +397,8 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
       <div class="tr-opts" data-opts="${id}">${opts.map((o) => `
         <div class="tr-opt" data-find="${esc(o.label.toLowerCase())}">
           <label class="fe-check"><input type="${multi ? "checkbox" : "radio"}" name="ans-${id}" data-ans="${id}" value="${esc(o.label)}"${picked.has(o.label) ? " checked" : ""} /> ${esc(o.label)}</label>
-          ${o.link ? `<a class="tr-link" href="${esc(o.link)}" target="_blank" rel="noopener" title="Open the information page" aria-label="Open the page for ${esc(o.label)}">${I.ext}</a>` : ""}
+          ${o.link ? `<a class="tr-link" href="${esc(o.link)}" target="_blank" rel="noopener" title="Open the information page" aria-label="Open the page for ${esc(o.label)}">${I.ext}</a>`
+            : f.display === "links" ? '<small class="tr-nolink" title="Add a link in the Aftercare Bank to make it clickable">No link</small>' : ""}
         </div>`).join("") || '<p class="tb-none">No choices.</p>'}</div></div>`;
   }
 

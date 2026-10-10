@@ -3800,3 +3800,6 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
   .pt-list-head { display: none; }
 }
 @media (max-width: 560px) { .pt-view { margin-left: 0; } }
+
+.tr-nolink { flex-shrink: 0; padding: .1rem .45rem; border-radius: 999px; background: #fef3c7; color: #92400e;
+  font-size: .7rem; font-weight: 600; white-space: nowrap; }
