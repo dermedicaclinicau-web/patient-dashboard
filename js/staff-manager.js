@@ -59,6 +59,7 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
   let roleTicks = {};   // { Clinician: [...], Reception: [...] }
   let tab = "staff";
   let dirty = false;    // role changes not saved yet
+  let savedNames = roleNames;   // roles the server knows (used in the Edit staff window)
 
   const groups = () => [...new Set(catalogue.map((p) => p.group))];
   const roleHas = (role, key) => /^admin$/i.test(role) || (roleTicks[role] || []).includes(key);
@@ -136,7 +137,11 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
     const set = new Set(roleTicks[r] || []);
     if (cb.checked) set.add(cb.dataset.perm); else set.delete(cb.dataset.perm);
     roleTicks[r] = [...set];
-    if (!dirty) { dirty = true; renderRoles(); }
+      if (!dirty) {                     // don't throw away a role that hasn't been saved yet
+        roleNames = rolesRes.roleNames || res.roles || roleNames;
+        roleTicks = rolesRes.roles || {};
+        savedNames = roleNames;
+      }
   });
 
   function fillRoleFilter() {
@@ -213,6 +218,7 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
       roleTicks = res.roles || out;
       if (Array.isArray(res.roleNames)) roleNames = res.roleNames;
       dirty = false;
+      savedNames = roleNames;
       fillRoleFilter();
       renderRoles();
       showToast("Role access saved");
@@ -327,6 +333,16 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
       <p class="fe-note" data-role="adminnote" hidden>Admins can do everything, so there are no exceptions to set.</p>`;
   }
 
+  // Never falls back to Admin by accident: existing staff keep their role (matched ignoring case),
+  // new staff start as Clinician (or the first non-Admin role). Unknown roles must be chosen.
+  function roleOptions(s) {
+    const names = savedNames;
+    const find = (v) => names.find((r) => r.toLowerCase() === String(v || "").toLowerCase()) || "";
+    const cur = s ? find(s.role) : (find("Clinician") || names.find((r) => !/^admin$/i.test(r)) || names[0]);
+    return (cur ? "" : `<option value="" selected disabled>Choose a role${s && s.role ? ` (was ${esc(s.role)})` : ""}</option>`)
+      + names.map((r) => `<option${r === cur ? " selected" : ""}>${esc(r)}</option>`).join("");
+  }
+
   function editStaff(s) {
     const isNew = !s;
     const dlg = document.createElement("dialog");
@@ -337,7 +353,7 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
           <p>${isNew ? "They can log in as soon as you save." : "Changes reach them within a minute."}</p></div>
         <label class="lh-field"><span class="lh-label">Name</span><input name="name" maxlength="120" value="${esc(s ? s.name : "")}" /></label>
         <label class="lh-field"><span class="lh-label">Role</span>
-          <select class="fb-select" name="role">${roleNames.map((r) => `<option${s && s.role === r ? " selected" : ""}>${esc(r)}</option>`).join("")}</select></label>
+          <select class="fb-select" name="role">${roleOptions(s)}</select></label>
         <label class="fe-check st-injector"><input type="checkbox" name="injector"${s && s.injector ? " checked" : ""} />
           Injector: carries their own kit (e.g. Xeomin)</label>
         <small class="fe-note">Gives them My kit, the kit check, and kit products in treatment records. Works with any role, including Admin.</small>
