@@ -3485,3 +3485,31 @@ a.inv-flag:hover { text-decoration: underline; }
 @media (max-width: 1100px) { .po-grid { grid-template-columns: 1fr; } }
 
 .inv-dose-row { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: .5rem; }
+
+/* ===== Edit product dialog: wider, three columns ===== */
+dialog:has([name="dosePer"]) {
+  width: min(1040px, 94vw);
+  max-width: none;
+}
+dialog:has([name="dosePer"]) :has(> .lh-field > [name="packSize"]) {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .85rem 1rem;
+  align-items: start;
+}
+/* Anything that isn't a field (hint, tickboxes, notes) runs full width */
+dialog:has([name="dosePer"]) :has(> .lh-field > [name="packSize"]) > * { grid-column: 1 / -1; }
+dialog:has([name="dosePer"]) :has(> .lh-field > [name="packSize"]) > .lh-field { grid-column: auto; }
+dialog:has([name="dosePer"]) :has(> .lh-field > [name="packSize"]) > .lh-field:has(> [name="name"]) { grid-column: span 2; }
+dialog:has([name="dosePer"]) :has(> .lh-field > [name="packSize"]) > .inv-span,
+dialog:has([name="dosePer"]) :has(> .lh-field > [name="packSize"]) > .lh-field:has(> [name="notes"]) { grid-column: 1 / -1; }
+
+/* Dose: two compact boxes instead of one stretched one */
+dialog:has([name="dosePer"]) .inv-dose-row { grid-template-columns: 140px 220px; }
+
+/* Phones and narrow iPad split view: back to one column */
+@media (max-width: 760px) {
+  dialog:has([name="dosePer"]) :has(> .lh-field > [name="packSize"]) { grid-template-columns: minmax(0, 1fr); }
+  dialog:has([name="dosePer"]) :has(> .lh-field > [name="packSize"]) > * { grid-column: 1 / -1 !important; }
+  dialog:has([name="dosePer"]) .inv-dose-row { grid-template-columns: 120px minmax(0, 1fr); }
+}
