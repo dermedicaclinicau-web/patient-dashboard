@@ -41,6 +41,8 @@ const I = {
 const CAT_LABEL = { patient: "To Patient", staff: "To Staff" };
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const newId = () => "t_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+const PATIENT_TOKENS = ["Patient name", "Patient first name", "Patient mobile", "Patient email"];
+const PATIENT_RE = /\{\s*(patient name|patient first name|patient mobile|patient email|upcoming appointments|treatment plan)\s*\}/gi;
 
 function blankField(type) {
   const f = { id: newId(), type, label: "", required: false, help: "", placeholder: "" };
@@ -304,6 +306,10 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   const sourceRequested = new Set();
   let dirty = false, saving = false, saveTimer = null;
   let lastText = null; // the subject box, or null for the message editor
+  let lastPatientTokens = 0;
+  function patientTokens() {
+    return (`${task.subject || ""} ${task.body || ""}`.match(PATIENT_RE) || []).length;
+  }
   let closedDays = [];
   let schedState = null; // the scheduler's record for this task (count, last send, problems)
   task.schedule = cleanSchedule(task.schedule);
@@ -361,12 +367,21 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     logo: () => (letterhead && letterhead.logo) || "",
   });
   editor.setHtml(task.body);
+  lastPatientTokens = patientTokens();
 
   /* ---------- Saving ---------- */
   function setState(s) {
     stateEl.textContent = s === "saving" ? "Saving…" : s === "dirty" ? "Unsaved changes" : s === "error" ? "Couldn't save. Retrying…" : "All changes saved";
   }
   function changed() {
+    // Adding a patient blank to a staff task turns on "This is about a patient"
+    const pt = patientTokens();
+    if (task.category === "staff" && !task.recipients.aboutPatient && pt > lastPatientTokens) {
+      task.recipients.aboutPatient = true;
+      renderForm();
+      showToast("Turned on “This is about a patient”. Staff will choose the patient when they run it.");
+    }
+    lastPatientTokens = pt;
     dirty = true;
     setState("dirty");
     msgEl.textContent = "";
@@ -375,7 +390,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(flush, 800);
   }
-  async function flush() {
+    async function flush() {
     clearTimeout(saveTimer);
     if (!dirty || saving) return;
     saving = true;
@@ -598,9 +613,17 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
       </section>`;
   }
 
-  function renderChips() {
+    function renderChips() {
     const box = $('[data-role="chips"]');
-    box.innerHTML = tokenGroups(task, tokenOpts()).map((g) => `
+    const groups = tokenGroups(task, tokenOpts());
+    // Staff tasks: always offer the patient blanks. Using one turns on "This is about a patient".
+    if (task.category === "staff" && !task.recipients.aboutPatient) {
+      groups.splice(1, 0, {
+        title: "Patient it's about (staff choose the patient when running)",
+        tokens: PATIENT_TOKENS.map((name) => ({ name, kind: "", hint: "Using this turns on “This is about a patient”" })),
+      });
+    }
+    box.innerHTML = groups.map((g) => `
       <div class="tb-chipgroup"><span>${esc(g.title)}</span>
         <div class="fe-chiprow">${g.tokens.map((t) => `<button type="button" class="fe-ins${
           t.kind === "smart" ? " is-smart" : t.kind === "field" ? " is-field" : ""}" data-token="${esc(t.name)}"${

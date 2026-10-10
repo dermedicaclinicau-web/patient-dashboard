@@ -155,12 +155,24 @@ export function taskProblems(task) {
   if (!richText(task.body)) out.push("Write the message.");
 
   const known = new Set(tokenGroups(task).flatMap((g) => g.tokens.map((t) => t.name.toLowerCase())));
+  const about = !!(task.recipients && task.recipients.aboutPatient);
+  const STAFF_SWAP = { email: "Patient email", mobile: "Patient mobile" }; // patient-task blanks with a staff-task version
   [...tokensIn(task.subject), ...tokensIn(task.body)].forEach((n) => {
-    if (known.has(n.toLowerCase())) return;
-    if (n.toLowerCase() === "treatment info") out.push("Add a Treatments field (connected to Treatment information) to use {Treatment info}.");
-    else if (BUILT_IN.includes(n.toLowerCase()) && task.category === "staff") {
+    const lower = n.toLowerCase();
+    if (known.has(lower)) return;
+    if (lower === "treatment info") {
+      out.push("Add a Treatments field (connected to Treatment information) to use {Treatment info}.");
+    } else if (task.category === "staff" && STAFF_SWAP[lower]) {
+      out.push(`{${n}} only works in To Patient tasks. For the patient's details use {${STAFF_SWAP[lower]}}${about ? "" : " (and tick “This is about a patient”)"}.`);
+    } else if (task.category === "staff" && lower === "date of birth") {
+      out.push("{Date of birth} only works in To Patient tasks. Remove it from this staff task.");
+    } else if (task.category === "staff" && lower === "aftercare") {
+      out.push("{Aftercare} only works in To Patient tasks. Add an Aftercare field in step 3 and use {Aftercare instructions}.");
+    } else if (task.category === "staff" && !about && BUILT_IN.includes(lower)) {
       out.push(`{${n}} needs a patient. Tick “This is about a patient” in step 2, or remove it.`);
-    } else out.push(`The message uses {${n}}, which isn't a blank this task has.`);
+    } else {
+      out.push(`The message uses {${n}}, which isn't a blank this task has.`);
+    }
   });
   return [...new Set(out)];
 }
