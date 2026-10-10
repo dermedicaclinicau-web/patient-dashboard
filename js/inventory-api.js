@@ -189,7 +189,10 @@ export async function listProducts() {
 export async function saveProduct(id, data, staff) {
   const clean = cleanProduct(data);
   if (!clean.name) throw new Error("Give the product a name.");
-  if (clean.usage === "kit" && !clean.dosePer) throw new Error("Kit products need a dose, e.g. 100 units in each vial.");
+  if (clean.usage === "kit" && !clean.dosePer) {
+    throw new Error(`Kit products are counted in whole ${clean.stockUnit === "item" ? "vials" : unitPlural(clean.stockUnit)} and used in units. ` +
+      `Set "Counted on the shelf as" to vial, "How many in each" to 1, and "Dose in each vial" to the units per vial (e.g. 100 units).`);
+  }
   if (id) {
     await updateDoc(doc(db, "inv_products", id), { ...clean, ...stamp(staff) });
     return id;
