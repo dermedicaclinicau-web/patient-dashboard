@@ -1298,36 +1298,6 @@ export async function saveCount({ kind, lines, note = "" }, staff) {
   return { id: ref.id, lines: out, openCount };
 }
 
-/* ===================== Opening counts and kit checks ===================== */
-
-export const COUNT_FREQ = { never: "Not counted", daily: "Every day", weekly: "Once a week", monthly: "Once a month" };
-export const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-
-export function dayKey(d = new Date()) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-// Is this product due to be counted on this day?
-export function countDue(p, d = new Date()) {
-  if (!p || !p.active) return false;
-  if (p.countFreq === "daily") return true;
-  if (p.countFreq === "weekly") return d.getDay() === Number(p.countDay);
-  if (p.countFreq === "monthly") {
-    const last = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
-    const want = p.countDay === "last" ? last : Math.min(Number(p.countDay) || 1, last);
-    return d.getDate() === want;
-  }
-  return false;
-}
-export const countLocs = (p) => (p.countWhere === "shelf" ? ["shelf"] : p.countWhere === "jt" ? ["jt"] : ["shelf", "jt"]);
-
-export async function listCountsOn(key = dayKey()) {
-  const snap = await getDocs(query(collection(db, "inv_counts"), where("dateKey", "==", key)));
-  return snap.docs.map((d) => {
-    const x = d.data() || {};
-    return { id: d.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [], at: toDate(x.at) };
-  });
-}
 
 // One counted kit lot: unopened + units left in the opened one, against the system's numbers right now
 async function countKitLine(l, ownOnly) {
