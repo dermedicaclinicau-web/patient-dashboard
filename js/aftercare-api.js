@@ -45,6 +45,7 @@ function toAftercare(d) {
     title: String(x["Aftercare Title"] || "").trim(),
     treatment: String(x["Associated Treatment"] || "").trim(),
     html: quillToHtml(x["Instruction"]),
+    link: /^https?:\/\/\S+$/i.test(String(x["Link"] || "").trim()) ? String(x["Link"]).trim() : "",
     updated: String(x["Updated As of"] || x["Created TimeStamp"] || ""),
   };
 }
@@ -71,6 +72,7 @@ export function aftercarePanel(a, { control = "" } = {}) {
       <div class="ac-head">
         <button type="button" class="ac-toggle" aria-expanded="false">${CHEV}<span class="ac-title">${esc(a.title)}</span>${
           a.treatment ? `<small>${esc(a.treatment)}</small>` : ""}</button>
+        ${a.link ? `<a class="ac-link" href="${esc(a.link)}" target="_blank" rel="noopener" title="${esc(a.link)}">Link ↗</a>` : ""}
         ${control}
       </div>
       <div class="ac-body fe-rich" hidden>${a.html || '<p class="fe-help">No instructions written yet.</p>'}</div>
@@ -99,15 +101,21 @@ export function bindPanels(el) {
 export function forgetAftercare() { cache = null; }
 
 // id: an existing aftercare to update, or "" for a new one. Returns the id.
-export async function saveAftercare(id, { title, treatment, html }, staff) {
+// id: an existing aftercare to update, or "" for a new one. Returns the id.
+export async function saveAftercare(id, { title, treatment, html, link }, staff) {
   const t = String(title || "").replace(/\s+/g, " ").trim().slice(0, 200);
   const tr = String(treatment || "").replace(/\s+/g, " ").trim().slice(0, 120);
   const body = cleanRichHtml(html).slice(0, 100000);
+  const ln = String(link || "").trim().slice(0, 500);
   if (!t) throw new Error("Give the aftercare a title.");
   if (!body.replace(/<[^>]+>/g, "").replace(/&nbsp;/g, " ").trim()) throw new Error("Write the instructions.");
+  if (ln && !/^https?:\/\/\S+$/i.test(ln)) throw new Error("The link should start with https://");
   const now = new Date().toISOString();
   const who = (staff && staff.name) || "";
-  const data = { "Aftercare Title": t, "Associated Treatment": tr, "Instruction": body, "Updated As of": now, "Updated By": who };
+  const data = {
+    "Aftercare Title": t, "Associated Treatment": tr, "Instruction": body, "Link": ln,
+    "Updated As of": now, "Updated By": who,
+  };
   let outId = id;
   if (id) {
     await updateDoc(doc(db, COL, id), data);

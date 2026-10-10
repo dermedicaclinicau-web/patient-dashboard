@@ -5,7 +5,7 @@ import {
 } from "./task-types.js";
 import {
   tokenGroups, taskProblems, fillTemplate, sampleValues, subjectHtml, clinicDetails,
-  fillTemplateHtml, emailShell, EMAIL_BACKGROUNDS, EMAIL_ACCENTS,
+  fillTemplateHtml, emailShell, EMAIL_BACKGROUNDS, EMAIL_ACCENTS, formatChoice,
 } from "./task-tokens.js";
 import { SOURCES, loadSource } from "./task-sources.js";
 import { createRichEditor } from "./rich-editor.js";
@@ -54,6 +54,11 @@ function blankField(type) {
 function treatmentsField() {
   return { ...blankField("checkboxes"), label: "Treatments", required: true, source: "treatments", display: "links",
     options: [], help: "Tick the treatments to send information about." };
+}
+
+function aftercareField() {
+  return { ...blankField("checkboxes"), label: "Aftercare instructions", source: "aftercare", display: "links",
+    options: [], help: "Tick the aftercare instructions to send." };
 }
 
 function editedAgo(date) {
@@ -501,7 +506,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
         const linked = items.filter((x) => x.link).length;
         body = `<div class="tb-info">
           <strong>${items.length} choice${items.length === 1 ? "" : "s"}</strong> from ${esc(SOURCES[src].name)}${
-            src === "treatments" ? `, ${linked} with information links` : ""}. This list stays up to date automatically.
+            src === "treatments" || src === "aftercare" ? `, ${linked} with links` : ""}. This list stays up to date automatically.
           <div class="tb-src-sample">${items.slice(0, 6).map((x) => `<span>${esc(x.label)}${x.link ? ` ${I.link}` : ""}</span>`).join("")}${
             items.length > 6 ? `<span>+${items.length - 6} more</span>` : ""}</div></div>`;
       }
@@ -533,12 +538,14 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
         ${choice ? choiceHtml(f, i) : ""}
         <input class="fe-input tb-help" data-fi="${i}" data-fk="help" maxlength="300" placeholder="Help text for staff (optional)" value="${esc(f.help)}" />
         ${task.category === "staff" && task.schedule.enabled ? `<input class="fe-input tb-help" data-fi="${i}" data-fk="default" maxlength="500"
-          placeholder="Answer used for automatic sends${f.required ? " (required)" : ""}" value="${esc(f.default || "")}" />` : ""}
+          placeholder="Answer used for automatic sends${TASK_CHOICE_TYPES.includes(f.type) ? " (choice names, separated by commas)" : ""}${
+            f.required ? " (required)" : ""}" value="${esc(f.default || "")}" />` : ""}
         </div>`;
   }
 
   function fieldsHtml() {
     const hasTx = task.fields.some((f) => f.source === "treatments");
+    const hasAc = task.fields.some((f) => f.source === "aftercare");
     return `
       <section class="tb-card">
         <h4><span class="tb-num">3</span>Fields to fill in when running <small>(optional)</small></h4>
@@ -547,6 +554,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
         <div class="tb-add">
           ${Object.entries(TASK_FIELD_TYPES).map(([k, l]) => `<button type="button" class="fe-ins" data-addfield="${k}">+ ${esc(l)}</button>`).join("")}
           ${hasTx ? "" : '<button type="button" class="fe-ins is-smart" data-addfield="treatments">+ Treatments (from Treatment information)</button>'}
+          ${hasAc ? "" : '<button type="button" class="fe-ins is-smart" data-addfield="aftercare">+ Aftercare (from Aftercare Bank)</button>'}
         </div>
       </section>`;
   }
@@ -702,10 +710,23 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     set("First name", "{First name}"); set("Full name", "{Full name}"); set("Today", "{Today}");
     set("Staff name", "The Dermedica team");
     set("Clinic phone", c.phone); set("Clinic email", c.email); set("Clinic address", c.address);
-    ["Upcoming appointments", "Treatment plan", "Treatment info", "Aftercare", "Treatments"].forEach((k) => set(k, ""));
-    task.fields.forEach((f) => { if (String(f.label || "").trim()) set(f.label.trim(), f.default || ""); });
+    ["Upcoming appointments", "Treatment plan", "Treatment info", "Aftercare"].forEach((k) => set(k, ""));
+    task.fields.forEach((f) => { if (String(f.label || "").trim()) set(f.label.trim(), defaultAnswer(f)); });
     s.renderedSubject = fillTemplate(task.subject, vals).slice(0, 200);
     s.renderedHtml = emailShell(fillTemplateHtml(task.body, vals), task.style, { clinic: c, hasLogo: !!(letterhead && letterhead.logo) });
+  }
+
+  // A field's answer for automatic sends. For choice fields, names that match the list become links.
+  function defaultAnswer(f) {
+    const raw = String(f.default || "").trim();
+    if (!raw || !TASK_CHOICE_TYPES.includes(f.type)) return raw;
+    const opts = (f.source || "list") === "list" ? (f.options || []) : (sources[f.source] || []);
+    const find = (w) => opts.find((o) => String(o.label || "").trim().toLowerCase() === w.toLowerCase());
+    const whole = find(raw);
+    if (whole) return formatChoice(f, [whole]);
+    const wanted = raw.split(/\s*[,;\n]\s*/).filter(Boolean);
+    const chosen = wanted.map(find).filter(Boolean);
+    return chosen.length === wanted.length ? formatChoice(f, chosen) : raw;
   }
 
   async function testSend(btn) {
@@ -811,7 +832,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
       else f[k] = el.value;
       if (k === "source") {
         if (f.source === "list" && !(f.options || []).length) f.options = [{ label: "Option 1", link: "" }];
-        if (f.source === "treatments") f.display = "links";
+        if (f.source === "treatments" || f.source === "aftercare") f.display = "links";
         renderForm();
         loadSources();
       }
@@ -877,7 +898,8 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     }
     const add = e.target.closest("[data-addfield]");
     if (add) {
-      task.fields.push(add.dataset.addfield === "treatments" ? treatmentsField() : blankField(add.dataset.addfield));
+      const kind = add.dataset.addfield;
+      task.fields.push(kind === "treatments" ? treatmentsField() : kind === "aftercare" ? aftercareField() : blankField(kind));
       renderForm();
       loadSources();
       changed();

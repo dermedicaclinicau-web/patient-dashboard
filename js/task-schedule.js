@@ -178,7 +178,7 @@ export function scheduleProblems(task) {
     if (slotMs({ y, m, d }, s.time) <= Date.now()) out.push("The send time has already passed. Choose a later date or time.");
   }
   if (s.end === "date" && s.endDate && s.endDate < s.date) out.push("The stop date is before the start date.");
-  if (/\{\s*(upcoming appointments|treatment plan|treatments|treatment info|aftercare)\s*\}/i.test(task.body)) {
+  if (/\{\s*(upcoming appointments|treatment plan|treatment info|aftercare)\s*\}/i.test(task.body + task.subject)) {
     out.push("Patient blanks like {Upcoming appointments} can't be used in scheduled tasks.");
   }
   return out;

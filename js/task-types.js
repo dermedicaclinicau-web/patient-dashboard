@@ -30,7 +30,7 @@ export const CHOICE_DISPLAYS = {
   bullets: "As a list",
   links: "As a list with links",
 };
-const SOURCE_KEYS = ["list", "treatments", "staff", "printables"];
+const SOURCE_KEYS = ["list", "treatments", "aftercare", "staff", "printables"];
 
 export const EMAIL_STYLE_DEFAULT = { background: "#f1f5f9", width: 600, logo: true, footer: true, accent: "#0f766e" };
 function cleanEmailStyle(s) {

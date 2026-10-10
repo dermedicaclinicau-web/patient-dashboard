@@ -4,10 +4,12 @@ import { db } from "./firebase-config.js";
 import { collection, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { fetchStaffList } from "./task-types.js";
 import { listPublishedForms } from "./form-templates.js";
+import { listAftercare } from "./aftercare-api.js";
 
 export const SOURCES = {
   list: { name: "My own list" },
   treatments: { name: "Treatment information" },
+  aftercare: { name: "Aftercare Bank" },
   staff: { name: "Staff members" },
   printables: { name: "Printables (Form Builder)" },
 };
@@ -32,6 +34,9 @@ async function loadTreatments() {
 
 const LOADERS = {
   treatments: loadTreatments,
+  aftercare: async () => (await listAftercare())
+    .map((a) => ({ label: a.title, link: a.link || "", id: a.id }))
+    .sort((a, b) => a.label.localeCompare(b.label, "en-AU")),
   staff: async () => (await fetchStaffList()).map((s) => ({ label: s.name, link: "", id: s.id })),
   printables: async () => (await listPublishedForms())
     .filter((t) => t.category === "printable")

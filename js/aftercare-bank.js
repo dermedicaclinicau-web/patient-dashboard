@@ -148,6 +148,9 @@ function openAftercareEditor({ item = null, treatments = [], staff = null }) {
           <label class="lh-field"><span class="lh-label">Associated treatment</span>
             <input name="treatment" maxlength="120" autocomplete="off" list="ac-treatments" placeholder="e.g. Hair Removal" value="${esc(item ? item.treatment : "")}" />
             <datalist id="ac-treatments">${treatments.map((t) => `<option value="${esc(t)}"></option>`).join("")}</datalist></label>
+          <label class="lh-field"><span class="lh-label">Link <small>(optional: makes the name clickable in Task Manager emails)</small></span>
+            <input name="link" type="url" maxlength="500" autocomplete="off" inputmode="url"
+              placeholder="https://dermedica.com.au/aftercare/ipl-hair-removal" value="${esc(item ? item.link || "" : "")}" /></label>
         </div>
         <div class="lh-field"><span class="lh-label">Instructions</span><div data-role="editor"></div></div>
         <p class="lh-error" role="alert" hidden></p>
@@ -197,6 +200,7 @@ function openAftercareEditor({ item = null, treatments = [], staff = null }) {
           title: form.elements.title.value,
           treatment: form.elements.treatment.value,
           html: editor.getHtml(),
+          link: form.elements.link.value,
         }, staff);
         busy = false;
         dirty = false;
