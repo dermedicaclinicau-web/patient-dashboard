@@ -36,6 +36,16 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const isoOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const todayIso = () => isoOf(new Date());
 const $all = (el, s) => [...el.querySelectorAll(s)];
+// "Fill in consent now": remembers the treatment form while the consent is filled in
+const RETURN_KEY = "dm.consentReturn";
+function readReturn() {
+  try {
+    const r = JSON.parse(sessionStorage.getItem(RETURN_KEY) || "null");
+    return r && Date.now() - Number(r.at || 0) < 3 * 3600000 ? r : null;
+  } catch { return null; }
+}
+function writeReturn(r) { try { sessionStorage.setItem(RETURN_KEY, JSON.stringify(r)); } catch { /* storage full or private mode */ } }
+function clearReturn() { try { sessionStorage.removeItem(RETURN_KEY); } catch { /* ignore */ } }
 
 function niceDate(key) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
@@ -56,14 +66,16 @@ function sheetHtml({ name, fields, settings, letterhead }) {
     }).join("")}</div>`;
 }
 
-function consentHtml(f, res) {
+function consentHtml(f, res, { canStart = false } = {}) {
   const months = Number(f.months) || 12;
   if (res && res.found) {
     return `<div class="fe-consent">${svg(ICONS.consent_status)}<span>Signed ${res.name ? `“${esc(res.name)}” ` : ""}on ${esc(niceDate(res.date))}.${
       res.submissionId ? ` <a href="#/form-record/${encodeURIComponent(res.submissionId)}">View it</a>` : ""}</span></div>`;
   }
   return `<div class="fe-consent is-warn">${svg(ICONS.consent_status)}<span>No signed consent in the last ${months} months.${
-    f.block ? " This form can't be saved until one is signed." : ""}</span></div>`;
+    f.block ? " This form can't be saved until one is signed." : ""}</span>${
+    canStart && f.consentFormId
+      ? `<button type="button" class="ff-btn is-primary fe-consent-go" data-consent-go="${esc(f.consentFormId)}">Fill in consent now</button>` : ""}</div>`;
 }
 
 /* ===================== Signature pad ===================== */
@@ -349,6 +361,10 @@ async function checkConsents(consentFields, patient) {
 export async function mountFormFill(container, param, { staff } = {}) {
   const [pid = "", tid = ""] = String(param || "").split("/");
   const patientHref = `#/patient/${encodeURIComponent(pid)}`;
+  const ret = readReturn();
+  const isConsentLeg = !!(ret && ret.patientId === pid && ret.consentId === tid);   // filling in the consent
+  const isReturnLeg = !!(ret && ret.patientId === pid && ret.templateId === tid && !isConsentLeg); // back on the treatment form
+  const exitHref = isConsentLeg ? ret.returnHash : patientHref;
   const back = `<a class="back-link" href="${patientHref}">← Back to patient</a>`;
   const root = document.createElement("section");
   root.className = "page wide";
@@ -389,20 +405,21 @@ export async function mountFormFill(container, param, { staff } = {}) {
     <div class="ff-wrap">
       <div class="ff-bar" role="region" aria-label="Form actions">
         <div class="ff-bar-inner">
-          <a class="ff-back" href="${patientHref}" aria-label="Back to patient" title="Back to patient">${BAR_ICONS.back}</a>
+          <a class="ff-back" href="${exitHref}" aria-label="Back" title="Back">${BAR_ICONS.back}</a>
           <div class="ff-bar-title">
             <strong>${esc(ver.name)}</strong>
             <span>${esc(patient.name)} · ${esc(categoryLabel(tpl.category))} · Version ${ver.version}</span>
           </div>
           <span class="ff-progress" data-role="progress" hidden></span>
           <div class="ff-bar-actions">
-            <a class="ff-btn is-quiet" href="${patientHref}">Cancel</a>
+            <a class="ff-btn is-quiet" href="${exitHref}">Cancel</a>
             <button type="button" class="ff-btn" data-save="print">${BAR_ICONS.print}<span>Save &amp; print</span></button>
             <button type="button" class="ff-btn" data-save="email">${BAR_ICONS.mail}<span>Save &amp; email</span></button>
             <button type="button" class="ff-btn is-primary" data-save="save">${BAR_ICONS.check}<span>Save</span></button>
           </div>
         </div>
         <p class="ff-msg" data-role="msg" aria-live="polite"></p>
+        ${isConsentLeg ? `<p class="ff-return">Consent for <strong>${esc(ret.templateName)}</strong>. When you save, you'll go back to it.</p>` : ""}
       </div>
       <div class="fe-sheet ff-sheet" data-role="sheet">${sheetHtml({ name: ver.name, fields, settings: ver.settings, letterhead })}</div>
     </div>`;
@@ -529,6 +546,22 @@ export async function mountFormFill(container, param, { staff } = {}) {
     progressEl.classList.toggle("is-done", done === need);
     progressEl.textContent = done === need ? "All required answered" : `${done} of ${need} required`;
   }
+  // Back from "Fill in consent now": put the answers back
+  if (isReturnLeg) {
+    const a = ret.answers || {};
+    fields.forEach((f) => {
+      const w = wrap(f.id);
+      if (!w || !(f.id in a)) return;
+      writeField(f, w, a[f.id]);
+      writeExtras(f, w, a[`${f.id}__x`]);
+    });
+    clearReturn();
+    dirty = Object.keys(a).length > 0;
+    const redo = fields.some((f) => f.type === "signature" || f.type === "aftercare" || (f.type === "image" && (f.source === "staff" || f.annotate)));
+    showToast(redo
+      ? "Welcome back. Your answers are restored. Add any signatures, photos or aftercare again."
+      : "Welcome back. Your answers are restored.");
+  }
   refresh();
 
   // Consent checks run in the background
@@ -546,7 +579,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
         if (!root.isConnected) return;
         consentFields.forEach((f) => {
           const el = wrap(f.id) && wrap(f.id).querySelector(".fe-consent");
-          if (el) el.outerHTML = consentHtml(f, consent[f.id]);
+          if (el) el.outerHTML = consentHtml(f, consent[f.id], { canStart: true });
         });
         refresh();
       });
@@ -568,6 +601,29 @@ export async function mountFormFill(container, param, { staff } = {}) {
       const box = row ? row.querySelector("[data-other], [data-cmt]") : w.querySelector("[data-other]:not([hidden]), [data-cmt]:not([hidden])");
       if (box && !box.hidden) box.focus();
     }
+  });
+
+    // "Fill in consent now": keep the answers so far, then open the consent form
+  root.addEventListener("click", (e) => {
+    const go = e.target.closest("[data-consent-go]");
+    if (!go) return;
+    const draft = {};
+    fields.forEach((f) => {
+      if (LAYOUT.includes(f.type) || ["photo", "signature", "image", "aftercare", "consent_status"].includes(f.type)) return;
+      const w = wrap(f.id);
+      if (!w || w.hidden) return;
+      draft[f.id] = readField(f, w, rctx());
+      const x = readExtras(f, w);
+      if (x) draft[`${f.id}__x`] = x;
+    });
+    writeReturn({
+      at: Date.now(), patientId: pid, templateId: tid, templateName: ver.name,
+      consentId: go.dataset.consentGo,
+      returnHash: `#/fill/${encodeURIComponent(pid)}/${encodeURIComponent(tid)}`,
+      answers: draft,
+    });
+    dirty = false; // the answers are kept, so don't ask "Leave without saving?"
+    location.hash = `#/fill/${encodeURIComponent(pid)}/${encodeURIComponent(go.dataset.consentGo)}`;
   });
 
   /* ---------- Checking and saving ---------- */
@@ -686,7 +742,10 @@ export async function mountFormFill(container, param, { staff } = {}) {
         signatures,
       }, staff);
       dirty = false;
-      if (kind === "save") {
+      if (kind === "save" && isConsentLeg) {
+        location.hash = ret.returnHash;
+        showToast(`${ver.name} saved. Back to ${ret.templateName}.`);
+      } else if (kind === "save") {
         if (tpl.category === "consent" || tpl.category === "treatment") highlightRecord(id);
         location.hash = patientHref;
         showToast(`${ver.name} saved to ${patient.name}'s record`);
@@ -781,6 +840,13 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
         </div>
       </div>
       <div data-role="log">${deliveriesHtml(sub.deliveries)}</div>
+      ${(() => {
+        const r = readReturn();
+        return r && r.patientId === sub.patientId && r.consentId === sub.templateId
+          ? `<div class="ff-return-bar"><span>Consent saved. Carry on with <strong>${esc(r.templateName)}</strong>.</span>
+              <a class="ff-btn is-primary" href="${esc(r.returnHash)}">Continue with ${esc(r.templateName)} →</a></div>`
+          : "";
+      })()}
       <div class="fe-sheet ff-sheet ff-print" data-role="sheet">${sheetHtml({ name: ver.name, fields, settings: ver.settings, letterhead })}</div>
     </div>`;
 

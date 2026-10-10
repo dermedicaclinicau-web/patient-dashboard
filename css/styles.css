@@ -3299,3 +3299,10 @@ a.tm-task:hover { border-color: var(--primary); }
 .pt-skel { height: 420px; border-radius: 10px; }
 .pt-wait { padding: 2.5rem 1rem; text-align: center; }
 @media (max-width: 1100px) { .pt-grid { grid-template-columns: 1fr; } }
+
+/* ---------- Consent: fill in now, then go back ---------- */
+.fe-consent-go { margin-left: auto; height: 34px; }
+.ff-return { margin: 0; padding: .55rem .9rem .7rem 4rem; font-size: .84rem; color: #1e40af; }
+.ff-return-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .6rem 1rem;
+  margin: 0 0 1rem; padding: .75rem 1rem; border: 1px solid #bfdbfe; border-radius: 12px; background: #eff6ff; color: #1e40af; font-size: .9rem; }
+@media (max-width: 760px) { .ff-return { padding-left: .9rem; } }
