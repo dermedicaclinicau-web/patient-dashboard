@@ -80,18 +80,12 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {} } = {})
     if (!p) return;
     l.rows.forEach((r) => {
       if (r.preset === null || r.preset === undefined) return;
-      if (dosed(p)) {
-        if (l.rows.some((r) => num(r.dose) > 0 && !(num(r.amount) >= 1))) return `${name}: enter how many ${unitPlural(p.stockUnit)} were opened.`;
-        if (l.rows.some((r) => num(r.amount) > 0 && !(num(r.dose) > 0))) return `${name}: enter how many ${p.doseUnit} were injected.`;
-        if (l.rows.some((r) => num(r.dose) > num(r.amount) * p.dosePer + 0.001)) {
-          return `${name}: ${fmt(clinicalTotal(l, p))} ${p.doseUnit} is more than ${plural(l.rows.reduce((a, r) => a + num(r.amount), 0), p.stockUnit)} hold. Check the ${unitPlural(p.stockUnit)} opened.`;
-        }
-      }
+      if (dosed(p)) { r.dose = r.preset; r.amount = syringesFor(p, num(r.preset)); }
       else r.amount = r.preset;
       r.preset = null;
     });
   }
-
+  
   function fixRefs(l) {
     const src = sources(l);
     l.rows.forEach((r, i) => {
@@ -341,6 +335,9 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {} } = {})
       if (dosed(p)) {
         if (l.rows.some((r) => num(r.dose) > 0 && !(num(r.amount) >= 1))) return `${name}: enter how many ${unitPlural(p.stockUnit)} were opened.`;
         if (l.rows.some((r) => num(r.amount) > 0 && !(num(r.dose) > 0))) return `${name}: enter how many ${p.doseUnit} were injected.`;
+        if (l.rows.some((r) => num(r.dose) > num(r.amount) * p.dosePer + 0.001)) {
+          return `${name}: ${fmt(clinicalTotal(l, p))} ${p.doseUnit} is more than ${plural(l.rows.reduce((a, r) => a + num(r.amount), 0), p.stockUnit)} hold. Check the ${unitPlural(p.stockUnit)} opened.`;
+        }
       }
       const max = l.item && l.item.max;
       if (max && total > max) return `${name}: ${fmt(total)} ${clinicalUnit(p)} is more than the ${max} allowed. Check the amount.`;

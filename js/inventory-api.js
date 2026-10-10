@@ -1241,62 +1241,6 @@ export async function listCountsOn(key = dayKey()) {
   });
 }
 
-// Saves a count. The system's numbers are read fresh at the moment of saving (never shown beforehand).
-// Nothing changes stock: differences are saved as "open" for Reporting to review.
-// opening: lines [{ productId, loc, batch, expiry, counted }]
-// kit:     lines [{ ref (kit id), sealed, open }]
-export async function saveCount({ kind, lines, note = "" }, staff) {
-  const me = uid();
-  const out = [];
-  if (kind === "kit") {
-    for (const l of lines) {
-      const snap = await getDoc(doc(db, "inv_kits", l.ref));
-      const k = snap.exists() ? normaliseKit(snap) : null;
-      if (!k || k.staffUid !== me) continue;
-      const sealed = Math.max(0, parseInt(l.sealed, 10) || 0);
-      const open = round1(Math.max(0, Number(l.open) || 0));
-      const system = round1(kitUnits(k));
-      const counted = round1(sealed * k.dosePer + open);
-      out.push({
-        productId: k.productId, productName: k.productName, loc: "kit", ref: k.id, batch: k.batch, expiry: k.expiry,
-        unit: k.doseUnit, system, counted, variance: round1(counted - system),
-        detail: { sealed, open, systemSealed: k.sealed, systemOpen: k.open },
-        status: Math.abs(counted - system) > 0.001 ? "open" : "ok", note: "",
-      });
-    }
-  } else {
-    const [products, lots] = await Promise.all([listProducts(), listAllLots()]);
-    const pById = new Map(products.map((p) => [p.id, p]));
-    const lotById = new Map(lots.map((l) => [l.id, l]));
-    const agg = new Map();
-    lines.forEach((l) => {
-      const p = pById.get(l.productId);
-      if (!p) return;
-      const loc = l.loc === "jt" ? "jt" : "shelf";
-      const batch = p.tracked ? clip(l.batch, 40) : "";
-      const expiry = p.tracked && KEY_RE.test(l.expiry || "") ? l.expiry : "";
-      const ref = lotId(p.id, loc, batch, expiry);
-      const a = agg.get(ref) || { p, loc, batch, expiry, counted: 0 };
-      a.counted += Math.max(0, parseInt(l.counted, 10) || 0);
-      agg.set(ref, a);
-    });
-    agg.forEach((a, ref) => {
-      const system = a.p.tracked ? ((lotById.get(ref) || {}).qty || 0) : (a.p.stock[a.loc] || 0);
-      out.push({
-        productId: a.p.id, productName: a.p.name, loc: a.loc, ref, batch: a.batch, expiry: a.expiry,
-        batchLabel: a.p.batchLabel || "Batch", unit: a.p.stockUnit, system, counted: a.counted,
-        variance: a.counted - system, status: a.counted !== system ? "open" : "ok", note: "",
-      });
-    });
-  }
-  if (!out.length) throw new Error("Nothing was counted.");
-  const openCount = out.filter((l) => l.status === "open").length;
-  const ref = await addDoc(collection(db, "inv_counts"), {
-    kind: kind === "kit" ? "kit" : "opening", dateKey: dayKey(), lines: out, openCount,
-    note: clip(note, 500), by: who(staff), byUid: me, at: serverTimestamp(),
-  });
-  return { id: ref.id, lines: out, openCount };
-}
 
 
 // One counted kit lot: unopened + units left in the opened one, against the system's numbers right now

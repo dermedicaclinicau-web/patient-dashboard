@@ -10,6 +10,7 @@ export const PERM_KEYS = [
   "tasks.build", "forms.build", "ssp.create", "ssp.config",
   "menu.inventory", "inventory.request", "inventory.order", "inventory.manage",
   "inventory.kit", "inventory.jt", "inventory.count", "menu.reports",
+  "dash.attention", "dash.appts", "dash.tasks", "dash.kit", "dash.records", "dash.usage", "dash.requests", "dash.stock", "dash.overview",
 ];
 
 let admin = false;

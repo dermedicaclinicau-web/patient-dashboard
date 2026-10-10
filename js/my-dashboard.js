@@ -6,6 +6,8 @@ import {
   isKitProduct, kitUnits, expiryState, plural, unitPlural, lowAt, myUid, reqNumber, REQ_STATUS, REL_STATUS,countDue, countLocs, dayKey, listCountsOn,
 } from "./inventory-api.js";
 import { listMySubmissions } from "./form-submissions.js";
+import { db } from "./firebase-config.js";
+import { doc, getDoc, getDocs, collection, query, where } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(1));
@@ -27,6 +29,37 @@ const card = (title, inner, cls = "", link = "") => `
     ${inner}
   </section>`;
 
+const DASH_CARDS = [
+  ["attention", "Needs my attention"], ["appts", "My appointments today"], ["tasks", "Open staff tasks"],
+  ["kit", "My kit"], ["records", "My records"], ["usage", "What I used"],
+  ["requests", "My requests"], ["stock", "Stock I use"], ["overview", "Clinic overview"],
+];
+const hideKey = (uid) => `dm.dash.hidden.${uid}`;
+const readHidden = (uid) => { try { return new Set(JSON.parse(localStorage.getItem(hideKey(uid)) || "[]")); } catch { return new Set(); } };
+const writeHidden = (uid, set) => { try { localStorage.setItem(hideKey(uid), JSON.stringify([...set])); } catch { /* private mode */ } };
+
+// Today's appointments for this staff member (matched on their name in the schedule)
+async function myAppointments(staff, key) {
+  const snap = await getDoc(doc(db, "appts_by_day", key));
+  const list = snap.exists() && Array.isArray(snap.data().appointments) ? snap.data().appointments : [];
+  const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim();
+  const full = norm(staff && staff.name);
+  const first = full.split(" ")[0];
+  if (!first) return [];
+  return list.filter((a) => {
+    const n = norm(a.staff);
+    return n && (n === full || n.includes(full) || full.includes(n) || n.split(" ")[0] === first);
+  }).sort((a, b) => (a.sortMinutes || 0) - (b.sortMinutes || 0));
+}
+
+// Open staff tasks (from patient pages) due today or overdue
+async function dueTasks(key) {
+  const snap = await getDocs(query(collection(db, "staff-task-list"), where("status", "==", "Open")));
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+    .filter((t) => t.dueDate && t.dueDate <= key)
+    .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+}  
+
 export async function mountMyDashboard(container, { staff } = {}) {
   const first = String((staff && staff.name) || "").split(" ")[0];
   const hr = new Date().getHours();
@@ -38,7 +71,10 @@ export async function mountMyDashboard(container, { staff } = {}) {
     <div class="fb-head">
       <div><h2>${greet}${first ? `, ${esc(first)}` : ""}</h2>
         <p class="muted">${esc(new Date().toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long", year: "numeric" }))}</p></div>
-      <div class="fb-head-actions"><button type="button" class="btn-ghost" data-act="refresh">${svg(ICON.refresh)} Refresh</button></div>
+      <div class="fb-head-actions">
+        <button type="button" class="btn-ghost" data-act="customise">Customise</button>
+        <button type="button" class="btn-ghost" data-act="refresh">${svg(ICON.refresh)} Refresh</button>
+      </div>
     </div>
     <div data-role="body"><div class="skeleton" style="height:320px;border-radius:14px"></div></div>`;
   container.replaceChildren(root);
@@ -52,7 +88,11 @@ export async function mountMyDashboard(container, { staff } = {}) {
   const safe = (p, fallback) => Promise.resolve(p).catch((err) => { console.warn("Dashboard:", err); return fallback; });
 
   async function load() {
-      const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday] = await Promise.all([
+      const me0 = myUid();
+      const hidden = readHidden(me0);
+      const show = (k) => can(`dash.${k}`) && !hidden.has(k);
+      const todayKey = dayKey();
+      const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks] = await Promise.all([
       safe(listProducts(), []),
       safe(listAllLots(), []),
       safe(listKits(), []),
@@ -65,6 +105,8 @@ export async function mountMyDashboard(container, { staff } = {}) {
       canOrder ? safe(listPos(), []) : [],
       canOrder ? safe(listRequests({ max: 300 }), []) : [],
       safe(listCountsOn(dayKey()), []),
+      show("appts") ? safe(myAppointments(staff, todayKey), []) : [],
+      show("tasks") ? safe(dueTasks(todayKey), []) : [],
     ]);
     if (!root.isConnected) return;
 
@@ -81,17 +123,14 @@ export async function mountMyDashboard(container, { staff } = {}) {
     const doneKeys = new Set(countsToday.flatMap((c) => c.lines.map((l) =>
       l.loc === "kit" ? `kit|${l.ref}` : c.kind === "opening" ? `${l.productId}|${l.loc}` : "")));
     if (can("inventory.count") || canOrder) {
-      const dueKeys = products.filter((p) => countDue(p)).flatMap((p) => [
-        ...countLocs(p).map((loc) => `${p.id}|${loc}`),
-        ...(isKitProduct(p) ? kits.filter((k) => k.productId === p.id).map((k) => `kit|${k.id}`) : []),
-      ]);
-      const left = dueKeys.filter((k) => !doneKeys.has(k)).length;
+      const counted = new Set(countsToday.filter((c) => c.kind === "opening").flatMap((c) => c.lines.map((l) => `${l.productId}|${l.loc}`)));
+      const left = products.filter((p) => countDue(p)).flatMap((p) => countLocs(p).map((loc) => `${p.id}|${loc}`)).filter((k) => !counted.has(k)).length;
       if (left) att.push({ tone: "warn", text: `Opening count: ${left} still to count today`, href: "#/tasks/count", act: "Count now" });
     }
     if (canKit) {
-      const mineDue = myKits.filter((k) => countDue(byId.get(k.productId)) && !doneKeys.has(`kit|${k.id}`));
-      if (mineDue.length) att.push({ tone: "info", text: `Your kit hasn't been counted today (${[...new Set(mineDue.map((k) => k.productName))].join(", ")})`,
-        href: "#/tasks/count/kit", act: "Check kit" });
+      const checked = new Set(countsToday.filter((c) => c.kind === "kit" && c.byUid === me).flatMap((c) => c.lines.map((l) => l.productId)));
+      const due = products.filter((p) => isKitProduct(p) && countDue(p) && myKits.some((k) => k.productId === p.id) && !checked.has(p.id));
+      if (due.length) att.push({ tone: "warn", text: `Kit check due: ${due.map((p) => p.name).join(", ")}`, href: "#/tasks/count/kit", act: "Check kit" });
     }
     if (can("inventory.count") || canOrder) {
       const counted = new Set(countsToday.filter((c) => c.kind === "opening").flatMap((c) => c.lines.map((l) => `${l.productId}|${l.loc}`)));
@@ -224,13 +263,61 @@ export async function mountMyDashboard(container, { staff } = {}) {
         <a class="md-tile${n ? ` is-${tone}` : ""}" href="${href}"><strong>${n}</strong><span>${esc(label)}</span></a>`).join("")}</div>`, "md-wide");
     }
 
-    body.innerHTML = `<div class="md-grid">${[attentionHtml, kitHtml, recordsHtml, usedHtml, reqHtml, stockHtml, overviewHtml].join("")}</div>`;
-  }
+    /* ---------- My appointments today ---------- */
+    const apptHtml = card("My appointments today", appts.length
+      ? `<ul class="md-list md-appts">${appts.map((a) => `<li><a href="#/calendar">
+          <strong>${esc(a.time || "")}</strong><span>${esc(a.patientName || "")}</span><small>${esc((a.services || []).join(", "))}</small></a></li>`).join("")}</ul>`
+      : '<p class="tb-none">No appointments for you today.</p>', "", '<a class="md-link" href="#/calendar">Open Calendar</a>');
 
+    /* ---------- Open staff tasks ---------- */
+    const tasksHtml = card("Open staff tasks", tasks.length
+      ? `<ul class="md-list">${tasks.slice(0, 10).map((t) => `<li><a href="#/patient/${encodeURIComponent(t.patientId || "")}">
+          <span>${esc(t.taskText || "")}</span><strong>${esc(t.patientName || "")}</strong>
+          <small class="${t.dueDate < todayKey ? "md-overdue" : ""}">${t.dueDate < todayKey ? "Overdue · " : ""}${esc(niceKey(t.dueDate))}</small></a></li>`).join("")}</ul>
+        ${tasks.length > 10 ? `<small class="muted">and ${tasks.length - 10} more</small>` : ""}`
+      : '<p class="tb-none">No open tasks due today.</p>');
+
+    const CARDS = [["attention", attentionHtml], ["appts", apptHtml], ["tasks", tasksHtml], ["kit", kitHtml],
+      ["records", recordsHtml], ["usage", usedHtml], ["requests", reqHtml], ["stock", stockHtml], ["overview", overviewHtml]];
+    const shown = CARDS.filter(([k, h]) => h && show(k));
+    body.innerHTML = shown.length
+      ? `<div class="md-grid">${shown.map(([, h]) => h).join("")}</div>`
+      : '<div class="tm-empty">Nothing to show yet. Use <strong>Customise</strong> to choose your cards, or ask an Admin to turn some on for you.</div>';
+  }
+  
   root.addEventListener("click", (e) => {
     if (e.target.closest('[data-act="refresh"]')) {
       body.innerHTML = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
       load();
+      return;
+    }
+    if (e.target.closest('[data-act="customise"]')) {
+      const me = myUid();
+      const hidden = readHidden(me);
+      const allowed = DASH_CARDS.filter(([k]) => can(`dash.${k}`));
+      const dlg = document.createElement("dialog");
+      dlg.className = "lh-dialog";
+      dlg.innerHTML = `<form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>Customise my dashboard</h3>
+          <p>Choose which cards you see. Cards not listed here are turned off for you by an Admin.</p></div>
+        ${allowed.length ? allowed.map(([k, label]) => `<label class="fe-check"><input type="checkbox" name="card" value="${k}"${hidden.has(k) ? "" : " checked"} /> ${esc(label)}</label>`).join("")
+          : '<p class="tb-none">No cards are turned on for you yet. Ask an Admin.</p>'}
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">Save</button>
+        </div></form>`;
+      document.body.appendChild(dlg);
+      dlg.addEventListener("close", () => dlg.remove());
+      dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+      dlg.querySelector("form").addEventListener("submit", (ev) => {
+        ev.preventDefault();
+        const on = new Set([...dlg.querySelectorAll('[name="card"]:checked')].map((x) => x.value));
+        writeHidden(me, new Set(allowed.map(([k]) => k).filter((k) => !on.has(k))));
+        dlg.close();
+        body.innerHTML = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
+        load();
+      });
+      dlg.showModal();
     }
   });
   load().catch((err) => {

@@ -1,6 +1,6 @@
 // Inventory (#/inventory/<tab>): stock on the Shelf and in JT storage, products, suppliers and the activity log.
 import {
-  INV_CATEGORIES, LOCATIONS, qtyText, packText, batchName, batchText, WRITEOFF_REASONS, ADD_REASONS, MOVE_TYPES, REQ_STATUS, PO_STATUS, catLabel, locLabel, plural, unitPlural,
+  INV_CATEGORIES, LOCATIONS, qtyText, packText, batchName, batchText, WEEKDAYS, WRITEOFF_REASONS, ADD_REASONS, MOVE_TYPES, REQ_STATUS, PO_STATUS, catLabel, locLabel, plural, unitPlural,
   expiryState, fefo, reqNumber, myUid, suggestOrder, listProducts, saveProduct, listSuppliers, saveSupplier, listAllLots, listMoves,
   applyStock, listRequests, setRequestStatus, cancelRequest, getRequestSettings, saveRequestSettings,
   listPos, createPo, poTotals, itemOnPo, lineFromProduct, cleanPoLine,
