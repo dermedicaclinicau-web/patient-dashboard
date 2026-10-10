@@ -128,7 +128,12 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {} } = {})
     if (!(total > 0)) return "";
     if (dosed(p)) {
       const syr = l.rows.reduce((a, r) => a + num(r.amount), 0);
-      return `<span class="cs-ok">✓ ${fmt(total)} ${esc(cu)} · ${esc(plural(syr, p.stockUnit))} opened</span>`;
+      const waste = Math.max(0, Math.round((syr * p.dosePer - total) * 100) / 100);
+      if (total > syr * p.dosePer + 0.001) {
+        return `<span class="cs-warn">${fmt(total)} ${esc(cu)} needs at least ${esc(plural(syringesFor(p, total), p.stockUnit))}.</span>`;
+      }
+      return `<span class="cs-ok">✓ ${fmt(total)} ${esc(cu)} · ${esc(plural(syr, p.stockUnit))} opened</span>${
+        waste ? ` <span class="cs-waste">${fmt(waste)} ${esc(cu)} discarded</span>` : ""}`;
     }
     return `<span class="cs-ok">✓ ${fmt(total)} ${esc(isKitProduct(p) || total === 1 ? cu : unitPlural(cu))}</span>`;
   }
@@ -308,6 +313,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {} } = {})
     return {
       fid: f.id, productId: p.id, name: p.name, kind: kit ? "kit" : "storage",
       unit: kit ? p.doseUnit : p.stockUnit, doseUnit: kit || dosed(p) ? p.doseUnit : "",
+      dosePer: dosed(p) ? p.dosePer : 0,
       loc: kit ? "kit" : l.loc, block: f.ifShort === "block", rows,
     };
   }).filter(Boolean));
@@ -340,10 +346,11 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {} } = {})
   refresh(false);
 }
 
-// "2.2 mL" for dosed Shelf products (with the syringes in brackets when wanted), otherwise "20 units" / "1 needle"
+// "0.8 mL (1 syringe, 0.2 mL discarded)" for dosed Shelf products, otherwise "20 units" / "1 needle"
 export function consumableAmountText(l, r, withStock = true) {
   if (l.kind !== "kit" && l.doseUnit && r.dose) {
-    return `${fmt(r.dose)} ${l.doseUnit}${withStock && r.amount ? ` (${plural(r.amount, l.unit)})` : ""}`;
+    const extra = [r.amount ? plural(r.amount, l.unit) : "", r.waste ? `${fmt(r.waste)} ${l.doseUnit} discarded` : ""].filter(Boolean);
+    return `${fmt(r.dose)} ${l.doseUnit}${withStock && extra.length ? ` (${extra.join(", ")})` : ""}`;
   }
   return l.kind === "kit" ? `${fmt(r.amount)} ${l.unit}` : plural(r.amount, l.unit);
 }

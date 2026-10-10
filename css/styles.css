@@ -3653,6 +3653,7 @@ a.ff-btn { text-decoration: none; }
 .cs-pick { max-height: 55vh; overflow: auto; display: grid; gap: .75rem; margin-top: .5rem; }
 .cs-pick-group h4 { margin: 0 0 .3rem; font-size: .85rem; color: #64748b; text-transform: uppercase; letter-spacing: .04em; }
 .cs-view td, .cs-view th { font-size: .92rem; }
+.cs-waste { color: #64748b; font-size: .85rem; margin-left: .35rem; }
 @media (max-width: 640px) { .cs-row { grid-template-columns: minmax(0, 1fr) 120px 28px; } }
 
 .cs-row.is-dosed { grid-template-columns: minmax(0, 1fr) 130px 140px 32px; }

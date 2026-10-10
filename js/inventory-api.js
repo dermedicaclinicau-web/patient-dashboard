@@ -1121,13 +1121,16 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
         }
       }
       const dose = l.kind === "kit" ? want : Math.round(Math.max(0, Number(r.dose) || 0) * 100) / 100;
-      return { ref: r.ref || "", batch: clip(r.batch, 40), expiry: KEY_RE.test(r.expiry || "") ? r.expiry : "", amount: want, taken, from, dose };
+      // One syringe per patient: whatever is left in the syringes opened is wastage
+      const per = Number(l.dosePer) || 0;
+      const waste = l.kind !== "kit" && per && dose ? Math.max(0, Math.round((want * per - dose) * 100) / 100) : 0;
+      return { ref: r.ref || "", batch: clip(r.batch, 40), expiry: KEY_RE.test(r.expiry || "") ? r.expiry : "", amount: want, taken, from, dose, waste };
     });
     const total = round1(rows.reduce((a, r) => a + r.amount, 0));
     const short = round1(rows.reduce((a, r) => a + (r.amount - r.taken), 0));
     return { fid: l.fid, productId: clip(l.productId, 60), name: clip(l.name, 150), kind: l.kind === "kit" ? "kit" : "storage",
       unit: clip(l.unit, 30), doseUnit: clip(l.doseUnit || "", 20), doseTotal: Math.round(rows.reduce((a, r) => a + r.dose, 0) * 100) / 100,
-      total, short, rows, block: l.block === true };
+      waste: Math.round(rows.reduce((a, r) => a + r.waste, 0) * 100) / 100,
   });
 
   const blocked = out.find((l) => l.block && l.short > 0);
@@ -1156,8 +1159,10 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
     logMove(tx, staff, {
       type: l.kind === "kit" ? "kit-use" : "use", productId: l.productId, productName: l.name, unit: l.unit,
       lines: moved.map((r) => ({ loc: r.from, batch: r.batch, expiry: r.expiry, delta: -r.taken })),
-      reason: "Treatment", note: `${patientName} · ${formName}`.slice(0, 500), ref: submissionId,
-    });
+      reason: "Treatment", note: [`${patientName} · ${formName}`,
+        l.doseUnit && l.kind !== "kit" ? `${l.doseTotal} ${l.doseUnit} given` : "",
+        l.waste ? `${l.waste} ${l.doseUnit} discarded` : ""].filter(Boolean).join(" · ").slice(0, 500),
+     });
   });
 
   const saved = out.map(({ fid, block, ...l }) => ({ ...l, rows: l.rows.map(({ ref, ...r }) => r) }));

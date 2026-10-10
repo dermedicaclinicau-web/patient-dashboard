@@ -127,7 +127,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     }
   }
 
-  
+
     function render() {
     if (tab === "stock") renderStock();
     else if (tab === "kits") renderKits(body, { staff, products: st.products, lots: st.lots, canKit, canJt, canManage, reload: load });
@@ -293,10 +293,10 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
             <small class="fe-note">Stock is still counted in whole items. The dose shows alongside, e.g. 3 vials (300 units), and is used later when recording what was used in a treatment.</small></div>
           <label class="lh-field"><span class="lh-label">How it's used in treatments</span>
             <select class="fb-select" name="usage">
-              <option value="storage"${x.usage !== "kit" ? " selected" : ""}>Straight from the Shelf (JT storage for Dr Teh)</option>
-              <option value="kit"${x.usage === "kit" ? " selected" : ""}>Carried in injectors' kits (e.g. Xeomin)</option>
+              <option value="storage"${x.usage !== "kit" ? " selected" : ""}>From the Shelf, one per patient (e.g. Belotero, needles)</option>
+              <option value="kit"${x.usage === "kit" ? " selected" : ""}>Carried in injectors' kits, shared across patients (e.g. Xeomin)</option>
             </select>
-            <small class="fe-note">Kit products need a dose. Injectors take them into their kit and use them in units.</small></label>
+            <small class="fe-note">From the Shelf with a dose: staff record the dose given, whole items come off stock, and any leftover is logged as discarded. Kit products need a dose and stay in the opened vial for the next patient.</small></label>
           <label class="lh-field"><span class="lh-label">Cost per order unit, $ (optional)</span><input name="cost" type="number" min="0" step="0.01" value="${val(x.cost)}" /></label>
           <label class="lh-field"><span class="lh-label">Retail price, $ (optional)</span><input name="price" type="number" min="0" step="0.01" value="${val(x.price)}" /></label>
           <label class="lh-field"><span class="lh-label">Barcode (optional)</span><input name="barcode" maxlength="60" value="${val(x.barcode)}" /></label>
