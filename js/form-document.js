@@ -56,6 +56,15 @@ const CSS = `
   .pdfdoc .fe-rich li { margin: 0 0 2px; }
   .pdfdoc .fe-rich hr { border: none; border-top: 1px solid #cbd5e1; margin: 10px 0; }
   .pdfdoc .fe-rich a { color: #0f766e; }
+  .pdfdoc .bl { height: 24px; border-bottom: 1px solid #94a3b8; }
+  .pdfdoc .bl-in { display: inline-block; width: 180px; height: 16px; border-bottom: 1px solid #94a3b8; vertical-align: bottom; }
+  .pdfdoc .bo-wrap { line-height: 1.9; }
+  .pdfdoc .bo { display: inline-block; margin: 0 20px 0 0; white-space: nowrap; }
+  .pdfdoc .bo-row { padding: 3px 0; }
+  .pdfdoc .bo-subs { margin: 2px 0 0 20px; line-height: 1.9; font-size: 10pt; }
+  .pdfdoc .box { display: inline-block; width: 12px; height: 12px; margin-right: 6px; border: 1.3px solid #475569; vertical-align: -1px; }
+  .pdfdoc .box.round { border-radius: 50%; }
+  .pdfdoc .sig-box { height: 64px; border-bottom: 1px solid #475569; }
 `;
 
 // Alignment is set directly on each element so the portal's own page styles
@@ -93,7 +102,78 @@ function choiceText(f, label, x) {
   return note ? `${main} <span class="note">(${esc(note)})</span>` : main;
 }
 
-function answer(f, v, sig, inline, x) {
+/* ---------- Blank forms (Task Manager → To Print) ---------- */
+const optLabel = (o) => String(o && typeof o === "object" ? (o.label ?? o.option ?? o.name ?? "") : (o ?? "")).trim();
+const optSubs = (o) => (o && typeof o === "object"
+  ? (Array.isArray(o.subs) ? o.subs : Array.isArray(o.options) ? o.options : []) : []);
+
+function isUnanswered(f, v, sig) {
+  switch (f.type) {
+    case "signature": return !(typeof sig === "string" && PNG_RE.test(sig));
+    case "patient": return !v || !Object.values(v).some((x) => String(x ?? "").trim());
+    case "table": return !Array.isArray(v) || !v.some((r) => r && Array.isArray(r.cells) && r.cells.some((c) => c !== "" && c !== false && c != null));
+    case "calculation": case "consent_status": return true;
+    default: return v === null || v === undefined || v === "" || (Array.isArray(v) && !v.length);
+  }
+}
+
+// Empty lines, tick-boxes and a signature box, for filling in by hand
+function blankAnswer(f) {
+  const line = '<div class="bl"></div>';
+  const opts = Array.isArray(f.options) ? f.options : [];
+  const otherLbl = esc(String(f.otherLabel || "").trim() || "Other");
+  const tick = (label, round) => `<span class="bo"><span class="box${round ? " round" : ""}"></span>${label}</span>`;
+  switch (f.type) {
+    case "long_text":
+      return line.repeat(Math.min(10, Math.max(2, parseInt(f.rows, 10) || 4)));
+    case "number":
+      return `<span class="bl-in" style="width:120px"></span>${f.unit ? ` ${esc(f.unit)}` : ""}`;
+    case "date": case "record_date":
+      return '<span class="bl-in" style="width:44px"></span> / <span class="bl-in" style="width:44px"></span> / <span class="bl-in" style="width:70px"></span>';
+    case "dropdown": case "single_choice": case "checkboxes": {
+      const round = f.type !== "checkboxes";
+      const items = opts.map(optLabel).filter(Boolean);
+      if (!items.length) return line;
+      return `<div class="bo-wrap">${items.map((o) => tick(esc(o), round)).join("")}${
+        f.allowOther ? tick(`${otherLbl}: <span class="bl-in"></span>`, round) : ""}</div>`;
+    }
+    case "checkbox_notes": {
+      const rows = opts.map(optLabel).filter(Boolean)
+        .map((o) => `<div class="bo-row"><span class="box"></span>${esc(o)} <span class="bl-in" style="width:260px"></span></div>`).join("");
+      const other = f.allowOther ? `<div class="bo-row"><span class="box"></span>${otherLbl}: <span class="bl-in" style="width:260px"></span></div>` : "";
+      return rows + other || line;
+    }
+    case "sub_checks": {
+      const rows = opts.map((o) => {
+        const subs = optSubs(o).map(optLabel).filter(Boolean);
+        return `<div class="bo-row"><span class="box"></span><b>${esc(optLabel(o))}</b>${
+          subs.length ? `<div class="bo-subs">${subs.map((s) => tick(esc(s), false)).join("")}</div>` : ""}</div>`;
+      }).join("");
+      return rows || line;
+    }
+    case "table": {
+      const cols = f.columns || [];
+      if (!cols.length) return line;
+      const n = Math.min(12, Math.max(3, parseInt(f.rows ?? f.rowCount, 10) || 4));
+      const row = `<tr>${cols.map((c) => `<td style="height:26px">${c.type === "check" ? '<span class="box"></span>' : ""}</td>`).join("")}</tr>`;
+      return `<table class="grid"><tr>${cols.map((c, i) => `<th>${esc(c.label || `Column ${i + 1}`)}</th>`).join("")}</tr>${row.repeat(n)}</table>`;
+    }
+    case "signature":
+      return '<div class="sig-box"></div><div class="sigmeta">Name: <span class="bl-in" style="width:220px"></span> &nbsp;&nbsp; Date: <span class="bl-in" style="width:110px"></span></div>';
+    case "patient":
+      return `<table class="kv">${patientParts(f).map(([, l]) =>
+        `<tr><td class="k">${esc(l)}</td><td><span class="bl-in" style="width:320px"></span></td></tr>`).join("")}</table>`;
+    case "consent_status":
+      return "";
+    case "calculation":
+      return '<span class="bl-in" style="width:140px"></span>';
+    default:
+      return line;
+  }
+}
+
+function answer(f, v, sig, inline, x, blank = false) {
+  if (blank && isUnanswered(f, v, sig)) return blankAnswer(f);
   const none = '<span class="none">Not answered</span>';
   switch (f.type) {
     case "short_text": case "long_text": case "email":
@@ -166,10 +246,11 @@ function answer(f, v, sig, inline, x) {
 //   previewHtml a full page that looks like a sheet of paper (for Preview)
 //   printHtml   a plain page, used only if the browser can't make the PDF
 //   fileName
-export function buildFormDocument({ sub, ver, letterhead: lh, images = {} }) {
+// blank: unanswered questions print as empty lines and boxes, and every question shows (Task Manager → To Print)
+export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank = false }) {
   const fields = (ver.fields || []).map(normaliseField).filter(Boolean);
   const showLh = !(ver.settings && ver.settings.showLetterhead === false);
-  const shown = visibleIds(fields, sub.answers);
+  const shown = blank ? new Set(fields.map((f) => f.id)) : visibleIds(fields, sub.answers);
 
     const body = fields.map((f) => {
     if (!shown.has(f.id)) return "";
@@ -237,14 +318,14 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {} }) {
       const qw = { narrow: "25%", medium: "40%", wide: "55%" }[st.qWidth]; // "Fit" = as wide as the question
       return `<div class="q" style="${box}"><table class="qi"><tr>` +
         `<td class="ql" style="${qw ? `width:${qw};` : "width:1%;white-space:nowrap;"}padding-right:${gap * 4}px;text-align:${st.align} !important;">${label}</td>` +
-        `<td class="qa" style="text-align:${st.align} !important;">${answer(f, v, sig, true, sub.answers[`${f.id}__x`])}</td></tr></table></div>`;
+                `<td class="qa" style="text-align:${st.align} !important;">${answer(f, v, sig, true, sub.answers[`${f.id}__x`], blank)}</td></tr></table></div>`;
     }
     return `<div class="q" style="${box}">${label ? `<div class="ql" style="margin-bottom:${gap}px;">${label}</div>` : ""}` +
-      `<div class="qa">${answer(f, v, sig, false, sub.answers[`${f.id}__x`])}</div></div>`;
+           `<div class="qa">${answer(f, v, sig, false, sub.answers[`${f.id}__x`], blank)}</div></div>`;
   }).join("");
 
-  const fileName = `${sub.templateName} - ${sub.patientName} - ${niceDate(sub.recordDate)}.pdf`
-    .replace(/[\\/:*?"<>|]+/g, "-");
+  const fileName = `${[sub.templateName, sub.patientName || (blank ? "Blank" : ""), niceDate(sub.recordDate)]
+    .filter(Boolean).join(" - ")}.pdf`.replace(/[\\/:*?"<>|]+/g, "-");
 
   const s = ver.settings || {};
   const align = ["left", "center", "right"].includes(s.titleAlign) ? s.titleAlign : "left";
@@ -254,8 +335,9 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {} }) {
     ${s.showTitle !== false
       ? `<h1 style="text-align:${align} !important;font-size:${pt}pt;">${esc(ver.name)}</h1>` : ""}
     ${s.showMeta !== false
-      ? `<p class="meta" style="text-align:${align} !important;">${esc(sub.patientName)}${
-          sub.recordDate ? ` · ${esc(niceDate(sub.recordDate))}` : ""}</p>` : ""}
+      ? `<p class="meta" style="text-align:${align} !important;">${sub.patientName || !blank
+          ? `${esc(sub.patientName)}${sub.recordDate ? ` · ${esc(niceDate(sub.recordDate))}` : ""}`
+          : 'Patient: <span class="bl-in" style="width:240px"></span> &nbsp;&nbsp; Date: <span class="bl-in" style="width:120px"></span>'}</p>` : ""}
     ${body}`;
 
   const previewHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(fileName)}</title><style>

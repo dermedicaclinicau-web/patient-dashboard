@@ -35,6 +35,7 @@ export function deliveryError(err) {
   switch (err && err.code) {
     case "UNAUTHORIZED": return "Your session has expired. Log out and back in, then try again.";
     case "NO_PRINTER": return "No printer email address is set. An admin can add it in Form Builder, under Form settings.";
+    case "FORBIDDEN": return "You don't have access to do this. Ask an admin to check your access in Staff.";
     case "BAD_EMAIL": return "Check the email address and try again.";
     case "RATE_LIMITED": return "You've sent a lot of emails in the last hour. Try again a little later.";
     case "QUOTA": return "The clinic's email limit for today has been reached. Try again tomorrow.";
@@ -135,10 +136,10 @@ async function preloadImages(fields, answers = {}) {
   return out;
 }
 
-// One saved form's PDF, made once and reused (preview, then send)
-async function formPdf({ sub, ver, letterhead }) {
+// One form's PDF, made once and reused (preview, then send). blank: print empty lines and boxes.
+async function formPdf({ sub, ver, letterhead, blank = false }) {
   const images = await preloadImages(ver.fields, sub.answers);
-  const doc = buildFormDocument({ sub, ver, letterhead, images });
+  const doc = buildFormDocument({ sub, ver, letterhead, images, blank });
   let job = null;
   return {
     doc,
@@ -148,10 +149,10 @@ async function formPdf({ sub, ver, letterhead }) {
     },
   };
 }
-
+export const formPrintJob = formPdf;
 // What gets sent to Apps Script: the finished PDF, or (if the browser couldn't
 // make one) the document, which the server then turns into a PDF itself
-async function pdfPayload(p) {
+export async function pdfPayload(p) {
   try {
     return { pdf: await blobToBase64(await p.blob()), fileName: p.doc.fileName };
   } catch (err) {
@@ -160,7 +161,7 @@ async function pdfPayload(p) {
   }
 }
 
-async function previewPdf(p) {
+export async function previewPdf(p) {
   const w = window.open("", "_blank");
   if (w) w.document.write('<p style="font-family:Arial,sans-serif;padding:2rem;color:#475569">Preparing the PDF…</p>');
   try {
@@ -354,17 +355,9 @@ export async function openPrinterDialog(staff) {
   input.focus();
 }
 
-/* ---------- A published Printable as a PDF, with the patient's details filled in (Task Manager) ---------- */
+/* ---------- A patient's details as answers (Printables in Task Manager, To Print) ---------- */
 
-export async function printablePdf({ templateId, patient }) {
-  const tpl = await getFormTemplate(templateId);
-  if (!tpl || tpl.status !== "live" || !tpl.version) throw new Error("One of the attachments isn't published any more.");
-  const [ver, letterhead] = await Promise.all([
-    getFormVersion(templateId, tpl.version),
-    getLetterhead().catch(() => DEFAULT_LETTERHEAD),
-  ]);
-  if (!ver) throw new Error(`Couldn't open the attachment "${tpl.name}".`);
-
+export function patientAnswers(ver, patient) {
   const d = new Date();
   const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
   const p = patient || {};
@@ -382,10 +375,25 @@ export async function printablePdf({ templateId, patient }) {
       answers[f.id] = fills[f.fill];
     }
   });
+  return answers;
+}
 
-  const sub = { answers, signatures: {}, templateName: ver.name, patientName: p.name || "", recordDate: today, version: ver.version, createdBy: "" };
-  const job = await formPdf({ sub, ver, letterhead });
-  const payload = await pdfPayload(job);
+/* ---------- A published Printable as a PDF, with the patient's details filled in (Task Manager) ---------- */
+
+export async function printablePdf({ templateId, patient }) {
+  const tpl = await getFormTemplate(templateId);
+  if (!tpl || tpl.status !== "live" || !tpl.version) throw new Error("One of the attachments isn't published any more.");
+  const [ver, letterhead] = await Promise.all([
+    getFormVersion(templateId, tpl.version),
+    getLetterhead().catch(() => DEFAULT_LETTERHEAD),
+  ]);
+  if (!ver) throw new Error(`Couldn't open the attachment "${tpl.name}".`);
+  const d = new Date();
+  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const p = patient || {};
+  const sub = { answers: patientAnswers(ver, p), signatures: {}, templateName: ver.name, patientName: p.name || "",
+    recordDate: today, version: ver.version, createdBy: "" };
+  const payload = await pdfPayload(await formPdf({ sub, ver, letterhead }));
   if (!payload.pdf) throw new Error(`Couldn't make the PDF for "${ver.name}". Try again.`);
   return { name: payload.fileName, pdf: payload.pdf };
 }

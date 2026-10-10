@@ -4,7 +4,9 @@
 //         #/tasks/run/<taskId>[/<patient>] -> run a task
 //         #/tasks/history                -> Task history
 //         #/tasks/types[/<id>]           -> Task types (admins)
-import { listPublishedForms } from "./form-templates.js";
+//         #/tasks/print/<formId>[/<patient>] -> print a form
+import { listPublishedForms, FORM_CATEGORIES } from "./form-templates.js";
+import { mountPrintTask } from "./print-task.js";
 import { listTaskTypes } from "./task-types.js";
 import { mountTaskTypes, mountTaskEditor } from "./task-builder.js";
 import { mountTaskRunner } from "./task-runner.js";
@@ -33,8 +35,8 @@ const CATEGORIES = [
   { key: "staff", title: "To Staff", icon: I.staff, tone: "violet",
     blurb: "Email a reminder or a note to one or more staff members." },
   { key: "print", title: "To Print", icon: I.print, tone: "amber",
-    blurb: "Print a document from the Printables in Form Builder." },
-];
+    blurb: "Print any form: blank, with a patient's details, or a completed copy." },
+  ];
 
 export function mountTaskManager(container, { param = "", isAdmin = false, staff = null } = {}) {
   const parts = String(param || "").split("/").filter(Boolean);
@@ -43,6 +45,7 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
 
   // Full-page screens
   if (view === "run" && sub) { mountTaskRunner(container, { taskId: sub, patientId: parts[2] || "", staff }); return; }
+  if (view === "print" && sub) { mountPrintTask(container, { templateId: sub, patientId: parts[2] || "", staff }); return; }
   if (view === "types" && sub) {
     if (isAdmin) { mountTaskEditor(container, { id: sub, staff }); return; }
     container.innerHTML = '<section class="page"><div class="state"><strong>Admins only</strong>Only admins can edit task types.</div></section>';
@@ -118,26 +121,53 @@ async function renderCategory(main, key, isAdmin) {
   list.addEventListener("click", (e) => {
     const run = e.target.closest("[data-run]");
     if (run) { location.hash = `#/tasks/run/${encodeURIComponent(run.dataset.run)}`; return; }
-    if (e.target.closest("[data-print]")) showToast("Printing from Task Manager is coming next. For now, open the patient and use Consent record or Treatment record.");
   });
 
   try {
     if (key === "print") {
-      const printables = (await listPublishedForms()).filter((t) => t.category === "printable");
+      const forms = (await listPublishedForms()).filter((t) => t.category !== "email");
       if (!list.isConnected) return;
-      list.innerHTML = printables.length
-        ? printables.map((t) => `
-            <button type="button" class="tm-task" data-print="${esc(t.id)}">
-              <span class="tm-task-icon">${I.doc}</span>
-              <span class="tm-task-main"><strong>${esc(t.name)}</strong><small>Printable · Version ${t.version}</small></span>
-              <span class="tm-task-go">${I.chev}</span>
-            </button>`).join("")
-        : `<div class="tm-empty">No printables are published yet.${isAdmin
-            ? ' Create one in <a href="#/forms">Form Builder</a> under <strong>Printables</strong>, then publish it.'
-            : " Ask an admin to publish one in Form Builder."}</div>`;
+      if (!forms.length) {
+        list.innerHTML = `<div class="tm-empty">No forms are published yet.${isAdmin
+          ? ' Create one in <a href="#/forms">Form Builder</a>, then publish it.'
+          : " Ask an admin to publish one in Form Builder."}</div>`;
+        return;
+      }
+      const groups = FORM_CATEGORIES
+        .map((c) => ({ ...c, items: forms.filter((t) => t.category === c.key) }))
+        .filter((g) => g.items.length);
+      list.innerHTML = `
+        <label class="ib-search pt-find">${ic('<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>')}
+          <input type="search" data-role="find" placeholder="Search forms" aria-label="Search forms" /></label>
+        ${groups.map((g) => `
+          <section class="pt-group" data-group>
+            <h4 class="pt-group-h">${esc(g.label)}</h4>
+            ${g.items.map((t) => `
+              <a class="tm-task" href="#/tasks/print/${encodeURIComponent(t.id)}" data-find="${esc(t.name.toLowerCase())}">
+                <span class="tm-task-icon">${I.doc}</span>
+                <span class="tm-task-main"><strong>${esc(t.name)}</strong><small>Version ${t.version}</small></span>
+                <span class="tm-task-go">${I.chev}</span>
+              </a>`).join("")}
+          </section>`).join("")}
+        <div class="tm-empty" data-role="nomatch" hidden>No forms match that search.</div>`;
+      list.querySelector('[data-role="find"]').addEventListener("input", (e) => {
+        const q = e.target.value.trim().toLowerCase();
+        let any = false;
+        list.querySelectorAll("[data-group]").forEach((g) => {
+          let n = 0;
+          g.querySelectorAll("[data-find]").forEach((a) => {
+            const ok = !q || a.dataset.find.includes(q);
+            a.hidden = !ok;
+            if (ok) n++;
+          });
+          g.hidden = !n;
+          if (n) any = true;
+        });
+        list.querySelector('[data-role="nomatch"]').hidden = any;
+      });
       return;
     }
-
+    
     const tasks = (await listTaskTypes({ isAdmin: false })).filter((t) => t.category === key);
     if (!list.isConnected) return;
     list.innerHTML = tasks.length

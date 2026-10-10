@@ -3262,3 +3262,30 @@ body.no-tasks-run [data-task-picker] { display: none !important; }
   border: 1px solid var(--primary); border-radius: 10px; background: var(--primary-soft); }
 .tb-pchip span { display: flex; flex-direction: column; }
 .tb-pchip small { color: var(--muted); font-size: .78rem; }
+
+/* ---------- Task Manager: To Print ---------- */
+a.tm-task { text-decoration: none; }
+a.tm-task:hover { border-color: var(--primary); }
+.pt-find { width: 100%; max-width: 420px; margin-bottom: .4rem; }
+.pt-find input { width: 100%; }
+.pt-group { display: flex; flex-direction: column; gap: .45rem; }
+.pt-group + .pt-group { margin-top: .6rem; }
+.pt-group-h { margin: .2rem 0 0; font-size: .74rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.pt-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); }
+.pt-form { display: flex; flex-direction: column; gap: .15rem; }
+.pt-form small { color: var(--muted); font-size: .8rem; }
+.pt-change { align-self: flex-start; text-decoration: none; }
+.pt-hint { margin: 0; font-size: .85rem; }
+.pt-saved { display: flex; flex-direction: column; gap: .35rem; max-height: 280px; overflow: auto; }
+.pt-saved-row { display: flex; align-items: center; gap: .6rem; padding: .55rem .7rem; border: 1px solid var(--border);
+  border-radius: 10px; background: #fff; cursor: pointer; }
+.pt-saved-row:has(input:checked) { border-color: var(--primary); background: var(--primary-soft); }
+.pt-saved-row input { width: 17px; height: 17px; accent-color: var(--primary); }
+.pt-saved-row span { display: flex; flex-direction: column; }
+.pt-saved-row small { color: var(--muted); font-size: .78rem; }
+.pt-stage { max-height: 75vh; overflow: auto; border-radius: 10px; background: #e2e8f0; }
+.pt-fit { position: relative; overflow: hidden; }
+.pt-frame { display: block; width: 800px; border: none; background: #e2e8f0; transform-origin: top left; }
+.pt-skel { height: 420px; border-radius: 10px; }
+.pt-wait { padding: 2.5rem 1rem; text-align: center; }
+@media (max-width: 1100px) { .pt-grid { grid-template-columns: 1fr; } }
