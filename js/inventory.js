@@ -189,7 +189,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       return `
         <div class="inv-prow${p.active ? "" : " is-off"}">
           <span class="inv-name"><strong>${esc(p.name)}${p.active ? "" : ' <em class="inv-off">Inactive</em>'}</strong>
-            <small>${esc([`${p.orderUnit} of ${plural(p.packSize, p.stockUnit)}`, sup && sup.name, p.supplierCode && `Code ${p.supplierCode}`].filter(Boolean).join(" · "))}</small></span>
+            <small>${esc([packText(p), sup && sup.name, p.supplierCode && `Code ${p.supplierCode}`].filter(Boolean).join(" · "))}</small></span>
           <span class="inv-price">${esc([p.cost !== null && `Cost ${money(p.cost)} / ${p.orderUnit}`, p.price !== null && `Retail ${money(p.price)}`].filter(Boolean).join(" · "))}</span>
           ${p.tracked ? '<span class="inv-flag is-info">Batch &amp; expiry</span>' : '<span></span>'}
           ${canManage ? `<button type="button" class="lh-btn" data-edit-product="${esc(p.id)}">Edit</button>` : "<span></span>"}
@@ -245,7 +245,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   /* ---------- Product editor ---------- */
   function editProduct(p) {
     const isNew = !p;
-    const x = p || { category: st.cat || "general", stockUnit: "unit", orderUnit: "box", packSize: 1, reorder: {}, active: true, tracked: false };
+    const x = p || { category: st.cat || "general", stockUnit: "", orderUnit: "", packSize: 1, reorder: {}, active: true, tracked: false };
     const hasStock = !!p && (p.stock.shelf + p.stock.jt) > 0;
     const val = (v) => esc(v === null || v === undefined ? "" : v);
     const dlg = openDialog("inv-dlg", `
@@ -262,9 +262,20 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
             <option value="">No supplier yet</option>${st.suppliers.map((s) =>
               `<option value="${esc(s.id)}"${x.supplierId === s.id ? " selected" : ""}>${esc(s.name)}</option>`).join("")}</select></label>
           <label class="lh-field"><span class="lh-label">Supplier's product code (optional)</span><input name="supplierCode" maxlength="60" value="${val(x.supplierCode)}" /></label>
-          <label class="lh-field"><span class="lh-label">Stock unit</span><input name="stockUnit" maxlength="30" placeholder="e.g. vial, syringe, unit" value="${val(x.stockUnit)}" /></label>
-          <label class="lh-field"><span class="lh-label">Ordered as</span><input name="orderUnit" maxlength="30" placeholder="e.g. box, pack" value="${val(x.orderUnit)}" /></label>
-          <label class="lh-field"><span class="lh-label">Stock units in each</span><input name="packSize" type="number" min="1" step="1" value="${val(x.packSize)}" /></label>
+          <label class="lh-field"><span class="lh-label">Counted on the shelf as</span>
+            <input name="stockUnit" maxlength="30" placeholder="e.g. vial, syringe, tube, item" value="${val(x.stockUnit)}" />
+            <small class="fe-note">What you pick up and count. For Xeomin: vial.</small></label>
+          <label class="lh-field"><span class="lh-label">Ordered from the supplier as</span>
+            <input name="orderUnit" maxlength="30" placeholder="e.g. box, pack, or vial" value="${val(x.orderUnit)}" />
+            <small class="fe-note">Can be the same, e.g. vial.</small></label>
+          <label class="lh-field"><span class="lh-label" data-role="packlbl">How many in each</span>
+            <input name="packSize" type="number" min="1" step="1" value="${val(x.packSize)}" /></label>
+          <div class="lh-field inv-span"><span class="lh-label">Dose in each <span data-role="doseitem">item</span> (optional, for injectables)</span>
+            <div class="inv-dose-row">
+              <input name="dosePer" type="number" min="0" step="any" placeholder="e.g. 100" value="${val(x.dosePer)}" aria-label="Dose amount" />
+              <input name="doseUnit" maxlength="20" placeholder="units" value="${val(x.doseUnit)}" aria-label="Dose measured in" />
+            </div>
+            <small class="fe-note">Stock is still counted in whole items. The dose shows alongside, e.g. 3 vials (300 units), and is used later when recording what was used in a treatment.</small></div>
           <label class="lh-field"><span class="lh-label">Cost per order unit, $ (optional)</span><input name="cost" type="number" min="0" step="0.01" value="${val(x.cost)}" /></label>
           <label class="lh-field"><span class="lh-label">Retail price, $ (optional)</span><input name="price" type="number" min="0" step="0.01" value="${val(x.price)}" /></label>
           <label class="lh-field"><span class="lh-label">Barcode (optional)</span><input name="barcode" maxlength="60" value="${val(x.barcode)}" /></label>
@@ -286,10 +297,16 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const form = dlg.querySelector("form");
     const err = dlg.querySelector(".lh-error");
     const packHint = () => {
-      const n = Math.max(1, parseInt(form.elements.packSize.value, 10) || 1);
-      const unit = form.elements.stockUnit.value.trim() || "unit";
-      const ou = form.elements.orderUnit.value.trim() || "box";
-      dlg.querySelector('[data-role="pack"]').textContent = `Receiving 1 ${ou} adds ${plural(n, unit)} to stock.`;
+      const f = form.elements;
+      const n = Math.max(1, parseInt(f.packSize.value, 10) || 1);
+      const unit = f.stockUnit.value.trim() || "item";
+      const ou = f.orderUnit.value.trim() || "box";
+      const dp = Number(f.dosePer.value);
+      const du = f.doseUnit.value.trim() || "units";
+      dlg.querySelector('[data-role="packlbl"]').textContent = `How many ${unitPlural(unit)} in each ${ou}`;
+      dlg.querySelector('[data-role="doseitem"]').textContent = unit;
+      const dose = dp > 0 ? ` (${+(n * dp).toFixed(2)} ${du})` : "";
+      dlg.querySelector('[data-role="pack"]').textContent = `Receiving 1 ${ou} adds ${plural(n, unit)}${dose} to stock.`;
     };
     packHint();
     form.addEventListener("input", packHint);
@@ -305,6 +322,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           name: f.name.value, category: f.category.value, brand: f.brand.value, supplierId: f.supplierId.value,
           supplierCode: f.supplierCode.value, stockUnit: f.stockUnit.value, orderUnit: f.orderUnit.value,
           packSize: f.packSize.value, cost: f.cost.value, price: f.price.value, barcode: f.barcode.value,
+          dosePer: f.dosePer.value, doseUnit: f.doseUnit.value,
           reorder: { shelf: f.reShelf.value, jt: f.reJt.value },
           tracked: hasStock ? x.tracked : f.tracked.checked, active: f.active.checked, notes: f.notes.value,
         }, staff);
@@ -555,12 +573,12 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       box.innerHTML = `
         <div class="inv-pd-head">
           <div><h3>${esc(p.name)}</h3>
-            <p class="muted">${esc([catLabel(p.category), p.brand, `${p.orderUnit} of ${plural(p.packSize, p.stockUnit)}`, p.tracked ? "Batch & expiry tracked" : ""].filter(Boolean).join(" · "))}</p></div>
+            <p class="muted">${esc([catLabel(p.category), p.brand, packText(p), p.tracked ? "Batch & expiry tracked" : ""].filter(Boolean).join(" · "))}</p></div>
           <button type="button" class="ib-tool" data-act="close" aria-label="Close" title="Close">×</button>
         </div>
         <div class="inv-pd-qty">${LOCATIONS.map((l) => `
           <div class="inv-pd-loc${lowAt(p, l.key) ? " is-low" : ""}"><span>${esc(l.label)}</span>
-            <strong>${esc(plural(p.stock[l.key], p.stockUnit))}</strong>
+            <strong>${esc(qtyText(p, p.stock[l.key]))}</strong>
             ${p.reorder[l.key] !== null ? `<small>${lowAt(p, l.key) ? "Low · " : ""}reorder at ${p.reorder[l.key]}</small>` : ""}</div>`).join("")}</div>
         ${canMove || canRequest ? `<div class="inv-pd-acts">
           ${canManage ? '<button type="button" class="lh-btn is-primary" data-stock="add">Add stock</button>' : ""}
@@ -575,7 +593,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
               const ex = expiryState(l.expiry);
               return `<tr><td>${esc(locLabel(l.loc))}</td><td>${esc(l.batch)}</td>
                 <td>${esc(niceDate(l.expiry))}${ex ? ` <span class="inv-flag is-${ex === "expired" ? "bad" : "warn"}">${ex === "expired" ? "Expired" : "Soon"}</span>` : ""}</td>
-                <td>${l.qty}</td></tr>`;
+                <td>${esc(qtyText(p, l.qty))}</td></tr>`;
             }).join("")}</tbody></table>`
           : '<p class="tb-none">No batches in stock.</p>'}</div>` : ""}
         ${sup ? `<div class="inv-pd-sec"><h4>Supplier</h4><p class="inv-pd-sup"><strong>${esc(sup.name)}</strong>${

@@ -305,7 +305,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       const p = byId.get(el.value);
       if (!p) return;
       Object.assign(l, { productId: p.id, name: p.name, supplierCode: p.supplierCode, orderUnit: p.orderUnit,
-        packSize: p.packSize, stockUnit: p.stockUnit, unitCost: p.cost });
+        packSize: p.packSize, stockUnit: p.stockUnit, dosePer: p.dosePer, doseUnit: p.doseUnit, unitCost: p.cost });
       renderLeft(); renderRight(); changed();
     } else if (el.dataset.l === "loc") {
       l.loc = el.value;
