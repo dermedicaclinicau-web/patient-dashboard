@@ -88,11 +88,11 @@ export async function mountMyDashboard(container, { staff } = {}) {
   const safe = (p, fallback) => Promise.resolve(p).catch((err) => { console.warn("Dashboard:", err); return fallback; });
 
   async function load() {
-      const me0 = myUid();
-      const hidden = readHidden(me0);
-      const show = (k) => can(`dash.${k}`) && !hidden.has(k);
-      const todayKey = dayKey();
-      const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks] = await Promise.all([
+    const me0 = myUid();
+    const hidden = readHidden(me0);
+    const show = (k) => can(`dash.${k}`) && !hidden.has(k);
+    const todayKey = dayKey();
+    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks] = await Promise.all([
       safe(listProducts(), []),
       safe(listAllLots(), []),
       safe(listKits(), []),
@@ -104,7 +104,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
       canOrder || canJt ? safe(listShortUsage(), []) : [],
       canOrder ? safe(listPos(), []) : [],
       canOrder ? safe(listRequests({ max: 300 }), []) : [],
-      safe(listCountsOn(dayKey()), []),
+      safe(listCountsOn(todayKey), []),
       show("appts") ? safe(myAppointments(staff, todayKey), []) : [],
       show("tasks") ? safe(dueTasks(todayKey), []) : [],
     ]);
@@ -122,25 +122,22 @@ export async function mountMyDashboard(container, { staff } = {}) {
     // What's been counted today (by anyone): Shelf/JT per product, kits per lot
     const doneKeys = new Set(countsToday.flatMap((c) => c.lines.map((l) =>
       l.loc === "kit" ? `kit|${l.ref}` : c.kind === "opening" ? `${l.productId}|${l.loc}` : "")));
+    // Opening count: Shelf / JT storage, plus every injector's kit for kit products due today
     if (can("inventory.count") || canOrder) {
-      const counted = new Set(countsToday.filter((c) => c.kind === "opening").flatMap((c) => c.lines.map((l) => `${l.productId}|${l.loc}`)));
-      const left = products.filter((p) => countDue(p)).flatMap((p) => countLocs(p).map((loc) => `${p.id}|${loc}`)).filter((k) => !counted.has(k)).length;
+      const dueKeys = products.filter((p) => countDue(p)).flatMap((p) => [
+        ...countLocs(p).map((loc) => `${p.id}|${loc}`),
+        ...(isKitProduct(p) ? kits.filter((k) => k.productId === p.id).map((k) => `kit|${k.id}`) : []),
+      ]);
+      const left = dueKeys.filter((k) => !doneKeys.has(k)).length;
       if (left) att.push({ tone: "warn", text: `Opening count: ${left} still to count today`, href: "#/tasks/count", act: "Count now" });
     }
+    // My kit: lots due today that nobody has counted yet
     if (canKit) {
-      const checked = new Set(countsToday.filter((c) => c.kind === "kit" && c.byUid === me).flatMap((c) => c.lines.map((l) => l.productId)));
-      const due = products.filter((p) => isKitProduct(p) && countDue(p) && myKits.some((k) => k.productId === p.id) && !checked.has(p.id));
-      if (due.length) att.push({ tone: "warn", text: `Kit check due: ${due.map((p) => p.name).join(", ")}`, href: "#/tasks/count/kit", act: "Check kit" });
-    }
-    if (can("inventory.count") || canOrder) {
-      const counted = new Set(countsToday.filter((c) => c.kind === "opening").flatMap((c) => c.lines.map((l) => `${l.productId}|${l.loc}`)));
-      const left = products.filter((p) => countDue(p)).flatMap((p) => countLocs(p).map((loc) => `${p.id}|${loc}`)).filter((k) => !counted.has(k)).length;
-      if (left) att.push({ tone: "warn", text: `Opening count: ${left} still to count today`, href: "#/tasks/count", act: "Count now" });
-    }
-    if (canKit) {
-      const checked = new Set(countsToday.filter((c) => c.kind === "kit" && c.byUid === me).flatMap((c) => c.lines.map((l) => l.productId)));
-      const due = products.filter((p) => isKitProduct(p) && countDue(p) && myKits.some((k) => k.productId === p.id) && !checked.has(p.id));
-      if (due.length) att.push({ tone: "warn", text: `Kit check due: ${due.map((p) => p.name).join(", ")}`, href: "#/tasks/count/kit", act: "Check kit" });
+      const mineDue = myKits.filter((k) => countDue(byId.get(k.productId)) && !doneKeys.has(`kit|${k.id}`));
+      if (mineDue.length) att.push({
+        tone: "info", text: `Your kit hasn't been counted today (${[...new Set(mineDue.map((k) => k.productName))].join(", ")})`,
+        href: "#/tasks/count/kit", act: "Check kit",
+      });
     }
     loans.filter((l) => l.fromUid === me && l.status === "unconfirmed").forEach((l) => att.push({
       tone: "warn", text: `${l.toName} took ${fmt(l.units)} ${l.doseUnit} of ${l.productName} from your opened vial`,
@@ -174,7 +171,6 @@ export async function mountMyDashboard(container, { staff } = {}) {
       ? `<ul class="md-att">${att.map((a) => `<li class="is-${a.tone}"><span>${esc(a.text)}</span>
           <a class="lh-btn" href="${a.href}">${esc(a.act)}</a></li>`).join("")}</ul>`
       : `<p class="md-clear">${svg(ICON.ok)} Nothing needs you right now.</p>`, "md-wide");
-
     /* ---------- My kit ---------- */
     const kitProducts = products.filter((p) => p.active && isKitProduct(p));
     const kitHtml = !canKit || !kitProducts.length ? "" : card("My kit", `<div class="md-kits">${kitProducts.map((p) => {
