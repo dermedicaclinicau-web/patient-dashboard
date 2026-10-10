@@ -124,7 +124,7 @@ async function renderCategory(main, key, isAdmin) {
   });
 
   try {
-    if (key === "print") {
+        if (key === "print") {
       const forms = (await listPublishedForms()).filter((t) => t.category !== "email");
       if (!list.isConnected) return;
       if (!forms.length) {
@@ -136,35 +136,87 @@ async function renderCategory(main, key, isAdmin) {
       const groups = FORM_CATEGORIES
         .map((c) => ({ ...c, items: forms.filter((t) => t.category === c.key) }))
         .filter((g) => g.items.length);
+
+      // Which sections are open, remembered on this device
+      const OPEN_KEY = "dm.print.open";
+      let openSet;
+      try {
+        const saved = JSON.parse(localStorage.getItem(OPEN_KEY) || "null");
+        openSet = new Set(Array.isArray(saved) ? saved : groups.length === 1 ? [groups[0].key] : []);
+      } catch { openSet = new Set(); }
+      const saveOpen = () => { try { localStorage.setItem(OPEN_KEY, JSON.stringify([...openSet])); } catch { /* private mode */ } };
+      let searching = false;
+
       list.innerHTML = `
-        <label class="ib-search pt-find">${ic('<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>')}
-          <input type="search" data-role="find" placeholder="Search forms" aria-label="Search forms" /></label>
+        <div class="pt-tools">
+          <label class="ib-search pt-find">${ic('<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>')}
+            <input type="search" data-role="find" placeholder="Search forms or categories" aria-label="Search forms" /></label>
+          <button type="button" class="ff-btn is-quiet" data-role="toggle-all"></button>
+        </div>
         ${groups.map((g) => `
-          <section class="pt-group" data-group>
-            <h4 class="pt-group-h">${esc(g.label)}</h4>
-            ${g.items.map((t) => `
+          <details class="pt-group" data-group="${g.key}" data-label="${esc(g.label.toLowerCase())}"${openSet.has(g.key) ? " open" : ""}>
+            <summary><span class="pt-chev">${I.chev}</span><span>${esc(g.label)}</span><em data-role="count">${g.items.length}</em></summary>
+            <div class="pt-group-body">${g.items.map((t) => `
               <a class="tm-task" href="#/tasks/print/${encodeURIComponent(t.id)}" data-find="${esc(t.name.toLowerCase())}">
                 <span class="tm-task-icon">${I.doc}</span>
                 <span class="tm-task-main"><strong>${esc(t.name)}</strong><small>Version ${t.version}</small></span>
                 <span class="tm-task-go">${I.chev}</span>
-              </a>`).join("")}
-          </section>`).join("")}
+              </a>`).join("")}</div>
+          </details>`).join("")}
         <div class="tm-empty" data-role="nomatch" hidden>No forms match that search.</div>`;
+
+      const sections = [...list.querySelectorAll("[data-group]")];
+      const toggleBtn = list.querySelector('[data-role="toggle-all"]');
+      const nomatch = list.querySelector('[data-role="nomatch"]');
+      const updateToggle = () => {
+        const visible = sections.filter((s) => !s.hidden);
+        toggleBtn.textContent = visible.length && visible.every((s) => s.open) ? "Collapse all" : "Expand all";
+      };
+
+      // Opening or closing a section by hand is remembered (not while searching)
+      list.addEventListener("toggle", (e) => {
+        const s = e.target.closest && e.target.closest("[data-group]");
+        if (!s) return;
+        if (!searching) {
+          if (s.open) openSet.add(s.dataset.group); else openSet.delete(s.dataset.group);
+          saveOpen();
+        }
+        updateToggle();
+      }, true);
+
+      toggleBtn.addEventListener("click", () => {
+        const visible = sections.filter((s) => !s.hidden);
+        const open = !visible.every((s) => s.open);
+        visible.forEach((s) => { s.open = open; });
+        if (!searching) {
+          visible.forEach((s) => { if (open) openSet.add(s.dataset.group); else openSet.delete(s.dataset.group); });
+          saveOpen();
+        }
+        updateToggle();
+      });
+
       list.querySelector('[data-role="find"]').addEventListener("input", (e) => {
         const q = e.target.value.trim().toLowerCase();
+        searching = !!q;
         let any = false;
-        list.querySelectorAll("[data-group]").forEach((g) => {
+        sections.forEach((s) => {
+          const wholeGroup = q && s.dataset.label.includes(q);
           let n = 0;
-          g.querySelectorAll("[data-find]").forEach((a) => {
-            const ok = !q || a.dataset.find.includes(q);
+          s.querySelectorAll("[data-find]").forEach((a) => {
+            const ok = !q || wholeGroup || a.dataset.find.includes(q);
             a.hidden = !ok;
             if (ok) n++;
           });
-          g.hidden = !n;
+          s.hidden = !n;
+          s.querySelector('[data-role="count"]').textContent = n;
+          s.open = q ? n > 0 : openSet.has(s.dataset.group);
           if (n) any = true;
         });
-        list.querySelector('[data-role="nomatch"]').hidden = any;
+        nomatch.hidden = any;
+        updateToggle();
       });
+
+      updateToggle();
       return;
     }
     

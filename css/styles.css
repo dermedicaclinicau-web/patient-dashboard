@@ -3266,11 +3266,21 @@ body.no-tasks-run [data-task-picker] { display: none !important; }
 /* ---------- Task Manager: To Print ---------- */
 a.tm-task { text-decoration: none; }
 a.tm-task:hover { border-color: var(--primary); }
-.pt-find { width: 100%; max-width: 420px; margin-bottom: .4rem; }
+.pt-tools { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-bottom: .2rem; }
+.pt-find { flex: 1 1 260px; max-width: 440px; }
 .pt-find input { width: 100%; }
-.pt-group { display: flex; flex-direction: column; gap: .45rem; }
-.pt-group + .pt-group { margin-top: .6rem; }
-.pt-group-h { margin: .2rem 0 0; font-size: .74rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.pt-group { overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: #fff; }
+.pt-group > summary { display: flex; align-items: center; gap: .55rem; padding: .8rem 1rem; list-style: none; cursor: pointer;
+  user-select: none; font-size: .8rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: #334155; }
+.pt-group > summary::-webkit-details-marker { display: none; }
+.pt-group > summary:hover { background: var(--surface-2); }
+.pt-group > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.pt-group > summary em { margin-left: auto; padding: .1rem .55rem; border-radius: 999px; background: var(--surface-2);
+  font-size: .72rem; font-style: normal; color: var(--muted); }
+.pt-group[open] > summary { border-bottom: 1px solid var(--border); }
+.pt-chev svg { display: block; width: 16px; height: 16px; color: var(--muted); transition: transform .18s ease; }
+.pt-group[open] .pt-chev svg { transform: rotate(90deg); color: var(--primary); }
+.pt-group-body { display: flex; flex-direction: column; gap: .4rem; padding: .6rem; background: var(--surface-2); }
 .pt-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); }
 .pt-form { display: flex; flex-direction: column; gap: .15rem; }
 .pt-form small { color: var(--muted); font-size: .8rem; }
