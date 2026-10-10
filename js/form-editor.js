@@ -899,7 +899,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
           const kit = isKitProduct(p);
           return {
             productId: id, name: p ? p.name : (o && o.name) || "Product", kind: kit ? "kit" : "storage",
-            unit: p ? (kit ? p.doseUnit : p.stockUnit) : (o && o.unit) || "",
+            unit: p ? (kit || p.dosePer ? p.doseUnit : p.stockUnit) : (o && o.unit) || "",
             required: o ? o.required : false, amount: o ? o.amount : null, max: o ? o.max : null,
           };
         });
@@ -1093,7 +1093,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
       if (root.isConnected && f && f.type === "aftercare") renderInspector();
     })
     .catch((err) => console.warn("Couldn't load email templates:", err));
-    
+
   listProducts()
     .then((list) => {
       products = list;

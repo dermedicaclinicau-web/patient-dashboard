@@ -3654,3 +3654,10 @@ a.ff-btn { text-decoration: none; }
 .cs-pick-group h4 { margin: 0 0 .3rem; font-size: .85rem; color: #64748b; text-transform: uppercase; letter-spacing: .04em; }
 .cs-view td, .cs-view th { font-size: .92rem; }
 @media (max-width: 640px) { .cs-row { grid-template-columns: minmax(0, 1fr) 120px 28px; } }
+
+.cs-row.is-dosed { grid-template-columns: minmax(0, 1fr) 130px 140px 32px; }
+.cs-cols { display: grid; grid-template-columns: minmax(0, 1fr) 130px 140px 32px; gap: .5rem;
+  font-size: .75rem; color: #64748b; text-transform: uppercase; letter-spacing: .04em; }
+@media (max-width: 640px) {
+  .cs-row.is-dosed, .cs-cols { grid-template-columns: minmax(0, 1fr) 100px 110px 28px; }
+}

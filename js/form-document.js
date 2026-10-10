@@ -299,7 +299,8 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
       if (!lines.length && !(blank && items.length)) return "";
       const rows = lines.length
         ? lines.map((l) => (l.rows && l.rows.length ? l.rows : [{ amount: l.total }]).map((r, i) => `<tr>
-            <td>${i ? "" : esc(l.name)}</td><td>${esc(`${+Number(r.amount || 0).toFixed(1)} ${l.unit || ""}`)}</td>
+            <td>${i ? "" : esc(l.name)}</td><td>${esc(l.kind !== "kit" && l.doseUnit && r.dose
+              ? `${+Number(r.dose).toFixed(2)} ${l.doseUnit}` : `${+Number(r.amount || 0).toFixed(1)} ${l.unit || ""}`)}</td>
             <td>${esc(r.batch || "")}</td><td>${esc(r.expiry ? niceDate(r.expiry) : "")}</td></tr>`).join("")).join("")
         : items.map((it) => `<tr><td>${esc(it.name)}</td><td style="height:24px"></td><td></td><td></td></tr>`).join("");
       return `<div class="q" style="${box}">${label ? `<div class="ql" style="margin-bottom:${gap}px;">${label}</div>` : ""}` +
