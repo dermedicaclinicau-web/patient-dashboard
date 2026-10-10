@@ -3250,3 +3250,14 @@ body.no-tasks-run [data-task-picker] { display: none !important; }
   .ac-head .ac-link { flex: none; padding: .2rem .55rem; border-radius: 999px; background: var(--primary-soft); color: var(--primary);
   font-size: .75rem; font-weight: 600; text-decoration: none; white-space: nowrap; }
 .ac-head .ac-link:hover { text-decoration: underline; }
+
+.tb-psearch { display: flex; flex-direction: column; gap: .35rem; }
+.tb-presults { display: flex; flex-direction: column; gap: .25rem; max-height: 260px; overflow-y: auto; }
+.tb-presult { display: flex; flex-direction: column; align-items: flex-start; gap: .1rem; padding: .5rem .7rem; border: 1px solid var(--border);
+  border-radius: 10px; background: #fff; font: inherit; text-align: left; cursor: pointer; }
+.tb-presult:hover, .tb-presult:focus-visible { border-color: var(--primary); background: var(--primary-soft); }
+.tb-presult small { color: var(--muted); font-size: .78rem; }
+.tb-pchip { display: flex; align-items: center; justify-content: space-between; gap: .6rem; padding: .55rem .75rem;
+  border: 1px solid var(--primary); border-radius: 10px; background: var(--primary-soft); }
+.tb-pchip span { display: flex; flex-direction: column; }
+.tb-pchip small { color: var(--muted); font-size: .78rem; }

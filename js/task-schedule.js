@@ -46,7 +46,7 @@ export function defaultSchedule() {
     days: ["Mo"], everyWeeks: 1, monthDay: "1", nth: "1", nthDay: "Mo", everyN: 2,
     end: "never", endDate: "", endCount: 10,
     skipWeekends: false, skipClosed: true, onlyApptDays: false, onSkip: "skip",
-    renderedHtml: "", renderedSubject: "",
+    renderedHtml: "", renderedSubject: "", patientId: "", patientName: "",
   };
 }
 
@@ -74,7 +74,9 @@ export function cleanSchedule(s) {
     onSkip: x.onSkip === "next" ? "next" : "skip",
     renderedHtml: String(x.renderedHtml || "").slice(0, 150000),
     renderedSubject: String(x.renderedSubject || "").slice(0, 200),
-  };
+    patientId: /^[A-Za-z0-9_-]{1,80}$/.test(String(x.patientId || "")) ? String(x.patientId) : "",
+    patientName: String(x.patientName || "").slice(0, 120),
+   };
 }
 
 function matches(s, p) {
@@ -161,10 +163,9 @@ export function describeSchedule(sched) {
   return bits.join(", ") + (cond.length ? ` · ${cond.join(", ")}` : "") + (s.paused ? " · Paused" : "");
 }
 
-export const PATIENT_CLASH = "This task sends automatically, so no one is there to choose a patient. " +
-  "To include a patient, set Schedule (step 7) to “Only when someone runs it”. " +
-  "To keep it automatic, untick “This is about a patient” and remove the patient blanks.";
-const PATIENT_BLANKS_RE = /\{\s*(patient name|patient first name|patient mobile|patient email|upcoming appointments|treatment plan|treatment info|aftercare)\s*\}/i;
+
+// Reasons a scheduled task can't be published yet
+const SMART_RE = /\{\s*(upcoming appointments|treatment plan|treatment info|aftercare)\s*\}/i;
 
 // Reasons a scheduled task can't be published yet
 export function scheduleProblems(task) {
@@ -173,8 +174,11 @@ export function scheduleProblems(task) {
   const out = [];
   if (task.recipients.mode !== "fixed") out.push("Scheduled tasks need “Always these staff” in Who it goes to.");
   else if (!task.recipients.staffIds.length) out.push("Choose who the scheduled task goes to.");
+  if (task.recipients.aboutPatient && !s.patientId) out.push("Choose the patient for automatic sends in Schedule (step 7).");
+  if (SMART_RE.test(`${task.subject} ${task.body}`)) {
+    out.push("Automatic sends can't include {Upcoming appointments}, {Treatment plan}, {Treatment info} or {Aftercare}. Remove them, or set Schedule to “Only when someone runs it”.");
+  }
   if (task.attachments.length) out.push("Scheduled tasks can't include attachments yet. Remove them in Attachments.");
-  if (task.recipients.aboutPatient || PATIENT_BLANKS_RE.test(`${task.subject} ${task.body}`)) out.push(PATIENT_CLASH);
   task.fields.filter((f) => f.required && !String(f.default || "").trim())
     .forEach((f) => out.push(`Give “${f.label || "Untitled field"}” an answer for automatic sends.`));
   if (s.freq === "weekly" && !s.days.length) out.push("Choose at least one day of the week.");
@@ -185,6 +189,7 @@ export function scheduleProblems(task) {
   if (s.end === "date" && s.endDate && s.endDate < s.date) out.push("The stop date is before the start date.");
   return out;
 }
+
 
 /* ---------- Clinic closed days (shared by every scheduled task) ---------- */
 

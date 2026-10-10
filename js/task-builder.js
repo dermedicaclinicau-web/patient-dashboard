@@ -13,11 +13,13 @@ import { hydrateRichImages } from "./rich-html.js";
 import { openImagePicker } from "./image-bank.js";
 import { listPublishedForms, getLetterhead } from "./form-templates.js";
 import { confirmDialog } from "./dialog.js";
-import { showToast } from "./utils.js";
+import { showToast, formatMobile } from "./utils.js";
 import {
   cleanSchedule, describeSchedule, scheduleProblems, nextSlots, FREQS, WEEK_ORDER, DAY_NAMES,
-  fmtTime, fmtSlot, getClosedDays, openClosedDaysDialog, listScheduleStates, PATIENT_CLASH,
+  fmtTime, fmtSlot, getClosedDays, openClosedDaysDialog, listScheduleStates,
 } from "./task-schedule.js";
+import { searchPatients } from "./task-runner.js";
+import { getPatient } from "./patients.js";
 import { callApi } from "./appointments.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -312,6 +314,8 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   }
   let closedDays = [];
   let schedState = null; // the scheduler's record for this task (count, last send, problems)
+  let schedPatient = null; // the patient automatic sends are about
+  let schSeq = 0, schTimer = null;
   task.schedule = cleanSchedule(task.schedule);
 
   root.innerHTML = `
@@ -375,16 +379,13 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   }
   // Every problem, with the patient clash shown once instead of two messages that contradict each other
   function allProblems() {
-    const sp = scheduleProblems(task);
-    let tp = taskProblems(task);
-    if (sp.includes(PATIENT_CLASH)) tp = tp.filter((p) => !/needs a patient/.test(p));
-    return [...tp, ...sp];
+    return [...taskProblems(task), ...scheduleProblems(task)];
   }
 
   function changed() {
     // Adding a patient blank to a staff task turns on "This is about a patient"
     const pt = patientTokens();
-    if (task.category === "staff" && !task.recipients.aboutPatient && !task.schedule.enabled && pt > lastPatientTokens) {
+    if (task.category === "staff" && !task.recipients.aboutPatient && pt > lastPatientTokens) {
       task.recipients.aboutPatient = true;
       renderForm();
       showToast("Turned on “This is about a patient”. Staff will choose the patient when they run it.");
@@ -625,7 +626,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     const box = $('[data-role="chips"]');
     const groups = tokenGroups(task, tokenOpts());
     // Staff tasks: always offer the patient blanks. Using one turns on "This is about a patient".
-    if (task.category === "staff" && !task.recipients.aboutPatient && !task.schedule.enabled) {
+    if (task.category === "staff" && !task.recipients.aboutPatient) {
       groups.splice(1, 0, {
         title: "Patient it's about (staff choose the patient when running)",
         tokens: PATIENT_TOKENS.map((name) => ({ name, kind: "", hint: "Using this turns on “This is about a patient”" })),
@@ -663,6 +664,55 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   function renderScheduleInfo() {
     const box = form.querySelector('[data-role="sch-info"]');
     if (box) box.innerHTML = scheduleInfoHtml();
+  }
+
+  function schedPatientHtml() {
+    const s = task.schedule;
+    const name = (schedPatient && schedPatient.id === s.patientId && schedPatient.name) || s.patientName;
+    const body = s.patientId && name
+      ? `<div class="tb-pchip"><span><strong>${esc(name)}</strong>${schedPatient && schedPatient.email
+          ? `<small>${esc(schedPatient.email)}</small>` : ""}</span>
+          <button type="button" class="hx-add" data-act="sch-patient-clear">Change</button></div>`
+      : `<div class="tb-psearch">
+          <input class="fe-input" data-role="sch-psearch" placeholder="Search for the patient by name" autocomplete="off" spellcheck="false" aria-label="Patient for automatic sends" />
+          <div class="tb-presults" data-role="sch-presults"></div></div>`;
+    return `<div class="tb-field"><span>Patient for automatic sends</span>${body}
+      <small class="muted">Automatic sends are about this patient. When staff run the task themselves, they still choose the patient.</small></div>`;
+  }
+
+  function schSearch(q) {
+    const box = form.querySelector('[data-role="sch-presults"]');
+    clearTimeout(schTimer);
+    if (!box) return;
+    if (q.trim().length < 2) { box.innerHTML = q.trim() ? '<p class="tb-none">Type at least 2 letters</p>' : ""; return; }
+    box.innerHTML = '<p class="tb-none">Searching…</p>';
+    const seq = ++schSeq;
+    schTimer = setTimeout(async () => {
+      let list;
+      try { list = await searchPatients(q); }
+      catch (err) {
+        console.warn("Patient search failed:", err);
+        if (seq === schSeq && box.isConnected) box.innerHTML = '<p class="tb-none tb-bad">Couldn\'t search. Check your connection.</p>';
+        return;
+      }
+      if (seq !== schSeq || !box.isConnected) return;
+      box.innerHTML = list.length ? list.map((r) => `
+        <button type="button" class="tb-presult" data-sch-patient="${esc(r.id)}">
+          <strong>${esc(r.name)}</strong><small>${esc([r.dob && `DOB ${r.dob}`, r.email || "No email on file"].filter(Boolean).join(" · "))}</small>
+        </button>`).join("") : '<p class="tb-none">No patients found. Try their last name.</p>';
+    }, 250);
+  }
+
+  async function pickSchedPatient(pid) {
+    let p;
+    try { p = await getPatient(pid); }
+    catch (err) { console.error("Patient load failed:", err); showToast("Couldn't open that patient. Try again."); return; }
+    if (!p || !root.isConnected) return;
+    schedPatient = p;
+    task.schedule.patientId = p.id;
+    task.schedule.patientName = String(p.name || "").slice(0, 120);
+    renderForm();
+    changed();
   }
 
   function scheduleHtml() {
@@ -709,6 +759,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
         ${extra}
         <label class="tb-field"><span>${s.freq === "once" ? "Send on" : "Starts on"}</span>
           <input class="fe-input" type="date" data-sch="date" value="${esc(s.date)}" /></label>
+        ${task.recipients.aboutPatient ? schedPatientHtml() : ""}
         ${s.freq !== "once" ? `
         <div class="tb-field"><span>Stops</span>
           ${seg("schend", [["never", "Never"], ["date", "On a date"], ["count", "After a number of sends"]], s.end, 'data-sch="end" data-rerender=""')}
@@ -732,18 +783,25 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   }
 
   // The finished email for automatic sends: everything filled in except {First name}, {Full name} and {Today}
+  // The finished email for automatic sends: everything filled in except {First name}, {Full name} and {Today}
   function prepareSchedule() {
     const s = task.schedule;
     if (task.category !== "staff" || !s.enabled) { s.renderedHtml = ""; s.renderedSubject = ""; return; }
+    const about = task.recipients.aboutPatient;
+    // Keep the last prepared email until the patient's details have loaded
+    if (about && s.patientId && (!schedPatient || schedPatient.id !== s.patientId)) return;
+    const p = about && schedPatient ? schedPatient : {};
     const c = clinicDetails(letterhead);
     const vals = new Map();
     const set = (k, v) => vals.set(k.toLowerCase(), v == null ? "" : String(v));
     set("First name", "{First name}"); set("Full name", "{Full name}"); set("Today", "{Today}");
     set("Staff name", "The Dermedica team");
     set("Clinic phone", c.phone); set("Clinic email", c.email); set("Clinic address", c.address);
+    set("Patient name", p.name); set("Patient first name", p.firstName);
+    set("Patient mobile", p.mobile ? formatMobile(p.mobile) : ""); set("Patient email", p.email);
     ["Upcoming appointments", "Treatment plan", "Treatment info", "Aftercare"].forEach((k) => set(k, ""));
     task.fields.forEach((f) => { if (String(f.label || "").trim()) set(f.label.trim(), defaultAnswer(f)); });
-    s.renderedSubject = fillTemplate(task.subject, vals).slice(0, 200);
+    s.renderedSubject = fillTemplate(task.subject, vals).replace(/\[\[([^|\]]+)\|[^\]]+\]\]/g, "$1").slice(0, 200);
     s.renderedHtml = emailShell(fillTemplateHtml(task.body, vals), task.style, { clinic: c, hasLogo: !!(letterhead && letterhead.logo) });
   }
 
@@ -841,6 +899,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   form.addEventListener("input", (e) => {
     const el = e.target;
     if (el.closest(".re")) return; // the message editor reports its own changes
+    if (el.matches('[data-role="sch-psearch"]')) { schSearch(el.value); return; }
     if (el.dataset.set) {
       setValue(el.dataset.set, el.type === "checkbox" ? el.checked : el.value);
       if (el.dataset.rerender !== undefined) {
@@ -903,6 +962,18 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   });
 
   form.addEventListener("click", (e) => {
+    const pp = e.target.closest("[data-sch-patient]");
+    if (pp) { pickSchedPatient(pp.dataset.schPatient); return; }
+    if (e.target.closest('[data-act="sch-patient-clear"]')) {
+      task.schedule.patientId = "";
+      task.schedule.patientName = "";
+      schedPatient = null;
+      renderForm();
+      changed();
+      const input = form.querySelector('[data-role="sch-psearch"]');
+      if (input) input.focus();
+      return;
+    }
     if (e.target.closest('[data-act="sch-closed"]')) {
       e.preventDefault();
       openClosedDaysDialog(staff).then((d) => { if (d) { closedDays = d; renderForm(); } });
@@ -1044,8 +1115,6 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
       .then((list) => { staffList = list; })
       .catch((err) => { console.warn("Staff list failed:", err); staffError = true; })
       .finally(() => { if (root.isConnected) { renderForm(); renderPreview(); } });
-      getClosedDays().then((d) => { closedDays = d; }).catch(() => {}).finally(() => { if (root.isConnected) renderForm(); });
-      listScheduleStates().then((m) => { schedState = m.get(id) || null; if (root.isConnected) renderScheduleInfo(); });
   }
 
   renderBar();
@@ -1062,4 +1131,13 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     .catch(() => { printables = []; })
     .finally(() => { if (root.isConnected) { renderForm(); renderPreview(); } });
   if (task.category === "staff" && task.recipients.mode === "fixed") loadStaff();
+
+  getClosedDays().then((d) => { closedDays = d; }).catch(() => {}).finally(() => { if (root.isConnected) renderForm(); });
+  listScheduleStates().then((m) => { schedState = m.get(id) || null; if (root.isConnected) renderScheduleInfo(); });
+  if (task.schedule.patientId) {
+    getPatient(task.schedule.patientId)
+      .then((p) => { schedPatient = p || null; })
+      .catch((err) => console.warn("Scheduled patient load failed:", err))
+      .finally(() => { if (root.isConnected) renderForm(); });
+  }
 }

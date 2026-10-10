@@ -54,7 +54,7 @@ function runError(err) {
 /* ===================== Patient search ===================== */
 
 // Matches first name, last name or full name, in any word order
-async function searchPatients(q) {
+export async function searchPatients(q) {
   const key = q.toLowerCase().replace(/\s+/g, " ").trim();
   if (key.length < 2) return [];
   const words = key.split(" ");
