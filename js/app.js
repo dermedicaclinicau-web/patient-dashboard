@@ -295,7 +295,7 @@ async function checkAccess() {
   try {
     const res = await refreshAccess();
     if (!res.changed || !currentStaff) return;
-    currentStaff = { ...currentStaff, role: res.role, perms: res.perms };
+    currentStaff = { ...currentStaff, role: res.role, perms: res.perms, injector: res.injector };
     setPerms(currentStaff);
     renderStaff(currentStaff);
     applyNav();

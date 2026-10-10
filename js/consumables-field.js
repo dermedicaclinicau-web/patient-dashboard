@@ -9,7 +9,7 @@ import {
   listProducts, listAllLots, listKits, isKitProduct, kitUnits, plural, unitPlural, fefo, lotId, INV_CATEGORIES, batchName, batchText,
 } from "./inventory-api.js";
 import { takeFromShelfDialog, borrowDialog } from "./inventory-kits.js";
-import { can } from "./perms.js";
+import { isInjector } from "./perms.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(2));
@@ -40,7 +40,7 @@ function loadStock(force = false) {
 export function mountConsumablesField(w, f, { staff, onChange = () => {} } = {}) {
   const host = w && w.querySelector("[data-cs-host]");
   if (!host) return;
-  const canKit = can("inventory.kit");
+  const canKit = isInjector();
   const defLoc = isTeh(staff) ? "jt" : "shelf";
   let stock = null, failed = false;
   const newRow = (preset = null) => ({ ref: "", amount: "", dose: "", auto: true, preset });

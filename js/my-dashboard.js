@@ -1,6 +1,6 @@
 // My dashboard (#/home): a personal summary for whoever is logged in.
 // Only reads existing data: kits, borrows, JT releases, requests, treatment usage and saved forms.
-import { can } from "./perms.js";
+import { can, isInjector } from "./perms.js";
 import {
   listProducts, listAllLots, listKits, listLoans, listReleases, listRequests, listMyUsage, listShortUsage, listPos,
   isKitProduct, kitUnits, expiryState, plural, unitPlural, lowAt, myUid, reqNumber, REQ_STATUS, REL_STATUS,countDue, countLocs, dayKey, listCountsOn,
@@ -44,7 +44,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
   container.replaceChildren(root);
   const body = root.querySelector('[data-role="body"]');
 
-  const canKit = can("inventory.kit");
+  const canKit = isInjector();
   const canManage = can("inventory.manage");
   const canOrder = canManage || can("inventory.order");
   const canJt = canManage || can("inventory.jt");
@@ -55,7 +55,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
       const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday] = await Promise.all([
       safe(listProducts(), []),
       safe(listAllLots(), []),
-      safe(listKits({ mine: !canJt }), []),
+      safe(listKits(), []),
       safe(listLoans(), []),
       safe(listReleases(), []),
       canReq ? safe(listRequests({ mine: true }), []) : [],
@@ -77,6 +77,22 @@ export async function mountMyDashboard(container, { staff } = {}) {
 
     /* ---------- Needs my attention ---------- */
     const att = [];
+    // What's been counted today (by anyone): Shelf/JT per product, kits per lot
+    const doneKeys = new Set(countsToday.flatMap((c) => c.lines.map((l) =>
+      l.loc === "kit" ? `kit|${l.ref}` : c.kind === "opening" ? `${l.productId}|${l.loc}` : "")));
+    if (can("inventory.count") || canOrder) {
+      const dueKeys = products.filter((p) => countDue(p)).flatMap((p) => [
+        ...countLocs(p).map((loc) => `${p.id}|${loc}`),
+        ...(isKitProduct(p) ? kits.filter((k) => k.productId === p.id).map((k) => `kit|${k.id}`) : []),
+      ]);
+      const left = dueKeys.filter((k) => !doneKeys.has(k)).length;
+      if (left) att.push({ tone: "warn", text: `Opening count: ${left} still to count today`, href: "#/tasks/count", act: "Count now" });
+    }
+    if (canKit) {
+      const mineDue = myKits.filter((k) => countDue(byId.get(k.productId)) && !doneKeys.has(`kit|${k.id}`));
+      if (mineDue.length) att.push({ tone: "info", text: `Your kit hasn't been counted today (${[...new Set(mineDue.map((k) => k.productName))].join(", ")})`,
+        href: "#/tasks/count/kit", act: "Check kit" });
+    }
     if (can("inventory.count") || canOrder) {
       const counted = new Set(countsToday.filter((c) => c.kind === "opening").flatMap((c) => c.lines.map((l) => `${l.productId}|${l.loc}`)));
       const left = products.filter((p) => countDue(p)).flatMap((p) => countLocs(p).map((loc) => `${p.id}|${loc}`)).filter((k) => !counted.has(k)).length;

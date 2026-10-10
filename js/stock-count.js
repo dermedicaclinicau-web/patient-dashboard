@@ -1,11 +1,12 @@
 // Task Manager → Opening count (#/tasks/count) and My kit check (#/tasks/count/kit).
 // Blind count: the system's numbers only appear after saving. Nothing here changes stock;
 // differences go to Reporting → Variance for review.
+// The opening count covers the Shelf, JT storage and every injector's kit (for products due today).
 import {
-  INV_CATEGORIES, plural, unitPlural, fefo, lotId, batchName, batchText, isKitProduct,
+  INV_CATEGORIES, unitPlural, fefo, batchName, batchText, isKitProduct,
   listProducts, listAllLots, listKits, countDue, countLocs, dayKey, listCountsOn, saveCount, myUid,
 } from "./inventory-api.js";
-import { can } from "./perms.js";
+import { can, isInjector } from "./perms.js";
 import { showToast } from "./utils.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -20,13 +21,14 @@ const niceDate = (key) => {
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
 };
 const timeOf = (d) => (d ? d.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }) : "");
-const LOC = { shelf: "Shelf", jt: "JT storage", kit: "My kit" };
-const diffText = (n, unit) => (n > 0 ? `+${fmt(n)}` : fmt(n)) + (unit ? ` ${unit}` : "");
+const LOC = { shelf: "Shelf", jt: "JT storage" };
+const whereOf = (l) => (l.loc === "kit" ? `${l.staffName || "Injector"}'s kit` : LOC[l.loc] || l.loc);
+const diffText = (n) => (n > 0 ? `+${fmt(n)}` : fmt(n));
 
 export async function mountStockCount(container, { param = "", staff = null } = {}) {
   const backHref = "#/tasks/new";
   const canCount = can("inventory.count") || can("inventory.order") || can("inventory.manage");
-  const canKit = can("inventory.kit");
+  const canKit = isInjector();
   const mode = param === "kit" && canKit ? "kit" : canCount ? "opening" : canKit ? "kit" : "";
   const root = document.createElement("section");
   root.className = "page wide";
@@ -37,10 +39,10 @@ export async function mountStockCount(container, { param = "", staff = null } = 
     return;
   }
 
-  let products, lots, todays, myKits;
+  let products, lots, todays, allKits;
   try {
-    [products, lots, todays, myKits] = await Promise.all([
-      listProducts(), listAllLots(), listCountsOn(dayKey()), canKit ? listKits({ mine: true }) : [],
+    [products, lots, todays, allKits] = await Promise.all([
+      listProducts(), listAllLots(), listCountsOn(dayKey()), listKits().catch(() => []),
     ]);
   } catch (err) {
     console.error("Count load failed:", err);
@@ -52,10 +54,19 @@ export async function mountStockCount(container, { param = "", staff = null } = 
 
   const me = myUid();
   const byId = new Map(products.map((p) => [p.id, p]));
+  const dueKitIds = new Set(products.filter((p) => isKitProduct(p) && countDue(p)).map((p) => p.id));
+
+  // Already counted today (by anyone): Shelf/JT per product, kits per lot
+  const done = new Map();
+  todays.forEach((c) => c.lines.forEach((l) => {
+    const key = l.loc === "kit" ? `kit|${l.ref}` : c.kind === "opening" ? `${l.productId}|${l.loc}` : "";
+    if (key) done.set(key, { by: c.by, at: c.at, name: l.productName, where: whereOf(l) });
+  }));
+
   const today = new Date().toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long" });
   const title = mode === "kit" ? "My kit check" : "Opening count";
   const switcher = canCount && canKit
-    ? `<div class="fe-seg sc-mode"><a class="fe-seg-btn${mode === "opening" ? " is-on" : ""}" href="#/tasks/count"><span>Shelf &amp; JT storage</span></a>
+    ? `<div class="fe-seg sc-mode"><a class="fe-seg-btn${mode === "opening" ? " is-on" : ""}" href="#/tasks/count"><span>Opening count</span></a>
         <a class="fe-seg-btn${mode === "kit" ? " is-on" : ""}" href="#/tasks/count/kit"><span>My kit</span></a></div>` : "";
 
   root.innerHTML = `
@@ -81,12 +92,24 @@ export async function mountStockCount(container, { param = "", staff = null } = 
   const saveBtn = $('[data-act="save"]');
   let busy = false;
 
-  /* ===================== Opening count ===================== */
+  // Kit lots: unopened + units left in the opened one
+  const kitFilled = (r) => r.sealed !== "" && r.open !== "";
+  const kitRowHtml = (r, i) => {
+    const p = byId.get(r.k.productId);
+    return `<div class="sc-item${kitFilled(r) ? " is-done" : ""}" data-ki="${i}">
+      <div class="sc-head"><strong>${esc(r.k.productName)}</strong>
+        <small>${esc(batchText(p, r.k.batch) || "No number")} · Exp ${esc(niceDate(r.k.expiry))}</small>
+        ${r.due ? '<span class="inv-flag is-info">Due today</span>' : ""}</div>
+      <div class="sc-row sc-kitrow">
+        <label><small>Unopened</small><div class="fe-num"><input class="fe-in" type="number" min="0" step="1" inputmode="numeric" data-k="sealed"
+          value="${esc(r.sealed)}" placeholder="?" /><span>${esc(unitPlural((p && p.stockUnit) || "vial"))}</span></div></label>
+        <label><small>Left in the opened one</small><div class="fe-num"><input class="fe-in" type="number" min="0" step="0.5" inputmode="decimal" data-k="open"
+          value="${esc(r.open)}" placeholder="?" /><span>${esc(r.k.doseUnit)}</span></div></label>
+      </div></div>`;
+  };
+
+  /* ===================== Opening count: Shelf, JT storage and injectors' kits ===================== */
   if (mode === "opening") {
-    const done = new Map();   // "productId|loc" -> { by, at }
-    todays.filter((c) => c.kind === "opening").forEach((c) => c.lines.forEach((l) => {
-      done.set(`${l.productId}|${l.loc}`, { by: c.by, at: c.at });
-    }));
     const lotsAt = (pid, loc) => lots.filter((l) => l.productId === pid && l.loc === loc && l.qty > 0).sort(fefo);
     const makeBlock = (p, loc, extra = false) => ({
       key: `${p.id}|${loc}`, p, loc, extra,
@@ -98,6 +121,9 @@ export async function mountStockCount(container, { param = "", staff = null } = 
     products.filter((p) => countDue(p)).forEach((p) => countLocs(p).forEach((loc) => {
       if (!done.has(`${p.id}|${loc}`)) blocks.push(makeBlock(p, loc));
     }));
+    const kitRows = allKits.filter((k) => dueKitIds.has(k.productId) && !done.has(`kit|${k.id}`))
+      .sort((a, b) => a.staffName.localeCompare(b.staffName) || a.productName.localeCompare(b.productName) || (a.expiry || "").localeCompare(b.expiry || ""))
+      .map((k) => ({ k, due: false, sealed: "", open: "" }));
 
     const filled = (b) => b.rows.length > 0 && b.rows.every((r) => r.counted !== "");
     const started = (b) => b.rows.some((r) => r.counted !== "");
@@ -115,13 +141,19 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         ${r.found ? '<button type="button" class="hx-x" data-act="rm" aria-label="Remove">×</button>' : "<span></span>"}</div>`;
     }
     function blockHtml(b, i) {
+      const bn = batchName(b.p).toLowerCase();
       return `<div class="sc-item${filled(b) ? " is-done" : ""}" data-i="${i}">
         <div class="sc-head"><strong>${esc(b.p.name)}</strong>
           <small>Count ${esc(unitPlural(b.p.stockUnit))}${b.p.dosePer ? ` (each ${fmt(b.p.dosePer)} ${esc(b.p.doseUnit)})` : ""}</small>
           ${b.extra ? '<button type="button" class="hx-x" data-act="rm-block" aria-label="Remove">×</button>' : ""}</div>
-        ${b.rows.map((r, j) => rowHtml(b, r, j)).join("") || `<p class="tb-none">No ${esc(batchName(b.p).toLowerCase())}s on record here. Use “+ Another ${esc(batchName(b.p).toLowerCase())} found”, or count 0.</p>`}
-        ${b.p.tracked ? `<button type="button" class="cs-link" data-act="found">+ Another ${esc(batchName(b.p).toLowerCase())} found</button>` : ""}
+        ${b.rows.map((r, j) => rowHtml(b, r, j)).join("") || `<p class="tb-none">No ${esc(bn)}s on record here. Use “+ Another ${esc(bn)} found”.</p>`}
+        ${b.p.tracked ? `<button type="button" class="cs-link" data-act="found">+ Another ${esc(bn)} found</button>` : ""}
       </div>`;
+    }
+    function progress() {
+      const total = blocks.length + kitRows.length;
+      const n = blocks.filter(filled).length + kitRows.filter(kitFilled).length;
+      $('[data-role="progress"]').textContent = total ? `${n} of ${total} counted` : "";
     }
     function draw() {
       const section = (loc) => {
@@ -132,15 +164,17 @@ export async function mountStockCount(container, { param = "", staff = null } = 
           return items.length ? `<div class="sc-cat">${esc(c.label)}</div>${items.map(([b, i]) => blockHtml(b, i)).join("")}` : "";
         }).join("")}</section>`;
       };
+      const people = [...new Set(kitRows.map((r) => r.k.staffName))];
+      const kitSection = kitRows.length ? `<section class="tb-card"><h4>Injectors' kits</h4>
+        <p class="muted">For each injector: count the unopened ones, and check how much is left in the opened one.</p>
+        ${people.map((name) => `<div class="sc-cat">${esc(name)}</div>${kitRows.map((r, i) => [r, i])
+          .filter(([r]) => r.k.staffName === name).map(([r, i]) => kitRowHtml(r, i)).join("")}`).join("")}</section>` : "";
       const listed = new Set(blocks.map((b) => b.key));
       const addable = products.filter((p) => p.active && (!listed.has(`${p.id}|shelf`) || !listed.has(`${p.id}|jt`)));
-      const doneHtml = done.size ? `<section class="tb-card"><h4>Done today</h4><ul class="sc-done">${[...done.entries()].map(([k, v]) => {
-        const [pid, loc] = k.split("|");
-        const p = byId.get(pid);
-        return `<li>${I.check}<span>${esc(p ? p.name : "Product")} · ${esc(LOC[loc] || loc)}</span><small>${esc(v.by)} · ${esc(timeOf(v.at))}</small></li>`;
-      }).join("")}</ul></section>` : "";
+      const doneHtml = done.size ? `<section class="tb-card"><h4>Done today</h4><ul class="sc-done">${[...done.values()].map((v) =>
+        `<li>${I.check}<span>${esc(v.name)} · ${esc(v.where)}</span><small>${esc(v.by)} · ${esc(timeOf(v.at))}</small></li>`).join("")}</ul></section>` : "";
       body.innerHTML = `
-        ${blocks.length ? section("shelf") + section("jt")
+        ${blocks.length || kitRows.length ? section("shelf") + section("jt") + kitSection
           : `<div class="tm-empty">${done.size ? "Everything due today has been counted. 👍" : "Nothing is due for counting today."}</div>`}
         <section class="tb-card"><h4>Add another product</h4>
           <div class="sc-add"><select class="fb-select" data-role="addp"><option value="">Choose a product…</option>${INV_CATEGORIES.map((c) => {
@@ -152,14 +186,19 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         ${doneHtml}`;
       progress();
     }
-    function progress() {
-      const n = blocks.filter(filled).length;
-      $('[data-role="progress"]').textContent = blocks.length ? `${n} of ${blocks.length} counted` : "";
-    }
 
     body.addEventListener("input", (e) => {
+      const kitEl = e.target.closest("[data-ki]");
+      if (kitEl && e.target.dataset.k) {
+        const r = kitRows[Number(kitEl.dataset.ki)];
+        r[e.target.dataset.k] = e.target.value;
+        kitEl.classList.toggle("is-done", kitFilled(r));
+        msgEl.textContent = "";
+        progress();
+        return;
+      }
       const f = e.target.dataset.f;
-      const item = e.target.closest(".sc-item");
+      const item = e.target.closest(".sc-item[data-i]");
       if (!f || !item) return;
       const b = blocks[Number(item.dataset.i)];
       const r = b.rows[Number(e.target.closest(".sc-row").dataset.j)];
@@ -171,7 +210,7 @@ export async function mountStockCount(container, { param = "", staff = null } = 
     body.addEventListener("click", (e) => {
       const a = e.target.closest("[data-act]");
       if (!a) return;
-      const item = a.closest(".sc-item");
+      const item = a.closest(".sc-item[data-i]");
       const b = item ? blocks[Number(item.dataset.i)] : null;
       if (a.dataset.act === "found" && b) { b.rows.push({ batch: "", expiry: "", counted: "", found: true }); draw(); }
       else if (a.dataset.act === "rm" && b) { b.rows.splice(Number(a.closest(".sc-row").dataset.j), 1); draw(); }
@@ -190,8 +229,11 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       if (busy) return;
       const partial = blocks.find((b) => started(b) && !filled(b));
       if (partial) { msgEl.textContent = `${partial.p.name} (${LOC[partial.loc]}): fill in every box, or leave them all empty to count it later.`; return; }
+      const partialKit = kitRows.find((r) => (r.sealed !== "" || r.open !== "") && !kitFilled(r));
+      if (partialKit) { msgEl.textContent = `${partialKit.k.staffName}'s ${partialKit.k.productName}: fill in both boxes (enter 0 if there's none).`; return; }
       const ready = blocks.filter(filled);
-      if (!ready.length) { msgEl.textContent = "Count at least one product first."; return; }
+      const readyKits = kitRows.filter(kitFilled);
+      if (!ready.length && !readyKits.length) { msgEl.textContent = "Count at least one item first."; return; }
       for (const b of ready) {
         for (const r of b.rows.filter((x) => x.found)) {
           if (!r.batch.trim()) { msgEl.textContent = `${b.p.name}: enter the ${batchName(b.p).toLowerCase()} number you found.`; return; }
@@ -204,7 +246,10 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       try {
         const res = await saveCount({
           kind: "opening",
-          lines: ready.flatMap((b) => b.rows.map((r) => ({ productId: b.p.id, loc: b.loc, batch: r.batch, expiry: r.expiry, counted: r.counted }))),
+          lines: [
+            ...ready.flatMap((b) => b.rows.map((r) => ({ productId: b.p.id, loc: b.loc, batch: r.batch, expiry: r.expiry, counted: r.counted }))),
+            ...readyKits.map((r) => ({ kit: true, ref: r.k.id, sealed: r.sealed, open: r.open })),
+          ],
         }, staff);
         showResults(res);
       } catch (err) {
@@ -221,49 +266,36 @@ export async function mountStockCount(container, { param = "", staff = null } = 
     draw();
   }
 
-  /* ===================== My kit check ===================== */
+  /* ===================== My kit check (the injector, any time) ===================== */
   if (mode === "kit") {
-    const checked = new Set(todays.filter((c) => c.kind === "kit" && c.byUid === me).flatMap((c) => c.lines.map((l) => l.ref)));
-    const dueIds = new Set(products.filter((p) => isKitProduct(p) && countDue(p)).map((p) => p.id));
-    const rows = myKits.filter((k) => !checked.has(k.id))
-      .map((k) => ({ k, due: dueIds.has(k.productId), sealed: "", open: "" }))
+    const rows = allKits.filter((k) => k.staffUid === me && !done.has(`kit|${k.id}`))
+      .map((k) => ({ k, due: dueKitIds.has(k.productId), sealed: "", open: "" }))
       .sort((a, b) => Number(b.due) - Number(a.due) || a.k.productName.localeCompare(b.k.productName));
-    const filled = (r) => r.sealed !== "" && r.open !== "";
+    const checkedToday = allKits.some((k) => k.staffUid === me && done.has(`kit|${k.id}`));
 
     function draw() {
       body.innerHTML = rows.length ? `<section class="tb-card"><h4>What's in your kit</h4>
-        <p class="muted">Count the unopened ${esc("vials")} and check how much is left in each opened one.</p>
-        ${rows.map((r, i) => {
-          const p = byId.get(r.k.productId);
-          return `<div class="sc-item${filled(r) ? " is-done" : ""}" data-i="${i}">
-            <div class="sc-head"><strong>${esc(r.k.productName)}</strong>
-              <small>${esc(batchText(p, r.k.batch) || "No number")} · Exp ${esc(niceDate(r.k.expiry))}</small>
-              ${r.due ? '<span class="inv-flag is-info">Due today</span>' : ""}</div>
-            <div class="sc-row sc-kitrow">
-              <label><small>Unopened</small><div class="fe-num"><input class="fe-in" type="number" min="0" step="1" inputmode="numeric" data-f="sealed" value="${esc(r.sealed)}" placeholder="?" /><span>${esc(unitPlural((p && p.stockUnit) || "vial"))}</span></div></label>
-              <label><small>Left in the opened one</small><div class="fe-num"><input class="fe-in" type="number" min="0" step="0.5" inputmode="decimal" data-f="open" value="${esc(r.open)}" placeholder="?" /><span>${esc(r.k.doseUnit)}</span></div></label>
-            </div></div>`;
-        }).join("")}</section>`
-        : `<div class="tm-empty">${checked.size ? "Your kit has been checked today. 👍" : "There's nothing in your kit to check."}</div>`;
-      $('[data-role="progress"]').textContent = rows.length ? `${rows.filter(filled).length} of ${rows.length} checked` : "";
+          <p class="muted">Count the unopened ones and check how much is left in each opened one.</p>
+          ${rows.map((r, i) => kitRowHtml(r, i)).join("")}</section>`
+        : `<div class="tm-empty">${checkedToday ? "Your kit has been checked today. 👍" : "There's nothing in your kit to check."}</div>`;
+      $('[data-role="progress"]').textContent = rows.length ? `${rows.filter(kitFilled).length} of ${rows.length} checked` : "";
     }
     body.addEventListener("input", (e) => {
-      const f = e.target.dataset.f;
-      const item = e.target.closest(".sc-item");
-      if (!f || !item) return;
-      const r = rows[Number(item.dataset.i)];
-      r[f] = e.target.value;
-      item.classList.toggle("is-done", filled(r));
-      $('[data-role="progress"]').textContent = `${rows.filter(filled).length} of ${rows.length} checked`;
+      const el = e.target.closest("[data-ki]");
+      if (!el || !e.target.dataset.k) return;
+      const r = rows[Number(el.dataset.ki)];
+      r[e.target.dataset.k] = e.target.value;
+      el.classList.toggle("is-done", kitFilled(r));
+      $('[data-role="progress"]').textContent = `${rows.filter(kitFilled).length} of ${rows.length} checked`;
       msgEl.textContent = "";
     });
     saveBtn.addEventListener("click", async () => {
       if (busy) return;
-      if (rows.some((r) => (r.sealed !== "" || r.open !== "") && !filled(r))) {
+      if (rows.some((r) => (r.sealed !== "" || r.open !== "") && !kitFilled(r))) {
         msgEl.textContent = "Fill in both boxes for each item you check (enter 0 if there's none).";
         return;
       }
-      const ready = rows.filter(filled);
+      const ready = rows.filter(kitFilled);
       if (!ready.length) { msgEl.textContent = "Check at least one item first."; return; }
       busy = true;
       saveBtn.disabled = true;
@@ -284,6 +316,7 @@ export async function mountStockCount(container, { param = "", staff = null } = 
   /* ===================== After saving: reveal the system's numbers ===================== */
   function showResults(res) {
     const diffs = res.lines.filter((l) => l.status === "open");
+    const qty = (l, n) => `${fmt(n)}${l.loc === "kit" ? ` ${l.unit}` : ""}`;
     $('[data-role="progress"]').textContent = "";
     saveBtn.hidden = true;
     body.innerHTML = `<section class="tb-card sc-results">
@@ -293,9 +326,9 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         : " Everything matched. 👍"}</p>
       <table class="inv-table"><thead><tr><th>Product</th><th>Where</th><th>Batch / Lot</th><th>Counted</th><th>System</th><th>Difference</th></tr></thead><tbody>${
         res.lines.map((l) => `<tr class="${l.status === "open" ? "is-diff" : ""}">
-          <td>${esc(l.productName)}</td><td>${esc(LOC[l.loc] || l.loc)}</td>
-          <td>${esc(l.batch ? `${l.batchLabel || "Batch"} ${l.batch}` : "—")}</td>
-          <td>${esc(fmt(l.counted))}</td><td>${esc(fmt(l.system))}</td>
+          <td>${esc(l.productName)}</td><td>${esc(whereOf(l))}</td>
+          <td>${esc(l.batch ? `${l.batchLabel || batchName(byId.get(l.productId))} ${l.batch}` : "—")}</td>
+          <td>${esc(qty(l, l.counted))}</td><td>${esc(qty(l, l.system))}</td>
           <td>${l.status === "open" ? `<strong>${esc(diffText(l.variance))}</strong>` : "✓"}</td></tr>`).join("")}</tbody></table>
       <div class="sc-after"><a class="ff-btn" href="${backHref}">Back to tasks</a>
         <button type="button" class="ff-btn is-primary" data-act="again">Count more</button></div>

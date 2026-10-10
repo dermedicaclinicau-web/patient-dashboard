@@ -83,7 +83,7 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
           ? `<img src="${esc(s.photo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()" />` : ""}<b>${esc(getInitials(s.name))}</b></span>
         <div class="st-main">
           <strong>${esc(s.name || "Unnamed")}${me && (me.uid === s.id || me.id === s.id) ? ' <em class="st-you">You</em>' : ""}</strong>
-          <small>${esc(s.email || "No email")} · ${s.lastLogin ? `Last login ${esc(when(s.lastLogin))}` : "Never logged in"}${esc(exceptions(s))}</small>
+          <small>${esc(s.email || "No email")} · ${s.lastLogin ? `Last login ${esc(when(s.lastLogin))}` : "Never logged in"}${s.injector ? " · Injector" : ""}${esc(exceptions(s))}</small>
         </div>
         <span class="st-role is-${esc(String(s.role || "").toLowerCase())}">${esc(s.role || "No role")}</span>
         <span class="st-status ${s.active ? "is-on" : "is-off"}">${s.active ? "Active" : "Turned off"}</span>
@@ -168,7 +168,7 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
       if (!root.isConnected) return;
       list = res.staff || [];
       roleNames = rolesRes.roleNames || res.roles || roleNames;
-      catalogue = rolesRes.perms || [];
+      catalogue = (rolesRes.perms || []).filter((p) => p.key !== "inventory.kit");
       roleTicks = rolesRes.roles || {};
       const sel = $('[data-role="rolefilter"]');
       if (sel.options.length === 1) sel.insertAdjacentHTML("beforeend", roleNames.map((r) => `<option>${esc(r)}</option>`).join(""));
@@ -252,6 +252,9 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
         <label class="lh-field"><span class="lh-label">Name</span><input name="name" maxlength="120" value="${esc(s ? s.name : "")}" /></label>
         <label class="lh-field"><span class="lh-label">Role</span>
           <select class="fb-select" name="role">${roleNames.map((r) => `<option${s && s.role === r ? " selected" : ""}>${esc(r)}</option>`).join("")}</select></label>
+        <label class="fe-check st-injector"><input type="checkbox" name="injector"${s && s.injector ? " checked" : ""} />
+          Injector: carries their own kit (e.g. Xeomin)</label>
+        <small class="fe-note">Gives them My kit, the kit check, and kit products in treatment records. Works with any role, including Admin.</small>
         <label class="lh-field"><span class="lh-label">Email (optional)</span><input type="email" name="email" maxlength="254" value="${esc(s ? s.email : "")}" /></label>
         <label class="lh-field"><span class="lh-label">Photo link (optional)</span><input name="photo" maxlength="1000" placeholder="https://…" value="${esc(s ? s.photo : "")}" /></label>
         ${isNew ? pinChoice("PIN") : ""}
@@ -291,6 +294,7 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
         const res = await api("save", { staff: {
           id: s ? s.id : "", name: form.elements.name.value, role: form.elements.role.value,
           email: form.elements.email.value, photo: form.elements.photo.value, pin: isNew ? readPin(form) : "", access,
+          injector: form.elements.injector.checked,
         } });
         dlg.close();
         if (res.pin) showPin(form.elements.name.value.trim(), res.pin, "Staff member added");

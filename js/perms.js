@@ -15,12 +15,15 @@ export const PERM_KEYS = [
 let admin = false;
 let role = "";
 let current = new Set();
+let injector = false;
+export const isInjector = () => injector;
 
 export const isAdmin = () => admin;
 export const can = (p) => admin || current.has(p);
 
 // Body classes like "no-billing-view" let the CSS hide what someone can't use
 export function setPerms(staff) {
+  injector = !!(staff && staff.injector === true);
   role = String((staff && staff.role) || "");
   admin = /^admin$/i.test(role);
   current = new Set(Array.isArray(staff && staff.perms) ? staff.perms : []);
@@ -34,7 +37,8 @@ const same = (list) => list.length === current.size && list.every((p) => current
 export async function refreshAccess() {
   const res = await callApi({ action: "staff", op: "me" });
   const perms = Array.isArray(res.perms) ? res.perms : [];
-  const changed = String(res.role || "") !== role || !same(perms);
+  const inj = res.injector === true;
+  const changed = String(res.role || "") !== role || !same(perms) || inj !== injector;
   if (changed && res.token) await signInWithCustomToken(auth, res.token);
-  return { changed, role: res.role || "", perms };
+  return { changed, role: res.role || "", perms, injector: inj };
 }

@@ -9,10 +9,11 @@ import { mountPurchaseOrder } from "./purchase-order.js";
 import { fetchStaffList } from "./task-types.js";
 import { callApi } from "./appointments.js";
 import { confirmDialog } from "./dialog.js";
-import { can } from "./perms.js";
+import { can, isInjector } from "./perms.js";
 import { showToast } from "./utils.js";
 import { mountReceivePo } from "./receive-po.js";
 import { renderKits } from "./inventory-kits.js";
+
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -71,7 +72,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   const canManage = can("inventory.manage");
   const canMove = canManage || can("inventory.order");
   const canRequest = can("inventory.request");
-  const canKit = can("inventory.kit");
+  const canKit = isInjector();
   const canJt = can("inventory.jt");
   const showKits = canKit || canJt || canManage;
 
