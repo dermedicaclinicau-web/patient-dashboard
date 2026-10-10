@@ -17,8 +17,10 @@ import { mountAftercareBank } from "./aftercare-bank.js";
 import { mountSspProductsPage } from "./ssp-products.js";
 import { mountSspBuilder } from "./ssp-builder.js";
 import { mountStaffManager } from "./staff-manager.js";
+import { mountInventory } from "./inventory.js";
 import { setPerms, can, isAdmin as isAdminNow, refreshAccess } from "./perms.js";
 import { initUpdateCheck } from "./updates.js";
+
 
 const $ = (id) => document.getElementById(id);
 
@@ -217,6 +219,7 @@ const PAGES = {
     mountSspBuilder(el, { patientId: pid, staff: currentStaff, isAdmin: can("ssp.config") });
   },
   tasks: (el, param) => mountTaskManager(el, { param, isAdmin: can("tasks.build"), staff: currentStaff }),
+  inventory: (el, param) => mountInventory(el, { param, staff: currentStaff }),
   staff: (el) => mountStaffManager(el, { staff: currentStaff }),
 };
 
@@ -225,14 +228,14 @@ const PAGE_PERM = {
   patients: "menu.patients", patient: "menu.patients", fill: "menu.patients", "form-record": "menu.patients",
   ssp: "ssp.create", calendar: "menu.calendar", forms: "menu.forms",
   "image-bank": "forms.build", "aftercare-bank": "forms.build", "ssp-products": "ssp.config",
-  tasks: "menu.tasks", staff: "admin",
+  tasks: "menu.tasks", inventory: "menu.inventory", staff: "admin",
 };
 const pageAllowed = (p) => {
   const need = PAGE_PERM[p];
   if (!need) return true;
   return need === "admin" ? isAdminNow() : can(need);
 };
-const firstAllowedPage = () => ["patients", "calendar", "tasks", "forms", "staff"].find(pageAllowed) || "";
+const firstAllowedPage = () => ["patients", "calendar", "tasks", "inventory", "forms", "staff"].find(pageAllowed) || "";
 const currentPage = () => location.hash.split("/")[1] || "";
 
 function applyNav() {

@@ -1,0 +1,602 @@
+// Inventory (#/inventory/<tab>): stock on the Shelf and in JT storage, products, suppliers and the activity log.
+import {
+  INV_CATEGORIES, LOCATIONS, WRITEOFF_REASONS, ADD_REASONS, MOVE_TYPES, catLabel, locLabel, plural, unitPlural,
+  expiryState, fefo, listProducts, saveProduct, listSuppliers, saveSupplier, listAllLots, listMoves, applyStock,
+} from "./inventory-api.js";
+import { can } from "./perms.js";
+import { showToast } from "./utils.js";
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const SEARCH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
+const TABS = [["stock", "Stock"], ["products", "Products"], ["suppliers", "Suppliers"], ["activity", "Activity"]];
+const niceDate = (key) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
+  return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
+};
+const when = (d) => (d ? d.toLocaleString("en-AU", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" }) : "");
+const money = (n) => (n === null || n === undefined ? "" : `$${Number(n).toFixed(2)}`);
+const errText = (err, fallback) => (err && err.code === "permission-denied"
+  ? "You don't have access to do this. Ask an Admin to check your Inventory access in Staff."
+  : err && err.message && !err.code ? err.message : fallback);
+const seg = (name, items, cur) => `<div class="fe-seg">${items.map(([v, l]) =>
+  `<label class="fe-seg-btn"><input type="radio" name="${name}" value="${v}"${v === cur ? " checked" : ""} /><span>${esc(l)}</span></label>`).join("")}</div>`;
+const lowAt = (p, loc) => p.reorder[loc] !== null && p.reorder[loc] !== undefined && p.stock[loc] <= p.reorder[loc];
+
+function openDialog(cls, html) {
+  const dlg = document.createElement("dialog");
+  dlg.className = `lh-dialog ${cls}`;
+  dlg.innerHTML = html;
+  document.body.appendChild(dlg);
+  dlg.addEventListener("close", () => dlg.remove());
+  dlg.showModal();
+  return dlg;
+}
+
+function linesText(m) {
+  return (m.lines || []).map((l) => `${locLabel(l.loc)} ${l.delta > 0 ? "+" : "−"}${Math.abs(l.delta)}${
+    l.batch ? ` (batch ${l.batch})` : ""}`).join(" · ");
+}
+function movesHtml(moves, showProduct = true) {
+  if (!moves.length) return '<p class="tb-none">No stock changes yet.</p>';
+  return `<ul class="inv-moves">${moves.map((m) => `
+    <li>
+      <span class="inv-m-when">${esc(when(m.at))}</span>
+      <span class="inv-m-main"><strong>${esc(MOVE_TYPES[m.type] || m.type)}</strong>${showProduct ? ` · ${esc(m.productName || "")}` : ""}
+        <small>${esc(linesText(m))}${m.reason ? ` · ${esc(m.reason)}` : ""}${m.note ? ` · ${esc(m.note)}` : ""}</small></span>
+      <span class="inv-m-by">${esc(m.by || "")}</span>
+    </li>`).join("")}</ul>`;
+}
+
+export function mountInventory(container, { param = "", staff = null } = {}) {
+  const first = String(param || "").split("/")[0];
+  const tab = TABS.some(([k]) => k === first) ? first : "stock";
+  const canManage = can("inventory.manage");
+  const canMove = canManage || can("inventory.order");
+
+  const root = document.createElement("section");
+  root.className = "page wide";
+  root.innerHTML = `
+    <div class="fb-head">
+      <div><h2>Inventory</h2><p class="muted">Stock on the Shelf and in JT storage, products and suppliers.</p></div>
+      ${canManage ? `<div class="fb-head-actions">
+        <button type="button" class="btn-ghost" data-act="new-supplier">+ New supplier</button>
+        <button type="button" class="btn-primary" data-act="new-product">+ New product</button>
+      </div>` : ""}
+    </div>
+    <nav class="pt-tabs inv-tabs" aria-label="Inventory">${TABS.map(([k, l]) =>
+      `<a href="#/inventory/${k}"${k === tab ? ' class="active" aria-current="page"' : ""}>${l}</a>`).join("")}</nav>
+    <div data-role="body"><div class="skeleton" style="height:320px;border-radius:14px"></div></div>`;
+  container.replaceChildren(root);
+  const body = root.querySelector('[data-role="body"]');
+
+  const st = { products: [], suppliers: [], lots: [], q: "", cat: "", view: "all", flagged: false, showInactive: false };
+  const supplierOf = (id) => st.suppliers.find((s) => s.id === id) || null;
+  const lotsOf = (pid) => st.lots.filter((l) => l.productId === pid).sort(fefo);
+  function flags(p) {
+    const out = [];
+    if (lowAt(p, "shelf")) out.push(["warn", "Low on Shelf"]);
+    if (lowAt(p, "jt")) out.push(["warn", "Low in JT storage"]);
+    const ex = lotsOf(p.id).map((l) => expiryState(l.expiry));
+    if (ex.includes("expired")) out.push(["bad", "Expired stock"]);
+    else if (ex.includes("soon")) out.push(["warn", "Expires soon"]);
+    return out;
+  }
+
+  async function load() {
+    try {
+      [st.products, st.suppliers, st.lots] = await Promise.all([listProducts(), listSuppliers(), listAllLots()]);
+      if (root.isConnected) render();
+    } catch (err) {
+      console.error("Inventory load failed:", err);
+      if (root.isConnected) body.innerHTML = `<div class="tm-empty is-error">${err && err.code === "permission-denied"
+        ? "Inventory is blocked. Check the Inventory Firestore rules have been published, and your Inventory access in Staff."
+        : "Couldn't load the inventory. Check your connection and try again."}</div>`;
+    }
+  }
+
+  function render() {
+    if (tab === "stock") renderStock();
+    else if (tab === "products") renderProducts();
+    else if (tab === "suppliers") renderSuppliers();
+    else renderActivity();
+  }
+
+  /* ---------- Stock ---------- */
+  function renderStock() {
+    const active = st.products.filter((p) => p.active);
+    const exp = (state) => active.filter((p) => lotsOf(p.id).some((l) => expiryState(l.expiry) === state)).length;
+    body.innerHTML = `
+      <div class="inv-stats">
+        <div class="inv-stat"><strong>${active.length}</strong><span>Products</span></div>
+        <div class="inv-stat is-warn"><strong>${active.filter((p) => lowAt(p, "shelf") || lowAt(p, "jt")).length}</strong><span>Low stock</span></div>
+        <div class="inv-stat is-warn"><strong>${exp("soon")}</strong><span>Expiring within 60 days</span></div>
+        <div class="inv-stat is-bad"><strong>${exp("expired")}</strong><span>With expired stock</span></div>
+      </div>
+      <div class="inv-tools">
+        <label class="ib-search inv-find">${SEARCH}<input type="search" data-f="q" placeholder="Search products, brands or suppliers" value="${esc(st.q)}" aria-label="Search" /></label>
+        <select class="fb-select" data-f="cat" aria-label="Category"><option value="">All categories</option>${INV_CATEGORIES.map((c) =>
+          `<option value="${c.key}"${st.cat === c.key ? " selected" : ""}>${esc(c.label)}</option>`).join("")}</select>
+        ${seg("inv-view", [["all", "Both"], ["shelf", "Shelf"], ["jt", "JT storage"]], st.view).replace(/name="inv-view"/g, 'name="inv-view" data-f="view"')}
+        <label class="fe-check"><input type="checkbox" data-f="flagged"${st.flagged ? " checked" : ""} /> Only low or expiring</label>
+      </div>
+      <div data-role="list"></div>`;
+    renderStockList();
+  }
+
+  function stockRow(p) {
+    const qty = (loc) => `<span class="inv-q${lowAt(p, loc) ? " is-low" : ""}"><small>${loc === "shelf" ? "Shelf" : "JT"}</small><b>${p.stock[loc]}</b></span>`;
+    const sup = supplierOf(p.supplierId);
+    return `
+      <button type="button" class="inv-row" data-product="${esc(p.id)}">
+        <span class="inv-name"><strong>${esc(p.name)}</strong>
+          <small>${esc([p.brand, sup && sup.name, p.tracked ? "Batch & expiry" : ""].filter(Boolean).join(" · "))}</small></span>
+        <span class="inv-flags">${flags(p).map(([t, l]) => `<span class="inv-flag is-${t}">${esc(l)}</span>`).join("")}</span>
+        ${st.view !== "jt" ? qty("shelf") : ""}${st.view !== "shelf" ? qty("jt") : ""}
+        <span class="inv-unit">${esc(unitPlural(p.stockUnit))}</span>
+      </button>`;
+  }
+
+  function renderStockList() {
+    const list = body.querySelector('[data-role="list"]');
+    if (!list) return;
+    if (!st.products.length) {
+      list.innerHTML = `<div class="tm-empty"><strong>No products yet.</strong><br>${canManage
+        ? 'Add your first product, then use <strong>Add stock</strong> to enter what you have.<div class="tm-empty-act"><button type="button" class="ff-btn is-primary" data-act="new-product">+ New product</button></div>'
+        : "Ask an Admin to add the products."}</div>`;
+      return;
+    }
+    const q = st.q.trim().toLowerCase();
+    const rows = st.products.filter((p) => p.active
+      && (!st.cat || p.category === st.cat)
+      && (!q || `${p.name} ${p.brand} ${(supplierOf(p.supplierId) || {}).name || ""}`.toLowerCase().includes(q))
+      && (!st.flagged || flags(p).length));
+    if (!rows.length) { list.innerHTML = '<div class="tm-empty">No products match.</div>'; return; }
+    list.innerHTML = INV_CATEGORIES.map((c) => {
+      const items = rows.filter((p) => p.category === c.key);
+      return items.length ? `<section class="inv-group"><h3>${esc(c.label)}<em>${items.length}</em></h3>
+        <div class="inv-list">${items.map(stockRow).join("")}</div></section>` : "";
+    }).join("");
+  }
+
+  /* ---------- Products ---------- */
+  function renderProducts() {
+    const rows = st.products.filter((p) => st.showInactive || p.active);
+    const line = (p) => {
+      const sup = supplierOf(p.supplierId);
+      return `
+        <div class="inv-prow${p.active ? "" : " is-off"}">
+          <span class="inv-name"><strong>${esc(p.name)}${p.active ? "" : ' <em class="inv-off">Inactive</em>'}</strong>
+            <small>${esc([`${p.orderUnit} of ${plural(p.packSize, p.stockUnit)}`, sup && sup.name, p.supplierCode && `Code ${p.supplierCode}`].filter(Boolean).join(" · "))}</small></span>
+          <span class="inv-price">${esc([p.cost !== null && `Cost ${money(p.cost)} / ${p.orderUnit}`, p.price !== null && `Retail ${money(p.price)}`].filter(Boolean).join(" · "))}</span>
+          ${p.tracked ? '<span class="inv-flag is-info">Batch &amp; expiry</span>' : '<span></span>'}
+          ${canManage ? `<button type="button" class="lh-btn" data-edit-product="${esc(p.id)}">Edit</button>` : "<span></span>"}
+        </div>`;
+    };
+    body.innerHTML = `
+      <div class="inv-tools"><label class="fe-check"><input type="checkbox" data-f="showInactive"${st.showInactive ? " checked" : ""} /> Show inactive products</label></div>
+      ${rows.length ? INV_CATEGORIES.map((c) => {
+        const items = rows.filter((p) => p.category === c.key);
+        return items.length ? `<section class="inv-group"><h3>${esc(c.label)}<em>${items.length}</em></h3>
+          <div class="inv-plist">${items.map(line).join("")}</div></section>` : "";
+      }).join("") : '<div class="tm-empty">No products yet.</div>'}`;
+  }
+
+  /* ---------- Suppliers ---------- */
+  function renderSuppliers() {
+    if (!st.suppliers.length) {
+      body.innerHTML = `<div class="tm-empty"><strong>No suppliers yet.</strong>${canManage
+        ? '<div class="tm-empty-act"><button type="button" class="ff-btn is-primary" data-act="new-supplier">+ New supplier</button></div>' : ""}</div>`;
+      return;
+    }
+    body.innerHTML = `<div class="inv-sups">${st.suppliers.map((s) => {
+      const n = st.products.filter((p) => p.supplierId === s.id && p.active).length;
+      return `
+        <article class="inv-sup${s.active ? "" : " is-off"}">
+          <div class="inv-sup-head"><strong>${esc(s.name)}</strong>${s.active ? "" : '<em class="inv-off">Inactive</em>'}
+            <span class="inv-flag is-info">${n} product${n === 1 ? "" : "s"}</span></div>
+          <dl>
+            ${s.contactName ? `<dt>Contact</dt><dd>${esc(s.contactName)}</dd>` : ""}
+            ${s.email ? `<dt>Order email</dt><dd><a href="mailto:${esc(s.email)}">${esc(s.email)}</a>${s.ccEmail ? ` <small>cc ${esc(s.ccEmail)}</small>` : ""}</dd>` : ""}
+            ${s.phone ? `<dt>Phone</dt><dd><a href="tel:${esc(s.phone.replace(/\s+/g, ""))}">${esc(s.phone)}</a></dd>` : ""}
+            ${s.accountNo ? `<dt>Account</dt><dd>${esc(s.accountNo)}</dd>` : ""}
+            ${s.website ? `<dt>Website</dt><dd><a href="${esc(s.website)}" target="_blank" rel="noopener">${esc(s.website.replace(/^https?:\/\//, ""))}</a></dd>` : ""}
+            ${s.orderNotes ? `<dt>Ordering notes</dt><dd>${esc(s.orderNotes)}</dd>` : ""}
+          </dl>
+          ${canManage ? `<button type="button" class="lh-btn" data-edit-supplier="${esc(s.id)}">Edit</button>` : ""}
+        </article>`;
+    }).join("")}</div>`;
+  }
+
+  /* ---------- Activity ---------- */
+  async function renderActivity() {
+    body.innerHTML = '<div class="skeleton" style="height:240px;border-radius:14px"></div>';
+    try {
+      const moves = await listMoves({ max: 200 });
+      if (root.isConnected) body.innerHTML = movesHtml(moves, true);
+    } catch (err) {
+      console.error("Inventory activity failed:", err);
+      if (root.isConnected) body.innerHTML = `<div class="tm-empty is-error">${esc(errText(err, "Couldn't load the activity."))}</div>`;
+    }
+  }
+
+  /* ---------- Product editor ---------- */
+  function editProduct(p) {
+    const isNew = !p;
+    const x = p || { category: st.cat || "general", stockUnit: "unit", orderUnit: "box", packSize: 1, reorder: {}, active: true, tracked: false };
+    const hasStock = !!p && (p.stock.shelf + p.stock.jt) > 0;
+    const val = (v) => esc(v === null || v === undefined ? "" : v);
+    const dlg = openDialog("inv-dlg", `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>${isNew ? "New product" : `Edit ${esc(x.name)}`}</h3>
+          <p>Stock is changed from the product's stock window, so every change is logged.</p></div>
+        <div class="inv-two">
+          <label class="lh-field inv-span"><span class="lh-label">Product name</span>
+            <input name="name" maxlength="150" placeholder="e.g. Xeomin 100 units" value="${val(x.name)}" /></label>
+          <label class="lh-field"><span class="lh-label">Category</span><select class="fb-select" name="category">${INV_CATEGORIES.map((c) =>
+            `<option value="${c.key}"${x.category === c.key ? " selected" : ""}>${esc(c.label)}</option>`).join("")}</select></label>
+          <label class="lh-field"><span class="lh-label">Brand (optional)</span><input name="brand" maxlength="80" value="${val(x.brand)}" /></label>
+          <label class="lh-field"><span class="lh-label">Supplier</span><select class="fb-select" name="supplierId">
+            <option value="">No supplier yet</option>${st.suppliers.map((s) =>
+              `<option value="${esc(s.id)}"${x.supplierId === s.id ? " selected" : ""}>${esc(s.name)}</option>`).join("")}</select></label>
+          <label class="lh-field"><span class="lh-label">Supplier's product code (optional)</span><input name="supplierCode" maxlength="60" value="${val(x.supplierCode)}" /></label>
+          <label class="lh-field"><span class="lh-label">Stock unit</span><input name="stockUnit" maxlength="30" placeholder="e.g. vial, syringe, unit" value="${val(x.stockUnit)}" /></label>
+          <label class="lh-field"><span class="lh-label">Ordered as</span><input name="orderUnit" maxlength="30" placeholder="e.g. box, pack" value="${val(x.orderUnit)}" /></label>
+          <label class="lh-field"><span class="lh-label">Stock units in each</span><input name="packSize" type="number" min="1" step="1" value="${val(x.packSize)}" /></label>
+          <label class="lh-field"><span class="lh-label">Cost per order unit, $ (optional)</span><input name="cost" type="number" min="0" step="0.01" value="${val(x.cost)}" /></label>
+          <label class="lh-field"><span class="lh-label">Retail price, $ (optional)</span><input name="price" type="number" min="0" step="0.01" value="${val(x.price)}" /></label>
+          <label class="lh-field"><span class="lh-label">Barcode (optional)</span><input name="barcode" maxlength="60" value="${val(x.barcode)}" /></label>
+          <label class="lh-field"><span class="lh-label">Reorder when Shelf is at or below</span><input name="reShelf" type="number" min="0" step="1" placeholder="No alert" value="${val(x.reorder.shelf)}" /></label>
+          <label class="lh-field"><span class="lh-label">Reorder when JT storage is at or below</span><input name="reJt" type="number" min="0" step="1" placeholder="No alert" value="${val(x.reorder.jt)}" /></label>
+        </div>
+        <p class="inv-hint" data-role="pack"></p>
+        <label class="fe-check"><input type="checkbox" name="tracked"${x.tracked ? " checked" : ""}${hasStock ? " disabled" : ""} />
+          Needs a batch number and expiry date (e.g. Xeomin)</label>
+        ${hasStock ? '<small class="fe-note">This can only be changed while there is no stock. Count it to zero first.</small>' : ""}
+        <label class="fe-check"><input type="checkbox" name="active"${x.active !== false ? " checked" : ""} /> Active (shown in stock and ordering)</label>
+        <label class="lh-field"><span class="lh-label">Notes (optional)</span><textarea name="notes" rows="2" maxlength="1000">${esc(x.notes || "")}</textarea></label>
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">${isNew ? "Add product" : "Save"}</button>
+        </div>
+      </form>`);
+    const form = dlg.querySelector("form");
+    const err = dlg.querySelector(".lh-error");
+    const packHint = () => {
+      const n = Math.max(1, parseInt(form.elements.packSize.value, 10) || 1);
+      const unit = form.elements.stockUnit.value.trim() || "unit";
+      const ou = form.elements.orderUnit.value.trim() || "box";
+      dlg.querySelector('[data-role="pack"]').textContent = `Receiving 1 ${ou} adds ${plural(n, unit)} to stock.`;
+    };
+    packHint();
+    form.addEventListener("input", packHint);
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const f = form.elements;
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      err.hidden = true;
+      try {
+        await saveProduct(p ? p.id : "", {
+          name: f.name.value, category: f.category.value, brand: f.brand.value, supplierId: f.supplierId.value,
+          supplierCode: f.supplierCode.value, stockUnit: f.stockUnit.value, orderUnit: f.orderUnit.value,
+          packSize: f.packSize.value, cost: f.cost.value, price: f.price.value, barcode: f.barcode.value,
+          reorder: { shelf: f.reShelf.value, jt: f.reJt.value },
+          tracked: hasStock ? x.tracked : f.tracked.checked, active: f.active.checked, notes: f.notes.value,
+        }, staff);
+        dlg.close();
+        showToast(isNew ? "Product added" : "Product saved");
+        load();
+      } catch (ex) {
+        console.error("Save product failed:", ex);
+        err.textContent = errText(ex, "Couldn't save. Try again.");
+        err.hidden = false;
+        btn.disabled = false;
+      }
+    });
+    form.elements.name.focus();
+  }
+
+  /* ---------- Supplier editor ---------- */
+  function editSupplier(s) {
+    const isNew = !s;
+    const x = s || { active: true };
+    const val = (v) => esc(v || "");
+    const dlg = openDialog("inv-dlg", `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>${isNew ? "New supplier" : `Edit ${esc(x.name)}`}</h3>
+          <p>Purchase orders are emailed to the order email, with the CC copied in.</p></div>
+        <div class="inv-two">
+          <label class="lh-field inv-span"><span class="lh-label">Company</span><input name="name" maxlength="120" value="${val(x.name)}" /></label>
+          <label class="lh-field"><span class="lh-label">Contact person</span><input name="contactName" maxlength="120" value="${val(x.contactName)}" /></label>
+          <label class="lh-field"><span class="lh-label">Phone</span><input name="phone" maxlength="40" value="${val(x.phone)}" /></label>
+          <label class="lh-field"><span class="lh-label">Order email</span><input name="email" type="email" maxlength="254" value="${val(x.email)}" /></label>
+          <label class="lh-field"><span class="lh-label">CC on orders (optional)</span><input name="ccEmail" type="email" maxlength="254" value="${val(x.ccEmail)}" /></label>
+          <label class="lh-field"><span class="lh-label">Our account number (optional)</span><input name="accountNo" maxlength="60" value="${val(x.accountNo)}" /></label>
+          <label class="lh-field"><span class="lh-label">Website (optional)</span><input name="website" maxlength="300" value="${val(x.website)}" /></label>
+          <label class="lh-field inv-span"><span class="lh-label">Address (optional)</span><input name="address" maxlength="300" value="${val(x.address)}" /></label>
+        </div>
+        <label class="lh-field"><span class="lh-label">Ordering notes (optional)</span>
+          <textarea name="orderNotes" rows="2" maxlength="1000" placeholder="e.g. Orders before 2pm ship same day. Minimum order $200.">${esc(x.orderNotes || "")}</textarea></label>
+        <label class="fe-check"><input type="checkbox" name="active"${x.active !== false ? " checked" : ""} /> Active</label>
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">${isNew ? "Add supplier" : "Save"}</button>
+        </div>
+      </form>`);
+    const form = dlg.querySelector("form");
+    const err = dlg.querySelector(".lh-error");
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const f = form.elements;
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      err.hidden = true;
+      try {
+        await saveSupplier(s ? s.id : "", {
+          name: f.name.value, contactName: f.contactName.value, phone: f.phone.value, email: f.email.value,
+          ccEmail: f.ccEmail.value, accountNo: f.accountNo.value, website: f.website.value, address: f.address.value,
+          orderNotes: f.orderNotes.value, active: f.active.checked,
+        }, staff);
+        dlg.close();
+        showToast(isNew ? "Supplier added" : "Supplier saved");
+        load();
+      } catch (ex) {
+        console.error("Save supplier failed:", ex);
+        err.textContent = errText(ex, "Couldn't save. Try again.");
+        err.hidden = false;
+        btn.disabled = false;
+      }
+    });
+    form.elements.name.focus();
+  }
+
+  /* ---------- Stock actions: add, count, move, write off ---------- */
+  function stockAction(p, mode) {
+    const lots = lotsOf(p.id);
+    const unit = p.stockUnit;
+    const lotLabel = (l) => `${locLabel(l.loc)} · Batch ${l.batch} · Exp ${niceDate(l.expiry)} · ${plural(l.qty, unit)}`;
+    const qtyField = (label) => `<label class="lh-field"><span class="lh-label">${label}</span>
+      <div class="fe-num"><input class="fe-input" name="qty" type="number" min="1" step="1" /><span>${esc(unitPlural(unit))}</span></div></label>`;
+    let inner = "";
+    let title = "";
+    let sub = "";
+
+    if (mode === "add") {
+      title = "Add stock";
+      sub = "For opening balances and stock found. Deliveries are received against a purchase order (coming next).";
+      inner = `
+        <div class="lh-field"><span class="lh-label">Where</span>${seg("loc", LOCATIONS.map((l) => [l.key, l.label]), "shelf")}</div>
+        ${p.tracked ? `<div class="inv-two">
+          <label class="lh-field"><span class="lh-label">Batch number</span><input name="batch" maxlength="40" autocomplete="off" /></label>
+          <label class="lh-field"><span class="lh-label">Expiry date</span><input name="expiry" type="date" /></label></div>` : ""}
+        ${qtyField("How many")}
+        <label class="lh-field"><span class="lh-label">Reason</span><select class="fb-select" name="reason">${ADD_REASONS.map((r) => `<option>${r}</option>`).join("")}</select></label>`;
+    } else if (mode === "count") {
+      title = "Count stock";
+      sub = "Enter what's physically there. Any difference is logged.";
+      inner = p.tracked
+        ? (lots.length ? `<table class="inv-table"><thead><tr><th>Storage</th><th>Batch</th><th>Expiry</th><th>System</th><th>Counted</th></tr></thead><tbody>${
+            lots.map((l, i) => `<tr><td>${esc(locLabel(l.loc))}</td><td>${esc(l.batch)}</td><td>${esc(niceDate(l.expiry))}</td><td>${l.qty}</td>
+              <td><input class="fe-input inv-num" type="number" min="0" step="1" data-count="${i}" value="${l.qty}" aria-label="Counted" /></td></tr>`).join("")}</tbody></table>
+            <small class="fe-note">A batch that isn't listed? Close this and use Add stock.</small>`
+          : '<p class="tb-none">Nothing in stock yet. Use Add stock to enter what you have, with its batch and expiry.</p>')
+        : `<table class="inv-table"><thead><tr><th>Storage</th><th>System</th><th>Counted</th></tr></thead><tbody>${
+            LOCATIONS.map((l) => `<tr><td>${esc(l.label)}</td><td>${p.stock[l.key]}</td>
+              <td><input class="fe-input inv-num" type="number" min="0" step="1" data-countloc="${l.key}" value="${p.stock[l.key]}" aria-label="Counted" /></td></tr>`).join("")}</tbody></table>`;
+    } else if (mode === "move") {
+      title = "Move stock";
+      sub = "Between the Shelf and JT storage. Both sides are logged together.";
+      const from = p.stock.shelf > 0 || p.stock.jt <= 0 ? "shelf" : "jt";
+      inner = `
+        <div class="lh-field"><span class="lh-label">Direction</span>${seg("from", [["shelf", "Shelf → JT storage"], ["jt", "JT storage → Shelf"]], from)}</div>
+        ${p.tracked ? '<label class="lh-field"><span class="lh-label">Batch</span><select class="fb-select" name="lot"></select></label>' : ""}
+        ${qtyField("How many")}
+        <p class="inv-hint" data-role="avail"></p>`;
+    } else {
+      title = "Write off stock";
+      sub = "Removes stock that can't be used. The reason is logged.";
+      inner = `
+        ${p.tracked
+          ? (lots.length ? `<label class="lh-field"><span class="lh-label">Batch</span><select class="fb-select" name="lot">${lots.map((l, i) =>
+              `<option value="${i}">${esc(lotLabel(l))}${expiryState(l.expiry) === "expired" ? " · EXPIRED" : ""}</option>`).join("")}</select></label>`
+            : '<p class="tb-none">There is no stock to write off.</p>')
+          : `<div class="lh-field"><span class="lh-label">From</span>${seg("loc", LOCATIONS.map((l) => [l.key, `${l.label} (${p.stock[l.key]})`]), p.stock.shelf > 0 ? "shelf" : "jt")}</div>`}
+        ${qtyField("How many")}
+        <label class="lh-field"><span class="lh-label">Reason</span><select class="fb-select" name="reason">${WRITEOFF_REASONS.map((r) => `<option>${r}</option>`).join("")}</select></label>`;
+    }
+
+    return new Promise((resolve) => {
+      let saved = false;
+      const dlg = openDialog("inv-dlg", `
+        <form class="lh-form" novalidate>
+          <div class="lh-dialog-head"><h3>${title}: ${esc(p.name)}</h3><p>${esc(sub)}</p></div>
+          ${inner}
+          <label class="lh-field"><span class="lh-label">Note (optional)</span><input name="note" maxlength="500" /></label>
+          <p class="lh-error" role="alert" hidden></p>
+          <div class="lh-actions">
+            <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+            <button type="submit" class="lh-btn is-primary">${title}</button>
+          </div>
+        </form>`);
+      const form = dlg.querySelector("form");
+      const err = dlg.querySelector(".lh-error");
+      const f = form.elements;
+
+      // Move: the batches (oldest expiry first) and how many are available
+      const moveLots = () => lots.filter((l) => l.loc === f.from.value);
+      const syncMove = () => {
+        if (mode !== "move") return;
+        let avail = p.stock[f.from.value];
+        if (p.tracked) {
+          const list = moveLots();
+          f.lot.innerHTML = list.length
+            ? list.map((l, i) => `<option value="${i}">${esc(`Batch ${l.batch} · Exp ${niceDate(l.expiry)} · ${plural(l.qty, unit)}`)}</option>`).join("")
+            : '<option value="">Nothing here to move</option>';
+          const l = list[Number(f.lot.value)];
+          avail = l ? l.qty : 0;
+        }
+        dlg.querySelector('[data-role="avail"]').textContent = `Available to move: ${plural(avail, unit)}.`;
+      };
+      syncMove();
+      form.addEventListener("change", (e) => { if (e.target.name === "from") syncMove(); if (e.target.name === "lot" && mode === "move") {
+        const l = moveLots()[Number(f.lot.value)];
+        dlg.querySelector('[data-role="avail"]').textContent = `Available to move: ${plural(l ? l.qty : 0, unit)}.`;
+      } });
+
+      dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        err.hidden = true;
+        const qty = f.qty ? parseInt(f.qty.value, 10) : 0;
+        let ops = [];
+        let reason = f.reason ? f.reason.value : "";
+        try {
+          if (mode === "add") {
+            if (!(qty >= 1)) throw new Error("Enter how many.");
+            if (p.tracked && (!f.batch.value.trim() || !f.expiry.value)) throw new Error("Enter the batch number and expiry date.");
+            ops = [{ loc: f.loc.value, batch: p.tracked ? f.batch.value : "", expiry: p.tracked ? f.expiry.value : "", delta: qty }];
+          } else if (mode === "count") {
+            if (p.tracked) {
+              ops = lots.map((l, i) => {
+                const n = parseInt(form.querySelector(`[data-count="${i}"]`).value, 10);
+                if (!(n >= 0)) throw new Error("Enter a count of 0 or more for every batch.");
+                return { loc: l.loc, batch: l.batch, expiry: l.expiry, delta: n - l.qty };
+              });
+            } else {
+              ops = LOCATIONS.map((l) => {
+                const n = parseInt(form.querySelector(`[data-countloc="${l.key}"]`).value, 10);
+                if (!(n >= 0)) throw new Error("Enter a count of 0 or more.");
+                return { loc: l.key, delta: n - p.stock[l.key] };
+              });
+            }
+            reason = "Stock count";
+          } else if (mode === "move") {
+            if (!(qty >= 1)) throw new Error("Enter how many to move.");
+            const from = f.from.value;
+            const to = from === "shelf" ? "jt" : "shelf";
+            const l = p.tracked ? moveLots()[Number(f.lot.value)] : null;
+            if (p.tracked && !l) throw new Error("There's nothing in that storage to move.");
+            const b = l ? l.batch : "";
+            const x = l ? l.expiry : "";
+            ops = [{ loc: from, batch: b, expiry: x, delta: -qty }, { loc: to, batch: b, expiry: x, delta: qty }];
+            reason = `${locLabel(from)} → ${locLabel(to)}`;
+          } else {
+            if (!(qty >= 1)) throw new Error("Enter how many to write off.");
+            if (p.tracked) {
+              const l = lots[Number(f.lot.value)];
+              if (!l) throw new Error("There is no stock to write off.");
+              ops = [{ loc: l.loc, batch: l.batch, expiry: l.expiry, delta: -qty }];
+            } else {
+              ops = [{ loc: f.loc.value, delta: -qty }];
+            }
+          }
+        } catch (ex) {
+          err.textContent = ex.message;
+          err.hidden = false;
+          return;
+        }
+        const btn = form.querySelector('[type="submit"]');
+        btn.disabled = true;
+        btn.textContent = "Saving…";
+        try {
+          await applyStock(p, { type: mode, ops, reason, note: f.note.value }, staff);
+          saved = true;
+          dlg.close();
+          showToast(mode === "move" ? "Stock moved" : mode === "count" ? "Count saved" : mode === "add" ? "Stock added" : "Stock written off");
+        } catch (ex) {
+          console.error("Stock change failed:", ex);
+          err.textContent = errText(ex, "Couldn't save. Try again.");
+          err.hidden = false;
+          btn.disabled = false;
+          btn.textContent = title;
+        }
+      });
+      dlg.addEventListener("close", () => resolve(saved));
+    });
+  }
+
+  /* ---------- A product's stock window ---------- */
+  function openProduct(id) {
+    const dlg = openDialog("inv-dlg inv-pdlg", '<div class="lh-form" data-role="pd"></div>');
+    const box = dlg.querySelector('[data-role="pd"]');
+
+    function draw() {
+      const p = st.products.find((x) => x.id === id);
+      if (!p) { dlg.close(); return; }
+      const lots = lotsOf(id);
+      const sup = supplierOf(p.supplierId);
+      box.innerHTML = `
+        <div class="inv-pd-head">
+          <div><h3>${esc(p.name)}</h3>
+            <p class="muted">${esc([catLabel(p.category), p.brand, `${p.orderUnit} of ${plural(p.packSize, p.stockUnit)}`, p.tracked ? "Batch & expiry tracked" : ""].filter(Boolean).join(" · "))}</p></div>
+          <button type="button" class="ib-tool" data-act="close" aria-label="Close" title="Close">×</button>
+        </div>
+        <div class="inv-pd-qty">${LOCATIONS.map((l) => `
+          <div class="inv-pd-loc${lowAt(p, l.key) ? " is-low" : ""}"><span>${esc(l.label)}</span>
+            <strong>${esc(plural(p.stock[l.key], p.stockUnit))}</strong>
+            ${p.reorder[l.key] !== null ? `<small>${lowAt(p, l.key) ? "Low · " : ""}reorder at ${p.reorder[l.key]}</small>` : ""}</div>`).join("")}</div>
+        ${canMove ? `<div class="inv-pd-acts">
+          ${canManage ? '<button type="button" class="lh-btn is-primary" data-stock="add">Add stock</button>' : ""}
+          <button type="button" class="lh-btn" data-stock="move">Move Shelf ⇄ JT</button>
+          ${canManage ? `<button type="button" class="lh-btn" data-stock="count">Count</button>
+            <button type="button" class="lh-btn" data-stock="writeoff">Write off</button>
+            <button type="button" class="lh-btn is-quiet" data-act="edit">Edit product</button>` : ""}
+        </div>` : ""}
+        ${p.tracked ? `<div class="inv-pd-sec"><h4>Batches <small>(oldest expiry first)</small></h4>${lots.length
+          ? `<table class="inv-table"><thead><tr><th>Storage</th><th>Batch</th><th>Expiry</th><th>Qty</th></tr></thead><tbody>${lots.map((l) => {
+              const ex = expiryState(l.expiry);
+              return `<tr><td>${esc(locLabel(l.loc))}</td><td>${esc(l.batch)}</td>
+                <td>${esc(niceDate(l.expiry))}${ex ? ` <span class="inv-flag is-${ex === "expired" ? "bad" : "warn"}">${ex === "expired" ? "Expired" : "Soon"}</span>` : ""}</td>
+                <td>${l.qty}</td></tr>`;
+            }).join("")}</tbody></table>`
+          : '<p class="tb-none">No batches in stock.</p>'}</div>` : ""}
+        ${sup ? `<div class="inv-pd-sec"><h4>Supplier</h4><p class="inv-pd-sup"><strong>${esc(sup.name)}</strong>${
+          [sup.contactName, sup.phone && `<a href="tel:${esc(sup.phone.replace(/\s+/g, ""))}">${esc(sup.phone)}</a>`,
+            sup.email && `<a href="mailto:${esc(sup.email)}">${esc(sup.email)}</a>`, p.supplierCode && `Code ${esc(p.supplierCode)}`]
+            .filter(Boolean).map((x) => ` · ${x.startsWith("<") ? x : esc(x)}`).join("")}</p></div>` : ""}
+        <div class="inv-pd-sec"><h4>Recent activity</h4><div data-role="moves"><p class="tb-none">Loading…</p></div></div>`;
+      listMoves({ productId: id, max: 15 })
+        .then((m) => { const el = box.querySelector('[data-role="moves"]'); if (el) el.innerHTML = movesHtml(m, false); })
+        .catch(() => { const el = box.querySelector('[data-role="moves"]'); if (el) el.innerHTML = '<p class="tb-none tb-bad">Couldn\'t load the activity.</p>'; });
+    }
+
+    box.addEventListener("click", async (e) => {
+      if (e.target.closest('[data-act="close"]')) { dlg.close(); return; }
+      const p = st.products.find((x) => x.id === id);
+      if (!p) return;
+      if (e.target.closest('[data-act="edit"]')) { dlg.close(); editProduct(p); return; }
+      const s = e.target.closest("[data-stock]");
+      if (s && await stockAction(p, s.dataset.stock)) {
+        await load();
+        if (dlg.open) draw();
+      }
+    });
+    draw();
+  }
+
+  /* ---------- Events ---------- */
+  root.addEventListener("click", (e) => {
+    if (e.target.closest('[data-act="new-product"]')) { editProduct(null); return; }
+    if (e.target.closest('[data-act="new-supplier"]')) { editSupplier(null); return; }
+    const pr = e.target.closest("[data-product]");
+    if (pr) { openProduct(pr.dataset.product); return; }
+    const ep = e.target.closest("[data-edit-product]");
+    if (ep) { const p = st.products.find((x) => x.id === ep.dataset.editProduct); if (p) editProduct(p); return; }
+    const es = e.target.closest("[data-edit-supplier]");
+    if (es) { const s = st.suppliers.find((x) => x.id === es.dataset.editSupplier); if (s) editSupplier(s); }
+  });
+  body.addEventListener("input", (e) => {
+    const k = e.target.dataset.f;
+    if (!k) return;
+    if (k === "flagged" || k === "showInactive") st[k] = e.target.checked;
+    else st[k] = e.target.value;
+    if (k === "showInactive") renderProducts(); else renderStockList();
+  });
+
+  load();
+}

@@ -8,6 +8,7 @@ export const PERM_KEYS = [
   "patients.edit", "patients.merge", "clinical.view", "billing.view",
   "consult.record", "consult.delete", "send.patients", "tasks.run",
   "tasks.build", "forms.build", "ssp.create", "ssp.config",
+  "menu.inventory", "inventory.request", "inventory.order", "inventory.manage",
 ];
 
 let admin = false;

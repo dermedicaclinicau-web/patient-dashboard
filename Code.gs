@@ -35,6 +35,9 @@ function doPost(e) {
     if (body.action === 'sendAftercareEmail') return json_(handleSendAftercareEmail_(body));
     if (body.action === 'printPdf') return json_(handlePrintPdf_(body));
     if (body.action === 'ssp') return json_(handleSsp_(body));
+    if (body.action === 'staff') return json_(handleStaff_(body));
+    if (body.action === 'scheduledTask') return json_(handleScheduledTask_(body));
+    if (body.action === 'printTask') return json_(handlePrintTask_(body));
 
     const pin = String(body.pin || '').trim();
 
@@ -47,15 +50,19 @@ function doPost(e) {
       Utilities.sleep(800); // slows brute-force attempts
       return json_({ ok: false, error: 'INVALID_PIN' });
     }
+    if (staff.active === false) return json_({ ok: false, error: 'INACTIVE' });
 
     const token = createCustomToken_(staff.id, {
       staffName: staff.name,
       staffRole: staff.role,
       staffPhoto: staff.photo,
       staffEmail: staff.email,
+      perms: effectivePerms_(staff),
     });
 
     const session = createSession_(staff);
+    try { fsPatch_(getConfig_(), STAFF_COLLECTION + '/' + staff.id, { 'Last Login': new Date().toISOString() }); }
+    catch (e) { console.warn('Last login not saved: ' + e); }
     return json_({ ok: true, token: token, session: session });
   } catch (err) {
     console.error('Login error:', err && err.stack ? err.stack : err);
@@ -75,9 +82,19 @@ function doGet(e) {
 // ===================== Firestore lookup =====================
 
 function findStaffByPin_(pin) {
-  const matches = getStaffDocs_().filter(function (s) { return s.pin === pin; });
+  const hash = pinHash_(pin);
+  const matches = getStaffDocs_().filter(function (s) {
+    return (s.pinHash && s.pinHash === hash) || (!s.pinHash && s.pin && s.pin === pin);
+  });
   if (matches.length > 1) throw new Error('Duplicate PIN found in ' + STAFF_COLLECTION);
-  return matches[0] || null;
+  const s = matches[0] || null;
+  if (s && !s.pinHash) { // an older plain PIN: store it hashed from now on
+    try {
+      fsPatch_(getConfig_(), STAFF_COLLECTION + '/' + s.id, { 'PIN Hash': hash, 'PIN': '' });
+      CacheService.getScriptCache().remove('staff_docs_v1');
+    } catch (e) { console.warn('PIN hash not saved: ' + e); }
+  }
+  return s;
 }
 
 // Staff list from Firestore, cached inside Apps Script (never sent to the browser)
@@ -98,16 +115,20 @@ function getStaffDocs_() {
   }
 
   const docs = (JSON.parse(res.getContentText()).documents || []).map(function (d) {
+    const f = d.fields || {};
     return {
       id: d.name.split('/').pop(), // Firestore doc ID becomes the Auth UID
-      pin: field_(d.fields, 'PIN'),
-      name: field_(d.fields, 'Staff Name'),
-      role: field_(d.fields, 'Role'),
-      photo: field_(d.fields, 'Profile Photo'),
-      email: field_(d.fields, 'Email address'),
+      pin: field_(f, 'PIN'),        // older plain PINs (converted to PIN Hash)
+      pinHash: field_(f, 'PIN Hash'),
+      name: field_(f, 'Staff Name'),
+      role: field_(f, 'Role'),
+      photo: field_(f, 'Profile Photo'),
+      email: field_(f, 'Email address'),
+      active: !(f['Active'] && f['Active'].booleanValue === false),
+      lastLogin: field_(f, 'Last Login'),
+      access: f['Access'] ? fromValue_(f['Access']) : null,
     };
   });
-
   try {
     cache.put('staff_docs_v1', JSON.stringify(docs), STAFF_CACHE_SECONDS);
   } catch (err) {
@@ -241,16 +262,31 @@ function createSession_(staff) {
 
 function getSession_(token) {
   if (!/^[a-f0-9]{64}$/i.test(token || '')) return null;
-  const raw = CacheService.getScriptCache().get('sess_' + token);
-  return raw ? JSON.parse(raw) : null;
+  const cache = CacheService.getScriptCache();
+  const raw = cache.get('sess_' + token);
+  if (!raw) return null;
+  const sess = JSON.parse(raw);
+  if (sess.uid === 'test') { sess.perms = PERMS_ALL_.slice(); return sess; } // editor test functions
+  let s = null;
+  try {
+    s = getStaffDocs_().filter(function (x) { return x.id === sess.uid; })[0] || null;
+  } catch (e) {
+    return sess; // Firestore hiccup: keep the session working
+  }
+  if (!s || s.active === false) { cache.remove('sess_' + token); return null; }
+  sess.name = s.name || sess.name;
+  sess.role = s.role || sess.role;
+  sess.perms = effectivePerms_(s);
+  return sess;
 }
-
 // ===================== Appointments (Google Sheet) =====================
 
 const MONTHS_ = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
 
 function handleAppointments_(body) {
-  if (!getSession_(String(body.session || ''))) return { ok: false, error: 'UNAUTHORIZED' };
+  const session = getSession_(String(body.session || ''));
+if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+if (!can_(session, 'consult.record')) return { ok: false, error: 'FORBIDDEN' };
 
   const dateKey = String(body.date || '');
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return { ok: false, error: 'BAD_DATE' };
@@ -1218,7 +1254,7 @@ function handleDeleteRecording_(body) {
   const job = fsGetDoc_(cfg, 'recording_jobs/' + id);
   const isOwner = !!(job && job.createdByUid && job.createdByUid === session.uid);
   const isAdmin = /^admin$/i.test(String(session.role || ''));
-  if (!isOwner && !isAdmin) return { ok: false, error: 'FORBIDDEN' };
+  if (!isOwner && !can_(session, 'consult.delete')) return { ok: false, error: 'FORBIDDEN' };
 
   // 1) Audio first: if this fails, nothing else is removed
   const audioPath = String(rec['Audio Path'] || (job && job.audioPath) || '');
@@ -1304,6 +1340,8 @@ const MAIL_LIMIT_PER_HOUR_ = 30; // per staff member
 function handleSendTreatmentEmail_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!can_(session, 'send.patients')) return { ok: false, error: 'FORBIDDEN' };
+  if (!can_(session, 'consult.record')) return { ok: false, error: 'FORBIDDEN' };
 
   const recordId = String(body.recordId || '').trim();
   const to = String(body.to || '').trim();
@@ -1612,6 +1650,7 @@ function geminiEmailFromPlan_(concerns, currentList, names) {
 function handleSendFormPdf_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!can_(session, 'send.patients')) return { ok: false, error: 'FORBIDDEN' };
 
   const id = String(body.submissionId || '').trim();
   const kind = body.kind === 'print' ? 'print' : 'email';
@@ -1666,11 +1705,21 @@ function handleSendFormPdf_(body) {
     mail.subject = 'Print: ' + fileName;
     mail.body = 'Sent from the Dermedica staff portal for printing.';
   } else {
-    const message = String(body.message || '').slice(0, 5000);
     mail.subject = String(body.subject || '').trim().slice(0, 200) ||
       ('Your ' + String(sub.templateName || 'form') + ' - Dermedica');
-    mail.body = message;
-    mail.htmlBody = textToEmailHtml_(message);
+    const richMsg = sanitizeEmailHtml_(body.messageHtml);
+    if (richMsg && richMsg.length <= 300000) {
+      // Rich text message (same design as the other portal emails)
+      const inlined = inlineTaskImages_(cfg, richMsg);
+      mail.htmlBody = inlined.html;
+      mail.body = emailHtmlToText_(inlined.html);
+      if (Object.keys(inlined.images).length) mail.inlineImages = inlined.images;
+    } else {
+      // Older plain text message
+      const message = String(body.message || '').slice(0, 5000);
+      mail.body = message;
+      mail.htmlBody = textToEmailHtml_(message);
+    }
     if (cc) mail.cc = cc;
   }
   MailApp.sendEmail(mail);
@@ -1749,10 +1798,9 @@ function handleImageBank_(body) {
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
   const rootId = String(PropertiesService.getScriptProperties().getProperty('IMAGE_BANK_FOLDER_ID') || '').trim();
   if (!rootId) return { ok: false, error: 'NO_IMAGE_BANK' };
-
   const op = String(body.op || '');
   const isAdmin = /^admin$/i.test(String(session.role || ''));
-  if (['mkdir', 'upload', 'rename', 'trash'].indexOf(op) !== -1 && !isAdmin) return { ok: false, error: 'FORBIDDEN' };
+  if (['mkdir', 'upload', 'rename', 'trash'].indexOf(op) !== -1 && !can_(session, 'forms.build')) return { ok: false, error: 'FORBIDDEN' };
 
   try {
     switch (op) {
@@ -1997,7 +2045,7 @@ function handleStaffList_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
   const staff = getStaffDocs_()
-    .filter(function (s) { return s.name; })
+    .filter(function (s) { return s.name && s.active !== false; })
     .map(function (s) { return { id: s.id, name: s.name, role: s.role, hasEmail: !!s.email }; })
     .sort(function (a, b) { return a.name.localeCompare(b.name); });
   return { ok: true, staff: staff };
@@ -2009,7 +2057,7 @@ const TASK_MAX_RECIPIENTS_ = 20;
 function handleSendTaskEmail_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
-
+  if (!can_(session, 'tasks.run')) return { ok: false, error: 'FORBIDDEN' };
   const taskId = String(body.taskId || '').trim();
   if (!/^[A-Za-z0-9_-]{10,40}$/.test(taskId)) return { ok: false, error: 'BAD_REQUEST' };
 
@@ -2201,6 +2249,7 @@ function storageImageBlob_(cfg, path, name) {
 function handleSendAftercareEmail_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!can_(session, 'send.patients')) return { ok: false, error: 'FORBIDDEN' };
 
   const cfg = getConfig_();
   const patientId = String(body.patientId || '').trim();
@@ -2258,6 +2307,7 @@ function handleSendAftercareEmail_(body) {
 function handlePrintPdf_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!can_(session, 'send.patients')) return { ok: false, error: 'FORBIDDEN' };
   const bytes = pdfBytes_(body.pdf);
   if (!bytes) return { ok: false, error: 'PDF_FAILED' };
 
@@ -2296,15 +2346,21 @@ function handleSsp_(body) {
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
   const isAdmin = /^admin$/i.test(String(session.role || ''));
   const op = String(body.op || '');
-  try {
-    if (op === 'appendRecord') return sspAppendRecord_(String(body.recordId || ''));
-    if (op === 'deliver') return sspDeliver_(body, session);
+    try {
+    if (op === 'appendRecord') {
+      if (!can_(session, 'ssp.create')) return { ok: false, error: 'FORBIDDEN' };
+      return sspAppendRecord_(String(body.recordId || ''));
+    }
+    if (op === 'deliver') {
+      if (!can_(session, 'send.patients')) return { ok: false, error: 'FORBIDDEN' };
+      return sspDeliver_(body, session);
+    }
     if (op === 'importProducts') {
-      if (!isAdmin) return { ok: false, error: 'FORBIDDEN' };
+      if (!can_(session, 'ssp.config')) return { ok: false, error: 'FORBIDDEN' };
       return sspImportProducts_();
     }
     if (op === 'productToSheet') {
-      if (!isAdmin) return { ok: false, error: 'FORBIDDEN' };
+      if (!can_(session, 'ssp.config')) return { ok: false, error: 'FORBIDDEN' };
       return sspProductToSheet_(body.product || {});
     }
   } catch (err) {
@@ -2527,4 +2583,664 @@ function sspDeliver_(body, session) {
 
   console.log('SSP ' + (rec.recordId || id) + (kind === 'print' ? ' sent to printer' : ' emailed to ' + to) + ' by ' + session.name);
   return { ok: true, entry: entry };
+}
+
+// ===================== Staff management (Admins only) =====================
+
+const STAFF_ROLES_ = ['Admin', 'Clinician', 'Reception'];
+
+// Secret key for PIN hashes. Lives only in Script Properties. Never change or delete it.
+function pinPepper_() {
+  const p = PropertiesService.getScriptProperties();
+  let v = p.getProperty('PIN_PEPPER');
+  if (!v) {
+    const lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      v = p.getProperty('PIN_PEPPER');
+      if (!v) { v = Utilities.getUuid() + Utilities.getUuid(); p.setProperty('PIN_PEPPER', v); }
+    } finally { lock.releaseLock(); }
+  }
+  return v;
+}
+
+function pinHash_(pin) {
+  return Utilities.base64Encode(Utilities.computeHmacSha256Signature(String(pin), pinPepper_()));
+}
+
+// Run ONCE after deploying: creates the secret key and hashes every existing PIN (nobody's PIN changes)
+function setupPinSecurity() {
+  pinPepper_();
+  const cfg = getConfig_();
+  CacheService.getScriptCache().remove('staff_docs_v1');
+  let n = 0;
+  getStaffDocs_().forEach(function (s) {
+    if (s.pin && !s.pinHash) {
+      fsPatch_(cfg, STAFF_COLLECTION + '/' + s.id, { 'PIN Hash': pinHash_(s.pin), 'PIN': '' });
+      n++;
+    }
+  });
+  CacheService.getScriptCache().remove('staff_docs_v1');
+  console.log('PIN security ready. ' + n + ' PIN(s) hashed.');
+}
+
+function staffFresh_() {
+  CacheService.getScriptCache().remove('staff_docs_v1');
+  return getStaffDocs_();
+}
+function activeAdmins_(all, excludeId) {
+  return all.filter(function (s) { return s.id !== excludeId && s.active !== false && /^admin$/i.test(s.role); }).length;
+}
+function pinInUse_(all, pin, exceptId) {
+  const hash = pinHash_(pin);
+  return all.some(function (s) {
+    return s.id !== exceptId && ((s.pinHash && s.pinHash === hash) || (!s.pinHash && s.pin && s.pin === pin));
+  });
+}
+function newPin_(all) {
+  for (let i = 0; i < 50; i++) {
+    const pin = String(parseInt(Utilities.getUuid().replace(/-/g, '').slice(0, 12), 16) % 900000 + 100000);
+    if (/^(\d)\1+$/.test(pin) || '0123456789'.indexOf(pin) !== -1) continue; // skip 111111 / 123456
+    if (!pinInUse_(all, pin, '')) return pin;
+  }
+  throw new Error('Could not make a unique PIN');
+}
+function staffClean_(v, max) { return String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, max); }
+
+function staffAudit_(cfg, session, action, target, details) {
+  try {
+    commitWrites_(cfg, [updateWrite_(cfg, 'staff_audit/a_' + Date.now() + '_' + Utilities.getUuid().slice(0, 8), {
+      at: new Date().toISOString(),
+      by: String(session.name || ''), byUid: String(session.uid || ''),
+      action: action, targetId: String(target.id || ''), targetName: String(target.name || ''),
+      details: String(details || '').slice(0, 300),
+    })]);
+  } catch (e) { console.warn('Staff audit not saved: ' + e); }
+}
+
+// Firebase sign-in on/off for a staff member (so a turned-off account can't keep using the portal)
+function idtAccessToken_(cfg) {
+  const cache = CacheService.getScriptCache();
+  const hit = cache.get('idt_access_token_v1');
+  if (hit) return hit;
+  const now = Math.floor(Date.now() / 1000);
+  const assertion = signJwt_({
+    iss: cfg.email, scope: 'https://www.googleapis.com/auth/identitytoolkit https://www.googleapis.com/auth/firebase',
+    aud: 'https://oauth2.googleapis.com/token', iat: now, exp: now + 3600,
+  }, cfg);
+  const res = UrlFetchApp.fetch('https://oauth2.googleapis.com/token', {
+    method: 'post', muteHttpExceptions: true,
+    payload: { grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion: assertion },
+  });
+  const data = JSON.parse(res.getContentText());
+  if (!data.access_token) throw new Error('Identity token error: ' + res.getContentText().slice(0, 200));
+  cache.put('idt_access_token_v1', data.access_token, 3000);
+  return data.access_token;
+}
+function setFirebaseUserDisabled_(cfg, uid, disabled) {
+  try {
+    const body = { localId: uid, disableUser: !!disabled };
+    if (disabled) body.validSince = String(Math.floor(Date.now() / 1000)); // signs them out everywhere
+    const res = UrlFetchApp.fetch('https://identitytoolkit.googleapis.com/v1/projects/' + cfg.projectId + '/accounts:update', {
+      method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+      headers: { Authorization: 'Bearer ' + idtAccessToken_(cfg) },
+      payload: JSON.stringify(body),
+    });
+    const code = res.getResponseCode();
+    if (code === 200) return true;
+    if (/USER_NOT_FOUND/.test(res.getContentText())) return true; // never logged in yet
+    console.warn('Firebase user update ' + code + ': ' + res.getContentText().slice(0, 200));
+    return false;
+  } catch (e) {
+    console.warn('Firebase user update failed: ' + e);
+    return false;
+  }
+}
+
+function handleStaff_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  const op = String(body.op || '');
+  if (op === 'me') return staffMe_(session); // anyone logged in
+  if (!/^admin$/i.test(String(session.role || ''))) return { ok: false, error: 'FORBIDDEN' };
+  try {
+    if (op === 'roles') return rolesGet_();
+    if (op === 'saveRoles') return rolesSave_(body.roles || {}, session);
+    if (op === 'list') return staffList_();
+    if (op === 'save') return staffSave_(body.staff || {}, session);
+    if (op === 'resetPin') return staffResetPin_(String(body.id || ''), String(body.pin || ''), session);
+    if (op === 'setActive') return staffSetActive_(String(body.id || ''), body.active === true, session);
+    if (op === 'unlock') {
+      CacheService.getScriptCache().remove('pin_fails');
+      staffAudit_(getConfig_(), session, 'Unlocked logins', {}, '');
+      return { ok: true };
+    }
+    if (op === 'audit') return staffAuditList_();
+  } catch (err) {
+    console.error('Staff ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: false, error: 'SERVER_ERROR', detail: String(err && err.message ? err.message : err).slice(0, 300) };
+  }
+  return { ok: false, error: 'BAD_REQUEST' };
+}
+
+function staffList_() {
+  const staff = staffFresh_().map(function (s) {
+    return { id: s.id, name: s.name, role: s.role, email: s.email, photo: s.photo,
+      active: s.active !== false, lastLogin: s.lastLogin || '', hasPin: !!(s.pinHash || s.pin),
+      access: s.access || { allow: [], deny: [] } };
+  }).sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
+  return { ok: true, staff: staff, roles: STAFF_ROLES_, locked: isLockedOut_() };
+}
+
+function staffSave_(p, session) {
+  const cfg = getConfig_();
+  const name = staffClean_(p.name, 120);
+  if (!name) return { ok: false, error: 'BAD_NAME' };
+  const role = STAFF_ROLES_.filter(function (r) { return r.toLowerCase() === String(p.role || '').toLowerCase(); })[0];
+  if (!role) return { ok: false, error: 'BAD_ROLE' };
+  const email = String(p.email || '').trim();
+  if (email && !isEmail_(email)) return { ok: false, error: 'BAD_EMAIL' };
+  const photo = String(p.photo || '').trim().slice(0, 1000);
+  if (photo && !/^https:\/\//i.test(photo)) return { ok: false, error: 'BAD_PHOTO' };
+  const all = staffFresh_();
+  const now = new Date().toISOString();
+  const access = cleanAccess_(p.access, role);
+
+  if (p.id) {
+    const cur = all.filter(function (s) { return s.id === String(p.id); })[0];
+    if (!cur) return { ok: false, error: 'NOT_FOUND' };
+    if (/^admin$/i.test(cur.role) && role !== 'Admin' && cur.active !== false && !activeAdmins_(all, cur.id)) {
+      return { ok: false, error: 'LAST_ADMIN' };
+    }
+    fsPatch_(cfg, STAFF_COLLECTION + '/' + cur.id, {
+      'Staff Name': name, 'Role': role, 'Email address': email, 'Profile Photo': photo, 'Access': access,
+      'Updated At': now, 'Updated By': String(session.name || ''),
+    });
+    const changes = [];
+    if (cur.name !== name) changes.push('name');
+    if (cur.role !== role) changes.push('role ' + cur.role + ' → ' + role);
+    if (cur.email !== email) changes.push('email');
+    if (cur.photo !== photo) changes.push('photo');
+    if (JSON.stringify(cur.access || { allow: [], deny: [] }) !== JSON.stringify(access)) changes.push('access');
+    staffAudit_(cfg, session, 'Edited', { id: cur.id, name: name }, changes.join(', '));
+    CacheService.getScriptCache().remove('staff_docs_v1');
+    return { ok: true, id: cur.id };
+  }
+
+  const pin = p.pin ? String(p.pin).trim() : newPin_(all);
+  if (!/^\d{4,8}$/.test(pin)) return { ok: false, error: 'BAD_PIN' };
+  if (pinInUse_(all, pin, '')) return { ok: false, error: 'PIN_TAKEN' };
+  const id = 'st_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20);
+  commitWrites_(cfg, [updateWrite_(cfg, STAFF_COLLECTION + '/' + id, {
+    'Staff Name': name, 'Role': role, 'Email address': email, 'Profile Photo': photo,
+    'PIN': '', 'PIN Hash': pinHash_(pin), 'Active': true, 'Access': access,
+    'Created At': now, 'Created By': String(session.name || ''),
+  })]);
+  staffAudit_(cfg, session, 'Added', { id: id, name: name }, 'role ' + role);
+  CacheService.getScriptCache().remove('staff_docs_v1');
+  return { ok: true, id: id, pin: pin };
+}
+
+function staffResetPin_(id, wanted, session) {
+  const all = staffFresh_();
+  const cur = all.filter(function (s) { return s.id === id; })[0];
+  if (!cur) return { ok: false, error: 'NOT_FOUND' };
+  const pin = wanted ? wanted.trim() : newPin_(all);
+  if (!/^\d{4,8}$/.test(pin)) return { ok: false, error: 'BAD_PIN' };
+  if (pinInUse_(all, pin, id)) return { ok: false, error: 'PIN_TAKEN' };
+  const cfg = getConfig_();
+  fsPatch_(cfg, STAFF_COLLECTION + '/' + id, {
+    'PIN Hash': pinHash_(pin), 'PIN': '', 'Updated At': new Date().toISOString(), 'Updated By': String(session.name || ''),
+  });
+  staffAudit_(cfg, session, 'Reset PIN', cur, wanted ? 'typed by admin' : 'made by the portal');
+  CacheService.getScriptCache().remove('staff_docs_v1');
+  return { ok: true, pin: pin };
+}
+
+function staffSetActive_(id, active, session) {
+  const all = staffFresh_();
+  const cur = all.filter(function (s) { return s.id === id; })[0];
+  if (!cur) return { ok: false, error: 'NOT_FOUND' };
+  if (!active && id === session.uid) return { ok: false, error: 'SELF' };
+  if (!active && /^admin$/i.test(cur.role) && !activeAdmins_(all, id)) return { ok: false, error: 'LAST_ADMIN' };
+  const cfg = getConfig_();
+  fsPatch_(cfg, STAFF_COLLECTION + '/' + id, {
+    'Active': active, 'Updated At': new Date().toISOString(), 'Updated By': String(session.name || ''),
+  });
+  const firebase = setFirebaseUserDisabled_(cfg, id, !active);
+  staffAudit_(cfg, session, active ? 'Turned on' : 'Turned off', cur, firebase ? '' : 'Firebase sign-in not updated');
+  CacheService.getScriptCache().remove('staff_docs_v1');
+  return { ok: true, firebase: firebase };
+}
+
+function staffAuditList_() {
+  const cfg = getConfig_();
+  const res = UrlFetchApp.fetch('https://firestore.googleapis.com/v1/' + fsBase_(cfg) + ':runQuery', {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) },
+    payload: JSON.stringify({ structuredQuery: {
+      from: [{ collectionId: 'staff_audit' }],
+      orderBy: [{ field: { fieldPath: 'at' }, direction: 'DESCENDING' }],
+      limit: 100,
+    } }),
+  });
+  if (res.getResponseCode() !== 200) throw new Error('Audit query ' + res.getResponseCode());
+  const entries = JSON.parse(res.getContentText())
+    .filter(function (r) { return r.document; })
+    .map(function (r) { return fromFields_(r.document.fields || {}); });
+  return { ok: true, entries: entries };
+}
+
+// ===================== Roles & access =====================
+
+// [key, group, label]
+const PERMS_ = [
+  ['menu.patients', 'Menus', 'Patient List'],
+  ['menu.calendar', 'Menus', 'Calendar'],
+  ['menu.forms', 'Menus', 'Form Builder (see forms)'],
+  ['menu.tasks', 'Menus', 'Task Manager'],
+  ['patients.edit', 'Patients', 'Add and edit patient details'],
+  ['patients.merge', 'Patients', 'Merge duplicate patients'],
+  ['clinical.view', 'Patients', 'See clinical notes, treatment plans and social history'],
+  ['billing.view', 'Patients', 'See billing and prescriptions'],
+  ['consult.record', 'Consultations', 'Record consultations and edit notes'],
+  ['consult.delete', 'Consultations', 'Delete any recording (staff can always delete their own)'],
+  ['send.patients', 'Sending', 'Email and print to patients'],
+  ['tasks.run', 'Sending', 'Run tasks'],
+  ['tasks.build', 'Building', 'Build task types'],
+  ['forms.build', 'Building', 'Build forms, Image Bank and Aftercare Bank'],
+  ['ssp.create', 'Skin Script', 'Create Skin Script Protocols'],
+  ['ssp.config', 'Skin Script', 'Skin Script products and design'],
+];
+const PERMS_ALL_ = PERMS_.map(function (p) { return p[0]; });
+const ROLE_DEFAULTS_ = {
+  Clinician: ['menu.patients', 'menu.calendar', 'menu.tasks', 'patients.edit', 'clinical.view', 'billing.view',
+    'consult.record', 'send.patients', 'tasks.run', 'ssp.create'],
+  Reception: ['menu.patients', 'menu.calendar', 'menu.tasks', 'patients.edit', 'send.patients', 'tasks.run'],
+};
+
+function rolesConfig_() {
+  const cache = CacheService.getScriptCache();
+  const hit = cache.get('roles_cfg_v1');
+  if (hit) return JSON.parse(hit);
+  let doc = null;
+  try { doc = fsGetDoc_(getConfig_(), 'staff_roles/config'); } catch (e) { console.warn('Roles config not read: ' + e); }
+  const out = {};
+  Object.keys(ROLE_DEFAULTS_).forEach(function (r) {
+    const v = doc && doc.roles && Array.isArray(doc.roles[r]) ? doc.roles[r] : ROLE_DEFAULTS_[r];
+    out[r] = v.filter(function (p) { return PERMS_ALL_.indexOf(p) !== -1; });
+  });
+  try { cache.put('roles_cfg_v1', JSON.stringify(out), 300); } catch (e) { /* not essential */ }
+  return out;
+}
+
+// What a staff member can do: their role's ticks, plus "always allow", minus "always block". Admins: everything.
+function effectivePerms_(s) {
+  if (!s) return [];
+  if (/^admin$/i.test(String(s.role || ''))) return PERMS_ALL_.slice();
+  const roles = rolesConfig_();
+  const key = Object.keys(roles).filter(function (r) { return r.toLowerCase() === String(s.role || '').toLowerCase(); })[0];
+  const set = {};
+  (key ? roles[key] : []).forEach(function (p) { set[p] = true; });
+  const acc = s.access || {};
+  (Array.isArray(acc.allow) ? acc.allow : []).forEach(function (p) { if (PERMS_ALL_.indexOf(p) !== -1) set[p] = true; });
+  (Array.isArray(acc.deny) ? acc.deny : []).forEach(function (p) { delete set[p]; });
+  return PERMS_ALL_.filter(function (p) { return set[p]; });
+}
+
+function can_(session, perm) {
+  return !!session && (/^admin$/i.test(String(session.role || '')) || (session.perms || []).indexOf(perm) !== -1);
+}
+
+function cleanAccess_(acc, role) {
+  if (/^admin$/i.test(String(role || ''))) return { allow: [], deny: [] };
+  acc = acc || {};
+  const allow = (Array.isArray(acc.allow) ? acc.allow : []).map(String).filter(function (k) { return PERMS_ALL_.indexOf(k) !== -1; });
+  const deny = (Array.isArray(acc.deny) ? acc.deny : []).map(String)
+    .filter(function (k) { return PERMS_ALL_.indexOf(k) !== -1 && allow.indexOf(k) === -1; });
+  return { allow: allow, deny: deny };
+}
+
+// Anyone logged in: their current access, and a fresh login token carrying it (for the Firestore rules)
+function staffMe_(session) {
+  const s = getStaffDocs_().filter(function (x) { return x.id === session.uid; })[0];
+  if (!s) return { ok: false, error: 'UNAUTHORIZED' };
+  const perms = effectivePerms_(s);
+  const token = createCustomToken_(s.id, {
+    staffName: s.name, staffRole: s.role, staffPhoto: s.photo, staffEmail: s.email, perms: perms,
+  });
+  return { ok: true, role: s.role, name: s.name, perms: perms, token: token };
+}
+
+function rolesGet_() {
+  return {
+    ok: true,
+    perms: PERMS_.map(function (p) { return { key: p[0], group: p[1], label: p[2] }; }),
+    roles: rolesConfig_(),
+    roleNames: STAFF_ROLES_,
+  };
+}
+
+function rolesSave_(roles, session) {
+  const out = {};
+  Object.keys(ROLE_DEFAULTS_).forEach(function (r) {
+    const v = roles && Array.isArray(roles[r]) ? roles[r] : [];
+    out[r] = PERMS_ALL_.filter(function (p) { return v.indexOf(p) !== -1; });
+  });
+  const cfg = getConfig_();
+  commitWrites_(cfg, [updateWrite_(cfg, 'staff_roles/config', {
+    roles: out, updatedAt: new Date().toISOString(), updatedBy: String(session.name || ''),
+  })]);
+  CacheService.getScriptCache().remove('roles_cfg_v1');
+  staffAudit_(cfg, session, 'Changed role access', {}, Object.keys(out).map(function (r) { return r + ': ' + out[r].length + ' ticks'; }).join(', '));
+  return { ok: true, roles: out };
+}
+
+// ===================== Scheduled staff tasks =====================
+// A trigger runs runScheduledTasks every 15 minutes. Times are Perth (UTC+8, no daylight saving).
+
+const SCH_DOW_ = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+const SCH_PERTH_ = 8 * 3600000;
+function schDayNum_(y, m, d) { return Math.floor(Date.UTC(y, m - 1, d) / 86400000); }
+function schFromNum_(n) { const t = new Date(n * 86400000); return { y: t.getUTCFullYear(), m: t.getUTCMonth() + 1, d: t.getUTCDate(), dow: t.getUTCDay() }; }
+function schKey_(p) { return p.y + '-' + pad2_(p.m) + '-' + pad2_(p.d); }
+function schDaysIn_(y, m) { return new Date(Date.UTC(y, m, 0)).getUTCDate(); }
+function schSlotMs_(p, time) { const t = String(time || '08:00').split(':'); return Date.UTC(p.y, p.m - 1, p.d, Number(t[0]), Number(t[1])) - SCH_PERTH_; }
+
+function schMatches_(s, p) {
+  const st = String(s.date).split('-').map(Number);
+  const startN = schDayNum_(st[0], st[1], st[2]);
+  const n = schDayNum_(p.y, p.m, p.d);
+  const diff = n - startN;
+  if (diff < 0) return false;
+  const code = SCH_DOW_[p.dow];
+  switch (s.freq) {
+    case 'once': return diff === 0;
+    case 'daily': return true;
+    case 'weekdays': return p.dow >= 1 && p.dow <= 5;
+    case 'weekly': {
+      if ((s.days || []).indexOf(code) === -1) return false;
+      if (Number(s.everyWeeks) !== 2) return true;
+      const mon = function (x) { return x - ((schFromNum_(x).dow + 6) % 7); };
+      return Math.round((mon(n) - mon(startN)) / 7) % 2 === 0;
+    }
+    case 'monthlyDate': {
+      const dim = schDaysIn_(p.y, p.m);
+      return p.d === (s.monthDay === 'last' ? dim : Math.min(Number(s.monthDay) || 1, dim));
+    }
+    case 'monthlyNth': {
+      if (code !== s.nthDay) return false;
+      return String(s.nth) === 'last' ? p.d + 7 > schDaysIn_(p.y, p.m) : Math.ceil(p.d / 7) === Number(s.nth);
+    }
+    case 'everyN': return diff % Math.max(2, Number(s.everyN) || 2) === 0;
+  }
+  return false;
+}
+function schBlocked_(s, p, closed) {
+  return (s.skipWeekends === true && (p.dow === 0 || p.dow === 6)) || (s.skipClosed !== false && closed[schKey_(p)] === true);
+}
+
+// The same rules as the portal's preview (js/task-schedule.js)
+function nextSlots_(s, afterMs, closedList, count) {
+  const closed = {};
+  (closedList || []).forEach(function (k) { closed[k] = true; });
+  const out = [];
+  const seen = {};
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(s.date || ''))) return out;
+  const a = new Date(afterMs + SCH_PERTH_);
+  let n = schDayNum_(a.getUTCFullYear(), a.getUTCMonth() + 1, a.getUTCDate()) - 31;
+  for (let i = 0; i < 800 && out.length < count; i++, n++) {
+    let p = schFromNum_(n);
+    if (!schMatches_(s, p)) continue;
+    let moved = false;
+    if (schBlocked_(s, p, closed)) {
+      if (s.onSkip !== 'next') continue;
+      let q = null;
+      for (let k = 1; k <= 14; k++) { const c = schFromNum_(n + k); if (!schBlocked_(s, c, closed)) { q = c; break; } }
+      if (!q) continue;
+      p = q;
+      moved = true;
+    }
+    const key = schKey_(p);
+    if (s.end === 'date' && s.endDate && key > s.endDate) break;
+    if (seen[key]) continue;
+    seen[key] = true;
+    const ms = schSlotMs_(p, s.time);
+    if (ms <= afterMs) continue;
+    out.push({ ms: ms, key: key, moved: moved });
+  }
+  return out.sort(function (x, y) { return x.ms - y.ms; });
+}
+
+function hasAppointments_(cfg, key) {
+  try {
+    const d = fsGetDoc_(cfg, 'appts_by_day/' + key);
+    return !!(d && Array.isArray(d.appointments) && d.appointments.length);
+  } catch (e) { return true; } // if unsure, send
+}
+
+// Sends a scheduled task's prepared email. onlyTo = { name, first, email } for a test.
+function sendScheduledTask_(cfg, id, t, slot, onlyTo) {
+  const s = t.schedule || {};
+  const htmlRaw = sanitizeEmailHtml_(s.renderedHtml);
+  const subjectRaw = String(s.renderedSubject || '').trim().slice(0, 200);
+  if (!htmlRaw || !subjectRaw) throw new Error('Open the task in the Task Builder and let it save once.');
+  const r = t.recipients || {};
+  let recipients;
+  if (onlyTo) {
+    recipients = [onlyTo];
+  } else {
+    const byId = {};
+    getStaffDocs_().forEach(function (x) { byId[x.id] = x; });
+    recipients = (r.staffIds || []).map(function (i) { return byId[String(i)]; })
+      .filter(function (x) { return x && x.active !== false && isEmail_(x.email); })
+      .map(function (x) { return { name: x.name, first: String(x.name || '').split(' ')[0], email: x.email }; });
+  }
+  if (!recipients.length) throw new Error('None of the chosen staff have an email address.');
+  if (MailApp.getRemainingDailyQuota() < recipients.length) throw new Error("The clinic's daily email limit has been reached.");
+
+  const today = Utilities.formatDate(new Date(slot ? slot.ms : Date.now()), 'Australia/Perth', 'EEEE d MMMM yyyy');
+  const escH = function (x) { return String(x || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
+  const inlined = inlineTaskImages_(cfg, htmlRaw);
+  const hasImages = Object.keys(inlined.images).length > 0;
+  const cc = !onlyTo && isEmail_(String(r.cc || '').trim()) ? String(r.cc).trim() : '';
+
+  recipients.forEach(function (p) {
+    const fill = function (str, html) {
+      return str
+        .replace(/\{\s*first name\s*\}/gi, html ? escH(p.first) : p.first)
+        .replace(/\{\s*full name\s*\}/gi, html ? escH(p.name) : p.name)
+        .replace(/\{\s*today\s*\}/gi, today);
+    };
+    const html = fill(inlined.html, true);
+    const mail = { to: p.email, subject: (onlyTo ? '[Test] ' : '') + fill(subjectRaw, false),
+      htmlBody: html, body: emailHtmlToText_(html), name: 'Dermedica Clinic' };
+    if (cc) mail.cc = cc;
+    if (hasImages) mail.inlineImages = inlined.images;
+    MailApp.sendEmail(mail);
+  });
+  if (onlyTo) return recipients.length;
+
+  try {
+    commitWrites_(cfg, [updateWrite_(cfg, 'task_runs/run_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20), {
+      taskId: id, taskName: String(t.name || ''), category: 'staff',
+      patientId: r.aboutPatient === true ? String(s.patientId || '') : '',
+      patientName: r.aboutPatient === true ? String(s.patientName || '') : '',
+      recipients: recipients.map(function (x) { return { name: x.name, email: x.email }; }),
+      cc: cc, subject: subjectRaw, html: htmlRaw.slice(0, 100000), attachments: [],
+      sentAt: new Date().toISOString(), sentBy: 'Sent automatically', sentByUid: '', scheduled: true, slot: slot.key,
+    })]);
+  } catch (e) { console.warn('Scheduled task sent, but the history log failed: ' + e); }
+  return recipients.length;
+}
+
+function runOneSchedule_(cfg, id, t, closed, now) {
+  const s = t.schedule;
+  const sig = JSON.stringify([s.freq, s.time, s.date, s.days, s.everyWeeks, s.monthDay, s.nth, s.nthDay, s.everyN,
+    s.skipWeekends, s.skipClosed, s.onSkip]);
+  const st = fsGetDoc_(cfg, 'task_schedules/' + id) || {};
+  let lastSlot = Number(st.lastSlot || 0);
+  // New or changed schedule, or a long gap: start from now (never a flood of catch-up emails)
+  if (!lastSlot || st.sig !== sig || now - lastSlot > 2 * 86400000) lastSlot = Math.max(lastSlot, now - 20 * 60000);
+
+  const state = {
+    sig: sig, lastSlot: lastSlot, count: Number(st.count || 0), lastSentAt: st.lastSentAt || '',
+    lastError: st.lastError || '', failCount: Number(st.failCount || 0), lastSkip: st.lastSkip || '',
+  };
+  const done = s.end === 'count' && s.freq !== 'once' && state.count >= Number(s.endCount || 0);
+  if (!done) {
+    const due = nextSlots_(s, lastSlot, closed, 60).filter(function (x) { return x.ms <= now; });
+    if (due.length) {
+      const slot = due[due.length - 1]; // only the latest due send
+      if (s.onlyApptDays === true && !hasAppointments_(cfg, slot.key)) {
+        state.lastSlot = slot.ms;
+        state.lastSkip = slot.key + ': no appointments';
+      } else {
+        try {
+          sendScheduledTask_(cfg, id, t, slot, null);
+          state.lastSlot = slot.ms;
+          state.count += 1;
+          state.lastSentAt = new Date().toISOString();
+          state.lastError = '';
+          state.failCount = 0;
+        } catch (e) {
+          state.failCount += 1;
+          state.lastError = String(e && e.message ? e.message : e).slice(0, 200);
+          if (state.failCount >= 3) { state.lastSlot = slot.ms; state.failCount = 0; } // give up on this one
+          console.error('Scheduled task ' + id + ' failed: ' + state.lastError);
+        }
+      }
+    }
+  }
+  state.finished = s.end === 'count' && s.freq !== 'once' && state.count >= Number(s.endCount || 0);
+  const nxt = state.finished ? null : nextSlots_(s, Math.max(now, state.lastSlot), closed, 1)[0];
+  state.nextMs = nxt ? nxt.ms : 0;
+  state.next = nxt ? new Date(nxt.ms).toISOString() : '';
+  state.updatedAt = new Date().toISOString();
+  commitWrites_(cfg, [updateWrite_(cfg, 'task_schedules/' + id, state)]);
+}
+
+// The trigger runs this every 15 minutes
+function runScheduledTasks() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return;
+  try {
+    const cfg = getConfig_();
+    const now = Date.now();
+    const tasks = fsListAll_(cfg, 'task_types')
+      .map(function (d) { return { id: d.name.split('/').pop(), t: fromFields_(d.fields || {}) }; })
+      .filter(function (x) {
+        const s = x.t.schedule;
+        return x.t.status === 'live' && x.t.category === 'staff' && s && s.enabled === true && s.paused !== true;
+      });
+    if (!tasks.length) return;
+    let closed = [];
+    try { const c = fsGetDoc_(cfg, 'task_settings/closed'); closed = (c && Array.isArray(c.dates)) ? c.dates : []; }
+    catch (e) { console.warn('Closed days not read: ' + e); }
+    tasks.forEach(function (x) {
+      try { runOneSchedule_(cfg, x.id, x.t, closed, now); }
+      catch (e) { console.error('Schedule ' + x.id + ' error: ' + (e && e.stack ? e.stack : e)); }
+    });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Run ONCE from the editor to start the scheduler
+function installTaskScheduler() {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return t.getHandlerFunction() === 'runScheduledTasks'; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('runScheduledTasks').timeBased().everyMinutes(15).create();
+  console.log('Task scheduler installed (every 15 minutes).');
+}
+
+// "Send a test to me" from the Task Builder
+function handleScheduledTask_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!can_(session, 'tasks.build')) return { ok: false, error: 'FORBIDDEN' };
+  if (String(body.op || '') !== 'test') return { ok: false, error: 'BAD_REQUEST' };
+  const id = String(body.taskId || '');
+  if (!/^[A-Za-z0-9_-]{10,40}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
+  const cfg = getConfig_();
+  const t = fsGetDoc_(cfg, 'task_types/' + id);
+  if (!t) return { ok: false, error: 'NOT_FOUND' };
+  const me = getStaffDocs_().filter(function (x) { return x.id === session.uid; })[0];
+  if (!me || !isEmail_(me.email)) return { ok: false, error: 'NO_EMAIL' };
+  try {
+    sendScheduledTask_(cfg, id, t, null, { name: me.name, first: String(me.name || '').split(' ')[0], email: me.email });
+  } catch (e) {
+    console.error('Scheduled task test failed: ' + e);
+    return { ok: false, error: 'SEND_FAILED', detail: String(e && e.message ? e.message : e).slice(0, 200) };
+  }
+  return { ok: true, to: me.email };
+}
+
+// ===================== Task Manager → To Print =====================
+// Emails the PDF to the clinic printer once per copy, and logs it in Task history.
+function handlePrintTask_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!can_(session, 'tasks.run')) return { ok: false, error: 'FORBIDDEN' };
+
+  const cfg = getConfig_();
+  const settings = fsGetDoc_(cfg, 'form_settings/printing') || {};
+  const printer = String(settings.printerEmail || '').trim();
+  if (!isEmail_(printer)) return { ok: false, error: 'NO_PRINTER' };
+
+  const copies = Math.max(1, Math.min(10, parseInt(body.copies, 10) || 1));
+  let fileName = String(body.fileName || 'Form.pdf').replace(/[\\/:*?"<>|]+/g, '-').slice(0, 150);
+  if (!/\.pdf$/i.test(fileName)) fileName += '.pdf';
+
+  let blob;
+  try {
+    if (body.pdf) blob = Utilities.newBlob(Utilities.base64Decode(String(body.pdf)), 'application/pdf', fileName);
+    else if (body.html) blob = Utilities.newBlob(String(body.html), 'text/html', 'form.html').getAs('application/pdf').setName(fileName);
+    else return { ok: false, error: 'BAD_REQUEST' };
+  } catch (e) {
+    console.error('Print PDF failed: ' + e);
+    return { ok: false, error: 'PDF_FAILED' };
+  }
+  if (blob.getBytes().length > 20 * 1024 * 1024) return { ok: false, error: 'PDF_FAILED' };
+  if (MailApp.getRemainingDailyQuota() < copies) return { ok: false, error: 'QUOTA' };
+
+  const me = getStaffDocs_().filter(function (x) { return x.id === session.uid; })[0];
+  const who = me ? String(me.name || '') : '';
+  const title = fileName.replace(/\.pdf$/i, '');
+  for (let i = 0; i < copies; i++) {
+    MailApp.sendEmail({
+      to: printer,
+      subject: title + (copies > 1 ? ' (copy ' + (i + 1) + ' of ' + copies + ')' : ''),
+      body: 'Printed from the Dermedica Staff Portal' + (who ? ' by ' + who : '') + '.',
+      attachments: [blob],
+      name: 'Dermedica Clinic',
+    });
+  }
+
+  const modeLabel = { blank: 'Blank', patient: 'Blank, for a patient', saved: 'Completed form' }[String(body.mode)] || 'Form';
+  const escH = function (x) { return String(x || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
+  try {
+    commitWrites_(cfg, [updateWrite_(cfg, 'task_runs/run_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20), {
+      taskId: String(body.templateId || '').slice(0, 60),
+      taskName: 'Print: ' + String(body.templateName || title).slice(0, 120),
+      category: 'print',
+      patientId: String(body.patientId || '').slice(0, 80),
+      patientName: String(body.patientName || '').slice(0, 120),
+      recipients: [{ name: 'Clinic printer', email: printer }],
+      cc: '',
+      subject: title,
+      html: '<p><strong>' + escH(modeLabel) + '</strong> · ' + copies + ' cop' + (copies === 1 ? 'y' : 'ies') +
+        ' sent to the clinic printer.</p><p>' + escH(fileName) + '</p>',
+      attachments: [fileName],
+      copies: copies,
+      mode: String(body.mode || ''),
+      submissionId: String(body.submissionId || '').slice(0, 80),
+      sentAt: new Date().toISOString(),
+      sentBy: who,
+      sentByUid: String(session.uid || ''),
+    })]);
+  } catch (e) { console.warn('Printed, but the history log failed: ' + e); }
+
+  return { ok: true, sent: copies, printer: printer };
 }
