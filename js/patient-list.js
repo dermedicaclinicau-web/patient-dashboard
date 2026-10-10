@@ -6,8 +6,10 @@ import {
   escapeHtml, getInitials, hueFromString, formatDobLong, calcAge, formatMobile, showToast, parseDateKey,
 } from "./utils.js";
 
-const CLIENT_PAGE = 24;
+const CLIENT_PAGE = 24;   // cards per page
+const LIST_PAGE = 60;     // rows per page in List view
 const GROUP_PAGE = 15;
+const VIEW_KEY = "dm.patients.view";
 
 const svg = (p) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -17,12 +19,19 @@ const ICONS = {
   plus: svg('<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>'),
   mail: svg('<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>'),
   phone: svg('<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>'),
+  grid: svg('<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>'),
+  list: svg('<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>'),
 };
 
 const PLACEHOLDERS = {
   name: "Search by name or email…",
   dupes: "Filter duplicates by name or email…",
 };
+
+// Cards or List, remembered on this computer
+const readView = () => { try { return localStorage.getItem(VIEW_KEY) === "list" ? "list" : "grid"; } catch { return "grid"; } };
+const saveView = (v) => { try { localStorage.setItem(VIEW_KEY, v); } catch { /* private mode */ } };
+const LIST_HEAD = `<div class="pt-list-head" aria-hidden="true"><span>Patient</span><span>Email</span><span>Mobile</span><span>Birthday</span></div>`;
 
 /* ===================== In-memory cache (cleared on logout, refresh, or a patient edit) ===================== */
 
@@ -134,6 +143,10 @@ export function mountPatientList(container) {
           <option value="45-54">45–54</option>
           <option value="55-200">55+</option>
         </select>
+        <div class="pt-view" role="group" aria-label="View">
+          <button type="button" data-view="grid" title="Cards" aria-label="Show as cards">${ICONS.grid}</button>
+          <button type="button" data-view="list" title="List" aria-label="Show as a list">${ICONS.list}</button>
+        </div>
       </div>
 
       <p class="pt-meta" aria-live="polite"></p>
@@ -145,6 +158,7 @@ export function mountPatientList(container) {
   const input = q(".pt-search input");
   const tabs = container.querySelectorAll(".pt-tabs button");
   const selects = container.querySelectorAll(".pt-select");
+  const viewBtns = container.querySelectorAll(".pt-view button");
   const total = q(".pt-total");
   const meta = q(".pt-meta");
   const results = q(".pt-results");
@@ -152,9 +166,20 @@ export function mountPatientList(container) {
   const refreshBtn = q(".pt-refresh");
 
   const state = {
-    mode: "name", term: "", birthday: "all", age: "all", seq: 0,
+    mode: "name", term: "", birthday: "all", age: "all", seq: 0, view: readView(),
     client: { list: [], shown: CLIENT_PAGE, groups: null, shownGroups: GROUP_PAGE },
   };
+  const pageSize = () => (state.view === "list" ? LIST_PAGE : CLIENT_PAGE);
+
+  function applyView() {
+    results.classList.toggle("is-list", state.view === "list");
+    viewBtns.forEach((b) => {
+      const on = b.dataset.view === state.view;
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-pressed", String(on));
+    });
+  }
+  applyView();
 
   /* ---------- total count ---------- */
   async function loadCount() {
@@ -172,7 +197,6 @@ export function mountPatientList(container) {
     isAdmin = v;
     if (state.mode === "dupes" && state.client.groups) renderGroups();
   });
-
 
   /* ---------- main loader ---------- */
   async function run() {
@@ -221,14 +245,14 @@ export function mountPatientList(container) {
     }
 
     state.client.list = list;
-    state.client.shown = CLIENT_PAGE;
+    state.client.shown = pageSize();
     renderClientPage();
   }
 
   function renderClientPage() {
     const { list, shown } = state.client;
     results.innerHTML = list.length
-      ? `<ul class="pt-grid">${list.slice(0, shown).map(cardHtml).join("")}</ul>`
+      ? `${state.view === "list" ? LIST_HEAD : ""}<ul class="pt-grid">${list.slice(0, shown).map(cardHtml).join("")}</ul>`
       : emptyState();
     moreBtn.hidden = list.length <= shown;
 
@@ -295,9 +319,23 @@ export function mountPatientList(container) {
     run();
   }));
 
+  // Cards / List: redraws what's already loaded, no reload needed
+  viewBtns.forEach((btn) => btn.addEventListener("click", () => {
+    if (btn.dataset.view === state.view) return;
+    state.view = btn.dataset.view;
+    saveView(state.view);
+    applyView();
+    if (!allCache) return;                      // still loading: the new view applies when it arrives
+    if (state.mode === "dupes") { if (state.client.groups) renderGroups(); }
+    else {
+      state.client.shown = Math.max(state.client.shown, pageSize());
+      renderClientPage();
+    }
+  }));
+
   moreBtn.addEventListener("click", () => {
     if (state.mode === "dupes") { state.client.shownGroups += GROUP_PAGE; renderGroups(); }
-    else { state.client.shown += CLIENT_PAGE; renderClientPage(); }
+    else { state.client.shown += pageSize(); renderClientPage(); }
   });
 
   refreshBtn.addEventListener("click", async () => {
@@ -394,6 +432,7 @@ function findDuplicates(list) {
 
 /* ===================== Templates ===================== */
 
+// The same card is used for both views; List view lays it out as one row with CSS
 function cardHtml(p) {
   const age = calcAge(p.dobKey);
   const dob = p.dobKey ? `${formatDobLong(p.dobKey)}${age !== null ? ` · ${age} yrs` : ""}` : "";

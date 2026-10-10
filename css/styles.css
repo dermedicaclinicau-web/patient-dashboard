@@ -3281,7 +3281,7 @@ a.tm-task:hover { border-color: var(--primary); }
 .pt-chev svg { display: block; width: 16px; height: 16px; color: var(--muted); transition: transform .18s ease; }
 .pt-group[open] .pt-chev svg { transform: rotate(90deg); color: var(--primary); }
 .pt-group-body { display: flex; flex-direction: column; gap: .4rem; padding: .6rem; background: var(--surface-2); }
-.pt-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); }
+.tb-grid.pt-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); }
 .pt-form { display: flex; flex-direction: column; gap: .15rem; }
 .pt-form small { color: var(--muted); font-size: .8rem; }
 .pt-change { align-self: flex-start; text-decoration: none; }
@@ -3298,7 +3298,7 @@ a.tm-task:hover { border-color: var(--primary); }
 .pt-frame { display: block; width: 800px; border: none; background: #e2e8f0; transform-origin: top left; }
 .pt-skel { height: 420px; border-radius: 10px; }
 .pt-wait { padding: 2.5rem 1rem; text-align: center; }
-@media (max-width: 1100px) { .pt-grid { grid-template-columns: 1fr; } }
+@media (max-width: 1100px) { .tb-grid.pt-grid { grid-template-columns: 1fr; } }
 
 /* ---------- Consent: fill in now, then go back ---------- */
 .fe-consent-go { margin-left: auto; height: 34px; }
@@ -3756,3 +3756,47 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .rp-from { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; }
 .rq-status.is-accepted { background: #ecfdf3; color: #027a48; }
 .rq-status.is-explained { background: #eff8ff; color: #175cd3; }
+
+/* ---------- Patient list: 4 columns on wide screens ---------- */
+.pt-page .pt-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 1500px) { .pt-page .pt-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 1100px) { .pt-page .pt-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 640px)  { .pt-page .pt-grid { grid-template-columns: minmax(0, 1fr); } }
+
+/* ---------- Patient list: Cards / List toggle ---------- */
+.pt-view { display: inline-flex; height: 46px; margin-left: auto; padding: 4px; gap: 2px;
+  border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); }
+.pt-view button { display: grid; place-items: center; width: 38px; border: none; border-radius: 8px;
+  background: transparent; color: var(--muted); cursor: pointer; }
+.pt-view button svg { width: 18px; height: 18px; }
+.pt-view button:hover { color: var(--text); }
+.pt-view button.active { background: #fff; color: var(--primary); box-shadow: 0 1px 3px rgba(15, 23, 42, .12); }
+.pt-view button:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+
+/* List view: the same cards, laid out as rows */
+.pt-results.is-list .pt-grid { grid-template-columns: minmax(0, 1fr); gap: 0; overflow: hidden;
+  border: 1px solid var(--border); border-radius: 14px; background: #fff; }
+.pt-results.is-list .pt-grid > li + li { border-top: 1px solid var(--border); }
+.pt-results.is-list .pt-card,
+.pt-list-head { display: grid; grid-template-columns: minmax(220px, 1.3fr) minmax(0, 1.6fr) 150px 200px;
+  align-items: center; gap: 1rem; }
+.pt-results.is-list .pt-card { height: auto; padding: .55rem 1rem; border: none; border-radius: 0; }
+.pt-results.is-list .pt-card:hover { transform: none; box-shadow: none; background: var(--surface-2); }
+.pt-results.is-list .pt-avatar { width: 34px; height: 34px; border-radius: 10px; font-size: .75rem; }
+.pt-results.is-list .pt-name { font-size: .95rem; }
+.pt-results.is-list .pt-contact { display: contents; }
+.pt-results.is-list .pt-contact > span { min-width: 0; font-size: .86rem; }
+.pt-results.is-list .pt-foot { margin: 0; padding: 0; min-height: 0; font-size: .82rem; }
+.pt-results.is-list .pt-skel { height: 52px; border-radius: 0; }
+.pt-list-head { padding: 0 1rem .4rem; font-size: .72rem; font-weight: 700; letter-spacing: .05em;
+  text-transform: uppercase; color: var(--muted); }
+.pt-results.is-list .pt-dupe .pt-grid { margin-top: .4rem; }
+
+/* Narrow screens: name and mobile only */
+@media (max-width: 900px) {
+  .pt-results.is-list .pt-card { grid-template-columns: minmax(0, 1fr) auto; }
+  .pt-results.is-list .pt-contact > span:first-child,
+  .pt-results.is-list .pt-foot,
+  .pt-list-head { display: none; }
+}
+@media (max-width: 560px) { .pt-view { margin-left: 0; } }
