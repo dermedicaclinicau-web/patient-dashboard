@@ -1,5 +1,5 @@
 ﻿{
-    "version":  "20261010-153930",
+    "version":  "20261010-154840",
     "files":  [
                   "./js/aftercare-api.js",
                   "./js/aftercare-bank.js",
@@ -41,6 +41,7 @@
                   "./js/inventory.js",
                   "./js/merge-dialog.js",
                   "./js/merge-patients.js",
+                  "./js/my-dashboard.js",
                   "./js/new-patient.js",
                   "./js/order-request.js",
                   "./js/panel-resize.js",

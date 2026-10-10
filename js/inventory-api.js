@@ -1194,3 +1194,13 @@ export async function listShortUsage() {
     .filter((u) => u.at && u.at.getTime() > since)
     .sort((a, b) => b.at - a.at);
 }
+
+// My treatment usage (default: the last 31 days), newest first
+export async function listMyUsage(days = 31) {
+  const snap = await getDocs(query(collection(db, "inv_usage"), where("byUid", "==", uid())));
+  const since = Date.now() - days * 864e5;
+  return snap.docs
+    .map((d) => { const x = d.data() || {}; return { id: d.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [], at: toDate(x.at) }; })
+    .filter((u) => u.at && u.at.getTime() > since)
+    .sort((a, b) => b.at - a.at);
+}

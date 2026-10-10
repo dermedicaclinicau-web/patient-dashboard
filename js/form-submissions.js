@@ -66,3 +66,14 @@ export async function listSubmissionsForPatient(ids) {
     b.recordDate.localeCompare(a.recordDate) ||
     ((b.createdAt ? b.createdAt.getTime() : 0) - (a.createdAt ? a.createdAt.getTime() : 0)));
 }
+
+// Forms I saved (default: the last 31 days), newest first
+export async function listMySubmissions(days = 31) {
+  const uid = auth.currentUser && auth.currentUser.uid;
+  if (!uid) return [];
+  const snap = await getDocs(query(collection(db, COL), where("createdByUid", "==", uid)));
+  const since = Date.now() - days * 864e5;
+  return snap.docs.map(normalise)
+    .filter((s) => s.createdAt && s.createdAt.getTime() > since)
+    .sort((a, b) => b.createdAt - a.createdAt);
+}

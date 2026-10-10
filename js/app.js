@@ -20,7 +20,7 @@ import { mountStaffManager } from "./staff-manager.js";
 import { mountInventory } from "./inventory.js";
 import { setPerms, can, isAdmin as isAdminNow, refreshAccess } from "./perms.js";
 import { initUpdateCheck } from "./updates.js";
-
+import { mountMyDashboard } from "./my-dashboard.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -235,7 +235,7 @@ const pageAllowed = (p) => {
   if (!need) return true;
   return need === "admin" ? isAdminNow() : can(need);
 };
-const firstAllowedPage = () => ["patients", "calendar", "tasks", "inventory", "forms", "staff"].find(pageAllowed) || "";
+const firstAllowedPage = () => ["calendar", "patients", "tasks", "inventory", "forms", "staff"].find(pageAllowed) || "";
 const currentPage = () => location.hash.split("/")[1] || "";
 
 function applyNav() {
