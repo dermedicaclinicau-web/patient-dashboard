@@ -161,6 +161,11 @@ export function describeSchedule(sched) {
   return bits.join(", ") + (cond.length ? ` · ${cond.join(", ")}` : "") + (s.paused ? " · Paused" : "");
 }
 
+export const PATIENT_CLASH = "This task sends automatically, so no one is there to choose a patient. " +
+  "To include a patient, set Schedule (step 7) to “Only when someone runs it”. " +
+  "To keep it automatic, untick “This is about a patient” and remove the patient blanks.";
+const PATIENT_BLANKS_RE = /\{\s*(patient name|patient first name|patient mobile|patient email|upcoming appointments|treatment plan|treatment info|aftercare)\s*\}/i;
+
 // Reasons a scheduled task can't be published yet
 export function scheduleProblems(task) {
   const s = task.schedule;
@@ -168,8 +173,8 @@ export function scheduleProblems(task) {
   const out = [];
   if (task.recipients.mode !== "fixed") out.push("Scheduled tasks need “Always these staff” in Who it goes to.");
   else if (!task.recipients.staffIds.length) out.push("Choose who the scheduled task goes to.");
-  if (task.recipients.aboutPatient) out.push("Scheduled tasks can't be about a patient. Untick “This is about a patient”.");
   if (task.attachments.length) out.push("Scheduled tasks can't include attachments yet. Remove them in Attachments.");
+  if (task.recipients.aboutPatient || PATIENT_BLANKS_RE.test(`${task.subject} ${task.body}`)) out.push(PATIENT_CLASH);
   task.fields.filter((f) => f.required && !String(f.default || "").trim())
     .forEach((f) => out.push(`Give “${f.label || "Untitled field"}” an answer for automatic sends.`));
   if (s.freq === "weekly" && !s.days.length) out.push("Choose at least one day of the week.");
@@ -178,9 +183,6 @@ export function scheduleProblems(task) {
     if (slotMs({ y, m, d }, s.time) <= Date.now()) out.push("The send time has already passed. Choose a later date or time.");
   }
   if (s.end === "date" && s.endDate && s.endDate < s.date) out.push("The stop date is before the start date.");
-  if (/\{\s*(upcoming appointments|treatment plan|treatment info|aftercare)\s*\}/i.test(task.body + task.subject)) {
-    out.push("Patient blanks like {Upcoming appointments} can't be used in scheduled tasks.");
-  }
   return out;
 }
 

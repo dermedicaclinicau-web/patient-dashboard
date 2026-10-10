@@ -16,7 +16,7 @@ import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 import {
   cleanSchedule, describeSchedule, scheduleProblems, nextSlots, FREQS, WEEK_ORDER, DAY_NAMES,
-  fmtTime, fmtSlot, getClosedDays, openClosedDaysDialog, listScheduleStates,
+  fmtTime, fmtSlot, getClosedDays, openClosedDaysDialog, listScheduleStates, PATIENT_CLASH,
 } from "./task-schedule.js";
 import { callApi } from "./appointments.js";
 
@@ -373,10 +373,18 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   function setState(s) {
     stateEl.textContent = s === "saving" ? "Saving…" : s === "dirty" ? "Unsaved changes" : s === "error" ? "Couldn't save. Retrying…" : "All changes saved";
   }
+  // Every problem, with the patient clash shown once instead of two messages that contradict each other
+  function allProblems() {
+    const sp = scheduleProblems(task);
+    let tp = taskProblems(task);
+    if (sp.includes(PATIENT_CLASH)) tp = tp.filter((p) => !/needs a patient/.test(p));
+    return [...tp, ...sp];
+  }
+
   function changed() {
     // Adding a patient blank to a staff task turns on "This is about a patient"
     const pt = patientTokens();
-    if (task.category === "staff" && !task.recipients.aboutPatient && pt > lastPatientTokens) {
+    if (task.category === "staff" && !task.recipients.aboutPatient && !task.schedule.enabled && pt > lastPatientTokens) {
       task.recipients.aboutPatient = true;
       renderForm();
       showToast("Turned on “This is about a patient”. Staff will choose the patient when they run it.");
@@ -617,7 +625,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     const box = $('[data-role="chips"]');
     const groups = tokenGroups(task, tokenOpts());
     // Staff tasks: always offer the patient blanks. Using one turns on "This is about a patient".
-    if (task.category === "staff" && !task.recipients.aboutPatient) {
+    if (task.category === "staff" && !task.recipients.aboutPatient && !task.schedule.enabled) {
       groups.splice(1, 0, {
         title: "Patient it's about (staff choose the patient when running)",
         tokens: PATIENT_TOKENS.map((name) => ({ name, kind: "", hint: "Using this turns on “This is about a patient”" })),
@@ -785,7 +793,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   /* ---------- Preview ---------- */
   function renderPreview() {
     const values = sampleValues(task, tokenOpts());
-    const problems = [...taskProblems(task), ...scheduleProblems(task)];
+    const problems = allProblems();
     const r = task.recipients;
     let to;
     if (task.category === "patient") to = "Jane Citizen &lt;jane@example.com&gt;";
@@ -984,7 +992,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
         } catch (err) { console.error(err); showToast("Couldn't unpublish. Try again."); }
         return;
       }
-      const problems = [...taskProblems(task), ...scheduleProblems(task)];
+      const problems = allProblems();
       if (problems.length) {
         msgEl.textContent = problems[0] + (problems.length > 1 ? ` (${problems.length - 1} more listed beside the preview)` : "");
         return;
