@@ -13,6 +13,7 @@ import { can, isInjector } from "./perms.js";
 import { showToast } from "./utils.js";
 import { mountReceivePo } from "./receive-po.js";
 import { renderKits } from "./inventory-kits.js";
+import { openProductImport, exportProductsCsv } from "./inventory-import.js";
 
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -213,7 +214,12 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         </div>`;
     };
     body.innerHTML = `
-      <div class="inv-tools"><label class="fe-check"><input type="checkbox" data-f="showInactive"${st.showInactive ? " checked" : ""} /> Show inactive products</label></div>
+      <div class="inv-tools">
+        <label class="fe-check"><input type="checkbox" data-f="showInactive"${st.showInactive ? " checked" : ""} /> Show inactive products</label>
+        <span class="inv-spacer"></span>
+        ${canManage ? `<button type="button" class="ff-btn" data-act="export-products">Export CSV</button>
+          <button type="button" class="ff-btn is-primary" data-act="import-products">Import products</button>` : ""}
+      </div>
       ${rows.length ? INV_CATEGORIES.map((c) => {
         const items = rows.filter((p) => p.category === c.key);
         return items.length ? `<section class="inv-group"><h3>${esc(c.label)}<em>${items.length}</em></h3>
@@ -994,6 +1000,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const rq = e.target.closest("[data-req]");
     if (rq) { handleReq(rq.dataset.id, rq.dataset.req); return; }
     if (e.target.closest('[data-act="req-settings"]')) { reqSettings(); return; }
+    if (e.target.closest('[data-act="import-products"]')) { openProductImport({ products: st.products, suppliers: st.suppliers, staff, onDone: load }); return; }
+    if (e.target.closest('[data-act="export-products"]')) { exportProductsCsv(st.products, st.suppliers); return; }
     if (e.target.closest('[data-act="new-product"]')) { editProduct(null); return; }
     if (e.target.closest('[data-act="new-supplier"]')) { editSupplier(null); return; }
     const pr = e.target.closest("[data-product]");

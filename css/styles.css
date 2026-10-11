@@ -3860,3 +3860,19 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .ptk-body .task.is-done .task-text { color: var(--muted, #667085); text-decoration: line-through; text-decoration-thickness: 1px; }
 .ptk-full { margin: 0 0 .5rem; font-size: .85rem; text-align: right; }
 .ptk-full a { color: var(--primary); font-weight: 600; text-decoration: none; }
+
+/* ---------- Product import ---------- */
+.inv-imp { width: min(1100px, 96vw); }
+.inv-imp-start { display: flex; gap: .6rem; flex-wrap: wrap; margin: .25rem 0 .75rem; }
+.inv-imp-pick { cursor: pointer; }
+.inv-imp-help { font-size: .85rem; background: var(--surface-2); border-radius: 10px; padding: .6rem .85rem; margin-bottom: .75rem; }
+.inv-imp-help summary { cursor: pointer; font-weight: 600; }
+.inv-imp-help ul { margin: .5rem 0 0; padding-left: 1.1rem; display: grid; gap: .3rem; }
+.inv-imp-opts { display: grid; gap: .25rem; margin-bottom: .5rem; }
+.inv-imp-file { margin: 0 0 .5rem; }
+.inv-imp-scroll { max-height: 48vh; overflow: auto; border: 1px solid var(--border, #e5e7eb); border-radius: 10px; margin-top: .5rem; }
+.inv-imp-scroll thead th { position: sticky; top: 0; background: #fff; z-index: 1; }
+.inv-imp-bar { height: 10px; background: var(--surface-2); border-radius: 999px; overflow: hidden; margin: .5rem 0; }
+.inv-imp-bar span { display: block; height: 100%; background: var(--primary); transition: width .2s; }
+.inv-imp-fail { font-size: .85rem; max-height: 30vh; overflow: auto; padding-left: 1.1rem; }
+.inv-flag.is-ok { background: #ecfdf3; color: #027a48; }
