@@ -1191,13 +1191,13 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
   return { answers };
 }
 
-// Treatment records saved without enough stock (last 30 days)
+// Treatment records saved without enough stock (last 30 days) that haven't been resolved yet
 export async function listShortUsage() {
   const snap = await getDocs(query(collection(db, "inv_usage"), where("short", "==", true)));
   const since = Date.now() - 30 * 864e5;
   return snap.docs
     .map((d) => { const x = d.data() || {}; return { id: d.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [], at: toDate(x.at) }; })
-    .filter((u) => u.at && u.at.getTime() > since)
+    .filter((u) => u.at && u.at.getTime() > since && u.resolved !== true)
     .sort((a, b) => b.at - a.at);
 }
 
@@ -1357,6 +1357,7 @@ export async function resolveCountLine(countId, index, { action, note = "" }, st
         tx.update(kRef, { sealed, open, updatedAt: serverTimestamp() });
         logMove(tx, staff, {
           type: "kit-count", productId: l.productId, productName: l.productName, unit: l.unit,
+          staffUid: l.staffUid || "", deltaUnits: diff,   // whose kit, and by how much (for Kit reconciliation)
           lines: dS ? [{ loc: "kit", batch: l.batch || "", expiry: l.expiry || "", delta: dS }] : [],
           reason: "Count difference accepted", ref: countId,
           note: [`${l.staffName || "Injector"}'s kit`, `${diff > 0 ? "+" : ""}${diff} ${l.unit}`, text].filter(Boolean).join(" · "),
@@ -1416,4 +1417,48 @@ export async function listMovesBetween(from, to, types = null) {
     .map((d) => { const x = d.data() || {}; return { id: d.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [], at: toDate(x.at) }; })
     .filter((m) => !types || types.includes(m.type))
     .sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0));
+}
+
+/* ===================== Reporting: kit reconciliation and saved short ===================== */
+
+export const KIT_MOVE_TYPES = ["kit-take", "kit-return", "kit-discard", "kit-use", "kit-count"];
+
+// Every kit movement ever (oldest first). Borrowing comes from inv_loans instead.
+export async function listKitMoves() {
+  const snap = await getDocs(query(collection(db, "inv_moves"), where("type", "in", KIT_MOVE_TYPES)));
+  return snap.docs
+    .map((d) => { const x = d.data() || {}; return { id: d.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [], at: toDate(x.at) }; })
+    .sort((a, b) => (a.at ? a.at.getTime() : 0) - (b.at ? b.at.getTime() : 0));
+}
+
+// Every borrow between injectors
+export async function listAllLoans() {
+  const snap = await getDocs(collection(db, "inv_loans"));
+  return snap.docs.map((d) => {
+    const x = d.data() || {};
+    return { id: d.id, ...x, units: Number(x.units) || 0, status: LOAN_STATUS[x.status] ? x.status : "unconfirmed",
+      createdAt: toDate(x.createdAt) };
+  });
+}
+
+// Every treatment record saved short (newest first), resolved or not
+export async function listShortAll() {
+  const snap = await getDocs(query(collection(db, "inv_usage"), where("short", "==", true)));
+  return snap.docs
+    .map((d) => { const x = d.data() || {}; return { id: d.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [],
+      at: toDate(x.at), resolvedAt: toDate(x.resolvedAt), resolved: x.resolved === true }; })
+    .sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0));
+}
+
+// Marks a saved-short record as sorted out, with a note. Only once.
+export async function resolveShort(id, note, staff) {
+  const text = clip(note, 500);
+  if (!text) throw new Error("Add a note saying how it was sorted out.");
+  const ref = doc(db, "inv_usage", id);
+  await runTransaction(db, async (tx) => {
+    const s = await tx.get(ref);
+    if (!s.exists()) throw new Error("This record no longer exists.");
+    if (s.data().resolved === true) throw new Error("Someone has already resolved this. Reload to see it.");
+    tx.update(ref, { resolved: true, resolvedNote: text, resolvedBy: who(staff), resolvedByUid: uid(), resolvedAt: serverTimestamp() });
+  });
 }

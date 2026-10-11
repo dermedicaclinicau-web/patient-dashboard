@@ -151,7 +151,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
       tone: "ok", text: `${plural(r.qty, r.unit)} of ${r.productName} is on the Shelf for you`,
       href: "#/inventory/kits", act: "Take it",
     }));
-    usage.filter((u) => u.short && now - u.at < 14 * DAY).forEach((u) => att.push({
+    usage.filter((u) => u.short && u.resolved !== true && now - u.at < 14 * DAY).forEach((u) => att.push({
       tone: "bad", text: `Saved short for ${u.patientName}: ${u.lines.filter((l) => l.short > 0).map((l) => `${l.name} by ${fmt(l.short)} ${l.unit}`).join(", ")}`,
       href: `#/form-record/${encodeURIComponent(u.submissionId)}`, act: "Open",
     }));

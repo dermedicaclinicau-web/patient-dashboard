@@ -3817,3 +3817,12 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .rp-detail > summary { cursor: pointer; font-weight: 700; }
 .rp-detail[open] > summary { margin-bottom: .6rem; }
 @media (max-width: 760px) { .rp-find { max-width: none; } }
+
+/* ---------- Reporting: kit reconciliation and saved short ---------- */
+.rp-recon th, .rp-recon td { white-space: nowrap; }
+.rp-recon td:first-child, .rp-recon td:nth-child(2) { white-space: normal; }
+.rp-ok { color: #027a48; font-weight: 700; }
+.rp-sub > td { padding: 0 !important; background: var(--surface-2); }
+.rp-hist { padding: .75rem 1rem 1rem; }
+.rp-hist .inv-table { background: #fff; font-size: .82rem; }
+.rp-hist .rp-note strong { color: var(--text); }

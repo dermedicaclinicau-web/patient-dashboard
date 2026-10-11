@@ -1,6 +1,6 @@
-// Reporting (#/reports/<tab>): count differences, wastage, kit reconciliation, usage and saved short.
 import {
   listProducts, listCounts, resolveCountLine, listUsageBetween, listMovesBetween,
+  listKits, listKitMoves, listAllLoans, listShortAll, resolveShort, kitUnits,
   batchName, plural, unitPlural, dayKey, COUNT_STATUS,
 } from "./inventory-api.js";
 import { can } from "./perms.js";
@@ -84,7 +84,8 @@ export function mountReports(container, { param = "", staff = null } = {}) {
   if (tab === "variance") mountVariance(body, staff);
   else if (tab === "wastage") mountWastage(body);
   else if (tab === "usage") mountUsage(body);
-  else body.innerHTML = '<div class="state"><strong>Coming next</strong>This report is being built.</div>';
+  else if (tab === "kits") mountKitRecon(body);
+  else mountShort(body, staff);
 }
 
 /* ===================== Count differences ===================== */
@@ -561,4 +562,304 @@ function mountUsage(body) {
       e.waste ? `${fmt(e.waste)} ${e.wasteUnit}` : "", e.batch, e.by, e.patient, e.detail, e.short ? +fmt(e.short) : "",
       e.value === null ? "" : e.value],
   });
+}
+/* ===================== Kit reconciliation ===================== */
+
+const round1 = (n) => Math.round((Number(n) || 0) * 10) / 10;
+
+// One row per injector + kit product, from every movement since the kit started
+function reconcileKits(byId, kits, moves, loans) {
+  const rows = new Map();
+  const names = new Map();
+  kits.forEach((k) => { if (k.staffUid) names.set(k.staffUid, k.staffName); });
+  moves.forEach((m) => { if (m.byUid && m.by && !names.has(m.byUid)) names.set(m.byUid, m.by); });
+  loans.forEach((l) => {
+    if (l.toUid && !names.has(l.toUid)) names.set(l.toUid, l.toName);
+    if (l.fromUid && !names.has(l.fromUid)) names.set(l.fromUid, l.fromName);
+  });
+  const uidByName = new Map([...names].map(([u, n]) => [String(n || "").trim().toLowerCase(), u]));
+
+  const rowFor = (uid, pid, fallbackName) => {
+    const key = `${uid}|${pid}`;
+    let r = rows.get(key);
+    if (!r) {
+      const p = byId.get(pid);
+      r = {
+        key, uid, productId: pid, staffName: names.get(uid) || fallbackName || "Unknown",
+        productName: (p && p.name) || "Unknown product", unit: (p && p.doseUnit) || "units", perUnit: perDose(p),
+        taken: 0, borrowedIn: 0, lentOut: 0, used: 0, discarded: 0, returned: 0, adjusted: 0, now: 0, disputed: 0, events: [],
+      };
+      rows.set(key, r);
+    }
+    return r;
+  };
+  const log = (r, at, what, change, note = "") => r.events.push({ at, what, change: round1(change), note });
+
+  moves.forEach((m) => {
+    const p = byId.get(m.productId);
+    const per = Number((p && p.dosePer) || 0);
+    const vialUnit = (p && p.stockUnit) || "vial";
+    const kitDelta = (m.lines || []).filter((l) => l.loc === "kit").reduce((a, l) => a + (Number(l.delta) || 0), 0);
+    if (m.type === "kit-take" || m.type === "kit-return") {
+      const units = Math.abs(kitDelta) * per;
+      if (!(units > 0) || !m.byUid) return;
+      const r = rowFor(m.byUid, m.productId, m.by);
+      if (m.type === "kit-take") { r.taken += units; log(r, m.at, `Taken from the Shelf (${plural(Math.abs(kitDelta), vialUnit)})`, units); }
+      else { r.returned += units; log(r, m.at, `Returned to the Shelf (${plural(Math.abs(kitDelta), vialUnit)})`, -units); }
+    } else if (m.type === "kit-use") {
+      const units = -kitDelta; // kit lines on treatment records are already in units
+      if (!(units > 0) || !m.byUid) return;
+      const r = rowFor(m.byUid, m.productId, m.by);
+      r.used += units;
+      log(r, m.at, "Used in treatment", -units, m.note || "");
+    } else if (m.type === "kit-discard") {
+      let units = Number(m.discardUnits);
+      if (!Number.isFinite(units)) {
+        const open = Number((/([\d.]+)\s+\S+\s+from the opened vial/.exec(m.note || "") || [])[1]) || 0;
+        units = open + Math.abs(kitDelta) * per;
+      }
+      if (!(units > 0) || !m.byUid) return;
+      const r = rowFor(m.byUid, m.productId, m.by);
+      r.discarded += units;
+      log(r, m.at, "Discarded", -units, [m.reason, m.note].filter(Boolean).join(" · "));
+    } else if (m.type === "kit-count") {
+      const owner = m.staffUid || uidByName.get(String(m.note || "").split("'s kit")[0].trim().toLowerCase());
+      let units = Number(m.deltaUnits);
+      if (!Number.isFinite(units)) units = Number((/(?:^|·\s)([+-]?\d+(?:\.\d+)?)\s+\S+/.exec(m.note || "") || [])[1]) || 0;
+      if (!owner || !units) return;
+      const r = rowFor(owner, m.productId, "");
+      r.adjusted += units;
+      log(r, m.at, "Count difference accepted", units, m.by ? `by ${m.by}` : "");
+    }
+  });
+
+  loans.forEach((l) => {
+    const u = Number(l.units) || 0;
+    if (!(u > 0)) return;
+    const note = l.status === "disputed" ? "Disputed" : l.status === "unconfirmed" ? "Not confirmed yet" : "";
+    if (l.toUid) {
+      const r = rowFor(l.toUid, l.productId, l.toName);
+      r.borrowedIn += u;
+      if (l.status === "disputed") r.disputed++;
+      log(r, l.createdAt, `Borrowed from ${l.fromName || "a colleague"}`, u, note);
+    }
+    if (l.fromUid) {
+      const r = rowFor(l.fromUid, l.productId, l.fromName);
+      r.lentOut += u;
+      if (l.status === "disputed") r.disputed++;
+      log(r, l.createdAt, `Lent to ${l.toName || "a colleague"}`, -u, note);
+    }
+  });
+
+  kits.forEach((k) => { const r = rowFor(k.staffUid, k.productId, k.staffName); r.now = round1(r.now + kitUnits(k)); });
+
+  return [...rows.values()].map((r) => {
+    const expected = round1(r.taken + r.borrowedIn - r.lentOut - r.used - r.discarded - r.returned + r.adjusted);
+    const gap = round1(r.now - expected);
+    r.events.sort((a, b) => (a.at ? a.at.getTime() : 0) - (b.at ? b.at.getTime() : 0));
+    let bal = 0;
+    r.events.forEach((e) => { bal = round1(bal + e.change); e.balance = bal; });
+    return { ...r, expected, gap, ok: Math.abs(gap) < 0.05,
+      gapValue: r.perUnit === null ? null : Math.round(r.perUnit * gap * 100) / 100 };
+  }).sort((a, b) => Number(a.ok) - Number(b.ok)
+    || a.staffName.localeCompare(b.staffName, "en-AU") || a.productName.localeCompare(b.productName, "en-AU"));
+}
+
+function mountKitRecon(body) {
+  const st = { rows: [], gapsOnly: false };
+  const n = (v) => (v ? fmt(v) : "—");
+
+  async function load() {
+    body.innerHTML = SKELETON;
+    try {
+      const [products, kits, moves, loans] = await Promise.all([listProducts(), listKits(), listKitMoves(), listAllLoans()]);
+      st.rows = reconcileKits(new Map(products.map((p) => [p.id, p])), kits, moves, loans);
+      if (body.isConnected) draw();
+    } catch (err) {
+      console.error("Kit reconciliation failed:", err);
+      if (body.isConnected) body.innerHTML = `<div class="tm-empty is-error">${esc(errText(err, "Couldn't load the kits. Try again."))}</div>`;
+    }
+  }
+
+  function histHtml(r) {
+    const ev = r.events.slice().reverse().slice(0, 200);
+    return `<div class="rp-hist"><table class="inv-table">
+      <thead><tr><th>Date</th><th>What happened</th><th>Change</th><th>Balance</th><th>Details</th></tr></thead>
+      <tbody>${ev.map((e) => `<tr><td>${esc(shortDate(e.at))}</td><td>${esc(e.what)}</td>
+        <td class="${e.change < 0 ? "rp-neg" : "rp-pos"}">${e.change > 0 ? "+" : ""}${esc(fmt(e.change))}</td>
+        <td>${esc(fmt(e.balance))}</td><td>${esc(e.note || "")}</td></tr>`).join("")}</tbody></table>
+      ${r.events.length > 200 ? `<p class="muted rp-note">Showing the latest 200 of ${r.events.length}.</p>` : ""}
+      ${r.ok ? "" : `<p class="rp-note"><strong>To fix:</strong> ask ${esc(r.staffName)} to do a kit check (Task Manager → Opening count → My kit),
+        then Accept the difference in Count differences.</p>`}</div>`;
+  }
+
+  function rowHtml(r) {
+    return `<tr class="${r.ok ? "" : "is-diff"}">
+      <td><strong>${esc(r.staffName)}</strong>${r.disputed ? ' <span class="inv-flag is-bad">Disputed borrow</span>' : ""}</td>
+      <td>${esc(r.productName)} <small class="muted">(${esc(r.unit)})</small></td>
+      <td>${n(r.taken)}</td><td>${n(r.borrowedIn)}</td><td>${n(r.lentOut)}</td><td>${n(r.used)}</td>
+      <td>${n(r.discarded)}</td><td>${n(r.returned)}</td>
+      <td>${r.adjusted ? `${r.adjusted > 0 ? "+" : ""}${fmt(r.adjusted)}` : "—"}</td>
+      <td>${esc(fmt(r.expected))}</td><td><strong>${esc(fmt(r.now))}</strong></td>
+      <td>${r.ok ? '<span class="rp-ok">✓</span>' : `<strong class="${r.gap < 0 ? "rp-neg" : "rp-pos"}">${r.gap > 0 ? "+" : ""}${esc(fmt(r.gap))}</strong>${
+        r.gapValue !== null ? ` <small class="muted">${esc(money(r.gapValue))}</small>` : ""}`}</td>
+      <td><button type="button" class="lh-btn" data-hist="${esc(r.key)}">History</button></td></tr>
+      <tr class="rp-sub" data-histrow="${esc(r.key)}" hidden><td colspan="13">${histHtml(r)}</td></tr>`;
+  }
+
+  function draw() {
+    const gaps = st.rows.filter((r) => !r.ok);
+    const rows = st.gapsOnly ? gaps : st.rows;
+    const gapValue = gaps.reduce((a, r) => a + Math.abs(r.gapValue || 0), 0);
+    body.innerHTML = `
+      <div class="inv-tools">
+        <label class="fe-check"><input type="checkbox" data-f="gaps"${st.gapsOnly ? " checked" : ""} /> Only show gaps</label>
+        <span class="inv-spacer"></span>
+        <button type="button" class="ff-btn" data-act="refresh">Refresh</button>
+        <button type="button" class="ff-btn" data-act="csv">Export CSV</button>
+      </div>
+      <p class="muted rp-range">Since each kit started: <strong>taken + borrowed in − lent out − used − discarded − returned ± counts accepted</strong>
+        should equal what's in the kit now. A gap means something wasn't recorded.</p>
+      <div class="inv-stats">
+        <div class="inv-stat"><strong>${new Set(st.rows.map((r) => r.uid)).size}</strong><span>Injectors</span></div>
+        <div class="inv-stat"><strong>${st.rows.length - gaps.length}</strong><span>Kits that add up</span></div>
+        <div class="inv-stat ${gaps.length ? "is-bad" : ""}"><strong>${gaps.length}</strong><span>With a gap</span></div>
+        <div class="inv-stat ${gaps.length ? "is-bad" : ""}"><strong>${esc(money(gapValue))}</strong><span>Gaps (at cost)</span></div>
+      </div>
+      ${rows.length ? `<section class="tb-card"><div class="rp-scroll"><table class="inv-table rp-table rp-recon">
+        <thead><tr><th>Injector</th><th>Product</th><th>Taken</th><th>Borrowed in</th><th>Lent out</th><th>Used</th>
+          <th>Discarded</th><th>Returned</th><th>Counts</th><th>Should have</th><th>In kit now</th><th>Gap</th><th></th></tr></thead>
+        <tbody>${rows.map(rowHtml).join("")}</tbody></table></div></section>`
+        : `<div class="tm-empty">${st.gapsOnly ? "No gaps. Every kit adds up. 👍" : "No kit activity yet."}</div>`}`;
+  }
+
+  function exportCsv() {
+    if (!st.rows.length) { showToast("Nothing to export."); return; }
+    downloadCsv(`kit-reconciliation-${dayKey()}.csv`, [
+      ["Injector", "Product", "Unit", "Taken", "Borrowed in", "Lent out", "Used", "Discarded", "Returned", "Counts accepted",
+        "Should have", "In kit now", "Gap", "Gap value ($)", "Disputed borrows"],
+      ...st.rows.map((r) => [r.staffName, r.productName, r.unit, r.taken, r.borrowedIn, r.lentOut, r.used, r.discarded, r.returned,
+        r.adjusted, r.expected, r.now, r.gap, r.gapValue === null ? "" : r.gapValue, r.disputed]),
+    ]);
+  }
+
+  body.addEventListener("click", (e) => {
+    const h = e.target.closest("[data-hist]");
+    if (h) {
+      const row = body.querySelector(`[data-histrow="${CSS.escape(h.dataset.hist)}"]`);
+      if (row) { row.hidden = !row.hidden; h.textContent = row.hidden ? "History" : "Hide"; }
+      return;
+    }
+    if (e.target.closest('[data-act="refresh"]')) { load(); return; }
+    if (e.target.closest('[data-act="csv"]')) exportCsv();
+  });
+  body.addEventListener("change", (e) => {
+    if (e.target.dataset.f === "gaps") { st.gapsOnly = e.target.checked; draw(); }
+  });
+  load();
+}
+
+/* ===================== Saved short ===================== */
+
+function mountShort(body, staff) {
+  const st = { view: "open", list: [] };
+  const shortText = (u) => u.lines.filter((l) => Number(l.short) > 0)
+    .map((l) => `${l.name} by ${fmt(l.short)} ${l.kind === "kit" ? l.unit : unitPlural(l.unit)}`).join(", ");
+
+  async function load() {
+    body.innerHTML = SKELETON;
+    try {
+      st.list = await listShortAll();
+      if (body.isConnected) draw();
+    } catch (err) {
+      console.error("Saved short failed:", err);
+      if (body.isConnected) body.innerHTML = `<div class="tm-empty is-error">${esc(errText(err, "Couldn't load the records. Try again."))}</div>`;
+    }
+  }
+
+  function draw() {
+    const open = st.list.filter((u) => !u.resolved);
+    const rows = st.view === "open" ? open : st.view === "resolved" ? st.list.filter((u) => u.resolved) : st.list;
+    body.innerHTML = `
+      <div class="inv-tools">
+        <div class="fe-seg">${[["open", `Open (${open.length})`], ["resolved", "Resolved"], ["all", "All"]].map(([v, l]) =>
+          `<label class="fe-seg-btn"><input type="radio" name="rp-short" data-f="view" value="${v}"${st.view === v ? " checked" : ""} /><span>${esc(l)}</span></label>`).join("")}</div>
+        <span class="inv-spacer"></span>
+        <button type="button" class="ff-btn" data-act="csv">Export CSV</button>
+      </div>
+      <p class="muted rp-range">Treatment records saved when the system showed less stock than was used. The patient's record is right;
+        the stock numbers were behind. Usually a count fixes it: count the product, Accept the difference in Count differences, then resolve it here.</p>
+      ${rows.length ? `<section class="tb-card"><div class="rp-scroll"><table class="inv-table rp-table">
+        <thead><tr><th>Date</th><th>Patient</th><th>Form</th><th>Staff</th><th>What was short</th><th></th></tr></thead>
+        <tbody>${rows.map((u) => `<tr class="${u.resolved ? "" : "is-diff"}" data-id="${esc(u.id)}">
+          <td>${esc(shortDate(u.at))}</td>
+          <td>${u.submissionId ? `<a href="#/form-record/${encodeURIComponent(u.submissionId)}">${esc(u.patientName || "Treatment record")}</a>` : esc(u.patientName || "—")}</td>
+          <td>${esc(u.formName || "—")}</td><td>${esc(u.by || "—")}</td>
+          <td><strong class="rp-neg">${esc(shortText(u))}</strong></td>
+          <td>${u.resolved
+            ? `<div class="rp-done"><span class="rq-status is-accepted">Resolved</span><small>${esc(u.resolvedNote || "")}</small>
+                <small>${esc([u.resolvedBy, shortDate(u.resolvedAt)].filter(Boolean).join(" · "))}</small></div>`
+            : '<div class="rp-acts"><button type="button" class="lh-btn is-primary" data-act="resolve">Resolve</button></div>'}</td>
+        </tr>`).join("")}</tbody></table></div></section>`
+        : `<div class="tm-empty">${st.view === "open" ? "Nothing saved short to sort out. 👍" : "Nothing here yet."}</div>`}`;
+  }
+
+  function resolve(u) {
+    const dlg = openDialog(`
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>Resolve: ${esc(u.patientName || "treatment record")}</h3>
+          <p>Short: <strong>${esc(shortText(u))}</strong>. Stock isn't changed here. Fix the numbers with a count first if needed.</p></div>
+        <label class="lh-field"><span class="lh-label">How was it sorted out?</span>
+          <textarea name="note" rows="3" maxlength="500" placeholder="e.g. Counted on 12 Oct, difference accepted"></textarea></label>
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">Mark as resolved</button>
+        </div>
+      </form>`);
+    const form = dlg.querySelector("form");
+    const err = dlg.querySelector(".lh-error");
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const note = form.elements.note.value.trim();
+      if (!note) { err.textContent = "Add a short note saying how it was sorted out."; err.hidden = false; return; }
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      err.hidden = true;
+      try {
+        await resolveShort(u.id, note, staff);
+        dlg.close();
+        showToast("Resolved");
+        load();
+      } catch (ex) {
+        console.error("Resolve failed:", ex);
+        err.textContent = errText(ex, "Couldn't save. Try again.");
+        err.hidden = false;
+        btn.disabled = false;
+      }
+    });
+    form.elements.note.focus();
+  }
+
+  body.addEventListener("click", (e) => {
+    if (e.target.closest('[data-act="csv"]')) {
+      if (!st.list.length) { showToast("Nothing to export."); return; }
+      downloadCsv(`saved-short-${dayKey()}.csv`, [
+        ["Date", "Patient", "Form", "Staff", "What was short", "Status", "Note", "Resolved by", "Resolved on"],
+        ...st.list.map((u) => [u.at ? dayKey(u.at) : "", u.patientName || "", u.formName || "", u.by || "", shortText(u),
+          u.resolved ? "Resolved" : "Open", u.resolvedNote || "", u.resolvedBy || "", u.resolvedAt ? dayKey(u.resolvedAt) : ""]),
+      ]);
+      return;
+    }
+    if (e.target.closest('[data-act="resolve"]')) {
+      const tr = e.target.closest("tr[data-id]");
+      const u = tr && st.list.find((x) => x.id === tr.dataset.id);
+      if (u) resolve(u);
+    }
+  });
+  body.addEventListener("change", (e) => {
+    if (e.target.dataset.f === "view") { st.view = e.target.value; draw(); }
+  });
+  load();
 }
