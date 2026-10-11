@@ -1,5 +1,5 @@
 ﻿{
-    "version":  "20261011-210955",
+    "version":  "20261012-062449",
     "files":  [
                   "./js/aftercare-api.js",
                   "./js/aftercare-bank.js",
@@ -53,6 +53,7 @@
                   "./js/personal-notes.js",
                   "./js/photo-field.js",
                   "./js/plan-editor.js",
+                  "./js/po-deliveries.js",
                   "./js/po-document.js",
                   "./js/print-task.js",
                   "./js/purchase-order.js",

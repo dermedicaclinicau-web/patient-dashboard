@@ -3835,3 +3835,18 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .rp-effect { display: block; font-size: .8rem; font-weight: 600; min-height: 1em; }
 .rp-chist { font-size: .82rem; background: var(--surface-2); border-radius: 10px; padding: .6rem .8rem; }
 .rp-chist ul { margin: .35rem 0 0; padding-left: 1.1rem; }
+
+/* ---------- PO deliveries ---------- */
+.po-dv-wrap { margin-top: 1rem; }
+.po-dv-top { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; margin-bottom: .5rem; }
+.po-dv-top h4 { margin: 0; }
+.po-dv-top h4 em { font-style: normal; font-size: .75rem; background: var(--surface-2); border-radius: 999px; padding: .1rem .5rem; margin-left: .35rem; }
+.po-dv-wait { font-size: .85rem; background: #fffaeb; border-radius: 10px; padding: .5rem .75rem; margin: 0 0 .75rem; }
+.po-dv-item { border-top: 1px solid var(--border, #e5e7eb); padding: .85rem 0; }
+.po-dv-head { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-bottom: .5rem; font-size: .88rem; }
+.po-dv-head span:not(.inv-flag) { color: var(--muted, #667085); }
+.po-dv-body { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1rem; align-items: start; }
+.po-dv-doc img { width: 120px; height: 120px; object-fit: cover; border-radius: 10px; border: 1px solid var(--border, #e5e7eb); display: block; }
+.po-dv-doc { font-size: .85rem; font-weight: 600; color: var(--primary); text-decoration: none; }
+.po-dv-note { font-size: .85rem; font-style: italic; margin: .5rem 0 0; }
+@media (max-width: 760px) { .po-dv-body { grid-template-columns: 1fr; } }

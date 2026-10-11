@@ -1,9 +1,10 @@
 // One purchase order (#/inventory/po/<id>): items, totals, the PDF, and sending it to the supplier.
 import {
-  PO_STATUS, REQ_STATUS, LOCATIONS, locLabel, plural, unitPlural, lowAt, suggestOrder, reqNumber,
+  PO_STATUS, REQ_STATUS, LOCATIONS, locLabel, plural, unitPlural, lowAt, suggestOrder, reqNumber, batchName,
   getPo, savePo, markPoSent, cancelPo, poTotals, lineFromProduct, cleanPoLine, supplierSnapshot,
   listProducts, listSuppliers, listRequests,
 } from "./inventory-api.js";
+import { renderDeliveries } from "./po-deliveries.js";
 import { buildPoDocument } from "./po-document.js";
 import { docToPdf, deliveryError } from "./form-delivery.js";
 import { getLetterhead } from "./form-templates.js";
@@ -89,6 +90,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
         <div class="tb-form" data-role="left"></div>
         <aside class="tr-mail-col po-side" data-role="right"></aside>
       </div>
+      <div class="po-dv-wrap" data-role="deliveries"></div>
     </div>`;
   const $ = (s) => root.querySelector(s);
   const left = $('[data-role="left"]');
@@ -286,9 +288,17 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
   }
 
   const renderAll = () => { renderBar(); renderLeft(); renderRight(); };
+
+  // Deliveries: only once the order has gone out (drafts have nothing to show)
+  const dvBox = $('[data-role="deliveries"]');
+  function renderDv() {
+    if (po.status === "draft") { dvBox.innerHTML = ""; return; }
+    renderDeliveries(dvBox, po, { labelOf: (pid) => batchName(byId.get(pid)), canReceive: false });
+  }
+
   async function reload() {
     try { po = await getPo(id); } catch (err) { console.error(err); }
-    if (root.isConnected && po) renderAll();
+    if (root.isConnected && po) { renderAll(); renderDv(); }
   }
 
   /* ---------- Editing ---------- */
@@ -544,6 +554,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
   });
 
   renderAll();
+  renderDv();
   listRequests({ max: 300 })
     .then((list) => { reqs = list; if (root.isConnected) renderRight(); })
     .catch(() => { reqs = []; if (root.isConnected) renderRight(); });
