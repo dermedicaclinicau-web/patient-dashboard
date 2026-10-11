@@ -3,7 +3,8 @@
 import { can, isInjector } from "./perms.js";
 import {
   listProducts, listAllLots, listKits, listLoans, listReleases, listRequests, listMyUsage, listShortUsage, listPos,
-  isKitProduct, kitUnits, expiryState, plural, unitPlural, lowAt, myUid, reqNumber, REQ_STATUS, REL_STATUS,countDue, countLocs, dayKey, listCountsOn,
+  isKitProduct, kitUnits, expiryState, plural, unitPlural, lowAt, myUid, reqNumber, REQ_STATUS, REL_STATUS, countDue, countLocs, dayKey, listCountsOn,
+  listCounts, listShortAll,
 } from "./inventory-api.js";
 import { listMySubmissions } from "./form-submissions.js";
 import { db } from "./firebase-config.js";
@@ -85,6 +86,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
   const canOrder = canManage || can("inventory.order");
   const canJt = canManage || can("inventory.jt");
   const canReq = can("inventory.request");
+  const canReport = can("menu.reports");
   const safe = (p, fallback) => Promise.resolve(p).catch((err) => { console.warn("Dashboard:", err); return fallback; });
 
   async function load() {
@@ -92,7 +94,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     const hidden = readHidden(me0);
     const show = (k) => can(`dash.${k}`) && !hidden.has(k);
     const todayKey = dayKey();
-    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks] = await Promise.all([
+    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts] = await Promise.all([
       safe(listProducts(), []),
       safe(listAllLots(), []),
       safe(listKits(), []),
@@ -107,6 +109,8 @@ export async function mountMyDashboard(container, { staff } = {}) {
       safe(listCountsOn(todayKey), []),
       show("appts") ? safe(myAppointments(staff, todayKey), []) : [],
       show("tasks") ? safe(dueTasks(todayKey), []) : [],
+      canReport ? safe(listCounts({ openOnly: true }), []) : [],
+      canReport ? safe(listShortAll(), []) : [],
     ]);
     if (!root.isConnected) return;
 
@@ -130,6 +134,15 @@ export async function mountMyDashboard(container, { staff } = {}) {
       ]);
       const left = dueKeys.filter((k) => !doneKeys.has(k)).length;
       if (left) att.push({ tone: "warn", text: `Opening count: ${left} still to count today`, href: "#/tasks/count", act: "Count now" });
+    }
+    // Reporting: differences and saved-short records waiting for someone
+    if (canReport) {
+      const diffs = openCounts.reduce((a, c) => a + (Number(c.openCount) || 0), 0);
+      if (diffs) att.push({ tone: "warn", text: `${diffs} count difference${diffs === 1 ? "" : "s"} to review`,
+        href: "#/reports/variance", act: "Review" });
+      const shortOpen = allShorts.filter((u) => !u.resolved).length;
+      if (shortOpen) att.push({ tone: "bad", text: `${shortOpen} saved short record${shortOpen === 1 ? "" : "s"} to resolve`,
+        href: "#/reports/short", act: "Resolve" });
     }
     // My kit: lots due today that nobody has counted yet
     if (canKit) {
@@ -253,7 +266,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
         ] : []),
         [loans.filter((l) => l.status === "unconfirmed").length, "Borrows to confirm", "#/inventory/kits", "info"],
         [loans.filter((l) => l.status === "disputed").length, "Disputed borrows", "#/inventory/kits", "bad"],
-        [shorts.length, "Saved short (30 days)", "#/inventory/kits", "bad"],
+        [shorts.length, "Saved short (30 days)", canReport ? "#/reports/short" : "#/inventory/kits", "bad"],
       ];
       overviewHtml = card("Clinic overview", `<div class="md-tiles">${tiles.map(([n, label, href, tone]) => `
         <a class="md-tile${n ? ` is-${tone}` : ""}" href="${href}"><strong>${n}</strong><span>${esc(label)}</span></a>`).join("")}</div>`, "md-wide");

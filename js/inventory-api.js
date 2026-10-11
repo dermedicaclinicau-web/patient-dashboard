@@ -26,6 +26,7 @@ export const MOVE_TYPES = {
   "kit-take": "Taken into kit", "kit-open": "Vial opened", "kit-return": "Returned from kit",
   "kit-discard": "Discarded from kit", "kit-use": "Used in treatment", release: "Released from JT storage",
   "kit-borrow": "Borrowed from a colleague", "kit-count": "Kit count adjusted",
+  "use-correct": "Usage corrected", "kit-correct": "Kit usage corrected",
 };
 export const EXPIRY_SOON_DAYS = 60;
 
@@ -1421,7 +1422,7 @@ export async function listMovesBetween(from, to, types = null) {
 
 /* ===================== Reporting: kit reconciliation and saved short ===================== */
 
-export const KIT_MOVE_TYPES = ["kit-take", "kit-return", "kit-discard", "kit-use", "kit-count"];
+export const KIT_MOVE_TYPES = ["kit-take", "kit-return", "kit-discard", "kit-use", "kit-count", "kit-correct"];
 
 // Every kit movement ever (oldest first). Borrowing comes from inv_loans instead.
 export async function listKitMoves() {
@@ -1460,5 +1461,169 @@ export async function resolveShort(id, note, staff) {
     if (!s.exists()) throw new Error("This record no longer exists.");
     if (s.data().resolved === true) throw new Error("Someone has already resolved this. Reload to see it.");
     tx.update(ref, { resolved: true, resolvedNote: text, resolvedBy: who(staff), resolvedByUid: uid(), resolvedAt: serverTimestamp() });
+  });
+}
+
+/* ===================== Correcting a treatment's usage ===================== */
+
+export async function getUsage(id) {
+  const s = await getDoc(doc(db, "inv_usage", id));
+  if (!s.exists()) return null;
+  const x = s.data() || {};
+  return { id: s.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [], at: toDate(x.at),
+    corrections: Array.isArray(x.corrections) ? x.corrections : [] };
+}
+
+// What a correction does to one row. diff = new amount − recorded amount.
+// Less used: anything still short is cleared first, the rest goes back to stock.
+// More used: all of it comes from stock (what was short stays short).
+// Returns move: + taken from stock now, − given back.
+export function correctionMove(row, newAmount, kit) {
+  const amount = Number(row.amount) || 0;
+  const taken = Number(row.taken) || 0;
+  const diff = kit ? round1(newAmount - amount) : Math.round(newAmount - amount);
+  if (diff >= 0) return { move: diff, clearsShort: 0 };
+  const clearsShort = Math.min(Math.max(0, amount - taken), -diff);
+  const back = -diff - clearsShort;
+  return { move: kit ? -round1(back) : -Math.round(back), clearsShort: kit ? round1(clearsShort) : clearsShort };
+}
+
+// changes: [{ li, ri, amount, dose }] (line and row index on the usage record)
+// One transaction: kit / batch / product totals, the activity log, and the usage record (original kept).
+export async function correctUsage(id, changes, reason, staff) {
+  const why = clip(reason, 300);
+  if (!why) throw new Error("Add a reason for the correction.");
+  const me = uid();
+  const by = who(staff);
+  const uRef = doc(db, "inv_usage", id);
+
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    const uSnap = await tx.get(uRef);
+    if (!uSnap.exists()) throw new Error("This record no longer exists.");
+    const u = uSnap.data();
+    const owner = String(u.byUid || "");
+    const ownerName = String(u.by || "the injector");
+    const lines = (Array.isArray(u.lines) ? u.lines : []).map((l) => ({ ...l, rows: (l.rows || []).map((r) => ({ ...r })) }));
+
+    const work = [];
+    for (const c of changes || []) {
+      const l = lines[c.li];
+      const r = l && l.rows[c.ri];
+      if (!r) throw new Error("This record has changed. Reload and try again.");
+      const kit = l.kind === "kit";
+      const amount = kit ? round1(Math.max(0, Number(c.amount) || 0)) : Math.max(0, Math.round(Number(c.amount) || 0));
+      const dose = kit ? amount : l.doseUnit ? Math.round(Math.max(0, Number(c.dose) || 0) * 100) / 100 : 0;
+      const same = amount === (Number(r.amount) || 0) && (kit || !l.doseUnit || dose === (Number(r.dose) || 0));
+      if (!same) work.push({ l, r, kit, amount, dose, ...correctionMove(r, amount, kit) });
+    }
+    if (!work.length) throw new Error("Nothing has changed.");
+
+    const prodSnaps = new Map(), kitSnaps = new Map(), lotSnaps = new Map();
+    for (const w of work) {
+      const pid = w.l.productId;
+      if (pid && !prodSnaps.has(pid)) prodSnaps.set(pid, await tx.get(doc(db, "inv_products", pid)));
+      if (!w.move) continue;
+      if (w.kit) {
+        w.ref = kitId(owner, pid, w.r.batch, w.r.expiry);
+        if (!kitSnaps.has(w.ref)) kitSnaps.set(w.ref, await tx.get(doc(db, "inv_kits", w.ref)));
+      } else {
+        w.loc = w.r.from === "jt" ? "jt" : "shelf";
+        w.ref = lotId(pid, w.loc, w.r.batch, w.r.expiry);
+        if (!lotSnaps.has(w.ref)) lotSnaps.set(w.ref, await tx.get(doc(db, "inv_lots", w.ref)));
+      }
+    }
+
+    // ---- Work out the stock changes ----
+    const kits = new Map(), lots = new Map(), stockDelta = new Map();
+    work.forEach((w) => {
+      const pid = w.l.productId;
+      const where = w.r.batch ? ` (${w.l.batchLabel || "Batch"} ${w.r.batch})` : "";
+      if (w.move && w.kit) {
+        const snap = kitSnaps.get(w.ref);
+        if (!snap || !snap.exists()) throw new Error(`${w.l.name}: this batch isn't in ${ownerName}'s kit any more. Do a kit check instead.`);
+        const d = snap.data();
+        const s = kits.get(w.ref) || { sealed: parseInt(d.sealed, 10) || 0, open: round1(d.open), dosePer: Number(d.dosePer) || 0 };
+        if (w.move > 0) {
+          while (w.move > s.open + 0.001 && s.sealed > 0 && s.dosePer > 0) { s.sealed -= 1; s.open = round1(s.open + s.dosePer); }
+          if (w.move > s.open + 0.001) {
+            throw new Error(`${w.l.name}: ${ownerName}'s kit only has ${round1(s.sealed * s.dosePer + s.open)} ${w.l.unit} left${where}. Do a kit check first.`);
+          }
+        }
+        s.open = round1(s.open - w.move); // a negative move puts units back in the opened vial
+        kits.set(w.ref, s);
+      } else if (w.move) {
+        const snap = lotSnaps.get(w.ref);
+        const s = lots.get(w.ref) || { qty: snap && snap.exists() ? Number(snap.data().qty) || 0 : 0, exists: !!(snap && snap.exists()),
+          productId: pid, loc: w.loc, batch: w.r.batch || "", expiry: w.r.expiry || "" };
+        if (w.move > s.qty) {
+          throw new Error(`${w.l.name}: only ${plural(s.qty, w.l.unit)} left in ${locLabel(w.loc)}${where}. Do a count first.`);
+        }
+        s.qty -= w.move;
+        lots.set(w.ref, s);
+        const sd = stockDelta.get(pid) || { shelf: 0, jt: 0 };
+        sd[w.loc] -= w.move;
+        stockDelta.set(pid, sd);
+      }
+
+      // The row itself
+      const p = prodSnaps.get(pid);
+      const per = p && p.exists() ? Number(p.data().dosePer) || 0 : 0;
+      w.before = { amount: Number(w.r.amount) || 0, dose: Number(w.r.dose) || 0 };
+      w.r.amount = w.amount;
+      w.r.taken = w.kit ? round1((Number(w.r.taken) || 0) + w.move) : (Number(w.r.taken) || 0) + w.move;
+      w.r.dose = w.dose;
+      w.r.waste = !w.kit && per && w.dose ? Math.max(0, Math.round((w.amount * per - w.dose) * 100) / 100) : 0;
+    });
+
+    // Line totals, the same way the treatment form works them out
+    new Set(work.map((w) => w.l)).forEach((l) => {
+      l.total = round1(l.rows.reduce((a, r) => a + (Number(r.amount) || 0), 0));
+      l.short = round1(l.rows.reduce((a, r) => a + Math.max(0, (Number(r.amount) || 0) - (Number(r.taken) || 0)), 0));
+      l.doseTotal = Math.round(l.rows.reduce((a, r) => a + (Number(r.dose) || 0), 0) * 100) / 100;
+      l.waste = Math.round(l.rows.reduce((a, r) => a + (Number(r.waste) || 0), 0) * 100) / 100;
+    });
+
+    // ---- Writes ----
+    kits.forEach((s, ref) => tx.update(doc(db, "inv_kits", ref), { sealed: s.sealed, open: s.open, updatedAt: serverTimestamp() }));
+    lots.forEach((s, ref) => tx.set(doc(db, "inv_lots", ref), {
+      productId: s.productId, loc: s.loc, batch: s.batch, expiry: s.expiry, qty: s.qty,
+      updatedAt: serverTimestamp(), ...(s.exists ? {} : { createdAt: serverTimestamp() }),
+    }, { merge: true }));
+    stockDelta.forEach((sd, pid) => {
+      const snap = prodSnaps.get(pid);
+      if (!snap || !snap.exists()) return;
+      const st = snap.data().stock || {};
+      tx.update(snap.ref, {
+        stock: { shelf: Math.max(0, (Number(st.shelf) || 0) + sd.shelf), jt: Math.max(0, (Number(st.jt) || 0) + sd.jt) },
+        stockAt: serverTimestamp(),
+      });
+    });
+
+    const amtText = (w, n) => (w.kit ? `${n} ${w.l.unit}` : plural(n, w.l.unit));
+    const changeText = (w) => [
+      w.before.amount !== w.amount ? `${amtText(w, w.before.amount)} → ${amtText(w, w.amount)}` : "",
+      !w.kit && w.l.doseUnit && w.before.dose !== w.dose ? `${w.before.dose} → ${w.dose} ${w.l.doseUnit} given` : "",
+    ].filter(Boolean).join(", ");
+
+    work.filter((w) => w.move).forEach((w) => logMove(tx, staff, {
+      type: w.kit ? "kit-correct" : "use-correct", productId: w.l.productId, productName: w.l.name, unit: w.l.unit,
+      ...(w.kit ? { staffUid: owner } : {}),
+      lines: [{ loc: w.kit ? "kit" : w.loc, batch: w.r.batch || "", expiry: w.r.expiry || "", delta: -w.move }],
+      reason: "Usage corrected", ref: id,
+      note: [`${u.patientName || ""} · ${u.formName || ""}`, changeText(w), w.kit ? `${ownerName}'s kit` : "", why]
+        .filter(Boolean).join(" · ").slice(0, 500),
+    }));
+
+    tx.update(uRef, {
+      lines,
+      short: lines.some((l) => (Number(l.short) || 0) > 0),
+      ...(u.original ? {} : { original: u.lines }),
+      corrected: true, correctedAt: serverTimestamp(), correctedBy: by, correctedByUid: me,
+      corrections: arrayUnion({
+        at: new Date().toISOString(), by, byUid: me, reason: why,
+        changes: work.map((w) => `${w.l.name}: ${changeText(w)}`),
+      }),
+    });
   });
 }

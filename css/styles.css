@@ -3826,3 +3826,12 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .rp-hist { padding: .75rem 1rem 1rem; }
 .rp-hist .inv-table { background: #fff; font-size: .82rem; }
 .rp-hist .rp-note strong { color: var(--text); }
+
+/* ---------- Correct usage ---------- */
+.rp-correct { max-width: 760px; }
+.rp-ctable td { vertical-align: top; }
+.rp-cin { display: flex; align-items: center; gap: .4rem; margin-bottom: .35rem; font-size: .85rem; }
+.rp-cin .fe-in { width: 90px; }
+.rp-effect { display: block; font-size: .8rem; font-weight: 600; min-height: 1em; }
+.rp-chist { font-size: .82rem; background: var(--surface-2); border-radius: 10px; padding: .6rem .8rem; }
+.rp-chist ul { margin: .35rem 0 0; padding-left: 1.1rem; }

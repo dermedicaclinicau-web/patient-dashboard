@@ -1,6 +1,7 @@
 import {
   listProducts, listCounts, resolveCountLine, listUsageBetween, listMovesBetween,
   listKits, listKitMoves, listAllLoans, listShortAll, resolveShort, kitUnits,
+  getUsage, correctUsage, correctionMove,
   batchName, plural, unitPlural, dayKey, COUNT_STATUS,
 } from "./inventory-api.js";
 import { can } from "./perms.js";
@@ -83,7 +84,7 @@ export function mountReports(container, { param = "", staff = null } = {}) {
   const body = root.querySelector('[data-role="body"]');
   if (tab === "variance") mountVariance(body, staff);
   else if (tab === "wastage") mountWastage(body);
-  else if (tab === "usage") mountUsage(body);
+  else if (tab === "usage") mountUsage(body, staff);
   else if (tab === "kits") mountKitRecon(body);
   else mountShort(body, staff);
 }
@@ -398,6 +399,7 @@ function mountRangeReport(body, cfg) {
     qTimer = setTimeout(() => { if (st.r) draw(); }, 200);
   });
   body.addEventListener("click", (e) => {
+    if (cfg.onClick && cfg.onClick(e, load)) return;
     if (!e.target.closest('[data-act="csv"]')) return;
     const ev = visible();
     if (!ev.length) { showToast("Nothing to export."); return; }
@@ -510,6 +512,7 @@ function useEvents(usage, byId) {
       short: Number(l.short) || 0,
       by: u.by || "", patient: u.patientName || "", patientId: u.patientId || "",
       detail: u.formName || "", submissionId: u.submissionId || "",
+      usageId: u.id, corrected: u.corrected === true,
       batch: [...new Set((l.rows || []).map((r) => r.batch).filter(Boolean))].join(", "),
       value: kit ? mul(perDose(p), items) : mul(perItem(p), items),
     });
@@ -519,7 +522,8 @@ function useEvents(usage, byId) {
 const useAmount = (e) => (e.dosed ? `${amt(e.amount, e.unit, false)} (${plural(+fmt(e.items), e.itemUnit)})` : amt(e.amount, e.unit, e.plain));
 const treatments = (ev) => new Set(ev.map((e) => e.submissionId || `${e.patientId}|${e.at && e.at.getTime()}`)).size;
 
-function mountUsage(body) {
+function mountUsage(body, staff) {
+  const canCorrect = can("inventory.manage");
   mountRangeReport(body, {
     name: "Usage", file: "usage",
     groups: [["product", "Product"], ["clinician", "Staff member"], ["patient", "Patient"], ["month", "Month"]],
@@ -549,20 +553,31 @@ function mountUsage(body) {
         <td>${esc(amountsText(g.events, group !== "product"))}</td><td>${esc(waste || "—")}</td><td>${esc(moneyOrDash(g.value))}</td></tr>`;
     },
     summaryFoot: (ev) => `<tr><th>Total</th><th>${treatments(ev)}</th><th></th><th></th><th>${esc(moneyOrDash(sumValue(ev)))}</th></tr>`,
-    detailHead: "<thead><tr><th>Date</th><th>Product</th><th>Amount</th><th>Batch / Lot</th><th>Staff</th><th>Patient</th><th>Value</th></tr></thead>",
+    detailHead: `<thead><tr><th>Date</th><th>Product</th><th>Amount</th><th>Batch / Lot</th><th>Staff</th><th>Patient</th><th>Value</th>${
+      canCorrect ? "<th></th>" : ""}</tr></thead>`,
     detailRow: (e) => `<tr>
       <td>${esc(shortDate(e.at))}</td>
-      <td>${esc(e.productName)}${e.short > 0 ? ' <span class="inv-flag is-bad">Saved short</span>' : ""}</td>
+      <td>${esc(e.productName)}${e.short > 0 ? ' <span class="inv-flag is-bad">Saved short</span>' : ""}${
+        e.corrected ? ' <span class="inv-flag is-info">Corrected</span>' : ""}</td>
       <td>${esc(useAmount(e))}${e.waste > 0 ? ` <small class="muted">· ${esc(fmt(e.waste))} ${esc(e.wasteUnit)} discarded</small>` : ""}</td>
       <td>${esc(e.batch || "—")}</td><td>${esc(e.by || "—")}</td>
       <td>${e.submissionId ? `<a href="#/form-record/${encodeURIComponent(e.submissionId)}">${esc(e.patient || "Treatment record")}</a>` : esc(e.patient || "—")}</td>
-      <td>${esc(moneyOrDash(e.value))}</td></tr>`,
-    csvHead: ["Date", "Product", "Amount", "Unit", "Syringes / items", "Discarded", "Batch / Lot", "Staff", "Patient", "Form", "Saved short", "Value ($)"],
+      <td>${esc(moneyOrDash(e.value))}</td>
+      ${canCorrect ? `<td><button type="button" class="lh-btn" data-correct="${esc(e.usageId)}">Correct</button></td>` : ""}</tr>`,
+    csvHead: ["Date", "Product", "Amount", "Unit", "Syringes / items", "Discarded", "Batch / Lot", "Staff", "Patient", "Form", "Saved short",
+      "Corrected", "Value ($)"],
     csvRow: (e) => [e.at ? dayKey(e.at) : "", e.productName, +fmt(e.amount), e.unit, e.kit ? "" : +fmt(e.items),
       e.waste ? `${fmt(e.waste)} ${e.wasteUnit}` : "", e.batch, e.by, e.patient, e.detail, e.short ? +fmt(e.short) : "",
-      e.value === null ? "" : e.value],
+      e.corrected ? "Yes" : "", e.value === null ? "" : e.value],
+    onClick(e, reload) {
+      const b = e.target.closest("[data-correct]");
+      if (!b) return false;
+      openCorrection(b.dataset.correct, staff, reload);
+      return true;
+    },
   });
 }
+
 /* ===================== Kit reconciliation ===================== */
 
 const round1 = (n) => Math.round((Number(n) || 0) * 10) / 10;
@@ -630,6 +645,12 @@ function reconcileKits(byId, kits, moves, loans) {
       const r = rowFor(owner, m.productId, "");
       r.adjusted += units;
       log(r, m.at, "Count difference accepted", units, m.by ? `by ${m.by}` : "");
+    } else if (m.type === "kit-correct") {
+      const units = -kitDelta; // + more was used, − units given back
+      if (!m.staffUid || !units) return;
+      const r = rowFor(m.staffUid, m.productId, "");
+      r.used += units;
+      log(r, m.at, units > 0 ? "Usage corrected (more used)" : "Usage corrected (units back)", -units, m.note || "");
     }
   });
 
@@ -799,7 +820,8 @@ function mountShort(body, staff) {
           <td>${u.resolved
             ? `<div class="rp-done"><span class="rq-status is-accepted">Resolved</span><small>${esc(u.resolvedNote || "")}</small>
                 <small>${esc([u.resolvedBy, shortDate(u.resolvedAt)].filter(Boolean).join(" · "))}</small></div>`
-            : '<div class="rp-acts"><button type="button" class="lh-btn is-primary" data-act="resolve">Resolve</button></div>'}</td>
+            : `<div class="rp-acts"><button type="button" class="lh-btn is-primary" data-act="resolve">Resolve</button>${
+              can("inventory.manage") ? `<button type="button" class="lh-btn" data-correct="${esc(u.id)}">Correct</button>` : ""}</div>`}</td>
         </tr>`).join("")}</tbody></table></div></section>`
         : `<div class="tm-empty">${st.view === "open" ? "Nothing saved short to sort out. 👍" : "Nothing here yet."}</div>`}`;
   }
@@ -843,6 +865,8 @@ function mountShort(body, staff) {
   }
 
   body.addEventListener("click", (e) => {
+    const cb = e.target.closest("[data-correct]");
+    if (cb) { openCorrection(cb.dataset.correct, staff, load); return; }
     if (e.target.closest('[data-act="csv"]')) {
       if (!st.list.length) { showToast("Nothing to export."); return; }
       downloadCsv(`saved-short-${dayKey()}.csv`, [
@@ -863,3 +887,101 @@ function mountShort(body, staff) {
   });
   load();
 }
+
+/* ===================== Correct usage (Manage inventory) ===================== */
+
+async function openCorrection(id, staff, onDone) {
+  let u;
+  try { u = await getUsage(id); } catch (err) { console.error(err); showToast(errText(err, "Couldn't open this record.")); return; }
+  if (!u) { showToast("This record no longer exists."); return; }
+
+  const items = u.lines.flatMap((l, li) => (l.rows || []).map((r, ri) => ({ l, r, li, ri, kit: l.kind === "kit", dosed: l.kind !== "kit" && !!l.doseUnit })));
+  if (!items.length) { showToast("There's nothing to correct on this record."); return; }
+  const whereTxt = (x) => (x.kit ? `${u.by || "Injector"}'s kit` : LOC[x.r.from] || x.r.from || "Shelf");
+  const amtTxt = (x, n) => (x.kit ? `${fmt(n)} ${x.l.unit}` : plural(+fmt(n), x.l.unit));
+
+  const dlg = openDialog(`
+    <form class="lh-form rp-correct" novalidate>
+      <div class="lh-dialog-head"><h3>Correct usage</h3>
+        <p><strong>${esc(u.patientName || "Patient")}</strong> · ${esc(u.formName || "")} · ${esc(shortDate(u.at))} · by ${esc(u.by || "—")}</p>
+        <p class="muted">Enter what was actually used. The difference goes back to, or comes from, the same batch. The original amounts are kept.</p></div>
+      <div class="rp-scroll"><table class="inv-table rp-ctable">
+        <thead><tr><th>Product</th><th>Recorded</th><th>Correct amount</th></tr></thead>
+        <tbody>${items.map((x, i) => {
+          const short = (Number(x.r.amount) || 0) - (Number(x.r.taken) || 0);
+          return `<tr data-i="${i}">
+            <td><strong>${esc(x.l.name)}</strong><br><small class="muted">${esc([x.r.batch ? `${x.l.batchLabel || "Batch"} ${x.r.batch}` : "", whereTxt(x)].filter(Boolean).join(" · "))}</small></td>
+            <td>${esc(amtTxt(x, x.r.amount))}${x.dosed ? `<br><small class="muted">${esc(fmt(x.r.dose))} ${esc(x.l.doseUnit)} given</small>` : ""}${
+              short > 0.001 ? `<br><small class="rp-neg">${esc(fmt(short))} short</small>` : ""}</td>
+            <td><label class="rp-cin"><input class="fe-in" type="number" min="0" step="${x.kit ? "0.1" : "1"}" data-k="amount" value="${esc(fmt(x.r.amount))}" />
+                ${esc(x.kit ? x.l.unit : unitPlural(x.l.unit))}</label>
+              ${x.dosed ? `<label class="rp-cin"><input class="fe-in" type="number" min="0" step="0.01" data-k="dose" value="${esc(fmt(x.r.dose))}" />
+                ${esc(x.l.doseUnit)} given</label>` : ""}
+              <small class="rp-effect" data-role="effect"></small></td></tr>`;
+        }).join("")}</tbody></table></div>
+      <label class="lh-field"><span class="lh-label">Reason</span>
+        <textarea name="reason" rows="2" maxlength="300" placeholder="e.g. Entered 40 units instead of 30"></textarea></label>
+      ${u.corrections.length ? `<div class="rp-chist"><strong>Earlier corrections</strong><ul>${u.corrections.map((c) =>
+        `<li>${esc(shortDate(toDateSafe(c.at)))} · ${esc(c.by || "")}: ${esc((c.changes || []).join("; "))}${c.reason ? ` · <em>${esc(c.reason)}</em>` : ""}</li>`).join("")}</ul></div>` : ""}
+      <p class="lh-error" role="alert" hidden></p>
+      <div class="lh-actions">
+        <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+        <button type="submit" class="lh-btn is-primary">Save correction</button>
+      </div>
+    </form>`);
+
+  const form = dlg.querySelector("form");
+  const err = dlg.querySelector(".lh-error");
+  const valOf = (tr, k) => { const el = tr.querySelector(`[data-k="${k}"]`); return el ? Number(el.value) : null; };
+
+  // Live "what will happen" under each product
+  const preview = () => form.querySelectorAll("tr[data-i]").forEach((tr) => {
+    const x = items[Number(tr.dataset.i)];
+    const out = tr.querySelector('[data-role="effect"]');
+    const n = valOf(tr, "amount");
+    if (!Number.isFinite(n) || n < 0) { out.textContent = "Enter an amount."; out.className = "rp-effect rp-neg"; return; }
+    const { move, clearsShort } = correctionMove(x.r, n, x.kit);
+    const parts = [];
+    if (clearsShort > 0) parts.push(`Clears ${amtTxt(x, clearsShort)} of the short`);
+    if (move > 0) parts.push(`Takes ${amtTxt(x, move)} more from ${whereTxt(x)}`);
+    if (move < 0) parts.push(`Returns ${amtTxt(x, -move)} to ${whereTxt(x)}`);
+    out.textContent = parts.join(" · ");
+    out.className = `rp-effect ${move > 0 ? "rp-neg" : "rp-pos"}`;
+  });
+  form.addEventListener("input", preview);
+  dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    err.hidden = true;
+    const changes = [];
+    for (const tr of form.querySelectorAll("tr[data-i]")) {
+      const x = items[Number(tr.dataset.i)];
+      const amount = valOf(tr, "amount");
+      const dose = x.dosed ? valOf(tr, "dose") : null;
+      if (!Number.isFinite(amount) || amount < 0 || (x.dosed && (!Number.isFinite(dose) || dose < 0))) {
+        err.textContent = `${x.l.name}: enter a number of 0 or more.`; err.hidden = false; return;
+      }
+      if (amount !== (Number(x.r.amount) || 0) || (x.dosed && dose !== (Number(x.r.dose) || 0))) {
+        changes.push({ li: x.li, ri: x.ri, amount, dose });
+      }
+    }
+    if (!changes.length) { err.textContent = "Nothing has changed."; err.hidden = false; return; }
+    const reason = form.elements.reason.value.trim();
+    if (!reason) { err.textContent = "Add a reason for the correction."; err.hidden = false; return; }
+    const btn = form.querySelector('[type="submit"]');
+    btn.disabled = true;
+    try {
+      await correctUsage(u.id, changes, reason, staff);
+      dlg.close();
+      showToast("Usage corrected. Stock updated.");
+      if (onDone) onDone();
+    } catch (ex) {
+      console.error("Correction failed:", ex);
+      err.textContent = errText(ex, "Couldn't save the correction. Try again.");
+      err.hidden = false;
+      btn.disabled = false;
+    }
+  });
+}
+const toDateSafe = (v) => { const d = v ? new Date(v) : null; return d && !isNaN(d) ? d : null; };
