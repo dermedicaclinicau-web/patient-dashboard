@@ -16,7 +16,7 @@ import {
 import {
   clinicalHistorySectionHtml, mountClinicalHistory, renderClinicalHistory, renderClinicalHistoryError,
 } from "./clinical-history-view.js";
-
+import { patientTasksSectionHtml, mountPatientTasks } from "./patient-tasks.js";
 import {
   fetchTranscriptRecords, latestTreatmentPlan, socialHistoryEntries, toBullets, allTreatmentPlans,
   parseTimeline,
@@ -141,6 +141,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   let todayAppts = [];
   let preData = null;
   let notesView = null;
+  let tasksView = null;
   let dialog, form, formError, saveBtn;
 
   root.addEventListener("click", (e) => {
@@ -216,6 +217,8 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     ${recordsSectionHtml()}
 
     ${formRecordsSectionHtml()}
+
+    ${patientTasksSectionHtml()}
     
     ${historySectionHtml()}
     
@@ -303,6 +306,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   mountRecords(root, patient);
   mountFormRecords(root, patient);
   mountHistory(root, patient);  
+ tasksView = mountPatientTasks(root, patient);
   mountBillingRx(root, patient);
   mountClinicalHistory(root, patient, staff);
 
@@ -362,6 +366,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     await Promise.allSettled([
       loadToday(), loadPreconsultData(), loadReminders(), loadTranscriptSections(),
       notesView ? notesView.reload() : null,
+      tasksView ? tasksView.reload() : null,
     ]);
     if (btn.isConnected) {
       btn.disabled = false;
@@ -442,6 +447,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     const pc = root.querySelector('details[data-key="preconsult"]');
     if (pc) pc.open = true;
     await loadReminders(); // opens the Reminders card when it has tasks
+    if (tasksView) tasksView.reload();
   }
 
   async function completeTask(btn) {
@@ -453,6 +459,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       await completeReminder(id, staff);
       showToast("Reminder marked as done");
       await loadReminders();
+      if (tasksView) tasksView.reload();
     } catch (err) {
       console.error("Completing reminder failed:", err);
       showToast(err.code === "permission-denied"

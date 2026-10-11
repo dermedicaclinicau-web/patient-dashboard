@@ -3850,3 +3850,13 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .po-dv-doc { font-size: .85rem; font-weight: 600; color: var(--primary); text-decoration: none; }
 .po-dv-note { font-size: .85rem; font-style: italic; margin: .5rem 0 0; }
 @media (max-width: 760px) { .po-dv-body { grid-template-columns: 1fr; } }
+
+/* ---------- Patient page: Tasks ---------- */
+.ptk-tools { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; margin-bottom: .75rem; }
+.ptk-tabs, .ptk-filters { display: inline-flex; gap: .25rem; background: var(--surface-2); border-radius: 999px; padding: .2rem; }
+.ptk-tab, .ptk-filter { border: 0; background: transparent; border-radius: 999px; padding: .35rem .85rem; font-size: .85rem; font-weight: 600; color: var(--muted, #667085); cursor: pointer; }
+.ptk-tab.is-on, .ptk-filter.is-on { background: #fff; color: var(--text, #101828); box-shadow: 0 1px 2px rgba(16, 24, 40, .08); }
+.ptk-filters[hidden] { display: none; }
+.ptk-body .task.is-done .task-text { color: var(--muted, #667085); text-decoration: line-through; text-decoration-thickness: 1px; }
+.ptk-full { margin: 0 0 .5rem; font-size: .85rem; text-align: right; }
+.ptk-full a { color: var(--primary); font-weight: 600; text-decoration: none; }
