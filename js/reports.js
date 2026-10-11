@@ -1,6 +1,7 @@
 // Reporting (#/reports/<tab>): count differences, wastage, kit reconciliation, usage and saved short.
 import {
-  listProducts, listCounts, resolveCountLine, batchName, plural, unitPlural, dayKey, COUNT_STATUS,
+  listProducts, listCounts, resolveCountLine, listUsageBetween, listMovesBetween,
+  batchName, plural, unitPlural, dayKey, COUNT_STATUS,
 } from "./inventory-api.js";
 import { can } from "./perms.js";
 import { showToast } from "./utils.js";
@@ -10,17 +11,31 @@ const fmt = (n) => String(+Number(n || 0).toFixed(2));
 const money = (n) => `${n < 0 ? "−" : ""}$${Math.abs(n).toFixed(2)}`;
 const LOC = { shelf: "Shelf", jt: "JT storage" };
 const whereOf = (l) => (l.loc === "kit" ? `${l.staffName || "Injector"}'s kit` : LOC[l.loc] || l.loc);
-const niceDate = (key) => {
+const parseKey = (key) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
-  return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short", year: "numeric" }) : "";
+  return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null;
 };
+const niceDate = (key) => {
+  const d = parseKey(key);
+  return d ? d.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short", year: "numeric" }) : "";
+};
+const shortDate = (d) => (d ? d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "");
 const timeOf = (d) => (d ? d.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }) : "");
+const monthLabel = (k) => { const [y, m] = k.split("-").map(Number); return new Date(y, m - 1, 1).toLocaleDateString("en-AU", { month: "long", year: "numeric" }); };
 const daysAgoKey = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return dayKey(d); };
 const SKELETON = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
 const TABS = [["variance", "Count differences"], ["wastage", "Wastage"], ["kits", "Kit reconciliation"], ["usage", "Usage"], ["short", "Saved short"]];
 const errText = (err, fallback) => (err && err.code === "permission-denied"
   ? "You don't have access to do this. Check the Firestore rules have been published, and your Reporting access in Staff."
   : err && err.message && !err.code ? err.message : fallback);
+
+// Cost at the clinic's price: per item on the Shelf, and per unit / mL inside it
+const perItem = (p) => (p && p.cost !== null && p.cost !== undefined ? p.cost / Math.max(1, p.packSize) : null);
+const perDose = (p) => { const c = perItem(p); return c !== null && p.dosePer ? c / p.dosePer : null; };
+const mul = (c, n) => (c === null ? null : Math.round(c * n * 100) / 100);
+const amt = (n, unit, plain) => (plain ? plural(+fmt(n), unit) : `${fmt(n)} ${unit}`);
+const sumValue = (ev) => (ev.some((e) => e.value !== null) ? Math.round(ev.reduce((a, e) => a + (e.value || 0), 0) * 100) / 100 : null);
+const moneyOrDash = (v) => (v === null ? "—" : money(v));
 
 // CSV that opens cleanly in Excel. Text starting with = + - @ is made safe so it can't run as a formula.
 export function downloadCsv(name, rows) {
@@ -67,6 +82,8 @@ export function mountReports(container, { param = "", staff = null } = {}) {
     <div data-role="body">${SKELETON}</div>`;
   const body = root.querySelector('[data-role="body"]');
   if (tab === "variance") mountVariance(body, staff);
+  else if (tab === "wastage") mountWastage(body);
+  else if (tab === "usage") mountUsage(body);
   else body.innerHTML = '<div class="state"><strong>Coming next</strong>This report is being built.</div>';
 }
 
@@ -79,11 +96,11 @@ function mountVariance(body, staff) {
   const unitCost = (l) => {
     const p = st.products.get(l.productId);
     if (!p || p.cost === null || p.cost === undefined) return null;
-    const perItem = p.cost / Math.max(1, p.packSize);
-    return l.loc === "kit" ? (p.dosePer ? perItem / p.dosePer : null) : perItem;
+    const pi = p.cost / Math.max(1, p.packSize);
+    return l.loc === "kit" ? (p.dosePer ? pi / p.dosePer : null) : pi;
   };
   const valueOf = (l) => { const c = unitCost(l); return c === null ? null : Math.round(c * (Number(l.variance) || 0) * 100) / 100; };
-  const amt = (l, n) => (l.loc === "kit" ? `${fmt(n)} ${l.unit}` : plural(+fmt(n), l.unit));
+  const amtOf = (l, n) => (l.loc === "kit" ? `${fmt(n)} ${l.unit}` : plural(+fmt(n), l.unit));
   const shown = (l) => st.view === "all" || l.status === "open";
 
   async function load() {
@@ -114,7 +131,7 @@ function mountVariance(body, staff) {
     return `<tr class="${l.status === "open" ? "is-diff" : ""}" data-c="${esc(c.id)}" data-i="${i}">
       <td>${esc(l.productName)}</td><td>${esc(whereOf(l))}</td>
       <td>${esc(l.batch ? `${l.batchLabel || batchName(st.products.get(l.productId))} ${l.batch}` : "—")}</td>
-      <td>${esc(amt(l, l.counted))}</td><td>${esc(amt(l, l.system))}</td>
+      <td>${esc(amtOf(l, l.counted))}</td><td>${esc(amtOf(l, l.system))}</td>
       <td>${l.status === "ok" ? "✓" : `<strong class="${cls(diff)}">${diff > 0 ? "+" : ""}${esc(fmt(diff))}</strong>`}</td>
       <td>${v === null || l.status === "ok" ? "—" : `<span class="${cls(v)}">${esc(money(v))}</span>`}</td>
       <td>${status}</td></tr>`;
@@ -225,4 +242,323 @@ function mountVariance(body, staff) {
     else if (f === "from") { st.from = e.target.value || daysAgoKey(30); load(); }
   });
   load();
+}
+
+/* ===================== Date-range reports (shared) ===================== */
+
+const RANGES = [["month", "This month"], ["last-month", "Last month"], ["30", "Last 30 days"], ["90", "Last 90 days"],
+  ["year", "This year"], ["custom", "Choose dates"]];
+
+// { from, to }: from is the first day at midnight, to is midnight after the last day
+function rangeOf(st) {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const tomorrow = new Date(today); tomorrow.setDate(today.getDate() + 1);
+  const back = (n) => { const d = new Date(today); d.setDate(d.getDate() - n); return d; };
+  switch (st.range) {
+    case "last-month": return { from: new Date(now.getFullYear(), now.getMonth() - 1, 1), to: new Date(now.getFullYear(), now.getMonth(), 1) };
+    case "30": return { from: back(29), to: tomorrow };
+    case "90": return { from: back(89), to: tomorrow };
+    case "year": return { from: new Date(now.getFullYear(), 0, 1), to: tomorrow };
+    case "custom": {
+      let a = parseKey(st.from) || back(29);
+      let b = parseKey(st.to) || today;
+      if (b < a) [a, b] = [b, a];
+      const to = new Date(b); to.setDate(b.getDate() + 1);
+      return { from: a, to };
+    }
+    default: return { from: new Date(now.getFullYear(), now.getMonth(), 1), to: tomorrow };
+  }
+}
+const lastDay = (r) => { const d = new Date(r.to); d.setDate(d.getDate() - 1); return d; };
+const rangeText = (r) => `${shortDate(r.from)} – ${shortDate(lastDay(r))}`;
+const fileDates = (r) => `${dayKey(r.from)}-to-${dayKey(lastDay(r))}`;
+
+// How entries can be grouped
+const KEY = {
+  product: { of: (e) => e.productId || e.productName, label: (e) => e.productName || "Unknown product" },
+  clinician: { of: (e) => e.by || "—", label: (e) => e.by || "Unknown" },
+  patient: { of: (e) => e.patientId || e.patient || "—", label: (e) => e.patient || "No patient" },
+  month: { of: (e) => (e.at ? dayKey(e.at).slice(0, 7) : "—"), label: (e, k) => (k === "—" ? "No date" : monthLabel(k)),
+    sort: (a, b) => b.key.localeCompare(a.key) },
+  type: { of: (e) => e.typeLabel, label: (e) => e.typeLabel },
+};
+
+// "Belotero 1.2 mL · Xeomin 40 units" (names left out when every entry is the same product)
+function amountsText(ev, withNames, pick = (e) => ({ n: e.amount, unit: e.unit, plain: e.plain })) {
+  const m = new Map();
+  ev.forEach((e) => {
+    const x = pick(e);
+    if (!x || !(x.n > 0)) return;
+    const k = `${e.productId || e.productName}|${x.unit}`;
+    const a = m.get(k) || { name: e.productName, unit: x.unit, plain: x.plain, n: 0 };
+    a.n += x.n;
+    m.set(k, a);
+  });
+  return [...m.values()].sort((a, b) => a.name.localeCompare(b.name, "en-AU"))
+    .map((a) => (withNames ? `${a.name} ` : "") + amt(a.n, a.unit, a.plain)).join(" · ");
+}
+
+// A report over a date range: toolbar, totals, a table by group, and every entry
+function mountRangeReport(body, cfg) {
+  const st = { range: "month", from: daysAgoKey(29), to: dayKey(), group: cfg.groups[0][0], q: "", events: [], r: null };
+  body.innerHTML = `<div data-role="tools"></div><div data-role="out">${SKELETON}</div>`;
+  const toolsEl = body.querySelector('[data-role="tools"]');
+  const out = body.querySelector('[data-role="out"]');
+  const groupName = () => (cfg.groups.find(([v]) => v === st.group) || cfg.groups[0])[1];
+
+  function drawTools() {
+    toolsEl.innerHTML = `<div class="inv-tools rp-tools">
+      <select class="fb-select" data-f="range" aria-label="Dates">${RANGES.map(([v, l]) =>
+        `<option value="${v}"${st.range === v ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
+      ${st.range === "custom" ? `
+        <label class="rp-from">From <input class="fe-in" type="date" data-f="from" value="${esc(st.from)}" /></label>
+        <label class="rp-from">To <input class="fe-in" type="date" data-f="to" value="${esc(st.to)}" /></label>` : ""}
+      <label class="rp-from">Group by <select class="fb-select" data-f="group">${cfg.groups.map(([v, l]) =>
+        `<option value="${v}"${st.group === v ? " selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
+      <input type="search" class="fe-input rp-find" data-f="q" placeholder="${esc(cfg.findPlaceholder)}" value="${esc(st.q)}" aria-label="Filter" />
+      <span class="inv-spacer"></span>
+      <button type="button" class="ff-btn" data-act="csv">Export CSV</button>
+    </div>`;
+  }
+
+  const visible = () => {
+    const q = st.q.trim().toLowerCase();
+    return q ? st.events.filter((e) => cfg.searchText(e).toLowerCase().includes(q)) : st.events;
+  };
+
+  async function load() {
+    out.innerHTML = SKELETON;
+    st.r = rangeOf(st);
+    try {
+      const ev = await cfg.load(st.r);
+      if (!out.isConnected) return;
+      st.events = ev;
+      draw();
+    } catch (err) {
+      console.error(`${cfg.name} report failed:`, err);
+      if (out.isConnected) out.innerHTML = `<div class="tm-empty is-error">${esc(errText(err, "Couldn't load the report. Try again."))}</div>`;
+    }
+  }
+
+  function draw() {
+    const ev = visible();
+    const key = KEY[st.group];
+    const map = new Map();
+    ev.forEach((e) => {
+      const k = key.of(e);
+      const g = map.get(k) || { key: k, label: key.label(e, k), events: [] };
+      g.events.push(e);
+      map.set(k, g);
+    });
+    const rows = [...map.values()].map((g) => ({ ...g, value: sumValue(g.events) }))
+      .sort(key.sort || ((a, b) => (b.value || 0) - (a.value || 0) || a.label.localeCompare(b.label, "en-AU")));
+    const missingCost = ev.some((e) => e.value === null);
+    out.innerHTML = `
+      <p class="muted rp-range">${esc(rangeText(st.r))} · ${ev.length} entr${ev.length === 1 ? "y" : "ies"}${st.q.trim() ? ` matching “${esc(st.q.trim())}”` : ""}</p>
+      ${ev.length ? `${cfg.statsHtml(ev)}
+        <section class="tb-card">
+          <h4>By ${esc(groupName().toLowerCase())}</h4>
+          <div class="rp-scroll"><table class="inv-table rp-table">
+            ${cfg.summaryHead(groupName())}
+            <tbody>${rows.map((g) => cfg.summaryRow(g, st.group)).join("")}</tbody>
+            <tfoot>${cfg.summaryFoot(ev)}</tfoot>
+          </table></div>
+          ${missingCost ? '<p class="muted rp-note">Value leaves out products with no cost. Add costs in Inventory → Products.</p>' : ""}
+        </section>
+        <details class="tb-card rp-detail"><summary>Every entry (${ev.length})</summary>
+          <div class="rp-scroll"><table class="inv-table rp-table">${cfg.detailHead}
+            <tbody>${ev.slice(0, 500).map(cfg.detailRow).join("")}</tbody></table></div>
+          ${ev.length > 500 ? `<p class="muted rp-note">Showing the latest 500. Export CSV for all ${ev.length}.</p>` : ""}
+        </details>`
+      : `<div class="tm-empty">${esc(cfg.empty)}</div>`}`;
+  }
+
+  body.addEventListener("change", (e) => {
+    const f = e.target.dataset.f;
+    if (f === "range") {
+      st.range = e.target.value;
+      if (st.range === "custom" && !st.from) { st.from = daysAgoKey(29); st.to = dayKey(); }
+      drawTools();
+      load();
+    } else if (f === "from" || f === "to") {
+      st[f] = e.target.value;
+      if (parseKey(st.from) && parseKey(st.to)) load();
+    } else if (f === "group") {
+      st.group = e.target.value;
+      if (st.r) draw();
+    }
+  });
+  let qTimer = null;
+  body.addEventListener("input", (e) => {
+    if (e.target.dataset.f !== "q") return;
+    st.q = e.target.value;
+    clearTimeout(qTimer);
+    qTimer = setTimeout(() => { if (st.r) draw(); }, 200);
+  });
+  body.addEventListener("click", (e) => {
+    if (!e.target.closest('[data-act="csv"]')) return;
+    const ev = visible();
+    if (!ev.length) { showToast("Nothing to export."); return; }
+    downloadCsv(`${cfg.file}-${fileDates(st.r)}.csv`, [cfg.csvHead, ...ev.map(cfg.csvRow)]);
+  });
+
+  drawTools();
+  load();
+}
+
+/* ===================== Wastage ===================== */
+
+// One entry per thing thrown away: filler left in syringes, kit discards and write-offs
+function wasteEvents(usage, moves, byId) {
+  const out = [];
+  usage.forEach((u) => u.lines.forEach((l) => {
+    const w = Number(l.waste) || 0;
+    if (!(w > 0) || l.kind === "kit") return;
+    const p = byId.get(l.productId);
+    out.push({
+      at: u.at, type: "filler", typeLabel: "Leftover discarded", productId: l.productId, productName: l.name,
+      amount: w, unit: l.doseUnit || "mL", plain: false, by: u.by || "", patient: u.patientName || "",
+      patientId: u.patientId || "", detail: u.formName || "", submissionId: u.submissionId || "",
+      batch: [...new Set((l.rows || []).map((r) => r.batch).filter(Boolean))].join(", "),
+      value: mul(perDose(p), w),
+    });
+  }));
+  moves.forEach((m) => {
+    const p = byId.get(m.productId);
+    const gone = (m.lines || []).reduce((a, l) => a + Math.max(0, -(Number(l.delta) || 0)), 0);
+    const batch = [...new Set((m.lines || []).map((l) => l.batch).filter(Boolean))].join(", ");
+    if (m.type === "kit-discard") {
+      let units = Number(m.discardUnits);
+      if (!Number.isFinite(units)) { // older entries: read the units from the note
+        const open = Number((/([\d.]+)\s+\S+\s+from the opened vial/.exec(m.note || "") || [])[1]) || 0;
+        units = open + gone * ((p && p.dosePer) || 0);
+      }
+      if (!(units > 0)) return;
+      out.push({
+        at: m.at, type: "kit", typeLabel: "Discarded from kit", productId: m.productId, productName: m.productName,
+        amount: units, unit: (p && p.doseUnit) || m.unit || "units", plain: false, by: m.by || "", patient: "", patientId: "",
+        detail: [m.reason, m.note].filter(Boolean).join(" · "), batch, value: mul(perDose(p), units),
+      });
+    } else if (m.type === "writeoff" && gone > 0) {
+      out.push({
+        at: m.at, type: "writeoff", typeLabel: "Written off", productId: m.productId, productName: m.productName,
+        amount: gone, unit: (p && p.stockUnit) || m.unit || "item", plain: true, by: m.by || "", patient: "", patientId: "",
+        detail: [m.reason, m.note].filter(Boolean).join(" · "), batch, value: mul(perItem(p), gone),
+      });
+    }
+  });
+  return out.sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0));
+}
+
+function mountWastage(body) {
+  mountRangeReport(body, {
+    name: "Wastage", file: "wastage",
+    groups: [["product", "Product"], ["clinician", "Staff member"], ["month", "Month"], ["type", "Type"]],
+    findPlaceholder: "Filter: product, staff, patient or reason",
+    empty: "No wastage recorded in these dates. 👍",
+    async load(r) {
+      const [products, usage, moves] = await Promise.all([
+        listProducts(), listUsageBetween(r.from, r.to), listMovesBetween(r.from, r.to, ["kit-discard", "writeoff"]),
+      ]);
+      return wasteEvents(usage, moves, new Map(products.map((p) => [p.id, p])));
+    },
+    searchText: (e) => [e.productName, e.by, e.patient, e.detail, e.typeLabel, e.batch].join(" "),
+    statsHtml(ev) {
+      const n = (t) => ev.filter((e) => e.type === t).length;
+      return `<div class="inv-stats">
+        <div class="inv-stat is-bad"><strong>${esc(moneyOrDash(sumValue(ev)))}</strong><span>Wasted (at cost)</span></div>
+        <div class="inv-stat"><strong>${n("filler")}</strong><span>Leftover filler discarded</span></div>
+        <div class="inv-stat"><strong>${n("kit")}</strong><span>Kit discards</span></div>
+        <div class="inv-stat is-warn"><strong>${n("writeoff")}</strong><span>Write-offs</span></div>
+      </div>`;
+    },
+    summaryHead: (label) => `<thead><tr><th>${esc(label)}</th><th>Entries</th><th>Amount</th><th>Value</th></tr></thead>`,
+    summaryRow: (g, group) => `<tr><td><strong>${esc(g.label)}</strong></td><td>${g.events.length}</td>
+      <td>${esc(amountsText(g.events, group !== "product"))}</td><td>${esc(moneyOrDash(g.value))}</td></tr>`,
+    summaryFoot: (ev) => `<tr><th>Total</th><th>${ev.length}</th><th></th><th>${esc(moneyOrDash(sumValue(ev)))}</th></tr>`,
+    detailHead: "<thead><tr><th>Date</th><th>Type</th><th>Product</th><th>Amount</th><th>Batch / Lot</th><th>Staff</th><th>Patient / reason</th><th>Value</th></tr></thead>",
+    detailRow: (e) => `<tr>
+      <td>${esc(shortDate(e.at))}</td>
+      <td><span class="inv-flag ${e.type === "writeoff" ? "is-warn" : "is-info"}">${esc(e.typeLabel)}</span></td>
+      <td>${esc(e.productName)}</td><td>${esc(amt(e.amount, e.unit, e.plain))}</td><td>${esc(e.batch || "—")}</td>
+      <td>${esc(e.by || "—")}</td>
+      <td>${e.submissionId ? `<a href="#/form-record/${encodeURIComponent(e.submissionId)}">${esc(e.patient || "Treatment record")}</a>` : esc(e.detail || "—")}</td>
+      <td>${esc(moneyOrDash(e.value))}</td></tr>`,
+    csvHead: ["Date", "Type", "Product", "Amount", "Unit", "Batch / Lot", "Staff", "Patient", "Form / reason", "Value ($)"],
+    csvRow: (e) => [e.at ? dayKey(e.at) : "", e.typeLabel, e.productName, +fmt(e.amount), e.unit, e.batch, e.by, e.patient, e.detail,
+      e.value === null ? "" : e.value],
+  });
+}
+
+/* ===================== Usage ===================== */
+
+// One entry per product recorded on a treatment form
+function useEvents(usage, byId) {
+  const out = [];
+  usage.forEach((u) => u.lines.forEach((l) => {
+    const p = byId.get(l.productId);
+    const kit = l.kind === "kit";
+    const items = Number(l.total) || 0;                       // kit: units; otherwise syringes / items taken
+    const dosedLine = !kit && !!l.doseUnit && Number(l.doseTotal) > 0;
+    out.push({
+      at: u.at, productId: l.productId, productName: l.name, kit, dosed: dosedLine,
+      amount: kit ? items : dosedLine ? Number(l.doseTotal) : items,
+      unit: kit ? l.unit : dosedLine ? l.doseUnit : l.unit, plain: !kit && !dosedLine,
+      items, itemUnit: l.unit, waste: Number(l.waste) || 0, wasteUnit: l.doseUnit || "",
+      short: Number(l.short) || 0,
+      by: u.by || "", patient: u.patientName || "", patientId: u.patientId || "",
+      detail: u.formName || "", submissionId: u.submissionId || "",
+      batch: [...new Set((l.rows || []).map((r) => r.batch).filter(Boolean))].join(", "),
+      value: kit ? mul(perDose(p), items) : mul(perItem(p), items),
+    });
+  }));
+  return out;
+}
+const useAmount = (e) => (e.dosed ? `${amt(e.amount, e.unit, false)} (${plural(+fmt(e.items), e.itemUnit)})` : amt(e.amount, e.unit, e.plain));
+const treatments = (ev) => new Set(ev.map((e) => e.submissionId || `${e.patientId}|${e.at && e.at.getTime()}`)).size;
+
+function mountUsage(body) {
+  mountRangeReport(body, {
+    name: "Usage", file: "usage",
+    groups: [["product", "Product"], ["clinician", "Staff member"], ["patient", "Patient"], ["month", "Month"]],
+    findPlaceholder: "Filter: product, staff or patient",
+    empty: "No products recorded on treatment forms in these dates.",
+    async load(r) {
+      const [products, usage] = await Promise.all([listProducts(), listUsageBetween(r.from, r.to)]);
+      return useEvents(usage, new Map(products.map((p) => [p.id, p])))
+        .sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0));
+    },
+    searchText: (e) => [e.productName, e.by, e.patient, e.detail, e.batch].join(" "),
+    statsHtml(ev) {
+      const short = ev.filter((e) => e.short > 0).length;
+      return `<div class="inv-stats">
+        <div class="inv-stat"><strong>${treatments(ev)}</strong><span>Treatment records</span></div>
+        <div class="inv-stat"><strong>${new Set(ev.map((e) => e.productId || e.productName)).size}</strong><span>Products used</span></div>
+        <div class="inv-stat"><strong>${esc(moneyOrDash(sumValue(ev)))}</strong><span>Stock used (at cost)</span></div>
+        <div class="inv-stat ${short ? "is-bad" : ""}"><strong>${short}</strong><span>Saved short</span></div>
+      </div>`;
+    },
+    summaryHead: (label) => `<thead><tr><th>${esc(label)}</th><th>Treatments</th><th>Amount</th><th>Discarded</th><th>Value</th></tr></thead>`,
+    summaryRow: (g, group) => {
+      const waste = amountsText(g.events, group !== "product", (e) => (e.waste > 0 ? { n: e.waste, unit: e.wasteUnit, plain: false } : null));
+      const label = group === "patient" && g.events[0].patientId
+        ? `<a href="#/patient/${encodeURIComponent(g.events[0].patientId)}">${esc(g.label)}</a>` : esc(g.label);
+      return `<tr><td><strong>${label}</strong></td><td>${treatments(g.events)}</td>
+        <td>${esc(amountsText(g.events, group !== "product"))}</td><td>${esc(waste || "—")}</td><td>${esc(moneyOrDash(g.value))}</td></tr>`;
+    },
+    summaryFoot: (ev) => `<tr><th>Total</th><th>${treatments(ev)}</th><th></th><th></th><th>${esc(moneyOrDash(sumValue(ev)))}</th></tr>`,
+    detailHead: "<thead><tr><th>Date</th><th>Product</th><th>Amount</th><th>Batch / Lot</th><th>Staff</th><th>Patient</th><th>Value</th></tr></thead>",
+    detailRow: (e) => `<tr>
+      <td>${esc(shortDate(e.at))}</td>
+      <td>${esc(e.productName)}${e.short > 0 ? ' <span class="inv-flag is-bad">Saved short</span>' : ""}</td>
+      <td>${esc(useAmount(e))}${e.waste > 0 ? ` <small class="muted">· ${esc(fmt(e.waste))} ${esc(e.wasteUnit)} discarded</small>` : ""}</td>
+      <td>${esc(e.batch || "—")}</td><td>${esc(e.by || "—")}</td>
+      <td>${e.submissionId ? `<a href="#/form-record/${encodeURIComponent(e.submissionId)}">${esc(e.patient || "Treatment record")}</a>` : esc(e.patient || "—")}</td>
+      <td>${esc(moneyOrDash(e.value))}</td></tr>`,
+    csvHead: ["Date", "Product", "Amount", "Unit", "Syringes / items", "Discarded", "Batch / Lot", "Staff", "Patient", "Form", "Saved short", "Value ($)"],
+    csvRow: (e) => [e.at ? dayKey(e.at) : "", e.productName, +fmt(e.amount), e.unit, e.kit ? "" : +fmt(e.items),
+      e.waste ? `${fmt(e.waste)} ${e.wasteUnit}` : "", e.batch, e.by, e.patient, e.detail, e.short ? +fmt(e.short) : "",
+      e.value === null ? "" : e.value],
+  });
 }

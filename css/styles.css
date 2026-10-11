@@ -3803,3 +3803,17 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 
 .tr-nolink { flex-shrink: 0; padding: .1rem .45rem; border-radius: 999px; background: #fef3c7; color: #92400e;
   font-size: .7rem; font-weight: 600; white-space: nowrap; }
+
+/* ---------- Reporting: date-range reports ---------- */
+.rp-tools .fb-select { padding: .5rem .7rem; font-size: .9rem; }
+.rp-find { flex: 1 1 220px; max-width: 320px; padding: .5rem .7rem; font-size: .9rem; }
+.rp-range { margin: -.25rem 0 .75rem; font-size: .85rem; }
+.rp-note { margin: .6rem 0 0; font-size: .8rem; }
+.rp-scroll { overflow-x: auto; }
+.rp-table tfoot th { background: var(--surface-2); text-align: left; }
+.rp-table td a { color: var(--primary); font-weight: 600; text-decoration: none; }
+.rp-table td a:hover { text-decoration: underline; }
+.rp-detail { margin-top: 1rem; }
+.rp-detail > summary { cursor: pointer; font-weight: 700; }
+.rp-detail[open] > summary { margin-bottom: .6rem; }
+@media (max-width: 760px) { .rp-find { max-width: none; } }

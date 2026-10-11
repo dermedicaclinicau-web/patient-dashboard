@@ -947,6 +947,7 @@ export async function kitDiscard(kit, { units = 0, vials = 0, reason = "", note 
     tx.update(kRef, { sealed: sealed - v, open: Math.max(0, round1(open - u)), updatedAt: serverTimestamp() });
     logMove(tx, staff, {
       type: "kit-discard", productId: kit.productId, productName: kit.productName, unit: kit.doseUnit,
+      discardUnits: round1(v * (Number(k.dosePer) || kit.dosePer || 0) + u), // total units lost, for Reporting
       lines: v ? [{ loc: "kit", batch: kit.batch, expiry: kit.expiry, delta: -v }] : [],
       reason: clip(reason, 60),
       note: [u && `${u} ${kit.doseUnit} from the opened vial`, clip(note, 400)].filter(Boolean).join(" · "),
@@ -1396,4 +1397,23 @@ export async function resolveCountLine(countId, index, { action, note = "" }, st
       events: arrayUnion({ at, by, action: accept ? "Accepted" : "Explained", note: `${l.productName} · ${locLabel(l.loc)}${text ? ` · ${text}` : ""}`.slice(0, 300) }),
     });
   });
+}
+
+/* ===================== Reporting: usage and wastage over a date range ===================== */
+
+// Treatment usage between two dates (from inclusive, to exclusive), newest first
+export async function listUsageBetween(from, to) {
+  const snap = await getDocs(query(collection(db, "inv_usage"), where("at", ">=", from), where("at", "<", to)));
+  return snap.docs
+    .map((d) => { const x = d.data() || {}; return { id: d.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [], at: toDate(x.at) }; })
+    .sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0));
+}
+
+// Activity between two dates, optionally only some types (e.g. ["kit-discard", "writeoff"])
+export async function listMovesBetween(from, to, types = null) {
+  const snap = await getDocs(query(collection(db, "inv_moves"), where("at", ">=", from), where("at", "<", to)));
+  return snap.docs
+    .map((d) => { const x = d.data() || {}; return { id: d.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [], at: toDate(x.at) }; })
+    .filter((m) => !types || types.includes(m.type))
+    .sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0));
 }
