@@ -27,6 +27,7 @@ import { mountAftercareField } from "./aftercare-field.js";
 import { listTaskTypes } from "./task-types.js";
 import { listProducts, isKitProduct } from "./inventory-api.js";
 import { openProductPicker } from "./consumables-field.js";
+import { listMarkingSets, openMarkingSetsDialog } from "./marking-sets.js";
 
 const UI = {
   up: '<polyline points="18 15 12 9 6 15"/>',
@@ -120,7 +121,9 @@ export async function mountFormEditor(container, { templateId, staff }) {
   let aftercareMap = null;   // aftercare id -> aftercare, once loaded
   let emailTemplates = [];   // To Patient task types, for the aftercare email
   let products = [];         // inventory products, for the Consumables field
-  const ctx = (live) => ({ live, fields, consentForms, prescriptionForms, letterhead, calcValues: null, aftercare: aftercareMap, emailTemplates, products });
+  let markSets = null;       // marking sets, once loaded
+  let previewAnnots = {};    // pictures being drawn on in Preview
+  const ctx = (live) => ({ live, fields, consentForms, prescriptionForms, letterhead, calcValues: null, aftercare: aftercareMap, emailTemplates, products, markSets });
   const current = () => fields.find((f) => f.id === sel) || null;
   const signature = () => JSON.stringify(formSnapshot({ name, fields, settings }));
 
@@ -276,6 +279,16 @@ export async function mountFormEditor(container, { templateId, staff }) {
         const c = checkFormula(f, fields);
         if (!c.ok) return { id: f.id, msg: `“${label || "Calculation"}”: ${c.error}` };
       }
+      if (f.type === "image" && f.source !== "staff") {
+        if (f.annotate && f.markMode === "marks" && markSets && !markSets.some((s) => s.id === f.markSetId)) {
+          return { id: f.id, msg: "Choose a marking set for the picture, or change what staff can do with it." };
+        }
+        const badQ = (f.questions || []).find((q) => !String(q.label || "").trim() || (q.type !== "text" && !(q.options || []).length));
+        if (badQ) {
+          return { id: f.id, msg: String(badQ.label || "").trim()
+            ? `“${badQ.label}” under the picture needs at least one choice.` : "A question under the picture needs a name." };
+        }
+      }
       if (f.type === "consent_status" && !f.consentFormId) {
         return { id: f.id, msg: "Choose which consent form the Consent check looks for." };
       }
@@ -370,6 +383,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     const values = evaluateCalcs(fields, (f) => {
       const w = stage.querySelector(`[data-fid="${CSS.escape(f.id)}"]`);
       if (w && w.hidden) return null; // hidden questions count as unanswered
+      if (f.type === "image") { const a = previewAnnots[f.id]; return a && a.total ? a.total() : null; }
       const el = stage.querySelector(`input[data-in="${CSS.escape(f.id)}"]`);
       return el ? el.value : null;
     });
@@ -443,7 +457,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     if (!build) refreshPreview();
     hydrateBankImages(stage);
     if (!build) {
-      attachAnnotators(stage, fields);
+      previewAnnots = attachAnnotators(stage, fields, { markSets: markSets || [] });
       fields.filter((f) => f.type === "aftercare").forEach((f) => {
         mountAftercareField(stage.querySelector(`[data-fid="${CSS.escape(f.id)}"]`), f, { onChange: refreshPreview });
       });
@@ -821,6 +835,15 @@ export async function mountFormEditor(container, { templateId, staff }) {
     }
     const f = current();
     if (!f) return;
+    if (e.target.closest('[data-act="ms-manage"]')) {
+      openMarkingSetsDialog({ staff }).then((sets) => {
+        if (!sets || !root.isConnected) return;
+        markSets = sets;
+        renderStage();
+        renderInspector();
+      });
+      return;
+    }
     if (el.dataset.opt !== undefined) {
       f.options[Number(el.dataset.opt)] = el.value;
     } else if (el.dataset.k) {
@@ -1104,4 +1127,14 @@ export async function mountFormEditor(container, { templateId, staff }) {
       if (root.isConnected && f && f.type === "consumables") renderInspector();
     })
     .catch((err) => console.warn("Couldn't load products:", err));
+
+  listMarkingSets()
+    .then((sets) => {
+      markSets = sets;
+      if (!root.isConnected) return;
+      const f = current();
+      if (f && f.type === "image") renderInspector();
+      if (mode === "preview") renderStage();
+    })
+    .catch((err) => { console.warn("Couldn't load marking sets:", err); markSets = []; });
 }

@@ -6,6 +6,7 @@ import { formatCalc } from "./form-calc.js";
 import { visibleIds } from "./form-conditions.js";
 import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing, textBlockHtml } from "./form-fields.js";
 import { cleanRichHtml } from "./rich-html.js";
+import { markSummary } from "./marking-sets.js";
 
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
 const LOGO_RE = /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/;
@@ -335,7 +336,15 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
           ? `<span style="display:inline-block !important;width:${pct}%;max-width:100%;">` +
               `<img src="${images[f.fileId]}" alt="" style="display:inline-block !important;width:auto;height:auto;max-width:100%;max-height:${maxH}px;"></span>`
           : `<img src="${images[f.fileId]}" alt="" style="display:inline-block !important;width:${pct}%;max-width:100%;height:auto;">`;
-      return `<div class="block" style="${box}">${label ? `<div class="ql" style="margin-bottom:${gap}px;">${label}</div>` : ""}${pic}${
+      const sumTxt = markSummary(v);
+      const answeredQs = v && typeof v === "object" && Array.isArray(v.questions) ? v.questions : [];
+      const extras = (sumTxt ? `<div style="font-size:10pt;font-weight:bold;margin-top:5px;">${esc(sumTxt)}</div>` : "") +
+        (answeredQs.length
+          ? answeredQs.map((q) => `<div style="font-size:10pt;margin-top:3px;"><span style="color:#475569;">${esc(q.label)}</span> ${esc(q.value)}</div>`).join("")
+          : blank ? (f.questions || []).filter((q) => String(q.label || "").trim()).map((q) => `<div style="font-size:10pt;margin-top:5px;">
+              <span style="color:#475569;">${esc(q.label)}</span> ${q.type === "text" ? '<span class="bl-in"></span>'
+                : (q.options || []).map((o) => `<span class="bo"><span class="box round"></span>${esc(o)}</span>`).join("")}</div>`).join("") : "");
+      return `<div class="block" style="${box}">${label ? `<div class="ql" style="margin-bottom:${gap}px;">${label}</div>` : ""}${pic}${extras}${
         f.caption ? `<div style="font-size:9pt;color:#64748b;margin-top:4px;">${esc(f.caption)}</div>` : ""}</div>`;
     }
 

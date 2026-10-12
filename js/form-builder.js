@@ -4,6 +4,7 @@ import {
 } from "./form-templates.js";
 import { mountFormEditor } from "./form-editor.js";
 import { openDuplicateDialog } from "./form-duplicate.js";
+import { openMarkingSetsDialog } from "./marking-sets.js";
 
 const svg = (p) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -75,6 +76,7 @@ function mountLibrary(container, { isAdmin, staff }) {
       <div class="fb-head-actions">
         <a class="btn-ghost fb-imgbank" href="#/image-bank">${svg(ICONS.image)}Image Bank</a>
         <a class="btn-ghost fb-imgbank" href="#/aftercare-bank">${svg(ICONS.heart)}Aftercare Bank</a>
+        <button type="button" class="btn-ghost fb-imgbank" data-act="marking-sets">${svg(ICONS.treatment)}Marking sets</button>
         <a class="btn-ghost fb-imgbank" href="#/ssp-products">${svg(ICONS.consent)}Skin Script Products</a>
         <button type="button" class="btn-primary fb-new" data-act="new">${svg(ICONS.plus)}New form</button>
       </div>` : ""}
@@ -248,6 +250,7 @@ function mountLibrary(container, { isAdmin, staff }) {
       if (t) openDuplicateDialog(t, staff);
       return;
     }
+    if (e.target.closest('[data-act="marking-sets"]')) { openMarkingSetsDialog({ staff }); return; }
     if (e.target.closest('[data-act="new"]')) { openNewForm(); return; }
     if (e.target.closest('[data-act="retry"]')) load(true);
   });

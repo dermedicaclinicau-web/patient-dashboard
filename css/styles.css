@@ -3983,3 +3983,38 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .nt-staff { max-height: 26vh; }
 .nt-inline { display: inline-flex; align-items: center; gap: .4rem; }
 .nt-inline input { width: 80px; padding: .45rem .6rem; border: 1px solid var(--border, #d0d5dd); border-radius: 8px; font: inherit; }
+
+/* ---------- Unit marks on pictures ---------- */
+.an-tools [hidden], .an-marks [hidden] { display: none !important; }
+.an-marks { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .9rem; margin: 0 0 .5rem; transition: opacity .15s; }
+.an-marks.is-idle { opacity: .55; }
+.an-vals { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; }
+.an-chip { min-width: 2.5rem; height: 2.5rem; padding: 0 .55rem; border-radius: 999px; border: 2px solid var(--c); background: #fff;
+  color: var(--c); font: inherit; font-weight: 700; cursor: pointer; }
+.an-chip.is-on { background: var(--c); color: #fff; box-shadow: 0 0 0 3px rgba(15, 23, 42, .12); }
+.an-chip:focus-visible { outline: 2px solid var(--c); outline-offset: 2px; }
+.an-unit { margin-left: .2rem; font-size: .85rem; color: var(--muted, #667085); }
+.an-total { display: flex; flex-wrap: wrap; align-items: baseline; gap: .3rem .9rem; margin-top: .45rem; font-size: .95rem; }
+.an-total strong { font-size: 1.05rem; }
+.an-total span { color: var(--muted, #667085); font-size: .85rem; }
+.an-warn { margin: 0 0 .4rem; padding: .45rem .65rem; border-radius: 8px; background: #fffaeb; color: #b54708; font-size: .85rem; }
+.an-sum { margin: .45rem 0 0; font-weight: 600; font-size: .92rem; }
+
+/* Questions under a picture */
+.fe-imgq { display: grid; gap: .45rem; margin-top: .6rem; text-align: left; }
+.fe-imgq-row { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .9rem; }
+.fe-imgq-l { font-weight: 600; font-size: .92rem; }
+.fe-imgq-opts { display: flex; flex-wrap: wrap; gap: .3rem 1rem; }
+.fe-imgq-row .fe-in { flex: 1; min-width: 180px; }
+.fe-ms-manage { justify-self: start; margin: -.2rem 0 .3rem; }
+
+/* Marking sets window */
+.ms-dlg { width: min(720px, 96vw); }
+.ms-list { display: grid; gap: .75rem; max-height: 58vh; overflow: auto; padding-right: .2rem; }
+.ms-set { display: grid; gap: .55rem; padding: .75rem .85rem; border: 1px solid var(--border, #e5e7eb); border-radius: 12px; }
+.ms-head { display: grid; grid-template-columns: minmax(0, 1fr) 120px auto; gap: .5rem; align-items: center; }
+.ms-vals { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
+.ms-val { display: inline-flex; align-items: center; gap: .25rem; padding: .2rem .3rem; border: 1px solid var(--border, #e5e7eb);
+  border-radius: 10px; background: var(--surface-2, #f8fafc); }
+.ms-val input[type="color"] { width: 28px; height: 28px; padding: 0; border: none; background: none; cursor: pointer; }
+.ms-val .fe-input { width: 72px; }

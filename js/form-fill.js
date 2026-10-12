@@ -2,7 +2,8 @@
 // View a saved one:                      #/form-record/<submissionId>
 import { getFormTemplate, getFormVersion, getLetterhead, categoryLabel } from "./form-templates.js";
 import { esc, svg, ICONS, renderField, normaliseField, watermarkHtml, canRequire,
-  choiceList, otherLabel, syncChoiceExtras, readExtras, writeExtras } from "./form-fields.js";
+  choiceList, otherLabel, syncChoiceExtras, readExtras, writeExtras, readImageQs, writeImageQs } from "./form-fields.js";
+import { listMarkingSets, markSummary } from "./marking-sets.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { letterheadHtml, DEFAULT_LETTERHEAD } from "./form-letterhead.js";
 import { getPatient, patientIds } from "./patients.js";
@@ -386,7 +387,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
   };
   if (!pid || !tid) { fail("Form not found", "Go back to the patient and choose a form again."); return; }
 
-  let tpl, patient, ver, letterhead;
+  let tpl, patient, ver, letterhead, markSets = [];
   try {
     [tpl, patient] = await Promise.all([
       getFormTemplate(tid).catch((err) => { if (err && err.code === "permission-denied") return null; throw err; }),
@@ -397,9 +398,10 @@ export async function mountFormFill(container, param, { staff } = {}) {
       fail("This form isn't available", "It may have been unpublished. Go back to the patient and choose another.");
       return;
     }
-    [ver, letterhead] = await Promise.all([
+    [ver, letterhead, markSets] = await Promise.all([
       getFormVersion(tid, tpl.version),
       getLetterhead().catch(() => DEFAULT_LETTERHEAD),
+      listMarkingSets().catch(() => []),
     ]);
   } catch (err) {
     console.error("Fill form load failed:", err);
@@ -436,7 +438,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
 
   const sheet = root.querySelector('[data-role="sheet"]');
   hydrateBankImages(sheet);
-  const annots = attachAnnotators(sheet, fields);
+  const annots = attachAnnotators(sheet, fields, { markSets });
   const msgEl = root.querySelector('[data-role="msg"]');
   const progressEl = root.querySelector('[data-role="progress"]');
   const saveBtns = $all(root, "[data-save]");
@@ -527,6 +529,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
     calc = evaluateCalcs(fields, (f) => {
       const w = wrap(f.id);
       if (w && w.hidden) return null; // hidden questions count as unanswered
+      if (f.type === "image") { const a = annots[f.id]; return a && a.total ? a.total() : null; }
       const el = sheet.querySelector(`input[data-in="${CSS.escape(f.id)}"]`);
       return el ? el.value : null;
     });
@@ -652,6 +655,11 @@ export async function mountFormFill(container, param, { staff } = {}) {
       const w = wrap(f.id);
       if (!w) return;
       const v = readField(f, w, rctx());
+      if (f.type === "image" && f.source !== "staff") {
+        const got = new Set(readImageQs(f, w).map((q) => q.id));
+        const miss = (f.questions || []).find((q) => q.required && String(q.label || "").trim() && !got.has(q.id));
+        if (miss) { out.push({ id: f.id, msg: `Answer “${miss.label}”.` }); return; }
+      }
       if (f.type === "aftercare" && w.acProblem) {
         const m = w.acProblem();
         if (m) { out.push({ id: f.id, msg: m }); return; }
@@ -740,7 +748,17 @@ export async function mountFormFill(container, param, { staff } = {}) {
       answers[f.id] = readField(f, w, rctx());
       const extra = readExtras(f, w);
       if (extra) answers[`${f.id}__x`] = extra;
-      if (f.type === "image" && annots[f.id] && !annots[f.id].isEmpty()) answers[f.id] = { drawing: annots[f.id].toDataURL() };
+      if (f.type === "image" && f.source !== "staff") {
+        const a = annots[f.id];
+        const out = {};
+        if (a && !a.isEmpty()) {
+          out.drawing = a.toDataURL();
+          if (a.markData) Object.assign(out, a.markData());
+        }
+        const qs = readImageQs(f, w);
+        if (qs.length) out.questions = qs;
+        answers[f.id] = Object.keys(out).length ? out : "";
+      }
       if (f.type === "signature" && pads[f.id] && !pads[f.id].isEmpty()) signatures[f.id] = pads[f.id].toDataURL();
     });
     const rd = fields.find((f) => f.type === "record_date" && shown.has(f.id));
@@ -914,17 +932,24 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
       if (el) el.outerHTML = '<p class="fe-help">No photos.</p>';
       return;
     }
-    if (f.type === "image" && f.annotate && f.source !== "staff" && f.fileId) {
-      const box = w.querySelector("[data-annot-img]");
+    if (f.type === "image" && f.source !== "staff") {
       const v = sub.answers[f.id];
-      const drawing = v && typeof v === "object" && PNG_RE.test(v.drawing || "") ? v.drawing : "";
-      if (box) {
-        bankImage(f.fileId)
-          .then((src) => {
-            if (box.isConnected) box.innerHTML = `<span class="an-view"><img src="${esc(src)}" alt="" />${
-              drawing ? `<img class="an-over" src="${esc(drawing)}" alt="Markings" />` : ""}</span>`;
-          })
-          .catch(() => { if (box.isConnected) box.innerHTML = '<span class="fe-img-missing">This picture is missing from the Image Bank</span>'; });
+      const saved = v && typeof v === "object" ? v : {};
+      writeImageQs(f, w, saved.questions);
+      const sum = markSummary(saved);
+      const fig = w.querySelector("figure");
+      if (sum && fig) fig.insertAdjacentHTML("beforeend", `<p class="an-sum">${esc(sum)}</p>`);
+      if (f.annotate && f.fileId) {
+        const box = w.querySelector("[data-annot-img]");
+        const drawing = PNG_RE.test(saved.drawing || "") ? saved.drawing : "";
+        if (box) {
+          bankImage(f.fileId)
+            .then((src) => {
+              if (box.isConnected) box.innerHTML = `<span class="an-view"><img src="${esc(src)}" alt="" />${
+                drawing ? `<img class="an-over" src="${esc(drawing)}" alt="Markings" />` : ""}</span>`;
+            })
+            .catch(() => { if (box.isConnected) box.innerHTML = '<span class="fe-img-missing">This picture is missing from the Image Bank</span>'; });
+        }
       }
       return;
     }

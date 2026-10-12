@@ -98,6 +98,10 @@ const ANSWER_TYPES = ["patient", "short_text", "long_text", "email", "number", "
 const BOX_TYPES = ["short_text", "email", "number", "date", "record_date", "dropdown"];
 const DRIVE_ID = /^[A-Za-z0-9_-]{10,80}$/;
 const opt = (v, list, dflt) => (list.includes(v) ? v : dflt);
+const fmtN = (n) => String(+Number(n || 0).toFixed(2));
+// Pictures staff place unit marks on: their total can be used in a Calculation
+export const isMarkImage = (x) => !!x && x.type === "image" && x.source !== "staff" && x.annotate === true && x.markMode === "marks";
+export const calcSource = (x) => !!x && (["number", "calculation"].includes(x.type) || isMarkImage(x));
 // An Image field's size: width as a % of the page, and an optional maximum height in px.
 // Pictures staff can draw on always keep their natural shape (so markings line up).
 export function imageSizing(f) {
@@ -216,6 +220,7 @@ export function createField(type, id) {
       f.source = "bank"; f.fileId = ""; f.fileName = ""; f.size = "medium"; f.caption = ""; f.alt = ""; f.max = 1;
       f.annotate = false; f.widthPct = 50; f.heightPx = null; f.allowBank = true;
       f.photoLayout = "grid"; f.perRow = 2;
+      f.markMode = "draw"; f.markSetId = ""; f.questions = [];
       break;
     case "watermark": f.source = "text"; f.text = "DRAFT"; f.opacity = 10; f.angle = -30; f.size = "large"; break;
     case "letterhead": f.line1 = LETTERHEAD[0]; f.line2 = LETTERHEAD[1]; break;
@@ -338,6 +343,15 @@ export function cleanField(f) {
       out.allowBank = f.allowBank !== false;
       out.photoLayout = pick(f.photoLayout, ["grid", "stack"], "grid");
       out.perRow = int(f.perRow, 2, 4, 2);
+      out.markMode = out.annotate && f.markMode === "marks" ? "marks" : "draw";
+      out.markSetId = /^[A-Za-z0-9_-]{1,40}$/.test(f.markSetId || "") ? f.markSetId : "";
+      out.questions = (Array.isArray(f.questions) ? f.questions : []).slice(0, 5).map((q, i) => ({
+        id: /^[A-Za-z0-9_-]{1,20}$/.test((q && q.id) || "") ? q.id : `q${i + 1}`,
+        label: clip(q && q.label, 200),
+        type: q && q.type === "text" ? "text" : "choice",
+        options: (Array.isArray(q && q.options) ? q.options : []).map((o) => clip(o, 100)).filter((o) => o.trim()).slice(0, 10),
+        required: !!(q && q.required === true),
+      }));
       break;
     case "watermark":
       out.source = pick(f.source, ["text", "logo"], "text");
@@ -387,7 +401,7 @@ export function prettyFormula(src, byId) {
   return String(src || "")
     .replace(/\{([^}]*)\}/g, (_, id) => {
       const f = byId.get(id.trim());
-      return f ? `[${f.label || "Untitled"}]` : "[removed question]";
+      return f ? `[${f.type === "image" ? `${f.label || f.fileName || "Picture"} total` : f.label || "Untitled"}]` : "[removed question]";
     })
     .replace(/\*/g, "×")
     .replace(/\//g, "÷");
@@ -414,8 +428,10 @@ export function checkFormula(f, fields) {
   for (const id of calcRefs(src)) {
     const r = byId.get(id);
     if (!r) return { ok: false, error: "The formula uses a question that has been removed." };
-    if (!["number", "calculation"].includes(r.type)) {
-      return { ok: false, error: `“${r.label || "Untitled"}” isn't a number question.` };
+    if (!calcSource(r)) {
+      return { ok: false, error: r.type === "image"
+        ? `“${r.label || r.fileName || "Picture"}” doesn't have unit marks any more.`
+        : `“${r.label || "Untitled"}” isn't a number question.` };
     }
   }
   if (refersToItself(f.id, byId)) return { ok: false, error: "The formula depends on its own result." };
@@ -573,8 +589,9 @@ export function renderField(f, ctx = {}) {
       const { pct, maxH } = imageSizing(f);
       return `<figure class="fe-img${maxH ? " has-max-h" : ""}${f.annotate ? " can-draw" : ""}">` +
         `<span class="fe-img-box" style="width:${pct}%;${maxH ? `--img-max-h:${maxH}px;` : ""}" ${hook}><span class="fe-img-loading">${svg(ICONS.image)}</span></span>` +
-        (!live && f.annotate ? `<span class="fe-img-draw-tag">${svg(ICONS.signature)}Staff can draw on this</span>` : "") +
-        `${cap}</figure>`;
+        (!live && f.annotate ? `<span class="fe-img-draw-tag">${svg(ICONS.signature)}${
+          f.markMode === "marks" ? "Staff place unit marks on this" : "Staff can draw on this"}</span>` : "") +
+        `${cap}</figure>` + imageQsHtml(f, live);
     }
     case "aftercare": {
       if (live) return head + '<div class="ac-host" data-ac-host><p class="fe-help">Loading aftercare…</p></div>';
@@ -739,8 +756,12 @@ function typeSettings(f, ctx = {}) {
             ? '<small class="fe-note fe-pad">The height follows the picture\'s shape when staff can draw on it, so the markings always line up.</small>'
             : setting("Maximum height", `<div class="fe-num"><input class="fe-input" type="number" min="40" max="1200" step="10" data-k="heightPx" data-num="optional" placeholder="Automatic" value="${f.heightPx ?? ""}" /><span>pixels</span></div>`,
                 "Leave empty to keep the picture's natural shape. Pictures are never stretched.")) +
-          `<label class="fe-check"><input type="checkbox" data-k="annotate" data-rerender=""${f.annotate ? " checked" : ""} /> Staff can draw on it while filling in</label>` +
-          '<small class="fe-note fe-pad">For face charts and injection points. The markings are saved with the patient\'s form; the picture in the Image Bank never changes.</small>' +
+          setting("While filling in, staff can", `<select class="fb-select" data-imgmode="" data-rerender="">${[
+            ["none", "Only look at it"], ["draw", "Draw on it"], ["marks", "Place unit marks on it (and draw)"],
+          ].map(([v, l]) => `<option value="${v}"${imgMode(f) === v ? " selected" : ""}>${l}</option>`).join("")}</select>`,
+            "For face charts and injection points. Markings are saved with the patient's form; the picture in the Image Bank never changes.") +
+          (imgMode(f) === "marks" ? markSetSettings(f, ctx) : "") +
+          imageQuestionsSettings(f) +
           caption +
           setting("Description", `<input class="fe-input" data-k="alt" maxlength="200" value="${esc(f.alt || "")}" />`,
             "Optional. Read aloud by screen readers; not shown on the form.");
@@ -815,7 +836,7 @@ function typeSettings(f, ctx = {}) {
         setting("Rows", `<input class="fe-input" type="number" min="1" max="30" data-k="rows" data-num="" value="${Number(f.rows) || 3}" />`);
 
     case "calculation": {
-      const others = (ctx.fields || []).filter((x) => x.id !== f.id && ["number", "calculation"].includes(x.type));
+      const others = (ctx.fields || []).filter((x) => x.id !== f.id && calcSource(x));
       const ops = [["+", "+"], ["-", "−"], ["*", "×"], ["/", "÷"], ["(", "("], [")", ")"],
         ["ROUND(", "Round"], ["MIN(", "Lowest of"], ["MAX(", "Highest of"], [",", ","]];
       return `
@@ -826,8 +847,9 @@ function typeSettings(f, ctx = {}) {
         <div class="fe-insp-field"><span class="fe-insp-label">Insert a question</span>${
           others.length
             ? `<div class="fe-chiprow">${others.map((x) =>
-                `<button type="button" class="fe-ins is-field" data-calcins="{${esc(x.id)}}">${esc(x.label || "Untitled")}</button>`).join("")}</div>`
-            : '<small class="fe-note">Add a Number question to use it here.</small>'}</div>
+                `<button type="button" class="fe-ins is-field" data-calcins="{${esc(x.id)}}">${esc(x.type === "image"
+                  ? `${x.label || x.fileName || "Picture"} (total)` : x.label || "Untitled")}</button>`).join("")}</div>`
+            : '<small class="fe-note">Add a Number question, or a picture with unit marks, to use it here.</small>'}</div>
         <div class="fe-insp-field"><span class="fe-insp-label">Insert</span>
           <div class="fe-chiprow">${ops.map(([v, l]) => `<button type="button" class="fe-ins" data-calcins="${esc(v)}">${esc(l)}</button>`).join("")}</div>
         </div>
@@ -914,6 +936,80 @@ function typeSettings(f, ctx = {}) {
   return "";
 }
 
+/* ===================== Pictures: unit marks and questions under the picture ===================== */
+
+const imgMode = (f) => (!f.annotate ? "none" : f.markMode === "marks" ? "marks" : "draw");
+
+function markSetSettings(f, ctx) {
+  const sets = ctx.markSets;
+  if (!sets) return '<small class="fe-note fe-pad">Loading marking sets…</small>';
+  const s = sets.find((x) => x.id === f.markSetId);
+  return setting("Marking set", choose("markSetId", [["", "Choose a marking set"], ...sets.map((x) => [x.id, x.name])], f.markSetId || "", false, true),
+      s ? `Staff tap ${esc(s.values.map((x) => fmtN(x.v)).join(" · "))}${s.unit ? ` ${esc(s.unit)}` : ""} and the total adds up as they go.${
+        s.tagMarks ? ` Each mark is tagged ${esc(s.tags.join(" or "))}.` : ""}` : "") +
+    '<button type="button" class="lh-btn fe-ms-manage" data-act="ms-manage">Manage marking sets</button>' +
+    '<small class="fe-note fe-pad">To show the total in another place, add a Calculation question and choose this picture under “Insert a question”.</small>';
+}
+
+function imageQuestionsSettings(f) {
+  const qs = Array.isArray(f.questions) ? f.questions : [];
+  return `<div class="fe-insp-field"><span class="fe-insp-label">Questions under the picture</span>
+    ${qs.map((q, i) => `
+      <div class="fe-grp">
+        <div class="fe-grp-head">
+          <input class="fe-input" data-iq="${i}" data-iqk="label" maxlength="200" placeholder="e.g. Treatment or touch-up?" value="${esc(q.label)}" aria-label="Question ${i + 1}" />
+          <button type="button" class="hx-x" data-iqdel="${i}" aria-label="Remove question ${i + 1}">${svg(ICONS.x)}</button>
+        </div>
+        <div class="fe-two">
+          <select class="fb-select" data-iq="${i}" data-iqk="type" data-rerender="" aria-label="Answer type">
+            <option value="choice"${q.type !== "text" ? " selected" : ""}>Choose one</option>
+            <option value="text"${q.type === "text" ? " selected" : ""}>Short answer</option>
+          </select>
+          <label class="fe-check"><input type="checkbox" data-iq="${i}" data-iqk="required"${q.required ? " checked" : ""} /> Required</label>
+        </div>
+        ${q.type !== "text" ? `<textarea class="fe-input" data-iq="${i}" data-iqk="options" rows="2" placeholder="One choice per line">${esc((q.options || []).join("\n"))}</textarea>` : ""}
+      </div>`).join("")}
+    ${qs.length < 5 ? '<button type="button" class="hx-add" data-act="iqadd">+ Add a question</button>' : ""}
+    <small class="fe-note">Shown right under the picture, for example Treatment or Touch-up.</small></div>`;
+}
+
+export function imageQsHtml(f, live) {
+  const qs = (Array.isArray(f.questions) ? f.questions : []).filter((q) => String(q.label || "").trim());
+  if (!qs.length) return "";
+  const inert = live ? "" : ' tabindex="-1"';
+  return `<div class="fe-imgq">${qs.map((q) => `
+    <div class="fe-imgq-row" data-imgq="${esc(q.id)}">
+      <span class="fe-imgq-l">${esc(q.label)}${q.required ? '<span class="fe-req" aria-label="required">*</span>' : ""}</span>${
+      q.type === "text"
+        ? `<input class="fe-in" type="text" maxlength="300"${inert} />`
+        : `<span class="fe-imgq-opts">${(q.options || []).map((o) =>
+            `<label class="fe-opt"><input type="radio" name="iq-${esc(f.id)}-${esc(q.id)}" value="${esc(o)}"${inert} /><span>${esc(o)}</span></label>`).join("")}</span>`}
+    </div>`).join("")}</div>`;
+}
+
+// [{ id, label, value }] for the questions that have an answer
+export function readImageQs(f, w) {
+  return (Array.isArray(f.questions) ? f.questions : []).map((q) => {
+    const row = w && w.querySelector(`[data-imgq="${CSS.escape(q.id)}"]`);
+    if (!row) return null;
+    let value = "";
+    if (q.type === "text") { const i = row.querySelector("input"); value = i ? i.value.trim().slice(0, 300) : ""; }
+    else { const r = row.querySelector("input:checked"); value = r ? r.value : ""; }
+    return value ? { id: q.id, label: q.label, value } : null;
+  }).filter(Boolean);
+}
+
+export function writeImageQs(f, w, list) {
+  const m = new Map((Array.isArray(list) ? list : []).map((x) => [x.id, x.value]));
+  (Array.isArray(f.questions) ? f.questions : []).forEach((q) => {
+    const row = w && w.querySelector(`[data-imgq="${CSS.escape(q.id)}"]`);
+    if (!row) return;
+    const v = m.get(q.id) || "";
+    if (q.type === "text") { const i = row.querySelector("input"); if (i) i.value = v; }
+    else row.querySelectorAll("input").forEach((r) => { r.checked = r.value === v; });
+  });
+}
+
 export function fieldSettings(f, ctx = {}) {
   return typeSettings(f, ctx) + layoutSettings(f);
 }
@@ -972,6 +1068,20 @@ function layoutSettings(f) {
 // Typing in table columns, sub-option groups, patient detail ticks and layout buttons.
 // Returns true if it changed something.
 export function applyInput(f, el) {
+  if (el.dataset.imgmode !== undefined) {
+    f.annotate = el.value !== "none";
+    f.markMode = el.value === "marks" ? "marks" : "draw";
+    return true;
+  }
+  if (el.dataset.iq !== undefined) {
+    const q = f.questions && f.questions[Number(el.dataset.iq)];
+    if (!q) return false;
+    const k = el.dataset.iqk;
+    if (k === "required") q.required = el.checked;
+    else if (k === "options") q.options = el.value.split("\n").map((s) => s.trim()).filter(Boolean);
+    else q[k] = el.value;
+    return true;
+  }
   if (el.dataset.ci !== undefined) {
     const it = f.items && f.items[Number(el.dataset.ci)];
     if (!it) return false;
@@ -1019,6 +1129,18 @@ export function applyInput(f, el) {
 
 // Add / remove buttons for table columns and sub-option groups.
 export function applyClick(f, target) {
+  if (target.closest('[data-act="iqadd"]')) {
+    f.questions = [...(Array.isArray(f.questions) ? f.questions : []), {
+      id: `q${Date.now().toString(36).slice(-6)}`, label: "Treatment or touch-up?", type: "choice",
+      options: ["Treatment", "Touch-up"], required: false,
+    }];
+    return true;
+  }
+  const iqd = target.closest("[data-iqdel]");
+  if (iqd) {
+    if (Array.isArray(f.questions)) f.questions.splice(Number(iqd.dataset.iqdel), 1);
+    return true;
+  }
   const cd = target.closest("[data-cidel]");
   if (cd) {
     if (Array.isArray(f.items)) f.items.splice(Number(cd.dataset.cidel), 1);
