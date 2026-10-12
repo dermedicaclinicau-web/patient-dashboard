@@ -15,12 +15,14 @@ import { showToast } from "./utils.js";
 import { mountReceivePo } from "./receive-po.js";
 import { renderKits } from "./inventory-kits.js";
 import { openProductImport, exportProductsCsv } from "./inventory-import.js";
+import { renderNotifications } from "./notifications.js";
 
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const SEARCH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
-const TABS = [["stock", "Stock"], ["kits", "Kits"], ["requests", "Requests"], ["orders", "Purchase orders"], ["products", "Products"], ["suppliers", "Suppliers"], ["activity", "Activity"]];
+const TABS = [["stock", "Stock"], ["kits", "Kits"], ["requests", "Requests"], ["orders", "Purchase orders"], ["products", "Products"],
+  ["suppliers", "Suppliers"], ["activity", "Activity"], ["notifications", "Notifications"]];
 const niceDate = (key) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
@@ -89,7 +91,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         <button type="button" class="btn-primary" data-act="new-product">+ New product</button>` : ""}
       </div>` : ""}
     </div>
-    <nav class="pt-tabs inv-tabs" aria-label="Inventory">${TABS.filter(([k]) => k !== "kits" || showKits).map(([k, l]) =>
+    <nav class="pt-tabs inv-tabs" aria-label="Inventory">${TABS.filter(([k]) => (k !== "kits" || showKits) && (k !== "notifications" || canManage)).map(([k, l]) =>
       `<a href="#/inventory/${k}"${k === tab ? ' class="active" aria-current="page"' : ""}>${l}${
         k === "requests" ? ' <em class="inv-tabcount" data-role="reqcount" hidden></em>' : ""}</a>`).join("")}</nav>
     <div data-role="body"><div class="skeleton" style="height:320px;border-radius:14px"></div></div>`;
@@ -142,6 +144,10 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     else if (tab === "orders") renderOrders();
     else if (tab === "products") renderProducts();
     else if (tab === "suppliers") renderSuppliers();
+    else if (tab === "notifications") {
+      if (canManage) renderNotifications(body, { staff });
+      else body.innerHTML = '<div class="tm-empty">Only Manage inventory can set up notifications.</div>';
+    }
     else renderActivity();
   }
 
@@ -1009,7 +1015,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         ${segF("rq-f", [["open", `Open (${counts.open})`], ["ordered", `Ordered (${counts.ordered})`], ["received", `Received (${counts.received})`], ["closed", "Declined & cancelled"], ["all", "All"]], st.reqFilter, "reqFilter")}
         ${st.reqFilter === "open" ? segF("rq-v", [["list", "List"], ["supplier", "By supplier"]], st.reqView, "reqView") : ""}
         <span class="inv-spacer"></span>
-        ${canManage ? '<button type="button" class="ff-btn" data-act="req-settings">Email settings</button>' : ""}
+        ${canManage ? '<a class="ff-btn" href="#/inventory/notifications">Email notifications</a>' : ""}
         ${canRequest ? '<a class="ff-btn is-primary" href="#/tasks/order">+ Request order</a>' : ""}
       </div>
       <div data-role="reqs"></div>`;

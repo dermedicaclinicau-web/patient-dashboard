@@ -8,6 +8,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 import { getStorage, ref as sRef, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
+import { pingNotify, queueNotify } from "./notify-api.js";
 
 export const INV_CATEGORIES = [
   { key: "retail", label: "Retail" },
@@ -51,6 +52,9 @@ const toDate = (v) => {
   if (typeof v === "string" && v) { const d = new Date(v); return isNaN(d) ? null : d; }
   return null;
 };
+
+// One event for Notifications, written in the same transaction as the change that caused it
+const outboxDoc = (event, data, byUid) => ({ event, data, status: "new", createdAt: serverTimestamp(), createdByUid: byUid });
 
 function uid() {
   const u = auth.currentUser && auth.currentUser.uid;
@@ -811,8 +815,10 @@ export async function receivePo(poId, receipt, staff) {
       by, byUid, at: serverTimestamp(),
     });
 
+    tx.set(doc(collection(db, "notify_outbox")), outboxDoc("stock.arrived", { receiptId: recRef.id, poId }, byUid));
     result = { status, number: po.number, requestIds: po.requestIds };
   });
+  pingNotify();
   return result;
 }
 
@@ -1131,8 +1137,8 @@ export async function answerLoan(loan, ok, note, staff) {
     status: ok ? "confirmed" : "disputed", response: clip(note, 500),
     respondedBy: who(staff), respondedAt: serverTimestamp(),
   });
+  if (!ok) queueNotify("loan.disputed", { loanId: loan.id });
 }
-
 /* ===================== Products used in treatments ===================== */
 // lines: [{ fid, productId, name, kind: "kit"|"storage", unit, loc, block, rows: [{ ref, batch, expiry, amount }] }]
 // Runs inside the transaction that saves the treatment record (reads first, then writes).
@@ -1223,11 +1229,14 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
   });
 
   const saved = out.map(({ fid, block, ...l }) => ({ ...l, rows: l.rows.map(({ ref, ...r }) => r) }));
-  tx.set(doc(collection(db, "inv_usage")), {
+  const uRef = doc(collection(db, "inv_usage"));
+  const isShort = saved.some((l) => l.short > 0);
+  tx.set(uRef, {
     submissionId, patientId: clip(patientId, 150), patientName: clip(patientName, 150), formName: clip(formName, 150),
-    recordDate: KEY_RE.test(recordDate || "") ? recordDate : "", lines: saved, short: saved.some((l) => l.short > 0),
+    recordDate: KEY_RE.test(recordDate || "") ? recordDate : "", lines: saved, short: isShort,
     by: who(staff), byUid: me, at: serverTimestamp(),
   });
+  if (isShort) tx.set(doc(collection(db, "notify_outbox")), outboxDoc("usage.short", { usageId: uRef.id }, me));
 
   const answers = {};
   out.forEach(({ fid }, i) => { (answers[fid] = answers[fid] || { lines: [] }).lines.push(saved[i]); });
@@ -1348,6 +1357,7 @@ export async function saveCount({ kind, lines, note = "" }, staff) {
     kind: isKitCheck ? "kit" : "opening", dateKey: dayKey(), lines: out, openCount,
     note: clip(note, 500), by: who(staff), byUid: me, at: serverTimestamp(),
   });
+  if (openCount) queueNotify("count.difference", { countId: ref.id });
   return { id: ref.id, lines: out, openCount };
 }
 

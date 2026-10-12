@@ -3955,3 +3955,31 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .md-task { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .5rem; }
 .md-task.is-overdue { border-left: 3px solid #d92d20; padding-left: .4rem; }
 .md-done { padding: .3rem .65rem; font-size: .8rem; white-space: nowrap; }
+
+/* ---------- Inventory → Notifications ---------- */
+.nt-intro { margin: 0; max-width: 640px; }
+.nt-rules { display: grid; gap: .75rem; margin-bottom: 1rem; }
+.nt-rule { background: #fff; border: 1px solid var(--border, #e5e7eb); border-radius: 14px; padding: .85rem 1rem; }
+.nt-rule.is-off { opacity: .6; }
+.nt-rule-head { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; }
+.nt-rule-head strong { font-size: 1rem; }
+.nt-dl { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: .25rem .75rem; margin: .65rem 0 0; font-size: .88rem; }
+.nt-dl dt { color: var(--muted, #667085); font-weight: 600; }
+.nt-dl dd { margin: 0; }
+.nt-switch { position: relative; width: 38px; height: 22px; flex: none; cursor: pointer; }
+.nt-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+.nt-switch span { position: absolute; inset: 0; border-radius: 999px; background: #d0d5dd; transition: background .15s; }
+.nt-switch span::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s; }
+.nt-switch input:checked + span { background: var(--primary); }
+.nt-switch input:checked + span::after { transform: translateX(16px); }
+.nt-switch input:focus-visible + span { outline: 2px solid var(--primary); outline-offset: 2px; }
+.nt-log { margin-top: 1rem; }
+.nt-dlg { width: min(760px, 96vw); }
+.nt-form [hidden] { display: none !important; }
+.nt-box { border: 1px solid var(--border, #e5e7eb); border-radius: 12px; padding: .6rem .9rem .8rem; margin: 0; display: grid; gap: .5rem; }
+.nt-box legend { font-weight: 700; font-size: .9rem; padding: 0 .35rem; }
+.nt-checks { display: flex; flex-wrap: wrap; gap: .25rem 1rem; }
+.nt-checks .fe-check { margin: 0; }
+.nt-staff { max-height: 26vh; }
+.nt-inline { display: inline-flex; align-items: center; gap: .4rem; }
+.nt-inline input { width: 80px; padding: .45rem .6rem; border: 1px solid var(--border, #d0d5dd); border-radius: 8px; font: inherit; }
