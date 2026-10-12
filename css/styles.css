@@ -3883,3 +3883,16 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .inv-alt input { padding: .45rem .6rem; border: 1px solid var(--border, #d0d5dd); border-radius: 8px; font: inherit; font-size: .88rem; min-width: 0; }
 .rq-from { padding: .35rem .5rem; font-size: .85rem; max-width: 260px; }
 @media (max-width: 760px) { .inv-alt { grid-template-columns: 1fr 1fr; } .inv-alt .ib-tool { justify-self: end; } }
+
+/* ---------- Products: tick boxes and bulk actions ---------- */
+.inv-name-pick { display: flex; align-items: flex-start; gap: .65rem; }
+.inv-name-pick > span { display: flex; flex-direction: column; min-width: 0; }
+.inv-pick { width: 18px; height: 18px; margin: .15rem 0 0; accent-color: var(--primary); cursor: pointer; flex: none; }
+.inv-group h3 .inv-pick { margin: 0 .55rem 0 0; vertical-align: -3px; }
+.inv-prow.is-picked { background: color-mix(in srgb, var(--primary) 7%, #fff); }
+.inv-pickall { margin: 0 0 .5rem; }
+.inv-bulk { position: sticky; top: .5rem; z-index: 5; display: flex; align-items: center; gap: .45rem; flex-wrap: wrap;
+  background: #fff; border: 1px solid var(--primary); border-radius: 12px; padding: .55rem .75rem; margin-bottom: .75rem;
+  box-shadow: 0 6px 18px rgba(16, 24, 40, .1); }
+.inv-bulk strong { margin-right: .35rem; }
+.inv-bulk[hidden] { display: none; }

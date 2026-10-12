@@ -99,6 +99,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   const st = {
     products: [], suppliers: [], lots: [], requests: [], q: "", cat: "", view: "all", flagged: false, showInactive: false,
     reqFilter: "open", reqView: "list", pos: [], poFilter: "draft", lineSup: {},
+    sel: new Set(), pq: "", pcat: "", psup: "",
   };
   const supplierOf = (id) => st.suppliers.find((s) => s.id === id) || null;
   // "Merz Aesthetics / Medical Supplies Co" (main first)
@@ -202,32 +203,228 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     }).join("");
   }
 
-  /* ---------- Products ---------- */
+  /* ---------- Products (with tick boxes and bulk actions) ---------- */
+  function productRows() {
+    const q = st.pq.trim().toLowerCase();
+    return st.products.filter((p) => (st.showInactive || p.active)
+      && (!st.pcat || p.category === st.pcat)
+      && (!st.psup || (st.psup === "none" ? !productSuppliers(p).length : suppliesProduct(p, st.psup)))
+      && (!q || `${p.name} ${p.brand} ${p.supplierCode} ${suppliersText(p)}`.toLowerCase().includes(q)));
+  }
+
   function renderProducts() {
-    const rows = st.products.filter((p) => st.showInactive || p.active);
-    const line = (p) => {
-      const sup = supplierOf(p.supplierId);
-      return `
-        <div class="inv-prow${p.active ? "" : " is-off"}">
-          <span class="inv-name"><strong>${esc(p.name)}${p.active ? "" : ' <em class="inv-off">Inactive</em>'}</strong>
-            <small>${esc([packText(p), suppliersText(p), p.supplierCode && `Code ${p.supplierCode}`].filter(Boolean).join(" · "))}</small></span>
-          <span class="inv-price">${esc([p.cost !== null && `Cost ${money(p.cost)} / ${p.orderUnit}`, p.price !== null && `Retail ${money(p.price)}`].filter(Boolean).join(" · "))}</span>
-          ${p.tracked ? '<span class="inv-flag is-info">Batch &amp; expiry</span>' : '<span></span>'}
-          ${canManage ? `<button type="button" class="lh-btn" data-edit-product="${esc(p.id)}">Edit</button>` : "<span></span>"}
-        </div>`;
-    };
     body.innerHTML = `
       <div class="inv-tools">
-        <label class="fe-check"><input type="checkbox" data-f="showInactive"${st.showInactive ? " checked" : ""} /> Show inactive products</label>
+        <label class="ib-search inv-find">${SEARCH}<input type="search" data-f="pq" placeholder="Search products, codes or suppliers" value="${esc(st.pq)}" aria-label="Search products" /></label>
+        <select class="fb-select" data-f="pcat" aria-label="Category"><option value="">All categories</option>${INV_CATEGORIES.map((c) =>
+          `<option value="${c.key}"${st.pcat === c.key ? " selected" : ""}>${esc(c.label)}</option>`).join("")}</select>
+        <select class="fb-select" data-f="psup" aria-label="Supplier">
+          <option value="">Any supplier</option>
+          <option value="none"${st.psup === "none" ? " selected" : ""}>No supplier yet</option>
+          ${st.suppliers.map((s) => `<option value="${esc(s.id)}"${st.psup === s.id ? " selected" : ""}>${esc(s.name)}</option>`).join("")}
+        </select>
+        <label class="fe-check"><input type="checkbox" data-f="showInactive"${st.showInactive ? " checked" : ""} /> Show inactive</label>
         <span class="inv-spacer"></span>
         ${canManage ? `<button type="button" class="ff-btn" data-act="export-products">Export CSV</button>
           <button type="button" class="ff-btn is-primary" data-act="import-products">Import products</button>` : ""}
       </div>
-      ${rows.length ? INV_CATEGORIES.map((c) => {
-        const items = rows.filter((p) => p.category === c.key);
-        return items.length ? `<section class="inv-group"><h3>${esc(c.label)}<em>${items.length}</em></h3>
-          <div class="inv-plist">${items.map(line).join("")}</div></section>` : "";
-      }).join("") : '<div class="tm-empty">No products yet.</div>'}`;
+      ${canManage ? `<div class="inv-bulk" data-role="bulk" hidden>
+        <strong data-role="selcount"></strong>
+        <button type="button" class="lh-btn is-primary" data-bulk="main">Set main supplier</button>
+        <button type="button" class="lh-btn" data-bulk="alt">Add other supplier</button>
+        <button type="button" class="lh-btn" data-bulk="remove">Remove a supplier</button>
+        <button type="button" class="lh-btn" data-bulk="category">Change category</button>
+        <button type="button" class="lh-btn" data-bulk="active">Make active</button>
+        <button type="button" class="lh-btn" data-bulk="inactive">Make inactive</button>
+        <button type="button" class="lh-btn is-quiet" data-bulk="clear">Clear selection</button>
+      </div>` : ""}
+      <div data-role="plist"></div>`;
+    drawProductList();
+  }
+
+  function drawProductList() {
+    const box = body.querySelector('[data-role="plist"]');
+    if (!box) return;
+    const rows = productRows();
+    // Only products that are still shown stay ticked
+    const shown = new Set(rows.map((p) => p.id));
+    [...st.sel].forEach((id) => { if (!shown.has(id)) st.sel.delete(id); });
+
+    const line = (p) => `
+      <div class="inv-prow${p.active ? "" : " is-off"}">
+        <span class="inv-name inv-name-pick">${canManage
+          ? `<input type="checkbox" class="inv-pick" data-pick="${esc(p.id)}" aria-label="Select ${esc(p.name)}" />` : ""}
+          <span><strong>${esc(p.name)}${p.active ? "" : ' <em class="inv-off">Inactive</em>'}</strong>
+          <small>${esc([packText(p), suppliersText(p) || "No supplier yet", p.supplierCode && `Code ${p.supplierCode}`].filter(Boolean).join(" · "))}</small></span></span>
+        <span class="inv-price">${esc([p.cost !== null && `Cost ${money(p.cost)} / ${p.orderUnit}`, p.price !== null && `Retail ${money(p.price)}`].filter(Boolean).join(" · "))}</span>
+        ${p.tracked ? '<span class="inv-flag is-info">Batch &amp; expiry</span>' : "<span></span>"}
+        ${canManage ? `<button type="button" class="lh-btn" data-edit-product="${esc(p.id)}">Edit</button>` : "<span></span>"}
+      </div>`;
+
+    box.innerHTML = rows.length
+      ? `${canManage ? `<label class="fe-check inv-pickall"><input type="checkbox" data-pickall /> Select all ${rows.length} shown</label>` : ""}
+        ${INV_CATEGORIES.map((c) => {
+          const items = rows.filter((p) => p.category === c.key);
+          return items.length ? `<section class="inv-group"><h3>${canManage
+            ? `<input type="checkbox" class="inv-pick" data-pickcat="${c.key}" aria-label="Select all ${esc(c.label)}" />` : ""}${esc(c.label)}<em>${items.length}</em></h3>
+            <div class="inv-plist">${items.map(line).join("")}</div></section>` : "";
+        }).join("")}`
+      : `<div class="tm-empty">${st.products.length ? "No products match." : "No products yet."}</div>`;
+    syncPick();
+  }
+
+  // Ticks, the category and "all" boxes (including half-ticked), and the action bar
+  function syncPick() {
+    const rows = productRows();
+    body.querySelectorAll("[data-pick]").forEach((cb) => {
+      cb.checked = st.sel.has(cb.dataset.pick);
+      cb.closest(".inv-prow").classList.toggle("is-picked", cb.checked);
+    });
+    const setBox = (cb, ids) => {
+      const n = ids.filter((id) => st.sel.has(id)).length;
+      cb.checked = n > 0 && n === ids.length;
+      cb.indeterminate = n > 0 && n < ids.length;
+    };
+    body.querySelectorAll("[data-pickcat]").forEach((cb) =>
+      setBox(cb, rows.filter((p) => p.category === cb.dataset.pickcat).map((p) => p.id)));
+    const all = body.querySelector("[data-pickall]");
+    if (all) setBox(all, rows.map((p) => p.id));
+    const bar = body.querySelector('[data-role="bulk"]');
+    if (bar) {
+      bar.hidden = !st.sel.size;
+      bar.querySelector('[data-role="selcount"]').textContent = `${st.sel.size} selected`;
+    }
+  }
+
+  // Saves each changed product (4 at a time). change(p) returns the fields to change, or null to skip.
+  async function runBulk(list, change, onProgress = () => {}) {
+    const todo = list.map((p) => [p, change(p)]).filter(([, c]) => c);
+    if (!todo.length) { showToast("Nothing to change: they're already set that way."); return; }
+    let done = 0;
+    const failed = [];
+    const queue = todo.slice();
+    await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
+      while (queue.length) {
+        const [p, c] = queue.shift();
+        const { id, stock, updatedAt, ...base } = p;
+        try { await saveProduct(id, { ...base, ...c }, staff); }
+        catch (err) { console.error("Bulk save failed:", p.name, err); failed.push(p.name); }
+        onProgress(++done, todo.length);
+      }
+    }));
+    showToast(failed.length
+      ? `Updated ${todo.length - failed.length}. Couldn't save: ${failed.slice(0, 3).join(", ")}${failed.length > 3 ? "…" : ""}`
+      : `Updated ${todo.length} product${todo.length === 1 ? "" : "s"}`);
+    st.sel.clear();
+    await load();
+  }
+
+  async function bulkAction(kind) {
+    if (kind === "clear") { st.sel.clear(); syncPick(); return; }
+    const list = st.products.filter((p) => st.sel.has(p.id));
+    if (!list.length) return;
+    const many = `${list.length} product${list.length === 1 ? "" : "s"}`;
+
+    if (kind === "active" || kind === "inactive") {
+      const on = kind === "active";
+      const ok = await confirmDialog({
+        title: `${on ? "Make active" : "Make inactive"}: ${many}?`,
+        message: on ? "They'll show in stock and ordering again." : "They'll be hidden from stock and ordering. Their stock and history are kept.",
+        confirmLabel: on ? "Make active" : "Make inactive", tone: on ? undefined : "warning",
+      });
+      if (ok) await runBulk(list, (p) => (p.active === on ? null : { active: on }));
+      return;
+    }
+
+    if (kind !== "category" && !st.suppliers.length) { showToast("Add a supplier first, in the Suppliers tab."); return; }
+    const choices = kind === "remove"
+      ? st.suppliers.filter((s) => list.some((p) => suppliesProduct(p, s.id)))
+      : st.suppliers.filter((s) => s.active);
+    if (kind === "remove" && !choices.length) { showToast("None of the selected products have a supplier yet."); return; }
+
+    // What each action changes on one product (null = nothing to do)
+    const changeFor = (p, v, keep) => {
+      if (kind === "category") return p.category === v ? null : { category: v };
+      const alts = (p.altSuppliers || []).map((a) => ({ ...a }));
+      if (kind === "alt") return suppliesProduct(p, v) ? null : { altSuppliers: [...alts, { supplierId: v }] };
+      if (kind === "main") {
+        if (p.supplierId === v) return null;
+        const was = alts.find((a) => a.supplierId === v);
+        const packChanges = !!(was && (was.orderUnit || was.packSize));
+        const old = p.supplierId && keep ? [{
+          supplierId: p.supplierId, supplierCode: p.supplierCode, cost: p.cost,
+          orderUnit: packChanges ? p.orderUnit : "", packSize: packChanges ? p.packSize : null,
+        }] : [];
+        return {
+          supplierId: v,
+          supplierCode: was ? was.supplierCode || "" : (p.supplierId ? "" : p.supplierCode),
+          cost: was && was.cost !== null && was.cost !== undefined ? was.cost : p.cost,
+          ...(packChanges ? { orderUnit: was.orderUnit || p.orderUnit, packSize: was.packSize || p.packSize } : {}),
+          altSuppliers: [...old, ...alts.filter((a) => a.supplierId !== v)],
+        };
+      }
+      // remove
+      if (!suppliesProduct(p, v)) return null;
+      if (p.supplierId !== v) return { altSuppliers: alts.filter((a) => a.supplierId !== v) };
+      const [next, ...others] = alts;
+      if (!next) return { supplierId: "", supplierCode: "" };
+      const pc = !!(next.orderUnit || next.packSize);
+      return {
+        supplierId: next.supplierId, supplierCode: next.supplierCode || "",
+        cost: next.cost !== null && next.cost !== undefined ? next.cost : p.cost,
+        ...(pc ? { orderUnit: next.orderUnit || p.orderUnit, packSize: next.packSize || p.packSize } : {}),
+        altSuppliers: others,
+      };
+    };
+
+    const titles = { main: "Set the main supplier", alt: "Add another supplier", remove: "Remove a supplier", category: "Change category" };
+    const help = {
+      main: "The usual supplier for these products. The cost stays as it is, unless this supplier's own price is already on file.",
+      alt: "Added to each product's other suppliers, so it can be chosen when ordering. Add their codes and prices later in each product.",
+      remove: "Taken off these products. Where it's the main supplier, the first other supplier becomes the main one.",
+      category: "Moves the products to this category.",
+    };
+    const dlg = openDialog("inv-dlg", `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>${titles[kind]}: ${esc(many)}</h3><p>${help[kind]}</p></div>
+        ${kind === "category"
+          ? `<label class="lh-field"><span class="lh-label">Category</span><select class="fb-select" name="v">${INV_CATEGORIES.map((c) =>
+              `<option value="${c.key}">${esc(c.label)}</option>`).join("")}</select></label>`
+          : `<label class="lh-field"><span class="lh-label">Supplier</span><select class="fb-select" name="v">${choices.map((s) =>
+              `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("")}</select></label>`}
+        ${kind === "main" ? '<label class="fe-check"><input type="checkbox" name="keep" checked /> Keep their current main supplier as an other supplier</label>' : ""}
+        <p class="inv-hint" data-role="preview"></p>
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">Apply</button>
+        </div>
+      </form>`);
+    const form = dlg.querySelector("form");
+    const pv = dlg.querySelector('[data-role="preview"]');
+    const keepOn = () => !form.elements.keep || form.elements.keep.checked;
+    const preview = () => {
+      const n = list.filter((p) => changeFor(p, form.elements.v.value, keepOn())).length;
+      pv.textContent = !n ? "Nothing to change: they're already set that way."
+        : n === list.length ? `All ${n} will change.` : `${n} will change · ${list.length - n} already set that way.`;
+    };
+    preview();
+    form.addEventListener("change", preview);
+    let busy = false;
+    dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => { if (!busy) dlg.close(); });
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const v = form.elements.v.value;
+      const keep = keepOn();
+      if (!list.some((p) => changeFor(p, v, keep))) { dlg.close(); return; }
+      busy = true;
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      await runBulk(list, (p) => changeFor(p, v, keep), (d, t) => { btn.textContent = `Saving ${d} of ${t}…`; });
+      busy = false;
+      dlg.close();
+    });
   }
 
   /* ---------- Suppliers ---------- */
@@ -1059,6 +1256,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
   /* ---------- Events ---------- */
   root.addEventListener("click", (e) => {
+    const bk = e.target.closest("[data-bulk]");
+    if (bk) { bulkAction(bk.dataset.bulk); return; }
     const mk = e.target.closest("[data-mkpo]");
     if (mk) { makePoFrom(mk.dataset.mkpo); return; }
     if (e.target.closest('[data-act="new-po"]')) { newPo(); return; }
@@ -1077,14 +1276,27 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     if (es) { const s = st.suppliers.find((x) => x.id === es.dataset.editSupplier); if (s) editSupplier(s); }
   });
   body.addEventListener("input", (e) => {
-    if (e.target.dataset.linesup) { st.lineSup[e.target.dataset.linesup] = e.target.value; renderRequests(); return; }
-    const k = e.target.dataset.f;
+    const t = e.target;
+    // Product tick boxes
+    if (t.dataset.pick) {
+      if (t.checked) st.sel.add(t.dataset.pick); else st.sel.delete(t.dataset.pick);
+      syncPick();
+      return;
+    }
+    if (t.dataset.pickcat !== undefined || t.dataset.pickall !== undefined) {
+      const ids = productRows().filter((p) => t.dataset.pickall !== undefined || p.category === t.dataset.pickcat).map((p) => p.id);
+      ids.forEach((id) => { if (t.checked) st.sel.add(id); else st.sel.delete(id); });
+      syncPick();
+      return;
+    }
+    if (t.dataset.linesup) { st.lineSup[t.dataset.linesup] = t.value; renderRequests(); return; }
+    const k = t.dataset.f;
     if (!k) return;
-    if (k === "reqFilter" || k === "reqView") { st[k] = e.target.value; renderRequests(); return; }
-    if (k === "poFilter") { st.poFilter = e.target.value; renderOrders(); return; }
-    if (k === "flagged" || k === "showInactive") st[k] = e.target.checked;
-    else st[k] = e.target.value;
-    if (k === "showInactive") renderProducts(); else renderStockList();
+    if (k === "reqFilter" || k === "reqView") { st[k] = t.value; renderRequests(); return; }
+    if (k === "poFilter") { st.poFilter = t.value; renderOrders(); return; }
+    if (k === "flagged" || k === "showInactive") st[k] = t.checked;
+    else st[k] = t.value;
+    if (["showInactive", "pq", "pcat", "psup"].includes(k)) drawProductList(); else renderStockList();
   });
 
   load();
