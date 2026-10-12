@@ -4101,3 +4101,15 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .an-pick.is-none.is-on { border-color: var(--primary); color: var(--primary); }
 .an-pick:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .an-hint { color: #b45309; font-weight: 600; }
+
+
+/* Shared products (opened once, used across patients) */
+.inv-open { display: grid; gap: .4rem; margin: 0 0 .5rem; padding: 0; list-style: none; }
+.inv-open li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: .6rem;
+  padding: .55rem .7rem; border: 1px solid var(--border); border-radius: 10px; }
+.inv-open li small { display: block; font-size: .78rem; color: var(--muted); }
+.cs-row.is-shared { display: grid; grid-template-columns: auto minmax(0, 1fr) 150px; align-items: center; gap: .5rem; }
+.cs-row.is-shared.no-dose { grid-template-columns: auto minmax(0, 1fr); }
+.cs-used { white-space: nowrap; }
+.cs-finish { margin-top: .35rem; font-size: .82rem; }
+@media (max-width: 560px) { .cs-row.is-shared { grid-template-columns: 1fr; } }

@@ -5,7 +5,8 @@ import {
   applyStock, listRequests, setRequestStatus, cancelRequest, getRequestSettings, saveRequestSettings,
   listPos, createPo, poTotals, itemOnPo, lineFromProduct, cleanPoLine,
   productSuppliers, supplierTerms, suppliesProduct, suggestOrderFor,
-  listCounts, listInvestigations, dayKey,
+  listCounts, listInvestigations, dayKey, 
+  isSharedProduct, listOpenContainers, openContainer, finishContainer, openState, expectedUses, FINISH_REASONS,
 } from "./inventory-api.js";
 import { renderInvestigations, mountInvestigation } from "./investigations.js";
 import { mountPurchaseOrder } from "./purchase-order.js";
@@ -32,6 +33,7 @@ const niceDate = (key) => {
 };
 const when = (d) => (d ? d.toLocaleString("en-AU", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" }) : "");
 const money = (n) => (n === null || n === undefined ? "" : `$${Number(n).toFixed(2)}`);
+const fmtN = (n) => String(+Number(n || 0).toFixed(2));
 const errText = (err, fallback) => (err && err.code === "permission-denied"
   ? "You don't have access to do this. Ask an Admin to check your Inventory access in Staff."
   : err && err.message && !err.code ? err.message : fallback);
@@ -109,7 +111,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     products: [], suppliers: [], lots: [], requests: [], q: "", cat: "", view: "all", flagged: false, showInactive: false,
     reqFilter: "open", reqView: "list", pos: [], poFilter: "draft", lineSup: {},
     sel: new Set(), pq: "", pcat: "", psup: "",
-    counts: [], invs: [], lastCounts: new Map(),
+    counts: [], invs: [], lastCounts: new Map(), open: [],
   };
   const supplierOf = (id) => st.suppliers.find((s) => s.id === id) || null;
   // "Merz Aesthetics / Medical Supplies Co" (main first)
@@ -124,6 +126,9 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const ex = lotsOf(p.id).map((l) => expiryState(l.expiry));
     if (ex.includes("expired")) out.push(["bad", "Expired stock"]);
     else if (ex.includes("soon")) out.push(["warn", "Expires soon"]);
+    const opened = st.open.filter((c) => c.productId === p.id);
+    if (opened.some((c) => openState(c) === "overdue")) out.push(["bad", "Opened one past its use-by"]);
+    else if (opened.some((c) => openState(c) === "soon")) out.push(["warn", "Opened one due to be discarded"]);
     return out;
   }
 
@@ -148,10 +153,11 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
   async function load() {
     try {
-      [st.products, st.suppliers, st.lots, st.requests, st.pos, st.counts, st.invs] = await Promise.all([
+      [st.products, st.suppliers, st.lots, st.requests, st.pos, st.counts, st.invs, st.open] = await Promise.all([
         listProducts(), listSuppliers(), listAllLots(), listRequests({ max: 300 }).catch(() => []), listPos().catch(() => []),
         listCounts({ from: dayKey(new Date(Date.now() - 120 * 864e5)) }).catch(() => []),
         listInvestigations({ open: true }).catch(() => []),
+        listOpenContainers().catch(() => []),
       ]);
       if (!root.isConnected) return;
       st.lastCounts = lastCountsOf(st.counts);
@@ -217,8 +223,9 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     return `
       <button type="button" class="inv-row" data-product="${esc(p.id)}">
         <span class="inv-name"><strong>${esc(p.name)}</strong>
-          <small>${esc([p.brand, suppliersText(p), p.tracked ? "Batch & expiry" : ""].filter(Boolean).join(" · "))}</small></span>
-        <span class="inv-flags">${flags(p).map(([t, l]) => `<span class="inv-flag is-${t}">${esc(l)}</span>`).join("")}</span>
+          <small>${esc([p.brand, suppliersText(p), p.tracked ? "Batch & expiry" : "",
+            isSharedProduct(p) ? `${st.open.filter((c) => c.productId === p.id).length} open` : ""].filter(Boolean).join(" · "))}</small></span>
+          <span class="inv-flags">${flags(p).map(([t, l]) => `<span class="inv-flag is-${t}">${esc(l)}</span>`).join("")}</span>
         ${st.view !== "jt" ? qty("shelf") : ""}${st.view !== "shelf" ? qty("jt") : ""}
         <span class="inv-unit">${esc(unitPlural(p.stockUnit))}</span>
       </button>`;
@@ -599,12 +606,19 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           <label class="lh-field" data-role="packrow"><span class="lh-label" data-role="packlbl">How many in each box</span>
             <input name="packSize" type="number" min="1" step="1" value="${val(x.packSize)}" /></label>
 
-          <label class="lh-field inv-span"><span class="lh-label">How it's used in treatments</span>
+           <label class="lh-field inv-span"><span class="lh-label">How it's used in treatments</span>
             <select class="fb-select" name="usage">
-              <option value="storage"${x.usage !== "kit" ? " selected" : ""}>From the Shelf, one per patient (e.g. Belotero, needles)</option>
+              <option value="storage"${!["kit", "shared"].includes(x.usage) ? " selected" : ""}>From the Shelf, one per patient (e.g. Belotero, needles)</option>
+              <option value="shared"${x.usage === "shared" ? " selected" : ""}>From the Shelf, opened and shared across patients (e.g. numbing cream)</option>
               <option value="kit"${x.usage === "kit" ? " selected" : ""}>Carried in injectors' kits, shared across patients (e.g. Xeomin)</option>
             </select>
-            <small class="fe-note">One per patient: the dose given is recorded and any leftover is logged as discarded. Kits: the clinician takes the vial into their own kit and uses it across patients until it's empty.</small></label>
+            <small class="fe-note" data-role="usagenote"></small></label>
+          <label class="lh-field" data-role="shrow"><span class="lh-label">Typical amount per use (optional)</span>
+            <div class="fe-num"><input name="perUse" type="number" min="0" step="any" placeholder="e.g. 2" value="${val(x.perUse)}" /><span data-role="perunit">mL</span></div>
+            <small class="fe-note">Filled in on treatment records, and used to spot a container that runs out early.</small></label>
+          <label class="lh-field" data-role="shrow"><span class="lh-label">Discard after opening (optional)</span>
+            <div class="fe-num"><input name="openDays" type="number" min="1" step="1" placeholder="No limit" value="${val(x.openDays)}" /><span>days</span></div>
+            <small class="fe-note">From the packaging's "use within" symbol. Never later than the expiry date.</small></label>
 
           <label class="lh-field"><span class="lh-label" data-role="costlbl">Cost per vial, $ (optional)</span><input name="cost" type="number" min="0" step="0.01" value="${val(x.cost)}" /></label>
           <label class="lh-field"><span class="lh-label">Retail price, $ (optional)</span><input name="price" type="number" min="0" step="0.01" value="${val(x.price)}" /></label>
@@ -666,15 +680,26 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       const dp = Number(f.dosePer.value);
       const du = f.doseUnit.value.trim() || "units";
       const kit = f.usage.value === "kit";
+      const sh = f.usage.value === "shared";
+      dlg.querySelectorAll('[data-role="shrow"]').forEach((el) => { el.style.display = sh ? "" : "none"; });
+      dlg.querySelector('[data-role="perunit"]').textContent = f.doseUnit.value.trim() || "mL";
+      dlg.querySelector('[data-role="usagenote"]').textContent = sh
+        ? `Opening one takes 1 ${unit} off stock. Each treatment record logs a use against the opened ${unit} (staff choose which, if more than one is open) until someone marks it finished. Stock counts only include sealed ones.`
+        : kit ? "The clinician takes the vial into their own kit and uses it across patients until it's empty."
+        : "The dose given is recorded and any leftover is logged as discarded.";
       dlg.querySelector('[data-role="packlbl"]').textContent = `How many ${unitPlural(unit)} in each ${ou}`;
-      dlg.querySelector('[data-role="doselbl"]').textContent = `Amount in each ${unit} (injectables)`;
+      dlg.querySelector('[data-role="doselbl"]').textContent = sh ? `Amount in each ${unit} (optional)` : `Amount in each ${unit} (injectables)`;
       dlg.querySelector('[data-role="costlbl"]').textContent = `Cost per ${ou}, $ (optional)`;
       const each = dp > 0 ? ` (${+dp.toFixed(2)} ${du})` : "";
+      const per = Number(f.perUse.value);
+      const uses = sh && dp > 0 && per > 0 ? ` (about ${Math.max(1, Math.round(dp / per))} uses)` : "";
       dlg.querySelector('[data-role="pack"]').textContent =
-        `Staff take 1 ${unit}${each} off the Shelf${kit ? " into their own kit, and use it across patients until it's empty" : ""}. ` +
+        (sh ? `Staff open 1 ${unit}${each} and share it across patients until it's empty${uses}. `
+          : `Staff take 1 ${unit}${each} off the Shelf${kit ? " into their own kit, and use it across patients until it's empty" : ""}. `) +
         (same ? `Each ${ou} received adds 1 ${unit} to stock.` : `Each ${ou} received adds ${plural(n, unit)} to stock.`) +
         (kit && !(dp > 0) ? ` Fill in the amount in each ${unit} (e.g. 100 units).` : "");
     };
+    
     packHint();
     form.addEventListener("input", packHint);
     form.addEventListener("change", packHint);
@@ -733,6 +758,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           packSize: f.packSize.value, cost: f.cost.value, price: f.price.value, barcode: f.barcode.value,
           dosePer: f.dosePer.value, doseUnit: f.doseUnit.value,
           usage: f.usage.value,
+          perUse: f.perUse.value, openDays: f.openDays.value,
           batchLabel: f.batchLabel.value,
           countFreq: f.countFreq.value, countDay: f.countDay.value, countWhere: f.countWhere.value,
           investigate: f.investigate.value, investigateOver: f.investigateOver.value,
@@ -995,6 +1021,101 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const dlg = openDialog("inv-dlg inv-pdlg", '<div class="lh-form" data-role="pd"></div>');
     const box = dlg.querySelector('[data-role="pd"]');
 
+    const canOpen = canMove || can("consult.record");
+    function sharedSecHtml(p) {
+      const list = st.open.filter((c) => c.productId === p.id);
+      return `<div class="inv-pd-sec"><h4>Opened now <small>(not counted in stock)</small></h4>${list.length ? `<ul class="inv-open">${list.map((c) => {
+        const s = openState(c);
+        const exp = expectedUses(c);
+        return `<li><span><strong>${esc(batchText(p, c.batch) || "No number")}</strong>${c.expiry ? ` · Exp ${esc(niceDate(c.expiry))}` : ""}
+            <small>Opened ${esc(when(c.openedAt))}${c.openedBy ? ` by ${esc(c.openedBy)}` : ""} · ${c.uses} use${c.uses === 1 ? "" : "s"}${
+              exp ? ` of about ${exp}` : ""}${c.used && c.doseUnit ? ` · ${esc(fmtN(c.used))} ${esc(c.doseUnit)} recorded` : ""}${
+              c.useBy ? ` · use by ${esc(niceDate(c.useBy))}` : ""}</small></span>
+          ${s ? `<span class="inv-flag is-${s === "overdue" ? "bad" : "warn"}">${s === "overdue" ? "Past use-by" : "Discard soon"}</span>` : "<span></span>"}
+          ${canOpen ? `<button type="button" class="lh-btn" data-finish="${esc(c.id)}">Finished</button>` : "<span></span>"}</li>`;
+      }).join("")}</ul>` : '<p class="tb-none">None open.</p>'}
+        ${canOpen ? `<button type="button" class="hx-add" data-act="open-new">+ Open a new ${esc(p.stockUnit)}</button>` : ""}</div>`;
+    }
+
+    function openSharedDialog(p) {
+      return new Promise((resolve) => {
+        const lots = lotsOf(p.id);
+        let saved = false;
+        const d2 = openDialog("inv-dlg", `
+          <form class="lh-form" novalidate>
+            <div class="lh-dialog-head"><h3>Open a new ${esc(p.stockUnit)}: ${esc(p.name)}</h3>
+              <p>1 ${esc(p.stockUnit)} comes off stock now. Treatment records then log uses against it until it's marked finished.</p></div>
+            ${lots.length ? `<label class="lh-field"><span class="lh-label">Which one</span><select class="fb-select" name="lot">${lots.map((l, i) =>
+              `<option value="${i}">${esc(`${locLabel(l.loc)}${p.tracked ? ` · ${batchText(p, l.batch)} · Exp ${niceDate(l.expiry)}` : ""} · ${plural(l.qty, p.stockUnit)}`)}</option>`).join("")}</select></label>`
+              : '<p class="tb-none">There are none in stock to open.</p>'}
+            <p class="lh-error" role="alert" hidden></p>
+            <div class="lh-actions">
+              <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+              ${lots.length ? '<button type="submit" class="lh-btn is-primary">Open it</button>' : ""}
+            </div>
+          </form>`);
+        const form = d2.querySelector("form");
+        d2.querySelector('[data-act="cancel"]').addEventListener("click", () => d2.close());
+        form.addEventListener("submit", async (e) => {
+          e.preventDefault();
+          const btn = form.querySelector('[type="submit"]');
+          btn.disabled = true;
+          try {
+            await openContainer(p, lots[Number(form.elements.lot.value)], staff);
+            saved = true;
+            d2.close();
+            showToast(`Opened. It's now in use.`);
+          } catch (ex) {
+            const err = d2.querySelector(".lh-error");
+            err.textContent = errText(ex, "Couldn't save. Try again.");
+            err.hidden = false;
+            btn.disabled = false;
+          }
+        });
+        d2.addEventListener("close", () => resolve(saved));
+      });
+    }
+
+    function finishSharedDialog(c, p) {
+      return new Promise((resolve) => {
+        const exp = expectedUses(c);
+        let saved = false;
+        const d2 = openDialog("inv-dlg", `
+          <form class="lh-form" novalidate>
+            <div class="lh-dialog-head"><h3>Finished: ${esc(p.name)}</h3>
+              <p>${esc(batchText(p, c.batch) || "No number")} · ${c.uses} use${c.uses === 1 ? "" : "s"}${exp ? ` (expected about ${exp})` : ""}. Stock doesn't change: it came off when it was opened.</p></div>
+            ${exp && c.uses < exp * 0.7 ? `<p class="inv-hint">That's fewer uses than expected. Add a note if you know why.</p>` : ""}
+            <label class="lh-field"><span class="lh-label">Why</span><select class="fb-select" name="reason">${FINISH_REASONS.map((r) =>
+              `<option${r === (openState(c) === "overdue" ? "Past its use-by date" : "Empty") ? " selected" : ""}>${esc(r)}</option>`).join("")}</select></label>
+            <label class="lh-field"><span class="lh-label">Note (optional)</span><input name="note" maxlength="300" /></label>
+            <p class="lh-error" role="alert" hidden></p>
+            <div class="lh-actions">
+              <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+              <button type="submit" class="lh-btn is-primary">Mark finished</button>
+            </div>
+          </form>`);
+        const form = d2.querySelector("form");
+        d2.querySelector('[data-act="cancel"]').addEventListener("click", () => d2.close());
+        form.addEventListener("submit", async (e) => {
+          e.preventDefault();
+          const btn = form.querySelector('[type="submit"]');
+          btn.disabled = true;
+          try {
+            await finishContainer(c, { reason: form.elements.reason.value, note: form.elements.note.value }, staff);
+            saved = true;
+            d2.close();
+            showToast("Marked finished");
+          } catch (ex) {
+            const err = d2.querySelector(".lh-error");
+            err.textContent = errText(ex, "Couldn't save. Try again.");
+            err.hidden = false;
+            btn.disabled = false;
+          }
+        });
+        d2.addEventListener("close", () => resolve(saved));
+      });
+    }
+
     function draw() {
       const p = st.products.find((x) => x.id === id);
       if (!p) { dlg.close(); return; }
@@ -1019,6 +1140,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
             <button type="button" class="lh-btn" data-stock="writeoff">Write off</button>
             <button type="button" class="lh-btn is-quiet" data-act="edit">Edit product</button>` : ""}
         </div>` : ""}
+        ${isSharedProduct(p) ? sharedSecHtml(p) : ""}
         ${p.tracked ? `<div class="inv-pd-sec"><h4>Stock by ${esc(batchName(p).toLowerCase())} <small>(oldest expiry first)</small></h4>${lots.length
           ? `<table class="inv-table"><thead><tr><th>Storage</th><th>${esc(batchName(p))}</th><th>Expiry</th><th>Qty</th></tr></thead><tbody>${lots.map((l) => {
            const ex = expiryState(l.expiry);
@@ -1052,6 +1174,16 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       if (e.target.closest('[data-act="close"]')) { dlg.close(); return; }
       const p = st.products.find((x) => x.id === id);
       if (!p) return;
+      if (e.target.closest('[data-act="open-new"]')) {
+        if (await openSharedDialog(p)) { await load(); if (dlg.open) draw(); }
+        return;
+      }
+      const fin = e.target.closest("[data-finish]");
+      if (fin) {
+        const c = st.open.find((x) => x.id === fin.dataset.finish);
+        if (c && await finishSharedDialog(c, p)) { await load(); if (dlg.open) draw(); }
+        return;
+      }
       if (e.target.closest('[data-act="edit"]')) { dlg.close(); editProduct(p); return; }
       if (e.target.closest('[data-act="request"]')) { dlg.close(); location.hash = `#/tasks/order/${encodeURIComponent(id)}`; return; }
       const s = e.target.closest("[data-stock]");

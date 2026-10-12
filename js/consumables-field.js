@@ -2,11 +2,14 @@
 // Kit products (e.g. Xeomin) come from the clinician's own kit, in units.
 // Shelf products with a dose (e.g. Belotero 1 mL, Radiesse 1.5 mL per syringe): the clinician records mL injected,
 //   and the syringes opened come off the Shelf (JT storage for Dr Teh).
+// Shared products (e.g. numbing cream): each record is one use of an opened container; a new one is opened
+//   (and comes off stock) only when needed. If several are open, staff choose which.
 // Everything else comes off in whole items.
 // Stock only changes when the form is saved, in the same transaction as the record.
 // (Take from Shelf and Borrow happen straight away: they're real handovers, logged on their own.)
 import {
-  listProducts, listAllLots, listKits, isKitProduct, kitUnits, plural, unitPlural, fefo, lotId, INV_CATEGORIES, batchName, batchText,
+  listProducts, listAllLots, listKits, listOpenContainers, isKitProduct, isSharedProduct, openState, kitUnits,
+  plural, unitPlural, fefo, lotId, INV_CATEGORIES, batchName, batchText,
 } from "./inventory-api.js";
 import { takeFromShelfDialog, borrowDialog } from "./inventory-kits.js";
 import { isInjector } from "./perms.js";
@@ -14,24 +17,29 @@ import { isInjector } from "./perms.js";
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(2));
 const num = (v) => Number(v) || 0;
+const r2 = (n) => Math.round(n * 100) / 100;
 const niceDate = (key) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "—";
 };
+const shortDate = (d) => (d ? d.toLocaleDateString("en-AU", { day: "numeric", month: "short" }) : "");
 const isTeh = (staff) => /\bteh\b/i.test(String((staff && staff.name) || ""));
+const shared = (p) => isSharedProduct(p);
 // A Shelf product measured by dose, e.g. a 1 mL syringe of filler
-const dosed = (p) => !!p && !isKitProduct(p) && !!p.dosePer;
+const dosed = (p) => !!p && !isKitProduct(p) && !shared(p) && !!p.dosePer;
 // What the clinician records: units (kit), mL (dosed), or items
-const clinicalUnit = (p) => (isKitProduct(p) || dosed(p) ? p.doseUnit : p.stockUnit);
+const clinicalUnit = (p) => (isKitProduct(p) || dosed(p) ? p.doseUnit : shared(p) ? (p.dosePer ? p.doseUnit : "use") : p.stockUnit);
 // Syringes needed for a dose: 2.2 mL of a 1.5 mL syringe = 2
 const syringesFor = (p, dose) => (dose > 0 ? Math.max(1, Math.ceil(dose / p.dosePer - 1e-9)) : "");
 
-// Shared by every Consumables field on the page
+// Shared by every Consumables field on the same form (reloaded for each new form)
 let stockJob = null;
+let stockAt = 0;
 function loadStock(force = false) {
-  if (!stockJob || force) {
-    stockJob = Promise.all([listProducts(), listAllLots(), listKits({ mine: true }).catch(() => [])])
-      .then(([products, lots, kits]) => ({ products, lots, kits }));
+  if (!stockJob || force || Date.now() - stockAt > 10000) {
+    stockAt = Date.now();
+    stockJob = Promise.all([listProducts(), listAllLots(), listKits({ mine: true }).catch(() => []), listOpenContainers().catch(() => [])])
+      .then(([products, lots, kits, open]) => ({ products, lots, kits, open }));
     stockJob.catch(() => { stockJob = null; });
   }
   return stockJob;
@@ -45,41 +53,132 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
   const canKit = isInjector();
   const defLoc = isTeh(staff) ? "jt" : "shelf";
   let stock = null, failed = false;
-  const newRow = (preset = null) => ({ ref: "", amount: "", dose: "", auto: true, preset });
+  // use: shared products only (null = not decided yet)
+  const newRow = (preset = null) => ({ ref: "", amount: "", dose: "", auto: true, preset, use: null, finish: false, seeded: false });
   const lines = (f.items || []).map((it) => ({
     productId: it.productId, item: it, extra: false, loc: defLoc, rows: [newRow(it.amount ?? null)],
   }));
 
   const productOf = (l) => (stock ? stock.products.find((p) => p.id === l.productId) : null);
   const nameOf = (l) => (productOf(l) || {}).name || (l.item && l.item.name) || "Product";
+  const whereOf = (l) => (l.loc === "jt" ? "JT storage" : "Shelf");
   // The amount the clinician gave (units / mL / items)
   const clinicalTotal = (l, p = productOf(l)) => l.rows.reduce((a, r) => a + num(dosed(p) ? r.dose : r.amount), 0);
 
   function sources(l) {
     const p = productOf(l);
-    if (!p) return [];
+    if (!p || shared(p)) return [];
     if (isKitProduct(p)) {
       return stock.kits.filter((k) => k.productId === p.id && kitUnits(k) > 0).map((k) => ({
         ref: k.id, batch: k.batch, expiry: k.expiry, avail: kitUnits(k),
         label: `${batchText(p, k.batch) || "No number"} · Exp ${niceDate(k.expiry)} · ${fmt(kitUnits(k))} ${k.doseUnit}${k.open ? ` (${fmt(k.open)} opened)` : ""}`,
-     }));
+      }));
     }
     if (!p.tracked) {
       const id = lotId(p.id, l.loc, "", "");
       const lot = stock.lots.find((x) => x.id === id);
       return [{ ref: id, batch: "", expiry: "", avail: lot ? lot.qty : 0,
-        label: `${l.loc === "jt" ? "JT storage" : "Shelf"} · ${plural(lot ? lot.qty : 0, p.stockUnit)}` }];
+        label: `${whereOf(l)} · ${plural(lot ? lot.qty : 0, p.stockUnit)}` }];
     }
     return stock.lots.filter((x) => x.productId === p.id && x.loc === l.loc && x.qty > 0).sort(fefo).map((x) => ({
       ref: x.id, batch: x.batch, expiry: x.expiry, avail: x.qty,
       label: `${batchText(p, x.batch)} · Exp ${niceDate(x.expiry)} · ${plural(x.qty, p.stockUnit)}`,
-     }));
+    }));
+  }
+
+  /* ---------- Shared products ---------- */
+  // Opened containers first, then sealed ones that could be opened (oldest expiry first)
+  function sharedOptions(l, p) {
+    const open = (stock.open || []).filter((c) => c.productId === p.id).map((c) => {
+      const s = openState(c);
+      return { value: c.id, c, label: [
+        `${batchText(p, c.batch) || "No number"}${c.expiry ? ` · Exp ${niceDate(c.expiry)}` : ""}`,
+        c.openedAt ? `opened ${shortDate(c.openedAt)}` : "", plural(c.uses, "use"),
+        s === "overdue" ? "PAST USE-BY" : s === "soon" ? `use by ${niceDate(c.useBy)}` : "",
+      ].filter(Boolean).join(" · ") };
+    });
+    const fresh = stock.lots.filter((x) => x.productId === p.id && x.loc === l.loc && x.qty > 0).sort(fefo).map((x) => ({
+      value: `new:${x.id}`, lot: x,
+      label: `${p.tracked ? `${batchText(p, x.batch)} · Exp ${niceDate(x.expiry)} · ` : ""}${plural(x.qty, p.stockUnit)} on the ${whereOf(l)}`,
+    }));
+    return { open, fresh };
+  }
+  // One open: use it. Several open: staff choose. None open: open the oldest expiry.
+  function fixShared(l, p) {
+    if (!l.rows.length) l.rows = [newRow()];
+    const r = l.rows[0];
+    const o = sharedOptions(l, p);
+    if ([...o.open, ...o.fresh].some((x) => x.value === r.ref)) return;
+    r.ref = o.open.length === 1 ? o.open[0].value : o.open.length > 1 ? "" : (o.fresh[0] ? o.fresh[0].value : "");
+  }
+  function sharedShort(l, p) {
+    const r = l.rows[0];
+    if (!r || !r.use || r.ref) return 0;
+    const o = sharedOptions(l, p);
+    return !o.open.length && !o.fresh.length ? 1 : 0;
+  }
+  function sharedMsg(l, p) {
+    const r = l.rows[0];
+    if (!r || !r.use) return "";
+    const u = p.stockUnit;
+    const o = sharedOptions(l, p);
+    if (!o.open.length && !o.fresh.length) {
+      return `<span class="cs-warn">None open and none on the ${esc(whereOf(l))}. ${f.ifShort === "block"
+        ? "Restock before saving." : "It will be saved and flagged for the ordering team."}</span>`;
+    }
+    if (!r.ref) return `<span class="cs-warn">More than one ${esc(u)} is open: choose which one you used.</span>`;
+    const c = o.open.find((x) => x.value === r.ref);
+    if (c && openState(c.c) === "overdue") {
+      return `<span class="cs-warn">This ${esc(u)} is past its use-by date (${esc(niceDate(c.c.useBy))}). Mark it finished and open a new one.</span>`;
+    }
+    const amt = num(r.dose) > 0 ? `${fmt(r.dose)} ${esc(p.doseUnit)}` : "Used";
+    return `<span class="cs-ok">✓ ${amt}${c ? ` from the opened ${esc(u)}` : ` · opens a new ${esc(u)}`}${r.finish ? ` · ${esc(u)} marked finished` : ""}</span>`;
+  }
+  function sharedLineHtml(l, i, p, req) {
+    const r = l.rows[0];
+    const o = sharedOptions(l, p);
+    const none = !o.open.length && !o.fresh.length;
+    const opt = (x) => `<option value="${esc(x.value)}"${x.value === r.ref ? " selected" : ""}>${esc(x.label)}</option>`;
+    const pick = none
+      ? `<span class="cs-src">None open, none on the ${esc(whereOf(l))}</span>`
+      : `<select class="fe-in" data-f="ref" aria-label="Which ${esc(p.stockUnit)}">
+          ${!r.ref ? `<option value="" selected>Choose which ${esc(p.stockUnit)}…</option>` : ""}
+          ${o.open.length ? `<optgroup label="Already open">${o.open.map(opt).join("")}</optgroup>` : ""}
+          ${o.fresh.length ? `<optgroup label="Open a new ${esc(p.stockUnit)}">${o.fresh.map(opt).join("")}</optgroup>` : ""}
+        </select>`;
+    return `<div class="cs-line${sharedShort(l, p) ? " is-short" : ""}" data-i="${i}">
+      <div class="cs-head">
+        <strong>${esc(p.name)}${req}</strong>
+        <small>${esc(`${o.open.length} open · ${whereOf(l)}: ${plural(p.stock[l.loc], p.stockUnit)} sealed`)}</small>${linkNoteHtml(l)}
+        <select class="fe-in cs-loc" data-f="loc" aria-label="Open new ones from">
+          <option value="shelf"${l.loc === "shelf" ? " selected" : ""}>Shelf</option>
+          <option value="jt"${l.loc === "jt" ? " selected" : ""}>JT storage</option></select>
+        ${l.extra ? '<button type="button" class="hx-x" data-cs="remove-line" aria-label="Remove">×</button>' : ""}
+      </div>
+      <div class="cs-row is-shared${p.dosePer ? "" : " no-dose"}" data-j="0">
+        <label class="fe-check cs-used"><input type="checkbox" data-f="use"${r.use ? " checked" : ""} /> Used</label>
+        ${pick}
+        ${p.dosePer ? `<div class="fe-num"><input class="fe-in" type="number" min="0" step="0.1" inputmode="decimal" data-f="dose"
+          value="${esc(r.dose)}" placeholder="Amount" aria-label="${esc(p.doseUnit)} used" /><span>${esc(p.doseUnit)}</span></div>` : ""}
+      </div>
+      ${none ? "" : `<label class="fe-check cs-finish"><input type="checkbox" data-f="finish"${r.finish ? " checked" : ""} />
+        It's empty after this patient: mark the ${esc(p.stockUnit)} finished</label>`}
+      <div class="cs-foot"><span data-role="msg">${sharedMsg(l, p)}</span></div>
+    </div>`;
   }
 
   // Default amounts from the form, once the product is known
   function applyPresets(l) {
     const p = productOf(l);
     if (!p) return;
+    if (shared(p)) {
+      l.rows.forEach((r) => {
+        if (r.use === null || r.use === undefined) r.use = !!(l.extra || (l.item && l.item.required));
+        if (r.preset !== null && r.preset !== undefined) { r.dose = r.preset; r.preset = null; r.seeded = true; }
+        else if (!r.seeded) { if (p.dosePer && p.perUse) r.dose = p.perUse; r.seeded = true; }
+      });
+      return;
+    }
     l.rows.forEach((r) => {
       if (r.preset === null || r.preset === undefined) return;
       if (dosed(p)) { r.dose = r.preset; r.amount = syringesFor(p, num(r.preset)); }
@@ -89,9 +188,16 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
   }
 
   // A linked amount: kit units are split across batches (oldest expiry first), mL fills the dose
-  const r2 = (n) => Math.round(n * 100) / 100;
   function fillFrom(l, val) {
     const p = productOf(l);
+    if (p && shared(p)) {
+      const r = l.rows[0] || newRow();
+      r.dose = val || "";
+      if (val > 0) r.use = true;
+      r.seeded = true;
+      l.rows = [r];
+      return;
+    }
     if (!val) { l.rows = [newRow()]; return; }
     if (!p) { l.rows = [newRow(val)]; return; }
     if (dosed(p)) { l.rows = [{ ...newRow(), dose: val, amount: syringesFor(p, val) }]; return; }
@@ -108,14 +214,14 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     }
     l.rows = rows;
   }
-  const linkNoteHtml = (l) => {
+  function linkNoteHtml(l) {
     const from = l.item && l.item.from;
     if (!from || !linked) return "";
     return `<small class="cs-linknote">${l.manual
       ? `Changed by hand · linked total ${esc(fmt(l.linkVal || 0))} <button type="button" class="cs-link" data-cs="relink">Use the linked total</button>`
       : `Filled in from ${esc(linkLabel ? linkLabel(from) : "the form")}`}</small>`;
-  };
-  
+  }
+
   function fixRefs(l) {
     const src = sources(l);
     l.rows.forEach((r, i) => {
@@ -127,6 +233,8 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
 
   // Stock that isn't there (kit units, or whole syringes / items)
   function shortOf(l, src = sources(l)) {
+    const p = productOf(l);
+    if (p && shared(p)) return sharedShort(l, p);
     const used = new Map();
     let short = 0;
     l.rows.forEach((r) => {
@@ -144,6 +252,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
   function msgHtml(l) {
     const p = productOf(l);
     if (!p) return "";
+    if (shared(p)) return sharedMsg(l, p);
     const total = clinicalTotal(l, p);
     const short = shortOf(l);
     const max = l.item && l.item.max;
@@ -158,7 +267,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     if (!(total > 0)) return "";
     if (dosed(p)) {
       const syr = l.rows.reduce((a, r) => a + num(r.amount), 0);
-      const waste = Math.max(0, Math.round((syr * p.dosePer - total) * 100) / 100);
+      const waste = Math.max(0, r2(syr * p.dosePer - total));
       if (total > syr * p.dosePer + 0.001) {
         return `<span class="cs-warn">${fmt(total)} ${esc(cu)} needs at least ${esc(plural(syringesFor(p, total), p.stockUnit))}.</span>`;
       }
@@ -197,6 +306,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
       return `<div class="cs-line is-missing" data-i="${i}"><div class="cs-head"><strong>${esc(nameOf(l))}${req}</strong></div>
         <p class="fe-help">This product isn't on the inventory list any more. Ask an Admin to update the form.</p></div>`;
     }
+    if (shared(p)) return sharedLineHtml(l, i, p, req);
     const kit = isKitProduct(p);
     if (kit && !canKit) {
       return `<div class="cs-line" data-i="${i}"><div class="cs-head"><strong>${esc(p.name)}${req}</strong></div>
@@ -205,7 +315,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     const src = sources(l);
     const info = kit
       ? `${fmt(stock.kits.filter((k) => k.productId === p.id).reduce((a, k) => a + kitUnits(k), 0))} ${p.doseUnit} in your kit`
-      : `${l.loc === "jt" ? "JT storage" : "Shelf"}: ${plural(p.stock[l.loc], p.stockUnit)}${dosed(p) ? ` · ${fmt(p.dosePer)} ${p.doseUnit} each` : ""}`;
+      : `${whereOf(l)}: ${plural(p.stock[l.loc], p.stockUnit)}${dosed(p) ? ` · ${fmt(p.dosePer)} ${p.doseUnit} each` : ""}`;
     return `<div class="cs-line${shortOf(l, src) > 0 ? " is-short" : ""}" data-i="${i}">
       <div class="cs-head">
         <strong>${esc(p.name)}${req}</strong><small>${esc(info)}</small>${linkNoteHtml(l)}
@@ -245,7 +355,11 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
       return;
     }
     if (!stock) return;
-    lines.forEach((l) => { applyPresets(l); fixRefs(l); });
+    lines.forEach((l) => {
+      applyPresets(l);
+      const p = productOf(l);
+      if (p && shared(p)) fixShared(l, p); else fixRefs(l);
+    });
     host.innerHTML = lines.map(lineHtml).join("") + addHtml();
   }
 
@@ -279,7 +393,13 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     if (l.item && l.item.from) l.manual = true; // their own figure wins until "Use the linked total"
     if (key === "dose") {
       r.dose = el.value;
-      if (r.auto && p) {                                  // syringes follow the mL until changed by hand
+      if (p && shared(p)) {                               // typing an amount means it was used
+        if (num(el.value) > 0 && !r.use) {
+          r.use = true;
+          const cb = rowEl.querySelector('[data-f="use"]');
+          if (cb) cb.checked = true;
+        }
+      } else if (r.auto && dosed(p)) {                    // syringes follow the mL until changed by hand
         r.amount = syringesFor(p, num(el.value));
         const syr = rowEl.querySelector('[data-f="amount"]');
         if (syr) syr.value = r.amount;
@@ -306,6 +426,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     const li = el.closest(".cs-line");
     if (!li) return;
     const l = lines[Number(li.dataset.i)];
+    if (el.dataset.f === "use" || el.dataset.f === "finish") { l.rows[0][el.dataset.f] = el.checked; onChange(); draw(); return; }
     if (el.dataset.f === "ref") { l.rows[Number(el.closest(".cs-row").dataset.j)].ref = el.value; onChange(); draw(); }
     else if (el.dataset.f === "loc") { l.loc = el.value; l.rows.forEach((r) => { r.ref = ""; }); onChange(); draw(); }
   });
@@ -333,13 +454,27 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
   w.csPlan = () => (!stock ? [] : lines.map((l) => {
     const p = productOf(l);
     if (!p) return null;
+    if (shared(p)) {
+      const r = l.rows[0];
+      if (!r || !r.use) return null;
+      const isNew = String(r.ref || "").startsWith("new:");
+      const lot = isNew ? stock.lots.find((x) => x.id === r.ref.slice(4)) : null;
+      const c = !isNew && r.ref ? (stock.open || []).find((x) => x.id === r.ref) : null;
+      const src = c || lot || {};
+      return {
+        fid: f.id, productId: p.id, name: p.name, kind: "shared", unit: p.stockUnit,
+        doseUnit: p.dosePer ? p.doseUnit : "", dosePer: 0, batchLabel: batchName(p), loc: l.loc, block: f.ifShort === "block",
+        rows: [{ ref: c ? c.id : "", lot: lot ? lot.id : "", batch: src.batch || "", expiry: src.expiry || "",
+          amount: 1, dose: r2(Math.max(0, num(r.dose))), finish: !!r.finish }],
+      };
+    }
     const kit = isKitProduct(p);
     if (kit && !canKit) return null;
     const src = sources(l);
     const rows = l.rows.map((r) => {
       const s = src.find((x) => x.ref === r.ref);
       const amount = kit ? Math.round(num(r.amount) * 10) / 10 : Math.round(num(r.amount));
-      const dose = kit ? amount : dosed(p) ? Math.round(num(r.dose) * 100) / 100 : 0;
+      const dose = kit ? amount : dosed(p) ? r2(num(r.dose)) : 0;
       return { ref: r.ref || "", batch: s ? s.batch : "", expiry: s ? s.expiry : "", amount, dose };
     }).filter((r) => r.amount > 0 || r.dose > 0);
     if (!rows.length) return null;
@@ -361,6 +496,17 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
       const name = nameOf(l);
       const req = l.item && l.item.required;
       if (l.rows.some((r) => num(r.amount) < 0 || num(r.dose) < 0)) return `${name}: amounts can't be negative.`;
+      if (p && shared(p)) {
+        const r = l.rows[0];
+        if (req && !(r && r.use)) return `${name}: tick Used.`;
+        if (r && r.use) {
+          const o = sharedOptions(l, p);
+          if (!r.ref && (o.open.length || o.fresh.length)) return `${name}: more than one ${p.stockUnit} is open. Choose which one you used.`;
+          if (!r.ref && f.ifShort === "block") return `${name}: none open and none in stock, so this form can't be saved yet.`;
+          if (p.dosePer && num(r.dose) > p.dosePer) return `${name}: ${fmt(r.dose)} ${p.doseUnit} is more than a whole ${p.stockUnit} holds.`;
+        }
+        continue;
+      }
       if (p && isKitProduct(p) && !canKit && req) return `${name} has to be recorded by an injector with a kit.`;
       const total = p ? clinicalTotal(l, p) : l.rows.reduce((a, r) => a + num(r.amount), 0);
       if (req && !(total > 0)) return `${name}: enter how much was used.`;
@@ -402,8 +548,15 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
   refresh(false);
 }
 
-// "0.8 mL (1 syringe, 0.2 mL discarded)" for dosed Shelf products, otherwise "20 units" / "1 needle"
+// "0.8 mL (1 syringe, 0.2 mL discarded)" for dosed Shelf products, "2 mL (from an opened tube)" for shared ones,
+// otherwise "20 units" / "1 needle"
 export function consumableAmountText(l, r, withStock = true) {
+  if (l.kind === "shared") {
+    const amt = r.dose ? `${fmt(r.dose)} ${l.doseUnit}` : "Used";
+    const extra = !r.taken ? ["none in stock"]
+      : [r.opened ? `opened a new ${l.unit}` : `from an opened ${l.unit}`, r.finished ? `${l.unit} finished` : ""].filter(Boolean);
+    return `${amt}${withStock ? ` (${extra.join(", ")})` : ""}`;
+  }
   if (l.kind !== "kit" && l.doseUnit && r.dose) {
     const extra = [r.amount ? plural(r.amount, l.unit) : "", r.waste ? `${fmt(r.waste)} ${l.doseUnit} discarded` : ""].filter(Boolean);
     return `${fmt(r.dose)} ${l.doseUnit}${withStock && extra.length ? ` (${extra.join(", ")})` : ""}`;
@@ -415,12 +568,16 @@ export function consumableAmountText(l, r, withStock = true) {
 export function consumablesViewHtml(v) {
   const lines = v && Array.isArray(v.lines) ? v.lines : [];
   if (!lines.length) return '<p class="fe-help">Nothing recorded.</p>';
-  const from = (r) => (r.from === "kit" ? "Clinician's kit" : r.from === "jt" ? "JT storage" : "Shelf");
+  const from = (l, r) => (r.from === "kit" ? "Clinician's kit"
+    : r.from === "open" ? `Opened ${l.unit}`
+    : `${r.from === "jt" ? "JT storage" : "Shelf"}${l.kind === "shared" && r.opened ? ` (new ${l.unit} opened)` : ""}`);
+  const shortText = (l) => (l.kind === "shared" ? "None in stock" : `Stock short by ${fmt(l.short)} ${l.kind === "kit" ? l.unit : unitPlural(l.unit)}`);
   return `<table class="inv-table cs-view"><thead><tr><th>Product</th><th>Amount</th><th>Batch / Lot</th><th>Expiry</th><th>From</th></tr></thead><tbody>${
   lines.map((l) => (l.rows && l.rows.length ? l.rows : [{ amount: l.total }]).map((r, i) => `<tr>
-      <td>${i ? "" : `<strong>${esc(l.name)}</strong>${l.short > 0 ? ` <span class="inv-flag is-warn">Stock short by ${fmt(l.short)} ${esc(l.kind === "kit" ? l.unit : unitPlural(l.unit))}</span>` : ""}`}</td>
-      <td>${esc(consumableAmountText(l, r))}</td>      <td>${esc(r.batch ? `${l.batchLabel || "Batch"} ${r.batch}` : "—")}</td>
-      <td>${esc(r.expiry ? niceDate(r.expiry) : "—")}</td><td>${esc(from(r))}</td></tr>`).join("")).join("")}</tbody></table>`;
+      <td>${i ? "" : `<strong>${esc(l.name)}</strong>${l.short > 0 ? ` <span class="inv-flag is-warn">${esc(shortText(l))}</span>` : ""}`}</td>
+      <td>${esc(consumableAmountText(l, r))}</td>
+      <td>${esc(r.batch ? `${l.batchLabel || "Batch"} ${r.batch}` : "—")}</td>
+      <td>${esc(r.expiry ? niceDate(r.expiry) : "—")}</td><td>${esc(from(l, r))}</td></tr>`).join("")).join("")}</tbody></table>`;
 }
 
 // Form Builder: choose which products a Consumables field lists (retail is left out)
@@ -433,6 +590,7 @@ export function openProductPicker(products, selectedIds = []) {
       return ps.length ? `<div class="cs-pick-group"><h4>${esc(c.label)}</h4>${ps.map((p) => `
         <label class="fe-check" data-find="${esc(p.name.toLowerCase())}"><input type="checkbox" value="${esc(p.id)}"${sel.has(p.id) ? " checked" : ""} />
           ${esc(p.name)} <small class="muted">${isKitProduct(p) ? `Kit · ${esc(p.doseUnit)}`
+            : shared(p) ? `Shared across patients${p.dosePer ? ` · ${fmt(p.dosePer)} ${esc(p.doseUnit)} per ${esc(p.stockUnit)}` : ""}`
             : dosed(p) ? `${esc(p.doseUnit)} · ${fmt(p.dosePer)} per ${esc(p.stockUnit)}` : esc(unitPlural(p.stockUnit))}</small></label>`).join("")}</div>` : "";
     }).join("");
     const dlg = document.createElement("dialog");

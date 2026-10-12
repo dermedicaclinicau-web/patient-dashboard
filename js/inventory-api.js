@@ -28,7 +28,8 @@ export const MOVE_TYPES = {
   "kit-discard": "Discarded from kit", "kit-use": "Used in treatment", release: "Released from JT storage",
   "kit-borrow": "Borrowed from a colleague", "kit-count": "Kit count adjusted",
   "use-correct": "Usage corrected", "kit-correct": "Kit usage corrected",
-  investigation: "Investigation closed",
+  investigation: "Investigation closed",  "shared-open": "Opened for sharing", "shared-finish": "Opened one finished",
+  
 };
 export const EXPIRY_SOON_DAYS = 60;
 
@@ -205,7 +206,9 @@ export function cleanProduct(p = {}) {
     orderUnit: clip(p.orderUnit, 30) || "box",
     dosePer,
     doseUnit: dosePer ? (clip(p.doseUnit, 20) || "units") : "",
-    usage: p.usage === "kit" ? "kit" : "storage",
+    usage: ["kit", "shared"].includes(p.usage) ? p.usage : "storage",
+    perUse: p.usage === "shared" ? dosePerOf(p.perUse) : null,
+    openDays: p.usage === "shared" && intOrNull(p.openDays) ? Math.min(3650, intOrNull(p.openDays)) : null,    
     packSize: Math.max(1, intOrNull(p.packSize) || 1),
     cost: moneyOrNull(p.cost),
     price: moneyOrNull(p.price),
@@ -244,6 +247,12 @@ export async function saveProduct(id, data, staff) {
   if (!clean.name) throw new Error("Give the product a name.");
   if (clean.usage === "kit" && !clean.dosePer) {
     throw new Error(`Fill in how much is in each ${clean.stockUnit}, e.g. 100 units in each vial. Kit products are used per unit across patients.`);
+  }
+  if (clean.usage === "shared" && clean.perUse && !clean.dosePer) {
+    throw new Error(`Fill in how much is in each ${clean.stockUnit} (e.g. 10 mL), so the amount per use makes sense.`);
+  }
+  if (clean.usage === "shared" && clean.perUse && clean.dosePer && clean.perUse > clean.dosePer) {
+    throw new Error(`The amount per use is more than a whole ${clean.stockUnit} holds.`);
   }
     if (id) {
     await updateDoc(doc(db, "inv_products", id), { ...clean, ...stamp(staff) });
@@ -1149,19 +1158,58 @@ export async function answerLoan(loan, ok, note, staff) {
 // The record always keeps the amount given to the patient.
 export async function consumeInTx(tx, { submissionId, lines, patientId, patientName, formName, recordDate, staff }) {
   const me = uid();
-  const kitSnaps = new Map(), lotSnaps = new Map(), prodSnaps = new Map();
+  const kitSnaps = new Map(), lotSnaps = new Map(), prodSnaps = new Map(), openSnaps = new Map();
+  const getOnce = async (map, col, id) => { if (id && !map.has(id)) map.set(id, await tx.get(doc(db, col, id))); };
   for (const l of lines) {
     for (const r of l.rows) {
-      if (!r.ref) continue;
-      if (l.kind === "kit") { if (!kitSnaps.has(r.ref)) kitSnaps.set(r.ref, await tx.get(doc(db, "inv_kits", r.ref))); }
-      else if (!lotSnaps.has(r.ref)) lotSnaps.set(r.ref, await tx.get(doc(db, "inv_lots", r.ref)));
+      if (l.kind === "kit") await getOnce(kitSnaps, "inv_kits", r.ref);
+      else if (l.kind === "shared") { if (r.ref) await getOnce(openSnaps, "inv_open", r.ref); else await getOnce(lotSnaps, "inv_lots", r.lot); }
+      else await getOnce(lotSnaps, "inv_lots", r.ref);
     }
-    if (l.kind !== "kit" && !prodSnaps.has(l.productId)) prodSnaps.set(l.productId, await tx.get(doc(db, "inv_products", l.productId)));
+    if (l.kind !== "kit") await getOnce(prodSnaps, "inv_products", l.productId);
   }
 
-  const kits = new Map(), lots = new Map();
+  const kits = new Map(), lots = new Map(), opens = new Map(), newOpens = [];
+  const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+  // Shared products: one use of an opened container, or opening a new one from a batch
+  function sharedRow(l, r) {
+    const dose = r2(Math.max(0, Number(r.dose) || 0));
+    const finish = r.finish === true;
+    if (r.ref) {
+      const snap = openSnaps.get(r.ref);
+      if (!snap || !snap.exists() || snap.data().status !== "open") {
+        throw new Error(`${l.name}: that opened ${l.unit} has just been marked finished. Choose another, or open a new one.`);
+      }
+      const d = snap.data();
+      const s = opens.get(r.ref) || { uses: parseInt(d.uses, 10) || 0, used: Number(d.used) || 0, finish: false };
+      s.uses += 1;
+      s.used = r2(s.used + dose);
+      s.finish = s.finish || finish;
+      opens.set(r.ref, s);
+      return { openId: r.ref, batch: String(d.batch || ""), expiry: String(d.expiry || ""), amount: 1, taken: 1,
+        from: "open", dose, waste: 0, opened: false, finished: finish };
+    }
+    const snap = r.lot ? lotSnaps.get(r.lot) : null;
+    if (snap && snap.exists()) {
+      const d = snap.data();
+      const s = lots.get(r.lot) || { qty: Number(d.qty) || 0, loc: d.loc === "jt" ? "jt" : "shelf" };
+      if (s.qty >= 1) {
+        s.qty -= 1;
+        lots.set(r.lot, s);
+        const ref = doc(collection(db, "inv_open"));
+        const batch = String(d.batch || ""), expiry = String(d.expiry || "");
+        newOpens.push({ ref, productId: l.productId, name: l.name, batch, expiry, loc: s.loc, dose, finish });
+        return { openId: ref.id, batch, expiry, amount: 1, taken: 1, from: s.loc, dose, waste: 0, opened: true, finished: finish };
+      }
+    }
+    return { openId: "", batch: clip(r.batch, 40), expiry: KEY_RE.test(r.expiry || "") ? r.expiry : "", amount: 1, taken: 0,
+      from: l.loc === "jt" ? "jt" : "shelf", dose, waste: 0, opened: false, finished: false };
+  }
+
   const out = lines.map((l) => {
     const rows = l.rows.map((r) => {
+      if (l.kind === "shared") return sharedRow(l, r);
       const want = l.kind === "kit" ? round1(r.amount) : Math.max(0, Math.round(Number(r.amount) || 0));
       let taken = 0, from = l.kind === "kit" ? "kit" : (l.loc === "jt" ? "jt" : "shelf");
       if (l.kind === "kit") {
@@ -1185,17 +1233,18 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
           lots.set(r.ref, s);
         }
       }
-      const dose = l.kind === "kit" ? want : Math.round(Math.max(0, Number(r.dose) || 0) * 100) / 100;
+      const dose = l.kind === "kit" ? want : r2(Math.max(0, Number(r.dose) || 0));
       // One syringe per patient: whatever is left in the syringes opened is wastage
       const per = Number(l.dosePer) || 0;
-      const waste = l.kind !== "kit" && per && dose ? Math.max(0, Math.round((want * per - dose) * 100) / 100) : 0;
+      const waste = l.kind !== "kit" && per && dose ? Math.max(0, r2(want * per - dose)) : 0;
       return { ref: r.ref || "", batch: clip(r.batch, 40), expiry: KEY_RE.test(r.expiry || "") ? r.expiry : "", amount: want, taken, from, dose, waste };
     });
     const total = round1(rows.reduce((a, r) => a + r.amount, 0));
     const short = round1(rows.reduce((a, r) => a + (r.amount - r.taken), 0));
-    return { fid: l.fid, productId: clip(l.productId, 60), name: clip(l.name, 150), kind: l.kind === "kit" ? "kit" : "storage",
-      unit: clip(l.unit, 30), batchLabel: clip(l.batchLabel || "", 20), doseUnit: clip(l.doseUnit || "", 20), doseTotal: Math.round(rows.reduce((a, r) => a + r.dose, 0) * 100) / 100,
-      waste: Math.round(rows.reduce((a, r) => a + r.waste, 0) * 100) / 100,
+    return { fid: l.fid, productId: clip(l.productId, 60), name: clip(l.name, 150),
+      kind: ["kit", "shared"].includes(l.kind) ? l.kind : "storage",
+      unit: clip(l.unit, 30), batchLabel: clip(l.batchLabel || "", 20), doseUnit: clip(l.doseUnit || "", 20),
+      doseTotal: r2(rows.reduce((a, r) => a + r.dose, 0)), waste: r2(rows.reduce((a, r) => a + r.waste, 0)),
       total, short, rows, block: l.block === true };
   });
 
@@ -1213,13 +1262,35 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
     const stock = { shelf: Number(st.shelf) || 0, jt: Number(st.jt) || 0 };
     let touched = false;
     out.filter((l) => l.kind !== "kit" && l.productId === pid).forEach((l) => l.rows.forEach((r) => {
-      if (!r.taken) return;
-      stock[r.from] = Math.max(0, stock[r.from] - r.taken);
+      const n = l.kind === "shared" ? (r.opened ? 1 : 0) : r.taken;   // shared: only a newly opened one leaves stock
+      if (!n) return;
+      stock[r.from] = Math.max(0, stock[r.from] - n);
       touched = true;
     }));
     if (touched) tx.update(snap.ref, { stock, stockAt: serverTimestamp() });
   });
+  opens.forEach((s, id) => tx.update(doc(db, "inv_open", id), {
+    uses: s.uses, used: s.used, lastUsedAt: serverTimestamp(), updatedAt: serverTimestamp(),
+    ...(s.finish ? finishedFields("Empty", staff) : {}),
+  }));
+  newOpens.forEach((n) => {
+    const snap = prodSnaps.get(n.productId);
+    tx.set(n.ref, openDocData(n.productId, snap && snap.exists() ? snap.data() : { name: n.name }, n, staff, {
+      uses: 1, used: n.dose, lastUsedAt: serverTimestamp(), ...(n.finish ? finishedFields("Empty", staff) : {}),
+    }));
+  });
   out.forEach((l) => {
+    if (l.kind === "shared") {
+      const opened = l.rows.filter((r) => r.opened);
+      if (opened.length) {
+        logMove(tx, staff, {
+          type: "shared-open", productId: l.productId, productName: l.name, unit: l.unit,
+          lines: opened.map((r) => ({ loc: r.from, batch: r.batch, expiry: r.expiry, delta: -1 })),
+          reason: "Treatment", note: `Opened for ${patientName} · ${formName}`.slice(0, 500),
+        });
+      }
+      return;
+    }
     const moved = l.rows.filter((r) => r.taken);
     if (!moved.length) return;
     logMove(tx, staff, {
@@ -1228,7 +1299,7 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
       reason: "Treatment", note: [`${patientName} · ${formName}`,
         l.doseUnit && l.kind !== "kit" ? `${l.doseTotal} ${l.doseUnit} given` : "",
         l.waste ? `${l.waste} ${l.doseUnit} discarded` : ""].filter(Boolean).join(" · ").slice(0, 500),
-     });
+    });
   });
 
   const saved = out.map(({ fid, block, ...l }) => ({ ...l, rows: l.rows.map(({ ref, ...r }) => r) }));
@@ -1245,6 +1316,7 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
   out.forEach(({ fid }, i) => { (answers[fid] = answers[fid] || { lines: [] }).lines.push(saved[i]); });
   return { answers };
 }
+
 
 // Treatment records saved without enough stock (last 30 days) that haven't been resolved yet
 export async function listShortUsage() {
@@ -1595,6 +1667,7 @@ export async function correctUsage(id, changes, reason, staff) {
       const l = lines[c.li];
       const r = l && l.rows[c.ri];
       if (!r) throw new Error("This record has changed. Reload and try again.");
+      if (l.kind === "shared") throw new Error(`${l.name} is shared across patients, so its uses can't be corrected here.`);
       const kit = l.kind === "kit";
       const amount = kit ? round1(Math.max(0, Number(c.amount) || 0)) : Math.max(0, Math.round(Number(c.amount) || 0));
       const dose = kit ? amount : l.doseUnit ? Math.round(Math.max(0, Number(c.dose) || 0) * 100) / 100 : 0;
@@ -2029,4 +2102,117 @@ export async function listUnrecordedTreatments({ fromKey, toKey, productId = "" 
   });
   items.sort((a, b) => b.dateKey.localeCompare(a.dateKey) || a.sortMinutes - b.sortMinutes);
   return { configured: true, items };
+}
+
+/* ===================== Shared products: opened once, used across patients (e.g. numbing cream) ===================== */
+// Stock counts sealed containers only. Opening one takes it off stock and starts an open container (inv_open).
+// Each treatment record logs a use against it until someone marks it finished.
+
+export const isSharedProduct = (p) => !!p && p.usage === "shared";
+export const FINISH_REASONS = ["Empty", "Past its use-by date", "Expired", "Contaminated or dropped", "Other"];
+
+function normaliseOpen(d) {
+  const x = d.data() || {};
+  return {
+    id: d.id, productId: String(x.productId || ""), productName: String(x.productName || ""), unit: String(x.unit || "item"),
+    size: Number(x.size) || 0, doseUnit: String(x.doseUnit || ""), perUse: Number(x.perUse) || 0,
+    batch: String(x.batch || ""), expiry: String(x.expiry || ""), from: x.from === "jt" ? "jt" : "shelf",
+    status: x.status === "finished" ? "finished" : "open",
+    uses: Math.max(0, parseInt(x.uses, 10) || 0), used: Number(x.used) || 0,
+    useBy: KEY_RE.test(x.useBy || "") ? x.useBy : "",
+    openedBy: String(x.openedBy || ""), openedAt: toDate(x.openedAt), lastUsedAt: toDate(x.lastUsedAt),
+    finishedBy: String(x.finishedBy || ""), finishedAt: toDate(x.finishedAt), finishReason: String(x.finishReason || ""),
+  };
+}
+
+// Open containers, oldest opened first
+export async function listOpenContainers({ productId = "" } = {}) {
+  const snap = await getDocs(query(collection(db, "inv_open"), where("status", "==", "open")));
+  return snap.docs.map(normaliseOpen)
+    .filter((c) => !productId || c.productId === productId)
+    .sort((a, b) => (a.openedAt ? a.openedAt.getTime() : 0) - (b.openedAt ? b.openedAt.getTime() : 0));
+}
+
+// About how many uses a container should give (10 mL ÷ 2 mL = 5), or null
+export const expectedUses = (c) => (c && c.size > 0 && c.perUse > 0 ? Math.max(1, Math.round(c.size / c.perUse)) : null);
+
+// "" (fine), "soon" (use-by within 3 days) or "overdue"
+export function openState(c) {
+  if (!c || !KEY_RE.test(c.useBy || "")) return "";
+  const today = dayKey();
+  if (c.useBy < today) return "overdue";
+  return c.useBy <= addDaysKey(today, 3) ? "soon" : "";
+}
+
+function openDocData(productId, pd, { batch = "", expiry = "", loc = "shelf" }, staff, extra = {}) {
+  const size = dosePerOf(pd.dosePer) || 0;
+  const days = parseInt(pd.openDays, 10) || 0;
+  let useBy = days > 0 ? addDaysKey(dayKey(), days) : "";
+  if (KEY_RE.test(expiry || "") && (!useBy || expiry < useBy)) useBy = expiry; // never past the batch expiry
+  return {
+    productId, productName: String(pd.name || ""), unit: String(pd.stockUnit || "item"),
+    size, doseUnit: size ? String(pd.doseUnit || "") : "", perUse: dosePerOf(pd.perUse) || 0,
+    batch: clip(batch, 40), expiry: KEY_RE.test(expiry || "") ? expiry : "", from: loc === "jt" ? "jt" : "shelf",
+    status: "open", uses: 0, used: 0, useBy,
+    openedBy: who(staff), openedByUid: uid(), openedAt: serverTimestamp(), updatedAt: serverTimestamp(),
+    ...extra,
+  };
+}
+
+function finishedFields(reason, staff, note = "") {
+  return {
+    status: "finished", finishReason: clip(reason, 60), finishNote: clip(note, 300),
+    finishedAt: serverTimestamp(), finishedBy: who(staff), finishedByUid: uid(), updatedAt: serverTimestamp(),
+  };
+}
+
+// Open one now (from the product's stock window): 1 comes off that batch
+export async function openContainer(product, lot, staff) {
+  if (!isSharedProduct(product)) throw new Error("This product isn't set up as shared across patients.");
+  if (!lot || !["shelf", "jt"].includes(lot.loc)) throw new Error("Choose which one to open.");
+  const pRef = doc(db, "inv_products", product.id);
+  const lRef = doc(db, "inv_lots", lot.id);
+  const oRef = doc(collection(db, "inv_open"));
+  await runTransaction(db, async (tx) => {
+    const pSnap = await tx.get(pRef);
+    const lSnap = await tx.get(lRef);
+    if (!pSnap.exists()) throw new Error("This product no longer exists.");
+    const have = lSnap.exists() ? Number(lSnap.data().qty) || 0 : 0;
+    if (have < 1) throw new Error(`There are none of that one left in ${locLabel(lot.loc)}. Reload and try again.`);
+    const pd = pSnap.data();
+    const s = pd.stock || {};
+    const stock = { shelf: Number(s.shelf) || 0, jt: Number(s.jt) || 0 };
+    stock[lot.loc] = Math.max(0, stock[lot.loc] - 1);
+    tx.update(lRef, { qty: have - 1, updatedAt: serverTimestamp() });
+    tx.update(pRef, { stock, stockAt: serverTimestamp() });
+    tx.set(oRef, openDocData(product.id, pd, lot, staff));
+    logMove(tx, staff, {
+      type: "shared-open", productId: product.id, productName: product.name, unit: product.stockUnit,
+      lines: [{ loc: lot.loc, batch: lot.batch || "", expiry: lot.expiry || "", delta: -1 }],
+      reason: "Opened for sharing", ref: oRef.id,
+    });
+  });
+  return oRef.id;
+}
+
+// Mark an open container finished (empty, past its use-by…). Stock doesn't change: it left stock when it was opened.
+export async function finishContainer(c, { reason = "Empty", note = "" }, staff) {
+  const why = FINISH_REASONS.includes(reason) ? reason : "Other";
+  const text = clip(note, 300);
+  if (why === "Other" && !text) throw new Error("Add a note saying why.");
+  const ref = doc(db, "inv_open", c.id);
+  await runTransaction(db, async (tx) => {
+    const s = await tx.get(ref);
+    if (!s.exists()) throw new Error("This no longer exists.");
+    if (s.data().status !== "open") throw new Error("Someone has already marked this one finished. Reload to see it.");
+    const x = normaliseOpen(s);
+    const exp = expectedUses(x);
+    tx.update(ref, finishedFields(why, staff, text));
+    logMove(tx, staff, {
+      type: "shared-finish", productId: x.productId, productName: x.productName, unit: x.unit,
+      reason: why.slice(0, 60), ref: c.id, uses: x.uses, expectedUses: exp,
+      note: [x.batch && `Batch ${x.batch}`, `${x.uses} use${x.uses === 1 ? "" : "s"}${exp ? ` (expected about ${exp})` : ""}`,
+        x.used && x.doseUnit ? `${x.used} ${x.doseUnit} recorded` : "", text].filter(Boolean).join(" · ").slice(0, 500),
+    });
+  });
 }

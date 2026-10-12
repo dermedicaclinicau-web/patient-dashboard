@@ -3,7 +3,7 @@
 // differences go to Reporting → Variance for review.
 // The opening count covers the Shelf, JT storage and every injector's kit (for products due today).
 import {
-  INV_CATEGORIES, unitPlural, fefo, batchName, batchText, isKitProduct,
+  INV_CATEGORIES, unitPlural, fefo, batchName, batchText, isKitProduct, isSharedProduct,
   listProducts, listAllLots, listKits, countDue, countLocs, dayKey, listCountsOn, saveCount, myUid,
 } from "./inventory-api.js";
 import { can, isInjector } from "./perms.js";
@@ -144,7 +144,8 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       const bn = batchName(b.p).toLowerCase();
       return `<div class="sc-item${filled(b) ? " is-done" : ""}" data-i="${i}">
         <div class="sc-head"><strong>${esc(b.p.name)}</strong>
-          <small>Count ${esc(unitPlural(b.p.stockUnit))}${b.p.dosePer ? ` (each ${fmt(b.p.dosePer)} ${esc(b.p.doseUnit)})` : ""}</small>
+          <small>Count ${esc(unitPlural(b.p.stockUnit))}${b.p.dosePer ? ` (each ${fmt(b.p.dosePer)} ${esc(b.p.doseUnit)})` : ""}${
+            isSharedProduct(b.p) ? ` · sealed ones only, not the opened one` : ""}</small>
           ${b.extra ? '<button type="button" class="hx-x" data-act="rm-block" aria-label="Remove">×</button>' : ""}</div>
         ${b.rows.map((r, j) => rowHtml(b, r, j)).join("") || `<p class="tb-none">No ${esc(bn)}s on record here. Use “+ Another ${esc(bn)} found”.</p>`}
         ${b.p.tracked ? `<button type="button" class="cs-link" data-act="found">+ Another ${esc(bn)} found</button>` : ""}
