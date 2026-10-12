@@ -2,7 +2,7 @@
 import {
   PO_STATUS, REQ_STATUS, LOCATIONS, locLabel, plural, unitPlural, lowAt, suggestOrder, reqNumber, batchName,
   getPo, savePo, markPoSent, cancelPo, poTotals, lineFromProduct, cleanPoLine, supplierSnapshot,
-  listProducts, listSuppliers, listRequests,
+  listProducts, listSuppliers, listRequests, supplierTerms, suppliesProduct, suggestOrderFor,
 } from "./inventory-api.js";
 import { renderDeliveries } from "./po-deliveries.js";
 import { buildPoDocument } from "./po-document.js";
@@ -74,6 +74,9 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
   let dirty = false, saving = false, timer = null, reqs = null;
   const editable = () => canOrder && po.status === "draft";
   const supplierFull = () => suppliers.find((s) => s.id === po.supplierId) || null;
+    // This PO's supplier's code, price and pack for a product. Not linked: no code or price (the PDF says "to be confirmed").
+  const termsFor = (p) => supplierTerms(p, po.supplierId)
+    || { supplierCode: "", cost: null, orderUnit: p.orderUnit, packSize: p.packSize };
 
   root.innerHTML = `
     <div class="ff-wrap tb-wrap">
@@ -182,8 +185,8 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
   }
 
   function productOptions(sel) {
-    const mine = products.filter((p) => p.active && p.supplierId === po.supplierId);
-    const others = products.filter((p) => p.active && p.supplierId !== po.supplierId);
+    const mine = products.filter((p) => p.active && suppliesProduct(p, po.supplierId));
+    const others = products.filter((p) => p.active && !suppliesProduct(p, po.supplierId));
     const current = sel ? byId.get(sel) : null;
     const opt = (p) => `<option value="${esc(p.id)}"${p.id === sel ? " selected" : ""}>${esc(p.name)}</option>`;
     return `<option value="">Choose a product…</option>${
@@ -306,7 +309,19 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     const el = e.target;
     if (el.dataset.k === "supplierId") {
       const s = suppliers.find((x) => x.id === el.value);
-      if (s) { po.supplierId = s.id; po.supplier = supplierSnapshot(s); renderAll(); changed(); }
+      if (!s) return;
+      po.supplierId = s.id;
+      po.supplier = supplierSnapshot(s);
+      // Each product line switches to the new supplier's code, price and pack, keeping the same amount of stock
+      po.lines.forEach((l) => {
+        const p = l.productId && byId.get(l.productId);
+        if (!p) return;
+        const t = termsFor(p);
+        const stock = l.qty * Math.max(1, l.packSize);
+        Object.assign(l, { supplierCode: t.supplierCode, unitCost: t.cost, orderUnit: t.orderUnit, packSize: t.packSize,
+          qty: Math.max(1, Math.ceil(stock / Math.max(1, t.packSize))) });
+      });
+      renderAll(); changed();
       return;
     }
     const row = el.closest("[data-i]");
@@ -315,8 +330,9 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     if (el.dataset.l === "product") {
       const p = byId.get(el.value);
       if (!p) return;
-      Object.assign(l, { productId: p.id, name: p.name, supplierCode: p.supplierCode, orderUnit: p.orderUnit,
-        packSize: p.packSize, stockUnit: p.stockUnit, dosePer: p.dosePer, doseUnit: p.doseUnit, unitCost: p.cost });
+      const t = termsFor(p);
+      Object.assign(l, { productId: p.id, name: p.name, supplierCode: t.supplierCode, orderUnit: t.orderUnit,
+        packSize: t.packSize, stockUnit: p.stockUnit, dosePer: p.dosePer, doseUnit: p.doseUnit, unitCost: t.cost });
       renderLeft(); renderRight(); changed();
     } else if (el.dataset.l === "loc") {
       l.loc = el.value;
@@ -538,9 +554,9 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       if (names.length) names[names.length - 1].focus();
     } else if (act === "add-low") {
       let n = 0;
-      products.filter((p) => p.active && p.supplierId === po.supplierId).forEach((p) => LOCATIONS.forEach((loc) => {
+      products.filter((p) => p.active && suppliesProduct(p, po.supplierId)).forEach((p) => LOCATIONS.forEach((loc) => {
         if (!lowAt(p, loc.key) || po.lines.some((l) => l.productId === p.id && l.loc === loc.key)) return;
-        po.lines.push(lineFromProduct(p, suggestOrder(p, loc.key), loc.key));
+        po.lines.push(lineFromProduct(p, suggestOrderFor(p, loc.key, po.supplierId), loc.key, [], po.supplierId));
         n++;
       }));
       if (!n) { showToast("Nothing else from this supplier is low."); return; }

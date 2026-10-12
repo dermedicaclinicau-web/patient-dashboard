@@ -3876,3 +3876,10 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .inv-imp-bar span { display: block; height: 100%; background: var(--primary); transition: width .2s; }
 .inv-imp-fail { font-size: .85rem; max-height: 30vh; overflow: auto; padding-left: 1.1rem; }
 .inv-flag.is-ok { background: #ecfdf3; color: #027a48; }
+
+/* ---------- Products with several suppliers ---------- */
+.inv-alts { display: grid; gap: .4rem; margin-bottom: .35rem; }
+.inv-alt { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) 110px minmax(0, 1fr) 110px auto; gap: .4rem; align-items: center; }
+.inv-alt input { padding: .45rem .6rem; border: 1px solid var(--border, #d0d5dd); border-radius: 8px; font: inherit; font-size: .88rem; min-width: 0; }
+.rq-from { padding: .35rem .5rem; font-size: .85rem; max-width: 260px; }
+@media (max-width: 760px) { .inv-alt { grid-template-columns: 1fr 1fr; } .inv-alt .ib-tool { justify-self: end; } }

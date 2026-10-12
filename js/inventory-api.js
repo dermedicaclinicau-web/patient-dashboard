@@ -146,6 +146,45 @@ export function packText(p) {
 export const batchName = (p) => (p && p.batchLabel) || "Batch";
 export const batchText = (p, batch) => (batch ? `${batchName(p)} ${batch}` : "");
 
+// Every supplier a product can be ordered from, main first, each with its own code, price and pack
+export function productSuppliers(p) {
+  if (!p) return [];
+  const main = p.supplierId ? [{
+    supplierId: p.supplierId, supplierCode: p.supplierCode || "", cost: p.cost ?? null,
+    orderUnit: p.orderUnit, packSize: p.packSize, main: true,
+  }] : [];
+  return main.concat((p.altSuppliers || []).map((a) => ({
+    supplierId: a.supplierId, supplierCode: a.supplierCode || "", cost: a.cost ?? null,
+    orderUnit: a.orderUnit || p.orderUnit, packSize: a.packSize || p.packSize, main: false,
+  })));
+}
+export const supplierTerms = (p, sid) => productSuppliers(p).find((s) => s.supplierId === sid) || null;
+export const suppliesProduct = (p, sid) => !!sid && !!supplierTerms(p, sid);
+
+// Suggested order to bring a storage up to about twice its reorder level, in one supplier's units
+export function suggestOrderFor(p, loc, sid) {
+  const t = supplierTerms(p, sid);
+  const r = Number(p.reorder[loc]) || 0;
+  const need = Math.max(1, Math.max(r * 2, r + 1) - (Number(p.stock[loc]) || 0));
+  return Math.max(1, Math.ceil(need / Math.max(1, (t && t.packSize) || p.packSize)));
+}
+
+// Other suppliers a product can be ordered from. Their own code, price and pack are optional
+// (blank = the same as the main supplier). The main supplier is never repeated here.
+function cleanAltSuppliers(list, mainId) {
+  const seen = new Set([mainId]);
+  return (Array.isArray(list) ? list : []).map((a) => {
+    const pack = intOrNull(a && a.packSize);
+    return {
+      supplierId: clip(a && a.supplierId, 60),
+      supplierCode: clip(a && a.supplierCode, 60),
+      cost: moneyOrNull(a && a.cost),
+      orderUnit: clip(a && a.orderUnit, 30),
+      packSize: pack && pack >= 1 ? pack : null,
+    };
+  }).filter((a) => a.supplierId && !seen.has(a.supplierId) && seen.add(a.supplierId)).slice(0, 10);
+}
+
 export function cleanProduct(p = {}) {
   const r = p.reorder || {};
   const dosePer = dosePerOf(p.dosePer);
@@ -155,6 +194,7 @@ export function cleanProduct(p = {}) {
     brand: clip(p.brand, 80),
     supplierId: clip(p.supplierId, 60),
     supplierCode: clip(p.supplierCode, 60),
+    altSuppliers: cleanAltSuppliers(p.altSuppliers, clip(p.supplierId, 60)),
     barcode: clip(p.barcode, 60),
     stockUnit: clip(p.stockUnit, 30) || "item",
     orderUnit: clip(p.orderUnit, 30) || "box",
@@ -442,11 +482,13 @@ export function cleanPoLine(l = {}) {
   };
 }
 
-export function lineFromProduct(p, qty, loc, sources = []) {
+// A PO line for a product, using the chosen supplier's code, price and pack (the main supplier's if none is given)
+export function lineFromProduct(p, qty, loc, sources = [], supplierId = "") {
+  const t = supplierTerms(p, supplierId || p.supplierId) || {};
   return cleanPoLine({
-    productId: p.id, name: p.name, supplierCode: p.supplierCode, qty, orderUnit: p.orderUnit,
-    packSize: p.packSize, stockUnit: p.stockUnit, dosePer: p.dosePer, doseUnit: p.doseUnit,
-    unitCost: p.cost, loc, sources,
+    productId: p.id, name: p.name, supplierCode: t.supplierCode ?? p.supplierCode, qty,
+    orderUnit: t.orderUnit || p.orderUnit, packSize: t.packSize || p.packSize, stockUnit: p.stockUnit,
+    dosePer: p.dosePer, doseUnit: p.doseUnit, unitCost: t.cost !== undefined ? t.cost : p.cost, loc, sources,
   });
 }
 

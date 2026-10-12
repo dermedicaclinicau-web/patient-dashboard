@@ -1,6 +1,6 @@
 // Inventory → Products: import many products (and their opening stock) from a CSV, or export them to one.
 import {
-  INV_CATEGORIES, WEEKDAYS, catLabel, plural, cleanProduct, saveProduct, saveSupplier, applyStock,
+  INV_CATEGORIES, WEEKDAYS, catLabel, plural, cleanProduct, saveProduct, saveSupplier, applyStock, productSuppliers,
 } from "./inventory-api.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -17,6 +17,7 @@ const COLS = [
   { key: "brand", label: "Brand" },
   { key: "supplier", label: "Supplier" },
   { key: "supplierCode", label: "Supplier code", alias: ["code", "sku", "product code"] },
+  { key: "altSuppliers", label: "Other suppliers", alias: ["more suppliers", "alt suppliers", "also from"] },
   { key: "barcode", label: "Barcode" },
   { key: "stockUnit", label: "Given as", alias: ["stock unit", "unit"] },
   { key: "dosePer", label: "Amount in each", alias: ["dose per", "amount each"] },
@@ -42,7 +43,7 @@ const COLS = [
 ];
 
 const EXAMPLES = [
-  { name: "Xeomin 100 units", category: "Injectables", brand: "Merz", supplier: "Merz Aesthetics", stockUnit: "vial", dosePer: "100",
+  { name: "Xeomin 100 units", category: "Injectables", brand: "Merz", supplier: "Merz Aesthetics", altSuppliers: "Medical Supplies Co | MS-XEO100 | 310", stockUnit: "vial", dosePer: "100",
     doseUnit: "units", orderUnit: "vial", packSize: "1", usage: "Kit", cost: "300", tracked: "Yes", batchLabel: "Lot",
     reShelf: "2", countFreq: "Daily", countWhere: "Both", active: "Yes", shelfQty: "4", batch: "ABC123", expiry: "31/03/2027" },
   { name: "Xeomin 100 units", jtQty: "6", batch: "DEF456", expiry: "30/06/2027" },
@@ -180,6 +181,11 @@ export function exportProductsCsv(products, suppliers) {
   const where = { both: "Both", shelf: "Shelf", jt: "JT" };
   const rows = products.map((p) => ({
     name: p.name, category: catLabel(p.category), brand: p.brand, supplier: supName(p.supplierId), supplierCode: p.supplierCode,
+    altSuppliers: productSuppliers(p).filter((t) => !t.main).map((t) => {
+      const parts = [supName(t.supplierId), t.supplierCode, t.cost ?? ""].map(String);
+      while (parts.length > 1 && !parts[parts.length - 1]) parts.pop();
+      return parts.join(" | ");
+    }).join("; "),
     barcode: p.barcode, stockUnit: p.stockUnit, dosePer: p.dosePer ?? "", doseUnit: p.doseUnit, orderUnit: p.orderUnit,
     packSize: p.packSize, usage: p.usage === "kit" ? "Kit" : "Shelf", cost: p.cost ?? "", price: p.price ?? "",
     tracked: p.tracked ? "Yes" : "No", batchLabel: p.batchLabel === "Batch" ? "" : p.batchLabel,
@@ -259,6 +265,30 @@ function buildPlan(text, products, suppliers, opts) {
       if (v("usage")) { const u = usageKey(v("usage")); if (u) put("usage", u); else it.errors.push(`Used from should be Shelf or Kit, not "${v("usage")}"`); }
       if (v("countFreq")) { const f = freqKey(v("countFreq")); if (f) put("countFreq", f); else it.errors.push(`Count should be Never, Daily, Weekly or Monthly, not "${v("countFreq")}"`); }
       if (v("countWhere")) { const w = whereKey(v("countWhere")); if (w) put("countWhere", w); else it.errors.push(`Count in should be Both, Shelf or JT, not "${v("countWhere")}"`); }
+      if (v("altSuppliers")) {
+        if (/^(none|-)$/i.test(v("altSuppliers"))) put("altSuppliers", []);
+        else {
+          const alts = [];
+          v("altSuppliers").split(";").map((x) => x.trim()).filter(Boolean).forEach((part) => {
+            const [nm = "", code = "", cost = ""] = part.split("|").map((x) => x.trim());
+            if (!nm) return;
+            const c = numVal(cost);
+            if (Number.isNaN(c)) { it.errors.push(`Other suppliers: price "${cost}" for ${nm} isn't a number`); return; }
+            const s = supByName.get(norm(nm));
+            if (!s && !opts.createSuppliers) { it.notes.push(`Other supplier "${nm}" isn't in the list, left out`); return; }
+            if (!s) newSuppliers.set(norm(nm), nm);
+            // Keep a different pack already set in the product editor for this supplier
+            const prev = it.existing && s ? (it.existing.altSuppliers || []).find((a) => a.supplierId === s.id) : null;
+            alts.push({
+              supplierId: s ? s.id : "", pendingName: s ? "" : nm,
+              supplierCode: code || (prev && prev.supplierCode) || "",
+              cost: c === undefined ? (prev ? prev.cost : null) : c,
+              orderUnit: prev ? prev.orderUnit : "", packSize: prev ? prev.packSize : null,
+            });
+          });
+          put("altSuppliers", alts);
+        }
+      }
       it.rawDay = v("countDay");
       if (v("supplier")) {
         it.supplierText = v("supplier");
@@ -337,7 +367,8 @@ async function runImport(plan, staff, onProgress) {
   const res = { created: 0, updated: 0, stocked: 0, failed: [] };
   const supIds = new Map();
   for (const name of plan.newSuppliers) {
-    if (!todo.some((it) => norm(it.newSupplier) === norm(name))) continue;
+    if (!todo.some((it) => norm(it.newSupplier) === norm(name)
+      || (it.data.altSuppliers || []).some((a) => a.pendingName && norm(a.pendingName) === norm(name)))) continue;
     try { supIds.set(norm(name), await saveSupplier("", { name, active: true }, staff)); }
     catch (err) { res.failed.push({ name: `Supplier ${name}`, line: "", msg: errText(err) }); }
   }
@@ -347,6 +378,8 @@ async function runImport(plan, staff, onProgress) {
     try {
       const data = { ...it.data };
       if (it.newSupplier) data.supplierId = supIds.get(norm(it.newSupplier)) || "";
+      data.altSuppliers = (data.altSuppliers || []).map((a) => (a.pendingName
+        ? { ...a, supplierId: supIds.get(norm(a.pendingName)) || "" } : a));
       id = await saveProduct(id, data, staff);
       if (it.existing) res.updated++; else res.created++;
     } catch (err) {
@@ -443,6 +476,7 @@ export function openProductImport({ products, suppliers, staff, onDone }) {
             <ul>
               <li><strong>Name</strong> is the only required column. A name that matches an existing product updates it; blank cells leave its details as they are.</li>
               <li><strong>Category</strong>: ${INV_CATEGORIES.map((c) => esc(c.label)).join(", ")}.</li>
+              <li><strong>Supplier</strong> is the main one. <strong>Other suppliers</strong>: <em>Name | their code | their price</em>, several separated by <em>;</em> (code and price optional). Type <em>None</em> to clear them.</li>
               <li><strong>Given as</strong> what staff take off the Shelf (vial, syringe, needle). <strong>Bought as</strong> and <strong>Pack size</strong> when it comes boxed (box of 100).</li>
               <li><strong>Amount in each</strong> and <strong>Measured in</strong> for injectables (100 units, 1 mL). <strong>Used from</strong>: Shelf, or Kit for products carried in injectors' kits.</li>
               <li><strong>Batch and expiry</strong>: Yes or No. <strong>Count</strong>: Never, Daily, Weekly (Count day: Monday…) or Monthly (Count day: 1–28 or Last).</li>

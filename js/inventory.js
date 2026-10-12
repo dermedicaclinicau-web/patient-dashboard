@@ -4,6 +4,7 @@ import {
   expiryState, fefo, reqNumber, myUid, suggestOrder, listProducts, saveProduct, listSuppliers, saveSupplier, listAllLots, listMoves,
   applyStock, listRequests, setRequestStatus, cancelRequest, getRequestSettings, saveRequestSettings,
   listPos, createPo, poTotals, itemOnPo, lineFromProduct, cleanPoLine,
+  productSuppliers, supplierTerms, suppliesProduct, suggestOrderFor,
 } from "./inventory-api.js";
 import { mountPurchaseOrder } from "./purchase-order.js";
 import { fetchStaffList } from "./task-types.js";
@@ -97,9 +98,11 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
   const st = {
     products: [], suppliers: [], lots: [], requests: [], q: "", cat: "", view: "all", flagged: false, showInactive: false,
-    reqFilter: "open", reqView: "list", pos: [], poFilter: "draft",
+    reqFilter: "open", reqView: "list", pos: [], poFilter: "draft", lineSup: {},
   };
   const supplierOf = (id) => st.suppliers.find((s) => s.id === id) || null;
+  // "Merz Aesthetics / Medical Supplies Co" (main first)
+  const suppliersText = (p) => productSuppliers(p).map((t) => (supplierOf(t.supplierId) || {}).name).filter(Boolean).join(" / ");
   const lotsOf = (pid) => st.lots.filter((l) => l.productId === pid).sort(fefo);
   const labelOf = (pid) => batchName(st.products.find((p) => p.id === pid));
   function flags(p) {
@@ -170,7 +173,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     return `
       <button type="button" class="inv-row" data-product="${esc(p.id)}">
         <span class="inv-name"><strong>${esc(p.name)}</strong>
-          <small>${esc([p.brand, sup && sup.name, p.tracked ? "Batch & expiry" : ""].filter(Boolean).join(" · "))}</small></span>
+          <small>${esc([p.brand, suppliersText(p), p.tracked ? "Batch & expiry" : ""].filter(Boolean).join(" · "))}</small></span>
         <span class="inv-flags">${flags(p).map(([t, l]) => `<span class="inv-flag is-${t}">${esc(l)}</span>`).join("")}</span>
         ${st.view !== "jt" ? qty("shelf") : ""}${st.view !== "shelf" ? qty("jt") : ""}
         <span class="inv-unit">${esc(unitPlural(p.stockUnit))}</span>
@@ -189,7 +192,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const q = st.q.trim().toLowerCase();
     const rows = st.products.filter((p) => p.active
       && (!st.cat || p.category === st.cat)
-      && (!q || `${p.name} ${p.brand} ${(supplierOf(p.supplierId) || {}).name || ""}`.toLowerCase().includes(q))
+      && (!q || `${p.name} ${p.brand} ${suppliersText(p)}`.toLowerCase().includes(q))
       && (!st.flagged || flags(p).length));
     if (!rows.length) { list.innerHTML = '<div class="tm-empty">No products match.</div>'; return; }
     list.innerHTML = INV_CATEGORIES.map((c) => {
@@ -207,7 +210,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       return `
         <div class="inv-prow${p.active ? "" : " is-off"}">
           <span class="inv-name"><strong>${esc(p.name)}${p.active ? "" : ' <em class="inv-off">Inactive</em>'}</strong>
-            <small>${esc([packText(p), sup && sup.name, p.supplierCode && `Code ${p.supplierCode}`].filter(Boolean).join(" · "))}</small></span>
+            <small>${esc([packText(p), suppliersText(p), p.supplierCode && `Code ${p.supplierCode}`].filter(Boolean).join(" · "))}</small></span>
           <span class="inv-price">${esc([p.cost !== null && `Cost ${money(p.cost)} / ${p.orderUnit}`, p.price !== null && `Retail ${money(p.price)}`].filter(Boolean).join(" · "))}</span>
           ${p.tracked ? '<span class="inv-flag is-info">Batch &amp; expiry</span>' : '<span></span>'}
           ${canManage ? `<button type="button" class="lh-btn" data-edit-product="${esc(p.id)}">Edit</button>` : "<span></span>"}
@@ -235,7 +238,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       return;
     }
     body.innerHTML = `<div class="inv-sups">${st.suppliers.map((s) => {
-      const n = st.products.filter((p) => p.supplierId === s.id && p.active).length;
+      const n = st.products.filter((p) => p.active && suppliesProduct(p, s.id)).length;
       return `
         <article class="inv-sup${s.active ? "" : " is-off"}">
           <div class="inv-sup-head"><strong>${esc(s.name)}</strong>${s.active ? "" : '<em class="inv-off">Inactive</em>'}
@@ -281,10 +284,14 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           <label class="lh-field"><span class="lh-label">Category</span><select class="fb-select" name="category">${INV_CATEGORIES.map((c) =>
             `<option value="${c.key}"${x.category === c.key ? " selected" : ""}>${esc(c.label)}</option>`).join("")}</select></label>
           <label class="lh-field"><span class="lh-label">Brand (optional)</span><input name="brand" maxlength="80" value="${val(x.brand)}" /></label>
-          <label class="lh-field"><span class="lh-label">Supplier</span><select class="fb-select" name="supplierId">
+          <label class="lh-field"><span class="lh-label">Main supplier</span><select class="fb-select" name="supplierId">
             <option value="">No supplier yet</option>${st.suppliers.map((s) =>
               `<option value="${esc(s.id)}"${x.supplierId === s.id ? " selected" : ""}>${esc(s.name)}</option>`).join("")}</select></label>
-          <label class="lh-field"><span class="lh-label">Supplier's product code (optional)</span><input name="supplierCode" maxlength="60" value="${val(x.supplierCode)}" /></label>
+          <label class="lh-field"><span class="lh-label">Main supplier's product code (optional)</span><input name="supplierCode" maxlength="60" value="${val(x.supplierCode)}" /></label>
+          <div class="lh-field inv-span"><span class="lh-label">Other suppliers (optional)</span>
+            <div class="inv-alts" data-role="alts">${(x.altSuppliers || []).map(altRow).join("")}</div>
+            <button type="button" class="hx-add" data-act="alt-add">+ Add another supplier</button>
+            <small class="fe-note">The ordering team can choose any of these when ordering. Price and pack can differ; leave them blank if they're the same as the main supplier.</small></div>
 
           <label class="lh-field"><span class="lh-label">Given to staff as</span>
             <input name="stockUnit" maxlength="30" placeholder="e.g. vial, syringe, needle" value="${val(x.stockUnit)}" />
@@ -390,6 +397,16 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     syncCount();
     form.elements.countFreq.addEventListener("change", syncCount);
     dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    dlg.addEventListener("click", (e) => {
+      if (e.target.closest('[data-act="alt-add"]')) {
+        dlg.querySelector('[data-role="alts"]').insertAdjacentHTML("beforeend", altRow());
+        const rows = dlg.querySelectorAll("[data-alt]");
+        rows[rows.length - 1].querySelector("select").focus();
+        return;
+      }
+      const rm = e.target.closest('[data-act="alt-remove"]');
+      if (rm) rm.closest("[data-alt]").remove();
+    });
 
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -401,6 +418,13 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         await saveProduct(p ? p.id : "", {
           name: f.name.value, category: f.category.value, brand: f.brand.value, supplierId: f.supplierId.value,
           supplierCode: f.supplierCode.value,
+          altSuppliers: [...form.querySelectorAll("[data-alt]")].map((r) => ({
+            supplierId: r.querySelector('[data-a="supplierId"]').value,
+            supplierCode: r.querySelector('[data-a="supplierCode"]').value,
+            cost: r.querySelector('[data-a="cost"]').value,
+            orderUnit: r.querySelector('[data-a="orderUnit"]').value,
+            packSize: r.querySelector('[data-a="packSize"]').value,
+          })).filter((a) => a.supplierId),
           stockUnit: f.stockUnit.value,
           orderUnit: f.orderUnit.value.trim() || f.stockUnit.value,
           packSize: f.packSize.value, cost: f.cost.value, price: f.price.value, barcode: f.barcode.value,
@@ -429,6 +453,17 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const isNew = !s;
     const x = s || { active: true };
     const val = (v) => esc(v || "");
+    const altRow = (a = {}) => `
+      <div class="inv-alt" data-alt>
+        <select class="fb-select" data-a="supplierId" aria-label="Supplier"><option value="">Choose a supplier…</option>${
+          st.suppliers.filter((s) => s.active || s.id === a.supplierId).map((s) =>
+            `<option value="${esc(s.id)}"${s.id === a.supplierId ? " selected" : ""}>${esc(s.name)}</option>`).join("")}</select>
+        <input data-a="supplierCode" maxlength="60" placeholder="Their code" value="${val(a.supplierCode)}" aria-label="Their product code" />
+        <input data-a="cost" type="number" min="0" step="0.01" placeholder="Their price $" value="${val(a.cost)}" aria-label="Their price" />
+        <input data-a="orderUnit" maxlength="30" placeholder="Bought as (same)" value="${val(a.orderUnit)}" aria-label="Bought as" />
+        <input data-a="packSize" type="number" min="1" step="1" placeholder="How many (same)" value="${val(a.packSize)}" aria-label="How many in each" />
+        <button type="button" class="ib-tool is-danger" data-act="alt-remove" aria-label="Remove this supplier" title="Remove">×</button>
+      </div>`;
     const dlg = openDialog("inv-dlg", `
       <form class="lh-form" novalidate>
         <div class="lh-dialog-head"><h3>${isNew ? "New supplier" : `Edit ${esc(x.name)}`}</h3>
@@ -686,10 +721,21 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
                 <td>${esc(qtyText(p, l.qty))}</td></tr>`;
             }).join("")}</tbody></table>`
           : '<p class="tb-none">No batches in stock.</p>'}</div>` : ""}
-        ${sup ? `<div class="inv-pd-sec"><h4>Supplier</h4><p class="inv-pd-sup"><strong>${esc(sup.name)}</strong>${
-          [sup.contactName, sup.phone && `<a href="tel:${esc(sup.phone.replace(/\s+/g, ""))}">${esc(sup.phone)}</a>`,
-            sup.email && `<a href="mailto:${esc(sup.email)}">${esc(sup.email)}</a>`, p.supplierCode && `Code ${esc(p.supplierCode)}`]
-            .filter(Boolean).map((x) => ` · ${x.startsWith("<") ? x : esc(x)}`).join("")}</p></div>` : ""}
+        ${productSuppliers(p).length ? `<div class="inv-pd-sec"><h4>Supplier${productSuppliers(p).length > 1 ? "s" : ""}</h4>${
+          productSuppliers(p).map((t) => {
+            const s = supplierOf(t.supplierId);
+            if (!s) return "";
+            const bits = [
+              s.contactName && esc(s.contactName),
+              s.phone && `<a href="tel:${esc(s.phone.replace(/\s+/g, ""))}">${esc(s.phone)}</a>`,
+              s.email && `<a href="mailto:${esc(s.email)}">${esc(s.email)}</a>`,
+              t.supplierCode && `Code ${esc(t.supplierCode)}`,
+              t.cost !== null && esc(`${money(t.cost)} / ${t.orderUnit}`),
+              (t.orderUnit !== p.orderUnit || t.packSize !== p.packSize) && esc(`${t.orderUnit} of ${plural(t.packSize, p.stockUnit)}`),
+            ].filter(Boolean);
+            return `<p class="inv-pd-sup"><strong>${esc(s.name)}</strong>${t.main ? ' <span class="inv-flag is-info">Main</span>' : ""}${
+              bits.map((b) => ` · ${b}`).join("")}</p>`;
+          }).join("")}</div>` : ""}
         <div class="inv-pd-sec"><h4>Recent activity</h4><div data-role="moves"><p class="tb-none">Loading…</p></div></div>`;
       listMoves({ productId: id, max: 15 })
         .then((m) => { const el = box.querySelector('[data-role="moves"]'); if (el) el.innerHTML = movesHtml(m, false, labelOf); })
@@ -773,23 +819,36 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       </article>`;
   }
 
-    // Open items that aren't on a purchase order yet, added up per supplier (in the supplier's order units)
+  // Open items not on a purchase order yet, added up per product + storage, then placed under the supplier
+  // they'll be ordered from: the one chosen here, otherwise the main supplier. Quantities are in that supplier's units.
   function openItemsBySupplier(rows) {
-    const groups = new Map();
+    const lines = new Map();
     rows.forEach((r) => r.items.forEach((it, i) => {
       if (itemOnPo(r.id, i, st.pos)) return;
       const p = st.products.find((x) => x.id === it.productId) || null;
-      const sid = (p && p.supplierId) || it.supplierId || "";
-      if (!groups.has(sid)) groups.set(sid, new Map());
-      const lines = groups.get(sid);
       const key = `${it.productId || it.name.toLowerCase()}|${r.loc}`;
-      const line = lines.get(key) || { p, name: it.name, unit: p ? p.orderUnit : it.unit, qty: 0, loc: r.loc, reqs: [], urgent: false, sources: [] };
-      line.qty += p && it.unitKind === "stock" ? Math.ceil(it.qty / Math.max(1, p.packSize)) : it.qty;
+      const line = lines.get(key) || { key, p, name: it.name, rawUnit: it.unit, rawQty: 0, stockQty: 0, loc: r.loc,
+        reqs: [], urgent: false, sources: [], fallbackSid: it.supplierId || "" };
+      if (p) line.stockQty += it.unitKind === "stock" ? it.qty : it.qty * Math.max(1, p.packSize);
+      else line.rawQty += it.qty;
       line.reqs.push(reqNumber(r));
       line.urgent = line.urgent || r.urgency === "urgent";
       line.sources.push({ r: r.id, i });
       lines.set(key, line);
     }));
+    const groups = new Map();
+    lines.forEach((l) => {
+      const options = l.p ? productSuppliers(l.p) : [];
+      const chosen = st.lineSup[l.key];
+      const sid = options.some((o) => o.supplierId === chosen) ? chosen : (l.p && l.p.supplierId) || l.fallbackSid || "";
+      const t = l.p ? supplierTerms(l.p, sid) : null;
+      const pack = Math.max(1, (t && t.packSize) || (l.p && l.p.packSize) || 1);
+      const out = { ...l, sid, options,
+        qty: l.p ? Math.max(1, Math.ceil(l.stockQty / pack)) : l.rawQty,
+        unit: l.p ? (t && t.orderUnit) || l.p.orderUnit : l.rawUnit };
+      if (!groups.has(sid)) groups.set(sid, []);
+      groups.get(sid).push(out);
+    });
     return groups;
   }
 
@@ -798,9 +857,14 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     if (!groups.size) return '<div class="tm-empty">Everything requested is already on a purchase order.</div>';
     const order = [...groups.keys()].sort((a, b) => !a ? 1 : !b ? -1
       : ((supplierOf(a) || {}).name || "").localeCompare((supplierOf(b) || {}).name || "", "en-AU"));
+    const fromCell = (l) => (l.options.length > 1
+      ? `<select class="fb-select rq-from" data-linesup="${esc(l.key)}" aria-label="Order from">${l.options.map((o) =>
+          `<option value="${esc(o.supplierId)}"${o.supplierId === l.sid ? " selected" : ""}>${esc((supplierOf(o.supplierId) || {}).name || "Unknown supplier")}${
+            o.cost !== null ? ` · ${money(o.cost)}/${o.orderUnit}` : ""}${o.main ? " (main)" : ""}</option>`).join("")}</select>`
+      : '<small class="muted">Only supplier</small>');
     return order.map((sid) => {
       const s = supplierOf(sid);
-      const lines = [...groups.get(sid).values()];
+      const lines = groups.get(sid);
       return `
         <section class="rq-sup">
           <div class="rq-sup-top">
@@ -808,9 +872,9 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
               <small>${esc(s ? [s.contactName, s.email, s.phone].filter(Boolean).join(" · ") : "New items, or products without a supplier")}</small></div>
             ${canMove ? `<button type="button" class="lh-btn is-primary" data-mkpo="${esc(sid)}">${sid ? "Create purchase order" : "Create purchase order…"}</button>` : ""}
           </div>
-          <table class="inv-table"><thead><tr><th>Product</th><th>Quantity</th><th>For</th><th>Requests</th></tr></thead><tbody>${lines.map((l) => `
+          <table class="inv-table"><thead><tr><th>Product</th><th>Quantity</th><th>For</th><th>Order from</th><th>Requests</th></tr></thead><tbody>${lines.map((l) => `
             <tr><td>${esc(l.name)}${l.urgent ? ' <span class="inv-flag is-bad">Urgent</span>' : ""}</td><td>${esc(plural(l.qty, l.unit))}</td>
-              <td>${esc(locLabel(l.loc))}</td><td>${esc([...new Set(l.reqs)].join(", "))}</td></tr>`).join("")}</tbody></table>
+              <td>${esc(locLabel(l.loc))}</td><td>${fromCell(l)}</td><td>${esc([...new Set(l.reqs)].join(", "))}</td></tr>`).join("")}</tbody></table>
         </section>`;
     }).join("");
   }
@@ -890,8 +954,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     }
     const g = openItemsBySupplier(st.requests.filter((r) => r.status === "open")).get(sid);
     if (!g) return;
-    const lines = [...g.values()].map((l) => (l.p
-      ? lineFromProduct(l.p, l.qty, l.loc, l.sources)
+    const lines = g.map((l) => (l.p
+      ? lineFromProduct(l.p, l.qty, l.loc, l.sources, supplierId)
       : cleanPoLine({ name: l.name, qty: l.qty, orderUnit: l.unit, loc: l.loc, sources: l.sources })));
     startPo(supplierId, lines);
   }
@@ -901,8 +965,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     if (!pick) return;
     const lines = [];
     if (pick.low) {
-      st.products.filter((p) => p.active && p.supplierId === pick.id).forEach((p) => LOCATIONS.forEach((l) => {
-        if (lowAt(p, l.key)) lines.push(lineFromProduct(p, suggestOrder(p, l.key), l.key));
+      st.products.filter((p) => p.active && suppliesProduct(p, pick.id)).forEach((p) => LOCATIONS.forEach((l) => {
+        if (lowAt(p, l.key)) lines.push(lineFromProduct(p, suggestOrderFor(p, l.key, pick.id), l.key, [], pick.id));
       }));
     }
     startPo(pick.id, lines);
@@ -1012,6 +1076,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     if (es) { const s = st.suppliers.find((x) => x.id === es.dataset.editSupplier); if (s) editSupplier(s); }
   });
   body.addEventListener("input", (e) => {
+    if (e.target.dataset.linesup) { st.lineSup[e.target.dataset.linesup] = e.target.value; renderRequests(); return; }
     const k = e.target.dataset.f;
     if (!k) return;
     if (k === "reqFilter" || k === "reqView") { st[k] = e.target.value; renderRequests(); return; }
