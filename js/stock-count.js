@@ -316,24 +316,30 @@ export async function mountStockCount(container, { param = "", staff = null } = 
   /* ===================== After saving: reveal the system's numbers ===================== */
   function showResults(res) {
     const diffs = res.lines.filter((l) => l.status === "open");
+    const invs = res.lines.filter((l) => l.status === "investigating");
     const qty = (l, n) => `${fmt(n)}${l.loc === "kit" ? ` ${l.unit}` : ""}`;
     $('[data-role="progress"]').textContent = "";
     saveBtn.hidden = true;
     body.innerHTML = `<section class="tb-card sc-results">
       <h4>${I.check} Count saved</h4>
-      <p>${res.lines.length} line${res.lines.length === 1 ? "" : "s"} counted.${diffs.length
-        ? ` <strong>${diffs.length} difference${diffs.length === 1 ? "" : "s"}</strong> sent to Reporting for review. Stock hasn't been changed.`
-        : " Everything matched. 👍"}</p>
-      <table class="inv-table"><thead><tr><th>Product</th><th>Where</th><th>Batch / Lot</th><th>Counted</th><th>System</th><th>Difference</th></tr></thead><tbody>${
-        res.lines.map((l) => `<tr class="${l.status === "open" ? "is-diff" : ""}">
+      <p>${res.lines.length} line${res.lines.length === 1 ? "" : "s"} counted.${
+        invs.length ? ` <strong>${invs.length} didn't match the digital count</strong>, so an investigation has been opened:
+          someone else will recount ${invs.length === 1 ? "it" : "them"}.` : ""}${
+        diffs.length ? ` <strong>${diffs.length} small difference${diffs.length === 1 ? "" : "s"}</strong> sent to Reporting for review.` : ""}${
+        !invs.length && !diffs.length ? " Everything matched. 👍" : " Stock hasn't been changed."}</p>
+      <table class="inv-table"><thead><tr><th>Product</th><th>Where</th><th>Batch / Lot</th><th>Counted</th><th>Digital</th><th>Difference</th></tr></thead><tbody>${
+        res.lines.map((l) => `<tr class="${l.status !== "ok" ? "is-diff" : ""}">
           <td>${esc(l.productName)}</td><td>${esc(whereOf(l))}</td>
           <td>${esc(l.batch ? `${l.batchLabel || batchName(byId.get(l.productId))} ${l.batch}` : "—")}</td>
-          <td>${esc(qty(l, l.counted))}</td><td>${esc(qty(l, l.system))}</td>
-          <td>${l.status === "open" ? `<strong>${esc(diffText(l.variance))}</strong>` : "✓"}</td></tr>`).join("")}</tbody></table>
+          <td>${esc(qty(l, l.counted))}</td>
+          <td>${l.status === "investigating" ? '<span class="muted">Hidden until the recount</span>' : esc(qty(l, l.system))}</td>
+          <td>${l.status === "investigating" ? '<span class="inv-flag is-bad">Investigating</span>'
+            : l.status === "open" ? `<strong>${esc(diffText(l.variance))}</strong>` : "✓"}</td></tr>`).join("")}</tbody></table>
       <div class="sc-after"><a class="ff-btn" href="${backHref}">Back to tasks</a>
         <button type="button" class="ff-btn is-primary" data-act="again">Count more</button></div>
     </section>`;
     body.querySelector('[data-act="again"]').addEventListener("click", () => mountStockCount(container, { param, staff }));
-    showToast(diffs.length ? `Saved. ${diffs.length} difference${diffs.length === 1 ? "" : "s"} to review.` : "Saved. Everything matched.");
+    showToast(invs.length ? `Saved. ${invs.length} investigation${invs.length === 1 ? "" : "s"} opened.`
+      : diffs.length ? `Saved. ${diffs.length} difference${diffs.length === 1 ? "" : "s"} to review.` : "Saved. Everything matched.");
   }
 }

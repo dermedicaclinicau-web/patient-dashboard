@@ -130,7 +130,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     const hidden = readHidden(me0);
     const show = (k) => can(`dash.${k}`) && !hidden.has(k);
     const todayKey = dayKey();
-    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts, notes, formsT] = await Promise.all([
+    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts, notes, formsT, invs] = await Promise.all([
       safe(listProducts(), []),
       safe(listAllLots(), []),
       safe(listKits(), []),
@@ -149,6 +149,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
       canReport ? safe(listShortAll(), []) : [],
       show("appts") ? safe(myNotes(staff), []) : [],
       show("appts") ? safe(formsToday(todayKey), []) : [],
+      can("inventory.count") || canOrder || canReport ? safe(listInvestigations({ open: true }), []) : [],
     ]);
     if (!root.isConnected) return;
 
@@ -186,6 +187,25 @@ export async function mountMyDashboard(container, { staff } = {}) {
       const shortOpen = allShorts.filter((u) => !u.resolved).length;
       if (shortOpen) att.push({ tone: "bad", text: `${shortOpen} saved short record${shortOpen === 1 ? "" : "s"} to resolve`,
         href: "#/reports/short", act: "Resolve" });
+    }
+    // Investigations: recounts for the onsite team (never the first counter, unless allowed), reviews for admins
+    if (invs.length) {
+      const counter = can("inventory.count") || canOrder;
+      const recounts = counter ? invs.filter((v) => v.status === "recount" && (v.openedByUid !== me || v.aloneApproved === true)) : [];
+      if (recounts.length === 1) {
+        att.push({ tone: "warn", text: `Recount needed: ${recounts[0].productName} (${recounts[0].loc === "jt" ? "JT storage" : "Shelf"})`,
+          href: `#/inventory/investigations/${encodeURIComponent(recounts[0].id)}`, act: "Recount" });
+      } else if (recounts.length) {
+        att.push({ tone: "warn", text: `${recounts.length} recounts needed`, href: "#/inventory/investigations", act: "Recount" });
+      }
+      if (canManage) {
+        const reviews = invs.filter((v) => v.status === "review").length;
+        if (reviews) att.push({ tone: "bad", text: `${reviews} investigation${reviews === 1 ? " needs" : "s need"} your review`,
+          href: "#/inventory/investigations", act: "Review" });
+        const stuck = invs.filter((v) => v.status === "recount" && v.aloneApproved !== true && v.openedAt && now - v.openedAt > DAY).length;
+        if (stuck) att.push({ tone: "info", text: `${stuck} recount${stuck === 1 ? " has" : "s have"} been waiting over a day`,
+          href: "#/inventory/investigations", act: "Open" });
+      }
     }
     // My consultation notes still in Draft (oldest first, so the longest-waiting opens first)
     const drafts = notes.filter((n) => !n.reviewed);

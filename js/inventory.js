@@ -6,6 +6,7 @@ import {
   listPos, createPo, poTotals, itemOnPo, lineFromProduct, cleanPoLine,
   productSuppliers, supplierTerms, suppliesProduct, suggestOrderFor,
 } from "./inventory-api.js";
+import { renderInvestigations, mountInvestigation } from "./investigations.js";
 import { mountPurchaseOrder } from "./purchase-order.js";
 import { fetchStaffList } from "./task-types.js";
 import { callApi } from "./appointments.js";
@@ -21,8 +22,8 @@ import { renderNotifications } from "./notifications.js";
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const SEARCH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
-const TABS = [["stock", "Stock"], ["kits", "Kits"], ["requests", "Requests"], ["orders", "Purchase orders"], ["products", "Products"],
-  ["suppliers", "Suppliers"], ["activity", "Activity"], ["notifications", "Notifications"]];
+const TABS = [["stock", "Stock"], ["kits", "Kits"], ["investigations", "Investigations"], ["requests", "Requests"], ["orders", "Purchase orders"],
+  ["products", "Products"], ["suppliers", "Suppliers"], ["activity", "Activity"], ["notifications", "Notifications"]];
 const niceDate = (key) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
@@ -64,6 +65,7 @@ function movesHtml(moves, showProduct = true, labelOf = () => "Batch") {
 export function mountInventory(container, { param = "", staff = null } = {}) {
   const parts = String(param || "").split("/");
   if (parts[0] === "po" && parts[1]) { mountPurchaseOrder(container, { id: parts[1], staff }); return; }
+  if (parts[0] === "investigations" && parts[1]) { mountInvestigation(container, { id: decodeURIComponent(parts[1]), staff }); return; }
   if (parts[0] === "receive") {
     const page = document.createElement("section");
     page.className = "page wide";
@@ -79,6 +81,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   const canKit = isInjector();
   const canJt = can("inventory.jt");
   const showKits = canKit || canJt || canManage;
+  const showInv = canMove || can("inventory.count") || can("menu.reports");
 
   const root = document.createElement("section");
   root.className = "page wide";
@@ -91,9 +94,11 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         <button type="button" class="btn-primary" data-act="new-product">+ New product</button>` : ""}
       </div>` : ""}
     </div>
-    <nav class="pt-tabs inv-tabs" aria-label="Inventory">${TABS.filter(([k]) => (k !== "kits" || showKits) && (k !== "notifications" || canManage)).map(([k, l]) =>
+    <nav class="pt-tabs inv-tabs" aria-label="Inventory">${TABS.filter(([k]) => (k !== "kits" || showKits)
+      && (k !== "notifications" || canManage) && (k !== "investigations" || showInv)).map(([k, l]) =>
       `<a href="#/inventory/${k}"${k === tab ? ' class="active" aria-current="page"' : ""}>${l}${
-        k === "requests" ? ' <em class="inv-tabcount" data-role="reqcount" hidden></em>' : ""}</a>`).join("")}</nav>
+        k === "requests" ? ' <em class="inv-tabcount" data-role="reqcount" hidden></em>' : ""}${
+        k === "investigations" ? ' <em class="inv-tabcount" data-role="ivxcount" hidden></em>' : ""}</a>`).join("")}</nav>
     <div data-role="body"><div class="skeleton" style="height:320px;border-radius:14px"></div></div>`;
   container.replaceChildren(root);
   const body = root.querySelector('[data-role="body"]');
@@ -102,6 +107,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     products: [], suppliers: [], lots: [], requests: [], q: "", cat: "", view: "all", flagged: false, showInactive: false,
     reqFilter: "open", reqView: "list", pos: [], poFilter: "draft", lineSup: {},
     sel: new Set(), pq: "", pcat: "", psup: "",
+    counts: [], invs: [], lastCounts: new Map(),
   };
   const supplierOf = (id) => st.suppliers.find((s) => s.id === id) || null;
   // "Merz Aesthetics / Medical Supplies Co" (main first)
@@ -110,6 +116,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   const labelOf = (pid) => batchName(st.products.find((p) => p.id === pid));
   function flags(p) {
     const out = [];
+    if (st.invs.some((v) => v.productId === p.id)) out.push(["bad", "Investigating"]);
     if (lowAt(p, "shelf")) out.push(["warn", "Low on Shelf"]);
     if (lowAt(p, "jt")) out.push(["warn", "Low in JT storage"]);
     const ex = lotsOf(p.id).map((l) => expiryState(l.expiry));
@@ -118,15 +125,39 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     return out;
   }
 
+  // The latest opening count of each product + storage (batches added together)
+  function lastCountsOf(counts) {
+    const m = new Map();
+    counts.filter((c) => c.kind === "opening").forEach((c) => {     // newest first
+      const per = new Map();
+      c.lines.filter((l) => l.loc !== "kit").forEach((l) => {
+        const k = `${l.productId}|${l.loc}`;
+        const a = per.get(k) || { counted: 0, system: 0, statuses: [], invIds: [], dateKey: c.dateKey, by: c.by };
+        a.counted += Number(l.counted) || 0;
+        a.system += Number(l.system) || 0;
+        a.statuses.push(l.status);
+        if (l.investigationId) a.invIds.push(l.investigationId);
+        per.set(k, a);
+      });
+      per.forEach((a, k) => { if (!m.has(k)) m.set(k, a); });
+    });
+    return m;
+  }
+
   async function load() {
     try {
-      [st.products, st.suppliers, st.lots, st.requests, st.pos] = await Promise.all([
+      [st.products, st.suppliers, st.lots, st.requests, st.pos, st.counts, st.invs] = await Promise.all([
         listProducts(), listSuppliers(), listAllLots(), listRequests({ max: 300 }).catch(() => []), listPos().catch(() => []),
+        listCounts({ from: dayKey(new Date(Date.now() - 120 * 864e5)) }).catch(() => []),
+        listInvestigations({ open: true }).catch(() => []),
       ]);
       if (!root.isConnected) return;
+      st.lastCounts = lastCountsOf(st.counts);
       const open = st.requests.filter((r) => r.status === "open").length;
       const badge = root.querySelector('[data-role="reqcount"]');
       if (badge) { badge.textContent = open; badge.hidden = !open; }
+      const ib = root.querySelector('[data-role="ivxcount"]');
+      if (ib) { ib.textContent = st.invs.length; ib.hidden = !st.invs.length; }
       render();
     } catch (err) {
       console.error("Inventory load failed:", err);
@@ -136,10 +167,10 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     }
   }
 
-
     function render() {
     if (tab === "stock") renderStock();
     else if (tab === "kits") renderKits(body, { staff, products: st.products, lots: st.lots, canKit, canJt, canManage, reload: load });
+    else if (tab === "investigations") renderInvestigations(body, { staff });
     else if (tab === "requests") renderRequests();
     else if (tab === "orders") renderOrders();
     else if (tab === "products") renderProducts();
@@ -587,6 +618,15 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
               ${[["both", "Shelf and JT storage"], ["shelf", "Shelf only"], ["jt", "JT storage only"]].map(([v, l]) =>
                 `<option value="${v}"${(x.countWhere || "both") === v ? " selected" : ""}>${l}</option>`).join("")}
             </select></label>
+          <label class="lh-field"><span class="lh-label">When a count doesn't match digital</span>
+            <select class="fb-select" name="investigate">
+              ${[["", "Default for the category"], ["always", "Always investigate (recount + admin review)"],
+                ["over", "Investigate when it's worth more than…"], ["never", "Never: straight to Count differences"]].map(([v, l]) =>
+                `<option value="${v}"${(x.investigate || "") === v ? " selected" : ""}>${l}</option>`).join("")}
+            </select>
+            <small class="fe-note">Defaults: Injectables always · General consumables never · others when over $20.</small></label>
+          <label class="lh-field" data-role="invoverrow"><span class="lh-label">Worth more than, $</span>
+            <input name="investigateOver" type="number" min="0" step="1" placeholder="20" value="${val(x.investigateOver)}" /></label>
         </div>
         <p class="inv-hint" data-role="pack"></p>
         <label class="fe-check"><input type="checkbox" name="tracked"${x.tracked ? " checked" : ""}${hasStock ? " disabled" : ""} />
@@ -650,6 +690,9 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     };
     syncCount();
     form.elements.countFreq.addEventListener("change", syncCount);
+    const syncInv = () => { dlg.querySelector('[data-role="invoverrow"]').style.display = form.elements.investigate.value === "over" ? "" : "none"; };
+    syncInv();
+    form.elements.investigate.addEventListener("change", syncInv);
     dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
     dlg.addEventListener("click", (e) => {
       if (e.target.closest('[data-act="alt-add"]')) {
@@ -686,6 +729,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           usage: f.usage.value,
           batchLabel: f.batchLabel.value,
           countFreq: f.countFreq.value, countDay: f.countDay.value, countWhere: f.countWhere.value,
+          investigate: f.investigate.value, investigateOver: f.investigateOver.value,
           reorder: { shelf: f.reShelf.value, jt: f.reJt.value },
           tracked: hasStock ? x.tracked : f.tracked.checked, active: f.active.checked, notes: f.notes.value,
         }, staff);
@@ -928,6 +972,18 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     });
   }
 
+  // The counted side of the three counters: the last opening count, and whether it matched digital
+  function countLine(pid, loc) {
+    const c = st.lastCounts.get(`${pid}|${loc}`);
+    if (!c) return '<small class="ivx-cl">Not counted yet</small>';
+    const d = niceDate(c.dateKey);
+    const inv = c.invIds.map((iid) => st.invs.find((v) => v.id === iid)).find(Boolean);
+    if (inv) return `<small class="ivx-cl is-bad">Counted ${c.counted} on ${esc(d)} · <a href="#/inventory/investigations/${esc(inv.id)}">Investigating</a></small>`;
+    if (c.statuses.includes("open")) return `<small class="ivx-cl is-warn">Counted ${c.counted} on ${esc(d)} · difference to review</small>`;
+    if (c.statuses.includes("investigating")) return `<small class="ivx-cl">Counted ${c.counted} on ${esc(d)} · investigated</small>`;
+    return `<small class="ivx-cl is-ok">Counted ${c.counted} on ${esc(d)} ✓ matched</small>`;
+  }
+
   /* ---------- A product's stock window ---------- */
   function openProduct(id) {
     const dlg = openDialog("inv-dlg inv-pdlg", '<div class="lh-form" data-role="pd"></div>');
@@ -945,10 +1001,11 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           <button type="button" class="ib-tool" data-act="close" aria-label="Close" title="Close">×</button>
         </div>
         <div class="inv-pd-qty">${LOCATIONS.map((l) => `
-          <div class="inv-pd-loc${lowAt(p, l.key) ? " is-low" : ""}"><span>${esc(l.label)}</span>
+          <div class="inv-pd-loc${lowAt(p, l.key) ? " is-low" : ""}"><span>${esc(l.label)} · digital</span>
             <strong>${esc(qtyText(p, p.stock[l.key]))}</strong>
-            ${p.reorder[l.key] !== null ? `<small>${lowAt(p, l.key) ? "Low · " : ""}reorder at ${p.reorder[l.key]}</small>` : ""}</div>`).join("")}</div>
-        ${canMove || canRequest ? `<div class="inv-pd-acts">
+            ${p.reorder[l.key] !== null ? `<small>${lowAt(p, l.key) ? "Low · " : ""}reorder at ${p.reorder[l.key]}</small>` : ""}
+            ${countLine(p.id, l.key)}</div>`).join("")}</div>
+          ${canMove || canRequest ? `<div class="inv-pd-acts">
           ${canManage ? '<button type="button" class="lh-btn is-primary" data-stock="add">Add stock</button>' : ""}
           ${canMove ? '<button type="button" class="lh-btn" data-stock="move">Move Shelf ⇄ JT</button>' : ""}
           ${canRequest ? '<button type="button" class="lh-btn" data-act="request">Request more</button>' : ""}

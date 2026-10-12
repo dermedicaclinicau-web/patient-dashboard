@@ -28,6 +28,7 @@ export const MOVE_TYPES = {
   "kit-discard": "Discarded from kit", "kit-use": "Used in treatment", release: "Released from JT storage",
   "kit-borrow": "Borrowed from a colleague", "kit-count": "Kit count adjusted",
   "use-correct": "Usage corrected", "kit-correct": "Kit usage corrected",
+  investigation: "Investigation closed",
 };
 export const EXPIRY_SOON_DAYS = 60;
 
@@ -215,6 +216,8 @@ export function cleanProduct(p = {}) {
       : p.countFreq === "monthly" ? (p.countDay === "last" ? "last" : Math.min(28, Math.max(1, parseInt(p.countDay, 10) || 1)))
       : null,
     countWhere: ["shelf", "jt"].includes(p.countWhere) ? p.countWhere : "both",
+    investigate: ["always", "over", "never"].includes(p.investigate) ? p.investigate : "",
+    investigateOver: moneyOrNull(p.investigateOver),
     reorder: { shelf: intOrNull(r.shelf), jt: intOrNull(r.jt) },
     notes: clip(p.notes, 1000),
     active: p.active !== false,
@@ -1314,25 +1317,28 @@ async function countKitLine(l, ownOnly) {
 }
 
 // Saves a count. The system's numbers are read fresh at the moment of saving (never shown beforehand).
-// Nothing changes stock: differences are saved as "open" for Reporting to review.
+// Nothing changes stock. Differences either open an investigation (per the product's setting)
+// or are saved as "open" for Reporting → Count differences.
 // opening: lines [{ productId, loc, batch, expiry, counted }] and/or kit lines [{ kit: true, ref, sealed, open }]
 // kit (an injector's own check): lines [{ ref, sealed, open }]
 export async function saveCount({ kind, lines, note = "" }, staff) {
   const me = uid();
+  const by = who(staff);
   const out = [];
   const isKitCheck = kind === "kit";
+  const products = new Map();
   for (const l of lines.filter((x) => isKitCheck || x.kit)) {
     const line = await countKitLine(l, isKitCheck);
     if (line) out.push(line);
   }
   const shelfLines = isKitCheck ? [] : lines.filter((x) => !x.kit);
   if (shelfLines.length) {
-    const [products, lots] = await Promise.all([listProducts(), listAllLots()]);
-    const pById = new Map(products.map((p) => [p.id, p]));
+    const [list, lots] = await Promise.all([listProducts(), listAllLots()]);
+    list.forEach((p) => products.set(p.id, p));
     const lotById = new Map(lots.map((l) => [l.id, l]));
     const agg = new Map();
     shelfLines.forEach((l) => {
-      const p = pById.get(l.productId);
+      const p = products.get(l.productId);
       if (!p) return;
       const loc = l.loc === "jt" ? "jt" : "shelf";
       const batch = p.tracked ? clip(l.batch, 40) : "";
@@ -1344,26 +1350,52 @@ export async function saveCount({ kind, lines, note = "" }, staff) {
     });
     agg.forEach((a, ref) => {
       const system = a.p.tracked ? ((lotById.get(ref) || {}).qty || 0) : (a.p.stock[a.loc] || 0);
+      const variance = a.counted - system;
       out.push({
         productId: a.p.id, productName: a.p.name, loc: a.loc, ref, batch: a.batch, expiry: a.expiry,
-        batchLabel: a.p.batchLabel || "Batch", unit: a.p.stockUnit, system, counted: a.counted,
-        variance: a.counted - system, status: a.counted !== system ? "open" : "ok", note: "",
+        batchLabel: a.p.batchLabel || "Batch", unit: a.p.stockUnit, system, counted: a.counted, variance,
+        status: !variance ? "ok" : needsInvestigation(a.p, variance) ? "investigating" : "open", note: "",
       });
     });
   }
   if (!out.length) throw new Error("Nothing was counted.");
-  const openCount = out.filter((l) => l.status === "open").length;
-  const ref = await addDoc(collection(db, "inv_counts"), {
-    kind: isKitCheck ? "kit" : "opening", dateKey: dayKey(), lines: out, openCount,
-    note: clip(note, 500), by: who(staff), byUid: me, at: serverTimestamp(),
+
+  // One write: the count, an investigation for each difference that needs one, and its notification
+  const cRef = doc(collection(db, "inv_counts"));
+  const batch = writeBatch(db);
+  const at = new Date().toISOString();
+  const opened = [];
+  out.forEach((l, i) => {
+    if (l.status !== "investigating") return;
+    const iRef = doc(collection(db, "inv_investigations"));
+    l.investigationId = iRef.id;
+    opened.push(iRef.id);
+    batch.set(iRef, {
+      countId: cRef.id, line: i, productId: l.productId, productName: l.productName, loc: l.loc, ref: l.ref,
+      batch: l.batch, expiry: l.expiry, batchLabel: l.batchLabel || "Batch", unit: l.unit,
+      digital: l.system, counted: l.counted, variance: l.variance, dateKey: dayKey(),
+      status: "recount", aloneApproved: false,
+      openedBy: by, openedByUid: me, openedAt: serverTimestamp(), updatedAt: serverTimestamp(),
+      events: [{ at, by, action: "Opened from the opening count", note: `Counted ${l.counted}, digital ${l.system}` }],
+    });
   });
-  if (openCount) queueNotify("count.difference", { countId: ref.id });
-  return { id: ref.id, lines: out, openCount };
+  const openCount = out.filter((l) => l.status === "open").length;
+  batch.set(cRef, {
+    kind: isKitCheck ? "kit" : "opening", dateKey: dayKey(), lines: out, openCount,
+    note: clip(note, 500), by, byUid: me, at: serverTimestamp(),
+  });
+  if (opened.length) {
+    batch.set(doc(collection(db, "notify_outbox")), outboxDoc("investigation.opened", { ids: opened.slice(0, 40), countId: cRef.id }, me));
+  }
+  await batch.commit();
+  if (openCount) queueNotify("count.difference", { countId: cRef.id });
+  if (opened.length) pingNotify();
+  return { id: cRef.id, lines: out, openCount, investigations: opened.length };
 }
 
 /* ===================== Reporting: count differences ===================== */
 
-export const COUNT_STATUS = { open: "To review", ok: "Matched", accepted: "Accepted", explained: "Explained" };
+export const COUNT_STATUS = { open: "To review", ok: "Matched", accepted: "Accepted", explained: "Explained", investigating: "Investigating" };
 
 // Counts with a difference still to review, or every count from a date on (dateKey "YYYY-MM-DD")
 export async function listCounts({ from = "", openOnly = false } = {}) {
@@ -1676,6 +1708,223 @@ export async function correctUsage(id, changes, reason, staff) {
         at: new Date().toISOString(), by, byUid: me, reason: why,
         changes: work.map((w) => `${w.l.name}: ${changeText(w)}`),
       }),
+    });
+  });
+}
+
+/* ===================== Investigations: when a count doesn't match the digital count ===================== */
+// Step 1: the portal checks its own records. Step 2: someone else recounts, blind.
+// Step 3: an admin reviews and closes it. Only outcomes that need it change digital, and every change is logged.
+
+// What happens to a count difference, by default, for each category (each product can override it)
+export const INVESTIGATE_DEFAULT = { injectable: "always", treatment: "over", retail: "over", general: "never" };
+export const INVESTIGATE_OVER_DEFAULT = 20;
+
+export function investigateRule(p) {
+  const mode = ["always", "over", "never"].includes(p && p.investigate) ? p.investigate : (INVESTIGATE_DEFAULT[p && p.category] || "over");
+  const over = p && p.investigateOver !== null && p.investigateOver !== undefined ? Number(p.investigateOver) : INVESTIGATE_OVER_DEFAULT;
+  return { mode, over };
+}
+
+// "over": the difference is worth more than $X at cost. No cost on file: investigated, to be safe.
+export function needsInvestigation(p, variance) {
+  if (!variance || !p) return false;
+  const { mode, over } = investigateRule(p);
+  if (mode === "always") return true;
+  if (mode === "never") return false;
+  const each = p.cost !== null && p.cost !== undefined ? p.cost / Math.max(1, p.packSize) : null;
+  return each === null ? true : Math.abs(variance) * each > over;
+}
+
+export const INV_STATUS = { recount: "Waiting for a recount", review: "Waiting for admin review", closed: "Closed" };
+
+// adjust: changes digital by the confirmed difference. sign: only offered for a shortage (−1) or extra (+1).
+export const INV_OUTCOMES = {
+  "count-error": { label: "Count error", adjust: false,
+    help: "The stock is there; it was counted wrong. Nothing changes." },
+  found: { label: "Found / misplaced", adjust: false,
+    help: "It turned up (e.g. put away in the wrong place). Nothing changes." },
+  "fixed-record": { label: "Used: fixed on the treatment record", adjust: false,
+    help: "Correct the patient's record first (Reporting → Usage → Correct). That already updates digital." },
+  "not-recorded": { label: "Used: no treatment record", adjust: true, sign: -1,
+    help: "Used but never checked out, and there's no record to correct. Name the patient or treatment in the note." },
+  missing: { label: "Missing / loss", adjust: true, sign: -1,
+    help: "Can't be found or explained. Written off." },
+  receiving: { label: "Receiving error", adjust: true,
+    help: "A delivery was put away or entered wrongly. Name the purchase order in the note." },
+  extra: { label: "Extra stock found", adjust: true, sign: 1,
+    help: "More is there than digital shows. Added to stock." },
+};
+
+function normaliseInvestigation(d) {
+  const x = d.data() || {};
+  return {
+    id: d.id, ...x,
+    digital: Number(x.digital) || 0, counted: Number(x.counted) || 0, variance: Number(x.variance) || 0,
+    events: Array.isArray(x.events) ? x.events : [],
+    openedAt: toDate(x.openedAt), closedAt: toDate(x.closedAt), updatedAt: toDate(x.updatedAt),
+  };
+}
+
+// open: only the ones still waiting for a recount or a review. Newest first.
+export async function listInvestigations({ open = false } = {}) {
+  const col = collection(db, "inv_investigations");
+  const snap = await getDocs(open ? query(col, where("status", "in", ["recount", "review"])) : col);
+  return snap.docs.map(normaliseInvestigation)
+    .sort((a, b) => (b.openedAt ? b.openedAt.getTime() : 0) - (a.openedAt ? a.openedAt.getTime() : 0));
+}
+
+export async function getInvestigation(id) {
+  const s = await getDoc(doc(db, "inv_investigations", id));
+  return s.exists() ? normaliseInvestigation(s) : null;
+}
+
+// Step 1: everything since the last count where this spot matched digital (or the last 30 days)
+export async function investigationEvidence(x) {
+  const countAt = x.openedAt instanceof Date ? x.openedAt : new Date();
+  const [counts, moves, shorts, pos, rels] = await Promise.all([
+    listCounts({ from: dayKey(new Date(countAt.getTime() - 120 * 864e5)) }).catch(() => []),
+    listMoves({ productId: x.productId, max: 1000 }).catch(() => []),
+    listShortAll().catch(() => []),
+    listPos().catch(() => []),
+    listReleases(200).catch(() => []),
+  ]);
+  const sameSpot = (l) => l.productId === x.productId && l.loc === x.loc
+    && (!x.batch || (l.batch === x.batch && (l.expiry || "") === (x.expiry || "")));
+  const last = counts.filter((c) => c.id !== x.countId && c.at && c.at < countAt)
+    .find((c) => c.lines.some((l) => sameSpot(l) && ["ok", "accepted"].includes(l.status)));
+  const since = last ? last.at : new Date(countAt.getTime() - 30 * 864e5);
+  const inWindow = (d) => !!d && d > since && d <= countAt;
+
+  const ledger = moves.filter((m) => inWindow(m.at)).map((m) => ({
+    at: m.at, type: m.type, by: m.by || "", ref: m.ref || "",
+    delta: (m.lines || []).filter((l) => l.loc === x.loc && (!x.batch || l.batch === x.batch))
+      .reduce((a, l) => a + (Number(l.delta) || 0), 0),
+    note: [m.reason, m.note].filter(Boolean).join(" · "),
+  })).filter((e) => e.delta).sort((a, b) => a.at - b.at);
+
+  return {
+    since, sinceCount: last || null, countAt, ledger,
+    digitalAtSince: x.digital - ledger.reduce((a, e) => a + e.delta, 0),
+    short: shorts.filter((u) => inWindow(u.at) && u.lines.some((l) => l.productId === x.productId && Number(l.short) > 0)),
+    pos: pos.filter((po) => ["sent", "part"].includes(po.status) && po.lines.some((l) => l.productId === x.productId)),
+    rels: rels.filter((r) => r.status === "pending" && r.productId === x.productId),
+    people: [...new Set(ledger.map((e) => e.by).filter(Boolean))],
+  };
+}
+
+// Step 2: the blind recount, by someone other than the first counter (unless an admin allowed it).
+// It's compared with digital at the moment of saving. A match closes it as a count error.
+export async function saveRecount(id, counted, staff) {
+  const n = parseInt(counted, 10);
+  if (!(n >= 0)) throw new Error("Enter how many you counted (0 if there are none).");
+  const me = uid();
+  const by = who(staff);
+  const iRef = doc(db, "inv_investigations", id);
+  let result = null;
+  await runTransaction(db, async (tx) => {
+    const s = await tx.get(iRef);
+    if (!s.exists()) throw new Error("This investigation no longer exists.");
+    const x = s.data();
+    if (x.status !== "recount") throw new Error("The recount has already been done. Reload to see it.");
+    if (x.openedByUid === me && x.aloneApproved !== true) {
+      throw new Error("Someone else needs to do the recount. If you're the only one on site, ask an admin to allow it.");
+    }
+    const pSnap = await tx.get(doc(db, "inv_products", x.productId));
+    const lSnap = await tx.get(doc(db, "inv_lots", String(x.ref || "")));
+    if (!pSnap.exists()) throw new Error("This product no longer exists.");
+    const p = pSnap.data();
+    const digital = p.tracked === true
+      ? (lSnap.exists() ? Number(lSnap.data().qty) || 0 : 0)
+      : Number((p.stock || {})[x.loc]) || 0;
+    const diff = n - digital;
+    const at = new Date().toISOString();
+    const matched = diff === 0;
+    tx.update(iRef, {
+      status: matched ? "closed" : "review",
+      recount: { counted: n, digital, variance: diff, by, byUid: me, at },
+      ...(matched ? {
+        outcome: "count-error",
+        outcomeNote: "The recount matched the digital count, so the first count was wrong. Stock wasn't changed.",
+        closedAt: serverTimestamp(), closedBy: by, closedByUid: me,
+      } : {}),
+      updatedAt: serverTimestamp(),
+      events: arrayUnion({ at, by, action: matched ? "Recount matched digital: closed as a count error" : "Recount confirmed the difference",
+        note: `Recounted ${n}, digital ${digital}` }),
+    });
+    if (!matched) tx.set(doc(collection(db, "notify_outbox")), outboxDoc("investigation.confirmed", { id }, me));
+    result = { matched, digital, diff };
+  });
+  if (!result.matched) pingNotify();
+  return result;
+}
+
+// Only one person on site: an admin lets the first counter do the recount
+export async function allowAloneRecount(id, staff) {
+  const by = who(staff);
+  await updateDoc(doc(db, "inv_investigations", id), {
+    aloneApproved: true, aloneApprovedBy: by, aloneApprovedByUid: uid(), updatedAt: serverTimestamp(),
+    events: arrayUnion({ at: new Date().toISOString(), by, action: "Allowed the first counter to recount", note: "Only one person on site" }),
+  });
+}
+
+// Step 3: an admin closes it. Outcomes that adjust apply the confirmed difference to today's stock
+// (like Accept: not "set to the counted number", as stock may have moved since).
+export async function closeInvestigation(id, { outcome, note = "", cctvChecked = false, cctvNote = "" }, staff) {
+  const o = INV_OUTCOMES[outcome];
+  if (!o) throw new Error("Choose what happened.");
+  const text = clip(note, 500);
+  if (!text) throw new Error("Add a note saying what you found.");
+  const me = uid();
+  const by = who(staff);
+  const iRef = doc(db, "inv_investigations", id);
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    const s = await tx.get(iRef);
+    if (!s.exists()) throw new Error("This investigation no longer exists.");
+    const x = s.data();
+    if (x.status === "closed") throw new Error("This investigation has already been closed. Reload to see it.");
+    const diff = Number(x.recount ? x.recount.variance : x.variance) || 0;
+    if (o.sign && Math.sign(diff) !== o.sign) throw new Error(`"${o.label}" doesn't fit a difference of ${diff > 0 ? "+" : ""}${diff}.`);
+    const loc = x.loc === "jt" ? "jt" : "shelf";
+    let pSnap = null;
+    let lSnap = null;
+    if (o.adjust && diff) {
+      pSnap = await tx.get(doc(db, "inv_products", x.productId));
+      lSnap = await tx.get(doc(db, "inv_lots", String(x.ref || "")));
+      if (!pSnap.exists()) throw new Error("This product no longer exists.");
+    }
+
+    // ---- Writes ----
+    let applied = 0;
+    if (pSnap) {
+      const p = pSnap.data();
+      const st = p.stock || {};
+      const stock = { shelf: Number(st.shelf) || 0, jt: Number(st.jt) || 0 };
+      const lotHave = lSnap.exists() ? Number(lSnap.data().qty) || 0 : 0;
+      const have = p.tracked === true ? lotHave : stock[loc];
+      if (have + diff < 0) {
+        throw new Error(`Only ${have} left in ${locLabel(loc)} now, so ${-diff} can't be removed. Do a fresh count, then close this as found or a count error.`);
+      }
+      stock[loc] = Math.max(0, stock[loc] + diff);
+      tx.set(lSnap.ref, {
+        productId: x.productId, loc, batch: x.batch || "", expiry: x.expiry || "", qty: Math.max(0, lotHave + diff),
+        updatedAt: serverTimestamp(), ...(lSnap.exists() ? {} : { createdAt: serverTimestamp() }),
+      }, { merge: true });
+      tx.update(pSnap.ref, { stock, stockAt: serverTimestamp() });
+      logMove(tx, staff, {
+        type: "investigation", productId: x.productId, productName: x.productName, unit: x.unit,
+        lines: [{ loc, batch: x.batch || "", expiry: x.expiry || "", delta: diff }],
+        reason: o.label.slice(0, 60), note: text, ref: id,
+      });
+      applied = diff;
+    }
+    tx.update(iRef, {
+      status: "closed", outcome, outcomeNote: text, applied,
+      cctv: { checked: cctvChecked === true, note: clip(cctvNote, 500) },
+      closedAt: serverTimestamp(), closedBy: by, closedByUid: me, updatedAt: serverTimestamp(),
+      events: arrayUnion({ at: new Date().toISOString(), by, action: `Closed: ${o.label}`,
+        note: applied ? `${locLabel(loc)} adjusted by ${applied > 0 ? "+" : ""}${applied}` : "Stock not changed" }),
     });
   });
 }

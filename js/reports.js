@@ -2,7 +2,7 @@ import {
   listProducts, listCounts, resolveCountLine, listUsageBetween, listMovesBetween,
   listKits, listKitMoves, listAllLoans, listShortAll, resolveShort, kitUnits,
   getUsage, correctUsage, correctionMove,
-  batchName, plural, unitPlural, dayKey, COUNT_STATUS,
+  batchName, plural, unitPlural, dayKey, COUNT_STATUS,listInvestigations, INV_OUTCOMES, INV_STATUS,
 } from "./inventory-api.js";
 import { can } from "./perms.js";
 import { showToast } from "./utils.js";
@@ -25,7 +25,7 @@ const timeOf = (d) => (d ? d.toLocaleTimeString("en-AU", { hour: "numeric", minu
 const monthLabel = (k) => { const [y, m] = k.split("-").map(Number); return new Date(y, m - 1, 1).toLocaleDateString("en-AU", { month: "long", year: "numeric" }); };
 const daysAgoKey = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return dayKey(d); };
 const SKELETON = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
-const TABS = [["variance", "Count differences"], ["wastage", "Wastage"], ["kits", "Kit reconciliation"], ["usage", "Usage"], ["short", "Saved short"]];
+const TABS = [["variance", "Count differences"], ["investigations", "Investigations"], ["wastage", "Wastage"], ["kits", "Kit reconciliation"], ["usage", "Usage"], ["short", "Saved short"]];
 const errText = (err, fallback) => (err && err.code === "permission-denied"
   ? "You don't have access to do this. Check the Firestore rules have been published, and your Reporting access in Staff."
   : err && err.message && !err.code ? err.message : fallback);
@@ -83,6 +83,7 @@ export function mountReports(container, { param = "", staff = null } = {}) {
     <div data-role="body">${SKELETON}</div>`;
   const body = root.querySelector('[data-role="body"]');
   if (tab === "variance") mountVariance(body, staff);
+  else if (tab === "investigations") mountInvestigationReport(body);
   else if (tab === "wastage") mountWastage(body);
   else if (tab === "usage") mountUsage(body, staff);
   else if (tab === "kits") mountKitRecon(body);
@@ -128,7 +129,9 @@ function mountVariance(body, staff) {
     const status = l.status === "open"
       ? `<div class="rp-acts"><button type="button" class="lh-btn is-primary" data-act="accept">Accept</button>
           <button type="button" class="lh-btn" data-act="explain">Explain</button></div>`
-      : `<div class="rp-done"><span class="rq-status is-${esc(l.status)}">${esc(COUNT_STATUS[l.status] || l.status)}</span>
+      : l.status === "investigating"
+        ? `<div class="rp-done"><a class="rq-status is-open" href="#/inventory/investigations/${encodeURIComponent(l.investigationId || "")}">Investigation →</a></div>`
+        : `<div class="rp-done"><span class="rq-status is-${esc(l.status)}">${esc(COUNT_STATUS[l.status] || l.status)}</span>
           ${l.note ? `<small>${esc(l.note)}</small>` : ""}${l.resolvedBy ? `<small>${esc(l.resolvedBy)}</small>` : ""}</div>`;
     return `<tr class="${l.status === "open" ? "is-diff" : ""}" data-c="${esc(c.id)}" data-i="${i}">
       <td>${esc(l.productName)}</td><td>${esc(whereOf(l))}</td>
@@ -408,6 +411,60 @@ function mountRangeReport(body, cfg) {
 
   drawTools();
   load();
+}
+
+/* ===================== Investigations ===================== */
+
+function mountInvestigationReport(body) {
+  mountRangeReport(body, {
+    name: "Investigations", file: "investigations",
+    groups: [["type", "Outcome"], ["product", "Product"], ["month", "Month"], ["clinician", "Counted by"]],
+    findPlaceholder: "Filter: product, outcome or staff",
+    empty: "No investigations opened in these dates. 👍",
+    async load(r) {
+      const [products, list] = await Promise.all([listProducts(), listInvestigations()]);
+      const byId = new Map(products.map((p) => [p.id, p]));
+      return list.filter((x) => x.openedAt && x.openedAt >= r.from && x.openedAt < r.to).map((x) => {
+        const diff = Number(x.recount ? x.recount.variance : x.variance) || 0;
+        return {
+          id: x.id, at: x.openedAt, productId: x.productId, productName: x.productName, by: x.openedBy || "",
+          typeLabel: x.status === "closed" ? ((INV_OUTCOMES[x.outcome] || {}).label || "Closed") : (INV_STATUS[x.status] || x.status),
+          open: x.status !== "closed", where: LOC[x.loc] || x.loc, batch: x.batch || "", diff, unit: x.unit || "item",
+          applied: Number(x.applied) || 0, recountBy: x.recount ? x.recount.by || "" : "", closedBy: x.closedBy || "",
+          note: x.outcomeNote || "", cctv: x.cctv && x.cctv.checked ? "Yes" : "",
+          days: x.closedAt ? Math.max(0, Math.round((x.closedAt - x.openedAt) / 864e5)) : null,
+          value: mul(perItem(byId.get(x.productId)), diff),
+        };
+      });
+    },
+    searchText: (e) => [e.productName, e.typeLabel, e.by, e.recountBy, e.closedBy, e.note, e.where].join(" "),
+    statsHtml(ev) {
+      const open = ev.filter((e) => e.open).length;
+      const closed = ev.filter((e) => !e.open && e.days !== null);
+      const down = ev.filter((e) => e.applied < 0 && e.value !== null).reduce((a, e) => a + e.value, 0);
+      return `<div class="inv-stats">
+        <div class="inv-stat ${open ? "is-warn" : ""}"><strong>${open}</strong><span>Still open</span></div>
+        <div class="inv-stat"><strong>${ev.filter((e) => e.typeLabel === INV_OUTCOMES["count-error"].label).length}</strong><span>Count errors</span></div>
+        <div class="inv-stat is-bad"><strong>${esc(money(Math.round(down * 100) / 100))}</strong><span>Taken off digital (at cost)</span></div>
+        <div class="inv-stat"><strong>${closed.length ? fmt(closed.reduce((a, e) => a + e.days, 0) / closed.length) : "—"}</strong><span>Days to close (average)</span></div>
+      </div>`;
+    },
+    summaryHead: (label) => `<thead><tr><th>${esc(label)}</th><th>Investigations</th><th>Still open</th><th>Value of differences</th></tr></thead>`,
+    summaryRow: (g) => `<tr><td><strong>${esc(g.label)}</strong></td><td>${g.events.length}</td>
+      <td>${g.events.filter((e) => e.open).length || "—"}</td><td>${esc(moneyOrDash(g.value))}</td></tr>`,
+    summaryFoot: (ev) => `<tr><th>Total</th><th>${ev.length}</th><th>${ev.filter((e) => e.open).length}</th><th>${esc(moneyOrDash(sumValue(ev)))}</th></tr>`,
+    detailHead: "<thead><tr><th>Opened</th><th>Product</th><th>Where</th><th>Difference</th><th>Outcome</th><th>Counted by</th><th>Recount by</th><th>Closed by</th><th>Value</th></tr></thead>",
+    detailRow: (e) => `<tr><td>${esc(shortDate(e.at))}</td>
+      <td><a href="#/inventory/investigations/${encodeURIComponent(e.id)}">${esc(e.productName)}</a></td>
+      <td>${esc(e.where)}${e.batch ? ` · ${esc(e.batch)}` : ""}</td>
+      <td class="${e.diff < 0 ? "rp-neg" : "rp-pos"}">${e.diff > 0 ? "+" : ""}${esc(fmt(e.diff))}</td>
+      <td><span class="inv-flag ${e.open ? "is-warn" : "is-info"}">${esc(e.typeLabel)}</span></td>
+      <td>${esc(e.by || "—")}</td><td>${esc(e.recountBy || "—")}</td><td>${esc(e.closedBy || "—")}</td><td>${esc(moneyOrDash(e.value))}</td></tr>`,
+    csvHead: ["Opened", "Product", "Where", "Batch / Lot", "Difference", "Unit", "Outcome", "Counted by", "Recount by", "Closed by",
+      "CCTV checked", "Days to close", "Note", "Value ($)"],
+    csvRow: (e) => [e.at ? dayKey(e.at) : "", e.productName, e.where, e.batch, e.diff, e.unit, e.typeLabel, e.by, e.recountBy, e.closedBy,
+      e.cctv, e.days === null ? "" : e.days, e.note, e.value === null ? "" : e.value],
+  });
 }
 
 /* ===================== Wastage ===================== */
