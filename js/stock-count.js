@@ -1,10 +1,13 @@
 // Task Manager → Opening count (#/tasks/count) and My kit check (#/tasks/count/kit).
 // Blind count: the system's numbers only appear after saving. Nothing here changes stock;
-// differences go to Reporting → Variance for review.
-// The opening count covers the Shelf, JT storage and every injector's kit (for products due today).
+// differences go to Reporting → Count differences, or open an investigation.
+// Each line remembers when it was counted, so stock used while counting doesn't show as a difference.
+// The opening count covers the Shelf, JT storage, every injector's kit (for products due today)
+// and the opened containers of shared products.
 import {
-  INV_CATEGORIES, unitPlural, fefo, batchName, batchText, isKitProduct, isSharedProduct,
+  INV_CATEGORIES, unitPlural, fefo, batchName, batchText, isKitProduct, isSharedProduct, plural,
   listProducts, listAllLots, listKits, countDue, countLocs, dayKey, listCountsOn, saveCount, myUid,
+  listOpenContainers, finishContainer, getCountSettings, saveCountSettings, COUNT_DUE_DEFAULT,
 } from "./inventory-api.js";
 import { can, isInjector } from "./perms.js";
 import { showToast } from "./utils.js";
@@ -20,7 +23,9 @@ const niceDate = (key) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
 };
+const shortDate = (d) => (d ? d.toLocaleDateString("en-AU", { day: "numeric", month: "short" }) : "");
 const timeOf = (d) => (d ? d.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }) : "");
+const clock = (t) => { const [h, m] = String(t || COUNT_DUE_DEFAULT).split(":").map(Number); return `${((h + 11) % 12) + 1}:${String(m).padStart(2, "0")}${h < 12 ? "am" : "pm"}`; };
 const LOC = { shelf: "Shelf", jt: "JT storage" };
 const whereOf = (l) => (l.loc === "kit" ? `${l.staffName || "Injector"}'s kit` : LOC[l.loc] || l.loc);
 const diffText = (n) => (n > 0 ? `+${fmt(n)}` : fmt(n));
@@ -28,6 +33,7 @@ const diffText = (n) => (n > 0 ? `+${fmt(n)}` : fmt(n));
 export async function mountStockCount(container, { param = "", staff = null } = {}) {
   const backHref = "#/tasks/new";
   const canCount = can("inventory.count") || can("inventory.order") || can("inventory.manage");
+  const canManage = can("inventory.manage");
   const canKit = isInjector();
   const mode = param === "kit" && canKit ? "kit" : canCount ? "opening" : canKit ? "kit" : "";
   const root = document.createElement("section");
@@ -39,10 +45,11 @@ export async function mountStockCount(container, { param = "", staff = null } = 
     return;
   }
 
-  let products, lots, todays, allKits;
+  let products, lots, todays, allKits, openNow, countCfg;
   try {
-    [products, lots, todays, allKits] = await Promise.all([
+    [products, lots, todays, allKits, openNow, countCfg] = await Promise.all([
       listProducts(), listAllLots(), listCountsOn(dayKey()), listKits().catch(() => []),
+      listOpenContainers().catch(() => []), getCountSettings().catch(() => ({ dueBy: COUNT_DUE_DEFAULT })),
     ]);
   } catch (err) {
     console.error("Count load failed:", err);
@@ -51,6 +58,7 @@ export async function mountStockCount(container, { param = "", staff = null } = 
     return;
   }
   if (!root.isConnected) return;
+  let dueBy = countCfg.dueBy;
 
   const me = myUid();
   const byId = new Map(products.map((p) => [p.id, p]));
@@ -74,7 +82,8 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       <div class="ff-bar" role="region" aria-label="${esc(title)}">
         <div class="ff-bar-inner">
           <a class="ff-back" href="${backHref}" aria-label="Back" title="Back">${I.back}</a>
-          <div class="ff-bar-title"><strong>${esc(title)}</strong><span>${esc(today)} · count what's physically there</span></div>
+          <div class="ff-bar-title"><strong>${esc(title)}</strong><span>${esc(today)} · count what's physically there${mode === "opening"
+            ? ` · <span data-role="dueby">due by ${esc(clock(dueBy))}</span>${canManage ? ' <button type="button" class="cs-link" data-act="dueby">Change</button>' : ""}` : ""}</span></div>
           <span class="ff-progress" data-role="progress"></span>
           <div class="ff-bar-actions">
             <a class="ff-btn is-quiet" href="${backHref}">Cancel</a>
@@ -91,6 +100,40 @@ export async function mountStockCount(container, { param = "", staff = null } = 
   const msgEl = $('[data-role="msg"]');
   const saveBtn = $('[data-act="save"]');
   let busy = false;
+
+  // Admins: when the opening count should be done by (for the dashboard and the reminder email)
+  root.addEventListener("click", (e) => {
+    if (!e.target.closest('[data-act="dueby"]')) return;
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog";
+    dlg.innerHTML = `<form class="lh-form" novalidate>
+      <div class="lh-dialog-head"><h3>Opening count due by</h3>
+        <p>After this time the dashboard shows it as overdue, and the "Opening count not done" notification is sent (Inventory → Notifications).</p></div>
+      <label class="lh-field"><span class="lh-label">Time</span><input type="time" name="t" value="${esc(dueBy)}" step="900" /></label>
+      <p class="lh-error" role="alert" hidden></p>
+      <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+        <button type="submit" class="lh-btn is-primary">Save</button></div></form>`;
+    document.body.appendChild(dlg);
+    dlg.addEventListener("close", () => dlg.remove());
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    dlg.querySelector("form").addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const t = dlg.querySelector('[name="t"]').value;
+      try {
+        await saveCountSettings({ dueBy: t }, staff);
+        dueBy = t;
+        const el = $('[data-role="dueby"]');
+        if (el) el.textContent = `due by ${clock(dueBy)}`;
+        dlg.close();
+        showToast("Saved");
+      } catch (err) {
+        const er = dlg.querySelector(".lh-error");
+        er.textContent = err && err.code === "permission-denied" ? "Only Manage inventory can change this." : (err.message || "Couldn't save.");
+        er.hidden = false;
+      }
+    });
+    dlg.showModal();
+  });
 
   // Kit lots: unopened + units left in the opened one
   const kitFilled = (r) => r.sealed !== "" && r.open !== "";
@@ -114,8 +157,8 @@ export async function mountStockCount(container, { param = "", staff = null } = 
     const makeBlock = (p, loc, extra = false) => ({
       key: `${p.id}|${loc}`, p, loc, extra,
       rows: p.tracked
-        ? lotsAt(p.id, loc).map((l) => ({ batch: l.batch, expiry: l.expiry, counted: "", found: false }))
-        : [{ batch: "", expiry: "", counted: "", found: false }],
+        ? lotsAt(p.id, loc).map((l) => ({ batch: l.batch, expiry: l.expiry, counted: "", countedAt: 0, found: false }))
+        : [{ batch: "", expiry: "", counted: "", countedAt: 0, found: false }],
     });
     const blocks = [];
     products.filter((p) => countDue(p)).forEach((p) => countLocs(p).forEach((loc) => {
@@ -124,6 +167,16 @@ export async function mountStockCount(container, { param = "", staff = null } = 
     const kitRows = allKits.filter((k) => dueKitIds.has(k.productId) && !done.has(`kit|${k.id}`))
       .sort((a, b) => a.staffName.localeCompare(b.staffName) || a.productName.localeCompare(b.productName) || (a.expiry || "").localeCompare(b.expiry || ""))
       .map((k) => ({ k, due: false, sealed: "", open: "" }));
+    const openChecks = new Map();   // opened container id → "there" | "missing"
+
+    // Walking order: by where each product is kept, when positions have been set
+    const posOf = (b) => String((b.loc === "jt" ? b.p.jtPos : b.p.shelfPos) || "").trim();
+    let order = products.some((p) => p.shelfPos || p.jtPos) ? "position" : "category";
+    const byPos = (a, b) => {
+      const pa = posOf(a), pb = posOf(b);
+      if (!pa !== !pb) return pa ? -1 : 1;
+      return pa.localeCompare(pb, "en-AU", { numeric: true, sensitivity: "base" }) || a.p.name.localeCompare(b.p.name);
+    };
 
     const filled = (b) => b.rows.length > 0 && b.rows.every((r) => r.counted !== "");
     const started = (b) => b.rows.some((r) => r.counted !== "");
@@ -140,15 +193,31 @@ export async function mountStockCount(container, { param = "", staff = null } = 
           value="${esc(r.counted)}" placeholder="?" aria-label="Counted" /><span>${esc(unitPlural(b.p.stockUnit))}</span></div>
         ${r.found ? '<button type="button" class="hx-x" data-act="rm" aria-label="Remove">×</button>' : "<span></span>"}</div>`;
     }
+    // Shared products: the opened ones aren't counted, just checked they're still there
+    function openHtml(b) {
+      if (!isSharedProduct(b.p) || b.loc !== "shelf") return "";
+      const list = openNow.filter((c) => c.productId === b.p.id);
+      if (!list.length) return "";
+      return `<div class="sc-open"><small>Opened now (not counted above). Is each one still there?</small>${list.map((c) => {
+        const v = openChecks.get(c.id) || "";
+        return `<div class="sc-openrow" data-open="${esc(c.id)}">
+          <span>${esc([batchText(b.p, c.batch) || "No number", c.openedAt ? `opened ${shortDate(c.openedAt)}` : "", plural(c.uses, "use")].filter(Boolean).join(" · "))}</span>
+          <div class="fe-seg">${[["there", "It's there"], ["missing", "Missing"]].map(([k, l]) =>
+            `<label class="fe-seg-btn"><input type="radio" name="op-${esc(c.id)}" value="${k}" data-open-ck${v === k ? " checked" : ""} /><span>${l}</span></label>`).join("")}</div>
+        </div>`;
+      }).join("")}</div>`;
+    }
     function blockHtml(b, i) {
       const bn = batchName(b.p).toLowerCase();
+      const pos = posOf(b);
       return `<div class="sc-item${filled(b) ? " is-done" : ""}" data-i="${i}">
-        <div class="sc-head"><strong>${esc(b.p.name)}</strong>
+        <div class="sc-head">${pos ? `<span class="sc-pos">${esc(pos)}</span>` : ""}<strong>${esc(b.p.name)}</strong>
           <small>Count ${esc(unitPlural(b.p.stockUnit))}${b.p.dosePer ? ` (each ${fmt(b.p.dosePer)} ${esc(b.p.doseUnit)})` : ""}${
-            isSharedProduct(b.p) ? ` · sealed ones only, not the opened one` : ""}</small>
+            isSharedProduct(b.p) ? " · sealed ones only, not the opened one" : ""}</small>
           ${b.extra ? '<button type="button" class="hx-x" data-act="rm-block" aria-label="Remove">×</button>' : ""}</div>
         ${b.rows.map((r, j) => rowHtml(b, r, j)).join("") || `<p class="tb-none">No ${esc(bn)}s on record here. Use “+ Another ${esc(bn)} found”.</p>`}
         ${b.p.tracked ? `<button type="button" class="cs-link" data-act="found">+ Another ${esc(bn)} found</button>` : ""}
+        ${openHtml(b)}
       </div>`;
     }
     function progress() {
@@ -160,10 +229,13 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       const section = (loc) => {
         const list = blocks.map((b, i) => [b, i]).filter(([b]) => b.loc === loc);
         if (!list.length) return "";
-        return `<section class="tb-card"><h4>${esc(LOC[loc])}</h4>${INV_CATEGORIES.map((c) => {
-          const items = list.filter(([b]) => b.p.category === c.key);
-          return items.length ? `<div class="sc-cat">${esc(c.label)}</div>${items.map(([b, i]) => blockHtml(b, i)).join("")}` : "";
-        }).join("")}</section>`;
+        const inner = order === "position"
+          ? list.sort(([a], [b]) => byPos(a, b)).map(([b, i]) => blockHtml(b, i)).join("")
+          : INV_CATEGORIES.map((c) => {
+            const items = list.filter(([b]) => b.p.category === c.key);
+            return items.length ? `<div class="sc-cat">${esc(c.label)}</div>${items.map(([b, i]) => blockHtml(b, i)).join("")}` : "";
+          }).join("");
+        return `<section class="tb-card"><h4>${esc(LOC[loc])}</h4>${inner}</section>`;
       };
       const people = [...new Set(kitRows.map((r) => r.k.staffName))];
       const kitSection = kitRows.length ? `<section class="tb-card"><h4>Injectors' kits</h4>
@@ -174,7 +246,10 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       const addable = products.filter((p) => p.active && (!listed.has(`${p.id}|shelf`) || !listed.has(`${p.id}|jt`)));
       const doneHtml = done.size ? `<section class="tb-card"><h4>Done today</h4><ul class="sc-done">${[...done.values()].map((v) =>
         `<li>${I.check}<span>${esc(v.name)} · ${esc(v.where)}</span><small>${esc(v.by)} · ${esc(timeOf(v.at))}</small></li>`).join("")}</ul></section>` : "";
+      const orderSeg = blocks.length ? `<div class="sc-order"><span class="muted">Order:</span><div class="fe-seg">${[["position", "Shelf position"], ["category", "Category"]].map(([v, l]) =>
+        `<label class="fe-seg-btn"><input type="radio" name="sc-order" value="${v}"${order === v ? " checked" : ""} /><span>${l}</span></label>`).join("")}</div></div>` : "";
       body.innerHTML = `
+        ${orderSeg}
         ${blocks.length || kitRows.length ? section("shelf") + section("jt") + kitSection
           : `<div class="tm-empty">${done.size ? "Everything due today has been counted. 👍" : "Nothing is due for counting today."}</div>`}
         <section class="tb-card"><h4>Add another product</h4>
@@ -189,21 +264,25 @@ export async function mountStockCount(container, { param = "", staff = null } = 
     }
 
     body.addEventListener("input", (e) => {
-      const kitEl = e.target.closest("[data-ki]");
-      if (kitEl && e.target.dataset.k) {
+      const t = e.target;
+      if (t.name === "sc-order") { order = t.value; draw(); return; }
+      if (t.dataset.openCk !== undefined) { openChecks.set(t.closest("[data-open]").dataset.open, t.value); return; }
+      const kitEl = t.closest("[data-ki]");
+      if (kitEl && t.dataset.k) {
         const r = kitRows[Number(kitEl.dataset.ki)];
-        r[e.target.dataset.k] = e.target.value;
+        r[t.dataset.k] = t.value;
         kitEl.classList.toggle("is-done", kitFilled(r));
         msgEl.textContent = "";
         progress();
         return;
       }
-      const f = e.target.dataset.f;
-      const item = e.target.closest(".sc-item[data-i]");
+      const f = t.dataset.f;
+      const item = t.closest(".sc-item[data-i]");
       if (!f || !item) return;
       const b = blocks[Number(item.dataset.i)];
-      const r = b.rows[Number(e.target.closest(".sc-row").dataset.j)];
-      r[f] = f === "counted" ? (e.target.value === "" ? "" : String(Math.max(0, parseInt(e.target.value, 10) || 0))) : e.target.value;
+      const r = b.rows[Number(t.closest(".sc-row").dataset.j)];
+      r[f] = f === "counted" ? (t.value === "" ? "" : String(Math.max(0, parseInt(t.value, 10) || 0))) : t.value;
+      if (f === "counted") r.countedAt = r.counted === "" ? 0 : Date.now();   // the moment this line was counted
       item.classList.toggle("is-done", filled(b));
       msgEl.textContent = "";
       progress();
@@ -213,7 +292,7 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       if (!a) return;
       const item = a.closest(".sc-item[data-i]");
       const b = item ? blocks[Number(item.dataset.i)] : null;
-      if (a.dataset.act === "found" && b) { b.rows.push({ batch: "", expiry: "", counted: "", found: true }); draw(); }
+      if (a.dataset.act === "found" && b) { b.rows.push({ batch: "", expiry: "", counted: "", countedAt: 0, found: true }); draw(); }
       else if (a.dataset.act === "rm" && b) { b.rows.splice(Number(a.closest(".sc-row").dataset.j), 1); draw(); }
       else if (a.dataset.act === "rm-block" && b) { blocks.splice(blocks.indexOf(b), 1); draw(); }
       else if (a.dataset.act === "add") {
@@ -248,11 +327,23 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         const res = await saveCount({
           kind: "opening",
           lines: [
-            ...ready.flatMap((b) => b.rows.map((r) => ({ productId: b.p.id, loc: b.loc, batch: r.batch, expiry: r.expiry, counted: r.counted }))),
+            ...ready.flatMap((b) => b.rows.map((r) => ({
+              productId: b.p.id, loc: b.loc, batch: r.batch, expiry: r.expiry, counted: r.counted, countedAt: r.countedAt || 0,
+            }))),
             ...readyKits.map((r) => ({ kit: true, ref: r.k.id, sealed: r.sealed, open: r.open })),
           ],
         }, staff);
-        showResults(res);
+        // Opened containers that weren't there are closed, so treatment records stop offering them
+        let missing = 0;
+        for (const [id, v] of openChecks) {
+          const c = v === "missing" ? openNow.find((x) => x.id === id) : null;
+          if (!c) continue;
+          try {
+            await finishContainer(c, { reason: "Missing at the opening count", note: `Not found at the opening count by ${(staff && staff.name) || "staff"}` }, staff);
+            missing++;
+          } catch (err) { console.warn("Couldn't close a missing container:", err); }
+        }
+        showResults(res, missing);
       } catch (err) {
         console.error("Save count failed:", err);
         msgEl.textContent = err && err.code === "permission-denied"
@@ -302,7 +393,7 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       saveBtn.disabled = true;
       try {
         const res = await saveCount({ kind: "kit", lines: ready.map((r) => ({ ref: r.k.id, sealed: r.sealed, open: r.open })) }, staff);
-        showResults(res);
+        showResults(res, 0);
       } catch (err) {
         console.error("Save kit check failed:", err);
         msgEl.textContent = err && err.message && !err.code ? err.message : "Couldn't save. Try again.";
@@ -315,10 +406,12 @@ export async function mountStockCount(container, { param = "", staff = null } = 
   }
 
   /* ===================== After saving: reveal the system's numbers ===================== */
-  function showResults(res) {
+  function showResults(res, missingOpened) {
     const diffs = res.lines.filter((l) => l.status === "open");
     const invs = res.lines.filter((l) => l.status === "investigating");
     const qty = (l, n) => `${fmt(n)}${l.loc === "kit" ? ` ${l.unit}` : ""}`;
+    const movedNote = (l) => (Number(l.movedSince)
+      ? `<br><small class="muted">${fmt(Math.abs(l.movedSince))} ${l.movedSince < 0 ? "used" : "added"} after you counted</small>` : "");
     $('[data-role="progress"]').textContent = "";
     saveBtn.hidden = true;
     body.innerHTML = `<section class="tb-card sc-results">
@@ -327,13 +420,14 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         invs.length ? ` <strong>${invs.length} didn't match the digital count</strong>, so an investigation has been opened:
           someone else will recount ${invs.length === 1 ? "it" : "them"}.` : ""}${
         diffs.length ? ` <strong>${diffs.length} small difference${diffs.length === 1 ? "" : "s"}</strong> sent to Reporting for review.` : ""}${
-        !invs.length && !diffs.length ? " Everything matched. 👍" : " Stock hasn't been changed."}</p>
+        !invs.length && !diffs.length ? " Everything matched. 👍" : " Stock hasn't been changed."}${
+        missingOpened ? ` ${missingOpened} opened container${missingOpened === 1 ? " was" : "s were"} marked missing.` : ""}</p>
       <table class="inv-table"><thead><tr><th>Product</th><th>Where</th><th>Batch / Lot</th><th>Counted</th><th>Digital</th><th>Difference</th></tr></thead><tbody>${
         res.lines.map((l) => `<tr class="${l.status !== "ok" ? "is-diff" : ""}">
           <td>${esc(l.productName)}</td><td>${esc(whereOf(l))}</td>
           <td>${esc(l.batch ? `${l.batchLabel || batchName(byId.get(l.productId))} ${l.batch}` : "—")}</td>
           <td>${esc(qty(l, l.counted))}</td>
-          <td>${l.status === "investigating" ? '<span class="muted">Hidden until the recount</span>' : esc(qty(l, l.system))}</td>
+          <td>${l.status === "investigating" ? '<span class="muted">Hidden until the recount</span>' : esc(qty(l, l.system)) + movedNote(l)}</td>
           <td>${l.status === "investigating" ? '<span class="inv-flag is-bad">Investigating</span>'
             : l.status === "open" ? `<strong>${esc(diffText(l.variance))}</strong>` : "✓"}</td></tr>`).join("")}</tbody></table>
       <div class="sc-after"><a class="ff-btn" href="${backHref}">Back to tasks</a>

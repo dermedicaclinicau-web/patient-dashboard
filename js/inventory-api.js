@@ -223,6 +223,8 @@ export function cleanProduct(p = {}) {
     investigateOver: moneyOrNull(p.investigateOver),
     reorder: { shelf: intOrNull(r.shelf), jt: intOrNull(r.jt) },
     notes: clip(p.notes, 1000),
+    shelfPos: clip(p.shelfPos, 30),
+    jtPos: clip(p.jtPos, 30),
     active: p.active !== false,
   };
 }
@@ -1361,6 +1363,18 @@ export function countDue(p, d = new Date()) {
 }
 export const countLocs = (p) => (p.countWhere === "shelf" ? ["shelf"] : p.countWhere === "jt" ? ["jt"] : ["shelf", "jt"]);
 
+// When the opening count should be done by (inv_settings/counting)
+export const COUNT_DUE_DEFAULT = "10:00";
+export async function getCountSettings() {
+  const s = await getDoc(doc(db, "inv_settings", "counting"));
+  const d = s.exists() ? s.data() : {};
+  return { dueBy: /^\d{2}:\d{2}$/.test(d.dueBy || "") ? d.dueBy : COUNT_DUE_DEFAULT };
+}
+export async function saveCountSettings({ dueBy }, staff) {
+  if (!/^\d{2}:\d{2}$/.test(dueBy || "")) throw new Error("Choose a time.");
+  await setDoc(doc(db, "inv_settings", "counting"), { dueBy, ...stamp(staff) }, { merge: true });
+}
+
 export async function listCountsOn(key = dayKey()) {
   const snap = await getDocs(query(collection(db, "inv_counts"), where("dateKey", "==", key)));
   return snap.docs.map((d) => {
@@ -1409,6 +1423,7 @@ export async function saveCount({ kind, lines, note = "" }, staff) {
     list.forEach((p) => products.set(p.id, p));
     const lotById = new Map(lots.map((l) => [l.id, l]));
     const agg = new Map();
+    const latest = Date.now() + 60000;
     shelfLines.forEach((l) => {
       const p = products.get(l.productId);
       if (!p) return;
@@ -1416,20 +1431,39 @@ export async function saveCount({ kind, lines, note = "" }, staff) {
       const batch = p.tracked ? clip(l.batch, 40) : "";
       const expiry = p.tracked && KEY_RE.test(l.expiry || "") ? l.expiry : "";
       const ref = lotId(p.id, loc, batch, expiry);
-      const a = agg.get(ref) || { p, loc, batch, expiry, counted: 0 };
+      const t = Number(l.countedAt) || 0;
+      const a = agg.get(ref) || { p, loc, batch, expiry, counted: 0, countedAt: 0 };
       a.counted += Math.max(0, parseInt(l.counted, 10) || 0);
+      a.countedAt = Math.max(a.countedAt, t > 0 && t <= latest ? t : 0);
       agg.set(ref, a);
     });
+
+    // Stock that moved after a line was counted (e.g. a treatment saved while counting) is taken back out,
+    // so each line is compared with digital as it was at the moment it was counted
+    const times = [...agg.values()].map((a) => a.countedAt).filter(Boolean);
+    const moves = times.length
+      ? await listMovesBetween(new Date(Math.min(...times) - 1000), new Date(latest)).catch(() => [])
+      : [];
+    const movedSince = (a) => (!a.countedAt ? 0 : moves
+      .filter((m) => m.productId === a.p.id && m.at && m.at.getTime() > a.countedAt)
+      .reduce((s, m) => s + (m.lines || [])
+        .filter((x) => x.loc === a.loc && (!a.p.tracked || ((x.batch || "") === a.batch && (x.expiry || "") === a.expiry)))
+        .reduce((t, x) => t + (Number(x.delta) || 0), 0), 0));
+
     agg.forEach((a, ref) => {
-      const system = a.p.tracked ? ((lotById.get(ref) || {}).qty || 0) : (a.p.stock[a.loc] || 0);
+      const now = a.p.tracked ? ((lotById.get(ref) || {}).qty || 0) : (a.p.stock[a.loc] || 0);
+      const moved = movedSince(a);
+      const system = Math.max(0, now - moved);
       const variance = a.counted - system;
       out.push({
         productId: a.p.id, productName: a.p.name, loc: a.loc, ref, batch: a.batch, expiry: a.expiry,
         batchLabel: a.p.batchLabel || "Batch", unit: a.p.stockUnit, system, counted: a.counted, variance,
+        systemNow: now, movedSince: moved, countedAt: a.countedAt ? new Date(a.countedAt).toISOString() : "",
         status: !variance ? "ok" : needsInvestigation(a.p, variance) ? "investigating" : "open", note: "",
       });
     });
   }
+  
   if (!out.length) throw new Error("Nothing was counted.");
 
   // One write: the count, an investigation for each difference that needs one, and its notification
@@ -2109,7 +2143,7 @@ export async function listUnrecordedTreatments({ fromKey, toKey, productId = "" 
 // Each treatment record logs a use against it until someone marks it finished.
 
 export const isSharedProduct = (p) => !!p && p.usage === "shared";
-export const FINISH_REASONS = ["Empty", "Past its use-by date", "Expired", "Contaminated or dropped", "Other"];
+export const FINISH_REASONS = ["Empty", "Past its use-by date", "Expired", "Contaminated or dropped", "Missing at the opening count", "Other"];
 
 function normaliseOpen(d) {
   const x = d.data() || {};

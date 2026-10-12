@@ -4,7 +4,7 @@ import { can, isInjector } from "./perms.js";
 import {
   listProducts, listAllLots, listKits, listLoans, listReleases, listRequests, listMyUsage, listShortUsage, listPos,
   isKitProduct, kitUnits, expiryState, plural, unitPlural, lowAt, myUid, reqNumber, REQ_STATUS, REL_STATUS, countDue, countLocs, dayKey, listCountsOn,
-  listCounts, listShortAll, listInvestigations, listUnrecordedTreatments,
+  listCounts, listShortAll, listInvestigations, listUnrecordedTreatments, getCountSettings,
 } from "./inventory-api.js";
 import { listMySubmissions } from "./form-submissions.js";
 import { db } from "./firebase-config.js";
@@ -130,7 +130,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     const hidden = readHidden(me0);
     const show = (k) => can(`dash.${k}`) && !hidden.has(k);
     const todayKey = dayKey();
-    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts, notes, formsT, invs, unrec] = await Promise.all([
+    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts, notes, formsT, invs, unrec, countCfg] = await Promise.all([
       safe(listProducts(), []),
       safe(listAllLots(), []),
       safe(listKits(), []),
@@ -150,6 +150,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
       show("appts") ? safe(myNotes(staff), []) : [],
       show("appts") ? safe(formsToday(todayKey), []) : [],
       can("inventory.count") || canOrder || canReport ? safe(listInvestigations({ open: true }), []) : [],
+      safe(getCountSettings(), { dueBy: "10:00" }),
       show("attention") && (can("consult.record") || canReport)
         ? safe(listUnrecordedTreatments({ fromKey: dayKey(new Date(Date.now() - 7 * DAY)), toKey: dayKey(new Date(Date.now() - DAY)) }), { items: [] })
         : { items: [] },
@@ -180,8 +181,15 @@ export async function mountMyDashboard(container, { staff } = {}) {
         ...(isKitProduct(p) ? kits.filter((k) => k.productId === p.id).map((k) => `kit|${k.id}`) : []),
       ]);
       const left = dueKeys.filter((k) => !doneKeys.has(k)).length;
-      if (left) att.push({ tone: "warn", text: `Opening count: ${left} still to count today`, href: "#/tasks/count", act: "Count now" });
-    }
+      if (left) {
+        const [dh, dm] = String(countCfg.dueBy || "10:00").split(":").map(Number);
+        const nowD = new Date();
+        const late = nowD.getHours() * 60 + nowD.getMinutes() >= dh * 60 + dm;
+        const dueText = `${((dh + 11) % 12) + 1}:${String(dm).padStart(2, "0")}${dh < 12 ? "am" : "pm"}`;
+        att.push({ tone: late ? "bad" : "warn",
+          text: late ? `Opening count overdue (due ${dueText}): ${left} still to count` : `Opening count: ${left} still to count (due ${dueText})`,
+          href: "#/tasks/count", act: "Count now" });
+      }
     // Reporting: differences and saved-short records waiting for someone
     if (canReport) {
       const diffs = openCounts.reduce((a, c) => a + (Number(c.openCount) || 0), 0);

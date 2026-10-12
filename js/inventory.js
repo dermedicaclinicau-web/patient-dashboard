@@ -645,6 +645,11 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
               ${[["both", "Shelf and JT storage"], ["shelf", "Shelf only"], ["jt", "JT storage only"]].map(([v, l]) =>
                 `<option value="${v}"${(x.countWhere || "both") === v ? " selected" : ""}>${l}</option>`).join("")}
             </select></label>
+          <label class="lh-field"><span class="lh-label">Where it's kept on the Shelf (optional)</span>
+            <input name="shelfPos" maxlength="30" placeholder="e.g. A2 or Fridge, top" value="${val(x.shelfPos)}" />
+            <small class="fe-note">The opening count can list products in this order, so staff walk the shelf once.</small></label>
+          <label class="lh-field"><span class="lh-label">Where it's kept in JT storage (optional)</span>
+            <input name="jtPos" maxlength="30" placeholder="e.g. Cabinet 2" value="${val(x.jtPos)}" /></label>
           <label class="lh-field"><span class="lh-label">When a count doesn't match digital</span>
             <select class="fb-select" name="investigate">
               ${[["", "Default for the category"], ["always", "Always investigate (recount + admin review)"],
@@ -768,6 +773,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           perUse: f.perUse.value, openDays: f.openDays.value,
           batchLabel: f.batchLabel.value,
           countFreq: f.countFreq.value, countDay: f.countDay.value, countWhere: f.countWhere.value,
+          shelfPos: f.shelfPos.value, jtPos: f.jtPos.value,
           investigate: f.investigate.value, investigateOver: f.investigateOver.value,
           reorder: { shelf: f.reShelf.value, jt: f.reJt.value },
           tracked: hasStock ? x.tracked : f.tracked.checked, active: f.active.checked, notes: f.notes.value,

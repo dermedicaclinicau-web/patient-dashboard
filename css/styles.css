@@ -4141,3 +4141,11 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .uit-ed textarea { width: 100%; padding: .45rem .55rem; border: 1px solid var(--border); border-radius: 8px; font: inherit; font-size: .85rem; resize: vertical; }
 .uit-acts { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .4rem; }
 .uit-acts small { flex: 1 1 100%; font-size: .72rem; color: var(--muted); }
+
+/* Opening count: walking order and opened containers */
+.sc-order { display: flex; align-items: center; gap: .5rem; margin: 0 0 .75rem; font-size: .85rem; }
+.sc-pos { display: inline-block; margin-right: .4rem; padding: .05rem .45rem; border-radius: 6px; background: var(--primary-soft);
+  color: var(--primary); font-size: .75rem; font-weight: 700; }
+.sc-open { display: grid; gap: .35rem; margin-top: .55rem; padding: .55rem .65rem; border: 1px dashed var(--border); border-radius: 10px; }
+.sc-open > small { color: var(--muted); }
+.sc-openrow { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; font-size: .85rem; }
