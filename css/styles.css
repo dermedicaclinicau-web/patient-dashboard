@@ -3885,8 +3885,10 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 @media (max-width: 760px) { .inv-alt { grid-template-columns: 1fr 1fr; } .inv-alt .ib-tool { justify-self: end; } }
 
 /* ---------- Products: tick boxes and bulk actions ---------- */
-.inv-name-pick { display: flex; align-items: flex-start; gap: .65rem; }
-.inv-name-pick > span { display: flex; flex-direction: column; min-width: 0; }
+/* Tick box beside the product name (the name and its details stay stacked) */
+.inv-prow .inv-name.inv-name-pick { display: flex; flex-direction: row; align-items: center; gap: .75rem; min-width: 0; }
+.inv-prow .inv-name.inv-name-pick > span { display: flex; flex-direction: column; gap: .1rem; min-width: 0; }
+.inv-prow .inv-name.inv-name-pick > .inv-pick { margin: 0; }
 .inv-pick { width: 18px; height: 18px; margin: .15rem 0 0; accent-color: var(--primary); cursor: pointer; flex: none; }
 .inv-group h3 .inv-pick { margin: 0 .55rem 0 0; vertical-align: -3px; }
 .inv-prow.is-picked { background: color-mix(in srgb, var(--primary) 7%, #fff); }
