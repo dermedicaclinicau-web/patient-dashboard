@@ -482,9 +482,25 @@ export async function mountFormFill(container, param, { staff } = {}) {
     mountPhotoField(wrap(f.id), f, { patient, onChange: () => { dirty = true; } });
   });
 
-    // Products used
+  // Products used. An amount can follow a marked picture, Calculation or Number on this form.
+  const linkedValue = (id) => {
+    const src = fields.find((x) => x.id === id);
+    const w = wrap(id);
+    if (!src || (w && w.hidden)) return null;
+    if (src.type === "image") { const a = annots[id]; return a && a.total ? a.total() : null; }
+    if (src.type === "calculation") return Number.isFinite(calc[id]) ? calc[id] : null;
+    if (src.type === "number") {
+      const el = sheet.querySelector(`input[data-in="${CSS.escape(id)}"]`);
+      return el && el.value !== "" ? Number(el.value) : null;
+    }
+    return null;
+  };
+  const linkedLabel = (id) => {
+    const src = fields.find((x) => x.id === id);
+    return !src ? "the form" : src.type === "image" ? (src.label || src.fileName || "the picture") : (src.label || "the form");
+  };
   fields.filter((f) => f.type === "consumables").forEach((f) => {
-    mountConsumablesField(wrap(f.id), f, { staff, onChange: () => { dirty = true; } });
+    mountConsumablesField(wrap(f.id), f, { staff, onChange: () => { dirty = true; }, linked: linkedValue, linkLabel: linkedLabel });
   });
 
   // Fill in from the patient's record
@@ -546,6 +562,11 @@ export async function mountFormFill(container, param, { staff } = {}) {
     shown = applyVisibility(sheet, fields, rctx());
     updateCalcs();
     shown = applyVisibility(sheet, fields, rctx());
+    fields.forEach((f) => {
+      if (f.type !== "consumables") return;
+      const w = wrap(f.id);
+      if (w && w.csSync) w.csSync();
+    });
     updateProgress();
   };
 

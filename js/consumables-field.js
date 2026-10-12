@@ -37,7 +37,9 @@ function loadStock(force = false) {
   return stockJob;
 }
 
-export function mountConsumablesField(w, f, { staff, onChange = () => {} } = {}) {
+// linked(fieldId): the current total of a marked picture / Calculation / Number on the form (or null)
+// linkLabel(fieldId): its name, shown as "Filled in from …"
+export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked = null, linkLabel = null } = {}) {
   const host = w && w.querySelector("[data-cs-host]");
   if (!host) return;
   const canKit = isInjector();
@@ -85,6 +87,34 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {} } = {})
       r.preset = null;
     });
   }
+
+  // A linked amount: kit units are split across batches (oldest expiry first), mL fills the dose
+  const r2 = (n) => Math.round(n * 100) / 100;
+  function fillFrom(l, val) {
+    const p = productOf(l);
+    if (!val) { l.rows = [newRow()]; return; }
+    if (!p) { l.rows = [newRow(val)]; return; }
+    if (dosed(p)) { l.rows = [{ ...newRow(), dose: val, amount: syringesFor(p, val) }]; return; }
+    let left = val;
+    const rows = [];
+    for (const s of sources(l)) {
+      if (left <= 0.0001) break;
+      const take = Math.min(left, Math.max(0, s.avail));
+      if (take > 0) { rows.push({ ...newRow(), ref: s.ref, amount: r2(take) }); left = r2(left - take); }
+    }
+    if (left > 0.0001) { // not enough in stock: the rest goes on the last row and is flagged as short
+      if (rows.length) rows[rows.length - 1].amount = r2(rows[rows.length - 1].amount + left);
+      else rows.push({ ...newRow(), amount: r2(left) });
+    }
+    l.rows = rows;
+  }
+  const linkNoteHtml = (l) => {
+    const from = l.item && l.item.from;
+    if (!from || !linked) return "";
+    return `<small class="cs-linknote">${l.manual
+      ? `Changed by hand · linked total ${esc(fmt(l.linkVal || 0))} <button type="button" class="cs-link" data-cs="relink">Use the linked total</button>`
+      : `Filled in from ${esc(linkLabel ? linkLabel(from) : "the form")}`}</small>`;
+  };
   
   function fixRefs(l) {
     const src = sources(l);
@@ -178,7 +208,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {} } = {})
       : `${l.loc === "jt" ? "JT storage" : "Shelf"}: ${plural(p.stock[l.loc], p.stockUnit)}${dosed(p) ? ` · ${fmt(p.dosePer)} ${p.doseUnit} each` : ""}`;
     return `<div class="cs-line${shortOf(l, src) > 0 ? " is-short" : ""}" data-i="${i}">
       <div class="cs-head">
-        <strong>${esc(p.name)}${req}</strong><small>${esc(info)}</small>
+        <strong>${esc(p.name)}${req}</strong><small>${esc(info)}</small>${linkNoteHtml(l)}
         ${kit ? "" : `<select class="fe-in cs-loc" data-f="loc" aria-label="Taken from">
           <option value="shelf"${l.loc === "shelf" ? " selected" : ""}>Shelf</option>
           <option value="jt"${l.loc === "jt" ? " selected" : ""}>JT storage</option></select>`}
@@ -229,6 +259,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {} } = {})
     }
     if (force) document.dispatchEvent(new CustomEvent("cs:stock"));
     draw();
+    if (w.csSync) { lines.forEach((l) => { if (!l.manual) l.linkVal = undefined; }); w.csSync(); }
   }
   const onStock = () => {
     if (!host.isConnected) { document.removeEventListener("cs:stock", onStock); return; }
@@ -245,6 +276,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {} } = {})
     const l = lines[Number(li.dataset.i)];
     const r = l.rows[Number(rowEl.dataset.j)];
     const p = productOf(l);
+    if (l.item && l.item.from) l.manual = true; // their own figure wins until "Use the linked total"
     if (key === "dose") {
       r.dose = el.value;
       if (r.auto && p) {                                  // syringes follow the mL until changed by hand
@@ -285,8 +317,9 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {} } = {})
     const l = li ? lines[Number(li.dataset.i)] : null;
     if (!l) return;
     const act = b.dataset.cs;
-    if (act === "add-row") { l.rows.push(newRow()); draw(); }
-    else if (act === "remove-row") { l.rows.splice(Number(b.closest(".cs-row").dataset.j), 1); onChange(); draw(); }
+    if (act === "relink") { l.manual = false; l.linkVal = undefined; w.csSync(); onChange(); return; }
+    if (act === "add-row") { if (l.item && l.item.from) l.manual = true; l.rows.push(newRow()); draw(); }
+    else if (act === "remove-row") { if (l.item && l.item.from) l.manual = true; l.rows.splice(Number(b.closest(".cs-row").dataset.j), 1); onChange(); draw(); }
     else if (act === "remove-line") { lines.splice(lines.indexOf(l), 1); onChange(); draw(); }
     else if (act === "take" || act === "borrow") {
       const p = productOf(l);
@@ -345,7 +378,27 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {} } = {})
     }
     return "";
   };
-
+  // Called by the form whenever answers change: linked lines follow their total
+  w.csSync = () => {
+    if (!linked || !stock) return;
+    let redraw = false;
+    lines.forEach((l, i) => {
+      const from = l.item && l.item.from;
+      if (!from) return;
+      const raw = Number(linked(from));
+      const val = Number.isFinite(raw) && raw > 0 ? r2(raw) : 0;
+      if (l.linkVal === val) return;
+      l.linkVal = val;
+      if (l.manual) { // keep their figure; just update the note
+        const note = host.querySelector(`.cs-line[data-i="${i}"] .cs-linknote`);
+        if (note) note.outerHTML = linkNoteHtml(l);
+        return;
+      }
+      fillFrom(l, val);
+      redraw = true;
+    });
+    if (redraw) draw();
+  };
   refresh(false);
 }
 

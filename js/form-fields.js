@@ -385,6 +385,7 @@ export function cleanField(f) {
           required: it.required === true,
           amount: Number(it.amount) > 0 ? Number(it.amount) : null,
           max: Number(it.max) > 0 ? Number(it.max) : null,
+          from: /^[A-Za-z0-9_-]{1,40}$/.test(it.from || "") ? it.from : "",
         }));
       out.allowExtra = f.allowExtra !== false;
       out.ifShort = pick(f.ifShort, ["flag", "block"], "flag");
@@ -633,7 +634,9 @@ export function renderField(f, ctx = {}) {
       return head + (items.length
         ? `<div class="cs-build">${items.map((it) => `<div class="cs-build-row"><span>${esc(it.name || "Product")}${
             it.required ? '<span class="fe-req">*</span>' : ""}</span><small>${it.kind === "kit" ? "From the clinician's kit" : "From the Shelf"}${
-            it.amount ? ` · ${esc(it.amount)} ${esc(it.unit)} by default` : ""}${it.max ? ` · up to ${esc(it.max)}` : ""}</small></div>`).join("")}</div>`
+            it.from ? ` · amount from ${esc(((ctx.fields || []).find((x) => x.id === it.from) || {}).label
+              || ((ctx.fields || []).find((x) => x.id === it.from) || {}).fileName || "the form")}`
+              : it.amount ? ` · ${esc(it.amount)} ${esc(it.unit)} by default` : ""}${it.max ? ` · up to ${esc(it.max)}` : ""}</small></div>`).join("")}</div>`
         : `<div class="fe-img-empty">${svg(ICONS.consumables)}<span>Choose products in the settings panel</span></div>`) +
         (f.allowExtra !== false ? '<div class="fe-help fe-help-after">Staff can add other products while filling in.</div>' : "");
     }
@@ -916,16 +919,25 @@ function typeSettings(f, ctx = {}) {
     }
     case "consumables": {
       const items = f.items || [];
+      const linkable = (ctx.fields || []).filter((x) => isMarkImage(x) || ["calculation", "number"].includes(x.type));
+      const linkName = (x) => (x.type === "image" ? `${x.label || x.fileName || "Picture"} (marks total)`
+        : `${x.label || "Untitled"} (${x.type === "number" ? "number" : "calculation"})`);
       return `<div class="fe-insp-field"><span class="fe-insp-label">Products</span>
         ${items.length ? items.map((it, i) => `<div class="cs-set">
           <div class="cs-set-head"><strong>${esc(it.name)}</strong><small>${it.kind === "kit" ? "Kit · in " + esc(it.unit) : "Shelf · in " + esc(it.unit)}</small>
             <button type="button" class="hx-x" data-cidel="${i}" aria-label="Remove ${esc(it.name)}">${svg(ICONS.x)}</button></div>
+          <label class="fe-insp-sub"><small>Amount comes from</small>
+            <select class="fb-select" data-ci="${i}" data-cik="from">
+              <option value="">Staff type it</option>
+              ${linkable.map((x) => `<option value="${esc(x.id)}"${it.from === x.id ? " selected" : ""}>${esc(linkName(x))}</option>`).join("")}
+            </select></label>
           <label class="fe-check"><input type="checkbox" data-ci="${i}" data-cik="required"${it.required ? " checked" : ""} /> Must be filled in</label>
           <div class="fe-two">
             <label class="fe-insp-sub"><small>Default amount</small><div class="fe-num"><input class="fe-input" type="number" min="0" step="any" data-ci="${i}" data-cik="amount" value="${it.amount ?? ""}" placeholder="None" /><span>${esc(it.unit)}</span></div></label>
             <label class="fe-insp-sub"><small>Most allowed</small><div class="fe-num"><input class="fe-input" type="number" min="0" step="any" data-ci="${i}" data-cik="max" value="${it.max ?? ""}" placeholder="No limit" /><span>${esc(it.unit)}</span></div></label>
           </div></div>`).join("") : '<small class="fe-note">None chosen yet.</small>'}
         <button type="button" class="lh-btn" data-act="cs-pick">Choose products</button></div>` +
+        '<small class="fe-note fe-pad">Amount comes from: fills the product in from a face chart, Calculation or Number on this form. Use one in the same unit as the product (units for kit products, mL for fillers). Staff can still change it.</small>' +
         setting("If there isn't enough in stock", choose("ifShort", [
           ["flag", "Save, and flag it for the ordering team"], ["block", "Don't allow saving"],
         ], f.ifShort || "flag"), "Flagging is safest for clinical records: the treatment is always recorded.") +
@@ -1122,6 +1134,7 @@ export function applyInput(f, el) {
   if (el.dataset.ci !== undefined) {
     const it = f.items && f.items[Number(el.dataset.ci)];
     if (!it) return false;
+    if (el.dataset.cik === "from") { it.from = el.value; return true; }
     if (el.dataset.cik === "required") it.required = el.checked;
     else { const n = Number(el.value); it[el.dataset.cik] = el.value === "" || !(n > 0) ? null : n; }
     return true;

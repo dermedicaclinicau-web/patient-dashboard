@@ -5,7 +5,7 @@ import {
 import {
   esc, svg, ICONS, FIELD_TYPES, FIELD_GROUPS, CHOICE_TYPES, FILLS, FILLS_FOR,
   createField, normaliseField, renderField, fieldSettings, applyInput, applyClick,
-  calcStatusHtml, checkFormula, canRequire, hasLabel, hasHelp, watermarkHtml, iqHasOptions,
+  calcStatusHtml, checkFormula, canRequire, hasLabel, hasHelp, watermarkHtml, iqHasOptions, isMarkImage,
 } from "./form-fields.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { DEFAULT_LETTERHEAD, letterheadHtml, openLetterheadDialog } from "./form-letterhead.js";
@@ -294,6 +294,14 @@ export async function mountFormEditor(container, { templateId, staff }) {
       }
       if (f.type === "consumables" && !(f.items || []).length) {
         return { id: f.id, msg: "Choose at least one product for the Consumables field." };
+      }
+      if (f.type === "consumables") {
+        const bad = (f.items || []).find((it) => {
+          if (!it.from) return false;
+          const src = fields.find((x) => x.id === it.from);
+          return !src || !(isMarkImage(src) || ["calculation", "number"].includes(src.type));
+        });
+        if (bad) return { id: f.id, msg: `${bad.name}: the question its amount comes from has been removed or no longer has unit marks.` };
       }
       if (f.type === "prescription_status" && !f.consentFormId) {
         return { id: f.id, msg: "Choose which prescription form the Prescription check looks for." };
@@ -928,6 +936,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
             productId: id, name: p ? p.name : (o && o.name) || "Product", kind: kit ? "kit" : "storage",
             unit: p ? (kit || p.dosePer ? p.doseUnit : p.stockUnit) : (o && o.unit) || "",
             required: o ? o.required : false, amount: o ? o.amount : null, max: o ? o.max : null,
+            from: o ? o.from || "" : "",
           };
         });
         changed(); renderStage(); renderInspector();
