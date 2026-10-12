@@ -46,14 +46,15 @@ const lowAt = (p, loc) => p.reorder[loc] !== null && p.reorder[loc] !== undefine
 let uiStaff = null;
 const isAdminStaff = (s) => /^admin$/i.test(String((s && s.role) || ""));
 
-function openDialog(cls, html) {
+// editWording: show "✎ Edit wording" to Admins in this window. Edited wording is shown to everyone everywhere.
+function openDialog(cls, html, { editWording = false } = {}) {
   const dlg = document.createElement("dialog");
   dlg.className = `lh-dialog ${cls}`;
   dlg.innerHTML = html;
   document.body.appendChild(dlg);
   dlg.addEventListener("close", () => dlg.remove());
   dlg.showModal();
-  enableUiText(dlg, { scope: "inv", admin: isAdminStaff(uiStaff), staff: uiStaff });
+  enableUiText(dlg, { scope: "inv", admin: editWording && isAdminStaff(uiStaff), staff: uiStaff });
   return dlg;
 }
 
@@ -675,7 +676,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
           <button type="submit" class="lh-btn is-primary">${isNew ? "Add product" : "Save"}</button>
         </div>
-      </form>`);
+      </form>`, { editWording: tab === "products" });
     const form = dlg.querySelector("form");
     const err = dlg.querySelector(".lh-error");
 
