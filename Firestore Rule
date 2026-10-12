@@ -63,12 +63,19 @@ service cloud.firestore {
         && d.get('trashed', false) is bool;
     }
 
+    // An optional web link: empty, or a full https:// address (no spaces)
+    function okLink(v) {
+      return v is string && v.size() <= 500 && (v == '' || v.matches('https://[^ ]+'));
+    }
+
     // Aftercare instructions: only these fields are checked, so anything else your existing tool stores is left alone
     function validAftercare(d) {
       return d['Aftercare Title'] is string
         && d['Aftercare Title'].size() > 0 && d['Aftercare Title'].size() <= 200
         && d['Associated Treatment'] is string && d['Associated Treatment'].size() <= 120
-        && d['Instruction'] is string && d['Instruction'].size() <= 100000;
+        && d['Instruction'] is string && d['Instruction'].size() <= 100000
+        && okLink(d.get('Link', ''))
+        && okLink(d.get('link', ''));
     }
 
     function validSspProduct(d) {
@@ -110,8 +117,6 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    
-
     // Batches on the Shelf and in JT storage
     match /inv_lots/{id} {
       allow read: if isStaff();
@@ -121,10 +126,10 @@ service cloud.firestore {
 
     // Activity log: append-only, stamped with the person who did it
     match /inv_moves/{id} {
-      allow read: if can('menu.inventory') || invOrder() || invKit();
+      allow read: if can('menu.inventory') || invOrder() || invKit() || invReport();
       allow create: if request.resource.data.byUid == request.auth.uid
         && (invManage()
-          || (invReport() && request.resource.data.type in ['count', 'kit-count'])
+          || (invReport() && request.resource.data.type in ['count', 'kit-count', 'use-correct', 'kit-correct'])
           || (invOrder() && request.resource.data.type in ['move', 'receive'])
           || (invKit() && request.resource.data.type in ['kit-take', 'kit-open', 'kit-return', 'kit-discard', 'kit-use', 'kit-borrow'])
           || (invJt() && request.resource.data.type == 'release')
@@ -173,11 +178,31 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Products used in treatments: written with the treatment record, never changed
+    // Products used in treatments: written with the treatment record.
+    // Reporting can resolve a saved-short record once. Manage inventory can correct amounts
+    // (patient, form, staff and the first original are locked).
     match /inv_usage/{id} {
       allow read: if isStaff();
       allow create: if invUse() && request.resource.data.byUid == request.auth.uid;
-      allow update, delete: if false;
+      allow update: if
+        (
+          (invReport() || invOrder())
+          && resource.data.get('resolved', false) != true
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['resolved', 'resolvedNote', 'resolvedBy', 'resolvedByUid', 'resolvedAt'])
+          && request.resource.data.resolved == true
+          && request.resource.data.resolvedNote is string
+          && request.resource.data.resolvedNote.size() > 0 && request.resource.data.resolvedNote.size() <= 500
+          && request.resource.data.resolvedByUid == request.auth.uid
+        ) || (
+          can('inventory.manage')
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['lines', 'short', 'original', 'corrected', 'corrections', 'correctedAt', 'correctedBy', 'correctedByUid'])
+          && request.resource.data.corrected == true
+          && request.resource.data.correctedByUid == request.auth.uid
+          && (!('original' in resource.data) || request.resource.data.original == resource.data.original)
+        );
+      allow delete: if false;
     }
 
     // Opening counts and kit checks. The system numbers are recorded when saved; Reporting reviews the differences.
@@ -237,6 +262,28 @@ service cloud.firestore {
       allow read: if can('menu.inventory') || invOrder();
       allow create: if invOrder() && request.resource.data.byUid == request.auth.uid;
       allow update, delete: if false;
+    }
+
+    // Notifications: rules are managed in Inventory → Notifications
+    match /notify_rules/{id} {
+      allow read, create, update, delete: if can('inventory.manage');
+    }
+    // Events the portal hands to Apps Script. Write-once; only Apps Script reads and updates them.
+    match /notify_outbox/{id} {
+      allow create: if isStaff()
+        && request.resource.data.keys().hasOnly(['event', 'data', 'status', 'createdAt', 'createdByUid'])
+        && request.resource.data.event in ['stock.arrived', 'count.difference', 'usage.short', 'loan.disputed']
+        && request.resource.data.status == 'new'
+        && request.resource.data.createdByUid == request.auth.uid;
+      allow read, update, delete: if false;
+    }
+    // Every email the rules sent (written by Apps Script only)
+    match /notify_log/{id} {
+      allow read: if can('inventory.manage');
+      allow write: if false;
+    }
+    match /notify_state/{id} {
+      allow read, write: if false;
     }
 
     // ===================== Old Apps Script Form Builder =====================
@@ -325,6 +372,11 @@ service cloud.firestore {
         && (request.resource.data.printerEmail == ''
             || request.resource.data.printerEmail.matches('[^ @]+@[^ @]+[.][^ @]+'))
         && request.resource.data.updatedAt == request.time;
+    }
+
+    match /form_settings/marking_sets {
+      allow read: if request.auth != null;
+      allow write: if can('forms.build');
     }
 
     // Skin Script design: validity, wording, PDF look and the patient email
@@ -433,15 +485,16 @@ service cloud.firestore {
 
     // ===================== Aftercare =====================
 
-    // Staff read; form builders add, edit and delete from the portal
+    // Staff read; form builders add, edit and delete from the portal.
+    // The optional link may be saved as "Link" or "link" (empty, or https:// only).
     match /Aftercare-instruction/{docId} {
       allow read: if isStaff();
       allow create: if can('forms.build') && validAftercare(request.resource.data)
         && request.resource.data.keys().hasOnly(['Aftercare Title', 'Associated Treatment', 'Created By',
-             'Created TimeStamp', 'Instruction', 'Updated As of', 'Updated By']);
+             'Created TimeStamp', 'Instruction', 'Link', 'link', 'Updated As of', 'Updated By']);
       allow update: if can('forms.build') && validAftercare(request.resource.data)
         && request.resource.data.diff(resource.data).affectedKeys()
-             .hasOnly(['Aftercare Title', 'Associated Treatment', 'Instruction', 'Updated As of', 'Updated By']);
+             .hasOnly(['Aftercare Title', 'Associated Treatment', 'Instruction', 'Link', 'link', 'Updated As of', 'Updated By']);
       allow delete: if can('forms.build');
     }
 
@@ -467,6 +520,10 @@ service cloud.firestore {
         && request.resource.data.items is list
         && request.resource.data.items.size() > 0 && request.resource.data.items.size() <= 150;
       allow update, delete: if false;
+      allow update: if can('ssp.create')
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['recordDate', 'validUntil', 'items', 'editedAt', 'editedBy', 'editedByUid', 'editCount', 'history'])
+        && request.resource.data.editedByUid == request.auth.uid;
     }
 
     // ===================== Staff =====================

@@ -577,6 +577,7 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .ssp-instr.none { color: var(--muted); font-style: italic; }
 .ssp-legend { display: flex; flex-wrap: wrap; gap: .4rem .9rem; padding: 0 .2rem; font-size: .75rem; color: #5b1a1a; }
 .ssp-legend span { display: inline-flex; align-items: center; gap: .35rem; }
+.ssp-wrap .ssp-banner.is-edit { border-color: #fedf89; background: #fffaeb; color: #93370d; }
 
 .pur-chips { display: flex; flex-wrap: wrap; gap: .4rem; }
 .pur-chip { font-size: .78rem; padding: .2rem .65rem; border-radius: 999px; background: #fff; color: #9f1239; }
@@ -4027,3 +4028,4 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .cs-linknote { display: inline-flex; align-items: center; flex-wrap: wrap; gap: .35rem; flex-basis: 100%;
   margin-top: .15rem; color: #0f766e; font-size: .8rem; font-weight: 600; }
 .cs-linknote .cs-link { font-size: .8rem; }
+

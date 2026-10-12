@@ -7,6 +7,8 @@ import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 import { openSspPreview } from "./ssp-send.js";
 import { getSspSettings, openSspSettings, SSP_DEFAULTS } from "./ssp-settings.js";
+import { takeSspIntent, updateSspRecord, describeSspChanges } from "./ssp-edit.js";
+import { callApi } from "./appointments.js";
 
 const DAYS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -82,6 +84,7 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
   const draftKey = `ssp-draft:${patient.id}`;
   const meta = { recordDate: todayIso(), validUntil: addMonths(todayIso(), VALID_MONTHS) };
   let saving = false;
+  let editing = null; // the saved protocol being edited (Edit), otherwise null
 
   /* ---------- Page ---------- */
   root.innerHTML = `
@@ -203,6 +206,7 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
   let draftTimer = null;
   function saveDraft() {
     clearTimeout(draftTimer);
+    if (editing) return; // edits are saved straight to the protocol, not as a draft
     draftTimer = setTimeout(() => {
       const changed = [...rows.values()].filter((r) => selected(r) || r.maint || r.edited || r.days.size || r.notes || r.split)
         .map((r) => ({ key: r.key, am: r.am, pm: r.pm, maint: r.maint, split: r.split, edited: r.edited,
@@ -230,20 +234,41 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
     });
   }
 
-  // A saved protocol's choices, ticked on this one
+  // A saved protocol's choices, ticked on this one. Old sheet protocols have no product id,
+  // so they're matched by name. Returns the names of products that couldn't be found.
+  const normName = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  function findRow(it) {
+    if (it.productId) {
+      const r = rows.get(`${it.step}:${it.productId}`);
+      if (r) return r;
+      const p = productMap.get(it.productId);
+      if (p && p.steps.length) return rows.get(`${p.steps[0]}:${p.id}`) || null;
+    }
+    const n = normName(it.name);
+    if (!n) return null;
+    const p = products.find((x) => normName(x.name) === n && (!it.step || x.steps.includes(it.step)))
+      || products.find((x) => normName(x.name) === n);
+    if (!p) return null;
+    return rows.get(`${it.step && p.steps.includes(it.step) ? it.step : p.steps[0]}:${p.id}`) || null;
+  }
   function applyRecord(rec) {
     clearRows();
+    const missing = [];
     (rec.items || []).forEach((it) => {
-      const r = rows.get(`${it.step}:${it.productId}`);
-      if (!r) return;
+      const r = findRow(it);
+      if (!r) { if (it.name) missing.push(it.name); return; }
       r.am = !!it.am; r.pm = !!it.pm; r.maint = !!it.maint;
       r.amText = it.amText || ""; r.pmText = it.pmText || "";
+      if (!r.amText && r.pm) r.amText = r.pmText;
+      if (!r.pmText && r.am) r.pmText = r.amText;
       r.split = !!(it.am && it.pm && r.amText !== r.pmText);
       r.text = it.am ? r.amText : r.pmText;
+      if (!r.text) r.text = r.amText = r.pmText = baseText(r);
       r.edited = r.split || r.text !== baseText(r);
       r.days = new Set(Array.isArray(it.days) ? it.days : []);
       r.notes = it.notes || "";
     });
+    return [...new Set(missing)];
   }
 
   /* ---------- Events ---------- */
@@ -411,6 +436,25 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
       throw new Error("Check the record date and valid until date.");
     }
     if (meta.validUntil < meta.recordDate) throw new Error("Valid until must be after the record date.");
+
+    // Edit: update the same protocol, keep what changed, and correct SSP_NEW
+    if (editing) {
+      const summary = describeSspChanges(editing, list, meta);
+      if (!summary) throw new Error("Nothing has changed yet. Make a change, or press Cancel.");
+      try {
+        await updateSspRecord(editing.id, { recordDate: meta.recordDate, validUntil: meta.validUntil, items: list }, staff, summary);
+      } catch (err) {
+        throw new Error(err.code === "permission-denied"
+          ? "Couldn't save the changes. Check the ssp_records update rule has been published."
+          : err.code ? "Couldn't save. Check your connection and try again." : err.message);
+      }
+      savedRecord = { ...editing, recordDate: meta.recordDate, validUntil: meta.validUntil, items: list,
+        editedBy: (staff && staff.name) || "", editCount: Number(editing.editCount || 0) + 1 };
+      callApi({ action: "ssp", op: "replaceRecord", recordId: editing.id })
+        .catch((err) => console.warn("Saved, but SSP_NEW wasn't updated:", err));
+      return savedRecord;
+    }
+
     const data = {
       recordId: `SSP-${meta.recordDate.replace(/-/g, "")}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
       patientId: patient.id,
@@ -444,13 +488,15 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
     lbl.textContent = "Saving…";
     try {
       const rec = await doSave();
-      showToast(`Skin Script Protocol saved (${rec.items.length} product${rec.items.length === 1 ? "" : "s"})`);
+      showToast(editing
+        ? "Skin Script Protocol updated"
+        : `Skin Script Protocol saved (${rec.items.length} product${rec.items.length === 1 ? "" : "s"})`);
       location.hash = backHref;
     } catch (err) {
       console.error("SSP save failed:", err);
       msgEl.textContent = err.message;
       btn.disabled = false;
-      lbl.textContent = "Save protocol";
+      lbl.textContent = editing ? "Save changes" : "Save protocol";
     } finally {
       saving = false;
     }
@@ -474,25 +520,71 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
   /* ---------- Start ---------- */
   let lastRecord = null;
   let draft = null;
-  try { draft = JSON.parse(localStorage.getItem(draftKey) || "null"); } catch { draft = null; }
-  if (draft && Array.isArray(draft.rows) && draft.rows.length) {
-    applySaved(draft.rows);
-    if (draft.recordDate) { meta.recordDate = draft.recordDate; $('[data-meta="recordDate"]').value = meta.recordDate; }
-    if (draft.validUntil) { meta.validUntil = draft.validUntil; $('[data-meta="validUntil"]').value = meta.validUntil; }
-    const when = new Date(draft.savedAt).toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
-    banner.innerHTML = `<div class="ssp-banner">Your unsaved draft from ${esc(when)} has been restored.
-      <button type="button" class="lh-btn is-quiet" data-act="fresh">Start fresh</button></div>`;
+  const intent = takeSspIntent(patient.id);
+
+  // Opened from "Edit" or "Duplicate" on the patient page
+  async function startFromIntent(it) {
+    let rec = null;
+    if (it.recordId) {
+      try {
+        rec = (await listSspRecords([patient.id, ...patientIds(patient)])).find((r) => r.id === it.recordId) || null;
+      } catch (err) { console.warn("Couldn't load the protocol:", err); }
+      if (!rec) {
+        banner.innerHTML = '<div class="ssp-banner">That protocol couldn\'t be found, so this is a new, blank one.</div>';
+        return;
+      }
+    }
+    const missing = applyRecord(rec || { items: Array.isArray(it.items) ? it.items : [] });
+    const missNote = missing.length
+      ? ` <strong>${missing.length} product${missing.length === 1 ? " isn't" : "s aren't"} in the catalogue any more and ${
+          missing.length === 1 ? "was" : "were"} left out:</strong> ${esc(missing.join(", "))}.`
+      : "";
+    if (it.mode === "edit" && rec) {
+      editing = rec;
+      meta.recordDate = rec.recordDate || meta.recordDate;
+      meta.validUntil = rec.validUntil || meta.validUntil;
+      $('[data-meta="recordDate"]').value = meta.recordDate;
+      $('[data-meta="validUntil"]').value = meta.validUntil;
+      root.querySelector(".ff-bar-title strong").textContent = "Edit Skin Script Protocol";
+      root.querySelector('[data-act="save"] span').textContent = "Save changes";
+      const sent = (rec.deliveries || []).length
+        ? " It has already been sent to the patient, so send the updated one after saving." : "";
+      banner.innerHTML = `<div class="ssp-banner is-edit">Editing the protocol from ${esc(niceDate(rec.recordDate))}.
+        Saving updates it, and a record of what changed is kept.${sent}${missNote}</div>`;
+    } else {
+      const from = rec ? niceDate(rec.recordDate) : (niceDate(it.fromDate) || it.fromDate || "an earlier date");
+      banner.innerHTML = `<div class="ssp-banner is-ok">Copied from the protocol from ${esc(from)}.
+        Saving creates a new protocol dated ${esc(niceDate(meta.recordDate))}; the original isn't changed.${missNote}</div>`;
+      saveDraft();
+    }
   }
+
+  if (intent) {
+    await startFromIntent(intent);
+  } else {
+    try { draft = JSON.parse(localStorage.getItem(draftKey) || "null"); } catch { draft = null; }
+    if (draft && Array.isArray(draft.rows) && draft.rows.length) {
+      applySaved(draft.rows);
+      if (draft.recordDate) { meta.recordDate = draft.recordDate; $('[data-meta="recordDate"]').value = meta.recordDate; }
+      if (draft.validUntil) { meta.validUntil = draft.validUntil; $('[data-meta="validUntil"]').value = meta.validUntil; }
+      const when = new Date(draft.savedAt).toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+      banner.innerHTML = `<div class="ssp-banner">Your unsaved draft from ${esc(when)} has been restored.
+        <button type="button" class="lh-btn is-quiet" data-act="fresh">Start fresh</button></div>`;
+    }
+  }
+  if (!root.isConnected) return;
   renderAll();
 
-  listSspRecords([patient.id, ...patientIds(patient)])
-    .then((list) => {
-      lastRecord = list[0] || null;
-      if (!lastRecord || !root.isConnected || (draft && draft.rows && draft.rows.length)) return;
-      banner.innerHTML = `<div class="ssp-banner">${esc(patient.firstName || patient.name)} has a protocol from ${esc(niceDate(lastRecord.recordDate))}
-        (${(lastRecord.items || []).length} products).
-        <button type="button" class="lh-btn is-primary" data-act="use-last">Use their last protocol</button>
-        <button type="button" class="lh-btn is-quiet" data-act="dismiss">Start blank</button></div>`;
-    })
-    .catch((err) => console.warn("Couldn't load earlier protocols:", err));
+  if (!intent) {
+    listSspRecords([patient.id, ...patientIds(patient)])
+      .then((list) => {
+        lastRecord = list[0] || null;
+        if (!lastRecord || !root.isConnected || (draft && draft.rows && draft.rows.length)) return;
+        banner.innerHTML = `<div class="ssp-banner">${esc(patient.firstName || patient.name)} has a protocol from ${esc(niceDate(lastRecord.recordDate))}
+          (${(lastRecord.items || []).length} products).
+          <button type="button" class="lh-btn is-primary" data-act="use-last">Use their last protocol</button>
+          <button type="button" class="lh-btn is-quiet" data-act="dismiss">Start blank</button></div>`;
+      })
+      .catch((err) => console.warn("Couldn't load earlier protocols:", err));
+  }
 }

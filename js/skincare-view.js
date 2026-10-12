@@ -3,6 +3,8 @@ import { escapeHtml, formatDobLong } from "./utils.js";
 import { listSspRecords } from "./ssp-api.js";
 import { openSspPreview } from "./ssp-send.js";
 import { patientIds } from "./patients.js";
+import { setSspIntent } from "./ssp-edit.js";
+import { can } from "./perms.js";
 
 const PAGE = 10;
 
@@ -23,6 +25,8 @@ const ICONS = {
   mail: svg('<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>'),
   print: svg('<polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/>'),
   eye: svg('<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>'),
+  edit: svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>'),
+  copy: svg('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'),
 };
 
 // Shares the dashboard's "remember open sections" storage
@@ -143,7 +147,7 @@ export function mountSkincare(root, patient, staff = null) {
     grid.querySelector(".sk-pur-count").textContent = data.purchases.length;
 
     sspBody.innerHTML = data.protocols.length
-      ? data.protocols.map((p, i) => protocolHtml(p, i === 0, lastMap)).join("") + legendHtml() +
+      ? data.protocols.map((p, i) => protocolHtml(p, i === 0, lastMap, i)).join("") + legendHtml() +
         (data.matchedByName ? `<p class="sk-note">Some records were matched by patient name.</p>` : "")
       : `<p class="sk-empty">No skin script protocol on record.</p>`;
 
@@ -174,6 +178,24 @@ export function mountSkincare(root, patient, staff = null) {
     if (e.target.closest("[data-sk-action='more']")) {
       shown += PAGE;
       renderPurchases();
+      return;
+    }
+    // Edit (portal protocols) / Duplicate (any protocol): open the builder with it filled in
+    const ed = e.target.closest("[data-sk-ed]");
+    if (ed) {
+      const p = data && data.protocols[Number(ed.dataset.idx)];
+      if (!p) return;
+      if (ed.dataset.skEd === "edit" && p.portal) {
+        setSspIntent({ mode: "edit", patientId: patient.id, recordId: p.portal.id });
+      } else {
+        setSspIntent({
+          mode: "copy", patientId: patient.id,
+          recordId: p.portal ? p.portal.id : "",
+          items: p.portal ? null : sheetItems(p),
+          fromDate: p.date || p.dateText || "",
+        });
+      }
+      location.hash = `#/ssp/new/${encodeURIComponent(patient.id)}`;
       return;
     }
     // View / Email / Print on a protocol saved in the portal
@@ -241,11 +263,26 @@ function portalMeta(r) {
   return [
     r.validUntil ? `Valid until ${formatDobLong(r.validUntil)}` : "",
     r.createdBy ? `by ${r.createdBy}` : "",
+    r.editCount ? `Edited${r.editCount > 1 ? ` ${r.editCount}×` : ""}${r.editedBy ? ` · last by ${r.editedBy}` : ""}` : "",
     ...sent,
   ].filter(Boolean).map(escapeHtml).join(" · ");
 }
 
-function protocolHtml(p, isLatest, lastMap) {
+// An SSP_NEW protocol, ready to copy into the builder (products are matched by name there)
+function sheetItems(p) {
+  return (p.items || []).map((it) => {
+    const s = slots(it);
+    return {
+      name: it.product, step: stepLetter(it.step),
+      am: s.am, pm: s.pm,
+      amText: s.am ? it.am || "" : "", pmText: s.pm ? it.pm || "" : "",
+      maint: /^y/i.test(String(it.maintenance || "")),
+      days: [], notes: String(it.when || it.whenToUse || "").slice(0, 300),
+    };
+  });
+}
+
+function protocolHtml(p, isLatest, lastMap, idx = 0) {
   const rows = {};
   (p.items || []).forEach((item) => {
     const key = stepLetter(item.step) || "other";
@@ -262,12 +299,17 @@ function protocolHtml(p, isLatest, lastMap) {
   const dateLabel = p.date ? formatDobLong(p.date) : (p.dateText || "Undated");
   const id = p.portal ? escapeHtml(p.portal.id) : "";
 
+  const canEdit = can("ssp.create");
+  const editBtns = canEdit
+    ? `${p.portal ? `<button type="button" class="ssp-btn" data-sk-ed="edit" data-idx="${idx}" title="Change this protocol">${ICONS.edit}Edit</button>` : ""}
+       <button type="button" class="ssp-btn" data-sk-ed="copy" data-idx="${idx}" title="Start a new protocol from this one">${ICONS.copy}Duplicate</button>`
+    : "";
   const actions = p.portal
     ? `<button type="button" class="ssp-btn" data-sk-ssp="view" data-id="${id}">${ICONS.eye}View</button>
        <button type="button" class="ssp-btn" data-sk-ssp="email" data-id="${id}">${ICONS.mail}Email to Patient</button>
-       <button type="button" class="ssp-btn" data-sk-ssp="print" data-id="${id}">${ICONS.print}Print</button>`
+       <button type="button" class="ssp-btn" data-sk-ssp="print" data-id="${id}">${ICONS.print}Print</button>${editBtns}`
     : `<button type="button" class="ssp-btn" data-soon="Email to patient">${ICONS.mail}Email to Patient</button>
-       <button type="button" class="ssp-btn" data-soon="Print protocol">${ICONS.print}Print</button>`;
+       <button type="button" class="ssp-btn" data-soon="Print protocol">${ICONS.print}Print</button>${editBtns}`;
 
   return `
     <details class="ssp-protocol" ${isLatest ? "open" : ""}>

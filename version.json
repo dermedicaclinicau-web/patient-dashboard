@@ -1,5 +1,5 @@
 ﻿{
-    "version":  "20261012-112927",
+    "version":  "20261012-114626",
     "files":  [
                   "./js/aftercare-api.js",
                   "./js/aftercare-bank.js",
@@ -80,6 +80,7 @@
                   "./js/ssp-builder.js",
                   "./js/ssp-defaults.js",
                   "./js/ssp-document.js",
+                  "./js/ssp-edit.js",
                   "./js/ssp-products-api.js",
                   "./js/ssp-products.js",
                   "./js/ssp-send.js",

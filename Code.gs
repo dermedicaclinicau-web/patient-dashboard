@@ -39,6 +39,7 @@ function doPost(e) {
     if (body.action === 'staff') return json_(handleStaff_(body));
     if (body.action === 'scheduledTask') return json_(handleScheduledTask_(body));
     if (body.action === 'printTask') return json_(handlePrintTask_(body));
+    if (body.action === 'notify') return json_(handleNotify_(body));
 
     const pin = String(body.pin || '').trim();
 
@@ -2354,6 +2355,10 @@ function handleSsp_(body) {
       if (!can_(session, 'ssp.create')) return { ok: false, error: 'FORBIDDEN' };
       return sspAppendRecord_(String(body.recordId || ''));
     }
+    if (op === 'replaceRecord') {
+      if (!can_(session, 'ssp.create')) return { ok: false, error: 'FORBIDDEN' };
+      return sspAppendRecord_(String(body.recordId || ''), true);
+    }
     if (op === 'deliver') {
       if (!can_(session, 'send.patients')) return { ok: false, error: 'FORBIDDEN' };
       return sspDeliver_(body, session);
@@ -2484,7 +2489,8 @@ function sspProductToSheet_(p) {
 
 
 // One saved protocol (Firestore ssp_records) -> one row per product in SSP_NEW. Written once only.
-function sspAppendRecord_(id) {
+// replace = true (after an edit): the protocol's old rows are removed first, then the new ones written
+function sspAppendRecord_(id, replace) {
   if (!/^[A-Za-z0-9_-]{10,40}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(20000)) return { ok: false, error: 'BUSY' };
@@ -2492,10 +2498,22 @@ function sspAppendRecord_(id) {
     const cfg = getConfig_();
     const rec = fsGetDoc_(cfg, 'ssp_records/' + id);
     if (!rec) return { ok: false, error: 'NOT_FOUND' };
-    if (rec.sheetSynced) return { ok: true, already: true };
+    if (rec.sheetSynced && !replace) return { ok: true, already: true };
 
     const sheet = SpreadsheetApp.openById(SSP_SHEET_ID).getSheetByName(SSP_SHEET_NAME);
     if (!sheet) throw new Error('Sheet tab not found: ' + SSP_SHEET_NAME);
+    let removed = 0;
+    if (replace) {
+      const rid = String(rec.recordId || id);
+      const last = sheet.getLastRow();
+      if (last >= 2) {
+        const hits = sheet.getRange(2, 1, last - 1, 1).createTextFinder(rid).matchEntireCell(true).findAll()
+          .map(function (r) { return r.getRow(); })
+          .sort(function (a, b) { return b - a; }); // bottom up, so row numbers don't shift
+        hits.forEach(function (r) { sheet.deleteRow(r); });
+        removed = hits.length;
+      }
+    }
     const when = rec.createdAt ? new Date(rec.createdAt) : new Date();
     const clipT = function (v, n) { return String(v == null ? '' : v).slice(0, n || 3000); };
     const rows = (Array.isArray(rec.items) ? rec.items : []).map(function (it) {
@@ -2519,8 +2537,9 @@ function sspAppendRecord_(id) {
     });
     if (rows.length) sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, 13).setValues(rows);
     fsPatch_(cfg, 'ssp_records/' + id, { sheetSynced: true, sheetSyncedAt: new Date().toISOString() });
-    console.log('SSP ' + (rec.recordId || id) + ': ' + rows.length + ' row(s) added to ' + SSP_SHEET_NAME);
-    return { ok: true, rows: rows.length };
+    console.log('SSP ' + (rec.recordId || id) + ': ' + (replace ? removed + ' old row(s) replaced with ' : '') +
+      rows.length + ' row(s) in ' + SSP_SHEET_NAME);
+    return { ok: true, rows: rows.length, removed: removed };
   } finally {
     lock.releaseLock();
   }
@@ -3401,66 +3420,25 @@ function invEmailWrap_(inner, hash, label) {
     inner + '<p style="margin:18px 0 0"><a href="' + PORTAL_URL_ + '#/' + hash + '" style="display:inline-block;padding:10px 18px;' +
     'border-radius:8px;background:#0f766e;color:#fff;text-decoration:none;font-weight:bold">' + label + '</a></p></div></div>';
 }
-// A new request → the staff chosen in Inventory → Requests → Email settings
+// A new request → whoever the "A new order request is sent" rules say (Inventory → Notifications)
 function invNotifyRequest_(id, session) {
   const cfg = getConfig_();
   const rec = fsGetDoc_(cfg, 'inv_requests/' + id);
   if (!rec) return { ok: false, error: 'NOT_FOUND' };
   if (rec.requestedByUid !== session.uid) return { ok: false, error: 'FORBIDDEN' };
   if (rec.notified === true) return { ok: true, sent: 0 };
-
-  const set = fsGetDoc_(cfg, 'inv_settings/requests') || {};
-  const urgent = rec.urgency === 'urgent';
-  let to = [];
-  if (!(set.urgentOnly === true && !urgent)) {
-    const byId = {};
-    getStaffDocs_().forEach(function (s) { byId[s.id] = s; });
-    to = (Array.isArray(set.notifyIds) ? set.notifyIds : [])
-      .map(function (sid) { return byId[String(sid)]; })
-      .filter(function (s) { return s && s.active !== false && isEmail_(s.email); })
-      .map(function (s) { return s.email; });
-  }
-  if (to.length && MailApp.getRemainingDailyQuota() >= 1) {
-    const num = invReqNumber_(id);
-    const loc = rec.loc === 'jt' ? 'JT storage' : 'Shelf';
-    const html = invEmailWrap_(
-      '<h2 style="margin:0 0 6px;font-size:20px;color:' + (urgent ? '#b91c1c' : '#0f766e') + '">' + (urgent ? 'Urgent order request ' : 'Order request ') + num + '</h2>' +
-      '<p style="margin:0 0 12px;color:#475569">From <strong>' + invEsc_(rec.requestedBy) + '</strong> · for the ' + loc + '</p>' +
-      invItemsHtml_(rec) +
-      (rec.note ? '<p style="margin:0 0 6px;padding:10px 12px;border-radius:8px;background:#f8fafc">“' + invEsc_(rec.note) + '”</p>' : ''));
-    MailApp.sendEmail({
-      to: to.join(','), name: 'Dermedica Clinic',
-      subject: (urgent ? 'URGENT: ' : '') + 'Order request ' + num + ' from ' + String(rec.requestedBy || 'staff'),
-      htmlBody: html, body: emailHtmlToText_(html),
-    });
-  }
   fsPatch_(cfg, 'inv_requests/' + id, { notified: true });
-  return { ok: true, sent: to.length };
+  return notifyProcessOne_(cfg, notifyEnqueue_(cfg, 'request.created', { requestId: id }, session.uid));
 }
 
-// Ordered or declined → the person who asked
+// Ordered or declined → whoever the "ordered or declined" rules say (by default, the person who asked)
 function invNotifyUpdate_(id) {
   const cfg = getConfig_();
   const rec = fsGetDoc_(cfg, 'inv_requests/' + id);
   if (!rec) return { ok: false, error: 'NOT_FOUND' };
   if (rec.status !== 'ordered' && rec.status !== 'declined') return { ok: true, sent: 0 };
-  const who = getStaffDocs_().filter(function (s) { return s.id === rec.requestedByUid; })[0];
-  if (!who || !isEmail_(who.email) || MailApp.getRemainingDailyQuota() < 1) return { ok: true, sent: 0 };
-  const num = invReqNumber_(id);
-  const ordered = rec.status === 'ordered';
-  const html = invEmailWrap_(
-    '<h2 style="margin:0 0 6px;font-size:20px;color:' + (ordered ? '#0f766e' : '#b45309') + '">Your order request ' + num + ' was ' + (ordered ? 'ordered' : 'declined') + '</h2>' +
-    '<p style="margin:0 0 12px;color:#475569">By <strong>' + invEsc_(rec.handledBy || 'the ordering team') + '</strong></p>' +
-    invItemsHtml_(rec) +
-    (rec.response ? '<p style="margin:0 0 6px;padding:10px 12px;border-radius:8px;background:#f8fafc">' + invEsc_(rec.response) + '</p>' : ''));
-  MailApp.sendEmail({
-    to: who.email, name: 'Dermedica Clinic',
-    subject: 'Order request ' + num + (ordered ? ' ordered' : ' declined'),
-    htmlBody: html, body: emailHtmlToText_(html),
-  });
-  return { ok: true, sent: 1 };
+  return notifyProcessOne_(cfg, notifyEnqueue_(cfg, 'request.updated', { requestId: id, status: rec.status }, ''));
 }
-
 // ===================== Inventory: purchase orders =====================
 
 // Every item of the request is on a sent (or received) PO. sentPoId counts as sent.
@@ -3625,4 +3603,591 @@ function invNotifyLoan_(id, session) {
   }
   fsPatch_(cfg, 'inv_loans/' + id, { notified: true });
   return { ok: true, sent: lender ? 1 : 0 };
+}
+
+// ===================== Notifications: rules, outbox and digests =====================
+// Rules live in Firestore notify_rules (Inventory → Notifications). Things that happen are queued in
+// notify_outbox (by the portal or by this script), matched against the rules and emailed.
+// runNotifications (every 5 minutes) sends anything waiting, checks for newly-low stock (hourly)
+// and sends digests when they're due. Every email sent is logged in notify_log.
+
+function handleNotify_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  const op = String(body.op || '');
+  try {
+    if (op === 'process') return { ok: true, processed: notifyProcessPending_(getConfig_(), 10, null, false) };
+    if (op === 'test') {
+      if (!can_(session, 'inventory.manage')) return { ok: false, error: 'FORBIDDEN' };
+      return notifyTest_(String(body.ruleId || ''), session);
+    }
+  } catch (err) {
+    console.error('Notify ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: false, error: 'SERVER_ERROR', detail: String(err && err.message ? err.message : err).slice(0, 300) };
+  }
+  return { ok: false, error: 'BAD_REQUEST' };
+}
+
+// The trigger runs this every 5 minutes
+function runNotifications() {
+  const cfg = getConfig_();
+  const now = Date.now();
+  const rules = notifyRules_(cfg);
+  try { notifyProcessPending_(cfg, 20, rules, true); } catch (e) { console.error('Outbox: ' + (e && e.stack ? e.stack : e)); }
+  try { notifyLowScan_(cfg, rules); } catch (e) { console.error('Low stock scan: ' + (e && e.stack ? e.stack : e)); }
+  try { notifyRunDigests_(cfg, rules, now); } catch (e) { console.error('Digests: ' + (e && e.stack ? e.stack : e)); }
+}
+
+// Run ONCE from the editor to start notifications
+function installNotifications() {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return t.getHandlerFunction() === 'runNotifications'; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('runNotifications').timeBased().everyMinutes(5).create();
+  runNotifications(); // creates the starter rules straight away
+  console.log('Notifications installed (every 5 minutes).');
+}
+
+/* ---------- Helpers ---------- */
+
+function uniq_(a) {
+  const seen = {};
+  return (a || []).filter(function (x) { return x && !seen[x] && (seen[x] = true); });
+}
+
+// Simple one-condition query. op: EQUAL, GREATER_THAN, IN
+function fsQuery_(cfg, collectionId, field, op, value, max) {
+  const v = Array.isArray(value) ? { arrayValue: { values: value.map(toValue_) } } : toValue_(value);
+  const res = UrlFetchApp.fetch('https://firestore.googleapis.com/v1/' + fsBase_(cfg) + ':runQuery', {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) },
+    payload: JSON.stringify({ structuredQuery: {
+      from: [{ collectionId: collectionId }],
+      where: { fieldFilter: { field: { fieldPath: field }, op: op, value: v } },
+      limit: max || 300,
+    } }),
+  });
+  if (res.getResponseCode() !== 200) throw new Error('Query ' + collectionId + ' ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
+  return JSON.parse(res.getContentText()).filter(function (r) { return r.document; }).map(function (r) {
+    const o = fromFields_(r.document.fields || {});
+    o._id = r.document.name.split('/').pop();
+    return o;
+  });
+}
+
+/* ---------- Rules (the starter rules are made once, from the old Requests → Email settings) ---------- */
+
+function notifyRules_(cfg) {
+  notifySeed_(cfg);
+  return fsListAll_(cfg, 'notify_rules').map(function (d) {
+    const r = fromFields_(d.fields || {});
+    r.id = d.name.split('/').pop();
+    return r;
+  });
+}
+
+function notifySeed_(cfg) {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('NOTIFY_SEEDED') === '1') return;
+  if (fsListAll_(cfg, 'notify_rules', ['name']).length) { props.setProperty('NOTIFY_SEEDED', '1'); return; }
+  const set = fsGetDoc_(cfg, 'inv_settings/requests') || {};
+  const now = new Date().toISOString();
+  const rule = function (id, extra) {
+    return updateWrite_(cfg, 'notify_rules/' + id, Object.assign({
+      enabled: true, kind: 'event', message: '', conditions: { urgentOnly: false, loc: 'any', categories: [], statuses: [] },
+      createdAt: now, createdBy: 'Set up automatically', updatedAt: now, updatedBy: 'Set up automatically',
+    }, extra));
+  };
+  const rc = function (o) { return Object.assign({ involved: false, staffIds: [], roles: [], emails: [], skipActor: true }, o); };
+  commitWrites_(cfg, [
+    rule('starter_requests', { name: 'New order requests', event: 'request.created',
+      conditions: { urgentOnly: set.urgentOnly === true, loc: 'any', categories: [], statuses: [] },
+      recipients: rc({ staffIds: Array.isArray(set.notifyIds) ? set.notifyIds.map(String) : [] }) }),
+    rule('starter_request_updates', { name: 'Tell the requester when it\'s ordered or declined', event: 'request.updated',
+      recipients: rc({ involved: true }) }),
+    rule('starter_arrived', { name: 'Tell the requester when their stock arrives', event: 'stock.arrived',
+      recipients: rc({ involved: true }) }),
+  ]);
+  props.setProperty('NOTIFY_SEEDED', '1');
+  console.log('Starter notification rules created.');
+}
+
+/* ---------- The outbox ---------- */
+
+function notifyEnqueue_(cfg, event, data, byUid) {
+  const id = 'n_' + Date.now() + '_' + Utilities.getUuid().replace(/-/g, '').slice(0, 8);
+  commitWrites_(cfg, [updateWrite_(cfg, 'notify_outbox/' + id, {
+    event: event, data: data || {}, status: 'new', createdAt: new Date().toISOString(), createdByUid: String(byUid || ''),
+  })]);
+  return id;
+}
+
+function notifyProcessPending_(cfg, max, rules, sweep) {
+  if (sweep) { // a run that crashed mid-send is tried again after 15 minutes
+    fsQuery_(cfg, 'notify_outbox', 'status', 'EQUAL', 'sending', 20).forEach(function (o) {
+      if (o.processedAt && Date.now() - Date.parse(o.processedAt) > 15 * 60000) fsPatch_(cfg, 'notify_outbox/' + o._id, { status: 'new' });
+    });
+  }
+  const waiting = fsQuery_(cfg, 'notify_outbox', 'status', 'EQUAL', 'new', max || 10);
+  if (!waiting.length) return 0;
+  const all = rules || notifyRules_(cfg);
+  waiting.forEach(function (o) { notifyProcessOne_(cfg, o._id, all); });
+  return waiting.length;
+}
+
+function notifyProcessOne_(cfg, id, rules) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(15000)) return { ok: true, queued: true }; // the next run sends it
+  let ev;
+  try {
+    ev = fsGetDoc_(cfg, 'notify_outbox/' + id);
+    if (!ev || ev.status !== 'new') return { ok: true, sent: 0 };
+    fsPatch_(cfg, 'notify_outbox/' + id, { status: 'sending', processedAt: new Date().toISOString() });
+  } finally {
+    lock.releaseLock();
+  }
+  let sent = 0;
+  const errors = [];
+  (rules || notifyRules_(cfg))
+    .filter(function (r) { return r.enabled === true && r.kind !== 'digest' && r.event === ev.event; })
+    .forEach(function (rule) {
+      try {
+        const ctx = notifyContext_(cfg, ev, rule);
+        if (ctx && notifyMatches_(rule, ctx)) sent += notifySend_(cfg, rule, ctx, id, null);
+      } catch (e) {
+        errors.push(String(rule.name || rule.id) + ': ' + (e && e.message ? e.message : e));
+        console.error('Rule ' + rule.id + ' on ' + id + ': ' + (e && e.stack ? e.stack : e));
+      }
+    });
+  fsPatch_(cfg, 'notify_outbox/' + id, {
+    status: errors.length ? 'failed' : 'done', sent: sent, error: errors.join(' | ').slice(0, 300),
+  });
+  return { ok: true, sent: sent };
+}
+
+/* ---------- What each event says (and who's involved) ---------- */
+
+function notifyContext_(cfg, ev, rule) {
+  const d = ev.data || {};
+  const memo = ev._memo || (ev._memo = {});
+  const get = function (path) { if (!(path in memo)) memo[path] = fsGetDoc_(cfg, path); return memo[path]; };
+  const catsOf = function (ids) {
+    return uniq_((ids || []).filter(Boolean).map(function (pid) { const p = get('inv_products/' + pid); return p ? String(p.category || '') : ''; }));
+  };
+  const h2 = function (t, color) { return '<h2 style="margin:0 0 6px;font-size:20px;color:' + (color || '#0f766e') + '">' + t + '</h2>'; };
+  const sub = function (html) { return '<p style="margin:0 0 12px;color:#475569">' + html + '</p>'; };
+  const box = function (t) { return t ? '<p style="margin:0 0 6px;padding:10px 12px;border-radius:8px;background:#f8fafc">' + invEsc_(t) + '</p>' : ''; };
+  const ul = function (items) { return '<ul style="margin:0 0 14px;padding-left:20px">' + items.map(function (x) { return '<li style="margin:0 0 4px">' + x + '</li>'; }).join('') + '</ul>'; };
+  const locName = function (l) { return l === 'jt' ? 'JT storage' : l === 'kit' ? 'kit' : 'the Shelf'; };
+
+  switch (ev.event) {
+    case 'request.created': {
+      const rec = get('inv_requests/' + d.requestId);
+      if (!rec) return null;
+      const num = invReqNumber_(d.requestId);
+      const urgent = rec.urgency === 'urgent';
+      const loc = rec.loc === 'jt' ? 'jt' : 'shelf';
+      return {
+        subject: (urgent ? 'URGENT: ' : '') + 'Order request ' + num + ' from ' + String(rec.requestedBy || 'staff'),
+        inner: h2((urgent ? 'Urgent order request ' : 'Order request ') + num, urgent ? '#b91c1c' : '') +
+          sub('From <strong>' + invEsc_(rec.requestedBy) + '</strong> · for ' + locName(loc)) + invItemsHtml_(rec) +
+          (rec.note ? box('“' + rec.note + '”') : ''),
+        hash: 'inventory/requests', label: 'Open order requests',
+        urgent: urgent, locs: [loc], categories: catsOf((rec.items || []).map(function (it) { return it.productId; })),
+        involved: [rec.requestedByUid], actor: rec.requestedByUid,
+      };
+    }
+    case 'request.updated': {
+      const rec = get('inv_requests/' + d.requestId);
+      if (!rec) return null;
+      const status = String(d.status || rec.status);
+      if (status !== 'ordered' && status !== 'declined') return null;
+      const num = invReqNumber_(d.requestId);
+      const ordered = status === 'ordered';
+      return {
+        subject: 'Order request ' + num + (ordered ? ' ordered' : ' declined'),
+        inner: h2('Order request ' + num + ' was ' + (ordered ? 'ordered' : 'declined'), ordered ? '' : '#b45309') +
+          sub('Requested by <strong>' + invEsc_(rec.requestedBy || '') + '</strong> · ' + (ordered ? 'ordered' : 'declined') +
+            ' by <strong>' + invEsc_(rec.handledBy || 'the ordering team') + '</strong>') + invItemsHtml_(rec) + box(rec.response),
+        hash: 'inventory/requests', label: 'Open order requests',
+        status: status, locs: [rec.loc === 'jt' ? 'jt' : 'shelf'],
+        categories: catsOf((rec.items || []).map(function (it) { return it.productId; })),
+        involved: [rec.requestedByUid], actor: rec.handledByUid,
+      };
+    }
+    case 'stock.arrived': {
+      const r = get('inv_receipts/' + d.receiptId);
+      if (!r) return null;
+      const lines = (r.lines || []).filter(function (l) { return (l.splits || []).length; });
+      if (!lines.length) return null;
+      const po = d.poId ? get('inv_pos/' + d.poId) : null;
+      const requesters = uniq_(((po && po.requestIds) || []).map(function (rid) {
+        const q = get('inv_requests/' + rid);
+        return q ? q.requestedByUid : '';
+      }));
+      return {
+        subject: 'Stock has arrived: ' + (r.poNumber || 'delivery') + (r.supplierName ? ' from ' + r.supplierName : ''),
+        inner: h2('Stock has arrived') +
+          sub(invEsc_(r.poNumber || '') + (r.supplierName ? ' · ' + invEsc_(r.supplierName) : '') + ' · received by <strong>' + invEsc_(r.by || '') + '</strong>') +
+          ul(lines.map(function (l) {
+            return '<strong>' + invEsc_(l.name) + '</strong> × ' + invEsc_(invQty_(l.arrived, l.orderUnit)) + ': ' +
+              (l.splits || []).map(function (s) {
+                return invEsc_(invQty_(s.qty, l.stockUnit)) + ' to ' + locName(s.loc) + (s.batch ? ' (' + invEsc_(s.batch) + ')' : '');
+              }).join('; ');
+          })),
+        hash: d.poId ? 'inventory/po/' + d.poId : 'inventory/orders', label: 'Open the purchase order',
+        locs: uniq_([].concat.apply([], lines.map(function (l) { return (l.splits || []).map(function (s) { return s.loc; }); }))),
+        categories: catsOf(lines.map(function (l) { return l.productId; })),
+        involved: requesters, actor: r.byUid,
+      };
+    }
+    case 'stock.low': {
+      const c = rule.conditions || {};
+      const cats = Array.isArray(c.categories) ? c.categories : [];
+      const items = (d.items || []).filter(function (it) {
+        return (!c.loc || c.loc === 'any' || it.loc === c.loc) && (!cats.length || cats.indexOf(it.category) !== -1);
+      });
+      if (!items.length) return null;
+      return {
+        subject: items.length === 1 ? items[0].name + ' is running low' : items.length + ' products are running low',
+        inner: h2('Running low') + sub('These have dropped to their reorder level:') + ul(items.map(function (it) {
+          return '<strong>' + invEsc_(it.name) + '</strong>: ' + invEsc_(invQty_(it.qty, it.unit)) + ' left in ' + locName(it.loc) +
+            ' (reorder at ' + it.reorder + ')';
+        })),
+        hash: 'inventory/stock', label: 'Open stock',
+        locs: uniq_(items.map(function (it) { return it.loc; })), categories: uniq_(items.map(function (it) { return it.category; })),
+        involved: [], actor: '',
+      };
+    }
+    case 'count.difference': {
+      const cnt = get('inv_counts/' + d.countId);
+      if (!cnt) return null;
+      const open = (cnt.lines || []).filter(function (l) { return l.status === 'open'; });
+      if (!open.length) return null;
+      const where = function (l) { return l.loc === 'kit' ? (l.staffName || 'Injector') + '\'s kit' : l.loc === 'jt' ? 'JT storage' : 'Shelf'; };
+      const kit = cnt.kind === 'kit';
+      return {
+        subject: (kit ? 'Kit check' : 'Opening count') + ': ' + open.length + ' difference' + (open.length === 1 ? '' : 's') + ' to review',
+        inner: h2((kit ? 'Kit check' : 'Opening count') + ' differences', '#b45309') +
+          sub('Counted by <strong>' + invEsc_(cnt.by || '') + '</strong>' + (cnt.dateKey ? ' · ' + invEsc_(cnt.dateKey) : '')) +
+          ul(open.map(function (l) {
+            const diff = Number(l.variance) || 0;
+            return '<strong>' + invEsc_(l.productName) + '</strong> · ' + invEsc_(where(l)) + ': counted ' + l.counted + ', system ' + l.system +
+              ' (<strong style="color:' + (diff < 0 ? '#b91c1c' : '#027a48') + '">' + (diff > 0 ? '+' : '') + diff + '</strong>)';
+          })),
+        hash: 'reports/variance', label: 'Review differences',
+        locs: uniq_(open.map(function (l) { return l.loc; })), categories: catsOf(open.map(function (l) { return l.productId; })),
+        involved: [cnt.byUid], actor: cnt.byUid,
+      };
+    }
+    case 'usage.short': {
+      const u = get('inv_usage/' + d.usageId);
+      if (!u || u.short !== true) return null;
+      const short = (u.lines || []).filter(function (l) { return Number(l.short) > 0; });
+      return {
+        subject: 'Saved short: ' + (u.patientName || 'treatment record'),
+        inner: h2('A treatment was saved short', '#b45309') +
+          sub('<strong>' + invEsc_(u.by || '') + '</strong> saved ' + invEsc_(u.formName || 'a treatment record') + ' for <strong>' +
+            invEsc_(u.patientName || 'a patient') + '</strong>, but the system showed less stock than was used:') +
+          ul(short.map(function (l) { return '<strong>' + invEsc_(l.name) + '</strong> short by ' + l.short + ' ' + invEsc_(l.unit || ''); })) +
+          '<p style="margin:0">The patient\'s record is right. Count the product, accept the difference, then resolve it.</p>',
+        hash: 'reports/short', label: 'Open Saved short',
+        categories: catsOf(short.map(function (l) { return l.productId; })), involved: [u.byUid], actor: u.byUid,
+      };
+    }
+    case 'loan.disputed': {
+      const ln = get('inv_loans/' + d.loanId);
+      if (!ln || ln.status !== 'disputed') return null;
+      return {
+        subject: 'Disputed borrow: ' + ln.units + ' ' + (ln.doseUnit || '') + ' of ' + (ln.productName || ''),
+        inner: h2('A borrow was disputed', '#b45309') +
+          sub('<strong>' + invEsc_(ln.fromName || '') + '</strong> disputed that <strong>' + invEsc_(ln.toName || '') + '</strong> took ' +
+            invEsc_(ln.units + ' ' + (ln.doseUnit || '')) + ' of ' + invEsc_(ln.productName || '') + (ln.batch ? ' (batch ' + invEsc_(ln.batch) + ')' : '') + '.') +
+          box(ln.response),
+        hash: 'inventory/kits', label: 'Open Kits', involved: [ln.toUid, ln.fromUid], actor: '',
+      };
+    }
+  }
+  return null;
+}
+
+function notifyMatches_(rule, ctx) {
+  const c = rule.conditions || {};
+  if (c.urgentOnly === true && rule.event === 'request.created' && !ctx.urgent) return false;
+  if (c.loc && c.loc !== 'any' && ctx.locs && ctx.locs.length && ctx.locs.indexOf(c.loc) === -1) return false;
+  const cats = Array.isArray(c.categories) ? c.categories : [];
+  if (cats.length && !(ctx.categories || []).some(function (x) { return cats.indexOf(x) !== -1; })) return false;
+  const sts = Array.isArray(c.statuses) ? c.statuses : [];
+  if (sts.length && ctx.status && sts.indexOf(ctx.status) === -1) return false;
+  return true;
+}
+
+// Staff by name, everyone in a role, the people involved and extra addresses (no duplicates)
+function notifyRecipients_(rule, ctx) {
+  const r = rule.recipients || {};
+  const ids = (Array.isArray(r.staffIds) ? r.staffIds : []).map(String);
+  const roles = (Array.isArray(r.roles) ? r.roles : []).map(function (x) { return String(x).toLowerCase(); });
+  const involved = r.involved === true ? (ctx.involved || []).filter(Boolean).map(String) : [];
+  const actor = r.skipActor !== false ? String(ctx.actor || '') : '';
+  const out = {};
+  getStaffDocs_().forEach(function (s) {
+    if (s.active === false || !isEmail_(s.email)) return;
+    const listed = ids.indexOf(s.id) !== -1 || roles.indexOf(String(s.role || '').toLowerCase()) !== -1;
+    if (involved.indexOf(s.id) !== -1 || (listed && s.id !== actor)) out[s.email.toLowerCase()] = s.email;
+  });
+  (Array.isArray(r.emails) ? r.emails : []).forEach(function (e) {
+    e = String(e || '').trim();
+    if (isEmail_(e)) out[e.toLowerCase()] = e;
+  });
+  return Object.keys(out).map(function (k) { return out[k]; }).slice(0, 40);
+}
+
+// onlyTo: send just to this address (a test), without logging
+function notifySend_(cfg, rule, ctx, refId, onlyTo) {
+  const to = onlyTo ? [onlyTo] : notifyRecipients_(rule, ctx);
+  if (!to.length) return 0;
+  if (MailApp.getRemainingDailyQuota() < 1) throw new Error('The clinic\'s daily email limit has been reached.');
+  const msg = String(rule.message || '').trim();
+  const inner = (msg ? '<p style="margin:0 0 14px;padding:10px 12px;border-radius:8px;background:#f0fdfa;color:#134e4a">' +
+    invEsc_(msg).replace(/\n/g, '<br>') + '</p>' : '') + ctx.inner;
+  const html = invEmailWrap_(inner, ctx.hash, ctx.label);
+  MailApp.sendEmail({
+    to: to.join(','), name: 'Dermedica Clinic', subject: (onlyTo ? '[Test] ' : '') + ctx.subject,
+    htmlBody: html, body: emailHtmlToText_(html),
+  });
+  if (!onlyTo) {
+    try {
+      commitWrites_(cfg, [updateWrite_(cfg, 'notify_log/l_' + Date.now() + '_' + Utilities.getUuid().slice(0, 8), {
+        ruleId: String(rule.id || ''), ruleName: String(rule.name || ''), event: rule.kind === 'digest' ? 'digest' : String(rule.event || ''),
+        to: to, subject: ctx.subject, refId: String(refId || ''), at: new Date().toISOString(),
+      })]);
+    } catch (e) { console.warn('Sent, but the notification log failed: ' + e); }
+  }
+  return to.length;
+}
+
+/* ---------- Low stock: checked hourly, each product alerts once until it's restocked ---------- */
+
+function notifyLowScan_(cfg, rules) {
+  if (!rules.some(function (r) { return r.enabled === true && r.kind !== 'digest' && r.event === 'stock.low'; })) return;
+  const props = PropertiesService.getScriptProperties();
+  if (Date.now() - Number(props.getProperty('NOTIFY_LOW_SCAN') || 0) < 55 * 60000) return;
+  props.setProperty('NOTIFY_LOW_SCAN', String(Date.now()));
+
+  const state = fsGetDoc_(cfg, 'notify_state/low');
+  const before = {};
+  ((state && state.keys) || []).forEach(function (k) { before[k] = true; });
+  const now = [];
+  const fresh = [];
+  fsListAll_(cfg, 'inv_products', ['name', 'category', 'stock', 'reorder', 'stockUnit', 'active']).forEach(function (d) {
+    const p = fromFields_(d.fields || {});
+    if (p.active === false) return;
+    const id = d.name.split('/').pop();
+    ['shelf', 'jt'].forEach(function (loc) {
+      const re = p.reorder ? p.reorder[loc] : null;
+      if (re === null || re === undefined || re === '') return;
+      const qty = Number((p.stock || {})[loc] || 0);
+      if (qty > Number(re)) return;
+      const key = id + '|' + loc;
+      now.push(key);
+      if (!before[key]) fresh.push({ productId: id, name: String(p.name || ''), category: String(p.category || ''),
+        loc: loc, qty: qty, reorder: Number(re), unit: String(p.stockUnit || 'item') });
+    });
+  });
+  commitWrites_(cfg, [updateWrite_(cfg, 'notify_state/low', { keys: now, at: new Date().toISOString() })]);
+  // The very first scan only remembers what's already low (no flood of alerts)
+  if (fresh.length && state) {
+    notifyProcessOne_(cfg, notifyEnqueue_(cfg, 'stock.low', { items: fresh.slice(0, 60) }, ''), rules);
+  }
+}
+
+/* ---------- Digests ---------- */
+
+// The most recent time this digest was due (Perth time)
+function notifyDigestSlot_(rule, now) {
+  const s = rule.schedule || {};
+  const a = new Date(now + SCH_PERTH_);
+  const today = schDayNum_(a.getUTCFullYear(), a.getUTCMonth() + 1, a.getUTCDate());
+  for (let k = 0; k < 8; k++) {
+    const p = schFromNum_(today - k);
+    if (s.freq === 'weekly' && p.dow !== Number(s.day)) continue;
+    if (s.freq === 'weekdays' && (p.dow === 0 || p.dow === 6)) continue;
+    const ms = schSlotMs_(p, s.time || '08:00');
+    if (ms <= now) return { ms: ms, key: schKey_(p) };
+  }
+  return null;
+}
+
+function notifyRunDigests_(cfg, rules, now) {
+  rules.filter(function (r) { return r.enabled === true && r.kind === 'digest'; }).forEach(function (rule) {
+    try {
+      const slot = notifyDigestSlot_(rule, now);
+      if (!slot) return;
+      const path = 'notify_state/digest_' + rule.id;
+      const st = fsGetDoc_(cfg, path);
+      // A new digest starts from its next time (never sends the moment it's created)
+      if (!st) { commitWrites_(cfg, [updateWrite_(cfg, path, { lastSlot: slot.ms })]); return; }
+      if (Number(st.lastSlot || 0) >= slot.ms) return;
+      commitWrites_(cfg, [updateWrite_(cfg, path, { lastSlot: slot.ms, lastRun: new Date().toISOString() })]);
+      if (now - slot.ms > 12 * 3600000) return; // missed by a long way: wait for the next one
+      const ctx = notifyDigestContext_(cfg, rule, slot);
+      if (!ctx.total && rule.skipEmpty !== false) return;
+      notifySend_(cfg, rule, ctx, slot.key, null);
+    } catch (e) {
+      console.error('Digest ' + rule.id + ': ' + (e && e.stack ? e.stack : e));
+    }
+  });
+}
+
+function notifyDigestContext_(cfg, rule, slot) {
+  const sec = rule.sections || {};
+  const cats = Array.isArray((rule.conditions || {}).categories) ? rule.conditions.categories : [];
+  const catOk = function (c) { return !cats.length || cats.indexOf(c) !== -1; };
+  const days = Math.min(180, Math.max(7, Number(rule.expiringDays) || 60));
+  const locName = function (l) { return l === 'jt' ? 'JT storage' : 'the Shelf'; };
+  const parts = [];
+  const summary = [];
+  let total = 0;
+
+  const block = function (title, short, items, hash, label) {
+    total += items.length;
+    if (items.length) summary.push(items.length + ' ' + short);
+    parts.push('<h3 style="margin:20px 0 6px;font-size:16px;color:#0f172a">' + invEsc_(title) +
+      ' <span style="color:#64748b;font-weight:normal">(' + items.length + ')</span></h3>' +
+      (items.length
+        ? '<ul style="margin:0 0 6px;padding-left:20px">' + items.slice(0, 15).map(function (x) { return '<li style="margin:0 0 4px">' + x + '</li>'; }).join('') + '</ul>' +
+          (items.length > 15 ? '<p style="margin:0;color:#64748b">and ' + (items.length - 15) + ' more</p>' : '')
+        : '<p style="margin:0;color:#64748b">None. 👍</p>') +
+      '<p style="margin:4px 0 0"><a href="' + PORTAL_URL_ + '#/' + hash + '" style="color:#0f766e">' + invEsc_(label) + ' →</a></p>');
+  };
+
+  let products = null;
+  const prods = function () {
+    if (!products) {
+      products = fsListAll_(cfg, 'inv_products', ['name', 'category', 'stock', 'reorder', 'stockUnit', 'active']).map(function (d) {
+        const f = fromFields_(d.fields || {});
+        f._id = d.name.split('/').pop();
+        return f;
+      }).filter(function (p) { return p.active !== false; });
+    }
+    return products;
+  };
+
+  if (sec.low) {
+    const items = [];
+    prods().forEach(function (p) {
+      if (!catOk(p.category)) return;
+      ['shelf', 'jt'].forEach(function (loc) {
+        const re = p.reorder ? p.reorder[loc] : null;
+        if (re === null || re === undefined || re === '') return;
+        const q = Number((p.stock || {})[loc] || 0);
+        if (q <= Number(re)) items.push('<strong>' + invEsc_(p.name) + '</strong>: ' + invEsc_(invQty_(q, p.stockUnit)) + ' in ' + locName(loc) + ' (reorder at ' + re + ')');
+      });
+    });
+    block('Low stock', 'low', items, 'inventory/stock', 'Open stock');
+  }
+  if (sec.expiring) {
+    const byId = {};
+    prods().forEach(function (p) { byId[p._id] = p; });
+    const todayKey = Utilities.formatDate(new Date(), 'Australia/Perth', 'yyyy-MM-dd');
+    const limitKey = Utilities.formatDate(new Date(Date.now() + days * 864e5), 'Australia/Perth', 'yyyy-MM-dd');
+    const lots = fsListAll_(cfg, 'inv_lots', ['productId', 'loc', 'batch', 'expiry', 'qty']).map(function (d) { return fromFields_(d.fields || {}); })
+      .filter(function (l) {
+        return Number(l.qty) > 0 && /^\d{4}-\d{2}-\d{2}$/.test(String(l.expiry || '')) && l.expiry <= limitKey &&
+          byId[l.productId] && catOk(byId[l.productId].category);
+      })
+      .sort(function (a, b) { return String(a.expiry).localeCompare(String(b.expiry)); });
+    block('Expiring within ' + days + ' days', 'expiring', lots.map(function (l) {
+      const p = byId[l.productId];
+      const gone = l.expiry < todayKey;
+      return '<strong>' + invEsc_(p.name) + '</strong>' + (l.batch ? ' · ' + invEsc_(l.batch) : '') + ': ' + invEsc_(invQty_(l.qty, p.stockUnit)) +
+        ' in ' + locName(l.loc) + ' · ' + (gone ? '<span style="color:#b91c1c">expired ' + l.expiry + '</span>' : 'expires ' + l.expiry);
+    }), 'inventory/stock', 'Open stock');
+  }
+  if (sec.requests) {
+    block('Open order requests', 'open requests', fsQuery_(cfg, 'inv_requests', 'status', 'EQUAL', 'open', 300).map(function (r) {
+      return '<strong>' + invReqNumber_(r._id) + '</strong>' + (r.urgency === 'urgent' ? ' <span style="color:#b91c1c">urgent</span>' : '') +
+        ' · ' + invEsc_(r.requestedBy || '') + ': ' + invEsc_((r.items || []).map(function (it) { return it.name; }).join(', '));
+    }), 'inventory/requests', 'Open requests');
+  }
+  if (sec.deliveries) {
+    block('Deliveries waiting', 'deliveries waiting', fsQuery_(cfg, 'inv_pos', 'status', 'IN', ['sent', 'part'], 300).map(function (p) {
+      return '<strong>' + invEsc_(p.number || '') + '</strong> · ' + invEsc_((p.supplier || {}).name || '') +
+        (p.status === 'part' ? ' · part received' : '') + (p.expectedDate ? ' · needed by ' + invEsc_(p.expectedDate) : '');
+    }), 'inventory/orders', 'Open purchase orders');
+  }
+  if (sec.counts) {
+    const items = [];
+    fsQuery_(cfg, 'inv_counts', 'openCount', 'GREATER_THAN', 0, 300).forEach(function (cnt) {
+      (cnt.lines || []).forEach(function (l) {
+        if (l.status !== 'open') return;
+        const where = l.loc === 'kit' ? (l.staffName || 'Injector') + '\'s kit' : l.loc === 'jt' ? 'JT storage' : 'Shelf';
+        items.push('<strong>' + invEsc_(l.productName) + '</strong> · ' + invEsc_(where) + ': counted ' + l.counted + ', system ' + l.system +
+          (cnt.dateKey ? ' · ' + invEsc_(cnt.dateKey) : ''));
+      });
+    });
+    block('Count differences to review', 'differences', items, 'reports/variance', 'Review differences');
+  }
+  if (sec.short) {
+    block('Saved short to resolve', 'saved short', fsQuery_(cfg, 'inv_usage', 'short', 'EQUAL', true, 300)
+      .filter(function (u) { return u.resolved !== true; })
+      .map(function (u) { return '<strong>' + invEsc_(u.patientName || '') + '</strong> · ' + invEsc_(u.formName || '') + ' · ' + invEsc_(u.by || ''); }),
+      'reports/short', 'Open Saved short');
+  }
+  if (sec.loans) {
+    block('Borrows to confirm or disputed', 'borrows', fsQuery_(cfg, 'inv_loans', 'status', 'IN', ['unconfirmed', 'disputed'], 300).map(function (l) {
+      return invEsc_(l.toName || '') + ' took <strong>' + invEsc_(l.units + ' ' + (l.doseUnit || '')) + '</strong> of ' + invEsc_(l.productName || '') +
+        ' from ' + invEsc_(l.fromName || '') + ' · ' + (l.status === 'disputed' ? '<span style="color:#b91c1c">disputed</span>' : 'waiting for confirmation');
+    }), 'inventory/kits', 'Open Kits');
+  }
+
+  const dayText = Utilities.formatDate(new Date(slot ? slot.ms : Date.now()), 'Australia/Perth', 'EEEE d MMMM yyyy');
+  return {
+    subject: String(rule.name || 'Inventory digest') + ': ' + (total ? summary.join(', ') : 'all clear'),
+    inner: '<h2 style="margin:0 0 4px;font-size:20px;color:#0f766e">' + invEsc_(rule.name || 'Inventory digest') + '</h2>' +
+      '<p style="margin:0 0 6px;color:#475569">' + invEsc_(dayText) + (total ? '' : ' · nothing needs attention 👍') + '</p>' + parts.join(''),
+    hash: 'home', label: 'Open the portal', total: total,
+  };
+}
+
+/* ---------- "Send test to me" ---------- */
+
+function notifyTest_(ruleId, session) {
+  if (!/^[A-Za-z0-9_-]{3,60}$/.test(ruleId)) return { ok: false, error: 'BAD_REQUEST' };
+  const cfg = getConfig_();
+  const rule = fsGetDoc_(cfg, 'notify_rules/' + ruleId);
+  if (!rule) return { ok: false, error: 'NOT_FOUND' };
+  rule.id = ruleId;
+  const me = getStaffDocs_().filter(function (x) { return x.id === session.uid; })[0];
+  if (!me || !isEmail_(me.email)) return { ok: false, error: 'NO_EMAIL' };
+
+  let ctx;
+  if (rule.kind === 'digest') {
+    ctx = notifyDigestContext_(cfg, rule, null); // the real digest, as it would look right now
+  } else {
+    const labels = {
+      'request.created': 'a new order request is sent', 'request.updated': 'an order request is ordered or declined',
+      'stock.arrived': 'stock arrives', 'stock.low': 'a product drops to its reorder level',
+      'count.difference': 'a stock count finds differences', 'usage.short': 'a treatment is saved short',
+      'loan.disputed': 'a borrow between injectors is disputed',
+    };
+    const r = rule.recipients || {};
+    const byId = {};
+    getStaffDocs_().forEach(function (s) { byId[s.id] = s; });
+    const who = [].concat(
+      r.involved === true ? ['the people involved'] : [],
+      (r.staffIds || []).map(function (id) { return byId[id] ? byId[id].name + (isEmail_(byId[id].email) ? '' : ' (no email on file)') : 'unknown staff'; }),
+      (r.roles || []).map(function (x) { return 'everyone in ' + x; }),
+      r.emails || []);
+    ctx = {
+      subject: String(rule.name || 'Notification'),
+      inner: '<h2 style="margin:0 0 6px;font-size:20px;color:#0f766e">Test: ' + invEsc_(rule.name || '') + '</h2>' +
+        '<p style="margin:0 0 12px">When <strong>' + invEsc_(labels[rule.event] || rule.event) + '</strong>, an email goes to: ' +
+        '<strong>' + invEsc_(who.join(', ') || 'nobody yet') + '</strong>.</p>' +
+        '<p style="margin:0;color:#475569">This is only a test. Real emails show the details of what happened.</p>',
+      hash: 'inventory/notifications', label: 'Open Notifications',
+    };
+  }
+  notifySend_(cfg, rule, ctx, '', me.email);
+  return { ok: true, to: me.email };
 }
