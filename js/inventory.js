@@ -274,6 +274,18 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const x = p || { category: st.cat || "general", stockUnit: "", orderUnit: "", packSize: 1, reorder: {}, active: true, tracked: false };
     const hasStock = !!p && (p.stock.shelf + p.stock.jt) > 0;
     const val = (v) => esc(v === null || v === undefined ? "" : v);
+    // One "other supplier" row: supplier, their code, their price, and (optional) a different pack
+    const altRow = (a = {}) => `
+      <div class="inv-alt" data-alt>
+        <select class="fb-select" data-a="supplierId" aria-label="Supplier"><option value="">Choose a supplier…</option>${
+          st.suppliers.filter((x) => x.active || x.id === a.supplierId).map((x) =>
+            `<option value="${esc(x.id)}"${x.id === a.supplierId ? " selected" : ""}>${esc(x.name)}</option>`).join("")}</select>
+        <input data-a="supplierCode" maxlength="60" placeholder="Their code" value="${val(a.supplierCode)}" aria-label="Their product code" />
+        <input data-a="cost" type="number" min="0" step="0.01" placeholder="Their price $" value="${val(a.cost)}" aria-label="Their price" />
+        <input data-a="orderUnit" maxlength="30" placeholder="Bought as (same)" value="${val(a.orderUnit)}" aria-label="Bought as" />
+        <input data-a="packSize" type="number" min="1" step="1" placeholder="How many (same)" value="${val(a.packSize)}" aria-label="How many in each" />
+        <button type="button" class="ib-tool is-danger" data-act="alt-remove" aria-label="Remove this supplier" title="Remove">×</button>
+      </div>`;
     const dlg = openDialog("inv-dlg", `
       <form class="lh-form" novalidate>
         <div class="lh-dialog-head"><h3>${isNew ? "New product" : `Edit ${esc(x.name)}`}</h3>
@@ -453,17 +465,6 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const isNew = !s;
     const x = s || { active: true };
     const val = (v) => esc(v || "");
-    const altRow = (a = {}) => `
-      <div class="inv-alt" data-alt>
-        <select class="fb-select" data-a="supplierId" aria-label="Supplier"><option value="">Choose a supplier…</option>${
-          st.suppliers.filter((s) => s.active || s.id === a.supplierId).map((s) =>
-            `<option value="${esc(s.id)}"${s.id === a.supplierId ? " selected" : ""}>${esc(s.name)}</option>`).join("")}</select>
-        <input data-a="supplierCode" maxlength="60" placeholder="Their code" value="${val(a.supplierCode)}" aria-label="Their product code" />
-        <input data-a="cost" type="number" min="0" step="0.01" placeholder="Their price $" value="${val(a.cost)}" aria-label="Their price" />
-        <input data-a="orderUnit" maxlength="30" placeholder="Bought as (same)" value="${val(a.orderUnit)}" aria-label="Bought as" />
-        <input data-a="packSize" type="number" min="1" step="1" placeholder="How many (same)" value="${val(a.packSize)}" aria-label="How many in each" />
-        <button type="button" class="ib-tool is-danger" data-act="alt-remove" aria-label="Remove this supplier" title="Remove">×</button>
-      </div>`;
     const dlg = openDialog("inv-dlg", `
       <form class="lh-form" novalidate>
         <div class="lh-dialog-head"><h3>${isNew ? "New supplier" : `Edit ${esc(x.name)}`}</h3>
