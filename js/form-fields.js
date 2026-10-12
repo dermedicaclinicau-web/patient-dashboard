@@ -2,6 +2,7 @@ import { runCalc, calcRefs, formatCalc } from "./form-calc.js";
 import { letterheadHtml } from "./form-letterhead.js";
 import { cleanCondition } from "./form-conditions.js";
 import { cleanRichHtml, richText } from "./rich-html.js";
+import { shapeSvg } from "./marking-sets.js";
 
 export const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -104,6 +105,13 @@ const fmtN = (n) => String(+Number(n || 0).toFixed(2));
 // Pictures staff place unit marks on: their total can be used in a Calculation
 export const isMarkImage = (x) => !!x && x.type === "image" && x.source !== "staff" && x.annotate === true && x.markMode === "marks";
 export const calcSource = (x) => !!x && (["number", "calculation"].includes(x.type) || isMarkImage(x));
+
+// The marking sets a picture uses (older forms saved just one, as markSetId)
+export function markSetIdsOf(f) {
+  const ids = Array.isArray(f && f.markSetIds) ? f.markSetIds.filter(Boolean) : [];
+  return ids.length ? ids : f && f.markSetId ? [f.markSetId] : [];
+}
+
 // An Image field's size: width as a % of the page, and an optional maximum height in px.
 // Pictures staff can draw on always keep their natural shape (so markings line up).
 export function imageSizing(f) {
@@ -245,7 +253,7 @@ export function createField(type, id) {
       f.source = "bank"; f.fileId = ""; f.fileName = ""; f.size = "medium"; f.caption = ""; f.alt = ""; f.max = 1;
       f.annotate = false; f.widthPct = 50; f.heightPx = null; f.allowBank = true;
       f.photoLayout = "grid"; f.perRow = 2;
-      f.markMode = "draw"; f.markSetId = ""; f.questions = [];
+      f.markMode = "draw"; f.markSetId = ""; f.markSetIds = []; f.questions = [];
       break;
     case "watermark": f.source = "text"; f.text = "DRAFT"; f.opacity = 10; f.angle = -30; f.size = "large"; break;
     case "letterhead": f.line1 = LETTERHEAD[0]; f.line2 = LETTERHEAD[1]; break;
@@ -376,7 +384,8 @@ export function cleanField(f) {
       out.photoLayout = pick(f.photoLayout, ["grid", "stack"], "grid");
       out.perRow = int(f.perRow, 2, 4, 2);
       out.markMode = out.annotate && f.markMode === "marks" ? "marks" : "draw";
-      out.markSetId = /^[A-Za-z0-9_-]{1,40}$/.test(f.markSetId || "") ? f.markSetId : "";
+      out.markSetIds = markSetIdsOf(f).filter((id) => /^[A-Za-z0-9_-]{1,40}$/.test(id)).slice(0, 4);
+      out.markSetId = out.markSetIds[0] || ""; // for older pages
       out.questions = (Array.isArray(f.questions) ? f.questions : []).slice(0, 5).map((q, i) => ({
         id: /^[A-Za-z0-9_-]{1,20}$/.test((q && q.id) || "") ? q.id : `q${i + 1}`,
         label: clip(q && q.label, 200),
@@ -1017,12 +1026,21 @@ export const iqHasOptions = (q) => ["radio", "checks", "dropdown"].includes(iqTy
 function markSetSettings(f, ctx) {
   const sets = ctx.markSets;
   if (!sets) return '<small class="fe-note fe-pad">Loading marking sets…</small>';
-  const s = sets.find((x) => x.id === f.markSetId);
-  return setting("Marking set", choose("markSetId", [["", "Choose a marking set"], ...sets.map((x) => [x.id, x.name])], f.markSetId || "", false, true),
-      s ? `Staff tap ${esc(s.values.map((x) => fmtN(x.v)).join(" · "))}${s.unit ? ` ${esc(s.unit)}` : ""} and the total adds up as they go.${
-        s.tagMarks ? ` Each mark is tagged ${esc(s.tags.join(" or "))}.` : ""}` : "") +
+  const ids = markSetIdsOf(f);
+  const chosen = ids.map((id) => sets.find((s) => s.id === id)).filter(Boolean);
+  const nums = chosen.filter((s) => s.type !== "label").length;
+  const sw = (s) => s.values.slice(0, 4).map((x) =>
+    shapeSvg(x.shape, x.colour, s.type === "label" ? x.code : fmtN(x.v), { size: 20 })).join("");
+  return `<div class="fe-insp-field"><span class="fe-insp-label">Marking sets</span>
+      <div class="fe-ms-picks">${sets.length ? sets.map((s) => `
+        <label class="fe-check"><input type="checkbox" data-msid="${esc(s.id)}" data-rerender=""${ids.includes(s.id) ? " checked" : ""} />
+          <span class="fe-ms-sw">${sw(s)}</span><span>${esc(s.name)} <small class="muted">${s.type === "label" ? "labels" : "numbers"}</small></span></label>`).join("")
+        : '<small class="fe-note">No marking sets yet. Make one with Manage marking sets.</small>'}</div>
+      <small class="fe-note">Tick one number set (the total) and any label sets, e.g. depth of placement. Each tap places one mark combining them.</small>
+      ${nums > 1 ? '<small class="fe-bad">Only one number set can be used on a picture. Untick the others.</small>' : ""}
+    </div>` +
     '<button type="button" class="lh-btn fe-ms-manage" data-act="ms-manage">Manage marking sets</button>' +
-    '<small class="fe-note fe-pad">To show the total in another place, add a Calculation question and choose this picture under “Insert a question”.</small>';
+    (nums ? '<small class="fe-note fe-pad">To show the total in another place, add a Calculation question and choose this picture under “Insert a question”.</small>' : "");
 }
 
 function imageQuestionsSettings(f) {
@@ -1169,6 +1187,13 @@ function layoutSettings(f) {
 // Typing in table columns, sub-option groups, patient detail ticks and layout buttons.
 // Returns true if it changed something.
 export function applyInput(f, el) {
+  if (el.dataset.msid !== undefined) {
+    const on = new Set(markSetIdsOf(f));
+    if (el.checked) on.add(el.dataset.msid); else on.delete(el.dataset.msid);
+    f.markSetIds = [...on].slice(0, 4);
+    f.markSetId = f.markSetIds[0] || "";
+    return true;
+  }
   if (el.dataset.clinpart !== undefined) {
     const on = new Set(clinicianParts(f).map(([k]) => k));
     if (el.checked) on.add(el.dataset.clinpart);
@@ -1235,6 +1260,8 @@ export function applyInput(f, el) {
   }
   return false;
 }
+
+
 
 // Add / remove buttons for table columns and sub-option groups.
 export function applyClick(f, target) {

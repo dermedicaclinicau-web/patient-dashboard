@@ -4075,3 +4075,29 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .st-reg-wide { grid-column: 1 / -1; }
 .fe-clin select.fe-in { width: 100%; }
 @media (max-width: 560px) { .st-reg-grid { grid-template-columns: 1fr; } }
+
+/* ---------- Marking sets: shapes, labels, several sets per picture ---------- */
+.ms-dlg { width: min(900px, 96vw); }
+.ms-shape { display: block; flex: none; }
+.ms-type { max-width: 340px; }
+.ms-head.is-label { grid-template-columns: minmax(0, 1fr) auto; }
+.ms-val { gap: .3rem; }
+.ms-val .ms-shape-sel { width: auto; min-height: 30px; padding: .2rem .4rem; font-size: .8rem; }
+.ms-val .ms-code { width: 62px; }
+.ms-val .ms-name { width: 150px; }
+.ms-prev { display: inline-flex; }
+.fe-ms-picks { display: grid; gap: .1rem; }
+.fe-ms-picks .fe-check { gap: .45rem; padding: .35rem .25rem; }
+.fe-ms-sw { display: inline-flex; gap: 2px; }
+.an-marks { flex-direction: column; align-items: stretch; gap: .45rem; }
+.an-setrow { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .6rem; }
+.an-setname { min-width: 96px; font-size: .78rem; font-weight: 700; color: var(--muted); }
+.an-setname small { font-weight: 500; }
+.an-pick { display: inline-flex; flex-direction: column; align-items: center; gap: 1px; padding: 3px; border: 2px solid transparent;
+  border-radius: 10px; background: #fff; font: inherit; cursor: pointer; }
+.an-pick small { max-width: 72px; overflow: hidden; font-size: .62rem; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.an-pick.is-on { border-color: var(--primary); background: var(--primary-soft); }
+.an-pick.is-none { height: 40px; padding: 0 .65rem; border-color: var(--border); font-size: .78rem; font-weight: 600; color: var(--muted); }
+.an-pick.is-none.is-on { border-color: var(--primary); color: var(--primary); }
+.an-pick:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.an-hint { color: #b45309; font-weight: 600; }

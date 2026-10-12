@@ -280,8 +280,12 @@ export async function mountFormEditor(container, { templateId, staff }) {
         if (!c.ok) return { id: f.id, msg: `“${label || "Calculation"}”: ${c.error}` };
       }
       if (f.type === "image" && f.source !== "staff") {
-        if (f.annotate && f.markMode === "marks" && markSets && !markSets.some((s) => s.id === f.markSetId)) {
-          return { id: f.id, msg: "Choose a marking set for the picture, or change what staff can do with it." };
+        if (f.annotate && f.markMode === "marks" && markSets) {
+          const chosen = markSetIdsOf(f).map((id) => markSets.find((s) => s.id === id)).filter(Boolean);
+          if (!chosen.length) return { id: f.id, msg: "Choose at least one marking set for the picture, or change what staff can do with it." };
+          if (chosen.filter((s) => s.type !== "label").length > 1) {
+            return { id: f.id, msg: "A picture can use one number set (the total) plus any label sets. Untick the extra number set." };
+          }
         }
         const badQ = (f.questions || []).find((q) => !String(q.label || "").trim() || (iqHasOptions(q) && !(q.options || []).length));
         if (badQ) {
