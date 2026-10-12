@@ -2,7 +2,6 @@
 import { getMasterPlan, planChanges, applyChanges, saveMasterPlan, patternText, monthLabel, matchServices } from "./master-plan-api.js";
 import { getPlanSettings } from "./plan-api.js";
 import { CATEGORIES } from "./plan-editor.js";
-import { showToast } from "./utils.js";
 import { showToast, toDateKey } from "./utils.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));

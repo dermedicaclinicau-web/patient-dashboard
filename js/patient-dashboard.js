@@ -423,7 +423,6 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
 
       renderTreatmentPlans(root, records);
       renderClinicalHistory(root, records);
-      loadMasterPlan();
     } catch (err) {
       if (!root.isConnected) return;
       console.error("Transcript sections failed:", err);
@@ -435,9 +434,9 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
         : "Couldn't load consultation records.";
       cards.forEach((c) => fillCard(c, "—", `<p class="empty-note error">${msg}</p>`, false));
     }
-    loadMasterPlan();
+    loadMasterPlan(); // once, whether the consultations loaded or not
   }
-
+  
   function fillCard(card, pill, html, isEmpty) {
     card.querySelector(".hint").textContent = pill;
     card.querySelector(".sub-body").innerHTML = html;
