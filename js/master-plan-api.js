@@ -56,6 +56,7 @@ export function cleanLine(l = {}) {
     sessions: whole(l.sessions),
     intervalWeeks: whole(l.intervalWeeks),
     startMonth: MONTH_RE.test(l.startMonth || "") ? l.startMonth : "",
+    countFrom: /^\d{4}-\d{2}-\d{2}$/.test(l.countFrom || "") ? l.countFrom : "",
     services: [...new Set((Array.isArray(l.services) ? l.services : []).map((s) => clip(s, 150)).filter(Boolean))].slice(0, 20),
     overrides: l.overrides && typeof l.overrides === "object" && !Array.isArray(l.overrides) ? l.overrides : {},
   };
@@ -127,9 +128,16 @@ export function matchServices(treatment, concern, services) {
     .map((r) => r.service).slice(0, 20);
 }
 
+// Do a treatment and a service name share a real word? ("Skin Needling full face" ~ "Skin Needling Face")
+export function sharesWord(a, b) {
+  const x = words(a);
+  const y = words(b);
+  return x.some((w) => y.includes(w));
+}
+
 /* ---------- What a consultation would change ---------- */
 
-function linesFrom(c, startMonth, key, services) {
+function linesFrom(c, startMonth, key, services, countFrom) {
   const texts = String(c.treatment || "").split(/\n+/).map((s) => s.replace(/^[-•*]\s*/, "").trim()).filter(Boolean);
   const freqs = String(c.frequency_interval || "").split(/\n+/).map((s) => s.trim());
   return (texts.length ? texts : [c.description || "Treatment"]).map((t, i) => cleanLine({
@@ -139,13 +147,13 @@ function linesFrom(c, startMonth, key, services) {
     sessions: i === 0 ? c.sessions : 0,
     intervalWeeks: i === 0 ? c.interval_weeks : 0,
     startMonth,
+    countFrom,
     services: matchServices(t, key, services),
   }));
 }
-
 // consult = the editable plan model (planFromSidecar / planFromText)
 // → { items: [{ kind: new | changed | same | uncategorised, key, before, after }], events: [new events] }
-export function planChanges(master, consult, { recordId = "", services = [] } = {}) {
+export function planChanges(master, consult, { recordId = "", services = [], fromKey = "" } = {}) {
   const cur = master ? master.concerns : [];
   const tl = consult.timeline || [];
   const sig = (x) => [x.lines.map((l) => `${normTx(l.treatment)}/${l.pattern}/${l.sessions}/${l.intervalWeeks}`).join("|"), normTx(x.quote)].join("#");
@@ -154,7 +162,7 @@ export function planChanges(master, consult, { recordId = "", services = [] } = 
     const start = tl.filter((t) => t.concern && t.concern === c.key).map((t) => monthKey(t.date)).filter(Boolean).sort()[0] || "";
     const after = cleanConcern({
       key: key || CATEGORIES[0], description: c.description, area: c.area, quote: c.quote, comments: c.comments,
-      lines: linesFrom(c, start, key, services), sourceRecordId: recordId,
+      lines: linesFrom(c, start, key, services, fromKey), sourceRecordId: recordId,
     });
     if (!key) return { kind: "uncategorised", key: "", before: null, after: { ...after, key: "" } };
     const before = cur.find((x) => x.key === key) || null;
@@ -177,7 +185,7 @@ export function applyChanges(master, picks, events) {
     const old = concerns[i];
     const lines = after.lines.map((l) => {
       const prev = old.lines.find((o) => normTx(o.treatment) === normTx(l.treatment));
-      return prev ? { ...l, id: prev.id, overrides: prev.overrides,
+      return prev ? { ...l, id: prev.id, overrides: prev.overrides, countFrom: prev.countFrom || l.countFrom,
         services: l.services.length ? l.services : prev.services, startMonth: l.startMonth || prev.startMonth } : l;
     });
     // A line that has been tracked (done, moved…) is kept even if the new consultation doesn't mention it

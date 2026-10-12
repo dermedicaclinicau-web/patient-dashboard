@@ -22,8 +22,7 @@ import {
   parseTimeline, extractSection,
 } from "./transcripts.js";
 import { readSidecar, planFromSidecar, planFromText } from "./plan-editor.js";
-import { getMasterPlan, PLAN_STATUS } from "./master-plan-api.js";
-import { getPlanSettings } from "./plan-api.js";
+import { createPlanOverview } from "./plan-overview.js";
 import { openPlanReview } from "./master-plan-review.js";
 import {
   escapeHtml, getInitials, hueFromString, formatDobLong, calcAge,
@@ -191,6 +190,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   let pastSummaries = [];      // badge records from recorded consultations
   let pastFormsLoaded = false;
   let transcriptRecords = [];  // consultations, newest first (for the master plan)
+  let planView = null;         // the Treatment Plan overview
 
   root.addEventListener("click", (e) => {
     const t = e.target;
@@ -212,7 +212,6 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     }
     const mpApply = t.closest("[data-action='mp-apply']");
     if (mpApply) { applyFromRecord(transcriptRecords.find((r) => r.id === mpApply.dataset.rid)); return; }
-    if (t.closest("[data-action='mp-create-latest']")) { applyFromRecord(latestConsultRecord()); return; }
     const sumBtn = t.closest("[data-pa-summary]");
     if (sumBtn) {
       const menu = sumBtn.closest(".pa-bdg-menu");
@@ -316,6 +315,15 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   form = dialog.querySelector("form");
   formError = dialog.querySelector(".form-error");
   saveBtn = dialog.querySelector("[type='submit']");
+  planView = createPlanOverview(root.querySelector('[data-role="mpbar"]'), {
+    patient, staff,
+    pre: () => preData,
+    today: () => todayAppts,
+    consults: () => transcriptRecords,
+    latestConsult: () => latestConsultRecord(),
+    applyLatest: () => applyFromRecord(latestConsultRecord()),
+    onReminder: () => { loadReminders(); if (tasksView) tasksView.reload(); },
+  });
 
   function renderTop() {
     bar.innerHTML = barHtml(patient, todayAppts, preData);
@@ -552,26 +560,9 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     });
   }
 
-  async function loadMasterPlan() {
-    const bar = root.querySelector('[data-role="mpbar"]');
-    if (!bar) return;
-    try {
-      const [master, settings] = await Promise.all([
-        getMasterPlan(patient.id),
-        getPlanSettings().catch(() => ({ concerns: [], services: [] })),
-      ]);
-      if (!root.isConnected) return;
-      bar.innerHTML = masterBarHtml(master, settings, !!latestConsultRecord());
-    } catch (err) {
-      if (!root.isConnected) return;
-      console.warn("Master plan failed:", err);
-      bar.innerHTML = `<p class="empty-note error">${err.code === "permission-denied"
-        ? "The master plan isn't accessible. Check the treatment_plans Firestore rules."
-        : "Couldn't load the master plan."}</p>`;
-    }
+  function loadMasterPlan() {
+    if (planView) planView.load();
   }
-
-
   async function mergeInfo() {
     const ids = patient.mergedIds.join(", ");
     const admin = /^admin$/i.test(String((staff && staff.role) || ""));
@@ -646,6 +637,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       if (!root.isConnected) return;
       todaySlot.innerHTML = todayHtml(todayAppts);
       renderTop();
+      if (planView) planView.redraw();
     } catch (err) {
       if (!root.isConnected) return;
       console.error("Today's appointment failed:", err);
@@ -664,6 +656,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       preData = res.found ? res.data : null;
       fillPreconsult(root, preData, res.lastUpdated);
       renderTop();
+      if (planView) planView.redraw();
     } catch (err) {
       if (!root.isConnected) return;
       console.error("Pre-consultation load failed:", err);
@@ -1174,27 +1167,6 @@ function socialHistoryHtml(entries) {
 function consultPlanOf(r) {
   if (!r || !r.soap) return null;
   return planFromSidecar(readSidecar(r.soap)) || planFromText(extractSection(r.soap, "TREATMENT PLAN"));
-}
-
-function masterBarHtml(master, settings, canCreate) {
-  if (!master) {
-    return `<div class="mp-bar is-empty">
-      <div class="mp-bar-main"><strong>No master plan yet</strong>
-        <small>One plan per patient, organised by concern and tracked visit by visit.</small></div>
-      ${canCreate ? '<button type="button" class="btn-primary sm" data-action="mp-create-latest">Create from the latest consultation</button>'
-        : '<small class="muted">Record a consultation with a treatment plan first.</small>'}
-    </div>`;
-  }
-  const con = (k) => settings.concerns.find((c) => c.name === k) || { label: k, colour: "#888780" };
-  const when = master.updatedAt ? formatShortDate(master.updatedAt) : "";
-  return `<div class="mp-bar">
-    <div class="mp-bar-main"><strong>Master plan</strong>
-      <span class="mp-status is-${escapeHtml(master.status)}">${escapeHtml(PLAN_STATUS[master.status])}</span>
-      <small>${master.concerns.length} concern${master.concerns.length === 1 ? "" : "s"} · version ${master.version}${
-        when ? ` · updated ${escapeHtml(when)}${master.updatedBy ? ` by ${escapeHtml(master.updatedBy)}` : ""}` : ""}</small></div>
-    <div class="mp-bar-chips">${master.concerns.map((c) =>
-      `<span class="ps-chip" style="--c:${escapeHtml(con(c.key).colour)}">${escapeHtml(con(c.key).label)}</span>`).join("")}</div>
-  </div>`;
 }
 
 /* ===================== Treatment Plan section ===================== */

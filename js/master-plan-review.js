@@ -3,6 +3,7 @@ import { getMasterPlan, planChanges, applyChanges, saveMasterPlan, patternText, 
 import { getPlanSettings } from "./plan-api.js";
 import { CATEGORIES } from "./plan-editor.js";
 import { showToast } from "./utils.js";
+import { showToast, toDateKey } from "./utils.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const BADGE = {
@@ -32,7 +33,8 @@ export async function openPlanReview({ patient, consult, recordId = "", recordDa
       : "Couldn't open the master plan. Try again.");
     return;
   }
-  const { items, events } = planChanges(master, consult, { recordId, services: settings.services });
+  const fromKey = recordDate instanceof Date && !isNaN(recordDate) ? toDateKey(recordDate) : "";
+  const { items, events } = planChanges(master, consult, { recordId, services: settings.services, fromKey });
   const con = (k) => settings.concerns.find((c) => c.name === k) || { label: k, colour: "#888780" };
   const chip = (k) => (k ? `<span class="ps-chip" style="--c:${esc(con(k).colour)}">${esc(con(k).label)}</span>` : "");
   const linesHtml = (c) => `<ul class="mp-lines">${c.lines.map((l) => {
