@@ -41,7 +41,7 @@ function isOpenSaved(key, fallback) {
 
 /* ===================== Data ===================== */
 
-async function fetchBillingAndRx(patient) {
+export async function fetchBillingAndRx(patient) {
   const ids = patientIds(patient);
   if (!ids.length) return { billing: [], rx: [], errors: [] };
 

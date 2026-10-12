@@ -11,7 +11,7 @@ import { historySectionHtml, mountHistory } from "./history-view.js";
 import { latestMerge, undoMerge } from "./merge-patients.js";
 import { confirmDialog, alertDialog } from "./dialog.js";
 import {
-  billingRxSectionHtml, mountBillingRx, injectableReferralSectionHtml, interestsCommsSectionHtml,
+  billingRxSectionHtml, mountBillingRx, injectableReferralSectionHtml, interestsCommsSectionHtml, fetchBillingAndRx,
 } from "./billing-rx-view.js";
 import {
   clinicalHistorySectionHtml, mountClinicalHistory, renderClinicalHistory, renderClinicalHistoryError,
@@ -28,6 +28,7 @@ import {
 } from "./utils.js";
 import { listSubmissionsForPatient } from "./form-submissions.js";
 import { showSoapPanel } from "./soap-panel.js";
+import { fetchPatientRecords } from "./records.js";
 
 /* ===================== Config ===================== */
 
@@ -483,18 +484,55 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   }
 
   async function loadPastForms() {
-    try {
-      const subs = await listSubmissionsForPatient([patient.id, ...patientIds(patient)]);
-      if (!root.isConnected) return;
-      pastForms = subs.map((s) => ({
-        dateKey: s.recordDate, kind: paFormKind(s), href: `#/form-record/${encodeURIComponent(s.id)}`,
-        label: [s.templateName, s.createdBy && `by ${s.createdBy}`].filter(Boolean).join(" · "),
-      })).filter((r) => r.kind && r.dateKey);
-      pastFormsLoaded = true;
-      pushPastRecords();
-    } catch (err) {
-      console.warn("Record badges: forms failed:", err); // badges just don't show; no false "No Tx Record"
+    const [recs, subs, scripts] = await Promise.allSettled([
+      fetchPatientRecords(patient),                                      // Treatment + Consent Records (old and portal)
+      listSubmissionsForPatient([patient.id, ...patientIds(patient)]),   // other portal forms (Rx, Summary)
+      fetchBillingAndRx(patient),                                        // Prescription + Injectable Prescription Records
+    ]);
+    if (!root.isConnected) return;
+
+    const list = [];
+    const label = (r) => [r.title, r.staff && `by ${r.staff}`].filter(Boolean).join(" · ");
+    const hrefOf = (r) => (r.portalId ? `#/form-record/${encodeURIComponent(r.portalId)}`
+      : /^https:\/\//i.test(r.link || "") ? r.link : "");
+
+    if (recs.status === "fulfilled") {
+      const add = (kind) => (r) => {
+        if (!(r.date instanceof Date) || isNaN(r.date)) return;
+        list.push({ dateKey: toDateKey(r.date), kind, href: hrefOf(r), label: label(r) });
+      };
+      (recs.value.treatments || []).forEach(add("tx"));
+      (recs.value.consents || []).forEach(add("cons"));
+    } else {
+      console.warn("Record badges: treatment/consent records failed:", recs.reason);
     }
+
+    if (subs.status === "fulfilled") {
+      subs.value.forEach((s) => {
+        const kind = paFormKind(s);
+        if ((kind === "rx" || kind === "summary") && s.recordDate) {
+          list.push({ dateKey: s.recordDate, kind, href: `#/form-record/${encodeURIComponent(s.id)}`,
+            label: [s.templateName, s.createdBy && `by ${s.createdBy}`].filter(Boolean).join(" · ") });
+        }
+      });
+    } else {
+      console.warn("Record badges: forms failed:", subs.reason);
+    }
+    if (scripts.status === "fulfilled") {
+      [...(scripts.value.rx || []), ...(scripts.value.injectables || [])].forEach((r) => {
+        if (!(r.date instanceof Date) || isNaN(r.date)) return;
+        list.push({
+          dateKey: toDateKey(r.date), kind: "rx",
+          href: /^https:\/\//i.test(r.link || "") ? r.link : "",
+          label: [r.title, r.staff && `by ${r.staff}`].filter(Boolean).join(" · "),
+        });
+      });
+    } else {
+      console.warn("Record badges: prescriptions failed:", scripts.reason);
+    }
+    pastForms = list;
+    pastFormsLoaded = recs.status === "fulfilled"; // "No Tx Record" only when treatment records actually loaded
+    pushPastRecords();
   }
 
 
@@ -910,11 +948,15 @@ function paAgo(d) {
   return `${y} yr${y === 1 ? "" : "s"} ago`;
 }
 
-// A badge (or a line in its menu): form records are links, summaries open a popup
+// A badge (or a line in its menu): summaries open the notes panel, records open their form or file
 function paRecHtml(r, cls, text) {
-  return r.href
-    ? `<a class="${cls}" href="${escapeHtml(r.href)}" title="${escapeHtml(r.label || "")}">${text}</a>`
-    : `<button type="button" class="${cls}" data-pa-summary="${escapeHtml(r.summaryId)}" title="${escapeHtml(r.label || "")}">${text}</button>`;
+  const title = escapeHtml(r.label || "");
+  if (r.summaryId) {
+    return `<button type="button" class="${cls}" data-pa-summary="${escapeHtml(r.summaryId)}" title="${title}">${text}</button>`;
+  }
+  if (!r.href) return `<span class="${cls}" title="${title} (no file attached)">${text}</span>`;
+  const external = /^https?:\/\//i.test(r.href) ? ' target="_blank" rel="noopener noreferrer"' : "";
+  return `<a class="${cls}" href="${escapeHtml(r.href)}"${external} title="${title}">${text}</a>`;
 }
 
 function paBadgesHtml(recs, missing) {
