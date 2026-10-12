@@ -3670,6 +3670,7 @@ function runNotifications() {
   try { notifyProcessPending_(cfg, 20, rules, true); } catch (e) { console.error('Outbox: ' + (e && e.stack ? e.stack : e)); }
   try { notifyLowScan_(cfg, rules); } catch (e) { console.error('Low stock scan: ' + (e && e.stack ? e.stack : e)); }
   try { notifyRunDigests_(cfg, rules, now); } catch (e) { console.error('Digests: ' + (e && e.stack ? e.stack : e)); }
+  try { notifyCountCheck_(cfg, rules, now); } catch (e) { console.error('Count check: ' + (e && e.stack ? e.stack : e)); }
 }
 
 // Run ONCE from the editor to start notifications
@@ -3971,6 +3972,26 @@ function notifyContext_(cfg, ev, rule) {
         locs: [x.loc], categories: catsOf([x.productId]), involved: [x.openedByUid, rc.byUid], actor: rc.byUid,
       };
     }
+    case 'count.overdue': {
+      const c = rule.conditions || {};
+      const cats = Array.isArray(c.categories) ? c.categories : [];
+      const items = (d.items || []).filter(function (it) {
+        return (!c.loc || c.loc === 'any' || it.loc === c.loc) && (!cats.length || cats.indexOf(it.category) !== -1);
+      });
+      if (!items.length) return null;
+      return {
+        subject: 'Opening count not done: ' + d.missing + ' of ' + d.total + ' still to count',
+        inner: h2('The opening count isn\'t finished', '#b45309') +
+          sub('It was due by <strong>' + invEsc_(d.dueBy) + '</strong> today. Still to count:') +
+          ul(items.slice(0, 30).map(function (it) {
+            return '<strong>' + invEsc_(it.name) + '</strong> · ' + (it.loc === 'jt' ? 'JT storage' : 'Shelf');
+          })) +
+          (items.length > 30 ? '<p style="margin:0;color:#64748b">and ' + (items.length - 30) + ' more</p>' : ''),
+        hash: 'tasks/count', label: 'Count now',
+        locs: uniq_(items.map(function (it) { return it.loc; })), categories: uniq_(items.map(function (it) { return it.category; })),
+        involved: [], actor: '',
+      };
+    }
     case 'loan.disputed': {
       const ln = get('inv_loans/' + d.loanId);
       if (!ln || ln.status !== 'disputed') return null;
@@ -4248,6 +4269,7 @@ function notifyTest_(ruleId, session) {
       'loan.disputed': 'a borrow between injectors is disputed',
       'investigation.opened': 'a count doesn\'t match digital and a recount is needed',
       'investigation.confirmed': 'a recount confirms a difference and an admin review is needed',
+      'count.overdue': 'the opening count isn\'t finished by its due time',
     };
     const r = rule.recipients || {};
     const byId = {};
@@ -4268,4 +4290,83 @@ function notifyTest_(ruleId, session) {
   }
   notifySend_(cfg, rule, ctx, '', me.email);
   return { ok: true, to: me.email };
+}
+
+/* ---------- Opening count not done by its due time (checked once a day) ---------- */
+
+// The same rules as the portal's countDue()
+function countDueGs_(x, p) {
+  if (x.active === false) return false;
+  const f = String(x.countFreq || 'never');
+  if (f === 'daily') return true;
+  if (f === 'weekly') return p.dow === Number(x.countDay);
+  if (f === 'monthly') {
+    const last = schDaysIn_(p.y, p.m);
+    return p.d === (x.countDay === 'last' ? last : Math.min(Number(x.countDay) || 1, last));
+  }
+  return false;
+}
+
+// A starter rule (to Reception) the first time, so the reminder works straight away. Editable in Notifications.
+function notifyCountSeed_(cfg, rules) {
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('COUNT_RULE_SEEDED') === '1') return;
+  props.setProperty('COUNT_RULE_SEEDED', '1');
+  if (rules.some(function (r) { return r.event === 'count.overdue'; })) return;
+  const now = new Date().toISOString();
+  const rule = {
+    name: 'Opening count not done by its due time', kind: 'event', event: 'count.overdue', enabled: true, message: '',
+    conditions: { urgentOnly: false, loc: 'any', categories: [], statuses: [] },
+    recipients: { involved: false, staffIds: [], roles: ['Reception'], emails: [], skipActor: true },
+    createdAt: now, createdBy: 'Set up automatically', updatedAt: now, updatedBy: 'Set up automatically',
+  };
+  commitWrites_(cfg, [updateWrite_(cfg, 'notify_rules/starter_count_overdue', rule)]);
+  rule.id = 'starter_count_overdue';
+  rules.push(rule);
+}
+
+function notifyCountCheck_(cfg, rules, now) {
+  notifyCountSeed_(cfg, rules);
+  if (!rules.some(function (r) { return r.enabled === true && r.kind !== 'digest' && r.event === 'count.overdue'; })) return;
+  const set = fsGetDoc_(cfg, 'inv_settings/counting') || {};
+  const due = /^\d{2}:\d{2}$/.test(String(set.dueBy || '')) ? set.dueBy : '10:00';
+  const a = new Date(now + SCH_PERTH_);
+  const p = { y: a.getUTCFullYear(), m: a.getUTCMonth() + 1, d: a.getUTCDate(), dow: a.getUTCDay() };
+  const key = schKey_(p);
+  const dueMs = schSlotMs_(p, due);
+  if (now < dueMs) return;
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('COUNT_CHECK_DAY') === key) return;   // once a day
+  props.setProperty('COUNT_CHECK_DAY', key);
+  if (now - dueMs > 4 * 3600000) return;                      // the trigger was down: don't remind hours later
+
+  let closed = [];
+  try { const c = fsGetDoc_(cfg, 'task_settings/closed'); closed = (c && Array.isArray(c.dates)) ? c.dates : []; } catch (e) { /* send anyway */ }
+  if (closed.indexOf(key) !== -1 || !hasAppointments_(cfg, key)) return;
+
+  const dueKeys = [];
+  const info = {};
+  fsListAll_(cfg, 'inv_products', ['name', 'active', 'category', 'countFreq', 'countDay', 'countWhere']).forEach(function (doc) {
+    const x = fromFields_(doc.fields || {});
+    if (!countDueGs_(x, p)) return;
+    const id = doc.name.split('/').pop();
+    const locs = x.countWhere === 'shelf' ? ['shelf'] : x.countWhere === 'jt' ? ['jt'] : ['shelf', 'jt'];
+    locs.forEach(function (loc) {
+      dueKeys.push(id + '|' + loc);
+      info[id + '|' + loc] = { name: String(x.name || ''), loc: loc, category: String(x.category || '') };
+    });
+  });
+  if (!dueKeys.length) return;
+
+  const done = {};
+  fsQuery_(cfg, 'inv_counts', 'dateKey', 'EQUAL', key, 300).forEach(function (c) {
+    if (c.kind !== 'opening') return;
+    (c.lines || []).forEach(function (l) { if (l.loc !== 'kit') done[l.productId + '|' + l.loc] = true; });
+  });
+  const missing = dueKeys.filter(function (k) { return !done[k]; }).map(function (k) { return info[k]; });
+  if (!missing.length) return;
+
+  notifyProcessOne_(cfg, notifyEnqueue_(cfg, 'count.overdue', {
+    dateKey: key, dueBy: due, total: dueKeys.length, missing: missing.length, items: missing.slice(0, 80),
+  }, ''), rules);
 }

@@ -4,19 +4,42 @@ import { parsePlan, parseTimeline } from "./transcripts.js";
 /* ===================== Constants ===================== */
 
 // The recorder's 9 canonical concern categories (must match exactly)
+// The master plan's 9 concerns. Must match PLAN_CONCERNS in Soap.gs exactly.
 export const CATEGORIES = [
-  "Expression Lines / Muscle Movement",
-  "Volume Loss / Contours",
-  "Skin Texture",
+  "Expression Lines & Wrinkles",
+  "Volume Loss",
   "Skin Laxity",
+  "Skin Texture & Quality",
   "Pigmentation",
-  "Redness / Sensitive Skin",
+  "Redness & Vascular Concerns",
   "Collagen Replenishment",
   "Body Contouring",
-  "Active Acne",
+  "Acne & Acne Scarring",
 ];
 
 export const catKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+// Names older consultations used → today's names
+const LEGACY_CATEGORIES = {
+  "Expression Lines / Muscle Movement": "Expression Lines & Wrinkles",
+  "Volume Loss / Contours": "Volume Loss",
+  "Skin Texture": "Skin Texture & Quality",
+  "Redness / Sensitive Skin": "Redness & Vascular Concerns",
+  "Active Acne": "Acne & Acne Scarring",
+};
+const CAT_LOOKUP = new Map([
+  ...CATEGORIES.map((c) => [catKey(c), c]),
+  ...Object.entries(LEGACY_CATEGORIES).map(([old, now]) => [catKey(old), now]),
+]);
+
+// Any spelling, old or new → today's name ("" if it isn't one of the 9)
+export const canonicalCategory = (s) => CAT_LOOKUP.get(catKey(s)) || "";
+
+export const PATTERNS = ["course", "maintenance", "once", "unknown"];
+const whole = (v) => {
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) && n > 0 ? Math.min(n, 520) : 0;
+};
 
 const INTENTS = {
   new_plan: { label: "New plan", cls: "new" },
@@ -68,39 +91,63 @@ export function buildSidecar(obj) {
 
 /* ===================== Plan model ===================== */
 
-// Sidecar plan -> editable model { intent, discussion_notes, concerns: [], timeline: [], booking_comments }
+// Sidecar plan -> editable model { intent, discussion_notes, concerns: [], timeline: [], booking_comments, patient_events }
 export function planFromSidecar(sc) {
   const p = sc && sc.plan;
   if (!p || typeof p !== "object") return null;
 
   const concerns = Object.keys(p.concerns || {}).sort()
-    .map((k) => p.concerns[k])
-    .filter((c) => c && (str(c.treatment) || str(c.description)))
-    .map((c) => ({
-      description: str(c.description), concern_category: str(c.concern_category), area: str(c.area),
-      treatment: str(c.treatment), frequency_interval: str(c.frequency_interval),
-      quote: str(c.quote), comments: str(c.comments),
-    }));
+    .map((k) => ({ k, c: p.concerns[k] }))
+    .filter(({ c }) => c && (str(c.treatment) || str(c.description)))
+    .map(({ k, c }) => {
+      const raw = str(c.concern_category);
+      return {
+        key: k.replace(/^concern_/, ""),           // the letter the timeline points at
+        description: str(c.description),
+        concern_category: canonicalCategory(raw) || (/^none$/i.test(raw) ? "" : raw),
+        area: str(c.area),
+        treatment: str(c.treatment),
+        frequency_interval: str(c.frequency_interval),
+        quote: str(c.quote),
+        comments: str(c.comments),
+        pattern: PATTERNS.includes(str(c.pattern)) ? str(c.pattern) : "unknown",
+        sessions: whole(c.sessions),
+        interval_weeks: whole(c.interval_weeks),
+      };
+    });
 
   const timeline = (Array.isArray(p.timeline) ? p.timeline : [])
-    .map((t) => ({ date: str(t && t.date), treatment: str(t && t.treatment), pretreatment_instructions: str(t && t.pretreatment_instructions) }))
+    .map((t) => ({
+      date: str(t && t.date),
+      treatment: str(t && t.treatment),
+      pretreatment_instructions: str(t && t.pretreatment_instructions),
+      concern: str(t && t.concern).toLowerCase().replace(/^concern_/, "").replace(/^none$/, ""),
+    }))
     .filter((t) => t.date || t.treatment);
+
+  const patient_events = (Array.isArray(p.patient_events) ? p.patient_events : [])
+    .map((e) => ({ name: str(e && e.name), month: str(e && e.month), avoid_downtime: !!(e && e.avoid_downtime === true) }))
+    .filter((e) => e.name);
 
   let intent = str(p.intent).toLowerCase();
   if (!INTENTS[intent]) intent = concerns.length ? "new_plan" : "none";
 
-  return { intent, discussion_notes: str(p.discussion_notes), concerns, timeline, booking_comments: str(p.booking_comments) };
+  return { intent, discussion_notes: str(p.discussion_notes), concerns, timeline, booking_comments: str(p.booking_comments), patient_events };
 }
 
 // Model -> sidecar plan (same shape as the recorder's schema: concern_a..concern_f)
 export function planToSidecarPlan(plan) {
   const concerns = {};
+  const letterOf = {}; // a concern's old letter -> its letter after edits (concerns can be removed or reordered)
   "abcdef".split("").forEach((l, i) => {
     const c = plan.concerns[i] || {};
+    if (c.key) letterOf[c.key] = l;
     concerns[`concern_${l}`] = {
       description: str(c.description), concern_category: str(c.concern_category), area: str(c.area),
       treatment: str(c.treatment), frequency_interval: str(c.frequency_interval),
       quote: str(c.quote), comments: str(c.comments),
+      pattern: PATTERNS.includes(str(c.pattern)) ? str(c.pattern) : "unknown",
+      sessions: whole(c.sessions), interval_weeks: whole(c.interval_weeks),
     };
   });
   return {
@@ -109,8 +156,12 @@ export function planToSidecarPlan(plan) {
     concerns,
     timeline: plan.intent === "reviewing_existing" ? [] : plan.timeline.map((t) => ({
       date: str(t.date), treatment: str(t.treatment), pretreatment_instructions: str(t.pretreatment_instructions),
+      concern: letterOf[str(t.concern)] || "",
     })),
     booking_comments: str(plan.booking_comments),
+    patient_events: (plan.patient_events || []).map((e) => ({
+      name: str(e.name), month: str(e.month), avoid_downtime: e.avoid_downtime === true,
+    })),
   };
 }
 
@@ -149,20 +200,23 @@ export function planToText(plan) {
   return t.trim();
 }
 
-// Categories this record already planned for (used for NEW vs UPDATE)
+// Categories this record already planned for (used for NEW vs UPDATE). Old names count as today's names.
 export function priorCategories(soap) {
   const sc = readSidecar(soap);
   if (sc && sc.plan && str(sc.plan.intent).toLowerCase() !== "reviewing_existing") {
     const cats = Object.values(sc.plan.concerns || {})
       .filter((c) => c && (str(c.treatment) || str(c.description)))
-      .map((c) => str(c.concern_category))
-      .filter(Boolean);
+      .map((c) => canonicalCategory(c.concern_category) || str(c.concern_category))
+      .filter((c) => c && !/^none$/i.test(c));
     if (cats.length) return cats;
   }
   const out = [];
   const re = /^CONCERN\s+[A-F]\s*:\s*(.+?)(?:\s+[—–-]\s+.*)?$/gim;
   let m;
-  while ((m = re.exec(String(soap || "")))) out.push(m[1].trim());
+  while ((m = re.exec(String(soap || "")))) {
+    const t = m[1].trim();
+    out.push(canonicalCategory(t) || t);
+  }
   return out;
 }
 
@@ -334,7 +388,7 @@ export function planFromText(text) {
 
   const concerns = parsed.concerns.map((c) => {
     // Newer text starts with an official category ("Skin Laxity — …"); older text doesn't
-    const cat = CATEGORIES.find((x) => catKey(x) === catKey(c.title)) || "";
+    const cat = canonicalCategory(c.title);
     const description = cat ? c.description.join(" ") : [c.title, ...c.description].filter(Boolean).join(" ");
     return {
       description: str(description),

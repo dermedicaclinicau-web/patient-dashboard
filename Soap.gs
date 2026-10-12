@@ -12,6 +12,19 @@ const EMAIL_LOG_SHEET_NAME = 'treatment_info_emailed';
 // 2. AI CONFIGURATION
 const GEMINI_MODEL = 'gemini-2.5-pro';
 
+// The master treatment plan's 9 concerns. Change names ONLY here and in js/plan-editor.js (CATEGORIES).
+const PLAN_CONCERNS = [
+  'Expression Lines & Wrinkles',
+  'Volume Loss',
+  'Skin Laxity',
+  'Skin Texture & Quality',
+  'Pigmentation',
+  'Redness & Vascular Concerns',
+  'Collagen Replenishment',
+  'Body Contouring',
+  'Acne & Acne Scarring',
+];
+
 const SOAP_PROMPTS = {
   subjective: `
     You are generating the SUBJECTIVE section.
@@ -145,7 +158,7 @@ const SOAP_PROMPTS = {
     *** ONE CONCERN PER CATEGORY ***
     Each concern_category can only appear ONCE across all concerns (A–F).
     If two or more issues fall in the same category (e.g., frown lines AND jaw slimming both fall
-    under "Expression Lines & Muscle Movement"), merge them into ONE concern entry.
+    under "Expression Lines & Wrinkles"), merge them into ONE concern entry.
 
     When merging, keep the sub-issues in the SAME ORDER in every field, one per line, so each line
     of "treatment", "frequency_interval" and "quote" corresponds to the same-numbered sub-issue:
@@ -175,16 +188,17 @@ const SOAP_PROMPTS = {
 
     Transcript: "So I really hate these lines around my eyes, they make me look so tired. And my jaw, it's just heavy now, I've noticed it getting worse."
     Clinician: "Yeah I can see what you mean. For the eyes we could do RestoraGlow — that's going to be $499 per session, we'd do 2 sessions a month apart. For the jaw we should do Ulthera, $1400 per session, once a year."
-    
+
     Output concerns:
     {
       "concern_a": {
         "description": "Crepey skin and fine lines around the periorbital area",
-        "concern_category": "Skin Texture",
+        "concern_category": "Skin Texture & Quality",
         "treatment": "RestoraGlow Eyes",
         "frequency_interval": "2 sessions, 1 month apart",
         "quote": "RestoraGlow Eyes — $499 per session",
-        "comments": ""
+        "comments": "",
+        "pattern": "course", "sessions": 2, "interval_weeks": 4
       },
       "concern_b": {
         "description": "Heaviness and jowling along the lower jaw",
@@ -192,36 +206,47 @@ const SOAP_PROMPTS = {
         "treatment": "Ulthera",
         "frequency_interval": "Once a year",
         "quote": "Ulthera — $1400 per session",
-        "comments": ""
+        "comments": "",
+        "pattern": "maintenance", "sessions": 1, "interval_weeks": 52
       }
     }
 
     Transcript: "The patient's chin is looking a bit recessed. I'd like to put some filler there, we'll discuss pricing at the next visit."
-    
+
     Output concerns:
     {
       "concern_a": {
         "description": "Recessed chin projection",
-        "concern_category": "Volume Loss / Contours",
+        "concern_category": "Volume Loss",
         "treatment": "Dermal Filler (chin)",
         "frequency_interval": "",
         "quote": "",
-        "comments": "Pricing to be discussed at next visit"
+        "comments": "Pricing to be discussed at next visit",
+        "pattern": "once", "sessions": 1, "interval_weeks": 0
+      }
+    }
+
+    Transcript: "These scars on my cheeks from my teenage acne really bother me, and I still get the odd breakout on my chin."
+    Clinician: "We'll do Skin Needling for the scarring, three sessions four weeks apart, $450 each."
+
+    Output concerns:
+    {
+      "concern_a": {
+        "description": "Acne scarring on the cheeks; occasional active breakouts on the chin",
+        "concern_category": "Acne & Acne Scarring",
+        "treatment": "Skin Needling (cheeks)",
+        "frequency_interval": "3 sessions, 4 weeks apart",
+        "quote": "Skin Needling cheeks — $450 per session",
+        "comments": "",
+        "pattern": "course", "sessions": 3, "interval_weeks": 4
       }
     }
 
     *** CONCERN CATEGORY MAPPING ***
-    For EVERY concern, set "concern_category" to exactly one of these 9 canonical names.
+    For EVERY real concern, set "concern_category" to exactly one of these 9 names.
     Copy the name EXACTLY, character for character. Never invent, abbreviate or re-word a category.
-    - "Expression Lines / Muscle Movement"
-    - "Volume Loss / Contours"
-    - "Skin Texture"
-    - "Skin Laxity"
-    - "Pigmentation"
-    - "Redness / Sensitive Skin"
-    - "Collagen Replenishment"
-    - "Body Contouring"
-    - "Active Acne"
+${PLAN_CONCERNS.map(function (n) { return '    - "' + n + '"'; }).join('\n')}
+    For UNUSED concern slots (no description and no treatment), set "concern_category" to "None".
 
     *** HOW TO CHOOSE THE CATEGORY (precedence order) ***
     RULE 1 — SYMPTOM FIRST. The category describes the PATIENT'S CONCERN, not the treatment.
@@ -230,9 +255,9 @@ const SOAP_PROMPTS = {
              appears under more than one category (see AMBIGUOUS TERMS), or when no symptom was named
              and you are reverse-engineering the concern from the treatment.
     RULE 3 — Never choose a category from a treatment's brand name. "Firm & Contour Treatment" contains
-             the word "Contour" but is a SKIN LAXITY treatment, NOT "Volume Loss / Contours".
+             the word "Contour" but is a SKIN LAXITY treatment, NOT "Volume Loss" or "Body Contouring".
 
-    ── 1. "Expression Lines / Muscle Movement" ──
+    ── 1. "Expression Lines & Wrinkles" ──
     SYMPTOM TRIGGERS: frown lines, glabella, "11s", crow's feet, smile lines around the eyes,
       forehead lines, lip lines/lip flip/gummy smile, sad face, downturned corners of the mouth,
       DAO, chin dimpling/pebbling/orange peel chin, neck bands, platysmal bands, "turkey neck" bands,
@@ -242,7 +267,7 @@ const SOAP_PROMPTS = {
     NOTE: If the concern is muscle-driven movement, use THIS category even if the area (neck, chin,
       jaw, mouth) also appears under another category.
 
-    ── 2. "Volume Loss / Contours" ──
+    ── 2. "Volume Loss" ──
     SYMPTOM TRIGGERS: flattening of the cheeks, hollow/deflated/sunken cheeks or temples,
       "looking tired", tired or gaunt appearance, nasolabial folds/lines, marionette lines,
       tear trough, hollow under-eyes, dark circles under the eyes, loss of facial contour/projection,
@@ -251,14 +276,7 @@ const SOAP_PROMPTS = {
     SCOPE GUARD: FACIAL volume and facial contour ONLY. Body fat, tummy fat, double-chin fat and
       body circumference go to "Body Contouring" — never here.
 
-    ── 3. "Skin Texture" ──
-    SYMPTOM TRIGGERS: enlarged pore size, rough or uneven texture, smile lines as fine surface
-      etched lines, scars, acne scarring, sleep lines/pillow creases, crepey or papery skin
-      (under-eyes, neck, chest/décolletage), dull skin, fine lines at rest, dehydrated/lacklustre skin.
-    TREATMENT SIGNALS: Filler, Radiesse, DermaGlow, RestoraGlow Face, RestoraGlow Eyes, Peel,
-      Stimulating Peel + LED, Genesis Glow.
-
-    ── 4. "Skin Laxity" ──
+    ── 3. "Skin Laxity" ──
     SYMPTOM TRIGGERS: sagging or drooping skin, jowls, loose skin under the chin, submental laxity,
       loss of jawline definition, saggy neck, loose or lax skin on the abdomen/tummy,
       loose skin on arms/thighs, skin that "hangs" or needs "lifting/tightening".
@@ -267,81 +285,130 @@ const SOAP_PROMPTS = {
     SCOPE GUARD: This is LOOSE SKIN. If the complaint is FAT or bulk rather than loose skin,
       use "Body Contouring".
 
-    ── 5. "Redness / Sensitive Skin" ──
+    ── 4. "Skin Texture & Quality" ──
+    SYMPTOM TRIGGERS: enlarged pore size, rough or uneven texture, smile lines as fine surface
+      etched lines, scars that are NOT from acne (surgical, injury), sleep lines/pillow creases,
+      crepey or papery skin (under-eyes, neck, chest/décolletage), dull skin, fine lines at rest,
+      dehydrated/lacklustre skin.
+    TREATMENT SIGNALS: Filler, Radiesse, DermaGlow, RestoraGlow Face, RestoraGlow Eyes, Peel,
+      Stimulating Peel + LED, Genesis Glow.
+    NOTE: Acne scars do NOT go here. They go to "Acne & Acne Scarring".
+
+    ── 5. "Pigmentation" ──
+    SYMPTOM TRIGGERS: melasma, sunspots, sun damage, freckles, age spots, brown patches,
+      post-inflammatory hyperpigmentation, uneven skin tone.
+
+    ── 6. "Redness & Vascular Concerns" ──
     SYMPTOM TRIGGERS: rosacea, sensitive or reactive skin, easily irritated skin, broken capillaries,
       telangiectasia, facial veins, flushing, blushing, persistent redness, stinging/burning skin.
     TREATMENT SIGNALS: Genesis Glow, OPL, Vascular laser, Soolantra, ZO Rozatrol, Azelaic acid, Finacea.
 
-    ── 6. "Pigmentation" ──
-    SYMPTOM TRIGGERS: melasma, sunspots, sun damage, freckles, age spots, brown patches,
-      post-inflammatory hyperpigmentation, uneven skin tone.
-
     ── 7. "Collagen Replenishment" ──
     SYMPTOM TRIGGERS: general collagen loss, overall skin rejuvenation, preventative/maintenance
       "collagen building" with no other specific symptom named.
+    TREATMENT SIGNALS: Collagen Activator.
     NOTE: Use this ONLY when no more specific category above fits. It is the fallback, not the default.
 
     ── 8. "Body Contouring" ──
     SYMPTOM TRIGGERS: double chin fat, stubborn fat pockets, body sculpting, muscle toning,
       tummy/flank/thigh fat, circumference reduction.
 
-    ── 9. "Active Acne" ──
-    SYMPTOM TRIGGERS: active breakouts, pimples, congestion, blackheads, cystic acne, oily skin.
-    NOTE: ACTIVE spots go here. Acne SCARRING goes to "Skin Texture".
+    ── 9. "Acne & Acne Scarring" ──
+    SYMPTOM TRIGGERS: active breakouts, pimples, congestion, blackheads, cystic acne, oily skin,
+      AND scarring left by acne (ice-pick, rolling, boxcar, pitted or indented acne scars).
+    TREATMENT SIGNALS: Clear complexion Max Laser, Clear complexion carbon Laser, Clear complexion Lite Laser,
+      Epiduo, and Skin Needling / ReFresh Microneedling WHEN the complaint is acne or acne scars.
+    NOTE: Active acne and acne scarring are ONE journey. Put both in ONE concern here, never split them.
 
     *** AMBIGUOUS TERMS — RESOLVE IN THIS ORDER ***
+    - "scars": from acne → "Acne & Acne Scarring". Any other scar → "Skin Texture & Quality".
     - "jowls" / "jowling": if the treatment discussed is Ulthera, Firm & Contour Treatment,
       Firm & Hydrate Treatment, Skin Lifting or eSkin Tight → "Skin Laxity".
-      If the treatment is Filler or Radiesse → "Volume Loss / Contours".
+      If the treatment is Filler or Radiesse → "Volume Loss".
       If NO treatment is named → default to "Skin Laxity".
     - "smile lines": if described as a FOLD, or as nasolabial, or treated with Filler/Radiesse for
-      volume → "Volume Loss / Contours". If described as fine surface lines, or treated with
-      DermaGlow / RestoraGlow / Peel / Genesis Glow → "Skin Texture".
-      Around the EYES on movement → "Expression Lines / Muscle Movement".
-    - "neck": muscle bands → "Expression Lines / Muscle Movement".
-      Crepey neck skin texture → "Skin Texture". Sagging/loose neck skin → "Skin Laxity".
-    - "chin": muscle dimpling/pebbling → "Expression Lines / Muscle Movement".
-      Recessed/weak projection → "Volume Loss / Contours".
+      volume → "Volume Loss". If described as fine surface lines, or treated with
+      DermaGlow / RestoraGlow / Peel / Genesis Glow → "Skin Texture & Quality".
+      Around the EYES on movement → "Expression Lines & Wrinkles".
+    - "neck": muscle bands → "Expression Lines & Wrinkles".
+      Crepey neck skin texture → "Skin Texture & Quality". Sagging/loose neck skin → "Skin Laxity".
+    - "chin": muscle dimpling/pebbling → "Expression Lines & Wrinkles".
+      Recessed/weak projection → "Volume Loss".
       Loose skin under the chin → "Skin Laxity". Fat under the chin → "Body Contouring".
-    - "jaw": heavy masseter muscle / bruxism / jaw slimming → "Expression Lines / Muscle Movement".
-      Loss of jawline from loose skin → "Skin Laxity". Loss of jawline from volume → "Volume Loss / Contours".
-    - "under the eyes": dark circles / hollowing / tear trough → "Volume Loss / Contours".
-      Crepey or textured under-eye skin → "Skin Texture".
-      Crow's feet / lines on smiling → "Expression Lines / Muscle Movement".
-    - Filler and Radiesse appear under BOTH "Volume Loss / Contours" and "Skin Texture".
+    - "jaw": heavy masseter muscle / bruxism / jaw slimming → "Expression Lines & Wrinkles".
+      Loss of jawline from loose skin → "Skin Laxity". Loss of jawline from volume → "Volume Loss".
+    - "under the eyes": dark circles / hollowing / tear trough → "Volume Loss".
+      Crepey or textured under-eye skin → "Skin Texture & Quality".
+      Crow's feet / lines on smiling → "Expression Lines & Wrinkles".
+    - Filler and Radiesse appear under BOTH "Volume Loss" and "Skin Texture & Quality".
       They can NEVER decide the category on their own — the symptom must decide.
-      Only if no symptom is recoverable at all, default Filler/Radiesse to "Volume Loss / Contours".
-    - Genesis Glow appears under BOTH "Skin Texture" and "Redness / Sensitive Skin".
-      Rosacea / flushing / capillaries → "Redness / Sensitive Skin". Pores / scars / dullness → "Skin Texture".
+      Only if no symptom is recoverable at all, default Filler/Radiesse to "Volume Loss".
+    - Genesis Glow appears under BOTH "Skin Texture & Quality" and "Redness & Vascular Concerns".
+      Rosacea / flushing / capillaries → "Redness & Vascular Concerns". Pores / dullness → "Skin Texture & Quality".
+
+    *** SCHEDULE FIELDS (one set per concern) ***
+    These let the clinic track the plan. Fill them from what was said; never invent a schedule.
+    - "pattern":
+        "course"      = a set number of sessions (e.g. "3 sessions a month apart", "a series of 2").
+        "maintenance" = repeats with no end (e.g. "every 3 to 4 months", "once a year", "top up yearly").
+        "once"        = a single treatment.
+        "unknown"     = the treatment was named but how often was not discussed.
+        If a course is followed by ongoing top-ups, use "course" and mention the top-ups in "comments".
+    - "sessions": whole number. Course: number of sessions. Once: 1. Maintenance: sessions per visit (usually 1).
+      Unknown: 0.
+    - "interval_weeks": whole number of weeks between sessions (course) or between repeats (maintenance).
+      1 month = 4, 6 weeks = 6, 2 months = 9, 3 months = 13, 4 months = 17, 6 months = 26, 1 year = 52.
+      For a range ("every 3 to 4 months") use the SHORTER interval (13). Once / unknown: 0.
+    - When one concern holds several treatments (merged sub-issues), describe the FIRST treatment line.
+    - Unused concern slots: "pattern": "unknown", "sessions": 0, "interval_weeks": 0.
+
+    *** TIMELINE LINK ***
+    Every timeline item MUST say which concern it belongs to in "concern": the letter a–f of that concern
+    ("a" for concern_a). If one visit treats two concerns, use the concern the visit is mainly for.
+    Use "none" only if the step matches no concern.
+
+    *** PATIENT EVENTS ***
+    List upcoming events in the patient's life that affect WHEN treatments should happen: holidays, travel,
+    weddings, parties, photo shoots, surgery, exams. Only events with a month you can work out.
+    - "name": short, e.g. "River cruise", "Daughter's wedding".
+    - "month": "MMMM YYYY", calculated from the Current Date of this recording.
+    - "avoid_downtime": true if the patient wants to look their best or avoid redness/bruising/downtime
+      before it (weddings, holidays, photos, events), or says so. Otherwise false.
+    Return an empty array if no such events are mentioned.
 
     Return a JSON OBJECT:
     {
       "intent": "One of: new_plan | reviewing_existing | none. Decide using the INTENT DECISION TREE above BEFORE filling anything else.",
       "discussion_notes": "Used ONLY when intent is reviewing_existing: a short factual summary of the review of the existing/prior plan. If a new treatment is mentioned in passing, note it here in words only — never as a concern. Empty string for all other intents.",
       "concerns": {
-         "concern_a": { 
+         "concern_a": {
           "description": "Clear description of the concern including the specific area of face or body",
-          "concern_category": "One of the 9 canonical category names listed above",
+          "concern_category": "One of the 9 category names above, or None for an unused slot",
           "area": "ONLY the anatomical area(s) for this concern, comma separated, Title Case, no treatment names and no adjectives. Examples: 'Eyes', 'Crow's Feet, Frown', 'Full Face', 'Neck, Decolletage'. Empty string if no area is identifiable.",
-            "treatment": "Treatment name AND treatment area. One line per point if multiple treatments.",
-            "frequency_interval": "Frequency or interval only if mentioned. Empty string if not mentioned.",
-            "quote": "Quote with treatment name, area, and number of treatments. More expensive quote first. Whole numbers = $ no decimals (e.g. 'one five nine five' = $1595). Dollars and cents = decimals (e.g. 'fifteen dollars ninety five' = $15.95). If a program/package: include program name, inclusions, and total price. Empty string if not mentioned.",
-            "comments": "Additional comments or notes for this concern. Empty string if not mentioned."
+          "treatment": "Treatment name AND treatment area. One line per point if multiple treatments.",
+          "frequency_interval": "Frequency or interval only if mentioned. Empty string if not mentioned.",
+          "quote": "Quote with treatment name, area, and number of treatments. More expensive quote first. Whole numbers = $ no decimals (e.g. 'one five nine five' = $1595). Dollars and cents = decimals (e.g. 'fifteen dollars ninety five' = $15.95). If a program/package: include program name, inclusions, and total price. Empty string if not mentioned.",
+          "comments": "Additional comments or notes for this concern. Empty string if not mentioned.",
+          "pattern": "course | maintenance | once | unknown (see SCHEDULE FIELDS)",
+          "sessions": "Whole number (see SCHEDULE FIELDS). 0 if unknown.",
+          "interval_weeks": "Whole number of weeks (see SCHEDULE FIELDS). 0 if unknown."
          },
-         "concern_b": { "description": "", "concern_category": "", "area": "", "treatment": "", "frequency_interval": "", "quote": "", "comments": "" },
-        "concern_c": { "description": "", "concern_category": "", "area": "", "treatment": "", "frequency_interval": "", "quote": "", "comments": "" },
-        "concern_d": { "description": "", "concern_category": "", "area": "", "treatment": "", "frequency_interval": "", "quote": "", "comments": "" },
-        "concern_e": { "description": "", "concern_category": "", "area": "", "treatment": "", "frequency_interval": "", "quote": "", "comments": "" },
-        "concern_f": { "description": "", "concern_category": "", "area": "", "treatment": "", "frequency_interval": "", "quote": "", "comments": "" }
+         "concern_b": { same fields as concern_a },
+         "concern_c": { same fields as concern_a },
+         "concern_d": { same fields as concern_a },
+         "concern_e": { same fields as concern_a },
+         "concern_f": { same fields as concern_a }
       },
       "timeline": [
-         { 
+         {
            "date": "Format as 'MMMM YYYY'. Calculate from the Record Date in your context. If transcript says 'in 2 weeks' add 2 weeks to the Record Date. If no specific date, use the earliest logical date.",
            "treatment": "Treatment name and area in bullet point format",
-           "pretreatment_instructions": "Exact instruction text from the rules below. Empty string if treatment has no instructions."
+           "pretreatment_instructions": "Exact instruction text from the rules below. Empty string if treatment has no instructions.",
+           "concern": "Letter a–f of the concern this step belongs to, or none (see TIMELINE LINK)"
          }
       ],
-      "booking_comments": "Any comments about rebooking, holiday conflicts, or scheduling constraints. Empty string if none."
+      "booking_comments": "Any comments about rebooking, holiday conflicts, or scheduling constraints. Empty string if none.",
+      "patient_events": [ { "name": "", "month": "MMMM YYYY", "avoid_downtime": false } ]
     }
 
     *** STRICT FORMATTING RULES ***
@@ -352,7 +419,7 @@ const SOAP_PROMPTS = {
     - QUOTE: Always include treatment name AND area. More expensive option listed first. Use $ only, never £.
     - TIMELINE: Chronological order, earliest date first. Format dates as "MMMM YYYY".
     - DO NOT repeat the treatment plan content. Each concern appears once only.
-    - In the "description" and "treatment" fields, never write "facial movement lines" or "facial muscle movement" — always write "expression lines". This restriction does NOT apply to "concern_category", which must always be copied exactly as "Expression Lines / Muscle Movement".
+    - In the "description" and "treatment" fields, never write "facial movement lines" or "facial muscle movement" — always write "expression lines". "concern_category" must always be copied exactly from the 9 category names.
 
     *** EXACT TREATMENT NAME REPLACEMENTS (apply everywhere) ***
     - Exilis / eSkin tightening / eSkin tight → "eSkin Tight" (never use the word Exilis)
@@ -733,6 +800,25 @@ function callGeminiComplex(transcript, dateContext) {
         Use "" for any field not mentioned. Do NOT guess.
   `;
 
+    // One concern. The category MUST be one of the 9 (or "None" for an unused slot).
+  const concernSchema = {
+    type: "OBJECT",
+    properties: {
+      description: { type: "STRING" },
+      concern_category: { type: "STRING", enum: PLAN_CONCERNS.concat(["None"]) },
+      area: { type: "STRING" },
+      treatment: { type: "STRING" },
+      frequency_interval: { type: "STRING" },
+      quote: { type: "STRING" },
+      comments: { type: "STRING" },
+      pattern: { type: "STRING", enum: ["course", "maintenance", "once", "unknown"] },
+      sessions: { type: "INTEGER" },
+      interval_weeks: { type: "INTEGER" },
+    },
+    required: ["description", "concern_category", "area", "treatment", "frequency_interval", "quote", "comments",
+      "pattern", "sessions", "interval_weeks"],
+  };
+
   const generationConfig = {
     temperature: 0.3,
     maxOutputTokens: 65536,
@@ -752,15 +838,37 @@ function callGeminiComplex(transcript, dateContext) {
             concerns: {
               type: "OBJECT",
               properties: {
-                concern_a: { type: "OBJECT", properties: { description: { type: "STRING" }, concern_category: { type: "STRING" }, area: { type: "STRING" }, treatment: { type: "STRING" }, frequency_interval: { type: "STRING" }, quote: { type: "STRING" }, comments: { type: "STRING" } }, required: ["description", "concern_category", "area", "treatment", "frequency_interval", "quote", "comments"] },
-                concern_b: { type: "OBJECT", properties: { description: { type: "STRING" }, concern_category: { type: "STRING" }, area: { type: "STRING" }, treatment: { type: "STRING" }, frequency_interval: { type: "STRING" }, quote: { type: "STRING" }, comments: { type: "STRING" } }, required: ["description", "concern_category", "area", "treatment", "frequency_interval", "quote", "comments"] },
-                concern_c: { type: "OBJECT", properties: { description: { type: "STRING" }, concern_category: { type: "STRING" }, area: { type: "STRING" }, treatment: { type: "STRING" }, frequency_interval: { type: "STRING" }, quote: { type: "STRING" }, comments: { type: "STRING" } }, required: ["description", "concern_category", "area", "treatment", "frequency_interval", "quote", "comments"] },
-                concern_d: { type: "OBJECT", properties: { description: { type: "STRING" }, concern_category: { type: "STRING" }, area: { type: "STRING" }, treatment: { type: "STRING" }, frequency_interval: { type: "STRING" }, quote: { type: "STRING" }, comments: { type: "STRING" } }, required: ["description", "concern_category", "area", "treatment", "frequency_interval", "quote", "comments"] },
-                concern_e: { type: "OBJECT", properties: { description: { type: "STRING" }, concern_category: { type: "STRING" }, area: { type: "STRING" }, treatment: { type: "STRING" }, frequency_interval: { type: "STRING" }, quote: { type: "STRING" }, comments: { type: "STRING" } }, required: ["description", "concern_category", "area", "treatment", "frequency_interval", "quote", "comments"] },
-                concern_f: { type: "OBJECT", properties: { description: { type: "STRING" }, concern_category: { type: "STRING" }, area: { type: "STRING" }, treatment: { type: "STRING" }, frequency_interval: { type: "STRING" }, quote: { type: "STRING" }, comments: { type: "STRING" } }, required: ["description", "concern_category", "area", "treatment", "frequency_interval", "quote", "comments"] }
+                concern_a: concernSchema, concern_b: concernSchema, concern_c: concernSchema,
+                concern_d: concernSchema, concern_e: concernSchema, concern_f: concernSchema,
               },
               required: ["concern_a", "concern_b", "concern_c", "concern_d", "concern_e", "concern_f"]
             },
+            timeline: {
+              type: "ARRAY",
+              items: {
+                type: "OBJECT",
+                properties: {
+                  date: { type: "STRING" },
+                  treatment: { type: "STRING" },
+                  pretreatment_instructions: { type: "STRING" },
+                  concern: { type: "STRING", enum: ["a", "b", "c", "d", "e", "f", "none"] },
+                },
+                required: ["date", "treatment", "pretreatment_instructions", "concern"]
+              }
+            },
+            booking_comments: { type: "STRING" },
+            patient_events: {
+              type: "ARRAY",
+              items: {
+                type: "OBJECT",
+                properties: { name: { type: "STRING" }, month: { type: "STRING" }, avoid_downtime: { type: "BOOLEAN" } },
+                required: ["name", "month", "avoid_downtime"]
+              }
+            }
+          },
+          required: ["intent", "discussion_notes", "concerns", "timeline", "booking_comments", "patient_events"]
+        },
+        
             timeline: { type: "ARRAY", items: { type: "OBJECT", properties: { date: { type: "STRING" }, treatment: { type: "STRING" }, pretreatment_instructions: { type: "STRING" } }, required: ["date", "treatment", "pretreatment_instructions"] } },
             booking_comments: { type: "STRING" }
           },
@@ -1004,7 +1112,8 @@ function formatSoapFromJSON(data) {
 
           if (treat || desc) {
             hasPlan = true;
-            const cat = String(c.concern_category || "").trim();
+            let cat = String(c.concern_category || "").trim();
+            if (/^none$/i.test(cat)) cat = "";
             const heading = (cat && desc) ? `${cat} — ${desc}` : (cat || desc);
             planText += `${k.toUpperCase().replace('_', ' ')}: ${heading}\n`;
             if (String(c.area || "").trim()) planText += `AREA: ${String(c.area).trim()}\n`;
@@ -1255,4 +1364,13 @@ function applyTranscriptCorrections_(text) {
   let cleaned = text;
   rules.forEach(function (r) { cleaned = cleaned.replace(r.pattern, r.replace); });
   return cleaned;
+}
+
+// Run from the editor to check the new plan fields (one Gemini call). Look at Executions → Logs.
+function testPlanSchema() {
+  const t = "Clinician: For your frown lines we'll keep doing Wrinkle Relaxer every three to four months, $395. " +
+    "For the acne scars on your cheeks I'd do Skin Needling, three sessions a month apart, $450 each. " +
+    "Patient: Great, I've got my daughter's wedding in March so I don't want any redness then.";
+  const r = cleanSoapJson_(callGeminiComplex(t, new Date()));
+  console.log(JSON.stringify(r.treatment_plan, null, 2));
 }

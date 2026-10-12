@@ -152,6 +152,18 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+match /inv_open/{id} {
+  allow read: if isStaff();
+  allow create: if isStaff()
+    && request.resource.data.openedByUid == request.auth.uid
+    && request.resource.data.status in ['open', 'finished'];
+  allow update: if isStaff()
+    && resource.data.status == 'open'
+    && request.resource.data.productId == resource.data.productId
+    && request.resource.data.openedByUid == resource.data.openedByUid;
+  allow delete: if false;
+}
+
     // Requests to release stock from JT storage to the Shelf (Dr Teh approves)
     match /inv_releases/{id} {
       allow read: if isStaff();
@@ -669,6 +681,12 @@ service cloud.firestore {
         && request.resource.data.updatedByUid == request.auth.uid;
       allow delete: if false;
     }
+
+
+    match /ui_settings/{id} {
+  allow read: if isStaff();
+  allow write: if isAdmin();
+}
 
     // Staff tasks / reminders
     match /staff-task-list/{taskId} {
