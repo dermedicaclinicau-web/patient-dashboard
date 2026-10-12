@@ -3913,3 +3913,30 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 /* Bulk "Add other suppliers": search box and hidden rows */
 .inv-supfind { width: 100%; margin-bottom: .5rem; }
 .inv-supticks [hidden] { display: none; }
+
+/* ---------- Recording bar: whose recording ---------- */
+.rec-pt { display: inline-flex; align-items: center; gap: .45rem; padding: .25rem .7rem .25rem .25rem; border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, .55); background: rgba(255, 255, 255, .92); color: #101828; font: inherit;
+  font-weight: 700; font-size: .9rem; cursor: pointer; max-width: 260px; flex: none; }
+.rec-pt:hover { background: #fff; box-shadow: 0 2px 8px rgba(16, 24, 40, .15); }
+.rec-av { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; flex: none;
+  background: hsl(var(--h, 200) 55% 45%); color: #fff; font-size: .72rem; font-weight: 700; }
+.rec-pt-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rec-warn { display: block; margin-top: .2rem; font-size: .8rem; font-weight: 700; color: #7a2e0e;
+  background: #fef0c7; border-radius: 6px; padding: .15rem .45rem; width: fit-content; }
+
+/* ---------- Dashboard: appointments & notes ---------- */
+.md-appt { display: grid; gap: .35rem; }
+.md-chips { display: flex; flex-wrap: wrap; gap: .35rem; padding-left: .25rem; }
+.md-chip { font: inherit; font-size: .75rem; font-weight: 600; border-radius: 999px; padding: .15rem .55rem;
+  background: var(--surface-2); color: var(--muted, #667085); border: 0; }
+.md-chip.is-ok { background: #ecfdf3; color: #027a48; }
+.md-chip.is-warn { background: #fffaeb; color: #b54708; cursor: pointer; }
+.md-chip.is-warn:hover { background: #fef0c7; }
+.md-sub { margin-top: 1rem; padding-top: .85rem; border-top: 1px solid var(--border, #e5e7eb); }
+.md-sub h4 { margin: 0 0 .5rem; font-size: .9rem; }
+.md-sub h4 em { font-style: normal; font-size: .72rem; background: #fffaeb; color: #b54708; border-radius: 999px; padding: .1rem .45rem; margin-left: .3rem; }
+.md-notes button { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: .75rem; align-items: center;
+  text-align: left; background: none; border: 0; padding: .45rem .25rem; font: inherit; cursor: pointer; border-radius: 8px; }
+.md-notes button:hover { background: var(--surface-2); }
+.md-notes small { color: var(--primary); font-weight: 600; }

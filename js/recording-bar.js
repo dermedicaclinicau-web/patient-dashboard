@@ -3,7 +3,7 @@ import {
   cancelRecording, uploadRecovered, discardRecording, retryUpload, dismiss, checkForUnfinished,
   retryProcessing,
 } from "./recorder.js";
-import { escapeHtml, showToast } from "./utils.js";
+import { escapeHtml, showToast, getInitials, hueFromString } from "./utils.js";
 import { showSoapPanel } from "./soap-panel.js";
 
 const svg = (p) =>
@@ -32,9 +32,20 @@ const fmt = (ms) => {
   return h ? `${h}:${mm}:${String(s).padStart(2, "0")}` : `${mm}:${String(s).padStart(2, "0")}`;
 };
 
-const patientLink = (p) => p
-  ? `<a href="#/patient/${encodeURIComponent(p.id)}">${escapeHtml(p.name)}</a>`
-  : "patient";
+// States where a recording belongs to one patient (so the bar must say whose)
+const OWNED = ["recording", "paused", "stopping", "uploading", "processing", "ready", "error", "failed", "recovered"];
+
+// Initials + name: opens that patient's page from anywhere in the app
+const patientChip = (p) => (p ? `
+  <button type="button" class="rec-pt" data-rec="open" title="Open ${escapeHtml(p.name)}'s page">
+    <span class="rec-av" style="--h:${hueFromString(p.name)}">${escapeHtml(getInitials(p.name))}</span>
+    <span class="rec-pt-name">${escapeHtml(p.name)}</span>
+  </button>` : "");
+
+// On a different patient's page than the one this recording is for
+const otherPatientWarning = (s) => (context && s.patient && context.id !== s.patient.id && OWNED.includes(s.status)
+  ? `<span class="rec-warn">⚠ You're viewing ${escapeHtml(context.name)}. This recording is for ${escapeHtml(s.patient.name)}.</span>`
+  : "");
 
 export function initRecordingBar(currentStaff) {
   staff = currentStaff;
@@ -86,6 +97,8 @@ function render(s) {
 
   let html = "";
   let cls = "";
+  const chip = patientChip(s.patient);
+  const warn = otherPatientWarning(s);
 
   switch (s.status) {
     case "idle":
@@ -93,7 +106,8 @@ function render(s) {
       cls = "is-idle";
       html = `
         <span class="rec-icon">${ICONS.mic}</span>
-        <span class="rec-text"><strong>Ready to record</strong><small>${escapeHtml(context.name)}</small></span>
+        <span class="rec-text"><strong>Ready to record · ${escapeHtml(context.name)}</strong>
+          <small>The recording is saved to this patient.</small></span>
         <label class="rec-consent">
           <input type="checkbox" data-rec-consent ${consent ? "checked" : ""} />
           Recording consent on file (signed at check-in)
@@ -109,8 +123,9 @@ function render(s) {
       cls = paused ? "is-paused" : "is-recording";
       html = `
         <span class="rec-dot"></span>
-        <span class="rec-text"><strong>${paused ? "Paused" : "Recording"} · ${patientLink(s.patient)}</strong>
-          <small>Started by ${escapeHtml(s.staff ? s.staff.name : "")}</small></span>
+        ${chip}
+        <span class="rec-text"><strong>${paused ? "Paused" : "Recording"}</strong>
+          <small>Started by ${escapeHtml(s.staff ? s.staff.name : "")}</small>${warn}</span>
         <span class="rec-timer">${fmt(s.elapsedMs)}</span>
         <span class="rec-actions">
           ${paused
@@ -124,16 +139,16 @@ function render(s) {
 
     case "stopping":
       cls = "is-busy";
-      html = `<span class="rec-icon">${ICONS.upload}</span>
-        <span class="rec-text"><strong>Finishing recording…</strong><small>${patientLink(s.patient)}</small></span>`;
+      html = `<span class="rec-icon">${ICONS.upload}</span>${chip}
+        <span class="rec-text"><strong>Finishing recording…</strong><small>Saving the last few seconds.</small>${warn}</span>`;
       break;
 
     case "uploading":
       cls = "is-busy";
       html = `
-        <span class="rec-icon">${ICONS.upload}</span>
-        <span class="rec-text"><strong>Uploading recording · ${patientLink(s.patient)}</strong>
-          <small>${fmt(s.elapsedMs)} recorded · please keep this tab open</small></span>
+        <span class="rec-icon">${ICONS.upload}</span>${chip}
+        <span class="rec-text"><strong>Uploading recording</strong>
+          <small>${fmt(s.elapsedMs)} recorded · please keep this tab open</small>${warn}</span>
         <span class="rec-progress"><span style="width:${Math.round(s.progress * 100)}%"></span></span>
         <span class="rec-pct">${Math.round(s.progress * 100)}%</span>`;
       break;
@@ -141,26 +156,20 @@ function render(s) {
     case "done":
       cls = "is-done";
       html = `
-        <span class="rec-icon">${ICONS.check}</span>
-        <span class="rec-text"><strong>Recording uploaded · ${patientLink(s.patient)}</strong>
-          <small>${fmt(s.elapsedMs)} saved securely. Clinical notes generation is coming in the next step.</small></span>
+        <span class="rec-icon">${ICONS.check}</span>${chip}
+        <span class="rec-text"><strong>Recording uploaded</strong><small>${fmt(s.elapsedMs)} saved securely.</small></span>
         <span class="rec-actions"><button type="button" class="rec-btn" data-rec="dismiss">Done</button></span>`;
       break;
 
-    case "error":
-          case "processing": {
+    case "processing": {
       cls = "is-busy";
-      const stages = [
-        ["upload", "Uploaded"],
-        ["transcribe", "Transcribing"],
-        ["notes", "Writing notes"],
-      ];
+      const stages = [["upload", "Uploaded"], ["transcribe", "Transcribing"], ["notes", "Writing notes"]];
       const current = (s.stage === "writing" || s.stage === "transcribed") ? 2 : s.stage === "transcribing" ? 1 : 0;
       const label = current === 2 ? "Writing clinical notes…" : current === 1 ? "Transcribing the consultation…" : "Starting processing…";
       html = `
-        <span class="rec-spin"></span>
-        <span class="rec-text"><strong>${label} · ${patientLink(s.patient)}</strong>
-          <small>This usually takes under a minute. You can keep working.</small></span>
+        <span class="rec-spin"></span>${chip}
+        <span class="rec-text"><strong>${label}</strong>
+          <small>This usually takes under a minute. You can keep working.</small>${warn}</span>
         <span class="rec-steps">${stages.map(([, name], i) =>
           `<span class="rec-step ${i < current ? "done" : i === current ? "active" : ""}">${name}</span>`).join("")}</span>`;
       break;
@@ -173,9 +182,9 @@ function render(s) {
         showSoapPanel(s.transcriptId, { mode: "min" }); // the notes tab slides out on the right
       }
       html = `
-        <span class="rec-icon">${ICONS.check}</span>
-        <span class="rec-text"><strong>Clinical notes ready · ${patientLink(s.patient)}</strong>
-          <small>Saved as Draft. Review and save them as Reviewed when you're happy.</small></span>
+        <span class="rec-icon">${ICONS.check}</span>${chip}
+        <span class="rec-text"><strong>Clinical notes ready</strong>
+          <small>Saved as Draft. Review and save them as Reviewed when you're happy.</small>${warn}</span>
         <span class="rec-actions">
           <button type="button" class="rec-btn go" data-rec="review">Review notes</button>
           <button type="button" class="rec-btn" data-rec="dismiss">Done</button>
@@ -185,19 +194,21 @@ function render(s) {
     case "failed":
       cls = "is-error";
       html = `
-        <span class="rec-icon">${ICONS.upload}</span>
-        <span class="rec-text"><strong>Couldn't create notes · ${patientLink(s.patient)}</strong>
-          <small>${escapeHtml(s.error)} The recording is saved securely, so nothing is lost.</small></span>
+        <span class="rec-icon">${ICONS.upload}</span>${chip}
+        <span class="rec-text"><strong>Couldn't create notes</strong>
+          <small>${escapeHtml(s.error)} The recording is saved securely, so nothing is lost.</small>${warn}</span>
         <span class="rec-actions">
           <button type="button" class="rec-btn go" data-rec="retry-process">Try again</button>
           <button type="button" class="rec-btn" data-rec="dismiss-failed">Hide</button>
         </span>`;
       break;
+
+    case "error":
       cls = "is-error";
       html = `
-        <span class="rec-icon">${ICONS.upload}</span>
-        <span class="rec-text"><strong>Upload didn't finish · ${patientLink(s.patient)}</strong>
-          <small>${escapeHtml(s.error)} The recording is safe on this device.</small></span>
+        <span class="rec-icon">${ICONS.upload}</span>${chip}
+        <span class="rec-text"><strong>Upload didn't finish</strong>
+          <small>${escapeHtml(s.error)} The recording is safe on this device.</small>${warn}</span>
         <span class="rec-actions">
           <button type="button" class="rec-btn go" data-rec="retry">Try again</button>
           <button type="button" class="rec-link" data-rec="discard">Discard</button>
@@ -207,9 +218,9 @@ function render(s) {
     case "recovered":
       cls = "is-recovered";
       html = `
-        <span class="rec-icon">${ICONS.mic}</span>
-        <span class="rec-text"><strong>Unfinished recording found · ${patientLink(s.patient)}</strong>
-          <small>${fmt(s.elapsedMs)} saved on this device and not yet uploaded.</small></span>
+        <span class="rec-icon">${ICONS.mic}</span>${chip}
+        <span class="rec-text"><strong>Unfinished recording found</strong>
+          <small>${fmt(s.elapsedMs)} saved on this device and not yet uploaded.</small>${warn}</span>
         <span class="rec-actions">
           <button type="button" class="rec-btn go" data-rec="upload">${ICONS.upload}Upload now</button>
           <button type="button" class="rec-link" data-rec="discard">Discard</button>
@@ -217,13 +228,12 @@ function render(s) {
       break;
   }
 
-  bar.className = `rec-bar ${cls}`.trim();
+  bar.className = `rec-bar ${cls}${warn ? " has-warn" : ""}`.trim();
   bar.innerHTML = html;
   bar.hidden = !html;
   // Lets the sticky patient header and sidebar sit below the bar
   document.documentElement.style.setProperty("--recbar-h", bar.hidden ? "0px" : `${bar.offsetHeight}px`);
 }
-
 async function onClick(e) {
   const btn = e.target.closest("[data-rec]");
   if (!btn) return;
@@ -260,12 +270,11 @@ async function onClick(e) {
       bar.hidden = true;
       document.documentElement.style.setProperty("--recbar-h", "0px");
     } else if (action === "open") {
-      const id = getState().patient && getState().patient.id;
-      if (!id) return;
-      const target = `#/patient/${encodeURIComponent(id)}`;
+      const p = getState().patient;
+      if (!p || !p.id) return;
+      const target = `#/patient/${encodeURIComponent(p.id)}`;
       if (location.hash === target) window.dispatchEvent(new HashChangeEvent("hashchange")); // reload the page's data
       else location.hash = target;
-      dismiss();
     }
   } catch (err) {
     console.error("Recording action failed:", err);

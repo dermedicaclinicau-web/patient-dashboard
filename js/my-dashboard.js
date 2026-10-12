@@ -8,7 +8,9 @@ import {
 } from "./inventory-api.js";
 import { listMySubmissions } from "./form-submissions.js";
 import { db } from "./firebase-config.js";
-import { doc, getDoc, getDocs, collection, query, where } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { doc, getDoc, getDocs, collection, query, where, FieldPath } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { showSoapPanel } from "./soap-panel.js";
+import { parseRecordDate } from "./transcripts.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(1));
@@ -31,7 +33,7 @@ const card = (title, inner, cls = "", link = "") => `
   </section>`;
 
 const DASH_CARDS = [
-  ["attention", "Needs my attention"], ["appts", "My appointments today"], ["tasks", "Open staff tasks"],
+  ["attention", "Needs my attention"], ["appts", "My appointments & notes"], ["tasks", "Open staff tasks"],
   ["kit", "My kit"], ["records", "My records"], ["usage", "What I used"],
   ["requests", "My requests"], ["stock", "Stock I use"], ["overview", "Clinic overview"],
 ];
@@ -60,6 +62,34 @@ async function dueTasks(key) {
     .filter((t) => t.dueDate && t.dueDate <= key)
     .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
 }  
+
+// My consultation notes (from recordings), newest first. Reviewed or still a Draft.
+async function myNotes(staff) {
+  const name = String((staff && staff.name) || "").trim();
+  if (!name) return [];
+  const snap = await getDocs(query(collection(db, "appointment_transcripts"), where(new FieldPath("Staff Name"), "==", name)));
+  return snap.docs.map((d) => {
+    const x = d.data() || {};
+    return {
+      id: d.id,
+      patientName: String(x["Patient Name"] || ""),
+      patientId: String(x["Patient ID"] || ""),
+      patientDocId: String(x["Patient Doc ID"] || ""),
+      reviewed: /^reviewed$/i.test(String(x.Status || "")),
+      date: parseRecordDate(x["Record Date and Time"]),
+      dateText: String(x["Record Date and Time"] || ""),
+    };
+  }).sort((a, b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0));
+}
+
+// Forms saved today (any staff), to show which of my patients have their forms done
+async function formsToday(key) {
+  const snap = await getDocs(query(collection(db, "form_submissions"), where("recordDate", "==", key)));
+  return snap.docs.map((d) => {
+    const x = d.data() || {};
+    return { patientId: String(x.patientId || ""), pttId: String(x.patientPttId || ""), name: String(x.patientName || "") };
+  });
+}
 
 export async function mountMyDashboard(container, { staff } = {}) {
   const first = String((staff && staff.name) || "").split(" ")[0];
@@ -94,7 +124,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     const hidden = readHidden(me0);
     const show = (k) => can(`dash.${k}`) && !hidden.has(k);
     const todayKey = dayKey();
-    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts] = await Promise.all([
+    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts, notes, formsT] = await Promise.all([
       safe(listProducts(), []),
       safe(listAllLots(), []),
       safe(listKits(), []),
@@ -111,6 +141,8 @@ export async function mountMyDashboard(container, { staff } = {}) {
       show("tasks") ? safe(dueTasks(todayKey), []) : [],
       canReport ? safe(listCounts({ openOnly: true }), []) : [],
       canReport ? safe(listShortAll(), []) : [],
+      show("appts") ? safe(myNotes(staff), []) : [],
+      show("appts") ? safe(formsToday(todayKey), []) : [],
     ]);
     if (!root.isConnected) return;
 
@@ -143,6 +175,15 @@ export async function mountMyDashboard(container, { staff } = {}) {
       const shortOpen = allShorts.filter((u) => !u.resolved).length;
       if (shortOpen) att.push({ tone: "bad", text: `${shortOpen} saved short record${shortOpen === 1 ? "" : "s"} to resolve`,
         href: "#/reports/short", act: "Resolve" });
+    }
+    // My consultation notes still in Draft (oldest first, so the longest-waiting opens first)
+    const drafts = notes.filter((n) => !n.reviewed);
+    if (drafts.length) {
+      const oldest = drafts[drafts.length - 1];
+      att.push({ tone: "warn", notesId: oldest.id,
+        text: `${drafts.length} consultation note${drafts.length === 1 ? "" : "s"} to review${
+          drafts.length > 1 ? ` (oldest: ${oldest.patientName || "patient"}${oldest.date ? `, ${shortDay(oldest.date)}` : ""})` : ` (${oldest.patientName || "patient"})`}`,
+        act: "Review" });
     }
     // My kit: lots due today that nobody has counted yet
     if (canKit) {
@@ -182,7 +223,9 @@ export async function mountMyDashboard(container, { staff } = {}) {
     }));
     const attentionHtml = card("Needs my attention", att.length
       ? `<ul class="md-att">${att.map((a) => `<li class="is-${a.tone}"><span>${esc(a.text)}</span>
-          <a class="lh-btn" href="${a.href}">${esc(a.act)}</a></li>`).join("")}</ul>`
+          ${a.notesId
+            ? `<button type="button" class="lh-btn" data-notes="${esc(a.notesId)}">${esc(a.act)}</button>`
+            : `<a class="lh-btn" href="${a.href}">${esc(a.act)}</a>`}</li>`).join("")}</ul>`
       : `<p class="md-clear">${svg(ICON.ok)} Nothing needs you right now.</p>`, "md-wide");
     /* ---------- My kit ---------- */
     const kitProducts = products.filter((p) => p.active && isKitProduct(p));
@@ -272,11 +315,52 @@ export async function mountMyDashboard(container, { staff } = {}) {
         <a class="md-tile${n ? ` is-${tone}` : ""}" href="${href}"><strong>${n}</strong><span>${esc(label)}</span></a>`).join("")}</div>`, "md-wide");
     }
 
-    /* ---------- My appointments today ---------- */
-    const apptHtml = card("My appointments today", appts.length
-      ? `<ul class="md-list md-appts">${appts.map((a) => `<li><a href="#/calendar">
-          <strong>${esc(a.time || "")}</strong><span>${esc(a.patientName || "")}</span><small>${esc((a.services || []).join(", "))}</small></a></li>`).join("")}</ul>`
-      : '<p class="tb-none">No appointments for you today.</p>', "", '<a class="md-link" href="#/calendar">Open Calendar</a>');
+    /* ---------- My appointments & notes ---------- */
+    const low = (s) => String(s || "").trim().toLowerCase();
+    const nm = (s) => low(s).replace(/\s+/g, " ");
+    // Same patient: by ID when the appointment has one, otherwise (or as well) by exact name
+    const samePatient = (a, ids, name) => {
+      const aid = low(a.patientId);
+      return (aid && ids.map(low).includes(aid)) || (!!nm(a.patientName) && nm(a.patientName) === nm(name));
+    };
+    const nowMin = new Date().getHours() * 60 + new Date().getMinutes();
+    const todayNotes = notes.filter((n) => n.date && dayKey(n.date) === todayKey);
+
+    const apptRow = (a) => {
+      const forms = formsT.filter((f) => samePatient(a, [f.patientId, f.pttId], f.name));
+      const note = todayNotes.find((n) => samePatient(a, [n.patientId, n.patientDocId], n.patientName));
+      const past = Number.isFinite(Number(a.sortMinutes)) && Number(a.sortMinutes) + 15 < nowMin;
+      const chips = [
+        forms.length
+          ? `<span class="md-chip is-ok">✓ ${forms.length} form${forms.length === 1 ? "" : "s"}</span>`
+          : '<span class="md-chip">No forms yet</span>',
+        note
+          ? (note.reviewed
+            ? '<span class="md-chip is-ok">✓ Notes reviewed</span>'
+            : `<button type="button" class="md-chip is-warn" data-notes="${esc(note.id)}">Notes to review</button>`)
+          : past ? '<span class="md-chip">No notes recorded</span>' : "",
+      ].join("");
+      const href = a.patientId ? `#/patient/${encodeURIComponent(a.patientId)}` : "#/calendar";
+      return `<li class="md-appt">
+        <a href="${href}"><strong>${esc(a.time || "")}</strong><span>${esc(a.patientName || "")}</span>
+          <small>${esc((a.services || []).join(", "))}</small></a>
+        <div class="md-chips">${chips}</div></li>`;
+    };
+
+    const draftList = notes.filter((n) => !n.reviewed);
+    const notesBlock = draftList.length ? `
+      <div class="md-sub">
+        <h4>Notes to review <em>${draftList.length}</em></h4>
+        <ul class="md-list md-notes">${draftList.slice(0, 6).map((n) => `<li>
+          <button type="button" data-notes="${esc(n.id)}"><strong>${esc(n.patientName || "Patient")}</strong>
+            <span>${esc(n.date ? shortDay(n.date) : n.dateText)}</span><small>Review →</small></button></li>`).join("")}</ul>
+        ${draftList.length > 6 ? `<small class="muted">and ${draftList.length - 6} more</small>` : ""}
+      </div>` : "";
+
+    const apptHtml = card("My appointments & notes", `
+      ${appts.length ? `<ul class="md-list md-appts">${appts.map(apptRow).join("")}</ul>` : '<p class="tb-none">No appointments for you today.</p>'}
+      ${notesBlock || (notes.length ? '<p class="md-clear md-sub">✓ All your consultation notes are reviewed.</p>' : "")}`,
+      "", '<a class="md-link" href="#/calendar">Open Calendar</a>');
 
     /* ---------- Open staff tasks ---------- */
     const tasksHtml = card("Open staff tasks", tasks.length
@@ -295,6 +379,8 @@ export async function mountMyDashboard(container, { staff } = {}) {
   }
   
   root.addEventListener("click", (e) => {
+    const nb = e.target.closest("[data-notes]");
+    if (nb) { showSoapPanel(nb.dataset.notes, { mode: "open" }); return; }
     if (e.target.closest('[data-act="refresh"]')) {
       body.innerHTML = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
       load();
