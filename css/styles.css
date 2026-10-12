@@ -3898,3 +3898,8 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
   box-shadow: 0 6px 18px rgba(16, 24, 40, .1); }
 .inv-bulk strong { margin-right: .35rem; }
 .inv-bulk[hidden] { display: none; }
+
+/* Bulk "Add other suppliers": a scrollable tick list */
+.inv-supticks { display: grid; gap: .35rem; max-height: 46vh; overflow: auto; padding: .6rem .75rem;
+  border: 1px solid var(--border, #e5e7eb); border-radius: 10px; background: var(--surface-2); }
+.inv-supticks .fe-check { margin: 0; }

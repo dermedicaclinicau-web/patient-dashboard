@@ -231,7 +231,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       ${canManage ? `<div class="inv-bulk" data-role="bulk" hidden>
         <strong data-role="selcount"></strong>
         <button type="button" class="lh-btn is-primary" data-bulk="main">Set main supplier</button>
-        <button type="button" class="lh-btn" data-bulk="alt">Add other supplier</button>
+        <button type="button" class="lh-btn" data-bulk="alt">Add other suppliers</button>
         <button type="button" class="lh-btn" data-bulk="remove">Remove a supplier</button>
         <button type="button" class="lh-btn" data-bulk="category">Change category</button>
         <button type="button" class="lh-btn" data-bulk="active">Make active</button>
@@ -341,12 +341,16 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       ? st.suppliers.filter((s) => list.some((p) => suppliesProduct(p, s.id)))
       : st.suppliers.filter((s) => s.active);
     if (kind === "remove" && !choices.length) { showToast("None of the selected products have a supplier yet."); return; }
+    const multi = kind === "alt"; // tick several suppliers at once
 
-    // What each action changes on one product (null = nothing to do)
+    // What each action changes on one product (null = nothing to do). For "alt", v is a list of supplier ids.
     const changeFor = (p, v, keep) => {
       if (kind === "category") return p.category === v ? null : { category: v };
       const alts = (p.altSuppliers || []).map((a) => ({ ...a }));
-      if (kind === "alt") return suppliesProduct(p, v) ? null : { altSuppliers: [...alts, { supplierId: v }] };
+      if (kind === "alt") {
+        const add = v.filter((id) => !suppliesProduct(p, id));
+        return add.length ? { altSuppliers: [...alts, ...add.map((id) => ({ supplierId: id }))] } : null;
+      }
       if (kind === "main") {
         if (p.supplierId === v) return null;
         const was = alts.find((a) => a.supplierId === v);
@@ -377,21 +381,31 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       };
     };
 
-    const titles = { main: "Set the main supplier", alt: "Add another supplier", remove: "Remove a supplier", category: "Change category" };
+    const titles = { main: "Set the main supplier", alt: "Add other suppliers", remove: "Remove a supplier", category: "Change category" };
     const help = {
       main: "The usual supplier for these products. The cost stays as it is, unless this supplier's own price is already on file.",
-      alt: "Added to each product's other suppliers, so it can be chosen when ordering. Add their codes and prices later in each product.",
+      alt: "Tick every supplier these products can also be ordered from. Add their codes and prices later in each product.",
       remove: "Taken off these products. Where it's the main supplier, the first other supplier becomes the main one.",
       category: "Moves the products to this category.",
     };
+    const already = (sid) => list.filter((p) => suppliesProduct(p, sid)).length;
+    const picker = kind === "category"
+      ? `<label class="lh-field"><span class="lh-label">Category</span><select class="fb-select" name="v">${INV_CATEGORIES.map((c) =>
+          `<option value="${c.key}">${esc(c.label)}</option>`).join("")}</select></label>`
+      : multi
+        ? `<div class="lh-field"><span class="lh-label">Suppliers</span>
+            <div class="inv-supticks">${choices.map((s) => {
+              const n = already(s.id);
+              return `<label class="fe-check"><input type="checkbox" name="v" value="${esc(s.id)}" /> ${esc(s.name)}${
+                n ? ` <small class="muted">(already on ${n === list.length ? "all" : n})</small>` : ""}</label>`;
+            }).join("")}</div></div>`
+        : `<label class="lh-field"><span class="lh-label">Supplier</span><select class="fb-select" name="v">${choices.map((s) =>
+            `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("")}</select></label>`;
+
     const dlg = openDialog("inv-dlg", `
       <form class="lh-form" novalidate>
         <div class="lh-dialog-head"><h3>${titles[kind]}: ${esc(many)}</h3><p>${help[kind]}</p></div>
-        ${kind === "category"
-          ? `<label class="lh-field"><span class="lh-label">Category</span><select class="fb-select" name="v">${INV_CATEGORIES.map((c) =>
-              `<option value="${c.key}">${esc(c.label)}</option>`).join("")}</select></label>`
-          : `<label class="lh-field"><span class="lh-label">Supplier</span><select class="fb-select" name="v">${choices.map((s) =>
-              `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("")}</select></label>`}
+        ${picker}
         ${kind === "main" ? '<label class="fe-check"><input type="checkbox" name="keep" checked /> Keep their current main supplier as an other supplier</label>' : ""}
         <p class="inv-hint" data-role="preview"></p>
         <p class="lh-error" role="alert" hidden></p>
@@ -402,10 +416,16 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       </form>`);
     const form = dlg.querySelector("form");
     const pv = dlg.querySelector('[data-role="preview"]');
+    const err = dlg.querySelector(".lh-error");
+    const value = () => (multi
+      ? [...form.querySelectorAll('[name="v"]:checked')].map((x) => x.value)
+      : form.elements.v.value);
     const keepOn = () => !form.elements.keep || form.elements.keep.checked;
     const preview = () => {
-      const n = list.filter((p) => changeFor(p, form.elements.v.value, keepOn())).length;
-      pv.textContent = !n ? "Nothing to change: they're already set that way."
+      const v = value();
+      if (multi && !v.length) { pv.textContent = "Tick one or more suppliers."; return; }
+      const n = list.filter((p) => changeFor(p, v, keepOn())).length;
+      pv.textContent = !n ? "Nothing to change: they already have these suppliers."
         : n === list.length ? `All ${n} will change.` : `${n} will change · ${list.length - n} already set that way.`;
     };
     preview();
@@ -415,9 +435,11 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => { if (!busy) dlg.close(); });
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const v = form.elements.v.value;
+      const v = value();
       const keep = keepOn();
+      if (multi && !v.length) { err.textContent = "Tick at least one supplier."; err.hidden = false; return; }
       if (!list.some((p) => changeFor(p, v, keep))) { dlg.close(); return; }
+      err.hidden = true;
       busy = true;
       const btn = form.querySelector('[type="submit"]');
       btn.disabled = true;
@@ -426,7 +448,6 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       dlg.close();
     });
   }
-
   /* ---------- Suppliers ---------- */
   function renderSuppliers() {
     if (!st.suppliers.length) {
