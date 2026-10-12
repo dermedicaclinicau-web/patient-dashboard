@@ -14,6 +14,7 @@ const SKEL = '<div class="skeleton" style="height:260px;border-radius:14px"></di
 const LOC = { shelf: "Shelf", jt: "JT storage" };
 const when = (d) => (d && !isNaN(d) ? d.toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "");
 const day = (d) => (d && !isNaN(d) ? d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "");
+const niceKey = (k) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(k || ""); return m ? day(new Date(+m[1], +m[2] - 1, +m[3])) : ""; };
 const signed = (n) => (n > 0 ? `+${n}` : String(n));
 const money = (n) => `${n < 0 ? "−" : ""}$${Math.abs(n).toFixed(2)}`;
 const isCounter = () => can("inventory.count") || can("inventory.order") || can("inventory.manage");
@@ -233,6 +234,9 @@ export async function mountInvestigation(container, { id, staff } = {}) {
         <td>${esc(m.by)}</td><td>${esc(m.note)}</td></tr>`;
     }).join("");
     const flags = [
+      ...((e.booked && e.booked.items) || []).map((b) => `<li><strong>Booked, nothing recorded</strong> · ${esc(b.patientName || "Patient")} · ${
+        esc(b.services.join(", "))} · ${esc(b.staff || "")} · ${esc(niceKey(b.dateKey))}${b.time ? ` ${esc(b.time)}` : ""}:
+        no treatment record uses this product.</li>`),
       ...e.short.map((u) => `<li><strong>Saved short</strong> · ${esc(u.patientName || "")} · ${esc(u.formName || "")} · ${esc(u.by || "")} · ${
         esc(day(u.at))}${u.resolved ? " (resolved)" : ""}: stock was used that the system didn't have.</li>`),
       ...e.pos.map((po) => `<li><strong>Delivery not fully put away</strong> · <a href="#/inventory/po/${encodeURIComponent(po.id)}">${esc(po.number)}</a> · ${
@@ -244,7 +248,9 @@ export async function mountInvestigation(container, { id, staff } = {}) {
       ${rows ? `<div class="rp-scroll"><table class="inv-table"><thead><tr><th>When</th><th>What</th><th>Change</th><th>Digital after</th><th>By</th><th>Details</th></tr></thead>
         <tbody>${rows}</tbody></table></div>` : '<p class="tb-none">No stock movements in that time.</p>'}
       ${flags.length ? `<div class="ivx-flags"><strong>Could explain it</strong><ul>${flags.join("")}</ul></div>`
-        : '<p class="ivx-none">Nothing in the records explains the difference.</p>'}`;
+        : '<p class="ivx-none">Nothing in the records explains the difference.</p>'}
+      ${e.booked && !e.booked.configured ? '<p class="muted ivx-note">Bookings aren\'t checked yet. Link services to products in Inventory → Service links.</p>' : ""}
+      ${e.booked && e.booked.failed ? '<p class="muted ivx-note">Bookings couldn\'t be checked this time. Reload to try again.</p>' : ""}`;
   }
 
   root.addEventListener("click", async (e) => {

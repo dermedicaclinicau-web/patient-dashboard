@@ -1782,12 +1782,13 @@ export async function getInvestigation(id) {
 // Step 1: everything since the last count where this spot matched digital (or the last 30 days)
 export async function investigationEvidence(x) {
   const countAt = x.openedAt instanceof Date ? x.openedAt : new Date();
-  const [counts, moves, shorts, pos, rels] = await Promise.all([
+  const [counts, moves, shorts, pos, rels, pSnap] = await Promise.all([
     listCounts({ from: dayKey(new Date(countAt.getTime() - 120 * 864e5)) }).catch(() => []),
     listMoves({ productId: x.productId, max: 1000 }).catch(() => []),
     listShortAll().catch(() => []),
     listPos().catch(() => []),
     listReleases(200).catch(() => []),
+    getDoc(doc(db, "inv_products", x.productId)).catch(() => null),
   ]);
   const sameSpot = (l) => l.productId === x.productId && l.loc === x.loc
     && (!x.batch || (l.batch === x.batch && (l.expiry || "") === (x.expiry || "")));
@@ -1803,8 +1804,16 @@ export async function investigationEvidence(x) {
     note: [m.reason, m.note].filter(Boolean).join(" · "),
   })).filter((e) => e.delta).sort((a, b) => a.at - b.at);
 
+  // Bookings for this product's services before the count day, with no treatment record using it.
+  // Kit products are skipped: what injectors use comes out of their kit, not the Shelf.
+  const isKit = !!(pSnap && pSnap.exists() && pSnap.data().usage === "kit");
+  const booked = isKit ? { configured: true, items: [], kit: true }
+    : await listUnrecordedTreatments({
+      fromKey: dayKey(since), toKey: dayKey(new Date(countAt.getTime() - 864e5)), productId: x.productId,
+    }).catch((err) => { console.warn("Booking check failed:", err); return { configured: true, items: [], failed: true }; });
+
   return {
-    since, sinceCount: last || null, countAt, ledger,
+    since, sinceCount: last || null, countAt, ledger, booked,
     digitalAtSince: x.digital - ledger.reduce((a, e) => a + e.delta, 0),
     short: shorts.filter((u) => inWindow(u.at) && u.lines.some((l) => l.productId === x.productId && Number(l.short) > 0)),
     pos: pos.filter((po) => ["sent", "part"].includes(po.status) && po.lines.some((l) => l.productId === x.productId)),
@@ -1927,4 +1936,97 @@ export async function closeInvestigation(id, { outcome, note = "", cctvChecked =
         note: applied ? `${locLabel(loc)} adjusted by ${applied > 0 ? "+" : ""}${applied}` : "Stock not changed" }),
     });
   });
+}
+
+/* ===================== Services ⇄ products: "booked, but nothing recorded" ===================== */
+// Inventory → Service links says which products each appointment service uses (any one of them counts).
+// A booking for a linked service is flagged when no treatment record for that patient uses one of those
+// products on the day or within 3 days after. Cancelled, no-show and rescheduled bookings are skipped.
+
+const normSvc = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+const normPerson = (s) => String(s || "").toLowerCase().replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim();
+const keyDate = (k) => { const [y, m, d] = String(k).split("-").map(Number); return new Date(y, m - 1, d); };
+const addDaysKey = (k, n) => { const d = keyDate(k); d.setDate(d.getDate() + n); return dayKey(d); };
+const NOT_SEEN_RE = /cancel|no.?show|did not (attend|arrive)|\bdna\b|resched/i;
+export const serviceKey = normSvc;
+
+export async function getServiceLinks() {
+  const s = await getDoc(doc(db, "inv_settings", "service_links"));
+  const list = s.exists() && Array.isArray(s.data().links) ? s.data().links : [];
+  return list.map((l) => ({
+    service: clip(l && l.service, 150),
+    productIds: (Array.isArray(l && l.productIds) ? l.productIds : []).map(String).filter(Boolean).slice(0, 40),
+  })).filter((l) => l.service && l.productIds.length);
+}
+
+export async function saveServiceLinks(links, staff) {
+  const seen = new Set();
+  const clean = (Array.isArray(links) ? links : []).map((l) => ({
+    service: clip(l && l.service, 150),
+    productIds: [...new Set((Array.isArray(l && l.productIds) ? l.productIds : []).map((x) => clip(x, 60)).filter(Boolean))].slice(0, 40),
+  })).filter((l) => l.service && l.productIds.length && !seen.has(normSvc(l.service)) && seen.add(normSvc(l.service))).slice(0, 400);
+  await setDoc(doc(db, "inv_settings", "service_links"), { links: clean, ...stamp(staff) });
+}
+
+// Every appointment between two days (inclusive), each with its dateKey
+export async function appointmentsBetween(fromKey, toKey) {
+  const snap = await getDocs(query(collection(db, "appts_by_day"), where("date", ">=", fromKey), where("date", "<=", toKey)));
+  return snap.docs.flatMap((d) => {
+    const x = d.data() || {};
+    const k = String(x.date || d.id);
+    return (Array.isArray(x.appointments) ? x.appointments : []).map((a) => ({ ...a, dateKey: k }));
+  });
+}
+
+// Services seen in appointments recently, busiest first (for Inventory → Service links)
+export async function listServicesSeen(days = 90) {
+  const appts = await appointmentsBetween(dayKey(new Date(Date.now() - days * 864e5)), dayKey());
+  const m = new Map();
+  appts.forEach((a) => (a.services || []).forEach((s) => {
+    const k = normSvc(s);
+    if (!k) return;
+    const c = m.get(k) || { service: String(s).trim(), n: 0 };
+    c.n++;
+    m.set(k, c);
+  }));
+  return [...m.values()].sort((a, b) => b.n - a.n);
+}
+
+// Bookings with a linked service but no treatment record using one of its products.
+// productId: only bookings whose services use this product. Returns { configured, items }.
+export async function listUnrecordedTreatments({ fromKey, toKey, productId = "" } = {}) {
+  if (!KEY_RE.test(fromKey || "") || !KEY_RE.test(toKey || "") || toKey < fromKey) return { configured: true, items: [] };
+  const links = await getServiceLinks();
+  if (!links.length) return { configured: false, items: [] };
+  const byService = new Map(links.map((l) => [normSvc(l.service), l]));
+  const [appts, usage] = await Promise.all([
+    appointmentsBetween(fromKey, toKey),
+    listUsageBetween(keyDate(fromKey), keyDate(addDaysKey(toKey, 4))),
+  ]);
+  const items = [];
+  appts.forEach((a) => {
+    if (NOT_SEEN_RE.test(String(a.status || ""))) return;
+    const linked = [...new Set((a.services || []).map((s) => byService.get(normSvc(s))).filter(Boolean))];
+    if (!linked.length) return;
+    const pids = new Set(linked.flatMap((l) => l.productIds));
+    if (productId && !pids.has(productId)) return;
+    const aid = String(a.patientId || "").trim().toLowerCase();
+    const an = normPerson(a.patientName);
+    const lastKey = addDaysKey(a.dateKey, 3);
+    const recorded = usage.some((u) => {
+      const same = (aid && String(u.patientId || "").trim().toLowerCase() === aid) || (!!an && normPerson(u.patientName) === an);
+      if (!same) return false;
+      const uk = KEY_RE.test(u.recordDate || "") ? u.recordDate : u.at ? dayKey(u.at) : "";
+      return uk >= a.dateKey && uk <= lastKey && u.lines.some((l) => pids.has(l.productId));
+    });
+    if (!recorded) {
+      items.push({
+        dateKey: a.dateKey, time: a.time || "", sortMinutes: Number(a.sortMinutes) || 0,
+        patientName: a.patientName || "", patientId: a.patientId || "", staff: a.staff || "",
+        services: linked.map((l) => l.service), productIds: [...pids],
+      });
+    }
+  });
+  items.sort((a, b) => b.dateKey.localeCompare(a.dateKey) || a.sortMinutes - b.sortMinutes);
+  return { configured: true, items };
 }

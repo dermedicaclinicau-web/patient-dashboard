@@ -130,7 +130,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     const hidden = readHidden(me0);
     const show = (k) => can(`dash.${k}`) && !hidden.has(k);
     const todayKey = dayKey();
-    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts, notes, formsT, invs] = await Promise.all([
+    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts, notes, formsT, invs, unrec] = await Promise.all([
       safe(listProducts(), []),
       safe(listAllLots(), []),
       safe(listKits(), []),
@@ -150,6 +150,9 @@ export async function mountMyDashboard(container, { staff } = {}) {
       show("appts") ? safe(myNotes(staff), []) : [],
       show("appts") ? safe(formsToday(todayKey), []) : [],
       can("inventory.count") || canOrder || canReport ? safe(listInvestigations({ open: true }), []) : [],
+      show("attention") && (can("consult.record") || canReport)
+        ? safe(listUnrecordedTreatments({ fromKey: dayKey(new Date(Date.now() - 7 * DAY)), toKey: dayKey(new Date(Date.now() - DAY)) }), { items: [] })
+        : { items: [] },
     ]);
     if (!root.isConnected) return;
 
@@ -206,6 +209,28 @@ export async function mountMyDashboard(container, { staff } = {}) {
         if (stuck) att.push({ tone: "info", text: `${stuck} recount${stuck === 1 ? " has" : "s have"} been waiting over a day`,
           href: "#/inventory/investigations", act: "Open" });
       }
+    }
+
+    // Booked for a service that uses stock, but no treatment record used it (the last 7 days, up to yesterday)
+    if (unrec.items.length) {
+      const nmS = (s) => String(s || "").toLowerCase().replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim();
+      const meFull = nmS(staff && staff.name);
+      const meFirst = meFull.split(" ")[0];
+      const isMineAppt = (b) => {
+        const n = nmS(b.staff);
+        return !!n && !!meFull && (n === meFull || n.includes(meFull) || meFull.includes(n) || n.split(" ")[0] === meFirst);
+      };
+      if (can("consult.record")) {
+        const mine = unrec.items.filter(isMineAppt);
+        mine.slice(0, 3).forEach((b) => att.push({
+          tone: "warn", text: `No products recorded for ${b.patientName || "a patient"} (${niceKey(b.dateKey)}, ${b.services.join(", ")})`,
+          href: b.patientId ? `#/patient/${encodeURIComponent(b.patientId)}` : "#/calendar", act: "Open",
+        }));
+        if (mine.length > 3) att.push({ tone: "warn", text: `…and ${mine.length - 3} more of your bookings with no products recorded`,
+          href: canReport ? "#/reports/notrecorded" : "#/calendar", act: "View" });
+      }
+      if (canReport) att.push({ tone: "info", text: `${unrec.items.length} booking${unrec.items.length === 1 ? "" : "s"} in the last week with no products recorded`,
+        href: "#/reports/notrecorded", act: "Review" });
     }
     // My consultation notes still in Draft (oldest first, so the longest-waiting opens first)
     const drafts = notes.filter((n) => !n.reviewed);

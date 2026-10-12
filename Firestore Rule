@@ -217,6 +217,26 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // Investigations: opened by the counter, recounted by someone else (blind), closed by Manage inventory
+    match /inv_investigations/{id} {
+      allow read: if isStaff();
+      allow create: if (can('inventory.count') || invOrder())
+        && request.resource.data.openedByUid == request.auth.uid
+        && request.resource.data.status == 'recount'
+        && request.resource.data.aloneApproved == false;
+      allow update: if (
+          (can('inventory.count') || invOrder())
+          && resource.data.status == 'recount'
+          && request.resource.data.status in ['review', 'closed']
+          && (request.resource.data.status == 'review' || request.resource.data.outcome == 'count-error')
+          && request.resource.data.recount.byUid == request.auth.uid
+          && (request.auth.uid != resource.data.openedByUid || resource.data.get('aloneApproved', false) == true)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+               'status', 'recount', 'outcome', 'outcomeNote', 'closedAt', 'closedBy', 'closedByUid', 'events', 'updatedAt'])
+        ) || invManage();
+      allow delete: if false;
+    }
+    
     // Order requests: anyone with "Request orders" asks; the ordering team handles them
     match /inv_requests/{id} {
       allow read: if can('menu.inventory') || can('inventory.request') || invOrder();
@@ -272,7 +292,8 @@ service cloud.firestore {
     match /notify_outbox/{id} {
       allow create: if isStaff()
         && request.resource.data.keys().hasOnly(['event', 'data', 'status', 'createdAt', 'createdByUid'])
-        && request.resource.data.event in ['stock.arrived', 'count.difference', 'usage.short', 'loan.disputed']
+        && request.resource.data.event in ['stock.arrived', 'count.difference', 'usage.short', 'loan.disputed',
+                                           'investigation.opened', 'investigation.confirmed']
         && request.resource.data.status == 'new'
         && request.resource.data.createdByUid == request.auth.uid;
       allow read, update, delete: if false;

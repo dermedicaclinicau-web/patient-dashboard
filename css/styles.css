@@ -4053,3 +4053,16 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .ivx-cl.is-warn { color: #b45309; }
 .ivx-cl.is-bad { color: #b91c1c; }
 .ivx-cl a { color: inherit; font-weight: 700; }
+
+/* ---------- Service links ---------- */
+.sl-list { display: flex; flex-direction: column; gap: .4rem; }
+.sl-row { display: grid; grid-template-columns: minmax(200px, 1fr) minmax(0, 2fr) auto; align-items: center; gap: .9rem;
+  padding: .7rem 1rem; border: 1px solid var(--border); border-radius: 12px; background: #fff; }
+.sl-row.is-unlinked { background: var(--surface-2); }
+.sl-name { display: flex; flex-direction: column; gap: .1rem; min-width: 0; }
+.sl-name small { font-size: .78rem; color: var(--muted); }
+.sl-prods { display: flex; flex-wrap: wrap; gap: .3rem; }
+.sl-chip { padding: .15rem .55rem; border-radius: 999px; background: var(--primary-soft); color: var(--primary); font-size: .78rem; font-weight: 600; }
+.sl-ticks { max-height: 52vh; }
+.ivx-note { margin: .5rem 0 0; font-size: .82rem; }
+@media (max-width: 760px) { .sl-row { grid-template-columns: 1fr; } }

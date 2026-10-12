@@ -18,13 +18,14 @@ import { mountReceivePo } from "./receive-po.js";
 import { renderKits } from "./inventory-kits.js";
 import { openProductImport, exportProductsCsv } from "./inventory-import.js";
 import { renderNotifications } from "./notifications.js";
+import { renderServiceLinks } from "./service-links.js";
 
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const SEARCH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
 const TABS = [["stock", "Stock"], ["kits", "Kits"], ["investigations", "Investigations"], ["requests", "Requests"], ["orders", "Purchase orders"],
-  ["products", "Products"], ["suppliers", "Suppliers"], ["activity", "Activity"], ["notifications", "Notifications"]];
+  ["products", "Products"], ["services", "Service links"], ["suppliers", "Suppliers"], ["activity", "Activity"], ["notifications", "Notifications"]];
 const niceDate = (key) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
@@ -96,7 +97,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       </div>` : ""}
     </div>
     <nav class="pt-tabs inv-tabs" aria-label="Inventory">${TABS.filter(([k]) => (k !== "kits" || showKits)
-      && (k !== "notifications" || canManage) && (k !== "investigations" || showInv)).map(([k, l]) =>
+      && (k !== "notifications" || canManage) && (k !== "services" || canManage) && (k !== "investigations" || showInv)).map(([k, l]) =>
       `<a href="#/inventory/${k}"${k === tab ? ' class="active" aria-current="page"' : ""}>${l}${
         k === "requests" ? ' <em class="inv-tabcount" data-role="reqcount" hidden></em>' : ""}${
         k === "investigations" ? ' <em class="inv-tabcount" data-role="ivxcount" hidden></em>' : ""}</a>`).join("")}</nav>
@@ -172,6 +173,10 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     if (tab === "stock") renderStock();
     else if (tab === "kits") renderKits(body, { staff, products: st.products, lots: st.lots, canKit, canJt, canManage, reload: load });
     else if (tab === "investigations") renderInvestigations(body, { staff });
+    else if (tab === "services") {
+      if (canManage) renderServiceLinks(body, { staff, products: st.products });
+      else body.innerHTML = '<div class="tm-empty">Only Manage inventory can link services to products.</div>';
+    }
     else if (tab === "requests") renderRequests();
     else if (tab === "orders") renderOrders();
     else if (tab === "products") renderProducts();

@@ -3,6 +3,7 @@ import {
   listKits, listKitMoves, listAllLoans, listShortAll, resolveShort, kitUnits,
   getUsage, correctUsage, correctionMove,
   batchName, plural, unitPlural, dayKey, COUNT_STATUS,listInvestigations, INV_OUTCOMES, INV_STATUS,
+  listUnrecordedTreatments,
 } from "./inventory-api.js";
 import { can } from "./perms.js";
 import { showToast } from "./utils.js";
@@ -25,7 +26,8 @@ const timeOf = (d) => (d ? d.toLocaleTimeString("en-AU", { hour: "numeric", minu
 const monthLabel = (k) => { const [y, m] = k.split("-").map(Number); return new Date(y, m - 1, 1).toLocaleDateString("en-AU", { month: "long", year: "numeric" }); };
 const daysAgoKey = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return dayKey(d); };
 const SKELETON = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
-const TABS = [["variance", "Count differences"], ["investigations", "Investigations"], ["wastage", "Wastage"], ["kits", "Kit reconciliation"], ["usage", "Usage"], ["short", "Saved short"]];
+const TABS = [["variance", "Count differences"], ["investigations", "Investigations"], ["notrecorded", "Not recorded"], ["wastage", "Wastage"],
+  ["kits", "Kit reconciliation"], ["usage", "Usage"], ["short", "Saved short"]];
 const errText = (err, fallback) => (err && err.code === "permission-denied"
   ? "You don't have access to do this. Check the Firestore rules have been published, and your Reporting access in Staff."
   : err && err.message && !err.code ? err.message : fallback);
@@ -84,6 +86,7 @@ export function mountReports(container, { param = "", staff = null } = {}) {
   const body = root.querySelector('[data-role="body"]');
   if (tab === "variance") mountVariance(body, staff);
   else if (tab === "investigations") mountInvestigationReport(body);
+  else if (tab === "notrecorded") mountNotRecorded(body);
   else if (tab === "wastage") mountWastage(body);
   else if (tab === "usage") mountUsage(body, staff);
   else if (tab === "kits") mountKitRecon(body);
@@ -464,6 +467,50 @@ function mountInvestigationReport(body) {
       "CCTV checked", "Days to close", "Note", "Value ($)"],
     csvRow: (e) => [e.at ? dayKey(e.at) : "", e.productName, e.where, e.batch, e.diff, e.unit, e.typeLabel, e.by, e.recountBy, e.closedBy,
       e.cctv, e.days === null ? "" : e.days, e.note, e.value === null ? "" : e.value],
+  });
+}
+
+/* ===================== Booked, but nothing recorded ===================== */
+
+function mountNotRecorded(body) {
+  mountRangeReport(body, {
+    name: "Not recorded", file: "booked-not-recorded",
+    groups: [["clinician", "Clinician"], ["type", "Service"], ["patient", "Patient"], ["month", "Month"]],
+    findPlaceholder: "Filter: patient, clinician or service",
+    empty: "Every booking with a linked service has a treatment record. 👍",
+    async load(r) {
+      // Up to yesterday: today's treatments may not be written up yet
+      const yesterday = new Date();
+      yesterday.setHours(0, 0, 0, 0);
+      yesterday.setDate(yesterday.getDate() - 1);
+      const last = lastDay(r) < yesterday ? lastDay(r) : yesterday;
+      const [products, res] = await Promise.all([
+        listProducts(), listUnrecordedTreatments({ fromKey: dayKey(r.from), toKey: dayKey(last) }),
+      ]);
+      if (!res.configured) throw new Error("No services are linked to products yet. An admin can link them in Inventory → Service links.");
+      const names = new Map(products.map((p) => [p.id, p.name]));
+      return res.items.map((b) => ({
+        at: parseKey(b.dateKey), time: b.time, by: b.staff || "Unassigned", patient: b.patientName || "", patientId: b.patientId || "",
+        typeLabel: b.services.join(", "), productId: b.services.join(", "), productName: b.services.join(", "),
+        expected: b.productIds.map((id) => names.get(id)).filter(Boolean).join(" / "), value: 0,
+      }));
+    },
+    searchText: (e) => [e.patient, e.by, e.typeLabel, e.expected].join(" "),
+    statsHtml: (ev) => `<div class="inv-stats">
+      <div class="inv-stat is-warn"><strong>${ev.length}</strong><span>Bookings with nothing recorded</span></div>
+      <div class="inv-stat"><strong>${new Set(ev.map((e) => e.by)).size}</strong><span>Clinicians</span></div>
+      <div class="inv-stat"><strong>${new Set(ev.map((e) => e.patientId || e.patient)).size}</strong><span>Patients</span></div>
+      <div class="inv-stat"><strong>${new Set(ev.map((e) => e.typeLabel)).size}</strong><span>Services</span></div>
+    </div>`,
+    summaryHead: (label) => `<thead><tr><th>${esc(label)}</th><th>Bookings</th></tr></thead>`,
+    summaryRow: (g) => `<tr><td><strong>${esc(g.label)}</strong></td><td>${g.events.length}</td></tr>`,
+    summaryFoot: (ev) => `<tr><th>Total</th><th>${ev.length}</th></tr>`,
+    detailHead: "<thead><tr><th>Date</th><th>Patient</th><th>Service</th><th>Clinician</th><th>Expected one of</th></tr></thead>",
+    detailRow: (e) => `<tr><td>${esc(shortDate(e.at))}${e.time ? ` <small class="muted">${esc(e.time)}</small>` : ""}</td>
+      <td>${e.patientId ? `<a href="#/patient/${encodeURIComponent(e.patientId)}">${esc(e.patient || "Patient")}</a>` : esc(e.patient || "—")}</td>
+      <td>${esc(e.typeLabel)}</td><td>${esc(e.by)}</td><td>${esc(e.expected || "—")}</td></tr>`,
+    csvHead: ["Date", "Time", "Patient", "Patient ID", "Service", "Clinician", "Expected one of"],
+    csvRow: (e) => [e.at ? dayKey(e.at) : "", e.time, e.patient, e.patientId, e.typeLabel, e.by, e.expected],
   });
 }
 

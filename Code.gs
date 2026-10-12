@@ -3895,6 +3895,48 @@ function notifyContext_(cfg, ev, rule) {
         categories: catsOf(short.map(function (l) { return l.productId; })), involved: [u.byUid], actor: u.byUid,
       };
     }
+    case 'investigation.opened': {
+      // No numbers in this email, so the recount stays blind
+      const list = (Array.isArray(d.ids) ? d.ids : []).map(function (iid) {
+        const x = get('inv_investigations/' + iid);
+        if (x) x._id = iid;
+        return x;
+      }).filter(function (x) { return x && x.status === 'recount'; });
+      if (!list.length) return null;
+      const where = function (x) { return x.loc === 'jt' ? 'JT storage' : 'Shelf'; };
+      return {
+        subject: 'Recount needed: ' + (list.length === 1 ? list[0].productName + ' (' + where(list[0]) + ')' : list.length + ' products'),
+        inner: h2('A recount is needed', '#b45309') +
+          sub('The opening count by <strong>' + invEsc_(list[0].openedBy || '') + '</strong> didn\'t match the digital count. ' +
+            'Someone else needs to recount, without looking at the system first:') +
+          ul(list.map(function (x) {
+            return '<a href="' + PORTAL_URL_ + '#/inventory/investigations/' + x._id + '" style="color:#0f766e">' + invEsc_(x.productName) + '</a> · ' +
+              where(x) + (x.batch ? ' · ' + invEsc_((x.batchLabel || 'Batch') + ' ' + x.batch) : '');
+          })),
+        hash: 'inventory/investigations', label: 'Open investigations',
+        locs: uniq_(list.map(function (x) { return x.loc; })), categories: catsOf(list.map(function (x) { return x.productId; })),
+        involved: [], actor: list[0].openedByUid,
+      };
+    }
+    case 'investigation.confirmed': {
+      const x = get('inv_investigations/' + d.id);
+      if (!x || x.status !== 'review') return null;
+      const rc = x.recount || {};
+      const where = x.loc === 'jt' ? 'JT storage' : 'Shelf';
+      const diff = Number(rc.variance) || 0;
+      return {
+        subject: 'Investigation: ' + x.productName + ' (' + where + ') ' + (diff > 0 ? '+' : '') + diff,
+        inner: h2('A difference has been confirmed', '#b91c1c') +
+          sub('<strong>' + invEsc_(x.productName) + '</strong> · ' + where + (x.batch ? ' · ' + invEsc_((x.batchLabel || 'Batch') + ' ' + x.batch) : '')) +
+          ul([
+            'First count by <strong>' + invEsc_(x.openedBy || '') + '</strong>: ' + x.counted + ' (digital ' + x.digital + ')',
+            'Recount by <strong>' + invEsc_(rc.by || '') + '</strong>: ' + rc.counted + ' (digital ' + rc.digital + ')',
+          ]) +
+          '<p style="margin:0">Check the records and CCTV, then close it with what happened.</p>',
+        hash: 'inventory/investigations/' + d.id, label: 'Review the investigation',
+        locs: [x.loc], categories: catsOf([x.productId]), involved: [x.openedByUid, rc.byUid], actor: rc.byUid,
+      };
+    }
     case 'loan.disputed': {
       const ln = get('inv_loans/' + d.loanId);
       if (!ln || ln.status !== 'disputed') return null;
@@ -4170,6 +4212,8 @@ function notifyTest_(ruleId, session) {
       'stock.arrived': 'stock arrives', 'stock.low': 'a product drops to its reorder level',
       'count.difference': 'a stock count finds differences', 'usage.short': 'a treatment is saved short',
       'loan.disputed': 'a borrow between injectors is disputed',
+      'investigation.opened': 'a count doesn\'t match digital and a recount is needed',
+      'investigation.confirmed': 'a recount confirms a difference and an admin review is needed',
     };
     const r = rule.recipients || {};
     const byId = {};
