@@ -450,7 +450,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
       }
       return;
     }
-    const td = e.target.closest("[data-task-done]");f
+    const td = e.target.closest("[data-task-done]");
     if (td) {
       td.disabled = true;
       td.textContent = "Saving…";
