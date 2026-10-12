@@ -4149,3 +4149,40 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .sc-open { display: grid; gap: .35rem; margin-top: .55rem; padding: .55rem .65rem; border: 1px dashed var(--border); border-radius: 10px; }
 .sc-open > small { color: var(--muted); }
 .sc-openrow { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; font-size: .85rem; }
+
+/* Past appointments: day cards */
+.pa-legend { display: flex; flex-wrap: wrap; gap: .9rem; margin: 0 0 .25rem; font-size: .75rem; color: var(--muted); }
+.pa-legend span { display: inline-flex; align-items: center; gap: .35rem; }
+.pa-legend .pa-dot { margin: 0; }
+.pa-year { display: flex; align-items: center; gap: .6rem; margin: .9rem 0 .5rem; font-size: .8rem; font-weight: 700; color: var(--muted); }
+.pa-year::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
+.pa-legend + .pa-year { margin-top: .4rem; }
+.pa-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: .6rem; }
+.pa-card { display: flex; flex-direction: column; min-width: 0; padding: .6rem .75rem; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+.pa-date { display: flex; justify-content: space-between; align-items: baseline; gap: .5rem; margin-bottom: .35rem; }
+.pa-date b { font-size: .9rem; }
+.pa-date span { font-size: .72rem; color: var(--muted); white-space: nowrap; }
+.pa-items { flex: 1; display: grid; align-content: start; gap: .3rem; margin: 0; padding: 0; list-style: none; }
+.pa-item { display: flex; gap: .45rem; font-size: .85rem; line-height: 1.4; }
+.pa-dot { flex: none; display: inline-block; width: 7px; height: 7px; margin-top: .45rem; border-radius: 50%; background: #1d9e75; }
+.pa-dot.is-inj { background: #7f77dd; }
+.pa-dot.is-rev { background: #b4b2a9; }
+.pa-who { font-size: .78rem; color: var(--muted); }
+.pa-area { display: inline-block; padding: 0 .4rem; border-radius: 6px; background: #eeedfe; color: #3c3489; font-size: .72rem; }
+.pa-adds { font-size: .78rem; color: var(--muted); }
+.pa-badges { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .55rem; padding-top: .5rem; border-top: 1px dashed var(--border); }
+.pa-bdg { display: inline-flex; align-items: center; padding: .1rem .45rem; border: 1px solid; border-radius: 6px; font-size: .72rem; font-weight: 600; text-decoration: none; cursor: pointer; list-style: none; }
+.pa-bdg::-webkit-details-marker { display: none; }
+.pa-bdg:hover { filter: brightness(.96); }
+.pa-bdg.is-tx { background: #e1f5ee; color: #085041; border-color: #9fe1cb; }
+.pa-bdg.is-cons { background: #e6f1fb; color: #0c447c; border-color: #b5d4f4; }
+.pa-bdg.is-rx { background: #faece7; color: #712b13; border-color: #f5c4b3; }
+.pa-bdg.is-summary { background: #f1efe8; color: #444441; border-color: #d3d1c7; }
+.pa-bdg.is-missing { background: none; color: #b91c1c; border: 1px dashed #fca5a5; cursor: default; }
+.pa-bdg-menu { position: relative; }
+.pa-bdg-pop { position: absolute; z-index: 5; top: calc(100% + 4px); left: 0; min-width: 190px; display: grid; padding: .3rem; background: #fff; border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 18px rgba(0, 0, 0, .12); }
+.pa-bdg-pop a { padding: .35rem .5rem; border-radius: 6px; font-size: .8rem; color: inherit; text-decoration: none; }
+.pa-bdg-pop a:hover { background: var(--primary-soft); }
+.pa-more { display: block; margin: .8rem auto 0; padding: .4rem .9rem; border: 1px solid var(--border); border-radius: 8px; background: #fff; font: inherit; font-size: .82rem; cursor: pointer; }
+.pa-more:hover { border-color: var(--primary); color: var(--primary); }
+.pa-other { margin-top: .75rem; }

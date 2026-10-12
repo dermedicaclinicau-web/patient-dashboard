@@ -73,6 +73,34 @@ const VISIT_CATEGORIES = [
    { title: "Firm / Ulthera / eST", field: "firmUlthera", color: "tan" }],
   [{ title: "Body Sculpting", field: "bodySculpting", color: "rose" }],
 ];
+
+/* ===================== Past appointments ===================== */
+
+const PA_SHOW = 8; // visits shown before "Show older visits"
+
+// Tags on the end of service names that mean nothing to staff, e.g. "Face[prg]", "Application prk"
+const PA_TRIM = /\s*\[?\b(?:prg|prk)\b\]?\s*$/i;
+
+// The same service on different areas becomes one line with area tags.
+// The first ( ) in "re" is the area.
+const PA_GROUPS = [
+  { name: "Wrinkle Relaxer", re: /^(?:WR|Wrinkle Relaxer)\s+(.+?)(?:\s*-\s*Wrinkle Relaxer)?$/i },
+];
+
+// Colour dot for each service (first match wins; anything else is "skin")
+const PA_KINDS = [
+  ["rev", /^review\b/i],
+  ["inj", /wrinkle relaxer|\bfiller\b|radiesse|belotero|juvederm|profhilo|sculptra|skin ?booster|hydra repair|collagen growth|xeomin|botox|dysport/i],
+];
+const PA_KIND_LABEL = { inj: "Injectables", skin: "Skin", rev: "Review" };
+
+// Record badges on each visit day, in this order
+const PA_BADGES = {
+  tx: { short: "Tx Record", full: "Treatment record" },
+  cons: { short: "Cons Record", full: "Consent record" },
+  rx: { short: "Rx", full: "Prescription" },
+  summary: { short: "Summary", full: "Summary" },
+};
 /* ===================== Icons ===================== */
 
 const svg = (paths, cls = "") =>
@@ -161,6 +189,12 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       const block = planToggle.closest(".plan-block");
       const expanded = block.classList.toggle("expanded");
       planToggle.querySelector("span").textContent = expanded ? "Show less" : "View full plan";
+      return;
+    }
+    const paMore = t.closest("[data-action='pa-more']");
+    if (paMore) {
+      const card = paMore.closest("details[data-key='past-appts']");
+      if (card && card._pa) { card._pa.all = !card._pa.all; renderPastAppts(card); }
       return;
     }
     const soon = t.closest("[data-soon]");
@@ -713,11 +747,18 @@ function fillPreconsult(root, data, lastUpdated) {
     hint.textContent = pillText(lines, d.dataset.unit);
     // Category bars only show a count when there's something in them
     hint.hidden = d.classList.contains("visit-card") && !lines.length;
+    d.classList.toggle("is-empty", !lines.length);
+
+    // Past appointments: day cards
+    if (d.dataset.key === "past-appts" && lines.length) {
+      d._pa = { ...paParse(lines), all: d._pa ? d._pa.all : false, records: d._pa ? d._pa.records : new Map() };
+      renderPastAppts(d);
+      return;
+    }
 
     d.querySelector(".sub-body").innerHTML = lines.length
       ? valueHtml(lines)
       : `<p class="empty-note">${data ? "Nothing recorded." : "No pre-consultation record found for this patient."}</p>`;
-    d.classList.toggle("is-empty", !lines.length);
   });
 }
 
@@ -731,6 +772,158 @@ function fillPreconsultError(root, err) {
     hint.hidden = false;
     d.querySelector(".sub-body").innerHTML = `<p class="empty-note error">${msg}</p>`;
   });
+}
+
+/* ===================== Past appointments: day cards ===================== */
+
+const paKind = (name) => (PA_KINDS.find(([, re]) => re.test(name)) || ["skin"])[0];
+
+// "DermaGlow Standard Neck" under "DermaGlow Standard Face" → "Neck"
+function paAddLabel(parent, name) {
+  const a = parent.toLowerCase().split(/\s+/);
+  const b = name.split(/\s+/);
+  let n = 0;
+  while (n < b.length - 1 && a[n] === b[n].toLowerCase()) n++;
+  return n >= 2 ? b.slice(n).join(" ") : name;
+}
+
+// "2/9/2026 - Peel (Clinician), [StimPeel] Add on Peel 2 areas (Dr Teh)" → one visit, newest first
+function paParse(lines) {
+  const byDay = new Map();
+  const other = [];
+  lines.forEach((line) => {
+    const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})\s*-\s*(.+)$/.exec(line);
+    const date = m && new Date(+m[3], +m[2] - 1, +m[1]);
+    if (!date || isNaN(date)) { other.push(line); return; }
+    const key = toDateKey(date);
+    const v = byDay.get(key) || { key, date, items: [] };
+    byDay.set(key, v);
+    const items = v.items;
+
+    // Split on "), " so names with their own brackets, e.g. "Review 15(post treatment)", stay whole
+    const parts = m[4].split(/\)\s*,\s*/);
+    parts.forEach((raw, i) => {
+      const txt = (i < parts.length - 1 ? `${raw})` : raw).trim();
+      if (!txt) return;
+      const w = /^(.*\S)\s+\(([^()]*)\)$/.exec(txt);   // last "(Clinician)"
+      let name = (w ? w[1] : txt).replace(/^\*+/, "").trim();
+      const who = w ? w[2].trim() : "";
+      const add = /^\[[^\]]*\]\s*add[\s-]*on\s+/i.exec(name);
+      if (add) name = name.slice(add[0].length);
+      name = name.replace(PA_TRIM, "").trim();
+      if (!name) return;
+
+      const grp = !add && PA_GROUPS.map((g) => [g, g.re.exec(name)]).find(([, x]) => x);
+      if (grp) {
+        const [g, x] = grp;
+        const area = x[1].trim();
+        const prev = items.find((it) => it.group === g.name && it.who === who);
+        if (prev) { if (!prev.areas.includes(area)) prev.areas.push(area); return; }
+        items.push({ name: g.name, group: g.name, areas: [area], adds: [], who, kind: paKind(g.name) });
+        return;
+      }
+      if (add) {
+        const parent = [...items].reverse().find((it) => !it.group);
+        if (parent) { parent.adds.push(paAddLabel(parent.name, name)); return; }
+      }
+      items.push({ name, group: "", areas: [], adds: [], who, kind: paKind(name) });
+    });
+  });
+  const visits = [...byDay.values()].filter((v) => v.items.length).sort((a, b) => b.date - a.date);
+  return { visits, other };
+}
+
+function paAgo(d) {
+  const days = Math.floor((Date.now() - d.getTime()) / 864e5);
+  if (days < 1) return "Today";
+  if (days < 14) return `${days} day${days === 1 ? "" : "s"} ago`;
+  if (days < 63) return `${Math.round(days / 7)} wks ago`;
+  if (days < 365) return `${Math.max(2, Math.round(days / 30.4))} mths ago`;
+  const y = Math.floor(days / 365);
+  return `${y} yr${y === 1 ? "" : "s"} ago`;
+}
+
+function paBadgesHtml(recs) {
+  if (!recs || !recs.length) return "";
+  const by = new Map();
+  recs.forEach((r) => {
+    if (!PA_BADGES[r.kind]) return;
+    if (!by.has(r.kind)) by.set(r.kind, []);
+    by.get(r.kind).push(r);
+  });
+  const html = Object.keys(PA_BADGES).filter((k) => by.has(k)).map((k) => {
+    const b = PA_BADGES[k];
+    const list = by.get(k);
+    if (list.length === 1) {
+      return `<a class="pa-bdg is-${k}" href="${escapeHtml(list[0].href)}" title="${escapeHtml(list[0].label || b.full)}">${escapeHtml(b.short)}</a>`;
+    }
+    return `<details class="pa-bdg-menu"><summary class="pa-bdg is-${k}">${escapeHtml(b.short)} ×${list.length}</summary>
+      <div class="pa-bdg-pop">${list.map((r) =>
+        `<a href="${escapeHtml(r.href)}">${escapeHtml(r.label || b.full)}</a>`).join("")}</div></details>`;
+  }).join("");
+  return html ? `<div class="pa-badges">${html}</div>` : "";
+}
+
+function paCardHtml(v, recs) {
+  const day = v.date.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" });
+  return `
+    <article class="pa-card">
+      <div class="pa-date"><b>${escapeHtml(day)}</b><span>${escapeHtml(paAgo(v.date))}</span></div>
+      <ul class="pa-items">${v.items.map((it) => `
+        <li class="pa-item"><i class="pa-dot is-${it.kind}" aria-hidden="true"></i>
+          <div>${escapeHtml(it.name)}${it.areas.map((a) => ` <span class="pa-area">${escapeHtml(a)}</span>`).join("")}${
+            it.who ? ` <span class="pa-who">· ${escapeHtml(it.who)}</span>` : ""}${
+            it.adds.length ? `<div class="pa-adds">${it.adds.map((a) => `+ ${escapeHtml(a)}`).join(" · ")}</div>` : ""}</div></li>`).join("")}
+      </ul>
+      ${paBadgesHtml(recs)}
+    </article>`;
+}
+
+function renderPastAppts(card) {
+  const st = card._pa;
+  if (!st) return;
+  const shown = st.all ? st.visits : st.visits.slice(0, PA_SHOW);
+  const kinds = new Set(shown.flatMap((v) => v.items.map((it) => it.kind)));
+
+  let html = `<div class="pa-legend">${Object.keys(PA_KIND_LABEL).filter((k) => kinds.has(k)).map((k) =>
+    `<span><i class="pa-dot is-${k}" aria-hidden="true"></i>${PA_KIND_LABEL[k]}</span>`).join("")}</div>`;
+  let year = null;
+  shown.forEach((v) => {
+    const y = v.date.getFullYear();
+    if (y !== year) {
+      if (year !== null) html += "</div>";
+      html += `<p class="pa-year">${y}</p><div class="pa-grid">`;
+      year = y;
+    }
+    html += paCardHtml(v, st.records.get(v.key));
+  });
+  if (year !== null) html += "</div>";
+
+  const more = st.visits.length - shown.length;
+  if (more > 0) {
+    const newest = st.visits[PA_SHOW].date.getFullYear();
+    const oldest = st.visits[st.visits.length - 1].date.getFullYear();
+    html += `<button type="button" class="pa-more" data-action="pa-more">Show ${more} older visit${more === 1 ? "" : "s"} (${
+      oldest === newest ? oldest : `${oldest} to ${newest}`})</button>`;
+  } else if (st.all && st.visits.length > PA_SHOW) {
+    html += `<button type="button" class="pa-more" data-action="pa-more">Show fewer</button>`;
+  }
+  if (st.other.length) html += `<ul class="pc-list pa-other">${st.other.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul>`;
+  card.querySelector(".sub-body").innerHTML = html;
+}
+
+// Records done on each visit day. list: [{ dateKey: "2026-09-02", kind: "tx"|"cons"|"rx"|"summary", href, label }]
+function setPastApptRecords(root, list) {
+  const card = root.querySelector('details[data-key="past-appts"]');
+  if (!card) return;
+  const map = new Map();
+  (list || []).forEach((r) => {
+    if (!r.dateKey) return;
+    if (!map.has(r.dateKey)) map.set(r.dateKey, []);
+    map.get(r.dateKey).push(r);
+  });
+  if (!card._pa) card._pa = { visits: [], other: [], all: false, records: map };
+  else { card._pa.records = map; if (card._pa.visits.length) renderPastAppts(card); }
 }
 
 /* ===================== Reminders ===================== */
