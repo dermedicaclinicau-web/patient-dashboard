@@ -20,6 +20,7 @@ import { renderKits } from "./inventory-kits.js";
 import { openProductImport, exportProductsCsv } from "./inventory-import.js";
 import { renderNotifications } from "./notifications.js";
 import { renderServiceLinks } from "./service-links.js";
+import { enableUiText } from "./ui-text.js";
 
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -41,6 +42,10 @@ const seg = (name, items, cur) => `<div class="fe-seg">${items.map(([v, l]) =>
   `<label class="fe-seg-btn"><input type="radio" name="${name}" value="${v}"${v === cur ? " checked" : ""} /><span>${esc(l)}</span></label>`).join("")}</div>`;
 const lowAt = (p, loc) => p.reorder[loc] !== null && p.reorder[loc] !== undefined && p.stock[loc] <= p.reorder[loc];
 
+// Who is using Inventory, for admin-editable wording in its windows
+let uiStaff = null;
+const isAdminStaff = (s) => /^admin$/i.test(String((s && s.role) || ""));
+
 function openDialog(cls, html) {
   const dlg = document.createElement("dialog");
   dlg.className = `lh-dialog ${cls}`;
@@ -48,6 +53,7 @@ function openDialog(cls, html) {
   document.body.appendChild(dlg);
   dlg.addEventListener("close", () => dlg.remove());
   dlg.showModal();
+  enableUiText(dlg, { scope: "inv", admin: isAdminStaff(uiStaff), staff: uiStaff });
   return dlg;
 }
 
@@ -67,6 +73,7 @@ function movesHtml(moves, showProduct = true, labelOf = () => "Batch") {
 }
 
 export function mountInventory(container, { param = "", staff = null } = {}) {
+  uiStaff = staff;
   const parts = String(param || "").split("/");
   if (parts[0] === "po" && parts[1]) { mountPurchaseOrder(container, { id: parts[1], staff }); return; }
   if (parts[0] === "investigations" && parts[1]) { mountInvestigation(container, { id: decodeURIComponent(parts[1]), staff }); return; }

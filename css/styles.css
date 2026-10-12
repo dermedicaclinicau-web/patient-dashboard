@@ -4129,3 +4129,15 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 /* Erase tool */
 .an-stage.is-erasing canvas { cursor: crosshair; }
 .an-btn[data-tool="erase"].is-on { color: #b91c1c; border-color: #fca5a5; background: #fef2f2; }
+
+/* Admin-editable wording */
+.uit-toggle { position: absolute; top: .65rem; right: 3.2rem; z-index: 2; padding: .25rem .65rem; border: 1px dashed var(--border);
+  border-radius: 999px; background: var(--surface, #fff); font: inherit; font-size: .75rem; font-weight: 600; color: var(--muted); cursor: pointer; }
+.uit-toggle[aria-pressed="true"] { border-style: solid; border-color: var(--primary); background: var(--primary-soft); color: var(--primary); }
+.is-uit-edit [data-uit-key] { outline: 1px dashed var(--primary); outline-offset: 2px; border-radius: 4px; cursor: text; }
+.is-uit-edit [data-uit-key]:hover { background: var(--primary-soft); }
+.is-uit-edit .uit-changed { outline-style: solid; }
+.uit-ed { display: grid; gap: .4rem; margin: .35rem 0 .5rem; padding: .6rem; border: 1px solid var(--primary); border-radius: 10px; background: var(--primary-soft); }
+.uit-ed textarea { width: 100%; padding: .45rem .55rem; border: 1px solid var(--border); border-radius: 8px; font: inherit; font-size: .85rem; resize: vertical; }
+.uit-acts { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: .4rem; }
+.uit-acts small { flex: 1 1 100%; font-size: .72rem; color: var(--muted); }

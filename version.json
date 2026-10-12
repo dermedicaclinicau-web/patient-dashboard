@@ -1,5 +1,5 @@
 ﻿{
-    "version":  "20261012-155739",
+    "version":  "20261012-160311",
     "files":  [
                   "./js/aftercare-api.js",
                   "./js/aftercare-bank.js",
@@ -100,6 +100,7 @@
                   "./js/task-tokens.js",
                   "./js/task-types.js",
                   "./js/transcripts.js",
+                  "./js/ui-text.js",
                   "./js/updates.js",
                   "./js/utils.js",
                   "./css/styles.css",
