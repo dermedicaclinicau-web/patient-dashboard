@@ -20,6 +20,9 @@ const ERR = {
   NOT_FOUND: "That staff member couldn't be found. Refresh and try again.",
   INVALID_PIN: "The server hasn't been updated yet. In Apps Script, deploy a new version.",
   UNAUTHORIZED: "Your session has ended. Log out and back in.",
+  BAD_PROVIDER: "Check the provider number: 6 digits, then a location character and a letter (e.g. 2345671A).",
+  BAD_PRESCRIBER: "Check the prescriber number: 6 or 7 digits.",
+  BAD_AHPRA: "Check the AHPRA number: 3 letters and 10 digits (e.g. MED0001234567).",
 };
 const errText = (err) => ERR[err && err.code] ||
   (err && err.code ? `Something went wrong (${err.code}). Check Apps Script → Executions.` : (err && err.message) || "Something went wrong.");
@@ -88,7 +91,8 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
           ? `<img src="${esc(s.photo)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()" />` : ""}<b>${esc(getInitials(s.name))}</b></span>
         <div class="st-main">
           <strong>${esc(s.name || "Unnamed")}${me && (me.uid === s.id || me.id === s.id) ? ' <em class="st-you">You</em>' : ""}</strong>
-          <small>${esc(s.email || "No email")} · ${s.lastLogin ? `Last login ${esc(when(s.lastLogin))}` : "Never logged in"}${s.injector ? " · Injector" : ""}${esc(exceptions(s))}</small>
+          <small>${esc(s.email || "No email")} · ${s.lastLogin ? `Last login ${esc(when(s.lastLogin))}` : "Never logged in"}${s.injector ? " · Injector" : ""}${
+            s.providerNo ? ` · Provider ${esc(s.providerNo)}` : ""}${esc(exceptions(s))}</small>
         </div>
         <span class="st-role is-${esc(String(s.role || "").toLowerCase())}">${esc(s.role || "No role")}</span>
         <span class="st-status ${s.active ? "is-on" : "is-off"}">${s.active ? "Active" : "Turned off"}</span>
@@ -359,6 +363,19 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
         <small class="fe-note">Gives them My kit, the kit check, and kit products in treatment records. Works with any role, including Admin.</small>
         <label class="lh-field"><span class="lh-label">Email (optional)</span><input type="email" name="email" maxlength="254" value="${esc(s ? s.email : "")}" /></label>
         <label class="lh-field"><span class="lh-label">Photo link (optional)</span><input name="photo" maxlength="1000" placeholder="https://…" value="${esc(s ? s.photo : "")}" /></label>
+        <fieldset class="st-reg"><legend>Registration (optional)</legend>
+          <p class="fe-note">Used to fill in forms automatically. Staff can still change them on a form.</p>
+          <div class="st-reg-grid">
+            <label class="lh-field"><span class="lh-label">Provider number</span>
+              <input name="providerNo" maxlength="12" placeholder="e.g. 2345671A" autocapitalize="characters" autocomplete="off" value="${esc(s ? s.providerNo || "" : "")}" /></label>
+            <label class="lh-field"><span class="lh-label">Prescriber number</span>
+              <input name="prescriberNo" maxlength="10" inputmode="numeric" placeholder="7 digits" autocomplete="off" value="${esc(s ? s.prescriberNo || "" : "")}" /></label>
+            <label class="lh-field"><span class="lh-label">AHPRA registration</span>
+              <input name="ahpraNo" maxlength="16" placeholder="e.g. MED0001234567" autocapitalize="characters" autocomplete="off" value="${esc(s ? s.ahpraNo || "" : "")}" /></label>
+            <label class="lh-field st-reg-wide"><span class="lh-label">Title and qualifications</span>
+              <input name="quals" maxlength="150" placeholder="e.g. Dr Jane Smith, MBBS FRACGP" value="${esc(s ? s.quals || "" : "")}" /></label>
+          </div>
+        </fieldset>
         ${isNew ? pinChoice("PIN") : ""}
         ${accessHtml(s)}
         <p class="lh-error" role="alert" hidden></p>
@@ -397,6 +414,8 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
           id: s ? s.id : "", name: form.elements.name.value, role: form.elements.role.value,
           email: form.elements.email.value, photo: form.elements.photo.value, pin: isNew ? readPin(form) : "", access,
           injector: form.elements.injector.checked,
+          providerNo: form.elements.providerNo.value, prescriberNo: form.elements.prescriberNo.value,
+          ahpraNo: form.elements.ahpraNo.value, quals: form.elements.quals.value,
         } });
         dlg.close();
         if (res.pin) showPin(form.elements.name.value.trim(), res.pin, "Staff member added");
