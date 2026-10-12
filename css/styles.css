@@ -4125,3 +4125,7 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .ms-val .ms-small { width: auto; min-height: 30px; padding: .2rem .4rem; font-size: .8rem; }
 .ms-sw { display: inline-flex; align-items: center; gap: .25rem; font-size: .72rem; font-weight: 700; color: var(--muted); }
 .ms-sw input[type="color"] { width: 30px; height: 30px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: none; cursor: pointer; }
+
+/* Erase tool */
+.an-stage.is-erasing canvas { cursor: crosshair; }
+.an-btn[data-tool="erase"].is-on { color: #b91c1c; border-color: #fca5a5; background: #fef2f2; }

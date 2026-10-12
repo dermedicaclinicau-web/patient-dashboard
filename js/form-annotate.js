@@ -1,6 +1,7 @@
 // Drawing and marks on a picture while filling in a form (face charts, injection points).
 // A picture can use several marking sets. Each is placed on its own: staff pick a value from any set,
 // then tap the picture. Number sets add up; label sets (e.g. SD, PO) are counted.
+// Erase removes one mark, dot or line. Undo steps back through every change (including Erase and Clear).
 // The markings are kept separately from the picture, so the Image Bank picture never changes.
 import { bankImage } from "./image-bank-api.js";
 import { traceShape, valueSvg, valueText, SHAPE_TEXT, textSize } from "./marking-sets.js";
@@ -10,6 +11,7 @@ const I = {
   pen: ic('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>'),
   dot: ic('<circle cx="12" cy="12" r="5" fill="currentColor"/>'),
   mark: ic('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3" fill="currentColor"/>'),
+  erase: ic('<path d="M20 20H8l-4.3-4.3a2 2 0 0 1 0-2.8L13.2 3.4a2 2 0 0 1 2.8 0l4.6 4.6a2 2 0 0 1 0 2.8L11 20"/><line x1="7.5" y1="9.5" x2="14.5" y2="16.5"/>'),
   undo: ic('<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>'),
 };
 const COLOURS = [["#dc2626", "Red"], ["#2563eb", "Blue"], ["#16a34a", "Green"], ["#111827", "Black"]];
@@ -17,6 +19,13 @@ const MAX_W = 1200; // drawing resolution (wide enough for print, small enough t
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(2));
 const sum = (list) => Math.round(list.reduce((a, o) => a + Number(o.v || 0), 0) * 100) / 100;
+// Distance from a point to a line segment
+const segDist = (px, py, ax, ay, bx, by) => {
+  const dx = bx - ax, dy = by - ay;
+  const len = dx * dx + dy * dy;
+  const u = len ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len)) : 0;
+  return Math.hypot(px - (ax + u * dx), py - (ay + u * dy));
+};
 
 // sets: the marking sets staff can use on this picture (in the order they were ticked).
 // marks: the older single-set option, still accepted.
@@ -48,6 +57,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
         ${marking ? `<button type="button" class="an-btn is-on" data-tool="mark" aria-pressed="true">${I.mark}<span>Mark</span></button>` : ""}
         <button type="button" class="an-btn${marking ? "" : " is-on"}" data-tool="pen" aria-pressed="${!marking}">${I.pen}<span>Draw</span></button>
         <button type="button" class="an-btn" data-tool="dot" aria-pressed="false">${I.dot}<span>Dot</span></button>
+        <button type="button" class="an-btn" data-tool="erase" aria-pressed="false" title="Tap one mark, dot or line to remove it">${I.erase}<span>Erase</span></button>
       </div>
       <div class="an-colours"${marking ? " hidden" : ""}>${COLOURS.map(([c, l], i) =>
         `<button type="button" class="an-swatch${i === 0 ? " is-on" : ""}" data-colour="${c}" style="--c:${c}" aria-label="${l}" aria-pressed="${i === 0}"></button>`).join("")}</div>
@@ -65,6 +75,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     ${marking ? '<div class="an-total" data-role="total" aria-live="polite"></div>' : ""}`;
 
   const img = box.querySelector(".an-stage img");
+  const stage = box.querySelector(".an-stage");
   const canvas = box.querySelector("canvas");
   const g = canvas.getContext("2d");
   const undoBtn = box.querySelector('[data-act="undo"]');
@@ -74,6 +85,9 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   let W = 0, H = 0;
   let tool = marking ? "mark" : "pen", colour = COLOURS[0][0], size = "thin";
   const ops = [];
+  // Every change, so Undo can step back through them:
+  // { add: op } · { removed: op, at } · { replaced: oldOp, by: newOp } · { cleared: [...ops], base }
+  const history = [];
   let current = null;
   // Earlier markings to keep drawing on top of
   let baseImg = null;
@@ -86,11 +100,10 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   const scale = () => (W || 1000) / 1000;
   const penWidth = () => (size === "thick" ? 7 : 3) * scale();
   const dotRadius = () => (size === "thick" ? 12 : 7) * scale();
+  // n screen pixels, in drawing pixels (the picture may be shown smaller or bigger than it's drawn)
+  const px = (n) => n * W / (canvas.getBoundingClientRect().width || W);
   // Marks are about 13px on screen, whatever size the picture is shown at
-  const markRadius = () => {
-    const shown = canvas.getBoundingClientRect().width || W;
-    return Math.max(10, 13 * W / shown);
-  };
+  const markRadius = () => Math.max(10, px(13));
   const markOps = () => ops.filter((o) => o.type === "mark");
   const marksOf = (s) => markOps().filter((o) => o.setId === s.id);
 
@@ -182,9 +195,13 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
 
   function showTotal() {
     if (!totalEl) return;
+    if (tool === "erase") {
+      totalEl.innerHTML = "<span>Tap a mark, dot or line to remove it. Undo brings it back.</span>";
+      return;
+    }
     if (!markOps().length) {
       totalEl.innerHTML = `<span>${order.length > 1 ? "Choose a value from any set, then tap the picture." : "Tap the picture to place the chosen value."}
-        Tap a mark again to remove it, or choose another value from its set and tap it to change it.</span>`;
+        To remove one mark, use Erase.</span>`;
       return;
     }
     totalEl.innerHTML = order.map((s) => {
@@ -201,11 +218,21 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     g.clearRect(0, 0, W, H);
     if (baseImg && W) g.drawImage(baseImg, 0, 0, W, H);
     ops.forEach(drawOp);
-    undoBtn.disabled = !ops.length;
+    undoBtn.disabled = !history.length;
     clearBtn.disabled = !ops.length && !baseImg;
     showTotal();
   }
   const changed = () => { redraw(); box.dispatchEvent(new Event("input", { bubbles: true })); };
+
+  function undo() {
+    const h = history.pop();
+    if (!h) return;
+    if (h.add) { const i = ops.indexOf(h.add); if (i >= 0) ops.splice(i, 1); }
+    else if (h.removed) ops.splice(Math.min(h.at, ops.length), 0, h.removed);
+    else if (h.replaced) { const i = ops.indexOf(h.by); if (i >= 0) ops[i] = h.replaced; }
+    else if (h.cleared) { ops.splice(0, ops.length, ...h.cleared); baseImg = h.base; }
+    changed();
+  }
 
   const pos = (e) => {
     const r = canvas.getBoundingClientRect();
@@ -219,33 +246,65 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     }
     return -1;
   };
+  // Anything under the finger (the top one first): a mark, a dot or a pen line. About a fingertip wide.
+  const hitAny = (x, y) => {
+    const tol = px(10);
+    for (let i = ops.length - 1; i >= 0; i--) {
+      const o = ops[i];
+      if (o.type === "mark" && Math.hypot(o.x - x, o.y - y) <= o.r * 1.2 + tol * 0.3) return i;
+      if (o.type === "dot" && Math.hypot(o.x - x, o.y - y) <= o.r + tol) return i;
+      if (o.type === "pen") {
+        const lim = o.width / 2 + tol;
+        const pts = o.points;
+        for (let k = 0; k < pts.length; k++) {
+          const [ax, ay] = pts[k];
+          const [bx, by] = pts[Math.min(k + 1, pts.length - 1)];
+          if (segDist(x, y, ax, ay, bx, by) <= lim) return i;
+        }
+      }
+    }
+    return -1;
+  };
 
   canvas.addEventListener("pointerdown", (e) => {
     if (!W) return;
     e.preventDefault();
     const [x, y] = pos(e);
+    if (tool === "erase") {
+      const i = hitAny(x, y);
+      if (i >= 0) {
+        history.push({ removed: ops[i], at: i });
+        ops.splice(i, 1);
+        changed();
+      }
+      return;
+    }
     if (tool === "mark") {
       const next = makeMark({ x, y, r: markRadius() });
       const hit = hitMark(x, y, next.setId);
       if (hit >= 0) {
         const m = ops[hit];
         const same = (m.label ? m.code === next.code : m.v === next.v) && (m.tag || 0) === (next.tag || 0);
-        if (same) ops.splice(hit, 1);
-        else ops[hit] = { ...next, x: m.x, y: m.y, r: m.r };
+        if (same) { history.push({ removed: m, at: hit }); ops.splice(hit, 1); }
+        else { const by = { ...next, x: m.x, y: m.y, r: m.r }; ops[hit] = by; history.push({ replaced: m, by }); }
       } else {
         ops.push(next);
+        history.push({ add: next });
       }
       changed();
       return;
     }
     if (tool === "dot") {
-      ops.push({ type: "dot", colour, r: dotRadius(), x, y });
+      const d = { type: "dot", colour, r: dotRadius(), x, y };
+      ops.push(d);
+      history.push({ add: d });
       changed();
       return;
     }
     canvas.setPointerCapture(e.pointerId);
     current = { type: "pen", colour, width: penWidth(), points: [[x, y]] };
     ops.push(current);
+    history.push({ add: current });
     redraw();
   });
   canvas.addEventListener("pointermove", (e) => {
@@ -269,10 +328,12 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
   const setTool = (t) => {
     tool = t;
     pickOne(box.querySelectorAll("[data-tool]"), box.querySelector(`[data-tool="${t}"]`));
-    const isMark = t === "mark";
-    box.querySelector(".an-colours").hidden = isMark;
-    box.querySelector('[data-role="sizes"]').hidden = isMark;
-    if (marksRow) marksRow.classList.toggle("is-idle", !isMark);
+    const plain = t === "pen" || t === "dot";   // colour and size only matter for drawing
+    box.querySelector(".an-colours").hidden = !plain;
+    box.querySelector('[data-role="sizes"]').hidden = !plain;
+    if (marksRow) marksRow.classList.toggle("is-idle", t !== "mark");
+    stage.classList.toggle("is-erasing", t === "erase");
+    showTotal();
   };
 
   box.addEventListener("click", (e) => {
@@ -293,8 +354,14 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
       pickOne(b.closest("[data-setrow]").querySelectorAll("[data-tag]"), b);
       setActive(si);
       setTool("mark");
-    } else if (b.dataset.act === "undo") { ops.pop(); changed(); }
-    else if (b.dataset.act === "clear") { ops.length = 0; baseImg = null; changed(); }
+    } else if (b.dataset.act === "undo") undo();
+    else if (b.dataset.act === "clear") {
+      if (!ops.length && !baseImg) return;
+      history.push({ cleared: ops.slice(), base: baseImg });
+      ops.length = 0;
+      baseImg = null;
+      changed();
+    }
   });
   showTotal();
 
