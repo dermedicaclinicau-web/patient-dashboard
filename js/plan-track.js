@@ -1,7 +1,7 @@
 // Treatment plan tracking: the patient's appointments → each plan line's sessions (done, booked, due…)
 import { serviceKey } from "./inventory-api.js";
 import { serviceSetup } from "./plan-api.js";
-import { sharesWord } from "./master-plan-api.js";
+import { sharesWord, monthKey } from "./master-plan-api.js";
 
 const pad = (n) => String(n).padStart(2, "0");
 export const dateKeyOf = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -61,14 +61,16 @@ export function visitsFrom(pre, today = []) {
     names.forEach((n) => { if (!v.services.some((s) => serviceKey(s) === serviceKey(n))) v.services.push(n); });
     days.set(key, v);
   };
-  const read = (fields, future) => fields.forEach((f) => String((pre && pre[f]) || "").split(/\r?\n/).forEach((line) => {
+  // Anything dated today or later is booked; anything earlier has happened (even if it came from the future-visits list)
+  const read = (fields) => fields.forEach((f) => String((pre && pre[f]) || "").split(/\r?\n/).forEach((line) => {
     const m = LINE_RE.exec(line.trim());
     if (!m) return;
     const key = `${m[3]}-${pad(m[2])}-${pad(m[1])}`;
-    add(key, serviceNames(m[4]), future || key >= todayKey);
+    add(key, serviceNames(m[4]), key >= todayKey);
   }));
-  read(PAST_FIELDS, false);
-  read(FUTURE_FIELDS, true);
+  read(PAST_FIELDS);
+  read(FUTURE_FIELDS);
+  
   const todays = (today || []).flatMap((a) => a.services || []);
   if (todays.length) add(todayKey, todays, true);
   return [...days.values()].filter((v) => v.services.length).sort((a, b) => a.dateKey.localeCompare(b.dateKey));
@@ -89,7 +91,9 @@ function trackLine(line, past, future) {
   let prev = null;
   for (let n = 1; n <= 60 && (!total || n <= total); n++) {
     const o = ov[String(n)] || {};
-    const expected = o.month || (n === 1 ? line.startMonth : prev ? addWeeks(prev.date || prev.month, iv) : "") || "";
+    // No start month set? Use a month written in the frequency ("Next treatment planned for June 2027")
+    const start = line.startMonth || monthKey(line.frequency);
+    const expected = o.month || (n === 1 ? start : prev ? addWeeks(prev.date || prev.month, iv) : "") || "";
     let s;
     if (o.status === "done") s = { state: "done", date: o.date || "", manual: true };
     else if (o.status === "skipped") s = { state: "skipped" };

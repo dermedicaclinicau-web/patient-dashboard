@@ -320,6 +320,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     pre: () => preData,
     today: () => todayAppts,
     consults: () => transcriptRecords,
+    recordsOn: (key) => [...pastForms, ...pastSummaries].filter((r) => r.dateKey === key),
     latestConsult: () => latestConsultRecord(),
     applyLatest: () => applyFromRecord(latestConsultRecord()),
     onReminder: () => { loadReminders(); if (tasksView) tasksView.reload(); },
@@ -1177,7 +1178,14 @@ function treatmentPlansSectionHtml() {
         <span class="pc-head">${ICONS.chev}<span class="pc-title">Treatment Plan</span><span class="hint tp-count">…</span></span>
       </summary>
       <div class="mp-wrap" data-role="mpbar"><div class="skeleton sm"></div></div>
-      <div class="section-body tp-body"><div class="skeleton sm"></div></div>
+      <details class="tp-history" data-key="tp-history" ${isOpen("tp-history", false) ? "open" : ""}>
+        <summary>
+          <span class="tp-hist-title">Consultation plans</span>
+          <span class="hint tp-hist-count">…</span>
+          ${ICONS.chev}
+        </summary>
+        <div class="section-body tp-body"><div class="skeleton sm"></div></div>
+      </details>
     </details>`;
 }
 
@@ -1186,9 +1194,11 @@ function renderTreatmentPlans(root, records) {
   if (!section) return;
 
   const plans = allTreatmentPlans(records);
-  section.querySelector(".tp-count").textContent = plans.length
-    ? `${plans.length} ${plans.length === 1 ? "plan" : "plans"}`
-    : "No record";
+  const dates = new Set(plans.map((p) => (p.date ? toDateKey(p.date) : p.dateText)));
+  const newest = plans.find((p) => p.date);
+  section.querySelector(".tp-hist-count").textContent = plans.length
+    ? `${dates.size} consultation${dates.size === 1 ? "" : "s"}${newest ? ` · latest ${formatShortDate(newest.date)}` : ""}`
+    : "None yet";
 
   const body = section.querySelector(".tp-body");
   if (!plans.length) {
