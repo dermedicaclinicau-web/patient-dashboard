@@ -40,6 +40,7 @@ function doPost(e) {
     if (body.action === 'scheduledTask') return json_(handleScheduledTask_(body));
     if (body.action === 'printTask') return json_(handlePrintTask_(body));
     if (body.action === 'notify') return json_(handleNotify_(body));
+    if (body.action === 'plan') return json_(handlePlan_(body));
 
     const pin = String(body.pin || '').trim();
 
@@ -4369,4 +4370,110 @@ function notifyCountCheck_(cfg, rules, now) {
   notifyProcessOne_(cfg, notifyEnqueue_(cfg, 'count.overdue', {
     dateKey: key, dueBy: due, total: dueKeys.length, missing: missing.length, items: missing.slice(0, 80),
   }, ''), rules);
+}
+
+// ===================== Treatment plans: suggest concerns + downtime for appointment services =====================
+
+function handlePlan_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!/^admin$/i.test(String(session.role || ''))) return { ok: false, error: 'FORBIDDEN' };
+  if (String(body.op || '') !== 'suggestServices') return { ok: false, error: 'BAD_REQUEST' };
+
+  const services = uniq_((Array.isArray(body.services) ? body.services : [])
+    .map(function (s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, 150); })
+    .filter(Boolean)).slice(0, 120);
+  if (!services.length) return { ok: true, items: [] };
+  try {
+    return { ok: true, items: geminiServiceConcerns_(services) };
+  } catch (err) {
+    console.error('Service suggestions failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: false, error: 'GEMINI_FAILED' };
+  }
+}
+
+const SERVICE_CONCERNS_PROMPT_ = [
+  'You set up an Australian cosmetic clinic\'s appointment SERVICES for treatment-plan tracking.',
+  'For EACH service name you are given, return one item with:',
+  '- "service": the service name copied EXACTLY as given.',
+  '- "concerns": every patient concern from CONCERNS that this service is commonly used to treat (usually 1 to 3).',
+  '  Copy concern names EXACTLY. Empty if it is not a treatment.',
+  '- "not_a_treatment": true for consultations, reviews, follow-ups, checks, admin, fees, product pick-ups, packages',
+  '  with no treatment named, and anything that does not treat the skin or body. Otherwise false.',
+  '- "downtime_days": typical days of VISIBLE downtime a patient should plan around (redness, swelling, bruising,',
+  '  peeling, scabbing). 0 if minimal or none. Whole number. Be realistic and conservative, not worst case.',
+  '',
+  'CONCERN GUIDE',
+  '- Expression Lines & Wrinkles: Wrinkle Relaxer, anti-wrinkle injections, jaw muscle / masseter, lip flip.',
+  '- Volume Loss: dermal filler, Radiesse (for volume), cheek / lip / chin / tear trough filler.',
+  '- Skin Laxity: Ulthera, Skin Lifting / HIFU, Firm & Contour, Firm & Hydrate, eSkin Tight, threads for lifting.',
+  '- Skin Texture & Quality: DermaGlow, RestoraGlow, peels, Genesis Glow, MediFacial, skin needling for texture, HydraRepair,',
+  '  Skin Remodelling, Rejuran, LED, ReJuvaDerm, Laser Facial, skin boosters.',
+  '- Pigmentation: pigment lasers, OPL / IPL for sun damage, Clear complexion lasers for pigment, peels for melasma.',
+  '- Redness & Vascular Concerns: Vascular laser, OPL for redness, Genesis Glow for rosacea.',
+  '- Collagen Replenishment: Collagen Activator / peptides, Sculptra, PRP, general collagen-building programs.',
+  '- Body Contouring: CoolSculpting, fat freezing, TruSculpt, Vanquish, fat dissolving, body sculpting.',
+  '- Acne & Acne Scarring: acne facials and lasers, Clear complexion lasers for acne, needling / microneedling for acne scars.',
+  'A service that names an add-on or area (e.g. "[DG] Add on DermaGlow Neck") has the same concerns as its main treatment.',
+  'Abbreviations: WR = Wrinkle Relaxer, DG = DermaGlow, prg/prk = room codes (ignore).',
+].join('\n');
+
+function geminiServiceConcerns_(services) {
+  const key = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
+  if (!key) throw new Error('Missing GEMINI_API_KEY script property.');
+
+  const schema = {
+    type: 'OBJECT',
+    properties: {
+      items: {
+        type: 'ARRAY',
+        items: {
+          type: 'OBJECT',
+          properties: {
+            service: { type: 'STRING' },
+            concerns: { type: 'ARRAY', items: { type: 'STRING' } },
+            not_a_treatment: { type: 'BOOLEAN' },
+            downtime_days: { type: 'INTEGER' },
+          },
+          required: ['service', 'concerns', 'not_a_treatment', 'downtime_days'],
+        },
+      },
+    },
+    required: ['items'],
+  };
+
+  const res = UrlFetchApp.fetch(
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent', {
+      method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+      headers: { 'x-goog-api-key': key },
+      payload: JSON.stringify({
+        systemInstruction: { parts: [{ text: SERVICE_CONCERNS_PROMPT_ + '\n\nCONCERNS\n' + PLAN_CONCERNS.map(function (n) { return '- ' + n; }).join('\n') }] },
+        contents: [{ role: 'user', parts: [{ text: JSON.stringify({ services: services }) }] }],
+        generationConfig: {
+          temperature: 0.1, responseMimeType: 'application/json', responseSchema: schema,
+          thinkingConfig: { thinkingBudget: 1024 },
+        },
+      }),
+    });
+  if (res.getResponseCode() !== 200) throw new Error('Gemini ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 300));
+
+  const data = JSON.parse(res.getContentText());
+  const cand = (data.candidates || [])[0] || {};
+  const text = ((cand.content || {}).parts || []).map(function (p) { return p.text || ''; }).join('');
+  const parsed = JSON.parse(text || '{}');
+
+  // Only names we asked about, only the 9 concerns, sensible downtime
+  const wanted = {};
+  services.forEach(function (s) { wanted[s.toLowerCase()] = s; });
+  return (Array.isArray(parsed.items) ? parsed.items : []).map(function (it) {
+    const name = wanted[String((it && it.service) || '').trim().toLowerCase()];
+    if (!name) return null;
+    const notT = it.not_a_treatment === true;
+    const concerns = notT ? [] : uniq_((Array.isArray(it.concerns) ? it.concerns : [])
+      .map(planConcernName_).filter(function (c) { return PLAN_CONCERNS.indexOf(c) !== -1; }));
+    return {
+      service: name, concerns: concerns, notTreatment: notT && !concerns.length,
+      downtimeDays: Math.min(60, Math.max(0, Math.round(Number(it.downtime_days) || 0))),
+    };
+  }).filter(Boolean);
 }

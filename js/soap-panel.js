@@ -14,6 +14,7 @@ import {
 import { callApi } from "./appointments.js";
 import { confirmDialog } from "./dialog.js";
 import { escapeHtml, showToast, toDateKey } from "./utils.js";
+import { openPlanReview } from "./master-plan-review.js";
 
 const svg = (p) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -317,11 +318,7 @@ function sectionHtml(s, value) {
   if (s.key === "email" && current && current.emailItems && current.emailItems.length) {
     return `<section class="sp-card sp-tone-indigo" data-email-card>${emailCardHtml(current.emailItems, current.data["Treatment Emails Sent"])}</section>`;
   }
-  const planActions = s.key === "plan" ? `
-    <span class="sp-card-actions">
-      <button type="button" class="sp-mini" data-soon="Update email from plan">Update email from plan</button>
-      <button type="button" class="sp-mini solid" data-soon="Create Treatment Plan">Create Treatment Plan</button>
-    </span>` : "";
+  const planActions = "";
   return `
     <section class="sp-card sp-tone-${s.tone} ${s.full ? "full" : ""}">
       <header>${ICONS[s.icon]}<span>${escapeHtml(s.title)}</span>${planActions}</header>
@@ -381,6 +378,7 @@ async function onClick(e) {
   else if (action === "delete") showDeleteConfirm();
   else if (action === "delete-cancel") hideDeleteConfirm();
   else if (action === "delete-confirm") doDelete(btn);
+  else if (action === "to-master") applyToMaster();
 }
 
 function refreshHeaderIcon() {
@@ -609,6 +607,20 @@ async function doDelete(btn) {
     btn.innerHTML = `${ICONS.trash}Delete permanently`;
   }
 }
+
+   // The plan in these notes → the patient's master plan (review first)
+   function applyToMaster() {
+     if (!current || !current.data || !current.plan) return;
+     if (current.dirty) { showToast("Save the notes first, then add them to the master plan."); return; }
+     const d = current.data;
+     const id = String(d["Patient Doc ID"] || d["Patient ID"] || "").trim();
+     if (!id) { showToast("These notes aren't linked to a patient record."); return; }
+     openPlanReview({
+       patient: { id, pttId: String(d["Patient ID"] || ""), name: String(d["Patient Name"] || "") },
+       consult: current.plan, recordId: current.id, recordDate: parseRecordDate(d["Record Date and Time"]), staff,
+       onDone: () => window.dispatchEvent(new CustomEvent("master-plan-updated", { detail: { patientId: id } })),
+     });
+   }
 
 /* ===================== Treatment Plan card ===================== */
 

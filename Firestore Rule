@@ -688,6 +688,38 @@ match /inv_open/{id} {
   allow write: if isAdmin();
 }
 
+    // Treatment plan settings: concern colours/names, services → concerns + downtime
+    match /plan_settings/{id} {
+      allow read: if isStaff();
+      allow write: if isAdmin() && id in ['concerns', 'services']
+        && request.resource.data.updatedByUid == request.auth.uid;
+    }
+
+        // Master treatment plans: one per patient. Each save is a numbered version, with its history entry written alongside.
+    match /treatment_plans/{patientId} {
+      allow read: if isStaff();
+      allow create: if can('clinical.view')
+        && request.resource.data.patientId == patientId
+        && request.resource.data.version == 1
+        && request.resource.data.updatedByUid == request.auth.uid
+        && existsAfter(/databases/$(database)/documents/treatment_plans/$(patientId)/history/1);
+      allow update: if can('clinical.view')
+        && request.resource.data.patientId == resource.data.patientId
+        && request.resource.data.version == resource.data.version + 1
+        && request.resource.data.updatedByUid == request.auth.uid
+        && existsAfter(/databases/$(database)/documents/treatment_plans/$(patientId)/history/$(string(request.resource.data.version)));
+      allow delete: if false;
+
+      match /history/{v} {
+        allow read: if isStaff();
+        allow create: if can('clinical.view')
+          && request.resource.data.byUid == request.auth.uid
+          && v == string(request.resource.data.version)
+          && getAfter(/databases/$(database)/documents/treatment_plans/$(patientId)).data.version == request.resource.data.version;
+        allow update, delete: if false;
+      }
+    }
+
     // Staff tasks / reminders
     match /staff-task-list/{taskId} {
       allow read: if isStaff();

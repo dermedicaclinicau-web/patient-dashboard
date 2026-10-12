@@ -360,7 +360,7 @@ export function planCardHtml(plan, priorCats) {
       ${reviewing ? "" : timelineHtml(plan.timeline)}
       <div class="pe-actions">
         <button type="button" class="pe-btn" data-sp="email-from-plan">${I.refresh}Update email from plan</button>
-        <button type="button" class="pe-btn solid" data-soon="Create Treatment Plan">${I.filePlus}Create Treatment Plan</button>
+        <button type="button" class="pe-btn solid" data-sp="to-master">${I.filePlus}Add to master plan</button>
       </div>
     </div>`;
 }

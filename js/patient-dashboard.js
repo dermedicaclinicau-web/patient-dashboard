@@ -19,8 +19,12 @@ import {
 import { patientTasksSectionHtml, mountPatientTasks } from "./patient-tasks.js";
 import {
   fetchTranscriptRecords, socialHistoryEntries, toBullets, allTreatmentPlans,
-  parseTimeline,
+  parseTimeline, extractSection,
 } from "./transcripts.js";
+import { readSidecar, planFromSidecar, planFromText } from "./plan-editor.js";
+import { getMasterPlan, PLAN_STATUS } from "./master-plan-api.js";
+import { getPlanSettings } from "./plan-api.js";
+import { openPlanReview } from "./master-plan-review.js";
 import {
   escapeHtml, getInitials, hueFromString, formatDobLong, calcAge,
   formatMobile, toTelHref, toDateKey, showToast, formatUpdated,
@@ -186,6 +190,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   let pastForms = [];          // badge records from completed forms
   let pastSummaries = [];      // badge records from recorded consultations
   let pastFormsLoaded = false;
+  let transcriptRecords = [];  // consultations, newest first (for the master plan)
 
   root.addEventListener("click", (e) => {
     const t = e.target;
@@ -205,6 +210,9 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       if (card && card._pa) { card._pa.all = !card._pa.all; renderPastAppts(card); }
       return;
     }
+    const mpApply = t.closest("[data-action='mp-apply']");
+    if (mpApply) { applyFromRecord(transcriptRecords.find((r) => r.id === mpApply.dataset.rid)); return; }
+    if (t.closest("[data-action='mp-create-latest']")) { applyFromRecord(latestConsultRecord()); return; }
     const sumBtn = t.closest("[data-pa-summary]");
     if (sumBtn) {
       const menu = sumBtn.closest(".pa-bdg-menu");
@@ -236,6 +244,13 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     if (!root.isConnected) { document.removeEventListener("click", closeBadgeMenus); return; } // left this patient
     root.querySelectorAll(".pa-bdg-menu[open]").forEach((m) => { if (!m.contains(e.target)) m.open = false; });
   };
+  // The notes panel can update the master plan too: refresh the bar when it does
+  const onPlanUpdated = (e) => {
+    if (!root.isConnected) { window.removeEventListener("master-plan-updated", onPlanUpdated); return; }
+    if (patient && e.detail && [patient.id, ...patientIds(patient)].includes(e.detail.patientId)) loadMasterPlan();
+  };
+  window.addEventListener("master-plan-updated", onPlanUpdated);
+
   document.addEventListener("click", closeBadgeMenus);
 
   try {
@@ -376,12 +391,12 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
 
   // Treatment plan + Social history, both from appointment_transcripts (fetched once)
   async function loadTranscriptSections() {
-    const planCard = root.querySelector('details[data-key="treatment-plan"]');
     const socialCard = root.querySelector('details[data-key="social-history"]');
     const cards = [socialCard].filter(Boolean);
     try {
       const records = await fetchTranscriptRecords(patient);
       if (!root.isConnected) return;
+      transcriptRecords = records;
 
       // Summary badges on the Past appointments day cards
       pastSummaries = records.filter((r) => r.date && r.soap.trim()).map((r) => ({
@@ -400,6 +415,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
 
       renderTreatmentPlans(root, records);
       renderClinicalHistory(root, records);
+      loadMasterPlan();
     } catch (err) {
       if (!root.isConnected) return;
       console.error("Transcript sections failed:", err);
@@ -411,6 +427,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
         : "Couldn't load consultation records.";
       cards.forEach((c) => fillCard(c, "—", `<p class="empty-note error">${msg}</p>`, false));
     }
+    loadMasterPlan();
   }
 
   function fillCard(card, pill, html, isEmpty) {
@@ -519,6 +536,39 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     pastForms = list;
     pastFormsLoaded = recs.status === "fulfilled"; // "No Tx Record" only when treatment records actually loaded
     pushPastRecords();
+  }
+
+  // The newest consultation with a new treatment plan
+  function latestConsultRecord() {
+    return transcriptRecords.find((r) => { const c = consultPlanOf(r); return c && c.intent !== "reviewing_existing" && c.concerns.length; }) || null;
+  }
+
+  function applyFromRecord(r) {
+    const consult = r ? consultPlanOf(r) : null;
+    if (!consult) { showToast("This consultation's plan couldn't be read as concerns, so it can't be added automatically."); return; }
+    openPlanReview({
+      patient: { id: patient.id, pttId: patient.pttId || "", name: patient.name },
+      consult, recordId: r.id, recordDate: r.date, staff, onDone: loadMasterPlan,
+    });
+  }
+
+  async function loadMasterPlan() {
+    const bar = root.querySelector('[data-role="mpbar"]');
+    if (!bar) return;
+    try {
+      const [master, settings] = await Promise.all([
+        getMasterPlan(patient.id),
+        getPlanSettings().catch(() => ({ concerns: [], services: [] })),
+      ]);
+      if (!root.isConnected) return;
+      bar.innerHTML = masterBarHtml(master, settings, !!latestConsultRecord());
+    } catch (err) {
+      if (!root.isConnected) return;
+      console.warn("Master plan failed:", err);
+      bar.innerHTML = `<p class="empty-note error">${err.code === "permission-denied"
+        ? "The master plan isn't accessible. Check the treatment_plans Firestore rules."
+        : "Couldn't load the master plan."}</p>`;
+    }
   }
 
 
@@ -1118,6 +1168,35 @@ function socialHistoryHtml(entries) {
   }).join("")}</div>`;
 }
 
+/* ===================== Master plan ===================== */
+
+// A consultation's plan as the editable model (structured sidecar, or the plan text), or null
+function consultPlanOf(r) {
+  if (!r || !r.soap) return null;
+  return planFromSidecar(readSidecar(r.soap)) || planFromText(extractSection(r.soap, "TREATMENT PLAN"));
+}
+
+function masterBarHtml(master, settings, canCreate) {
+  if (!master) {
+    return `<div class="mp-bar is-empty">
+      <div class="mp-bar-main"><strong>No master plan yet</strong>
+        <small>One plan per patient, organised by concern and tracked visit by visit.</small></div>
+      ${canCreate ? '<button type="button" class="btn-primary sm" data-action="mp-create-latest">Create from the latest consultation</button>'
+        : '<small class="muted">Record a consultation with a treatment plan first.</small>'}
+    </div>`;
+  }
+  const con = (k) => settings.concerns.find((c) => c.name === k) || { label: k, colour: "#888780" };
+  const when = master.updatedAt ? formatShortDate(master.updatedAt) : "";
+  return `<div class="mp-bar">
+    <div class="mp-bar-main"><strong>Master plan</strong>
+      <span class="mp-status is-${escapeHtml(master.status)}">${escapeHtml(PLAN_STATUS[master.status])}</span>
+      <small>${master.concerns.length} concern${master.concerns.length === 1 ? "" : "s"} · version ${master.version}${
+        when ? ` · updated ${escapeHtml(when)}${master.updatedBy ? ` by ${escapeHtml(master.updatedBy)}` : ""}` : ""}</small></div>
+    <div class="mp-bar-chips">${master.concerns.map((c) =>
+      `<span class="ps-chip" style="--c:${escapeHtml(con(c.key).colour)}">${escapeHtml(con(c.key).label)}</span>`).join("")}</div>
+  </div>`;
+}
+
 /* ===================== Treatment Plan section ===================== */
 
 function treatmentPlansSectionHtml() {
@@ -1126,6 +1205,7 @@ function treatmentPlansSectionHtml() {
       <summary>
         <span class="pc-head">${ICONS.chev}<span class="pc-title">Treatment Plan</span><span class="hint tp-count">…</span></span>
       </summary>
+      <div class="mp-wrap" data-role="mpbar"><div class="skeleton sm"></div></div>
       <div class="section-body tp-body"><div class="skeleton sm"></div></div>
     </details>`;
 }
@@ -1173,8 +1253,13 @@ function planGroupHtml(group, isLatest) {
           ${isLatest ? `<span class="tp-latest">Latest</span>` : ""}
           ${group.some((p) => p.matchedByName) ? `<span class="task-flag neutral">Matched by name</span>` : ""}
         </span>
-        ${ICONS.chev}
-      </summary>
+        <span class="tp-sum-right">
+          ${group.some((p) => { const c = consultPlanOf(p); return c && c.intent !== "reviewing_existing" && c.concerns.length; })
+            ? `<button type="button" class="tp-apply" data-action="mp-apply" data-rid="${escapeHtml((group.find((p) => {
+                const c = consultPlanOf(p); return c && c.concerns.length; }) || first).id)}">Apply to master plan</button>` : ""}
+          ${ICONS.chev}
+        </span>
+        </summary>
       <div class="tp-record-body">${group.map(planBodyHtml).join("")}</div>
     </details>`;
 }
