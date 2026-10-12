@@ -2156,6 +2156,7 @@ function normaliseOpen(d) {
     useBy: KEY_RE.test(x.useBy || "") ? x.useBy : "",
     openedBy: String(x.openedBy || ""), openedAt: toDate(x.openedAt), lastUsedAt: toDate(x.lastUsedAt),
     finishedBy: String(x.finishedBy || ""), finishedAt: toDate(x.finishedAt), finishReason: String(x.finishReason || ""),
+    finishNote: String(x.finishNote || ""),
   };
 }
 
@@ -2165,6 +2166,13 @@ export async function listOpenContainers({ productId = "" } = {}) {
   return snap.docs.map(normaliseOpen)
     .filter((c) => !productId || c.productId === productId)
     .sort((a, b) => (a.openedAt ? a.openedAt.getTime() : 0) - (b.openedAt ? b.openedAt.getTime() : 0));
+}
+
+// Every container opened in a date range (still open or finished), newest first
+export async function listContainersBetween(from, to) {
+  const snap = await getDocs(query(collection(db, "inv_open"), where("openedAt", ">=", from), where("openedAt", "<", to)));
+  return snap.docs.map(normaliseOpen)
+    .sort((a, b) => (b.openedAt ? b.openedAt.getTime() : 0) - (a.openedAt ? a.openedAt.getTime() : 0));
 }
 
 // About how many uses a container should give (10 mL ÷ 2 mL = 5), or null

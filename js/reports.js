@@ -3,7 +3,7 @@ import {
   listKits, listKitMoves, listAllLoans, listShortAll, resolveShort, kitUnits,
   getUsage, correctUsage, correctionMove,
   batchName, plural, unitPlural, dayKey, COUNT_STATUS,listInvestigations, INV_OUTCOMES, INV_STATUS,
-  listUnrecordedTreatments,
+  listUnrecordedTreatments, listContainersBetween, expectedUses,
 } from "./inventory-api.js";
 import { can } from "./perms.js";
 import { showToast } from "./utils.js";
@@ -27,7 +27,7 @@ const monthLabel = (k) => { const [y, m] = k.split("-").map(Number); return new 
 const daysAgoKey = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return dayKey(d); };
 const SKELETON = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
 const TABS = [["variance", "Count differences"], ["investigations", "Investigations"], ["notrecorded", "Not recorded"], ["wastage", "Wastage"],
-  ["kits", "Kit reconciliation"], ["usage", "Usage"], ["short", "Saved short"]];
+  ["kits", "Kit reconciliation"], ["usage", "Usage"], ["opened", "Opened containers"], ["short", "Saved short"]];
 const errText = (err, fallback) => (err && err.code === "permission-denied"
   ? "You don't have access to do this. Check the Firestore rules have been published, and your Reporting access in Staff."
   : err && err.message && !err.code ? err.message : fallback);
@@ -89,6 +89,7 @@ export function mountReports(container, { param = "", staff = null } = {}) {
   else if (tab === "notrecorded") mountNotRecorded(body);
   else if (tab === "wastage") mountWastage(body);
   else if (tab === "usage") mountUsage(body, staff);
+  else if (tab === "opened") mountOpened(body);
   else if (tab === "kits") mountKitRecon(body);
   else mountShort(body, staff);
 }
@@ -547,6 +548,19 @@ function wasteEvents(usage, moves, byId) {
         amount: units, unit: (p && p.doseUnit) || m.unit || "units", plain: false, by: m.by || "", patient: "", patientId: "",
         detail: [m.reason, m.note].filter(Boolean).join(" · "), batch, value: mul(perDose(p), units),
       });
+    } else if (m.type === "shared-finish" && m.reason && m.reason !== "Empty") {
+      // An opened container thrown away before it was used up: what was left of it
+      const exp = Number(m.expectedUses) || 0;
+      const uses = Number(m.uses) || 0;
+      const left = exp ? Math.max(0, 1 - uses / exp) : 1;
+      if (!(left > 0)) return;
+      out.push({
+        at: m.at, type: "opened", typeLabel: "Opened one discarded", productId: m.productId, productName: m.productName,
+        amount: Math.round(left * 100) / 100, unit: (p && p.stockUnit) || m.unit || "item", plain: false, by: m.by || "",
+        patient: "", patientId: "", batch,
+        detail: [m.reason, `${plural(uses, "use")}${exp ? ` of about ${exp}` : ""}`].join(" · "),
+        value: mul(perItem(p), left),
+      });
     } else if (m.type === "writeoff" && gone > 0) {
       out.push({
         at: m.at, type: "writeoff", typeLabel: "Written off", productId: m.productId, productName: m.productName,
@@ -566,7 +580,7 @@ function mountWastage(body) {
     empty: "No wastage recorded in these dates. 👍",
     async load(r) {
       const [products, usage, moves] = await Promise.all([
-        listProducts(), listUsageBetween(r.from, r.to), listMovesBetween(r.from, r.to, ["kit-discard", "writeoff"]),
+        listProducts(), listUsageBetween(r.from, r.to), listMovesBetween(r.from, r.to, ["kit-discard", "writeoff", "shared-finish"]),
       ]);
       return wasteEvents(usage, moves, new Map(products.map((p) => [p.id, p])));
     },
@@ -605,6 +619,20 @@ function useEvents(usage, byId) {
   const out = [];
   usage.forEach((u) => u.lines.forEach((l) => {
     const p = byId.get(l.productId);
+    if (l.kind === "shared") {
+      const rows = l.rows || [];
+      const opened = rows.filter((r) => r.opened).length;
+      out.push({
+        at: u.at, productId: l.productId, productName: l.name, kit: false, dosed: false, shared: true,
+        amount: rows.length, unit: "use", plain: true, dose: Number(l.doseTotal) || 0, doseUnit: l.doseUnit || "",
+        items: opened, itemUnit: l.unit, opened, waste: 0, wasteUnit: "", short: Number(l.short) || 0,
+        by: u.by || "", patient: u.patientName || "", patientId: u.patientId || "",
+        detail: u.formName || "", submissionId: u.submissionId || "", usageId: u.id, corrected: u.corrected === true,
+        batch: [...new Set(rows.map((r) => r.batch).filter(Boolean))].join(", "),
+        value: mul(perItem(p), opened),   // the cost lands when a container is opened
+      });
+      return;
+    }
     const kit = l.kind === "kit";
     const items = Number(l.total) || 0;                       // kit: units; otherwise syringes / items taken
     const dosedLine = !kit && !!l.doseUnit && Number(l.doseTotal) > 0;
@@ -623,7 +651,9 @@ function useEvents(usage, byId) {
   }));
   return out;
 }
-const useAmount = (e) => (e.dosed ? `${amt(e.amount, e.unit, false)} (${plural(+fmt(e.items), e.itemUnit)})` : amt(e.amount, e.unit, e.plain));
+const useAmount = (e) => (e.shared
+  ? `${plural(e.amount, "use")}${e.dose ? ` (${fmt(e.dose)} ${e.doseUnit})` : ""}${e.opened ? ` · opened ${plural(e.opened, e.itemUnit)}` : ""}`
+  : e.dosed ? `${amt(e.amount, e.unit, false)} (${plural(+fmt(e.items), e.itemUnit)})` : amt(e.amount, e.unit, e.plain));
 const treatments = (ev) => new Set(ev.map((e) => e.submissionId || `${e.patientId}|${e.at && e.at.getTime()}`)).size;
 
 function mountUsage(body, staff) {
@@ -667,7 +697,7 @@ function mountUsage(body, staff) {
       <td>${esc(e.batch || "—")}</td><td>${esc(e.by || "—")}</td>
       <td>${e.submissionId ? `<a href="#/form-record/${encodeURIComponent(e.submissionId)}">${esc(e.patient || "Treatment record")}</a>` : esc(e.patient || "—")}</td>
       <td>${esc(moneyOrDash(e.value))}</td>
-      ${canCorrect ? `<td><button type="button" class="lh-btn" data-correct="${esc(e.usageId)}">Correct</button></td>` : ""}</tr>`,
+      ${canCorrect ? `<td>${e.shared ? "" : `<button type="button" class="lh-btn" data-correct="${esc(e.usageId)}">Correct</button>`}</td>` : ""}</tr>`,
     csvHead: ["Date", "Product", "Amount", "Unit", "Syringes / items", "Discarded", "Batch / Lot", "Staff", "Patient", "Form", "Saved short",
       "Corrected", "Value ($)"],
     csvRow: (e) => [e.at ? dayKey(e.at) : "", e.productName, +fmt(e.amount), e.unit, e.kit ? "" : +fmt(e.items),
@@ -679,6 +709,70 @@ function mountUsage(body, staff) {
       openCorrection(b.dataset.correct, staff, reload);
       return true;
     },
+  });
+}
+
+/* ===================== Opened containers (shared products) ===================== */
+
+function mountOpened(body) {
+  const usesText = (e) => `${e.uses}${e.expected ? ` of about ${e.expected}` : ""}`;
+  mountRangeReport(body, {
+    name: "Opened containers", file: "opened-containers",
+    groups: [["product", "Product"], ["type", "Status"], ["month", "Month"], ["clinician", "Opened by"]],
+    findPlaceholder: "Filter: product, batch or staff",
+    empty: "No shared products were opened in these dates.",
+    async load(r) {
+      const [products, list] = await Promise.all([listProducts(), listContainersBetween(r.from, r.to)]);
+      const byId = new Map(products.map((p) => [p.id, p]));
+      return list.map((c) => {
+        const exp = expectedUses(c);
+        const open = c.status === "open";
+        return {
+          id: c.id, at: c.openedAt, productId: c.productId, productName: c.productName, by: c.openedBy || "",
+          typeLabel: open ? "Still open" : (c.finishReason || "Finished"), open, uses: c.uses, expected: exp,
+          used: c.used, doseUnit: c.doseUnit, batch: c.batch, unit: c.unit,
+          low: !open && !!exp && c.uses < exp * 0.7,
+          finishedAt: c.finishedAt, finishedBy: c.finishedBy || "", note: c.finishNote || "",
+          days: c.finishedAt && c.openedAt ? Math.max(0, Math.round((c.finishedAt - c.openedAt) / 864e5)) : null,
+          value: perItem(byId.get(c.productId)),
+        };
+      });
+    },
+    searchText: (e) => [e.productName, e.batch, e.by, e.finishedBy, e.typeLabel, e.note].join(" "),
+    statsHtml(ev) {
+      const done = ev.filter((e) => !e.open && e.expected);
+      const avg = done.length ? Math.round(done.reduce((a, e) => a + e.uses / e.expected, 0) / done.length * 100) : null;
+      const low = ev.filter((e) => e.low).length;
+      return `<div class="inv-stats">
+        <div class="inv-stat"><strong>${ev.length}</strong><span>Opened</span></div>
+        <div class="inv-stat"><strong>${ev.filter((e) => e.open).length}</strong><span>Still open</span></div>
+        <div class="inv-stat ${low ? "is-warn" : ""}"><strong>${low}</strong><span>Fewer uses than expected</span></div>
+        <div class="inv-stat"><strong>${avg === null ? "—" : `${avg}%`}</strong><span>Uses vs expected (average)</span></div>
+      </div>`;
+    },
+    summaryHead: (label) => `<thead><tr><th>${esc(label)}</th><th>Opened</th><th>Uses</th><th>Uses each (average)</th><th>Fewer than expected</th><th>Value</th></tr></thead>`,
+    summaryRow: (g) => {
+      const uses = g.events.reduce((a, e) => a + e.uses, 0);
+      const low = g.events.filter((e) => e.low).length;
+      return `<tr><td><strong>${esc(g.label)}</strong></td><td>${g.events.length}</td><td>${uses}</td>
+        <td>${esc(fmt(uses / g.events.length))}</td><td>${low ? `<span class="rp-neg">${low}</span>` : "—"}</td><td>${esc(moneyOrDash(g.value))}</td></tr>`;
+    },
+    summaryFoot: (ev) => `<tr><th>Total</th><th>${ev.length}</th><th>${ev.reduce((a, e) => a + e.uses, 0)}</th><th></th>
+      <th>${ev.filter((e) => e.low).length}</th><th>${esc(moneyOrDash(sumValue(ev)))}</th></tr>`,
+    detailHead: "<thead><tr><th>Opened</th><th>Product</th><th>Batch / Lot</th><th>Opened by</th><th>Uses</th><th>Status</th><th>Finished</th><th>Value</th></tr></thead>",
+    detailRow: (e) => `<tr class="${e.low ? "is-diff" : ""}">
+      <td>${esc(shortDate(e.at))}</td><td>${esc(e.productName)}</td><td>${esc(e.batch || "—")}</td><td>${esc(e.by || "—")}</td>
+      <td>${esc(usesText(e))}${e.used && e.doseUnit ? ` <small class="muted">· ${esc(fmt(e.used))} ${esc(e.doseUnit)}</small>` : ""}${
+        e.low ? ' <span class="inv-flag is-warn">Fewer than expected</span>' : ""}</td>
+      <td><span class="inv-flag ${e.open ? "is-info" : e.typeLabel === "Empty" ? "is-ok" : "is-warn"}">${esc(e.typeLabel)}</span></td>
+      <td>${e.finishedAt ? `${esc(shortDate(e.finishedAt))}${e.days !== null ? ` <small class="muted">(${e.days} day${e.days === 1 ? "" : "s"})</small>` : ""}${
+        e.finishedBy ? `<br><small class="muted">${esc(e.finishedBy)}</small>` : ""}` : "—"}</td>
+      <td>${esc(moneyOrDash(e.value))}</td></tr>`,
+    csvHead: ["Opened", "Product", "Batch / Lot", "Opened by", "Uses", "Expected uses", "Amount recorded", "Status", "Finished",
+      "Days open", "Finished by", "Note", "Value ($)"],
+    csvRow: (e) => [e.at ? dayKey(e.at) : "", e.productName, e.batch, e.by, e.uses, e.expected || "",
+      e.used ? `${fmt(e.used)} ${e.doseUnit}` : "", e.typeLabel, e.finishedAt ? dayKey(e.finishedAt) : "",
+      e.days === null ? "" : e.days, e.finishedBy, e.note, e.value === null ? "" : e.value],
   });
 }
 
@@ -999,7 +1093,7 @@ async function openCorrection(id, staff, onDone) {
   try { u = await getUsage(id); } catch (err) { console.error(err); showToast(errText(err, "Couldn't open this record.")); return; }
   if (!u) { showToast("This record no longer exists."); return; }
 
-  const items = u.lines.flatMap((l, li) => (l.rows || []).map((r, ri) => ({ l, r, li, ri, kit: l.kind === "kit", dosed: l.kind !== "kit" && !!l.doseUnit })));
+  const items = u.lines.flatMap((l, li) => (l.kind === "shared" ? [] : (l.rows || []).map((r, ri) => ({ l, r, li, ri, kit: l.kind === "kit", dosed: l.kind !== "kit" && !!l.doseUnit }))));
   if (!items.length) { showToast("There's nothing to correct on this record."); return; }
   const whereTxt = (x) => (x.kit ? `${u.by || "Injector"}'s kit` : LOC[x.r.from] || x.r.from || "Shelf");
   const amtTxt = (x, n) => (x.kit ? `${fmt(n)} ${x.l.unit}` : plural(+fmt(n), x.l.unit));
