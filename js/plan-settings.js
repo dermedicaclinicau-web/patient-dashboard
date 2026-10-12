@@ -1,6 +1,9 @@
 // Inventory → Treatment plans: concern colours/names, and services → concerns + downtime (Admins).
 import { listServicesSeen, serviceKey } from "./inventory-api.js";
-import { getPlanSettings, savePlanConcerns, saveServiceConcerns, suggestServiceConcerns } from "./plan-api.js";
+import {
+  getPlanSettings, savePlanConcerns, saveServiceConcerns, suggestServiceConcerns,
+  getPlanDocSettings, savePlanDocSettings, PLAN_DOC_DEFAULTS,
+} from "./plan-api.js";
 import { showToast } from "./utils.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -15,8 +18,11 @@ export async function renderPlanSettings(body, { staff } = {}) {
   body.innerHTML = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
   let cfg;
   let seen;
+  let docCfg;
   try {
-    [cfg, seen] = await Promise.all([getPlanSettings(), listServicesSeen(180).catch(() => [])]);
+    [cfg, seen, docCfg] = await Promise.all([
+      getPlanSettings(), listServicesSeen(180).catch(() => []), getPlanDocSettings().catch(() => ({ ...PLAN_DOC_DEFAULTS })),
+    ]);
   } catch (err) {
     console.error("Plan settings failed:", err);
     if (body.isConnected) body.innerHTML = `<div class="tm-empty is-error">${esc(errText(err, "Couldn't load the settings. Try again."))}</div>`;
@@ -65,7 +71,24 @@ export async function renderPlanSettings(body, { staff } = {}) {
         <button type="button" class="lh-btn is-primary" data-ps="ai">Suggest with AI</button>
       </div>
       <div class="sl-list" data-role="pslist"></div>
-    </section>`;
+    </section>
+    <section class="tb-card">
+      <h4>Patient copy</h4>
+      <p class="muted ps-note">How a treatment plan looks when it's printed or emailed to a patient. The logo and clinic details
+        come from the Form Builder letterhead. {First name} is replaced with the patient's first name. Clinicians' notes are never included.</p>
+      <div class="inv-two">
+        <label class="lh-field"><span class="lh-label">Title</span><input class="fe-input" data-pd="title" maxlength="80" value="${esc(docCfg.title)}" /></label>
+        <label class="lh-field"><span class="lh-label">Colour</span><input type="color" data-pd="colour" value="${esc(docCfg.colour)}" /></label>
+        <label class="lh-field inv-span"><span class="lh-label">Welcome</span><textarea data-pd="welcome" rows="3" maxlength="2000">${esc(docCfg.welcome)}</textarea></label>
+        <label class="lh-field inv-span"><span class="lh-label">Closing</span><textarea data-pd="closing" rows="2" maxlength="2000">${esc(docCfg.closing)}</textarea></label>
+        <label class="lh-field inv-span"><span class="lh-label">Small print</span><textarea data-pd="disclaimer" rows="2" maxlength="1000">${esc(docCfg.disclaimer)}</textarea></label>
+        <label class="fe-check inv-span"><input type="checkbox" data-pd="prices"${docCfg.showPrices ? " checked" : ""} /> Show quotes by default (staff can untick each time)</label>
+        <label class="lh-field inv-span"><span class="lh-label">Email subject</span><input class="fe-input" data-pd="emailSubject" maxlength="200" value="${esc(docCfg.emailSubject)}" /></label>
+        <label class="lh-field inv-span"><span class="lh-label">Email message</span><textarea data-pd="emailMessage" rows="5" maxlength="3000">${esc(docCfg.emailMessage)}</textarea></label>
+      </div>
+      <div class="lh-actions"><button type="button" class="lh-btn is-primary" data-ps="save-doc">Save patient copy</button></div>
+    </section> `;
+    
 
   const listEl = body.querySelector('[data-role="pslist"]');
 
@@ -253,6 +276,25 @@ export async function renderPlanSettings(body, { staff } = {}) {
     if (ed) { edit(ed.dataset.psEdit); return; }
     const ai = e.target.closest('[data-ps="ai"]');
     if (ai) { suggest(ai); return; }
+    const sd = e.target.closest('[data-ps="save-doc"]');
+    if (sd) {
+      const v = (k) => body.querySelector(`[data-pd="${k}"]`);
+      sd.disabled = true;
+      try {
+        await savePlanDocSettings({
+          title: v("title").value, colour: v("colour").value, welcome: v("welcome").value, closing: v("closing").value,
+          disclaimer: v("disclaimer").value, showPrices: v("prices").checked,
+          emailSubject: v("emailSubject").value, emailMessage: v("emailMessage").value,
+        }, staff);
+        showToast("Patient copy saved");
+      } catch (ex) {
+        console.error("Save patient copy failed:", ex);
+        showToast(errText(ex, "Couldn't save. Try again."));
+      } finally {
+        sd.disabled = false;
+      }
+      return;
+    }
     const sv = e.target.closest('[data-ps="save-concerns"]');
     if (!sv) return;
     const next = cfg.concerns.map((c, i) => ({

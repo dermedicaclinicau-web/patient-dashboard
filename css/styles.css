@@ -4534,3 +4534,24 @@ button.pa-bdg { font-family: inherit; line-height: inherit; }
 .tp-history[open] > summary .sum-chev { transform: rotate(180deg); }
 .tp-hist-title { font-weight: 600; font-size: .9rem; }
 .tp-history .tp-body { border-top: 1px solid var(--border); }
+
+/* Patient copy window */
+.pd-dlg { width: min(1180px, 97vw); max-height: 94vh; padding: 0; }
+.pd-grid { display: grid; grid-template-columns: 340px minmax(0, 1fr); min-height: 70vh; max-height: 94vh; }
+.pd-opts { display: grid; align-content: start; gap: .75rem; padding: 1.1rem; overflow: auto; border-right: 1px solid var(--border); }
+.pd-cons { display: grid; gap: .5rem; }
+.pd-con { padding: .5rem .6rem; border: 1px solid var(--border); border-left: 4px solid var(--c); border-radius: 0 10px 10px 0; }
+.pd-con-name strong { font-size: .88rem; }
+.pd-line { margin-left: 1.4rem; font-size: .84rem; }
+.pd-line input:disabled + * , .pd-line:has(input:disabled) { opacity: .5; }
+.pd-price { color: #0f766e; }
+.pd-last { margin: 0; font-size: .78rem; color: var(--muted); }
+.pd-acts { display: flex; flex-wrap: wrap; gap: .4rem; }
+.pd-email { display: grid; gap: .5rem; padding: .7rem; border: 1px solid var(--border); border-radius: 10px; background: #f8fafc; }
+.pd-preview { overflow: auto; padding: 1.2rem; background: #e2e8f0; }
+.pd-page { width: 760px; margin: 0 auto; padding: 24px 20px; background: #fff; box-shadow: 0 2px 12px rgba(15, 23, 42, .15); }
+@media (max-width: 900px) {
+  .pd-grid { grid-template-columns: 1fr; max-height: none; }
+  .pd-opts { border-right: 0; border-bottom: 1px solid var(--border); }
+  .pd-page { width: 760px; }
+}

@@ -11,6 +11,7 @@ import { serviceKey } from "./inventory-api.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 import { showSoapPanel } from "./soap-panel.js";
+import { openPlanDocument } from "./plan-doc.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const MONTH_RE = /^\d{4}-\d{2}$/;
@@ -258,6 +259,7 @@ export function createPlanOverview(el, ctx) {
         when ? `, ${esc(when)}${m.updatedBy ? ` by ${esc(m.updatedBy)}` : ""}` : ""}</span>
       <span class="pv-spacer"></span>
       ${newer ? '<button type="button" class="lh-btn" data-po="apply-latest">Update from the latest consultation</button>' : ""}
+      <button type="button" class="lh-btn" data-po="doc">Patient copy</button>
       <div class="fe-seg po-viewseg">${[["list", "List"], ["cal", "Calendar"]].map(([v, l]) =>
         `<label class="fe-seg-btn"><input type="radio" name="po-view" value="${v}" data-po-view${st.view === v ? " checked" : ""} /><span>${l}</span></label>`).join("")}</div>
       ${["proposed", "sent"].includes(eff) ? '<button type="button" class="lh-btn is-primary" data-po="accept">Patient accepted</button>' : ""}
@@ -529,6 +531,16 @@ export function createPlanOverview(el, ctx) {
 
   /* ---------- Menus ---------- */
 
+  // The patient's copy: emailing a Proposed plan moves it to "Sent to patient"
+  function openDoc() {
+    openPlanDocument({
+      patient, master: st.master, track: compute(), labelOf: con, staff,
+      onSent: async (kind) => {
+        if (kind === "email" && st.master.status === "proposed") await setPlanStatus("sent");
+      },
+    });
+  }
+
   function planMenu() {
     const m = st.master;
     const eff = autoStatus(compute());
@@ -541,6 +553,7 @@ export function createPlanOverview(el, ctx) {
         <div class="pv-radios">${Object.entries(PLAN_STATUS).map(([v, l]) => `
           <label class="fe-check"><input type="radio" name="status" value="${v}"${v === eff ? " checked" : ""} /> ${l}</label>`).join("")}</div></div>
       <div class="po-slot-btns">
+        <button type="button" class="lh-btn" data-act="doc">Patient copy</button>
         <button type="button" class="lh-btn" data-act="history">History</button>
         ${newer ? '<button type="button" class="lh-btn" data-act="latest">Update from the latest consultation</button>' : ""}
       </div>
@@ -554,6 +567,7 @@ export function createPlanOverview(el, ctx) {
     form.addEventListener("click", (e) => {
       const b = e.target.closest("[data-act]");
       if (!b) return;
+      if (b.dataset.act === "doc") { dlg.close(); openDoc(); return; }
       if (b.dataset.act === "history") { dlg.close(); showHistory(); }
       else if (b.dataset.act === "latest") { dlg.close(); ctx.applyLatest(); }
       else if (b.dataset.act === "close") dlg.close();
@@ -965,6 +979,7 @@ export function createPlanOverview(el, ctx) {
     if (d.po === "apply-latest") { ctx.applyLatest(); return; }
     if (d.po === "accept") { setPlanStatus("accepted"); return; }
     if (d.po === "plan-menu") { planMenu(); return; }
+    if (d.po === "doc") { openDoc(); return; }
     if (d.po === "add-event") { addEvent(); return; }
     if (d.po === "remove-event") { removeEvent(d.e); return; }
     if (d.po === "cal-prev") { st.calStart = addMonths(st.calStart, -3); draw(); return; }

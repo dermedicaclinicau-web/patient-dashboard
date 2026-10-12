@@ -86,3 +86,45 @@ export function serviceSetup(services, name) {
   const k = serviceKey(name);
   return (services || []).find((r) => serviceKey(r.service) === k) || null;
 }
+
+/* ---------- Patient copy: design settings (plan_settings/document) ---------- */
+
+export const PLAN_DOC_DEFAULTS = {
+  title: "Your treatment plan",
+  colour: "#0F766E",
+  welcome: "Hi {First name},\n\nThank you for coming in to see us. Here is the treatment plan we talked about, organised by the concerns you'd like to work on.",
+  closing: "If you have any questions about your plan, or you'd like to book your next treatment, give us a call or reply to this email.",
+  disclaimer: "Prices are a guide only and may change. Your clinician will confirm the details at each visit.",
+  showPrices: true,
+  emailSubject: "Your treatment plan - Dermedica",
+  emailMessage: "Hi {First name},\n\nYour treatment plan is attached. If you have any questions, or you'd like to book, reply to this email or give us a call.\n\nKind regards,\nDermedica",
+};
+
+function cleanDocSettings(x = {}) {
+  const d = PLAN_DOC_DEFAULTS;
+  const text = (v, n, fb) => (typeof v === "string" ? String(v).slice(0, n) : fb);
+  return {
+    title: clip(x.title, 80) || d.title,
+    colour: HEX.test(x.colour || "") ? x.colour : d.colour,
+    welcome: text(x.welcome, 2000, d.welcome),
+    closing: text(x.closing, 2000, d.closing),
+    disclaimer: text(x.disclaimer, 1000, d.disclaimer),
+    showPrices: x.showPrices === undefined ? d.showPrices : x.showPrices === true,
+    emailSubject: clip(x.emailSubject, 200) || d.emailSubject,
+    emailMessage: text(x.emailMessage, 3000, d.emailMessage),
+  };
+}
+
+export async function getPlanDocSettings() {
+  const s = await getDoc(doc(db, "plan_settings", "document"));
+  return cleanDocSettings(s.exists() ? s.data() : {});
+}
+
+export async function savePlanDocSettings(x, staff) {
+  await setDoc(doc(db, "plan_settings", "document"), { ...cleanDocSettings(x), ...stamp(staff) });
+}
+
+// The PDF → the clinic printer, or emailed to the patient (Apps Script checks access and logs it)
+export async function deliverPlanDoc(payload) {
+  return callApi({ action: "plan", op: "deliver", ...payload });
+}
