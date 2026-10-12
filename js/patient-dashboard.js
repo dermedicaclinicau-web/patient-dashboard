@@ -27,6 +27,7 @@ import {
   parseDateKey, formatShortDate,
 } from "./utils.js";
 import { listSubmissionsForPatient } from "./form-submissions.js";
+import { showSoapPanel } from "./soap-panel.js";
 
 /* ===================== Config ===================== */
 
@@ -188,7 +189,6 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   let pastForms = [];          // badge records from completed forms
   let pastSummaries = [];      // badge records from recorded consultations
   let pastFormsLoaded = false;
-  let summaryById = new Map();
 
   root.addEventListener("click", (e) => {
     const t = e.target;
@@ -219,7 +219,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     if (sumBtn) {
       const menu = sumBtn.closest(".pa-bdg-menu");
       if (menu) menu.open = false;
-      openSummary(sumBtn.dataset.paSummary);
+      showSoapPanel(sumBtn.dataset.paSummary); // the Consultation notes panel
       return;
     }
     const soon = t.closest("[data-soon]");
@@ -389,7 +389,6 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       if (!root.isConnected) return;
 
       // Summary badges on the Past appointments day cards
-      summaryById = new Map(records.map((r) => [r.id, r]));
       pastSummaries = records.filter((r) => r.date && r.soap.trim()).map((r) => ({
         dateKey: toDateKey(r.date), kind: "summary", summaryId: r.id,
         label: `Consultation${r.staff ? ` · ${r.staff}` : ""}`,
@@ -498,24 +497,6 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     }
   }
 
-  function openSummary(id) {
-    const r = summaryById.get(id);
-    if (!r) return;
-    const dlg = document.createElement("dialog");
-    dlg.className = "dialog wide-dialog pa-sum-dlg";
-    dlg.innerHTML = `
-      <div class="dialog-body">
-        <h2 class="serif">Consultation summary</h2>
-        <p class="pa-sum-meta">${escapeHtml([r.date ? formatShortDate(r.date) : r.dateText, r.staff && `by ${r.staff}`,
-          r.matchedByName && "matched by name"].filter(Boolean).join(" · "))}</p>
-        <div class="pa-soap">${soapHtml(r.soap)}</div>
-        <div class="dialog-actions"><button type="button" class="btn-primary" data-x>Close</button></div>
-      </div>`;
-    document.body.appendChild(dlg);
-    dlg.addEventListener("close", () => dlg.remove());
-    dlg.querySelector("[data-x]").addEventListener("click", () => dlg.close());
-    dlg.showModal();
-  }
 
   async function mergeInfo() {
     const ids = patient.mergedIds.join(", ");
@@ -1020,16 +1001,6 @@ function setPastApptRecords(root, list, formsLoaded) {
   if (card._pa.visits.length) renderPastAppts(card);
 }
 
-// Consultation summary text: "!!HEADING:" sections become headings
-function soapHtml(soap) {
-  const parts = String(soap || "").split(/!!\s*([A-Za-z][A-Za-z &/()-]{2,})\s*:?/);
-  let html = parts[0].trim() ? `<p>${escapeHtml(parts[0].trim())}</p>` : "";
-  for (let i = 1; i < parts.length; i += 2) {
-    const body = (parts[i + 1] || "").trim();
-    html += `<h4>${escapeHtml(parts[i].trim())}</h4>${body ? `<p>${escapeHtml(body)}</p>` : ""}`;
-  }
-  return html || '<p class="empty-note">There\'s no summary text in this record.</p>';
-}
 
 /* ===================== Reminders ===================== */
 
