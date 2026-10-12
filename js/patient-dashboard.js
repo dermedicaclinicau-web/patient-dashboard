@@ -80,6 +80,7 @@ const VISIT_CATEGORIES = [
 /* ===================== Past appointments ===================== */
 
 const PA_SHOW = 8; // visits shown before "Show older visits"
+const PA_SHOW_CATEGORY = 4; // category cards are half-width, so show fewer before "Show older"
 
 // Tags on the end of service names that mean nothing to staff, e.g. "Face[prg]", "Application prk"
 const PA_TRIM = /\s*\[?\b(?:prg|prk)\b\]?\s*$/i;
@@ -212,7 +213,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     }
     const paMore = t.closest("[data-action='pa-more']");
     if (paMore) {
-      const card = paMore.closest("details[data-key='past-appts']");
+      const card = paMore.closest("details.sub-card");
       if (card && card._pa) { card._pa.all = !card._pa.all; renderPastAppts(card); }
       return;
     }
@@ -232,7 +233,14 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   // <details> "toggle" doesn't bubble, so listen in the capture phase
   root.addEventListener("toggle", (e) => {
     const d = e.target;
-    if (d.matches && d.matches("details[data-key]")) saveOpen(d.dataset.key, d.open);
+    if (!d.matches || !d.matches("details[data-key]")) return;
+    saveOpen(d.dataset.key, d.open);
+    // Category cards side by side open and close together
+    if (d.dataset.pair !== undefined) {
+      root.querySelectorAll(`details[data-pair="${CSS.escape(d.dataset.pair)}"]`).forEach((o) => {
+        if (o !== d && o.open !== d.open) o.open = d.open;
+      });
+    }
   }, true);
 
   // Close any open record-badge menu (e.g. "Tx Record ×2") when clicking elsewhere
@@ -687,9 +695,10 @@ function barHtml(p, today = [], pre = null) {
 }
 
 function subCard({ key, title, icon = "", body = "", pill = "", tone = "", action = null,
-                   field = "", unit = "", extraClass = "", open = false, remember = true }) {
+                   field = "", unit = "", extraClass = "", open = false, remember = true, pair = "" }) {
   return `
     <details class="sub-card ${tone ? `tone-${tone}` : ""} ${extraClass}" data-key="${escapeHtml(key)}"${
+      pair !== "" ? ` data-pair="${escapeHtml(String(pair))}"` : ""}${
       field ? ` data-field="${escapeHtml(field)}"` : ""}${unit ? ` data-unit="${escapeHtml(unit)}"` : ""} ${
       (remember ? isOpen(key, open) : open) ? "open" : ""}>
       <summary>
@@ -736,13 +745,16 @@ function preConsultHtml() {
 
 function visitsHtml() {
   const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-  const cards = VISIT_CATEGORIES.flatMap((row) =>
-    row.map((c) => subCard({
+  const cards = VISIT_CATEGORIES.flatMap((row, ri) => {
+    // Both cards in a row start the same way: open or closed as the row was last left
+    const open = isOpen(`visit-${slug(row[0].title)}`, false);
+    return row.map((c) => subCard({
       key: `visit-${slug(c.title)}`, title: c.title, tone: c.color,
       field: c.field, unit: "visit|visits", extraClass: "visit-card",
+      remember: false, open, pair: ri,
       body: `<div class="skeleton xs"></div>`,
-    }))
-  ).join("");
+    }));
+  }).join("");
 
   return `
     <div class="visits-block">
@@ -849,8 +861,8 @@ function fillPreconsult(root, data, lastUpdated) {
     hint.hidden = d.classList.contains("visit-card") && !lines.length;
     d.classList.toggle("is-empty", !lines.length);
 
-    // Past appointments: day cards
-    if (d.dataset.key === "past-appts") {
+    // Past appointments and the category cards: day cards
+    if (d.dataset.key === "past-appts" || d.classList.contains("visit-card")) {
       const prev = d._pa;
       d._pa = { ...paParse(lines), all: prev ? prev.all : false, records: prev ? prev.records : new Map(), formsLoaded: prev ? prev.formsLoaded : false };
       if (d._pa.visits.length) {
@@ -997,11 +1009,13 @@ function paCardHtml(v, recs, formsLoaded) {
 function renderPastAppts(card) {
   const st = card._pa;
   if (!st) return;
-  const shown = st.all ? st.visits : st.visits.slice(0, PA_SHOW);
+  const limit = card.classList.contains("visit-card") ? PA_SHOW_CATEGORY : PA_SHOW;
+  const shown = st.all ? st.visits : st.visits.slice(0, limit);
   const kinds = new Set(shown.flatMap((v) => v.items.map((it) => it.kind)));
 
-  let html = `<div class="pa-legend">${Object.keys(PA_KIND_LABEL).filter((k) => kinds.has(k)).map((k) =>
-    `<span><i class="pa-dot is-${k}" aria-hidden="true"></i>${PA_KIND_LABEL[k]}</span>`).join("")}</div>`;
+  // The colour legend only helps when there's more than one kind to tell apart
+  let html = kinds.size > 1 ? `<div class="pa-legend">${Object.keys(PA_KIND_LABEL).filter((k) => kinds.has(k)).map((k) =>
+    `<span><i class="pa-dot is-${k}" aria-hidden="true"></i>${PA_KIND_LABEL[k]}</span>`).join("")}</div>` : "";
   let year = null;
   shown.forEach((v) => {
     const y = v.date.getFullYear();
@@ -1016,33 +1030,33 @@ function renderPastAppts(card) {
 
   const more = st.visits.length - shown.length;
   if (more > 0) {
-    const newest = st.visits[PA_SHOW].date.getFullYear();
+    const newest = st.visits[limit].date.getFullYear();
     const oldest = st.visits[st.visits.length - 1].date.getFullYear();
     html += `<button type="button" class="pa-more" data-action="pa-more">Show ${more} older visit${more === 1 ? "" : "s"} (${
       oldest === newest ? oldest : `${oldest} to ${newest}`})</button>`;
-  } else if (st.all && st.visits.length > PA_SHOW) {
+  } else if (st.all && st.visits.length > limit) {
     html += `<button type="button" class="pa-more" data-action="pa-more">Show fewer</button>`;
   }
   if (st.other.length) html += `<ul class="pc-list pa-other">${st.other.map((l) => `<li>${escapeHtml(l)}</li>`).join("")}</ul>`;
   card.querySelector(".sub-body").innerHTML = html;
 }
 
-// list: [{ dateKey, kind, href | summaryId, label }]. formsLoaded: form records were read, so "No Tx Record" is trustworthy
+// list: [{ dateKey, kind, href | summaryId, label }]. formsLoaded: records were read, so "No Tx Record" is trustworthy.
+// Goes to Past appointments AND every category card.
 function setPastApptRecords(root, list, formsLoaded) {
-  const card = root.querySelector('details[data-key="past-appts"]');
-  if (!card) return;
   const map = new Map();
   (list || []).forEach((r) => {
     if (!r.dateKey || !r.kind) return;
     if (!map.has(r.dateKey)) map.set(r.dateKey, []);
     map.get(r.dateKey).push(r);
   });
-  if (!card._pa) { card._pa = { visits: [], other: [], all: false, records: map, formsLoaded }; return; }
-  card._pa.records = map;
-  card._pa.formsLoaded = formsLoaded;
-  if (card._pa.visits.length) renderPastAppts(card);
+  root.querySelectorAll('details[data-key="past-appts"], details.visit-card').forEach((card) => {
+    if (!card._pa) { card._pa = { visits: [], other: [], all: false, records: map, formsLoaded }; return; }
+    card._pa.records = map;
+    card._pa.formsLoaded = formsLoaded;
+    if (card._pa.visits.length) renderPastAppts(card);
+  });
 }
-
 
 /* ===================== Reminders ===================== */
 
