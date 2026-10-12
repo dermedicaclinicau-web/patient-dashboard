@@ -37,11 +37,13 @@ export const ICONS = {
   space: '<line x1="12" y1="3" x2="12" y2="21"/><polyline points="8 7 12 3 16 7"/><polyline points="8 17 12 21 16 17"/>',
   x: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
   consumables: '<path d="m18 2 4 4"/><path d="m17 7 3-3"/><path d="M19 9 8.7 19.3a2.4 2.4 0 0 1-3.4 0l-.6-.6a2.4 2.4 0 0 1 0-3.4L15 5"/><path d="m9 11 4 4"/><path d="m5 19-3 3"/>',
+  clinician: '<rect x="2" y="5" width="20" height="14" rx="2"/><circle cx="8" cy="12" r="2.5"/><path d="M14 10h5M14 14h4"/>',
 };
 
 // `was` = the name in the old Apps Script builder (tooltip + search).
 export const FIELD_TYPES = {
   patient:        { name: "Patient details", was: "Patient Details", label: "Patient details" },
+  clinician:      { name: "Clinician details", was: "Provider number Prescriber AHPRA Doctor", label: "Clinician" },
   short_text:     { name: "Short answer", was: "Short Text", label: "Untitled question" },
   long_text:      { name: "Long answer", was: "Long Text", label: "Untitled question" },
   email:          { name: "Email", was: "Email", label: "Email address" },
@@ -68,7 +70,7 @@ export const FIELD_TYPES = {
 };
 
 export const FIELD_GROUPS = [
-  ["Patient and visit", ["patient", "record_date", "date"]],
+  ["Patient and visit", ["patient", "clinician", "record_date", "date"]],
   ["Answers", ["short_text", "long_text", "number", "email"]],
   ["Choices", ["single_choice", "dropdown", "checkboxes", "checkbox_notes", "sub_checks"]],
   ["Clinical", ["signature", "consent_status", "prescription_status", "image", "aftercare", "consumables"]],
@@ -93,7 +95,7 @@ const LAYOUT_TYPES = ["single_choice", "checkboxes", "checkbox_notes"];
 const PLACEHOLDER_TYPES = ["short_text", "long_text", "email", "number", "dropdown"];
 export const INLINE_TYPES = ["short_text", "email", "number", "date", "record_date", "dropdown", "single_choice", "checkboxes", "calculation"];
 // Fields that get the Layout settings
-const ANSWER_TYPES = ["patient", "short_text", "long_text", "email", "number", "date", "record_date", "single_choice",
+const ANSWER_TYPES = ["patient", "clinician", "short_text", "long_text", "email", "number", "date", "record_date", "single_choice",
   "checkboxes", "checkbox_notes", "sub_checks", "dropdown", "table", "calculation", "signature", "image", "consent_status", "prescription_status"];
 const BOX_TYPES = ["short_text", "email", "number", "date", "record_date", "dropdown"];
 const DRIVE_ID = /^[A-Za-z0-9_-]{10,80}$/;
@@ -148,6 +150,23 @@ export function patientParts(f) {
   return PATIENT_PARTS.filter(([k]) => keys.includes(k));
 }
 
+// Which staff details the Clinician details block can show (from Staff → Edit → Registration)
+export const CLINICIAN_PARTS = [
+  ["name", "Name"],
+  ["quals", "Title and qualifications"],
+  ["providerNo", "Provider number"],
+  ["prescriberNo", "Prescriber number"],
+  ["ahpraNo", "AHPRA registration"],
+];
+const CLIN_KEYS = CLINICIAN_PARTS.map((p) => p[0]);
+const DEFAULT_CLIN = ["name", "providerNo"];
+export function clinicianParts(f) {
+  const keys = Array.isArray(f.parts) && f.parts.length ? f.parts : DEFAULT_CLIN;
+  return CLINICIAN_PARTS.filter(([k]) => keys.includes(k));
+}
+// Short answers that fill in from the staff member's registration details
+export const STAFF_FILLS = ["staff.providerNo", "staff.prescriberNo", "staff.ahpraNo", "staff.quals"];
+
 export const SIGNERS = {
   patient: "Patient",
   practitioner: "Practitioner",
@@ -166,9 +185,14 @@ export const FILLS = {
   "patient.address": "Patient address",
   "today": "Today's date",
   "staff.name": "Staff member filling it in",
+  "staff.providerNo": "Provider number (staff filling it in)",
+  "staff.prescriberNo": "Prescriber number (staff filling it in)",
+  "staff.ahpraNo": "AHPRA registration (staff filling it in)",
+  "staff.quals": "Title and qualifications (staff filling it in)",
 };
 export const FILLS_FOR = {
-  short_text: ["", "patient.name", "patient.firstName", "patient.lastName", "patient.email", "patient.mobile", "patient.address", "staff.name"],
+  short_text: ["", "patient.name", "patient.firstName", "patient.lastName", "patient.email", "patient.mobile", "patient.address", "staff.name",
+    "staff.providerNo", "staff.prescriberNo", "staff.ahpraNo", "staff.quals"],
   long_text: ["", "patient.address"],
   email: ["", "patient.email"],
   date: ["", "today", "patient.dob"],
@@ -204,6 +228,7 @@ export function createField(type, id) {
 
   switch (type) {
     case "patient": f.parts = [...DEFAULT_PARTS]; break;
+    case "clinician": f.parts = [...DEFAULT_CLIN]; f.who = "me"; break;
     case "long_text": f.size = "medium"; break;
     case "date": f.range = "any"; break;
     case "signature": f.signer = "patient"; f.showNameDate = true; break;
@@ -242,6 +267,7 @@ export function normaliseField(f) {
   if (out.type === "sub_checks" && !(Array.isArray(out.groups) && out.groups.length)) out.groups = [{ label: "Option A", subs: [] }];
   if (out.type === "table" && !(Array.isArray(out.columns) && out.columns.length)) out.columns = [{ label: "Column 1", type: "text" }];
   if (out.type === "patient" && !(Array.isArray(out.parts) && out.parts.length)) out.parts = [...DEFAULT_PARTS];
+  if (out.type === "clinician" && !(Array.isArray(out.parts) && out.parts.length)) out.parts = [...DEFAULT_CLIN];
   return out;
 }
 
@@ -292,6 +318,12 @@ export function cleanField(f) {
     case "patient": {
       const parts = (Array.isArray(f.parts) ? f.parts : []).filter((k) => PART_KEYS.includes(k));
       out.parts = parts.length ? PART_KEYS.filter((k) => parts.includes(k)) : ["name"];
+      break;
+    }
+    case "clinician": {
+      const parts = (Array.isArray(f.parts) ? f.parts : []).filter((k) => CLIN_KEYS.includes(k));
+      out.parts = parts.length ? CLIN_KEYS.filter((k) => parts.includes(k)) : ["name"];
+      out.who = f.who === "choose" ? "choose" : "me";
       break;
     }
     case "long_text": out.size = pick(f.size, ["small", "medium", "large"], "medium"); break;
@@ -619,6 +651,16 @@ export function renderField(f, ctx = {}) {
             f.block ? ", and stops the form being saved if there isn't one" : ""}.</div>`
         : `<div class="fe-consent is-warn">${icon}Choose which ${rx ? "prescription" : "consent"} form to check.</div>`);
     }
+    case "clinician": {
+      const pick = f.who === "choose";
+      return head + `<div class="fe-patient fe-clin">${pick
+        ? `<label class="is-wide"><small>Clinician</small><select class="fe-in" data-clin-pick${inert}><option value="">Choose a clinician</option></select></label>` : ""}${
+        clinicianParts(f).map(([k, l]) =>
+          `<label${k === "quals" ? ' class="is-wide"' : ""}><small>${l}</small><input class="fe-in" type="text" data-cpart="${k}" maxlength="150"${inert} /></label>`).join("")}</div>` +
+        (live ? "" : `<div class="fe-help fe-help-after">${pick
+          ? "Staff choose the clinician; it starts with whoever is filling it in."
+          : "Filled in for whoever is filling in the form."} From their details in Staff; they can still change them.</div>`);
+    }
     case "patient":
       return head + `<div class="fe-patient">${patientParts(f).map(([k, l]) =>
         `<label${k === "address" ? ' class="is-wide"' : ""}><small>${l}</small><input class="fe-in" type="text" data-part="${k}"${inert} /></label>`).join("")}</div>` +
@@ -703,6 +745,16 @@ function typeSettings(f, ctx = {}) {
         <div class="fe-parts">${PATIENT_PARTS.map(([k, l]) =>
           `<label class="fe-check"><input type="checkbox" data-part="${k}" data-rerender=""${on.includes(k) ? " checked" : ""} /> ${esc(l)}</label>`).join("")}</div>
         <small class="fe-note">Filled in from the patient's record. At least one detail is always shown.</small></div>`;
+    }
+
+    case "clinician": {
+      const on = clinicianParts(f).map(([k]) => k);
+      return setting("Whose details", choose("who", [["me", "Whoever is filling in the form"], ["choose", "Staff choose a clinician"]], f.who || "me"),
+          "Choose a clinician suits Reception completing a form for a doctor. It starts with whoever is filling it in.") +
+        `<div class="fe-insp-field"><span class="fe-insp-label">Details to show</span>
+          <div class="fe-parts">${CLINICIAN_PARTS.map(([k, l]) =>
+            `<label class="fe-check"><input type="checkbox" data-clinpart="${k}" data-rerender=""${on.includes(k) ? " checked" : ""} /> ${esc(l)}</label>`).join("")}</div>
+          <small class="fe-note">From each person's Registration in Staff. They can still change them on the form, for example a provider number for another location.</small></div>`;
     }
 
     case "short_text":
@@ -1117,6 +1169,13 @@ function layoutSettings(f) {
 // Typing in table columns, sub-option groups, patient detail ticks and layout buttons.
 // Returns true if it changed something.
 export function applyInput(f, el) {
+  if (el.dataset.clinpart !== undefined) {
+    const on = new Set(clinicianParts(f).map(([k]) => k));
+    if (el.checked) on.add(el.dataset.clinpart);
+    else if (on.size > 1) on.delete(el.dataset.clinpart); // always keep at least one
+    f.parts = CLIN_KEYS.filter((k) => on.has(k));
+    return true;
+  }
   if (el.dataset.imgmode !== undefined) {
     f.annotate = el.value !== "none";
     f.markMode = el.value === "marks" ? "marks" : "draw";

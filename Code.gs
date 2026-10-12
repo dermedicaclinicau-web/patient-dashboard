@@ -131,6 +131,10 @@ function getStaffDocs_() {
       lastLogin: field_(f, 'Last Login'),
       access: f['Access'] ? fromValue_(f['Access']) : null,
       injector: !!(f['Injector'] && f['Injector'].booleanValue === true),
+      providerNo: field_(f, 'Provider Number'),
+      prescriberNo: field_(f, 'Prescriber Number'),
+      ahpraNo: field_(f, 'AHPRA Number'),
+      quals: field_(f, 'Qualifications'),
     };
   });
   try {
@@ -2050,7 +2054,10 @@ function handleStaffList_(body) {
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
   const staff = getStaffDocs_()
     .filter(function (s) { return s.name && s.active !== false; })
-    .map(function (s) { return { id: s.id, name: s.name, role: s.role, hasEmail: !!s.email }; })
+    .map(function (s) {
+      return { id: s.id, name: s.name, role: s.role, hasEmail: !!s.email,
+        providerNo: s.providerNo || '', prescriberNo: s.prescriberNo || '', ahpraNo: s.ahpraNo || '', quals: s.quals || '' };
+    })
     .sort(function (a, b) { return a.name.localeCompare(b.name); });
   return { ok: true, staff: staff };
 }
@@ -2751,9 +2758,26 @@ function staffList_() {
   const staff = staffFresh_().map(function (s) {
     return { id: s.id, name: s.name, role: s.role, email: s.email, photo: s.photo,
       active: s.active !== false, lastLogin: s.lastLogin || '', hasPin: !!(s.pinHash || s.pin),
-      injector: s.injector === true, access: s.access || { allow: [], deny: [] } };
+      injector: s.injector === true,
+      providerNo: s.providerNo || '', prescriberNo: s.prescriberNo || '', ahpraNo: s.ahpraNo || '', quals: s.quals || '',
+      access: s.access || { allow: [], deny: [] } };
     }).sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
   return { ok: true, staff: staff, roles: roleNames_(), locked: isLockedOut_() };
+}
+
+// Provider / prescriber / AHPRA numbers and the title line. All optional; checked loosely.
+function staffRegClean_(p) {
+  const code = function (v, n) { return String(v == null ? '' : v).replace(/\s+/g, '').toUpperCase().slice(0, n); };
+  const out = {
+    providerNo: code(p.providerNo, 12),
+    prescriberNo: code(p.prescriberNo, 10),
+    ahpraNo: code(p.ahpraNo, 16),
+    quals: staffClean_(p.quals, 150),
+  };
+  if (out.providerNo && !/^\d{5,6}[0-9A-Z][A-Z]$/.test(out.providerNo)) return { error: 'BAD_PROVIDER' };
+  if (out.prescriberNo && !/^\d{6,7}$/.test(out.prescriberNo)) return { error: 'BAD_PRESCRIBER' };
+  if (out.ahpraNo && !/^[A-Z]{3}\d{10}$/.test(out.ahpraNo)) return { error: 'BAD_AHPRA' };
+  return out;
 }
 
 function staffSave_(p, session) {
@@ -2770,6 +2794,8 @@ function staffSave_(p, session) {
   const now = new Date().toISOString();
   const access = cleanAccess_(p.access, role);
   const injector = p.injector === true;
+  const reg = staffRegClean_(p);
+  if (reg.error) return { ok: false, error: reg.error };
 
 
   if (p.id) {
@@ -2780,7 +2806,9 @@ function staffSave_(p, session) {
     }
     fsPatch_(cfg, STAFF_COLLECTION + '/' + cur.id, {
       'Staff Name': name, 'Role': role, 'Email address': email, 'Profile Photo': photo, 'Access': access,
-      'Injector': injector, 'Updated At': now, 'Updated By': String(session.name || ''),
+      'Injector': injector, 'Provider Number': reg.providerNo, 'Prescriber Number': reg.prescriberNo,
+      'AHPRA Number': reg.ahpraNo, 'Qualifications': reg.quals,
+      'Updated At': now, 'Updated By': String(session.name || ''),
     });
     
    const changes = [];
@@ -2789,6 +2817,10 @@ function staffSave_(p, session) {
     if (cur.email !== email) changes.push('email');
     if (cur.photo !== photo) changes.push('photo');
     if ((cur.injector === true) !== injector) changes.push(injector ? 'now an injector' : 'no longer an injector');
+    if ((cur.providerNo || '') !== reg.providerNo) changes.push('provider number');
+    if ((cur.prescriberNo || '') !== reg.prescriberNo) changes.push('prescriber number');
+    if ((cur.ahpraNo || '') !== reg.ahpraNo) changes.push('AHPRA number');
+    if ((cur.quals || '') !== reg.quals) changes.push('title');
     if (JSON.stringify(cur.access || { allow: [], deny: [] }) !== JSON.stringify(access)) changes.push('access');
     staffAudit_(cfg, session, 'Edited', { id: cur.id, name: name }, changes.join(', '));
     CacheService.getScriptCache().remove('staff_docs_v1');
@@ -2802,6 +2834,8 @@ function staffSave_(p, session) {
   commitWrites_(cfg, [updateWrite_(cfg, STAFF_COLLECTION + '/' + id, {
     'Staff Name': name, 'Role': role, 'Email address': email, 'Profile Photo': photo,
     'PIN': '', 'PIN Hash': pinHash_(pin), 'Active': true, 'Access': access, 'Injector': injector,
+    'Provider Number': reg.providerNo, 'Prescriber Number': reg.prescriberNo,
+    'AHPRA Number': reg.ahpraNo, 'Qualifications': reg.quals,
     'Created At': now, 'Created By': String(session.name || ''),
   })]);
   staffAudit_(cfg, session, 'Added', { id: id, name: name }, 'role ' + role);

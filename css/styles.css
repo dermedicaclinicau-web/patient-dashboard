@@ -4066,3 +4066,12 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .sl-ticks { max-height: 52vh; }
 .ivx-note { margin: .5rem 0 0; font-size: .82rem; }
 @media (max-width: 760px) { .sl-row { grid-template-columns: 1fr; } }
+
+/* ---------- Staff registration + Clinician details ---------- */
+.st-reg { margin: .4rem 0 0; padding: .7rem .9rem .9rem; border: 1px solid var(--border); border-radius: 12px; }
+.st-reg legend { padding: 0 .35rem; font-size: .85rem; font-weight: 600; }
+.st-reg .fe-note { margin: 0 0 .5rem; }
+.st-reg-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem .8rem; }
+.st-reg-wide { grid-column: 1 / -1; }
+.fe-clin select.fe-in { width: 100%; }
+@media (max-width: 560px) { .st-reg-grid { grid-template-columns: 1fr; } }

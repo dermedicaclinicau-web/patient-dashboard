@@ -4,7 +4,7 @@
 // backup PDF converter can render it too.)
 import { formatCalc } from "./form-calc.js";
 import { visibleIds } from "./form-conditions.js";
-import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing, textBlockHtml } from "./form-fields.js";
+import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing, textBlockHtml, clinicianParts } from "./form-fields.js";
 import { cleanRichHtml } from "./rich-html.js";
 import { markSummary } from "./marking-sets.js";
 
@@ -119,6 +119,7 @@ function isUnanswered(f, v, sig) {
   switch (f.type) {
     case "signature": return !(typeof sig === "string" && PNG_RE.test(sig));
     case "patient": return !v || !Object.values(v).some((x) => String(x ?? "").trim());
+    case "clinician": return !v || typeof v !== "object" || !Object.entries(v).some(([k, x]) => k !== "staffId" && String(x ?? "").trim());
     case "table": return !Array.isArray(v) || !v.some((r) => r && Array.isArray(r.cells) && r.cells.some((c) => c !== "" && c !== false && c != null));
     case "calculation": case "consent_status": case "prescription_status": return true;
     default: return v === null || v === undefined || v === "" || (Array.isArray(v) && !v.length);
@@ -170,6 +171,9 @@ function blankAnswer(f) {
       return '<div class="sig-box"></div><div class="sigmeta">Name: <span class="bl-in" style="width:220px"></span> &nbsp;&nbsp; Date: <span class="bl-in" style="width:110px"></span></div>';
     case "patient":
       return `<table class="kv">${patientParts(f).map(([, l]) =>
+        `<tr><td class="k">${esc(l)}</td><td><span class="bl-in" style="width:320px"></span></td></tr>`).join("")}</table>`;
+    case "clinician":
+      return `<table class="kv">${clinicianParts(f).map(([, l]) =>
         `<tr><td class="k">${esc(l)}</td><td><span class="bl-in" style="width:320px"></span></td></tr>`).join("")}</table>`;
     case "consent_status": case "prescription_status":
       return "";
@@ -238,6 +242,11 @@ function answer(f, v, sig, inline, x, blank = false) {
     case "patient": {
       const d = v || {};
       return `<table class="kv">${patientParts(f).map(([k, l]) =>
+        `<tr><td class="k">${esc(l)}</td><td>${d[k] ? esc(d[k]) : '<span class="none">—</span>'}</td></tr>`).join("")}</table>`;
+    }
+    case "clinician": {
+      const d = v && typeof v === "object" ? v : {};
+      return `<table class="kv">${clinicianParts(f).map(([k, l]) =>
         `<tr><td class="k">${esc(l)}</td><td>${d[k] ? esc(d[k]) : '<span class="none">—</span>'}</td></tr>`).join("")}</table>`;
     }
     case "consent_status":

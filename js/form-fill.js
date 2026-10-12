@@ -2,7 +2,7 @@
 // View a saved one:                      #/form-record/<submissionId>
 import { getFormTemplate, getFormVersion, getLetterhead, categoryLabel } from "./form-templates.js";
 import { esc, svg, ICONS, renderField, normaliseField, watermarkHtml, canRequire,
-  choiceList, otherLabel, syncChoiceExtras, readExtras, writeExtras, readImageQs, writeImageQs } from "./form-fields.js";
+  choiceList, otherLabel, syncChoiceExtras, readExtras, writeExtras, readImageQs, writeImageQs, STAFF_FILLS } from "./form-fields.js";
 import { listMarkingSets, markSummary } from "./marking-sets.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { letterheadHtml, DEFAULT_LETTERHEAD } from "./form-letterhead.js";
@@ -22,6 +22,7 @@ import { mountAftercareField } from "./aftercare-field.js";
 import { mountPhotoField } from "./photo-field.js";
 import { mountConsumablesField, consumablesViewHtml } from "./consumables-field.js";
 import { consumeInTx } from "./inventory-api.js";
+import { listStaffDetails, staffDetailsFor } from "./staff-details.js";
 
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const BAR_ICONS = {
@@ -231,6 +232,13 @@ export function readField(f, w, { pads = {}, calc = {}, consent = {}, annots = {
       const d = w.querySelector("[data-sig-date]");
       return { signed: true, name: n ? n.value.trim().slice(0, 120) : "", date: d ? d.value : todayIso() };
     }
+    case "clinician": {
+      const out = {};
+      const sel = w.querySelector("[data-clin-pick]");
+      if (sel && sel.value) out.staffId = sel.value;
+      $all(w, "[data-cpart]").forEach((el) => { out[el.dataset.cpart] = el.value.trim().slice(0, 150); });
+      return Object.keys(out).some((k) => k !== "staffId" && out[k]) ? out : "";
+    }
     case "patient": {
       const out = {};
       $all(w, "[data-part]").forEach((el) => { out[el.dataset.part] = el.value; });
@@ -334,6 +342,17 @@ function writeField(f, w, v) {
     case "calculation": {
       const out = w.querySelector("[data-calc]");
       if (out) out.textContent = formatCalc(v, f) || "—";
+      break;
+    }
+    case "clinician": {
+      const sel = w.querySelector("[data-clin-pick]");
+      if (sel && v && v.staffId) {
+        if (![...sel.options].some((o) => o.value === v.staffId)) {
+          sel.insertAdjacentHTML("beforeend", `<option value="${esc(v.staffId)}">${esc(v.name || "Clinician")}</option>`);
+        }
+        sel.value = v.staffId;
+      }
+      $all(w, "[data-cpart]").forEach((el) => { el.value = (v && v[el.dataset.cpart]) || ""; });
       break;
     }
     case "patient":
@@ -538,6 +557,45 @@ export async function mountFormFill(container, param, { staff } = {}) {
     }
   });
 
+    // Clinician details and the staff number fills: from Staff, loaded in the background. Never overwrites typing.
+  let staffList = [];
+  const meDetails = () => staffDetailsFor(staffList, staff) || { id: "", name: (staff && staff.name) || "" };
+  const fillClin = (w, d, overwrite) => $all(w, "[data-cpart]").forEach((el) => {
+    if (overwrite || !el.value) el.value = (d && d[el.dataset.cpart]) || "";
+  });
+  fields.filter((f) => f.type === "clinician").forEach((f) => { const w = wrap(f.id); if (w) fillClin(w, meDetails(), false); });
+  if (fields.some((f) => f.type === "clinician" || STAFF_FILLS.includes(f.fill))) {
+    listStaffDetails()
+      .then((list) => {
+        if (!root.isConnected) return;
+        staffList = list;
+        const me = meDetails();
+        fields.forEach((f) => {
+          const w = wrap(f.id);
+          if (!w) return;
+          if (STAFF_FILLS.includes(f.fill)) {
+            const el = w.querySelector(".fe-in");
+            const v = me[f.fill.slice(6)];
+            if (el && !el.value && v) el.value = v;
+          }
+          if (f.type === "clinician") {
+            const sel = w.querySelector("[data-clin-pick]");
+            if (sel) {
+              const keep = sel.value;
+              sel.innerHTML = '<option value="">Choose a clinician</option>' + list.map((s) =>
+                `<option value="${esc(s.id)}">${esc(s.name)}${s.providerNo ? ` · ${esc(s.providerNo)}` : ""}</option>`).join("");
+              sel.value = keep || me.id || "";
+            }
+            fillClin(w, me, false);
+          }
+        });
+        refresh();
+      })
+      .catch((err) => console.warn("Staff details not loaded:", err));
+  }
+
+  
+
   /* ---------- Calculations + which questions show ---------- */
   const rctx = () => ({ pads, calc, consent, annots });
 
@@ -625,6 +683,11 @@ export async function mountFormFill(container, param, { staff } = {}) {
   }
 
   sheet.addEventListener("input", (e) => {
+    const clinPick = e.target.closest("[data-clin-pick]");
+    if (clinPick) {
+      const d = staffList.find((s) => s.id === clinPick.value);
+      fillClin(clinPick.closest("[data-fid]"), d || {}, true);
+    }
     dirty = true;
     refresh();
     const w = e.target.closest("[data-fid]");
