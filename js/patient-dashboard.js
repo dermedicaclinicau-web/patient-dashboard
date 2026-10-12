@@ -642,7 +642,7 @@ function barHtml(p, today = [], pre = null) {
   const chips = [
     p.pttId && `<span class="chip">ID ${escapeHtml(p.pttId)}</span>`,
     today.length && `<span class="chip chip-today">Appt today ${escapeHtml(today[0].time || "")}</span>`,
-    pre && pre.overdue && `<span class="chip chip-alert">Overdue treatments</span>`,
+    pre && pre.overdue && overdueChipHtml(pre.overdue),
     p.mergedIds && p.mergedIds.length &&
       `<button type="button" class="chip chip-merged" data-action="merge-info">Merged · ${p.mergedIds.length} other ID${p.mergedIds.length > 1 ? "s" : ""}</button>`,
     p.redirectedFrom && `<span class="chip">Opened from merged record ${escapeHtml(p.redirectedFrom)}</span>`,
@@ -670,6 +670,30 @@ function barHtml(p, today = [], pre = null) {
       <div><dt>Email</dt><dd>${show(p.email)}</dd></div>
       <div><dt>Address</dt><dd>${show(p.address)}</dd></div>
     </dl>`;
+}
+
+// "Overdue treatments" chip with a bubble listing what's due (hover on desktop, tap on iPad)
+function overdueChipHtml(value) {
+  const lines = toLines(value);
+  if (!lines.length) return "";
+  return `
+    <span class="od-wrap">
+      <button type="button" class="chip chip-alert od-chip" aria-describedby="od-tip">
+        ${ICONS.alert}<span>Overdue treatments</span><em>${lines.length}</em>
+      </button>
+      <span class="od-tip" id="od-tip" role="tooltip">
+        <strong>Overdue treatments</strong>
+        <ul>${lines.map((l) => `<li>${overdueLineHtml(l)}</li>`).join("")}</ul>
+      </span>
+    </span>`;
+}
+
+// "Wrinkle Relaxer - last visit 21/4/2026" → bold name, detail underneath
+function overdueLineHtml(line) {
+  const m = /^(.+?)\s*(?:\s[-–—]\s|:\s)\s*(.+)$/.exec(line);
+  return m
+    ? `<b>${escapeHtml(m[1])}</b><small>${escapeHtml(m[2])}</small>`
+    : `<b>${escapeHtml(line)}</b>`;
 }
 
 function subCard({ key, title, icon = "", body = "", pill = "", tone = "", action = null,
