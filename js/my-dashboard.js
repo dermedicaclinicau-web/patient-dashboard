@@ -150,10 +150,10 @@ export async function mountMyDashboard(container, { staff } = {}) {
       show("appts") ? safe(myNotes(staff), []) : [],
       show("appts") ? safe(formsToday(todayKey), []) : [],
       can("inventory.count") || canOrder || canReport ? safe(listInvestigations({ open: true }), []) : [],
-      safe(getCountSettings(), { dueBy: "10:00" }),
       show("attention") && (can("consult.record") || canReport)
         ? safe(listUnrecordedTreatments({ fromKey: dayKey(new Date(Date.now() - 7 * DAY)), toKey: dayKey(new Date(Date.now() - DAY)) }), { items: [] })
         : { items: [] },
+      safe(getCountSettings(), { dueBy: "10:00" }),
     ]);
     if (!root.isConnected) return;
 
@@ -181,7 +181,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
         ...(isKitProduct(p) ? kits.filter((k) => k.productId === p.id).map((k) => `kit|${k.id}`) : []),
       ]);
       const left = dueKeys.filter((k) => !doneKeys.has(k)).length;
-      if (left) {
+           if (left) {
         const [dh, dm] = String(countCfg.dueBy || "10:00").split(":").map(Number);
         const nowD = new Date();
         const late = nowD.getHours() * 60 + nowD.getMinutes() >= dh * 60 + dm;
@@ -190,6 +190,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
           text: late ? `Opening count overdue (due ${dueText}): ${left} still to count` : `Opening count: ${left} still to count (due ${dueText})`,
           href: "#/tasks/count", act: "Count now" });
       }
+    }   // ← add this line: closes "if (can("inventory.count") || canOrder) {"
     // Reporting: differences and saved-short records waiting for someone
     if (canReport) {
       const diffs = openCounts.reduce((a, c) => a + (Number(c.openCount) || 0), 0);
