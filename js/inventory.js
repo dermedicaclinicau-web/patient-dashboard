@@ -5,6 +5,7 @@ import {
   applyStock, listRequests, setRequestStatus, cancelRequest, getRequestSettings, saveRequestSettings,
   listPos, createPo, poTotals, itemOnPo, lineFromProduct, cleanPoLine,
   productSuppliers, supplierTerms, suppliesProduct, suggestOrderFor,
+  listCounts, listInvestigations, dayKey,
 } from "./inventory-api.js";
 import { renderInvestigations, mountInvestigation } from "./investigations.js";
 import { mountPurchaseOrder } from "./purchase-order.js";

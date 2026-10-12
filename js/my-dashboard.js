@@ -4,7 +4,7 @@ import { can, isInjector } from "./perms.js";
 import {
   listProducts, listAllLots, listKits, listLoans, listReleases, listRequests, listMyUsage, listShortUsage, listPos,
   isKitProduct, kitUnits, expiryState, plural, unitPlural, lowAt, myUid, reqNumber, REQ_STATUS, REL_STATUS, countDue, countLocs, dayKey, listCountsOn,
-  listCounts, listShortAll,
+  listCounts, listShortAll, listInvestigations,
 } from "./inventory-api.js";
 import { listMySubmissions } from "./form-submissions.js";
 import { db } from "./firebase-config.js";
