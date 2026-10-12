@@ -394,11 +394,12 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           `<option value="${c.key}">${esc(c.label)}</option>`).join("")}</select></label>`
       : multi
         ? `<div class="lh-field"><span class="lh-label">Suppliers</span>
+            <input type="search" class="fe-input inv-supfind" data-role="supfind" placeholder="Search suppliers" aria-label="Search suppliers" autocomplete="off" />
             <div class="inv-supticks">${choices.map((s) => {
               const n = already(s.id);
-              return `<label class="fe-check"><input type="checkbox" name="v" value="${esc(s.id)}" /> ${esc(s.name)}${
+              return `<label class="fe-check" data-find="${esc(s.name.toLowerCase())}"><input type="checkbox" name="v" value="${esc(s.id)}" /> ${esc(s.name)}${
                 n ? ` <small class="muted">(already on ${n === list.length ? "all" : n})</small>` : ""}</label>`;
-            }).join("")}</div></div>`
+            }).join("")}<p class="tb-none" data-role="nomatch" hidden>No suppliers match.</p></div></div>`
         : `<label class="lh-field"><span class="lh-label">Supplier</span><select class="fb-select" name="v">${choices.map((s) =>
             `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("")}</select></label>`;
 
@@ -417,6 +418,22 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const form = dlg.querySelector("form");
     const pv = dlg.querySelector('[data-role="preview"]');
     const err = dlg.querySelector(".lh-error");
+    // Search suppliers: ticked ones always stay in view
+    const find = dlg.querySelector('[data-role="supfind"]');
+    if (find) {
+      find.addEventListener("input", () => {
+        const q = find.value.trim().toLowerCase();
+        let any = false;
+        dlg.querySelectorAll(".inv-supticks [data-find]").forEach((row) => {
+          const ok = !q || row.dataset.find.includes(q) || row.querySelector("input").checked;
+          row.hidden = !ok;
+          if (ok) any = true;
+        });
+        dlg.querySelector('[data-role="nomatch"]').hidden = any;
+      });
+      find.addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
+      find.focus();
+    }
     const value = () => (multi
       ? [...form.querySelectorAll('[name="v"]:checked')].map((x) => x.value)
       : form.elements.v.value);
@@ -425,8 +442,9 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       const v = value();
       if (multi && !v.length) { pv.textContent = "Tick one or more suppliers."; return; }
       const n = list.filter((p) => changeFor(p, v, keepOn())).length;
-      pv.textContent = !n ? "Nothing to change: they already have these suppliers."
-        : n === list.length ? `All ${n} will change.` : `${n} will change · ${list.length - n} already set that way.`;
+      const ticked = multi ? `${v.length} ticked · ` : "";
+      pv.textContent = ticked + (!n ? "Nothing to change: they already have these suppliers."
+        : n === list.length ? `All ${n} will change.` : `${n} will change · ${list.length - n} already set that way.`);
     };
     preview();
     form.addEventListener("change", preview);

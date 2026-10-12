@@ -3893,13 +3893,23 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .inv-group h3 .inv-pick { margin: 0 .55rem 0 0; vertical-align: -3px; }
 .inv-prow.is-picked { background: color-mix(in srgb, var(--primary) 7%, #fff); }
 .inv-pickall { margin: 0 0 .5rem; }
-.inv-bulk { position: sticky; top: .5rem; z-index: 5; display: flex; align-items: center; gap: .45rem; flex-wrap: wrap;
-  background: #fff; border: 1px solid var(--primary); border-radius: 12px; padding: .55rem .75rem; margin-bottom: .75rem;
-  box-shadow: 0 6px 18px rgba(16, 24, 40, .1); }
-.inv-bulk strong { margin-right: .35rem; }
+/* Bulk actions: a floating bar at the bottom of the screen while products are ticked */
+.inv-bulk { position: fixed; left: 50%; bottom: 1.25rem; transform: translateX(-50%); z-index: 50;
+  display: flex; align-items: center; gap: .45rem; flex-wrap: wrap; justify-content: center;
+  width: max-content; max-width: calc(100vw - 2rem);
+  background: #fff; border: 1px solid var(--primary); border-radius: 14px; padding: .6rem .8rem;
+  box-shadow: 0 12px 32px rgba(16, 24, 40, .18); animation: inv-bulk-in .18s ease-out; }
+.inv-bulk strong { margin-right: .35rem; white-space: nowrap; }
 .inv-bulk[hidden] { display: none; }
+@keyframes inv-bulk-in { from { opacity: 0; transform: translate(-50%, 12px); } to { opacity: 1; transform: translate(-50%, 0); } }
+/* Room at the bottom of the list so the bar never covers the last product */
+.inv-bulk:not([hidden]) ~ [data-role="plist"] { padding-bottom: 6rem; }
 
 /* Bulk "Add other suppliers": a scrollable tick list */
 .inv-supticks { display: grid; gap: .35rem; max-height: 46vh; overflow: auto; padding: .6rem .75rem;
   border: 1px solid var(--border, #e5e7eb); border-radius: 10px; background: var(--surface-2); }
 .inv-supticks .fe-check { margin: 0; }
+
+/* Bulk "Add other suppliers": search box and hidden rows */
+.inv-supfind { width: 100%; margin-bottom: .5rem; }
+.inv-supticks [hidden] { display: none; }
