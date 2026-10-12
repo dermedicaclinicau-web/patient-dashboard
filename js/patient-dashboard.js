@@ -26,6 +26,7 @@ import {
   formatMobile, toTelHref, toDateKey, showToast, formatUpdated,
   parseDateKey, formatShortDate,
 } from "./utils.js";
+import { listSubmissionsForPatient } from "./form-submissions.js";
 
 /* ===================== Config ===================== */
 
@@ -101,6 +102,19 @@ const PA_BADGES = {
   rx: { short: "Rx", full: "Prescription" },
   summary: { short: "Summary", full: "Summary" },
 };
+// "No Tx Record" warning on injectables visits from this date (YYYY-MM-DD). Visits before the portal had
+// treatment records aren't checked. Set to "" to turn the warning off.
+const PA_TX_CHECK_FROM = "2026-07-01";
+
+// Which badge a completed form gets ("" = no badge)
+function paFormKind(s) {
+  const c = String(s.category || "").toLowerCase();
+  if (c === "treatment") return "tx";
+  if (c === "consent") return "cons";
+  if (c === "rx" || c === "prescription" || /prescription/i.test(s.templateName || "")) return "rx";
+  if (c === "summary") return "summary";
+  return "";
+}
 /* ===================== Icons ===================== */
 
 const svg = (paths, cls = "") =>
@@ -171,6 +185,10 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   let notesView = null;
   let tasksView = null;
   let dialog, form, formError, saveBtn;
+  let pastForms = [];          // badge records from completed forms
+  let pastSummaries = [];      // badge records from recorded consultations
+  let pastFormsLoaded = false;
+  let summaryById = new Map();
 
   root.addEventListener("click", (e) => {
     const t = e.target;
@@ -197,6 +215,13 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       if (card && card._pa) { card._pa.all = !card._pa.all; renderPastAppts(card); }
       return;
     }
+    const sumBtn = t.closest("[data-pa-summary]");
+    if (sumBtn) {
+      const menu = sumBtn.closest(".pa-bdg-menu");
+      if (menu) menu.open = false;
+      openSummary(sumBtn.dataset.paSummary);
+      return;
+    }
     const soon = t.closest("[data-soon]");
     if (soon) { showToast(`${soon.dataset.soon}: coming soon`); return; }
     if (t.closest(".pb-edit")) { openEdit(); return; }
@@ -208,6 +233,13 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     const d = e.target;
     if (d.matches && d.matches("details[data-key]")) saveOpen(d.dataset.key, d.open);
   }, true);
+
+  // Close any open record-badge menu (e.g. "Tx Record ×2") when clicking elsewhere
+  const closeBadgeMenus = (e) => {
+    if (!root.isConnected) { document.removeEventListener("click", closeBadgeMenus); return; } // left this patient
+    root.querySelectorAll(".pa-bdg-menu[open]").forEach((m) => { if (!m.contains(e.target)) m.open = false; });
+  };
+  document.addEventListener("click", closeBadgeMenus);
 
   try {
     patient = await getPatient(patientId);
@@ -333,6 +365,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   loadToday();
   setRecordingPatient(patient); // shows "Ready to record" for this patient
   loadPreconsultData();
+  loadPastForms();
   loadReminders();
   notesView = mountPersonalNotes(root, patient, staff);
   loadTranscriptSections();
@@ -354,6 +387,14 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     try {
       const records = await fetchTranscriptRecords(patient);
       if (!root.isConnected) return;
+
+      // Summary badges on the Past appointments day cards
+      summaryById = new Map(records.map((r) => [r.id, r]));
+      pastSummaries = records.filter((r) => r.date && r.soap.trim()).map((r) => ({
+        dateKey: toDateKey(r.date), kind: "summary", summaryId: r.id,
+        label: `Consultation${r.staff ? ` · ${r.staff}` : ""}`,
+      }));
+      pushPastRecords();
 
       if (planCard) {
         const latest = latestTreatmentPlan(records);
@@ -398,7 +439,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     btn.disabled = true;
     btn.classList.add("is-loading");
     await Promise.allSettled([
-      loadToday(), loadPreconsultData(), loadReminders(), loadTranscriptSections(),
+      loadToday(), loadPreconsultData(), loadReminders(), loadTranscriptSections(), loadPastForms(),
       notesView ? notesView.reload() : null,
       tasksView ? tasksView.reload() : null,
     ]);
@@ -436,6 +477,46 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       }</p>`;
     }
   }
+
+  // Record badges on the Past appointments day cards
+  function pushPastRecords() {
+    setPastApptRecords(root, [...pastForms, ...pastSummaries], pastFormsLoaded);
+  }
+
+  async function loadPastForms() {
+    try {
+      const subs = await listSubmissionsForPatient([patient.id, ...patientIds(patient)]);
+      if (!root.isConnected) return;
+      pastForms = subs.map((s) => ({
+        dateKey: s.recordDate, kind: paFormKind(s), href: `#/form-record/${encodeURIComponent(s.id)}`,
+        label: [s.templateName, s.createdBy && `by ${s.createdBy}`].filter(Boolean).join(" · "),
+      })).filter((r) => r.kind && r.dateKey);
+      pastFormsLoaded = true;
+      pushPastRecords();
+    } catch (err) {
+      console.warn("Record badges: forms failed:", err); // badges just don't show; no false "No Tx Record"
+    }
+  }
+
+  function openSummary(id) {
+    const r = summaryById.get(id);
+    if (!r) return;
+    const dlg = document.createElement("dialog");
+    dlg.className = "dialog wide-dialog pa-sum-dlg";
+    dlg.innerHTML = `
+      <div class="dialog-body">
+        <h2 class="serif">Consultation summary</h2>
+        <p class="pa-sum-meta">${escapeHtml([r.date ? formatShortDate(r.date) : r.dateText, r.staff && `by ${r.staff}`,
+          r.matchedByName && "matched by name"].filter(Boolean).join(" · "))}</p>
+        <div class="pa-soap">${soapHtml(r.soap)}</div>
+        <div class="dialog-actions"><button type="button" class="btn-primary" data-x>Close</button></div>
+      </div>`;
+    document.body.appendChild(dlg);
+    dlg.addEventListener("close", () => dlg.remove());
+    dlg.querySelector("[data-x]").addEventListener("click", () => dlg.close());
+    dlg.showModal();
+  }
+
   async function mergeInfo() {
     const ids = patient.mergedIds.join(", ");
     const admin = /^admin$/i.test(String((staff && staff.role) || ""));
@@ -750,10 +831,15 @@ function fillPreconsult(root, data, lastUpdated) {
     d.classList.toggle("is-empty", !lines.length);
 
     // Past appointments: day cards
-    if (d.dataset.key === "past-appts" && lines.length) {
-      d._pa = { ...paParse(lines), all: d._pa ? d._pa.all : false, records: d._pa ? d._pa.records : new Map() };
-      renderPastAppts(d);
-      return;
+    if (d.dataset.key === "past-appts") {
+      const prev = d._pa;
+      d._pa = { ...paParse(lines), all: prev ? prev.all : false, records: prev ? prev.records : new Map(), formsLoaded: prev ? prev.formsLoaded : false };
+      if (d._pa.visits.length) {
+        const n = d._pa.visits.length;
+        hint.textContent = `${n} ${n === 1 ? "visit" : "visits"}`;
+        renderPastAppts(d);
+        return;
+      }
     }
 
     d.querySelector(".sub-body").innerHTML = lines.length
@@ -843,10 +929,16 @@ function paAgo(d) {
   return `${y} yr${y === 1 ? "" : "s"} ago`;
 }
 
-function paBadgesHtml(recs) {
-  if (!recs || !recs.length) return "";
+// A badge (or a line in its menu): form records are links, summaries open a popup
+function paRecHtml(r, cls, text) {
+  return r.href
+    ? `<a class="${cls}" href="${escapeHtml(r.href)}" title="${escapeHtml(r.label || "")}">${text}</a>`
+    : `<button type="button" class="${cls}" data-pa-summary="${escapeHtml(r.summaryId)}" title="${escapeHtml(r.label || "")}">${text}</button>`;
+}
+
+function paBadgesHtml(recs, missing) {
   const by = new Map();
-  recs.forEach((r) => {
+  (recs || []).forEach((r) => {
     if (!PA_BADGES[r.kind]) return;
     if (!by.has(r.kind)) by.set(r.kind, []);
     by.get(r.kind).push(r);
@@ -854,20 +946,20 @@ function paBadgesHtml(recs) {
   const html = Object.keys(PA_BADGES).filter((k) => by.has(k)).map((k) => {
     const b = PA_BADGES[k];
     const list = by.get(k);
-    if (list.length === 1) {
-      return `<a class="pa-bdg is-${k}" href="${escapeHtml(list[0].href)}" title="${escapeHtml(list[0].label || b.full)}">${escapeHtml(b.short)}</a>`;
-    }
+    if (list.length === 1) return paRecHtml(list[0], `pa-bdg is-${k}`, escapeHtml(b.short));
     return `<details class="pa-bdg-menu"><summary class="pa-bdg is-${k}">${escapeHtml(b.short)} ×${list.length}</summary>
-      <div class="pa-bdg-pop">${list.map((r) =>
-        `<a href="${escapeHtml(r.href)}">${escapeHtml(r.label || b.full)}</a>`).join("")}</div></details>`;
-  }).join("");
+      <div class="pa-bdg-pop">${list.map((r) => paRecHtml(r, "pa-pop-item", escapeHtml(r.label || b.full))).join("")}</div></details>`;
+  }).join("") + (missing ? '<span class="pa-bdg is-missing" title="Injectables were booked but there\'s no treatment record for this day">No Tx Record</span>' : "");
   return html ? `<div class="pa-badges">${html}</div>` : "";
 }
 
-function paCardHtml(v, recs) {
+
+function paCardHtml(v, recs, formsLoaded) {
   const day = v.date.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" });
+  const missing = formsLoaded && !!PA_TX_CHECK_FROM && v.key >= PA_TX_CHECK_FROM && v.key < toDateKey()
+    && v.items.some((it) => it.kind === "inj") && !(recs || []).some((r) => r.kind === "tx");
   return `
-    <article class="pa-card">
+    <article class="pa-card${missing ? " is-missing" : ""}">
       <div class="pa-date"><b>${escapeHtml(day)}</b><span>${escapeHtml(paAgo(v.date))}</span></div>
       <ul class="pa-items">${v.items.map((it) => `
         <li class="pa-item"><i class="pa-dot is-${it.kind}" aria-hidden="true"></i>
@@ -875,7 +967,7 @@ function paCardHtml(v, recs) {
             it.who ? ` <span class="pa-who">· ${escapeHtml(it.who)}</span>` : ""}${
             it.adds.length ? `<div class="pa-adds">${it.adds.map((a) => `+ ${escapeHtml(a)}`).join(" · ")}</div>` : ""}</div></li>`).join("")}
       </ul>
-      ${paBadgesHtml(recs)}
+      ${paBadgesHtml(recs, missing)}
     </article>`;
 }
 
@@ -895,8 +987,8 @@ function renderPastAppts(card) {
       html += `<p class="pa-year">${y}</p><div class="pa-grid">`;
       year = y;
     }
-    html += paCardHtml(v, st.records.get(v.key));
-  });
+    html += paCardHtml(v, st.records.get(v.key), st.formsLoaded);
+    });
   if (year !== null) html += "</div>";
 
   const more = st.visits.length - shown.length;
@@ -912,18 +1004,31 @@ function renderPastAppts(card) {
   card.querySelector(".sub-body").innerHTML = html;
 }
 
-// Records done on each visit day. list: [{ dateKey: "2026-09-02", kind: "tx"|"cons"|"rx"|"summary", href, label }]
-function setPastApptRecords(root, list) {
+// list: [{ dateKey, kind, href | summaryId, label }]. formsLoaded: form records were read, so "No Tx Record" is trustworthy
+function setPastApptRecords(root, list, formsLoaded) {
   const card = root.querySelector('details[data-key="past-appts"]');
   if (!card) return;
   const map = new Map();
   (list || []).forEach((r) => {
-    if (!r.dateKey) return;
+    if (!r.dateKey || !r.kind) return;
     if (!map.has(r.dateKey)) map.set(r.dateKey, []);
     map.get(r.dateKey).push(r);
   });
-  if (!card._pa) card._pa = { visits: [], other: [], all: false, records: map };
-  else { card._pa.records = map; if (card._pa.visits.length) renderPastAppts(card); }
+  if (!card._pa) { card._pa = { visits: [], other: [], all: false, records: map, formsLoaded }; return; }
+  card._pa.records = map;
+  card._pa.formsLoaded = formsLoaded;
+  if (card._pa.visits.length) renderPastAppts(card);
+}
+
+// Consultation summary text: "!!HEADING:" sections become headings
+function soapHtml(soap) {
+  const parts = String(soap || "").split(/!!\s*([A-Za-z][A-Za-z &/()-]{2,})\s*:?/);
+  let html = parts[0].trim() ? `<p>${escapeHtml(parts[0].trim())}</p>` : "";
+  for (let i = 1; i < parts.length; i += 2) {
+    const body = (parts[i + 1] || "").trim();
+    html += `<h4>${escapeHtml(parts[i].trim())}</h4>${body ? `<p>${escapeHtml(body)}</p>` : ""}`;
+  }
+  return html || '<p class="empty-note">There\'s no summary text in this record.</p>';
 }
 
 /* ===================== Reminders ===================== */
