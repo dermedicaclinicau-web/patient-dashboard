@@ -4113,3 +4113,15 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
 .cs-used { white-space: nowrap; }
 .cs-finish { margin-top: .35rem; font-size: .82rem; }
 @media (max-width: 560px) { .cs-row.is-shared { grid-template-columns: 1fr; } }
+
+/* Marking sets: placed separately, with their own look */
+.an-setrow { padding: .35rem .5rem; border: 1px solid transparent; border-radius: 10px; }
+.an-setrow.is-active { border-color: var(--primary); background: var(--primary-soft); }
+.an-marks.has-one .an-setrow.is-active { border-color: transparent; background: none; }
+.an-setrow .an-tags { margin-left: auto; }
+.an-total b { font-weight: 700; }
+.ms-val { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; padding: .35rem 0; border-bottom: 1px dashed var(--border); }
+.ms-val .ms-num { width: 80px; }
+.ms-val .ms-small { width: auto; min-height: 30px; padding: .2rem .4rem; font-size: .8rem; }
+.ms-sw { display: inline-flex; align-items: center; gap: .25rem; font-size: .72rem; font-weight: 700; color: var(--muted); }
+.ms-sw input[type="color"] { width: 30px; height: 30px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: none; cursor: pointer; }

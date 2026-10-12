@@ -1,9 +1,9 @@
 // Marking sets: what staff can place on a picture.
 //   Numbers: values that add up to a total (e.g. wrinkle relaxer units 0.5, 1, 2…).
 //   Labels: short codes that are counted (e.g. depth of placement SD, PO).
-// Every value has a colour and a shape. A picture can use one number set plus any label sets;
-// each mark combines a value from each. One list in form_settings/marking_sets, shared by every form.
-// Saved forms keep their own copy of each mark, so editing a set later never changes a saved record.
+// A picture can use several sets; each is placed on its own (staff pick a value from any set, then tap).
+// Every value has its own shape, shape colour, filled or see-through, text colour and text size.
+// One list in form_settings/marking_sets, shared by every form. Saved forms keep their own copy of each mark.
 import { db } from "./firebase-config.js";
 import { doc, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { showToast } from "./utils.js";
@@ -12,7 +12,9 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 export const MARK_COLOURS = ["#2563eb", "#16a34a", "#d97706", "#dc2626", "#7c3aed", "#db2777", "#0891b2", "#4b5563"];
 export const MARK_SHAPES = [["circle", "Circle"], ["square", "Square"], ["diamond", "Diamond"], ["triangle", "Triangle"],
   ["hexagon", "Hexagon"], ["star", "Star"]];
+export const TEXT_SIZES = [["s", "Small text"], ["m", "Medium text"], ["l", "Large text"]];
 const SHAPE_KEYS = MARK_SHAPES.map(([k]) => k);
+const TSIZE = { s: 0.75, m: 1, l: 1.3 };
 const HEX = /^#[0-9a-f]{6}$/i;
 export const fmtMark = (n) => String(+Number(n || 0).toFixed(2));
 
@@ -21,32 +23,44 @@ export const SHAPE_TEXT = {
   circle: { dy: 0.06, fs: 1 }, square: { dy: 0.06, fs: 1 }, hexagon: { dy: 0.06, fs: 0.95 },
   diamond: { dy: 0.06, fs: 0.8 }, triangle: { dy: 0.35, fs: 0.7 }, star: { dy: 0.1, fs: 0.6 },
 };
-export const textSize = (text, shape) => {
+export const textSize = (text, shape, tsize = "m") => {
   const t = String(text || "");
-  return (t.length > 3 ? 0.62 : t.length > 2 ? 0.78 : 1) * (SHAPE_TEXT[shape] || SHAPE_TEXT.circle).fs;
+  return (t.length > 3 ? 0.62 : t.length > 2 ? 0.78 : 1) * (SHAPE_TEXT[shape] || SHAPE_TEXT.circle).fs * (TSIZE[tsize] || 1);
 };
+
+// A value's look, with defaults (white text on a filled shape; shape-coloured text when see-through)
+function styleOf(x, j) {
+  const colour = HEX.test((x && x.colour) || "") ? x.colour.toLowerCase() : MARK_COLOURS[j % MARK_COLOURS.length];
+  const fill = x && x.fill === "none" ? "none" : "solid";
+  return {
+    colour,
+    shape: SHAPE_KEYS.includes(x && x.shape) ? x.shape : "circle",
+    fill,
+    text: HEX.test((x && x.text) || "") ? x.text.toLowerCase() : (fill === "none" ? colour : "#ffffff"),
+    tsize: ["s", "m", "l"].includes(x && x.tsize) ? x.tsize : "m",
+  };
+}
+const newStyle = (colour) => ({ colour, shape: "circle", fill: "solid", text: "#ffffff", tsize: "m" });
 
 const DEFAULT_SETS = [{
   id: "wr_units", name: "Wrinkle relaxer units", type: "number", unit: "units",
-  values: [0.5, 1, 2, 3, 4, 5, 10].map((v, i) => ({ v, colour: MARK_COLOURS[i % MARK_COLOURS.length], shape: "circle" })),
+  values: [0.5, 1, 2, 3, 4, 5, 10].map((v, i) => ({ v, ...newStyle(MARK_COLOURS[i % MARK_COLOURS.length]) })),
   tagMarks: false, tags: ["Treatment", "Touch-up"],
 }];
 
 export function cleanSet(s = {}, i = 0) {
   const type = s.type === "label" ? "label" : "number";
   const seen = new Set();
-  const colourOf = (x, j) => (HEX.test((x && x.colour) || "") ? x.colour.toLowerCase() : MARK_COLOURS[j % MARK_COLOURS.length]);
-  const shapeOf = (x) => (SHAPE_KEYS.includes(x && x.shape) ? x.shape : "circle");
   const raw = Array.isArray(s.values) ? s.values : [];
   const values = type === "label"
     ? raw.map((x, j) => ({
         code: String((x && x.code) || "").trim().slice(0, 5),
         name: String((x && x.name) || "").trim().slice(0, 40),
-        colour: colourOf(x, j), shape: shapeOf(x),
+        ...styleOf(x, j),
       }))
       .filter((x) => x.code && !seen.has(x.code.toLowerCase()) && seen.add(x.code.toLowerCase()))
       .slice(0, 12)
-    : raw.map((x, j) => ({ v: Math.round(Number(x && x.v) * 100) / 100, colour: colourOf(x, j), shape: shapeOf(x) }))
+    : raw.map((x, j) => ({ v: Math.round(Number(x && x.v) * 100) / 100, ...styleOf(x, j) }))
       .filter((x) => Number.isFinite(x.v) && x.v > 0 && x.v <= 1000 && !seen.has(x.v) && seen.add(x.v))
       .sort((a, b) => a.v - b.v)
       .slice(0, 20);
@@ -90,9 +104,12 @@ export function traceShape(g, shape, x, y, r) {
   }
 }
 
-export function shapeSvg(shape, colour, text = "", { size = 30, outline = false } = {}) {
+// opts: { size, fill: "solid"|"none", textColour, tsize: "s"|"m"|"l" }
+export function shapeSvg(shape, colour, text = "", { size = 30, fill = "solid", textColour = "", tsize = "m" } = {}) {
   const r = 12, c = 20;
   const col = HEX.test(colour || "") ? colour : "#4b5563";
+  const see = fill === "none";
+  const tc = HEX.test(textColour || "") ? textColour : (see ? col : "#ffffff");
   const pts = (list) => list.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
   const ring = (n, rot, rr, dy = 0) => Array.from({ length: n }, (_, i) => {
     const a = rot + i * 2 * Math.PI / n;
@@ -114,11 +131,18 @@ export function shapeSvg(shape, colour, text = "", { size = 30, outline = false 
   const t = String(text || "");
   const st = SHAPE_TEXT[shape] || SHAPE_TEXT.circle;
   return `<svg class="ms-shape" viewBox="0 0 40 40" width="${size}" height="${size}" aria-hidden="true">` +
-    `<g fill="${outline ? "#fff" : col}" stroke="${outline ? col : "#fff"}" stroke-width="2" stroke-linejoin="round">${el}</g>` +
+    `<g fill="${see ? "none" : col}" stroke="${see ? col : "#fff"}" stroke-width="${see ? 2.6 : 2}" stroke-linejoin="round">${el}</g>` +
     (t ? `<text x="${c}" y="${(c + r * st.dy).toFixed(1)}" text-anchor="middle" dominant-baseline="central" font-family="Arial, Helvetica, sans-serif"` +
-      ` font-weight="700" font-size="${(r * textSize(t, shape)).toFixed(1)}" fill="${outline ? col : "#fff"}">${esc(t)}</text>` : "") +
+      ` font-weight="700" font-size="${(r * textSize(t, shape, tsize)).toFixed(1)}" fill="${tc}"${
+        see ? ' stroke="#fff" stroke-width="2" paint-order="stroke"' : ""}>${esc(t)}</text>` : "") +
     "</svg>";
 }
+
+// A marking set value as a little picture: its shape, colours and its number or code
+export const valueText = (s, x) => (s.type === "label" ? x.code || ""
+  : x.v === "" || x.v === null || x.v === undefined ? "" : fmtMark(x.v));
+export const valueSvg = (s, x, size = 30) =>
+  shapeSvg(x.shape || "circle", x.colour, valueText(s, x), { size, fill: x.fill, textColour: x.text, tsize: x.tsize });
 
 /* ---------- Loading and saving ---------- */
 
@@ -140,9 +164,20 @@ export async function saveMarkingSets(sets, staff) {
   return clean;
 }
 
-// "Total 1.2 mL · 9 marks · Treatment 1 · Depth: SD 0.8 (5), PO 0.4 (4)" (or "" when there are no marks)
+// "Units: 23.5 units (9 marks), Treatment 20 · Depth: SD × 5, PO × 4" (or "" when there are no marks)
 export function markSummary(v) {
   if (!v || typeof v !== "object" || !Array.isArray(v.marks) || !v.marks.length) return "";
+  if (Array.isArray(v.sets) && v.sets.length) {
+    return v.sets.filter((s) => Number(s.n) > 0).map((s) => {
+      if (s.type === "label") {
+        return `${s.name}: ${(s.counts || []).filter((c) => Number(c.n) > 0).map((c) => `${c.code} × ${c.n}`).join(", ")}`;
+      }
+      const tags = s.byTag && typeof s.byTag === "object"
+        ? Object.entries(s.byTag).filter(([, x]) => Number(x) > 0).map(([t, x]) => `${t} ${fmtMark(x)}`) : [];
+      return `${s.name}: ${fmtMark(s.total)}${s.unit ? ` ${s.unit}` : ""} (${s.n} mark${s.n === 1 ? "" : "s"})${tags.length ? `, ${tags.join(", ")}` : ""}`;
+    }).join(" · ");
+  }
+  // Records saved before marking sets could be used separately
   const n = v.marks.length;
   const hasTotal = typeof v.total === "number";
   const parts = [];
@@ -152,9 +187,7 @@ export function markSummary(v) {
   tags.forEach(([t, x]) => parts.push(`${t} ${fmtMark(x)}`));
   (Array.isArray(v.labelSets) ? v.labelSets : []).forEach((ls) => {
     const counts = (Array.isArray(ls.counts) ? ls.counts : []).filter((c) => Number(c.n) > 0);
-    if (!counts.length) return;
-    parts.push(`${ls.name}: ${counts.map((c) => (hasTotal
-      ? `${c.code} ${fmtMark(c.total)} (${c.n})` : `${c.code} × ${c.n}`)).join(", ")}`);
+    if (counts.length) parts.push(`${ls.name}: ${counts.map((c) => `${c.code} × ${c.n}`).join(", ")}`);
   });
   return parts.join(" · ");
 }
@@ -180,7 +213,7 @@ export async function openMarkingSetsDialog({ staff } = {}) {
       <form class="lh-form" novalidate>
         <div class="lh-dialog-head"><h3>Marking sets</h3>
           <p>What staff tap onto a picture. <strong>Numbers</strong> add up to a total (units, mL). <strong>Labels</strong> are codes that
-            are counted, like depth of placement (SD, PO). A picture can use one number set plus any label sets, and each mark combines them.
+            are counted, like depth of placement (SD, PO). A picture can use several sets, and each is placed on its own.
             Shared by every form; forms already saved keep their own marks.</p></div>
         <div class="ms-list" data-role="list"></div>
         <button type="button" class="hx-add" data-act="ms-new">+ New marking set</button>
@@ -192,22 +225,24 @@ export async function openMarkingSetsDialog({ staff } = {}) {
       </form>`;
     const list = dlg.querySelector('[data-role="list"]');
     const err = dlg.querySelector(".lh-error");
-    const textOf = (s, x) => (s.type === "label" ? x.code || "" : x.v === "" || x.v === null || x.v === undefined ? "" : fmtMark(x.v));
 
-    const shapeSel = (cur) => `<select class="fb-select ms-shape-sel" data-vk="shape" aria-label="Shape">${MARK_SHAPES.map(([k, l]) =>
+    const sel = (key, items, cur, label) => `<select class="fb-select ms-small" data-vk="${key}" aria-label="${label}" title="${label}">${items.map(([k, l]) =>
       `<option value="${k}"${k === cur ? " selected" : ""}>${l}</option>`).join("")}</select>`;
     const valHtml = (s, x, j) => {
       const label = s.type === "label";
-      return `<span class="ms-val${label ? " is-label" : ""}" data-v="${j}">
-        <span class="ms-prev">${shapeSvg(x.shape || "circle", x.colour, textOf(s, x), { size: 30 })}</span>
-        <input type="color" data-vk="colour" value="${esc(x.colour)}" aria-label="Colour" />
-        ${shapeSel(x.shape || "circle")}
+      return `<div class="ms-val${label ? " is-label" : ""}" data-v="${j}">
+        <span class="ms-prev">${valueSvg(s, x, 34)}</span>
         ${label
           ? `<input class="fe-input ms-code" data-vk="code" maxlength="5" placeholder="SD" value="${esc(x.code || "")}" aria-label="Code" />
              <input class="fe-input ms-name" data-vk="name" maxlength="40" placeholder="Meaning (optional)" value="${esc(x.name || "")}" aria-label="Meaning" />`
-          : `<input class="fe-input" type="number" min="0" step="any" data-vk="v" value="${x.v ?? ""}" aria-label="Value" />`}
+          : `<input class="fe-input ms-num" type="number" min="0" step="any" data-vk="v" value="${x.v ?? ""}" aria-label="Value" />`}
+        ${sel("shape", MARK_SHAPES, x.shape || "circle", "Shape")}
+        <label class="ms-sw" title="Shape colour"><span>Shape</span><input type="color" data-vk="colour" value="${esc(x.colour)}" aria-label="Shape colour" /></label>
+        ${sel("fill", [["solid", "Filled"], ["none", "See-through"]], x.fill || "solid", "Background")}
+        <label class="ms-sw" title="Text colour"><span>Text</span><input type="color" data-vk="text" value="${esc(x.text || "#ffffff")}" aria-label="Text colour" /></label>
+        ${sel("tsize", TEXT_SIZES, x.tsize || "m", "Text size")}
         <button type="button" class="hx-x" data-vdel aria-label="Remove this value">×</button>
-      </span>`;
+      </div>`;
     };
     const setHtml = (s, i) => {
       const label = s.type === "label";
@@ -243,8 +278,8 @@ export async function openMarkingSetsDialog({ staff } = {}) {
           s.type = t.value;
           s.tagMarks = false;
           s.values = t.value === "label"
-            ? [{ code: "", name: "", colour: MARK_COLOURS[0], shape: "circle" }]
-            : [{ v: 1, colour: MARK_COLOURS[0], shape: "circle" }];
+            ? [{ code: "", name: "", ...newStyle(MARK_COLOURS[0]) }]
+            : [{ v: 1, ...newStyle(MARK_COLOURS[0]) }];
         }
         draw();
         return;
@@ -256,15 +291,22 @@ export async function openMarkingSetsDialog({ staff } = {}) {
       if (!vb || !t.dataset.vk) return;
       const x = s.values[Number(vb.dataset.v)];
       x[t.dataset.vk] = t.value;
+      // Keep the text readable when switching between filled and see-through
+      if (t.dataset.vk === "fill") {
+        const tx = vb.querySelector('[data-vk="text"]');
+        if (t.value === "none" && String(x.text).toLowerCase() === "#ffffff") x.text = x.colour;
+        if (t.value === "solid" && String(x.text).toLowerCase() === String(x.colour).toLowerCase()) x.text = "#ffffff";
+        if (tx) tx.value = x.text;
+      }
       const prev = vb.querySelector(".ms-prev");
-      if (prev) prev.innerHTML = shapeSvg(x.shape || "circle", x.colour, textOf(s, x), { size: 30 });
+      if (prev) prev.innerHTML = valueSvg(s, x, 34);
     });
 
     dlg.addEventListener("click", (e) => {
       if (e.target.closest('[data-act="cancel"]')) { if (!busy) dlg.close(); return; }
       if (e.target.closest('[data-act="ms-new"]')) {
         sets.push({ id: `ms_${Date.now().toString(36)}`, name: "", type: "number", unit: "units",
-          values: [{ v: 1, colour: MARK_COLOURS[0], shape: "circle" }], tagMarks: false, tags: ["Treatment", "Touch-up"] });
+          values: [{ v: 1, ...newStyle(MARK_COLOURS[0]) }], tagMarks: false, tags: ["Treatment", "Touch-up"] });
         draw();
         const names = list.querySelectorAll('[data-sk="name"]');
         if (names.length) names[names.length - 1].focus();
@@ -275,8 +317,8 @@ export async function openMarkingSetsDialog({ staff } = {}) {
       const s = sets[Number(box.dataset.set)];
       if (e.target.closest("[data-setdel]")) { sets.splice(Number(box.dataset.set), 1); draw(); return; }
       if (e.target.closest("[data-vadd]")) {
-        const colour = MARK_COLOURS[s.values.length % MARK_COLOURS.length];
-        s.values.push(s.type === "label" ? { code: "", name: "", colour, shape: "circle" } : { v: "", colour, shape: "circle" });
+        const st = newStyle(MARK_COLOURS[s.values.length % MARK_COLOURS.length]);
+        s.values.push(s.type === "label" ? { code: "", name: "", ...st } : { v: "", ...st });
         draw();
         const inputs = list.querySelectorAll(`[data-set="${box.dataset.set}"] [data-vk="${s.type === "label" ? "code" : "v"}"]`);
         if (inputs.length) inputs[inputs.length - 1].focus();

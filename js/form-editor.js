@@ -284,9 +284,6 @@ export async function mountFormEditor(container, { templateId, staff }) {
         if (f.annotate && f.markMode === "marks" && markSets) {
           const chosen = markSetIdsOf(f).map((id) => markSets.find((s) => s.id === id)).filter(Boolean);
           if (!chosen.length) return { id: f.id, msg: "Choose at least one marking set for the picture, or change what staff can do with it." };
-          if (chosen.filter((s) => s.type !== "label").length > 1) {
-            return { id: f.id, msg: "A picture can use one number set (the total) plus any label sets. Untick the extra number set." };
-          }
         }
         const badQ = (f.questions || []).find((q) => !String(q.label || "").trim() || (iqHasOptions(q) && !(q.options || []).length));
         if (badQ) {

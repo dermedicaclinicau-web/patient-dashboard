@@ -2,7 +2,7 @@ import { runCalc, calcRefs, formatCalc } from "./form-calc.js";
 import { letterheadHtml } from "./form-letterhead.js";
 import { cleanCondition } from "./form-conditions.js";
 import { cleanRichHtml, richText } from "./rich-html.js";
-import { shapeSvg } from "./marking-sets.js";
+import { valueSvg } from "./marking-sets.js";
 
 export const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -384,7 +384,7 @@ export function cleanField(f) {
       out.photoLayout = pick(f.photoLayout, ["grid", "stack"], "grid");
       out.perRow = int(f.perRow, 2, 4, 2);
       out.markMode = out.annotate && f.markMode === "marks" ? "marks" : "draw";
-      out.markSetIds = markSetIdsOf(f).filter((id) => /^[A-Za-z0-9_-]{1,40}$/.test(id)).slice(0, 4);
+      out.markSetIds = markSetIdsOf(f).filter((id) => /^[A-Za-z0-9_-]{1,40}$/.test(id)).slice(0, 6);
       out.markSetId = out.markSetIds[0] || ""; // for older pages
       out.questions = (Array.isArray(f.questions) ? f.questions : []).slice(0, 5).map((q, i) => ({
         id: /^[A-Za-z0-9_-]{1,20}$/.test((q && q.id) || "") ? q.id : `q${i + 1}`,
@@ -1027,22 +1027,20 @@ function markSetSettings(f, ctx) {
   const sets = ctx.markSets;
   if (!sets) return '<small class="fe-note fe-pad">Loading marking sets…</small>';
   const ids = markSetIdsOf(f);
-  const chosen = ids.map((id) => sets.find((s) => s.id === id)).filter(Boolean);
-  const nums = chosen.filter((s) => s.type !== "label").length;
-  const sw = (s) => s.values.slice(0, 4).map((x) =>
-    shapeSvg(x.shape, x.colour, s.type === "label" ? x.code : fmtN(x.v), { size: 20 })).join("");
+  const firstNum = ids.map((id) => sets.find((s) => s.id === id)).filter(Boolean).find((s) => s.type !== "label") || null;
+  const sw = (s) => s.values.slice(0, 4).map((x) => valueSvg(s, x, 20)).join("");
   return `<div class="fe-insp-field"><span class="fe-insp-label">Marking sets</span>
       <div class="fe-ms-picks">${sets.length ? sets.map((s) => `
         <label class="fe-check"><input type="checkbox" data-msid="${esc(s.id)}" data-rerender=""${ids.includes(s.id) ? " checked" : ""} />
-          <span class="fe-ms-sw">${sw(s)}</span><span>${esc(s.name)} <small class="muted">${s.type === "label" ? "labels" : "numbers"}</small></span></label>`).join("")
+          <span class="fe-ms-sw">${sw(s)}</span><span>${esc(s.name)} <small class="muted">${s.type === "label" ? "labels" : "numbers"}${
+            firstNum && firstNum.id === s.id ? " · total used in Calculations" : ""}</small></span></label>`).join("")
         : '<small class="fe-note">No marking sets yet. Make one with Manage marking sets.</small>'}</div>
-      <small class="fe-note">Tick one number set (the total) and any label sets, e.g. depth of placement. Each tap places one mark combining them.</small>
-      ${nums > 1 ? '<small class="fe-bad">Only one number set can be used on a picture. Untick the others.</small>' : ""}
+      <small class="fe-note">Tick every set staff can use on this picture. Each set is placed on its own: staff choose a value from any set, then tap the picture.
+        The first numbers set ticked is the total used by Calculations and Consumables.</small>
     </div>` +
     '<button type="button" class="lh-btn fe-ms-manage" data-act="ms-manage">Manage marking sets</button>' +
-    (nums ? '<small class="fe-note fe-pad">To show the total in another place, add a Calculation question and choose this picture under “Insert a question”.</small>' : "");
+    (firstNum ? '<small class="fe-note fe-pad">To show the total in another place, add a Calculation question and choose this picture under “Insert a question”.</small>' : "");
 }
-
 function imageQuestionsSettings(f) {
   const qs = Array.isArray(f.questions) ? f.questions : [];
   return `<div class="fe-insp-field"><span class="fe-insp-label">Questions under the picture</span>
@@ -1190,7 +1188,7 @@ export function applyInput(f, el) {
   if (el.dataset.msid !== undefined) {
     const on = new Set(markSetIdsOf(f));
     if (el.checked) on.add(el.dataset.msid); else on.delete(el.dataset.msid);
-    f.markSetIds = [...on].slice(0, 4);
+    f.markSetIds = [...on].slice(0, 6);
     f.markSetId = f.markSetIds[0] || "";
     return true;
   }
