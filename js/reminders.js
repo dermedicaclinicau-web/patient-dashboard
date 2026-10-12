@@ -18,14 +18,17 @@ export async function fetchOpenReminders(patient) {
     .filter((t) => String(t.status || "").trim().toLowerCase() !== "completed")
     .sort((a, b) => String(a.dueDate || "9999").localeCompare(String(b.dueDate || "9999")));
 }
-// Same fields and formats as the existing staff-task-list documents
-export function addReminder(patient, { taskText, dueDate }, staff) {
+// Same fields and formats as the existing staff-task-list documents.
+// assignedToId / assignedToName: a staff member, or "" for anyone.
+export function addReminder(patient, { taskText, dueDate, assignedToId = "", assignedToName = "" }, staff) {
   return addDoc(collection(db, "staff-task-list"), {
     patientId: String(patient.pttId || patient.id),
     patientName: patient.name || "",
     taskText: String(taskText).trim(),
     dueDate,                                 // "YYYY-MM-DD"
     status: "Open",
+    assignedToId: String(assignedToId || ""),
+    assignedToName: String(assignedToName || ""),
     createdAt: new Date().toISOString(),
     createdBy: (staff && staff.name) || "",
     createdByUid: auth.currentUser.uid,

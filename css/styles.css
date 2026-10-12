@@ -3940,3 +3940,18 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
   text-align: left; background: none; border: 0; padding: .45rem .25rem; font: inherit; cursor: pointer; border-radius: 8px; }
 .md-notes button:hover { background: var(--surface-2); }
 .md-notes small { color: var(--primary); font-weight: 600; }
+
+/* ---------- Reminder dialog: assign to ---------- */
+.rm-assign { width: 100%; }
+.rm-hint { display: block; margin-top: .3rem; font-size: .78rem; color: var(--muted, #667085); }
+
+/* ---------- Dashboard: Tasks card ---------- */
+.md-ttabs { display: inline-flex; gap: .25rem; background: var(--surface-2); border-radius: 999px; padding: .2rem; margin-bottom: .6rem; }
+.md-ttab { border: 0; background: transparent; border-radius: 999px; padding: .3rem .8rem; font: inherit; font-size: .82rem;
+  font-weight: 600; color: var(--muted, #667085); cursor: pointer; }
+.md-ttab.is-on { background: #fff; color: var(--text, #101828); box-shadow: 0 1px 2px rgba(16, 24, 40, .08); }
+.md-grp { margin: .6rem 0 .25rem; font-size: .78rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: var(--muted, #667085); }
+.md-grp em { font-style: normal; background: var(--surface-2); border-radius: 999px; padding: .05rem .45rem; margin-left: .25rem; }
+.md-task { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .5rem; }
+.md-task.is-overdue { border-left: 3px solid #d92d20; padding-left: .4rem; }
+.md-done { padding: .3rem .65rem; font-size: .8rem; white-space: nowrap; }

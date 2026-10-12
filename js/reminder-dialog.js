@@ -1,5 +1,6 @@
 import { addReminder } from "./reminders.js";
 import { escapeHtml, toDateKey } from "./utils.js";
+import { fetchStaffList } from "./task-types.js";
 
 const svg = (p) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -95,6 +96,15 @@ export function openReminderDialog({ patient, staff }) {
           </div>
           <input type="date" name="due" value="${tomorrow}" min="${plusDays(0)}" />
         </div>
+          <input type="date" name="due" value="${tomorrow}" min="${plusDays(0)}" />
+        </div>
+
+        <label class="em-field"><span>Assign to</span>
+          <select name="assign" class="fb-select rm-assign">
+            <option value="">Anyone (the whole team)</option>
+          </select>
+          <small class="rm-hint" data-role="assign-hint">It shows on their dashboard under Tasks → Mine.</small>
+        </label>
 
         <p class="em-error" role="alert"></p>
 
@@ -107,6 +117,22 @@ export function openReminderDialog({ patient, staff }) {
     dlg.showModal();
     markActiveChip();
     dlg.querySelector("textarea").focus();
+
+    // Staff to assign to (loaded in the background; "Anyone" works straight away)
+    const mine = String((staff && staff.name) || "").trim().toLowerCase();
+    fetchStaffList()
+      .then((list) => {
+        const sel = dlg.querySelector('select[name="assign"]');
+        if (!sel || !ctx) return;
+        sel.insertAdjacentHTML("beforeend", list.map((s) => `
+          <option value="${escapeHtml(s.id)}" data-name="${escapeHtml(s.name)}">${escapeHtml(s.name)}${
+            String(s.name || "").trim().toLowerCase() === mine ? " (me)" : ""}${s.role ? ` · ${escapeHtml(s.role)}` : ""}</option>`).join(""));
+      })
+      .catch((err) => {
+        console.warn("Staff list failed:", err);
+        const hint = dlg.querySelector('[data-role="assign-hint"]');
+        if (hint) hint.textContent = "Couldn't load the staff list. It will be saved for anyone.";
+      });
   });
 }
 
@@ -127,7 +153,13 @@ async function onSubmit(e) {
   errEl.textContent = "";
 
   try {
-    await addReminder(ctx.patient, { taskText: text, dueDate: due }, ctx.staff);
+    const sel = form.elements.assign;
+    const opt = sel && sel.selectedOptions[0];
+    await addReminder(ctx.patient, {
+      taskText: text, dueDate: due,
+      assignedToId: sel ? sel.value : "",
+      assignedToName: sel && sel.value && opt ? opt.dataset.name || "" : "",
+    }, ctx.staff);
     ctx.saved = true;
     dlg.close();
   } catch (err) {

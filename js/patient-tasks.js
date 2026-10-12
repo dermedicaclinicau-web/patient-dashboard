@@ -79,7 +79,8 @@ export function mountPatientTasks(root, patient) {
     const doneAt = toD(t.completedAt || t.doneAt || t.updatedAt);
     const doneBy = t.completedBy || t.doneBy || t.updatedBy || "";
     const meta = open
-      ? [due ? `Due ${formatShortDate(due)}` : dueKey ? `Due ${dueKey}` : "No due date", t.createdBy ? `Added by ${t.createdBy}` : ""]
+      ? [due ? `Due ${formatShortDate(due)}` : dueKey ? `Due ${dueKey}` : "No due date",
+        t.assignedToName ? `For ${t.assignedToName}` : "", t.createdBy ? `Added by ${t.createdBy}` : ""]
       : [`Done${doneAt ? ` ${formatShortDate(doneAt)}` : ""}${doneBy ? ` by ${doneBy}` : ""}`,
         due ? `was due ${formatShortDate(due)}` : "", t.createdBy ? `added by ${t.createdBy}` : ""];
     const status = String(t.status || "").trim();

@@ -746,6 +746,7 @@ function remindersHtml(tasks) {
 
     const meta = [
       due ? `Due ${formatShortDate(due)}` : (dueKey ? `Due ${dueKey}` : "No due date"),
+      t.assignedToName ? `For ${t.assignedToName}` : "",
       t.createdBy ? `Added by ${t.createdBy}` : "",
     ].filter(Boolean).map(escapeHtml).join(" · ");
 
