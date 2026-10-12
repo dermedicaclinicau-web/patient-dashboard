@@ -341,9 +341,13 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
       const extras = (sumTxt ? `<div style="font-size:10pt;font-weight:bold;margin-top:5px;">${esc(sumTxt)}</div>` : "") +
         (answeredQs.length
           ? answeredQs.map((q) => `<div style="font-size:10pt;margin-top:3px;"><span style="color:#475569;">${esc(q.label)}</span> ${esc(q.value)}</div>`).join("")
-          : blank ? (f.questions || []).filter((q) => String(q.label || "").trim()).map((q) => `<div style="font-size:10pt;margin-top:5px;">
-              <span style="color:#475569;">${esc(q.label)}</span> ${q.type === "text" ? '<span class="bl-in"></span>'
-                : (q.options || []).map((o) => `<span class="bo"><span class="box round"></span>${esc(o)}</span>`).join("")}</div>`).join("") : "");
+          : blank ? (f.questions || []).filter((q) => String(q.label || "").trim()).map((q) => {
+              const t = q.type === "choice" || !q.type ? "radio" : q.type;
+              const ctrl = t === "text" ? '<span class="bl-in" style="width:260px"></span>'
+                : t === "long" ? '<div class="bl"></div><div class="bl"></div>'
+                : (q.options || []).map((o) => `<span class="bo"><span class="box${t === "checks" ? "" : " round"}"></span>${esc(o)}</span>`).join("");
+              return `<div style="font-size:10pt;margin-top:5px;"><span style="color:#475569;">${esc(q.label)}</span> ${ctrl}</div>`;
+            }).join("") : "");
       return `<div class="block" style="${box}">${label ? `<div class="ql" style="margin-bottom:${gap}px;">${label}</div>` : ""}${pic}${extras}${
         f.caption ? `<div style="font-size:9pt;color:#64748b;margin-top:4px;">${esc(f.caption)}</div>` : ""}</div>`;
     }

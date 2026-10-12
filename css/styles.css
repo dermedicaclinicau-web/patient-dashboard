@@ -4018,3 +4018,7 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
   border-radius: 10px; background: var(--surface-2, #f8fafc); }
 .ms-val input[type="color"] { width: 28px; height: 28px; padding: 0; border: none; background: none; cursor: pointer; }
 .ms-val .fe-input { width: 72px; }
+
+.fe-imgq-row.is-long { display: grid; gap: .3rem; }
+.fe-imgq-row textarea.fe-in { width: 100%; resize: vertical; }
+.fe-imgq-row select.fe-in { min-width: 180px; flex: 0 1 260px; }

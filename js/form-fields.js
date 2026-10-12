@@ -348,7 +348,7 @@ export function cleanField(f) {
       out.questions = (Array.isArray(f.questions) ? f.questions : []).slice(0, 5).map((q, i) => ({
         id: /^[A-Za-z0-9_-]{1,20}$/.test((q && q.id) || "") ? q.id : `q${i + 1}`,
         label: clip(q && q.label, 200),
-        type: q && q.type === "text" ? "text" : "choice",
+        type: iqType(q),
         options: (Array.isArray(q && q.options) ? q.options : []).map((o) => clip(o, 100)).filter((o) => o.trim()).slice(0, 10),
         required: !!(q && q.required === true),
       }));
@@ -939,6 +939,16 @@ function typeSettings(f, ctx = {}) {
 /* ===================== Pictures: unit marks and questions under the picture ===================== */
 
 const imgMode = (f) => (!f.annotate ? "none" : f.markMode === "marks" ? "marks" : "draw");
+// Answer types for questions under a picture ("choice" is the older name for "radio")
+export const IQ_TYPES = [
+  ["radio", "Choose one (round buttons)"],
+  ["checks", "Choose any (tick boxes)"],
+  ["dropdown", "Dropdown"],
+  ["text", "Short answer"],
+  ["long", "Comment box"],
+];
+export const iqType = (q) => (IQ_TYPES.some(([k]) => k === (q && q.type)) ? q.type : "radio");
+export const iqHasOptions = (q) => ["radio", "checks", "dropdown"].includes(iqType(q));
 
 function markSetSettings(f, ctx) {
   const sets = ctx.markSets;
@@ -962,51 +972,78 @@ function imageQuestionsSettings(f) {
         </div>
         <div class="fe-two">
           <select class="fb-select" data-iq="${i}" data-iqk="type" data-rerender="" aria-label="Answer type">
-            <option value="choice"${q.type !== "text" ? " selected" : ""}>Choose one</option>
-            <option value="text"${q.type === "text" ? " selected" : ""}>Short answer</option>
+            ${IQ_TYPES.map(([v, l]) => `<option value="${v}"${iqType(q) === v ? " selected" : ""}>${l}</option>`).join("")}
           </select>
           <label class="fe-check"><input type="checkbox" data-iq="${i}" data-iqk="required"${q.required ? " checked" : ""} /> Required</label>
         </div>
-        ${q.type !== "text" ? `<textarea class="fe-input" data-iq="${i}" data-iqk="options" rows="2" placeholder="One choice per line">${esc((q.options || []).join("\n"))}</textarea>` : ""}
+        ${iqHasOptions(q) ? `<textarea class="fe-input" data-iq="${i}" data-iqk="options" rows="2" placeholder="One choice per line">${esc((q.options || []).join("\n"))}</textarea>` : ""}
       </div>`).join("")}
     ${qs.length < 5 ? '<button type="button" class="hx-add" data-act="iqadd">+ Add a question</button>' : ""}
-    <small class="fe-note">Shown right under the picture, for example Treatment or Touch-up.</small></div>`;
+    <small class="fe-note">Shown right under the picture, for example Treatment or Touch-up, or a comment about the areas.</small></div>`;
 }
 
 export function imageQsHtml(f, live) {
   const qs = (Array.isArray(f.questions) ? f.questions : []).filter((q) => String(q.label || "").trim());
   if (!qs.length) return "";
   const inert = live ? "" : ' tabindex="-1"';
-  return `<div class="fe-imgq">${qs.map((q) => `
-    <div class="fe-imgq-row" data-imgq="${esc(q.id)}">
-      <span class="fe-imgq-l">${esc(q.label)}${q.required ? '<span class="fe-req" aria-label="required">*</span>' : ""}</span>${
-      q.type === "text"
-        ? `<input class="fe-in" type="text" maxlength="300"${inert} />`
-        : `<span class="fe-imgq-opts">${(q.options || []).map((o) =>
-            `<label class="fe-opt"><input type="radio" name="iq-${esc(f.id)}-${esc(q.id)}" value="${esc(o)}"${inert} /><span>${esc(o)}</span></label>`).join("")}</span>`}
-    </div>`).join("")}</div>`;
+  return `<div class="fe-imgq">${qs.map((q) => {
+    const t = iqType(q);
+    const opts = Array.isArray(q.options) ? q.options : [];
+    const name = `iq-${esc(f.id)}-${esc(q.id)}`;
+    let ctrl;
+    if (t === "text") ctrl = `<input class="fe-in" type="text" maxlength="300"${inert} />`;
+    else if (t === "long") ctrl = `<textarea class="fe-in" rows="3" maxlength="1000"${inert}></textarea>`;
+    else if (t === "dropdown") {
+      ctrl = `<select class="fe-in"${inert}><option value="">Choose one</option>${
+        opts.map((o) => `<option value="${esc(o)}">${esc(o)}</option>`).join("")}</select>`;
+    } else {
+      ctrl = `<span class="fe-imgq-opts">${opts.map((o) =>
+        `<label class="fe-opt"><input type="${t === "checks" ? "checkbox" : "radio"}" name="${name}" value="${esc(o)}"${inert} /><span>${esc(o)}</span></label>`).join("")}</span>`;
+    }
+    return `<div class="fe-imgq-row${t === "long" ? " is-long" : ""}" data-imgq="${esc(q.id)}">
+      <span class="fe-imgq-l">${esc(q.label)}${q.required ? '<span class="fe-req" aria-label="required">*</span>' : ""}</span>${ctrl}</div>`;
+  }).join("")}</div>`;
 }
 
-// [{ id, label, value }] for the questions that have an answer
+// [{ id, label, value, values? }] for the questions that have an answer ("values" only for Choose any)
 export function readImageQs(f, w) {
   return (Array.isArray(f.questions) ? f.questions : []).map((q) => {
     const row = w && w.querySelector(`[data-imgq="${CSS.escape(q.id)}"]`);
     if (!row) return null;
+    const t = iqType(q);
     let value = "";
-    if (q.type === "text") { const i = row.querySelector("input"); value = i ? i.value.trim().slice(0, 300) : ""; }
-    else { const r = row.querySelector("input:checked"); value = r ? r.value : ""; }
-    return value ? { id: q.id, label: q.label, value } : null;
+    let values = null;
+    if (t === "text" || t === "long") {
+      const i = row.querySelector("input, textarea");
+      value = i ? i.value.trim().slice(0, t === "long" ? 1000 : 300) : "";
+    } else if (t === "dropdown") {
+      const s = row.querySelector("select");
+      value = s ? s.value : "";
+    } else if (t === "checks") {
+      values = [...row.querySelectorAll("input:checked")].map((x) => x.value);
+      value = values.join(", ");
+    } else {
+      const r = row.querySelector("input:checked");
+      value = r ? r.value : "";
+    }
+    return value ? { id: q.id, label: q.label, value, ...(values ? { values } : {}) } : null;
   }).filter(Boolean);
 }
 
 export function writeImageQs(f, w, list) {
-  const m = new Map((Array.isArray(list) ? list : []).map((x) => [x.id, x.value]));
+  const m = new Map((Array.isArray(list) ? list : []).map((x) => [x.id, x]));
   (Array.isArray(f.questions) ? f.questions : []).forEach((q) => {
     const row = w && w.querySelector(`[data-imgq="${CSS.escape(q.id)}"]`);
     if (!row) return;
-    const v = m.get(q.id) || "";
-    if (q.type === "text") { const i = row.querySelector("input"); if (i) i.value = v; }
-    else row.querySelectorAll("input").forEach((r) => { r.checked = r.value === v; });
+    const x = m.get(q.id);
+    const v = x ? String(x.value || "") : "";
+    const t = iqType(q);
+    if (t === "text" || t === "long") { const i = row.querySelector("input, textarea"); if (i) i.value = v; }
+    else if (t === "dropdown") { const s = row.querySelector("select"); if (s) s.value = v; }
+    else if (t === "checks") {
+      const on = new Set(x && Array.isArray(x.values) ? x.values : v ? v.split(", ") : []);
+      row.querySelectorAll("input").forEach((r) => { r.checked = on.has(r.value); });
+    } else row.querySelectorAll("input").forEach((r) => { r.checked = r.value === v; });
   });
 }
 
@@ -1131,7 +1168,7 @@ export function applyInput(f, el) {
 export function applyClick(f, target) {
   if (target.closest('[data-act="iqadd"]')) {
     f.questions = [...(Array.isArray(f.questions) ? f.questions : []), {
-      id: `q${Date.now().toString(36).slice(-6)}`, label: "Treatment or touch-up?", type: "choice",
+      id: `q${Date.now().toString(36).slice(-6)}`, label: "Treatment or touch-up?", type: "radio",
       options: ["Treatment", "Touch-up"], required: false,
     }];
     return true;

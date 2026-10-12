@@ -5,7 +5,7 @@ import {
 import {
   esc, svg, ICONS, FIELD_TYPES, FIELD_GROUPS, CHOICE_TYPES, FILLS, FILLS_FOR,
   createField, normaliseField, renderField, fieldSettings, applyInput, applyClick,
-  calcStatusHtml, checkFormula, canRequire, hasLabel, hasHelp, watermarkHtml,
+  calcStatusHtml, checkFormula, canRequire, hasLabel, hasHelp, watermarkHtml, iqHasOptions,
 } from "./form-fields.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { DEFAULT_LETTERHEAD, letterheadHtml, openLetterheadDialog } from "./form-letterhead.js";
@@ -283,7 +283,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
         if (f.annotate && f.markMode === "marks" && markSets && !markSets.some((s) => s.id === f.markSetId)) {
           return { id: f.id, msg: "Choose a marking set for the picture, or change what staff can do with it." };
         }
-        const badQ = (f.questions || []).find((q) => !String(q.label || "").trim() || (q.type !== "text" && !(q.options || []).length));
+        const badQ = (f.questions || []).find((q) => !String(q.label || "").trim() || (iqHasOptions(q) && !(q.options || []).length));
         if (badQ) {
           return { id: f.id, msg: String(badQ.label || "").trim()
             ? `“${badQ.label}” under the picture needs at least one choice.` : "A question under the picture needs a name." };
@@ -835,15 +835,6 @@ export async function mountFormEditor(container, { templateId, staff }) {
     }
     const f = current();
     if (!f) return;
-    if (e.target.closest('[data-act="ms-manage"]')) {
-      openMarkingSetsDialog({ staff }).then((sets) => {
-        if (!sets || !root.isConnected) return;
-        markSets = sets;
-        renderStage();
-        renderInspector();
-      });
-      return;
-    }
     if (el.dataset.opt !== undefined) {
       f.options[Number(el.dataset.opt)] = el.value;
     } else if (el.dataset.k) {
@@ -902,6 +893,16 @@ export async function mountFormEditor(container, { templateId, staff }) {
     if (e.target.closest('[data-act="unpublish"]')) { unpublish(); return; }
     const f = current();
     if (!f) return;
+
+    if (e.target.closest('[data-act="ms-manage"]')) {
+      openMarkingSetsDialog({ staff }).then((sets) => {
+        if (!sets || !root.isConnected) return;
+        markSets = sets;
+        renderStage();
+        renderInspector();
+      });
+      return;
+    }
 
     if (e.target.closest('[data-act="ac-pick"]')) {
       openAftercarePicker({ selected: f.items || [] }).then((ids) => {
