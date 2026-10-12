@@ -18,7 +18,7 @@ import {
 } from "./clinical-history-view.js";
 import { patientTasksSectionHtml, mountPatientTasks } from "./patient-tasks.js";
 import {
-  fetchTranscriptRecords, latestTreatmentPlan, socialHistoryEntries, toBullets, allTreatmentPlans,
+  fetchTranscriptRecords, socialHistoryEntries, toBullets, allTreatmentPlans,
   parseTimeline,
 } from "./transcripts.js";
 import {
@@ -58,10 +58,7 @@ const PRECONSULT_SECTIONS = [
   { key: "future-visits", title: "Future visits", icon: "calendar", field: "futureVisits", unit: "visit|visits", tone: "purple" },
   //{ key: "overdue", title: "Overdue treatments", icon: "alert", field: "overdue", unit: "overdue|overdue", tone: "red" },
   { key: "packages", title: "Customer packages", icon: "box", field: "packages", unit: "active|active" },
-  { key: "skin-script", title: "Skin script protocol", icon: "file", field: "skinScriptDate", unit: "value",
-    action: ["Create new SSP", "Create new SSP", "create-ssp"] },
-  { key: "treatment-plan", title: "Treatment plan", icon: "check", custom: true, tone: "purple",
-    remember: false }, // always starts collapsed
+
 ];
 
 // Each inner array is one row; two items sit side by side
@@ -146,8 +143,6 @@ const ICONS = {
   layers: svg('<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>'),
   alert: svg('<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>'),
   box: svg('<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>'),
-  file: svg(FILE + '<line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>'),
-  check: svg('<polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'),
   refresh: svg('<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>'),
   chevRight: svg('<polyline points="9 18 15 12 9 6"/>'),
   tick: svg('<polyline points="20 6 9 17 4 12"/>'),
@@ -204,13 +199,6 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     const doneBtn = t.closest("[data-action='task-done']");
     if (doneBtn) { completeTask(doneBtn); return; }
     if (t.closest(".back-btn, [data-action='back']")) { if (onBack) onBack(); return; }
-    const planToggle = t.closest("[data-action='toggle-plan']");
-    if (planToggle) {
-      const block = planToggle.closest(".plan-block");
-      const expanded = block.classList.toggle("expanded");
-      planToggle.querySelector("span").textContent = expanded ? "Show less" : "View full plan";
-      return;
-    }
     const paMore = t.closest("[data-action='pa-more']");
     if (paMore) {
       const card = paMore.closest("details.sub-card");
@@ -382,7 +370,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   mountRecords(root, patient);
   mountFormRecords(root, patient);
   mountHistory(root, patient);  
- tasksView = mountPatientTasks(root, patient);
+  tasksView = mountPatientTasks(root, patient);
   mountBillingRx(root, patient);
   mountClinicalHistory(root, patient, staff);
 
@@ -390,9 +378,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   async function loadTranscriptSections() {
     const planCard = root.querySelector('details[data-key="treatment-plan"]');
     const socialCard = root.querySelector('details[data-key="social-history"]');
-    const cards = [planCard, socialCard].filter(Boolean);
-    if (!cards.length) return;
-
+    const cards = [socialCard].filter(Boolean);
     try {
       const records = await fetchTranscriptRecords(patient);
       if (!root.isConnected) return;
@@ -403,14 +389,6 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
         label: `Consultation${r.staff ? ` · ${r.staff}` : ""}`,
       }));
       pushPastRecords();
-
-      if (planCard) {
-        const latest = latestTreatmentPlan(records);
-        fillCard(planCard,
-          latest ? "On file" : "No record",
-          latest ? treatmentPlanHtml(latest) : `<p class="empty-note">No treatment plan on record.</p>`,
-          !latest);
-      }
 
       if (socialCard) {
         const entries = socialHistoryEntries(records);
@@ -1090,27 +1068,6 @@ function remindersHtml(tasks) {
   }).join("")}</ul>`;
 }
 
-/* ===================== Treatment plan ===================== */
-
-function treatmentPlanHtml(p) {
-  const dateText = p.date
-    ? `${p.date.getDate()} ${p.date.toLocaleString("en-AU", { month: "long" })} ${p.date.getFullYear()}`
-    : p.dateText;
-  const isLong = p.plan.length > 450 || p.plan.split(/\n/).length > 6;
-
-  return `
-    <div class="plan-block">
-      <div class="plan-head">
-        <span class="plan-date">Most recent${dateText ? ` — ${escapeHtml(dateText)}` : ""}</span>
-        ${isLong ? `<button type="button" class="plan-toggle" data-action="toggle-plan">${ICONS.chevRight}<span>View full plan</span></button>` : ""}
-      </div>
-      <div class="plan-text"><div class="plan-clamp">${escapeHtml(p.plan)}</div></div>
-      <div class="plan-meta">
-        ${p.staff ? `<span>By ${escapeHtml(p.staff)}</span>` : ""}
-        ${p.matchedByName ? `<span class="task-flag neutral">Matched by name</span>` : ""}
-      </div>
-    </div>`;
-}
 
 /* ===================== Social history ===================== */
 
