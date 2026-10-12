@@ -1,11 +1,12 @@
-// Treatment Plan section: the patient's master plan, tracked against their appointments.
+// Treatment Plan section: the patient's master plan, tracked against their appointments (List and Calendar views).
 import { db, auth } from "./firebase-config.js";
 import { collection, addDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   getMasterPlan, saveMasterPlan, listPlanHistory, PLAN_STATUS, CONCERN_STATUS, patternText, monthLabel, cleanLine, cleanEvent,
+  matchServices,
 } from "./master-plan-api.js";
-import { getPlanSettings } from "./plan-api.js";
-import { visitsFrom, trackPlan, thisMonth, dateKeyOf, dayLabel } from "./plan-track.js";
+import { getPlanSettings, serviceSetup } from "./plan-api.js";
+import { visitsFrom, trackPlan, thisMonth, dateKeyOf, dayLabel, addMonths, monthDiff } from "./plan-track.js";
 import { serviceKey } from "./inventory-api.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
@@ -14,6 +15,9 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const MONTH_RE = /^\d{4}-\d{2}$/;
 const PATTERN_LABEL = { course: "A course", maintenance: "Ongoing (maintenance)", once: "Once", unknown: "Not set" };
 const ACTIVE = ["active", "maintenance"];
+const OPEN_STATES = ["planned", "due", "overdue"];   // sessions that can be moved
+const VIEW_KEY = "po-view";                           // List or Calendar, remembered on this computer
+const LONG_DOWNTIME = 7;                              // days: also warn in the month before an event
 
 function openDlg(html) {
   const dlg = document.createElement("dialog");
@@ -65,7 +69,11 @@ function nextText(lt) {
 // ctx = { patient, staff, pre(), today(), consults(), latestConsult(), applyLatest(), onReminder() }
 export function createPlanOverview(el, ctx) {
   const { patient, staff } = ctx;
-  const st = { master: null, settings: { concerns: [], services: [] }, loaded: false, error: "", busy: false };
+  const st = {
+    master: null, settings: { concerns: [], services: [] }, loaded: false, error: "", busy: false,
+    view: (() => { try { return localStorage.getItem(VIEW_KEY) === "cal" ? "cal" : "list"; } catch { return "list"; } })(),
+    calStart: addMonths(thisMonth(), -1),
+  };
   const con = (k) => st.settings.concerns.find((c) => c.name === k) || { label: k, colour: "#888780" };
   const chip = (k) => `<span class="ps-chip" style="--c:${esc(con(k).colour)}">${esc(con(k).label)}</span>`;
   const attrs = (c, l, n) => `data-c="${esc(c.key)}"${l ? ` data-l="${esc(l.id)}"` : ""}${n ? ` data-n="${n}"` : ""}`;
@@ -97,10 +105,49 @@ export function createPlanOverview(el, ctx) {
     });
   }
 
-  function needsList(track) {
+  /* ---------- Downtime and clashes with patient events ---------- */
+
+  // The longest downtime among the services that count for this treatment
+  function downtimeOf(c, l) {
+    const names = l.services.length ? l.services : matchServices(l.treatment, c.key, st.settings.services);
+    let best = { days: 0, note: "" };
+    names.forEach((n) => {
+      const r = serviceSetup(st.settings.services, n);
+      if (r && r.downtimeDays > best.days) best = { days: r.downtimeDays, note: r.downtimeNote };
+    });
+    return best;
+  }
+
+  // Sessions with downtime in an "avoid downtime" event's month (or the month before, for longer downtime)
+  function clashList(track) {
     const m = st.master;
+    const evs = m.events.filter((e) => e.avoidDowntime && MONTH_RE.test(e.month));
     const out = [];
+    if (!evs.length) return out;
+    m.concerns.forEach((c) => {
+      if (!ACTIVE.includes(c.status)) return;
+      c.lines.forEach((l) => {
+        const dt = downtimeOf(c, l);
+        if (!dt.days) return;
+        track.get(c.key).lines.get(l.id).slots.forEach((s) => {
+          if (![...OPEN_STATES, "booked"].includes(s.state) || !s.month) return;
+          const e = evs.find((x) => s.month === x.month || (s.month === addMonths(x.month, -1) && dt.days >= LONG_DOWNTIME));
+          if (!e) return;
+          const early = addMonths(e.month, dt.days >= LONG_DOWNTIME ? -2 : -1);
+          const to = early >= thisMonth() ? early : addMonths(e.month, 1);
+          out.push({ c, l, s, e, dt, to, key: `${c.key}|${l.id}|${s.n}`,
+            lt: track.get(c.key).lines.get(l.id) });
+        });
+      });
+    });
+    return out;
+  }
+
+  function needsList(track, clashes) {
+    const m = st.master;
+    const out = clashes.map((x) => ({ ...x, clash: true, rank: -1 }));
     if (["completed", "closed"].includes(m.status)) return out;
+    const clashed = new Set(clashes.map((x) => x.key));
     const rank = { overdue: 0, due: 1, unscheduled: 2 };
     m.concerns.forEach((c) => {
       if (!ACTIVE.includes(c.status)) return;
@@ -108,7 +155,7 @@ export function createPlanOverview(el, ctx) {
       c.lines.forEach((l) => {
         const lt = t.lines.get(l.id);
         const s = lt.next;
-        if (s && s.state in rank) out.push({ c, l, lt, s, rank: rank[s.state] });
+        if (s && s.state in rank && !clashed.has(`${c.key}|${l.id}|${s.n}`)) out.push({ c, l, lt, s, rank: rank[s.state] });
       });
       if (c.status === "active" && c.lines.length && c.lines.every((l) => t.lines.get(l.id).complete)) {
         out.push({ c, complete: true, rank: 3 });
@@ -117,7 +164,7 @@ export function createPlanOverview(el, ctx) {
     return out.sort((a, b) => a.rank - b.rank);
   }
 
-  /* ---------- Drawing ---------- */
+  /* ---------- Drawing: shared ---------- */
 
   function emptyHtml() {
     const latest = ctx.latestConsult();
@@ -139,6 +186,8 @@ export function createPlanOverview(el, ctx) {
           Object.entries(PLAN_STATUS).map(([v, l]) => `<option value="${v}"${v === m.status ? " selected" : ""}>${l}</option>`).join("")}</select>
         <small>Version ${m.version}${when ? ` · updated ${esc(when)}${m.updatedBy ? ` by ${esc(m.updatedBy)}` : ""}` : ""}</small></div>
       <div class="po-head-acts">
+        <div class="fe-seg po-viewseg">${[["list", "List"], ["cal", "Calendar"]].map(([v, l]) =>
+          `<label class="fe-seg-btn"><input type="radio" name="po-view" value="${v}" data-po-view${st.view === v ? " checked" : ""} /><span>${l}</span></label>`).join("")}</div>
         ${newer ? '<button type="button" class="lh-btn" data-po="apply-latest">Update from the latest consultation</button>' : ""}
         <button type="button" class="lh-btn is-quiet" data-po="history">History</button>
       </div>
@@ -146,25 +195,41 @@ export function createPlanOverview(el, ctx) {
   }
 
   function needsHtml(list) {
-    return `<section class="po-needs"><h4>Needs action <em>${list.length}</em></h4>${list.map((x) => x.complete ? `
-      <div class="po-need is-complete">${chip(x.c.key)}
-        <div class="po-need-main"><strong>Every treatment is done</strong>
-          <small>Move this concern to maintenance, or mark it resolved.</small></div>
-        <div class="po-need-acts">
-          <button type="button" class="lh-btn" data-po="set-concern" data-v="maintenance" ${attrs(x.c)}>Maintenance</button>
-          <button type="button" class="lh-btn" data-po="set-concern" data-v="resolved" ${attrs(x.c)}>Resolved</button></div>
-      </div>` : `
-      <div class="po-need is-${x.s.state}">${chip(x.c.key)}
+    return `<section class="po-needs"><h4>Needs action <em>${list.length}</em></h4>${list.map((x) => {
+      if (x.clash) {
+        return `<div class="po-need is-clash">${chip(x.c.key)}
+          <div class="po-need-main"><strong>${esc(x.l.treatment)} is too close to ${esc(x.e.name)}</strong>
+            <small>${esc(slotText(x.lt, x.s))} · ${x.dt.days} day${x.dt.days === 1 ? "" : "s"} of downtime${
+              x.dt.note ? ` (${esc(x.dt.note)})` : ""} · ${esc(x.e.name)} is in ${esc(monthLabel(x.e.month))}</small></div>
+          <div class="po-need-acts">${x.s.state === "booked"
+            ? `<button type="button" class="lh-btn is-primary" data-po="ask-rebook" ${attrs(x.c, x.l, x.s.n)} data-ev="${esc(x.e.id)}">Ask reception to rebook</button>`
+            : `<button type="button" class="lh-btn is-primary" data-po="clash-move" ${attrs(x.c, x.l, x.s.n)} data-to="${esc(x.to)}">Move to ${esc(monthLabel(x.to))}</button>`}
+            <button type="button" class="lh-btn" data-po="slot" ${attrs(x.c, x.l, x.s.n)}>More</button></div>
+        </div>`;
+      }
+      if (x.complete) {
+        return `<div class="po-need is-complete">${chip(x.c.key)}
+          <div class="po-need-main"><strong>Every treatment is done</strong>
+            <small>Move this concern to maintenance, or mark it resolved.</small></div>
+          <div class="po-need-acts">
+            <button type="button" class="lh-btn" data-po="set-concern" data-v="maintenance" ${attrs(x.c)}>Maintenance</button>
+            <button type="button" class="lh-btn" data-po="set-concern" data-v="resolved" ${attrs(x.c)}>Resolved</button></div>
+        </div>`;
+      }
+      return `<div class="po-need is-${x.s.state}">${chip(x.c.key)}
         <div class="po-need-main"><strong>${esc(x.l.treatment)}</strong>
           <small>${esc(slotText(x.lt, x.s))}${x.s.asked ? ` · asked reception ${esc(dayLabel(String(x.s.asked.at || "").slice(0, 10)))}${
             x.s.asked.by ? ` (${esc(x.s.asked.by)})` : ""}` : ""}</small></div>
         <div class="po-need-acts">
           <button type="button" class="lh-btn is-primary" data-po="ask" ${attrs(x.c, x.l, x.s.n)}>${x.s.asked ? "Ask again" : "Ask reception to book"}</button>
           <button type="button" class="lh-btn" data-po="slot" ${attrs(x.c, x.l, x.s.n)}>More</button></div>
-      </div>`).join("")}</section>`;
+      </div>`;
+    }).join("")}</section>`;
   }
 
-  function lineHtml(c, l, lt) {
+  /* ---------- Drawing: List ---------- */
+
+  function lineHtml(c, l, lt, clashKeys) {
     const shown = lt.total ? lt.slots : lt.slots.slice(-6);
     const hidden = lt.slots.length - shown.length;
     const sub = [patternText(l), l.services.length ? `${l.services.length} linked service${l.services.length === 1 ? "" : "s"}` : ""]
@@ -173,14 +238,17 @@ export function createPlanOverview(el, ctx) {
       <div class="po-line-top"><strong>${esc(l.treatment)}</strong>
         <button type="button" class="po-mini" data-po="edit-line" ${attrs(c, l)}>Edit</button></div>
       ${sub ? `<small class="po-sub">${esc(sub)}</small>` : ""}
-      <div class="po-dots">${hidden ? `<span class="po-more">+${hidden}</span>` : ""}${shown.map((s) => `
-        <button type="button" class="po-dotb is-${s.state}${s.manual ? " is-manual" : ""}" data-po="slot" ${attrs(c, l, s.n)}
-          title="${esc(slotText(lt, s))}" aria-label="${esc(slotText(lt, s))}"></button>`).join("")}</div>
+      <div class="po-dots">${hidden ? `<span class="po-more">+${hidden}</span>` : ""}${shown.map((s) => {
+        const clash = clashKeys.has(`${c.key}|${l.id}|${s.n}`);
+        const t = `${slotText(lt, s)}${clash ? " · too close to a patient event" : ""}`;
+        return `<button type="button" class="po-dotb is-${s.state}${s.manual ? " is-manual" : ""}${clash ? " is-clash" : ""}" data-po="slot" ${
+          attrs(c, l, s.n)} title="${esc(t)}" aria-label="${esc(t)}"></button>`;
+      }).join("")}</div>
       <small class="po-next is-${lt.complete ? "complete" : lt.next ? lt.next.state : "none"}">${esc(nextText(lt))}</small>
     </div>`;
   }
 
-  function cardHtml(c, t) {
+  function cardHtml(c, t, clashKeys) {
     const k = con(c.key);
     return `<article class="po-card${ACTIVE.includes(c.status) ? "" : " is-off"}" style="--c:${esc(k.colour)}">
       <header class="po-card-head"><strong>${esc(k.label)}</strong>
@@ -188,7 +256,7 @@ export function createPlanOverview(el, ctx) {
           Object.entries(CONCERN_STATUS).map(([v, l]) => `<option value="${v}"${v === c.status ? " selected" : ""}>${l}</option>`).join("")}</select>
       </header>
       ${c.description || c.area ? `<p class="po-desc">${esc(c.description)}${c.area ? ` <em>${esc(c.area)}</em>` : ""}</p>` : ""}
-      <div class="po-lines">${c.lines.map((l) => lineHtml(c, l, t.lines.get(l.id))).join("") || '<p class="tb-none">No treatments yet.</p>'}</div>
+      <div class="po-lines">${c.lines.map((l) => lineHtml(c, l, t.lines.get(l.id), clashKeys)).join("") || '<p class="tb-none">No treatments yet.</p>'}</div>
       ${t.unmatched ? `<p class="po-unmatched">${t.unmatched} visit${t.unmatched === 1 ? "" : "s"} for this concern couldn't be matched to a treatment. Edit a treatment to link its services.</p>` : ""}
       <button type="button" class="po-add" data-po="add-line" ${attrs(c)}>+ Add a treatment</button>
       ${c.quote ? `<details class="po-quote"><summary>Quote</summary><p>${esc(c.quote).replace(/\n/g, "<br>")}</p></details>` : ""}
@@ -206,6 +274,71 @@ export function createPlanOverview(el, ctx) {
     </section>`;
   }
 
+  /* ---------- Drawing: Calendar ---------- */
+
+  function stepHtml(c, l, lt, s, clash, active) {
+    const movable = active && OPEN_STATES.includes(s.state);
+    const t = `${slotText(lt, s)}${clash ? " · too close to a patient event" : ""}${movable ? " · drag to move" : ""}`;
+    return `<button type="button" class="pcal-step is-${s.state}${s.manual ? " is-manual" : ""}${movable ? " is-movable" : ""}${
+      clash ? " is-clash" : ""}" data-po="slot" ${attrs(c, l, s.n)} data-row="${esc(`${c.key}|${l.id}`)}"
+      title="${esc(t)}" aria-label="${esc(t)}">${clash ? "⚠ " : ""}${s.n}</button>`;
+  }
+
+  function calendarHtml(track, clashKeys) {
+    const m = st.master;
+    const cur = thisMonth();
+    const months = Array.from({ length: 12 }, (_, i) => addMonths(st.calStart, i));
+    const head = (k, i) => {
+      const [y, mo] = k.split("-").map(Number);
+      const name = new Date(y, mo - 1, 1).toLocaleDateString("en-AU", { month: "short" });
+      return `<div class="pcal-mh${k === cur ? " is-now" : ""}">${name}${i === 0 || mo === 1 ? `<small>${y}</small>` : ""}</div>`;
+    };
+    const cells = (row, fill) => months.map((k) =>
+      `<div class="pcal-cell${k === cur ? " is-now" : ""}" data-month="${k}"${row ? ` data-row="${esc(row)}"` : ""}>${fill(k)}</div>`).join("");
+
+    let rows = "";
+    m.concerns.forEach((c) => {
+      const k = con(c.key);
+      const active = ACTIVE.includes(c.status);
+      const t = track.get(c.key);
+      rows += `<div class="pcal-concern${active ? "" : " is-off"}" style="--c:${esc(k.colour)}">${esc(k.label)}${
+        active ? "" : ` <small>${esc(CONCERN_STATUS[c.status])}</small>`}</div>`;
+      c.lines.forEach((l) => {
+        const lt = t.lines.get(l.id);
+        const row = `${c.key}|${l.id}`;
+        const unsched = lt.slots.filter((s) => !s.month && s.state !== "skipped");
+        rows += `<div class="pcal-label${active ? "" : " is-off"}" style="--c:${esc(k.colour)}">
+          <strong>${esc(l.treatment)}</strong><small>${esc(nextText(lt))}</small>
+          ${unsched.map((s) => `<button type="button" class="pcal-uns" data-po="slot" ${attrs(c, l, s.n)}>Session ${s.n}: not scheduled</button>`).join("")}
+        </div>${cells(active ? row : "", (mo) => lt.slots.filter((s) => s.month === mo)
+          .map((s) => stepHtml(c, l, lt, s, clashKeys.has(`${row}|${s.n}`), active)).join(""))}`;
+      });
+    });
+
+    return `<section class="pcal-wrap">
+      <div class="pcal-nav">
+        <button type="button" class="lh-btn is-quiet" data-po="cal-prev" aria-label="Earlier months">‹ Earlier</button>
+        <strong>${esc(monthLabel(months[0]))} to ${esc(monthLabel(months[11]))}</strong>
+        <button type="button" class="lh-btn is-quiet" data-po="cal-today">Today</button>
+        <button type="button" class="lh-btn is-quiet" data-po="cal-next" aria-label="Later months">Later ›</button>
+      </div>
+      <div class="pcal-scroll"><div class="pcal">
+        <div class="pcal-label pcal-corner"></div>${months.map(head).join("")}
+        <div class="pcal-label pcal-evl"><strong>Patient events</strong>
+          <button type="button" class="po-mini" data-po="add-event">+ Add</button></div>${cells("", (k) => m.events.filter((e) => e.month === k)
+          .map((e) => `<span class="pcal-ev${e.avoidDowntime ? " is-avoid" : ""}" title="${esc(e.name)}${
+            e.avoidDowntime ? " · avoid downtime before it" : ""}">${esc(e.name)}</span>`).join(""))}
+        ${rows}
+      </div></div>
+      <p class="pcal-legend">
+        <span><i class="pcal-key is-done"></i>Done</span><span><i class="pcal-key is-booked"></i>Booked</span>
+        <span><i class="pcal-key is-due"></i>Due</span><span><i class="pcal-key is-overdue"></i>Overdue</span>
+        <span><i class="pcal-key is-planned"></i>Planned</span>
+        <span class="pcal-hint">Drag a planned session to another month, or tap it for more.</span>
+      </p>
+    </section>`;
+  }
+
   function draw() {
     if (!el.isConnected) return;
     if (st.error) { el.innerHTML = `<p class="empty-note error">${esc(st.error)}</p>`; return; }
@@ -213,12 +346,15 @@ export function createPlanOverview(el, ctx) {
     const m = st.master;
     if (!m) { el.innerHTML = emptyHtml(); return; }
     const track = compute();
-    const list = needsList(track);
+    const clashes = clashList(track);
+    const clashKeys = new Set(clashes.map((x) => x.key));
+    const list = needsList(track, clashes);
     el.innerHTML = `<div class="po">
       ${headHtml(m)}
       ${list.length ? needsHtml(list) : ""}
-      <div class="po-grid">${m.concerns.map((c) => cardHtml(c, track.get(c.key))).join("")}</div>
-      ${eventsHtml(m)}
+      ${st.view === "cal"
+        ? calendarHtml(track, clashKeys)
+        : `<div class="po-grid">${m.concerns.map((c) => cardHtml(c, track.get(c.key), clashKeys)).join("")}</div>${eventsHtml(m)}`}
     </div>`;
   }
 
@@ -255,6 +391,8 @@ export function createPlanOverview(el, ctx) {
     const lt = compute().get(c.key).lines.get(l.id);
     return [lt, lt && lt.slots.find((x) => x.n === n)];
   };
+  // Later sessions of the same treatment that are still to come (these follow a move)
+  const laterOpen = (lt, n) => lt.slots.filter((x) => x.n > n && OPEN_STATES.includes(x.state) && x.month);
 
   function setPlanStatus(v) {
     if (!PLAN_STATUS[v] || v === st.master.status) return;
@@ -267,17 +405,42 @@ export function createPlanOverview(el, ctx) {
       "Changed a concern's status", `${con(c.key).label}: ${CONCERN_STATUS[v]}`);
   }
 
+  /* ---------- Moving a session (later ones keep their spacing) ---------- */
+
+  // keepGaps: sessions after it move by the same number of months. Otherwise they stay where they are.
+  async function moveSlot(c, l, n, toMonth, keepGaps = true) {
+    const [lt, s] = slotOf(c, l, n);
+    if (!s || !MONTH_RE.test(toMonth) || !OPEN_STATES.concat("unscheduled").includes(s.state)) return false;
+    if (toMonth === s.month && !s.moved) return false;
+    const shift = s.month ? monthDiff(s.month, toMonth) : 0;
+    const later = laterOpen(lt, n);
+    const ov = l.overrides || {};
+    return commit((p) => {
+      setOv(p, c.key, l.id, String(n), { month: toMonth });
+      later.forEach((x) => {
+        const own = (ov[String(x.n)] || {}).month;
+        // Sessions without their own month already follow the moved one (by the interval). Pinned ones shift with it.
+        if (keepGaps) { if (own && shift) setOv(p, c.key, l.id, String(x.n), { month: addMonths(own, shift) }); }
+        else setOv(p, c.key, l.id, String(x.n), { month: x.month });
+      });
+    }, `Moved a session to ${monthLabel(toMonth)}`,
+    `${l.treatment}, session ${n}${later.length ? (keepGaps ? `, and the ${later.length} after it` : ", later sessions kept in place") : ""}`);
+  }
+
   /* ---------- Ask reception to book (a reminder on the patient) ---------- */
 
-  async function askReception(c, l, n) {
+  async function askReception(c, l, n, rebookNote = "") {
     const [lt, s] = slotOf(c, l, n);
     const uid = auth.currentUser && auth.currentUser.uid;
     if (!s) return;
     if (!uid) { showToast("Your session has ended. Log in again."); return; }
+    const what = `${l.treatment} (${con(c.key).label}${lt.total ? `, session ${s.n} of ${lt.total}` : ""})`;
     const when = s.state === "overdue" ? "as soon as possible" : s.month ? `in ${monthLabel(s.month)}` : "when it suits the patient";
-    const text = `Please book ${patient.name}: ${l.treatment} (${con(c.key).label}${lt.total ? `, session ${s.n} of ${lt.total}` : ""}), ${when}.`;
+    const text = rebookNote
+      ? `Please rebook ${patient.name}: ${what}, booked ${dayLabel(s.date)}. ${rebookNote}`
+      : `Please book ${patient.name}: ${what}, ${when}.`;
     const today = dateKeyOf(new Date());
-    const due = s.month && `${s.month}-01` > today ? `${s.month}-01` : today;
+    const due = !rebookNote && s.month && `${s.month}-01` > today ? `${s.month}-01` : today;
     st.busy = true;
     try {
       await addDoc(collection(db, "staff-task-list"), {
@@ -293,7 +456,7 @@ export function createPlanOverview(el, ctx) {
     }
     st.busy = false;
     await commit((p) => setOv(p, c.key, l.id, String(n), { asked: { at: new Date().toISOString(), by: (staff && staff.name) || "" } }),
-      "Asked reception to book", text);
+      rebookNote ? "Asked reception to rebook" : "Asked reception to book", text);
     showToast("Reminder added for reception");
     if (ctx.onReminder) ctx.onReminder();
   }
@@ -305,8 +468,11 @@ export function createPlanOverview(el, ctx) {
     if (!s) return;
     const today = dateKeyOf(new Date());
     const open = !["done", "booked", "skipped"].includes(s.state);
+    const later = laterOpen(lt, n);
+    const dt = downtimeOf(c, l);
     const dlg = openDlg(`
-      <div class="lh-dialog-head"><h3>${esc(l.treatment)}</h3><p>${chip(c.key)} ${esc(slotText(lt, s))}</p></div>
+      <div class="lh-dialog-head"><h3>${esc(l.treatment)}</h3><p>${chip(c.key)} ${esc(slotText(lt, s))}${
+        dt.days ? ` · ${dt.days} day${dt.days === 1 ? "" : "s"} of downtime` : ""}</p></div>
       ${s.state === "done" && !s.manual ? `<p class="inv-hint">Matched to the appointment on ${esc(dayLabel(s.date))}, so it's counted automatically.</p>` : ""}
       ${s.state === "booked" ? `<p class="inv-hint">There's an appointment booked for ${esc(dayLabel(s.date))}. It becomes Done after the visit.</p>` : ""}
       ${open ? `
@@ -317,6 +483,8 @@ export function createPlanOverview(el, ctx) {
         <div class="po-slot-row">
           <label class="lh-field"><span class="lh-label">Move to</span><input type="month" name="month" value="${esc(s.month || thisMonth())}" placeholder="2026-11" /></label>
           <button type="button" class="lh-btn" data-act="move">Move</button></div>
+        ${later.length ? `<label class="fe-check"><input type="checkbox" name="keep" checked /> Move the ${later.length} later session${
+          later.length === 1 ? "" : "s"} with it (keeps the gaps)</label>` : ""}
         <div class="po-slot-btns">
           <button type="button" class="lh-btn" data-act="ask">${s.asked ? "Ask reception again" : "Ask reception to book"}</button>
           <button type="button" class="lh-btn is-quiet" data-act="skip">Skip this session</button>
@@ -336,6 +504,15 @@ export function createPlanOverview(el, ctx) {
       const act = b.dataset.act;
       if (act === "close") { dlg.close(); return; }
       if (act === "ask") { dlg.close(); askReception(c, l, n); return; }
+      if (act === "move") {
+        const mo = form.elements.month.value.trim();
+        if (!MONTH_RE.test(mo)) { fail("Choose a month (e.g. 2026-11)."); return; }
+        if (mo === s.month) { dlg.close(); return; }
+        b.disabled = true;
+        if (await moveSlot(c, l, n, mo, !form.elements.keep || form.elements.keep.checked)) dlg.close();
+        else b.disabled = false;
+        return;
+      }
       const label = `${l.treatment}, ${slotText(lt, s).split(" · ")[0].toLowerCase()}`;
       let patch;
       let action;
@@ -344,11 +521,6 @@ export function createPlanOverview(el, ctx) {
         if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || d > today) { fail("Choose the day it was done (today or earlier)."); return; }
         patch = { status: "done", date: d, month: undefined };
         action = "Marked a session done";
-      } else if (act === "move") {
-        const mo = form.elements.month.value.trim();
-        if (!MONTH_RE.test(mo)) { fail("Choose a month (e.g. 2026-11)."); return; }
-        patch = { month: mo };
-        action = `Moved a session to ${monthLabel(mo)}`;
       } else if (act === "skip") {
         patch = { status: "skipped" };
         action = "Skipped a session";
@@ -524,9 +696,63 @@ export function createPlanOverview(el, ctx) {
     dlg.querySelector('[data-act="close"]').addEventListener("click", () => dlg.close());
   }
 
+  /* ---------- Calendar: drag a session to another month (mouse, pen or finger) ---------- */
+
+  let drag = null;
+  let swallowClick = false; // the click that follows a drag must not open the session
+
+  el.addEventListener("pointerdown", (e) => {
+    const step = e.target.closest(".pcal-step.is-movable");
+    if (!step || st.busy || (e.pointerType === "mouse" && e.button !== 0)) return;
+    drag = { step, x: e.clientX, y: e.clientY, id: e.pointerId, on: false, target: null };
+    try { step.setPointerCapture(e.pointerId); } catch { /* not essential */ }
+  });
+
+  el.addEventListener("pointermove", (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    if (!drag.on) {
+      if (Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 6) return; // a tap, not a drag (yet)
+      drag.on = true;
+      drag.step.classList.add("is-dragging");
+      el.classList.add("pcal-dragging");
+    }
+    e.preventDefault();
+    drag.step.style.transform = `translate(${e.clientX - drag.x}px, ${e.clientY - drag.y}px)`;
+    // Look under the finger, not at the session being dragged
+    drag.step.style.visibility = "hidden";
+    const under = document.elementFromPoint(e.clientX, e.clientY);
+    drag.step.style.visibility = "";
+    const cell = under && under.closest(".pcal-cell[data-row]");
+    const ok = cell && cell.dataset.row === drag.step.dataset.row ? cell : null;
+    if (drag.target !== ok) {
+      if (drag.target) drag.target.classList.remove("is-target");
+      drag.target = ok;
+      if (ok) ok.classList.add("is-target");
+    }
+  });
+
+  const endDrag = (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const d = drag;
+    drag = null;
+    el.classList.remove("pcal-dragging");
+    if (!d.on) return; // a tap: the click opens the session
+    swallowClick = true;
+    setTimeout(() => { swallowClick = false; }, 400);
+    d.step.classList.remove("is-dragging");
+    d.step.style.transform = "";
+    if (d.target) d.target.classList.remove("is-target");
+    if (e.type === "pointercancel" || !d.target) return;
+    const [c, l] = findLine(d.step.dataset.c, d.step.dataset.l);
+    if (c && l) moveSlot(c, l, Number(d.step.dataset.n), d.target.dataset.month, true);
+  };
+  el.addEventListener("pointerup", endDrag);
+  el.addEventListener("pointercancel", endDrag);
+
   /* ---------- Events ---------- */
 
   el.addEventListener("click", (e) => {
+    if (swallowClick) { swallowClick = false; e.preventDefault(); return; }
     const b = e.target.closest("[data-po]");
     if (!b || b.tagName === "SELECT" || st.busy) return;
     const d = b.dataset;
@@ -534,6 +760,9 @@ export function createPlanOverview(el, ctx) {
     if (d.po === "history") { showHistory(); return; }
     if (d.po === "add-event") { addEvent(); return; }
     if (d.po === "remove-event") { removeEvent(d.e); return; }
+    if (d.po === "cal-prev") { st.calStart = addMonths(st.calStart, -3); draw(); return; }
+    if (d.po === "cal-next") { st.calStart = addMonths(st.calStart, 3); draw(); return; }
+    if (d.po === "cal-today") { st.calStart = addMonths(thisMonth(), -1); draw(); return; }
     const [c, l] = findLine(d.c, d.l);
     if (!c) return;
     if (d.po === "set-concern") setConcernStatus(c, d.v);
@@ -541,9 +770,21 @@ export function createPlanOverview(el, ctx) {
     else if (d.po === "edit-line" && l) editLine(c, l);
     else if (d.po === "slot" && l) slotDialog(c, l, Number(d.n));
     else if (d.po === "ask" && l) askReception(c, l, Number(d.n));
+    else if (d.po === "clash-move" && l) moveSlot(c, l, Number(d.n), d.to, true);
+    else if (d.po === "ask-rebook" && l) {
+      const ev = st.master.events.find((x) => x.id === d.ev);
+      askReception(c, l, Number(d.n), ev ? `It's too close to ${ev.name} (${monthLabel(ev.month)}), so it needs a new date.` : "It needs a new date.");
+    }
   });
+
   el.addEventListener("change", (e) => {
     const t = e.target;
+    if (t.matches("[data-po-view]")) {
+      st.view = t.value === "cal" ? "cal" : "list";
+      try { localStorage.setItem(VIEW_KEY, st.view); } catch { /* not essential */ }
+      draw();
+      return;
+    }
     if (st.busy) { draw(); return; }
     if (t.matches('[data-po="plan-status"]')) setPlanStatus(t.value);
     else if (t.matches('[data-po="concern-status"]')) setConcernStatus(findLine(t.dataset.c)[0], t.value);

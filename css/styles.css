@@ -4370,3 +4370,66 @@ button.pa-bdg { font-family: inherit; line-height: inherit; }
   border-radius: 10px; background: #f8fafc; font-size: .85rem; }
 .po-hist li span { display: grid; }
 .po-hist small { color: var(--muted); }
+
+/* Plan: List / Calendar switch */
+.po-viewseg { margin-right: .2rem; }
+
+/* Plan: downtime clashes */
+.po-need.is-clash { border-left-color: #c2410c; background: #fff7ed; }
+.po-dotb.is-clash { box-shadow: 0 0 0 2px #fff, 0 0 0 4px #f97316; }
+
+/* Plan: calendar */
+.pcal-wrap { display: grid; gap: .5rem; }
+.pcal-nav { display: flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+.pcal-nav strong { margin-right: auto; font-size: .9rem; }
+.pcal-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 14px; background: #fff; }
+.pcal { display: grid; grid-template-columns: minmax(170px, 230px) repeat(12, minmax(58px, 1fr)); min-width: 900px; }
+.pcal > div { border-bottom: 1px solid #f1f5f9; }
+.pcal-mh { padding: .45rem .3rem; text-align: center; font-size: .78rem; font-weight: 700; color: #475569; background: #f8fafc;
+  border-left: 1px solid #f1f5f9; }
+.pcal-mh small { display: block; font-weight: 500; color: var(--muted); font-size: .68rem; }
+.pcal-mh.is-now { color: var(--primary); background: #ecfdf5; }
+.pcal-label { position: sticky; left: 0; z-index: 2; display: grid; align-content: start; gap: .15rem; padding: .45rem .6rem;
+  background: #fff; border-right: 1px solid var(--border); border-left: 4px solid var(--c, transparent); font-size: .82rem; }
+.pcal-label small { color: var(--muted); font-size: .72rem; }
+.pcal-label.is-off { opacity: .55; }
+.pcal-corner { background: #f8fafc; }
+.pcal-evl { display: flex; align-items: center; justify-content: space-between; gap: .3rem; background: #fffbeb; border-left-color: #f59e0b; }
+.pcal-concern { grid-column: 1 / -1; padding: .35rem .6rem; font-size: .78rem; font-weight: 700; letter-spacing: .02em;
+  color: color-mix(in srgb, var(--c) 75%, #0f172a); background: color-mix(in srgb, var(--c) 10%, #fff);
+  border-top: 2px solid var(--c); }
+.pcal-concern.is-off { opacity: .6; }
+.pcal-concern small { font-weight: 500; color: var(--muted); }
+.pcal-cell { display: flex; flex-wrap: wrap; align-content: flex-start; justify-content: center; gap: .2rem; min-height: 44px;
+  padding: .3rem .2rem; border-left: 1px solid #f1f5f9; }
+.pcal-cell.is-now { background: #f0fdf9; }
+.pcal-cell.is-target { background: #dbeafe; outline: 2px dashed #2563eb; outline-offset: -3px; }
+.pcal-ev { max-width: 100%; padding: .1rem .35rem; border-radius: 6px; background: #fef3c7; color: #92400e; font-size: .7rem;
+  font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pcal-ev.is-avoid::before { content: "★ "; }
+.pcal-uns { justify-self: start; padding: .05rem .4rem; border: 1px dashed #94a3b8; border-radius: 6px; background: #fff;
+  color: #475569; font: inherit; font-size: .7rem; cursor: pointer; }
+
+.pcal-step { min-width: 26px; height: 24px; padding: 0 .35rem; border-radius: 999px; border: 2px solid #cbd5e1; background: #fff;
+  color: #334155; font: inherit; font-size: .72rem; font-weight: 700; cursor: pointer; }
+.pcal-step.is-done { background: #16a34a; border-color: #16a34a; color: #fff; }
+.pcal-step.is-done.is-manual { background: #86efac; color: #14532d; }
+.pcal-step.is-booked { background: #2563eb; border-color: #2563eb; color: #fff; }
+.pcal-step.is-due { background: #fef3c7; border-color: #f59e0b; color: #92400e; }
+.pcal-step.is-overdue { background: #fee2e2; border-color: #dc2626; color: #991b1b; }
+.pcal-step.is-planned { border-style: dashed; border-color: var(--primary); color: var(--primary); }
+.pcal-step.is-skipped { opacity: .5; text-decoration: line-through; }
+.pcal-step.is-clash { box-shadow: 0 0 0 2px #fff, 0 0 0 4px #f97316; }
+.pcal-step.is-movable { cursor: grab; touch-action: none; }
+.pcal-step.is-dragging { position: relative; z-index: 5; cursor: grabbing; box-shadow: 0 6px 16px rgba(15, 23, 42, .25); }
+.pcal-dragging, .pcal-dragging * { user-select: none; -webkit-user-select: none; }
+
+.pcal-legend { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .9rem; margin: 0; font-size: .76rem; color: #475569; }
+.pcal-legend span { display: inline-flex; align-items: center; gap: .3rem; }
+.pcal-key { display: inline-block; width: 12px; height: 12px; border-radius: 50%; border: 2px solid #cbd5e1; }
+.pcal-key.is-done { background: #16a34a; border-color: #16a34a; }
+.pcal-key.is-booked { background: #2563eb; border-color: #2563eb; }
+.pcal-key.is-due { background: #fef3c7; border-color: #f59e0b; }
+.pcal-key.is-overdue { background: #fee2e2; border-color: #dc2626; }
+.pcal-key.is-planned { border-style: dashed; border-color: var(--primary); }
+.pcal-hint { color: var(--muted); margin-left: auto; }

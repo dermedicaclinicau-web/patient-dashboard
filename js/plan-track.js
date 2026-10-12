@@ -17,6 +17,19 @@ export function addWeeks(key, w) {
   return monthOfDate(d);
 }
 
+// "2026-11" + 2 → "2027-01"
+export function addMonths(key, n) {
+  const m = /^(\d{4})-(\d{2})/.exec(key || "");
+  return m ? monthOfDate(new Date(+m[1], +m[2] - 1 + n, 1)) : "";
+}
+
+// Months from a to b ("2026-11" → "2027-01" = 2)
+export function monthDiff(a, b) {
+  const x = /^(\d{4})-(\d{2})/.exec(a || "");
+  const y = /^(\d{4})-(\d{2})/.exec(b || "");
+  return x && y ? (+y[1] - +x[1]) * 12 + (+y[2] - +x[2]) : 0;
+}
+
 export function dayLabel(key) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(key || "");
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
