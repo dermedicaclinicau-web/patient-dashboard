@@ -38,7 +38,7 @@ function seenKey(staff) {
 async function kitToday(staff) {
   if (!staff || staff.injector !== true) return null;
   const [products, kits, day] = await Promise.all([listProducts(), listKits({ mine: true }), getMyKitDay()]);
-  if (day && day.start) return null;
+  if (day && (day.start || day.end)) return null;
   const kp = products.filter((p) => p.active && isKitProduct(p) && kits.some((k) => k.productId === p.id));
   return kp.length ? { products: kp.map((p) => ({ p })) } : null;
 }
@@ -352,7 +352,7 @@ let btnCheck = 0;
 async function dayState(staff) {
   if (!staff) return null;
   const [day, kit] = await Promise.all([getMyKitDay(), kitToday(staff)]);
-  return day && day.start ? null : { kit };
+  return day && (day.start || day.end) ? null : { kit };
 }
 
 // The top bar button: the kit count for injectors with a kit, otherwise the welcome

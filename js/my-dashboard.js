@@ -257,7 +257,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     if (myOverdue) att.push({ tone: "bad", ttab: "mine",
       text: `${myOverdue} of your task${myOverdue === 1 ? " is" : "s are"} overdue`, act: "View" });
     // Start of Day: injectors holding a kit who haven't done today's count (e.g. pressed "Remind me later")
-    const sodPending = canKit && !(myDay && myDay.start)
+    const sodPending = canKit && !(myDay && (myDay.start || myDay.end))
       && myKits.some((k) => { const p = byId.get(k.productId); return p && p.active && isKitProduct(p); });
     if (sodPending) att.unshift({ tone: "warn", sod: true, text: "Start of Day: your kit count isn't done yet", act: "Count my kit" });
     // My kit: lots due today that nobody has counted yet (not repeated while the Start of Day count is waiting)
