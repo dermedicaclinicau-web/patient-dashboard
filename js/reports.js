@@ -7,6 +7,7 @@ import {
 } from "./inventory-api.js";
 import { can } from "./perms.js";
 import { showToast } from "./utils.js";
+import { renderPlanReports } from "./plan-reports.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(2));

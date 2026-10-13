@@ -4555,3 +4555,33 @@ button.pa-bdg { font-family: inherit; line-height: inherit; }
   .pd-opts { border-right: 0; border-bottom: 1px solid var(--border); }
   .pd-page { width: 760px; }
 }
+
+/* Reporting: treatment plans */
+.rp-funnel { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: .6rem; margin-bottom: .5rem; }
+.rp-stage { display: grid; gap: .1rem; padding: .7rem .8rem; border: 1px solid var(--border); border-radius: 12px; background: #fff;
+  font: inherit; text-align: left; cursor: pointer; }
+.rp-stage span { font-size: .8rem; color: var(--muted); }
+.rp-stage strong { font-size: 1.5rem; line-height: 1.1; }
+.rp-stage small { font-size: .74rem; color: var(--muted); }
+.rp-stage.is-closed strong { color: #94a3b8; }
+.rp-stage.is-on, .rp-stage:hover { border-color: var(--primary); }
+.rp-stage.is-on { background: #f0fdfa; }
+.rp-note { margin: 0 0 .9rem; font-size: .78rem; color: var(--muted); }
+.rp-table td { vertical-align: middle; }
+.rp-num { padding: .15rem .45rem; border: 1px solid transparent; border-radius: 7px; background: none; font: inherit; font-weight: 600; cursor: pointer; }
+.rp-num small { font-weight: 500; color: var(--muted); }
+.rp-num:hover, .rp-num.is-on { border-color: var(--primary); background: #f0fdfa; }
+.rp-list { display: grid; gap: .4rem; }
+.rp-row { display: flex; align-items: center; flex-wrap: wrap; gap: .4rem .8rem; padding: .55rem .8rem; border: 1px solid var(--border);
+  border-left: 4px solid #cbd5e1; border-radius: 0 10px 10px 0; background: #fff; font-size: .86rem; }
+.rp-row.is-overdue { border-left-color: #dc2626; }
+.rp-row.is-due { border-left-color: #f59e0b; }
+.rp-row.is-unscheduled { border-left-color: #94a3b8; }
+.rp-who { min-width: 160px; font-weight: 600; }
+.rp-who a { color: inherit; }
+.rp-tx { display: inline-flex; align-items: center; gap: .4rem; flex-wrap: wrap; }
+.rp-tx small { color: var(--muted); }
+.rp-when { font-weight: 600; color: #b45309; }
+.rp-row.is-overdue .rp-when { color: #b91c1c; }
+.rp-meta { flex: 1; color: var(--muted); font-size: .8rem; }
+.rp-chips { display: inline-flex; flex-wrap: wrap; gap: .25rem; }

@@ -12,6 +12,7 @@ import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 import { showSoapPanel } from "./soap-panel.js";
 import { openPlanDocument } from "./plan-doc.js";
+import { callApi } from "./appointments.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const MONTH_RE = /^\d{4}-\d{2}$/;
@@ -124,6 +125,7 @@ export function createPlanOverview(el, ctx) {
         getPlanSettings().catch(() => ({ concerns: [], services: [] })),
       ]);
       Object.assign(st, { master: m, settings: s, loaded: true, error: "" });
+      if (m) refreshProgress();
     } catch (err) {
       console.warn("Master plan failed:", err);
       st.error = err && err.code === "permission-denied"
@@ -133,6 +135,15 @@ export function createPlanOverview(el, ctx) {
     draw();
   }
 
+  // Reporting's summary for this patient is worked out again in the background (at most every 20 seconds)
+  let lastRefresh = 0;
+  function refreshProgress() {
+    if (Date.now() - lastRefresh < 20000) return;
+    lastRefresh = Date.now();
+    callApi({ action: "plan", op: "refreshProgress", patientId: patient.id })
+      .catch((err) => console.warn("Plan progress not refreshed:", err));
+  }
+  
   function compute() {
     const m = st.master;
     const consultDay = new Map((ctx.consults() || []).filter((r) => r.date).map((r) => [r.id, dateKeyOf(r.date)]));
