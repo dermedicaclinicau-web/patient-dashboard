@@ -4806,3 +4806,5 @@ dialog.lh-dialog.inv-dlg.rr-dlg > .rr-form {
   .sc-prod { min-width: 150px; }
   .sc-note-td { width: 140px; }
 }
+
+.re-tokpick { margin-top: .35rem; max-width: 100%; font-size: .85rem; }

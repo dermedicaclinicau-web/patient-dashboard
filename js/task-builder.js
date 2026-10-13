@@ -369,6 +369,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     pickImage: () => openImagePicker({ isAdmin: true }),
     accent: () => task.style.accent,
     logo: () => (letterhead && letterhead.logo) || "",
+    tokens: chipGroups,
   });
   editor.setHtml(task.body);
   lastPatientTokens = patientTokens();
@@ -622,8 +623,8 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
       </section>`;
   }
 
-    function renderChips() {
-    const box = $('[data-role="chips"]');
+  // The blanks this task can use (the chips under the message, and the button / link windows)
+  function chipGroups() {
     const groups = tokenGroups(task, tokenOpts());
     // Staff tasks: always offer the patient blanks. Using one turns on "This is about a patient".
     if (task.category === "staff" && !task.recipients.aboutPatient) {
@@ -632,6 +633,18 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
         tokens: PATIENT_TOKENS.map((name) => ({ name, kind: "", hint: "Using this turns on “This is about a patient”" })),
       });
     }
+    return groups;
+  }
+
+  function renderChips() {
+    const box = $('[data-role="chips"]');
+    box.innerHTML = chipGroups().map((g) => `
+      <div class="tb-chipgroup"><span>${esc(g.title)}</span>
+        <div class="fe-chiprow">${g.tokens.map((t) => `<button type="button" class="fe-ins${
+          t.kind === "smart" ? " is-smart" : t.kind === "field" ? " is-field" : ""}" data-token="${esc(t.name)}"${
+          t.hint ? ` title="${esc(t.hint)}"` : ""}>{${esc(t.name)}}</button>`).join("")}</div></div>`).join("");
+  }
+
     box.innerHTML = groups.map((g) => `
       <div class="tb-chipgroup"><span>${esc(g.title)}</span>
         <div class="fe-chiprow">${g.tokens.map((t) => `<button type="button" class="fe-ins${

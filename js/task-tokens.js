@@ -229,9 +229,34 @@ export function valueToHtml(v) {
   return marks(h).replace(/\n/g, "<br>");
 }
 
-// Fills {blanks} in rich HTML (only in the text, never inside tags)
+// A filled-in value as plain text (preview highlights and [[name|link]] markers removed)
+function plainValue(v) {
+  if (v && typeof v === "object") v = v.text || "";
+  return String(v ?? "").replace(/[\u0001\u0002]/g, "");
+}
+
+// A value inside a link's address. At the start: the whole address (must be a web, email or phone link).
+// Anywhere else: made URL-safe, e.g. "Mary-Jane O'Brien" → "Mary-Jane%20O'Brien".
+function hrefPart(v, atStart) {
+  const s = plainValue(v).trim();
+  if (atStart) {
+    const m = /\[\[[^|\]]+\|(https?:\/\/[^\]\s]+)\]\]/.exec(s);
+    const u = m ? m[1] : s.replace(/^•\s*/, "").split(/\s+/)[0] || "";
+    if (/^(https?:\/\/|mailto:|tel:)/i.test(u)) return u;
+    return /^[\w-]+(\.[\w-]+)+(\/\S*)?$/i.test(u) ? `https://${u}` : "#";
+  }
+  return encodeURIComponent(s.replace(/\[\[([^|\]]+)\|[^\]]+\]\]/g, "$1").replace(/^•\s*/gm, "").replace(/\n+/g, ", "));
+}
+
+// Fills {blanks} in rich HTML: in the text, and inside links (href); never anywhere else in a tag
 export function fillTemplateHtml(html, values) {
-  return String(html || "").split(/(<[^>]*>)/).map((part) => (part.startsWith("<") ? part
+  const fillHref = (url) => url.replace(/\{([^{}\n]{1,80})\}/g, (whole, n, offset) => {
+    const v = values.get(n.trim().toLowerCase());
+    if (v === undefined || plainValue(v) === whole) return whole; // left for the server, e.g. {First name} in staff tasks
+    return esc(hrefPart(v, offset === 0));
+  });
+  return String(html || "").split(/(<[^>]*>)/).map((part) => (part.startsWith("<")
+    ? part.replace(/(\shref\s*=\s*")([^"]*)(")/gi, (m, a, url, c) => a + fillHref(url) + c)
     : part.replace(/\{([^{}\n]{1,80})\}/g, (whole, n) => {
         const v = values.get(n.trim().toLowerCase());
         return v === undefined ? whole : valueToHtml(v);

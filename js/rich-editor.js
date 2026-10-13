@@ -32,11 +32,17 @@ function askDialog({ title, fields, confirm = "Add" }) {
     let result = null;
     const dlg = document.createElement("dialog");
     dlg.className = "lh-dialog fe-confirm";
+    // "+ Insert a blank…": the same blanks as the chips under the message
+    const tokenSelect = (f) => `<select class="fb-select re-tokpick" data-tok-for="${f.key}" aria-label="Insert a blank into ${esc(f.label.toLowerCase())}">
+        <option value="">+ Insert a blank…</option>${f.tokens.map((g) => `<optgroup label="${esc(g.title)}">${g.tokens.map((t) =>
+          `<option value="${esc(t.name)}">{${esc(t.name)}}</option>`).join("")}</optgroup>`).join("")}</select>`;
     dlg.innerHTML = `
       <form class="lh-form" novalidate>
         <div class="lh-dialog-head"><h3>${esc(title)}</h3></div>
-        ${fields.map((f) => `<label class="lh-field"><span class="lh-label">${esc(f.label)}</span>
-          <input type="text" name="${f.key}" maxlength="500" value="${esc(f.value || "")}" placeholder="${esc(f.placeholder || "")}" /></label>`).join("")}
+        ${fields.map((f) => `<div class="lh-field"><span class="lh-label">${esc(f.label)}</span>
+          <input type="text" name="${f.key}" maxlength="500" value="${esc(f.value || "")}" placeholder="${esc(f.placeholder || "")}" aria-label="${esc(f.label)}" />
+          ${f.tokens && f.tokens.length ? tokenSelect(f) : ""}
+          ${f.hint ? `<small class="fe-note">${esc(f.hint)}</small>` : ""}</div>`).join("")}
         <p class="lh-error" role="alert" hidden></p>
         <div class="lh-actions">
           <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
@@ -45,6 +51,19 @@ function askDialog({ title, fields, confirm = "Add" }) {
       </form>`;
     const form = dlg.querySelector("form");
     dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    // Puts the chosen blank where the cursor is in that box
+    form.addEventListener("change", (e) => {
+      const s = e.target.closest("[data-tok-for]");
+      if (!s || !s.value) return;
+      const input = form.elements[s.dataset.tokFor];
+      const tok = `{${s.value}}`;
+      const a = input.selectionStart ?? input.value.length;
+      const b = input.selectionEnd ?? a;
+      input.value = input.value.slice(0, a) + tok + input.value.slice(b);
+      s.value = "";
+      input.focus();
+      input.setSelectionRange(a + tok.length, a + tok.length);
+    });
     form.addEventListener("submit", (e) => {
       e.preventDefault();
       const out = {};
@@ -66,17 +85,20 @@ function askDialog({ title, fields, confirm = "Add" }) {
   });
 }
 
+
 const fixUrl = (u) => {
   const s = String(u || "").trim();
   if (!s) return "";
+  if (/^\{[^{}]{1,80}\}/.test(s)) return s; // a blank that becomes the whole address when the task runs
   return /^(https?:|mailto:|tel:)/i.test(s) ? s : "https://" + s.replace(/^\/+/, "");
 };
 
 export function createRichEditor(host, {
   onInput = () => {}, onFocus = () => {}, pickImage = null, button: showButton = true,
-  accent = () => "#0f766e", logo = () => "",
+  accent = () => "#0f766e", logo = () => "", tokens = null,
 } = {}) {
-  const btn = (cmd, icon, title) =>
+  
+const btn = (cmd, icon, title) =>
     `<button type="button" class="re-btn" data-cmd="${cmd}" title="${title}" aria-label="${title}">${icon}</button>`;
   host.innerHTML = `
     <div class="re">
@@ -179,13 +201,16 @@ export function createRichEditor(host, {
     if (cmd === "colour") { pop.hidden = !pop.hidden; return; }
     pop.hidden = true;
 
+    const groups = tokens ? tokens() : null;   // blanks this task can use (builder only)
+    const URL_HINT = groups ? "You can use blanks, e.g. https://dermedica.com.au/book?name={First name}. A blank on its own, like {Booking link}, uses the whole answer as the address." : "";
+
     if (cmd === "link") {
       const text = saved ? saved.toString() : "";
       const res = await askDialog({
         title: "Add a link",
         fields: [
-          { key: "url", label: "Web address", value: "https://", required: true },
-          ...(text ? [] : [{ key: "text", label: "Text to show", placeholder: "e.g. Read more about this treatment" }]),
+          { key: "url", label: "Web address", value: "https://", required: true, tokens: groups, hint: URL_HINT },
+          ...(text ? [] : [{ key: "text", label: "Text to show", placeholder: "e.g. Read more about this treatment", tokens: groups }]),
         ],
       });
       if (!res) return;
@@ -194,6 +219,7 @@ export function createRichEditor(host, {
       else insertHtml(`<a href="${esc(url)}">${esc(res.text || url)}</a>&nbsp;`);
       return;
     }
+    
     if (cmd === "image") {
       const img = await pickImage();
       if (!img) return;
@@ -204,8 +230,8 @@ export function createRichEditor(host, {
       const res = await askDialog({
         title: "Add a button",
         fields: [
-          { key: "text", label: "Button text", placeholder: "e.g. Book your review", required: true },
-          { key: "url", label: "Web address it opens", value: "https://", required: true },
+          { key: "text", label: "Button text", placeholder: "e.g. Book your review", required: true, tokens: groups },
+          { key: "url", label: "Web address it opens", value: "https://", required: true, tokens: groups, hint: URL_HINT },
         ],
       });
       if (!res) return;

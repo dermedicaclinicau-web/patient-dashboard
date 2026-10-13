@@ -45,7 +45,8 @@ function walk(node) {
         if (s) n.setAttribute("style", s); else n.removeAttribute("style");
         return;
       }
-      const ok = (tag === "A" && name === "href" && /^(https?:|mailto:|tel:)/i.test(a.value.trim()))
+      const href = a.value.trim();
+      const ok = (tag === "A" && name === "href" && (/^(https?:|mailto:|tel:)/i.test(href) || /^\{[^{}<>"]{1,80}\}/.test(href)))
         || (tag === "IMG" && ["data-bank", "data-logo", "alt", "width"].includes(name));
       if (!ok) n.removeAttribute(a.name);
     });
