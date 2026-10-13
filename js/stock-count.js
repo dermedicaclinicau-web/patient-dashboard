@@ -2,10 +2,9 @@
 // Blind count: the system's numbers only appear after saving. Nothing here changes stock;
 // differences go to Reporting → Count differences, or open an investigation.
 // Each line remembers when it was counted, so stock used while counting doesn't show as a difference.
-// The opening count covers the Shelf, JT storage, every injector's kit (for products due today)
-// and the opened containers of shared products.
+// The opening count is one table: a row per product (a line per batch), with Shelf, JT storage and a comment.
 import {
-  INV_CATEGORIES, unitPlural, fefo, batchName, batchText, isKitProduct, isSharedProduct, plural,
+  INV_CATEGORIES, unitPlural, batchName, batchText, isKitProduct, isSharedProduct, plural,
   listProducts, listAllLots, listKits, countDue, countLocs, dayKey, listCountsOn, saveCount, myUid,
   listOpenContainers, finishContainer, getCountSettings, saveCountSettings, COUNT_DUE_DEFAULT,
 } from "./inventory-api.js";
@@ -17,6 +16,7 @@ const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 const I = {
   back: ic('<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>'),
   check: ic('<polyline points="20 6 9 17 4 12"/>'),
+  search: ic('<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>'),
 };
 const fmt = (n) => String(+Number(n || 0).toFixed(1));
 const niceDate = (key) => {
@@ -27,8 +27,10 @@ const shortDate = (d) => (d ? d.toLocaleDateString("en-AU", { day: "numeric", mo
 const timeOf = (d) => (d ? d.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }) : "");
 const clock = (t) => { const [h, m] = String(t || COUNT_DUE_DEFAULT).split(":").map(Number); return `${((h + 11) % 12) + 1}:${String(m).padStart(2, "0")}${h < 12 ? "am" : "pm"}`; };
 const LOC = { shelf: "Shelf", jt: "JT storage" };
+const LOCS = ["shelf", "jt"];
 const whereOf = (l) => (l.loc === "kit" ? `${l.staffName || "Injector"}'s kit` : LOC[l.loc] || l.loc);
 const diffText = (n) => (n > 0 ? `+${fmt(n)}` : fmt(n));
+const whole = (v) => (v === "" ? "" : String(Math.max(0, parseInt(v, 10) || 0)));
 
 export async function mountStockCount(container, { param = "", staff = null } = {}) {
   const backHref = "#/tasks/new";
@@ -101,7 +103,17 @@ export async function mountStockCount(container, { param = "", staff = null } = 
   const saveBtn = $('[data-act="save"]');
   let busy = false;
 
-  // Admins: when the opening count should be done by (for the dashboard and the reminder email)
+  // Enter moves to the next box in the same column (walk the Shelf, then JT storage)
+  body.addEventListener("keydown", (e) => {
+    const t = e.target;
+    if (e.key !== "Enter" || !t.dataset || !t.dataset.col) return;
+    e.preventDefault();
+    const all = [...body.querySelectorAll(`input[data-col="${t.dataset.col}"]`)];
+    const next = all[all.indexOf(t) + 1];
+    if (next) { next.focus(); next.select(); } else t.blur();
+  });
+
+  // Manage inventory: when the opening count should be done by (for the dashboard, the card and the reminder email)
   root.addEventListener("click", (e) => {
     if (!e.target.closest('[data-act="dueby"]')) return;
     const dlg = document.createElement("dialog");
@@ -151,121 +163,219 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       </div></div>`;
   };
 
-  /* ===================== Opening count: Shelf, JT storage and injectors' kits ===================== */
+  /* ===================== Opening count: one table ===================== */
   if (mode === "opening") {
-    const lotsAt = (pid, loc) => lots.filter((l) => l.productId === pid && l.loc === loc && l.qty > 0).sort(fefo);
-    const makeBlock = (p, loc, extra = false) => ({
-      key: `${p.id}|${loc}`, p, loc, extra,
-      rows: p.tracked
-        ? lotsAt(p.id, loc).map((l) => ({ batch: l.batch, expiry: l.expiry, counted: "", countedAt: 0, found: false }))
-        : [{ batch: "", expiry: "", counted: "", countedAt: 0, found: false }],
+    const newRow = (batch, expiry, found, both = false) => ({
+      batch, expiry, found, at: { shelf: both, jt: both }, counted: { shelf: "", jt: "" }, countedAt: { shelf: 0, jt: 0 },
     });
-    const blocks = [];
-    products.filter((p) => countDue(p)).forEach((p) => countLocs(p).forEach((loc) => {
-      if (!done.has(`${p.id}|${loc}`)) blocks.push(makeBlock(p, loc));
-    }));
+    // One item per product: untracked = one line; tracked = a line per batch held on the Shelf or in JT storage
+    function makeItem(p, locs, extra = false) {
+      let rows;
+      if (p.tracked) {
+        const m = new Map();
+        lots.filter((l) => l.productId === p.id && l.qty > 0 && LOCS.includes(l.loc)).forEach((l) => {
+          const k = `${l.batch}|${l.expiry}`;
+          const r = m.get(k) || newRow(l.batch, l.expiry, false);
+          r.at[l.loc] = true;
+          m.set(k, r);
+        });
+        rows = [...m.values()].sort((a, b) => (a.expiry || "9999").localeCompare(b.expiry || "9999"));
+      } else {
+        rows = [newRow("", "", false, true)];
+      }
+      return { p, locs, extra, rows, none: { shelf: "", jt: "" }, noneAt: { shelf: 0, jt: 0 }, note: "" };
+    }
+
+    const items = [];
+    products.filter((p) => countDue(p)).forEach((p) => {
+      const locs = countLocs(p).filter((loc) => !done.has(`${p.id}|${loc}`));
+      if (locs.length) items.push(makeItem(p, locs));
+    });
     const kitRows = allKits.filter((k) => dueKitIds.has(k.productId) && !done.has(`kit|${k.id}`))
       .sort((a, b) => a.staffName.localeCompare(b.staffName) || a.productName.localeCompare(b.productName) || (a.expiry || "").localeCompare(b.expiry || ""))
       .map((k) => ({ k, due: false, sealed: "", open: "" }));
     const openChecks = new Map();   // opened container id → "there" | "missing"
+    const st = { q: "", left: false, order: products.some((p) => p.shelfPos || p.jtPos) ? "position" : "category" };
 
-    // Walking order: by where each product is kept, when positions have been set
-    const posOf = (b) => String((b.loc === "jt" ? b.p.jtPos : b.p.shelfPos) || "").trim();
-    let order = products.some((p) => p.shelfPos || p.jtPos) ? "position" : "category";
-    const byPos = (a, b) => {
-      const pa = posOf(a), pb = posOf(b);
+    // What has to be filled for a product + storage to count as done
+    const needRows = (it, loc) => it.rows.filter((r) => !r.found && r.at[loc]);
+    const noneAt = (it, loc) => it.p.tracked && !needRows(it, loc).length;   // tracked, nothing on record there
+    const foundAt = (it, loc) => it.rows.filter((r) => r.found && r.counted[loc] !== "");
+    const locFilled = (it, loc) => (noneAt(it, loc)
+      ? it.none[loc] !== "" || foundAt(it, loc).length > 0
+      : needRows(it, loc).every((r) => r.counted[loc] !== ""));
+    const locStarted = (it, loc) => (noneAt(it, loc) && it.none[loc] !== "")
+      || it.rows.some((r) => (r.found || r.at[loc]) && r.counted[loc] !== "");
+    const itemFilled = (it) => it.locs.every((loc) => locFilled(it, loc));
+
+    const posOf = (p, loc) => String((loc === "jt" ? p.jtPos : p.shelfPos) || "").trim();
+    const byPos = (loc) => (a, b) => {
+      const pa = posOf(a.p, loc), pb = posOf(b.p, loc);
       if (!pa !== !pb) return pa ? -1 : 1;
       return pa.localeCompare(pb, "en-AU", { numeric: true, sensitivity: "base" }) || a.p.name.localeCompare(b.p.name);
     };
 
-    const filled = (b) => b.rows.length > 0 && b.rows.every((r) => r.counted !== "");
-    const started = (b) => b.rows.some((r) => r.counted !== "");
-
-    function rowHtml(b, r, j) {
-      const label = batchName(b.p);
-      const lot = !b.p.tracked ? `<span class="sc-lot">${esc(LOC[b.loc])}</span>`
-        : r.found
-          ? `<span class="sc-found"><input class="fe-in" data-f="batch" maxlength="40" autocapitalize="characters" placeholder="${esc(label)} #" value="${esc(r.batch)}" />
-              <input class="fe-in" type="date" data-f="expiry" value="${esc(r.expiry)}" aria-label="Expiry" /></span>`
-          : `<span class="sc-lot">${esc(batchText(b.p, r.batch) || "No number")} · Exp ${esc(niceDate(r.expiry))}</span>`;
-      return `<div class="sc-row" data-j="${j}">${lot}
-        <div class="fe-num"><input class="fe-in" type="number" min="0" step="1" inputmode="numeric" data-f="counted"
-          value="${esc(r.counted)}" placeholder="?" aria-label="Counted" /><span>${esc(unitPlural(b.p.stockUnit))}</span></div>
-        ${r.found ? '<button type="button" class="hx-x" data-act="rm" aria-label="Remove">×</button>' : "<span></span>"}</div>`;
-    }
-    // Shared products: the opened ones aren't counted, just checked they're still there
-    function openHtml(b) {
-      if (!isSharedProduct(b.p) || b.loc !== "shelf") return "";
-      const list = openNow.filter((c) => c.productId === b.p.id);
-      if (!list.length) return "";
-      return `<div class="sc-open"><small>Opened now (not counted above). Is each one still there?</small>${list.map((c) => {
-        const v = openChecks.get(c.id) || "";
-        return `<div class="sc-openrow" data-open="${esc(c.id)}">
-          <span>${esc([batchText(b.p, c.batch) || "No number", c.openedAt ? `opened ${shortDate(c.openedAt)}` : "", plural(c.uses, "use")].filter(Boolean).join(" · "))}</span>
-          <div class="fe-seg">${[["there", "It's there"], ["missing", "Missing"]].map(([k, l]) =>
-            `<label class="fe-seg-btn"><input type="radio" name="op-${esc(c.id)}" value="${k}" data-open-ck${v === k ? " checked" : ""} /><span>${l}</span></label>`).join("")}</div>
-        </div>`;
-      }).join("")}</div>`;
-    }
-    function blockHtml(b, i) {
-      const bn = batchName(b.p).toLowerCase();
-      const pos = posOf(b);
-      return `<div class="sc-item${filled(b) ? " is-done" : ""}" data-i="${i}">
-        <div class="sc-head">${pos ? `<span class="sc-pos">${esc(pos)}</span>` : ""}<strong>${esc(b.p.name)}</strong>
-          <small>Count ${esc(unitPlural(b.p.stockUnit))}${b.p.dosePer ? ` (each ${fmt(b.p.dosePer)} ${esc(b.p.doseUnit)})` : ""}${
-            isSharedProduct(b.p) ? " · sealed ones only, not the opened one" : ""}</small>
-          ${b.extra ? '<button type="button" class="hx-x" data-act="rm-block" aria-label="Remove">×</button>' : ""}</div>
-        ${b.rows.map((r, j) => rowHtml(b, r, j)).join("") || `<p class="tb-none">No ${esc(bn)}s on record here. Use “+ Another ${esc(bn)} found”.</p>`}
-        ${b.p.tracked ? `<button type="button" class="cs-link" data-act="found">+ Another ${esc(bn)} found</button>` : ""}
-        ${openHtml(b)}
-      </div>`;
-    }
     function progress() {
-      const total = blocks.length + kitRows.length;
-      const n = blocks.filter(filled).length + kitRows.filter(kitFilled).length;
+      const total = items.reduce((a, it) => a + it.locs.length, 0) + kitRows.length;
+      const n = items.reduce((a, it) => a + it.locs.filter((l) => locFilled(it, l)).length, 0) + kitRows.filter(kitFilled).length;
       $('[data-role="progress"]').textContent = total ? `${n} of ${total} counted` : "";
     }
+
+    /* ---------- The table ---------- */
+    const numIn = (attrs, v, loc, label) => `<input class="fe-in sc-in" type="number" min="0" step="1" inputmode="numeric" ${attrs}
+      data-col="${loc}" value="${esc(v)}" placeholder="?" aria-label="${esc(label)}" />`;
+
+    function prodCell(it, r, ri, n) {
+      const p = it.p;
+      const bn = batchName(p);
+      const pos = [p.shelfPos && `<span class="sc-pos" title="Shelf position">${esc(p.shelfPos)}</span>`,
+        p.jtPos && `<span class="sc-pos is-jt" title="JT storage position">JT ${esc(p.jtPos)}</span>`].filter(Boolean).join("");
+      const head = ri === 0 ? `<div class="sc-pname">${pos}<strong>${esc(p.name)}</strong>${
+        it.extra ? '<button type="button" class="hx-x" data-act="rm-item" aria-label="Remove from this count">×</button>' : ""}</div>
+        <small class="muted">Count ${esc(unitPlural(p.stockUnit))}${p.dosePer ? ` (each ${fmt(p.dosePer)} ${esc(p.doseUnit)})` : ""}${
+          isSharedProduct(p) ? " · sealed only" : ""}</small>` : "";
+      let lot = "";
+      if (p.tracked && !r.virtual) {
+        lot = r.found
+          ? `<div class="sc-found"><input class="fe-in" data-r="${ri}" data-f="batch" maxlength="40" autocapitalize="characters"
+                placeholder="${esc(bn)} #" value="${esc(r.batch)}" aria-label="${esc(bn)} number" />
+              <input class="fe-in" type="date" data-r="${ri}" data-f="expiry" value="${esc(r.expiry)}" aria-label="Expiry" />
+              <button type="button" class="hx-x" data-act="rm" data-r="${ri}" aria-label="Remove">×</button></div>`
+          : `<div class="sc-lot">${esc(batchText(p, r.batch) || "No number")} · Exp ${esc(niceDate(r.expiry))}</div>`;
+      }
+      const add = p.tracked && ri === n - 1 ? `<button type="button" class="cs-link" data-act="found">+ ${esc(bn)} found</button>` : "";
+      return `<td class="sc-prod">${head}${lot}${add}</td>`;
+    }
+
+    function cell(it, r, ri, loc) {
+      const name = `${it.p.name}, ${LOC[loc]}${r.batch ? `, ${batchName(it.p)} ${r.batch}` : ""}`;
+      if (!it.locs.includes(loc)) {
+        return `<td class="sc-na">${ri === 0 ? (done.has(`${it.p.id}|${loc}`) ? "✓ counted today" : "—") : ""}</td>`;
+      }
+      if (noneAt(it, loc) && !r.found) {
+        return ri === 0
+          ? `<td>${numIn(`data-none="${loc}"`, it.none[loc], loc, name)}<small class="sc-hint">None on record. Enter 0, or add a ${esc(batchName(it.p).toLowerCase())}.</small></td>`
+          : "<td></td>";
+      }
+      if (r.found || r.at[loc]) return `<td>${numIn(`data-r="${ri}" data-loc="${loc}"`, r.counted[loc], loc, name)}</td>`;
+      return '<td class="sc-na" title="Not in this storage">—</td>';
+    }
+
+    function itemHtml(it, i) {
+      const rows = it.rows.length ? it.rows : [{ virtual: true, at: {}, counted: {}, found: false }];
+      const n = rows.length;
+      return `<tbody class="sc-item${itemFilled(it) ? " is-done" : ""}" data-it="${i}">${rows.map((r, ri) => `<tr>
+        ${prodCell(it, r, ri, n)}
+        ${LOCS.map((loc) => cell(it, r, ri, loc)).join("")}
+        ${ri === 0 ? `<td rowspan="${n}" class="sc-note-td"><input class="fe-in sc-note" data-note maxlength="300" placeholder="Optional"
+          value="${esc(it.note)}" aria-label="Comment on ${esc(it.p.name)}" /></td>` : ""}
+      </tr>`).join("")}</tbody>`;
+    }
+
+    function drawTable() {
+      const box = body.querySelector('[data-role="table"]');
+      if (!box) return;
+      if (!items.length) { box.innerHTML = ""; return; }
+      const q = st.q.trim().toLowerCase();
+      const list = items.map((it, i) => [it, i]).filter(([it]) =>
+        (!q || `${it.p.name} ${it.p.shelfPos || ""} ${it.p.jtPos || ""}`.toLowerCase().includes(q)) && (!st.left || !itemFilled(it)));
+      let rows;
+      if (st.order === "category") {
+        rows = INV_CATEGORIES.map((c) => {
+          const g = list.filter(([it]) => it.p.category === c.key).sort(([a], [b]) => a.p.name.localeCompare(b.p.name));
+          return g.length ? `<tbody class="sc-grp"><tr><th colspan="4">${esc(c.label)} <em>${g.length}</em></th></tr></tbody>${
+            g.map(([it, i]) => itemHtml(it, i)).join("")}` : "";
+        }).join("");
+      } else {
+        const sorter = st.order === "jtpos" ? byPos("jt") : st.order === "position" ? byPos("shelf") : (a, b) => a.p.name.localeCompare(b.p.name);
+        rows = list.sort(([a], [b]) => sorter(a, b)).map(([it, i]) => itemHtml(it, i)).join("");
+      }
+      box.innerHTML = `<section class="tb-card sc-card"><div class="sc-scroll"><table class="inv-table sc-table">
+        <thead><tr><th>Product</th><th>Shelf count</th><th>JT storage count</th><th>Comments <small>(optional)</small></th></tr></thead>
+        ${rows || '<tbody><tr><td colspan="4" class="tb-none">No products match.</td></tr></tbody>'}
+      </table></div></section>`;
+    }
+
+    /* ---------- Kits and opened containers ---------- */
+    function kitsHtml() {
+      if (!kitRows.length) return "";
+      return `<section class="tb-card"><h4>Injectors' kits</h4>
+        <p class="muted">Count the unopened ones, and check how much is left in the opened one.</p>
+        <div class="sc-scroll"><table class="inv-table sc-table">
+          <thead><tr><th>Injector</th><th>Product</th><th>Unopened</th><th>Left in the opened one</th></tr></thead>
+          <tbody>${kitRows.map((r, i) => {
+            const p = byId.get(r.k.productId);
+            return `<tr class="${kitFilled(r) ? "is-done" : ""}" data-ki="${i}">
+              <td>${esc(r.k.staffName)}</td>
+              <td><strong>${esc(r.k.productName)}</strong><br><small class="muted">${esc(batchText(p, r.k.batch) || "No number")} · Exp ${esc(niceDate(r.k.expiry))}</small></td>
+              <td><div class="sc-cell"><input class="fe-in sc-in" type="number" min="0" step="1" inputmode="numeric" data-k="sealed" data-col="ks"
+                value="${esc(r.sealed)}" placeholder="?" aria-label="Unopened" /><span>${esc(unitPlural((p && p.stockUnit) || "vial"))}</span></div></td>
+              <td><div class="sc-cell"><input class="fe-in sc-in" type="number" min="0" step="0.5" inputmode="decimal" data-k="open" data-col="ko"
+                value="${esc(r.open)}" placeholder="?" aria-label="Left in the opened one" /><span>${esc(r.k.doseUnit)}</span></div></td></tr>`;
+          }).join("")}</tbody></table></div></section>`;
+    }
+
+    // Shared products: the opened ones aren't counted, just checked they're still there
+    const openList = () => items.filter((it) => isSharedProduct(it.p) && it.locs.includes("shelf"))
+      .flatMap((it) => openNow.filter((c) => c.productId === it.p.id).map((c) => ({ p: it.p, c })));
+    function openHtml() {
+      const list = openList();
+      if (!list.length) return "";
+      return `<section class="tb-card"><h4>Opened containers</h4>
+        <p class="muted">Not counted above. Just check each one is still there.</p>
+        <div class="sc-scroll"><table class="inv-table sc-table">
+          <thead><tr><th>Product</th><th>Opened</th><th>Still there?</th></tr></thead>
+          <tbody>${list.map(({ p, c }) => {
+            const v = openChecks.get(c.id) || "";
+            return `<tr data-open="${esc(c.id)}">
+              <td><strong>${esc(p.name)}</strong><br><small class="muted">${esc(batchText(p, c.batch) || "No number")}</small></td>
+              <td>${esc([c.openedAt ? shortDate(c.openedAt) : "", plural(c.uses, "use")].filter(Boolean).join(" · "))}</td>
+              <td><div class="fe-seg">${[["there", "It's there"], ["missing", "Missing"]].map(([k, l]) =>
+                `<label class="fe-seg-btn"><input type="radio" name="op-${esc(c.id)}" value="${k}" data-open-ck${v === k ? " checked" : ""} /><span>${l}</span></label>`).join("")}</div></td></tr>`;
+          }).join("")}</tbody></table></div></section>`;
+    }
+
+    function addHtml() {
+      const addable = products.filter((p) => {
+        if (!p.active) return false;
+        const it = items.find((x) => x.p.id === p.id);
+        return !it || it.locs.length < 2;
+      });
+      return `<section class="tb-card"><h4>Add another product</h4>
+        <div class="sc-add"><select class="fb-select" data-role="addp"><option value="">Choose a product…</option>${INV_CATEGORIES.map((c) => {
+          const g = addable.filter((p) => p.category === c.key);
+          return g.length ? `<optgroup label="${esc(c.label)}">${g.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</optgroup>` : "";
+        }).join("")}</select>
+        <select class="fb-select" data-role="addloc"><option value="both">Shelf and JT storage</option><option value="shelf">Shelf</option><option value="jt">JT storage</option></select>
+        <button type="button" class="lh-btn" data-act="add">Add</button></div></section>`;
+    }
+
     function draw() {
-      const section = (loc) => {
-        const list = blocks.map((b, i) => [b, i]).filter(([b]) => b.loc === loc);
-        if (!list.length) return "";
-        const inner = order === "position"
-          ? list.sort(([a], [b]) => byPos(a, b)).map(([b, i]) => blockHtml(b, i)).join("")
-          : INV_CATEGORIES.map((c) => {
-            const items = list.filter(([b]) => b.p.category === c.key);
-            return items.length ? `<div class="sc-cat">${esc(c.label)}</div>${items.map(([b, i]) => blockHtml(b, i)).join("")}` : "";
-          }).join("");
-        return `<section class="tb-card"><h4>${esc(LOC[loc])}</h4>${inner}</section>`;
-      };
-      const people = [...new Set(kitRows.map((r) => r.k.staffName))];
-      const kitSection = kitRows.length ? `<section class="tb-card"><h4>Injectors' kits</h4>
-        <p class="muted">For each injector: count the unopened ones, and check how much is left in the opened one.</p>
-        ${people.map((name) => `<div class="sc-cat">${esc(name)}</div>${kitRows.map((r, i) => [r, i])
-          .filter(([r]) => r.k.staffName === name).map(([r, i]) => kitRowHtml(r, i)).join("")}`).join("")}</section>` : "";
-      const listed = new Set(blocks.map((b) => b.key));
-      const addable = products.filter((p) => p.active && (!listed.has(`${p.id}|shelf`) || !listed.has(`${p.id}|jt`)));
       const doneHtml = done.size ? `<section class="tb-card"><h4>Done today</h4><ul class="sc-done">${[...done.values()].map((v) =>
         `<li>${I.check}<span>${esc(v.name)} · ${esc(v.where)}</span><small>${esc(v.by)} · ${esc(timeOf(v.at))}</small></li>`).join("")}</ul></section>` : "";
-      const orderSeg = blocks.length ? `<div class="sc-order"><span class="muted">Order:</span><div class="fe-seg">${[["position", "Shelf position"], ["category", "Category"]].map(([v, l]) =>
-        `<label class="fe-seg-btn"><input type="radio" name="sc-order" value="${v}"${order === v ? " checked" : ""} /><span>${l}</span></label>`).join("")}</div></div>` : "";
+      const tools = items.length ? `<div class="sc-tools">
+          <label class="ib-search sc-find">${I.search}<input type="search" data-role="q" placeholder="Find a product or position" value="${esc(st.q)}" aria-label="Find a product" /></label>
+          <label class="sc-ord">Order <select class="fb-select" data-role="order">${[["position", "Shelf position"], ["jtpos", "JT storage position"],
+            ["category", "Category"], ["name", "A–Z"]].map(([v, l]) => `<option value="${v}"${st.order === v ? " selected" : ""}>${l}</option>`).join("")}</select></label>
+          <label class="fe-check"><input type="checkbox" data-role="left"${st.left ? " checked" : ""} /> Only not counted yet</label>
+          <span class="muted sc-tip">Tip: press Enter to go to the next box down.</span>
+        </div>` : "";
       body.innerHTML = `
-        ${orderSeg}
-        ${blocks.length || kitRows.length ? section("shelf") + section("jt") + kitSection
+        ${items.length || kitRows.length ? tools
           : `<div class="tm-empty">${done.size ? "Everything due today has been counted. 👍" : "Nothing is due for counting today."}</div>`}
-        <section class="tb-card"><h4>Add another product</h4>
-          <div class="sc-add"><select class="fb-select" data-role="addp"><option value="">Choose a product…</option>${INV_CATEGORIES.map((c) => {
-            const items = addable.filter((p) => p.category === c.key);
-            return items.length ? `<optgroup label="${esc(c.label)}">${items.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</optgroup>` : "";
-          }).join("")}</select>
-          <select class="fb-select" data-role="addloc"><option value="shelf">Shelf</option><option value="jt">JT storage</option></select>
-          <button type="button" class="lh-btn" data-act="add">Add</button></div></section>
+        <div data-role="table"></div>
+        ${kitsHtml()}
+        ${openHtml()}
+        ${addHtml()}
         ${doneHtml}`;
+      drawTable();
       progress();
     }
 
+    /* ---------- Typing ---------- */
     body.addEventListener("input", (e) => {
       const t = e.target;
-      if (t.name === "sc-order") { order = t.value; draw(); return; }
+      if (t.dataset.role === "q") { st.q = t.value; drawTable(); return; }
       if (t.dataset.openCk !== undefined) { openChecks.set(t.closest("[data-open]").dataset.open, t.value); return; }
       const kitEl = t.closest("[data-ki]");
       if (kitEl && t.dataset.k) {
@@ -276,62 +386,113 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         progress();
         return;
       }
-      const f = t.dataset.f;
-      const item = t.closest(".sc-item[data-i]");
-      if (!f || !item) return;
-      const b = blocks[Number(item.dataset.i)];
-      const r = b.rows[Number(t.closest(".sc-row").dataset.j)];
-      r[f] = f === "counted" ? (t.value === "" ? "" : String(Math.max(0, parseInt(t.value, 10) || 0))) : t.value;
-      if (f === "counted") r.countedAt = r.counted === "" ? 0 : Date.now();   // the moment this line was counted
-      item.classList.toggle("is-done", filled(b));
+      const tb = t.closest("tbody[data-it]");
+      if (!tb) return;
+      const it = items[Number(tb.dataset.it)];
+      if (t.dataset.note !== undefined) { it.note = t.value; return; }
+      if (t.dataset.none) {
+        const loc = t.dataset.none;
+        it.none[loc] = whole(t.value);
+        it.noneAt[loc] = it.none[loc] === "" ? 0 : Date.now();
+      } else if (t.dataset.loc) {
+        const r = it.rows[Number(t.dataset.r)];
+        const loc = t.dataset.loc;
+        r.counted[loc] = whole(t.value);
+        r.countedAt[loc] = r.counted[loc] === "" ? 0 : Date.now();   // the moment this line was counted
+      } else if (t.dataset.f) {
+        it.rows[Number(t.dataset.r)][t.dataset.f] = t.value;
+        return;
+      } else {
+        return;
+      }
+      tb.classList.toggle("is-done", itemFilled(it));
       msgEl.textContent = "";
       progress();
+    });
+    body.addEventListener("change", (e) => {
+      const r = e.target.dataset.role;
+      if (r === "order") { st.order = e.target.value; drawTable(); }
+      else if (r === "left") { st.left = e.target.checked; drawTable(); }
     });
     body.addEventListener("click", (e) => {
       const a = e.target.closest("[data-act]");
       if (!a) return;
-      const item = a.closest(".sc-item[data-i]");
-      const b = item ? blocks[Number(item.dataset.i)] : null;
-      if (a.dataset.act === "found" && b) { b.rows.push({ batch: "", expiry: "", counted: "", countedAt: 0, found: true }); draw(); }
-      else if (a.dataset.act === "rm" && b) { b.rows.splice(Number(a.closest(".sc-row").dataset.j), 1); draw(); }
-      else if (a.dataset.act === "rm-block" && b) { blocks.splice(blocks.indexOf(b), 1); draw(); }
-      else if (a.dataset.act === "add") {
-        const p = byId.get($('[data-role="addp"]').value);
-        const loc = $('[data-role="addloc"]').value;
+      const tb = a.closest("tbody[data-it]");
+      const idx = tb ? Number(tb.dataset.it) : -1;
+      const it = idx >= 0 ? items[idx] : null;
+      if (a.dataset.act === "found" && it) {
+        it.rows.push(newRow("", "", true));
+        drawTable();
+        const ins = body.querySelectorAll(`tbody[data-it="${idx}"] [data-f="batch"]`);
+        if (ins.length) ins[ins.length - 1].focus();
+      } else if (a.dataset.act === "rm" && it) {
+        it.rows.splice(Number(a.dataset.r), 1);
+        drawTable();
+        progress();
+      } else if (a.dataset.act === "rm-item" && it) {
+        items.splice(idx, 1);
+        draw();
+      } else if (a.dataset.act === "add") {
+        const p = byId.get(body.querySelector('[data-role="addp"]').value);
         if (!p) { showToast("Choose a product."); return; }
-        if (blocks.some((x) => x.key === `${p.id}|${loc}`)) { showToast("That's already on the list."); return; }
-        blocks.push(makeBlock(p, loc, true));
+        const v = body.querySelector('[data-role="addloc"]').value;
+        const want = v === "both" ? ["shelf", "jt"] : [v];
+        const cur = items.find((x) => x.p.id === p.id);
+        if (cur) {
+          const extra = want.filter((l) => !cur.locs.includes(l));
+          if (!extra.length) { showToast("That's already on the list."); return; }
+          cur.locs = LOCS.filter((l) => cur.locs.includes(l) || extra.includes(l));
+        } else {
+          items.push(makeItem(p, want, true));
+        }
+        st.q = "";
+        st.left = false;
         draw();
       }
     });
 
+    /* ---------- Save ---------- */
     saveBtn.addEventListener("click", async () => {
       if (busy) return;
-      const partial = blocks.find((b) => started(b) && !filled(b));
-      if (partial) { msgEl.textContent = `${partial.p.name} (${LOC[partial.loc]}): fill in every box, or leave them all empty to count it later.`; return; }
-      const partialKit = kitRows.find((r) => (r.sealed !== "" || r.open !== "") && !kitFilled(r));
-      if (partialKit) { msgEl.textContent = `${partialKit.k.staffName}'s ${partialKit.k.productName}: fill in both boxes (enter 0 if there's none).`; return; }
-      const ready = blocks.filter(filled);
-      const readyKits = kitRows.filter(kitFilled);
-      if (!ready.length && !readyKits.length) { msgEl.textContent = "Count at least one item first."; return; }
-      for (const b of ready) {
-        for (const r of b.rows.filter((x) => x.found)) {
-          if (!r.batch.trim()) { msgEl.textContent = `${b.p.name}: enter the ${batchName(b.p).toLowerCase()} number you found.`; return; }
-          if (!r.expiry) { msgEl.textContent = `${b.p.name}: enter a real expiry date for the ${batchName(b.p).toLowerCase()} you found (check the day).`; return; }
+      const label = (it, loc) => `${it.p.name} (${LOC[loc]})`;
+      for (const it of items) {
+        for (const loc of it.locs) {
+          if (locStarted(it, loc) && !locFilled(it, loc)) {
+            msgEl.textContent = `${label(it, loc)}: fill in every ${batchName(it.p).toLowerCase()}, or leave them all empty to count it later.`;
+            return;
+          }
+          if (noneAt(it, loc) && Number(it.none[loc]) > 0) {
+            msgEl.textContent = `${label(it, loc)}: there are none on record, so use “+ ${batchName(it.p)} found” to enter what's there.`;
+            return;
+          }
+        }
+        for (const r of it.rows.filter((x) => x.found && LOCS.some((l) => x.counted[l] !== ""))) {
+          if (!r.batch.trim()) { msgEl.textContent = `${it.p.name}: enter the ${batchName(it.p).toLowerCase()} number you found.`; return; }
+          if (!r.expiry) { msgEl.textContent = `${it.p.name}: enter a real expiry date for the ${batchName(it.p).toLowerCase()} you found (check the day).`; return; }
         }
       }
+      const partialKit = kitRows.find((r) => (r.sealed !== "" || r.open !== "") && !kitFilled(r));
+      if (partialKit) { msgEl.textContent = `${partialKit.k.staffName}'s ${partialKit.k.productName}: fill in both boxes (enter 0 if there's none).`; return; }
+
+      const lines = [];
+      items.forEach((it) => it.locs.filter((loc) => locFilled(it, loc)).forEach((loc) => {
+        if (noneAt(it, loc) && it.none[loc] !== "") {
+          lines.push({ productId: it.p.id, loc, batch: "", expiry: "", counted: it.none[loc], countedAt: it.noneAt[loc] || 0, note: it.note });
+        }
+        it.rows.filter((r) => (r.found || r.at[loc]) && r.counted[loc] !== "").forEach((r) => lines.push({
+          productId: it.p.id, loc, batch: r.batch, expiry: r.expiry, counted: r.counted[loc], countedAt: r.countedAt[loc] || 0, note: it.note,
+        }));
+      }));
+      const readyKits = kitRows.filter(kitFilled);
+      if (!lines.length && !readyKits.length) { msgEl.textContent = "Count at least one item first."; return; }
+
       busy = true;
       saveBtn.disabled = true;
       saveBtn.querySelector("span").textContent = "Saving…";
       try {
         const res = await saveCount({
           kind: "opening",
-          lines: [
-            ...ready.flatMap((b) => b.rows.map((r) => ({
-              productId: b.p.id, loc: b.loc, batch: r.batch, expiry: r.expiry, counted: r.counted, countedAt: r.countedAt || 0,
-            }))),
-            ...readyKits.map((r) => ({ kit: true, ref: r.k.id, sealed: r.sealed, open: r.open })),
-          ],
+          lines: [...lines, ...readyKits.map((r) => ({ kit: true, ref: r.k.id, sealed: r.sealed, open: r.open }))],
         }, staff);
         // Opened containers that weren't there are closed, so treatment records stop offering them
         let missing = 0;
@@ -422,14 +583,14 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         diffs.length ? ` <strong>${diffs.length} small difference${diffs.length === 1 ? "" : "s"}</strong> sent to Reporting for review.` : ""}${
         !invs.length && !diffs.length ? " Everything matched. 👍" : " Stock hasn't been changed."}${
         missingOpened ? ` ${missingOpened} opened container${missingOpened === 1 ? " was" : "s were"} marked missing.` : ""}</p>
-      <table class="inv-table"><thead><tr><th>Product</th><th>Where</th><th>Batch / Lot</th><th>Counted</th><th>Digital</th><th>Difference</th></tr></thead><tbody>${
+      <div class="sc-scroll"><table class="inv-table"><thead><tr><th>Product</th><th>Where</th><th>Batch / Lot</th><th>Counted</th><th>Digital</th><th>Difference</th></tr></thead><tbody>${
         res.lines.map((l) => `<tr class="${l.status !== "ok" ? "is-diff" : ""}">
-          <td>${esc(l.productName)}</td><td>${esc(whereOf(l))}</td>
+          <td>${esc(l.productName)}${l.countNote ? `<br><small class="muted">“${esc(l.countNote)}”</small>` : ""}</td><td>${esc(whereOf(l))}</td>
           <td>${esc(l.batch ? `${l.batchLabel || batchName(byId.get(l.productId))} ${l.batch}` : "—")}</td>
           <td>${esc(qty(l, l.counted))}</td>
           <td>${l.status === "investigating" ? '<span class="muted">Hidden until the recount</span>' : esc(qty(l, l.system)) + movedNote(l)}</td>
           <td>${l.status === "investigating" ? '<span class="inv-flag is-bad">Investigating</span>'
-            : l.status === "open" ? `<strong>${esc(diffText(l.variance))}</strong>` : "✓"}</td></tr>`).join("")}</tbody></table>
+            : l.status === "open" ? `<strong>${esc(diffText(l.variance))}</strong>` : "✓"}</td></tr>`).join("")}</tbody></table></div>
       <div class="sc-after"><a class="ff-btn" href="${backHref}">Back to tasks</a>
         <button type="button" class="ff-btn is-primary" data-act="again">Count more</button></div>
     </section>`;

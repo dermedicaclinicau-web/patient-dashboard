@@ -140,7 +140,7 @@ function mountVariance(body, staff) {
         : `<div class="rp-done"><span class="rq-status is-${esc(l.status)}">${esc(COUNT_STATUS[l.status] || l.status)}</span>
           ${l.note ? `<small>${esc(l.note)}</small>` : ""}${l.resolvedBy ? `<small>${esc(l.resolvedBy)}</small>` : ""}</div>`;
     return `<tr class="${l.status === "open" ? "is-diff" : ""}" data-c="${esc(c.id)}" data-i="${i}">
-      <td>${esc(l.productName)}</td><td>${esc(whereOf(l))}</td>
+      <td>${esc(l.productName)}${l.countNote ? `<br><small class="muted">“${esc(l.countNote)}”</small>` : ""}</td><td>${esc(whereOf(l))}</td>
       <td>${esc(l.batch ? `${l.batchLabel || batchName(st.products.get(l.productId))} ${l.batch}` : "—")}</td>
       <td>${esc(amtOf(l, l.counted))}</td><td>${esc(amtOf(l, l.system))}</td>
       <td>${l.status === "ok" ? "✓" : `<strong class="${cls(diff)}">${diff > 0 ? "+" : ""}${esc(fmt(diff))}</strong>`}</td>
@@ -226,13 +226,13 @@ function mountVariance(body, staff) {
 
   function exportCsv() {
     const rows = [["Date", "Type", "Counted by", "Product", "Where", "Batch / Lot", "Expiry", "Counted", "System", "Difference",
-      "Unit", "Value ($)", "Status", "Note", "Reviewed by"]];
+      "Unit", "Value ($)", "Status", "Counter's comment", "Note", "Reviewed by"]];
     st.counts.forEach((c) => c.lines.forEach((l) => {
       if (!shown(l)) return;
       const v = valueOf(l);
       rows.push([c.dateKey || "", c.kind === "kit" ? "Kit check" : "Opening count", c.by || "", l.productName || "", whereOf(l),
         l.batch || "", l.expiry || "", Number(l.counted) || 0, Number(l.system) || 0, Number(l.variance) || 0, l.unit || "",
-        v === null ? "" : v, COUNT_STATUS[l.status] || l.status || "", l.note || "", l.resolvedBy || ""]);
+        v === null ? "" : v, COUNT_STATUS[l.status] || l.status || "", l.countNote || "", l.note || "", l.resolvedBy || ""]);
     }));
     if (rows.length === 1) { showToast("Nothing to export."); return; }
     downloadCsv(`count-differences-${dayKey()}.csv`, rows);

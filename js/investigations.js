@@ -196,7 +196,8 @@ export async function mountInvestigation(container, { id, staff } = {}) {
     root.innerHTML = `<div class="ivx-wrap">
       <a class="back-link" href="${back}">← Investigations</a>
       <div class="fb-head"><div><h2>${esc(x.productName)}</h2>
-        <p class="muted">${esc(whereText(x))} · opening count on ${esc(day(x.openedAt))} by ${esc(x.openedBy || "—")}</p></div>${pill(x)}</div>
+        <p class="muted">${esc(whereText(x))} · opening count on ${esc(day(x.openedAt))} by ${esc(x.openedBy || "—")}${
+          x.countNote ? ` · “${esc(x.countNote)}”` : ""}</p></div>${pill(x)}</div>
       ${numbers}
       <section class="tb-card"><h4><span class="tb-num">1</span> Record check <small>since the last count that matched</small></h4>
         <div data-role="ev">${blind ? '<p class="muted">Shown after the recount, so the recount stays blind.</p>'

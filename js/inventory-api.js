@@ -1432,9 +1432,10 @@ export async function saveCount({ kind, lines, note = "" }, staff) {
       const expiry = p.tracked && KEY_RE.test(l.expiry || "") ? l.expiry : "";
       const ref = lotId(p.id, loc, batch, expiry);
       const t = Number(l.countedAt) || 0;
-      const a = agg.get(ref) || { p, loc, batch, expiry, counted: 0, countedAt: 0 };
+      const a = agg.get(ref) || { p, loc, batch, expiry, counted: 0, countedAt: 0, note: "" };
       a.counted += Math.max(0, parseInt(l.counted, 10) || 0);
       a.countedAt = Math.max(a.countedAt, t > 0 && t <= latest ? t : 0);
+      if (!a.note && l.note) a.note = clip(l.note, 300);
       agg.set(ref, a);
     });
 
@@ -1459,7 +1460,7 @@ export async function saveCount({ kind, lines, note = "" }, staff) {
         productId: a.p.id, productName: a.p.name, loc: a.loc, ref, batch: a.batch, expiry: a.expiry,
         batchLabel: a.p.batchLabel || "Batch", unit: a.p.stockUnit, system, counted: a.counted, variance,
         systemNow: now, movedSince: moved, countedAt: a.countedAt ? new Date(a.countedAt).toISOString() : "",
-        status: !variance ? "ok" : needsInvestigation(a.p, variance) ? "investigating" : "open", note: "",
+        status: !variance ? "ok" : needsInvestigation(a.p, variance) ? "investigating" : "open", note: "", countNote: a.note,
       });
     });
   }
@@ -1479,7 +1480,7 @@ export async function saveCount({ kind, lines, note = "" }, staff) {
     batch.set(iRef, {
       countId: cRef.id, line: i, productId: l.productId, productName: l.productName, loc: l.loc, ref: l.ref,
       batch: l.batch, expiry: l.expiry, batchLabel: l.batchLabel || "Batch", unit: l.unit,
-      digital: l.system, counted: l.counted, variance: l.variance, dateKey: dayKey(),
+      digital: l.system, counted: l.counted, variance: l.variance, countNote: l.countNote || "", dateKey: dayKey(),
       status: "recount", aloneApproved: false,
       openedBy: by, openedByUid: me, openedAt: serverTimestamp(), updatedAt: serverTimestamp(),
       events: [{ at, by, action: "Opened from the opening count", note: `Counted ${l.counted}, digital ${l.system}` }],
