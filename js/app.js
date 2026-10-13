@@ -3,7 +3,7 @@ import { mountPatientList, clearPatientCache } from "./patient-list.js";
 import { mountCalendar } from "./calendar.js";
 import { mountPatientDashboard } from "./patient-dashboard.js";
 import { escapeHtml, getInitials, showToast } from "./utils.js";
-import { maybeShowStartOfDay, closeStartOfDay } from "./start-of-day.js";
+import { maybeShowStartOfDay, closeStartOfDay, refreshStartOfDayButton, hideStartOfDayButton } from "./start-of-day.js";
 import { initRecordingBar, setRecordingPatient } from "./recording-bar.js";
 import { isRecorderBusy, suspendRecorder } from "./recorder.js";
 import { initSoapPanel, closeSoapPanel, hasUnsavedNotes } from "./soap-panel.js";
@@ -25,7 +25,7 @@ import { mountReports } from "./reports.js";
 import { mountSettings } from "./settings.js";
 import { initEndOfDay, teardownEndOfDay } from "./end-of-day.js";
 import { mountStaffDays } from "./staff-days.js";
-import { maybeShowStartOfDay, closeStartOfDay, refreshStartOfDayButton, hideStartOfDayButton } from "./start-of-day.js";
+
 
 const $ = (id) => document.getElementById(id);
 
