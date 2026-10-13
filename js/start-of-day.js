@@ -62,6 +62,19 @@ export function closeStartOfDay() {
   current = null;
 }
 
+// Opens the kit count on demand (My dashboard → Needs my attention). Returns false if there's nothing to count.
+export async function openStartOfDayKit(staff) {
+  if (current) return true;   // already open
+  const kit = await kitToday(staff).catch((err) => { console.warn("Kit check failed:", err); return null; });
+  if (!kit) {
+    showToast("Nothing to count: today's kit count is done, or your kit is empty.");
+    window.dispatchEvent(new Event("kitday:changed"));   // the dashboard reminder is out of date
+    return false;
+  }
+  if (!current) showStartOfDay(staff, { kit, kitOnly: true });
+  return true;
+}
+
 export function showStartOfDay(staff, { kit = null, kitOnly = false } = {}) {
   closeStartOfDay();
   const mine = session;
@@ -212,7 +225,10 @@ function renderKit(dlg, staff, kit, close) {
     card.querySelectorAll(".sod-kp input, .sod-kp button").forEach((i) => { i.disabled = none.checked; });
     showErr("");
   });
-  card.querySelector('[data-act="later"]').addEventListener("click", close);
+  card.querySelector('[data-act="later"]').addEventListener("click", () => {
+    close();
+    showToast("No problem. Count your kit from My dashboard → Needs my attention when you're ready.");
+  });
   card.addEventListener("input", () => showErr(""));
   card.addEventListener("click", (e) => {
     const add = e.target.closest('[data-act="add"]');
@@ -273,6 +289,7 @@ function renderKit(dlg, staff, kit, close) {
     showErr("");
     try {
       const r = await saveKitDayStart({ notInjecting, items }, staff);
+      window.dispatchEvent(new Event("kitday:changed"));
       close();
       const notes = [];
       if (r.overnight) notes.push(`${plural(r.overnight, "overnight difference")} sent to an admin`);

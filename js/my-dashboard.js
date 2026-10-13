@@ -4,7 +4,7 @@ import { can, isInjector } from "./perms.js";
 import {
   listProducts, listAllLots, listKits, listLoans, listReleases, listRequests, listMyUsage, listShortUsage, listPos,
   isKitProduct, kitUnits, expiryState, plural, unitPlural, lowAt, myUid, reqNumber, REQ_STATUS, REL_STATUS, countDue, countLocs, dayKey, listCountsOn,
-  listCounts, listShortAll, listInvestigations, listUnrecordedTreatments, getCountSettings,
+  listCounts, listShortAll, listInvestigations, listUnrecordedTreatments, getCountSettings, getMyKitDay,
 } from "./inventory-api.js";
 import { listMySubmissions } from "./form-submissions.js";
 import { db } from "./firebase-config.js";
@@ -14,6 +14,7 @@ import { parseRecordDate } from "./transcripts.js";
 import { completeReminder } from "./reminders.js";
 import { showToast } from "./utils.js";
 import { renderDayCard } from "./staff-days.js";
+import { openStartOfDayKit } from "./start-of-day.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(1));
@@ -131,7 +132,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     const hidden = readHidden(me0);
     const show = (k) => can(`dash.${k}`) && !hidden.has(k);
     const todayKey = dayKey();
-    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts, notes, formsT, invs, unrec, countCfg] = await Promise.all([
+    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts, notes, formsT, invs, unrec, countCfg, myDay] = await Promise.all([
       safe(listProducts(), []),
       safe(listAllLots(), []),
       safe(listKits(), []),
@@ -155,6 +156,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
         ? safe(listUnrecordedTreatments({ fromKey: dayKey(new Date(Date.now() - 7 * DAY)), toKey: dayKey(new Date(Date.now() - DAY)) }), { items: [] })
         : { items: [] },
       safe(getCountSettings(), { dueBy: "10:00" }),
+      canKit ? safe(getMyKitDay(), null) : null,
     ]);
     if (!root.isConnected) return;
 
@@ -254,8 +256,12 @@ export async function mountMyDashboard(container, { staff } = {}) {
     const myOverdue = tasks.filter((t) => isMine(t) && t.dueDate && t.dueDate < todayKey).length;
     if (myOverdue) att.push({ tone: "bad", ttab: "mine",
       text: `${myOverdue} of your task${myOverdue === 1 ? " is" : "s are"} overdue`, act: "View" });
-    // My kit: lots due today that nobody has counted yet
-    if (canKit) {
+    // Start of Day: injectors holding a kit who haven't done today's count (e.g. pressed "Remind me later")
+    const sodPending = canKit && !(myDay && myDay.start)
+      && myKits.some((k) => { const p = byId.get(k.productId); return p && p.active && isKitProduct(p); });
+    if (sodPending) att.unshift({ tone: "warn", sod: true, text: "Start of Day: your kit count isn't done yet", act: "Count my kit" });
+    // My kit: lots due today that nobody has counted yet (not repeated while the Start of Day count is waiting)
+    if (canKit && !sodPending) {
       const mineDue = myKits.filter((k) => countDue(byId.get(k.productId)) && !doneKeys.has(`kit|${k.id}`));
       if (mineDue.length) att.push({
         tone: "info", text: `Your kit hasn't been counted today (${[...new Set(mineDue.map((k) => k.productName))].join(", ")})`,
@@ -292,7 +298,9 @@ export async function mountMyDashboard(container, { staff } = {}) {
     }));
     const attentionHtml = card("Needs my attention", att.length
       ? `<ul class="md-att">${att.map((a) => `<li class="is-${a.tone}"><span>${esc(a.text)}</span>
-          ${a.notesId
+          ${a.sod
+            ? `<button type="button" class="lh-btn is-primary" data-sod="1">${esc(a.act)}</button>`
+            : a.notesId
             ? `<button type="button" class="lh-btn" data-notes="${esc(a.notesId)}">${esc(a.act)}</button>`
             : a.ttab
               ? `<button type="button" class="lh-btn" data-ttab="${esc(a.ttab)}" data-goto="tasks">${esc(a.act)}</button>`
@@ -493,10 +501,15 @@ export async function mountMyDashboard(container, { staff } = {}) {
       ? `<div class="md-grid">${shown.map(([, h]) => h).join("")}</div>`
       : '<div class="tm-empty">Nothing to show yet. Use <strong>Customise</strong> to choose your cards, or ask an Admin to turn some on for you.</div>';
     renderDayCard(body.querySelector('[data-role="days"]')); // Admins only; does nothing if the card is hidden
-    }
-  
-  
+  }
+
   root.addEventListener("click", (e) => {
+    const sb = e.target.closest("[data-sod]");
+    if (sb) {
+      sb.disabled = true;
+      openStartOfDayKit(staff).finally(() => { sb.disabled = false; });
+      return;
+    }
     const nb = e.target.closest("[data-notes]");
     if (nb) { showSoapPanel(nb.dataset.notes, { mode: "open" }); return; }
     const tt = e.target.closest("[data-ttab]");
@@ -557,6 +570,12 @@ export async function mountMyDashboard(container, { staff } = {}) {
       dlg.showModal();
     }
   });
+  // Start of Day saved (or found already done): reload so the reminder goes away
+  const onKitDay = () => {
+    if (!root.isConnected) { window.removeEventListener("kitday:changed", onKitDay); return; }
+    load();
+  };
+  window.addEventListener("kitday:changed", onKitDay);
   load().catch((err) => {
     console.error("Dashboard failed:", err);
     if (root.isConnected) body.innerHTML = '<div class="tm-empty is-error">Couldn\'t load your dashboard. Check your connection and try again.</div>';
