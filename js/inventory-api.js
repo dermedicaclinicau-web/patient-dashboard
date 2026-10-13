@@ -2715,6 +2715,21 @@ export async function saveKitDayStart({ notInjecting = false, items = [] }, staf
   };
 }
 
+// Start of Day with no kit to count (everyone who isn't counting a kit): just the time they started. Once per day.
+export async function saveDayStart(staff) {
+  const me = uid();
+  const key = dayKey();
+  const ref = doc(db, "inv_kitdays", kitDayId(me, key));
+  const s = await getDoc(ref);
+  if (s.exists() && s.data().start) return false;   // already started today
+  await setDoc(ref, {
+    staffUid: me, staffName: who(staff), dateKey: key,
+    start: { at: serverTimestamp(), kit: false, notInjecting: false, items: [], countId: "", differences: 0, overnight: 0 },
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
+  return true;
+}
+
 // End of Day: a blind kit count (injectors) and the answers to the admin's questions. Once per day.
 // items: [{ productId, productName, doseUnit, usedToday, lots: [{ ref, batch, expiry, sealed, open }] }]
 // answers: [{ id, label, type, value, text }]

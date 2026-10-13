@@ -1,7 +1,6 @@
 import { fetchDayAppointments } from "./appointments.js";
 import { escapeHtml, getInitials, toDateKey, showToast } from "./utils.js";
-import { listProducts, listKits, isKitProduct, getMyKitDay, saveKitDayStart, plural } from "./inventory-api.js";
-
+import { listProducts, listKits, isKitProduct, getMyKitDay, saveKitDayStart, saveDayStart, plural } from "./inventory-api.js";
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July",
   "August", "September", "October", "November", "December"];
@@ -127,8 +126,9 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false } = {}) {
   dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(); });                  // Esc: kit step = remind me later
   dlg.addEventListener("click", (e) => { if (e.target === dlg && !kitMode) close(); });     // click outside (welcome only)
 
-  // The kit check loads while they read the welcome
-  const kitP = kit ? Promise.resolve(kit) : kitToday(staff).catch((err) => { console.warn("Kit check failed:", err); return null; });
+  // The kit check loads while they read the welcome (an error means "don't know": the day isn't started without the count)
+  const kitP = kit || noKit ? Promise.resolve(kit)
+    : kitToday(staff).catch((err) => { console.warn("Kit check failed:", err); return { error: true }; });
 
   const startBtn = dlg.querySelector('[data-act="start"]');
   startBtn.addEventListener("click", async () => {
@@ -136,8 +136,17 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false } = {}) {
     startBtn.textContent = "One moment…";
     const k = await kitP;
     if (!dlg.isConnected || mine !== session) return;
-    if (k) { kitMode = true; renderKit(dlg, staff, k, close); }
-    else close();
+    if (k && k.error) { close(); return; }   // the button stays at the top to try again
+    if (k) { kitMode = true; renderKit(dlg, staff, k, close); return; }
+    // No kit to count: starting the day is just recorded
+    try {
+      await saveDayStart(staff);
+      window.dispatchEvent(new Event("kitday:changed"));
+    } catch (err) {
+      console.warn("Start of day not saved:", err);
+      showToast("Couldn't record your start. Press “Start my day” at the top to try again.");
+    }
+    close();
   });
 
   dlg.showModal();
@@ -335,9 +344,31 @@ async function loadStats(dlg) {
   }
 }
 
-/* ---------- "Start my day" in the top bar: shown until today's kit count is done ---------- */
+/* ---------- "Start my day" in the top bar: every staff member, until they've started today ---------- */
 let btnStaff = null;
 let btnCheck = 0;
+
+// null = already started today. Otherwise { kit }: the kit to count, or null if there's nothing to count.
+async function dayState(staff) {
+  if (!staff) return null;
+  const [day, kit] = await Promise.all([getMyKitDay(), kitToday(staff)]);
+  return day && day.start ? null : { kit };
+}
+
+// The top bar button: the kit count for injectors with a kit, otherwise the welcome
+export async function openStartOfDay(staff) {
+  if (current || !staff) return;
+  const st = await dayState(staff).catch((err) => { console.warn("Day check failed:", err); return undefined; });
+  if (current) return;
+  if (st === undefined) { showToast("Couldn't check your day. Check your connection and try again."); return; }
+  if (!st) {
+    showToast("You've already started today.");
+    window.dispatchEvent(new Event("kitday:changed"));
+    return;
+  }
+  if (st.kit) showStartOfDay(staff, { kit: st.kit, kitOnly: true });
+  else showStartOfDay(staff, { noKit: true });
+}
 
 function sodButton() {
   let b = document.getElementById("sod-btn");
@@ -354,12 +385,12 @@ function sodButton() {
   if (!b.dataset.wired) {
     b.dataset.wired = "1";
     b.className = "eod-btn sod-btn";
-    b.title = "Count your kit for today";
+    b.title = "Start your day";
     b.innerHTML = `${SUN}<span>Start my day</span>`;
     b.addEventListener("click", async () => {
       if (!btnStaff || b.disabled) return;
       b.disabled = true;
-      try { await openStartOfDayKit(btnStaff); } finally { b.disabled = false; }
+      try { await openStartOfDay(btnStaff); } finally { b.disabled = false; }
     });
   }
   return b;
@@ -369,16 +400,16 @@ function setPending(on) {
   const b = sodButton();
   if (!b) return;
   b.hidden = !on;
-  if (b.parentElement) b.parentElement.classList.toggle("sod-pending", on);   // hides "End my day" meanwhile
+  if (b.parentElement) b.parentElement.classList.toggle("sod-pending", on);   // "End my day" waits until the day has started
 }
 
-// Shows the button if this person still has today's kit count to do
+// Shows the button until this person has started today
 export async function refreshStartOfDayButton(staff) {
   btnStaff = staff || null;
   const mine = ++btnCheck;
   if (!staff) { setPending(false); return; }
-  const kit = await kitToday(staff).catch((err) => { console.warn("Kit check failed:", err); return null; });
-  if (mine === btnCheck && btnStaff === staff) setPending(!!kit);
+  const st = await dayState(staff).catch((err) => { console.warn("Day check failed:", err); return null; });
+  if (mine === btnCheck && btnStaff === staff) setPending(!!st);
 }
 
 // On logout
@@ -388,5 +419,5 @@ export function hideStartOfDayButton() {
   setPending(false);
 }
 
-// Saved, or found already done: hide it
+// Started (or found already started): swap to "End my day"
 window.addEventListener("kitday:changed", () => { if (btnStaff) refreshStartOfDayButton(btnStaff); });
