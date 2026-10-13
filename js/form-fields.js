@@ -102,6 +102,37 @@ const BOX_TYPES = ["short_text", "email", "number", "date", "record_date", "drop
 const DRIVE_ID = /^[A-Za-z0-9_-]{10,80}$/;
 const opt = (v, list, dflt) => (list.includes(v) ? v : dflt);
 const fmtN = (n) => String(+Number(n || 0).toFixed(2));
+// Pre-fill: the answer a question starts with when the form opens (staff can change it)
+export const PREFILL_TYPES = ["short_text", "long_text", "email", "number", "single_choice", "dropdown", "checkboxes", "checkbox_notes"];
+const PREFILL_NOTE = "Staff can change it before saving. It applies to forms filled in after you publish.";
+const textPrefill = (f) => (!f.fill && typeof f.prefill === "string" ? f.prefill : "");
+const numPrefill = (f) => (f.prefill !== null && f.prefill !== undefined && f.prefill !== "" && Number.isFinite(Number(f.prefill))
+  ? Number(f.prefill) : null);
+const isPrefilled = (f, o) => (f.type === "single_choice" || f.type === "dropdown"
+  ? f.prefill === o : Array.isArray(f.prefill) && f.prefill.includes(o));
+
+// "Pre-filled: Yes, No" for the builder chip ("" if nothing)
+export function prefillSummary(f) {
+  if (!f || !PREFILL_TYPES.includes(f.type)) return "";
+  let s = "";
+  if (Array.isArray(f.prefill)) s = f.prefill.join(", ");
+  else if (f.type === "number") s = numPrefill(f) === null ? "" : String(numPrefill(f));
+  else if (f.type === "single_choice" || f.type === "dropdown") s = f.prefill || "";
+  else s = textPrefill(f).replace(/\s+/g, " ");
+  return s.length > 40 ? `${s.slice(0, 39)}…` : s;
+}
+
+// A choice renamed in the builder keeps its pre-fill
+export function renameInPrefill(f, from, to) {
+  if (f.prefill === from) f.prefill = to;
+  else if (Array.isArray(f.prefill)) f.prefill = f.prefill.map((x) => (x === from ? to : x));
+}
+// A choice removed in the builder is taken out of the pre-fill
+export function tidyPrefill(f) {
+  const opts = f.options || [];
+  if (Array.isArray(f.prefill)) f.prefill = f.prefill.filter((x) => opts.includes(x));
+  else if ((f.type === "single_choice" || f.type === "dropdown") && f.prefill && !opts.includes(f.prefill)) f.prefill = "";
+}
 // Pictures staff place unit marks on: their total can be used in a Calculation
 export const isMarkImage = (x) => !!x && x.type === "image" && x.source !== "staff" && x.annotate === true && x.markMode === "marks";
 export const calcSource = (x) => !!x && (["number", "calculation"].includes(x.type) || isMarkImage(x));
@@ -433,6 +464,22 @@ export function cleanField(f) {
       break;
 }
   const sw = cleanCondition(f);
+  if (PREFILL_TYPES.includes(f.type)) {
+    const v = f.prefill;
+    if (f.type === "single_choice" || f.type === "dropdown") {
+      const s = clip(v, 200);
+      if (s && out.options.includes(s)) out.prefill = s;
+    } else if (f.type === "checkboxes" || f.type === "checkbox_notes") {
+      const a = [...new Set((Array.isArray(v) ? v : []).map(String))].filter((o) => out.options.includes(o));
+      if (a.length) out.prefill = a;
+    } else if (f.type === "number") {
+      const n = numOrNull(v);
+      if (n !== null) out.prefill = n;
+    } else if (!out.fill) {
+      const s = clip(v, f.type === "long_text" ? 2000 : 500);
+      if (s.trim()) out.prefill = s;
+    }
+  }
   if (sw) out.showWhen = sw;
   return out;
 }
@@ -516,11 +563,11 @@ export function renderField(f, ctx = {}) {
   const optsClass = `fe-opts is-${esc(f.layout || "list")}`;
 
   switch (f.type) {
-    case "short_text": return head + `<input class="fe-in" type="text"${ph}${inert} />`;
-    case "email": return head + `<input class="fe-in" type="email" autocomplete="off"${ph}${inert} />`;
+    case "short_text": return head + `<input class="fe-in" type="text"${ph}${textPrefill(f) ? ` value="${esc(textPrefill(f))}"` : ""}${inert} />`;
+    case "email": return head + `<input class="fe-in" type="email" autocomplete="off"${ph}${textPrefill(f) ? ` value="${esc(textPrefill(f))}"` : ""}${inert} />`;
     case "long_text": {
       const rows = { small: 2, medium: 4, large: 8 }[f.size] || 4;
-      return head + `<textarea class="fe-in" rows="${rows}"${ph}${inert}></textarea>`;
+      return head + `<textarea class="fe-in" rows="${rows}"${ph}${inert}>${esc(textPrefill(f))}</textarea>`;
     }
     case "date": {
       const t = todayIso();
@@ -533,13 +580,14 @@ export function renderField(f, ctx = {}) {
     case "number":
       return head + `<div class="fe-num"><input class="fe-in" type="number" data-in="${id}"${ph}${
         f.min !== null && f.min !== undefined ? ` min="${Number(f.min)}"` : ""}${
-        f.max !== null && f.max !== undefined ? ` max="${Number(f.max)}"` : ""}${inert} />${
+        f.max !== null && f.max !== undefined ? ` max="${Number(f.max)}"` : ""}${
+        numPrefill(f) !== null ? ` value="${numPrefill(f)}"` : ""}${inert} />${
         f.unit ? `<span>${esc(f.unit)}</span>` : ""}</div>`;
     case "dropdown": {
       const list = choiceList(f);
       const cmt = (f.commentOn || []).filter((o) => list.includes(o));
       return head + `<select class="fe-in"${inert}><option value="">${esc(f.placeholder || "Choose one")}</option>${
-        list.map((o) => `<option value="${esc(o)}">${esc(o)}</option>`).join("")}</select>` +
+        list.map((o) => `<option value="${esc(o)}"${!(f.allowOther && o === list[list.length - 1] && o === otherLabel(f)) && isPrefilled(f, o) ? " selected" : ""}>${esc(o)}</option>`).join("")}</select>` +
         (f.allowOther ? `<input class="fe-in fe-xin" type="text" data-other maxlength="500" placeholder="Type the ${esc(otherLabel(f).toLowerCase())} answer"${live ? " hidden" : ""}${inert} />` : "") +
         (cmt.length ? (live
           ? `<input class="fe-in fe-xin" type="text" data-cmt="dd" maxlength="1000" placeholder="${esc(f.commentHint || "Please give details")}" hidden />`
@@ -552,7 +600,8 @@ export function renderField(f, ctx = {}) {
       const cmt = new Set(f.commentOn || []);
       return head + `<div class="${optsClass}">${list.map((o, i) => {
         const isOther = f.allowOther && i === list.length - 1;
-        const box = `<label class="fe-opt"><input type="${t}" name="${id}"${inert} /><span>${esc(o)}</span>${
+        const on = !isOther && isPrefilled(f, o);
+        const box = `<label class="fe-opt"><input type="${t}" name="${id}"${on ? " checked" : ""}${inert} /><span>${esc(o)}</span>${
           !live && !isOther && cmt.has(o) ? '<em class="fe-xtag">+ details</em>' : ""}</label>`;
         if (isOther) {
           return `<span class="fe-optx">${box}<input class="fe-in fe-xin" type="text" data-other maxlength="500" placeholder="Please specify"${live ? " hidden" : ""}${inert} /></span>`;
@@ -570,7 +619,7 @@ export function renderField(f, ctx = {}) {
         const isOther = f.allowOther && i === list.length - 1;
         return `
         <div class="fe-optnote${isOther ? " is-other" : ""}">
-          <label class="fe-opt">${box("checkbox")}<span>${esc(o)}</span></label>
+          <label class="fe-opt"><input type="checkbox"${!isOther && isPrefilled(f, o) ? " checked" : ""}${inert} /><span>${esc(o)}</span></label>
           <input class="fe-in fe-note-in" type="text" placeholder="${isOther ? "Please specify" : "Add a note"}"${inert} />
         </div>`;
       }).join("")}</div>`;
@@ -1180,11 +1229,48 @@ function layoutSettings(f) {
   </div>`;
 }
 
+/* ===================== Pre-fill setting ===================== */
+
+export function prefillSettings(f) {
+  if (!PREFILL_TYPES.includes(f.type)) return "";
+  const opts = (f.options || []).filter((o) => String(o).trim());
+  if (f.type === "single_choice" || f.type === "dropdown") {
+    return setting("Pre-fill", `<select class="fb-select" data-k="prefill" data-rerender="">${
+      [["", "Nothing chosen"], ...opts.map((o) => [o, o])].map(([v, l]) =>
+        `<option value="${esc(v)}"${(f.prefill || "") === v ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`,
+      `The answer that starts selected. ${PREFILL_NOTE}`);
+  }
+  if (f.type === "checkboxes" || f.type === "checkbox_notes") {
+    const on = new Set(Array.isArray(f.prefill) ? f.prefill : []);
+    return `<div class="fe-insp-field"><span class="fe-insp-label">Pre-fill</span>
+      <div class="fe-parts">${opts.map((o) => `<label class="fe-check"><input type="checkbox" data-prefill="${esc(o)}" data-rerender=""${
+        on.has(o) ? " checked" : ""} /> ${esc(o)}</label>`).join("") || '<small class="fe-note">Add answer choices first.</small>'}</div>
+      <small class="fe-note">Ticked when the form opens. ${PREFILL_NOTE}</small></div>`;
+  }
+  if (f.type === "number") {
+    return setting("Pre-fill", `<input class="fe-input" type="number" step="any" data-k="prefill" data-num="optional" placeholder="Empty" value="${numPrefill(f) ?? ""}" />`,
+      `The number the box starts with. ${PREFILL_NOTE}`);
+  }
+  if (f.fill) return ""; // "Fill in automatically" is used instead
+  const control = f.type === "long_text"
+    ? `<textarea class="fe-input" data-k="prefill" rows="3" maxlength="2000" placeholder="Empty">${esc(f.prefill || "")}</textarea>`
+    : `<input class="fe-input" data-k="prefill" maxlength="500" placeholder="Empty" value="${esc(f.prefill || "")}" />`;
+  return setting("Pre-fill", control,
+    `Text the box starts with. You can use {Patient name}, {First name}, {Last name}, {Date of birth}, {Patient ID}, {Today} and {My name}. ${PREFILL_NOTE}`);
+}
+
 /* ===================== Settings that edit lists inside a field ===================== */
+
 
 // Typing in table columns, sub-option groups, patient detail ticks and layout buttons.
 // Returns true if it changed something.
 export function applyInput(f, el) {
+  if (el.dataset.prefill !== undefined) {
+    const s = new Set(Array.isArray(f.prefill) ? f.prefill : []);
+    if (el.checked) s.add(el.dataset.prefill); else s.delete(el.dataset.prefill);
+    f.prefill = (f.options || []).filter((o) => s.has(o));
+    return true;
+  }
   if (el.dataset.msid !== undefined) {
     const on = new Set(markSetIdsOf(f));
     if (el.checked) on.add(el.dataset.msid); else on.delete(el.dataset.msid);

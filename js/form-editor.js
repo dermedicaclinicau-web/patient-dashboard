@@ -6,7 +6,7 @@ import {
   esc, svg, ICONS, FIELD_TYPES, FIELD_GROUPS, CHOICE_TYPES, FILLS, FILLS_FOR,
   createField, normaliseField, renderField, fieldSettings, applyInput, applyClick,
   calcStatusHtml, checkFormula, canRequire, hasLabel, hasHelp, watermarkHtml, iqHasOptions, isMarkImage,
-  markSetIdsOf,
+  markSetIdsOf, prefillSettings, prefillSummary, renameInPrefill, tidyPrefill,
 } from "./form-fields.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { DEFAULT_LETTERHEAD, letterheadHtml, openLetterheadDialog } from "./form-letterhead.js";
@@ -424,8 +424,10 @@ export async function mountFormEditor(container, { templateId, staff }) {
       const on = f.id === sel;
       const cond = conditionSummary(f, fields);
       const condBad = cond ? conditionProblem(f, fields) : "";
+      const pf = prefillSummary(f);
       const chips = [
         f.fill && `<span class="fe-chip">${svg(UI.user)}Auto-filled: ${esc(FILLS[f.fill] || f.fill)}</span>`,
+        pf && `<span class="fe-chip">${svg('<polyline points="20 6 9 17 4 12"/>')}Pre-filled: ${esc(pf)}</span>`,
         cond && `<span class="fe-chip is-cond${condBad ? " is-bad" : ""}">${svg(BRANCH)}${esc(condBad || cond)}</span>`,
       ].filter(Boolean).join("");
       return `
@@ -565,10 +567,11 @@ export async function mountFormEditor(container, { templateId, staff }) {
     h += fieldSettings(f, ctx(false));
     if (FILLS_FOR[f.type]) {
       h += setting("Fill in automatically",
-        `<select class="fb-select" data-k="fill">${FILLS_FOR[f.type].map((k) =>
+        `<select class="fb-select" data-k="fill" data-rerender="">${FILLS_FOR[f.type].map((k) =>
           `<option value="${k}"${(f.fill || "") === k ? " selected" : ""}>${esc(FILLS[k])}</option>`).join("")}</select>`,
         f.fill ? "Staff can still change it before saving." : "");
     }
+    h += prefillSettings(f);
     h += conditionSettingsHtml(f, fields);
     if (canRequire(f.type)) {
       h += `<label class="fe-check"><input type="checkbox" data-k="required"${f.required ? " checked" : ""} /> Answer required</label>`;
@@ -846,7 +849,9 @@ export async function mountFormEditor(container, { templateId, staff }) {
     const f = current();
     if (!f) return;
     if (el.dataset.opt !== undefined) {
-      f.options[Number(el.dataset.opt)] = el.value;
+      const i = Number(el.dataset.opt);
+      renameInPrefill(f, f.options[i], el.value);
+      f.options[i] = el.value;
     } else if (el.dataset.k) {
       const k = el.dataset.k;
       if (el.type === "checkbox") {
@@ -977,6 +982,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     if (del) {
       if (f.options.length > 1) {
         f.options.splice(Number(del.dataset.optdel), 1);
+        tidyPrefill(f);
         changed(); renderStage(); renderInspector();
       }
       return;

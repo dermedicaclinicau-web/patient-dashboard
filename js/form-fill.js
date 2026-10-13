@@ -557,6 +557,28 @@ export async function mountFormFill(container, param, { staff } = {}) {
     }
   });
 
+  // Pre-filled text: {Patient name}, {Today}… become the real details
+  const TOKENS = {
+    "patient name": patient.name || "",
+    "first name": patient.firstName || String(patient.name || "").split(" ")[0] || "",
+    "last name": patient.lastName || "",
+    "date of birth": formatDobLong(patient.dobKey) || patient.dob || "",
+    "patient id": patient.pttId || patient.id || "",
+    "today": new Date().toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" }),
+    "my name": (staff && staff.name) || "",
+  };
+  const fillTokens = (s) => String(s).replace(/\{\s*([a-z ]+?)\s*\}/gi, (m, k) => {
+    const key = k.toLowerCase().replace(/\s+/g, " ");
+    return key in TOKENS ? TOKENS[key] : m;
+  });
+  fields.forEach((f) => {
+    if (f.fill || typeof f.prefill !== "string" || !f.prefill.includes("{")) return;
+    if (!["short_text", "long_text", "email"].includes(f.type)) return;
+    const w = wrap(f.id);
+    const el = w && w.querySelector(".fe-in");
+    if (el) el.value = fillTokens(f.prefill);
+  });
+
     // Clinician details and the staff number fills: from Staff, loaded in the background. Never overwrites typing.
   let staffList = [];
   const meDetails = () => staffDetailsFor(staffList, staff) || { id: "", name: (staff && staff.name) || "" };
