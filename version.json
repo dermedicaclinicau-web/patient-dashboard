@@ -1,5 +1,5 @@
 ﻿{
-    "version":  "20261013-151445",
+    "version":  "20261013-155950",
     "files":  [
                   "./js/aftercare-api.js",
                   "./js/aftercare-bank.js",
@@ -102,6 +102,7 @@
                   "./js/ssp-products.js",
                   "./js/ssp-send.js",
                   "./js/ssp-settings.js",
+                  "./js/staff-days.js",
                   "./js/staff-details.js",
                   "./js/staff-manager.js",
                   "./js/start-of-day.js",

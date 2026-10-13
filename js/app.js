@@ -24,6 +24,7 @@ import { mountMyDashboard } from "./my-dashboard.js";
 import { mountReports } from "./reports.js";
 import { mountSettings } from "./settings.js";
 import { initEndOfDay, teardownEndOfDay } from "./end-of-day.js";
+import { mountStaffDays } from "./staff-days.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -208,7 +209,9 @@ function placeholderPage(title, message, backLink = "") {
 }
 
 const PAGES = {
-  home: (el) => mountMyDashboard(el, { staff: currentStaff }),
+  home: (el, param) => (String(param || "").split("/")[0] === "days"
+    ? mountStaffDays(el)
+    : mountMyDashboard(el, { staff: currentStaff })),
   patients: (el) => mountPatientList(el),
   calendar: (el, param) => mountCalendar(el, param),
   forms: (el, param) => mountFormBuilder(el, { isAdmin: can("forms.build"), staff: currentStaff, templateId: param }),

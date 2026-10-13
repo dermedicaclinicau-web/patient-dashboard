@@ -229,13 +229,19 @@ match /inv_open/{id} {
       allow delete: if false;
     }
 
-    // Investigations: opened by the counter, recounted by someone else (blind), closed by Manage inventory
+    // Investigations: opened by the counter, recounted by someone else (blind), closed by Manage inventory.
+    // Injectors also open one at Start of Day when their kit doesn't match their last End of Day (no recount: admin review).
     match /inv_investigations/{id} {
       allow read: if isStaff();
-      allow create: if (can('inventory.count') || invOrder())
-        && request.resource.data.openedByUid == request.auth.uid
-        && request.resource.data.status == 'recount'
-        && request.resource.data.aloneApproved == false;
+      allow create: if request.resource.data.openedByUid == request.auth.uid && (
+          ((can('inventory.count') || invOrder())
+            && request.resource.data.status == 'recount'
+            && request.resource.data.aloneApproved == false)
+          || (invKit()
+            && request.resource.data.kind == 'kit-overnight'
+            && request.resource.data.loc == 'kit'
+            && request.resource.data.staffUid == request.auth.uid
+            && request.resource.data.status == 'review'));
       allow update: if (
           (can('inventory.count') || invOrder())
           && resource.data.status == 'recount'
@@ -248,7 +254,26 @@ match /inv_open/{id} {
         ) || invManage();
       allow delete: if false;
     }
-    
+
+    // Start of Day / End of Day: one document per person per day, inv_kitdays/<uid>__<YYYY-MM-DD>.
+    // Each person reads and writes only their own day; Reporting and Manage inventory read everyone's.
+    match /inv_kitdays/{dayId} {
+      allow read: if isStaff() && (
+          dayId.split('__')[0] == request.auth.uid   // own day (works before it exists)
+          || isAdmin());                             // everyone's: Admins only (My dashboard)
+      allow create, update: if isStaff()
+        && request.resource.data.staffUid == request.auth.uid
+        && request.resource.data.dateKey is string
+        && dayId == request.auth.uid + '__' + request.resource.data.dateKey;
+      allow delete: if false;
+    }
+
+    // End of Day questions: all staff read them; Admin / Build tasks edits them
+    match /app_settings/{id} {
+      allow read: if isStaff();
+      allow write: if can('tasks.build');
+    }
+
     // Order requests: anyone with "Request orders" asks; the ordering team handles them
     match /inv_requests/{id} {
       allow read: if can('menu.inventory') || can('inventory.request') || invOrder();

@@ -2157,7 +2157,8 @@ export async function investigationEvidence(x) {
   const since = last ? last.at : new Date(countAt.getTime() - 30 * 864e5);
   const inWindow = (d) => !!d && d > since && d <= countAt;
 
-  const ledger = moves.filter((m) => inWindow(m.at)).map((m) => ({
+  const ledger = moves.filter((m) => inWindow(m.at)
+    && (x.loc !== "kit" || !x.staffUid || m.byUid === x.staffUid || m.staffUid === x.staffUid)).map((m) => ({
     at: m.at, type: m.type, by: m.by || "", ref: m.ref || "",
     delta: (m.lines || []).filter((l) => l.loc === x.loc && (!x.batch || l.batch === x.batch))
       .reduce((a, l) => a + (Number(l.delta) || 0), 0),
@@ -2195,6 +2196,7 @@ export async function saveRecount(id, counted, staff) {
     const s = await tx.get(iRef);
     if (!s.exists()) throw new Error("This investigation no longer exists.");
     const x = s.data();
+    if (x.loc === "kit") throw new Error("Kit differences don't have a recount. An admin reviews them.");
     if (x.status !== "recount") throw new Error("The recount has already been done. Reload to see it.");
     if (x.openedByUid === me && x.aloneApproved !== true) {
       throw new Error("Someone else needs to do the recount. If you're the only one on site, ask an admin to allow it.");
@@ -2258,7 +2260,7 @@ export async function closeInvestigation(id, { outcome, note = "", cctvChecked =
     const loc = x.loc === "jt" ? "jt" : "shelf";
     let pSnap = null;
     let lSnap = null;
-    if (o.adjust && diff) {
+    if (o.adjust && diff && x.loc !== "kit") {   // kits are fixed from Count differences, not here
       pSnap = await tx.get(doc(db, "inv_products", x.productId));
       lSnap = await tx.get(doc(db, "inv_lots", String(x.ref || "")));
       if (!pSnap.exists()) throw new Error("This product no longer exists.");
@@ -2534,43 +2536,183 @@ export async function getMyKitDay(key = dayKey()) {
   return s.exists() ? normaliseKitDay(s) : null;
 }
 
-// items: [{ productId, productName, doseUnit, inUse (kit ref or ""), lots: [{ ref, batch, expiry, sealed, open }] }]
+// Batch numbers compared loosely: "a-123 " and "A123" are the same batch
+const normBatch = (s) => String(s || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+
+// The latest End of Day with kit counts before today (looks back up to 7 days), or null
+async function lastKitEnd(me) {
+  for (let i = 1; i <= 7; i++) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    const s = await getDoc(doc(db, "inv_kitdays", kitDayId(me, dayKey(d))));
+    if (!s.exists()) continue;
+    const day = normaliseKitDay(s);
+    if (day.end && day.end.at && day.end.items.length) return day;
+  }
+  return null;
+}
+
+// Units that physically went in (+) or out (−) of my kit since a moment, per product:
+// taken / returned, used on treatment records, discarded, borrowed / lent.
+// Admin adjustments (accepted differences, usage corrections) don't move anything physically, so they're left out.
+async function kitFlowSince(since, productsById) {
+  const me = uid();
+  const [moves, loans] = await Promise.all([listMyKitMoves(500), listLoans(200).catch(() => [])]);
+  const per = (pid) => Number((productsById.get(pid) || {}).dosePer) || 0;
+  const flow = new Map();
+  const add = (pid, n) => flow.set(pid, round1((flow.get(pid) || 0) + n));
+  const after = (d) => !!d && d > since;
+  moves.filter((m) => after(m.at)).forEach((m) => {
+    const kitDelta = (m.lines || []).filter((l) => l.loc === "kit").reduce((a, l) => a + (Number(l.delta) || 0), 0);
+    if (m.type === "kit-take" || m.type === "kit-return") add(m.productId, kitDelta * per(m.productId)); // vials → units
+    else if (m.type === "kit-use") add(m.productId, kitDelta);                                           // already units
+    else if (m.type === "kit-discard") {
+      let u = Number(m.discardUnits);
+      if (!Number.isFinite(u)) u = Math.abs(kitDelta) * per(m.productId);
+      add(m.productId, -u);
+    }
+  });
+  loans.filter((l) => after(l.createdAt)).forEach((l) => {
+    if (l.toUid === me) add(l.productId, Number(l.units) || 0);
+    if (l.fromUid === me) add(l.productId, -(Number(l.units) || 0));
+  });
+  return flow;
+}
+
+// Start of Day: a blind count. The clinician types each batch from the label (nothing is shown to choose from).
+// items: [{ productId, rows: [{ batch, expiry, sealed, open, inUse }] }]
+// 1. Typed batches are matched to the kit records; any batch in the records that wasn't typed counts as 0.
+//    Saved as a kit check, so differences reach Count differences.
+// 2. Batches that aren't in the kit records are kept and flagged.
+// 3. Overnight: last End of Day + what was recorded since should equal this morning. If not, an investigation opens.
 export async function saveKitDayStart({ notInjecting = false, items = [] }, staff) {
   const me = uid();
   const by = who(staff);
   const key = dayKey();
-  const lines = notInjecting ? [] : items.flatMap((it) => it.lots.map((l) => ({ ref: l.ref, sealed: l.sealed, open: l.open })));
-  if (!notInjecting && !lines.length) throw new Error("Count your kit, or tick “I'm not injecting today”.");
+  const ref = doc(db, "inv_kitdays", kitDayId(me, key));
 
-  // The blind count, saved as this person's kit check
-  const count = lines.length ? await saveCount({ kind: "kit", lines, note: "Start of day" }, staff) : null;
+  if (notInjecting) {
+    await setDoc(ref, {
+      staffUid: me, staffName: by, dateKey: key,
+      start: { at: serverTimestamp(), notInjecting: true, items: [], countId: "", differences: 0, overnight: 0 },
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+    return { notInjecting: true, differences: 0, overnight: 0, unknown: 0 };
+  }
+
+  const [products, kits] = await Promise.all([listProducts(), listKits({ mine: true })]);
+  const byPid = new Map(products.map((p) => [p.id, p]));
+  const lines = [];
+  const work = [];
+
+  for (const it of items) {
+    const p = byPid.get(it.productId);
+    if (!p) continue;
+    const lots = kits.filter((k) => k.productId === p.id);
+    const tally = new Map(lots.map((k) => [k.id, { k, sealed: 0, open: 0 }]));
+    const unknown = [];
+    const rows = (Array.isArray(it.rows) ? it.rows : []).map((r) => ({
+      batch: clip(r.batch, 40), expiry: KEY_RE.test(r.expiry || "") ? r.expiry : "",
+      sealed: Math.max(0, parseInt(r.sealed, 10) || 0), open: round1(Math.max(0, Number(r.open) || 0)),
+      inUse: r.inUse === true, ref: "", expiryMismatch: false,
+    }));
+    rows.forEach((r) => {
+      const nb = normBatch(r.batch);
+      const same = lots.filter((k) => normBatch(k.batch) === nb);
+      const k = same.find((c) => (c.expiry || "") === r.expiry) || same[0] || null;
+      if (!k) { unknown.push(r); return; }
+      const t = tally.get(k.id);
+      t.sealed += r.sealed;
+      t.open = round1(t.open + r.open);
+      r.ref = k.id;
+      r.expiryMismatch = !!r.expiry && !!k.expiry && r.expiry !== k.expiry;
+    });
+    tally.forEach((t) => lines.push({ ref: t.k.id, sealed: t.sealed, open: t.open }));
+    work.push({ p, rows, unknown, lots });
+  }
+  if (!work.length) throw new Error("Count your kit, or tick “I'm not injecting today”.");
+
+  // 1. Against the kit records
+  const count = lines.length ? await saveCount({ kind: "kit", lines, note: "Start of day (blind)" }, staff) : null;
   const byRef = new Map(((count && count.lines) || []).map((l) => [l.ref, l]));
 
-  const out = notInjecting ? [] : items.map((it) => {
-    const lots = it.lots.map((l) => {
-      const c = byRef.get(l.ref) || {};
-      return {
-        ref: l.ref, batch: String(c.batch || l.batch || ""), expiry: String(c.expiry || l.expiry || ""),
-        sealed: Math.max(0, parseInt(l.sealed, 10) || 0), open: round1(Math.max(0, Number(l.open) || 0)),
-        counted: round1(c.counted), system: round1(c.system), variance: round1(c.variance),
-      };
+  // 3. Overnight: since the last End of Day
+  const lastEnd = await lastKitEnd(me).catch(() => null);
+  const flow = lastEnd ? await kitFlowSince(lastEnd.end.at, byPid).catch(() => null) : null;
+
+  const at = new Date().toISOString();
+  const batch = writeBatch(db);
+  const opened = [];
+  const out = work.map(({ p, rows, unknown, lots }) => {
+    const unitsOf = (r) => round1(r.sealed * p.dosePer + r.open);
+    const lotOut = lots.map((k) => {
+      const c = byRef.get(k.id) || {};
+      const typed = rows.some((r) => r.ref === k.id);
+      return { ref: k.id, batch: k.batch, expiry: k.expiry, typed,
+        counted: round1(c.counted), system: round1(c.system), variance: round1(c.variance) };
     });
-    const use = lots.find((l) => l.ref === it.inUse) || null;
-    const sum = (k) => round1(lots.reduce((a, l) => a + (Number(l[k]) || 0), 0));
+    const unknownUnits = round1(unknown.reduce((a, r) => a + unitsOf(r), 0));
+    const counted = round1(lotOut.reduce((a, l) => a + l.counted, 0) + unknownUnits);
+    const system = round1(lotOut.reduce((a, l) => a + l.system, 0));
+    const use = rows.find((r) => r.inUse) || null;
+
+    const e = lastEnd ? lastEnd.end.items.find((x) => x.productId === p.id) : null;
+    let overnight = { compared: false,
+      reason: !lastEnd ? "No End of Day count in the last 7 days" : !e ? "Not counted at the last End of Day" : !flow ? "Couldn't load kit activity" : "" };
+    if (lastEnd && e && flow) {
+      const endCounted = round1(e.counted);
+      const moved = round1(flow.get(p.id) || 0);
+      const expected = round1(endCounted + moved);
+      const gap = round1(counted - expected);
+      overnight = { compared: true, fromDateKey: lastEnd.dateKey, endCounted, moved, expected, gap, investigationId: "" };
+      if (Math.abs(gap) >= 0.05) {
+        const iRef = doc(collection(db, "inv_investigations"));
+        overnight.investigationId = iRef.id;
+        opened.push(iRef.id);
+        const u = p.doseUnit || "units";
+        batch.set(iRef, {
+          kind: "kit-overnight", countId: count ? count.id : "", line: -1,
+          productId: p.id, productName: p.name, loc: "kit", ref: "", staffUid: me, staffName: by,
+          batch: "", expiry: "", batchLabel: p.batchLabel || "Batch", unit: u,
+          digital: expected, counted, variance: gap, countNote: "", dateKey: key,
+          status: "review", aloneApproved: true,
+          overnight: { fromDateKey: lastEnd.dateKey, endCounted, moved, expected },
+          openedBy: by, openedByUid: me, openedAt: serverTimestamp(), updatedAt: serverTimestamp(),
+          events: [{ at, by, action: "Opened: overnight kit difference",
+            note: `End of day ${lastEnd.dateKey}: ${endCounted} ${u}. Recorded since: ${moved >= 0 ? "+" : ""}${moved}. `
+              + `Expected ${expected}, counted ${counted} this morning (${gap > 0 ? "+" : ""}${gap}).` }],
+        });
+      }
+    }
+
     return {
-      productId: clip(it.productId, 60), productName: clip(it.productName, 150), doseUnit: clip(it.doseUnit, 20) || "units",
-      inUse: use ? { ref: use.ref, batch: use.batch, expiry: use.expiry, open: use.open } : null,
-      counted: sum("counted"), system: sum("system"), variance: sum("variance"), lots,
+      productId: p.id, productName: p.name, doseUnit: p.doseUnit || "units",
+      rows: rows.map(({ batch: b, expiry, sealed, open, inUse, ref: r, expiryMismatch }) =>
+        ({ batch: b, expiry, sealed, open, inUse, ref: r, expiryMismatch, units: unitsOf({ sealed, open }) })),
+      inUse: use ? { batch: use.batch, expiry: use.expiry, ref: use.ref } : null,
+      lots: lotOut, unknown: unknown.map((r) => ({ batch: r.batch, expiry: r.expiry, units: unitsOf(r) })),
+      counted, system, variance: round1(counted - system), overnight,
     };
   });
-  const differences = count ? count.lines.filter((l) => l.status !== "ok").length : 0;
 
-  await setDoc(doc(db, "inv_kitdays", kitDayId(me, key)), {
+  if (opened.length) {
+    batch.set(doc(collection(db, "notify_outbox")), outboxDoc("investigation.opened", { ids: opened, countId: count ? count.id : "" }, me));
+  }
+  batch.set(ref, {
     staffUid: me, staffName: by, dateKey: key,
-    start: { at: serverTimestamp(), notInjecting: notInjecting === true, items: out, countId: count ? count.id : "", differences },
+    start: { at: serverTimestamp(), notInjecting: false, blind: true, items: out, countId: count ? count.id : "",
+      differences: count ? count.lines.filter((l) => l.status !== "ok").length : 0, overnight: opened.length },
     updatedAt: serverTimestamp(),
   }, { merge: true });
-  return { differences, notInjecting: notInjecting === true };
+  await batch.commit();
+  if (opened.length) pingNotify();
+
+  return {
+    notInjecting: false,
+    differences: count ? count.lines.filter((l) => l.status !== "ok").length : 0,
+    overnight: opened.length,
+    unknown: out.reduce((a, o) => a + o.unknown.length, 0),
+  };
 }
 
 // End of Day: a blind kit count (injectors) and the answers to the admin's questions. Once per day.

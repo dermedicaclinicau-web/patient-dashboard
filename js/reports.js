@@ -30,7 +30,7 @@ const monthLabel = (k) => { const [y, m] = k.split("-").map(Number); return new 
 const daysAgoKey = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return dayKey(d); };
 const SKELETON = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
 const TABS = [["variance", "Count differences"], ["investigations", "Investigations"], ["notrecorded", "Not recorded"], ["wastage", "Wastage"],
-  ["kits", "Kit reconciliation"], ["kitdays", "Start & end of day"], ["usage", "Usage"], ["opened", "Opened containers"], ["short", "Saved short"], ["plans", "Treatment plans"]];
+  ["kits", "Kit reconciliation"], ["usage", "Usage"], ["opened", "Opened containers"], ["short", "Saved short"], ["plans", "Treatment plans"]];
 const errText = (err, fallback) => (err && err.code === "permission-denied"
   ? "You don't have access to do this. Check the Firestore rules have been published, and your Reporting access in Staff."
   : err && err.message && !err.code ? err.message : fallback);
@@ -94,7 +94,6 @@ export function mountReports(container, { param = "", staff = null } = {}) {
   else if (tab === "usage") mountUsage(body, staff);
   else if (tab === "opened") mountOpened(body);
   else if (tab === "kits") mountKitRecon(body);
-  else if (tab === "kitdays") mountKitDays(body);
   else if (tab === "plans") renderPlanReports(body, { staff });
   else mountShort(body, staff);
 }
@@ -1086,12 +1085,14 @@ function mountKitRecon(body) {
 
 /* ===================== Start & end of day ===================== */
 
-function mountKitDays(body) {
+export function mountDayReport(body) {
   const dayOf = (e) => `${e.by}|${e.at ? dayKey(e.at) : ""}`;
   const face = (v) => { const m = MOODS.find(([n]) => n === Math.round(v)); return m ? m[1] : ""; };
   const off = (n) => Math.abs(Number(n) || 0) > 0.001;
   const signed = (n) => `${n > 0 ? "+" : ""}${fmt(n)}`;
-  const diffText = (e) => [off(e.startDiff) && `Start ${signed(e.startDiff)}`, off(e.endDiff) && `End ${signed(e.endDiff)}`].filter(Boolean).join(" · ");
+  const diffText = (e) => [off(e.night) && `Overnight ${signed(e.night)}`, off(e.startDiff) && `Start ${signed(e.startDiff)}`,
+    off(e.endDiff) && `End ${signed(e.endDiff)}`].filter(Boolean).join(" · ");
+  const isDiff = (e) => e.typeLabel === "Difference" || e.typeLabel === "Overnight difference";
   const moods = (ev) => ev.filter((e) => e.first && e.mood !== null).map((e) => e.mood);
   const avg = (list) => (list.length ? list.reduce((a, n) => a + n, 0) / list.length : null);
   const avgText = (list) => { const a = avg(list); return a === null ? "—" : `${face(a)} ${fmt(a)}`; };
@@ -1116,63 +1117,76 @@ function mountKitDays(body) {
         const eItems = new Map(((en && en.items) || []).map((it) => [it.productId, it]));
         const pids = [...new Set([...sItems.keys(), ...eItems.keys()])];
         if (!pids.length) {
-          return [{ ...base, productId: "-", productName: "—", unit: "", inUse: "", start: null, used: null, end: null, startDiff: 0, endDiff: 0,
+          return [{ ...base, productId: "-", productName: "—", unit: "", inUse: "", start: null, used: null, end: null,
+            startDiff: 0, endDiff: 0, night: 0, unknown: 0, nightNote: "",
             typeLabel: s && s.notInjecting ? "Not injecting" : !en ? "Day not ended" : "Ended" }];
         }
         return pids.map((pid, i) => {
           const si = sItems.get(pid), ei = eItems.get(pid), it = si || ei;
           const startDiff = si ? Number(si.variance) || 0 : 0, endDiff = ei ? Number(ei.variance) || 0 : 0;
+          const ov = si && si.overnight;
+          const night = ov && ov.compared ? Number(ov.gap) || 0 : 0;
           return {
             ...base, first: i === 0, productId: pid, productName: it.productName || "Product", unit: it.doseUnit || "units",
             inUse: !si ? "" : si.inUse
               ? [si.inUse.batch ? `Batch ${si.inUse.batch}` : "No batch number", si.inUse.expiry ? `Exp ${shortDate(parseKey(si.inUse.expiry))}` : ""].filter(Boolean).join(" · ")
               : "Not using today",
             start: si ? Number(si.counted) || 0 : null, used: ei ? Number(ei.usedToday) || 0 : null, end: ei ? Number(ei.counted) || 0 : null,
-            startDiff, endDiff,
-            typeLabel: off(startDiff) || off(endDiff) ? "Difference" : !en ? "Day not ended" : !s ? "No start count" : "Matched",
+            startDiff, endDiff, night, unknown: si && Array.isArray(si.unknown) ? si.unknown.length : 0,
+            nightNote: ov ? (ov.compared ? `Expected ${fmt(ov.expected)} (end of day ${ov.fromDateKey}: ${fmt(ov.endCounted)}, since: ${signed(ov.moved)})` : ov.reason || "") : "",
+            investigationId: ov && ov.investigationId ? ov.investigationId : "",
+            typeLabel: off(night) ? "Overnight difference" : off(startDiff) || off(endDiff) ? "Difference"
+              : !en ? "Day not ended" : !s ? "No start count" : "Matched",
           };
         });
       });
     },
     searchText: (e) => [e.by, e.productName, e.inUse, e.typeLabel, e.answers].join(" "),
     statsHtml(ev) {
-      const diffs = ev.filter((e) => e.typeLabel === "Difference").length;
+      const night = ev.filter((e) => e.typeLabel === "Overnight difference").length;
+      const diffs = ev.filter(isDiff).length;
       const notEnded = new Set(ev.filter((e) => e.typeLabel === "Day not ended").map(dayOf)).size;
       return `<div class="inv-stats">
         <div class="inv-stat"><strong>${new Set(ev.map(dayOf)).size}</strong><span>Staff days logged</span></div>
         <div class="inv-stat"><strong>${esc(avgText(moods(ev)))}</strong><span>How the day went (average of 5)</span></div>
-        <div class="inv-stat ${diffs ? "is-warn" : ""}"><strong>${diffs}</strong><span>Kit differences</span></div>
-        <div class="inv-stat ${notEnded ? "is-warn" : ""}"><strong>${notEnded}</strong><span>Days not ended</span></div>
+        <div class="inv-stat ${night ? "is-bad" : ""}"><strong>${night}</strong><span>Overnight differences</span></div>
+        <div class="inv-stat ${diffs || notEnded ? "is-warn" : ""}"><strong>${diffs} · ${notEnded}</strong><span>Kit differences · days not ended</span></div>
       </div>`;
     },
-    summaryHead: (label) => `<thead><tr><th>${esc(label)}</th><th>Days</th><th>How the day went</th><th>Kit differences</th><th>Not ended</th></tr></thead>`,
+    summaryHead: (label) => `<thead><tr><th>${esc(label)}</th><th>Days</th><th>How the day went</th><th>Overnight</th><th>Kit differences</th><th>Not ended</th></tr></thead>`,
     summaryRow: (g) => `<tr><td><strong>${esc(g.label)}</strong></td><td>${new Set(g.events.map(dayOf)).size}</td>
       <td>${esc(avgText(moods(g.events)))}</td>
-      <td>${g.events.filter((e) => e.typeLabel === "Difference").length || "—"}</td>
+      <td>${g.events.filter((e) => e.typeLabel === "Overnight difference").length || "—"}</td>
+      <td>${g.events.filter(isDiff).length || "—"}</td>
       <td>${new Set(g.events.filter((e) => e.typeLabel === "Day not ended").map(dayOf)).size || "—"}</td></tr>`,
     summaryFoot: (ev) => `<tr><th>Total</th><th>${new Set(ev.map(dayOf)).size}</th><th>${esc(avgText(moods(ev)))}</th>
-      <th>${ev.filter((e) => e.typeLabel === "Difference").length}</th><th>${new Set(ev.filter((e) => e.typeLabel === "Day not ended").map(dayOf)).size}</th></tr>`,
+      <th>${ev.filter((e) => e.typeLabel === "Overnight difference").length}</th><th>${ev.filter(isDiff).length}</th>
+      <th>${new Set(ev.filter((e) => e.typeLabel === "Day not ended").map(dayOf)).size}</th></tr>`,
     detailHead: "<thead><tr><th>Date</th><th>Staff</th><th>Product</th><th>Vial in use</th><th>Start</th><th>Used on records</th><th>End</th><th>Difference</th><th>Day</th><th>Notes</th></tr></thead>",
     detailRow: (e) => {
       const n = (v) => (v === null ? "—" : `${esc(fmt(v))} ${esc(e.unit)}`);
       const d = diffText(e);
-      return `<tr class="${e.typeLabel === "Difference" ? "is-diff" : ""}">
+      return `<tr class="${isDiff(e) ? "is-diff" : ""}">
         <td>${esc(shortDate(e.at))}<br><small class="muted">${esc([e.startAt && `In ${timeOf(e.startAt)}`, e.endAt && `Out ${timeOf(e.endAt)}`].filter(Boolean).join(" · "))}</small></td>
         <td>${esc(e.by)}</td><td>${esc(e.productName)}</td>
-        <td>${e.typeLabel === "Not injecting" ? '<span class="inv-flag is-info">Not injecting</span>' : esc(e.inUse || "—")}</td>
-        <td>${n(e.start)}</td><td>${n(e.used)}</td><td>${n(e.end)}</td>
+        <td>${e.typeLabel === "Not injecting" ? '<span class="inv-flag is-info">Not injecting</span>' : esc(e.inUse || "—")}${
+          e.unknown ? `<br><span class="inv-flag is-warn">${e.unknown} batch${e.unknown === 1 ? "" : "es"} not in kit</span>` : ""}</td>
+        <td>${n(e.start)}${e.nightNote ? `<br><small class="muted">${esc(e.nightNote)}</small>` : ""}</td>
+        <td>${n(e.used)}</td><td>${n(e.end)}</td>
         <td>${d ? `<strong class="rp-neg">${esc(d)}</strong>` : e.start !== null || e.end !== null ? "✓" : "—"}${
+          e.investigationId ? `<br><a href="#/inventory/investigations/${encodeURIComponent(e.investigationId)}">Investigation →</a>` : ""}${
           e.typeLabel === "Day not ended" ? '<br><span class="inv-flag is-warn">Not ended</span>' : ""}</td>
         <td class="rp-mood">${e.first && e.mood !== null ? `<span title="${e.mood} of 5">${face(e.mood)}</span>` : ""}</td>
         <td>${e.first && e.answers ? `<small>${esc(e.answers)}</small>` : ""}</td></tr>`;
     },
-    csvHead: ["Date", "Staff", "Product", "Vial in use", "Start count", "Used on records", "End count", "Unit", "Start difference",
-      "End difference", "Result", "Day (1-5)", "Answers", "Started at", "Ended at"],
+    csvHead: ["Date", "Staff", "Product", "Vial in use", "Start count", "Used on records", "End count", "Unit", "Overnight difference",
+      "Start difference", "End difference", "Batches not in kit", "Result", "Day (1-5)", "Answers", "Started at", "Ended at"],
     csvRow: (e) => [e.at ? dayKey(e.at) : "", e.by, e.productName, e.inUse, e.start ?? "", e.used ?? "", e.end ?? "", e.unit,
-      e.start === null ? "" : e.startDiff, e.end === null ? "" : e.endDiff, e.typeLabel, e.first && e.mood !== null ? e.mood : "",
-      e.first ? e.answers : "", e.startAt ? timeOf(e.startAt) : "", e.endAt ? timeOf(e.endAt) : ""],
+      e.night || "", e.start === null ? "" : e.startDiff, e.end === null ? "" : e.endDiff, e.unknown || "", e.typeLabel,
+      e.first && e.mood !== null ? e.mood : "", e.first ? e.answers : "", e.startAt ? timeOf(e.startAt) : "", e.endAt ? timeOf(e.endAt) : ""],
   });
 }
+
 
 /* ===================== Saved short ===================== */
 

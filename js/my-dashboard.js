@@ -13,6 +13,7 @@ import { showSoapPanel } from "./soap-panel.js";
 import { parseRecordDate } from "./transcripts.js";
 import { completeReminder } from "./reminders.js";
 import { showToast } from "./utils.js";
+import { renderDayCard } from "./staff-days.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(1));
@@ -35,7 +36,7 @@ const card = (title, inner, cls = "", link = "") => `
   </section>`;
 
 const DASH_CARDS = [
-  ["attention", "Needs my attention"], ["appts", "My appointments & notes"], ["tasks", "Tasks"],
+  ["attention", "Needs my attention"], ["days", "Start & end of day"], ["appts", "My appointments & notes"], ["tasks", "Tasks"],
   ["kit", "My kit"], ["records", "My records"], ["usage", "What I used"],
   ["requests", "My requests"], ["stock", "Stock I use"], ["overview", "Clinic overview"],
 ];
@@ -190,7 +191,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
           text: late ? `Opening count overdue (due ${dueText}): ${left} still to count` : `Opening count: ${left} still to count (due ${dueText})`,
           href: "#/tasks/count", act: "Count now" });
       }
-    }   // ← add this line: closes "if (can("inventory.count") || canOrder) {"
+    }  
     // Reporting: differences and saved-short records waiting for someone
     if (canReport) {
       const diffs = openCounts.reduce((a, c) => a + (Number(c.openCount) || 0), 0);
@@ -483,13 +484,17 @@ export async function mountMyDashboard(container, { staff } = {}) {
     };
     const tasksHtml = card("Tasks", `<div data-role="tasks-card">${tasksInner()}</div>`, "md-tasks-card");
     
-    const CARDS = [["attention", attentionHtml], ["appts", apptHtml], ["tasks", tasksHtml], ["kit", kitHtml],
+    /* ---------- Start & end of day (Admins): filled in by staff-days.js ---------- */
+    const daysHtml = '<section class="md-card md-wide" data-role="days"></section>';
+    const CARDS = [["attention", attentionHtml], ["days", daysHtml], ["appts", apptHtml], ["tasks", tasksHtml], ["kit", kitHtml],
       ["records", recordsHtml], ["usage", usedHtml], ["requests", reqHtml], ["stock", stockHtml], ["overview", overviewHtml]];
     const shown = CARDS.filter(([k, h]) => h && show(k));
     body.innerHTML = shown.length
       ? `<div class="md-grid">${shown.map(([, h]) => h).join("")}</div>`
       : '<div class="tm-empty">Nothing to show yet. Use <strong>Customise</strong> to choose your cards, or ask an Admin to turn some on for you.</div>';
-  }
+    renderDayCard(body.querySelector('[data-role="days"]')); // Admins only; does nothing if the card is hidden
+    }
+  
   
   root.addEventListener("click", (e) => {
     const nb = e.target.closest("[data-notes]");

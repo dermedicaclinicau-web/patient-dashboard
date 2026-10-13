@@ -4944,3 +4944,19 @@ dialog.lh-dialog.eod-dlg{width:min(660px,95vw)}
 
   .eod-admin .eod-savebar{bottom:8px}
 .eod-admin .tb-card{margin-bottom:12px}
+
+/* Start of Day: blind kit count, typed from the labels */
+.sod.is-kit .sod-card{max-width:740px;width:min(740px,95vw)}
+.sod-k-hint{margin:0 0 6px;font-size:13px;color:var(--muted)}
+.sod-kscroll{overflow-x:auto}
+.sod-ktable .sod-batch{width:130px;text-transform:uppercase}
+.sod-ktable .sod-exp{width:150px}
+.sod-ktable input[type="radio"]{width:18px;height:18px;accent-color:var(--primary)}
+.sod-ktable .sod-use{text-align:center}
+.sod-ktable .hx-x{width:28px;height:28px}
+.sod-krow-acts{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-top:6px}
+.sod-krow-acts .fe-check{padding:.3rem .25rem}
+
+/* My dashboard → Start & end of day */
+.sd-table td{vertical-align:middle}
+.md-stats{flex-wrap:wrap;gap:1rem 1.75rem}
