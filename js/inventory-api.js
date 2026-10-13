@@ -2511,3 +2511,116 @@ export async function finishContainer(c, { reason = "Empty", note = "" }, staff)
     });
   });
 }
+
+/* ===================== Kit days: Start of Day (and later End of Day) per injector ===================== */
+// One document per injector per day: inv_kitdays/<uid>__<YYYY-MM-DD>.
+// start: the vial in use and a blind count of the kit (also saved as a kit check, so differences reach Count differences).
+// end: added by End of Day later.
+
+export const kitDayId = (staffUid, key) => `${staffUid}__${key}`;
+
+function normaliseKitDay(d) {
+  const x = d.data() || {};
+  return {
+    id: d.id, staffUid: String(x.staffUid || ""), staffName: String(x.staffName || ""), dateKey: String(x.dateKey || ""),
+    start: x.start ? { ...x.start, at: toDate(x.start.at), items: Array.isArray(x.start.items) ? x.start.items : [] } : null,
+    end: x.end ? { ...x.end, at: toDate(x.end.at), items: Array.isArray(x.end.items) ? x.end.items : [],
+      answers: Array.isArray(x.end.answers) ? x.end.answers : [] } : null,
+  };
+}
+// Today's record for the person logged in, or null
+export async function getMyKitDay(key = dayKey()) {
+  const s = await getDoc(doc(db, "inv_kitdays", kitDayId(uid(), key)));
+  return s.exists() ? normaliseKitDay(s) : null;
+}
+
+// items: [{ productId, productName, doseUnit, inUse (kit ref or ""), lots: [{ ref, batch, expiry, sealed, open }] }]
+export async function saveKitDayStart({ notInjecting = false, items = [] }, staff) {
+  const me = uid();
+  const by = who(staff);
+  const key = dayKey();
+  const lines = notInjecting ? [] : items.flatMap((it) => it.lots.map((l) => ({ ref: l.ref, sealed: l.sealed, open: l.open })));
+  if (!notInjecting && !lines.length) throw new Error("Count your kit, or tick “I'm not injecting today”.");
+
+  // The blind count, saved as this person's kit check
+  const count = lines.length ? await saveCount({ kind: "kit", lines, note: "Start of day" }, staff) : null;
+  const byRef = new Map(((count && count.lines) || []).map((l) => [l.ref, l]));
+
+  const out = notInjecting ? [] : items.map((it) => {
+    const lots = it.lots.map((l) => {
+      const c = byRef.get(l.ref) || {};
+      return {
+        ref: l.ref, batch: String(c.batch || l.batch || ""), expiry: String(c.expiry || l.expiry || ""),
+        sealed: Math.max(0, parseInt(l.sealed, 10) || 0), open: round1(Math.max(0, Number(l.open) || 0)),
+        counted: round1(c.counted), system: round1(c.system), variance: round1(c.variance),
+      };
+    });
+    const use = lots.find((l) => l.ref === it.inUse) || null;
+    const sum = (k) => round1(lots.reduce((a, l) => a + (Number(l[k]) || 0), 0));
+    return {
+      productId: clip(it.productId, 60), productName: clip(it.productName, 150), doseUnit: clip(it.doseUnit, 20) || "units",
+      inUse: use ? { ref: use.ref, batch: use.batch, expiry: use.expiry, open: use.open } : null,
+      counted: sum("counted"), system: sum("system"), variance: sum("variance"), lots,
+    };
+  });
+  const differences = count ? count.lines.filter((l) => l.status !== "ok").length : 0;
+
+  await setDoc(doc(db, "inv_kitdays", kitDayId(me, key)), {
+    staffUid: me, staffName: by, dateKey: key,
+    start: { at: serverTimestamp(), notInjecting: notInjecting === true, items: out, countId: count ? count.id : "", differences },
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
+  return { differences, notInjecting: notInjecting === true };
+}
+
+// End of Day: a blind kit count (injectors) and the answers to the admin's questions. Once per day.
+// items: [{ productId, productName, doseUnit, usedToday, lots: [{ ref, batch, expiry, sealed, open }] }]
+// answers: [{ id, label, type, value, text }]
+export async function saveKitDayEnd({ items = [], answers = [] }, staff) {
+  const me = uid();
+  const by = who(staff);
+  const key = dayKey();
+  const ref = doc(db, "inv_kitdays", kitDayId(me, key));
+  const existing = await getDoc(ref);
+  if (existing.exists() && existing.data().end) throw new Error("You've already ended today. Reload to see it.");
+
+  const lines = items.flatMap((it) => it.lots.map((l) => ({ ref: l.ref, sealed: l.sealed, open: l.open })));
+  const count = lines.length ? await saveCount({ kind: "kit", lines, note: "End of day" }, staff) : null;
+  const byRef = new Map(((count && count.lines) || []).map((l) => [l.ref, l]));
+
+  const out = items.map((it) => {
+    const lots = it.lots.map((l) => {
+      const c = byRef.get(l.ref) || {};
+      return {
+        ref: l.ref, batch: String(c.batch || l.batch || ""), expiry: String(c.expiry || l.expiry || ""),
+        sealed: Math.max(0, parseInt(l.sealed, 10) || 0), open: round1(Math.max(0, Number(l.open) || 0)),
+        counted: round1(c.counted), system: round1(c.system), variance: round1(c.variance),
+      };
+    });
+    const sum = (k) => round1(lots.reduce((a, l) => a + (Number(l[k]) || 0), 0));
+    return {
+      productId: clip(it.productId, 60), productName: clip(it.productName, 150), doseUnit: clip(it.doseUnit, 20) || "units",
+      usedToday: round1(it.usedToday), counted: sum("counted"), system: sum("system"), variance: sum("variance"), lots,
+    };
+  });
+  const cleanAnswers = (Array.isArray(answers) ? answers : []).slice(0, 40).map((a) => ({
+    id: clip(a.id, 40), label: clip(a.label, 200), type: clip(a.type, 20),
+    value: typeof a.value === "number" && Number.isFinite(a.value) ? a.value : clip(a.value, 2000),
+    text: clip(a.text, 2000),
+  }));
+  const differences = count ? count.lines.filter((l) => l.status !== "ok").length : 0;
+
+  await setDoc(ref, {
+    staffUid: me, staffName: by, dateKey: key,
+    end: { at: serverTimestamp(), items: out, answers: cleanAnswers, countId: count ? count.id : "", differences },
+    updatedAt: serverTimestamp(),
+  }, { merge: true });
+  return { differences, items: out };
+}
+
+// Every kit day between two dates (from inclusive, to exclusive), newest first. Admin / Reporting.
+export async function listKitDays(from, to) {
+  const snap = await getDocs(query(collection(db, "inv_kitdays"),
+    where("dateKey", ">=", dayKey(from)), where("dateKey", "<", dayKey(to))));
+  return snap.docs.map(normaliseKitDay).sort((a, b) => b.dateKey.localeCompare(a.dateKey) || a.staffName.localeCompare(b.staffName));
+}

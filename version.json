@@ -1,5 +1,5 @@
 ﻿{
-    "version":  "20261013-142340",
+    "version":  "20261013-150710",
     "files":  [
                   "./js/aftercare-api.js",
                   "./js/aftercare-bank.js",
@@ -18,6 +18,9 @@
                   "./js/data.js",
                   "./js/dialog.js",
                   "./js/email-composer.js",
+                  "./js/end-of-day-admin.js",
+                  "./js/end-of-day-api.js",
+                  "./js/end-of-day.js",
                   "./js/firebase-config.js",
                   "./js/form-annotate.js",
                   "./js/form-builder.js",

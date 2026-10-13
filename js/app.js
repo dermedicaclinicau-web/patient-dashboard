@@ -23,6 +23,8 @@ import { initUpdateCheck } from "./updates.js";
 import { mountMyDashboard } from "./my-dashboard.js";
 import { mountReports } from "./reports.js";
 import { mountSettings } from "./settings.js";
+import { initEndOfDay, teardownEndOfDay } from "./end-of-day.js";
+import { mountEndOfDaySettings } from "./end-of-day-admin.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -221,7 +223,9 @@ const PAGES = {
     const [, pid = ""] = String(param || "").split("/"); // #/ssp/new/<patientId>
     mountSspBuilder(el, { patientId: pid, staff: currentStaff, isAdmin: can("ssp.config") });
   },
-  tasks: (el, param) => mountTaskManager(el, { param, isAdmin: can("tasks.build"), staff: currentStaff }),
+  tasks: (el, param) => (String(param || "").split("/")[0] === "end-of-day"
+    ? mountEndOfDaySettings(el, { staff: currentStaff })
+    : mountTaskManager(el, { param, isAdmin: can("tasks.build"), staff: currentStaff })),
   inventory: (el, param) => mountInventory(el, { param, staff: currentStaff }),
   reports: (el, param) => mountReports(el, { param, staff: currentStaff }),
   staff: (el) => mountStaffManager(el, { staff: currentStaff }),
@@ -304,6 +308,7 @@ async function checkAccess() {
     setPerms(currentStaff);
     renderStaff(currentStaff);
     applyNav();
+    initEndOfDay(currentStaff);
     if (!pageAllowed(currentPage())) router();
     showToast("Your access has been updated");
   } catch (err) {
@@ -320,6 +325,7 @@ watchAuth((staff) => {
     renderStaff(staff);
     applyNav();
     if (sameUser) {
+      initEndOfDay(staff); // access may have changed (e.g. made an injector)
       // A refreshed login token (access changed): keep the current page unless it's no longer allowed
       if (!pageAllowed(currentPage())) router();
       return;
@@ -329,6 +335,7 @@ watchAuth((staff) => {
     initSoapPanel(staff);
     router();
     maybeShowStartOfDay(staff);
+    initEndOfDay(staff, { onLogout: () => els.logoutBtn.click() }); // runs the usual "recording in progress" checks
     clearInterval(accessTimer);
     accessTimer = setInterval(checkAccess, 5 * 60 * 1000);
     lastAccessCheck = 0;
@@ -339,6 +346,7 @@ watchAuth((staff) => {
     els.content.innerHTML = ""; // remove patient data from the page on logout
     clearPatientCache();
     closeStartOfDay();
+    teardownEndOfDay();
     suspendRecorder(); // stops the mic; any audio stays on this device for upload at next login
     closeSoapPanel();
     closeFormPicker();
