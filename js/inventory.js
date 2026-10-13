@@ -7,6 +7,7 @@ import {
   productSuppliers, supplierTerms, suppliesProduct, suggestOrderFor,
   listCounts, listInvestigations, dayKey, 
   isSharedProduct, listOpenContainers, openContainer, finishContainer, openState, expectedUses, FINISH_REASONS,
+  setStartingStock,
 } from "./inventory-api.js";
 import { renderInvestigations, mountInvestigation } from "./investigations.js";
 import { mountPurchaseOrder } from "./purchase-order.js";
@@ -311,6 +312,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         <button type="button" class="lh-btn" data-bulk="remove">Remove a supplier</button>
         <button type="button" class="lh-btn" data-bulk="category">Change category</button>
         <button type="button" class="lh-btn" data-bulk="count">Opening count</button>
+        <button type="button" class="lh-btn" data-bulk="start">Set starting stock</button>
         <button type="button" class="lh-btn" data-bulk="active">Make active</button>
         <button type="button" class="lh-btn" data-bulk="inactive">Make inactive</button>
         <button type="button" class="lh-btn is-quiet" data-bulk="clear">Clear selection</button>
@@ -414,6 +416,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     }
 
     if (kind === "count") { bulkCount(list, many); return; }
+    if (kind === "start") { bulkStart(list, many); return; }
     if (kind !== "category" && !st.suppliers.length) { showToast("Add a supplier first, in the Suppliers tab."); return; }
     const choices = kind === "remove"
       ? st.suppliers.filter((s) => list.some((p) => suppliesProduct(p, s.id)))
@@ -630,6 +633,131 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       busy = false;
       dlg.close();
     });
+  }
+
+  // Bulk: type in what's physically there now, as each product's starting point. An empty box = leave it as it is.
+  function bulkStart(list, many) {
+    const fields = []; // { p, loc, batch, expiry, have }
+    const box = (f, label) => {
+      const i = fields.push(f) - 1;
+      return `<input class="fe-input inv-num" type="number" min="0" step="1" inputmode="numeric" data-sp="${i}"
+        placeholder="${f.have}" aria-label="${esc(`${f.p.name}: ${label}`)}" />`;
+    };
+    const card = (p) => {
+      const head = `<div class="inv-sp-name"><strong>${esc(p.name)}</strong><small>${esc(unitPlural(p.stockUnit))}</small></div>`;
+      if (!p.tracked) {
+        return `<div class="inv-sp">${head}<div class="inv-sp-locs">${LOCATIONS.map((l) => `
+          <label class="inv-sp-loc"><span>${esc(l.label)}<small>Digital ${p.stock[l.key]}</small></span>
+            ${box({ p, loc: l.key, batch: "", expiry: "", have: p.stock[l.key] }, l.label)}</label>`).join("")}</div></div>`;
+      }
+      const lots = lotsOf(p.id);
+      const bn = batchName(p).toLowerCase();
+      return `<div class="inv-sp">${head}${lots.length
+        ? `<div class="inv-sp-locs">${lots.map((l) => `
+            <label class="inv-sp-loc"><span>${esc(locLabel(l.loc))} · ${esc(batchText(p, l.batch))}<small>Exp ${esc(niceDate(l.expiry))} · digital ${l.qty}</small></span>
+              ${box({ p, loc: l.loc, batch: l.batch, expiry: l.expiry, have: l.qty }, `${locLabel(l.loc)} ${batchText(p, l.batch)}`)}</label>`).join("")}</div>
+          <small class="fe-note">Another ${esc(bn)} that isn't listed? Add it with Add stock in the product's window.</small>`
+        : `<p class="tb-none">No stock recorded yet. Use Add stock in the product's window to enter each ${esc(bn)} with its expiry.</p>`}</div>`;
+    };
+
+    const dlg = openDialog("inv-dlg inv-spdlg", `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>Set starting stock: ${esc(many)}</h3>
+          <p>Type what's physically there now. Digital is set to that number, and each change is logged in Activity as “Starting stock set”.
+            Leave a box empty to keep it as it is.</p></div>
+        <div class="inv-sp-list">${list.map(card).join("")}</div>
+        <p class="inv-hint" data-role="preview"></p>
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">Set starting stock</button>
+        </div>
+      </form>`);
+    const form = dlg.querySelector("form");
+    const pv = dlg.querySelector('[data-role="preview"]');
+    const err = dlg.querySelector(".lh-error");
+    const inputs = () => [...form.querySelectorAll("[data-sp]")];
+
+    // What's been typed: null for an empty box
+    const read = () => inputs().map((el) => {
+      const raw = el.value.trim();
+      if (raw === "") return null;
+      const n = Number(raw);
+      return { ...fields[Number(el.dataset.sp)], qty: n, bad: !Number.isInteger(n) || n < 0 };
+    }).filter(Boolean);
+
+    const preview = () => {
+      inputs().forEach((el) => {
+        const f = fields[Number(el.dataset.sp)];
+        const v = el.value.trim();
+        el.closest(".inv-sp-loc").classList.toggle("is-set", v !== "" && Number(v) !== f.have);
+      });
+      const typed = read();
+      const ch = typed.filter((t) => !t.bad && t.qty !== t.have);
+      const prods = new Set(ch.map((t) => t.p.id)).size;
+      pv.textContent = !typed.length ? "Type the numbers you counted. Empty boxes stay as they are."
+        : !ch.length ? "Everything typed already matches digital: nothing will change."
+        : `${plural(ch.length, "change")} across ${plural(prods, "product")}.`;
+    };
+    preview();
+    form.addEventListener("input", preview);
+
+    // Enter moves to the next box instead of saving
+    form.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || !e.target.matches("[data-sp]")) return;
+      e.preventDefault();
+      const all = inputs();
+      const next = all[all.indexOf(e.target) + 1];
+      if (next) { next.focus(); next.select(); } else form.querySelector('[type="submit"]').focus();
+    });
+
+    let busy = false;
+    dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => { if (!busy) dlg.close(); });
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      const typed = read();
+      const bad = typed.find((t) => t.bad);
+      if (bad) { err.textContent = `${bad.p.name}: enter a whole number of 0 or more.`; err.hidden = false; return; }
+      const ch = typed.filter((t) => t.qty !== t.have);
+      if (!ch.length) { err.textContent = "Nothing to change. Type a number that's different from digital."; err.hidden = false; return; }
+
+      const byProduct = new Map();
+      ch.forEach((t) => byProduct.set(t.p.id, [...(byProduct.get(t.p.id) || []), t]));
+      const queue = [...byProduct.values()];
+      const total = queue.length;
+      let done = 0, places = 0;
+      const failed = [];
+      busy = true;
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
+        while (queue.length) {
+          const g = queue.shift();
+          const p = g[0].p;
+          try { places += await setStartingStock(p, g.map(({ loc, batch, expiry, qty }) => ({ loc, batch, expiry, qty })), staff); }
+          catch (ex) { console.error("Starting stock failed:", p.name, ex); failed.push(p.name); }
+          btn.textContent = `Saving ${++done} of ${total}…`;
+        }
+      }));
+      busy = false;
+      if (failed.length) {
+        err.textContent = `Couldn't save: ${failed.slice(0, 3).join(", ")}${failed.length > 3 ? "…" : ""}. The others were saved. Try those again.`;
+        err.hidden = false;
+        btn.disabled = false;
+        btn.textContent = "Set starting stock";
+        await load();
+        return;
+      }
+      dlg.close();
+      showToast(`Starting stock set: ${plural(places, "change")} across ${plural(total, "product")}`);
+      st.sel.clear();
+      await load();
+    });
+
+    const first = form.querySelector("[data-sp]");
+    if (first) first.focus();
   }
 
   /* ---------- Suppliers ---------- */

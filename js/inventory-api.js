@@ -1781,6 +1781,66 @@ export async function setBaseline(plan, { closeOlder = true } = {}, staff, onPro
   return { changed: changes.length, investigations: inv.size };
 }
 
+/* ---------- Starting stock typed in (products not in the opening count) ---------- */
+// Sets each place / batch to what's physically there now. targets: [{ loc, batch, expiry, qty }].
+// The difference is worked out inside the transaction, so stock that moved a moment ago is respected.
+// Logged as "Starting stock set". Returns how many places changed.
+export async function setStartingStock(product, targets, staff) {
+  const byUid = uid();
+  const want = new Map();
+  (targets || []).forEach((t) => {
+    const qty = parseInt(t.qty, 10);
+    if (!(qty >= 0)) return;
+    const loc = t.loc === "jt" ? "jt" : "shelf";
+    const batch = product.tracked ? clip(t.batch, 40) : "";
+    const expiry = product.tracked && KEY_RE.test(t.expiry || "") ? t.expiry : "";
+    if (product.tracked && (!batch || !expiry)) {
+      throw new Error(`${product.name}: each ${batchName(product).toLowerCase()} needs its number and expiry date.`);
+    }
+    want.set(lotId(product.id, loc, batch, expiry), { loc, batch, expiry, qty });
+  });
+  if (!want.size) return 0;
+
+  const pRef = doc(db, "inv_products", product.id);
+  let changed = 0;
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    const pSnap = await tx.get(pRef);
+    if (!pSnap.exists()) throw new Error(`${product.name} no longer exists.`);
+    const snaps = new Map();
+    for (const id of want.keys()) snaps.set(id, await tx.get(doc(db, "inv_lots", id)));
+
+    // ---- Writes ----
+    const pd = pSnap.data();
+    const s = pd.stock || {};
+    const stock = { shelf: Number(s.shelf) || 0, jt: Number(s.jt) || 0 };
+    const tracked = pd.tracked === true;
+    const lines = [];
+    want.forEach((w, id) => {
+      const snap = snaps.get(id);
+      const lotHave = snap.exists() ? Number(snap.data().qty) || 0 : 0;
+      const have = tracked ? lotHave : stock[w.loc];
+      const delta = w.qty - have;
+      if (!delta) return;
+      stock[w.loc] = Math.max(0, stock[w.loc] + delta);
+      tx.set(snap.ref, {
+        productId: product.id, loc: w.loc, batch: w.batch, expiry: w.expiry, qty: w.qty,
+        updatedAt: serverTimestamp(), ...(snap.exists() ? {} : { createdAt: serverTimestamp() }),
+      }, { merge: true });
+      lines.push({ loc: w.loc, batch: w.batch, expiry: w.expiry, delta });
+    });
+    changed = lines.length;
+    if (!lines.length) return;
+    tx.update(pRef, { stock, stockAt: serverTimestamp() });
+    tx.set(doc(collection(db, "inv_moves")), {
+      type: "baseline", productId: product.id, productName: String(pd.name || product.name),
+      unit: String(pd.stockUnit || product.stockUnit), lines, reason: "Starting stock set", note: "Typed in", ref: "",
+      by: who(staff), byUid, at: serverTimestamp(),
+    });
+  });
+  return changed;
+}
+
 
 /* ===================== Reporting: usage and wastage over a date range ===================== */
 

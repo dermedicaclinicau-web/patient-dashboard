@@ -4822,3 +4822,18 @@ dialog.lh-dialog.inv-dlg .rp-bl{max-width:760px}
 .rp-bl-sum:empty{display:none}
 .rp-bl-miss{margin:8px 0;font-size:14px}
 .rp-bl-miss p{margin:6px 0 0;color:var(--muted,#64748b)}
+
+/* Products → Set starting stock */
+dialog.lh-dialog.inv-dlg.inv-spdlg{width:min(780px,96vw)}
+.inv-sp-list{display:flex;flex-direction:column;gap:10px;max-height:56vh;overflow:auto;padding-right:4px}
+.inv-sp{border:1px solid var(--line,#e5e7eb);border-radius:12px;padding:10px 12px}
+.inv-sp-name{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:8px}
+.inv-sp-name small{color:var(--muted,#64748b)}
+.inv-sp-locs{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px}
+.inv-sp-loc{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 8px;border-radius:10px;background:var(--surface-2,#f8fafc)}
+.inv-sp-loc>span{display:flex;flex-direction:column;min-width:0;font-size:14px}
+.inv-sp-loc small{color:var(--muted,#64748b);font-size:12px}
+.inv-sp-loc input{width:90px;text-align:right}
+.inv-sp-loc.is-set{background:#ecfdf5}
+.inv-sp-loc.is-set input{border-color:#10b981}
+.inv-sp .fe-note{display:block;margin-top:6px}
