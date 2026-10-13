@@ -22,6 +22,7 @@ import { setPerms, can, isAdmin as isAdminNow, refreshAccess } from "./perms.js"
 import { initUpdateCheck } from "./updates.js";
 import { mountMyDashboard } from "./my-dashboard.js";
 import { mountReports } from "./reports.js";
+import { mountRecordingSettings } from "./recording-settings.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -224,6 +225,7 @@ const PAGES = {
   inventory: (el, param) => mountInventory(el, { param, staff: currentStaff }),
   reports: (el, param) => mountReports(el, { param, staff: currentStaff }),
   staff: (el) => mountStaffManager(el, { staff: currentStaff }),
+  settings: (el) => mountRecordingSettings(el, { staff: currentStaff }),
 };
 
 // Which permission each page needs ("admin" = Admins only)
@@ -231,8 +233,9 @@ const PAGE_PERM = {
   patients: "menu.patients", patient: "menu.patients", fill: "menu.patients", "form-record": "menu.patients",
   ssp: "ssp.create", calendar: "menu.calendar", forms: "menu.forms",
   "image-bank": "forms.build", "aftercare-bank": "forms.build", "ssp-products": "ssp.config",
-  tasks: "menu.tasks", inventory: "menu.inventory", reports: "menu.reports", staff: "admin",
+  tasks: "menu.tasks", inventory: "menu.inventory", reports: "menu.reports", staff: "admin", settings: "admin",
 };
+
 const pageAllowed = (p) => {
   const need = PAGE_PERM[p];
   if (!need) return true;

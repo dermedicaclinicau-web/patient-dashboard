@@ -271,6 +271,7 @@ function render() {
              <button type="button" class="sp-link" data-sp="undo-regen">Restore previous version</button></p>`
         : ""}
       ${!hasSoap ? `<p class="sp-banner warn">Clinical notes haven't been generated for this record yet. You can still type notes below.</p>` : ""}
+      ${rulesHtml(d)}
 
       <details class="sp-raw">
         <summary>${ICONS.chev}${ICONS.lines}<span>Raw transcript</span></summary>
@@ -307,6 +308,27 @@ function render() {
     </div>`;
 
   if (!panel.hidden) requestAnimationFrame(autosizeAll);
+}
+
+// What the recording rules did on this recording (System configuration → Recording rules)
+function rulesHtml(d) {
+  const hits = Array.isArray(d["Rule Hits"]) ? d["Rule Hits"] : [];
+  const err = String(d["Rule Error"] || "");
+  if (!hits.length && !err) return "";
+  return `<div class="sp-rules">
+    ${hits.length ? `<p class="sp-rules-title">${ICONS.alert}<span>Recording rules that fired</span></p>
+      <ul>${hits.map((h) => {
+        const did = [
+          (h.flags || []).length && "highlighted in the notes",
+          (h.notes || []).length && "added to the notes",
+          (h.reminders || []).length && `reminder${h.reminders.length > 1 ? "s" : ""} created`,
+        ].filter(Boolean).join(" · ");
+        const why = (h.heard || []).length ? `heard “${h.heard.join(", ")}”` : h.said ? `“${h.said}”` : "";
+        return `<li><strong>${escapeHtml(h.name || "Rule")}</strong>${why ? ` <span>${escapeHtml(why)}</span>` : ""}${
+          did ? `<em>${escapeHtml(did)}</em>` : ""}</li>`;
+      }).join("")}</ul>` : ""}
+    ${err ? `<p class="sp-rules-err">Recording rules couldn't run for this recording: ${escapeHtml(err)}</p>` : ""}
+  </div>`;
 }
 
 function sectionHtml(s, value) {

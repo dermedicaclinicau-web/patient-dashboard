@@ -25,6 +25,73 @@ const PLAN_CONCERNS = [
   'Acne & Acne Scarring',
 ];
 
+// Older recorder names → today's names
+const PLAN_CONCERN_ALIASES_ = {
+  'expressionlinesmusclemovement': 'Expression Lines & Wrinkles',
+  'volumelosscontours': 'Volume Loss',
+  'skintexture': 'Skin Texture & Quality',
+  'rednesssensitiveskin': 'Redness & Vascular Concerns',
+  'activeacne': 'Acne & Acne Scarring',
+};
+
+// Whatever Gemini wrote → exactly one of the 9 names ("" for an unused slot).
+// Something unrecognisable is kept as written, so a person sees it and can fix it.
+function planConcernName_(raw) {
+  const text = String(raw == null ? '' : raw).trim();
+  const key = text.toLowerCase().replace(/[^a-z0-9]+/g, '');
+  if (!key || key === 'none') return '';
+  for (let i = 0; i < PLAN_CONCERNS.length; i++) {
+    if (PLAN_CONCERNS[i].toLowerCase().replace(/[^a-z0-9]+/g, '') === key) return PLAN_CONCERNS[i];
+  }
+  if (PLAN_CONCERN_ALIASES_[key]) return PLAN_CONCERN_ALIASES_[key];
+  if (/acne/.test(key)) return 'Acne & Acne Scarring';
+  if (/expression|wrinkle|muscle/.test(key)) return 'Expression Lines & Wrinkles';
+  if (/volume/.test(key)) return 'Volume Loss';
+  if (/laxity|sagging|lifting/.test(key)) return 'Skin Laxity';
+  if (/texture|quality/.test(key)) return 'Skin Texture & Quality';
+  if (/pigment/.test(key)) return 'Pigmentation';
+  if (/redness|vascular|sensitive|rosacea/.test(key)) return 'Redness & Vascular Concerns';
+  if (/collagen/.test(key)) return 'Collagen Replenishment';
+  if (/body|fat/.test(key)) return 'Body Contouring';
+  return text;
+}
+
+function planWholeNum_(v) {
+  const n = Math.round(Number(v));
+  return isFinite(n) && n > 0 ? Math.min(n, 520) : 0;
+}
+
+// Tidies the treatment plan Gemini returned: exact category names, valid pattern, whole numbers,
+// timeline letters a–f, and only real patient events.
+function normalisePlanJson_(data) {
+  const tp = data && data.treatment_plan;
+  if (!tp || typeof tp !== 'object') return data;
+  const PATTERNS = ['course', 'maintenance', 'once', 'unknown'];
+  const concerns = tp.concerns && typeof tp.concerns === 'object' ? tp.concerns : {};
+  Object.keys(concerns).forEach(function (k) {
+    const c = concerns[k];
+    if (!c || typeof c !== 'object') return;
+    c.concern_category = planConcernName_(c.concern_category);
+    const p = String(c.pattern || '').trim().toLowerCase();
+    c.pattern = PATTERNS.indexOf(p) !== -1 ? p : 'unknown';
+    c.sessions = planWholeNum_(c.sessions);
+    c.interval_weeks = planWholeNum_(c.interval_weeks);
+  });
+  if (Array.isArray(tp.timeline)) {
+    tp.timeline.forEach(function (t) {
+      if (!t || typeof t !== 'object') return;
+      const m = /^(?:concern[\s_-]*)?([a-f])$/i.exec(String(t.concern || '').trim());
+      t.concern = m ? m[1].toLowerCase() : '';
+    });
+  }
+  tp.patient_events = (Array.isArray(tp.patient_events) ? tp.patient_events : [])
+    .filter(function (e) { return e && String(e.name || '').trim(); })
+    .map(function (e) {
+      return { name: String(e.name).trim().slice(0, 100), month: String(e.month || '').trim().slice(0, 30), avoid_downtime: e.avoid_downtime === true };
+    });
+  return data;
+}
+
 const SOAP_PROMPTS = {
   subjective: `
     You are generating the SUBJECTIVE section.
@@ -798,20 +865,22 @@ function callGeminiComplex(transcript, dateContext) {
         - "referral_given": the NAME of anyone this patient says they are referring or recommending to the clinic, if explicitly mentioned. Otherwise "".
         - "relationship_type": how that person is related to THIS patient, IF stated. Use EXACTLY one of: Mother, Father, Daughter, Son, Sister, Brother, Spouse, Partner, Friend, Other. Otherwise "".
         Use "" for any field not mentioned. Do NOT guess.
+    ${recInstructionsBlock_()}
   `;
 
-    // One concern. The category MUST be one of the 9 (or "None" for an unused slot).
+  // One concern. Names are checked in code after Gemini answers (normalisePlanJson_), not by enums,
+  // because enums repeated across 6 concerns make the schema too big for Gemini.
   const concernSchema = {
     type: "OBJECT",
     properties: {
       description: { type: "STRING" },
-      concern_category: { type: "STRING", enum: PLAN_CONCERNS.concat(["None"]) },
+      concern_category: { type: "STRING" },
       area: { type: "STRING" },
       treatment: { type: "STRING" },
       frequency_interval: { type: "STRING" },
       quote: { type: "STRING" },
       comments: { type: "STRING" },
-      pattern: { type: "STRING", enum: ["course", "maintenance", "once", "unknown"] },
+      pattern: { type: "STRING" },
       sessions: { type: "INTEGER" },
       interval_weeks: { type: "INTEGER" },
     },
@@ -851,7 +920,7 @@ function callGeminiComplex(transcript, dateContext) {
                   date: { type: "STRING" },
                   treatment: { type: "STRING" },
                   pretreatment_instructions: { type: "STRING" },
-                  concern: { type: "STRING", enum: ["a", "b", "c", "d", "e", "f", "none"] },
+                  concern: { type: "STRING" },
                 },
                 required: ["date", "treatment", "pretreatment_instructions", "concern"]
               }
@@ -869,12 +938,7 @@ function callGeminiComplex(transcript, dateContext) {
           required: ["intent", "discussion_notes", "concerns", "timeline", "booking_comments", "patient_events"]
         },
         
-            timeline: { type: "ARRAY", items: { type: "OBJECT", properties: { date: { type: "STRING" }, treatment: { type: "STRING" }, pretreatment_instructions: { type: "STRING" } }, required: ["date", "treatment", "pretreatment_instructions"] } },
-            booking_comments: { type: "STRING" }
-          },
-          required: ["intent", "discussion_notes", "concerns", "timeline", "booking_comments"]
-        },
-        skin_health_protocol: {
+      skin_health_protocol: {
           type: "OBJECT",
           properties: {
             products: { type: "ARRAY", items: { type: "OBJECT", properties: { name: { type: "STRING" }, instruction: { type: "STRING" } } } },
@@ -962,7 +1026,7 @@ function callGeminiComplex(transcript, dateContext) {
   rawText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
 
   try {
-    return JSON.parse(rawText);
+    return normalisePlanJson_(JSON.parse(rawText));
   } catch (parseErr) {
     throw new Error("Gemini returned invalid JSON (finishReason=" + finishReason +
       "). First 300 chars: " + rawText.slice(0, 300));
@@ -1365,6 +1429,7 @@ function applyTranscriptCorrections_(text) {
   rules.forEach(function (r) { cleaned = cleaned.replace(r.pattern, r.replace); });
   return cleaned;
 }
+
 
 // Run from the editor to check the new plan fields (one Gemini call). Look at Executions → Logs.
 function testPlanSchema() {

@@ -691,9 +691,30 @@ match /inv_open/{id} {
     // Treatment plan settings: concern colours/names, services → concerns + downtime
     match /plan_settings/{id} {
       allow read: if isStaff();
-      allow write: if isAdmin() && id in ['concerns', 'services']
+      allow write: if isAdmin() && id in ['concerns', 'services', 'document']
         && request.resource.data.updatedByUid == request.auth.uid;
     }
+
+    match /recording_config/{id} {
+  allow read: if isStaff();
+  allow create: if isAdmin() && id == 'rules'
+    && request.resource.data.version == 1
+    && request.resource.data.updatedByUid == request.auth.uid
+    && existsAfter(/databases/$(database)/documents/recording_config/rules/history/1);
+  allow update: if isAdmin() && id == 'rules'
+    && request.resource.data.version == resource.data.version + 1
+    && request.resource.data.updatedByUid == request.auth.uid
+    && existsAfter(/databases/$(database)/documents/recording_config/rules/history/$(string(request.resource.data.version)));
+  allow delete: if false;
+  match /history/{v} {
+    allow read: if isStaff();
+    allow create: if isAdmin() && id == 'rules'
+      && request.resource.data.byUid == request.auth.uid
+      && v == string(request.resource.data.version)
+      && getAfter(/databases/$(database)/documents/recording_config/rules).data.version == request.resource.data.version;
+    allow update, delete: if false;
+  }
+}
 
         // Master treatment plans: one per patient. Each save is a numbered version, with its history entry written alongside.
     match /treatment_plans/{patientId} {
@@ -718,6 +739,17 @@ match /inv_open/{id} {
           && getAfter(/databases/$(database)/documents/treatment_plans/$(patientId)).data.version == request.resource.data.version;
         allow update, delete: if false;
       }
+      // Patient copies sent (written by Apps Script only)
+      match /sends/{s} {
+        allow read: if isStaff();
+        allow write: if false;
+      }
+    }
+
+        // Plan progress summaries for Reporting (written by Apps Script only)
+    match /plan_progress/{id} {
+      allow read: if isStaff();
+      allow write: if false;
     }
 
     // Staff tasks / reminders
@@ -726,6 +758,7 @@ match /inv_open/{id} {
       allow create: if isStaff()
         && request.resource.data.keys().hasOnly([
              'patientId', 'patientName', 'taskText', 'dueDate', 'status',
+             'assignedToId', 'assignedToName',
              'createdAt', 'createdBy', 'createdByUid'])
         && request.resource.data.taskText is string
         && request.resource.data.taskText.size() > 0

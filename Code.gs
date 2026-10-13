@@ -41,6 +41,7 @@ function doPost(e) {
     if (body.action === 'printTask') return json_(handlePrintTask_(body));
     if (body.action === 'notify') return json_(handleNotify_(body));
     if (body.action === 'plan') return json_(handlePlan_(body));
+    if (body.action === 'recordingRules') return json_(handleRecordingRules_(body));
 
     const pin = String(body.pin || '').trim();
 
@@ -1025,7 +1026,7 @@ function transcribeStage_(cfg, job) {
 
 // STEP 2: transcript -> Recorder's callGeminiComplex + formatSoapFromJSON -> Status "Draft"
 function writeNotesStage_(cfg, job) {
-  const id = job.recordingId;
+  const id = job._id;
   const docPath = 'appointment_transcripts/' + id;
   const rec = fsGetDoc_(cfg, docPath);
   const transcript = rec ? String(rec['Full Raw Transcript'] || '') : '';
@@ -1037,20 +1038,35 @@ function writeNotesStage_(cfg, job) {
 
   const dateObj = job.startedAt ? new Date(job.startedAt) : new Date();
   const soapJson = cleanSoapJson_(callGeminiComplex(transcript.replace(/<[^>]*>?/gm, '\n'), dateObj));
-  const formattedSoap = formatSoapFromJSON(soapJson);
+
+  // Recording rules (System configuration): reminders, highlights and note lines. Never stops the notes.
+  let ruleHits = [];
+  let ruleError = '';
+  try {
+    ruleHits = recApplyRules_(cfg, job, transcript);
+    recAddToNotes_(soapJson, ruleHits);
+  } catch (e) {
+    console.error('Recording rules failed for ' + id + ': ' + (e && e.stack ? e.stack : e));
+    ruleError = String((e && e.message) || e).slice(0, 300);
+  }
 
   fsPatch_(cfg, docPath, {
     'Status': 'Draft',
-    'Gemini SOAP': formattedSoap,
+    'Gemini SOAP': formatSoapFromJSON(soapJson),
     // Personal preferences Gemini picked up. Offered as suggestions in the review panel.
     'Suggested Personal Notes': Array.isArray(soapJson.personal_notes)
       ? soapJson.personal_notes.map(String).filter(Boolean) : [],
+    'Rule Hits': ruleHits,
+    'Rules Checked At': new Date().toISOString(),
+    'Rule Error': ruleError,
   });
 
   // Same referral email as the Recorder (non-fatal if it fails)
   sendReferralNotification_(job.patientName || '', job.patientId || job.patientDocId || '',
     soapJson.referral, job.staffName || '');
 }
+
+
 
 function downloadAudio_(cfg, audioPath) {
   if (!/^appointment_audio\//.test(String(audioPath || ''))) {
@@ -1132,7 +1148,8 @@ function deepgram_(blob, mime, staffName) {
     throw new Error('Deepgram returned an EMPTY transcript. The recording contained no recognisable speech' +
       (json.metadata && json.metadata.duration ? ' (duration ' + json.metadata.duration + 's)' : '') + '.');
   }
-  rawTranscript = applyTranscriptCorrections_(rawTranscript);
+  const fixText = recTranscriptFix_(getConfig_()); // built-in corrections + Recording rules → Words and spellings
+  rawTranscript = fixText(rawTranscript);
 
   // Speaker-labelled transcript, formatted exactly like the Recorder's
   let formatted = rawTranscript;
@@ -1143,7 +1160,7 @@ function deepgram_(blob, mime, staffName) {
       let colorClass = 'text-gray-700';
       if (p.speaker === 0) { label = staffName || 'Staff'; colorClass = 'text-blue-800'; }
       else if (p.speaker === 1) { label = 'Patient'; colorClass = 'text-teal-700'; }
-      const sentences = (p.sentences || []).map(function (s) { return applyTranscriptCorrections_(s.text); }).join(' ');
+      const sentences = (p.sentences || []).map(function (s) { return fixText(s.text); }).join(' ');
       return '<div>\n                <b class="' + colorClass + '">' + label + ':</b> \n                <span class="text-gray-800">' +
         sentences + '</span>\n              </div><br>';
     }).join('');
@@ -3336,7 +3353,11 @@ function handlePrintTask_(body) {
 
   let blob;
   try {
-    if (body.pdf) blob = Utilities.newBlob(Utilities.base64Decode(String(body.pdf)), 'application/pdf', fileName);
+    if (body.pdf) {
+      const bytes = pdfBytes_(body.pdf);
+      if (!bytes) return { ok: false, error: 'PDF_FAILED' };
+      blob = Utilities.newBlob(bytes, MimeType.PDF, fileName);
+    }
     else if (body.html) blob = Utilities.newBlob(String(body.html), 'text/html', 'form.html').getAs('application/pdf').setName(fileName);
     else return { ok: false, error: 'BAD_REQUEST' };
   } catch (e) {
@@ -4377,8 +4398,29 @@ function notifyCountCheck_(cfg, rules, now) {
 function handlePlan_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  const op = String(body.op || '');
+
+  if (op === 'deliver') {
+    if (!can_(session, 'send.patients')) return { ok: false, error: 'FORBIDDEN' };
+    try {
+      return planDeliver_(body, session);
+    } catch (err) {
+      console.error('Plan deliver failed: ' + (err && err.stack ? err.stack : err));
+      return { ok: false, error: 'SERVER_ERROR' };
+    }
+  }
+  if (op === 'refreshProgress') {
+    const one = String(body.patientId || '').trim();
+    if (!one && !can_(session, 'menu.reports')) return { ok: false, error: 'FORBIDDEN' };
+    try {
+      return { ok: true, count: planProgressRun_(one) };
+    } catch (err) {
+      console.error('Plan progress failed: ' + (err && err.stack ? err.stack : err));
+      return { ok: false, error: 'SERVER_ERROR' };
+    }
+  }
   if (!/^admin$/i.test(String(session.role || ''))) return { ok: false, error: 'FORBIDDEN' };
-  if (String(body.op || '') !== 'suggestServices') return { ok: false, error: 'BAD_REQUEST' };
+  if (op !== 'suggestServices') return { ok: false, error: 'BAD_REQUEST' };
 
   const services = uniq_((Array.isArray(body.services) ? body.services : [])
     .map(function (s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, 150); })
@@ -4390,6 +4432,64 @@ function handlePlan_(body) {
     console.error('Service suggestions failed: ' + (err && err.stack ? err.stack : err));
     return { ok: false, error: 'GEMINI_FAILED' };
   }
+}
+
+// The patient copy (a PDF made in the browser) → the clinic printer, or emailed to the patient. Logged on the plan.
+function planDeliver_(body, session) {
+  const pid = String(body.patientId || '').trim();
+  if (!pid || pid.length > 150 || pid.indexOf('/') !== -1) return { ok: false, error: 'BAD_REQUEST' };
+  const kind = body.kind === 'print' ? 'print' : 'email';
+  const bytes = pdfBytes_(body.pdf);
+  if (!bytes) return { ok: false, error: 'PDF_FAILED' };
+
+  const cfg = getConfig_();
+  const plan = fsGetDoc_(cfg, 'treatment_plans/' + encodeURIComponent(pid));
+  if (!plan) return { ok: false, error: 'NOT_FOUND' };
+
+  const cache = CacheService.getScriptCache();
+  const rlKey = 'mail_' + session.uid;
+  const sentThisHour = Number(cache.get(rlKey) || 0);
+  if (sentThisHour >= MAIL_LIMIT_PER_HOUR_) return { ok: false, error: 'RATE_LIMITED' };
+  if (MailApp.getRemainingDailyQuota() < 1) return { ok: false, error: 'QUOTA' };
+
+  const fileName = cleanFileName_(body.fileName, 'Treatment plan - ' + String(plan.patientName || 'Patient'));
+  const pdf = Utilities.newBlob(bytes, MimeType.PDF, fileName);
+  let to = '';
+  let cc = '';
+
+  if (kind === 'print') {
+    const ps = fsGetDoc_(cfg, 'form_settings/printing');
+    to = String((ps && ps.printerEmail) || '').trim();
+    if (!isEmail_(to)) return { ok: false, error: 'NO_PRINTER' };
+    MailApp.sendEmail({
+      to: to, subject: 'Print: ' + fileName, name: 'Dermedica Clinic',
+      body: 'Sent from the Dermedica staff portal for printing.', attachments: [pdf],
+    });
+  } else {
+    to = String(body.to || '').trim();
+    cc = String(body.cc || '').trim();
+    if (!isEmail_(to) || (cc && !isEmail_(cc))) return { ok: false, error: 'BAD_EMAIL' };
+    const subject = String(body.subject || '').trim().slice(0, 200) || 'Your treatment plan - Dermedica';
+    const htmlRaw = sanitizeEmailHtml_(body.html);
+    if (!htmlRaw || htmlRaw.length > 100000) return { ok: false, error: 'BAD_REQUEST' };
+    const mail = { to: to, subject: subject, htmlBody: htmlRaw, body: emailHtmlToText_(htmlRaw),
+      name: 'Dermedica Clinic', attachments: [pdf] };
+    if (cc) mail.cc = cc;
+    MailApp.sendEmail(mail);
+  }
+  cache.put(rlKey, String(sentThisHour + 1), 3600);
+
+  const entry = {
+    kind: kind, to: to, cc: cc, version: Number(plan.version) || 0,
+    sentAt: new Date().toISOString(), sentBy: String(session.name || ''), sentByUid: String(session.uid || ''),
+  };
+  try {
+    commitWrites_(cfg, [updateWrite_(cfg, 'treatment_plans/' + pid + '/sends/s_' + Date.now() + '_' +
+      Utilities.getUuid().replace(/-/g, '').slice(0, 8), entry)]);
+  } catch (e) { console.warn('Plan sent, but the send log failed: ' + e); }
+
+  console.log('Treatment plan for ' + pid + (kind === 'print' ? ' sent to printer' : ' emailed to ' + to) + ' by ' + session.name);
+  return { ok: true, entry: entry };
 }
 
 const SERVICE_CONCERNS_PROMPT_ = [
@@ -4476,4 +4576,252 @@ function geminiServiceConcerns_(services) {
       downtimeDays: Math.min(60, Math.max(0, Math.round(Number(it.downtime_days) || 0))),
     };
   }).filter(Boolean);
+}
+
+// ===================== Treatment plans: progress summaries for Reporting =====================
+// The same rules as the portal's plan-track.js: the patient's visits → each treatment's sessions.
+// Saved to plan_progress/{patientId} (read by Reporting). Runs daily, and for one patient when their plan is opened or changed.
+
+const PLAN_TZ_ = 'Australia/Perth';
+const PLAN_ACTIVE_ = ['active', 'maintenance'];
+const PLAN_VISIT_FIELDS_ = ['other', 'wrinkleRelaxer', 'fillerRadiesse', 'restoraGlow', 'laserOplPeel', 'firmUlthera',
+  'otherInjectables', 'bodySculpting', 'hydraRepair', 'collagenActivator', 'futureVisits'];
+const PLAN_STOP_ = {};
+['and', 'the', 'for', 'with', 'per', 'session', 'sessions', 'treatment', 'treatments', 'area', 'areas', 'full', 'face',
+  'left', 'right', 'add', 'standard', 'series', 'course', 'one', 'two', 'three'].forEach(function (w) { PLAN_STOP_[w] = true; });
+const PLAN_MONTHS_ = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+
+function planSvcKey_(s) { return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
+function planNormTx_(s) { return String(s || '').toLowerCase().replace(/\([^)]*\)/g, ' ').replace(/[^a-z0-9]+/g, ' ').trim(); }
+function planWords_(s) {
+  return planNormTx_(String(s || '').replace(/\bWR\b/g, 'wrinkle relaxer')).split(' ')
+    .filter(function (w) { return w.length > 2 && !PLAN_STOP_[w]; });
+}
+function planShares_(a, b) {
+  const y = planWords_(b);
+  return planWords_(a).some(function (w) { return y.indexOf(w) !== -1; });
+}
+// "March 2027", "Mar 2027" or "2027-03" → "2027-03"
+function planMonthKey_(s) {
+  const t = String(s || '').trim();
+  let m = /^(\d{4})-(\d{2})/.exec(t);
+  if (m) return m[1] + '-' + m[2];
+  m = /([A-Za-z]{3})[a-z]*\.?\s+(\d{4})/.exec(t);
+  const mo = m && PLAN_MONTHS_[m[1].toLowerCase()];
+  return mo ? m[2] + '-' + pad2_(mo) : '';
+}
+function planAddWeeks_(key, w) {
+  const m = /^(\d{4})-(\d{2})(?:-(\d{2}))?$/.exec(key || '');
+  if (!m || !w) return '';
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, m[3] ? +m[3] : 15) + w * 7 * 86400000);
+  return d.getUTCFullYear() + '-' + pad2_(d.getUTCMonth() + 1);
+}
+function planServiceNames_(text) {
+  const parts = String(text || '').split(/\)\s*,\s*/);
+  return parts.map(function (raw, i) { return (i < parts.length - 1 ? raw + ')' : raw).trim(); })
+    .map(function (t) { return t.replace(/\s+\([^()]*\)$/, '').replace(/^\*+/, '').trim(); })
+    .filter(Boolean);
+}
+
+// → [{ dateKey, services, future }] oldest first
+function planVisits_(pre, todaySvcs, todayKey) {
+  const days = {};
+  const add = function (key, names, future) {
+    const v = days[key] || (days[key] = { dateKey: key, services: [], future: false });
+    v.future = v.future || future;
+    names.forEach(function (n) {
+      if (!v.services.some(function (s) { return planSvcKey_(s) === planSvcKey_(n); })) v.services.push(n);
+    });
+  };
+  PLAN_VISIT_FIELDS_.forEach(function (f) {
+    String((pre && pre[f]) || '').split(/\r?\n/).forEach(function (line) {
+      const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})\s*-\s*(.+)$/.exec(line.trim());
+      if (!m) return;
+      const key = m[3] + '-' + pad2_(m[2]) + '-' + pad2_(m[1]);
+      add(key, planServiceNames_(m[4]), key >= todayKey);
+    });
+  });
+  if (todaySvcs && todaySvcs.length) add(todayKey, todaySvcs, true);
+  return Object.keys(days).sort().map(function (k) { return days[k]; }).filter(function (v) { return v.services.length; });
+}
+
+function planTrackLine_(line, past, future, cur) {
+  const ov = line.overrides || {};
+  const iv = Number(line.intervalWeeks) || 0;
+  const pattern = String(line.pattern || 'unknown');
+  const total = pattern === 'course' ? Math.max(1, Number(line.sessions) || 1) : pattern === 'once' ? 1 : 0;
+  const P = past.slice();
+  const F = future.slice();
+  const start = line.startMonth || planMonthKey_(line.frequency);
+  const slots = [];
+  let prev = null;
+  for (let n = 1; n <= 60 && (!total || n <= total); n++) {
+    const o = ov[String(n)] || {};
+    const expected = o.month || (n === 1 ? start : prev ? planAddWeeks_(prev.date || prev.month, iv) : '') || '';
+    let s;
+    if (o.status === 'done') s = { state: 'done', date: o.date || '' };
+    else if (o.status === 'skipped') s = { state: 'skipped' };
+    else if (P.length) s = { state: 'done', date: P.shift() };
+    else if (F.length) s = { state: 'booked', date: F.shift() };
+    else if (!total && pattern === 'unknown' && !iv && slots.some(function (x) { return x.state === 'done'; })) break;
+    else s = { state: !expected ? 'unscheduled' : expected < cur ? 'overdue' : expected === cur ? 'due' : 'planned' };
+    s.n = n;
+    s.month = s.date ? s.date.slice(0, 7) : expected;
+    s.asked = o.asked || null;
+    slots.push(s);
+    prev = s;
+    if (!total && ['done', 'booked', 'skipped'].indexOf(s.state) === -1) break;
+  }
+  const next = slots.filter(function (s) { return s.state !== 'done' && s.state !== 'skipped'; })[0] || null;
+  return {
+    slots: slots, total: total, next: next, complete: !!total && !next,
+    done: slots.filter(function (s) { return s.state === 'done'; }).length,
+  };
+}
+
+function planTrackConcern_(c, visits, svcMap, fromOf, cur) {
+  const lines = Array.isArray(c.lines) ? c.lines : [];
+  const hits = {};
+  lines.forEach(function (l) { hits[l.id] = { past: {}, future: {} }; });
+  visits.forEach(function (v) {
+    const ids = {};
+    v.services.forEach(function (s) {
+      const k = planSvcKey_(s);
+      let line = lines.filter(function (l) { return (l.services || []).some(function (x) { return planSvcKey_(x) === k; }); })[0];
+      if (!line) {
+        const set = svcMap[k];
+        if (!set || set.notTreatment || (set.concerns || []).indexOf(c.key) === -1) return;
+        line = lines.filter(function (l) { return planShares_(l.treatment, s); })[0] || (lines.length === 1 ? lines[0] : null);
+        if (!line) return;
+      }
+      ids[line.id] = line;
+    });
+    Object.keys(ids).forEach(function (id) {
+      if (v.dateKey >= (fromOf(ids[id]) || '')) hits[id][v.future ? 'future' : 'past'][v.dateKey] = true;
+    });
+  });
+  const out = {};
+  lines.forEach(function (l) {
+    out[l.id] = planTrackLine_(l, Object.keys(hits[l.id].past).sort(), Object.keys(hits[l.id].future).sort(), cur);
+  });
+  return out;
+}
+
+function planSummary_(id, plan, pre, todaySvcs, svcMap, todayKey) {
+  const cur = todayKey.slice(0, 7);
+  const createdKey = plan.createdAt ? Utilities.formatDate(new Date(plan.createdAt), PLAN_TZ_, 'yyyy-MM-dd') : '';
+  const visits = planVisits_(pre, todaySvcs, todayKey);
+  const concerns = Array.isArray(plan.concerns) ? plan.concerns : [];
+  const lines = [];
+  let lastVisit = '';
+  let nextBooked = '';
+  let started = false;
+  const cSum = concerns.map(function (c) {
+    const cs = String(c.status || 'active');
+    const tr = planTrackConcern_(c, visits, svcMap, function (l) { return l.countFrom || createdKey; }, cur);
+    let cStarted = false;
+    (c.lines || []).forEach(function (l) {
+      const t = tr[l.id];
+      t.slots.forEach(function (s) {
+        if (s.state === 'done' && s.date > lastVisit) lastVisit = s.date;
+        if (s.state === 'booked' && s.date >= todayKey && (!nextBooked || s.date < nextBooked)) nextBooked = s.date;
+        if (s.state === 'done' || s.state === 'booked') cStarted = true;
+      });
+      const nx = t.next;
+      lines.push({
+        lineId: String(l.id || ''), concern: String(c.key || ''), concernStatus: cs, treatment: String(l.treatment || '').slice(0, 200),
+        state: t.complete ? 'complete' : nx ? nx.state : 'none', n: nx ? nx.n : 0, total: t.total, done: t.done,
+        month: nx ? nx.month || '' : '', date: nx ? nx.date || '' : '',
+        askedAt: nx && nx.asked ? String(nx.asked.at || '') : '', askedBy: nx && nx.asked ? String(nx.asked.by || '') : '',
+      });
+    });
+    if (PLAN_ACTIVE_.indexOf(cs) !== -1 && cStarted) started = true;
+    return { key: String(c.key || ''), status: cs, started: cStarted, lines: (c.lines || []).length };
+  });
+
+  // The same automatic status as the plan screen
+  const status = String(plan.status || 'proposed');
+  let eff = status;
+  if (status !== 'closed') {
+    if (concerns.length && !concerns.some(function (c) { return PLAN_ACTIVE_.indexOf(String(c.status || 'active')) !== -1; })) eff = 'completed';
+    else if (['proposed', 'sent', 'accepted'].indexOf(status) !== -1 && started) eff = 'in_progress';
+  }
+  return {
+    patientId: id, patientPttId: String(plan.patientPttId || ''), patientName: String(plan.patientName || ''),
+    status: status, effStatus: eff, createdAt: String(plan.createdAt || ''), createdBy: String(plan.createdBy || ''),
+    updatedAt: String(plan.updatedAt || ''), version: Number(plan.version) || 0,
+    concerns: cSum, lines: lines.slice(0, 60), lastVisit: lastVisit, nextBooked: nextBooked,
+    computedAt: new Date().toISOString(),
+  };
+}
+
+// Reads many documents in one go (100 at a time). → { "collection/id": fields }
+function fsBatchGet_(cfg, paths) {
+  const out = {};
+  for (let i = 0; i < paths.length; i += 100) {
+    const res = UrlFetchApp.fetch('https://firestore.googleapis.com/v1/' + fsBase_(cfg) + ':batchGet', {
+      method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+      headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) },
+      payload: JSON.stringify({ documents: paths.slice(i, i + 100).map(function (p) { return fsBase_(cfg) + '/' + p; }) }),
+    });
+    if (res.getResponseCode() !== 200) throw new Error('Firestore batchGet ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
+    JSON.parse(res.getContentText()).forEach(function (r) {
+      if (r.found) out[r.found.name.split('/documents/')[1]] = fromFields_(r.found.fields || {});
+    });
+  }
+  return out;
+}
+
+// onlyId: one patient's plan; empty: every plan. Returns how many were saved.
+function planProgressRun_(onlyId) {
+  const cfg = getConfig_();
+  const todayKey = Utilities.formatDate(new Date(), PLAN_TZ_, 'yyyy-MM-dd');
+  let plans;
+  if (onlyId) {
+    if (onlyId.length > 150 || onlyId.indexOf('/') !== -1) return 0;
+    const p = fsGetDoc_(cfg, 'treatment_plans/' + encodeURIComponent(onlyId));
+    plans = p ? [{ id: onlyId, d: p }] : [];
+  } else {
+    plans = fsListAll_(cfg, 'treatment_plans').map(function (d) { return { id: d.name.split('/').pop(), d: fromFields_(d.fields || {}) }; });
+  }
+  if (!plans.length) return 0;
+
+  const svcMap = {};
+  const set = fsGetDoc_(cfg, 'plan_settings/services');
+  ((set && set.services) || []).forEach(function (r) { if (r && r.service) svcMap[planSvcKey_(r.service)] = r; });
+
+  const todayById = {};
+  try {
+    const day = fsGetDoc_(cfg, 'appts_by_day/' + todayKey);
+    ((day && day.appointments) || []).forEach(function (a) {
+      const k = String(a.patientId || '').toLowerCase();
+      if (k) todayById[k] = (todayById[k] || []).concat(a.services || []);
+    });
+  } catch (e) { console.warn('Today\'s appointments not read: ' + e); }
+
+  const ptt = function (p) { return docId_(p.d.patientPttId || p.d.patientId || p.id); };
+  const pres = fsBatchGet_(cfg, uniq_(plans.map(function (p) { return ptt(p) ? 'pcn_results/' + ptt(p) : ''; }).filter(Boolean)));
+
+  const writes = plans.map(function (p) {
+    const key = ptt(p);
+    return updateWrite_(cfg, 'plan_progress/' + p.id,
+      planSummary_(p.id, p.d, pres['pcn_results/' + key] || null, todayById[String(key).toLowerCase()] || [], svcMap, todayKey));
+  });
+  commitWrites_(cfg, writes, 100);
+  return writes.length;
+}
+
+// The daily trigger runs this
+function runPlanProgress() {
+  console.log('Plan progress updated for ' + planProgressRun_('') + ' plan(s).');
+}
+
+// Run ONCE from the editor: every morning about 9am, after the 8:30 sheet sync
+function installPlanProgress() {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return t.getHandlerFunction() === 'runPlanProgress'; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('runPlanProgress').timeBased().everyDays(1).atHour(9).nearMinute(0).create();
+  runPlanProgress();
+  console.log('Plan progress installed (daily, about 9am).');
 }

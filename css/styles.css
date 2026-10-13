@@ -4593,3 +4593,46 @@ button.pa-bdg { font-family: inherit; line-height: inherit; }
 /* Portal prescriptions on the patient page */
 .bp-portal { display: inline-block; padding: .05rem .45rem; border-radius: 999px; background: #f0fdfa; color: #0f766e;
   font-size: .7rem; font-weight: 600; }
+
+
+  /* System configuration: recording rules */
+.rr-head-acts { display: flex; gap: .5rem; flex-wrap: wrap; }
+.rr-intro { margin: .25rem 0 1rem; }
+.rr-group { margin-bottom: 1rem; }
+.rr-group-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+.rr-group-head h4 { margin: 0; }
+.rr-group-head p { margin: .15rem 0 0; font-size: .85rem; }
+.rr-none { margin: .5rem 0 0; }
+.rr-rule { display: flex; align-items: center; gap: .6rem; padding: .65rem .75rem; margin-top: .5rem;
+  border: 1px solid var(--border); border-radius: 10px; }
+.rr-rule.is-off { opacity: .55; }
+.rr-rule-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .2rem; }
+.rr-rule-main small { color: var(--muted); overflow-wrap: anywhere; }
+.rr-acts { display: flex; flex-wrap: wrap; gap: .3rem; margin-top: .15rem; }
+.rr-form { max-width: 580px; }
+.rr-types { flex-wrap: wrap; }
+.rr-act { border: 1px solid var(--border); border-radius: 10px; padding: .55rem .7rem; margin-top: .45rem; }
+.rr-act-body { display: flex; flex-direction: column; gap: .45rem; margin-top: .45rem; }
+.rr-act-body[hidden] { display: none; }
+.rr-test-out { margin-top: .75rem; }
+.rr-test-out ul { margin: .3rem 0 .5rem 1.1rem; }
+.rr-history summary { cursor: pointer; font-weight: 600; }
+.rr-history .rp-scroll { margin-top: .75rem; }
+@media (max-width: 640px) { .rr-rule { flex-wrap: wrap; } }
+
+
+/* Recording rules: settings extras */
+.rr-group-acts { display: flex; gap: .4rem; flex-wrap: wrap; justify-content: flex-end; }
+.rr-topics { margin: .5rem 0; }
+.rr-topics [data-role="topics-out"] { margin-top: .5rem; }
+
+/* Notes panel: recording rules that fired */
+.sp-rules { margin: 0 0 .75rem; padding: .6rem .75rem; border-radius: 10px; background: #fffbeb;
+  border: 1px solid #fde68a; font-size: .85rem; }
+.sp-rules-title { display: flex; align-items: center; gap: .4rem; margin: 0 0 .35rem; font-weight: 600; color: #92400e; }
+.sp-rules-title svg { width: 16px; height: 16px; }
+.sp-rules ul { margin: 0; padding-left: 1.1rem; }
+.sp-rules li { margin: .2rem 0; }
+.sp-rules li span { color: #78716c; }
+.sp-rules li em { display: block; font-style: normal; color: #92400e; font-size: .8rem; }
+.sp-rules-err { margin: .35rem 0 0; color: #b91c1c; }
