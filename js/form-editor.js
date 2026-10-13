@@ -7,6 +7,7 @@ import {
   createField, normaliseField, renderField, fieldSettings, applyInput, applyClick,
   calcStatusHtml, checkFormula, canRequire, hasLabel, hasHelp, watermarkHtml, iqHasOptions, isMarkImage,
   markSetIdsOf, prefillSettings, prefillSummary, renameInPrefill, tidyPrefill, subExtrasHtml,
+  tableCols, tableTotal, tableClick,
 } from "./form-fields.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { DEFAULT_LETTERHEAD, letterheadHtml, openLetterheadDialog } from "./form-letterhead.js";
@@ -280,6 +281,10 @@ export async function mountFormEditor(container, { templateId, staff }) {
         const c = checkFormula(f, fields);
         if (!c.ok) return { id: f.id, msg: `“${label || "Calculation"}”: ${c.error}` };
       }
+      if (f.type === "table") {
+        const bad = tableCols(f).find((c) => c.type === "dropdown" && !c.options.length);
+        if (bad) return { id: f.id, msg: `Table column “${bad.label || "Column"}” needs at least one choice.` };
+      }
       if (f.type === "image" && f.source !== "staff") {
         if (f.annotate && f.markMode === "marks" && markSets) {
           const chosen = markSetIdsOf(f).map((id) => markSets.find((s) => s.id === id)).filter(Boolean);
@@ -390,9 +395,10 @@ export async function mountFormEditor(container, { templateId, staff }) {
   }
 
   function updateCalcs() {
-    const values = evaluateCalcs(fields, (f) => {
+    const values = evaluateCalcs(fields, (f, col) => {
       const w = stage.querySelector(`[data-fid="${CSS.escape(f.id)}"]`);
       if (w && w.hidden) return null; // hidden questions count as unanswered
+      if (f.type === "table") return tableTotal(f, w, col);
       if (f.type === "image") { const a = previewAnnots[f.id]; return a && a.total ? a.total() : null; }
       const el = stage.querySelector(`input[data-in="${CSS.escape(f.id)}"]`);
       return el ? el.value : null;
@@ -819,6 +825,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   });
 
   stage.addEventListener("click", (e) => {
+    if (mode === "preview" && tableClick(e.target, fields)) { refreshPreview(); return; }
     if (mode !== "build") return;
     if (e.target.closest('[data-role="lh"], [data-role="title"]')) { select(FORM); return; }
     const fieldEl = e.target.closest(".fe-field[data-id]");
@@ -898,6 +905,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
       const st = insp.querySelector('[data-role="calc-status"]');
       if (st) st.innerHTML = calcStatusHtml(f, fields);
     }
+    
   });
 
   insp.addEventListener("change", (e) => {

@@ -2,7 +2,8 @@
 // View a saved one:                      #/form-record/<submissionId>
 import { getFormTemplate, getFormVersion, getLetterhead, categoryLabel } from "./form-templates.js";
 import { esc, svg, ICONS, renderField, normaliseField, watermarkHtml, canRequire,
-  choiceList, otherLabel, syncChoiceExtras, readExtras, writeExtras, readImageQs, writeImageQs, STAFF_FILLS } from "./form-fields.js";
+  choiceList, otherLabel, syncChoiceExtras, readExtras, writeExtras, readImageQs, writeImageQs, STAFF_FILLS,
+  tableCols, tableMax, tableRowHtml, syncTableRows, tableClick, tableTotal } from "./form-fields.js";
 import { listMarkingSets, markSummary } from "./marking-sets.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { letterheadHtml, DEFAULT_LETTERHEAD } from "./form-letterhead.js";
@@ -225,10 +226,22 @@ export function readField(f, w, { pads = {}, calc = {}, consent = {}, annots = {
         return [out];
       });
       
-    case "table": // Firestore can't store lists inside lists, so each row is { cells: [...] }
+    case "table": { // Firestore can't store lists inside lists, so each row is { cells: [...] }
+      const cols = tableCols(f);
       return $all(w, "tbody tr").map((tr) => ({
-        cells: $all(tr, "input").map((inp) => (inp.type === "checkbox" ? inp.checked : inp.value.trim().slice(0, 500))),
+        cells: cols.map((c, ci) => {
+          const el = tr.querySelector(`[data-c="${ci}"]`);
+          if (!el) return c.type === "check" ? false : "";
+          if (c.type === "check") return el.checked;
+          if (c.type === "number") {
+            if (el.value === "") return "";
+            const n = Number(el.value);
+            return Number.isFinite(n) ? n : "";
+          }
+          return String(el.value || "").trim().slice(0, 500);
+        }),
       }));
+    }
     case "calculation": {
       const v = calc[f.id];
       return Number.isFinite(v) ? v : null;
@@ -340,15 +353,24 @@ function writeField(f, w, v) {
       syncChoiceExtras(f, w);
       break;
     }
-    case "table":
+    case "table": {
+      const saved = Array.isArray(v) ? v : [];
+      const tbody = w.querySelector("tbody");
+      const want = Math.min(saved.length, tableMax(f));
+      if (tbody) while (tbody.rows.length < want) tbody.insertAdjacentHTML("beforeend", tableRowHtml(f, true, true));
+      const cols = tableCols(f);
       $all(w, "tbody tr").forEach((tr, r) => {
-        const cells = (Array.isArray(v) && v[r] && Array.isArray(v[r].cells)) ? v[r].cells : [];
-        $all(tr, "input").forEach((inp, c) => {
-          if (inp.type === "checkbox") inp.checked = cells[c] === true;
-          else inp.value = typeof cells[c] === "string" ? cells[c] : "";
+        const cells = saved[r] && Array.isArray(saved[r].cells) ? saved[r].cells : [];
+        cols.forEach((c, ci) => {
+          const el = tr.querySelector(`[data-c="${ci}"]`);
+          if (!el) return;
+          if (c.type === "check") el.checked = cells[ci] === true;
+          else el.value = cells[ci] === null || cells[ci] === undefined || cells[ci] === false ? "" : String(cells[ci]);
         });
       });
+      syncTableRows(f, w);
       break;
+    }
     case "calculation": {
       const out = w.querySelector("[data-calc]");
       if (out) out.textContent = formatCalc(v, f) || "—";
@@ -632,9 +654,10 @@ export async function mountFormFill(container, param, { staff } = {}) {
   const rctx = () => ({ pads, calc, consent, annots });
 
   const updateCalcs = () => {
-    calc = evaluateCalcs(fields, (f) => {
+    calc = evaluateCalcs(fields, (f, col) => {
       const w = wrap(f.id);
       if (w && w.hidden) return null; // hidden questions count as unanswered
+      if (f.type === "table") return tableTotal(f, w, col);
       if (f.type === "image") { const a = annots[f.id]; return a && a.total ? a.total() : null; }
       const el = sheet.querySelector(`input[data-in="${CSS.escape(f.id)}"]`);
       return el ? el.value : null;
@@ -736,6 +759,12 @@ export async function mountFormFill(container, param, { staff } = {}) {
       if (box && !box.hidden) box.focus();
     }
   });
+
+    // Tables: + Add a row / remove an added row
+  sheet.addEventListener("click", (e) => {
+    if (tableClick(e.target, fields)) { dirty = true; refresh(); }
+  });
+  fields.filter((f) => f.type === "table").forEach((f) => syncTableRows(f, wrap(f.id)));
 
     // "Fill in consent now": keep the answers so far, then open the consent form
   root.addEventListener("click", (e) => {
@@ -1088,6 +1117,7 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
     writeExtras(f, w, sub.answers[`${f.id}__x`]);
     $all(w, "[data-subcmt]").forEach((c) => { if (!c.value) c.hidden = true; }); // no comment typed: nothing to show
   });
+  $all(sheet, "[data-tadd], [data-trm]").forEach((b) => b.remove()); // no adding or removing rows on a saved form
   $all(sheet, "input, textarea, select").forEach((el) => { el.disabled = true; });
 
   /* ---------- Email / send to printer / print here ---------- */

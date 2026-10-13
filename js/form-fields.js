@@ -127,6 +127,89 @@ export function subExtrasHtml(g, i) {
     <small class="fe-note">The comment box opens when staff tick that sub-option. The note is a guide for staff and isn't saved.</small>
   </details>`;
 }
+
+/* ---------- Tables: column types, adding rows, and column totals for Calculations ---------- */
+export const TABLE_COL_TYPES = [["text", "Text"], ["number", "Number"], ["check", "Tick box"], ["date", "Date"], ["dropdown", "Dropdown"]];
+const TCOL_KEYS = TABLE_COL_TYPES.map(([k]) => k);
+const COL_ID = /^[A-Za-z0-9_-]{1,20}$/;
+const newColId = () => "c" + Math.random().toString(36).slice(2, 8);
+
+// A table's columns, tidied (older columns get a position-based id)
+export function tableCols(f) {
+  const list = Array.isArray(f && f.columns) && f.columns.length ? f.columns : [{ label: "Column 1", type: "text" }];
+  return list.map((c, i) => ({
+    id: COL_ID.test((c && c.id) || "") ? c.id : `c${i + 1}`,
+    label: String((c && c.label) || ""),
+    type: TCOL_KEYS.includes(c && c.type) ? c.type : "text",
+    unit: String((c && c.unit) || ""),
+    options: (Array.isArray(c && c.options) ? c.options : []).map(String).filter((o) => o.trim()),
+  }));
+}
+// The most rows a table can have on the live form
+export function tableMax(f) {
+  const rows = int(f.rows, 1, 30, 3);
+  return f.addRows === true ? int(f.maxRows, rows, 50, Math.max(rows, 10)) : rows;
+}
+// One row of a table. removable: a row staff added (gets a remove button)
+export function tableRowHtml(f, live = true, removable = false) {
+  const inert = live ? "" : ' tabindex="-1"';
+  const cells = tableCols(f).map((c, ci) => {
+    const a = ` data-c="${ci}"${inert}`;
+    switch (c.type) {
+      case "check": return `<td class="is-check"><input type="checkbox"${a} /></td>`;
+      case "number": return `<td class="is-num"><input class="fe-tcell" type="number" step="any" inputmode="decimal"${a} /></td>`;
+      case "date": return `<td><input class="fe-tcell" type="date"${a} /></td>`;
+      case "dropdown": return `<td><select class="fe-tcell"${a}><option value=""></option>${
+        c.options.map((o) => `<option value="${esc(o)}">${esc(o)}</option>`).join("")}</select></td>`;
+      default: return `<td><input class="fe-tcell" type="text" maxlength="500"${a} /></td>`;
+    }
+  }).join("");
+  const rm = live && f.addRows === true
+    ? `<td class="fe-trm">${removable ? `<button type="button" class="hx-x" data-trm aria-label="Remove this row" title="Remove this row">${svg(ICONS.x)}</button>` : ""}</td>`
+    : "";
+  return `<tr>${cells}${rm}</tr>`;
+}
+// The "+ Add a row" button follows the limit
+export function syncTableRows(f, w) {
+  const b = w && w.querySelector("[data-tadd]");
+  if (!b) return;
+  const max = tableMax(f);
+  const full = w.querySelectorAll("tbody tr").length >= max;
+  b.disabled = full;
+  b.textContent = full ? `Most rows reached (${max})` : "+ Add a row";
+}
+// Add / remove row buttons on a live form. Returns true if it handled the click.
+export function tableClick(target, fields) {
+  const add = target.closest("[data-tadd]");
+  const rm = target.closest("[data-trm]");
+  if (!add && !rm) return false;
+  const w = target.closest("[data-fid]");
+  const f = w && fields.find((x) => x.id === w.dataset.fid);
+  const tbody = w && w.querySelector("tbody");
+  if (!f || f.type !== "table" || !tbody) return false;
+  if (add) {
+    if (tbody.rows.length >= tableMax(f)) return true;
+    tbody.insertAdjacentHTML("beforeend", tableRowHtml(f, true, true));
+    const first = tbody.lastElementChild.querySelector("[data-c]");
+    if (first) first.focus();
+  } else {
+    rm.closest("tr").remove();
+  }
+  syncTableRows(f, w);
+  return true;
+}
+// The total of a Number column on a live form (null if every cell is empty)
+export function tableTotal(f, w, colId) {
+  const ci = tableCols(f).findIndex((c) => c.id === colId);
+  if (ci < 0 || !w) return null;
+  let sum = 0, any = false;
+  w.querySelectorAll(`tbody [data-c="${ci}"]`).forEach((el) => {
+    if (el.value === "") return;
+    const n = Number(el.value);
+    if (Number.isFinite(n)) { sum += n; any = true; }
+  });
+  return any ? Math.round(sum * 1e6) / 1e6 : null;
+}
 const LAYOUT_TYPES = ["single_choice", "checkboxes", "checkbox_notes"];
 const PLACEHOLDER_TYPES = ["short_text", "long_text", "email", "number", "dropdown"];
 export const INLINE_TYPES = ["short_text", "email", "number", "date", "record_date", "dropdown", "single_choice", "checkboxes", "calculation"];
@@ -313,7 +396,10 @@ export function createField(type, id) {
       f.groups = [{ label: "Option A", subs: ["Sub-option 1", "Sub-option 2"] }];
       f.subCols = 1; f.subLayout = "list";
       break;
-    case "table": f.columns = [{ label: "Column 1", type: "text" }, { label: "Column 2", type: "text" }]; f.rows = 3; break;
+    case "table":
+      f.columns = [{ id: "c1", label: "Column 1", type: "text" }, { id: "c2", label: "Column 2", type: "text" }];
+      f.rows = 3; f.addRows = false; f.maxRows = 10;
+      break;
     case "calculation": f.formula = ""; f.decimals = 2; f.prefix = ""; f.suffix = ""; f.blank = "zero"; break;
     case "image":
       f.source = "bank"; f.fileId = ""; f.fileName = ""; f.size = "medium"; f.caption = ""; f.alt = ""; f.max = 1;
@@ -340,6 +426,7 @@ export function normaliseField(f) {
   if (CHOICE_TYPES.includes(out.type) && !(Array.isArray(out.options) && out.options.length)) out.options = ["Option 1"];
   if (out.type === "sub_checks" && !(Array.isArray(out.groups) && out.groups.length)) out.groups = [{ label: "Option A", subs: [] }];
   if (out.type === "table" && !(Array.isArray(out.columns) && out.columns.length)) out.columns = [{ label: "Column 1", type: "text" }];
+  if (out.type === "table") out.columns = out.columns.map((c, i) => ({ ...c, id: COL_ID.test((c && c.id) || "") ? c.id : `c${i + 1}` }));
   if (out.type === "patient" && !(Array.isArray(out.parts) && out.parts.length)) out.parts = [...DEFAULT_PARTS];
   if (out.type === "clinician" && !(Array.isArray(out.parts) && out.parts.length)) out.parts = [...DEFAULT_CLIN];
   return out;
@@ -429,13 +516,22 @@ export function cleanField(f) {
       out.subCols = int(f.subCols, 1, 4, 1);
       out.subLayout = pick(f.subLayout, ["list", "inline"], "list");
       break;
-    case "table":
-      out.columns = (Array.isArray(f.columns) ? f.columns : []).slice(0, 12).map((c) => ({
-        label: clip(c && c.label, 100),
-        type: pick(c && c.type, ["text", "check"], "text"),
-      }));
+    case "table": {
+      const seen = new Set();
+      out.columns = tableCols(f).slice(0, 12).map((c, i) => {
+        const id = seen.has(c.id) ? `${c.id}_${i}` : c.id;
+        seen.add(id);
+        return {
+          id, label: clip(c.label, 100), type: c.type,
+          ...(c.type === "number" ? { unit: clip(c.unit, 20) } : {}),
+          ...(c.type === "dropdown" ? { options: c.options.map((o) => clip(o, 100)).slice(0, 30) } : {}),
+        };
+      });
       out.rows = int(f.rows, 1, 30, 3);
+      out.addRows = f.addRows === true;
+      out.maxRows = int(f.maxRows, out.rows, 50, Math.max(out.rows, 10));
       break;
+    }
     case "calculation":
       out.formula = clip(f.formula, 500);
       out.decimals = int(f.decimals, 0, 4, 2);
@@ -531,8 +627,15 @@ export function cleanField(f) {
 
 export function prettyFormula(src, byId) {
   return String(src || "")
-    .replace(/\{([^}]*)\}/g, (_, id) => {
-      const f = byId.get(id.trim());
+    .replace(/\{([^}]*)\}/g, (_, raw) => {
+      const id = raw.trim();
+      const dot = id.indexOf(".");
+      if (dot > 0) {
+        const t = byId.get(id.slice(0, dot));
+        const c = t && t.type === "table" ? tableCols(t).find((x) => x.id === id.slice(dot + 1)) : null;
+        return c ? `[${t.label || "Table"} · ${c.label || "Column"} total]` : "[removed column]";
+      }
+      const f = byId.get(id);
       return f ? `[${f.type === "image" ? `${f.label || f.fileName || "Picture"} total` : f.label || "Untitled"}]` : "[removed question]";
     })
     .replace(/\*/g, "×")
@@ -558,6 +661,14 @@ export function checkFormula(f, fields) {
   if (!src) return { ok: false, error: "Add a formula. Tap a question below to start." };
   const byId = new Map(fields.map((x) => [x.id, x]));
   for (const id of calcRefs(src)) {
+    const dot = id.indexOf(".");
+    if (dot > 0) { // a table column total
+      const t = byId.get(id.slice(0, dot));
+      const col = t && t.type === "table" ? tableCols(t).find((c) => c.id === id.slice(dot + 1)) : null;
+      if (!col) return { ok: false, error: "The formula uses a table column that has been removed." };
+      if (col.type !== "number") return { ok: false, error: `“${col.label || "Column"}” in “${t.label || "Table"}” isn't a Number column any more.` };
+      continue;
+    }
     const r = byId.get(id);
     if (!r) return { ok: false, error: "The formula uses a question that has been removed." };
     if (!calcSource(r)) {
@@ -688,16 +799,17 @@ export function renderField(f, ctx = {}) {
           <input class="fe-in fe-xin" type="text" data-other maxlength="500" placeholder="Please specify"${live ? " hidden" : ""}${inert} />
         </span></div>` : ""}</div>`;
     case "table": {
-      const cols = f.columns && f.columns.length ? f.columns : [{ label: "Column 1", type: "text" }];
-      const rows = Math.max(1, Math.min(30, parseInt(f.rows, 10) || 3));
+      const cols = tableCols(f);
+      const rows = int(f.rows, 1, 30, 3);
+      const canAdd = live && f.addRows === true;
       let body = "";
-      for (let r = 0; r < rows; r++) {
-        body += `<tr>${cols.map((c) => c.type === "check"
-          ? `<td class="is-check">${box("checkbox")}</td>`
-          : `<td>${box("text")}</td>`).join("")}</tr>`;
-      }
+      for (let r = 0; r < rows; r++) body += tableRowHtml(f, live, false);
       return head + `<div class="fe-table-wrap"><table class="fe-table"><thead><tr>${
-        cols.map((c, i) => `<th>${esc(c.label || `Column ${i + 1}`)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>`;
+        cols.map((c, i) => `<th${c.type === "number" ? ' class="is-num"' : ""}>${esc(c.label || `Column ${i + 1}`)}${
+          c.type === "number" && c.unit.trim() ? ` <small>(${esc(c.unit)})</small>` : ""}</th>`).join("")}${
+        canAdd ? '<th class="fe-trm"></th>' : ""}</tr></thead><tbody>${body}</tbody></table></div>` +
+        (canAdd ? '<button type="button" class="hx-add fe-tadd" data-tadd>+ Add a row</button>' : "") +
+        (!live && f.addRows ? `<div class="fe-help fe-help-after">Staff can add rows, up to ${tableMax(f)}.</div>` : "");
     }
     case "calculation": {
       const v = ctx.calcValues ? ctx.calcValues[f.id] : null;
@@ -985,22 +1097,34 @@ function typeSettings(f, ctx = {}) {
         <button type="button" class="hx-add" data-act="grpadd">+ Add an option</button>
         <small class="fe-note">Sub-options appear when their option is ticked.</small></div>` + extrasSettings(f, false);
 
-    case "table":
-      return `<div class="fe-insp-field"><span class="fe-insp-label">Columns</span>${
-        f.columns.map((c, i) => `
-          <div class="fe-col">
-            <input class="fe-input" data-col="${i}" data-colk="label" maxlength="100" value="${esc(c.label)}" aria-label="Column ${i + 1} name" />
-            <select class="fb-select" data-col="${i}" data-colk="type" aria-label="Column ${i + 1} type">
-              <option value="text"${c.type !== "check" ? " selected" : ""}>Text</option>
-              <option value="check"${c.type === "check" ? " selected" : ""}>Tick box</option>
-            </select>
-            <button type="button" class="hx-x" data-coldel="${i}" aria-label="Remove column ${i + 1}">${svg(ICONS.x)}</button>
+    case "table": {
+      const cols = tableCols(f);
+      const rows = int(f.rows, 1, 30, 3);
+      return `<div class="fe-insp-field"><span class="fe-insp-label">Columns</span>${cols.map((c, i) => `
+          <div class="fe-tcol">
+            <div class="fe-col">
+              <input class="fe-input" data-col="${i}" data-colk="label" maxlength="100" value="${esc(c.label)}" aria-label="Column ${i + 1} name" />
+              <select class="fb-select" data-col="${i}" data-colk="type" data-rerender="" aria-label="Column ${i + 1} type">
+                ${TABLE_COL_TYPES.map(([v, l]) => `<option value="${v}"${c.type === v ? " selected" : ""}>${l}</option>`).join("")}
+              </select>
+              <button type="button" class="hx-x" data-coldel="${i}" aria-label="Remove column ${i + 1}">${svg(ICONS.x)}</button>
+            </div>
+            ${c.type === "number" ? `<input class="fe-input fe-col-sub" data-col="${i}" data-colk="unit" maxlength="20" placeholder="Unit (optional), e.g. units or mL" value="${esc(c.unit)}" />` : ""}
+            ${c.type === "dropdown" ? `<textarea class="fe-input fe-col-sub" data-col="${i}" data-colk="options" rows="3" placeholder="One choice per line">${esc(c.options.join("\n"))}</textarea>` : ""}
           </div>`).join("")}
-        ${f.columns.length < 12 ? '<button type="button" class="hx-add" data-act="coladd">+ Add a column</button>' : ""}</div>` +
-        setting("Rows", `<input class="fe-input" type="number" min="1" max="30" data-k="rows" data-num="" value="${Number(f.rows) || 3}" />`);
-
+        ${cols.length < 12 ? '<button type="button" class="hx-add" data-act="coladd">+ Add a column</button>' : ""}
+        <small class="fe-note">Number columns can be added up in a Calculation: their totals appear under “Insert a question”.</small></div>` +
+        setting(f.addRows ? "Starting rows" : "Rows", `<input class="fe-input" type="number" min="1" max="30" data-k="rows" data-num="" value="${rows}" />`) +
+        `<label class="fe-check"><input type="checkbox" data-k="addRows" data-rerender=""${f.addRows ? " checked" : ""} /> Staff can add rows while filling in</label>` +
+        (f.addRows ? setting("Most rows", `<input class="fe-input" type="number" min="${rows}" max="50" data-k="maxRows" data-num="" value="${tableMax(f)}" />`,
+          "Staff can remove the rows they add. The starting rows always stay.") : "");
+    }
     case "calculation": {
       const others = (ctx.fields || []).filter((x) => x.id !== f.id && calcSource(x));
+      const colTotals = (ctx.fields || []).filter((x) => x.type === "table").flatMap((t) =>
+        tableCols(t).filter((c) => c.type === "number").map((c) => ({
+          tok: `{${t.id}.${c.id}}`, name: `${t.label || "Table"} · ${c.label || "Column"} (total)`,
+        })));
       const ops = [["+", "+"], ["-", "−"], ["*", "×"], ["/", "÷"], ["(", "("], [")", ")"],
         ["ROUND(", "Round"], ["MIN(", "Lowest of"], ["MAX(", "Highest of"], [",", ","]];
       return `
@@ -1009,11 +1133,12 @@ function typeSettings(f, ctx = {}) {
           <div class="fe-calc-status" data-role="calc-status">${calcStatusHtml(f, ctx.fields || [])}</div>
         </div>
         <div class="fe-insp-field"><span class="fe-insp-label">Insert a question</span>${
-          others.length
+          others.length || colTotals.length
             ? `<div class="fe-chiprow">${others.map((x) =>
                 `<button type="button" class="fe-ins is-field" data-calcins="{${esc(x.id)}}">${esc(x.type === "image"
-                  ? `${x.label || x.fileName || "Picture"} (total)` : x.label || "Untitled")}</button>`).join("")}</div>`
-            : '<small class="fe-note">Add a Number question, or a picture with unit marks, to use it here.</small>'}</div>
+                  ? `${x.label || x.fileName || "Picture"} (total)` : x.label || "Untitled")}</button>`).join("")}${
+                colTotals.map((t) => `<button type="button" class="fe-ins is-field" data-calcins="${esc(t.tok)}">${esc(t.name)}</button>`).join("")}</div>`
+            : '<small class="fe-note">Add a Number question, a table with a Number column, or a picture with unit marks, to use it here.</small>'}</div>
         <div class="fe-insp-field"><span class="fe-insp-label">Insert</span>
           <div class="fe-chiprow">${ops.map(([v, l]) => `<button type="button" class="fe-ins" data-calcins="${esc(v)}">${esc(l)}</button>`).join("")}</div>
         </div>
@@ -1382,7 +1507,9 @@ export function applyInput(f, el) {
   if (el.dataset.col !== undefined) {
     const c = f.columns && f.columns[Number(el.dataset.col)];
     if (!c) return false;
-    c[el.dataset.colk] = el.value;
+    const k = el.dataset.colk;
+    if (k === "options") c.options = el.value.split("\n").map((s) => s.trim()).filter(Boolean);
+    else c[k] = el.value;
     return true;
   }
   if (el.dataset.grp !== undefined) {
@@ -1434,7 +1561,7 @@ export function applyClick(f, target) {
   const btn = target.closest('[data-act="coladd"], [data-coldel], [data-act="grpadd"], [data-grpdel]');
   if (!btn) return false;
   if (btn.dataset.act === "coladd") {
-    if (f.columns.length < 12) f.columns.push({ label: `Column ${f.columns.length + 1}`, type: "text" });
+    if (f.columns.length < 12) f.columns.push({ id: newColId(), label: `Column ${f.columns.length + 1}`, type: "text" });
     return true;
   }
   if (btn.dataset.coldel !== undefined) {

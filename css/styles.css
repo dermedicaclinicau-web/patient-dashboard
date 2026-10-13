@@ -4860,3 +4860,14 @@ dialog.lh-dialog.inv-dlg.inv-spdlg{width:min(780px,96vw)}
 .fe-subx-row{display:flex;flex-direction:column;gap:6px;padding:8px 0;border-top:1px solid var(--line,#eef2f7)}
 .fe-subx-row:first-of-type{border-top:0}
 .fe-subx-row strong{font-size:13px}
+
+/* Tables: column types and adding rows */
+.fe-table .fe-tcell{width:100%;min-width:0;padding:6px 8px;border:1px solid var(--line,#e2e8f0);border-radius:6px;font:inherit;background:#fff}
+.fe-table td.is-num .fe-tcell{text-align:right}
+.fe-table th.is-num{text-align:right}
+.fe-table th small{font-weight:400;color:var(--muted,#64748b)}
+.fe-table td.fe-trm,.fe-table th.fe-trm{width:34px;padding:2px;text-align:center}
+.fe-tadd{margin-top:6px}
+.fe-tadd:disabled{opacity:.55;cursor:default}
+.fe-tcol{display:flex;flex-direction:column;gap:6px;margin-bottom:8px}
+.fe-col-sub{margin-left:0}

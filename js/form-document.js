@@ -4,9 +4,10 @@
 // backup PDF converter can render it too.)
 import { formatCalc } from "./form-calc.js";
 import { visibleIds } from "./form-conditions.js";
-import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing, textBlockHtml, clinicianParts } from "./form-fields.js";
+import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing, textBlockHtml, clinicianParts, tableCols } from "./form-fields.js";
 import { cleanRichHtml } from "./rich-html.js";
 import { markSummary } from "./marking-sets.js";
+
 
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
 const LOGO_RE = /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/;
@@ -126,6 +127,7 @@ function isUnanswered(f, v, sig) {
   }
 }
 
+const tableMaxRows = (f) => Math.max(parseInt(f.rows, 10) || 3, parseInt(f.maxRows, 10) || 10);
 // Empty lines, tick-boxes and a signature box, for filling in by hand
 function blankAnswer(f) {
   const line = '<div class="bl"></div>';
@@ -153,7 +155,7 @@ function blankAnswer(f) {
       return rows + other || line;
     }
     case "sub_checks": {
-      const rows = opts.map((o) => {
+      const rows = (Array.isArray(f.groups) && f.groups.length ? f.groups : opts).map((o) => {
         const subs = optSubs(o).map(optLabel).filter(Boolean);
         return `<div class="bo-row"><span class="box"></span><b>${esc(optLabel(o))}</b>${
           subs.length ? `<div class="bo-subs">${subs.map((s) => tick(esc(s), false)).join("")}</div>` : ""}</div>`;
@@ -161,11 +163,12 @@ function blankAnswer(f) {
       return rows || line;
     }
     case "table": {
-      const cols = f.columns || [];
+      const cols = tableCols(f);
       if (!cols.length) return line;
-      const n = Math.min(12, Math.max(3, parseInt(f.rows ?? f.rowCount, 10) || 4));
+      const n = Math.min(12, Math.max(3, f.addRows ? Math.min(tableMaxRows(f), 12) : parseInt(f.rows ?? f.rowCount, 10) || 4));
       const row = `<tr>${cols.map((c) => `<td style="height:26px">${c.type === "check" ? '<span class="box"></span>' : ""}</td>`).join("")}</tr>`;
-      return `<table class="grid"><tr>${cols.map((c, i) => `<th>${esc(c.label || `Column ${i + 1}`)}</th>`).join("")}</tr>${row.repeat(n)}</table>`;
+      return `<table class="grid"><tr>${cols.map((c, i) => `<th>${esc(c.label || `Column ${i + 1}`)}${
+        c.type === "number" && c.unit ? ` (${esc(c.unit)})` : ""}</th>`).join("")}</tr>${row.repeat(n)}</table>`;
     }
     case "signature":
       return '<div class="sig-box"></div><div class="sigmeta">Name: <span class="bl-in" style="width:220px"></span> &nbsp;&nbsp; Date: <span class="bl-in" style="width:110px"></span></div>';
@@ -214,21 +217,29 @@ function answer(f, v, sig, inline, x, blank = false) {
       return Array.isArray(v) && v.length
         ? `<ul>${v.map((r) => {
             if (r.other) return `<li>${esc(r.option)}: ${esc(r.other)}</li>`;
-            const subs = (r.subs || []).map((s) => (s === oLbl && r.subOther ? `${esc(s)}: ${esc(r.subOther)}` : esc(s)));
+            const notes = new Map((Array.isArray(r.subNotes) ? r.subNotes : []).map((n) => [n.sub, n.note]));
+            const subs = (r.subs || []).map((s) => (s === oLbl && r.subOther
+              ? `${esc(s)}: ${esc(r.subOther)}`
+              : `${esc(s)}${notes.get(s) ? ` <span class="note">(${esc(notes.get(s))})</span>` : ""}`));
             return `<li>${esc(r.option)}${subs.length ? `: ${subs.join(", ")}` : ""}</li>`;
           }).join("")}</ul>`
         : '<span class="none">None ticked</span>';
     }
     case "table": {
-      const cols = f.columns || [];
-      const rows = (Array.isArray(v) ? v : [])
-        .filter((r) => r && Array.isArray(r.cells) && r.cells.some((c) => c !== "" && c !== false));
+      const cols = tableCols(f);
+      const filled = (c) => c !== "" && c !== false && c !== null && c !== undefined;
+      const rows = (Array.isArray(v) ? v : []).filter((r) => r && Array.isArray(r.cells) && r.cells.some(filled));
       if (!rows.length) return none;
-      return `<table class="grid"><tr>${cols.map((c, i) => `<th>${esc(c.label || `Column ${i + 1}`)}</th>`).join("")}</tr>${
-        rows.map((r) => `<tr>${cols.map((c, i) => {
-          const x = r.cells[i];
-          return `<td>${c.type === "check" ? (x === true ? "Yes" : "") : esc(typeof x === "string" ? x : "")}</td>`;
-        }).join("")}</tr>`).join("")}</table>`;
+      const cellText = (c, x) => {
+        if (c.type === "check") return x === true ? "Yes" : "";
+        if (x === null || x === undefined || x === false || x === "") return "";
+        if (c.type === "date") return esc(niceDate(String(x)));
+        if (c.type === "number") return esc(typeof x === "number" ? String(+x.toFixed(4)) : String(x));
+        return esc(String(x));
+      };
+      return `<table class="grid"><tr>${cols.map((c, i) => `<th>${esc(c.label || `Column ${i + 1}`)}${
+        c.type === "number" && c.unit ? ` (${esc(c.unit)})` : ""}</th>`).join("")}</tr>${
+        rows.map((r) => `<tr>${cols.map((c, i) => `<td${c.type === "number" ? ' style="text-align:right"' : ""}>${cellText(c, r.cells[i])}</td>`).join("")}</tr>`).join("")}</table>`;
     }
     case "calculation":
       return esc(formatCalc(v, f) || "—");

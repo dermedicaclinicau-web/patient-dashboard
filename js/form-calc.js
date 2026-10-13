@@ -161,8 +161,13 @@ export function evaluateCalcs(fields, getValue) {
   const byId = new Map(fields.map((f) => [f.id, f]));
   const memo = new Map(), visiting = new Set();
   function valueOf(id) {
-    const f = byId.get(id);
+    const dot = id.indexOf(".");
+    const f = byId.get(dot > 0 ? id.slice(0, dot) : id);
     if (!f) return null;
+    if (dot > 0) { // a table column total
+      const n = parseFloat(getValue(f, id.slice(dot + 1)));
+      return Number.isFinite(n) ? n : null;
+    }
     if (f.type !== "calculation") {
       const n = parseFloat(getValue(f));
       return Number.isFinite(n) ? n : null;
