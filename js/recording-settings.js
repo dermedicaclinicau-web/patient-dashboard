@@ -14,22 +14,38 @@ const SKELETON = '<div class="skeleton" style="height:240px;border-radius:14px">
 const isAdmin = (staff) => /^admin$/i.test(String((staff && staff.role) || ""));
 const sectionName = (k) => (NOTE_SECTIONS.find(([v]) => v === k) || NOTE_SECTIONS[0])[1];
 const DUE = [[0, "Today"], [1, "Tomorrow"], [2, "In 2 days"], [7, "In a week"], [14, "In 2 weeks"], [30, "In a month"]];
+const ico = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+const TYPE_ICON = {
+  words: ico('<path d="M3 21c3 0 7-1 7-8V5H3v7h4c0 4-2 6-4 6"/><path d="M14 21c3 0 7-1 7-8V5h-7v7h4c0 4-2 6-4 6"/>'),
+  topic: ico('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>'),
+  instruction: ico('<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>'),
+  spelling: ico('<polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/>'),
+};
+const TYPE_SHORT = {
+  words: "Exact words or phrases, checked word for word",
+  topic: "Gemini judges the meaning",
+  instruction: "Tells Gemini how to write the notes",
+  spelling: "Fixes misheard names and products",
+};
+const NAME_PH = {
+  words: "e.g. Pregnancy or breastfeeding", topic: "e.g. Pregnancy or breastfeeding",
+  instruction: "e.g. Units per area", spelling: "e.g. Injectable product names",
+};
 const when = (d) => (d ? d.toLocaleString("en-AU", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" }) : "");
 const errText = (err) => (err && err.code === "permission-denied"
   ? "Couldn't save. Check the Firestore rules for recording_config have been published."
   : err && err.message && !err.code ? err.message : "Couldn't save. Check your connection and try again.");
 const defaultActions = (type) => [{ type: "flag", text: type === "topic" ? "{What was said}" : "Mentioned: {Words heard}" }];
 
-function openDialog(html) {
+function openDialog(html, cls = "") {
   const dlg = document.createElement("dialog");
-  dlg.className = "lh-dialog inv-dlg";
+  dlg.className = `lh-dialog inv-dlg ${cls}`.trim();
   dlg.innerHTML = html;
   document.body.appendChild(dlg);
   dlg.addEventListener("close", () => dlg.remove());
   dlg.showModal();
   return dlg;
 }
-
 // "heard = correct" per line -> { pairs, bad }
 function parsePairs(text) {
   let bad = 0;
@@ -57,9 +73,9 @@ function actionText(a) {
   return `Reminder for ${who}, due ${due}`;
 }
 
-export function mountRecordingSettings(container, { staff = null } = {}) {
-  const root = document.createElement("section");
-  root.className = "page wide";
+export function mountRecordingSettings(container, { staff = null, embedded = false } = {}) {
+  const root = document.createElement(embedded ? "div" : "section");
+  root.className = embedded ? "rr-embed" : "page wide";
   container.replaceChildren(root);
   if (!isAdmin(staff)) {
     root.innerHTML = '<div class="state"><strong>No access</strong>Only Admins can change the system configuration.</div>';
@@ -68,8 +84,9 @@ export function mountRecordingSettings(container, { staff = null } = {}) {
 
   const st = { rules: [], version: 0, updatedAt: null, updatedBy: "", staffList: [] };
   root.innerHTML = `
-    <div class="fb-head">
-      <div><h2>System configuration</h2><p class="muted">Recording rules: what happens when a consultation is recorded.</p></div>
+    <div class="fb-head${embedded ? " rr-subhead" : ""}">
+      <div>${embedded ? "" : "<h2>System configuration</h2>"}
+        <p class="muted">Recording rules: what happens when a consultation is recorded.</p></div>
       <div class="rr-head-acts">
         <button type="button" class="ff-btn" data-act="test">Test rules</button>
         <button type="button" class="ff-btn is-primary" data-act="add">+ Add rule</button>
@@ -77,7 +94,7 @@ export function mountRecordingSettings(container, { staff = null } = {}) {
     </div>
     <div data-role="body">${SKELETON}</div>`;
   const body = root.querySelector('[data-role="body"]');
-
+  
   async function load() {
     try {
       const [res, staffList] = await Promise.all([getRules(), listStaffDetails().catch(() => [])]);
@@ -150,14 +167,11 @@ export function mountRecordingSettings(container, { staff = null } = {}) {
         <small class="fe-note">Describe it in plain words, as you would to a new staff member.</small></label>`;
     }
     if (d.type === "instruction") {
-      return `<label class="lh-field"><span class="lh-label">Section</span>
-          <select class="fb-select" name="section">${NOTE_SECTIONS.map(([k, l]) =>
-            `<option value="${k}"${(d.section || "") === k ? " selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
-        <label class="lh-field"><span class="lh-label">Instruction</span>
+      return `<label class="lh-field"><span class="lh-label">Instruction</span>
           <textarea class="fe-input" name="instruction" rows="4" maxlength="1000" placeholder="e.g. Always list each area treated with the units used.">${esc(d.instruction || "")}</textarea>
           <small class="fe-note">Write it as you'd tell a scribe. It can't change the layout of the notes or the treatment plan.</small></label>`;
     }
-    return `<label class="lh-field"><span class="lh-label">Words and spellings</span>
+      return `<label class="lh-field"><span class="lh-label">Words and spellings</span>
       <textarea class="fe-input" name="pairs" rows="6" placeholder="zeo min = Xeomin&#10;dys port = Dysport">${esc(d._pairLines ?? (d.pairs || []).map((p) => `${p.heard} = ${p.correct}`).join("\n"))}</textarea>
       <small class="fe-note">One per line: how it's often heard = how it should be written.</small></label>`;
   }
@@ -204,24 +218,46 @@ export function mountRecordingSettings(container, { staff = null } = {}) {
       <small class="fe-note">${esc(TOKENS_HELP)}</small></div>`;
   }
 
+  const nameField = (d) => `<label class="lh-field"><span class="lh-label">Name</span>
+    <input class="fe-input" name="rname" maxlength="100" value="${esc(d.name || "")}" placeholder="${esc(NAME_PH[d.type] || "")}" /></label>`;
+  const sectionField = (d) => `<label class="lh-field"><span class="lh-label">Section</span>
+    <select class="fb-select" name="section">${NOTE_SECTIONS.map(([k, l]) =>
+      `<option value="${k}"${(d.section || "") === k ? " selected" : ""}>${esc(l)}</option>`).join("")}</select></label>`;
+
   function editorHtml(d, isNew) {
-    const hint = (RULE_TYPES.find(([k]) => k === d.type) || [])[2] || "";
+    const acts = d.type === "words" || d.type === "topic";
     return `
-      <div class="lh-dialog-head"><h3>${isNew ? "New rule" : "Edit rule"}</h3>${isNew ? "" : `<p>${esc(typeName(d.type))}</p>`}</div>
-      ${isNew ? `<div class="lh-field"><span class="lh-label">Type of rule</span>
-        <div class="fe-seg rr-types">${RULE_TYPES.map(([k, l]) =>
-          `<label class="fe-seg-btn"><input type="radio" name="rtype" value="${k}"${d.type === k ? " checked" : ""} /><span>${esc(l)}</span></label>`).join("")}</div>
-        <small class="fe-note">${esc(hint)}</small></div>` : ""}
-      <label class="lh-field"><span class="lh-label">Name</span>
-        <input class="fe-input" name="rname" maxlength="100" value="${esc(d.name || "")}" placeholder="e.g. Pregnancy or breastfeeding" /></label>
-      ${typeFields(d)}
-      ${d.type === "words" || d.type === "topic" ? actionsHtml(d) : ""}
-      <label class="fe-check"><input type="checkbox" name="enabled"${d.enabled !== false ? " checked" : ""} /> Rule is on</label>
-      <p class="lh-error" role="alert" hidden></p>
-      <div class="lh-actions">
-        <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
-        <button type="submit" class="lh-btn is-primary">Save rule</button>
-      </div>`;
+      <header class="rr-dlg-head">
+        <div>
+          <h3>${isNew ? "New rule" : "Edit rule"}</h3>
+          <p>${isNew ? "Choose the kind of rule, then fill in the details." : `${TYPE_ICON[d.type] || ""}${esc(typeName(d.type))}`}</p>
+        </div>
+        <button type="button" class="rr-x" data-act="cancel" aria-label="Close">×</button>
+      </header>
+
+      <div class="rr-dlg-body">
+        ${isNew ? `<fieldset class="rr-typegrid"><legend class="lh-label">Type of rule</legend>
+          ${RULE_TYPES.map(([k, l]) => `
+            <label class="rr-typecard${d.type === k ? " is-on" : ""}">
+              <input type="radio" name="rtype" value="${k}"${d.type === k ? " checked" : ""} />
+              <span class="rr-typeicon">${TYPE_ICON[k]}</span>
+              <span class="rr-typetext"><strong>${esc(l)}</strong><small>${esc(TYPE_SHORT[k])}</small></span>
+            </label>`).join("")}
+        </fieldset>` : ""}
+
+        ${d.type === "instruction" ? `<div class="rr-row">${nameField(d)}${sectionField(d)}</div>` : nameField(d)}
+        ${typeFields(d)}
+        ${acts ? actionsHtml(d) : ""}
+        <p class="lh-error" role="alert" hidden></p>
+      </div>
+
+      <footer class="rr-dlg-foot">
+        <label class="rr-switch"><input type="checkbox" name="enabled"${d.enabled !== false ? " checked" : ""} /><span></span> Rule is on</label>
+        <div class="rr-foot-btns">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">Save rule</button>
+        </div>
+      </footer>`;
   }
 
   // Reads what's on the form; anything not on it keeps its value from `base`
@@ -255,7 +291,7 @@ export function mountRecordingSettings(container, { staff = null } = {}) {
       id: newRuleId(), type, name: "", enabled: true, words: [], topic: "", section: "", instruction: "", pairs: [],
       actions: type === "words" || type === "topic" ? defaultActions(type) : [],
     };
-    const dlg = openDialog('<form class="lh-form rr-form" novalidate></form>');
+    const dlg = openDialog('<form class="rr-form" novalidate></form>', "rr-dlg");
     const form = dlg.querySelector("form");
     const render = () => { form.innerHTML = editorHtml(draft, isNew); };
     render();

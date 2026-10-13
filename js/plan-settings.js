@@ -1,4 +1,4 @@
-// Inventory → Treatment plans: concern colours/names, and services → concerns + downtime (Admins).
+// System configuration → Treatment plans: concern colours/names, services → concerns + downtime, patient copy (Admins).
 import { listServicesSeen, serviceKey } from "./inventory-api.js";
 import {
   getPlanSettings, savePlanConcerns, saveServiceConcerns, suggestServiceConcerns,

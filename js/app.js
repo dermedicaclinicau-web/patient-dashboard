@@ -22,7 +22,7 @@ import { setPerms, can, isAdmin as isAdminNow, refreshAccess } from "./perms.js"
 import { initUpdateCheck } from "./updates.js";
 import { mountMyDashboard } from "./my-dashboard.js";
 import { mountReports } from "./reports.js";
-import { mountRecordingSettings } from "./recording-settings.js";
+import { mountSettings } from "./settings.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -225,7 +225,7 @@ const PAGES = {
   inventory: (el, param) => mountInventory(el, { param, staff: currentStaff }),
   reports: (el, param) => mountReports(el, { param, staff: currentStaff }),
   staff: (el) => mountStaffManager(el, { staff: currentStaff }),
-  settings: (el) => mountRecordingSettings(el, { staff: currentStaff }),
+  settings: (el, param) => mountSettings(el, { param, staff: currentStaff }),
 };
 
 // Which permission each page needs ("admin" = Admins only)
