@@ -24,7 +24,6 @@ import { mountMyDashboard } from "./my-dashboard.js";
 import { mountReports } from "./reports.js";
 import { mountSettings } from "./settings.js";
 import { initEndOfDay, teardownEndOfDay } from "./end-of-day.js";
-import { mountEndOfDaySettings } from "./end-of-day-admin.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -223,9 +222,7 @@ const PAGES = {
     const [, pid = ""] = String(param || "").split("/"); // #/ssp/new/<patientId>
     mountSspBuilder(el, { patientId: pid, staff: currentStaff, isAdmin: can("ssp.config") });
   },
-  tasks: (el, param) => (String(param || "").split("/")[0] === "end-of-day"
-    ? mountEndOfDaySettings(el, { staff: currentStaff })
-    : mountTaskManager(el, { param, isAdmin: can("tasks.build"), staff: currentStaff })),
+  tasks: (el, param) => mountTaskManager(el, { param, isAdmin: can("tasks.build"), staff: currentStaff }),
   inventory: (el, param) => mountInventory(el, { param, staff: currentStaff }),
   reports: (el, param) => mountReports(el, { param, staff: currentStaff }),
   staff: (el) => mountStaffManager(el, { staff: currentStaff }),

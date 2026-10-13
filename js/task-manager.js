@@ -16,6 +16,7 @@ import { mountOrderRequest } from "./order-request.js";
 import { can, isInjector } from "./perms.js";
 import { mountStockCount } from "./stock-count.js";
 import { renderCountCard } from "./count-card.js";
+import { mountEndOfDaySettings } from "./end-of-day-admin.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -33,6 +34,7 @@ const I = {
   count: ic('<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><polyline points="9 14 11 16 15 12"/>'),
   chev: ic('<polyline points="9 18 15 12 9 6"/>'),
   back: ic('<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>'),
+  moon: ic('<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>'),
 };
 
 const CATEGORIES = [
@@ -81,6 +83,7 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
         ${canCountAny() ? link("count", "#/tasks/count", I.count, "Opening count") : ""}
         ${link("history", "#/tasks/history", I.history, "Task history")}
         ${isAdmin ? link("types", "#/tasks/types", I.types, "Task types") : ""}
+        ${isAdmin ? link("end-of-day", "#/tasks/end-of-day", I.moon, "End of day") : ""}
       </nav>
       <div class="tm-main" data-role="main"></div>
     </div>`;
@@ -88,6 +91,11 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
   const main = root.querySelector('[data-role="main"]');
 
   if (view === "history") { mountTaskHistory(main, { patientId: sub }); return; }
+  if (view === "end-of-day") {
+    if (!isAdmin) { main.innerHTML = '<div class="tm-empty">Only admins can set up End of day.</div>'; return; }
+    mountEndOfDaySettings(main, { staff, embedded: true });
+    return;
+  }
   if (view === "types") {
     if (!isAdmin) { main.innerHTML = '<div class="tm-empty">Only admins can set up task types.</div>'; return; }
     mountTaskTypes(main, { staff });

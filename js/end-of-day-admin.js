@@ -4,9 +4,9 @@ import { can } from "./perms.js";
 import { confirmDialog } from "./dialog.js";
 import { escapeHtml as esc, showToast } from "./utils.js";
 
-export function mountEndOfDaySettings(container, { staff = null } = {}) {
+export function mountEndOfDaySettings(container, { staff = null, embedded = false } = {}) {
   const root = document.createElement("section");
-  root.className = "page";
+  root.className = embedded ? "eod-admin" : "page";
   container.replaceChildren(root);
   if (!can("tasks.build")) {
     root.innerHTML = '<div class="state"><strong>No access</strong>Ask an Admin for Build tasks access in Staff.</div>';
@@ -39,10 +39,14 @@ export function mountEndOfDaySettings(container, { staff = null } = {}) {
   function draw() {
     const c = st.cfg;
     root.innerHTML = `
-      <a class="ff-btn is-quiet eod-back" href="#/tasks">← Task Manager</a>
-      <div class="fb-head"><div><h2>End of day</h2>
-        <p class="muted">What staff are asked when they click <strong>End my day</strong> at the top of the screen.
-          Answers show in Reporting → Start &amp; end of day.</p></div></div>
+      ${embedded
+        ? `<h3 class="tm-h">End of day</h3>
+           <p class="muted tm-sub">What staff are asked when they click <strong>End my day</strong> under their profile.
+             Answers show in Reporting → Start &amp; end of day.</p>`
+        : `<a class="ff-btn is-quiet eod-back" href="#/tasks">← Task Manager</a>
+           <div class="fb-head"><div><h2>End of day</h2>
+             <p class="muted">What staff are asked when they click <strong>End my day</strong> under their profile.
+               Answers show in Reporting → Start &amp; end of day.</p></div></div>`}
       <section class="tb-card eod-set">
         <h4>Who sees End my day</h4>
         <div class="fe-seg">${[["all", "Everyone"], ["injectors", "Injectors only"]].map(([v, l]) =>
@@ -134,6 +138,17 @@ export function mountEndOfDaySettings(container, { staff = null } = {}) {
     draw();
   });
 
+    // Leaving with unsaved changes: ask first
+  const guard = (e) => {
+    if (!st.dirty || !root.isConnected) { window.removeEventListener("hashchange", guard); return; }
+    if (location.hash.startsWith("#/tasks/end-of-day")) return;
+    if (!confirm("You have unsaved End of day changes. Leave without saving?")) {
+      history.replaceState(null, "", e.oldURL);
+      e.stopImmediatePropagation();
+    } else window.removeEventListener("hashchange", guard);
+  };
+  window.addEventListener("hashchange", guard, true);
+  
   getEndOfDaySettings()
     .then((cfg) => { st.cfg = cfg; if (root.isConnected) draw(); })
     .catch((err) => {
