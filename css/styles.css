@@ -5054,3 +5054,8 @@ dialog.lh-dialog.eod-dlg{width:min(760px,95vw)}
 .kc-batch{display:grid;grid-template-columns:1fr 1fr;gap:.6rem;margin-top:.75rem;padding-top:.75rem;border-top:1px dashed var(--border)}
 .kc-list.is-off{opacity:.45}
 @media (max-width:560px){.kc-batch{grid-template-columns:1fr}}
+
+/* Edit start of day: beside End my day */
+.tb-day{gap:.4rem}
+.tb-pill.is-edit{background:#f8fafc;border-color:var(--border);color:#334155}
+.tb-pill.is-edit:hover{background:#eef2f7;border-color:#cbd5e1}

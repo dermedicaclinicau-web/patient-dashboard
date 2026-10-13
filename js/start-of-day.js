@@ -13,6 +13,7 @@ const svg = (p) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const SUN = svg('<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>');
 const MOON = svg('<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>');
+const EDIT = svg('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>');
 const ICO = {
   cal: svg('<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>'),
   task: svg('<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'),
@@ -226,7 +227,8 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
   loadStats(dlg, staff);
 }
 
-/* ---------- Your kit: "How many units remaining?" (blind: nothing is filled in) ---------- */
+/* ---------- Your kit: "How many units remaining?" (blind: nothin/* ---------- Your kit: "How many units remaining?" (blind: nothing is filled in) ---------- */
+// Every clinician ticked as carrying a kit counts it, every day, whether or not they're injecting.
 // kit.edit (correcting today's start): this morning's batch and expiry are filled in again; the units never are.
 
 function renderKit(dlg, staff, kit, close) {
@@ -236,7 +238,7 @@ function renderKit(dlg, staff, kit, close) {
   const products = kit.products.map(({ p }) => p);
   const submitLabel = edit ? "Save changes" : "Save and start my day";
   const earlierRow = (pid) => {
-    const it = edit && !edit.notInjecting ? (edit.items || []).find((x) => x.productId === pid) : null;
+    const it = edit ? (edit.items || []).find((x) => x.productId === pid) : null;
     const rows = (it && it.rows) || [];
     return rows.find((r) => r.inUse) || rows[0] || {};
   };
@@ -252,7 +254,6 @@ function renderKit(dlg, staff, kit, close) {
         const r = earlierRow(p.id);
         return { p, batch: r.batch || "", expiry: r.expiry || "" };
       }))}</div>
-      <label class="fe-check sod-none"><input type="checkbox" name="none" /> I'm not injecting today</label>
       <p class="lh-error" role="alert" hidden></p>
       <div class="sod-kit-acts">
         <button type="button" class="lh-btn is-quiet" data-act="later">${edit ? "Cancel" : "Remind me later"}</button>
@@ -262,16 +263,8 @@ function renderKit(dlg, staff, kit, close) {
 
   const form = card.querySelector("form");
   const err = card.querySelector(".lh-error");
-  const none = form.elements.none;
   const showErr = (m, focus) => { err.textContent = m; err.hidden = !m; if (focus) focus.focus(); };
   wireKitCount(card);
-  const syncOff = () => {
-    card.querySelector(".kc-list").classList.toggle("is-off", none.checked);
-    card.querySelectorAll(".kc input").forEach((i) => { i.disabled = none.checked; });
-  };
-  if (edit && edit.notInjecting) none.checked = true;
-  syncOff();
-  none.addEventListener("change", () => { syncOff(); showErr(""); });
   card.addEventListener("input", () => showErr(""));
   card.querySelector('[data-act="later"]').addEventListener("click", () => {
     close();
@@ -280,28 +273,22 @@ function renderKit(dlg, staff, kit, close) {
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const notInjecting = none.checked;
-    let items = [];
-    if (!notInjecting) {
-      const r = readKitCount(card, products);
-      if (r.error) { showErr(r.error, r.focus); return; }
-      items = r.items;
-    }
+    const r0 = readKitCount(card, products);
+    if (r0.error) { showErr(r0.error, r0.focus); return; }
 
     const btn = form.querySelector('[type="submit"]');
     btn.disabled = true;
     btn.textContent = "Saving…";
     showErr("");
     try {
-      const r = await saveKitDayStart({ notInjecting, items }, staff);
+      const r = await saveKitDayStart({ items: r0.items }, staff);
       window.dispatchEvent(new Event("kitday:changed"));
       close();
       const lead = edit ? "Start of day updated." : "Kit count saved.";
       const notes = [];
       if (r.overnight) notes.push(`${plural(r.overnight, "overnight difference")} sent to an admin`);
       if (r.unknown) notes.push(`${plural(r.unknown, "batch")} not in your kit records yet (an admin will check)`);
-      showToast(r.notInjecting ? (edit ? "Start of day updated: not injecting today." : "Noted: not injecting today. Have a great day!")
-        : notes.length ? `${lead} ${notes.join(" · ")}.`
+      showToast(notes.length ? `${lead} ${notes.join(" · ")}.`
         : r.differences ? `${lead} ${plural(r.differences, "difference")} will be reviewed.`
         : edit ? "Start of day updated. Everything matched." : "Kit count saved. Everything matched. Have a great day!");
     } catch (ex) {
@@ -314,7 +301,7 @@ function renderKit(dlg, staff, kit, close) {
     }
   });
 
-  const first = card.querySelector('[data-f="units"]:not(:disabled)');
+  const first = card.querySelector('[data-f="units"]');
   if (first) setTimeout(() => first.focus(), 50);
 }
 
@@ -460,8 +447,36 @@ function setPending(on) {
   if (b.parentElement) b.parentElement.classList.toggle("sod-pending", on);   // "End my day" waits until the day has started
 }
 
-// "Edit start of day" in the profile menu
+// "Edit start of day": a pill beside "End my day", and the item in the profile menu.
+// Shown from the moment the day is started until it's ended.
+function editPill() {
+  let b = document.getElementById("sod-edit-btn");
+  if (!b) {
+    const host = document.querySelector(".tb-day");
+    if (!host) return null;
+    b = document.createElement("button");
+    b.type = "button";
+    b.id = "sod-edit-btn";
+    b.hidden = true;
+    host.insertBefore(b, document.getElementById("eod-btn"));
+  }
+  if (!b.dataset.wired) {
+    b.dataset.wired = "1";
+    b.className = "tb-pill is-edit";
+    b.title = "Got this morning's kit count wrong? Fix it here";
+    b.innerHTML = `${EDIT}<span>Edit start of day</span>`;
+    b.addEventListener("click", async () => {
+      if (!btnStaff || b.disabled) return;
+      b.disabled = true;
+      try { await openStartOfDayEdit(btnStaff); } finally { b.disabled = false; }
+    });
+  }
+  return b;
+}
+
 function setEditable(on) {
+  const pill = editPill();
+  if (pill) pill.hidden = !on;
   const it = document.getElementById("me-sod-edit");
   if (!it) return;
   if (!it.dataset.wired) {

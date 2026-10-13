@@ -71,12 +71,12 @@
         <!-- Start appointment / live recording timer (filled by recording-bar.js) -->
         <div id="tb-rec" class="tb-rec" hidden></div>
 
-        <!-- Start my day → End my day → Day ended -->
+        <!-- Start my day → (Edit start of day + End my day) → Day ended -->
         <div class="tb-day">
           <button type="button" id="sod-btn" class="tb-pill is-start" hidden></button>
+          <button type="button" id="sod-edit-btn" class="tb-pill is-edit" hidden></button>
           <button type="button" id="eod-btn" class="tb-pill" hidden></button>
         </div>
-
         <!-- Profile chip and its menu -->
         <div class="tb-me">
           <button type="button" id="me-btn" class="tb-me-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="me-menu">

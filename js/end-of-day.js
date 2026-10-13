@@ -119,8 +119,7 @@ async function openEndOfDay() {
     [cfg, day] = await Promise.all([getEndOfDaySettings(), getMyKitDay()]);
     setLabel(!!(day && day.end), day && day.end ? day.end.at : null); // also resets the label after midnight
     if (day && day.end) { if (dlg.open) summary(dlg, day); return; }
-    const notInjecting = !!(day && day.start && day.start.notInjecting);
-    if (cfg.kitCheck && staff.injector === true && !notInjecting) kit = await kitForEnd(day);
+    if (cfg.kitCheck && staff.injector === true) kit = await kitForEnd(day);
   } catch (err) {
     console.error("End of day failed to load:", err);
     if (dlg.open) dlg.innerHTML = `<div class="lh-form"><div class="lh-dialog-head"><h3>End of day</h3></div>
