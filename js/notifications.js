@@ -1,5 +1,5 @@
 // Inventory → Notifications: "when X happens, email these people" rules and regular digests.
-import { INV_CATEGORIES, catLabel } from "./inventory-api.js";
+import { INV_CATEGORIES, catLabel, getCountSettings, COUNT_DUE_DEFAULT } from "./inventory-api.js";
 import {
   NOTIFY_EVENTS, DIGEST_SECTIONS, listRules, saveRule, deleteRule, setRuleEnabled, listNotifyLog, testRule,
 } from "./notify-api.js";
@@ -7,10 +7,13 @@ import { fetchStaffList } from "./task-types.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 
+
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const SKELETON = '<div class="skeleton" style="height:260px;border-radius:14px"></div>';
-const eventOf = (k) => NOTIFY_EVENTS.find((e) => e.key === k) || NOTIFY_EVENTS[0];
+// An event this version doesn't know is kept as it is (never quietly changed to the first one)
+const eventOf = (k) => NOTIFY_EVENTS.find((e) => e.key === k)
+  || { key: k, label: `Unknown event (${k || "none"})`, conds: [], involved: "", unknown: true };
 const timeText = (t) => {
   const [h, m] = String(t || "08:00").split(":").map(Number);
   return `${h % 12 || 12}:${String(m).padStart(2, "0")} ${h < 12 ? "am" : "pm"}`;
@@ -25,12 +28,18 @@ export async function renderNotifications(body, { staff }) {
   let rules = [];
   let staffList = [];
   let log = [];
+  let dueBy = COUNT_DUE_DEFAULT;
   const nameOf = (id) => (staffList.find((s) => s.id === id) || {}).name || "Unknown staff";
   const roles = () => [...new Set(["Admin", "Clinician", "Reception", ...staffList.map((s) => s.role).filter(Boolean)])];
 
   async function load() {
     try {
-      [rules, staffList, log] = await Promise.all([listRules(), fetchStaffList().catch(() => []), listNotifyLog(40).catch(() => [])]);
+      let cfg;
+      [rules, staffList, log, cfg] = await Promise.all([
+        listRules(), fetchStaffList().catch(() => []), listNotifyLog(40).catch(() => []),
+        getCountSettings().catch(() => ({ dueBy: COUNT_DUE_DEFAULT })),
+      ]);
+      dueBy = cfg.dueBy;
       if (body.isConnected) draw();
     } catch (err) {
       console.error("Notifications failed:", err);
@@ -40,7 +49,9 @@ export async function renderNotifications(body, { staff }) {
 
   /* ---------- Plain-words summaries ---------- */
   const whenText = (r) => {
-    if (r.kind !== "digest") return eventOf(r.event).label;
+    if (r.kind !== "digest") {
+      return r.event === "count.overdue" ? `${eventOf(r.event).label} (${timeText(dueBy)})` : eventOf(r.event).label;
+    }
     const t = timeText(r.schedule.time);
     return r.schedule.freq === "weekly" ? `Every ${DAYS[r.schedule.day]} at ${t}`
       : r.schedule.freq === "weekdays" ? `Weekdays at ${t}` : `Every day at ${t}`;
@@ -134,10 +145,13 @@ export async function renderNotifications(body, { staff }) {
 
         <div data-show="event">
           <label class="lh-field"><span class="lh-label">When</span>
-            <select class="fb-select" name="event">${NOTIFY_EVENTS.map((e) =>
-              `<option value="${e.key}"${r.event === e.key ? " selected" : ""}>${esc(e.label)}</option>`).join("")}</select></label>
-          ${r.event === "stock.low" || isNew ? '<small class="fe-note" data-role="lowhint">Low stock is checked every hour. Each product alerts once when it drops to its reorder level, and again only after it\'s been restocked.</small>' : ""}
-        </div>
+            <select class="fb-select" name="event">${(NOTIFY_EVENTS.some((e) => e.key === r.event) ? NOTIFY_EVENTS : [eventOf(r.event), ...NOTIFY_EVENTS]).map((e) =>
+              `<option value="${esc(e.key)}"${r.event === e.key ? " selected" : ""}>${esc(e.label)}</option>`).join("")}</select></label>
+            ${r.event === "stock.low" || isNew ? '<small class="fe-note" data-role="lowhint">Low stock is checked every hour. Each product alerts once when it drops to its reorder level, and again only after it\'s been restocked.</small>' : ""}
+          <small class="fe-note" data-role="counthint">Checked once a day at ${esc(timeText(dueBy))}, the due-by time set in
+            Task Manager → Opening count (Manage inventory can change it there). Only sent on days with appointments when the clinic isn't closed,
+            and lists what's still to count.</small>
+            </div>
 
         <div data-show="digest">
           <div class="inv-two">
@@ -216,6 +230,8 @@ export async function renderNotifications(body, { staff }) {
       dlg.querySelector('[data-role="dayrow"]').hidden = f.freq.value !== "weekly";
       const hint = dlg.querySelector('[data-role="lowhint"]');
       if (hint) hint.hidden = f.event.value !== "stock.low";
+      const ch = dlg.querySelector('[data-role="counthint"]');
+      if (ch) ch.hidden = f.event.value !== "count.overdue";
     };
     sync();
     form.addEventListener("change", sync);
@@ -232,6 +248,11 @@ export async function renderNotifications(body, { staff }) {
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       err.hidden = true;
+      if (form.querySelector('[name="kind"]:checked').value === "event" && eventOf(f.event.value).unknown) {
+        err.textContent = "This rule's event isn't available in this version of the portal. Choose another event, or refresh the page.";
+        err.hidden = false;
+        return;
+      }
       const kind = form.querySelector('[name="kind"]:checked').value;
       const secs = new Set(ticked("sec"));
       const statuses = ticked("status");

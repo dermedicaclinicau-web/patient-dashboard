@@ -10,13 +10,15 @@ export const NOTIFY_EVENTS = [
   { key: "request.created", label: "A new order request is sent", involved: "The person who asked", conds: ["urgentOnly", "loc", "categories"] },
   { key: "request.updated", label: "An order request is ordered or declined", involved: "The person who asked", conds: ["statuses"] },
   { key: "stock.arrived", label: "Stock arrives (a delivery is received)", involved: "Whoever requested it", conds: ["loc", "categories"] },
-  { key: "stock.low", label: "A product drops to its reorder level", involved: "", conds: ["loc", "categories"] },
+  { key: "stock.low", label: "A product drops to its reorder level", conds: ["loc", "categories"], involved: "" },
+  { key: "count.overdue", label: "The opening count isn't finished by its due time", conds: ["loc", "categories"], involved: "" },
   { key: "count.difference", label: "A stock count finds differences", involved: "Whoever did the count", conds: [] },
   { key: "usage.short", label: "A treatment is saved short (not enough stock)", involved: "The clinician who saved it", conds: ["categories"] },
   { key: "loan.disputed", label: "A borrow between injectors is disputed", involved: "Both injectors", conds: [] },
   { key: "investigation.opened", label: "A count doesn't match digital (a recount is needed)", conds: ["loc", "categories"], involved: "" },
   { key: "investigation.confirmed", label: "A recount confirms a difference (admin review needed)", conds: ["loc", "categories"],
     involved: "The people who counted it" },
+    
 ];
 export const DIGEST_SECTIONS = [
   ["low", "Low stock"], ["expiring", "Expiring soon"], ["requests", "Open order requests"],

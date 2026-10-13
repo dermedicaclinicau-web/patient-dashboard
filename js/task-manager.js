@@ -13,8 +13,9 @@ import { mountTaskRunner } from "./task-runner.js";
 import { mountTaskHistory } from "./task-history.js";
 import { showToast } from "./utils.js";
 import { mountOrderRequest } from "./order-request.js";
-import { can } from "./perms.js";
+import { can, isInjector } from "./perms.js";
 import { mountStockCount } from "./stock-count.js";
+import { renderCountCard } from "./count-card.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -29,6 +30,7 @@ const I = {
   mail: ic('<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>'),
   doc: ic('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>'),
   box: ic('<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/>'),
+  count: ic('<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><polyline points="9 14 11 16 15 12"/>'),
   chev: ic('<polyline points="9 18 15 12 9 6"/>'),
   back: ic('<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>'),
 };
@@ -44,6 +46,8 @@ const CATEGORIES = [
     blurb: "Ask the ordering team for stock: products running low, or something new." },
   ];
 
+  // Counting access (Shelf / JT storage) or an injector's kit
+const canCountAny = () => can("inventory.count") || can("inventory.order") || can("inventory.manage") || isInjector();
 export function mountTaskManager(container, { param = "", isAdmin = false, staff = null } = {}) {
   const parts = String(param || "").split("/").filter(Boolean);
   const view = parts[0] || "new";
@@ -74,6 +78,7 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
     <div class="tm-layout">
       <nav class="tm-menu" aria-label="Task Manager">
         ${link("new", "#/tasks/new", I.plus, "Create new task")}
+        ${canCountAny() ? link("count", "#/tasks/count", I.count, "Opening count") : ""}
         ${link("history", "#/tasks/history", I.history, "Task history")}
         ${isAdmin ? link("types", "#/tasks/types", I.types, "Task types") : ""}
       </nav>
@@ -89,7 +94,7 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
     return;
   }
   if (sub && CATEGORIES.some((c) => c.key === sub)) { renderCategory(main, sub, isAdmin); return; }
-  renderCategories(main);
+  renderCategories(main, staff);
 }
 
 /* ===================== Create new task: choose a category ===================== */
@@ -100,8 +105,9 @@ function steps(active) {
     `<li class="${i < active ? "is-done" : i === active ? "is-on" : ""}"><span>${i + 1}</span>${n}</li>`).join("")}</ol>`;
 }
 
-function renderCategories(main) {
+function renderCategories(main, staff = null) {
   main.innerHTML = `
+    ${canCountAny() ? '<div class="tm-today" data-role="count-card"></div>' : ""}
     ${steps(0)}
     <h3 class="tm-h">What kind of task?</h3>
     <div class="tm-cats">${CATEGORIES.filter((c) => !c.perm || [].concat(c.perm).some((k) => can(k))).map((c) => `
@@ -112,6 +118,8 @@ function renderCategories(main) {
         <span class="tm-cat-go">${I.chev}</span>
       </a>`).join("")}
     </div>`;
+  const card = main.querySelector('[data-role="count-card"]');
+  if (card) renderCountCard(card, { staff });
 }
 
 /* ===================== Create new task: choose a task ===================== */
