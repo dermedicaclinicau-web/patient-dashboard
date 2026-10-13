@@ -7,6 +7,7 @@ import { visibleIds } from "./form-conditions.js";
 import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing, textBlockHtml, clinicianParts } from "./form-fields.js";
 import { cleanRichHtml } from "./rich-html.js";
 import { markSummary } from "./marking-sets.js";
+import { buildFormDocument, niceDate } from "./form-document.js";
 
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
 const LOGO_RE = /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/;
