@@ -1,0 +1,95 @@
+// Chat: Help (staff → the admins) and messages between staff.
+// chats/<id>: one per conversation (help__<staffUid>, or dm__<uidA>__<uidB> sorted), with its messages under it.
+// Members read and write their own chats; Admins can read every chat and answer Help.
+import { db, auth } from "./firebase-config.js";
+import {
+  collection, doc, getDocs, onSnapshot, query, where, orderBy, limitToLast, writeBatch, updateDoc, serverTimestamp,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+const toDate = (v) => (v && typeof v.toDate === "function" ? v.toDate() : null);
+const uid = () => {
+  const u = auth.currentUser && auth.currentUser.uid;
+  if (!u) throw new Error("Your session has ended. Log in again.");
+  return u;
+};
+const PAGE_RE = /^#\/[\w\-/%.~]*$/;
+
+export const helpId = (staffUid) => `help__${staffUid}`;
+export const dmId = (a, b) => `dm__${[a, b].sort().join("__")}`;
+// Only links inside the portal (#/…) are kept
+export const safePage = (p) => (p && PAGE_RE.test(String(p.hash || ""))
+  ? { hash: String(p.hash).slice(0, 300), label: String(p.label || "").slice(0, 80) } : null);
+
+function normChat(d) {
+  const x = d.data({ serverTimestamps: "estimate" }) || {};
+  const readAt = {};
+  Object.entries(x.readAt || {}).forEach(([k, v]) => { readAt[k] = toDate(v); });
+  return {
+    id: d.id, kind: x.kind === "help" ? "help" : "dm",
+    members: Array.isArray(x.members) ? x.members.map(String) : [], names: x.names || {},
+    lastText: String(x.lastText || ""), lastAt: toDate(x.lastAt), lastBy: String(x.lastBy || ""),
+    lastByName: String(x.lastByName || ""), status: x.status === "sorted" ? "sorted" : "open", readAt,
+  };
+}
+
+// Someone else wrote last, after I last read it
+export const isUnread = (c, me) => !!c.lastAt && c.lastBy !== me && (!c.readAt[me] || c.readAt[me] < c.lastAt);
+
+// My conversations, live. Admins also get every Help conversation.
+export function watchChats(me, admin, onChange, onError = () => {}) {
+  const col = collection(db, "chats");
+  let mine = new Map();
+  let help = new Map();
+  const emit = () => onChange([...new Map([...help, ...mine]).values()]);
+  const subs = [onSnapshot(query(col, where("members", "array-contains", me)),
+    (s) => { mine = new Map(s.docs.map((d) => [d.id, normChat(d)])); emit(); }, onError)];
+  if (admin) {
+    subs.push(onSnapshot(query(col, where("kind", "==", "help")),
+      (s) => { help = new Map(s.docs.map((d) => [d.id, normChat(d)])); emit(); }, onError));
+  }
+  return () => subs.forEach((u) => u());
+}
+
+// Admins: every conversation, including chats between other staff
+export async function listAllChats() {
+  const s = await getDocs(collection(db, "chats"));
+  return s.docs.map(normChat);
+}
+
+// The latest 150 messages of one conversation, live, oldest first
+export function watchMessages(chatId, onChange, onError = () => {}) {
+  return onSnapshot(query(collection(db, "chats", chatId, "messages"), orderBy("at"), limitToLast(150)), (s) => {
+    onChange(s.docs.map((d) => {
+      const x = d.data({ serverTimestamps: "estimate" }) || {};
+      return { id: d.id, text: String(x.text || ""), by: String(x.by || ""), byUid: String(x.byUid || ""),
+        at: toDate(x.at), page: safePage(x.page) };
+    }));
+  }, onError);
+}
+
+// The conversation (created on the first message) and the message, together
+export async function sendMessage(chat, text, page, staff) {
+  const me = uid();
+  const by = String((staff && staff.name) || "").slice(0, 120);
+  const body = String(text || "").trim().slice(0, 4000);
+  if (!body) throw new Error("Type a message first.");
+  const cRef = doc(db, "chats", chat.id);
+  const b = writeBatch(db);
+  b.set(cRef, {
+    kind: chat.kind, members: chat.members, names: { ...(chat.names || {}), [me]: by },
+    lastText: body.slice(0, 200), lastAt: serverTimestamp(), lastBy: me, lastByName: by,
+    readAt: { [me]: serverTimestamp() }, updatedAt: serverTimestamp(),
+    ...(chat.kind === "help" && chat.members[0] === me ? { status: "open" } : {}),   // a new Help message reopens it
+  }, { merge: true });
+  b.set(doc(collection(cRef, "messages")), { text: body, by, byUid: me, at: serverTimestamp(), page: safePage(page) });
+  await b.commit();
+}
+
+export async function markRead(chatId) {
+  await updateDoc(doc(db, "chats", chatId), { [`readAt.${uid()}`]: serverTimestamp() });
+}
+
+// Admins: a Help conversation is "sorted", or reopened
+export async function setChatStatus(chatId, status) {
+  await updateDoc(doc(db, "chats", chatId), { status: status === "sorted" ? "sorted" : "open", updatedAt: serverTimestamp() });
+}

@@ -1,5 +1,5 @@
 ﻿{
-    "version":  "20261014-070952",
+    "version":  "20261014-072636",
     "files":  [
                   "./js/aftercare-api.js",
                   "./js/aftercare-bank.js",
@@ -11,6 +11,8 @@
                   "./js/billing-rx-view.js",
                   "./js/calendar-badges.js",
                   "./js/calendar.js",
+                  "./js/chat-api.js",
+                  "./js/chat.js",
                   "./js/clinical-history-view.js",
                   "./js/clinical-profile.js",
                   "./js/consumables-field.js",

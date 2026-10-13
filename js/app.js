@@ -26,6 +26,7 @@ import { mountSettings } from "./settings.js";
 import { initEndOfDay, teardownEndOfDay } from "./end-of-day.js";
 import { mountStaffDays } from "./staff-days.js";
 import { initTopbar, closeTopbarMenu } from "./topbar.js";
+import { initChat, teardownChat } from "./chat.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -330,6 +331,7 @@ watchAuth((staff) => {
     if (sameUser) {
       initEndOfDay(staff); // access may have changed (e.g. made an injector)
       refreshStartOfDayButton(staff);
+      initChat(staff);   // picks up a change to Admin access
       // A refreshed login token (access changed): keep the current page unless it's no longer allowed
       if (!pageAllowed(currentPage())) router();
       return;
@@ -340,6 +342,7 @@ watchAuth((staff) => {
     router();
     maybeShowStartOfDay(staff);
     initEndOfDay(staff, { onLogout: () => els.logoutBtn.click() }); // runs the usual "recording in progress" checks
+    initChat(staff);
     clearInterval(accessTimer);
     accessTimer = setInterval(checkAccess, 5 * 60 * 1000);
     lastAccessCheck = 0;
@@ -351,6 +354,7 @@ watchAuth((staff) => {
     clearPatientCache();
     closeStartOfDay();
     teardownEndOfDay();
+    teardownChat();
     hideStartOfDayButton();
     closeTopbarMenu();
     suspendRecorder(); // stops the mic; any audio stays on this device for upload at next login
