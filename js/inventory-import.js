@@ -11,6 +11,7 @@ const errText = (err) => (err && err.code === "permission-denied"
   : err && err.message ? err.message : "Couldn't save.");
 
 // Column headings (aliases are also recognised, in any order, any capitals)
+// Column headings (aliases are also recognised, in any order, any capitals)
 const COLS = [
   { key: "name", label: "Name", alias: ["product", "product name", "item"] },
   { key: "category", label: "Category" },
@@ -25,6 +26,8 @@ const COLS = [
   { key: "orderUnit", label: "Bought as", alias: ["order unit"] },
   { key: "packSize", label: "Pack size", alias: ["per box", "how many in each"] },
   { key: "usage", label: "Used from", alias: ["usage"] },
+  { key: "perUse", label: "Amount per use", alias: ["per use", "typical amount per use"] },
+  { key: "openDays", label: "Discard after (days)", alias: ["discard after opening", "open days", "use within days"] },
   { key: "cost", label: "Cost" },
   { key: "price", label: "Retail price", alias: ["price", "rrp"] },
   { key: "tracked", label: "Batch and expiry", alias: ["tracked", "batch tracked", "batch & expiry"] },
@@ -34,6 +37,10 @@ const COLS = [
   { key: "countFreq", label: "Count", alias: ["count frequency", "opening count"] },
   { key: "countDay", label: "Count day" },
   { key: "countWhere", label: "Count in" },
+  { key: "shelfPos", label: "Shelf position", alias: ["shelf location", "where on shelf", "shelf pos"] },
+  { key: "jtPos", label: "JT position", alias: ["jt location", "where in jt", "jt pos"] },
+  { key: "investigate", label: "Investigate", alias: ["when a count doesn't match", "investigation"] },
+  { key: "investigateOver", label: "Investigate over $", alias: ["investigate over", "worth more than"] },
   { key: "active", label: "Active" },
   { key: "notes", label: "Notes" },
   { key: "shelfQty", label: "Shelf qty", alias: ["shelf", "shelf stock"] },
@@ -45,14 +52,19 @@ const COLS = [
 const EXAMPLES = [
   { name: "Xeomin 100 units", category: "Injectables", brand: "Merz", supplier: "Merz Aesthetics", altSuppliers: "Medical Supplies Co | MS-XEO100 | 310", stockUnit: "vial", dosePer: "100",
     doseUnit: "units", orderUnit: "vial", packSize: "1", usage: "Kit", cost: "300", tracked: "Yes", batchLabel: "Lot",
-    reShelf: "2", countFreq: "Daily", countWhere: "Both", active: "Yes", shelfQty: "4", batch: "ABC123", expiry: "31/03/2027" },
+    reShelf: "2", countFreq: "Daily", countWhere: "Both", shelfPos: "Fridge, top", jtPos: "Cabinet 1", investigate: "Always",
+    active: "Yes", shelfQty: "4", batch: "ABC123", expiry: "31/03/2027" },
   { name: "Xeomin 100 units", jtQty: "6", batch: "DEF456", expiry: "30/06/2027" },
   { name: "Belotero Balance 1mL", category: "Injectables", brand: "Merz", supplier: "Merz Aesthetics", stockUnit: "syringe", dosePer: "1",
     doseUnit: "mL", orderUnit: "syringe", packSize: "1", usage: "Shelf", cost: "180", tracked: "Yes", reShelf: "3",
-    countFreq: "Weekly", countDay: "Monday", active: "Yes", shelfQty: "5", batch: "BB2201", expiry: "11/2027" },
+    countFreq: "Weekly", countDay: "Monday", shelfPos: "Fridge, middle", active: "Yes", shelfQty: "5", batch: "BB2201", expiry: "11/2027" },
+  { name: "Numbing cream 30g", category: "Treatment consumables", supplier: "Medical Supplies Co", stockUnit: "tube", dosePer: "30",
+    doseUnit: "g", orderUnit: "tube", packSize: "1", usage: "Shared", perUse: "2", openDays: "28", cost: "45", tracked: "No",
+    reShelf: "2", countFreq: "Weekly", countDay: "Friday", shelfPos: "B3", investigate: "Over", investigateOver: "30",
+    active: "Yes", shelfQty: "3" },
   { name: "Needles 30G 13mm", category: "Treatment consumables", supplier: "Medical Supplies Co", stockUnit: "needle",
     orderUnit: "box", packSize: "100", usage: "Shelf", cost: "25", tracked: "No", reShelf: "100", countFreq: "Never",
-    active: "Yes", shelfQty: "250" },
+    shelfPos: "C1", investigate: "Never", active: "Yes", shelfQty: "250" },
 ];
 
 /* ---------- CSV ---------- */
@@ -109,13 +121,20 @@ function catKey(s) {
   if (n.startsWith("general") || n.startsWith("consum")) return "general";
   return null;
 }
-const usageKey = (s) => (/kit/i.test(s) ? "kit" : /^(shelf|storage|one per patient|patient)/i.test(s.trim()) ? "storage" : null);
-function freqKey(s) {
+const usageKey = (s) => {
+  const t = String(s || "").trim();
+  if (/kit/i.test(t)) return "kit";
+  if (/^(shared|share|opened|open)/i.test(t)) return "shared";
+  if (/^(shelf|storage|one per patient|patient)/i.test(t)) return "storage";
+  return null;
+};
+// "Default" (follow the category), Always, Over (a dollar amount) or Never
+function investKey(s) {
   const n = norm(s);
-  if (!n || /^(never|no|none|notcounted)$/.test(n)) return "never";
-  if (/^(daily|everyday|day)$/.test(n)) return "daily";
-  if (/^(weekly|week|onceaweek)$/.test(n)) return "weekly";
-  if (/^(monthly|month|onceamonth)$/.test(n)) return "monthly";
+  if (/^(default|category|categorydefault)$/.test(n)) return "";
+  if (/^(always|yes)$/.test(n)) return "always";
+  if (/^(over|whenover|ifover|worthmorethan)$/.test(n)) return "over";
+  if (/^(never|no)$/.test(n)) return "never";
   return null;
 }
 function whereKey(s) {
@@ -179,6 +198,8 @@ export function exportProductsCsv(products, suppliers) {
   const supName = (id) => (suppliers.find((s) => s.id === id) || {}).name || "";
   const freq = { never: "Never", daily: "Daily", weekly: "Weekly", monthly: "Monthly" };
   const where = { both: "Both", shelf: "Shelf", jt: "JT" };
+  const usage = { kit: "Kit", shared: "Shared", storage: "Shelf" };
+  const invest = { always: "Always", over: "Over", never: "Never" };
   const rows = products.map((p) => ({
     name: p.name, category: catLabel(p.category), brand: p.brand, supplier: supName(p.supplierId), supplierCode: p.supplierCode,
     altSuppliers: productSuppliers(p).filter((t) => !t.main).map((t) => {
@@ -187,11 +208,17 @@ export function exportProductsCsv(products, suppliers) {
       return parts.join(" | ");
     }).join("; "),
     barcode: p.barcode, stockUnit: p.stockUnit, dosePer: p.dosePer ?? "", doseUnit: p.doseUnit, orderUnit: p.orderUnit,
-    packSize: p.packSize, usage: p.usage === "kit" ? "Kit" : "Shelf", cost: p.cost ?? "", price: p.price ?? "",
+    packSize: p.packSize, usage: usage[p.usage] || "Shelf",
+    perUse: p.usage === "shared" ? p.perUse ?? "" : "", openDays: p.usage === "shared" ? p.openDays ?? "" : "",
+    cost: p.cost ?? "", price: p.price ?? "",
     tracked: p.tracked ? "Yes" : "No", batchLabel: p.batchLabel === "Batch" ? "" : p.batchLabel,
     reShelf: p.reorder.shelf ?? "", reJt: p.reorder.jt ?? "", countFreq: freq[p.countFreq] || "Never",
     countDay: p.countFreq === "weekly" ? WEEKDAYS[p.countDay] || "" : p.countFreq === "monthly" ? (p.countDay === "last" ? "Last" : String(p.countDay ?? "")) : "",
-    countWhere: p.countFreq === "never" ? "" : where[p.countWhere] || "Both", active: p.active ? "Yes" : "No", notes: p.notes,
+    countWhere: p.countFreq === "never" ? "" : where[p.countWhere] || "Both",
+    shelfPos: p.shelfPos || "", jtPos: p.jtPos || "",
+    investigate: invest[p.investigate] || "Default",
+    investigateOver: p.investigate === "over" ? p.investigateOver ?? "" : "",
+    active: p.active ? "Yes" : "No", notes: p.notes,
   }));
   const d = new Date();
   const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -240,11 +267,11 @@ function buildPlan(text, products, suppliers, opts) {
         const c = catKey(v("category"));
         if (c) put("category", c); else it.notes.push(`Unknown category "${v("category")}"`);
       }
-      ["brand", "supplierCode", "barcode", "stockUnit", "doseUnit", "orderUnit", "batchLabel", "notes"].forEach((k) => { if (v(k)) put(k, v(k)); });
+      ["brand", "supplierCode", "barcode", "stockUnit", "doseUnit", "orderUnit", "batchLabel", "notes", "shelfPos", "jtPos"].forEach((k) => { if (v(k)) put(k, v(k)); });
       if (v("name") && it.existing && it.existing.name !== name) put("name", name);
       if (!it.existing) put("name", name);
-      [["dosePer", false], ["cost", false], ["price", false], ["packSize", true]].forEach(([k, whole]) => {
-        const n = numVal(v(k));
+      [["dosePer", false], ["cost", false], ["price", false], ["packSize", true], ["perUse", false], ["investigateOver", false], ["openDays", true]].forEach(([k, whole]) => {
+       const n = numVal(v(k));
         if (n === undefined) return;
         if (Number.isNaN(n) || (whole && (!Number.isInteger(n) || n < 1))) it.errors.push(`${label(k)} "${v(k)}" isn't a valid number`);
         else put(k, n);
@@ -262,9 +289,10 @@ function buildPlan(text, products, suppliers, opts) {
         const b = yesNo(v(k));
         if (b === null) it.errors.push(`${label(k)} should be Yes or No, not "${v(k)}"`); else put(f, b);
       });
-      if (v("usage")) { const u = usageKey(v("usage")); if (u) put("usage", u); else it.errors.push(`Used from should be Shelf or Kit, not "${v("usage")}"`); }
+      if (v("usage")) { const u = usageKey(v("usage")); if (u) put("usage", u); else it.errors.push(`Used from should be Shelf, Shared or Kit, not "${v("usage")}"`); }
       if (v("countFreq")) { const f = freqKey(v("countFreq")); if (f) put("countFreq", f); else it.errors.push(`Count should be Never, Daily, Weekly or Monthly, not "${v("countFreq")}"`); }
       if (v("countWhere")) { const w = whereKey(v("countWhere")); if (w) put("countWhere", w); else it.errors.push(`Count in should be Both, Shelf or JT, not "${v("countWhere")}"`); }
+      if (v("investigate")) { const iv = investKey(v("investigate")); if (iv !== null) put("investigate", iv); else it.errors.push(`Investigate should be Default, Always, Over or Never, not "${v("investigate")}"`); }
       if (v("altSuppliers")) {
         if (/^(none|-)$/i.test(v("altSuppliers"))) put("altSuppliers", []);
         else {
@@ -326,6 +354,8 @@ function buildPlan(text, products, suppliers, opts) {
     }
     const clean = cleanProduct(data);
     if (clean.usage === "kit" && !clean.dosePer) it.errors.push("Kit products need an Amount in each (e.g. 100 units)");
+    if (clean.usage === "shared" && clean.perUse && !clean.dosePer) it.errors.push("Shared products with an Amount per use also need an Amount in each (e.g. 30 g)");
+    if (clean.usage === "shared" && clean.perUse && clean.dosePer && clean.perUse > clean.dosePer) it.errors.push("Amount per use is more than a whole one holds");
 
     // Opening stock
     let stockOps = [];
@@ -477,12 +507,17 @@ export function openProductImport({ products, suppliers, staff, onDone }) {
               <li><strong>Name</strong> is the only required column. A name that matches an existing product updates it; blank cells leave its details as they are.</li>
               <li><strong>Category</strong>: ${INV_CATEGORIES.map((c) => esc(c.label)).join(", ")}.</li>
               <li><strong>Supplier</strong> is the main one. <strong>Other suppliers</strong>: <em>Name | their code | their price</em>, several separated by <em>;</em> (code and price optional). Type <em>None</em> to clear them.</li>
-              <li><strong>Given as</strong> what staff take off the Shelf (vial, syringe, needle). <strong>Bought as</strong> and <strong>Pack size</strong> when it comes boxed (box of 100).</li>
-              <li><strong>Amount in each</strong> and <strong>Measured in</strong> for injectables (100 units, 1 mL). <strong>Used from</strong>: Shelf, or Kit for products carried in injectors' kits.</li>
-              <li><strong>Batch and expiry</strong>: Yes or No. <strong>Count</strong>: Never, Daily, Weekly (Count day: Monday…) or Monthly (Count day: 1–28 or Last).</li>
+              <li><strong>Given as</strong> what staff take off the Shelf (vial, syringe, tube). <strong>Bought as</strong> and <strong>Pack size</strong> when it comes boxed (box of 100).</li>
+              <li><strong>Amount in each</strong> and <strong>Measured in</strong> for injectables and shared products (100 units, 1 mL, 30 g).</li>
+              <li><strong>Used from</strong>: <em>Shelf</em> (one per patient), <em>Shared</em> (opened and shared across patients, e.g. numbing cream) or <em>Kit</em> (carried in injectors' kits).
+                Shared products can also have <strong>Amount per use</strong> and <strong>Discard after (days)</strong>.</li>
+              <li><strong>Batch and expiry</strong>: Yes or No. <strong>Count</strong>: Never, Daily, Weekly (Count day: Monday…) or Monthly (Count day: 1–28 or Last).
+                <strong>Shelf position</strong> / <strong>JT position</strong> set the order of the opening count.</li>
+              <li><strong>Investigate</strong>: Default (follows the category), Always, Never, or Over with <strong>Investigate over $</strong>.</li>
               <li><strong>Shelf qty / JT qty</strong> add opening stock. For batch &amp; expiry products, fill in <strong>Batch</strong> and <strong>Expiry</strong>, one row per batch, repeating the name.</li>
-              <li>Opening stock is only added to products that have no stock yet, so importing again never doubles it.</li>
-            </ul></details>`}
+              <li>Opening stock is only added to products that have no stock yet, so importing again never doubles it. To set stock on products that already have some, use <strong>Set starting stock</strong>.</li>
+            </ul>
+          </details>`}
         <div class="inv-imp-opts">
           <label class="fe-check"><input type="checkbox" data-f="update"${st.opts.update ? " checked" : ""} /> Update products that already exist (matched by name)</label>
           <label class="fe-check"><input type="checkbox" data-f="createSuppliers"${st.opts.createSuppliers ? " checked" : ""} /> Create suppliers that aren't in the list yet</label>
