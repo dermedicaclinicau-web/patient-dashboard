@@ -123,6 +123,20 @@ export async function openStartOfDayEdit(staff) {
   }
 }
 
+// What the toast says after the kit count is saved
+function kitToast(r, edit = false) {
+  const lead = edit ? "Start of day updated." : "Kit count saved.";
+  const notes = [];
+  if (r.overnight) notes.push(`${plural(r.overnight, "overnight difference")} sent to an admin`);
+  if (r.unknown) notes.push(`${plural(r.unknown, "batch")} not in your kit records yet (an admin will check)`);
+  return notes.length ? `${lead} ${notes.join(" · ")}.`
+    : r.differences ? `${lead} ${plural(r.differences, "difference")} will be reviewed.`
+    : edit ? "Start of day updated. Everything matched." : "Kit count saved. Everything matched. Have a great day!";
+}
+const saveErrText = (ex) => (ex && ex.code === "permission-denied"
+  ? "Couldn't save. Check the Firestore rules for inv_kitdays, inv_counts and inv_investigations have been published."
+  : (ex && ex.message && !ex.code) ? ex.message : "Couldn't save. Check your connection and try again.");
+
 export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = false } = {}) {
   closeStartOfDay();
   const mine = session;
@@ -161,12 +175,15 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
         <div class="skeleton" style="height:48px;border-radius:10px"></div>
       </div>
 
+      <div data-role="kit"></div>
+
       <button type="button" class="sod-btn" data-act="start">Start my day</button>
     </div>`;
 
   document.body.appendChild(dlg);
   current = dlg;
-  let kitMode = false;
+  let kitMode = false;    // the kit count is on screen: clicking outside doesn't close it (nothing typed is lost)
+  let kitShown = null;    // the kit products being counted in the welcome
 
   const img = dlg.querySelector(".sod-avatar img");
   if (img) img.addEventListener("error", () => img.remove());
@@ -176,10 +193,10 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
     dlg.classList.add("closing");
     setTimeout(() => { if (current === dlg) closeStartOfDay(); }, 180);
   };
-  dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(); });   // Esc: kit step = remind me later
+  dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(); });   // Esc: the kit count comes back at the next login
   // Welcome only: click outside, or follow a link (a task, My dashboard) to close
   dlg.addEventListener("click", (e) => {
-    if (kitMode) return;
+    if (kitMode && !e.target.closest('a[href^="#/"]')) return;
     if (e.target === dlg || e.target.closest('a[href^="#/"]')) close();
   });
 
@@ -188,13 +205,65 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
     : kitToday(staff).catch((err) => { console.warn("Kit check failed:", err); return { error: true }; });
 
   const startBtn = dlg.querySelector('[data-act="start"]');
+  const kitBox = dlg.querySelector('[data-role="kit"]');
+
+  // Injectors: "How many units remaining?" right here in the welcome
+  const showKitHere = (k) => {
+    if (kitShown || !k || k.error || !dlg.isConnected || mine !== session) return;
+    kitShown = k.products.map(({ p }) => p);
+    kitMode = true;
+    kitBox.innerHTML = `<section class="sod-you sod-kitq">
+        <p class="sod-you-h">Your kit</p>
+        <p class="sod-note">How much is left in your kit? Put 0 if you have none.</p>
+        <div class="kc-list">${kitCountHtml(kitShown.map((p) => ({ p })))}</div>
+        <p class="lh-error" role="alert" hidden></p>
+      </section>`;
+    wireKitCount(kitBox);
+    kitBox.addEventListener("input", () => { kitBox.querySelector(".lh-error").hidden = true; });
+    startBtn.textContent = "Save and start my day";
+  };
+
   startBtn.addEventListener("click", async () => {
+    if (startBtn.disabled) return;
+    const label = startBtn.textContent;
     startBtn.disabled = true;
     startBtn.textContent = "One moment…";
     const k = await kitP;
     if (!dlg.isConnected || mine !== session) return;
     if (k && k.error) { close(); return; }   // the button stays at the top to try again
-    if (k) { kitMode = true; renderKit(dlg, staff, k, close); return; }
+
+    // A kit that hadn't appeared yet: show the question first
+    if (k && !kitShown) {
+      showKitHere(k);
+      startBtn.disabled = false;
+      return;
+    }
+
+    // Kit count + start of day, together
+    if (kitShown) {
+      const errEl = kitBox.querySelector(".lh-error");
+      const fail = (m, focus) => {
+        errEl.textContent = m;
+        errEl.hidden = false;
+        if (focus) focus.focus();
+        startBtn.disabled = false;
+        startBtn.textContent = label;
+      };
+      const r0 = readKitCount(kitBox, kitShown);
+      if (r0.error) { fail(r0.error, r0.focus); return; }
+      startBtn.textContent = "Saving…";
+      try {
+        const r = await saveKitDayStart({ items: r0.items }, staff);
+        window.dispatchEvent(new Event("kitday:changed"));
+        close();
+        showToast(kitToast(r));
+      } catch (ex) {
+        console.error("Start of day kit count failed:", ex);
+        fail(saveErrText(ex));
+      }
+      return;
+    }
+
     // No kit to count: starting the day is just recorded
     try {
       await saveDayStart(staff);
@@ -214,6 +283,7 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
     return;
   }
   setTimeout(() => startBtn.focus(), 50);
+  kitP.then(showKitHere);   // the kit question appears as soon as it's known
 
   // Remember the welcome has been shown today (and tidy up older days for this staff member)
   try {
@@ -226,8 +296,7 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
 
   loadStats(dlg, staff);
 }
-
-/* ---------- Your kit: "How many units remaining?" (blind: nothin/* ---------- Your kit: "How many units remaining?" (blind: nothing is filled in) ---------- */
+/* ---------- Your kit: "How many units remaining?" (blind: nothing is filled in) ---------- */
 // Every clinician ticked as carrying a kit counts it, every day, whether or not they're injecting.
 // kit.edit (correcting today's start): this morning's batch and expiry are filled in again; the units never are.
 
@@ -284,18 +353,10 @@ function renderKit(dlg, staff, kit, close) {
       const r = await saveKitDayStart({ items: r0.items }, staff);
       window.dispatchEvent(new Event("kitday:changed"));
       close();
-      const lead = edit ? "Start of day updated." : "Kit count saved.";
-      const notes = [];
-      if (r.overnight) notes.push(`${plural(r.overnight, "overnight difference")} sent to an admin`);
-      if (r.unknown) notes.push(`${plural(r.unknown, "batch")} not in your kit records yet (an admin will check)`);
-      showToast(notes.length ? `${lead} ${notes.join(" · ")}.`
-        : r.differences ? `${lead} ${plural(r.differences, "difference")} will be reviewed.`
-        : edit ? "Start of day updated. Everything matched." : "Kit count saved. Everything matched. Have a great day!");
+      showToast(kitToast(r, !!edit));
     } catch (ex) {
       console.error("Start of day kit count failed:", ex);
-      showErr(ex && ex.code === "permission-denied"
-        ? "Couldn't save. Check the Firestore rules for inv_kitdays, inv_counts and inv_investigations have been published."
-        : (ex && ex.message && !ex.code) ? ex.message : "Couldn't save. Check your connection and try again.");
+      showErr(saveErrText(ex));
       btn.disabled = false;
       btn.textContent = submitLabel;
     }

@@ -5067,3 +5067,9 @@ dialog.lh-dialog.eod-dlg{width:min(760px,95vw)}
 .tb-pill.is-nudge{background:#eef2ff;border-color:#a5b4fc;color:#3730a3;animation:tb-nudge-end 1.8s ease-out infinite}
 .tb-pill.is-nudge:hover{background:#e0e7ff}
 @media (prefers-reduced-motion: reduce){ .tb-pill.is-start, .tb-pill.is-nudge{animation:none} }
+
+/* Start of Day welcome: the kit question under "For you today" */
+.sod-kitq{margin-top:.75rem}
+.sod-kitq .sod-note{margin:0 0 .25rem;text-align:left}
+.sod-kitq .kc{margin:.5rem 0 0}
+.sod-kitq .lh-error{margin:.5rem 0 0}
