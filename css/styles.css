@@ -4890,7 +4890,7 @@ dialog.lh-dialog.inv-dlg.inv-spdlg{width:min(780px,96vw)}
 .sod-kit-acts{display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-top:14px}
 .sod.is-kit .sod-btn{width:auto;padding-left:18px;padding-right:18px}
 
-/* End my day: under the avatar (fits inside the 64px top bar) */
+/* End of day recap */
 .eod-recap li{margin:4px 0}
 .eod-mood,.eod-pill{position:relative}
 
@@ -5031,3 +5031,5 @@ body.no-consult-record #tb-rec{display:none !important}
 .sod-you-more{display:inline-block;margin-top:.6rem;font-size:.82rem;font-weight:600;color:var(--primary);text-decoration:none}
 .sod-you-more:hover{text-decoration:underline}
 .eod-fix{margin:0 0 .5rem;font-size:.85rem;color:var(--muted)}
+
+.topbar{z-index:50}
