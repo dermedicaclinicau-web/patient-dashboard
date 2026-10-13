@@ -4808,3 +4808,17 @@ dialog.lh-dialog.inv-dlg.rr-dlg > .rr-form {
 }
 
 .re-tokpick { margin-top: .35rem; max-width: 100%; font-size: .85rem; }
+
+/* Count differences: starting stock */
+.rp-base{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;
+  padding:12px 14px;margin-bottom:12px;border:1px solid var(--line,#e5e7eb);border-radius:12px;background:var(--surface-2,#f8fafc)}
+.rp-base>div{display:flex;flex-direction:column;gap:2px;min-width:0}
+.rp-base small{color:var(--muted,#64748b)}
+.rp-base.is-none{border-color:#f5c26b;background:#fffbeb}
+.rq-status.is-baseline{background:#e0f2fe;color:#075985}
+dialog.lh-dialog.inv-dlg .rp-bl{max-width:760px}
+.rp-bl-scroll{max-height:340px;overflow:auto;margin:10px 0;border:1px solid var(--line,#e5e7eb);border-radius:10px}
+.rp-bl-sum{margin:8px 0;padding-left:18px;color:var(--muted,#64748b);font-size:14px}
+.rp-bl-sum:empty{display:none}
+.rp-bl-miss{margin:8px 0;font-size:14px}
+.rp-bl-miss p{margin:6px 0 0;color:var(--muted,#64748b)}

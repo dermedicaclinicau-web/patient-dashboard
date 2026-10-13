@@ -29,7 +29,7 @@ export const MOVE_TYPES = {
   "kit-borrow": "Borrowed from a colleague", "kit-count": "Kit count adjusted",
   "use-correct": "Usage corrected", "kit-correct": "Kit usage corrected",
   investigation: "Investigation closed",  "shared-open": "Opened for sharing", "shared-finish": "Opened one finished",
-  
+  baseline: "Starting stock set",  
 };
 export const EXPIRY_SOON_DAYS = 60;
 
@@ -1502,8 +1502,8 @@ export async function saveCount({ kind, lines, note = "" }, staff) {
 
 /* ===================== Reporting: count differences ===================== */
 
-export const COUNT_STATUS = { open: "To review", ok: "Matched", accepted: "Accepted", explained: "Explained", investigating: "Investigating" };
-
+export const COUNT_STATUS = { open: "To review", ok: "Matched", accepted: "Accepted", explained: "Explained", investigating: "Investigating",
+  baseline: "Starting stock" };
 // Counts with a difference still to review, or every count from a date on (dateKey "YYYY-MM-DD")
 export async function listCounts({ from = "", openOnly = false } = {}) {
   const col = collection(db, "inv_counts");
@@ -1591,6 +1591,196 @@ export async function resolveCountLine(countId, index, { action, note = "" }, st
     });
   });
 }
+
+
+/* ===================== Starting stock: make digital match a day's opening count ===================== */
+// From then on every count difference is a real one. For each product + place + batch the latest count
+// that day wins, and its difference is applied to stock now (like Accept: stock may have moved since).
+// Kits aren't touched: they keep their own history (Kit reconciliation).
+// Safe to run again: each count line has a fixed activity id, so it's never applied twice.
+
+const baselineMoveId = (countId, index) => `baseline__${countId}__${index}`;
+
+export async function getBaseline() {
+  const s = await getDoc(doc(db, "inv_settings", "counting"));
+  const b = s.exists() ? s.data().baseline : null;
+  return b && KEY_RE.test(b.dateKey || "")
+    ? { dateKey: b.dateKey, by: String(b.by || ""), at: toDate(b.at), changed: Number(b.changed) || 0 } : null;
+}
+
+// What setting the starting stock would do. Nothing is changed.
+export async function baselinePlan(key = dayKey()) {
+  const [today, products, openCounts, openInvs] = await Promise.all([
+    listCountsOn(key), listProducts(), listCounts({ openOnly: true }), listInvestigations({ open: true }),
+  ]);
+  const byId = new Map(products.map((p) => [p.id, p]));
+  const invById = new Map(openInvs.map((x) => [x.id, x])); // only open ones: a closed one has been dealt with
+
+  // The latest count of each spot today; earlier counts of the same spot are set aside
+  const latest = new Map();
+  const earlier = [];
+  today.filter((c) => c.kind === "opening")
+    .sort((a, b) => (a.at ? a.at.getTime() : 0) - (b.at ? b.at.getTime() : 0))
+    .forEach((c) => c.lines.forEach((line, index) => {
+      if (line.loc === "kit" || !byId.has(line.productId)) return;
+      const prev = latest.get(line.ref);
+      if (prev) earlier.push(prev);
+      latest.set(line.ref, { countId: c.id, index, line, product: byId.get(line.productId) });
+    }));
+
+  const items = [...latest.values()].map((x) => {
+    const l = x.line;
+    const inv = l.status === "investigating" ? invById.get(l.investigationId) || null : null;
+    let diff = 0;
+    if (l.status === "open" || l.status === "explained") diff = Number(l.variance) || 0;
+    else if (inv) diff = Number(inv.recount ? inv.recount.variance : l.variance) || 0; // a recount is fresher
+    return {
+      ...x, loc: l.loc === "jt" ? "jt" : "shelf", diff, invId: inv ? inv.id : "",
+      state: diff ? "change" : l.status === "ok" ? "match" : "done",
+    };
+  });
+
+  const earlierOpen = earlier.filter((x) => x.line.status === "open"
+    || (x.line.status === "investigating" && invById.has(x.line.investigationId)));
+  const olderLines = openCounts.filter((c) => (c.dateKey || "") < key)
+    .flatMap((c) => c.lines.map((line, index) => ({ countId: c.id, index, line })).filter((x) => x.line.status === "open"));
+  const todayInv = new Set([...items, ...earlierOpen].map((x) => x.line.investigationId).filter(Boolean));
+  const olderInvs = openInvs.filter((x) => !todayInv.has(x.id) && (x.dateKey || "") < key);
+  const counted = new Set(items.map((x) => x.product.id));
+  const notCounted = products.filter((p) => p.active && !counted.has(p.id) && (p.stock.shelf > 0 || p.stock.jt > 0));
+  return { key, items, earlier: earlierOpen, olderLines, olderInvs, notCounted };
+}
+
+// One product's changes in one transaction: batches, the product total and the activity log together
+async function baselineProduct(list, key, staff, applied) {
+  const p = list[0].product;
+  const pRef = doc(db, "inv_products", p.id);
+  const by = who(staff);
+  const me = uid();
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    const pSnap = await tx.get(pRef);
+    if (!pSnap.exists()) return;
+    const reads = [];
+    for (const x of list) {
+      const mRef = doc(db, "inv_moves", baselineMoveId(x.countId, x.index));
+      const lRef = doc(db, "inv_lots", String(x.line.ref || ""));
+      reads.push({ x, mRef, lRef, m: await tx.get(mRef), l: await tx.get(lRef) });
+    }
+
+    // ---- Writes ----
+    const pd = pSnap.data();
+    const s = pd.stock || {};
+    const stock = { shelf: Number(s.shelf) || 0, jt: Number(s.jt) || 0 };
+    let touched = false;
+    reads.forEach(({ x, mRef, lRef, m, l }) => {
+      const k = `${x.countId}:${x.index}`;
+      if (m.exists()) { applied.set(k, Number(m.data().applied) || 0); return; } // done on an earlier run
+      const lotHave = l.exists() ? Number(l.data().qty) || 0 : 0;
+      const have = pd.tracked === true ? lotHave : stock[x.loc];
+      const delta = Math.max(-have, x.diff); // never below zero
+      stock[x.loc] = Math.max(0, stock[x.loc] + delta);
+      tx.set(lRef, {
+        productId: p.id, loc: x.loc, batch: x.line.batch || "", expiry: x.line.expiry || "", qty: Math.max(0, lotHave + delta),
+        updatedAt: serverTimestamp(), ...(l.exists() ? {} : { createdAt: serverTimestamp() }),
+      }, { merge: true });
+      tx.set(mRef, {
+        type: "baseline", productId: p.id, productName: String(pd.name || p.name), unit: String(pd.stockUnit || p.stockUnit),
+        lines: [{ loc: x.loc, batch: x.line.batch || "", expiry: x.line.expiry || "", delta }],
+        reason: "Starting stock set", ref: x.countId, applied: delta,
+        note: [`Counted ${x.line.counted} on ${key}`, delta !== x.diff ? `only ${-delta} could be taken off` : ""].filter(Boolean).join(" · "),
+        by, byUid: me, at: serverTimestamp(),
+      });
+      applied.set(k, delta);
+      touched = true;
+    });
+    if (touched) tx.update(pRef, { stock, stockAt: serverTimestamp() });
+  });
+}
+
+// Runs a plan from baselinePlan. closeOlder: also close differences and investigations from before that day.
+export async function setBaseline(plan, { closeOlder = true } = {}, staff, onProgress = () => {}) {
+  const by = who(staff);
+  const me = uid();
+  const at = new Date().toISOString();
+  const changes = plan.items.filter((x) => x.state === "change");
+  const applied = new Map(); // "countId:index" → what was actually applied
+
+  // 1. Stock: one transaction per product, a few at a time
+  const byProduct = new Map();
+  changes.forEach((x) => byProduct.set(x.product.id, [...(byProduct.get(x.product.id) || []), x]));
+  const groups = [...byProduct.values()];
+  for (let i = 0; i < groups.length; i += 4) {
+    onProgress(`Updating stock… ${i} of ${groups.length}`);
+    await Promise.all(groups.slice(i, i + 4).map((g) => baselineProduct(g, plan.key, staff, applied)));
+  }
+
+  // 2. Investigations
+  const inv = new Map();
+  changes.filter((x) => x.invId).forEach((x) => inv.set(x.invId, {
+    applied: applied.get(`${x.countId}:${x.index}`) || 0, note: "Starting stock set from this count.",
+  }));
+  plan.earlier.forEach((x) => {
+    const id = x.line.investigationId;
+    if (id && !inv.has(id)) inv.set(id, { applied: 0, note: "A later count that day was used for the starting stock." });
+  });
+  if (closeOlder) plan.olderInvs.forEach((x) => {
+    if (!inv.has(x.id)) inv.set(x.id, { applied: 0, note: "Closed when the starting stock was set. Stock wasn't changed." });
+  });
+  onProgress("Closing investigations…");
+  const invIds = [...inv.keys()];
+  for (let i = 0; i < invIds.length; i += 400) {
+    const b = writeBatch(db);
+    invIds.slice(i, i + 400).forEach((id) => {
+      const v = inv.get(id);
+      b.update(doc(db, "inv_investigations", id), {
+        status: "closed", outcome: "baseline", outcomeNote: v.note, applied: v.applied,
+        closedAt: serverTimestamp(), closedBy: by, closedByUid: me, updatedAt: serverTimestamp(),
+        events: arrayUnion({ at, by, action: "Closed: starting stock set",
+          note: v.applied ? `Adjusted by ${v.applied > 0 ? "+" : ""}${v.applied}` : "Stock not changed" }),
+      });
+    });
+    await b.commit();
+  }
+
+  // 3. The count lines
+  const marks = new Map(); // countId → Map(index → { applied, note })
+  const mark = (x, n, note) => {
+    const m = marks.get(x.countId) || new Map();
+    m.set(x.index, { applied: n, note });
+    marks.set(x.countId, m);
+  };
+  changes.forEach((x) => mark(x, applied.get(`${x.countId}:${x.index}`) || 0, "Starting stock set"));
+  plan.earlier.forEach((x) => mark(x, 0, "A later count that day was used"));
+  if (closeOlder) plan.olderLines.forEach((x) => mark(x, 0, "Before the starting stock"));
+  onProgress("Updating the counts…");
+  const entries = [...marks];
+  for (let i = 0; i < entries.length; i += 5) {
+    await Promise.all(entries.slice(i, i + 5).map(([countId, m]) => runTransaction(db, async (tx) => {
+      const ref = doc(db, "inv_counts", countId);
+      const s = await tx.get(ref);
+      if (!s.exists()) return;
+      const lines = (Array.isArray(s.data().lines) ? s.data().lines : []).map((l) => ({ ...l }));
+      m.forEach((v, idx) => {
+        const l = lines[idx];
+        if (!l || ["ok", "accepted", "baseline"].includes(l.status)) return;
+        lines[idx] = { ...l, status: "baseline", applied: v.applied, note: v.note, resolvedBy: by, resolvedByUid: me, resolvedAt: at };
+      });
+      tx.update(ref, {
+        lines, openCount: lines.filter((l) => l.status === "open").length, updatedAt: serverTimestamp(), updatedBy: by,
+        events: arrayUnion({ at, by, action: "Starting stock set", note: plan.key }),
+      });
+    })));
+  }
+
+  // 4. The "counting from" date
+  await setDoc(doc(db, "inv_settings", "counting"), {
+    baseline: { dateKey: plan.key, at: serverTimestamp(), by, byUid: me, changed: changes.length },
+  }, { merge: true });
+
+  return { changed: changes.length, investigations: inv.size };
+}
+
 
 /* ===================== Reporting: usage and wastage over a date range ===================== */
 
@@ -1862,6 +2052,8 @@ export const INV_OUTCOMES = {
     help: "A delivery was put away or entered wrongly. Name the purchase order in the note." },
   extra: { label: "Extra stock found", adjust: true, sign: 1,
     help: "More is there than digital shows. Added to stock." },
+  baseline: { label: "Starting stock set", adjust: false, system: true,
+    help: "Closed when the starting stock was set from an opening count." },
 };
 
 function normaliseInvestigation(d) {
@@ -1989,7 +2181,7 @@ export async function allowAloneRecount(id, staff) {
 // (like Accept: not "set to the counted number", as stock may have moved since).
 export async function closeInvestigation(id, { outcome, note = "", cctvChecked = false, cctvNote = "" }, staff) {
   const o = INV_OUTCOMES[outcome];
-  if (!o) throw new Error("Choose what happened.");
+  if (!o || o.system) throw new Error("Choose what happened.");
   const text = clip(note, 500);
   if (!text) throw new Error("Add a note saying what you found.");
   const me = uid();

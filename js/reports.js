@@ -4,6 +4,7 @@ import {
   getUsage, correctUsage, correctionMove,
   batchName, plural, unitPlural, dayKey, COUNT_STATUS,listInvestigations, INV_OUTCOMES, INV_STATUS,
   listUnrecordedTreatments, listContainersBetween, expectedUses,
+  getBaseline, baselinePlan, setBaseline, listCountsOn,
 } from "./inventory-api.js";
 import { can } from "./perms.js";
 import { showToast } from "./utils.js";
@@ -99,7 +100,8 @@ export function mountReports(container, { param = "", staff = null } = {}) {
 /* ===================== Count differences ===================== */
 
 function mountVariance(body, staff) {
-  const st = { view: "open", from: daysAgoKey(30), counts: [], products: new Map() };
+  const st = { view: "open", from: daysAgoKey(30), counts: [], products: new Map(), base: null, todayCounted: false };
+  const canBase = can("inventory.manage");
 
   // Cost per counted item (cost is per supplier unit). Kits: per unit (e.g. per unit of Xeomin).
   const unitCost = (l) => {
@@ -115,17 +117,39 @@ function mountVariance(body, staff) {
   async function load() {
     body.innerHTML = SKELETON;
     try {
-      const [counts, products] = await Promise.all([
+      const [counts, products, base, today] = await Promise.all([
         st.view === "open" ? listCounts({ openOnly: true }) : listCounts({ from: st.from }),
         listProducts(),
+        getBaseline().catch(() => null),
+        canBase ? listCountsOn(dayKey()).catch(() => []) : Promise.resolve([]),
       ]);
       st.counts = counts;
       st.products = new Map(products.map((p) => [p.id, p]));
+      st.base = base;
+      st.todayCounted = today.some((c) => c.kind === "opening");
       if (body.isConnected) draw();
     } catch (err) {
       console.error("Count differences failed:", err);
       if (body.isConnected) body.innerHTML = `<div class="tm-empty is-error">${esc(errText(err, "Couldn't load the counts. Try again."))}</div>`;
     }
+  }
+
+  // "Counting from…" and the button to set the starting stock
+  function baseHtml() {
+    const b = st.base;
+    const again = b && b.dateKey === dayKey();
+    const btn = canBase && st.todayCounted
+      ? `<button type="button" class="ff-btn${b ? "" : " is-primary"}" data-act="baseline">${again
+        ? "Update the starting stock from today's count" : "Set the starting stock from today's count"}</button>`
+      : canBase ? '<small class="muted">Do today\'s opening count first, then set it as the starting stock here.</small>' : "";
+    return `<div class="rp-base${b ? "" : " is-none"}">
+      <div>${b
+        ? `<strong>Counting from ${esc(niceDate(b.dateKey))}</strong>
+           <small>Starting stock set${b.by ? ` by ${esc(b.by)}` : ""}${b.at ? ` at ${esc(timeOf(b.at))}` : ""}. Differences are compared with stock from then on.</small>`
+        : `<strong>No starting stock set yet</strong>
+           <small>${canBase ? "Once an opening count is finished, set it as the starting stock so every difference after that is a real one."
+             : "An admin can set it from an opening count."}</small>`}</div>
+      ${btn}</div>`;
   }
 
   function rowHtml(c, l, i) {
@@ -165,6 +189,7 @@ function mountVariance(body, staff) {
     const sum = (pred) => open.reduce((a, l) => { const v = valueOf(l); return a + (v !== null && pred(v) ? v : 0); }, 0);
     const groups = st.counts.map(groupHtml).join("");
     body.innerHTML = `
+      ${baseHtml()}
       <div class="inv-tools">
         <div class="fe-seg">${[["open", `To review (${st.view === "open" ? open.length : "…"})`], ["all", "All counts"]].map(([v, l]) =>
           `<label class="fe-seg-btn"><input type="radio" name="rp-view" data-f="view" value="${v}"${st.view === v ? " checked" : ""} /><span>${esc(l)}</span></label>`).join("")}</div>
@@ -178,6 +203,82 @@ function mountVariance(body, staff) {
         <div class="inv-stat"><strong>${esc(money(sum((v) => v > 0)))}</strong><span>Extra found (at cost)</span></div>
       </div>` : ""}
       ${groups || `<div class="tm-empty">${st.view === "open" ? "No count differences to review. 👍" : "No counts in this period."}</div>`}`;
+  }
+
+  async function openBaseline() {
+    const dlg = openDialog(`<div class="lh-form rp-bl"><div class="lh-dialog-head"><h3>Set the starting stock</h3>
+      <p>Checking today's count…</p></div>${SKELETON}</div>`);
+    let plan;
+    try {
+      plan = await baselinePlan();
+    } catch (err) {
+      console.error("Starting stock check failed:", err);
+      if (dlg.open) dlg.querySelector(".lh-form").innerHTML = `<div class="lh-dialog-head"><h3>Set the starting stock</h3></div>
+        <p class="lh-error">${esc(errText(err, "Couldn't check today's count. Try again."))}</p>
+        <div class="lh-actions"><button type="button" class="lh-btn" data-act="cancel">Close</button></div>`;
+      dlg.querySelector('[data-act="cancel"]')?.addEventListener("click", () => dlg.close());
+      return;
+    }
+    if (!dlg.open) return;
+
+    const ch = plan.items.filter((x) => x.state === "change");
+    const match = plan.items.filter((x) => x.state === "match").length;
+    const done = plan.items.filter((x) => x.state === "done").length;
+    const olderBits = [plan.olderLines.length && plural(plan.olderLines.length, "difference"),
+      plan.olderInvs.length && plural(plan.olderInvs.length, "investigation")].filter(Boolean);
+    const where = (x) => `${LOC[x.loc] || x.loc}${x.line.batch ? ` · ${x.line.batchLabel || "Batch"} ${x.line.batch}` : ""}`;
+
+    dlg.innerHTML = `<form class="lh-form rp-bl" novalidate>
+      <div class="lh-dialog-head"><h3>Set the starting stock</h3>
+        <p>Digital is set to match today's opening count (${plural(plan.items.length, "product and place")} counted).
+          Every change is logged in Activity as “Starting stock set”. Injectors' kits aren't changed.</p></div>
+      ${ch.length ? `<div class="rp-bl-scroll"><table class="inv-table rp-table">
+        <thead><tr><th>Product</th><th>Where</th><th>Counted</th><th>Digital</th><th>Change</th></tr></thead>
+        <tbody>${ch.map((x) => `<tr><td>${esc(x.product.name)}${x.invId ? ' <span class="inv-flag is-warn">Closes its investigation</span>' : ""}</td>
+          <td>${esc(where(x))}</td><td>${esc(fmt(x.line.counted))}</td><td>${esc(fmt(x.line.system))}</td>
+          <td class="${x.diff < 0 ? "rp-neg" : "rp-pos"}"><strong>${x.diff > 0 ? "+" : ""}${esc(fmt(x.diff))}</strong></td></tr>`).join("")}</tbody>
+        </table></div>`
+        : '<p class="tb-info">Everything counted today already matches digital, so stock won\'t change. Today is still saved as the starting point.</p>'}
+      <ul class="rp-bl-sum">
+        ${match ? `<li>${match} already match: no change</li>` : ""}
+        ${done ? `<li>${done} already reviewed today (accepted, or investigation closed): left as they are</li>` : ""}
+        ${plan.earlier.length ? `<li>${plural(plan.earlier.length, "earlier count")} of the same spot today: closed, the latest count is used</li>` : ""}
+      </ul>
+      ${plan.notCounted.length ? `<details class="rp-bl-miss"><summary>${plural(plan.notCounted.length, "product")} with stock weren't counted today: not changed</summary>
+        <p>${esc(plan.notCounted.slice(0, 40).map((p) => p.name).join(", "))}${plan.notCounted.length > 40 ? "…" : ""}</p></details>` : ""}
+      ${olderBits.length ? `<label class="fe-check"><input type="checkbox" name="older" checked />
+        Also close ${esc(olderBits.join(" and "))} from before today <small class="muted">(stock isn't changed for these)</small></label>` : ""}
+      <p class="lh-error" role="alert" hidden></p>
+      <div class="lh-actions">
+        <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+        <button type="submit" class="lh-btn is-primary">${ch.length ? `Set starting stock (${plural(ch.length, "change")})` : "Set starting stock"}</button>
+      </div></form>`;
+
+    const form = dlg.querySelector("form");
+    const err = dlg.querySelector(".lh-error");
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const btn = form.querySelector('[type="submit"]');
+      const cancel = form.querySelector('[data-act="cancel"]');
+      btn.disabled = true;
+      cancel.disabled = true;
+      err.hidden = true;
+      try {
+        const r = await setBaseline(plan, { closeOlder: !!(form.elements.older && form.elements.older.checked) }, staff,
+          (t) => { btn.textContent = t; });
+        dlg.close();
+        showToast(r.changed ? `Starting stock set. ${plural(r.changed, "change")} made.` : "Starting stock set. Nothing needed changing.");
+        load();
+      } catch (ex) {
+        console.error("Starting stock failed:", ex);
+        err.textContent = `${errText(ex, "Couldn't finish.")} It's safe to try again: nothing is applied twice.`;
+        err.hidden = false;
+        btn.disabled = false;
+        cancel.disabled = false;
+        btn.textContent = "Try again";
+      }
+    });
   }
 
   function review(c, i, l, act) {
@@ -242,6 +343,7 @@ function mountVariance(body, staff) {
     const a = e.target.closest("[data-act]");
     if (!a) return;
     if (a.dataset.act === "csv") { exportCsv(); return; }
+    if (a.dataset.act === "baseline") { openBaseline(); return; }
     const tr = a.closest("tr[data-c]");
     const c = tr && st.counts.find((x) => x.id === tr.dataset.c);
     const i = tr ? Number(tr.dataset.i) : -1;
