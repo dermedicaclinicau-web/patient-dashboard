@@ -118,7 +118,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   const st = {
     products: [], suppliers: [], lots: [], requests: [], q: "", cat: "", view: "all", flagged: false, showInactive: false,
     reqFilter: "open", reqView: "list", pos: [], poFilter: "draft", lineSup: {},
-    sel: new Set(), pq: "", pcat: "", psup: "",
+    sel: new Set(), pq: "", pcat: "", psup: "",  pcount: "",
     counts: [], invs: [], lastCounts: new Map(), open: [],
   };
   const supplierOf = (id) => st.suppliers.find((s) => s.id === id) || null;
@@ -262,11 +262,24 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   }
 
   /* ---------- Products (with tick boxes and bulk actions) ---------- */
+  // "Counted daily · Shelf only", or "" when it isn't counted
+  const ordinal = (n) => n + (n % 10 === 1 && n !== 11 ? "st" : n % 10 === 2 && n !== 12 ? "nd" : n % 10 === 3 && n !== 13 ? "rd" : "th");
+  const countText = (p) => {
+    const f = p.countFreq || "never";
+    if (f === "never") return "";
+    const when = f === "daily" ? "Counted daily"
+      : f === "weekly" ? `Counted ${WEEKDAYS[Number(p.countDay) || 0]}s`
+      : `Counted monthly (${p.countDay === "last" ? "last day" : `the ${ordinal(Number(p.countDay) || 1)}`})`;
+    const where = p.countWhere === "shelf" ? " · Shelf only" : p.countWhere === "jt" ? " · JT storage only" : "";
+    return when + where;
+  };
+  
   function productRows() {
     const q = st.pq.trim().toLowerCase();
     return st.products.filter((p) => (st.showInactive || p.active)
       && (!st.pcat || p.category === st.pcat)
       && (!st.psup || (st.psup === "none" ? !productSuppliers(p).length : suppliesProduct(p, st.psup)))
+      && (!st.pcount || (st.pcount === "never" ? (p.countFreq || "never") === "never" : (p.countFreq || "never") !== "never"))
       && (!q || `${p.name} ${p.brand} ${p.supplierCode} ${suppliersText(p)}`.toLowerCase().includes(q)));
   }
 
@@ -281,6 +294,11 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           <option value="none"${st.psup === "none" ? " selected" : ""}>No supplier yet</option>
           ${st.suppliers.map((s) => `<option value="${esc(s.id)}"${st.psup === s.id ? " selected" : ""}>${esc(s.name)}</option>`).join("")}
         </select>
+        <select class="fb-select" data-f="pcount" aria-label="Opening count">
+          <option value="">Any count</option>
+          <option value="set"${st.pcount === "set" ? " selected" : ""}>Counted</option>
+          <option value="never"${st.pcount === "never" ? " selected" : ""}>Not counted</option>
+        </select>
         <label class="fe-check"><input type="checkbox" data-f="showInactive"${st.showInactive ? " checked" : ""} /> Show inactive</label>
         <span class="inv-spacer"></span>
         ${canManage ? `<button type="button" class="ff-btn" data-act="export-products">Export CSV</button>
@@ -292,6 +310,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         <button type="button" class="lh-btn" data-bulk="alt">Add other suppliers</button>
         <button type="button" class="lh-btn" data-bulk="remove">Remove a supplier</button>
         <button type="button" class="lh-btn" data-bulk="category">Change category</button>
+        <button type="button" class="lh-btn" data-bulk="count">Opening count</button>
         <button type="button" class="lh-btn" data-bulk="active">Make active</button>
         <button type="button" class="lh-btn" data-bulk="inactive">Make inactive</button>
         <button type="button" class="lh-btn is-quiet" data-bulk="clear">Clear selection</button>
@@ -313,8 +332,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         <span class="inv-name inv-name-pick">${canManage
           ? `<input type="checkbox" class="inv-pick" data-pick="${esc(p.id)}" aria-label="Select ${esc(p.name)}" />` : ""}
           <span><strong>${esc(p.name)}${p.active ? "" : ' <em class="inv-off">Inactive</em>'}</strong>
-          <small>${esc([packText(p), suppliersText(p) || "No supplier yet", p.supplierCode && `Code ${p.supplierCode}`].filter(Boolean).join(" · "))}</small></span></span>
-        <span class="inv-price">${esc([p.cost !== null && `Cost ${money(p.cost)} / ${p.orderUnit}`, p.price !== null && `Retail ${money(p.price)}`].filter(Boolean).join(" · "))}</span>
+          <small>${esc([packText(p), suppliersText(p) || "No supplier yet", p.supplierCode && `Code ${p.supplierCode}`, countText(p)].filter(Boolean).join(" · "))}</small></span></span>
+          <span class="inv-price">${esc([p.cost !== null && `Cost ${money(p.cost)} / ${p.orderUnit}`, p.price !== null && `Retail ${money(p.price)}`].filter(Boolean).join(" · "))}</span>
         ${p.tracked ? '<span class="inv-flag is-info">Batch &amp; expiry</span>' : "<span></span>"}
         ${canManage ? `<button type="button" class="lh-btn" data-edit-product="${esc(p.id)}">Edit</button>` : "<span></span>"}
       </div>`;
@@ -394,6 +413,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       return;
     }
 
+    if (kind === "count") { bulkCount(list, many); return; }
     if (kind !== "category" && !st.suppliers.length) { showToast("Add a supplier first, in the Suppliers tab."); return; }
     const choices = kind === "remove"
       ? st.suppliers.filter((s) => list.some((p) => suppliesProduct(p, s.id)))
@@ -524,6 +544,94 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       dlg.close();
     });
   }
+
+  // Bulk: how often the selected products are counted at the opening count, and where
+  function bulkCount(list, many) {
+    const dlg = openDialog("inv-dlg", `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>Opening count: ${esc(many)}</h3>
+          <p>How often these are counted in Task Manager → Opening count, and where. Products due today show in today's count straight away.</p></div>
+        <div class="inv-two">
+          <label class="lh-field"><span class="lh-label">Count</span>
+            <select class="fb-select" name="freq">${[["daily", "Every day"], ["weekly", "Once a week"], ["monthly", "Once a month"], ["never", "Not counted"]]
+              .map(([v, l]) => `<option value="${v}">${l}</option>`).join("")}</select></label>
+          <label class="lh-field" data-role="dayrow"><span class="lh-label">On</span>
+            <select class="fb-select" name="day"></select></label>
+          <label class="lh-field inv-span" data-role="whererow"><span class="lh-label">Count in</span>
+            <select class="fb-select" name="where">
+              <option value="">Keep each product's setting</option>
+              <option value="both">Shelf and JT storage</option>
+              <option value="shelf">Shelf only</option>
+              <option value="jt">JT storage only</option>
+            </select></label>
+        </div>
+        <p class="inv-hint" data-role="preview"></p>
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">Apply</button>
+        </div>
+      </form>`);
+    const form = dlg.querySelector("form");
+    const f = form.elements;
+    const pv = dlg.querySelector('[data-role="preview"]');
+    let dayFor = "";
+
+    // The day list follows the frequency (weekly: Monday…Sunday, monthly: 1st…28th or the last day)
+    const syncDay = () => {
+      const freq = f.freq.value;
+      dlg.querySelector('[data-role="dayrow"]').hidden = freq !== "weekly" && freq !== "monthly";
+      dlg.querySelector('[data-role="whererow"]').hidden = freq === "never";
+      if (dayFor === freq) return;
+      const opts = freq === "weekly" ? [1, 2, 3, 4, 5, 6, 0].map((d) => [String(d), WEEKDAYS[d]])
+        : freq === "monthly" ? [...Array.from({ length: 28 }, (_, i) => [String(i + 1), `The ${ordinal(i + 1)}`]), ["last", "The last day of the month"]] : [];
+      f.day.innerHTML = opts.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("");
+      dayFor = freq;
+    };
+
+    const want = (p) => {
+      const freq = f.freq.value;
+      const hasDay = freq === "weekly" || freq === "monthly";
+      return {
+        countFreq: freq,
+        countDay: hasDay ? f.day.value : null,
+        countWhere: freq === "never" ? (p.countWhere || "both") : (f.where.value || p.countWhere || "both"),
+      };
+    };
+    const changeFor = (p) => {
+      const w = want(p);
+      const same = (p.countFreq || "never") === w.countFreq
+        && (w.countDay === null || String(p.countDay) === String(w.countDay))
+        && (p.countWhere || "both") === w.countWhere;
+      return same ? null : w;
+    };
+    const preview = () => {
+      syncDay();
+      const n = list.filter((p) => changeFor(p)).length;
+      const freq = f.freq.value;
+      const sample = { countFreq: freq, countDay: f.day.value, countWhere: f.where.value || "both" };
+      const what = freq === "never" ? "They won't be counted." : `${countText(sample)}${f.where.value ? "" : " (where: as each product is set)"}.`;
+      pv.textContent = `${what} ${!n ? "Nothing to change: they're already set that way."
+        : n === list.length ? `All ${n} will change.` : `${n} will change · ${list.length - n} already set that way.`}`;
+    };
+    preview();
+    form.addEventListener("change", preview);
+
+    let busy = false;
+    dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => { if (!busy) dlg.close(); });
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (!list.some((p) => changeFor(p))) { dlg.close(); return; }
+      busy = true;
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      await runBulk(list, changeFor, (d, t) => { btn.textContent = `Saving ${d} of ${t}…`; });
+      busy = false;
+      dlg.close();
+    });
+  }
+
   /* ---------- Suppliers ---------- */
   function renderSuppliers() {
     if (!st.suppliers.length) {
@@ -1550,7 +1658,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     if (k === "poFilter") { st.poFilter = t.value; renderOrders(); return; }
     if (k === "flagged" || k === "showInactive") st[k] = t.checked;
     else st[k] = t.value;
-    if (["showInactive", "pq", "pcat", "psup"].includes(k)) drawProductList(); else renderStockList();
+    if (["showInactive", "pq", "pcat", "psup", "pcount"].includes(k)) drawProductList(); else renderStockList();
   });
 
   load();
