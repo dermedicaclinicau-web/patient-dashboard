@@ -5059,3 +5059,11 @@ dialog.lh-dialog.eod-dlg{width:min(760px,95vw)}
 .tb-day{gap:.4rem}
 .tb-pill.is-edit{background:#f8fafc;border-color:var(--border);color:#334155}
 .tb-pill.is-edit:hover{background:#eef2f7;border-color:#cbd5e1}
+
+/* Day pills: pulse to get attention */
+@keyframes tb-nudge-start { 0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, .55); } 60% { box-shadow: 0 0 0 8px rgba(245, 158, 11, 0); } }
+@keyframes tb-nudge-end { 0%, 100% { box-shadow: 0 0 0 0 rgba(99, 102, 241, .5); } 60% { box-shadow: 0 0 0 8px rgba(99, 102, 241, 0); } }
+.tb-pill.is-start{animation:tb-nudge-start 1.8s ease-out infinite}
+.tb-pill.is-nudge{background:#eef2ff;border-color:#a5b4fc;color:#3730a3;animation:tb-nudge-end 1.8s ease-out infinite}
+.tb-pill.is-nudge:hover{background:#e0e7ff}
+@media (prefers-reduced-motion: reduce){ .tb-pill.is-start, .tb-pill.is-nudge{animation:none} }

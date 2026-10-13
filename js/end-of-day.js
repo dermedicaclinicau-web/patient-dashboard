@@ -26,6 +26,18 @@ let btn = null;
 let me = null;
 let onLogout = null;
 let gen = 0;
+// "End my day" starts pulsing from this time (minutes after midnight): 17 * 60 = 5:00 pm
+const NUDGE_FROM = 17 * 60;
+let nudgeTimer = null;
+
+// Pulse "End my day" in the evening, until the day is ended
+function syncNudge() {
+  if (!btn) return;
+  const now = new Date();
+  const on = !btn.classList.contains("is-done") && now.getHours() * 60 + now.getMinutes() >= NUDGE_FROM;
+  btn.classList.toggle("is-nudge", on);
+  if (!btn.classList.contains("is-done")) btn.title = on ? "Time to end your day" : "Finish your day";
+}
 
 /* ---------- The day pill in the top bar ---------- */
 // The button in index.html (#eod-btn), or one added to the top bar if it isn't there. Click handler bound once.
@@ -51,6 +63,10 @@ export async function initEndOfDay(staff, { onLogout: lo } = {}) {
   const g = ++gen;
   btn = getButton();
   if (!btn || !staff) return;
+  btn = getButton();
+  if (!btn || !staff) return;
+  clearInterval(nudgeTimer);
+  nudgeTimer = setInterval(syncNudge, 60 * 1000);   // checked every minute
   try {
     const [cfg, day] = await Promise.all([getEndOfDaySettings(), getMyKitDay().catch(() => null)]);
     if (g !== gen) return;
@@ -69,13 +85,15 @@ function setLabel(ended, at = null) {
     ? `${CHECK}<span>Day ended${at ? ` ${esc(timeOf(at))}` : ""}</span>`
     : `${MOON}<span>End my day</span>`;
   btn.title = ended ? "See what you entered today" : "Finish your day";
+  syncNudge();
 }
-
 // On logout: hide (not remove) the button, so the next person to log in still has it
 export function teardownEndOfDay() {
   gen++;
   me = null;
-  if (btn) { btn.hidden = true; btn.innerHTML = ""; btn.classList.remove("is-done"); }
+  clearInterval(nudgeTimer);
+  nudgeTimer = null;
+  if (btn) { btn.hidden = true; btn.innerHTML = ""; btn.classList.remove("is-done", "is-nudge"); }
   btn = null;
   document.querySelectorAll("dialog.eod-dlg").forEach((d) => d.remove());
 }

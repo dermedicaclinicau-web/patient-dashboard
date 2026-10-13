@@ -503,7 +503,9 @@ export function hideStartOfDayButton() {
   btnCheck++;
   setPending(false);
   setEditable(false);
+  // Until the next person's day has been checked, "End my day" stays hidden
+  const dayBar = document.querySelector(".tb-day");
+  if (dayBar) dayBar.classList.add("sod-pending");
 }
-
 // Started, corrected or ended: refresh the top bar
 window.addEventListener("kitday:changed", () => { if (btnStaff) refreshStartOfDayButton(btnStaff); });
