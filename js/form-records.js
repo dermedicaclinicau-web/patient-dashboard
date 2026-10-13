@@ -40,7 +40,7 @@ export async function mountFormRecords(root, patient) {
   try {
     // Consent forms and treatment records show under Treatment / Consent Records instead
     const list = (await listSubmissionsForPatient([patient.id, ...patientIds(patient)]))
-      .filter((s) => s.category !== "consent" && s.category !== "treatment");
+      .filter((s) => !["consent", "treatment", "prescription"].includes(s.category));
     if (!section.isConnected) return;
     count.textContent = list.length ? `${list.length} ${list.length === 1 ? "form" : "forms"}` : "None yet";
     body.innerHTML = list.length
@@ -52,7 +52,7 @@ export async function mountFormRecords(root, patient) {
             </span>
             ${icon('<polyline points="9 18 15 12 9 6"/>')}
           </a>`).join("")}</div>`
-      : '<p class="empty-note">No other forms yet. Consent forms and treatment records appear under Treatment Records and Consent Records.</p>'
+      : '<p class="empty-note">No other forms yet. Consent forms and treatment records appear under Treatment Records and Consent Records, and prescriptions under Prescriptions and Injectable Prescription Records.</p>'
   } catch (err) {
     if (!section.isConnected) return;
     console.error("Completed forms failed:", err);

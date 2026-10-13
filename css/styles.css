@@ -4585,3 +4585,11 @@ button.pa-bdg { font-family: inherit; line-height: inherit; }
 .rp-row.is-overdue .rp-when { color: #b91c1c; }
 .rp-meta { flex: 1; color: var(--muted); font-size: .8rem; }
 .rp-chips { display: inline-flex; flex-wrap: wrap; gap: .25rem; }
+
+/* Form picker: prescription headings */
+.fp-group-h { padding: .45rem .75rem .2rem; font-size: .72rem; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; color: var(--muted); }
+.fp-group + .fp-group { border-top: 1px solid var(--border); margin-top: .25rem; }
+
+/* Portal prescriptions on the patient page */
+.bp-portal { display: inline-block; padding: .05rem .45rem; border-radius: 999px; background: #f0fdfa; color: #0f766e;
+  font-size: .7rem; font-weight: 600; }

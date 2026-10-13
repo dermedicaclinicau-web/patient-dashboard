@@ -28,7 +28,7 @@ const monthLabel = (k) => { const [y, m] = k.split("-").map(Number); return new 
 const daysAgoKey = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return dayKey(d); };
 const SKELETON = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
 const TABS = [["variance", "Count differences"], ["investigations", "Investigations"], ["notrecorded", "Not recorded"], ["wastage", "Wastage"],
-  ["kits", "Kit reconciliation"], ["usage", "Usage"], ["opened", "Opened containers"], ["short", "Saved short"]];
+  ["kits", "Kit reconciliation"], ["usage", "Usage"], ["opened", "Opened containers"], ["short", "Saved short"], ["plans", "Treatment plans"]];
 const errText = (err, fallback) => (err && err.code === "permission-denied"
   ? "You don't have access to do this. Check the Firestore rules have been published, and your Reporting access in Staff."
   : err && err.message && !err.code ? err.message : fallback);
@@ -92,6 +92,7 @@ export function mountReports(container, { param = "", staff = null } = {}) {
   else if (tab === "usage") mountUsage(body, staff);
   else if (tab === "opened") mountOpened(body);
   else if (tab === "kits") mountKitRecon(body);
+  else if (tab === "plans") renderPlanReports(body, { staff });
   else mountShort(body, staff);
 }
 

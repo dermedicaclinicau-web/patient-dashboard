@@ -1,6 +1,6 @@
 import {
   categoryLabel, getFormTemplate, getFormVersion, saveFormTemplate, publishFormTemplate,
-  formSnapshot, listFormTemplates, getLetterhead, saveLetterhead,
+  formSnapshot, listFormTemplates, getLetterhead, saveLetterhead, RX_KINDS, rxKindGuess,
 } from "./form-templates.js";
 import {
   esc, svg, ICONS, FIELD_TYPES, FIELD_GROUPS, CHOICE_TYPES, FILLS, FILLS_FOR,
@@ -505,6 +505,15 @@ export async function mountFormEditor(container, { templateId, staff }) {
           <option value="other"${settings.group === "other" ? " selected" : ""}>Other</option>
         </select>
         <small class="fe-note">Where saved forms appear on the patient's page, and which Create Consent / Create Tx buttons offer this form.</small>
+      </label>` : ""}
+      ${tpl.category === "prescription" ? `
+      <label class="fe-insp-field"><span class="fe-insp-label">Prescription type</span>
+        <select class="fb-select" data-s="rxKind">
+          <option value="">Automatic, from the form name (${esc(RX_KINDS[rxKindGuess(name)])})</option>
+          <option value="product"${settings.rxKind === "product" ? " selected" : ""}>Product prescription</option>
+          <option value="treatment"${settings.rxKind === "treatment" ? " selected" : ""}>Treatment prescription</option>
+        </select>
+        <small class="fe-note">Product prescriptions show under Billing &amp; Prescriptions on the patient's page. Treatment prescriptions show under Injectable Prescription Records. Publish to apply it.</small>
       </label>` : ""}
       <div class="fe-insp-field fe-title-settings">
         <span class="fe-insp-label">Form title</span>

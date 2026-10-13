@@ -4,6 +4,8 @@ import { collection, query, where, getDocs, FieldPath }
 import { escapeHtml } from "./utils.js";
 import { parseRecordDate } from "./transcripts.js";
 import { patientIds } from "./patients.js";
+import { listSubmissionsForPatient } from "./form-submissions.js";
+import { getFormVersion, rxKindOf } from "./form-templates.js";
 
 const PAGE = 6;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -31,6 +33,40 @@ const driveLink = (id) => (/^[\w-]{10,}$/.test(String(id || "")) ? `https://driv
 // Injectable prescription types (everything else stays in the "Prescription" card)
 const INJECTABLE_RE = /xeomin|botox|dysport|letybo|relatox|wrinkle|toxin|\bha\b|hyaluronic|filler|radiesse|sculptra|rejuran|profhilo|skin\s?booster|hyalase|polynucleotide|injectable/i;
 const isInjectable = (r) => INJECTABLE_RE.test(r.title);
+// "2026-10-08" -> a date at midday (so it never slips to the day before)
+const keyDate = (key) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
+  return m ? new Date(+m[1], +m[2] - 1, +m[3], 12) : null;
+};
+
+// Prescriptions filled in on the portal, sorted by the type set on the version they were filled in on
+async function portalPrescriptions(patient) {
+  try {
+    const subs = (await listSubmissionsForPatient([patient.id, ...patientIds(patient)]))
+      .filter((s) => s.category === "prescription");
+    const versions = new Map();
+    await Promise.all([...new Set(subs.map((s) => `${s.templateId}|${s.version}`))].map(async (key) => {
+      const [tid, v] = key.split("|");
+      versions.set(key, await getFormVersion(tid, v).catch(() => null));
+    }));
+    return subs.map((s) => {
+      const ver = versions.get(`${s.templateId}|${s.version}`);
+      return {
+        kind: rxKindOf(ver ? { name: ver.name, settings: ver.settings } : { name: s.templateName }),
+        title: s.templateName,
+        date: keyDate(s.recordDate),
+        dateText: s.recordDate,
+        staff: s.createdBy ? `by ${s.createdBy}` : "",
+        recordId: "",
+        link: "",
+        portalId: s.id,
+      };
+    });
+  } catch (err) {
+    console.warn("Portal prescriptions couldn't be added:", err);
+    return [];
+  }
+}
 
 function isOpenSaved(key, fallback) {
   try {
@@ -43,13 +79,14 @@ function isOpenSaved(key, fallback) {
 
 export async function fetchBillingAndRx(patient) {
   const ids = patientIds(patient);
-  if (!ids.length) return { billing: [], rx: [], errors: [] };
+  if (!ids.length) return { billing: [], rx: [], injectables: [] };
 
-  const [scanRes, rxRes] = await Promise.allSettled([
+  const [scanRes, rxRes, portalRes] = await Promise.allSettled([
     getDocs(query(collection(db, "scanned_file_log"), where("PatientID", "in", ids))),
     getDocs(query(collection(db, "prescription_record"), where(new FieldPath("Patient ID"), "in", ids))),
+    portalPrescriptions(patient),
   ]);
-
+  const portal = portalRes.status === "fulfilled" ? portalRes.value : [];
   const billing = scanRes.status === "fulfilled"
     ? scanRes.value.docs
         .map((d) => ({ docId: d.id, ...d.data() }))
@@ -84,8 +121,8 @@ export async function fetchBillingAndRx(patient) {
   [scanRes, rxRes].forEach((r) => { if (r.status === "rejected") console.error("Billing/Rx load failed:", r.reason); });
   return {
     billing,
-    rx: rx ? rx.filter((r) => !isInjectable(r)) : null,
-    injectables: rx ? rx.filter(isInjectable) : null,
+    rx: rx ? [...rx.filter((r) => !isInjectable(r)), ...portal.filter((p) => p.kind === "product")].sort(byDateDesc) : null,
+    injectables: rx ? [...rx.filter(isInjectable), ...portal.filter((p) => p.kind === "treatment")].sort(byDateDesc) : null,
   };
 }
 
@@ -105,14 +142,16 @@ export function billingRxSectionHtml() {
 
       <details class="rc-card" data-key="billing-rx" ${open}>
         <summary>
-          <span class="rc-title">${ICONS.chev}<span class="bp-icon rx">${ICONS.rx}</span>Prescription</span>
-          <span class="sk-badge bp-rx-count">–</span>
+          <span class="rc-title">${ICONS.chev}<span class="bp-icon rx">${ICONS.rx}</span>Product Prescriptions</span>
+          <span class="sk-tools">
+            <button type="button" class="rc-link" data-create="prescription" data-rxkind="product">+ Add</button>
+            <span class="sk-badge bp-rx-count">–</span>
+          </span>
         </summary>
         <div class="rc-body"><div class="bp-list bp-rx-body"><div class="skeleton sm"></div></div></div>
       </details>
     </div>`;
 }
-
 /* ===================== Behaviour ===================== */
 
 export function mountBillingRx(root, patient) {
@@ -222,7 +261,10 @@ export function injectableReferralSectionHtml() {
       <details class="rc-card ir-card" data-key="inj-referral" ${open}>
         <summary>
           <span class="rc-title">${ICONS.chev}<span class="bp-icon inj">${ICONS.syringe}</span>Injectable Prescription Records</span>
-          <span class="sk-badge ir-count">–</span>
+          <span class="sk-tools">
+            <button type="button" class="rc-link" data-create="prescription" data-rxkind="treatment">+ Add</button>
+            <span class="sk-badge ir-count">–</span>
+          </span>
         </summary>
         <div class="rc-body"><div class="bp-list ir-body"><div class="skeleton sm"></div></div></div>
       </details>
@@ -264,6 +306,17 @@ function billingHtml(b) {
 }
 
 function rxHtml(r) {
+  if (r.portalId) {
+    return `
+      <article class="rc-item">
+        <div class="rc-item-top"><h4>${escapeHtml(r.title)}</h4><span class="rc-date">${escapeHtml(fmt(r))}</span></div>
+        ${r.staff ? `<p class="rc-staff">${escapeHtml(r.staff)}</p>` : ""}
+        <p class="bp-id"><span class="bp-portal">Portal form</span></p>
+        <div class="rc-actions">
+          <a class="rc-act" href="#/form-record/${encodeURIComponent(r.portalId)}">${ICONS.view}View</a>
+        </div>
+      </article>`;
+  }
   return `
     <article class="rc-item">
       <div class="rc-item-top"><h4>${escapeHtml(r.title)}</h4><span class="rc-date">${escapeHtml(fmt(r))}</span></div>

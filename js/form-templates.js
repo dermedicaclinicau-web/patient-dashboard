@@ -9,6 +9,16 @@ import { CATEGORIES, categorize } from "./records.js";
 
 const GROUP_KEYS = [...CATEGORIES.map((c) => c.key), "other"];
 
+// Prescription forms: Product (skincare, products) or Treatment (injectables, treatments).
+// Set in Form settings; forms without one are worked out from their name.
+export const RX_KINDS = { product: "Product prescription", treatment: "Treatment prescription" };
+const RX_TREATMENT_RE = /xeomin|botox|dysport|letybo|relatox|wrinkle|toxin|\bha\b|hyaluronic|filler|radiesse|sculptra|rejuran|profhilo|skin\s?booster|hyalase|polynucleotide|injectable|treatment/i;
+export const rxKindGuess = (name) => (RX_TREATMENT_RE.test(String(name || "")) ? "treatment" : "product");
+export function rxKindOf(t) {
+  const k = t && t.settings && t.settings.rxKind;
+  return k === "product" || k === "treatment" ? k : rxKindGuess(t && t.name);
+}
+
 // Which treatment group a form belongs to: chosen in Form settings, or worked out from its name
 export function formGroup(t) {
   const g = t && t.settings && t.settings.group;
@@ -73,6 +83,7 @@ export function formSnapshot({ name, fields, settings }) {
     settings: {
       showLetterhead: !(settings && settings.showLetterhead === false),
       group: settings && GROUP_KEYS.includes(settings.group) ? settings.group : "",
+      rxKind: settings && ["product", "treatment"].includes(settings.rxKind) ? settings.rxKind : "",
       showTitle: !(settings && settings.showTitle === false),
       titleAlign: settings && ["left", "center", "right"].includes(settings.titleAlign) ? settings.titleAlign : "left",
       titleSize: settings && ["small", "medium", "large"].includes(settings.titleSize) ? settings.titleSize : "medium",

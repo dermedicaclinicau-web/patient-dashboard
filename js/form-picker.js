@@ -1,7 +1,7 @@
 // Dropdowns of published forms on the patient dashboard:
 // - the Consent record / Treatment record / Prescription tiles
 // - "+ Create Consent" / "+ Create Tx" on each treatment group (only that group's forms)
-import { listPublishedForms, categoryLabel, formGroup } from "./form-templates.js";
+import { listPublishedForms, categoryLabel, formGroup, rxKindOf } from "./form-templates.js";
 import { CATEGORIES } from "./records.js";
 import { esc } from "./form-fields.js";
 import { listTaskTypes } from "./task-types.js";
@@ -57,7 +57,7 @@ function items() {
   return menu ? [...menu.querySelectorAll(".fp-item:not([hidden])")] : [];
 }
 
-async function open(trigger, category, staff, group) {
+async function open(trigger, category, staff, group, rxKind = "") {
   closeFormPicker();
   const patientId = patientIdFromHash();
   if (!patientId) return;
@@ -68,7 +68,8 @@ async function open(trigger, category, staff, group) {
   const groupInfo = group ? CATEGORIES.find((c) => c.key === group) || { key: "other", title: "Other" } : null;
   const kind = category === "consent" ? "consent forms"
     : category === "treatment" ? "treatment records" : categoryLabel(category).toLowerCase();
-  const label = groupInfo ? `${groupInfo.title}: ${kind}` : categoryLabel(category);
+  const rxLabel = { product: "Product prescriptions", treatment: "Treatment prescriptions" };
+  const label = rxKind && rxLabel[rxKind] ? rxLabel[rxKind] : groupInfo ? `${groupInfo.title}: ${kind}` : categoryLabel(category);
 
   const thisMenu = document.createElement("div");
   menu = thisMenu;
@@ -104,6 +105,19 @@ async function open(trigger, category, staff, group) {
     else if (forms.length) note = `No ${groupInfo.title} ${kind} are published yet. Choose from all ${kind}:`;
   }
 
+  // From a section's "+ Add": only that kind of prescription. Just one? Open it straight away.
+  let grouped = category === "prescription";
+  if (category === "prescription" && rxKind) {
+    const mine = forms.filter((t) => rxKindOf(t) === rxKind);
+    if (mine.length === 1) {
+      closeFormPicker();
+      location.hash = fillHref(patientId, mine[0].id);
+      return;
+    }
+    if (mine.length) { forms = mine; grouped = false; }
+    else if (forms.length) note = `No ${rxLabel[rxKind].toLowerCase()} are published yet. Choose from all prescriptions:`;
+  }
+
   const body = menu.querySelector(".fp-body");
   if (!forms.length) {
     body.innerHTML = `<div class="fp-empty">No ${esc(kind)} are published yet.${
@@ -112,14 +126,21 @@ async function open(trigger, category, staff, group) {
     return;
   }
 
+  const itemHtml = (t) => `
+        <button type="button" class="fp-item" role="menuitem" data-fill="${esc(t.id)}" data-find="${esc(t.name.toLowerCase())}">
+          <span>${esc(t.name)}</span><small>Version ${t.version}</small>
+        </button>`;
+  // The Prescription tile: treatment and product prescriptions under their own headings
+  const sections = grouped
+    ? [["treatment", "Treatment prescriptions"], ["product", "Product prescriptions"]]
+        .map(([k, title]) => [title, forms.filter((t) => rxKindOf(t) === k)]).filter(([, list]) => list.length)
+    : [["", forms]];
   body.innerHTML = `
     ${note ? `<div class="fp-note">${esc(note)}</div>` : ""}
     ${forms.length > 6 ? `<input type="search" class="fp-search" placeholder="Search ${esc(kind)}" aria-label="Search ${esc(kind)}" />` : ""}
     <div class="fp-list" role="menu">
-      ${forms.map((t) => `
-        <button type="button" class="fp-item" role="menuitem" data-fill="${esc(t.id)}" data-find="${esc(t.name.toLowerCase())}">
-          <span>${esc(t.name)}</span><small>Version ${t.version}</small>
-        </button>`).join("")}
+      ${sections.map(([title, list]) => `<div class="fp-group">${title ? `<div class="fp-group-h">${esc(title)}</div>` : ""}${
+        list.map(itemHtml).join("")}</div>`).join("")}
       <div class="fp-empty" data-role="nomatch" hidden>No forms match that search.</div>
     </div>`;
   position();
@@ -134,6 +155,7 @@ async function open(trigger, category, staff, group) {
         if (!b.hidden) any = true;
       });
       body.querySelector('[data-role="nomatch"]').hidden = any;
+      body.querySelectorAll(".fp-group").forEach((g) => { g.hidden = !g.querySelector(".fp-item:not([hidden])"); });
     });
     search.focus();
   } else {
@@ -235,8 +257,8 @@ export function initFormPicker(contentEl, { getStaff }) {
     e.stopPropagation();
     if (menu && anchor === trigger) { closeFormPicker(); return; }
     trigger.setAttribute("aria-haspopup", "true");
-    open(trigger, category, getStaff(), create ? create.dataset.group || "" : "");
-  }, true);
+    open(trigger, category, getStaff(), create ? create.dataset.group || "" : "", create ? create.dataset.rxkind || "" : "");
+    }, true);
 
   document.addEventListener("pointerdown", (e) => {
     if (menu && !menu.contains(e.target) && !(anchor && anchor.contains(e.target))) closeFormPicker();

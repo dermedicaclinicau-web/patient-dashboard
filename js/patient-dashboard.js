@@ -530,7 +530,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       console.warn("Record badges: forms failed:", subs.reason);
     }
     if (scripts.status === "fulfilled") {
-      [...(scripts.value.rx || []), ...(scripts.value.injectables || [])].forEach((r) => {
+      [...(scripts.value.rx || []), ...(scripts.value.injectables || [])].filter((r) => !r.portalId).forEach((r) => {
         if (!(r.date instanceof Date) || isNaN(r.date)) return;
         list.push({
           dateKey: toDateKey(r.date), kind: "rx",
