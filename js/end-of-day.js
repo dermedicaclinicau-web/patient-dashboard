@@ -187,7 +187,7 @@ function readAnswer(form, q, i) {
   return v;
 }
 
-function renderForm(dlg, staff, cfg, day, kit) {function renderForm(dlg, staff, cfg, day, kit) {
+function renderForm(dlg, staff, cfg, day, kit) {
   const editLink = can("tasks.build") ? '<a class="eod-edit" href="#/tasks/end-of-day">Edit these questions</a>' : "";
   dlg.innerHTML = `<form class="lh-form eod-form" novalidate>
     <div class="lh-dialog-head"><h3>End of day</h3><p>${esc(todayText())} · Thanks for today, ${esc(firstName(staff.name))}.</p></div>
