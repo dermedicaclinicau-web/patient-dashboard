@@ -624,7 +624,6 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   }
 
   // The blanks this task can use (the chips under the message, and the button / link windows)
-  // The blanks this task can use (the chips under the message, and the button / link windows)
   function chipGroups() {
     const groups = tokenGroups(task, tokenOpts());
     // Staff tasks: always offer the patient blanks. Using one turns on "This is about a patient".
@@ -640,14 +639,6 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   function renderChips() {
     const box = $('[data-role="chips"]');
     box.innerHTML = chipGroups().map((g) => `
-      <div class="tb-chipgroup"><span>${esc(g.title)}</span>
-        <div class="fe-chiprow">${g.tokens.map((t) => `<button type="button" class="fe-ins${
-          t.kind === "smart" ? " is-smart" : t.kind === "field" ? " is-field" : ""}" data-token="${esc(t.name)}"${
-          t.hint ? ` title="${esc(t.hint)}"` : ""}>{${esc(t.name)}}</button>`).join("")}</div></div>`).join("");
-  }
-
-    /* ---------- Schedule (To Staff only) ---------- */
-    box.innerHTML = groups.map((g) => `
       <div class="tb-chipgroup"><span>${esc(g.title)}</span>
         <div class="fe-chiprow">${g.tokens.map((t) => `<button type="button" class="fe-ins${
           t.kind === "smart" ? " is-smart" : t.kind === "field" ? " is-field" : ""}" data-token="${esc(t.name)}"${
