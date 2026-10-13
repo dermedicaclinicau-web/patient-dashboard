@@ -264,9 +264,10 @@ match /inv_open/{id} {
     // Start of Day / End of Day: one document per person per day, inv_kitdays/<uid>__<YYYY-MM-DD>.
     // Each person reads and writes only their own day; Reporting and Manage inventory read everyone's.
     match /inv_kitdays/{dayId} {
-      allow read: if isStaff() && (
-          dayId.split('__')[0] == request.auth.uid   // own day (works before it exists)
-          || isAdmin());                             // everyone's: Admins only (My dashboard)
+  allow read: if isStaff() && (
+      dayId.split('__')[0] == request.auth.uid
+      || isAdmin()
+      || can('inventory.manage'));   // investigation page: an injector's End / Start of Day
       allow create, update: if isStaff()
         && request.resource.data.staffUid == request.auth.uid
         && request.resource.data.dateKey is string

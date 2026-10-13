@@ -2552,33 +2552,82 @@ async function lastKitEnd(me) {
   return null;
 }
 
-// Units that physically went in (+) or out (−) of my kit since a moment, per product:
+// What a kit activity line is called on the investigation page
+export const KIT_FLOW_LABELS = {
+  "kit-take": "Taken from the Shelf", "kit-return": "Returned to the Shelf", "kit-use": "Used in treatment",
+  "kit-discard": "Discarded", "kit-in": "Borrowed from a colleague", "kit-out": "Lent to a colleague",
+};
+
+// One line per thing that physically went in (+) or out (−) of an injector's kit, in units, oldest first:
 // taken / returned, used on treatment records, discarded, borrowed / lent.
 // Admin adjustments (accepted differences, usage corrections) don't move anything physically, so they're left out.
+function kitFlowEvents(moves, loans, staffUid, productsById, since, until = null, productId = "") {
+  const per = (pid) => Number((productsById.get(pid) || {}).dosePer) || 0;
+  const inWin = (d) => !!d && d > since && (!until || d <= until);
+  const out = [];
+  moves.forEach((m) => {
+    if (m.byUid !== staffUid || !inWin(m.at) || (productId && m.productId !== productId)) return;
+    const kitDelta = (m.lines || []).filter((l) => l.loc === "kit").reduce((a, l) => a + (Number(l.delta) || 0), 0);
+    let units;
+    if (m.type === "kit-take" || m.type === "kit-return") units = kitDelta * per(m.productId);   // vials → units
+    else if (m.type === "kit-use") units = kitDelta;                                             // already units
+    else if (m.type === "kit-discard") {
+      const d = Number(m.discardUnits);
+      units = -(Number.isFinite(d) ? d : Math.abs(kitDelta) * per(m.productId));
+    } else return;
+    if (!units) return;
+    out.push({ at: m.at, type: m.type, productId: m.productId, units: round1(units), by: m.by || "",
+      note: [m.reason, m.note].filter(Boolean).join(" · ") });
+  });
+  loans.forEach((l) => {
+    if (!inWin(l.createdAt) || (productId && l.productId !== productId)) return;
+    const u = round1(l.units);
+    if (!u) return;
+    if (l.toUid === staffUid) out.push({ at: l.createdAt, type: "kit-in", productId: l.productId, units: u, by: l.toName || "",
+      note: `From ${l.fromName || "a colleague"}'s opened vial`, status: l.status });
+    if (l.fromUid === staffUid) out.push({ at: l.createdAt, type: "kit-out", productId: l.productId, units: -u, by: l.toName || "",
+      note: `To ${l.toName || "a colleague"}`, status: l.status });
+  });
+  return out.sort((a, b) => a.at - b.at);
+}
+
+// Units in (+) or out (−) of my kit since a moment, per product
 async function kitFlowSince(since, productsById) {
   const me = uid();
   const [moves, loans] = await Promise.all([listMyKitMoves(500), listLoans(200).catch(() => [])]);
-  const per = (pid) => Number((productsById.get(pid) || {}).dosePer) || 0;
   const flow = new Map();
-  const add = (pid, n) => flow.set(pid, round1((flow.get(pid) || 0) + n));
-  const after = (d) => !!d && d > since;
-  moves.filter((m) => after(m.at)).forEach((m) => {
-    const kitDelta = (m.lines || []).filter((l) => l.loc === "kit").reduce((a, l) => a + (Number(l.delta) || 0), 0);
-    if (m.type === "kit-take" || m.type === "kit-return") add(m.productId, kitDelta * per(m.productId)); // vials → units
-    else if (m.type === "kit-use") add(m.productId, kitDelta);                                           // already units
-    else if (m.type === "kit-discard") {
-      let u = Number(m.discardUnits);
-      if (!Number.isFinite(u)) u = Math.abs(kitDelta) * per(m.productId);
-      add(m.productId, -u);
-    }
-  });
-  loans.filter((l) => after(l.createdAt)).forEach((l) => {
-    if (l.toUid === me) add(l.productId, Number(l.units) || 0);
-    if (l.fromUid === me) add(l.productId, -(Number(l.units) || 0));
+  kitFlowEvents(moves, loans, me, productsById, since).forEach((e) => {
+    flow.set(e.productId, round1((flow.get(e.productId) || 0) + e.units));
   });
   return flow;
 }
 
+// The investigation page for an overnight kit difference: everything that went in or out of that
+// injector's kit for that product between their End of Day count and the Start of Day count that opened it
+export async function kitOvernightEvidence(x) {
+  const o = x.overnight || {};
+  const staffUid = String(x.staffUid || "");
+  const countAt = x.openedAt instanceof Date ? x.openedAt : new Date();
+  const readDay = (key) => (KEY_RE.test(key || "") && staffUid
+    ? getDoc(doc(db, "inv_kitdays", kitDayId(staffUid, key))).then((s) => (s.exists() ? normaliseKitDay(s) : null)).catch(() => null)
+    : Promise.resolve(null));
+  const [products, moves, loans, endDay, startDay] = await Promise.all([
+    listProducts(), listMoves({ productId: x.productId, max: 2000 }), listAllLoans().catch(() => []),
+    readDay(o.fromDateKey), readDay(x.dateKey),
+  ]);
+  const endAt = toDate(o.endAt) || (endDay && endDay.end && endDay.end.at) || null;
+  const since = endAt || (KEY_RE.test(o.fromDateKey || "") ? keyDate(o.fromDateKey) : new Date(countAt.getTime() - 864e5));
+  const events = kitFlowEvents(moves, loans, staffUid, new Map(products.map((p) => [p.id, p])), since, countAt, x.productId);
+  const start = startDay && startDay.start;
+  return {
+    since, exactSince: !!endAt, countAt, events,
+    total: round1(events.reduce((a, e) => a + e.units, 0)),
+    endItem: endDay && endDay.end ? endDay.end.items.find((it) => it.productId === x.productId) || null : null,
+    startItem: start ? (start.items || []).find((it) => it.productId === x.productId) || null : null,
+    correctedAt: start ? toDate(start.correctedAt) : null,
+    people: [...new Set([x.staffName, ...events.map((e) => e.by)].filter(Boolean))],
+  };
+}
 // Start of Day: a blind count. The clinician types each batch from the label (nothing is shown to choose from).
 // items: [{ productId, rows: [{ batch, expiry, sealed, open, inUse }] }]
 // 1. Typed batches are matched to the kit records; any batch in the records that wasn't typed counts as 0.
@@ -2708,7 +2757,7 @@ export async function saveKitDayStart({ notInjecting = false, items = [] }, staf
           batch: "", expiry: "", batchLabel: p.batchLabel || "Batch", unit: u,
           digital: expected, counted, variance: gap, countNote: "", dateKey: key,
           status: "review", aloneApproved: true,
-          overnight: { fromDateKey: lastEnd.dateKey, endCounted, moved, expected },
+          overnight: { fromDateKey: lastEnd.dateKey, endCounted, moved, expected, endAt: lastEnd.end.at },
           openedBy: by, openedByUid: me, openedAt: serverTimestamp(), updatedAt: serverTimestamp(),
           events: [{ at, by, action: "Opened: overnight kit difference",
             note: `End of day ${lastEnd.dateKey}: ${endCounted} ${u}. Recorded since: ${moved >= 0 ? "+" : ""}${moved}. `

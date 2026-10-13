@@ -5033,3 +5033,9 @@ body.no-consult-record #tb-rec{display:none !important}
 .eod-fix{margin:0 0 .5rem;font-size:.85rem;color:var(--muted)}
 
 .topbar{z-index:50}
+
+/* Investigation: overnight kit difference */
+.ivx-ov{grid-template-columns:repeat(5,minmax(0,1fr))}
+.ivx-sum{margin:0 0 .75rem;font-size:.92rem;line-height:1.65}
+.ivx-ov-edge td{background:var(--surface-2)}
+@media (max-width:900px){.ivx-ov{grid-template-columns:repeat(2,minmax(0,1fr))}}
