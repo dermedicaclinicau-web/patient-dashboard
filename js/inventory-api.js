@@ -1785,7 +1785,7 @@ export async function setBaseline(plan, { closeOlder = true } = {}, staff, onPro
 // Sets each place / batch to what's physically there now. targets: [{ loc, batch, expiry, qty }].
 // The difference is worked out inside the transaction, so stock that moved a moment ago is respected.
 // Logged as "Starting stock set". Returns how many places changed.
-export async function setStartingStock(product, targets, staff) {
+export async function setStartingStock(product, targets, staff, { type = "baseline", reason = "Starting stock set", note = "Typed in" } = {}) {
   const byUid = uid();
   const want = new Map();
   (targets || []).forEach((t) => {
@@ -1833,8 +1833,8 @@ export async function setStartingStock(product, targets, staff) {
     if (!lines.length) return;
     tx.update(pRef, { stock, stockAt: serverTimestamp() });
     tx.set(doc(collection(db, "inv_moves")), {
-      type: "baseline", productId: product.id, productName: String(pd.name || product.name),
-      unit: String(pd.stockUnit || product.stockUnit), lines, reason: "Starting stock set", note: "Typed in", ref: "",
+      type: type === "count" ? "count" : "baseline", productId: product.id, productName: String(pd.name || product.name),
+      unit: String(pd.stockUnit || product.stockUnit), lines, reason: clip(reason, 60), note: clip(note, 500), ref: "",
       by: who(staff), byUid, at: serverTimestamp(),
     });
   });

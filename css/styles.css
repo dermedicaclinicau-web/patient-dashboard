@@ -4837,3 +4837,16 @@ dialog.lh-dialog.inv-dlg.inv-spdlg{width:min(780px,96vw)}
 .inv-sp-loc.is-set{background:#ecfdf5}
 .inv-sp-loc.is-set input{border-color:#10b981}
 .inv-sp .fe-note{display:block;margin-top:6px}
+
+/* Stock → Update digital count */
+.inv-qrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap;cursor:default;text-align:left}
+.inv-qrow:hover{transform:none}
+.inv-qrow .inv-name{flex:1 1 220px;min-width:0}
+.inv-qrow .inv-flags{flex:0 1 auto}
+.inv-qc{display:flex;flex-direction:column;align-items:flex-end;gap:2px}
+.inv-qc small{color:var(--muted,#64748b);font-size:12px;white-space:nowrap}
+.inv-qc input{width:84px;text-align:right}
+.inv-qc.is-set input{border-color:#10b981;background:#ecfdf5}
+.inv-quickbar{position:sticky;bottom:12px;z-index:5;display:flex;align-items:center;gap:10px;margin-top:14px;
+  padding:10px 14px;border:1px solid var(--line,#e5e7eb);border-radius:12px;background:var(--surface,#fff);
+  box-shadow:0 6px 20px rgba(15,23,42,.12)}

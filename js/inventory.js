@@ -121,6 +121,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     reqFilter: "open", reqView: "list", pos: [], poFilter: "draft", lineSup: {},
     sel: new Set(), pq: "", pcat: "", psup: "",  pcount: "",
     counts: [], invs: [], lastCounts: new Map(), open: [],
+    quick: false, qv: new Map(),   // Stock → Update digital count: on/off, and what's been typed ("productId|loc" → "12")
   };
   const supplierOf = (id) => st.suppliers.find((s) => s.id === id) || null;
   // "Merz Aesthetics / Medical Supplies Co" (main first)
@@ -220,13 +221,24 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           `<option value="${c.key}"${st.cat === c.key ? " selected" : ""}>${esc(c.label)}</option>`).join("")}</select>
         ${seg("inv-view", [["all", "Both"], ["shelf", "Shelf"], ["jt", "JT storage"]], st.view).replace(/name="inv-view"/g, 'name="inv-view" data-f="view"')}
         <label class="fe-check"><input type="checkbox" data-f="flagged"${st.flagged ? " checked" : ""} /> Only low or expiring</label>
-        ${canRequest ? '<a class="ff-btn" href="#/tasks/order/low">Request low stock</a>' : ""}
+        <span class="inv-spacer"></span>
+        ${canManage ? `<button type="button" class="ff-btn${st.quick ? " is-primary" : ""}" data-act="quick">${st.quick ? "Done updating" : "Update digital count"}</button>` : ""}
+        ${canRequest && !st.quick ? '<a class="ff-btn" href="#/tasks/order/low">Request low stock</a>' : ""}
       </div>
-      <div data-role="list"></div>`;
+      ${st.quick ? `<p class="inv-hint">Type what's there now. Empty boxes stay as they are. Enter moves to the next box. Batch &amp; expiry products are counted by batch.</p>` : ""}
+      <div data-role="list"></div>
+      ${st.quick ? `<div class="inv-quickbar" data-role="quickbar">
+        <span data-role="qtext"></span>
+        <span class="inv-spacer"></span>
+        <button type="button" class="lh-btn is-quiet" data-act="quick-discard">Discard</button>
+        <button type="button" class="lh-btn is-primary" data-act="quick-save">Save</button>
+      </div>` : ""}`;
     renderStockList();
+    syncQuickBar();
   }
 
   function stockRow(p) {
+    if (st.quick) return quickRow(p);
     const qty = (loc) => `<span class="inv-q${lowAt(p, loc) ? " is-low" : ""}"><small>${loc === "shelf" ? "Shelf" : "JT"}</small><b>${p.stock[loc]}</b></span>`;
     const sup = supplierOf(p.supplierId);
     return `
@@ -260,6 +272,101 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       return items.length ? `<section class="inv-group"><h3>${esc(c.label)}<em>${items.length}</em></h3>
         <div class="inv-list">${items.map(stockRow).join("")}</div></section>` : "";
     }).join("");
+  }
+
+  /* ---------- Stock → Update digital count (Manage inventory) ---------- */
+  function quickRow(p) {
+    const locs = LOCATIONS.filter((l) => st.view === "all" || st.view === l.key);
+    const cell = (loc) => {
+      const k = `${p.id}|${loc}`;
+      const v = st.qv.has(k) ? st.qv.get(k) : "";
+      const set = v !== "" && Number(v) !== p.stock[loc];
+      return `<label class="inv-qc${set ? " is-set" : ""}"><small>${loc === "shelf" ? "Shelf" : "JT"} · now ${p.stock[loc]}</small>
+        <input class="fe-input inv-num" type="number" min="0" step="1" inputmode="numeric" data-qc="${esc(k)}"
+          value="${esc(v)}" placeholder="${p.stock[loc]}" aria-label="${esc(`${p.name}: ${loc === "shelf" ? "Shelf" : "JT storage"}`)}" /></label>`;
+    };
+    return `
+      <div class="inv-row inv-qrow">
+        <span class="inv-name"><strong>${esc(p.name)}</strong><small>${esc(unitPlural(p.stockUnit))}</small></span>
+        <span class="inv-flags">${flags(p).map(([t, l]) => `<span class="inv-flag is-${t}">${esc(l)}</span>`).join("")}</span>
+        ${p.tracked
+          ? `<button type="button" class="lh-btn" data-qbatch="${esc(p.id)}">Count by ${esc(batchName(p).toLowerCase())}…</button>`
+          : locs.map((l) => cell(l.key)).join("")}
+      </div>`;
+  }
+
+  // What's been typed that differs from digital (bad = not a whole number of 0 or more)
+  function quickChanges() {
+    return [...st.qv].map(([k, v]) => {
+      const [pid, loc] = k.split("|");
+      const p = st.products.find((x) => x.id === pid);
+      const n = Number(v);
+      return p ? { k, p, loc, n, bad: !Number.isInteger(n) || n < 0 } : null;
+    }).filter((c) => c && (c.bad || c.n !== c.p.stock[c.loc]));
+  }
+
+  function syncQuickBar() {
+    const bar = body.querySelector('[data-role="quickbar"]');
+    if (!bar) return;
+    const ch = quickChanges();
+    const prods = new Set(ch.map((c) => c.p.id)).size;
+    bar.querySelector('[data-role="qtext"]').textContent = ch.length
+      ? `${plural(ch.length, "change")} across ${plural(prods, "product")}` : "No changes yet";
+    bar.querySelector('[data-act="quick-save"]').disabled = !ch.length;
+    bar.querySelector('[data-act="quick-discard"]').disabled = !st.qv.size;
+  }
+
+  async function toggleQuick() {
+    if (st.quick && quickChanges().length) {
+      const ok = await confirmDialog({
+        title: "Discard what you've typed?",
+        message: `${plural(quickChanges().length, "change")} haven't been saved.`,
+        confirmLabel: "Discard", tone: "warning",
+      });
+      if (!ok) return;
+    }
+    st.quick = !st.quick;
+    st.qv.clear();
+    renderStock();
+    if (st.quick) { const first = body.querySelector("[data-qc]"); if (first) first.focus(); }
+  }
+
+  async function saveQuick(btn) {
+    const ch = quickChanges();
+    const bad = ch.find((c) => c.bad);
+    if (bad) {
+      showToast(`${bad.p.name}: enter a whole number of 0 or more.`);
+      const el = body.querySelector(`[data-qc="${CSS.escape(bad.k)}"]`);
+      if (el) el.focus();
+      return;
+    }
+    if (!ch.length) return;
+    const byProduct = new Map();
+    ch.forEach((c) => byProduct.set(c.p.id, [...(byProduct.get(c.p.id) || []), c]));
+    const queue = [...byProduct.values()];
+    const total = queue.length;
+    let done = 0, places = 0;
+    const failed = [];
+    btn.disabled = true;
+    await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
+      while (queue.length) {
+        const g = queue.shift();
+        const p = g[0].p;
+        try {
+          places += await setStartingStock(p, g.map((c) => ({ loc: c.loc, qty: c.n })), staff,
+            { type: "count", reason: "Stock count", note: "Quick count" });
+          g.forEach((c) => st.qv.delete(c.k));
+        } catch (ex) {
+          console.error("Quick count failed:", p.name, ex);
+          failed.push(p.name);
+        }
+        btn.textContent = `Saving ${++done} of ${total}…`;
+      }
+    }));
+    showToast(failed.length
+      ? `Saved ${total - failed.length}. Couldn't save: ${failed.slice(0, 3).join(", ")}${failed.length > 3 ? "…" : ""}. Their numbers are still there to try again.`
+      : `Digital count updated: ${plural(places, "change")} across ${plural(total, "product")}`);
+    await load();
   }
 
   /* ---------- Products (with tick boxes and bulk actions) ---------- */
@@ -1746,6 +1853,16 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
   /* ---------- Events ---------- */
   root.addEventListener("click", (e) => {
+    if (e.target.closest('[data-act="quick"]')) { toggleQuick(); return; }
+    if (e.target.closest('[data-act="quick-discard"]')) { st.qv.clear(); renderStockList(); syncQuickBar(); return; }
+    const qs = e.target.closest('[data-act="quick-save"]');
+    if (qs) { saveQuick(qs); return; }
+    const qb = e.target.closest("[data-qbatch]");
+    if (qb) {
+      const p = st.products.find((x) => x.id === qb.dataset.qbatch);
+      if (p) stockAction(p, "count").then((saved) => { if (saved) load(); });
+      return;
+    }
     const bk = e.target.closest("[data-bulk]");
     if (bk) { bulkAction(bk.dataset.bulk); return; }
     const mk = e.target.closest("[data-mkpo]");
@@ -1767,6 +1884,16 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   });
   body.addEventListener("input", (e) => {
     const t = e.target;
+    // Stock → Update digital count
+    if (t.dataset.qc !== undefined) {
+      const v = t.value.trim();
+      if (v === "") st.qv.delete(t.dataset.qc); else st.qv.set(t.dataset.qc, v);
+      const [pid, loc] = t.dataset.qc.split("|");
+      const p = st.products.find((x) => x.id === pid);
+      t.closest(".inv-qc").classList.toggle("is-set", !!p && v !== "" && Number(v) !== p.stock[loc]);
+      syncQuickBar();
+      return;
+    }
     // Product tick boxes
     if (t.dataset.pick) {
       if (t.checked) st.sel.add(t.dataset.pick); else st.sel.delete(t.dataset.pick);
@@ -1787,6 +1914,15 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     if (k === "flagged" || k === "showInactive") st[k] = t.checked;
     else st[k] = t.value;
     if (["showInactive", "pq", "pcat", "psup", "pcount"].includes(k)) drawProductList(); else renderStockList();
+  });
+
+  body.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.target.dataset.qc === undefined) return;
+    e.preventDefault();
+    const all = [...body.querySelectorAll("[data-qc]")];
+    const next = all[all.indexOf(e.target) + 1];
+    if (next) { next.focus(); next.select(); }
+    else { const save = body.querySelector('[data-act="quick-save"]'); if (save && !save.disabled) save.focus(); }
   });
 
   load();
