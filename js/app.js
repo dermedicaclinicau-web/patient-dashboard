@@ -25,6 +25,7 @@ import { mountReports } from "./reports.js";
 import { mountSettings } from "./settings.js";
 import { initEndOfDay, teardownEndOfDay } from "./end-of-day.js";
 import { mountStaffDays } from "./staff-days.js";
+import { maybeShowStartOfDay, closeStartOfDay, refreshStartOfDayButton, hideStartOfDayButton } from "./start-of-day.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -309,6 +310,7 @@ async function checkAccess() {
     renderStaff(currentStaff);
     applyNav();
     initEndOfDay(currentStaff);
+    refreshStartOfDayButton(currentStaff);
     if (!pageAllowed(currentPage())) router();
     showToast("Your access has been updated");
   } catch (err) {
@@ -326,6 +328,7 @@ watchAuth((staff) => {
     applyNav();
     if (sameUser) {
       initEndOfDay(staff); // access may have changed (e.g. made an injector)
+      refreshStartOfDayButton(staff);
       // A refreshed login token (access changed): keep the current page unless it's no longer allowed
       if (!pageAllowed(currentPage())) router();
       return;
@@ -347,6 +350,7 @@ watchAuth((staff) => {
     clearPatientCache();
     closeStartOfDay();
     teardownEndOfDay();
+    hideStartOfDayButton();
     suspendRecorder(); // stops the mic; any audio stays on this device for upload at next login
     closeSoapPanel();
     closeFormPicker();

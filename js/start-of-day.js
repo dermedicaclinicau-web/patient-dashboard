@@ -46,6 +46,7 @@ async function kitToday(staff) {
 // The welcome once per day. The kit count until it's done (it comes back at the next login if put off).
 export async function maybeShowStartOfDay(staff) {
   if (!staff) return;
+  refreshStartOfDayButton(staff);
   let seen = false;
   try { seen = !!localStorage.getItem(seenKey(staff)); } catch { /* storage blocked: show it */ }
   if (!seen) { showStartOfDay(staff); return; }
@@ -227,8 +228,8 @@ function renderKit(dlg, staff, kit, close) {
   });
   card.querySelector('[data-act="later"]').addEventListener("click", () => {
     close();
-    showToast("No problem. Count your kit from My dashboard → Needs my attention when you're ready.");
-  });
+    showToast("No problem. Press “Start my day” at the top when you're ready to count your kit.");
+    });
   card.addEventListener("input", () => showErr(""));
   card.addEventListener("click", (e) => {
     const add = e.target.closest('[data-act="add"]');
@@ -333,3 +334,59 @@ async function loadStats(dlg) {
     if (dlg.isConnected && wrap.isConnected) wrap.hidden = true;
   }
 }
+
+/* ---------- "Start my day" in the top bar: shown until today's kit count is done ---------- */
+let btnStaff = null;
+let btnCheck = 0;
+
+function sodButton() {
+  let b = document.getElementById("sod-btn");
+  if (!b) {
+    const eod = document.getElementById("eod-btn");
+    const stack = eod ? eod.parentElement : document.querySelector(".avatar-stack");
+    if (!stack) return null;
+    b = document.createElement("button");
+    b.type = "button";
+    b.id = "sod-btn";
+    b.hidden = true;
+    stack.insertBefore(b, eod || null);
+  }
+  if (!b.dataset.wired) {
+    b.dataset.wired = "1";
+    b.className = "eod-btn sod-btn";
+    b.title = "Count your kit for today";
+    b.innerHTML = `${SUN}<span>Start my day</span>`;
+    b.addEventListener("click", async () => {
+      if (!btnStaff || b.disabled) return;
+      b.disabled = true;
+      try { await openStartOfDayKit(btnStaff); } finally { b.disabled = false; }
+    });
+  }
+  return b;
+}
+
+function setPending(on) {
+  const b = sodButton();
+  if (!b) return;
+  b.hidden = !on;
+  if (b.parentElement) b.parentElement.classList.toggle("sod-pending", on);   // hides "End my day" meanwhile
+}
+
+// Shows the button if this person still has today's kit count to do
+export async function refreshStartOfDayButton(staff) {
+  btnStaff = staff || null;
+  const mine = ++btnCheck;
+  if (!staff) { setPending(false); return; }
+  const kit = await kitToday(staff).catch((err) => { console.warn("Kit check failed:", err); return null; });
+  if (mine === btnCheck && btnStaff === staff) setPending(!!kit);
+}
+
+// On logout
+export function hideStartOfDayButton() {
+  btnStaff = null;
+  btnCheck++;
+  setPending(false);
+}
+
+// Saved, or found already done: hide it
+window.addEventListener("kitday:changed", () => { if (btnStaff) refreshStartOfDayButton(btnStaff); });

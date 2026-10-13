@@ -4960,3 +4960,9 @@ dialog.lh-dialog.eod-dlg{width:min(660px,95vw)}
 /* My dashboard → Start & end of day */
 .sd-table td{vertical-align:middle}
 .md-stats{flex-wrap:wrap;gap:1rem 1.75rem}
+
+/* Start my day: in End my day's place until today's kit count is done */
+.sod-btn{color:#b45309;border-color:#fcd34d;background:#fffbeb}
+.sod-btn:hover{background:#fef3c7;border-color:#f59e0b}
+.sod-btn[hidden]{display:none}
+.avatar-stack.sod-pending .eod-btn{display:none}
