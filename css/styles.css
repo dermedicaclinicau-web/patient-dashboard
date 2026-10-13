@@ -4639,8 +4639,15 @@ button.pa-bdg { font-family: inherit; line-height: inherit; }
 
 
 /* ===== Recording rules: add / edit window ===== */
-dialog.rr-dlg { width: min(720px, 94vw); max-width: none; padding: 0; overflow: hidden; }
-.rr-dlg .rr-form { display: flex; flex-direction: column; max-height: 88vh; margin: 0; }
+dialog.lh-dialog.inv-dlg.rr-dlg {
+  width: min(680px, 94vw); max-width: 94vw; min-width: 0;
+  padding: 0; overflow: hidden;
+}
+dialog.lh-dialog.inv-dlg.rr-dlg > .rr-form {
+  display: flex; flex-direction: column;
+  width: 100%; max-width: none; box-sizing: border-box;
+  max-height: 88vh; margin: 0; padding: 0;
+}
 
 .rr-dlg-head { display: flex; align-items: flex-start; gap: 1rem; padding: 1.1rem 1.4rem .9rem; border-bottom: 1px solid var(--border); }
 .rr-dlg-head > div { flex: 1; }
