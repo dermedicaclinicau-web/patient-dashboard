@@ -2634,11 +2634,16 @@ export async function kitOvernightEvidence(x) {
 function matchKitRows(p, rowsIn, lots) {
   const tally = new Map(lots.map((k) => [k.id, { k, sealed: 0, open: 0 }]));
   const unknown = [];
-  const rows = (Array.isArray(rowsIn) ? rowsIn : []).map((r) => ({
-    batch: clip(r.batch, 40), expiry: KEY_RE.test(r.expiry || "") ? r.expiry : "",
-    sealed: Math.max(0, parseInt(r.sealed, 10) || 0), open: round1(Math.max(0, Number(r.open) || 0)),
-    inUse: r.inUse === true, ref: "", expiryMismatch: false,
-  }));
+  // A row is either just "units remaining" (Start / End of Day), or unopened + opened (older records)
+  const rows = (Array.isArray(rowsIn) ? rowsIn : []).map((r) => {
+    const units = r.units !== undefined && r.units !== null ? round1(Math.max(0, Number(r.units) || 0)) : null;
+    return {
+      batch: clip(r.batch, 40), expiry: KEY_RE.test(r.expiry || "") ? r.expiry : "",
+      sealed: units === null ? Math.max(0, parseInt(r.sealed, 10) || 0) : 0,
+      open: units === null ? round1(Math.max(0, Number(r.open) || 0)) : units,
+      inUse: r.inUse === true, ref: "", expiryMismatch: false,
+    };
+  });
   rows.forEach((r) => {
     const nb = normBatch(r.batch);
     const same = lots.filter((k) => normBatch(k.batch) === nb);

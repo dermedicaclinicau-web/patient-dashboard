@@ -266,10 +266,10 @@ export async function mountInvestigation(container, { id, staff } = {}) {
     const loanFlag = (v) => (v.status === "disputed" ? ' <span class="inv-flag is-bad">Disputed</span>'
       : v.status === "unconfirmed" ? ' <span class="inv-flag is-warn">Not confirmed</span>' : "");
     const endLots = ((e.endItem && (e.endItem.rows || e.endItem.lots)) || [])
-      .map((l) => `${l.batch || "No batch"}: ${l.sealed} unopened, ${r1(l.open)} left`).join(" · ");
+      .map((l) => `${l.batch || "No batch"}: ${r1(l.units !== undefined ? l.units : l.counted)} ${u}`).join(" · ");
     const startLots = !e.correctedAt ? ((e.startItem && e.startItem.rows) || [])
-      .map((r) => `${r.batch || "No batch"}: ${r.sealed} unopened, ${r1(r.open)} left`).join(" · ") : "";
-
+      .map((r) => `${r.batch || "No batch"}: ${r1(r.units)} ${u}`).join(" · ") : "";
+      
     let bal = r1(o.endCounted);
     const rows = [
       `<tr class="ivx-ov-edge"><td>${esc(when(e.since))}</td><td><strong>End of Day count</strong></td><td></td>

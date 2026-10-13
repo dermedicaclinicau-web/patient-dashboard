@@ -3,6 +3,7 @@ import { escapeHtml, getInitials, toDateKey, showToast } from "./utils.js";
 import { listProducts, isKitProduct, getMyKitDay, saveKitDayStart, saveDayStart, plural } from "./inventory-api.js";
 import { db } from "./firebase-config.js";
 import { collection, getDocs, query, where, FieldPath } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { kitCountHtml, wireKitCount, readKitCount } from "./kit-count.js";
 
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July",
@@ -225,52 +226,19 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
   loadStats(dlg, staff);
 }
 
-/* ---------- Your kit: a blind count, typed from the labels ---------- */
-// kit.edit (correcting today's start): batch, expiry and "using today" are carried over; the counts never are.
+/* ---------- Your kit: "How many units remaining?" (blind: nothing is filled in) ---------- */
+// kit.edit (correcting today's start): this morning's batch and expiry are filled in again; the units never are.
 
 function renderKit(dlg, staff, kit, close) {
   dlg.classList.add("is-kit");
   const card = dlg.querySelector(".sod-card");
-  const byId = new Map(kit.products.map(({ p }) => [p.id, p]));
-  const bl = (p) => (p.batchLabel || "Batch");
   const edit = kit.edit || null;
-  const earlier = (pid) => (edit && !edit.notInjecting ? (edit.items || []).find((it) => it.productId === pid) : null) || null;
+  const products = kit.products.map(({ p }) => p);
   const submitLabel = edit ? "Save changes" : "Save and start my day";
-
-  const rowHtml = (p, r = null) => `<tr>
-      ${p.tracked ? `<td><input class="fe-input sod-batch" data-f="batch" maxlength="40" autocomplete="off" spellcheck="false"
-          aria-label="${esc(bl(p))} number" placeholder="From the label" value="${esc((r && r.batch) || "")}" /></td>
-        <td><input class="fe-input sod-exp" type="date" data-f="expiry" aria-label="Expiry date" value="${esc((r && r.expiry) || "")}" /></td>` : ""}
-      <td><input class="fe-input" type="number" min="0" step="1" inputmode="numeric" data-f="sealed" aria-label="Unopened" /></td>
-      <td><div class="fe-num"><input class="fe-input" type="number" min="0" step="0.5" inputmode="decimal" data-f="open"
-          aria-label="${esc(p.doseUnit)} left in the opened ${esc(p.stockUnit)}" /><span>${esc(p.doseUnit)}</span></div></td>
-      <td class="sod-use"><input type="radio" name="use-${esc(p.id)}" value="row" data-f="use" aria-label="Using this one today"${r && r.inUse ? " checked" : ""} /></td>
-      <td><button type="button" class="hx-x" data-act="rm" aria-label="Remove this row" title="Remove">×</button></td>
-    </tr>`;
-
-  const productHtml = (p) => {
-    const e = earlier(p.id);
-    const emptyKit = !!e && !(Array.isArray(e.rows) && e.rows.length);   // corrected from a "None in my kit" morning
-    const rows = e && Array.isArray(e.rows) && e.rows.length ? e.rows : [null];
-    const noneOn = !!(e && !emptyKit && !e.inUse);
-    return `
-    <section class="sod-kp" data-pid="${esc(p.id)}">
-      <h3>${esc(p.name)} <small>${esc(`${p.dosePer} ${p.doseUnit} per ${p.stockUnit}`)}</small></h3>
-      <p class="sod-k-hint">${p.tracked
-        ? `Read the ${esc(bl(p).toLowerCase())} number and expiry off each ${esc(p.stockUnit)} in your kit. One row per ${esc(bl(p).toLowerCase())}.`
-        : `Count what's in your kit.`}</p>
-      <div class="sod-kscroll"><table class="sod-ktable">
-        <thead><tr>${p.tracked ? `<th>${esc(bl(p))} #</th><th>Expiry</th>` : ""}<th>Unopened</th>
-          <th>Left in the opened ${esc(p.stockUnit)}</th><th>Using today</th><th></th></tr></thead>
-        <tbody>${rows.map((r) => rowHtml(p, r)).join("")}</tbody></table></div>
-      <div class="sod-krow-acts">
-        ${p.tracked ? `<button type="button" class="ff-btn is-quiet" data-act="add">+ Add another ${esc(bl(p).toLowerCase())}</button>` : "<span></span>"}
-        <span class="sod-k-opts">
-          <label class="fe-check"><input type="radio" name="use-${esc(p.id)}" value="none"${noneOn ? " checked" : ""} /> Not using this today</label>
-          <label class="fe-check"><input type="checkbox" data-none${emptyKit ? " checked" : ""} /> None in my kit</label>
-        </span>
-      </div>
-    </section>`;
+  const earlierRow = (pid) => {
+    const it = edit && !edit.notInjecting ? (edit.items || []).find((x) => x.productId === pid) : null;
+    const rows = (it && it.rows) || [];
+    return rows.find((r) => r.inUse) || rows[0] || {};
   };
 
   card.innerHTML = `
@@ -278,10 +246,12 @@ function renderKit(dlg, staff, kit, close) {
       <p class="sod-eyebrow">Start of day${edit && edit.at ? ` · started ${esc(timeOf(edit.at))}` : ""}</p>
       <h2 id="sod-title" class="sod-title serif">${edit ? "Edit start of day" : "Your kit"}</h2>
       <p class="sod-sub">${edit
-        ? "Count what's in your kit right now and save. This replaces this morning's count (it stays on record), and treatments since this morning are taken into account."
-        : `Count what's physically in your kit and type in each ${esc(kit.products.some(({ p }) => p.tracked) ? "batch and expiry from the label" : "item")}.
-          Put 0 where there's none, and choose the one you're using today. If you don't carry one of these at all, tick <strong>None in my kit</strong>.`}</p>
-      ${kit.products.map(({ p }) => productHtml(p)).join("")}
+        ? "Enter what's left in your kit right now. This replaces this morning's count (it stays on record)."
+        : "How much is left in your kit? Put 0 if you have none."}</p>
+      <div class="kc-list">${kitCountHtml(products.map((p) => {
+        const r = earlierRow(p.id);
+        return { p, batch: r.batch || "", expiry: r.expiry || "" };
+      }))}</div>
       <label class="fe-check sod-none"><input type="checkbox" name="none" /> I'm not injecting today</label>
       <p class="lh-error" role="alert" hidden></p>
       <div class="sod-kit-acts">
@@ -294,85 +264,28 @@ function renderKit(dlg, staff, kit, close) {
   const err = card.querySelector(".lh-error");
   const none = form.elements.none;
   const showErr = (m, focus) => { err.textContent = m; err.hidden = !m; if (focus) focus.focus(); };
-  const syncRm = (sec) => {
-    const rows = sec.querySelectorAll("tbody tr");
-    rows.forEach((tr) => { tr.querySelector('[data-act="rm"]').hidden = rows.length < 2; });
-  };
-  // "I'm not injecting today" turns everything off; "None in my kit" turns off just that product's rows
+  wireKitCount(card);
   const syncOff = () => {
-    const all = none.checked;
-    card.querySelectorAll(".sod-kp").forEach((sec) => {
-      const empty = sec.querySelector("[data-none]").checked;
-      sec.classList.toggle("is-off", all);
-      sec.classList.toggle("is-empty", !all && empty);
-      sec.querySelectorAll("input, button").forEach((el) => { el.disabled = all || (empty && !el.matches("[data-none]")); });
-    });
+    card.querySelector(".kc-list").classList.toggle("is-off", none.checked);
+    card.querySelectorAll(".kc input").forEach((i) => { i.disabled = none.checked; });
   };
-  card.querySelectorAll(".sod-kp").forEach(syncRm);
   if (edit && edit.notInjecting) none.checked = true;
   syncOff();
-
-  card.addEventListener("change", (e) => {
-    if (e.target === none || e.target.matches("[data-none]")) { syncOff(); showErr(""); }
-  });
+  none.addEventListener("change", () => { syncOff(); showErr(""); });
+  card.addEventListener("input", () => showErr(""));
   card.querySelector('[data-act="later"]').addEventListener("click", () => {
     close();
     if (!edit) showToast("No problem. Press “Start my day” at the top when you're ready to count your kit.");
-  });
-  card.addEventListener("input", () => showErr(""));
-  card.addEventListener("click", (e) => {
-    const add = e.target.closest('[data-act="add"]');
-    if (add) {
-      const sec = add.closest(".sod-kp");
-      const tb = sec.querySelector("tbody");
-      tb.insertAdjacentHTML("beforeend", rowHtml(byId.get(sec.dataset.pid)));
-      syncRm(sec);
-      tb.lastElementChild.querySelector("input").focus();
-      return;
-    }
-    const rm = e.target.closest('[data-act="rm"]');
-    if (rm) {
-      const sec = rm.closest(".sod-kp");
-      rm.closest("tr").remove();
-      syncRm(sec);
-      return;
-    }
-    if (e.target.closest('a[href^="#/"]')) close();
   });
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const notInjecting = none.checked;
-    const items = [];
+    let items = [];
     if (!notInjecting) {
-      for (const { p } of kit.products) {
-        const sec = card.querySelector(`[data-pid="${CSS.escape(p.id)}"]`);
-        // None in my kit: counted as 0 (anything the records say is in the kit becomes a difference to review)
-        if (sec.querySelector("[data-none]").checked) { items.push({ productId: p.id, rows: [] }); continue; }
-        const trs = [...sec.querySelectorAll("tbody tr")];
-        const rows = [];
-        let chosen = sec.querySelector('input[value="none"]').checked;
-        for (const tr of trs) {
-          const f = (k) => tr.querySelector(`[data-f="${k}"]`);
-          const batch = p.tracked ? f("batch").value.trim() : "";
-          const expiry = p.tracked ? f("expiry").value : "";
-          const s = f("sealed").value.trim();
-          const o = f("open").value.trim();
-          if (trs.length > 1 && !batch && !expiry && s === "" && o === "") continue; // an empty extra row
-          if (p.tracked && !batch) { showErr(`${p.name}: type the ${bl(p).toLowerCase()} number from the label, or tick “None in my kit”.`, f("batch")); return; }
-          if (p.tracked && !/^\d{4}-\d{2}-\d{2}$/.test(expiry)) { showErr(`${p.name} ${batch}: enter the expiry date from the label.`, f("expiry")); return; }
-          const sn = Number(s), on = Number(o);
-          if (s === "" || !Number.isInteger(sn) || sn < 0) { showErr(`${p.name}${batch ? ` ${batch}` : ""}: enter how many unopened (0 if none).`, f("sealed")); return; }
-          if (o === "" || !(on >= 0)) { showErr(`${p.name}${batch ? ` ${batch}` : ""}: enter the ${p.doseUnit} left in the opened ${p.stockUnit} (0 if none).`, f("open")); return; }
-          if (on > (Number(p.dosePer) || Infinity)) { showErr(`${p.name}: an opened ${p.stockUnit} holds ${p.dosePer} ${p.doseUnit} at most.`, f("open")); return; }
-          const inUse = f("use").checked;
-          if (inUse) chosen = true;
-          rows.push({ batch, expiry, sealed: sn, open: on, inUse });
-        }
-        if (!rows.length) { showErr(`${p.name}: count at least one ${p.tracked ? bl(p).toLowerCase() : "row"}, or tick “None in my kit”.`); return; }
-        if (!chosen) { showErr(`${p.name}: tick the ${p.stockUnit} you're using today, or “Not using this today”.`); return; }
-        items.push({ productId: p.id, rows });
-      }
+      const r = readKitCount(card, products);
+      if (r.error) { showErr(r.error, r.focus); return; }
+      items = r.items;
     }
 
     const btn = form.querySelector('[type="submit"]');
@@ -401,9 +314,10 @@ function renderKit(dlg, staff, kit, close) {
     }
   });
 
-  const first = card.querySelector(edit ? '[data-f="sealed"]:not(:disabled)' : '[data-f="batch"]:not(:disabled), [data-f="sealed"]:not(:disabled)');
+  const first = card.querySelector('[data-f="units"]:not(:disabled)');
   if (first) setTimeout(() => first.focus(), 50);
 }
+
 
 /* ---------- The welcome: the clinic today, and what's waiting for you ---------- */
 
