@@ -4697,3 +4697,17 @@ dialog.rr-dlg { width: min(720px, 94vw); max-width: none; padding: 0; overflow: 
 
 .rr-subhead { margin-top: .25rem; }
 .rr-subhead h2 { display: none; }
+
+/* System configuration → Wording */
+.ut-group + .ut-group { margin-top: 1rem; }
+.ut-group h5 { margin: .25rem 0 .4rem; font-size: .75rem; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; color: var(--muted); }
+.ut-row { display: flex; gap: 1rem; align-items: flex-start; padding: .75rem .9rem; border: 1px solid var(--border); border-radius: 12px; margin-bottom: .5rem; }
+.ut-row.is-editing { border-color: #0f766e; background: #f0fdfa; }
+.ut-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .25rem; }
+.ut-where { font-size: .75rem; font-weight: 600; color: #0f766e; }
+.ut-new { margin: 0; font-weight: 500; }
+.ut-orig { margin: 0; font-size: .82rem; color: var(--muted); }
+.ut-orig span { font-weight: 600; }
+.ut-ta { width: 100%; box-sizing: border-box; }
+.ut-acts { display: flex; gap: .4rem; flex: none; }
+@media (max-width: 640px) { .ut-row { flex-direction: column; } .ut-acts { align-self: flex-end; } }

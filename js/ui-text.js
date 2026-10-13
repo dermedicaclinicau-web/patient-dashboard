@@ -24,18 +24,32 @@ export function loadUiText() {
   return job;
 }
 
-// value "" goes back to the original wording
-export async function saveUiText(key, value, staff) {
+// value "" goes back to the original wording. info = { orig, where } is kept so the Wording tab can list it.
+export async function saveUiText(key, value, staff, info = {}) {
   const v = norm(value).slice(0, 600);
+  const by = String((staff && staff.name) || "").slice(0, 120);
   await setDoc(REF, {
     texts: { [key]: v || deleteField() },
-    updatedAt: serverTimestamp(), updatedBy: String((staff && staff.name) || "").slice(0, 120),
+    meta: { [key]: v ? {
+      orig: norm(info.orig).slice(0, 600),
+      where: norm(info.where).slice(0, 120),
+      by, at: new Date().toISOString(),
+    } : deleteField() },
+    updatedAt: serverTimestamp(), updatedBy: by,
   }, { merge: true });
   cache = { ...(cache || {}) };
   if (v) cache[key] = v; else delete cache[key];
   return cache;
 }
 
+// Everything, fresh from Firestore (System configuration → Wording)
+export async function loadUiTextAll() {
+  const s = await getDoc(REF);
+  const d = s.exists() ? s.data() : {};
+  cache = { ...(d.texts || {}) };
+  job = Promise.resolve(cache);
+  return { texts: { ...(d.texts || {}) }, meta: { ...(d.meta || {}) } };
+}
 const editable = (root) => [...root.querySelectorAll(SEL)].filter((el) =>
   !el.children.length && !el.dataset.role && !el.closest(".uit-ed") && (el.dataset.uitKey || norm(el.textContent)));
 
@@ -115,7 +129,8 @@ export function enableUiText(dlg, { scope = "ui", admin = false, staff = null } 
       const save = value === orig ? "" : value;
       b.disabled = true;
       try {
-        texts = await saveUiText(key, save, staff);
+        const head = dlg.querySelector(".lh-dialog-head h3, h3");
+        texts = await saveUiText(key, save, staff, { orig, where: head ? head.textContent : "" });
         ed.remove();
         run();
         showToast(save ? "Wording saved" : "Back to the original wording");

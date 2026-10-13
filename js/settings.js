@@ -1,8 +1,9 @@
 // System configuration (#/settings/<tab>): clinic-wide settings. Admins only.
 import { mountRecordingSettings } from "./recording-settings.js";
 import { renderPlanSettings } from "./plan-settings.js";
+import { renderUiTextSettings } from "./ui-text-settings.js";
 
-const TABS = [["recording", "Recording rules"], ["plans", "Treatment plans"]];
+const TABS = [["recording", "Recording rules"], ["plans", "Treatment plans"], ["wording", "Wording"]];
 const isAdmin = (s) => /^admin$/i.test(String((s && s.role) || ""));
 
 export function mountSettings(container, { param = "", staff = null } = {}) {
@@ -27,5 +28,6 @@ export function mountSettings(container, { param = "", staff = null } = {}) {
   const body = root.querySelector('[data-role="body"]');
 
   if (tab === "plans") renderPlanSettings(body, { staff });
+  else if (tab === "wording") renderUiTextSettings(body, { staff });
   else mountRecordingSettings(body, { staff, embedded: true });
 }
