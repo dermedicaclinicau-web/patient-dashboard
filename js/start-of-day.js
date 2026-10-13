@@ -1,6 +1,6 @@
 import { fetchDayAppointments } from "./appointments.js";
 import { escapeHtml, getInitials, toDateKey, showToast } from "./utils.js";
-import { listProducts, listKits, isKitProduct, getMyKitDay, saveKitDayStart, saveDayStart, plural } from "./inventory-api.js";
+import { listProducts, isKitProduct, getMyKitDay, saveKitDayStart, saveDayStart, plural } from "./inventory-api.js";
 import { db } from "./firebase-config.js";
 import { collection, getDocs, query, where, FieldPath } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
@@ -51,12 +51,12 @@ function seenKey(staff) {
 
 /* ---------- Kit ---------- */
 
-// Active kit products this injector holds now (plus any listed in alsoIds, e.g. counted this morning)
+// Everyone ticked as carrying a kit counts every active kit product (e.g. Xeomin), whatever the system thinks
+// is in their kit. alsoIds: products counted this morning that have since been made inactive (for corrections).
 async function kitProductsFor(staff, alsoIds = []) {
   if (!staff || staff.injector !== true) return [];
-  const [products, kits] = await Promise.all([listProducts(), listKits({ mine: true })]);
-  return products.filter((p) => p.active && isKitProduct(p)
-    && (kits.some((k) => k.productId === p.id) || alsoIds.includes(p.id)));
+  const products = await listProducts();
+  return products.filter((p) => isKitProduct(p) && (p.active || alsoIds.includes(p.id)));
 }
 
 // Injectors holding a kit product right now, who haven't started today: { products: [{ p }] }, otherwise null
@@ -250,8 +250,9 @@ function renderKit(dlg, staff, kit, close) {
 
   const productHtml = (p) => {
     const e = earlier(p.id);
+    const emptyKit = !!e && !(Array.isArray(e.rows) && e.rows.length);   // corrected from a "None in my kit" morning
     const rows = e && Array.isArray(e.rows) && e.rows.length ? e.rows : [null];
-    const noneOn = !!(e && !e.inUse);
+    const noneOn = !!(e && !emptyKit && !e.inUse);
     return `
     <section class="sod-kp" data-pid="${esc(p.id)}">
       <h3>${esc(p.name)} <small>${esc(`${p.dosePer} ${p.doseUnit} per ${p.stockUnit}`)}</small></h3>
@@ -264,7 +265,10 @@ function renderKit(dlg, staff, kit, close) {
         <tbody>${rows.map((r) => rowHtml(p, r)).join("")}</tbody></table></div>
       <div class="sod-krow-acts">
         ${p.tracked ? `<button type="button" class="ff-btn is-quiet" data-act="add">+ Add another ${esc(bl(p).toLowerCase())}</button>` : "<span></span>"}
-        <label class="fe-check"><input type="radio" name="use-${esc(p.id)}" value="none"${noneOn ? " checked" : ""} /> Not using this today</label>
+        <span class="sod-k-opts">
+          <label class="fe-check"><input type="radio" name="use-${esc(p.id)}" value="none"${noneOn ? " checked" : ""} /> Not using this today</label>
+          <label class="fe-check"><input type="checkbox" data-none${emptyKit ? " checked" : ""} /> None in my kit</label>
+        </span>
       </div>
     </section>`;
   };
@@ -275,8 +279,8 @@ function renderKit(dlg, staff, kit, close) {
       <h2 id="sod-title" class="sod-title serif">${edit ? "Edit start of day" : "Your kit"}</h2>
       <p class="sod-sub">${edit
         ? "Count what's in your kit right now and save. This replaces this morning's count (it stays on record), and treatments since this morning are taken into account."
-        : `Count what's physically in your kit and type in each ${esc(kit.products.some(({ p }) => p.tracked) ? "batch" : "item")}.
-        Put 0 where there's none, and choose the one you're using today.`}</p>
+        : `Count what's physically in your kit and type in each ${esc(kit.products.some(({ p }) => p.tracked) ? "batch and expiry from the label" : "item")}.
+          Put 0 where there's none, and choose the one you're using today. If you don't carry one of these at all, tick <strong>None in my kit</strong>.`}</p>
       ${kit.products.map(({ p }) => productHtml(p)).join("")}
       <label class="fe-check sod-none"><input type="checkbox" name="none" /> I'm not injecting today</label>
       <p class="lh-error" role="alert" hidden></p>
@@ -288,21 +292,29 @@ function renderKit(dlg, staff, kit, close) {
 
   const form = card.querySelector("form");
   const err = card.querySelector(".lh-error");
+  const none = form.elements.none;
   const showErr = (m, focus) => { err.textContent = m; err.hidden = !m; if (focus) focus.focus(); };
   const syncRm = (sec) => {
     const rows = sec.querySelectorAll("tbody tr");
     rows.forEach((tr) => { tr.querySelector('[data-act="rm"]').hidden = rows.length < 2; });
   };
+  // "I'm not injecting today" turns everything off; "None in my kit" turns off just that product's rows
+  const syncOff = () => {
+    const all = none.checked;
+    card.querySelectorAll(".sod-kp").forEach((sec) => {
+      const empty = sec.querySelector("[data-none]").checked;
+      sec.classList.toggle("is-off", all);
+      sec.classList.toggle("is-empty", !all && empty);
+      sec.querySelectorAll("input, button").forEach((el) => { el.disabled = all || (empty && !el.matches("[data-none]")); });
+    });
+  };
   card.querySelectorAll(".sod-kp").forEach(syncRm);
+  if (edit && edit.notInjecting) none.checked = true;
+  syncOff();
 
-  const none = form.elements.none;
-  none.addEventListener("change", () => {
-    card.querySelectorAll(".sod-kp").forEach((s) => s.classList.toggle("is-off", none.checked));
-    card.querySelectorAll(".sod-kp input, .sod-kp button").forEach((i) => { i.disabled = none.checked; });
-    showErr("");
+  card.addEventListener("change", (e) => {
+    if (e.target === none || e.target.matches("[data-none]")) { syncOff(); showErr(""); }
   });
-  if (edit && edit.notInjecting) { none.checked = true; none.dispatchEvent(new Event("change")); }
-
   card.querySelector('[data-act="later"]').addEventListener("click", () => {
     close();
     if (!edit) showToast("No problem. Press “Start my day” at the top when you're ready to count your kit.");
@@ -335,6 +347,8 @@ function renderKit(dlg, staff, kit, close) {
     if (!notInjecting) {
       for (const { p } of kit.products) {
         const sec = card.querySelector(`[data-pid="${CSS.escape(p.id)}"]`);
+        // None in my kit: counted as 0 (anything the records say is in the kit becomes a difference to review)
+        if (sec.querySelector("[data-none]").checked) { items.push({ productId: p.id, rows: [] }); continue; }
         const trs = [...sec.querySelectorAll("tbody tr")];
         const rows = [];
         let chosen = sec.querySelector('input[value="none"]').checked;
@@ -345,7 +359,7 @@ function renderKit(dlg, staff, kit, close) {
           const s = f("sealed").value.trim();
           const o = f("open").value.trim();
           if (trs.length > 1 && !batch && !expiry && s === "" && o === "") continue; // an empty extra row
-          if (p.tracked && !batch) { showErr(`${p.name}: type the ${bl(p).toLowerCase()} number from the label.`, f("batch")); return; }
+          if (p.tracked && !batch) { showErr(`${p.name}: type the ${bl(p).toLowerCase()} number from the label, or tick “None in my kit”.`, f("batch")); return; }
           if (p.tracked && !/^\d{4}-\d{2}-\d{2}$/.test(expiry)) { showErr(`${p.name} ${batch}: enter the expiry date from the label.`, f("expiry")); return; }
           const sn = Number(s), on = Number(o);
           if (s === "" || !Number.isInteger(sn) || sn < 0) { showErr(`${p.name}${batch ? ` ${batch}` : ""}: enter how many unopened (0 if none).`, f("sealed")); return; }
@@ -355,7 +369,7 @@ function renderKit(dlg, staff, kit, close) {
           if (inUse) chosen = true;
           rows.push({ batch, expiry, sealed: sn, open: on, inUse });
         }
-        if (!rows.length) { showErr(`${p.name}: count at least one ${p.tracked ? bl(p).toLowerCase() : "row"}.`); return; }
+        if (!rows.length) { showErr(`${p.name}: count at least one ${p.tracked ? bl(p).toLowerCase() : "row"}, or tick “None in my kit”.`); return; }
         if (!chosen) { showErr(`${p.name}: tick the ${p.stockUnit} you're using today, or “Not using this today”.`); return; }
         items.push({ productId: p.id, rows });
       }
@@ -372,7 +386,7 @@ function renderKit(dlg, staff, kit, close) {
       const lead = edit ? "Start of day updated." : "Kit count saved.";
       const notes = [];
       if (r.overnight) notes.push(`${plural(r.overnight, "overnight difference")} sent to an admin`);
-      if (r.unknown) notes.push(`${plural(r.unknown, "batch")} not found in your kit records`);
+      if (r.unknown) notes.push(`${plural(r.unknown, "batch")} not in your kit records yet (an admin will check)`);
       showToast(r.notInjecting ? (edit ? "Start of day updated: not injecting today." : "Noted: not injecting today. Have a great day!")
         : notes.length ? `${lead} ${notes.join(" · ")}.`
         : r.differences ? `${lead} ${plural(r.differences, "difference")} will be reviewed.`
@@ -387,7 +401,7 @@ function renderKit(dlg, staff, kit, close) {
     }
   });
 
-  const first = card.querySelector(edit ? '[data-f="sealed"]' : '[data-f="batch"], [data-f="sealed"]');
+  const first = card.querySelector(edit ? '[data-f="sealed"]:not(:disabled)' : '[data-f="batch"]:not(:disabled), [data-f="sealed"]:not(:disabled)');
   if (first) setTimeout(() => first.focus(), 50);
 }
 

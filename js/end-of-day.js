@@ -1,4 +1,5 @@
-// "End my day": the button under the avatar. Injectors count their kit (blind); everyone answers the admin's questions.
+// "End my day": the day pill in the top bar. Injectors count their kit (blind, typed from the labels);
+// everyone answers the admin's questions.
 import { getEndOfDaySettings, MOODS, answerText } from "./end-of-day-api.js";
 import { listProducts, listKits, isKitProduct, getMyKitDay, saveKitDayEnd, listMyUsage, dayKey, plural } from "./inventory-api.js";
 import { can } from "./perms.js";
@@ -9,10 +10,9 @@ const esc = (s) => escapeHtml(String(s ?? "")); // always text (ratings are numb
 const MOON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
 const CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
 const fmt = (n) => String(+Number(n || 0).toFixed(1));
-const niceDate = (key) => {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
-  return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "No expiry";
-};
+const r1 = (n) => Math.round((Number(n) || 0) * 10) / 10;
+const normB = (s) => String(s || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+const bl = (p) => p.batchLabel || "Batch";
 const timeOf = (d) => (d ? d.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }) : "");
 const todayText = () => new Date().toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long" });
 const firstName = (n) => String(n || "").trim().replace(/^(dr|prof)\.?\s+/i, "").split(/\s+/)[0] || "there";
@@ -27,7 +27,6 @@ let onLogout = null;
 let gen = 0;
 
 /* ---------- The day pill in the top bar ---------- */
-// The button in index.html (#eod-btn), or one added to the top bar if it isn't there. Click handler bound once.
 // The button in index.html (#eod-btn), or one added to the top bar if it isn't there. Click handler bound once.
 function getButton() {
   let b = document.getElementById("eod-btn");
@@ -82,7 +81,8 @@ export function teardownEndOfDay() {
 
 /* ---------- The window ---------- */
 
-// Kit products to count tonight: in the kit now, used today, or counted this morning
+// Every active kit product (as at Start of Day). Batch and expiry are filled in from this morning's count and the
+// kit records; the counts never are. "None in my kit" starts ticked when nothing is known for that product.
 async function kitForEnd(day) {
   const [products, kits, usage] = await Promise.all([listProducts(), listKits({ mine: true }), listMyUsage(2).catch(() => [])]);
   const key = dayKey();
@@ -91,9 +91,20 @@ async function kitForEnd(day) {
     if (l.kind === "kit") used.set(l.productId, (used.get(l.productId) || 0) + (Number(l.total) || 0));
   }));
   const start = new Map(((day && day.start && !day.start.notInjecting && day.start.items) || []).map((it) => [it.productId, it]));
-  return products.filter((p) => p.active && isKitProduct(p))
-    .map((p) => ({ p, lots: kits.filter((k) => k.productId === p.id), used: Math.round((used.get(p.id) || 0) * 10) / 10, start: start.get(p.id) || null }))
-    .filter((x) => x.lots.length || x.used || x.start);
+  return products.filter((p) => isKitProduct(p) && (p.active || start.has(p.id))).map((p) => {
+    const s = start.get(p.id) || null;
+    const seen = new Map();
+    const add = (batch, expiry) => {
+      const b = p.tracked ? String(batch || "").trim() : "";
+      const x = p.tracked ? String(expiry || "") : "";
+      const k = `${normB(b)}|${x}`;
+      if (!seen.has(k)) seen.set(k, { batch: b, expiry: x });
+    };
+    ((s && s.rows) || []).forEach((r) => add(r.batch, r.expiry));
+    kits.filter((k) => k.productId === p.id).forEach((k) => add(k.batch, k.expiry));
+    const known = seen.size > 0;
+    return { p, used: r1(used.get(p.id) || 0), start: s, prefill: known ? [...seen.values()] : [{ batch: "", expiry: "" }], none: !known };
+  });
 }
 
 async function openEndOfDay() {
@@ -125,24 +136,36 @@ async function openEndOfDay() {
   if (dlg.open) renderForm(dlg, staff, cfg, day, kit);
 }
 
+// One row: batch and expiry (filled in, editable), and the counts (always empty)
+const rowHtml = (p, r = null) => `<tr>
+    ${p.tracked ? `<td><input class="fe-input sod-batch" data-f="batch" maxlength="40" autocomplete="off" spellcheck="false"
+        aria-label="${esc(bl(p))} number" placeholder="From the label" value="${esc((r && r.batch) || "")}" /></td>
+      <td><input class="fe-input sod-exp" type="date" data-f="expiry" aria-label="Expiry date" value="${esc((r && r.expiry) || "")}" /></td>` : ""}
+    <td><input class="fe-input" type="number" min="0" step="1" inputmode="numeric" data-f="sealed" aria-label="Unopened" /></td>
+    <td><div class="fe-num"><input class="fe-input" type="number" min="0" step="0.5" inputmode="decimal" data-f="open"
+        aria-label="${esc(p.doseUnit)} left in the opened ${esc(p.stockUnit)}" /><span>${esc(p.doseUnit)}</span></div></td>
+    <td><button type="button" class="hx-x" data-act="rm" aria-label="Remove this row" title="Remove">×</button></td>
+  </tr>`;
+
 // Blind: no start count, no units used. Those show after saving.
 function kitHtml(kit) {
   if (!kit.length) return "";
+  const tracked = kit.some(({ p }) => p.tracked);
   return `<section class="eod-sec"><h4>Your kit</h4>
-    <p class="muted">Count what's physically in your kit now. Put 0 where there's none.
+    <p class="muted">Count what's physically in your kit now${tracked ? ", checking the batch and expiry on each label" : ""}.
+      Put 0 where there's none, add anything that isn't listed, and tick <strong>None in my kit</strong> for anything you don't carry.
       Make sure every treatment today is saved first.</p>
-    ${kit.map(({ p, lots, start }) => `
-      <div class="sod-kp" data-pid="${esc(p.id)}">
-        <h3>${esc(p.name)}</h3>
-        ${start && start.inUse && start.inUse.batch ? `<ul class="eod-facts"><li>This morning you chose ${esc(p.batchLabel || "Batch")} ${esc(start.inUse.batch)}.</li></ul>` : ""}
-        ${lots.length ? `<table class="sod-ktable">
-          <thead><tr><th>${esc(p.batchLabel || "Batch")}</th><th>Unopened</th><th>Left in the opened ${esc(p.stockUnit)}</th></tr></thead>
-          <tbody>${lots.map((k) => `<tr data-ref="${esc(k.id)}">
-            <td>${esc(k.batch || "—")}<br><small class="muted">Exp ${esc(niceDate(k.expiry))}</small></td>
-            <td><input class="fe-input" type="number" min="0" step="1" inputmode="numeric" data-f="sealed" aria-label="Unopened" /></td>
-            <td><div class="fe-num"><input class="fe-input" type="number" min="0" step="0.5" inputmode="decimal" data-f="open" aria-label="${esc(p.doseUnit)} left" /><span>${esc(p.doseUnit)}</span></div></td>
-          </tr>`).join("")}</tbody></table>`
-          : '<p class="tb-none">Nothing left in your kit to count.</p>'}
+    ${kit.map(({ p, start, prefill, none }) => `
+      <div class="sod-kp${none ? " is-empty" : ""}" data-pid="${esc(p.id)}">
+        <h3>${esc(p.name)} <small>${esc(`${p.dosePer} ${p.doseUnit} per ${p.stockUnit}`)}</small></h3>
+        ${start && start.inUse && start.inUse.batch ? `<ul class="eod-facts"><li>This morning you chose ${esc(bl(p))} ${esc(start.inUse.batch)}.</li></ul>` : ""}
+        <div class="sod-kscroll"><table class="sod-ktable">
+          <thead><tr>${p.tracked ? `<th>${esc(bl(p))} #</th><th>Expiry</th>` : ""}<th>Unopened</th><th>Left in the opened ${esc(p.stockUnit)}</th><th></th></tr></thead>
+          <tbody>${prefill.map((r) => rowHtml(p, r)).join("")}</tbody></table></div>
+        <div class="sod-krow-acts">
+          ${p.tracked ? `<button type="button" class="ff-btn is-quiet" data-act="add">+ Add another ${esc(bl(p).toLowerCase())}</button>` : "<span></span>"}
+          <label class="fe-check"><input type="checkbox" data-none${none ? " checked" : ""} /> None in my kit</label>
+        </div>
       </div>`).join("")}</section>`;
 }
 
@@ -201,6 +224,7 @@ function renderForm(dlg, staff, cfg, day, kit) {
 
   const form = dlg.querySelector("form");
   const err = dlg.querySelector(".lh-error");
+  const byId = new Map(kit.map(({ p }) => [p.id, p]));
   const showErr = (m, focus) => { err.textContent = m; err.hidden = !m; if (focus) focus.focus(); };
   dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
   dlg.querySelector('[data-act="sod-edit"]')?.addEventListener("click", () => {
@@ -210,26 +234,67 @@ function renderForm(dlg, staff, cfg, day, kit) {
   dlg.querySelector(".eod-edit")?.addEventListener("click", () => dlg.close());
   form.addEventListener("input", () => showErr(""));
 
+  // Kit rows: add, remove, and "None in my kit"
+  const syncRm = (sec) => {
+    const rows = sec.querySelectorAll("tbody tr");
+    rows.forEach((tr) => { tr.querySelector('[data-act="rm"]').hidden = rows.length < 2; });
+  };
+  const syncNone = (sec) => {
+    const empty = sec.querySelector("[data-none]").checked;
+    sec.classList.toggle("is-empty", empty);
+    sec.querySelectorAll('tbody input, tbody button, [data-act="add"]').forEach((el) => { el.disabled = empty; });
+  };
+  form.querySelectorAll(".sod-kp").forEach((sec) => { syncRm(sec); syncNone(sec); });
+  form.addEventListener("change", (e) => {
+    if (e.target.matches("[data-none]")) { syncNone(e.target.closest(".sod-kp")); showErr(""); }
+  });
+  form.addEventListener("click", (e) => {
+    const add = e.target.closest('[data-act="add"]');
+    if (add) {
+      const sec = add.closest(".sod-kp");
+      const tb = sec.querySelector("tbody");
+      tb.insertAdjacentHTML("beforeend", rowHtml(byId.get(sec.dataset.pid)));
+      syncRm(sec);
+      tb.lastElementChild.querySelector("input").focus();
+      return;
+    }
+    const rm = e.target.closest('[data-act="rm"]');
+    if (rm) {
+      const sec = rm.closest(".sod-kp");
+      rm.closest("tr").remove();
+      syncRm(sec);
+    }
+  });
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const andLogout = e.submitter && e.submitter.value === "logout";
 
     // Kit counts
     const items = [];
-    for (const { p, lots, used } of kit) {
+    for (const { p, used } of kit) {
       const sec = form.querySelector(`[data-pid="${CSS.escape(p.id)}"]`);
+      const base = { productId: p.id, productName: p.name, doseUnit: p.doseUnit, usedToday: used };
+      if (sec.querySelector("[data-none]").checked) { items.push({ ...base, rows: [] }); continue; }
+      const trs = [...sec.querySelectorAll("tbody tr")];
       const rows = [];
-      for (const k of lots) {
-        const row = sec.querySelector(`[data-ref="${CSS.escape(k.id)}"]`);
-        const sEl = row.querySelector('[data-f="sealed"]');
-        const oEl = row.querySelector('[data-f="open"]');
-        const sn = Number(sEl.value), on = Number(oEl.value);
-        if (sEl.value.trim() === "" || !Number.isInteger(sn) || sn < 0) { showErr(`${p.name}: enter the unopened count (0 if none).`, sEl); return; }
-        if (oEl.value.trim() === "" || !(on >= 0)) { showErr(`${p.name}: enter the units left in the opened ${p.stockUnit} (0 if none).`, oEl); return; }
-        if (on > (Number(p.dosePer) || Infinity)) { showErr(`${p.name}: an opened ${p.stockUnit} holds ${p.dosePer} ${p.doseUnit} at most.`, oEl); return; }
-        rows.push({ ref: k.id, batch: k.batch, expiry: k.expiry, sealed: sn, open: on });
+      for (const tr of trs) {
+        const f = (k) => tr.querySelector(`[data-f="${k}"]`);
+        const batch = p.tracked ? f("batch").value.trim() : "";
+        const expiry = p.tracked ? f("expiry").value : "";
+        const s = f("sealed").value.trim();
+        const o = f("open").value.trim();
+        if (trs.length > 1 && !batch && !expiry && s === "" && o === "") continue; // an empty extra row
+        if (p.tracked && !batch) { showErr(`${p.name}: type the ${bl(p).toLowerCase()} number from the label, or tick “None in my kit”.`, f("batch")); return; }
+        if (p.tracked && !/^\d{4}-\d{2}-\d{2}$/.test(expiry)) { showErr(`${p.name} ${batch}: enter the expiry date from the label.`, f("expiry")); return; }
+        const sn = Number(s), on = Number(o);
+        if (s === "" || !Number.isInteger(sn) || sn < 0) { showErr(`${p.name}${batch ? ` ${batch}` : ""}: enter how many unopened (0 if none, or remove the row).`, f("sealed")); return; }
+        if (o === "" || !(on >= 0)) { showErr(`${p.name}${batch ? ` ${batch}` : ""}: enter the ${p.doseUnit} left in the opened ${p.stockUnit} (0 if none).`, f("open")); return; }
+        if (on > (Number(p.dosePer) || Infinity)) { showErr(`${p.name}: an opened ${p.stockUnit} holds ${p.dosePer} ${p.doseUnit} at most.`, f("open")); return; }
+        rows.push({ batch, expiry, sealed: sn, open: on });
       }
-      items.push({ productId: p.id, productName: p.name, doseUnit: p.doseUnit, usedToday: used, lots: rows });
+      if (!rows.length) { showErr(`${p.name}: count at least one ${p.tracked ? bl(p).toLowerCase() : "row"}, or tick “None in my kit”.`); return; }
+      items.push({ ...base, rows });
     }
 
     // Questions
@@ -259,7 +324,7 @@ function renderForm(dlg, staff, cfg, day, kit) {
     }
   });
 
-  const first = form.querySelector('[data-f="sealed"], .eod-q input, .eod-q textarea');
+  const first = form.querySelector('.sod-kp:not(.is-empty) [data-f="sealed"], .eod-q input, .eod-q textarea');
   if (first) setTimeout(() => first.focus(), 50);
 }
 

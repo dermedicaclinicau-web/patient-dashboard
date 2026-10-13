@@ -5039,3 +5039,7 @@ body.no-consult-record #tb-rec{display:none !important}
 .ivx-sum{margin:0 0 .75rem;font-size:.92rem;line-height:1.65}
 .ivx-ov-edge td{background:var(--surface-2)}
 @media (max-width:900px){.ivx-ov{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+.sod-k-opts{display:flex;flex-wrap:wrap;gap:.1rem 1rem;margin-left:auto}
+.sod-kp.is-empty .sod-kscroll,.sod-kp.is-empty [data-act="add"]{opacity:.4}
+dialog.lh-dialog.eod-dlg{width:min(760px,95vw)}

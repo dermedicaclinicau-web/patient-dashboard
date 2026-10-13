@@ -265,7 +265,7 @@ export async function mountInvestigation(container, { id, staff } = {}) {
     const label = (v) => KIT_FLOW_LABELS[v.type] || MOVE_TYPES[v.type] || v.type;
     const loanFlag = (v) => (v.status === "disputed" ? ' <span class="inv-flag is-bad">Disputed</span>'
       : v.status === "unconfirmed" ? ' <span class="inv-flag is-warn">Not confirmed</span>' : "");
-    const endLots = ((e.endItem && e.endItem.lots) || [])
+    const endLots = ((e.endItem && (e.endItem.rows || e.endItem.lots)) || [])
       .map((l) => `${l.batch || "No batch"}: ${l.sealed} unopened, ${r1(l.open)} left`).join(" · ");
     const startLots = !e.correctedAt ? ((e.startItem && e.startItem.rows) || [])
       .map((r) => `${r.batch || "No batch"}: ${r.sealed} unopened, ${r1(r.open)} left`).join(" · ") : "";
