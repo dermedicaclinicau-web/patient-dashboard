@@ -215,8 +215,16 @@ export function readField(f, w, { pads = {}, calc = {}, consent = {}, annots = {
         const out = { option: grp.label, subs: boxes.slice(1).flatMap((b, j) => (b.checked ? [subList[j] ?? ""] : [])) };
         const so = row.querySelector("[data-subother]");
         if (so && !so.hidden && so.value.trim()) out.subOther = so.value.trim().slice(0, 300);
+        // Comments typed under ticked sub-options
+        const notes = $all(row, "[data-subcmt]").flatMap((c) => {
+          if (c.hidden || !c.value.trim()) return [];
+          const s = (grp.subs || [])[Number(c.dataset.subcmt)];
+          return s && out.subs.includes(s) ? [{ sub: s, note: c.value.trim().slice(0, 300) }] : [];
+        });
+        if (notes.length) out.subNotes = notes;
         return [out];
       });
+      
     case "table": // Firestore can't store lists inside lists, so each row is { cells: [...] }
       return $all(w, "tbody tr").map((tr) => ({
         cells: $all(tr, "input").map((inp) => (inp.type === "checkbox" ? inp.checked : inp.value.trim().slice(0, 500))),
@@ -322,10 +330,12 @@ function writeField(f, w, v) {
         const grp = f.groups[i] || { label: "", subs: [] };
         const subs = m.get(grp.label);
         const subList = [...(grp.subs || []), ...(grp.other ? [otherLabel(f)] : [])];
+        const hit = rows.find((r) => r.option === grp.label);
         if (boxes[0]) boxes[0].checked = !!subs;
         boxes.slice(1).forEach((b, j) => { b.checked = !!subs && subs.has(subList[j]); });
-        const hit = rows.find((r) => r.option === grp.label);
         set(row.querySelector("[data-subother]"), (hit && hit.subOther) || "");
+        const sn = new Map(((hit && Array.isArray(hit.subNotes)) ? hit.subNotes : []).map((n) => [n.sub, n.note]));
+        $all(row, "[data-subcmt]").forEach((c) => { c.value = sn.get((grp.subs || [])[Number(c.dataset.subcmt)]) || ""; });
       });
       syncChoiceExtras(f, w);
       break;
@@ -722,7 +732,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
     const t = e.target;
     if (w && t.matches('input[type="radio"], input[type="checkbox"], select') && (t.tagName === "SELECT" || t.checked)) {
       const row = t.closest(".fe-optx");
-      const box = row ? row.querySelector("[data-other], [data-cmt]") : w.querySelector("[data-other]:not([hidden]), [data-cmt]:not([hidden])");
+      const box = row ? row.querySelector("[data-other], [data-cmt], [data-subother], [data-subcmt]") : w.querySelector("[data-other]:not([hidden]), [data-cmt]:not([hidden])");
       if (box && !box.hidden) box.focus();
     }
   });
@@ -806,6 +816,8 @@ export async function mountFormFill(container, param, { staff } = {}) {
         out.push({ id: f.id, msg: `Type the “${otherLabel(f)}” answer.` });
       } else if (f.commentRequired && $all(w, "[data-cmt]").some((c) => !c.hidden && !c.value.trim())) {
         out.push({ id: f.id, msg: "Add the details for the ticked answer." });
+      } else if ($all(w, "[data-subcmt][data-req]").some((c) => !c.hidden && !c.value.trim())) {
+        out.push({ id: f.id, msg: "Add the comment for the ticked sub-option." });
       }
     });
     return out;
@@ -1074,6 +1086,7 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
     }
     writeField(f, w, sub.answers[f.id]);
     writeExtras(f, w, sub.answers[`${f.id}__x`]);
+    $all(w, "[data-subcmt]").forEach((c) => { if (!c.value) c.hidden = true; }); // no comment typed: nothing to show
   });
   $all(sheet, "input, textarea, select").forEach((el) => { el.disabled = true; });
 

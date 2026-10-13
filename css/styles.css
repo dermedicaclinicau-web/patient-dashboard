@@ -4850,3 +4850,13 @@ dialog.lh-dialog.inv-dlg.inv-spdlg{width:min(780px,96vw)}
 .inv-quickbar{position:sticky;bottom:12px;z-index:5;display:flex;align-items:center;gap:10px;margin-top:14px;
   padding:10px 14px;border:1px solid var(--line,#e5e7eb);border-radius:12px;background:var(--surface,#fff);
   box-shadow:0 6px 20px rgba(15,23,42,.12)}
+
+/* Checkboxes + sub-options: comment boxes and notes */
+.fe-subnote{display:block;margin-top:1px;font-size:12px;font-weight:400;line-height:1.35;color:var(--muted,#64748b)}
+.fe-sub-opts .fe-optx{display:flex;flex-direction:column;gap:4px}
+.fe-sub-opts .fe-optx .fe-xin{margin-left:26px;max-width:420px}
+.fe-subx{margin-top:8px;border:1px solid var(--line,#e5e7eb);border-radius:10px;padding:6px 10px}
+.fe-subx summary{cursor:pointer;font-size:13px;font-weight:600;color:var(--muted,#475569)}
+.fe-subx-row{display:flex;flex-direction:column;gap:6px;padding:8px 0;border-top:1px solid var(--line,#eef2f7)}
+.fe-subx-row:first-of-type{border-top:0}
+.fe-subx-row strong{font-size:13px}

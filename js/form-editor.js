@@ -6,7 +6,7 @@ import {
   esc, svg, ICONS, FIELD_TYPES, FIELD_GROUPS, CHOICE_TYPES, FILLS, FILLS_FOR,
   createField, normaliseField, renderField, fieldSettings, applyInput, applyClick,
   calcStatusHtml, checkFormula, canRequire, hasLabel, hasHelp, watermarkHtml, iqHasOptions, isMarkImage,
-  markSetIdsOf, prefillSettings, prefillSummary, renameInPrefill, tidyPrefill,
+  markSetIdsOf, prefillSettings, prefillSummary, renameInPrefill, tidyPrefill, subExtrasHtml,
 } from "./form-fields.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { DEFAULT_LETTERHEAD, letterheadHtml, openLetterheadDialog } from "./form-letterhead.js";
@@ -888,6 +888,11 @@ export async function mountFormEditor(container, { templateId, staff }) {
     }
     changed();
     renderStage();
+    // Typing sub-options: refresh just that option's comment list (the textarea keeps focus)
+    if (el.dataset.grpk === "subs") {
+      const host = insp.querySelector(`[data-subx="${el.dataset.grp}"]`);
+      if (host) host.innerHTML = subExtrasHtml(f.groups[Number(el.dataset.grp)], Number(el.dataset.grp));
+    }
     if (el.dataset.rerender !== undefined) { renderInspector(); return; }
     if (f.type === "calculation") {
       const st = insp.querySelector('[data-role="calc-status"]');

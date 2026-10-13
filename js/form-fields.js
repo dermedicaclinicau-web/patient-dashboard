@@ -92,6 +92,41 @@ export function choiceList(f) {
   const opts = Array.isArray(f.options) && f.options.length ? f.options : ["Option 1"];
   return f.allowOther && OTHER_TYPES.includes(f.type) && f.type !== "sub_checks" ? [...opts, otherLabel(f)] : [...opts];
 }
+// Checkboxes + sub-options: each sub-option can have a comment box (off / optional / required) and a note under it.
+// Stored on the group as extras: [{ sub, box, hint, note }], matched by the sub-option's name.
+export const SUB_BOX = ["off", "optional", "required"];
+export function subExtra(g, s) {
+  const x = (Array.isArray(g && g.extras) ? g.extras : []).find((e) => e && e.sub === s) || {};
+  return { box: SUB_BOX.includes(x.box) ? x.box : "off", hint: String(x.hint || ""), note: String(x.note || "") };
+}
+function setSubExtra(g, s, x) {
+  const rest = (Array.isArray(g.extras) ? g.extras : []).filter((e) => e && e.sub !== s);
+  g.extras = x.box !== "off" || x.note.trim() || x.hint.trim() ? [...rest, { sub: s, ...x }] : rest;
+}
+
+// The builder's "Comment boxes and notes" list for one option's sub-options
+export function subExtrasHtml(g, i) {
+  const subs = (g && Array.isArray(g.subs) ? g.subs : []).filter((s) => String(s).trim());
+  if (!subs.length) return "";
+  const set = subs.filter((s) => { const x = subExtra(g, s); return x.box !== "off" || x.note.trim(); }).length;
+  return `<details class="fe-subx"${set ? " open" : ""}>
+    <summary>Comment boxes and notes${set ? ` (${set})` : ""}</summary>
+    ${subs.map((s) => {
+      const x = subExtra(g, s);
+      const a = `data-grp="${i}" data-sx="${esc(s)}"`;
+      return `<div class="fe-subx-row">
+        <strong>${esc(s)}</strong>
+        <select class="fb-select" ${a} data-sxk="box" data-rerender="" aria-label="Comment box for ${esc(s)}">
+          ${[["off", "No comment box"], ["optional", "Comment box (optional)"], ["required", "Comment box (required)"]].map(([v, l]) =>
+            `<option value="${v}"${x.box === v ? " selected" : ""}>${l}</option>`).join("")}
+        </select>
+        ${x.box !== "off" ? `<input class="fe-input" ${a} data-sxk="hint" maxlength="100" placeholder="Hint in the box, e.g. Which side?" value="${esc(x.hint)}" />` : ""}
+        <input class="fe-input" ${a} data-sxk="note" maxlength="200" placeholder="Note under it (optional), e.g. Use for dynamic lines only" value="${esc(x.note)}" />
+      </div>`;
+    }).join("")}
+    <small class="fe-note">The comment box opens when staff tick that sub-option. The note is a guide for staff and isn't saved.</small>
+  </details>`;
+}
 const LAYOUT_TYPES = ["single_choice", "checkboxes", "checkbox_notes"];
 const PLACEHOLDER_TYPES = ["short_text", "long_text", "email", "number", "dropdown"];
 export const INLINE_TYPES = ["short_text", "email", "number", "date", "record_date", "dropdown", "single_choice", "checkboxes", "calculation"];
@@ -378,11 +413,19 @@ export function cleanField(f) {
     case "space": out.size = pick(f.size, ["small", "medium", "large"], "medium"); break;
     case "number": out.min = numOrNull(f.min); out.max = numOrNull(f.max); out.unit = clip(f.unit, 20); break;
     case "sub_checks":
-      out.groups = (Array.isArray(f.groups) ? f.groups : []).slice(0, 30).map((g) => ({
-        label: clip(g && g.label, 200),
-        subs: (Array.isArray(g && g.subs) ? g.subs : []).map((s) => clip(s, 200)).slice(0, 30),
-        other: !!(g && g.other === true),
-      }));
+      out.groups = (Array.isArray(f.groups) ? f.groups : []).slice(0, 30).map((g) => {
+        const subs = (Array.isArray(g && g.subs) ? g.subs : []).map((s) => clip(s, 200)).slice(0, 30);
+        const extras = (Array.isArray(g && g.extras) ? g.extras : [])
+          .filter((e) => e && subs.includes(String(e.sub)))
+          .map((e) => ({ sub: String(e.sub), box: pick(e.box, SUB_BOX, "off"), hint: clip(e.hint, 100), note: clip(e.note, 200) }))
+          .filter((e, k, a) => (e.box !== "off" || e.note.trim()) && a.findIndex((y) => y.sub === e.sub) === k);
+        return {
+          label: clip(g && g.label, 200),
+          subs,
+          other: !!(g && g.other === true),
+          ...(extras.length ? { extras } : {}),
+        };
+      });
       out.subCols = int(f.subCols, 1, 4, 1);
       out.subLayout = pick(f.subLayout, ["list", "inline"], "list");
       break;
@@ -624,12 +667,19 @@ export function renderField(f, ctx = {}) {
         </div>`;
       }).join("")}</div>`;
     }
-    case "sub_checks":
+   case "sub_checks":
       return head + `<div class="fe-opts fe-subgrid cols-${int(f.subCols, 1, 4, 1)} sub-${f.subLayout === "inline" ? "inline" : "list"}">${(f.groups || []).map((g) => `
         <div class="fe-sub">
           <label class="fe-opt">${box("checkbox")}<span>${esc(g.label)}</span></label>
-          ${(g.subs && g.subs.length) || g.other ? `<div class="fe-sub-opts">${(g.subs || []).map((s) =>
-            `<label class="fe-opt">${box("checkbox")}<span>${esc(s)}</span></label>`).join("")}${g.other ? `
+          ${(g.subs && g.subs.length) || g.other ? `<div class="fe-sub-opts">${(g.subs || []).map((s, j) => {
+            const x = subExtra(g, s);
+            const lab = `<label class="fe-opt">${box("checkbox")}<span>${esc(s)}${
+              x.note.trim() ? `<small class="fe-subnote">${esc(x.note)}</small>` : ""}</span>${
+              !live && x.box !== "off" ? `<em class="fe-xtag">+ comment${x.box === "required" ? " (required)" : ""}</em>` : ""}</label>`;
+            if (!live || x.box === "off") return lab;
+            return `<span class="fe-optx">${lab}<input class="fe-in fe-xin" type="text" data-subcmt="${j}"${
+              x.box === "required" ? " data-req" : ""} maxlength="300" placeholder="${esc(x.hint.trim() || "Add a comment")}" hidden /></span>`;
+          }).join("")}${g.other ? `
             <span class="fe-optx"><label class="fe-opt">${box("checkbox")}<span>${esc(otherLabel(f))}</span></label>
               <input class="fe-in fe-xin" type="text" data-subother maxlength="300" placeholder="Please specify"${live ? " hidden" : ""}${inert} /></span>` : ""}</div>` : ""}
         </div>`).join("")}${f.allowOther ? `
@@ -930,6 +980,7 @@ function typeSettings(f, ctx = {}) {
             <textarea class="fe-input" data-grp="${i}" data-grpk="subs" rows="3" placeholder="One sub-option per line">${esc((g.subs || []).join("\n"))}</textarea>
             <label class="fe-check fe-grp-other"><input type="checkbox" data-grp="${i}" data-grpk="other"${g.other ? " checked" : ""} />
               Add “${esc(otherLabel(f))}” to these sub-options</label>
+            <div data-subx="${i}">${subExtrasHtml(g, i)}</div>
             </div>`).join("")}
         <button type="button" class="hx-add" data-act="grpadd">+ Add an option</button>
         <small class="fe-note">Sub-options appear when their option is ticked.</small></div>` + extrasSettings(f, false);
@@ -1337,6 +1388,15 @@ export function applyInput(f, el) {
   if (el.dataset.grp !== undefined) {
     const g = f.groups && f.groups[Number(el.dataset.grp)];
     if (!g) return false;
+    if (el.dataset.sx !== undefined) {
+      const x = subExtra(g, el.dataset.sx);
+      const k = el.dataset.sxk;
+      if (k === "box") x.box = SUB_BOX.includes(el.value) ? el.value : "off";
+      else if (k === "hint" || k === "note") x[k] = el.value;
+      else return false;
+      setSubExtra(g, el.dataset.sx, x);
+      return true;
+    }
     if (el.dataset.grpk === "subs") g.subs = el.value.split("\n").map((s) => s.trim()).filter(Boolean);
     else if (el.dataset.grpk === "other") g.other = el.checked;
     else g.label = el.value;
@@ -1443,8 +1503,15 @@ export function syncChoiceExtras(f, w) {
   }
   w.querySelectorAll(".fe-optx").forEach((row) => {
     const box = row.querySelector('input[type="radio"], input[type="checkbox"]');
-    showBox(row.querySelector("[data-other], [data-cmt], [data-subother]"), !!(box && box.checked));
+    showBox(row.querySelector("[data-other], [data-cmt], [data-subother], [data-subcmt]"), !!(box && box.checked));
   });
+  // Sub-options: when the option above them is unticked, their boxes close too
+  if (f.type === "sub_checks") {
+    w.querySelectorAll(".fe-sub").forEach((row) => {
+      const main = row.querySelector(':scope > .fe-opt input[type="checkbox"]');
+      if (main && !main.checked) row.querySelectorAll("[data-subcmt], [data-subother]").forEach((el) => showBox(el, false));
+    });
+  }
 }
 
 // { other: "typed answer", notes: { "Yes": "details" } }, or null
