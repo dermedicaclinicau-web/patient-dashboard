@@ -210,6 +210,12 @@ export function tableTotal(f, w, colId) {
   });
   return any ? Math.round(sum * 1e6) / 1e6 : null;
 }
+// How a table's column heading lines up: the table's setting, or automatic (numbers right, the rest left)
+export const TABLE_HEAD_ALIGNS = ["auto", "left", "center", "right"];
+export function tableHeadAlign(f, c) {
+  const a = TABLE_HEAD_ALIGNS.includes(f && f.headAlign) ? f.headAlign : "auto";
+  return a !== "auto" ? a : c && c.type === "number" ? "right" : "left";
+}
 const LAYOUT_TYPES = ["single_choice", "checkboxes", "checkbox_notes"];
 const PLACEHOLDER_TYPES = ["short_text", "long_text", "email", "number", "dropdown"];
 export const INLINE_TYPES = ["short_text", "email", "number", "date", "record_date", "dropdown", "single_choice", "checkboxes", "calculation"];
@@ -398,7 +404,7 @@ export function createField(type, id) {
       break;
     case "table":
       f.columns = [{ id: "c1", label: "Column 1", type: "text" }, { id: "c2", label: "Column 2", type: "text" }];
-      f.rows = 3; f.addRows = false; f.maxRows = 10;
+      f.rows = 3; f.addRows = false; f.maxRows = 10; f.headAlign = "auto";
       break;
     case "calculation": f.formula = ""; f.decimals = 2; f.prefix = ""; f.suffix = ""; f.blank = "zero"; break;
     case "image":
@@ -530,6 +536,7 @@ export function cleanField(f) {
       out.rows = int(f.rows, 1, 30, 3);
       out.addRows = f.addRows === true;
       out.maxRows = int(f.maxRows, out.rows, 50, Math.max(out.rows, 10));
+      out.headAlign = pick(f.headAlign, TABLE_HEAD_ALIGNS, "auto");
       break;
     }
     case "calculation":
@@ -805,7 +812,7 @@ export function renderField(f, ctx = {}) {
       let body = "";
       for (let r = 0; r < rows; r++) body += tableRowHtml(f, live, false);
       return head + `<div class="fe-table-wrap"><table class="fe-table"><thead><tr>${
-        cols.map((c, i) => `<th${c.type === "number" ? ' class="is-num"' : ""}>${esc(c.label || `Column ${i + 1}`)}${
+        cols.map((c, i) => `<th${c.type === "number" ? ' class="is-num"' : ""} style="text-align:${tableHeadAlign(f, c)}">${esc(c.label || `Column ${i + 1}`)}${
           c.type === "number" && c.unit.trim() ? ` <small>(${esc(c.unit)})</small>` : ""}</th>`).join("")}${
         canAdd ? '<th class="fe-trm"></th>' : ""}</tr></thead><tbody>${body}</tbody></table></div>` +
         (canAdd ? '<button type="button" class="hx-add fe-tadd" data-tadd>+ Add a row</button>' : "") +
@@ -1114,6 +1121,8 @@ function typeSettings(f, ctx = {}) {
           </div>`).join("")}
         ${cols.length < 12 ? '<button type="button" class="hx-add" data-act="coladd">+ Add a column</button>' : ""}
         <small class="fe-note">Number columns can be added up in a Calculation: their totals appear under “Insert a question”.</small></div>` +
+        setting("Column headings", choose("headAlign", [["auto", "Automatic (numbers on the right)"], ["left", "Left"], ["center", "Centre"], ["right", "Right"]],
+          TABLE_HEAD_ALIGNS.includes(f.headAlign) ? f.headAlign : "auto")) +
         setting(f.addRows ? "Starting rows" : "Rows", `<input class="fe-input" type="number" min="1" max="30" data-k="rows" data-num="" value="${rows}" />`) +
         `<label class="fe-check"><input type="checkbox" data-k="addRows" data-rerender=""${f.addRows ? " checked" : ""} /> Staff can add rows while filling in</label>` +
         (f.addRows ? setting("Most rows", `<input class="fe-input" type="number" min="${rows}" max="50" data-k="maxRows" data-num="" value="${tableMax(f)}" />`,

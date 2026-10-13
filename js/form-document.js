@@ -4,7 +4,7 @@
 // backup PDF converter can render it too.)
 import { formatCalc } from "./form-calc.js";
 import { visibleIds } from "./form-conditions.js";
-import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing, textBlockHtml, clinicianParts, tableCols } from "./form-fields.js";
+import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing, textBlockHtml, clinicianParts, tableCols, tableHeadAlign } from "./form-fields.js";
 import { cleanRichHtml } from "./rich-html.js";
 import { markSummary } from "./marking-sets.js";
 
@@ -167,7 +167,7 @@ function blankAnswer(f) {
       if (!cols.length) return line;
       const n = Math.min(12, Math.max(3, f.addRows ? Math.min(tableMaxRows(f), 12) : parseInt(f.rows ?? f.rowCount, 10) || 4));
       const row = `<tr>${cols.map((c) => `<td style="height:26px">${c.type === "check" ? '<span class="box"></span>' : ""}</td>`).join("")}</tr>`;
-      return `<table class="grid"><tr>${cols.map((c, i) => `<th>${esc(c.label || `Column ${i + 1}`)}${
+      return `<table class="grid"><tr>${cols.map((c, i) => `<th style="text-align:${tableHeadAlign(f, c)}">${esc(c.label || `Column ${i + 1}`)}${
         c.type === "number" && c.unit ? ` (${esc(c.unit)})` : ""}</th>`).join("")}</tr>${row.repeat(n)}</table>`;
     }
     case "signature":
@@ -237,7 +237,7 @@ function answer(f, v, sig, inline, x, blank = false) {
         if (c.type === "number") return esc(typeof x === "number" ? String(+x.toFixed(4)) : String(x));
         return esc(String(x));
       };
-      return `<table class="grid"><tr>${cols.map((c, i) => `<th>${esc(c.label || `Column ${i + 1}`)}${
+      return `<table class="grid"><tr>${cols.map((c, i) => `<th style="text-align:${tableHeadAlign(f, c)}">${esc(c.label || `Column ${i + 1}`)}${
         c.type === "number" && c.unit ? ` (${esc(c.unit)})` : ""}</th>`).join("")}</tr>${
         rows.map((r) => `<tr>${cols.map((c, i) => `<td${c.type === "number" ? ' style="text-align:right"' : ""}>${cellText(c, r.cells[i])}</td>`).join("")}</tr>`).join("")}</table>`;
     }
