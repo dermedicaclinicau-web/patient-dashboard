@@ -25,7 +25,7 @@ import { mountReports } from "./reports.js";
 import { mountSettings } from "./settings.js";
 import { initEndOfDay, teardownEndOfDay } from "./end-of-day.js";
 import { mountStaffDays } from "./staff-days.js";
-
+import { initTopbar, closeTopbarMenu } from "./topbar.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -64,6 +64,7 @@ const els = {
 
 let currentStaff = null;
 initFormPicker(els.content, { getStaff: () => currentStaff });
+initTopbar();
 
 function showView(name) {
   for (const [key, el] of Object.entries(views)) el.hidden = key !== name;
@@ -351,6 +352,7 @@ watchAuth((staff) => {
     closeStartOfDay();
     teardownEndOfDay();
     hideStartOfDayButton();
+    closeTopbarMenu();
     suspendRecorder(); // stops the mic; any audio stays on this device for upload at next login
     closeSoapPanel();
     closeFormPicker();

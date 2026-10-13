@@ -224,8 +224,14 @@ match /inv_open/{id} {
         && request.resource.data.lines is list && request.resource.data.lines.size() <= 400
         && ((request.resource.data.kind == 'opening' && (can('inventory.count') || invOrder()))
           || (request.resource.data.kind == 'kit' && invKit()));
-      allow update: if can('menu.reports')
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lines', 'openCount', 'updatedAt', 'updatedBy', 'events']);
+      allow update: if (can('menu.reports')
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lines', 'openCount', 'updatedAt', 'updatedBy', 'events']))
+        // An injector correcting their Start of Day retires their own earlier kit check (it stays on record)
+        || (invKit() && resource.data.kind == 'kit' && resource.data.byUid == request.auth.uid
+          && resource.data.get('superseded', false) == false
+          && request.resource.data.superseded == true
+          && request.resource.data.openCount == 0
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['superseded', 'supersededBy', 'supersededAt', 'openCount']));
       allow delete: if false;
     }
 
@@ -264,7 +270,11 @@ match /inv_open/{id} {
       allow create, update: if isStaff()
         && request.resource.data.staffUid == request.auth.uid
         && request.resource.data.dateKey is string
-        && dayId == request.auth.uid + '__' + request.resource.data.dateKey;
+        && dayId == request.auth.uid + '__' + request.resource.data.dateKey
+        // Once the day has ended, its start and end can't be changed
+        && (resource == null || !('end' in resource.data)
+          || (request.resource.data.get('start', null) == resource.data.get('start', null)
+            && request.resource.data.end == resource.data.end));
       allow delete: if false;
     }
 

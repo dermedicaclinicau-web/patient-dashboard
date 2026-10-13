@@ -157,7 +157,9 @@ function mountVariance(body, staff) {
     const diff = Number(l.variance) || 0;
     const v = valueOf(l);
     const cls = (n) => (n < 0 ? "rp-neg" : "rp-pos");
-    const status = l.status === "open"
+    const status = l.status === "open" && c.superseded
+      ? '<div class="rp-done"><span class="rq-status is-cancelled">Replaced</span><small>Recounted by the injector</small></div>'
+      : l.status === "open"
       ? `<div class="rp-acts"><button type="button" class="lh-btn is-primary" data-act="accept">Accept</button>
           <button type="button" class="lh-btn" data-act="explain">Explain</button></div>`
       : l.status === "investigating"
@@ -179,7 +181,8 @@ function mountVariance(body, staff) {
     return `<section class="tb-card rp-count">
       <div class="rp-count-head"><strong>${c.kind === "kit" ? "Kit check" : "Opening count"}</strong>
         <span>${esc(niceDate(c.dateKey))}${c.at ? ` · ${esc(timeOf(c.at))}` : ""} · by ${esc(c.by || "—")}</span>
-        ${c.openCount ? `<span class="inv-flag is-warn">${c.openCount} to review</span>` : '<span class="inv-flag is-info">All reviewed</span>'}</div>
+        ${c.superseded ? '<span class="inv-flag is-info">Replaced by a corrected count</span>'
+          : c.openCount ? `<span class="inv-flag is-warn">${c.openCount} to review</span>` : '<span class="inv-flag is-info">All reviewed</span>'}</div>
       <table class="inv-table rp-table"><thead><tr><th>Product</th><th>Where</th><th>Batch / Lot</th><th>Counted</th><th>System</th>
         <th>Difference</th><th>Value</th><th></th></tr></thead>
         <tbody>${rows.map(([l, i]) => rowHtml(c, l, i)).join("")}</tbody></table></section>`;
@@ -1110,7 +1113,7 @@ export function mountDayReport(body) {
         const moodA = answers.find((a) => a.type === "mood" && Number(a.value));
         const base = {
           at: parseKey(d.dateKey), by: d.staffName || "—", value: 0, startAt: s ? s.at : null, endAt: en ? en.at : null,
-          mood: moodA ? Number(moodA.value) : null, first: true,
+          mood: moodA ? Number(moodA.value) : null, first: true, corrected: !!(s && s.correctedAt),
           answers: answers.filter((a) => a.type !== "mood" && String(a.text || "").trim()).map((a) => `${a.label}: ${a.text}`).join(" · "),
         };
         const sItems = new Map(((s && !s.notInjecting && s.items) || []).map((it) => [it.productId, it]));
@@ -1167,7 +1170,8 @@ export function mountDayReport(body) {
       const n = (v) => (v === null ? "—" : `${esc(fmt(v))} ${esc(e.unit)}`);
       const d = diffText(e);
       return `<tr class="${isDiff(e) ? "is-diff" : ""}">
-        <td>${esc(shortDate(e.at))}<br><small class="muted">${esc([e.startAt && `In ${timeOf(e.startAt)}`, e.endAt && `Out ${timeOf(e.endAt)}`].filter(Boolean).join(" · "))}</small></td>
+        <td>${esc(shortDate(e.at))}<br><small class="muted">${esc([e.startAt && `In ${timeOf(e.startAt)}`, e.endAt && `Out ${timeOf(e.endAt)}`].filter(Boolean).join(" · "))}</small>${
+          e.first && e.corrected ? '<br><span class="inv-flag is-info">Start corrected</span>' : ""}</td>
         <td>${esc(e.by)}</td><td>${esc(e.productName)}</td>
         <td>${e.typeLabel === "Not injecting" ? '<span class="inv-flag is-info">Not injecting</span>' : esc(e.inUse || "—")}${
           e.unknown ? `<br><span class="inv-flag is-warn">${e.unknown} batch${e.unknown === 1 ? "" : "es"} not in kit</span>` : ""}</td>
@@ -1180,10 +1184,11 @@ export function mountDayReport(body) {
         <td>${e.first && e.answers ? `<small>${esc(e.answers)}</small>` : ""}</td></tr>`;
     },
     csvHead: ["Date", "Staff", "Product", "Vial in use", "Start count", "Used on records", "End count", "Unit", "Overnight difference",
-      "Start difference", "End difference", "Batches not in kit", "Result", "Day (1-5)", "Answers", "Started at", "Ended at"],
+      "Start difference", "End difference", "Batches not in kit", "Result", "Day (1-5)", "Answers", "Started at", "Start corrected", "Ended at"],
     csvRow: (e) => [e.at ? dayKey(e.at) : "", e.by, e.productName, e.inUse, e.start ?? "", e.used ?? "", e.end ?? "", e.unit,
       e.night || "", e.start === null ? "" : e.startDiff, e.end === null ? "" : e.endDiff, e.unknown || "", e.typeLabel,
-      e.first && e.mood !== null ? e.mood : "", e.first ? e.answers : "", e.startAt ? timeOf(e.startAt) : "", e.endAt ? timeOf(e.endAt) : ""],
+      e.first && e.mood !== null ? e.mood : "", e.first ? e.answers : "", e.startAt ? timeOf(e.startAt) : "",
+      e.first && e.corrected ? "Yes" : "", e.endAt ? timeOf(e.endAt) : ""],
   });
 }
 

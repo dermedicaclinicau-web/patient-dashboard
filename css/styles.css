@@ -4891,12 +4891,6 @@ dialog.lh-dialog.inv-dlg.inv-spdlg{width:min(780px,96vw)}
 .sod.is-kit .sod-btn{width:auto;padding-left:18px;padding-right:18px}
 
 /* End my day: under the avatar (fits inside the 64px top bar) */
-.avatar-stack{display:flex;flex-direction:column;align-items:center;gap:2px}
-.eod-btn{display:inline-flex;align-items:center;gap:4px;padding:1px 8px;border:1px solid var(--border);border-radius:999px;
-  background:var(--surface,#fff);font:inherit;font-size:11px;font-weight:600;line-height:1.35;color:var(--text);cursor:pointer;white-space:nowrap}
-.eod-btn svg{width:12px;height:12px}
-.eod-btn:hover{background:#eef2ff;border-color:#c7d2fe}
-.eod-btn.is-done{color:#047857;border-color:#a7f3d0;background:#ecfdf5}
 .eod-recap li{margin:4px 0}
 .eod-mood,.eod-pill{position:relative}
 
@@ -4961,8 +4955,79 @@ dialog.lh-dialog.eod-dlg{width:min(660px,95vw)}
 .sd-table td{vertical-align:middle}
 .md-stats{flex-wrap:wrap;gap:1rem 1.75rem}
 
-/* Start my day: in End my day's place until today's kit count is done */
-.sod-btn{color:#b45309;border-color:#fcd34d;background:#fffbeb}
-.sod-btn:hover{background:#fef3c7;border-color:#f59e0b}
-.sod-btn[hidden]{display:none}
-.avatar-stack.sod-pending .eod-btn{display:none}
+/* ===== Top bar: one line ===== */
+.topbar-right{gap:.6rem}
+.tb-day{display:flex}
+.tb-day.sod-pending #eod-btn{display:none}
+
+/* Day pill: Start my day → End my day → Day ended */
+.tb-pill{display:inline-flex;align-items:center;gap:.4rem;height:36px;padding:0 .9rem;border:1px solid var(--border);border-radius:999px;
+  background:#fff;color:var(--text);font:inherit;font-size:.85rem;font-weight:600;white-space:nowrap;cursor:pointer;
+  transition:background .15s,border-color .15s}
+.tb-pill svg{width:16px;height:16px;flex-shrink:0}
+.tb-pill:hover{background:var(--surface-2);border-color:#cbd5e1}
+.tb-pill.is-start{background:#fffbeb;border-color:#fcd34d;color:#92400e}
+.tb-pill.is-start:hover{background:#fef3c7;border-color:#f59e0b}
+.tb-pill.is-done{background:#ecfdf5;border-color:#a7f3d0;color:#047857}
+.tb-pill:disabled{opacity:.6;cursor:wait}
+
+/* Start appointment / live recording */
+.tb-rec-btn{display:inline-flex;align-items:center;gap:.45rem;height:36px;padding:0 1rem;border:1px solid transparent;border-radius:999px;
+  background:#e11d48;color:#fff;font:inherit;font-size:.85rem;font-weight:700;white-space:nowrap;cursor:pointer;
+  box-shadow:0 4px 12px -4px rgba(225,29,72,.5)}
+.tb-rec-btn:hover{background:#be123c}
+.tb-rec-btn:disabled{opacity:.6;cursor:wait}
+.tb-rec-btn svg{width:15px;height:15px}
+.tb-rec-btn.is-live{background:#fff1f2;border-color:#fecdd3;color:#be123c;box-shadow:none}
+.tb-rec-btn.is-paused{background:#fffbeb;border-color:#fde68a;color:#b45309;box-shadow:none}
+.tb-rec-btn .rec-dot{width:9px;height:9px}
+.tb-rec-time{font-variant-numeric:tabular-nums}
+
+/* Profile chip and menu */
+.tb-me{position:relative}
+.tb-me-btn{display:flex;align-items:center;gap:.55rem;height:44px;padding:0 .55rem 0 .3rem;border:1px solid transparent;border-radius:999px;
+  background:none;font:inherit;color:var(--text);cursor:pointer}
+.tb-me-btn:hover,.tb-me-btn[aria-expanded="true"]{background:var(--surface-2);border-color:var(--border)}
+.tb-me-btn .avatar{width:34px;height:34px}
+.tb-me-name{display:flex;flex-direction:column;align-items:flex-start;line-height:1.2;text-align:left}
+.tb-me-name strong{font-size:.9rem}
+.tb-me-name small{font-size:.72rem;color:var(--muted)}
+.tb-chev{width:16px;height:16px;color:var(--muted);transition:transform .15s}
+.tb-me-btn[aria-expanded="true"] .tb-chev{transform:rotate(180deg)}
+.tb-menu{position:absolute;top:calc(100% + 8px);right:0;z-index:60;width:240px;padding:.35rem;border:1px solid var(--border);
+  border-radius:14px;background:#fff;box-shadow:0 18px 40px -12px rgba(15,23,42,.25);animation:ov-in .14s ease-out}
+.tb-menu-head{padding:.55rem .6rem .7rem;margin-bottom:.3rem;border-bottom:1px solid var(--border)}
+.tb-menu-head div{display:flex;flex-direction:column;line-height:1.25;min-width:0}
+.tb-menu-head strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tb-menu-head small{font-size:.75rem;color:var(--muted)}
+.tb-mi{display:flex;align-items:center;gap:.6rem;width:100%;padding:.55rem .6rem;border:none;border-radius:9px;background:none;
+  font:inherit;font-size:.9rem;color:var(--text);text-align:left;cursor:pointer}
+.tb-mi:hover,.tb-mi:focus-visible{background:var(--surface-2);outline:none}
+.tb-mi svg{width:17px;height:17px;color:var(--muted);flex-shrink:0}
+.tb-mi.is-out{margin-top:.3rem;padding-top:.65rem;border-top:1px solid var(--border);border-radius:0 0 9px 9px}
+.tb-pill:focus-visible,.tb-me-btn:focus-visible,.tb-rec-btn:focus-visible{outline:2px solid var(--primary);outline-offset:2px}
+body.no-consult-record #tb-rec{display:none !important}
+
+/* Smaller screens: icons only for the buttons, avatar only for the profile */
+@media (max-width: 860px){ .tb-me-name{display:none} }
+@media (max-width: 560px){
+  .topbar-right{gap:.35rem}
+  .tb-pill span,.tb-rec-btn span:not(.tb-rec-time):not(.rec-dot){display:none}
+  .tb-pill,.tb-rec-btn{padding:0 .7rem}
+}
+
+/* Start of Day: For you today */
+.sod-card{max-height:calc(100dvh - 2rem);overflow-y:auto}
+.sod-you{margin-top:1rem;padding:.85rem 1rem;border:1px solid var(--border);border-radius:16px;background:var(--surface-2);text-align:left}
+.sod-you-h{margin:0 0 .5rem;font-size:.72rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--primary)}
+.sod-you ul{display:grid;gap:.5rem;margin:0;padding:0;list-style:none}
+.sod-you li{display:flex;align-items:flex-start;gap:.55rem;font-size:.9rem;line-height:1.4}
+.sod-you li > svg{width:16px;height:16px;flex-shrink:0;margin-top:.15rem;color:var(--primary)}
+.sod-you li.is-bad > svg{color:var(--danger)}
+.sod-you-tasks{display:grid;gap:.3rem;margin-top:.3rem}
+.sod-you-tasks a,.sod-you-tasks > span{display:block;padding:.35rem .55rem;border-radius:8px;background:#fff;color:var(--text);font-weight:600;text-decoration:none}
+.sod-you-tasks a:hover{color:var(--primary)}
+.sod-you small{display:block;font-size:.76rem;font-weight:400;color:var(--muted)}
+.sod-you-more{display:inline-block;margin-top:.6rem;font-size:.82rem;font-weight:600;color:var(--primary);text-decoration:none}
+.sod-you-more:hover{text-decoration:underline}
+.eod-fix{margin:0 0 .5rem;font-size:.85rem;color:var(--muted)}

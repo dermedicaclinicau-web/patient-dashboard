@@ -17,6 +17,7 @@ const ICONS = {
 };
 
 let bar = null;
+let slot = null;      // the top-bar spot: "Start appointment", or the live timer while recording
 let staff = null;
 let context = null;   // the patient page currently open (for the "Ready" state)
 let consent = true; // consent forms are signed at check-in
@@ -51,6 +52,11 @@ export function initRecordingBar(currentStaff) {
   staff = currentStaff;
   bar = document.getElementById("rec-bar");
   if (!bar) return;
+  slot = document.getElementById("tb-rec");
+  if (slot && !slot.dataset.wired) {
+    slot.dataset.wired = "1";
+    slot.addEventListener("click", onClick);
+  }
   if (!bar.dataset.wired) {
     bar.dataset.wired = "1";
     bar.addEventListener("click", onClick);
@@ -91,36 +97,32 @@ function render(s) {
     if (bar2) bar2.style.width = `${Math.round(s.progress * 100)}%`;
     const pct = bar.querySelector(".rec-pct");
     if (pct) pct.textContent = `${Math.round(s.progress * 100)}%`;
+    const t = slot && slot.querySelector(".tb-rec-time");
+    if (t) t.textContent = fmt(s.elapsedMs);
     return;
   }
   lastKey = key;
 
   let html = "";
+  let top = "";
   let cls = "";
   const chip = patientChip(s.patient);
   const warn = otherPatientWarning(s);
 
   switch (s.status) {
     case "idle":
-      if (!context) break;
-      cls = "is-idle";
-      html = `
-        <span class="rec-icon">${ICONS.mic}</span>
-        <span class="rec-text"><strong>Ready to record · ${escapeHtml(context.name)}</strong>
-          <small>The recording is saved to this patient.</small></span>
-        <label class="rec-consent">
-          <input type="checkbox" data-rec-consent ${consent ? "checked" : ""} />
-          Recording consent on file (signed at check-in)
-        </label>
-        <span class="rec-actions">
-          <button type="button" class="rec-btn primary" data-rec="start" ${consent ? "" : "disabled"}>${ICONS.mic}Start Appointment</button>
-        </span>`;
+      // Ready to record: just the button in the top bar, no extra row
+      if (context) top = `<button type="button" class="tb-rec-btn" data-rec="start"
+        title="Record this appointment for ${escapeHtml(context.name)}">${ICONS.mic}<span>Start appointment</span></button>`;
       break;
 
     case "recording":
     case "paused": {
       const paused = s.status === "paused";
       cls = paused ? "is-paused" : "is-recording";
+      top = `<button type="button" class="tb-rec-btn ${paused ? "is-paused" : "is-live"}" data-rec="open"
+        title="${paused ? "Paused" : "Recording"}${s.patient ? ` · ${escapeHtml(s.patient.name)}` : ""}">
+        <span class="rec-dot"></span><span class="tb-rec-time">${fmt(s.elapsedMs)}</span></button>`;
       html = `
         <span class="rec-dot"></span>
         ${chip}
@@ -231,6 +233,7 @@ function render(s) {
   bar.className = `rec-bar ${cls}${warn ? " has-warn" : ""}`.trim();
   bar.innerHTML = html;
   bar.hidden = !html;
+  if (slot) { slot.innerHTML = top; slot.hidden = !top; }
   // Lets the sticky patient header and sidebar sit below the bar
   document.documentElement.style.setProperty("--recbar-h", bar.hidden ? "0px" : `${bar.offsetHeight}px`);
 }

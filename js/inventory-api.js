@@ -2584,20 +2584,50 @@ async function kitFlowSince(since, productsById) {
 // 1. Typed batches are matched to the kit records; any batch in the records that wasn't typed counts as 0.
 //    Saved as a kit check, so differences reach Count differences.
 // 2. Batches that aren't in the kit records are kept and flagged.
-// 3. Overnight: last End of Day + what was recorded since should equal this morning. If not, an investigation opens.
+// 3. Overnight: last End of Day + what was recorded since should equal what's counted now. If not, an investigation opens.
+// Saving again the same day (before End of Day) corrects it: the start time stays, the earlier count is kept in
+// start.previous and its kit check is marked as replaced. An investigation already opened stays with the admin.
 export async function saveKitDayStart({ notInjecting = false, items = [] }, staff) {
   const me = uid();
   const by = who(staff);
   const key = dayKey();
   const ref = doc(db, "inv_kitdays", kitDayId(me, key));
 
+  const prevSnap = await getDoc(ref);
+  const prevDay = prevSnap.exists() ? normaliseKitDay(prevSnap) : null;
+  if (prevDay && prevDay.end) throw new Error("You've already ended today, so your start of day can't be changed.");
+  const before = prevDay && prevDay.start ? prevDay.start : null;
+  const startAt = before && before.at ? before.at : serverTimestamp();
+  const editFields = before ? {
+    correctedAt: serverTimestamp(),
+    previous: [...(Array.isArray(before.previous) ? before.previous : []), {
+      replacedAt: new Date().toISOString(), countId: before.countId || "", notInjecting: !!before.notInjecting,
+      items: (before.items || []).map((it) => ({
+        productId: String(it.productId || ""), productName: String(it.productName || ""),
+        counted: Number(it.counted) || 0, inUse: it.inUse && it.inUse.batch ? String(it.inUse.batch) : "",
+      })),
+    }].slice(-5),
+  } : {};
+  const earlierInv = (pid) => {
+    const it = before && (before.items || []).find((x) => x.productId === pid);
+    return (it && it.overnight && it.overnight.investigationId) || "";
+  };
+  // The earlier kit check leaves Count differences (it stays on record, marked as replaced)
+  const retire = async (newCountId) => {
+    if (!before || !before.countId) return;
+    await updateDoc(doc(db, "inv_counts", before.countId), {
+      superseded: true, supersededBy: newCountId || "", supersededAt: serverTimestamp(), openCount: 0,
+    }).catch((err) => console.warn("Couldn't mark the earlier kit check as replaced:", err));
+  };
+
   if (notInjecting) {
     await setDoc(ref, {
       staffUid: me, staffName: by, dateKey: key,
-      start: { at: serverTimestamp(), notInjecting: true, items: [], countId: "", differences: 0, overnight: 0 },
+      start: { at: startAt, notInjecting: true, items: [], countId: "", differences: 0, overnight: 0, ...editFields },
       updatedAt: serverTimestamp(),
     }, { merge: true });
-    return { notInjecting: true, differences: 0, overnight: 0, unknown: 0 };
+    await retire("");
+    return { notInjecting: true, differences: 0, overnight: 0, unknown: 0, edited: !!before };
   }
 
   const [products, kits] = await Promise.all([listProducts(), listKits({ mine: true })]);
@@ -2633,7 +2663,9 @@ export async function saveKitDayStart({ notInjecting = false, items = [] }, staf
   if (!work.length) throw new Error("Count your kit, or tick “I'm not injecting today”.");
 
   // 1. Against the kit records
-  const count = lines.length ? await saveCount({ kind: "kit", lines, note: "Start of day (blind)" }, staff) : null;
+  const count = lines.length
+    ? await saveCount({ kind: "kit", lines, note: before ? "Start of day (corrected)" : "Start of day (blind)" }, staff)
+    : null;
   const byRef = new Map(((count && count.lines) || []).map((l) => [l.ref, l]));
 
   // 3. Overnight: since the last End of Day
@@ -2664,8 +2696,8 @@ export async function saveKitDayStart({ notInjecting = false, items = [] }, staf
       const moved = round1(flow.get(p.id) || 0);
       const expected = round1(endCounted + moved);
       const gap = round1(counted - expected);
-      overnight = { compared: true, fromDateKey: lastEnd.dateKey, endCounted, moved, expected, gap, investigationId: "" };
-      if (Math.abs(gap) >= 0.05) {
+      overnight = { compared: true, fromDateKey: lastEnd.dateKey, endCounted, moved, expected, gap, investigationId: earlierInv(p.id) };
+      if (Math.abs(gap) >= 0.05 && !overnight.investigationId) {   // one investigation per product per day
         const iRef = doc(collection(db, "inv_investigations"));
         overnight.investigationId = iRef.id;
         opened.push(iRef.id);
@@ -2680,7 +2712,7 @@ export async function saveKitDayStart({ notInjecting = false, items = [] }, staf
           openedBy: by, openedByUid: me, openedAt: serverTimestamp(), updatedAt: serverTimestamp(),
           events: [{ at, by, action: "Opened: overnight kit difference",
             note: `End of day ${lastEnd.dateKey}: ${endCounted} ${u}. Recorded since: ${moved >= 0 ? "+" : ""}${moved}. `
-              + `Expected ${expected}, counted ${counted} this morning (${gap > 0 ? "+" : ""}${gap}).` }],
+              + `Expected ${expected}, counted ${counted}${before ? " (corrected count)" : " this morning"} (${gap > 0 ? "+" : ""}${gap}).` }],
         });
       }
     }
@@ -2698,23 +2730,22 @@ export async function saveKitDayStart({ notInjecting = false, items = [] }, staf
   if (opened.length) {
     batch.set(doc(collection(db, "notify_outbox")), outboxDoc("investigation.opened", { ids: opened, countId: count ? count.id : "" }, me));
   }
+  const differences = count ? count.lines.filter((l) => l.status !== "ok").length : 0;
   batch.set(ref, {
     staffUid: me, staffName: by, dateKey: key,
-    start: { at: serverTimestamp(), notInjecting: false, blind: true, items: out, countId: count ? count.id : "",
-      differences: count ? count.lines.filter((l) => l.status !== "ok").length : 0, overnight: opened.length },
+    start: { at: startAt, notInjecting: false, blind: true, items: out, countId: count ? count.id : "",
+      differences, overnight: opened.length, ...editFields },
     updatedAt: serverTimestamp(),
   }, { merge: true });
   await batch.commit();
+  await retire(count ? count.id : "");
   if (opened.length) pingNotify();
 
   return {
-    notInjecting: false,
-    differences: count ? count.lines.filter((l) => l.status !== "ok").length : 0,
-    overnight: opened.length,
+    notInjecting: false, differences, overnight: opened.length, edited: !!before,
     unknown: out.reduce((a, o) => a + o.unknown.length, 0),
   };
 }
-
 // Start of Day with no kit to count (everyone who isn't counting a kit): just the time they started. Once per day.
 export async function saveDayStart(staff) {
   const me = uid();

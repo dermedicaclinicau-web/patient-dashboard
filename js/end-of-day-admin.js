@@ -41,12 +41,12 @@ export function mountEndOfDaySettings(container, { staff = null, embedded = fals
     root.innerHTML = `
       ${embedded
         ? `<h3 class="tm-h">End of day</h3>
-           <p class="muted tm-sub">What staff are asked when they click <strong>End my day</strong> under their profile.
-             Answers show in Reporting → Start &amp; end of day.</p>`
+           <p class="muted tm-sub">What staff are asked when they click <strong>End my day</strong> in the top bar.
+             Admins see the answers on My dashboard → Start &amp; end of day.</p>`
         : `<a class="ff-btn is-quiet eod-back" href="#/tasks">← Task Manager</a>
            <div class="fb-head"><div><h2>End of day</h2>
-             <p class="muted">What staff are asked when they click <strong>End my day</strong> under their profile.
-               Answers show in Reporting → Start &amp; end of day.</p></div></div>`}
+             <p class="muted">What staff are asked when they click <strong>End my day</strong> in the top bar.
+               Admins see the answers on My dashboard → Start &amp; end of day.</p></div></div>`}
       <section class="tb-card eod-set">
         <h4>Who sees End my day</h4>
         <div class="fe-seg">${[["all", "Everyone"], ["injectors", "Injectors only"]].map(([v, l]) =>

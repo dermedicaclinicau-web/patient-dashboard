@@ -3,9 +3,11 @@ import { getEndOfDaySettings, MOODS, answerText } from "./end-of-day-api.js";
 import { listProducts, listKits, isKitProduct, getMyKitDay, saveKitDayEnd, listMyUsage, dayKey, plural } from "./inventory-api.js";
 import { can } from "./perms.js";
 import { escapeHtml, showToast } from "./utils.js";
+import { openStartOfDayEdit } from "./start-of-day.js";
 
 const esc = (s) => escapeHtml(String(s ?? "")); // always text (ratings are numbers)
 const MOON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+const CHECK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
 const fmt = (n) => String(+Number(n || 0).toFixed(1));
 const niceDate = (key) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
@@ -24,18 +26,18 @@ let me = null;
 let onLogout = null;
 let gen = 0;
 
-/* ---------- The button under the avatar ---------- */
-
+/* ---------- The day pill in the top bar ---------- */
+// The button in index.html (#eod-btn), or one added to the top bar if it isn't there. Click handler bound once.
 // The button in index.html (#eod-btn), or one added to the top bar if it isn't there. Click handler bound once.
 function getButton() {
   let b = document.getElementById("eod-btn");
   if (!b) {
-    const host = document.querySelector(".topbar-right");
+    const host = document.querySelector(".tb-day, .topbar-right");
     if (!host) return null;
     b = document.createElement("button");
     b.type = "button";
     b.id = "eod-btn";
-    b.className = "eod-btn";
+    b.className = "tb-pill";
     b.hidden = true;
     host.appendChild(b);
   }
@@ -53,17 +55,19 @@ export async function initEndOfDay(staff, { onLogout: lo } = {}) {
     const [cfg, day] = await Promise.all([getEndOfDaySettings(), getMyKitDay().catch(() => null)]);
     if (g !== gen) return;
     btn.hidden = !(cfg.who === "all" || staff.injector === true);
-    setLabel(!!(day && day.end));
+    setLabel(!!(day && day.end), day && day.end ? day.end.at : null);
   } catch (err) {
     console.warn("End of day setup failed:", err);
     if (g === gen) { btn.hidden = false; setLabel(false); }
   }
 }
 
-function setLabel(ended) {
+function setLabel(ended, at = null) {
   if (!btn) return;
   btn.classList.toggle("is-done", ended);
-  btn.innerHTML = ended ? "Day ended ✓" : `${MOON}<span>End my day</span>`;
+  btn.innerHTML = ended
+    ? `${CHECK}<span>Day ended${at ? ` ${esc(timeOf(at))}` : ""}</span>`
+    : `${MOON}<span>End my day</span>`;
   btn.title = ended ? "See what you entered today" : "Finish your day";
 }
 
@@ -106,7 +110,7 @@ async function openEndOfDay() {
   let cfg, day, kit = [];
   try {
     [cfg, day] = await Promise.all([getEndOfDaySettings(), getMyKitDay()]);
-    setLabel(!!(day && day.end)); // also resets the label after midnight
+    setLabel(!!(day && day.end), day && day.end ? day.end.at : null); // also resets the label after midnight
     if (day && day.end) { if (dlg.open) summary(dlg, day); return; }
     const notInjecting = !!(day && day.start && day.start.notInjecting);
     if (cfg.kitCheck && staff.injector === true && !notInjecting) kit = await kitForEnd(day);
@@ -182,6 +186,8 @@ function renderForm(dlg, staff, cfg, day, kit) {
   const editLink = can("tasks.build") ? '<a class="eod-edit" href="#/tasks/end-of-day">Edit these questions</a>' : "";
   dlg.innerHTML = `<form class="lh-form eod-form" novalidate>
     <div class="lh-dialog-head"><h3>End of day</h3><p>${esc(todayText())} · Thanks for today, ${esc(firstName(staff.name))}.</p></div>
+    ${staff.injector === true && day && day.start ? `<p class="eod-fix">Wrong count this morning?
+      <button type="button" class="rc-link" data-act="sod-edit">Edit start of day</button></p>` : ""}
     ${kitHtml(kit)}
     ${cfg.questions.length ? `<section class="eod-sec">${kit.length ? "<h4>Your day</h4>" : ""}${cfg.questions.map(questionHtml).join("")}</section>` : ""}
     ${!kit.length && !cfg.questions.length ? '<p class="muted">Nothing to fill in. Just finish your day.</p>' : ""}
@@ -197,6 +203,10 @@ function renderForm(dlg, staff, cfg, day, kit) {
   const err = dlg.querySelector(".lh-error");
   const showErr = (m, focus) => { err.textContent = m; err.hidden = !m; if (focus) focus.focus(); };
   dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+  dlg.querySelector('[data-act="sod-edit"]')?.addEventListener("click", () => {
+    dlg.close();
+    setTimeout(() => openStartOfDayEdit(staff), 0);
+  });
   dlg.querySelector(".eod-edit")?.addEventListener("click", () => dlg.close());
   form.addEventListener("input", () => showErr(""));
 
@@ -239,7 +249,8 @@ function renderForm(dlg, staff, cfg, day, kit) {
     if (e.submitter) e.submitter.textContent = "Saving…";
     try {
       const r = await saveKitDayEnd({ items, answers }, staff);
-      setLabel(true);
+      setLabel(true, new Date());
+      window.dispatchEvent(new Event("kitday:changed"));
       done(dlg, r, andLogout, day);
     } catch (ex) {
       console.error("End of day save failed:", ex);

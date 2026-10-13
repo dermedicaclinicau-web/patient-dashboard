@@ -68,25 +68,44 @@
       </div>
 
       <div class="topbar-right">
-        <div class="greeting">
-          <span class="greeting-text">Welcome, <strong id="staff-name"></strong></span>
-          <span class="greeting-role" id="staff-role"></span>
+        <!-- Start appointment / live recording timer (filled by recording-bar.js) -->
+        <div id="tb-rec" class="tb-rec" hidden></div>
+
+        <!-- Start my day → End my day → Day ended -->
+        <div class="tb-day">
+          <button type="button" id="sod-btn" class="tb-pill is-start" hidden></button>
+          <button type="button" id="eod-btn" class="tb-pill" hidden></button>
         </div>
-        <div class="avatar-stack">
-          <div class="avatar">
-            <span id="staff-initials"></span>
-            <img id="staff-photo" alt="" referrerpolicy="no-referrer" hidden />
+
+        <!-- Profile chip and its menu -->
+        <div class="tb-me">
+          <button type="button" id="me-btn" class="tb-me-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="me-menu">
+            <span class="avatar">
+              <span id="staff-initials"></span>
+              <img id="staff-photo" alt="" referrerpolicy="no-referrer" hidden />
+            </span>
+            <span class="tb-me-name"><strong id="staff-name"></strong><small id="staff-role"></small></span>
+            <svg class="tb-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          <div id="me-menu" class="tb-menu" role="menu" hidden>
+            <div class="tb-menu-head"><div><strong data-tb="name"></strong><small data-tb="role"></small></div></div>
+            <button type="button" id="me-day" class="tb-mi" role="menuitem" hidden></button>
+            <button type="button" id="me-sod-edit" class="tb-mi" role="menuitem" hidden>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M10 14l2 2 4-4"/></svg>
+              <span>Edit start of day</span>
+            </button>
+            <button type="button" id="edit-profile-btn" class="tb-mi" role="menuitem">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+              <span>Edit my name</span>
+            </button>
+            <button type="button" id="logout-btn" class="tb-mi is-out" role="menuitem">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+              <span>Log out</span>
+            </button>
           </div>
-          <button type="button" id="sod-btn" class="eod-btn sod-btn" hidden></button>
-          <button type="button" id="eod-btn" class="eod-btn" hidden></button>
         </div>
-        <button id="edit-profile-btn" class="icon-btn" title="Edit profile" aria-label="Edit profile">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-        </button>
-        <button id="logout-btn" class="btn-ghost sm">Log out</button>
       </div>
     </header>
-
     <div id="rec-bar" class="rec-bar" hidden></div>
 
     <div class="shell-body">

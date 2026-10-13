@@ -1,6 +1,9 @@
 import { fetchDayAppointments } from "./appointments.js";
 import { escapeHtml, getInitials, toDateKey, showToast } from "./utils.js";
 import { listProducts, listKits, isKitProduct, getMyKitDay, saveKitDayStart, saveDayStart, plural } from "./inventory-api.js";
+import { db } from "./firebase-config.js";
+import { collection, getDocs, query, where, FieldPath } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July",
   "August", "September", "October", "November", "December"];
@@ -9,10 +12,22 @@ const svg = (p) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const SUN = svg('<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>');
 const MOON = svg('<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>');
+const ICO = {
+  cal: svg('<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>'),
+  task: svg('<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'),
+  note: svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/>'),
+};
 const esc = escapeHtml;
 const niceDate = (key) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "No expiry";
+};
+const timeOf = (d) => (d ? d.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }) : "");
+// Same matching as My dashboard: appointments by name (first name is enough), tasks by staff ID or exact name
+const normName = (s) => String(s || "").toLowerCase().replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim();
+const sameStaff = (a, b) => {
+  const x = normName(a), y = normName(b);
+  return !!x && !!y && (x === y || x.includes(y) || y.includes(x) || x.split(" ")[0] === y.split(" ")[0]);
 };
 
 let current = null;
@@ -34,14 +49,24 @@ function seenKey(staff) {
   return `sod:${staff.uid}:${toDateKey()}`;
 }
 
-// Injectors holding a kit product right now, who haven't done today's count: { products: [{ p }] }, otherwise null
+/* ---------- Kit ---------- */
+
+// Active kit products this injector holds now (plus any listed in alsoIds, e.g. counted this morning)
+async function kitProductsFor(staff, alsoIds = []) {
+  if (!staff || staff.injector !== true) return [];
+  const [products, kits] = await Promise.all([listProducts(), listKits({ mine: true })]);
+  return products.filter((p) => p.active && isKitProduct(p)
+    && (kits.some((k) => k.productId === p.id) || alsoIds.includes(p.id)));
+}
+
+// Injectors holding a kit product right now, who haven't started today: { products: [{ p }] }, otherwise null
 async function kitToday(staff) {
   if (!staff || staff.injector !== true) return null;
-  const [products, kits, day] = await Promise.all([listProducts(), listKits({ mine: true }), getMyKitDay()]);
+  const [kp, day] = await Promise.all([kitProductsFor(staff), getMyKitDay()]);
   if (day && (day.start || day.end)) return null;
-  const kp = products.filter((p) => p.active && isKitProduct(p) && kits.some((k) => k.productId === p.id));
   return kp.length ? { products: kp.map((p) => ({ p })) } : null;
 }
+
 // The welcome once per day. The kit count until it's done (it comes back at the next login if put off).
 export async function maybeShowStartOfDay(staff) {
   if (!staff) return;
@@ -75,7 +100,28 @@ export async function openStartOfDayKit(staff) {
   return true;
 }
 
-export function showStartOfDay(staff, { kit = null, kitOnly = false } = {}) {
+// Correct today's start of day (until End of Day): a fresh blind count of the kit as it is now
+export async function openStartOfDayEdit(staff) {
+  if (current || !staff) return;
+  try {
+    const day = await getMyKitDay();
+    if (!day || !day.start) { showToast("You haven't started today yet."); return; }
+    if (day.end) {
+      showToast("You've already ended today, so your start of day can't be changed.");
+      window.dispatchEvent(new Event("kitday:changed"));
+      return;
+    }
+    const kp = await kitProductsFor(staff, (day.start.items || []).map((it) => it.productId));
+    if (current) return;
+    if (!kp.length) { showToast("There's no kit to count."); return; }
+    showStartOfDay(staff, { kit: { products: kp.map((p) => ({ p })), edit: day.start }, kitOnly: true });
+  } catch (err) {
+    console.warn("Edit start of day failed:", err);
+    showToast("Couldn't open your start of day. Check your connection and try again.");
+  }
+}
+
+export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = false } = {}) {
   closeStartOfDay();
   const mine = session;
 
@@ -108,6 +154,11 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false } = {}) {
         <div class="sod-stat"><strong data-stat="staff">–</strong><span>clinicians on</span></div>
       </div>
 
+      <div class="sod-you" data-role="foryou">
+        <p class="sod-you-h">For you today</p>
+        <div class="skeleton" style="height:48px;border-radius:10px"></div>
+      </div>
+
       <button type="button" class="sod-btn" data-act="start">Start my day</button>
     </div>`;
 
@@ -123,8 +174,12 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false } = {}) {
     dlg.classList.add("closing");
     setTimeout(() => { if (current === dlg) closeStartOfDay(); }, 180);
   };
-  dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(); });                  // Esc: kit step = remind me later
-  dlg.addEventListener("click", (e) => { if (e.target === dlg && !kitMode) close(); });     // click outside (welcome only)
+  dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(); });   // Esc: kit step = remind me later
+  // Welcome only: click outside, or follow a link (a task, My dashboard) to close
+  dlg.addEventListener("click", (e) => {
+    if (kitMode) return;
+    if (e.target === dlg || e.target.closest('a[href^="#/"]')) close();
+  });
 
   // The kit check loads while they read the welcome (an error means "don't know": the day isn't started without the count)
   const kitP = kit || noKit ? Promise.resolve(kit)
@@ -167,29 +222,37 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false } = {}) {
     localStorage.setItem(seenKey(staff), "1");
   } catch { /* ignore */ }
 
-  loadStats(dlg);
+  loadStats(dlg, staff);
 }
 
 /* ---------- Your kit: a blind count, typed from the labels ---------- */
+// kit.edit (correcting today's start): batch, expiry and "using today" are carried over; the counts never are.
 
 function renderKit(dlg, staff, kit, close) {
   dlg.classList.add("is-kit");
   const card = dlg.querySelector(".sod-card");
   const byId = new Map(kit.products.map(({ p }) => [p.id, p]));
   const bl = (p) => (p.batchLabel || "Batch");
+  const edit = kit.edit || null;
+  const earlier = (pid) => (edit && !edit.notInjecting ? (edit.items || []).find((it) => it.productId === pid) : null) || null;
+  const submitLabel = edit ? "Save changes" : "Save and start my day";
 
-  const rowHtml = (p) => `<tr>
+  const rowHtml = (p, r = null) => `<tr>
       ${p.tracked ? `<td><input class="fe-input sod-batch" data-f="batch" maxlength="40" autocomplete="off" spellcheck="false"
-          aria-label="${esc(bl(p))} number" placeholder="From the label" /></td>
-        <td><input class="fe-input sod-exp" type="date" data-f="expiry" aria-label="Expiry date" /></td>` : ""}
+          aria-label="${esc(bl(p))} number" placeholder="From the label" value="${esc((r && r.batch) || "")}" /></td>
+        <td><input class="fe-input sod-exp" type="date" data-f="expiry" aria-label="Expiry date" value="${esc((r && r.expiry) || "")}" /></td>` : ""}
       <td><input class="fe-input" type="number" min="0" step="1" inputmode="numeric" data-f="sealed" aria-label="Unopened" /></td>
       <td><div class="fe-num"><input class="fe-input" type="number" min="0" step="0.5" inputmode="decimal" data-f="open"
           aria-label="${esc(p.doseUnit)} left in the opened ${esc(p.stockUnit)}" /><span>${esc(p.doseUnit)}</span></div></td>
-      <td class="sod-use"><input type="radio" name="use-${esc(p.id)}" value="row" data-f="use" aria-label="Using this one today" /></td>
+      <td class="sod-use"><input type="radio" name="use-${esc(p.id)}" value="row" data-f="use" aria-label="Using this one today"${r && r.inUse ? " checked" : ""} /></td>
       <td><button type="button" class="hx-x" data-act="rm" aria-label="Remove this row" title="Remove">×</button></td>
     </tr>`;
 
-  const productHtml = (p) => `
+  const productHtml = (p) => {
+    const e = earlier(p.id);
+    const rows = e && Array.isArray(e.rows) && e.rows.length ? e.rows : [null];
+    const noneOn = !!(e && !e.inUse);
+    return `
     <section class="sod-kp" data-pid="${esc(p.id)}">
       <h3>${esc(p.name)} <small>${esc(`${p.dosePer} ${p.doseUnit} per ${p.stockUnit}`)}</small></h3>
       <p class="sod-k-hint">${p.tracked
@@ -198,25 +261,28 @@ function renderKit(dlg, staff, kit, close) {
       <div class="sod-kscroll"><table class="sod-ktable">
         <thead><tr>${p.tracked ? `<th>${esc(bl(p))} #</th><th>Expiry</th>` : ""}<th>Unopened</th>
           <th>Left in the opened ${esc(p.stockUnit)}</th><th>Using today</th><th></th></tr></thead>
-        <tbody>${rowHtml(p)}</tbody></table></div>
+        <tbody>${rows.map((r) => rowHtml(p, r)).join("")}</tbody></table></div>
       <div class="sod-krow-acts">
         ${p.tracked ? `<button type="button" class="ff-btn is-quiet" data-act="add">+ Add another ${esc(bl(p).toLowerCase())}</button>` : "<span></span>"}
-        <label class="fe-check"><input type="radio" name="use-${esc(p.id)}" value="none" /> Not using this today</label>
+        <label class="fe-check"><input type="radio" name="use-${esc(p.id)}" value="none"${noneOn ? " checked" : ""} /> Not using this today</label>
       </div>
     </section>`;
+  };
 
   card.innerHTML = `
     <form class="sod-kitform" novalidate>
-      <p class="sod-eyebrow">Start of day</p>
-      <h2 id="sod-title" class="sod-title serif">Your kit</h2>
-      <p class="sod-sub">Count what's physically in your kit and type in each ${esc(kit.products.some(({ p }) => p.tracked) ? "batch" : "item")}.
-        Put 0 where there's none, and choose the one you're using today.</p>
+      <p class="sod-eyebrow">Start of day${edit && edit.at ? ` · started ${esc(timeOf(edit.at))}` : ""}</p>
+      <h2 id="sod-title" class="sod-title serif">${edit ? "Edit start of day" : "Your kit"}</h2>
+      <p class="sod-sub">${edit
+        ? "Count what's in your kit right now and save. This replaces this morning's count (it stays on record), and treatments since this morning are taken into account."
+        : `Count what's physically in your kit and type in each ${esc(kit.products.some(({ p }) => p.tracked) ? "batch" : "item")}.
+        Put 0 where there's none, and choose the one you're using today.`}</p>
       ${kit.products.map(({ p }) => productHtml(p)).join("")}
       <label class="fe-check sod-none"><input type="checkbox" name="none" /> I'm not injecting today</label>
       <p class="lh-error" role="alert" hidden></p>
       <div class="sod-kit-acts">
-        <button type="button" class="lh-btn is-quiet" data-act="later">Remind me later</button>
-        <button type="submit" class="sod-btn">Save and start my day</button>
+        <button type="button" class="lh-btn is-quiet" data-act="later">${edit ? "Cancel" : "Remind me later"}</button>
+        <button type="submit" class="sod-btn">${submitLabel}</button>
       </div>
     </form>`;
 
@@ -235,10 +301,12 @@ function renderKit(dlg, staff, kit, close) {
     card.querySelectorAll(".sod-kp input, .sod-kp button").forEach((i) => { i.disabled = none.checked; });
     showErr("");
   });
+  if (edit && edit.notInjecting) { none.checked = true; none.dispatchEvent(new Event("change")); }
+
   card.querySelector('[data-act="later"]').addEventListener("click", () => {
     close();
-    showToast("No problem. Press “Start my day” at the top when you're ready to count your kit.");
-    });
+    if (!edit) showToast("No problem. Press “Start my day” at the top when you're ready to count your kit.");
+  });
   card.addEventListener("input", () => showErr(""));
   card.addEventListener("click", (e) => {
     const add = e.target.closest('[data-act="add"]');
@@ -301,58 +369,119 @@ function renderKit(dlg, staff, kit, close) {
       const r = await saveKitDayStart({ notInjecting, items }, staff);
       window.dispatchEvent(new Event("kitday:changed"));
       close();
+      const lead = edit ? "Start of day updated." : "Kit count saved.";
       const notes = [];
       if (r.overnight) notes.push(`${plural(r.overnight, "overnight difference")} sent to an admin`);
       if (r.unknown) notes.push(`${plural(r.unknown, "batch")} not found in your kit records`);
-      showToast(r.notInjecting ? "Noted: not injecting today. Have a great day!"
-        : notes.length ? `Kit count saved. ${notes.join(" · ")}.`
-        : r.differences ? `Kit count saved. ${plural(r.differences, "difference")} will be reviewed.`
-        : "Kit count saved. Everything matched. Have a great day!");
+      showToast(r.notInjecting ? (edit ? "Start of day updated: not injecting today." : "Noted: not injecting today. Have a great day!")
+        : notes.length ? `${lead} ${notes.join(" · ")}.`
+        : r.differences ? `${lead} ${plural(r.differences, "difference")} will be reviewed.`
+        : edit ? "Start of day updated. Everything matched." : "Kit count saved. Everything matched. Have a great day!");
     } catch (ex) {
       console.error("Start of day kit count failed:", ex);
       showErr(ex && ex.code === "permission-denied"
-        ? "Couldn't save. Check the Firestore rules for inv_kitdays and inv_investigations have been published."
+        ? "Couldn't save. Check the Firestore rules for inv_kitdays, inv_counts and inv_investigations have been published."
         : (ex && ex.message && !ex.code) ? ex.message : "Couldn't save. Check your connection and try again.");
       btn.disabled = false;
-      btn.textContent = "Save and start my day";
+      btn.textContent = submitLabel;
     }
   });
 
-  const first = card.querySelector('[data-f="batch"], [data-f="sealed"]');
+  const first = card.querySelector(edit ? '[data-f="sealed"]' : '[data-f="batch"], [data-f="sealed"]');
   if (first) setTimeout(() => first.focus(), 50);
 }
 
+/* ---------- The welcome: the clinic today, and what's waiting for you ---------- */
 
-async function loadStats(dlg) {
-  const wrap = dlg.querySelector(".sod-stats");
-  if (!wrap) return;
-  try {
-    const data = await fetchDayAppointments(toDateKey());
-    if (!dlg.isConnected || !wrap.isConnected) return;
-
-    const appts = data.appointments || [];
-    if (!appts.length) {
-      wrap.innerHTML = `<p class="sod-note">No appointments are scheduled today.</p>`;
-      return;
-    }
-    const clinicians = new Set(appts.map((a) => a.staff).filter(Boolean)).size;
-    wrap.querySelector('[data-stat="appts"]').textContent = appts.length;
-    wrap.querySelector('[data-stat="staff"]').textContent = clinicians;
-  } catch (err) {
-    console.warn("Start of Day stats failed:", err);
-    if (dlg.isConnected && wrap.isConnected) wrap.hidden = true;
-  }
+// My open tasks due today or earlier, oldest first
+async function myTasksDue(staff, key) {
+  const snap = await getDocs(query(collection(db, "staff-task-list"), where("status", "==", "Open")));
+  const ids = [staff.uid, staff.id, staff.staffId].filter(Boolean).map(String);
+  const nm = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+    .filter((t) => (t.assignedToId && ids.includes(String(t.assignedToId))) || (t.assignedToName && nm(t.assignedToName) === nm(staff.name)))
+    .filter((t) => t.dueDate && t.dueDate <= key)
+    .sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)));
 }
 
-/* ---------- "Start my day" in the top bar: every staff member, until they've started today ---------- */
+// How many of my consultation notes are still a Draft
+async function myDraftNotes(staff) {
+  const name = String(staff.name || "").trim();
+  if (!name) return 0;
+  const snap = await getDocs(query(collection(db, "appointment_transcripts"), where(new FieldPath("Staff Name"), "==", name)));
+  return snap.docs.filter((d) => !/^reviewed$/i.test(String((d.data() || {}).Status || ""))).length;
+}
+
+async function loadStats(dlg, staff) {
+  const wrap = dlg.querySelector(".sod-stats");
+  const you = dlg.querySelector('[data-role="foryou"]');
+  const key = toDateKey();
+  const [apR, tkR, ntR] = await Promise.allSettled([fetchDayAppointments(key), myTasksDue(staff, key), myDraftNotes(staff)]);
+  if (!dlg.isConnected) return;
+
+  // The clinic today
+  const appts = apR.status === "fulfilled" ? (apR.value.appointments || []) : null;
+  if (wrap && wrap.isConnected) {
+    if (!appts) { console.warn("Start of Day stats failed:", apR.reason); wrap.hidden = true; }
+    else if (!appts.length) wrap.innerHTML = `<p class="sod-note">No appointments are scheduled today.</p>`;
+    else {
+      wrap.querySelector('[data-stat="appts"]').textContent = appts.length;
+      wrap.querySelector('[data-stat="staff"]').textContent = new Set(appts.map((a) => a.staff).filter(Boolean)).size;
+    }
+  }
+
+  // For you today
+  if (!you || !you.isConnected) return;
+  if (tkR.status === "rejected") console.warn("Start of Day tasks failed:", tkR.reason);
+  if (ntR.status === "rejected") console.warn("Start of Day notes failed:", ntR.reason);
+  const lines = [];
+
+  const mine = (appts || []).filter((a) => sameStaff(a.staff, staff.name))
+    .sort((a, b) => (Number(a.sortMinutes) || 0) - (Number(b.sortMinutes) || 0));
+  if (mine.length) {
+    lines.push(`<li>${ICO.cal}<span><strong>${mine.length} appointment${mine.length === 1 ? "" : "s"}</strong> with you${
+      mine[0].time ? ` · first at ${esc(mine[0].time)}` : ""}</span></li>`);
+  }
+
+  const tasks = tkR.status === "fulfilled" ? tkR.value : [];
+  if (tasks.length) {
+    const overdue = tasks.filter((t) => t.dueDate < key).length;
+    const item = (t) => {
+      const inner = `${esc(t.taskText || "Reminder")}<small>${esc(t.patientName || "")}${t.patientName ? " · " : ""}${
+        t.dueDate < key ? `Overdue (${esc(niceDate(t.dueDate))})` : "Due today"}</small>`;
+      return t.patientId ? `<a href="#/patient/${encodeURIComponent(t.patientId)}">${inner}</a>` : `<span>${inner}</span>`;
+    };
+    lines.push(`<li class="${overdue ? "is-bad" : ""}">${ICO.task}<span><strong>${tasks.length} task${tasks.length === 1 ? "" : "s"} due</strong>${
+      overdue ? ` · ${overdue} overdue` : ""}
+      <span class="sod-you-tasks">${tasks.slice(0, 3).map(item).join("")}${tasks.length > 3 ? `<small>and ${tasks.length - 3} more</small>` : ""}</span></span></li>`);
+  }
+
+  const drafts = ntR.status === "fulfilled" ? ntR.value : 0;
+  if (drafts) lines.push(`<li>${ICO.note}<span><strong>${drafts} consultation note${drafts === 1 ? "" : "s"}</strong> to review</span></li>`);
+
+  you.innerHTML = `<p class="sod-you-h">For you today</p>
+    ${lines.length ? `<ul>${lines.join("")}</ul>` : '<p class="sod-note">Nothing waiting for you. Enjoy your day!</p>'}
+    <a class="sod-you-more" href="#/home">Open My dashboard →</a>`;
+}
+
+/* ---------- The top bar: "Start my day" until started, and "Edit start of day" until ended ---------- */
 let btnStaff = null;
 let btnCheck = 0;
+
+async function dayInfo(staff) {
+  const [day, kit] = await Promise.all([getMyKitDay(), kitToday(staff)]);
+  return {
+    started: !!(day && (day.start || day.end)),
+    kit,
+    canEdit: staff.injector === true && !!(day && day.start && !day.end),
+  };
+}
 
 // null = already started today. Otherwise { kit }: the kit to count, or null if there's nothing to count.
 async function dayState(staff) {
   if (!staff) return null;
-  const [day, kit] = await Promise.all([getMyKitDay(), kitToday(staff)]);
-  return day && (day.start || day.end) ? null : { kit };
+  const info = await dayInfo(staff);
+  return info.started ? null : { kit: info.kit };
 }
 
 // The top bar button: the kit count for injectors with a kit, otherwise the welcome
@@ -374,7 +503,7 @@ function sodButton() {
   let b = document.getElementById("sod-btn");
   if (!b) {
     const eod = document.getElementById("eod-btn");
-    const stack = eod ? eod.parentElement : document.querySelector(".avatar-stack");
+    const stack = eod ? eod.parentElement : document.querySelector(".tb-day, .topbar-right");
     if (!stack) return null;
     b = document.createElement("button");
     b.type = "button";
@@ -384,7 +513,7 @@ function sodButton() {
   }
   if (!b.dataset.wired) {
     b.dataset.wired = "1";
-    b.className = "eod-btn sod-btn";
+    b.className = "tb-pill is-start";
     b.title = "Start your day";
     b.innerHTML = `${SUN}<span>Start my day</span>`;
     b.addEventListener("click", async () => {
@@ -403,13 +532,26 @@ function setPending(on) {
   if (b.parentElement) b.parentElement.classList.toggle("sod-pending", on);   // "End my day" waits until the day has started
 }
 
-// Shows the button until this person has started today
+// "Edit start of day" in the profile menu
+function setEditable(on) {
+  const it = document.getElementById("me-sod-edit");
+  if (!it) return;
+  if (!it.dataset.wired) {
+    it.dataset.wired = "1";
+    it.addEventListener("click", () => { if (btnStaff) openStartOfDayEdit(btnStaff); });
+  }
+  it.hidden = !on;
+}
+
+// Shows "Start my day" until this person has started today, and "Edit start of day" until they've ended it
 export async function refreshStartOfDayButton(staff) {
   btnStaff = staff || null;
   const mine = ++btnCheck;
-  if (!staff) { setPending(false); return; }
-  const st = await dayState(staff).catch((err) => { console.warn("Day check failed:", err); return null; });
-  if (mine === btnCheck && btnStaff === staff) setPending(!!st);
+  if (!staff) { setPending(false); setEditable(false); return; }
+  const info = await dayInfo(staff).catch((err) => { console.warn("Day check failed:", err); return null; });
+  if (mine !== btnCheck || btnStaff !== staff) return;
+  setPending(!!info && !info.started);
+  setEditable(!!info && info.canEdit);
 }
 
 // On logout
@@ -417,7 +559,8 @@ export function hideStartOfDayButton() {
   btnStaff = null;
   btnCheck++;
   setPending(false);
+  setEditable(false);
 }
 
-// Started (or found already started): swap to "End my day"
+// Started, corrected or ended: refresh the top bar
 window.addEventListener("kitday:changed", () => { if (btnStaff) refreshStartOfDayButton(btnStaff); });
