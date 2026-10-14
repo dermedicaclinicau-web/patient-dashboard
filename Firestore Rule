@@ -318,12 +318,18 @@ match /inv_count_drafts/{id} {
   allow read, write: if id.matches('opening__[0-9]{4}-[0-9]{2}-[0-9]{2}')
     && (can('inventory.count') || can('inventory.order') || can('inventory.manage'));
 }
-    // PO numbers: only ever counts up by one
+    // Inventory settings: request emails, count due time and starting stock, service links
+    match /inv_settings/{id} {
+      allow read: if isStaff();
+      allow write: if invManage() || (id == 'counting' && invReport());
+    }
+
+    // PO numbers: a counter per supplier and day ("PO-DHL-10142026" → 1, 2…). The old "po" field is kept.
     match /inv_settings/counters {
+      allow read: if invOrder();
       allow create, update: if invOrder()
-        && request.resource.data.keys().hasOnly(['po'])
-        && request.resource.data.po is int
-        && request.resource.data.po == (resource == null ? 1 : resource.data.po + 1);
+        && request.resource.data.keys().hasOnly(['po', 'poSeq'])
+        && request.resource.data.get('poSeq', {}) is map;
     }
 
     // Purchase orders: the ordering team
@@ -331,7 +337,10 @@ match /inv_count_drafts/{id} {
       allow read: if can('menu.inventory') || invReceive();
       allow create: if invOrder() && request.resource.data.createdByUid == request.auth.uid
         && request.resource.data.status == 'draft';
-      allow update: if (invOrder() && request.resource.data.number == resource.data.number)
+      allow update: if (invOrder() && (request.resource.data.number == resource.data.number
+          || (resource.data.status == 'draft' && request.resource.data.status == 'draft'
+            && request.resource.data.number is string
+            && request.resource.data.number.matches('PO-[A-Z0-9]{3}-[0-9]{8}(-[0-9]+)?'))))
         || (invReceive()
           && resource.data.status in ['sent', 'part']
           && request.resource.data.status in ['part', 'received']
