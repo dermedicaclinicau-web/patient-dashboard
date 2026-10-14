@@ -2710,16 +2710,28 @@ function newPin_(all) {
   throw new Error('Could not make a unique PIN');
 }
 function staffClean_(v, max) { return String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, max); }
+// A partial update (only these fields) for commitWrites_. The document must already exist.
+function patchWrite_(cfg, path, obj) {
+  return {
+    update: { name: fsBase_(cfg) + '/' + path, fields: toFields_(obj) },
+    updateMask: { fieldPaths: Object.keys(obj).map(quoteField_) },
+    currentDocument: { exists: true },
+  };
+}
+
+// The Activity entry as a write, so it's saved together with the change it describes
+function staffAuditWrite_(cfg, session, action, target, details) {
+  return updateWrite_(cfg, 'staff_audit/a_' + Date.now() + '_' + Utilities.getUuid().slice(0, 8), {
+    at: new Date().toISOString(),
+    by: String(session.name || ''), byUid: String(session.uid || ''),
+    action: action, targetId: String(target.id || ''), targetName: String(target.name || ''),
+    details: String(details || '').slice(0, 300),
+  });
+}
 
 function staffAudit_(cfg, session, action, target, details) {
-  try {
-    commitWrites_(cfg, [updateWrite_(cfg, 'staff_audit/a_' + Date.now() + '_' + Utilities.getUuid().slice(0, 8), {
-      at: new Date().toISOString(),
-      by: String(session.name || ''), byUid: String(session.uid || ''),
-      action: action, targetId: String(target.id || ''), targetName: String(target.name || ''),
-      details: String(details || '').slice(0, 300),
-    })]);
-  } catch (e) { console.warn('Staff audit not saved: ' + e); }
+  try { commitWrites_(cfg, [staffAuditWrite_(cfg, session, action, target, details)]); }
+  catch (e) { console.warn('Staff audit not saved: ' + e); }
 }
 
 // Firebase sign-in on/off for a staff member (so a turned-off account can't keep using the portal)
@@ -2830,21 +2842,13 @@ function staffSave_(p, session) {
   const reg = staffRegClean_(p);
   if (reg.error) return { ok: false, error: reg.error };
 
-
   if (p.id) {
     const cur = all.filter(function (s) { return s.id === String(p.id); })[0];
     if (!cur) return { ok: false, error: 'NOT_FOUND' };
     if (/^admin$/i.test(cur.role) && role !== 'Admin' && cur.active !== false && !activeAdmins_(all, cur.id)) {
       return { ok: false, error: 'LAST_ADMIN' };
     }
-    fsPatch_(cfg, STAFF_COLLECTION + '/' + cur.id, {
-      'Staff Name': name, 'Role': role, 'Email address': email, 'Profile Photo': photo, 'Access': access,
-      'Injector': injector, 'Provider Number': reg.providerNo, 'Prescriber Number': reg.prescriberNo,
-      'AHPRA Number': reg.ahpraNo, 'Qualifications': reg.quals,
-      'Updated At': now, 'Updated By': String(session.name || ''),
-    });
-    
-   const changes = [];
+    const changes = [];
     if (cur.name !== name) changes.push('name');
     if (cur.role !== role) changes.push('role ' + cur.role + ' → ' + role);
     if (cur.email !== email) changes.push('email');
@@ -2855,7 +2859,17 @@ function staffSave_(p, session) {
     if ((cur.ahpraNo || '') !== reg.ahpraNo) changes.push('AHPRA number');
     if ((cur.quals || '') !== reg.quals) changes.push('title');
     if (JSON.stringify(cur.access || { allow: [], deny: [] }) !== JSON.stringify(access)) changes.push('access');
-    staffAudit_(cfg, session, 'Edited', { id: cur.id, name: name }, changes.join(', '));
+
+    // The change and its Activity entry in one write
+    commitWrites_(cfg, [
+      patchWrite_(cfg, STAFF_COLLECTION + '/' + cur.id, {
+        'Staff Name': name, 'Role': role, 'Email address': email, 'Profile Photo': photo, 'Access': access,
+        'Injector': injector, 'Provider Number': reg.providerNo, 'Prescriber Number': reg.prescriberNo,
+        'AHPRA Number': reg.ahpraNo, 'Qualifications': reg.quals,
+        'Updated At': now, 'Updated By': String(session.name || ''),
+      }),
+      staffAuditWrite_(cfg, session, 'Edited', { id: cur.id, name: name }, changes.join(', ')),
+    ]);
     CacheService.getScriptCache().remove('staff_docs_v1');
     return { ok: true, id: cur.id };
   }
@@ -2864,14 +2878,16 @@ function staffSave_(p, session) {
   if (!/^\d{4,8}$/.test(pin)) return { ok: false, error: 'BAD_PIN' };
   if (pinInUse_(all, pin, '')) return { ok: false, error: 'PIN_TAKEN' };
   const id = 'st_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20);
-  commitWrites_(cfg, [updateWrite_(cfg, STAFF_COLLECTION + '/' + id, {
-    'Staff Name': name, 'Role': role, 'Email address': email, 'Profile Photo': photo,
-    'PIN': '', 'PIN Hash': pinHash_(pin), 'Active': true, 'Access': access, 'Injector': injector,
-    'Provider Number': reg.providerNo, 'Prescriber Number': reg.prescriberNo,
-    'AHPRA Number': reg.ahpraNo, 'Qualifications': reg.quals,
-    'Created At': now, 'Created By': String(session.name || ''),
-  })]);
-  staffAudit_(cfg, session, 'Added', { id: id, name: name }, 'role ' + role);
+  commitWrites_(cfg, [
+    updateWrite_(cfg, STAFF_COLLECTION + '/' + id, {
+      'Staff Name': name, 'Role': role, 'Email address': email, 'Profile Photo': photo,
+      'PIN': '', 'PIN Hash': pinHash_(pin), 'Active': true, 'Access': access, 'Injector': injector,
+      'Provider Number': reg.providerNo, 'Prescriber Number': reg.prescriberNo,
+      'AHPRA Number': reg.ahpraNo, 'Qualifications': reg.quals,
+      'Created At': now, 'Created By': String(session.name || ''),
+    }),
+    staffAuditWrite_(cfg, session, 'Added', { id: id, name: name }, 'role ' + role),
+  ]);
   CacheService.getScriptCache().remove('staff_docs_v1');
   return { ok: true, id: id, pin: pin };
 }
@@ -2884,10 +2900,12 @@ function staffResetPin_(id, wanted, session) {
   if (!/^\d{4,8}$/.test(pin)) return { ok: false, error: 'BAD_PIN' };
   if (pinInUse_(all, pin, id)) return { ok: false, error: 'PIN_TAKEN' };
   const cfg = getConfig_();
-  fsPatch_(cfg, STAFF_COLLECTION + '/' + id, {
-    'PIN Hash': pinHash_(pin), 'PIN': '', 'Updated At': new Date().toISOString(), 'Updated By': String(session.name || ''),
-  });
-  staffAudit_(cfg, session, 'Reset PIN', cur, wanted ? 'typed by admin' : 'made by the portal');
+  commitWrites_(cfg, [
+    patchWrite_(cfg, STAFF_COLLECTION + '/' + id, {
+      'PIN Hash': pinHash_(pin), 'PIN': '', 'Updated At': new Date().toISOString(), 'Updated By': String(session.name || ''),
+    }),
+    staffAuditWrite_(cfg, session, 'Reset PIN', cur, wanted ? 'typed by admin' : 'made by the portal'),
+  ]);
   CacheService.getScriptCache().remove('staff_docs_v1');
   return { ok: true, pin: pin };
 }
@@ -2899,11 +2917,13 @@ function staffSetActive_(id, active, session) {
   if (!active && id === session.uid) return { ok: false, error: 'SELF' };
   if (!active && /^admin$/i.test(cur.role) && !activeAdmins_(all, id)) return { ok: false, error: 'LAST_ADMIN' };
   const cfg = getConfig_();
-  fsPatch_(cfg, STAFF_COLLECTION + '/' + id, {
-    'Active': active, 'Updated At': new Date().toISOString(), 'Updated By': String(session.name || ''),
-  });
   const firebase = setFirebaseUserDisabled_(cfg, id, !active);
-  staffAudit_(cfg, session, active ? 'Turned on' : 'Turned off', cur, firebase ? '' : 'Firebase sign-in not updated');
+  commitWrites_(cfg, [
+    patchWrite_(cfg, STAFF_COLLECTION + '/' + id, {
+      'Active': active, 'Updated At': new Date().toISOString(), 'Updated By': String(session.name || ''),
+    }),
+    staffAuditWrite_(cfg, session, active ? 'Turned on' : 'Turned off', cur, firebase ? '' : 'Firebase sign-in not updated'),
+  ]);
   CacheService.getScriptCache().remove('staff_docs_v1');
   return { ok: true, firebase: firebase };
 }
@@ -3100,15 +3120,17 @@ function rolesSave_(roles, roleNames, session) {
   });
 
   const cfg = getConfig_();
-  commitWrites_(cfg, [updateWrite_(cfg, 'staff_roles/config', {
-    roles: out, roleNames: names, updatedAt: new Date().toISOString(), updatedBy: String(session.name || ''),
-  })]);
+  commitWrites_(cfg, [
+    updateWrite_(cfg, 'staff_roles/config', {
+      roles: out, roleNames: names, updatedAt: new Date().toISOString(), updatedBy: String(session.name || ''),
+    }),
+    staffAuditWrite_(cfg, session, 'Changed role access', {}, [
+      added.length ? 'added ' + added.join(', ') : '',
+      removed.length ? 'removed ' + removed.join(', ') : '',
+      Object.keys(out).map(function (r) { return r + ': ' + out[r].length + ' ticks'; }).join(', '),
+    ].filter(Boolean).join(' · ')),
+  ]);
   CacheService.getScriptCache().remove('roles_cfg_v2');
-  staffAudit_(cfg, session, 'Changed role access', {}, [
-    added.length ? 'added ' + added.join(', ') : '',
-    removed.length ? 'removed ' + removed.join(', ') : '',
-    Object.keys(out).map(function (r) { return r + ': ' + out[r].length + ' ticks'; }).join(', '),
-  ].filter(Boolean).join(' · '));
   return { ok: true, roles: out, roleNames: names };
 }
 // ===================== Scheduled staff tasks =====================

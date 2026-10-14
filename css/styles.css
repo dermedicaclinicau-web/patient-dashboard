@@ -5185,3 +5185,10 @@ dialog.lh-dialog.eod-dlg{width:min(760px,95vw)}
 .st-matrix tbody tr:not(.st-mgroup):hover td{background:#f8fafc}
 .st-matrix-foot{position:sticky;bottom:0}
 @media (max-width:700px){.st-matrix-wrap{max-height:calc(100vh - 180px)}}
+
+/* Buttons that are saving */
+.st-spin{display:inline-block;width:14px;height:14px;margin-right:.45rem;border:2px solid currentColor;border-right-color:transparent;
+  border-radius:50%;vertical-align:-2px;animation:st-spin .7s linear infinite}
+@keyframes st-spin{to{transform:rotate(360deg)}}
+.is-busy{cursor:progress !important;opacity:.85}
+.st-matrix-wrap.is-saving{opacity:.55;pointer-events:none;transition:opacity .15s}

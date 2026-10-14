@@ -31,6 +31,26 @@ const when = (iso) => {
   return d && !isNaN(d) ? d.toLocaleString("en-AU", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" }) : "";
 };
 
+// Shows a button is working: spinner, wording, disabled. After 4 seconds: "Still saving…". Returns done() to put it back.
+function busy(btn, text = "Saving…") {
+  if (!btn) return () => {};
+  const html = btn.innerHTML;
+  const spin = '<span class="st-spin" aria-hidden="true"></span>';
+  btn.disabled = true;
+  btn.classList.add("is-busy");
+  btn.setAttribute("aria-busy", "true");
+  btn.innerHTML = spin + esc(text);
+  const slow = setTimeout(() => { if (btn.isConnected) btn.innerHTML = `${spin}Still saving…`; }, 4000);
+  return () => {
+    clearTimeout(slow);
+    if (!btn.isConnected) return;
+    btn.disabled = false;
+    btn.classList.remove("is-busy");
+    btn.removeAttribute("aria-busy");
+    btn.innerHTML = html;
+  };
+}
+
 export function mountStaffManager(container, { staff: me = null } = {}) {
   const root = document.createElement("section");
   root.className = "page wide";
@@ -220,8 +240,9 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
   async function saveRoles(btn) {
     const out = {};
     roleNames.filter((r) => !/^admin$/i.test(r)).forEach((r) => { out[r] = [...new Set(roleTicks[r] || [])]; });
-    btn.disabled = true;
-    btn.textContent = "Saving…";
+    const wrap = body.querySelector(".st-matrix-wrap");
+    if (wrap) wrap.classList.add("is-saving");          // no tick changes while it saves
+    const done = busy(btn, "Saving…");
     try {
       const res = await api("saveRoles", { roles: out, roleNames });
       roleTicks = res.roles || out;
@@ -230,14 +251,14 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
       savedNames = roleNames;
       fillRoleFilter();
       renderRoles();
-      showToast("Role access saved");
+      showToast("Role access saved. Staff get it within a minute.");
     } catch (ex) {
+      done();
+      if (wrap) wrap.classList.remove("is-saving");
       showToast(errText(ex));
-      btn.disabled = false;
-      btn.textContent = "Save role access";
     }
   }
-
+  
   /* ---------- Activity tab ---------- */
   async function renderAudit() {
     body.innerHTML = '<div class="skeleton" style="height:200px;border-radius:14px"></div>';
@@ -280,6 +301,17 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
       console.error("Staff load failed:", err);
       body.innerHTML = `<div class="tm-empty is-error">${esc(errText(err))}</div>`;
     }
+  }
+
+    // After a save: only the staff list is fetched again, quietly, behind what's already on screen
+  async function refreshList() {
+    try {
+      const res = await api("list");
+      if (!root.isConnected) return;
+      list = res.staff || list;
+      renderLock(res.locked);
+      if (tab === "staff") renderStaff();
+    } catch (err) { console.warn("Staff list refresh failed:", err); }
   }
 
   /* ---------- Windows ---------- */
@@ -404,33 +436,48 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
     syncRole();
     form.elements.role.addEventListener("change", syncRole);
     if (isNew) wirePinChoice(form);
-    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    let saving = false;
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => { if (!saving) dlg.close(); });
+    dlg.addEventListener("cancel", (e) => { if (saving) e.preventDefault(); });   // Esc can't close it mid-save
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
+      if (saving) return;
       const btn = form.querySelector('[type="submit"]');
-      btn.disabled = true;
       err.hidden = true;
       const access = { allow: [], deny: [] };
       dlg.querySelectorAll("[data-acc]").forEach((sel) => {
         if (sel.value === "allow") access.allow.push(sel.dataset.acc);
         if (sel.value === "deny") access.deny.push(sel.dataset.acc);
       });
+      const f = form.elements;
+      const payload = {
+        id: s ? s.id : "", name: f.name.value, role: f.role.value,
+        email: f.email.value, photo: f.photo.value, pin: isNew ? readPin(form) : "", access,
+        injector: f.injector.checked,
+        providerNo: f.providerNo.value, prescriberNo: f.prescriberNo.value,
+        ahpraNo: f.ahpraNo.value, quals: f.quals.value,
+      };
+      saving = true;
+      const done = busy(btn, isNew ? "Adding…" : "Saving…");
       try {
-        const res = await api("save", { staff: {
-          id: s ? s.id : "", name: form.elements.name.value, role: form.elements.role.value,
-          email: form.elements.email.value, photo: form.elements.photo.value, pin: isNew ? readPin(form) : "", access,
-          injector: form.elements.injector.checked,
-          providerNo: form.elements.providerNo.value, prescriberNo: form.elements.prescriberNo.value,
-          ahpraNo: form.elements.ahpraNo.value, quals: form.elements.quals.value,
-        } });
+        const res = await api("save", { staff: payload });
+        // Show the change straight away; the full list is fetched again quietly
+        const { pin, ...shown } = payload;
+        const row = { ...(s || { active: true, lastLogin: "", hasPin: true }), ...shown,
+          id: res.id || shown.id, name: shown.name.trim(), email: shown.email.trim() };
+        list = s ? list.map((x) => (x.id === s.id ? row : x))
+          : [...list, row].sort((a, b) => String(a.name).localeCompare(String(b.name)));
+        saving = false;
         dlg.close();
-        if (res.pin) showPin(form.elements.name.value.trim(), res.pin, "Staff member added");
-        else showToast("Staff details saved");
-        load();
+        if (tab === "staff") renderStaff();
+        if (res.pin) showPin(row.name, res.pin, "Staff member added");
+        else showToast(`${row.name} saved`);
+        refreshList();
       } catch (ex) {
+        saving = false;
+        done();
         err.textContent = errText(ex);
         err.hidden = false;
-        btn.disabled = false;
       }
     });
     dlg.addEventListener("close", () => dlg.remove());
@@ -456,19 +503,24 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
     const err = dlg.querySelector(".lh-error");
     wirePinChoice(form);
     dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    let saving = false;
+    dlg.addEventListener("cancel", (e) => { if (saving) e.preventDefault(); });
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const btn = form.querySelector('[type="submit"]');
-      btn.disabled = true;
+      if (saving) return;
       err.hidden = true;
+      saving = true;
+      const done = busy(form.querySelector('[type="submit"]'), "Resetting…");
       try {
         const res = await api("resetPin", { id: s.id, pin: readPin(form) });
+        saving = false;
         dlg.close();
         showPin(s.name, res.pin, "PIN reset");
       } catch (ex) {
+        saving = false;
+        done();
         err.textContent = errText(ex);
         err.hidden = false;
-        btn.disabled = false;
       }
     });
     dlg.addEventListener("close", () => dlg.remove());
@@ -476,7 +528,7 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
     dlg.showModal();
   }
 
-  async function toggle(s) {
+  async function toggle(s, btn) {
     const off = s.active;
     const ok = await confirmDialog({
       title: off ? `Turn off ${s.name}?` : `Turn on ${s.name}?`,
@@ -487,15 +539,20 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
       tone: off ? "danger" : "info",
     });
     if (!ok) return;
+    const done = busy(btn, off ? "Turning off…" : "Turning on…");
     try {
       const res = await api("setActive", { id: s.id, active: !off });
+      list = list.map((x) => (x.id === s.id ? { ...x, active: !off } : x));
+      renderStaff();
       showToast(off
         ? (res.firebase ? `${s.name} turned off` : `${s.name} turned off. Their open pages may keep working for up to an hour.`)
         : `${s.name} turned on`);
-      load();
-    } catch (ex) { showToast(errText(ex)); }
+      refreshList();
+    } catch (ex) {
+      done();
+      showToast(errText(ex));
+    }
   }
-
   /* ---------- Events ---------- */
   root.addEventListener("click", async (e) => {
     const t = e.target;
@@ -506,7 +563,7 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
     const pn = t.closest("[data-pin]");
     if (pn) { resetPin(find(pn.dataset.pin)); return; }
     const tg = t.closest("[data-toggle]");
-    if (tg) { toggle(find(tg.dataset.toggle)); return; }
+    if (tg) { if (!tg.disabled) toggle(find(tg.dataset.toggle), tg); return; }
     if (t.closest('[data-act="add-role"]')) { addRole(); return; }
     const dr = t.closest("[data-delrole]");
     if (dr) { removeRole(dr.dataset.delrole); return; }
@@ -520,10 +577,10 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
       return;
     }
     const un = t.closest('[data-act="unlock"]');
-    if (un) {
-      un.disabled = true;
+    if (un && !un.disabled) {
+      const done = busy(un, "Unlocking…");
       try { await api("unlock"); renderLock(false); showToast("Logins unlocked"); }
-      catch (ex) { showToast(errText(ex)); un.disabled = false; }
+      catch (ex) { done(); showToast(errText(ex)); }
     }
   });
   $('[data-role="q"]').addEventListener("input", renderStaff);

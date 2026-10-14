@@ -5,6 +5,7 @@ import {
   LOCATIONS, PO_STATUS, getPo, listPos, listProducts, listReceipts, receivePo, uploadDocket,
   syncReceivedRequests, plural, unitPlural, locLabel, expiryState, batchName,
 } from "./inventory-api.js";
+import { can } from "./perms.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const niceDate = (d) => (d instanceof Date ? d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "");
@@ -14,7 +15,6 @@ const int = (v) => Math.max(0, parseInt(v, 10) || 0);
 const sumOf = (s) => s.splits.reduce((a, x) => a + int(x.qty), 0);
 // The ordering team goes back to the purchase order; everyone else back to the list of deliveries
 const canOrders = () => can("inventory.order") || can("inventory.manage");
-import { can } from "./perms.js";
 
 function toast(msg, bad = false) {
   const t = document.createElement("div");
