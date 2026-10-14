@@ -50,8 +50,11 @@ export async function renderDeliveries(box, po, { labelOf = () => "Batch", canRe
     <article class="po-dv-item">
       <div class="po-dv-head">
         <strong>Delivery ${receipts.length - i}</strong>
-        <span>${esc(when(r.receivedAt ? new Date(r.receivedAt) : r.at))} · received by ${esc(r.receivedBy || r.by || "—")}${
-          r.receivedBy && r.by && r.receivedBy !== r.by ? ` · entered by ${esc(r.by)}` : ""}</span>
+        <span>${esc(r.historical ? niceKey(String(r.receivedAt || "").slice(0, 10)) : when(r.receivedAt ? new Date(r.receivedAt) : r.at))}${
+          (r.receivedBy || (!r.historical && r.by)) ? ` · received by ${esc(r.receivedBy || r.by)}` : ""}${
+          r.historical && r.by ? ` · recorded by ${esc(r.by)}` : ""}${
+          !r.historical && r.receivedBy && r.by && r.receivedBy !== r.by ? ` · entered by ${esc(r.by)}` : ""}</span>
+        ${r.historical ? '<span class="inv-flag is-info">Before the portal</span>' : ""}
         ${r.docketNo ? `<span class="inv-flag is-info">Docket ${esc(r.docketNo)}</span>` : ""}
         ${r.closed ? '<span class="inv-flag is-warn">Closed short</span>' : ""}
       </div>
@@ -62,7 +65,7 @@ export async function renderDeliveries(box, po, { labelOf = () => "Batch", canRe
             <td>${esc(plural(Number(l.arrived) || 0, l.orderUnit || "unit"))}${
               Number(l.packSize) > 1 ? ` <small class="muted">(${esc(plural((Number(l.arrived) || 0) * Number(l.packSize), l.stockUnit))})</small>` : ""}</td>
             <td>${(l.splits || []).length ? (l.splits || []).map((s) => `<div>${esc(splitText(l, s))}</div>`).join("")
-              : '<small class="muted">Not a stock item</small>'}</td></tr>`).join("")
+              : r.historical ? '<small class="muted">Recorded only, stock not changed</small>' : '<small class="muted">Not a stock item</small>'}</td></tr>`).join("")
           || '<tr><td colspan="3"><small class="muted">Order closed without stock</small></td></tr>'}</tbody></table>
         ${docketHtml(r)}
       </div>

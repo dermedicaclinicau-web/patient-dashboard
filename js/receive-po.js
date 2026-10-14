@@ -140,7 +140,9 @@ export async function mountReceivePo(root, poId, staff) {
   };
 
   const recHtml = (r) => `<div class="rcv-rec"><div>
-      <strong>${esc(niceDate(r.receivedAt ? new Date(r.receivedAt) : r.at))}</strong> · received by ${esc(r.receivedBy || r.by || "")}${
+      <strong>${esc(niceDate(r.receivedAt ? new Date(r.receivedAt) : r.at))}</strong>${
+        (r.receivedBy || (!r.historical && r.by)) ? ` · received by ${esc(r.receivedBy || r.by)}` : ""}${
+        r.historical ? " · before the portal" : ""}${
         r.docketNo ? ` · Docket ${esc(r.docketNo)}` : ""}${r.closed ? " · <em>order closed</em>" : ""}
       <small>${esc((r.lines || []).map((x) => `${x.arrived} × ${x.name}`).join(", "))}</small>
       ${r.note ? `<small>${esc(r.note)}</small>` : ""}</div>

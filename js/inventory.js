@@ -1532,12 +1532,13 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
             const s = supplierOf(t.supplierId);
             if (!s) return "";
             const bits = [
-              s.contactName && esc(s.contactName),
-              s.phone && `<a href="tel:${esc(s.phone.replace(/\s+/g, ""))}">${esc(s.phone)}</a>`,
-              s.email && `<a href="mailto:${esc(s.email)}">${esc(s.email)}</a>`,
-              t.supplierCode && `Code ${esc(t.supplierCode)}`,
-              t.cost !== null && esc(`${money(t.cost)} / ${t.orderUnit}`),
-              (t.orderUnit !== p.orderUnit || t.packSize !== p.packSize) && esc(`${t.orderUnit} of ${plural(t.packSize, p.stockUnit)}`),
+              `Ordered ${niceDate(po.orderDate)}`,
+              po.historical ? `received ${niceDate(po.receivedDate)} (before the portal)`
+                : po.sentDate ? `sent ${niceDate(po.sentDate)}`
+                : po.sentAt ? `sent ${when(po.sentAt)}` : "",
+              `${po.lines.length} item${po.lines.length === 1 ? "" : "s"}`,
+              po.requestIds.length && `${po.requestIds.length} request${po.requestIds.length === 1 ? "" : "s"}`,
+              po.createdBy && `by ${po.createdBy}`,
             ].filter(Boolean);
             return `<p class="inv-pd-sup"><strong>${esc(s.name)}</strong>${t.main ? ' <span class="inv-flag is-info">Main</span>' : ""}${
               bits.map((b) => ` · ${b}`).join("")}</p>`;

@@ -334,19 +334,40 @@ match /inv_count_drafts/{id} {
 
     // Purchase orders: the ordering team
     match /inv_pos/{id} {
-      allow read: if can('menu.inventory') || invReceive();
-      allow create: if invOrder() && request.resource.data.createdByUid == request.auth.uid
-        && request.resource.data.status == 'draft';
-      allow update: if (invOrder() && (request.resource.data.number == resource.data.number
-          || (resource.data.status == 'draft' && request.resource.data.status == 'draft'
-            && request.resource.data.number is string
-            && request.resource.data.number.matches('PO-[A-Z0-9]{3}-[0-9]{8}(-[0-9]+)?'))))
-        || (invReceive()
-          && resource.data.status in ['sent', 'part']
-          && request.resource.data.status in ['part', 'received']
+      // "Received before the portal" can only be set (or unset) by an Admin
+      function historicalOk() {
+        return request.resource.data.get('historical', false) == resource.data.get('historical', false) || isAdmin();
+      }
+      // Admin: an order sent and received before the portal, recorded for history only (no stock changes)
+      function adminPastReceipt() {
+        return isAdmin()
+          && resource.data.status in ['draft', 'sent']
+          && request.resource.data.status == 'received'
+          && request.resource.data.historical == true
+          && request.resource.data.receivedDate is string
+          && request.resource.data.number == resource.data.number
           && request.resource.data.lines.size() == resource.data.lines.size()
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-               'lines', 'status', 'receiptIds', 'lastReceivedAt', 'receivedAt', 'updatedAt', 'updatedBy', 'events']));
+               'lines', 'status', 'historical', 'receivedDate', 'receivedAt', 'lastReceivedAt', 'receiptIds',
+               'sentAt', 'sentDate', 'sentBy', 'sentVia', 'updatedAt', 'updatedBy', 'events']);
+      }
+
+      allow read: if can('menu.inventory') || invReceive();
+      allow create: if invOrder() && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.status == 'draft'
+        && request.resource.data.get('historical', false) == false;
+      allow update: if historicalOk() && (
+          (invOrder() && (request.resource.data.number == resource.data.number
+            || (resource.data.status == 'draft' && request.resource.data.status == 'draft'
+              && request.resource.data.number is string
+              && request.resource.data.number.matches('PO-[A-Z0-9]{3}-[0-9]{8}(-[0-9]+)?'))))
+          || (invReceive()
+            && resource.data.status in ['sent', 'part']
+            && request.resource.data.status in ['part', 'received']
+            && request.resource.data.lines.size() == resource.data.lines.size()
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                 'lines', 'status', 'receiptIds', 'lastReceivedAt', 'receivedAt', 'updatedAt', 'updatedBy', 'events']))
+          || adminPastReceipt());
       allow delete: if false;
     }
 

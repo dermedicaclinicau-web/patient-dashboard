@@ -545,6 +545,8 @@ function normalisePo(d) {
     orderDate: KEY_RE.test(x.orderDate || "") ? x.orderDate : (toDate(x.createdAt) ? dayKey(toDate(x.createdAt)) : ""),
     backdated: x.backdated === true,
     sentDate: KEY_RE.test(x.sentDate || "") ? x.sentDate : "",   // set when "Mark as sent" was backdated
+    historical: x.historical === true,   // received before the portal: recorded only, stock never changed
+    receivedDate: KEY_RE.test(x.receivedDate || "") ? x.receivedDate : "",
   };
 }
 
@@ -742,6 +744,62 @@ export async function cancelPo(po, reason, staff) {
     });
   });
   await batch.commit();
+}
+
+// Admin: an order sent and received before the portal, recorded for history only.
+// Every line is marked fully received. No stock, activity log or notifications: the stock is already in the counts.
+// Drafts need the date they were sent; sent orders keep theirs. Returns { number, requestIds }.
+export async function recordPastReceipt(poId, { sentDate = "", receivedDate, receivedBy = "", docketNo = "", note = "" }, staff) {
+  const today = dayKey();
+  if (!KEY_RE.test(receivedDate || "") || receivedDate > today) throw new Error("Check the date it was received: it can't be in the future.");
+  const by = who(staff);
+  const byUid = uid();
+  const poRef = doc(db, "inv_pos", poId);
+  const recRef = doc(collection(db, "inv_receipts"));
+  const noon = (k) => Timestamp.fromDate(new Date(`${k}T12:00:00`));   // midday, so the date never shifts with time zones
+  let result = null;
+
+  await runTransaction(db, async (tx) => {
+    const s = await tx.get(poRef);
+    if (!s.exists()) throw new Error("This purchase order no longer exists.");
+    const po = normalisePo(s);
+    const draft = po.status === "draft";
+    if (!draft && po.status !== "sent") throw new Error(`This order is ${PO_STATUS[po.status].toLowerCase()}, so it can't be recorded this way.`);
+    if (po.lines.some((l) => l.received > 0)) throw new Error("Stock has already been received on this order. Use Receive stock instead.");
+    if (!po.lines.length) throw new Error("Add the items first.");
+
+    const sent = draft ? sentDate : (po.sentDate || (po.sentAt ? dayKey(po.sentAt) : ""));
+    if (draft) {
+      if (!KEY_RE.test(sent || "") || sent > today) throw new Error("Check the date it was sent.");
+      if (po.orderDate && sent < po.orderDate) throw new Error("It can't have been sent before its order date.");
+    }
+    if (receivedDate < (sent || po.orderDate || "")) throw new Error("It can't have been received before it was sent.");
+
+    const at = new Date().toISOString();
+    const lines = po.lines.map((l) => ({ ...l, received: l.qty }));
+    tx.update(poRef, {
+      lines, status: "received", historical: true, receivedDate,
+      receivedAt: noon(receivedDate), lastReceivedAt: noon(receivedDate), receiptIds: arrayUnion(recRef.id),
+      ...(draft ? { sentAt: noon(sent), sentDate: sent, sentBy: by, sentVia: "Before the portal" } : {}),
+      updatedAt: serverTimestamp(), updatedBy: by,
+      events: arrayUnion({ at, by, action: "Recorded as received before the portal", note: [
+        draft ? `Sent ${sent}` : "", `Received ${receivedDate}`, clip(receivedBy, 120) && `by ${clip(receivedBy, 120)}`,
+        clip(docketNo, 60) && `Docket ${clip(docketNo, 60)}`, "Stock not changed",
+      ].filter(Boolean).join(" · ").slice(0, 300) }),
+    });
+    tx.set(recRef, {
+      poId, poNumber: po.number, supplierId: po.supplierId, supplierName: po.supplier.name,
+      docketNo: clip(docketNo, 60), note: clip(note, 1000), docket: null, closed: false, historical: true,
+      scanId: "", receivedBy: clip(receivedBy, 120), receivedByUid: "", receivedAt: `${receivedDate}T12:00:00`,
+      lines: po.lines.map((l) => ({
+        key: l.key, productId: l.productId, name: l.name, arrived: l.qty,
+        orderUnit: l.orderUnit, packSize: l.packSize, stockUnit: l.stockUnit, splits: [],
+      })),
+      by, byUid, at: serverTimestamp(),
+    });
+    result = { number: po.number, requestIds: po.requestIds };
+  });
+  return result;
 }
 
 /* ===================== Receiving deliveries ===================== */

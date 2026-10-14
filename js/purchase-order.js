@@ -3,6 +3,7 @@ import {
   PO_STATUS, REQ_STATUS, LOCATIONS, locLabel, plural, unitPlural, lowAt, suggestOrder, reqNumber, batchName,
   getPo, savePo, renumberPo, markPoSent, cancelPo, poTotals, lineFromProduct, cleanPoLine, supplierSnapshot,
   listProducts, listSuppliers, listRequests, supplierTerms, suppliesProduct, suggestOrderFor, dayKey, productSuppliers,
+  recordPastReceipt, getBaseline, syncReceivedRequests,
 } from "./inventory-api.js";
 import { renderDeliveries } from "./po-deliveries.js";
 import { deliveryError } from "./form-delivery.js";
@@ -12,7 +13,7 @@ import { createRichEditor } from "./rich-editor.js";
 import { richText } from "./rich-html.js";
 import { emailShell, clinicDetails } from "./task-tokens.js";
 import { callApi } from "./appointments.js";
-import { can } from "./perms.js";
+import { can, isAdmin } from "./perms.js";
 import { showToast } from "./utils.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -166,6 +167,11 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       acts.push(`<button type="button" class="ff-btn" data-act="resend">${I.send}<span>Email again</span></button>`);
       acts.push(`<a class="ff-btn is-primary" href="#/inventory/receive/${encodeURIComponent(po.id)}">${I.check}<span>Receive stock</span></a>`);
     }
+    // Admin: orders received before the portal (drafts, or sent with nothing in yet)
+    if (isAdmin() && (po.status === "draft" || (po.status === "sent" && nothingIn))) {
+      acts.splice(Math.max(0, acts.length - 1), 0,
+        `<button type="button" class="ff-btn" data-act="past">${I.check}<span>Already received</span></button>`);
+    }
     $('[data-role="acts"]').innerHTML = acts.join("");
   }
 
@@ -235,6 +241,8 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
           <dt>Order date</dt><dd>${esc(niceDate(po.orderDate) || "Not set")}${po.backdated ? ' <span class="po-tag">backdated</span>' : ""}</dd>
           ${po.sentDate || po.sentAt ? `<dt>Sent</dt><dd>${esc(po.sentDate ? niceDate(po.sentDate) : when(po.sentAt))}${
             po.sentVia ? ` (${esc(po.sentVia)})` : ""}</dd>` : ""}
+          ${po.historical ? `<dt>Received</dt><dd>${esc(niceDate(po.receivedDate) || "Not recorded")}
+            <span class="po-tag">before the portal</span><br><small class="muted">Recorded only. Stock wasn't changed.</small></dd>` : ""}
           <dt>Needed by</dt><dd>${esc(niceDate(po.expectedDate) || "Not set")}</dd>
           <dt>Notes to the supplier</dt><dd>${po.notesToSupplier ? esc(po.notesToSupplier).replace(/\n/g, "<br>") : "None"}</dd>
           <dt>Internal note</dt><dd>${po.internalNote ? esc(po.internalNote) : "None"}</dd>
@@ -676,6 +684,94 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     });
   }
 
+  // Admin: an order already received before the portal. Recorded only: stock isn't changed.
+  async function pastDialog() {
+    const p = problems();
+    if (p) { msgEl.textContent = p; return; }
+    await settle();
+    const today = dayKey();
+    const draft = po.status === "draft";
+    const sentKnown = po.sentDate || (po.sentAt ? dayKey(po.sentAt) : "");
+    const dlg = openDialog("inv-dlg", `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>Record ${esc(po.number)} as already received</h3>
+          <p>For orders received before the portal. Every item is marked as received in full.
+            <strong>Stock isn't changed</strong>: it should already be in your counts.</p></div>
+        <div class="po-dates">
+          ${draft ? `<label class="lh-field"><span class="lh-label">Date sent to the supplier</span>
+              <input type="date" name="sentDate" value="${esc(po.orderDate || today)}" min="${esc(po.orderDate || "")}" max="${today}" /></label>`
+            : `<div class="lh-field"><span class="lh-label">Sent</span><strong>${esc(niceDate(sentKnown) || "Not recorded")}</strong></div>`}
+          <label class="lh-field"><span class="lh-label">Date received</span>
+            <input type="date" name="receivedDate" value="${today}" min="${esc(sentKnown || po.orderDate || "")}" max="${today}" /></label>
+        </div>
+        <div class="po-dates">
+          <label class="lh-field"><span class="lh-label">Received by (optional)</span>
+            <input name="receivedBy" maxlength="120" autocomplete="off" /></label>
+          <label class="lh-field"><span class="lh-label">Docket number (optional)</span>
+            <input name="docketNo" maxlength="60" autocomplete="off" /></label>
+        </div>
+        <label class="lh-field"><span class="lh-label">Note (optional)</span>
+          <input name="note" maxlength="1000" placeholder="e.g. Entered from the old app" /></label>
+        <p class="tb-info" data-role="warn" hidden></p>
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">Record as received</button>
+        </div>
+      </form>`);
+    const form = dlg.querySelector("form");
+    const err = dlg.querySelector(".lh-error");
+    const warn = dlg.querySelector('[data-role="warn"]');
+    const show = (m) => { err.textContent = m; err.hidden = false; };
+
+    // Received on or after the starting stock day: probably not in the counts yet
+    let base = null;
+    const check = () => {
+      const rd = form.elements.receivedDate.value;
+      const late = !!(base && rd && rd >= base.dateKey);
+      warn.hidden = !late;
+      if (late) warn.textContent = `Your starting stock was set from the count on ${niceDate(base.dateKey)}. `
+        + "If this arrived after that count, it isn't in the stock numbers yet: use Receive stock instead.";
+    };
+    getBaseline().then((b) => { base = b; if (dlg.open) check(); }).catch(() => {});
+    form.elements.receivedDate.addEventListener("input", check);
+
+    let busy = false;
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => { if (!busy) dlg.close(); });
+    dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const sentDate = draft ? form.elements.sentDate.value : "";
+      const receivedDate = form.elements.receivedDate.value;
+      if (draft && !/^\d{4}-\d{2}-\d{2}$/.test(sentDate)) { show("Choose the date it was sent."); return; }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(receivedDate)) { show("Choose the date it was received."); return; }
+      if (draft && receivedDate < sentDate) { show("It can't have been received before it was sent."); return; }
+      busy = true;
+      err.hidden = true;
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      btn.textContent = "Saving…";
+      try {
+        const res = await recordPastReceipt(po.id, {
+          sentDate, receivedDate, receivedBy: form.elements.receivedBy.value,
+          docketNo: form.elements.docketNo.value, note: form.elements.note.value,
+        }, staff);
+        try { await syncReceivedRequests(res.requestIds, staff); } catch (ex) { console.warn("Requests not updated", ex); }
+        busy = false;
+        dlg.close();
+        showToast(`${res.number} recorded as received ${niceDate(receivedDate)}. Stock wasn't changed.`);
+        reload();
+      } catch (ex) {
+        console.error("Record past receipt failed:", ex);
+        busy = false;
+        show(ex && ex.code === "permission-denied" ? "Only an Admin can record orders received before the portal."
+          : ex && ex.message && !ex.code ? ex.message : "Couldn't save. Try again.");
+        btn.disabled = false;
+        btn.textContent = "Record as received";
+      }
+    });
+  }
+
   async function cancelDialog() {
     await settle();
     const dlg = openDialog("inv-dlg", `
@@ -746,6 +842,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     } else if (act === "send") sendDialog(false);
     else if (act === "resend") sendDialog(true);
     else if (act === "mark-sent") markSentDialog();
+    else if (act === "past") pastDialog();
     else if (act === "cancel") cancelDialog();
   });
 
