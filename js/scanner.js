@@ -105,7 +105,6 @@ export function mountScanner(container, { staff = null } = {}) {
   function resultHtml() {
     const r = st.review;
     const when = [r.apptDate && niceDate(r.apptDate), r.apptTime, r.provider].filter(Boolean).join(" · ");
-    const sumText = `Products ${money(r.productsTotal)} + services ${money(r.servicesTotal)} = ${money(r.sum)}`;
     return `${headHtml()}
       <div class="scan-res-head">
         <button type="button" class="scan-thumb" data-act="big" aria-label="Show the photo larger"><img src="${st.photoUrl}" alt="" /></button>
@@ -118,10 +117,7 @@ export function mountScanner(container, { staff = null } = {}) {
           ${r.lines.map(rowHtml).join("")}
         </div>`
         : '<p class="scan-err">No products were found on the sheet or in the photo. Try a closer, clearer photo.</p>'}
-      ${r.services.length ? `<div class="scan-svc"><h4>Services</h4>${r.services.map((s) =>
-        `<div class="scan-svc-row"><span>${esc(s.text)}</span><span>${esc(money(s.fee))}</span></div>`).join("")}</div>` : ""}
-      <p class="scan-total${r.totalFlag ? " is-warn" : ""}">${esc(r.totalFlag
-        || (r.writtenTotal !== null ? `${sumText} ✓ matches the total written` : sumText))}</p>
+      ${r.lines.length ? `<p class="scan-total">Products total ${esc(money(r.productsTotal))}</p>` : ""}
       ${r.flagCount ? `<label class="lh-field"><span class="lh-label">What happened? (optional)</span>
         <textarea data-role="note" rows="2" maxlength="1000" placeholder="e.g. SPF given as a sample, no charge"></textarea></label>` : ""}
       <p class="scan-sell" data-role="sell">${esc(sellText())}</p>

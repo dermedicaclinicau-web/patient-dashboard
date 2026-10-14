@@ -87,7 +87,7 @@ export function startReview(result, products) {
   return lines;
 }
 
-// Flags each line, works out how many come off the Shelf, and checks the total. Run again after any change.
+// Flags each line and works out how many come off the Shelf. Run again after any change.
 // take: how many come off the Shelf. Left undefined, it's filled in: written and seen → the written quantity;
 // seen but not written → the number seen (it was still handed over); written but not seen → 0 until someone confirms.
 export function reviewBilling(lines, result, products) {
@@ -124,26 +124,16 @@ export function reviewBilling(lines, result, products) {
     return { ...l, product: p, qty, fee, take, flags };
   });
 
-  const services = (result.services || []).map((s) => ({ text: String(s.text || "").slice(0, 150), fee: num(s.fee) }));
   const productsTotal = r2(out.reduce((a, l) => a + (l.fee || 0), 0));
-  const servicesTotal = r2(services.reduce((a, s) => a + (s.fee || 0), 0));
-  const sum = r2(productsTotal + servicesTotal);
-  const credit = num(result.credit) || 0;
-  const written = [num(result.grandTotal), num(result.totalToPay)].filter((t) => t !== null);
-  const fits = (t) => [sum, r2(sum - credit)].some((s) => Math.abs(t - s) <= 1);
-  const totalFlag = written.length && !written.some(fits)
-    ? `The fees on the sheet add up to ${money(sum)}, but the total written is ${money(written[0])}.` : "";
   return {
-    lines: out, services, productsTotal, servicesTotal, sum, credit,
-    writtenTotal: written.length ? written[0] : null, totalFlag,
-    flagCount: out.filter((l) => l.flags.length).length + (totalFlag ? 1 : 0),
+    lines: out, productsTotal,
+    flagCount: out.filter((l) => l.flags.length).length,
     patientName: String(result.patientName || "").slice(0, 150),
     apptDate: /^\d{4}-\d{2}-\d{2}$/.test(result.date || "") ? result.date : "",
     apptTime: String(result.time || "").slice(0, 20),
     provider: String(result.provider || "").slice(0, 80),
   };
 }
-
 /* ---------- Already checked out today? ---------- */
 // The same patient's sales today that include any of these products: [{ name, qty, by }]
 export async function earlierSales(review, productIds) {
@@ -182,8 +172,7 @@ export async function saveBillingScan({ photo, result, review, note = "" }, staf
       written: l.written.map((w) => w.text).join(" / "), qty: l.qty, fee: l.fee, seen: l.seen, take: l.take || 0,
       seenAs: l.seenText.join(" / ").slice(0, 300), fixed: !!l.fixed, flags: l.flags.map((f) => f[1]),
     })),
-    services: review.services, productsTotal: review.productsTotal, servicesTotal: review.servicesTotal,
-    sum: review.sum, credit: review.credit, writtenTotal: review.writtenTotal, totalFlag: review.totalFlag,
+    productsTotal: review.productsTotal,
     photo: file, raw: JSON.stringify(result).slice(0, 20000), saleId: "",
     by: String((staff && staff.name) || "").slice(0, 120), byUid: uid, at: serverTimestamp(),
   };
