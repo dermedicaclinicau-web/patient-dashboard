@@ -99,7 +99,11 @@ export function mountScanner(container, { staff = null } = {}) {
         ${take}
         ${st.fixing === i ? fixHtml(l, i) : ""}
       </div>
-      <span class="scan-fee">${l.fee !== null ? esc(money(l.fee)) : l.qty ? "none" : ""}</span>
+      ${l.product || l.qty ? `<label class="scan-fee scan-fee-edit">
+          <span class="scan-fee-in">$<input type="number" min="0" max="99999" step="0.01" inputmode="decimal" data-fee="${i}"
+            value="${l.fee ?? ""}" placeholder="0" aria-label="Fee for ${esc(l.product ? l.product.name : "this line")}" /></span>
+          ${l.feeFrom === "price" ? "<small>retail price</small>" : l.feeFrom === "edited" ? "<small>changed</small>" : ""}
+        </label>` : '<span class="scan-fee"></span>'}
       <span class="scan-seen ${l.seen ? "is-yes" : "is-no"}" aria-label="${l.seen ? "In the photo" : "Not in the photo"}">${l.seen ? "✓" : "✕"}</span>
     </div>`;
   };
@@ -119,7 +123,7 @@ export function mountScanner(container, { staff = null } = {}) {
           ${r.lines.map(rowHtml).join("")}
         </div>`
         : '<p class="scan-err">No products were found on the sheet or in the photo. Try a closer, clearer photo.</p>'}
-      ${r.lines.length ? `<p class="scan-total">Products total ${esc(money(r.productsTotal))}</p>` : ""}
+      ${r.lines.length ? `<p class="scan-total" data-role="total">Products total ${esc(money(r.productsTotal))}</p>` : ""}
       ${r.flagCount ? `<label class="lh-field"><span class="lh-label">What happened? (optional)</span>
         <textarea data-role="note" rows="2" maxlength="1000" placeholder="e.g. SPF given as a sample, no charge"></textarea></label>` : ""}
       <p class="scan-sell" data-role="sell">${esc(sellText())}</p>
@@ -379,8 +383,19 @@ export function mountScanner(container, { staff = null } = {}) {
   });
 
   // Typing a quantity: the totals update straight away; the flags update when you leave the box
+  // Typing a quantity or a fee: the totals update straight away; the flags update when you leave the box
   root.addEventListener("input", (e) => {
     const t = e.target;
+    if (t.dataset.fee !== undefined) {
+      const l = st.lines[Number(t.dataset.fee)];
+      if (!l) return;
+      const v = t.value.trim();
+      l.feeEdit = v === "" || !Number.isFinite(Number(v)) ? null : Math.max(0, Math.round(Number(v) * 100) / 100);
+      l.fee = l.feeEdit;
+      const tot = root.querySelector('[data-role="total"]');
+      if (tot) tot.textContent = `Products total ${money(Math.round(st.lines.reduce((a, x) => a + (x.fee || 0), 0) * 100) / 100)}`;
+      return;
+    }
     if (t.dataset.take === undefined) return;
     const l = st.lines[Number(t.dataset.take)];
     if (!l) return;
@@ -399,13 +414,14 @@ export function mountScanner(container, { staff = null } = {}) {
       if (f) usePhoto(f);
       return;
     }
-    if (t.dataset.take !== undefined) { rereview(); render(); return; }
+    if (t.dataset.take !== undefined || t.dataset.fee !== undefined) { rereview(); render(); return; }
     if (t.dataset.fixsel !== undefined) {   // staff picked the right product for a line
       const l = st.lines[Number(t.dataset.fixsel)];
       if (!l) return;
       l.productId = t.value;
       l.fixed = true;
-      l.take = undefined;   // worked out again for the new product
+      l.take = undefined;      // worked out again for the new product
+      l.feeEdit = undefined;   // and the fee (its retail price may differ)
       rereview();
       st.fixing = -1;
       render();

@@ -32,7 +32,7 @@ const toBase64 = (blob) => new Promise((resolve, reject) => {
 });
 
 // At most 2000px on the long side (plenty for handwriting), as JPEG
-export async function preparePhoto(blob, max = 2000, quality = 0.85) {
+export async function preparePhoto(blob, max = 1600, quality = 0.8) {
   const img = await loadImage(blob);
   const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
   const c = document.createElement("canvas");
@@ -45,12 +45,18 @@ export async function preparePhoto(blob, max = 2000, quality = 0.85) {
 }
 
 /* ---------- Gemini (through Apps Script) ---------- */
+// Only what can be handed to a patient: Retail, plus anything with a retail price. Everything if that leaves nothing.
+const sellable = (products) => {
+  const list = products.filter((p) => p.category === "retail" || (p.price !== null && p.price !== undefined && p.price !== ""));
+  return list.length ? list : products;
+};
+
 export async function readBillingSheet(base64, products) {
   let res;
   try {
     res = await callApi({
       action: "scanner", op: "billing", mime: "image/jpeg", image: base64,
-      products: products.map((p) => ({ id: p.id, name: p.name, brand: p.brand || "" })),
+      products: sellable(products).map((p) => ({ id: p.id, name: p.name, brand: p.brand || "" })),
     });
   } catch (err) {
     if (err && err.code === "UNAUTHORIZED") throw err;   // "Your session has expired…"
@@ -61,12 +67,19 @@ export async function readBillingSheet(base64, products) {
   if (!res.result) throw new Error("The scanner couldn't read that photo. Try again.");
   return res.result;
 }
-
 /* ---------- Matching and checking ---------- */
+/* ---------- Matching and checking ---------- */
+// Words that tell products apart. Brand words don't count, so "ZO DPD" never pairs with "ZO Rozatrol" just for being ZO.
+const BRAND_WORDS = new Set(["dermedica", "zo", "skin", "health", "zein", "obagi", "by", "md", "the", "and", "of", "with", "ml"]);
+const ABBR = { d: "dermedica", derm: "dermedica", dpd: "daily power defense", spf: "sunscreen", sunscreen: "sunscreen" };
+const keyWords = (s) => new Set(String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(" ")
+  .filter(Boolean).flatMap((w) => (ABBR[w] || w).split(" ")).filter((w) => !BRAND_WORDS.has(w)));
+
 // One line per product: what's written on the sheet and what's in the photo. Ids not on the list are dropped.
 export function startReview(result, products) {
-  const known = new Set(products.map((p) => p.id));
-  const id = (v) => (known.has(String(v || "")) ? String(v) : "");
+  const byId = new Map(products.map((p) => [p.id, p]));
+  const id = (v) => (byId.has(String(v || "")) ? String(v) : "");
+  const pName = (pid) => { const p = byId.get(pid); return p ? `${p.brand || ""} ${p.name}` : ""; };
   const lines = [];
   const lineFor = (pid) => {
     let l = pid ? lines.find((x) => x.productId === pid) : null;
@@ -84,12 +97,31 @@ export function startReview(result, products) {
     l.seenText.push(String(s.description || "").slice(0, 150));
     l.conf = Math.min(l.conf, conf(s.confidence));
   });
+
+  // A written line with nothing in the photo + a product in the photo that isn't written, sharing a word
+  // ("Derm Pro B" and Pro B Plus): the same product. Joined, keeping the photo's product (labels beat handwriting).
+  lines.filter((l) => l.written.length && !l.seen).forEach((w) => {
+    const wk = keyWords(`${w.written.map((x) => x.text).join(" ")} ${pName(w.productId)}`);
+    let best = null, bestScore = 0;
+    lines.forEach((s) => {
+      if (s === w || s.written.length || !s.seen) return;
+      const sk = keyWords(`${s.seenText.join(" ")} ${pName(s.productId)}`);
+      let score = 0;
+      wk.forEach((x) => { if (sk.has(x)) score++; });
+      if (score > bestScore) { best = s; bestScore = score; }
+    });
+    if (!best) return;
+    best.written = w.written;
+    best.conf = Math.min(best.conf, w.conf);
+    if (!best.productId) best.productId = w.productId;
+    lines.splice(lines.indexOf(w), 1);
+  });
   return lines;
 }
-
-// Flags each line and works out how many come off the Shelf. Run again after any change.
-// take: how many come off the Shelf. Left undefined, it's filled in: written and seen → the written quantity;
-// seen but not written → the number seen (it was still handed over); written but not seen → 0 until someone confirms.
+// Flags each line, works out the fee and how many come off the Shelf. Run again after any change.
+// take: left undefined, it's filled in: written and seen → the written quantity; seen but not written → the number seen;
+// written but not seen → 0 until someone confirms.
+// fee: what staff typed (feeEdit) → what's written on the sheet → the retail price × quantity.
 export function reviewBilling(lines, result, products) {
   const byId = new Map(products.map((p) => [p.id, p]));
   const merged = [];
@@ -99,15 +131,21 @@ export function reviewBilling(lines, result, products) {
       m.written.push(...l.written); m.seen += l.seen; m.seenText.push(...l.seenText);
       m.conf = Math.min(m.conf, l.conf); m.fixed = m.fixed || l.fixed;
       if (l.take !== undefined) m.take = (m.take || 0) + l.take;
+      if (l.feeEdit !== undefined) m.feeEdit = r2((m.feeEdit || 0) + (l.feeEdit || 0));
     } else {
       merged.push({ productId: l.productId, written: [...l.written], seen: l.seen, seenText: [...l.seenText],
-        conf: l.conf, fixed: !!l.fixed, take: l.take });
+        conf: l.conf, fixed: !!l.fixed, take: l.take, feeEdit: l.feeEdit });
     }
   });
   const out = merged.map((l) => {
     const p = byId.get(l.productId) || null;
     const qty = l.written.reduce((a, w) => a + w.qty, 0);
-    const fee = l.written.some((w) => w.fee !== null) ? r2(l.written.reduce((a, w) => a + (w.fee || 0), 0)) : null;
+    const writtenFee = l.written.some((w) => w.fee !== null) ? r2(l.written.reduce((a, w) => a + (w.fee || 0), 0)) : null;
+    const price = p ? num(p.price) : null;
+    let fee = null, feeFrom = "";
+    if (l.feeEdit !== undefined) { fee = l.feeEdit; feeFrom = "edited"; }
+    else if (writtenFee !== null) { fee = writtenFee; feeFrom = "written"; }
+    else if (qty && price !== null) { fee = r2(price * qty); feeFrom = "price"; }
     const take = !p ? 0 : l.take !== undefined ? l.take : qty && l.seen ? qty : !qty && l.seen ? l.seen : 0;
     const shelf = p ? Number((p.stock || {}).shelf) || 0 : 0;
     const flags = [];
@@ -115,13 +153,13 @@ export function reviewBilling(lines, result, products) {
     if (qty && !l.seen) flags.push(["bad", "Written, but not in the photo"]);
     if (!qty && l.seen) flags.push(["bad", "In the photo, but not written on the sheet"]);
     if (qty && l.seen && qty !== l.seen) flags.push(["warn", `${qty} written, ${l.seen} in the photo`]);
-    if (qty && fee === null) flags.push(["warn", "No fee written"]);
-    else if (qty && p && p.price !== null && p.price !== undefined && Math.abs(fee - p.price * qty) > 0.5) {
-      flags.push(["warn", `Fee ${money(fee)}, retail price ${money(r2(p.price * qty))}`]);
+    if (qty && fee === null) flags.push(["warn", "No fee written, and no retail price saved"]);
+    else if (feeFrom === "written" && price !== null && Math.abs(fee - price * qty) > 0.5) {
+      flags.push(["warn", `Fee ${money(fee)}, retail price ${money(r2(price * qty))}`]);
     }
     if (p && !l.fixed && l.conf < 0.6) flags.push(["warn", "Check this is the right product"]);
     if (p && take > shelf) flags.push(["warn", `The Shelf shows ${shelf} in the system`]);
-    return { ...l, product: p, qty, fee, take, flags };
+    return { ...l, product: p, qty, fee, feeFrom, take, flags };
   });
 
   const productsTotal = r2(out.reduce((a, l) => a + (l.fee || 0), 0));
@@ -134,6 +172,7 @@ export function reviewBilling(lines, result, products) {
     provider: String(result.provider || "").slice(0, 80),
   };
 }
+
 /* ---------- Already checked out today? ---------- */
 // The same patient's sales today that include any of these products: [{ name, qty, by }]
 export async function earlierSales(review, productIds) {
@@ -169,7 +208,7 @@ export async function saveBillingScan({ photo, result, review, note = "" }, staf
     patientName: review.patientName, apptDate: review.apptDate, apptTime: review.apptTime, provider: review.provider,
     lines: review.lines.map((l) => ({
       productId: l.productId, productName: l.product ? l.product.name : "",
-      written: l.written.map((w) => w.text).join(" / "), qty: l.qty, fee: l.fee, seen: l.seen, take: l.take || 0,
+      written: l.written.map((w) => w.text).join(" / "), qty: l.qty, fee: l.fee, feeFrom: l.feeFrom || "", seen: l.seen, take: l.take || 0,
       seenAs: l.seenText.join(" / ").slice(0, 300), fixed: !!l.fixed, flags: l.flags.map((f) => f[1]),
     })),
     productsTotal: review.productsTotal,
