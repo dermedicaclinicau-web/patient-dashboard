@@ -1,4 +1,4 @@
-// One purchase order (#/inventory/po/<id>): items, totals, the PDF, and sending it to the supplier.
+// One purchase order (#/inventory/po/<id>): items, and emailing the order to the supplier.
 import {
   PO_STATUS, REQ_STATUS, LOCATIONS, locLabel, plural, unitPlural, lowAt, suggestOrder, reqNumber, batchName,
   getPo, savePo, renumberPo, markPoSent, cancelPo, poTotals, lineFromProduct, cleanPoLine, supplierSnapshot,
@@ -209,20 +209,6 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
           ${l.sources.length ? `<small class="po-src">From ${l.sources.length} request item${l.sources.length === 1 ? "" : "s"}</small>` : ""}</td>
         <td><div class="po-qty"><input class="fe-input" type="number" min="1" max="9999" step="1" data-l="qty" value="${l.qty}" aria-label="Quantity" />
           <small>${esc(unitPlural(l.orderUnit))}</small></div></td>
-        <td><select class="fb-select" data-l="loc" aria-label="For">${LOCATIONS.map((x) =>
-          `<option value="${x.key}"${x.key === l.loc ? " selected" : ""}>${esc(x.label)}</option>`).join("")}</select></td>
-        <td><button type="button" class="ib-tool is-danger" data-l="remove" aria-label="Remove" title="Remove">×</button></td>
-      </tr>`;
-  }
-    const named = !l.productId && (l.custom || l.name);
-    return `
-      <tr data-i="${i}">
-        <td>${named
-          ? `<input class="fe-input" data-l="name" maxlength="150" placeholder="Item name, brand and size" value="${esc(l.name)}" aria-label="Item" />`
-          : `<select class="fb-select" data-l="product" aria-label="Product">${productOptions(l.productId)}</select>`}
-          ${l.sources.length ? `<small class="po-src">From ${l.sources.length} request item${l.sources.length === 1 ? "" : "s"}</small>` : ""}</td>
-        <td><div class="po-qty"><input class="fe-input" type="number" min="1" max="9999" step="1" data-l="qty" value="${l.qty}" aria-label="Quantity" />
-          <small>${esc(unitPlural(l.orderUnit))}</small></div></td>
         <td><input class="fe-input po-cost" type="number" min="0" step="0.01" data-l="cost" placeholder="—" value="${l.unitCost ?? ""}" aria-label="Unit price" /></td>
         <td><select class="fb-select" data-l="loc" aria-label="For">${LOCATIONS.map((x) =>
           `<option value="${x.key}"${x.key === l.loc ? " selected" : ""}>${esc(x.label)}</option>`).join("")}</select></td>
@@ -230,7 +216,6 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
         <td><button type="button" class="ib-tool is-danger" data-l="remove" aria-label="Remove" title="Remove">×</button></td>
       </tr>`;
   }
-
   function itemsCard() {
     const ed = editable();
     return `
@@ -264,9 +249,9 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       <section class="tb-card">
         <h4><span class="tb-num">3</span>Details</h4>
         <label class="tb-field po-needed"><span>Needed by (optional)</span><input class="fe-input" type="date" data-k="expectedDate" value="${esc(po.expectedDate)}" /></label>
-        <label class="tb-field"><span>Notes to the supplier (on the PDF)</span>
+        <label class="tb-field"><span>Notes to the supplier (in the email)</span>
           <textarea class="fe-input" data-k="notesToSupplier" rows="3" maxlength="2000" placeholder="e.g. Please deliver before 2pm.">${esc(po.notesToSupplier)}</textarea></label>
-        <label class="tb-field"><span>Internal note (not on the PDF)</span>
+        <label class="tb-field"><span>Internal note (not sent to the supplier)</span>
           <textarea class="fe-input" data-k="internalNote" rows="2" maxlength="1000">${esc(po.internalNote)}</textarea></label>
       </section>`;
   }
