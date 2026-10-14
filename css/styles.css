@@ -5298,14 +5298,5 @@ body.is-arranging, body.is-arranging *{user-select:none;-webkit-user-select:none
 .po-needed{max-width:240px}
 .po-row{grid-template-columns:minmax(0,1fr) auto}
 
-/* PDF preview window (forms and purchase orders) */
-dialog.lh-dialog.pdf-prev{width:min(1000px,96vw);height:min(92dvh,1150px);max-height:none;padding:0;overflow:hidden}
-dialog.lh-dialog.pdf-prev[open]{display:flex;flex-direction:column}
-.pdf-prev-bar{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:.5rem 1rem;padding:.75rem 1rem;border-bottom:1px solid var(--border);background:#fff}
-.pdf-prev-bar strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pdf-prev-acts{display:flex;flex-wrap:wrap;gap:.4rem}
-.pdf-prev-acts a.lh-btn{text-decoration:none}
-.pdf-prev-body{flex:1;min-height:0;display:flex;flex-direction:column;background:#e2e8f0}
-.pdf-prev-frame{flex:1;width:100%;border:0;background:#e2e8f0}
-.pdf-prev-wait,.pdf-prev-note{margin:0;padding:1rem;text-align:center;color:var(--muted)}
-.pdf-prev-note{background:#fffbeb;color:#92400e}
+/* Send to supplier: the order as it will appear in the email */
+.po-mail-items{max-height:40vh;overflow:auto;padding:.4rem 1rem .6rem;border:1px solid var(--border);border-radius:10px;background:#fff}

@@ -5,8 +5,7 @@ import {
   listProducts, listSuppliers, listRequests, supplierTerms, suppliesProduct, suggestOrderFor,
 } from "./inventory-api.js";
 import { renderDeliveries } from "./po-deliveries.js";
-import { buildPoDocument } from "./po-document.js";
-import { docToPdf, deliveryError, showPdfPreview } from "./form-delivery.js";
+import { deliveryError } from "./form-delivery.js";
 import { getLetterhead } from "./form-templates.js";
 import { DEFAULT_LETTERHEAD } from "./form-letterhead.js";
 import { createRichEditor } from "./rich-editor.js";
@@ -154,7 +153,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     pill.className = `rq-status is-${po.status}`;
     pill.textContent = PO_STATUS[po.status];
     const nothingIn = po.lines.every((l) => !l.received);
-    const acts = [`<button type="button" class="ff-btn" data-act="preview">${I.doc}<span>Preview PDF</span></button>`];
+    const acts = [];
     if (canOrder && po.status === "draft") {
       acts.unshift('<button type="button" class="ff-btn is-quiet" data-act="cancel">Cancel PO</button>');
       acts.push(`<button type="button" class="ff-btn" data-act="mark-sent">${I.check}<span>Mark as sent</span></button>`);
@@ -379,32 +378,51 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     if (!po.lines.length) return "Add at least one item.";
     return "";
   }
-  const makeDoc = () => buildPoDocument({ po, letterhead });
 
-  // Preview in a window on this page (a new tab can show blank in some browsers)
-  async function preview() {
-    await settle();
-    const d = makeDoc();
-    showPdfPreview(() => docToPdf(d).then((r) => r.blob), { fileName: d.fileName, fallbackHtml: d.previewHtml });
+
+  // Under the item name: "Box of 5 syringes · 1 mL per syringe"
+  const packSub = (l) => {
+    const pack = l.packSize > 1 ? `${l.orderUnit} of ${plural(l.packSize, l.stockUnit)}` : "";
+    const dose = l.dosePer && l.doseUnit ? `${l.dosePer} ${l.doseUnit} per ${l.stockUnit}` : "";
+    return [pack, dose].filter(Boolean).join(" · ");
+  };
+
+  // The order itself, written into the email (styled inline so it looks right in every mail app)
+  function itemsEmailHtml() {
+    const lines = po.lines;
+    const hasCode = lines.some((l) => String(l.supplierCode || "").trim());
+    const th = (t, right = false) => `<th style="padding:8px 10px;background:#0f766e;color:#ffffff;font-size:13px;font-weight:bold;text-align:${right ? "right" : "left"}">${t}</th>`;
+    const td = (v, right = false, extra = "") => `<td style="padding:8px 10px;border-bottom:1px solid #e2e8f0;font-size:14px;vertical-align:top;text-align:${right ? "right" : "left"};${extra}">${v}</td>`;
+    return `<div style="margin:18px 0 6px;font-size:16px;font-weight:bold;color:#0f766e">Purchase order ${esc(po.number)}</div>`
+      + (po.expectedDate ? `<p style="margin:0 0 8px;font-size:14px"><strong>Needed by:</strong> ${esc(niceDate(po.expectedDate))}</p>` : "")
+      + `<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;margin:6px 0 12px">
+          <tr>${th("#")}${th("Item")}${hasCode ? th("Code") : ""}${th("Qty", true)}</tr>
+          ${lines.map((l, i) => {
+            const sub = packSub(l);
+            return `<tr>${td(i + 1, false, "color:#64748b;width:28px")}${
+              td(`${esc(l.name)}${sub ? `<div style="font-size:12px;color:#64748b">${esc(sub)}</div>` : ""}`)}${
+              hasCode ? td(esc(l.supplierCode || "")) : ""}${
+              td(`<strong>${esc(plural(l.qty, l.orderUnit))}</strong>`, true, "white-space:nowrap")}</tr>`;
+          }).join("")}
+        </table>`
+      + (po.notesToSupplier ? `<p style="margin:0 0 12px;padding:10px 12px;border:1px solid #e2e8f0;background:#f8fafc;font-size:14px"><strong>Notes:</strong><br>${
+          esc(po.notesToSupplier).replace(/\n/g, "<br>")}</p>` : "");
   }
+
   async function sendDialog(again) {
     const p = problems();
     if (p) { msgEl.textContent = p; return; }
     await settle();
     const s = supplierFull() || po.supplier;
-    const d = makeDoc();
-    let job = docToPdf(d);
-    job.catch(() => {});
     const first = String(s.contactName || "").split(" ")[0];
     const message = `<p>Hi ${esc(first || "there")},</p>` +
-      `<p>Please find attached our purchase order <strong>${esc(po.number)}</strong>${s.accountNo ? ` (account ${esc(s.accountNo)})` : ""}.</p>` +
-      (po.expectedDate ? `<p>We'd appreciate delivery by ${esc(niceDate(po.expectedDate))}.</p>` : "") +
-      "<p>Please reply to confirm the order and the expected delivery date.</p>" +
-      `<p>Kind regards,<br>${esc((staff && staff.name) || "The team")}<br>Dermedica</p>`;
+      `<p>Please see our purchase order <strong>${esc(po.number)}</strong> below${s.accountNo ? ` (account ${esc(s.accountNo)})` : ""}.</p>` +
+      "<p>Please reply to confirm the order, pricing and the expected delivery date.</p>";
+    const signoff = `Kind regards,\n${(staff && staff.name) || "The team"}\nDermedica`;
     const dlg = openDialog("ec-dialog ac-mail", `
       <form class="lh-form ec-form" novalidate>
         <div class="lh-dialog-head"><h3>${again ? "Email the purchase order again" : "Send to supplier"}</h3>
-          <p>Sent from the clinic's email with the purchase order attached as a PDF.</p></div>
+          <p>The order is written into the email, below your message. Nothing is attached.</p></div>
         <div class="po-from">
           <label class="lh-field"><span class="lh-label">From</span>
             <select class="fb-select" name="from" disabled><option value="">Loading your email addresses…</option></select></label>
@@ -416,7 +434,9 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
         </div>
         <label class="lh-field"><span class="lh-label">Subject</span><input name="subject" maxlength="200" value="${esc(`Purchase order ${po.number} - Dermedica`)}" /></label>
         <div class="lh-field"><span class="lh-label">Message</span><div class="tr-canvas" style="background-color:#f1f5f9"><div data-role="editor"></div></div></div>
-        <div class="ec-attach">${I.doc}<span>${esc(d.fileName)}</span></div>
+        <div class="lh-field"><span class="lh-label">The order (added after your message)</span>
+          <div class="po-mail-items">${itemsEmailHtml()}</div></div>
+        <label class="lh-field"><span class="lh-label">Sign-off</span><textarea name="signoff" rows="3" maxlength="300">${esc(signoff)}</textarea></label>
         <p class="lh-error" role="alert" hidden></p>
         <div class="lh-actions">
           <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
@@ -427,6 +447,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     const err = dlg.querySelector(".lh-error");
     const editor = createRichEditor(dlg.querySelector('[data-role="editor"]'), { accent: () => "#0f766e" });
     editor.setHtml(message);
+
     // The addresses this clinic can send from (main account + Gmail "Send mail as" aliases)
     const fromSel = form.elements.from;
     const defBox = dlg.querySelector(".po-from-def");
@@ -442,10 +463,10 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       syncDefault();
     }).catch((ex) => {
       console.warn("Senders not loaded:", ex);
-      if (!dlg.open) return;
-      fromSel.innerHTML = '<option value="">The clinic\'s main address</option>';
+      if (dlg.open) fromSel.innerHTML = '<option value="">The clinic\'s main address</option>';
     });
     fromSel.addEventListener("change", syncDefault);
+
     let busy = false;
     dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => { if (!busy) dlg.close(); });
     dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
@@ -460,18 +481,17 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       busy = true;
       const btn = form.querySelector('[type="submit"]');
       btn.disabled = true;
-      btn.textContent = "Preparing PDF…";
+      btn.textContent = "Sending…";
       err.hidden = true;
+      const sign = form.elements.signoff.value.trim();
+      const body = editor.getHtml() + itemsEmailHtml()
+        + (sign ? `<p>${esc(sign).replace(/\n/g, "<br>")}</p>` : "");
       try {
-        let pdf;
-        try { pdf = (await job).pdf; } catch { job = docToPdf(d); pdf = (await job).pdf; }
-        btn.textContent = "Sending…";
         await callApi({
           action: "inventory", op: "sendPo", poId: id, to, cc,
           from: fromSel.value, makeDefault: !defBox.hidden && form.elements.makeDefault.checked,
           subject: form.elements.subject.value.trim() || `Purchase order ${po.number}`,
-          html: emailShell(editor.getHtml(), {}, { clinic: clinicDetails(letterhead), hasLogo: !!(letterhead && letterhead.logo) }),
-          pdf, fileName: d.fileName,
+          html: emailShell(body, {}, { clinic: clinicDetails(letterhead), hasLogo: !!(letterhead && letterhead.logo) }),
         });
         busy = false;
         dlg.close();
@@ -590,8 +610,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       if (!n) { showToast("Nothing else from this supplier is low."); return; }
       renderLeft(); renderRight(); changed();
       showToast(`${n} low item${n === 1 ? "" : "s"} added with suggested amounts`);
-    } else if (act === "preview") preview();
-    else if (act === "send") sendDialog(false);
+    } else if (act === "send") sendDialog(false);
     else if (act === "resend") sendDialog(true);
     else if (act === "mark-sent") markSentDialog();
     else if (act === "cancel") cancelDialog();
