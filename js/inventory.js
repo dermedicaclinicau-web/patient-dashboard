@@ -1707,14 +1707,13 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         ${canMove ? '<button type="button" class="btn-primary" data-act="new-po">+ New purchase order</button>' : ""}
       </div>
       ${rows.length ? `<div class="po-list">${rows.map((po) => {
-        const t = poTotals(po);
         const bits = [`${po.lines.length} item${po.lines.length === 1 ? "" : "s"}`,
           po.requestIds.length && `${po.requestIds.length} request${po.requestIds.length === 1 ? "" : "s"}`,
           po.sentAt ? `Sent ${when(po.sentAt)}` : `Created ${when(po.createdAt)}`, po.createdBy && `by ${po.createdBy}`].filter(Boolean);
         return `<a class="po-row" href="#/inventory/po/${encodeURIComponent(po.id)}">
           <span class="inv-name"><strong>${esc(po.number)} · ${esc(po.supplier.name)}</strong><small>${esc(bits.join(" · "))}</small></span>
           <span class="rq-status is-${po.status}">${esc(PO_STATUS[po.status])}</span>
-          <strong class="po-amt">${esc(money(t.total))}</strong></a>`;
+          </a>`;
       }).join("")}</div>`
         : `<div class="tm-empty">${f === "draft" ? "No drafts. Create one from Requests → By supplier, or with + New purchase order." : "Nothing here."}</div>`}`;
   }

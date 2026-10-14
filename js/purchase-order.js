@@ -6,7 +6,7 @@ import {
 } from "./inventory-api.js";
 import { renderDeliveries } from "./po-deliveries.js";
 import { buildPoDocument } from "./po-document.js";
-import { docToPdf, deliveryError } from "./form-delivery.js";
+import { docToPdf, deliveryError, showPdfPreview } from "./form-delivery.js";
 import { getLetterhead } from "./form-templates.js";
 import { DEFAULT_LETTERHEAD } from "./form-letterhead.js";
 import { createRichEditor } from "./rich-editor.js";
@@ -196,12 +196,25 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
   }
 
   function lineRow(l, i) {
-    const total = l.unitCost === null ? "—" : money(l.unitCost * l.qty);
     if (!editable()) {
       return `<tr><td><strong>${esc(l.name)}</strong>${l.supplierCode ? ` <small class="po-code">${esc(l.supplierCode)}</small>` : ""}</td>
-        <td>${esc(plural(l.qty, l.orderUnit))}</td><td>${l.unitCost === null ? "—" : money(l.unitCost)}</td><td>${esc(locLabel(l.loc))}</td>
-        <td class="r">${total}</td>${po.status !== "draft" ? `<td>${l.received} of ${l.qty}</td>` : ""}</tr>`;
+        <td>${esc(plural(l.qty, l.orderUnit))}</td><td>${esc(locLabel(l.loc))}</td>
+        ${po.status !== "draft" ? `<td>${l.received} of ${l.qty}</td>` : ""}</tr>`;
     }
+    const named = !l.productId && (l.custom || l.name);
+    return `
+      <tr data-i="${i}">
+        <td>${named
+          ? `<input class="fe-input" data-l="name" maxlength="150" placeholder="Item name, brand and size" value="${esc(l.name)}" aria-label="Item" />`
+          : `<select class="fb-select" data-l="product" aria-label="Product">${productOptions(l.productId)}</select>`}
+          ${l.sources.length ? `<small class="po-src">From ${l.sources.length} request item${l.sources.length === 1 ? "" : "s"}</small>` : ""}</td>
+        <td><div class="po-qty"><input class="fe-input" type="number" min="1" max="9999" step="1" data-l="qty" value="${l.qty}" aria-label="Quantity" />
+          <small>${esc(unitPlural(l.orderUnit))}</small></div></td>
+        <td><select class="fb-select" data-l="loc" aria-label="For">${LOCATIONS.map((x) =>
+          `<option value="${x.key}"${x.key === l.loc ? " selected" : ""}>${esc(x.label)}</option>`).join("")}</select></td>
+        <td><button type="button" class="ib-tool is-danger" data-l="remove" aria-label="Remove" title="Remove">×</button></td>
+      </tr>`;
+  }
     const named = !l.productId && (l.custom || l.name);
     return `
       <tr data-i="${i}">
@@ -225,7 +238,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       <section class="tb-card">
         <h4><span class="tb-num">2</span>Items</h4>
         ${po.lines.length ? `<div class="po-table-wrap"><table class="inv-table po-table"><thead><tr>
-            <th>Item</th><th>Qty</th><th>Unit price</th><th>For</th><th class="r">Total</th>${ed ? "<th></th>" : po.status !== "draft" ? "<th>Received</th>" : ""}
+            <th>Item</th><th>Qty</th><th>For</th>${ed ? "<th></th>" : po.status !== "draft" ? "<th>Received</th>" : ""}
           </tr></thead><tbody>${po.lines.map(lineRow).join("")}</tbody></table></div>`
           : '<p class="tb-none">No items yet.</p>'}
         ${ed ? `<div class="or-add">
@@ -251,10 +264,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     return `
       <section class="tb-card">
         <h4><span class="tb-num">3</span>Details</h4>
-        <div class="tb-two">
-          <label class="tb-field"><span>Needed by (optional)</span><input class="fe-input" type="date" data-k="expectedDate" value="${esc(po.expectedDate)}" /></label>
-          <label class="fe-check po-gst"><input type="checkbox" data-k="gst"${po.gst ? " checked" : ""} /> Add 10% GST to the total</label>
-        </div>
+        <label class="tb-field po-needed"><span>Needed by (optional)</span><input class="fe-input" type="date" data-k="expectedDate" value="${esc(po.expectedDate)}" /></label>
         <label class="tb-field"><span>Notes to the supplier (on the PDF)</span>
           <textarea class="fe-input" data-k="notesToSupplier" rows="3" maxlength="2000" placeholder="e.g. Please deliver before 2pm.">${esc(po.notesToSupplier)}</textarea></label>
         <label class="tb-field"><span>Internal note (not on the PDF)</span>
@@ -274,22 +284,13 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       : '<p class="tb-none">The linked requests could not be found.</p>';
   }
   function renderRight() {
-    const t = poTotals(po);
     right.innerHTML = `
-      <section class="tb-card">
-        <h4>Total</h4>
-        <div class="po-sum"><span>Subtotal</span><strong>${money(t.subtotal)}</strong></div>
-        ${po.gst ? `<div class="po-sum"><span>GST (10%)</span><strong>${money(t.gst)}</strong></div>` : ""}
-        <div class="po-sum is-total"><span>Total${po.gst ? " inc. GST" : ""}</span><strong>${money(t.total)}</strong></div>
-        ${t.missing ? '<small class="muted">Some items have no unit price. The PDF says prices are to be confirmed.</small>' : ""}
-      </section>
       <section class="tb-card"><h4>Requests on this order</h4>${reqsHtml()}</section>
       <section class="tb-card"><h4>History</h4>${po.events.length
         ? `<ul class="po-events">${po.events.slice().reverse().map((e) => `<li><strong>${esc(e.action)}</strong>${e.note ? ` · ${esc(e.note)}` : ""}
             <small>${esc(e.by || "")} · ${esc(when(new Date(e.at)))}</small></li>`).join("")}</ul>`
         : '<p class="tb-none">Nothing yet.</p>'}</section>`;
   }
-
   const renderAll = () => { renderBar(); renderLeft(); renderRight(); };
 
   // Deliveries: only once the order has gone out (drafts have nothing to show)
@@ -360,7 +361,6 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     const k = el.dataset.k;
     if (k && k !== "supplierId") {
       po[k] = el.type === "checkbox" ? el.checked : el.value;
-      if (k === "gst") renderRight();
       changed();
       return;
     }
@@ -368,15 +368,10 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     if (!row) return;
     const l = po.lines[Number(row.dataset.i)];
     if (el.dataset.l === "qty") l.qty = Math.min(9999, Math.max(1, parseInt(el.value, 10) || 1));
-    else if (el.dataset.l === "cost") l.unitCost = el.value === "" ? null : Math.max(0, Math.round((Number(el.value) || 0) * 100) / 100);
     else if (el.dataset.l === "name") l.name = el.value;
     else return;
-    const lt = row.querySelector('[data-role="lt"]');
-    if (lt) lt.textContent = l.unitCost === null ? "—" : money(l.unitCost * l.qty);
-    renderRight();
     changed();
   });
-
   /* ---------- PDF, sending, cancelling ---------- */
   function problems() {
     if (!po.supplierId) return "Choose a supplier.";
@@ -386,22 +381,12 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
   }
   const makeDoc = () => buildPoDocument({ po, letterhead });
 
+  // Preview in a window on this page (a new tab can show blank in some browsers)
   async function preview() {
     await settle();
-    const w = window.open("", "_blank");
-    if (w) w.document.write('<p style="font-family:Arial,sans-serif;padding:2rem;color:#475569">Preparing the PDF…</p>');
     const d = makeDoc();
-    try {
-      const { blob } = await docToPdf(d);
-      const url = URL.createObjectURL(blob);
-      if (w) w.location.href = url; else window.open(url, "_blank");
-      setTimeout(() => URL.revokeObjectURL(url), 120000);
-    } catch (err) {
-      console.warn("PDF preview failed:", err);
-      if (w) { w.document.open(); w.document.write(d.previewHtml); w.document.close(); }
-    }
+    showPdfPreview(() => docToPdf(d).then((r) => r.blob), { fileName: d.fileName, fallbackHtml: d.previewHtml });
   }
-
   async function sendDialog(again) {
     const p = problems();
     if (p) { msgEl.textContent = p; return; }

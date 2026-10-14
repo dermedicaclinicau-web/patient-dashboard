@@ -161,17 +161,53 @@ export async function pdfPayload(p) {
   }
 }
 
-export async function previewPdf(p) {
-  const w = window.open("", "_blank");
-  if (w) w.document.write('<p style="font-family:Arial,sans-serif;padding:2rem;color:#475569">Preparing the PDF…</p>');
+// A PDF shown in a window on the page (a new tab can stay blank in Chrome and on the iPad),
+// with Open in new tab and Download. If the PDF can't be made, the page it's made from is shown instead.
+// makeBlob: () => Promise<Blob>
+export async function showPdfPreview(makeBlob, { fileName = "document.pdf", fallbackHtml = "" } = {}) {
+  const dlg = document.createElement("dialog");
+  dlg.className = "lh-dialog pdf-prev";
+  dlg.innerHTML = `
+    <div class="pdf-prev-bar">
+      <strong>${esc(fileName)}</strong>
+      <span class="pdf-prev-acts">
+        <a class="lh-btn" data-role="open" target="_blank" rel="noopener" hidden>Open in new tab</a>
+        <a class="lh-btn" data-role="dl" hidden>Download</a>
+        <button type="button" class="lh-btn is-primary" data-act="close">Close</button>
+      </span>
+    </div>
+    <div class="pdf-prev-body" data-role="body"><p class="pdf-prev-wait">Preparing the PDF…</p></div>`;
+  let url = "";
+  dlg.addEventListener("close", () => { if (url) URL.revokeObjectURL(url); dlg.remove(); });
+  dlg.querySelector('[data-act="close"]').addEventListener("click", () => dlg.close());
+  document.body.appendChild(dlg);
+  dlg.showModal();
+  const box = dlg.querySelector('[data-role="body"]');
   try {
-    const url = URL.createObjectURL(await p.blob());
-    if (w) w.location.href = url; else window.open(url, "_blank");
-    setTimeout(() => URL.revokeObjectURL(url), 120000);
+    const raw = await makeBlob();
+    if (!dlg.open) return;
+    const pdf = raw && raw.type === "application/pdf" ? raw : new Blob([raw], { type: "application/pdf" });
+    if (!pdf.size || pdf.size < 800) throw new Error(`The PDF came out empty (${pdf.size} bytes)`);
+    url = URL.createObjectURL(pdf);
+    box.innerHTML = `<iframe class="pdf-prev-frame" src="${url}#view=FitH" title="${esc(fileName)}"></iframe>`;
+    const open = dlg.querySelector('[data-role="open"]');
+    const dl = dlg.querySelector('[data-role="dl"]');
+    open.href = url;
+    dl.href = url;
+    dl.download = fileName;
+    open.hidden = false;
+    dl.hidden = false;
   } catch (err) {
     console.warn("PDF preview failed, showing the page instead:", err);
-    if (w) { w.document.open(); w.document.write(p.doc.previewHtml); w.document.close(); }
+    if (!dlg.open) return;
+    box.innerHTML = `<p class="pdf-prev-note">The PDF couldn't be made on this device, so this is the page it's made from.</p>
+      <iframe class="pdf-prev-frame" sandbox title="${esc(fileName)}"></iframe>`;
+    box.querySelector("iframe").srcdoc = fallbackHtml || '<p style="font-family:Arial,sans-serif;padding:2rem">Nothing to show.</p>';
   }
+}
+
+export function previewPdf(p) {
+  return showPdfPreview(() => p.blob(), { fileName: p.doc.fileName, fallbackHtml: p.doc.previewHtml });
 }
 
 /* ---------- Send to printer ---------- */
