@@ -208,12 +208,19 @@ export async function mountStockCount(container, { param = "", staff = null } = 
     const openChecks = new Map();   // opened container id → "there" | "missing"
 
     // The clinic's walking order, per storage place
-    const order = { shelf: countOrder.shelf || [], jt: countOrder.jt || [] };
-    const hasOrder = (loc) => order[loc].some((e) => e.p);
+    const order = { shelf: countOrder.shelf || [], jt: countOrder.jt || [], cats: countOrder.cats || {} };
+    const catKey = (loc, cat) => `${loc}__${cat}`;
+    const ownCatOrder = (loc, cat) => !!cat && (order.cats[catKey(loc, cat)] || []).some((e) => e.p);
+    // The walking order to use: the category's own (once arranged), otherwise the place's
+    const orderFor = (loc, cat) => (ownCatOrder(loc, cat) ? order.cats[catKey(loc, cat)] : order[loc]);
+    const hasOrder = (loc, cat = "") => orderFor(loc, cat).some((e) => e.p);
+    const anyCatOrder = Object.values(order.cats).some((l) => l.some((e) => e.p));
     const st = {
-      q: "", left: false, place: "", arrange: null, resumed: null,
-      order: hasOrder("shelf") || hasOrder("jt") ? "walk" : products.some((p) => p.shelfPos || p.jtPos) ? "position" : "category",
+      q: "", left: false, place: "", arrange: null, resumed: null, cat: "",
+      order: hasOrder("shelf") || hasOrder("jt") || anyCatOrder ? "walk"
+        : products.some((p) => p.shelfPos || p.jtPos) ? "position" : "category",
     };
+    const arrangeLabel = () => `Arrange ${st.cat ? `${catLabel(st.cat)} ` : ""}order`;
 
     // What has to be filled for a product + storage to count as done
     const needRows = (it, loc) => it.rows.filter((r) => !r.found && r.at[loc]);
@@ -341,6 +348,35 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       return cur.byUid === me ? "You (on another device)" : (cur.by || "Someone");
     }
 
+        /* ---------- Category filter (only changes what's shown; everything is still saved) ---------- */
+    // The categories counted at this place, with how many are still to count
+    function catStats(loc) {
+      return INV_CATEGORIES.map((c) => {
+        const its = items.filter((it) => it.locs.includes(loc) && it.p.category === c.key);
+        return { key: c.key, label: c.label, total: its.length, left: its.filter((it) => !locFilled(it, loc)).length };
+      }).filter((c) => c.total);
+    }
+    function catsHtml(loc) {
+      const cs = catStats(loc);
+      if (cs.length < 2) return "";
+      const pill = (key, label, left) => `<button type="button" class="sc-cat${st.cat === key ? " is-on" : ""}${left ? "" : " is-done"}"
+          data-cat="${esc(key)}" aria-pressed="${st.cat === key}">${esc(label)}<em data-role="catn">${left ? `${left} left` : "✓"}</em></button>`;
+      return `<div class="sc-cats" role="group" aria-label="Show a category">${pill("", "All", placeLeft(loc))}${
+        cs.map((c) => pill(c.key, c.label, c.left)).join("")}</div>`;
+    }
+    // Updates the numbers on the pills without redrawing (so typing isn't interrupted)
+    function updateCats() {
+      if (st.place === "kits") return;
+      const set = (key, left) => {
+        const b = body.querySelector(`.sc-cat[data-cat="${CSS.escape(key)}"]`);
+        if (!b) return;
+        b.classList.toggle("is-done", !left);
+        b.querySelector('[data-role="catn"]').textContent = left ? `${left} left` : "✓";
+      };
+      set("", placeLeft(st.place));
+      catStats(st.place).forEach((c) => set(c.key, c.left));
+    }
+
     function placesHtml() {
       const ps = places();
       return `<div class="sc-places" role="tablist" aria-label="Where you're counting">${ps.map(([k, l], n) => {
@@ -380,6 +416,7 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       const n = items.reduce((a, it) => a + it.locs.filter((l) => locFilled(it, l)).length, 0) + kitRows.filter(kitFilled).length;
       $('[data-role="progress"]').textContent = total ? `${n} of ${total} counted` : "";
       updatePlaces();
+      updateCats();
     }
 
     /* ---------- The table for one place ---------- */
@@ -439,6 +476,7 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       const loc = st.place;
       const q = st.q.trim().toLowerCase();
       const list = items.map((it, i) => [it, i]).filter(([it]) => it.locs.includes(loc)
+        && (!st.cat || it.p.category === st.cat)
         && (!q || `${it.p.name} ${posOf(it.p, loc)}`.toLowerCase().includes(q))
         && (!st.left || !locFilled(it, loc)));
       let rows;
@@ -448,7 +486,7 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         const groups = [];
         let g = { name: "", rows: [] };
         groups.push(g);
-        order[loc].forEach((e) => {
+        orderFor(loc, st.cat).forEach((e) => {
           if (e.s !== undefined) { g = { name: e.s, rows: [] }; groups.push(g); return; }
           const x = left.get(e.p);
           if (x) { g.rows.push(x); left.delete(e.p); }
@@ -456,11 +494,11 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         const placed = groups.some((x) => x.rows.length);
         const rest = [...left.values()].sort(([a], [b]) => byPos(loc)(a, b));
         if (rest.length) groups.push({ name: placed ? "Not placed yet" : "", rows: rest, unplaced: placed });
-        const tip = list.length && !hasOrder(loc) && !q && !st.left
-          ? `<tbody><tr><td colspan="3" class="tb-none">There's no ${esc(LOC[loc])} order yet. Press <strong>Arrange order</strong> once to put the products in the order they sit.</td></tr></tbody>`
+        const tip = list.length && !hasOrder(loc, st.cat) && !q && !st.left
+          ? `<tbody><tr><td colspan="3" class="tb-none">There's no ${esc(LOC[loc])}${st.cat ? ` · ${esc(catLabel(st.cat))}` : ""} order yet. Press <strong>${esc(arrangeLabel())}</strong> once to put the products in the order they sit.</td></tr></tbody>`
           : "";
         rows = tip + groups.filter((x) => x.rows.length).map((x) => (x.name
-          ? groupHead(x.name, x.rows.length, x.unplaced ? " <small>· press Arrange order to put these in place</small>" : "", x.unplaced ? " sc-unplaced" : "")
+          ? groupHead(x.name, x.rows.length, x.unplaced ? ` <small>· press ${esc(arrangeLabel())} to put these in place</small>` : "", x.unplaced ? " sc-unplaced" : "")
           : "") + x.rows.map(([it, i]) => itemHtml(it, i, loc)).join("")).join("");
       } else if (st.order === "category") {
         rows = INV_CATEGORIES.map((c) => {
@@ -473,25 +511,37 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       }
       box.innerHTML = `<section class="tb-card sc-card"><div class="sc-scroll"><table class="sc-table">
         <thead><tr><th>Product</th><th>How many?</th><th>Comment <small>(optional)</small></th></tr></thead>
-        ${rows || `<tbody><tr><td colspan="3" class="tb-none">${st.left ? "Everything here has been counted. 👍" : "No products match."}</td></tr></tbody>`}
+        ${rows || `<tbody><tr><td colspan="3" class="tb-none">${st.left
+          ? `Everything${st.cat ? ` in ${esc(catLabel(st.cat))}` : " here"} has been counted. 👍` : "No products match."}</td></tr></tbody>`}
       </table></div></section>`;
     }
 
     /* ---------- Arrange order (the whole clinic's walking order) ---------- */
-    // Every product counted at this place (not only today's), so weekly and monthly ones get a place too
-    function startArrange(loc) {
+    // Every product counted at this place (not only today's), so weekly and monthly ones get a place too.
+    // cat: only that category, starting from its own order, or the place's order (keeping headings that have its products)
+    function startArrange(loc, cat = "") {
       const pool = new Map();
-      products.filter((p) => p.active && (p.countFreq || "never") !== "never" && countLocs(p).includes(loc)).forEach((p) => pool.set(p.id, p));
-      items.filter((it) => it.locs.includes(loc)).forEach((it) => pool.set(it.p.id, it.p));
+      const inCat = (p) => !cat || p.category === cat;
+      products.filter((p) => p.active && (p.countFreq || "never") !== "never" && countLocs(p).includes(loc) && inCat(p))
+        .forEach((p) => pool.set(p.id, p));
+      items.filter((it) => it.locs.includes(loc) && inCat(it.p)).forEach((it) => pool.set(it.p.id, it.p));
+      const keepAllHeadings = !cat || ownCatOrder(loc, cat);
       const list = [];
-      order[loc].forEach((e) => {
-        if (e.s !== undefined) list.push({ s: e.s });
-        else if (pool.has(e.p)) { list.push({ p: e.p }); pool.delete(e.p); }
+      let head = null;
+      orderFor(loc, cat).forEach((e) => {
+        if (e.s !== undefined) {
+          if (keepAllHeadings) list.push({ s: e.s }); else head = { s: e.s };
+          return;
+        }
+        if (!pool.has(e.p)) return;
+        if (head) { list.push(head); head = null; }
+        list.push({ p: e.p });
+        pool.delete(e.p);
       });
       const rest = [...pool.values()].sort(byPosP(loc));
       if (rest.length && list.length) list.push({ s: "Not placed yet", tmp: true });
       rest.forEach((p) => list.push({ p: p.id }));
-      st.arrange = { loc, list, dirty: false };
+      st.arrange = { loc, cat, list, dirty: false };
     }
 
     function drawArrange() {
@@ -503,10 +553,15 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         <button type="button" class="sc-ar-mv" data-ar-act="down" aria-label="Move down"${i === last ? " disabled" : ""}>▼</button>`;
       box.innerHTML = `<section class="tb-card sc-arr">
         <div class="sc-arr-head">
-          <div><h4>Arrange the ${esc(LOC[a.loc])} order</h4>
+          <div><h4>Arrange the ${esc(LOC[a.loc])}${a.cat ? ` · ${esc(catLabel(a.cat))}` : ""} order</h4>
             <p class="muted">Put the products in the order they sit, so the count follows your walk. Drag ⠿, or use ▲ ▼.
-              Add a heading for each fridge, cabinet or shelf. Everyone's count uses this order.</p></div>
-          <button type="button" class="lh-btn" data-act="ar-sec">+ Add heading</button>
+              Add a heading for each fridge, cabinet or shelf. ${a.cat
+                ? `Only ${esc(catLabel(a.cat))} products are here. Counting ${esc(catLabel(a.cat))} uses this order; All uses the ${esc(LOC[a.loc])} order.`
+                : "Everyone's count uses this order."}</p></div>
+          <div class="sc-arr-acts">
+            ${a.cat && ownCatOrder(a.loc, a.cat) ? `<button type="button" class="lh-btn is-quiet" data-act="ar-reset">Use the ${esc(LOC[a.loc])} order instead</button>` : ""}
+            <button type="button" class="lh-btn" data-act="ar-sec">+ Add heading</button>
+          </div>
         </div>
         ${a.list.length ? `<ol class="sc-arr-list" data-role="arlist">${a.list.map((e, i) => {
           if (e.s !== undefined) {
@@ -642,6 +697,7 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         progress();
         return;
       }
+      if (st.cat && !catStats(st.place).some((c) => c.key === st.cat)) st.cat = "";   // not counted at this place
       const intro = (PLACES.find(([k]) => k === st.place) || [])[2] || "";
       const orders = [["walk", "Walking order"], ["position", "Position code"], ["category", "Category"], ["name", "A–Z"]];
       const tools = st.place !== "kits" ? `<div class="sc-tools">
@@ -649,7 +705,7 @@ export async function mountStockCount(container, { param = "", staff = null } = 
           <label class="sc-ord">Order <select class="fb-select" data-role="order">${orders
             .map(([v, l]) => `<option value="${v}"${st.order === v ? " selected" : ""}>${l}</option>`).join("")}</select></label>
           <label class="fe-check"><input type="checkbox" data-role="left"${st.left ? " checked" : ""} /> Only show what's left</label>
-          <button type="button" class="ff-btn" data-act="arrange">Arrange order</button>
+          <button type="button" class="ff-btn" data-act="arrange">${esc(arrangeLabel())}</button>
         </div>` : "";
       const doneList = done.size ? `<details class="tb-card sc-more"><summary>Done today (${done.size})</summary><ul class="sc-done">${[...done.values()].map((v) =>
         `<li>${I.check}<span>${esc(v.name)} · ${esc(v.where)}</span><small>${esc(v.by)} · ${esc(timeOf(v.at))}</small></li>`).join("")}</ul></details>` : "";
@@ -658,6 +714,7 @@ export async function mountStockCount(container, { param = "", staff = null } = 
           ${placesHtml()}
           <p class="sc-intro">${esc(intro)}</p>
           ${tools}
+          ${st.place !== "kits" ? catsHtml(st.place) : ""}
           <div data-role="table"></div>
           ${st.place === "kits" ? kitsHtml() : ""}
           ${st.place === "shelf" ? openHtml() : ""}
@@ -744,6 +801,21 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         (again && !again.disabled ? again : other).focus();
         return;
       }
+      const cb = e.target.closest("[data-cat]");
+      if (cb && !st.arrange) {
+        st.cat = cb.dataset.cat;
+        body.querySelectorAll(".sc-cat").forEach((b) => {
+          const on = b.dataset.cat === st.cat;
+          b.classList.toggle("is-on", on);
+          b.setAttribute("aria-pressed", String(on));
+        });
+        const ab = body.querySelector('[data-act="arrange"]');
+        if (ab) ab.textContent = arrangeLabel();
+        drawTable();
+        const first = body.querySelector("input.sc-in");
+        if (first) first.focus({ preventScroll: true });
+        return;
+      }
 
       const pl = e.target.closest("[data-place]");
       if (pl) {
@@ -763,7 +835,7 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       const act = a.dataset.act;
 
       if (act === "arrange") {
-        startArrange(st.place);
+        startArrange(st.place, st.cat);
         draw();
         root.scrollIntoView({ behavior: "smooth", block: "start" });
         return;
@@ -789,12 +861,12 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         a.disabled = true;
         a.textContent = "Saving…";
         try {
-          await saveCountOrder(ar.loc, list, staff);
-          order[ar.loc] = list;
+          await saveCountOrder(ar.loc, list, staff, ar.cat);
+          if (ar.cat) order.cats[catKey(ar.loc, ar.cat)] = list; else order[ar.loc] = list;
           st.arrange = null;
           st.order = "walk";
           draw();
-          showToast(`${LOC[ar.loc]} order saved. Everyone's count now follows it.`);
+          showToast(`${LOC[ar.loc]}${ar.cat ? ` · ${catLabel(ar.cat)}` : ""} order saved. Everyone's count now follows it.`);
         } catch (err) {
           console.error("Save order failed:", err);
           showToast(err && err.code === "permission-denied"
@@ -802,6 +874,26 @@ export async function mountStockCount(container, { param = "", staff = null } = 
             : "Couldn't save the order. Try again.");
           a.disabled = false;
           a.textContent = "Save order";
+        }
+        return;
+      }
+      if (act === "ar-reset") {
+        const ar = st.arrange;
+        const ok = await confirmDialog({
+          title: `Use the ${LOC[ar.loc]} order for ${catLabel(ar.cat)}?`,
+          message: `${catLabel(ar.cat)}'s own order is removed. Counting ${catLabel(ar.cat)} then follows the ${LOC[ar.loc]} order.`,
+          confirmLabel: "Use the overall order", tone: "warning",
+        });
+        if (!ok) return;
+        try {
+          await saveCountOrder(ar.loc, [], staff, ar.cat);
+          order.cats[catKey(ar.loc, ar.cat)] = [];
+          st.arrange = null;
+          draw();
+          showToast(`${catLabel(ar.cat)} now follows the ${LOC[ar.loc]} order.`);
+        } catch (err) {
+          console.error("Reset order failed:", err);
+          showToast("Couldn't change the order. Try again.");
         }
         return;
       }
@@ -901,16 +993,22 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       }
 
       const label = (it, loc) => `${it.p.name} (${LOC[loc]})`;
-      const goTo = (loc) => { if (st.place !== loc) { st.place = loc; draw(); } };
+      // Shows the place (and the product, if the category filter is hiding it)
+      const goTo = (loc, it = null) => {
+        let redraw = false;
+        if (st.place !== loc) { st.place = loc; redraw = true; }
+        if (it && st.cat && it.p.category !== st.cat) { st.cat = ""; redraw = true; }
+        if (redraw) draw();
+      };
       for (const it of items) {
         for (const loc of it.locs) {
           if (locStarted(it, loc) && !locFilled(it, loc)) {
-            goTo(loc);
+             goTo(loc, it);
             msgEl.textContent = `${label(it, loc)}: fill in every ${batchName(it.p).toLowerCase()}, or leave them all empty to count it later.`;
             return;
           }
           if (noneAt(it, loc) && Number(it.none[loc]) > 0) {
-            goTo(loc);
+            goTo(loc, it);
             msgEl.textContent = `${label(it, loc)}: there are none on record, so use “+ A ${batchName(it.p).toLowerCase()} that isn't listed” to enter what's there.`;
             return;
           }

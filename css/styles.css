@@ -5415,3 +5415,17 @@ body.is-arranging, body.is-arranging *{user-select:none;-webkit-user-select:none
   .rcv-pa-head { display: none; }
   .rcv-pa-row input[data-f="q"] { text-align: left; }
 }
+/* Opening count: category pills */
+.sc-cats { display: flex; flex-wrap: wrap; gap: .4rem; margin: 0 0 .85rem; }
+.sc-cat { display: inline-flex; align-items: center; gap: .45rem; height: 36px; padding: 0 .9rem;
+  border: 1px solid var(--border); border-radius: 999px; background: #fff; color: #475569;
+  font: inherit; font-size: .86rem; font-weight: 600; cursor: pointer;
+  transition: background .15s, border-color .15s, color .15s, box-shadow .15s; }
+.sc-cat:hover { border-color: #94a3b8; color: var(--text); }
+.sc-cat em { min-width: 20px; padding: 0 .45rem; border-radius: 999px; background: #fef3c7; color: #92400e;
+  font-size: .72rem; font-style: normal; font-weight: 700; line-height: 20px; text-align: center; }
+.sc-cat.is-done em { background: #dcfce7; color: #166534; }
+.sc-cat.is-on { background: var(--primary); border-color: var(--primary); color: #fff; box-shadow: 0 2px 8px rgba(15, 118, 110, .25); }
+.sc-cat.is-on em { background: rgba(255, 255, 255, .25); color: #fff; }
+.sc-cat:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.sc-arr-acts { display: flex; flex-wrap: wrap; gap: .4rem; justify-content: flex-end; }

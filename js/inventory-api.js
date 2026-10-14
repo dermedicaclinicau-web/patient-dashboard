@@ -1439,17 +1439,26 @@ function cleanOrderList(list) {
   return out.slice(0, 800);
 }
 
+// Category orders: cats["shelf__retail"] = [...] (used when that category is picked at the count)
+const ORDER_CAT_RE = /^(shelf|jt)__[a-z]+$/;
+
 export async function getCountOrder() {
   const s = await getDoc(doc(db, "inv_settings", "count_order"));
   const d = s.exists() ? s.data() : {};
-  return { shelf: cleanOrderList(d.shelf), jt: cleanOrderList(d.jt), by: String(d.updatedBy || ""), at: toDate(d.updatedAt) };
+  const cats = {};
+  Object.entries(d.cats && typeof d.cats === "object" ? d.cats : {}).forEach(([k, v]) => {
+    if (ORDER_CAT_RE.test(k)) cats[k] = cleanOrderList(v);
+  });
+  return { shelf: cleanOrderList(d.shelf), jt: cleanOrderList(d.jt), cats, by: String(d.updatedBy || ""), at: toDate(d.updatedAt) };
 }
 
-export async function saveCountOrder(loc, list, staff) {
+// cat: save it as that category's own order (an empty list goes back to the place's order)
+export async function saveCountOrder(loc, list, staff, cat = "") {
   if (!["shelf", "jt"].includes(loc)) throw new Error("Choose the Shelf or JT storage.");
-  await setDoc(doc(db, "inv_settings", "count_order"), { [loc]: cleanOrderList(list), ...stamp(staff) }, { merge: true });
+  if (cat && !INV_CATEGORIES.some((c) => c.key === cat)) throw new Error("Unknown category.");
+  const data = cat ? { cats: { [`${loc}__${cat}`]: cleanOrderList(list) } } : { [loc]: cleanOrderList(list) };
+  await setDoc(doc(db, "inv_settings", "count_order"), { ...data, ...stamp(staff) }, { merge: true });
 }
-
 // An opening count in progress ("Save and finish later"): one per day, anyone who counts can carry it on
 const draftRef = (key) => doc(db, "inv_count_drafts", `opening__${key}`);
 
