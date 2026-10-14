@@ -5387,3 +5387,31 @@ body.is-arranging, body.is-arranging *{user-select:none;-webkit-user-select:none
 }
 .seg-n.is-zero { opacity: .5; }
 .inv-tools .fe-seg-btn input:checked + span .seg-n { background: rgba(255, 255, 255, .25); color: #fff; opacity: 1; }
+
+/* ---------- Receive delivery: Shelf | JT storage side by side ---------- */
+.rcv-pa { margin-top: .9rem; padding-top: .85rem; border-top: 1px dashed var(--border); }
+.rcv-pa-title { margin-bottom: .45rem; font-size: .82rem; font-weight: 700; color: #334155; }
+.rcv-pa-title small { font-weight: 500; color: var(--muted); }
+.rcv-pa-row { display: grid; grid-template-columns: repeat(2, minmax(0, 150px)) 32px; gap: .5rem; align-items: center; }
+.rcv-pa-row.is-tracked { grid-template-columns: minmax(120px, 1fr) 165px repeat(2, minmax(0, 120px)) 32px; }
+.rcv-pa-row + .rcv-pa-row { margin-top: .45rem; }
+.rcv-pa-head span { font-size: .76rem; font-weight: 600; color: var(--muted); }
+.rcv-pa-head small { margin-left: .25rem; padding: .05rem .4rem; border-radius: 999px; background: var(--primary-soft);
+  color: var(--primary); font-size: .66rem; font-weight: 700; }
+.rcv-pa-row input { width: 100%; min-width: 0; min-height: 44px; padding: 0 .65rem; box-sizing: border-box;
+  border: 1px solid #d5dde0; border-radius: 10px; background: #fff; font: inherit; font-size: 1rem; outline: none; }
+.rcv-pa-row input[data-f="q"] { text-align: center; font-weight: 700; font-variant-numeric: tabular-nums;
+  -moz-appearance: textfield; }
+.rcv-pa-row input[data-f="q"]::-webkit-outer-spin-button,
+.rcv-pa-row input[data-f="q"]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.rcv-pa-row input.is-for { border-color: #99d5cf; background: #f0fdfa; }
+.rcv-pa-row input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+.rcv-pa-row input[data-f="batch"] { text-transform: uppercase; }
+.rcv-pa .rcv-exp { grid-column: 1 / -1; }
+.rcv-pa .rcv-link { margin-top: .45rem; }
+.rcv-check { margin-top: .65rem; }
+@media (max-width: 640px) {
+  .rcv-pa-row, .rcv-pa-row.is-tracked { grid-template-columns: 1fr 1fr; }
+  .rcv-pa-head { display: none; }
+  .rcv-pa-row input[data-f="q"] { text-align: left; }
+}

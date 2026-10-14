@@ -1,6 +1,6 @@
 // Phase 4: receive a delivery against a purchase order.
 //   #/inventory/receive        → choose which sent order the delivery is for
-//   #/inventory/receive/<poId> → docket photo, what arrived, where it was put (storage, batch, expiry)
+//   #/inventory/receive/<poId> → docket photo, what arrived, where it went (Shelf | JT storage, batch, expiry)
 import {
   LOCATIONS, PO_STATUS, getPo, listPos, listProducts, listReceipts, receivePo, uploadDocket,
   syncReceivedRequests, plural, unitPlural, locLabel, expiryState, batchName,
@@ -12,7 +12,21 @@ const niceDate = (d) => (d instanceof Date ? d.toLocaleDateString("en-AU", { day
 const left = (l) => Math.max(0, (l.qty || 0) - (l.received || 0));
 const doseText = (l, n) => (l.dosePer && l.doseUnit ? ` (${+(n * l.dosePer).toFixed(2)} ${l.doseUnit})` : "");
 const int = (v) => Math.max(0, parseInt(v, 10) || 0);
-const sumOf = (s) => s.splits.reduce((a, x) => a + int(x.qty), 0);
+
+// Each line's "where it went" is a list of rows: { batch, expiry, q: { shelf: n, jt: n } }
+const rowQty = (r) => LOCATIONS.reduce((a, o) => a + int(r.q[o.key]), 0);
+const sumOf = (s) => s.rows.reduce((a, r) => a + rowQty(r), 0);
+const newRow = (loc, n) => ({ batch: "", expiry: "", q: Object.fromEntries(LOCATIONS.map((o) => [o.key, o.key === loc ? n : 0])) });
+// One row: the storage it was ordered for takes whatever the others don't
+function balance(r, keep, need) {
+  const others = LOCATIONS.filter((o) => o.key !== keep).reduce((a, o) => a + int(r.q[o.key]), 0);
+  if (others > need) { LOCATIONS.forEach((o) => { r.q[o.key] = 0; }); r.q[keep] = need; }
+  else r.q[keep] = need - others;
+}
+// The rows as the splits receivePo expects (empty boxes left out)
+const toSplits = (s) => s.rows.flatMap((r) => LOCATIONS.filter((o) => int(r.q[o.key]) > 0)
+  .map((o) => ({ loc: o.key, batch: r.batch, expiry: r.expiry, qty: int(r.q[o.key]) })));
+
 // The ordering team goes back to the purchase order; everyone else back to the list of deliveries
 const canOrders = () => can("inventory.order") || can("inventory.manage");
 
@@ -45,7 +59,8 @@ export async function mountReceivePo(root, poId, staff) {
   const open = ["sent", "part"].includes(po.status);
   const prod = new Map(products.map((p) => [p.id, p]));
   const tracked = (l) => !!(prod.get(l.productId) || {}).tracked;
-  const state = new Map(po.lines.map((l) => [l.key, { arrived: 0, splits: [] }]));
+  const home = (l) => (LOCATIONS.some((o) => o.key === l.loc) ? l.loc : LOCATIONS[0].key);
+  const state = new Map(po.lines.map((l) => [l.key, { arrived: 0, rows: [] }]));
   let docketFile = null, docketUrl = "", uploaded = null, busy = false;
 
   const lineHtml = (l) => {
@@ -59,7 +74,7 @@ export async function mountReceivePo(root, poId, staff) {
           <small>${esc(info.filter(Boolean).join(" · "))}</small></div>
         ${open && remaining ? `<div class="rcv-arrived"><span>${esc(unitPlural(l.orderUnit))} arrived</span>
             <div class="rcv-step"><button type="button" data-act="minus" aria-label="One less">−</button>
-              <input data-f="arrived" type="number" min="0" step="1" inputmode="numeric" value="${s.arrived}" />
+              <input data-f="arrived" type="number" min="0" step="1" inputmode="numeric" value="${s.arrived}" aria-label="How many arrived" />
               <button type="button" data-act="plus" aria-label="One more">+</button></div>
             <small>${remaining} still to come</small></div>`
           : `<span class="rcv-chip ${remaining ? "" : "is-done"}">${remaining ? `${remaining} not received` : "All received"}</span>`}
@@ -69,21 +84,32 @@ export async function mountReceivePo(root, poId, staff) {
     </div>`;
   };
 
+  // Where it went: Shelf | JT storage side by side (and a batch + expiry per row for tracked products)
   const splitsHtml = (l) => {
     const s = state.get(l.key);
     if (!s.arrived) return "";
     if (!l.productId) return `<p class="rcv-note">Not linked to a product, so no stock changes. It's only ticked off the order.</p>`;
     const tr = tracked(l);
-    return `<div class="rcv-splits">${s.splits.map((x, i) => `<div class="rcv-split${tr ? " is-tracked" : ""}" data-i="${i}">
-        <label><span>Put in</span><select data-f="loc">${LOCATIONS.map((o) =>
-          `<option value="${o.key}"${o.key === x.loc ? " selected" : ""}>${esc(o.label)}</option>`).join("")}</select></label>
-        ${tr ? `<label><span>${esc(batchName(prod.get(l.productId)))}</span><input data-f="batch" value="${esc(x.batch)}" maxlength="40" autocapitalize="characters" autocomplete="off" placeholder="${esc(batchName(prod.get(l.productId)))} #" /></label>
-        <label><span>Expiry</span><input data-f="expiry" type="date" value="${esc(x.expiry)}" /></label>` : ""}
-        <label><span>${esc(unitPlural(l.stockUnit))}</span><input data-f="qty" type="number" min="0" step="1" inputmode="numeric" value="${x.qty}" /></label>
-        ${s.splits.length > 1 ? `<button type="button" class="rcv-x" data-act="rm" aria-label="Remove this row">×</button>` : "<span></span>"}
+    const bn = tr ? batchName(prod.get(l.productId)) : "";
+    const cls = `rcv-pa-row${tr ? " is-tracked" : ""}`;
+    return `<div class="rcv-pa">
+      <div class="rcv-pa-title">Where it's going <small>(${esc(unitPlural(l.stockUnit))})</small></div>
+      <div class="${cls} rcv-pa-head" aria-hidden="true">
+        ${tr ? `<span>${esc(bn)}</span><span>Expiry</span>` : ""}
+        ${LOCATIONS.map((o) => `<span>${esc(o.label)}${o.key === home(l) ? " <small>ordered for</small>" : ""}</span>`).join("")}
+        <span></span>
+      </div>
+      ${s.rows.map((r, i) => `<div class="${cls}" data-i="${i}">
+        ${tr ? `<input data-f="batch" value="${esc(r.batch)}" maxlength="40" autocapitalize="characters" autocomplete="off"
+            placeholder="${esc(bn)} #" aria-label="${esc(bn)} number" />
+          <input data-f="expiry" type="date" value="${esc(r.expiry)}" aria-label="Expiry date" />` : ""}
+        ${LOCATIONS.map((o) => `<input data-f="q" data-loc="${o.key}" class="${o.key === home(l) ? "is-for" : ""}" type="number"
+            min="0" step="1" inputmode="numeric" value="${int(r.q[o.key])}" aria-label="${esc(o.label)}" />`).join("")}
+        ${s.rows.length > 1 ? `<button type="button" class="rcv-x" data-act="rm" aria-label="Remove this row" title="Remove">×</button>` : "<span></span>"}
         <span class="rcv-exp" data-role="exp"></span>
       </div>`).join("")}
-      <button type="button" class="rcv-link" data-act="add">+ ${tr ? "Another batch or storage" : "Split between storages"}</button></div>`;
+      ${tr ? `<button type="button" class="rcv-link" data-act="add">+ Another ${esc(bn.toLowerCase())}</button>` : ""}
+    </div>`;
   };
 
   const recHtml = (r) => `<div class="rcv-rec"><div>
@@ -92,13 +118,14 @@ export async function mountReceivePo(root, poId, staff) {
       ${r.note ? `<small>${esc(r.note)}</small>` : ""}</div>
     ${r.docket && r.docket.url ? `<a class="rcv-link" href="${esc(r.docket.url)}" target="_blank" rel="noopener">View docket</a>` : ""}</div>`;
 
+  const subtitle = [po.supplier.name, po.number,
+    po.status === "sent" && po.sentAt ? `Sent ${niceDate(po.sentAt)}`
+      : [PO_STATUS[po.status], po.sentAt && `sent ${niceDate(po.sentAt)}`].filter(Boolean).join(", ")].filter(Boolean).join(" · ");
+
   root.innerHTML = `<div class="rcv">
     <a class="rcv-back" href="${back}">← ${esc(canOrders() ? po.number : "Receive a delivery")}</a>
     <div class="rcv-head">
-      <div><h1>Receive delivery</h1>
-        <p class="muted">${esc([po.supplier.name, po.number,
-          po.status === "sent" && po.sentAt ? `Sent ${niceDate(po.sentAt)}`
-            : [PO_STATUS[po.status], po.sentAt && `sent ${niceDate(po.sentAt)}`].filter(Boolean).join(", ")].filter(Boolean).join(" · "))}</p></div>
+      <div><h1>Receive delivery</h1><p class="muted">${esc(subtitle)}</p></div>
       ${open ? `<button type="button" class="rcv-btn" data-act="all">Everything arrived</button>` : ""}
     </div>
     ${open ? "" : `<p class="rcv-banner">This order is ${esc(PO_STATUS[po.status].toLowerCase())}, so stock can't be received on it.${
@@ -140,12 +167,12 @@ export async function mountReceivePo(root, poId, staff) {
     if (!card) return;
     const s = state.get(l.key);
     const box = card.querySelector('[data-role="check"]');
-    card.querySelectorAll(".rcv-split").forEach((row) => {
-      const x = s.splits[+row.dataset.i];
-      const st = x && tracked(l) ? expiryState(x.expiry) : "";
-      const exp = row.querySelector('[data-role="exp"]');
-      exp.textContent = st === "expired" ? "Expiry date has passed" : st === "soon" ? "Expires within 60 days" : "";
-      exp.className = `rcv-exp${st ? ` is-${st}` : ""}`;
+    card.querySelectorAll(".rcv-pa-row[data-i]").forEach((row) => {
+      const r = s.rows[+row.dataset.i];
+      const ex = r && tracked(l) && rowQty(r) ? expiryState(r.expiry) : "";
+      const el = row.querySelector('[data-role="exp"]');
+      el.textContent = ex === "expired" ? "Expiry date has passed" : ex === "soon" ? "Expires within 60 days" : "";
+      el.className = `rcv-exp${ex ? ` is-${ex}` : ""}`;
     });
     if (!s.arrived || !l.productId) { box.innerHTML = ""; drawSum(); return; }
     const need = s.arrived * l.packSize;
@@ -168,9 +195,9 @@ export async function mountReceivePo(root, poId, staff) {
     const s = state.get(l.key);
     s.arrived = Math.max(0, Math.min(9999, n));
     const need = s.arrived * l.packSize;
-    if (!s.arrived) s.splits = [];
-    else if (!s.splits.length) s.splits = [{ loc: l.loc, batch: "", expiry: "", qty: need }];
-    else if (s.splits.length === 1) s.splits[0].qty = need;
+    if (!s.arrived) s.rows = [];
+    else if (!s.rows.length) s.rows = [newRow(home(l), need)];
+    else if (s.rows.length === 1) balance(s.rows[0], home(l), need);
     const inp = cardOf(l).querySelector('[data-f="arrived"]');
     if (inp && !fromInput) inp.value = s.arrived;
     drawSplits(l);
@@ -180,9 +207,7 @@ export async function mountReceivePo(root, poId, staff) {
     const el = $('[data-role="sum"]');
     if (!el) return;
     const got = po.lines.filter((l) => state.get(l.key).arrived > 0);
-    el.textContent = got.length
-      ? `Receiving ${got.length} line${got.length === 1 ? "" : "s"}`
-      : "Nothing entered yet";
+    el.textContent = got.length ? `Receiving ${got.length} line${got.length === 1 ? "" : "s"}` : "Nothing entered yet";
   }
 
   function drawDocket() {
@@ -221,11 +246,12 @@ export async function mountReceivePo(root, poId, staff) {
     else if (act === "plus") setArrived(l, s.arrived + 1);
     else if (act === "minus") setArrived(l, s.arrived - 1);
     else if (act === "add") {
-      const other = s.splits.length && !tracked(l) ? (s.splits[0].loc === "shelf" ? "jt" : "shelf") : l.loc;
-      s.splits.push({ loc: other, batch: "", expiry: "", qty: Math.max(0, s.arrived * l.packSize - sumOf(s)) });
+      s.rows.push(newRow(home(l), Math.max(0, s.arrived * l.packSize - sumOf(s))));
       drawSplits(l);
+      const rows = cardOf(l).querySelectorAll('[data-f="batch"]');
+      if (rows.length) rows[rows.length - 1].focus();
     } else if (act === "rm") {
-      s.splits.splice(+b.closest(".rcv-split").dataset.i, 1);
+      s.rows.splice(+b.closest(".rcv-pa-row").dataset.i, 1);
       drawSplits(l);
     } else if (act === "zoom") b.closest(".rcv-photo").classList.toggle("is-zoom");
     else if (act === "clear-docket") {
@@ -236,17 +262,33 @@ export async function mountReceivePo(root, poId, staff) {
   });
 
   root.addEventListener("input", (e) => {
-    const f = e.target.dataset && e.target.dataset.f;
+    const t = e.target;
+    const f = t.dataset && t.dataset.f;
     if (!f) return;
-    const l = lineOf(e.target);
+    const l = lineOf(t);
     if (!l) return;
     const s = state.get(l.key);
-    if (f === "arrived") return setArrived(l, int(e.target.value), true);
-    const row = e.target.closest(".rcv-split");
-    const x = row && s.splits[+row.dataset.i];
-    if (!x) return;
-    x[f] = f === "qty" ? int(e.target.value) : e.target.value;
+    if (f === "arrived") return setArrived(l, int(t.value), true);
+    const rowEl = t.closest(".rcv-pa-row[data-i]");
+    const r = rowEl && s.rows[+rowEl.dataset.i];
+    if (!r) return;
+    if (f === "q") {
+      const loc = t.dataset.loc;
+      r.q[loc] = int(t.value);
+      // One row, two storages: the other box takes the rest
+      if (s.rows.length === 1 && LOCATIONS.length === 2 && t.value !== "") {
+        const other = LOCATIONS.find((o) => o.key !== loc).key;
+        r.q[other] = Math.max(0, s.arrived * l.packSize - r.q[loc]);
+        const oi = rowEl.querySelector(`[data-loc="${other}"]`);
+        if (oi) oi.value = r.q[other];
+      }
+    } else r[f] = t.value;
     drawCheck(l);
+  });
+
+  // Clicking into a number box selects it, so typing replaces the 0
+  root.addEventListener("focusin", (e) => {
+    if (e.target.matches('[data-f="q"], [data-f="arrived"]')) e.target.select();
   });
 
   async function submit() {
@@ -265,11 +307,11 @@ export async function mountReceivePo(root, poId, staff) {
         const card = cardOf(l);
         const badDate = card && [...card.querySelectorAll('[data-f="expiry"]')].some((i) => i.validity && i.validity.badInput);
         if (badDate) return toast(`${l.name}: an expiry date doesn't exist. Check the day (e.g. September has 30 days).`, true);
-        if (s.splits.some((x) => int(x.qty) && !String(x.batch).trim())) return toast(`${l.name}: enter the ${label} number.`, true);
-        if (s.splits.some((x) => int(x.qty) && !x.expiry)) return toast(`${l.name}: enter the expiry date.`, true);
+        if (s.rows.some((r) => rowQty(r) && !String(r.batch).trim())) return toast(`${l.name}: enter the ${label} number.`, true);
+        if (s.rows.some((r) => rowQty(r) && !r.expiry)) return toast(`${l.name}: enter the expiry date.`, true);
       }
     }
-    const expired = picked.filter(({ l, s }) => tracked(l) && s.splits.some((x) => expiryState(x.expiry) === "expired"));
+    const expired = picked.filter(({ l, s }) => tracked(l) && s.rows.some((r) => rowQty(r) && expiryState(r.expiry) === "expired"));
     if (expired.length && !confirm(`${expired.map((x) => x.l.name).join(", ")}: an expiry date has already passed. Receive anyway?`)) return;
     const over = picked.filter(({ l, s }) => s.arrived > left(l));
     if (over.length && !confirm(`More arrived than was still to come for ${over.map((x) => x.l.name).join(", ")}. Receive anyway?`)) return;
@@ -289,7 +331,7 @@ export async function mountReceivePo(root, poId, staff) {
         note: $('[data-role="note"]').value,
         docket: uploaded,
         close,
-        lines: picked.map(({ l, s }) => ({ key: l.key, arrived: s.arrived, splits: s.splits })),
+        lines: picked.map(({ l, s }) => ({ key: l.key, arrived: s.arrived, splits: toSplits(s) })),
       }, staff);
       let done = [];
       try { done = await syncReceivedRequests(res.requestIds, staff); } catch (err) { console.warn("Requests not updated", err); }
