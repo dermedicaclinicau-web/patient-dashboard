@@ -5,6 +5,7 @@ import { listProducts, INV_CATEGORIES, plural } from "./inventory-api.js";
 import { preparePhoto, readBillingSheet, startReview, reviewBilling, saveBillingScan, earlierSales, money } from "./scanner-api.js";
 import { showToast } from "./utils.js";
 import { confirmDialog } from "./dialog.js";
+import { warmUpLogin } from "./auth.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const svg = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -28,6 +29,7 @@ export function mountScanner(container, { staff = null } = {}) {
   const loadProducts = () => listProducts().then((list) => { products = list.filter((p) => p.active); })
     .catch((err) => console.error("Scanner: the product list didn't load", err));
   let productsReady = loadProducts();
+  warmUpLogin();   // wakes Apps Script while the photo is being lined up, so the first scan isn't slow
 
   const st = {
     mode: "camera", stream: null, track: null, starting: false, zoom: 1, hw: null, torch: false, canTorch: false, canFocus: false,
@@ -264,7 +266,9 @@ export function mountScanner(container, { staff = null } = {}) {
     try {
       await productsReady;
       if (!products.length) throw new Error("Couldn't load the product list. Check your connection and try again.");
+      const t0 = performance.now();
       st.result = await readBillingSheet(st.base64, products);
+      console.log(`Scanner: ${Math.round(performance.now() - t0)} ms from sending the photo to the answer`);
       st.lines = startReview(st.result, products);
       rereview();
       st.mode = "result";

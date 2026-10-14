@@ -42,7 +42,7 @@ function doPost(e) {
     if (body.action === 'notify') return json_(handleNotify_(body));
     if (body.action === 'plan') return json_(handlePlan_(body));
     if (body.action === 'recordingRules') return json_(handleRecordingRules_(body));
-    if (body.action === 'scanner') return out_(scannerAction_(body));
+    if (body.action === 'scanner') return json_(scannerAction_(body));
     
 
     const pin = String(body.pin || '').trim();
@@ -5023,13 +5023,22 @@ function testChatReminders() {
 
 /* ===================== Scanner: photos read by Gemini ===================== */
 // body: { op: "billing", image: base64 JPEG, mime, products: [{ id, name, brand }] }
-// The key stays in Script Properties, so it never reaches the browser.
-// Always answers ok: true, so callApi doesn't replace the message. Problems come back in "problem".
+// Always answers ok: true (after the login check), so callApi doesn't replace the message.
+// Problems come back in "problem".
 function scannerAction_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+
+  const cache = CacheService.getScriptCache();
+  const rlKey = 'scan_' + session.uid;
+  const n = Number(cache.get(rlKey) || 0);
+  if (n >= 60) return { ok: true, problem: "You've scanned a lot in the last hour. Wait a few minutes, then try again." };
+  cache.put(rlKey, String(n + 1), 3600);
+
   try {
     return { ok: true, result: scanBilling_(body) };
   } catch (err) {
-    console.error('Scanner failed: ' + (err && err.stack || err));
+    console.error('Scanner failed for ' + session.name + ': ' + (err && err.stack || err));
     return { ok: true, problem: String((err && err.message) || "The scanner couldn't read that photo. Try again.") };
   }
 }
@@ -5050,16 +5059,15 @@ function scanBillingPrompt_(products) {
   return [
     'You are checking a photo taken at a skin clinic. It shows a printed billing sheet with handwriting,',
     'and usually the actual products being given to the patient placed on or next to it.',
+    'Only the PRODUCTS matter. Ignore services, treatments, consultations, packages and all totals.',
     '',
     'Read:',
     '1. The header: patient name, appointment date (as YYYY-MM-DD), time and provider (e.g. "Dr Teh").',
-    '2. "Services done today": each service and its fee. If a sum is written (e.g. "190-95=95"), the fee is the final number.',
-    '3. The products section (the rows with a "Purchase Status" and "Fee" column): each product line exactly as written,',
+    '2. The products section only (the rows with a "Purchase Status" and "Fee" column): each product line exactly as written,',
     '   its quantity (1 unless written like "x2" or "2x") and its fee. Ignore crossed-out lines. Ticks and marks are not products.',
-    '4. The grand total, any account credit used, and the total amount to pay (each as the final number of any sum written).',
-    '5. Every physical product visible in the photo (bottles, tubes, boxes), read from its label, and how many of each.',
+    '3. Every physical product visible in the photo (bottles, tubes, boxes), read from its label, and how many of each.',
     '',
-    'Match every written line and every product seen to ONE id from the product list below.',
+    'Match every written product line and every product seen to ONE id from the product list below.',
     'Common abbreviations: "D." or "Derm" = Dermedica, "ZO" = ZO Skin Health, "DPD" = Daily Power Defense, "SPF" = a sunscreen.',
     'Use the brand, the product name and the size to choose. If nothing fits, use "". Never make up an id.',
     'Give each match a confidence from 0 to 1.',
@@ -5076,9 +5084,6 @@ const SCAN_BILLING_SCHEMA_ = {
     date: { type: 'STRING', description: 'Appointment date as YYYY-MM-DD, or empty' },
     time: { type: 'STRING' },
     provider: { type: 'STRING' },
-    services: { type: 'ARRAY', items: { type: 'OBJECT', properties: {
-      text: { type: 'STRING' }, fee: { type: 'NUMBER', nullable: true },
-    }, required: ['text'] } },
     written: { type: 'ARRAY', items: { type: 'OBJECT', properties: {
       text: { type: 'STRING', description: 'The product line exactly as handwritten' },
       qty: { type: 'INTEGER' },
@@ -5092,11 +5097,8 @@ const SCAN_BILLING_SCHEMA_ = {
       productId: { type: 'STRING', description: 'An id from the product list, or empty' },
       confidence: { type: 'NUMBER' },
     }, required: ['description', 'count', 'productId', 'confidence'] } },
-    grandTotal: { type: 'NUMBER', nullable: true },
-    credit: { type: 'NUMBER', nullable: true },
-    totalToPay: { type: 'NUMBER', nullable: true },
   },
-  required: ['patientName', 'date', 'provider', 'services', 'written', 'seen'],
+  required: ['patientName', 'date', 'provider', 'written', 'seen'],
 };
 
 // One photo + instructions in, JSON (matching the schema) out. Retries when Gemini is busy.
@@ -5106,10 +5108,17 @@ function geminiJson_(prompt, imageB64, mime, schema) {
   if (!key) throw new Error("The scanner isn't set up yet. Add GEMINI_API_KEY in Script Properties.");
   const model = props.getProperty('GEMINI_MODEL') || 'gemini-2.5-flash';
   const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent';
+  // Thinking makes Gemini 2.5 slower. Reading a sheet doesn't need it.
+  // SCAN_THINKING in Script Properties: 0 = off (fastest), e.g. 512 = a little, if matches get worse.
+  const thinking = Math.max(0, parseInt(props.getProperty('SCAN_THINKING') || '0', 10) || 0);
   const payload = JSON.stringify({
     contents: [{ role: 'user', parts: [{ text: prompt }, { inline_data: { mime_type: mime, data: imageB64 } }] }],
-    generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: schema },
+    generationConfig: {
+      temperature: 0, responseMimeType: 'application/json', responseSchema: schema,
+      thinkingConfig: { thinkingBudget: thinking },
+    },
   });
+  const started = Date.now();
   let res = null, code = 0;
   for (let attempt = 0; attempt < 3; attempt++) {
     res = UrlFetchApp.fetch(url, {
@@ -5129,5 +5138,6 @@ function geminiJson_(prompt, imageB64, mime, schema) {
   const cand = json.candidates && json.candidates[0];
   const out = cand && cand.content && cand.content.parts ? cand.content.parts.map((p) => p.text || '').join('') : '';
   if (!out) throw new Error("The scanner didn't find anything. Try a clearer photo.");
+  console.log('Scanner: Gemini took ' + (Date.now() - started) + ' ms (thinking ' + thinking + ')');
   return JSON.parse(out);
 }
