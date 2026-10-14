@@ -50,7 +50,8 @@ export async function renderDeliveries(box, po, { labelOf = () => "Batch", canRe
     <article class="po-dv-item">
       <div class="po-dv-head">
         <strong>Delivery ${receipts.length - i}</strong>
-        <span>${esc(when(r.at))} · received by ${esc(r.by || "—")}</span>
+        <span>${esc(when(r.receivedAt ? new Date(r.receivedAt) : r.at))} · received by ${esc(r.receivedBy || r.by || "—")}${
+          r.receivedBy && r.by && r.receivedBy !== r.by ? ` · entered by ${esc(r.by)}` : ""}</span>
         ${r.docketNo ? `<span class="inv-flag is-info">Docket ${esc(r.docketNo)}</span>` : ""}
         ${r.closed ? '<span class="inv-flag is-warn">Closed short</span>' : ""}
       </div>

@@ -14,6 +14,21 @@ const niceDate = (key) => {
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
 };
 const STATUS = { sent: "Sent", part: "Part received" };
+const keyOf = (d) => (d instanceof Date && !isNaN(d) ? `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}` : "");
+// "today", "yesterday", "12 days ago"
+const ago = (key) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
+  if (!m) return "";
+  const now = new Date();
+  const days = Math.round((Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()) - Date.UTC(+m[1], +m[2] - 1, +m[3])) / 864e5);
+  return days <= 0 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
+};
+// The date box needs a day: "2027-05" → "2027-05-31"
+const fullExpiry = (e) => {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(e || "")) return e;
+  const m = /^(\d{4})-(\d{2})$/.exec(e || "");
+  return m ? `${m[1]}-${m[2]}-${pad2(new Date(+m[1], +m[2], 0).getDate())}` : "";
+};
 
 export function mountDocketResult(el, { photo, photoUrl, result, products, staff, onAgain }) {
   const myUid = (auth.currentUser && auth.currentUser.uid) || "";
@@ -66,15 +81,25 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
     if (p && !l.fixed && l.conf < 0.6) flags.push(["warn", "Check this is the right product"]);
     if (!l.qty) flags.push(["warn", "None supplied (back-ordered?)"]);
     const bad = flags.some((f) => f[0] === "bad");
+    const name = p ? p.name : "this line";
     return `<div class="dk-row${bad ? " is-bad" : flags.length ? " is-warn" : ""}">
       <div class="dk-main">
         <button type="button" class="scan-name" data-dkfix="${i}">${esc(p ? p.name : "Not matched")}<small>change</small></button>
-        <small>${esc(l.text)}${l.code ? ` · ${esc(l.code)}` : ""}${l.count > 1 ? ` · ${l.count} lines on the docket` : ""}</small>
+        <small>${esc(l.text)}${l.code ? ` · ${esc(l.code)}` : ""}${l.count > 1 ? ` · ${l.count} lines on the docket` : ""}${
+          l.edited ? ' <em class="dk-edited">edited</em>' : ""}</small>
         ${flags.map(([t, m]) => `<span class="scan-flag is-${t}">${esc(m)}</span>`).join("")}
         ${s.fixing === i ? fixHtml(l, i) : ""}
       </div>
-      <span class="dk-qty">${l.qty}${l.unit ? `<small>${esc(l.unit)}</small>` : ""}</span>
-      <span class="dk-batch">${l.batch ? esc(l.batch) : "–"}${l.expiry ? `<small>exp ${esc(l.expiry)}</small>` : ""}</span>
+      <div class="dk-fields">
+        <label class="dk-f dk-f-qty"><span>Qty${l.unit ? ` <small>${esc(l.unit)}</small>` : ""}</span>
+          <input class="dk-input" type="number" min="0" max="9999" step="1" inputmode="numeric" data-dkq="${i}"
+            value="${l.qty}" aria-label="Quantity of ${esc(name)}" /></label>
+        <label class="dk-f dk-f-batch"><span>Batch</span>
+          <input class="dk-input" maxlength="40" autocapitalize="characters" autocomplete="off" data-dkb="${i}"
+            value="${esc(l.batch)}" placeholder="–" aria-label="Batch of ${esc(name)}" /></label>
+        <label class="dk-f dk-f-exp"><span>Expiry</span>
+          <input class="dk-input" type="date" data-dke="${i}" value="${esc(fullExpiry(l.expiry))}" aria-label="Expiry of ${esc(name)}" /></label>
+      </div>
     </div>`;
   };
 
@@ -84,16 +109,25 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
     const docketProducts = s.review.lines.filter((l) => l.productId).length;
     const tags = [r.numberMatch && "PO number on the docket", r.supplierMatch && "Same supplier",
       r.hits && `${r.hits} of ${docketProducts} docket products on it`].filter(Boolean);
+    // Who ordered it and when: whoever receives it often isn't the person who sent it
+    const orderKey = po.orderDate || keyOf(po.createdAt);
+    const ordered = orderKey ? `Ordered ${niceDate(orderKey)} (${ago(orderKey)})${po.createdBy ? ` by ${po.createdBy}` : ""}` : "";
+    const sentKey = po.sentDate || keyOf(po.sentAt);
+    const sent = sentKey ? `Sent ${niceDate(sentKey)}${po.sentBy ? ` by ${po.sentBy}` : ""}${po.sentVia ? ` · ${po.sentVia}` : ""}` : "";
+    const facts = [po.status === "part" ? "Part received" : "", po.expectedDate && `Needed by ${niceDate(po.expectedDate) || po.expectedDate}`,
+      `${n} line${n === 1 ? "" : "s"}`].filter(Boolean).join(" · ");
     return `<label class="dk-po${po.id === s.poId ? " is-on" : ""}">
       <input type="radio" name="dk-po" value="${esc(po.id)}" data-dkpo${po.id === s.poId ? " checked" : ""} />
       <span class="dk-po-txt">
         <span class="dk-po-title"><strong>${esc(po.number || "Purchase order")}</strong><span>${esc(poSupplier(po) || "No supplier")}</span></span>
-        <small>${esc([STATUS[po.status] || po.status, po.expectedDate && `needed by ${niceDate(po.expectedDate) || po.expectedDate}`,
-          `${n} line${n === 1 ? "" : "s"}`].filter(Boolean).join(" · "))}</small>
+        ${ordered ? `<small class="dk-po-who">${esc(ordered)}</small>` : ""}
+        ${sent ? `<small class="dk-po-who">${esc(sent)}</small>` : ""}
+        <small>${esc(facts)}</small>
         ${tags.length ? `<span class="dk-tags">${tags.map((t) => `<em>${esc(t)}</em>`).join("")}</span>` : ""}
       </span>
     </label>`;
   };
+  
   // Two lines on the button: what it does, then which order
   const receiveLabel = (po) => `<span>Receive stock</span><small>${esc(po ? po.number || "this order" : "Choose an order")}</small>`;
 
@@ -129,9 +163,8 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
       </div>
 
       <h3 class="dk-h">On the docket <small>${r.lines.length}</small></h3>
-      ${r.lines.length ? `<div class="dk-list">
-          <div class="dk-list-head"><span>Product</span><span class="dk-qty">Qty</span><span class="dk-batch">Batch · expiry</span></div>
-          ${r.lines.map(lineHtml).join("")}</div>`
+      ${r.lines.length ? `<p class="dk-muted dk-hint">Check the quantity, batch and expiry against the docket and fix anything misread.</p>
+        <div class="dk-list">${r.lines.map(lineHtml).join("")}</div>`
         : '<p class="scan-err">No product lines were read. Try a closer photo of the docket.</p>'}
 
       <h3 class="dk-h">Which purchase order is it for?</h3>
@@ -164,7 +197,8 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
       const receivedAt = isNaN(at) ? new Date() : at;
       const lines = s.review.lines.map((l) => ({
         productId: l.productId, productName: (byId.get(l.productId) || {}).name || "",
-        text: l.text, code: l.code, qty: l.qty, unit: l.unit, batch: l.batch, expiry: l.expiry,
+        text: l.text, code: l.code, qty: l.qty, unit: l.unit, batch: String(l.batch || "").trim(), expiry: fullExpiry(l.expiry),
+        edited: l.edited === true,
       }));
       const saved = await saveDocketScan({ photo, result, review: s.review, lines, po,
         receivedBy: who ? who.name : (staff && staff.name) || "", receivedByUid: s.recvUid, receivedAt, note: s.note }, staff);
@@ -202,7 +236,31 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
     else if (act === "save") save(false, b);
     else if (act === "receive") save(true, b);
   });
-  el.addEventListener("input", (e) => { if (e.target.dataset.dknote !== undefined) s.note = e.target.value; });
+  // Refreshes one docket line's name, notes and flags without touching its boxes (so typing isn't interrupted)
+  function refreshLine(i) {
+    const rowEl = el.querySelectorAll(".dk-list .dk-row")[i];
+    const l = s.review.lines[i];
+    if (!rowEl || !l) return;
+    const tmp = document.createElement("div");
+    tmp.innerHTML = lineHtml(l, i);
+    const fresh = tmp.firstElementChild;
+    rowEl.className = fresh.className;
+    rowEl.querySelector(".dk-main").replaceWith(fresh.querySelector(".dk-main"));
+  }
+
+  el.addEventListener("input", (e) => {
+    const t = e.target;
+    if (t.dataset.dknote !== undefined) { s.note = t.value; return; }
+    const i = t.dataset.dkq ?? t.dataset.dkb ?? t.dataset.dke;
+    const l = i !== undefined ? s.review.lines[Number(i)] : null;
+    if (!l) return;
+    if (t.dataset.dkq !== undefined) l.qty = Math.min(9999, Math.max(0, parseInt(t.value, 10) || 0));
+    else if (t.dataset.dkb !== undefined) l.batch = t.value.trim().toUpperCase().slice(0, 40);
+    else if (/^\d{4}-\d{2}-\d{2}$/.test(t.value) || t.value === "") l.expiry = t.value;
+    l.edited = true;
+    refreshLine(Number(i));   // flags and the "edited" tag update as you type
+  });
+  
   el.addEventListener("change", (e) => {
     const t = e.target;
     if (t.dataset.dkrecv !== undefined) s.recvUid = t.value;

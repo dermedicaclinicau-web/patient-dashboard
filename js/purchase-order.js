@@ -186,17 +186,6 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       </section>`;
   }
 
-  function productOptions(sel) {
-    const mine = products.filter((p) => p.active && suppliesProduct(p, po.supplierId));
-    const others = products.filter((p) => p.active && !suppliesProduct(p, po.supplierId));
-    const current = sel ? byId.get(sel) : null;
-    const opt = (p) => `<option value="${esc(p.id)}"${p.id === sel ? " selected" : ""}>${esc(p.name)}</option>`;
-    return `<option value="">Choose a product…</option>${
-      current && !current.active ? `<optgroup label="Inactive">${opt(current)}</optgroup>` : ""}${
-      mine.length ? `<optgroup label="This supplier">${mine.map(opt).join("")}</optgroup>` : ""}${
-      others.length ? `<optgroup label="Other products">${others.map(opt).join("")}</optgroup>` : ""}`;
-  }
-
   function lineRow(l, i) {
     if (!editable()) {
       return `<tr><td><strong>${esc(l.name)}</strong>${l.supplierCode ? ` <small class="po-code">${esc(l.supplierCode)}</small>` : ""}</td>
@@ -260,7 +249,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
         <div class="po-dates">
           <label class="tb-field"><span>Order date</span>
             <input class="fe-input" type="date" data-k="orderDate" value="${esc(po.orderDate || today)}" max="${today}" />
-            <small class="muted">${po.orderDate && po.orderDate < today
+            <small class="muted">${po.backdated
               ? '<span class="po-tag">backdated</span> The PO number follows this date.'
               : "Change it for an order placed earlier, e.g. one from the old app."}</small></label>
           <label class="tb-field po-needed"><span>Needed by (optional)</span>
@@ -488,7 +477,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return;   // still being typed
       if (v > dayKey()) { msgEl.textContent = "The order date can't be in the future."; return; }
       po.orderDate = v;
-      po.backdated = v < dayKey();
+      po.backdated = v < (po.createdAt instanceof Date && !isNaN(po.createdAt) ? dayKey(po.createdAt) : dayKey());
       changed();
       return;
     }

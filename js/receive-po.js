@@ -23,6 +23,17 @@ function fullExpiry(e) {
   return m ? `${m[1]}-${m[2]}-${String(new Date(+m[1], +m[2], 0).getDate()).padStart(2, "0")}` : "";
 }
 
+// "vial" / "vials", "box" / "boxes" are the same unit
+const unitKey = (x) => String(x || "").trim().toLowerCase();
+const sameUnit = (a, b) => {
+  const x = unitKey(a), y = unitKey(b);
+  return !!x && !!y && (x === y || `${x}s` === y || `${y}s` === x || `${x}es` === y || `${y}es` === x);
+};
+// A docket line in stock units: counted in single items (e.g. "20 syringes") → as is;
+// counted in the order unit ("2 boxes") or no unit read → × pack size
+const stockUnitsOf = (d, l) => (l.packSize > 1 && sameUnit(d.unit, l.stockUnit) && !sameUnit(d.unit, l.orderUnit)
+  ? d.qty : d.qty * l.packSize);
+
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const niceDate = (d) => (d instanceof Date ? d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "");
 const left = (l) => Math.max(0, (l.qty || 0) - (l.received || 0));
@@ -129,7 +140,8 @@ export async function mountReceivePo(root, poId, staff) {
   };
 
   const recHtml = (r) => `<div class="rcv-rec"><div>
-      <strong>${esc(niceDate(r.at))}</strong> · ${esc(r.by || "")}${r.docketNo ? ` · Docket ${esc(r.docketNo)}` : ""}${r.closed ? " · <em>order closed</em>" : ""}
+      <strong>${esc(niceDate(r.receivedAt ? new Date(r.receivedAt) : r.at))}</strong> · received by ${esc(r.receivedBy || r.by || "")}${
+        r.docketNo ? ` · Docket ${esc(r.docketNo)}` : ""}${r.closed ? " · <em>order closed</em>" : ""}
       <small>${esc((r.lines || []).map((x) => `${x.arrived} × ${x.name}`).join(", "))}</small>
       ${r.note ? `<small>${esc(r.note)}</small>` : ""}</div>
     ${r.docket && r.docket.url ? `<a class="rcv-link" href="${esc(r.docket.url)}" target="_blank" rel="noopener">View docket</a>` : ""}</div>`;
@@ -388,15 +400,19 @@ export async function mountReceivePo(root, poId, staff) {
     byProduct.forEach((list, pid) => {
       const l = po.lines.find((x) => x.productId === pid && left(x) > 0);
       if (!l) return;
-      setArrived(l, list.reduce((a, d) => a + d.qty, 0));
-      if (tracked(l)) {   // one row per batch on the docket
-        state.get(l.key).rows = list.map((d) => ({
-          ...newRow(home(l), d.qty * l.packSize), batch: String(d.batch || ""), expiry: fullExpiry(d.expiry),
-        }));
-        drawSplits(l);
-      }
+      const units = list.map((d) => stockUnitsOf(d, l));
+      const total = units.reduce((a, n) => a + n, 0);
+      // Order units arrived (rounded up). If the docket isn't a whole number of packs,
+      // the "put away" check shows the mismatch so it can be fixed before saving.
+      setArrived(l, Math.max(1, Math.ceil(total / l.packSize)));
+      const s = state.get(l.key);
+      s.rows = tracked(l)
+        ? list.map((d, i) => ({ ...newRow(home(l), units[i]), batch: String(d.batch || ""), expiry: fullExpiry(d.expiry) }))
+        : [newRow(home(l), total)];
+      drawSplits(l);
       filled++;
     });
+    
     const dn = $('[data-role="docketNo"]');
     if (dn && pre.docketNumber) dn.value = pre.docketNumber;
     const nt = $('[data-role="note"]');

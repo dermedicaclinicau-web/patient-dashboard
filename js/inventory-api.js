@@ -638,8 +638,10 @@ export async function savePo(id, po, staff) {
   if (po.orderDate !== undefined && po.orderDate !== "") {
     const today = dayKey();
     if (!KEY_RE.test(po.orderDate) || po.orderDate > today) throw new Error("Check the order date: it can't be in the future.");
+    // Backdated = earlier than the day it was entered (not just "before today")
+    const made = po.createdAt instanceof Date && !isNaN(po.createdAt) ? dayKey(po.createdAt) : today;
     data.orderDate = po.orderDate;
-    data.backdated = po.orderDate < today;
+    data.backdated = po.orderDate < made;
   }
   await updateDoc(doc(db, "inv_pos", id), data);
 }
