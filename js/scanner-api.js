@@ -2,10 +2,11 @@
 // matched to the product list here, then saved: the scan (Firestore: scans, photo in Storage) and,
 // in the same transaction, the sale that takes the products off the Shelf.
 import { db, auth } from "./firebase-config.js";
-import { collection, doc, setDoc, getDoc, updateDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { collection, doc, setDoc, getDoc, getDocs, query, where, updateDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { getStorage, ref as sRef, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 import { callApi } from "./appointments.js";
 import { dayKey, recordSale, listSalesOn, listPos } from "./inventory-api.js";
+import { fetchPatients, findPatientsById, patientIds } from "./patients.js";
 
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const num = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : r2(v));
@@ -421,4 +422,124 @@ export async function saveDocketScan({ photo, result, review, lines, po, receive
 export async function linkDocketReceipt(scanId, receiptId) {
   if (!scanId) return;
   await updateDoc(doc(db, "scans", scanId), { status: "received", receiptId: String(receiptId || ""), linkedAt: serverTimestamp() });
+}
+
+/* ---------- Product prescriptions ---------- */
+export async function readPrescription(base64, rxProducts) {
+  let res;
+  try {
+    res = await callApi({ action: "scanner", op: "rx", mime: "image/jpeg", image: base64, rxProducts });
+  } catch (err) {
+    if (err && err.code === "UNAUTHORIZED") throw err;
+    console.error("Prescription scanner call failed:", err);
+    throw new Error(err && err.message && !err.code ? err.message : "The scanner couldn't be reached. Try again.");
+  }
+  if (res.problem) throw new Error(res.problem);
+  if (!res.result) throw new Error("The scanner couldn't read that prescription. Try again.");
+  return res.result;
+}
+
+// Only exact names from the list are kept. Fading Cream is decided here too (any of its ingredients).
+const FADING_RE = /\b(hq|hydroquinone|kojic|ascorbic|dexameth\w*|dexa)\b/i;
+export function reviewRx(result, rxProducts) {
+  const byLower = new Map(rxProducts.map((n) => [n.toLowerCase(), n]));
+  const fading = byLower.get("fading cream") || "";
+  const items = (result.items || []).slice(0, 20).map((it) => {
+    const text = String(it.text || "").slice(0, 500);
+    const strengths = String(it.strengths || "").slice(0, 300);
+    let product = byLower.get(String(it.product || "").trim().toLowerCase()) || "";
+    if (fading && FADING_RE.test(`${text} ${strengths}`)) product = fading;
+    return {
+      text, product, strengths, quantity: String(it.quantity || "").slice(0, 60),
+      directions: String(it.directions || "").slice(0, 300), repeats: String(it.repeats || "").slice(0, 20),
+      conf: conf(it.confidence), fixed: false,
+    };
+  }).filter((it) => it.text || it.product);
+  return {
+    patientName: String(result.patientName || "").slice(0, 150),
+    address: String(result.address || "").slice(0, 300),
+    postcode: String(result.postcode || "").replace(/\D/g, "").slice(0, 4),
+    date: ymd(result.date),
+    scriptNumber: String(result.scriptNumber || "").trim().toUpperCase().slice(0, 40),
+    prescriber: String(result.prescriber || "").slice(0, 120),
+    items,
+  };
+}
+
+// The patient this prescription is for, from every patient (not just today's bookings).
+// Searched by full name (either order), then surname. The postcode in their address breaks ties.
+// Picked automatically only when one patient is clearly the best.
+export async function findRxPatient(review) {
+  const name = normName(review.patientName);
+  if (!name) return { match: null, candidates: [] };
+  const words = name.split(" ").filter((w) => w.length > 1);
+  const terms = [...new Set([name, words[words.length - 1], words[0]].filter(Boolean))];
+  const found = new Map();
+  for (const t of terms) {
+    const r = await fetchPatients({ mode: "name", term: t }).catch(() => ({ patients: [] }));
+    r.patients.forEach((p) => { if (!p.mergedInto) found.set(p.id, p); });
+  }
+  const pc = review.postcode;
+  const scored = [...found.values()].map((p) => {
+    let s = nameScore(review.patientName, p.name);
+    if (pc && String(p.address || "").includes(pc)) s += 0.3;
+    return { p, s };
+  }).filter((x) => x.s >= 0.5).sort((a, b) => b.s - a.s);
+  const top = scored[0];
+  const clear = !!top && top.s >= 0.8 && (!scored[1] || scored[1].s <= top.s - 0.3);
+  return { match: clear ? top.p : null, candidates: scored.slice(0, 8).map((x) => x.p) };
+}
+
+// "change": search all patients by name or patient ID
+export async function searchPatientsQuick(term) {
+  const t = String(term || "").trim();
+  if (t.length < 2) return [];
+  const [byName, byId] = await Promise.all([
+    fetchPatients({ mode: "name", term: normName(t) }).then((r) => r.patients).catch(() => []),
+    findPatientsById(t).catch(() => []),
+  ]);
+  const out = new Map();
+  [...byId, ...byName].forEach((p) => { if (!p.mergedInto) out.set(p.id, p); });
+  return [...out.values()].slice(0, 10);
+}
+
+// A prescription with this script number that's already been saved, or null
+export async function rxScanExists(scriptNumber) {
+  const n = String(scriptNumber || "").trim().toUpperCase();
+  if (!n) return null;
+  const snap = await getDocs(query(collection(db, "scans"), where("scriptNumber", "==", n)));
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() })).find((x) => x.kind === "rx" && x.status !== "deleted") || null;
+}
+
+// Saves the prescription and its photo. Shown on the patient's Product Prescriptions card.
+export async function saveRxScan({ photo, result, review, patient, date, items, note = "" }, staff) {
+  const uid = auth.currentUser && auth.currentUser.uid;
+  if (!uid) throw new Error("Your session has ended. Log in again.");
+  const ref = doc(collection(db, "scans"));
+  const key = dayKey();
+  const part = (s, n = 40) => String(s || "").trim().replace(/[^A-Za-z0-9-]+/g, "-").replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "").slice(0, n);
+  const fileName = `${date}_${part(patient.name, 40)}${review.scriptNumber ? `_${part(review.scriptNumber, 20)}` : ""}__${ref.id.slice(0, 6)}.jpg`;
+  let file = null;
+  if (photo) {
+    try {
+      const path = `scans/rx/${key}/${fileName}`;
+      const r = sRef(getStorage(), path);
+      await uploadBytes(r, photo, { contentType: "image/jpeg", contentDisposition: `inline; filename="${fileName}"` });
+      file = { path, url: await getDownloadURL(r), name: fileName };
+    } catch (err) { console.warn("The prescription photo wasn't saved:", err); }
+  }
+  await setDoc(ref, {
+    kind: "rx", dateKey: key, status: "saved",
+    patientId: patient.id, patientPttId: String(patient.pttId || ""), patientIds: patientIds(patient),
+    patientName: patient.name, readName: review.patientName,
+    recordDate: date, scriptNumber: review.scriptNumber, prescriber: review.prescriber,
+    items: items.map((it) => ({
+      product: it.product, text: it.text, strengths: String(it.strengths || "").trim().slice(0, 300),
+      quantity: String(it.quantity || "").trim().slice(0, 60), directions: String(it.directions || "").trim().slice(0, 300),
+      repeats: String(it.repeats || "").trim().slice(0, 20), fixed: !!it.fixed,
+    })),
+    note: String(note || "").trim().slice(0, 1000), photo: file, raw: JSON.stringify(result).slice(0, 20000),
+    by: String((staff && staff.name) || "").slice(0, 120), byUid: uid, at: serverTimestamp(),
+  });
+  return { id: ref.id };
 }

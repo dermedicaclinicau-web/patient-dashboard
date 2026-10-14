@@ -81,12 +81,29 @@ export async function fetchBillingAndRx(patient) {
   const ids = patientIds(patient);
   if (!ids.length) return { billing: [], rx: [], injectables: [] };
 
-  const [scanRes, rxRes, portalRes] = await Promise.allSettled([
+  const [scanRes, rxRes, portalRes, rxScanRes] = await Promise.allSettled([
     getDocs(query(collection(db, "scanned_file_log"), where("PatientID", "in", ids))),
     getDocs(query(collection(db, "prescription_record"), where(new FieldPath("Patient ID"), "in", ids))),
     portalPrescriptions(patient),
+    getDocs(query(collection(db, "scans"), where("patientIds", "array-contains-any", ids))),
   ]);
   const portal = portalRes.status === "fulfilled" ? portalRes.value : [];
+  // Prescriptions saved from the Scanner: one row per item, with the photo
+  const scannedRx = rxScanRes.status === "fulfilled"
+    ? rxScanRes.value.docs.map((d) => ({ id: d.id, ...d.data() }))
+        .filter((s) => s.kind === "rx" && s.status !== "deleted")
+        .flatMap((s) => (Array.isArray(s.items) ? s.items : []).map((it) => ({
+          title: String(it.product || "Prescription"),
+          date: keyDate(s.recordDate), dateText: String(s.recordDate || ""),
+          staff: s.by ? `Scanned by ${s.by}` : "",
+          recordId: String(s.scriptNumber || ""),
+          link: s.photo && s.photo.url ? String(s.photo.url) : "",
+          detail: [it.strengths, it.quantity && `Qty ${it.quantity}`, it.directions, it.repeats && `${it.repeats} repeats`]
+            .filter(Boolean).join(" · "),
+          scanned: true,
+        })))
+    : [];
+  if (rxScanRes.status === "rejected") console.warn("Scanned prescriptions couldn't be loaded:", rxScanRes.reason);
   const billing = scanRes.status === "fulfilled"
     ? scanRes.value.docs
         .map((d) => ({ docId: d.id, ...d.data() }))
@@ -121,7 +138,7 @@ export async function fetchBillingAndRx(patient) {
   [scanRes, rxRes].forEach((r) => { if (r.status === "rejected") console.error("Billing/Rx load failed:", r.reason); });
   return {
     billing,
-    rx: rx ? [...rx.filter((r) => !isInjectable(r)), ...portal.filter((p) => p.kind === "product")].sort(byDateDesc) : null,
+    rx: rx ? [...rx.filter((r) => !isInjectable(r)), ...portal.filter((p) => p.kind === "product"), ...scannedRx].sort(byDateDesc) : null,
     injectables: rx ? [...rx.filter(isInjectable), ...portal.filter((p) => p.kind === "treatment")].sort(byDateDesc) : null,
   };
 }
@@ -306,6 +323,16 @@ function billingHtml(b) {
 }
 
 function rxHtml(r) {
+  if (r.scanned) {
+    return `
+      <article class="rc-item">
+        <div class="rc-item-top"><h4>${escapeHtml(r.title)}</h4><span class="rc-date">${escapeHtml(fmt(r))}</span></div>
+        ${r.detail ? `<p class="rc-staff">${escapeHtml(r.detail)}</p>` : ""}
+        ${r.staff ? `<p class="rc-staff">${escapeHtml(r.staff)}</p>` : ""}
+        <p class="bp-id"><span class="bp-portal is-scan">Scanned</span>${r.recordId ? ` ${escapeHtml(r.recordId)}` : ""}</p>
+        <div class="rc-actions">${viewLink(r.link)}</div>
+      </article>`;
+  }
   if (r.portalId) {
     return `
       <article class="rc-item">

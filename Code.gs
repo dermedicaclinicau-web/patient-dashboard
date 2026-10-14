@@ -3003,6 +3003,11 @@ const PERMS_ = [
   ['inventory.kit', 'Inventory', 'Carries a kit (set by the Injector tick on each staff member)'],
   ['inventory.jt', 'Inventory', 'Approves releases from JT storage'],
   ['inventory.count', 'Inventory', 'Does the opening count (Shelf and JT storage)'],
+  ['inventory.history', 'Inventory', 'Record orders received before the portal (no stock change)'],
+  ['menu.scanner', 'Scanner', 'Scanner menu (open the Scanner)'],
+  ['scanner.billing', 'Scanner', 'Scan billing sheets (takes products off the Shelf)'],
+  ['scanner.docket', 'Scanner', 'Scan delivery dockets'],
+  ['scanner.rx', 'Scanner', 'Scan product prescriptions (adds them to the patient)'],
   ['menu.reports', 'Menus', 'Reporting: variance, wastage, kit reconciliation and usage'],
   ['dash.attention', 'My dashboard', 'Needs my attention'],
   ['dash.appts', 'My dashboard', 'My appointments today'],
@@ -3018,11 +3023,38 @@ const PERMS_ALL_ = PERMS_.map(function (p) { return p[0]; });
 const ROLE_DEFAULTS_ = {
   Clinician: ['menu.patients', 'menu.calendar', 'menu.tasks', 'patients.edit', 'clinical.view', 'billing.view',
     'consult.record', 'send.patients', 'tasks.run', 'ssp.create', 'menu.inventory', 'inventory.request', 'inventory.receive',
+    'menu.scanner', 'scanner.billing', 'scanner.docket',
     'dash.attention', 'dash.appts', 'dash.tasks', 'dash.kit', 'dash.records', 'dash.usage', 'dash.requests', 'dash.stock'],
   Reception: ['menu.patients', 'menu.calendar', 'menu.tasks', 'patients.edit', 'send.patients', 'tasks.run',
     'menu.inventory', 'inventory.view', 'inventory.request', 'inventory.receive', 'inventory.order', 'inventory.count', 'menu.reports',
+    'menu.scanner', 'scanner.billing', 'scanner.docket',
     'dash.attention', 'dash.appts', 'dash.tasks', 'dash.requests', 'dash.overview'],
 };
+
+
+// Run ONCE from the editor after adding the Scanner permissions: every existing role keeps the Scanner.
+// Untick it afterwards in Staff → Roles & access for any role that shouldn't have it.
+function grantScannerAccess() {
+  const cfg = getConfig_();
+  const doc = fsGetDoc_(cfg, 'staff_roles/config');
+  if (!doc || !doc.roles) { console.log('Roles have never been saved, so the defaults apply. Nothing to do.'); return; }
+  const add = ['menu.scanner', 'scanner.billing', 'scanner.docket'];
+  const roles = doc.roles;
+  const changed = [];
+  Object.keys(roles).forEach(function (r) {
+    if (/^admin$/i.test(r)) return;
+    const list = Array.isArray(roles[r]) ? roles[r].slice() : [];
+    const before = list.length;
+    add.forEach(function (p) { if (list.indexOf(p) === -1) list.push(p); });
+    roles[r] = list;
+    if (list.length !== before) changed.push(r);
+  });
+  fsPatch_(cfg, 'staff_roles/config', {
+    roles: roles, updatedAt: new Date().toISOString(), updatedBy: 'grantScannerAccess (editor)',
+  });
+  CacheService.getScriptCache().remove('roles_cfg_v2');
+  console.log('Scanner access added to: ' + (changed.join(', ') || 'nobody (already had it)'));
+}
 
 // Role names + each role's ticks, from staff_roles/config (defaults until it's first saved).
 // Cached 5 minutes. Not cached if Firestore couldn't be read, so a hiccup doesn't stick.
@@ -5028,6 +5060,9 @@ function testChatReminders() {
 function scannerAction_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  const op = String(body.op || '');
+  const kind = op === 'docket' ? 'docket' : op === 'rx' ? 'rx' : 'billing';
+  if (!can_(session, 'menu.scanner') || !can_(session, 'scanner.' + kind)) return { ok: false, error: 'FORBIDDEN' };
 
   const cache = CacheService.getScriptCache();
   const rlKey = 'scan_' + session.uid;
@@ -5036,14 +5071,13 @@ function scannerAction_(body) {
   cache.put(rlKey, String(n + 1), 3600);
 
   try {
-    const result = String(body.op || '') === 'docket' ? scanDocket_(body) : scanBilling_(body);
+    const result = kind === 'docket' ? scanDocket_(body) : kind === 'rx' ? scanRx_(body) : scanBilling_(body);
     return { ok: true, result: result };
   } catch (err) {
     console.error('Scanner failed for ' + session.name + ': ' + (err && err.stack || err));
     return { ok: true, problem: String((err && err.message) || "The scanner couldn't read that photo. Try again.") };
   }
 }
-
 function scanBilling_(body) {
   if (body.op !== 'billing') throw new Error('Unknown scanner action.');
   const image = String(body.image || '');
@@ -5223,4 +5257,101 @@ const SCAN_DOCKET_SCHEMA_ = {
     }, required: ['text', 'qty', 'productId', 'confidence'] } },
   },
   required: ['supplier', 'docketNumber', 'lines'],
+};
+
+/* ---------- Scanner: product prescriptions ---------- */
+// body: { op: "rx", image, mime, rxProducts: ["Epiduo", "Fading Cream", …] }   (the clinic's prescription product names)
+const FADING_CREAM_ = 'Fading Cream';
+const FADING_RE_ = /\b(hq|hydroquinone|kojic|ascorbic|dexameth\w*|dexa)\b/i;
+
+function scanRx_(body) {
+  const image = String(body.image || '');
+  if (!image) throw new Error('The photo is missing. Take it again.');
+  if (image.length > 12 * 1024 * 1024) throw new Error('The photo is too big. Take it again.');
+  const products = uniq_((Array.isArray(body.rxProducts) ? body.rxProducts : [])
+    .map(function (s) { return String(s || '').replace(/\s+/g, ' ').trim().slice(0, 120); })
+    .filter(Boolean)).slice(0, 400);
+  if (!products.length) throw new Error('The prescription product list is empty.');
+
+  const out = geminiJson_(scanRxPrompt_(products), image, String(body.mime || 'image/jpeg'), SCAN_RX_SCHEMA_);
+
+  // Only exact names from the list are kept. Fading Cream is decided here too, not left to Gemini alone.
+  const byLower = {};
+  products.forEach(function (p) { byLower[p.toLowerCase()] = p; });
+  const fading = byLower[FADING_CREAM_.toLowerCase()] || '';
+  out.items = (Array.isArray(out.items) ? out.items : []).map(function (it) {
+    it = it || {};
+    const text = String(it.text || '');
+    let product = byLower[String(it.product || '').trim().toLowerCase()] || '';
+    if (fading && FADING_RE_.test(text)) { product = fading; it.confidence = Math.max(Number(it.confidence) || 0, 0.95); }
+    return {
+      text: text.slice(0, 500), product: product, strengths: String(it.strengths || '').slice(0, 300),
+      quantity: String(it.quantity || '').slice(0, 60), directions: String(it.directions || '').slice(0, 300),
+      repeats: String(it.repeats || '').slice(0, 20), confidence: Math.max(0, Math.min(1, Number(it.confidence) || 0)),
+    };
+  }).filter(function (it) { return it.text || it.product; });
+  // Two Fading Cream ingredient lines are one prescription
+  if (fading) {
+    const fc = out.items.filter(function (it) { return it.product === fading; });
+    if (fc.length > 1) {
+      const merged = Object.assign({}, fc[0], {
+        text: fc.map(function (x) { return x.text; }).join('\n'),
+        strengths: fc.map(function (x) { return x.strengths; }).filter(Boolean).join(', '),
+        quantity: fc.map(function (x) { return x.quantity; }).filter(Boolean)[0] || '',
+      });
+      out.items = [merged].concat(out.items.filter(function (it) { return it.product !== fading; }));
+    }
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(out.date || ''))) out.date = '';
+  return out;
+}
+
+function scanRxPrompt_(products) {
+  return [
+    'You are reading a photo of a handwritten prescription from Dermedica, an Australian skin clinic.',
+    'The doctor\'s details are printed at the top; the patient and the medicines are handwritten.',
+    '',
+    'Read:',
+    '1. patientName: the patient\'s full name as written. address and postcode: the patient\'s address (helps find the right patient).',
+    '2. date: the date written next to the doctor\'s signature, as YYYY-MM-DD. It is Australian: DAY/MONTH/YEAR,',
+    '   and a 2-digit year is 20YY (28/4/26 = 2026-04-28). Use "" if you can\'t read it.',
+    '3. scriptNumber: the printed number at the top right (e.g. AC22102718). prescriber: the doctor\'s name printed at the top.',
+    '4. items: one per medicine or compound. text = exactly as written. strengths = any percentages or doses (e.g. "4% HQ, 2% kojic acid").',
+    '   quantity = the amount to supply (often circled, e.g. "100", "20", "50g"). directions = how to use it, in plain English',
+    '   ("bd" = twice a day, "tds" = three times a day, "QID" = four times a day, "nocte" = at night, "ii" = two).',
+    '   repeats = number of repeats if written, else "".',
+    '',
+    'RULES',
+    '- A compound with ANY of hydroquinone (HQ), kojic acid, ascorbic acid or dexamethasone is ONE item, product "' + FADING_CREAM_ + '".',
+    '  Put all its ingredients in strengths, and the total amount (e.g. 50g) in quantity.',
+    '- product must be copied EXACTLY from the list below. Choose the one the medicine is (brand or generic name). If none fits, use "".',
+    '  Never make up a product name.',
+    '- Ignore the printed form labels, PBS boxes, signatures and the yellow section.',
+    '- Give each item a confidence from 0 to 1.',
+    '',
+    'Prescription products:',
+    products.join('\n'),
+  ].join('\n');
+}
+
+const SCAN_RX_SCHEMA_ = {
+  type: 'OBJECT',
+  properties: {
+    patientName: { type: 'STRING' },
+    address: { type: 'STRING' },
+    postcode: { type: 'STRING' },
+    date: { type: 'STRING', description: 'YYYY-MM-DD, or empty' },
+    scriptNumber: { type: 'STRING' },
+    prescriber: { type: 'STRING' },
+    items: { type: 'ARRAY', items: { type: 'OBJECT', properties: {
+      text: { type: 'STRING', description: 'The medicine exactly as written' },
+      product: { type: 'STRING', description: 'An exact name from the product list, or empty' },
+      strengths: { type: 'STRING' },
+      quantity: { type: 'STRING' },
+      directions: { type: 'STRING' },
+      repeats: { type: 'STRING' },
+      confidence: { type: 'NUMBER' },
+    }, required: ['text', 'product', 'confidence'] } },
+  },
+  required: ['patientName', 'date', 'items'],
 };
