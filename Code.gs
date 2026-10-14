@@ -42,6 +42,8 @@ function doPost(e) {
     if (body.action === 'notify') return json_(handleNotify_(body));
     if (body.action === 'plan') return json_(handlePlan_(body));
     if (body.action === 'recordingRules') return json_(handleRecordingRules_(body));
+    if (body.action === 'scanner') return out_(scannerAction_(body));
+    
 
     const pin = String(body.pin || '').trim();
 
@@ -5017,4 +5019,115 @@ function chatHelpReminders_(cfg) {
 // Run from the editor to try it straight away (still only emails for messages waiting 10+ minutes)
 function testChatReminders() {
   chatHelpReminders_(getConfig_());
+}
+
+/* ===================== Scanner: photos read by Gemini ===================== */
+// body: { op: "billing", image: base64 JPEG, mime, products: [{ id, name, brand }] }
+// The key stays in Script Properties, so it never reaches the browser.
+// Always answers ok: true, so callApi doesn't replace the message. Problems come back in "problem".
+function scannerAction_(body) {
+  try {
+    return { ok: true, result: scanBilling_(body) };
+  } catch (err) {
+    console.error('Scanner failed: ' + (err && err.stack || err));
+    return { ok: true, problem: String((err && err.message) || "The scanner couldn't read that photo. Try again.") };
+  }
+}
+
+function scanBilling_(body) {
+  if (body.op !== 'billing') throw new Error('Unknown scanner action.');
+  const image = String(body.image || '');
+  if (!image) throw new Error('The photo is missing. Take it again.');
+  if (image.length > 12 * 1024 * 1024) throw new Error('The photo is too big. Take it again.');
+  const products = (Array.isArray(body.products) ? body.products : []).slice(0, 800)
+    .map((p) => ({ id: String(p.id || '').slice(0, 60), name: String(p.name || '').slice(0, 150), brand: String(p.brand || '').slice(0, 80) }))
+    .filter((p) => p.id && p.name);
+  if (!products.length) throw new Error('The product list is empty.');
+  return geminiJson_(scanBillingPrompt_(products), image, String(body.mime || 'image/jpeg'), SCAN_BILLING_SCHEMA_);
+}
+
+function scanBillingPrompt_(products) {
+  return [
+    'You are checking a photo taken at a skin clinic. It shows a printed billing sheet with handwriting,',
+    'and usually the actual products being given to the patient placed on or next to it.',
+    '',
+    'Read:',
+    '1. The header: patient name, appointment date (as YYYY-MM-DD), time and provider (e.g. "Dr Teh").',
+    '2. "Services done today": each service and its fee. If a sum is written (e.g. "190-95=95"), the fee is the final number.',
+    '3. The products section (the rows with a "Purchase Status" and "Fee" column): each product line exactly as written,',
+    '   its quantity (1 unless written like "x2" or "2x") and its fee. Ignore crossed-out lines. Ticks and marks are not products.',
+    '4. The grand total, any account credit used, and the total amount to pay (each as the final number of any sum written).',
+    '5. Every physical product visible in the photo (bottles, tubes, boxes), read from its label, and how many of each.',
+    '',
+    'Match every written line and every product seen to ONE id from the product list below.',
+    'Common abbreviations: "D." or "Derm" = Dermedica, "ZO" = ZO Skin Health, "DPD" = Daily Power Defense, "SPF" = a sunscreen.',
+    'Use the brand, the product name and the size to choose. If nothing fits, use "". Never make up an id.',
+    'Give each match a confidence from 0 to 1.',
+    '',
+    'Products (id | brand | name):',
+    products.map((p) => p.id + ' | ' + p.brand + ' | ' + p.name).join('\n'),
+  ].join('\n');
+}
+
+const SCAN_BILLING_SCHEMA_ = {
+  type: 'OBJECT',
+  properties: {
+    patientName: { type: 'STRING' },
+    date: { type: 'STRING', description: 'Appointment date as YYYY-MM-DD, or empty' },
+    time: { type: 'STRING' },
+    provider: { type: 'STRING' },
+    services: { type: 'ARRAY', items: { type: 'OBJECT', properties: {
+      text: { type: 'STRING' }, fee: { type: 'NUMBER', nullable: true },
+    }, required: ['text'] } },
+    written: { type: 'ARRAY', items: { type: 'OBJECT', properties: {
+      text: { type: 'STRING', description: 'The product line exactly as handwritten' },
+      qty: { type: 'INTEGER' },
+      fee: { type: 'NUMBER', nullable: true },
+      productId: { type: 'STRING', description: 'An id from the product list, or empty' },
+      confidence: { type: 'NUMBER' },
+    }, required: ['text', 'qty', 'productId', 'confidence'] } },
+    seen: { type: 'ARRAY', items: { type: 'OBJECT', properties: {
+      description: { type: 'STRING', description: 'What the label says' },
+      count: { type: 'INTEGER' },
+      productId: { type: 'STRING', description: 'An id from the product list, or empty' },
+      confidence: { type: 'NUMBER' },
+    }, required: ['description', 'count', 'productId', 'confidence'] } },
+    grandTotal: { type: 'NUMBER', nullable: true },
+    credit: { type: 'NUMBER', nullable: true },
+    totalToPay: { type: 'NUMBER', nullable: true },
+  },
+  required: ['patientName', 'date', 'provider', 'services', 'written', 'seen'],
+};
+
+// One photo + instructions in, JSON (matching the schema) out. Retries when Gemini is busy.
+function geminiJson_(prompt, imageB64, mime, schema) {
+  const props = PropertiesService.getScriptProperties();
+  const key = props.getProperty('GEMINI_API_KEY');
+  if (!key) throw new Error("The scanner isn't set up yet. Add GEMINI_API_KEY in Script Properties.");
+  const model = props.getProperty('GEMINI_MODEL') || 'gemini-2.5-flash';
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent';
+  const payload = JSON.stringify({
+    contents: [{ role: 'user', parts: [{ text: prompt }, { inline_data: { mime_type: mime, data: imageB64 } }] }],
+    generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: schema },
+  });
+  let res = null, code = 0;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    res = UrlFetchApp.fetch(url, {
+      method: 'post', contentType: 'application/json', headers: { 'x-goog-api-key': key },
+      payload, muteHttpExceptions: true,
+    });
+    code = res.getResponseCode();
+    if (code !== 429 && code < 500) break;
+    Utilities.sleep(1500 * (attempt + 1));
+  }
+  const text = res.getContentText();
+  if (code !== 200) {
+    console.error('Gemini ' + code + ': ' + text.slice(0, 1500));
+    throw new Error(code === 429 ? 'The scanner is busy. Try again in a minute.' : "The scanner couldn't read that photo. Try again.");
+  }
+  const json = JSON.parse(text);
+  const cand = json.candidates && json.candidates[0];
+  const out = cand && cand.content && cand.content.parts ? cand.content.parts.map((p) => p.text || '').join('') : '';
+  if (!out) throw new Error("The scanner didn't find anything. Try a clearer photo.");
+  return JSON.parse(out);
 }

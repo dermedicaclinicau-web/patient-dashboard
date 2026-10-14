@@ -29,6 +29,7 @@ import { initTopbar, closeTopbarMenu } from "./topbar.js";
 import { initChat, teardownChat } from "./chat.js";
 import { openMyPhoto } from "./my-photo.js";
 import { mountKnowledge } from "./knowledge.js";
+import { mountScanner } from "./scanner.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -249,6 +250,7 @@ const PAGES = {
   staff: (el) => mountStaffManager(el, { staff: currentStaff }),
   settings: (el, param) => mountSettings(el, { param, staff: currentStaff }),
   help: (el, param) => mountKnowledge(el, { param, staff: currentStaff }),
+  scanner: (el) => mountScanner(el, { staff: currentStaff }),
 };
 
 // Which permission each page needs ("admin" = Admins only)

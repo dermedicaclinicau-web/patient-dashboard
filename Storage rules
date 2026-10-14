@@ -1,0 +1,107 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isStaff() {
+      return request.auth != null && request.auth.token.staffRole is string;
+    }
+
+    function isAdmin() {
+      return isStaff() && request.auth.token.staffRole.lower() == 'admin';
+    }
+
+    // Dashboard consultation recordings. Fully private.
+    // Staff can upload audio; NOBODY can read/change/delete from a browser.
+    match /appointment_audio/{patientId}/{fileName} {
+      allow create: if isStaff()
+        && request.resource.size < 200 * 1024 * 1024
+        && request.resource.contentType.matches('audio/.*');
+      allow read, update, delete: if false;
+    }
+
+    // Image Bank: clinic diagrams and model pictures (not patient photos).
+    // Staff can view; admins can add. Files are never changed or deleted from a browser.
+    match /image_bank/{imageId}/{file} {
+      allow get: if isStaff();
+      allow list: if false;
+      allow create: if isAdmin()
+        && (file == 'full' || file == 'thumb')
+        && request.resource.size < 10 * 1024 * 1024
+        && request.resource.contentType.matches('image/(png|jpeg|gif|webp)');
+      allow update, delete: if false;
+    }
+
+    match /staff_photos/{folder}/{file} {
+  allow read: if isStaff();
+  allow create: if isStaff()
+    && (request.auth.uid == folder || isAdmin())
+    && request.resource.size < 2 * 1024 * 1024
+    && request.resource.contentType == 'image/jpeg';
+  allow update, delete: if false;
+}
+
+
+    // Photos taken or uploaded while filling in a form. Staff only.
+    // Never changed or deleted from a browser (part of the clinical record).
+    match /form_photos/{patientId}/{fileName} {
+      allow get: if isStaff();
+      allow list: if false;
+      allow create: if isStaff()
+        && request.resource.size < 10 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp)');
+      allow update, delete: if false;
+    }
+
+    // EXISTING tool (still in use): uploads and opening known files keep working,
+    // but nobody can list folders, overwrite or delete files.
+    match /transcription_audio/{allPaths=**} {
+      allow get: if true;
+      allow list: if false;
+      allow create: if request.resource.size < 150 * 1024 * 1024
+                    && request.resource.contentType.matches('audio/.*');
+      allow update, delete: if false;
+    }
+
+    match /treatment_records/{allPaths=**} {
+      allow get: if true;
+      allow list: if false;
+      allow create: if request.resource.size < 20 * 1024 * 1024
+                    && request.resource.contentType == 'application/pdf';
+      allow update, delete: if false;
+    }
+
+    match /soc_med_files/{allPaths=**} {
+      allow get: if true;
+      allow list: if false;
+      allow create: if request.resource.size < 20 * 1024 * 1024
+                    && (request.resource.contentType.matches('image/.*')
+                     || request.resource.contentType.matches('video/.*')
+                     || request.resource.contentType.matches('audio/.*'));
+      allow update, delete: if false;
+    }
+
+    // Delivery dockets: photo or PDF, uploaded when a delivery is received
+    match /inv_dockets/{poId}/{file} {
+      allow read: if request.auth != null && request.auth.token.staffRole is string;
+      allow create: if request.auth != null && request.auth.token.staffRole is string
+        && (request.auth.token.staffRole.lower() == 'admin'
+          || (request.auth.token.perms is list
+            && request.auth.token.perms.hasAny(['inventory.receive', 'inventory.order', 'inventory.manage'])))
+    && request.resource.size < 25 * 1024 * 1024
+    && request.resource.contentType.matches('image/.*|application/pdf');
+      allow update, delete: if false;
+    }
+    
+    // Scanner: billing sheet photos (and later delivery dockets). Kept as a record, never changed or deleted.
+    match /scans/{kind}/{day}/{file} {
+      allow get: if isStaff();
+      allow list: if false;
+      allow create: if isStaff()
+        && kind in ['billing', 'docket']
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType == 'image/jpeg';
+      allow update, delete: if false;
+    }
+
+  }
+}
