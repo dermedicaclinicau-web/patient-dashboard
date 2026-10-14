@@ -3,8 +3,9 @@
 // Members read and write their own chats; Admins can read every chat and answer Help.
 import { db, auth } from "./firebase-config.js";
 import {
-  collection, doc, getDocs, onSnapshot, query, where, orderBy, limitToLast, writeBatch, updateDoc, serverTimestamp,
+  collection, doc, getDocs, onSnapshot, query, where, orderBy, limitToLast, writeBatch, updateDoc, setDoc, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
 
 const toDate = (v) => (v && typeof v.toDate === "function" ? v.toDate() : null);
 const uid = () => {
@@ -25,13 +26,13 @@ function normChat(d) {
   const readAt = {};
   Object.entries(x.readAt || {}).forEach(([k, v]) => { readAt[k] = toDate(v); });
   return {
-    id: d.id, kind: x.kind === "help" ? "help" : "dm",
+    id: d.id, kind: ["help", "dm", "group"].includes(x.kind) ? x.kind : "dm",
+    name: String(x.name || ""), createdByUid: String(x.createdByUid || ""),
     members: Array.isArray(x.members) ? x.members.map(String) : [], names: x.names || {},
     lastText: String(x.lastText || ""), lastAt: toDate(x.lastAt), lastBy: String(x.lastBy || ""),
     lastByName: String(x.lastByName || ""), status: x.status === "sorted" ? "sorted" : "open", readAt,
   };
 }
-
 // Someone else wrote last, after I last read it
 export const isUnread = (c, me) => !!c.lastAt && c.lastBy !== me && (!c.readAt[me] || c.readAt[me] < c.lastAt);
 
@@ -80,6 +81,7 @@ export async function sendMessage(chat, text, page, staff) {
     lastText: body.slice(0, 200), lastAt: serverTimestamp(), lastBy: me, lastByName: by,
     readAt: { [me]: serverTimestamp() }, updatedAt: serverTimestamp(),
     ...(chat.kind === "help" && chat.members[0] === me ? { status: "open" } : {}),   // a new Help message reopens it
+    ...(chat.kind === "group" ? { name: String(chat.name || "").slice(0, 60), createdByUid: chat.createdByUid } : {}),
   }, { merge: true });
   b.set(doc(collection(cRef, "messages")), { text: body, by, byUid: me, at: serverTimestamp(), page: safePage(page) });
   await b.commit();
@@ -92,4 +94,22 @@ export async function markRead(chatId) {
 // Admins: a Help conversation is "sorted", or reopened
 export async function setChatStatus(chatId, status) {
   await updateDoc(doc(db, "chats", chatId), { status: status === "sorted" ? "sorted" : "open", updatedAt: serverTimestamp() });
+}
+
+// A new group's id (the group is created with its first message)
+export const newGroupId = () => `group__${doc(collection(db, "chats")).id}`;
+
+// "Away" for Help: app_settings/chat → { away: { on, back: "YYYY-MM-DD", note } }
+export function watchAway(onChange) {
+  return onSnapshot(doc(db, "app_settings", "chat"), (s) => {
+    const a = (s.exists() && s.data().away) || {};
+    onChange({ on: a.on === true, back: /^\d{4}-\d{2}-\d{2}$/.test(a.back || "") ? a.back : "", note: String(a.note || "") });
+  }, (err) => console.warn("Chat away status failed:", err));
+}
+
+export async function saveAway({ on, back = "", note = "" }, staff) {
+  await setDoc(doc(db, "app_settings", "chat"), {
+    away: { on: on === true, back: on ? String(back || "") : "", note: on ? String(note || "").trim().slice(0, 120) : "" },
+    updatedAt: serverTimestamp(), updatedBy: String((staff && staff.name) || "").slice(0, 120),
+  }, { merge: true });
 }

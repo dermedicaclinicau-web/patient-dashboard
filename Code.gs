@@ -1490,6 +1490,10 @@ function handleRegenerateSoap_(body) {
       return { ok: false, error: 'GEMINI_FAILED' };
     }
 
+    // Recording rules: put this recording's highlights and note lines back (no new reminders)
+    try { recAddToNotes_(soapJson, Array.isArray(rec['Rule Hits']) ? rec['Rule Hits'] : []); }
+    catch (e) { console.warn('Rule lines not re-added on regenerate: ' + e); }
+
     fsPatch_(cfg, docPath, {
       'Status': 'Draft',
       'Gemini SOAP': formatSoapFromJSON(soapJson),
@@ -2158,7 +2162,8 @@ function handleSendTaskEmail_(body) {
   // One email per person, with their own name filled in (staff tasks)
   recipients.forEach(function (r) {
     const subject = subjectRaw.replace(/\{First name\}/gi, r.first).replace(/\{Full name\}/gi, r.name);
-    const html = inlined.html.replace(/\{First name\}/gi, escH(r.first)).replace(/\{Full name\}/gi, escH(r.name));
+    const html = fillPersonTagsInLinks_(inlined.html, { 'first name': r.first, 'full name': r.name })
+      .replace(/\{First name\}/gi, escH(r.first)).replace(/\{Full name\}/gi, escH(r.name));
     const mail = { to: r.email, subject: subject, htmlBody: html, body: emailHtmlToText_(html), name: 'Dermedica Clinic' };
     if (cc) mail.cc = cc;
     if (attachments.length) mail.attachments = attachments;
@@ -2225,6 +2230,16 @@ function inlineTaskImages_(cfg, html) {
       .replace(/^<img/i, '<img src="cid:' + key + '"');
   });
   return { html: out, images: images };
+}
+
+// {First name} / {Full name} / {Today} inside a link (href) are made URL-safe; elsewhere they're filled as text
+function fillPersonTagsInLinks_(html, vals) {
+  return String(html || '').replace(/(\shref\s*=\s*")([^"]*)(")/gi, function (m, a, url, c) {
+    return a + url.replace(/\{\s*(first name|full name|today)\s*\}/gi, function (t, k) {
+      const v = vals[k.toLowerCase().replace(/\s+/g, ' ')];
+      return v === undefined ? t : encodeURIComponent(v);
+    }) + c;
+  });
 }
 
 // Big photos are sent as a smaller copy (1200px wide) so the email stays light
@@ -3210,7 +3225,7 @@ function sendScheduledTask_(cfg, id, t, slot, onlyTo) {
         .replace(/\{\s*full name\s*\}/gi, html ? escH(p.name) : p.name)
         .replace(/\{\s*today\s*\}/gi, today);
     };
-    const html = fill(inlined.html, true);
+    const html = fill(fillPersonTagsInLinks_(inlined.html, { 'first name': p.first, 'full name': p.name, today: today }), true);
     const mail = { to: p.email, subject: (onlyTo ? '[Test] ' : '') + fill(subjectRaw, false),
       htmlBody: html, body: emailHtmlToText_(html), name: 'Dermedica Clinic' };
     if (cc) mail.cc = cc;

@@ -5150,3 +5150,27 @@ dialog.lh-dialog.eod-dlg{width:min(760px,95vw)}
 .ch-pop-in strong{font-size:.85rem}
 .ch-pop-in small{font-size:.8rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 @media print{.ch{display:none !important}}
+
+
+/* Chat: groups and away */
+.ch-av.is-group{background:#ede9fe;color:#6d28d9}
+.ch-av.is-group svg{width:18px;height:18px}
+.ch-hd-t small.is-away{color:#b45309;font-weight:600}
+.ch-away{display:flex;align-items:center;justify-content:space-between;gap:.5rem;margin:.6rem .75rem 0;padding:.45rem .7rem;
+  border:1px solid var(--border);border-radius:10px;background:var(--surface-2);font-size:.78rem;color:var(--muted)}
+.ch-away.is-on{border-color:#fcd34d;background:#fffbeb;color:#92400e}
+.ch-away span{display:inline-flex;align-items:center;gap:.35rem;min-width:0}
+.ch-away svg{width:14px;height:14px;flex:none}
+.ch-find{display:flex;flex-direction:column;gap:.5rem}
+.ch-newgroup{justify-content:flex-start;gap:.4rem}
+.ch-newgroup svg{width:16px;height:16px}
+.ch-gform{display:flex;flex-direction:column;gap:.5rem;padding:.6rem .75rem;border-bottom:1px solid var(--border)}
+.ch-quick{display:flex;flex-wrap:wrap;gap:.35rem}
+.ch-quick:empty{display:none}
+.ch-chip{padding:.25rem .65rem;border:1px solid var(--border);border-radius:999px;background:#fff;font:inherit;font-size:.78rem;font-weight:600;color:#334155;cursor:pointer}
+.ch-chip:hover{border-color:var(--primary);color:var(--primary)}
+.ch-pick{cursor:pointer}
+.ch-pick input{width:17px;height:17px;flex:none;accent-color:var(--primary)}
+.ch-pick:has(input:checked){background:#f0fdfa}
+.ch-awayform{display:flex;flex-direction:column;gap:.7rem;padding:.8rem;overflow-y:auto}
+.ch-awayform p{margin:0;font-size:.82rem}
