@@ -26,8 +26,9 @@ import { enableUiText } from "./ui-text.js";
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const SEARCH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
-const TABS = [["stock", "Stock"], ["kits", "Kits"], ["investigations", "Investigations"], ["requests", "Requests"], ["orders", "Purchase orders"],
-  ["products", "Products"], ["services", "Service links"], ["suppliers", "Suppliers"], ["activity", "Activity"], ["notifications", "Notifications"]];
+const TABS = [["stock", "Stock"], ["kits", "Kits"], ["investigations", "Investigations"], ["requests", "Requests"],
+  ["receive", "Receive delivery"], ["orders", "Purchase orders"], ["products", "Products"], ["services", "Service links"],
+  ["suppliers", "Suppliers"], ["activity", "Activity"], ["notifications", "Notifications"]];
 const niceDate = (key) => {
 const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
@@ -77,42 +78,59 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   uiStaff = staff;
   const parts = String(param || "").split("/");
   if (parts[0] === "plans") { location.replace("#/settings/plans"); return; } // moved to System configuration
-  if (parts[0] === "po" && parts[1]) { mountPurchaseOrder(container, { id: parts[1], staff }); return; }
-  if (parts[0] === "investigations" && parts[1]) { mountInvestigation(container, { id: decodeURIComponent(parts[1]), staff }); return; }
-  if (parts[0] === "receive") {
-    const page = document.createElement("section");
-    page.className = "page wide";
-    container.replaceChildren(page);
-    mountReceivePo(page, parts[1] ? decodeURIComponent(parts[1]) : "", staff);
-    return;
-  }
-  const first = String(param || "").split("/")[0];
-  const tab = TABS.some(([k]) => k === first) ? first : "stock";
+
+  // Who can see what. Every tab follows the permission behind it.
   const canManage = can("inventory.manage");
   const canMove = canManage || can("inventory.order");
+  const canReceive = canMove || can("inventory.receive");
+  const canView = canMove || can("inventory.view") || can("inventory.count");
   const canRequest = can("inventory.request");
   const canKit = isInjector();
   const canJt = can("inventory.jt");
   const showKits = canKit || canJt || canManage;
   const showInv = canMove || can("inventory.count") || can("menu.reports");
+  const TAB_OK = {
+    stock: canView, kits: showKits, investigations: showInv, requests: canRequest || canMove, receive: canReceive,
+    orders: canMove, products: canView, services: canManage, suppliers: canView, activity: canView, notifications: canManage,
+  };
+  const tabs = TABS.filter(([k]) => TAB_OK[k]);
+  const noAccess = () => {
+    container.innerHTML = '<section class="page wide"><div class="state"><strong>No access</strong>Ask an Admin to give you Inventory access in Staff.</div></section>';
+  };
+
+  if (parts[0] === "po" && parts[1]) { mountPurchaseOrder(container, { id: parts[1], staff }); return; }
+  if (parts[0] === "investigations" && parts[1]) { mountInvestigation(container, { id: decodeURIComponent(parts[1]), staff }); return; }
+  if (parts[0] === "receive" && parts[1]) {          // receiving one purchase order: its own page
+    if (!canReceive) { noAccess(); return; }
+    const page = document.createElement("section");
+    page.className = "page wide";
+    container.replaceChildren(page);
+    mountReceivePo(page, decodeURIComponent(parts[1]), staff);
+    return;
+  }
+  if (!tabs.length) { noAccess(); return; }
+  const first = parts[0];
+  if (first && !tabs.some(([k]) => k === first)) { location.replace(`#/inventory/${tabs[0][0]}`); return; }
+  const tab = first || tabs[0][0];
+  const sub = canView ? "Stock on the Shelf and in JT storage, products and suppliers." : "Order requests and deliveries.";
 
   const root = document.createElement("section");
   root.className = "page wide";
   root.innerHTML = `
     <div class="fb-head">
-      <div><h2>Inventory</h2><p class="muted">Stock on the Shelf and in JT storage, products and suppliers.</p></div>
-      ${canMove ? `<div class="fb-head-actions">
-        <a class="btn-ghost inv-head-link" href="#/inventory/receive">Receive delivery</a>
+      <div><h2>Inventory</h2><p class="muted">${sub}</p></div>
+      ${(canReceive && tab !== "receive") || canManage ? `<div class="fb-head-actions">
+        ${canReceive && tab !== "receive" ? '<a class="btn-ghost inv-head-link" href="#/inventory/receive">Receive delivery</a>' : ""}
         ${canManage ? `<button type="button" class="btn-ghost" data-act="new-supplier">+ New supplier</button>
         <button type="button" class="btn-primary" data-act="new-product">+ New product</button>` : ""}
       </div>` : ""}
     </div>
-    <nav class="pt-tabs inv-tabs" aria-label="Inventory">${TABS.filter(([k]) => (k !== "kits" || showKits)
-    && (k !== "notifications" || canManage) && (k !== "services" || canManage) && (k !== "investigations" || showInv)).map(([k, l]) =>
+    <nav class="pt-tabs inv-tabs" aria-label="Inventory">${tabs.map(([k, l]) =>
         `<a href="#/inventory/${k}"${k === tab ? ' class="active" aria-current="page"' : ""}>${l}${
         k === "requests" ? ' <em class="inv-tabcount" data-role="reqcount" hidden></em>' : ""}${
         k === "investigations" ? ' <em class="inv-tabcount" data-role="ivxcount" hidden></em>' : ""}</a>`).join("")}</nav>
     <div data-role="body"><div class="skeleton" style="height:320px;border-radius:14px"></div></div>`;
+
   container.replaceChildren(root);
   const body = root.querySelector('[data-role="body"]');
 
@@ -187,6 +205,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
     function render() {
     if (tab === "stock") renderStock();
+    else if (tab === "receive") mountReceivePo(body, "", staff);
     else if (tab === "kits") renderKits(body, { staff, products: st.products, lots: st.lots, canKit, canJt, canManage, reload: load });
     else if (tab === "investigations") renderInvestigations(body, { staff });
     else if (tab === "services") {
@@ -1853,6 +1872,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
   /* ---------- Events ---------- */
   root.addEventListener("click", (e) => {
+    if (tab === "receive" && body.contains(e.target)) return;   // the receiving screen handles its own clicks
     if (e.target.closest('[data-act="quick"]')) { toggleQuick(); return; }
     if (e.target.closest('[data-act="quick-discard"]')) { st.qv.clear(); renderStockList(); syncQuickBar(); return; }
     const qs = e.target.closest('[data-act="quick-save"]');
@@ -1883,6 +1903,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     if (es) { const s = st.suppliers.find((x) => x.id === es.dataset.editSupplier); if (s) editSupplier(s); }
   });
   body.addEventListener("input", (e) => {
+    if (tab === "receive") return;
     const t = e.target;
     // Stock → Update digital count
     if (t.dataset.qc !== undefined) {
@@ -1917,7 +1938,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   });
 
   body.addEventListener("keydown", (e) => {
-    if (e.key !== "Enter" || e.target.dataset.qc === undefined) return;
+    if (tab === "receive" || e.key !== "Enter" || e.target.dataset.qc === undefined) return;
     e.preventDefault();
     const all = [...body.querySelectorAll("[data-qc]")];
     const next = all[all.indexOf(e.target) + 1];

@@ -2946,9 +2946,11 @@ const PERMS_ = [
   ['forms.build', 'Building', 'Build forms, Image Bank and Aftercare Bank'],
   ['ssp.create', 'Skin Script', 'Create Skin Script Protocols'],
   ['ssp.config', 'Skin Script', 'Skin Script products and design'],
-  ['menu.inventory', 'Inventory', 'Inventory (see stock, products and suppliers)'],
+  ['menu.inventory', 'Inventory', 'Inventory menu (open Inventory)'],
+  ['inventory.view', 'Inventory', 'See stock, products, suppliers and activity'],
   ['inventory.request', 'Inventory', 'Request orders'],
-  ['inventory.order', 'Inventory', 'Ordering team: purchase orders, receiving and moving stock'],
+  ['inventory.receive', 'Inventory', 'Receive deliveries'],
+  ['inventory.order', 'Inventory', 'Ordering team: purchase orders and moving stock (includes receiving)'],
   ['inventory.manage', 'Inventory', 'Manage products, suppliers and stock counts'],
   ['inventory.kit', 'Inventory', 'Carries a kit (set by the Injector tick on each staff member)'],
   ['inventory.jt', 'Inventory', 'Approves releases from JT storage'],
@@ -2967,10 +2969,10 @@ const PERMS_ = [
 const PERMS_ALL_ = PERMS_.map(function (p) { return p[0]; });
 const ROLE_DEFAULTS_ = {
   Clinician: ['menu.patients', 'menu.calendar', 'menu.tasks', 'patients.edit', 'clinical.view', 'billing.view',
-    'consult.record', 'send.patients', 'tasks.run', 'ssp.create', 'menu.inventory', 'inventory.request',
+    'consult.record', 'send.patients', 'tasks.run', 'ssp.create', 'menu.inventory', 'inventory.request', 'inventory.receive',
     'dash.attention', 'dash.appts', 'dash.tasks', 'dash.kit', 'dash.records', 'dash.usage', 'dash.requests', 'dash.stock'],
   Reception: ['menu.patients', 'menu.calendar', 'menu.tasks', 'patients.edit', 'send.patients', 'tasks.run',
-    'menu.inventory', 'inventory.request', 'inventory.order', 'inventory.count', 'menu.reports',
+    'menu.inventory', 'inventory.view', 'inventory.request', 'inventory.receive', 'inventory.order', 'inventory.count', 'menu.reports',
     'dash.attention', 'dash.appts', 'dash.tasks', 'dash.requests', 'dash.overview'],
 };
 
@@ -3708,6 +3710,7 @@ function runNotifications() {
   try { notifyLowScan_(cfg, rules); } catch (e) { console.error('Low stock scan: ' + (e && e.stack ? e.stack : e)); }
   try { notifyRunDigests_(cfg, rules, now); } catch (e) { console.error('Digests: ' + (e && e.stack ? e.stack : e)); }
   try { notifyCountCheck_(cfg, rules, now); } catch (e) { console.error('Count check: ' + (e && e.stack ? e.stack : e)); }
+  try { chatHelpReminders_(cfg); } catch (e) { console.error('Chat reminders: ' + (e && e.stack ? e.stack : e)); }
 }
 
 // Run ONCE from the editor to start notifications
@@ -4839,4 +4842,77 @@ function installPlanProgress() {
   ScriptApp.newTrigger('runPlanProgress').timeBased().everyDays(1).atHour(9).nearMinute(0).create();
   runPlanProgress();
   console.log('Plan progress installed (daily, about 9am).');
+}
+
+// ===================== Chat: email the admins about unread Help messages =====================
+// runNotifications (every 5 minutes) checks the Help chats. When a staff member's message has waited
+// CHAT_REMIND_MINUTES_ without an admin opening it, every active Admin with an email is emailed,
+// once for that message. Nothing is sent while "away" is on (see CHAT_REMIND_WHEN_AWAY_).
+
+const CHAT_REMIND_MINUTES_ = 10;
+const CHAT_REMIND_WHEN_AWAY_ = false;   // true: still email while "Back tomorrow" / away is switched on
+
+function chatHelpReminders_(cfg) {
+  const now = Date.now();
+
+  if (!CHAT_REMIND_WHEN_AWAY_) {
+    try {
+      const s = fsGetDoc_(cfg, 'app_settings/chat');
+      const a = s && s.away;
+      const today = Utilities.formatDate(new Date(), 'Australia/Perth', 'yyyy-MM-dd');
+      if (a && a.on === true && (!a.back || String(a.back) > today)) return;
+    } catch (e) { /* not sure: carry on and remind */ }
+  }
+
+  const admins = getStaffDocs_().filter(function (s) { return s.active !== false && /^admin$/i.test(String(s.role || '')); });
+  const to = uniq_(admins.map(function (s) { return isEmail_(s.email) ? s.email : ''; }));
+  if (!to.length) return;
+  const adminIds = admins.map(function (s) { return s.id; });
+
+  fsQuery_(cfg, 'chats', 'kind', 'EQUAL', 'help', 300).forEach(function (c) {
+    try {
+      const staffUid = String((c.members || [])[0] || '');
+      const lastAt = Date.parse(String(c.lastAt || ''));
+      if (!staffUid || !lastAt) return;
+      if (String(c.lastBy || '') !== staffUid) return;                       // an admin has the last word
+      if (c.status === 'sorted') return;
+      const age = now - lastAt;
+      if (age < CHAT_REMIND_MINUTES_ * 60000 || age > 24 * 3600000) return;  // too soon, or too old to nag about
+      if (String(c.emailedFor || '') === String(c.lastAt)) return;            // already emailed for this message
+      const readAt = c.readAt || {};
+      if (adminIds.some(function (id) { const r = Date.parse(String(readAt[id] || '')); return r && r >= lastAt; })) return;
+      if (MailApp.getRemainingDailyQuota() < 1) return;
+
+      const who = String(c.lastByName || (c.names && c.names[staffUid]) || 'A staff member');
+      const text = String(c.lastText || '');
+      const mins = Math.round(age / 60000);
+      const html = invEmailWrap_(
+        '<h2 style="margin:0 0 6px;font-size:20px;color:#0f766e">' + invEsc_(who) + ' needs help</h2>' +
+        '<p style="margin:0 0 12px;color:#475569">Sent ' + mins + ' minutes ago in the portal\'s Help chat, and not read yet.</p>' +
+        '<p style="margin:0 0 6px;padding:12px 14px;border-radius:10px;background:#f0fdfa;color:#134e4a;white-space:pre-wrap">' +
+          invEsc_(text) + (text.length >= 200 ? '…' : '') + '</p>',
+        'home/chat/' + c._id, 'Reply in the portal');
+      MailApp.sendEmail({
+        to: to.join(','), name: 'Dermedica Portal',
+        subject: 'Help request from ' + who + ': ' + text.replace(/\s+/g, ' ').slice(0, 60) + (text.length > 60 ? '…' : ''),
+        htmlBody: html, body: emailHtmlToText_(html),
+      });
+
+      fsPatch_(cfg, 'chats/' + c._id, { emailedFor: String(c.lastAt), emailedAt: new Date().toISOString() });
+      try {
+        commitWrites_(cfg, [updateWrite_(cfg, 'notify_log/l_' + Date.now() + '_' + Utilities.getUuid().slice(0, 8), {
+          ruleId: 'chat_help', ruleName: 'Unread Help message', event: 'chat.help', to: to,
+          subject: 'Help request from ' + who, refId: String(c._id), at: new Date().toISOString(),
+        })]);
+      } catch (e) { console.warn('Chat reminder sent, but the log failed: ' + e); }
+      console.log('Chat reminder sent for ' + c._id);
+    } catch (e) {
+      console.error('Chat reminder ' + c._id + ': ' + (e && e.stack ? e.stack : e));
+    }
+  });
+}
+
+// Run from the editor to try it straight away (still only emails for messages waiting 10+ minutes)
+function testChatReminders() {
+  chatHelpReminders_(getConfig_());
 }

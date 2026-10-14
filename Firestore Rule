@@ -93,7 +93,8 @@ service cloud.firestore {
     function invOrder() { return can('inventory.manage') || can('inventory.order'); }  // ordering team
     function invKit() { return can('inventory.kit'); }                        // injectors who carry a kit
     function invJt() { return can('inventory.jt') || invManage(); }           // approves JT storage releases
-    function invStock() { return invOrder() || invKit() || invJt(); }
+    function invReceive() { return invOrder() || can('inventory.receive'); }  // ticks off deliveries
+    function invStock() { return invOrder() || invKit() || invJt() || invReceive(); }
     function invUse() { return invStock() || can('consult.record'); }         // records products used in treatments
     function invReport() { return can('menu.reports'); }                      // reviews count differences
     function kitOk() {
@@ -102,7 +103,7 @@ service cloud.firestore {
     }
 
     match /inv_suppliers/{id} {
-      allow read: if can('menu.inventory') || invOrder();
+      allow read: if can('menu.inventory') || invReceive();
       allow create, update: if invManage() && request.resource.data.name is string && request.resource.data.name.size() > 0;
       allow delete: if false;
     }
@@ -130,7 +131,8 @@ service cloud.firestore {
       allow create: if request.resource.data.byUid == request.auth.uid
         && (invManage()
           || (invReport() && request.resource.data.type in ['count', 'kit-count', 'use-correct', 'kit-correct'])
-          || (invOrder() && request.resource.data.type in ['move', 'receive'])
+          || (invOrder() && request.resource.data.type == 'move')
+          || (invReceive() && request.resource.data.type == 'receive')
           || (invKit() && request.resource.data.type in ['kit-take', 'kit-open', 'kit-return', 'kit-discard', 'kit-use', 'kit-borrow'])
           || (invJt() && request.resource.data.type == 'release')
           || (invUse() && request.resource.data.type == 'use'));
@@ -287,7 +289,7 @@ match /inv_open/{id} {
 
     // Order requests: anyone with "Request orders" asks; the ordering team handles them
     match /inv_requests/{id} {
-      allow read: if can('menu.inventory') || can('inventory.request') || invOrder();
+      allow read: if can('menu.inventory') || can('inventory.request') || invReceive();
       allow create: if can('inventory.request')
         && request.resource.data.requestedByUid == request.auth.uid
         && request.resource.data.status == 'open'
@@ -298,6 +300,9 @@ match /inv_open/{id} {
           && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['requestedBy', 'requestedByUid', 'createdAt', 'items']))
         || (resource.data.requestedByUid == request.auth.uid && resource.data.status == 'open'
           && request.resource.data.status == 'cancelled'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt', 'events']))
+        || (invReceive() && resource.data.status in ['open', 'ordered']
+          && request.resource.data.status == 'received'
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt', 'events']));
       allow delete: if false;
     }
@@ -318,17 +323,23 @@ match /inv_open/{id} {
 
     // Purchase orders: the ordering team
     match /inv_pos/{id} {
-      allow read: if can('menu.inventory') || invOrder();
+      allow read: if can('menu.inventory') || invReceive();
       allow create: if invOrder() && request.resource.data.createdByUid == request.auth.uid
         && request.resource.data.status == 'draft';
-      allow update: if invOrder() && request.resource.data.number == resource.data.number;
+      allow update: if (invOrder() && request.resource.data.number == resource.data.number)
+        || (invReceive()
+          && resource.data.status in ['sent', 'part']
+          && request.resource.data.status in ['part', 'received']
+          && request.resource.data.lines.size() == resource.data.lines.size()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+               'lines', 'status', 'receiptIds', 'lastReceivedAt', 'receivedAt', 'updatedAt', 'updatedBy', 'events']));
       allow delete: if false;
     }
 
     // Deliveries received against a purchase order
     match /inv_receipts/{id} {
-      allow read: if can('menu.inventory') || invOrder();
-      allow create: if invOrder() && request.resource.data.byUid == request.auth.uid;
+      allow read: if can('menu.inventory') || invReceive();
+      allow create: if invReceive() && request.resource.data.byUid == request.auth.uid;
       allow update, delete: if false;
     }
 
@@ -851,7 +862,47 @@ match /inv_open/{id} {
              'MergedIds', 'MergedNames', 'MergedInto', 'MergedAt', 'MergedBy', 'MergedByUid',
              'UpdatedAt', 'UpdatedBy', 'UpdatedByUid']);
     }
+    
+    // Chat: Help (staff → admins), one-to-one chats and group chats.
+    // Members read and write their own conversations; Admins can read every chat and answer Help.
+    // Messages can't be edited or deleted from the browser.
+    match /chats/{chatId} {
+      allow read: if isStaff() && (resource == null
+        || request.auth.uid in resource.data.members || isAdmin());
+      allow create: if isStaff()
+        && request.resource.data.members is list
+        && request.auth.uid in request.resource.data.members
+        && ((request.resource.data.kind == 'help'
+              && request.resource.data.members.size() == 1
+              && chatId == 'help__' + request.auth.uid)
+          || (request.resource.data.kind == 'dm'
+              && request.resource.data.members.size() == 2
+              && chatId == 'dm__' + request.resource.data.members[0] + '__' + request.resource.data.members[1])
+          || (request.resource.data.kind == 'group'
+              && request.resource.data.members.size() >= 2 && request.resource.data.members.size() <= 40
+              && chatId.matches('group__[A-Za-z0-9]+')
+              && request.resource.data.name is string
+              && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 60
+              && request.resource.data.createdByUid == request.auth.uid));
+      allow update: if isStaff()
+        && (request.auth.uid in resource.data.members || (isAdmin() && resource.data.kind == 'help'))
+        && request.resource.data.members == resource.data.members
+        && request.resource.data.kind == resource.data.kind;
+      allow delete: if false;
 
+      match /messages/{messageId} {
+        allow read: if isStaff() && (isAdmin()
+          || request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.members);
+        allow create: if isStaff()
+          && request.resource.data.byUid == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0 && request.resource.data.text.size() <= 4000
+          && (request.auth.uid in getAfter(/databases/$(database)/documents/chats/$(chatId)).data.members
+            || (isAdmin() && getAfter(/databases/$(database)/documents/chats/$(chatId)).data.kind == 'help'));
+        allow update, delete: if false;
+      }
+    }
+    
     // ===================== Safety net =====================
     // Anything not allowed by a rule above stays locked
     // (this includes staff_roles and staff_audit, which only Apps Script writes)

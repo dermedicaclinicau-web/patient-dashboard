@@ -12,6 +12,9 @@ const left = (l) => Math.max(0, (l.qty || 0) - (l.received || 0));
 const doseText = (l, n) => (l.dosePer && l.doseUnit ? ` (${+(n * l.dosePer).toFixed(2)} ${l.doseUnit})` : "");
 const int = (v) => Math.max(0, parseInt(v, 10) || 0);
 const sumOf = (s) => s.splits.reduce((a, x) => a + int(x.qty), 0);
+// The ordering team goes back to the purchase order; everyone else back to the list of deliveries
+const canOrders = () => can("inventory.order") || can("inventory.manage");
+import { can } from "./perms.js";
 
 function toast(msg, bad = false) {
   const t = document.createElement("div");
@@ -38,7 +41,7 @@ export async function mountReceivePo(root, poId, staff) {
     return;
   }
 
-  const back = `#/inventory/po/${encodeURIComponent(po.id)}`;
+  const back = canOrders() ? `#/inventory/po/${encodeURIComponent(po.id)}` : "#/inventory/receive";
   const open = ["sent", "part"].includes(po.status);
   const prod = new Map(products.map((p) => [p.id, p]));
   const tracked = (l) => !!(prod.get(l.productId) || {}).tracked;
@@ -90,7 +93,7 @@ export async function mountReceivePo(root, poId, staff) {
     ${r.docket && r.docket.url ? `<a class="rcv-link" href="${esc(r.docket.url)}" target="_blank" rel="noopener">View docket</a>` : ""}</div>`;
 
   root.innerHTML = `<div class="rcv">
-    <a class="rcv-back" href="${back}">← ${esc(po.number)}</a>
+    <a class="rcv-back" href="${back}">← ${esc(canOrders() ? po.number : "Receive a delivery")}</a>
     <div class="rcv-head">
       <div><h1>Receive delivery</h1>
         <p class="muted">${esc([po.supplier.name, po.number, PO_STATUS[po.status], po.sentAt && `sent ${niceDate(po.sentAt)}`].filter(Boolean).join(" · "))}</p></div>
@@ -307,7 +310,7 @@ export async function mountReceivePo(root, poId, staff) {
 
 async function mountPicker(root) {
   root.innerHTML = `<div class="rcv">
-    <a class="rcv-back" href="#/inventory/orders">← Purchase orders</a>
+    ${canOrders() ? '<a class="rcv-back" href="#/inventory/orders">← Purchase orders</a>' : ""}
     <h1>Receive a delivery</h1>
     <p class="muted">Which order is this delivery for? Match the supplier, or the PO number printed on the docket.</p>
     <input class="rcv-search" type="search" placeholder="Search supplier or PO number" data-role="q" />
