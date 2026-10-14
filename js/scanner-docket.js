@@ -2,7 +2,7 @@
 // purchase order it's for. "Receive this order" saves the docket and opens that order to receive it,
 // with the docket's quantities, batches and expiries handed over (sessionStorage "docketPrefill").
 import { auth } from "./firebase-config.js";
-import { INV_CATEGORIES } from "./inventory-api.js";
+import { INV_CATEGORIES, batchName } from "./inventory-api.js";
 import { reviewDocket, rankPos, listOpenPos, poSupplier, staffList, matchStaff, saveDocketScan } from "./scanner-api.js";
 import { showToast } from "./utils.js";
 
@@ -94,11 +94,12 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
         <label class="dk-f dk-f-qty"><span>Qty${l.unit ? ` <small>${esc(l.unit)}</small>` : ""}</span>
           <input class="dk-input" type="number" min="0" max="9999" step="1" inputmode="numeric" data-dkq="${i}"
             value="${l.qty}" aria-label="Quantity of ${esc(name)}" /></label>
-        <label class="dk-f dk-f-batch"><span>Batch</span>
+        ${p && p.tracked ? `
+        <label class="dk-f dk-f-batch"><span>${esc(batchName(p))}</span>
           <input class="dk-input" maxlength="40" autocapitalize="characters" autocomplete="off" data-dkb="${i}"
-            value="${esc(l.batch)}" placeholder="–" aria-label="Batch of ${esc(name)}" /></label>
+            value="${esc(l.batch)}" placeholder="–" aria-label="${esc(batchName(p))} of ${esc(name)}" /></label>
         <label class="dk-f dk-f-exp"><span>Expiry</span>
-          <input class="dk-input" type="date" data-dke="${i}" value="${esc(fullExpiry(l.expiry))}" aria-label="Expiry of ${esc(name)}" /></label>
+          <input class="dk-input" type="date" data-dke="${i}" value="${esc(fullExpiry(l.expiry))}" aria-label="Expiry of ${esc(name)}" /></label>` : ""}
       </div>
     </div>`;
   };
@@ -163,7 +164,9 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
       </div>
 
       <h3 class="dk-h">On the docket <small>${r.lines.length}</small></h3>
-      ${r.lines.length ? `<p class="dk-muted dk-hint">Check the quantity, batch and expiry against the docket and fix anything misread.</p>
+      ${r.lines.length ? `<p class="dk-muted dk-hint">${r.lines.some((l) => (byId.get(l.productId) || {}).tracked)
+          ? "Check the quantities, and the batch and expiry where asked, against the docket. Fix anything misread."
+          : "Check the quantities against the docket and fix anything misread."}</p>
         <div class="dk-list">${r.lines.map(lineHtml).join("")}</div>`
         : '<p class="scan-err">No product lines were read. Try a closer photo of the docket.</p>'}
 
@@ -195,11 +198,16 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
       const who = s.people.find((p) => p.id === s.recvUid);
       const at = new Date(s.recvAt);
       const receivedAt = isNaN(at) ? new Date() : at;
-      const lines = s.review.lines.map((l) => ({
-        productId: l.productId, productName: (byId.get(l.productId) || {}).name || "",
-        text: l.text, code: l.code, qty: l.qty, unit: l.unit, batch: String(l.batch || "").trim(), expiry: fullExpiry(l.expiry),
-        edited: l.edited === true,
-      }));
+      const lines = s.review.lines.map((l) => {
+        const p = byId.get(l.productId);
+        const tracked = !!(p && p.tracked);   // batch and expiry only for products that track them
+        return {
+          productId: l.productId, productName: p ? p.name : "",
+          text: l.text, code: l.code, qty: l.qty, unit: l.unit,
+          batch: tracked ? String(l.batch || "").trim() : "", expiry: tracked ? fullExpiry(l.expiry) : "",
+          edited: l.edited === true,
+        };
+      });
       const saved = await saveDocketScan({ photo, result, review: s.review, lines, po,
         receivedBy: who ? who.name : (staff && staff.name) || "", receivedByUid: s.recvUid, receivedAt, note: s.note }, staff);
 
