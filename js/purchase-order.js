@@ -3,7 +3,7 @@ import {
   PO_STATUS, REQ_STATUS, LOCATIONS, locLabel, plural, unitPlural, lowAt, suggestOrder, reqNumber, batchName,
   getPo, savePo, renumberPo, markPoSent, cancelPo, poTotals, lineFromProduct, cleanPoLine, supplierSnapshot,
   listProducts, listSuppliers, listRequests, supplierTerms, suppliesProduct, suggestOrderFor, dayKey, productSuppliers,
-  recordPastReceipt, getBaseline, syncReceivedRequests, fillPoTemplate,
+  recordPastReceipt, getBaseline, syncReceivedRequests, fillPoTemplate, PO_ORDER_TAG_RE,
 } from "./inventory-api.js";
 import { renderDeliveries } from "./po-deliveries.js";
 import { deliveryError } from "./form-delivery.js";
@@ -560,10 +560,12 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     const subject = ownSubject ? fillPoTemplate(ownSubject, tpl) : `Purchase order ${po.number} - Dermedica`;
     // A template usually signs off itself, so the sign-off starts empty (it can still be typed in)
     const signoff = ownBody ? "" : `Kind regards,\n${(staff && staff.name) || "The team"}\nDermedica`;
+    const tagged = PO_ORDER_TAG_RE.test(message);   // the supplier's message says where the order goes
     const dlg = openDialog("ec-dialog ac-mail", `
       <form class="lh-form ec-form" novalidate>
         <div class="lh-dialog-head"><h3>${again ? "Email the purchase order again" : "Send to supplier"}</h3>
-          <p>The order is written into the email, below your message. Nothing is attached.</p>
+          <p data-role="orderwhere">${tagged ? "The order goes where {Order table} is in your message."
+            : "The order is written into the email, below your message."} Nothing is attached.</p>
           ${ownBody || ownSubject ? `<p class="fe-note">Filled in from ${esc(s.name || "this supplier")}'s saved email.
             Changes here are for this email only. To change it for next time, edit the supplier.</p>` : ""}</div>
         <div class="po-from">
@@ -577,8 +579,9 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
         </div>
         <label class="lh-field"><span class="lh-label">Subject</span><input name="subject" maxlength="200" value="${esc(subject)}" /></label>
         <div class="lh-field"><span class="lh-label">Message</span><div class="tr-canvas" style="background-color:#f1f5f9"><div data-role="editor"></div></div></div>
-        <div class="lh-field"><span class="lh-label">The order (added after your message)</span>
-          <div class="po-mail-items">${itemsEmailHtml()}</div></div>
+        <div class="lh-field"><span class="lh-label" data-role="orderlabel">The order (${tagged
+          ? "goes where {Order table} is in your message" : "added after your message"})</span>
+        <div class="po-mail-items">${itemsEmailHtml()}</div></div>
         <label class="lh-field"><span class="lh-label">Sign-off</span><textarea name="signoff" rows="3" maxlength="300">${esc(signoff)}</textarea></label>
         <p class="lh-error" role="alert" hidden></p>
         <div class="lh-actions">
@@ -590,6 +593,16 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     const err = dlg.querySelector(".lh-error");
     const editor = createRichEditor(dlg.querySelector('[data-role="editor"]'), { accent: () => "#0f766e" });
     editor.setHtml(message);
+    // If {Order table} is typed or deleted, the wording about where the order goes follows it
+    const syncWhere = () => {
+      const t = PO_ORDER_TAG_RE.test(editor.getHtml());
+      dlg.querySelector('[data-role="orderwhere"]').textContent = (t
+        ? "The order goes where {Order table} is in your message." : "The order is written into the email, below your message.")
+        + " Nothing is attached.";
+      dlg.querySelector('[data-role="orderlabel"]').textContent =
+        `The order (${t ? "goes where {Order table} is in your message" : "added after your message"})`;
+    };
+    dlg.querySelector('[data-role="editor"]').addEventListener("input", syncWhere);
 
     // The addresses this clinic can send from (main account + Gmail "Send mail as" aliases)
     const fromSel = form.elements.from;
@@ -627,7 +640,15 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       btn.textContent = "Sending…";
       err.hidden = true;
       const sign = form.elements.signoff.value.trim();
-      const body = editor.getHtml() + itemsEmailHtml()
+      // {Order table} in the message: the table goes there (its paragraph is replaced, so the HTML stays tidy).
+      // Otherwise it goes after the message. Any extra copies of the tag are removed.
+      const msgHtml = editor.getHtml();
+      const table = itemsEmailHtml();
+      const ownLine = /<p[^>]*>\s*(?:<[^>]+>\s*)*\{\s*order\s+table\s*\}\s*(?:<\/?[^>]+>\s*)*<\/p>/i;
+      const placed = ownLine.test(msgHtml) ? msgHtml.replace(ownLine, table)
+        : PO_ORDER_TAG_RE.test(msgHtml) ? msgHtml.replace(PO_ORDER_TAG_RE, table)
+        : msgHtml + table;
+      const body = placed.replace(new RegExp(PO_ORDER_TAG_RE.source, "gi"), "")
         + (sign ? `<p>${esc(sign).replace(/\n/g, "<br>")}</p>` : "");
       try {
         await callApi({

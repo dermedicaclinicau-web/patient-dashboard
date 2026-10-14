@@ -7,7 +7,7 @@ import {
   productSuppliers, supplierTerms, suppliesProduct, suggestOrderFor,
   listCounts, listInvestigations, dayKey, 
   isSharedProduct, listOpenContainers, openContainer, finishContainer, openState, expectedUses, FINISH_REASONS,
-  setStartingStock, PO_EMAIL_TAGS, fillPoTemplate, poNumberBase,
+  setStartingStock, PO_EMAIL_TAGS, fillPoTemplate, poNumberBase, PO_ORDER_TAG_RE,
 } from "./inventory-api.js";
 import { renderInvestigations, mountInvestigation } from "./investigations.js";
 import { mountPurchaseOrder } from "./purchase-order.js";
@@ -1161,7 +1161,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const isNew = !s;
     const x = s || { active: true };
     const val = (v) => esc(v || "");
-    const noFill = 'autocomplete="off" data-lpignore="true" data-1p-ignore'; // keeps password managers out
+    const noFill = 'autocomplete="off" data-lpignore="true" data-1p-ignore data-bwignore data-form-type="other"';
     const on = x.active !== false;
     const dlg = openDialog("inv-dlg sup-dlg", `
       <form class="sup-form" novalidate>
@@ -1176,7 +1176,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           <div class="sup-col">
             <section class="sup-sec"><h4>Company</h4>
               <label class="lh-field"><span class="lh-label">Company name</span>
-                <input name="name" maxlength="120" ${noFill} value="${val(x.name)}" /></label>
+                <input name="company" maxlength="120" ${noFill} value="${val(x.name)}" /></label>
               <div class="sup-two">
                 <label class="lh-field"><span class="lh-label">Our account number</span>
                   <input name="accountNo" maxlength="60" ${noFill} placeholder="Optional" value="${val(x.accountNo)}" /></label>
@@ -1203,8 +1203,9 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
             </section>
 
             <section class="sup-sec"><h4>Ordering notes <small>optional</small></h4>
-              <textarea name="orderNotes" rows="3" maxlength="1000"
-                placeholder="e.g. Orders before 2pm ship same day. Minimum order $200.">${esc(x.orderNotes || "")}</textarea>
+              <label class="lh-field"><span class="lh-label">Notes for staff</span>
+                <textarea name="orderNotes" rows="3" maxlength="1000"
+                  placeholder="e.g. Orders before 2pm ship same day. Minimum order $200.">${esc(x.orderNotes || "")}</textarea></label>
               <small class="fe-note">Shown to staff on every purchase order for this supplier. Not sent to the supplier.</small>
             </section>
           </div>
@@ -1212,12 +1213,13 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           <div class="sup-col">
             <section class="sup-sec"><h4>Purchase order email <small>optional</small></h4>
               <p class="fe-note">Fills in the email when an order is sent to this supplier. Staff can still change it before sending.
-                Leave both empty to use the standard wording.</p>
+                Put <strong>{Order table}</strong> on its own line to choose where the order goes, e.g. above a footer.
+                Without it, the order goes after your message. Leave both empty to use the standard wording.</p>
               <label class="lh-field"><span class="lh-label">Subject</span>
                 <input name="emailSubject" maxlength="200" data-tpl ${noFill} placeholder="Purchase order {PO number} from Dermedica" value="${val(x.emailSubject)}" /></label>
               <label class="lh-field"><span class="lh-label">Message</span>
-                <textarea name="emailBody" rows="7" maxlength="5000" data-tpl
-                  placeholder="Hi {Contact first name},&#10;&#10;Please find our order {PO number} below. Our account number is {Account number}.&#10;&#10;Thank you,&#10;{My name}">${esc(x.emailBody || "")}</textarea></label>
+                <textarea name="emailBody" rows="6" maxlength="5000" data-tpl
+                  placeholder="Hi {Contact first name},&#10;&#10;Please find our order {PO number} below.&#10;&#10;{Order table}&#10;&#10;Thank you,&#10;{My name}">${esc(x.emailBody || "")}</textarea></label>
               <div class="inv-tags"><small class="muted">Insert:</small>${PO_EMAIL_TAGS.map(([t, help]) =>
                 `<button type="button" class="ch-chip" data-tag="${esc(t)}" title="${esc(help)}">${esc(t)}</button>`).join("")}</div>
             </section>
@@ -1227,7 +1229,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
                 <div class="sup-pv-row"><span>To</span><strong data-role="pvto"></strong></div>
                 <div class="sup-pv-row"><span>Subject</span><strong data-role="pvsub"></strong></div>
                 <div class="sup-pv-body" data-role="pvbody"></div>
-                <div class="sup-pv-order" aria-hidden="true"><b data-role="pvnum"></b><i></i><i></i><i></i>
+                <div class="sup-pv-order" data-role="pvorder" aria-hidden="true"><b data-role="pvnum"></b><i></i><i></i><i></i>
                   <small>The order's items, codes and quantities are added here</small></div>
               </div>
             </section>
@@ -1253,11 +1255,17 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       f.active.closest(".sup-active").classList.toggle("is-off", !f.active.checked);
     });
 
-    // Live preview with sample details. Placeholders that didn't fill in (typos) are highlighted.
-    const paras = (t) => t.trim().split(/\n{2,}/)
-      .map((p) => `<p>${esc(p).replace(/\n/g, "<br>").replace(/\{[^{}]+\}/g, "<mark>$&</mark>")}</p>`).join("");
+    // Live preview with sample details. {Order table} shows where the order goes; other unfilled tags (typos) are highlighted.
+    const orderMock = (num) => `<div class="sup-pv-order is-inline" aria-hidden="true"><b>Purchase order ${esc(num)}</b>
+      <i></i><i></i><i></i><small>The order's items, codes and quantities go here</small></div>`;
+    const typo = /\{(?!\s*order\s+table\s*\})[^{}]+\}/gi;
+    const paras = (t, num) => t.trim().split(/\n{2,}/).map((p) => {
+      if (/^\{\s*order\s+table\s*\}$/i.test(p.trim())) return orderMock(num);
+      return `<p>${esc(p).replace(/\n/g, "<br>").replace(typo, "<mark>$&</mark>")
+        .replace(new RegExp(PO_ORDER_TAG_RE.source, "gi"), `</p>${orderMock(num)}<p>`)}</p>`;
+    }).join("").replace(/<p>(\s|<br>)*<\/p>/g, "");
     const drawPreview = () => {
-      const sup = { name: f.name.value.trim(), contactName: f.contactName.value.trim(), accountNo: f.accountNo.value.trim() };
+      const sup = { name: f.company.value.trim(), contactName: f.contactName.value.trim(), accountNo: f.accountNo.value.trim() };
       const po = { number: poNumberBase(sup.name || "Supplier"), orderDate: dayKey(), lines: [{}, {}, {}] };
       const tpl = { po, supplier: sup, staff };
       const subj = f.emailSubject.value.trim();
@@ -1266,12 +1274,13 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       $d("pvto").textContent = [f.email.value.trim() || "No order email yet", f.ccEmail.value.trim() && `cc ${f.ccEmail.value.trim()}`]
         .filter(Boolean).join(" · ");
       $d("pvsub").textContent = subj ? fillPoTemplate(subj, tpl) : `Purchase order ${po.number} - Dermedica`;
-      $d("pvbody").innerHTML = body ? paras(fillPoTemplate(body, tpl))
+      $d("pvbody").innerHTML = body ? paras(fillPoTemplate(body, tpl), po.number)
         : `<p>Hi ${esc(first || "there")},</p><p>Please see our purchase order <strong>${esc(po.number)}</strong> below${
             sup.accountNo ? ` (account ${esc(sup.accountNo)})` : ""}.</p><p>Please reply to confirm the order, pricing and the expected delivery date.</p>
           <p>Kind regards,<br>${esc((staff && staff.name) || "The team")}<br>Dermedica</p>`;
       $d("pvnum").textContent = `Purchase order ${po.number}`;
       $d("pvnote").textContent = subj || body ? "with sample details" : "standard wording";
+      $d("pvorder").hidden = !!body && PO_ORDER_TAG_RE.test(body);   // shown in place instead
     };
     drawPreview();
     form.addEventListener("input", drawPreview);
@@ -1298,7 +1307,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       err.hidden = true;
       try {
         await saveSupplier(s ? s.id : "", {
-          name: f.name.value, contactName: f.contactName.value, phone: f.phone.value, email: f.email.value,
+          name: f.company.value, contactName: f.contactName.value, phone: f.phone.value, email: f.email.value,
           ccEmail: f.ccEmail.value, accountNo: f.accountNo.value, website: f.website.value, address: f.address.value,
           orderNotes: f.orderNotes.value, active: f.active.checked,
           emailSubject: f.emailSubject.value, emailBody: f.emailBody.value,
@@ -1313,9 +1322,9 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         btn.disabled = false;
       }
     });
-    f.name.focus();
+    f.company.focus();
   }
-  
+
   /* ---------- Stock actions: add, count, move, write off ---------- */
   function stockAction(p, mode) {
     const lots = lotsOf(p.id);

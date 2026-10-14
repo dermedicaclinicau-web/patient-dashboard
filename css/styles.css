@@ -5736,3 +5736,22 @@ textarea.dk-input { min-height: 70px; resize: vertical; }
   .sup-two { grid-template-columns: 1fr; }
   .sup-head, .sup-body, .sup-foot { padding-left: 16px; padding-right: 16px; }
 }
+
+.sup-body { align-items: start; padding-top: 14px; padding-bottom: 14px; }
+.sup-sec { gap: 8px; }
+.sup-sec textarea { width: 100%; resize: vertical; }
+
+/* Insert buttons: smaller, so they fit on fewer lines */
+.sup-sec .inv-tags { gap: 4px; }
+.sup-sec .inv-tags .ch-chip { font-size: 12px; padding: 3px 9px; line-height: 1.4; }
+
+/* Preview: tighter, so the sign-off and the order area fit without scrolling */
+.sup-pv-row { padding: 6px 12px; font-size: 13px; }
+.sup-pv-body { padding: 10px 12px; font-size: 13px; line-height: 1.45; }
+.sup-pv-body p { margin: 0 0 6px; }
+.sup-pv-order { padding: 8px 10px; gap: 5px; }
+.sup-pv-order i { height: 6px; }
+
+.sup-pv-order[hidden] { display: none; }
+.sup-pv-body .sup-pv-order.is-inline { margin: 4px 0 8px; }
+.sup-sec .inv-tags .ch-chip[data-tag="{Order table}"] { border-color: #0f766e; color: #0f766e; font-weight: 600; }

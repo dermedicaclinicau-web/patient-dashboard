@@ -3199,8 +3199,10 @@ export const PO_EMAIL_TAGS = [
   ["{Account number}", "Our account number with them"],
   ["{Item count}", "How many lines are on the order"],
   ["{My name}", "The staff member sending it"],
+  ["{Order table}", "Where the order's items go. Without it, they go after the message"],
 ];
-
+// Finds {Order table} (any spacing or capitals). fillPoTemplate leaves it alone; it's swapped for the table when sending.
+export const PO_ORDER_TAG_RE = /\{\s*order\s+table\s*\}/i;
 // Fills a subject or message from the supplier's template. Unknown {tags} are left as typed.
 export function fillPoTemplate(text, { po, supplier, staff }) {
   const s = supplier || {};
