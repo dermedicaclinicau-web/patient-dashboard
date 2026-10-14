@@ -259,6 +259,7 @@ const PAGE_PERM = {
   ssp: "ssp.create", calendar: "menu.calendar", forms: "menu.forms",
   "image-bank": "forms.build", "aftercare-bank": "forms.build", "ssp-products": "ssp.config",
   tasks: "menu.tasks", inventory: "menu.inventory", reports: "menu.reports", staff: "admin", settings: "admin",
+  scanner: "menu.scanner",
 };
 
 const pageAllowed = (p) => {
@@ -266,7 +267,7 @@ const pageAllowed = (p) => {
   if (!need) return true;
   return need === "admin" ? isAdminNow() : can(need);
 };
-const firstAllowedPage = () => ["calendar", "patients", "tasks", "inventory", "reports", "forms", "staff", "help"].find(pageAllowed) || "";
+const firstAllowedPage = () => ["calendar", "patients", "tasks", "inventory", "scanner", "reports", "forms", "staff", "help"].find(pageAllowed) || "";
 const currentPage = () => location.hash.split("/")[1] || "";
 
 function applyNav() {

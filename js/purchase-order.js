@@ -13,7 +13,7 @@ import { createRichEditor } from "./rich-editor.js";
 import { richText } from "./rich-html.js";
 import { emailShell, clinicDetails } from "./task-tokens.js";
 import { callApi } from "./appointments.js";
-import { can, isAdmin } from "./perms.js";
+import { can } from "./perms.js";
 import { showToast } from "./utils.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -168,7 +168,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       acts.push(`<a class="ff-btn is-primary" href="#/inventory/receive/${encodeURIComponent(po.id)}">${I.check}<span>Receive stock</span></a>`);
     }
     // Admin: orders received before the portal (drafts, or sent with nothing in yet)
-    if (isAdmin() && (po.status === "draft" || (po.status === "sent" && nothingIn))) {
+    if (can("inventory.history") && (po.status === "draft" || (po.status === "sent" && nothingIn))) {
       acts.splice(Math.max(0, acts.length - 1), 0,
         `<button type="button" class="ff-btn" data-act="past">${I.check}<span>Already received</span></button>`);
     }
@@ -764,7 +764,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       } catch (ex) {
         console.error("Record past receipt failed:", ex);
         busy = false;
-        show(ex && ex.code === "permission-denied" ? "Only an Admin can record orders received before the portal."
+        show(ex && ex.code === "permission-denied" ? "You don't have access to record orders received before the portal."
           : ex && ex.message && !ex.code ? ex.message : "Couldn't save. Try again.");
         btn.disabled = false;
         btn.textContent = "Record as received";

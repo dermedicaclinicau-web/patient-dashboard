@@ -8,6 +8,7 @@ import { mountDocketResult } from "./scanner-docket.js";
 import { showToast } from "./utils.js";
 import { confirmDialog } from "./dialog.js";
 import { warmUpLogin } from "./auth.js";
+import { can } from "./perms.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const svg = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -27,6 +28,13 @@ export function mountScanner(container, { staff = null } = {}) {
   const root = document.createElement("section");
   root.className = "page scan";
   container.replaceChildren(root);
+  // Which kinds of scan this person can do (Staff → Roles & access)
+  const KINDS = [["billing", "Billing sheet"], ["docket", "Delivery docket"]].filter(([k]) => can(`scanner.${k}`));
+  if (!KINDS.length) {
+    root.innerHTML = `<div class="state"><strong>No scanner access</strong>
+      Ask an Admin to tick “Scan billing sheets” or “Scan delivery dockets” for your role in Staff → Roles &amp; access.</div>`;
+    return;
+  }
 
   // The product list (with Shelf stock). Loaded again after each sale, so the numbers stay current.
   let products = [];
@@ -38,7 +46,7 @@ export function mountScanner(container, { staff = null } = {}) {
   const st = {
     mode: "camera", stream: null, track: null, starting: false, zoom: 1, hw: null, torch: false, canTorch: false, canFocus: false,
     camErr: "", photo: null, photoUrl: "", base64: "", result: null, lines: [], review: null, error: "", fixing: -1, busy: false,
-    booking: null, patient: null, pickPatient: false, kind: "billing",   // kind: "billing" or "docket"
+    booking: null, patient: null, pickPatient: false, kind: KINDS[0][0],   // kind: "billing" or "docket"
   };
 
   const sellCount = () => st.lines.reduce((a, l) => a + (l.product ? l.take || 0 : 0), 0);
@@ -48,10 +56,10 @@ export function mountScanner(container, { staff = null } = {}) {
   const patientName = () => (st.patient && st.patient.name) || (st.review && st.review.patientName) || "";
 
   /* ---------- Screens ---------- */
-  const headHtml = () => `<div class="scan-head"><div class="scan-modes" role="tablist" aria-label="What you're scanning">
-      <button type="button" class="scan-mode${st.kind === "billing" ? " is-on" : ""}" role="tab" aria-selected="${st.kind === "billing"}" data-kind="billing">Billing sheet</button>
-      <button type="button" class="scan-mode${st.kind === "docket" ? " is-on" : ""}" role="tab" aria-selected="${st.kind === "docket"}" data-kind="docket">Delivery docket</button>
-    </div></div>`;
+  const headHtml = () => (KINDS.length < 2 ? "" : `<div class="scan-head"><div class="scan-modes" role="tablist" aria-label="What you're scanning">
+      ${KINDS.map(([k, label]) => `<button type="button" class="scan-mode${st.kind === k ? " is-on" : ""}" role="tab"
+        aria-selected="${st.kind === k}" data-kind="${k}">${label}</button>`).join("")}
+    </div></div>`);
 
   const cameraHtml = () => `${headHtml()}
     <div class="scan-vf" data-role="vf">

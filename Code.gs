@@ -5036,7 +5036,8 @@ function scannerAction_(body) {
   cache.put(rlKey, String(n + 1), 3600);
 
   try {
-    return { ok: true, result: scanBilling_(body) };
+    const result = String(body.op || '') === 'docket' ? scanDocket_(body) : scanBilling_(body);
+    return { ok: true, result: result };
   } catch (err) {
     console.error('Scanner failed for ' + session.name + ': ' + (err && err.stack || err));
     return { ok: true, problem: String((err && err.message) || "The scanner couldn't read that photo. Try again.") };
@@ -5162,3 +5163,64 @@ function geminiJson_(prompt, imageB64, mime, schema) {
     ', thinking ' + (tries[t] ? JSON.stringify(tries[t]) : 'model default') + ')');
   return JSON.parse(out);
 }
+
+
+/* ---------- Scanner: supplier delivery dockets ---------- */
+function scanDocket_(body) {
+  const image = String(body.image || '');
+  if (!image) throw new Error('The photo is missing. Take it again.');
+  if (image.length > 12 * 1024 * 1024) throw new Error('The photo is too big. Take it again.');
+  const products = (Array.isArray(body.products) ? body.products : []).slice(0, 1500)
+    .map((p) => ({ id: String(p.id || '').slice(0, 60), name: String(p.name || '').slice(0, 150), brand: String(p.brand || '').slice(0, 80) }))
+    .filter((p) => p.id && p.name);
+  if (!products.length) throw new Error('The product list is empty.');
+  return geminiJson_(scanDocketPrompt_(products), image, String(body.mime || 'image/jpeg'), SCAN_DOCKET_SCHEMA_);
+}
+
+function scanDocketPrompt_(products) {
+  return [
+    'You are reading a photo of a supplier\'s delivery docket (packing slip, delivery note or tax invoice) that came with',
+    'a delivery to Dermedica, a skin clinic. Dermedica is always the CUSTOMER, never the supplier.',
+    '',
+    'Read:',
+    '1. supplier: the company that sent the goods (from the letterhead or logo).',
+    '2. docketNumber: the docket, delivery note or invoice number. docketDate: its date as YYYY-MM-DD.',
+    '3. poNumber: the clinic\'s purchase order number if printed (often labelled "PO", "Your ref", "Customer order", "Order no").',
+    '4. Every product line: the description as printed (text), the product code, the quantity SUPPLIED (not ordered;',
+    '   back-ordered or not supplied = 0), the unit (box, vial, each…), the batch or lot number and the expiry date',
+    '   (YYYY-MM-DD, or YYYY-MM if only the month is printed). If one product has several batches, give one line per batch.',
+    '   Ignore freight, GST, discounts and totals.',
+    '5. If someone has handwritten or stamped who received it and when (a "Received by" box or signature line):',
+    '   receivedBy (the name), receivedDate (YYYY-MM-DD) and receivedTime (24-hour HH:MM). Otherwise "".',
+    '',
+    'Match every product line to ONE id from the product list below, using the brand, name, strength and size.',
+    'If nothing fits, use "". Never make up an id. Give each match a confidence from 0 to 1.',
+    '',
+    'Products (id | brand | name):',
+    products.map((p) => p.id + ' | ' + p.brand + ' | ' + p.name).join('\n'),
+  ].join('\n');
+}
+
+const SCAN_DOCKET_SCHEMA_ = {
+  type: 'OBJECT',
+  properties: {
+    supplier: { type: 'STRING' },
+    docketNumber: { type: 'STRING' },
+    docketDate: { type: 'STRING', description: 'YYYY-MM-DD, or empty' },
+    poNumber: { type: 'STRING', description: "The clinic's purchase order number, or empty" },
+    receivedBy: { type: 'STRING', description: 'Handwritten or stamped name of who received it, or empty' },
+    receivedDate: { type: 'STRING', description: 'YYYY-MM-DD, or empty' },
+    receivedTime: { type: 'STRING', description: '24-hour HH:MM, or empty' },
+    lines: { type: 'ARRAY', items: { type: 'OBJECT', properties: {
+      text: { type: 'STRING', description: 'The line as printed' },
+      code: { type: 'STRING' },
+      qty: { type: 'INTEGER', description: 'Quantity supplied' },
+      unit: { type: 'STRING' },
+      batch: { type: 'STRING' },
+      expiry: { type: 'STRING', description: 'YYYY-MM-DD or YYYY-MM, or empty' },
+      productId: { type: 'STRING', description: 'An id from the product list, or empty' },
+      confidence: { type: 'NUMBER' },
+    }, required: ['text', 'qty', 'productId', 'confidence'] } },
+  },
+  required: ['supplier', 'docketNumber', 'lines'],
+};
