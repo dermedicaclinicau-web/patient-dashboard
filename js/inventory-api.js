@@ -29,7 +29,8 @@ export const MOVE_TYPES = {
   "kit-borrow": "Borrowed from a colleague", "kit-count": "Kit count adjusted",
   "use-correct": "Usage corrected", "kit-correct": "Kit usage corrected",
   investigation: "Investigation closed",  "shared-open": "Opened for sharing", "shared-finish": "Opened one finished",
-  baseline: "Starting stock set",  
+  baseline: "Starting stock set",
+  sale: "Sold",
 };
 export const EXPIRY_SOON_DAYS = 60;
 
@@ -2987,4 +2988,106 @@ export async function listKitDays(from, to) {
   const snap = await getDocs(query(collection(db, "inv_kitdays"),
     where("dateKey", ">=", dayKey(from)), where("dateKey", "<", dayKey(to))));
   return snap.docs.map(normaliseKitDay).sort((a, b) => b.dateKey.localeCompare(a.dateKey) || a.staffName.localeCompare(b.staffName));
+}
+
+/* ===================== Sales: products checked out to patients (the Scanner now, the checkout later) ===================== */
+// Every sale comes off the Shelf, oldest expiry first, in one transaction with the activity log and the sale record.
+// A sale never fails for lack of stock: whatever the system didn't have is saved as short, to count and sort out.
+
+export async function listSalesOn(key = dayKey()) {
+  const snap = await getDocs(query(collection(db, "inv_sales"), where("dateKey", "==", key)));
+  return snap.docs.map((d) => {
+    const x = d.data() || {};
+    return { id: d.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [], at: toDate(x.at) };
+  });
+}
+
+// sale = { source: "scan" | "pos", scanId, patientName, apptDate, provider, note, lines: [{ productId, qty, fee }] }
+// also(tx, saleId): extra writes in the same transaction (e.g. the scan record). Returns { id, lines, short }.
+export async function recordSale(sale, staff, { also = null } = {}) {
+  const me = uid();
+  const by = who(staff);
+  const want = new Map();
+  (sale.lines || []).forEach((l) => {
+    const pid = clip(l.productId, 60);
+    const q = Math.min(99, Math.max(0, parseInt(l.qty, 10) || 0));
+    if (!pid || !q) return;
+    const cur = want.get(pid) || { productId: pid, qty: 0, fee: 0, hasFee: false };
+    cur.qty += q;
+    if (l.fee !== null && l.fee !== undefined && l.fee !== "" && Number.isFinite(Number(l.fee))) {
+      cur.fee = round2(cur.fee + Number(l.fee));
+      cur.hasFee = true;
+    }
+    want.set(pid, cur);
+  });
+  const items = [...want.values()].slice(0, 40);
+  if (!items.length) throw new Error("Nothing to take off the Shelf.");
+
+  // Each product's Shelf batches, oldest expiry first. Their quantities are read again inside the transaction.
+  const lotIds = new Map();
+  await Promise.all(items.map(async (it) => {
+    const snap = await getDocs(query(collection(db, "inv_lots"), where("productId", "==", it.productId)));
+    lotIds.set(it.productId, snap.docs.map(normaliseLot).filter((l) => l.loc === "shelf" && l.qty > 0).sort(fefo).map((l) => l.id));
+  }));
+
+  const saleRef = doc(collection(db, "inv_sales"));
+  let result = null;
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    const prods = new Map();
+    const lots = new Map();
+    for (const it of items) {
+      const ps = await tx.get(doc(db, "inv_products", it.productId));
+      if (!ps.exists()) throw new Error("A product on this sale no longer exists. Scan it again.");
+      prods.set(it.productId, ps);
+      for (const id of lotIds.get(it.productId) || []) lots.set(id, await tx.get(doc(db, "inv_lots", id)));
+    }
+
+    // ---- Writes ----
+    const reason = sale.source === "pos" ? "Checkout" : "Billing sheet scan";
+    const who2 = [sale.patientName, sale.provider].filter(Boolean).join(" · ");
+    const out = items.map((it) => {
+      const ps = prods.get(it.productId);
+      const pd = ps.data();
+      let left = it.qty;
+      const rows = [];
+      for (const id of lotIds.get(it.productId) || []) {
+        if (!left) break;
+        const s = lots.get(id);
+        if (!s || !s.exists()) continue;
+        const d = s.data();
+        const have = Number(d.qty) || 0;
+        if (have <= 0) continue;
+        const n = Math.min(have, left);
+        tx.update(s.ref, { qty: have - n, updatedAt: serverTimestamp() });
+        rows.push({ batch: String(d.batch || ""), expiry: String(d.expiry || ""), taken: n });
+        left -= n;
+      }
+      const taken = it.qty - left;
+      if (taken) {
+        const st = pd.stock || {};
+        tx.update(ps.ref, { stock: { shelf: Math.max(0, (Number(st.shelf) || 0) - taken), jt: Number(st.jt) || 0 }, stockAt: serverTimestamp() });
+        logMove(tx, staff, {
+          type: "sale", productId: it.productId, productName: String(pd.name || ""), unit: String(pd.stockUnit || "item"),
+          lines: rows.map((r) => ({ loc: "shelf", batch: r.batch, expiry: r.expiry, delta: -r.taken })),
+          reason, note: who2.slice(0, 500), ref: saleRef.id,
+        });
+      }
+      return {
+        productId: it.productId, name: String(pd.name || ""), unit: String(pd.stockUnit || "item"),
+        qty: it.qty, fee: it.hasFee ? it.fee : null, taken, short: it.qty - taken, rows,
+      };
+    });
+    const short = out.some((l) => l.short > 0);
+    tx.set(saleRef, {
+      source: sale.source === "pos" ? "pos" : "scan", scanId: clip(sale.scanId, 40),
+      patientName: clip(sale.patientName, 150), apptDate: KEY_RE.test(sale.apptDate || "") ? sale.apptDate : "",
+      provider: clip(sale.provider, 80), note: clip(sale.note, 500),
+      lines: out, short, total: round2(out.reduce((a, l) => a + (l.fee || 0), 0)),
+      voided: false, dateKey: dayKey(), by, byUid: me, at: serverTimestamp(),
+    });
+    if (also) also(tx, saleRef.id, out);
+    result = { id: saleRef.id, lines: out, short };
+  });
+  return result;
 }

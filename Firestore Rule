@@ -135,7 +135,7 @@ service cloud.firestore {
           || (invReceive() && request.resource.data.type == 'receive')
           || (invKit() && request.resource.data.type in ['kit-take', 'kit-open', 'kit-return', 'kit-discard', 'kit-use', 'kit-borrow'])
           || (invJt() && request.resource.data.type == 'release')
-          || (invUse() && request.resource.data.type == 'use'));
+          || (invUse() && request.resource.data.type in ['use', 'sale']));
       allow update, delete: if false;
     }
 
@@ -916,11 +916,20 @@ match /inv_count_drafts/{id} {
         allow update, delete: if false;
       }
     }
-match /scans/{id} {
-  allow read: if request.auth != null;
-  allow create: if request.auth != null && request.resource.data.byUid == request.auth.uid;
-  allow update, delete: if false;
-}
+    match /scans/{id} {
+      allow read: if isStaff();
+      allow create: if isStaff() && request.resource.data.byUid == request.auth.uid;
+      allow update, delete: if false;
+    }
+    // Sales: products checked out to patients (Scanner now, the checkout later). Never edited from a browser.
+    match /inv_sales/{id} {
+      allow read: if isStaff();
+      allow create: if invUse() && request.resource.data.byUid == request.auth.uid
+        && request.resource.data.lines is list
+        && request.resource.data.lines.size() > 0 && request.resource.data.lines.size() <= 40
+        && request.resource.data.voided == false;
+      allow update, delete: if false;
+    }
     
     // ===================== Safety net =====================
     // Anything not allowed by a rule above stays locked

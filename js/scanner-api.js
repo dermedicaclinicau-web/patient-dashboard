@@ -1,14 +1,16 @@
 // Scanner: a photo is read by Gemini through Apps Script (the API key never reaches the browser),
-// matched to the product list here, and saved to Firestore (scans) with the photo in Storage.
+// matched to the product list here, then saved: the scan (Firestore: scans, photo in Storage) and,
+// in the same transaction, the sale that takes the products off the Shelf.
 import { db, auth } from "./firebase-config.js";
 import { collection, doc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { getStorage, ref as sRef, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 import { callApi } from "./appointments.js";
-import { dayKey } from "./inventory-api.js";
+import { dayKey, recordSale, listSalesOn } from "./inventory-api.js";
 
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const num = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : r2(v));
 const conf = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? 1 : Number(v));
+const normName = (s) => String(s || "").toLowerCase().replace(/[^a-z]+/g, " ").trim();
 export const money = (n) => (n === null || n === undefined ? "" : `$${Number.isInteger(Number(n)) ? Number(n) : Number(n).toFixed(2)}`);
 
 /* ---------- The photo ---------- */
@@ -85,7 +87,9 @@ export function startReview(result, products) {
   return lines;
 }
 
-// Flags each line and checks the total. Run again after someone changes a match.
+// Flags each line, works out how many come off the Shelf, and checks the total. Run again after any change.
+// take: how many come off the Shelf. Left undefined, it's filled in: written and seen → the written quantity;
+// seen but not written → the number seen (it was still handed over); written but not seen → 0 until someone confirms.
 export function reviewBilling(lines, result, products) {
   const byId = new Map(products.map((p) => [p.id, p]));
   const merged = [];
@@ -94,14 +98,18 @@ export function reviewBilling(lines, result, products) {
     if (m) {
       m.written.push(...l.written); m.seen += l.seen; m.seenText.push(...l.seenText);
       m.conf = Math.min(m.conf, l.conf); m.fixed = m.fixed || l.fixed;
+      if (l.take !== undefined) m.take = (m.take || 0) + l.take;
     } else {
-      merged.push({ productId: l.productId, written: [...l.written], seen: l.seen, seenText: [...l.seenText], conf: l.conf, fixed: !!l.fixed });
+      merged.push({ productId: l.productId, written: [...l.written], seen: l.seen, seenText: [...l.seenText],
+        conf: l.conf, fixed: !!l.fixed, take: l.take });
     }
   });
   const out = merged.map((l) => {
     const p = byId.get(l.productId) || null;
     const qty = l.written.reduce((a, w) => a + w.qty, 0);
     const fee = l.written.some((w) => w.fee !== null) ? r2(l.written.reduce((a, w) => a + (w.fee || 0), 0)) : null;
+    const take = !p ? 0 : l.take !== undefined ? l.take : qty && l.seen ? qty : !qty && l.seen ? l.seen : 0;
+    const shelf = p ? Number((p.stock || {}).shelf) || 0 : 0;
     const flags = [];
     if (!p) flags.push(["bad", qty ? "Not matched to a product" : "Couldn't tell which product this is"]);
     if (qty && !l.seen) flags.push(["bad", "Written, but not in the photo"]);
@@ -112,7 +120,8 @@ export function reviewBilling(lines, result, products) {
       flags.push(["warn", `Fee ${money(fee)}, retail price ${money(r2(p.price * qty))}`]);
     }
     if (p && !l.fixed && l.conf < 0.6) flags.push(["warn", "Check this is the right product"]);
-    return { ...l, product: p, qty, fee, flags };
+    if (p && take > shelf) flags.push(["warn", `The Shelf shows ${shelf} in the system`]);
+    return { ...l, product: p, qty, fee, take, flags };
   });
 
   const services = (result.services || []).map((s) => ({ text: String(s.text || "").slice(0, 150), fee: num(s.fee) }));
@@ -135,7 +144,19 @@ export function reviewBilling(lines, result, products) {
   };
 }
 
-/* ---------- Keeping a record ---------- */
+/* ---------- Already checked out today? ---------- */
+// The same patient's sales today that include any of these products: [{ name, qty, by }]
+export async function earlierSales(review, productIds) {
+  const name = normName(review.patientName);
+  if (!name) return [];
+  const want = new Set(productIds);
+  return (await listSalesOn(dayKey()))
+    .filter((s) => !s.voided && normName(s.patientName) === name)
+    .flatMap((s) => s.lines.filter((l) => want.has(l.productId)).map((l) => ({ name: l.name, qty: l.qty, by: s.by })));
+}
+
+/* ---------- Saving: the scan, and the sale that takes the products off the Shelf ---------- */
+// Returns { id, sale } (sale is null when nothing came off the Shelf)
 export async function saveBillingScan({ photo, result, review, note = "" }, staff) {
   const uid = auth.currentUser && auth.currentUser.uid;
   if (!uid) throw new Error("Your session has ended. Log in again.");
@@ -150,19 +171,29 @@ export async function saveBillingScan({ photo, result, review, note = "" }, staf
       file = { path, url: await getDownloadURL(r) };
     } catch (err) { console.warn("The scan photo wasn't saved:", err); }
   }
-  await setDoc(ref, {
-    kind: "billing", dateKey: key, status: review.flagCount ? "flagged" : "ok", flagCount: review.flagCount,
-    note: String(note || "").trim().slice(0, 1000),
+  const cleanNote = String(note || "").trim().slice(0, 1000);
+  const sell = review.lines.filter((l) => l.product && l.take > 0)
+    .map((l) => ({ productId: l.productId, qty: l.take, fee: l.fee }));
+  const data = {
+    kind: "billing", dateKey: key, status: review.flagCount ? "flagged" : "ok", flagCount: review.flagCount, note: cleanNote,
     patientName: review.patientName, apptDate: review.apptDate, apptTime: review.apptTime, provider: review.provider,
     lines: review.lines.map((l) => ({
       productId: l.productId, productName: l.product ? l.product.name : "",
-      written: l.written.map((w) => w.text).join(" / "), qty: l.qty, fee: l.fee, seen: l.seen,
+      written: l.written.map((w) => w.text).join(" / "), qty: l.qty, fee: l.fee, seen: l.seen, take: l.take || 0,
       seenAs: l.seenText.join(" / ").slice(0, 300), fixed: !!l.fixed, flags: l.flags.map((f) => f[1]),
     })),
     services: review.services, productsTotal: review.productsTotal, servicesTotal: review.servicesTotal,
     sum: review.sum, credit: review.credit, writtenTotal: review.writtenTotal, totalFlag: review.totalFlag,
-    photo: file, raw: JSON.stringify(result).slice(0, 20000),
+    photo: file, raw: JSON.stringify(result).slice(0, 20000), saleId: "",
     by: String((staff && staff.name) || "").slice(0, 120), byUid: uid, at: serverTimestamp(),
-  });
-  return ref.id;
+  };
+  if (!sell.length) {
+    await setDoc(ref, data);
+    return { id: ref.id, sale: null };
+  }
+  const sale = await recordSale({
+    source: "scan", scanId: ref.id, patientName: review.patientName, apptDate: review.apptDate,
+    provider: review.provider, note: cleanNote, lines: sell,
+  }, staff, { also: (tx, saleId) => tx.set(ref, { ...data, saleId }) });
+  return { id: ref.id, sale };
 }

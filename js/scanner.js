@@ -1,9 +1,10 @@
 // Scanner (#/scanner): photograph a billing sheet with the products on it.
 // Gemini reads the handwriting and the labels; the portal matches both to the product list and flags anything that doesn't line up.
-// Nothing here changes stock. Each scan is kept (Firestore: scans) with its photo.
-import { listProducts, INV_CATEGORIES } from "./inventory-api.js";
-import { preparePhoto, readBillingSheet, startReview, reviewBilling, saveBillingScan, money } from "./scanner-api.js";
+// Saving takes what was given off the Shelf (a sale, oldest expiry first) and keeps the scan with its photo.
+import { listProducts, INV_CATEGORIES, plural } from "./inventory-api.js";
+import { preparePhoto, readBillingSheet, startReview, reviewBilling, saveBillingScan, earlierSales, money } from "./scanner-api.js";
 import { showToast } from "./utils.js";
+import { confirmDialog } from "./dialog.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const svg = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -22,14 +23,20 @@ export function mountScanner(container, { staff = null } = {}) {
   root.className = "page scan";
   container.replaceChildren(root);
 
+  // The product list (with Shelf stock). Loaded again after each sale, so the numbers stay current.
   let products = [];
-  const productsReady = listProducts().then((list) => { products = list.filter((p) => p.active); })
+  const loadProducts = () => listProducts().then((list) => { products = list.filter((p) => p.active); })
     .catch((err) => console.error("Scanner: the product list didn't load", err));
+  let productsReady = loadProducts();
 
   const st = {
     mode: "camera", stream: null, track: null, starting: false, zoom: 1, hw: null, torch: false, canTorch: false, canFocus: false,
     camErr: "", photo: null, photoUrl: "", base64: "", result: null, lines: [], review: null, error: "", fixing: -1, busy: false,
   };
+
+  const sellCount = () => st.lines.reduce((a, l) => a + (l.product ? l.take || 0 : 0), 0);
+  const sellText = () => (sellCount() ? `Saving takes ${plural(sellCount(), "product")} off the Shelf.` : "Nothing will come off the Shelf.");
+  const saveLabel = () => (sellCount() ? `Save and take ${sellCount()} off Shelf` : "Save");
 
   /* ---------- Screens ---------- */
   const headHtml = () => `<div class="scan-head"><div class="scan-modes" role="tablist" aria-label="What you're scanning">
@@ -78,11 +85,16 @@ export function mountScanner(container, { staff = null } = {}) {
     const bad = l.flags.some((f) => f[0] === "bad");
     const written = l.written.map((w) => `“${w.text}”${w.qty > 1 ? ` ×${w.qty}` : ""}`).join(", ");
     const seenAs = !l.product && l.seenText.length ? ` (${l.seenText.join(", ")})` : "";
+    const take = l.product ? `<label class="scan-take">Off Shelf
+        <input type="number" min="0" max="99" step="1" inputmode="numeric" data-take="${i}" value="${l.take || 0}"
+          aria-label="How many ${esc(l.product.name)} come off the Shelf" />
+        <small>${Number(l.product.stock.shelf) || 0} on Shelf now</small></label>` : "";
     return `<div class="scan-row${l.flags.length ? (bad ? " is-bad" : " is-warn") : ""}">
       <div class="scan-row-main">
         <button type="button" class="scan-name" data-fix="${i}">${esc(l.product ? l.product.name : "Not matched")}<small>change</small></button>
         <small>${written ? `Written ${esc(written)}` : "Not written on the sheet"}${l.seen ? ` · in the photo${l.seen > 1 ? ` ×${l.seen}` : ""}${esc(seenAs)}` : ""}</small>
         ${l.flags.map(([t, m]) => `<span class="scan-flag is-${t}">${esc(m)}</span>`).join("")}
+        ${take}
         ${st.fixing === i ? fixHtml(l, i) : ""}
       </div>
       <span class="scan-fee">${l.fee !== null ? esc(money(l.fee)) : l.qty ? "none" : ""}</span>
@@ -112,16 +124,27 @@ export function mountScanner(container, { staff = null } = {}) {
         || (r.writtenTotal !== null ? `${sumText} ✓ matches the total written` : sumText))}</p>
       ${r.flagCount ? `<label class="lh-field"><span class="lh-label">What happened? (optional)</span>
         <textarea data-role="note" rows="2" maxlength="1000" placeholder="e.g. SPF given as a sample, no charge"></textarea></label>` : ""}
+      <p class="scan-sell" data-role="sell">${esc(sellText())}</p>
       <div class="scan-acts">
         <button type="button" class="lh-btn" data-act="again">Scan again</button>
-        <button type="button" class="lh-btn is-primary" data-act="save">${r.flagCount ? "Save" : "Looks right"}</button>
+        <button type="button" class="lh-btn is-primary" data-act="save">${esc(saveLabel())}</button>
       </div>`;
   }
 
   function render() {
+    // A note being typed survives a redraw (e.g. after changing a quantity)
+    const noteEl = root.querySelector('[data-role="note"]');
+    const note = noteEl ? noteEl.value : "";
     root.innerHTML = st.mode === "camera" ? cameraHtml() : st.mode === "busy" ? busyHtml()
       : st.mode === "error" ? errorHtml() : resultHtml();
+    const n2 = root.querySelector('[data-role="note"]');
+    if (n2 && note) n2.value = note;
     if (st.mode === "camera") startCamera();
+  }
+
+  function rereview() {
+    st.review = reviewBilling(st.lines, st.result, products);
+    st.lines = st.review.lines;
   }
 
   /* ---------- Camera ---------- */
@@ -246,8 +269,8 @@ export function mountScanner(container, { staff = null } = {}) {
       await productsReady;
       if (!products.length) throw new Error("Couldn't load the product list. Check your connection and try again.");
       st.result = await readBillingSheet(st.base64, products);
-      st.review = reviewBilling(startReview(st.result, products), st.result, products);
-      st.lines = st.review.lines;
+      st.lines = startReview(st.result, products);
+      rereview();
       st.mode = "result";
     } catch (err) {
       console.error("Scan failed:", err);
@@ -265,21 +288,44 @@ export function mountScanner(container, { staff = null } = {}) {
 
   async function save(btn) {
     if (st.busy) return;
+    const selling = st.lines.filter((l) => l.product && l.take > 0);
+
+    // The same patient already had some of these checked out today? Ask before taking them off again.
+    if (selling.length) {
+      const before = await earlierSales(st.review, selling.map((l) => l.productId)).catch(() => []);
+      if (before.length) {
+        const ok = await confirmDialog({
+          title: "Already checked out today?",
+          message: `${before.map((b) => `${b.qty} × ${b.name}${b.by ? ` (by ${b.by})` : ""}`).join(", ")} ${before.length === 1 ? "was" : "were"} already `
+            + `taken off the Shelf for ${st.review.patientName} today. Take ${selling.length === 1 ? "it" : "them"} off again?`,
+          confirmLabel: "Take off again", tone: "warning",
+        });
+        if (!ok) return;
+      }
+    }
+
     st.busy = true;
     btn.disabled = true;
     btn.textContent = "Saving…";
     try {
       const note = root.querySelector('[data-role="note"]');
-      await saveBillingScan({ photo: st.photo, result: st.result, review: st.review, note: note ? note.value : "" }, staff);
-      showToast(st.review.flagCount ? "Saved, with what needs checking" : "Saved");
+      const res = await saveBillingScan({ photo: st.photo, result: st.result, review: st.review, note: note ? note.value : "" }, staff);
+      const sale = res.sale;
+      const short = sale ? sale.lines.filter((l) => l.short > 0) : [];
+      const taken = sale ? sale.lines.reduce((a, l) => a + l.taken, 0) : 0;
+      showToast(!sale ? "Saved. Nothing came off the Shelf."
+        : short.length
+          ? `Saved. ${short.map((l) => l.name).join(", ")}: the Shelf showed fewer than were given. Count ${short.length === 1 ? "it" : "them"} to put the numbers right.`
+          : `Saved. ${plural(taken, "product")} taken off the Shelf.`);
+      productsReady = loadProducts();   // fresh Shelf numbers for the next scan
       again();
     } catch (err) {
       console.error("Save scan failed:", err);
       showToast(err && err.code === "permission-denied"
-        ? "Saving scans is blocked. Ask an Admin to publish the Firestore rule for scans."
-        : "Couldn't save. Try again.");
+        ? "You don't have access to take stock off the Shelf. Ask an Admin to check your Inventory access in Staff."
+        : (err && err.message && !err.code) ? err.message : "Couldn't save. Nothing was taken off the Shelf. Try again.");
       btn.disabled = false;
-      btn.textContent = st.review.flagCount ? "Save" : "Looks right";
+      btn.textContent = saveLabel();
     } finally {
       st.busy = false;
     }
@@ -332,6 +378,19 @@ export function mountScanner(container, { staff = null } = {}) {
     else if (act === "big") { const big = root.querySelector('[data-role="big"]'); if (big) big.hidden = !big.hidden; }
   });
 
+  // Typing a quantity: the totals update straight away; the flags update when you leave the box
+  root.addEventListener("input", (e) => {
+    const t = e.target;
+    if (t.dataset.take === undefined) return;
+    const l = st.lines[Number(t.dataset.take)];
+    if (!l) return;
+    l.take = Math.min(99, Math.max(0, parseInt(t.value, 10) || 0));
+    const s = root.querySelector('[data-role="sell"]');
+    if (s) s.textContent = sellText();
+    const b = root.querySelector('[data-act="save"]');
+    if (b && !st.busy) b.textContent = saveLabel();
+  });
+
   root.addEventListener("change", (e) => {
     const t = e.target;
     if (t.dataset.role === "file") {
@@ -340,13 +399,14 @@ export function mountScanner(container, { staff = null } = {}) {
       if (f) usePhoto(f);
       return;
     }
+    if (t.dataset.take !== undefined) { rereview(); render(); return; }
     if (t.dataset.fixsel !== undefined) {   // staff picked the right product for a line
       const l = st.lines[Number(t.dataset.fixsel)];
       if (!l) return;
       l.productId = t.value;
       l.fixed = true;
-      st.review = reviewBilling(st.lines, st.result, products);
-      st.lines = st.review.lines;
+      l.take = undefined;   // worked out again for the new product
+      rereview();
       st.fixing = -1;
       render();
     }
