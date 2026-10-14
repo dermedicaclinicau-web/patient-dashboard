@@ -43,3 +43,9 @@ export async function refreshAccess() {
   if (changed && res.token) await signInWithCustomToken(auth, res.token);
   return { changed, role: res.role || "", perms, injector: inj };
 }
+
+// A fresh login token with the person's current details (e.g. after changing their photo)
+export async function refreshLoginToken() {
+  const res = await callApi({ action: "staff", op: "me" });
+  if (res.token) await signInWithCustomToken(auth, res.token);
+}

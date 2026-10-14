@@ -18,7 +18,7 @@ import { mountSspProductsPage } from "./ssp-products.js";
 import { mountSspBuilder } from "./ssp-builder.js";
 import { mountStaffManager } from "./staff-manager.js";
 import { mountInventory } from "./inventory.js";
-import { setPerms, can, isAdmin as isAdminNow, refreshAccess } from "./perms.js";
+import { setPerms, can, isAdmin as isAdminNow, refreshAccess, refreshLoginToken } from "./perms.js";
 import { initUpdateCheck } from "./updates.js";
 import { mountMyDashboard } from "./my-dashboard.js";
 import { mountReports } from "./reports.js";
@@ -28,6 +28,7 @@ import { mountStaffDays } from "./staff-days.js";
 import { initTopbar, closeTopbarMenu } from "./topbar.js";
 import { initChat, teardownChat } from "./chat.js";
 import { openMyPhoto } from "./my-photo.js";
+import { mountKnowledge } from "./knowledge.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -179,6 +180,19 @@ els.editProfileBtn.addEventListener("click", () => {
   els.profileName.select();
 });
 
+// My photo: upload, take or remove your own photo
+const myPhotoBtn = $("my-photo-btn");
+if (myPhotoBtn) myPhotoBtn.addEventListener("click", () => {
+  if (!currentStaff) return;
+  closeTopbarMenu();
+  openMyPhoto({ ...currentStaff }, async (url) => {
+    currentStaff = { ...currentStaff, photo: url };
+    renderStaff(currentStaff);
+    try { await refreshLoginToken(); }            // so the new photo is still there after a refresh
+    catch (err) { console.warn("Login token not refreshed:", err); }
+  });
+});
+
 els.profileCancel.addEventListener("click", () => els.profileDialog.close());
 
 els.profileForm.addEventListener("submit", async (e) => {
@@ -234,6 +248,7 @@ const PAGES = {
   reports: (el, param) => mountReports(el, { param, staff: currentStaff }),
   staff: (el) => mountStaffManager(el, { staff: currentStaff }),
   settings: (el, param) => mountSettings(el, { param, staff: currentStaff }),
+  help: (el, param) => mountKnowledge(el, { param, staff: currentStaff }),
 };
 
 // Which permission each page needs ("admin" = Admins only)
@@ -249,7 +264,7 @@ const pageAllowed = (p) => {
   if (!need) return true;
   return need === "admin" ? isAdminNow() : can(need);
 };
-const firstAllowedPage = () => ["calendar", "patients", "tasks", "inventory", "reports", "forms", "staff"].find(pageAllowed) || "";
+const firstAllowedPage = () => ["calendar", "patients", "tasks", "inventory", "reports", "forms", "staff", "help"].find(pageAllowed) || "";
 const currentPage = () => location.hash.split("/")[1] || "";
 
 function applyNav() {

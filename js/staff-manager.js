@@ -168,13 +168,13 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
     const set = new Set(roleTicks[r] || []);
     if (cb.checked) set.add(cb.dataset.perm); else set.delete(cb.dataset.perm);
     roleTicks[r] = [...set];
-      if (!dirty) {                     // don't throw away a role that hasn't been saved yet
-        roleNames = rolesRes.roleNames || res.roles || roleNames;
-        roleTicks = rolesRes.roles || {};
-        savedNames = roleNames;
-      }
-      savedTicks = JSON.parse(JSON.stringify(rolesRes.roles || {}));
-      });
+    if (!dirty) {
+      dirty = true;
+      const foot = body.querySelector(".st-matrix-foot");
+      const btn = foot && foot.querySelector('[data-act="save-roles"]');
+      if (btn && !foot.querySelector(".st-dirty")) btn.insertAdjacentHTML("beforebegin", '<span class="st-dirty">Unsaved changes</span>');
+    }
+  });
 
   function fillRoleFilter() {
     const sel = $('[data-role="rolefilter"]');
@@ -297,6 +297,7 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
         roleTicks = rolesRes.roles || {};
         savedNames = roleNames;
       }
+      savedTicks = JSON.parse(JSON.stringify(rolesRes.roles || {}));
       catalogue = (rolesRes.perms || []).filter((p) => p.key !== "inventory.kit");
       fillRoleFilter();
       renderLock(res.locked);

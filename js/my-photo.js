@@ -10,7 +10,7 @@ export function openMyPhoto(staff, onChange = () => {}) {
   let photo = (staff && staff.photo) || "";
   let busy = false;
   const dlg = document.createElement("dialog");
-  dlg.className = "lh-dialog mp-dlg";
+  dlg.className = "lh-dialog myp-dlg";
   dlg.innerHTML = `
     <div class="lh-form">
       <div class="lh-dialog-head"><h3>My photo</h3><p>Shown next to your name in the portal and in chat.</p></div>
