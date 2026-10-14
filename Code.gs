@@ -2778,6 +2778,7 @@ function handleStaff_(body) {
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
   const op = String(body.op || '');
   if (op === 'me') return staffMe_(session); // anyone logged in
+  if (op === 'setPhoto') return staffSetPhoto_(String(body.photo || ''), session); // anyone: their own photo
   if (!/^admin$/i.test(String(session.role || ''))) return { ok: false, error: 'FORBIDDEN' };
   try {
     if (op === 'roles') return rolesGet_();
@@ -2926,6 +2927,31 @@ function staffSetActive_(id, active, session) {
   ]);
   CacheService.getScriptCache().remove('staff_docs_v1');
   return { ok: true, firebase: firebase };
+}
+
+// Only a photo uploaded into this person's own folder: staff_photos/<their id>/…
+function staffPhotoOk_(url, uid) {
+  if (url.length > 1000) return false;
+  const m = /^https:\/\/firebasestorage\.googleapis\.com\/v0\/b\/[^\/?#]+\/o\/([^?#]+)\?/.exec(url);
+  if (!m) return false;
+  try { return decodeURIComponent(m[1]).indexOf('staff_photos/' + uid + '/') === 0; } catch (e) { return false; }
+}
+
+// Any staff member changing (or removing) their own profile photo
+function staffSetPhoto_(url, session) {
+  url = url.trim();
+  if (url && !staffPhotoOk_(url, session.uid)) return { ok: false, error: 'BAD_PHOTO' };
+  const cur = getStaffDocs_().filter(function (s) { return s.id === session.uid; })[0];
+  if (!cur) return { ok: false, error: 'UNAUTHORIZED' };
+  const cfg = getConfig_();
+  commitWrites_(cfg, [
+    patchWrite_(cfg, STAFF_COLLECTION + '/' + cur.id, {
+      'Profile Photo': url, 'Updated At': new Date().toISOString(), 'Updated By': String(session.name || ''),
+    }),
+    staffAuditWrite_(cfg, session, url ? 'Changed own photo' : 'Removed own photo', cur, ''),
+  ]);
+  CacheService.getScriptCache().remove('staff_docs_v1');
+  return { ok: true, photo: url };
 }
 
 function staffAuditList_() {
@@ -3446,6 +3472,8 @@ function handlePrintTask_(body) {
   return { ok: true, sent: copies, printer: printer };
 }
 
+
+
 // ===================== Inventory: order request emails =====================
 
 const PORTAL_URL_ = 'https://dermedicaclinicau-web.github.io/patient-dashboard/';
@@ -3486,6 +3514,12 @@ function handleInventory_(body) {
       if (!ordering) return { ok: false, error: 'FORBIDDEN' };
       if (!okId(body.poId)) return { ok: false, error: 'BAD_REQUEST' };
       return invSendPo_(String(body.poId), body, session);
+    }
+    if (op === 'senders') {
+      if (!ordering) return { ok: false, error: 'FORBIDDEN' };
+      const s = mailSenders_();
+      const def = poSenderDefault_();
+      return { ok: true, primary: s.primary, aliases: s.aliases, defaultFrom: def && okSender_(def, s) ? def : s.primary };
     }
   } catch (err) {
     console.error('Inventory ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
@@ -3534,6 +3568,38 @@ function invNotifyUpdate_(id) {
   if (rec.status !== 'ordered' && rec.status !== 'declined') return { ok: true, sent: 0 };
   return notifyProcessOne_(cfg, notifyEnqueue_(cfg, 'request.updated', { requestId: id, status: rec.status }, ''));
 }
+
+// ===================== Sending from a Gmail alias =====================
+// Aliases are the "Send mail as" addresses in Gmail → Settings → Accounts, on the account that runs this script.
+function mailSenders_() {
+  const cache = CacheService.getScriptCache();
+  const hit = cache.get('mail_senders_v1');
+  if (hit) return JSON.parse(hit);
+  const primary = String(Session.getEffectiveUser().getEmail() || '');
+  let aliases = [];
+  try { aliases = GmailApp.getAliases().map(String); }
+  catch (e) { console.warn('Gmail aliases not read: ' + e); }
+  const out = {
+    primary: primary,
+    aliases: uniq_(aliases.filter(function (a) { return isEmail_(a) && a.toLowerCase() !== primary.toLowerCase(); })),
+  };
+  try { cache.put('mail_senders_v1', JSON.stringify(out), 600); } catch (e) { /* not essential */ }
+  return out;
+}
+function okSender_(from, s) {
+  const f = String(from || '').toLowerCase();
+  return !f || f === s.primary.toLowerCase() || s.aliases.some(function (a) { return a.toLowerCase() === f; });
+}
+function poSenderDefault_() {
+  return String(PropertiesService.getScriptProperties().getProperty('PO_FROM_DEFAULT') || '');
+}
+
+// Run from the editor once: approves Gmail access and shows the addresses the portal will offer
+function testMailSenders() {
+  CacheService.getScriptCache().remove('mail_senders_v1');
+  console.log(JSON.stringify(mailSenders_()));
+}
+
 // ===================== Inventory: purchase orders =====================
 
 // Every item of the request is on a sent (or received) PO. sentPoId counts as sent.
@@ -3562,31 +3628,45 @@ function invSendPo_(id, body, session) {
   const to = String(body.to || '').trim();
   const cc = String(body.cc || '').trim();
   if (!isEmail_(to) || (cc && !isEmail_(cc))) return { ok: false, error: 'BAD_EMAIL' };
-  const bytes = pdfBytes_(body.pdf);
-  if (!bytes) return { ok: false, error: 'PDF_FAILED' };
+  const bytes = body.pdf ? pdfBytes_(body.pdf) : null;   // POs: no attachment, the order is in the email
+  if (body.pdf && !bytes) return { ok: false, error: 'PDF_FAILED' };
   const htmlRaw = sanitizeEmailHtml_(body.html);
   if (!htmlRaw || htmlRaw.length > 300000) return { ok: false, error: 'BAD_REQUEST' };
   if (MailApp.getRemainingDailyQuota() < 1) return { ok: false, error: 'QUOTA' };
 
-  const fileName = cleanFileName_(body.fileName, String(po.number || 'Purchase order'));
   const inlined = inlineTaskImages_(cfg, htmlRaw);
   const mail = {
     to: to, name: 'Dermedica Clinic',
     subject: String(body.subject || '').trim().slice(0, 200) || ('Purchase order ' + po.number),
     htmlBody: inlined.html, body: emailHtmlToText_(inlined.html),
-    attachments: [Utilities.newBlob(bytes, MimeType.PDF, fileName)],
   };
+  if (bytes) mail.attachments = [Utilities.newBlob(bytes, MimeType.PDF, cleanFileName_(body.fileName, String(po.number || 'Purchase order')))];
   if (cc) mail.cc = cc;
   if (Object.keys(inlined.images).length) mail.inlineImages = inlined.images;
-  MailApp.sendEmail(mail);
+  // From: the main account (MailApp), or one of its Gmail "Send mail as" aliases (GmailApp)
+  const senders = mailSenders_();
+  const from = String(body.from || '').trim();
+  if (from && !okSender_(from, senders)) return { ok: false, error: 'BAD_FROM' };
+  const useAlias = !!from && from.toLowerCase() !== senders.primary.toLowerCase();
+  if (useAlias) {
+    const opts = { htmlBody: mail.htmlBody, name: mail.name, from: from };
+    if (mail.attachments) opts.attachments = mail.attachments;
+    if (cc) opts.cc = cc;
+    if (mail.inlineImages) opts.inlineImages = mail.inlineImages;
+    GmailApp.sendEmail(to, mail.subject, mail.body, opts);
+  } else {
+    MailApp.sendEmail(mail);
+  }
+  if (body.makeDefault === true) PropertiesService.getScriptProperties().setProperty('PO_FROM_DEFAULT', from || senders.primary);
+  const sentFrom = from || senders.primary;
 
   const now = new Date().toISOString();
   const who = String(session.name || '');
   const first = po.status === 'draft';
   const patch = {
-    sentTo: to + (cc ? ' (cc ' + cc + ')' : ''), lastEmailAt: now, updatedAt: now, updatedBy: who,
+    sentTo: to + (cc ? ' (cc ' + cc + ')' : ''), sentFrom: sentFrom, lastEmailAt: now, updatedAt: now, updatedBy: who,
     events: (Array.isArray(po.events) ? po.events : []).concat([{
-      at: now, by: who, action: first ? 'Sent to supplier' : 'Emailed again', note: 'To ' + to,
+      at: now, by: who, action: first ? 'Sent to supplier' : 'Emailed again', note: 'To ' + to + ' · from ' + sentFrom,
     }]).slice(-60),
   };
   if (first) { patch.status = 'sent'; patch.sentAt = now; patch.sentBy = who; patch.sentVia = 'Email'; }
