@@ -5286,3 +5286,8 @@ body.is-arranging, body.is-arranging *{user-select:none;-webkit-user-select:none
 .po-table td:first-child{min-width:240px}
 .po-gst{align-self:end;white-space:nowrap}
 @media (max-width:1100px){.tb-grid.po-grid{grid-template-columns:minmax(0,1fr)}.po-side{position:static}}
+
+/* Send to supplier: From */
+.po-from{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:.5rem 1rem}
+.po-from-def{white-space:nowrap;padding-bottom:.55rem}
+@media (max-width:640px){.po-from{grid-template-columns:1fr}.po-from-def{white-space:normal;padding-bottom:0}}

@@ -420,6 +420,11 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       <form class="lh-form ec-form" novalidate>
         <div class="lh-dialog-head"><h3>${again ? "Email the purchase order again" : "Send to supplier"}</h3>
           <p>Sent from the clinic's email with the purchase order attached as a PDF.</p></div>
+        <div class="po-from">
+          <label class="lh-field"><span class="lh-label">From</span>
+            <select class="fb-select" name="from" disabled><option value="">Loading your email addresses…</option></select></label>
+          <label class="fe-check po-from-def" hidden><input type="checkbox" name="makeDefault" /> Use this for purchase orders from now on</label>
+        </div>
         <div class="ac-ed-two">
           <label class="lh-field"><span class="lh-label">To</span><input type="email" name="to" maxlength="254" value="${esc(s.email || "")}" /></label>
           <label class="lh-field"><span class="lh-label">CC (optional)</span><input type="email" name="cc" maxlength="254" value="${esc(s.ccEmail || "")}" /></label>
@@ -437,6 +442,25 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     const err = dlg.querySelector(".lh-error");
     const editor = createRichEditor(dlg.querySelector('[data-role="editor"]'), { accent: () => "#0f766e" });
     editor.setHtml(message);
+    // The addresses this clinic can send from (main account + Gmail "Send mail as" aliases)
+    const fromSel = form.elements.from;
+    const defBox = dlg.querySelector(".po-from-def");
+    let defaultFrom = "";
+    const syncDefault = () => { defBox.hidden = !fromSel.value || fromSel.value === defaultFrom; };
+    callApi({ action: "inventory", op: "senders" }).then((res) => {
+      if (!dlg.open) return;
+      const list = [res.primary, ...(res.aliases || [])].filter(Boolean);
+      defaultFrom = res.defaultFrom || res.primary || "";
+      fromSel.innerHTML = list.map((a) => `<option value="${esc(a)}"${a === defaultFrom ? " selected" : ""}>${
+        esc(a)}${a === res.primary ? " (main account)" : ""}</option>`).join("");
+      fromSel.disabled = false;
+      syncDefault();
+    }).catch((ex) => {
+      console.warn("Senders not loaded:", ex);
+      if (!dlg.open) return;
+      fromSel.innerHTML = '<option value="">The clinic\'s main address</option>';
+    });
+    fromSel.addEventListener("change", syncDefault);
     let busy = false;
     dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => { if (!busy) dlg.close(); });
     dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
@@ -459,6 +483,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
         btn.textContent = "Sending…";
         await callApi({
           action: "inventory", op: "sendPo", poId: id, to, cc,
+          from: fromSel.value, makeDefault: !defBox.hidden && form.elements.makeDefault.checked,
           subject: form.elements.subject.value.trim() || `Purchase order ${po.number}`,
           html: emailShell(editor.getHtml(), {}, { clinic: clinicDetails(letterhead), hasLogo: !!(letterhead && letterhead.logo) }),
           pdf, fileName: d.fileName,
@@ -470,7 +495,9 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       } catch (ex) {
         console.error("Send PO failed:", ex);
         busy = false;
-        show(ex && ex.code === "FORBIDDEN" ? "Only the ordering team can send purchase orders." : deliveryError(ex));
+        show(ex && ex.code === "FORBIDDEN" ? "Only the ordering team can send purchase orders."
+          : ex && ex.code === "BAD_FROM" ? "That sending address isn't set up in Gmail any more. Choose another one."
+          : deliveryError(ex));
         btn.disabled = false;
         btn.textContent = again ? "Send again" : "Send purchase order";
       }
