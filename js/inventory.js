@@ -1531,14 +1531,10 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           productSuppliers(p).map((t) => {
             const s = supplierOf(t.supplierId);
             if (!s) return "";
-            const bits = [
-              `Ordered ${niceDate(po.orderDate)}`,
-              po.historical ? `received ${niceDate(po.receivedDate)} (before the portal)`
-                : po.sentDate ? `sent ${niceDate(po.sentDate)}`
-                : po.sentAt ? `sent ${when(po.sentAt)}` : "",
-              `${po.lines.length} item${po.lines.length === 1 ? "" : "s"}`,
-              po.requestIds.length && `${po.requestIds.length} request${po.requestIds.length === 1 ? "" : "s"}`,
-              po.createdBy && `by ${po.createdBy}`,
+             const bits = [
+              t.supplierCode && `Code ${t.supplierCode}`,
+              t.cost !== null && t.cost !== undefined && `${money(t.cost)} / ${t.orderUnit || p.orderUnit}`,
+              s.email, s.phone,
             ].filter(Boolean);
             return `<p class="inv-pd-sup"><strong>${esc(s.name)}</strong>${t.main ? ' <span class="inv-flag is-info">Main</span>' : ""}${
               bits.map((b) => ` · ${b}`).join("")}</p>`;
@@ -1711,9 +1707,15 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         ${canMove ? '<button type="button" class="btn-primary" data-act="new-po">+ New purchase order</button>' : ""}
       </div>
       ${rows.length ? `<div class="po-list">${rows.map((po) => {
-        const bits = [`${po.lines.length} item${po.lines.length === 1 ? "" : "s"}`,
+        const bits = [
+          `Ordered ${niceDate(po.orderDate)}`,
+          po.historical ? `received ${niceDate(po.receivedDate)} (before the portal)`
+            : po.sentDate ? `sent ${niceDate(po.sentDate)}`
+            : po.sentAt ? `sent ${when(po.sentAt)}` : "",
+          `${po.lines.length} item${po.lines.length === 1 ? "" : "s"}`,
           po.requestIds.length && `${po.requestIds.length} request${po.requestIds.length === 1 ? "" : "s"}`,
-          po.sentAt ? `Sent ${when(po.sentAt)}` : `Created ${when(po.createdAt)}`, po.createdBy && `by ${po.createdBy}`].filter(Boolean);
+          po.createdBy && `by ${po.createdBy}`,
+        ].filter(Boolean);
         return `<a class="po-row" href="#/inventory/po/${encodeURIComponent(po.id)}">
           <span class="inv-name"><strong>${esc(po.number)} · ${esc(po.supplier.name)}</strong><small>${esc(bits.join(" · "))}</small></span>
           <span class="rq-status is-${po.status}">${esc(PO_STATUS[po.status])}</span>
