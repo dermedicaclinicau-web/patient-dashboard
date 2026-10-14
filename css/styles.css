@@ -4310,7 +4310,7 @@ button.pa-bdg { font-family: inherit; line-height: inherit; }
 .po-need-acts { display: flex; gap: .35rem; flex-wrap: wrap; justify-content: flex-end; }
 @media (max-width: 700px) { .po-need { grid-template-columns: 1fr; } .po-need-acts { justify-content: flex-start; } }
 
-.po-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: .75rem; }
+.po .po-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: .75rem; }
 .po-card { display: grid; align-content: start; gap: .55rem; padding: .8rem .9rem; border: 1px solid var(--border);
   border-top: 4px solid var(--c); border-radius: 14px; background: #fff; }
 .po-card.is-off { opacity: .6; }
@@ -4349,7 +4349,7 @@ button.pa-bdg { font-family: inherit; line-height: inherit; }
 .po-quote > summary { cursor: pointer; color: var(--muted); font-weight: 600; }
 .po-quote p { margin: .3rem 0 0; }
 
-.po-events { padding: .7rem .9rem; border: 1px solid var(--border); border-radius: 14px; background: #fff; }
+.po .po-events { padding: .7rem .9rem; border: 1px solid var(--border); border-radius: 14px; background: #fff; }
 .po-sec-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: .35rem; }
 .po-sec-head h4 { margin: 0; font-size: .9rem; }
 .po-evlist { display: grid; gap: .3rem; margin: 0; padding: 0; list-style: none; }
@@ -5278,3 +5278,11 @@ body.is-arranging, body.is-arranging *{user-select:none;-webkit-user-select:none
   border:1px solid #bfdbfe;border-radius:12px;background:#eff6ff;color:#1e40af;font-size:.9rem}
 .sc-resume .cs-link{margin-left:auto}
 @media (max-width:760px){.ff-bar-actions [data-act="later"] span{display:none}}
+
+/* Purchase order page: roomier layout */
+.tb-grid.po-grid, .po-grid:not(.po .po-grid) { gap: 1.25rem; align-items: start; }
+.po-grid > :last-child { position: sticky; top: 6.5rem; display: flex; flex-direction: column; gap: 1rem; }
+.po-table th { white-space: nowrap; }
+.po-table td:first-child { min-width: 240px; }
+.po-gst { align-self: center; white-space: nowrap; }
+@media (max-width: 1100px) { .po-grid > :last-child { position: static; } }
