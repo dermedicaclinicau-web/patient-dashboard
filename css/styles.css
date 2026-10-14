@@ -5174,3 +5174,14 @@ dialog.lh-dialog.eod-dlg{width:min(760px,95vw)}
 .ch-pick:has(input:checked){background:#f0fdfa}
 .ch-awayform{display:flex;flex-direction:column;gap:.7rem;padding:.8rem;overflow-y:auto}
 .ch-awayform p{margin:0;font-size:.82rem}
+
+/* Staff → Roles & access: the role names (and the Access column) stay in view while scrolling */
+.st-matrix-wrap{max-height:calc(100vh - 240px);overflow:auto;border:1px solid var(--border);border-radius:12px;background:var(--surface,#fff)}
+.st-matrix{border-collapse:separate;border-spacing:0;width:100%}
+.st-matrix thead th{position:sticky;top:0;z-index:4;background:var(--surface,#fff);box-shadow:inset 0 -2px 0 var(--border)}
+.st-matrix th:first-child,.st-matrix td:first-child{position:sticky;left:0;z-index:2;background:var(--surface,#fff)}
+.st-matrix thead th:first-child{z-index:5}
+.st-matrix .st-mgroup td{position:sticky;top:var(--st-head,42px);z-index:3;background:#f1f5f9;font-weight:700;box-shadow:inset 0 -1px 0 var(--border)}
+.st-matrix tbody tr:not(.st-mgroup):hover td{background:#f8fafc}
+.st-matrix-foot{position:sticky;bottom:0}
+@media (max-width:700px){.st-matrix-wrap{max-height:calc(100vh - 180px)}}

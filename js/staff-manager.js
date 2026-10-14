@@ -131,6 +131,10 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
         ${dirty ? '<span class="st-dirty">Unsaved changes</span>' : ""}
         <button type="button" class="lh-btn is-primary" data-act="save-roles">Save role access</button>
       </div>`;
+    // Group names stick just under the role names, whatever height the header is
+    const wrap = body.querySelector(".st-matrix-wrap");
+    const head = wrap && wrap.querySelector("thead");
+    if (head) wrap.style.setProperty("--st-head", `${head.offsetHeight}px`);
   }
 
   // Ticks are remembered as you go, so adding or removing a role doesn't lose them
