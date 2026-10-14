@@ -47,7 +47,8 @@ const CSS = `
 
 export function buildPoDocument({ po, letterhead: lh = {} }) {
   const s = po.supplier || {};
-  const date = (po.sentAt || po.createdAt || new Date()).toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" });
+  const date = po.orderDate ? niceDate(po.orderDate)
+    : (po.sentAt || po.createdAt || new Date()).toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" });
   const logo = LOGO_RE.test(lh.logo || "")
     ? `<img src="${lh.logo}" alt="" style="display:inline-block !important;height:52px !important;width:auto !important;max-width:none !important;">` : "";
   const clinic = lh.name || "Dermedica";

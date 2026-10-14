@@ -2,7 +2,7 @@
 import {
   PO_STATUS, REQ_STATUS, LOCATIONS, locLabel, plural, unitPlural, lowAt, suggestOrder, reqNumber, batchName,
   getPo, savePo, renumberPo, markPoSent, cancelPo, poTotals, lineFromProduct, cleanPoLine, supplierSnapshot,
-  listProducts, listSuppliers, listRequests, supplierTerms, suppliesProduct, suggestOrderFor,
+  listProducts, listSuppliers, listRequests, supplierTerms, suppliesProduct, suggestOrderFor, dayKey,
 } from "./inventory-api.js";
 import { renderDeliveries } from "./po-deliveries.js";
 import { deliveryError } from "./form-delivery.js";
@@ -146,9 +146,12 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
   /* ---------- Top bar ---------- */
   function renderBar() {
     $('[data-role="title"]').textContent = po.number;
-    $('[data-role="sub"]').innerHTML = `${esc(po.supplier.name || "No supplier")} · ${editable()
+    // Backdated orders show their date; a backdated send shows the day only (no made-up time)
+    const dated = po.backdated && po.orderDate ? ` · dated ${niceDate(po.orderDate)}` : "";
+    const sentText = po.sentDate ? `Sent ${niceDate(po.sentDate)}` : po.sentAt ? `Sent ${when(po.sentAt)}` : "";
+    $('[data-role="sub"]').innerHTML = `${esc((po.supplier.name || "No supplier") + dated)} · ${editable()
       ? `<span data-role="state">${dirty ? "Unsaved changes" : "All changes saved"}</span>`
-      : esc(po.sentAt ? `Sent ${when(po.sentAt)}${po.sentVia ? ` (${po.sentVia})` : ""}` : PO_STATUS[po.status])}`;
+      : esc(sentText ? `${sentText}${po.sentVia ? ` (${po.sentVia})` : ""}` : PO_STATUS[po.status])}`;
     const pill = $('[data-role="pill"]');
     pill.className = `rq-status is-${po.status}`;
     pill.textContent = PO_STATUS[po.status];
@@ -237,6 +240,9 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     if (!editable()) {
       return `<section class="tb-card"><h4><span class="tb-num">3</span>Details</h4>
         <dl class="po-dl">
+          <dt>Order date</dt><dd>${esc(niceDate(po.orderDate) || "Not set")}${po.backdated ? ' <span class="po-tag">backdated</span>' : ""}</dd>
+          ${po.sentDate || po.sentAt ? `<dt>Sent</dt><dd>${esc(po.sentDate ? niceDate(po.sentDate) : when(po.sentAt))}${
+            po.sentVia ? ` (${esc(po.sentVia)})` : ""}</dd>` : ""}
           <dt>Needed by</dt><dd>${esc(niceDate(po.expectedDate) || "Not set")}</dd>
           <dt>Notes to the supplier</dt><dd>${po.notesToSupplier ? esc(po.notesToSupplier).replace(/\n/g, "<br>") : "None"}</dd>
           <dt>Internal note</dt><dd>${po.internalNote ? esc(po.internalNote) : "None"}</dd>
@@ -244,10 +250,19 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
           ${po.status === "cancelled" ? `<dt>Cancelled</dt><dd>${esc(po.cancelReason || "")}</dd>` : ""}
         </dl></section>`;
     }
+    const today = dayKey();
     return `
       <section class="tb-card">
         <h4><span class="tb-num">3</span>Details</h4>
-        <label class="tb-field po-needed"><span>Needed by (optional)</span><input class="fe-input" type="date" data-k="expectedDate" value="${esc(po.expectedDate)}" /></label>
+        <div class="po-dates">
+          <label class="tb-field"><span>Order date</span>
+            <input class="fe-input" type="date" data-k="orderDate" value="${esc(po.orderDate || today)}" max="${today}" />
+            <small class="muted">${po.orderDate && po.orderDate < today
+              ? '<span class="po-tag">backdated</span> The PO number follows this date.'
+              : "Change it for an order placed earlier, e.g. one from the old app."}</small></label>
+          <label class="tb-field po-needed"><span>Needed by (optional)</span>
+            <input class="fe-input" type="date" data-k="expectedDate" value="${esc(po.expectedDate)}" /></label>
+        </div>
         <label class="tb-field"><span>Notes to the supplier (in the email)</span>
           <textarea class="fe-input" data-k="notesToSupplier" rows="3" maxlength="2000" placeholder="e.g. Please deliver before 2pm.">${esc(po.notesToSupplier)}</textarea></label>
         <label class="tb-field"><span>Internal note (not sent to the supplier)</span>
@@ -306,6 +321,11 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
   /* ---------- Editing ---------- */
   left.addEventListener("change", (e) => {
     const el = e.target;
+    if (el.dataset.k === "orderDate") {   // the number follows the order date (once it's saved)
+      renderLeft();
+      renumber();
+      return;
+    }
     if (el.dataset.k === "supplierId") {
       const s = suppliers.find((x) => x.id === el.value);
       if (!s) return;
@@ -342,6 +362,15 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
   left.addEventListener("input", (e) => {
     const el = e.target;
     const k = el.dataset.k;
+    if (k === "orderDate") {
+      const v = el.value;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) return;   // still being typed
+      if (v > dayKey()) { msgEl.textContent = "The order date can't be in the future."; return; }
+      po.orderDate = v;
+      po.backdated = v < dayKey();
+      changed();
+      return;
+    }
     if (k && k !== "supplierId") {
       po[k] = el.type === "checkbox" ? el.checked : el.value;
       changed();
@@ -497,12 +526,15 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     const p = problems();
     if (p) { msgEl.textContent = p; return; }
     await settle();
+    const today = dayKey();
     const dlg = openDialog("inv-dlg", `
       <form class="lh-form" novalidate>
         <div class="lh-dialog-head"><h3>Mark ${esc(po.number)} as sent</h3>
-          <p>For orders placed another way. The requests it covers are marked as ordered.</p></div>
+          <p>For orders placed another way, or already sent from the old app. Nothing is emailed. The requests it covers are marked as ordered.</p></div>
         <label class="lh-field"><span class="lh-label">How was it ordered?</span>
           <select class="fb-select" name="via">${SENT_VIA.map((v) => `<option>${esc(v)}</option>`).join("")}</select></label>
+        <label class="lh-field"><span class="lh-label">Date sent to the supplier</span>
+          <input type="date" name="sentDate" value="${today}" max="${today}" min="${esc(po.orderDate || "")}" /></label>
         <label class="lh-field"><span class="lh-label">Note (optional)</span><input name="note" maxlength="300" placeholder="e.g. Spoke to Sarah, arriving Friday" /></label>
         <p class="lh-error" role="alert" hidden></p>
         <div class="lh-actions">
@@ -511,27 +543,29 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
         </div>
       </form>`);
     const form = dlg.querySelector("form");
+    const err = dlg.querySelector(".lh-error");
     dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
+      const sentDate = form.elements.sentDate.value;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(sentDate)) { err.textContent = "Choose the date it was sent."; err.hidden = false; return; }
       const btn = form.querySelector('[type="submit"]');
       btn.disabled = true;
       try {
-        const done = await markPoSent(po, { via: form.elements.via.value, note: form.elements.note.value }, staff);
+        const done = await markPoSent(po, { via: form.elements.via.value, note: form.elements.note.value, sentDate }, staff);
         done.forEach((rid) => callApi({ action: "inventory", op: "notifyUpdate", requestId: rid }).catch(() => {}));
         dlg.close();
-        showToast(`${po.number} marked as sent`);
+        showToast(`${po.number} marked as sent${sentDate < today ? ` on ${niceDate(sentDate)}` : ""}`);
         reload();
       } catch (ex) {
         console.error("Mark sent failed:", ex);
-        const err = dlg.querySelector(".lh-error");
-        err.textContent = "Couldn't save. Try again.";
+        err.textContent = ex && ex.message && !ex.code ? ex.message : "Couldn't save. Try again.";
         err.hidden = false;
         btn.disabled = false;
       }
     });
   }
-
+  
   async function cancelDialog() {
     await settle();
     const dlg = openDialog("inv-dlg", `

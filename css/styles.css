@@ -5606,3 +5606,9 @@ body.is-arranging, body.is-arranging *{user-select:none;-webkit-user-select:none
 .dk-po-txt small { color: var(--muted, #64748b); }
 .dk-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
 .dk-tags em { font-style: normal; font-size: 11px; font-weight: 600; color: #027a48; background: #ecfdf3; border-radius: 999px; padding: 1px 8px; }
+
+/* Purchase orders: order date */
+.po-dates { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 560px) { .po-dates { grid-template-columns: 1fr; } }
+.po-tag { display: inline-block; font-size: 11px; font-weight: 600; color: #92400e; background: #fef3c7;
+  border-radius: 999px; padding: 1px 8px; vertical-align: middle; }

@@ -544,6 +544,7 @@ function normalisePo(d) {
     // The date the order was placed (can be backdated). Older orders: the day they were created.
     orderDate: KEY_RE.test(x.orderDate || "") ? x.orderDate : (toDate(x.createdAt) ? dayKey(toDate(x.createdAt)) : ""),
     backdated: x.backdated === true,
+    sentDate: KEY_RE.test(x.sentDate || "") ? x.sentDate : "",   // set when "Mark as sent" was backdated
   };
 }
 
@@ -697,6 +698,7 @@ export async function markPoSent(po, { via = "", note = "", sentDate = "" }, sta
     status: "sent", sentBy: by, sentVia: clip(via, 40), updatedAt: serverTimestamp(), updatedBy: by,
     // Midday that day, so the date never shifts with time zones
     sentAt: earlier ? Timestamp.fromDate(new Date(`${sentDate}T12:00:00`)) : serverTimestamp(),
+    sentDate: earlier ? sentDate : "",
     events: arrayUnion({ at, by, action: "Marked as sent", note: [
       earlier ? `Sent ${sentDate} (recorded ${today})` : "", via, note,
     ].filter(Boolean).join(" · ").slice(0, 300) }),
