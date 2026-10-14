@@ -96,7 +96,9 @@ export async function mountReceivePo(root, poId, staff) {
     <a class="rcv-back" href="${back}">← ${esc(canOrders() ? po.number : "Receive a delivery")}</a>
     <div class="rcv-head">
       <div><h1>Receive delivery</h1>
-        <p class="muted">${esc([po.supplier.name, po.number, PO_STATUS[po.status], po.sentAt && `sent ${niceDate(po.sentAt)}`].filter(Boolean).join(" · "))}</p></div>
+        <p class="muted">${esc([po.supplier.name, po.number,
+          po.status === "sent" && po.sentAt ? `Sent ${niceDate(po.sentAt)}`
+            : [PO_STATUS[po.status], po.sentAt && `sent ${niceDate(po.sentAt)}`].filter(Boolean).join(", ")].filter(Boolean).join(" · "))}</p></div>
       ${open ? `<button type="button" class="rcv-btn" data-act="all">Everything arrived</button>` : ""}
     </div>
     ${open ? "" : `<p class="rcv-banner">This order is ${esc(PO_STATUS[po.status].toLowerCase())}, so stock can't be received on it.${
@@ -110,7 +112,8 @@ export async function mountReceivePo(root, poId, staff) {
           <label class="rcv-btn">Choose file<input type="file" accept="image/*,application/pdf" hidden data-role="file" /></label>
         </div>
         <label class="lh-field"><span class="lh-label">Docket or invoice number</span>
-          <input data-role="docketNo" maxlength="60" autocomplete="off" /></label>
+          <input type="text" data-role="docketNo" maxlength="60" autocomplete="off"
+            data-lpignore="true" data-1p-ignore data-bwignore="true" data-form-type="other" /></label>
       </aside>` : ""}
       <section class="rcv-main">
         <div data-role="lines">${po.lines.map(lineHtml).join("")}</div>

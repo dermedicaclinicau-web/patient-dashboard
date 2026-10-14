@@ -5300,3 +5300,38 @@ body.is-arranging, body.is-arranging *{user-select:none;-webkit-user-select:none
 
 /* Send to supplier: the order as it will appear in the email */
 .po-mail-items{max-height:40vh;overflow:auto;padding:.4rem 1rem .6rem;border:1px solid var(--border);border-radius:10px;background:#fff}
+
+/* Receive delivery: text boxes and spacing */
+.rcv .rcv-head .muted { margin-top: .2rem; font-size: .92rem; }
+.rcv .lh-field { gap: .35rem; }
+.rcv .lh-field input, .rcv .lh-field textarea {
+  width: 100%; min-height: 42px; padding: .55rem .75rem; box-sizing: border-box;
+  border: 1px solid var(--border); border-radius: 10px; background: #fff;
+  font: inherit; font-size: .95rem; color: var(--text); outline: none;
+}
+.rcv .lh-field textarea { min-height: 64px; line-height: 1.5; resize: vertical; }
+.rcv .lh-field input:focus, .rcv .lh-field textarea:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+.rcv .lh-field input::placeholder, .rcv .lh-field textarea::placeholder { color: #94a3b8; }
+
+/* Docket card */
+.rcv-docket { gap: .85rem; padding: 1.1rem; }
+.rcv-photo { padding: 1rem .8rem; background: var(--surface-2); }
+.rcv-photo .muted { margin: 0; font-size: .85rem; line-height: 1.5; }
+.rcv-photo-btns .rcv-btn { font-size: .9rem; }
+
+/* Item cards */
+.rcv-line { padding: 1rem 1.15rem; }
+.rcv-line-name strong { font-size: 1rem; }
+.rcv-line-name small { font-size: .82rem; }
+.rcv-arrived > span { font-size: .78rem; font-weight: 600; color: var(--muted); }
+.rcv-arrived > span::first-letter { text-transform: uppercase; }
+.rcv-arrived > small { font-size: .76rem; color: var(--muted); }
+.rcv-step input { font-weight: 600; -moz-appearance: textfield; }
+.rcv-step input::-webkit-outer-spin-button,
+.rcv-step input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+
+/* Note and Receive stock card */
+.rcv-foot { padding: 1.1rem 1.15rem; gap: .9rem; }
+.rcv-close { font-size: .92rem; }
+.rcv-close small { margin-top: .1rem; font-size: .8rem; }
+.rcv-submit { padding-top: .75rem; border-top: 1px solid var(--border); }
