@@ -7,7 +7,7 @@ import {
   productSuppliers, supplierTerms, suppliesProduct, suggestOrderFor,
   listCounts, listInvestigations, dayKey, 
   isSharedProduct, listOpenContainers, openContainer, finishContainer, openState, expectedUses, FINISH_REASONS,
-  setStartingStock, PO_EMAIL_TAGS,
+  setStartingStock, PO_EMAIL_TAGS, fillPoTemplate, poNumberBase,
 } from "./inventory-api.js";
 import { renderInvestigations, mountInvestigation } from "./investigations.js";
 import { mountPurchaseOrder } from "./purchase-order.js";
@@ -1161,45 +1161,123 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const isNew = !s;
     const x = s || { active: true };
     const val = (v) => esc(v || "");
-    const dlg = openDialog("inv-dlg", `
-      <form class="lh-form" novalidate>
-        <div class="lh-dialog-head"><h3>${isNew ? "New supplier" : `Edit ${esc(x.name)}`}</h3>
-          <p>Purchase orders are emailed to the order email, with the CC copied in.</p></div>
-        <div class="inv-two">
-          <label class="lh-field inv-span"><span class="lh-label">Company</span><input name="name" maxlength="120" value="${val(x.name)}" /></label>
-          <label class="lh-field"><span class="lh-label">Contact person</span><input name="contactName" maxlength="120" value="${val(x.contactName)}" /></label>
-          <label class="lh-field"><span class="lh-label">Phone</span><input name="phone" maxlength="40" value="${val(x.phone)}" /></label>
-          <label class="lh-field"><span class="lh-label">Order email</span><input name="email" type="email" maxlength="254" value="${val(x.email)}" /></label>
-          <label class="lh-field"><span class="lh-label">CC on orders (optional)</span><input name="ccEmail" type="email" maxlength="254" value="${val(x.ccEmail)}" /></label>
-          <label class="lh-field"><span class="lh-label">Our account number (optional)</span><input name="accountNo" maxlength="60" value="${val(x.accountNo)}" /></label>
-          <label class="lh-field"><span class="lh-label">Website (optional)</span><input name="website" maxlength="300" value="${val(x.website)}" /></label>
-          <label class="lh-field inv-span"><span class="lh-label">Address (optional)</span><input name="address" maxlength="300" value="${val(x.address)}" /></label>
+    const noFill = 'autocomplete="off" data-lpignore="true" data-1p-ignore'; // keeps password managers out
+    const on = x.active !== false;
+    const dlg = openDialog("inv-dlg sup-dlg", `
+      <form class="sup-form" novalidate>
+        <header class="sup-head">
+          <div><h3>${isNew ? "New supplier" : `Edit ${esc(x.name)}`}</h3>
+            <p>Purchase orders are emailed to the order email, with the CC copied in.</p></div>
+          <label class="sup-active${on ? "" : " is-off"}"><input type="checkbox" name="active"${on ? " checked" : ""} />
+            <span class="sup-switch" aria-hidden="true"></span><span data-role="activetxt">${on ? "Active" : "Inactive"}</span></label>
+        </header>
+
+        <div class="sup-body">
+          <div class="sup-col">
+            <section class="sup-sec"><h4>Company</h4>
+              <label class="lh-field"><span class="lh-label">Company name</span>
+                <input name="name" maxlength="120" ${noFill} value="${val(x.name)}" /></label>
+              <div class="sup-two">
+                <label class="lh-field"><span class="lh-label">Our account number</span>
+                  <input name="accountNo" maxlength="60" ${noFill} placeholder="Optional" value="${val(x.accountNo)}" /></label>
+                <label class="lh-field"><span class="lh-label">Website</span>
+                  <input name="website" maxlength="300" ${noFill} placeholder="Optional" value="${val(x.website)}" /></label>
+              </div>
+              <label class="lh-field"><span class="lh-label">Address</span>
+                <input name="address" maxlength="300" ${noFill} placeholder="Optional" value="${val(x.address)}" /></label>
+            </section>
+
+            <section class="sup-sec"><h4>Who to order from</h4>
+              <div class="sup-two">
+                <label class="lh-field"><span class="lh-label">Contact person</span>
+                  <input name="contactName" maxlength="120" ${noFill} placeholder="e.g. Joshua Harry" value="${val(x.contactName)}" /></label>
+                <label class="lh-field"><span class="lh-label">Phone</span>
+                  <input name="phone" maxlength="40" ${noFill} placeholder="Optional" value="${val(x.phone)}" /></label>
+              </div>
+              <div class="sup-two">
+                <label class="lh-field"><span class="lh-label">Order email</span>
+                  <input name="email" type="email" maxlength="254" ${noFill} value="${val(x.email)}" /></label>
+                <label class="lh-field"><span class="lh-label">CC on orders</span>
+                  <input name="ccEmail" type="email" maxlength="254" ${noFill} placeholder="Optional" value="${val(x.ccEmail)}" /></label>
+              </div>
+            </section>
+
+            <section class="sup-sec"><h4>Ordering notes <small>optional</small></h4>
+              <textarea name="orderNotes" rows="3" maxlength="1000"
+                placeholder="e.g. Orders before 2pm ship same day. Minimum order $200.">${esc(x.orderNotes || "")}</textarea>
+              <small class="fe-note">Shown to staff on every purchase order for this supplier. Not sent to the supplier.</small>
+            </section>
+          </div>
+
+          <div class="sup-col">
+            <section class="sup-sec"><h4>Purchase order email <small>optional</small></h4>
+              <p class="fe-note">Fills in the email when an order is sent to this supplier. Staff can still change it before sending.
+                Leave both empty to use the standard wording.</p>
+              <label class="lh-field"><span class="lh-label">Subject</span>
+                <input name="emailSubject" maxlength="200" data-tpl ${noFill} placeholder="Purchase order {PO number} from Dermedica" value="${val(x.emailSubject)}" /></label>
+              <label class="lh-field"><span class="lh-label">Message</span>
+                <textarea name="emailBody" rows="7" maxlength="5000" data-tpl
+                  placeholder="Hi {Contact first name},&#10;&#10;Please find our order {PO number} below. Our account number is {Account number}.&#10;&#10;Thank you,&#10;{My name}">${esc(x.emailBody || "")}</textarea></label>
+              <div class="inv-tags"><small class="muted">Insert:</small>${PO_EMAIL_TAGS.map(([t, help]) =>
+                `<button type="button" class="ch-chip" data-tag="${esc(t)}" title="${esc(help)}">${esc(t)}</button>`).join("")}</div>
+            </section>
+
+            <section class="sup-sec"><h4>Preview <small data-role="pvnote"></small></h4>
+              <div class="sup-pv-card">
+                <div class="sup-pv-row"><span>To</span><strong data-role="pvto"></strong></div>
+                <div class="sup-pv-row"><span>Subject</span><strong data-role="pvsub"></strong></div>
+                <div class="sup-pv-body" data-role="pvbody"></div>
+                <div class="sup-pv-order" aria-hidden="true"><b data-role="pvnum"></b><i></i><i></i><i></i>
+                  <small>The order's items, codes and quantities are added here</small></div>
+              </div>
+            </section>
+          </div>
         </div>
-        <label class="lh-field"><span class="lh-label">Ordering notes (optional)</span>
-          <textarea name="orderNotes" rows="2" maxlength="1000" placeholder="e.g. Orders before 2pm ship same day. Minimum order $200.">${esc(x.orderNotes || "")}</textarea></label>
-        <details class="inv-emailtpl"${x.emailSubject || x.emailBody ? " open" : ""}>
-          <summary>Purchase order email (optional)</summary>
-          <p class="fe-note">Fills in the email when a purchase order is sent to this supplier. Staff can still change it before sending.
-            The order itself is always added below your message. Leave empty to use the standard wording.</p>
-          <label class="lh-field"><span class="lh-label">Subject</span>
-            <input name="emailSubject" maxlength="200" data-tpl placeholder="Purchase order {PO number} from Dermedica" value="${val(x.emailSubject)}" /></label>
-          <label class="lh-field"><span class="lh-label">Message</span>
-            <textarea name="emailBody" rows="7" maxlength="5000" data-tpl placeholder="Hi {Contact first name},&#10;&#10;Please find our order {PO number} below. Our account number is {Account number}.&#10;&#10;Thank you,&#10;{My name}">${esc(x.emailBody || "")}</textarea></label>
-          <div class="inv-tags"><small class="muted">Insert:</small>${PO_EMAIL_TAGS.map(([t]) =>
-            `<button type="button" class="ch-chip" data-tag="${esc(t)}">${esc(t)}</button>`).join("")}</div>
-        </details>
-          <label class="fe-check"><input type="checkbox" name="active"${x.active !== false ? " checked" : ""} /> Active</label>
-        <p class="lh-error" role="alert" hidden></p>
-        <div class="lh-actions">
+
+        <footer class="sup-foot">
+          <p class="lh-error" role="alert" hidden></p>
+          <span class="inv-spacer"></span>
           <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
           <button type="submit" class="lh-btn is-primary">${isNew ? "Add supplier" : "Save"}</button>
-        </div>
+        </footer>
       </form>`);
     const form = dlg.querySelector("form");
+    const f = form.elements;
     const err = dlg.querySelector(".lh-error");
+    const $d = (r) => dlg.querySelector(`[data-role="${r}"]`);
     dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+
+    // Active switch: its wording follows it
+    f.active.addEventListener("change", () => {
+      $d("activetxt").textContent = f.active.checked ? "Active" : "Inactive";
+      f.active.closest(".sup-active").classList.toggle("is-off", !f.active.checked);
+    });
+
+    // Live preview with sample details. Placeholders that didn't fill in (typos) are highlighted.
+    const paras = (t) => t.trim().split(/\n{2,}/)
+      .map((p) => `<p>${esc(p).replace(/\n/g, "<br>").replace(/\{[^{}]+\}/g, "<mark>$&</mark>")}</p>`).join("");
+    const drawPreview = () => {
+      const sup = { name: f.name.value.trim(), contactName: f.contactName.value.trim(), accountNo: f.accountNo.value.trim() };
+      const po = { number: poNumberBase(sup.name || "Supplier"), orderDate: dayKey(), lines: [{}, {}, {}] };
+      const tpl = { po, supplier: sup, staff };
+      const subj = f.emailSubject.value.trim();
+      const body = f.emailBody.value.trim();
+      const first = sup.contactName.split(/\s+/)[0];
+      $d("pvto").textContent = [f.email.value.trim() || "No order email yet", f.ccEmail.value.trim() && `cc ${f.ccEmail.value.trim()}`]
+        .filter(Boolean).join(" · ");
+      $d("pvsub").textContent = subj ? fillPoTemplate(subj, tpl) : `Purchase order ${po.number} - Dermedica`;
+      $d("pvbody").innerHTML = body ? paras(fillPoTemplate(body, tpl))
+        : `<p>Hi ${esc(first || "there")},</p><p>Please see our purchase order <strong>${esc(po.number)}</strong> below${
+            sup.accountNo ? ` (account ${esc(sup.accountNo)})` : ""}.</p><p>Please reply to confirm the order, pricing and the expected delivery date.</p>
+          <p>Kind regards,<br>${esc((staff && staff.name) || "The team")}<br>Dermedica</p>`;
+      $d("pvnum").textContent = `Purchase order ${po.number}`;
+      $d("pvnote").textContent = subj || body ? "with sample details" : "standard wording";
+    };
+    drawPreview();
+    form.addEventListener("input", drawPreview);
+
     // Insert buttons: put the placeholder where the cursor is, in the subject or message (whichever was used last)
-    let tplField = form.elements.emailBody;
+    let tplField = f.emailBody;
     form.querySelectorAll("[data-tpl]").forEach((el) => el.addEventListener("focus", () => { tplField = el; }));
     dlg.addEventListener("click", (e) => {
       const b = e.target.closest("[data-tag]");
@@ -1210,10 +1288,11 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       el.value = el.value.slice(0, at) + b.dataset.tag + el.value.slice(end);
       el.focus();
       el.setSelectionRange(at + b.dataset.tag.length, at + b.dataset.tag.length);
+      drawPreview();
     });
+
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const f = form.elements;
       const btn = form.querySelector('[type="submit"]');
       btn.disabled = true;
       err.hidden = true;
@@ -1234,9 +1313,9 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         btn.disabled = false;
       }
     });
-    form.elements.name.focus();
+    f.name.focus();
   }
-
+  
   /* ---------- Stock actions: add, count, move, write off ---------- */
   function stockAction(p, mode) {
     const lots = lotsOf(p.id);
