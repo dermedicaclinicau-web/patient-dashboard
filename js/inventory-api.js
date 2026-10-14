@@ -103,10 +103,12 @@ export function cleanSupplier(s = {}) {
     website: clip(s.website, 300),
     address: clip(s.address, 300),
     orderNotes: clip(s.orderNotes, 1000),
+    // Purchase order email template (Supplier → Purchase order email). Empty = the standard wording.
+    emailSubject: clip(s.emailSubject, 200),
+    emailBody: String(s.emailBody ?? "").replace(/\r\n/g, "\n").trim().slice(0, 5000),
     active: s.active !== false,
   };
 }
-
 export async function listSuppliers() {
   const snap = await getDocs(collection(db, "inv_suppliers"));
   return snap.docs.map((d) => ({ id: d.id, ...cleanSupplier(d.data()) }))
@@ -3185,4 +3187,39 @@ export async function recordSale(sale, staff, { also = null } = {}) {
     result = { id: saleRef.id, lines: out, short };
   });
   return result;
+}
+
+// Purchase order email templates (Supplier → Purchase order email). Placeholders → [tag, what it fills in with]
+export const PO_EMAIL_TAGS = [
+  ["{Contact first name}", "The supplier's contact first name"],
+  ["{Contact name}", "The supplier's contact full name"],
+  ["{Supplier}", "The supplier's company name"],
+  ["{PO number}", "The purchase order number"],
+  ["{Order date}", "The date the order was placed"],
+  ["{Account number}", "Our account number with them"],
+  ["{Item count}", "How many lines are on the order"],
+  ["{My name}", "The staff member sending it"],
+];
+
+// Fills a subject or message from the supplier's template. Unknown {tags} are left as typed.
+export function fillPoTemplate(text, { po, supplier, staff }) {
+  const s = supplier || {};
+  const contact = String(s.contactName || "").trim();
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec((po && po.orderDate) || "");
+  const orderDate = m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" }) : "";
+  const n = po && Array.isArray(po.lines) ? po.lines.length : 0;
+  const vals = {
+    "contact first name": contact.split(/\s+/)[0] || "there",
+    "contact name": contact || "there",
+    "supplier": s.name || (po && po.supplier && po.supplier.name) || "",
+    "po number": (po && po.number) || "",
+    "order date": orderDate,
+    "account number": s.accountNo || "",
+    "item count": `${n} item${n === 1 ? "" : "s"}`,
+    "my name": String((staff && staff.name) || "").trim(),
+  };
+  return String(text || "").replace(/\{\s*([^{}]+?)\s*\}/g, (all, k) => {
+    const v = vals[k.toLowerCase().replace(/\s+/g, " ")];
+    return v === undefined ? all : v;
+  });
 }

@@ -3,7 +3,7 @@ import {
   PO_STATUS, REQ_STATUS, LOCATIONS, locLabel, plural, unitPlural, lowAt, suggestOrder, reqNumber, batchName,
   getPo, savePo, renumberPo, markPoSent, cancelPo, poTotals, lineFromProduct, cleanPoLine, supplierSnapshot,
   listProducts, listSuppliers, listRequests, supplierTerms, suppliesProduct, suggestOrderFor, dayKey, productSuppliers,
-  recordPastReceipt, getBaseline, syncReceivedRequests,
+  recordPastReceipt, getBaseline, syncReceivedRequests, fillPoTemplate,
 } from "./inventory-api.js";
 import { renderDeliveries } from "./po-deliveries.js";
 import { deliveryError } from "./form-delivery.js";
@@ -34,6 +34,9 @@ const niceDate = (key) => {
 };
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const SENT_VIA = ["Phone", "Supplier's website", "Email from another account", "In person", "Other"];
+// Plain text from a supplier's template → email paragraphs (blank line = new paragraph)
+const textToHtml = (t) => String(t || "").trim().split(/\n{2,}/)
+  .map((p) => `<p>${esc(p).replace(/\n/g, "<br>")}</p>`).join("");
 
 function openDialog(cls, html) {
   const dlg = document.createElement("dialog");
@@ -545,15 +548,24 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     if (p) { msgEl.textContent = p; return; }
     await settle();
     const s = supplierFull() || po.supplier;
+    const tpl = { po, supplier: s, staff };
+    // The supplier's saved email (Inventory → Suppliers → Edit), otherwise the standard wording
+    const ownBody = String(s.emailBody || "").trim();
+    const ownSubject = String(s.emailSubject || "").trim();
     const first = String(s.contactName || "").split(" ")[0];
-    const message = `<p>Hi ${esc(first || "there")},</p>` +
-      `<p>Please see our purchase order <strong>${esc(po.number)}</strong> below${s.accountNo ? ` (account ${esc(s.accountNo)})` : ""}.</p>` +
-      "<p>Please reply to confirm the order, pricing and the expected delivery date.</p>";
-    const signoff = `Kind regards,\n${(staff && staff.name) || "The team"}\nDermedica`;
+    const message = ownBody ? textToHtml(fillPoTemplate(ownBody, tpl))
+      : `<p>Hi ${esc(first || "there")},</p>` +
+        `<p>Please see our purchase order <strong>${esc(po.number)}</strong> below${s.accountNo ? ` (account ${esc(s.accountNo)})` : ""}.</p>` +
+        "<p>Please reply to confirm the order, pricing and the expected delivery date.</p>";
+    const subject = ownSubject ? fillPoTemplate(ownSubject, tpl) : `Purchase order ${po.number} - Dermedica`;
+    // A template usually signs off itself, so the sign-off starts empty (it can still be typed in)
+    const signoff = ownBody ? "" : `Kind regards,\n${(staff && staff.name) || "The team"}\nDermedica`;
     const dlg = openDialog("ec-dialog ac-mail", `
       <form class="lh-form ec-form" novalidate>
         <div class="lh-dialog-head"><h3>${again ? "Email the purchase order again" : "Send to supplier"}</h3>
-          <p>The order is written into the email, below your message. Nothing is attached.</p></div>
+          <p>The order is written into the email, below your message. Nothing is attached.</p>
+          ${ownBody || ownSubject ? `<p class="fe-note">Filled in from ${esc(s.name || "this supplier")}'s saved email.
+            Changes here are for this email only. To change it for next time, edit the supplier.</p>` : ""}</div>
         <div class="po-from">
           <label class="lh-field"><span class="lh-label">From</span>
             <select class="fb-select" name="from" disabled><option value="">Loading your email addresses…</option></select></label>
@@ -563,7 +575,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
           <label class="lh-field"><span class="lh-label">To</span><input type="email" name="to" maxlength="254" value="${esc(s.email || "")}" /></label>
           <label class="lh-field"><span class="lh-label">CC (optional)</span><input type="email" name="cc" maxlength="254" value="${esc(s.ccEmail || "")}" /></label>
         </div>
-        <label class="lh-field"><span class="lh-label">Subject</span><input name="subject" maxlength="200" value="${esc(`Purchase order ${po.number} - Dermedica`)}" /></label>
+        <label class="lh-field"><span class="lh-label">Subject</span><input name="subject" maxlength="200" value="${esc(subject)}" /></label>
         <div class="lh-field"><span class="lh-label">Message</span><div class="tr-canvas" style="background-color:#f1f5f9"><div data-role="editor"></div></div></div>
         <div class="lh-field"><span class="lh-label">The order (added after your message)</span>
           <div class="po-mail-items">${itemsEmailHtml()}</div></div>

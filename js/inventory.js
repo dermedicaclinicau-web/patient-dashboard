@@ -7,7 +7,7 @@ import {
   productSuppliers, supplierTerms, suppliesProduct, suggestOrderFor,
   listCounts, listInvestigations, dayKey, 
   isSharedProduct, listOpenContainers, openContainer, finishContainer, openState, expectedUses, FINISH_REASONS,
-  setStartingStock,
+  setStartingStock, PO_EMAIL_TAGS,
 } from "./inventory-api.js";
 import { renderInvestigations, mountInvestigation } from "./investigations.js";
 import { mountPurchaseOrder } from "./purchase-order.js";
@@ -1177,7 +1177,18 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         </div>
         <label class="lh-field"><span class="lh-label">Ordering notes (optional)</span>
           <textarea name="orderNotes" rows="2" maxlength="1000" placeholder="e.g. Orders before 2pm ship same day. Minimum order $200.">${esc(x.orderNotes || "")}</textarea></label>
-        <label class="fe-check"><input type="checkbox" name="active"${x.active !== false ? " checked" : ""} /> Active</label>
+        <details class="inv-emailtpl"${x.emailSubject || x.emailBody ? " open" : ""}>
+          <summary>Purchase order email (optional)</summary>
+          <p class="fe-note">Fills in the email when a purchase order is sent to this supplier. Staff can still change it before sending.
+            The order itself is always added below your message. Leave empty to use the standard wording.</p>
+          <label class="lh-field"><span class="lh-label">Subject</span>
+            <input name="emailSubject" maxlength="200" data-tpl placeholder="Purchase order {PO number} from Dermedica" value="${val(x.emailSubject)}" /></label>
+          <label class="lh-field"><span class="lh-label">Message</span>
+            <textarea name="emailBody" rows="7" maxlength="5000" data-tpl placeholder="Hi {Contact first name},&#10;&#10;Please find our order {PO number} below. Our account number is {Account number}.&#10;&#10;Thank you,&#10;{My name}">${esc(x.emailBody || "")}</textarea></label>
+          <div class="inv-tags"><small class="muted">Insert:</small>${PO_EMAIL_TAGS.map(([t]) =>
+            `<button type="button" class="ch-chip" data-tag="${esc(t)}">${esc(t)}</button>`).join("")}</div>
+        </details>
+          <label class="fe-check"><input type="checkbox" name="active"${x.active !== false ? " checked" : ""} /> Active</label>
         <p class="lh-error" role="alert" hidden></p>
         <div class="lh-actions">
           <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
@@ -1187,6 +1198,19 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const form = dlg.querySelector("form");
     const err = dlg.querySelector(".lh-error");
     dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    // Insert buttons: put the placeholder where the cursor is, in the subject or message (whichever was used last)
+    let tplField = form.elements.emailBody;
+    form.querySelectorAll("[data-tpl]").forEach((el) => el.addEventListener("focus", () => { tplField = el; }));
+    dlg.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-tag]");
+      if (!b) return;
+      const el = tplField;
+      const at = el.selectionStart ?? el.value.length;
+      const end = el.selectionEnd ?? at;
+      el.value = el.value.slice(0, at) + b.dataset.tag + el.value.slice(end);
+      el.focus();
+      el.setSelectionRange(at + b.dataset.tag.length, at + b.dataset.tag.length);
+    });
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const f = form.elements;
@@ -1198,6 +1222,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           name: f.name.value, contactName: f.contactName.value, phone: f.phone.value, email: f.email.value,
           ccEmail: f.ccEmail.value, accountNo: f.accountNo.value, website: f.website.value, address: f.address.value,
           orderNotes: f.orderNotes.value, active: f.active.checked,
+          emailSubject: f.emailSubject.value, emailBody: f.emailBody.value,
         }, staff);
         dlg.close();
         showToast(isNew ? "Supplier added" : "Supplier saved");

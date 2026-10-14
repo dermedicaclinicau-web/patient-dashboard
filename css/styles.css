@@ -5683,3 +5683,8 @@ textarea.dk-input { min-height: 70px; resize: vertical; }
 }
 .po-combo-name em.is-low { background: #fef3c7; color: #92400e; }
 .po-combo-none, .po-combo-more { padding: 12px; color: var(--muted, #64748b); font-size: 13px; }
+
+.inv-emailtpl { border: 1px solid var(--border, #e2e8f0); border-radius: 10px; padding: 10px 12px; margin: 4px 0 8px; }
+.inv-emailtpl > summary { cursor: pointer; font-weight: 600; }
+.inv-emailtpl[open] > summary { margin-bottom: 8px; }
+.inv-tags { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }

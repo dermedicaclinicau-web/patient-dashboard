@@ -336,11 +336,11 @@ match /inv_count_drafts/{id} {
     match /inv_pos/{id} {
       // "Received before the portal" can only be set (or unset) by an Admin
       function historicalOk() {
-        return request.resource.data.get('historical', false) == resource.data.get('historical', false) || isAdmin();
+        return request.resource.data.get('historical', false) == resource.data.get('historical', false)
+          || can('inventory.history');
       }
-      // Admin: an order sent and received before the portal, recorded for history only (no stock changes)
       function adminPastReceipt() {
-        return isAdmin()
+        return can('inventory.history')
           && resource.data.status in ['draft', 'sent']
           && request.resource.data.status == 'received'
           && request.resource.data.historical == true
