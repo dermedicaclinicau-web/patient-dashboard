@@ -4,7 +4,7 @@
 import { db, auth } from "./firebase-config.js";
 import {
   collection, doc, getDocs, getDoc, addDoc, setDoc, updateDoc, deleteDoc, query, where, orderBy, limit, runTransaction,
-  serverTimestamp, arrayUnion, arrayRemove, writeBatch,
+  serverTimestamp, arrayUnion, arrayRemove, writeBatch, Timestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 import { getStorage, ref as sRef, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
@@ -541,15 +541,18 @@ function normalisePo(d) {
     createdAt: toDate(x.createdAt),
     sentAt: toDate(x.sentAt),
     updatedAt: toDate(x.updatedAt),
+    // The date the order was placed (can be backdated). Older orders: the day they were created.
+    orderDate: KEY_RE.test(x.orderDate || "") ? x.orderDate : (toDate(x.createdAt) ? dayKey(toDate(x.createdAt)) : ""),
+    backdated: x.backdated === true,
   };
 }
 
 export async function listPos() {
   const snap = await getDocs(collection(db, "inv_pos"));
   return snap.docs.map(normalisePo)
-    .sort((a, b) => (b.createdAt ? b.createdAt.getTime() : 0) - (a.createdAt ? a.createdAt.getTime() : 0));
+    .sort((a, b) => (b.orderDate || "").localeCompare(a.orderDate || "")
+      || (b.createdAt ? b.createdAt.getTime() : 0) - (a.createdAt ? a.createdAt.getTime() : 0));
 }
-
 export async function getPo(id) {
   const snap = await getDoc(doc(db, "inv_pos", id));
   return snap.exists() ? normalisePo(snap) : null;
@@ -577,8 +580,15 @@ function nextPoNumber(countersSnap, base) {
 }
 
 // A new draft PO with the next number. The requests it covers are linked to it.
-export async function createPo({ supplier, lines = [] }, staff) {
+// orderDate (YYYY-MM-DD, optional): when the order was placed, for orders brought over from the old app.
+// Today or earlier; the number is built from it. createdAt always stays the real moment it was entered.
+export async function createPo({ supplier, lines = [], orderDate = "" }, staff) {
   if (!supplier || !supplier.id) throw new Error("Choose a supplier.");
+  const today = dayKey();
+  const dated = orderDate ? String(orderDate) : today;
+  if (!KEY_RE.test(dated)) throw new Error("Check the order date.");
+  if (dated > today) throw new Error("The order date can't be in the future.");
+  const backdated = dated < today;
   const clean = lines.map(cleanPoLine);
   const requestIds = [...new Set(clean.flatMap((l) => l.sources.map((s) => s.r)))].slice(0, 50);
   const by = String((staff && staff.name) || "").slice(0, 120);
@@ -588,15 +598,18 @@ export async function createPo({ supplier, lines = [] }, staff) {
   const poRef = doc(collection(db, "inv_pos"));
   await runTransaction(db, async (tx) => {
     const c = await tx.get(cRef);
-    const base = poNumberBase(supplier.name);
+    const base = poNumberBase(supplier.name, keyDate(dated));
     const { n, number } = nextPoNumber(c, base);
     tx.set(cRef, { poSeq: { [base]: n } }, { merge: true });
     tx.set(poRef, {
       number, supplierId: supplier.id, supplier: supplierSnapshot(supplier), status: "draft",
       lines: clean, requestIds, expectedDate: "", notesToSupplier: "", internalNote: "", gst: false,
-      total: poTotals({ lines: clean }).total,
+      total: poTotals({ lines: clean }).total, orderDate: dated, backdated,
       createdBy: by, createdByUid: byUid, createdAt: serverTimestamp(), updatedAt: serverTimestamp(), updatedBy: by,
-      events: [{ at, by, action: "Created", note: requestIds.length ? `From ${requestIds.length} request${requestIds.length === 1 ? "" : "s"}` : "" }],
+      events: [{ at, by, action: "Created", note: [
+        backdated ? `Dated ${dated} (entered ${today})` : "",
+        requestIds.length ? `From ${requestIds.length} request${requestIds.length === 1 ? "" : "s"}` : "",
+      ].filter(Boolean).join(" · ") }],
     });
     requestIds.forEach((rid) => tx.update(doc(db, "inv_requests", rid), {
       poIds: arrayUnion(poRef.id), poNumbers: arrayUnion(number), updatedAt: serverTimestamp(),
@@ -606,10 +619,11 @@ export async function createPo({ supplier, lines = [] }, staff) {
   return poRef.id;
 }
 
-// A draft's editable parts (empty rows are dropped)
+// A draft's editable parts (empty rows are dropped). po.orderDate (optional) changes the order date;
+// call renumberPo afterwards so the number follows it.
 export async function savePo(id, po, staff) {
   const lines = (po.lines || []).filter((l) => l.productId || String(l.name || "").trim()).map(cleanPoLine);
-  await updateDoc(doc(db, "inv_pos", id), {
+  const data = {
     supplierId: clip(po.supplierId, 60),
     supplier: supplierSnapshot(po.supplier || {}),
     lines,
@@ -619,7 +633,14 @@ export async function savePo(id, po, staff) {
     gst: po.gst === true,
     total: poTotals({ lines, gst: po.gst === true }).total,
     ...stamp(staff),
-  });
+  };
+  if (po.orderDate !== undefined && po.orderDate !== "") {
+    const today = dayKey();
+    if (!KEY_RE.test(po.orderDate) || po.orderDate > today) throw new Error("Check the order date: it can't be in the future.");
+    data.orderDate = po.orderDate;
+    data.backdated = po.orderDate < today;
+  }
+  await updateDoc(doc(db, "inv_pos", id), data);
 }
 
 // A draft whose supplier changed gets a number for the new supplier (same creation date).
@@ -636,7 +657,7 @@ export async function renumberPo(id, staff) {
     const po = normalisePo(s);
     number = po.number;
     if (po.status !== "draft") return;
-    const base = poNumberBase(po.supplier.name, po.createdAt || new Date());
+    const base = poNumberBase(po.supplier.name, po.orderDate ? keyDate(po.orderDate) : (po.createdAt || new Date()));
     if (po.number === base || po.number.startsWith(`${base}-`)) return;   // already right
     const c = await tx.get(cRef);
     const reqSnaps = [];
@@ -649,7 +670,7 @@ export async function renumberPo(id, staff) {
     tx.set(cRef, { poSeq: { [base]: next.n } }, { merge: true });
     tx.update(pRef, {
       number, updatedAt: serverTimestamp(), updatedBy: by,
-      events: arrayUnion({ at: new Date().toISOString(), by, action: "Renumbered", note: `${old} → ${number} (supplier changed)` }),
+      events: arrayUnion({ at: new Date().toISOString(), by, action: "Renumbered", note: `${old} → ${number} (supplier or date changed)` }),
     });
     reqSnaps.forEach((r) => {
       if (!r.exists()) return;
@@ -661,15 +682,24 @@ export async function renumberPo(id, staff) {
 }
 
 // Ordered another way (phone, website). Returns the request ids that became "Ordered".
-export async function markPoSent(po, { via = "", note = "" }, staff) {
+// sentDate (YYYY-MM-DD, optional): when it was really sent, for orders brought over from the old app
+export async function markPoSent(po, { via = "", note = "", sentDate = "" }, staff) {
   const by = String((staff && staff.name) || "").slice(0, 120);
   const at = new Date().toISOString();
+  const today = dayKey();
+  if (sentDate && (!KEY_RE.test(sentDate) || sentDate > today)) throw new Error("Check the date it was sent: it can't be in the future.");
+  if (sentDate && po.orderDate && sentDate < po.orderDate) throw new Error("It can't have been sent before its order date.");
+  const earlier = !!sentDate && sentDate < today;
   const all = (await listPos()).map((x) => (x.id === po.id ? { ...x, status: "sent" } : x));
   const reqSnaps = await Promise.all(po.requestIds.map((rid) => getDoc(doc(db, "inv_requests", rid))));
   const batch = writeBatch(db);
   batch.update(doc(db, "inv_pos", po.id), {
-    status: "sent", sentAt: serverTimestamp(), sentBy: by, sentVia: clip(via, 40), updatedAt: serverTimestamp(), updatedBy: by,
-    events: arrayUnion({ at, by, action: "Marked as sent", note: [via, note].filter(Boolean).join(" · ").slice(0, 300) }),
+    status: "sent", sentBy: by, sentVia: clip(via, 40), updatedAt: serverTimestamp(), updatedBy: by,
+    // Midday that day, so the date never shifts with time zones
+    sentAt: earlier ? Timestamp.fromDate(new Date(`${sentDate}T12:00:00`)) : serverTimestamp(),
+    events: arrayUnion({ at, by, action: "Marked as sent", note: [
+      earlier ? `Sent ${sentDate} (recorded ${today})` : "", via, note,
+    ].filter(Boolean).join(" · ").slice(0, 300) }),
   });
   const done = [];
   reqSnaps.forEach((s) => {

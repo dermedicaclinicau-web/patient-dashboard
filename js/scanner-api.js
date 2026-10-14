@@ -365,13 +365,28 @@ export async function saveDocketScan({ photo, result, review, lines, po, receive
   if (!uid) throw new Error("Your session has ended. Log in again.");
   const ref = doc(collection(db, "scans"));
   const key = dayKey();
+  // A readable name: date_PO_Docket_Supplier__id.jpg (Storage can't rename a file later, so it's named now)
+  const part = (s, n = 40) => String(s || "").trim().replace(/[^A-Za-z0-9-]+/g, "-").replace(/-{2,}/g, "-")
+    .replace(/^-+|-+$/g, "").slice(0, n);
+  const supplierName = po ? poSupplier(po) || review.supplier : review.supplier;
+  const base = [
+    key,
+    po ? part(po.number) : "No-PO",
+    review.docketNumber ? `Docket-${part(review.docketNumber, 30)}` : "",
+    part(supplierName, 30),
+  ].filter(Boolean).join("_");
+  const fileName = `${base}__${ref.id.slice(0, 6)}.jpg`;
+
   let file = null;
   if (photo) {
     try {
-      const path = `scans/docket/${key}/${ref.id}.jpg`;
+      const path = `scans/docket/${key}/${fileName}`;
       const r = sRef(getStorage(), path);
-      await uploadBytes(r, photo, { contentType: "image/jpeg" });
-      file = { path, url: await getDownloadURL(r) };
+      await uploadBytes(r, photo, {
+        contentType: "image/jpeg",
+        contentDisposition: `inline; filename="${fileName}"`,   // downloads keep the readable name
+      });
+      file = { path, url: await getDownloadURL(r), name: fileName };
     } catch (err) { console.warn("The docket photo wasn't saved:", err); }
   }
   await setDoc(ref, {
