@@ -2,7 +2,7 @@
 import {
   PO_STATUS, REQ_STATUS, LOCATIONS, locLabel, plural, unitPlural, lowAt, suggestOrder, reqNumber, batchName,
   getPo, savePo, renumberPo, markPoSent, cancelPo, poTotals, lineFromProduct, cleanPoLine, supplierSnapshot,
-  listProducts, listSuppliers, listRequests, supplierTerms, suppliesProduct, suggestOrderFor, dayKey,
+  listProducts, listSuppliers, listRequests, supplierTerms, suppliesProduct, suggestOrderFor, dayKey, productSuppliers,
 } from "./inventory-api.js";
 import { renderDeliveries } from "./po-deliveries.js";
 import { deliveryError } from "./form-delivery.js";
@@ -208,7 +208,10 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       <tr data-i="${i}">
         <td>${named
           ? `<input class="fe-input" data-l="name" maxlength="150" placeholder="Item name, brand and size" value="${esc(l.name)}" aria-label="Item" />`
-          : `<select class="fb-select" data-l="product" aria-label="Product">${productOptions(l.productId)}</select>`}
+          : `<button type="button" class="fb-select po-pick${l.productId ? "" : " is-empty"}" data-l="pick"
+              aria-haspopup="listbox" aria-expanded="false" aria-label="Product">${esc(
+              l.productId ? `${(byId.get(l.productId) || {}).name || l.name}${byId.get(l.productId) && !byId.get(l.productId).active ? " (inactive)" : ""}`
+                : "Search for a product…")}</button>`}
           ${l.sources.length ? `<small class="po-src">From ${l.sources.length} request item${l.sources.length === 1 ? "" : "s"}</small>` : ""}</td>
         <td><div class="po-qty"><input class="fe-input" type="number" min="1" max="9999" step="1" data-l="qty" value="${l.qty}" aria-label="Quantity" />
           <small>${esc(unitPlural(l.orderUnit))}</small></div></td>
@@ -317,6 +320,124 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       console.warn("PO not renumbered:", err);
     }
   }
+
+    /* ---------- Searchable product picker ---------- */
+  // One panel at a time, attached to <body> so the table's scroll box never cuts it off
+  const norm = (s) => String(s || "").toLowerCase();
+  let combo = null;
+
+  // Choosing a product for a row: this supplier's code, price and pack
+  function setLineProduct(l, p) {
+    const t = termsFor(p);
+    Object.assign(l, { productId: p.id, name: p.name, supplierCode: t.supplierCode, orderUnit: t.orderUnit,
+      packSize: t.packSize, stockUnit: p.stockUnit, dosePer: p.dosePer, doseUnit: p.doseUnit, unitCost: t.cost });
+    renderLeft(); renderRight(); changed();
+  }
+
+  function closeCombo() {
+    if (!combo) return;
+    const { el, btn, outside, onScroll } = combo;
+    combo = null;
+    el.remove();
+    document.removeEventListener("pointerdown", outside, true);
+    window.removeEventListener("resize", closeCombo);
+    window.removeEventListener("scroll", onScroll, true);
+    if (btn && btn.isConnected) btn.setAttribute("aria-expanded", "false");
+  }
+
+  function placeCombo() {
+    if (!combo) return;
+    const r = combo.btn.getBoundingClientRect();
+    if (!r.width) { closeCombo(); return; }
+    const w = Math.min(Math.max(r.width, 360), window.innerWidth - 16);
+    const below = window.innerHeight - r.bottom;
+    Object.assign(combo.el.style, { width: `${w}px`, left: `${Math.max(8, Math.min(r.left, window.innerWidth - w - 8))}px` });
+    if (below < 300 && r.top > below) { combo.el.style.top = ""; combo.el.style.bottom = `${window.innerHeight - r.top + 4}px`; }
+    else { combo.el.style.bottom = ""; combo.el.style.top = `${r.bottom + 4}px`; }
+  }
+
+  function drawCombo() {
+    const words = norm(combo.input.value).split(/\s+/).filter(Boolean);
+    const text = (p) => norm(`${p.name} ${p.brand} ${productSuppliers(p).map((s) => s.supplierCode).join(" ")} ${p.supplierCode}`);
+    const hits = products.filter((p) => (p.active || p.id === combo.current) && words.every((w) => text(p).includes(w)));
+    const mine = hits.filter((p) => suppliesProduct(p, po.supplierId));
+    const others = hits.filter((p) => !suppliesProduct(p, po.supplierId));
+    combo.items = [...mine, ...others].slice(0, 100);
+    combo.active = Math.min(Math.max(0, combo.active), Math.max(0, combo.items.length - 1));
+    const onPo = new Set(po.lines.map((l) => l.productId).filter(Boolean));
+    const opt = (p, i) => {
+      const t = termsFor(p);
+      const pack = t.packSize > 1 ? `${t.orderUnit} of ${plural(t.packSize, p.stockUnit)}` : `By the ${p.stockUnit}`;
+      const info = [p.brand, t.supplierCode && `Code ${t.supplierCode}`, pack, `Shelf ${p.stock.shelf} · JT ${p.stock.jt}`].filter(Boolean);
+      const low = LOCATIONS.some((x) => lowAt(p, x.key));
+      return `<li role="option" id="poc-${i}" data-pi="${i}" aria-selected="${i === combo.active}"
+          class="po-combo-opt${i === combo.active ? " is-active" : ""}${p.id === combo.current ? " is-current" : ""}">
+        <span class="po-combo-name"><strong>${esc(p.name)}</strong>${
+          low ? '<em class="is-low">low</em>' : ""}${onPo.has(p.id) && p.id !== combo.current ? "<em>on this order</em>" : ""}</span>
+        <small>${esc(info.join(" · "))}</small></li>`;
+    };
+    const head = (t) => `<li class="po-combo-head" role="presentation">${esc(t)}</li>`;
+    const nMine = Math.min(mine.length, combo.items.length);
+    combo.list.innerHTML = combo.items.length
+      ? (nMine ? head("This supplier") : "") + combo.items.slice(0, nMine).map((p, i) => opt(p, i)).join("")
+        + (combo.items.length > nMine ? head(nMine ? "Other products" : "Products") : "")
+        + combo.items.slice(nMine).map((p, i) => opt(p, i + nMine)).join("")
+        + (hits.length > combo.items.length ? `<li class="po-combo-more" role="presentation">Showing 100 of ${hits.length}. Type more to narrow it down.</li>` : "")
+      : `<li class="po-combo-none" role="presentation">No product matches “${esc(combo.input.value)}”. Use “+ Add an item not on the list” instead.</li>`;
+    combo.input.setAttribute("aria-activedescendant", combo.items.length ? `poc-${combo.active}` : "");
+    const act = combo.list.querySelector(".is-active");
+    if (act) act.scrollIntoView({ block: "nearest" });
+  }
+
+  function pickFromCombo(p) {
+    if (!combo || !p) return;
+    const l = po.lines[combo.li];
+    closeCombo();
+    if (l) setLineProduct(l, p);
+  }
+
+  function openCombo(btn) {
+    closeCombo();
+    const row = btn.closest("[data-i]");
+    const l = row && po.lines[Number(row.dataset.i)];
+    if (!l) return;
+    const el = document.createElement("div");
+    el.className = "po-combo";
+    el.innerHTML = `<input type="search" class="fe-input po-combo-q" placeholder="Search name, brand or code" autocomplete="off"
+        role="combobox" aria-expanded="true" aria-controls="po-combo-list" aria-label="Search products" />
+      <ul class="po-combo-list" id="po-combo-list" role="listbox" aria-label="Products"></ul>`;
+    document.body.appendChild(el);
+    combo = { el, btn, li: Number(row.dataset.i), current: l.productId, input: el.querySelector("input"),
+      list: el.querySelector("ul"), active: 0, items: [] };
+    combo.outside = (e) => { if (!el.contains(e.target) && !btn.contains(e.target)) closeCombo(); };
+    combo.onScroll = (e) => { if (combo && !el.contains(e.target)) placeCombo(); };
+    document.addEventListener("pointerdown", combo.outside, true);
+    window.addEventListener("resize", closeCombo);
+    window.addEventListener("scroll", combo.onScroll, true);
+    btn.setAttribute("aria-expanded", "true");
+
+    placeCombo();
+    drawCombo();
+    const cur = combo.items.findIndex((p) => p.id === combo.current);   // start on the product already chosen
+    if (cur > 0) { combo.active = cur; drawCombo(); }
+    combo.input.focus();
+
+    combo.input.addEventListener("input", () => { combo.active = 0; drawCombo(); });
+    combo.input.addEventListener("keydown", (e) => {
+      if (!combo) return;
+      if (e.key === "ArrowDown") { e.preventDefault(); combo.active = Math.min(combo.items.length - 1, combo.active + 1); drawCombo(); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); combo.active = Math.max(0, combo.active - 1); drawCombo(); }
+      else if (e.key === "Enter") { e.preventDefault(); pickFromCombo(combo.items[combo.active]); }
+      else if (e.key === "Escape") { e.preventDefault(); const b = combo.btn; closeCombo(); if (b.isConnected) b.focus(); }
+      else if (e.key === "Tab") closeCombo();
+    });
+    combo.list.addEventListener("pointerdown", (e) => e.preventDefault());   // keeps the search box focused
+    combo.list.addEventListener("click", (e) => {
+      const o = e.target.closest("[data-pi]");
+      if (o && combo) pickFromCombo(combo.items[Number(o.dataset.pi)]);
+    });
+  }
+  window.addEventListener("hashchange", closeCombo);   // never left open on another page
 
   /* ---------- Editing ---------- */
   left.addEventListener("change", (e) => {
@@ -565,7 +686,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       }
     });
   }
-  
+
   async function cancelDialog() {
     await settle();
     const dlg = openDialog("inv-dlg", `
@@ -599,6 +720,11 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
   }
 
   root.addEventListener("click", (e) => {
+    const pk = e.target.closest('[data-l="pick"]');
+    if (pk) {
+      if (combo && combo.btn === pk) closeCombo(); else openCombo(pk);
+      return;
+    }
     const rm = e.target.closest('[data-l="remove"]');
     if (rm) {
       po.lines.splice(Number(rm.closest("[data-i]").dataset.i), 1);
@@ -611,8 +737,8 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     if (act === "add-line") {
       po.lines.push(cleanPoLine({ qty: 1 }));
       renderLeft(); changed();
-      const sels = left.querySelectorAll('[data-l="product"]');
-      if (sels.length) sels[sels.length - 1].focus();
+      const picks = left.querySelectorAll('[data-l="pick"]');
+      if (picks.length) openCombo(picks[picks.length - 1]);
     } else if (act === "add-custom") {
       po.lines.push({ ...cleanPoLine({ qty: 1 }), custom: true });
       renderLeft(); changed();
