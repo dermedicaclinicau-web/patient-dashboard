@@ -1,7 +1,7 @@
 // One purchase order (#/inventory/po/<id>): items, totals, the PDF, and sending it to the supplier.
 import {
   PO_STATUS, REQ_STATUS, LOCATIONS, locLabel, plural, unitPlural, lowAt, suggestOrder, reqNumber, batchName,
-  getPo, savePo, markPoSent, cancelPo, poTotals, lineFromProduct, cleanPoLine, supplierSnapshot,
+  getPo, savePo, renumberPo, markPoSent, cancelPo, poTotals, lineFromProduct, cleanPoLine, supplierSnapshot,
   listProducts, listSuppliers, listRequests, supplierTerms, suppliesProduct, suggestOrderFor,
 } from "./inventory-api.js";
 import { renderDeliveries } from "./po-deliveries.js";
@@ -304,6 +304,21 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     if (root.isConnected && po) { renderAll(); renderDv(); }
   }
 
+    // A draft's number follows its supplier (PO-<first 3 letters>-<date created>)
+  async function renumber() {
+    try {
+      await settle();
+      const n = await renumberPo(id, staff);
+      if (n && n !== po.number) {
+        po.number = n;
+        renderBar();
+        showToast(`Renumbered to ${n}`);
+      }
+    } catch (err) {
+      console.warn("PO not renumbered:", err);
+    }
+  }
+
   /* ---------- Editing ---------- */
   left.addEventListener("change", (e) => {
     const el = e.target;
@@ -322,6 +337,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
           qty: Math.max(1, Math.ceil(stock / Math.max(1, t.packSize))) });
       });
       renderAll(); changed();
+      renumber();
       return;
     }
     const row = el.closest("[data-i]");

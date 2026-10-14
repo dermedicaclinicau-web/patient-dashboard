@@ -562,6 +562,19 @@ export function itemOnPo(requestId, index, pos, statuses = null) {
 // Every item of the request is on a sent (or received) PO
 export const requestFullyOrdered = (r, pos) => r.items.length > 0 && r.items.every((_, i) => !!itemOnPo(r.id, i, pos, PO_LIVE));
 
+// "PO-DHL-10142026": the supplier's first 3 letters + the date created (MMDDYYYY)
+export function poNumberBase(supplierName, d = new Date()) {
+  const code = (String(supplierName || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 3) || "SUP").padEnd(3, "X");
+  const p2 = (n) => String(n).padStart(2, "0");
+  return `PO-${code}-${p2(d.getMonth() + 1)}${p2(d.getDate())}${d.getFullYear()}`;
+}
+// The next free number for a base: the first is the base itself, then -2, -3…
+function nextPoNumber(countersSnap, base) {
+  const seq = countersSnap.exists() && countersSnap.data().poSeq ? Number(countersSnap.data().poSeq[base]) || 0 : 0;
+  const n = seq + 1;
+  return { n, number: n > 1 ? `${base}-${n}` : base };
+}
+
 // A new draft PO with the next number. The requests it covers are linked to it.
 export async function createPo({ supplier, lines = [] }, staff) {
   if (!supplier || !supplier.id) throw new Error("Choose a supplier.");
@@ -574,9 +587,9 @@ export async function createPo({ supplier, lines = [] }, staff) {
   const poRef = doc(collection(db, "inv_pos"));
   await runTransaction(db, async (tx) => {
     const c = await tx.get(cRef);
-    const n = (c.exists() ? Number(c.data().po) || 0 : 0) + 1;
-    const number = `PO-${new Date().getFullYear()}-${String(n).padStart(4, "0")}`;
-    tx.set(cRef, { po: n });
+    const base = poNumberBase(supplier.name);
+    const { n, number } = nextPoNumber(c, base);
+    tx.set(cRef, { poSeq: { [base]: n } }, { merge: true });
     tx.set(poRef, {
       number, supplierId: supplier.id, supplier: supplierSnapshot(supplier), status: "draft",
       lines: clean, requestIds, expectedDate: "", notesToSupplier: "", internalNote: "", gst: false,
@@ -606,6 +619,44 @@ export async function savePo(id, po, staff) {
     total: poTotals({ lines, gst: po.gst === true }).total,
     ...stamp(staff),
   });
+}
+
+// A draft whose supplier changed gets a number for the new supplier (same creation date).
+// Sent orders never change number. The requests on it are updated too. Returns the number.
+export async function renumberPo(id, staff) {
+  const pRef = doc(db, "inv_pos", id);
+  const cRef = doc(db, "inv_settings", "counters");
+  const by = who(staff);
+  let number = "";
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    const s = await tx.get(pRef);
+    if (!s.exists()) throw new Error("This purchase order no longer exists.");
+    const po = normalisePo(s);
+    number = po.number;
+    if (po.status !== "draft") return;
+    const base = poNumberBase(po.supplier.name, po.createdAt || new Date());
+    if (po.number === base || po.number.startsWith(`${base}-`)) return;   // already right
+    const c = await tx.get(cRef);
+    const reqSnaps = [];
+    for (const rid of po.requestIds) reqSnaps.push(await tx.get(doc(db, "inv_requests", rid)));
+
+    // ---- Writes ----
+    const next = nextPoNumber(c, base);
+    const old = po.number;
+    number = next.number;
+    tx.set(cRef, { poSeq: { [base]: next.n } }, { merge: true });
+    tx.update(pRef, {
+      number, updatedAt: serverTimestamp(), updatedBy: by,
+      events: arrayUnion({ at: new Date().toISOString(), by, action: "Renumbered", note: `${old} → ${number} (supplier changed)` }),
+    });
+    reqSnaps.forEach((r) => {
+      if (!r.exists()) return;
+      const list = Array.isArray(r.data().poNumbers) ? r.data().poNumbers : [];
+      tx.update(r.ref, { poNumbers: list.map((x) => (x === old ? number : x)), updatedAt: serverTimestamp() });
+    });
+  });
+  return number;
 }
 
 // Ordered another way (phone, website). Returns the request ids that became "Ordered".

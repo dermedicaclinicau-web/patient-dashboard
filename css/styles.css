@@ -5279,10 +5279,10 @@ body.is-arranging, body.is-arranging *{user-select:none;-webkit-user-select:none
 .sc-resume .cs-link{margin-left:auto}
 @media (max-width:760px){.ff-bar-actions [data-act="later"] span{display:none}}
 
-/* Purchase order page: roomier layout */
-.tb-grid.po-grid, .po-grid:not(.po .po-grid) { gap: 1.25rem; align-items: start; }
-.po-grid > :last-child { position: sticky; top: 6.5rem; display: flex; flex-direction: column; gap: 1rem; }
-.po-table th { white-space: nowrap; }
-.po-table td:first-child { min-width: 240px; }
-.po-gst { align-self: center; white-space: nowrap; }
-@media (max-width: 1100px) { .po-grid > :last-child { position: static; } }
+/* Purchase order page: a wide column and a side column (never the treatment plan's card grid) */
+.tb-grid.po-grid{grid-template-columns:minmax(0,1fr) 340px;gap:1.25rem;align-items:start}
+.po-side{display:flex;flex-direction:column;gap:1rem}
+.po-table th{white-space:nowrap}
+.po-table td:first-child{min-width:240px}
+.po-gst{align-self:end;white-space:nowrap}
+@media (max-width:1100px){.tb-grid.po-grid{grid-template-columns:minmax(0,1fr)}.po-side{position:static}}
