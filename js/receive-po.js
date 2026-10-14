@@ -6,6 +6,22 @@ import {
   syncReceivedRequests, plural, unitPlural, locLabel, expiryState, batchName,
 } from "./inventory-api.js";
 import { can } from "./perms.js";
+import { linkDocketReceipt } from "./scanner-api.js";
+
+// Came from the Scanner? The scanned docket for this order (used once)
+function takeDocketPrefill(poId) {
+  let pre = null;
+  try { pre = JSON.parse(sessionStorage.getItem("docketPrefill") || "null"); } catch { pre = null; }
+  if (!pre || pre.poId !== poId) return null;
+  sessionStorage.removeItem("docketPrefill");
+  return pre;
+}
+// "2027-05" → "2027-05-31" (the date box needs a day)
+function fullExpiry(e) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(e || "")) return e;
+  const m = /^(\d{4})-(\d{2})$/.exec(e || "");
+  return m ? `${m[1]}-${m[2]}-${String(new Date(+m[1], +m[2], 0).getDate()).padStart(2, "0")}` : "";
+}
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const niceDate = (d) => (d instanceof Date ? d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "");
@@ -61,7 +77,7 @@ export async function mountReceivePo(root, poId, staff) {
   const tracked = (l) => !!(prod.get(l.productId) || {}).tracked;
   const home = (l) => (LOCATIONS.some((o) => o.key === l.loc) ? l.loc : LOCATIONS[0].key);
   const state = new Map(po.lines.map((l) => [l.key, { arrived: 0, rows: [] }]));
-  let docketFile = null, docketUrl = "", uploaded = null, busy = false;
+  let docketFile = null, docketUrl = "", uploaded = null, busy = false, fromDocket = null;
 
   const lineHtml = (l) => {
     const s = state.get(l.key);
@@ -213,6 +229,11 @@ export async function mountReceivePo(root, poId, staff) {
   function drawDocket() {
     const box = $('[data-role="photo"]');
     if (!box) return;
+    if (!docketFile && uploaded && uploaded.url) {   // the scanned docket, already saved
+      box.innerHTML = `<img src="${esc(uploaded.url)}" alt="Docket" data-act="zoom" />
+        <button type="button" class="rcv-link" data-act="clear-docket">Remove</button>`;
+      return;
+    }
     if (!docketFile) { box.innerHTML = `<p class="muted">No docket yet. Photograph it so it's kept with this order.</p>`; return; }
     const isPdf = docketFile.type === "application/pdf";
     box.innerHTML = `${isPdf
@@ -316,7 +337,7 @@ export async function mountReceivePo(root, poId, staff) {
     const over = picked.filter(({ l, s }) => s.arrived > left(l));
     if (over.length && !confirm(`More arrived than was still to come for ${over.map((x) => x.l.name).join(", ")}. Receive anyway?`)) return;
     if (close && !confirm("Close this order? Anything not delivered won't be expected any more.")) return;
-    if (!docketFile && picked.length && !confirm("No docket photo has been added. Receive without one?")) return;
+    if (!docketFile && !uploaded && picked.length && !confirm("No docket photo has been added. Receive without one?")) return;
 
     busy = true;
     btn.disabled = true;
@@ -332,7 +353,14 @@ export async function mountReceivePo(root, poId, staff) {
         docket: uploaded,
         close,
         lines: picked.map(({ l, s }) => ({ key: l.key, arrived: s.arrived, splits: toSplits(s) })),
+        scanId: fromDocket ? fromDocket.scanId : "",
+        receivedBy: fromDocket ? fromDocket.receivedBy : "",
+        receivedByUid: fromDocket ? fromDocket.receivedByUid : "",
+        receivedAt: fromDocket ? fromDocket.receivedAt : "",
       }, staff);
+      if (fromDocket && fromDocket.scanId) {
+        linkDocketReceipt(fromDocket.scanId, res.receiptId).catch((err) => console.warn("Docket scan not linked to the delivery:", err));
+      }
       let done = [];
       try { done = await syncReceivedRequests(res.requestIds, staff); } catch (err) { console.warn("Requests not updated", err); }
       toast(`${res.status === "received" ? `${res.number} is fully received` : "Delivery received"}.${
@@ -349,6 +377,42 @@ export async function mountReceivePo(root, poId, staff) {
     }
   }
 
+  // From the Scanner: what the docket says arrived, its batches and expiries, ready to check
+  function applyPrefill(pre) {
+    fromDocket = pre;
+    const byProduct = new Map();
+    (pre.lines || []).forEach((d) => {
+      if (d.productId && d.qty > 0) byProduct.set(d.productId, [...(byProduct.get(d.productId) || []), d]);
+    });
+    let filled = 0;
+    byProduct.forEach((list, pid) => {
+      const l = po.lines.find((x) => x.productId === pid && left(x) > 0);
+      if (!l) return;
+      setArrived(l, list.reduce((a, d) => a + d.qty, 0));
+      if (tracked(l)) {   // one row per batch on the docket
+        state.get(l.key).rows = list.map((d) => ({
+          ...newRow(home(l), d.qty * l.packSize), batch: String(d.batch || ""), expiry: fullExpiry(d.expiry),
+        }));
+        drawSplits(l);
+      }
+      filled++;
+    });
+    const dn = $('[data-role="docketNo"]');
+    if (dn && pre.docketNumber) dn.value = pre.docketNumber;
+    const nt = $('[data-role="note"]');
+    if (nt && pre.note) nt.value = pre.note;
+    if (pre.photoUrl) uploaded = { path: pre.photoPath || "", url: pre.photoUrl, type: "image" };
+    const when = pre.receivedAt ? new Date(pre.receivedAt) : null;
+    const main = $(".rcv-main");
+    if (main) main.insertAdjacentHTML("afterbegin", `<p class="rcv-banner is-info">Filled in from the scanned docket${
+      pre.docketNumber ? ` ${esc(pre.docketNumber)}` : ""}${pre.receivedBy ? ` · received by ${esc(pre.receivedBy)}` : ""}${
+      when && !isNaN(when) ? ` · ${esc(when.toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }))}` : ""}.
+      ${filled ? `${filled} line${filled === 1 ? "" : "s"} filled in.` : "None of the docket's products are still to come on this order."}
+      Check the numbers, then press Receive stock.</p>`);
+  }
+
+  const pre = takeDocketPrefill(po.id);
+  if (pre && open) applyPrefill(pre);
   drawDocket();
   po.lines.forEach((l) => drawCheck(l));
 }

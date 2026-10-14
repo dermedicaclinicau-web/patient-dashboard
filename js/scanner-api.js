@@ -2,10 +2,10 @@
 // matched to the product list here, then saved: the scan (Firestore: scans, photo in Storage) and,
 // in the same transaction, the sale that takes the products off the Shelf.
 import { db, auth } from "./firebase-config.js";
-import { collection, doc, setDoc, getDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { collection, doc, setDoc, getDoc, updateDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { getStorage, ref as sRef, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 import { callApi } from "./appointments.js";
-import { dayKey, recordSale, listSalesOn } from "./inventory-api.js";
+import { dayKey, recordSale, listSalesOn, listPos } from "./inventory-api.js";
 
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const num = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : r2(v));
@@ -275,4 +275,121 @@ export async function saveBillingScan({ photo, result, review, note = "", patien
     provider: review.provider, note: cleanNote, lines: sell,
   }, staff, { also: (tx, saleId) => tx.set(ref, { ...data, saleId }) });
   return { id: ref.id, sale };
+}
+/* ---------- Delivery dockets ---------- */
+const ymd = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || "")) ? String(v) : "");
+const expiryOf = (v) => { const s = String(v || "").trim(); return /^\d{4}-\d{2}(-\d{2})?$/.test(s) ? s : ""; };
+// "PO-0042", "po 42", "42" → "42"
+const poKey = (s) => String(s || "").toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/^PO/, "").replace(/^0+/, "");
+// Words that tell suppliers apart ("Pty Ltd", "Australia" don't)
+const SUPPLIER_FILLER = new Set(["pty", "ltd", "limited", "australia", "aust", "au", "inc", "co", "company", "group", "the", "and", "of"]);
+const supplierWords = (s) => new Set(normName(s).split(" ").filter((w) => w.length > 1 && !SUPPLIER_FILLER.has(w)));
+
+export const poSupplier = (po) => String((po && po.supplier && po.supplier.name) || (po && po.supplierName) || "");
+
+// The docket read by Gemini (all products are sent: dockets aren't only Retail)
+export async function readDocket(base64, products) {
+  let res;
+  try {
+    res = await callApi({
+      action: "scanner", op: "docket", mime: "image/jpeg", image: base64,
+      products: products.map((p) => ({ id: p.id, name: p.name, brand: p.brand || "" })),
+    });
+  } catch (err) {
+    if (err && err.code === "UNAUTHORIZED") throw err;
+    console.error("Docket scanner call failed:", err);
+    throw new Error(err && err.message && !err.code ? err.message : "The scanner couldn't be reached. Try again.");
+  }
+  if (res.problem) throw new Error(res.problem);
+  if (!res.result) throw new Error("The scanner couldn't read that docket. Try again.");
+  return res.result;
+}
+
+// Cleans what Gemini read. Product ids not on the list are dropped.
+export function reviewDocket(result, products) {
+  const known = new Set(products.map((p) => p.id));
+  return {
+    supplier: String(result.supplier || "").slice(0, 150),
+    docketNumber: String(result.docketNumber || "").slice(0, 60),
+    docketDate: ymd(result.docketDate),
+    poNumber: String(result.poNumber || "").slice(0, 60),
+    receivedByText: String(result.receivedBy || "").slice(0, 120),
+    receivedDate: ymd(result.receivedDate),
+    receivedTime: /^\d{2}:\d{2}$/.test(String(result.receivedTime || "")) ? result.receivedTime : "",
+    lines: (result.lines || []).slice(0, 60).map((l) => ({
+      productId: known.has(String(l.productId || "")) ? String(l.productId) : "",
+      text: String(l.text || "").slice(0, 150), code: String(l.code || "").slice(0, 60),
+      qty: Math.max(0, parseInt(l.qty, 10) || 0), unit: String(l.unit || "").slice(0, 30),
+      batch: String(l.batch || "").slice(0, 60), expiry: expiryOf(l.expiry),
+      conf: conf(l.confidence), fixed: false,
+    })),
+  };
+}
+
+// Purchase orders still waiting for stock
+export async function listOpenPos() {
+  return (await listPos()).filter((p) => ["sent", "part"].includes(p.status));
+}
+
+// Best first: the PO number printed on the docket (100), the same supplier (10), then each docket product on the order (1)
+export function rankPos(review, pos) {
+  const want = poKey(review.poNumber);
+  const sw = supplierWords(review.supplier);
+  const ids = new Set(review.lines.map((l) => l.productId).filter(Boolean));
+  return pos.map((po) => {
+    const onPo = new Set((po.lines || []).map((l) => l.productId).filter(Boolean));
+    const hits = [...ids].filter((id) => onPo.has(id)).length;
+    const numberMatch = !!want && poKey(po.number) === want;
+    const supplierMatch = [...supplierWords(poSupplier(po))].some((w) => sw.has(w));
+    return { po, hits, numberMatch, supplierMatch, score: (numberMatch ? 100 : 0) + (supplierMatch ? 10 : 0) + hits };
+  }).sort((a, b) => b.score - a.score || String(b.po.number || "").localeCompare(String(a.po.number || "")));
+}
+
+// Active staff (names only), for "Received by"
+export async function staffList() {
+  const res = await callApi({ action: "staffList" });
+  return (res && res.staff) || [];
+}
+
+// The staff member a handwritten name belongs to (first name alone is enough), or null
+export function matchStaff(text, people) {
+  if (!normName(text)) return null;
+  let best = null, score = 0;
+  people.forEach((p) => { const v = nameScore(text, p.name); if (v > score) { best = p; score = v; } });
+  return score >= 0.5 ? best : null;
+}
+
+// Saves the docket and its photo. lines: [{ productId, productName, text, code, qty, unit, batch, expiry }]
+export async function saveDocketScan({ photo, result, review, lines, po, receivedBy, receivedByUid, receivedAt, note = "" }, staff) {
+  const uid = auth.currentUser && auth.currentUser.uid;
+  if (!uid) throw new Error("Your session has ended. Log in again.");
+  const ref = doc(collection(db, "scans"));
+  const key = dayKey();
+  let file = null;
+  if (photo) {
+    try {
+      const path = `scans/docket/${key}/${ref.id}.jpg`;
+      const r = sRef(getStorage(), path);
+      await uploadBytes(r, photo, { contentType: "image/jpeg" });
+      file = { path, url: await getDownloadURL(r) };
+    } catch (err) { console.warn("The docket photo wasn't saved:", err); }
+  }
+  await setDoc(ref, {
+    kind: "docket", dateKey: key, status: po ? "linked" : "unlinked",
+    supplierName: po ? poSupplier(po) || review.supplier : review.supplier, supplierRead: review.supplier,
+    docketNumber: review.docketNumber, docketDate: review.docketDate, poNumberRead: review.poNumber,
+    poId: po ? po.id : "", poNumber: po ? String(po.number || "") : "",
+    receivedBy: String(receivedBy || "").slice(0, 120), receivedByUid: String(receivedByUid || ""),
+    receivedAt: receivedAt.toISOString(),
+    lines, note: String(note || "").trim().slice(0, 1000), photo: file,
+    raw: JSON.stringify(result).slice(0, 20000), receiptId: "",
+    by: String((staff && staff.name) || "").slice(0, 120), byUid: uid, at: serverTimestamp(),
+  });
+  return { id: ref.id, photoUrl: file ? file.url : "", photoPath: file ? file.path : "" };
+}
+
+// After the delivery is received: the docket scan points to its delivery record
+export async function linkDocketReceipt(scanId, receiptId) {
+  if (!scanId) return;
+  await updateDoc(doc(db, "scans", scanId), { status: "received", receiptId: String(receiptId || ""), linkedAt: serverTimestamp() });
 }

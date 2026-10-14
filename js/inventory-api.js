@@ -874,6 +874,9 @@ export async function receivePo(poId, receipt, staff) {
     tx.set(recRef, {
       poId, poNumber: po.number, supplierId: po.supplierId, supplierName: po.supplier.name,
       docketNo, note: clip(receipt.note, 1000), docket, closed: !!receipt.close && !allIn,
+      scanId: clip(receipt.scanId, 40),
+      receivedBy: clip(receipt.receivedBy, 120), receivedByUid: clip(receipt.receivedByUid, 60),
+      receivedAt: typeof receipt.receivedAt === "string" ? receipt.receivedAt.slice(0, 30) : "",
       lines: work.map((w) => ({
         key: w.line.key, productId: w.line.productId, name: w.line.name, arrived: w.arrived,
         orderUnit: w.line.orderUnit, packSize: w.line.packSize, stockUnit: w.line.stockUnit, splits: w.splits,
@@ -882,7 +885,7 @@ export async function receivePo(poId, receipt, staff) {
     });
 
     tx.set(doc(collection(db, "notify_outbox")), outboxDoc("stock.arrived", { receiptId: recRef.id, poId }, byUid));
-    result = { status, number: po.number, requestIds: po.requestIds };
+    result = { receiptId: recRef.id, status, number: po.number, requestIds: po.requestIds };
   });
   pingNotify();
   return result;

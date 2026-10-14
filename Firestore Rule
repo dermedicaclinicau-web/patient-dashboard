@@ -918,8 +918,18 @@ match /inv_count_drafts/{id} {
     }
     match /scans/{id} {
       allow read: if isStaff();
-      allow create: if isStaff() && request.resource.data.byUid == request.auth.uid;
-      allow update, delete: if false;
+      allow create: if isStaff()
+        && request.resource.data.byUid == request.auth.uid
+        && request.resource.data.kind in ['billing', 'docket'];
+      // A delivery docket can be marked received once, linked to its delivery record. Nothing else can change.
+      allow update: if isStaff()
+        && resource.data.kind == 'docket'
+        && resource.data.status != 'received'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'receiptId', 'linkedAt'])
+        && request.resource.data.status == 'received'
+        && request.resource.data.receiptId is string
+        && request.resource.data.receiptId.size() > 0;
+      allow delete: if false;
     }
     // Sales: products checked out to patients (Scanner now, the checkout later). Never edited from a browser.
     match /inv_sales/{id} {

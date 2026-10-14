@@ -3,7 +3,8 @@
 // The sheet is matched to that day's booking, so the scan shows on the patient's dashboard.
 // Saving takes what was given off the Shelf (a sale, oldest expiry first) and keeps the scan with its photo.
 import { listProducts, INV_CATEGORIES, plural } from "./inventory-api.js";
-import { preparePhoto, readBillingSheet, startReview, reviewBilling, saveBillingScan, earlierSales, findBooking, money } from "./scanner-api.js";
+import { preparePhoto, readBillingSheet, readDocket, startReview, reviewBilling, saveBillingScan, earlierSales, findBooking, money } from "./scanner-api.js";
+import { mountDocketResult } from "./scanner-docket.js";
 import { showToast } from "./utils.js";
 import { confirmDialog } from "./dialog.js";
 import { warmUpLogin } from "./auth.js";
@@ -37,7 +38,7 @@ export function mountScanner(container, { staff = null } = {}) {
   const st = {
     mode: "camera", stream: null, track: null, starting: false, zoom: 1, hw: null, torch: false, canTorch: false, canFocus: false,
     camErr: "", photo: null, photoUrl: "", base64: "", result: null, lines: [], review: null, error: "", fixing: -1, busy: false,
-    booking: null, patient: null, pickPatient: false,   // NEW
+    booking: null, patient: null, pickPatient: false, kind: "billing",   // kind: "billing" or "docket"
   };
 
   const sellCount = () => st.lines.reduce((a, l) => a + (l.product ? l.take || 0 : 0), 0);
@@ -48,8 +49,8 @@ export function mountScanner(container, { staff = null } = {}) {
 
   /* ---------- Screens ---------- */
   const headHtml = () => `<div class="scan-head"><div class="scan-modes" role="tablist" aria-label="What you're scanning">
-      <button type="button" class="scan-mode is-on" role="tab" aria-selected="true">Billing sheet</button>
-      <button type="button" class="scan-mode" role="tab" aria-selected="false" disabled>Delivery docket <small>soon</small></button>
+      <button type="button" class="scan-mode${st.kind === "billing" ? " is-on" : ""}" role="tab" aria-selected="${st.kind === "billing"}" data-kind="billing">Billing sheet</button>
+      <button type="button" class="scan-mode${st.kind === "docket" ? " is-on" : ""}" role="tab" aria-selected="${st.kind === "docket"}" data-kind="docket">Delivery docket</button>
     </div></div>`;
 
   const cameraHtml = () => `${headHtml()}
@@ -57,7 +58,7 @@ export function mountScanner(container, { staff = null } = {}) {
       <video playsinline muted autoplay></video>
       <div class="scan-frame" aria-hidden="true"></div>
       <span class="scan-focus" data-role="focus" aria-hidden="true"></span>
-      <p class="scan-tip${st.camErr ? " is-bad" : ""}" data-role="tip">${esc(st.camErr || "Fit the billing sheet and the products inside the frame")}</p>
+      <p class="scan-tip${st.camErr ? " is-bad" : ""}" data-role="tip">${esc(st.camErr || (st.kind === "docket" ? "Fit the whole delivery docket inside the frame" : "Fit the billing sheet and the products inside the frame"))}</p>
       <div class="scan-zoom" role="group" aria-label="Zoom">${[1, 1.5, 2].map((z) =>
         `<button type="button" data-zoom="${z}" class="${z === st.zoom ? "is-on" : ""}">${z}×</button>`).join("")}</div>
       <button type="button" class="scan-torch" data-act="torch" aria-label="Torch" hidden>${I.bolt}</button>
@@ -70,7 +71,7 @@ export function mountScanner(container, { staff = null } = {}) {
 
   const busyHtml = () => `${headHtml()}
     <div class="scan-shot"><img src="${st.photoUrl}" alt="The photo being read" />
-      <div class="scan-busy"><span class="scan-spin"></span>Reading the sheet and the products…</div></div>`;
+      <div class="scan-busy"><span class="scan-spin"></span>${st.kind === "docket" ? "Reading the delivery docket…" : "Reading the sheet and the products…"}</div></div>`;
 
   const errorHtml = () => `${headHtml()}
     ${st.photoUrl ? `<div class="scan-shot"><img src="${st.photoUrl}" alt="The photo" /></div>` : ""}
@@ -157,6 +158,12 @@ export function mountScanner(container, { staff = null } = {}) {
   }
 
   function render() {
+    if (st.mode === "docket") {   // the docket screen draws itself
+      root.innerHTML = `${headHtml()}<div data-role="docket"></div>`;
+      mountDocketResult(root.querySelector('[data-role="docket"]'),
+        { photo: st.photo, photoUrl: st.photoUrl, result: st.result, products, staff, onAgain: again });
+      return;
+    }
     // A note being typed survives a redraw (e.g. after changing a quantity)
     const noteEl = root.querySelector('[data-role="note"]');
     const note = noteEl ? noteEl.value : "";
@@ -294,15 +301,21 @@ export function mountScanner(container, { staff = null } = {}) {
       await productsReady;
       if (!products.length) throw new Error("Couldn't load the product list. Check your connection and try again.");
       const t0 = performance.now();
-      st.result = await readBillingSheet(st.base64, products);
-      console.log(`Scanner: ${Math.round(performance.now() - t0)} ms from sending the photo to the answer`);
-      st.lines = startReview(st.result, products);
-      rereview();
-      // NEW: which booked patient this is. Never stops the scan if it can't be worked out.
-      st.booking = await findBooking(st.review).catch((err) => { console.warn("Booking match failed:", err); return null; });
-      st.patient = fromBooking(st.booking && st.booking.match);
-      st.pickPatient = false;
-      st.mode = "result";
+      if (st.kind === "docket") {
+        st.result = await readDocket(st.base64, products);
+        console.log(`Scanner: ${Math.round(performance.now() - t0)} ms to read the docket`);
+        st.mode = "docket";
+      } else {
+        st.result = await readBillingSheet(st.base64, products);
+        console.log(`Scanner: ${Math.round(performance.now() - t0)} ms from sending the photo to the answer`);
+        st.lines = startReview(st.result, products);
+        rereview();
+        // Which booked patient this is. Never stops the scan if it can't be worked out.
+        st.booking = await findBooking(st.review).catch((err) => { console.warn("Booking match failed:", err); return null; });
+        st.patient = fromBooking(st.booking && st.booking.match);
+        st.pickPatient = false;
+        st.mode = "result";
+      }
     } catch (err) {
       console.error("Scan failed:", err);
       st.error = (err && err.message) || "The scanner couldn't read that photo. Try again.";
@@ -310,7 +323,7 @@ export function mountScanner(container, { staff = null } = {}) {
     }
     if (root.isConnected) render();
   }
-
+  
   function again() {
     if (st.photoUrl) URL.revokeObjectURL(st.photoUrl);
     Object.assign(st, { mode: "camera", photo: null, photoUrl: "", base64: "", result: null, lines: [], review: null, error: "",
@@ -394,6 +407,8 @@ export function mountScanner(container, { staff = null } = {}) {
   root.addEventListener("pointercancel", up);
 
   root.addEventListener("click", (e) => {
+    const kd = e.target.closest("[data-kind]");
+    if (kd) { if (st.mode !== "busy" && !st.busy && st.kind !== kd.dataset.kind) { st.kind = kd.dataset.kind; again(); } return; }
     const z = e.target.closest("[data-zoom]");
     if (z) { st.zoom = Number(z.dataset.zoom); applyZoom(); return; }
     const fx = e.target.closest("[data-fix]");
