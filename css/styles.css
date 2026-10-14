@@ -5335,3 +5335,55 @@ body.is-arranging, body.is-arranging *{user-select:none;-webkit-user-select:none
 .rcv-close { font-size: .92rem; }
 .rcv-close small { margin-top: .1rem; font-size: .8rem; }
 .rcv-submit { padding-top: .75rem; border-top: 1px solid var(--border); }
+
+/* ---------- Inventory tabs: clear underline style ---------- */
+.pt-tabs.inv-tabs {
+  display: flex; height: auto; gap: .2rem; padding: 0; margin-bottom: 1.25rem;
+  border: 0; border-bottom: 1px solid var(--border); border-radius: 0; background: none;
+  overflow-x: auto; scrollbar-width: none;
+}
+.pt-tabs.inv-tabs::-webkit-scrollbar { display: none; }
+.inv-tabs a {
+  position: relative; flex: none; display: inline-flex; align-items: center; gap: .4rem;
+  height: 46px; padding: 0 1rem; border-radius: 10px 10px 0 0;
+  color: var(--muted); font-size: .93rem; font-weight: 600; text-decoration: none; white-space: nowrap;
+  transition: color .15s, background .15s;
+}
+.inv-tabs a::after {
+  content: ""; position: absolute; left: .55rem; right: .55rem; bottom: -1px; height: 3px;
+  border-radius: 3px 3px 0 0; background: transparent; transition: background .15s;
+}
+.inv-tabs a:hover { color: var(--text); background: var(--surface-2); }
+.inv-tabs a:hover::after { background: #cbd5e1; }
+.inv-tabs a.active { color: var(--primary); background: var(--primary-soft); box-shadow: none; }
+.inv-tabs a.active::after { background: var(--primary); }
+.inv-tabs a:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.inv-tabs .inv-tabcount { margin-left: 0; }
+
+/* The header's "Receive delivery" link was showing in visited-link purple */
+.inv-head-link, .inv-head-link:visited { color: var(--text); }
+.inv-head-link:hover { color: var(--primary); }
+
+/* ---------- Inventory filters (Drafts / Sent…, Open / Ordered…, Both / Shelf / JT) ---------- */
+.inv-tools .fe-seg { flex-wrap: wrap; gap: .4rem; padding: 0; border: 0; background: none; }
+.inv-tools .fe-seg-btn { flex: none; }
+.inv-tools .fe-seg-btn span {
+  display: inline-flex; align-items: center; gap: .45rem; height: 36px; padding: 0 .9rem;
+  border: 1px solid var(--border); border-radius: 999px; background: #fff;
+  color: #475569; font-size: .86rem; font-weight: 600;
+  transition: background .15s, border-color .15s, color .15s, box-shadow .15s;
+}
+.inv-tools .fe-seg-btn span:hover { border-color: #94a3b8; color: var(--text); }
+.inv-tools .fe-seg-btn input:checked + span {
+  background: var(--primary); border-color: var(--primary); color: #fff;
+  box-shadow: 0 2px 8px rgba(15, 118, 110, .25);
+}
+.inv-tools .fe-seg-btn input:focus-visible + span { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+/* The count badge */
+.seg-n {
+  min-width: 20px; padding: 0 .4rem; border-radius: 999px; background: var(--surface-2);
+  color: #334155; font-size: .72rem; font-style: normal; font-weight: 700; line-height: 20px; text-align: center;
+}
+.seg-n.is-zero { opacity: .5; }
+.inv-tools .fe-seg-btn input:checked + span .seg-n { background: rgba(255, 255, 255, .25); color: #fff; opacity: 1; }

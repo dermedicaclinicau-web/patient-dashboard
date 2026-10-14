@@ -39,8 +39,10 @@ const fmtN = (n) => String(+Number(n || 0).toFixed(2));
 const errText = (err, fallback) => (err && err.code === "permission-denied"
   ? "You don't have access to do this. Ask an Admin to check your Inventory access in Staff."
   : err && err.message && !err.code ? err.message : fallback);
-const seg = (name, items, cur) => `<div class="fe-seg">${items.map(([v, l]) =>
-  `<label class="fe-seg-btn"><input type="radio" name="${name}" value="${v}"${v === cur ? " checked" : ""} /><span>${esc(l)}</span></label>`).join("")}</div>`;
+// items: [value, label] or [value, label, count] (the count shows as a small badge)
+const seg = (name, items, cur) => `<div class="fe-seg">${items.map(([v, l, n]) =>
+  `<label class="fe-seg-btn"><input type="radio" name="${name}" value="${v}"${v === cur ? " checked" : ""} /><span>${esc(l)}${
+    n === undefined ? "" : `<em class="seg-n${n ? "" : " is-zero"}">${n}</em>`}</span></label>`).join("")}</div>`;
 const lowAt = (p, loc) => p.reorder[loc] !== null && p.reorder[loc] !== undefined && p.stock[loc] <= p.reorder[loc];
 
 // Who is using Inventory, for admin-editable wording in its windows
@@ -1583,7 +1585,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const segF = (name, items, cur, key) => seg(name, items, cur).replace(new RegExp(`name="${name}"`, "g"), `name="${name}" data-f="${key}"`);
     body.innerHTML = `
       <div class="inv-tools">
-        ${segF("rq-f", [["open", `Open (${counts.open})`], ["ordered", `Ordered (${counts.ordered})`], ["received", `Received (${counts.received})`], ["closed", "Declined & cancelled"], ["all", "All"]], st.reqFilter, "reqFilter")}
+        ${segF("rq-f", [["open", "Open", counts.open], ["ordered", "Ordered", counts.ordered], ["received", "Received", counts.received],
+          ["closed", "Declined & cancelled"], ["all", "All"]], st.reqFilter, "reqFilter")}
         ${st.reqFilter === "open" ? segF("rq-v", [["list", "List"], ["supplier", "By supplier"]], st.reqView, "reqView") : ""}
         <span class="inv-spacer"></span>
         ${canManage ? '<a class="ff-btn" href="#/inventory/notifications">Email notifications</a>' : ""}
@@ -1701,7 +1704,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const rows = st.pos.filter((p) => f === "all" || p.status === f);
     body.innerHTML = `
       <div class="inv-tools">
-        ${segF("po-f", [["draft", `Drafts (${n("draft")})`], ["sent", `Sent (${n("sent")})`], ["part", `Part received (${n("part")})`],
+        ${segF("po-f", [["draft", "Drafts", n("draft")], ["sent", "Sent", n("sent")], ["part", "Part received", n("part")],
           ["received", "Received"], ["cancelled", "Cancelled"], ["all", "All"]], f, "poFilter")}
         <span class="inv-spacer"></span>
         ${canMove ? '<button type="button" class="btn-primary" data-act="new-po">+ New purchase order</button>' : ""}
