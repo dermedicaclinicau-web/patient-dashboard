@@ -541,7 +541,25 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       const rest = [...pool.values()].sort(byPosP(loc));
       if (rest.length && list.length) list.push({ s: "Not placed yet", tmp: true });
       rest.forEach((p) => list.push({ p: p.id }));
-      st.arrange = { loc, cat, list, dirty: false };
+      st.arrange = { loc, cat, list, dirty: false, sel: new Set(), lastPick: null, flash: null };
+    }
+
+    // Moves every ticked entry together (keeping their order): to the top, the bottom, or just below another entry
+    function moveTicked(to) {
+      const a = st.arrange;
+      const picked = a.list.filter((e) => a.sel.has(e));
+      if (!picked.length) return;
+      const rest = a.list.filter((e) => !a.sel.has(e));
+      const at = to === "top" ? 0 : to === "bottom" ? rest.length : rest.indexOf(to) + 1;
+      rest.splice(at, 0, ...picked);
+      a.list = rest;
+      a.dirty = true;
+      a.sel.clear();
+      a.lastPick = null;
+      a.flash = new Set(picked);
+      drawArrange();
+      const first = body.querySelector(".sc-ar.is-moved");
+      if (first) first.scrollIntoView({ behavior: "smooth", block: "center" });
     }
 
     function drawArrange() {
@@ -549,12 +567,20 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       const a = st.arrange;
       if (!box || !a) return;
       const last = a.list.length - 1;
+      const n = a.sel.size;
       const mv = (i) => `<button type="button" class="sc-ar-mv" data-ar-act="up" aria-label="Move up"${i === 0 ? " disabled" : ""}>▲</button>
         <button type="button" class="sc-ar-mv" data-ar-act="down" aria-label="Move down"${i === last ? " disabled" : ""}>▼</button>`;
+      const pick = (e, label) => `<input type="checkbox" class="sc-ar-pick" data-ar-pick${a.sel.has(e) ? " checked" : ""}
+        aria-label="Tick ${esc(label)} to move it" />`;
+      const here = (e) => (n && !a.sel.has(e)
+        ? `<button type="button" class="sc-ar-here" data-ar-act="here" title="Put the ticked ones just below this">Move here</button>` : "");
+      const cls = (e) => `${a.sel.has(e) ? " is-picked" : ""}${a.flash && a.flash.has(e) ? " is-moved" : ""}`;
+
       box.innerHTML = `<section class="tb-card sc-arr">
         <div class="sc-arr-head">
           <div><h4>Arrange the ${esc(LOC[a.loc])}${a.cat ? ` · ${esc(catLabel(a.cat))}` : ""} order</h4>
             <p class="muted">Put the products in the order they sit, so the count follows your walk. Drag ⠿, or use ▲ ▼.
+              To move several at once, tick them (Shift-click ticks a range), then press <strong>Move here</strong> on the row they go below.
               Add a heading for each fridge, cabinet or shelf. ${a.cat
                 ? `Only ${esc(catLabel(a.cat))} products are here. Counting ${esc(catLabel(a.cat))} uses this order; All uses the ${esc(LOC[a.loc])} order.`
                 : "Everyone's count uses this order."}</p></div>
@@ -563,26 +589,36 @@ export async function mountStockCount(container, { param = "", staff = null } = 
             <button type="button" class="lh-btn" data-act="ar-sec">+ Add heading</button>
           </div>
         </div>
-        ${a.list.length ? `<ol class="sc-arr-list" data-role="arlist">${a.list.map((e, i) => {
+        ${a.list.length ? `<ol class="sc-arr-list${n ? " is-picking" : ""}" data-role="arlist">${a.list.map((e, i) => {
           if (e.s !== undefined) {
-            return `<li class="sc-ar is-sec${e.tmp ? " is-tmp" : ""}" data-ar="${i}">
+            return `<li class="sc-ar is-sec${e.tmp ? " is-tmp" : ""}${cls(e)}" data-ar="${i}">
+              ${pick(e, e.s || "heading")}
               <span class="sc-grip" data-grip title="Drag to move" aria-hidden="true">⠿</span>
               <input class="fe-input sc-ar-name" data-ar-name value="${esc(e.s)}" maxlength="60" placeholder="e.g. Fridge" aria-label="Heading" />
-              <span class="sc-ar-btns">${mv(i)}<button type="button" class="hx-x" data-ar-act="del" aria-label="Remove heading">×</button></span></li>`;
+              <span class="sc-ar-btns">${here(e)}${mv(i)}<button type="button" class="hx-x" data-ar-act="del" aria-label="Remove heading">×</button></span></li>`;
           }
           const p = byId.get(e.p);
-          return `<li class="sc-ar" data-ar="${i}">
+          const name = p ? p.name : "Removed product";
+          return `<li class="sc-ar${cls(e)}" data-ar="${i}">
+            ${pick(e, name)}
             <span class="sc-grip" data-grip title="Drag to move" aria-hidden="true">⠿</span>
-            <span class="sc-ar-name"><strong>${esc(p ? p.name : "Removed product")}</strong><small>${esc(p ? catLabel(p.category) : "")}</small></span>
-            <span class="sc-ar-btns">${mv(i)}</span></li>`;
+            <span class="sc-ar-name"><strong>${esc(name)}</strong><small>${esc(p ? catLabel(p.category) : "")}</small></span>
+            <span class="sc-ar-btns">${here(e)}${mv(i)}</span></li>`;
         }).join("")}</ol>` : '<p class="tb-none">Nothing is counted here.</p>'}
+        ${n ? `<div class="sc-ar-bar" role="toolbar" aria-label="Move the ticked ones">
+          <strong>${n} ticked</strong>
+          <span class="sc-ar-bar-hint">Press <b>Move here</b> on a row, or:</span>
+          <button type="button" class="lh-btn" data-ar-bulk="top">Move to top</button>
+          <button type="button" class="lh-btn" data-ar-bulk="bottom">Move to bottom</button>
+          <button type="button" class="lh-btn is-quiet" data-ar-bulk="clear">Clear</button>
+        </div>` : ""}
         <div class="sc-arr-foot">
           <button type="button" class="lh-btn is-quiet" data-act="ar-cancel">Cancel</button>
           <button type="button" class="lh-btn is-primary" data-act="ar-save">Save order</button>
         </div>
       </section>`;
+      a.flash = null;   // the highlight only shows once
     }
-
     // Drag with a finger or the mouse (works on the iPad, unlike the browser's own drag and drop)
     let drag = null;
     body.addEventListener("pointerdown", (e) => {
@@ -610,14 +646,26 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       drag.li.classList.remove("is-dragging");
       document.body.classList.remove("is-arranging");
       const ol = body.querySelector('[data-role="arlist"]');
-      if (ol && st.arrange) {
-        const next = [...ol.children].map((li) => st.arrange.list[Number(li.dataset.ar)]);
-        if (next.some((x, i) => x !== st.arrange.list[i])) st.arrange.dirty = true;
-        st.arrange.list = next;
+      const a = st.arrange;
+      if (ol && a) {
+        const dragged = a.list[Number(drag.li.dataset.ar)];
+        let next = [...ol.children].map((li) => a.list[Number(li.dataset.ar)]);
+        // Dragging a ticked one: all the ticked ones land there together, in their order
+        if (a.sel.has(dragged) && a.sel.size > 1) {
+          const picked = a.list.filter((x) => a.sel.has(x));
+          const rest = next.filter((x) => !a.sel.has(x) || x === dragged);
+          rest.splice(rest.indexOf(dragged), 1, ...picked);
+          next = rest;
+          a.sel.clear();
+          a.flash = new Set(picked);
+        }
+        if (next.some((x, i) => x !== a.list[i])) a.dirty = true;
+        a.list = next;
       }
       drag = null;
       drawArrange();
     };
+    
     body.addEventListener("pointerup", endDrag);
     body.addEventListener("pointercancel", endDrag);
 
@@ -779,13 +827,39 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       else if (r === "left") { st.left = e.target.checked; drawTable(); }
     });
     body.addEventListener("click", async (e) => {
-      // Arrange order: ▲ ▼ and remove heading
+      const pk = e.target.closest("[data-ar-pick]");
+      if (pk && st.arrange) {
+        const a = st.arrange;
+        const entry = a.list[Number(pk.closest("[data-ar]").dataset.ar)];
+        const on = pk.checked;
+        const from = e.shiftKey && a.lastPick ? a.list.indexOf(a.lastPick) : -1;
+        if (from >= 0) {
+          const to = a.list.indexOf(entry);
+          a.list.slice(Math.min(from, to), Math.max(from, to) + 1).forEach((x) => (on ? a.sel.add(x) : a.sel.delete(x)));
+        } else if (on) a.sel.add(entry); else a.sel.delete(entry);
+        a.lastPick = entry;
+        drawArrange();
+        const again = body.querySelector(`[data-ar="${a.list.indexOf(entry)}"] [data-ar-pick]`);
+        if (again) again.focus({ preventScroll: true });
+        return;
+      }
+      // Arrange order: the bar under the list
+      const bulk = e.target.closest("[data-ar-bulk]");
+      if (bulk && st.arrange) {
+        const k = bulk.dataset.arBulk;
+        if (k === "clear") { st.arrange.sel.clear(); st.arrange.lastPick = null; drawArrange(); }
+        else moveTicked(k);
+        return;
+      }
+      // Arrange order: Move here, ▲ ▼ and remove heading
       const arb = e.target.closest("[data-ar-act]");
       if (arb && st.arrange) {
         const i = Number(arb.closest("[data-ar]").dataset.ar);
         const act = arb.dataset.arAct;
         const L = st.arrange.list;
+        if (act === "here") { moveTicked(L[i]); return; }
         if (act === "del") {
+          st.arrange.sel.delete(L[i]);
           L.splice(i, 1);
           st.arrange.dirty = true;
           drawArrange();
@@ -800,7 +874,7 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         const other = body.querySelector(`[data-ar="${j}"] [data-ar-act="${act === "up" ? "down" : "up"}"]`);
         (again && !again.disabled ? again : other).focus();
         return;
-      }
+      }      
       const cb = e.target.closest("[data-cat]");
       if (cb && !st.arrange) {
         st.cat = cb.dataset.cat;
