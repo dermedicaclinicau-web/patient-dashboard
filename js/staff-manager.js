@@ -2,6 +2,7 @@
 import { callApi } from "./appointments.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast, escapeHtml as esc, getInitials, hueFromString } from "./utils.js";
+import { uploadStaffPhoto, photoErrText } from "./staff-photo.js";
 
 const api = (op, extra = {}) => callApi({ action: "staff", op, ...extra });
 const ERR = {
@@ -11,7 +12,7 @@ const ERR = {
   BAD_PIN: "PINs are 4 to 8 digits.",
   BAD_NAME: "Enter the staff member's name.",
   BAD_EMAIL: "Check the email address.",
-  BAD_PHOTO: "The photo must be a web address starting with https://",
+  BAD_PHOTO: "That photo couldn't be used. Upload it again.",
   BAD_ROLE: "Choose a role.",
   ROLE_IN_USE: "Someone still has that role. Change their role first, then remove it.",
   ROLE_EXISTS: "There's already a role with that name.",
@@ -400,7 +401,17 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
           Injector: carries their own kit (e.g. Xeomin)</label>
         <small class="fe-note">Gives them My kit, the kit check, and kit products in treatment records. Works with any role, including Admin.</small>
         <label class="lh-field"><span class="lh-label">Email (optional)</span><input type="email" name="email" maxlength="254" value="${esc(s ? s.email : "")}" /></label>
-        <label class="lh-field"><span class="lh-label">Photo link (optional)</span><input name="photo" maxlength="1000" placeholder="https://…" value="${esc(s ? s.photo : "")}" /></label>
+        <div class="lh-field"><span class="lh-label">Photo (optional)</span>
+          <div class="st-photo-pick">
+            <span class="st-avatar st-avatar-lg" data-role="pv"></span>
+            <div class="st-photo-btns">
+              <label class="lh-btn">Upload photo<input type="file" accept="image/*" hidden data-role="photofile" /></label>
+              <button type="button" class="lh-btn is-quiet" data-act="photo-remove">Remove</button>
+              <small class="fe-note" data-role="photonote" role="status"></small>
+            </div>
+          </div>
+          <input type="hidden" name="photo" value="${esc(s ? s.photo || "" : "")}" />
+        </div>
         <fieldset class="st-reg"><legend>Registration (optional)</legend>
           <p class="fe-note">Used to fill in forms automatically. Staff can still change them on a form.</p>
           <div class="st-reg-grid">
@@ -424,6 +435,44 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
       </form>`;
     const form = dlg.querySelector("form");
     const err = dlg.querySelector(".lh-error");
+    // Photo: uploaded straight away, saved with everything else when Save is pressed
+    const pv = dlg.querySelector('[data-role="pv"]');
+    const pnote = dlg.querySelector('[data-role="photonote"]');
+    let uploading = false;
+    const drawPv = () => {
+      const url = form.elements.photo.value;
+      const nm = form.elements.name.value.trim() || "?";
+      pv.style.setProperty("--h", hueFromString(nm));
+      pv.innerHTML = (url ? `<img src="${esc(url)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()" />` : "")
+        + `<b>${esc(getInitials(nm))}</b>`;
+      dlg.querySelector('[data-act="photo-remove"]').hidden = !url;
+    };
+    drawPv();
+    form.elements.name.addEventListener("input", drawPv);
+    const photoFolder = s ? s.id : `new_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    dlg.querySelector('[data-role="photofile"]').addEventListener("change", async (e) => {
+      const file = e.target.files && e.target.files[0];
+      e.target.value = "";
+      if (!file || uploading) return;
+      uploading = true;
+      pnote.classList.remove("is-bad");
+      pnote.textContent = "Uploading photo…";
+      try {
+        form.elements.photo.value = await uploadStaffPhoto(photoFolder, file);
+        drawPv();
+        pnote.textContent = "New photo ready. Press Save to keep it.";
+      } catch (ex) {
+        console.error("Staff photo failed:", ex);
+        pnote.textContent = photoErrText(ex);
+        pnote.classList.add("is-bad");
+      } finally { uploading = false; }
+    });
+    dlg.querySelector('[data-act="photo-remove"]').addEventListener("click", () => {
+      form.elements.photo.value = "";
+      drawPv();
+      pnote.classList.remove("is-bad");
+      pnote.textContent = "Photo removed. Press Save to keep the change.";
+    });
     const syncRole = () => {
       const role = form.elements.role.value;
       const admin = /^admin$/i.test(role);
@@ -442,6 +491,7 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       if (saving) return;
+      if (uploading) { err.textContent = "Wait for the photo to finish uploading."; err.hidden = false; return; }
       const btn = form.querySelector('[type="submit"]');
       err.hidden = true;
       const access = { allow: [], deny: [] };

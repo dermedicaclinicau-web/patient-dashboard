@@ -27,6 +27,7 @@ import { initEndOfDay, teardownEndOfDay } from "./end-of-day.js";
 import { mountStaffDays } from "./staff-days.js";
 import { initTopbar, closeTopbarMenu } from "./topbar.js";
 import { initChat, teardownChat } from "./chat.js";
+import { openMyPhoto } from "./my-photo.js";
 
 const $ = (id) => document.getElementById(id);
 

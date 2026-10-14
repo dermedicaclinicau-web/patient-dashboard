@@ -5192,3 +5192,16 @@ dialog.lh-dialog.eod-dlg{width:min(760px,95vw)}
 @keyframes st-spin{to{transform:rotate(360deg)}}
 .is-busy{cursor:progress !important;opacity:.85}
 .st-matrix-wrap.is-saving{opacity:.55;pointer-events:none;transition:opacity .15s}
+
+/* Staff photos */
+.st-photo-pick{display:flex;align-items:center;gap:14px}
+.st-photo-btns{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.st-photo-btns label.lh-btn{cursor:pointer}
+.st-photo-btns .fe-note{flex-basis:100%}
+.st-avatar.st-avatar-lg{width:72px;height:72px;font-size:24px;flex:none}
+.st-avatar-lg img{width:100%;height:100%;object-fit:cover}
+.mp-dlg .st-avatar-lg{width:128px;height:128px;font-size:40px;display:grid;margin:4px auto 14px}
+.mp-btns{justify-content:center}
+.mp-note{text-align:center;min-height:1.2em}
+.fe-note.is-bad{color:#b91c1c}
+@media (hover:hover) and (pointer:fine){.mp-cam{display:none}}
