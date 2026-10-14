@@ -307,12 +307,17 @@ match /inv_open/{id} {
       allow delete: if false;
     }
 
-    // Inventory settings (who gets order request emails)
-    match /inv_settings/{id} {
-      allow read: if isStaff();
-      allow write: if invManage();
-    }
+// Opening count: the clinic's walking order (anyone who counts can arrange it)
+match /inv_settings/count_order {
+  allow read: if can('menu.inventory') || can('inventory.count') || can('inventory.order') || can('inventory.manage');
+  allow write: if can('inventory.count') || can('inventory.order') || can('inventory.manage');
+}
 
+// Opening count in progress ("Save and finish later"): one per day
+match /inv_count_drafts/{id} {
+  allow read, write: if id.matches('opening__[0-9]{4}-[0-9]{2}-[0-9]{2}')
+    && (can('inventory.count') || can('inventory.order') || can('inventory.manage'));
+}
     // PO numbers: only ever counts up by one
     match /inv_settings/counters {
       allow create, update: if invOrder()

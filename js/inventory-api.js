@@ -3,7 +3,7 @@
 // Every stock change updates the batch, the total and the activity log together, in one transaction.
 import { db, auth } from "./firebase-config.js";
 import {
-  collection, doc, getDocs, getDoc, addDoc, setDoc, updateDoc, query, where, orderBy, limit, runTransaction,
+  collection, doc, getDocs, getDoc, addDoc, setDoc, updateDoc, deleteDoc, query, where, orderBy, limit, runTransaction,
   serverTimestamp, arrayUnion, arrayRemove, writeBatch,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
@@ -1373,6 +1373,51 @@ export async function getCountSettings() {
 export async function saveCountSettings({ dueBy }, staff) {
   if (!/^\d{2}:\d{2}$/.test(dueBy || "")) throw new Error("Choose a time.");
   await setDoc(doc(db, "inv_settings", "counting"), { dueBy, ...stamp(staff) }, { merge: true });
+}
+
+/* ===================== Opening count: walking order and saved progress ===================== */
+// The order products sit in on the Shelf and in JT storage, with headings ("Fridge", "Cabinet A – top shelf").
+// One order for the whole clinic: inv_settings/count_order → { shelf: [{ s: "Fridge" } | { p: productId }], jt: [...] }
+function cleanOrderList(list) {
+  const seen = new Set();
+  const out = [];
+  (Array.isArray(list) ? list : []).forEach((e) => {
+    if (e && typeof e.s === "string") { const s = clip(e.s, 60); if (s) out.push({ s }); }
+    else if (e && e.p) { const p = clip(e.p, 60); if (p && !seen.has(p)) { seen.add(p); out.push({ p }); } }
+  });
+  return out.slice(0, 800);
+}
+
+export async function getCountOrder() {
+  const s = await getDoc(doc(db, "inv_settings", "count_order"));
+  const d = s.exists() ? s.data() : {};
+  return { shelf: cleanOrderList(d.shelf), jt: cleanOrderList(d.jt), by: String(d.updatedBy || ""), at: toDate(d.updatedAt) };
+}
+
+export async function saveCountOrder(loc, list, staff) {
+  if (!["shelf", "jt"].includes(loc)) throw new Error("Choose the Shelf or JT storage.");
+  await setDoc(doc(db, "inv_settings", "count_order"), { [loc]: cleanOrderList(list), ...stamp(staff) }, { merge: true });
+}
+
+// An opening count in progress ("Save and finish later"): one per day, anyone who counts can carry it on
+const draftRef = (key) => doc(db, "inv_count_drafts", `opening__${key}`);
+
+export async function getCountDraft(key = dayKey()) {
+  const s = await getDoc(draftRef(key));
+  if (!s.exists()) return null;
+  const x = s.data() || {};
+  return { ...x, savedAt: Number(x.savedAt) || 0, updatedAt: toDate(x.updatedAt) };
+}
+
+export async function saveCountDraft(draft, staff, key = dayKey()) {
+  if (JSON.stringify(draft).length > 900000) throw new Error("This count is too big to save for later. Press Save count instead.");
+  await setDoc(draftRef(key), {
+    ...draft, kind: "opening", dateKey: key, by: who(staff), byUid: uid(), savedAt: Date.now(), updatedAt: serverTimestamp(),
+  });
+}
+
+export async function deleteCountDraft(key = dayKey()) {
+  await deleteDoc(draftRef(key));
 }
 
 export async function listCountsOn(key = dayKey()) {

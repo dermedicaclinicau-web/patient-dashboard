@@ -3,13 +3,17 @@
 // differences go to Reporting → Count differences, or open an investigation.
 // Each line remembers when it was counted, so stock used while counting doesn't show as a difference.
 // The opening count is one table: a row per product (a line per batch), with Shelf, JT storage and a comment.
+// Walking order: products are listed in the order they sit (Arrange order), shared by the whole clinic.
+// Save and finish later: progress is kept on this device as it's typed, and can be saved for anyone to carry on.
 import {
-  INV_CATEGORIES, unitPlural, batchName, batchText, isKitProduct, isSharedProduct, plural,
+  INV_CATEGORIES, unitPlural, batchName, batchText, isKitProduct, isSharedProduct, plural, catLabel,
   listProducts, listAllLots, listKits, countDue, countLocs, dayKey, listCountsOn, saveCount, myUid,
   listOpenContainers, finishContainer, getCountSettings, saveCountSettings, COUNT_DUE_DEFAULT,
+  getCountOrder, saveCountOrder, getCountDraft, saveCountDraft, deleteCountDraft,
 } from "./inventory-api.js";
 import { can, isInjector } from "./perms.js";
 import { showToast } from "./utils.js";
+import { confirmDialog } from "./dialog.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -17,6 +21,7 @@ const I = {
   back: ic('<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>'),
   check: ic('<polyline points="20 6 9 17 4 12"/>'),
   search: ic('<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>'),
+  pause: ic('<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>'),
 };
 const fmt = (n) => String(+Number(n || 0).toFixed(1));
 const niceDate = (key) => {
@@ -31,6 +36,7 @@ const LOCS = ["shelf", "jt"];
 const whereOf = (l) => (l.loc === "kit" ? `${l.staffName || "Injector"}'s kit` : LOC[l.loc] || l.loc);
 const diffText = (n) => (n > 0 ? `+${fmt(n)}` : fmt(n));
 const whole = (v) => (v === "" ? "" : String(Math.max(0, parseInt(v, 10) || 0)));
+const filled = (v) => v !== undefined && v !== null && String(v) !== "";
 
 export async function mountStockCount(container, { param = "", staff = null } = {}) {
   const backHref = "#/tasks/new";
@@ -47,11 +53,13 @@ export async function mountStockCount(container, { param = "", staff = null } = 
     return;
   }
 
-  let products, lots, todays, allKits, openNow, countCfg;
+  let products, lots, todays, allKits, openNow, countCfg, countOrder, serverDraft;
   try {
-    [products, lots, todays, allKits, openNow, countCfg] = await Promise.all([
+    [products, lots, todays, allKits, openNow, countCfg, countOrder, serverDraft] = await Promise.all([
       listProducts(), listAllLots(), listCountsOn(dayKey()), listKits().catch(() => []),
       listOpenContainers().catch(() => []), getCountSettings().catch(() => ({ dueBy: COUNT_DUE_DEFAULT })),
+      mode === "opening" ? getCountOrder().catch(() => ({ shelf: [], jt: [] })) : null,
+      mode === "opening" ? getCountDraft().catch(() => null) : null,
     ]);
   } catch (err) {
     console.error("Count load failed:", err);
@@ -88,7 +96,8 @@ export async function mountStockCount(container, { param = "", staff = null } = 
             ? ` · <span data-role="dueby">due by ${esc(clock(dueBy))}</span>${canManage ? ' <button type="button" class="cs-link" data-act="dueby">Change</button>' : ""}` : ""}</span></div>
           <span class="ff-progress" data-role="progress"></span>
           <div class="ff-bar-actions">
-            <a class="ff-btn is-quiet" href="${backHref}">Cancel</a>
+            <a class="ff-btn is-quiet" href="${backHref}">Close</a>
+            ${mode === "opening" ? `<button type="button" class="ff-btn" data-act="later">${I.pause}<span>Save and finish later</span></button>` : ""}
             <button type="button" class="ff-btn is-primary" data-act="save">${I.check}<span>Save count</span></button>
           </div>
         </div>
@@ -101,11 +110,13 @@ export async function mountStockCount(container, { param = "", staff = null } = 
   const body = $('[data-role="body"]');
   const msgEl = $('[data-role="msg"]');
   const saveBtn = $('[data-act="save"]');
+  const laterBtn = $('[data-act="later"]');
   let busy = false;
 
   // Enter moves to the next box in the same column (walk the Shelf, then JT storage)
   body.addEventListener("keydown", (e) => {
     const t = e.target;
+    if (e.key === "Enter" && t.dataset && t.dataset.arName !== undefined) { e.preventDefault(); t.blur(); return; }
     if (e.key !== "Enter" || !t.dataset || !t.dataset.col) return;
     e.preventDefault();
     const all = [...body.querySelectorAll(`input[data-col="${t.dataset.col}"]`)];
@@ -195,7 +206,14 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       .sort((a, b) => a.staffName.localeCompare(b.staffName) || a.productName.localeCompare(b.productName) || (a.expiry || "").localeCompare(b.expiry || ""))
       .map((k) => ({ k, due: false, sealed: "", open: "" }));
     const openChecks = new Map();   // opened container id → "there" | "missing"
-    const st = { q: "", left: false, order: products.some((p) => p.shelfPos || p.jtPos) ? "position" : "category", place: "" };
+
+    // The clinic's walking order, per storage place
+    const order = { shelf: countOrder.shelf || [], jt: countOrder.jt || [] };
+    const hasOrder = (loc) => order[loc].some((e) => e.p);
+    const st = {
+      q: "", left: false, place: "", arrange: null, resumed: null,
+      order: hasOrder("shelf") || hasOrder("jt") ? "walk" : products.some((p) => p.shelfPos || p.jtPos) ? "position" : "category",
+    };
 
     // What has to be filled for a product + storage to count as done
     const needRows = (it, loc) => it.rows.filter((r) => !r.found && r.at[loc]);
@@ -219,6 +237,109 @@ export async function mountStockCount(container, { param = "", staff = null } = 
     const places = () => PLACES.filter(([k]) => placeTotal(k) > 0);
     const placeName = (pl) => (PLACES.find(([k]) => k === pl) || ["", ""])[1];
     st.place = (places()[0] || ["shelf"])[0];
+
+    /* ---------- Saved progress: on this device as it's typed, and "Save and finish later" for anyone ---------- */
+    const LOCAL_KEY = `sc_draft_${me}_${dayKey()}`;
+    const myName = String((staff && staff.name) || "");
+
+    // Everything typed so far (only what's been touched, so it stays small)
+    function snapshot() {
+      return {
+        place: st.place,
+        items: items.filter((it) => it.extra || it.note || LOCS.some((l) => it.none[l] !== "")
+          || it.rows.some((r) => r.found || LOCS.some((l) => r.counted[l] !== "")))
+          .map((it) => ({
+            pid: it.p.id, locs: [...it.locs], extra: !!it.extra, note: it.note,
+            none: { ...it.none }, noneAt: { ...it.noneAt },
+            rows: it.rows.filter((r) => r.found || LOCS.some((l) => r.counted[l] !== "")).map((r) => ({
+              batch: r.batch, expiry: r.expiry, found: !!r.found, counted: { ...r.counted }, countedAt: { ...r.countedAt },
+            })),
+          })),
+        kits: kitRows.filter((r) => r.sealed !== "" || r.open !== "").map((r) => ({ ref: r.k.id, sealed: r.sealed, open: r.open })),
+        open: [...openChecks].map(([id, v]) => ({ id, v })),
+      };
+    }
+    const draftCount = (d) => (d.items || []).reduce((a, x) => a
+      + LOCS.filter((l) => x.none && filled(x.none[l])).length
+      + (x.rows || []).reduce((b, r) => b + LOCS.filter((l) => r.counted && filled(r.counted[l])).length, 0), 0)
+      + (d.kits || []).length;
+
+    // Puts saved numbers back. Only fills what the saved copy has, so it can also combine two copies.
+    function applyDraft(d) {
+      (d.items || []).forEach((x) => {
+        const p = byId.get(x.pid);
+        if (!p) return;
+        const locs = (Array.isArray(x.locs) ? x.locs : []).filter((l) => LOCS.includes(l) && !done.has(`${p.id}|${l}`));
+        let it = items.find((i) => i.p.id === p.id);
+        if (!it) {
+          if (!locs.length) return;
+          it = makeItem(p, locs, true);
+          items.push(it);
+        } else if (x.extra) {
+          it.locs = LOCS.filter((l) => it.locs.includes(l) || locs.includes(l));
+        }
+        if (x.note) it.note = String(x.note);
+        LOCS.forEach((l) => {
+          if (x.none && filled(x.none[l])) { it.none[l] = whole(String(x.none[l])); it.noneAt[l] = Number((x.noneAt || {})[l]) || 0; }
+        });
+        (x.rows || []).forEach((r) => {
+          const batch = String(r.batch || ""), expiry = String(r.expiry || "");
+          let row = r.found
+            ? it.rows.find((y) => y.found && y.batch === batch && y.expiry === expiry)
+            : it.rows.find((y) => !y.found && y.batch === batch && y.expiry === expiry);
+          if (!row) {   // a batch that has since run out on record: keep the line that was counted
+            row = newRow(batch, expiry, !!r.found);
+            if (!r.found) LOCS.forEach((l) => { row.at[l] = filled((r.counted || {})[l]); });
+            it.rows.push(row);
+          }
+          LOCS.forEach((l) => {
+            const v = (r.counted || {})[l];
+            if (filled(v)) { row.counted[l] = whole(String(v)); row.countedAt[l] = Number((r.countedAt || {})[l]) || 0; }
+          });
+        });
+      });
+      (d.kits || []).forEach((k) => {
+        const r = kitRows.find((x) => x.k.id === k.ref);
+        if (!r) return;
+        if (filled(k.sealed)) r.sealed = String(k.sealed);
+        if (filled(k.open)) r.open = String(k.open);
+      });
+      (d.open || []).forEach((o) => { if (o && openNow.some((c) => c.id === o.id)) openChecks.set(o.id, o.v); });
+      if (d.place) st.place = d.place;
+    }
+
+    // Older saved copies first, so the newest wins
+    try {
+      Object.keys(localStorage).filter((k) => k.startsWith(`sc_draft_${me}_`) && k !== LOCAL_KEY).forEach((k) => localStorage.removeItem(k));
+    } catch { /* storage unavailable */ }
+    let localDraft = null;
+    try { localDraft = JSON.parse(localStorage.getItem(LOCAL_KEY) || "null"); } catch { localDraft = null; }
+    let loadedAt = Date.now();
+    const drafts = [serverDraft, localDraft].filter((d) => d && Array.isArray(d.items)).sort((a, b) => (a.savedAt || 0) - (b.savedAt || 0));
+    drafts.forEach(applyDraft);
+    const latest = drafts[drafts.length - 1];
+    if (latest && draftCount(latest)) st.resumed = { by: latest.byUid === me ? "" : (latest.by || "Someone"), at: latest.savedAt || 0 };
+
+    let saveTimer = 0;
+    const autosave = () => {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => {
+        try { localStorage.setItem(LOCAL_KEY, JSON.stringify({ ...snapshot(), savedAt: Date.now(), by: myName, byUid: me })); }
+        catch { /* full or unavailable: Save and finish later still works */ }
+      }, 500);
+    };
+    const clearLocal = () => { clearTimeout(saveTimer); try { localStorage.removeItem(LOCAL_KEY); } catch { /* fine */ } };
+
+    // Someone saved more counts after this page opened: theirs fill the gaps, what's typed here wins
+    async function mergeNewer() {
+      const cur = await getCountDraft().catch(() => null);
+      if (!cur || !Array.isArray(cur.items) || (cur.savedAt || 0) <= loadedAt) return "";
+      const mine = snapshot();
+      applyDraft(cur);
+      applyDraft(mine);
+      loadedAt = Date.now();
+      return cur.byUid === me ? "You (on another device)" : (cur.by || "Someone");
+    }
 
     function placesHtml() {
       const ps = places();
@@ -263,11 +384,12 @@ export async function mountStockCount(container, { param = "", staff = null } = 
 
     /* ---------- The table for one place ---------- */
     const posOf = (p, loc) => String((loc === "jt" ? p.jtPos : p.shelfPos) || "").trim();
-    const byPos = (loc) => (a, b) => {
-      const pa = posOf(a.p, loc), pb = posOf(b.p, loc);
+    const byPosP = (loc) => (a, b) => {
+      const pa = posOf(a, loc), pb = posOf(b, loc);
       if (!pa !== !pb) return pa ? -1 : 1;
-      return pa.localeCompare(pb, "en-AU", { numeric: true, sensitivity: "base" }) || a.p.name.localeCompare(b.p.name);
+      return pa.localeCompare(pb, "en-AU", { numeric: true, sensitivity: "base" }) || a.name.localeCompare(b.name);
     };
+    const byPos = (loc) => (a, b) => byPosP(loc)(a.p, b.p);
     const numIn = (attrs, v, loc, label) => `<input class="fe-in sc-in" type="number" min="0" step="1" inputmode="numeric" ${attrs}
       data-col="${loc}" value="${esc(v)}" placeholder="?" aria-label="${esc(label)}" />`;
 
@@ -275,7 +397,7 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       const p = it.p;
       const bn = batchName(p);
       const pos = posOf(p, loc);
-      const head = k === 0 ? `<div class="sc-pname">${pos ? `<span class="sc-pos">${esc(pos)}</span>` : ""}<strong>${esc(p.name)}</strong>${
+      const head = k === 0 ? `<div class="sc-pname">${pos && st.order === "position" ? `<span class="sc-pos">${esc(pos)}</span>` : ""}<strong>${esc(p.name)}</strong>${
         it.extra ? '<button type="button" class="hx-x" data-act="rm-item" aria-label="Remove from this count">×</button>' : ""}</div>
         ${isSharedProduct(p) ? '<small>Only count the sealed ones, not the opened one</small>' : ""}` : "";
       let lot = "";
@@ -308,20 +430,42 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       }).join("")}</tbody>`;
     }
 
+    const groupHead = (name, n, extra = "", cls = "") =>
+      `<tbody class="sc-grp${cls}"><tr><th colspan="3">${esc(name)} <em>${n}</em>${extra}</th></tr></tbody>`;
+
     function drawTable() {
       const box = body.querySelector('[data-role="table"]');
-      if (!box || st.place === "kits") return;
+      if (!box || st.place === "kits" || st.arrange) return;
       const loc = st.place;
       const q = st.q.trim().toLowerCase();
       const list = items.map((it, i) => [it, i]).filter(([it]) => it.locs.includes(loc)
         && (!q || `${it.p.name} ${posOf(it.p, loc)}`.toLowerCase().includes(q))
         && (!st.left || !locFilled(it, loc)));
       let rows;
-      if (st.order === "category") {
+      if (st.order === "walk") {
+        // In the order they sit, under their headings. Anything not arranged yet goes last.
+        const left = new Map(list.map((x) => [x[0].p.id, x]));
+        const groups = [];
+        let g = { name: "", rows: [] };
+        groups.push(g);
+        order[loc].forEach((e) => {
+          if (e.s !== undefined) { g = { name: e.s, rows: [] }; groups.push(g); return; }
+          const x = left.get(e.p);
+          if (x) { g.rows.push(x); left.delete(e.p); }
+        });
+        const placed = groups.some((x) => x.rows.length);
+        const rest = [...left.values()].sort(([a], [b]) => byPos(loc)(a, b));
+        if (rest.length) groups.push({ name: placed ? "Not placed yet" : "", rows: rest, unplaced: placed });
+        const tip = list.length && !hasOrder(loc) && !q && !st.left
+          ? `<tbody><tr><td colspan="3" class="tb-none">There's no ${esc(LOC[loc])} order yet. Press <strong>Arrange order</strong> once to put the products in the order they sit.</td></tr></tbody>`
+          : "";
+        rows = tip + groups.filter((x) => x.rows.length).map((x) => (x.name
+          ? groupHead(x.name, x.rows.length, x.unplaced ? " <small>· press Arrange order to put these in place</small>" : "", x.unplaced ? " sc-unplaced" : "")
+          : "") + x.rows.map(([it, i]) => itemHtml(it, i, loc)).join("")).join("");
+      } else if (st.order === "category") {
         rows = INV_CATEGORIES.map((c) => {
           const g = list.filter(([it]) => it.p.category === c.key).sort(([a], [b]) => a.p.name.localeCompare(b.p.name));
-          return g.length ? `<tbody class="sc-grp"><tr><th colspan="3">${esc(c.label)} <em>${g.length}</em></th></tr></tbody>${
-            g.map(([it, i]) => itemHtml(it, i, loc)).join("")}` : "";
+          return g.length ? groupHead(c.label, g.length) + g.map(([it, i]) => itemHtml(it, i, loc)).join("") : "";
         }).join("");
       } else {
         const sorter = st.order === "position" ? byPos(loc) : (a, b) => a.p.name.localeCompare(b.p.name);
@@ -332,6 +476,103 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         ${rows || `<tbody><tr><td colspan="3" class="tb-none">${st.left ? "Everything here has been counted. 👍" : "No products match."}</td></tr></tbody>`}
       </table></div></section>`;
     }
+
+    /* ---------- Arrange order (the whole clinic's walking order) ---------- */
+    // Every product counted at this place (not only today's), so weekly and monthly ones get a place too
+    function startArrange(loc) {
+      const pool = new Map();
+      products.filter((p) => p.active && (p.countFreq || "never") !== "never" && countLocs(p).includes(loc)).forEach((p) => pool.set(p.id, p));
+      items.filter((it) => it.locs.includes(loc)).forEach((it) => pool.set(it.p.id, it.p));
+      const list = [];
+      order[loc].forEach((e) => {
+        if (e.s !== undefined) list.push({ s: e.s });
+        else if (pool.has(e.p)) { list.push({ p: e.p }); pool.delete(e.p); }
+      });
+      const rest = [...pool.values()].sort(byPosP(loc));
+      if (rest.length && list.length) list.push({ s: "Not placed yet", tmp: true });
+      rest.forEach((p) => list.push({ p: p.id }));
+      st.arrange = { loc, list, dirty: false };
+    }
+
+    function drawArrange() {
+      const box = body.querySelector('[data-role="table"]');
+      const a = st.arrange;
+      if (!box || !a) return;
+      const last = a.list.length - 1;
+      const mv = (i) => `<button type="button" class="sc-ar-mv" data-ar-act="up" aria-label="Move up"${i === 0 ? " disabled" : ""}>▲</button>
+        <button type="button" class="sc-ar-mv" data-ar-act="down" aria-label="Move down"${i === last ? " disabled" : ""}>▼</button>`;
+      box.innerHTML = `<section class="tb-card sc-arr">
+        <div class="sc-arr-head">
+          <div><h4>Arrange the ${esc(LOC[a.loc])} order</h4>
+            <p class="muted">Put the products in the order they sit, so the count follows your walk. Drag ⠿, or use ▲ ▼.
+              Add a heading for each fridge, cabinet or shelf. Everyone's count uses this order.</p></div>
+          <button type="button" class="lh-btn" data-act="ar-sec">+ Add heading</button>
+        </div>
+        ${a.list.length ? `<ol class="sc-arr-list" data-role="arlist">${a.list.map((e, i) => {
+          if (e.s !== undefined) {
+            return `<li class="sc-ar is-sec${e.tmp ? " is-tmp" : ""}" data-ar="${i}">
+              <span class="sc-grip" data-grip title="Drag to move" aria-hidden="true">⠿</span>
+              <input class="fe-input sc-ar-name" data-ar-name value="${esc(e.s)}" maxlength="60" placeholder="e.g. Fridge" aria-label="Heading" />
+              <span class="sc-ar-btns">${mv(i)}<button type="button" class="hx-x" data-ar-act="del" aria-label="Remove heading">×</button></span></li>`;
+          }
+          const p = byId.get(e.p);
+          return `<li class="sc-ar" data-ar="${i}">
+            <span class="sc-grip" data-grip title="Drag to move" aria-hidden="true">⠿</span>
+            <span class="sc-ar-name"><strong>${esc(p ? p.name : "Removed product")}</strong><small>${esc(p ? catLabel(p.category) : "")}</small></span>
+            <span class="sc-ar-btns">${mv(i)}</span></li>`;
+        }).join("")}</ol>` : '<p class="tb-none">Nothing is counted here.</p>'}
+        <div class="sc-arr-foot">
+          <button type="button" class="lh-btn is-quiet" data-act="ar-cancel">Cancel</button>
+          <button type="button" class="lh-btn is-primary" data-act="ar-save">Save order</button>
+        </div>
+      </section>`;
+    }
+
+    // Drag with a finger or the mouse (works on the iPad, unlike the browser's own drag and drop)
+    let drag = null;
+    body.addEventListener("pointerdown", (e) => {
+      const grip = e.target.closest("[data-grip]");
+      if (!grip || !st.arrange) return;
+      e.preventDefault();
+      drag = { li: grip.closest("[data-ar]"), id: e.pointerId };
+      drag.li.classList.add("is-dragging");
+      document.body.classList.add("is-arranging");
+      try { grip.setPointerCapture(e.pointerId); } catch { /* fine */ }
+    });
+    body.addEventListener("pointermove", (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const over = document.elementFromPoint(e.clientX, e.clientY);
+      const li = over && over.closest(".sc-arr-list > [data-ar]");
+      if (li && li !== drag.li) {
+        const r = li.getBoundingClientRect();
+        li.parentNode.insertBefore(drag.li, e.clientY < r.top + r.height / 2 ? li : li.nextSibling);
+      }
+      if (e.clientY < 90) window.scrollBy(0, -14);
+      else if (e.clientY > window.innerHeight - 70) window.scrollBy(0, 14);
+    });
+    const endDrag = () => {
+      if (!drag) return;
+      drag.li.classList.remove("is-dragging");
+      document.body.classList.remove("is-arranging");
+      const ol = body.querySelector('[data-role="arlist"]');
+      if (ol && st.arrange) {
+        const next = [...ol.children].map((li) => st.arrange.list[Number(li.dataset.ar)]);
+        if (next.some((x, i) => x !== st.arrange.list[i])) st.arrange.dirty = true;
+        st.arrange.list = next;
+      }
+      drag = null;
+      drawArrange();
+    };
+    body.addEventListener("pointerup", endDrag);
+    body.addEventListener("pointercancel", endDrag);
+
+    const leaveArrange = async () => {
+      if (!st.arrange || !st.arrange.dirty) return true;
+      return confirmDialog({
+        title: "Leave without saving the order?", message: "The changes to the order haven't been saved.",
+        confirmLabel: "Leave", tone: "warning",
+      });
+    };
 
     function kitsHtml() {
       if (!kitRows.length) return "";
@@ -383,19 +624,37 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         <button type="button" class="lh-btn" data-act="add">Add</button></div>`;
     }
 
+    function resumeHtml() {
+      if (!st.resumed) return "";
+      const when = st.resumed.at ? ` (saved ${esc(timeOf(new Date(st.resumed.at)))})` : "";
+      return `<div class="sc-resume" role="status"><span>↻ ${st.resumed.by
+        ? `Carrying on from <strong>${esc(st.resumed.by)}</strong>'s count${when}.`
+        : `Carrying on from where you left off${when}.`}</span>
+        <button type="button" class="cs-link" data-act="restart">Start again</button></div>`;
+    }
+
     function draw() {
       const ps = places();
       if (ps.length && !ps.some(([k]) => k === st.place)) st.place = ps[0][0];
+      if (st.arrange) {
+        body.innerHTML = `${placesHtml()}<div data-role="table"></div>`;
+        drawArrange();
+        progress();
+        return;
+      }
       const intro = (PLACES.find(([k]) => k === st.place) || [])[2] || "";
+      const orders = [["walk", "Walking order"], ["position", "Position code"], ["category", "Category"], ["name", "A–Z"]];
       const tools = st.place !== "kits" ? `<div class="sc-tools">
           <label class="ib-search sc-find">${I.search}<input type="search" data-role="q" placeholder="Find a product" value="${esc(st.q)}" aria-label="Find a product" /></label>
-          <label class="sc-ord">Order <select class="fb-select" data-role="order">${[["position", "Where it's kept"], ["category", "Category"], ["name", "A–Z"]]
+          <label class="sc-ord">Order <select class="fb-select" data-role="order">${orders
             .map(([v, l]) => `<option value="${v}"${st.order === v ? " selected" : ""}>${l}</option>`).join("")}</select></label>
           <label class="fe-check"><input type="checkbox" data-role="left"${st.left ? " checked" : ""} /> Only show what's left</label>
+          <button type="button" class="ff-btn" data-act="arrange">Arrange order</button>
         </div>` : "";
       const doneList = done.size ? `<details class="tb-card sc-more"><summary>Done today (${done.size})</summary><ul class="sc-done">${[...done.values()].map((v) =>
         `<li>${I.check}<span>${esc(v.name)} · ${esc(v.where)}</span><small>${esc(v.by)} · ${esc(timeOf(v.at))}</small></li>`).join("")}</ul></details>` : "";
       body.innerHTML = ps.length ? `
+          ${resumeHtml()}
           ${placesHtml()}
           <p class="sc-intro">${esc(intro)}</p>
           ${tools}
@@ -415,8 +674,13 @@ export async function mountStockCount(container, { param = "", staff = null } = 
     /* ---------- Typing ---------- */
     body.addEventListener("input", (e) => {
       const t = e.target;
+      if (t.dataset.arName !== undefined && st.arrange) {
+        const entry = st.arrange.list[Number(t.closest("[data-ar]").dataset.ar)];
+        if (entry) { entry.s = t.value; entry.tmp = false; st.arrange.dirty = true; }
+        return;
+      }
       if (t.dataset.role === "q") { st.q = t.value; drawTable(); return; }
-      if (t.dataset.openCk !== undefined) { openChecks.set(t.closest("[data-open]").dataset.open, t.value); return; }
+      if (t.dataset.openCk !== undefined) { openChecks.set(t.closest("[data-open]").dataset.open, t.value); autosave(); return; }
       const kitEl = t.closest("[data-ki]");
       if (kitEl && t.dataset.k) {
         const r = kitRows[Number(kitEl.dataset.ki)];
@@ -424,12 +688,13 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         kitEl.classList.toggle("is-done", kitFilled(r));
         msgEl.textContent = "";
         progress();
+        autosave();
         return;
       }
       const tb = t.closest("tbody[data-it]");
       if (!tb) return;
       const it = items[Number(tb.dataset.it)];
-      if (t.dataset.note !== undefined) { it.note = t.value; return; }
+      if (t.dataset.note !== undefined) { it.note = t.value; autosave(); return; }
       if (t.dataset.none) {
         const loc = t.dataset.none;
         it.none[loc] = whole(t.value);
@@ -441,6 +706,7 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         r.countedAt[loc] = r.counted[loc] === "" ? 0 : Date.now();   // the moment this line was counted
       } else if (t.dataset.f) {
         it.rows[Number(t.dataset.r)][t.dataset.f] = t.value;
+        autosave();
         return;
       } else {
         return;
@@ -448,18 +714,45 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       tb.classList.toggle("is-done", locFilled(it, st.place));
       msgEl.textContent = "";
       progress();
+      autosave();
     });
     body.addEventListener("change", (e) => {
       const r = e.target.dataset.role;
       if (r === "order") { st.order = e.target.value; drawTable(); }
       else if (r === "left") { st.left = e.target.checked; drawTable(); }
     });
-    body.addEventListener("click", (e) => {
+    body.addEventListener("click", async (e) => {
+      // Arrange order: ▲ ▼ and remove heading
+      const arb = e.target.closest("[data-ar-act]");
+      if (arb && st.arrange) {
+        const i = Number(arb.closest("[data-ar]").dataset.ar);
+        const act = arb.dataset.arAct;
+        const L = st.arrange.list;
+        if (act === "del") {
+          L.splice(i, 1);
+          st.arrange.dirty = true;
+          drawArrange();
+          return;
+        }
+        const j = i + (act === "up" ? -1 : 1);
+        if (j < 0 || j >= L.length) return;
+        [L[i], L[j]] = [L[j], L[i]];
+        st.arrange.dirty = true;
+        drawArrange();
+        const again = body.querySelector(`[data-ar="${j}"] [data-ar-act="${act}"]`);
+        const other = body.querySelector(`[data-ar="${j}"] [data-ar-act="${act === "up" ? "down" : "up"}"]`);
+        (again && !again.disabled ? again : other).focus();
+        return;
+      }
+
       const pl = e.target.closest("[data-place]");
       if (pl) {
+        if (!(await leaveArrange())) return;
+        st.arrange = null;
         st.place = pl.dataset.place;
         st.q = "";
         draw();
+        autosave();
         root.scrollIntoView({ behavior: "smooth", block: "start" });
         const first = body.querySelector("input.sc-in");
         if (first) setTimeout(() => first.focus({ preventScroll: true }), 300);
@@ -467,22 +760,83 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       }
       const a = e.target.closest("[data-act]");
       if (!a) return;
+      const act = a.dataset.act;
+
+      if (act === "arrange") {
+        startArrange(st.place);
+        draw();
+        root.scrollIntoView({ behavior: "smooth", block: "start" });
+        return;
+      }
+      if (act === "ar-sec") {
+        st.arrange.list.unshift({ s: "" });
+        st.arrange.dirty = true;
+        drawArrange();
+        const inp = body.querySelector('[data-ar="0"] [data-ar-name]');
+        if (inp) inp.focus();
+        return;
+      }
+      if (act === "ar-cancel") {
+        if (!(await leaveArrange())) return;
+        st.arrange = null;
+        draw();
+        return;
+      }
+      if (act === "ar-save") {
+        const ar = st.arrange;
+        const list = ar.list.filter((x) => x.p || (x.s !== undefined && !x.tmp && x.s.trim()))
+          .map((x) => (x.p ? { p: x.p } : { s: x.s.trim() }));
+        a.disabled = true;
+        a.textContent = "Saving…";
+        try {
+          await saveCountOrder(ar.loc, list, staff);
+          order[ar.loc] = list;
+          st.arrange = null;
+          st.order = "walk";
+          draw();
+          showToast(`${LOC[ar.loc]} order saved. Everyone's count now follows it.`);
+        } catch (err) {
+          console.error("Save order failed:", err);
+          showToast(err && err.code === "permission-denied"
+            ? "You don't have access to change the order. Ask an Admin to check the Firestore rules."
+            : "Couldn't save the order. Try again.");
+          a.disabled = false;
+          a.textContent = "Save order";
+        }
+        return;
+      }
+      if (act === "restart") {
+        const ok = await confirmDialog({
+          title: "Start the count again?",
+          message: "Everything typed in so far is cleared, including anything saved to finish later. Counts already saved aren't affected.",
+          confirmLabel: "Start again", tone: "warning",
+        });
+        if (!ok) return;
+        clearLocal();
+        await deleteCountDraft().catch(() => {});
+        mountStockCount(container, { param, staff });
+        return;
+      }
+
       const tb = a.closest("tbody[data-it]");
       const idx = tb ? Number(tb.dataset.it) : -1;
       const it = idx >= 0 ? items[idx] : null;
-      if (a.dataset.act === "found" && it) {
+      if (act === "found" && it) {
         it.rows.push(newRow("", "", true));
         drawTable();
+        autosave();
         const ins = body.querySelectorAll(`tbody[data-it="${idx}"] [data-f="batch"]`);
         if (ins.length) ins[ins.length - 1].focus();
-      } else if (a.dataset.act === "rm" && it) {
+      } else if (act === "rm" && it) {
         it.rows.splice(Number(a.dataset.r), 1);
         drawTable();
         progress();
-      } else if (a.dataset.act === "rm-item" && it) {
+        autosave();
+      } else if (act === "rm-item" && it) {
         items.splice(idx, 1);
         draw();
-      } else if (a.dataset.act === "add") {
+        autosave();
+      } else if (act === "add") {
         const p = byId.get(body.querySelector('[data-role="addp"]').value);
         if (!p) { showToast("Choose a product."); return; }
         const v = body.querySelector('[data-role="addloc"]').value;
@@ -492,6 +846,7 @@ export async function mountStockCount(container, { param = "", staff = null } = 
           const extra = want.filter((l) => !cur.locs.includes(l));
           if (!extra.length) { showToast("That's already on the list."); return; }
           cur.locs = LOCS.filter((l) => cur.locs.includes(l) || extra.includes(l));
+          cur.extra = true;
         } else {
           items.push(makeItem(p, want, true));
         }
@@ -499,13 +854,52 @@ export async function mountStockCount(container, { param = "", staff = null } = 
         st.left = false;
         st.place = want[0];
         draw();
+        autosave();
         showToast(`${p.name} added`);
+      }
+    });
+
+    /* ---------- Save and finish later ---------- */
+    laterBtn.addEventListener("click", async () => {
+      if (busy) return;
+      if (st.arrange) { msgEl.textContent = "Save or cancel the new order first."; return; }
+      if (!draftCount(snapshot()) && !snapshot().items.length) { msgEl.textContent = "Nothing has been counted yet."; return; }
+      busy = true;
+      laterBtn.disabled = true;
+      laterBtn.querySelector("span").textContent = "Saving…";
+      try {
+        const merged = await mergeNewer();
+        await saveCountDraft(snapshot(), staff);
+        clearLocal();
+        showToast(`Saved${merged ? ` (with ${merged}'s counts too)` : ""}. Open Task Manager → Opening count to carry on.`);
+        location.hash = backHref;
+      } catch (err) {
+        console.error("Save for later failed:", err);
+        msgEl.textContent = err && err.code === "permission-denied"
+          ? "Saving for later is blocked. Ask an Admin to publish the Firestore rule for inv_count_drafts."
+          : err && err.message && !err.code ? err.message : "Couldn't save. Your numbers are still kept on this device. Try again.";
+      } finally {
+        busy = false;
+        laterBtn.disabled = false;
+        laterBtn.querySelector("span").textContent = "Save and finish later";
       }
     });
 
     /* ---------- Save ---------- */
     saveBtn.addEventListener("click", async () => {
       if (busy) return;
+      if (st.arrange) { msgEl.textContent = "Save or cancel the new order first."; return; }
+
+      // Someone saved more counts for later while this was open: add them in first
+      busy = true;
+      let merged = "";
+      try { merged = await mergeNewer(); } finally { busy = false; }
+      if (merged) {
+        draw();
+        msgEl.textContent = `${merged} saved more counts while you were counting. They've been added: check them, then press Save count again.`;
+        return;
+      }
+
       const label = (it, loc) => `${it.p.name} (${LOC[loc]})`;
       const goTo = (loc) => { if (st.place !== loc) { st.place = loc; draw(); } };
       for (const it of items) {
@@ -547,12 +941,16 @@ export async function mountStockCount(container, { param = "", staff = null } = 
 
       busy = true;
       saveBtn.disabled = true;
+      laterBtn.disabled = true;
       saveBtn.querySelector("span").textContent = "Saving…";
       try {
         const res = await saveCount({
           kind: "opening",
           lines: [...lines, ...readyKits.map((r) => ({ kit: true, ref: r.k.id, sealed: r.sealed, open: r.open }))],
         }, staff);
+        // The count is saved: nothing is waiting to be finished any more
+        clearLocal();
+        deleteCountDraft().catch((err) => console.warn("Saved progress not cleared:", err));
         // Opened containers that weren't there are closed, so treatment records stop offering them
         let missing = 0;
         for (const [id, v] of openChecks) {
@@ -572,6 +970,7 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       } finally {
         busy = false;
         saveBtn.disabled = false;
+        laterBtn.disabled = false;
         saveBtn.querySelector("span").textContent = "Save count";
       }
     });
@@ -634,6 +1033,7 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       ? `<br><small class="muted">${fmt(Math.abs(l.movedSince))} ${l.movedSince < 0 ? "used" : "added"} after you counted</small>` : "");
     $('[data-role="progress"]').textContent = "";
     saveBtn.hidden = true;
+    if (laterBtn) laterBtn.hidden = true;
     body.innerHTML = `<section class="tb-card sc-results">
       <h4>${I.check} Count saved</h4>
       <p>${res.lines.length} line${res.lines.length === 1 ? "" : "s"} counted.${

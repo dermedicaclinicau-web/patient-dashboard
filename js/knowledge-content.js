@@ -15,8 +15,9 @@ export const GUIDE = [
         "Open the portal and type your PIN.",
         "You'll see only the menus your role uses. If something you need is missing, ask an Admin.",
       ], tips: [
-        "Your PIN is yours alone. Never share it or log in for someone else.",
-        "Too many wrong PINs locks logins for everyone for up to 15 minutes. An Admin can unlock it straight away.",
+        "If it isn't finished by its due time, a reminder email is sent.",
+        "Interrupted? Press **Save and finish later**. You, or anyone else who counts, can carry on from Task Manager → Opening count.",
+        "Want the list in the order things sit? Press **Arrange order** once, drag the products into place and add headings like \"Fridge\". Everyone's count follows it.",
       ] },
       { id: "logout", q: "Logging out on a shared computer", steps: [
         "Click your name in the top bar, then **Log out**.",
