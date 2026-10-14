@@ -84,6 +84,8 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
   let tab = "staff";
   let dirty = false;    // role changes not saved yet
   let savedNames = roleNames;   // roles the server knows (used in the Edit staff window)
+  let savedTicks = {};  // role access as saved on the server (the Edit window's "role default" uses this, not unsaved ticks)
+  const savedHas = (role, key) => /^admin$/i.test(role) || (savedTicks[role] || []).includes(key);
 
   const groups = () => [...new Set(catalogue.map((p) => p.group))];
   const roleHas = (role, key) => /^admin$/i.test(role) || (roleTicks[role] || []).includes(key);
@@ -166,13 +168,13 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
     const set = new Set(roleTicks[r] || []);
     if (cb.checked) set.add(cb.dataset.perm); else set.delete(cb.dataset.perm);
     roleTicks[r] = [...set];
-    if (!dirty) {
-      dirty = true;
-      const foot = body.querySelector(".st-matrix-foot");
-      const btn = foot && foot.querySelector('[data-act="save-roles"]');
-      if (btn && !foot.querySelector(".st-dirty")) btn.insertAdjacentHTML("beforebegin", '<span class="st-dirty">Unsaved changes</span>');
-    }
-  });
+      if (!dirty) {                     // don't throw away a role that hasn't been saved yet
+        roleNames = rolesRes.roleNames || res.roles || roleNames;
+        roleTicks = rolesRes.roles || {};
+        savedNames = roleNames;
+      }
+      savedTicks = JSON.parse(JSON.stringify(rolesRes.roles || {}));
+      });
 
   function fillRoleFilter() {
     const sel = $('[data-role="rolefilter"]');
@@ -250,6 +252,7 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
       if (Array.isArray(res.roleNames)) roleNames = res.roleNames;
       dirty = false;
       savedNames = roleNames;
+      savedTicks = JSON.parse(JSON.stringify(roleTicks));
       fillRoleFilter();
       renderRoles();
       showToast("Role access saved. Staff get it within a minute.");
@@ -356,27 +359,35 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
   const readPin = (form) => (form.querySelector('[name="pinMode"]:checked').value === "typed" ? form.elements.pin.value.trim() : "");
 
   // Per-person exceptions: Role default / Always allow / Always block
+  // Per-person exceptions: Role default / Always allow / Always block, with what they end up with
   function accessHtml(s) {
     const acc = (s && s.access) || { allow: [], deny: [] };
     const val = (k) => (acc.allow || []).includes(k) ? "allow" : (acc.deny || []).includes(k) ? "deny" : "";
+    const n = (acc.allow || []).length + (acc.deny || []).length;
+    if (!catalogue.length) return '<p class="fe-note" data-role="access">Access settings are still loading. Close this and open it again.</p><p data-role="adminnote" hidden></p>';
     return `
-      <details class="st-access" data-role="access">
-        <summary>Access for this person <small class="muted">exceptions to their role</small></summary>
+      <details class="st-access" data-role="access"${n ? " open" : ""}>
+        <summary>Access for this person <small class="muted" data-role="acccount"></small></summary>
+        <p class="fe-note">Leave on <strong>Role default</strong> unless this person needs something different from their role.</p>
         <div class="st-acc-list">${groups().map((g) => `
           <div class="st-acc-group">${esc(g)}</div>
           ${catalogue.filter((p) => p.group === g).map((p) => `
-            <label class="st-acc-row"><span>${esc(p.label)} <small class="muted" data-def="${esc(p.key)}"></small></span>
+            <label class="st-acc-row" data-accrow="${esc(p.key)}">
+              <span>${esc(p.label)} <small class="muted" data-def="${esc(p.key)}"></small></span>
               <select class="fb-select" data-acc="${esc(p.key)}">
                 <option value=""${val(p.key) === "" ? " selected" : ""}>Role default</option>
                 <option value="allow"${val(p.key) === "allow" ? " selected" : ""}>Always allow</option>
                 <option value="deny"${val(p.key) === "deny" ? " selected" : ""}>Always block</option>
-              </select></label>`).join("")}`).join("")}
+              </select>
+              <span class="st-acc-res" data-res="${esc(p.key)}"></span>
+            </label>`).join("")}`).join("")}
         </div>
+        <button type="button" class="lh-btn is-quiet st-acc-reset" data-act="acc-reset">Reset all to role default</button>
       </details>
       <p class="fe-note" data-role="adminnote" hidden>Admins can do everything, so there are no exceptions to set.</p>`;
   }
-
-  // Never falls back to Admin by accident: existing staff keep their role (matched ignoring case),
+  
+  
   // new staff start as Clinician (or the first non-Admin role). Unknown roles must be chosen.
   function roleOptions(s) {
     const names = savedNames;
@@ -473,17 +484,39 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
       pnote.classList.remove("is-bad");
       pnote.textContent = "Photo removed. Press Save to keep the change.";
     });
-    const syncRole = () => {
+    // Keeps every row's role default, result and highlight up to date as the role or a setting changes
+    const syncAccess = () => {
       const role = form.elements.role.value;
       const admin = /^admin$/i.test(role);
       dlg.querySelector('[data-role="access"]').hidden = admin;
       dlg.querySelector('[data-role="adminnote"]').hidden = !admin;
-      dlg.querySelectorAll("[data-def]").forEach((el) => {
-        el.textContent = `(${role}: ${roleHas(role, el.dataset.def) ? "yes" : "no"})`;
+      let n = 0;
+      dlg.querySelectorAll("[data-acc]").forEach((sel) => {
+        const key = sel.dataset.acc;
+        const def = role ? savedHas(role, key) : false;
+        const v = sel.value;
+        const has = v === "allow" ? true : v === "deny" ? false : def;
+        const pointless = (v === "allow" && def) || (v === "deny" && !def);
+        if (v) n++;
+        const row = sel.closest("[data-accrow]");
+        row.classList.toggle("is-changed", !!v);
+        row.querySelector("[data-def]").textContent = role
+          ? `(${role}: ${def ? "yes" : "no"}${pointless ? ", so this changes nothing" : ""})` : "";
+        const res = row.querySelector("[data-res]");
+        res.textContent = has ? "Has it" : "No";
+        res.className = `st-acc-res ${has ? "is-yes" : "is-no"}`;
       });
+      const count = dlg.querySelector('[data-role="acccount"]');
+      if (count) count.textContent = n ? `${n} exception${n === 1 ? "" : "s"}` : "same as their role";
     };
-    syncRole();
-    form.elements.role.addEventListener("change", syncRole);
+    syncAccess();
+    form.elements.role.addEventListener("change", syncAccess);
+    dlg.addEventListener("change", (e) => { if (e.target.matches("[data-acc]")) syncAccess(); });
+    dlg.addEventListener("click", (e) => {
+      if (!e.target.closest('[data-act="acc-reset"]')) return;
+      dlg.querySelectorAll("[data-acc]").forEach((sel) => { sel.value = ""; });
+      syncAccess();
+    });
     if (isNew) wirePinChoice(form);
     let saving = false;
     dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => { if (!saving) dlg.close(); });
