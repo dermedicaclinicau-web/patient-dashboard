@@ -316,14 +316,28 @@ export function reviewDocket(result, products) {
     receivedByText: String(result.receivedBy || "").slice(0, 120),
     receivedDate: ymd(result.receivedDate),
     receivedTime: /^\d{2}:\d{2}$/.test(String(result.receivedTime || "")) ? result.receivedTime : "",
-    lines: (result.lines || []).slice(0, 60).map((l) => ({
+    lines: joinDocketLines((result.lines || []).slice(0, 60).map((l) => ({
       productId: known.has(String(l.productId || "")) ? String(l.productId) : "",
       text: String(l.text || "").slice(0, 150), code: String(l.code || "").slice(0, 60),
       qty: Math.max(0, parseInt(l.qty, 10) || 0), unit: String(l.unit || "").slice(0, 30),
       batch: String(l.batch || "").slice(0, 60), expiry: expiryOf(l.expiry),
-      conf: conf(l.confidence), fixed: false,
-    })),
+      conf: conf(l.confidence), fixed: false, count: 1,
+    }))),
   };
+}
+
+// The same product, batch and expiry printed on several lines → one line (quantities added).
+// Different batches stay separate: each is received on its own row.
+function joinDocketLines(lines) {
+  const out = [];
+  lines.forEach((l) => {
+    const same = l.productId && out.find((x) => x.productId === l.productId && x.batch === l.batch && x.expiry === l.expiry);
+    if (!same) { out.push(l); return; }
+    same.qty += l.qty;
+    same.count += 1;
+    same.conf = Math.min(same.conf, l.conf);
+  });
+  return out;
 }
 
 // Purchase orders still waiting for stock

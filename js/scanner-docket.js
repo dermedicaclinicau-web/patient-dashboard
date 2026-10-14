@@ -69,7 +69,7 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
     return `<div class="dk-row${bad ? " is-bad" : flags.length ? " is-warn" : ""}">
       <div class="dk-main">
         <button type="button" class="scan-name" data-dkfix="${i}">${esc(p ? p.name : "Not matched")}<small>change</small></button>
-        <small>${esc(l.text)}${l.code ? ` · ${esc(l.code)}` : ""}</small>
+        <small>${esc(l.text)}${l.code ? ` · ${esc(l.code)}` : ""}${l.count > 1 ? ` · ${l.count} lines on the docket` : ""}</small>
         ${flags.map(([t, m]) => `<span class="scan-flag is-${t}">${esc(m)}</span>`).join("")}
         ${s.fixing === i ? fixHtml(l, i) : ""}
       </div>
@@ -86,12 +86,16 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
       r.hits && `${r.hits} of ${docketProducts} docket products on it`].filter(Boolean);
     return `<label class="dk-po${po.id === s.poId ? " is-on" : ""}">
       <input type="radio" name="dk-po" value="${esc(po.id)}" data-dkpo${po.id === s.poId ? " checked" : ""} />
-      <span class="dk-po-txt"><strong>${esc(po.number || "Purchase order")}</strong> · ${esc(poSupplier(po) || "No supplier")}
-        <small>${esc(STATUS[po.status] || po.status || "")}${po.expectedDate ? ` · needed by ${esc(niceDate(po.expectedDate) || po.expectedDate)}` : ""} · ${n} line${n === 1 ? "" : "s"}</small>
+      <span class="dk-po-txt">
+        <span class="dk-po-title"><strong>${esc(po.number || "Purchase order")}</strong><span>${esc(poSupplier(po) || "No supplier")}</span></span>
+        <small>${esc([STATUS[po.status] || po.status, po.expectedDate && `needed by ${niceDate(po.expectedDate) || po.expectedDate}`,
+          `${n} line${n === 1 ? "" : "s"}`].filter(Boolean).join(" · "))}</small>
         ${tags.length ? `<span class="dk-tags">${tags.map((t) => `<em>${esc(t)}</em>`).join("")}</span>` : ""}
       </span>
     </label>`;
   };
+  // Two lines on the button: what it does, then which order
+  const receiveLabel = (po) => `<span>Receive stock</span><small>${esc(po ? po.number || "this order" : "Choose an order")}</small>`;
 
   function draw() {
     const r = s.review;
@@ -115,13 +119,13 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
       <div class="scan-big" data-role="dkbig"${s.big ? "" : " hidden"}><img src="${photoUrl}" alt="The docket" /></div>
 
       <div class="dk-recv">
-        <label class="lh-field"><span class="lh-label">Received by</span>
-          <select class="fb-select" data-dkrecv>${people.map((p) =>
+        <label class="dk-field"><span class="lh-label">Received by</span>
+          <select class="dk-input" data-dkrecv>${people.map((p) =>
             `<option value="${esc(p.id)}"${p.id === s.recvUid ? " selected" : ""}>${esc(p.name)}</option>`).join("")}</select>
           ${r.receivedByText ? `<small class="dk-muted">Written on the docket: “${esc(r.receivedByText)}”</small>` : ""}
         </label>
-        <label class="lh-field"><span class="lh-label">Received date and time</span>
-          <input type="datetime-local" class="fb-input" data-dkat value="${esc(s.recvAt)}" /></label>
+        <label class="dk-field"><span class="lh-label">Received date and time</span>
+          <input type="datetime-local" class="dk-input" data-dkat value="${esc(s.recvAt)}" /></label>
       </div>
 
       <h3 class="dk-h">On the docket <small>${r.lines.length}</small></h3>
@@ -134,16 +138,16 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
       ${s.posError ? `<p class="scan-err">${esc(s.posError)}</p>`
         : !s.ranked.length ? '<p class="dk-muted">There are no open purchase orders (sent or part received).</p>'
         : `<div class="dk-pos">${list.map(poHtml).join("")}</div>
-           ${list.length < s.ranked.length ? `<button type="button" class="scan-pat-btn" data-dk="all">Show all ${s.ranked.length} open orders</button>` : ""}`}
-      ${toCome.length ? `<p class="dk-muted">Still to come on ${esc(po.number || "this order")}: ${toCome.map((l) =>
+           ${list.length < s.ranked.length ? `<button type="button" class="scan-pat-btn dk-more" data-dk="all">Show all ${s.ranked.length} open orders</button>` : ""}`}
+      ${toCome.length ? `<p class="dk-muted dk-tocome"><strong>Still to come on ${esc(po.number || "this order")}:</strong> ${toCome.map((l) =>
           esc(l.name || l.productName || (byId.get(l.productId) || {}).name || "a product")).join(", ")}</p>` : ""}
 
-      <label class="lh-field"><span class="lh-label">Note (optional)</span>
-        <textarea data-dknote rows="2" maxlength="1000" placeholder="e.g. 1 box damaged">${esc(s.note)}</textarea></label>
-      <div class="scan-acts">
+      <label class="dk-field dk-note"><span class="lh-label">Note (optional)</span>
+        <textarea class="dk-input" data-dknote rows="2" maxlength="1000" placeholder="e.g. 1 box damaged">${esc(s.note)}</textarea></label>
+      <div class="dk-acts">
         <button type="button" class="lh-btn" data-dk="again">Scan again</button>
         <button type="button" class="lh-btn" data-dk="save">Save docket only</button>
-        <button type="button" class="lh-btn is-primary" data-dk="receive"${po ? "" : " disabled"}>Receive ${esc(po ? po.number || "this order" : "an order")}</button>
+        <button type="button" class="lh-btn is-primary dk-receive" data-dk="receive"${po ? "" : " disabled"}>${receiveLabel(po)}</button>
       </div>`;
   }
 
@@ -180,7 +184,7 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
       console.error("Save docket failed:", err);
       showToast(err && err.message && !err.code ? err.message : "Couldn't save the docket. Try again.");
       btn.disabled = false;
-      btn.textContent = receive ? `Receive ${po.number || "this order"}` : "Save docket only";
+      if (receive) btn.innerHTML = receiveLabel(po); else btn.textContent = "Save docket only";
     } finally {
       s.busy = false;
     }
