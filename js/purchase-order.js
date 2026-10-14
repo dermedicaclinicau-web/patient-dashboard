@@ -209,13 +209,12 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
           ${l.sources.length ? `<small class="po-src">From ${l.sources.length} request item${l.sources.length === 1 ? "" : "s"}</small>` : ""}</td>
         <td><div class="po-qty"><input class="fe-input" type="number" min="1" max="9999" step="1" data-l="qty" value="${l.qty}" aria-label="Quantity" />
           <small>${esc(unitPlural(l.orderUnit))}</small></div></td>
-        <td><input class="fe-input po-cost" type="number" min="0" step="0.01" data-l="cost" placeholder="—" value="${l.unitCost ?? ""}" aria-label="Unit price" /></td>
         <td><select class="fb-select" data-l="loc" aria-label="For">${LOCATIONS.map((x) =>
           `<option value="${x.key}"${x.key === l.loc ? " selected" : ""}>${esc(x.label)}</option>`).join("")}</select></td>
-        <td class="r" data-role="lt">${total}</td>
         <td><button type="button" class="ib-tool is-danger" data-l="remove" aria-label="Remove" title="Remove">×</button></td>
       </tr>`;
   }
+  
   function itemsCard() {
     const ed = editable();
     return `
