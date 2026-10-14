@@ -1,8 +1,9 @@
 // Scanner (#/scanner): photograph a billing sheet with the products on it.
 // Gemini reads the handwriting and the labels; the portal matches both to the product list and flags anything that doesn't line up.
+// The sheet is matched to that day's booking, so the scan shows on the patient's dashboard.
 // Saving takes what was given off the Shelf (a sale, oldest expiry first) and keeps the scan with its photo.
 import { listProducts, INV_CATEGORIES, plural } from "./inventory-api.js";
-import { preparePhoto, readBillingSheet, startReview, reviewBilling, saveBillingScan, earlierSales, money } from "./scanner-api.js";
+import { preparePhoto, readBillingSheet, startReview, reviewBilling, saveBillingScan, earlierSales, findBooking, money } from "./scanner-api.js";
 import { showToast } from "./utils.js";
 import { confirmDialog } from "./dialog.js";
 import { warmUpLogin } from "./auth.js";
@@ -18,6 +19,8 @@ const niceDate = (key) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
 };
+// NEW: a booking → the patient saved with the scan
+const fromBooking = (a) => (a ? { id: String(a.patientId || ""), name: a.patientName || "", time: a.time || "", staff: a.staff || "" } : null);
 
 export function mountScanner(container, { staff = null } = {}) {
   const root = document.createElement("section");
@@ -34,11 +37,14 @@ export function mountScanner(container, { staff = null } = {}) {
   const st = {
     mode: "camera", stream: null, track: null, starting: false, zoom: 1, hw: null, torch: false, canTorch: false, canFocus: false,
     camErr: "", photo: null, photoUrl: "", base64: "", result: null, lines: [], review: null, error: "", fixing: -1, busy: false,
+    booking: null, patient: null, pickPatient: false,   // NEW
   };
 
   const sellCount = () => st.lines.reduce((a, l) => a + (l.product ? l.take || 0 : 0), 0);
   const sellText = () => (sellCount() ? `Saving takes ${plural(sellCount(), "product")} off the Shelf.` : "Nothing will come off the Shelf.");
   const saveLabel = () => (sellCount() ? `Save and take ${sellCount()} off Shelf` : "Save");
+  // NEW: the booked name when matched, else the name read from the sheet
+  const patientName = () => (st.patient && st.patient.name) || (st.review && st.review.patientName) || "";
 
   /* ---------- Screens ---------- */
   const headHtml = () => `<div class="scan-head"><div class="scan-modes" role="tablist" aria-label="What you're scanning">
@@ -83,6 +89,22 @@ export function mountScanner(container, { staff = null } = {}) {
       }).join("")}
     </select>`;
 
+  // NEW: which booking this sheet belongs to, with "change" to pick another of that day's bookings
+  const patientHtml = () => {
+    const p = st.patient;
+    const list = (st.booking && st.booking.list) || [];
+    return `<div class="scan-pat">
+        ${p ? `<span class="scan-pat-ok">✓ Booked ${esc(p.time)}${p.staff ? ` with ${esc(p.staff)}` : ""}${p.id ? ` · ID ${esc(p.id)}` : ""}</span>`
+            : `<span class="scan-pat-no">Not matched to a booking${st.review.apptDate ? "" : " (no date read)"}</span>`}
+        ${list.length ? '<button type="button" class="scan-pat-btn" data-act="pickpat">change</button>' : ""}
+      </div>
+      ${st.pickPatient ? `<select class="fb-select scan-fix" data-patsel aria-label="Which patient is it?">
+          <option value="">Not one of these bookings</option>
+          ${list.map((a, i) => `<option value="${i}"${p && p.id === String(a.patientId || "") && p.time === (a.time || "") ? " selected" : ""}>${
+            esc(a.time || "")} · ${esc(a.patientName || "")} · ${esc(a.staff || "")}</option>`).join("")}
+        </select>` : ""}`;
+  };
+
   const rowHtml = (l, i) => {
     const bad = l.flags.some((f) => f[0] === "bad");
     const written = l.written.map((w) => `“${w.text}”${w.qty > 1 ? ` ×${w.qty}` : ""}`).join(", ");
@@ -114,7 +136,8 @@ export function mountScanner(container, { staff = null } = {}) {
     return `${headHtml()}
       <div class="scan-res-head">
         <button type="button" class="scan-thumb" data-act="big" aria-label="Show the photo larger"><img src="${st.photoUrl}" alt="" /></button>
-        <div><strong>${esc(r.patientName || "Patient name not read")}</strong><small>${esc(when || "Date not read")}</small></div>
+        <div><strong>${esc(patientName() || "Patient name not read")}</strong>
+          <small>${esc(when || "Date not read")}</small>${patientHtml()}</div>
         <span class="scan-chip ${r.flagCount ? "is-warn" : "is-ok"}">${r.flagCount ? `${r.flagCount} to check` : "All matches"}</span>
       </div>
       <div class="scan-big" data-role="big" hidden><img src="${st.photoUrl}" alt="The photo" /></div>
@@ -275,6 +298,10 @@ export function mountScanner(container, { staff = null } = {}) {
       console.log(`Scanner: ${Math.round(performance.now() - t0)} ms from sending the photo to the answer`);
       st.lines = startReview(st.result, products);
       rereview();
+      // NEW: which booked patient this is. Never stops the scan if it can't be worked out.
+      st.booking = await findBooking(st.review).catch((err) => { console.warn("Booking match failed:", err); return null; });
+      st.patient = fromBooking(st.booking && st.booking.match);
+      st.pickPatient = false;
       st.mode = "result";
     } catch (err) {
       console.error("Scan failed:", err);
@@ -286,22 +313,24 @@ export function mountScanner(container, { staff = null } = {}) {
 
   function again() {
     if (st.photoUrl) URL.revokeObjectURL(st.photoUrl);
-    Object.assign(st, { mode: "camera", photo: null, photoUrl: "", base64: "", result: null, lines: [], review: null, error: "", fixing: -1, camErr: "" });
+    Object.assign(st, { mode: "camera", photo: null, photoUrl: "", base64: "", result: null, lines: [], review: null, error: "",
+      fixing: -1, camErr: "", booking: null, patient: null, pickPatient: false });   // NEW: patient reset
     render();
   }
 
   async function save(btn) {
     if (st.busy) return;
     const selling = st.lines.filter((l) => l.product && l.take > 0);
+    const who = patientName();   // NEW: the same name the sale is saved under
 
     // The same patient already had some of these checked out today? Ask before taking them off again.
     if (selling.length) {
-      const before = await earlierSales(st.review, selling.map((l) => l.productId)).catch(() => []);
+      const before = await earlierSales({ ...st.review, patientName: who }, selling.map((l) => l.productId)).catch(() => []);
       if (before.length) {
         const ok = await confirmDialog({
           title: "Already checked out today?",
           message: `${before.map((b) => `${b.qty} × ${b.name}${b.by ? ` (by ${b.by})` : ""}`).join(", ")} ${before.length === 1 ? "was" : "were"} already `
-            + `taken off the Shelf for ${st.review.patientName} today. Take ${selling.length === 1 ? "it" : "them"} off again?`,
+            + `taken off the Shelf for ${who} today. Take ${selling.length === 1 ? "it" : "them"} off again?`,
           confirmLabel: "Take off again", tone: "warning",
         });
         if (!ok) return;
@@ -313,7 +342,8 @@ export function mountScanner(container, { staff = null } = {}) {
     btn.textContent = "Saving…";
     try {
       const note = root.querySelector('[data-role="note"]');
-      const res = await saveBillingScan({ photo: st.photo, result: st.result, review: st.review, note: note ? note.value : "" }, staff);
+      const res = await saveBillingScan({ photo: st.photo, result: st.result, review: st.review,
+        note: note ? note.value : "", patient: st.patient }, staff);
       const sale = res.sale;
       const short = sale ? sale.lines.filter((l) => l.short > 0) : [];
       const taken = sale ? sale.lines.reduce((a, l) => a + l.taken, 0) : 0;
@@ -379,10 +409,10 @@ export function mountScanner(container, { staff = null } = {}) {
     } else if (act === "again") again();
     else if (act === "retry") analyse();
     else if (act === "save") save(b);
+    else if (act === "pickpat") { st.pickPatient = !st.pickPatient; render(); }   // NEW
     else if (act === "big") { const big = root.querySelector('[data-role="big"]'); if (big) big.hidden = !big.hidden; }
   });
 
-  // Typing a quantity: the totals update straight away; the flags update when you leave the box
   // Typing a quantity or a fee: the totals update straight away; the flags update when you leave the box
   root.addEventListener("input", (e) => {
     const t = e.target;
@@ -412,6 +442,13 @@ export function mountScanner(container, { staff = null } = {}) {
       const f = t.files && t.files[0];
       t.value = "";
       if (f) usePhoto(f);
+      return;
+    }
+    if (t.dataset.patsel !== undefined) {   // NEW: staff picked the right booking
+      const list = (st.booking && st.booking.list) || [];
+      st.patient = t.value === "" ? null : fromBooking(list[Number(t.value)]);
+      st.pickPatient = false;
+      render();
       return;
     }
     if (t.dataset.take !== undefined || t.dataset.fee !== undefined) { rereview(); render(); return; }

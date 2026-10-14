@@ -2,7 +2,7 @@
 // matched to the product list here, then saved: the scan (Firestore: scans, photo in Storage) and,
 // in the same transaction, the sale that takes the products off the Shelf.
 import { db, auth } from "./firebase-config.js";
-import { collection, doc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { collection, doc, setDoc, getDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { getStorage, ref as sRef, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 import { callApi } from "./appointments.js";
 import { dayKey, recordSale, listSalesOn } from "./inventory-api.js";
@@ -67,7 +67,7 @@ export async function readBillingSheet(base64, products) {
   if (!res.result) throw new Error("The scanner couldn't read that photo. Try again.");
   return res.result;
 }
-/* ---------- Matching and checking ---------- */
+
 /* ---------- Matching and checking ---------- */
 // Words that tell products apart. Brand words don't count, so "ZO DPD" never pairs with "ZO Rozatrol" just for being ZO.
 const BRAND_WORDS = new Set(["dermedica", "zo", "skin", "health", "zein", "obagi", "by", "md", "the", "and", "of", "with", "ml"]);
@@ -184,9 +184,53 @@ export async function earlierSales(review, productIds) {
     .flatMap((s) => s.lines.filter((l) => want.has(l.productId)).map((l) => ({ name: l.name, qty: l.qty, by: s.by })));
 }
 
+
+/* ---------- The patient: matched to that day's booking ---------- */
+// "2:15PM" / "2:15 pm" → 855
+const minutesOf = (t) => {
+  const m = /(\d{1,2}):(\d{2})\s*(am|pm)?/i.exec(String(t || ""));
+  if (!m) return null;
+  let h = Number(m[1]);
+  if (m[3]) h = (h % 12) + (m[3].toLowerCase() === "pm" ? 12 : 0);
+  return h * 60 + Number(m[2]);
+};
+const nameWords = (s) => normName(s).split(" ").filter((w) => w.length > 1);
+// 1 = every word the same, 0.5 = half of them (e.g. a missing middle name)
+const nameScore = (a, b) => {
+  const A = nameWords(a), B = nameWords(b);
+  if (!A.length || !B.length) return 0;
+  return A.filter((w) => B.includes(w)).length / Math.max(A.length, B.length);
+};
+
+// The day's bookings (one per patient + time + staff), sorted by time
+export async function bookingsOn(dateKey) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey || "")) return [];
+  const snap = await getDoc(doc(db, "appts_by_day", dateKey));
+  const list = snap.exists() ? (snap.data().appointments || []) : [];
+  return list.filter((a) => a.patientName || a.patientId).sort((a, b) => (a.sortMinutes || 0) - (b.sortMinutes || 0));
+}
+
+// The booking this sheet belongs to: name ×3, same start time +1, same provider +0.5. Needs 2 or more.
+export async function findBooking(review) {
+  const date = review.apptDate || dayKey();
+  const list = await bookingsOn(date);
+  const t = minutesOf(review.apptTime);
+  const prov = nameWords(review.provider).filter((w) => w !== "dr").pop() || "";
+  let best = null, bestScore = 0;
+  list.forEach((a) => {
+    let s = nameScore(review.patientName, a.patientName) * 3;
+    if (t !== null && minutesOf(a.time) === t) s += 1;
+    if (prov && nameWords(a.staff).includes(prov)) s += 0.5;
+    if (s > bestScore) { best = a; bestScore = s; }
+  });
+  return { date, list, match: bestScore >= 2 ? best : null };
+}
+
 /* ---------- Saving: the scan, and the sale that takes the products off the Shelf ---------- */
 // Returns { id, sale } (sale is null when nothing came off the Shelf)
-export async function saveBillingScan({ photo, result, review, note = "" }, staff) {
+// Returns { id, sale } (sale is null when nothing came off the Shelf)
+// patient: the booking this sheet was matched to { id (Patient ID), name, time, staff }, or null
+export async function saveBillingScan({ photo, result, review, note = "", patient = null }, staff) {
   const uid = auth.currentUser && auth.currentUser.uid;
   if (!uid) throw new Error("Your session has ended. Log in again.");
   const ref = doc(collection(db, "scans"));
@@ -201,14 +245,21 @@ export async function saveBillingScan({ photo, result, review, note = "" }, staf
     } catch (err) { console.warn("The scan photo wasn't saved:", err); }
   }
   const cleanNote = String(note || "").trim().slice(0, 1000);
+  const patientName = patient && patient.name ? patient.name : review.patientName;
   const sell = review.lines.filter((l) => l.product && l.take > 0)
     .map((l) => ({ productId: l.productId, qty: l.take, fee: l.fee }));
   const data = {
     kind: "billing", dateKey: key, status: review.flagCount ? "flagged" : "ok", flagCount: review.flagCount, note: cleanNote,
-    patientName: review.patientName, apptDate: review.apptDate, apptTime: review.apptTime, provider: review.provider,
+    // The patient: from the booking when matched (shown on their dashboard), and the name exactly as read from the sheet
+    patientName, readName: review.patientName,
+    patientPttId: patient ? String(patient.id || "") : "",
+    bookedWith: patient ? String(patient.staff || "") : "",
+    bookedAt: patient ? String(patient.time || "") : "",
+    apptDate: review.apptDate, apptTime: review.apptTime, provider: review.provider,
     lines: review.lines.map((l) => ({
       productId: l.productId, productName: l.product ? l.product.name : "",
-      written: l.written.map((w) => w.text).join(" / "), qty: l.qty, fee: l.fee, feeFrom: l.feeFrom || "", seen: l.seen, take: l.take || 0,
+      written: l.written.map((w) => w.text).join(" / "), qty: l.qty, fee: l.fee, feeFrom: l.feeFrom || "",
+      seen: l.seen, take: l.take || 0,
       seenAs: l.seenText.join(" / ").slice(0, 300), fixed: !!l.fixed, flags: l.flags.map((f) => f[1]),
     })),
     productsTotal: review.productsTotal,
@@ -220,7 +271,7 @@ export async function saveBillingScan({ photo, result, review, note = "" }, staf
     return { id: ref.id, sale: null };
   }
   const sale = await recordSale({
-    source: "scan", scanId: ref.id, patientName: review.patientName, apptDate: review.apptDate,
+    source: "scan", scanId: ref.id, patientName, apptDate: review.apptDate,
     provider: review.provider, note: cleanNote, lines: sell,
   }, staff, { also: (tx, saleId) => tx.set(ref, { ...data, saleId }) });
   return { id: ref.id, sale };

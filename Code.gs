@@ -5068,6 +5068,9 @@ function scanBillingPrompt_(products) {
     '3. Every physical product visible in the photo (bottles, tubes, boxes), read from its label, and how many of each.',
     '',
     'Match every written product line and every product seen to ONE id from the product list below.',
+    'The products in the photo are usually the SAME products written on the sheet. When a handwritten line is short or',
+    'abbreviated (e.g. "Derm Pro B", "Derm SPF"), read the matching product\'s label in the photo and give the written line',
+    'and the product seen the SAME id. The printed label is more reliable than the handwriting.',
     'Common abbreviations: "D." or "Derm" = Dermedica, "ZO" = ZO Skin Health, "DPD" = Daily Power Defense, "SPF" = a sunscreen.',
     'Use the brand, the product name and the size to choose. If nothing fits, use "". Never make up an id.',
     'Give each match a confidence from 0 to 1.',
@@ -5102,42 +5105,60 @@ const SCAN_BILLING_SCHEMA_ = {
 };
 
 // One photo + instructions in, JSON (matching the schema) out. Retries when Gemini is busy.
+// Thinking makes Gemini slower and reading a sheet doesn't need it. Models differ in what they accept,
+// so the fastest setting is tried first, and whichever one works is remembered for 6 hours.
 function geminiJson_(prompt, imageB64, mime, schema) {
   const props = PropertiesService.getScriptProperties();
   const key = props.getProperty('GEMINI_API_KEY');
   if (!key) throw new Error("The scanner isn't set up yet. Add GEMINI_API_KEY in Script Properties.");
   const model = props.getProperty('GEMINI_MODEL') || 'gemini-2.5-flash';
   const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent';
-  // Thinking makes Gemini 2.5 slower. Reading a sheet doesn't need it.
-  // SCAN_THINKING in Script Properties: 0 = off (fastest), e.g. 512 = a little, if matches get worse.
-  const thinking = Math.max(0, parseInt(props.getProperty('SCAN_THINKING') || '0', 10) || 0);
-  const payload = JSON.stringify({
-    contents: [{ role: 'user', parts: [{ text: prompt }, { inline_data: { mime_type: mime, data: imageB64 } }] }],
-    generationConfig: {
-      temperature: 0, responseMimeType: 'application/json', responseSchema: schema,
-      thinkingConfig: { thinkingBudget: thinking },
-    },
-  });
+  const budget = Math.max(0, parseInt(props.getProperty('SCAN_THINKING') || '0', 10) || 0);
+  const tries = [{ thinkingBudget: budget }, { thinkingLevel: 'low' }, null];   // fastest first; null = model default
+
+  const cache = CacheService.getScriptCache();
+  const memoKey = 'scan_think_' + model + '_' + budget;
+  let t = Math.min(tries.length - 1, Math.max(0, parseInt(cache.get(memoKey) || '0', 10) || 0));
+  const payloadFor = function () {
+    const gc = { temperature: 0, responseMimeType: 'application/json', responseSchema: schema };
+    if (tries[t]) gc.thinkingConfig = tries[t];
+    return JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: prompt }, { inline_data: { mime_type: mime, data: imageB64 } }] }],
+      generationConfig: gc,
+    });
+  };
+
   const started = Date.now();
-  let res = null, code = 0;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    res = UrlFetchApp.fetch(url, {
+  let code = 0, text = '';
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const res = UrlFetchApp.fetch(url, {
       method: 'post', contentType: 'application/json', headers: { 'x-goog-api-key': key },
-      payload, muteHttpExceptions: true,
+      payload: payloadFor(), muteHttpExceptions: true,
     });
     code = res.getResponseCode();
+    text = res.getContentText();
+    if (code === 400 && t < tries.length - 1 && /thinking/i.test(text)) {
+      console.warn('Scanner: ' + model + ' refused ' + JSON.stringify(tries[t]) + '. Trying the next setting. ' + text.slice(0, 200));
+      t++;
+      continue;
+    }
     if (code !== 429 && code < 500) break;
     Utilities.sleep(1500 * (attempt + 1));
   }
-  const text = res.getContentText();
   if (code !== 200) {
-    console.error('Gemini ' + code + ': ' + text.slice(0, 1500));
+    console.error('Gemini ' + code + ' (model ' + model + '): ' + text.slice(0, 1500));
     throw new Error(code === 429 ? 'The scanner is busy. Try again in a minute.' : "The scanner couldn't read that photo. Try again.");
   }
+  try { cache.put(memoKey, String(t), 21600); } catch (e) { /* not essential */ }
+
   const json = JSON.parse(text);
   const cand = json.candidates && json.candidates[0];
   const out = cand && cand.content && cand.content.parts ? cand.content.parts.map((p) => p.text || '').join('') : '';
-  if (!out) throw new Error("The scanner didn't find anything. Try a clearer photo.");
-  console.log('Scanner: Gemini took ' + (Date.now() - started) + ' ms (thinking ' + thinking + ')');
+  if (!out) {
+    console.error('Gemini gave no answer (finish: ' + (cand && cand.finishReason) + ')');
+    throw new Error("The scanner didn't find anything. Try a clearer photo.");
+  }
+  console.log('Scanner: Gemini took ' + (Date.now() - started) + ' ms (model ' + model +
+    ', thinking ' + (tries[t] ? JSON.stringify(tries[t]) : 'model default') + ')');
   return JSON.parse(out);
 }
