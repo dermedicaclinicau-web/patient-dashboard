@@ -43,6 +43,7 @@ function doPost(e) {
     if (body.action === 'plan') return json_(handlePlan_(body));
     if (body.action === 'recordingRules') return json_(handleRecordingRules_(body));
     if (body.action === 'scanner') return json_(scannerAction_(body));
+    if (body.action === 'records') return json_(handleRecords_(body));
     
 
     const pin = String(body.pin || '').trim();
@@ -2150,9 +2151,19 @@ function handleSendTaskEmail_(body) {
   const wantedAtt = Array.isArray(body.attachments) ? body.attachments.slice(0, 3) : [];
   const attachments = [];
   for (let i = 0; i < wantedAtt.length; i++) {
-    const bytes = pdfBytes_(wantedAtt[i] && wantedAtt[i].pdf);
-    if (!bytes) return { ok: false, error: 'PDF_FAILED' };
-    attachments.push(Utilities.newBlob(bytes, MimeType.PDF, cleanFileName_(wantedAtt[i].name, 'Attachment')));
+    const a = wantedAtt[i] || {};
+    const name = cleanFileName_(a.name, 'Attachment');
+    const bytes = pdfBytes_(a.pdf);
+    if (bytes) { attachments.push(Utilities.newBlob(bytes, MimeType.PDF, name)); continue; }
+    // The browser couldn't make this PDF, so it's made here from the form instead
+    const html = sanitizePdfHtml_(a.html);
+    if (!html || html.length > 4000000) return { ok: false, error: 'PDF_FAILED' };
+    try {
+      attachments.push(Utilities.newBlob(html, 'text/html', 'form.html').getAs(MimeType.PDF).setName(name));
+    } catch (err) {
+      console.error('Task attachment PDF failed: ' + (err && err.stack ? err.stack : err));
+      return { ok: false, error: 'PDF_FAILED' };
+    }
   }
 
   const escH = function (s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
@@ -5390,3 +5401,374 @@ const SCAN_RX_SCHEMA_ = {
   },
   required: ['patientName', 'date', 'items'],
 };
+
+// ===================== Records: move a saved form to another patient =====================
+// The record keeps its id (links and consent checks keep working). Patient details on the form are refilled,
+// products used move with it, and the move is kept on the record (moves) and in record_moves.
+
+const MOVE_REASONS_ = { wrong: 'Saved to the wrong patient', duplicate: 'Duplicate patient record', other: 'Other' };
+// Answers that only hold a patient detail because they were filled in automatically
+const REC_FILLS_ = { 'patient.name': 'name', 'patient.firstName': 'first', 'patient.lastName': 'last', 'patient.dob': 'dobKey',
+  'patient.email': 'email', 'patient.mobile': 'mobile', 'patient.address': 'address' };
+const recNorm_ = function (s) { return String(s == null ? '' : s).toLowerCase().replace(/\s+/g, ' ').trim(); };
+const recSame_ = function (a, b) { return String(a || '').toLowerCase().replace(/\s+/g, '') === String(b || '').toLowerCase().replace(/\s+/g, ''); };
+
+// Older records imported from the sheets: a row in Firestore + a finished PDF in Google Drive
+const REC_LEGACY_ = {
+  treatment: { col: 'treatment_records', title: 'Treatment Record Type', link: 'File PDF Link' },
+  consent: { col: 'consent_records', title: 'Consent Type', link: 'PDF Link' },
+};
+
+function handleRecords_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!can_(session, 'records.move')) return { ok: false, error: 'FORBIDDEN' };
+  const op = String(body.op || '');
+  try {
+    if (op === 'legacyCheck' || op === 'moveLegacy') {
+      const kind = String(body.kind || '');
+      const def = REC_LEGACY_[kind];
+      const rid = String(body.recordId || '').trim();
+      if (!def || !recDocIdOk_(rid)) return { ok: false, error: 'BAD_REQUEST' };
+      return op === 'legacyCheck' ? recLegacyCheck_(def, rid) : recMoveLegacy_(def, kind, rid, body, session);
+    }
+    const id = String(body.submissionId || '').trim();
+    if (!/^[A-Za-z0-9_-]{10,40}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
+    if (op === 'moveCheck') return recMoveCheck_(id);
+    if (op === 'moveSubmission') return recMoveSubmission_(id, body, session);
+  } catch (err) {
+    console.error('Records ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: false, error: 'SERVER_ERROR', detail: String(err && err.message ? err.message : err).slice(0, 300) };
+  }
+  return { ok: false, error: 'BAD_REQUEST' };
+}
+
+function recPatient_(cfg, id) {
+  if (!id || id.length > 150 || id.indexOf('/') !== -1) return null;
+  const p = fsGetDoc_(cfg, 'patient_list/' + encodeURIComponent(id));
+  if (!p) return null;
+  const name = String(p['Patient Name'] || ((p['First Name'] || '') + ' ' + (p['Last Name'] || '')).trim());
+  return {
+    id: id, pttId: String(p.PttID || id), name: name,
+    first: String(p['First Name'] || name.split(' ')[0] || ''), last: String(p['Last Name'] || ''),
+    dobKey: String(p.DobKey || ''), dob: String(p.DOB || ''), email: String(p.Email || ''),
+    mobile: String(p.Mobile || ''), address: String(p.Address || ''), mergedInto: String(p.MergedInto || ''),
+  };
+}
+
+function recLongDate_(key) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(key || ''));
+  return m ? Utilities.formatDate(new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], 12)), 'UTC', 'd MMMM yyyy') : '';
+}
+function recMobile_(s) {
+  const d = String(s || '').replace(/\D/g, '');
+  if (/^04\d{8}$/.test(d)) return d.slice(0, 4) + ' ' + d.slice(4, 7) + ' ' + d.slice(7);
+  if (/^614\d{8}$/.test(d)) return recMobile_('0' + d.slice(2));
+  return String(s || '');
+}
+
+function recFieldsOf_(cfg, sub) {
+  const tid = String(sub.templateId || '');
+  if (!/^[A-Za-z0-9_-]{1,60}$/.test(tid)) return [];
+  const v = fsGetDoc_(cfg, 'form_templates/' + tid + '/versions/' + String(Number(sub.version) || 0));
+  return v && Array.isArray(v.fields) ? v.fields : [];
+}
+
+// The old patient's name in answers staff typed (not the patient details, signatures or auto-fills)
+function recTextMentions_(answers, fields, oldName) {
+  const n = recNorm_(oldName);
+  if (n.length < 3) return false;
+  const skip = {};
+  fields.forEach(function (f) {
+    if (f && (f.type === 'patient' || f.type === 'signature' || (f.fill && REC_FILLS_[f.fill]))) skip[f.id] = true;
+  });
+  return Object.keys(answers || {}).some(function (k) {
+    return k !== '__tags' && !skip[k.replace(/__x$/, '')] && recNorm_(JSON.stringify(answers[k])).indexOf(n) !== -1;
+  });
+}
+
+// Consent / prescription checks on this form that found a record (they belong to the old patient)
+function recConsentChecks_(answers) {
+  return Object.keys(answers || {}).filter(function (k) {
+    const v = answers[k];
+    return v && typeof v === 'object' && !Array.isArray(v) && v.found === true && typeof v.submissionId === 'string' && v.submissionId;
+  }).length;
+}
+
+function recPhotoCount_(answers) {
+  let n = 0;
+  Object.keys(answers || {}).forEach(function (k) {
+    const v = answers[k];
+    if (v && typeof v === 'object' && Array.isArray(v.photos)) n += v.photos.length;
+  });
+  return n;
+}
+
+// The old patient's other forms whose consent check found this one
+function recDependents_(cfg, fromId, subId) {
+  if (!fromId) return [];
+  return fsQuery_(cfg, 'form_submissions', 'patientId', 'EQUAL', fromId, 300)
+    .filter(function (s) {
+      return s._id !== subId && Object.keys(s.answers || {}).some(function (k) {
+        const v = s.answers[k];
+        return v && typeof v === 'object' && v.found === true && v.submissionId === subId;
+      });
+    })
+    .map(function (s) { return { id: s._id, name: String(s.templateName || ''), date: String(s.recordDate || '') }; })
+    .slice(0, 20);
+}
+
+// The answers with the new patient's details in place of the old one's
+function recRewrite_(answersIn, fields, from, to) {
+  const answers = JSON.parse(JSON.stringify(answersIn || {}));
+  const toVals = { name: to.name, first: to.first, last: to.last, dobKey: to.dobKey, email: to.email, mobile: to.mobile, address: to.address };
+  const fromVals = { name: from.name, first: from.first, last: from.last, dobKey: from.dobKey, email: from.email, mobile: from.mobile, address: from.address };
+  const dobLong = recLongDate_(to.dobKey) || to.dob;
+  fields.forEach(function (f) {
+    if (!f || !f.id || !(f.id in answers)) return;
+    const v = answers[f.id];
+    if (f.type === 'patient' && v && typeof v === 'object' && !Array.isArray(v)) {
+      const part = { name: to.name, dob: dobLong, mobile: recMobile_(to.mobile), email: to.email, address: to.address, pttId: to.pttId };
+      Object.keys(v).forEach(function (k) { if (k in part) v[k] = part[k]; });
+    } else if (f.type === 'signature' && (f.signer || 'patient') === 'patient' && v && typeof v === 'object' && v.name && recSame_(v.name, from.name)) {
+      v.name = to.name;
+    } else if (f.fill && REC_FILLS_[f.fill] && typeof v === 'string') {
+      const k = REC_FILLS_[f.fill];
+      if (!fromVals[k] || recSame_(v, fromVals[k])) answers[f.id] = toVals[k] || ''; // never overwrites something typed over it
+    }
+  });
+  if (answers.__tags && typeof answers.__tags === 'object') {
+    const t = answers.__tags;
+    t['patient name'] = to.name;
+    t['first name'] = to.first;
+    t['last name'] = to.last;
+    t['date of birth'] = dobLong;
+    t['patient id'] = to.pttId;
+  }
+  return answers;
+}
+
+// Before moving: what's linked to the record
+function recMoveCheck_(id) {
+  const cfg = getConfig_();
+  const sub = fsGetDoc_(cfg, 'form_submissions/' + id);
+  if (!sub) return { ok: false, error: 'NOT_FOUND' };
+  const fields = recFieldsOf_(cfg, sub);
+  return {
+    ok: true,
+    dependents: recDependents_(cfg, String(sub.patientId || ''), id),
+    consentChecks: recConsentChecks_(sub.answers),
+    textMention: recTextMentions_(sub.answers, fields, sub.patientName),
+    photos: recPhotoCount_(sub.answers),
+    usage: fsQuery_(cfg, 'inv_usage', 'submissionId', 'EQUAL', id, 5).length,
+  };
+}
+
+function recMoveSubmission_(id, body, session) {
+  const toId = String(body.toPatientId || '').trim();
+  const reason = MOVE_REASONS_[body.reason] ? String(body.reason) : '';
+  const note = String(body.note || '').trim().slice(0, 500);
+  if (!reason) return { ok: false, error: 'NO_REASON' };
+  if (reason === 'other' && !note) return { ok: false, error: 'NO_NOTE' };
+
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) return { ok: false, error: 'BUSY' };
+  try {
+    const cfg = getConfig_();
+    const sub = fsGetDoc_(cfg, 'form_submissions/' + id);
+    if (!sub) return { ok: false, error: 'NOT_FOUND' };
+    const fromId = String(sub.patientId || '');
+    if (toId === fromId) return { ok: false, error: 'SAME_PATIENT' };
+    const to = recPatient_(cfg, toId);
+    if (!to) return { ok: false, error: 'NO_PATIENT' };
+    if (to.mergedInto) return { ok: false, error: 'MERGED' };
+    const from = recPatient_(cfg, fromId) || { id: fromId, pttId: String(sub.patientPttId || ''), name: '',
+      first: '', last: '', dobKey: '', dob: '', email: '', mobile: '', address: '' };
+    if (!from.name) from.name = String(sub.patientName || '');
+
+    const fields = recFieldsOf_(cfg, sub);
+    const answers = recRewrite_(sub.answers || {}, fields, from, to);
+    const now = new Date().toISOString();
+    const move = {
+      at: now, by: String(session.name || ''), byUid: String(session.uid || ''),
+      fromId: fromId, fromPttId: String(sub.patientPttId || ''), fromName: String(sub.patientName || ''),
+      toId: toId, toPttId: to.pttId, toName: to.name,
+      reason: reason, reasonText: MOVE_REASONS_[reason], note: note,
+    };
+    const dependents = recDependents_(cfg, fromId, id);
+
+    fsPatch_(cfg, 'form_submissions/' + id, {
+      patientId: toId, patientPttId: to.pttId, patientName: to.name, answers: answers,
+      moves: (Array.isArray(sub.moves) ? sub.moves : []).concat([move]).slice(-20), movedAt: now,
+    });
+
+    // Products used move with the record
+    let usage = 0;
+    fsQuery_(cfg, 'inv_usage', 'submissionId', 'EQUAL', id, 5).forEach(function (u) {
+      try {
+        fsPatch_(cfg, 'inv_usage/' + u._id, {
+          patientId: toId, patientName: to.name,
+          movedFrom: { patientId: fromId, patientName: String(sub.patientName || ''), at: now, by: move.by },
+        });
+        usage++;
+      } catch (e) { console.warn('Usage ' + u._id + ' not moved: ' + e); }
+    });
+
+    const deliveries = Array.isArray(sub.deliveries) ? sub.deliveries.length : 0;
+    try {
+      commitWrites_(cfg, [updateWrite_(cfg, 'record_moves/m_' + Date.now() + '_' + Utilities.getUuid().slice(0, 8), Object.assign({
+        kind: 'form', submissionId: id, templateName: String(sub.templateName || ''), category: String(sub.category || ''),
+        recordDate: String(sub.recordDate || ''), deliveries: deliveries, dependents: dependents.length, usage: usage,
+      }, move))]);
+    } catch (e) { console.warn('Record moved, but the move log failed: ' + e); }
+
+    console.log('Form ' + id + ' moved from ' + move.fromName + ' to ' + to.name + ' by ' + move.by);
+    return {
+      ok: true, move: move, dependents: dependents, deliveries: deliveries, usage: usage,
+      consentChecks: recConsentChecks_(answers), textMention: recTextMentions_(answers, fields, sub.patientName),
+    };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/* ---------- Older records (treatment_records / consent_records) ---------- */
+
+function recDocIdOk_(id) {
+  return !!id && id.length <= 150 && id.indexOf('/') === -1 && id !== '.' && id !== '..';
+}
+
+// A patient by doc ID, or by PttID (older rows store the PttID)
+function recPatientAny_(cfg, id) {
+  if (!recDocIdOk_(id)) return null;
+  const p = recPatient_(cfg, id);
+  if (p) return p;
+  const hit = fsQuery_(cfg, 'patient_list', 'PttID', 'EQUAL', id, 1)[0];
+  return hit ? recPatient_(cfg, hit._id) : null;
+}
+
+// "https://drive.google.com/file/d/<id>/view" or "...?id=<id>" -> "<id>"
+function recDriveId_(link) {
+  const s = String(link || '');
+  const m = /\/d\/([A-Za-z0-9_-]{20,})/.exec(s) || /[?&]id=([A-Za-z0-9_-]{20,})/.exec(s);
+  return m ? m[1] : '';
+}
+
+// Can the account running this script rename the file?
+function recCanEdit_(f) {
+  try {
+    const me = String(Session.getEffectiveUser().getEmail() || '').toLowerCase();
+    if (!me) return true; // can't tell: it will be tried
+    const owner = f.getOwner();
+    if (!owner) return true; // shared drive: tried on move
+    if (String(owner.getEmail()).toLowerCase() === me) return true;
+    return f.getEditors().some(function (u) { return String(u.getEmail()).toLowerCase() === me; });
+  } catch (e) { return false; }
+}
+
+// The old patient's name swapped for the new one; if it isn't in the name, the new name is added on the end
+function recNewFileName_(oldName, fromName, toName) {
+  const ext = (String(oldName).match(/\.[A-Za-z0-9]{2,5}$/) || [''])[0];
+  let base = ext ? oldName.slice(0, -ext.length) : String(oldName);
+  const from = String(fromName || '').trim();
+  const src = from.length >= 3 ? from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+') : '';
+  if (src && new RegExp(src, 'i').test(base)) base = base.replace(new RegExp(src, 'gi'), toName);
+  else base = base + ' - ' + toName;
+  return bankCleanName_(base, 180) + ext;
+}
+
+function recLegacyCheck_(def, rid) {
+  const cfg = getConfig_();
+  const rec = fsGetDoc_(cfg, def.col + '/' + encodeURIComponent(rid));
+  if (!rec) return { ok: false, error: 'NOT_FOUND' };
+  const link = String(rec[def.link] || '').trim();
+  const fid = recDriveId_(link);
+  let fileName = '';
+  let canRename = false;
+  if (fid) {
+    try {
+      const f = DriveApp.getFileById(fid);
+      fileName = f.getName();
+      canRename = recCanEdit_(f);
+    } catch (e) { console.warn('Record PDF not reachable (' + fid + '): ' + e); }
+  }
+  return {
+    ok: true, hasLink: !!link, fileFound: !!fileName, fileName: fileName, canRename: canRename,
+    moves: Array.isArray(rec.moves) ? rec.moves.length : 0,
+  };
+}
+
+function recMoveLegacy_(def, kind, rid, body, session) {
+  const toId = String(body.toPatientId || '').trim();
+  const fromHint = String(body.fromPatientId || '').trim();
+  const reason = MOVE_REASONS_[body.reason] ? String(body.reason) : '';
+  const note = String(body.note || '').trim().slice(0, 500);
+  if (!reason) return { ok: false, error: 'NO_REASON' };
+  if (reason === 'other' && !note) return { ok: false, error: 'NO_NOTE' };
+
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) return { ok: false, error: 'BUSY' };
+  try {
+    const cfg = getConfig_();
+    const path = def.col + '/' + encodeURIComponent(rid);
+    const rec = fsGetDoc_(cfg, path);
+    if (!rec) return { ok: false, error: 'NOT_FOUND' };
+    const to = recPatient_(cfg, toId);
+    if (!to) return { ok: false, error: 'NO_PATIENT' };
+    if (to.mergedInto) return { ok: false, error: 'MERGED' };
+
+    // Rows matched by name only have no Patient ID: the patient page it was moved from is used instead
+    const curPid = String(rec['Patient ID'] || '').trim();
+    const fromPid = curPid || fromHint;
+    if (fromPid && (fromPid === to.id || fromPid === to.pttId)) return { ok: false, error: 'SAME_PATIENT' };
+    const from = fromPid ? recPatientAny_(cfg, fromPid) : null;
+    const fromName = String(rec['Patient Name'] || (from && from.name) || '');
+
+    const now = new Date().toISOString();
+    const move = {
+      at: now, by: String(session.name || ''), byUid: String(session.uid || ''),
+      fromId: from ? from.id : fromPid, fromPttId: from ? from.pttId : curPid, fromName: fromName,
+      toId: to.id, toPttId: to.pttId, toName: to.name,
+      reason: reason, reasonText: MOVE_REASONS_[reason], note: note,
+    };
+
+    fsPatch_(cfg, path, {
+      'Patient ID': to.pttId,
+      'Patient Name': to.name,
+      moves: (Array.isArray(rec.moves) ? rec.moves : []).concat([move]).slice(-20),
+      movedAt: now,
+    });
+
+    // The PDF can't be changed, only renamed. The record has already moved if this fails.
+    let file = 'none';
+    let fileName = '';
+    let oldFileName = '';
+    const fid = recDriveId_(rec[def.link]);
+    if (fid) {
+      try {
+        const f = DriveApp.getFileById(fid);
+        oldFileName = f.getName();
+        fileName = recNewFileName_(oldFileName, fromName, to.name);
+        if (fileName !== oldFileName) { f.setName(fileName); file = 'renamed'; }
+        else file = 'unchanged';
+      } catch (e) {
+        console.warn('Record ' + rid + ' moved, but its PDF was not renamed: ' + e);
+        file = 'failed';
+        fileName = '';
+      }
+    }
+
+    try {
+      commitWrites_(cfg, [updateWrite_(cfg, 'record_moves/m_' + Date.now() + '_' + Utilities.getUuid().slice(0, 8), Object.assign({
+        kind: 'legacy-' + kind, collection: def.col, recordId: rid, recordRef: String(rec['Record ID'] || ''),
+        templateName: String(rec[def.title] || ''), recordDate: String(rec['Record Date'] || ''),
+        fileId: fid, file: file, oldFileName: oldFileName, fileName: fileName,
+      }, move))]);
+    } catch (e) { console.warn('Record moved, but the move log failed: ' + e); }
+
+    console.log(def.col + '/' + rid + ' moved from ' + fromName + ' to ' + to.name + ' by ' + move.by + ' (PDF: ' + file + ')');
+    return { ok: true, move: move, file: file, fileName: fileName };
+  } finally {
+    lock.releaseLock();
+  }
+}

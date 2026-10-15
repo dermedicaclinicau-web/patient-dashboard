@@ -1,5 +1,6 @@
-// Moving a saved form to another patient (it was saved to the wrong one). Done by Apps Script,
-// so the record stays locked against normal editing and every move is kept.
+// Moving a record to another patient (it was saved to the wrong one). Done by Apps Script,
+// so records stay locked against normal editing and every move is kept.
+// Portal forms: { sub }. Older imported records (a row + a Drive PDF): { legacy }.
 import { callApi } from "./appointments.js";
 import { can } from "./perms.js";
 
@@ -42,19 +43,59 @@ export function movesHtml(list) {
   </ul>`;
 }
 
+// Warnings for a portal form
+function formChecks(c, sub) {
+  const items = [];
+  const sent = (sub.deliveries || []).length;
+  if (sent) items.push(`It has been <strong>emailed or printed ${sent} time${sent === 1 ? "" : "s"}</strong>. Those copies have ${esc(sub.patientName)}'s details on them.`);
+  if (c.dependents && c.dependents.length) items.push(`<strong>${c.dependents.length} other form${c.dependents.length === 1 ? "" : "s"}</strong> of ${esc(sub.patientName)} used it as their consent: ${
+    c.dependents.map((d) => `${esc(d.name)} (${esc(niceDate(d.date))})`).join(", ")}. They won't be changed.`);
+  if (c.consentChecks) items.push("Its consent check found a consent on the <strong>old patient's</strong> record. That result is kept as it was.");
+  if (c.textMention) items.push(`Answers typed on the form mention <strong>${esc(sub.patientName)}</strong>. Saved forms can't be edited, so those stay. If that matters, fill in a new form instead.`);
+  if (c.photos) items.push(`${c.photos} photo${c.photos === 1 ? "" : "s"} stay with the record.`);
+  if (c.usage) items.push("The products used move with it.");
+  return items;
+}
+
+// Warnings for an older record (a finished PDF)
+function legacyChecks(c, sub, legacy) {
+  const items = [];
+  const old = esc(sub.patientName);
+  if (c.fileFound) {
+    items.push(`The PDF shows <strong>${old}</strong>'s name and details. A finished PDF can't be changed, so it will still show them.`);
+    items.push(c.canRename
+      ? `The file in Google Drive (<strong>${esc(c.fileName)}</strong>) will be renamed for the new patient.`
+      : `The portal can't rename the file in Google Drive (<strong>${esc(c.fileName)}</strong>) because it doesn't have edit access. It will keep its name.`);
+  } else if (c.hasLink) {
+    items.push(`The PDF couldn't be opened from the portal's Google account, so it won't be renamed. It still shows ${old}'s details.`);
+  } else {
+    items.push("There's no PDF attached to this record.");
+  }
+  if (legacy.kind === "consent") items.push("Moving a consent changes the <strong>Consent on file</strong> badges on both patients' treatment records.");
+  if (legacy.matchedByName) items.push(`This record was matched to ${old} <strong>by name only</strong>. After the move it's linked to the chosen patient by ID.`);
+  if (c.moves) items.push(`It has been moved ${c.moves} time${c.moves === 1 ? "" : "s"} before.`);
+  return items;
+}
+
 // Resolves with the result once moved, or null if cancelled
-export async function openMoveRecordDialog({ sub }) {
+export async function openMoveRecordDialog({ sub: subIn = null, legacy = null } = {}) {
   const { searchPatients } = await import("./task-runner.js"); // loaded here, so pages don't import each other in a loop
+  // An older record looks like a saved form to the dialog
+  const sub = legacy ? {
+    id: legacy.id, templateName: legacy.title, recordDate: legacy.dateText,
+    patientName: legacy.patientName, patientId: legacy.patientId, deliveries: [],
+  } : subIn;
+  const noun = legacy ? "record" : "form";
+
   return new Promise((resolve) => {
     let result = null, target = null, busy = false, seq = 0, timer = null, results = [];
-    const sent = (sub.deliveries || []).length;
     const dlg = document.createElement("dialog");
     dlg.className = "lh-dialog rm-dialog";
     dlg.innerHTML = `
       <form class="lh-form" novalidate>
         <div class="lh-dialog-head">
           <h3>Move to another patient</h3>
-          <p><strong>${esc(sub.templateName)}</strong> · ${esc(niceDate(sub.recordDate))}<br>
+          <p><strong>${esc(sub.templateName)}</strong> · ${esc(niceDate(sub.recordDate))}${legacy ? " · older record (PDF)" : ""}<br>
             Now on <strong>${esc(sub.patientName)}</strong>'s record.</p>
         </div>
         <div class="rm-checks" data-role="checks"><p class="muted">Checking what's linked to this record…</p></div>
@@ -80,7 +121,7 @@ export async function openMoveRecordDialog({ sub }) {
     const sync = () => {
       const sure = $('[data-k="sure"]');
       $('[data-role="sure-text"]').textContent = target
-        ? `I've checked: this form belongs to ${target.name}, not ${sub.patientName}`
+        ? `I've checked: this ${noun} belongs to ${target.name}, not ${sub.patientName}`
         : "I've checked this is the right patient";
       $('[data-role="note-req"]').textContent = $('[data-k="reason"]').value === "other" ? "(required)" : "(optional)";
       goBtn.disabled = busy || !target || !sure.checked;
@@ -118,17 +159,12 @@ export async function openMoveRecordDialog({ sub }) {
 
     // What's linked to it, before moving
     const checks = $('[data-role="checks"]');
-    callApi({ action: "records", op: "moveCheck", submissionId: sub.id })
+    callApi(legacy
+      ? { action: "records", op: "legacyCheck", kind: legacy.kind, recordId: legacy.id }
+      : { action: "records", op: "moveCheck", submissionId: sub.id })
       .then((c) => {
         if (!dlg.isConnected) return;
-        const items = [];
-        if (sent) items.push(`It has been <strong>emailed or printed ${sent} time${sent === 1 ? "" : "s"}</strong>. Those copies have ${esc(sub.patientName)}'s details on them.`);
-        if (c.dependents && c.dependents.length) items.push(`<strong>${c.dependents.length} other form${c.dependents.length === 1 ? "" : "s"}</strong> of ${esc(sub.patientName)} used it as their consent: ${
-          c.dependents.map((d) => `${esc(d.name)} (${esc(niceDate(d.date))})`).join(", ")}. They won't be changed.`);
-        if (c.consentChecks) items.push("Its consent check found a consent on the <strong>old patient's</strong> record. That result is kept as it was.");
-        if (c.textMention) items.push(`Answers typed on the form mention <strong>${esc(sub.patientName)}</strong>. Saved forms can't be edited, so those stay. If that matters, fill in a new form instead.`);
-        if (c.photos) items.push(`${c.photos} photo${c.photos === 1 ? "" : "s"} stay with the record.`);
-        if (c.usage) items.push("The products used move with it.");
+        const items = legacy ? legacyChecks(c, sub, legacy) : formChecks(c, sub);
         checks.innerHTML = items.length
           ? `<p class="rm-checks-h">Before you move it</p><ul>${items.map((t) => `<li>${t}</li>`).join("")}</ul>`
           : '<p class="muted">Nothing else is linked to this record.</p>';
@@ -169,11 +205,21 @@ export async function openMoveRecordDialog({ sub }) {
       goBtn.textContent = "Moving…";
       showErr("");
       try {
-        result = await callApi({ action: "records", op: "moveSubmission", submissionId: sub.id, toPatientId: target.id, reason, note });
+        result = await callApi(legacy
+          ? { action: "records", op: "moveLegacy", kind: legacy.kind, recordId: legacy.id,
+              fromPatientId: legacy.patientId, toPatientId: target.id, reason, note }
+          : { action: "records", op: "moveSubmission", submissionId: sub.id, toPatientId: target.id, reason, note });
+
         const after = [];
-        if (result.deliveries) after.push(`It was emailed or printed while on ${esc(sub.patientName)}'s record. Consider letting the clinic manager know, in case those copies need following up.`);
-        if (result.dependents && result.dependents.length) after.push(`Check ${esc(sub.patientName)}'s ${result.dependents.map((d) => esc(d.name)).join(", ")}: their consent check pointed to this form.`);
-        if (result.textMention) after.push(`Typed answers still mention ${esc(sub.patientName)}.`);
+        if (legacy) {
+          if (result.file === "renamed") after.push(`The PDF in Google Drive was renamed to <strong>${esc(result.fileName)}</strong>.`);
+          else if (result.file === "failed") after.push("The PDF in Google Drive couldn't be renamed. Rename it by hand if needed.");
+          if (result.file !== "none") after.push(`The PDF itself still shows ${esc(sub.patientName)}'s details.`);
+        } else {
+          if (result.deliveries) after.push(`It was emailed or printed while on ${esc(sub.patientName)}'s record. Consider letting the clinic manager know, in case those copies need following up.`);
+          if (result.dependents && result.dependents.length) after.push(`Check ${esc(sub.patientName)}'s ${result.dependents.map((d) => esc(d.name)).join(", ")}: their consent check pointed to this form.`);
+          if (result.textMention) after.push(`Typed answers still mention ${esc(sub.patientName)}.`);
+        }
         form.innerHTML = `
           <div class="lh-dialog-head"><h3>Moved</h3>
             <p><strong>${esc(sub.templateName)}</strong> is now on <strong>${esc(target.name)}</strong>'s record. The move is kept on the record.</p></div>

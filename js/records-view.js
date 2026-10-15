@@ -66,6 +66,7 @@ export function mountRecords(root, patient) {
 
   let loaded = false;
   let loading = null;
+  let lists = { treatment: [], consent: [] }; // the loaded records, for the Move button
 
   function showHighlight() {
     const id = highlightId;
@@ -88,6 +89,7 @@ export function mountRecords(root, patient) {
         const { treatments, consents } = await fetchPatientRecords(patient);
         if (!grid.isConnected) return;
         loaded = true;
+        lists = { treatment: treatments, consent: consents };
         grid.querySelector(".rc-tx-count").textContent = treatments.length;
         grid.querySelector(".rc-cs-count").textContent = consents.length;
         txBody.innerHTML = treatmentsHtml(treatments);
@@ -116,16 +118,27 @@ export function mountRecords(root, patient) {
     if (card.open) load();
   }, true);
 
-  // Move a portal form to another patient, then reload this patient's records
+  // Move a record to another patient (portal forms and older records), then reload this patient's records
   grid.addEventListener("click", async (e) => {
-    const b = e.target.closest("[data-move-sub]");
-    if (!b) return;
+    const b = e.target.closest("[data-move-sub], [data-move-legacy]");
+    if (!b || b.disabled) return;
     e.preventDefault();
     b.disabled = true;
     try {
-      const sub = await getSubmission(b.dataset.moveSub);
-      if (!sub) return;
-      const res = await openMoveRecordDialog({ sub });
+      let res = null;
+      if (b.dataset.moveSub) {
+        const sub = await getSubmission(b.dataset.moveSub);
+        if (sub) res = await openMoveRecordDialog({ sub });
+      } else {
+        const kind = b.dataset.moveLegacy;
+        const r = (lists[kind] || []).find((x) => !x.portalId && x.id === b.dataset.id);
+        if (r) {
+          res = await openMoveRecordDialog({ legacy: {
+            kind, id: r.id, title: r.title, dateText: r.dateText,
+            patientName: r.patientName || patient.name, patientId: patient.id, matchedByName: r.matchedByName,
+          } });
+        }
+      }
       if (res && grid.isConnected) {
         loaded = false;
         txBody.innerHTML = csBody.innerHTML = '<div class="skeleton sm"></div>';
@@ -158,6 +171,17 @@ function viewLink(link) {
 const portalView = (r) =>
   `<a class="rc-act" href="#/form-record/${encodeURIComponent(r.portalId)}">${ICONS.view}View</a>` +
   (canMoveRecords() ? `<button type="button" class="rc-act" data-move-sub="${escapeHtml(r.portalId)}">${ICONS.move}Move</button>` : "");
+
+  const legacyMove = (kind, r) => (canMoveRecords()
+  ? `<button type="button" class="rc-act" data-move-legacy="${kind}" data-id="${escapeHtml(r.id)}">${ICONS.move}Move</button>` : "");
+
+function movedNote(r) {
+  const m = r.moves && r.moves[r.moves.length - 1];
+  if (!m) return "";
+  const d = new Date(m.at);
+  return `<p class="rc-moved">Moved here from ${escapeHtml(m.fromName || "another patient")}${
+    isNaN(d) ? "" : ` · ${escapeHtml(d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }))}`}</p>`;
+}
 
 function categoryHtml(cat, items, inner, actions = "") {
   return `
@@ -219,8 +243,10 @@ function txItemHtml(t) {
       ${consentBadge(t)}
       ${t.staff ? `<p class="rc-staff">${escapeHtml(t.staff)}</p>` : ""}
       ${t.matchedByName ? `<span class="task-flag neutral">Matched by name</span>` : ""}
+      ${movedNote(t)}
       <div class="rc-actions">
         ${viewLink(t.link)}
+        ${legacyMove("treatment", t)}
         <button type="button" class="rc-act" data-soon="Edit record">${ICONS.edit}Edit Record</button>
         <button type="button" class="rc-act" data-soon="Rename record">${ICONS.rename}Rename</button>
         <button type="button" class="rc-act danger" data-soon="Delete record">${ICONS.trash}Delete</button>
@@ -242,8 +268,10 @@ function consentItemHtml(c) {
     <article class="rc-item">
       <div class="rc-item-top"><h4>${escapeHtml(c.title)}</h4><span class="rc-date">${escapeHtml(fmt(c))}</span></div>
       ${c.staff ? `<p class="rc-staff">${escapeHtml(c.staff)}</p>` : ""}
+      ${movedNote(c)}
       <div class="rc-actions">
         ${viewLink(c.link)}
+        ${legacyMove("consent", c)}
         <button type="button" class="rc-act" data-soon="Edit consent">${ICONS.edit}Edit</button>
         <button type="button" class="rc-act danger" data-soon="Delete consent">${ICONS.trash}Delete</button>
       </div>

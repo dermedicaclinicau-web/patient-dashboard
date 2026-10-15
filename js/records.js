@@ -105,6 +105,9 @@ export async function fetchPatientRecords(patient) {
       link: String(data["PDF Link"] || ""),
       recordId: String(data["Record ID"] || ""),
       matchedByName: byName,
+      legacyKind: "consent",
+      patientName: String(data["Patient Name"] || ""),
+      moves: Array.isArray(data.moves) ? data.moves : [],
     };
   }).concat(portal.filter((p) => p.kind === "consent")).sort(byDateDesc);
 
@@ -119,6 +122,9 @@ export async function fetchPatientRecords(patient) {
       link: String(data["File PDF Link"] || ""),
       recordId: String(data["Record ID"] || ""),
       matchedByName: byName,
+      legacyKind: "treatment",
+      patientName: String(data["Patient Name"] || ""),
+      moves: Array.isArray(data.moves) ? data.moves : [],
     };
   }).concat(portal.filter((p) => p.kind === "treatment")).sort(byDateDesc);
 

@@ -6154,3 +6154,6 @@ a.md-quiet:hover { border-color: var(--primary); }
 .rm-chosen span { display: flex; flex-direction: column; }
 .rm-sure { padding: .55rem .7rem; border-radius: 10px; background: #f8fafc; }
 .rm-log li { color: #92400e; }
+
+/* Older record moved here from another patient */
+.rc-moved { margin: 4px 0 0; font-size: 12px; color: #b45309; }
