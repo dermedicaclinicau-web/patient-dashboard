@@ -3524,6 +3524,10 @@ function handleInventory_(body) {
       if (!okId(body.requestId)) return { ok: false, error: 'BAD_REQUEST' };
       return invNotifyRequest_(String(body.requestId), session);
     }
+    if (op === 'resendRequest') {
+      if (!okId(body.requestId)) return { ok: false, error: 'BAD_REQUEST' };
+      return invResendRequest_(String(body.requestId), session, ordering);
+    }
     if (op === 'notifyUpdate') {
       if (!ordering) return { ok: false, error: 'FORBIDDEN' };
       if (!okId(body.requestId)) return { ok: false, error: 'BAD_REQUEST' };
@@ -3592,6 +3596,36 @@ function invNotifyRequest_(id, session) {
   if (rec.notified === true) return { ok: true, sent: 0 };
   fsPatch_(cfg, 'inv_requests/' + id, { notified: true });
   return notifyProcessOne_(cfg, notifyEnqueue_(cfg, 'request.created', { requestId: id }, session.uid));
+}
+
+// "Email it again": an open request goes out to whoever the "new order request" rules say now.
+// The ordering team can resend any request; staff can resend their own.
+function invResendRequest_(id, session, ordering) {
+  const cfg = getConfig_();
+  const rec = fsGetDoc_(cfg, 'inv_requests/' + id);
+  if (!rec) return { ok: false, error: 'NOT_FOUND' };
+  if (!ordering && rec.requestedByUid !== session.uid) return { ok: false, error: 'FORBIDDEN' };
+  if (rec.status !== 'open') return { ok: true, sent: 0, reason: 'NOT_OPEN' };
+
+  const rules = notifyRules_(cfg);
+  if (!rules.some(function (r) { return r.enabled === true && r.kind !== 'digest' && r.event === 'request.created'; })) {
+    return { ok: true, sent: 0, reason: 'RULE_OFF' };
+  }
+  const res = notifyProcessOne_(cfg, notifyEnqueue_(cfg, 'request.created', { requestId: id, resent: true }, session.uid), rules);
+
+  // Noted on the request's history
+  try {
+    const now = new Date().toISOString();
+    fsPatch_(cfg, 'inv_requests/' + id, {
+      notified: true, lastEmailedAt: now, lastEmailedBy: String(session.name || ''),
+      events: (Array.isArray(rec.events) ? rec.events : []).concat([{
+        at: now, by: String(session.name || ''), action: 'Email sent again',
+        note: res.queued ? 'Queued' : (res.sent || 0) + ' recipient' + (res.sent === 1 ? '' : 's'),
+      }]).slice(-60),
+    });
+  } catch (e) { console.warn('Request ' + id + ' emailed again, but its history wasn\'t updated: ' + e); }
+
+  return { ok: true, sent: res.sent || 0, queued: !!res.queued, reason: res.sent || res.queued ? '' : 'NO_MATCH' };
 }
 
 // Ordered or declined → whoever the "ordered or declined" rules say (by default, the person who asked)

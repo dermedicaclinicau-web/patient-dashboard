@@ -787,7 +787,9 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
           const att = a.mode === "blank"
             ? await printablePdf({ templateId: a.id, patient: st.patient })
             : await savedFormPdf(a.subId);
-          console.info(`Attachment "${att.name}" (${a.mode}): ${Math.round(att.pdf.length * 0.75 / 1024)} KB`);
+          console.info(att.pdf
+            ? `Attachment "${att.name}" (${a.mode}): ${Math.round(att.pdf.length * 0.75 / 1024)} KB PDF`
+            : `Attachment "${att.name}" (${a.mode}): the browser couldn't make it, so the server will`);
           attachments.push(att);
         }
       }

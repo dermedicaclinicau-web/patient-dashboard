@@ -85,33 +85,68 @@ function loadHtml2Pdf() {
   return libPromise;
 }
 
+// True if a drawn page is (almost) all white
+function isBlankCanvas(canvas) {
+  try {
+    if (!canvas || !canvas.width || !canvas.height) return true;
+    const w = 300;
+    const h = Math.min(6000, Math.max(1, Math.round(canvas.height * (w / canvas.width))));
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    const g = c.getContext("2d");
+    g.drawImage(canvas, 0, 0, w, h);
+    const d = g.getImageData(0, 0, w, h).data;
+    for (let i = 0; i < d.length; i += 4) {
+      if (d[i] < 235 || d[i + 1] < 235 || d[i + 2] < 235) return false;
+    }
+    return true;
+  } catch { return false; } // can't check (e.g. a tainted picture): assume it's fine
+}
+
+const waitForImages = (el) => Promise.all([...el.querySelectorAll("img")].map((img) => (img.complete
+  ? null
+  : new Promise((r) => { img.addEventListener("load", r, { once: true }); img.addEventListener("error", r, { once: true }); setTimeout(r, 5000); }))));
+
 // opts (Skin Script): { margin: mm, width: content width in px }. Forms use the defaults.
 async function renderPdf(doc, opts = {}) {
   const html2pdf = await loadHtml2Pdf();
   const margin = Number(opts.margin) || 12;
   const width = Number(opts.width) || 703;
+  const settings = {
+    margin: [margin, margin, margin, margin],
+    filename: doc.fileName,
+    image: { type: "jpeg", quality: 0.92 },
+    html2canvas: {
+      scale: 2, backgroundColor: "#ffffff", logging: false,
+      scrollX: 0, scrollY: 0, width, windowWidth: width,
+    },
+    jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
+    pagebreak: { mode: ["css", "legacy"], avoid: [".q", ".block", "tr", ".sig"] },
+  };
   const holder = document.createElement("div");
   holder.setAttribute("aria-hidden", "true");
   holder.style.cssText = `position:fixed;left:-10000px;top:0;width:${width}px;`;
   holder.innerHTML = `<style>${doc.css}</style><div class="pdfdoc">${doc.inner}</div>`;
   document.body.appendChild(holder);
+  const sx = window.scrollX, sy = window.scrollY;
   try {
-    return await html2pdf().set({
-      margin: [margin, margin, margin, margin],
-      filename: doc.fileName,
-      image: { type: "jpeg", quality: 0.92 },
-      html2canvas: {
-        scale: 2, backgroundColor: "#ffffff", logging: false,
-        scrollX: 0, scrollY: 0, width, windowWidth: width,
-      },
-      jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
-      pagebreak: { mode: ["css", "legacy"], avoid: [".q", ".block", "tr", ".sig"] },
-    }).from(holder.querySelector(".pdfdoc")).outputPdf("blob");
+    if (document.fonts && document.fonts.ready) await document.fonts.ready.catch(() => {});
+    await waitForImages(holder);
+    window.scrollTo(0, 0); // the PDF tool draws a blank page when the window is scrolled down
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const job = html2pdf().set(settings).from(holder.querySelector(".pdfdoc")).toCanvas();
+      const canvas = await job.get("canvas");
+      if (!isBlankCanvas(canvas)) return await job.toPdf().output("blob");
+      console.warn(`PDF "${doc.fileName}" came out blank (try ${attempt}, ${canvas && canvas.width}×${canvas && canvas.height}, scrolled ${sy}px)`);
+      await new Promise((r) => setTimeout(r, 400));
+    }
+    throw new Error("The PDF came out blank");
   } finally {
     holder.remove();
+    window.scrollTo(sx, sy);
   }
 }
-
 
 const blobToBase64 = (blob) => new Promise((resolve, reject) => {
   const r = new FileReader();
@@ -431,8 +466,7 @@ export async function printablePdf({ templateId, patient }) {
   const sub = { answers: patientAnswers(ver, p), signatures: {}, templateName: ver.name, patientName: p.name || "",
     recordDate: today, version: ver.version, createdBy: "" };
   const payload = await pdfPayload(await formPdf({ sub, ver, letterhead }));
-  if (!payload.pdf) throw new Error(`Couldn't make the PDF for "${ver.name}". Try again.`);
-  return { name: payload.fileName, pdf: payload.pdf };
+  return payload.pdf ? { name: payload.fileName, pdf: payload.pdf } : { name: payload.fileName, html: payload.html };
 }
 
 /* ---------- A saved form as a PDF (Task Manager: filled in before sending, or a saved copy) ---------- */
@@ -446,8 +480,7 @@ export async function savedFormPdf(submissionId) {
   ]);
   if (!ver) throw new Error(`Couldn't open "${sub.templateName}". The version it was filled in on is missing.`);
   const payload = await pdfPayload(await formPdf({ sub, ver, letterhead }));
-  if (!payload.pdf) throw new Error(`Couldn't make the PDF for "${sub.templateName}". Try again.`);
-  return { name: payload.fileName, pdf: payload.pdf };
+  return payload.pdf ? { name: payload.fileName, pdf: payload.pdf } : { name: payload.fileName, html: payload.html };
 }
 
 // Shows a saved form's PDF exactly as it will be attached (Task Manager)
