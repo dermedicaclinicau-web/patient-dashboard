@@ -299,8 +299,17 @@ export function fieldStyle(f) {
     space: opt(s.space, ["normal", "more", "most"], "normal"),
     hideLabel: s.hideLabel === true,
     textSize: opt(s.textSize, ["small", "normal", "large"], "normal"),
+    span: opt(s.span, ["full", "half", "third", "twothirds"], "full"),
   };
 }
+
+// How much of a row a question takes (out of 6), and its class on the page
+export const SPAN_UNITS = { full: 6, half: 3, third: 2, twothirds: 4 };
+export const spanUnits = (f) => SPAN_UNITS[fieldStyle(f).span] || 6;
+export const spanClass = (f) => {
+  const s = fieldStyle(f).span;
+  return s !== "full" ? ` span-${s}` : "";
+};
 
 // Which patient details the Patient details block can show
 export const PATIENT_PARTS = [
@@ -1479,6 +1488,8 @@ function layoutSettings(f) {
 
   return `<div class="fe-insp-field fe-layout">
     <span class="fe-insp-label">Layout</span>
+    ${row("Width on the page", seg("span", [["full", "Full"], ["half", "Half"], ["third", "Third"], ["twothirds", "2/3"]], s.span))}
+    <small class="fe-note">Questions next to each other that fit on one row (two halves, three thirds) sit side by side. On phones they go one under another.</small>
     ${!isText && hasLabel(f.type)
       ? `<label class="fe-check"><input type="checkbox" data-st="showLabel"${s.hideLabel ? "" : " checked"} /> Show the question</label>` : ""}
     ${INLINE_TYPES.includes(f.type)

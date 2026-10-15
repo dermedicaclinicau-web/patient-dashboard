@@ -5,7 +5,7 @@
 import { formatCalc } from "./form-calc.js";
 import { visibleIds } from "./form-conditions.js";
 import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing, textBlockHtml, clinicianParts, tableCols, tableHeadAlign,
-specialistParts, specialistBlockHtml,
+specialistParts, specialistBlockHtml, spanUnits,
  } from "./form-fields.js";
 import { cleanRichHtml, richText } from "./rich-html.js";
 import { markSummary } from "./marking-sets.js";
@@ -281,6 +281,34 @@ function answer(f, v, sig, inline, x, blank = false) {
   return none;
 }
 
+// Questions side by side: consecutive part-width questions share a row (a simple table, so the server's PDF backup can draw it too)
+function pdfRows(fields, parts) {
+  let out = "";
+  let row = [];
+  let used = 0;
+  const flush = () => {
+    if (!row.length) return;
+    const pct = (u) => ((u / 6) * 100).toFixed(3);
+    out += `<table style="width:100%;border-collapse:collapse;table-layout:fixed;margin:0;"><tr>${
+      row.map((c, i) => `<td style="width:${pct(c.u)}%;vertical-align:top;padding:0 ${
+        i < row.length - 1 || used < 6 ? 14 : 0}px 0 0;">${c.html}</td>`).join("")}${
+      used < 6 ? `<td style="width:${pct(6 - used)}%"></td>` : ""}</tr></table>`;
+    row = [];
+    used = 0;
+  };
+  fields.forEach((f, i) => {
+    const html = parts[i];
+    if (!html) return;                         // hidden, or left out of the PDF
+    const u = spanUnits(f);
+    if (u >= 6) { flush(); out += html; return; }
+    if (used + u > 6) flush();
+    row.push({ u, html });
+    used += u;
+  });
+  flush();
+  return out;
+}
+
 // Returns:
 //   inner       the document itself (inside <div class="pdfdoc">)
 //   css         its styling (all scoped to .pdfdoc)
@@ -305,7 +333,7 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
   const showLh = !(ver.settings && ver.settings.showLetterhead === false);
   const shown = blank ? new Set(fields.map((f) => f.id)) : visibleIds(fields, sub.answers);
 
-    const body = fields.map((f) => {
+    const parts = fields.map((f) => {
     if (!shown.has(f.id)) return "";
     if (f.pdfHide) return "";   // live form only
     if (f.type === "watermark" || f.type === "photo") return "";
@@ -404,7 +432,8 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
     }
     return `<div class="q" style="${box}">${label ? `<div class="ql" style="margin-bottom:${gap}px;">${label}</div>` : ""}` +
            `<div class="qa">${answer(f, v, sig, false, sub.answers[`${f.id}__x`], blank)}</div></div>`;
-  }).join("");
+  });
+  const body = pdfRows(fields, parts);
 
   const fileName = `${[sub.templateName, sub.patientName || (blank ? "Blank" : ""), niceDate(sub.recordDate)]
     .filter(Boolean).join(" - ")}.pdf`.replace(/[\\/:*?"<>|]+/g, "-");

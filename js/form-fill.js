@@ -3,7 +3,7 @@
 import { getFormTemplate, getFormVersion, getLetterhead, categoryLabel } from "./form-templates.js";
 import { esc, svg, ICONS, renderField, normaliseField, watermarkHtml, canRequire,
   choiceList, otherLabel, syncChoiceExtras, readExtras, writeExtras, readImageQs, writeImageQs, STAFF_FILLS,
-  tableCols, tableMax, tableRowHtml, syncTableRows, tableClick, tableTotal } from "./form-fields.js";
+  tableCols, tableMax, tableRowHtml, syncTableRows, tableClick, tableTotal, spanClass } from "./form-fields.js";
 import { listMarkingSets, markSummary } from "./marking-sets.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { letterheadHtml, DEFAULT_LETTERHEAD } from "./form-letterhead.js";
@@ -71,7 +71,7 @@ function sheetHtml({ name, fields, settings, letterhead }) {
     ${formTitleHtml(name, settings || {})}
     <div class="fe-fields">${fields.map((f) => {
       const body = renderField(f, ctx);
-      return body ? `<div class="fe-field" data-fid="${esc(f.id)}">${body}</div>` : "";
+      return body ? `<div class="fe-field${spanClass(f)}" data-fid="${esc(f.id)}">${body}</div>` : "";
     }).join("")}</div>`;
 }
 

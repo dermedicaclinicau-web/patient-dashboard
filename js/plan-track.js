@@ -149,7 +149,7 @@ export function trackPlan(master, { visits, services, fromOf, waiting = () => fa
     out.set(c.key, {
       unmatched,
       lines: new Map(c.lines.map((l) => [l.id,
-        trackLine(l, [...hits.get(l.id).past].sort(), [...hits.get(l.id).future].sort())])),
+        trackLine(l, [...hits.get(l.id).past].sort(), [...hits.get(l.id).future].sort(), waiting(c))])),
     });
   });
   return out;

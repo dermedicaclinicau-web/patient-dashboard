@@ -6183,3 +6183,21 @@ a.md-quiet:hover { border-color: var(--primary); }
 .pw-btns { display: flex; gap: 4px; }
 .pw-save { display: flex; justify-content: flex-end; gap: 8px; }
 @media (max-width: 700px) { .pw-phase { grid-template-columns: auto 1fr; } }
+
+/* ---------- Questions side by side ---------- */
+.fe-fields { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); column-gap: 2.25rem; row-gap: .35rem; align-items: stretch; }
+.fe-fields > * { grid-column: 1 / -1; min-width: 0; }
+.fe-fields > .fe-field.span-half { grid-column: span 3; }
+.fe-fields > .fe-field.span-third { grid-column: span 2; }
+.fe-fields > .fe-field.span-twothirds { grid-column: span 4; }
+
+/* Where a dragged question will land */
+.fe-field.is-drop-before::before, .fe-field.is-drop-after::after { content: ""; position: absolute; left: 0; right: 0; height: 3px;
+  border-radius: 3px; background: var(--primary); pointer-events: none; }
+.fe-field.is-drop-before::before { top: -4px; }
+.fe-field.is-drop-after::after { bottom: -4px; }
+.fe-field.is-drop-before.is-drop-side::before { top: 0; bottom: 0; left: -1.2rem; right: auto; width: 3px; height: auto; }
+
+@media (max-width: 640px) {
+  .fe-fields > .fe-field[class*="span-"] { grid-column: 1 / -1; }
+}

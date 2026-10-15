@@ -7,7 +7,7 @@ import {
   createField, normaliseField, renderField, fieldSettings, applyInput, applyClick,
   calcStatusHtml, checkFormula, canRequire, hasLabel, hasHelp, watermarkHtml, iqHasOptions, isMarkImage,
   markSetIdsOf, prefillSettings, prefillSummary, renameInPrefill, tidyPrefill, subExtrasHtml,
-  tableCols, tableTotal, tableClick,
+  tableCols, tableTotal, tableClick, spanClass,
 } from "./form-fields.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { DEFAULT_LETTERHEAD, letterheadHtml, openLetterheadDialog } from "./form-letterhead.js";
@@ -431,7 +431,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     const BRANCH = '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>';
     const items = fields.map((f, i) => {
       const body = renderField(f, c);
-      if (!build) return body ? `<div class="fe-field" data-fid="${esc(f.id)}">${body}</div>` : "";
+      if (!build) return body ? `<div class="fe-field${spanClass(f)}" data-fid="${esc(f.id)}">${body}</div>` : "";
       const on = f.id === sel;
       const cond = conditionSummary(f, fields);
       const condBad = cond ? conditionProblem(f, fields) : "";
@@ -443,7 +443,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
         f.pdfHide && `<span class="fe-chip">${svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><line x1="4" y1="4" x2="20" y2="20"/>')}Not on the PDF</span>`,
       ].filter(Boolean).join("");
       return `
-        <div class="fe-field${on ? " is-selected" : ""}${cond ? " is-conditional" : ""}" data-id="${esc(f.id)}" draggable="true" tabindex="0"
+        <div class="fe-field${spanClass(f)}${on ? " is-selected" : ""}${cond ? " is-conditional" : ""}" data-id="${esc(f.id)}" draggable="true" tabindex="0"
              aria-label="${esc(FIELD_TYPES[f.type].name)}${f.label ? ": " + esc(f.label) : ""}">
           ${body}
           ${chips ? `<div class="fe-chips">${chips}</div>` : ""}
@@ -1105,7 +1105,8 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
   /* ---------- Drag and drop ---------- */
   let drag = null, dropAt = null;
-  const clearLine = () => { const old = stage.querySelector(".fe-dropline"); if (old) old.remove(); };
+  const clearLine = () => stage.querySelectorAll(".is-drop-before, .is-drop-after")
+    .forEach((el) => el.classList.remove("is-drop-before", "is-drop-after", "is-drop-side"));
   const endDrag = () => { drag = null; dropAt = null; clearLine(); };
 
   root.addEventListener("dragstart", (e) => {
@@ -1118,23 +1119,31 @@ export async function mountFormEditor(container, { templateId, staff }) {
     e.dataTransfer.setData("text/plain", drag.type || drag.id);
   });
 
+  // Full-width questions: top or bottom half. Side-by-side ones: left or right half.
   stage.addEventListener("dragover", (e) => {
     if (!drag || mode !== "build") return;
     const list = stage.querySelector('[data-role="fields"]');
     if (!list) return;
     e.preventDefault();
+    const lr = list.getBoundingClientRect();
     const items = [...list.querySelectorAll(".fe-field[data-id]")];
     let i = items.length;
     for (let k = 0; k < items.length; k++) {
       const r = items[k].getBoundingClientRect();
-      if (e.clientY < r.top + r.height / 2) { i = k; break; }
+      const before = r.width > lr.width * 0.8
+        ? e.clientY < r.top + r.height / 2
+        : e.clientY < r.top || (e.clientY <= r.bottom && e.clientX < r.left + r.width / 2);
+      if (before) { i = k; break; }
     }
-    if (i === dropAt && stage.querySelector(".fe-dropline")) return;
+    if (i === dropAt) return;
     dropAt = i;
     clearLine();
-    const line = document.createElement("div");
-    line.className = "fe-dropline";
-    if (items[i]) list.insertBefore(line, items[i]); else list.appendChild(line);
+    if (items[i]) {
+      items[i].classList.add("is-drop-before");
+      if (items[i].getBoundingClientRect().left > lr.left + 24) items[i].classList.add("is-drop-side");
+    } else if (items.length) {
+      items[items.length - 1].classList.add("is-drop-after");
+    }
   });
 
   stage.addEventListener("drop", (e) => {
@@ -1162,7 +1171,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   });
 
   root.addEventListener("dragend", endDrag);
-
+  
   /* ---------- Start ---------- */
   renderStage();
   renderInspector();
