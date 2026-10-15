@@ -5939,3 +5939,19 @@ a.md-quiet:hover { border-color: var(--primary); }
 .tr-appts li span { display: block; margin-top: .1rem; color: var(--muted); font-size: .82rem; }
 .tr-appts-note { display: block; color: #92400e; font-size: .8rem; }
 .tb-card h4 small { font-weight: 500; color: var(--muted); }
+
+/* Delivery docket: extra items (not on the order) */
+.dk-h-extra { color: #b45309; }
+.dk-h-extra small { background: #fef3c7 !important; color: #92400e !important; }
+.dk-list-extra { border-color: #fde68a; }
+.dk-row.is-skip { background: #f8fafc; opacity: .7; }
+.dk-row.is-skip .scan-name { text-decoration: line-through; }
+.dk-skip { margin-top: 2px; font-size: 12.5px; }
+.scan-flag.is-info { background: #e0f2fe; color: #075985; }
+
+/* Receive delivery: extra items (not on the order) */
+.rcv-h2-extra { color: #b45309; }
+.rcv-h2-extra small { font-weight: 400; font-size: 13px; color: #92400e; margin-left: 6px; }
+.rcv-extra-hint { margin: 0 0 10px; font-size: 13px; }
+.rcv-line.is-extra { border-color: #fde68a; background: #fffbeb; }
+.rcv-line.is-extra .rcv-arrived .rcv-link { margin-top: 4px; font-size: 12.5px; }

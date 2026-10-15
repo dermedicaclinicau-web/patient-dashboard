@@ -549,6 +549,7 @@ function normalisePo(d) {
     sentDate: KEY_RE.test(x.sentDate || "") ? x.sentDate : "",   // set when "Mark as sent" was backdated
     historical: x.historical === true,   // received before the portal: recorded only, stock never changed
     receivedDate: KEY_RE.test(x.receivedDate || "") ? x.receivedDate : "",
+    extras: Array.isArray(x.extras) ? x.extras : [],   // came in a delivery but weren't ordered
   };
 }
 
@@ -846,7 +847,8 @@ export async function listReceipts(poId) {
 }
 
 // receipt = { docketNo, note, docket: {path,url,type} | null, close,
-//   lines: [{ key, arrived (supplier's order units), splits: [{ loc, batch, expiry, qty (stock units) }] }] }
+//   lines: [{ key, arrived (supplier's order units), splits: [{ loc, batch, expiry, qty (stock units) }] }],
+//   extras: [{ productId, qty (stock units), text, splits }] }   ← on the docket but not on the order
 // One transaction: batches, product totals, activity log, PO lines + status, and the delivery record.
 export async function receivePo(poId, receipt, staff) {
   const byUid = uid();
@@ -858,6 +860,14 @@ export async function receivePo(poId, receipt, staff) {
   const docket = receipt.docket && receipt.docket.url
     ? { path: clip(receipt.docket.path, 300), url: String(receipt.docket.url).slice(0, 2000), type: receipt.docket.type === "pdf" ? "pdf" : "image" }
     : null;
+  const cleanSplits = (list, fallback) => (Array.isArray(list) ? list : [])
+    .map((s) => ({
+      loc: LOCATIONS.some((x) => x.key === s.loc) ? s.loc : fallback,
+      batch: clip(s.batch, 40),
+      expiry: KEY_RE.test(s.expiry || "") ? s.expiry : "",
+      qty: Math.max(0, parseInt(s.qty, 10) || 0),
+    }))
+    .filter((s) => s.qty);
   let result = null;
 
   await runTransaction(db, async (tx) => {
@@ -875,14 +885,7 @@ export async function receivePo(poId, receipt, staff) {
       if (!line) throw new Error("This order has been changed by someone else. Reload and try again.");
       const arrived = Math.min(9999, Math.max(0, parseInt(r.arrived, 10) || 0));
       if (!arrived) continue;
-      const splits = (Array.isArray(r.splits) ? r.splits : [])
-        .map((s) => ({
-          loc: LOCATIONS.some((x) => x.key === s.loc) ? s.loc : line.loc,
-          batch: clip(s.batch, 40),
-          expiry: KEY_RE.test(s.expiry || "") ? s.expiry : "",
-          qty: Math.max(0, parseInt(s.qty, 10) || 0),
-        }))
-        .filter((s) => s.qty);
+      const splits = cleanSplits(r.splits, line.loc);
       if (line.productId) {
         const need = arrived * line.packSize;
         const put = splits.reduce((a, s) => a + s.qty, 0);
@@ -890,13 +893,26 @@ export async function receivePo(poId, receipt, staff) {
       }
       work.push({ line, arrived, splits });
     }
-    if (!work.length && !receipt.close) throw new Error("Enter what arrived.");
 
-    const pids = [...new Set(work.filter((w) => w.line.productId).map((w) => w.line.productId))];
+    // Extra items: on the docket but not on the order (qty in stock units). They never count towards
+    // what's still to come, so the order's own lines, and whether it's complete, aren't changed by them.
+    const extraWork = [];
+    for (const x of (Array.isArray(receipt.extras) ? receipt.extras : []).slice(0, 40)) {
+      const productId = clip(x.productId, 60);
+      const qty = Math.min(99999, Math.max(0, parseInt(x.qty, 10) || 0));
+      if (!productId || !qty) continue;
+      extraWork.push({ productId, qty, text: clip(x.text, 150), splits: cleanSplits(x.splits, "shelf") });
+    }
+    if (!work.length && !extraWork.length && !receipt.close) throw new Error("Enter what arrived.");
+
+    const pids = [...new Set([
+      ...work.filter((w) => w.line.productId).map((w) => w.line.productId),
+      ...extraWork.map((x) => x.productId),
+    ])];
     const prod = new Map();
     for (const id of pids) {
       const s = await tx.get(doc(db, "inv_products", id));
-      if (!s.exists()) throw new Error("A product on this order no longer exists.");
+      if (!s.exists()) throw new Error("A product in this delivery no longer exists.");
       prod.set(id, normaliseProduct(s));
     }
     work.forEach((w) => {
@@ -907,17 +923,33 @@ export async function receivePo(poId, receipt, staff) {
         throw new Error(`${p.name} needs a ${batchName(p).toLowerCase()} number and expiry date.`);
       }
     });
+    extraWork.forEach((x) => {
+      const p = prod.get(x.productId);
+      x.name = p.name;
+      x.unit = p.stockUnit;
+      x.splits = x.splits.map((s) => ({ ...s, batch: p.tracked ? s.batch : "", expiry: p.tracked ? s.expiry : "" }));
+      const put = x.splits.reduce((a, s) => a + s.qty, 0);
+      if (put !== x.qty) throw new Error(`${p.name} (extra item): ${plural(x.qty, p.stockUnit)} arrived but ${put} have been put away.`);
+      if (p.tracked && x.splits.some((s) => !s.batch || !s.expiry)) {
+        throw new Error(`${p.name} (extra item) needs a ${batchName(p).toLowerCase()} number and expiry date.`);
+      }
+    });
 
+    // Everything being put away: the order's lines and the extras
+    const puts = [
+      ...work.filter((w) => prod.has(w.line.productId)).map((w) => ({ productId: w.line.productId, splits: w.splits })),
+      ...extraWork.map((x) => ({ productId: x.productId, splits: x.splits })),
+    ];
     const lots = new Map();
-    for (const w of work) {
+    for (const w of puts) {
       for (const s of w.splits) {
-        const id = lotId(w.line.productId, s.loc, s.batch, s.expiry);
+        const id = lotId(w.productId, s.loc, s.batch, s.expiry);
         if (!lots.has(id)) {
           const ref = doc(db, "inv_lots", id);
           const snap = await tx.get(ref);
           lots.set(id, {
             ref, exists: snap.exists(), have: snap.exists() ? Number(snap.data().qty) || 0 : 0,
-            productId: w.line.productId, loc: s.loc, batch: s.batch, expiry: s.expiry, delta: 0,
+            productId: w.productId, loc: s.loc, batch: s.batch, expiry: s.expiry, delta: 0,
           });
         }
         lots.get(id).delta += s.qty;
@@ -932,7 +964,7 @@ export async function receivePo(poId, receipt, staff) {
 
     prod.forEach((p, id) => {
       const stock = { ...p.stock };
-      work.filter((w) => w.line.productId === id).forEach((w) => w.splits.forEach((s) => { stock[s.loc] += s.qty; }));
+      puts.filter((w) => w.productId === id).forEach((w) => w.splits.forEach((s) => { stock[s.loc] += s.qty; }));
       tx.update(doc(db, "inv_products", id), { stock, stockAt: serverTimestamp() });
     });
 
@@ -946,21 +978,38 @@ export async function receivePo(poId, receipt, staff) {
         by, byUid, at: serverTimestamp(),
       });
     });
+    extraWork.forEach((x) => {
+      tx.set(doc(collection(db, "inv_moves")), {
+        type: "receive", productId: x.productId, productName: x.name, unit: x.unit,
+        lines: x.splits.map((s) => ({ loc: s.loc, batch: s.batch, expiry: s.expiry, delta: s.qty })),
+        reason: "Delivery: extra, not ordered",
+        note: [docketNo && `Docket ${docketNo}`, x.text && `Docket line: ${x.text}`].filter(Boolean).join(" · ").slice(0, 500),
+        ref: po.number, poId, extra: true, by, byUid, at: serverTimestamp(),
+      });
+    });
 
     const lines = po.lines.map((l) => {
       const w = work.find((x) => x.line.key === l.key);
       return w ? { ...l, received: l.received + w.arrived } : l;
     });
     const allIn = lines.every((l) => l.received >= l.qty);
-    const status = allIn || receipt.close ? "received" : "part";
-    const summary = work.map((w) => `${w.arrived} × ${w.line.name}`).join(", ");
+    // Only extras arrived: the order's status stays as it was
+    const status = allIn || receipt.close ? "received" : work.length ? "part" : po.status;
+    const summary = [
+      ...work.map((w) => `${w.arrived} × ${w.line.name}`),
+      ...extraWork.map((x) => `${x.qty} × ${x.name} (extra)`),
+    ].join(", ");
     tx.update(poRef, {
       lines, status, receiptIds: arrayUnion(recRef.id),
+      ...(extraWork.length ? { extras: arrayUnion(...extraWork.map((x) => ({
+        productId: x.productId, name: x.name, qty: x.qty, unit: x.unit, receiptId: recRef.id, at, by,
+      }))) } : {}),
       lastReceivedAt: serverTimestamp(), ...(status === "received" ? { receivedAt: serverTimestamp() } : {}),
       updatedAt: serverTimestamp(), updatedBy: by,
       events: arrayUnion({
         at, by,
-        action: status === "part" ? "Part received" : allIn ? "Received" : "Closed short",
+        action: !work.length && !receipt.close ? "Extra items received"
+          : status === "part" ? "Part received" : allIn ? "Received" : "Closed short",
         note: [docketNo && `Docket ${docketNo}`, summary].filter(Boolean).join(" · ").slice(0, 300),
       }),
     });
@@ -971,15 +1020,21 @@ export async function receivePo(poId, receipt, staff) {
       scanId: clip(receipt.scanId, 40),
       receivedBy: clip(receipt.receivedBy, 120), receivedByUid: clip(receipt.receivedByUid, 60),
       receivedAt: typeof receipt.receivedAt === "string" ? receipt.receivedAt.slice(0, 30) : "",
-      lines: work.map((w) => ({
-        key: w.line.key, productId: w.line.productId, name: w.line.name, arrived: w.arrived,
-        orderUnit: w.line.orderUnit, packSize: w.line.packSize, stockUnit: w.line.stockUnit, splits: w.splits,
-      })),
+      lines: [
+        ...work.map((w) => ({
+          key: w.line.key, productId: w.line.productId, name: w.line.name, arrived: w.arrived,
+          orderUnit: w.line.orderUnit, packSize: w.line.packSize, stockUnit: w.line.stockUnit, splits: w.splits,
+        })),
+        ...extraWork.map((x) => ({
+          key: "", productId: x.productId, name: x.name, arrived: x.qty, extra: true, text: x.text,
+          orderUnit: x.unit, packSize: 1, stockUnit: x.unit, splits: x.splits,
+        })),
+      ],
       by, byUid, at: serverTimestamp(),
     });
 
     tx.set(doc(collection(db, "notify_outbox")), outboxDoc("stock.arrived", { receiptId: recRef.id, poId }, byUid));
-    result = { receiptId: recRef.id, status, number: po.number, requestIds: po.requestIds };
+    result = { receiptId: recRef.id, status, number: po.number, requestIds: po.requestIds, extras: extraWork.length };
   });
   pingNotify();
   return result;

@@ -72,25 +72,29 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
       }).join("")}
     </select>`;
 
-  const lineHtml = (l, i) => {
+  // extra = on the docket but not on the chosen order (still received, if staff want it)
+  const lineHtml = (l, i, extra = false) => {
     const p = byId.get(l.productId);
-    const po = selected();
     const flags = [];
-    if (!p) flags.push(["bad", "Not matched to a product"]);
-    else if (po && !idsOn(po).has(l.productId)) flags.push(["warn", "Not on this purchase order"]);
-    if (p && !l.fixed && l.conf < 0.6) flags.push(["warn", "Check this is the right product"]);
-    if (!l.qty) flags.push(["warn", "None supplied (back-ordered?)"]);
+    if (extra) {
+      if (l.skip) flags.push(["info", "Not being received"]);
+      else if (!p) flags.push(["bad", "Choose the product, or tap “Don't receive this”"]);
+      else flags.push(["warn", "Extra: not on this order"]);
+    } else if (!p) flags.push(["bad", "Not matched to a product"]);
+    if (p && !l.skip && !l.fixed && l.conf < 0.6) flags.push(["warn", "Check this is the right product"]);
+    if (!l.skip && !l.qty) flags.push(["warn", "None supplied (back-ordered?)"]);
     const bad = flags.some((f) => f[0] === "bad");
     const name = p ? p.name : "this line";
-    return `<div class="dk-row${bad ? " is-bad" : flags.length ? " is-warn" : ""}">
+    return `<div class="dk-row${l.skip ? " is-skip" : bad ? " is-bad" : flags.length ? " is-warn" : ""}" data-row="${i}">
       <div class="dk-main">
         <button type="button" class="scan-name" data-dkfix="${i}">${esc(p ? p.name : "Not matched")}<small>change</small></button>
         <small>${esc(l.text)}${l.code ? ` · ${esc(l.code)}` : ""}${l.count > 1 ? ` · ${l.count} lines on the docket` : ""}${
           l.edited ? ' <em class="dk-edited">edited</em>' : ""}</small>
         ${flags.map(([t, m]) => `<span class="scan-flag is-${t}">${esc(m)}</span>`).join("")}
+        ${extra ? `<button type="button" class="scan-pat-btn dk-skip" data-dkskip="${i}">${l.skip ? "Receive this after all" : "Don't receive this"}</button>` : ""}
         ${s.fixing === i ? fixHtml(l, i) : ""}
       </div>
-      <div class="dk-fields">
+      ${l.skip ? "" : `<div class="dk-fields">
         <label class="dk-f dk-f-qty"><span>Qty${l.unit ? ` <small>${esc(l.unit)}</small>` : ""}</span>
           <input class="dk-input" type="number" min="0" max="9999" step="1" inputmode="numeric" data-dkq="${i}"
             value="${l.qty}" aria-label="Quantity of ${esc(name)}" /></label>
@@ -100,10 +104,18 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
             value="${esc(l.batch)}" placeholder="–" aria-label="${esc(batchName(p))} of ${esc(name)}" /></label>
         <label class="dk-f dk-f-exp"><span>Expiry</span>
           <input class="dk-input" type="date" data-dke="${i}" value="${esc(fullExpiry(l.expiry))}" aria-label="Expiry of ${esc(name)}" /></label>` : ""}
-      </div>
+      </div>`}
     </div>`;
   };
-
+  // Which docket lines are on the chosen order, and which are extra
+  const splitLines = (po) => {
+    const rows = s.review.lines.map((l, i) => ({ l, i }));
+    if (!po) return { main: rows, extra: [] };
+    const on = idsOn(po);
+    const isOn = ({ l }) => !!l.productId && on.has(l.productId);
+    return { main: rows.filter(isOn), extra: rows.filter((x) => !isOn(x)) };
+  };
+  
   const poHtml = (r) => {
     const po = r.po;
     const n = (po.lines || []).length;
@@ -163,12 +175,24 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
           <input type="datetime-local" class="dk-input" data-dkat value="${esc(s.recvAt)}" /></label>
       </div>
 
-      <h3 class="dk-h">On the docket <small>${r.lines.length}</small></h3>
-      ${r.lines.length ? `<p class="dk-muted dk-hint">${r.lines.some((l) => (byId.get(l.productId) || {}).tracked)
-          ? "Check the quantities, and the batch and expiry where asked, against the docket. Fix anything misread."
-          : "Check the quantities against the docket and fix anything misread."}</p>
-        <div class="dk-list">${r.lines.map(lineHtml).join("")}</div>`
-        : '<p class="scan-err">No product lines were read. Try a closer photo of the docket.</p>'}
+      ${(() => {
+        if (!r.lines.length) return '<p class="scan-err">No product lines were read. Try a closer photo of the docket.</p>';
+        const { main, extra } = splitLines(po);
+        const tracked = r.lines.some((l) => (byId.get(l.productId) || {}).tracked);
+        return `
+          <h3 class="dk-h">${po ? "On the order" : "On the docket"} <small>${main.length}</small></h3>
+          ${main.length ? `<p class="dk-muted dk-hint">${tracked
+              ? "Check the quantities, and the batch and expiry where asked, against the docket. Fix anything misread."
+              : "Check the quantities against the docket and fix anything misread."}</p>
+            <div class="dk-list">${main.map(({ l, i }) => lineHtml(l, i)).join("")}</div>`
+            : `<p class="dk-muted">None of the docket's items are on ${esc(po.number || "this order")}. Check it's the right order.</p>`}
+          ${extra.length ? `
+            <h3 class="dk-h dk-h-extra">Extra items <small>${extra.length}</small></h3>
+            <p class="dk-muted dk-hint">These aren't on ${esc(po.number || "this order")}, but they came in the box. They're still received
+              into stock, and you choose Shelf or JT storage on the next screen. Tap “Don't receive this” for freight, samples
+              or anything you don't stock.</p>
+            <div class="dk-list dk-list-extra">${extra.map(({ l, i }) => lineHtml(l, i, true)).join("")}</div>` : ""}`;
+      })()}
 
       <h3 class="dk-h">Which purchase order is it for?</h3>
       ${s.posError ? `<p class="scan-err">${esc(s.posError)}</p>`
@@ -191,6 +215,15 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
     if (s.busy) return;
     const po = selected();
     if (receive && !po) return;
+    if (receive) {
+      const waiting = splitLines(po).extra.filter(({ l }) => !l.skip && !l.productId && l.qty > 0);
+      if (waiting.length) {
+        showToast(`Choose the product for ${waiting.length === 1 ? "the extra item" : `${waiting.length} extra items`}, or tap “Don't receive this”.`);
+        const row = el.querySelector(`.dk-row[data-row="${waiting[0].i}"]`);
+        if (row) row.scrollIntoView({ behavior: "smooth", block: "center" });
+        return;
+      }
+    }
     s.busy = true;
     btn.disabled = true;
     btn.textContent = "Saving…";
@@ -198,6 +231,7 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
       const who = s.people.find((p) => p.id === s.recvUid);
       const at = new Date(s.recvAt);
       const receivedAt = isNaN(at) ? new Date() : at;
+      const on = po ? idsOn(po) : new Set();
       const lines = s.review.lines.map((l) => {
         const p = byId.get(l.productId);
         const tracked = !!(p && p.tracked);   // batch and expiry only for products that track them
@@ -206,19 +240,23 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
           text: l.text, code: l.code, qty: l.qty, unit: l.unit,
           batch: tracked ? String(l.batch || "").trim() : "", expiry: tracked ? fullExpiry(l.expiry) : "",
           edited: l.edited === true,
+          extra: !!po && !(l.productId && on.has(l.productId)),   // came in the box, not on the order
+          skip: l.skip === true,                                  // staff chose not to receive it
         };
       });
       const saved = await saveDocketScan({ photo, result, review: s.review, lines, po,
         receivedBy: who ? who.name : (staff && staff.name) || "", receivedByUid: s.recvUid, receivedAt, note: s.note }, staff);
 
       if (!receive) { showToast("Docket saved."); onAgain(); return; }
-      const on = idsOn(po);
       sessionStorage.setItem("docketPrefill", JSON.stringify({
         poId: po.id, scanId: saved.id, photoUrl: saved.photoUrl, photoPath: saved.photoPath,
         docketNumber: s.review.docketNumber, supplier: s.review.supplier,
         receivedBy: who ? who.name : "", receivedByUid: s.recvUid, receivedAt: receivedAt.toISOString(), note: s.note,
-        lines: lines.filter((l) => l.productId && on.has(l.productId) && l.qty > 0)
+        lines: lines.filter((l) => !l.extra && l.productId && l.qty > 0)
           .map((l) => ({ productId: l.productId, qty: l.qty, unit: l.unit, batch: l.batch, expiry: l.expiry })),
+        // Not on the order, but received too: the receive page shows them with Shelf | JT storage boxes
+        extras: lines.filter((l) => l.extra && !l.skip && l.productId && l.qty > 0)
+          .map((l) => ({ productId: l.productId, qty: l.qty, unit: l.unit, batch: l.batch, expiry: l.expiry, text: l.text })),
       }));
       showToast(`Docket saved. Opening ${po.number || "the order"} to receive it.`);
       location.hash = `#/inventory/receive/${encodeURIComponent(po.id)}`;
@@ -233,6 +271,8 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
   }
 
   el.addEventListener("click", (e) => {
+    const sk = e.target.closest("[data-dkskip]");
+    if (sk) { const l = s.review.lines[Number(sk.dataset.dkskip)]; if (l) { l.skip = !l.skip; draw(); } return; }
     const fx = e.target.closest("[data-dkfix]");
     if (fx) { const i = Number(fx.dataset.dkfix); s.fixing = s.fixing === i ? -1 : i; draw(); return; }
     const b = e.target.closest("[data-dk]");
@@ -246,11 +286,11 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
   });
   // Refreshes one docket line's name, notes and flags without touching its boxes (so typing isn't interrupted)
   function refreshLine(i) {
-    const rowEl = el.querySelectorAll(".dk-list .dk-row")[i];
+    const rowEl = el.querySelector(`.dk-row[data-row="${i}"]`);
     const l = s.review.lines[i];
     if (!rowEl || !l) return;
     const tmp = document.createElement("div");
-    tmp.innerHTML = lineHtml(l, i);
+    tmp.innerHTML = lineHtml(l, i, !!rowEl.closest(".dk-list-extra"));
     const fresh = tmp.firstElementChild;
     rowEl.className = fresh.className;
     rowEl.querySelector(".dk-main").replaceWith(fresh.querySelector(".dk-main"));

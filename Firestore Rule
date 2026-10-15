@@ -363,10 +363,10 @@ match /inv_count_drafts/{id} {
               && request.resource.data.number.matches('PO-[A-Z0-9]{3}-[0-9]{8}(-[0-9]+)?'))))
           || (invReceive()
             && resource.data.status in ['sent', 'part']
-            && request.resource.data.status in ['part', 'received']
+            && (request.resource.data.status in ['part', 'received'] || request.resource.data.status == resource.data.status)
             && request.resource.data.lines.size() == resource.data.lines.size()
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-                 'lines', 'status', 'receiptIds', 'lastReceivedAt', 'receivedAt', 'updatedAt', 'updatedBy', 'events']))
+                 'lines', 'status', 'extras', 'receiptIds', 'lastReceivedAt', 'receivedAt', 'updatedAt', 'updatedBy', 'events']))
           || adminPastReceipt());
       allow delete: if false;
     }

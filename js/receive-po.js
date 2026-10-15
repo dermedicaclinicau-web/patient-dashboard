@@ -88,9 +88,13 @@ export async function mountReceivePo(root, poId, staff) {
   const tracked = (l) => !!(prod.get(l.productId) || {}).tracked;
   const home = (l) => (LOCATIONS.some((o) => o.key === l.loc) ? l.loc : LOCATIONS[0].key);
   const state = new Map(po.lines.map((l) => [l.key, { arrived: 0, rows: [] }]));
+    // Extra items from a scanned docket: not on the order, but still received (counted in stock units)
+  const extras = [];
+  const allLines = () => po.lines.concat(extras);
   let docketFile = null, docketUrl = "", uploaded = null, busy = false, fromDocket = null;
 
   const lineHtml = (l) => {
+    if (l.extra) return extraHtml(l);
     const s = state.get(l.key);
     const remaining = left(l);
     const ordered = `Ordered ${plural(l.qty, l.orderUnit)}${l.packSize > 1 ? ` of ${plural(l.packSize, l.stockUnit)}` : ""}`;
@@ -123,7 +127,7 @@ export async function mountReceivePo(root, poId, staff) {
       <div class="rcv-pa-title">Where it's going <small>(${esc(unitPlural(l.stockUnit))})</small></div>
       <div class="${cls} rcv-pa-head" aria-hidden="true">
         ${tr ? `<span>${esc(bn)}</span><span>Expiry</span>` : ""}
-        ${LOCATIONS.map((o) => `<span>${esc(o.label)}${o.key === home(l) ? " <small>ordered for</small>" : ""}</span>`).join("")}
+        ${LOCATIONS.map((o) => `<span>${esc(o.label)}${o.key === home(l) ? ` <small>${l.extra ? "usually kept" : "ordered for"}</small>` : ""}</span>`).join("")}
         <span></span>
       </div>
       ${s.rows.map((r, i) => `<div class="${cls}" data-i="${i}">
@@ -139,12 +143,30 @@ export async function mountReceivePo(root, poId, staff) {
     </div>`;
   };
 
+    // An extra item: no "ordered" or "still to come", just how many arrived and where they're going
+  const extraHtml = (l) => {
+    const s = state.get(l.key);
+    return `<div class="rcv-line is-extra" data-key="${esc(l.key)}">
+      <div class="rcv-line-head">
+        <div class="rcv-line-name"><strong>${esc(l.name)}</strong>
+          <small>Not on ${esc(po.number || "this order")}${l.text ? ` · docket: ${esc(l.text)}` : ""}</small></div>
+        <div class="rcv-arrived"><span>${esc(unitPlural(l.stockUnit))} arrived</span>
+          <div class="rcv-step"><button type="button" data-act="minus" aria-label="One less">−</button>
+            <input data-f="arrived" type="number" min="0" step="1" inputmode="numeric" value="${s.arrived}" aria-label="How many arrived" />
+            <button type="button" data-act="plus" aria-label="One more">+</button></div>
+          <button type="button" class="rcv-link" data-act="drop-extra">Don't receive this</button></div>
+      </div>
+      <div data-role="splits">${splitsHtml(l)}</div>
+      <div class="rcv-check" data-role="check"></div>
+    </div>`;
+  };
+
   const recHtml = (r) => `<div class="rcv-rec"><div>
       <strong>${esc(niceDate(r.receivedAt ? new Date(r.receivedAt) : r.at))}</strong>${
         (r.receivedBy || (!r.historical && r.by)) ? ` · received by ${esc(r.receivedBy || r.by)}` : ""}${
         r.historical ? " · before the portal" : ""}${
         r.docketNo ? ` · Docket ${esc(r.docketNo)}` : ""}${r.closed ? " · <em>order closed</em>" : ""}
-      <small>${esc((r.lines || []).map((x) => `${x.arrived} × ${x.name}`).join(", "))}</small>
+      <small>${esc((r.lines || []).map((x) => `${x.arrived} × ${x.name}${x.extra ? " (extra)" : ""}`).join(", "))}</small>
       ${r.note ? `<small>${esc(r.note)}</small>` : ""}</div>
     ${r.docket && r.docket.url ? `<a class="rcv-link" href="${esc(r.docket.url)}" target="_blank" rel="noopener">View docket</a>` : ""}</div>`;
 
@@ -174,6 +196,7 @@ export async function mountReceivePo(root, poId, staff) {
       </aside>` : ""}
       <section class="rcv-main">
         <div data-role="lines">${po.lines.map(lineHtml).join("")}</div>
+        <div data-role="extras"></div>
         ${open ? `<div class="rcv-foot">
           <label class="lh-field"><span class="lh-label">Note (optional)</span>
             <textarea data-role="note" rows="2" maxlength="1000" placeholder="e.g. One box damaged, replacement coming"></textarea></label>
@@ -190,7 +213,7 @@ export async function mountReceivePo(root, poId, staff) {
 
   const $ = (sel) => root.querySelector(sel);
   const cardOf = (l) => root.querySelector(`.rcv-line[data-key="${CSS.escape(l.key)}"]`);
-  const lineOf = (el) => { const c = el.closest(".rcv-line"); return c ? po.lines.find((x) => x.key === c.dataset.key) : null; };
+  const lineOf = (el) => { const c = el.closest(".rcv-line"); return c ? allLines().find((x) => x.key === c.dataset.key) : null; };
 
   function drawCheck(l) {
     const card = cardOf(l);
@@ -207,7 +230,7 @@ export async function mountReceivePo(root, poId, staff) {
     if (!s.arrived || !l.productId) { box.innerHTML = ""; drawSum(); return; }
     const need = s.arrived * l.packSize;
     const put = sumOf(s);
-    const over = s.arrived > left(l) ? ` <span class="rcv-warn">More than was still to come</span>` : "";
+    const over = !l.extra && s.arrived > left(l) ? ` <span class="rcv-warn">More than was still to come</span>` : "";
     box.innerHTML = put === need
       ? `<span class="rcv-ok">✓ ${esc(plural(need, l.stockUnit))}${esc(doseText(l, need))} put away</span>${over}`
       : `<span class="rcv-warn">${put} of ${esc(plural(need, l.stockUnit))} put away</span>${over}`;
@@ -236,8 +259,17 @@ export async function mountReceivePo(root, poId, staff) {
   function drawSum() {
     const el = $('[data-role="sum"]');
     if (!el) return;
-    const got = po.lines.filter((l) => state.get(l.key).arrived > 0);
+    const got = allLines().filter((l) => state.get(l.key).arrived > 0);
     el.textContent = got.length ? `Receiving ${got.length} line${got.length === 1 ? "" : "s"}` : "Nothing entered yet";
+  }
+  function drawExtras() {
+    const box = $('[data-role="extras"]');
+    if (!box) return;
+    box.innerHTML = extras.length ? `<h2 class="rcv-h2 rcv-h2-extra">Extra items <small>not on the order</small></h2>
+      <p class="muted rcv-extra-hint">These came in the box but weren't ordered. They're added to stock like everything else,
+        so choose Shelf or JT storage for each. They're noted on ${esc(po.number || "the order")} without changing what's still to come.</p>
+      ${extras.map(lineHtml).join("")}` : "";
+    extras.forEach((l) => drawCheck(l));
   }
 
   function drawDocket() {
@@ -288,6 +320,11 @@ export async function mountReceivePo(root, poId, staff) {
     } else if (act === "rm") {
       s.rows.splice(+b.closest(".rcv-pa-row").dataset.i, 1);
       drawSplits(l);
+    } else if (act === "drop-extra") {
+      extras.splice(extras.indexOf(l), 1);
+      state.delete(l.key);
+      drawExtras();
+      drawSum();
     } else if (act === "zoom") b.closest(".rcv-photo").classList.toggle("is-zoom");
     else if (act === "clear-docket") {
       if (docketUrl) URL.revokeObjectURL(docketUrl);
@@ -330,10 +367,11 @@ export async function mountReceivePo(root, poId, staff) {
     if (busy) return;
     const btn = $('[data-act="save"]');
     const picked = po.lines.map((l) => ({ l, s: state.get(l.key) })).filter((x) => x.s.arrived > 0);
+    const extraPicked = extras.map((l) => ({ l, s: state.get(l.key) })).filter((x) => x.s.arrived > 0);
     const close = $('[data-role="close"]').checked;
-    if (!picked.length && !close) return toast("Enter what arrived first, or tick “Nothing more is coming”.", true);
+    if (!picked.length && !extraPicked.length && !close) return toast("Enter what arrived first, or tick “Nothing more is coming”.", true);
 
-    for (const { l, s } of picked) {
+    for (const { l, s } of [...picked, ...extraPicked]) {
       if (!l.productId) continue;
       const need = s.arrived * l.packSize, put = sumOf(s);
       if (put !== need) return toast(`${l.name}: ${plural(need, l.stockUnit)} arrived, but ${put} have been put away.`, true);
@@ -346,12 +384,12 @@ export async function mountReceivePo(root, poId, staff) {
         if (s.rows.some((r) => rowQty(r) && !r.expiry)) return toast(`${l.name}: enter the expiry date.`, true);
       }
     }
-    const expired = picked.filter(({ l, s }) => tracked(l) && s.rows.some((r) => rowQty(r) && expiryState(r.expiry) === "expired"));
+    const expired = [...picked, ...extraPicked].filter(({ l, s }) => tracked(l) && s.rows.some((r) => rowQty(r) && expiryState(r.expiry) === "expired"));
     if (expired.length && !confirm(`${expired.map((x) => x.l.name).join(", ")}: an expiry date has already passed. Receive anyway?`)) return;
     const over = picked.filter(({ l, s }) => s.arrived > left(l));
     if (over.length && !confirm(`More arrived than was still to come for ${over.map((x) => x.l.name).join(", ")}. Receive anyway?`)) return;
     if (close && !confirm("Close this order? Anything not delivered won't be expected any more.")) return;
-    if (!docketFile && !uploaded && picked.length && !confirm("No docket photo has been added. Receive without one?")) return;
+    if (!docketFile && !uploaded && (picked.length || extraPicked.length) && !confirm("No docket photo has been added. Receive without one?")) return;
 
     busy = true;
     btn.disabled = true;
@@ -367,6 +405,7 @@ export async function mountReceivePo(root, poId, staff) {
         docket: uploaded,
         close,
         lines: picked.map(({ l, s }) => ({ key: l.key, arrived: s.arrived, splits: toSplits(s) })),
+        extras: extraPicked.map(({ l, s }) => ({ productId: l.productId, qty: s.arrived, text: l.text, splits: toSplits(s) })),
         scanId: fromDocket ? fromDocket.scanId : "",
         receivedBy: fromDocket ? fromDocket.receivedBy : "",
         receivedByUid: fromDocket ? fromDocket.receivedByUid : "",
@@ -415,6 +454,31 @@ export async function mountReceivePo(root, poId, staff) {
       filled++;
     });
     
+
+    // Extra items (on the docket, not on this order): received in stock units, Shelf or JT storage
+    const extraBy = new Map();
+    (pre.extras || []).forEach((d) => {
+      if (prod.get(d.productId) && d.qty > 0) extraBy.set(d.productId, [...(extraBy.get(d.productId) || []), d]);
+    });
+    extraBy.forEach((list, pid) => {
+      const p = prod.get(pid);
+      const l = {
+        key: `extra_${pid}`, extra: true, productId: pid, name: p.name,
+        text: list.map((d) => d.text).filter(Boolean).join(" / "),
+        packSize: 1, stockUnit: p.stockUnit, orderUnit: p.stockUnit, loc: p.countWhere === "jt" ? "jt" : "shelf",
+        qty: 0, received: 0, dosePer: p.dosePer, doseUnit: p.doseUnit,
+      };
+      const units = list.map((d) => stockUnitsOf(d, { packSize: p.packSize, stockUnit: p.stockUnit, orderUnit: p.orderUnit }));
+      const total = units.reduce((a, n) => a + n, 0);
+      extras.push(l);
+      state.set(l.key, {
+        arrived: total,
+        rows: p.tracked
+          ? list.map((d, i) => ({ ...newRow(home(l), units[i]), batch: String(d.batch || ""), expiry: fullExpiry(d.expiry) }))
+          : [newRow(home(l), total)],
+      });
+    });
+    drawExtras();
     const dn = $('[data-role="docketNo"]');
     if (dn && pre.docketNumber) dn.value = pre.docketNumber;
     const nt = $('[data-role="note"]');
@@ -426,6 +490,7 @@ export async function mountReceivePo(root, poId, staff) {
       pre.docketNumber ? ` ${esc(pre.docketNumber)}` : ""}${pre.receivedBy ? ` · received by ${esc(pre.receivedBy)}` : ""}${
       when && !isNaN(when) ? ` · ${esc(when.toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }))}` : ""}.
       ${filled ? `${filled} line${filled === 1 ? "" : "s"} filled in.` : "None of the docket's products are still to come on this order."}
+      ${extras.length ? `${extras.length} extra item${extras.length === 1 ? "" : "s"} not on the order, below.` : ""}
       Check the numbers, then press Receive stock.</p>`);
   }
 
