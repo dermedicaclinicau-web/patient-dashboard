@@ -108,43 +108,35 @@ const waitForImages = (el) => Promise.all([...el.querySelectorAll("img")].map((i
   ? null
   : new Promise((r) => { img.addEventListener("load", r, { once: true }); img.addEventListener("error", r, { once: true }); setTimeout(r, 5000); }))));
 
-// opts (Skin Script): { margin: mm, width: content width in px }. Forms use the defaults.
+// opts (Skin Script): { margin: mm }. Forms use the defaults.
+// The document is handed to the PDF maker as its own piece of HTML (the same way as the treatment plan's patient copy),
+// so the portal page behind it can't change the layout or end up in the picture.
 async function renderPdf(doc, opts = {}) {
   const html2pdf = await loadHtml2Pdf();
   const margin = Number(opts.margin) || 12;
-  const width = Number(opts.width) || 703;
   const settings = {
     margin: [margin, margin, margin, margin],
     filename: doc.fileName,
     image: { type: "jpeg", quality: 0.92 },
-    html2canvas: {
-      scale: 2, backgroundColor: "#ffffff", logging: false,
-      scrollX: 0, scrollY: 0, width, windowWidth: width,
-    },
+    html2canvas: { scale: 2, backgroundColor: "#ffffff", logging: false, scrollX: 0, scrollY: 0 },
     jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
     pagebreak: { mode: ["css", "legacy"], avoid: [".q", ".block", "tr", ".sig"] },
   };
-  const holder = document.createElement("div");
-  holder.setAttribute("aria-hidden", "true");
-  holder.style.cssText = `position:fixed;left:-10000px;top:0;width:${width}px;`;
-  holder.innerHTML = `<style>${doc.css}</style><div class="pdfdoc">${doc.inner}</div>`;
-  document.body.appendChild(holder);
+  const source = `<style>${doc.css}</style><div class="pdfdoc">${doc.inner}</div>`;
   const sx = window.scrollX, sy = window.scrollY;
   try {
     if (document.fonts && document.fonts.ready) await document.fonts.ready.catch(() => {});
-    await waitForImages(holder);
-    window.scrollTo(0, 0); // the PDF tool draws a blank page when the window is scrolled down
+    window.scrollTo(0, 0); // the PDF tool can draw a blank page when the window is scrolled down
     for (let attempt = 1; attempt <= 2; attempt++) {
-      const job = html2pdf().set(settings).from(holder.querySelector(".pdfdoc")).toCanvas();
+      const job = html2pdf().set(settings).from(source, "string").toCanvas();
       const canvas = await job.get("canvas");
       if (!isBlankCanvas(canvas)) return await job.toPdf().output("blob");
-      console.warn(`PDF "${doc.fileName}" came out blank (try ${attempt}, ${canvas && canvas.width}×${canvas && canvas.height}, scrolled ${sy}px)`);
+      console.warn(`PDF "${doc.fileName}" came out blank (try ${attempt}, ${canvas && canvas.width}×${canvas && canvas.height})`);
       await new Promise((r) => setTimeout(r, 400));
     }
     throw new Error("The PDF came out blank");
   } finally {
-    holder.remove();
-    window.scrollTo(sx, sy);
+    if (window.scrollX !== sx || window.scrollY !== sy) window.scrollTo(sx, sy);
   }
 }
 

@@ -3,12 +3,13 @@
 import { listSubmissionsForPatient, getSubmission } from "./form-submissions.js";
 import { getFormTemplate, getFormVersion, getLetterhead, getPrintSettings, categoryLabel } from "./form-templates.js";
 import { DEFAULT_LETTERHEAD } from "./form-letterhead.js";
-import { formPrintJob, pdfPayload, previewPdf, patientAnswers, deliveryError } from "./form-delivery.js";
+import { formPrintJob, previewPdf, patientAnswers } from "./form-delivery.js";
+import { queuePrint } from "./print-queue.js";
 import { niceDate } from "./form-document.js";
 import { searchPatients } from "./task-runner.js";
 import { getPatient, patientIds } from "./patients.js";
-import { callApi } from "./appointments.js";
 import { showToast } from "./utils.js";
+
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -281,38 +282,32 @@ export async function mountPrintTask(container, { templateId, patientId = "" } =
   }
 
   /* ---------- Printing ---------- */
-  async function sendPrint() {
-    if (!st.job || st.busy) return;
+  // Printing runs in the background (see print-queue.js), so staff can carry on straight away
+  function sendPrint() {
+    if (!st.job) return;
     if (!printer) {
       msgEl.textContent = "No printer email address is set. An admin can add it in Form Builder, under Form settings. Use Open PDF to print it yourself.";
       return;
     }
-    const copies = st.copies;
-    const saved = st.mode === "saved" ? st.saved.find((x) => x.id === st.chosen) : null;
-    const label = printBtn.querySelector("span");
-    st.busy = true;
-    renderButtons();
-    label.textContent = "Preparing PDF…";
-    msgEl.textContent = "";
-    try {
-      const payload = await pdfPayload(st.job);
-      label.textContent = "Sending…";
-      const res = await callApi({
+    const saved = st.mode === "saved" ? (st.saved || []).find((x) => x.id === st.chosen) : null;
+    const forPatient = st.mode !== "blank" && st.patient;
+    queuePrint({
+      title: tpl.name + (forPatient ? ` · ${st.patient.name || ""}` : ""),
+      copies: st.copies,
+      job: st.job,
+      request: {
         action: "printTask",
-        templateId, templateName: tpl.name, mode: st.mode, copies,
-        patientId: st.mode !== "blank" && st.patient ? st.patient.id : "",
-        patientName: st.mode !== "blank" && st.patient ? st.patient.name || "" : "",
+        templateId, templateName: tpl.name, mode: st.mode, copies: st.copies,
+        patientId: forPatient ? st.patient.id : "",
+        patientName: forPatient ? st.patient.name || "" : "",
         submissionId: saved ? saved.id : "",
-        ...payload,
-      });
-      showToast(`Sent ${res.sent} cop${res.sent === 1 ? "y" : "ies"} to the printer`);
-    } catch (err) {
-      console.error("Print failed:", err);
-      msgEl.textContent = deliveryError(err);
-    } finally {
-      st.busy = false;
-      renderButtons();
-    }
+      },
+    });
+    msgEl.textContent = "";
+    // A short pause so a double tap doesn't print it twice
+    printBtn.disabled = true;
+    printBtn.querySelector("span").textContent = "Sent to the print queue ✓";
+    setTimeout(() => { if (root.isConnected) renderButtons(); }, 1500);
   }
 
   /* ---------- Events ---------- */
