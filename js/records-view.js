@@ -223,7 +223,6 @@ function txItemHtml(t) {
         ${viewLink(t.link)}
         <button type="button" class="rc-act" data-soon="Edit record">${ICONS.edit}Edit Record</button>
         <button type="button" class="rc-act" data-soon="Rename record">${ICONS.rename}Rename</button>
-        <button type="button" class="rc-act" data-soon="Move record">${ICONS.move}Move</button>
         <button type="button" class="rc-act danger" data-soon="Delete record">${ICONS.trash}Delete</button>
       </div>
     </article>`;

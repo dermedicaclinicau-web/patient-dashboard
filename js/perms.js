@@ -11,7 +11,7 @@ export const PERM_KEYS = [
   "menu.inventory", "inventory.view", "inventory.request", "inventory.receive", "inventory.order", "inventory.manage",
   "inventory.kit", "inventory.jt", "inventory.count", "menu.reports",
   "dash.attention", "dash.appts", "dash.tasks", "dash.kit", "dash.records", "dash.usage", "dash.requests", "dash.stock", "dash.overview",
-  "menu.scanner", "scanner.billing", "scanner.docket", "scanner.rx", "inventory.history",
+  "menu.scanner", "scanner.billing", "scanner.docket", "scanner.rx", "inventory.history", "records.move",
 ];
 
 let admin = false;
