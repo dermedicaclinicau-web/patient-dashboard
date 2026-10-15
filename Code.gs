@@ -4526,7 +4526,8 @@ function notifyCountCheck_(cfg, rules, now) {
     const x = fromFields_(doc.fields || {});
     if (!countDueGs_(x, p)) return;
     const id = doc.name.split('/').pop();
-    const locs = x.countWhere === 'shelf' ? ['shelf'] : x.countWhere === 'jt' ? ['jt'] : ['shelf', 'jt'];
+    // JT storage is optional when the Shelf is counted too (only "JT storage only" products need their JT count)
+    const locs = x.countWhere === 'jt' ? ['jt'] : ['shelf'];
     locs.forEach(function (loc) {
       dueKeys.push(id + '|' + loc);
       info[id + '|' + loc] = { name: String(x.name || ''), loc: loc, category: String(x.category || '') };

@@ -9,6 +9,12 @@ service firebase.storage {
     function isAdmin() {
       return isStaff() && request.auth.token.staffRole.lower() == 'admin';
     }
+    
+    // The Scanner tick for this kind of scan (Admins have them all)
+    function canScan(kind) {
+      return isAdmin() || (request.auth.token.perms is list
+        && ('scanner.' + kind) in request.auth.token.perms);
+    }
 
     // Dashboard consultation recordings. Fully private.
     // Staff can upload audio; NOBODY can read/change/delete from a browser.
@@ -92,12 +98,14 @@ service firebase.storage {
       allow update, delete: if false;
     }
     
-    // Scanner: billing sheet photos (and later delivery dockets). Kept as a record, never changed or deleted.
+    // Scanner photos: billing sheets, delivery dockets and product prescriptions.
+    // Kept as a record, never changed or deleted. Uploading needs the matching Scanner tick.
     match /scans/{kind}/{day}/{file} {
       allow get: if isStaff();
       allow list: if false;
       allow create: if isStaff()
-        && kind in ['billing', 'docket']
+        && kind in ['billing', 'docket', 'rx']
+        && canScan(kind)
         && request.resource.size < 5 * 1024 * 1024
         && request.resource.contentType == 'image/jpeg';
       allow update, delete: if false;

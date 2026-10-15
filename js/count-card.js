@@ -39,10 +39,15 @@ export async function renderCountCard(host, { staff = null } = {}) {
   const done = new Set(todays.flatMap((c) => c.lines.map((l) =>
     l.loc === "kit" ? `kit|${l.ref}` : c.kind === "opening" ? `${l.productId}|${l.loc}` : "")).filter(Boolean));
 
-  // Due today, by where it's counted
+  // Due today, by where it's counted. JT storage is optional for products also counted on the Shelf.
   const groups = { shelf: [], jt: [], kit: [] };
+  const optJt = [];
   products.filter((p) => countDue(p)).forEach((p) => {
-    countLocs(p).forEach((loc) => groups[loc].push(`${p.id}|${loc}`));
+    const locs = countLocs(p);
+    locs.forEach((loc) => {
+      const key = `${p.id}|${loc}`;
+      if (loc === "jt" && locs.includes("shelf")) optJt.push(key); else groups[loc].push(key);
+    });
     if (isKitProduct(p)) kits.filter((k) => k.productId === p.id).forEach((k) => groups.kit.push(`kit|${k.id}`));
   });
   const left = (keys) => keys.filter((k) => !done.has(k)).length;
@@ -50,7 +55,7 @@ export async function renderCountCard(host, { staff = null } = {}) {
   const total = all.length;
   const remaining = left(all);
   const counted = total - remaining;
-
+  const optDone = optJt.length - left(optJt);
   const [h, m] = String(cfg.dueBy || COUNT_DUE_DEFAULT).split(":").map(Number);
   const now = new Date();
   const late = now.getHours() * 60 + now.getMinutes() >= h * 60 + m;
@@ -73,13 +78,14 @@ export async function renderCountCard(host, { staff = null } = {}) {
   const locs = [["shelf", "Shelf"], ["jt", "JT storage"], ["kit", "Kits"]].filter(([k]) => groups[k].length).map(([k, l]) => {
     const n = left(groups[k]);
     return `<span class="cc-loc${n ? "" : " is-done"}">${l}: ${n ? `${n} left` : "done ✓"}</span>`;
-  }).join("");
+  }).join("") + (optJt.length
+    ? `<span class="cc-loc${optDone ? " is-done" : ""}">JT storage (optional): ${optDone} of ${optJt.length}</span>` : "");
   const mainLabel = state === "done" ? "Count more" : counted ? "Continue the count" : "Start the count";
 
   host.innerHTML = `<section class="tb-card cc is-${state}">
     <div class="cc-head">
       <div><h4>Opening count</h4>
-        <p class="muted">Count what's physically there. The system's numbers only show after saving.</p></div>
+        <p class="muted">Count what's physically there. It's a blind count: the system's numbers aren't shown.</p></div>
       <span class="cc-pill">${esc(pill)}</span>
     </div>
     ${total ? `

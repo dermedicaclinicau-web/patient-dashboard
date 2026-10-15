@@ -231,16 +231,28 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       : needRows(it, loc).every((r) => r.counted[loc] !== ""));
     const locStarted = (it, loc) => (noneAt(it, loc) && it.none[loc] !== "")
       || it.rows.some((r) => (r.found || r.at[loc]) && r.counted[loc] !== "");
+    // JT storage is optional for a product that's also counted on the Shelf (JT-only products still need it)
+    const isOpt = (it, loc) => loc === "jt" && countLocs(it.p).includes("shelf");
 
     /* ---------- The places: Shelf → JT storage → Injectors' kits ---------- */
     const PLACES = [
       ["shelf", "Shelf", "Go to the Shelf and count each product. Type the number you see, then press Enter."],
-      ["jt", "JT storage", "Go to JT storage and count each product. Type the number you see, then press Enter."],
+      ["jt", "JT storage", "Go to JT storage and count each product. For products that are also on the Shelf this is optional: leave the box empty to skip it."],
       ["kits", "Injectors' kits", "For each injector's kit: count the unopened ones, and check how much is left in the opened one."],
     ];
     const placeTotal = (pl) => (pl === "kits" ? kitRows.length : items.filter((it) => it.locs.includes(pl)).length);
     const placeLeft = (pl) => (pl === "kits" ? kitRows.filter((r) => !kitFilled(r)).length
       : items.filter((it) => it.locs.includes(pl) && !locFilled(it, pl)).length);
+    // Left to count: what has to be done, and what's optional
+    const placeReqLeft = (pl) => (pl === "kits" ? kitRows.filter((r) => !kitFilled(r)).length
+      : items.filter((it) => it.locs.includes(pl) && !isOpt(it, pl) && !locFilled(it, pl)).length);
+    const placeOptLeft = (pl) => (pl === "kits" ? 0
+      : items.filter((it) => it.locs.includes(pl) && isOpt(it, pl) && !locFilled(it, pl)).length);
+    const placeSub = (pl) => {
+      const r = placeReqLeft(pl), o = placeOptLeft(pl);
+      if (r) return `${r} to count${o ? ` · ${o} optional` : ""}`;
+      return o ? `Optional · ${o} not counted` : "All counted";
+    };
     const places = () => PLACES.filter(([k]) => placeTotal(k) > 0);
     const placeName = (pl) => (PLACES.find(([k]) => k === pl) || ["", ""])[1];
     st.place = (places()[0] || ["shelf"])[0];
@@ -380,11 +392,11 @@ export async function mountStockCount(container, { param = "", staff = null } = 
     function placesHtml() {
       const ps = places();
       return `<div class="sc-places" role="tablist" aria-label="Where you're counting">${ps.map(([k, l], n) => {
-        const left = placeLeft(k);
-        return `<button type="button" class="sc-place${st.place === k ? " is-on" : ""}${left ? "" : " is-done"}" data-place="${k}"
-            role="tab" aria-selected="${st.place === k}">
-          <span class="sc-place-n">${left ? n + 1 : "✓"}</span>
-          <span class="sc-place-t"><strong>${esc(l)}</strong><small>${left ? `${left} of ${placeTotal(k)} to count` : "All counted"}</small></span>
+        const r = placeReqLeft(k), o = placeOptLeft(k);
+        return `<button type="button" class="sc-place${st.place === k ? " is-on" : ""}${!r && !o ? " is-done" : ""}${!r && o ? " is-opt" : ""}"
+            data-place="${k}" role="tab" aria-selected="${st.place === k}">
+          <span class="sc-place-n">${!r && !o ? "✓" : n + 1}</span>
+          <span class="sc-place-t"><strong>${esc(l)}</strong><small>${esc(placeSub(k))}</small></span>
         </button>`;
       }).join("")}</div>`;
     }
@@ -395,26 +407,31 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       ps.forEach(([k], n) => {
         const btn = body.querySelector(`.sc-place[data-place="${k}"]`);
         if (!btn) return;
-        const left = placeLeft(k);
-        btn.classList.toggle("is-done", !left);
-        btn.querySelector(".sc-place-n").textContent = left ? String(n + 1) : "✓";
-        btn.querySelector("small").textContent = left ? `${left} of ${placeTotal(k)} to count` : "All counted";
+        const r = placeReqLeft(k), o = placeOptLeft(k);
+        btn.classList.toggle("is-done", !r && !o);
+        btn.classList.toggle("is-opt", !r && !!o);
+        btn.querySelector(".sc-place-n").textContent = !r && !o ? "✓" : String(n + 1);
+        btn.querySelector("small").textContent = placeSub(k);
       });
       const nb = body.querySelector('[data-role="next"]');
       if (!nb) return;
-      if (!ps.length || placeLeft(st.place)) { nb.hidden = true; return; }
-      const next = ps.find(([k]) => k !== st.place && placeLeft(k));
+      if (!ps.length || placeReqLeft(st.place)) { nb.hidden = true; return; }
+      const next = ps.find(([k]) => k !== st.place && placeReqLeft(k));
+      const opt = ps.find(([k]) => k !== st.place && placeOptLeft(k));
       nb.hidden = false;
       nb.innerHTML = next
         ? `<span>✓ <strong>${esc(placeName(st.place))}</strong> is done.</span>
            <button type="button" class="ff-btn is-primary" data-place="${next[0]}">Next: ${esc(next[1])} →</button>`
-        : "<span>✓ <strong>Everything is counted.</strong> Press <strong>Save count</strong> at the top.</span>";
+        : `<span>✓ <strong>Everything that has to be counted is done.</strong> Press <strong>Save count</strong> at the top.</span>${opt
+          ? `<button type="button" class="ff-btn" data-place="${opt[0]}">Count ${esc(opt[1])} too (optional)</button>` : ""}`;
     }
 
     function progress() {
-      const total = items.reduce((a, it) => a + it.locs.length, 0) + kitRows.length;
-      const n = items.reduce((a, it) => a + it.locs.filter((l) => locFilled(it, l)).length, 0) + kitRows.filter(kitFilled).length;
-      $('[data-role="progress"]').textContent = total ? `${n} of ${total} counted` : "";
+      const req = (it) => it.locs.filter((l) => !isOpt(it, l));
+      const total = items.reduce((a, it) => a + req(it).length, 0) + kitRows.length;
+      const n = items.reduce((a, it) => a + req(it).filter((l) => locFilled(it, l)).length, 0) + kitRows.filter(kitFilled).length;
+      const extra = items.reduce((a, it) => a + it.locs.filter((l) => isOpt(it, l) && locFilled(it, l)).length, 0);
+      $('[data-role="progress"]').textContent = total ? `${n} of ${total} counted${extra ? ` · +${extra} JT storage` : ""}` : "";
       updatePlaces();
       updateCats();
     }
@@ -457,10 +474,11 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       const unit = esc(unitPlural(it.p.stockUnit));
       return `<tbody class="sc-tb${locFilled(it, loc) ? " is-done" : ""}" data-it="${i}">${lines.map((x, k) => {
         const label = `${it.p.name}${x.r && x.r.batch ? `, ${batchName(it.p)} ${x.r.batch}` : ""}`;
+        const optTag = isOpt(it, loc) && k === 0 ? '<small class="sc-hint">Optional: leave empty to skip</small>' : "";
         const count = x.none
           ? `<div class="sc-cell">${numIn(`data-none="${loc}"`, it.none[loc], loc, label)}<span>${unit}</span></div>
-             <small class="sc-hint">None on record here. Type 0 if there are none.</small>`
-          : `<div class="sc-cell">${numIn(`data-r="${x.ri}" data-loc="${loc}"`, x.r.counted[loc], loc, label)}<span>${unit}</span></div>`;
+             <small class="sc-hint">Type 0 if there are none here.</small>${optTag}`
+          : `<div class="sc-cell">${numIn(`data-r="${x.ri}" data-loc="${loc}"`, x.r.counted[loc], loc, label)}<span>${unit}</span></div>${optTag}`;
         return `<tr>${prodCell(it, x, k, n, loc)}<td class="sc-count">${count}</td>${k === 0
           ? `<td rowspan="${n}" class="sc-note-td"><input class="fe-in sc-note" data-note maxlength="300" placeholder="Optional"
               value="${esc(it.note)}" aria-label="Comment on ${esc(it.p.name)}" /></td>` : ""}</tr>`;
@@ -1077,13 +1095,13 @@ export async function mountStockCount(container, { param = "", staff = null } = 
       for (const it of items) {
         for (const loc of it.locs) {
           if (locStarted(it, loc) && !locFilled(it, loc)) {
-             goTo(loc, it);
-            msgEl.textContent = `${label(it, loc)}: fill in every ${batchName(it.p).toLowerCase()}, or leave them all empty to count it later.`;
+            goTo(loc, it);
+            msgEl.textContent = `${label(it, loc)}: fill in every ${batchName(it.p).toLowerCase()}, or leave them all empty to skip it.`;
             return;
           }
           if (noneAt(it, loc) && Number(it.none[loc]) > 0) {
             goTo(loc, it);
-            msgEl.textContent = `${label(it, loc)}: there are none on record, so use “+ A ${batchName(it.p).toLowerCase()} that isn't listed” to enter what's there.`;
+            msgEl.textContent = `${label(it, loc)}: use “+ A ${batchName(it.p).toLowerCase()} that isn't listed” to enter the ${batchName(it.p).toLowerCase()} number and expiry of what's there.`;
             return;
           }
         }
@@ -1196,37 +1214,25 @@ export async function mountStockCount(container, { param = "", staff = null } = 
     draw();
   }
 
-  /* ===================== After saving: reveal the system's numbers ===================== */
+  /* ===================== After saving: what was counted (the count stays blind) ===================== */
   function showResults(res, missingOpened) {
-    const diffs = res.lines.filter((l) => l.status === "open");
-    const invs = res.lines.filter((l) => l.status === "investigating");
     const qty = (l, n) => `${fmt(n)}${l.loc === "kit" ? ` ${l.unit}` : ""}`;
-    const movedNote = (l) => (Number(l.movedSince)
-      ? `<br><small class="muted">${fmt(Math.abs(l.movedSince))} ${l.movedSince < 0 ? "used" : "added"} after you counted</small>` : "");
     $('[data-role="progress"]').textContent = "";
     saveBtn.hidden = true;
     if (laterBtn) laterBtn.hidden = true;
     body.innerHTML = `<section class="tb-card sc-results">
       <h4>${I.check} Count saved</h4>
-      <p>${res.lines.length} line${res.lines.length === 1 ? "" : "s"} counted.${
-        invs.length ? ` <strong>${invs.length} didn't match the digital count</strong>, so an investigation has been opened:
-          someone else will recount ${invs.length === 1 ? "it" : "them"}.` : ""}${
-        diffs.length ? ` <strong>${diffs.length} small difference${diffs.length === 1 ? "" : "s"}</strong> sent to Reporting for review.` : ""}${
-        !invs.length && !diffs.length ? " Everything matched. 👍" : " Stock hasn't been changed."}${
+      <p>Thank you. ${esc(plural(res.lines.length, "line"))} counted. Your numbers have gone to Reporting to be checked, and stock hasn't been changed.${
         missingOpened ? ` ${missingOpened} opened container${missingOpened === 1 ? " was" : "s were"} marked missing.` : ""}</p>
-      <div class="sc-scroll"><table class="inv-table"><thead><tr><th>Product</th><th>Where</th><th>Batch / Lot</th><th>Counted</th><th>Digital</th><th>Difference</th></tr></thead><tbody>${
-        res.lines.map((l) => `<tr class="${l.status !== "ok" ? "is-diff" : ""}">
+      <div class="sc-scroll"><table class="inv-table"><thead><tr><th>Product</th><th>Where</th><th>Batch / Lot</th><th>You counted</th></tr></thead><tbody>${
+        res.lines.map((l) => `<tr>
           <td>${esc(l.productName)}${l.countNote ? `<br><small class="muted">“${esc(l.countNote)}”</small>` : ""}</td><td>${esc(whereOf(l))}</td>
           <td>${esc(l.batch ? `${l.batchLabel || batchName(byId.get(l.productId))} ${l.batch}` : "—")}</td>
-          <td>${esc(qty(l, l.counted))}</td>
-          <td>${l.status === "investigating" ? '<span class="muted">Hidden until the recount</span>' : esc(qty(l, l.system)) + movedNote(l)}</td>
-          <td>${l.status === "investigating" ? '<span class="inv-flag is-bad">Investigating</span>'
-            : l.status === "open" ? `<strong>${esc(diffText(l.variance))}</strong>` : "✓"}</td></tr>`).join("")}</tbody></table></div>
+          <td>${esc(qty(l, l.counted))}</td></tr>`).join("")}</tbody></table></div>
       <div class="sc-after"><a class="ff-btn" href="${backHref}">Back to tasks</a>
         <button type="button" class="ff-btn is-primary" data-act="again">Count more</button></div>
     </section>`;
     body.querySelector('[data-act="again"]').addEventListener("click", () => mountStockCount(container, { param, staff }));
-    showToast(invs.length ? `Saved. ${invs.length} investigation${invs.length === 1 ? "" : "s"} opened.`
-      : diffs.length ? `Saved. ${diffs.length} difference${diffs.length === 1 ? "" : "s"} to review.` : "Saved. Everything matched.");
+    showToast("Count saved. Thank you.");
   }
 }

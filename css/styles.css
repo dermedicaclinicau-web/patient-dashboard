@@ -5780,3 +5780,6 @@ textarea.dk-input { min-height: 70px; resize: vertical; }
 .rx-fields label { display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: #64748b; }
 .bp-portal.is-scan { background: #ecfeff; color: #0e7490; }
 @media (max-width: 640px) { .rx-fields { grid-template-columns: 1fr 1fr; } }
+
+.sc-place.is-opt .sc-place-n { background: #e0f2fe; color: #075985; }
+.sc-place.is-opt small { color: #075985; }
