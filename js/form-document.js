@@ -39,8 +39,8 @@ const CSS = `
   .pdfdoc .lh-lines { font-size: 8.5pt; color: #64748b; line-height: 1.5; }
   .pdfdoc h1 { font-family: Georgia, serif; font-size: 19pt; font-weight: normal; color: #0f172a; margin: 4px 0 4px; }
   .pdfdoc .meta { font-size: 9.5pt; color: #64748b; margin: 0 0 14px; }
-  .pdfdoc .q { padding: 9px 0; border-bottom: 1px solid #e2e8f0; page-break-inside: avoid; }
-  .pdfdoc .ql { font-size: 9.5pt; font-weight: bold; color: #475569; margin-bottom: 4px; }
+  .pdfdoc .q { padding: 9px 0; border-bottom: 1px solid #d9d9d9; page-break-inside: avoid; }
+  .pdfdoc .ql { font-size: 9.5pt; font-weight: bold; color: #1a1a1a; margin-bottom: 4px; }
   .pdfdoc .qa { font-size: 11pt; line-height: 1.45; }
   .pdfdoc table.qi { width: 100%; border-collapse: collapse; }
   .pdfdoc table.qi td { padding: 0; vertical-align: top; }
@@ -49,8 +49,8 @@ const CSS = `
   .pdfdoc .note { color: #475569; }
   .pdfdoc ul { margin: 2px 0; padding-left: 18px; }
   .pdfdoc table.grid { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
-  .pdfdoc table.grid th, .pdfdoc table.grid td { border: 1px solid #cbd5e1; padding: 5px 7px; text-align: left; }
-  .pdfdoc table.grid th { background: #f1f5f9; }
+  .pdfdoc table.grid th, .pdfdoc table.grid td { border: 1px solid #333; padding: 5px 7px; text-align: left; color: #1a1a1a; }
+  .pdfdoc table.grid th { background: #ececec; }
   .pdfdoc table.kv { border-collapse: collapse; font-size: 10.5pt; }
   .pdfdoc table.kv td { padding: 3px 18px 3px 0; vertical-align: top; }
   .pdfdoc table.kv td.k { color: #64748b; font-size: 9.5pt; }
@@ -68,15 +68,15 @@ const CSS = `
   .pdfdoc .fe-rich li { margin: 0 0 2px; }
   .pdfdoc .fe-rich hr { border: none; border-top: 1px solid #cbd5e1; margin: 10px 0; }
   .pdfdoc .fe-rich a { color: #0f766e; }
-  .pdfdoc .bl { height: 24px; border-bottom: 1px solid #94a3b8; }
-  .pdfdoc .bl-in { display: inline-block; width: 180px; height: 16px; border-bottom: 1px solid #94a3b8; vertical-align: bottom; }
+  .pdfdoc .bl { height: 24px; border-bottom: 1px solid #333; }
+  .pdfdoc .bl-in { display: inline-block; width: 180px; height: 16px; border-bottom: 1px solid #333; vertical-align: bottom; }
   .pdfdoc .bo-wrap { line-height: 1.9; }
   .pdfdoc .bo { display: inline-block; margin: 0 20px 0 0; white-space: nowrap; }
   .pdfdoc .bo-row { padding: 3px 0; }
   .pdfdoc .bo-subs { margin: 2px 0 0 20px; line-height: 1.9; font-size: 10pt; }
-  .pdfdoc .box { display: inline-block; width: 12px; height: 12px; margin-right: 6px; border: 1.3px solid #475569; vertical-align: -1px; }
+  .pdfdoc .box { display: inline-block; width: 12px; height: 12px; margin-right: 6px; border: 1.3px solid #1a1a1a; vertical-align: -1px; }
   .pdfdoc .box.round { border-radius: 50%; }
-  .pdfdoc .sig-box { height: 64px; border-bottom: 1px solid #475569; }
+  .pdfdoc .sig-box { height: 64px; border-bottom: 1px solid #1a1a1a; }
 `;
 
 // Alignment is set directly on each element so the portal's own page styles
@@ -466,7 +466,7 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
       ? `<p style="margin:16px 0 0;font-size:8.5pt;color:#64748b;">Patient details corrected on ${esc(fmtIso(sub.moves[sub.moves.length - 1].at))}.</p>` : ""}`;
 
   const previewHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(fileName)}</title><style>
-    body { margin: 0; background: #e2e8f0; }
+    body { margin: 0; background: #e2e8f0; overflow-x: hidden; }
     .page { width: 703px; margin: 24px auto; padding: 45px; background: #fff; box-shadow: 0 4px 24px rgba(15, 23, 42, .15); }
     ${CSS}
   </style></head><body><div class="page"><div class="pdfdoc">${inner}</div></div></body></html>`;
