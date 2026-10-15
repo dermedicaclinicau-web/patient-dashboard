@@ -2,8 +2,9 @@
 import { mountRecordingSettings } from "./recording-settings.js";
 import { renderPlanSettings } from "./plan-settings.js";
 import { renderUiTextSettings } from "./ui-text-settings.js";
+import { renderPlanWorkflowSettings } from "./plan-workflow-settings.js";
 
-const TABS = [["recording", "Recording rules"], ["plans", "Treatment plans"], ["wording", "Wording"]];
+const TABS = [["recording", "Recording rules"], ["plans", "Treatment plans"], ["workflow", "Plan workflow"], ["wording", "Wording"]];
 const isAdmin = (s) => /^admin$/i.test(String((s && s.role) || ""));
 
 export function mountSettings(container, { param = "", staff = null } = {}) {
@@ -28,6 +29,7 @@ export function mountSettings(container, { param = "", staff = null } = {}) {
   const body = root.querySelector('[data-role="body"]');
 
   if (tab === "plans") renderPlanSettings(body, { staff });
+  else if (tab === "workflow") renderPlanWorkflowSettings(body, { staff });
   else if (tab === "wording") renderUiTextSettings(body, { staff });
   else mountRecordingSettings(body, { staff, embedded: true });
 }

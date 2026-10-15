@@ -803,7 +803,7 @@ match /inv_count_drafts/{id} {
     // Treatment plan settings: concern colours/names, services → concerns + downtime
     match /plan_settings/{id} {
       allow read: if isStaff();
-      allow write: if isAdmin() && id in ['concerns', 'services', 'document']
+      allow write: if isAdmin() && id in ['concerns', 'services', 'document', 'workflow']
         && request.resource.data.updatedByUid == request.auth.uid;
     }
 

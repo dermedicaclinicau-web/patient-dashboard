@@ -128,3 +128,71 @@ export async function savePlanDocSettings(x, staff) {
 export async function deliverPlanDoc(payload) {
   return callApi({ action: "plan", op: "deliver", ...payload });
 }
+
+/* ---------- Treatment plan workflow (plan_settings/workflow) ---------- */
+
+export const PLAN_WORKFLOW_DEFAULTS = {
+  phases: [
+    { id: "p1", name: "Priority 1 · Now", note: "What we're starting with", colour: "#0F766E", tracked: true },
+    { id: "p2", name: "Priority 2 · Next", note: "When you're ready, once the first stage is under way", colour: "#378ADD", tracked: false },
+    { id: "p3", name: "Priority 3 · Later", note: "For the future, when the timing and budget suit you", colour: "#888780", tracked: false },
+  ],
+  newPlanPhase: "p1",
+  addPhase: "p2",
+  promote: "suggest",
+  promoteStart: "ask",
+  remindFrom: "accepted",
+  waitingKeepsOpen: true,
+  docShowWaiting: true,
+  docPhaseTotals: true,
+  moved: {},
+};
+const PHASE_ID = /^[a-z0-9]{2,24}$/;
+
+export function cleanWorkflow(x = {}) {
+  const d = PLAN_WORKFLOW_DEFAULTS;
+  const seen = new Set();
+  let phases = (Array.isArray(x.phases) ? x.phases : []).map((p) => ({
+    id: PHASE_ID.test(String((p && p.id) || "")) ? p.id : "",
+    name: clip(p && p.name, 40),
+    note: clip(p && p.note, 200),
+    colour: HEX.test((p && p.colour) || "") ? p.colour : "#888780",
+    tracked: !!(p && p.tracked === true),
+  })).filter((p) => p.id && p.name && !seen.has(p.id) && seen.add(p.id)).slice(0, 5);
+  if (!phases.length) phases = d.phases.map((p) => ({ ...p }));
+  if (!phases.some((p) => p.tracked)) phases[0].tracked = true;
+  const ids = phases.map((p) => p.id);
+  const oneOf = (v, list, fb) => (list.includes(v) ? v : fb);
+  const moved = {};
+  Object.entries(x.moved && typeof x.moved === "object" ? x.moved : {}).forEach(([k, v]) => {
+    if (PHASE_ID.test(k) && !ids.includes(k) && typeof v === "string" && PHASE_ID.test(v)) moved[k] = v;
+  });
+  return {
+    phases,
+    newPlanPhase: oneOf(x.newPlanPhase, ids, ids[0]),
+    addPhase: oneOf(x.addPhase, ids, ids[1] || ids[0]),
+    promote: oneOf(x.promote, ["suggest", "off"], d.promote),
+    promoteStart: oneOf(x.promoteStart, ["ask", "this", "next"], d.promoteStart),
+    remindFrom: oneOf(x.remindFrom, ["accepted", "proposed"], d.remindFrom),
+    waitingKeepsOpen: x.waitingKeepsOpen === undefined ? d.waitingKeepsOpen : x.waitingKeepsOpen === true,
+    docShowWaiting: x.docShowWaiting === undefined ? d.docShowWaiting : x.docShowWaiting === true,
+    docPhaseTotals: x.docPhaseTotals === undefined ? d.docPhaseTotals : x.docPhaseTotals === true,
+    moved,
+  };
+}
+
+// The phase a concern sits in. No priority yet, or a removed phase: follows the workflow (first phase by default).
+export function phaseOf(wf, id) {
+  let k = id;
+  for (let i = 0; i < 6 && k && !wf.phases.some((p) => p.id === k); i++) k = wf.moved[k];
+  return wf.phases.find((p) => p.id === k) || wf.phases[0];
+}
+
+export async function getPlanWorkflow() {
+  const s = await getDoc(doc(db, "plan_settings", "workflow"));
+  return cleanWorkflow(s.exists() ? s.data() : {});
+}
+
+export async function savePlanWorkflow(x, staff) {
+  await setDoc(doc(db, "plan_settings", "workflow"), { ...cleanWorkflow(x), ...stamp(staff) });
+}

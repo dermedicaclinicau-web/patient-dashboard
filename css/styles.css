@@ -6157,3 +6157,29 @@ a.md-quiet:hover { border-color: var(--primary); }
 
 /* Older record moved here from another patient */
 .rc-moved { margin: 4px 0 0; font-size: 12px; color: #b45309; }
+
+/* Treatment plan: priorities */
+.pv-phase { margin: 0 0 14px; }
+.pv-phase-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; margin: 14px 0 6px; padding-left: 10px; border-left: 4px solid var(--p); }
+.pv-phase-head small { color: #64748b; }
+.pv-phase-tag { font-size: 11px; padding: 1px 8px; border-radius: 999px; background: #f1f5f9; color: #475569; }
+.pv-group.is-waiting { opacity: .78; }
+.pv-chip.is-waiting { background: #f1f5f9; color: #64748b; border-style: dashed; }
+.pcal-phase { grid-column: 1 / -1; padding: 10px 6px 2px; font-size: 12px; font-weight: 700; letter-spacing: .03em;
+  text-transform: uppercase; color: #475569; border-left: 4px solid var(--p); }
+.po-need.is-promote { border-left-color: #378ADD; }
+.mp-phase { margin-left: auto; max-width: 210px; }
+
+/* System configuration → Plan workflow */
+.pw { display: grid; gap: 14px; max-width: 900px; }
+.pw-card { padding: 16px 18px; border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; }
+.pw-card h3 { margin: 0 0 4px; font-size: 16px; }
+.pw-phases { display: grid; gap: 8px; margin: 12px 0; }
+.pw-phase { display: grid; grid-template-columns: auto auto 1fr auto auto; gap: 10px; align-items: center;
+  padding: 8px 10px; border: 1px solid #e2e8f0; border-radius: 10px; }
+.pw-num { width: 24px; height: 24px; border-radius: 50%; background: #f1f5f9; display: grid; place-items: center; font-weight: 700; font-size: 12px; }
+.pw-phase input[type="color"] { width: 34px; height: 34px; padding: 0; border: none; background: none; cursor: pointer; }
+.pw-fields { display: grid; gap: 6px; }
+.pw-btns { display: flex; gap: 4px; }
+.pw-save { display: flex; justify-content: flex-end; gap: 8px; }
+@media (max-width: 700px) { .pw-phase { grid-template-columns: auto 1fr; } }

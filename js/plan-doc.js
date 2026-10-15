@@ -2,9 +2,10 @@
 import { db } from "./firebase-config.js";
 import { doc, getDoc, getDocs, collection, query, orderBy, limit }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { getPlanDocSettings, deliverPlanDoc } from "./plan-api.js";
+import { getPlanDocSettings, deliverPlanDoc, phaseOf, cleanWorkflow } from "./plan-api.js";
 import { thisMonth, addMonths } from "./plan-track.js";
 import { showToast } from "./utils.js";
+
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const PDF_LIB = "https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js";
@@ -55,6 +56,7 @@ function progressText(lt) {
     if (s.state === "booked") bits.push(`Booked for ${dayLong(s.date)}`);
     else if (s.state === "due" || s.state === "overdue") bits.push("Next: now, when you're ready to book");
     else if (s.state === "planned") bits.push(`Next: ${monthLong(s.month)}`);
+    else if (s.state === "waiting") bits.push("Later in your plan");
     else bits.push("Timing to be confirmed");
   }
   return bits.join(" · ");
@@ -73,14 +75,23 @@ function letterheadHtml(lh, colour) {
     <td style="padding:0 0 12px;vertical-align:middle;text-align:${logo ? "right" : "left"}">${name}${lines}</td></tr></table>`;
 }
 
+// Adds up the dollar amounts in the quotes ("$650", "$1,240.50")
+function quoteTotal(list) {
+  let t = 0;
+  list.forEach((c) => (String(c.quote || "").match(/\$\s?[\d,]+(?:\.\d{2})?/g) || [])
+    .forEach((m) => { t += Number(m.replace(/[$,\s]/g, "")) || 0; }));
+  return Math.round(t * 100) / 100;
+}
+const money = (n) => `$${n.toLocaleString("en-AU", { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 })}`;
+
 // pick = { concerns: Set(keys), lines: Set(line ids), prices: Set(keys), message }
-export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff }) {
+export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff, wf = cleanWorkflow({}) }) {
   const colour = d.colour;
   const concerns = master.concerns.filter((c) => pick.concerns.has(c.key) && c.lines.some((l) => pick.lines.has(l.id)));
   const today = new Date();
   const todayText = today.toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" });
 
-  const sections = concerns.map((c) => {
+  const sectionHtml = (c) => {
     const lab = labelOf(c.key);
     const lines = c.lines.filter((l) => pick.lines.has(l.id));
     return `<div style="margin:0 0 14px;padding:12px 14px;border:1px solid #e2e8f0;border-left:5px solid ${lab.colour};page-break-inside:avoid">
@@ -97,7 +108,25 @@ export function planDocHtml({ patient, master, track, labelOf, d, lh, pick, staf
       ${pick.prices.has(c.key) && c.quote ? `<div style="margin-top:8px;padding:8px 10px;background:#f8fafc;font-size:12px;color:#334155">
         <strong style="color:#0f172a">Quote</strong><br>${esc(c.quote).replace(/\n/g, "<br>")}</div>` : ""}
     </div>`;
-  }).join("");
+  };
+
+  // Grouped by priority, with a quote total under each (when switched on in the plan workflow)
+  const many = wf.phases.length > 1;
+  let grand = 0;
+  let priced = 0;
+  const sections = wf.phases.map((ph) => {
+    const list = concerns.filter((c) => phaseOf(wf, c.priority).id === ph.id);
+    if (!list.length) return "";
+    const total = wf.docPhaseTotals ? quoteTotal(list.filter((c) => pick.prices.has(c.key))) : 0;
+    if (total) { grand += total; priced++; }
+    return `${many ? `<div style="margin:18px 0 8px;padding-left:10px;border-left:4px solid ${esc(ph.colour)};page-break-after:avoid">
+        <div style="font-size:15px;font-weight:bold;color:#0f172a">${esc(ph.name)}</div>
+        ${ph.note ? `<div style="font-size:12px;color:#64748b">${esc(ph.note)}</div>` : ""}</div>` : ""}
+      ${list.map(sectionHtml).join("")}
+      ${total ? `<div style="margin:-6px 0 14px;text-align:right;font-size:12px;color:#334155">Quoted${
+        many ? ` for ${esc(ph.name)}` : ""}: <strong>${esc(money(total))}</strong></div>` : ""}`;
+  }).join("") + (priced > 1 ? `<div style="margin:4px 0 14px;padding:8px 10px;background:#f8fafc;text-align:right;font-size:13px">
+    Full plan as quoted: <strong>${esc(money(grand))}</strong></div>` : "");
 
   // The coming 12 months: planned and booked treatments, and the patient's events
   const cur = thisMonth();
@@ -181,7 +210,8 @@ const SEND_ERRORS = {
 };
 
 // labelOf(key) → { label, colour } (the patient-facing concern names)
-export async function openPlanDocument({ patient, master, track, labelOf, staff, onSent }) {
+export async function openPlanDocument({ patient, master, track, labelOf, staff, onSent, workflow }) {
+  const wf = workflow || cleanWorkflow({});
   let d;
   let lh = null;
   let sends = [];
@@ -199,13 +229,14 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
   }
 
   const pick = {
-    concerns: new Set(master.concerns.filter((c) => ACTIVE.includes(c.status)).map((c) => c.key)),
+    concerns: new Set(master.concerns.filter((c) => ACTIVE.includes(c.status) &&
+      (wf.docShowWaiting || phaseOf(wf, c.priority).tracked)).map((c) => c.key)),
     lines: new Set(master.concerns.flatMap((c) => c.lines.map((l) => l.id))),
     prices: new Set(d.showPrices ? master.concerns.filter((c) => c.quote).map((c) => c.key) : []),
     message: "",
   };
   const fileName = `Treatment plan - ${patient.name || "Patient"}.pdf`;
-  const html = () => planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff });
+  const html = () => planDocHtml({ patient, master, track, labelOf, d, lh, pick, staff, wf });
   const lastSent = sends.map((s) => `${s.kind === "print" ? "Printed" : `Emailed to ${s.to}`} ${
     s.sentAt ? new Date(s.sentAt).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : ""}${s.sentBy ? ` by ${s.sentBy}` : ""}`);
 
@@ -220,7 +251,8 @@ export async function openPlanDocument({ patient, master, track, labelOf, staff,
           const lab = labelOf(c.key);
           return `<div class="pd-con" style="--c:${esc(lab.colour)}">
             <label class="fe-check pd-con-name"><input type="checkbox" data-con="${esc(c.key)}"${pick.concerns.has(c.key) ? " checked" : ""} />
-              <strong>${esc(lab.label)}</strong>${ACTIVE.includes(c.status) ? "" : ' <small class="muted">(not active)</small>'}</label>
+              <strong>${esc(lab.label)}</strong>${wf.phases.length > 1 ? ` <small class="muted">${esc(phaseOf(wf, c.priority).name)}</small>` : ""}${
+                ACTIVE.includes(c.status) ? "" : ' <small class="muted">(not active)</small>'}</label>
             ${c.lines.map((l) => `<label class="fe-check pd-line"><input type="checkbox" data-line="${esc(l.id)}" data-of="${esc(c.key)}"${
               pick.lines.has(l.id) ? " checked" : ""} /> ${esc(l.treatment)}</label>`).join("")}
             ${c.quote ? `<label class="fe-check pd-line pd-price"><input type="checkbox" data-price="${esc(c.key)}"${

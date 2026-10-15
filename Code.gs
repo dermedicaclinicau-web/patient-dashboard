@@ -2995,6 +2995,7 @@ const PERMS_ = [
   ['menu.tasks', 'Menus', 'Task Manager'],
   ['patients.edit', 'Patients', 'Add and edit patient details'],
   ['patients.merge', 'Patients', 'Merge duplicate patients'],
+  ['records.move', 'Patients', 'Move records to another patient'],
   ['clinical.view', 'Patients', 'See clinical notes, treatment plans and social history'],
   ['billing.view', 'Patients', 'See billing and prescriptions'],
   ['consult.record', 'Consultations', 'Record consultations and edit notes'],
@@ -4845,7 +4846,29 @@ function planVisits_(pre, todaySvcs, todayKey) {
   return Object.keys(days).sort().map(function (k) { return days[k]; }).filter(function (v) { return v.services.length; });
 }
 
-function planTrackLine_(line, past, future, cur) {
+// The plan workflow (System configuration → Plan workflow). Defaults until it's first saved.
+function planWorkflow_(cfg) {
+  let w = null;
+  try { w = fsGetDoc_(cfg, 'plan_settings/workflow'); } catch (e) { console.warn('Plan workflow not read: ' + e); }
+  let phases = (w && Array.isArray(w.phases) ? w.phases : []).filter(function (p) { return p && p.id; });
+  if (!phases.length) {
+    phases = [{ id: 'p1', name: 'Priority 1 · Now', tracked: true }, { id: 'p2', name: 'Priority 2 · Next', tracked: false },
+      { id: 'p3', name: 'Priority 3 · Later', tracked: false }];
+  }
+  if (!phases.some(function (p) { return p.tracked === true; })) phases[0].tracked = true;
+  return {
+    phases: phases,
+    moved: w && w.moved && typeof w.moved === 'object' ? w.moved : {},
+    waitingKeepsOpen: !(w && w.waitingKeepsOpen === false),
+  };
+}
+function planPhase_(wf, id) {
+  let k = id;
+  for (let i = 0; i < 6 && k && !wf.phases.some(function (p) { return p.id === k; }); i++) k = wf.moved[k];
+  return wf.phases.filter(function (p) { return p.id === k; })[0] || wf.phases[0];
+}
+
+function planTrackLine_(line, past, future, cur, waiting) {
   const ov = line.overrides || {};
   const iv = Number(line.intervalWeeks) || 0;
   const pattern = String(line.pattern || 'unknown');
@@ -4865,8 +4888,10 @@ function planTrackLine_(line, past, future, cur) {
     else if (F.length) s = { state: 'booked', date: F.shift() };
     else if (!total && pattern === 'unknown' && !iv && slots.some(function (x) { return x.state === 'done'; })) break;
     else s = { state: !expected ? 'unscheduled' : expected < cur ? 'overdue' : expected === cur ? 'due' : 'planned' };
+    // A concern in a waiting priority: nothing is due until it's moved up
+    if (waiting && ['done', 'booked', 'skipped'].indexOf(s.state) === -1) s = { state: 'waiting' };
     s.n = n;
-    s.month = s.date ? s.date.slice(0, 7) : expected;
+    s.month = s.date ? s.date.slice(0, 7) : s.state === 'waiting' ? '' : expected;
     s.asked = o.asked || null;
     slots.push(s);
     prev = s;
@@ -4879,7 +4904,7 @@ function planTrackLine_(line, past, future, cur) {
   };
 }
 
-function planTrackConcern_(c, visits, svcMap, fromOf, cur) {
+function planTrackConcern_(c, visits, svcMap, fromOf, cur, waiting) {
   const lines = Array.isArray(c.lines) ? c.lines : [];
   const hits = {};
   lines.forEach(function (l) { hits[l.id] = { past: {}, future: {} }; });
@@ -4907,7 +4932,7 @@ function planTrackConcern_(c, visits, svcMap, fromOf, cur) {
   return out;
 }
 
-function planSummary_(id, plan, pre, todaySvcs, svcMap, todayKey) {
+function planSummary_(id, plan, pre, todaySvcs, svcMap, todayKey, wf) {
   const cur = todayKey.slice(0, 7);
   const createdKey = plan.createdAt ? Utilities.formatDate(new Date(plan.createdAt), PLAN_TZ_, 'yyyy-MM-dd') : '';
   const visits = planVisits_(pre, todaySvcs, todayKey);
@@ -4918,7 +4943,9 @@ function planSummary_(id, plan, pre, todaySvcs, svcMap, todayKey) {
   let started = false;
   const cSum = concerns.map(function (c) {
     const cs = String(c.status || 'active');
-    const tr = planTrackConcern_(c, visits, svcMap, function (l) { return l.countFrom || createdKey; }, cur);
+    const ph = planPhase_(wf, c.priority);
+    const waiting = ph.tracked !== true;
+    const tr = planTrackConcern_(c, visits, svcMap, function (l) { return l.countFrom || createdKey; }, cur, waiting);
     let cStarted = false;
     (c.lines || []).forEach(function (l) {
       const t = tr[l.id];
@@ -4933,17 +4960,21 @@ function planSummary_(id, plan, pre, todaySvcs, svcMap, todayKey) {
         state: t.complete ? 'complete' : nx ? nx.state : 'none', n: nx ? nx.n : 0, total: t.total, done: t.done,
         month: nx ? nx.month || '' : '', date: nx ? nx.date || '' : '',
         askedAt: nx && nx.asked ? String(nx.asked.at || '') : '', askedBy: nx && nx.asked ? String(nx.asked.by || '') : '',
+        phase: String(ph.id || ''), phaseName: String(ph.name || ''), waiting: waiting,
       });
     });
     if (PLAN_ACTIVE_.indexOf(cs) !== -1 && cStarted) started = true;
-    return { key: String(c.key || ''), status: cs, started: cStarted, lines: (c.lines || []).length };
+    return { key: String(c.key || ''), status: cs, started: cStarted, lines: (c.lines || []).length,
+      phase: String(ph.id || ''), phaseName: String(ph.name || ''), waiting: waiting };
   });
 
   // The same automatic status as the plan screen
   const status = String(plan.status || 'proposed');
   let eff = status;
   if (status !== 'closed') {
-    if (concerns.length && !concerns.some(function (c) { return PLAN_ACTIVE_.indexOf(String(c.status || 'active')) !== -1; })) eff = 'completed';
+    const live = concerns.filter(function (c) { return PLAN_ACTIVE_.indexOf(String(c.status || 'active')) !== -1; });
+    const liveTracked = live.filter(function (c) { return planPhase_(wf, c.priority).tracked === true; });
+    if (concerns.length && (!live.length || (!wf.waitingKeepsOpen && !liveTracked.length))) eff = 'completed';
     else if (['proposed', 'sent', 'accepted'].indexOf(status) !== -1 && started) eff = 'in_progress';
   }
   return {
@@ -5001,11 +5032,11 @@ function planProgressRun_(onlyId) {
 
   const ptt = function (p) { return docId_(p.d.patientPttId || p.d.patientId || p.id); };
   const pres = fsBatchGet_(cfg, uniq_(plans.map(function (p) { return ptt(p) ? 'pcn_results/' + ptt(p) : ''; }).filter(Boolean)));
-
+  const wf = planWorkflow_(cfg);
   const writes = plans.map(function (p) {
     const key = ptt(p);
     return updateWrite_(cfg, 'plan_progress/' + p.id,
-      planSummary_(p.id, p.d, pres['pcn_results/' + key] || null, todayById[String(key).toLowerCase()] || [], svcMap, todayKey));
+      planSummary_(p.id, p.d, pres['pcn_results/' + key] || null, todayById[String(key).toLowerCase()] || [], svcMap, todayKey, wf));
   });
   commitWrites_(cfg, writes, 100);
   return writes.length;

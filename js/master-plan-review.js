@@ -1,8 +1,9 @@
 // "Create / update the master plan" from one consultation: review each concern, tick what to apply.
 import { getMasterPlan, planChanges, applyChanges, saveMasterPlan, patternText, monthLabel, matchServices } from "./master-plan-api.js";
-import { getPlanSettings } from "./plan-api.js";
+import { getPlanSettings, getPlanWorkflow, cleanWorkflow } from "./plan-api.js";
 import { CATEGORIES } from "./plan-editor.js";
 import { showToast, toDateKey } from "./utils.js";
+
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const BADGE = {
@@ -20,10 +21,12 @@ export async function openPlanReview({ patient, consult, recordId = "", recordDa
   }
   let master;
   let settings;
+  let wf;
   try {
-    [master, settings] = await Promise.all([
+    [master, settings, wf] = await Promise.all([
       getMasterPlan(patient.id),
       getPlanSettings().catch(() => ({ concerns: [], services: [] })),
+      getPlanWorkflow().catch(() => cleanWorkflow({})),
     ]);
   } catch (err) {
     console.error("Master plan load failed:", err);
@@ -43,7 +46,12 @@ export async function openPlanReview({ patient, consult, recordId = "", recordDa
   const when = recordDate instanceof Date && !isNaN(recordDate)
     ? recordDate.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
   const toApply = items.filter((it) => it.kind !== "same").length;
-
+  // The starting priority for new concerns (the clinician can change it for each one)
+  const defPhase = master && master.concerns.length ? wf.addPhase : wf.newPlanPhase;
+  const phaseSel = (i) => wf.phases.length > 1
+    ? `<select class="fb-select mp-phase" data-phase="${i}" aria-label="Priority">${wf.phases.map((p) =>
+      `<option value="${esc(p.id)}"${p.id === defPhase ? " selected" : ""}>${esc(p.name)}${p.tracked ? "" : " (waiting)"}</option>`).join("")}</select>`
+    : "";
   const dlg = document.createElement("dialog");
   dlg.className = "lh-dialog inv-dlg mp-dlg";
   dlg.innerHTML = `
@@ -62,7 +70,8 @@ export async function openPlanReview({ patient, consult, recordId = "", recordDa
               ? `<select class="fb-select mp-cat" data-cat="${i}" aria-label="Which concern"><option value="">Choose a concern…</option>${
                 CATEGORIES.map((k) => `<option value="${esc(k)}">${esc(con(k).label)}</option>`).join("")}</select>`
               : chip(it.key)}
-              <span class="mp-badge ${BADGE[it.kind][1]}">${BADGE[it.kind][0]}</span></span>
+              <span class="mp-badge ${BADGE[it.kind][1]}">${BADGE[it.kind][0]}</span>
+              ${it.kind === "new" || it.kind === "uncategorised" ? phaseSel(i) : ""}</span>
             ${it.after.description ? `<p class="mp-desc">${esc(it.after.description)}${it.after.area ? ` · <em>${esc(it.after.area)}</em>` : ""}</p>` : ""}
             ${linesHtml(it.after)}
             ${it.before ? `<details class="mp-before"><summary>What the plan has now</summary>${linesHtml(it.before)}</details>` : ""}
@@ -103,10 +112,13 @@ export async function openPlanReview({ patient, consult, recordId = "", recordDa
     for (const box of form.querySelectorAll('[name="pick"]:checked')) {
       const i = Number(box.value);
       const it = items[i];
-      if (it.kind !== "uncategorised") { picks.push(it); continue; }
+      const sel = form.querySelector(`[data-phase="${i}"]`);
+      const priority = sel ? sel.value : defPhase;
+      if (it.kind === "changed") { picks.push(it); continue; }      // keeps its current priority
+      if (it.kind !== "uncategorised") { picks.push({ ...it, after: { ...it.after, priority } }); continue; }
       const key = form.querySelector(`[data-cat="${i}"]`).value;
       if (!key) { err.textContent = "Choose which concern each ticked item belongs to, or untick it."; err.hidden = false; return; }
-      const after = { ...it.after, key, lines: it.after.lines.map((l) => ({ ...l, services: l.services.length ? l.services : matchServices(l.treatment, key, settings.services) })) };
+      const after = { ...it.after, key, priority, lines: it.after.lines.map((l) => ({ ...l, services: l.services.length ? l.services : matchServices(l.treatment, key, settings.services) })) };
       picks.push({ ...it, key, after });
     }
     const evPicks = [...form.querySelectorAll('[name="ev"]:checked')].map((x) => events[Number(x.value)]);

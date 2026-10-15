@@ -80,7 +80,7 @@ export function visitsFrom(pre, today = []) {
 
 // past/future: sorted date keys of visits that count for this line.
 // overrides[n]: { status: "done" | "skipped", date, month (moved), asked: { at, by } }
-function trackLine(line, past, future) {
+function trackLine(line, past, future, waiting = false) {
   const ov = line.overrides || {};
   const iv = line.intervalWeeks || 0;
   const total = line.pattern === "course" ? Math.max(1, line.sessions || 1) : line.pattern === "once" ? 1 : 0; // 0 = ongoing
@@ -101,8 +101,10 @@ function trackLine(line, past, future) {
     else if (F.length) s = { state: "booked", date: F.shift() };
     else if (!total && line.pattern === "unknown" && !iv && slots.some((x) => x.state === "done")) break; // no schedule to follow
     else s = { state: !expected ? "unscheduled" : expected < cur ? "overdue" : expected === cur ? "due" : "planned" };
+    // A concern in a waiting priority: nothing is due until it's moved up
+    if (waiting && !["done", "booked", "skipped"].includes(s.state)) s = { state: "waiting" };
     s.n = n;
-    s.month = s.date ? s.date.slice(0, 7) : expected;
+    s.month = s.date ? s.date.slice(0, 7) : s.state === "waiting" ? "" : expected;
     s.moved = !!o.month && !s.date;
     s.asked = o.asked || null;
     slots.push(s);
@@ -118,7 +120,7 @@ function trackLine(line, past, future) {
 
 // fromOf(concern, line) → date key from which visits count for that line ("" = all)
 // → Map(concernKey → { lines: Map(lineId → track), unmatched })
-export function trackPlan(master, { visits, services, fromOf }) {
+export function trackPlan(master, { visits, services, fromOf, waiting = () => false }) {
   const out = new Map();
   master.concerns.forEach((c) => {
     const hits = new Map(c.lines.map((l) => [l.id, { past: new Set(), future: new Set() }]));

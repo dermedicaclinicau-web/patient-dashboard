@@ -65,6 +65,7 @@ export function cleanConcern(c = {}) {
   return {
     key: canonicalCategory(c.key),
     status: CONCERN_STATUS[c.status] ? c.status : "active",
+    priority: /^[a-z0-9]{2,24}$/.test(String(c.priority || "")) ? c.priority : "",
     description: clip(c.description, 600),
     area: clip(c.area, 200),
     quote: clip(c.quote, 1500),
@@ -89,8 +90,7 @@ function normalisePlan(id, x = {}) {
     patientPttId: String(x.patientPttId || ""),
     patientName: String(x.patientName || ""),
     status: PLAN_STATUS[x.status] ? x.status : "proposed",
-    concerns: (Array.isArray(x.concerns) ? x.concerns : []).map(cleanConcern).filter((c) => c.key)
-      .sort((a, b) => CATEGORIES.indexOf(a.key) - CATEGORIES.indexOf(b.key)),
+    concerns: (Array.isArray(x.concerns) ? x.concerns : []).map(cleanConcern).filter((c) => c.key),
     events: (Array.isArray(x.events) ? x.events : []).map(cleanEvent).filter((e) => e.name),
     sources: Array.isArray(x.sources) ? x.sources.map(String) : [],
     version: Number(x.version) || 0,
@@ -192,13 +192,11 @@ export function applyChanges(master, picks, events) {
     old.lines.forEach((o) => {
       if (Object.keys(o.overrides || {}).length && !lines.some((l) => l.id === o.id)) lines.push(o);
     });
-    concerns[i] = { ...old, ...after, key, lines,
+    concerns[i] = { ...old, ...after, key, lines, priority: old.priority || after.priority,
       status: ["resolved", "not_pursuing"].includes(old.status) ? "active" : old.status };
   });
-  concerns.sort((a, b) => CATEGORIES.indexOf(a.key) - CATEGORIES.indexOf(b.key));
   return { status: master ? master.status : "proposed", concerns, events: [...(master ? master.events : []), ...events] };
 }
-
 /* ---------- Saving (one numbered version at a time, with history) ---------- */
 
 // meta = { action, summary, recordId, expectedVersion } (expectedVersion 0 = creating it)

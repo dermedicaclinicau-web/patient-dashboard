@@ -5,7 +5,7 @@ import {
   getMasterPlan, saveMasterPlan, listPlanHistory, PLAN_STATUS, CONCERN_STATUS, patternText, monthLabel, cleanLine, cleanEvent,
   matchServices, sharesWord,
 } from "./master-plan-api.js";
-import { getPlanSettings, serviceSetup } from "./plan-api.js";
+import { getPlanSettings, serviceSetup, getPlanWorkflow, cleanWorkflow, phaseOf } from "./plan-api.js";
 import { visitsFrom, trackPlan, thisMonth, dateKeyOf, dayLabel, addMonths, monthDiff } from "./plan-track.js";
 import { serviceKey } from "./inventory-api.js";
 import { confirmDialog } from "./dialog.js";
@@ -63,6 +63,7 @@ function slotText(lt, s) {
     case "overdue": return `${base} · overdue since ${monthLabel(s.month)}`;
     case "due": return `${base} · due this month`;
     case "planned": return `${base} · planned ${monthLabel(s.month)}`;
+    case "waiting": return `${base} · waiting (later in the plan)`;   // slotText, before default
     default: return `${base} · not scheduled yet`;
   }
 }
@@ -76,6 +77,7 @@ function chipLabel(s) {
     case "overdue": return `Overdue · ${monthLabel(s.month)}`;
     case "planned": return monthLabel(s.month);
     case "skipped": return "Skipped";
+    case "waiting": return "Waiting";                                  // chipLabel, before default
     default: return "Choose a month";
   }
 }
@@ -88,7 +90,7 @@ function nextText(lt) {
   if (!s) return prog || "No visits yet";
   const what = {
     booked: `booked ${dayLabel(s.date)}`, due: "due this month", overdue: `overdue since ${monthLabel(s.month)}`,
-    planned: `next ${monthLabel(s.month)}`, unscheduled: "next not scheduled",
+    planned: `next ${monthLabel(s.month)}`, unscheduled: "next not scheduled", waiting: "waiting",   // nextText map
   }[s.state] || "";
   return [prog, what].filter(Boolean).join(" · ");
 }
@@ -107,6 +109,7 @@ export function createPlanOverview(el, ctx) {
   const { patient, staff } = ctx;
   const st = {
     master: null, settings: { concerns: [], services: [] }, loaded: false, error: "", busy: false, autoFor: -1,
+    wf: cleanWorkflow({}),
     view: (() => { try { return localStorage.getItem(VIEW_KEY) === "cal" ? "cal" : "list"; } catch { return "list"; } })(),
     calStart: addMonths(thisMonth(), -1),
   };
@@ -117,14 +120,19 @@ export function createPlanOverview(el, ctx) {
     const card = el.closest(".tp-card");
     return card ? card.querySelector(".tp-count") : null;
   };
+  const phase = (c) => phaseOf(st.wf, c.priority);
+  const isWaiting = (c) => !phase(c).tracked;
+  const firstTracked = () => st.wf.phases.find((p) => p.tracked) || st.wf.phases[0];
+  const byPhase = () => st.wf.phases.map((ph) => ({ ph, list: st.master.concerns.filter((c) => phase(c).id === ph.id) }));
 
   async function load() {
     try {
-      const [m, s] = await Promise.all([
+      const [m, s, wf] = await Promise.all([
         getMasterPlan(patient.id),
         getPlanSettings().catch(() => ({ concerns: [], services: [] })),
+        getPlanWorkflow().catch(() => cleanWorkflow({})),
       ]);
-      Object.assign(st, { master: m, settings: s, loaded: true, error: "" });
+      Object.assign(st, { master: m, settings: s, wf, loaded: true, error: "" });
       if (m) refreshProgress();
     } catch (err) {
       console.warn("Master plan failed:", err);
@@ -151,6 +159,7 @@ export function createPlanOverview(el, ctx) {
     return trackPlan(m, {
       visits: visitsFrom(ctx.pre(), ctx.today()),
       services: st.settings.services,
+      waiting: isWaiting,
       fromOf: (c, l) => (l && l.countFrom) || fallback(c),
     });
   }
@@ -161,7 +170,8 @@ export function createPlanOverview(el, ctx) {
   function autoStatus(track) {
     const m = st.master;
     if (m.status === "closed") return m.status;
-    if (m.concerns.length && !m.concerns.some((c) => ACTIVE.includes(c.status))) return "completed";
+    const live = m.concerns.filter((c) => ACTIVE.includes(c.status));
+    if (m.concerns.length && (!live.length || (!st.wf.waitingKeepsOpen && !live.some((c) => !isWaiting(c))))) return "completed";
     if (["proposed", "sent", "accepted"].includes(m.status)) {
       const started = m.concerns.some((c) => ACTIVE.includes(c.status) && c.lines.some((l) =>
         track.get(c.key).lines.get(l.id).slots.some((s) => s.state === "done" || s.state === "booked")));
@@ -223,10 +233,31 @@ export function createPlanOverview(el, ctx) {
     return out;
   }
 
+  // Waiting concerns that could move up: booked early, or every tracked concern is finished
+  function promoteList(track) {
+    if (st.wf.promote === "off") return [];
+    const live = st.master.concerns.filter((c) => ACTIVE.includes(c.status));
+    const waiting = live.filter(isWaiting);
+    if (!waiting.length) return [];
+    const out = waiting
+      .filter((c) => c.lines.some((l) => track.get(c.key).lines.get(l.id).slots.some((s) => s.state === "booked")))
+      .map((c) => ({ c, promote: "early", rank: 0.5 }));
+    const trackedOpen = live.some((c) => !isWaiting(c) && c.status === "active" &&
+      !(c.lines.length && c.lines.every((l) => track.get(c.key).lines.get(l.id).complete)));
+    if (!trackedOpen && !out.length) {
+      const order = st.wf.phases.map((p) => p.id);
+      const next = waiting.slice().sort((a, b) => order.indexOf(phase(a).id) - order.indexOf(phase(b).id))[0];
+      out.push({ c: next, promote: "ready", rank: 3.5 });
+    }
+    return out;
+  }
+
   function needsList(track, clashes, booking) {
     const m = st.master;
     const out = clashes.map((x) => ({ ...x, clash: true, rank: -1 }));
-    if (["completed", "closed"].includes(m.status)) return out;
+    if (m.status === "closed") return out;
+    out.push(...promoteList(track));
+    if (m.status === "completed") return out.sort((a, b) => a.rank - b.rank);
     const clashed = new Set(clashes.map((x) => x.key));
     const rank = { overdue: 0, due: 1, unscheduled: 2 };
     m.concerns.forEach((c) => {
@@ -301,6 +332,15 @@ export function createPlanOverview(el, ctx) {
   }
 
   function needRowHtml(x) {
+    if (x.promote) {
+      return `<div class="po-need is-promote">${chip(x.c.key)}
+        <div class="po-need-main"><strong>${x.promote === "early" ? "Booked early" : "Ready to move up"}</strong>
+          <small>${x.promote === "early"
+            ? `A visit is booked for this concern, but it's in ${esc(phase(x.c).name)}.`
+            : `Every tracked concern is done, in maintenance or not being pursued. This one is next (${esc(phase(x.c).name)}).`}</small></div>
+        <div class="po-need-acts"><button type="button" class="lh-btn is-primary" data-po="promote" ${attrs(x.c)}>Move to ${esc(firstTracked().name)}</button></div>
+      </div>`;
+    }
     if (x.clash) {
       return `<div class="po-need is-clash">${chip(x.c.key)}
         <div class="po-need-main"><strong>${esc(x.l.treatment)} is too close to ${esc(x.e.name)}</strong>
@@ -333,16 +373,21 @@ export function createPlanOverview(el, ctx) {
 
   // Booking reminders are one line that opens; it opens by itself when something is overdue or clashes
   function needsHtml(list, booking, eff) {
-    const quiet = ["proposed", "sent"].includes(eff)
+    const quiet = !booking && ["proposed", "sent"].includes(eff)
       ? '<p class="pv-quiet">Waiting for the patient to agree. Booking reminders appear once the plan is accepted.</p>' : "";
     if (!list.length) return quiet;
-    const book = list.filter((x) => !x.clash && !x.complete).length;
+    const count = (f) => list.filter(f).length;
+    const clash = count((x) => x.clash);
+    const book = count((x) => !x.clash && !x.complete && !x.promote);
+    const fin = count((x) => x.complete);
+    const up = count((x) => x.promote);
     const parts = [
-      list.some((x) => x.clash) && `${list.filter((x) => x.clash).length} too close to a patient event`,
+      clash && `${clash} too close to a patient event`,
       book && `${book} treatment${book === 1 ? "" : "s"} need${book === 1 ? "s" : ""} booking`,
-      list.some((x) => x.complete) && `${list.filter((x) => x.complete).length} concern${list.filter((x) => x.complete).length === 1 ? "" : "s"} finished`,
+      fin && `${fin} concern${fin === 1 ? "" : "s"} finished`,
+      up && `${up} ready to move up`,
     ].filter(Boolean);
-    const open = list.some((x) => x.clash || (x.s && x.s.state === "overdue"));
+    const open = list.some((x) => x.clash || x.promote || (x.s && x.s.state === "overdue"));
     return `${quiet}<details class="pv-needs"${open ? " open" : ""}>
       <summary><span class="pv-needs-dot"></span>${esc(parts.join(" · "))}</summary>
       <div class="pv-needs-list">${list.map(needRowHtml).join("")}</div>
@@ -360,8 +405,10 @@ export function createPlanOverview(el, ctx) {
   function rowHtml(c, l, lt, clashKeys) {
     const price = priceOf(c, l);
     const done = lt.slots.filter((s) => s.state === "done");
-    const shown = lt.total ? lt.slots : [...done.slice(-3), ...lt.slots.filter((s) => s.state !== "done")];
-    const hidden = lt.slots.length - shown.length;
+    const firstWait = lt.slots.find((s) => s.state === "waiting");
+    const shown = firstWait ? lt.slots.filter((s) => s.state !== "waiting").concat(firstWait)
+      : lt.total ? lt.slots : [...done.slice(-3), ...lt.slots.filter((s) => s.state !== "done")];
+    const hidden = firstWait ? 0 : lt.slots.length - shown.length;
     const sub = [patternText(l) || "Schedule not set", lt.total ? `${lt.done} of ${lt.total} done` : ""].filter(Boolean).join(" · ");
     return `<div class="pv-row">
       <div class="pv-tx"><strong>${esc(l.treatment)}</strong><small>${esc(sub)}</small></div>
@@ -376,7 +423,7 @@ export function createPlanOverview(el, ctx) {
   function groupHtml(c, t, clashKeys) {
     const k = con(c.key);
     const off = !ACTIVE.includes(c.status);
-    return `<section class="pv-group${off ? " is-off" : ""}" style="--c:${esc(k.colour)}">
+    return `<section class="pv-group${off ? " is-off" : ""}${isWaiting(c) ? " is-waiting" : ""}" style="--c:${esc(k.colour)}">
       <header class="pv-ghead"><strong>${esc(k.label)}</strong>
         ${c.area ? `<span class="pv-area">${esc(c.area)}</span>` : ""}
         ${c.status !== "active" ? `<span class="pv-cstatus">${esc(CONCERN_STATUS[c.status])}</span>` : ""}
@@ -426,21 +473,26 @@ export function createPlanOverview(el, ctx) {
       `<div class="pcal-cell${k === cur ? " is-now" : ""}" data-month="${k}"${row ? ` data-row="${esc(row)}"` : ""}>${fill(k)}</div>`).join("");
 
     let rows = "";
-    m.concerns.forEach((c) => {
-      const k = con(c.key);
-      const active = ACTIVE.includes(c.status);
-      const t = track.get(c.key);
-      rows += `<div class="pcal-concern${active ? "" : " is-off"}" style="--c:${esc(k.colour)}">${esc(k.label)}${
-        active ? "" : ` <small>${esc(CONCERN_STATUS[c.status])}</small>`}</div>`;
-      c.lines.forEach((l) => {
-        const lt = t.lines.get(l.id);
-        const row = `${c.key}|${l.id}`;
-        const unsched = lt.slots.filter((s) => !s.month && s.state !== "skipped");
-        rows += `<div class="pcal-label${active ? "" : " is-off"}" style="--c:${esc(k.colour)}">
-          <strong>${esc(l.treatment)}</strong><small>${esc(nextText(lt))}</small>
-          ${unsched.map((s) => `<button type="button" class="pcal-uns" data-po="slot" ${attrs(c, l, s.n)}>Session ${s.n}: choose a month</button>`).join("")}
-        </div>${cells(active ? row : "", (mo) => lt.slots.filter((s) => s.month === mo)
-          .map((s) => stepHtml(c, l, lt, s, clashKeys.has(`${row}|${s.n}`), active)).join(""))}`;
+    const many = st.wf.phases.length > 1;
+    byPhase().forEach(({ ph, list }) => {
+      if (!list.length) return;
+      if (many) rows += `<div class="pcal-phase" style="--p:${esc(ph.colour)}">${esc(ph.name)}${ph.tracked ? "" : " · waiting"}</div>`;
+      list.forEach((c) => {
+        const k = con(c.key);
+        const active = ACTIVE.includes(c.status);
+        const t = track.get(c.key);
+        rows += `<div class="pcal-concern${active ? "" : " is-off"}" style="--c:${esc(k.colour)}">${esc(k.label)}${
+          active ? "" : ` <small>${esc(CONCERN_STATUS[c.status])}</small>`}</div>`;
+        c.lines.forEach((l) => {
+          const lt = t.lines.get(l.id);
+          const row = `${c.key}|${l.id}`;
+          const unsched = lt.slots.filter((s) => !s.month && !["skipped", "waiting"].includes(s.state));
+          rows += `<div class="pcal-label${active ? "" : " is-off"}" style="--c:${esc(k.colour)}">
+            <strong>${esc(l.treatment)}</strong><small>${esc(nextText(lt))}</small>
+            ${unsched.map((s) => `<button type="button" class="pcal-uns" data-po="slot" ${attrs(c, l, s.n)}>Session ${s.n}: choose a month</button>`).join("")}
+          </div>${cells(active ? row : "", (mo) => lt.slots.filter((s) => s.month === mo)
+            .map((s) => stepHtml(c, l, lt, s, clashKeys.has(`${row}|${s.n}`), active)).join(""))}`;
+        });
       });
     });
 
@@ -468,6 +520,17 @@ export function createPlanOverview(el, ctx) {
     </section>`;
   }
 
+    // List view: concerns grouped under their priority, in the workflow's order
+  function phasesHtml(track, clashKeys) {
+    const many = st.wf.phases.length > 1;
+    return byPhase().filter((g) => g.list.length).map(({ ph, list }) => `
+      <div class="pv-phase${ph.tracked ? "" : " is-waiting"}" style="--p:${esc(ph.colour)}">
+        ${many ? `<p class="pv-phase-head"><strong>${esc(ph.name)}</strong>${ph.tracked ? "" : '<span class="pv-phase-tag">Waiting</span>'}${
+          ph.note ? `<small>${esc(ph.note)}</small>` : ""}</p>` : ""}
+        ${list.map((c) => groupHtml(c, track.get(c.key), clashKeys)).join("")}
+      </div>`).join("");
+  }
+
   function draw() {
     if (!el.isConnected) return;
     const hint = sectionHint();
@@ -477,7 +540,7 @@ export function createPlanOverview(el, ctx) {
     if (!m) { el.innerHTML = emptyHtml(); if (hint) hint.textContent = "No master plan"; return; }
     const track = compute();
     const eff = autoStatus(track);
-    const booking = BOOKING_STATUSES.includes(eff);
+    const booking = BOOKING_STATUSES.includes(eff) || (st.wf.remindFrom === "proposed" && ["proposed", "sent"].includes(eff));
     const clashes = clashList(track);
     const clashKeys = new Set(clashes.map((x) => x.key));
     const list = needsList(track, clashes, booking);
@@ -488,11 +551,10 @@ export function createPlanOverview(el, ctx) {
       ${needsHtml(list, booking, eff)}
       ${st.view === "cal"
         ? calendarHtml(track, clashKeys)
-        : `${m.concerns.map((c) => groupHtml(c, track.get(c.key), clashKeys)).join("")}${eventsHtml(m)}`}
+        : `${phasesHtml(track, clashKeys)}${eventsHtml(m)}`}
     </div>`;
     if (eff !== m.status) setTimeout(() => saveAutoStatus(eff), 0);
   }
-
   /* ---------- Saving: every change is a new version ---------- */
 
   async function commit(mutate, action, summary) {
@@ -545,7 +607,7 @@ export function createPlanOverview(el, ctx) {
   // The patient's copy: emailing a Proposed plan moves it to "Sent to patient"
   function openDoc() {
     openPlanDocument({
-      patient, master: st.master, track: compute(), labelOf: con, staff,
+      patient, master: st.master, track: compute(), labelOf: con, staff, workflow: st.wf,
       onSent: async (kind) => {
         if (kind === "email" && st.master.status === "proposed") await setPlanStatus("sent");
       },
@@ -587,8 +649,19 @@ export function createPlanOverview(el, ctx) {
 
   function concernMenu(c) {
     const k = con(c.key);
+    const ph = phase(c);
+    const same = st.master.concerns.filter((x) => phase(x).id === ph.id);
+    const at = same.findIndex((x) => x.key === c.key);
     const dlg = openDlg(`
       <div class="lh-dialog-head"><h3>${esc(k.label)}</h3><p>${esc(c.description || "")}</p></div>
+      ${st.wf.phases.length > 1 ? `<div class="lh-field"><span class="lh-label">Priority</span>
+        <div class="pv-radios">${st.wf.phases.map((p) => `
+          <label class="fe-check"><input type="radio" name="phase" value="${esc(p.id)}"${p.id === ph.id ? " checked" : ""} /> ${esc(p.name)}${
+            p.tracked ? "" : ' <small class="muted">(waiting)</small>'}</label>`).join("")}</div></div>` : ""}
+      ${same.length > 1 ? `<div class="po-slot-btns">
+        <button type="button" class="lh-btn" data-act="up"${at === 0 ? " disabled" : ""}>↑ Move up</button>
+        <button type="button" class="lh-btn" data-act="down"${at === same.length - 1 ? " disabled" : ""}>↓ Move down</button>
+        <small class="fe-note">The order within ${esc(ph.name)}</small></div>` : ""}
       <div class="lh-field"><span class="lh-label">Status</span>
         <div class="pv-radios">${Object.entries(CONCERN_STATUS).map(([v, l]) => `
           <label class="fe-check"><input type="radio" name="cstatus" value="${v}"${v === c.status ? " checked" : ""} /> ${l}</label>`).join("")}</div>
@@ -599,15 +672,94 @@ export function createPlanOverview(el, ctx) {
     const form = dlg.querySelector("form");
     form.addEventListener("submit", (e) => e.preventDefault());
     form.addEventListener("change", async (e) => {
-      if (e.target.name !== "cstatus" || st.busy) return;
-      if (await setConcernStatus(c, e.target.value)) dlg.close();
+      if (st.busy) return;
+      if (e.target.name === "phase") { dlg.close(); setConcernPhase(c, e.target.value); return; }
+      if (e.target.name === "cstatus" && await setConcernStatus(c, e.target.value)) dlg.close();
     });
     form.addEventListener("click", (e) => {
       const b = e.target.closest("[data-act]");
-      if (!b) return;
+      if (!b || b.disabled) return;
       if (b.dataset.act === "add") { dlg.close(); editLine(c, null); }
+      else if (b.dataset.act === "up" || b.dataset.act === "down") { dlg.close(); moveConcern(c, b.dataset.act === "up" ? -1 : 1); }
       else if (b.dataset.act === "close") dlg.close();
     });
+  }
+
+  // Up or down within its priority (the plan's order is the order of master.concerns)
+  function moveConcern(c, dir) {
+    const same = st.master.concerns.filter((x) => phase(x).id === phase(c).id);
+    const other = same[same.findIndex((x) => x.key === c.key) + dir];
+    if (!other) return Promise.resolve(false);
+    return commit((p) => {
+      const a = p.concerns.findIndex((x) => x.key === c.key);
+      const b = p.concerns.findIndex((x) => x.key === other.key);
+      [p.concerns[a], p.concerns[b]] = [p.concerns[b], p.concerns[a]];
+    }, dir < 0 ? "Moved a concern up" : "Moved a concern down", `${con(c.key).label}, within ${phase(c).name}`);
+  }
+
+  // Start month for treatments that haven't started, when a concern moves up (null = cancelled)
+  function askStart(c, to) {
+    return new Promise((resolve) => {
+      let val = null;
+      const dlg = openDlg(`
+        <div class="lh-dialog-head"><h3>Move ${esc(con(c.key).label)} to ${esc(to.name)}</h3>
+          <p>When should its treatments start? Sessions already done or booked aren't changed.</p></div>
+        <label class="lh-field"><span class="lh-label">Start month</span><input type="month" name="start" value="${thisMonth()}" /></label>
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">Move</button></div>`);
+      const form = dlg.querySelector("form");
+      dlg.addEventListener("close", () => resolve(val));
+      dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+      form.addEventListener("submit", (e) => {
+        e.preventDefault();
+        const v = form.elements.start.value.trim();
+        if (!MONTH_RE.test(v)) {
+          const er = dlg.querySelector(".lh-error");
+          er.textContent = "Choose a month (e.g. 2026-11).";
+          er.hidden = false;
+          return;
+        }
+        val = v;
+        dlg.close();
+      });
+    });
+  }
+
+  async function setConcernPhase(c, id) {
+    const to = st.wf.phases.find((p) => p.id === id);
+    const from = phase(c);
+    if (!to || to.id === from.id || st.busy) return false;
+    const promoting = to.tracked && !from.tracked;
+    const t = compute().get(c.key);
+    const fresh = new Set(c.lines.filter((l) => !t.lines.get(l.id).slots
+      .some((s) => s.state === "done" || s.state === "booked")).map((l) => l.id));
+    let start = "";
+    if (promoting && fresh.size) {
+      start = st.wf.promoteStart === "this" ? thisMonth()
+        : st.wf.promoteStart === "next" ? addMonths(thisMonth(), 1)
+        : await askStart(c, to);
+      if (start === null) return false;
+    }
+    return commit((p) => {
+      const x = p.concerns.find((y) => y.key === c.key);
+      if (!x) return;
+      x.priority = to.id;
+      if (start) {
+        x.lines.forEach((l) => {
+          if (!fresh.has(l.id)) return;
+          l.startMonth = start;
+          Object.keys(l.overrides || {}).forEach((n) => {
+            delete l.overrides[n].month;                                   // old planned months would be overdue
+            if (!Object.keys(l.overrides[n]).length) delete l.overrides[n];
+          });
+        });
+      }
+      if (promoting && p.status === "completed") p.status = "in_progress";
+      p.concerns.splice(p.concerns.indexOf(x), 1);                         // last in its new priority
+      p.concerns.push(x);
+    }, promoting ? "Moved a concern up" : "Changed a concern's priority",
+    `${con(c.key).label}: ${from.name} → ${to.name}${start ? `, starting ${monthLabel(start)}` : ""}`);
   }
 
   function showQuote(c) {
@@ -693,7 +845,8 @@ export function createPlanOverview(el, ctx) {
     const [lt, s] = slotOf(c, l, n);
     if (!s) return;
     const today = dateKeyOf(new Date());
-    const open = !["done", "booked", "skipped"].includes(s.state);
+    const waiting = s.state === "waiting";
+    const open = !["done", "booked", "skipped", "waiting"].includes(s.state);
     const later = laterOpen(lt, n);
     const dt = downtimeOf(c, l);
     const price = priceOf(c, l);
@@ -703,6 +856,8 @@ export function createPlanOverview(el, ctx) {
       ${s.state === "done" && !s.manual ? `<p class="inv-hint">Matched to the appointment on ${esc(dayLabel(s.date))}, so it's counted automatically.</p>` : ""}
       ${s.state === "done" ? recordsHtml(s.date) : ""}
       ${s.state === "booked" ? `<p class="inv-hint">There's an appointment booked for ${esc(dayLabel(s.date))}. It becomes Done after the visit.</p>` : ""}
+      ${waiting ? `<p class="inv-hint">${esc(con(c.key).label)} is in ${esc(phase(c).name)}, so its sessions aren't scheduled yet.</p>
+        <div class="po-slot-btns"><button type="button" class="lh-btn is-primary" data-act="promote">Move to ${esc(firstTracked().name)}</button></div>` : ""}
       ${open ? `
         <div class="po-slot-row">
           <label class="lh-field"><span class="lh-label">Done on</span><input type="date" name="date" value="${today}" max="${today}" /></label>
@@ -734,6 +889,7 @@ export function createPlanOverview(el, ctx) {
       if (!b || st.busy) return;
       const act = b.dataset.act;
       if (act === "close") { dlg.close(); return; }
+      if (act === "promote") { dlg.close(); setConcernPhase(c, firstTracked().id); return; }
       if (act === "ask") { dlg.close(); askReception(c, l, n); return; }
       if (act === "move") {
         const mo = form.elements.month.value.trim();
@@ -999,6 +1155,7 @@ export function createPlanOverview(el, ctx) {
     const [c, l] = findLine(d.c, d.l);
     if (!c) return;
     if (d.po === "set-concern") setConcernStatus(c, d.v);
+    else if (d.po === "promote") setConcernPhase(c, firstTracked().id);
     else if (d.po === "concern-menu") concernMenu(c);
     else if (d.po === "quote") showQuote(c);
     else if (d.po === "edit-line" && l) editLine(c, l);
