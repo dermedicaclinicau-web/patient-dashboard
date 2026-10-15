@@ -30,6 +30,7 @@ import { listTaskTypes } from "./task-types.js";
 import { listProducts, isKitProduct } from "./inventory-api.js";
 import { openProductPicker } from "./consumables-field.js";
 import { listMarkingSets, openMarkingSetsDialog } from "./marking-sets.js";
+import { listSpecialists, specialitiesOf } from "./specialists-api.js";
 
 const UI = {
   up: '<polyline points="18 15 12 9 6 15"/>',
@@ -124,8 +125,9 @@ export async function mountFormEditor(container, { templateId, staff }) {
   let emailTemplates = [];   // To Patient task types, for the aftercare email
   let products = [];         // inventory products, for the Consumables field
   let markSets = null;       // marking sets, once loaded
+  let specialities = [];     // from the Specialist Bank, for the field's Speciality suggestions
   let previewAnnots = {};    // pictures being drawn on in Preview
-  const ctx = (live) => ({ live, fields, consentForms, prescriptionForms, letterhead, calcValues: null, aftercare: aftercareMap, emailTemplates, products, markSets });
+  const ctx = (live) => ({ live, fields, consentForms, prescriptionForms, letterhead, calcValues: null, aftercare: aftercareMap, emailTemplates, products, markSets, specialities });
   const current = () => fields.find((f) => f.id === sel) || null;
   const signature = () => JSON.stringify(formSnapshot({ name, fields, settings }));
 
@@ -481,6 +483,9 @@ export async function mountFormEditor(container, { templateId, staff }) {
       });
       stage.querySelectorAll("[data-cs-host]").forEach((h) => {
         h.innerHTML = '<p class="fe-help">Staff see their kit and Shelf stock here, and record what they used.</p>';
+      });
+      stage.querySelectorAll("[data-sp-host]").forEach((h) => {
+        h.innerHTML = '<p class="fe-help">Staff choose a specialist from the Specialist Bank here, or add a new one.</p>';
       });
     }
   }
@@ -1177,4 +1182,12 @@ export async function mountFormEditor(container, { templateId, staff }) {
       if (mode === "preview") renderStage();
     })
     .catch((err) => { console.warn("Couldn't load marking sets:", err); markSets = []; });
+    
+    listSpecialists()
+    .then((list) => {
+      specialities = specialitiesOf(list);
+      const f = current();
+      if (root.isConnected && f && f.type === "specialist") renderInspector();
+    })
+    .catch((err) => console.warn("Couldn't load the Specialist Bank:", err));
 }

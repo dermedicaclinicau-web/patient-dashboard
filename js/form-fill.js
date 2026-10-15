@@ -24,6 +24,7 @@ import { mountPhotoField } from "./photo-field.js";
 import { mountConsumablesField, consumablesViewHtml } from "./consumables-field.js";
 import { consumeInTx } from "./inventory-api.js";
 import { listStaffDetails, staffDetailsFor } from "./staff-details.js";
+import { mountSpecialistField } from "./specialist-field.js";
 
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const BAR_ICONS = {
@@ -270,6 +271,8 @@ export function readField(f, w, { pads = {}, calc = {}, consent = {}, annots = {
       const a = annots[f.id];
       return a && !a.isEmpty() ? { drawn: true } : "";
     }
+    case "specialist":
+      return w.spRead ? w.spRead() : "";
     case "consumables":
       return w.csRead ? w.csRead() : { lines: [] };
     case "aftercare":
@@ -387,6 +390,9 @@ function writeField(f, w, v) {
       $all(w, "[data-cpart]").forEach((el) => { el.value = (v && v[el.dataset.cpart]) || ""; });
       break;
     }
+    case "specialist":
+      if (w.spWrite) w.spWrite(v);
+      break;
     case "patient":
       $all(w, "[data-part]").forEach((el) => { el.value = (v && v[el.dataset.part]) || ""; });
       break;
@@ -552,6 +558,10 @@ export async function mountFormFill(container, param, { staff } = {}) {
   };
   fields.filter((f) => f.type === "consumables").forEach((f) => {
     mountConsumablesField(wrap(f.id), f, { staff, onChange: () => { dirty = true; }, linked: linkedValue, linkLabel: linkedLabel });
+  });
+  // Referral specialist: from the Specialist Bank. Staff can add or correct one here.
+  fields.filter((f) => f.type === "specialist").forEach((f) => {
+    mountSpecialistField(wrap(f.id), f, { staff, onChange: () => { dirty = true; } });
   });
 
   // Fill in from the patient's record
@@ -1106,6 +1116,10 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
     }
     if (f.type === "aftercare") {
       mountAftercareField(w, f, { saved: sub.answers[f.id] || null });
+      return;
+    }
+    if (f.type === "specialist") {
+      mountSpecialistField(w, f, { saved: sub.answers[f.id] || null });
       return;
     }
     if (f.type === "consumables") {

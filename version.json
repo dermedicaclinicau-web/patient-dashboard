@@ -1,5 +1,5 @@
 ﻿{
-    "version":  "20261015-113052",
+    "version":  "20261015-120938",
     "files":  [
                   "./js/aftercare-api.js",
                   "./js/aftercare-bank.js",
@@ -106,6 +106,9 @@
                   "./js/skincare.js",
                   "./js/soap-panel.js",
                   "./js/soap.js",
+                  "./js/specialist-bank.js",
+                  "./js/specialist-field.js",
+                  "./js/specialists-api.js",
                   "./js/ssp-api.js",
                   "./js/ssp-builder.js",
                   "./js/ssp-defaults.js",

@@ -6064,3 +6064,27 @@ a.md-quiet:hover { border-color: var(--primary); }
 .ch-editing { display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: .45rem .8rem;
   border-top: 1px solid #fde68a; background: #fffbeb; color: #92400e; font-size: .8rem; font-weight: 600; }
 .ch-editing + .ch-comp { border-top: none; }
+
+/* ---------- Referral specialist + Specialist Bank ---------- */
+.sp-pick { display: grid; gap: .5rem; }
+.sp-acts { display: flex; flex-wrap: wrap; gap: .4rem; }
+.sp-all { font-size: .85rem; }
+.sp-card { margin-top: .6rem; padding: .75rem .9rem; border: 1px solid var(--border); border-radius: 10px; background: #f8fafc; }
+.sp-card.is-sample { opacity: .75; border-style: dashed; }
+.sp-build-pick { display: flex; align-items: center; gap: .5rem; color: var(--muted); font-size: .9rem; }
+.sp-build-pick svg { width: 18px; height: 18px; flex: none; }
+.sp-kv { border-collapse: collapse; }
+.sp-kv td { padding: 2px 16px 2px 0; vertical-align: top; }
+.sp-kv td.k { color: var(--muted); font-size: .85em; }
+.sp-dlg { width: min(560px, calc(100vw - 2rem)); }
+.sp-two { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; }
+.sp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: .9rem; }
+.sp-item { display: flex; flex-direction: column; gap: .3rem; padding: .9rem 1rem; border: 1px solid var(--border); border-radius: 12px; background: #fff; }
+.sp-item.is-off { opacity: .6; }
+.sp-item p { margin: 0; font-size: .9rem; }
+.sp-item-head { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
+.sp-contact a { color: inherit; }
+.sp-notes { color: var(--muted); font-style: italic; }
+.sp-item-foot { display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin-top: auto; padding-top: .4rem; }
+.sp-item-foot span { display: flex; gap: .4rem; }
+@media (max-width: 560px) { .sp-two { grid-template-columns: 1fr; } }

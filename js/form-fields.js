@@ -38,6 +38,7 @@ export const ICONS = {
   space: '<line x1="12" y1="3" x2="12" y2="21"/><polyline points="8 7 12 3 16 7"/><polyline points="8 17 12 21 16 17"/>',
   x: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
   consumables: '<path d="m18 2 4 4"/><path d="m17 7 3-3"/><path d="M19 9 8.7 19.3a2.4 2.4 0 0 1-3.4 0l-.6-.6a2.4 2.4 0 0 1 0-3.4L15 5"/><path d="m9 11 4 4"/><path d="m5 19-3 3"/>',
+  specialist: '<path d="M4 3v6a5 5 0 0 0 10 0V3"/><path d="M9 14v2a5 5 0 0 0 10 0v-3"/><circle cx="19" cy="11" r="2"/>',
   clinician: '<rect x="2" y="5" width="20" height="14" rx="2"/><circle cx="8" cy="12" r="2.5"/><path d="M14 10h5M14 14h4"/>',
 };
 
@@ -68,13 +69,14 @@ export const FIELD_TYPES = {
   watermark:      { name: "Watermark", was: "Watermark", label: "" },
   space:          { name: "Space", was: "Space", label: "" },
   consumables:    { name: "Consumables", was: "Products used stock inventory", label: "Products used" },
+  specialist:     { name: "Referral specialist", was: "Specialist referral doctor letter", label: "Referred to" },
 };
 
 export const FIELD_GROUPS = [
   ["Patient and visit", ["patient", "clinician", "record_date", "date"]],
   ["Answers", ["short_text", "long_text", "number", "email"]],
   ["Choices", ["single_choice", "dropdown", "checkboxes", "checkbox_notes", "sub_checks"]],
-  ["Clinical", ["signature", "consent_status", "prescription_status", "image", "aftercare", "consumables"]],
+  ["Clinical", ["signature", "consent_status", "prescription_status", "image", "aftercare", "consumables", "specialist"]],
   ["Tables and maths", ["table", "calculation"]],
   ["Page layout", ["text_block", "space", "watermark"]],
 ];
@@ -221,7 +223,8 @@ const PLACEHOLDER_TYPES = ["short_text", "long_text", "email", "number", "dropdo
 export const INLINE_TYPES = ["short_text", "email", "number", "date", "record_date", "dropdown", "single_choice", "checkboxes", "calculation"];
 // Fields that get the Layout settings
 const ANSWER_TYPES = ["patient", "clinician", "short_text", "long_text", "email", "number", "date", "record_date", "single_choice",
-  "checkboxes", "checkbox_notes", "sub_checks", "dropdown", "table", "calculation", "signature", "image", "consent_status", "prescription_status"];
+  "checkboxes", "checkbox_notes", "sub_checks", "dropdown", "table", "calculation", "signature", "image", "consent_status", "prescription_status",
+  "specialist"];
 const BOX_TYPES = ["short_text", "email", "number", "date", "record_date", "dropdown"];
 const DRIVE_ID = /^[A-Za-z0-9_-]{10,80}$/;
 const opt = (v, list, dflt) => (list.includes(v) ? v : dflt);
@@ -329,6 +332,31 @@ export function clinicianParts(f) {
 }
 // Short answers that fill in from the staff member's registration details
 export const STAFF_FILLS = ["staff.providerNo", "staff.prescriberNo", "staff.ahpraNo", "staff.quals"];
+// Referral specialist: the details it can show (the name is always shown)
+export const SPECIALIST_PARTS = [
+  ["speciality", "Speciality"], ["practice", "Practice"], ["address", "Address"], ["phone", "Phone"], ["email", "Email"],
+];
+const SP_KEYS = SPECIALIST_PARTS.map((p) => p[0]);
+export function specialistParts(f) {
+  const keys = Array.isArray(f && f.parts) ? f.parts : SP_KEYS;
+  return SPECIALIST_PARTS.filter(([k]) => keys.includes(k));
+}
+// A chosen specialist as an address block (for letters) or a table. Used on the form, the saved form and the PDF.
+export function specialistBlockHtml(f, v) {
+  if (!v || !v.name) return "";
+  const on = specialistParts(f).map(([k]) => k);
+  const val = (k) => String(v[k] || "").trim();
+  const br = (s) => esc(s).replace(/\n/g, "<br>");
+  if (f.show === "table") {
+    return `<table class="kv sp-kv"><tr><td class="k">Name</td><td><strong>${esc(v.name)}</strong></td></tr>${
+      specialistParts(f).filter(([k]) => val(k)).map(([k, l]) => `<tr><td class="k">${esc(l)}</td><td>${br(val(k))}</td></tr>`).join("")}</table>`;
+  }
+  const contact = [on.includes("phone") && val("phone") && `Phone ${esc(val("phone"))}`,
+    on.includes("email") && val("email") && esc(val("email"))].filter(Boolean).join(" · ");
+  const lines = [`<strong>${esc(v.name)}</strong>`,
+    ...["speciality", "practice", "address"].filter((k) => on.includes(k) && val(k)).map((k) => br(val(k))), contact].filter(Boolean);
+  return `<div class="sp-letter" style="line-height:1.5">${lines.join("<br>")}</div>`;
+}
 
 export const SIGNERS = {
   patient: "Patient",
@@ -419,6 +447,7 @@ export function createField(type, id) {
     case "prescription_status": f.consentFormId = ""; f.months = 6; f.block = false; break;
     case "aftercare": f.mode = "fixed"; f.items = []; f.preselect = true; f.emailTemplate = ""; f.confirm = "each"; break;
     case "consumables": f.items = []; f.allowExtra = true; f.ifShort = "flag"; break;
+    case "specialist": f.parts = [...SP_KEYS]; f.speciality = ""; f.allowAdd = true; f.allowEdit = true; f.show = "letter"; break;
   }
   return f;
 }
@@ -608,7 +637,17 @@ export function cleanField(f) {
       out.allowExtra = f.allowExtra !== false;
       out.ifShort = pick(f.ifShort, ["flag", "block"], "flag");
       break;
+    case "specialist": {
+      const parts = (Array.isArray(f.parts) ? f.parts : []).filter((k) => SP_KEYS.includes(k));
+      out.parts = SP_KEYS.filter((k) => parts.includes(k));
+      out.speciality = clip(f.speciality, 80).trim();
+      out.allowAdd = f.allowAdd !== false;
+      out.allowEdit = f.allowEdit !== false;
+      out.show = pick(f.show, ["letter", "table"], "letter");
+      break;
+    }
 }
+
   const sw = cleanCondition(f);
   if (PREFILL_TYPES.includes(f.type)) {
     const v = f.prefill;
@@ -909,6 +948,14 @@ export function renderField(f, ctx = {}) {
         : `<div class="fe-img-empty">${svg(ICONS.consumables)}<span>Choose products in the settings panel</span></div>`) +
         (f.allowExtra !== false ? '<div class="fe-help fe-help-after">Staff can add other products while filling in.</div>' : "");
     }
+    case "specialist": {
+      if (live) return head + '<div class="sp-host" data-sp-host><p class="fe-help">Loading specialists…</p></div>';
+      const sample = { name: "Dr Jane Smith", speciality: f.speciality || "Dermatologist", practice: "Example Skin Specialists",
+        address: "12 Example St, Perth WA 6000", phone: "08 9000 0000", email: "reception@example.com" };
+      return head + `<div class="sp-build-pick">${svg(ICONS.specialist)}<span>Staff choose from the Specialist Bank${
+        f.speciality ? ` (${esc(f.speciality)})` : ""}${f.allowAdd !== false ? ", or add a new one" : ""}. Example:</span></div>` +
+        `<div class="sp-card is-sample">${specialistBlockHtml(f, sample)}</div>`;
+    }
     case "letterhead":
       return letterheadHtml(ctx.letterhead);
     case "watermark": {
@@ -1158,7 +1205,21 @@ function typeSettings(f, ctx = {}) {
           setting("Before the result", `<input class="fe-input" data-k="prefix" maxlength="10" placeholder="$" value="${esc(f.prefix || "")}" />`)}${
           setting("After the result", `<input class="fe-input" data-k="suffix" maxlength="20" placeholder=" units" value="${esc(f.suffix || "")}" />`)}</div>`;
     }
-
+    case "specialist": {
+      const on = specialistParts(f).map(([k]) => k);
+      return setting("Speciality to list", `<input class="fe-input" data-k="speciality" maxlength="80" list="sp-spec-list" placeholder="Any speciality" value="${esc(f.speciality || "")}" />
+          <datalist id="sp-spec-list">${(ctx.specialities || []).map((s) => `<option value="${esc(s)}"></option>`).join("")}</datalist>`,
+          "Optional. Only these specialists are listed; staff can tick to see everyone.") +
+        setting("Show as", choose("show", [["letter", "Address block (for letters)"], ["table", "Table"]], f.show || "letter")) +
+        `<div class="fe-insp-field"><span class="fe-insp-label">Details to show</span>
+          <div class="fe-parts">${SPECIALIST_PARTS.map(([k, l]) =>
+            `<label class="fe-check"><input type="checkbox" data-sppart="${k}"${on.includes(k) ? " checked" : ""} /> ${esc(l)}</label>`).join("")}</div>
+          <small class="fe-note">The name is always shown. Notes for staff are never printed.</small></div>` +
+        `<label class="fe-check"><input type="checkbox" data-k="allowAdd"${f.allowAdd !== false ? " checked" : ""} /> Staff can add a new specialist while filling in</label>` +
+        `<label class="fe-check"><input type="checkbox" data-k="allowEdit"${f.allowEdit !== false ? " checked" : ""} /> Staff can correct a specialist's details while filling in</label>` +
+        '<p class="fe-note fe-pad">New and corrected specialists are saved to the Specialist Bank for everyone. A saved letter keeps the details it was saved with.</p>' +
+        '<a class="lh-btn" href="#/specialist-bank" target="_blank" rel="noopener">Open the Specialist Bank</a>';
+    }
     case "watermark": {
       const logo = f.source === "logo";
       const hasLogo = !!(ctx.letterhead && ctx.letterhead.logo);
@@ -1450,6 +1511,12 @@ export function prefillSettings(f) {
 // Typing in table columns, sub-option groups, patient detail ticks and layout buttons.
 // Returns true if it changed something.
 export function applyInput(f, el) {
+  if (el.dataset.sppart !== undefined) {
+    const on = new Set(specialistParts(f).map(([k]) => k));
+    if (el.checked) on.add(el.dataset.sppart); else on.delete(el.dataset.sppart);
+    f.parts = SP_KEYS.filter((k) => on.has(k));
+    return true;
+  }
   if (el.dataset.prefill !== undefined) {
     const s = new Set(Array.isArray(f.prefill) ? f.prefill : []);
     if (el.checked) s.add(el.dataset.prefill); else s.delete(el.dataset.prefill);

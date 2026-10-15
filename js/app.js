@@ -14,6 +14,7 @@ import { initFormPicker, closeFormPicker } from "./form-picker.js";
 import { mountImageBank } from "./image-bank.js";
 import { mountTaskManager } from "./task-manager.js";
 import { mountAftercareBank } from "./aftercare-bank.js";
+import { mountSpecialistBank } from "./specialist-bank.js";
 import { mountSspProductsPage } from "./ssp-products.js";
 import { mountSspBuilder } from "./ssp-builder.js";
 import { mountStaffManager } from "./staff-manager.js";
@@ -242,6 +243,7 @@ const PAGES = {
   "form-record": (el, id) => mountFormRecord(el, id, { staff: currentStaff }),
   "image-bank": (el) => mountImageBank(el, { isAdmin: can("forms.build") }),
   "aftercare-bank": (el) => mountAftercareBank(el, { isAdmin: can("forms.build"), staff: currentStaff }),
+  "specialist-bank": (el) => mountSpecialistBank(el, { staff: currentStaff }),
   "ssp-products": (el) => mountSspProductsPage(el, { isAdmin: can("ssp.config"), staff: currentStaff }),
   ssp: (el, param) => {
     const [, pid = ""] = String(param || "").split("/"); // #/ssp/new/<patientId>
@@ -260,7 +262,7 @@ const PAGES = {
 const PAGE_PERM = {
   patients: "menu.patients", patient: "menu.patients", fill: "menu.patients", "form-record": "menu.patients",
   ssp: "ssp.create", calendar: "menu.calendar", forms: "menu.forms",
-  "image-bank": "forms.build", "aftercare-bank": "forms.build", "ssp-products": "ssp.config",
+  "image-bank": "forms.build", "aftercare-bank": "forms.build", "specialist-bank": "menu.forms", "ssp-products": "ssp.config",
   tasks: "menu.tasks", inventory: "menu.inventory", reports: "menu.reports", staff: "admin", settings: "admin",
   scanner: "menu.scanner",
 };
@@ -294,7 +296,7 @@ function router() {
   try { param = decodeURIComponent(rest.join("/")); } catch { /* malformed URL, ignore */ }
 
   const navKey = ["patient", "fill", "form-record", "ssp"].includes(page) ? "patients"
-    : ["image-bank", "aftercare-bank", "ssp-products"].includes(page) ? "forms" : page;
+    : ["image-bank", "aftercare-bank", "ssp-products", "specialist-bank"].includes(page) ? "forms" : page;
     els.navItems.forEach((a) => {
     const active = a.dataset.page === navKey;
     a.classList.toggle("active", active);

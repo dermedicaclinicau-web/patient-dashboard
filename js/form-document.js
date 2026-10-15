@@ -4,7 +4,9 @@
 // backup PDF converter can render it too.)
 import { formatCalc } from "./form-calc.js";
 import { visibleIds } from "./form-conditions.js";
-import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing, textBlockHtml, clinicianParts, tableCols, tableHeadAlign } from "./form-fields.js";
+import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing, textBlockHtml, clinicianParts, tableCols, tableHeadAlign,
+specialistParts, specialistBlockHtml,
+ } from "./form-fields.js";
 import { cleanRichHtml } from "./rich-html.js";
 import { markSummary } from "./marking-sets.js";
 
@@ -182,6 +184,9 @@ function blankAnswer(f) {
       return "";
     case "calculation":
       return '<span class="bl-in" style="width:140px"></span>';
+    case "specialist":
+      return `<table class="kv"><tr><td class="k">Name</td><td><span class="bl-in" style="width:320px"></span></td></tr>${
+        specialistParts(f).map(([, l]) => `<tr><td class="k">${esc(l)}</td><td><span class="bl-in" style="width:320px"></span></td></tr>`).join("")}</table>`;
     default:
       return line;
   }
@@ -260,6 +265,8 @@ function answer(f, v, sig, inline, x, blank = false) {
       return `<table class="kv">${clinicianParts(f).map(([k, l]) =>
         `<tr><td class="k">${esc(l)}</td><td>${d[k] ? esc(d[k]) : '<span class="none">—</span>'}</td></tr>`).join("")}</table>`;
     }
+    case "specialist":
+      return v && typeof v === "object" && v.name ? specialistBlockHtml(f, v) : none;
     case "consent_status":
     case "prescription_status": {
       const rx = f.type === "prescription_status";

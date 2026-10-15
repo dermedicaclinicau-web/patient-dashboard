@@ -68,6 +68,36 @@ service cloud.firestore {
       return v is string && v.size() <= 500 && (v == '' || v.matches('https://[^ ]+'));
     }
 
+    // Specialist Bank: everyone can read, add and correct; archiving needs Form Builder access
+    match /specialists/{id} {
+      function canBuild() {
+        return request.auth.token.get('perms', []).hasAny(['forms.build']);
+      }
+      function validSpecialist(d) {
+        return d.keys().hasOnly(['name', 'nameKey', 'speciality', 'practice', 'phone', 'email', 'address', 'notes', 'active',
+                                 'createdAt', 'createdBy', 'createdByUid', 'updatedAt', 'updatedBy', 'updatedByUid'])
+          && d.name is string && d.name.size() > 0 && d.name.size() <= 120
+          && d.speciality is string && d.speciality.size() <= 80
+          && d.practice is string && d.practice.size() <= 150
+          && d.phone is string && d.phone.size() <= 40
+          && d.email is string && d.email.size() <= 254
+          && d.address is string && d.address.size() <= 300
+          && d.notes is string && d.notes.size() <= 1000
+          && d.active is bool;
+      }
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && validSpecialist(request.resource.data)
+        && request.resource.data.active == true
+        && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.updatedByUid == request.auth.uid;
+      allow update: if request.auth != null && validSpecialist(request.resource.data)
+        && request.resource.data.createdByUid == resource.data.createdByUid
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedByUid == request.auth.uid
+        && (request.resource.data.active == resource.data.active || canBuild());
+      allow delete: if false;
+    }
+    
     // Aftercare instructions: only these fields are checked, so anything else your existing tool stores is left alone
     function validAftercare(d) {
       return d['Aftercare Title'] is string
