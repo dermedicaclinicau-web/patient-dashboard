@@ -1,5 +1,6 @@
 // My dashboard (#/home): a personal summary for whoever is logged in.
 // Only reads existing data: kits, borrows, JT releases, requests, treatment usage and saved forms.
+// Today strip and quick actions at the top; each person can reorder, hide and collapse the cards (kept on this device).
 import { can, isInjector } from "./perms.js";
 import {
   listProducts, listAllLots, listKits, listLoans, listReleases, listRequests, listMyUsage, listShortUsage, listPos,
@@ -15,6 +16,7 @@ import { completeReminder } from "./reminders.js";
 import { showToast } from "./utils.js";
 import { renderDayCard } from "./staff-days.js";
 import { openStartOfDayKit } from "./start-of-day.js";
+import { mountMyNotes } from "./my-notes.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(1));
@@ -28,6 +30,13 @@ const ICON = {
   alert: '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
   ok: '<polyline points="20 6 9 17 4 12"/>',
   refresh: '<polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>',
+  count: '<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><polyline points="9 14 11 16 15 12"/>',
+  kit: '<path d="m18 2 4 4"/><path d="m17 7 3-3"/><path d="M19 9 8.7 19.3a2.4 2.4 0 0 1-3.4 0l-.6-.6a2.4 2.4 0 0 1 0-3.4L15 5"/><path d="m9 11 4 4"/>',
+  scan: '<path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><line x1="7" y1="12" x2="17" y2="12"/>',
+  box: '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/>',
+  note: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="14 3 14 9 20 9"/><line x1="8" y1="14" x2="14" y2="14"/>',
+  cal: '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
+  chev: '<polyline points="6 9 12 15 18 9"/>',
 };
 const svg = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const card = (title, inner, cls = "", link = "") => `
@@ -35,15 +44,32 @@ const card = (title, inner, cls = "", link = "") => `
     <div class="md-card-head"><h3>${esc(title)}</h3>${link}</div>
     ${inner}
   </section>`;
+// An empty card shrinks to one line
+const quiet = (title, text, href = "") => (href
+  ? `<a class="md-card md-quiet" href="${href}"><strong>${esc(title)}</strong><span>${esc(text)}</span><i aria-hidden="true">›</i></a>`
+  : `<div class="md-card md-quiet"><strong>${esc(title)}</strong><span>${esc(text)}</span></div>`);
 
+// The cards, in their default order. "notes" is for everyone; the rest need their dash.* tick.
 const DASH_CARDS = [
-  ["attention", "Needs my attention"], ["days", "Start & end of day"], ["appts", "My appointments & notes"], ["tasks", "Tasks"],
-  ["kit", "My kit"], ["records", "My records"], ["usage", "What I used"],
+  ["attention", "Needs my attention"], ["appts", "My appointments & notes"], ["tasks", "Tasks"], ["notes", "My notes"],
+  ["days", "Start & end of day"], ["kit", "My kit"], ["records", "My records"], ["usage", "What I used"],
   ["requests", "My requests"], ["stock", "Stock I use"], ["overview", "Clinic overview"],
 ];
+const allowedCard = (k) => k === "notes" || can(`dash.${k}`);
+
+// Per person, on this device: hidden cards, collapsed cards and the card order
+const readSet = (key) => { try { return new Set(JSON.parse(localStorage.getItem(key) || "[]")); } catch { return new Set(); } };
+const writeSet = (key, set) => { try { localStorage.setItem(key, JSON.stringify([...set])); } catch { /* private mode */ } };
 const hideKey = (uid) => `dm.dash.hidden.${uid}`;
-const readHidden = (uid) => { try { return new Set(JSON.parse(localStorage.getItem(hideKey(uid)) || "[]")); } catch { return new Set(); } };
-const writeHidden = (uid, set) => { try { localStorage.setItem(hideKey(uid), JSON.stringify([...set])); } catch { /* private mode */ } };
+const foldKey = (uid) => `dm.dash.collapsed.${uid}`;
+const orderKey = (uid) => `dm.dash.order.${uid}`;
+const readOrder = (uid) => { try { const a = JSON.parse(localStorage.getItem(orderKey(uid)) || "[]"); return Array.isArray(a) ? a : []; } catch { return []; } };
+const writeOrder = (uid, list) => { try { localStorage.setItem(orderKey(uid), JSON.stringify(list)); } catch { /* private mode */ } };
+// Saved order first; cards that are new since then keep their default place at the end
+const byOrder = (list, order) => {
+  const pos = (k) => { const i = order.indexOf(k); return i === -1 ? 1000 + DASH_CARDS.findIndex(([x]) => x === k) : i; };
+  return [...list].sort((a, b) => pos(a[0]) - pos(b[0]));
+};
 
 // Today's appointments for this staff member (matched on their name in the schedule)
 async function myAppointments(staff, key) {
@@ -67,7 +93,7 @@ async function openTasks() {
 }
 const TASK_TAB_KEY = "dm.dash.tasktab";
 const readTaskTab = () => { try { return localStorage.getItem(TASK_TAB_KEY) || "mine"; } catch { return "mine"; } };
-const saveTaskTab = (v) => { try { localStorage.setItem(TASK_TAB_KEY, v); } catch { /* private mode */ } };  
+const saveTaskTab = (v) => { try { localStorage.setItem(TASK_TAB_KEY, v); } catch { /* private mode */ } };
 
 // My consultation notes (from recordings), newest first. Reviewed or still a Draft.
 async function myNotes(staff) {
@@ -107,7 +133,8 @@ export async function mountMyDashboard(container, { staff } = {}) {
   root.innerHTML = `
     <div class="fb-head">
       <div><h2>${greet}${first ? `, ${esc(first)}` : ""}</h2>
-        <p class="muted">${esc(new Date().toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long", year: "numeric" }))}</p></div>
+        <p class="muted">${esc(new Date().toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long", year: "numeric" }))}
+          · <span data-role="updated">loading…</span></p></div>
       <div class="fb-head-actions">
         <button type="button" class="btn-ghost" data-act="customise">Customise</button>
         <button type="button" class="btn-ghost" data-act="refresh">${svg(ICON.refresh)} Refresh</button>
@@ -123,14 +150,26 @@ export async function mountMyDashboard(container, { staff } = {}) {
   const canJt = canManage || can("inventory.jt");
   const canReq = can("inventory.request");
   const canReport = can("menu.reports");
+  const canCount = can("inventory.count") || canOrder;
   const safe = (p, fallback) => Promise.resolve(p).catch((err) => { console.warn("Dashboard:", err); return fallback; });
-  
+
   let drawTasks = () => {};
+  let loadedAt = 0;
+
+  // "Updated 2 min ago", kept current while the page is open
+  const updatedEl = root.querySelector('[data-role="updated"]');
+  const tickUpdated = () => {
+    if (!root.isConnected) { clearInterval(updTimer); return; }
+    if (!loadedAt) return;
+    const mins = Math.floor((Date.now() - loadedAt) / 60000);
+    updatedEl.textContent = mins < 1 ? "updated just now" : `updated ${mins} min ago`;
+  };
+  const updTimer = setInterval(tickUpdated, 30000);
 
   async function load() {
     const me0 = myUid();
-    const hidden = readHidden(me0);
-    const show = (k) => can(`dash.${k}`) && !hidden.has(k);
+    const hidden = readSet(hideKey(me0));
+    const show = (k) => allowedCard(k) && !hidden.has(k);
     const todayKey = dayKey();
     const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts, notes, formsT, invs, unrec, countCfg, myDay] = await Promise.all([
       safe(listProducts(), []),
@@ -177,23 +216,32 @@ export async function mountMyDashboard(container, { staff } = {}) {
     // What's been counted today (by anyone): Shelf/JT per product, kits per lot
     const doneKeys = new Set(countsToday.flatMap((c) => c.lines.map((l) =>
       l.loc === "kit" ? `kit|${l.ref}` : c.kind === "opening" ? `${l.productId}|${l.loc}` : "")));
-    // Opening count: Shelf / JT storage, plus every injector's kit for kit products due today
-    if (can("inventory.count") || canOrder) {
-      const dueKeys = products.filter((p) => countDue(p)).flatMap((p) => [
-        ...countLocs(p).map((loc) => `${p.id}|${loc}`),
-        ...(isKitProduct(p) ? kits.filter((k) => k.productId === p.id).map((k) => `kit|${k.id}`) : []),
-      ]);
-      const left = dueKeys.filter((k) => !doneKeys.has(k)).length;
-           if (left) {
+    // Opening count: the Shelf, JT-only products and every injector's kit for kit products due today.
+    // JT storage is optional for products also counted on the Shelf (the same rule as the count page and the card).
+    let countLeft = null;
+    let countLate = false;
+    let countDueText = "";
+    if (canCount) {
+      const dueKeys = products.filter((p) => countDue(p)).flatMap((p) => {
+        const locs = countLocs(p);
+        return [
+          ...locs.filter((loc) => !(loc === "jt" && locs.includes("shelf"))).map((loc) => `${p.id}|${loc}`),
+          ...(isKitProduct(p) ? kits.filter((k) => k.productId === p.id).map((k) => `kit|${k.id}`) : []),
+        ];
+      });
+      if (dueKeys.length) {
+        countLeft = dueKeys.filter((k) => !doneKeys.has(k)).length;
         const [dh, dm] = String(countCfg.dueBy || "10:00").split(":").map(Number);
         const nowD = new Date();
-        const late = nowD.getHours() * 60 + nowD.getMinutes() >= dh * 60 + dm;
-        const dueText = `${((dh + 11) % 12) + 1}:${String(dm).padStart(2, "0")}${dh < 12 ? "am" : "pm"}`;
-        att.push({ tone: late ? "bad" : "warn",
-          text: late ? `Opening count overdue (due ${dueText}): ${left} still to count` : `Opening count: ${left} still to count (due ${dueText})`,
-          href: "#/tasks/count", act: "Count now" });
+        countLate = nowD.getHours() * 60 + nowD.getMinutes() >= dh * 60 + dm;
+        countDueText = `${((dh + 11) % 12) + 1}:${String(dm).padStart(2, "0")}${dh < 12 ? "am" : "pm"}`;
+        if (countLeft) {
+          att.push({ tone: countLate ? "bad" : "warn",
+            text: countLate ? `Opening count overdue (due ${countDueText}): ${countLeft} still to count` : `Opening count: ${countLeft} still to count (due ${countDueText})`,
+            href: "#/tasks/count", act: "Count now" });
+        }
       }
-    }  
+    }
     // Reporting: differences and saved-short records waiting for someone
     if (canReport) {
       const diffs = openCounts.reduce((a, c) => a + (Number(c.openCount) || 0), 0);
@@ -205,8 +253,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     }
     // Investigations: recounts for the onsite team (never the first counter, unless allowed), reviews for admins
     if (invs.length) {
-      const counter = can("inventory.count") || canOrder;
-      const recounts = counter ? invs.filter((v) => v.status === "recount" && (v.openedByUid !== me || v.aloneApproved === true)) : [];
+      const recounts = canCount ? invs.filter((v) => v.status === "recount" && (v.openedByUid !== me || v.aloneApproved === true)) : [];
       if (recounts.length === 1) {
         att.push({ tone: "warn", text: `Recount needed: ${recounts[0].productName} (${recounts[0].loc === "jt" ? "JT storage" : "Shelf"})`,
           href: `#/inventory/investigations/${encodeURIComponent(recounts[0].id)}`, act: "Recount" });
@@ -306,6 +353,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
               ? `<button type="button" class="lh-btn" data-ttab="${esc(a.ttab)}" data-goto="tasks">${esc(a.act)}</button>`
               : `<a class="lh-btn" href="${a.href}">${esc(a.act)}</a>`}</li>`).join("")}</ul>`
       : `<p class="md-clear">${svg(ICON.ok)} Nothing needs you right now.</p>`, "md-wide");
+
     /* ---------- My kit ---------- */
     const kitProducts = products.filter((p) => p.active && isKitProduct(p));
     const kitHtml = !canKit || !kitProducts.length ? "" : card("My kit", `<div class="md-kits">${kitProducts.map((p) => {
@@ -342,7 +390,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     }));
     const amt = (a, n) => (a.plain ? plural(+fmt(n), a.unit) : `${fmt(n)} ${a.unit}`);
     const usedRows = [...agg.values()].sort((a, b) => a.name.localeCompare(b.name));
-    const usedHtml = !usedRows.length ? "" : card("What I used", `<table class="inv-table md-used">
+    const usedHtml = !usedRows.length ? quiet("What I used", "Nothing recorded in the last 30 days") : card("What I used", `<table class="inv-table md-used">
       <thead><tr><th>Product</th><th>Last 7 days</th><th>Last 30 days</th><th>Discarded</th></tr></thead><tbody>${usedRows.map((a) => `
         <tr><td>${esc(a.name)}</td><td>${a.week ? esc(amt(a, a.week)) : "—"}</td><td>${esc(amt(a, a.month))}</td>
           <td>${a.waste ? esc(`${fmt(a.waste)} ${a.unit}`) : "—"}</td></tr>`).join("")}</tbody></table>`);
@@ -355,7 +403,9 @@ export async function mountMyDashboard(container, { staff } = {}) {
       ...myRels.map((r) => ({ at: r.createdAt, label: `JT storage · ${plural(r.qty, r.unit)} of ${r.productName}`,
         status: r.status, statusText: REL_STATUS[r.status], href: "#/inventory/kits" })),
     ].sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0)).slice(0, 8);
-    const reqHtml = !reqItems.length ? "" : card("My requests", `<ul class="md-list">${reqItems.map((r) => `<li><a href="${r.href}">
+    const reqHtml = !reqItems.length
+      ? quiet("My requests", canReq ? "None yet · request an order" : "None yet", canReq ? "#/tasks/order" : "")
+      : card("My requests", `<ul class="md-list">${reqItems.map((r) => `<li><a href="${r.href}">
         <span>${esc(r.label)}</span><span class="rq-status is-${esc(r.status)}">${esc(r.statusText)}</span><small>${esc(shortDay(r.at))}</small></a></li>`).join("")}</ul>`,
       "", canReq ? '<a class="md-link" href="#/tasks/order">+ Request order</a>' : "");
 
@@ -367,7 +417,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
       return `<tr><td>${esc(p.name)}</td><td>${esc(plural(p.stock.shelf, p.stockUnit))}</td><td>${esc(plural(p.stock.jt, p.stockUnit))}</td>
         <td>${flag ? `<span class="inv-flag is-${flag[0]}">${esc(flag[1])}</span>` : ""}</td></tr>`;
     });
-    const stockHtml = !stockRows.length ? "" : card("Stock I use", `<table class="inv-table">
+    const stockHtml = !stockRows.length ? quiet("Stock I use", "Shows once you record products in a treatment") : card("Stock I use", `<table class="inv-table">
       <thead><tr><th>Product</th><th>Shelf</th><th>JT storage</th><th></th></tr></thead><tbody>${stockRows.join("")}</tbody></table>`,
       "", '<a class="md-link" href="#/inventory/stock">Open Inventory</a>');
 
@@ -491,19 +541,130 @@ export async function mountMyDashboard(container, { staff } = {}) {
       if (el) el.innerHTML = tasksInner();
     };
     const tasksHtml = card("Tasks", `<div data-role="tasks-card">${tasksInner()}</div>`, "md-tasks-card");
-    
-    /* ---------- Start & end of day (Admins): filled in by staff-days.js ---------- */
+
+    /* ---------- My notes (filled in by my-notes.js) and Start & end of day (Admins, by staff-days.js) ---------- */
+    const notesHtml = '<section class="md-card md-notes-card" data-role="notes"></section>';
     const daysHtml = '<section class="md-card md-wide" data-role="days"></section>';
-    const CARDS = [["attention", attentionHtml], ["days", daysHtml], ["appts", apptHtml], ["tasks", tasksHtml], ["kit", kitHtml],
-      ["records", recordsHtml], ["usage", usedHtml], ["requests", reqHtml], ["stock", stockHtml], ["overview", overviewHtml]];
-    const shown = CARDS.filter(([k, h]) => h && show(k));
-    body.innerHTML = shown.length
+
+    /* ---------- Today strip ---------- */
+    const strip = [];
+    if (sodPending) strip.push({ tone: "warn", icon: ICON.kit, text: "Kit count not done", sod: true });
+    if (countLeft !== null) {
+      strip.push(countLeft
+        ? { tone: countLate ? "bad" : "warn", icon: ICON.count, text: `Opening count: ${countLeft} left · ${countLate ? "overdue" : `due ${countDueText}`}`, href: "#/tasks/count" }
+        : { tone: "ok", icon: ICON.count, text: "Opening count done ✓", href: "#/tasks/count" });
+    }
+    if (show("appts")) {
+      const next = appts.find((a) => Number(a.sortMinutes) >= nowMin);
+      strip.push({ tone: "info", icon: ICON.cal, goto: "appts",
+        text: appts.length ? `${appts.length} appointment${appts.length === 1 ? "" : "s"}${next && next.time ? ` · next ${next.time}` : ""}` : "No appointments today" });
+    }
+    if (drafts.length) strip.push({ tone: "warn", icon: ICON.note, text: `${drafts.length} note${drafts.length === 1 ? "" : "s"} to review`, notesId: drafts[drafts.length - 1].id });
+    if (show("tasks")) {
+      const od = mineList.filter((t) => t.dueDate && t.dueDate < todayKey).length;
+      const due = mineList.filter((t) => t.dueDate && t.dueDate <= todayKey).length;
+      strip.push({ tone: od ? "bad" : due ? "warn" : "ok", icon: ICON.ok, ttab: "mine",
+        text: due ? `${due} task${due === 1 ? "" : "s"} due${od ? ` · ${od} overdue` : ""}` : "No tasks due" });
+    }
+    const pillHtml = (p) => {
+      const inner = `${svg(p.icon)}<span>${esc(p.text)}</span>`;
+      const cls = `md-pill is-${p.tone}`;
+      if (p.href) return `<a class="${cls}" href="${p.href}">${inner}</a>`;
+      if (p.sod) return `<button type="button" class="${cls}" data-sod="1">${inner}</button>`;
+      if (p.notesId) return `<button type="button" class="${cls}" data-notes="${esc(p.notesId)}">${inner}</button>`;
+      if (p.ttab) return `<button type="button" class="${cls}" data-ttab="${p.ttab}" data-goto="tasks">${inner}</button>`;
+      return `<button type="button" class="${cls}" data-goto-card="${esc(p.goto)}">${inner}</button>`;
+    };
+    const stripHtml = strip.length ? `<div class="md-strip">${strip.map(pillHtml).join("")}</div>` : "";
+
+    /* ---------- Quick actions (only what this person can do) ---------- */
+    const qa = [
+      canCount && `<a class="md-qa" href="#/tasks/count">${svg(ICON.count)}Start the count</a>`,
+      canKit && `<a class="md-qa" href="#/tasks/count/kit">${svg(ICON.kit)}Check my kit</a>`,
+      can("menu.scanner") && `<a class="md-qa" href="#/scanner">${svg(ICON.scan)}Scan</a>`,
+      canReq && `<a class="md-qa" href="#/tasks/order">${svg(ICON.box)}Request stock</a>`,
+      show("notes") && `<button type="button" class="md-qa" data-act="new-note">${svg(ICON.note)}New note</button>`,
+      can("menu.calendar") && `<a class="md-qa" href="#/calendar">${svg(ICON.cal)}Calendar</a>`,
+    ].filter(Boolean);
+    const qaHtml = qa.length ? `<div class="md-qas">${qa.join("")}</div>` : "";
+
+    /* ---------- The cards, in this person's order ---------- */
+    const CARDS = [["attention", attentionHtml], ["appts", apptHtml], ["tasks", tasksHtml], ["notes", notesHtml], ["days", daysHtml],
+      ["kit", kitHtml], ["records", recordsHtml], ["usage", usedHtml], ["requests", reqHtml], ["stock", stockHtml], ["overview", overviewHtml]];
+    const shown = byOrder(CARDS, readOrder(me)).filter(([k, h]) => h && show(k));
+    body.innerHTML = `${stripHtml}${qaHtml}${shown.length
       ? `<div class="md-grid">${shown.map(([, h]) => h).join("")}</div>`
-      : '<div class="tm-empty">Nothing to show yet. Use <strong>Customise</strong> to choose your cards, or ask an Admin to turn some on for you.</div>';
+      : '<div class="tm-empty">Nothing to show yet. Use <strong>Customise</strong> to choose your cards, or ask an Admin to turn some on for you.</div>'}`;
+
+    const grid = body.querySelector(".md-grid");
+    if (grid) {
+      [...grid.children].forEach((el, i) => { if (shown[i]) el.dataset.card = shown[i][0]; });
+      mountMyNotes(body.querySelector('[data-role="notes"]'));
+      addFolds(grid, me);
+    }
     renderDayCard(body.querySelector('[data-role="days"]')); // Admins only; does nothing if the card is hidden
+    loadedAt = Date.now();
+    tickUpdated();
+  }
+
+  /* ---------- Collapsing a card (remembered per person) ---------- */
+  function addFolds(grid, me) {
+    const folded = readSet(foldKey(me));
+    grid.querySelectorAll(":scope > [data-card]").forEach((el) => {
+      const head = el.querySelector(".md-card-head");
+      if (!head) return;
+      const k = el.dataset.card;
+      const isFolded = folded.has(k);
+      el.classList.toggle("is-collapsed", isFolded);
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "md-fold";
+      b.dataset.fold = k;
+      b.setAttribute("aria-expanded", String(!isFolded));
+      b.setAttribute("aria-label", isFolded ? "Show this card" : "Collapse this card");
+      b.title = isFolded ? "Show" : "Collapse";
+      b.innerHTML = svg(ICON.chev);
+      head.appendChild(b);
+    });
+  }
+  function setFolded(k, fold) {
+    const me = myUid();
+    const folded = readSet(foldKey(me));
+    if (fold) folded.add(k); else folded.delete(k);
+    writeSet(foldKey(me), folded);
+    const el = body.querySelector(`[data-card="${CSS.escape(k)}"]`);
+    if (!el) return null;
+    el.classList.toggle("is-collapsed", fold);
+    const b = el.querySelector("[data-fold]");
+    if (b) {
+      b.setAttribute("aria-expanded", String(!fold));
+      b.setAttribute("aria-label", fold ? "Show this card" : "Collapse this card");
+      b.title = fold ? "Show" : "Collapse";
+    }
+    return el;
+  }
+  // Opens a card (if it was collapsed) and scrolls to it
+  function goToCard(k) {
+    const el = setFolded(k, false);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    return el;
   }
 
   root.addEventListener("click", (e) => {
+    const fb = e.target.closest("[data-fold]");
+    if (fb) {
+      const el = fb.closest("[data-card]");
+      setFolded(fb.dataset.fold, !el.classList.contains("is-collapsed"));
+      return;
+    }
+    const gc = e.target.closest("[data-goto-card]");
+    if (gc) { goToCard(gc.dataset.gotoCard); return; }
+    if (e.target.closest('[data-act="new-note"]')) {
+      const el = goToCard("notes");
+      const input = el && el.querySelector('[data-role="in"]');
+      if (input) setTimeout(() => input.focus({ preventScroll: true }), 300);
+      return;
+    }
     const sb = e.target.closest("[data-sod]");
     if (sb) {
       sb.disabled = true;
@@ -516,10 +677,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     if (tt) {
       saveTaskTab(tt.dataset.ttab);
       drawTasks();
-      if (tt.dataset.goto) {
-        const el = body.querySelector(".md-tasks-card");
-        if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-      }
+      if (tt.dataset.goto) goToCard("tasks");
       return;
     }
     const td = e.target.closest("[data-task-done]");
@@ -541,35 +699,69 @@ export async function mountMyDashboard(container, { staff } = {}) {
       load();
       return;
     }
-    if (e.target.closest('[data-act="customise"]')) {
-      const me = myUid();
-      const hidden = readHidden(me);
-      const allowed = DASH_CARDS.filter(([k]) => can(`dash.${k}`));
-      const dlg = document.createElement("dialog");
-      dlg.className = "lh-dialog";
-      dlg.innerHTML = `<form class="lh-form" novalidate>
-        <div class="lh-dialog-head"><h3>Customise my dashboard</h3>
-          <p>Choose which cards you see. Cards not listed here are turned off for you by an Admin.</p></div>
-        ${allowed.length ? allowed.map(([k, label]) => `<label class="fe-check"><input type="checkbox" name="card" value="${k}"${hidden.has(k) ? "" : " checked"} /> ${esc(label)}</label>`).join("")
-          : '<p class="tb-none">No cards are turned on for you yet. Ask an Admin.</p>'}
-        <div class="lh-actions">
-          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
-          <button type="submit" class="lh-btn is-primary">Save</button>
-        </div></form>`;
-      document.body.appendChild(dlg);
-      dlg.addEventListener("close", () => dlg.remove());
-      dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
-      dlg.querySelector("form").addEventListener("submit", (ev) => {
-        ev.preventDefault();
-        const on = new Set([...dlg.querySelectorAll('[name="card"]:checked')].map((x) => x.value));
-        writeHidden(me, new Set(allowed.map(([k]) => k).filter((k) => !on.has(k))));
-        dlg.close();
-        body.innerHTML = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
-        load();
-      });
-      dlg.showModal();
-    }
+    if (e.target.closest('[data-act="customise"]')) openCustomise();
   });
+
+  /* ---------- Customise: which cards, and in what order ---------- */
+  function openCustomise() {
+    const me = myUid();
+    const hidden = readSet(hideKey(me));
+    let list = byOrder(DASH_CARDS.filter(([k]) => allowedCard(k)), readOrder(me))
+      .map(([k, label]) => ({ k, label, on: !hidden.has(k) }));
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog md-cz-dlg";
+    dlg.innerHTML = `<form class="lh-form" novalidate>
+      <div class="lh-dialog-head"><h3>Customise my dashboard</h3>
+        <p>Tick the cards you want, and use ▲ ▼ to put them in your order. Cards not listed here are turned off for you by an Admin.</p></div>
+      <ol class="md-cz" data-role="list"></ol>
+      <div class="lh-actions">
+        <button type="button" class="lh-btn is-quiet" data-act="reset">Reset to default</button>
+        <span style="flex:1"></span>
+        <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+        <button type="submit" class="lh-btn is-primary">Save</button>
+      </div></form>`;
+    document.body.appendChild(dlg);
+    const ol = dlg.querySelector('[data-role="list"]');
+    const draw = (focusSel = "") => {
+      ol.innerHTML = list.map((r, i) => `<li class="md-cz-row">
+        <label class="fe-check"><input type="checkbox" data-k="${r.k}"${r.on ? " checked" : ""} /> ${esc(r.label)}</label>
+        <span class="md-cz-mv">
+          <button type="button" class="sc-ar-mv" data-mv="up" data-i="${i}" aria-label="Move ${esc(r.label)} up"${i === 0 ? " disabled" : ""}>▲</button>
+          <button type="button" class="sc-ar-mv" data-mv="down" data-i="${i}" aria-label="Move ${esc(r.label)} down"${i === list.length - 1 ? " disabled" : ""}>▼</button>
+        </span></li>`).join("");
+      if (focusSel) { const f = ol.querySelector(focusSel); if (f && !f.disabled) f.focus(); }
+    };
+    draw();
+    ol.addEventListener("change", (e) => {
+      const r = list.find((x) => x.k === e.target.dataset.k);
+      if (r) r.on = e.target.checked;
+    });
+    ol.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-mv]");
+      if (!b) return;
+      const i = Number(b.dataset.i);
+      const j = b.dataset.mv === "up" ? i - 1 : i + 1;
+      if (j < 0 || j >= list.length) return;
+      [list[i], list[j]] = [list[j], list[i]];
+      draw(`[data-mv="${b.dataset.mv}"][data-i="${j}"]`);
+    });
+    dlg.querySelector('[data-act="reset"]').addEventListener("click", () => {
+      list = DASH_CARDS.filter(([k]) => allowedCard(k)).map(([k, label]) => ({ k, label, on: true }));
+      draw();
+    });
+    dlg.addEventListener("close", () => dlg.remove());
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    dlg.querySelector("form").addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      writeSet(hideKey(me), new Set(list.filter((r) => !r.on).map((r) => r.k)));
+      writeOrder(me, list.map((r) => r.k));
+      dlg.close();
+      body.innerHTML = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
+      load();
+    });
+    dlg.showModal();
+  }
+
   // Start of Day saved (or found already done): reload so the reminder goes away
   const onKitDay = () => {
     if (!root.isConnected) { window.removeEventListener("kitday:changed", onKitDay); return; }

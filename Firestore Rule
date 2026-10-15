@@ -858,6 +858,23 @@ match /inv_count_drafts/{id} {
       allow delete: if false;
     }
 
+    // My notes: a private scratchpad. Only the person who wrote a note can read, change or delete it.
+    match /staff_notes/{noteId} {
+      function okNote(d) {
+        return d.keys().hasOnly(['ownerUid', 'text', 'items', 'color', 'pinned', 'createdAt', 'updatedAt'])
+          && d.ownerUid == request.auth.uid
+          && d.text is string && d.text.size() <= 2000
+          && d.items is list && d.items.size() <= 30
+          && d.color in ['yellow', 'green', 'blue', 'pink', 'grey']
+          && d.pinned is bool;
+      }
+      allow read: if isStaff() && resource.data.ownerUid == request.auth.uid;
+      allow create: if isStaff() && okNote(request.resource.data);
+      allow update: if isStaff() && resource.data.ownerUid == request.auth.uid && okNote(request.resource.data)
+        && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if isStaff() && resource.data.ownerUid == request.auth.uid;
+    }
+
     // Patient list
     match /patient_list/{patientId} {
       allow read: if isStaff();
