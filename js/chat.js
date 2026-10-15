@@ -1,11 +1,13 @@
 // The chat bubble (bottom-right on every page): Help to the admins, messages between staff, and group chats.
 // A new message: a chime, a pop-up, a red badge, "(2)" in the tab title, and a desktop alert when the portal is in the background.
+// Your own messages can be edited or deleted; any chat can be removed from your own list.
 import {
-  watchChats, watchMessages, sendMessage, markRead, setChatStatus, listAllChats, isUnread, helpId, dmId,
-  newGroupId, watchAway, saveAway,
+  watchChats, watchMessages, sendMessage, markRead, setChatStatus, listAllChats, isUnread, isHiddenFor, helpId, dmId,
+  newGroupId, watchAway, saveAway, editMessage, deleteMessage, hideChat,
 } from "./chat-api.js";
 import { fetchStaffList } from "./task-types.js";
 import { isAdmin } from "./perms.js";
+import { confirmDialog } from "./dialog.js";
 import { escapeHtml, getInitials, hueFromString, showToast } from "./utils.js";
 
 const HELP_NAME = "Bethany";   // who answers Help
@@ -23,7 +25,17 @@ const I = {
   help: svg('<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/>'),
   group: svg('<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>'),
   moon: svg('<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>'),
+  smile: svg('<circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/>'),
+  trash: svg('<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>'),
 };
+
+// The emoji panel in the message box
+const EMOJI = ["😀", "😂", "😊", "😍", "🥰", "😉", "😎", "🤔", "😅", "😢", "😮", "😴", "🙏", "👍", "👎", "👏",
+  "🙌", "💪", "👋", "🤞", "🎉", "❤️", "💯", "✅", "❌", "⭐", "🔥", "☕", "🍰", "🌸", "📅", "⏰"];
+// "👍" or "🎉🎉": shown large, without the bubble
+const onlyEmoji = (s) => s.length <= 12 && /\p{Extended_Pictographic}/u.test(s)
+  && /^(?:\p{Extended_Pictographic}|\p{Emoji_Component}|\s)+$/u.test(s);
+
 const when = (d) => {
   if (!d) return "";
   return d.toDateString() === new Date().toDateString()
@@ -63,6 +75,9 @@ let startedAt = 0;
 let view = "list";           // list | thread | new | group | all | away
 let openId = "";
 let current = null;
+let canWriteNow = false;     // the open conversation can be written in
+let msgList = [];            // the open conversation's messages
+let editing = "";            // the id of my message being edited
 let audio = null;
 let popTimer = null;
 let baseTitle = "";
@@ -78,7 +93,7 @@ export function initChat(staff) {
   admin = isAdmin();
   baseTitle = document.title.replace(/^\(\d+\)\s*/, "");
   startedAt = Date.now();
-  drafts.set(helpId(me.uid), { id: helpId(me.uid), kind: "help", members: [me.uid], names: {}, status: "open", readAt: {}, lastAt: null });
+  drafts.set(helpId(me.uid), { id: helpId(me.uid), kind: "help", members: [me.uid], names: {}, status: "open", readAt: {}, hiddenAt: {}, lastAt: null });
   build();
   unsub = watchChats(me.uid, admin, onChats, (err) => console.warn("Chat failed to load:", err));
   awayUnsub = watchAway((a) => { away = a; render(); });
@@ -103,6 +118,8 @@ export function teardownChat() {
   view = "list";
   openId = "";
   current = null;
+  msgList = [];
+  editing = "";
   document.removeEventListener("pointerdown", unlockAudio);
   document.removeEventListener("visibilitychange", readIfViewing);
   window.removeEventListener("hashchange", checkChatLink);
@@ -178,7 +195,8 @@ function onChats(list) {
 
 const chatFor = (id) => chats.find((c) => c.id === id) || (allChats || []).find((c) => c.id === id) || drafts.get(id) || null;
 const isOpen = () => !!panel && !panel.hidden;
-const myChats = () => chats.filter((c) => c.members.includes(me.uid) || (admin && c.kind === "help"));
+// My list: my conversations (Admins: plus Help), minus any I removed that have nothing new
+const myChats = () => chats.filter((c) => (c.members.includes(me.uid) || (admin && c.kind === "help")) && !isHiddenFor(c, me.uid));
 const muteKey = () => `chat:mute:${me.uid}`;
 const muted = () => { try { return localStorage.getItem(muteKey()) === "1"; } catch { return false; } };
 const nameOf = (c, u) => (c.names && c.names[u]) || (staffById.get(u) || {}).name || "Staff";
@@ -298,6 +316,7 @@ function hidePanel() {
   root.classList.remove("is-open");
   stopMessages();
   view = "list";
+  editing = "";
 }
 function stopMessages() { if (msgUnsub) msgUnsub(); msgUnsub = null; }
 
@@ -321,6 +340,7 @@ const row = (c) => {
 
 function drawList() {
   view = "list";
+  editing = "";
   const list = myChats();
   const help = list.filter((c) => c.kind === "help" && c.members[0] !== me.uid)
     .sort((a, b) => (a.status === "sorted") - (b.status === "sorted"));
@@ -357,20 +377,30 @@ function openThread(id) {
   view = "thread";
   openId = id;
   current = c;
+  msgList = [];
+  editing = "";
   const isMember = c.members.includes(me.uid);
   const canWrite = isMember || (admin && c.kind === "help");
+  canWriteNow = canWrite;
   const helpStaff = c.kind === "help" && c.members[0] === me.uid;
   const adminHelp = admin && c.kind === "help" && !helpStaff;
+  // Remove from my list: saved conversations I'm part of (not my own Help chat, which is always there)
+  const canHide = !helpStaff && (isMember || adminHelp) && chats.some((x) => x.id === id);
   const sub = helpStaff ? `<small data-role="helpsub" class="${awayOn() ? "is-away" : ""}">${esc(helpSub())}</small>`
     : c.kind === "group" ? `<small>${esc(membersText(c))}</small>` : "";
   panel.innerHTML = `${head(`${avatar(titleOf(c), kindOf(c))}<span class="ch-hd-t"><strong>${esc(titleOf(c))}</strong>${sub}</span>`, {
       back: true,
-      extra: adminHelp ? `<button type="button" class="lh-btn" data-act="sorted">${c.status === "sorted" ? "Reopen" : "Mark as sorted"}</button>` : "",
+      extra: `${adminHelp ? `<button type="button" class="lh-btn" data-act="sorted">${c.status === "sorted" ? "Reopen" : "Mark as sorted"}</button>` : ""}${
+        canHide ? `<button type="button" class="ch-ic" data-act="hide" aria-label="Remove from my list" title="Remove from my list">${I.trash}</button>` : ""}`,
     })}
     <div class="ch-msgs" data-role="msgs"><p class="ch-empty">${helpStaff
       ? "Ask anything about the portal. Bethany will get back to you."
       : c.kind === "group" ? "Say hello to start the group." : "No messages yet."}</p></div>
-    ${canWrite ? `<form class="ch-comp" novalidate>
+    ${canWrite ? `<div class="ch-editing" data-role="editing" hidden><span>Editing your message</span>
+        <button type="button" class="rc-link" data-act="canceledit">Cancel</button></div>
+      <form class="ch-comp" novalidate>
+        <div class="ch-emo" data-role="emo" hidden>${EMOJI.map((x) => `<button type="button" data-emo="${x}">${x}</button>`).join("")}</div>
+        <button type="button" class="ch-ic ch-emo-btn" data-act="emoji" aria-label="Add emoji" title="Emoji">${I.smile}</button>
         <textarea rows="1" maxlength="4000" placeholder="Type your message" aria-label="Message"></textarea>
         <button type="submit" class="ch-send" aria-label="Send">${I.send}</button></form>
       <label class="ch-link"><input type="checkbox" data-role="withpage"${helpStaff ? " checked" : ""} /> Include a link to this page</label>`
@@ -392,14 +422,24 @@ function startMessages(id) {
 function drawMessages(msgs, first) {
   const box = panel && panel.querySelector('[data-role="msgs"]');
   if (!box || view !== "thread") return;
+  msgList = msgs;
   const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
   if (!msgs.length) return;
   box.innerHTML = msgs.map((m) => {
     const mine = m.byUid === me.uid;
+    const canAct = mine && canWriteNow && !m.deleted;
+    const text = String(m.text || "").trim();
+    const bubble = m.deleted
+      ? '<div class="ch-m-b is-deleted">Message deleted</div>'
+      : `<div class="ch-m-b${onlyEmoji(text) ? " is-emoji" : ""}"${canAct
+        ? ` data-mine="${esc(m.id)}" role="button" tabindex="0" title="Tap to edit or delete"` : ""}>${esc(m.text)}</div>`;
+    const acts = canAct ? `<span class="ch-m-acts" hidden>
+        <button type="button" data-act="medit" data-mid="${esc(m.id)}">Edit</button>
+        <button type="button" class="is-danger" data-act="mdel" data-mid="${esc(m.id)}">Delete</button></span>` : "";
     return `<div class="ch-m${mine ? " is-me" : ""}">
       ${mine ? "" : `<small class="ch-m-by">${esc(m.by)}</small>`}
-      <div class="ch-m-b">${esc(m.text)}</div>
-      <small class="ch-m-meta">${m.page ? `<a href="${esc(m.page.hash)}">${I.link} ${esc(m.page.label || "Page")}</a> · ` : ""}${esc(when(m.at))}</small>
+      ${bubble}${acts}
+      <small class="ch-m-meta">${m.page && !m.deleted ? `<a href="${esc(m.page.hash)}">${I.link} ${esc(m.page.label || "Page")}</a> · ` : ""}${esc(when(m.at))}${m.edited && !m.deleted ? " · edited" : ""}</small>
     </div>`;
   }).join("");
   if (first || atBottom) box.scrollTop = box.scrollHeight;
@@ -413,27 +453,138 @@ function pageInfo() {
   return { hash: location.hash || "#/home", label };
 }
 
+const isLastMsg = (id) => msgList.length > 0 && msgList[msgList.length - 1].id === id;
+
 async function send(form) {
   if (!current) return;
   const ta = form.querySelector("textarea");
   const btn = form.querySelector('[type="submit"]');
   const text = ta.value.trim();
   if (!text || btn.disabled) return;
-  const withPage = !!(panel.querySelector('[data-role="withpage"]') || {}).checked;
   btn.disabled = true;
   try {
-    await sendMessage(current, text, withPage ? pageInfo() : null, me);
-    ta.value = "";
-    ta.style.height = "";
-    if (!msgUnsub) startMessages(current.id);
+    if (editing) {
+      // Saving an edit to one of my messages
+      const id = editing;
+      const old = msgList.find((x) => x.id === id);
+      if (!old || old.deleted) throw new Error("That message can't be edited any more.");
+      if (old.text !== text) await editMessage(current.id, id, text, isLastMsg(id));
+      stopEdit();
+    } else {
+      const withPage = !!(panel.querySelector('[data-role="withpage"]') || {}).checked;
+      await sendMessage(current, text, withPage ? pageInfo() : null, me);
+      ta.value = "";
+      ta.style.height = "";
+      if (!msgUnsub) startMessages(current.id);
+    }
+    hideEmoji();
   } catch (err) {
     console.error("Chat send failed:", err);
     showToast(err && err.code === "permission-denied"
-      ? "Couldn't send. Check the chats Firestore rule has been published."
+      ? "Couldn't save. Check the chats Firestore rule has been published."
       : err && err.message && !err.code ? err.message : "Couldn't send. Check your connection and try again.");
   }
   btn.disabled = false;
   ta.focus();
+}
+
+/* ---------- My own messages: edit and delete ---------- */
+
+// Tapping one of my messages shows Edit / Delete under it
+function toggleMsgActs(bubble) {
+  const acts = bubble.parentElement && bubble.parentElement.querySelector(".ch-m-acts");
+  if (!acts) return;
+  const show = acts.hidden;
+  panel.querySelectorAll(".ch-m-acts").forEach((a) => { a.hidden = true; });
+  acts.hidden = !show;
+}
+
+function startEdit(mid) {
+  const m = msgList.find((x) => x.id === mid);
+  const ta = panel.querySelector(".ch-comp textarea");
+  const bar = panel.querySelector('[data-role="editing"]');
+  if (!m || m.deleted || !ta || !bar) return;
+  editing = mid;
+  bar.hidden = false;
+  ta.value = m.text;
+  ta.dispatchEvent(new Event("input", { bubbles: true }));   // grows the box to fit
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+  panel.querySelectorAll(".ch-m-acts").forEach((a) => { a.hidden = true; });
+}
+
+function stopEdit() {
+  editing = "";
+  const bar = panel && panel.querySelector('[data-role="editing"]');
+  if (bar) bar.hidden = true;
+  const ta = panel && panel.querySelector(".ch-comp textarea");
+  if (ta) { ta.value = ""; ta.style.height = ""; }
+}
+
+async function removeMsg(mid) {
+  if (!current) return;
+  const ok = await confirmDialog({
+    title: "Delete this message?",
+    message: "It's removed for everyone in this chat.",
+    confirmLabel: "Delete",
+    tone: "danger",
+  });
+  if (!ok) return;
+  if (editing === mid) stopEdit();
+  try {
+    await deleteMessage(current.id, mid, isLastMsg(mid));
+  } catch (err) {
+    console.error("Delete message failed:", err);
+    showToast(err && err.code === "permission-denied"
+      ? "Couldn't delete. Check the chats Firestore rule has been published."
+      : "Couldn't delete. Try again.");
+  }
+}
+
+// Remove the open conversation from my list (others keep it)
+async function hideThread() {
+  if (!current) return;
+  const ok = await confirmDialog({
+    title: "Remove this chat from your list?",
+    message: "Only your list changes. Everyone else keeps the chat, and it comes back here if someone sends a new message.",
+    confirmLabel: "Remove",
+    tone: "warning",
+  });
+  if (!ok) return;
+  try {
+    await hideChat(current.id);
+    stopMessages();
+    drawList();
+    showToast("Chat removed from your list");
+  } catch (err) {
+    console.error("Remove chat failed:", err);
+    showToast("Couldn't remove it. Try again.");
+  }
+}
+
+/* ---------- Emoji ---------- */
+
+function hideEmoji() {
+  const emo = panel && panel.querySelector('[data-role="emo"]');
+  if (emo) emo.hidden = true;
+}
+
+function toggleEmoji() {
+  const emo = panel && panel.querySelector('[data-role="emo"]');
+  if (emo) emo.hidden = !emo.hidden;
+}
+
+// Puts the emoji where the cursor is (or replaces the selected text)
+function insertEmoji(ch) {
+  const ta = panel && panel.querySelector(".ch-comp textarea");
+  if (!ta) return;
+  const start = ta.selectionStart ?? ta.value.length;
+  const end = ta.selectionEnd ?? ta.value.length;
+  ta.value = ta.value.slice(0, start) + ch + ta.value.slice(end);
+  const pos = start + ch.length;
+  ta.focus();
+  ta.setSelectionRange(pos, pos);
+  ta.dispatchEvent(new Event("input", { bubbles: true }));   // grows the box if needed
 }
 
 /* ---------- New message (one person) ---------- */
@@ -466,7 +617,7 @@ function startDm(otherUid) {
   const id = dmId(me.uid, otherUid);
   if (!chatFor(id)) {
     drafts.set(id, { id, kind: "dm", members: [me.uid, otherUid].sort(), names: { [otherUid]: (s && s.name) || "" },
-      status: "open", readAt: {}, lastAt: null });
+      status: "open", readAt: {}, hiddenAt: {}, lastAt: null });
   }
   openThread(id);
 }
@@ -533,7 +684,7 @@ function createGroup() {
   groupSel.forEach((u) => { names[u] = (staffById.get(u) || {}).name || ""; });
   const id = newGroupId();
   drafts.set(id, { id, kind: "group", name: name.slice(0, 60), members, names, createdByUid: me.uid,
-    status: "open", readAt: {}, lastAt: null });
+    status: "open", readAt: {}, hiddenAt: {}, lastAt: null });
   groupSel.clear();
   openThread(id);
 }
@@ -593,12 +744,15 @@ async function submitAway(form) {
 /* ---------- Clicks, keys and typing ---------- */
 
 async function onClick(e) {
-  const t = e.target.closest("[data-act],[data-open],[data-dm],[data-pick],[data-back]");
+  if (!e.target.closest('.ch-emo, [data-act="emoji"]')) hideEmoji();   // a tap anywhere else closes the emoji panel
+  const t = e.target.closest("[data-act],[data-open],[data-dm],[data-pick],[data-back],[data-emo],[data-mine]");
   if (!t || !me) return;
+  if (t.dataset.emo) { insertEmoji(t.dataset.emo); return; }
   if (t.dataset.open) { hidePop(); openThread(t.dataset.open); return; }
   if (t.dataset.dm) { startDm(t.dataset.dm); return; }
   if (t.dataset.pick) { pickMany(t.dataset.pick); return; }
   if (t.dataset.back) { const f = panel.querySelector('[name="back"]'); if (f) f.value = t.dataset.back; return; }
+  if (t.dataset.mine) { toggleMsgActs(t); return; }
   switch (t.dataset.act) {
     case "toggle":
       if (isOpen()) hidePanel(); else { showPanel(); drawList(); }
@@ -615,6 +769,11 @@ async function onClick(e) {
       catch (err) { console.error("Save away failed:", err); showToast("Couldn't save. Try again."); }
       break;
     case "popx": hidePop(); break;
+    case "emoji": toggleEmoji(); break;
+    case "medit": startEdit(t.dataset.mid); break;
+    case "mdel": removeMsg(t.dataset.mid); break;
+    case "canceledit": stopEdit(); break;
+    case "hide": hideThread(); break;
     case "mute":
       try { localStorage.setItem(muteKey(), muted() ? "0" : "1"); } catch { /* ignore */ }
       if (!muted()) chime();   // a sample of the sound when it's turned on
@@ -647,7 +806,20 @@ function onSubmit(e) {
 }
 
 function onKey(e) {
-  if (e.key === "Escape" && isOpen()) { hidePanel(); root.querySelector(".ch-bubble").focus(); return; }
+  if (e.key === "Escape" && isOpen()) {
+    const emo = panel.querySelector('[data-role="emo"]');
+    if (emo && !emo.hidden) { emo.hidden = true; return; }
+    if (editing) { stopEdit(); return; }
+    hidePanel();
+    root.querySelector(".ch-bubble").focus();
+    return;
+  }
+  // Keyboard: Enter on one of my messages shows Edit / Delete
+  if (e.key === "Enter" && e.target.matches("[data-mine]")) {
+    e.preventDefault();
+    toggleMsgActs(e.target);
+    return;
+  }
   // Enter sends, Shift + Enter starts a new line
   if (e.key === "Enter" && !e.shiftKey && e.target.matches(".ch-comp textarea")) {
     e.preventDefault();

@@ -917,7 +917,7 @@ match /inv_count_drafts/{id} {
     
     // Chat: Help (staff → admins), one-to-one chats and group chats.
     // Members read and write their own conversations; Admins can read every chat and answer Help.
-    // Messages can't be edited or deleted from the browser.
+    // People can edit or delete only their OWN messages. A deleted message keeps its place, with no text.
     match /chats/{chatId} {
       allow read: if isStaff() && (resource == null
         || request.auth.uid in resource.data.members || isAdmin());
@@ -936,6 +936,7 @@ match /inv_count_drafts/{id} {
               && request.resource.data.name is string
               && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 60
               && request.resource.data.createdByUid == request.auth.uid));
+      // Members (and Admins on Help): read receipts, "removed from my list", last-message preview, status
       allow update: if isStaff()
         && (request.auth.uid in resource.data.members || (isAdmin() && resource.data.kind == 'help'))
         && request.resource.data.members == resource.data.members
@@ -951,9 +952,22 @@ match /inv_count_drafts/{id} {
           && request.resource.data.text.size() > 0 && request.resource.data.text.size() <= 4000
           && (request.auth.uid in getAfter(/databases/$(database)/documents/chats/$(chatId)).data.members
             || (isAdmin() && getAfter(/databases/$(database)/documents/chats/$(chatId)).data.kind == 'help'));
-        allow update, delete: if false;
+        // Edit or delete: only the person who sent it, only the text, and never after it's been deleted
+        allow update: if isStaff()
+          && resource.data.byUid == request.auth.uid
+          && resource.data.get('deleted', false) != true
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['text', 'page', 'edited', 'editedAt', 'deleted', 'deletedAt'])
+          && request.resource.data.text is string && request.resource.data.text.size() <= 4000
+          && ((request.resource.data.get('deleted', false) == true && request.resource.data.text == '')
+            || (request.resource.data.get('deleted', false) != true && request.resource.data.text.size() > 0))
+          && (request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.members
+            || (isAdmin() && get(/databases/$(database)/documents/chats/$(chatId)).data.kind == 'help'));
+        allow delete: if false;
       }
     }
+    
+    
     match /scans/{id} {
       allow read: if isStaff();
       allow create: if isStaff() && request.resource.data.byUid == request.auth.uid
