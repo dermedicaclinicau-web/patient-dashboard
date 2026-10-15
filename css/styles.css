@@ -5787,11 +5787,6 @@ textarea.dk-input { min-height: 70px; resize: vertical; }
 
 /* ---------- My notes ---------- */
 .mn .md-card-head small { font-size: .78rem; }
-.mn-addbtn { display: inline-flex; align-items: center; gap: .35rem; margin-left: auto; height: 34px; padding: 0 .9rem; border: none;
-  border-radius: 999px; background: var(--primary); color: #fff; font: inherit; font-size: .85rem; font-weight: 600; cursor: pointer; }
-.mn-addbtn svg { width: 16px; height: 16px; }
-.mn-addbtn:hover { filter: brightness(1.08); }
-.md-card.is-collapsed .mn-addbtn { display: none; }
 .md-card.is-collapsed .mn .md-fold { margin-left: auto; }
 
 .mn-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: .7rem; }
@@ -5870,7 +5865,6 @@ textarea.dk-input { min-height: 70px; resize: vertical; }
 @media (max-width: 640px) {
   .mn-grid { grid-template-columns: 1fr 1fr; }
   .mn-addbtn span { display: none; }
-  .mn-addbtn { width: 34px; padding: 0; justify-content: center; }
   .mn-cbtns .lh-btn { flex: 1; }
 }
 

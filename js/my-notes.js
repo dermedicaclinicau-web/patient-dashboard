@@ -52,8 +52,7 @@ export function mountMyNotes(host) {
   const st = { notes: [], all: false, draft: null, saving: false, loading: true, error: "", lastColor: "yellow" };
 
   host.innerHTML = `<div class="mn">
-    <div class="md-card-head"><h3>My notes</h3><small class="muted">🔒 Only you can see these</small>
-      <button type="button" class="mn-addbtn" data-act="new">${I.plus}<span>Add note</span></button></div>
+    <div class="md-card-head"><h3>My notes</h3><small class="muted">🔒 Only you can see these</small></div>
     <div data-role="list"><div class="skeleton sm"></div></div>
   </div>`;
   const $list = host.querySelector('[data-role="list"]');
