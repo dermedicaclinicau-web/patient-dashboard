@@ -6201,3 +6201,12 @@ a.md-quiet:hover { border-color: var(--primary); }
 @media (max-width: 640px) {
   .fe-fields > .fe-field[class*="span-"] { grid-column: 1 / -1; }
 }
+
+/* Side by side: answer boxes fill the rest of their column
+   (unless the question's own "Answer box width" is set to Half or Third) */
+.fe-fields > .fe-field[class*="span-"] .fe-lay:not(.w-half):not(.w-third) .fe-lay-a > .fe-in,
+.fe-fields > .fe-field[class*="span-"] .fe-lay:not(.w-half):not(.w-third) .fe-lay-a > .fe-num {
+  width: 100%;
+  max-width: none;
+}
+.fe-fields > .fe-field[class*="span-"] .fe-lay:not(.w-half):not(.w-third) .fe-lay-a > .fe-num .fe-in { width: 100%; }
