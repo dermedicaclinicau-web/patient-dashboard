@@ -571,6 +571,8 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   function fieldsHtml() {
     const hasTx = task.fields.some((f) => f.source === "treatments");
     const hasAc = task.fields.some((f) => f.source === "aftercare");
+    const aboutPt = task.category === "patient" || task.recipients.aboutPatient;
+    const hasAppts = /\{\s*upcoming appointments\s*\}/i.test(`${task.subject} ${task.body}`);
     return `
       <section class="tb-card">
         <h4><span class="tb-num">3</span>Fields to fill in when running <small>(optional)</small></h4>
@@ -580,6 +582,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
           ${Object.entries(TASK_FIELD_TYPES).map(([k, l]) => `<button type="button" class="fe-ins" data-addfield="${k}">+ ${esc(l)}</button>`).join("")}
           ${hasTx ? "" : '<button type="button" class="fe-ins is-smart" data-addfield="treatments">+ Treatments (from Treatment information)</button>'}
           ${hasAc ? "" : '<button type="button" class="fe-ins is-smart" data-addfield="aftercare">+ Aftercare (from Aftercare Bank)</button>'}
+          ${aboutPt && !hasAppts ? '<button type="button" class="fe-ins is-smart" data-addappts="">+ Upcoming appointments (from the appointment book)</button>' : ""}
         </div>
       </section>`;
   }
@@ -900,7 +903,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   }
 
   form.addEventListener("focusin", (e) => { if (e.target.matches("[data-tokens]")) lastText = e.target; });
-  form.addEventListener("mousedown", (e) => { if (e.target.closest("[data-token]")) e.preventDefault(); });
+  form.addEventListener("mousedown", (e) => { if (e.target.closest("[data-token], [data-addappts]")) e.preventDefault(); });
 
   form.addEventListener("input", (e) => {
     const el = e.target;
@@ -1002,6 +1005,14 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
       } else {
         editor.insertToken(name);
       }
+      return;
+    }
+    if (e.target.closest("[data-addappts]")) {
+      editor.insertToken("Upcoming appointments");
+      task.body = editor.getHtml();
+      renderForm();
+      changed();
+      showToast("Added {Upcoming appointments} to the message. It fills in with the patient's bookings when the task is run.");
       return;
     }
     const add = e.target.closest("[data-addfield]");

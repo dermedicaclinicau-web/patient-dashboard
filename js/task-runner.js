@@ -14,6 +14,7 @@ import { showToast, formatDobLong, formatMobile } from "./utils.js";
 import { formatChoice, fillTemplate, fillTemplateHtml, emailShell, clinicDetails, EMAIL_RE } from "./task-tokens.js";
 import { createRichEditor } from "./rich-editor.js";
 import { openImagePicker } from "./image-bank.js";
+import { upcomingAppointments, formatUpcoming, apptWhen, apptDetail, niceDay } from "./upcoming-appts.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -112,6 +113,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   const st = {
     patient: null, staffList: null, staffSel: new Set(), answers: {}, sources: {},
     smart: { appointments: "", plan: "" }, letterhead: null, printables: null,
+    appts: { months: 6, services: true, staff: true, items: null, status: "", source: "book", lastKey: "", toKey: "" },
     subjectEdited: false, bodyEdited: false, sending: false, touched: false,
     combo: { results: [], active: -1, status: "", seq: 0 },
   };
@@ -187,7 +189,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
 
   function values() {
     const m = new Map();
-    const set = (k, v) => m.set(k.toLowerCase(), v == null ? "" : String(v));
+    const set = (k, v) => m.set(k.toLowerCase(), v == null ? "" : typeof v === "object" ? v : String(v));
     const p = st.patient || {};
     const c = clinicDetails(st.letterhead);
     if (task.category === "patient") {
@@ -417,6 +419,9 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     } else if (task.category === "patient") {
       h += `<section class="tb-card"><h4>Details</h4><p class="tb-none">Nothing else to fill in. Choose the patient in the <strong>To</strong> box, check the email, then send.</p></section>`;
     }
+    if (uses("upcoming appointments") && st.patient) {
+      h += `<section class="tb-card" data-role="appts-card">${apptCardHtml()}</section>`;
+    }
     left.innerHTML = h;
   }
 
@@ -434,14 +439,11 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   function loadSmart() {
     const p = st.patient;
     st.smart = { appointments: "", plan: "" };
-    if (!p) { renderMessage(); return; }
+    if (!p) { st.appts.items = null; st.appts.status = ""; renderMessage(); return; }
     const jobs = [];
     if (uses("upcoming appointments")) {
       st.smart.appointments = "(loading appointments…)";
-      jobs.push(fetchPreconsult(p).then((res) => {
-        const lines = String((res && res.found && res.data && res.data.futureVisits) || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-        st.smart.appointments = lines.length ? lines.map((l) => "• " + l).join("\n") : "There are no upcoming appointments booked at the moment.";
-      }).catch(() => { st.smart.appointments = ""; }));
+      jobs.push(loadAppointments(p));
     }
     if (uses("treatment plan")) {
       st.smart.plan = "(loading treatment plan…)";
@@ -463,9 +465,105 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     }
   }
 
+  /* ---------- Upcoming appointments ---------- */
+  async function loadAppointments(p) {
+    const a = st.appts;
+    a.status = "loading";
+    renderApptCard();
+    try {
+      const res = await upcomingAppointments(p, { months: a.months });
+      if (st.patient !== p) return;
+      if (res.daysFound) {
+        Object.assign(a, { items: res.items, source: "book", lastKey: res.lastKey, toKey: res.toKey });
+      } else {
+        // No future days uploaded to the appointment book yet: use the pre-consultation sheet's list instead
+        const pre = await fetchPreconsult(p).catch(() => null);
+        if (st.patient !== p) return;
+        const lines = String((pre && pre.found && pre.data && pre.data.futureVisits) || "")
+          .split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+        Object.assign(a, { items: lines.map((line) => ({ line })), source: "sheet", lastKey: "", toKey: res.toKey });
+      }
+      a.status = "";
+    } catch (err) {
+      console.warn("Upcoming appointments failed:", err);
+      if (st.patient !== p) return;
+      a.items = [];
+      a.status = err && err.code === "permission-denied" ? "blocked" : "error";
+    }
+    applyAppts();
+  }
+
+  function applyAppts() {
+    const a = st.appts;
+    if (a.status === "error" || a.status === "blocked") st.smart.appointments = "";
+    else if (!a.items || !a.items.length) st.smart.appointments = "There are no upcoming appointments booked at the moment.";
+    else if (a.source === "sheet") st.smart.appointments = a.items.map((x) => "• " + x.line).join("\n");
+    else st.smart.appointments = formatUpcoming(a.items, { services: a.services, staff: a.staff });
+    renderApptCard();
+  }
+
+  function apptCardHtml() {
+    const a = st.appts;
+    const opts = { services: a.services, staff: a.staff };
+    const n = a.items && a.status === "" ? a.items.length : null;
+    let list;
+    if (a.status === "loading" || a.items === null) list = '<p class="tb-none">Looking up appointments…</p>';
+    else if (a.status === "blocked") list = '<p class="tb-none tb-bad">The appointment book is blocked. Check the appts_by_day Firestore rule allows read.</p>';
+    else if (a.status === "error") list = '<p class="tb-none tb-bad">Couldn\'t load the appointments. Check your connection and try again.</p>';
+    else if (!a.items.length) list = '<p class="tb-none">No upcoming appointments booked. The email will say so.</p>';
+    else if (a.source === "sheet") list = `<ul class="tr-appts">${a.items.map((x) => `<li>${esc(x.line)}</li>`).join("")}</ul>`;
+    else {
+      list = `<ul class="tr-appts">${a.items.map((x) => {
+        const d = apptDetail(x, opts);
+        return `<li><strong>${esc(apptWhen(x))}</strong>${d ? `<span>${esc(d)}</span>` : ""}</li>`;
+      }).join("")}</ul>`;
+    }
+    const notes = [];
+    if (a.status === "" && a.source === "sheet") {
+      notes.push("From the pre-consultation sheet, because the appointment book has no future days uploaded yet.");
+    }
+    if (a.status === "" && a.source === "book" && a.lastKey && a.lastKey < a.toKey) {
+      notes.push(`The appointment book only goes up to ${niceDay(a.lastKey)}, so anything booked after that won't show.`);
+    }
+    return `
+      <h4>Upcoming appointments${n !== null ? ` <small>${n} found</small>` : ""}</h4>
+      <div class="tr-appt-opts">
+        <label class="tr-appt-range">Show the next
+          <select class="fb-select" data-appt="months">${[3, 6, 12].map((m) =>
+            `<option value="${m}"${a.months === m ? " selected" : ""}>${m} months</option>`).join("")}</select></label>
+        ${a.source === "sheet" ? "" : `
+        <label class="fe-check"><input type="checkbox" data-appt="services"${a.services ? " checked" : ""} /> Treatments</label>
+        <label class="fe-check"><input type="checkbox" data-appt="staff"${a.staff ? " checked" : ""} /> Who it's with</label>`}
+      </div>
+      ${list}
+      ${notes.map((t) => `<small class="tr-appts-note">${esc(t)}</small>`).join("")}`;
+  }
+
+  function renderApptCard() {
+    const box = left.querySelector('[data-role="appts-card"]');
+    if (box) box.innerHTML = apptCardHtml();
+  }
+
+  function afterAppts() {
+    renderMessage();
+    if (st.bodyEdited) noteEl.textContent = "The appointments have changed. Press “Reset to the task's wording” to put them in the email.";
+  }
+
   /* ---------- Events ---------- */
   left.addEventListener("input", (e) => {
     const el = e.target;
+    if (el.dataset.appt !== undefined) {
+      const k = el.dataset.appt;
+      if (k === "months") {
+        st.appts.months = Number(el.value) || 6;
+        if (st.patient) loadAppointments(st.patient).then(afterAppts);
+      } else {
+        st.appts[k] = el.checked;
+        applyAppts();
+        afterAppts();
+      }
+      return;
+    }
     if (el.dataset.filter !== undefined) {
       const q = el.value.trim().toLowerCase();
       left.querySelectorAll(`[data-opts="${CSS.escape(el.dataset.filter)}"] .tr-opt`).forEach((row) => {

@@ -37,8 +37,11 @@ export function formatChoice(field, chosen) {
 
 const SMART = {
   "Upcoming appointments": {
-    hint: "Their future visits from the appointment book (updated each morning)",
-    sample: "• Tue 14 Oct 2026, 10:00 am: Wrinkle Relaxer\n• Tue 11 Nov 2026, 2:30 pm: Review",
+    hint: "Their bookings from today onwards, from the appointment book. Staff choose how far ahead when sending.",
+    sample: {
+      html: "• <strong>Thu 22 Oct 2026, 10:30 am</strong>: Anti-wrinkle injections with Dr Joanna Teh<br>• <strong>Tue 17 Nov 2026, 2:00 pm</strong>: Skin review",
+      text: "• Thu 22 Oct 2026, 10:30 am: Anti-wrinkle injections\n• Tue 17 Nov 2026, 2:00 pm: Skin review",
+    },
   },
   "Treatment plan": {
     hint: "Their latest treatment plan, from the consultation notes",

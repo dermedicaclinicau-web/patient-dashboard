@@ -1,5 +1,5 @@
 ﻿{
-    "version":  "20261015-094545",
+    "version":  "20261015-095007",
     "files":  [
                   "./js/aftercare-api.js",
                   "./js/aftercare-bank.js",
@@ -133,6 +133,7 @@
                   "./js/transcripts.js",
                   "./js/ui-text-settings.js",
                   "./js/ui-text.js",
+                  "./js/upcoming-appts.js",
                   "./js/updates.js",
                   "./js/utils.js",
                   "./css/styles.css",

@@ -5927,3 +5927,15 @@ a.md-quiet:hover { border-color: var(--primary); }
   .md-qa { flex: 1 1 calc(50% - .5rem); justify-content: center; }
   .md-pill { height: auto; min-height: 34px; padding: .35rem .8rem; }
 }
+
+/* ---------- Running a task: upcoming appointments ---------- */
+.tr-appt-opts { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem 1rem; }
+.tr-appt-range { display: inline-flex; align-items: center; gap: .5rem; font-size: .88rem; }
+.tr-appt-range .fb-select { padding: .4rem .6rem; font-size: .88rem; }
+.tr-appt-opts .fe-check { padding: .3rem 0; }
+.tr-appts { display: grid; gap: .35rem; margin: 0; padding: 0; list-style: none; }
+.tr-appts li { padding: .5rem .7rem; border: 1px solid var(--border); border-left: 3px solid var(--primary);
+  border-radius: 8px; background: var(--surface-2); font-size: .88rem; }
+.tr-appts li span { display: block; margin-top: .1rem; color: var(--muted); font-size: .82rem; }
+.tr-appts-note { display: block; color: #92400e; font-size: .8rem; }
+.tb-card h4 small { font-weight: 500; color: var(--muted); }
