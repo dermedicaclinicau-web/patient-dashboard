@@ -347,7 +347,7 @@ function drawList() {
       <button type="button" class="lh-btn is-primary" data-act="new">${I.plus}<span>New message</span></button>
       ${admin ? '<button type="button" class="lh-btn" data-act="all">All staff chats</button>' : ""}
     </footer>
-    <p class="ch-note">Chats can be seen by the clinic's admins.</p>`;
+    <p class="ch-note"></p>`;
 }
 
 function openThread(id) {
