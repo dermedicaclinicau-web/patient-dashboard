@@ -1,4 +1,4 @@
-import { countPatients, fetchAllPatients, phoneCore } from "./patients.js";
+import { phoneCore, fetchPatientIndex, fetchPatientChanges, fetchPatientsRaw, getPatientDoc } from "./patients.js";
 import { openNewPatientDialog } from "./new-patient.js";
 import { openMergeDialog } from "./merge-dialog.js";
 import { isAdminUser } from "./merge-patients.js";
@@ -33,38 +33,115 @@ const readView = () => { try { return localStorage.getItem(VIEW_KEY) === "list" 
 const saveView = (v) => { try { localStorage.setItem(VIEW_KEY, v); } catch { /* private mode */ } };
 const LIST_HEAD = `<div class="pt-list-head" aria-hidden="true"><span>Patient</span><span>Email</span><span>Mobile</span><span>Birthday</span></div>`;
 
-/* ===================== In-memory cache (cleared on logout, refresh, or a patient edit) ===================== */
+/* ===================== In-memory cache (cleared on logout) ===================== */
+// Loaded from the nightly patient index (a few documents) plus anything added or edited since.
+// Falls back to reading every patient if the index can't be used.
 
-let allCache = null;
+const RECHECK_MS = 2 * 60 * 1000;   // look for other staff's changes at most every 2 minutes
+const collator = new Intl.Collator("en", { sensitivity: "base" });
+const sortKey = (p) => p.nameKey || p.name.toLowerCase();
+
+let byId = null;        // every patient, merged duplicates included
+let allCache = null;    // the list that's shown: merged duplicates hidden, sorted
 let allPromise = null;
-let countCache = null;
 let cacheGen = 0;
+let checkedAt = 0;      // when changes were last fetched (ms)
+let checking = null;
+let pending = null;     // patients being re-read after an edit
 
-export function clearPatientCache() {
+let fullNext = false;   // Shift+Refresh: skip the index once and read every patient
+
+export function clearPatientCache({ full = false } = {}) {
   cacheGen++;
-  allCache = null;
-  allPromise = null;
-  countCache = null;
+  byId = allCache = allPromise = checking = pending = null;
+  checkedAt = 0;
+  fullNext = full;
 }
 
-// A patient's name or email was edited somewhere in the app: reload the list next time
-window.addEventListener("patient-updated", clearPatientCache);
+function visible(map) {
+  return [...map.values()].filter((p) => !p.mergedInto)
+    .sort((a, b) => collator.compare(sortKey(a), sortKey(b)));
+}
 
-function loadAll() {
-  if (allCache) return Promise.resolve(allCache);
+function put(map, p) {
+  indexPatient(p);
+  map.set(p.id, p);
+}
+
+async function loadAll() {
+  if (pending) await pending;
+  if (allCache) return allCache;
   if (!allPromise) {
     const gen = cacheGen;
-    allPromise = fetchAllPatients()
-      .then((list) => {
-        list.forEach(indexPatient);
-        if (gen === cacheGen) allCache = list;
-        return list;
-      })
-      .catch((err) => { allPromise = null; throw err; });
+    allPromise = (async () => {
+      const started = Date.now();
+      let map = null;
+      let since = 0;
+      const useIndex = !fullNext;
+      fullNext = false;
+      try {
+        const idx = useIndex ? await fetchPatientIndex() : null;
+        if (idx) { map = idx.map; since = idx.builtAt; }
+      } catch (err) { console.warn("Patient index unavailable, reading every patient:", err); }
+
+      const via = map ? "index" : "full read";
+      if (map) {
+        try {
+          (await fetchPatientChanges(since)).forEach((p) => map.set(p.id, p));
+          since = started;
+        } catch (err) { console.warn("Recent patient changes not loaded:", err); }
+      } else {
+        map = new Map((await fetchPatientsRaw()).map((p) => [p.id, p]));
+        since = started;
+      }
+      map.forEach(indexPatient);
+      const list = visible(map);
+      console.info(`Patient list: ${map.size} patients in ${Date.now() - started} ms (${via})`);
+      if (gen === cacheGen) { byId = map; allCache = list; checkedAt = since; }
+      return list;
+    })().catch((err) => { if (gen === cacheGen) allPromise = null; throw err; });
   }
   return allPromise;
 }
 
+// Patients added or edited since the last check, by anyone. Resolves true when something changed.
+function refreshChanges(force = false) {
+  if (!byId) return Promise.resolve(false);
+  if (checking) return checking;
+  if (!force && Date.now() - checkedAt < RECHECK_MS) return Promise.resolve(false);
+  const gen = cacheGen;
+  const started = Date.now();
+  checking = fetchPatientChanges(checkedAt)
+    .then((list) => {
+      if (gen !== cacheGen || !byId) return false;
+      checkedAt = started;
+      list.forEach((p) => put(byId, p));
+      if (list.length) allCache = visible(byId);
+      return list.length > 0;
+    })
+    .finally(() => { if (gen === cacheGen) checking = null; });
+  return checking;
+}
+
+// A patient was added, edited or merged in the portal: re-read just them
+window.addEventListener("patient-updated", (e) => {
+  const d = (e && e.detail) || {};
+  const ids = [...new Set([].concat(d.ids || [], d.id || []).map(String).filter(Boolean))];
+  if (!byId) { if (allPromise) clearPatientCache(); return; } // still loading: start again so the change isn't missed
+  if (!ids.length) { clearPatientCache(); return; }
+  const gen = cacheGen;
+  pending = Promise.all(ids.map(getPatientDoc))
+    .then((list) => {
+      if (gen !== cacheGen || !byId) return;
+      list.forEach((p, i) => (p ? put(byId, p) : byId.delete(ids[i])));
+      allCache = visible(byId);
+    })
+    .catch((err) => {
+      console.warn("Patient not re-read, the list will reload:", err);
+      if (gen === cacheGen) clearPatientCache();
+    })
+    .finally(() => { if (gen === cacheGen) pending = null; });
+});
 /* ===================== Search ===================== */
 
 // "  O'Brien-Smith, Zoë " -> "obrien smith zoe"
@@ -338,10 +415,14 @@ export function mountPatientList(container) {
     else { state.client.shown += pageSize(); renderClientPage(); }
   });
 
-  refreshBtn.addEventListener("click", async () => {
+  // Refresh: fetch just what changed. Shift+click reloads every patient from scratch.
+  refreshBtn.addEventListener("click", async (e) => {
     refreshBtn.classList.add("is-loading");
     refreshBtn.disabled = true;
-    clearPatientCache();
+    try {
+      if (e.shiftKey || !byId) clearPatientCache({ full: e.shiftKey });
+      else await refreshChanges(true);
+    } catch (err) { console.warn("Refresh failed:", err); }
     await Promise.allSettled([loadCount(), run()]);
     refreshBtn.classList.remove("is-loading");
     refreshBtn.disabled = false;
@@ -370,7 +451,11 @@ export function mountPatientList(container) {
   });
 
   loadCount();
-  run();
+  // Show the list straight away, then pick up anything other staff changed since it was loaded
+  run()
+    .then(() => refreshChanges())
+    .then((changed) => { if (changed && results.isConnected) { loadCount(); run(); } })
+    .catch((err) => console.warn("Patient changes not checked:", err));
 }
 
 /* ===================== Filters ===================== */

@@ -2,7 +2,7 @@ import { db, auth } from "./firebase-config.js";
 import { formatDobLong, toDateKeyLoose } from "./utils.js";
 import {
   collection, query, where, orderBy, limit, startAfter, getDocs,
-  doc, getDoc, setDoc, updateDoc, serverTimestamp, getCountFromServer,
+  doc, getDoc, setDoc, updateDoc, serverTimestamp, getCountFromServer, Timestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const COLLECTION = "patient_list";
@@ -61,9 +61,13 @@ function reverseName(t) {
 }
 
 function toPatient(snap) {
-  const d = snap.data();
+  return patientFromData(snap.id, snap.data());
+}
+
+// A patient from raw patient_list fields (a Firestore document or a row of the patient index)
+export function patientFromData(id, d) {
   return {
-    id: snap.id,
+    id,
     pttId: d.PttID || "",
     firstName: d["First Name"] || "",
     lastName: d["Last Name"] || "",
@@ -210,13 +214,59 @@ export async function searchPatientsByPhone(term) {
   return [...out.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-// Every patient (only used by Duplicates / Birthday / Age filters, then kept in memory)
-export async function fetchAllPatients() {
+// Every patient document, merged duplicates included (the slow way: one read per patient)
+export async function fetchPatientsRaw() {
   const snap = await getDocs(collection(db, COLLECTION));
-  return snap.docs
-    .map(toPatient)
-    .filter((p) => !p.mergedInto) // merged duplicates are hidden
+  return snap.docs.map(toPatient);
+}
+
+// Every patient (merged duplicates hidden), sorted by surname
+export async function fetchAllPatients() {
+  return (await fetchPatientsRaw())
+    .filter((p) => !p.mergedInto)
     .sort((a, b) => (a.nameKey || a.name.toLowerCase()).localeCompare(b.nameKey || b.name.toLowerCase()));
+}
+
+/* ===================== Fast loading: the nightly index + recent changes ===================== */
+
+const INDEX_MAX_AGE_MS = 3 * 86400000;   // older than this (the nightly build stopped?): read every patient instead
+const CHANGE_MARGIN_MS = 30 * 60 * 1000; // overlap, so a computer clock that's a little off can't miss an edit
+
+// { map: Map(id -> patient), builtAt: ms }, or null when the index can't be used
+export async function fetchPatientIndex() {
+  const metaSnap = await getDoc(doc(db, "patient_index", "meta"));
+  if (!metaSnap.exists()) return null;
+  const meta = metaSnap.data();
+  const builtAt = Date.parse(meta.builtAt || "");
+  const parts = Number(meta.parts) || 0;
+  if (!builtAt || !parts || Date.now() - builtAt > INDEX_MAX_AGE_MS) return null;
+
+  const snaps = await Promise.all(Array.from({ length: parts }, (_, i) => getDoc(doc(db, "patient_index", `p${i}`))));
+  const map = new Map();
+  for (const s of snaps) {
+    if (!s.exists() || s.data().build !== meta.build) return null; // caught mid-rebuild: use the slow way this once
+    JSON.parse(s.data().data || "[]").forEach(([id, d]) => map.set(id, patientFromData(id, d)));
+  }
+  return map.size === Number(meta.count) ? { map, builtAt } : null;
+}
+
+// Patients added or edited since a time (ms)
+export async function fetchPatientChanges(sinceMs) {
+  const after = Timestamp.fromMillis(Math.max(0, sinceMs - CHANGE_MARGIN_MS));
+  const col = collection(db, COLLECTION);
+  const [edited, added] = await Promise.all([
+    getDocs(query(col, where("UpdatedAt", ">", after))),
+    getDocs(query(col, where("CreatedAt", ">", after))),
+  ]);
+  const out = new Map();
+  [edited, added].forEach((snap) => snap.forEach((d) => out.set(d.id, toPatient(d))));
+  return [...out.values()];
+}
+
+// One patient exactly as stored (no redirect to a merged record), or null
+export async function getPatientDoc(id) {
+  const snap = await getDoc(doc(db, COLLECTION, id));
+  return snap.exists() ? toPatient(snap) : null;
 }
 
 /* ===================== New patients ===================== */

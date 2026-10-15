@@ -123,6 +123,7 @@ export async function mergePatients({ survivor, duplicates, details }) {
   });
   duplicates.forEach((d) => batch.update(doc(db, "patient_list", d.id), {
     MergedInto: survivor.id, MergedAt: at, MergedBy: me.name, MergedByUid: me.uid,
+    UpdatedAt: serverTimestamp(), UpdatedBy: me.name, UpdatedByUid: me.uid, // so the Patient List sees the merge
   }));
 
   // Combine the clinical lists into the kept patient's profile
@@ -155,8 +156,9 @@ export async function mergePatients({ survivor, duplicates, details }) {
   });
 
   await batch.commit(); // all or nothing
-  window.dispatchEvent(new CustomEvent("patient-updated", { detail: { id: survivor.id } }));
-  return { mergeId: mergeRef.id };
+  window.dispatchEvent(new CustomEvent("patient-updated", {
+    detail: { id: survivor.id, ids: [survivor.id, ...duplicates.map((d) => d.id)] },
+  }));
 }
 
 /* ===================== Undo ===================== */
@@ -184,6 +186,7 @@ export async function undoMerge(merge) {
 
   (merge.duplicates || []).forEach((d) => batch.update(doc(db, "patient_list", d.id), {
     MergedInto: deleteField(), MergedAt: deleteField(), MergedBy: deleteField(), MergedByUid: deleteField(),
+    UpdatedAt: serverTimestamp(), UpdatedBy: me.name, UpdatedByUid: me.uid,
   }));
 
   if (merge.before && merge.before.profileChanged) {
@@ -202,5 +205,7 @@ export async function undoMerge(merge) {
   });
 
   await batch.commit();
-  window.dispatchEvent(new CustomEvent("patient-updated", { detail: { id: merge.survivorId } }));
+  window.dispatchEvent(new CustomEvent("patient-updated", {
+    detail: { id: merge.survivorId, ids: [merge.survivorId, ...(merge.duplicates || []).map((d) => d.id)] },
+  }));
 }

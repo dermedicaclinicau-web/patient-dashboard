@@ -5803,3 +5803,66 @@ function recMoveLegacy_(def, kind, rid, body, session) {
     lock.releaseLock();
   }
 }
+
+// ===================== Patient list: a fast-loading index =====================
+// The Patient List reads these few documents instead of every patient, then asks Firestore only for
+// patients added or edited since (UpdatedAt / CreatedAt). Rebuilt every morning. The portal falls back
+// to reading every patient if the index is missing or more than 3 days old.
+
+const PATIENT_INDEX_FIELDS_ = ['PttID', 'First Name', 'Last Name', 'Patient Name', 'NameKey', 'Email', 'Mobile',
+  'Address', 'DobKey', 'DOB', 'MergedIds', 'MergedNames', 'MergedInto'];
+const PATIENT_INDEX_PART_ = 400000; // characters per document (Firestore's limit is 1 MiB)
+
+function buildPatientIndex() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) { console.log('Another job is running. Patient index skipped.'); return; }
+  try {
+    const cfg = getConfig_();
+    const builtAt = new Date().toISOString(); // taken BEFORE reading, so nothing saved meanwhile is missed
+    const rows = fsListAll_(cfg, 'patient_list', PATIENT_INDEX_FIELDS_).map(function (d) {
+      const f = fromFields_(d.fields || {});
+      const out = {};
+      PATIENT_INDEX_FIELDS_.forEach(function (k) {
+        const v = f[k];
+        if (v === null || v === undefined || v === '' || (Array.isArray(v) && !v.length)) return;
+        out[k] = v;
+      });
+      return JSON.stringify([d.name.split('/').pop(), out]);
+    });
+    if (!rows.length) throw new Error('patient_list came back empty. Index not changed.');
+
+    const parts = [];
+    let cur = [];
+    let size = 2;
+    rows.forEach(function (r) {
+      if (cur.length && size + r.length + 1 > PATIENT_INDEX_PART_) { parts.push('[' + cur.join(',') + ']'); cur = []; size = 2; }
+      cur.push(r);
+      size += r.length + 1;
+    });
+    if (cur.length) parts.push('[' + cur.join(',') + ']');
+
+    const build = Utilities.getUuid();
+    const old = fsGetDoc_(cfg, 'patient_index/meta');
+    const writes = parts.map(function (data, i) {
+      return updateWrite_(cfg, 'patient_index/p' + i, { build: build, data: data });
+    });
+    for (let i = parts.length; i < Number((old && old.parts) || 0); i++) writes.push(deleteWrite_(cfg, 'patient_index/p' + i));
+    writes.push(updateWrite_(cfg, 'patient_index/meta', {
+      build: build, parts: parts.length, count: rows.length, builtAt: builtAt,
+    }));
+    commitWrites_(cfg, writes, 500); // one commit, so the portal never sees half a build
+    console.log('Patient index: ' + rows.length + ' patients in ' + parts.length + ' part(s).');
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Run ONCE from the editor: builds the index now, then every morning around 5am
+function installPatientIndex() {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return t.getHandlerFunction() === 'buildPatientIndex'; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('buildPatientIndex').timeBased().everyDays(1).atHour(5).create();
+  buildPatientIndex();
+  console.log('Patient index installed (daily, about 5am).');
+}

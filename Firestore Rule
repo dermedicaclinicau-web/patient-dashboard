@@ -944,6 +944,12 @@ match /inv_count_drafts/{id} {
              'MergedIds', 'MergedNames', 'MergedInto', 'MergedAt', 'MergedBy', 'MergedByUid',
              'UpdatedAt', 'UpdatedBy', 'UpdatedByUid']);
     }
+
+    // Patient List index (built nightly by Apps Script)
+    match /patient_index/{id} {
+      allow read: if isStaff();
+      allow write: if false;
+    }
     
     // Chat: Help (staff → admins), one-to-one chats and group chats.
     // Members read and write their own conversations; Admins can read every chat and answer Help.
