@@ -60,10 +60,11 @@ const SMART = {
   },
 };
 
+const SPECIALIST_TOKENS = ["Specialist name", "Specialist speciality", "Specialist practice", "Specialist email", "Specialist phone", "Specialist address"];
 const BUILT_IN = ["first name", "full name", "email", "mobile", "date of birth", "patient name", "patient first name",
   "patient mobile", "patient email", "today", "staff name", "clinic phone", "clinic email", "clinic address",
-  ...Object.keys(SMART).map((k) => k.toLowerCase())];
-
+  ...Object.keys(SMART).map((k) => k.toLowerCase()), ...SPECIALIST_TOKENS.map((k) => k.toLowerCase())];
+const fillsForms = (task) => (task.attachments || []).some((a) => /^(fill|saved):/.test(String(a)));
 const treatmentsField = (task) => (task.fields || []).find((f) => TASK_CHOICE_TYPES.includes(f.type) && f.source === "treatments");
 
 // A field's sample for the preview: real choices where we have them
@@ -104,6 +105,12 @@ export function tokenGroups(task, { staffName = "", letterhead = null, sources =
     tok("Clinic address", c.address || "Scarborough WA"),
   ] });
 
+  if (fillsForms(task)) {
+    const samples = ["Dr Sarah Lee", "Dermatologist", "Perth Skin Specialists", "reception@example.com", "08 9000 0000", "12 Example St, Perth WA 6000"];
+    groups.push({ title: "From the attached form", tokens: SPECIALIST_TOKENS.map((n, i) =>
+      tok(n, samples[i], "", "From the Referral specialist on the attached form, once it's filled in")) });
+  }
+  
   const fields = (task.fields || []).filter((f) => String(f.label || "").trim());
   if (fields.length) {
     groups.push({ title: "Your fields", tokens: fields.map((f) => tok(f.label.trim(), fieldSample(f, sources), "field")) });
@@ -133,7 +140,9 @@ export function taskProblems(task) {
     out.push("Choose at least one staff member to send it to.");
   }
   if (r.cc && !EMAIL_RE.test(r.cc)) out.push("Check the CC email address.");
-
+  if (task.category === "staff" && !r.aboutPatient && fillsForms(task)) {
+    out.push("Attachments filled in by staff (or saved copies) need a patient. Tick “This is about a patient”, or set them to Blank.");
+  }
   const seen = new Set();
   (task.fields || []).forEach((f, i) => {
     const l = String(f.label || "").trim();

@@ -433,14 +433,15 @@ async function checkConsents(consentFields, patient) {
 
 /* ===================== Fill in ===================== */
 
-export async function mountFormFill(container, param, { staff } = {}) {
+// embedded (Task Manager overlay): { onSaved(submissionId), onCancel(), saveLabel }
+export async function mountFormFill(container, param, { staff, embedded = null } = {}) {
   const [pid = "", tid = ""] = String(param || "").split("/");
   const patientHref = `#/patient/${encodeURIComponent(pid)}`;
-  const ret = readReturn();
+  const ret = embedded ? null : readReturn();
   const isConsentLeg = !!(ret && ret.patientId === pid && ret.consentId === tid);   // filling in the consent
   const isReturnLeg = !!(ret && ret.patientId === pid && ret.templateId === tid && !isConsentLeg); // back on the treatment form
   const exitHref = isConsentLeg ? ret.returnHash : patientHref;
-  const back = `<a class="back-link" href="${patientHref}">← Back to patient</a>`;
+  const back = embedded ? "" : `<a class="back-link" href="${patientHref}">← Back to patient</a>`;
   const root = document.createElement("section");
   root.className = "page wide";
   root.innerHTML = back + '<div class="skeleton" style="height:420px;border-radius:14px"></div>';
@@ -481,17 +482,21 @@ export async function mountFormFill(container, param, { staff } = {}) {
     <div class="ff-wrap">
       <div class="ff-bar" role="region" aria-label="Form actions">
         <div class="ff-bar-inner">
-          <a class="ff-back" href="${exitHref}" aria-label="Back" title="Back">${BAR_ICONS.back}</a>
+          ${embedded
+            ? `<button type="button" class="ff-back" data-act="emb-cancel" aria-label="Cancel" title="Cancel">${BAR_ICONS.back}</button>`
+            : `<a class="ff-back" href="${exitHref}" aria-label="Back" title="Back">${BAR_ICONS.back}</a>`}
           <div class="ff-bar-title">
             <strong>${esc(ver.name)}</strong>
             <span>${esc(patient.name)} · ${esc(categoryLabel(tpl.category))} · Version ${ver.version}</span>
           </div>
           <span class="ff-progress" data-role="progress" hidden></span>
-          <div class="ff-bar-actions">
+          <div class="ff-bar-actions">${embedded ? `
+            <button type="button" class="ff-btn is-quiet" data-act="emb-cancel">Cancel</button>
+            <button type="button" class="ff-btn is-primary" data-save="save">${BAR_ICONS.check}<span>${esc(embedded.saveLabel || "Save")}</span></button>` : `
             <a class="ff-btn is-quiet" href="${exitHref}">Cancel</a>
             <button type="button" class="ff-btn" data-save="print">${BAR_ICONS.print}<span>Save &amp; print</span></button>
             <button type="button" class="ff-btn" data-save="email">${BAR_ICONS.mail}<span>Save &amp; email</span></button>
-            <button type="button" class="ff-btn is-primary" data-save="save">${BAR_ICONS.check}<span>Save</span></button>
+            <button type="button" class="ff-btn is-primary" data-save="save">${BAR_ICONS.check}<span>Save</span></button>`}
           </div>
         </div>
         <p class="ff-msg" data-role="msg" aria-live="polite"></p>
@@ -770,7 +775,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
         if (!root.isConnected) return;
         consentFields.forEach((f) => {
           const el = wrap(f.id) && wrap(f.id).querySelector(".fe-consent");
-          if (el) el.outerHTML = consentHtml(f, consent[f.id], { canStart: true });
+          if (el) el.outerHTML = consentHtml(f, consent[f.id], { canStart: !embedded }); // no leaving the overlay mid-task
         });
         refresh();
       });
@@ -982,6 +987,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
         }),
       } : undefined);
       dirty = false;
+      if (embedded) { embedded.onSaved(id); return; }
       if (kind === "save" && isConsentLeg) {
         location.hash = ret.returnHash;
         showToast(`${ver.name} saved. Back to ${ret.templateName}.`);
@@ -1008,6 +1014,20 @@ export async function mountFormFill(container, param, { staff } = {}) {
   }
   saveBtns.forEach((b) => b.addEventListener("click", () => save(b.dataset.save)));
 
+    // Inside an overlay: Cancel asks first if anything has been filled in
+  if (embedded) {
+    root.addEventListener("click", async (e) => {
+      if (!e.target.closest('[data-act="emb-cancel"]')) return;
+      if (dirty && !(await confirmDialog({
+        title: "Close without saving?",
+        message: "The answers on this form haven't been saved and will be lost.",
+        confirmLabel: "Close without saving", tone: "warning",
+      }))) return;
+      dirty = false;
+      embedded.onCancel();
+    });
+  }
+  
   /* ---------- Don't lose answers by accident ---------- */
   const onBeforeUnload = (e) => { if (dirty && root.isConnected) { e.preventDefault(); e.returnValue = ""; } };
   const guard = async (e) => {

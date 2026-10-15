@@ -1,13 +1,15 @@
 // Running a task: who it's for, the details, the ready-written email, then send.
 // Route: #/tasks/run/<taskId>            (from Task Manager)
 //        #/tasks/run/<taskId>/<patientId> (from the patient page's Email button)
-import { getTaskType, fetchStaffList, TASK_CHOICE_TYPES } from "./task-types.js";
+import { getTaskType, fetchStaffList, TASK_CHOICE_TYPES, parseAttachment } from "./task-types.js";
+import { printablePdf, savedFormPdf } from "./form-delivery.js";
+import { getSubmission, listSubmissionsForPatient } from "./form-submissions.js";
+import { getPatient, patientIds } from "./patients.js";
+import { mountFormFill } from "./form-fill.js";
 import { loadSource } from "./task-sources.js";
-import { getPatient } from "./patients.js";
 import { fetchPreconsult, callApi } from "./appointments.js";
 import { fetchTranscriptRecords, latestTreatmentPlan } from "./transcripts.js";
 import { getLetterhead, listPublishedForms } from "./form-templates.js";
-import { printablePdf } from "./form-delivery.js";
 import { db } from "./firebase-config.js";
 import { collection, query, where, limit, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { showToast, formatDobLong, formatMobile } from "./utils.js";
@@ -35,6 +37,8 @@ const niceDate = (key) => {
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" }) : (key || "");
 };
 const titleCase = (s) => s.replace(/\b\w/g, (c) => c.toUpperCase());
+const isoToday = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+const SP_KEYS = ["specialist name", "specialist speciality", "specialist practice", "specialist email", "specialist phone", "specialist address"];
 
 function runError(err) {
   switch (err && err.code) {
@@ -116,6 +120,8 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     appts: { months: 6, services: true, staff: true, items: null, status: "", source: "book", lastKey: "", toKey: "" },
     subjectEdited: false, bodyEdited: false, sending: false, touched: false,
     combo: { results: [], active: -1, status: "", seq: 0 },
+    // Attachments: { mode: "blank"|"fill"|"saved", id, subId, tags, saved }
+    atts: task.attachments.map(parseAttachment).map((a) => ({ ...a, subId: "", tags: null, saved: undefined })),
   };
   if (patientId) { try { st.patient = await getPatient(patientId); } catch (err) { console.warn("Patient load failed:", err); } }
   if (!root.isConnected) return;
@@ -207,6 +213,9 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     set("Aftercare", ""); // only filled in when emailing aftercare from a form
     const tx = task.fields.find((f) => TASK_CHOICE_TYPES.includes(f.type) && f.source === "treatments");
     if (tx) set("Treatment info", formatChoice({ ...tx, display: "links" }, chosen(tx)));
+    // From an attached form that's been filled in (its Referral specialist)
+    const ft = st.atts.map((a) => a.tags).find((t) => t && t["specialist name"]) || {};
+    SP_KEYS.forEach((k) => set(k, ft[k] || ""));
     // Your own fields last, so a field called "Aftercare" (or "Treatment plan") is never blanked out
     task.fields.forEach((f) => { if (f.label.trim()) set(f.label.trim(), answerText(f)); });
     return m;
@@ -306,14 +315,14 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     catch (err) { console.error(err); showToast("Couldn't open that patient. Try again."); return; }
     if (!root.isConnected || !st.patient) return;
     st.combo = { results: [], active: -1, status: "", seq: st.combo.seq + 1 };
-    renderLeft(); renderTo(); loadSmart();
+    renderLeft(); renderTo(); loadSmart(); loadAttachments();
     const to = $('[data-role="to-input"]');
     if (to && !to.value) to.focus();
   }
 
   function clearPatient() {
     st.patient = null;
-    renderLeft(); renderTo(); loadSmart();
+    renderLeft(); renderTo(); loadSmart(); loadAttachments();
     const input = root.querySelector(".pc-input");
     if (input) input.focus();
   }
@@ -335,8 +344,10 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
       box.innerHTML = `${patientChip()}
         <input class="fe-input" type="email" data-role="to-input" maxlength="254" aria-label="Email address"
           placeholder="No email on file. Type one in." value="${esc(st.patient.email || "")}" />
-        <small class="tr-warn" data-role="to-warn" hidden></small>`;
+        <small class="tr-warn" data-role="to-warn" hidden></small>
+        <div data-role="to-extra"></div>`;
       checkTo();
+      renderToExtra();
       return;
     }
     const ids = fixedStaff ? task.recipients.staffIds : [...st.staffSel];
@@ -347,15 +358,33 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
       : `<span class="muted">${st.staffList === null ? "Loading staff…" : "Choose staff on the left"}</span>`;
   }
 
+  const specialistTags = () => st.atts.map((a) => a.tags).find((t) => t && t["specialist email"]) || null;
+
   function checkTo() {
     const input = $('[data-role="to-input"]');
     const warn = $('[data-role="to-warn"]');
     if (!input || !warn) return;
     const onFile = ((st.patient && st.patient.email) || "").toLowerCase();
     const v = input.value.trim().toLowerCase();
+    const sp = specialistTags();
+    if (sp && v && v === String(sp["specialist email"]).toLowerCase()) {
+      warn.textContent = `Sending to ${sp["specialist name"] || "the specialist"}, not the patient.`;
+      warn.hidden = false;
+      return;
+    }
     if (!onFile) { warn.textContent = "There's no email on this patient's record. Type one in."; warn.hidden = false; return; }
     warn.textContent = "This isn't the email address on the patient's record.";
     warn.hidden = !v || v === onFile;
+  }
+
+  // "Send to the specialist instead", once an attached form with a Referral specialist is filled in
+  function renderToExtra() {
+    const box = $('[data-role="to-extra"]');
+    if (!box) return;
+    const sp = specialistTags();
+    const em = sp && sp["specialist email"];
+    box.innerHTML = em ? `<button type="button" class="hx-add" data-act="to-specialist" data-email="${esc(em)}">Send to ${
+      esc(sp["specialist name"] || "the specialist")} instead (${esc(em)})</button>` : "";
   }
 
   function staffCard() {
@@ -425,14 +454,106 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     left.innerHTML = h;
   }
 
+  const formName = (fid) => ((st.printables || []).find((x) => x.id === fid) || {}).name || "Attachment";
+
   function renderAttachments() {
     const box = $('[data-role="atts"]');
-    if (!task.attachments.length) { box.innerHTML = ""; return; }
-    const names = task.attachments.map((id) => {
-      const p = (st.printables || []).find((x) => x.id === id);
-      return p ? p.name : "Attachment";
+    if (!st.atts.length) { box.innerHTML = ""; return; }
+    box.innerHTML = `<div class="tr-atts">${st.atts.map((a, i) => {
+      const n = esc(formName(a.id));
+      if (a.mode === "blank") return `<div class="tr-att"><span class="tb-att">${I.doc}${n}.pdf</span></div>`;
+      if (!st.patient) return `<div class="tr-att"><span class="tb-att is-todo">${I.doc}${n}</span><small class="muted">Choose the patient first.</small></div>`;
+      if (a.mode === "fill") {
+        return `<div class="tr-att"><span class="tb-att${a.subId ? "" : " is-todo"}">${I.doc}${n}${a.subId ? " ✓" : ""}</span>
+          <small class="muted">${a.subId ? `Filled in and saved to ${esc(st.patient.name)}'s record.` : "Needs filling in before sending."}</small>
+          <button type="button" class="lh-btn${a.subId ? " is-quiet" : " is-primary"}" data-attfill="${i}">${a.subId ? "Fill in again" : "Fill in now"}</button></div>`;
+      }
+      if (a.saved === null || a.saved === undefined) return `<div class="tr-att"><span class="tb-att">${I.doc}${n}</span><small class="muted">Looking for saved copies…</small></div>`;
+      if (!a.saved.length) {
+        return `<div class="tr-att"><span class="tb-att is-todo">${I.doc}${n}</span><small class="muted">None saved for this patient yet.</small>
+          <button type="button" class="lh-btn is-primary" data-attfill="${i}">Fill one in now</button></div>`;
+      }
+      return `<div class="tr-att"><span class="tb-att">${I.doc}${n}</span>
+        <select class="fb-select" data-attpick="${i}" aria-label="Which saved copy">${a.saved.map((s) =>
+          `<option value="${esc(s.id)}"${s.id === a.subId ? " selected" : ""}>${esc(niceDate(s.recordDate))}${s.createdBy ? ` · ${esc(s.createdBy)}` : ""}</option>`).join("")}</select></div>`;
+    }).join("")}</div>`;
+  }
+
+  // A new patient: nothing filled in yet; saved copies are looked up again
+  function loadAttachments() {
+    st.atts.forEach((a) => { a.subId = ""; a.tags = null; a.saved = a.mode === "saved" ? null : undefined; });
+    renderAttachments();
+    const p = st.patient;
+    if (!p || !st.atts.some((a) => a.mode === "saved")) return;
+    listSubmissionsForPatient([p.id, ...patientIds(p)])
+      .then((subs) => {
+        if (st.patient !== p) return;
+        st.atts.forEach((a) => {
+          if (a.mode !== "saved") return;
+          a.saved = subs.filter((s) => s.templateId === a.id)
+            .sort((x, y) => String(y.recordDate || "").localeCompare(String(x.recordDate || ""))); // newest first
+          if (a.saved[0]) pickSaved(a, a.saved[0]);
+        });
+      })
+      .catch((err) => { console.warn("Saved copies not loaded:", err); st.atts.forEach((a) => { if (a.mode === "saved") a.saved = []; }); })
+      .finally(() => { if (root.isConnected && st.patient === p) { renderAttachments(); renderToExtra(); checkTo(); renderMessage(); } });
+  }
+
+    // Use a saved copy. Its specialist details come from the saved answers (read in full if the list didn't include them).
+  async function pickSaved(a, s) {
+    a.subId = s.id;
+    a.tags = (s.answers && s.answers.__tags) || null;
+    if (a.tags) return;
+    try {
+      const full = await getSubmission(s.id);
+      if (a.subId !== s.id) return; // a different copy was chosen meanwhile
+      a.tags = (full && full.answers && full.answers.__tags) || null;
+    } catch (err) {
+      console.warn("Saved form not read:", err);
+    }
+    if (root.isConnected) { renderToExtra(); checkTo(); renderMessage(); }
+  }
+
+  // The live form in an overlay. Saving puts it on the patient's record and attaches it.
+  function openFill(i) {
+    const a = st.atts[i];
+    const p = st.patient;
+    if (!a || !p) return;
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog tr-fill-dlg";
+    dlg.innerHTML = '<div data-role="fill"></div>';
+    document.body.appendChild(dlg);
+    const host = dlg.querySelector('[data-role="fill"]');
+    dlg.addEventListener("cancel", (e) => {
+      e.preventDefault();
+      const c = host.querySelector('[data-act="emb-cancel"]');
+      if (c) c.click(); else dlg.close();
     });
-    box.innerHTML = `<div class="tb-mail-att">${names.map((n2) => `<span class="tb-att">${I.doc}${esc(n2)}.pdf</span>`).join("")}</div>`;
+    dlg.addEventListener("close", () => dlg.remove());
+    mountFormFill(host, `${p.id}/${a.id}`, {
+      staff,
+      embedded: {
+        saveLabel: "Save and attach",
+        onCancel: () => dlg.close(),
+        onSaved: async (subId) => {
+          dlg.close();
+          a.subId = subId;
+          try { const s = await getSubmission(subId); a.tags = (s && s.answers && s.answers.__tags) || null; }
+          catch (err) { console.warn("Saved form not read back:", err); }
+          if (a.mode === "saved") {
+            a.saved = [{ id: subId, recordDate: isoToday(), createdBy: (staff && staff.name) || "", answers: { __tags: a.tags || {} } }, ...(a.saved || [])];
+          }
+          st.touched = true;
+          if (!root.isConnected) return;
+          renderAttachments(); renderToExtra(); checkTo(); renderMessage();
+          if (st.bodyEdited && /\{\s*specialist/i.test(allText)) {
+            noteEl.textContent = "The specialist's details are ready. Press “Reset to the task's wording” to put them in the email.";
+          }
+          showToast(`${formName(a.id)} saved to ${p.name}'s record and attached`);
+        },
+      },
+    });
+    dlg.showModal();
   }
 
   /* ---------- Loading data ---------- */
@@ -589,7 +710,26 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   });
 
   root.addEventListener("click", (e) => {
-    if (e.target.closest('[data-act="change-patient"]')) clearPatient();
+    if (e.target.closest('[data-act="change-patient"]')) { clearPatient(); return; }
+    const ts = e.target.closest('[data-act="to-specialist"]');
+    if (ts) {
+      const input = $('[data-role="to-input"]');
+      if (input) { input.value = ts.dataset.email; checkTo(); st.touched = true; }
+    }
+  });
+  const attsBox = $('[data-role="atts"]');
+  attsBox.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-attfill]");
+    if (b) openFill(Number(b.dataset.attfill));
+  });
+  attsBox.addEventListener("input", (e) => {
+    const s = e.target.closest("[data-attpick]");
+    if (!s) return;
+    const a = st.atts[Number(s.dataset.attpick)];
+    const hit = a && (a.saved || []).find((x) => x.id === s.value);
+    if (!hit) return;
+    pickSaved(a, hit);
+    renderToExtra(); checkTo(); renderMessage();
   });
   $('[data-role="to"]').addEventListener("input", (e) => { if (e.target.matches('[data-role="to-input"]')) checkTo(); });
   subjectEl.addEventListener("input", () => { st.subjectEdited = true; st.touched = true; resetBtn.hidden = false; });
@@ -608,6 +748,12 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     }
     const cc = ccEl.value.trim();
     if (cc && !EMAIL_RE.test(cc)) out.push("Check the CC email address.");
+    if (st.patient) {
+      st.atts.forEach((a) => {
+        if (a.mode === "fill" && !a.subId) out.push(`Fill in “${formName(a.id)}” before sending (under the email).`);
+        if (a.mode === "saved" && !a.subId) out.push(`There's no saved “${formName(a.id)}” for this patient. Fill one in under the email.`);
+      });
+    }
     task.fields.forEach((f) => { if (f.required && isEmpty(st.answers[f.id])) out.push(`Answer “${f.label}”.`); });
     if (!subjectEl.value.trim()) out.push("Add a subject.");
     if (!editor.text().trim()) out.push("The message is empty.");
@@ -628,9 +774,13 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     const label = sendBtn.querySelector("span");
     try {
       const attachments = [];
-      if (task.attachments.length) {
+      if (st.atts.length) {
         label.textContent = "Preparing PDFs…";
-        for (const tid of task.attachments) attachments.push(await printablePdf({ templateId: tid, patient: st.patient }));
+        for (const a of st.atts) {
+          attachments.push(a.mode === "blank"
+            ? await printablePdf({ templateId: a.id, patient: st.patient })
+            : await savedFormPdf(a.subId));
+        }
       }
       label.textContent = "Sending…";
       const to = task.category === "patient" ? $('[data-role="to-input"]').value.trim() : "";
@@ -676,6 +826,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   renderTo();
   renderAttachments();
   loadSmart();
+  if (st.patient) loadAttachments();
   if (task.category === "patient" && !st.patient) {
     const s = root.querySelector(".pc-input");
     if (s) s.focus();

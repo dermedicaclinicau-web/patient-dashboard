@@ -13,6 +13,7 @@ import { photoSrc, photoKey } from "./photo-field.js";
 import { createRichEditor } from "./rich-editor.js";
 import { richText } from "./rich-html.js";
 import { emailShell, clinicDetails } from "./task-tokens.js";
+import { getSubmission } from "./form-submissions.js";
 
 const EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
 const PDF_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
@@ -431,6 +432,21 @@ export async function printablePdf({ templateId, patient }) {
     recordDate: today, version: ver.version, createdBy: "" };
   const payload = await pdfPayload(await formPdf({ sub, ver, letterhead }));
   if (!payload.pdf) throw new Error(`Couldn't make the PDF for "${ver.name}". Try again.`);
+  return { name: payload.fileName, pdf: payload.pdf };
+}
+
+/* ---------- A saved form as a PDF (Task Manager: filled in before sending, or a saved copy) ---------- */
+
+export async function savedFormPdf(submissionId) {
+  const sub = await getSubmission(submissionId);
+  if (!sub) throw new Error("The saved form couldn't be found. Fill it in again.");
+  const [ver, letterhead] = await Promise.all([
+    getFormVersion(sub.templateId, sub.version),
+    getLetterhead().catch(() => DEFAULT_LETTERHEAD),
+  ]);
+  if (!ver) throw new Error(`Couldn't open "${sub.templateName}". The version it was filled in on is missing.`);
+  const payload = await pdfPayload(await formPdf({ sub, ver, letterhead }));
+  if (!payload.pdf) throw new Error(`Couldn't make the PDF for "${sub.templateName}". Try again.`);
   return { name: payload.fileName, pdf: payload.pdf };
 }
 

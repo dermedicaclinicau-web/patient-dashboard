@@ -1,7 +1,7 @@
 // Task Builder: the Task types list and the task editor.
 import {
   listTaskTypes, getTaskType, createTaskType, saveTaskType, taskSnapshot, fetchStaffList,
-  TASK_FIELD_TYPES, TASK_CHOICE_TYPES, CHOICE_DISPLAYS,
+  TASK_FIELD_TYPES, TASK_CHOICE_TYPES, CHOICE_DISPLAYS, ATTACH_MODES, parseAttachment, attachmentKey,
 } from "./task-types.js";
 import {
   tokenGroups, taskProblems, fillTemplate, sampleValues, subjectHtml, clinicDetails,
@@ -11,7 +11,7 @@ import { SOURCES, loadSource } from "./task-sources.js";
 import { createRichEditor } from "./rich-editor.js";
 import { hydrateRichImages } from "./rich-html.js";
 import { openImagePicker } from "./image-bank.js";
-import { listPublishedForms, getLetterhead } from "./form-templates.js";
+import { listPublishedForms, getLetterhead, categoryLabel } from "./form-templates.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast, formatMobile } from "./utils.js";
 import {
@@ -608,24 +608,40 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   }
 
   function attachmentsHtml() {
+    const about = task.category === "patient" || task.recipients.aboutPatient;
     let inner;
-    if (printables === null) inner = '<p class="tb-none">Loading printables…</p>';
-    else if (!printables.length) inner = '<p class="tb-none">No published printables yet. Publish one in <a href="#/forms">Form Builder</a> under Printables.</p>';
+    if (printables === null) inner = '<p class="tb-none">Loading forms…</p>';
     else {
-      const full = task.attachments.length >= 3;
-      inner = `<div class="tb-attach">${printables.map((p) => {
-        const on = task.attachments.includes(p.id);
-        return `<label class="fe-check"><input type="checkbox" data-attach="${esc(p.id)}"${on ? " checked" : ""}${!on && full ? " disabled" : ""} /> ${esc(p.name)}</label>`;
-      }).join("")}</div>`;
+      const rows = task.attachments.map((a, i) => {
+        const { mode, id: fid } = parseAttachment(a);
+        const f = printables.find((x) => x.id === fid);
+        return `<div class="tb-attrow">
+          <span class="tb-att">${I.doc}${esc(f ? f.name : "A form that isn't published any more")}</span>
+          <select class="fb-select" data-attmode="${i}" aria-label="How it's attached">${ATTACH_MODES.map(([v, l]) =>
+            `<option value="${v}"${mode === v ? " selected" : ""}${v !== "blank" && !about ? " disabled" : ""}>${esc(l)}</option>`).join("")}</select>
+          <button type="button" class="ib-tool is-danger" data-attdel="${i}" aria-label="Remove this attachment" title="Remove">${I.x}</button>
+        </div>`;
+      }).join("");
+      const avail = printables.filter((f) => !task.attachments.some((a) => parseAttachment(a).id === f.id));
+      const cats = [...new Set(avail.map((f) => f.category))];
+      const add = task.attachments.length < 3 && avail.length
+        ? `<select class="fb-select" data-attadd aria-label="Add an attachment"><option value="">+ Add a form…</option>${cats.map((c) =>
+            `<optgroup label="${esc(categoryLabel(c))}">${avail.filter((f) => f.category === c).map((f) =>
+              `<option value="${esc(f.id)}">${esc(f.name)}</option>`).join("")}</optgroup>`).join("")}</select>`
+        : "";
+      inner = (rows || '<p class="tb-none">No attachments.</p>') + add +
+        (!printables.length ? '<p class="tb-none">No published forms yet. Publish one in <a href="#/forms">Form Builder</a>.</p>' : "");
     }
     return `
       <section class="tb-card">
         <h4><span class="tb-num">6</span>Attachments <small>(optional)</small></h4>
         ${inner}
-        <small class="muted">Attached as PDFs, up to 3.</small>
+        <small class="muted">Attached as PDFs, up to 3. <strong>Fill in before sending</strong> opens the form for staff when they run the task;
+          it's saved to the patient's record and the finished PDF is attached. Use {Specialist name} and the other specialist blanks
+          in the message to fill them in from it.${about ? "" : " Filled-in and saved copies need a patient: tick “This is about a patient”."}</small>
       </section>`;
   }
-
+  
   // The blanks this task can use (the chips under the message, and the button / link windows)
   function chipGroups() {
     const groups = tokenGroups(task, tokenOpts());
@@ -868,7 +884,10 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
       const names = (staffList || []).filter((s) => r.staffIds.includes(s.id)).map((s) => esc(s.name));
       to = names.length ? names.join(", ") + (names.length > 1 ? " <small>(each gets their own copy)</small>" : "") : "<em>No one chosen yet</em>";
     } else to = "<em>The staff chosen when it's run</em>";
-    const attNames = (printables || []).filter((p) => task.attachments.includes(p.id));
+    const attNames = task.attachments.map(parseAttachment).map(({ mode, id: fid }) => {
+      const p = (printables || []).find((x) => x.id === fid);
+      return p ? { name: p.name, mode } : null;
+    }).filter(Boolean);
     const hasLogo = !!(letterhead && letterhead.logo);
 
     preview.innerHTML = `
@@ -883,7 +902,8 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
           <div class="tb-mail-row"><span>Subject</span><strong>${subjectHtml(fillTemplate(task.subject, values)) || "<em>No subject yet</em>"}</strong></div>
           <div class="tb-mail-body tb-mail-shell" data-role="shell">${emailShell(fillTemplateHtml(task.body, values), task.style,
             { clinic: clinicDetails(letterhead), hasLogo })}</div>
-          ${attNames.length ? `<div class="tb-mail-att">${attNames.map((p) => `<span class="tb-att">${I.doc}${esc(p.name)}.pdf</span>`).join("")}</div>` : ""}
+          ${attNames.length ? `<div class="tb-mail-att">${attNames.map((p) => `<span class="tb-att">${I.doc}${esc(p.name)}.pdf${
+            p.mode === "fill" ? " <small>(filled in when sent)</small>" : p.mode === "saved" ? " <small>(saved copy)</small>" : ""}</span>`).join("")}</div>` : ""}
         </div>
         <small class="muted">Highlighted parts are filled in from the fields when the task is run. Choices show real examples from your lists.</small>
       </div>`;
@@ -959,10 +979,18 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
       }
       task.schedule = cleanSchedule(s);
       if (el.dataset.rerender !== undefined) renderForm(); else renderScheduleInfo();
-    } else if (el.dataset.attach !== undefined) {
-      const ids = new Set(task.attachments);
-      if (el.checked) ids.add(el.dataset.attach); else ids.delete(el.dataset.attach);
-      task.attachments = [...ids].slice(0, 3);
+    } else if (el.dataset.attmode !== undefined) {
+      const i = Number(el.dataset.attmode);
+      const { id: fid } = parseAttachment(task.attachments[i]);
+      task.attachments[i] = attachmentKey(el.value, fid);
+      renderForm();
+    } else if (el.dataset.attadd !== undefined) {
+      const fid = el.value;
+      if (!fid) return;
+      const f = (printables || []).find((x) => x.id === fid);
+      const about = task.category === "patient" || task.recipients.aboutPatient;
+      const mode = !about || (f && f.category === "printable") ? "blank" : "fill";
+      task.attachments = [...task.attachments, attachmentKey(mode, fid)].slice(0, 3);
       renderForm();
     } else {
       return;
@@ -990,6 +1018,13 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     }
     const st = e.target.closest('[data-act="sch-test"]');
     if (st) { testSend(st); return; }
+    const ad = e.target.closest("[data-attdel]");
+    if (ad) {
+      task.attachments.splice(Number(ad.dataset.attdel), 1);
+      renderForm();
+      changed();
+      return;
+    }
     const tokenBtn = e.target.closest("[data-token]");
     if (tokenBtn) {
       const name = tokenBtn.dataset.token;
@@ -1144,7 +1179,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     .catch(() => { letterhead = {}; })
     .finally(() => { if (root.isConnected) { renderForm(); renderPreview(); } });
   listPublishedForms()
-    .then((list) => { printables = list.filter((t) => t.category === "printable"); })
+    .then((list) => { printables = list.filter((t) => t.category !== "email"); }) // any published form can be attached
     .catch(() => { printables = []; })
     .finally(() => { if (root.isConnected) { renderForm(); renderPreview(); } });
   if (task.category === "staff" && task.recipients.mode === "fixed") loadStaff();

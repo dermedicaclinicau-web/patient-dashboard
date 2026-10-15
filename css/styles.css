@@ -6116,3 +6116,13 @@ a.md-quiet:hover { border-color: var(--primary); }
 .rt-build.rt-small .rt-build-body { min-height: 50px; }
 .rt-build.rt-large .rt-build-body { min-height: 180px; }
 .rt-view { padding: .6rem .75rem; border: 1px solid var(--border); border-radius: 10px; background: #f8fafc; }
+
+/* ---------- Task Manager: attachments filled in before sending ---------- */
+.tb-attrow { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-bottom: .45rem; }
+.tb-attrow .fb-select { flex: 1 1 220px; }
+.tr-atts { display: grid; gap: .5rem; margin-top: .75rem; }
+.tr-att { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.tb-att.is-todo { border-style: dashed; opacity: .85; }
+.tr-fill-dlg { width: min(980px, calc(100vw - 2rem)); max-height: calc(100dvh - 2rem); overflow: auto; padding: 0; }
+.tr-fill-dlg .page { margin: 0; max-width: none; padding: 0 1rem 1rem; }
+.tr-fill-dlg .ff-bar { position: sticky; top: 0; z-index: 5; }

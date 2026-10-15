@@ -32,6 +32,19 @@ export const CHOICE_DISPLAYS = {
 };
 const SOURCE_KEYS = ["list", "treatments", "aftercare", "staff", "printables"];
 
+// Task attachments: a form id, optionally with how it's attached ("fill:<id>" or "saved:<id>"; a plain id is "blank")
+export const ATTACH_MODES = [
+  ["blank", "Blank, with the patient's details"],
+  ["fill", "Staff fill it in before sending"],
+  ["saved", "A copy already saved for the patient"],
+];
+const ATTACH_RE = /^((fill|saved):)?[A-Za-z0-9]{10,40}$/;
+export function parseAttachment(a) {
+  const m = /^(fill|saved):(.+)$/.exec(String(a || ""));
+  return m ? { mode: m[1], id: m[2] } : { mode: "blank", id: String(a || "") };
+}
+export const attachmentKey = (mode, id) => (mode === "fill" || mode === "saved" ? `${mode}:${id}` : id);
+
 export const EMAIL_STYLE_DEFAULT = { background: "#f1f5f9", width: 600, logo: true, footer: true, accent: "#0f766e" };
 function cleanEmailStyle(s) {
   const x = s || {};
@@ -96,8 +109,13 @@ export function taskSnapshot(t = {}) {
     format: "rich",
     body: (t.format === "rich" ? cleanRichHtml(t.body) : textToRichHtml(t.body)).slice(0, 60000),
     style: cleanEmailStyle(t.style),
-    attachments: (Array.isArray(t.attachments) ? t.attachments : [])
-      .map(String).filter((id) => /^[A-Za-z0-9]{10,40}$/.test(id)).slice(0, 3),
+    attachments: (() => {
+      const seen = new Set();
+      return (Array.isArray(t.attachments) ? t.attachments : []).map(String)
+        .filter((a) => ATTACH_RE.test(a))
+        .filter((a) => { const id = parseAttachment(a).id; if (seen.has(id)) return false; seen.add(id); return true; })
+        .slice(0, 3);
+    })(),
     schedule: category === "staff" ? cleanSchedule(t.schedule) : { ...cleanSchedule(null), enabled: false },
   };
 }
