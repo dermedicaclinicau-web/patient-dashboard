@@ -5873,3 +5873,63 @@ textarea.dk-input { min-height: 70px; resize: vertical; }
   .mn-addbtn { width: 34px; padding: 0; justify-content: center; }
   .mn-cbtns .lh-btn { flex: 1; }
 }
+
+/* ---------- My dashboard: card headers (title left, everything else together on the right) ---------- */
+.md-card-head { align-items: center; justify-content: flex-start; gap: .5rem; }
+.md-card-head > h3 { margin-right: auto; }
+.mn .md-card-head { flex-wrap: wrap; }
+.mn .md-card-head > h3 { margin-right: 0; }
+.mn .md-card-head > small { margin-right: auto; }
+.mn .mn-addbtn { margin-left: 0; }
+
+/* ---------- My dashboard: today strip ---------- */
+.md-strip { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 .9rem; }
+.md-pill { display: inline-flex; align-items: center; gap: .4rem; height: 34px; padding: 0 .85rem; border: 1px solid transparent;
+  border-radius: 999px; font: inherit; font-size: .85rem; font-weight: 600; text-decoration: none; cursor: pointer; }
+.md-pill svg { width: 15px; height: 15px; flex: none; }
+.md-pill.is-info { background: #eff6ff; color: #1d4ed8; }
+.md-pill.is-ok { background: #ecfdf5; color: #047857; }
+.md-pill.is-warn { background: #fffbeb; color: #92400e; border-color: #fde68a; }
+.md-pill.is-bad { background: #fef2f2; color: #b91c1c; border-color: #fecaca; }
+.md-pill:hover { filter: brightness(.97); }
+
+/* ---------- My dashboard: quick actions ---------- */
+.md-qas { display: flex; flex-wrap: wrap; gap: .5rem; margin: 0 0 1rem; }
+.md-qa { display: inline-flex; align-items: center; gap: .45rem; height: 40px; padding: 0 1rem; border: 1px solid var(--border);
+  border-radius: 12px; background: #fff; color: var(--text); font: inherit; font-size: .88rem; font-weight: 600; text-decoration: none; cursor: pointer;
+  transition: border-color .15s, background .15s, color .15s; }
+.md-qa svg { width: 17px; height: 17px; color: var(--primary); }
+.md-qa:hover { border-color: var(--primary); background: var(--primary-soft); color: var(--primary); }
+.md-pill:focus-visible, .md-qa:focus-visible, .md-fold:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+/* ---------- My dashboard: collapsing a card ---------- */
+.md-fold { display: grid; place-items: center; width: 28px; height: 28px; flex: none; padding: 0; border: none; border-radius: 8px;
+  background: none; color: var(--muted); cursor: pointer; transition: transform .15s, background .15s; }
+.md-fold svg { width: 16px; height: 16px; }
+.md-fold:hover { background: var(--surface-2); color: var(--text); }
+.md-card.is-collapsed .md-fold { transform: rotate(-90deg); }
+.md-card.is-collapsed { gap: 0; padding-bottom: .9rem; }
+.md-card.is-collapsed .md-card-head ~ *,
+.md-card.is-collapsed .md-card-head > .md-link { display: none !important; }
+
+/* ---------- My dashboard: empty cards shrink to one line ---------- */
+.md-quiet { grid-column: 1 / -1; display: flex; align-items: center; gap: .75rem; padding: .7rem 1.1rem; color: var(--text); text-decoration: none; }
+.md-quiet strong { font-size: .95rem; font-weight: 600; }
+.md-quiet span { flex: 1; font-size: .85rem; color: var(--muted); }
+.md-quiet i { font-style: normal; font-size: 1.2rem; color: var(--muted); }
+a.md-quiet:hover { border-color: var(--primary); }
+.md-notes-card { min-width: 0; }
+
+/* ---------- My dashboard: Customise window ---------- */
+.md-cz-dlg { width: min(480px, calc(100vw - 2rem)); }
+.md-cz { display: flex; flex-direction: column; gap: .3rem; margin: 0; padding: 0; list-style: none; }
+.md-cz-row { display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: .35rem .5rem;
+  border: 1px solid var(--border); border-radius: 10px; }
+.md-cz-row .fe-check { padding: .2rem 0; }
+.md-cz-mv { display: flex; gap: .25rem; }
+.md-cz-mv .sc-ar-mv { width: 32px; height: 32px; }
+
+@media (max-width: 640px) {
+  .md-qa { flex: 1 1 calc(50% - .5rem); justify-content: center; }
+  .md-pill { height: auto; min-height: 34px; padding: .35rem .8rem; }
+}
