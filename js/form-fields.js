@@ -138,6 +138,11 @@ const TCOL_KEYS = TABLE_COL_TYPES.map(([k]) => k);
 const COL_ID = /^[A-Za-z0-9_-]{1,20}$/;
 const newColId = () => "c" + Math.random().toString(36).slice(2, 8);
 
+// Column widths (% of the table) and row heights
+export const TABLE_COL_WIDTHS = [[0, "Auto"], [10, "10%"], [15, "15%"], [20, "20%"], [25, "25%"], [30, "30%"], [35, "35%"], [40, "40%"], [50, "50%"], [60, "60%"]];
+export const TABLE_ROW_HEIGHTS = ["compact", "normal", "tall", "xl"];
+export const tableRowHeight = (f) => (TABLE_ROW_HEIGHTS.includes(f && f.rowHeight) ? f.rowHeight : "normal");
+
 // A table's columns, tidied (older columns get a position-based id)
 export function tableCols(f) {
   const list = Array.isArray(f && f.columns) && f.columns.length ? f.columns : [{ label: "Column 1", type: "text" }];
@@ -147,7 +152,20 @@ export function tableCols(f) {
     type: TCOL_KEYS.includes(c && c.type) ? c.type : "text",
     unit: String((c && c.unit) || ""),
     options: (Array.isArray(c && c.options) ? c.options : []).map(String).filter((o) => o.trim()),
+    width: Math.max(0, Math.min(90, parseInt(c && c.width, 10) || 0)),
   }));
+}
+
+// Each column's width in %, or null for Auto. Scaled down when they don't fit
+// (Auto columns always keep at least 8% each). budget: below 100 leaves room for the remove-row column.
+export function tableColWidths(f, budget = 100) {
+  const ws = tableCols(f).map((c) => (c.width > 0 ? c.width : null));
+  const set = ws.reduce((a, w) => a + (w || 0), 0);
+  if (!set) return ws;
+  const autos = ws.filter((w) => w === null).length;
+  const room = autos ? Math.min(set, budget - autos * 8) : budget;
+  const k = room / set;
+  return ws.map((w) => (w === null ? null : Math.round(w * k * 10) / 10));
 }
 // The most rows a table can have on the live form
 export function tableMax(f) {
@@ -444,7 +462,7 @@ export function createField(type, id) {
       break;
     case "table":
       f.columns = [{ id: "c1", label: "Column 1", type: "text" }, { id: "c2", label: "Column 2", type: "text" }];
-      f.rows = 3; f.addRows = false; f.maxRows = 10; f.headAlign = "auto";
+      f.rows = 3; f.addRows = false; f.maxRows = 10; f.headAlign = "auto"; f.rowHeight = "normal";
       break;
     case "calculation": f.formula = ""; f.decimals = 2; f.prefix = ""; f.suffix = ""; f.blank = "zero"; break;
     case "image":
@@ -574,6 +592,7 @@ export function cleanField(f) {
         seen.add(id);
         return {
           id, label: clip(c.label, 100), type: c.type,
+          ...(c.width ? { width: c.width } : {}),
           ...(c.type === "number" ? { unit: clip(c.unit, 20) } : {}),
           ...(c.type === "dropdown" ? { options: c.options.map((o) => clip(o, 100)).slice(0, 30) } : {}),
         };
@@ -582,6 +601,7 @@ export function cleanField(f) {
       out.addRows = f.addRows === true;
       out.maxRows = int(f.maxRows, out.rows, 50, Math.max(out.rows, 10));
       out.headAlign = pick(f.headAlign, TABLE_HEAD_ALIGNS, "auto");
+      out.rowHeight = pick(f.rowHeight, TABLE_ROW_HEIGHTS, "normal");
       break;
     }
     case "calculation":
@@ -874,12 +894,15 @@ export function renderField(f, ctx = {}) {
       const cols = tableCols(f);
       const rows = int(f.rows, 1, 30, 3);
       const canAdd = live && f.addRows === true;
+      const ws = tableColWidths(f, canAdd ? 94 : 100);
+      const fixed = ws.some((w) => w !== null);
       let body = "";
       for (let r = 0; r < rows; r++) body += tableRowHtml(f, live, false);
-      return head + `<div class="fe-table-wrap"><table class="fe-table"><thead><tr>${
-        cols.map((c, i) => `<th${c.type === "number" ? ' class="is-num"' : ""} style="text-align:${tableHeadAlign(f, c)}">${esc(c.label || `Column ${i + 1}`)}${
+      return head + `<div class="fe-table-wrap"><table class="fe-table rh-${tableRowHeight(f)}${fixed ? " is-fixed" : ""}"><thead><tr>${
+        cols.map((c, i) => `<th${c.type === "number" ? ' class="is-num"' : ""} style="text-align:${tableHeadAlign(f, c)};${
+          ws[i] !== null ? `width:${ws[i]}%;` : ""}">${esc(c.label || `Column ${i + 1}`)}${
           c.type === "number" && c.unit.trim() ? ` <small>(${esc(c.unit)})</small>` : ""}</th>`).join("")}${
-        canAdd ? '<th class="fe-trm"></th>' : ""}</tr></thead><tbody>${body}</tbody></table></div>` +
+        canAdd ? `<th class="fe-trm"${fixed ? ' style="width:6%"' : ""}></th>` : ""}</tr></thead><tbody>${body}</tbody></table></div>` +
         (canAdd ? '<button type="button" class="hx-add fe-tadd" data-tadd>+ Add a row</button>' : "") +
         (!live && f.addRows ? `<div class="fe-help fe-help-after">Staff can add rows, up to ${tableMax(f)}.</div>` : "");
     }
@@ -1184,6 +1207,13 @@ function typeSettings(f, ctx = {}) {
     case "table": {
       const cols = tableCols(f);
       const rows = int(f.rows, 1, 30, 3);
+      const setW = cols.reduce((a, c) => a + (c.width || 0), 0);
+      const autos = cols.filter((c) => !c.width).length;
+      const widthNote = !setW
+        ? "All columns are on Auto, so they size to fit their headings."
+        : setW > 100 || (!autos && setW !== 100) || (autos && setW > 100 - autos * 8)
+          ? `The widths add up to ${setW}%, so they're scaled to fit the page.`
+          : `Set widths use ${setW}% of the table${autos ? `. The ${autos} Auto column${autos === 1 ? "" : "s"} share the rest` : ""}.`;
       return `<div class="fe-insp-field"><span class="fe-insp-label">Columns</span>${cols.map((c, i) => `
           <div class="fe-tcol">
             <div class="fe-col">
@@ -1193,13 +1223,20 @@ function typeSettings(f, ctx = {}) {
               </select>
               <button type="button" class="hx-x" data-coldel="${i}" aria-label="Remove column ${i + 1}">${svg(ICONS.x)}</button>
             </div>
+            <label class="fe-tcol-w"><small>Width</small>
+              <select class="fb-select" data-col="${i}" data-colk="width" data-rerender="" aria-label="Column ${i + 1} width">
+                ${TABLE_COL_WIDTHS.map(([v, l]) => `<option value="${v}"${(c.width || 0) === v ? " selected" : ""}>${l}</option>`).join("")}
+              </select></label>
             ${c.type === "number" ? `<input class="fe-input fe-col-sub" data-col="${i}" data-colk="unit" maxlength="20" placeholder="Unit (optional), e.g. units or mL" value="${esc(c.unit)}" />` : ""}
             ${c.type === "dropdown" ? `<textarea class="fe-input fe-col-sub" data-col="${i}" data-colk="options" rows="3" placeholder="One choice per line">${esc(c.options.join("\n"))}</textarea>` : ""}
           </div>`).join("")}
         ${cols.length < 12 ? '<button type="button" class="hx-add" data-act="coladd">+ Add a column</button>' : ""}
+        <small class="fe-note">${esc(widthNote)}</small>
         <small class="fe-note">Number columns can be added up in a Calculation: their totals appear under “Insert a question”.</small></div>` +
         setting("Column headings", choose("headAlign", [["auto", "Automatic (numbers on the right)"], ["left", "Left"], ["center", "Centre"], ["right", "Right"]],
           TABLE_HEAD_ALIGNS.includes(f.headAlign) ? f.headAlign : "auto")) +
+        setting("Row height", choose("rowHeight", [["compact", "Compact"], ["normal", "Normal"], ["tall", "Tall"], ["xl", "Extra tall"]], tableRowHeight(f)),
+          "Tall and Extra tall leave room for writing by hand on printed forms.") +
         setting(f.addRows ? "Starting rows" : "Rows", `<input class="fe-input" type="number" min="1" max="30" data-k="rows" data-num="" value="${rows}" />`) +
         `<label class="fe-check"><input type="checkbox" data-k="addRows" data-rerender=""${f.addRows ? " checked" : ""} /> Staff can add rows while filling in</label>` +
         (f.addRows ? setting("Most rows", `<input class="fe-input" type="number" min="${rows}" max="50" data-k="maxRows" data-num="" value="${tableMax(f)}" />`,

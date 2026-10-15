@@ -5,7 +5,7 @@
 import { formatCalc } from "./form-calc.js";
 import { visibleIds } from "./form-conditions.js";
 import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing, textBlockHtml, clinicianParts, tableCols, tableHeadAlign,
-specialistParts, specialistBlockHtml, spanUnits,
+specialistParts, specialistBlockHtml, spanUnits, tableColWidths,
  } from "./form-fields.js";
 import { cleanRichHtml, richText } from "./rich-html.js";
 import { markSummary } from "./marking-sets.js";
@@ -131,6 +131,18 @@ function isUnanswered(f, v, sig) {
 }
 
 const tableMaxRows = (f) => Math.max(parseInt(f.rows, 10) || 3, parseInt(f.maxRows, 10) || 10);
+// A table's opening tag and heading row, with its column widths. Widths go on the headings so the server's PDF backup understands them too.
+const PDF_ROW = { compact: 20, normal: 26, tall: 38, xl: 54 };
+function gridStart(f, cols) {
+  const ws = tableColWidths(f);
+  const fixed = ws.some((w) => w !== null);
+  return {
+    open: `<table class="grid"${fixed ? ' style="table-layout:fixed"' : ""}>`,
+    head: `<tr>${cols.map((c, i) => `<th style="text-align:${tableHeadAlign(f, c)};${ws[i] !== null ? `width:${ws[i]}%;` : ""}">${
+      esc(c.label || `Column ${i + 1}`)}${c.type === "number" && c.unit ? ` (${esc(c.unit)})` : ""}</th>`).join("")}</tr>`,
+    h: PDF_ROW[f.rowHeight] || 26,
+  };
+}
 // Empty lines, tick-boxes and a signature box, for filling in by hand
 function blankAnswer(f) {
   const line = '<div class="bl"></div>';
@@ -169,9 +181,9 @@ function blankAnswer(f) {
       const cols = tableCols(f);
       if (!cols.length) return line;
       const n = Math.min(12, Math.max(3, f.addRows ? Math.min(tableMaxRows(f), 12) : parseInt(f.rows ?? f.rowCount, 10) || 4));
-      const row = `<tr>${cols.map((c) => `<td style="height:26px">${c.type === "check" ? '<span class="box"></span>' : ""}</td>`).join("")}</tr>`;
-      return `<table class="grid"><tr>${cols.map((c, i) => `<th style="text-align:${tableHeadAlign(f, c)}">${esc(c.label || `Column ${i + 1}`)}${
-        c.type === "number" && c.unit ? ` (${esc(c.unit)})` : ""}</th>`).join("")}</tr>${row.repeat(n)}</table>`;
+      const g = gridStart(f, cols);
+      const row = `<tr>${cols.map((c) => `<td style="height:${g.h}px">${c.type === "check" ? '<span class="box"></span>' : ""}</td>`).join("")}</tr>`;
+      return `${g.open}${g.head}${row.repeat(n)}</table>`;
     }
     case "signature":
       return '<div class="sig-box"></div><div class="sigmeta">Name: <span class="bl-in" style="width:220px"></span> &nbsp;&nbsp; Date: <span class="bl-in" style="width:110px"></span></div>';
@@ -245,9 +257,9 @@ function answer(f, v, sig, inline, x, blank = false) {
         if (c.type === "number") return esc(typeof x === "number" ? String(+x.toFixed(4)) : String(x));
         return esc(String(x));
       };
-      return `<table class="grid"><tr>${cols.map((c, i) => `<th style="text-align:${tableHeadAlign(f, c)}">${esc(c.label || `Column ${i + 1}`)}${
-        c.type === "number" && c.unit ? ` (${esc(c.unit)})` : ""}</th>`).join("")}</tr>${
-        rows.map((r) => `<tr>${cols.map((c, i) => `<td${c.type === "number" ? ' style="text-align:right"' : ""}>${cellText(c, r.cells[i])}</td>`).join("")}</tr>`).join("")}</table>`;
+      const g = gridStart(f, cols);
+      return `${g.open}${g.head}${rows.map((r) => `<tr>${cols.map((c, i) => `<td style="height:${g.h}px;${
+        c.type === "number" ? "text-align:right;" : ""}">${cellText(c, r.cells[i])}</td>`).join("")}</tr>`).join("")}</table>`;
     }
     case "calculation":
       return esc(formatCalc(v, f) || "—");
