@@ -26,6 +26,7 @@ import { consumeInTx } from "./inventory-api.js";
 import { listStaffDetails, staffDetailsFor } from "./staff-details.js";
 import { mountSpecialistField } from "./specialist-field.js";
 import { tagValues, collectTagNodes, applyTagNodes } from "./form-tags.js";
+import { mountRichTextField } from "./rich-field.js";
 
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const BAR_ICONS = {
@@ -272,6 +273,8 @@ export function readField(f, w, { pads = {}, calc = {}, consent = {}, annots = {
       const a = annots[f.id];
       return a && !a.isEmpty() ? { drawn: true } : "";
     }
+    case "rich_text":
+      return w.rtRead ? w.rtRead() : "";
     case "specialist":
       return w.spRead ? w.spRead() : "";
     case "consumables":
@@ -391,6 +394,9 @@ function writeField(f, w, v) {
       $all(w, "[data-cpart]").forEach((el) => { el.value = (v && v[el.dataset.cpart]) || ""; });
       break;
     }
+    case "rich_text":
+      if (w.rtWrite) w.rtWrite(v);
+      break;
     case "specialist":
       if (w.spWrite) w.spWrite(v);
       break;
@@ -565,6 +571,10 @@ export async function mountFormFill(container, param, { staff } = {}) {
   fields.filter((f) => f.type === "specialist").forEach((f) => {
     mountSpecialistField(wrap(f.id), f, { staff, onChange: () => { dirty = true; } });
   });
+  // Rich text answers: their starting text fills in from the patient now, and from the specialist once chosen
+  fields.filter((f) => f.type === "rich_text").forEach((f) => {
+    mountRichTextField(wrap(f.id), f, { onChange: () => { dirty = true; }, tags: tagValues({ patient, staff, recordDate: todayIso() }) });
+  });
 
   // Fill in from the patient's record
   const P = {
@@ -703,7 +713,13 @@ export async function mountFormFill(container, param, { staff } = {}) {
       if (w && w.csSync) w.csSync();
     });
     updateProgress();
-    applyTagNodes(tagNodes, liveTags(), null); // an empty tag stays visible until it can be filled
+    const tv = liveTags();
+    applyTagNodes(tagNodes, tv, null); // an empty tag stays visible until it can be filled
+    fields.forEach((f) => {
+      if (f.type !== "rich_text") return;
+      const w = wrap(f.id);
+      if (w && w.rtRetag) w.rtRetag(tv);
+    });
   };
 
   // "2 of 4 required" in the top bar (only questions that are showing count)
@@ -1131,6 +1147,10 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
     }
     if (f.type === "aftercare") {
       mountAftercareField(w, f, { saved: sub.answers[f.id] || null });
+      return;
+    }
+    if (f.type === "rich_text") {
+      mountRichTextField(w, f, { saved: sub.answers[f.id] || null });
       return;
     }
     if (f.type === "specialist") {

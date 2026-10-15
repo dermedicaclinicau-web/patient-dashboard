@@ -33,6 +33,7 @@ import { listMarkingSets, openMarkingSetsDialog } from "./marking-sets.js";
 import { listSpecialists, specialitiesOf } from "./specialists-api.js";
 import { openSpecialistBankDialog } from "./specialist-bank.js";
 import { tagPickerHtml, collectTagNodes, applyTagNodes, SAMPLE_TAGS } from "./form-tags.js";
+import { mountRichTextField } from "./rich-field.js";
 
 const UI = {
   up: '<polyline points="18 15 12 9 6 15"/>',
@@ -481,6 +482,9 @@ export async function mountFormEditor(container, { templateId, staff }) {
     hydrateBankImages(stage);
     if (!build) {
       applyTagNodes(collectTagNodes(stage), SAMPLE_TAGS);
+      fields.filter((f) => f.type === "rich_text").forEach((f) => {
+        mountRichTextField(stage.querySelector(`[data-fid="${CSS.escape(f.id)}"]`), f, { tags: SAMPLE_TAGS });
+      });
       previewAnnots = attachAnnotators(stage, fields, { markSets: markSets || [] });
       fields.filter((f) => f.type === "aftercare").forEach((f) => {
         mountAftercareField(stage.querySelector(`[data-fid="${CSS.escape(f.id)}"]`), f, { onChange: refreshPreview });
@@ -623,6 +627,16 @@ export async function mountFormEditor(container, { templateId, staff }) {
         },
       });
       ed.setHtml(tbField.html || textToRichHtml(tbField.text));
+    }
+    // Rich text answer: its starting text
+    const rtHost = insp.querySelector('[data-role="rt-starter"]');
+    const rtField = current();
+    if (rtHost && rtField && rtField.type === "rich_text") {
+      const ed2 = createRichEditor(rtHost, {
+        button: false,
+        onInput: () => { rtField.starter = ed2.getHtml(); changed(); renderStage(); },
+      });
+      ed2.setHtml(rtField.starter || "");
     }
   }
 

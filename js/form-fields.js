@@ -40,6 +40,7 @@ export const ICONS = {
   consumables: '<path d="m18 2 4 4"/><path d="m17 7 3-3"/><path d="M19 9 8.7 19.3a2.4 2.4 0 0 1-3.4 0l-.6-.6a2.4 2.4 0 0 1 0-3.4L15 5"/><path d="m9 11 4 4"/><path d="m5 19-3 3"/>',
   specialist: '<path d="M4 3v6a5 5 0 0 0 10 0V3"/><path d="M9 14v2a5 5 0 0 0 10 0v-3"/><circle cx="19" cy="11" r="2"/>',
   clinician: '<rect x="2" y="5" width="20" height="14" rx="2"/><circle cx="8" cy="12" r="2.5"/><path d="M14 10h5M14 14h4"/>',
+  rich_text: '<path d="M6 4h8a4 4 0 0 1 0 8H6z"/><path d="M6 12h9a4 4 0 0 1 0 8H6z"/>',
 };
 
 // `was` = the name in the old Apps Script builder (tooltip + search).
@@ -48,6 +49,7 @@ export const FIELD_TYPES = {
   clinician:      { name: "Clinician details", was: "Provider number Prescriber AHPRA Doctor", label: "Clinician" },
   short_text:     { name: "Short answer", was: "Short Text", label: "Untitled question" },
   long_text:      { name: "Long answer", was: "Long Text", label: "Untitled question" },
+  rich_text:      { name: "Rich text answer", was: "Rich text formatted long answer letter body", label: "Untitled question" },
   email:          { name: "Email", was: "Email", label: "Email address" },
   number:         { name: "Number", was: "Number", label: "Untitled question" },
   date:           { name: "Date", was: "Date", label: "Date" },
@@ -74,7 +76,7 @@ export const FIELD_TYPES = {
 
 export const FIELD_GROUPS = [
   ["Patient and visit", ["patient", "clinician", "record_date", "date"]],
-  ["Answers", ["short_text", "long_text", "number", "email"]],
+  ["Answers", ["short_text", "long_text", "rich_text", "number", "email"]],
   ["Choices", ["single_choice", "dropdown", "checkboxes", "checkbox_notes", "sub_checks"]],
   ["Clinical", ["signature", "consent_status", "prescription_status", "image", "aftercare", "consumables", "specialist"]],
   ["Tables and maths", ["table", "calculation"]],
@@ -224,7 +226,7 @@ export const INLINE_TYPES = ["short_text", "email", "number", "date", "record_da
 // Fields that get the Layout settings
 const ANSWER_TYPES = ["patient", "clinician", "short_text", "long_text", "email", "number", "date", "record_date", "single_choice",
   "checkboxes", "checkbox_notes", "sub_checks", "dropdown", "table", "calculation", "signature", "image", "consent_status", "prescription_status",
-  "specialist"];
+  "specialist", "rich_text"];
 const BOX_TYPES = ["short_text", "email", "number", "date", "record_date", "dropdown"];
 const DRIVE_ID = /^[A-Za-z0-9_-]{10,80}$/;
 const opt = (v, list, dflt) => (list.includes(v) ? v : dflt);
@@ -421,6 +423,7 @@ export function createField(type, id) {
     case "patient": f.parts = [...DEFAULT_PARTS]; break;
     case "clinician": f.parts = [...DEFAULT_CLIN]; f.who = "me"; break;
     case "long_text": f.size = "medium"; break;
+    case "rich_text": f.size = "medium"; f.starter = ""; break;
     case "date": f.range = "any"; break;
     case "signature": f.signer = "patient"; f.showNameDate = true; break;
     case "text_block": f.text = ""; f.html = ""; break;
@@ -523,6 +526,10 @@ export function cleanField(f) {
       break;
     }
     case "long_text": out.size = pick(f.size, ["small", "medium", "large"], "medium"); break;
+    case "rich_text":
+      out.size = pick(f.size, ["small", "medium", "large"], "medium");
+      out.starter = f.starter && richText(f.starter) ? cleanRichHtml(f.starter).slice(0, 30000) : "";
+      break;
     case "date": out.range = pick(f.range, ["any", "past", "future"], "any"); break;
     case "signature":
       out.signer = pick(f.signer, Object.keys(SIGNERS), "patient");
@@ -769,6 +776,15 @@ export function renderField(f, ctx = {}) {
     case "long_text": {
       const rows = { small: 2, medium: 4, large: 8 }[f.size] || 4;
       return head + `<textarea class="fe-in" rows="${rows}"${ph}${inert}>${esc(textPrefill(f))}</textarea>`;
+    }
+    case "rich_text": {
+      const size = esc(f.size || "medium");
+      if (live) return head + `<div class="rt-host rt-${size}" data-rt-host></div>`;
+      return head + `<div class="rt-build rt-${size}">
+        <div class="rt-build-bar"><b>B</b><i>I</i><u>U</u><span>•</span><span>1.</span><span>H</span><span>Link</span></div>
+        <div class="rt-build-body">${f.starter && richText(f.starter)
+          ? `<div class="fe-rich">${cleanRichHtml(f.starter)}</div>`
+          : '<span class="fe-ph">Staff type here, with bold, lists, headings and links.</span>'}</div></div>`;
     }
     case "date": {
       const t = todayIso();
@@ -1041,7 +1057,11 @@ function typeSettings(f, ctx = {}) {
     case "long_text":
       return placeholderSetting(f, "e.g. Describe any reactions") +
         setting("Box size", choose("size", [["small", "Small (2 lines)"], ["medium", "Medium (4 lines)"], ["large", "Large (8 lines)"]], f.size || "medium"));
-
+    case "rich_text":
+      return setting("Box size", choose("size", [["small", "Small"], ["medium", "Medium"], ["large", "Large (letters)"]], f.size || "medium")) +
+        `<div class="fe-insp-field"><span class="fe-insp-label">Starting text (optional)</span><div data-role="rt-starter"></div>
+          <small class="fe-note">What the box starts with, e.g. the body of a letter. Tags like {Patient name} and {Specialist name} fill in,
+            and the text keeps up with the specialist chosen until staff start typing. Staff can change all of it.</small></div>`;
     case "date":
       return setting("Allowed dates", choose("range", [["any", "Any date"], ["past", "Today or earlier"], ["future", "Today or later"]], f.range || "any"),
         "For example, today or earlier for a date of birth.");

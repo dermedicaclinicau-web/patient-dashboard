@@ -6105,3 +6105,14 @@ a.md-quiet:hover { border-color: var(--primary); }
   font-size: .7rem; padding: .1rem .45rem; border-radius: 999px; background: #f1f5f9; color: var(--muted);
 }
 @media print { .fe-field.is-pdf-hide { display: none !important; } }
+
+/* ---------- Rich text answer ---------- */
+.rt-host [contenteditable] { min-height: 140px; }
+.rt-host.rt-small [contenteditable] { min-height: 80px; }
+.rt-host.rt-large [contenteditable] { min-height: 320px; }
+.rt-build { border: 1px solid var(--border); border-radius: 10px; background: #fff; overflow: hidden; }
+.rt-build-bar { display: flex; gap: .7rem; padding: .35rem .6rem; border-bottom: 1px solid var(--border); background: #f8fafc; color: var(--muted); font-size: .8rem; }
+.rt-build-body { padding: .6rem .75rem; min-height: 90px; }
+.rt-build.rt-small .rt-build-body { min-height: 50px; }
+.rt-build.rt-large .rt-build-body { min-height: 180px; }
+.rt-view { padding: .6rem .75rem; border: 1px solid var(--border); border-radius: 10px; background: #f8fafc; }

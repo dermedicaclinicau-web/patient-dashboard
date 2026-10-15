@@ -92,7 +92,7 @@ export function collectTagNodes(root) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode: (n) => {
       const p = n.parentElement;
-      if (!p || p.closest("textarea, script, style, [data-sp-host], [data-ac-host], [data-cs-host], [data-ph-host]")) return NodeFilter.FILTER_REJECT;
+      if (!p || p.closest("textarea, script, style, [data-sp-host], [data-ac-host], [data-cs-host], [data-ph-host], [data-rt-host]")) return NodeFilter.FILTER_REJECT;
       return hasTags(n.nodeValue) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
     },
   });

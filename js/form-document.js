@@ -7,7 +7,7 @@ import { visibleIds } from "./form-conditions.js";
 import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing, textBlockHtml, clinicianParts, tableCols, tableHeadAlign,
 specialistParts, specialistBlockHtml,
  } from "./form-fields.js";
-import { cleanRichHtml } from "./rich-html.js";
+import { cleanRichHtml, richText } from "./rich-html.js";
 import { markSummary } from "./marking-sets.js";
 import { tagValues, fillTags, fillTagsHtml } from "./form-tags.js";
 
@@ -138,8 +138,8 @@ function blankAnswer(f) {
   const otherLbl = esc(String(f.otherLabel || "").trim() || "Other");
   const tick = (label, round) => `<span class="bo"><span class="box${round ? " round" : ""}"></span>${label}</span>`;
   switch (f.type) {
-    case "long_text":
-      return line.repeat(Math.min(10, Math.max(2, parseInt(f.rows, 10) || 4)));
+    case "long_text": case "rich_text":
+      return line.repeat({ small: 3, medium: 5, large: f.type === "rich_text" ? 12 : 8 }[f.size] || 5);
     case "number":
       return `<span class="bl-in" style="width:120px"></span>${f.unit ? ` ${esc(f.unit)}` : ""}`;
     case "date": case "record_date":
@@ -199,6 +199,8 @@ function answer(f, v, sig, inline, x, blank = false) {
   switch (f.type) {
     case "short_text": case "long_text": case "email":
       return v ? esc(v).replace(/\n/g, "<br>") : none;
+    case "rich_text":
+      return typeof v === "string" && richText(v) ? `<div class="fe-rich">${cleanRichHtml(v)}</div>` : none;
     case "dropdown": case "single_choice":
       return v ? choiceText(f, v, x) : none;
     case "date": case "record_date":
@@ -321,7 +323,8 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
         content ? `<div style="font-size:${fs}pt;line-height:1.55;">${content}</div>` : ""}</div>`;
     }
 
-    const v = sub.answers[f.id];
+    const raw = sub.answers[f.id];
+    const v = f.type === "rich_text" && typeof raw === "string" ? fillTagsHtml(raw, tags, missing) : raw; // tags left empty when it was saved
     const sig = sub.signatures[f.id];
     const label = st.hideLabel ? "" : esc(f.label || "");
     const gap = { tight: 2, normal: 4, wide: 10 }[st.gap] || 4;

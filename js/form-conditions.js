@@ -22,7 +22,7 @@ const KIND = {
   single_choice: "choice", dropdown: "choice",
   checkboxes: "multi", checkbox_notes: "multi", sub_checks: "multi",
   number: "number", calculation: "number",
-  short_text: "text", long_text: "text", email: "text",
+  short_text: "text", long_text: "text", email: "text", rich_text: "text",
   date: "date", record_date: "date",
   signature: "signature", consent_status: "consent",
 };

@@ -1,5 +1,5 @@
 ﻿{
-    "version":  "20261015-122602",
+    "version":  "20261015-123733",
     "files":  [
                   "./js/aftercare-api.js",
                   "./js/aftercare-bank.js",
@@ -95,6 +95,7 @@
                   "./js/reminders.js",
                   "./js/reports.js",
                   "./js/rich-editor.js",
+                  "./js/rich-field.js",
                   "./js/rich-html.js",
                   "./js/rx-products.js",
                   "./js/scanner-api.js",
