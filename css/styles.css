@@ -6088,3 +6088,9 @@ a.md-quiet:hover { border-color: var(--primary); }
 .sp-item-foot { display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin-top: auto; padding-top: .4rem; }
 .sp-item-foot span { display: flex; gap: .4rem; }
 @media (max-width: 560px) { .sp-two { grid-template-columns: 1fr; } }
+
+.sp-bank-dlg { width: min(980px, calc(100vw - 2rem)); max-height: calc(100dvh - 3rem); overflow: auto; padding: 1.1rem 1.25rem 1.25rem; }
+.sp-bank-dlg-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: .25rem; }
+.sp-bank-dlg-head h3 { margin: 0; }
+.sp-bank.is-embedded .fb-head { margin-bottom: .75rem; }
+.sp-bank.is-embedded .sp-grid { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }

@@ -1218,7 +1218,7 @@ function typeSettings(f, ctx = {}) {
         `<label class="fe-check"><input type="checkbox" data-k="allowAdd"${f.allowAdd !== false ? " checked" : ""} /> Staff can add a new specialist while filling in</label>` +
         `<label class="fe-check"><input type="checkbox" data-k="allowEdit"${f.allowEdit !== false ? " checked" : ""} /> Staff can correct a specialist's details while filling in</label>` +
         '<p class="fe-note fe-pad">New and corrected specialists are saved to the Specialist Bank for everyone. A saved letter keeps the details it was saved with.</p>' +
-        '<a class="lh-btn" href="#/specialist-bank" target="_blank" rel="noopener">Open the Specialist Bank</a>';
+        '<button type="button" class="lh-btn" data-act="sp-bank">Manage the Specialist Bank</button>';
     }
     case "watermark": {
       const logo = f.source === "logo";

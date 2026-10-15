@@ -31,6 +31,7 @@ import { listProducts, isKitProduct } from "./inventory-api.js";
 import { openProductPicker } from "./consumables-field.js";
 import { listMarkingSets, openMarkingSetsDialog } from "./marking-sets.js";
 import { listSpecialists, specialitiesOf } from "./specialists-api.js";
+import { openSpecialistBankDialog } from "./specialist-bank.js";
 
 const UI = {
   up: '<polyline points="18 15 12 9 6 15"/>',
@@ -936,6 +937,16 @@ export async function mountFormEditor(container, { templateId, staff }) {
     const f = current();
     if (!f) return;
 
+    if (e.target.closest('[data-act="sp-bank"]')) {
+      openSpecialistBankDialog({ staff })
+        .then(() => listSpecialists({ force: true }))
+        .then((list) => {
+          specialities = specialitiesOf(list);
+          if (root.isConnected) renderInspector();
+        })
+        .catch((err) => console.warn("Couldn't refresh the Specialist Bank:", err));
+      return;
+    }
     if (e.target.closest('[data-act="ms-manage"]')) {
       openMarkingSetsDialog({ staff }).then((sets) => {
         if (!sets || !root.isConnected) return;

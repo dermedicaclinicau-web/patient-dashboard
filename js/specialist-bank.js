@@ -1,4 +1,5 @@
-// Specialist Bank (#/specialist-bank): specialists for referral letters.
+// Specialist Bank: specialists for referral letters.
+// As a page (#/specialist-bank), or as an overlay from the form editor (openSpecialistBankDialog).
 import { listSpecialists, setSpecialistActive, specialitiesOf } from "./specialists-api.js";
 import { openSpecialistDialog } from "./specialist-field.js";
 import { esc } from "./form-fields.js";
@@ -6,15 +7,16 @@ import { confirmDialog } from "./dialog.js";
 import { can } from "./perms.js";
 import { showToast } from "./utils.js";
 
-export function mountSpecialistBank(container, { staff = null } = {}) {
+// embedded: inside the overlay (no back link or page title)
+export function mountSpecialistBank(container, { staff = null, embedded = false } = {}) {
   const canArchive = can("forms.build");
   const st = { list: [], q: "", spec: "", archived: false };
   const root = document.createElement("section");
-  root.className = "page wide";
+  root.className = embedded ? "sp-bank is-embedded" : "page wide sp-bank";
   root.innerHTML = `
-    <a class="back-link" href="#/forms">← Form Builder</a>
+    ${embedded ? "" : '<a class="back-link" href="#/forms">← Form Builder</a>'}
     <div class="fb-head">
-      <div><h2>Specialist Bank</h2>
+      <div>${embedded ? "" : "<h2>Specialist Bank</h2>"}
         <p class="muted">Specialists for referral letters. Staff can also add new ones while filling in a form.</p></div>
       <div class="fb-head-actions"><button type="button" class="btn-primary" data-act="new">+ New specialist</button></div>
     </div>
@@ -112,4 +114,24 @@ export function mountSpecialistBank(container, { staff = null } = {}) {
   });
 
   load();
+}
+
+// The Specialist Bank as an overlay. Resolves when it's closed.
+export function openSpecialistBankDialog({ staff = null } = {}) {
+  return new Promise((resolve) => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog sp-bank-dlg";
+    dlg.setAttribute("aria-label", "Specialist Bank");
+    dlg.innerHTML = `
+      <div class="sp-bank-dlg-head">
+        <h3>Specialist Bank</h3>
+        <button type="button" class="ib-tool" data-act="close-bank" aria-label="Close" title="Close">×</button>
+      </div>
+      <div data-role="bank"></div>`;
+    document.body.appendChild(dlg);
+    dlg.querySelector('[data-act="close-bank"]').addEventListener("click", () => dlg.close());
+    dlg.addEventListener("close", () => { dlg.remove(); resolve(); });
+    mountSpecialistBank(dlg.querySelector('[data-role="bank"]'), { staff, embedded: true });
+    dlg.showModal();
+  });
 }
