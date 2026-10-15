@@ -1741,6 +1741,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         ${r.status === "open" && (canMove || mine) ? `<div class="rq-acts">
           ${canMove ? `<button type="button" class="lh-btn is-primary" data-req="ordered" data-id="${esc(r.id)}">Mark as ordered</button>
             <button type="button" class="lh-btn" data-req="declined" data-id="${esc(r.id)}">Decline</button>` : ""}
+          <button type="button" class="lh-btn" data-req="email" data-id="${esc(r.id)}">Email it again</button>
           ${mine ? `<button type="button" class="lh-btn is-quiet" data-req="cancel" data-id="${esc(r.id)}">Cancel request</button>` : ""}
         </div>` : ""}
       </article>`;
@@ -1904,9 +1905,28 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     startPo(pick.id, lines);
   }
 
+    // Sends an open request to whoever the "New order requests" rule says now
+  async function emailRequestAgain(r) {
+    const btn = body.querySelector(`[data-req="email"][data-id="${CSS.escape(r.id)}"]`);
+    if (btn) { btn.disabled = true; btn.textContent = "Sending…"; }
+    try {
+      const res = await callApi({ action: "inventory", op: "resendRequest", requestId: r.id });
+      showToast(res.sent ? `${reqNumber(r)} emailed to ${res.sent} ${res.sent === 1 ? "person" : "people"}`
+        : res.queued ? "It's queued and goes out in the next few minutes."
+        : res.reason === "RULE_OFF" ? "The “New order requests” email rule is turned off. Turn it on in Inventory → Notifications."
+        : res.reason === "NOT_OPEN" ? "This request isn't open any more."
+        : "Nobody matched the email rule (it may be set to urgent only, or the people on it have no email). Check Inventory → Notifications.");
+    } catch (err) {
+      console.error("Email again failed:", err);
+      showToast(errText(err, "Couldn't send it. Try again."));
+    }
+    if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = "Email it again"; }
+  }
+  
   async function handleReq(id, act) {
     const r = st.requests.find((x) => x.id === id);
     if (!r) return;
+    if (act === "email") { emailRequestAgain(r); return; }
     if (act === "cancel") {
       const ok = await confirmDialog({ title: `Cancel ${reqNumber(r)}?`, message: "It will show as cancelled.", confirmLabel: "Cancel request", tone: "warning" });
       if (!ok) return;
