@@ -18,6 +18,8 @@ export const FORM_TAGS = [
   ["{Specialist address}", "Their address"],
   ["{Specialist phone}", "Their phone number"],
   ["{Specialist email}", "Their email address"],
+  ["{Medicare number}", "The patient's Medicare number"],
+  ["{Medicare reference number}", "The patient's reference number on the Medicare card"],
 ];
 
 // What Preview shows
@@ -27,6 +29,7 @@ export const SAMPLE_TAGS = {
   "specialist name": "Dr Sarah Lee", "specialist": "Dr Sarah Lee", "specialist speciality": "Dermatologist",
   "specialist practice": "Perth Skin Specialists", "specialist address": "12 Example St, Perth WA 6000",
   "specialist phone": "08 9000 0000", "specialist email": "reception@example.com",
+  "medicare number": "2123 45670 1", "medicare reference number": "1",
 };
 
 const TAG_RE = /\{\s*([A-Za-z][A-Za-z ]*?)\s*\}/g;
@@ -40,7 +43,11 @@ function longDate(k) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(k || "");
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" }) : "";
 }
-
+// "2123456701" -> "2123 45670 1"
+function medicareText(s) {
+  const d = String(s || "").replace(/\D/g, "");
+  return d.length === 10 ? `${d.slice(0, 4)} ${d.slice(4, 9)} ${d.slice(9)}` : String(s || "");
+}
 // The values for one form. today: "YYYY-MM-DD" (defaults to now)
 export function tagValues({ patient = null, staff = null, specialist = null, recordDate = "", today = "" } = {}) {
   const p = patient || {};
@@ -53,6 +60,8 @@ export function tagValues({ patient = null, staff = null, specialist = null, rec
     "last name": p.lastName || (parts.length > 1 ? parts[parts.length - 1] : ""),
     "date of birth": (p.dobKey && formatDobLong(p.dobKey)) || p.dob || "",
     "patient id": p.pttId || p.id || "",
+    "medicare number": medicareText(p.medicareNo),
+    "medicare reference number": String(p.medicareIrn || ""),
     "today": longDate(today || dayKey()),
     "record date": longDate(recordDate),
     "my name": (staff && staff.name) || "",

@@ -1,4 +1,4 @@
-import { createPatient, findPossibleDuplicates, phoneCore } from "./patients.js";
+import { createPatient, findPossibleDuplicates, phoneCore, medicareDigits, medicareValid } from "./patients.js";
 import { escapeHtml, formatDobLong, formatMobile, toDateKey } from "./utils.js";
 import { confirmDialog } from "./dialog.js";
 
@@ -48,6 +48,8 @@ function readInput(form) {
     dobKey: f.dobKey.value,
     phone: phoneCore(f.mobile.value),
     email: f.email.value.trim().toLowerCase(),
+    medicare: medicareDigits(f.medicareNo.value),
+    medicareIrn: f.medicareIrn.value.replace(/\D/g, ""),
   };
 }
 
@@ -58,9 +60,12 @@ function compare(p, inp) {
     dob: !!inp.dobKey && p.dobKey === inp.dobKey,
     phone: inp.phone.length >= 8 && phoneCore(p.mobile) === inp.phone,
     email: !!inp.email && String(p.email || "").trim().toLowerCase() === inp.email,
+    // Same card AND same person on it (a family shares the number, not the reference number)
+    medicare: inp.medicare.length === 10 && !!inp.medicareIrn
+      && medicareDigits(p.medicareNo) === inp.medicare && String(p.medicareIrn || "") === inp.medicareIrn,
   };
-  if (!hits.name && !hits.phone && !hits.email) return null;
-  return { patient: p, hits, strong: hits.name && (hits.dob || hits.phone || hits.email) };
+  if (!hits.name && !hits.phone && !hits.email && !hits.medicare) return null;
+  return { patient: p, hits, strong: hits.medicare || (hits.name && (hits.dob || hits.phone || hits.email)) };
 }
 
 function findMatches(list, inp) {
@@ -70,7 +75,7 @@ function findMatches(list, inp) {
     Object.values(b.hits).filter(Boolean).length - Object.values(a.hits).filter(Boolean).length);
 }
 
-const REASON = { name: "name", dob: "date of birth", phone: "mobile", email: "email" };
+const REASON = { name: "name", dob: "date of birth", phone: "mobile", email: "email", medicare: "Medicare number" };
 const reasonText = (hits) => Object.keys(REASON).filter((k) => hits[k]).map((k) => REASON[k]);
 const joinWords = (w) => (w.length > 1 ? `${w.slice(0, -1).join(", ")} and ${w[w.length - 1]}` : w[0] || "");
 
@@ -125,6 +130,8 @@ export function openNewPatientDialog({ loadAll }) {
           <label class="em-field"><span>Mobile *</span><input name="mobile" type="tel" maxlength="20" placeholder="04xx xxx xxx" autocomplete="off" /></label>
           <label class="em-field full"><span>Email</span><input name="email" type="email" maxlength="120" autocomplete="off" /></label>
           <label class="em-field full"><span>Address</span><input name="address" maxlength="200" autocomplete="off" /></label>
+          <label class="em-field"><span>Medicare number</span><input name="medicareNo" inputmode="numeric" maxlength="14" placeholder="2123 45670 1" autocomplete="off" /></label>
+          <label class="em-field"><span>Medicare reference no.</span><input name="medicareIrn" inputmode="numeric" maxlength="1" placeholder="1–9" autocomplete="off" /></label>
         </div>
         <p class="np-note">The patient ID is created automatically. Adding a date of birth helps spot duplicates.</p>
 
@@ -204,6 +211,9 @@ async function onSubmit(e) {
   if (!inp.last) { errEl.textContent = "Please enter the last name."; f.lastName.focus(); return; }
   if (inp.phone.length < 8 || inp.phone.length > 11) { errEl.textContent = "Please enter a valid mobile number."; f.mobile.focus(); return; }
   if (inp.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(inp.email)) { errEl.textContent = "Please enter a valid email address."; f.email.focus(); return; }
+  if (inp.medicare && !medicareValid(inp.medicare)) { errEl.textContent = "Check the Medicare number. It's the 10 digits on the card."; f.medicareNo.focus(); return; }
+  if (inp.medicareIrn && !/^[1-9]$/.test(inp.medicareIrn)) { errEl.textContent = "The Medicare reference number is one digit, 1 to 9."; f.medicareIrn.focus(); return; }
+  if (inp.medicareIrn && !inp.medicare) { errEl.textContent = "Add the Medicare number as well as the reference number."; f.medicareNo.focus(); return; }
 
   const reset = () => { if (btn.isConnected) { btn.disabled = false; btn.innerHTML = `${I.userPlus}Add patient`; } };
   btn.disabled = true;
@@ -246,6 +256,7 @@ async function onSubmit(e) {
     myCtx.created = await createPatient({
       firstName: inp.first, lastName: inp.last, dobKey: inp.dobKey,
       mobile: f.mobile.value, email: f.email.value, address: f.address.value,
+      medicareNo: inp.medicare, medicareIrn: inp.medicareIrn,
     });
     dlg.close();
   } catch (err) {

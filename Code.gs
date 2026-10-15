@@ -5585,6 +5585,8 @@ function recRewrite_(answersIn, fields, from, to) {
     t['last name'] = to.last;
     t['date of birth'] = dobLong;
     t['patient id'] = to.pttId;
+    t['medicare number'] = to.medicare;
+    t['medicare reference number'] = to.medicareIrn;
   }
   return answers;
 }
