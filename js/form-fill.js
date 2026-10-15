@@ -25,6 +25,7 @@ import { mountConsumablesField, consumablesViewHtml } from "./consumables-field.
 import { consumeInTx } from "./inventory-api.js";
 import { listStaffDetails, staffDetailsFor } from "./staff-details.js";
 import { mountSpecialistField } from "./specialist-field.js";
+import { tagValues, collectTagNodes, applyTagNodes } from "./form-tags.js";
 
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const BAR_ICONS = {
@@ -500,6 +501,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
   const progressEl = root.querySelector('[data-role="progress"]');
   const saveBtns = $all(root, "[data-save]");
   const wrap = (id) => sheet.querySelector(`[data-fid="${CSS.escape(id)}"]`);
+  const tagNodes = collectTagNodes(sheet);
   const pads = {};
   const consent = {};
   let calc = {};
@@ -658,7 +660,17 @@ export async function mountFormFill(container, param, { staff } = {}) {
       .catch((err) => console.warn("Staff details not loaded:", err));
   }
 
-  
+  // Merge tags: the patient, the staff member, the record date and the specialist chosen on this form
+  const liveTags = () => {
+    const spF = fields.find((f) => f.type === "specialist" && shown.has(f.id));
+    const spW = spF && wrap(spF.id);
+    const rdF = fields.find((f) => f.type === "record_date" && shown.has(f.id));
+    const rdEl = rdF && wrap(rdF.id) && wrap(rdF.id).querySelector(".fe-in");
+    return tagValues({
+      patient, staff, specialist: spW && spW.spRead ? spW.spRead() : null,
+      recordDate: (rdEl && rdEl.value) || todayIso(),
+    });
+  };
 
   /* ---------- Calculations + which questions show ---------- */
   const rctx = () => ({ pads, calc, consent, annots });
@@ -691,6 +703,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
       if (w && w.csSync) w.csSync();
     });
     updateProgress();
+    applyTagNodes(tagNodes, liveTags(), null); // an empty tag stays visible until it can be filled
   };
 
   // "2 of 4 required" in the top bar (only questions that are showing count)
@@ -918,6 +931,7 @@ export async function mountFormFill(container, param, { staff } = {}) {
       }
       if (f.type === "signature" && pads[f.id] && !pads[f.id].isEmpty()) signatures[f.id] = pads[f.id].toDataURL();
     });
+    answers.__tags = liveTags(); // frozen, so the saved copy and PDF always read the same
     const rd = fields.find((f) => f.type === "record_date" && shown.has(f.id));
     let recordDate = rd ? answers[rd.id] : "";
     if (!/^\d{4}-\d{2}-\d{2}$/.test(recordDate || "")) recordDate = todayIso();
@@ -1067,6 +1081,7 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
     const w = sheet.querySelector(`[data-fid="${CSS.escape(f.id)}"]`);
     if (!w) return;
     if (!shownIds.has(f.id)) { w.hidden = true; return; } // wasn't shown when it was filled in
+    if (f.pdfHide) w.classList.add("is-pdf-hide");
     if (f.type === "signature") {
       const host = w.querySelector(".fe-sig");
       const src = sub.signatures[f.id];
@@ -1130,6 +1145,11 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
     writeField(f, w, sub.answers[f.id]);
     writeExtras(f, w, sub.answers[`${f.id}__x`]);
     $all(w, "[data-subcmt]").forEach((c) => { if (!c.value) c.hidden = true; }); // no comment typed: nothing to show
+  });
+  // Merge tags, as they were when the form was saved (older forms: worked out from the record)
+  applyTagNodes(collectTagNodes(sheet), {
+    ...tagValues({ patient: { name: sub.patientName }, staff: { name: sub.createdBy }, recordDate: sub.recordDate, today: sub.recordDate }),
+    ...((sub.answers && sub.answers.__tags) || {}),
   });
   $all(sheet, "[data-tadd], [data-trm]").forEach((b) => b.remove()); // no adding or removing rows on a saved form
   $all(sheet, "input, textarea, select").forEach((el) => { el.disabled = true; });

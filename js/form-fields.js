@@ -666,6 +666,7 @@ export function cleanField(f) {
     }
   }
   if (sw) out.showWhen = sw;
+  if (f.pdfHide === true && !["watermark", "letterhead"].includes(f.type)) out.pdfHide = true;
   return out;
 }
 

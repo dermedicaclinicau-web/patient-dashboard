@@ -6094,3 +6094,14 @@ a.md-quiet:hover { border-color: var(--primary); }
 .sp-bank-dlg-head h3 { margin: 0; }
 .sp-bank.is-embedded .fb-head { margin-bottom: .75rem; }
 .sp-bank.is-embedded .sp-grid { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+
+/* ---------- Merge tags + "Leave out of the PDF" ---------- */
+.fe-tagbox summary { cursor: pointer; font-weight: 600; font-size: .85rem; }
+.fe-tagbox[open] summary { margin-bottom: .45rem; }
+.fe-tagbox .fe-chiprow { margin-bottom: .35rem; }
+.ff-view .fe-field.is-pdf-hide { position: relative; }
+.ff-view .fe-field.is-pdf-hide::after {
+  content: "Not on the PDF"; position: absolute; top: .25rem; right: .25rem;
+  font-size: .7rem; padding: .1rem .45rem; border-radius: 999px; background: #f1f5f9; color: var(--muted);
+}
+@media print { .fe-field.is-pdf-hide { display: none !important; } }

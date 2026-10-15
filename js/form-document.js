@@ -9,6 +9,7 @@ specialistParts, specialistBlockHtml,
  } from "./form-fields.js";
 import { cleanRichHtml } from "./rich-html.js";
 import { markSummary } from "./marking-sets.js";
+import { tagValues, fillTags, fillTagsHtml } from "./form-tags.js";
 
 
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
@@ -286,12 +287,25 @@ function answer(f, v, sig, inline, x, blank = false) {
 //   fileName
 // blank: unanswered questions print as empty lines and boxes, and every question shows (Task Manager → To Print)
 export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank = false }) {
-  const fields = (ver.fields || []).map(normaliseField).filter(Boolean);
+  // Merge tags, as saved with the form. A blank printable gets a line to write on instead.
+  const tags = {
+    ...tagValues({ patient: { name: sub.patientName }, staff: { name: sub.createdBy }, recordDate: sub.recordDate, today: sub.recordDate }),
+    ...((sub.answers && sub.answers.__tags) || {}),
+  };
+  const missing = blank ? "____________" : "";
+  const fields = (ver.fields || []).map(normaliseField).filter(Boolean).map((f) => ({
+    ...f,
+    label: fillTags(f.label, tags, missing),
+    help: fillTags(f.help, tags, missing),
+    text: fillTags(f.text, tags, missing),
+    html: f.html ? fillTagsHtml(f.html, tags, missing) : f.html,
+  }));
   const showLh = !(ver.settings && ver.settings.showLetterhead === false);
   const shown = blank ? new Set(fields.map((f) => f.id)) : visibleIds(fields, sub.answers);
 
     const body = fields.map((f) => {
     if (!shown.has(f.id)) return "";
+    if (f.pdfHide) return "";   // live form only
     if (f.type === "watermark" || f.type === "photo") return "";
     if (f.type === "space") return `<div style="height:${{ small: 8, medium: 20, large: 40 }[f.size] || 20}px"></div>`;
     if (f.type === "letterhead") return letterhead(lh);
@@ -398,7 +412,7 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
   const inner = `
     ${showLh ? letterhead(lh) : ""}
     ${s.showTitle !== false
-      ? `<h1 style="text-align:${align} !important;font-size:${pt}pt;">${esc(ver.name)}</h1>` : ""}
+      ? `<h1 style="text-align:${align} !important;font-size:${pt}pt;">${esc(fillTags(ver.name, tags, missing))}</h1>` : ""}
     ${s.showMeta !== false
       ? `<p class="meta" style="text-align:${align} !important;">${sub.patientName || !blank
           ? `${esc(sub.patientName)}${sub.recordDate ? ` · ${esc(niceDate(sub.recordDate))}` : ""}`

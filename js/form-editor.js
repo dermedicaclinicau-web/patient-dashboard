@@ -32,6 +32,7 @@ import { openProductPicker } from "./consumables-field.js";
 import { listMarkingSets, openMarkingSetsDialog } from "./marking-sets.js";
 import { listSpecialists, specialitiesOf } from "./specialists-api.js";
 import { openSpecialistBankDialog } from "./specialist-bank.js";
+import { tagPickerHtml, collectTagNodes, applyTagNodes, SAMPLE_TAGS } from "./form-tags.js";
 
 const UI = {
   up: '<polyline points="18 15 12 9 6 15"/>',
@@ -438,6 +439,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
         f.fill && `<span class="fe-chip">${svg(UI.user)}Auto-filled: ${esc(FILLS[f.fill] || f.fill)}</span>`,
         pf && `<span class="fe-chip">${svg('<polyline points="20 6 9 17 4 12"/>')}Pre-filled: ${esc(pf)}</span>`,
         cond && `<span class="fe-chip is-cond${condBad ? " is-bad" : ""}">${svg(BRANCH)}${esc(condBad || cond)}</span>`,
+        f.pdfHide && `<span class="fe-chip">${svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><line x1="4" y1="4" x2="20" y2="20"/>')}Not on the PDF</span>`,
       ].filter(Boolean).join("");
       return `
         <div class="fe-field${on ? " is-selected" : ""}${cond ? " is-conditional" : ""}" data-id="${esc(f.id)}" draggable="true" tabindex="0"
@@ -478,6 +480,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     if (!build) refreshPreview();
     hydrateBankImages(stage);
     if (!build) {
+      applyTagNodes(collectTagNodes(stage), SAMPLE_TAGS);
       previewAnnots = attachAnnotators(stage, fields, { markSets: markSets || [] });
       fields.filter((f) => f.type === "aftercare").forEach((f) => {
         mountAftercareField(stage.querySelector(`[data-fid="${CSS.escape(f.id)}"]`), f, { onChange: refreshPreview });
@@ -573,6 +576,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
         : f.type === "image" ? "Title (optional)" : "Question";
       h += setting(lbl, `<input class="fe-input" data-k="label" maxlength="300" value="${esc(f.label)}" />`);
     }
+    if (hasLabel(f.type) || hasHelp(f.type)) h += tagPickerHtml();
     if (hasHelp(f.type)) {
       h += setting("Help text", `<input class="fe-input" data-k="help" maxlength="500" placeholder="Shown under the question" value="${esc(f.help)}" />`);
     }
@@ -594,6 +598,10 @@ export async function mountFormEditor(container, { templateId, staff }) {
     }
     h += prefillSettings(f);
     h += conditionSettingsHtml(f, fields);
+    if (!["watermark", "letterhead"].includes(f.type)) {
+      h += `<label class="fe-check"><input type="checkbox" data-k="pdfHide"${f.pdfHide ? " checked" : ""} /> Leave out of the PDF and printouts</label>
+        <small class="fe-note fe-pad">For questions only meant for the live form. They're still answered and saved, and show when the saved form is opened in the portal.</small>`;
+    }
     if (canRequire(f.type)) {
       h += `<label class="fe-check"><input type="checkbox" data-k="required"${f.required ? " checked" : ""} /> Answer required</label>`;
     }
@@ -927,6 +935,15 @@ export async function mountFormEditor(container, { templateId, staff }) {
   insp.addEventListener("mousedown", (e) => {
     if (e.target.closest("[data-calcins]")) e.preventDefault();
   });
+  // Which box "Insert a tag" goes into: the last one typed in
+  let tagKey = "label";
+  insp.addEventListener("focusin", (e) => {
+    const k = e.target.dataset && e.target.dataset.k;
+    if (k === "label" || k === "help") tagKey = k;
+  });
+  insp.addEventListener("mousedown", (e) => {
+    if (e.target.closest("[data-taginsert]")) e.preventDefault(); // keep the cursor where it is
+  });
 
   insp.addEventListener("click", (e) => {
     if (e.target.closest(".re")) return;
@@ -936,6 +953,20 @@ export async function mountFormEditor(container, { templateId, staff }) {
     if (e.target.closest('[data-act="unpublish"]')) { unpublish(); return; }
     const f = current();
     if (!f) return;
+
+    const ti = e.target.closest("[data-taginsert]");
+    if (ti) {
+      const el = insp.querySelector(`[data-k="${tagKey}"]`) || insp.querySelector('[data-k="label"]');
+      if (!el) return;
+      const tok = ti.dataset.taginsert;
+      const s = el.selectionStart ?? el.value.length;
+      const end = el.selectionEnd ?? s;
+      el.value = el.value.slice(0, s) + tok + el.value.slice(end);
+      el.focus();
+      el.setSelectionRange(s + tok.length, s + tok.length);
+      el.dispatchEvent(new Event("input", { bubbles: true })); // saves it like typing
+      return;
+    }
 
     if (e.target.closest('[data-act="sp-bank"]')) {
       openSpecialistBankDialog({ staff })

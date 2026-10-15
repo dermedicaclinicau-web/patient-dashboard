@@ -1,5 +1,5 @@
 ﻿{
-    "version":  "20261015-121406",
+    "version":  "20261015-122602",
     "files":  [
                   "./js/aftercare-api.js",
                   "./js/aftercare-bank.js",
@@ -39,6 +39,7 @@
                   "./js/form-picker.js",
                   "./js/form-records.js",
                   "./js/form-submissions.js",
+                  "./js/form-tags.js",
                   "./js/form-templates.js",
                   "./js/history-view.js",
                   "./js/image-bank-api.js",
