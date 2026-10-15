@@ -602,17 +602,26 @@ export async function mountMyDashboard(container, { staff } = {}) {
       mountMyNotes(body.querySelector('[data-role="notes"]'));
       addFolds(grid, me);
     }
-    renderDayCard(body.querySelector('[data-role="days"]')); // Admins only; does nothing if the card is hidden
-    loadedAt = Date.now();
-    tickUpdated();
-  }
-
+    // Start & end of day fills itself in a moment later: give it its ⌄ button once its header appears
+    const daysEl = body.querySelector('[data-role="days"]');
+    renderDayCard(daysEl); // Admins only; does nothing if the card is hidden
+    if (grid && daysEl) {
+      if (daysEl.querySelector(".md-card-head")) {
+        addFolds(grid, me);   // it drew straight away
+      } else {
+        const mo = new MutationObserver(() => {
+          if (!daysEl.isConnected) { mo.disconnect(); return; }
+          if (daysEl.querySelector(".md-card-head")) { mo.disconnect(); addFolds(grid, me); }
+        });
+        mo.observe(daysEl, { childList: true, subtree: true });
+      }
+    }
   /* ---------- Collapsing a card (remembered per person) ---------- */
   function addFolds(grid, me) {
     const folded = readSet(foldKey(me));
     grid.querySelectorAll(":scope > [data-card]").forEach((el) => {
       const head = el.querySelector(".md-card-head");
-      if (!head) return;
+      if (!head || head.querySelector(".md-fold")) return;
       const k = el.dataset.card;
       const isFolded = folded.has(k);
       el.classList.toggle("is-collapsed", isFolded);
