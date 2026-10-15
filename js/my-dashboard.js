@@ -616,6 +616,10 @@ export async function mountMyDashboard(container, { staff } = {}) {
         mo.observe(daysEl, { childList: true, subtree: true });
       }
     }
+    loadedAt = Date.now();
+    tickUpdated();
+  }
+
   /* ---------- Collapsing a card (remembered per person) ---------- */
   function addFolds(grid, me) {
     const folded = readSet(foldKey(me));
