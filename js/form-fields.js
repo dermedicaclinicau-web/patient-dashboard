@@ -336,6 +336,8 @@ export const PATIENT_PARTS = [
   ["mobile", "Mobile"],
   ["email", "Email"],
   ["address", "Address"],
+  ["medicare", "Medicare number"],
+  ["medicareIrn", "Medicare reference number"],
   ["pttId", "Patient ID"],
 ];
 const PART_KEYS = PATIENT_PARTS.map((p) => p[0]);
@@ -403,6 +405,8 @@ export const FILLS = {
   "patient.email": "Patient email",
   "patient.mobile": "Patient mobile",
   "patient.address": "Patient address",
+  "patient.medicare": "Patient Medicare number",
+  "patient.medicareIrn": "Patient Medicare reference number",
   "today": "Today's date",
   "staff.name": "Staff member filling it in",
   "staff.providerNo": "Provider number (staff filling it in)",
@@ -411,7 +415,8 @@ export const FILLS = {
   "staff.quals": "Title and qualifications (staff filling it in)",
 };
 export const FILLS_FOR = {
-  short_text: ["", "patient.name", "patient.firstName", "patient.lastName", "patient.email", "patient.mobile", "patient.address", "staff.name",
+  short_text: ["", "patient.name", "patient.firstName", "patient.lastName", "patient.email", "patient.mobile", "patient.address",
+    "patient.medicare", "patient.medicareIrn", "staff.name",
     "staff.providerNo", "staff.prescriberNo", "staff.ahpraNo", "staff.quals"],
   long_text: ["", "patient.address"],
   email: ["", "patient.email"],

@@ -7,7 +7,7 @@ import { esc, svg, ICONS, renderField, normaliseField, watermarkHtml, canRequire
 import { listMarkingSets, markSummary } from "./marking-sets.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { letterheadHtml, DEFAULT_LETTERHEAD } from "./form-letterhead.js";
-import { getPatient, patientIds } from "./patients.js";
+import { getPatient, patientIds, formatMedicare } from "./patients.js";
 import { saveSubmission, getSubmission, listSubmissionsForPatient } from "./form-submissions.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast, formatDobLong, formatMobile } from "./utils.js";
@@ -591,6 +591,8 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     "patient.email": patient.email,
     "patient.mobile": patient.mobile,
     "patient.address": patient.address,
+    "patient.medicare": formatMedicare(patient.medicareNo),
+    "patient.medicareIrn": patient.medicareIrn,
     "today": todayIso(),
     "staff.name": (staff && staff.name) || "",
   };
@@ -600,6 +602,8 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     mobile: patient.mobile ? formatMobile(patient.mobile) : "",
     email: patient.email,
     address: patient.address,
+    medicare: formatMedicare(patient.medicareNo),
+    medicareIrn: patient.medicareIrn,
     pttId: patient.pttId || patient.id,
   };
   fields.forEach((f) => {

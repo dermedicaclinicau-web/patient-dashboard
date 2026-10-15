@@ -76,6 +76,8 @@ export function patientFromData(id, d) {
     email: d.Email || "",
     mobile: d.Mobile || "",
     address: d.Address || "",
+    medicareNo: String(d["Medicare Number"] ?? ""),
+    medicareIrn: String(d["Medicare IRN"] ?? ""),
     // Use DobKey if it's readable, otherwise work it out from DOB (any common format)
     dobKey: toDateKeyLoose(d.DobKey) || toDateKeyLoose(d.DOB),
     dob: typeof d.DOB === "string" ? d.DOB : "",
@@ -149,7 +151,12 @@ export async function updatePatient(current, input, staff) {
     Object.assign(updates, { Mobile: mobile, PhoneKey: mobile });
   }
   if (address !== current.address) updates.Address = address;
-
+  // Only when the edit form sends them, so older screens never wipe them
+  if (input.medicareNo !== undefined || input.medicareIrn !== undefined) {
+    const mc = cleanMedicare(input);
+    if (mc.no !== current.medicareNo) updates["Medicare Number"] = mc.no;
+    if (mc.irn !== current.medicareIrn) updates["Medicare IRN"] = mc.irn;
+  }
   if (!Object.keys(updates).length) return { changed: false };
 
   Object.assign(updates, {
@@ -195,6 +202,29 @@ export function phoneCore(s) {
   if (d.startsWith("61")) d = d.slice(2);
   else if (d.startsWith("0")) d = d.slice(1);
   return d;
+}
+
+// Medicare card: 10 digits (the 9th is a check digit), plus the patient's reference number on the card (IRN, 1–9)
+export const medicareDigits = (s) => String(s ?? "").replace(/\D/g, "");
+export function medicareValid(s) {
+  const d = medicareDigits(s);
+  if (!/^[2-6]\d{9}$/.test(d)) return false;
+  const sum = [1, 3, 7, 9, 1, 3, 7, 9].reduce((a, w, i) => a + w * Number(d[i]), 0);
+  return sum % 10 === Number(d[8]);
+}
+// "2123456701" -> "2123 45670 1"
+export function formatMedicare(s) {
+  const d = medicareDigits(s);
+  return d.length === 10 ? `${d.slice(0, 4)} ${d.slice(4, 9)} ${d.slice(9)}` : String(s ?? "");
+}
+// Checks what was typed. Returns { no, irn } or throws a message for staff.
+function cleanMedicare(input) {
+  const no = medicareDigits(input.medicareNo);
+  const irn = String(input.medicareIrn ?? "").replace(/\D/g, "");
+  if (no && !medicareValid(no)) throw new Error("Check the Medicare number. It's the 10 digits on the card.");
+  if (irn && !/^[1-9]$/.test(irn)) throw new Error("The Medicare reference number is one digit, 1 to 9, beside the patient's name on the card.");
+  if (irn && !no) throw new Error("Add the Medicare number as well as the reference number.");
+  return { no, irn };
 }
 
 // Phone search that copes with numbers stored as 61…, 0… or without the leading 0
@@ -309,6 +339,7 @@ export async function createPatient(input) {
   const mobile = String(input.mobile ?? "").replace(/\D/g, "");
   const address = clean(input.address);
   const dobKey = clean(input.dobKey);
+  const mc = cleanMedicare(input);
 
   if (!first || !last) throw new Error("First and last name are required.");
   if (phoneCore(mobile).length < 8) throw new Error("Please enter a valid mobile number.");
@@ -328,6 +359,8 @@ export async function createPatient(input) {
     "First Name": first,
     "Last Name": last,
     "Patient Name": `${first} ${last}`,
+    "Medicare Number": mc.no,
+    "Medicare IRN": mc.irn,
     NameKey: nameKey,
     Email: email,
     EmailKey: email.toLowerCase(),

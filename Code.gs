@@ -5440,7 +5440,8 @@ const SCAN_RX_SCHEMA_ = {
 const MOVE_REASONS_ = { wrong: 'Saved to the wrong patient', duplicate: 'Duplicate patient record', other: 'Other' };
 // Answers that only hold a patient detail because they were filled in automatically
 const REC_FILLS_ = { 'patient.name': 'name', 'patient.firstName': 'first', 'patient.lastName': 'last', 'patient.dob': 'dobKey',
-  'patient.email': 'email', 'patient.mobile': 'mobile', 'patient.address': 'address' };
+  'patient.email': 'email', 'patient.mobile': 'mobile', 'patient.address': 'address',
+  'patient.medicare': 'medicare', 'patient.medicareIrn': 'medicareIrn' };
 const recNorm_ = function (s) { return String(s == null ? '' : s).toLowerCase().replace(/\s+/g, ' ').trim(); };
 const recSame_ = function (a, b) { return String(a || '').toLowerCase().replace(/\s+/g, '') === String(b || '').toLowerCase().replace(/\s+/g, ''); };
 
@@ -5483,7 +5484,8 @@ function recPatient_(cfg, id) {
     id: id, pttId: String(p.PttID || id), name: name,
     first: String(p['First Name'] || name.split(' ')[0] || ''), last: String(p['Last Name'] || ''),
     dobKey: String(p.DobKey || ''), dob: String(p.DOB || ''), email: String(p.Email || ''),
-    mobile: String(p.Mobile || ''), address: String(p.Address || ''), mergedInto: String(p.MergedInto || ''),
+    mobile: String(p.Mobile || ''), address: String(p.Address || ''),
+    medicare: recMedicare_(p['Medicare Number']), medicareIrn: String(p['Medicare IRN'] || ''), mergedInto: String(p.MergedInto || ''),
   };
 }
 
@@ -5496,6 +5498,11 @@ function recMobile_(s) {
   if (/^04\d{8}$/.test(d)) return d.slice(0, 4) + ' ' + d.slice(4, 7) + ' ' + d.slice(7);
   if (/^614\d{8}$/.test(d)) return recMobile_('0' + d.slice(2));
   return String(s || '');
+}
+
+function recMedicare_(s) {
+  const d = String(s || '').replace(/\D/g, '');
+  return d.length === 10 ? d.slice(0, 4) + ' ' + d.slice(4, 9) + ' ' + d.slice(9) : String(s || '');
 }
 
 function recFieldsOf_(cfg, sub) {
@@ -5552,14 +5559,17 @@ function recDependents_(cfg, fromId, subId) {
 // The answers with the new patient's details in place of the old one's
 function recRewrite_(answersIn, fields, from, to) {
   const answers = JSON.parse(JSON.stringify(answersIn || {}));
-  const toVals = { name: to.name, first: to.first, last: to.last, dobKey: to.dobKey, email: to.email, mobile: to.mobile, address: to.address };
-  const fromVals = { name: from.name, first: from.first, last: from.last, dobKey: from.dobKey, email: from.email, mobile: from.mobile, address: from.address };
+  const toVals = { name: to.name, first: to.first, last: to.last, dobKey: to.dobKey, email: to.email, mobile: to.mobile,
+    address: to.address, medicare: to.medicare, medicareIrn: to.medicareIrn };
+  const fromVals = { name: from.name, first: from.first, last: from.last, dobKey: from.dobKey, email: from.email, mobile: from.mobile,
+    address: from.address, medicare: from.medicare || '', medicareIrn: from.medicareIrn || '' };
   const dobLong = recLongDate_(to.dobKey) || to.dob;
   fields.forEach(function (f) {
     if (!f || !f.id || !(f.id in answers)) return;
     const v = answers[f.id];
     if (f.type === 'patient' && v && typeof v === 'object' && !Array.isArray(v)) {
-      const part = { name: to.name, dob: dobLong, mobile: recMobile_(to.mobile), email: to.email, address: to.address, pttId: to.pttId };
+      const part = { name: to.name, dob: dobLong, mobile: recMobile_(to.mobile), email: to.email, address: to.address, pttId: to.pttId,
+        medicare: to.medicare, medicareIrn: to.medicareIrn };
       Object.keys(v).forEach(function (k) { if (k in part) v[k] = part[k]; });
     } else if (f.type === 'signature' && (f.signer || 'patient') === 'patient' && v && typeof v === 'object' && v.name && recSame_(v.name, from.name)) {
       v.name = to.name;
@@ -5810,7 +5820,7 @@ function recMoveLegacy_(def, kind, rid, body, session) {
 // to reading every patient if the index is missing or more than 3 days old.
 
 const PATIENT_INDEX_FIELDS_ = ['PttID', 'First Name', 'Last Name', 'Patient Name', 'NameKey', 'Email', 'Mobile',
-  'Address', 'DobKey', 'DOB', 'MergedIds', 'MergedNames', 'MergedInto'];
+  'Address', 'DobKey', 'DOB', 'Medicare Number', 'Medicare IRN', 'MergedIds', 'MergedNames', 'MergedInto'];
 const PATIENT_INDEX_PART_ = 400000; // characters per document (Firestore's limit is 1 MiB)
 
 function buildPatientIndex() {
