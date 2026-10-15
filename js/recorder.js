@@ -1,3 +1,8 @@
+// Recording consultations.
+// The live recording: one at a time (there's one microphone). Complete Appointment hands it to the background
+// straight away, so the next appointment can be recorded while the last one uploads and becomes notes.
+// Background recordings ("jobs"): any number at once, each with its own upload, progress and notes.
+// Audio stays on this device (IndexedDB) until its job is created, so a closed tab or a logout loses nothing.
 import { storage, db, auth } from "./firebase-config.js";
 import { ref, uploadBytesResumable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 import { doc, setDoc, serverTimestamp, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -6,12 +11,12 @@ import { toDateKey } from "./utils.js";
 
 /* ===================== State ===================== */
 
-const state = {
-  status: "idle", // idle | recording | paused | stopping | uploading | done | error | recovered
-  recId: null, patient: null, staff: null,
-  elapsedMs: 0, startedAt: null, mime: "",
-  progress: 0, error: "",
-};
+const IDLE = { status: "idle", recId: null, patient: null, staff: null, elapsedMs: 0, startedAt: null, mime: "" };
+const live = { ...IDLE };   // status: idle | recording | paused | stopping
+
+// recId → { recId, patient, staff, elapsedMs, startedAt, at, status, stage, progress, error, transcriptId, announced }
+// status: recovered (on this device, not uploaded) | uploading | error (upload failed) | processing | failed | ready
+const jobs = new Map();
 
 const listeners = new Set();
 let mediaRecorder = null;
@@ -21,16 +26,22 @@ let runStart = 0;
 let wakeLock = null;
 let tickTimer = null;
 let lastMetaSave = 0;
+let checkedFor = "";               // the person the unfinished-recordings check last ran for
 const pendingWrites = new Set();
+const uploads = new Map();         // recId → the running upload
+const watchers = new Map();        // recId → stop watching its job
 
-const ACTIVE = ["recording", "paused", "stopping", "uploading"];
-
-function elapsed() {
-  return state.elapsedMs + (state.status === "recording" ? performance.now() - runStart : 0);
-}
+const LIVE_BUSY = ["recording", "paused", "stopping"];
+const elapsed = () => live.elapsedMs + (live.status === "recording" ? performance.now() - runStart : 0);
+const myUid = () => (auth.currentUser && auth.currentUser.uid) || "";
 
 export function getState() {
-  return { ...state, elapsedMs: elapsed() };
+  const l = { ...live, elapsedMs: elapsed() };
+  return {
+    ...l,   // older callers read status / patient from the top
+    live: l,
+    jobs: [...jobs.values()].sort((a, b) => (a.at || 0) - (b.at || 0)).map((j) => ({ ...j })),
+  };
 }
 
 export function subscribe(fn) {
@@ -44,9 +55,10 @@ function emit() {
   listeners.forEach((fn) => fn(s));
 }
 
-export function isRecorderBusy() {
-  return ACTIVE.includes(state.status);
-}
+// The microphone is in use
+export const isRecorderBusy = () => LIVE_BUSY.includes(live.status);
+// A finished recording is still on its way up
+export const hasPendingUploads = () => [...jobs.values()].some((j) => j.status === "uploading");
 
 /* ===================== IndexedDB: crash-safe chunk storage ===================== */
 
@@ -90,11 +102,53 @@ async function deleteRecording(recId) {
   await withStore(META, "readwrite", (s) => s.delete(recId));
 }
 
-function metaFromState() {
+function metaFromLive() {
   return {
-    recId: state.recId, patient: state.patient, staff: state.staff,
-    startedAt: state.startedAt, mime: state.mime, elapsedMs: elapsed(),
+    recId: live.recId, patient: live.patient, staff: live.staff,
+    startedAt: live.startedAt, mime: live.mime, elapsedMs: elapsed(),
   };
+}
+
+/* ===================== Recordings still becoming notes (remembered across a refresh) ===================== */
+
+const TRACK_KEY = "dm-rec-jobs-v1";
+const DAY = 864e5;
+
+function readTracked() {
+  try {
+    const v = JSON.parse(localStorage.getItem(TRACK_KEY) || "[]");
+    return Array.isArray(v) ? v : [];
+  } catch { return []; }
+}
+
+function saveTracked() {
+  const me = myUid();
+  if (!me) return;
+  const mine = [...jobs.values()].filter((j) => ["processing", "failed", "ready"].includes(j.status))
+    .map((j) => ({ recId: j.recId, patient: j.patient, staff: j.staff, elapsedMs: j.elapsedMs, at: j.at,
+      announced: !!j.announced, uid: me }));
+  // Someone else's on a shared iPad are kept (for a day)
+  const others = readTracked().filter((t) => t.uid !== me && Date.now() - (t.at || 0) < DAY);
+  try { localStorage.setItem(TRACK_KEY, JSON.stringify([...others, ...mine].slice(-40))); } catch { /* not essential */ }
+}
+
+/* ===================== Jobs ===================== */
+
+function addJob(meta, status) {
+  jobs.set(meta.recId, {
+    recId: meta.recId, patient: meta.patient || null, staff: meta.staff || null, elapsedMs: meta.elapsedMs || 0,
+    startedAt: meta.startedAt || "", at: meta.at || Date.now(), status, stage: "", progress: 0, error: "",
+    transcriptId: "", announced: !!meta.announced,
+  });
+}
+
+function setJob(recId, patch) {
+  const j = jobs.get(recId);
+  if (!j) return;
+  const statusChanged = patch.status && patch.status !== j.status;
+  Object.assign(j, patch);
+  if (statusChanged) saveTracked();
+  emit();
 }
 
 /* ===================== Helpers ===================== */
@@ -121,11 +175,11 @@ function stopStream() {
 function startTick() {
   clearInterval(tickTimer);
   tickTimer = setInterval(() => {
-    if (state.status !== "recording") return;
+    if (live.status !== "recording") return;
     emit();
     if (Date.now() - lastMetaSave > 10_000) {
       lastMetaSave = Date.now();
-      putMeta(metaFromState()).catch(() => {});
+      putMeta(metaFromLive()).catch(() => {});
     }
   }, 1000);
 }
@@ -135,12 +189,8 @@ function stopTick() {
   tickTimer = null;
 }
 
-function reset() {
-  stopWatching();
-  Object.assign(state, {
-    status: "idle", recId: null, patient: null, staff: null,
-    elapsedMs: 0, startedAt: null, mime: "", progress: 0, error: "",
-  });
+function resetLive() {
+  Object.assign(live, IDLE);
   emit();
 }
 
@@ -159,11 +209,11 @@ async function stopRecorder() {
   stopTick();
 }
 
-/* ===================== Public actions ===================== */
+/* ===================== The live recording ===================== */
 
 export async function startRecording(patient, staff) {
-  if (isRecorderBusy() || state.status === "recovered") {
-    throw new Error("Finish or discard the current recording first.");
+  if (isRecorderBusy()) {
+    throw new Error(`The recording for ${live.patient ? live.patient.name : "another patient"} is still going. Complete or cancel it first.`);
   }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === "undefined") {
     throw new Error("This browser can't record audio. Please use Chrome, Edge or Safari.");
@@ -177,15 +227,15 @@ export async function startRecording(patient, staff) {
   mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime, audioBitsPerSecond: 32000 } : undefined);
 
   const recId = `REC-${toDateKey().replace(/-/g, "")}-${Date.now().toString(36).toUpperCase()}`;
-  Object.assign(state, {
+  Object.assign(live, {
     status: "recording", recId,
     patient: { id: patient.id, pttId: patient.pttId || "", name: patient.name },
     staff: { uid: staff.uid, name: staff.name },
     elapsedMs: 0, startedAt: new Date().toISOString(),
-    mime: mediaRecorder.mimeType || mime || "audio/webm", progress: 0, error: "",
+    mime: mediaRecorder.mimeType || mime || "audio/webm",
   });
   chunkSeq = 0;
-  await putMeta(metaFromState());
+  await putMeta(metaFromLive());
 
   // Every chunk is saved to the device as it arrives
   mediaRecorder.ondataavailable = (e) => {
@@ -197,7 +247,7 @@ export async function startRecording(patient, staff) {
 
   // Microphone unplugged / permission revoked: save what we have
   stream.getAudioTracks().forEach((t) => {
-    t.onended = () => { if (state.status === "recording" || state.status === "paused") completeRecording(); };
+    t.onended = () => { if (live.status === "recording" || live.status === "paused") completeRecording(); };
   });
 
   mediaRecorder.start(5000); // a chunk every 5 seconds
@@ -209,62 +259,76 @@ export async function startRecording(patient, staff) {
 }
 
 export function pauseRecording() {
-  if (state.status !== "recording") return;
+  if (live.status !== "recording") return;
   mediaRecorder.pause();
-  state.elapsedMs += performance.now() - runStart;
-  state.status = "paused";
-  putMeta(metaFromState()).catch(() => {});
+  live.elapsedMs += performance.now() - runStart;
+  live.status = "paused";
+  putMeta(metaFromLive()).catch(() => {});
   emit();
 }
 
 export function resumeRecording() {
-  if (state.status !== "paused") return;
+  if (live.status !== "paused") return;
   mediaRecorder.resume();
   runStart = performance.now();
-  state.status = "recording";
+  live.status = "recording";
   emit();
 }
 
+// Saves the last seconds, frees the microphone, and sends the recording on in the background
 export async function completeRecording() {
-  if (state.status !== "recording" && state.status !== "paused") return;
-  if (state.status === "recording") state.elapsedMs += performance.now() - runStart;
-  state.status = "stopping";
+  if (live.status !== "recording" && live.status !== "paused") return;
+  if (live.status === "recording") live.elapsedMs += performance.now() - runStart;
+  live.status = "stopping";
   emit();
 
   await stopRecorder();
-  await putMeta(metaFromState()).catch(() => {});
-  await uploadRecording(state.recId);
+  const meta = metaFromLive();
+  await putMeta(meta).catch(() => {});
+  resetLive();                 // ready for the next patient straight away
+  addJob(meta, "uploading");
+  emit();
+  runUpload(meta.recId);       // not awaited: it carries on in the background
 }
 
 export async function cancelRecording() {
-  if (state.status !== "recording" && state.status !== "paused") return;
-  const id = state.recId;
+  if (live.status !== "recording" && live.status !== "paused") return;
+  const id = live.recId;
   await stopRecorder();
   await deleteRecording(id).catch(() => {});
-  reset();
+  resetLive();
 }
 
-// On logout: stop the mic but KEEP the audio on the device for upload at next login
+// On logout: stop the mic and any uploads, but KEEP the audio on the device for upload at the next login
 export async function suspendRecorder() {
-  if (state.status === "recording" || state.status === "paused") {
-    if (state.status === "recording") state.elapsedMs += performance.now() - runStart;
+  if (live.status === "recording" || live.status === "paused") {
+    if (live.status === "recording") live.elapsedMs += performance.now() - runStart;
     await stopRecorder();
-    await putMeta(metaFromState()).catch(() => {});
+    await putMeta(metaFromLive()).catch(() => {});
   }
-  reset();
+  uploads.forEach((task) => { try { task.cancel(); } catch { /* already finished */ } });
+  uploads.clear();
+  watchers.forEach((stop) => stop());
+  watchers.clear();
+  jobs.clear();
+  checkedFor = "";
+  resetLive();
 }
 
-async function uploadRecording(recId) {
+/* ===================== Upload (background) ===================== */
+
+// Recovered or failed uploads: send now
+export function uploadNow(recId) {
+  const j = jobs.get(recId);
+  if (j && ["recovered", "error"].includes(j.status)) runUpload(recId);
+}
+
+async function runUpload(recId) {
+  if (!jobs.has(recId) || uploads.has(recId)) return;
+  setJob(recId, { status: "uploading", progress: 0, error: "" });
   try {
     const meta = await getMeta(recId);
-    if (!meta) throw new Error("Recording not found on this device.");
-
-    Object.assign(state, {
-      status: "uploading", progress: 0, recId,
-      patient: meta.patient, staff: meta.staff, elapsedMs: meta.elapsedMs || 0, mime: meta.mime,
-    });
-    emit();
-
+    if (!meta) throw new Error("This recording isn't on this device any more.");
     const chunks = await getChunks(recId);
     if (!chunks.length) throw new Error("No audio was captured. Check the microphone and try again.");
 
@@ -279,14 +343,19 @@ async function uploadRecording(recId) {
         contentType: baseType,
         customMetadata: { recordingId: recId, patientId: patientKey },
       });
+      uploads.set(recId, task);
       task.on("state_changed",
         (snap) => {
-          state.progress = snap.totalBytes ? snap.bytesTransferred / snap.totalBytes : 0;
+          const j = jobs.get(recId);
+          if (!j) return;
+          j.progress = snap.totalBytes ? snap.bytesTransferred / snap.totalBytes : 0;
           emit();
         },
         reject,
         resolve);
     });
+    uploads.delete(recId);
+    if (!jobs.has(recId)) return;   // logged out mid-upload: it goes again at the next login
 
     await setDoc(doc(db, "recording_jobs", recId), {
       recordingId: recId,
@@ -298,8 +367,8 @@ async function uploadRecording(recId) {
       patientId: meta.patient.pttId || "",
       patientDocId: meta.patient.id || "",
       patientName: meta.patient.name || "",
-      staffName: meta.staff.name || "",
-      createdByUid: auth.currentUser ? auth.currentUser.uid : "",
+      staffName: (meta.staff && meta.staff.name) || "",
+      createdByUid: myUid(),
       startedAt: meta.startedAt,
       consent: true,
       createdAt: serverTimestamp(),
@@ -308,109 +377,134 @@ async function uploadRecording(recId) {
     await deleteRecording(recId); // the device copy is no longer needed
     startProcessing(recId);
   } catch (err) {
+    uploads.delete(recId);
+    if (!jobs.has(recId) || (err && err.code === "storage/canceled")) return;
     console.error("Recording upload failed:", err);
-    state.status = "error";
-    state.error = err.code === "storage/unauthorized" || err.code === "permission-denied"
-      ? "Upload was blocked. Make sure you're logged in, then try again."
-      : (err.message || "Upload failed. Check your connection and try again.");
-    emit();
-  }
-}
-
-export function retryUpload() {
-  if (state.status === "error" && state.recId) uploadRecording(state.recId);
-}
-
-export function dismiss() {
-  if (state.status === "done" || state.status === "ready") reset();
-}
-
-/* ===================== Recovery after a crash / closed tab / logout ===================== */
-
-export async function checkForUnfinished() {
-  if (state.status !== "idle") return;
-  try {
-    const metas = await getAllMeta();
-    const latest = metas.sort((a, b) => String(b.startedAt).localeCompare(String(a.startedAt)))[0];
-    if (!latest || state.status !== "idle") return;
-    Object.assign(state, {
-      status: "recovered", recId: latest.recId, patient: latest.patient, staff: latest.staff,
-      elapsedMs: latest.elapsedMs || 0, mime: latest.mime,
+    setJob(recId, {
+      status: "error",
+      error: err.code === "storage/unauthorized" || err.code === "permission-denied"
+        ? "Upload was blocked. Make sure you're logged in, then try again."
+        : (err.message || "Upload failed. Check your connection and try again."),
     });
-    emit();
-  } catch (err) {
-    console.warn("Recording recovery check failed:", err);
   }
 }
 
-export function uploadRecovered() {
-  if (state.status === "recovered") uploadRecording(state.recId);
-}
+/* ===================== Processing (Deepgram → Gemini, in Apps Script) ===================== */
 
-export async function discardRecording() {
-  const id = state.recId;
-  if (id) await deleteRecording(id).catch(() => {});
-  reset();
-}
-
-/* ===================== Safety nets ===================== */
-
-window.addEventListener("beforeunload", (e) => {
-  if (isRecorderBusy()) {
-    e.preventDefault();
-    e.returnValue = ""; // browser shows "Leave site?"
-  }
-});
-
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && (state.status === "recording" || state.status === "paused")) {
-    acquireWakeLock(); // wake lock is dropped when the tab is hidden
-  }
-});
-
-/* ===================== Phase 2: processing (Deepgram -> Gemini) ===================== */
-
-let jobUnsub = null;
-
-function stopWatching() {
-  if (jobUnsub) { jobUnsub(); jobUnsub = null; }
+function stopWatching(recId) {
+  const stop = watchers.get(recId);
+  if (stop) { stop(); watchers.delete(recId); }
 }
 
 // Live progress from the server via the recording_jobs document
 function watchJob(recId) {
-  stopWatching();
-  jobUnsub = onSnapshot(doc(db, "recording_jobs", recId), (snap) => {
-    if (!snap.exists() || state.recId !== recId) return;
+  stopWatching(recId);
+  watchers.set(recId, onSnapshot(doc(db, "recording_jobs", recId), (snap) => {
+    if (!jobs.has(recId)) { stopWatching(recId); return; }
+    // The recording was deleted on the server: its chip goes too (but not just because the iPad is offline)
+    if (!snap.exists()) { if (!snap.metadata.fromCache) dismissJob(recId); return; }
     const job = snap.data();
     if (job.status === "ready") {
-      stopWatching();
-      Object.assign(state, { status: "ready", transcriptId: job.transcriptId || recId, error: "" });
+      stopWatching(recId);
+      setJob(recId, { status: "ready", transcriptId: job.transcriptId || recId, error: "" });
     } else if (job.status === "failed") {
-      Object.assign(state, { status: "failed", error: job.error || "Processing failed." });
+      setJob(recId, { status: "failed", error: job.error || "Processing failed." });
     } else {
-      Object.assign(state, { status: "processing", stage: job.status });
+      setJob(recId, { status: "processing", stage: job.status });
     }
-    emit();
-  }, (err) => console.warn("Watching the recording job failed:", err));
+  }, (err) => console.warn("Watching the recording job failed:", err)));
 }
 
 // Step 1 (transcribe) and step 2 (write notes) run as separate server calls
 async function kickProcessing(recId, round = 0) {
   try {
     const res = await callApi({ action: "processRecording", recordingId: recId });
-    if (res && res.next && round < 3 && state.recId === recId) kickProcessing(recId, round + 1);
+    if (res && res.next && round < 3 && jobs.has(recId)) kickProcessing(recId, round + 1);
   } catch (err) {
     console.warn("Process request didn't complete (the 5-minute sweeper will continue it):", err);
   }
 }
 
 function startProcessing(recId) {
-  Object.assign(state, { status: "processing", stage: "uploaded", error: "", progress: 1 });
-  emit();
+  setJob(recId, { status: "processing", stage: "uploaded", error: "", progress: 1 });
   watchJob(recId);
   kickProcessing(recId);
 }
 
-export function retryProcessing() {
-  if (state.status === "failed" && state.recId) startProcessing(state.recId);
+export function retryProcessing(recId) {
+  const j = jobs.get(recId);
+  if (j && j.status === "failed") startProcessing(recId);
 }
+
+/* ===================== Tidying the list ===================== */
+
+// Hides a recording that's safely uploaded (its notes still finish on the server)
+export function dismissJob(recId) {
+  const j = jobs.get(recId);
+  if (!j || ["uploading", "recovered", "error"].includes(j.status)) return;   // audio not safe yet: Discard instead
+  stopWatching(recId);
+  jobs.delete(recId);
+  saveTracked();
+  emit();
+}
+
+// Deletes a recording that's only on this device
+export async function discardJob(recId) {
+  const j = jobs.get(recId);
+  if (!j || !["recovered", "error"].includes(j.status)) return;
+  await deleteRecording(recId).catch(() => {});
+  jobs.delete(recId);
+  emit();
+}
+
+// The notes panel has been shown for this one (so it doesn't slide out again after a refresh)
+export function markAnnounced(recId) {
+  const j = jobs.get(recId);
+  if (!j || j.announced) return;
+  j.announced = true;
+  saveTracked();
+}
+
+/* ===================== After a crash / closed tab / logout ===================== */
+
+export async function checkForUnfinished() {
+  const me = myUid();
+  if (!me || checkedFor === me) return;
+  checkedFor = me;
+
+  // 1. Audio still on this device (never uploaded). Your own goes straight up; anyone else's waits for a tap.
+  try {
+    const metas = await getAllMeta();
+    metas.forEach((m) => {
+      if (!m || !m.recId || m.recId === live.recId || jobs.has(m.recId)) return;
+      addJob({ ...m, at: Date.parse(m.startedAt) || Date.now() }, "recovered");
+      if (m.staff && m.staff.uid === me) runUpload(m.recId);
+    });
+  } catch (err) {
+    console.warn("Recording recovery check failed:", err);
+  }
+
+  // 2. Uploaded, and still being turned into notes when the page was closed
+  readTracked()
+    .filter((t) => t.uid === me && Date.now() - (t.at || 0) < DAY && t.recId && !jobs.has(t.recId))
+    .forEach((t) => {
+      addJob(t, "processing");
+      watchJob(t.recId);
+    });
+  emit();
+}
+
+/* ===================== Safety nets ===================== */
+
+window.addEventListener("beforeunload", (e) => {
+  if (isRecorderBusy() || hasPendingUploads()) {
+    e.preventDefault();
+    e.returnValue = ""; // browser shows "Leave site?"
+  }
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && (live.status === "recording" || live.status === "paused")) {
+    acquireWakeLock(); // wake lock is dropped when the tab is hidden
+  }
+});

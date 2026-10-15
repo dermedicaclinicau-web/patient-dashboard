@@ -5,7 +5,7 @@ import { mountPatientDashboard } from "./patient-dashboard.js";
 import { escapeHtml, getInitials, showToast } from "./utils.js";
 import { maybeShowStartOfDay, closeStartOfDay, refreshStartOfDayButton, hideStartOfDayButton } from "./start-of-day.js";
 import { initRecordingBar, setRecordingPatient } from "./recording-bar.js";
-import { isRecorderBusy, suspendRecorder } from "./recorder.js";
+import { isRecorderBusy, hasPendingUploads, suspendRecorder } from "./recorder.js";
 import { initSoapPanel, closeSoapPanel, hasUnsavedNotes } from "./soap-panel.js";
 import { confirmDialog } from "./dialog.js";
 import { mountFormBuilder } from "./form-builder.js";
@@ -157,9 +157,12 @@ function renderStaff(staff) {
 
 els.staffPhoto.addEventListener("error", () => { els.staffPhoto.hidden = true; });
 els.logoutBtn.addEventListener("click", async () => {
-  if (isRecorderBusy() && !(await confirmDialog({
-    title: "A recording is in progress",
-    message: "Log out anyway? The recording stays saved on this computer and can be uploaded at your next login.",
+  const recording = isRecorderBusy();
+  if ((recording || hasPendingUploads()) && !(await confirmDialog({
+    title: recording ? "A recording is in progress" : "A recording is still uploading",
+    message: recording
+      ? "Log out anyway? The recording stays saved on this computer and uploads at your next login."
+      : "Log out anyway? The upload stops, but the recording stays saved on this computer and finishes uploading at your next login.",
     confirmLabel: "Log out",
     tone: "warning",
   }))) return;

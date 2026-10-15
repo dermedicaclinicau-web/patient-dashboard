@@ -1,7 +1,8 @@
+// The recording bar: the live recording (timer, Pause, Complete), and a chip for each recording
+// still uploading or becoming notes in the background.
 import {
-  subscribe, getState, startRecording, pauseRecording, resumeRecording, completeRecording,
-  cancelRecording, uploadRecovered, discardRecording, retryUpload, dismiss, checkForUnfinished,
-  retryProcessing,
+  subscribe, getState, startRecording, pauseRecording, resumeRecording, completeRecording, cancelRecording,
+  uploadNow, retryProcessing, discardJob, dismissJob, markAnnounced, checkForUnfinished,
 } from "./recorder.js";
 import { escapeHtml, showToast, getInitials, hueFromString } from "./utils.js";
 import { showSoapPanel } from "./soap-panel.js";
@@ -19,10 +20,9 @@ const ICONS = {
 let bar = null;
 let slot = null;      // the top-bar spot: "Start appointment", or the live timer while recording
 let staff = null;
-let context = null;   // the patient page currently open (for the "Ready" state)
-let consent = true; // consent forms are signed at check-in
+let context = null;   // the patient page currently open
 let lastKey = "";
-let announcedNotes = ""; // so the notes tab only pops out once per recording
+const toasted = new Set();   // "notes ready" toasts already shown
 
 const fmt = (ms) => {
   const total = Math.floor(ms / 1000);
@@ -33,20 +33,20 @@ const fmt = (ms) => {
   return h ? `${h}:${mm}:${String(s).padStart(2, "0")}` : `${mm}:${String(s).padStart(2, "0")}`;
 };
 
-// States where a recording belongs to one patient (so the bar must say whose)
-const OWNED = ["recording", "paused", "stopping", "uploading", "processing", "ready", "error", "failed", "recovered"];
-
 // Initials + name: opens that patient's page from anywhere in the app
-const patientChip = (p) => (p ? `
-  <button type="button" class="rec-pt" data-rec="open" title="Open ${escapeHtml(p.name)}'s page">
+const patientChip = (p, act = "open", id = "") => (p ? `
+  <button type="button" class="rec-pt" data-rec="${act}"${id ? ` data-id="${escapeHtml(id)}"` : ""} title="Open ${escapeHtml(p.name)}'s page">
     <span class="rec-av" style="--h:${hueFromString(p.name)}">${escapeHtml(getInitials(p.name))}</span>
     <span class="rec-pt-name">${escapeHtml(p.name)}</span>
   </button>` : "");
 
-// On a different patient's page than the one this recording is for
-const otherPatientWarning = (s) => (context && s.patient && context.id !== s.patient.id && OWNED.includes(s.status)
-  ? `<span class="rec-warn">⚠ You're viewing ${escapeHtml(context.name)}. This recording is for ${escapeHtml(s.patient.name)}.</span>`
+// Recording one patient while looking at another
+const otherPatientWarning = (L) => (context && L.patient && context.id !== L.patient.id && L.status !== "idle"
+  ? `<span class="rec-warn">⚠ You're viewing ${escapeHtml(context.name)}. This recording is for ${escapeHtml(L.patient.name)}.</span>`
   : "");
+
+const stageText = (j) => (j.stage === "writing" || j.stage === "transcribed" ? "Writing notes…"
+  : j.stage === "transcribing" ? "Transcribing…" : "Starting…");
 
 export function initRecordingBar(currentStaff) {
   staff = currentStaff;
@@ -60,191 +60,178 @@ export function initRecordingBar(currentStaff) {
   if (!bar.dataset.wired) {
     bar.dataset.wired = "1";
     bar.addEventListener("click", onClick);
-    bar.addEventListener("change", (e) => {
-      if (e.target.matches("[data-rec-consent]")) {
-        consent = e.target.checked;
-        const start = bar.querySelector("[data-rec='start']");
-        if (start) start.disabled = !consent;
-      }
-    });
     subscribe(render);
-    // If the notes for the finished recording are deleted, clear the "notes ready" bar
+    // Notes deleted: their chip goes too
     window.addEventListener("recording-deleted", (e) => {
-      if (getState().transcriptId === e.detail.id) dismiss();
+      const j = getState().jobs.find((x) => x.transcriptId === e.detail.id);
+      if (j) dismissJob(j.recId);
     });
   }
   checkForUnfinished();
+  lastKey = "";
   render(getState());
 }
 
 // Called by the patient page (patient) or other pages (null)
 export function setRecordingPatient(patient) {
-  if ((context && context.id) !== (patient && patient.id)) consent = true; // reset to the default for each patient
   context = patient;
   lastKey = "";
   if (bar) render(getState());
 }
 
+/* ---------- Notes ready ---------- */
+
+// Not recording: the notes tab slides out. Recording someone else: just a toast, so nothing covers the consultation.
+function announce(s) {
+  const ready = s.jobs.filter((j) => j.status === "ready" && !j.announced && j.transcriptId);
+  if (!ready.length) return;
+  if (s.live.status === "idle") {
+    showSoapPanel(ready[ready.length - 1].transcriptId, { mode: "min" });
+    ready.forEach((j) => markAnnounced(j.recId));
+    return;
+  }
+  ready.forEach((j) => {
+    if (toasted.has(j.recId)) return;
+    toasted.add(j.recId);
+    showToast(`Notes ready for ${j.patient ? j.patient.name : "your last patient"}. Review them when you're done.`);
+  });
+}
+
+/* ---------- Drawing ---------- */
+
+function liveParts(L) {
+  if (L.status === "idle") {
+    return { cls: "", html: "", top: context ? `<button type="button" class="tb-rec-btn" data-rec="start"
+      title="Record this appointment for ${escapeHtml(context.name)}">${ICONS.mic}<span>Start appointment</span></button>` : "" };
+  }
+  const chip = patientChip(L.patient);
+  const warn = otherPatientWarning(L);
+  if (L.status === "stopping") {
+    return { cls: "is-busy", top: "",
+      html: `<span class="rec-spin"></span>${chip}<strong class="rec-live-msg">Saving the last few seconds…</strong>${warn}` };
+  }
+  const paused = L.status === "paused";
+  return {
+    cls: paused ? "is-paused" : "is-recording",
+    top: `<button type="button" class="tb-rec-btn ${paused ? "is-paused" : "is-live"}" data-rec="open"
+      title="${paused ? "Paused" : "Recording"}${L.patient ? ` · ${escapeHtml(L.patient.name)}` : ""}">
+      <span class="rec-dot"></span><span class="tb-rec-time">${fmt(L.elapsedMs)}</span></button>`,
+    html: `
+      <span class="rec-dot"></span>
+      ${chip}
+      <span class="rec-timer">${fmt(L.elapsedMs)}</span>
+      ${warn}
+      <span class="rec-actions">
+        ${paused
+          ? `<button type="button" class="rec-btn" data-rec="resume">${ICONS.play}Resume</button>`
+          : `<button type="button" class="rec-btn" data-rec="pause">${ICONS.pause}Pause</button>`}
+        <button type="button" class="rec-btn go" data-rec="complete">${ICONS.check}Complete Appointment</button>
+        <button type="button" class="rec-link" data-rec="cancel">Cancel</button>
+      </span>`,
+  };
+}
+
+function jobHtml(j) {
+  const id = escapeHtml(j.recId);
+  const pct = Math.round((j.progress || 0) * 100);
+  const btn = (act, label, go = false) =>
+    `<button type="button" class="rec-jb${go ? " go" : ""}" data-rec="${act}" data-id="${id}">${label}</button>`;
+  const hide = (title) =>
+    `<button type="button" class="rec-jx" data-rec="job-dismiss" data-id="${id}" title="${escapeHtml(title)}" aria-label="Hide">×</button>`;
+  let cls = "", st = "", acts = "";
+  switch (j.status) {
+    case "uploading":
+      cls = "is-busy";
+      st = `${ICONS.upload}<span>Uploading</span><span class="rec-mini"><span style="width:${pct}%"></span></span>
+        <span class="rec-mini-pct">${pct}%</span>`;
+      break;
+    case "processing":
+      cls = "is-busy";
+      st = `<span class="rec-spin"></span><span>${stageText(j)}</span>`;
+      acts = hide("Hide. The notes still finish and appear on the patient's page.");
+      break;
+    case "ready":
+      cls = "is-ready";
+      st = `${ICONS.check}<span>Notes ready</span>`;
+      acts = btn("job-review", "Review", true) + hide("Hide");
+      break;
+    case "failed":
+      cls = "is-bad";
+      st = "<span>Couldn't create notes</span>";
+      acts = btn("job-process", "Try again", true) + hide("Hide. The server keeps trying in the background.");
+      break;
+    case "error":
+      cls = "is-bad";
+      st = `${ICONS.upload}<span>Upload didn't finish</span>`;
+      acts = btn("job-upload", "Try again", true) + btn("job-discard", "Discard");
+      break;
+    case "recovered":
+      cls = "is-saved";
+      st = `${ICONS.mic}<span>Not uploaded yet · ${fmt(j.elapsedMs)}</span>`;
+      acts = btn("job-upload", "Upload now", true) + btn("job-discard", "Discard");
+      break;
+  }
+  return `<div class="rec-job ${cls}" data-job="${id}"${j.error ? ` title="${escapeHtml(j.error)}"` : ""}>
+    ${patientChip(j.patient, "job-open", j.recId)}<span class="rec-job-st">${st}</span>${acts}</div>`;
+}
+
 function render(s) {
   if (!bar) return;
-  const key = [s.status, s.stage, s.recId, context && context.id].join("|");
+  const L = s.live;
+  announce(s);
+  const key = [L.status, L.recId, context && context.id,
+    s.jobs.map((j) => `${j.recId}:${j.status}:${j.stage}`).join(",")].join("|");
 
-  // Same state: just update the live numbers (keeps the consent box / focus intact)
+  // Same layout: just update the live numbers
   if (key === lastKey) {
     const timer = bar.querySelector(".rec-timer");
-    if (timer) timer.textContent = fmt(s.elapsedMs);
-    const bar2 = bar.querySelector(".rec-progress span");
-    if (bar2) bar2.style.width = `${Math.round(s.progress * 100)}%`;
-    const pct = bar.querySelector(".rec-pct");
-    if (pct) pct.textContent = `${Math.round(s.progress * 100)}%`;
+    if (timer) timer.textContent = fmt(L.elapsedMs);
     const t = slot && slot.querySelector(".tb-rec-time");
-    if (t) t.textContent = fmt(s.elapsedMs);
+    if (t) t.textContent = fmt(L.elapsedMs);
+    s.jobs.forEach((j) => {
+      if (j.status !== "uploading") return;
+      const el = bar.querySelector(`[data-job="${CSS.escape(j.recId)}"]`);
+      if (!el) return;
+      const pct = Math.round((j.progress || 0) * 100);
+      const fill = el.querySelector(".rec-mini span");
+      if (fill) fill.style.width = `${pct}%`;
+      const p = el.querySelector(".rec-mini-pct");
+      if (p) p.textContent = `${pct}%`;
+    });
     return;
   }
   lastKey = key;
 
-  let html = "";
-  let top = "";
-  let cls = "";
-  const chip = patientChip(s.patient);
-  const warn = otherPatientWarning(s);
-
-  switch (s.status) {
-    case "idle":
-      // Ready to record: just the button in the top bar, no extra row
-      if (context) top = `<button type="button" class="tb-rec-btn" data-rec="start"
-        title="Record this appointment for ${escapeHtml(context.name)}">${ICONS.mic}<span>Start appointment</span></button>`;
-      break;
-
-    case "recording":
-    case "paused": {
-      const paused = s.status === "paused";
-      cls = paused ? "is-paused" : "is-recording";
-      top = `<button type="button" class="tb-rec-btn ${paused ? "is-paused" : "is-live"}" data-rec="open"
-        title="${paused ? "Paused" : "Recording"}${s.patient ? ` · ${escapeHtml(s.patient.name)}` : ""}">
-        <span class="rec-dot"></span><span class="tb-rec-time">${fmt(s.elapsedMs)}</span></button>`;
-      html = `
-        <span class="rec-dot"></span>
-        ${chip}
-        <span class="rec-text"><strong>${paused ? "Paused" : "Recording"}</strong>
-          <small>Started by ${escapeHtml(s.staff ? s.staff.name : "")}</small>${warn}</span>
-        <span class="rec-timer">${fmt(s.elapsedMs)}</span>
-        <span class="rec-actions">
-          ${paused
-            ? `<button type="button" class="rec-btn" data-rec="resume">${ICONS.play}Resume</button>`
-            : `<button type="button" class="rec-btn" data-rec="pause">${ICONS.pause}Pause</button>`}
-          <button type="button" class="rec-btn go" data-rec="complete">${ICONS.check}Complete Appointment</button>
-          <button type="button" class="rec-link" data-rec="cancel">Cancel</button>
-        </span>`;
-      break;
-    }
-
-    case "stopping":
-      cls = "is-busy";
-      html = `<span class="rec-icon">${ICONS.upload}</span>${chip}
-        <span class="rec-text"><strong>Finishing recording…</strong><small>Saving the last few seconds.</small>${warn}</span>`;
-      break;
-
-    case "uploading":
-      cls = "is-busy";
-      html = `
-        <span class="rec-icon">${ICONS.upload}</span>${chip}
-        <span class="rec-text"><strong>Uploading recording</strong>
-          <small>${fmt(s.elapsedMs)} recorded · please keep this tab open</small>${warn}</span>
-        <span class="rec-progress"><span style="width:${Math.round(s.progress * 100)}%"></span></span>
-        <span class="rec-pct">${Math.round(s.progress * 100)}%</span>`;
-      break;
-
-    case "done":
-      cls = "is-done";
-      html = `
-        <span class="rec-icon">${ICONS.check}</span>${chip}
-        <span class="rec-text"><strong>Recording uploaded</strong><small>${fmt(s.elapsedMs)} saved securely.</small></span>
-        <span class="rec-actions"><button type="button" class="rec-btn" data-rec="dismiss">Done</button></span>`;
-      break;
-
-    case "processing": {
-      cls = "is-busy";
-      const stages = [["upload", "Uploaded"], ["transcribe", "Transcribing"], ["notes", "Writing notes"]];
-      const current = (s.stage === "writing" || s.stage === "transcribed") ? 2 : s.stage === "transcribing" ? 1 : 0;
-      const label = current === 2 ? "Writing clinical notes…" : current === 1 ? "Transcribing the consultation…" : "Starting processing…";
-      html = `
-        <span class="rec-spin"></span>${chip}
-        <span class="rec-text"><strong>${label}</strong>
-          <small>This usually takes under a minute. You can keep working.</small>${warn}</span>
-        <span class="rec-steps">${stages.map(([, name], i) =>
-          `<span class="rec-step ${i < current ? "done" : i === current ? "active" : ""}">${name}</span>`).join("")}</span>`;
-      break;
-    }
-
-    case "ready":
-      cls = "is-done";
-      if (s.transcriptId && s.transcriptId !== announcedNotes) {
-        announcedNotes = s.transcriptId;
-        showSoapPanel(s.transcriptId, { mode: "min" }); // the notes tab slides out on the right
-      }
-      html = `
-        <span class="rec-icon">${ICONS.check}</span>${chip}
-        <span class="rec-text"><strong>Clinical notes ready</strong>
-          <small>Saved as Draft. Review and save them as Reviewed when you're happy.</small>${warn}</span>
-        <span class="rec-actions">
-          <button type="button" class="rec-btn go" data-rec="review">Review notes</button>
-          <button type="button" class="rec-btn" data-rec="dismiss">Done</button>
-        </span>`;
-      break;
-
-    case "failed":
-      cls = "is-error";
-      html = `
-        <span class="rec-icon">${ICONS.upload}</span>${chip}
-        <span class="rec-text"><strong>Couldn't create notes</strong>
-          <small>${escapeHtml(s.error)} The recording is saved securely, so nothing is lost.</small>${warn}</span>
-        <span class="rec-actions">
-          <button type="button" class="rec-btn go" data-rec="retry-process">Try again</button>
-          <button type="button" class="rec-btn" data-rec="dismiss-failed">Hide</button>
-        </span>`;
-      break;
-
-    case "error":
-      cls = "is-error";
-      html = `
-        <span class="rec-icon">${ICONS.upload}</span>${chip}
-        <span class="rec-text"><strong>Upload didn't finish</strong>
-          <small>${escapeHtml(s.error)} The recording is safe on this device.</small>${warn}</span>
-        <span class="rec-actions">
-          <button type="button" class="rec-btn go" data-rec="retry">Try again</button>
-          <button type="button" class="rec-link" data-rec="discard">Discard</button>
-        </span>`;
-      break;
-
-    case "recovered":
-      cls = "is-recovered";
-      html = `
-        <span class="rec-icon">${ICONS.mic}</span>${chip}
-        <span class="rec-text"><strong>Unfinished recording found</strong>
-          <small>${fmt(s.elapsedMs)} saved on this device and not yet uploaded.</small>${warn}</span>
-        <span class="rec-actions">
-          <button type="button" class="rec-btn go" data-rec="upload">${ICONS.upload}Upload now</button>
-          <button type="button" class="rec-link" data-rec="discard">Discard</button>
-        </span>`;
-      break;
-  }
-
-  bar.className = `rec-bar ${cls}${warn ? " has-warn" : ""}`.trim();
-  bar.innerHTML = html;
-  bar.hidden = !html;
+  const { cls, html, top } = liveParts(L);
+  const liveRow = html ? `<div class="rec-live ${cls}">${html}</div>` : "";
+  const tray = s.jobs.length ? `<div class="rec-tray">${s.jobs.map(jobHtml).join("")}</div>` : "";
+  bar.className = "rec-bar is-stack";
+  bar.innerHTML = liveRow + tray;
+  bar.hidden = !(liveRow || tray);
   if (slot) { slot.innerHTML = top; slot.hidden = !top; }
   // Lets the sticky patient header and sidebar sit below the bar
   document.documentElement.style.setProperty("--recbar-h", bar.hidden ? "0px" : `${bar.offsetHeight}px`);
 }
+
+/* ---------- Buttons ---------- */
+
+function openPatient(p) {
+  if (!p || !p.id) return;
+  const target = `#/patient/${encodeURIComponent(p.id)}`;
+  if (location.hash === target) window.dispatchEvent(new HashChangeEvent("hashchange")); // reload the page's data
+  else location.hash = target;
+}
+
 async function onClick(e) {
   const btn = e.target.closest("[data-rec]");
   if (!btn) return;
   const action = btn.dataset.rec;
+  const id = btn.dataset.id || "";
+  const job = id ? getState().jobs.find((j) => j.recId === id) : null;
 
   try {
     if (action === "start") {
-      if (!context || !consent) return;
+      if (!context) return;
       btn.disabled = true;
       await startRecording(context, staff);
     } else if (action === "pause") {
@@ -252,32 +239,28 @@ async function onClick(e) {
     } else if (action === "resume") {
       resumeRecording();
     } else if (action === "complete") {
-      if (confirm("Complete this appointment and upload the recording?")) await completeRecording();
+      if (!confirm("Complete this appointment? The recording uploads in the background.")) return;
+      const who = getState().live.patient;
+      await completeRecording();
+      showToast(`${who ? `${who.name}'s recording` : "The recording"} is uploading in the background. You can start the next appointment.`);
     } else if (action === "cancel") {
       if (confirm("Cancel and delete this recording? This can't be undone.")) await cancelRecording();
-    } else if (action === "upload") {
-      uploadRecovered();
-    } else if (action === "retry") {
-      retryUpload();
-    } else if (action === "discard") {
-      if (confirm("Delete this recording permanently? This can't be undone.")) await discardRecording();
-    } else if (action === "dismiss") {
-      dismiss();
-    } else if (action === "review") {
-      const id = getState().transcriptId;
-      if (id) showSoapPanel(id, { mode: "open" });  
-    } else if (action === "retry-process") {
-      retryProcessing();
-    } else if (action === "dismiss-failed") {
-      // The server keeps retrying in the background; this just hides the bar
-      bar.hidden = true;
-      document.documentElement.style.setProperty("--recbar-h", "0px");
     } else if (action === "open") {
-      const p = getState().patient;
-      if (!p || !p.id) return;
-      const target = `#/patient/${encodeURIComponent(p.id)}`;
-      if (location.hash === target) window.dispatchEvent(new HashChangeEvent("hashchange")); // reload the page's data
-      else location.hash = target;
+      openPatient(getState().live.patient);
+    } else if (action === "job-open") {
+      if (job) openPatient(job.patient);
+    } else if (action === "job-review") {
+      if (job && job.transcriptId) { markAnnounced(job.recId); showSoapPanel(job.transcriptId, { mode: "open" }); }
+    } else if (action === "job-dismiss") {
+      dismissJob(id);
+    } else if (action === "job-upload") {
+      uploadNow(id);
+    } else if (action === "job-process") {
+      retryProcessing(id);
+    } else if (action === "job-discard") {
+      if (confirm(`Delete ${job && job.patient ? `${job.patient.name}'s` : "this"} recording permanently? It hasn't been uploaded, so this can't be undone.`)) {
+        await discardJob(id);
+      }
     }
   } catch (err) {
     console.error("Recording action failed:", err);
