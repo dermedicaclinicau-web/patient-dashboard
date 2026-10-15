@@ -661,8 +661,8 @@ export async function mountMyDashboard(container, { staff } = {}) {
     if (gc) { goToCard(gc.dataset.gotoCard); return; }
     if (e.target.closest('[data-act="new-note"]')) {
       const el = goToCard("notes");
-      const input = el && el.querySelector('[data-role="in"]');
-      if (input) setTimeout(() => input.focus({ preventScroll: true }), 300);
+      const btn = el && el.querySelector('[data-act="new"]');
+      if (btn) setTimeout(() => btn.click(), 300);
       return;
     }
     const sb = e.target.closest("[data-sod]");
