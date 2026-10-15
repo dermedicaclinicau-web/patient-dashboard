@@ -6138,3 +6138,19 @@ a.md-quiet:hover { border-color: var(--primary); }
 .pdf-prev-body { flex: 1; min-height: 0; display: flex; flex-direction: column; background: #525659; }
 .pdf-prev-frame { flex: 1; width: 100%; height: 100%; border: 0; background: #fff; }
 .pdf-prev-wait, .pdf-prev-note { margin: 0; padding: 1rem; color: #fff; }
+
+/* ---------- Move a saved form to another patient ---------- */
+.rm-dialog { width: min(560px, calc(100vw - 2rem)); }
+.rm-checks { padding: .7rem .85rem; border-radius: 10px; background: #fffbeb; border: 1px solid #fde68a; font-size: .9rem; }
+.rm-checks .muted { margin: 0; }
+.rm-checks-h { margin: 0 0 .35rem; font-weight: 600; color: #92400e; }
+.rm-checks ul { margin: 0; padding-left: 1.1rem; display: grid; gap: .3rem; }
+.rm-results { display: grid; gap: .3rem; margin-top: .4rem; max-height: 220px; overflow: auto; }
+.rm-result, .rm-chosen { display: flex; flex-direction: column; align-items: flex-start; gap: .1rem; text-align: left;
+  padding: .55rem .75rem; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; cursor: pointer; }
+.rm-result:hover { border-color: #0f766e; background: #f0fdfa; }
+.rm-result small, .rm-chosen small { color: #64748b; }
+.rm-chosen { flex-direction: row; align-items: center; justify-content: space-between; cursor: default; background: #f0fdfa; border-color: #99f6e4; }
+.rm-chosen span { display: flex; flex-direction: column; }
+.rm-sure { padding: .55rem .7rem; border-radius: 10px; background: #f8fafc; }
+.rm-log li { color: #92400e; }

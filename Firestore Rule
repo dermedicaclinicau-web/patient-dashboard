@@ -1020,7 +1020,11 @@ match /inv_count_drafts/{id} {
         && request.resource.data.voided == false;
       allow update, delete: if false;
     }
-    
+    // Saved forms moved to another patient (written by Apps Script only)
+    match /record_moves/{id} {
+      allow read: if can('records.move');
+      allow write: if false;
+    }
     // ===================== Safety net =====================
     // Anything not allowed by a rule above stays locked
     // (this includes staff_roles and staff_audit, which only Apps Script writes)

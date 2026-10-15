@@ -27,6 +27,7 @@ import { listStaffDetails, staffDetailsFor } from "./staff-details.js";
 import { mountSpecialistField } from "./specialist-field.js";
 import { tagValues, collectTagNodes, applyTagNodes } from "./form-tags.js";
 import { mountRichTextField } from "./rich-field.js";
+import { openMoveRecordDialog, canMoveRecords, movesHtml } from "./record-move.js";
 
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const BAR_ICONS = {
@@ -1096,10 +1097,12 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
             <button type="button" class="ff-btn" data-act="email">${BAR_ICONS.mail}<span>Email</span></button>
             <button type="button" class="ff-btn" data-act="printer">${BAR_ICONS.send}<span>Send to printer</span></button>
             <button type="button" class="ff-btn" data-act="print">${BAR_ICONS.print}<span>Print here</span></button>
+            ${canMoveRecords() ? `<button type="button" class="ff-btn" data-act="move" title="Saved to the wrong patient? Move it">${BAR_ICONS.send}<span>Move</span></button>` : ""}
           </div>
         </div>
       </div>
       <div data-role="log">${deliveriesHtml(sub.deliveries)}</div>
+      <div data-role="moves">${movesHtml(sub.moves)}</div>
       ${(() => {
         const r = readReturn();
         return r && r.patientId === sub.patientId && r.consentId === sub.templateId
@@ -1224,6 +1227,11 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
     if (e.target.closest('[data-act="email"]')) emailFlow();
     else if (e.target.closest('[data-act="printer"]')) printerFlow();
     else if (e.target.closest('[data-act="print"]')) window.print();
+    else if (e.target.closest('[data-act="move"]')) {
+      openMoveRecordDialog({ sub }).then((res) => {
+        if (res && container.isConnected) mountFormRecord(container, submissionId, { staff }); // show it on the new patient
+      });
+    }
   });
 
   // Arrived here from "Save & email" or "Save & print"

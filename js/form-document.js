@@ -420,7 +420,9 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
       ? `<p class="meta" style="text-align:${align} !important;">${sub.patientName || !blank
           ? `${esc(sub.patientName)}${sub.recordDate ? ` · ${esc(niceDate(sub.recordDate))}` : ""}`
           : 'Patient: <span class="bl-in" style="width:240px"></span> &nbsp;&nbsp; Date: <span class="bl-in" style="width:120px"></span>'}</p>` : ""}
-    ${body}`;
+    ${body}
+    ${Array.isArray(sub.moves) && sub.moves.length
+      ? `<p style="margin:16px 0 0;font-size:8.5pt;color:#64748b;">Patient details corrected on ${esc(fmtIso(sub.moves[sub.moves.length - 1].at))}.</p>` : ""}`;
 
   const previewHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(fileName)}</title><style>
     body { margin: 0; background: #e2e8f0; }

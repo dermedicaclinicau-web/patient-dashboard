@@ -1,5 +1,7 @@
 import { fetchPatientRecords, CATEGORIES, OTHER_CATEGORY } from "./records.js";
 import { escapeHtml } from "./utils.js";
+import { getSubmission } from "./form-submissions.js";
+import { openMoveRecordDialog, canMoveRecords } from "./record-move.js";
 
 const svg = (p, cls = "") =>
   `<svg ${cls ? `class="${cls}" ` : ""}viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -114,6 +116,27 @@ export function mountRecords(root, patient) {
     if (card.open) load();
   }, true);
 
+  // Move a portal form to another patient, then reload this patient's records
+  grid.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-move-sub]");
+    if (!b) return;
+    e.preventDefault();
+    b.disabled = true;
+    try {
+      const sub = await getSubmission(b.dataset.moveSub);
+      if (!sub) return;
+      const res = await openMoveRecordDialog({ sub });
+      if (res && grid.isConnected) {
+        loaded = false;
+        txBody.innerHTML = csBody.innerHTML = '<div class="skeleton sm"></div>';
+        load();
+      }
+    } catch (err) {
+      console.error("Move failed:", err);
+    } finally {
+      b.disabled = false;
+    }
+  });
   if (highlightId && !txCard.open) txCard.open = true; // just saved a record: show it
   if (txCard.open) load();
 }
@@ -133,7 +156,8 @@ function viewLink(link) {
 }
 
 const portalView = (r) =>
-  `<a class="rc-act" href="#/form-record/${encodeURIComponent(r.portalId)}">${ICONS.view}View</a>`;
+  `<a class="rc-act" href="#/form-record/${encodeURIComponent(r.portalId)}">${ICONS.view}View</a>` +
+  (canMoveRecords() ? `<button type="button" class="rc-act" data-move-sub="${escapeHtml(r.portalId)}">${ICONS.move}Move</button>` : "");
 
 function categoryHtml(cat, items, inner, actions = "") {
   return `

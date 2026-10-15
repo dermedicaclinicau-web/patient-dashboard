@@ -1,5 +1,5 @@
 ﻿{
-    "version":  "20261015-130429",
+    "version":  "20261015-145234",
     "files":  [
                   "./js/aftercare-api.js",
                   "./js/aftercare-bank.js",
@@ -85,6 +85,7 @@
                   "./js/print-task.js",
                   "./js/purchase-order.js",
                   "./js/receive-po.js",
+                  "./js/record-move.js",
                   "./js/recorder.js",
                   "./js/recording-bar.js",
                   "./js/recording-rules-api.js",
