@@ -2,7 +2,7 @@
 // Route: #/tasks/run/<taskId>            (from Task Manager)
 //        #/tasks/run/<taskId>/<patientId> (from the patient page's Email button)
 import { getTaskType, fetchStaffList, TASK_CHOICE_TYPES, parseAttachment } from "./task-types.js";
-import { printablePdf, savedFormPdf } from "./form-delivery.js";
+import { printablePdf, savedFormPdf, previewSavedForm } from "./form-delivery.js";
 import { getSubmission, listSubmissionsForPatient } from "./form-submissions.js";
 import { getPatient, patientIds } from "./patients.js";
 import { mountFormFill } from "./form-fill.js";
@@ -466,6 +466,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
       if (a.mode === "fill") {
         return `<div class="tr-att"><span class="tb-att${a.subId ? "" : " is-todo"}">${I.doc}${n}${a.subId ? " ✓" : ""}</span>
           <small class="muted">${a.subId ? `Filled in and saved to ${esc(st.patient.name)}'s record.` : "Needs filling in before sending."}</small>
+          ${a.subId ? `<button type="button" class="lh-btn is-quiet" data-attprev="${i}">Preview</button>` : ""}
           <button type="button" class="lh-btn${a.subId ? " is-quiet" : " is-primary"}" data-attfill="${i}">${a.subId ? "Fill in again" : "Fill in now"}</button></div>`;
       }
       if (a.saved === null || a.saved === undefined) return `<div class="tr-att"><span class="tb-att">${I.doc}${n}</span><small class="muted">Looking for saved copies…</small></div>`;
@@ -475,7 +476,8 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
       }
       return `<div class="tr-att"><span class="tb-att">${I.doc}${n}</span>
         <select class="fb-select" data-attpick="${i}" aria-label="Which saved copy">${a.saved.map((s) =>
-          `<option value="${esc(s.id)}"${s.id === a.subId ? " selected" : ""}>${esc(niceDate(s.recordDate))}${s.createdBy ? ` · ${esc(s.createdBy)}` : ""}</option>`).join("")}</select></div>`;
+          `<option value="${esc(s.id)}"${s.id === a.subId ? " selected" : ""}>${esc(niceDate(s.recordDate))}${s.createdBy ? ` · ${esc(s.createdBy)}` : ""}</option>`).join("")}</select>
+        <button type="button" class="lh-btn is-quiet" data-attprev="${i}">Preview</button></div>`;
     }).join("")}</div>`;
   }
 
@@ -720,7 +722,12 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   const attsBox = $('[data-role="atts"]');
   attsBox.addEventListener("click", (e) => {
     const b = e.target.closest("[data-attfill]");
-    if (b) openFill(Number(b.dataset.attfill));
+    if (b) { openFill(Number(b.dataset.attfill)); return; }
+    const pv = e.target.closest("[data-attprev]");
+    if (pv) {
+      const a = st.atts[Number(pv.dataset.attprev)];
+      if (a && a.subId) previewSavedForm(a.subId).catch((err) => { console.error(err); showToast(err.message || "Couldn't preview. Try again."); });
+    }
   });
   attsBox.addEventListener("input", (e) => {
     const s = e.target.closest("[data-attpick]");
@@ -777,9 +784,11 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
       if (st.atts.length) {
         label.textContent = "Preparing PDFs…";
         for (const a of st.atts) {
-          attachments.push(a.mode === "blank"
+          const att = a.mode === "blank"
             ? await printablePdf({ templateId: a.id, patient: st.patient })
-            : await savedFormPdf(a.subId));
+            : await savedFormPdf(a.subId);
+          console.info(`Attachment "${att.name}" (${a.mode}): ${Math.round(att.pdf.length * 0.75 / 1024)} KB`);
+          attachments.push(att);
         }
       }
       label.textContent = "Sending…";

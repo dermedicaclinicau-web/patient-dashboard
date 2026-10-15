@@ -450,6 +450,18 @@ export async function savedFormPdf(submissionId) {
   return { name: payload.fileName, pdf: payload.pdf };
 }
 
+// Shows a saved form's PDF exactly as it will be attached (Task Manager)
+export async function previewSavedForm(submissionId) {
+  const sub = await getSubmission(submissionId);
+  if (!sub) throw new Error("The saved form couldn't be found.");
+  const [ver, letterhead] = await Promise.all([
+    getFormVersion(sub.templateId, sub.version),
+    getLetterhead().catch(() => DEFAULT_LETTERHEAD),
+  ]);
+  if (!ver) throw new Error(`Couldn't open "${sub.templateName}".`);
+  return previewPdf(await formPdf({ sub, ver, letterhead }));
+}
+
 /* ---------- Aftercare on its own, as a PDF (Print aftercare) ---------- */
 
 export async function aftercarePdf({ items, patient }) {
