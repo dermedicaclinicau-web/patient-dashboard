@@ -394,7 +394,7 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
 
     const parts = fields.map((f) => {
     if (!shown.has(f.id)) return "";
-    if (f.pdfHide) return "";   // live form only
+    if (f.liveHide ? !f.liveHideShow : f.pdfHide) return ""; // hidden from staff (unless kept for the PDF), or live form only
     if (f.type === "watermark" || f.type === "photo") return "";
     if (f.type === "space") return `<div style="height:${{ small: 8, medium: 20, large: 40 }[f.size] || 20}px"></div>`;
     if (f.type === "letterhead") return letterhead(lh);

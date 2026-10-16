@@ -8,7 +8,7 @@ import {
   createField, normaliseField, renderField, fieldSettings, applyInput, applyClick,
   calcStatusHtml, checkFormula, canRequire, hasLabel, hasHelp, watermarkHtml, iqHasOptions, isMarkImage,
   markSetIdsOf, prefillSettings, prefillSummary, renameInPrefill, tidyPrefill, subExtrasHtml,
-  tableCols, tableTotal, tableClick, spanClass, tableRecalc, tableProblem, BUTTON_URL_RE, syncButtons,
+  tableCols, tableTotal, tableClick, spanClass, tableRecalc, tableProblem, BUTTON_URL_RE, syncButtons, canLiveHide,
 } from "./form-fields.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { DEFAULT_LETTERHEAD, letterheadHtml, openLetterheadDialog } from "./form-letterhead.js";
@@ -132,6 +132,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   let specialities = [];     // from the Specialist Bank, for the field's Speciality suggestions
   let previewAnnots = {};    // pictures being drawn on in Preview
   let previewTags = [];      // text with tags in it, on the Preview
+  let staffView = false;     // Preview: hide the fields staff won't see
   const ctx = (live) => ({ live, fields, consentForms, prescriptionForms, letterhead, calcValues: null, aftercare: aftercareMap, emailTemplates, products, markSets, specialities });
   const current = () => fields.find((f) => f.id === sel) || null;
   const signature = () => JSON.stringify(formSnapshot({ name, fields, settings }));
@@ -153,6 +154,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
           <button type="button" data-mode="build" class="active">Build</button>
           <button type="button" data-mode="preview">Preview</button>
         </div>
+        <button type="button" class="btn-ghost fe-staffview" data-act="staff-view" data-role="staffview" hidden>Show as staff see it</button>
         <button type="button" class="btn-ghost fe-dup" data-act="duplicate" title="Make a new draft with these questions">Duplicate</button>
         <button type="button" class="btn-ghost fe-savenow" data-act="save-now" data-role="savenow" disabled>Save draft</button>
         <button type="button" class="btn-ghost fe-unpub" data-act="unpublish" data-role="unpublish" hidden>Unpublish</button>
@@ -280,6 +282,9 @@ export async function mountFormEditor(container, { templateId, staff }) {
       if (cp) return { id: f.id, msg: `“${label || FIELD_TYPES[f.type].name}”: ${cp}` };
       if (hasLabel(f.type) && !["text_block", "image"].includes(f.type) && !label) {
         return { id: f.id, msg: "Every question needs a name. Add one to the highlighted question." };
+      }
+      if (f.liveHide && f.required && canRequire(f.type)) {
+        return { id: f.id, msg: `“${label || FIELD_TYPES[f.type].name}” is hidden from staff but set as Answer required. Untick one of them.` };
       }
       if (CHOICE_TYPES.includes(f.type) && !f.options.some((o) => String(o).trim())) {
         return { id: f.id, msg: `“${label}” needs at least one answer choice.` };
@@ -447,7 +452,8 @@ export async function mountFormEditor(container, { templateId, staff }) {
     const tagOwners = new Set(formFieldTags(fields).map((t) => t.f.id));
     const items = fields.map((f, i) => {
       const body = renderField(f, c);
-      if (!build) return body ? `<div class="fe-field${spanClass(f)}" data-fid="${esc(f.id)}">${body}</div>` : "";
+      if (!build) return body ? `<div class="fe-field${spanClass(f)}${f.liveHide ? " is-livehide" : ""}" data-fid="${esc(f.id)}">${
+        f.liveHide ? '<span class="fe-livehide-tag">Hidden from staff</span>' : ""}${body}</div>` : "";
       const on = f.id === sel;
       const cond = conditionSummary(f, fields);
       const condBad = cond ? conditionProblem(f, fields) : "";
@@ -461,10 +467,12 @@ export async function mountFormEditor(container, { templateId, staff }) {
           return n && `<span class="fe-chip is-tag">{${esc(tn)}} · used in ${n} place${n === 1 ? "" : "s"}</span>`;
         })(),
         cond && `<span class="fe-chip is-cond${condBad ? " is-bad" : ""}">${svg(BRANCH)}${esc(condBad || cond)}</span>`,
-        f.pdfHide && `<span class="fe-chip">${svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><line x1="4" y1="4" x2="20" y2="20"/>')}Not on the PDF</span>`,
+        f.liveHide && `<span class="fe-chip is-livehide-chip">${svg('<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/>')}Hidden from staff${
+          f.liveHideShow ? " · on the PDF" : ""}</span>`,
+        f.pdfHide && !f.liveHide && `<span class="fe-chip">${svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><line x1="4" y1="4" x2="20" y2="20"/>')}Not on the PDF</span>`,
       ].filter(Boolean).join("");
       return `
-        <div class="fe-field${spanClass(f)}${on ? " is-selected" : ""}${cond ? " is-conditional" : ""}" data-id="${esc(f.id)}" draggable="true" tabindex="0"
+        <div class="fe-field${spanClass(f)}${on ? " is-selected" : ""}${cond ? " is-conditional" : ""}${f.liveHide ? " is-livehide" : ""}" data-id="${esc(f.id)}" draggable="true" tabindex="0"
              aria-label="${esc(FIELD_TYPES[f.type].name)}${f.label ? ": " + esc(f.label) : ""}">
           ${body}
           ${chips ? `<div class="fe-chips">${chips}</div>` : ""}
@@ -498,6 +506,16 @@ export async function mountFormEditor(container, { templateId, staff }) {
         ${formTitleHtml(name || "Untitled form", settings, { build, selected: formSel })}
         <div class="fe-fields" data-role="fields">${items || empty}</div>
       </div>`;
+
+    // Preview: "Show as staff see it" (only when something is hidden)
+    const anyHidden = fields.some((f) => f.liveHide);
+    const sv = $('[data-role="staffview"]');
+    if (sv) {
+      sv.hidden = build || !anyHidden;
+      sv.textContent = staffView ? "Show hidden fields" : "Show as staff see it";
+      sv.classList.toggle("is-on", staffView);
+    }
+    shell.classList.toggle("is-staff-view", !build && staffView && anyHidden);
 
     previewTags = build ? [] : collectTagNodes(stage);
     if (!build) refreshPreview();
@@ -664,7 +682,15 @@ export async function mountFormEditor(container, { templateId, staff }) {
     }
     h += prefillSettings(f);
     h += conditionSettingsHtml(f, fields);
-    if (!["watermark", "letterhead"].includes(f.type)) {
+    if (canLiveHide(f)) {
+      h += `<label class="fe-check"><input type="checkbox" data-k="liveHide" data-rerender=""${f.liveHide ? " checked" : ""} /> Hide on the live form</label>
+        <small class="fe-note fe-pad">Staff won't see it when filling in. It still works behind the scenes: calculations, tags, pre-fills and show-when rules use its answer, and it's saved with the form.</small>`;
+      if (f.liveHide) {
+        h += `<label class="fe-check"><input type="checkbox" data-k="liveHideShow" data-rerender=""${f.liveHideShow ? " checked" : ""} /> Still show it on the PDF and saved copy</label>
+          <small class="fe-note fe-pad">Leave unticked for helper questions and notes for admins.</small>`;
+      }
+    }
+    if (!["watermark", "letterhead"].includes(f.type) && !f.liveHide) {
       h += `<label class="fe-check"><input type="checkbox" data-k="pdfHide"${f.pdfHide ? " checked" : ""} /> Leave out of the PDF and printouts</label>
         <small class="fe-note fe-pad">For questions only meant for the live form. They're still answered and saved, and show when the saved form is opened in the portal.</small>`;
     }
@@ -939,6 +965,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   root.addEventListener("click", (e) => {
     const m = e.target.closest("[data-mode]");
     if (m) { setMode(m.dataset.mode); renderStage(); return; }
+    if (e.target.closest('[data-act="staff-view"]')) { staffView = !staffView; renderStage(); return; }
     if (e.target.closest('[data-act="publish"]')) { publish(); return; }
     if (e.target.closest('.fe-top [data-act="unpublish"]')) { unpublish(); return; }
     if (e.target.closest('.fe-top [data-act="duplicate"]')) {

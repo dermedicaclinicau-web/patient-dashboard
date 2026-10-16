@@ -640,6 +640,8 @@ export async function mountFormFill(container, param, { staff, embedded = null }
   const progressEl = root.querySelector('[data-role="progress"]');
   const saveBtns = $all(root, "[data-save]");
   const wrap = (id) => sheet.querySelector(`[data-fid="${CSS.escape(id)}"]`);
+  // Hidden from staff: hidden with a class, not `hidden`, so calculations, tags and show-when rules still read the answer
+  fields.forEach((f) => { if (f.liveHide) { const w = wrap(f.id); if (w) w.classList.add("is-livehide"); } });
   const tagNodes = collectTagNodes(sheet);
   const pads = {};
   const consent = {};
@@ -847,7 +849,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     let need = 0, done = 0;
     fields.forEach((f) => {
       if (!f.required || !canRequire(f.type) || LAYOUT.includes(f.type) || f.type === "photo") return;
-      if (!shown.has(f.id)) return;
+      if (!shown.has(f.id) || f.liveHide) return;
       const w = wrap(f.id);
       if (!w) return;
       need++;
@@ -960,6 +962,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     fields.forEach((f) => {
       if (LAYOUT.includes(f.type) || f.type === "photo") return;
       if (!shown.has(f.id)) return; // hidden questions are never required
+      if (f.liveHide) return;       // staff can't see it, so they can't be asked to fix it
       const w = wrap(f.id);
       if (!w) return;
       const v = readField(f, w, rctx());
@@ -1245,7 +1248,8 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
     const w = sheet.querySelector(`[data-fid="${CSS.escape(f.id)}"]`);
     if (!w) return;
     if (!shownIds.has(f.id)) { w.hidden = true; return; } // wasn't shown when it was filled in
-    if (f.pdfHide) w.classList.add("is-pdf-hide");
+    if (f.liveHide && !f.liveHideShow) { w.hidden = true; return; } // hidden from staff and not part of the saved copy
+    if (f.pdfHide && !f.liveHide) w.classList.add("is-pdf-hide");
     if (f.type === "signature") {
       const host = w.querySelector(".fe-sig");
       const src = sub.signatures[f.id];

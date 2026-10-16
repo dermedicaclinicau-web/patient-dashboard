@@ -6530,3 +6530,16 @@ a.md-quiet:hover { border-color: var(--primary); }
 .fe-tpay-add { justify-self: start; margin: .1rem 0 .2rem 8px; font-size: .8rem; }
 .fe-tinv .is-due { border-top: 2px solid var(--text); font-size: 1rem; font-weight: 700; }
 .fe-tinv .is-due strong { color: #b45309; }
+
+/* ---------- Form Builder: fields hidden from staff ---------- */
+.fe-shell .fe-field.is-livehide { opacity: .55; outline: 2px dashed #94a3b8; outline-offset: 4px; border-radius: 6px; }
+.fe-shell .fe-field.is-livehide.is-selected { opacity: 1; }
+.fe-chip.is-livehide-chip { background: #f1f5f9; color: #475569; border-color: #cbd5e1; }
+.fe-livehide-tag {
+  display: inline-block; margin: 0 0 6px; padding: 2px 8px; border-radius: 999px;
+  background: #f1f5f9; color: #475569; font-size: 11px; font-weight: 600; letter-spacing: .02em;
+}
+.fe-shell.is-staff-view .fe-field.is-livehide { display: none !important; }
+.fe-staffview.is-on { background: #0f766e; color: #fff; border-color: #0f766e; }
+/* Live form: out of sight, but still answered and calculated */
+.ff-sheet .fe-field.is-livehide { display: none !important; }

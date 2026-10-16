@@ -756,6 +756,11 @@ export const FILLS_FOR = {
 const NO_LABEL = ["space", "letterhead", "watermark"];
 const NO_HELP = ["patient", "text_block", "space", "letterhead", "watermark"];
 const NO_REQUIRED = ["text_block", "space", "letterhead", "watermark", "calculation", "consent_status", "prescription_status", "image", "aftercare", "consumables", "button"];
+// Fields that can be hidden from staff on the live form (still answered, calculated and saved behind the scenes)
+const NO_LIVEHIDE = ["signature", "consumables", "aftercare", "consent_status", "prescription_status", "space", "letterhead", "watermark"];
+export function canLiveHide(f) {
+  return !!f && FIELD_TYPES[f.type] && !NO_LIVEHIDE.includes(f.type) && !(f.type === "image" && f.source === "staff");
+}
 export const hasLabel = (t) => !NO_LABEL.includes(t);
 export const hasHelp = (t) => !NO_HELP.includes(t);
 export const canRequire = (t) => !NO_REQUIRED.includes(t);
@@ -1079,6 +1084,10 @@ export function cleanField(f) {
   }
   if (sw) out.showWhen = sw;
   if (f.pdfHide === true && !["watermark", "letterhead"].includes(f.type)) out.pdfHide = true;
+  if (f.liveHide === true && canLiveHide(f)) {
+    out.liveHide = true;
+    if (f.liveHideShow === true) out.liveHideShow = true; // still on the PDF and saved copy
+  }
   return out;
 }
 
