@@ -2,6 +2,7 @@
 // View a saved one:                      #/form-record/<submissionId>
 import { getFormTemplate, getFormVersion, getLetterhead, categoryLabel, listPublishedForms } from "./form-templates.js";
 import { fetchPatientRecords } from "./records.js";
+import { fetchBillingAndRx } from "./billing-rx-view.js";
 import { esc, svg, ICONS, renderField, normaliseField, watermarkHtml, canRequire,
   choiceList, otherLabel, syncChoiceExtras, readExtras, writeExtras, readImageQs, writeImageQs, STAFF_FILLS,
   tableCols, tableMax, tableRowHtml, syncTableRows, tableClick, tableTotal, spanClass } from "./form-fields.js";
@@ -433,22 +434,36 @@ function coreName(s) {
 
 // Consent check: the chosen consent form filled in on the portal, or a consent with the same name
 // (years and "Consent Form" ignored), on the portal or in the older consent records.
-// Prescription check: the chosen prescription form, or a portal prescription with the same name.
+// Prescription check: the chosen prescription form filled in on the portal, or a prescription with the same name
+// (years and "S4 / Prescription" ignored) from the patient's Prescription cards: older records, portal forms or scanned.
 async function checkConsents(consentFields, patient) {
-  const needGroups = consentFields.some((f) => f.type === "consent_status");
-  const [subs, recs, forms] = await Promise.all([
+  const needConsents = consentFields.some((f) => f.type === "consent_status");
+  const needRx = consentFields.some((f) => f.type === "prescription_status");
+  const [subs, recs, forms, rxData] = await Promise.all([
     listSubmissionsForPatient([patient.id, ...patientIds(patient)]),
-    needGroups
+    needConsents
       ? fetchPatientRecords(patient).catch((err) => { console.warn("Older consents not checked:", err); return null; })
       : null,
     listPublishedForms().catch(() => []),
+    needRx
+      ? fetchBillingAndRx(patient).catch((err) => { console.warn("Older prescriptions not checked:", err); return null; })
+      : null,
   ]);
+  // Every prescription on the patient's two Prescription cards, newest first (null if they couldn't be loaded)
+  const allRx = rxData && (rxData.injectables || rxData.rx)
+    ? [...(rxData.injectables || []), ...(rxData.rx || [])]
+        .sort((a, b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0))
+    : null;
+
   const out = {};
   consentFields.forEach((f) => {
     const cut = new Date();
     cut.setMonth(cut.getMonth() - (Number(f.months) || (f.type === "prescription_status" ? 6 : 12)));
     cut.setHours(0, 0, 0, 0);
     const cutKey = isoOf(cut);
+    const tpl = forms.find((t) => t.id === f.consentFormId);
+    const want = tpl ? coreName(tpl.name) : "";
+    const pdf = (r) => (!r.portalId && /^https:\/\//i.test(r.link || "") ? r.link : "");
 
     // 1) The chosen form, filled in on the portal (most recent first)
     const hit = f.consentFormId
@@ -460,31 +475,32 @@ async function checkConsents(consentFields, patient) {
       return;
     }
 
-    // 2) Consent checks: a consent with the same name (years and "Consent Form" ignored), portal or older record
-    if (f.type === "consent_status" && recs) {
-      const tpl = forms.find((t) => t.id === f.consentFormId);
-      const want = tpl ? coreName(tpl.name) : "";
-      if (want) {
-        const c = recs.consents.find((x) => x.date && x.date >= cut && coreName(x.title) === want);
-        if (c) {
-          out[f.id] = {
-            found: true, date: isoOf(c.date), submissionId: c.portalId || "", name: c.title,
-            link: !c.portalId && /^https:\/\//i.test(c.link || "") ? c.link : "",
-          };
-          return;
-        }
+    // 2) Consent checks: a consent with the same name, portal or older record
+    if (f.type === "consent_status" && recs && want) {
+      const c = recs.consents.find((x) => x.date && x.date >= cut && coreName(x.title) === want);
+      if (c) {
+        out[f.id] = { found: true, date: isoOf(c.date), submissionId: c.portalId || "", name: c.title, link: pdf(c) };
+        return;
       }
     }
-    // 3) Prescription checks: a portal prescription with the same name (years and "S4 / Prescription" ignored)
-    if (f.type === "prescription_status") {
-      const tpl = forms.find((t) => t.id === f.consentFormId);
-      const want = tpl ? coreName(tpl.name) : "";
-      const p = want ? subs
-        .filter((s) => s.category === "prescription" && s.recordDate >= cutKey && coreName(s.templateName) === want)
-        .sort((a, b) => String(b.recordDate).localeCompare(String(a.recordDate)))[0] : null;
-      if (p) {
-        out[f.id] = { found: true, date: p.recordDate, submissionId: p.id, name: p.templateName };
-        return;
+
+    // 3) Prescription checks: a prescription with the same name on either Prescription card
+    if (f.type === "prescription_status" && want) {
+      if (allRx) {
+        const p = allRx.find((x) => x.date && x.date >= cut && coreName(x.title) === want);
+        if (p) {
+          out[f.id] = { found: true, date: isoOf(p.date), submissionId: p.portalId || "", name: p.title, link: pdf(p) };
+          return;
+        }
+      } else {
+        // The cards couldn't be loaded: portal prescriptions only
+        const p = subs
+          .filter((s) => s.category === "prescription" && s.recordDate >= cutKey && coreName(s.templateName) === want)
+          .sort((a, b) => String(b.recordDate).localeCompare(String(a.recordDate)))[0];
+        if (p) {
+          out[f.id] = { found: true, date: p.recordDate, submissionId: p.id, name: p.templateName };
+          return;
+        }
       }
     }
 
