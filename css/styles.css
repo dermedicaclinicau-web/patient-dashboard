@@ -6458,3 +6458,18 @@ a.md-quiet:hover { border-color: var(--primary); }
 .ef-match { display: flex; flex-direction: column; align-items: flex-start; gap: .4rem; }
 .ef-match ul { margin: 0; padding-left: 1.1rem; font-size: .85rem; line-height: 1.6; }
 .ef-match a { color: var(--primary); }
+
+/* ---------- My dashboard: task actions, notes and the email ---------- */
+.md-task { align-items: start; }
+.md-list li .md-task-main { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: .75rem; align-items: center;
+  padding: .55rem 0; border-bottom: 1px solid #eef2f3; }
+.md-task-acts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .3rem; padding-top: .45rem; }
+.md-task-acts .lh-btn { padding: .3rem .6rem; font-size: .78rem; }
+.md-task-note { display: block; margin-top: .15rem; font-size: .78rem; font-style: italic; color: #475569; }
+.md-task.is-done > a > span, .md-task.is-done > .md-task-main > span { color: var(--muted); text-decoration: line-through; }
+.md-tnotes { display: grid; gap: .4rem; max-height: 240px; overflow: auto; margin: 0; padding: 0; list-style: none; }
+.md-tnotes li { padding: .45rem .6rem; border-radius: 8px; background: var(--surface-2); font-size: .85rem; }
+.md-tnotes em { font-style: normal; color: #475569; }
+.md-tnotes small { display: block; margin-top: .1rem; font-size: .74rem; color: var(--muted); }
+.md-tmail-frame { display: block; width: 100%; height: min(55vh, 460px); border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+@media (max-width: 640px) { .md-task { grid-template-columns: 1fr; } .md-task-acts { justify-content: flex-start; padding-top: 0; } }

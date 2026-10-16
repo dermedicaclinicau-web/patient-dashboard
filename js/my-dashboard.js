@@ -1,6 +1,7 @@
 // My dashboard (#/home): a personal summary for whoever is logged in.
 // Only reads existing data: kits, borrows, JT releases, requests, treatment usage and saved forms.
 // Today strip and quick actions at the top; each person can reorder, hide and collapse the cards (kept on this device).
+// Tasks: done, notes, passing on and reopening go through Apps Script (staffTask), which tells the person who assigned it.
 import { can, isInjector } from "./perms.js";
 import {
   listProducts, listAllLots, listKits, listLoans, listReleases, listRequests, listMyUsage, listShortUsage, listPos,
@@ -12,7 +13,8 @@ import { db } from "./firebase-config.js";
 import { doc, getDoc, getDocs, collection, query, where, FieldPath } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { showSoapPanel } from "./soap-panel.js";
 import { parseRecordDate } from "./transcripts.js";
-import { completeReminder } from "./reminders.js";
+import { callApi } from "./appointments.js";
+import { fetchStaffList } from "./task-types.js";
 import { showToast } from "./utils.js";
 import { renderDayCard } from "./staff-days.js";
 import { openStartOfDayKit } from "./start-of-day.js";
@@ -26,6 +28,7 @@ const niceKey = (key) => {
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
 };
 const shortDay = (d) => (d ? d.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" }) : "");
+const toMs = (v) => (v && v.toDate ? v.toDate().getTime() : v ? Date.parse(v) || 0 : 0);
 const ICON = {
   alert: '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
   ok: '<polyline points="20 6 9 17 4 12"/>',
@@ -85,15 +88,79 @@ async function myAppointments(staff, key) {
   }).sort((a, b) => (a.sortMinutes || 0) - (b.sortMinutes || 0));
 }
 
-// Every open staff task (reminders from patient pages), soonest due first
+// Every open staff task (reminders from patient pages, and tasks from Task Manager), soonest due first
 async function openTasks() {
   const snap = await getDocs(query(collection(db, "staff-task-list"), where("status", "==", "Open")));
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }))
     .sort((a, b) => String(a.dueDate || "9999").localeCompare(String(b.dueDate || "9999")));
 }
+// Every task I've assigned, open or done (for "Done in the last 7 days")
+async function myCreatedTasks(uid) {
+  if (!uid) return [];
+  const snap = await getDocs(query(collection(db, "staff-task-list"), where("createdByUid", "==", uid)));
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
 const TASK_TAB_KEY = "dm.dash.tasktab";
 const readTaskTab = () => { try { return localStorage.getItem(TASK_TAB_KEY) || "mine"; } catch { return "mine"; } };
 const saveTaskTab = (v) => { try { localStorage.setItem(TASK_TAB_KEY, v); } catch { /* private mode */ } };
+
+function taskErr(ex) {
+  return {
+    FORBIDDEN: "Only the person it's for, the person who assigned it, or an Admin can change this task.",
+    NOT_FOUND: "This task has been removed.",
+    NO_NOTE: "Write a note first.",
+    NO_STAFF: "Choose someone to pass it to.",
+    DONE: "It's already done. Reopen it first.",
+    BUSY: "The server is busy. Try again in a moment.",
+    UNAUTHORIZED: "Your session has expired. Log out and back in.",
+    INVALID_PIN: "The server hasn't been updated yet. Deploy a new Apps Script version.",
+  }[ex && ex.code] || "Couldn't save. Try again.";
+}
+
+// A small window with a form. onSubmit throws to show an error and keep the window open.
+function taskDialog({ title, intro = "", inner, submit = "", cancel = "Cancel", onSubmit, wide = false }) {
+  const dlg = document.createElement("dialog");
+  dlg.className = "lh-dialog " + (wide ? "th-dialog" : "fe-confirm");
+  dlg.innerHTML = `<form class="lh-form" novalidate>
+    <div class="lh-dialog-head"><h3>${esc(title)}</h3>${intro ? `<p>${intro}</p>` : ""}</div>
+    ${inner}
+    <p class="lh-error" role="alert" hidden></p>
+    <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="cancel">${esc(cancel)}</button>
+      ${submit ? `<button type="submit" class="lh-btn is-primary">${esc(submit)}</button>` : ""}</div></form>`;
+  const form = dlg.querySelector("form");
+  const err = dlg.querySelector(".lh-error");
+  dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!onSubmit) { dlg.close(); return; }
+    const btn = form.querySelector('[type="submit"]');
+    err.hidden = true;
+    if (btn) { btn.disabled = true; btn.dataset.label = btn.textContent; btn.textContent = "Saving…"; }
+    try {
+      await onSubmit(form);
+      dlg.close();
+    } catch (ex) {
+      console.error("Task change failed:", ex);
+      err.textContent = ex && ex.message && !ex.code ? ex.message : taskErr(ex);
+      err.hidden = false;
+      if (btn) { btn.disabled = false; btn.textContent = btn.dataset.label; }
+    }
+  });
+  dlg.addEventListener("close", () => dlg.remove());
+  document.body.appendChild(dlg);
+  dlg.showModal();
+  return dlg;
+}
+
+const notesListHtml = (t) => {
+  const list = Array.isArray(t.notes) ? t.notes : [];
+  const hist = Array.isArray(t.history) ? t.history : [];
+  const rows = [
+    ...list.map((n) => ({ at: Date.parse(n.at) || 0, html: `${esc(n.text)}<small>${esc(n.by || "")} · ${esc(new Date(Date.parse(n.at)).toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }))}</small>` })),
+    ...hist.map((h) => ({ at: Date.parse(h.at) || 0, html: `<em>${esc(h.what)}</em><small>${esc(h.by || "")} · ${esc(new Date(Date.parse(h.at)).toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }))}</small>` })),
+  ].sort((a, b) => a.at - b.at);
+  return rows.length ? `<ul class="md-tnotes">${rows.map((r) => `<li>${r.html}</li>`).join("")}</ul>` : "";
+};
 
 // My consultation notes (from recordings), newest first. Reviewed or still a Draft.
 async function myNotes(staff) {
@@ -155,6 +222,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
 
   let drawTasks = () => {};
   let loadedAt = 0;
+  let taskMap = new Map();
 
   // "Updated 2 min ago", kept current while the page is open
   const updatedEl = root.querySelector('[data-role="updated"]');
@@ -171,7 +239,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     const hidden = readSet(hideKey(me0));
     const show = (k) => allowedCard(k) && !hidden.has(k);
     const todayKey = dayKey();
-    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts, notes, formsT, invs, unrec, countCfg, myDay] = await Promise.all([
+    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts, notes, formsT, invs, unrec, countCfg, myDay, myCreated] = await Promise.all([
       safe(listProducts(), []),
       safe(listAllLots(), []),
       safe(listKits(), []),
@@ -196,6 +264,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
         : { items: [] },
       safe(getCountSettings(), { dueBy: "10:00" }),
       canKit ? safe(getMyKitDay(), null) : null,
+      show("tasks") ? safe(myCreatedTasks(me0), []) : [],
     ]);
     if (!root.isConnected) return;
 
@@ -492,27 +561,51 @@ export async function mountMyDashboard(container, { staff } = {}) {
       "", '<a class="md-link" href="#/calendar">Open Calendar</a>');
 
     /* ---------- Tasks: mine, ones I assigned, everyone ---------- */
+    taskMap = new Map([...tasks, ...myCreated].map((t) => [t.id, t]));
     const in7 = dayKey(new Date(Date.now() + 7 * DAY));
     const sortDue = (a, b) => String(a.dueDate || "9999").localeCompare(String(b.dueDate || "9999"));
     const mineList = tasks.filter(isMine).sort(sortDue);
     const createdList = tasks.filter((t) => t.createdByUid === me && !isMine(t)).sort(sortDue);
     const dueNowList = tasks.filter((t) => t.dueDate && t.dueDate <= todayKey).sort(sortDue);
+    const doneRecent = myCreated.filter((t) => t.status === "Completed" && now - toMs(t.completedAt) < 7 * DAY)
+      .sort((a, b) => toMs(b.completedAt) - toMs(a.completedAt));
 
+    const lastNote = (t) => {
+      const n = Array.isArray(t.notes) && t.notes.length ? t.notes[t.notes.length - 1] : null;
+      return n ? `<em class="md-task-note">“${esc(n.text)}” · ${esc(n.by || "")}</em>` : "";
+    };
+    const taskMain = (t, sub) => {
+      const inner = `<span>${esc(t.taskText || "Untitled reminder")}${lastNote(t)}</span><strong>${esc(t.patientName || "")}</strong><small>${sub}</small>`;
+      return t.patientId ? `<a href="#/patient/${encodeURIComponent(t.patientId)}">${inner}</a>` : `<div class="md-task-main">${inner}</div>`;
+    };
     const taskLi = (t, who) => {
       const overdue = !!t.dueDate && t.dueDate < todayKey;
       const whoText = who === "to"
         ? (t.assignedToName ? `For ${t.assignedToName}` : "For anyone")
         : (t.createdBy ? `From ${t.createdBy}` : "");
+      const sub = `${overdue ? "Overdue · " : t.dueDate === todayKey ? "Today · " : ""}${esc(niceKey(t.dueDate) || "No due date")}${whoText ? ` · ${esc(whoText)}` : ""}`;
       return `<li class="md-task${overdue ? " is-overdue" : ""}">
-        <a href="#/patient/${encodeURIComponent(t.patientId || "")}">
-          <span>${esc(t.taskText || "Untitled reminder")}</span><strong>${esc(t.patientName || "")}</strong>
-          <small class="${overdue ? "md-overdue" : ""}">${overdue ? "Overdue · " : t.dueDate === todayKey ? "Today · " : ""}${
-            esc(niceKey(t.dueDate) || "No due date")}${whoText ? ` · ${esc(whoText)}` : ""}</small></a>
-        <button type="button" class="lh-btn md-done" data-task-done="${esc(t.id)}" title="Mark as done">✓ Done</button></li>`;
+        ${taskMain(t, sub)}
+        <div class="md-task-acts">
+          ${t.runId ? `<button type="button" class="lh-btn is-quiet" data-task-email="${esc(t.runId)}" title="Open the email it came from">Email</button>` : ""}
+          <button type="button" class="lh-btn is-quiet" data-task-note="${esc(t.id)}">Note</button>
+          <button type="button" class="lh-btn is-quiet" data-task-pass="${esc(t.id)}">Pass on</button>
+          <button type="button" class="lh-btn md-done" data-task-done="${esc(t.id)}" title="Mark as done">✓ Done</button>
+        </div></li>`;
     };
-    const group = (title, list, who) => (list.length ? `
+    const doneLi = (t) => {
+      const when = toMs(t.completedAt);
+      const sub = `Done by ${esc(t.completedBy || "someone")}${when ? ` · ${esc(shortDay(new Date(when)))}` : ""}`;
+      return `<li class="md-task is-done">
+        ${taskMain(t, sub)}
+        <div class="md-task-acts">
+          <button type="button" class="lh-btn is-quiet" data-task-note="${esc(t.id)}">Notes</button>
+          <button type="button" class="lh-btn is-quiet" data-task-reopen="${esc(t.id)}">Reopen</button>
+        </div></li>`;
+    };
+    const group = (title, list, who, render = taskLi) => (list.length ? `
       <p class="md-grp">${esc(title)} <em>${list.length}</em></p>
-      <ul class="md-list md-tasks">${list.slice(0, 10).map((t) => taskLi(t, who)).join("")}</ul>
+      <ul class="md-list md-tasks">${list.slice(0, 10).map((t) => render(t, who)).join("")}</ul>
       ${list.length > 10 ? `<small class="muted">and ${list.length - 10} more</small>` : ""}` : "");
 
     const tasksInner = () => {
@@ -520,8 +613,9 @@ export async function mountMyDashboard(container, { staff } = {}) {
       const tabs = `<div class="md-ttabs">${[["mine", `Mine (${mineList.length})`], ["created", `I assigned (${createdList.length})`], ["all", "Everyone"]]
         .map(([k, l]) => `<button type="button" class="md-ttab${tab === k ? " is-on" : ""}" data-ttab="${k}">${esc(l)}</button>`).join("")}</div>`;
       if (tab === "created") {
-        return tabs + (createdList.length ? group("Waiting on others", createdList, "to")
-          : '<p class="tb-none">No open tasks you\'ve assigned to others.</p>');
+        return tabs + (createdList.length || doneRecent.length
+          ? group("Waiting on others", createdList, "to") + group("Done in the last 7 days", doneRecent, "to", doneLi)
+          : '<p class="tb-none">No tasks you\'ve assigned to others.</p>');
       }
       if (tab === "all") {
         return tabs + (dueNowList.length ? group("Due today or overdue", dueNowList, "to") : '<p class="tb-none">No open tasks due today.</p>');
@@ -532,8 +626,8 @@ export async function mountMyDashboard(container, { staff } = {}) {
       const later = mineList.filter((t) => t.dueDate && t.dueDate > in7);
       return tabs + (mineList.length
         ? group("Overdue", od, "from") + group("Today", td, "from") + group("Next 7 days", soon, "from")
-          + (later.length ? `<small class="muted">${later.length} more due later</small>` : "")
-          + (!od.length && !td.length && !soon.length ? '<p class="tb-none">Nothing due this week. 👍</p>' : "")
+          + group("Later", later, "from")
+          + (!od.length && !td.length && !soon.length && !later.length ? '<p class="tb-none">Nothing due this week. 👍</p>' : "")
         : '<p class="tb-none">Nothing assigned to you. 👍</p>');
     };
     drawTasks = () => {
@@ -663,6 +757,98 @@ export async function mountMyDashboard(container, { staff } = {}) {
     return el;
   }
 
+  /* ---------- Tasks: done, notes, passing on, reopening, the email ---------- */
+  const taskCall = (op, id, extra = {}) => callApi({ action: "staffTask", op, id, ...extra });
+  const taskLabel = (t) => `<strong>${esc(t.taskText || "Task")}</strong>${t.patientName ? ` · ${esc(t.patientName)}` : ""}`;
+
+  function doneDialog(t) {
+    const tellsSomeone = t.createdByUid && t.createdByUid !== myUid();
+    taskDialog({
+      title: "Mark as done?", intro: taskLabel(t),
+      inner: `<label class="lh-field"><span class="lh-label">Note <small>(optional)</small></span>
+        <textarea name="note" rows="3" maxlength="500" placeholder="e.g. Called her and booked her in for Tuesday"></textarea></label>
+        ${tellsSomeone ? `<small class="muted">${esc(t.createdBy || "The person who assigned it")} gets an email to say it's done.</small>` : ""}`,
+      submit: "✓ Done",
+      onSubmit: async (form) => {
+        await taskCall("done", t.id, { note: form.elements.note.value.trim() });
+        showToast("Task marked as done");
+        load();
+      },
+    });
+  }
+
+  function noteDialog(t) {
+    const done = t.status === "Completed";
+    taskDialog({
+      title: done ? "Notes" : "Add a note", intro: taskLabel(t),
+      inner: `${notesListHtml(t) || '<p class="tb-none">No notes yet.</p>'}
+        ${done ? "" : `<label class="lh-field"><span class="lh-label">New note</span>
+          <textarea name="note" rows="3" maxlength="500" placeholder="e.g. Left a message, will try again tomorrow"></textarea></label>`}`,
+      submit: done ? "" : "Add note", cancel: done ? "Close" : "Cancel",
+      onSubmit: done ? null : async (form) => {
+        const note = form.elements.note.value.trim();
+        if (!note) throw new Error("Write a note first.");
+        await taskCall("note", t.id, { note });
+        showToast("Note added");
+        load();
+      },
+    });
+  }
+
+  function passDialog(t) {
+    const dlg = taskDialog({
+      title: "Pass it on", intro: taskLabel(t),
+      inner: `<label class="lh-field"><span class="lh-label">To</span>
+          <select class="fb-select" name="toId"><option value="">Loading staff…</option></select></label>
+        <label class="lh-field"><span class="lh-label">Note <small>(optional)</small></span>
+          <textarea name="note" rows="3" maxlength="500" placeholder="e.g. I'm away tomorrow, can you call her?"></textarea></label>
+        <small class="muted">They get an email, and it moves to their task list.</small>`,
+      submit: "Pass it on",
+      onSubmit: async (form) => {
+        const toId = form.elements.toId.value;
+        if (!toId) throw new Error("Choose who to pass it to.");
+        const r = await taskCall("passOn", t.id, { toId, note: form.elements.note.value.trim() });
+        showToast(`Passed on to ${r.assignedToName || "them"}`);
+        load();
+      },
+    });
+    fetchStaffList().then((list) => {
+      const sel = dlg.querySelector('[name="toId"]');
+      if (!sel) return;
+      const options = list.filter((s) => s.id !== t.assignedToId);
+      sel.innerHTML = '<option value="">Choose someone</option>' + options.map((s) =>
+        `<option value="${esc(s.id)}">${esc(s.name)}${s.role ? ` (${esc(s.role)})` : ""}</option>`).join("");
+    }).catch((err) => {
+      console.warn("Staff list failed:", err);
+      const sel = dlg.querySelector('[name="toId"]');
+      if (sel) sel.innerHTML = '<option value="">Couldn\'t load staff. Close and try again.</option>';
+    });
+  }
+
+  function emailDialog(runId) {
+    const dlg = taskDialog({
+      title: "The task email", cancel: "Close", wide: true,
+      inner: '<div data-role="mail"><p class="tb-none">Loading…</p></div>',
+    });
+    getDoc(doc(db, "task_runs", runId)).then((snap) => {
+      const box = dlg.querySelector('[data-role="mail"]');
+      if (!box) return;
+      if (!snap.exists()) { box.innerHTML = '<p class="tb-none">This email isn\'t in Task history any more.</p>'; return; }
+      const r = snap.data() || {};
+      const sent = r.sentAt ? new Date(r.sentAt).toLocaleString("en-AU", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" }) : "";
+      box.innerHTML = `<div class="th-meta">
+          <div><span>Subject</span><strong>${esc(r.subject || "")}</strong></div>
+          <div><span>Sent</span>${esc([sent, r.sentBy && `by ${r.sentBy}`].filter(Boolean).join(" "))}</div>
+          <div><span>To</span>${esc((r.recipients || []).map((x) => x.name || x.email).join(", "))}</div>
+        </div><iframe class="md-tmail-frame" sandbox="" title="The email"></iframe>`;
+      box.querySelector("iframe").srcdoc = String(r.html || "");
+    }).catch((err) => {
+      console.warn("Task email not read:", err);
+      const box = dlg.querySelector('[data-role="mail"]');
+      if (box) box.innerHTML = '<p class="tb-none tb-bad">Couldn\'t open the email.</p>';
+    });
+  }
+
   root.addEventListener("click", (e) => {
     const fb = e.target.closest("[data-fold]");
     if (fb) {
@@ -694,17 +880,19 @@ export async function mountMyDashboard(container, { staff } = {}) {
       return;
     }
     const td = e.target.closest("[data-task-done]");
-    if (td) {
-      td.disabled = true;
-      td.textContent = "Saving…";
-      completeReminder(td.dataset.taskDone, staff)
-        .then(() => { showToast("Task marked as done"); load(); })
-        .catch((err) => {
-          console.error("Completing task failed:", err);
-          showToast(err && err.code === "permission-denied" ? "You don't have permission to update tasks." : "Couldn't update the task.");
-          td.disabled = false;
-          td.textContent = "✓ Done";
-        });
+    if (td) { const t = taskMap.get(td.dataset.taskDone); if (t) doneDialog(t); return; }
+    const tn = e.target.closest("[data-task-note]");
+    if (tn) { const t = taskMap.get(tn.dataset.taskNote); if (t) noteDialog(t); return; }
+    const tp = e.target.closest("[data-task-pass]");
+    if (tp) { const t = taskMap.get(tp.dataset.taskPass); if (t) passDialog(t); return; }
+    const te = e.target.closest("[data-task-email]");
+    if (te) { emailDialog(te.dataset.taskEmail); return; }
+    const tr = e.target.closest("[data-task-reopen]");
+    if (tr) {
+      tr.disabled = true;
+      taskCall("reopen", tr.dataset.taskReopen)
+        .then(() => { showToast("Reopened. It's back on their list."); load(); })
+        .catch((err) => { console.error(err); showToast(taskErr(err)); tr.disabled = false; });
       return;
     }
     if (e.target.closest('[data-act="refresh"]')) {

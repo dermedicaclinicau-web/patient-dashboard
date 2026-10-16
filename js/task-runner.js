@@ -123,6 +123,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     smart: { appointments: "", plan: "" }, letterhead: null, printables: null,
     appts: { months: 6, services: true, staff: true, items: null, status: "", source: "book", lastKey: "", toKey: "" },
     subjectEdited: false, bodyEdited: false, sending: false, touched: false,
+    todo: { on: true, due: "" },
     combo: { results: [], active: -1, status: "", seq: 0 },
     // Attachments: { mode: "blank"|"fill"|"saved", id, subId, tags, saved }
     atts: task.attachments.map(parseAttachment).map((a) => ({ ...a, subId: "", tags: null, saved: undefined })),
@@ -403,6 +404,16 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
         ${esc(s.name)} <small>${esc(s.role || "")}${s.hasEmail ? "" : " · no email on file"}</small></label>`).join("")}</div>`;
   }
 
+  // Staff tasks: also put it on their task list (My dashboard → Tasks)
+  function todoCardHtml(num) {
+    const t = st.todo;
+    return `<section class="tb-card"><h4><span class="tb-num">${num}</span>Task list</h4>
+      <label class="fe-check"><input type="checkbox" data-todo="on"${t.on ? " checked" : ""} /> Add it to their task list</label>
+      <small class="muted">They can tick it off, add a note or pass it on. You'll get an email when it's done.</small>
+      ${t.on ? `<label class="tb-field"><span>Due <small>(optional)</small></span>
+        <input class="fe-input tr-date" type="date" data-todo="due" value="${esc(t.due)}" /></label>` : ""}
+    </section>`;
+  }
   /* ---------- The task's fields ---------- */
   function fieldHtml(f) {
     const v = st.answers[f.id];
@@ -447,6 +458,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
         h += `<section class="tb-card"><h4><span class="tb-num">${n++}</span>Which patient</h4>${
           st.patient ? patientChip() : comboHtml("Patient this is about")}</section>`;
       }
+      h += todoCardHtml(n++);
     }
     if (task.fields.length) {
       h += `<section class="tb-card"><h4><span class="tb-num">${n++}</span>Details</h4>${task.fields.map(fieldHtml).join("")}</section>`;
@@ -680,6 +692,11 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   /* ---------- Events ---------- */
   left.addEventListener("input", (e) => {
     const el = e.target;
+    if (el.dataset.todo !== undefined) {
+      if (el.dataset.todo === "on") { st.todo.on = el.checked; renderLeft(); }
+      else st.todo.due = el.value;
+      return;
+    }
     if (el.dataset.appt !== undefined) {
       const k = el.dataset.appt;
       if (k === "months") {
@@ -793,6 +810,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     to: task.category === "patient" ? $('[data-role="to-input"]').value.trim() : "",
     cc: ccEl.value.trim(),
     staffIds: fixedStaff ? [] : [...st.staffSel],
+    todo: task.category === "staff" ? { on: st.todo.on, due: st.todo.due } : null,
   });
 
   async function buildAttachments(btn) {

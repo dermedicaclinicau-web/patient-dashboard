@@ -46,6 +46,7 @@ function doPost(e) {
     if (body.action === 'records') return json_(handleRecords_(body));
     if (body.action === 'scheduleTaskEmail') return json_(handleScheduleTaskEmail_(body));
     if (body.action === 'emailFlow') return json_(handleEmailFlow_(body));
+    if (body.action === 'staffTask') return json_(handleStaffTask_(body));
 
     const pin = String(body.pin || '').trim();
 
@@ -754,6 +755,7 @@ function toFields_(obj) {
 
 function toValue_(v) {
   if (v === null || v === undefined) return { nullValue: null };
+  if (v instanceof Date) return { timestampValue: v.toISOString() };
   if (Array.isArray(v)) return { arrayValue: { values: v.map(toValue_) } };
   if (typeof v === 'object') return { mapValue: { fields: toFields_(v) } };
   if (typeof v === 'number') return Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v };
@@ -2173,7 +2175,7 @@ function handleSendTaskEmail_(body) {
     getStaffDocs_().forEach(function (s) { byId[s.id] = s; });
     wanted.slice(0, TASK_MAX_RECIPIENTS_).forEach(function (id) {
       const s = byId[String(id)];
-      if (s && isEmail_(s.email)) recipients.push({ name: s.name, first: String(s.name || '').split(' ')[0], email: s.email });
+      if (s && isEmail_(s.email)) recipients.push({ id: s.id, name: s.name, first: String(s.name || '').split(' ')[0], email: s.email });
     });
     if (!recipients.length) return { ok: false, error: 'NO_RECIPIENTS' };
   }
@@ -2243,8 +2245,17 @@ function handleSendTaskEmail_(body) {
     })]);
   } catch (e) { console.warn('Task sent, but the history log failed: ' + e); }
 
+  let todos = 0;
+  const todo = staffTodoOpts_(body.todo);
+  if (task.category === 'staff' && todo.on) {
+    todos = staffTodoCreate_(cfg, {
+      recipients: recipients, text: subjectRaw, due: todo.due, patientId: patientId, patientName: patientName,
+      taskId: taskId, taskName: String(task.name || ''), runId: runId,
+      by: String(session.name || ''), byUid: String(session.uid || ''),
+    });
+  }
   console.log('Task "' + task.name + '" sent to ' + recipients.length + ' recipient(s) by ' + session.name);
-  return { ok: true, runId: runId, sent: recipients.length };
+  return { ok: true, runId: runId, sent: recipients.length, todos: todos };
 }
 
 // ===================== Task emails: pictures inside the email =====================
@@ -3626,6 +3637,7 @@ function schedCreate_(body, session) {
     taskId: taskId, taskName: String(task.name || ''), category: String(task.category || ''),
     patientId: patientId, patientName: patientName, to: to, cc: cc, staffIds: staffIds,
     subject: subject, html: html, attachments: atts,
+    todo: task.category === 'staff' ? staffTodoOpts_(body.todo) : { on: false, due: '' },
     appts: { months: [3, 6, 12].indexOf(Number(a.months)) !== -1 ? Number(a.months) : 6,
       services: a.services !== false, staff: a.staff !== false },
     fillsLater: SCHED_APPTS_RE_().test(html) || SCHED_TODAY_RE_().test(html) || SCHED_TODAY_RE_().test(subject),
@@ -3742,7 +3754,7 @@ function schedDeliver_(cfg, rec) {
     getStaffDocs_().forEach(function (s) { byId[s.id] = s; });
     (rec.staffIds || []).forEach(function (sid) {
       const s = byId[String(sid)];
-      if (s && s.active !== false && isEmail_(s.email)) recipients.push({ name: s.name, first: String(s.name || '').split(' ')[0], email: s.email });
+      if (s && s.active !== false && isEmail_(s.email)) recipients.push({ id: s.id, name: s.name, first: String(s.name || '').split(' ')[0], email: s.email });
     });
     if (!recipients.length) fail('None of the chosen staff have an email address.');
   }
@@ -3795,6 +3807,14 @@ function schedDeliver_(cfg, rec) {
       scheduled: true, scheduledId: String(rec._id || ''),
     })]);
   } catch (e) { console.warn('Scheduled email sent, but the history log failed: ' + e); }
+  const todo = staffTodoOpts_(rec.todo);
+  if (rec.category === 'staff' && todo.on) {
+    staffTodoCreate_(cfg, {
+      recipients: recipients, text: subject, due: todo.due, patientId: pid, patientName: pName,
+      taskId: String(rec.taskId || ''), taskName: String(rec.taskName || ''), runId: runId,
+      by: String(rec.createdBy || ''), byUid: String(rec.createdByUid || ''),
+    });
+  }
   return { runId: runId, count: recipients.length, to: recipients.map(function (r) { return r.email; }).join(', ') };
 }
 
@@ -7378,6 +7398,137 @@ function flowStopRun_(id, session) {
       status: 'stopped', reason: 'Stopped by ' + String(session.name || 'staff') + '.', next: '', updatedAt: new Date().toISOString(),
     });
     return { ok: true };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ===================== Staff tasks: to-dos from Task Manager =====================
+// A staff task sent with "Add it to their task list" gives each person an open task in staff-task-list
+// (the same list as patient-page reminders and My dashboard → Tasks). Done, notes, passing on and reopening
+// go through here, so the person who assigned it is told, and only the right people can change it.
+
+function staffTodoOpts_(t) {
+  t = t || {};
+  const due = String(t.due || '');
+  return { on: t.on === true, due: /^\d{4}-\d{2}-\d{2}$/.test(due) ? due : '' };
+}
+
+// One open task per person. Never stops the email from sending.
+function staffTodoCreate_(cfg, o) {
+  try {
+    const now = new Date();
+    const writes = (o.recipients || []).filter(function (r) { return r && r.id; }).map(function (r) {
+      return updateWrite_(cfg, 'staff-task-list/t_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20), {
+        patientId: String(o.patientId || ''), patientName: String(o.patientName || ''),
+        taskText: String(o.text || o.taskName || 'Task').replace(/\s+/g, ' ').trim().slice(0, 500) || 'Task',
+        dueDate: String(o.due || ''), status: 'Open',
+        assignedToId: String(r.id), assignedToName: String(r.name || ''),
+        createdAt: now, createdBy: String(o.by || ''), createdByUid: String(o.byUid || ''),
+        source: 'task', taskId: String(o.taskId || ''), taskName: String(o.taskName || ''), runId: String(o.runId || ''),
+        notes: [], history: [{ at: now.toISOString(), by: String(o.by || ''), what: 'Assigned to ' + String(r.name || '') }],
+      });
+    });
+    if (writes.length) commitWrites_(cfg, writes);
+    return writes.length;
+  } catch (e) {
+    console.warn('Task sent, but the task list entries failed: ' + e);
+    return 0;
+  }
+}
+
+function staffTodoTell_(toUid, subject, heading, extraHtml, t) {
+  try {
+    const s = getStaffDocs_().filter(function (x) { return x.id === toUid; })[0];
+    if (!s || s.active === false || !isEmail_(s.email) || MailApp.getRemainingDailyQuota() < 1) return;
+    const html = invEmailWrap_(
+      '<h2 style="margin:0 0 6px;font-size:20px;color:#0f766e">' + invEsc_(heading) + '</h2>' +
+      '<p style="margin:0 0 12px;color:#475569"><strong>' + invEsc_(t.taskText || 'Task') + '</strong>' +
+        (t.patientName ? ' · ' + invEsc_(t.patientName) : '') + '</p>' + (extraHtml || ''),
+      'home', 'Open my dashboard');
+    MailApp.sendEmail({ to: s.email, name: 'Dermedica Portal', subject: subject, htmlBody: html, body: emailHtmlToText_(html) });
+  } catch (e) { console.warn('Task email not sent: ' + e); }
+}
+
+function handleStaffTask_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  const op = String(body.op || '');
+  const id = String(body.id || '');
+  if (!/^[A-Za-z0-9_-]{5,80}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
+  const note = String(body.note || '').replace(/\r/g, '').trim().slice(0, 500);
+
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) return { ok: false, error: 'BUSY' };
+  try {
+    const cfg = getConfig_();
+    const path = 'staff-task-list/' + id;
+    const t = fsGetDoc_(cfg, path);
+    if (!t) return { ok: false, error: 'NOT_FOUND' };
+    const admin = /^admin$/i.test(String(session.role || ''));
+    const isAssignee = !!t.assignedToId && t.assignedToId === session.uid;
+    const isCreator = !!t.createdByUid && t.createdByUid === session.uid;
+    if (!admin && !isAssignee && !isCreator && t.assignedToId) return { ok: false, error: 'FORBIDDEN' };
+
+    const now = new Date();
+    const who = String(session.name || 'Staff');
+    const history = (Array.isArray(t.history) ? t.history : []).slice(-40);
+    const notes = (Array.isArray(t.notes) ? t.notes : []).slice(-40);
+    const addNote = function () { if (note) notes.push({ at: now.toISOString(), by: who, byUid: String(session.uid || ''), text: note }); };
+    const noteHtml = note ? '<p style="margin:0;padding:10px 12px;border-radius:8px;background:#f0fdfa;color:#134e4a">“' +
+      invEsc_(note).replace(/\n/g, '<br>') + '”</p>' : '';
+
+    if (op === 'done') {
+      if (t.status === 'Completed') return { ok: true, already: true };
+      addNote();
+      history.push({ at: now.toISOString(), by: who, what: 'Marked as done' });
+      fsPatch_(cfg, path, { status: 'Completed', completedAt: now, completedBy: who, completedByUid: String(session.uid || ''),
+        notes: notes, history: history });
+      if (t.createdByUid && t.createdByUid !== session.uid) {
+        staffTodoTell_(t.createdByUid, 'Done: ' + String(t.taskText || 'Task').slice(0, 80), who + ' has done a task you assigned', noteHtml, t);
+      }
+      return { ok: true };
+    }
+    if (op === 'reopen') {
+      if (t.status !== 'Completed') return { ok: true, already: true };
+      addNote();
+      history.push({ at: now.toISOString(), by: who, what: 'Reopened' });
+      fsPatch_(cfg, path, { status: 'Open', completedAt: null, completedBy: '', completedByUid: '', notes: notes, history: history });
+      if (t.assignedToId && t.assignedToId !== session.uid) {
+        staffTodoTell_(t.assignedToId, 'Reopened: ' + String(t.taskText || 'Task').slice(0, 80), who + ' reopened a task for you', noteHtml, t);
+      }
+      return { ok: true };
+    }
+    if (op === 'note') {
+      if (!note) return { ok: false, error: 'NO_NOTE' };
+      addNote();
+      fsPatch_(cfg, path, { notes: notes });
+      return { ok: true };
+    }
+    if (op === 'passOn') {
+      if (t.status === 'Completed') return { ok: false, error: 'DONE' };
+      const toId = String(body.toId || '');
+      const to = getStaffDocs_().filter(function (s) { return s.id === toId && s.active !== false; })[0];
+      if (!to) return { ok: false, error: 'NO_STAFF' };
+      if (to.id === t.assignedToId) return { ok: true, already: true };
+      addNote();
+      history.push({ at: now.toISOString(), by: who,
+        what: 'Passed on' + (t.assignedToName ? ' from ' + t.assignedToName : '') + ' to ' + String(to.name || '') });
+      fsPatch_(cfg, path, { assignedToId: to.id, assignedToName: String(to.name || ''), notes: notes, history: history });
+      if (to.id !== session.uid) {
+        staffTodoTell_(to.id, 'Task for you: ' + String(t.taskText || 'Task').slice(0, 80), who + ' passed a task on to you',
+          noteHtml + (t.dueDate ? '<p style="margin:10px 0 0;color:#475569">Due ' + invEsc_(recLongDate_(t.dueDate) || t.dueDate) + '</p>' : ''), t);
+      }
+      if (t.createdByUid && t.createdByUid !== session.uid && t.createdByUid !== to.id) {
+        staffTodoTell_(t.createdByUid, 'Passed on: ' + String(t.taskText || 'Task').slice(0, 80),
+          who + ' passed your task on to ' + String(to.name || ''), noteHtml, t);
+      }
+      return { ok: true, assignedToName: String(to.name || '') };
+    }
+    return { ok: false, error: 'BAD_REQUEST' };
+  } catch (err) {
+    console.error('Staff task ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: false, error: 'SERVER_ERROR', detail: String(err && err.message ? err.message : err).slice(0, 300) };
   } finally {
     lock.releaseLock();
   }
