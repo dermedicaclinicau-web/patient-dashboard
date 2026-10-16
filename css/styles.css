@@ -6520,3 +6520,13 @@ a.md-quiet:hover { border-color: var(--primary); }
 .fe-table:not(.has-rm) .fe-trm { display: none; }
 .fe-table th.fe-trm, .fe-table td.fe-trm, .fe-table tfoot td.fe-trm {
   width: 40px; padding: 0 0 0 4px; border: none; background: transparent; }
+
+  /* Invoice totals: payments and amount due */
+.fe-tinv > .fe-tpay { display: grid; gap: .35rem; margin-top: .3rem; padding: .5rem 0 0; border-top: 1px dashed var(--border); }
+.fe-tpay-row { display: flex; align-items: center; gap: .5rem; padding: 0 8px; }
+.fe-tpay-row select.fe-in { flex: 1; min-width: 0; height: 32px; padding: .2rem .45rem; font-size: .88rem; }
+.fe-tpay-row .fe-tinv-din { margin: 0; }
+.fe-tpay-row .hx-x, .fe-tpay-sp { flex: none; width: 28px; height: 28px; }
+.fe-tpay-add { justify-self: start; margin: .1rem 0 .2rem 8px; font-size: .8rem; }
+.fe-tinv .is-due { border-top: 2px solid var(--text); font-size: 1rem; font-weight: 700; }
+.fe-tinv .is-due strong { color: #b45309; }

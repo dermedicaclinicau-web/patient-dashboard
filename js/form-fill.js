@@ -6,7 +6,7 @@ import { fetchBillingAndRx } from "./billing-rx-view.js";
 import { esc, svg, ICONS, renderField, normaliseField, watermarkHtml, canRequire,
   choiceList, otherLabel, syncChoiceExtras, readExtras, writeExtras, readImageQs, writeImageQs, STAFF_FILLS,
   tableCols, tableMax, tableRowHtml, syncTableRows, tableClick, tableTotal, tableRecalc, spanClass, syncButtons,
-  readTableDisc, writeTableDisc, tableInvoice } from "./form-fields.js";
+  readTableDisc, readTablePays, tableInvRead, tableInvWrite, tableInvoice } from "./form-fields.js";
 import { listMarkingSets, markSummary } from "./marking-sets.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { letterheadHtml, DEFAULT_LETTERHEAD } from "./form-letterhead.js";
@@ -863,7 +863,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     fields.forEach((f) => {
       const w = wrap(f.id);
       if (!w || !(f.id in a)) return;
-      if (f.type === "table") writeTableDisc(f, w, a[`${f.id}__d`]);
+      tableInvWrite(f, w, a);
       writeField(f, w, a[f.id]);
       writeExtras(f, w, a[`${f.id}__x`]);
     });
@@ -940,7 +940,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
       draft[f.id] = readField(f, w, rctx());
       const x = readExtras(f, w);
       if (x) draft[`${f.id}__x`] = x;
-      if (f.type === "table") { const d = readTableDisc(f, w); if (d !== null) draft[`${f.id}__d`] = d; }
+      if (f.type === "table") Object.assign(draft, tableInvRead(f, w));
     });
     writeReturn({
       at: Date.now(), patientId: pid, templateId: tid, templateName: ver.name,
@@ -985,6 +985,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
         const inv = tableInvoice(f);
         const d = readTableDisc(f, w);
         if (inv && inv.disc === "percent" && d !== null && d > 100) out.push({ id: f.id, msg: "The discount can't be more than 100%." });
+        else if (readTablePays(f, w).some((p) => p.amount > 0 && !p.method)) out.push({ id: f.id, msg: "Choose how each payment was made." });
       }
       if (f.type === "date" && v) {
         if (f.range === "past" && v > t) out.push({ id: f.id, msg: "Choose today or an earlier date." });
@@ -1063,7 +1064,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
       answers[f.id] = readField(f, w, rctx());
       const extra = readExtras(f, w);
       if (extra) answers[`${f.id}__x`] = extra;
-      if (f.type === "table") { const d = readTableDisc(f, w); if (d !== null) answers[`${f.id}__d`] = d; }
+      if (f.type === "table") Object.assign(answers, tableInvRead(f, w)); // discount and payments
       if (f.type === "image" && f.source !== "staff") {
         const a = annots[f.id];
         const out = {};
@@ -1309,7 +1310,7 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
       if (host) host.outerHTML = consumablesViewHtml(sub.answers[f.id]);
       return;
     }
-    if (f.type === "table") writeTableDisc(f, w, sub.answers[`${f.id}__d`]);
+    tableInvWrite(f, w, sub.answers);
     writeField(f, w, sub.answers[f.id]);
     writeExtras(f, w, sub.answers[`${f.id}__x`]);
     $all(w, "[data-subcmt]").forEach((c) => { if (!c.value) c.hidden = true; }); // no comment typed: nothing to show
@@ -1321,7 +1322,7 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
   };
   applyTagNodes(collectTagNodes(sheet), savedTags);
   syncButtons(sheet, fields, savedTags);
-  $all(sheet, "[data-tadd], [data-trm]").forEach((b) => b.remove()); // no adding or removing rows on a saved form
+  $all(sheet, "[data-tadd], [data-trm], [data-tpayadd], [data-tpayrm]").forEach((b) => b.remove()); // a saved form can't change
   $all(sheet, "input, textarea, select").forEach((el) => { el.disabled = true; });
 
   /* ---------- Email / send to printer / print here ---------- */

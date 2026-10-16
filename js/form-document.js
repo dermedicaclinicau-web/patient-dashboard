@@ -158,21 +158,31 @@ function pdfInv(f, s) {
   const v = (k) => {
     if (!s) return '<span class="bl-in" style="width:90px"></span>';
     if (k === "disc") return s.disc > 0 ? `−${esc(fmtInv(inv.col, s.disc))}` : "—";
+    if (k === "due" && s.due < 0) return `${esc(fmtInv(inv.col, -s.due))} credit`;
     return esc(fmtInv(inv.col, s[k]));
   };
   const r = (l, k, big) => {
     const b = big ? "font-weight:bold;border-top:1.5px solid #1a1a1a;" : "";
     return `<tr><td style="padding:3px 16px 3px 0;${b}">${esc(l)}</td><td style="padding:3px 0;text-align:right;${b}">${v(k)}</td></tr>`;
   };
+  const cell = "padding:3px 16px 3px 0;";
   const hasD = inv.disc !== "none";
   const dl = `Discount${inv.disc === "percent" && s && s.discIn ? ` (${+s.discIn}%)` : ""}`;
   const top = hasD ? r("Subtotal", "base") + r(dl, "disc") : "";
-  const rows = inv.gst === "add" ? (hasD ? top : r("Subtotal", "sub")) + r("GST (10%)", "gst") + r("Total", "total", true)
+  let rows = inv.gst === "add" ? (hasD ? top : r("Subtotal", "sub")) + r("GST (10%)", "gst") + r("Total", "total", true)
     : inv.gst === "incl" ? top + r("Total", "total", true) + r("Includes GST of", "gst")
     : top + r("Total", "total", true);
+  if (inv.pay) {
+    const pays = s && Array.isArray(s.pays) ? s.pays : [];
+    rows += s
+      ? pays.map((p) => `<tr><td style="${cell}">Paid${p.method ? ` · ${esc(p.method)}` : ""}</td>` +
+          `<td style="padding:3px 0;text-align:right;">${esc(fmtInv(inv.col, p.amount))}</td></tr>`).join("")
+      : `<tr><td style="${cell}">Paid by <span class="bl-in" style="width:110px"></span></td>` +
+          `<td style="padding:3px 0;text-align:right;"><span class="bl-in" style="width:90px"></span></td></tr>`;
+    rows += r("Amount due", "due", true);
+  }
   return `<table style="margin:6px 0 0 auto;border-collapse:collapse;font-size:10pt;">${rows}</table>`;
 }
-
 // Empty lines, tick-boxes and a signature box, for filling in by hand
 function blankAnswer(f) {
   const line = '<div class="bl"></div>';
@@ -291,7 +301,7 @@ function answer(f, v, sig, inline, x, blank = false) {
         return esc(String(x));
       };
       const g = gridStart(f, cols);
-      const sums = tableSums(f, rows.map((r) => r.cells), x && x.disc);
+      const sums = tableSums(f, rows.map((r) => r.cells), x && x.disc, x && x.pays);
       return `${g.open}${g.head}${rows.map((r) => `<tr>${cols.map((c, i) => `<td style="height:${g.h}px;${
         isNumCol(c) ? "text-align:right;" : ""}">${cellText(c, r.cells[i])}</td>`).join("")}</tr>`).join("")}${
         pdfTotalRow(f, cols, sums)}</table>${pdfInv(f, sums)}`;
@@ -481,7 +491,9 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
         f.caption ? `<div style="font-size:9pt;color:#64748b;margin-top:4px;">${esc(f.caption)}</div>` : ""}</div>`;
     }
 
-    const xx = f.type === "table" ? { disc: sub.answers[`${f.id}__d`] } : sub.answers[`${f.id}__x`]; // tables: the discount
+    const xx = f.type === "table" // tables: the discount and payments
+      ? { disc: sub.answers[`${f.id}__d`], pays: sub.answers[`${f.id}__p`] }
+      : sub.answers[`${f.id}__x`];
     if (st.pos === "beside" && INLINE_TYPES.includes(f.type)) {
       const qw = { narrow: "25%", medium: "40%", wide: "55%" }[st.qWidth]; // "Fit" = as wide as the question
       return `<div class="q" style="${box}"><table class="qi"><tr>` +

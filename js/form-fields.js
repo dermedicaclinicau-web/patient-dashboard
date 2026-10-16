@@ -143,8 +143,10 @@ const newColId = () => "c" + Math.random().toString(36).slice(2, 8);
 // Columns that hold numbers (typed, or worked out from other columns)
 export const isNumCol = (c) => !!c && (c.type === "number" || c.type === "calc");
 export const TABLE_GST = [["none", "No GST"], ["incl", "Prices include GST"], ["add", "Add 10% GST"]];
-const INV_KEYS = { __sub: "Subtotal", __gst: "GST", __total: "Total", __disc: "Discount" };
+const INV_KEYS = { __sub: "Subtotal", __gst: "GST", __total: "Total", __disc: "Discount", __paid: "Amount paid", __due: "Amount due" };
 export const TABLE_DISC = [["none", "No discount"], ["percent", "Staff enter a % discount"], ["amount", "Staff enter a $ discount"]];
+export const DEFAULT_PAY = ["EFTPOS", "Credit card", "Cash", "Bank transfer", "Gift voucher", "Afterpay", "Health fund"];
+const MAX_PAYS = 6;
 
 // Column widths (% of the table) and row heights
 export const TABLE_COL_WIDTHS = [[0, "Auto"], [10, "10%"], [15, "15%"], [20, "20%"], [25, "25%"], [30, "30%"], [35, "35%"], [40, "40%"], [50, "50%"], [60, "60%"]];
@@ -221,15 +223,34 @@ export function syncTableRows(f, w) {
   b.textContent = full ? `Most rows reached (${max})` : "+ Add a row";
 }
 
-// Add / remove row buttons on a live form. Returns true if it handled the click.
+// Add / remove row and payment buttons on a live form. Returns true if it handled the click.
 export function tableClick(target, fields) {
   const add = target.closest("[data-tadd]");
   const rm = target.closest("[data-trm]");
-  if (!add && !rm) return false;
+  const padd = target.closest("[data-tpayadd]");
+  const prm = target.closest("[data-tpayrm]");
+  if (!add && !rm && !padd && !prm) return false;
   const w = target.closest("[data-fid]");
   const f = w && fields.find((x) => x.id === w.dataset.fid);
-  const tbody = w && w.querySelector("tbody");
-  if (!f || f.type !== "table" || !tbody) return false;
+  if (!f || f.type !== "table") return false;
+  if (padd || prm) {
+    const inv = tableInvoice(f);
+    const host = w.querySelector("[data-tpay]");
+    if (!inv || !host) return false;
+    if (padd) {
+      if (host.children.length < MAX_PAYS) {
+        host.insertAdjacentHTML("beforeend", payRowHtml(inv, true, true));
+        const s = host.lastElementChild.querySelector("[data-pm]");
+        if (s) s.focus();
+      }
+    } else {
+      prm.closest(".fe-tpay-row").remove();
+    }
+    syncPayRows(w);
+    return true;
+  }
+  const tbody = w.querySelector("tbody");
+  if (!tbody) return false;
   if (add) {
     if (tbody.rows.length >= tableMax(f)) return true;
     tbody.insertAdjacentHTML("beforeend", tableRowHtml(f, true, true));
@@ -241,6 +262,7 @@ export function tableClick(target, fields) {
   syncTableRows(f, w);
   return true;
 }
+
 // The total of a Number or Calculated column on a live form (null if every cell is empty).
 // "__sub", "__gst" and "__total" are the table's invoice totals.
 export function tableTotal(f, w, colId) {
@@ -292,12 +314,15 @@ export function tableInvoice(f) {
     gst: ["incl", "add"].includes(inv.gst) ? inv.gst : "none",
     disc,
     discDefault: disc !== "none" && Number.isFinite(dd) && dd >= 0 ? dd : null,
+    pay: inv.pay === true,
+    payMethods: (Array.isArray(inv.payMethods) && inv.payMethods.length ? inv.payMethods : DEFAULT_PAY)
+      .map((s) => String(s || "").trim().slice(0, 60)).filter(Boolean).slice(0, 20),
   };
 }
 
 // Column totals and invoice totals from rows of cell values (live form, saved form, PDF).
 // discIn: the discount staff typed (a % or an amount, following the table's setting), or null.
-export function tableSums(f, rows, discIn = null) {
+export function tableSums(f, rows, discIn = null, pays = null) {
   const cols = tableCols(f);
   const sums = {};
   cols.forEach((c, ci) => {
@@ -329,6 +354,13 @@ export function tableSums(f, rows, discIn = null) {
     else if (inv.gst === "incl") { out.total = net; out.gst = cents(net / 11); out.sub = cents(out.total - out.gst); }
     else out.total = net;
   }
+  if (inv && inv.pay) {
+    const cents = (x) => Math.round(x * 100) / 100;
+    out.pays = (Array.isArray(pays) ? pays : []).filter((p) => p && Number(p.amount) > 0)
+      .map((p) => ({ method: String(p.method || ""), amount: cents(Number(p.amount)) }));
+    out.paid = cents(out.pays.reduce((a, p) => a + p.amount, 0));
+    out.due = out.total !== null ? cents(out.total - out.paid) : null;
+  }
   return out;
 }
 
@@ -354,7 +386,7 @@ export function tableRecalc(f, w) {
       return v === null ? "" : v;
     });
   });
-  const s = tableSums(f, rows, readTableDisc(f, w));
+  const s = tableSums(f, rows, readTableDisc(f, w), readTablePays(f, w));
   w.querySelectorAll("[data-tsum]").forEach((el) => {
     const c = cols.find((x) => x.id === el.dataset.tsum);
     const v = c ? s.sums[c.id] : null;
@@ -363,6 +395,7 @@ export function tableRecalc(f, w) {
   w.querySelectorAll("[data-tinv]").forEach((el) => {
     const v = s[el.dataset.tinv];
     if (el.dataset.tinv === "disc") { el.textContent = v > 0 ? `−${fmtInv(s.col, v)}` : "—"; return; }
+    if (el.dataset.tinv === "due" && v < 0) { el.textContent = `${fmtInv(s.col, -v)} credit`; return; }
     el.textContent = v === null || v === undefined ? "—" : fmtInv(s.col, v);
   });
   return s;
@@ -380,6 +413,72 @@ export function readTableDisc(f, w) {
 export function writeTableDisc(f, w, v) {
   const el = w && w.querySelector("[data-tdisc]");
   if (el) el.value = v === null || v === undefined || v === "" ? "" : String(v);
+}
+
+/* ---------- Invoice payments ---------- */
+function payRowHtml(inv, live, removable) {
+  const inert = live ? "" : ' tabindex="-1"';
+  return `<div class="fe-tpay-row">
+    <select class="fe-in" data-pm aria-label="Payment method"${inert}><option value="">Payment method</option>${
+      inv.payMethods.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join("")}</select>
+    <span class="fe-tinv-din"><em>${esc(inv.col.prefix || "$")}</em><input class="fe-in" type="number" min="0" step="any" inputmode="decimal"
+      data-pa aria-label="Amount paid"${inert} /></span>
+    ${removable ? `<button type="button" class="hx-x" data-tpayrm aria-label="Remove this payment">${svg(ICONS.x)}</button>` : '<span class="fe-tpay-sp"></span>'}
+  </div>`;
+}
+function syncPayRows(w) {
+  const host = w && w.querySelector("[data-tpay]");
+  const b = w && w.querySelector("[data-tpayadd]");
+  if (!host || !b) return;
+  const full = host.children.length >= MAX_PAYS;
+  b.disabled = full;
+  b.textContent = full ? `Most payments reached (${MAX_PAYS})` : "+ Add a payment";
+}
+// The payments typed under a table: [{ method, amount }]
+export function readTablePays(f, w) {
+  const inv = tableInvoice(f);
+  if (!inv || !inv.pay || !w) return [];
+  return [...w.querySelectorAll("[data-tpay] .fe-tpay-row")].map((r) => {
+    const m = r.querySelector("[data-pm]");
+    const a = r.querySelector("[data-pa]");
+    const n = a && a.value !== "" ? Number(a.value) : NaN;
+    return { method: m ? String(m.value).slice(0, 60) : "", amount: Number.isFinite(n) && n >= 0 ? Math.round(n * 100) / 100 : null };
+  }).filter((p) => p.method || p.amount !== null).slice(0, MAX_PAYS);
+}
+export function writeTablePays(f, w, list) {
+  const inv = tableInvoice(f);
+  const host = w && w.querySelector("[data-tpay]");
+  if (!inv || !inv.pay || !host) return;
+  const pays = (Array.isArray(list) ? list : []).slice(0, MAX_PAYS);
+  while (host.children.length < Math.max(1, pays.length)) host.insertAdjacentHTML("beforeend", payRowHtml(inv, true, true));
+  [...host.querySelectorAll(".fe-tpay-row")].forEach((r, i) => {
+    const p = pays[i] || {};
+    const m = r.querySelector("[data-pm]");
+    const a = r.querySelector("[data-pa]");
+    if (m) {
+      if (p.method && ![...m.options].some((o) => o.value === p.method)) { // a method that's since been removed
+        m.insertAdjacentHTML("beforeend", `<option value="${esc(p.method)}">${esc(p.method)}</option>`);
+      }
+      m.value = p.method || "";
+    }
+    if (a) a.value = p.amount === null || p.amount === undefined ? "" : String(p.amount);
+  });
+  syncPayRows(w);
+}
+// The discount and payments, as extra answers to save: { "<id>__d": 10, "<id>__p": [...] }
+export function tableInvRead(f, w) {
+  const out = {};
+  if (!f || f.type !== "table") return out;
+  const d = readTableDisc(f, w);
+  if (d !== null) out[`${f.id}__d`] = d;
+  const p = readTablePays(f, w);
+  if (p.length) out[`${f.id}__p`] = p;
+  return out;
+}
+export function tableInvWrite(f, w, answers) {
+  if (!f || f.type !== "table" || !answers) return;
+  writeTableDisc(f, w, answers[`${f.id}__d`]);
+  writeTablePays(f, w, answers[`${f.id}__p`]);
 }
 
 // What's wrong with a Calculated column's formula, or ""
@@ -423,7 +522,7 @@ function tableFootHtml(f, cols, canAdd) {
 function tableInvHtml(f, live = false) {
   const inv = tableInvoice(f);
   if (!inv) return "";
-  const row = (label, k, big) => `<div${big ? ' class="is-total"' : ""}><span>${esc(label)}</span><strong data-tinv="${k}">—</strong></div>`;
+  const row = (label, k, cls = "") => `<div${cls ? ` class="${cls}"` : ""}><span>${esc(label)}</span><strong data-tinv="${k}">—</strong></div>`;
   const hasD = inv.disc !== "none";
   const disc = hasD ? `<div class="fe-tinv-disc"><span>Discount</span><span class="fe-tinv-din">${
       inv.disc === "amount" ? `<em>${esc(inv.col.prefix || "$")}</em>` : ""}<input class="fe-in" type="number" min="0"${
@@ -431,9 +530,15 @@ function tableInvHtml(f, live = false) {
       inv.discDefault !== null ? ` value="${inv.discDefault}"` : ""}${live ? "" : ' tabindex="-1"'} />${
       inv.disc === "percent" ? "<em>%</em>" : ""}</span><strong data-tinv="disc">—</strong></div>` : "";
   const top = hasD ? row("Subtotal", "base") + disc : "";
-  return `<div class="fe-tinv">${inv.gst === "add" ? (hasD ? top : row("Subtotal", "sub")) + row("GST (10%)", "gst") + row("Total", "total", true)
-    : inv.gst === "incl" ? top + row("Total", "total", true) + row("Includes GST of", "gst")
-    : top + row("Total", "total", true)}</div>`;
+  const main = inv.gst === "add" ? (hasD ? top : row("Subtotal", "sub")) + row("GST (10%)", "gst") + row("Total", "total", "is-total")
+    : inv.gst === "incl" ? top + row("Total", "total", "is-total") + row("Includes GST of", "gst")
+    : top + row("Total", "total", "is-total");
+  const pay = inv.pay
+    ? `<div class="fe-tpay" data-tpay>${payRowHtml(inv, live, false)}</div>${
+        live ? '<button type="button" class="hx-add fe-tpay-add" data-tpayadd>+ Add a payment</button>' : ""}${
+        row("Amount paid", "paid")}${row("Amount due", "due", "is-due")}`
+    : "";
+  return `<div class="fe-tinv">${main}${pay}</div>`;
 }
 
 // How a table's column heading lines up: the table's setting, or automatic (numbers right, the rest left)
@@ -857,8 +962,9 @@ export function cleanField(f) {
       });
       const inv = tableInvoice({ invoice: f.invoice, columns: out.columns });
       if (inv) {
-        out.invoice = { col: inv.col.id, gst: inv.gst, disc: inv.disc,
-          ...(inv.discDefault !== null ? { discDefault: inv.discDefault } : {}) };
+        out.invoice = { col: inv.col.id, gst: inv.gst, disc: inv.disc, pay: inv.pay,
+          ...(inv.discDefault !== null ? { discDefault: inv.discDefault } : {}),
+          ...(inv.pay ? { payMethods: inv.payMethods } : {}) };
       }
       out.rows = int(f.rows, 1, 30, 3);
       out.addRows = f.addRows === true;
@@ -1569,7 +1675,11 @@ function typeSettings(f, ctx = {}) {
             ${inv.disc !== "none" ? `<label class="fe-insp-sub"><small>Starting discount (optional, staff can change it)</small>
               <div class="fe-num"><input class="fe-input" type="number" min="0" step="any" data-inv="discDefault" placeholder="None"
                 value="${inv.discDefault ?? ""}" /><span>${inv.disc === "percent" ? "%" : esc(inv.col.prefix || "$")}</span></div></label>
-              <small class="fe-note">Staff type the discount under the table. It comes off before GST.</small>` : ""}` : ""}
+              <small class="fe-note">Staff type the discount under the table. It comes off before GST.</small>` : ""}
+            <label class="fe-check"><input type="checkbox" data-inv="pay" data-rerender=""${inv.pay ? " checked" : ""} /> Payments and amount due</label>
+            ${inv.pay ? `<label class="fe-insp-sub"><small>Payment methods (one per line)</small>
+              <textarea class="fe-input" data-inv="payMethods" rows="5">${esc(inv.payMethods.join("\n"))}</textarea></label>
+              <small class="fe-note">Staff record each payment (how and how much) under the totals. Amount due = Total − payments.</small>` : ""}` : ""}
           <small class="fe-note">${numCols.length
             ? "Shows the Total (and the Subtotal and GST, if chosen) under the table. A Calculation question can use them too."
             : "Add a Number or Calculated column first."}</small></div>` +
@@ -1592,7 +1702,8 @@ function typeSettings(f, ctx = {}) {
             tok: `{${t.id}.${c.id}}`, name: `${t.label || "Table"} · ${c.label || "Column"} (total)`,
           })),
           ...(inv ? [["__total", "Total"], ...(inv.gst !== "none" ? [["__sub", "Subtotal"], ["__gst", "GST"]] : []),
-            ...(inv.disc !== "none" ? [["__disc", "Discount"]] : [])]
+            ...(inv.disc !== "none" ? [["__disc", "Discount"]] : []),
+            ...(inv.pay ? [["__paid", "Amount paid"], ["__due", "Amount due"]] : [])]
             .map(([k, l]) => ({ tok: `{${t.id}.${k}}`, name: `${t.label || "Table"} · ${l}` })) : []),
         ];
       });
@@ -2012,7 +2123,11 @@ export function applyInput(f, el) {
     return true;
   }
   if (el.dataset.inv !== undefined) {
-    f.invoice = { ...(f.invoice || {}), [el.dataset.inv]: el.value };
+    const k = el.dataset.inv;
+    const v = el.type === "checkbox" ? el.checked
+      : k === "payMethods" ? el.value.split("\n").map((s) => s.trim()).filter(Boolean).slice(0, 20)
+      : el.value;
+    f.invoice = { ...(f.invoice || {}), [k]: v };
     if (!f.invoice.col) f.invoice = null;
     return true;
   }
