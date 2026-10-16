@@ -6555,6 +6555,7 @@ function flowUpcoming_(cfg, doc, memo) {
 }
 
 // Their newest Skin Script: portal protocols (they say who made them) or older ones from the SSP sheet
+// Their newest Skin Script: portal protocols (they say who made them) or older ones from the SSP sheet
 function flowSsp_(cfg, doc, memo) {
   const none = { active: false, date: '', expires: '', clinician: '', clinicianUid: '', items: [] };
   const today = flowKey_(Date.now());
@@ -6588,8 +6589,9 @@ function flowSsp_(cfg, doc, memo) {
       clinician: String(best.createdBy || ''), clinicianUid: String(best.createdByUid || ''),
       items: (Array.isArray(best.items) ? best.items : []).map(function (it) {
         return {
-          name: String(it.name || ''), step: SSP_STEP_LABEL_[it.step] || String(it.step || ''),
+          name: String(it.name || ''), key: String(it.step || ''), step: SSP_STEP_LABEL_[it.step] || String(it.step || ''),
           am: it.am ? String(it.amText || '') : '', pm: it.pm ? String(it.pmText || '') : '',
+          proto: it.am && it.pm ? 'AM & PM' : it.am ? 'AM' : it.pm ? 'PM' : '',
           when: [Array.isArray(it.days) ? it.days.join(', ') : '', String(it.notes || '')].filter(Boolean).join(' · '),
         };
       }),
@@ -6600,24 +6602,25 @@ function flowSsp_(cfg, doc, memo) {
       active: old.date >= cutoff, date: old.date, expires: flowAddMonthsKey_(old.date, memo.sspMonths),
       clinician: '', clinicianUid: '',
       items: (old.items || []).map(function (it) {
-        return { name: String(it.product || ''), step: String(it.step || ''), am: String(it.am || ''), pm: String(it.pm || ''),
-          when: String(it.whenToUse || '') };
+        return {
+          name: String(it.product || ''), key: sspParseSteps_(it.step)[0] || '', step: String(it.step || ''),
+          am: String(it.am || ''), pm: String(it.pm || ''), proto: String(it.protocol || ''), when: String(it.whenToUse || ''),
+        };
       }),
     };
   }
   return none;
 }
 
-// A published Skin Script catalogue product matching the name (for "How to use" and the catalogue-only trigger)
+// A published Skin Script catalogue product matching the name (for "How to use", shop links and the catalogue-only trigger)
 function flowProduct_(cfg, memo, name) {
   if (!memo.products) {
-    memo.products = fsListAll_(cfg, 'ssp_products', ['name', 'defaultInstruction', 'published'])
+    memo.products = fsListAll_(cfg, 'ssp_products', ['name', 'defaultInstruction', 'published', 'shopLink'])
       .map(function (d) { return fromFields_(d.fields || {}); })
       .filter(function (p) { return p.name && p.published !== false; });
   }
   return memo.products.filter(function (p) { return flowSameProduct_(p.name, name); })[0] || null;
 }
-
 // Everything the cards and rules need to know about one patient. Each part is only read when it's needed.
 function flowCtx_(cfg, run, memo) {
   memo.pts = memo.pts || {};
@@ -6849,8 +6852,11 @@ function flowSendPatient_(cfg, flow, step, run, ctx, memo, tester) {
     throw e;
   }
   const vals = flowVals_(cfg, run, ctx, memo, false);
-  let html = sanitizeEmailHtml_(flowFillHtml_(c.html, vals));
-  let subject = flowFill_(c.subject, vals, false).replace(/\s+/g, ' ').trim().slice(0, 200) || 'A message from Dermedica';
+  let body = String(c.html);
+  if (FLOW_SSP_TABLE_RE_().test(body)) body = flowInsertSspTable_(body, flowSspTableHtml_(cfg, ctx, memo, (flow.style || {}).accent));
+  let html = sanitizeEmailHtml_(flowFillHtml_(body, vals));
+  let subject = flowFill_(String(c.subject || '').replace(FLOW_SSP_TABLE_RE_(), ''), vals, false)
+    .replace(/\s+/g, ' ').trim().slice(0, 200) || 'A message from Dermedica';
   let to = ctx.who.email;
   if (tester) {
     html = flowTestBanner_(flow.name, 'This would have gone to ' + ctx.who.name +
@@ -6866,6 +6872,67 @@ function flowSendPatient_(cfg, flow, step, run, ctx, memo, tester) {
   MailApp.sendEmail(mail);
   if (!tester) flowLog_(cfg, flow, run, ctx, 'patient', [{ name: ctx.who.name, email: to }], subject, html);
   return to;
+}
+
+/* ---------- {Skin Script table}: the patient's most recent Skin Script ---------- */
+
+const FLOW_SSP_TABLE_RE_ = function () { return /\{\s*skin script table\s*\}/gi; };
+const FLOW_SSP_SUB_ = { A: 'Preparing your skin', B: 'Prevent & Correct', C: 'Hydrating', E: 'Sunscreen' };
+
+// A blank on its own line: the whole paragraph becomes the table (a table can't sit inside a paragraph)
+function flowInsertSspTable_(html, table) {
+  const wrap = '(?:\\s|&nbsp;|<br\\s*\\/?>|<\\/?(?:span|strong|b|em|i|mark|u)\\b[^>]*>)*';
+  const block = new RegExp('<p\\b[^>]*>' + wrap + '\\{\\s*skin script table\\s*\\}' + wrap + '<\\/p>', 'gi');
+  return String(html || '').replace(block, function () { return table; })
+    .replace(FLOW_SSP_TABLE_RE_(), function () { return table; });
+}
+
+function flowSspTableHtml_(cfg, ctx, memo, accent) {
+  const s = ctx.ssp();
+  const items = (s.items || []).filter(function (it) { return it.name; });
+  if (!items.length) {
+    return '<p style="margin:0 0 14px">We don\'t have a Skin Script on file for you yet. Reply to this email and we\'ll help you put one together.</p>';
+  }
+  const acc = /^#[0-9a-f]{3,8}$/i.test(String(accent || '')) ? accent : '#5fae96';
+
+  // Grouped by step, in step order (A, Boost, B, C, D, E, F)
+  const groups = [];
+  const byKey = {};
+  items.forEach(function (it) {
+    const k = String(it.key || '').toUpperCase() || ('?' + it.step);
+    if (!byKey[k]) { byKey[k] = { key: k, label: it.step || SSP_STEP_LABEL_[k] || '', items: [] }; groups.push(byKey[k]); }
+    byKey[k].items.push(it);
+  });
+  const order = function (k) { const i = SSP_STEP_KEYS_.indexOf(k); return i === -1 ? 99 : i; };
+  groups.sort(function (a, b) { return order(a.key) - order(b.key); });
+
+  const cell = 'padding:14px 16px;border-top:1px solid #e5e7eb;vertical-align:top;';
+  const rows = groups.map(function (g) {
+    return g.items.map(function (it, j) {
+      const prod = flowProduct_(cfg, memo, it.name);
+      const link = prod && /^https:\/\/[^\s"'<>]+$/i.test(String(prod.shopLink || '')) ? String(prod.shopLink) : '';
+      const name = link
+        ? '<a href="' + invEsc_(link) + '" style="color:#1e293b;text-decoration:underline">' + invEsc_(it.name) + '</a>'
+        : invEsc_(it.name);
+      const sub = FLOW_SSP_SUB_[g.key] || '';
+      return '<tr>' +
+        (j === 0 ? '<td rowspan="' + g.items.length + '" style="' + cell + 'width:30%">' +
+          '<strong style="font-size:14px;color:#0f172a">' + invEsc_(g.label || 'Other') + '</strong>' +
+          (sub ? '<div style="margin-top:3px;font-size:12px;color:#64748b">' + invEsc_(sub) + '</div>' : '') + '</td>' : '') +
+        '<td style="' + cell + '"><span style="color:' + acc + '">&#8226;</span>&nbsp;&nbsp;' + name + '</td>' +
+        '<td style="' + cell + 'white-space:nowrap;width:22%">' + invEsc_(it.proto || '') + '</td>' +
+        '</tr>';
+    }).join('');
+  }).join('');
+
+  return '<div style="margin:18px 0;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden">' +
+    '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" ' +
+      'style="width:100%;border-collapse:collapse;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.45;color:#1e293b">' +
+    '<tr style="background:' + acc + '">' +
+      '<th align="left" style="padding:12px 16px;color:#fff;font-size:13px;font-weight:700">Step</th>' +
+      '<th align="left" style="padding:12px 16px;color:#fff;font-size:13px;font-weight:700">Product Name</th>' +
+      '<th align="left" style="padding:12px 16px;color:#fff;font-size:13px;font-weight:700">Protocol</th></tr>' +
+    rows + '</table></div>';
 }
 
 // Who a Notify staff card goes to. No Skin Script clinician (or seller) found: the Admins.

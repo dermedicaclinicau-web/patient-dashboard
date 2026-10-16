@@ -83,7 +83,7 @@ const STAFF_SHORT = { ssp_creator: "SSP clinician", sold_by: "Who sold it", role
 const PATIENT_TOKENS = [
   { title: "Patient", tokens: ["First name", "Full name"] },
   { title: "This purchase", tokens: ["Product name", "Purchase date", "How to use"] },
-  { title: "Their Skin Script", tokens: ["SSP step", "AM instructions", "PM instructions", "When to use", "SSP clinician"], smart: true },
+  { title: "Their Skin Script", tokens: ["Skin Script table", "SSP step", "AM instructions", "PM instructions", "When to use", "SSP clinician"], smart: true },
   { title: "Clinic", tokens: ["Clinic phone", "Clinic email", "Clinic address"] },
 ];
 const STAFF_TOKENS = [
@@ -101,6 +101,38 @@ const SAMPLE = {
   "ssp clinician": "Dr Teh", "ssp date": "2 September 2026",
 };
 const UNSUB = '<p style="margin:18px 0 0;font-size:12px;color:#64748b">You\'re getting this because you agreed to emails from Dermedica. <a href="#">Unsubscribe</a></p>';
+
+
+// {Skin Script table}: an example for the preview. The real one is built for each patient when the email is sent (Code.gs).
+const SSP_SUB = { "Step A": "Preparing your skin", "Step B": "Prevent & Correct", "Step C": "Hydrating", "Step E": "Sunscreen" };
+function sampleSspTable(accent) {
+  const acc = /^#[0-9a-f]{3,8}$/i.test(String(accent || "")) ? accent : "#5fae96";
+  const groups = [
+    ["Step A", [["Dermedica Essential Cleanser", "AM & PM", true]]],
+    ["Boost", [["ZO Complexion Renewal Pads", "PM", true]]],
+    ["Step B", [["ZO Illuminating AOX Serum", "AM", true], ["ZO Wrinkle and Texture Serum", "PM", true]]],
+    ["Step C", [["Dermedica Pro B Plus", "AM & PM", false]]],
+    ["Step E", [["Dermedica Sunscreen", "AM", false]]],
+  ];
+  const cell = "padding:14px 16px;border-top:1px solid #e5e7eb;vertical-align:top;";
+  const rows = groups.map(([step, items]) => items.map(([name, proto, link], j) => `<tr>
+    ${j === 0 ? `<td rowspan="${items.length}" style="${cell}width:30%"><strong style="font-size:14px;color:#0f172a">${step}</strong>
+      ${SSP_SUB[step] ? `<div style="margin-top:3px;font-size:12px;color:#64748b">${SSP_SUB[step]}</div>` : ""}</td>` : ""}
+    <td style="${cell}"><span style="color:${acc}">&#8226;</span>&nbsp;&nbsp;${link
+      ? `<a href="#" style="color:#1e293b;text-decoration:underline">${name}</a>` : name}</td>
+    <td style="${cell}white-space:nowrap;width:22%">${proto}</td></tr>`).join("")).join("");
+  return `<div style="margin:18px 0;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.45;color:#1e293b">
+    <tr style="background:${acc}"><th align="left" style="padding:12px 16px;color:#fff;font-size:13px;font-weight:700">Step</th>
+      <th align="left" style="padding:12px 16px;color:#fff;font-size:13px;font-weight:700">Product Name</th>
+      <th align="left" style="padding:12px 16px;color:#fff;font-size:13px;font-weight:700">Protocol</th></tr>${rows}</table></div>`;
+}
+// A blank on its own line: the whole paragraph becomes the table
+function insertSspTable(html, table) {
+  const wrap = "(?:\\s|&nbsp;|<br\\s*\\/?>|<\\/?(?:span|strong|b|em|i|mark|u)\\b[^>]*>)*";
+  const block = new RegExp(`<p\\b[^>]*>${wrap}\\{\\s*skin script table\\s*\\}${wrap}<\\/p>`, "gi");
+  return String(html || "").replace(block, () => table).replace(/\{\s*skin script table\s*\}/gi, () => table);
+}
 
 /* ===================== Cards ===================== */
 
@@ -1077,7 +1109,7 @@ async function mountFlowEditor(container, { id, staff }) {
       <div class="tb-mail">
         <div class="tb-mail-row"><span>To</span><span>Jane Citizen &lt;jane@example.com&gt;</span></div>
         <div class="tb-mail-row"><span>Subject</span><strong>${subjectHtml(fillTemplate(s.cfg.subject, vals)) || "<em>No subject yet</em>"}</strong></div>
-        <div class="tb-mail-body tb-mail-shell" data-role="shell">${emailShell(fillTemplateHtml(s.cfg.body || "", vals) + (s.cfg.promo ? UNSUB : ""),
+        <div class="tb-mail-body tb-mail-shell" data-role="shell">${emailShell(insertSspTable(fillTemplateHtml(s.cfg.body || "", vals), sampleSspTable(flow.style.accent)) + (s.cfg.promo ? UNSUB : ""),
           flow.style, { clinic: clinicDetails(letterhead), hasLogo: !!(letterhead && letterhead.logo) })}</div>
       </div>`;
     hydrateRichImages(box.querySelector('[data-role="shell"]'), { logo: (letterhead && letterhead.logo) || "" });
