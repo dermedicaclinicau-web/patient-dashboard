@@ -5,7 +5,7 @@ import { fetchPatientRecords } from "./records.js";
 import { fetchBillingAndRx } from "./billing-rx-view.js";
 import { esc, svg, ICONS, renderField, normaliseField, watermarkHtml, canRequire,
   choiceList, otherLabel, syncChoiceExtras, readExtras, writeExtras, readImageQs, writeImageQs, STAFF_FILLS,
-  tableCols, tableMax, tableRowHtml, syncTableRows, tableClick, tableTotal, spanClass } from "./form-fields.js";
+  tableCols, tableMax, tableRowHtml, syncTableRows, tableClick, tableTotal, tableRecalc, spanClass } from "./form-fields.js";
 import { listMarkingSets, markSummary } from "./marking-sets.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { letterheadHtml, DEFAULT_LETTERHEAD } from "./form-letterhead.js";
@@ -240,6 +240,7 @@ export function readField(f, w, { pads = {}, calc = {}, consent = {}, annots = {
           const el = tr.querySelector(`[data-c="${ci}"]`);
           if (!el) return c.type === "check" ? false : "";
           if (c.type === "check") return el.checked;
+          if (c.type === "calc") return el.dataset.v === "" || el.dataset.v === undefined ? "" : Number(el.dataset.v);
           if (c.type === "number") {
             if (el.value === "") return "";
             const n = Number(el.value);
@@ -376,10 +377,11 @@ function writeField(f, w, v) {
           const el = tr.querySelector(`[data-c="${ci}"]`);
           if (!el) return;
           if (c.type === "check") el.checked = cells[ci] === true;
-          else el.value = cells[ci] === null || cells[ci] === undefined || cells[ci] === false ? "" : String(cells[ci]);
+          else if (c.type !== "calc") el.value = cells[ci] === null || cells[ci] === undefined || cells[ci] === false ? "" : String(cells[ci]);
         });
       });
       syncTableRows(f, w);
+      tableRecalc(f, w); // Calculated cells and totals
       break;
     }
     case "calculation": {
@@ -818,6 +820,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
 
   // Twice, because a calculation can depend on what's shown and decide what's shown
   const refresh = () => {
+    fields.forEach((f) => { if (f.type === "table") tableRecalc(f, wrap(f.id)); });
     updateCalcs();
     shown = applyVisibility(sheet, fields, rctx());
     updateCalcs();

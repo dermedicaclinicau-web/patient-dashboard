@@ -5,7 +5,7 @@
 import { formatCalc } from "./form-calc.js";
 import { visibleIds } from "./form-conditions.js";
 import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing, textBlockHtml, clinicianParts, tableCols, tableHeadAlign,
-specialistParts, specialistBlockHtml, spanUnits, tableColWidths,
+specialistParts, specialistBlockHtml, spanUnits, tableColWidths, tableSums, fmtCol, isNumCol, tableInvoice,
  } from "./form-fields.js";
 import { cleanRichHtml, richText } from "./rich-html.js";
 import { markSummary } from "./marking-sets.js";
@@ -143,6 +143,29 @@ function gridStart(f, cols) {
     h: PDF_ROW[f.rowHeight] || 26,
   };
 }
+
+// The Total row inside a table, and Subtotal / GST / Total under it. s = null: empty lines (blank printable)
+function pdfTotalRow(f, cols, s) {
+  if (!cols.some((c) => c.total && isNumCol(c))) return "";
+  const cell = "font-weight:bold;background:#f2f2f2;";
+  return `<tr>${cols.map((c, i) => (c.total && isNumCol(c)
+    ? `<td style="${cell}text-align:right;">${s ? esc(fmtCol(c, s.sums[c.id])) : ""}</td>`
+    : `<td style="${cell}">${i === 0 ? "Total" : ""}</td>`)).join("")}</tr>`;
+}
+function pdfInv(f, s) {
+  const inv = tableInvoice(f);
+  if (!inv) return "";
+  const v = (k) => (s ? esc(fmtCol(inv.col, s[k])) : '<span class="bl-in" style="width:90px"></span>');
+  const r = (l, k, big) => {
+    const b = big ? "font-weight:bold;border-top:1.5px solid #1a1a1a;" : "";
+    return `<tr><td style="padding:3px 16px 3px 0;${b}">${esc(l)}</td><td style="padding:3px 0;text-align:right;${b}">${v(k)}</td></tr>`;
+  };
+  const rows = inv.gst === "add" ? r("Subtotal", "sub") + r("GST (10%)", "gst") + r("Total", "total", true)
+    : inv.gst === "incl" ? r("Total", "total", true) + r("Includes GST of", "gst")
+    : r("Total", "total", true);
+  return `<table style="margin:6px 0 0 auto;border-collapse:collapse;font-size:10pt;">${rows}</table>`;
+}
+
 // Empty lines, tick-boxes and a signature box, for filling in by hand
 function blankAnswer(f) {
   const line = '<div class="bl"></div>';
@@ -183,7 +206,7 @@ function blankAnswer(f) {
       const n = Math.min(12, Math.max(3, f.addRows ? Math.min(tableMaxRows(f), 12) : parseInt(f.rows ?? f.rowCount, 10) || 4));
       const g = gridStart(f, cols);
       const row = `<tr>${cols.map((c) => `<td style="height:${g.h}px">${c.type === "check" ? '<span class="box"></span>' : ""}</td>`).join("")}</tr>`;
-      return `${g.open}${g.head}${row.repeat(n)}</table>`;
+      return `${g.open}${g.head}${row.repeat(n)}${pdfTotalRow(f, cols, null)}</table>${pdfInv(f, null)}`;
     }
     case "signature":
       return '<div class="sig-box"></div><div class="sigmeta">Name: <span class="bl-in" style="width:220px"></span> &nbsp;&nbsp; Date: <span class="bl-in" style="width:110px"></span></div>';
@@ -254,12 +277,17 @@ function answer(f, v, sig, inline, x, blank = false) {
         if (c.type === "check") return x === true ? "Yes" : "";
         if (x === null || x === undefined || x === false || x === "") return "";
         if (c.type === "date") return esc(niceDate(String(x)));
-        if (c.type === "number") return esc(typeof x === "number" ? String(+x.toFixed(4)) : String(x));
+        if (c.type === "calc") return esc(fmtCol(c, x));
+        if (c.type === "number") {
+          return esc(c.prefix || c.decimals ? fmtCol(c, x) : typeof x === "number" ? String(+x.toFixed(4)) : String(x));
+        }
         return esc(String(x));
       };
       const g = gridStart(f, cols);
+      const sums = tableSums(f, rows.map((r) => r.cells));
       return `${g.open}${g.head}${rows.map((r) => `<tr>${cols.map((c, i) => `<td style="height:${g.h}px;${
-        c.type === "number" ? "text-align:right;" : ""}">${cellText(c, r.cells[i])}</td>`).join("")}</tr>`).join("")}</table>`;
+        isNumCol(c) ? "text-align:right;" : ""}">${cellText(c, r.cells[i])}</td>`).join("")}</tr>`).join("")}${
+        pdfTotalRow(f, cols, sums)}</table>${pdfInv(f, sums)}`;
     }
     case "calculation":
       return esc(formatCalc(v, f) || "—");

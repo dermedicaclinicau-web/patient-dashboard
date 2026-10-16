@@ -8,7 +8,7 @@ import {
   createField, normaliseField, renderField, fieldSettings, applyInput, applyClick,
   calcStatusHtml, checkFormula, canRequire, hasLabel, hasHelp, watermarkHtml, iqHasOptions, isMarkImage,
   markSetIdsOf, prefillSettings, prefillSummary, renameInPrefill, tidyPrefill, subExtrasHtml,
-  tableCols, tableTotal, tableClick, spanClass,
+  tableCols, tableTotal, tableClick, spanClass, tableRecalc, tableProblem,
 } from "./form-fields.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { DEFAULT_LETTERHEAD, letterheadHtml, openLetterheadDialog } from "./form-letterhead.js";
@@ -289,6 +289,8 @@ export async function mountFormEditor(container, { templateId, staff }) {
         if (!c.ok) return { id: f.id, msg: `“${label || "Calculation"}”: ${c.error}` };
       }
       if (f.type === "table") {
+        const tp = tableProblem(f);
+        if (tp) return { id: f.id, msg: tp };
         const bad = tableCols(f).find((c) => c.type === "dropdown" && !c.options.length);
         if (bad) return { id: f.id, msg: `Table column “${bad.label || "Column"}” needs at least one choice.` };
       }
@@ -421,6 +423,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   // Preview: questions appear and disappear as answers change, and tags fill in, like the real form
   function refreshPreview() {
     if (mode !== "preview") return;
+    fields.forEach((f) => { if (f.type === "table") tableRecalc(f, stage.querySelector(`[data-fid="${CSS.escape(f.id)}"]`)); });
     let calc = updateCalcs();
     applyVisibility(stage, fields, { pads: {}, calc, consent: {} });
     calc = updateCalcs();
@@ -1060,7 +1063,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   });
 
   insp.addEventListener("mousedown", (e) => {
-    if (e.target.closest("[data-calcins]")) e.preventDefault();
+    if (e.target.closest("[data-calcins], [data-tcalcins]")) e.preventDefault(); // keep the cursor in the formula
   });
   // Which box "Insert a tag" goes into: the last one typed in (including a Text block or starting text)
   let tagKey = "label", richEl = null;

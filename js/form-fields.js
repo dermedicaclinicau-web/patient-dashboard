@@ -133,10 +133,14 @@ export function subExtrasHtml(g, i) {
 }
 
 /* ---------- Tables: column types, adding rows, and column totals for Calculations ---------- */
-export const TABLE_COL_TYPES = [["text", "Text"], ["number", "Number"], ["check", "Tick box"], ["date", "Date"], ["dropdown", "Dropdown"]];
+export const TABLE_COL_TYPES = [["text", "Text"], ["number", "Number"], ["calc", "Calculated"], ["check", "Tick box"], ["date", "Date"], ["dropdown", "Dropdown"]];
 const TCOL_KEYS = TABLE_COL_TYPES.map(([k]) => k);
 const COL_ID = /^[A-Za-z0-9_-]{1,20}$/;
 const newColId = () => "c" + Math.random().toString(36).slice(2, 8);
+// Columns that hold numbers (typed, or worked out from other columns)
+export const isNumCol = (c) => !!c && (c.type === "number" || c.type === "calc");
+export const TABLE_GST = [["none", "No GST"], ["incl", "Prices include GST"], ["add", "Add 10% GST"]];
+const INV_KEYS = { __sub: "Subtotal", __gst: "GST", __total: "Total" };
 
 // Column widths (% of the table) and row heights
 export const TABLE_COL_WIDTHS = [[0, "Auto"], [10, "10%"], [15, "15%"], [20, "20%"], [25, "25%"], [30, "30%"], [35, "35%"], [40, "40%"], [50, "50%"], [60, "60%"]];
@@ -146,14 +150,22 @@ export const tableRowHeight = (f) => (TABLE_ROW_HEIGHTS.includes(f && f.rowHeigh
 // A table's columns, tidied (older columns get a position-based id)
 export function tableCols(f) {
   const list = Array.isArray(f && f.columns) && f.columns.length ? f.columns : [{ label: "Column 1", type: "text" }];
-  return list.map((c, i) => ({
-    id: COL_ID.test((c && c.id) || "") ? c.id : `c${i + 1}`,
-    label: String((c && c.label) || ""),
-    type: TCOL_KEYS.includes(c && c.type) ? c.type : "text",
-    unit: String((c && c.unit) || ""),
-    options: (Array.isArray(c && c.options) ? c.options : []).map(String).filter((o) => o.trim()),
-    width: Math.max(0, Math.min(90, parseInt(c && c.width, 10) || 0)),
-  }));
+  return list.map((c, i) => {
+    const type = TCOL_KEYS.includes(c && c.type) ? c.type : "text";
+    const dp = parseInt(c && c.decimals, 10);
+    return {
+      id: COL_ID.test((c && c.id) || "") ? c.id : `c${i + 1}`,
+      label: String((c && c.label) || ""),
+      type,
+      unit: String((c && c.unit) || ""),
+      options: (Array.isArray(c && c.options) ? c.options : []).map(String).filter((o) => o.trim()),
+      width: Math.max(0, Math.min(90, parseInt(c && c.width, 10) || 0)),
+      prefix: String((c && c.prefix) || ""),
+      decimals: Number.isFinite(dp) ? Math.max(0, Math.min(4, dp)) : (type === "calc" || (c && c.prefix) ? 2 : 0),
+      total: !!(c && c.total === true),
+      formula: String((c && c.formula) || ""),
+    };
+  });
 }
 
 // Each column's width in %, or null for Auto. Scaled down when they don't fit
@@ -179,7 +191,8 @@ export function tableRowHtml(f, live = true, removable = false) {
     const a = ` data-c="${ci}"${inert}`;
     switch (c.type) {
       case "check": return `<td class="is-check"><input type="checkbox"${a} /></td>`;
-      case "number": return `<td class="is-num"><input class="fe-tcell" type="number" step="any" inputmode="decimal"${a} /></td>`;
+      case "number": return `<td class="is-num"><span class="fe-tnum">${c.prefix ? `<span>${esc(c.prefix)}</span>` : ""}<input class="fe-tcell" type="number" step="any" inputmode="decimal"${a} /></span></td>`;
+      case "calc": return `<td class="is-num is-calc"><output class="fe-tcalc" data-c="${ci}" data-v=""></output></td>`;
       case "date": return `<td><input class="fe-tcell" type="date"${a} /></td>`;
       case "dropdown": return `<td><select class="fe-tcell"${a}><option value=""></option>${
         c.options.map((o) => `<option value="${esc(o)}">${esc(o)}</option>`).join("")}</select></td>`;
@@ -220,23 +233,164 @@ export function tableClick(target, fields) {
   syncTableRows(f, w);
   return true;
 }
-// The total of a Number column on a live form (null if every cell is empty)
+// The total of a Number or Calculated column on a live form (null if every cell is empty).
+// "__sub", "__gst" and "__total" are the table's invoice totals.
 export function tableTotal(f, w, colId) {
-  const ci = tableCols(f).findIndex((c) => c.id === colId);
-  if (ci < 0 || !w) return null;
+  if (!w) return null;
+  if (INV_KEYS[colId]) {
+    const s = tableRecalc(f, w);
+    const v = s ? s[colId.slice(2)] : null;
+    return v === undefined ? null : v;
+  }
+  const cols = tableCols(f);
+  const ci = cols.findIndex((c) => c.id === colId);
+  if (ci < 0) return null;
+  const calc = cols[ci].type === "calc";
   let sum = 0, any = false;
   w.querySelectorAll(`tbody [data-c="${ci}"]`).forEach((el) => {
-    if (el.value === "") return;
-    const n = Number(el.value);
+    const raw = calc ? el.dataset.v : el.value;
+    if (raw === "" || raw === undefined) return;
+    const n = Number(raw);
     if (Number.isFinite(n)) { sum += n; any = true; }
   });
   return any ? Math.round(sum * 1e6) / 1e6 : null;
 }
+
+// A number shown the way its column is set up ("$12.50")
+export const fmtCol = (c, n) => (n === null || n === undefined || !Number.isFinite(Number(n))
+  ? "" : formatCalc(Number(n), { decimals: c && c.decimals, prefix: (c && c.prefix) || "" }));
+
+// One row's Calculated cell. Empty until at least one of the numbers it uses is filled in.
+function rowCalc(c, vals) {
+  if (!c.formula.trim()) return null;
+  const refs = calcRefs(c.formula);
+  if (refs.length && refs.every((r) => vals[r] === null || vals[r] === undefined)) return null;
+  const r = runCalc(c.formula, (id) => vals[id]);
+  return r.ok && Number.isFinite(r.value) ? Math.round(r.value * 1e6) / 1e6 : null;
+}
+
+// The column the invoice totals add up, and how GST works, or null
+export function tableInvoice(f) {
+  const inv = f && f.invoice;
+  if (!inv || !inv.col) return null;
+  const col = tableCols(f).find((c) => c.id === inv.col && isNumCol(c));
+  return col ? { col, gst: ["incl", "add"].includes(inv.gst) ? inv.gst : "none" } : null;
+}
+
+// Column totals and invoice totals from rows of cell values (live form, saved form, PDF)
+export function tableSums(f, rows) {
+  const cols = tableCols(f);
+  const sums = {};
+  cols.forEach((c, ci) => {
+    if (!isNumCol(c)) return;
+    let t = 0, any = false;
+    (rows || []).forEach((r) => {
+      const x = Array.isArray(r) ? r[ci] : null;
+      if (x === "" || x === null || x === undefined || x === false) return;
+      const n = Number(x);
+      if (Number.isFinite(n)) { t += n; any = true; }
+    });
+    sums[c.id] = any ? Math.round(t * 1e6) / 1e6 : null;
+  });
+  const inv = tableInvoice(f);
+  const out = { sums, sub: null, gst: null, total: null, col: inv ? inv.col : null };
+  const base = inv ? sums[inv.col.id] : null;
+  if (base !== null && base !== undefined) {
+    const cents = (x) => Math.round(x * 100) / 100;
+    if (inv.gst === "add") { out.sub = cents(base); out.gst = cents(base * 0.1); out.total = cents(out.sub + out.gst); }
+    else if (inv.gst === "incl") { out.total = cents(base); out.gst = cents(base / 11); out.sub = cents(out.total - out.gst); }
+    else out.total = cents(base);
+  }
+  return out;
+}
+
+// Works out every row's Calculated cells and the totals on a live form. Returns the totals.
+export function tableRecalc(f, w) {
+  if (!f || f.type !== "table" || !w) return null;
+  const cols = tableCols(f);
+  const rows = [...w.querySelectorAll("tbody tr")].map((tr) => {
+    const vals = {};
+    return cols.map((c, ci) => {
+      const el = tr.querySelector(`[data-c="${ci}"]`);
+      if (!el || !isNumCol(c)) return "";
+      let v = null;
+      if (c.type === "number") {
+        const n = el.value === "" ? NaN : Number(el.value);
+        v = Number.isFinite(n) ? n : null;
+      } else {
+        v = rowCalc(c, vals);
+        el.dataset.v = v === null ? "" : String(v);
+        el.textContent = v === null ? "" : fmtCol(c, v);
+      }
+      vals[c.id] = v;
+      return v === null ? "" : v;
+    });
+  });
+  const s = tableSums(f, rows);
+  w.querySelectorAll("[data-tsum]").forEach((el) => {
+    const c = cols.find((x) => x.id === el.dataset.tsum);
+    const v = c ? s.sums[c.id] : null;
+    el.textContent = v === null || v === undefined ? "—" : fmtCol(c, v);
+  });
+  w.querySelectorAll("[data-tinv]").forEach((el) => {
+    const v = s[el.dataset.tinv];
+    el.textContent = v === null || v === undefined ? "—" : fmtCol(s.col, v);
+  });
+  return s;
+}
+
+// What's wrong with a Calculated column's formula, or ""
+export function tableColProblem(f, ci) {
+  const cols = tableCols(f);
+  const c = cols[ci];
+  if (!c || c.type !== "calc") return "";
+  const name = c.label || `Column ${ci + 1}`;
+  if (!c.formula.trim()) return `“${name}” needs a formula.`;
+  for (const id of calcRefs(c.formula)) {
+    const k = cols.findIndex((x) => x.id === id);
+    if (k < 0) return `“${name}” uses a column that has been removed.`;
+    if (!isNumCol(cols[k])) return `“${name}” uses “${cols[k].label || "a column"}”, which isn't a Number or Calculated column.`;
+    if (k >= ci) return `“${name}” can only use columns to its left. Move “${cols[k].label || "that column"}” left with ◀.`;
+  }
+  const r = runCalc(c.formula, () => 1);
+  return r.ok ? "" : `“${name}”: ${r.error}`;
+}
+export function tableProblem(f) {
+  const n = tableCols(f).length;
+  for (let i = 0; i < n; i++) { const p = tableColProblem(f, i); if (p) return p; }
+  return "";
+}
+function tableColStatusHtml(f, ci) {
+  const p = tableColProblem(f, ci);
+  if (p) return `<span class="fe-bad">${esc(p)}</span>`;
+  const cols = tableCols(f);
+  const reads = cols[ci].formula
+    .replace(/\{([^}]*)\}/g, (_, id) => { const x = cols.find((c) => c.id === id.trim()); return `[${x ? x.label || "Column" : "?"}]`; })
+    .replace(/\*/g, "×").replace(/\//g, "÷");
+  return `<span class="fe-ok">Works out each row</span><span class="fe-reads">Reads as: ${esc(reads)}</span>`;
+}
+
+// The Total row inside the table, and Subtotal / GST / Total under it
+function tableFootHtml(f, cols, canAdd) {
+  if (!cols.some((c) => c.total && isNumCol(c))) return "";
+  return `<tfoot><tr>${cols.map((c, i) => (c.total && isNumCol(c)
+    ? `<td class="is-num fe-tsum" data-tsum="${esc(c.id)}">—</td>`
+    : `<td class="fe-tsum-l">${i === 0 ? "Total" : ""}</td>`)).join("")}${canAdd ? '<td class="fe-trm"></td>' : ""}</tr></tfoot>`;
+}
+function tableInvHtml(f) {
+  const inv = tableInvoice(f);
+  if (!inv) return "";
+  const row = (label, k, big) => `<div${big ? ' class="is-total"' : ""}><span>${esc(label)}</span><strong data-tinv="${k}">—</strong></div>`;
+  return `<div class="fe-tinv">${inv.gst === "add" ? row("Subtotal", "sub") + row("GST (10%)", "gst") + row("Total", "total", true)
+    : inv.gst === "incl" ? row("Total", "total", true) + row("Includes GST of", "gst")
+    : row("Total", "total", true)}</div>`;
+}
+
 // How a table's column heading lines up: the table's setting, or automatic (numbers right, the rest left)
 export const TABLE_HEAD_ALIGNS = ["auto", "left", "center", "right"];
 export function tableHeadAlign(f, c) {
   const a = TABLE_HEAD_ALIGNS.includes(f && f.headAlign) ? f.headAlign : "auto";
-  return a !== "auto" ? a : c && c.type === "number" ? "right" : "left";
+  return a !== "auto" ? a : isNumCol(c) ? "right" : "left";
 }
 const LAYOUT_TYPES = ["single_choice", "checkboxes", "checkbox_notes"];
 const PLACEHOLDER_TYPES = ["short_text", "long_text", "email", "number", "dropdown"];
@@ -621,9 +775,13 @@ export function cleanField(f) {
           id, label: clip(c.label, 100), type: c.type,
           ...(c.width ? { width: c.width } : {}),
           ...(c.type === "number" ? { unit: clip(c.unit, 20) } : {}),
+          ...(isNumCol(c) ? { prefix: clip(c.prefix, 5), decimals: c.decimals, total: c.total } : {}),
+          ...(c.type === "calc" ? { formula: clip(c.formula, 300) } : {}),
           ...(c.type === "dropdown" ? { options: c.options.map((o) => clip(o, 100)).slice(0, 30) } : {}),
         };
       });
+      const inv = tableInvoice({ invoice: f.invoice, columns: out.columns });
+      if (inv) out.invoice = { col: inv.col.id, gst: inv.gst };
       out.rows = int(f.rows, 1, 30, 3);
       out.addRows = f.addRows === true;
       out.maxRows = int(f.maxRows, out.rows, 50, Math.max(out.rows, 10));
@@ -631,6 +789,7 @@ export function cleanField(f) {
       out.rowHeight = pick(f.rowHeight, TABLE_ROW_HEIGHTS, "normal");
       break;
     }
+    
     case "calculation":
       out.formula = clip(f.formula, 500);
       out.decimals = int(f.decimals, 0, 4, 2);
@@ -742,7 +901,9 @@ export function prettyFormula(src, byId) {
       const dot = id.indexOf(".");
       if (dot > 0) {
         const t = byId.get(id.slice(0, dot));
-        const c = t && t.type === "table" ? tableCols(t).find((x) => x.id === id.slice(dot + 1)) : null;
+        const sub = id.slice(dot + 1);
+        if (t && t.type === "table" && INV_KEYS[sub]) return `[${t.label || "Table"} · ${INV_KEYS[sub]}]`;
+        const c = t && t.type === "table" ? tableCols(t).find((x) => x.id === sub) : null;
         return c ? `[${t.label || "Table"} · ${c.label || "Column"} total]` : "[removed column]";
       }
       const f = byId.get(id);
@@ -772,11 +933,16 @@ export function checkFormula(f, fields) {
   const byId = new Map(fields.map((x) => [x.id, x]));
   for (const id of calcRefs(src)) {
     const dot = id.indexOf(".");
-    if (dot > 0) { // a table column total
+    if (dot > 0) { // a table column total, or its invoice totals
       const t = byId.get(id.slice(0, dot));
-      const col = t && t.type === "table" ? tableCols(t).find((c) => c.id === id.slice(dot + 1)) : null;
+      const sub = id.slice(dot + 1);
+      if (INV_KEYS[sub]) {
+        if (!t || t.type !== "table" || !tableInvoice(t)) return { ok: false, error: "The formula uses a table's invoice totals, but that table doesn't have them any more." };
+        continue;
+      }
+      const col = t && t.type === "table" ? tableCols(t).find((c) => c.id === sub) : null;
       if (!col) return { ok: false, error: "The formula uses a table column that has been removed." };
-      if (col.type !== "number") return { ok: false, error: `“${col.label || "Column"}” in “${t.label || "Table"}” isn't a Number column any more.` };
+      if (!isNumCol(col)) return { ok: false, error: `“${col.label || "Column"}” in “${t.label || "Table"}” isn't a Number or Calculated column any more.` };
       continue;
     }
     const r = byId.get(id);
@@ -929,10 +1095,10 @@ export function renderField(f, ctx = {}) {
       let body = "";
       for (let r = 0; r < rows; r++) body += tableRowHtml(f, live, false);
       return head + `<div class="fe-table-wrap"><table class="fe-table rh-${tableRowHeight(f)}${fixed ? " is-fixed" : ""}"><thead><tr>${
-        cols.map((c, i) => `<th${c.type === "number" ? ' class="is-num"' : ""} style="text-align:${tableHeadAlign(f, c)};${
+        cols.map((c, i) => `<th${isNumCol(c) ? ' class="is-num"' : ""} style="text-align:${tableHeadAlign(f, c)};${
           ws[i] !== null ? `width:${ws[i]}%;` : ""}">${esc(c.label || `Column ${i + 1}`)}${
           c.type === "number" && c.unit.trim() ? ` <small>(${esc(c.unit)})</small>` : ""}</th>`).join("")}${
-        canAdd ? `<th class="fe-trm"${fixed ? ' style="width:6%"' : ""}></th>` : ""}</tr></thead><tbody>${body}</tbody></table></div>` +
+        canAdd ? `<th class="fe-trm"${fixed ? ' style="width:6%"' : ""}></th>` : ""}</tr></thead><tbody>${body}</tbody>${tableFootHtml(f, cols, canAdd)}</table></div>` + tableInvHtml(f) +
         (canAdd ? '<button type="button" class="hx-add fe-tadd" data-tadd>+ Add a row</button>' : "") +
         (!live && f.addRows ? `<div class="fe-help fe-help-after">Staff can add rows, up to ${tableMax(f)}.</div>` : "");
     }
@@ -1244,6 +1410,37 @@ function typeSettings(f, ctx = {}) {
         : setW > 100 || (!autos && setW !== 100) || (autos && setW > 100 - autos * 8)
           ? `The widths add up to ${setW}%, so they're scaled to fit the page.`
           : `Set widths use ${setW}% of the table${autos ? `. The ${autos} Auto column${autos === 1 ? "" : "s"} share the rest` : ""}.`;
+      const ops = [["+", "+"], ["-", "−"], ["*", "×"], ["/", "÷"], ["(", "("], [")", ")"]];
+      const numFmt = (c, i) => `
+        <div class="fe-two">
+          <label class="fe-insp-sub"><small>Before the number</small>
+            <input class="fe-input" data-col="${i}" data-colk="prefix" maxlength="5" placeholder="e.g. $" value="${esc(c.prefix)}" /></label>
+          <label class="fe-insp-sub"><small>Decimal places</small>
+            <select class="fb-select" data-col="${i}" data-colk="decimals">${[0, 1, 2, 3, 4].map((n) =>
+              `<option value="${n}"${c.decimals === n ? " selected" : ""}>${n}</option>`).join("")}</select></label>
+        </div>
+        <label class="fe-check"><input type="checkbox" data-col="${i}" data-colk="total" data-rerender=""${c.total ? " checked" : ""} /> Add it up in a Total row</label>`;
+      const extra = (c, i) => {
+        if (c.type === "number") {
+          return `<input class="fe-input fe-col-sub" data-col="${i}" data-colk="unit" maxlength="20" placeholder="Unit (optional), e.g. units or mL" value="${esc(c.unit)}" />` + numFmt(c, i);
+        }
+        if (c.type === "calc") {
+          const left = cols.slice(0, i).filter(isNumCol);
+          return `<textarea class="fe-input fe-formula fe-col-sub" data-col="${i}" data-colk="formula" rows="2" maxlength="300" spellcheck="false"
+              placeholder="e.g. Qty × Price: tap the columns below">${esc(c.formula)}</textarea>
+            <div class="fe-chiprow">${left.map((x) =>
+              `<button type="button" class="fe-ins is-field" data-tcalcins="{${esc(x.id)}}" data-tcol="${i}">${esc(x.label || "Column")}</button>`).join("")}${
+              ops.map(([v, l]) => `<button type="button" class="fe-ins" data-tcalcins="${esc(v)}" data-tcol="${i}">${l}</button>`).join("")}</div>
+            ${left.length ? "" : '<small class="fe-note">Put a Number column to the left of this one to use it.</small>'}
+            <div class="fe-calc-status" data-tcalcst="${i}">${tableColStatusHtml(f, i)}</div>` + numFmt(c, i);
+        }
+        if (c.type === "dropdown") {
+          return `<textarea class="fe-input fe-col-sub" data-col="${i}" data-colk="options" rows="3" placeholder="One choice per line">${esc(c.options.join("\n"))}</textarea>`;
+        }
+        return "";
+      };
+      const numCols = cols.filter(isNumCol);
+      const inv = tableInvoice(f);
       return `<div class="fe-insp-field"><span class="fe-insp-label">Columns</span>${cols.map((c, i) => `
           <div class="fe-tcol">
             <div class="fe-col">
@@ -1251,18 +1448,26 @@ function typeSettings(f, ctx = {}) {
               <select class="fb-select" data-col="${i}" data-colk="type" data-rerender="" aria-label="Column ${i + 1} type">
                 ${TABLE_COL_TYPES.map(([v, l]) => `<option value="${v}"${c.type === v ? " selected" : ""}>${l}</option>`).join("")}
               </select>
+              <button type="button" class="hx-x" data-colup="${i}" aria-label="Move column ${i + 1} left" title="Move left"${i === 0 ? " disabled" : ""}>${svg('<polyline points="15 18 9 12 15 6"/>')}</button>
               <button type="button" class="hx-x" data-coldel="${i}" aria-label="Remove column ${i + 1}">${svg(ICONS.x)}</button>
             </div>
             <label class="fe-tcol-w"><small>Width</small>
               <select class="fb-select" data-col="${i}" data-colk="width" data-rerender="" aria-label="Column ${i + 1} width">
                 ${TABLE_COL_WIDTHS.map(([v, l]) => `<option value="${v}"${(c.width || 0) === v ? " selected" : ""}>${l}</option>`).join("")}
               </select></label>
-            ${c.type === "number" ? `<input class="fe-input fe-col-sub" data-col="${i}" data-colk="unit" maxlength="20" placeholder="Unit (optional), e.g. units or mL" value="${esc(c.unit)}" />` : ""}
-            ${c.type === "dropdown" ? `<textarea class="fe-input fe-col-sub" data-col="${i}" data-colk="options" rows="3" placeholder="One choice per line">${esc(c.options.join("\n"))}</textarea>` : ""}
+            ${extra(c, i)}
           </div>`).join("")}
         ${cols.length < 12 ? '<button type="button" class="hx-add" data-act="coladd">+ Add a column</button>' : ""}
         <small class="fe-note">${esc(widthNote)}</small>
-        <small class="fe-note">Number columns can be added up in a Calculation: their totals appear under “Insert a question”.</small></div>` +
+        <small class="fe-note">A Calculated column works out each row from the columns to its left, for example Qty × Price. Number and Calculated columns can also be added up in a Calculation question.</small></div>` +
+        `<div class="fe-insp-field"><span class="fe-insp-label">Invoice totals</span>
+          <select class="fb-select" data-inv="col" data-rerender="">${[["", "None"], ...numCols.map((c) => [c.id, `Add up “${c.label || "Column"}”`])].map(([v, l]) =>
+            `<option value="${esc(v)}"${(inv ? inv.col.id : "") === v ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
+          ${inv ? `<select class="fb-select" data-inv="gst" data-rerender="">${TABLE_GST.map(([v, l]) =>
+            `<option value="${v}"${inv.gst === v ? " selected" : ""}>${l}</option>`).join("")}</select>` : ""}
+          <small class="fe-note">${numCols.length
+            ? "Shows the Total (and the Subtotal and GST, if chosen) under the table. A Calculation question can use them too."
+            : "Add a Number or Calculated column first."}</small></div>` +
         setting("Column headings", choose("headAlign", [["auto", "Automatic (numbers on the right)"], ["left", "Left"], ["center", "Centre"], ["right", "Right"]],
           TABLE_HEAD_ALIGNS.includes(f.headAlign) ? f.headAlign : "auto")) +
         setting("Row height", choose("rowHeight", [["compact", "Compact"], ["normal", "Normal"], ["tall", "Tall"], ["xl", "Extra tall"]], tableRowHeight(f)),
@@ -1272,12 +1477,19 @@ function typeSettings(f, ctx = {}) {
         (f.addRows ? setting("Most rows", `<input class="fe-input" type="number" min="${rows}" max="50" data-k="maxRows" data-num="" value="${tableMax(f)}" />`,
           "Staff can remove the rows they add. The starting rows always stay.") : "");
     }
+    
     case "calculation": {
       const others = (ctx.fields || []).filter((x) => x.id !== f.id && calcSource(x));
-      const colTotals = (ctx.fields || []).filter((x) => x.type === "table").flatMap((t) =>
-        tableCols(t).filter((c) => c.type === "number").map((c) => ({
-          tok: `{${t.id}.${c.id}}`, name: `${t.label || "Table"} · ${c.label || "Column"} (total)`,
-        })));
+      const colTotals = (ctx.fields || []).filter((x) => x.type === "table").flatMap((t) => {
+        const inv = tableInvoice(t);
+        return [
+          ...tableCols(t).filter(isNumCol).map((c) => ({
+            tok: `{${t.id}.${c.id}}`, name: `${t.label || "Table"} · ${c.label || "Column"} (total)`,
+          })),
+          ...(inv ? [["__total", "Total"], ...(inv.gst !== "none" ? [["__sub", "Subtotal"], ["__gst", "GST"]] : [])]
+            .map(([k, l]) => ({ tok: `{${t.id}.${k}}`, name: `${t.label || "Table"} · ${l}` })) : []),
+        ];
+      });
       const ops = [["+", "+"], ["-", "−"], ["*", "×"], ["/", "÷"], ["(", "("], [")", ")"],
         ["ROUND(", "Round"], ["MIN(", "Lowest of"], ["MAX(", "Highest of"], [",", ","]];
       return `
@@ -1680,12 +1892,24 @@ export function applyInput(f, el) {
     f.parts = PART_KEYS.filter((k) => on.has(k));
     return true;
   }
+  if (el.dataset.inv !== undefined) {
+    f.invoice = { ...(f.invoice || {}), [el.dataset.inv]: el.value };
+    if (!f.invoice.col) f.invoice = null;
+    return true;
+  }
   if (el.dataset.col !== undefined) {
-    const c = f.columns && f.columns[Number(el.dataset.col)];
+    const ci = Number(el.dataset.col);
+    const c = f.columns && f.columns[ci];
     if (!c) return false;
     const k = el.dataset.colk;
     if (k === "options") c.options = el.value.split("\n").map((s) => s.trim()).filter(Boolean);
+    else if (k === "total") c.total = el.checked;
+    else if (k === "decimals") c.decimals = Number(el.value) || 0;
     else c[k] = el.value;
+    if (k === "formula") { // the "Works out each row" line keeps up while typing
+      const st = el.closest(".fe-tcol") && el.closest(".fe-tcol").querySelector("[data-tcalcst]");
+      if (st) st.innerHTML = tableColStatusHtml(f, ci);
+    }
     return true;
   }
   if (el.dataset.grp !== undefined) {
@@ -1712,6 +1936,30 @@ export function applyInput(f, el) {
 
 // Add / remove buttons for table columns and sub-option groups.
 export function applyClick(f, target) {
+  // Calculated column: a column or operator goes into its formula
+  const tins = target.closest("[data-tcalcins]");
+  if (tins) {
+    const ci = Number(tins.dataset.tcol);
+    const c = f.columns && f.columns[ci];
+    if (!c) return false;
+    const box = tins.closest(".fe-tcol");
+    const ta = box && box.querySelector('[data-colk="formula"]');
+    const cur = ta ? ta.value : String(c.formula || "");
+    const focused = ta && document.activeElement === ta;
+    const s = focused ? ta.selectionStart : cur.length;
+    const e = focused ? ta.selectionEnd : s;
+    const tok = tins.dataset.tcalcins;
+    const before = cur.slice(0, s);
+    const sp = before && !/[\s(]$/.test(before) && tok !== ")" ? " " : "";
+    c.formula = (before + sp + tok + cur.slice(e)).slice(0, 300);
+    return true;
+  }
+  const up = target.closest("[data-colup]");
+  if (up) {
+    const i = Number(up.dataset.colup);
+    if (i > 0 && f.columns[i]) [f.columns[i - 1], f.columns[i]] = [f.columns[i], f.columns[i - 1]];
+    return true;
+  }
   if (target.closest('[data-act="iqadd"]')) {
     f.questions = [...(Array.isArray(f.questions) ? f.questions : []), {
       id: `q${Date.now().toString(36).slice(-6)}`, label: "Treatment or touch-up?", type: "radio",

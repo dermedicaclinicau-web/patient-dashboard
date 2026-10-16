@@ -6473,3 +6473,20 @@ a.md-quiet:hover { border-color: var(--primary); }
 .md-tnotes small { display: block; margin-top: .1rem; font-size: .74rem; color: var(--muted); }
 .md-tmail-frame { display: block; width: 100%; height: min(55vh, 460px); border: 1px solid var(--border); border-radius: 10px; background: #fff; }
 @media (max-width: 640px) { .md-task { grid-template-columns: 1fr; } .md-task-acts { justify-content: flex-start; padding-top: 0; } }
+
+/* Tables: calculated columns, totals and invoice totals */
+.fe-tnum { display: flex; align-items: center; gap: 4px; padding-left: 6px; }
+.fe-tnum > span { color: var(--muted); font-size: .85rem; }
+.fe-tnum .fe-tcell { flex: 1; min-width: 0; }
+.fe-table td.is-calc { background: var(--surface-2); }
+.fe-tcalc { display: block; min-height: 30px; padding: 6px 8px; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text); }
+.fe-table tfoot td { height: auto; padding: 6px 8px; border: 1px solid var(--border); background: var(--surface-2);
+  font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
+.fe-table tfoot td.fe-tsum-l { text-align: left; }
+.fe-tinv { display: grid; gap: 2px; width: min(320px, 100%); margin: 8px 0 0 auto; font-size: .92rem; }
+.fe-tinv > div { display: flex; justify-content: space-between; gap: 1rem; padding: 4px 8px; }
+.fe-tinv strong { font-variant-numeric: tabular-nums; }
+.fe-tinv .is-total { border-top: 2px solid var(--text); font-size: 1rem; font-weight: 700; }
+.fe-tcol .fe-chiprow { margin-top: .35rem; }
+.fe-tcol .fe-calc-status { margin-top: .3rem; }
+.hx-x:disabled { opacity: .35; cursor: default; }

@@ -6392,14 +6392,17 @@ function installPatientIndex() {
 }
 
 // ===================== Email flows: the runner =====================
-// runScheduledTasks (every 15 minutes) calls runEmailFlows_. New purchases from the invoice sync start live flows:
-// one run per patient, product and invoice, saved in email_flow_runs with a fixed ID so nothing starts twice.
-// Each run moves through its cards. Patient emails go out between 9 am and 6 pm Perth; waits set the next time.
+// runScheduledTasks (every 15 minutes) calls runEmailFlows_. Three triggers start live flows:
+//  · purchase: new purchases from the invoice sync (one run per patient, product and invoice)
+//  · visit: each morning after 9 am, the day before's visits from the appointment book (one run per visit)
+//  · daily: each morning after 9 am, every patient on the pre-consult list is checked against the flow's rules
+// Runs are saved in email_flow_runs with fixed IDs, so nothing starts twice. Each run moves through its cards:
+// patient emails go out between 9 am and 6 pm Perth; waits set the next time.
 // While a flow is testing, every email goes to the person who turned it on, marked [Test].
-// Rules ("Only start for patients who…", If / else rules, "Also stop when…") use the fields in FLOW_FIELD_TYPE_,
-// the same keys as js/flow-rules.js.
+// Rules use the fields in FLOW_FIELD_TYPE_, the same keys as js/flow-rules.js.
 
 const FLOW_RUNS_ = 'email_flow_runs';
+const FLOW_STATE_ = 'email_flow_state';
 const FLOW_LOOKBACK_DAYS_ = 3;
 const FLOW_HOURS_ = [9, 18];
 const FLOW_STEPS_PER_RUN_ = 12;
@@ -6411,6 +6414,7 @@ const FLOW_CONDS_ = {
 const FLOW_TOKEN_RE_ = /\{\s*([A-Za-z][A-Za-z ]{0,40}?)\s*\}/g;
 const FLOW_FIELD_TYPE_ = {
   'buy.product': 'products', 'buy.first': 'bool', 'buy.in_ssp': 'bool', 'buy.sold_by': 'text',
+  'visit.service': 'text', 'visit.staff': 'text',
   'hist.bought': 'products', 'hist.times': 'number', 'hist.days_since': 'number',
   'appt.has_future': 'bool', 'appt.next_days': 'number', 'appt.last_days': 'number', 'appt.visits': 'number',
   'appt.future_service': 'text', 'appt.past_service': 'text',
@@ -6418,6 +6422,14 @@ const FLOW_FIELD_TYPE_ = {
   'plan.status': 'choice', 'plan.due': 'bool', 'plan.overdue': 'bool',
   'form.saved': 'form',
   'pt.age': 'number', 'pt.email': 'bool', 'pt.mobile': 'bool', 'pt.marketing': 'bool',
+};
+// How much reading a rule needs (cheapest checked first, so most patients are ruled out quickly)
+const FLOW_RULE_COST_ = {
+  'buy.product': 0, 'buy.sold_by': 0, 'visit.service': 0, 'visit.staff': 0,
+  'appt.has_future': 0, 'appt.next_days': 0, 'appt.last_days': 0, 'appt.visits': 0, 'appt.future_service': 0, 'appt.past_service': 0,
+  'pt.age': 1, 'pt.email': 1, 'pt.mobile': 1, 'pt.marketing': 1,
+  'buy.first': 2, 'hist.bought': 2, 'hist.times': 2, 'hist.days_since': 2, 'plan.status': 2, 'plan.due': 2, 'plan.overdue': 2, 'form.saved': 2,
+  'buy.in_ssp': 3, 'ssp.active': 3, 'ssp.age_days': 3, 'ssp.expiry_days': 3,
 };
 
 /* ---------- Small helpers ---------- */
@@ -6432,7 +6444,17 @@ function flowSameProduct_(a, b) {
   const l = a.length < b.length ? b : a;
   return s.length >= 4 && l.indexOf(s + ' ') === 0;
 }
+// A visit matches if any of its services contains one of the words (no words: any visit)
+function flowVisitServicesOk_(words, services) {
+  const w = (Array.isArray(words) ? words : []).map(flowNorm_).filter(Boolean);
+  if (!w.length) return true;
+  return (Array.isArray(services) ? services : []).some(function (s) {
+    const n = flowNorm_(s);
+    return w.some(function (x) { return n.indexOf(x) !== -1; });
+  });
+}
 function flowKey_(ms) { return Utilities.formatDate(new Date(ms), REC_TZ_, 'yyyy-MM-dd'); }
+function flowPerthMin_() { const p = new Date(Date.now() + SCH_PERTH_); return p.getUTCHours() * 60 + p.getUTCMinutes(); }
 function flowPart_(s) { return String(s || '').replace(/[^A-Za-z0-9_-]+/g, '_').slice(0, 60) || 'x'; }
 function flowHash_(s) {
   return Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, String(s), Utilities.Charset.UTF_8)
@@ -6448,6 +6470,10 @@ function flowDays_(a, b) {
 function flowAddMonthsKey_(key, n) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(key || ''));
   return m ? Utilities.formatDate(new Date(Date.UTC(+m[1], +m[2] - 1 + n, +m[3], 12)), 'UTC', 'yyyy-MM-dd') : '';
+}
+function flowAddDaysKey_(key, n) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(key || ''));
+  return m ? Utilities.formatDate(new Date(Date.UTC(+m[1], +m[2] - 1, +m[3] + n, 12)), 'UTC', 'yyyy-MM-dd') : '';
 }
 function flowWaitText_(c) {
   const n = Math.max(1, Math.floor(Number(c.num) || 1));
@@ -6575,9 +6601,9 @@ function flowUpcoming_(cfg, doc, memo) {
 }
 
 // Their newest Skin Script: portal protocols (they say who made them) or older ones from the SSP sheet
-// Their newest Skin Script: portal protocols (they say who made them) or older ones from the SSP sheet
 function flowSsp_(cfg, doc, memo) {
   const none = { active: false, date: '', expires: '', clinician: '', clinicianUid: '', items: [] };
+  if (!doc || !doc._id) return none;
   const today = flowKey_(Date.now());
   if (memo.sspMonths === undefined) {
     memo.sspMonths = 12;
@@ -6641,6 +6667,7 @@ function flowProduct_(cfg, memo, name) {
   }
   return memo.products.filter(function (p) { return flowSameProduct_(p.name, name); })[0] || null;
 }
+
 // Everything the cards and rules need to know about one patient. Each part is only read when it's needed.
 function flowCtx_(cfg, run, memo) {
   memo.pts = memo.pts || {};
@@ -6663,6 +6690,35 @@ function flowCtx_(cfg, run, memo) {
   return ctx;
 }
 
+// For the daily check: the visits come straight from the pre-consult row, and the patient record is only
+// read if a rule needs it (or they match). Same shape as flowCtx_.
+function flowLazyCtx_(cfg, pre, memo) {
+  memo.pts = memo.pts || {};
+  const sid = String(pre.patientId || '').trim();
+  const today = flowKey_(Date.now());
+  const once = {};
+  const lazy = function (k, fn) { return function () { if (!(k in once)) once[k] = fn(); return once[k]; }; };
+  const blankDoc = { _id: '' };
+  const loadDoc = lazy('doc', function () {
+    if (!(sid in memo.pts)) memo.pts[sid] = flowPatient_(cfg, sid);
+    return memo.pts[sid] || blankDoc;
+  });
+  const ctx = { memo: memo, _f: {} };
+  Object.defineProperty(ctx, 'doc', { get: loadDoc });
+  Object.defineProperty(ctx, 'pid', { get: function () { return loadDoc()._id; } });
+  Object.defineProperty(ctx, 'who', { get: lazy('who', function () { return flowWho_(loadDoc()); }) });
+  const all = lazy('all', function () { return planVisits_(pre, [], today); });
+  ctx.visits = lazy('visits', function () { return all().filter(function (v) { return !v.future; }); });
+  ctx.future = lazy('future', function () {
+    return all().filter(function (v) { return v.future; }).map(function (v) { return { date: v.dateKey, time: '', services: v.services }; });
+  });
+  ctx.upcoming = lazy('up', function () { return ctx.future().map(function (a) { return a.date + '|'; }); });
+  ctx.ssp = lazy('ssp', function () { return flowSsp_(cfg, loadDoc(), memo); });
+  ctx.plan = lazy('plan', function () { const d = loadDoc(); return d._id ? fsGetDoc_(cfg, 'plan_progress/' + encodeURIComponent(d._id)) : null; });
+  ctx.forms = lazy('forms', function () { const d = loadDoc(); return d._id ? fsQuery_(cfg, 'form_submissions', 'patientId', 'EQUAL', d._id, 300) : []; });
+  return ctx;
+}
+
 // Their invoice purchases (skincare/{key}.purchases)
 function flowPurchases_(cfg, run, ctx) {
   if (ctx._buys) return ctx._buys;
@@ -6674,7 +6730,7 @@ function flowPurchases_(cfg, run, ctx) {
 
 /* ---------- Rules ---------- */
 
-// One fact about the patient (or this purchase), worked out once per run
+// One fact about the patient (or this purchase / visit), worked out once per run
 function flowFact_(cfg, key, run, ctx) {
   if (key in ctx._f) return ctx._f[key];
   const today = flowKey_(Date.now());
@@ -6683,17 +6739,19 @@ function flowFact_(cfg, key, run, ctx) {
     case 'buy.product': v = String(run.product || ''); break;
     case 'buy.sold_by': v = String(run.soldBy || ''); break;
     case 'buy.first':
-      v = !flowPurchases_(cfg, run, ctx).some(function (p) {
+      v = !!run.product && !flowPurchases_(cfg, run, ctx).some(function (p) {
         return flowSameProduct_(p.product, run.product) && String(p.date || '') < String(run.purchaseDate || '');
       });
       break;
     case 'buy.in_ssp': {
       const s = ctx.ssp();
-      v = s.active && s.items.some(function (it) { return flowSameProduct_(it.name, run.product); });
+      v = !!run.product && s.active && s.items.some(function (it) { return flowSameProduct_(it.name, run.product); });
       break;
     }
+    case 'visit.service': v = Array.isArray(run.visitServices) ? run.visitServices : []; break;
+    case 'visit.staff': v = Array.isArray(run.visitStaff) ? run.visitStaff : []; break;
     case 'hist.bought': v = flowPurchases_(cfg, run, ctx).map(function (p) { return String(p.product || ''); }); break;
-    case 'hist.times': v = flowPurchases_(cfg, run, ctx).filter(function (p) { return flowSameProduct_(p.product, run.product); }).length; break;
+    case 'hist.times': v = run.product ? flowPurchases_(cfg, run, ctx).filter(function (p) { return flowSameProduct_(p.product, run.product); }).length : 0; break;
     case 'hist.days_since': {
       const when = String(run.purchaseDate || today);
       const prev = flowPurchases_(cfg, run, ctx).map(function (p) { return String(p.date || ''); })
@@ -6770,10 +6828,11 @@ function flowRuleOk_(cfg, r, run, ctx) {
   return false;
 }
 
-// A set of rules: all (or any) of them. No rules at all counts as a match.
+// A set of rules: all (or any) of them. No rules at all counts as a match. Cheapest rules are checked first.
 function flowGroupOk_(cfg, g, run, ctx) {
-  const rules = g && Array.isArray(g.rules) ? g.rules : [];
+  const rules = g && Array.isArray(g.rules) ? g.rules.slice() : [];
   if (!rules.length) return true;
+  rules.sort(function (a, b) { return (FLOW_RULE_COST_[a.field] || 3) - (FLOW_RULE_COST_[b.field] || 3); });
   const ok = function (r) { return flowRuleOk_(cfg, r, run, ctx); };
   return g.match === 'any' ? rules.some(ok) : rules.every(ok);
 }
@@ -6792,14 +6851,23 @@ function flowCond_(cfg, c, run, ctx) {
 }
 function flowCondLabel_(c) { return FLOW_CONDS_[(c && c.cond) || ''] || String((c && c.cond) || ''); }
 
-// Why the trigger wouldn't start this flow for this purchase, or ''
+// Why the trigger wouldn't start this flow for this purchase / visit / patient, or ''
 function flowTriggerWhyNot_(cfg, flow, run, ctx, memo) {
   const t = flow.trigger || {};
-  if (t.scope === 'catalogue' && !flowProduct_(cfg, memo, run.product)) return "it isn't a Skin Script catalogue product";
-  if (t.scope === 'list' && !(Array.isArray(t.products) ? t.products : []).some(function (n) { return flowSameProduct_(n, run.product); })) {
-    return "it isn't one of the flow's chosen products";
+  const ev = t.event || 'purchase';
+  if (ev === 'purchase') {
+    if (t.scope === 'catalogue' && !flowProduct_(cfg, memo, run.product)) return "it isn't a Skin Script catalogue product";
+    if (t.scope === 'list' && !(Array.isArray(t.products) ? t.products : []).some(function (n) { return flowSameProduct_(n, run.product); })) {
+      return "it isn't one of the flow's chosen products";
+    }
   }
-  if (flowHasRules_(t.rules) && !flowGroupOk_(cfg, t.rules, run, ctx)) return "the patient doesn't match the start rules";
+  if (ev === 'visit' && t.serviceScope === 'some' && !flowVisitServicesOk_(t.services, run.visitServices)) {
+    return "the visit wasn't for one of the flow's chosen services";
+  }
+  if (ev === 'daily' && !flowHasRules_(t.rules)) return 'the daily check has no rules yet';
+  if (flowHasRules_(t.rules) && !flowGroupOk_(cfg, t.rules, run, ctx)) {
+    return ev === 'daily' ? "the patient doesn't match the daily check today" : "the patient doesn't match the start rules";
+  }
   return '';
 }
 
@@ -6808,14 +6876,17 @@ function flowTriggerWhyNot_(cfg, flow, run, ctx, memo) {
 function flowVals_(cfg, run, ctx, memo, forStaff) {
   const w = ctx.who;
   const s = ctx.ssp();
-  const item = s.active ? s.items.filter(function (it) { return flowSameProduct_(it.name, run.product); })[0] : null;
-  const prod = flowProduct_(cfg, memo, run.product);
+  const item = s.active && run.product ? s.items.filter(function (it) { return flowSameProduct_(it.name, run.product); })[0] : null;
+  const prod = run.product ? flowProduct_(cfg, memo, run.product) : null;
   const how = String((prod && prod.defaultInstruction) || '').trim() ||
     (item ? [item.am && 'Morning: ' + item.am, item.pm && 'Evening: ' + item.pm].filter(Boolean).join('\n') : '');
   return {
     'first name': w.first, 'full name': w.name, 'patient name': w.name, 'patient mobile': w.mobile, 'patient email': w.email,
-    'product name': run.product, 'purchase date': recLongDate_(run.purchaseDate) || String(run.purchaseDate || ''),
+    'product name': String(run.product || ''), 'purchase date': recLongDate_(run.purchaseDate) || String(run.purchaseDate || ''),
     'sold by': String(run.soldBy || ''), 'how to use': how,
+    'visit date': run.visitDate ? (recLongDate_(run.visitDate) || run.visitDate) : '',
+    'visit services': (Array.isArray(run.visitServices) ? run.visitServices : []).join(', '),
+    'visit staff': (Array.isArray(run.visitStaff) ? run.visitStaff : []).join(' and '),
     'ssp step': item ? item.step : '', 'am instructions': item ? item.am : '', 'pm instructions': item ? item.pm : '',
     'when to use': item ? item.when : '',
     'ssp clinician': s.clinician || (forStaff ? 'Not recorded' : 'our team'),
@@ -6965,7 +7036,7 @@ function flowStaffTo_(step, run, ctx) {
     const uid = ctx.ssp().clinicianUid;
     list = all.filter(function (s) { return uid && s.id === uid; });
   } else if (c.to === 'sold_by') {
-    const n = flowNorm_(run.soldBy);
+    const n = flowNorm_(run.soldBy || (Array.isArray(run.visitStaff) ? run.visitStaff[0] : ''));
     list = all.filter(function (s) { return n && flowNorm_(s.name) === n; });
   } else if (c.to === 'roles') {
     const roles = (c.roles || []).map(function (r) { return String(r).toLowerCase(); });
@@ -7037,7 +7108,10 @@ function runEmailFlows_(cfg, deadline) {
   flows.forEach(function (f) { byId[f._id] = f; });
   const memo = {};
   if (flows.length) {
-    try { flowEnrol_(cfg, flows, memo); } catch (e) { console.error('Email flows, starting runs: ' + (e && e.stack ? e.stack : e)); }
+    try { flowEnrol_(cfg, flows, memo); } catch (e) { console.error('Email flows, purchases: ' + (e && e.stack ? e.stack : e)); }
+    try { flowEnrolVisits_(cfg, flows, memo); } catch (e) { console.error('Email flows, visits: ' + (e && e.stack ? e.stack : e)); }
+    // The daily check leaves at least 90 seconds for sending
+    try { flowDailyChecks_(cfg, flows, memo, deadline - 90000); } catch (e) { console.error('Email flows, daily check: ' + (e && e.stack ? e.stack : e)); }
   }
   const gone = {};
   fsQuery_(cfg, FLOW_RUNS_, 'status', 'EQUAL', 'active', 500)
@@ -7061,6 +7135,19 @@ function runEmailFlows_(cfg, deadline) {
       try { flowStep_(cfg, f, r, memo, deadline); }
       catch (e) { flowFail_(cfg, f, r, e); }
     });
+}
+
+// A new run's fields (shared by the three triggers)
+function flowNewRun_(f, doc, extra) {
+  const now = new Date().toISOString();
+  return Object.assign({
+    flowId: f._id, flowName: String(f.name || ''), kind: 'purchase', product: '', purchaseDate: '', invoiceId: '', soldBy: '',
+    visitDate: '', visitServices: [], visitStaff: [], sourceKey: '', sourceId: '',
+    patientId: doc._id, patientName: flowWho_(doc).name, status: 'active', reason: '',
+    next: String(f.steps[0].id || ''), dueAt: Date.now(),
+    mode: f.sendMode === 'real' ? 'real' : 'test', testUid: String(f.testUid || f.updatedByUid || ''),
+    apptKeys: [], events: [], startedAt: now, updatedAt: now, attempts: 0, sent: 0, lastError: '',
+  }, extra);
 }
 
 // New purchases from the invoice sync → new runs. Only checked when the sync has brought in new data.
@@ -7117,33 +7204,31 @@ function flowEnrol_(cfg, flows, memo) {
     if (!(sid in memo.pts)) memo.pts[sid] = flowPatient_(cfg, sid);
     const doc = memo.pts[sid];
     const base = {
-      flowId: f._id, flowName: String(f.name || ''), product: c.product, purchaseDate: c.date,
+      kind: 'purchase', product: c.product, purchaseDate: c.date,
       invoiceId: String(c.p.invoiceId || ''), soldBy: String(c.p.staff || ''), sourceKey: c.sk._key, sourceId: sid,
-      startedAt: now, updatedAt: now, attempts: 0, sent: 0, lastError: '',
     };
     if (!doc) {
-      writes.push(updateWrite_(cfg, FLOW_RUNS_ + '/' + c.id, Object.assign(base, {
-        patientId: '', patientName: String(c.sk.patientName || ''), status: 'skipped',
-        reason: 'No matching patient in the Patient List.', next: '', dueAt: 0, mode: '', events: [],
-      })));
+      writes.push(updateWrite_(cfg, FLOW_RUNS_ + '/' + c.id, Object.assign({
+        flowId: f._id, flowName: String(f.name || ''), patientId: '', patientName: String(c.sk.patientName || ''),
+        status: 'skipped', reason: 'No matching patient in the Patient List.', next: '', dueAt: 0, mode: '', events: [],
+        startedAt: now, updatedAt: now, attempts: 0, sent: 0, lastError: '',
+      }, base)));
       return;
     }
     memo.pts[doc._id] = doc;
     // "Only start for patients who…": not a match means no run at all
-    const trun = { patientId: doc._id, product: c.product, purchaseDate: c.date, soldBy: base.soldBy, sourceKey: c.sk._key };
+    const trun = Object.assign({ patientId: doc._id }, base);
     if (flowHasRules_((f.trigger || {}).rules)) {
       const tctx = flowCtx_(cfg, trun, memo);
       if (!tctx || !flowGroupOk_(cfg, f.trigger.rules, trun, tctx)) return;
     }
-    const who = flowWho_(doc);
     const earlier = fsQuery_(cfg, FLOW_RUNS_, 'patientId', 'EQUAL', doc._id, 100).filter(function (r) {
       return r.flowId === f._id && r.status === 'active' && flowSameProduct_(r.product, c.product);
     });
     if (earlier.length && (f.stop || {}).rebuy === false) {
-      writes.push(updateWrite_(cfg, FLOW_RUNS_ + '/' + c.id, Object.assign(base, {
-        patientId: doc._id, patientName: who.name, status: 'skipped',
-        reason: 'Already in this flow for this product.', next: '', dueAt: 0, mode: '', events: [],
-      })));
+      writes.push(updateWrite_(cfg, FLOW_RUNS_ + '/' + c.id, flowNewRun_(f, doc, Object.assign({}, base, {
+        status: 'skipped', reason: 'Already in this flow for this product.', next: '', dueAt: 0, mode: '',
+      }))));
       return;
     }
     // Bought it again: the earlier run stops, and this one starts from the top
@@ -7152,17 +7237,198 @@ function flowEnrol_(cfg, flows, memo) {
         status: 'stopped', reason: 'Bought it again, so the flow started over.', next: '', updatedAt: now,
       }));
     });
-    writes.push(updateWrite_(cfg, FLOW_RUNS_ + '/' + c.id, Object.assign(base, {
-      patientId: doc._id, patientName: who.name, status: 'active', reason: '',
-      next: String(f.steps[0].id || ''), dueAt: Date.now(),
-      mode: f.sendMode === 'real' ? 'real' : 'test', testUid: String(f.testUid || f.updatedByUid || ''),
+    writes.push(updateWrite_(cfg, FLOW_RUNS_ + '/' + c.id, flowNewRun_(f, doc, Object.assign({}, base, {
       apptKeys: (f.stop || {}).booking === true ? flowUpcoming_(cfg, doc, memo) : [],
       events: [{ at: now, what: 'Started: bought ' + c.product + ' on ' + (recLongDate_(c.date) || c.date) }],
-    })));
+    }))));
   });
   if (writes.length) commitWrites_(cfg, writes, 100);
   props.setProperty('FLOW_ENROL_SIG', sig); // only after the runs are saved, so a failure is tried again
-  console.log('Email flows: ' + writes.length + ' run(s) started or updated.');
+  console.log('Email flows: ' + writes.length + ' purchase run(s) started or updated.');
+}
+
+// Yesterday's (and any missed) visits → new runs. Each morning after 9 am, each day looked at once per flow.
+function flowEnrolVisits_(cfg, flows, memo) {
+  const list = flows.filter(function (f) {
+    return (f.trigger || {}).event === 'visit' && Array.isArray(f.steps) && f.steps.length;
+  });
+  if (!list.length || flowPerthMin_() < 9 * 60) return;
+  const props = PropertiesService.getScriptProperties();
+  const today = flowKey_(Date.now());
+  const yest = flowAddDaysKey_(today, -1);
+  const floor = flowAddDaysKey_(today, -FLOW_LOOKBACK_DAYS_);
+  memo.pts = memo.pts || {};
+
+  list.forEach(function (f) {
+    const pk = 'FLOW_VISITS_' + f._id;
+    const liveAt = String(f.liveAt || '');
+    let st = {};
+    try { st = JSON.parse(props.getProperty(pk) || '{}'); } catch (e) { st = {}; }
+    if (st.liveAt !== liveAt) st = { liveAt: liveAt, done: '' };
+    const liveMs = Date.parse(liveAt);
+    let from = liveMs ? flowKey_(liveMs) : today;  // visits from the day it was turned on
+    if (from < floor) from = floor;
+    if (st.done && st.done >= from) from = flowAddDaysKey_(st.done, 1);
+    if (from > yest) return;
+
+    const t = f.trigger || {};
+    // Visits (one per patient per day): services and staff merged, cancelled and DNA left out
+    const visits = {};
+    schedApptDays_(cfg, from, yest).forEach(function (d) {
+      const key = String(d.date || '');
+      (d.appointments || []).forEach(function (a) {
+        if (SCHED_CANCELLED_.test(String(a.status || ''))) return;
+        const pid = String(a.patientId || '').trim();
+        if (!pid) return; // no Patient ID: we can't be sure who it is
+        const k = key + '|' + pid;
+        const v = visits[k] || (visits[k] = { date: key, pid: pid, services: [], staff: [] });
+        (a.services || []).forEach(function (s) { s = String(s || '').trim(); if (s && v.services.indexOf(s) === -1) v.services.push(s); });
+        const who = String(a.staff || '').trim();
+        if (who && !SCHED_NOT_PERSON_.test(who) && v.staff.indexOf(who) === -1) v.staff.push(who);
+      });
+    });
+    const cand = Object.keys(visits).map(function (k) { return visits[k]; }).filter(function (v) {
+      return t.serviceScope !== 'some' || flowVisitServicesOk_(t.services, v.services);
+    });
+    if (cand.length) {
+      const ids = cand.map(function (v) { return flowPart_(f._id) + '__' + flowPart_(v.pid) + '__v' + v.date.replace(/-/g, ''); });
+      const have = fsBatchGet_(cfg, ids.map(function (id) { return FLOW_RUNS_ + '/' + id; }));
+      const writes = [];
+      cand.forEach(function (v, i) {
+        if (have[FLOW_RUNS_ + '/' + ids[i]]) return;
+        if (!(v.pid in memo.pts)) memo.pts[v.pid] = flowPatient_(cfg, v.pid);
+        const doc = memo.pts[v.pid];
+        if (!doc) return;
+        memo.pts[doc._id] = doc;
+        const base = {
+          kind: 'visit', purchaseDate: v.date, visitDate: v.date, visitServices: v.services, visitStaff: v.staff,
+          sourceKey: docId_(doc.PttID || doc._id), sourceId: v.pid,
+        };
+        const trun = Object.assign({ patientId: doc._id }, base);
+        if (flowHasRules_(t.rules)) {
+          const tctx = flowCtx_(cfg, trun, memo);
+          if (!tctx || !flowGroupOk_(cfg, t.rules, trun, tctx)) return;
+        }
+        const now = new Date().toISOString();
+        const earlier = fsQuery_(cfg, FLOW_RUNS_, 'patientId', 'EQUAL', doc._id, 100)
+          .filter(function (r) { return r.flowId === f._id && r.status === 'active'; });
+        if (earlier.length && (f.stop || {}).rebuy === false) return; // already in it, and "come in again" is off
+        earlier.forEach(function (r) {
+          writes.push(patchWrite_(cfg, FLOW_RUNS_ + '/' + r._id, {
+            status: 'stopped', reason: 'Came in again, so the flow started over.', next: '', updatedAt: now,
+          }));
+        });
+        writes.push(updateWrite_(cfg, FLOW_RUNS_ + '/' + ids[i], flowNewRun_(f, doc, Object.assign({}, base, {
+          apptKeys: (f.stop || {}).booking === true ? flowUpcoming_(cfg, doc, memo) : [],
+          events: [{ at: now, what: 'Started: visit on ' + (recLongDate_(v.date) || v.date) +
+            (v.services.length ? ' (' + v.services.join(', ') + ')' : '') }],
+        }))));
+      });
+      if (writes.length) commitWrites_(cfg, writes, 100);
+      console.log('Email flows: ' + writes.length + ' visit run(s) for "' + f.name + '".');
+    }
+    st.done = yest;
+    props.setProperty(pk, JSON.stringify(st));
+  });
+}
+
+// Every patient on the pre-consult list, with their visit history, in ID order
+function flowDailyPool_(cfg) {
+  return fsListAll_(cfg, 'pcn_results', ['patientId', 'patientName'].concat(PLAN_VISIT_FIELDS_))
+    .map(function (d) { const o = fromFields_(d.fields || {}); o._key = d.name.split('/').pop(); return o; })
+    .filter(function (o) { return String(o.patientId || '').trim(); })
+    .sort(function (a, b) { return a._key < b._key ? -1 : a._key > b._key ? 1 : 0; });
+}
+
+// The daily check. Each morning after 9 am, every patient is checked once; a big list carries on over the next runs.
+// Patients who already matched when the flow was turned on are only noted (unless "Also start…" is ticked), so it
+// starts people as they newly match. State per flow: email_flow_state/{flowId} (Apps Script only).
+function flowDailyChecks_(cfg, flows, memo, budgetEnd) {
+  const list = flows.filter(function (f) {
+    return (f.trigger || {}).event === 'daily' && Array.isArray(f.steps) && f.steps.length && flowHasRules_(f.trigger.rules);
+  });
+  if (!list.length || flowPerthMin_() < 9 * 60) return;
+  const today = flowKey_(Date.now());
+  let pool = null;
+
+  list.forEach(function (f) {
+    if (Date.now() > budgetEnd) return;
+    const t = f.trigger;
+    const path = FLOW_STATE_ + '/' + f._id;
+    let st = fsGetDoc_(cfg, path) || {};
+    const liveAt = String(f.liveAt || '');
+    if (st.liveAt !== liveAt) {
+      st = { liveAt: liveAt, day: '', after: '', done: false, matched: [], baseline: [], ready: t.existing === true, started: 0 };
+    }
+    if (st.day !== today) {
+      // A new day: anyone who stopped matching yesterday leaves the "already matched" list, so they can start later
+      if (st.day && st.done && st.ready) {
+        const m = {};
+        (st.matched || []).forEach(function (k) { m[k] = true; });
+        st.baseline = (st.baseline || []).filter(function (k) { return m[k]; });
+      }
+      st.day = today; st.after = ''; st.done = false; st.matched = []; st.started = 0;
+    }
+    if (st.done) return;
+
+    if (!pool) pool = flowDailyPool_(cfg);
+    const cap = Math.min(200, Math.max(1, Number(t.dailyMax) || 25));
+    const base = {};
+    (st.baseline || []).forEach(function (k) { base[k] = true; });
+    const matched = (st.matched || []).slice();
+    let started = Number(st.started || 0);
+    let i = 0;
+    while (i < pool.length && st.after && pool[i]._key <= st.after) i++;
+    for (; i < pool.length; i++) {
+      if (Date.now() > budgetEnd) break;
+      const pre = pool[i];
+      const ctx = flowLazyCtx_(cfg, pre, memo);
+      const run = { patientId: '', kind: 'daily', product: '', purchaseDate: today, sourceKey: pre._key };
+      let ok = false;
+      try { ok = flowGroupOk_(cfg, t.rules, run, ctx); }
+      catch (e) { console.warn('Daily check ' + f._id + ', ' + pre._key + ': ' + e); }
+      st.after = pre._key;
+      if (!ok) continue;
+      matched.push(pre._key);
+      if (!st.ready || base[pre._key] || started >= cap) continue;
+      try { if (flowStartDaily_(cfg, f, pre, ctx, memo, today)) started++; }
+      catch (e) { console.warn('Daily start ' + f._id + ', ' + pre._key + ': ' + e); }
+    }
+    const finished = i >= pool.length;
+    st.matched = matched;
+    st.started = started;
+    st.done = finished;
+    if (finished && !st.ready) { st.ready = true; st.baseline = matched.slice(); }
+    st.updatedAt = new Date().toISOString();
+    commitWrites_(cfg, [updateWrite_(cfg, path, st)]);
+    console.log('Daily check "' + f.name + '": ' + (finished ? 'finished' : 'checked up to ' + st.after) +
+      ', ' + matched.length + ' match so far, ' + started + ' started today.');
+  });
+}
+
+// Starts a daily-check run for one patient, unless they're already in it (or were recently)
+function flowStartDaily_(cfg, f, pre, ctx, memo, today) {
+  const doc = ctx.doc;
+  if (!doc || !doc._id) return false;
+  const t = f.trigger || {};
+  const repeat = Math.max(0, Math.floor(Number(t.repeatDays) || 0));
+  const mine = fsQuery_(cfg, FLOW_RUNS_, 'patientId', 'EQUAL', doc._id, 100)
+    .filter(function (r) { return r.flowId === f._id && r.status !== 'skipped'; });
+  if (mine.some(function (r) { return r.status === 'active'; })) return false;
+  if (mine.length) {
+    if (!repeat) return false;
+    const last = Math.max.apply(null, mine.map(function (r) { return Date.parse(String(r.startedAt || '')) || 0; }));
+    if (Date.now() - last < repeat * 86400000) return false;
+  }
+  const id = flowPart_(f._id) + '__' + flowPart_(pre._key) + '__d' + today.replace(/-/g, '');
+  if (fsGetDoc_(cfg, FLOW_RUNS_ + '/' + id)) return false;
+  const now = new Date().toISOString();
+  commitWrites_(cfg, [updateWrite_(cfg, FLOW_RUNS_ + '/' + id, flowNewRun_(f, doc, {
+    kind: 'daily', purchaseDate: today, sourceKey: pre._key, sourceId: String(pre.patientId || ''),
+    apptKeys: (f.stop || {}).booking === true ? flowUpcoming_(cfg, doc, memo) : [],
+    events: [{ at: now, what: 'Started: the daily check found them.' }],
+  }))]);
+  return true;
 }
 
 // Moves one run along. Progress is saved after every email, so a crash never sends one twice.
@@ -7283,10 +7549,11 @@ function flowTellBuilder_(flow, run, msg) {
     const to = uniq_(getStaffDocs_().filter(function (s) { return ids.indexOf(s.id) !== -1 && isEmail_(s.email); })
       .map(function (s) { return s.email; }));
     if (!to.length || MailApp.getRemainingDailyQuota() < 1) return;
+    const what = run.product ? ' (' + invEsc_(run.product) + ')' : run.visitDate ? ' (visit on ' + invEsc_(run.visitDate) + ')' : '';
     const html = invEmailWrap_(
       '<h2 style="margin:0 0 6px;font-size:20px;color:#b91c1c">An email flow couldn\'t send</h2>' +
       '<p style="margin:0 0 12px;color:#475569"><strong>' + invEsc_(flow.name) + '</strong> for ' +
-        invEsc_(run.patientName || 'a patient') + (run.product ? ' (' + invEsc_(run.product) + ')' : '') + '.</p>' +
+        invEsc_(run.patientName || 'a patient') + what + '.</p>' +
       '<p style="margin:0;padding:10px 12px;border-radius:8px;background:#fef2f2;color:#991b1b">' + invEsc_(msg) + '</p>',
       'settings/flows/' + encodeURIComponent(flow._id), 'Open the flow');
     MailApp.sendEmail({ to: to.join(','), name: 'Dermedica Portal', subject: 'Email flow not sent: ' + flow.name,
@@ -7294,7 +7561,7 @@ function flowTellBuilder_(flow, run, msg) {
   } catch (e) { console.warn('Flow builder not told: ' + e); }
 }
 
-/* ---------- From the portal: test with a patient, stop a run ---------- */
+/* ---------- From the portal: test with a patient, who matches today, stop a run ---------- */
 
 function handleEmailFlow_(body) {
   const session = getSession_(String(body.session || ''));
@@ -7303,6 +7570,7 @@ function handleEmailFlow_(body) {
   const op = String(body.op || '');
   try {
     if (op === 'test') return flowTestRun_(body, session);
+    if (op === 'preview') return flowPreview_(body, session);
     if (op === 'stopRun') return flowStopRun_(String(body.id || ''), session);
   } catch (err) {
     console.error('Email flow ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
@@ -7315,12 +7583,14 @@ function handleEmailFlow_(body) {
 function flowTestRun_(body, session) {
   const flowId = String(body.flowId || '');
   if (!/^[A-Za-z0-9_-]{5,60}$/.test(flowId)) return { ok: false, error: 'BAD_REQUEST' };
-  const product = String(body.product || '').trim().slice(0, 150);
-  if (!product) return { ok: false, error: 'NO_PRODUCT' };
   const cfg = getConfig_();
   const flow = fsGetDoc_(cfg, 'email_flows/' + flowId);
   if (!flow || flow.status === 'archived') return { ok: false, error: 'NOT_FOUND' };
   flow._id = flowId;
+  const ev = (flow.trigger || {}).event || 'purchase';
+  const product = String(body.product || '').trim().slice(0, 150);
+  if (ev === 'purchase' && !product) return { ok: false, error: 'NO_PRODUCT' };
+  const services = String(body.services || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean).slice(0, 10);
   const doc = flowPatient_(cfg, String(body.patientId || ''));
   if (!doc) return { ok: false, error: 'NO_PATIENT' };
   const me = flowTester_(session.uid);
@@ -7335,14 +7605,22 @@ function flowTestRun_(body, session) {
 
   const memo = { pts: {} };
   memo.pts[doc._id] = doc;
-  const run = { _id: 'test', flowId: flowId, product: product, purchaseDate: flowKey_(Date.now()), invoiceId: 'test',
-    soldBy: String(session.name || ''), sourceKey: docId_(doc.PttID || doc._id), patientId: doc._id, mode: 'test' };
+  const today = flowKey_(Date.now());
+  const run = {
+    _id: 'test', flowId: flowId, kind: ev, product: ev === 'purchase' ? product : '', purchaseDate: today, invoiceId: 'test',
+    soldBy: ev === 'purchase' ? String(session.name || '') : '',
+    visitDate: ev === 'visit' ? today : '', visitServices: ev === 'visit' ? services : [],
+    visitStaff: ev === 'visit' ? [String(session.name || '')] : [],
+    sourceKey: docId_(doc.PttID || doc._id), patientId: doc._id, mode: 'test',
+  };
   const ctx = flowCtx_(cfg, run, memo);
   run.apptKeys = ctx.upcoming();
 
   const steps = [];
   const whyNot = flowTriggerWhyNot_(cfg, flow, run, ctx, memo);
-  if (whyNot) steps.push("Heads up: the real flow wouldn't start for this purchase (" + whyNot + '). The test carries on so you can see the emails.');
+  steps.push(whyNot
+    ? "Heads up: the real flow wouldn't start for them (" + whyNot + '). The test carries on so you can see the emails.'
+    : 'The real flow would start for them.');
   let sent = 0;
   let ended = false;
   let next = Array.isArray(flow.steps) && flow.steps[0] ? String(flow.steps[0].id || '') : '';
@@ -7374,7 +7652,7 @@ function flowTestRun_(body, session) {
       if (why) { steps.push('Stop rule: ' + why + ' The real flow would stop here.'); ended = true; break; }
       flowSendPatient_(cfg, flow, s, run, ctx, memo, me);
       sent++;
-      steps.push('Email “' + flowFill_(c.subject, flowVals_(cfg, run, ctx, memo, false), false) + '”' +
+      steps.push('Email “' + flowFill_(String(c.subject || '').replace(FLOW_SSP_TABLE_RE_(), ''), flowVals_(cfg, run, ctx, memo, false), false) + '”' +
         (c.promo ? ' (promotional: patients won\'t get it until marketing consent is added)' : '') + '. Sent to you.');
       next = afterId;
       continue;
@@ -7383,6 +7661,46 @@ function flowTestRun_(body, session) {
   }
   if (!ended) steps.push('Finished.');
   return { ok: true, to: me.email, sent: sent, steps: steps };
+}
+
+// "Who matches today?" for a daily check: everyone checked against the saved rules (up to about 4 minutes)
+function flowPreview_(body, session) {
+  const flowId = String(body.flowId || '');
+  if (!/^[A-Za-z0-9_-]{5,60}$/.test(flowId)) return { ok: false, error: 'BAD_REQUEST' };
+  const cfg = getConfig_();
+  const flow = fsGetDoc_(cfg, 'email_flows/' + flowId);
+  if (!flow || flow.status === 'archived') return { ok: false, error: 'NOT_FOUND' };
+  const t = flow.trigger || {};
+  if (!flowHasRules_(t.rules)) return { ok: false, error: 'NO_RULES', detail: 'Add at least one rule first.' };
+
+  const cache = CacheService.getScriptCache();
+  const rlKey = 'flowpreview_' + session.uid;
+  const used = Number(cache.get(rlKey) || 0);
+  if (used >= 10) return { ok: false, error: 'RATE_LIMITED' };
+  cache.put(rlKey, String(used + 1), 3600);
+
+  const started = Date.now();
+  const today = flowKey_(Date.now());
+  const pool = flowDailyPool_(cfg);
+  const memo = {};
+  let checked = 0, count = 0;
+  const sample = [];
+  for (let i = 0; i < pool.length; i++) {
+    if (Date.now() - started > 240000) break;
+    const pre = pool[i];
+    const ctx = flowLazyCtx_(cfg, pre, memo);
+    const run = { patientId: '', kind: 'daily', product: '', purchaseDate: today, sourceKey: pre._key };
+    let ok = false;
+    try { ok = flowGroupOk_(cfg, t.rules, run, ctx); } catch (e) { ok = false; }
+    checked++;
+    if (!ok) continue;
+    count++;
+    if (sample.length < 20) {
+      const d = ctx.doc;
+      sample.push({ id: String(d._id || ''), name: (d._id ? ctx.who.name : '') || String(pre.patientName || '') });
+    }
+  }
+  return { ok: true, total: pool.length, checked: checked, count: count, sample: sample, partial: checked < pool.length };
 }
 
 function flowStopRun_(id, session) {
