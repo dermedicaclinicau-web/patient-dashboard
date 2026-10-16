@@ -6453,3 +6453,8 @@ a.md-quiet:hover { border-color: var(--primary); }
 .fr-none { font-size: .8rem; color: var(--muted); }
 .fr-pp-add { display: flex; gap: .35rem; }
 .fr-pp-add .fe-input { flex: 1; min-width: 0; }
+
+/* Email flows: "Who matches today?" */
+.ef-match { display: flex; flex-direction: column; align-items: flex-start; gap: .4rem; }
+.ef-match ul { margin: 0; padding-left: 1.1rem; font-size: .85rem; line-height: 1.6; }
+.ef-match a { color: var(--primary); }

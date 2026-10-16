@@ -1,8 +1,8 @@
-// Email flows: the rule builder. Used for "Only start for patients who…", If / else rules and "Also stop when…".
+// Email flows: the rule builder. Used for "Only start for patients who…", daily checks, If / else rules and "Also stop when…".
 // The field keys here must match FLOW_FIELD_TYPE_ in Code.gs, which works them out for each patient.
 
 import { db } from "./firebase-config.js";
-import { collection, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { collection, getDocs, doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -18,6 +18,9 @@ export const RULE_FIELDS = [
   { key: "buy.first", group: "This purchase", label: "It's the first time they've bought it", type: "bool" },
   { key: "buy.in_ssp", group: "This purchase", label: "It's in their Skin Script", type: "bool" },
   { key: "buy.sold_by", group: "This purchase", label: "Sold by", type: "text", hint: "Staff name" },
+
+  { key: "visit.service", group: "This visit", label: "A service at this visit", type: "text", hint: "e.g. Peel" },
+  { key: "visit.staff", group: "This visit", label: "Seen by", type: "text", hint: "Staff name" },
 
   { key: "hist.bought", group: "Purchase history", label: "Has ever bought", type: "products" },
   { key: "hist.times", group: "Purchase history", label: "Times they've bought this product", type: "number" },
@@ -142,17 +145,37 @@ export async function loadProductNames() {
   return namesCache;
 }
 
-// A list of product names (chips) with a box to add more. arr is changed in place.
-export function mountProductPicker(host, arr, { onChange = () => {}, names = [] } = {}) {
+// Appointment service names (System configuration → Treatment plans → services)
+let servicesCache = null;
+export async function loadServiceNames() {
+  if (servicesCache) return servicesCache;
+  try {
+    const d = await getDoc(doc(db, "plan_settings", "services"));
+    const list = d.exists() && Array.isArray(d.data().services) ? d.data().services : [];
+    const out = new Map();
+    list.forEach((r) => {
+      const n = String((r && r.service) || "").replace(/\s+/g, " ").trim();
+      if (n && !(r && r.notTreatment)) out.set(n.toLowerCase(), n);
+    });
+    servicesCache = [...out.values()].sort((a, b) => a.localeCompare(b));
+  } catch (err) {
+    console.warn("Service names not loaded:", err);
+    servicesCache = [];
+  }
+  return servicesCache;
+}
+
+// A list of names (chips) with a box to add more. arr is changed in place.
+export function mountProductPicker(host, arr, { onChange = () => {}, names = [], placeholder = "Type a product name", none = "No products chosen yet" } = {}) {
   const listId = "pp_" + Math.random().toString(36).slice(2, 8);
   const known = new Map(names.map((n) => [n.toLowerCase(), n]));
   function render() {
     host.innerHTML = `
       <div class="fr-chips">${arr.length ? arr.map((n, i) => `<span class="fr-chip">${esc(n)}
         <button type="button" data-pp-x="${i}" aria-label="Remove ${esc(n)}" title="Remove">×</button></span>`).join("")
-        : '<span class="fr-none">No products chosen yet</span>'}</div>
+        : `<span class="fr-none">${esc(none)}</span>`}</div>
       <div class="fr-pp-add">
-        <input class="fe-input" list="${listId}" data-pp-in maxlength="150" placeholder="Type a product name" />
+        <input class="fe-input" list="${listId}" data-pp-in maxlength="150" placeholder="${esc(placeholder)}" />
         <button type="button" class="lh-btn" data-pp-add>Add</button>
       </div>
       <datalist id="${listId}">${names.map((n) => `<option value="${esc(n)}"></option>`).join("")}</datalist>`;

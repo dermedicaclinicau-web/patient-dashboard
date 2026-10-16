@@ -6800,6 +6800,7 @@ function flowVals_(cfg, run, ctx, memo, forStaff) {
     'when to use': item ? item.when : '',
     'ssp clinician': s.clinician || (forStaff ? 'Not recorded' : 'our team'),
     'ssp date': s.date ? (recLongDate_(s.date) || s.date) : '',
+    'ssp expiry date': s.expires ? (recLongDate_(s.expires) || s.expires) : '',
   };
 }
 function flowFill_(text, vals, html) {

@@ -1,5 +1,5 @@
 // System configuration → Email flows: automatic emails to patients and staff, built from cards.
-// A flow starts with a trigger (a product is purchased) and runs its cards top to bottom.
+// A flow starts with a trigger (a purchase, a visit, or a daily check) and runs its cards top to bottom.
 // Apps Script (runEmailFlows_) sends them. While a flow is testing, every email goes to the person who turned it on.
 
 import { db } from "./firebase-config.js";
@@ -9,7 +9,8 @@ import {
 import { callApi } from "./appointments.js";
 import { searchPatients } from "./task-runner.js";
 import {
-  blankGroup, cleanGroup, groupProblem, describeGroup, ruleCount, loadProductNames, mountRuleBuilder, mountProductPicker,
+  blankGroup, cleanGroup, groupProblem, describeGroup, ruleCount, loadProductNames, loadServiceNames,
+  mountRuleBuilder, mountProductPicker,
 } from "./flow-rules.js";
 
 import { createRichEditor } from "./rich-editor.js";
@@ -39,6 +40,8 @@ const I = {
   bell: ic('<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/>'),
   stop: ic('<circle cx="12" cy="12" r="9"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/>'),
   cart: ic('<circle cx="9" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/><path d="M3 4h2l2.5 11h11L21 7H7"/>'),
+  cal: ic('<rect x="3" y="5" width="18" height="16" rx="2"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="8" y1="3" x2="8" y2="7"/><line x1="16" y1="3" x2="16" y2="7"/>'),
+  sun: ic('<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>'),
   flow: ic('<circle cx="6" cy="5" r="2"/><circle cx="18" cy="19" r="2"/><path d="M8 5h6a4 4 0 0 1 0 8H10a4 4 0 0 0 0 8h6"/>'),
   plus: ic('<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>'),
   back: ic('<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>'),
@@ -59,10 +62,16 @@ const TYPES = {
 const ADDABLE = ["email", "wait", "branch", "staff", "stop"];
 const TRIGGERS = [
   ["purchase", "A product is purchased", false],
+  ["visit", "A patient has been in for a visit", false],
+  ["daily", "A daily check finds patients who match", false],
   ["ssp_created", "A Skin Script is created", true],
-  ["ssp_expiring", "A Skin Script is about to expire", true],
 ];
+const TRIG_ICON = { purchase: "cart", visit: "cal", daily: "sun" };
 const SCOPES = [["any", "Any product"], ["catalogue", "Only Skin Script catalogue products"], ["list", "Only these products"]];
+const VISIT_SCOPES = [["any", "Any visit"], ["some", "Only visits for these services"]];
+const REPEATS = [[0, "Once only"], [30, "Again after 30 days"], [60, "Again after 60 days"], [90, "Again after 90 days"],
+  [180, "Again after 180 days"], [365, "Again after a year"]];
+const DAILY_MAX = [[10, "10"], [25, "25"], [50, "50"], [100, "100"], [200, "200"]];
 const CONDS = [
   ["in_ssp", "The product is in their Skin Script"],
   ["has_ssp", "They have an active Skin Script"],
@@ -83,25 +92,27 @@ const STAFF_SHORT = { ssp_creator: "SSP clinician", sold_by: "Who sold it", role
 const PATIENT_TOKENS = [
   { title: "Patient", tokens: ["First name", "Full name"] },
   { title: "This purchase", tokens: ["Product name", "Purchase date", "How to use"] },
+  { title: "This visit", tokens: ["Visit date", "Visit services"] },
   { title: "Their Skin Script", tokens: ["Skin Script table", "SSP date", "SSP expiry date", "SSP step", "AM instructions", "PM instructions", "When to use", "SSP clinician"], smart: true },
   { title: "Clinic", tokens: ["Clinic phone", "Clinic email", "Clinic address"] },
 ];
 const STAFF_TOKENS = [
   { title: "Patient", tokens: ["Patient name", "Patient mobile", "Patient email"] },
   { title: "This purchase", tokens: ["Product name", "Purchase date", "Sold by"] },
+  { title: "This visit", tokens: ["Visit date", "Visit services", "Visit staff"] },
   { title: "Their Skin Script", tokens: ["SSP clinician", "SSP date"], smart: true },
 ];
 const SAMPLE = {
   "first name": "Jane", "full name": "Jane Citizen", "patient name": "Jane Citizen",
   "patient mobile": "0412 345 678", "patient email": "jane@example.com",
   "product name": "Hydrating Serum", "purchase date": "16 October 2026", "sold by": "Reception",
+  "visit date": "15 October 2026", "visit services": "DermaGlow Peel", "visit staff": "Dr Teh",
   "how to use": "Apply 2 pumps to clean skin, morning and night.",
   "ssp step": "Step B", "am instructions": "Apply 2 pumps after cleansing.",
   "pm instructions": "Apply 2 pumps before your moisturiser.", "when to use": "Every day",
   "ssp clinician": "Dr Teh", "ssp date": "2 September 2026", "ssp expiry date": "2 September 2027",
 };
 const UNSUB = '<p style="margin:18px 0 0;font-size:12px;color:#64748b">You\'re getting this because you agreed to emails from Dermedica. <a href="#">Unsubscribe</a></p>';
-
 
 // {Skin Script table}: an example for the preview. The real one is built for each patient when the email is sent (Code.gs).
 const SSP_SUB = { "Step A": "Preparing your skin", "Step B": "Prevent & Correct", "Step C": "Hydrating", "Step E": "Sunscreen" };
@@ -181,7 +192,7 @@ function walk(list, fn, depth = 1) {
 function count(list) { let n = 0; walk(list || [], () => n++); return n; }
 
 const plainText = (html) => String(html || "").replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").trim();
-const label = (pairs, v) => (pairs.find((p) => p[0] === v) || [])[1] || "";
+const label = (pairs, v) => (pairs.find((p) => String(p[0]) === String(v)) || [])[1] || "";
 const unitWord = (num, unit) => (Number(num) === 1 ? unit.replace(/s$/, "") : unit);
 const triggerLabel = (t) => label(TRIGGERS, (t && t.event) || "purchase") || "A product is purchased";
 
@@ -221,10 +232,12 @@ function stepProblems(s, depth) {
 
 function flowProblems(flow) {
   const out = [];
+  const t = flow.trigger;
   if (!flow.name.trim()) out.push("Give the flow a name.");
-  if (flow.trigger.scope === "list" && !flow.trigger.products.length) out.push("Choose at least one product for the trigger, or pick Any product.");
-  const tp = groupProblem(flow.trigger.rules, false);
-  if (tp) out.push(`Start rules: ${tp}.`);
+  if (t.event === "purchase" && t.scope === "list" && !t.products.length) out.push("Choose at least one product for the trigger, or pick Any product.");
+  if (t.event === "visit" && t.serviceScope === "some" && !t.services.length) out.push("Choose at least one service for the trigger, or pick Any visit.");
+  const tp = groupProblem(t.rules, t.event === "daily");
+  if (tp) out.push(t.event === "daily" ? `Daily check: ${tp}.` : `Start rules: ${tp}.`);
   const sp = groupProblem(flow.stop.rules, false);
   if (sp) out.push(`Stop rules: ${sp}.`);
   if (!flow.steps.length) out.push("Add at least one card under the trigger.");
@@ -240,15 +253,15 @@ function flowProblems(flow) {
 
 /* ===================== Saving ===================== */
 
+const cleanNames = (list) => (Array.isArray(list) ? list : []).map(String).filter(Boolean).slice(0, 40);
 function snapshot(d = {}) {
   const t = d.trigger || {}, st = d.stop || {};
   return {
     name: String(d.name || ""),
     description: String(d.description || ""),
     trigger: {
-      event: "purchase", scope: "any", ...t,
-      products: (Array.isArray(t.products) ? t.products : []).map(String).filter(Boolean).slice(0, 40),
-      rules: cleanGroup(t.rules),
+      event: "purchase", scope: "any", serviceScope: "any", repeatDays: 0, dailyMax: 25, existing: false, ...t,
+      products: cleanNames(t.products), services: cleanNames(t.services), rules: cleanGroup(t.rules),
     },
     steps: cleanSteps(d.steps),
     stop: { rebuy: true, booking: false, gapDays: 3, ...st, rules: cleanGroup(st.rules) },
@@ -392,8 +405,8 @@ async function mountFlowList(container, { staff }) {
     <div class="tb-head">
       <div>
         <h3 class="tm-h">Email flows</h3>
-        <p class="muted tm-sub">Automatic emails to patients and staff when something happens, like a product being purchased.
-          Each flow is a set of cards that run from top to bottom.</p>
+        <p class="muted tm-sub">Automatic emails to patients and staff when something happens: a purchase, a visit, or a daily check
+          that finds patients who match your rules. Each flow is a set of cards that run from top to bottom.</p>
       </div>
       <div class="ff-bar-actions">
         <button type="button" class="ff-btn" data-act="starter">Add Skin Script starter</button>
@@ -428,8 +441,9 @@ async function mountFlowList(container, { staff }) {
       const n = count(f.steps);
       const live = f.status === "live";
       const testing = live && f.sendMode !== "real";
+      const ev = (f.trigger && f.trigger.event) || "purchase";
       return `<a class="tm-task" href="${BASE}/${encodeURIComponent(f.id)}">
-        <span class="tm-task-icon">${I.flow}</span>
+        <span class="tm-task-icon">${I[TRIG_ICON[ev] || "flow"]}</span>
         <span class="tm-task-main"><strong>${esc(f.name)}</strong>
           <small>${esc([triggerLabel(f.trigger), `${n} card${n === 1 ? "" : "s"}`, editedAgo(f.updatedAt)].filter(Boolean).join(" · "))}</small></span>
         <span class="tb-pill ${live && !testing ? "is-live" : "is-draft"}">${live ? (testing ? "Live · testing" : "Live") : "Draft"}</span>
@@ -528,7 +542,8 @@ async function mountFlowEditor(container, { id, staff }) {
   let letterhead = null, staffList = null, staffError = false;
   let mode = loaded.sendMode === "real" ? "real" : "test"; // testing: every email goes to the person who turned it on
   let runs = null, runsErr = "", runsLoading = false;
-  let productNames = [];
+  let productNames = [], serviceNames = [];
+  let matchOut = "";       // the last "Who matches today?" answer
   const lhReady = getLetterhead().then((lh) => { letterhead = lh || {}; }).catch(() => { letterhead = {}; });
   let editor = null, lastText = null;
   let dirty = false, saving = false, saveTimer = null;
@@ -711,10 +726,16 @@ async function mountFlowEditor(container, { id, staff }) {
 
   function triggerText() {
     const t = flow.trigger;
+    const r = ruleCount(t.rules);
+    const rules = r ? ` · ${r} rule${r === 1 ? "" : "s"}` : "";
+    if (t.event === "visit") {
+      const n = t.services.length;
+      return "A patient has been in" + (t.serviceScope === "some" ? ` (${n} service${n === 1 ? "" : "s"})` : "") + rules;
+    }
+    if (t.event === "daily") return "Daily check" + (r ? rules : " · no rules yet");
     const n = t.products.length;
     const what = t.scope === "catalogue" ? " (Skin Script catalogue)" : t.scope === "list" ? ` (${n} product${n === 1 ? "" : "s"})` : "";
-    const r = ruleCount(t.rules);
-    return triggerLabel(t) + what + (r ? ` · ${r} rule${r === 1 ? "" : "s"}` : "");
+    return triggerLabel(t) + what + rules;
   }
 
   function cardHtml(s, depth, x, y) {
@@ -745,7 +766,7 @@ async function mountFlowEditor(container, { id, staff }) {
       <svg class="ef-lines" width="${L.w}" height="${L.h}" aria-hidden="true"><path d="${L.d}"/></svg>
       <div class="ef-card is-t-trigger${on ? " is-sel" : ""}" style="left:${L.trigger.x}px;top:${L.trigger.y}px;width:${CW}px;height:${CH}px"
         data-pick="trigger" tabindex="0" role="button" aria-pressed="${on}">
-        <span class="ef-ico is-trigger">${I.cart}</span>
+        <span class="ef-ico is-trigger">${I[TRIG_ICON[flow.trigger.event] || "cart"]}</span>
         <span class="ef-card-main"><small>When this happens</small>
           <strong>${esc(triggerText())}</strong></span>
       </div>
@@ -926,14 +947,53 @@ async function mountFlowEditor(container, { id, staff }) {
     </div>`).join("")}</div>`;
   const editorGroups = () => PATIENT_TOKENS.map((g) => ({ title: g.title, tokens: g.tokens.map((name) => ({ name, kind: g.smart ? "smart" : "", hint: "" })) }));
 
+  function triggerHtml() {
+    const t = flow.trigger;
+    if (t.event === "visit") {
+      return `
+        <label class="tb-field"><span>Which visits</span>
+          <select class="fb-select" data-f="trigger.serviceScope">${opt(VISIT_SCOPES, t.serviceScope)}</select></label>
+        ${t.serviceScope === "some" ? `<div class="tb-field"><span>Services</span><div class="fr-pp" data-role="trig-services"></div>
+          <small class="muted">A visit matches if any of its services contains one of these, so "Peel" matches "DermaGlow Peel".</small></div>` : ""}
+        <div class="tb-field"><span>Only start for patients who… <small>(optional)</small></span><div data-role="trig-rules"></div></div>
+        <p class="tb-info">Checked each morning after the appointment sync, for the day before. Cancelled and DNA appointments don't count.
+          Each visit starts the flow once.</p>`;
+    }
+    if (t.event === "daily") {
+      return `
+        <p class="tb-info">Every morning, every patient is checked against these rules. Patients who match start the flow.</p>
+        <div class="tb-field"><span>Patients who…</span><div data-role="trig-rules"></div></div>
+        <label class="tb-field"><span>Each patient can start this flow</span>
+          <select class="fb-select" data-f="trigger.repeatDays">${opt(REPEATS, t.repeatDays)}</select></label>
+        <label class="tb-field"><span>Start at most this many patients a day</span>
+          <select class="fb-select" data-f="trigger.dailyMax">${opt(DAILY_MAX, t.dailyMax)}</select>
+          <small class="muted">Anyone over the limit starts the next day.</small></label>
+        <label class="fe-check"><input type="checkbox" data-f="trigger.existing"${t.existing ? " checked" : ""} />
+          Also start patients who already match when it's turned on</label>
+        <small class="muted">Off: the first morning only notes who already matches. From then on, patients start as they newly match.</small>
+        <div class="ef-match">
+          <button type="button" class="lh-btn" data-act="preview-match">Who matches today?</button>
+          <div data-role="match-out">${matchOut}</div>
+        </div>`;
+    }
+    return `
+      <label class="tb-field"><span>Which products</span>
+        <select class="fb-select" data-f="trigger.scope">${opt(SCOPES, t.scope)}</select></label>
+      ${t.scope === "list" ? `<div class="tb-field"><span>Products</span><div class="fr-pp" data-role="trig-products"></div>
+        <small class="muted">Sizes count as the same product, so "Hydrating Serum" also matches "Hydrating Serum 30ml".</small></div>` : ""}
+      <div class="tb-field"><span>Only start for patients who… <small>(optional)</small></span><div data-role="trig-rules"></div></div>
+      <p class="tb-info">Purchases come from the invoice sync (the INVOICE RECORD sheet), checked each time it updates. Each purchase starts the flow once for that patient and product. Scanner billing sheets and sales will be added next.</p>`;
+  }
+
   function flowSettingsHtml() {
     const t = flow.trigger, st = flow.stop, s = flow.style;
     const sw = (key, list) => `<div class="tb-swatches">${list.map((c) => `
       <label class="tb-sw" title="${c}"><input type="radio" name="ef-${key}" data-style="${key}" value="${c}"${s[key] === c ? " checked" : ""} />
         <span style="background:${c}"></span></label>`).join("")}</div>`;
     const gaps = [[0, "No limit"], ...[1, 2, 3, 5, 7].map((d) => [d, `${d} day${d === 1 ? "" : "s"}`])];
+    const again = t.event === "purchase" ? "They buy the same product again" : t.event === "visit" ? "They come in again" : "";
     return `
-      <div class="ef-side-head"><span class="ef-ico is-trigger">${I.cart}</span>
+      <div class="ef-side-head"><span class="ef-ico is-trigger">${I[TRIG_ICON[t.event] || "cart"]}</span>
         <div><strong>Flow settings</strong><small>Click a card on the left to set it up</small></div></div>
       <section class="ef-sec" data-role="runs"></section>
       <section class="ef-sec"><h4>About this flow</h4>
@@ -945,17 +1005,12 @@ async function mountFlowEditor(container, { id, staff }) {
         <div class="ef-radios">${TRIGGERS.map(([v, l, soon]) => `
           <label class="fe-check${soon ? " is-soon" : ""}"><input type="radio" name="ef-trig" data-f="trigger.event" value="${v}"${t.event === v ? " checked" : ""}${soon ? " disabled" : ""} />
             ${esc(l)}${soon ? ' <small class="muted">· coming soon</small>' : ""}</label>`).join("")}</div>
-        <label class="tb-field"><span>Which products</span>
-          <select class="fb-select" data-f="trigger.scope">${opt(SCOPES, t.scope)}</select></label>
-        ${t.scope === "list" ? `<div class="tb-field"><span>Products</span><div class="fr-pp" data-role="trig-products"></div>
-          <small class="muted">Sizes count as the same product, so "Hydrating Serum" also matches "Hydrating Serum 30ml".</small></div>` : ""}
-        <div class="tb-field"><span>Only start for patients who… <small>(optional)</small></span><div data-role="trig-rules"></div></div>
-        <p class="tb-info">Purchases come from the invoice sync (the INVOICE RECORD sheet), checked each time it updates. Each purchase starts the flow once for that patient and product. Scanner billing sheets and sales will be added next.</p>
+        ${triggerHtml()}
       </section>
       <section class="ef-sec"><h4>Stop rules <small>(checked before every email)</small></h4>
         <label class="fe-check"><input type="checkbox" checked disabled /> They unsubscribe <small class="muted">(always on)</small></label>
         <label class="fe-check"><input type="checkbox" checked disabled /> They have no email address <small class="muted">(always on)</small></label>
-        <label class="fe-check"><input type="checkbox" data-f="stop.rebuy"${st.rebuy ? " checked" : ""} /> They buy the same product again <small class="muted">(the flow starts over)</small></label>
+        ${again ? `<label class="fe-check"><input type="checkbox" data-f="stop.rebuy"${st.rebuy ? " checked" : ""} /> ${again} <small class="muted">(the flow starts over)</small></label>` : ""}
         <label class="fe-check"><input type="checkbox" data-f="stop.booking"${st.booking ? " checked" : ""} /> They book an appointment</label>
         <div class="tb-field"><span>Also stop when…</span><div data-role="stop-rules"></div></div>
         <label class="tb-field"><span>At most one automatic email to a patient every</span>
@@ -973,12 +1028,15 @@ async function mountFlowEditor(container, { id, staff }) {
   function mountSettingsRules() {
     const tp = side.querySelector('[data-role="trig-products"]');
     if (tp) mountProductPicker(tp, flow.trigger.products, { onChange: ruleChange, names: productNames });
+    const ts = side.querySelector('[data-role="trig-services"]');
+    if (ts) mountProductPicker(ts, flow.trigger.services, { onChange: ruleChange, names: serviceNames,
+      placeholder: "Type a service or a word like Peel", none: "No services chosen yet" });
     const tr = side.querySelector('[data-role="trig-rules"]');
     if (tr) mountRuleBuilder(tr, flow.trigger.rules, { onChange: ruleChange, names: productNames,
-      empty: "Anyone who makes a matching purchase starts the flow." });
+      empty: flow.trigger.event === "daily" ? "Add at least one rule, e.g. Has a future appointment booked: No."
+        : flow.trigger.event === "visit" ? "Anyone who comes in starts the flow." : "Anyone who makes a matching purchase starts the flow." });
     const sr = side.querySelector('[data-role="stop-rules"]');
-    if (sr) mountRuleBuilder(sr, flow.stop.rules, { onChange: ruleChange, names: productNames,
-      empty: "No extra stop rules." });
+    if (sr) mountRuleBuilder(sr, flow.stop.rules, { onChange: ruleChange, names: productNames, empty: "No extra stop rules." });
   }
 
   function stepBodyHtml(s) {
@@ -1123,11 +1181,13 @@ async function mountFlowEditor(container, { id, staff }) {
       .finally(() => { if (root.isConnected && !editor) renderSide(); });
   }
 
+  const NUM_PATHS = ["stop.gapDays", "trigger.repeatDays", "trigger.dailyMax"];
+  const RERENDER_PATHS = ["trigger.event", "trigger.scope", "trigger.serviceScope"];
   function setFlowValue(path, el) {
     const v = el.type === "checkbox" ? el.checked : el.value;
     if (path === "name" || path === "description") { flow[path] = v; return; }
     const [a, b] = path.split(".");
-    flow[a][b] = path === "stop.gapDays" ? Number(v) : v;
+    flow[a][b] = NUM_PATHS.includes(path) ? Number(v) : v;
   }
 
   side.addEventListener("focusin", (e) => { if (e.target.matches("[data-tokens]")) lastText = e.target; });
@@ -1138,9 +1198,10 @@ async function mountFlowEditor(container, { id, staff }) {
     if (el.closest(".re")) return; // the message editor reports its own changes
     if (el.dataset.f !== undefined) {
       setFlowValue(el.dataset.f, el);
+      if (el.dataset.f === "trigger.event") matchOut = "";
       renderCanvas();
       changed();
-      if (el.dataset.f === "trigger.scope") renderSide();
+      if (RERENDER_PATHS.includes(el.dataset.f)) renderSide();
       return;
     }
     if (el.dataset.style !== undefined) {
@@ -1170,7 +1231,35 @@ async function mountFlowEditor(container, { id, staff }) {
     else if (s.type === "email") renderPreview();
   });
 
+  // "Who matches today?" for a daily check
+  async function previewMatches(btn) {
+    const out = side.querySelector('[data-role="match-out"]');
+    const p = groupProblem(flow.trigger.rules, true);
+    if (p) { if (out) out.innerHTML = `<p class="tb-none tb-bad">${esc(p)}.</p>`; return; }
+    btn.disabled = true;
+    btn.textContent = "Checking every patient…";
+    if (out) out.innerHTML = '<p class="tb-none">This can take a minute or two.</p>';
+    try {
+      await settle();
+      const res = await callApi({ action: "emailFlow", op: "preview", flowId: id });
+      matchOut = `<p class="tb-ready">${res.count} patient${res.count === 1 ? "" : "s"} match${res.count === 1 ? "es" : ""} today
+          ${res.partial ? ` (checked ${res.checked} of ${res.total}, so there may be more)` : ` (out of ${res.total})`}</p>
+        ${res.sample && res.sample.length ? `<ul>${res.sample.map((x) => `<li><a href="#/patient/${encodeURIComponent(x.id)}">${esc(x.name || "Unknown")}</a></li>`).join("")}</ul>
+          ${res.count > res.sample.length ? `<small class="muted">and ${res.count - res.sample.length} more</small>` : ""}` : ""}`;
+    } catch (ex) {
+      console.error("Preview failed:", ex);
+      matchOut = `<p class="tb-none tb-bad">${esc(ex && ex.code === "RATE_LIMITED" ? "You've checked a lot in the last hour. Try again later."
+        : (ex && ex.detail) || "Couldn't check right now. Try again.")}</p>`;
+    } finally {
+      const o = side.querySelector('[data-role="match-out"]');
+      if (o) o.innerHTML = matchOut;
+      if (btn.isConnected) { btn.disabled = false; btn.textContent = "Who matches today?"; }
+    }
+  }
+
   side.addEventListener("click", async (e) => {
+    const pm = e.target.closest('[data-act="preview-match"]');
+    if (pm) { previewMatches(pm); return; }
     if (e.target.closest('[data-act="runs-refresh"]')) { runs = null; renderRuns(); return; }
     const stopRun = e.target.closest("[data-stoprun]");
     if (stopRun) {
@@ -1270,6 +1359,11 @@ async function mountFlowEditor(container, { id, staff }) {
     if (root.isConnected) renderRuns();
   }
 
+  function runWhat(r) {
+    if (r.kind === "visit") return [`Visit on ${r.visitDate || r.purchaseDate || ""}`, (r.visitServices || []).join(", ")];
+    if (r.kind === "daily") return [`Daily check · started ${String(r.startedAt || "").slice(0, 10)}`];
+    return [r.product, r.purchaseDate && `bought ${r.purchaseDate}`];
+  }
   function runHtml(r) {
     const [lbl, cls] = RUN_ST[r.status] || [r.status || "", ""];
     const testing = r.mode === "test" && r.status === "active";
@@ -1280,7 +1374,7 @@ async function mountFlowEditor(container, { id, staff }) {
     return `<div class="ef-run">
       <div class="ef-run-top"><strong>${esc(r.patientName || "Unknown patient")}</strong>
         <span class="ef-st ${testing ? "is-test" : cls}">${testing ? "Testing" : esc(lbl)}</span></div>
-      <small>${esc([r.product, r.purchaseDate && `bought ${r.purchaseDate}`, `${Number(r.sent) || 0} sent`].filter(Boolean).join(" · "))}</small>
+      <small>${esc([...runWhat(r), `${Number(r.sent) || 0} sent`].filter(Boolean).join(" · "))}</small>
       ${next ? `<small>${esc(next)}</small>` : ""}
       ${r.reason && r.status !== "active" ? `<small>${esc(r.reason)}</small>` : ""}
       ${r.status === "active" ? `<button type="button" class="lh-btn is-quiet" data-stoprun="${esc(r.id)}">Stop for this patient</button>` : ""}
@@ -1297,12 +1391,15 @@ async function mountFlowEditor(container, { id, staff }) {
     }
     const n = (k) => runs.filter((r) => r.status === k).length;
     const list = runs.slice(0, 12);
+    const ev = flow.trigger.event;
+    const waiting = ev === "visit" ? "Patients start the flow the morning after a matching visit."
+      : ev === "daily" ? "Patients start the flow when the morning check finds them."
+      : "Patients start the flow when the invoice sync brings in a matching purchase.";
     box.innerHTML = `
       <div class="ef-runs-head"><h4>Patients in this flow</h4>
         <button type="button" class="lh-btn is-quiet" data-act="runs-refresh">Refresh</button></div>
       ${runsErr ? `<p class="tb-none tb-bad">${runsErr === "blocked" ? "Blocked. Check the email_flow_runs Firestore rule." : "Couldn't load. Press Refresh."}</p>` : ""}
-      ${!runs.length && !runsErr ? `<p class="tb-none">${status === "live"
-        ? "Nobody yet. Patients start the flow when the invoice sync brings in a matching purchase."
+      ${!runs.length && !runsErr ? `<p class="tb-none">${status === "live" ? `Nobody yet. ${waiting}`
         : "Nobody yet. Turn the flow on to start it, or use Test with a patient."}</p>` : ""}
       ${runs.length ? `<div class="ef-runs-n">${["active", "done", "stopped", "failed", "skipped"].filter((k) => n(k))
         .map((k) => `<span class="ef-st ${RUN_ST[k][1]}">${n(k)} ${RUN_ST[k][0].toLowerCase()}</span>`).join("")}</div>` : ""}
@@ -1323,6 +1420,16 @@ async function mountFlowEditor(container, { id, staff }) {
   }[ex && ex.code] || (ex && ex.detail) || "The test couldn't run. Check Apps Script → Executions.");
 
   function testDialog() {
+    const ev = flow.trigger.event;
+    const extra = ev === "purchase" ? `
+        <label class="lh-field"><span class="lh-label">Product they bought</span>
+          <input type="text" name="extra" maxlength="150" list="ef-test-list" placeholder="e.g. Hydrating Serum" /></label>
+        <datalist id="ef-test-list">${productNames.map((n) => `<option value="${esc(n)}"></option>`).join("")}</datalist>`
+      : ev === "visit" ? `
+        <label class="lh-field"><span class="lh-label">Services at the visit <small>(optional, separate with commas)</small></span>
+          <input type="text" name="extra" maxlength="300" list="ef-test-list" placeholder="e.g. DermaGlow Peel" /></label>
+        <datalist id="ef-test-list">${serviceNames.map((n) => `<option value="${esc(n)}"></option>`).join("")}</datalist>`
+      : '<p class="tb-info">The patient is checked against the daily rules now, then the whole flow runs.</p>';
     const dlg = document.createElement("dialog");
     dlg.className = "lh-dialog ef-test-dlg";
     dlg.innerHTML = `
@@ -1333,9 +1440,7 @@ async function mountFlowEditor(container, { id, staff }) {
           <input type="search" name="q" placeholder="Search by name" autocomplete="off" /></label>
         <div class="ef-test-hits" data-role="hits"></div>
         <div data-role="pick"></div>
-        <label class="lh-field"><span class="lh-label">Product they bought</span>
-          <input type="text" name="product" maxlength="150" list="ef-test-products" placeholder="e.g. Hydrating Serum" /></label>
-        <datalist id="ef-test-products">${productNames.map((n) => `<option value="${esc(n)}"></option>`).join("")}</datalist>
+        ${extra}
         <div data-role="out"></div>
         <p class="lh-error" role="alert" hidden></p>
         <div class="lh-actions">
@@ -1376,20 +1481,26 @@ async function mountFlowEditor(container, { id, staff }) {
       if (e.target.closest('[data-act="cancel"]')) { dlg.close(); return; }
       if (e.target.closest('[data-act="unpick"]')) { chosen = null; showPick(); form.elements.q.focus(); return; }
       const h = e.target.closest("[data-hit]");
-      if (h) { chosen = found[Number(h.dataset.hit)] || null; showPick(); form.elements.product.focus(); }
+      if (h) {
+        chosen = found[Number(h.dataset.hit)] || null;
+        showPick();
+        if (form.elements.extra) form.elements.extra.focus();
+      }
     });
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       err.hidden = true;
-      const product = form.elements.product.value.trim();
-      const problem = !chosen ? "Choose a patient." : !product ? "Type the product they bought." : flowProblems(flow)[0] || "";
+      const extraVal = form.elements.extra ? form.elements.extra.value.trim() : "";
+      const problem = !chosen ? "Choose a patient."
+        : ev === "purchase" && !extraVal ? "Type the product they bought." : flowProblems(flow)[0] || "";
       if (problem) { err.textContent = problem; err.hidden = false; return; }
       runBtn.disabled = true;
       runBtn.textContent = "Running…";
       out.innerHTML = '<p class="tb-none">Running the flow. This can take up to a minute…</p>';
       try {
         await settle();
-        const res = await callApi({ action: "emailFlow", op: "test", flowId: id, patientId: chosen.id, product });
+        const res = await callApi({ action: "emailFlow", op: "test", flowId: id, patientId: chosen.id,
+          product: ev === "purchase" ? extraVal : "", services: ev === "visit" ? extraVal : "" });
         out.innerHTML = `<div class="tb-ready">${res.sent} test email${res.sent === 1 ? "" : "s"} sent to ${esc(res.to)}</div>
           <ol class="ef-steps">${(res.steps || []).map((s) => `<li>${esc(s)}</li>`).join("")}</ol>`;
       } catch (ex) {
@@ -1452,11 +1563,17 @@ async function mountFlowEditor(container, { id, staff }) {
         msgEl.textContent = problems[0] + (problems.length > 1 ? ` (and ${problems.length - 1} more: look for the orange cards)` : "");
         return;
       }
+      const ev = flow.trigger.event;
+      const who = ev === "visit" ? "Patients who come in from today start the flow the next morning"
+        : ev === "daily" ? (flow.trigger.existing
+          ? `From the next morning check, patients who match start the flow (up to ${flow.trigger.dailyMax} a day)`
+          : "The first morning check only notes who already matches. From the day after, patients who newly match start the flow")
+        : "Patients who buy a matching product from today start the flow";
       if (!(await confirmDialog({
         title: `Turn on “${flow.name.trim()}”?`,
         message: mode === "real"
-          ? "Patients who buy a matching product from today start the flow and get the emails."
-          : "Patients who buy a matching product from today start the flow, but every email comes to you, marked [Test], until you press Send to patients.\n\nUse Test with a patient to try the whole flow straight away.",
+          ? `${who}, and get the emails.`
+          : `${who}, but every email comes to you, marked [Test], until you press Send to patients.\n\nUse Test with a patient to try the whole flow straight away.`,
         confirmLabel: "Turn on", tone: "info",
       }))) return;
       await settle();
@@ -1505,9 +1622,10 @@ async function mountFlowEditor(container, { id, staff }) {
   renderCanvas();
   renderSide();
   lhReady.finally(() => { if (root.isConnected) renderPreview(); });
-  loadProductNames().then((names) => {
-    productNames = names;
-    // The product suggestions appear once the names have loaded
+  Promise.all([loadProductNames(), loadServiceNames()]).then(([p, s]) => {
+    productNames = p;
+    serviceNames = s;
+    // The suggestions appear once the names have loaded
     if (root.isConnected && !editor && side.querySelector("[data-pp-in]")) renderSide();
   }).catch(() => {});
 }
