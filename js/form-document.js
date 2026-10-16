@@ -5,7 +5,7 @@
 import { formatCalc } from "./form-calc.js";
 import { visibleIds } from "./form-conditions.js";
 import { esc, normaliseField, patientParts, INLINE_TYPES, fieldStyle, imageSizing, textBlockHtml, clinicianParts, tableCols, tableHeadAlign,
-specialistParts, specialistBlockHtml, spanUnits, tableColWidths, tableSums, fmtCol, isNumCol, tableInvoice,
+specialistParts, specialistBlockHtml, spanUnits, tableColWidths, tableSums, fmtCol, fmtInv, isNumCol, tableInvoice, buttonHref,
  } from "./form-fields.js";
 import { cleanRichHtml, richText } from "./rich-html.js";
 import { markSummary } from "./marking-sets.js";
@@ -155,14 +155,21 @@ function pdfTotalRow(f, cols, s) {
 function pdfInv(f, s) {
   const inv = tableInvoice(f);
   if (!inv) return "";
-  const v = (k) => (s ? esc(fmtCol(inv.col, s[k])) : '<span class="bl-in" style="width:90px"></span>');
+  const v = (k) => {
+    if (!s) return '<span class="bl-in" style="width:90px"></span>';
+    if (k === "disc") return s.disc > 0 ? `−${esc(fmtInv(inv.col, s.disc))}` : "—";
+    return esc(fmtInv(inv.col, s[k]));
+  };
   const r = (l, k, big) => {
     const b = big ? "font-weight:bold;border-top:1.5px solid #1a1a1a;" : "";
     return `<tr><td style="padding:3px 16px 3px 0;${b}">${esc(l)}</td><td style="padding:3px 0;text-align:right;${b}">${v(k)}</td></tr>`;
   };
-  const rows = inv.gst === "add" ? r("Subtotal", "sub") + r("GST (10%)", "gst") + r("Total", "total", true)
-    : inv.gst === "incl" ? r("Total", "total", true) + r("Includes GST of", "gst")
-    : r("Total", "total", true);
+  const hasD = inv.disc !== "none";
+  const dl = `Discount${inv.disc === "percent" && s && s.discIn ? ` (${+s.discIn}%)` : ""}`;
+  const top = hasD ? r("Subtotal", "base") + r(dl, "disc") : "";
+  const rows = inv.gst === "add" ? (hasD ? top : r("Subtotal", "sub")) + r("GST (10%)", "gst") + r("Total", "total", true)
+    : inv.gst === "incl" ? top + r("Total", "total", true) + r("Includes GST of", "gst")
+    : top + r("Total", "total", true);
   return `<table style="margin:6px 0 0 auto;border-collapse:collapse;font-size:10pt;">${rows}</table>`;
 }
 
@@ -284,7 +291,7 @@ function answer(f, v, sig, inline, x, blank = false) {
         return esc(String(x));
       };
       const g = gridStart(f, cols);
-      const sums = tableSums(f, rows.map((r) => r.cells));
+      const sums = tableSums(f, rows.map((r) => r.cells), x && x.disc);
       return `${g.open}${g.head}${rows.map((r) => `<tr>${cols.map((c, i) => `<td style="height:${g.h}px;${
         isNumCol(c) ? "text-align:right;" : ""}">${cellText(c, r.cells[i])}</td>`).join("")}</tr>`).join("")}${
         pdfTotalRow(f, cols, sums)}</table>${pdfInv(f, sums)}`;
@@ -386,6 +393,14 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
     const after = { normal: 0, more: 12, most: 24 }[st.space] || 0;
     const box = `text-align:${st.align} !important;${after ? `margin-bottom:${after}px;` : ""}`;
 
+    if (f.type === "button") { // a PDF can't be clicked: the text, with the link written underneath
+      const href = buttonHref(f, tags);
+      if (!href || href.startsWith("#")) return ""; // portal pages mean nothing on paper
+      const shown = href.replace(/^(mailto|tel):/i, "");
+      return `<div class="block" style="${box}">` +
+        `<span style="display:inline-block;padding:6px 14px;border:1.5px solid #0f766e;border-radius:8px;color:#0f766e;font-weight:bold;font-size:10pt;">${esc(f.label || "Link")}</span>` +
+        `<div style="font-size:8.5pt;color:#475569;margin-top:4px;word-break:break-all;">${esc(shown)}</div></div>`;
+    }
     if (f.type === "text_block") {
       const fs = { small: 9, normal: 10, large: 11.5 }[st.textSize] || 10;
       const content = textBlockHtml(f);
@@ -466,14 +481,15 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
         f.caption ? `<div style="font-size:9pt;color:#64748b;margin-top:4px;">${esc(f.caption)}</div>` : ""}</div>`;
     }
 
+    const xx = f.type === "table" ? { disc: sub.answers[`${f.id}__d`] } : sub.answers[`${f.id}__x`]; // tables: the discount
     if (st.pos === "beside" && INLINE_TYPES.includes(f.type)) {
       const qw = { narrow: "25%", medium: "40%", wide: "55%" }[st.qWidth]; // "Fit" = as wide as the question
       return `<div class="q" style="${box}"><table class="qi"><tr>` +
         `<td class="ql" style="${qw ? `width:${qw};` : "width:1%;white-space:nowrap;"}padding-right:${gap * 4}px;text-align:${st.align} !important;">${label}</td>` +
-                `<td class="qa" style="text-align:${st.align} !important;">${answer(f, v, sig, true, sub.answers[`${f.id}__x`], blank)}</td></tr></table></div>`;
+                `<td class="qa" style="text-align:${st.align} !important;">${answer(f, v, sig, true, xx, blank)}</td></tr></table></div>`;
     }
     return `<div class="q" style="${box}">${label ? `<div class="ql" style="margin-bottom:${gap}px;">${label}</div>` : ""}` +
-           `<div class="qa">${answer(f, v, sig, false, sub.answers[`${f.id}__x`], blank)}</div></div>`;
+           `<div class="qa">${answer(f, v, sig, false, xx, blank)}</div></div>`;
   });
   const body = pdfRows(fields, parts);
 

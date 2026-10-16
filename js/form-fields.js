@@ -41,6 +41,8 @@ export const ICONS = {
   specialist: '<path d="M4 3v6a5 5 0 0 0 10 0V3"/><path d="M9 14v2a5 5 0 0 0 10 0v-3"/><circle cx="19" cy="11" r="2"/>',
   clinician: '<rect x="2" y="5" width="20" height="14" rx="2"/><circle cx="8" cy="12" r="2.5"/><path d="M14 10h5M14 14h4"/>',
   rich_text: '<path d="M6 4h8a4 4 0 0 1 0 8H6z"/><path d="M6 12h9a4 4 0 0 1 0 8H6z"/>',
+  button: '<rect x="2" y="7" width="20" height="10" rx="3"/><line x1="8" y1="12" x2="16" y2="12"/>',
+  extlink: '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/>',
 };
 
 // `was` = the name in the old Apps Script builder (tooltip + search).
@@ -72,6 +74,7 @@ export const FIELD_TYPES = {
   space:          { name: "Space", was: "Space", label: "" },
   consumables:    { name: "Consumables", was: "Products used stock inventory", label: "Products used" },
   specialist:     { name: "Referral specialist", was: "Specialist referral doctor letter", label: "Referred to" },
+  button:         { name: "Button", was: "Custom button link url website", label: "Open link" },
 };
 
 export const FIELD_GROUPS = [
@@ -80,7 +83,7 @@ export const FIELD_GROUPS = [
   ["Choices", ["single_choice", "dropdown", "checkboxes", "checkbox_notes", "sub_checks"]],
   ["Clinical", ["signature", "consent_status", "prescription_status", "image", "aftercare", "consumables", "specialist"]],
   ["Tables and maths", ["table", "calculation"]],
-  ["Page layout", ["text_block", "space", "watermark"]],
+  ["Page layout", ["text_block", "button", "space", "watermark"]],
 ];
 
 export const CHOICE_TYPES = ["single_choice", "checkboxes", "checkbox_notes", "dropdown"];
@@ -140,7 +143,8 @@ const newColId = () => "c" + Math.random().toString(36).slice(2, 8);
 // Columns that hold numbers (typed, or worked out from other columns)
 export const isNumCol = (c) => !!c && (c.type === "number" || c.type === "calc");
 export const TABLE_GST = [["none", "No GST"], ["incl", "Prices include GST"], ["add", "Add 10% GST"]];
-const INV_KEYS = { __sub: "Subtotal", __gst: "GST", __total: "Total" };
+const INV_KEYS = { __sub: "Subtotal", __gst: "GST", __total: "Total", __disc: "Discount" };
+export const TABLE_DISC = [["none", "No discount"], ["percent", "Staff enter a % discount"], ["amount", "Staff enter a $ discount"]];
 
 // Column widths (% of the table) and row heights
 export const TABLE_COL_WIDTHS = [[0, "Auto"], [10, "10%"], [15, "15%"], [20, "20%"], [25, "25%"], [30, "30%"], [35, "35%"], [40, "40%"], [50, "50%"], [60, "60%"]];
@@ -204,15 +208,19 @@ export function tableRowHtml(f, live = true, removable = false) {
     : "";
   return `<tr>${cells}${rm}</tr>`;
 }
-// The "+ Add a row" button follows the limit
+// The "+ Add a row" button follows the limit, and the remove column only shows once a row has been added
 export function syncTableRows(f, w) {
-  const b = w && w.querySelector("[data-tadd]");
+  if (!w) return;
+  const table = w.querySelector(".fe-table");
+  if (table) table.classList.toggle("has-rm", !!w.querySelector("tbody [data-trm]"));
+  const b = w.querySelector("[data-tadd]");
   if (!b) return;
   const max = tableMax(f);
   const full = w.querySelectorAll("tbody tr").length >= max;
   b.disabled = full;
   b.textContent = full ? `Most rows reached (${max})` : "+ Add a row";
 }
+
 // Add / remove row buttons on a live form. Returns true if it handled the click.
 export function tableClick(target, fields) {
   const add = target.closest("[data-tadd]");
@@ -259,6 +267,8 @@ export function tableTotal(f, w, colId) {
 // A number shown the way its column is set up ("$12.50")
 export const fmtCol = (c, n) => (n === null || n === undefined || !Number.isFinite(Number(n))
   ? "" : formatCalc(Number(n), { decimals: c && c.decimals, prefix: (c && c.prefix) || "" }));
+// Invoice totals always show cents (GST is rarely a whole number)
+export const fmtInv = (c, n) => fmtCol({ ...(c || {}), decimals: Math.max(2, (c && c.decimals) || 0) }, n);
 
 // One row's Calculated cell. Empty until at least one of the numbers it uses is filled in.
 function rowCalc(c, vals) {
@@ -269,16 +279,25 @@ function rowCalc(c, vals) {
   return r.ok && Number.isFinite(r.value) ? Math.round(r.value * 1e6) / 1e6 : null;
 }
 
-// The column the invoice totals add up, and how GST works, or null
+// The column the invoice totals add up, how GST works, and the discount, or null
 export function tableInvoice(f) {
   const inv = f && f.invoice;
   if (!inv || !inv.col) return null;
   const col = tableCols(f).find((c) => c.id === inv.col && isNumCol(c));
-  return col ? { col, gst: ["incl", "add"].includes(inv.gst) ? inv.gst : "none" } : null;
+  if (!col) return null;
+  const disc = ["percent", "amount"].includes(inv.disc) ? inv.disc : "none";
+  const dd = inv.discDefault === "" || inv.discDefault === null || inv.discDefault === undefined ? NaN : Number(inv.discDefault);
+  return {
+    col,
+    gst: ["incl", "add"].includes(inv.gst) ? inv.gst : "none",
+    disc,
+    discDefault: disc !== "none" && Number.isFinite(dd) && dd >= 0 ? dd : null,
+  };
 }
 
-// Column totals and invoice totals from rows of cell values (live form, saved form, PDF)
-export function tableSums(f, rows) {
+// Column totals and invoice totals from rows of cell values (live form, saved form, PDF).
+// discIn: the discount staff typed (a % or an amount, following the table's setting), or null.
+export function tableSums(f, rows, discIn = null) {
   const cols = tableCols(f);
   const sums = {};
   cols.forEach((c, ci) => {
@@ -293,13 +312,22 @@ export function tableSums(f, rows) {
     sums[c.id] = any ? Math.round(t * 1e6) / 1e6 : null;
   });
   const inv = tableInvoice(f);
-  const out = { sums, sub: null, gst: null, total: null, col: inv ? inv.col : null };
+  const out = { sums, base: null, disc: null, discIn: null, sub: null, gst: null, total: null, col: inv ? inv.col : null };
   const base = inv ? sums[inv.col.id] : null;
   if (base !== null && base !== undefined) {
     const cents = (x) => Math.round(x * 100) / 100;
-    if (inv.gst === "add") { out.sub = cents(base); out.gst = cents(base * 0.1); out.total = cents(out.sub + out.gst); }
-    else if (inv.gst === "incl") { out.total = cents(base); out.gst = cents(base / 11); out.sub = cents(out.total - out.gst); }
-    else out.total = cents(base);
+    const d = discIn === null || discIn === undefined || discIn === "" ? NaN : Number(discIn);
+    let disc = 0;
+    if (inv.disc !== "none" && Number.isFinite(d) && d > 0) {
+      out.discIn = d;
+      disc = inv.disc === "percent" ? (base * Math.min(d, 100)) / 100 : Math.min(d, Math.max(base, 0));
+    }
+    out.base = cents(base);
+    out.disc = inv.disc === "none" ? null : cents(disc);
+    const net = cents(base - disc); // the discount comes off before GST
+    if (inv.gst === "add") { out.sub = net; out.gst = cents(net * 0.1); out.total = cents(out.sub + out.gst); }
+    else if (inv.gst === "incl") { out.total = net; out.gst = cents(net / 11); out.sub = cents(out.total - out.gst); }
+    else out.total = net;
   }
   return out;
 }
@@ -326,7 +354,7 @@ export function tableRecalc(f, w) {
       return v === null ? "" : v;
     });
   });
-  const s = tableSums(f, rows);
+  const s = tableSums(f, rows, readTableDisc(f, w));
   w.querySelectorAll("[data-tsum]").forEach((el) => {
     const c = cols.find((x) => x.id === el.dataset.tsum);
     const v = c ? s.sums[c.id] : null;
@@ -334,9 +362,24 @@ export function tableRecalc(f, w) {
   });
   w.querySelectorAll("[data-tinv]").forEach((el) => {
     const v = s[el.dataset.tinv];
-    el.textContent = v === null || v === undefined ? "—" : fmtCol(s.col, v);
+    if (el.dataset.tinv === "disc") { el.textContent = v > 0 ? `−${fmtInv(s.col, v)}` : "—"; return; }
+    el.textContent = v === null || v === undefined ? "—" : fmtInv(s.col, v);
   });
   return s;
+}
+
+// The discount typed under a table, or null (none set up, or left empty)
+export function readTableDisc(f, w) {
+  const inv = tableInvoice(f);
+  if (!inv || inv.disc === "none" || !w) return null;
+  const el = w.querySelector("[data-tdisc]");
+  if (!el || el.value === "") return null;
+  const n = Number(el.value);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+export function writeTableDisc(f, w, v) {
+  const el = w && w.querySelector("[data-tdisc]");
+  if (el) el.value = v === null || v === undefined || v === "" ? "" : String(v);
 }
 
 // What's wrong with a Calculated column's formula, or ""
@@ -377,13 +420,20 @@ function tableFootHtml(f, cols, canAdd) {
     ? `<td class="is-num fe-tsum" data-tsum="${esc(c.id)}">—</td>`
     : `<td class="fe-tsum-l">${i === 0 ? "Total" : ""}</td>`)).join("")}${canAdd ? '<td class="fe-trm"></td>' : ""}</tr></tfoot>`;
 }
-function tableInvHtml(f) {
+function tableInvHtml(f, live = false) {
   const inv = tableInvoice(f);
   if (!inv) return "";
   const row = (label, k, big) => `<div${big ? ' class="is-total"' : ""}><span>${esc(label)}</span><strong data-tinv="${k}">—</strong></div>`;
-  return `<div class="fe-tinv">${inv.gst === "add" ? row("Subtotal", "sub") + row("GST (10%)", "gst") + row("Total", "total", true)
-    : inv.gst === "incl" ? row("Total", "total", true) + row("Includes GST of", "gst")
-    : row("Total", "total", true)}</div>`;
+  const hasD = inv.disc !== "none";
+  const disc = hasD ? `<div class="fe-tinv-disc"><span>Discount</span><span class="fe-tinv-din">${
+      inv.disc === "amount" ? `<em>${esc(inv.col.prefix || "$")}</em>` : ""}<input class="fe-in" type="number" min="0"${
+      inv.disc === "percent" ? ' max="100"' : ""} step="any" inputmode="decimal" data-tdisc aria-label="Discount"${
+      inv.discDefault !== null ? ` value="${inv.discDefault}"` : ""}${live ? "" : ' tabindex="-1"'} />${
+      inv.disc === "percent" ? "<em>%</em>" : ""}</span><strong data-tinv="disc">—</strong></div>` : "";
+  const top = hasD ? row("Subtotal", "base") + disc : "";
+  return `<div class="fe-tinv">${inv.gst === "add" ? (hasD ? top : row("Subtotal", "sub")) + row("GST (10%)", "gst") + row("Total", "total", true)
+    : inv.gst === "incl" ? top + row("Total", "total", true) + row("Includes GST of", "gst")
+    : top + row("Total", "total", true)}</div>`;
 }
 
 // How a table's column heading lines up: the table's setting, or automatic (numbers right, the rest left)
@@ -398,7 +448,7 @@ export const INLINE_TYPES = ["short_text", "email", "number", "date", "record_da
 // Fields that get the Layout settings
 const ANSWER_TYPES = ["patient", "clinician", "short_text", "long_text", "email", "number", "date", "record_date", "single_choice",
   "checkboxes", "checkbox_notes", "sub_checks", "dropdown", "table", "calculation", "signature", "image", "consent_status", "prescription_status",
-  "specialist", "rich_text"];
+  "specialist", "rich_text", "button"];
 const BOX_TYPES = ["short_text", "email", "number", "date", "record_date", "dropdown"];
 const DRIVE_ID = /^[A-Za-z0-9_-]{10,80}$/;
 const opt = (v, list, dflt) => (list.includes(v) ? v : dflt);
@@ -600,10 +650,34 @@ export const FILLS_FOR = {
 
 const NO_LABEL = ["space", "letterhead", "watermark"];
 const NO_HELP = ["patient", "text_block", "space", "letterhead", "watermark"];
-const NO_REQUIRED = ["text_block", "space", "letterhead", "watermark", "calculation", "consent_status", "prescription_status", "image", "aftercare", "consumables"];
+const NO_REQUIRED = ["text_block", "space", "letterhead", "watermark", "calculation", "consent_status", "prescription_status", "image", "aftercare", "consumables", "button"];
 export const hasLabel = (t) => !NO_LABEL.includes(t);
 export const hasHelp = (t) => !NO_HELP.includes(t);
 export const canRequire = (t) => !NO_REQUIRED.includes(t);
+
+/* ---------- Buttons: a link staff or patients can click ---------- */
+// Only safe links: web pages, email, phone, or a page in the portal
+export const BUTTON_URL_RE = /^(https:\/\/|mailto:|tel:|#\/)/i;
+// The button's link with its tags filled in (made safe for a link), or "" if it isn't a usable link
+export function buttonHref(f, vals = {}) {
+  const raw = String((f && f.url) || "").trim();
+  if (!BUTTON_URL_RE.test(raw)) return "";
+  const out = raw.replace(/\{\s*([A-Za-z][A-Za-z0-9 /-]*?)\s*\}/g, (m, k) => {
+    const kk = tagKeyOf(k);
+    return kk in vals ? encodeURIComponent(String(vals[kk] || "")) : "";
+  });
+  return BUTTON_URL_RE.test(out) ? out : "";
+}
+// Fills in every button's link on a page (live form, Preview, saved form)
+export function syncButtons(root, fields, vals = {}) {
+  if (!root) return;
+  root.querySelectorAll("[data-btnf]").forEach((a) => {
+    const f = fields.find((x) => x.id === a.dataset.btnf);
+    const h = f ? buttonHref(f, vals) : "";
+    if (h) a.setAttribute("href", h); else a.removeAttribute("href");
+    a.classList.toggle("is-off", !h);
+  });
+}
 
 const LETTERHEAD = [
   "Unit 4/91 Scarborough Beach Rd, Scarborough WA 6019, Australia",
@@ -658,6 +732,7 @@ export function createField(type, id) {
     case "aftercare": f.mode = "fixed"; f.items = []; f.preselect = true; f.emailTemplate = ""; f.confirm = "each"; break;
     case "consumables": f.items = []; f.allowExtra = true; f.ifShort = "flag"; break;
     case "specialist": f.parts = [...SP_KEYS]; f.speciality = ""; f.allowAdd = true; f.allowEdit = true; f.show = "letter"; break;
+    case "button": f.url = ""; f.newTab = true; f.look = "primary"; f.size = "medium"; break;
   }
   return f;
 }
@@ -781,7 +856,10 @@ export function cleanField(f) {
         };
       });
       const inv = tableInvoice({ invoice: f.invoice, columns: out.columns });
-      if (inv) out.invoice = { col: inv.col.id, gst: inv.gst };
+      if (inv) {
+        out.invoice = { col: inv.col.id, gst: inv.gst, disc: inv.disc,
+          ...(inv.discDefault !== null ? { discDefault: inv.discDefault } : {}) };
+      }
       out.rows = int(f.rows, 1, 30, 3);
       out.addRows = f.addRows === true;
       out.maxRows = int(f.maxRows, out.rows, 50, Math.max(out.rows, 10));
@@ -858,6 +936,12 @@ export function cleanField(f) {
         }));
       out.allowExtra = f.allowExtra !== false;
       out.ifShort = pick(f.ifShort, ["flag", "block"], "flag");
+      break;
+    case "button":
+      out.url = clip(String(f.url || "").trim(), 1000); // checked when it's used, so half-typed links aren't lost
+      out.newTab = f.newTab !== false;
+      out.look = pick(f.look, ["primary", "outline", "soft"], "primary");
+      out.size = pick(f.size, ["small", "medium", "large"], "medium");
       break;
     case "specialist": {
       const parts = (Array.isArray(f.parts) ? f.parts : []).filter((k) => SP_KEYS.includes(k));
@@ -979,7 +1063,7 @@ export function renderField(f, ctx = {}) {
   const live = !!ctx.live;
   const inert = live ? "" : ' tabindex="-1"';
   const id = esc(f.id);
-  const q = hasLabel(f.type) && f.type !== "text_block" && !(f.type === "image" && !String(f.label || "").trim())
+  const q = hasLabel(f.type) && f.type !== "text_block" && f.type !== "button" && !(f.type === "image" && !String(f.label || "").trim())
     ? `<div class="fe-q">${esc(f.label || FIELD_TYPES[f.type].label || "Untitled question")}${
         f.required ? '<span class="fe-req" aria-label="required">*</span>' : ""}</div>`
     : "";
@@ -1098,7 +1182,7 @@ export function renderField(f, ctx = {}) {
         cols.map((c, i) => `<th${isNumCol(c) ? ' class="is-num"' : ""} style="text-align:${tableHeadAlign(f, c)};${
           ws[i] !== null ? `width:${ws[i]}%;` : ""}">${esc(c.label || `Column ${i + 1}`)}${
           c.type === "number" && c.unit.trim() ? ` <small>(${esc(c.unit)})</small>` : ""}</th>`).join("")}${
-        canAdd ? `<th class="fe-trm"${fixed ? ' style="width:6%"' : ""}></th>` : ""}</tr></thead><tbody>${body}</tbody>${tableFootHtml(f, cols, canAdd)}</table></div>` + tableInvHtml(f) +
+        canAdd ? `<th class="fe-trm"${fixed ? ' style="width:6%"' : ""}></th>` : ""}</tr></thead><tbody>${body}</tbody>${tableFootHtml(f, cols, canAdd)}</table></div>` + tableInvHtml(f, live) +
         (canAdd ? '<button type="button" class="hx-add fe-tadd" data-tadd>+ Add a row</button>' : "") +
         (!live && f.addRows ? `<div class="fe-help fe-help-after">Staff can add rows, up to ${tableMax(f)}.</div>` : "");
     }
@@ -1200,6 +1284,21 @@ export function renderField(f, ctx = {}) {
       return head + `<div class="sp-build-pick">${svg(ICONS.specialist)}<span>Staff choose from the Specialist Bank${
         f.speciality ? ` (${esc(f.speciality)})` : ""}${f.allowAdd !== false ? ", or add a new one" : ""}. Example:</span></div>` +
         `<div class="sp-card is-sample">${specialistBlockHtml(f, sample)}</div>`;
+    }
+    case "button": {
+      const look = ["primary", "outline", "soft"].includes(f.look) ? f.look : "primary";
+      const size = ["small", "medium", "large"].includes(f.size) ? f.size : "medium";
+      const text = esc(f.label || "Open link");
+      const portal = /^#\//.test(String(f.url || "").trim());
+      const ext = f.newTab !== false && !portal;
+      if (!live) {
+        const ok = BUTTON_URL_RE.test(String(f.url || "").trim());
+        return head + `<span class="fe-btnf is-${look} is-${size}">${text}${ext ? svg(ICONS.extlink) : ""}</span>` +
+          `<div class="fe-help fe-help-after${ok ? "" : " fe-bad"}">${ok ? `Opens ${esc(f.url)}` : "Add a link in the settings panel."}</div>`;
+      }
+      const href = buttonHref(f);
+      return head + `<a class="fe-btnf is-${look} is-${size}${href ? "" : " is-off"}" data-btnf="${id}"${href ? ` href="${esc(href)}"` : ""}${
+        ext ? ' target="_blank" rel="noopener noreferrer"' : ""}>${text}${ext ? svg(ICONS.extlink) : ""}</a>`;
     }
     case "letterhead":
       return letterheadHtml(ctx.letterhead);
@@ -1464,7 +1563,13 @@ function typeSettings(f, ctx = {}) {
           <select class="fb-select" data-inv="col" data-rerender="">${[["", "None"], ...numCols.map((c) => [c.id, `Add up “${c.label || "Column"}”`])].map(([v, l]) =>
             `<option value="${esc(v)}"${(inv ? inv.col.id : "") === v ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
           ${inv ? `<select class="fb-select" data-inv="gst" data-rerender="">${TABLE_GST.map(([v, l]) =>
-            `<option value="${v}"${inv.gst === v ? " selected" : ""}>${l}</option>`).join("")}</select>` : ""}
+            `<option value="${v}"${inv.gst === v ? " selected" : ""}>${l}</option>`).join("")}</select>
+            <select class="fb-select" data-inv="disc" data-rerender="">${TABLE_DISC.map(([v, l]) =>
+              `<option value="${v}"${inv.disc === v ? " selected" : ""}>${l}</option>`).join("")}</select>
+            ${inv.disc !== "none" ? `<label class="fe-insp-sub"><small>Starting discount (optional, staff can change it)</small>
+              <div class="fe-num"><input class="fe-input" type="number" min="0" step="any" data-inv="discDefault" placeholder="None"
+                value="${inv.discDefault ?? ""}" /><span>${inv.disc === "percent" ? "%" : esc(inv.col.prefix || "$")}</span></div></label>
+              <small class="fe-note">Staff type the discount under the table. It comes off before GST.</small>` : ""}` : ""}
           <small class="fe-note">${numCols.length
             ? "Shows the Total (and the Subtotal and GST, if chosen) under the table. A Calculation question can use them too."
             : "Add a Number or Calculated column first."}</small></div>` +
@@ -1486,7 +1591,8 @@ function typeSettings(f, ctx = {}) {
           ...tableCols(t).filter(isNumCol).map((c) => ({
             tok: `{${t.id}.${c.id}}`, name: `${t.label || "Table"} · ${c.label || "Column"} (total)`,
           })),
-          ...(inv ? [["__total", "Total"], ...(inv.gst !== "none" ? [["__sub", "Subtotal"], ["__gst", "GST"]] : [])]
+          ...(inv ? [["__total", "Total"], ...(inv.gst !== "none" ? [["__sub", "Subtotal"], ["__gst", "GST"]] : []),
+            ...(inv.disc !== "none" ? [["__disc", "Discount"]] : [])]
             .map(([k, l]) => ({ tok: `{${t.id}.${k}}`, name: `${t.label || "Table"} · ${l}` })) : []),
         ];
       });
@@ -1528,6 +1634,19 @@ function typeSettings(f, ctx = {}) {
         `<label class="fe-check"><input type="checkbox" data-k="allowEdit"${f.allowEdit !== false ? " checked" : ""} /> Staff can correct a specialist's details while filling in</label>` +
         '<p class="fe-note fe-pad">New and corrected specialists are saved to the Specialist Bank for everyone. A saved letter keeps the details it was saved with.</p>' +
         '<button type="button" class="lh-btn" data-act="sp-bank">Manage the Specialist Bank</button>';
+    }
+    case "button": {
+      const url = String(f.url || "").trim();
+      const bad = url && !BUTTON_URL_RE.test(url);
+      return setting("Link", `<input class="fe-input" data-k="url" maxlength="1000" placeholder="https://… or mailto:… or #/tasks" value="${esc(f.url || "")}" />`,
+          bad ? '<span class="fe-bad">Start the link with https://, mailto:, tel: or #/ (a page in the portal).</span>'
+            : "Tags work in the link, like {Patient ID} or {First name}: click in the box, then Insert a tag. They're filled in for each patient.") +
+        `<label class="fe-check"><input type="checkbox" data-k="newTab"${f.newTab !== false ? " checked" : ""} /> Open in a new tab</label>` +
+        '<small class="fe-note fe-pad">Portal pages (#/…) always open in the same tab.</small>' +
+        `<div class="fe-two">${
+          setting("Look", choose("look", [["primary", "Filled"], ["outline", "Outline"], ["soft", "Soft"]], f.look || "primary"))}${
+          setting("Size", choose("size", [["small", "Small"], ["medium", "Medium"], ["large", "Large"]], f.size || "medium"))}</div>` +
+        '<p class="fe-note fe-pad">On the PDF, the button text is printed with the link underneath (a PDF can\'t be clicked). Portal links are left off.</p>';
     }
     case "watermark": {
       const logo = f.source === "logo";
@@ -1769,7 +1888,7 @@ function layoutSettings(f) {
     <span class="fe-insp-label">Layout</span>
     ${row("Width on the page", seg("span", [["full", "Full"], ["half", "Half"], ["third", "Third"], ["twothirds", "2/3"]], s.span))}
     <small class="fe-note">Questions next to each other that fit on one row (two halves, three thirds) sit side by side. On phones they go one under another.</small>
-    ${!isText && hasLabel(f.type)
+    ${!isText && hasLabel(f.type) && f.type !== "button"
       ? `<label class="fe-check"><input type="checkbox" data-st="showLabel"${s.hideLabel ? "" : " checked"} /> Show the question</label>` : ""}
     ${INLINE_TYPES.includes(f.type)
       ? row("Answer", seg("pos", [["below", "Under the question"], ["beside", "Beside the question"]], s.pos, true)) : ""}

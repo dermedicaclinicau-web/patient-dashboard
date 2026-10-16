@@ -5,7 +5,8 @@ import { fetchPatientRecords } from "./records.js";
 import { fetchBillingAndRx } from "./billing-rx-view.js";
 import { esc, svg, ICONS, renderField, normaliseField, watermarkHtml, canRequire,
   choiceList, otherLabel, syncChoiceExtras, readExtras, writeExtras, readImageQs, writeImageQs, STAFF_FILLS,
-  tableCols, tableMax, tableRowHtml, syncTableRows, tableClick, tableTotal, tableRecalc, spanClass } from "./form-fields.js";
+  tableCols, tableMax, tableRowHtml, syncTableRows, tableClick, tableTotal, tableRecalc, spanClass, syncButtons,
+  readTableDisc, writeTableDisc, tableInvoice } from "./form-fields.js";
 import { listMarkingSets, markSummary } from "./marking-sets.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { letterheadHtml, DEFAULT_LETTERHEAD } from "./form-letterhead.js";
@@ -40,7 +41,7 @@ const BAR_ICONS = {
   send: ic('<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>'),
 };
 
-const LAYOUT = ["text_block", "space", "letterhead", "watermark"];
+const LAYOUT = ["text_block", "space", "letterhead", "watermark", "button"]; // nothing is saved for these
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -833,6 +834,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     updateProgress();
     const tv = liveTags();
     applyTagNodes(tagNodes, tv, null); // an empty tag stays visible until it can be filled
+    syncButtons(sheet, fields, tv);
     fields.forEach((f) => {
       if (f.type !== "rich_text") return;
       const w = wrap(f.id);
@@ -861,6 +863,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     fields.forEach((f) => {
       const w = wrap(f.id);
       if (!w || !(f.id in a)) return;
+      if (f.type === "table") writeTableDisc(f, w, a[`${f.id}__d`]);
       writeField(f, w, a[f.id]);
       writeExtras(f, w, a[`${f.id}__x`]);
     });
@@ -937,6 +940,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
       draft[f.id] = readField(f, w, rctx());
       const x = readExtras(f, w);
       if (x) draft[`${f.id}__x`] = x;
+      if (f.type === "table") { const d = readTableDisc(f, w); if (d !== null) draft[`${f.id}__d`] = d; }
     });
     writeReturn({
       at: Date.now(), patientId: pid, templateId: tid, templateName: ver.name,
@@ -977,6 +981,11 @@ export async function mountFormFill(container, param, { staff, embedded = null }
         return;
       }
       if (f.type === "email" && v && !EMAIL_RE.test(v)) out.push({ id: f.id, msg: "Enter a valid email address." });
+      if (f.type === "table") {
+        const inv = tableInvoice(f);
+        const d = readTableDisc(f, w);
+        if (inv && inv.disc === "percent" && d !== null && d > 100) out.push({ id: f.id, msg: "The discount can't be more than 100%." });
+      }
       if (f.type === "date" && v) {
         if (f.range === "past" && v > t) out.push({ id: f.id, msg: "Choose today or an earlier date." });
         if (f.range === "future" && v < t) out.push({ id: f.id, msg: "Choose today or a later date." });
@@ -1054,6 +1063,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
       answers[f.id] = readField(f, w, rctx());
       const extra = readExtras(f, w);
       if (extra) answers[`${f.id}__x`] = extra;
+      if (f.type === "table") { const d = readTableDisc(f, w); if (d !== null) answers[`${f.id}__d`] = d; }
       if (f.type === "image" && f.source !== "staff") {
         const a = annots[f.id];
         const out = {};
@@ -1299,15 +1309,18 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
       if (host) host.outerHTML = consumablesViewHtml(sub.answers[f.id]);
       return;
     }
+    if (f.type === "table") writeTableDisc(f, w, sub.answers[`${f.id}__d`]);
     writeField(f, w, sub.answers[f.id]);
     writeExtras(f, w, sub.answers[`${f.id}__x`]);
     $all(w, "[data-subcmt]").forEach((c) => { if (!c.value) c.hidden = true; }); // no comment typed: nothing to show
   });
   // Merge tags, as they were when the form was saved (older forms: worked out from the record)
-  applyTagNodes(collectTagNodes(sheet), {
+  const savedTags = {
     ...tagValues({ patient: { name: sub.patientName }, staff: { name: sub.createdBy }, recordDate: sub.recordDate, today: sub.recordDate }),
     ...((sub.answers && sub.answers.__tags) || {}),
-  });
+  };
+  applyTagNodes(collectTagNodes(sheet), savedTags);
+  syncButtons(sheet, fields, savedTags);
   $all(sheet, "[data-tadd], [data-trm]").forEach((b) => b.remove()); // no adding or removing rows on a saved form
   $all(sheet, "input, textarea, select").forEach((el) => { el.disabled = true; });
 

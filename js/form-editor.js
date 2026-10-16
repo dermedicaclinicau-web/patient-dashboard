@@ -8,7 +8,7 @@ import {
   createField, normaliseField, renderField, fieldSettings, applyInput, applyClick,
   calcStatusHtml, checkFormula, canRequire, hasLabel, hasHelp, watermarkHtml, iqHasOptions, isMarkImage,
   markSetIdsOf, prefillSettings, prefillSummary, renameInPrefill, tidyPrefill, subExtrasHtml,
-  tableCols, tableTotal, tableClick, spanClass, tableRecalc, tableProblem,
+  tableCols, tableTotal, tableClick, spanClass, tableRecalc, tableProblem, BUTTON_URL_RE, syncButtons,
 } from "./form-fields.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { DEFAULT_LETTERHEAD, letterheadHtml, openLetterheadDialog } from "./form-letterhead.js";
@@ -46,7 +46,7 @@ const UI = {
 };
 
 const FORM = "__form"; // "selected" value meaning the form settings panel is open
-const LAYOUT_ONLY = ["text_block", "space", "letterhead", "watermark"];
+const LAYOUT_ONLY = ["text_block", "space", "letterhead", "watermark", "button"];
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const fmtDate = (d) => d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" });
 
@@ -284,6 +284,9 @@ export async function mountFormEditor(container, { templateId, staff }) {
       if (CHOICE_TYPES.includes(f.type) && !f.options.some((o) => String(o).trim())) {
         return { id: f.id, msg: `“${label}” needs at least one answer choice.` };
       }
+      if (f.type === "button" && !BUTTON_URL_RE.test(String(f.url || "").trim())) {
+        return { id: f.id, msg: `“${label || "Button"}” needs a link starting with https://, mailto:, tel: or #/.` };
+      }
       if (f.type === "calculation") {
         const c = checkFormula(f, fields);
         if (!c.ok) return { id: f.id, msg: `“${label || "Calculation"}”: ${c.error}` };
@@ -430,6 +433,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     applyVisibility(stage, fields, { pads: {}, calc, consent: {} });
     const tv = fieldTagValues(stage, fields, SAMPLE_TAGS, { pads: {}, calc, consent: {} });
     applyTagNodes(previewTags, tv, null); // unanswered tags stay visible as {Tag}
+    syncButtons(stage, fields, tv);
     fields.forEach((f) => {
       const w = f.type === "rich_text" && stage.querySelector(`[data-fid="${CSS.escape(f.id)}"]`);
       if (w && w.rtRetag) w.rtRetag(tv);
@@ -633,7 +637,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
     let h = `<div class="fe-insp-head">${svg(ICONS[f.type])}<span>${esc(FIELD_TYPES[f.type].name)}</span></div>`;
     if (hasLabel(f.type)) {
-      const lbl = f.type === "text_block" ? "Heading" : f.type === "table" ? "Table title"
+      const lbl = f.type === "button" ? "Button text" : f.type === "text_block" ? "Heading" : f.type === "table" ? "Table title"
         : f.type === "image" ? "Title (optional)" : "Question";
       h += setting(lbl, `<input class="fe-input" data-k="label" maxlength="300" value="${esc(f.label)}" />`);
     }
@@ -965,6 +969,13 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
   stage.addEventListener("click", (e) => {
     if (mode === "preview" && tableClick(e.target, fields)) { refreshPreview(); return; }
+    const btnf = mode === "preview" && e.target.closest("[data-btnf]");
+    if (btnf) { // Preview never leaves the editor
+      e.preventDefault();
+      const h = btnf.getAttribute("href");
+      showToast(h ? `On the real form this opens ${h}` : "Add a link to this button first.");
+      return;
+    }
     if (mode !== "build") return;
     if (e.target.closest('[data-role="lh"], [data-role="title"]')) { select(FORM); return; }
     const fieldEl = e.target.closest(".fe-field[data-id]");
@@ -1070,7 +1081,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   insp.addEventListener("focusin", (e) => {
     if (e.target.isContentEditable) { tagKey = "__rich"; richEl = e.target; return; }
     const k = e.target.dataset && e.target.dataset.k;
-    if (k === "label" || k === "help" || k === "prefill") { tagKey = k; richEl = null; }
+    if (k === "label" || k === "help" || k === "prefill" || k === "url") { tagKey = k; richEl = null; }
   });
   insp.addEventListener("mousedown", (e) => {
     if (e.target.closest("[data-taginsert]")) e.preventDefault(); // keep the cursor where it is
