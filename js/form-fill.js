@@ -418,9 +418,22 @@ function isBlank(v) {
   return false;
 }
 
-// Consent check: the chosen consent form filled in on the portal, or any consent in the same treatment group
-// (portal or the older consent records), the same way the patient's page groups them.
-// Prescription check: the chosen prescription form filled in on the portal.
+// The meaningful part of a form / record name: years, versions and filler words removed, so
+// "2026 Wrinkle Relaxer Consent Form" and "Wrinkle Relaxer Consent Form" both become "wrinkle relaxer".
+const NAME_NOISE = new Set(["consent", "consents", "form", "forms", "record", "records", "version", "new", "updated",
+  "copy", "of", "for", "and", "the", "patient", "prescription", "prescriptions", "script", "scripts", "rx", "s4"]);
+function coreName(s) {
+  return String(s || "").toLowerCase()
+    .replace(/\bwr\b/g, "wrinkle relaxer")
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(" ")
+    .filter((w) => w && !NAME_NOISE.has(w) && !/^(19|20)\d{2}$/.test(w) && !/^v\d+$/.test(w))
+    .join(" ");
+}
+
+// Consent check: the chosen consent form filled in on the portal, or a consent with the same name
+// (years and "Consent Form" ignored), on the portal or in the older consent records.
+// Prescription check: the chosen prescription form, or a portal prescription with the same name.
 async function checkConsents(consentFields, patient) {
   const needGroups = consentFields.some((f) => f.type === "consent_status");
   const [subs, recs, forms] = await Promise.all([
@@ -428,7 +441,7 @@ async function checkConsents(consentFields, patient) {
     needGroups
       ? fetchPatientRecords(patient).catch((err) => { console.warn("Older consents not checked:", err); return null; })
       : null,
-    needGroups ? listPublishedForms().catch(() => []) : [],
+    listPublishedForms().catch(() => []),
   ]);
   const out = {};
   consentFields.forEach((f) => {
@@ -447,12 +460,12 @@ async function checkConsents(consentFields, patient) {
       return;
     }
 
-    // 2) Consent checks: any consent in the same treatment group (newest first, as records.js sorts them)
+    // 2) Consent checks: a consent with the same name (years and "Consent Form" ignored), portal or older record
     if (f.type === "consent_status" && recs) {
       const tpl = forms.find((t) => t.id === f.consentFormId);
-      const group = tpl ? formGroup(tpl) : "";
-      if (group && group !== "other") {
-        const c = recs.consents.find((x) => x.category === group && x.date && x.date >= cut);
+      const want = tpl ? coreName(tpl.name) : "";
+      if (want) {
+        const c = recs.consents.find((x) => x.date && x.date >= cut && coreName(x.title) === want);
         if (c) {
           out[f.id] = {
             found: true, date: isoOf(c.date), submissionId: c.portalId || "", name: c.title,
@@ -462,6 +475,20 @@ async function checkConsents(consentFields, patient) {
         }
       }
     }
+    // 3) Prescription checks: a portal prescription with the same name (years and "S4 / Prescription" ignored)
+    if (f.type === "prescription_status") {
+      const tpl = forms.find((t) => t.id === f.consentFormId);
+      const want = tpl ? coreName(tpl.name) : "";
+      const p = want ? subs
+        .filter((s) => s.category === "prescription" && s.recordDate >= cutKey && coreName(s.templateName) === want)
+        .sort((a, b) => String(b.recordDate).localeCompare(String(a.recordDate)))[0] : null;
+      if (p) {
+        out[f.id] = { found: true, date: p.recordDate, submissionId: p.id, name: p.templateName };
+        return;
+      }
+    }
+
+    // Nothing found
     out[f.id] = { found: false, date: "", submissionId: "", name: "" };
   });
   return out;
