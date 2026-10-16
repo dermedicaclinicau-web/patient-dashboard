@@ -6420,3 +6420,36 @@ a.md-quiet:hover { border-color: var(--primary); }
 .ef-st.is-test { background: #fef3c7; color: #92400e; }
 .ef-st.is-done { background: #ecfdf5; color: #047857; }
 .ef-st.is-failed { background: #fee2e2; color: #b91c1c; }
+
+/* ---------- Email flows: rules and product lists ---------- */
+.fr { display: flex; flex-direction: column; gap: .5rem; }
+.fr-match { display: flex; align-items: center; gap: .4rem; font-size: .85rem; }
+.fr-match .fb-select { width: auto; padding: .3rem .5rem; font-size: .85rem; }
+.fr-rules { display: flex; flex-direction: column; gap: .4rem; }
+.fr-rule { display: flex; flex-direction: column; gap: .35rem; padding: .55rem .6rem; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--surface-2); }
+.fr-join { align-self: flex-start; padding: 0 .45rem; border-radius: 999px; background: #ede9fe; color: #6d28d9;
+  font-size: .68rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.fr-row { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem; }
+.fr-row .fb-select, .fr-row .fe-input { min-width: 0; padding: .4rem .55rem; font-size: .85rem; }
+.fr-field { flex: 1 1 100%; width: 100%; }
+.fr-op { flex: 0 0 auto; width: auto; }
+.fr-val { flex: 1 1 120px; }
+.fr-num { flex: 0 0 84px; width: 84px; }
+.fr-unit { font-size: .8rem; color: var(--muted); }
+.fr-x { margin-left: auto; width: 28px; height: 28px; flex: none; border: none; border-radius: 8px; background: none;
+  color: var(--muted); font-size: 1.15rem; line-height: 1; cursor: pointer; }
+.fr-x:hover { background: #fee2e2; color: #b91c1c; }
+.fr-add { align-self: flex-start; padding: .3rem .75rem; border: 1px dashed var(--primary); border-radius: 8px; background: #fff;
+  color: var(--primary); font: inherit; font-size: .82rem; font-weight: 600; cursor: pointer; }
+.fr-add:hover { background: var(--primary-soft); }
+.fr-empty { margin: 0; font-size: .82rem; color: var(--muted); }
+.fr-pp { display: flex; flex-direction: column; gap: .4rem; }
+.fr-chips { display: flex; flex-wrap: wrap; gap: .3rem; }
+.fr-chip { display: inline-flex; align-items: center; gap: .2rem; padding: .15rem .25rem .15rem .6rem; border-radius: 999px;
+  background: var(--primary-soft); color: var(--primary-hover); font-size: .78rem; font-weight: 600; }
+.fr-chip button { width: 20px; height: 20px; border: none; border-radius: 50%; background: rgba(15, 118, 110, .12);
+  color: inherit; font: inherit; line-height: 1; cursor: pointer; }
+.fr-none { font-size: .8rem; color: var(--muted); }
+.fr-pp-add { display: flex; gap: .35rem; }
+.fr-pp-add .fe-input { flex: 1; min-width: 0; }

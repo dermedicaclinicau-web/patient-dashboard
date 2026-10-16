@@ -6376,6 +6376,8 @@ function installPatientIndex() {
 // one run per patient, product and invoice, saved in email_flow_runs with a fixed ID so nothing starts twice.
 // Each run moves through its cards. Patient emails go out between 9 am and 6 pm Perth; waits set the next time.
 // While a flow is testing, every email goes to the person who turned it on, marked [Test].
+// Rules ("Only start for patients who…", If / else rules, "Also stop when…") use the fields in FLOW_FIELD_TYPE_,
+// the same keys as js/flow-rules.js.
 
 const FLOW_RUNS_ = 'email_flow_runs';
 const FLOW_LOOKBACK_DAYS_ = 3;
@@ -6384,9 +6386,19 @@ const FLOW_STEPS_PER_RUN_ = 12;
 const FLOW_CONDS_ = {
   in_ssp: 'The product is in their Skin Script', has_ssp: 'They have an active Skin Script',
   marketing: 'They agreed to marketing emails', first_buy: "It's the first time they've bought this product",
-  booked: 'They have an upcoming appointment',
+  booked: 'They have an upcoming appointment', rules: 'Your own rules',
 };
 const FLOW_TOKEN_RE_ = /\{\s*([A-Za-z][A-Za-z ]{0,40}?)\s*\}/g;
+const FLOW_FIELD_TYPE_ = {
+  'buy.product': 'products', 'buy.first': 'bool', 'buy.in_ssp': 'bool', 'buy.sold_by': 'text',
+  'hist.bought': 'products', 'hist.times': 'number', 'hist.days_since': 'number',
+  'appt.has_future': 'bool', 'appt.next_days': 'number', 'appt.last_days': 'number', 'appt.visits': 'number',
+  'appt.future_service': 'text', 'appt.past_service': 'text',
+  'ssp.active': 'bool', 'ssp.age_days': 'number', 'ssp.expiry_days': 'number',
+  'plan.status': 'choice', 'plan.due': 'bool', 'plan.overdue': 'bool',
+  'form.saved': 'form',
+  'pt.age': 'number', 'pt.email': 'bool', 'pt.mobile': 'bool', 'pt.marketing': 'bool',
+};
 
 /* ---------- Small helpers ---------- */
 
@@ -6405,6 +6417,17 @@ function flowPart_(s) { return String(s || '').replace(/[^A-Za-z0-9_-]+/g, '_').
 function flowHash_(s) {
   return Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, String(s), Utilities.Charset.UTF_8)
     .map(function (b) { return ('0' + (b & 255).toString(16)).slice(-2); }).join('').slice(0, 16);
+}
+// Whole days from one "yyyy-MM-dd" to another (negative if b is earlier), or null
+function flowDays_(a, b) {
+  const pa = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(a || ''));
+  const pb = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(b || ''));
+  if (!pa || !pb) return null;
+  return Math.round((Date.UTC(+pb[1], +pb[2] - 1, +pb[3]) - Date.UTC(+pa[1], +pa[2] - 1, +pa[3])) / 86400000);
+}
+function flowAddMonthsKey_(key, n) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(key || ''));
+  return m ? Utilities.formatDate(new Date(Date.UTC(+m[1], +m[2] - 1 + n, +m[3], 12)), 'UTC', 'yyyy-MM-dd') : '';
 }
 function flowWaitText_(c) {
   const n = Math.max(1, Math.floor(Number(c.num) || 1));
@@ -6487,8 +6510,8 @@ function flowWho_(doc) {
     email: String(doc.Email || '').trim(), mobile: recMobile_(doc.Mobile) };
 }
 
-// Upcoming bookings as "date|time" keys (same matching as js/upcoming-appts.js)
-function flowUpcoming_(cfg, doc, memo) {
+// Upcoming bookings (same matching as js/upcoming-appts.js), one per date + time: [{ date, time, services }]
+function flowFuture_(cfg, doc, memo) {
   if (!memo.appt) {
     const today = flowKey_(Date.now());
     const t = today.split('-').map(Number);
@@ -6505,7 +6528,7 @@ function flowUpcoming_(cfg, doc, memo) {
   [doc['Patient Name'], (doc['First Name'] || '') + ' ' + (doc['Last Name'] || '')]
     .concat(Array.isArray(doc.MergedNames) ? doc.MergedNames : [])
     .forEach(function (n) { n = schedNorm_(n); if (n) names[n] = true; });
-  const out = {};
+  const byKey = {};
   memo.appt.days.forEach(function (d) {
     const key = String(d.date || '');
     (d.appointments || []).forEach(function (a) {
@@ -6514,15 +6537,26 @@ function flowUpcoming_(cfg, doc, memo) {
       if (!mine || SCHED_CANCELLED_.test(String(a.status || ''))) return;
       const mins = Number(a.sortMinutes);
       if (key === memo.appt.today && isFinite(mins) && mins < memo.appt.nowMin) return;
-      out[key + '|' + String(a.time || '').trim()] = true;
+      const time = String(a.time || '').trim();
+      const k = key + '|' + time;
+      const row = byKey[k] || (byKey[k] = { date: key, time: time, sort: isFinite(mins) ? mins : 0, services: [] });
+      (a.services || []).forEach(function (s) {
+        s = String(s || '').trim();
+        if (s && row.services.indexOf(s) === -1) row.services.push(s);
+      });
     });
   });
-  return Object.keys(out).sort();
+  return Object.keys(byKey).map(function (k) { return byKey[k]; })
+    .sort(function (x, y) { return x.date.localeCompare(y.date) || x.sort - y.sort; });
+}
+// The same bookings as "date|time" keys (for the "They book an appointment" stop rule)
+function flowUpcoming_(cfg, doc, memo) {
+  return flowFuture_(cfg, doc, memo).map(function (a) { return a.date + '|' + a.time; });
 }
 
 // Their newest Skin Script: portal protocols (they say who made them) or older ones from the SSP sheet
 function flowSsp_(cfg, doc, memo) {
-  const none = { active: false, date: '', clinician: '', clinicianUid: '', items: [] };
+  const none = { active: false, date: '', expires: '', clinician: '', clinicianUid: '', items: [] };
   const today = flowKey_(Date.now());
   if (memo.sspMonths === undefined) {
     memo.sspMonths = 12;
@@ -6546,9 +6580,12 @@ function flowSsp_(cfg, doc, memo) {
 
   if (best && (!old || String(best.recordDate || '') >= String(old.date))) {
     const vu = String(best.validUntil || '').slice(0, 10);
+    const hasVu = /^\d{4}-\d{2}-\d{2}$/.test(vu);
+    const rd = String(best.recordDate || '');
     return {
-      active: /^\d{4}-\d{2}-\d{2}$/.test(vu) ? vu >= today : String(best.recordDate || '') >= cutoff,
-      date: String(best.recordDate || ''), clinician: String(best.createdBy || ''), clinicianUid: String(best.createdByUid || ''),
+      active: hasVu ? vu >= today : rd >= cutoff,
+      date: rd, expires: hasVu ? vu : flowAddMonthsKey_(rd, memo.sspMonths),
+      clinician: String(best.createdBy || ''), clinicianUid: String(best.createdByUid || ''),
       items: (Array.isArray(best.items) ? best.items : []).map(function (it) {
         return {
           name: String(it.name || ''), step: SSP_STEP_LABEL_[it.step] || String(it.step || ''),
@@ -6560,7 +6597,8 @@ function flowSsp_(cfg, doc, memo) {
   }
   if (old) {
     return {
-      active: old.date >= cutoff, date: old.date, clinician: '', clinicianUid: '',
+      active: old.date >= cutoff, date: old.date, expires: flowAddMonthsKey_(old.date, memo.sspMonths),
+      clinician: '', clinicianUid: '',
       items: (old.items || []).map(function (it) {
         return { name: String(it.product || ''), step: String(it.step || ''), am: String(it.am || ''), pm: String(it.pm || ''),
           when: String(it.whenToUse || '') };
@@ -6580,34 +6618,166 @@ function flowProduct_(cfg, memo, name) {
   return memo.products.filter(function (p) { return flowSameProduct_(p.name, name); })[0] || null;
 }
 
+// Everything the cards and rules need to know about one patient. Each part is only read when it's needed.
 function flowCtx_(cfg, run, memo) {
   memo.pts = memo.pts || {};
   if (!(run.patientId in memo.pts)) memo.pts[run.patientId] = flowPatient_(cfg, run.patientId);
   const doc = memo.pts[run.patientId];
   if (!doc) return null;
-  let ssp = null, up = null;
-  return {
-    doc: doc, pid: doc._id, who: flowWho_(doc),
-    ssp: function () { return ssp || (ssp = flowSsp_(cfg, doc, memo)); },
-    upcoming: function () { return up || (up = flowUpcoming_(cfg, doc, memo)); },
-  };
+  const once = {};
+  const lazy = function (k, fn) { return function () { if (!(k in once)) once[k] = fn(); return once[k]; }; };
+  const ctx = { doc: doc, pid: doc._id, who: flowWho_(doc), memo: memo, _f: {} };
+  ctx.ssp = lazy('ssp', function () { return flowSsp_(cfg, doc, memo); });
+  ctx.future = lazy('future', function () { return flowFuture_(cfg, doc, memo); });
+  ctx.upcoming = lazy('up', function () { return ctx.future().map(function (a) { return a.date + '|' + a.time; }); });
+  ctx.visits = lazy('visits', function () {
+    const key = docId_(doc.PttID || doc._id);
+    const pre = key ? fsGetDoc_(cfg, 'pcn_results/' + encodeURIComponent(key)) : null;
+    return pre ? planVisits_(pre, [], flowKey_(Date.now())).filter(function (v) { return !v.future; }) : [];
+  });
+  ctx.plan = lazy('plan', function () { return fsGetDoc_(cfg, 'plan_progress/' + encodeURIComponent(doc._id)); });
+  ctx.forms = lazy('forms', function () { return fsQuery_(cfg, 'form_submissions', 'patientId', 'EQUAL', doc._id, 300); });
+  return ctx;
 }
 
-function flowCond_(cfg, cond, run, ctx) {
-  if (cond === 'has_ssp') return ctx.ssp().active;
-  if (cond === 'in_ssp') {
-    const s = ctx.ssp();
-    return s.active && s.items.some(function (it) { return flowSameProduct_(it.name, run.product); });
+// Their invoice purchases (skincare/{key}.purchases)
+function flowPurchases_(cfg, run, ctx) {
+  if (ctx._buys) return ctx._buys;
+  const key = run.sourceKey || docId_(ctx.doc.PttID || ctx.doc._id);
+  const sk = key ? fsGetDoc_(cfg, 'skincare/' + encodeURIComponent(key)) : null;
+  ctx._buys = (sk && Array.isArray(sk.purchases)) ? sk.purchases : [];
+  return ctx._buys;
+}
+
+/* ---------- Rules ---------- */
+
+// One fact about the patient (or this purchase), worked out once per run
+function flowFact_(cfg, key, run, ctx) {
+  if (key in ctx._f) return ctx._f[key];
+  const today = flowKey_(Date.now());
+  let v = null;
+  switch (key) {
+    case 'buy.product': v = String(run.product || ''); break;
+    case 'buy.sold_by': v = String(run.soldBy || ''); break;
+    case 'buy.first':
+      v = !flowPurchases_(cfg, run, ctx).some(function (p) {
+        return flowSameProduct_(p.product, run.product) && String(p.date || '') < String(run.purchaseDate || '');
+      });
+      break;
+    case 'buy.in_ssp': {
+      const s = ctx.ssp();
+      v = s.active && s.items.some(function (it) { return flowSameProduct_(it.name, run.product); });
+      break;
+    }
+    case 'hist.bought': v = flowPurchases_(cfg, run, ctx).map(function (p) { return String(p.product || ''); }); break;
+    case 'hist.times': v = flowPurchases_(cfg, run, ctx).filter(function (p) { return flowSameProduct_(p.product, run.product); }).length; break;
+    case 'hist.days_since': {
+      const when = String(run.purchaseDate || today);
+      const prev = flowPurchases_(cfg, run, ctx).map(function (p) { return String(p.date || ''); })
+        .filter(function (d) { return /^\d{4}-\d{2}-\d{2}$/.test(d) && d < when; }).sort().pop();
+      v = prev ? flowDays_(prev, when) : Infinity;
+      break;
+    }
+    case 'appt.has_future': v = ctx.future().length > 0; break;
+    case 'appt.next_days': { const n = ctx.future()[0]; v = n ? flowDays_(today, n.date) : Infinity; break; }
+    case 'appt.future_service': v = [].concat.apply([], ctx.future().map(function (a) { return a.services; })); break;
+    case 'appt.last_days': { const p = ctx.visits(); v = p.length ? flowDays_(p[p.length - 1].dateKey, today) : Infinity; break; }
+    case 'appt.visits': v = ctx.visits().length; break;
+    case 'appt.past_service': v = [].concat.apply([], ctx.visits().map(function (x) { return x.services; })); break;
+    case 'ssp.active': v = ctx.ssp().active; break;
+    case 'ssp.age_days': { const s = ctx.ssp(); v = s.date ? flowDays_(s.date, today) : null; break; }
+    case 'ssp.expiry_days': { const s = ctx.ssp(); v = s.expires ? flowDays_(today, s.expires) : null; break; }
+    case 'plan.status': { const p = ctx.plan(); v = p ? String(p.effStatus || p.status || 'none') : 'none'; break; }
+    case 'plan.due':
+    case 'plan.overdue': {
+      const p = ctx.plan();
+      const states = key === 'plan.due' ? ['due', 'overdue'] : ['overdue'];
+      v = !!(p && Array.isArray(p.lines) && p.lines.some(function (l) {
+        return states.indexOf(String(l.state || '')) !== -1 && ['active', 'maintenance'].indexOf(String(l.concernStatus || 'active')) !== -1;
+      }));
+      break;
+    }
+    case 'pt.age': { const a = recAge_(ctx.doc.DobKey, today); v = a === '' ? null : Number(a); break; }
+    case 'pt.email': v = isEmail_(ctx.who.email); break;
+    case 'pt.mobile': v = String(ctx.doc.Mobile || '').replace(/\D/g, '').length >= 8; break;
+    case 'pt.marketing': v = ctx.doc['Marketing OK'] === true; break; // marketing consent arrives in Step 4
   }
-  if (cond === 'booked') return ctx.upcoming().length > 0;
-  if (cond === 'first_buy') {
-    const sk = run.sourceKey ? fsGetDoc_(cfg, 'skincare/' + encodeURIComponent(run.sourceKey)) : null;
-    return !((sk && Array.isArray(sk.purchases)) ? sk.purchases : []).some(function (p) {
-      return flowSameProduct_(p.product, run.product) && String(p.date || '') < String(run.purchaseDate || '');
+  ctx._f[key] = v;
+  return v;
+}
+
+function flowRuleOk_(cfg, r, run, ctx) {
+  const type = FLOW_FIELD_TYPE_[r && r.field];
+  if (!type) return false;
+  if (type === 'form') {
+    const want = flowNorm_(r.value);
+    if (!want) return false;
+    const days = Number(r.days) || 0;
+    const today = flowKey_(Date.now());
+    const has = ctx.forms().some(function (s) {
+      if (flowNorm_(s.templateName).indexOf(want) === -1) return false;
+      if (!days) return true;
+      const d = flowDays_(String(s.recordDate || ''), today);
+      return d !== null && d <= days;
     });
+    return r.op === 'none' ? !has : has;
   }
-  if (cond === 'marketing') return ctx.doc['Marketing OK'] === true; // marketing consent arrives in Step 4
+  const v = flowFact_(cfg, r.field, run, ctx);
+  if (type === 'bool') return r.op === 'no' ? v !== true : v === true;
+  if (type === 'number') {
+    const n = Number(r.value);
+    if (v === null || v === undefined || r.value === '' || !isFinite(n)) return false;
+    return r.op === 'lt' ? v < n : r.op === 'eq' ? v === n : v > n;
+  }
+  if (type === 'text') {
+    const want = flowNorm_(r.value);
+    if (!want) return false;
+    const has = (Array.isArray(v) ? v : [v]).some(function (x) { return flowNorm_(x).indexOf(want) !== -1; });
+    return r.op === 'not_contains' ? !has : has;
+  }
+  if (type === 'products') {
+    const wanted = Array.isArray(r.value) ? r.value : [];
+    if (!wanted.length) return false;
+    const has = (Array.isArray(v) ? v : [v]).some(function (x) {
+      return wanted.some(function (w) { return flowSameProduct_(x, w); });
+    });
+    return r.op === 'none' ? !has : has;
+  }
+  if (type === 'choice') return r.op === 'not' ? v !== String(r.value) : v === String(r.value);
   return false;
+}
+
+// A set of rules: all (or any) of them. No rules at all counts as a match.
+function flowGroupOk_(cfg, g, run, ctx) {
+  const rules = g && Array.isArray(g.rules) ? g.rules : [];
+  if (!rules.length) return true;
+  const ok = function (r) { return flowRuleOk_(cfg, r, run, ctx); };
+  return g.match === 'any' ? rules.some(ok) : rules.every(ok);
+}
+function flowHasRules_(g) { return !!(g && Array.isArray(g.rules) && g.rules.length); }
+
+// If / else. c is the card's settings (or an older card's condition name).
+function flowCond_(cfg, c, run, ctx) {
+  const cond = typeof c === 'string' ? c : String((c && c.cond) || '');
+  if (cond === 'rules') return flowGroupOk_(cfg, c && c.rules, run, ctx);
+  if (cond === 'has_ssp') return flowFact_(cfg, 'ssp.active', run, ctx) === true;
+  if (cond === 'in_ssp') return flowFact_(cfg, 'buy.in_ssp', run, ctx) === true;
+  if (cond === 'booked') return flowFact_(cfg, 'appt.has_future', run, ctx) === true;
+  if (cond === 'first_buy') return flowFact_(cfg, 'buy.first', run, ctx) === true;
+  if (cond === 'marketing') return flowFact_(cfg, 'pt.marketing', run, ctx) === true;
+  return false;
+}
+function flowCondLabel_(c) { return FLOW_CONDS_[(c && c.cond) || ''] || String((c && c.cond) || ''); }
+
+// Why the trigger wouldn't start this flow for this purchase, or ''
+function flowTriggerWhyNot_(cfg, flow, run, ctx, memo) {
+  const t = flow.trigger || {};
+  if (t.scope === 'catalogue' && !flowProduct_(cfg, memo, run.product)) return "it isn't a Skin Script catalogue product";
+  if (t.scope === 'list' && !(Array.isArray(t.products) ? t.products : []).some(function (n) { return flowSameProduct_(n, run.product); })) {
+    return "it isn't one of the flow's chosen products";
+  }
+  if (flowHasRules_(t.rules) && !flowGroupOk_(cfg, t.rules, run, ctx)) return "the patient doesn't match the start rules";
+  return '';
 }
 
 /* ---------- Filling in the blanks ---------- */
@@ -6747,13 +6917,15 @@ function flowSendStaff_(cfg, flow, step, run, ctx, memo, tester) {
 
 /* ---------- Stop rules ---------- */
 
-function flowStopWhy_(flow, run, ctx, testing) {
+function flowStopWhy_(cfg, flow, run, ctx, testing) {
   if (!testing && !isEmail_(ctx.who.email)) return "There's no email address on their record.";
-  if ((flow.stop || {}).booking === true) {
+  const st = flow.stop || {};
+  if (st.booking === true) {
     const before = {};
     (run.apptKeys || []).forEach(function (k) { before[k] = true; });
     if (ctx.upcoming().some(function (k) { return !before[k]; })) return 'They booked an appointment.';
   }
+  if (flowHasRules_(st.rules) && flowGroupOk_(cfg, st.rules, run, ctx)) return "One of the flow's stop rules matched.";
   return '';
 }
 // At most one automatic email to a patient every X days, across all flows (test emails don't count)
@@ -6826,9 +6998,12 @@ function flowEnrol_(cfg, flows, memo) {
       const product = String(p.product || '').trim();
       if (!product || !/^\d{4}-\d{2}-\d{2}$/.test(date) || date < from || date > today) return;
       list.forEach(function (f) {
+        const t = f.trigger || {};
         const liveMs = Date.parse(String(f.liveAt || ''));
         if (date < (liveMs ? flowKey_(liveMs) : today)) return; // bought before the flow was turned on
-        if ((f.trigger || {}).scope === 'catalogue' && !flowProduct_(cfg, memo, product)) return;
+        // The cheap product checks first; the patient rules are checked once we know who they are
+        if (t.scope === 'catalogue' && !flowProduct_(cfg, memo, product)) return;
+        if (t.scope === 'list' && !(Array.isArray(t.products) ? t.products : []).some(function (n) { return flowSameProduct_(n, product); })) return;
         cand.push({
           id: flowPart_(f._id) + '__' + flowPart_(sk.patientId) + '__' + flowHash_([p.invoiceId, product, date].join('|')),
           dup: f._id + '|' + String(sk.patientId) + '|' + flowNorm_(product),
@@ -6864,6 +7039,13 @@ function flowEnrol_(cfg, flows, memo) {
         reason: 'No matching patient in the Patient List.', next: '', dueAt: 0, mode: '', events: [],
       })));
       return;
+    }
+    memo.pts[doc._id] = doc;
+    // "Only start for patients who…": not a match means no run at all
+    const trun = { patientId: doc._id, product: c.product, purchaseDate: c.date, soldBy: base.soldBy, sourceKey: c.sk._key };
+    if (flowHasRules_((f.trigger || {}).rules)) {
+      const tctx = flowCtx_(cfg, trun, memo);
+      if (!tctx || !flowGroupOk_(cfg, f.trigger.rules, trun, tctx)) return;
     }
     const who = flowWho_(doc);
     const earlier = fsQuery_(cfg, FLOW_RUNS_, 'patientId', 'EQUAL', doc._id, 100).filter(function (r) {
@@ -6942,8 +7124,8 @@ function flowStep_(cfg, flow, run, memo, deadline) {
     }
 
     if (s.type === 'branch') {
-      const yes = flowCond_(cfg, c.cond, run, ctx);
-      note((yes ? 'Yes: ' : 'No: ') + (FLOW_CONDS_[c.cond] || c.cond));
+      const yes = flowCond_(cfg, c, run, ctx);
+      note((yes ? 'Yes: ' : 'No: ') + flowCondLabel_(c));
       const pathList = (yes ? c.yes : c.no) || [];
       next = pathList.length ? String(pathList[0].id || '') : afterId;
       continue;
@@ -6960,7 +7142,7 @@ function flowStep_(cfg, flow, run, memo, deadline) {
     }
 
     if (s.type === 'email') {
-      const why = flowStopWhy_(flow, run, ctx, !!tester);
+      const why = flowStopWhy_(cfg, flow, run, ctx, !!tester);
       if (why) { note('Stopped: ' + why); save({ status: 'stopped', reason: why, next: '' }); return; }
       if (c.promo && !tester) {
         note('Skipped a promotional email (marketing consent is still to come).');
@@ -7071,6 +7253,8 @@ function flowTestRun_(body, session) {
   run.apptKeys = ctx.upcoming();
 
   const steps = [];
+  const whyNot = flowTriggerWhyNot_(cfg, flow, run, ctx, memo);
+  if (whyNot) steps.push("Heads up: the real flow wouldn't start for this purchase (" + whyNot + '). The test carries on so you can see the emails.');
   let sent = 0;
   let ended = false;
   let next = Array.isArray(flow.steps) && flow.steps[0] ? String(flow.steps[0].id || '') : '';
@@ -7084,8 +7268,8 @@ function flowTestRun_(body, session) {
     if (s.type === 'stop') { steps.push('End flow.'); ended = true; break; }
     if (s.type === 'wait') { steps.push('Wait ' + flowWaitText_(c) + ' (skipped in a test).'); next = afterId; continue; }
     if (s.type === 'branch') {
-      const yes = flowCond_(cfg, c.cond, run, ctx);
-      steps.push('If / else: ' + (FLOW_CONDS_[c.cond] || c.cond) + ' → ' + (yes ? 'Yes' : 'No'));
+      const yes = flowCond_(cfg, c, run, ctx);
+      steps.push('If / else: ' + flowCondLabel_(c) + ' → ' + (yes ? 'Yes' : 'No'));
       const pathList = (yes ? c.yes : c.no) || [];
       next = pathList.length ? String(pathList[0].id || '') : afterId;
       continue;
@@ -7098,7 +7282,7 @@ function flowTestRun_(body, session) {
       continue;
     }
     if (s.type === 'email') {
-      const why = flowStopWhy_(flow, run, ctx, false);
+      const why = flowStopWhy_(cfg, flow, run, ctx, false);
       if (why) { steps.push('Stop rule: ' + why + ' The real flow would stop here.'); ended = true; break; }
       flowSendPatient_(cfg, flow, s, run, ctx, memo, me);
       sent++;

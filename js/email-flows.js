@@ -8,6 +8,9 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
 import { searchPatients } from "./task-runner.js";
+import {
+  blankGroup, cleanGroup, groupProblem, describeGroup, ruleCount, loadProductNames, mountRuleBuilder, mountProductPicker,
+} from "./flow-rules.js";
 
 import { createRichEditor } from "./rich-editor.js";
 import { hydrateRichImages } from "./rich-html.js";
@@ -59,13 +62,14 @@ const TRIGGERS = [
   ["ssp_created", "A Skin Script is created", true],
   ["ssp_expiring", "A Skin Script is about to expire", true],
 ];
-const SCOPES = [["any", "Any product"], ["catalogue", "Only Skin Script catalogue products"]];
+const SCOPES = [["any", "Any product"], ["catalogue", "Only Skin Script catalogue products"], ["list", "Only these products"]];
 const CONDS = [
   ["in_ssp", "The product is in their Skin Script"],
   ["has_ssp", "They have an active Skin Script"],
   ["marketing", "They agreed to marketing emails"],
   ["first_buy", "It's the first time they've bought this product"],
   ["booked", "They have an upcoming appointment"],
+  ["rules", "Build my own rules…"],
 ];
 const UNITS = [["days", "days", 365], ["weeks", "weeks", 52], ["months", "months", 12]];
 const STAFF_TO = [
@@ -105,7 +109,7 @@ const newId = () => "s_" + Math.random().toString(36).slice(2, 9) + Date.now().t
 function blank(type) {
   const cfg = type === "email" ? { subject: "", body: "", promo: false }
     : type === "wait" ? { num: 1, unit: "weeks" }
-    : type === "branch" ? { cond: "in_ssp", yes: [], no: [] }
+    : type === "branch" ? { cond: "in_ssp", rules: blankGroup(), yes: [], no: [] }
     : type === "staff" ? { to: "ssp_creator", roles: [], staffIds: [], subject: "", message: "" }
     : {};
   return { id: newId(), type, cfg };
@@ -115,7 +119,7 @@ function cleanSteps(list) {
   return (Array.isArray(list) ? list : []).filter((s) => s && TYPES[s.type]).map((s) => {
     const b = blank(s.type);
     const cfg = { ...b.cfg, ...(s.cfg || {}) };
-    if (s.type === "branch") { cfg.yes = cleanSteps(cfg.yes); cfg.no = cleanSteps(cfg.no); }
+    if (s.type === "branch") { cfg.yes = cleanSteps(cfg.yes); cfg.no = cleanSteps(cfg.no); cfg.rules = cleanGroup(cfg.rules); }
     if (s.type === "staff") {
       cfg.roles = Array.isArray(cfg.roles) ? cfg.roles.map(String) : [];
       cfg.staffIds = Array.isArray(cfg.staffIds) ? cfg.staffIds.map(String) : [];
@@ -153,7 +157,7 @@ function summary(s) {
   const c = s.cfg;
   if (s.type === "email") return c.subject.trim() || "No subject yet";
   if (s.type === "wait") return `${Number(c.num) || 0} ${unitWord(c.num, c.unit)}`;
-  if (s.type === "branch") return label(CONDS, c.cond);
+  if (s.type === "branch") return c.cond === "rules" ? describeGroup(c.rules) : label(CONDS, c.cond);
   if (s.type === "staff") {
     const to = c.to === "roles" && c.roles.length ? c.roles.join(", ") : STAFF_SHORT[c.to] || "Staff";
     return c.subject.trim() ? `To ${to} · ${c.subject.trim()}` : `To ${to}`;
@@ -176,8 +180,9 @@ function stepProblems(s, depth) {
     if (c.to === "staff" && !c.staffIds.length) out.push("Choose at least one staff member");
     if (!c.subject.trim()) out.push("Add a subject");
     if (!c.message.trim()) out.push("Write the message");
-  } else if (s.type === "branch" && depth > MAX_DEPTH) {
-    out.push(`If / else can only go ${MAX_DEPTH} deep`);
+  } else if (s.type === "branch") {
+    if (depth > MAX_DEPTH) out.push(`If / else can only go ${MAX_DEPTH} deep`);
+    if (c.cond === "rules") { const p = groupProblem(c.rules, true); if (p) out.push(p); }
   }
   return out;
 }
@@ -185,6 +190,11 @@ function stepProblems(s, depth) {
 function flowProblems(flow) {
   const out = [];
   if (!flow.name.trim()) out.push("Give the flow a name.");
+  if (flow.trigger.scope === "list" && !flow.trigger.products.length) out.push("Choose at least one product for the trigger, or pick Any product.");
+  const tp = groupProblem(flow.trigger.rules, false);
+  if (tp) out.push(`Start rules: ${tp}.`);
+  const sp = groupProblem(flow.stop.rules, false);
+  if (sp) out.push(`Stop rules: ${sp}.`);
   if (!flow.steps.length) out.push("Add at least one card under the trigger.");
   if (count(flow.steps) > MAX_STEPS) out.push(`A flow can have up to ${MAX_STEPS} cards.`);
   let n = 0;
@@ -199,12 +209,17 @@ function flowProblems(flow) {
 /* ===================== Saving ===================== */
 
 function snapshot(d = {}) {
+  const t = d.trigger || {}, st = d.stop || {};
   return {
     name: String(d.name || ""),
     description: String(d.description || ""),
-    trigger: { event: "purchase", scope: "any", ...(d.trigger || {}) },
+    trigger: {
+      event: "purchase", scope: "any", ...t,
+      products: (Array.isArray(t.products) ? t.products : []).map(String).filter(Boolean).slice(0, 40),
+      rules: cleanGroup(t.rules),
+    },
     steps: cleanSteps(d.steps),
-    stop: { rebuy: true, booking: false, gapDays: 3, ...(d.stop || {}) },
+    stop: { rebuy: true, booking: false, gapDays: 3, ...st, rules: cleanGroup(st.rules) },
     style: { background: EMAIL_BACKGROUNDS[0], accent: EMAIL_ACCENTS[0], width: 600, logo: true, footer: true, ...(d.style || {}) },
   };
 }
@@ -481,6 +496,7 @@ async function mountFlowEditor(container, { id, staff }) {
   let letterhead = null, staffList = null, staffError = false;
   let mode = loaded.sendMode === "real" ? "real" : "test"; // testing: every email goes to the person who turned it on
   let runs = null, runsErr = "", runsLoading = false;
+  let productNames = [];
   const lhReady = getLetterhead().then((lh) => { letterhead = lh || {}; }).catch(() => { letterhead = {}; });
   let editor = null, lastText = null;
   let dirty = false, saving = false, saveTimer = null;
@@ -545,6 +561,7 @@ async function mountFlowEditor(container, { id, staff }) {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(flush, 800);
   }
+  const ruleChange = () => { changed(); renderCanvas(); };
   async function flush() {
     clearTimeout(saveTimer);
     if (!dirty || saving) return;
@@ -660,6 +677,14 @@ async function mountFlowEditor(container, { id, staff }) {
     return L;
   }
 
+  function triggerText() {
+    const t = flow.trigger;
+    const n = t.products.length;
+    const what = t.scope === "catalogue" ? " (Skin Script catalogue)" : t.scope === "list" ? ` (${n} product${n === 1 ? "" : "s"})` : "";
+    const r = ruleCount(t.rules);
+    return triggerLabel(t) + what + (r ? ` · ${r} rule${r === 1 ? "" : "s"}` : "");
+  }
+
   function cardHtml(s, depth, x, y) {
     const t = TYPES[s.type];
     const probs = stepProblems(s, depth);
@@ -690,7 +715,7 @@ async function mountFlowEditor(container, { id, staff }) {
         data-pick="trigger" tabindex="0" role="button" aria-pressed="${on}">
         <span class="ef-ico is-trigger">${I.cart}</span>
         <span class="ef-card-main"><small>When this happens</small>
-          <strong>${esc(triggerLabel(flow.trigger))}${flow.trigger.scope === "catalogue" ? " (Skin Script catalogue)" : ""}</strong></span>
+          <strong>${esc(triggerText())}</strong></span>
       </div>
       ${L.cards.map((c) => cardHtml(c.s, c.depth, c.x, c.y)).join("")}
       ${L.labels.map((b) => `<span class="ef-bl${b.yes ? " is-yes" : ""}" style="left:${b.x}px;top:${b.y}px">${b.yes ? "Yes" : "No"}</span>`).join("")}
@@ -890,6 +915,9 @@ async function mountFlowEditor(container, { id, staff }) {
             ${esc(l)}${soon ? ' <small class="muted">· coming soon</small>' : ""}</label>`).join("")}</div>
         <label class="tb-field"><span>Which products</span>
           <select class="fb-select" data-f="trigger.scope">${opt(SCOPES, t.scope)}</select></label>
+        ${t.scope === "list" ? `<div class="tb-field"><span>Products</span><div class="fr-pp" data-role="trig-products"></div>
+          <small class="muted">Sizes count as the same product, so "Hydrating Serum" also matches "Hydrating Serum 30ml".</small></div>` : ""}
+        <div class="tb-field"><span>Only start for patients who… <small>(optional)</small></span><div data-role="trig-rules"></div></div>
         <p class="tb-info">Purchases come from the invoice sync (the INVOICE RECORD sheet), checked each time it updates. Each purchase starts the flow once for that patient and product. Scanner billing sheets and sales will be added next.</p>
       </section>
       <section class="ef-sec"><h4>Stop rules <small>(checked before every email)</small></h4>
@@ -897,6 +925,7 @@ async function mountFlowEditor(container, { id, staff }) {
         <label class="fe-check"><input type="checkbox" checked disabled /> They have no email address <small class="muted">(always on)</small></label>
         <label class="fe-check"><input type="checkbox" data-f="stop.rebuy"${st.rebuy ? " checked" : ""} /> They buy the same product again <small class="muted">(the flow starts over)</small></label>
         <label class="fe-check"><input type="checkbox" data-f="stop.booking"${st.booking ? " checked" : ""} /> They book an appointment</label>
+        <div class="tb-field"><span>Also stop when…</span><div data-role="stop-rules"></div></div>
         <label class="tb-field"><span>At most one automatic email to a patient every</span>
           <select class="fb-select" data-f="stop.gapDays">${opt(gaps, st.gapDays)}</select>
           <small class="muted">Across all flows. An email that comes due too soon waits until it's allowed.</small></label>
@@ -907,6 +936,17 @@ async function mountFlowEditor(container, { id, staff }) {
         <label class="fe-check"><input type="checkbox" data-style="logo"${s.logo ? " checked" : ""} /> Clinic logo at the top</label>
         <label class="fe-check"><input type="checkbox" data-style="footer"${s.footer ? " checked" : ""} /> Clinic details at the bottom</label>
       </section>`;
+  }
+
+  function mountSettingsRules() {
+    const tp = side.querySelector('[data-role="trig-products"]');
+    if (tp) mountProductPicker(tp, flow.trigger.products, { onChange: ruleChange, names: productNames });
+    const tr = side.querySelector('[data-role="trig-rules"]');
+    if (tr) mountRuleBuilder(tr, flow.trigger.rules, { onChange: ruleChange, names: productNames,
+      empty: "Anyone who makes a matching purchase starts the flow." });
+    const sr = side.querySelector('[data-role="stop-rules"]');
+    if (sr) mountRuleBuilder(sr, flow.stop.rules, { onChange: ruleChange, names: productNames,
+      empty: "No extra stop rules." });
   }
 
   function stepBodyHtml(s) {
@@ -939,7 +979,8 @@ async function mountFlowEditor(container, { id, staff }) {
     if (s.type === "branch") {
       return `
         <section class="ef-sec">
-          <label class="tb-field"><span>Check</span><select class="fb-select" data-k="cond">${opt(CONDS, c.cond)}</select></label>
+          <label class="tb-field"><span>Check</span><select class="fb-select" data-k="cond" data-rerender>${opt(CONDS, c.cond)}</select></label>
+          ${c.cond === "rules" ? '<div data-role="branch-rules"></div>' : ""}
           <p class="tb-info">Patients who match carry on down <strong>Yes</strong>. Everyone else goes down <strong>No</strong>.</p>
         </section>`;
     }
@@ -980,7 +1021,13 @@ async function mountFlowEditor(container, { id, staff }) {
     editor = null;
     lastText = null;
     const r = sel && sel !== "trigger" ? find(flow.steps, sel) : null;
-    if (!r) { if (sel !== "trigger") sel = null; side.innerHTML = flowSettingsHtml(); renderRuns(); return; }
+    if (!r) {
+      if (sel !== "trigger") sel = null;
+      side.innerHTML = flowSettingsHtml();
+      mountSettingsRules();
+      renderRuns();
+      return;
+    }
     const s = r.list[r.i];
     const t = TYPES[s.type];
     side.innerHTML = `
@@ -1004,6 +1051,11 @@ async function mountFlowEditor(container, { id, staff }) {
       });
       editor.setHtml(s.cfg.body || "");
       renderPreview();
+    }
+    if (s.type === "branch" && s.cfg.cond === "rules") {
+      mountRuleBuilder(side.querySelector('[data-role="branch-rules"]'), s.cfg.rules, {
+        onChange: ruleChange, names: productNames, empty: "Add a rule to decide who goes down Yes.",
+      });
     }
     if (s.type === "staff" && (s.cfg.to === "roles" || s.cfg.to === "staff")) loadStaff();
   }
@@ -1052,7 +1104,13 @@ async function mountFlowEditor(container, { id, staff }) {
   side.addEventListener("input", (e) => {
     const el = e.target;
     if (el.closest(".re")) return; // the message editor reports its own changes
-    if (el.dataset.f !== undefined) { setFlowValue(el.dataset.f, el); renderCanvas(); changed(); return; }
+    if (el.dataset.f !== undefined) {
+      setFlowValue(el.dataset.f, el);
+      renderCanvas();
+      changed();
+      if (el.dataset.f === "trigger.scope") renderSide();
+      return;
+    }
     if (el.dataset.style !== undefined) {
       flow.style[el.dataset.style] = el.type === "checkbox" ? el.checked : el.value;
       changed();
@@ -1244,7 +1302,8 @@ async function mountFlowEditor(container, { id, staff }) {
         <div class="ef-test-hits" data-role="hits"></div>
         <div data-role="pick"></div>
         <label class="lh-field"><span class="lh-label">Product they bought</span>
-          <input type="text" name="product" maxlength="150" placeholder="e.g. Hydrating Serum" /></label>
+          <input type="text" name="product" maxlength="150" list="ef-test-products" placeholder="e.g. Hydrating Serum" /></label>
+        <datalist id="ef-test-products">${productNames.map((n) => `<option value="${esc(n)}"></option>`).join("")}</datalist>
         <div data-role="out"></div>
         <p class="lh-error" role="alert" hidden></p>
         <div class="lh-actions">
@@ -1414,4 +1473,9 @@ async function mountFlowEditor(container, { id, staff }) {
   renderCanvas();
   renderSide();
   lhReady.finally(() => { if (root.isConnected) renderPreview(); });
+  loadProductNames().then((names) => {
+    productNames = names;
+    // The product suggestions appear once the names have loaded
+    if (root.isConnected && !editor && side.querySelector("[data-pp-in]")) renderSide();
+  }).catch(() => {});
 }
