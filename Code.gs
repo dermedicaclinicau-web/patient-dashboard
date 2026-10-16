@@ -45,7 +45,7 @@ function doPost(e) {
     if (body.action === 'scanner') return json_(scannerAction_(body));
     if (body.action === 'records') return json_(handleRecords_(body));
     if (body.action === 'scheduleTaskEmail') return json_(handleScheduleTaskEmail_(body));
-    
+    if (body.action === 'emailFlow') return json_(handleEmailFlow_(body));
 
     const pin = String(body.pin || '').trim();
 
@@ -3448,23 +3448,29 @@ function runScheduledTasks() {
     const cfg = getConfig_();
     const now = Date.now();
     try { runScheduledTaskEmails_(cfg); } catch (e) { console.error('Scheduled emails: ' + (e && e.stack ? e.stack : e)); }
-    const tasks = fsListAll_(cfg, 'task_types')
-      .map(function (d) { return { id: d.name.split('/').pop(), t: fromFields_(d.fields || {}) }; })
-      .filter(function (x) {
-        const s = x.t.schedule;
-        return x.t.status === 'live' && x.t.category === 'staff' && s && s.enabled === true && s.paused !== true;
-      });
-    if (!tasks.length) return;
-    let closed = [];
-    try { const c = fsGetDoc_(cfg, 'task_settings/closed'); closed = (c && Array.isArray(c.dates)) ? c.dates : []; }
-    catch (e) { console.warn('Closed days not read: ' + e); }
-    tasks.forEach(function (x) {
-      try { runOneSchedule_(cfg, x.id, x.t, closed, now); }
-      catch (e) { console.error('Schedule ' + x.id + ' error: ' + (e && e.stack ? e.stack : e)); }
-    });
+    try { runStaffSchedules_(cfg, now); } catch (e) { console.error('Staff schedules: ' + (e && e.stack ? e.stack : e)); }
+    try { runEmailFlows_(cfg, now + 5 * 60000); } catch (e) { console.error('Email flows: ' + (e && e.stack ? e.stack : e)); }
   } finally {
     lock.releaseLock();
   }
+}
+
+// Scheduled staff tasks (Task Builder → Schedule)
+function runStaffSchedules_(cfg, now) {
+  const tasks = fsListAll_(cfg, 'task_types')
+    .map(function (d) { return { id: d.name.split('/').pop(), t: fromFields_(d.fields || {}) }; })
+    .filter(function (x) {
+      const s = x.t.schedule;
+      return x.t.status === 'live' && x.t.category === 'staff' && s && s.enabled === true && s.paused !== true;
+    });
+  if (!tasks.length) return;
+  let closed = [];
+  try { const c = fsGetDoc_(cfg, 'task_settings/closed'); closed = (c && Array.isArray(c.dates)) ? c.dates : []; }
+  catch (e) { console.warn('Closed days not read: ' + e); }
+  tasks.forEach(function (x) {
+    try { runOneSchedule_(cfg, x.id, x.t, closed, now); }
+    catch (e) { console.error('Schedule ' + x.id + ' error: ' + (e && e.stack ? e.stack : e)); }
+  });
 }
 
 // Run ONCE from the editor to start the scheduler
@@ -6363,4 +6369,764 @@ function installPatientIndex() {
   ScriptApp.newTrigger('buildPatientIndex').timeBased().everyDays(1).atHour(5).create();
   buildPatientIndex();
   console.log('Patient index installed (daily, about 5am).');
+}
+
+// ===================== Email flows: the runner =====================
+// runScheduledTasks (every 15 minutes) calls runEmailFlows_. New purchases from the invoice sync start live flows:
+// one run per patient, product and invoice, saved in email_flow_runs with a fixed ID so nothing starts twice.
+// Each run moves through its cards. Patient emails go out between 9 am and 6 pm Perth; waits set the next time.
+// While a flow is testing, every email goes to the person who turned it on, marked [Test].
+
+const FLOW_RUNS_ = 'email_flow_runs';
+const FLOW_LOOKBACK_DAYS_ = 3;
+const FLOW_HOURS_ = [9, 18];
+const FLOW_STEPS_PER_RUN_ = 12;
+const FLOW_CONDS_ = {
+  in_ssp: 'The product is in their Skin Script', has_ssp: 'They have an active Skin Script',
+  marketing: 'They agreed to marketing emails', first_buy: "It's the first time they've bought this product",
+  booked: 'They have an upcoming appointment',
+};
+const FLOW_TOKEN_RE_ = /\{\s*([A-Za-z][A-Za-z ]{0,40}?)\s*\}/g;
+
+/* ---------- Small helpers ---------- */
+
+function flowNorm_(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+// "Hydrating Serum" matches "Hydrating Serum 30ml", but "Serum" doesn't match "Serum Booster"
+function flowSameProduct_(a, b) {
+  a = flowNorm_(a); b = flowNorm_(b);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const s = a.length < b.length ? a : b;
+  const l = a.length < b.length ? b : a;
+  return s.length >= 4 && l.indexOf(s + ' ') === 0;
+}
+function flowKey_(ms) { return Utilities.formatDate(new Date(ms), REC_TZ_, 'yyyy-MM-dd'); }
+function flowPart_(s) { return String(s || '').replace(/[^A-Za-z0-9_-]+/g, '_').slice(0, 60) || 'x'; }
+function flowHash_(s) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, String(s), Utilities.Charset.UTF_8)
+    .map(function (b) { return ('0' + (b & 255).toString(16)).slice(-2); }).join('').slice(0, 16);
+}
+function flowWaitText_(c) {
+  const n = Math.max(1, Math.floor(Number(c.num) || 1));
+  const u = String(c.unit || 'days');
+  return n + ' ' + (n === 1 ? u.replace(/s$/, '') : u);
+}
+// Now if it's between 9 am and 6 pm Perth, otherwise the next 9 am
+function flowSendWindow_(ms) {
+  const p = new Date(ms + SCH_PERTH_);
+  const h = p.getUTCHours();
+  if (h >= FLOW_HOURS_[0] && h < FLOW_HOURS_[1]) return ms;
+  let day = schDayNum_(p.getUTCFullYear(), p.getUTCMonth() + 1, p.getUTCDate());
+  if (h >= FLOW_HOURS_[1]) day++;
+  return schSlotMs_(schFromNum_(day), pad2_(FLOW_HOURS_[0]) + ':00');
+}
+function flowAddWait_(ms, c) {
+  const n = Math.max(1, Math.floor(Number(c.num) || 1));
+  if (c.unit === 'months') {
+    const d = new Date(ms + SCH_PERTH_);
+    d.setUTCMonth(d.getUTCMonth() + n);
+    return d.getTime() - SCH_PERTH_;
+  }
+  return ms + n * (c.unit === 'weeks' ? 7 : 1) * 86400000;
+}
+
+/* ---------- Finding cards (If / else paths join again after the If / else) ---------- */
+
+function flowFind_(list, id, parents) {
+  parents = parents || [];
+  list = Array.isArray(list) ? list : [];
+  for (let i = 0; i < list.length; i++) {
+    const s = list[i];
+    if (!s) continue;
+    if (s.id === id) return { list: list, i: i, parents: parents };
+    if (s.type === 'branch') {
+      const c = s.cfg || {};
+      const up = parents.concat([{ list: list, i: i }]);
+      const r = flowFind_(c.yes, id, up) || flowFind_(c.no, id, up);
+      if (r) return r;
+    }
+  }
+  return null;
+}
+function flowAfter_(loc) {
+  if (loc.i + 1 < loc.list.length) return loc.list[loc.i + 1];
+  for (let k = loc.parents.length - 1; k >= 0; k--) {
+    const p = loc.parents[k];
+    if (p.i + 1 < p.list.length) return p.list[p.i + 1];
+  }
+  return null;
+}
+
+/* ---------- The patient, their Skin Script, their bookings ---------- */
+
+// A patient by doc ID or PttID, following a merge to the record that was kept
+function flowPatient_(cfg, id) {
+  id = String(id || '').trim();
+  if (!recDocIdOk_(id)) return null;
+  let pid = id;
+  let doc = fsGetDoc_(cfg, 'patient_list/' + encodeURIComponent(id));
+  if (!doc) {
+    const hit = fsQuery_(cfg, 'patient_list', 'PttID', 'EQUAL', id, 1)[0];
+    if (!hit) return null;
+    pid = hit._id;
+    doc = hit;
+  }
+  for (let i = 0; i < 4 && doc.MergedInto && String(doc.MergedInto) !== pid; i++) {
+    const next = String(doc.MergedInto);
+    const d = fsGetDoc_(cfg, 'patient_list/' + encodeURIComponent(next));
+    if (!d) break;
+    pid = next;
+    doc = d;
+  }
+  doc._id = pid;
+  return doc;
+}
+function flowWho_(doc) {
+  const name = String(doc['Patient Name'] || ((doc['First Name'] || '') + ' ' + (doc['Last Name'] || '')).trim());
+  return { name: name, first: String(doc['First Name'] || name.split(' ')[0] || ''),
+    email: String(doc.Email || '').trim(), mobile: recMobile_(doc.Mobile) };
+}
+
+// Upcoming bookings as "date|time" keys (same matching as js/upcoming-appts.js)
+function flowUpcoming_(cfg, doc, memo) {
+  if (!memo.appt) {
+    const today = flowKey_(Date.now());
+    const t = today.split('-').map(Number);
+    const end = Utilities.formatDate(new Date(Date.UTC(t[0], t[1] - 1 + 12, t[2], 12)), 'UTC', 'yyyy-MM-dd');
+    const p = new Date(Date.now() + SCH_PERTH_);
+    memo.appt = { today: today, nowMin: p.getUTCHours() * 60 + p.getUTCMinutes(), days: schedApptDays_(cfg, today, end) };
+  }
+  const ids = {};
+  [doc._id, doc.PttID].concat(Array.isArray(doc.MergedIds) ? doc.MergedIds : []).forEach(function (x) {
+    x = String(x == null ? '' : x).trim().toLowerCase();
+    if (x) ids[x] = true;
+  });
+  const names = {};
+  [doc['Patient Name'], (doc['First Name'] || '') + ' ' + (doc['Last Name'] || '')]
+    .concat(Array.isArray(doc.MergedNames) ? doc.MergedNames : [])
+    .forEach(function (n) { n = schedNorm_(n); if (n) names[n] = true; });
+  const out = {};
+  memo.appt.days.forEach(function (d) {
+    const key = String(d.date || '');
+    (d.appointments || []).forEach(function (a) {
+      const aid = String(a.patientId || '').trim().toLowerCase();
+      const mine = aid ? !!ids[aid] : !!names[schedNorm_(a.patientName)];
+      if (!mine || SCHED_CANCELLED_.test(String(a.status || ''))) return;
+      const mins = Number(a.sortMinutes);
+      if (key === memo.appt.today && isFinite(mins) && mins < memo.appt.nowMin) return;
+      out[key + '|' + String(a.time || '').trim()] = true;
+    });
+  });
+  return Object.keys(out).sort();
+}
+
+// Their newest Skin Script: portal protocols (they say who made them) or older ones from the SSP sheet
+function flowSsp_(cfg, doc, memo) {
+  const none = { active: false, date: '', clinician: '', clinicianUid: '', items: [] };
+  const today = flowKey_(Date.now());
+  if (memo.sspMonths === undefined) {
+    memo.sspMonths = 12;
+    try { const s = fsGetDoc_(cfg, 'form_settings/ssp'); if (s && Number(s.validMonths) > 0) memo.sspMonths = Number(s.validMonths); }
+    catch (e) { /* 12 months */ }
+  }
+  const t = today.split('-').map(Number);
+  const cutoff = Utilities.formatDate(new Date(Date.UTC(t[0], t[1] - 1 - memo.sspMonths, t[2], 12)), 'UTC', 'yyyy-MM-dd');
+
+  let best = null;
+  uniq_([String(doc._id)].concat(Array.isArray(doc.MergedIds) ? doc.MergedIds.map(String) : [])).slice(0, 6).forEach(function (id) {
+    fsQuery_(cfg, 'ssp_records', 'patientId', 'EQUAL', id, 50).forEach(function (r) {
+      if (!best || String(r.recordDate || '') > String(best.recordDate || '')) best = r;
+    });
+  });
+  const key = docId_(doc.PttID || doc._id);
+  const sk = key ? fsGetDoc_(cfg, 'skincare/' + encodeURIComponent(key)) : null;
+  const old = ((sk && Array.isArray(sk.protocols)) ? sk.protocols : [])
+    .filter(function (p) { return /^\d{4}-\d{2}-\d{2}$/.test(String(p.date || '')); })
+    .sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); })[0] || null;
+
+  if (best && (!old || String(best.recordDate || '') >= String(old.date))) {
+    const vu = String(best.validUntil || '').slice(0, 10);
+    return {
+      active: /^\d{4}-\d{2}-\d{2}$/.test(vu) ? vu >= today : String(best.recordDate || '') >= cutoff,
+      date: String(best.recordDate || ''), clinician: String(best.createdBy || ''), clinicianUid: String(best.createdByUid || ''),
+      items: (Array.isArray(best.items) ? best.items : []).map(function (it) {
+        return {
+          name: String(it.name || ''), step: SSP_STEP_LABEL_[it.step] || String(it.step || ''),
+          am: it.am ? String(it.amText || '') : '', pm: it.pm ? String(it.pmText || '') : '',
+          when: [Array.isArray(it.days) ? it.days.join(', ') : '', String(it.notes || '')].filter(Boolean).join(' · '),
+        };
+      }),
+    };
+  }
+  if (old) {
+    return {
+      active: old.date >= cutoff, date: old.date, clinician: '', clinicianUid: '',
+      items: (old.items || []).map(function (it) {
+        return { name: String(it.product || ''), step: String(it.step || ''), am: String(it.am || ''), pm: String(it.pm || ''),
+          when: String(it.whenToUse || '') };
+      }),
+    };
+  }
+  return none;
+}
+
+// A published Skin Script catalogue product matching the name (for "How to use" and the catalogue-only trigger)
+function flowProduct_(cfg, memo, name) {
+  if (!memo.products) {
+    memo.products = fsListAll_(cfg, 'ssp_products', ['name', 'defaultInstruction', 'published'])
+      .map(function (d) { return fromFields_(d.fields || {}); })
+      .filter(function (p) { return p.name && p.published !== false; });
+  }
+  return memo.products.filter(function (p) { return flowSameProduct_(p.name, name); })[0] || null;
+}
+
+function flowCtx_(cfg, run, memo) {
+  memo.pts = memo.pts || {};
+  if (!(run.patientId in memo.pts)) memo.pts[run.patientId] = flowPatient_(cfg, run.patientId);
+  const doc = memo.pts[run.patientId];
+  if (!doc) return null;
+  let ssp = null, up = null;
+  return {
+    doc: doc, pid: doc._id, who: flowWho_(doc),
+    ssp: function () { return ssp || (ssp = flowSsp_(cfg, doc, memo)); },
+    upcoming: function () { return up || (up = flowUpcoming_(cfg, doc, memo)); },
+  };
+}
+
+function flowCond_(cfg, cond, run, ctx) {
+  if (cond === 'has_ssp') return ctx.ssp().active;
+  if (cond === 'in_ssp') {
+    const s = ctx.ssp();
+    return s.active && s.items.some(function (it) { return flowSameProduct_(it.name, run.product); });
+  }
+  if (cond === 'booked') return ctx.upcoming().length > 0;
+  if (cond === 'first_buy') {
+    const sk = run.sourceKey ? fsGetDoc_(cfg, 'skincare/' + encodeURIComponent(run.sourceKey)) : null;
+    return !((sk && Array.isArray(sk.purchases)) ? sk.purchases : []).some(function (p) {
+      return flowSameProduct_(p.product, run.product) && String(p.date || '') < String(run.purchaseDate || '');
+    });
+  }
+  if (cond === 'marketing') return ctx.doc['Marketing OK'] === true; // marketing consent arrives in Step 4
+  return false;
+}
+
+/* ---------- Filling in the blanks ---------- */
+
+function flowVals_(cfg, run, ctx, memo, forStaff) {
+  const w = ctx.who;
+  const s = ctx.ssp();
+  const item = s.active ? s.items.filter(function (it) { return flowSameProduct_(it.name, run.product); })[0] : null;
+  const prod = flowProduct_(cfg, memo, run.product);
+  const how = String((prod && prod.defaultInstruction) || '').trim() ||
+    (item ? [item.am && 'Morning: ' + item.am, item.pm && 'Evening: ' + item.pm].filter(Boolean).join('\n') : '');
+  return {
+    'first name': w.first, 'full name': w.name, 'patient name': w.name, 'patient mobile': w.mobile, 'patient email': w.email,
+    'product name': run.product, 'purchase date': recLongDate_(run.purchaseDate) || String(run.purchaseDate || ''),
+    'sold by': String(run.soldBy || ''), 'how to use': how,
+    'ssp step': item ? item.step : '', 'am instructions': item ? item.am : '', 'pm instructions': item ? item.pm : '',
+    'when to use': item ? item.when : '',
+    'ssp clinician': s.clinician || (forStaff ? 'Not recorded' : 'our team'),
+    'ssp date': s.date ? (recLongDate_(s.date) || s.date) : '',
+  };
+}
+function flowFill_(text, vals, html) {
+  return String(text || '').replace(FLOW_TOKEN_RE_, function (m, k) {
+    const key = k.toLowerCase().replace(/\s+/g, ' ');
+    if (!(key in vals)) return m;
+    const v = String(vals[key] == null ? '' : vals[key]);
+    return html ? invEsc_(v).replace(/\n/g, '<br>') : v;
+  });
+}
+// Blanks inside links are made URL-safe; everywhere else they're filled as text
+function flowFillHtml_(html, vals) {
+  const links = String(html || '').replace(/(\shref\s*=\s*")([^"]*)(")/gi, function (m, a, url, c) {
+    return a + url.replace(FLOW_TOKEN_RE_, function (t, k) {
+      const key = k.toLowerCase().replace(/\s+/g, ' ');
+      return key in vals ? encodeURIComponent(String(vals[key] || '')) : t;
+    }) + c;
+  });
+  return flowFill_(links, vals, true);
+}
+
+/* ---------- Sending ---------- */
+
+function flowTester_(uid) {
+  const s = getStaffDocs_().filter(function (x) { return x.id === uid; })[0];
+  return s && isEmail_(s.email) ? { name: String(s.name || ''), email: s.email } : null;
+}
+function flowTestBanner_(flowName, text) {
+  return '<div style="margin:0 0 12px;padding:10px 14px;border:1px dashed #f59e0b;border-radius:10px;background:#fffbeb;' +
+    'color:#92400e;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.5"><strong>Test from the email flow “' +
+    invEsc_(flowName) + '”.</strong> ' + invEsc_(text) + '</div>';
+}
+function flowLog_(cfg, flow, run, ctx, category, recips, subject, html) {
+  try {
+    commitWrites_(cfg, [updateWrite_(cfg, 'task_runs/run_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20), {
+      taskId: String(flow._id || ''), taskName: 'Email flow: ' + String(flow.name || ''), category: category,
+      patientId: ctx.pid, patientName: ctx.who.name, recipients: recips, cc: '', subject: subject,
+      html: String(html || '').slice(0, 100000), attachments: [],
+      sentAt: new Date().toISOString(), sentBy: 'Email flow', sentByUid: '', flow: true, flowRunId: String(run._id || ''),
+    })]);
+  } catch (e) { console.warn('Flow email sent, but the history log failed: ' + e); }
+}
+
+// The patient email (finished in the portal; only the patient's blanks are filled here)
+function flowSendPatient_(cfg, flow, step, run, ctx, memo, tester) {
+  const c = step.cfg || {};
+  if (!String(c.html || '').trim()) {
+    const e = new Error('Open this flow in Email flows so it saves once, then it can send.');
+    e.final = true;
+    throw e;
+  }
+  const vals = flowVals_(cfg, run, ctx, memo, false);
+  let html = sanitizeEmailHtml_(flowFillHtml_(c.html, vals));
+  let subject = flowFill_(c.subject, vals, false).replace(/\s+/g, ' ').trim().slice(0, 200) || 'A message from Dermedica';
+  let to = ctx.who.email;
+  if (tester) {
+    html = flowTestBanner_(flow.name, 'This would have gone to ' + ctx.who.name +
+      (isEmail_(to) ? ' <' + to + '>' : ' (no email on their record)') + '.' +
+      (c.promo ? ' It\'s promotional, so patients won\'t get it until marketing consent is added.' : '')) + html;
+    subject = '[Test] ' + subject;
+    to = tester.email;
+  }
+  if (!isEmail_(to)) { const e = new Error("There's no email address for " + (ctx.who.name || 'the patient') + '.'); e.final = true; throw e; }
+  const inlined = inlineTaskImages_(cfg, html);
+  const mail = { to: to, subject: subject, htmlBody: inlined.html, body: emailHtmlToText_(inlined.html), name: 'Dermedica Clinic' };
+  if (Object.keys(inlined.images).length) mail.inlineImages = inlined.images;
+  MailApp.sendEmail(mail);
+  if (!tester) flowLog_(cfg, flow, run, ctx, 'patient', [{ name: ctx.who.name, email: to }], subject, html);
+  return to;
+}
+
+// Who a Notify staff card goes to. No Skin Script clinician (or seller) found: the Admins.
+function flowStaffTo_(step, run, ctx) {
+  const c = step.cfg || {};
+  const all = getStaffDocs_().filter(function (s) { return s.active !== false && isEmail_(s.email); });
+  let list = [];
+  if (c.to === 'ssp_creator') {
+    const uid = ctx.ssp().clinicianUid;
+    list = all.filter(function (s) { return uid && s.id === uid; });
+  } else if (c.to === 'sold_by') {
+    const n = flowNorm_(run.soldBy);
+    list = all.filter(function (s) { return n && flowNorm_(s.name) === n; });
+  } else if (c.to === 'roles') {
+    const roles = (c.roles || []).map(function (r) { return String(r).toLowerCase(); });
+    list = all.filter(function (s) { return roles.indexOf(String(s.role || '').toLowerCase()) !== -1; });
+  } else if (c.to === 'staff') {
+    const ids = (c.staffIds || []).map(String);
+    list = all.filter(function (s) { return ids.indexOf(s.id) !== -1; });
+  }
+  if (!list.length && (c.to === 'ssp_creator' || c.to === 'sold_by')) {
+    list = all.filter(function (s) { return /^admin$/i.test(String(s.role || '')); });
+  }
+  return list.slice(0, 20).map(function (s) { return { name: String(s.name || ''), email: s.email }; });
+}
+function flowSendStaff_(cfg, flow, step, run, ctx, memo, tester) {
+  const c = step.cfg || {};
+  const vals = flowVals_(cfg, run, ctx, memo, true);
+  const intended = flowStaffTo_(step, run, ctx);
+  const subject0 = flowFill_(c.subject, vals, false).replace(/\s+/g, ' ').trim().slice(0, 200) || 'Email flow: ' + flow.name;
+  let inner = '<h2 style="margin:0 0 10px;font-size:19px;color:#0f766e">' + invEsc_(subject0) + '</h2>' +
+    '<p style="margin:0">' + invEsc_(flowFill_(c.message, vals, false)).replace(/\n/g, '<br>') + '</p>' +
+    '<p style="margin:14px 0 0;font-size:13px;color:#64748b">From the email flow “' + invEsc_(flow.name) + '”.</p>';
+  let subject = subject0;
+  let to = intended;
+  if (tester) {
+    inner = flowTestBanner_(flow.name, 'This would have gone to ' +
+      (intended.map(function (x) { return x.name; }).join(', ') || 'nobody (no staff match)') + '.') + inner;
+    subject = '[Test] ' + subject;
+    to = [tester];
+  }
+  if (!to.length) return [];
+  const html = invEmailWrap_(inner, 'patient/' + encodeURIComponent(ctx.pid), "Open the patient's page");
+  MailApp.sendEmail({ to: to.map(function (x) { return x.email; }).join(','), name: 'Dermedica Portal',
+    subject: subject, htmlBody: html, body: emailHtmlToText_(html) });
+  if (!tester) flowLog_(cfg, flow, run, ctx, 'staff', to, subject, html);
+  return intended;
+}
+
+/* ---------- Stop rules ---------- */
+
+function flowStopWhy_(flow, run, ctx, testing) {
+  if (!testing && !isEmail_(ctx.who.email)) return "There's no email address on their record.";
+  if ((flow.stop || {}).booking === true) {
+    const before = {};
+    (run.apptKeys || []).forEach(function (k) { before[k] = true; });
+    if (ctx.upcoming().some(function (k) { return !before[k]; })) return 'They booked an appointment.';
+  }
+  return '';
+}
+// At most one automatic email to a patient every X days, across all flows (test emails don't count)
+function flowGapUntil_(cfg, flow, ctx) {
+  const days = Number((flow.stop || {}).gapDays) || 0;
+  if (days <= 0) return 0;
+  let last = 0;
+  fsQuery_(cfg, FLOW_RUNS_, 'patientId', 'EQUAL', ctx.pid, 200).forEach(function (r) {
+    if (r.mode === 'test') return;
+    const t = Date.parse(String(r.lastEmailAt || ''));
+    if (t > last) last = t;
+  });
+  return last ? last + days * 86400000 : 0;
+}
+
+/* ---------- The 15-minute run ---------- */
+
+function runEmailFlows_(cfg, deadline) {
+  const flows = fsQuery_(cfg, 'email_flows', 'status', 'EQUAL', 'live', 50);
+  const byId = {};
+  flows.forEach(function (f) { byId[f._id] = f; });
+  const memo = {};
+  if (flows.length) {
+    try { flowEnrol_(cfg, flows, memo); } catch (e) { console.error('Email flows, starting runs: ' + (e && e.stack ? e.stack : e)); }
+  }
+  const gone = {};
+  fsQuery_(cfg, FLOW_RUNS_, 'status', 'EQUAL', 'active', 500)
+    .filter(function (r) { return Number(r.dueAt || 0) <= Date.now(); })
+    .sort(function (a, b) { return Number(a.dueAt || 0) - Number(b.dueAt || 0); })
+    .slice(0, 80)
+    .forEach(function (r) {
+      if (Date.now() > deadline) return; // the rest go next time
+      const f = byId[r.flowId];
+      if (!f) {
+        // Turned off: the run waits until it's turned on again. Deleted: the run stops.
+        if (!(r.flowId in gone)) {
+          const d = fsGetDoc_(cfg, 'email_flows/' + r.flowId);
+          gone[r.flowId] = !d || d.status === 'archived';
+        }
+        if (gone[r.flowId]) {
+          fsPatch_(cfg, FLOW_RUNS_ + '/' + r._id, { status: 'stopped', reason: 'The flow was deleted.', next: '', updatedAt: new Date().toISOString() });
+        }
+        return;
+      }
+      try { flowStep_(cfg, f, r, memo, deadline); }
+      catch (e) { flowFail_(cfg, f, r, e); }
+    });
+}
+
+// New purchases from the invoice sync → new runs. Only checked when the sync has brought in new data.
+function flowEnrol_(cfg, flows, memo) {
+  const list = flows.filter(function (f) {
+    return ((f.trigger || {}).event || 'purchase') === 'purchase' && Array.isArray(f.steps) && f.steps.length;
+  });
+  if (!list.length) return;
+  const props = PropertiesService.getScriptProperties();
+  const sig = String(props.getProperty('LAST_SYNCED_SSP_UPDATE') || '') + '|' +
+    list.map(function (f) { return f._id + ':' + (f.liveAt || ''); }).sort().join(',');
+  if (props.getProperty('FLOW_ENROL_SIG') === sig) return;
+
+  const today = flowKey_(Date.now());
+  const from = flowKey_(Date.now() - FLOW_LOOKBACK_DAYS_ * 86400000);
+  const cand = [];
+  fsListAll_(cfg, 'skincare', ['patientId', 'patientName', 'purchases']).forEach(function (d) {
+    const sk = fromFields_(d.fields || {});
+    sk._key = d.name.split('/').pop();
+    if (!String(sk.patientId || '').trim()) return; // matched by name only: we can't be sure who it is
+    (Array.isArray(sk.purchases) ? sk.purchases : []).forEach(function (p) {
+      const date = String(p.date || '');
+      const product = String(p.product || '').trim();
+      if (!product || !/^\d{4}-\d{2}-\d{2}$/.test(date) || date < from || date > today) return;
+      list.forEach(function (f) {
+        const liveMs = Date.parse(String(f.liveAt || ''));
+        if (date < (liveMs ? flowKey_(liveMs) : today)) return; // bought before the flow was turned on
+        if ((f.trigger || {}).scope === 'catalogue' && !flowProduct_(cfg, memo, product)) return;
+        cand.push({
+          id: flowPart_(f._id) + '__' + flowPart_(sk.patientId) + '__' + flowHash_([p.invoiceId, product, date].join('|')),
+          dup: f._id + '|' + String(sk.patientId) + '|' + flowNorm_(product),
+          f: f, sk: sk, p: p, date: date, product: product,
+        });
+      });
+    });
+  });
+  if (!cand.length) { props.setProperty('FLOW_ENROL_SIG', sig); return; }
+
+  // The same product bought twice in a few days: only the newest purchase starts the flow
+  cand.sort(function (a, b) { return b.date.localeCompare(a.date); });
+  const taken = {};
+  const fresh = cand.filter(function (c) { if (taken[c.dup]) return false; taken[c.dup] = true; return true; });
+  const have = fsBatchGet_(cfg, fresh.map(function (c) { return FLOW_RUNS_ + '/' + c.id; }));
+  const writes = [];
+  memo.pts = memo.pts || {};
+  fresh.forEach(function (c) {
+    if (have[FLOW_RUNS_ + '/' + c.id]) return; // already started
+    const f = c.f;
+    const now = new Date().toISOString();
+    const sid = String(c.sk.patientId);
+    if (!(sid in memo.pts)) memo.pts[sid] = flowPatient_(cfg, sid);
+    const doc = memo.pts[sid];
+    const base = {
+      flowId: f._id, flowName: String(f.name || ''), product: c.product, purchaseDate: c.date,
+      invoiceId: String(c.p.invoiceId || ''), soldBy: String(c.p.staff || ''), sourceKey: c.sk._key, sourceId: sid,
+      startedAt: now, updatedAt: now, attempts: 0, sent: 0, lastError: '',
+    };
+    if (!doc) {
+      writes.push(updateWrite_(cfg, FLOW_RUNS_ + '/' + c.id, Object.assign(base, {
+        patientId: '', patientName: String(c.sk.patientName || ''), status: 'skipped',
+        reason: 'No matching patient in the Patient List.', next: '', dueAt: 0, mode: '', events: [],
+      })));
+      return;
+    }
+    const who = flowWho_(doc);
+    const earlier = fsQuery_(cfg, FLOW_RUNS_, 'patientId', 'EQUAL', doc._id, 100).filter(function (r) {
+      return r.flowId === f._id && r.status === 'active' && flowSameProduct_(r.product, c.product);
+    });
+    if (earlier.length && (f.stop || {}).rebuy === false) {
+      writes.push(updateWrite_(cfg, FLOW_RUNS_ + '/' + c.id, Object.assign(base, {
+        patientId: doc._id, patientName: who.name, status: 'skipped',
+        reason: 'Already in this flow for this product.', next: '', dueAt: 0, mode: '', events: [],
+      })));
+      return;
+    }
+    // Bought it again: the earlier run stops, and this one starts from the top
+    earlier.forEach(function (r) {
+      writes.push(patchWrite_(cfg, FLOW_RUNS_ + '/' + r._id, {
+        status: 'stopped', reason: 'Bought it again, so the flow started over.', next: '', updatedAt: now,
+      }));
+    });
+    writes.push(updateWrite_(cfg, FLOW_RUNS_ + '/' + c.id, Object.assign(base, {
+      patientId: doc._id, patientName: who.name, status: 'active', reason: '',
+      next: String(f.steps[0].id || ''), dueAt: Date.now(),
+      mode: f.sendMode === 'real' ? 'real' : 'test', testUid: String(f.testUid || f.updatedByUid || ''),
+      apptKeys: (f.stop || {}).booking === true ? flowUpcoming_(cfg, doc, memo) : [],
+      events: [{ at: now, what: 'Started: bought ' + c.product + ' on ' + (recLongDate_(c.date) || c.date) }],
+    })));
+  });
+  if (writes.length) commitWrites_(cfg, writes, 100);
+  props.setProperty('FLOW_ENROL_SIG', sig); // only after the runs are saved, so a failure is tried again
+  console.log('Email flows: ' + writes.length + ' run(s) started or updated.');
+}
+
+// Moves one run along. Progress is saved after every email, so a crash never sends one twice.
+function flowStep_(cfg, flow, run, memo, deadline) {
+  const path = FLOW_RUNS_ + '/' + run._id;
+  const events = (Array.isArray(run.events) ? run.events : []).slice(-40);
+  const note = function (what) { events.push({ at: new Date().toISOString(), what: String(what).slice(0, 240) }); };
+  const save = function (extra) {
+    fsPatch_(cfg, path, Object.assign({ events: events.slice(-40), attempts: 0, lastError: '', updatedAt: new Date().toISOString() }, extra));
+  };
+
+  const ctx = flowCtx_(cfg, run, memo);
+  if (!ctx) { note('Stopped: the patient record is no longer there.'); save({ status: 'stopped', reason: 'The patient record is no longer there.', next: '' }); return; }
+  let tester = null;
+  if (run.mode === 'test') {
+    tester = flowTester_(run.testUid);
+    if (!tester) {
+      save({ status: 'failed', reason: 'Testing, but the person who turned the flow on has no email address in Staff.', next: '' });
+      return;
+    }
+  }
+
+  let next = String(run.next || '');
+  let sent = Number(run.sent || 0);
+  for (let n = 0; n < FLOW_STEPS_PER_RUN_; n++) {
+    if (!next) { note('Finished.'); save({ status: 'done', reason: 'Finished.', next: '' }); return; }
+    if (Date.now() > deadline) { save({ next: next, dueAt: Date.now() }); return; }
+    const loc = flowFind_(flow.steps, next);
+    if (!loc) {
+      note('Stopped: the flow was changed and its next card was removed.');
+      save({ status: 'stopped', reason: 'The flow was changed and its next card was removed.', next: '' });
+      return;
+    }
+    const s = loc.list[loc.i];
+    const c = s.cfg || {};
+    const after = flowAfter_(loc);
+    const afterId = after ? String(after.id || '') : '';
+
+    if (s.type === 'stop') { note('Reached End flow.'); save({ status: 'done', reason: 'Reached End flow.', next: '' }); return; }
+
+    if (s.type === 'wait') {
+      if (!afterId) { note('Finished.'); save({ status: 'done', reason: 'Finished.', next: '' }); return; }
+      const due = flowAddWait_(Date.now(), c);
+      note('Waiting ' + flowWaitText_(c) + ' (until ' + Utilities.formatDate(new Date(due), REC_TZ_, 'd MMM yyyy') + ')');
+      save({ next: afterId, dueAt: due });
+      return;
+    }
+
+    if (s.type === 'branch') {
+      const yes = flowCond_(cfg, c.cond, run, ctx);
+      note((yes ? 'Yes: ' : 'No: ') + (FLOW_CONDS_[c.cond] || c.cond));
+      const pathList = (yes ? c.yes : c.no) || [];
+      next = pathList.length ? String(pathList[0].id || '') : afterId;
+      continue;
+    }
+
+    if (s.type === 'staff') {
+      const to = flowSendStaff_(cfg, flow, s, run, ctx, memo, tester);
+      note(to.length ? 'Staff emailed: ' + to.map(function (x) { return x.name; }).join(', ') + (tester ? ' (sent to you while testing)' : '')
+        : 'Notify staff: nobody to email.');
+      if (to.length) sent++;
+      next = afterId;
+      save({ next: next, sent: sent, dueAt: Date.now() });
+      continue;
+    }
+
+    if (s.type === 'email') {
+      const why = flowStopWhy_(flow, run, ctx, !!tester);
+      if (why) { note('Stopped: ' + why); save({ status: 'stopped', reason: why, next: '' }); return; }
+      if (c.promo && !tester) {
+        note('Skipped a promotional email (marketing consent is still to come).');
+        next = afterId;
+        continue;
+      }
+      if (!tester) {
+        const gap = flowGapUntil_(cfg, flow, ctx);
+        if (gap > Date.now()) {
+          note('Waiting: another automatic email went to them recently.');
+          save({ next: next, dueAt: gap });
+          return;
+        }
+      }
+      const win = flowSendWindow_(Date.now());
+      if (win > Date.now()) { save({ next: next, dueAt: win }); return; }
+      if (MailApp.getRemainingDailyQuota() < 2) {
+        note("The clinic's daily email limit was reached. Trying again later.");
+        save({ next: next, dueAt: Date.now() + 3600000 });
+        return;
+      }
+      const to = flowSendPatient_(cfg, flow, s, run, ctx, memo, tester);
+      sent++;
+      next = afterId;
+      note('Emailed “' + String(c.subject || '').slice(0, 120) + '”' + (tester ? ' to ' + to + ' (testing)' : ''));
+      save(Object.assign({ next: next, sent: sent, dueAt: Date.now() }, tester ? {} : { lastEmailAt: new Date().toISOString() }));
+      continue;
+    }
+    next = afterId; // a card type this version doesn't know
+  }
+  save({ next: next, dueAt: Date.now() }); // carries on next time
+}
+
+function flowFail_(cfg, flow, run, e) {
+  const msg = String(e && e.message ? e.message : e).slice(0, 300);
+  const attempts = Number(run.attempts || 0) + 1;
+  const final = (e && e.final === true) || attempts >= 3;
+  console.error('Email flow run ' + run._id + (final ? ' failed: ' : ' will retry: ') + msg);
+  try {
+    fsPatch_(cfg, FLOW_RUNS_ + '/' + run._id, final
+      ? { status: 'failed', reason: msg, attempts: attempts, lastError: msg, updatedAt: new Date().toISOString() }
+      : { attempts: attempts, lastError: msg, dueAt: Date.now() + 15 * 60000, updatedAt: new Date().toISOString() });
+  } catch (e2) { console.error('Run not updated: ' + e2); }
+  if (final) flowTellBuilder_(flow, run, msg);
+}
+
+function flowTellBuilder_(flow, run, msg) {
+  try {
+    const ids = uniq_([String(flow.testUid || ''), String(flow.createdByUid || '')]);
+    const to = uniq_(getStaffDocs_().filter(function (s) { return ids.indexOf(s.id) !== -1 && isEmail_(s.email); })
+      .map(function (s) { return s.email; }));
+    if (!to.length || MailApp.getRemainingDailyQuota() < 1) return;
+    const html = invEmailWrap_(
+      '<h2 style="margin:0 0 6px;font-size:20px;color:#b91c1c">An email flow couldn\'t send</h2>' +
+      '<p style="margin:0 0 12px;color:#475569"><strong>' + invEsc_(flow.name) + '</strong> for ' +
+        invEsc_(run.patientName || 'a patient') + (run.product ? ' (' + invEsc_(run.product) + ')' : '') + '.</p>' +
+      '<p style="margin:0;padding:10px 12px;border-radius:8px;background:#fef2f2;color:#991b1b">' + invEsc_(msg) + '</p>',
+      'settings/flows/' + encodeURIComponent(flow._id), 'Open the flow');
+    MailApp.sendEmail({ to: to.join(','), name: 'Dermedica Portal', subject: 'Email flow not sent: ' + flow.name,
+      htmlBody: html, body: emailHtmlToText_(html) });
+  } catch (e) { console.warn('Flow builder not told: ' + e); }
+}
+
+/* ---------- From the portal: test with a patient, stop a run ---------- */
+
+function handleEmailFlow_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!can_(session, 'flows.build')) return { ok: false, error: 'FORBIDDEN' };
+  const op = String(body.op || '');
+  try {
+    if (op === 'test') return flowTestRun_(body, session);
+    if (op === 'stopRun') return flowStopRun_(String(body.id || ''), session);
+  } catch (err) {
+    console.error('Email flow ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: false, error: 'SERVER_ERROR', detail: String(err && err.message ? err.message : err).slice(0, 300) };
+  }
+  return { ok: false, error: 'BAD_REQUEST' };
+}
+
+// The whole flow, now, for one patient. Waits are skipped; every email comes to the person testing.
+function flowTestRun_(body, session) {
+  const flowId = String(body.flowId || '');
+  if (!/^[A-Za-z0-9_-]{5,60}$/.test(flowId)) return { ok: false, error: 'BAD_REQUEST' };
+  const product = String(body.product || '').trim().slice(0, 150);
+  if (!product) return { ok: false, error: 'NO_PRODUCT' };
+  const cfg = getConfig_();
+  const flow = fsGetDoc_(cfg, 'email_flows/' + flowId);
+  if (!flow || flow.status === 'archived') return { ok: false, error: 'NOT_FOUND' };
+  flow._id = flowId;
+  const doc = flowPatient_(cfg, String(body.patientId || ''));
+  if (!doc) return { ok: false, error: 'NO_PATIENT' };
+  const me = flowTester_(session.uid);
+  if (!me) return { ok: false, error: 'NO_EMAIL' };
+
+  const cache = CacheService.getScriptCache();
+  const rlKey = 'flowtest_' + session.uid;
+  const used = Number(cache.get(rlKey) || 0);
+  if (used >= 15) return { ok: false, error: 'RATE_LIMITED' };
+  if (MailApp.getRemainingDailyQuota() < 10) return { ok: false, error: 'QUOTA' };
+  cache.put(rlKey, String(used + 1), 3600);
+
+  const memo = { pts: {} };
+  memo.pts[doc._id] = doc;
+  const run = { _id: 'test', flowId: flowId, product: product, purchaseDate: flowKey_(Date.now()), invoiceId: 'test',
+    soldBy: String(session.name || ''), sourceKey: docId_(doc.PttID || doc._id), patientId: doc._id, mode: 'test' };
+  const ctx = flowCtx_(cfg, run, memo);
+  run.apptKeys = ctx.upcoming();
+
+  const steps = [];
+  let sent = 0;
+  let ended = false;
+  let next = Array.isArray(flow.steps) && flow.steps[0] ? String(flow.steps[0].id || '') : '';
+  for (let n = 0; n < 60 && next; n++) {
+    const loc = flowFind_(flow.steps, next);
+    if (!loc) break;
+    const s = loc.list[loc.i];
+    const c = s.cfg || {};
+    const after = flowAfter_(loc);
+    const afterId = after ? String(after.id || '') : '';
+    if (s.type === 'stop') { steps.push('End flow.'); ended = true; break; }
+    if (s.type === 'wait') { steps.push('Wait ' + flowWaitText_(c) + ' (skipped in a test).'); next = afterId; continue; }
+    if (s.type === 'branch') {
+      const yes = flowCond_(cfg, c.cond, run, ctx);
+      steps.push('If / else: ' + (FLOW_CONDS_[c.cond] || c.cond) + ' → ' + (yes ? 'Yes' : 'No'));
+      const pathList = (yes ? c.yes : c.no) || [];
+      next = pathList.length ? String(pathList[0].id || '') : afterId;
+      continue;
+    }
+    if (s.type === 'staff') {
+      const to = flowSendStaff_(cfg, flow, s, run, ctx, memo, me);
+      sent++;
+      steps.push('Notify staff: would go to ' + (to.map(function (x) { return x.name; }).join(', ') || 'nobody') + '. Sent to you.');
+      next = afterId;
+      continue;
+    }
+    if (s.type === 'email') {
+      const why = flowStopWhy_(flow, run, ctx, false);
+      if (why) { steps.push('Stop rule: ' + why + ' The real flow would stop here.'); ended = true; break; }
+      flowSendPatient_(cfg, flow, s, run, ctx, memo, me);
+      sent++;
+      steps.push('Email “' + flowFill_(c.subject, flowVals_(cfg, run, ctx, memo, false), false) + '”' +
+        (c.promo ? ' (promotional: patients won\'t get it until marketing consent is added)' : '') + '. Sent to you.');
+      next = afterId;
+      continue;
+    }
+    next = afterId;
+  }
+  if (!ended) steps.push('Finished.');
+  return { ok: true, to: me.email, sent: sent, steps: steps };
+}
+
+function flowStopRun_(id, session) {
+  if (!/^[A-Za-z0-9_-]{5,200}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) return { ok: false, error: 'BUSY' };
+  try {
+    const cfg = getConfig_();
+    const r = fsGetDoc_(cfg, FLOW_RUNS_ + '/' + id);
+    if (!r) return { ok: false, error: 'NOT_FOUND' };
+    if (r.status !== 'active') return { ok: false, error: 'NOT_ACTIVE' };
+    fsPatch_(cfg, FLOW_RUNS_ + '/' + id, {
+      status: 'stopped', reason: 'Stopped by ' + String(session.name || 'staff') + '.', next: '', updatedAt: new Date().toISOString(),
+    });
+    return { ok: true };
+  } finally {
+    lock.releaseLock();
+  }
 }

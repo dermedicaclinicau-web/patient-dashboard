@@ -6395,3 +6395,28 @@ a.md-quiet:hover { border-color: var(--primary); }
 .tl-quick .ch-chip:hover { border-color: var(--primary); color: var(--primary); }
 .lh-dialog .lh-two { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; }
 @media (max-width: 520px) { .lh-dialog .lh-two { grid-template-columns: 1fr; } }
+
+/* ---------- Email flows: testing and patients in the flow ---------- */
+.ef-test-dlg { width: min(620px, calc(100vw - 2rem)); }
+.ef-test-hits { display: flex; flex-direction: column; gap: .3rem; max-height: 220px; overflow: auto; }
+.ef-test-hits:empty { display: none; }
+.ef-hit { display: flex; flex-direction: column; align-items: flex-start; gap: .1rem; padding: .5rem .7rem; border: 1px solid var(--border);
+  border-radius: 10px; background: #fff; font: inherit; text-align: left; cursor: pointer; }
+.ef-hit:hover, .ef-hit:focus-visible { border-color: var(--primary); background: var(--primary-soft); }
+.ef-hit small { color: var(--muted); font-size: .78rem; }
+.ef-chosen { display: flex; align-items: center; justify-content: space-between; gap: .5rem; padding: .5rem .7rem;
+  border: 1px solid var(--primary); border-radius: 10px; background: var(--primary-soft); }
+.ef-steps { display: grid; gap: .3rem; margin: .6rem 0 0; padding-left: 1.2rem; font-size: .88rem; line-height: 1.45; }
+.ef-runs-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.ef-runs-head .lh-btn { padding: .25rem .6rem; font-size: .78rem; }
+.ef-runs-n { display: flex; flex-wrap: wrap; gap: .3rem; }
+.ef-run { display: flex; flex-direction: column; gap: .2rem; padding: .55rem .65rem; border: 1px solid var(--border); border-radius: 10px; font-size: .85rem; }
+.ef-run-top { display: flex; align-items: center; gap: .4rem; }
+.ef-run-top strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ef-run small { color: var(--muted); font-size: .78rem; }
+.ef-run .lh-btn { align-self: flex-start; padding: .25rem .6rem; font-size: .78rem; }
+.ef-st { padding: .1rem .5rem; border-radius: 999px; background: #f1f5f9; color: #475569; font-size: .7rem; font-weight: 700; white-space: nowrap; }
+.ef-st.is-active { background: #eff6ff; color: #1d4ed8; }
+.ef-st.is-test { background: #fef3c7; color: #92400e; }
+.ef-st.is-done { background: #ecfdf5; color: #047857; }
+.ef-st.is-failed { background: #fee2e2; color: #b91c1c; }

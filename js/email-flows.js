@@ -1,12 +1,13 @@
 // System configuration → Email flows: automatic emails to patients and staff, built from cards.
 // A flow starts with a trigger (a product is purchased) and runs its cards top to bottom.
-// Step 1: building and saving only. Nothing is sent from this page.
+// Apps Script (runEmailFlows_) sends them. While a flow is testing, every email goes to the person who turned it on.
 
-// ⚠ Use the same two import lines as the top of task-types.js (path to db, Firebase version)
 import { db } from "./firebase-config.js";
 import {
-  collection, doc, getDoc, getDocs, addDoc, updateDoc, serverTimestamp,
+  collection, doc, getDoc, getDocs, addDoc, updateDoc, serverTimestamp, query, where, limit,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { callApi } from "./appointments.js";
+import { searchPatients } from "./task-runner.js";
 
 import { createRichEditor } from "./rich-editor.js";
 import { hydrateRichImages } from "./rich-html.js";
@@ -207,10 +208,23 @@ function snapshot(d = {}) {
     style: { background: EMAIL_BACKGROUNDS[0], accent: EMAIL_ACCENTS[0], width: 600, logo: true, footer: true, ...(d.style || {}) },
   };
 }
-const toDoc = (f) => JSON.parse(JSON.stringify({
+// Each patient email is finished here (design, logo and clinic details), so Apps Script only fills in the patient's blanks
+function rendered(steps, style, lh) {
+  const copy = JSON.parse(JSON.stringify(steps));
+  if (!lh) return copy; // keeps what was saved before
+  const c = clinicDetails(lh);
+  const vals = new Map([["clinic phone", c.phone || ""], ["clinic email", c.email || ""], ["clinic address", c.address || ""]]);
+  walk(copy, (s) => {
+    if (s.type === "email") {
+      s.cfg.html = emailShell(fillTemplateHtml(s.cfg.body || "", vals), style, { clinic: c, hasLogo: !!lh.logo });
+    }
+  });
+  return copy;
+}
+const toDoc = (f, lh) => JSON.parse(JSON.stringify({
   name: f.name.trim().slice(0, 120) || "Untitled flow",
   description: f.description.trim().slice(0, 300),
-  trigger: f.trigger, steps: f.steps, stop: f.stop, style: f.style,
+  trigger: f.trigger, steps: rendered(f.steps, f.style, lh), stop: f.stop, style: f.style,
 }));
 const by = (staff) => ({ updatedBy: String((staff && staff.name) || ""), updatedByUid: String((staff && staff.uid) || "") });
 
@@ -232,8 +246,8 @@ async function createFlow(data, staff) {
   });
   return ref.id;
 }
-async function saveFlow(id, flow, staff, status) {
-  const patch = { ...toDoc(flow), updatedAt: serverTimestamp(), ...by(staff) };
+async function saveFlow(id, flow, staff, status, lh, extra = {}) {
+  const patch = { ...toDoc(flow, lh), ...extra, updatedAt: serverTimestamp(), ...by(staff) };
   if (status) patch.status = status;
   await updateDoc(doc(db, COL, id), patch);
 }
@@ -366,11 +380,12 @@ async function mountFlowList(container, { staff }) {
     list.innerHTML = flows.map((f) => {
       const n = count(f.steps);
       const live = f.status === "live";
+      const testing = live && f.sendMode !== "real";
       return `<a class="tm-task" href="${BASE}/${encodeURIComponent(f.id)}">
         <span class="tm-task-icon">${I.flow}</span>
         <span class="tm-task-main"><strong>${esc(f.name)}</strong>
           <small>${esc([triggerLabel(f.trigger), `${n} card${n === 1 ? "" : "s"}`, editedAgo(f.updatedAt)].filter(Boolean).join(" · "))}</small></span>
-        <span class="tb-pill ${live ? "is-live" : "is-draft"}">${live ? "Live" : "Draft"}</span>
+        <span class="tb-pill ${live && !testing ? "is-live" : "is-draft"}">${live ? (testing ? "Live · testing" : "Live") : "Draft"}</span>
         <span class="tm-task-go">${I.chev}</span>
       </a>`;
     }).join("");
@@ -464,6 +479,9 @@ async function mountFlowEditor(container, { id, staff }) {
   let sel = null;          // a card id, "trigger", or null (flow settings)
   let menuAt = null;       // which + menu is open
   let letterhead = null, staffList = null, staffError = false;
+  let mode = loaded.sendMode === "real" ? "real" : "test"; // testing: every email goes to the person who turned it on
+  let runs = null, runsErr = "", runsLoading = false;
+  const lhReady = getLetterhead().then((lh) => { letterhead = lh || {}; }).catch(() => { letterhead = {}; });
   let editor = null, lastText = null;
   let dirty = false, saving = false, saveTimer = null;
 
@@ -480,6 +498,8 @@ async function mountFlowEditor(container, { id, staff }) {
           <div class="ff-bar-actions">
             <button type="button" class="ff-btn is-quiet" data-act="delete">${I.trash}<span>Delete</span></button>
             <button type="button" class="ff-btn" data-act="duplicate">${I.copy}<span>Duplicate</span></button>
+            <button type="button" class="ff-btn" data-act="test">${I.mail}<span>Test with a patient</span></button>
+            <button type="button" class="ff-btn" data-act="mode" hidden><span>Send to patients</span></button>
             <button type="button" class="ff-btn is-primary" data-act="live"><span>Turn on</span></button>
           </div>
         </div>
@@ -533,7 +553,8 @@ async function mountFlowEditor(container, { id, staff }) {
     setState("saving");
     let failed = false;
     try {
-      await saveFlow(id, flow, staff);
+      await lhReady;
+      await saveFlow(id, flow, staff, null, letterhead);
       setState(dirty ? "dirty" : "saved");
     } catch (err) {
       console.error("Flow save failed:", err);
@@ -566,10 +587,14 @@ async function mountFlowEditor(container, { id, staff }) {
     $('[data-role="title"]').textContent = flow.name.trim() || "Untitled flow";
     $('[data-role="sub"]').textContent = `${triggerLabel(flow.trigger)} · ${n} card${n === 1 ? "" : "s"}`;
     const pill = $('[data-role="pill"]');
-    pill.className = "tb-pill " + (live ? "is-live" : "is-draft");
-    pill.textContent = live ? "Live" : "Draft";
+    pill.className = "tb-pill " + (live && mode === "real" ? "is-live" : "is-draft");
+    pill.textContent = live ? (mode === "real" ? "Live" : "Live · testing") : "Draft";
     liveBtn.querySelector("span").textContent = live ? "Turn off" : "Turn on";
     liveBtn.classList.toggle("is-primary", !live);
+    const modeBtn = $('[data-act="mode"]');
+    modeBtn.hidden = !live;
+    modeBtn.querySelector("span").textContent = mode === "real" ? "Back to testing" : "Send to patients";
+    modeBtn.classList.toggle("is-primary", live && mode !== "real");
   }
 
   /* ---------- The canvas: a tree of cards you can drag around and zoom ---------- */
@@ -703,8 +728,8 @@ async function mountFlowEditor(container, { id, staff }) {
     applyView();
   }
   // Brings a card into view if it's off the screen (after adding it)
-  function reveal(id) {
-    const c = pos.get(id);
+  function reveal(cardId) {
+    const c = pos.get(cardId);
     if (!c) return;
     const vw = canvas.clientWidth, vh = canvas.clientHeight;
     const sx = view.x + c.x * view.z, sy = view.y + c.y * view.z;
@@ -800,8 +825,8 @@ async function mountFlowEditor(container, { id, staff }) {
     insertAt("after:" + cur.id, type);
   }
 
-  function pick(id) {
-    sel = sel === id ? null : id;
+  function pick(cardId) {
+    sel = sel === cardId ? null : cardId;
     menuAt = null;
     renderCanvas();
     renderSide();
@@ -853,6 +878,7 @@ async function mountFlowEditor(container, { id, staff }) {
     return `
       <div class="ef-side-head"><span class="ef-ico is-trigger">${I.cart}</span>
         <div><strong>Flow settings</strong><small>Click a card on the left to set it up</small></div></div>
+      <section class="ef-sec" data-role="runs"></section>
       <section class="ef-sec"><h4>About this flow</h4>
         <label class="tb-field"><span>Name</span><input class="fe-input" data-f="name" maxlength="120" value="${esc(flow.name)}" /></label>
         <label class="tb-field"><span>Description <small>(optional)</small></span>
@@ -864,7 +890,7 @@ async function mountFlowEditor(container, { id, staff }) {
             ${esc(l)}${soon ? ' <small class="muted">· coming soon</small>' : ""}</label>`).join("")}</div>
         <label class="tb-field"><span>Which products</span>
           <select class="fb-select" data-f="trigger.scope">${opt(SCOPES, t.scope)}</select></label>
-        <p class="tb-info">Purchases come from the invoice sync, Scanner billing sheets and sales. Each purchase starts the flow once for that patient and product.</p>
+        <p class="tb-info">Purchases come from the invoice sync (the INVOICE RECORD sheet), checked each time it updates. Each purchase starts the flow once for that patient and product. Scanner billing sheets and sales will be added next.</p>
       </section>
       <section class="ef-sec"><h4>Stop rules <small>(checked before every email)</small></h4>
         <label class="fe-check"><input type="checkbox" checked disabled /> They unsubscribe <small class="muted">(always on)</small></label>
@@ -954,7 +980,7 @@ async function mountFlowEditor(container, { id, staff }) {
     editor = null;
     lastText = null;
     const r = sel && sel !== "trigger" ? find(flow.steps, sel) : null;
-    if (!r) { if (sel !== "trigger") sel = null; side.innerHTML = flowSettingsHtml(); return; }
+    if (!r) { if (sel !== "trigger") sel = null; side.innerHTML = flowSettingsHtml(); renderRuns(); return; }
     const s = r.list[r.i];
     const t = TYPES[s.type];
     side.innerHTML = `
@@ -1055,6 +1081,26 @@ async function mountFlowEditor(container, { id, staff }) {
   });
 
   side.addEventListener("click", async (e) => {
+    if (e.target.closest('[data-act="runs-refresh"]')) { runs = null; renderRuns(); return; }
+    const stopRun = e.target.closest("[data-stoprun]");
+    if (stopRun) {
+      if (!(await confirmDialog({
+        title: "Stop the flow for this patient?", message: "They won't get any more emails from this flow.",
+        confirmLabel: "Stop", cancelLabel: "Keep going", tone: "danger",
+      }))) return;
+      stopRun.disabled = true;
+      try {
+        await callApi({ action: "emailFlow", op: "stopRun", id: stopRun.dataset.stoprun });
+        showToast("Stopped. No more emails from this flow for them.");
+        runs = null;
+        renderRuns();
+      } catch (ex) {
+        console.error("Stop run failed:", ex);
+        showToast(ex && ex.code === "NOT_ACTIVE" ? "It has already finished." : "Couldn't stop it. Try again.");
+        if (stopRun.isConnected) stopRun.disabled = false;
+      }
+      return;
+    }
     const tok = e.target.closest("[data-token]");
     if (tok) {
       const name = tok.dataset.token;
@@ -1108,18 +1154,205 @@ async function mountFlowEditor(container, { id, staff }) {
     }
   });
 
+  /* ---------- Patients in this flow ---------- */
+  const RUN_ST = {
+    active: ["In progress", "is-active"], done: ["Finished", "is-done"], stopped: ["Stopped", ""],
+    failed: ["Not sent", "is-failed"], skipped: ["Skipped", ""],
+  };
+  const runWhen = (ms) => (ms ? new Date(Number(ms)).toLocaleString("en-AU",
+    { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "");
+
+  async function loadRuns() {
+    if (runsLoading) return;
+    runsLoading = true;
+    try {
+      const snap = await getDocs(query(collection(db, "email_flow_runs"), where("flowId", "==", id), limit(200)));
+      runs = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+        .sort((a, b) => String(b.startedAt || "").localeCompare(String(a.startedAt || "")));
+      runsErr = "";
+    } catch (err) {
+      console.warn("Flow runs failed:", err);
+      runs = [];
+      runsErr = err && err.code === "permission-denied" ? "blocked" : "error";
+    } finally {
+      runsLoading = false;
+    }
+    if (root.isConnected) renderRuns();
+  }
+
+  function runHtml(r) {
+    const [lbl, cls] = RUN_ST[r.status] || [r.status || "", ""];
+    const testing = r.mode === "test" && r.status === "active";
+    const at = r.status === "active" && r.next ? find(flow.steps, r.next) : null;
+    const step = at ? at.list[at.i] : null;
+    const next = step ? `Next: ${TYPES[step.type].short}${step.type === "email" && step.cfg.subject ? ` · ${step.cfg.subject}` : ""}${
+      Number(r.dueAt) > Date.now() ? ` · ${runWhen(r.dueAt)}` : ""}` : "";
+    return `<div class="ef-run">
+      <div class="ef-run-top"><strong>${esc(r.patientName || "Unknown patient")}</strong>
+        <span class="ef-st ${testing ? "is-test" : cls}">${testing ? "Testing" : esc(lbl)}</span></div>
+      <small>${esc([r.product, r.purchaseDate && `bought ${r.purchaseDate}`, `${Number(r.sent) || 0} sent`].filter(Boolean).join(" · "))}</small>
+      ${next ? `<small>${esc(next)}</small>` : ""}
+      ${r.reason && r.status !== "active" ? `<small>${esc(r.reason)}</small>` : ""}
+      ${r.status === "active" ? `<button type="button" class="lh-btn is-quiet" data-stoprun="${esc(r.id)}">Stop for this patient</button>` : ""}
+    </div>`;
+  }
+
+  function renderRuns() {
+    const box = side.querySelector('[data-role="runs"]');
+    if (!box) return;
+    if (runs === null) {
+      box.innerHTML = '<h4>Patients in this flow</h4><p class="tb-none">Loading…</p>';
+      loadRuns();
+      return;
+    }
+    const n = (k) => runs.filter((r) => r.status === k).length;
+    const list = runs.slice(0, 12);
+    box.innerHTML = `
+      <div class="ef-runs-head"><h4>Patients in this flow</h4>
+        <button type="button" class="lh-btn is-quiet" data-act="runs-refresh">Refresh</button></div>
+      ${runsErr ? `<p class="tb-none tb-bad">${runsErr === "blocked" ? "Blocked. Check the email_flow_runs Firestore rule." : "Couldn't load. Press Refresh."}</p>` : ""}
+      ${!runs.length && !runsErr ? `<p class="tb-none">${status === "live"
+        ? "Nobody yet. Patients start the flow when the invoice sync brings in a matching purchase."
+        : "Nobody yet. Turn the flow on to start it, or use Test with a patient."}</p>` : ""}
+      ${runs.length ? `<div class="ef-runs-n">${["active", "done", "stopped", "failed", "skipped"].filter((k) => n(k))
+        .map((k) => `<span class="ef-st ${RUN_ST[k][1]}">${n(k)} ${RUN_ST[k][0].toLowerCase()}</span>`).join("")}</div>` : ""}
+      ${list.map(runHtml).join("")}
+      ${runs.length > list.length ? `<small class="muted">Showing the latest ${list.length} of ${runs.length}.</small>` : ""}`;
+  }
+
+  /* ---------- Test with a patient ---------- */
+  const testError = (ex) => ({
+    NO_PATIENT: "That patient couldn't be found.",
+    NO_EMAIL: "Add your email address in Staff first, so the test emails can reach you.",
+    NO_PRODUCT: "Type the product they bought.",
+    QUOTA: "The clinic's email limit for today is nearly used up. Try again tomorrow.",
+    RATE_LIMITED: "You've run a lot of tests in the last hour. Try again a little later.",
+    FORBIDDEN: "You need Build email flows access.",
+    NOT_FOUND: "This flow has been deleted.",
+    UNAUTHORIZED: "Your session has expired. Log out and back in.",
+  }[ex && ex.code] || (ex && ex.detail) || "The test couldn't run. Check Apps Script → Executions.");
+
+  function testDialog() {
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog ef-test-dlg";
+    dlg.innerHTML = `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>Test with a patient</h3>
+          <p>Runs the whole flow now for a patient you choose. Every email comes to you, marked [Test]. Waits are skipped. Nothing goes to the patient.</p></div>
+        <label class="lh-field" data-role="find"><span class="lh-label">Patient</span>
+          <input type="search" name="q" placeholder="Search by name" autocomplete="off" /></label>
+        <div class="ef-test-hits" data-role="hits"></div>
+        <div data-role="pick"></div>
+        <label class="lh-field"><span class="lh-label">Product they bought</span>
+          <input type="text" name="product" maxlength="150" placeholder="e.g. Hydrating Serum" /></label>
+        <div data-role="out"></div>
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Close</button>
+          <button type="submit" class="lh-btn is-primary">Run test</button>
+        </div>
+      </form>`;
+    const form = dlg.querySelector("form");
+    const hits = dlg.querySelector('[data-role="hits"]');
+    const pickBox = dlg.querySelector('[data-role="pick"]');
+    const findBox = dlg.querySelector('[data-role="find"]');
+    const out = dlg.querySelector('[data-role="out"]');
+    const err = dlg.querySelector(".lh-error");
+    const runBtn = form.querySelector('[type="submit"]');
+    let chosen = null, found = [], timer = null, seq = 0;
+
+    const showPick = () => {
+      pickBox.innerHTML = chosen ? `<div class="ef-chosen"><span><strong>${esc(chosen.name)}</strong><br>
+        <small class="muted">${esc(chosen.email || "No email on file")}</small></span>
+        <button type="button" class="lh-btn is-quiet" data-act="unpick">Change</button></div>` : "";
+      findBox.hidden = !!chosen;
+      if (chosen) hits.innerHTML = "";
+    };
+    form.elements.q.addEventListener("input", () => {
+      clearTimeout(timer);
+      const q = form.elements.q.value;
+      if (q.trim().length < 2) { hits.innerHTML = ""; return; }
+      const my = ++seq;
+      timer = setTimeout(async () => {
+        try { found = await searchPatients(q); } catch (ex) { console.warn(ex); found = []; }
+        if (my !== seq || !dlg.open) return;
+        hits.innerHTML = found.length ? found.map((p, i) => `<button type="button" class="ef-hit" data-hit="${i}">
+          <strong>${esc(p.name)}</strong><small>${esc([p.dob && `DOB ${p.dob}`, p.email || "No email on file"].filter(Boolean).join(" · "))}</small>
+        </button>`).join("") : '<p class="tb-none">No patients found. Try their last name.</p>';
+      }, 250);
+    });
+    dlg.addEventListener("click", (e) => {
+      if (e.target.closest('[data-act="cancel"]')) { dlg.close(); return; }
+      if (e.target.closest('[data-act="unpick"]')) { chosen = null; showPick(); form.elements.q.focus(); return; }
+      const h = e.target.closest("[data-hit]");
+      if (h) { chosen = found[Number(h.dataset.hit)] || null; showPick(); form.elements.product.focus(); }
+    });
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      const product = form.elements.product.value.trim();
+      const problem = !chosen ? "Choose a patient." : !product ? "Type the product they bought." : flowProblems(flow)[0] || "";
+      if (problem) { err.textContent = problem; err.hidden = false; return; }
+      runBtn.disabled = true;
+      runBtn.textContent = "Running…";
+      out.innerHTML = '<p class="tb-none">Running the flow. This can take up to a minute…</p>';
+      try {
+        await settle();
+        const res = await callApi({ action: "emailFlow", op: "test", flowId: id, patientId: chosen.id, product });
+        out.innerHTML = `<div class="tb-ready">${res.sent} test email${res.sent === 1 ? "" : "s"} sent to ${esc(res.to)}</div>
+          <ol class="ef-steps">${(res.steps || []).map((s) => `<li>${esc(s)}</li>`).join("")}</ol>`;
+      } catch (ex) {
+        console.error("Flow test failed:", ex);
+        out.innerHTML = "";
+        err.textContent = testError(ex);
+        err.hidden = false;
+      } finally {
+        runBtn.disabled = false;
+        runBtn.textContent = "Run test again";
+      }
+    });
+    dlg.addEventListener("close", () => { clearTimeout(timer); dlg.remove(); });
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    form.elements.q.focus();
+  }
+
   /* ---------- Top bar actions ---------- */
   root.querySelector(".ff-bar").addEventListener("click", async (e) => {
     const act = e.target.closest("[data-act]");
     if (!act) return;
 
+    if (act.dataset.act === "test") { testDialog(); return; }
+
+    if (act.dataset.act === "mode") {
+      const toReal = mode !== "real";
+      if (!(await confirmDialog(toReal ? {
+        title: "Start sending to patients?",
+        message: "From now on, patients who start this flow get the emails themselves.\n\nPatients who started it while you were testing keep sending to you.",
+        confirmLabel: "Send to patients", cancelLabel: "Keep testing", tone: "warning",
+      } : {
+        title: "Go back to testing?",
+        message: "Patients who start the flow from now on are emailed to you instead, marked [Test].",
+        confirmLabel: "Back to testing", tone: "info",
+      }))) return;
+      await settle();
+      try {
+        await saveFlow(id, flow, staff, null, letterhead, { sendMode: toReal ? "real" : "test" });
+        mode = toReal ? "real" : "test";
+        renderBar();
+        showToast(toReal ? "Now sending to patients." : "Back to testing. Emails come to you.");
+      } catch (err) { console.error(err); showToast("Couldn't change it. Try again."); }
+      return;
+    }
+
     if (act.dataset.act === "live") {
       if (status === "live") {
         await settle();
         try {
-          await saveFlow(id, flow, staff, "draft");
-          status = "draft"; renderBar();
-          showToast("Turned off. No more patients will start this flow.");
+          await saveFlow(id, flow, staff, "draft", letterhead);
+          status = "draft";
+          renderBar();
+          showToast("Turned off. Nothing more is sent until it's turned on again.");
         } catch (err) { console.error(err); showToast("Couldn't turn it off. Try again."); }
         return;
       }
@@ -1130,14 +1363,21 @@ async function mountFlowEditor(container, { id, staff }) {
       }
       if (!(await confirmDialog({
         title: `Turn on “${flow.name.trim()}”?`,
-        message: "It's marked as ready to run. Nothing is emailed yet: the next portal update starts checking purchases against live flows, with a test run first.",
+        message: mode === "real"
+          ? "Patients who buy a matching product from today start the flow and get the emails."
+          : "Patients who buy a matching product from today start the flow, but every email comes to you, marked [Test], until you press Send to patients.\n\nUse Test with a patient to try the whole flow straight away.",
         confirmLabel: "Turn on", tone: "info",
       }))) return;
       await settle();
       try {
-        await saveFlow(id, flow, staff, "live");
-        status = "live"; renderBar();
-        showToast("Turned on.");
+        await saveFlow(id, flow, staff, "live", letterhead, {
+          liveAt: new Date().toISOString(), sendMode: mode,
+          testUid: String((staff && staff.uid) || ""), testName: String((staff && staff.name) || ""),
+        });
+        status = "live";
+        renderBar();
+        if (!sel) renderSide();
+        showToast(mode === "real" ? "Turned on." : "Turned on for testing. Emails come to you.");
       } catch (err) {
         console.error("Turn on failed:", err);
         showToast(err.code === "permission-denied" ? "You don't have Build email flows access." : "Couldn't turn it on. Try again.");
@@ -1158,12 +1398,12 @@ async function mountFlowEditor(container, { id, staff }) {
     if (act.dataset.act === "delete") {
       if (!(await confirmDialog({
         title: `Delete “${flow.name.trim() || "Untitled flow"}”?`,
-        message: "It's removed from Email flows and no more patients will start it.",
+        message: "It's removed from Email flows, and patients in it get no more emails.",
         confirmLabel: "Delete flow", tone: "danger",
       }))) return;
       await settle();
       try {
-        await saveFlow(id, flow, staff, "archived");
+        await saveFlow(id, flow, staff, "archived", letterhead);
         location.hash = BASE;
       } catch (err) { console.error(err); showToast("Couldn't delete. Try again."); }
     }
@@ -1173,8 +1413,5 @@ async function mountFlowEditor(container, { id, staff }) {
   renderBar();
   renderCanvas();
   renderSide();
-  getLetterhead()
-    .then((lh) => { letterhead = lh; })
-    .catch(() => { letterhead = {}; })
-    .finally(() => { if (root.isConnected) renderPreview(); });
+  lhReady.finally(() => { if (root.isConnected) renderPreview(); });
 }

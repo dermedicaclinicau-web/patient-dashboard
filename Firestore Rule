@@ -615,6 +615,7 @@ match /inv_count_drafts/{id} {
 
     function validFlow(d) {
       return d.keys().hasOnly(['name', 'description', 'status', 'trigger', 'steps', 'stop', 'style',
+                               'liveAt', 'sendMode', 'testUid', 'testName',
                                'createdAt', 'createdBy', 'createdByUid',
                                'updatedAt', 'updatedBy', 'updatedByUid'])
         && d.name is string && d.name.size() > 0 && d.name.size() <= 120
@@ -623,9 +624,11 @@ match /inv_count_drafts/{id} {
         && d.trigger is map
         && d.steps is list && d.steps.size() <= 40
         && d.get('stop', {}) is map
-        && d.get('style', {}) is map;
+        && d.get('style', {}) is map
+        && d.get('sendMode', 'test') in ['test', 'real']
+        && d.get('liveAt', '') is string;
     }
-
+    
     // Flows: built in System configuration → Email flows. Archived, never deleted.
     match /email_flows/{flowId} {
       allow read: if can('flows.build');
