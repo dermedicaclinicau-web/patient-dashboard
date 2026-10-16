@@ -1,6 +1,7 @@
 import {
   categoryLabel, getFormTemplate, getFormVersion, saveFormTemplate, publishFormTemplate,
   formSnapshot, listFormTemplates, getLetterhead, saveLetterhead, RX_KINDS, rxKindGuess,
+  FORM_CATEGORIES, changeFormCategory,
 } from "./form-templates.js";
 import {
   esc, svg, ICONS, FIELD_TYPES, FIELD_GROUPS, CHOICE_TYPES, FILLS, FILLS_FOR,
@@ -142,7 +143,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
       <div class="fe-top-main">
         <input class="fe-name" data-role="name" maxlength="120" aria-label="Form name" value="${esc(name)}" />
         <div class="fe-sub">
-          <span>${esc(categoryLabel(tpl.category))}</span>
+          <span data-role="cat">${esc(categoryLabel(tpl.category))}</span>
           <span class="fb-pill" data-role="pill"></span>
           <span class="fe-state" data-role="state">All changes saved</span>
         </div>
@@ -529,6 +530,13 @@ export async function mountFormEditor(container, { templateId, staff }) {
               ? "Not on the patient dashboard. Publish to make it available again."
               : "Not published yet. Click Publish at the top when it's ready."}</small>`}
       </div>
+      <label class="fe-insp-field"><span class="fe-insp-label">Category</span>
+        <select class="fb-select" data-cat>
+          ${FORM_CATEGORIES.map((c) => `<option value="${c.key}"${tpl.category === c.key ? " selected" : ""}>${esc(c.label)}</option>`).join("")}
+        </select>
+        <small class="fe-note">Where this form is listed: on patient pages, in Task Manager and in the Form Builder.
+          Changes straight away${status === "live" ? ", without publishing again" : ""}. Forms already saved for patients keep their category.</small>
+      </label>
       ${["consent", "treatment"].includes(tpl.category) ? `
       <label class="fe-insp-field"><span class="fe-insp-label">Treatment group</span>
         <select class="fb-select" data-s="group">
@@ -684,6 +692,58 @@ export async function mountFormEditor(container, { templateId, staff }) {
         onInput: () => { rtField.starter = ed2.getHtml(); changed(); renderStage(); },
       });
       ed2.setHtml(rtField.starter || "");
+    }
+  }
+
+    // Moving the form to another category: warns about anything that uses it, then saves straight away
+  let catBusy = false;
+  async function changeCategory(next) {
+    const prev = tpl.category;
+    if (catBusy || next === prev) return;
+    catBusy = true;
+    try {
+      const [tasks, forms] = await Promise.all([
+        listTaskTypes({ isAdmin: true }).catch(() => null),
+        listFormTemplates({ isAdmin: true, force: true }).catch(() => null),
+      ]);
+      if (!root.isConnected) return;
+      // Task types that attach or print this form (matched by its id anywhere in the task)
+      const usedBy = (tasks || []).filter((t) => t.status !== "archived" && JSON.stringify(t).includes(templateId));
+      // Other forms whose Consent / Prescription check looks for this one
+      const checkedBy = (forms || []).filter((t) => t.id !== templateId && (t.fields || []).some((f) =>
+        f && (f.type === "consent_status" || f.type === "prescription_status") && f.consentFormId === templateId));
+
+      const lines = [
+        `It moves from ${categoryLabel(prev)} to ${categoryLabel(next)}${status === "live" ? " straight away" : ""}. Forms already saved for patients keep their category.`,
+        usedBy.length ? `Used by ${usedBy.length === 1 ? "this task" : "these tasks"}: ${usedBy.map((t) => t.name).join(", ")}. Check ${usedBy.length === 1 ? "it still attaches or prints" : "they still attach or print"} it.` : "",
+        checkedBy.length ? `Checked for by: ${checkedBy.map((t) => t.name).join(", ")}. Those checks keep working.` : "",
+        !tasks || !forms ? "Couldn't check which tasks and forms use it." : "",
+        next === "prescription" ? "Choose Product or Treatment prescription in Form settings afterwards." : "",
+        ["consent", "treatment"].includes(next) ? "Check the Treatment group in Form settings afterwards." : "",
+      ].filter(Boolean);
+
+      const ok = await confirmDialog({
+        title: `Move to ${categoryLabel(next)}?`,
+        message: lines.join(" "),
+        confirm: "Move it",
+        tone: "primary",
+      });
+      if (!ok || !root.isConnected) { if (root.isConnected) renderInspector(); return; } // puts the dropdown back
+
+      await settle();
+      await changeFormCategory(templateId, next, staff);
+      tpl.category = next;
+      if (dirty) flush(); // an edit made just before was waiting to autosave
+      const catEl = $('[data-role="cat"]');
+      if (catEl) catEl.textContent = categoryLabel(next);
+      renderInspector();
+      showToast(`Moved to ${categoryLabel(next)}.`);
+    } catch (err) {
+      console.error("Category change failed:", err);
+      showToast(err.code === "permission-denied" ? "You don't have permission to change this form." : "Couldn't change the category. Try again.");
+      if (root.isConnected) renderInspector();
+    } finally {
+      catBusy = false;
     }
   }
 
@@ -990,6 +1050,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
   insp.addEventListener("change", (e) => {
     if (e.target.closest(".re")) return;
+    if (e.target.matches("[data-cat]")) { changeCategory(e.target.value); return; }
     if (e.target.matches('input[type="file"][data-img-upload]')) { uploadImage(current(), e.target); return; }
     const f = current();
     const el = e.target;

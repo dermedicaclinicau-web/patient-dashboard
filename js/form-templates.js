@@ -212,6 +212,21 @@ export async function saveFormTemplate(id, { name, fields, settings, status }, s
   if (status) publishedCache = null;
 }
 
+
+// Moves a form to another category (published or not). Only the category changes: no new version is needed,
+// because filling in a form uses the form's own category. Saved forms keep the category they were saved under.
+export async function changeFormCategory(id, category, staff) {
+  if (!CATEGORY_KEYS.includes(category)) throw new Error("Choose a category.");
+  const uid = currentUid();
+  await updateDoc(doc(db, COLLECTION, id), {
+    category,
+    updatedAt: serverTimestamp(),
+    updatedBy: (staff && staff.name) || "",
+    updatedByUid: uid,
+  });
+  cache = null;
+  publishedCache = null; // the patient dashboard lists pick it up straight away
+}
 /* ===================== Publishing ===================== */
 
 // Saves a frozen copy as versions/{n+1} and makes the form live, in one step.

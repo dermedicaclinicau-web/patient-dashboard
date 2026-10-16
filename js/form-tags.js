@@ -1,7 +1,7 @@
 // Merge tags: {Patient name}, {Today}, {Specialist name}… plus one for every answer on the form ({Date Received}).
 // Filled in live as the form is filled in, and frozen into the saved form (answers.__tags) for the saved copy and PDF.
 import { esc, fieldTagName, fieldTagKey, tagKeyOf } from "./form-fields.js";
-import { formatDobLong } from "./utils.js";
+import { formatDobLong, formatMobile } from "./utils.js";
 
 // [tag, what it is, group]
 export const FORM_TAGS = [
@@ -9,6 +9,10 @@ export const FORM_TAGS = [
   ["{First name}", "The patient's first name", "patient"],
   ["{Last name}", "The patient's last name", "patient"],
   ["{Date of birth}", "The patient's date of birth", "patient"],
+  ["{Patient age}", "The patient's age on the form's Record date", "patient"],
+  ["{Patient address}", "The patient's address", "patient"],
+  ["{Patient mobile}", "The patient's mobile number", "patient"],
+  ["{Patient email}", "The patient's email address", "patient"],
   ["{Patient ID}", "The patient's ID", "patient"],
   ["{Medicare number}", "The patient's Medicare number", "patient"],
   ["{Medicare reference number}", "The patient's reference number on the Medicare card", "patient"],
@@ -28,6 +32,8 @@ const GROUPS = [["patient", "Patient"], ["visit", "Visit and staff"], ["speciali
 // What Preview shows
 export const SAMPLE_TAGS = {
   "patient name": "Jane Citizen", "first name": "Jane", "last name": "Citizen", "date of birth": "3 March 1985",
+  "patient age": "41", "patient address": "1 Sample St, Perth WA 6000", "patient mobile": "0412 345 678",
+  "patient email": "jane@example.com",
   "patient id": "PAT-1234567890123", "medicare number": "2123 45670 1", "medicare reference number": "1", "medicare expiry": "03/2028",
   "today": longDate(dayKey()), "record date": longDate(dayKey()), "my name": "Dr Teh",
   "specialist name": "Dr Sarah Lee", "specialist": "Dr Sarah Lee", "specialist speciality": "Dermatologist",
@@ -50,6 +56,15 @@ function medicareText(s) {
   const d = String(s || "").replace(/\D/g, "");
   return d.length === 10 ? `${d.slice(0, 4)} ${d.slice(4, 9)} ${d.slice(9)}` : String(s || "");
 }
+// Age in whole years on a given day ("YYYY-MM-DD" both), or "" if either date is missing
+export function ageOn(dobKey, onKey) {
+  const a = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dobKey || "");
+  const b = /^(\d{4})-(\d{2})-(\d{2})$/.exec(onKey || "");
+  if (!a || !b) return "";
+  let y = +b[1] - +a[1];
+  if (+b[2] < +a[2] || (+b[2] === +a[2] && +b[3] < +a[3])) y--;
+  return y >= 0 && y < 130 ? String(y) : "";
+}
 
 // The values for one form. today: "YYYY-MM-DD" (defaults to now)
 export function tagValues({ patient = null, staff = null, specialist = null, recordDate = "", today = "" } = {}) {
@@ -57,16 +72,21 @@ export function tagValues({ patient = null, staff = null, specialist = null, rec
   const name = String(p.name || "").trim();
   const parts = name.split(/\s+/).filter(Boolean);
   const s = specialist && typeof specialist === "object" ? specialist : {};
+  const day = today || dayKey();
   return {
     "patient name": name,
     "first name": p.firstName || parts[0] || "",
     "last name": p.lastName || (parts.length > 1 ? parts[parts.length - 1] : ""),
     "date of birth": (p.dobKey && formatDobLong(p.dobKey)) || p.dob || "",
+    "patient age": ageOn(p.dobKey, recordDate || day),
+    "patient address": String(p.address || "").trim(),
+    "patient mobile": p.mobile ? formatMobile(p.mobile) : "",
+    "patient email": String(p.email || "").trim(),
     "patient id": p.pttId || p.id || "",
     "medicare number": medicareText(p.medicareNo),
     "medicare reference number": String(p.medicareIrn || ""),
     "medicare expiry": /^\d{4}-\d{2}$/.test(p.medicareExp || "") ? `${p.medicareExp.slice(5)}/${p.medicareExp.slice(0, 4)}` : "",
-    "today": longDate(today || dayKey()),
+    "today": longDate(day),
     "record date": longDate(recordDate),
     "my name": (staff && staff.name) || "",
     "specialist name": s.name || "",

@@ -3069,15 +3069,21 @@ function grantScannerAccess() {
 }
 
 // Role names + each role's ticks, from staff_roles/config (defaults until it's first saved).
-// Cached 5 minutes. Not cached if Firestore couldn't be read, so a hiccup doesn't stick.
+// Cached 5 minutes. If Firestore can't be read, the last roles that loaded properly are used,
+// never the defaults, so a hiccup can't change anyone's access.
 function rolesData_() {
   const cache = CacheService.getScriptCache();
   const hit = cache.get('roles_cfg_v2');
   if (hit) return JSON.parse(hit);
+  const props = PropertiesService.getScriptProperties();
   let doc = null;
-  let readOk = true;
   try { doc = fsGetDoc_(getConfig_(), 'staff_roles/config'); }
-  catch (e) { readOk = false; console.warn('Roles config not read: ' + e); }
+  catch (e) {
+    console.warn('Roles config not read: ' + e);
+    const last = props.getProperty('ROLES_LAST_GOOD');
+    if (last) return JSON.parse(last);
+    // Nothing remembered yet: fall through to the defaults (only ever on a brand-new setup)
+  }
 
   const seen = { admin: true };
   const names = ['Admin'];
@@ -3096,9 +3102,13 @@ function rolesData_() {
   });
 
   const out = { names: names, roles: roles };
-  if (readOk) { try { cache.put('roles_cfg_v2', JSON.stringify(out), 300); } catch (e) { /* not essential */ } }
+  const json = JSON.stringify(out);
+  try { cache.put('roles_cfg_v2', json, 300); } catch (e) { /* not essential */ }
+  try { if (props.getProperty('ROLES_LAST_GOOD') !== json) props.setProperty('ROLES_LAST_GOOD', json); }
+  catch (e) { console.warn('Roles backup not saved: ' + e); }
   return out;
 }
+
 function rolesConfig_() { return rolesData_().roles; }
 function roleNames_() { return rolesData_().names; }
 // What a staff member can do: their role's ticks, plus "always allow", minus "always block". Admins: everything.
@@ -3131,7 +3141,9 @@ function cleanAccess_(acc, role) {
 
 // Anyone logged in: their current access, and a fresh login token carrying it (for the Firestore rules)
 function staffMe_(session) {
-  const s = getStaffDocs_().filter(function (x) { return x.id === session.uid; })[0];
+  let s;
+  try { s = getStaffDocs_().filter(function (x) { return x.id === session.uid; })[0]; }
+  catch (e) { console.warn('Access check skipped: ' + e); return { ok: false, error: 'BUSY' }; }
   if (!s) return { ok: false, error: 'UNAUTHORIZED' };
   const perms = effectivePerms_(s);
   const token = createCustomToken_(s.id, {
@@ -3140,7 +3152,6 @@ function staffMe_(session) {
   });
   return { ok: true, role: s.role, name: s.name, perms: perms, injector: s.injector === true, token: token };
 }
-
 function rolesGet_() {
   const d = rolesData_();
   return {
@@ -5562,8 +5573,18 @@ function recDependents_(cfg, fromId, subId) {
     .slice(0, 20);
 }
 
+// Age in whole years on a day ("YYYY-MM-DD" both), or ""
+function recAge_(dobKey, onKey) {
+  const a = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dobKey || ''));
+  const b = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(onKey || ''));
+  if (!a || !b) return '';
+  let y = +b[1] - +a[1];
+  if (+b[2] < +a[2] || (+b[2] === +a[2] && +b[3] < +a[3])) y--;
+  return y >= 0 && y < 130 ? String(y) : '';
+}
+
 // The answers with the new patient's details in place of the old one's
-function recRewrite_(answersIn, fields, from, to) {
+function recRewrite_(answersIn, fields, from, to, recordDate) {
   const answers = JSON.parse(JSON.stringify(answersIn || {}));
   const toVals = { name: to.name, first: to.first, last: to.last, dobKey: to.dobKey, email: to.email, mobile: to.mobile,
     address: to.address, medicare: to.medicare, medicareIrn: to.medicareIrn, medicareExp: to.medicareExp };
@@ -5594,7 +5615,10 @@ function recRewrite_(answersIn, fields, from, to) {
     t['medicare number'] = to.medicare;
     t['medicare reference number'] = to.medicareIrn;
     t['medicare expiry'] = to.medicareExp;
-  }
+    t['patient address'] = to.address;
+    t['patient mobile'] = recMobile_(to.mobile);
+    t['patient email'] = to.email;
+    t['patient age'] = recAge_(to.dobKey, recordDate || Utilities.formatDate(new Date(), REC_TZ_, 'yyyy-MM-dd'));  }
   return answers;
 }
 
@@ -5637,7 +5661,7 @@ function recMoveSubmission_(id, body, session) {
     if (!from.name) from.name = String(sub.patientName || '');
 
     const fields = recFieldsOf_(cfg, sub);
-    const answers = recRewrite_(sub.answers || {}, fields, from, to);
+    const answers = recRewrite_(sub.answers || {}, fields, from, to, String(sub.recordDate || ''));
     const now = new Date().toISOString();
     const move = {
       at: now, by: String(session.name || ''), byUid: String(session.uid || ''),
