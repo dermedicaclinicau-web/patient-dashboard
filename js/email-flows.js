@@ -491,7 +491,16 @@ async function mountFlowEditor(container, { id, staff }) {
             <span>Add after the selected card</span>
             ${ADDABLE.map((t) => `<button type="button" class="ef-pal-btn" data-pal="${t}">${I[TYPES[t].icon]}<span>${esc(TYPES[t].short)}</span></button>`).join("")}
           </div>
-          <div class="ef-canvas" data-role="canvas"></div>
+          <div class="ef-vp" data-role="canvas" aria-label="Flow canvas">
+            <div class="ef-world" data-role="world"></div>
+            <div class="ef-zoom" role="group" aria-label="Zoom">
+              <button type="button" data-zoom="out" aria-label="Zoom out" title="Zoom out">−</button>
+              <button type="button" data-zoom="100" data-role="zoom" title="Back to 100%">100%</button>
+              <button type="button" data-zoom="in" aria-label="Zoom in" title="Zoom in">+</button>
+              <button type="button" data-zoom="fit" title="Fit the whole flow">Fit</button>
+            </div>
+            <p class="ef-hint">Drag the background to move around · Ctrl + scroll or pinch to zoom</p>
+          </div>
         </div>
         <aside class="ef-side" data-role="side" aria-label="Card settings"></aside>
       </div>
@@ -563,55 +572,190 @@ async function mountFlowEditor(container, { id, staff }) {
     liveBtn.classList.toggle("is-primary", !live);
   }
 
-  /* ---------- The cards ---------- */
-  function cardHtml(s, depth) {
+  /* ---------- The canvas: a tree of cards you can drag around and zoom ---------- */
+  const CW = 260, CH = 88;          // every card is this size
+  const GAP = 64;                   // space between cards (the + sits in the middle)
+  const HG = 48;                    // space between the Yes and No paths
+  const SPLIT = 24, LBL = 64, PAD = 60;
+  const world = $('[data-role="world"]');
+  const zoomLbl = $('[data-role="zoom"]');
+  const view = { x: 0, y: 0, z: 1, ready: false };
+  let pos = new Map();              // card id → its place in the last layout
+
+  // How wide a path needs to be (an If / else needs room for both of its paths)
+  function measure(list) {
+    let w = CW;
+    for (const s of list) if (s.type === "branch") w = Math.max(w, measure(s.cfg.yes) + HG + measure(s.cfg.no));
+    return w;
+  }
+
+  function layout() {
+    const L = { cards: [], plus: [], labels: [], d: "" };
+    const line = (d) => { L.d += d; };
+    const opensEnd = (list) => !list.length || list[list.length - 1].type !== "stop";
+
+    // Lays out one path, centred on cx, starting under yIn. Returns the bottom of the path.
+    function place(items, cx, yIn, key, depth) {
+      let prev = yIn;
+      for (let i = 0; ; i++) {
+        const s = items[i];
+        const py = prev + GAP / 2;
+        L.plus.push({ key, x: cx, y: py });
+        if (!s) { line(`M${cx} ${prev}V${py}`); return py + 14; }
+        const top = prev + GAP, bot = top + CH;
+        line(`M${cx} ${prev}V${top}`);
+        L.cards.push({ s, depth, x: cx - CW / 2, y: top });
+        if (s.type === "stop") return bot;
+        if (s.type !== "branch") { prev = bot; key = "after:" + s.id; continue; }
+
+        const wy = measure(s.cfg.yes), wn = measure(s.cfg.no), total = wy + HG + wn;
+        const lx = cx - total / 2 + wy / 2, rx = cx + total / 2 - wn / 2;
+        const sy = bot + SPLIT, cy = bot + LBL;
+        line(`M${cx} ${bot}V${sy}M${lx} ${sy}H${rx}M${lx} ${sy}V${cy}M${rx} ${sy}V${cy}`);
+        L.labels.push({ yes: true, x: lx, y: (sy + cy) / 2 }, { yes: false, x: rx, y: (sy + cy) / 2 });
+        const ey = place(s.cfg.yes, lx, cy, `start:${s.id}:yes`, depth + 1);
+        const en = place(s.cfg.no, rx, cy, `start:${s.id}:no`, depth + 1);
+        if (i === items.length - 1) return Math.max(ey, en);
+
+        // Cards after an If / else: the two paths join again
+        const my = Math.max(ey, en) + SPLIT;
+        if (opensEnd(s.cfg.yes)) line(`M${lx} ${ey}V${my}`);
+        if (opensEnd(s.cfg.no)) line(`M${rx} ${en}V${my}`);
+        line(`M${lx} ${my}H${rx}`);
+        prev = my;
+        key = "after:" + s.id;
+      }
+    }
+
+    const inner = measure(flow.steps);
+    const cx = PAD + inner / 2;
+    L.trigger = { x: cx - CW / 2, y: PAD };
+    L.h = place(flow.steps, cx, PAD + CH, "start:root", 1) + PAD;
+    L.w = inner + PAD * 2;
+    return L;
+  }
+
+  function cardHtml(s, depth, x, y) {
     const t = TYPES[s.type];
     const probs = stepProblems(s, depth);
     const on = sel === s.id;
     const full = summary(s);
-    return `<div class="ef-card${on ? " is-sel" : ""}${probs.length ? " is-bad" : ""}" data-pick="${esc(s.id)}" tabindex="0" role="button" aria-pressed="${on}" title="${esc(full)}">
+    return `<div class="ef-card is-t-${s.type}${on ? " is-sel" : ""}${probs.length ? " is-bad" : ""}"
+      style="left:${x}px;top:${y}px;width:${CW}px;height:${CH}px"
+      data-pick="${esc(s.id)}" tabindex="0" role="button" aria-pressed="${on}" title="${esc(full)}">
       <span class="ef-ico ${t.tone}">${I[t.icon]}</span>
       <span class="ef-card-main">
-        <small>${esc(depth > 1 ? t.short : t.label)}${s.type === "email" && s.cfg.promo ? " · <em>Promotional</em>" : ""}</small>
+        <small>${esc(t.label)}${s.type === "email" && s.cfg.promo ? " · <em>Promotional</em>" : ""}</small>
         <strong>${esc(full)}</strong>
         ${probs.length ? `<em class="ef-card-warn">${esc(probs[0])}</em>` : ""}
       </span>
     </div>`;
   }
-  function addHtml(key) {
-    const open = menuAt === key;
-    return `<div class="ef-conn"></div>
-      <div class="ef-add"><button type="button" class="ef-plus" data-add="${esc(key)}" aria-label="Add a card here" aria-expanded="${open}">${I.plus}</button></div>
-      ${open ? `<div class="ef-menu">${ADDABLE.map((t) =>
-        `<button type="button" data-ins="${esc(key)}" data-type="${t}">${I[TYPES[t].icon]}<span>${esc(TYPES[t].short)}</span></button>`).join("")}</div>` : ""}
-      <div class="ef-conn"></div>`;
-  }
-  function listHtml(list, startKey, depth) {
-    let h = addHtml(startKey);
-    list.forEach((s) => {
-      h += cardHtml(s, depth);
-      if (s.type === "branch") {
-        h += `<div class="ef-branch">
-          <div class="ef-col"><div class="ef-bl is-yes">Yes</div>${listHtml(s.cfg.yes, `start:${s.id}:yes`, depth + 1)}</div>
-          <div class="ef-col"><div class="ef-bl">No</div>${listHtml(s.cfg.no, `start:${s.id}:no`, depth + 1)}</div>
-        </div>`;
-      } else if (s.type !== "stop") {
-        h += addHtml("after:" + s.id);
-      }
-    });
-    return h;
-  }
+
   function renderCanvas() {
+    const L = layout();
+    pos = new Map(L.cards.map((c) => [c.s.id, c]));
     const on = sel === "trigger";
-    canvas.innerHTML = `
-      <div class="ef-card${on ? " is-sel" : ""}" data-pick="trigger" tabindex="0" role="button" aria-pressed="${on}">
+    const menu = menuAt && L.plus.find((p) => p.key === menuAt);
+    world.style.width = L.w + "px";
+    world.style.height = L.h + "px";
+    world.innerHTML = `
+      <svg class="ef-lines" width="${L.w}" height="${L.h}" aria-hidden="true"><path d="${L.d}"/></svg>
+      <div class="ef-card is-t-trigger${on ? " is-sel" : ""}" style="left:${L.trigger.x}px;top:${L.trigger.y}px;width:${CW}px;height:${CH}px"
+        data-pick="trigger" tabindex="0" role="button" aria-pressed="${on}">
         <span class="ef-ico is-trigger">${I.cart}</span>
         <span class="ef-card-main"><small>When this happens</small>
           <strong>${esc(triggerLabel(flow.trigger))}${flow.trigger.scope === "catalogue" ? " (Skin Script catalogue)" : ""}</strong></span>
       </div>
-      ${listHtml(flow.steps, "start:root", 1)}`;
+      ${L.cards.map((c) => cardHtml(c.s, c.depth, c.x, c.y)).join("")}
+      ${L.labels.map((b) => `<span class="ef-bl${b.yes ? " is-yes" : ""}" style="left:${b.x}px;top:${b.y}px">${b.yes ? "Yes" : "No"}</span>`).join("")}
+      ${L.plus.map((p) => `<button type="button" class="ef-plus${p.key === menuAt ? " is-open" : ""}" style="left:${p.x}px;top:${p.y}px"
+        data-add="${esc(p.key)}" aria-label="Add a card here" aria-expanded="${p.key === menuAt}">${I.plus}</button>`).join("")}
+      ${menu ? `<div class="ef-menu" style="left:${menu.x}px;top:${menu.y + 22}px">${ADDABLE.map((t) =>
+        `<button type="button" data-ins="${esc(menu.key)}" data-type="${t}">${I[TYPES[t].icon]}<span>${esc(TYPES[t].short)}</span></button>`).join("")}</div>` : ""}`;
+    if (!view.ready && canvas.clientWidth) { fit(true); view.ready = true; }
+    applyView();
   }
 
+  /* ---------- Moving and zooming ---------- */
+  const clampZ = (z) => Math.min(1.6, Math.max(0.3, z));
+  function applyView() {
+    world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.z})`;
+    const g = 20 * view.z;
+    canvas.style.backgroundSize = `${g}px ${g}px`;
+    canvas.style.backgroundPosition = `${view.x}px ${view.y}px`;
+    zoomLbl.textContent = Math.round(view.z * 100) + "%";
+  }
+  function zoomAt(f, px, py) {
+    const z = clampZ(view.z * f);
+    view.x = px - (px - view.x) * (z / view.z);
+    view.y = py - (py - view.y) * (z / view.z);
+    view.z = z;
+    applyView();
+  }
+  // Fit the flow: to the width only when the page opens, or the whole flow from the Fit button
+  function fit(widthOnly) {
+    const vw = canvas.clientWidth, vh = canvas.clientHeight;
+    const w = parseFloat(world.style.width) || 1, h = parseFloat(world.style.height) || 1;
+    view.z = clampZ(Math.min(1, (vw - 24) / w, widthOnly ? 1 : (vh - 24) / h));
+    view.x = (vw - w * view.z) / 2;
+    view.y = widthOnly ? 0 : (vh - h * view.z) / 2;
+    applyView();
+  }
+  // Brings a card into view if it's off the screen (after adding it)
+  function reveal(id) {
+    const c = pos.get(id);
+    if (!c) return;
+    const vw = canvas.clientWidth, vh = canvas.clientHeight;
+    const sx = view.x + c.x * view.z, sy = view.y + c.y * view.z;
+    if (sx >= 0 && sy >= 0 && sx + CW * view.z <= vw && sy + CH * view.z <= vh) return;
+    view.x = vw / 2 - (c.x + CW / 2) * view.z;
+    view.y = vh / 2 - (c.y + CH / 2) * view.z;
+    applyView();
+  }
+
+  const ptrs = new Map();
+  let dragDist = 0;
+  const spread = () => { const [a, b] = [...ptrs.values()]; return Math.hypot(a.x - b.x, a.y - b.y) || 1; };
+  canvas.addEventListener("pointerdown", (e) => {
+    if (e.button > 0 || e.target.closest("[data-pick], [data-add], [data-ins], [data-zoom], .ef-menu")) return;
+    canvas.setPointerCapture(e.pointerId);
+    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (ptrs.size === 1) dragDist = 0;
+    canvas.classList.add("is-panning");
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    const p = ptrs.get(e.pointerId);
+    if (!p) return;
+    if (ptrs.size === 2) {                                   // pinch to zoom
+      const before = spread();
+      ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      const [a, b] = [...ptrs.values()];
+      const r = canvas.getBoundingClientRect();
+      zoomAt(spread() / before, (a.x + b.x) / 2 - r.left, (a.y + b.y) / 2 - r.top);
+    } else {                                                 // drag to move
+      const dx = e.clientX - p.x, dy = e.clientY - p.y;
+      view.x += dx; view.y += dy;
+      dragDist += Math.abs(dx) + Math.abs(dy);
+      ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      applyView();
+    }
+  });
+  const endPtr = (e) => { ptrs.delete(e.pointerId); if (!ptrs.size) canvas.classList.remove("is-panning"); };
+  canvas.addEventListener("pointerup", endPtr);
+  canvas.addEventListener("pointercancel", endPtr);
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) {                            // Ctrl + scroll, and trackpad pinch
+      const r = canvas.getBoundingClientRect();
+      zoomAt(Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top);
+    } else {
+      view.x -= e.deltaX; view.y -= e.deltaY;
+      applyView();
+    }
+  }, { passive: false });
+
+  /* ---------- Adding cards ---------- */
   function insertAt(key, type) {
     if (count(flow.steps) >= MAX_STEPS) { showToast(`A flow can have up to ${MAX_STEPS} cards.`); return; }
     let list, idx, depth;
@@ -635,6 +779,7 @@ async function mountFlowEditor(container, { id, staff }) {
     changed();
     renderCanvas();
     renderSide();
+    reveal(s.id);
   }
 
   function palAdd(type) {
@@ -664,16 +809,27 @@ async function mountFlowEditor(container, { id, staff }) {
   }
 
   canvas.addEventListener("click", (e) => {
+    const zb = e.target.closest("[data-zoom]");
+    if (zb) {
+      const k = zb.dataset.zoom, cw = canvas.clientWidth / 2, ch = canvas.clientHeight / 2;
+      if (k === "fit") fit(false);
+      else if (k === "100") zoomAt(1 / view.z, cw, ch);
+      else zoomAt(k === "in" ? 1.2 : 1 / 1.2, cw, ch);
+      return;
+    }
     const ins = e.target.closest("[data-ins]");
     if (ins) { insertAt(ins.dataset.ins, ins.dataset.type); return; }
     const add = e.target.closest("[data-add]");
     if (add) { menuAt = menuAt === add.dataset.add ? null : add.dataset.add; renderCanvas(); return; }
     const card = e.target.closest("[data-pick]");
-    if (card) pick(card.dataset.pick);
+    if (card) { pick(card.dataset.pick); return; }
+    // A click on the empty background (not the end of a drag) closes the + menu
+    if (menuAt && dragDist < 4 && !e.target.closest(".ef-menu")) { menuAt = null; renderCanvas(); }
   });
   canvas.addEventListener("keydown", (e) => {
     const card = e.target.closest("[data-pick]");
     if (card && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); pick(card.dataset.pick); }
+    if (e.key === "Escape" && menuAt) { menuAt = null; renderCanvas(); }
   });
   root.querySelector(".ef-pal").addEventListener("click", (e) => {
     const b = e.target.closest("[data-pal]");
