@@ -83,7 +83,7 @@ const STAFF_SHORT = { ssp_creator: "SSP clinician", sold_by: "Who sold it", role
 const PATIENT_TOKENS = [
   { title: "Patient", tokens: ["First name", "Full name"] },
   { title: "This purchase", tokens: ["Product name", "Purchase date", "How to use"] },
-  { title: "Their Skin Script", tokens: ["Skin Script table", "SSP step", "AM instructions", "PM instructions", "When to use", "SSP clinician"], smart: true },
+  { title: "Their Skin Script", tokens: ["Skin Script table", "SSP date", "SSP expiry date", "SSP step", "AM instructions", "PM instructions", "When to use", "SSP clinician"], smart: true },
   { title: "Clinic", tokens: ["Clinic phone", "Clinic email", "Clinic address"] },
 ];
 const STAFF_TOKENS = [
@@ -98,7 +98,7 @@ const SAMPLE = {
   "how to use": "Apply 2 pumps to clean skin, morning and night.",
   "ssp step": "Step B", "am instructions": "Apply 2 pumps after cleansing.",
   "pm instructions": "Apply 2 pumps before your moisturiser.", "when to use": "Every day",
-  "ssp clinician": "Dr Teh", "ssp date": "2 September 2026",
+  "ssp clinician": "Dr Teh", "ssp date": "2 September 2026", "ssp expiry date": "2 September 2027",
 };
 const UNSUB = '<p style="margin:18px 0 0;font-size:12px;color:#64748b">You\'re getting this because you agreed to emails from Dermedica. <a href="#">Unsubscribe</a></p>';
 
