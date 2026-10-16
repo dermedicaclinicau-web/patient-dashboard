@@ -1,5 +1,5 @@
 ﻿{
-    "version":  "20261016-123057",
+    "version":  "20261016-172626",
     "files":  [
                   "./js/aftercare-api.js",
                   "./js/aftercare-bank.js",
@@ -21,6 +21,7 @@
                   "./js/data.js",
                   "./js/dialog.js",
                   "./js/email-composer.js",
+                  "./js/email-flows.js",
                   "./js/end-of-day-admin.js",
                   "./js/end-of-day-api.js",
                   "./js/end-of-day.js",
@@ -131,6 +132,7 @@
                   "./js/stock-count.js",
                   "./js/task-builder.js",
                   "./js/task-history.js",
+                  "./js/task-later.js",
                   "./js/task-manager.js",
                   "./js/task-runner.js",
                   "./js/task-schedule.js",
