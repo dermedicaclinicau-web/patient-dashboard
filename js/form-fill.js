@@ -1,6 +1,7 @@
 // Fill in a published form for a patient: #/fill/<patientId>/<templateId>
 // View a saved one:                      #/form-record/<submissionId>
-import { getFormTemplate, getFormVersion, getLetterhead, categoryLabel } from "./form-templates.js";
+import { getFormTemplate, getFormVersion, getLetterhead, categoryLabel, listPublishedForms } from "./form-templates.js";
+import { fetchPatientRecords } from "./records.js";
 import { esc, svg, ICONS, renderField, normaliseField, watermarkHtml, canRequire,
   choiceList, otherLabel, syncChoiceExtras, readExtras, writeExtras, readImageQs, writeImageQs, STAFF_FILLS,
   tableCols, tableMax, tableRowHtml, syncTableRows, tableClick, tableTotal, spanClass } from "./form-fields.js";
@@ -82,7 +83,8 @@ function consentHtml(f, res, { canStart = false } = {}) {
   const icon = svg(ICONS[f.type] || ICONS.consent_status);
   if (res && res.found) {
     return `<div class="fe-consent">${icon}<span>${rx ? "Prescription" : "Signed"} ${res.name ? `“${esc(res.name)}” ` : ""}on ${esc(niceDate(res.date))}.${
-      res.submissionId ? ` <a href="#/form-record/${encodeURIComponent(res.submissionId)}">View it</a>` : ""}</span></div>`;
+      res.submissionId ? ` <a href="#/form-record/${encodeURIComponent(res.submissionId)}">View it</a>`
+      : res.link ? ` <a href="${esc(res.link)}" target="_blank" rel="noopener noreferrer">View PDF</a>` : ""}</span></div>`;
   }
   return `<div class="fe-consent is-warn">${icon}<span>No ${rx ? "prescription" : "signed consent"} in the last ${months} months.${
     f.block ? ` This form can't be saved until ${rx ? "there's a valid prescription" : "one is signed"}.` : ""}</span>${
@@ -416,18 +418,51 @@ function isBlank(v) {
   return false;
 }
 
+// Consent check: the chosen consent form filled in on the portal, or any consent in the same treatment group
+// (portal or the older consent records), the same way the patient's page groups them.
+// Prescription check: the chosen prescription form filled in on the portal.
 async function checkConsents(consentFields, patient) {
-  const subs = await listSubmissionsForPatient([patient.id, ...patientIds(patient)]);
+  const needGroups = consentFields.some((f) => f.type === "consent_status");
+  const [subs, recs, forms] = await Promise.all([
+    listSubmissionsForPatient([patient.id, ...patientIds(patient)]),
+    needGroups
+      ? fetchPatientRecords(patient).catch((err) => { console.warn("Older consents not checked:", err); return null; })
+      : null,
+    needGroups ? listPublishedForms().catch(() => []) : [],
+  ]);
   const out = {};
   consentFields.forEach((f) => {
     const cut = new Date();
-    cut.setMonth(cut.getMonth() - (Number(f.months) || 12));
+    cut.setMonth(cut.getMonth() - (Number(f.months) || (f.type === "prescription_status" ? 6 : 12)));
+    cut.setHours(0, 0, 0, 0);
+    const cutKey = isoOf(cut);
+
+    // 1) The chosen form, filled in on the portal (most recent first)
     const hit = f.consentFormId
-      ? subs.find((s) => s.templateId === f.consentFormId && s.recordDate >= isoOf(cut))
+      ? subs.filter((s) => s.templateId === f.consentFormId && s.recordDate >= cutKey)
+          .sort((a, b) => String(b.recordDate).localeCompare(String(a.recordDate)))[0]
       : null;
-    out[f.id] = hit
-      ? { found: true, date: hit.recordDate, submissionId: hit.id, name: hit.templateName }
-      : { found: false, date: "", submissionId: "", name: "" };
+    if (hit) {
+      out[f.id] = { found: true, date: hit.recordDate, submissionId: hit.id, name: hit.templateName };
+      return;
+    }
+
+    // 2) Consent checks: any consent in the same treatment group (newest first, as records.js sorts them)
+    if (f.type === "consent_status" && recs) {
+      const tpl = forms.find((t) => t.id === f.consentFormId);
+      const group = tpl ? formGroup(tpl) : "";
+      if (group && group !== "other") {
+        const c = recs.consents.find((x) => x.category === group && x.date && x.date >= cut);
+        if (c) {
+          out[f.id] = {
+            found: true, date: isoOf(c.date), submissionId: c.portalId || "", name: c.title,
+            link: !c.portalId && /^https:\/\//i.test(c.link || "") ? c.link : "",
+          };
+          return;
+        }
+      }
+    }
+    out[f.id] = { found: false, date: "", submissionId: "", name: "" };
   });
   return out;
 }
