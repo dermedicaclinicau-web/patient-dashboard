@@ -18,6 +18,7 @@ import { createRichEditor } from "./rich-editor.js";
 import { openImagePicker } from "./image-bank.js";
 import { upcomingAppointments, formatUpcoming, apptWhen, apptDetail, niceDay } from "./upcoming-appts.js";
 import { pickSendTime, fmtSendTime } from "./task-later.js";
+import { listSspRecords } from "./ssp-api.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -124,6 +125,8 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     appts: { months: 6, services: true, staff: true, items: null, status: "", source: "book", lastKey: "", toKey: "" },
     subjectEdited: false, bodyEdited: false, sending: false, touched: false,
     todo: { on: true, due: "" },
+    touchedFields: new Set(), // choice fields staff have ticked themselves (not overwritten by the Skin Script)
+    sspNote: "",
     combo: { results: [], active: -1, status: "", seq: 0 },
     // Attachments: { mode: "blank"|"fill"|"saved", id, subId, tags, saved }
     atts: task.attachments.map(parseAttachment).map((a) => ({ ...a, subId: "", tags: null, saved: undefined })),
@@ -321,9 +324,42 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     catch (err) { console.error(err); showToast("Couldn't open that patient. Try again."); return; }
     if (!root.isConnected || !st.patient) return;
     st.combo = { results: [], active: -1, status: "", seq: st.combo.seq + 1 };
-    renderLeft(); renderTo(); loadSmart(); loadAttachments();
+    renderLeft(); renderTo(); loadSmart(); loadAttachments(); prefillFromSsp();
     const to = $('[data-role="to-input"]');
     if (to && !to.value) to.focus();
+  }
+
+  // Products fields: tick the products on the patient's latest Skin Script (unless staff have ticked some themselves)
+  const sameProduct = (a, b) => {
+    a = String(a || "").toLowerCase().trim(); b = String(b || "").toLowerCase().trim();
+    if (!a || !b) return false;
+    return a === b || a.startsWith(b + " ") || b.startsWith(a + " ");
+  };
+  async function prefillFromSsp() {
+    const fs = task.fields.filter((f) => f.source === "products" && f.fromSsp && TASK_CHOICE_TYPES.includes(f.type));
+    const p = st.patient;
+    st.sspNote = "";
+    if (!fs.length || !p) return;
+    let recs, opts;
+    try {
+      [recs, opts] = await Promise.all([listSspRecords([p.id, ...patientIds(p)]), loadSource("products")]);
+    } catch (err) {
+      console.warn("Skin Script not checked:", err);
+      return;
+    }
+    if (st.patient !== p || !root.isConnected) return;
+    const latest = recs[0];
+    const names = latest ? (latest.items || []).map((it) => it && it.name).filter(Boolean) : [];
+    st.sspNote = latest
+      ? (names.length ? `Ticked from their Skin Script of ${niceDate(latest.recordDate) || "their last visit"}.` : "Their latest Skin Script has no products.")
+      : "There's no Skin Script on file for this patient yet.";
+    fs.forEach((f) => {
+      if (st.touchedFields.has(f.id)) return;
+      const picked = opts.filter((o) => names.some((n) => sameProduct(o.name || o.label, n))).map((o) => o.label);
+      st.answers[f.id] = f.type === "checkboxes" ? picked : (picked[0] || "");
+    });
+    renderLeft();
+    renderMessage();
   }
 
   function clearPatient() {
@@ -439,13 +475,17 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     }
     const multi = f.type === "checkboxes";
     const picked = new Set(Array.isArray(v) ? v : v ? [v] : []);
-    return `<div class="tb-field">${head}${help}
+    const sspNote = f.source === "products" && f.fromSsp && st.patient && st.sspNote
+      ? `<small class="tr-appts-note">${esc(st.sspNote)}</small>` : "";
+    return `<div class="tb-field">${head}${help}${sspNote}
       ${opts.length > 8 ? `<input type="search" class="fe-input tr-filter" data-filter="${id}" placeholder="Filter ${esc(f.label.toLowerCase())}" />` : ""}
       <div class="tr-opts" data-opts="${id}">${opts.map((o) => `
         <div class="tr-opt" data-find="${esc(o.label.toLowerCase())}">
           <label class="fe-check"><input type="${multi ? "checkbox" : "radio"}" name="ans-${id}" data-ans="${id}" value="${esc(o.label)}"${picked.has(o.label) ? " checked" : ""} /> ${esc(o.label)}</label>
           ${o.link ? `<a class="tr-link" href="${esc(o.link)}" target="_blank" rel="noopener" title="Open the information page" aria-label="Open the page for ${esc(o.label)}">${I.ext}</a>`
-            : f.display === "links" ? '<small class="tr-nolink" title="Add a link in the Aftercare Bank to make it clickable">No link</small>' : ""}
+            : f.display === "links" ? `<small class="tr-nolink" title="${f.source === "products"
+              ? "Add a shop link in Skin Script Products to make it clickable"
+              : "Add a link in the Aftercare Bank to make it clickable"}">No link</small>` : ""}
         </div>`).join("") || '<p class="tb-none">No choices.</p>'}</div></div>`;
   }
 
@@ -723,6 +763,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     }
     if (el.dataset.ans !== undefined) {
       const fid = el.dataset.ans;
+      st.touchedFields.add(fid);
       if (el.type === "checkbox") {
         st.answers[fid] = [...left.querySelectorAll(`[data-ans="${CSS.escape(fid)}"]:checked`)].map((x) => x.value);
       } else {
@@ -912,7 +953,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   renderTo();
   renderAttachments();
   loadSmart();
-  if (st.patient) loadAttachments();
+  if (st.patient) { loadAttachments(); prefillFromSsp(); }
   if (task.category === "patient" && !st.patient) {
     const s = root.querySelector(".pc-input");
     if (s) s.focus();

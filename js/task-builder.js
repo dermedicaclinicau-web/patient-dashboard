@@ -60,6 +60,11 @@ function treatmentsField() {
     options: [], help: "Tick the treatments to send information about." };
 }
 
+function productsField() {
+  return { ...blankField("checkboxes"), label: "Products", source: "products", display: "links", fromSsp: true,
+    options: [], help: "Tick the products to include. Their names link to the online shop." };
+}
+
 function aftercareField() {
   return { ...blankField("checkboxes"), label: "Aftercare instructions", source: "aftercare", display: "links",
     options: [], help: "Tick the aftercare instructions to send." };
@@ -531,7 +536,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
         const linked = items.filter((x) => x.link).length;
         body = `<div class="tb-info">
           <strong>${items.length} choice${items.length === 1 ? "" : "s"}</strong> from ${esc(SOURCES[src].name)}${
-            src === "treatments" || src === "aftercare" ? `, ${linked} with links` : ""}. This list stays up to date automatically.
+            ["treatments", "aftercare", "products"].includes(src) ? `, ${linked} with links` : ""}. This list stays up to date automatically.
           <div class="tb-src-sample">${items.slice(0, 6).map((x) => `<span>${esc(x.label)}${x.link ? ` ${I.link}` : ""}</span>`).join("")}${
             items.length > 6 ? `<span>+${items.length - 6} more</span>` : ""}</div></div>`;
       }
@@ -545,7 +550,9 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
           <select class="fb-select" data-fi="${i}" data-fk="display">${Object.entries(CHOICE_DISPLAYS).map(([k, l]) =>
             `<option value="${k}"${(f.display || "inline") === k ? " selected" : ""}>${esc(l)}</option>`).join("")}</select></label>
       </div>
-      ${body}`;
+      ${body}
+      ${src === "products" ? `<label class="fe-check"><input type="checkbox" data-fi="${i}" data-fk="fromSsp"${f.fromSsp ? " checked" : ""} />
+        Start with the products on the patient's Skin Script ticked <small class="muted">(staff can change them)</small></label>` : ""}`;
   }
 
   function fieldCard(f, i) {
@@ -571,6 +578,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   function fieldsHtml() {
     const hasTx = task.fields.some((f) => f.source === "treatments");
     const hasAc = task.fields.some((f) => f.source === "aftercare");
+    const hasPr = task.fields.some((f) => f.source === "products");
     const aboutPt = task.category === "patient" || task.recipients.aboutPatient;
     const hasAppts = /\{\s*upcoming appointments\s*\}/i.test(`${task.subject} ${task.body}`);
     return `
@@ -582,6 +590,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
           ${Object.entries(TASK_FIELD_TYPES).map(([k, l]) => `<button type="button" class="fe-ins" data-addfield="${k}">+ ${esc(l)}</button>`).join("")}
           ${hasTx ? "" : '<button type="button" class="fe-ins is-smart" data-addfield="treatments">+ Treatments (from Treatment information)</button>'}
           ${hasAc ? "" : '<button type="button" class="fe-ins is-smart" data-addfield="aftercare">+ Aftercare (from Aftercare Bank)</button>'}
+          ${hasPr ? "" : '<button type="button" class="fe-ins is-smart" data-addfield="products">+ Products (from Skin Script Products)</button>'}
           ${aboutPt && !hasAppts ? '<button type="button" class="fe-ins is-smart" data-addappts="">+ Upcoming appointments (from the appointment book)</button>' : ""}
         </div>
       </section>`;
@@ -947,11 +956,12 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
       const f = task.fields[Number(el.dataset.fi)];
       if (!f) return;
       const k = el.dataset.fk;
-      if (k === "required") f.required = el.checked;
+      if (el.type === "checkbox") f[k] = el.checked; // Required, and "Start with their Skin Script ticked"
       else f[k] = el.value;
       if (k === "source") {
         if (f.source === "list" && !(f.options || []).length) f.options = [{ label: "Option 1", link: "" }];
-        if (f.source === "treatments" || f.source === "aftercare") f.display = "links";
+        if (["treatments", "aftercare", "products"].includes(f.source)) f.display = "links";
+        if (f.source === "products" && f.fromSsp === undefined) f.fromSsp = true;
         renderForm();
         loadSources();
       }
@@ -1053,7 +1063,8 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     const add = e.target.closest("[data-addfield]");
     if (add) {
       const kind = add.dataset.addfield;
-      task.fields.push(kind === "treatments" ? treatmentsField() : kind === "aftercare" ? aftercareField() : blankField(kind));
+      task.fields.push(kind === "treatments" ? treatmentsField() : kind === "aftercare" ? aftercareField()
+        : kind === "products" ? productsField() : blankField(kind));
       renderForm();
       loadSources();
       changed();

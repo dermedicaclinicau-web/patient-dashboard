@@ -30,7 +30,7 @@ export const CHOICE_DISPLAYS = {
   bullets: "As a list",
   links: "As a list with links",
 };
-const SOURCE_KEYS = ["list", "treatments", "aftercare", "staff", "printables"];
+const SOURCE_KEYS = ["list", "treatments", "aftercare", "products", "staff", "printables"];
 
 // Task attachments: a form id, optionally with how it's attached ("fill:<id>" or "saved:<id>"; a plain id is "blank")
 export const ATTACH_MODES = [
@@ -84,6 +84,7 @@ export function cleanTaskField(f) {
       .map((o) => ({ label: clip(o.label, 120).trim(), link: clip(o.link, 500).trim() }))
       .filter((o) => o.label || o.link)
       .slice(0, 60);
+    if (out.source === "products") out.fromSsp = f.fromSsp === true; // pre-tick the patient's Skin Script
   }
   return out;
 }
