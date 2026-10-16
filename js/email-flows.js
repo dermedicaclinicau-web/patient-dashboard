@@ -18,6 +18,7 @@ import {
 import { fetchStaffList } from "./task-types.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
+import { settingsHeaderHtml } from "./settings.js";
 
 const COL = "email_flows";
 const BASE = "#/settings/flows";
@@ -323,7 +324,7 @@ async function mountFlowList(container, { staff }) {
   const root = document.createElement("section");
   root.className = "page wide ef-page";
   root.innerHTML = `
-    ${admin ? '<a class="back-link" href="#/settings">← System configuration</a>' : ""}
+    ${admin ? settingsHeaderHtml("flows") : ""}
     <div class="tb-head">
       <div>
         <h3 class="tm-h">Email flows</h3>
