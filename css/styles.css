@@ -6355,3 +6355,13 @@ a.md-quiet:hover { border-color: var(--primary); }
   .ef-side { position: static; max-height: none; }
 }
 @media (max-width: 640px) { .ef-hint { display: none; } }
+
+/* ---------- Checkboxes + sub-options: same alignment on the live form as in the builder ---------- */
+/* Sub-options line up on the left (a column with align-items: center was centring each one) */
+.fe-opts .fe-sub > .fe-sub-opts .fe-optx { flex-direction: column; align-items: flex-start; }
+/* The comment box under a ticked sub-option still uses the full width */
+.fe-opts .fe-sub > .fe-sub-opts .fe-optx .fe-xin { align-self: stretch; width: auto; max-width: 360px; margin-left: 26px; }
+/* Tick boxes never shrink when the label wraps onto two lines */
+.fe-opt input[type="checkbox"], .fe-opt input[type="radio"] { flex: none; }
+.fe-opts .fe-sub > .fe-opt { align-items: flex-start; }
+.fe-opts .fe-sub > .fe-opt input { margin-top: .15rem; }
