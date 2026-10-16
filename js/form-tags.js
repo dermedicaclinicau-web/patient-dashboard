@@ -1,40 +1,42 @@
-// Merge tags in question titles, help text, Text blocks and the form title: {Patient name}, {Specialist name}…
+// Merge tags: {Patient name}, {Today}, {Specialist name}… plus one for every answer on the form ({Date Received}).
 // Filled in live as the form is filled in, and frozen into the saved form (answers.__tags) for the saved copy and PDF.
-import { esc } from "./form-fields.js";
+import { esc, fieldTagName, fieldTagKey, tagKeyOf } from "./form-fields.js";
 import { formatDobLong } from "./utils.js";
 
+// [tag, what it is, group]
 export const FORM_TAGS = [
-  ["{Patient name}", "The patient's full name"],
-  ["{First name}", "The patient's first name"],
-  ["{Last name}", "The patient's last name"],
-  ["{Date of birth}", "The patient's date of birth"],
-  ["{Patient ID}", "The patient's ID"],
-  ["{Today}", "The date the form is filled in"],
-  ["{Record date}", "The form's Record date"],
-  ["{My name}", "The staff member filling it in"],
-  ["{Specialist name}", "The specialist chosen on this form"],
-  ["{Specialist speciality}", "Their speciality"],
-  ["{Specialist practice}", "Their practice or clinic"],
-  ["{Specialist address}", "Their address"],
-  ["{Specialist phone}", "Their phone number"],
-  ["{Specialist email}", "Their email address"],
-  ["{Medicare number}", "The patient's Medicare number"],
-  ["{Medicare reference number}", "The patient's reference number on the Medicare card"],
+  ["{Patient name}", "The patient's full name", "patient"],
+  ["{First name}", "The patient's first name", "patient"],
+  ["{Last name}", "The patient's last name", "patient"],
+  ["{Date of birth}", "The patient's date of birth", "patient"],
+  ["{Patient ID}", "The patient's ID", "patient"],
+  ["{Medicare number}", "The patient's Medicare number", "patient"],
+  ["{Medicare reference number}", "The patient's reference number on the Medicare card", "patient"],
+  ["{Medicare expiry}", "When the patient's Medicare card expires", "patient"],
+  ["{Today}", "The date the form is filled in", "visit"],
+  ["{Record date}", "The form's Record date", "visit"],
+  ["{My name}", "The staff member filling it in", "visit"],
+  ["{Specialist name}", "The specialist chosen on this form", "specialist"],
+  ["{Specialist speciality}", "Their speciality", "specialist"],
+  ["{Specialist practice}", "Their practice or clinic", "specialist"],
+  ["{Specialist address}", "Their address", "specialist"],
+  ["{Specialist phone}", "Their phone number", "specialist"],
+  ["{Specialist email}", "Their email address", "specialist"],
 ];
+const GROUPS = [["patient", "Patient"], ["visit", "Visit and staff"], ["specialist", "Specialist chosen on this form"]];
 
 // What Preview shows
 export const SAMPLE_TAGS = {
   "patient name": "Jane Citizen", "first name": "Jane", "last name": "Citizen", "date of birth": "3 March 1985",
-  "patient id": "PAT-1234567890123", "today": longDate(dayKey()), "record date": longDate(dayKey()), "my name": "Dr Teh",
+  "patient id": "PAT-1234567890123", "medicare number": "2123 45670 1", "medicare reference number": "1", "medicare expiry": "03/2028",
+  "today": longDate(dayKey()), "record date": longDate(dayKey()), "my name": "Dr Teh",
   "specialist name": "Dr Sarah Lee", "specialist": "Dr Sarah Lee", "specialist speciality": "Dermatologist",
   "specialist practice": "Perth Skin Specialists", "specialist address": "12 Example St, Perth WA 6000",
   "specialist phone": "08 9000 0000", "specialist email": "reception@example.com",
-  "medicare number": "2123 45670 1", "medicare reference number": "1",
 };
 
-const TAG_RE = /\{\s*([A-Za-z][A-Za-z ]*?)\s*\}/g;
-const keyOf = (k) => k.toLowerCase().replace(/\s+/g, " ");
-export const hasTags = (s) => /\{\s*[A-Za-z][A-Za-z ]*\}/.test(String(s || ""));
+const TAG_RE = /\{\s*([A-Za-z][A-Za-z0-9 /-]*?)\s*\}/g;
+export const hasTags = (s) => /\{\s*[A-Za-z][A-Za-z0-9 /-]*\}/.test(String(s || ""));
 
 function dayKey(d = new Date()) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -48,6 +50,7 @@ function medicareText(s) {
   const d = String(s || "").replace(/\D/g, "");
   return d.length === 10 ? `${d.slice(0, 4)} ${d.slice(4, 9)} ${d.slice(9)}` : String(s || "");
 }
+
 // The values for one form. today: "YYYY-MM-DD" (defaults to now)
 export function tagValues({ patient = null, staff = null, specialist = null, recordDate = "", today = "" } = {}) {
   const p = patient || {};
@@ -62,6 +65,7 @@ export function tagValues({ patient = null, staff = null, specialist = null, rec
     "patient id": p.pttId || p.id || "",
     "medicare number": medicareText(p.medicareNo),
     "medicare reference number": String(p.medicareIrn || ""),
+    "medicare expiry": /^\d{4}-\d{2}$/.test(p.medicareExp || "") ? `${p.medicareExp.slice(5)}/${p.medicareExp.slice(0, 4)}` : "",
     "today": longDate(today || dayKey()),
     "record date": longDate(recordDate),
     "my name": (staff && staff.name) || "",
@@ -74,11 +78,45 @@ export function tagValues({ patient = null, staff = null, specialist = null, rec
     "specialist email": s.email || "",
   };
 }
+// Built-in tags always win over an answer with the same name
+export const BUILTIN_TAG_KEYS = Object.keys(tagValues({}));
+
+// The answers that have a tag: [{ f, name, key }]. The first question with a name owns it.
+export function formFieldTags(fields) {
+  const seen = new Set(BUILTIN_TAG_KEYS);
+  const out = [];
+  (fields || []).forEach((f) => {
+    const key = fieldTagKey(f);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    out.push({ f, name: fieldTagName(f), key });
+  });
+  return out;
+}
+
+// Where a tag is used on a form
+const TEXT_KEYS = ["label", "help", "text", "html", "prefill", "starter"];
+export function tagRefRe(name, flags = "gi") {
+  const src = String(name || "").trim().replace(/[.*+?^${}()|[\]\\/]/g, "\\$&").replace(/\s+/g, "\\s+");
+  return new RegExp(`\\{\\s*${src}\\s*\\}`, flags);
+}
+export function tagUsedBy(fields, name, exceptId = "") {
+  if (!name) return [];
+  const re = tagRefRe(name, "i");
+  return (fields || []).filter((f) => f.id !== exceptId && TEXT_KEYS.some((k) => typeof f[k] === "string" && re.test(f[k])));
+}
+// A question was renamed: everywhere that used its tag follows
+export function renameTagRefs(fields, from, to) {
+  const re = tagRefRe(from);
+  (fields || []).forEach((f) => TEXT_KEYS.forEach((k) => {
+    if (typeof f[k] === "string") f[k] = f[k].replace(re, `{${to}}`);
+  }));
+}
 
 // Plain text. missing: what an empty tag becomes ("" by default; null keeps the tag as typed). Unknown tags are left alone.
 export function fillTags(text, vals, missing = "") {
   return String(text ?? "").replace(TAG_RE, (m, k) => {
-    const kk = keyOf(k);
+    const kk = tagKeyOf(k);
     if (!(kk in vals)) return m;
     return vals[kk] ? vals[kk] : missing === null ? m : missing;
   });
@@ -87,7 +125,7 @@ export function fillTags(text, vals, missing = "") {
 // HTML (Text blocks): the values are escaped
 export function fillTagsHtml(html, vals, missing = "") {
   return String(html ?? "").replace(TAG_RE, (m, k) => {
-    const kk = keyOf(k);
+    const kk = tagKeyOf(k);
     if (!(kk in vals)) return m;
     return vals[kk] ? esc(vals[kk]).replace(/\n/g, "<br>") : missing === null ? m : missing;
   });
@@ -116,13 +154,26 @@ export function applyTagNodes(list, vals, missing = "") {
   });
 }
 
-// The builder's "Insert a tag" list
-export function tagPickerHtml() {
+// The builder's "Insert a tag" list: this form's answers first, then the built-in tags
+export function tagPickerHtml({ fields = [], current = null } = {}) {
+  const pos = new Map(fields.map((f, i) => [f.id, i]));
+  const here = current ? pos.get(current.id) : -1;
+  const own = formFieldTags(fields).filter((t) => !current || t.f.id !== current.id);
+  const chip = (tag, help, cls = "") =>
+    `<button type="button" class="fe-ins${cls}" data-taginsert="${esc(tag)}" title="${esc(help)}">${esc(tag)}</button>`;
+  const sec = (title, body) => `<div class="fe-tagsec"><span class="fe-tagsec-h">${esc(title)}</span>${body}</div>`;
+  const answers = own.length
+    ? `<div class="fe-chiprow">${own.map((t) => chip(`{${t.name}}`,
+        `The answer to “${t.f.label || t.name}”${here >= 0 && pos.get(t.f.id) > here ? " (a later question: fills in once it's answered)" : ""}`,
+        " is-field")).join("")}</div>`
+    : '<small class="fe-note">Every question you add gets a tag here, named after the question.</small>';
+  const hasSp = fields.some((f) => f.type === "specialist");
   return `<details class="fe-insp-field fe-tagbox">
-    <summary>Insert a tag <small class="muted">{Patient name}, {Specialist name}…</small></summary>
-    <div class="fe-chiprow">${FORM_TAGS.map(([t, help]) =>
-      `<button type="button" class="fe-ins" data-taginsert="${esc(t)}" title="${esc(help)}">${esc(t)}</button>`).join("")}</div>
-    <small class="fe-note">Goes into the question or help text, whichever you were last typing in. Filled in on the form, the saved copy and the PDF.
-      In a Text block, type the tag straight into the text. Specialist tags fill in once a specialist is chosen on the form.</small>
+    <summary>Insert a tag <small class="muted">answers, patient, dates…</small></summary>
+    ${sec("Answers on this form", answers)}
+    ${GROUPS.filter(([g]) => g !== "specialist" || hasSp).map(([g, title]) =>
+      sec(title, `<div class="fe-chiprow">${FORM_TAGS.filter((t) => t[2] === g).map(([t, h]) => chip(t, h)).join("")}</div>`)).join("")}
+    <small class="fe-note">Click in the question, help text, pre-fill or a text block, then click a tag. On the form it becomes the answer or detail,
+      and it's kept on the saved copy and PDF.</small>
   </details>`;
 }

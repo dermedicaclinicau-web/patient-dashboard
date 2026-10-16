@@ -1,4 +1,4 @@
-import { createPatient, findPossibleDuplicates, phoneCore, medicareDigits, medicareValid } from "./patients.js";
+import { createPatient, findPossibleDuplicates, phoneCore, medicareDigits, medicareValid, medicareExpiryKey } from "./patients.js";
 import { escapeHtml, formatDobLong, formatMobile, toDateKey } from "./utils.js";
 import { confirmDialog } from "./dialog.js";
 
@@ -50,6 +50,7 @@ function readInput(form) {
     email: f.email.value.trim().toLowerCase(),
     medicare: medicareDigits(f.medicareNo.value),
     medicareIrn: f.medicareIrn.value.replace(/\D/g, ""),
+    medicareExp: f.medicareExp.value.trim(),
   };
 }
 
@@ -132,7 +133,8 @@ export function openNewPatientDialog({ loadAll }) {
           <label class="em-field full"><span>Address</span><input name="address" maxlength="200" autocomplete="off" /></label>
           <label class="em-field"><span>Medicare number</span><input name="medicareNo" inputmode="numeric" maxlength="14" placeholder="2123 45670 1" autocomplete="off" /></label>
           <label class="em-field"><span>Medicare reference no.</span><input name="medicareIrn" inputmode="numeric" maxlength="1" placeholder="1–9" autocomplete="off" /></label>
-        </div>
+          <label class="em-field"><span>Medicare expiry</span><input name="medicareExp" maxlength="7" placeholder="MM/YYYY" autocomplete="off" /></label>
+          </div>
         <p class="np-note">The patient ID is created automatically. Adding a date of birth helps spot duplicates.</p>
 
         <div class="np-dupes-slot" aria-live="polite"></div>
@@ -214,6 +216,8 @@ async function onSubmit(e) {
   if (inp.medicare && !medicareValid(inp.medicare)) { errEl.textContent = "Check the Medicare number. It's the 10 digits on the card."; f.medicareNo.focus(); return; }
   if (inp.medicareIrn && !/^[1-9]$/.test(inp.medicareIrn)) { errEl.textContent = "The Medicare reference number is one digit, 1 to 9."; f.medicareIrn.focus(); return; }
   if (inp.medicareIrn && !inp.medicare) { errEl.textContent = "Add the Medicare number as well as the reference number."; f.medicareNo.focus(); return; }
+  if (medicareExpiryKey(inp.medicareExp) === null) { errEl.textContent = "Check the Medicare expiry, for example 03/2028."; f.medicareExp.focus(); return; }
+  if (inp.medicareExp && !inp.medicare) { errEl.textContent = "Add the Medicare number as well."; f.medicareNo.focus(); return; }
 
   const reset = () => { if (btn.isConnected) { btn.disabled = false; btn.innerHTML = `${I.userPlus}Add patient`; } };
   btn.disabled = true;
@@ -256,7 +260,7 @@ async function onSubmit(e) {
     myCtx.created = await createPatient({
       firstName: inp.first, lastName: inp.last, dobKey: inp.dobKey,
       mobile: f.mobile.value, email: f.email.value, address: f.address.value,
-      medicareNo: inp.medicare, medicareIrn: inp.medicareIrn,
+      medicareNo: inp.medicare, medicareIrn: inp.medicareIrn, medicareExp: inp.medicareExp,
     });
     dlg.close();
   } catch (err) {

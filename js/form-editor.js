@@ -13,9 +13,9 @@ import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { DEFAULT_LETTERHEAD, letterheadHtml, openLetterheadDialog } from "./form-letterhead.js";
 import { openPrinterDialog } from "./form-delivery.js";
 import { conditionSettingsHtml, applyConditionInput, applyConditionClick, conditionSummary, conditionProblem } from "./form-conditions.js";
-import { applyVisibility } from "./form-fill.js";
+import { applyVisibility, fieldTagValues } from "./form-fill.js";
 import { CATEGORIES, categorize } from "./records.js";
-import { formTitleHtml } from "./form-fields.js";
+import { TAG_TYPES, fieldTagName, tagKeyOf, formTitleHtml } from "./form-fields.js";
 import { openImagePicker } from "./image-bank.js";
 import { bankUpload, bankError, hydrateBankImages } from "./image-bank-api.js";
 import { attachAnnotators } from "./form-annotate.js";
@@ -32,7 +32,7 @@ import { openProductPicker } from "./consumables-field.js";
 import { listMarkingSets, openMarkingSetsDialog } from "./marking-sets.js";
 import { listSpecialists, specialitiesOf } from "./specialists-api.js";
 import { openSpecialistBankDialog } from "./specialist-bank.js";
-import { tagPickerHtml, collectTagNodes, applyTagNodes, SAMPLE_TAGS } from "./form-tags.js";
+import { tagPickerHtml, collectTagNodes, applyTagNodes, SAMPLE_TAGS, formFieldTags, tagUsedBy, renameTagRefs, tagRefRe } from "./form-tags.js";
 import { mountRichTextField } from "./rich-field.js";
 
 const UI = {
@@ -130,6 +130,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   let markSets = null;       // marking sets, once loaded
   let specialities = [];     // from the Specialist Bank, for the field's Speciality suggestions
   let previewAnnots = {};    // pictures being drawn on in Preview
+  let previewTags = [];      // text with tags in it, on the Preview
   const ctx = (live) => ({ live, fields, consentForms, prescriptionForms, letterhead, calcValues: null, aftercare: aftercareMap, emailTemplates, products, markSets, specialities });
   const current = () => fields.find((f) => f.id === sel) || null;
   const signature = () => JSON.stringify(formSnapshot({ name, fields, settings }));
@@ -416,19 +417,26 @@ export async function mountFormEditor(container, { templateId, staff }) {
     return values;
   }
 
-  // Preview: questions appear and disappear as answers change, like the real form
+  // Preview: questions appear and disappear as answers change, and tags fill in, like the real form
   function refreshPreview() {
     if (mode !== "preview") return;
     let calc = updateCalcs();
     applyVisibility(stage, fields, { pads: {}, calc, consent: {} });
     calc = updateCalcs();
     applyVisibility(stage, fields, { pads: {}, calc, consent: {} });
+    const tv = fieldTagValues(stage, fields, SAMPLE_TAGS, { pads: {}, calc, consent: {} });
+    applyTagNodes(previewTags, tv, null); // unanswered tags stay visible as {Tag}
+    fields.forEach((f) => {
+      const w = f.type === "rich_text" && stage.querySelector(`[data-fid="${CSS.escape(f.id)}"]`);
+      if (w && w.rtRetag) w.rtRetag(tv);
+    });
   }
 
   function renderStage() {
     const build = mode === "build";
     const c = ctx(!build);
     const BRANCH = '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>';
+    const tagOwners = new Set(formFieldTags(fields).map((t) => t.f.id));
     const items = fields.map((f, i) => {
       const body = renderField(f, c);
       if (!build) return body ? `<div class="fe-field${spanClass(f)}" data-fid="${esc(f.id)}">${body}</div>` : "";
@@ -439,6 +447,11 @@ export async function mountFormEditor(container, { templateId, staff }) {
       const chips = [
         f.fill && `<span class="fe-chip">${svg(UI.user)}Auto-filled: ${esc(FILLS[f.fill] || f.fill)}</span>`,
         pf && `<span class="fe-chip">${svg('<polyline points="20 6 9 17 4 12"/>')}Pre-filled: ${esc(pf)}</span>`,
+        (() => {
+          const tn = tagOwners.has(f.id) ? fieldTagName(f) : "";
+          const n = tn ? tagUsedBy(fields, tn, f.id).length : 0;
+          return n && `<span class="fe-chip is-tag">{${esc(tn)}} · used in ${n} place${n === 1 ? "" : "s"}</span>`;
+        })(),
         cond && `<span class="fe-chip is-cond${condBad ? " is-bad" : ""}">${svg(BRANCH)}${esc(condBad || cond)}</span>`,
         f.pdfHide && `<span class="fe-chip">${svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><line x1="4" y1="4" x2="20" y2="20"/>')}Not on the PDF</span>`,
       ].filter(Boolean).join("");
@@ -478,10 +491,10 @@ export async function mountFormEditor(container, { templateId, staff }) {
         <div class="fe-fields" data-role="fields">${items || empty}</div>
       </div>`;
 
+    previewTags = build ? [] : collectTagNodes(stage);
     if (!build) refreshPreview();
     hydrateBankImages(stage);
     if (!build) {
-      applyTagNodes(collectTagNodes(stage), SAMPLE_TAGS);
       fields.filter((f) => f.type === "rich_text").forEach((f) => {
         mountRichTextField(stage.querySelector(`[data-fid="${CSS.escape(f.id)}"]`), f, { tags: SAMPLE_TAGS });
       });
@@ -570,6 +583,39 @@ export async function mountFormEditor(container, { templateId, staff }) {
       </div>`;
   }
 
+  // This answer's own tag: what it's called, where it's used, and a name of its own if wanted
+  function myTagHtml(f) {
+    if (!TAG_TYPES.includes(f.type)) return "";
+    const tn = fieldTagName(f);
+    const owner = !!tn && formFieldTags(fields).some((t) => t.f.id === f.id);
+    const used = owner ? tagUsedBy(fields, tn, f.id) : [];
+    const note = !tn ? "Name the question to give its answer a tag."
+      : !owner ? `{${tn}} is already used by another question or a built-in tag. Type a tag name of its own to use this answer.`
+      : used.length ? `Used in: ${used.map((x) => x.label || FIELD_TYPES[x.type].name).join(", ")}.`
+      : "Put it in a later question's name, help text or pre-fill to repeat this answer there.";
+    return `<div class="fe-insp-field fe-mytag"><span class="fe-insp-label">This answer's tag</span>
+      ${owner ? `<div class="fe-mytag-row"><code>{${esc(tn)}}</code>
+        <button type="button" class="lh-btn is-quiet" data-act="tag-copy" data-tag="{${esc(tn)}}">Copy</button></div>` : ""}
+      <input class="fe-input" data-k="tag" maxlength="40" placeholder="Same as the question" value="${esc(f.tag || "")}" aria-label="Tag name" />
+      <small class="fe-note">${esc(note)}</small></div>`;
+  }
+
+  // Renaming a question (or its tag): everywhere that uses the tag follows.
+  // If the new name is empty or clashes, the old tag is kept so nothing breaks.
+  const tagOwnerName = (f) => {
+    const tn = fieldTagName(f);
+    return tn && formFieldTags(fields).some((t) => t.f.id === f.id) ? tn : "";
+  };
+  function followTag(f, before) {
+    const inTitle = tagRefRe(before, "i").test(name);
+    if (!inTitle && !tagUsedBy(fields, before, f.id).length) return;
+    const after = tagOwnerName(f);
+    if (!after) { if (!f.tag) f.tag = before; return; }
+    if (tagKeyOf(after) === tagKeyOf(before)) return;
+    renameTagRefs(fields, before, after);
+    if (inTitle) { name = name.replace(tagRefRe(before), `{${after}}`); nameInput.value = name; }
+  }
+
   function renderInspector() {
     const f = current();
     if (!f) { renderFormSettings(); return; }
@@ -580,7 +626,8 @@ export async function mountFormEditor(container, { templateId, staff }) {
         : f.type === "image" ? "Title (optional)" : "Question";
       h += setting(lbl, `<input class="fe-input" data-k="label" maxlength="300" value="${esc(f.label)}" />`);
     }
-    if (hasLabel(f.type) || hasHelp(f.type)) h += tagPickerHtml();
+    h += myTagHtml(f);
+    if (hasLabel(f.type) || hasHelp(f.type)) h += tagPickerHtml({ fields, current: f });
     if (hasHelp(f.type)) {
       h += setting("Help text", `<input class="fe-input" data-k="help" maxlength="500" placeholder="Shown under the question" value="${esc(f.help)}" />`);
     }
@@ -701,6 +748,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
       if (["record_date", "watermark"].includes(fields[i].type)) { showToast("A form can only have one of these."); return; }
       const c = JSON.parse(JSON.stringify(fields[i]));
       c.id = newId();
+      delete c.tag;
       fields.splice(i + 1, 0, c);
       sel = c.id;
     } else if (action === "remove") {
@@ -879,7 +927,10 @@ export async function mountFormEditor(container, { templateId, staff }) {
     }
   });
 
-  stage.addEventListener("input", refreshPreview);
+  stage.addEventListener("input", (e) => {
+    if (e.target.matches && e.target.matches("[data-linked]")) e.target.dataset.touched = "1";
+    refreshPreview();
+  });
 
   insp.addEventListener("input", (e) => {
     if (e.target.closest(".re")) return;
@@ -898,6 +949,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
       f.options[i] = el.value;
     } else if (el.dataset.k) {
       const k = el.dataset.k;
+      const tagBefore = k === "label" || k === "tag" ? tagOwnerName(f) : "";
       if (el.type === "checkbox") {
         f[k] = el.checked;
       } else if (el.dataset.num !== undefined) {
@@ -916,6 +968,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
       } else {
         f[k] = el.value;
       }
+      if (tagBefore) followTag(f, tagBefore); // renaming a question: everywhere its tag is used follows
     } else if (el.dataset.cond !== undefined || el.dataset.rule !== undefined) {
       if (!applyConditionInput(f, el, fields)) return;
     } else if (!applyInput(f, el)) {
@@ -933,7 +986,6 @@ export async function mountFormEditor(container, { templateId, staff }) {
       const st = insp.querySelector('[data-role="calc-status"]');
       if (st) st.innerHTML = calcStatusHtml(f, fields);
     }
-    
   });
 
   insp.addEventListener("change", (e) => {
@@ -949,11 +1001,12 @@ export async function mountFormEditor(container, { templateId, staff }) {
   insp.addEventListener("mousedown", (e) => {
     if (e.target.closest("[data-calcins]")) e.preventDefault();
   });
-  // Which box "Insert a tag" goes into: the last one typed in
-  let tagKey = "label";
+  // Which box "Insert a tag" goes into: the last one typed in (including a Text block or starting text)
+  let tagKey = "label", richEl = null;
   insp.addEventListener("focusin", (e) => {
+    if (e.target.isContentEditable) { tagKey = "__rich"; richEl = e.target; return; }
     const k = e.target.dataset && e.target.dataset.k;
-    if (k === "label" || k === "help") tagKey = k;
+    if (k === "label" || k === "help" || k === "prefill") { tagKey = k; richEl = null; }
   });
   insp.addEventListener("mousedown", (e) => {
     if (e.target.closest("[data-taginsert]")) e.preventDefault(); // keep the cursor where it is
@@ -970,15 +1023,25 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
     const ti = e.target.closest("[data-taginsert]");
     if (ti) {
+      const tok = ti.dataset.taginsert;
+      if (tagKey === "__rich" && richEl && richEl.isConnected) {
+        richEl.focus();
+        document.execCommand("insertText", false, tok); // the editor saves it like typing
+        return;
+      }
       const el = insp.querySelector(`[data-k="${tagKey}"]`) || insp.querySelector('[data-k="label"]');
       if (!el) return;
-      const tok = ti.dataset.taginsert;
       const s = el.selectionStart ?? el.value.length;
       const end = el.selectionEnd ?? s;
       el.value = el.value.slice(0, s) + tok + el.value.slice(end);
       el.focus();
       el.setSelectionRange(s + tok.length, s + tok.length);
       el.dispatchEvent(new Event("input", { bubbles: true })); // saves it like typing
+      return;
+    }
+    const cp = e.target.closest('[data-act="tag-copy"]');
+    if (cp) {
+      if (navigator.clipboard) navigator.clipboard.writeText(cp.dataset.tag).then(() => showToast(`Copied ${cp.dataset.tag}`)).catch(() => {});
       return;
     }
 

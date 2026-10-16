@@ -9,7 +9,7 @@ specialistParts, specialistBlockHtml, spanUnits, tableColWidths,
  } from "./form-fields.js";
 import { cleanRichHtml, richText } from "./rich-html.js";
 import { markSummary } from "./marking-sets.js";
-import { tagValues, fillTags, fillTagsHtml } from "./form-tags.js";
+import { tagValues, fillTags, fillTagsHtml, formFieldTags } from "./form-tags.js";
 
 
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
@@ -334,6 +334,8 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
     ...tagValues({ patient: { name: sub.patientName }, staff: { name: sub.createdBy }, recordDate: sub.recordDate, today: sub.recordDate }),
     ...((sub.answers && sub.answers.__tags) || {}),
   };
+  // Answers' tags: a line to write on in a blank print; empty on forms saved before answers had tags
+  formFieldTags((ver.fields || []).map(normaliseField).filter(Boolean)).forEach((t) => { if (!(t.key in tags)) tags[t.key] = ""; });
   const missing = blank ? "____________" : "";
   const fields = (ver.fields || []).map(normaliseField).filter(Boolean).map((f) => ({
     ...f,

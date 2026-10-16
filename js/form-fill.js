@@ -7,7 +7,7 @@ import { esc, svg, ICONS, renderField, normaliseField, watermarkHtml, canRequire
 import { listMarkingSets, markSummary } from "./marking-sets.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { letterheadHtml, DEFAULT_LETTERHEAD } from "./form-letterhead.js";
-import { getPatient, patientIds, formatMedicare } from "./patients.js";
+import { getPatient, patientIds, formatMedicare, formatMedicareExpiry } from "./patients.js";
 import { saveSubmission, getSubmission, listSubmissionsForPatient } from "./form-submissions.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast, formatDobLong, formatMobile } from "./utils.js";
@@ -25,7 +25,7 @@ import { mountConsumablesField, consumablesViewHtml } from "./consumables-field.
 import { consumeInTx } from "./inventory-api.js";
 import { listStaffDetails, staffDetailsFor } from "./staff-details.js";
 import { mountSpecialistField } from "./specialist-field.js";
-import { tagValues, collectTagNodes, applyTagNodes } from "./form-tags.js";
+import { tagValues, collectTagNodes, applyTagNodes, fillTags, formFieldTags } from "./form-tags.js";
 import { mountRichTextField } from "./rich-field.js";
 import { openMoveRecordDialog, canMoveRecords, movesHtml } from "./record-move.js";
 
@@ -432,6 +432,52 @@ async function checkConsents(consentFields, patient) {
   return out;
 }
 
+/* ===================== Answers as merge tags ===================== */
+
+const tagDate = (k) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(k || "");
+  return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" }) : String(k || "");
+};
+
+// An answer as text, for its tag
+export function answerTagText(f, v, x) {
+  if (v === null || v === undefined || v === "") return "";
+  const other = (o) => (f.allowOther && o === otherLabel(f) && x && x.other ? x.other : String(o));
+  switch (f.type) {
+    case "number": return `${v}${f.unit ? ` ${f.unit}` : ""}`;
+    case "date": case "record_date": return tagDate(v);
+    case "dropdown": case "single_choice": return other(v);
+    case "checkboxes": return (Array.isArray(v) ? v : []).map(other).join(", ");
+    case "calculation": return formatCalc(v, f) || "";
+    case "clinician": return v && typeof v === "object" ? String(v.name || "") : "";
+    default: return typeof v === "string" ? v : "";
+  }
+}
+
+// Every answer's tag, then the pre-fills that use tags, top to bottom (so a chain fills in one go).
+// A pre-filled box stops following once staff type in it. Form Builder's Preview uses this too.
+export function fieldTagValues(sheet, fields, base, ctx) {
+  const vals = { ...base };
+  const owners = formFieldTags(fields);
+  const ownerKey = new Map(owners.map((t) => [t.f.id, t.key]));
+  const wrapOf = (f) => sheet.querySelector(`[data-fid="${CSS.escape(f.id)}"]`);
+  const text = (f) => {
+    const w = wrapOf(f);
+    return w && !w.hidden ? answerTagText(f, readField(f, w, ctx), readExtras(f, w)) : "";
+  };
+  owners.forEach((t) => { vals[t.key] = text(t.f); });
+  fields.forEach((f) => {
+    const w = wrapOf(f);
+    const el = w && w.querySelector("[data-linked]");
+    if (!el || el.dataset.touched) return;
+    const k = ownerKey.get(f.id);
+    const v = fillTags(f.prefill, k ? { ...vals, [k]: "" } : vals, ""); // a box can't follow itself
+    if (el.value !== v) el.value = v;
+    if (k) vals[k] = text(f);
+  });
+  return vals;
+}
+
 /* ===================== Fill in ===================== */
 
 // embedded (Task Manager overlay): { onSaved(submissionId), onCancel(), saveLabel }
@@ -582,7 +628,6 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     mountRichTextField(wrap(f.id), f, { onChange: () => { dirty = true; }, tags: tagValues({ patient, staff, recordDate: todayIso() }) });
   });
 
-  // Fill in from the patient's record
   const P = {
     "patient.name": patient.name,
     "patient.firstName": patient.firstName,
@@ -593,6 +638,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     "patient.address": patient.address,
     "patient.medicare": formatMedicare(patient.medicareNo),
     "patient.medicareIrn": patient.medicareIrn,
+    "patient.medicareExp": formatMedicareExpiry(patient.medicareExp),
     "today": todayIso(),
     "staff.name": (staff && staff.name) || "",
   };
@@ -604,8 +650,10 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     address: patient.address,
     medicare: formatMedicare(patient.medicareNo),
     medicareIrn: patient.medicareIrn,
+    medicareExp: formatMedicareExpiry(patient.medicareExp),
     pttId: patient.pttId || patient.id,
   };
+  
   fields.forEach((f) => {
     const w = wrap(f.id);
     if (!w) return;
@@ -621,27 +669,6 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     }
   });
 
-  // Pre-filled text: {Patient name}, {Today}… become the real details
-  const TOKENS = {
-    "patient name": patient.name || "",
-    "first name": patient.firstName || String(patient.name || "").split(" ")[0] || "",
-    "last name": patient.lastName || "",
-    "date of birth": formatDobLong(patient.dobKey) || patient.dob || "",
-    "patient id": patient.pttId || patient.id || "",
-    "today": new Date().toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" }),
-    "my name": (staff && staff.name) || "",
-  };
-  const fillTokens = (s) => String(s).replace(/\{\s*([a-z ]+?)\s*\}/gi, (m, k) => {
-    const key = k.toLowerCase().replace(/\s+/g, " ");
-    return key in TOKENS ? TOKENS[key] : m;
-  });
-  fields.forEach((f) => {
-    if (f.fill || typeof f.prefill !== "string" || !f.prefill.includes("{")) return;
-    if (!["short_text", "long_text", "email"].includes(f.type)) return;
-    const w = wrap(f.id);
-    const el = w && w.querySelector(".fe-in");
-    if (el) el.value = fillTokens(f.prefill);
-  });
 
     // Clinician details and the staff number fills: from Staff, loaded in the background. Never overwrites typing.
   let staffList = [];
@@ -686,10 +713,10 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     const spW = spF && wrap(spF.id);
     const rdF = fields.find((f) => f.type === "record_date" && shown.has(f.id));
     const rdEl = rdF && wrap(rdF.id) && wrap(rdF.id).querySelector(".fe-in");
-    return tagValues({
+    return fieldTagValues(sheet, fields, tagValues({
       patient, staff, specialist: spW && spW.spRead ? spW.spRead() : null,
       recordDate: (rdEl && rdEl.value) || todayIso(),
-    });
+    }), rctx());
   };
 
   /* ---------- Calculations + which questions show ---------- */
@@ -756,6 +783,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
       writeField(f, w, a[f.id]);
       writeExtras(f, w, a[`${f.id}__x`]);
     });
+    $all(sheet, "[data-linked]").forEach((el) => { if (el.value) el.dataset.touched = "1"; });
     clearReturn();
     dirty = Object.keys(a).length > 0;
     const redo = fields.some((f) => f.type === "signature" || f.type === "aftercare" || (f.type === "image" && (f.source === "staff" || f.annotate)));
@@ -787,6 +815,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
   }
 
   sheet.addEventListener("input", (e) => {
+    if (e.target.matches && e.target.matches("[data-linked]")) e.target.dataset.touched = "1"; // staff typed: stop following
     const clinPick = e.target.closest("[data-clin-pick]");
     if (clinPick) {
       const d = staffList.find((s) => s.id === clinPick.value);

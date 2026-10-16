@@ -909,19 +909,20 @@ match /inv_count_drafts/{id} {
     match /patient_list/{patientId} {
       allow read: if isStaff();
 
-      // Medicare: empty, or 10 digits starting 2–6. Reference number (IRN): empty, or one digit 1–9.
+      // Medicare: empty, or 10 digits starting 2–6. Reference number: empty, or 1–9. Expiry: empty, or YYYY-MM.
       function okMedicare(d) {
         return d.get('Medicare Number', '') is string
           && d.get('Medicare Number', '').matches('^([2-6][0-9]{9})?$')
           && d.get('Medicare IRN', '') is string
-          && d.get('Medicare IRN', '').matches('^[1-9]?$');
+          && d.get('Medicare IRN', '').matches('^[1-9]?$')
+          && d.get('Medicare Expiry', '') is string
+          && d.get('Medicare Expiry', '').matches('^([0-9]{4}-(0[1-9]|1[0-2]))?$');
       }
-
       // New patients from the dashboard: ID is system-generated, document ID = PttID
       allow create: if can('patients.edit')
         && request.resource.data.keys().hasOnly([
              'PttID', 'First Name', 'Last Name', 'Patient Name', 'NameKey', 'Email', 'EmailKey',
-             'Mobile', 'PhoneKey', 'Address', 'Medicare Number', 'Medicare IRN', 'DobKey', 'DOB', 'IdentityKey',
+             'Mobile', 'PhoneKey', 'Address', 'Medicare Number', 'Medicare IRN', 'Medicare Expiry', 'DobKey', 'DOB', 'IdentityKey',
              'CreatedAt', 'CreatedBy', 'CreatedByUid', 'Source'])
         && request.resource.data.PttID == patientId
         && request.resource.data.PttID.matches('^PAT-[0-9]{13,}$')
@@ -937,7 +938,7 @@ match /inv_count_drafts/{id} {
              'First Name', 'Last Name', 'Patient Name', 'NameKey',
              'DOB', 'DobKey', 'IdentityKey',
              'Email', 'EmailKey', 'Mobile', 'PhoneKey', 'Address',
-             'Medicare Number', 'Medicare IRN',
+             'Medicare Number', 'Medicare IRN', 'Medicare Expiry',
              'UpdatedAt', 'UpdatedBy', 'UpdatedByUid'])
         && request.resource.data.UpdatedAt == request.time
         && request.resource.data.UpdatedByUid == request.auth.uid
@@ -952,7 +953,7 @@ match /inv_count_drafts/{id} {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
              'First Name', 'Last Name', 'Patient Name', 'NameKey',
              'DOB', 'DobKey', 'IdentityKey', 'Email', 'EmailKey', 'Mobile', 'PhoneKey', 'Address',
-             'Medicare Number', 'Medicare IRN',
+             'Medicare Number', 'Medicare IRN', 'Medicare Expiry',
              'MergedIds', 'MergedNames', 'MergedInto', 'MergedAt', 'MergedBy', 'MergedByUid',
              'UpdatedAt', 'UpdatedBy', 'UpdatedByUid'])
         && okMedicare(request.resource.data);

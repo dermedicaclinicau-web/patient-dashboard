@@ -329,6 +329,25 @@ export const spanClass = (f) => {
   return s !== "full" ? ` span-${s}` : "";
 };
 
+/* ---------- Merge tags for answers: every answer gets one, named after its question ({Date Received}) ---------- */
+export const TAG_TYPES = ["short_text", "long_text", "email", "number", "date", "record_date", "dropdown",
+  "single_choice", "checkboxes", "calculation", "clinician"];
+export const tagKeyOf = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
+// "Patient's allergies?" -> "Patients allergies". Letters, numbers, spaces, / and - only; starts with a letter.
+export function cleanTagName(s) {
+  return String(s || "").replace(/['’]/g, "").replace(/[^A-Za-z0-9 /-]+/g, " ").replace(/\s+/g, " ").trim()
+    .replace(/^[^A-Za-z]+/, "").slice(0, 40).trim();
+}
+// Its own tag name if one is set, otherwise the question
+export function fieldTagName(f) {
+  return f && TAG_TYPES.includes(f.type) ? cleanTagName(f.tag) || cleanTagName(f.label) : "";
+}
+export const fieldTagKey = (f) => tagKeyOf(fieldTagName(f));
+// A pre-fill with tags in it follows those answers until staff type in the box
+const HAS_TAG = /\{\s*[A-Za-z][A-Za-z0-9 /-]*\}/;
+export const linkedPrefill = (f) => !!f && ["short_text", "long_text", "email"].includes(f.type) && !f.fill
+  && typeof f.prefill === "string" && HAS_TAG.test(f.prefill);
+
 // Which patient details the Patient details block can show
 export const PATIENT_PARTS = [
   ["name", "Full name"],
@@ -338,6 +357,7 @@ export const PATIENT_PARTS = [
   ["address", "Address"],
   ["medicare", "Medicare number"],
   ["medicareIrn", "Medicare reference number"],
+  ["medicareExp", "Medicare expiry"],
   ["pttId", "Patient ID"],
 ];
 const PART_KEYS = PATIENT_PARTS.map((p) => p[0]);
@@ -407,6 +427,7 @@ export const FILLS = {
   "patient.address": "Patient address",
   "patient.medicare": "Patient Medicare number",
   "patient.medicareIrn": "Patient Medicare reference number",
+  "patient.medicareExp": "Patient Medicare expiry",
   "today": "Today's date",
   "staff.name": "Staff member filling it in",
   "staff.providerNo": "Provider number (staff filling it in)",
@@ -416,7 +437,7 @@ export const FILLS = {
 };
 export const FILLS_FOR = {
   short_text: ["", "patient.name", "patient.firstName", "patient.lastName", "patient.email", "patient.mobile", "patient.address",
-    "patient.medicare", "patient.medicareIrn", "staff.name",
+    "patient.medicare", "patient.medicareIrn", "patient.medicareExp", "staff.name",
     "staff.providerNo", "staff.prescriberNo", "staff.ahpraNo", "staff.quals"],
   long_text: ["", "patient.address"],
   email: ["", "patient.email"],
@@ -544,6 +565,7 @@ export function cleanField(f) {
   if (PLACEHOLDER_TYPES.includes(f.type)) out.placeholder = clip(f.placeholder, 100);
   if (ANSWER_TYPES.includes(f.type) || f.type === "text_block") out.style = fieldStyle(f);
   if (FILLS_FOR[f.type] && f.fill && FILLS_FOR[f.type].includes(f.fill)) out.fill = f.fill;
+  if (TAG_TYPES.includes(f.type) && cleanTagName(f.tag)) out.tag = cleanTagName(f.tag);
 
   switch (f.type) {
     case "patient": {
@@ -805,11 +827,14 @@ export function renderField(f, ctx = {}) {
   const optsClass = `fe-opts is-${esc(f.layout || "list")}`;
 
   switch (f.type) {
-    case "short_text": return head + `<input class="fe-in" type="text"${ph}${textPrefill(f) ? ` value="${esc(textPrefill(f))}"` : ""}${inert} />`;
-    case "email": return head + `<input class="fe-in" type="email" autocomplete="off"${ph}${textPrefill(f) ? ` value="${esc(textPrefill(f))}"` : ""}${inert} />`;
+    case "short_text": return head + `<input class="fe-in" type="text"${ph}${live && linkedPrefill(f) ? ' data-linked=""'
+      : textPrefill(f) ? ` value="${esc(textPrefill(f))}"` : ""}${inert} />`;
+    case "email": return head + `<input class="fe-in" type="email" autocomplete="off"${ph}${live && linkedPrefill(f) ? ' data-linked=""'
+      : textPrefill(f) ? ` value="${esc(textPrefill(f))}"` : ""}${inert} />`;
     case "long_text": {
       const rows = { small: 2, medium: 4, large: 8 }[f.size] || 4;
-      return head + `<textarea class="fe-in" rows="${rows}"${ph}${inert}>${esc(textPrefill(f))}</textarea>`;
+      const linked = live && linkedPrefill(f);
+      return head + `<textarea class="fe-in" rows="${rows}"${ph}${linked ? ' data-linked=""' : ""}${inert}>${linked ? "" : esc(textPrefill(f))}</textarea>`;
     }
     case "rich_text": {
       const size = esc(f.size || "medium");
@@ -1576,7 +1601,8 @@ export function prefillSettings(f) {
     ? `<textarea class="fe-input" data-k="prefill" rows="3" maxlength="2000" placeholder="Empty">${esc(f.prefill || "")}</textarea>`
     : `<input class="fe-input" data-k="prefill" maxlength="500" placeholder="Empty" value="${esc(f.prefill || "")}" />`;
   return setting("Pre-fill", control,
-    `Text the box starts with. You can use {Patient name}, {First name}, {Last name}, {Date of birth}, {Patient ID}, {Today} and {My name}. ${PREFILL_NOTE}`);
+    `Text the box starts with. Use tags for earlier answers, like {Date Received}, or {Patient name}, {Today} and {My name}. ` +
+    `A box with an answer's tag keeps up with that answer until staff type in it. ${PREFILL_NOTE}`);
 }
 
 /* ===================== Settings that edit lists inside a field ===================== */

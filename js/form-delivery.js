@@ -2,7 +2,7 @@
 // the send log, and the printer address setting.
 // The PDF is made in the browser so it looks exactly like the preview.
 import { callApi } from "./appointments.js";
-import { getPatient, formatMedicare } from "./patients.js";
+import { getPatient, formatMedicare, formatMedicareExpiry } from "./patients.js";
 import { getPrintSettings, savePrintSettings, getFormTemplate, getFormVersion, getLetterhead } from "./form-templates.js";
 import { esc } from "./form-fields.js";
 import { buildFormDocument, niceDate } from "./form-document.js";
@@ -428,14 +428,17 @@ export function patientAnswers(ver, patient) {
   const fills = {
     "patient.name": p.name, "patient.firstName": p.firstName, "patient.lastName": p.lastName,
     "patient.dob": p.dobKey, "patient.email": p.email, "patient.mobile": p.mobile,
-    "patient.address": p.address, "today": today, "patient.medicare": formatMedicare(p.medicareNo), "patient.medicareIrn": p.medicareIrn,
+    "patient.address": p.address, "today": today,
+    "patient.medicare": formatMedicare(p.medicareNo), "patient.medicareIrn": p.medicareIrn,
+    "patient.medicareExp": formatMedicareExpiry(p.medicareExp),
   };
   const answers = {};
   (ver.fields || []).forEach((f) => {
     if (f.type === "patient") {
       answers[f.id] = { name: p.name || "", dob: formatDobLong(p.dobKey) || p.dob || "", mobile: p.mobile || "",
         email: p.email || "", address: p.address || "", pttId: p.pttId || "",
-        medicare: formatMedicare(p.medicareNo), medicareIrn: p.medicareIrn || "" };
+        medicare: formatMedicare(p.medicareNo), medicareIrn: p.medicareIrn || "",
+        medicareExp: formatMedicareExpiry(p.medicareExp) };
     } else if (f.fill && fills[f.fill]) {
       answers[f.id] = fills[f.fill];
     }

@@ -19,7 +19,7 @@ export const LINKED = [
 
 const PATIENT_FIELDS = [
   "First Name", "Last Name", "Patient Name", "NameKey", "DOB", "DobKey", "IdentityKey",
-  "Email", "EmailKey", "Mobile", "PhoneKey", "Address", "Medicare Number", "Medicare IRN", "MergedIds", "MergedNames",
+  "Email", "EmailKey", "Mobile", "PhoneKey", "Address", "Medicare Number", "Medicare IRN", "Medicare Expiry", "MergedIds", "MergedNames",
 ];
 const SECTIONS = ["social", "meds", "conditions", "allergies"];
 const normItem = (s) => String(s || "").replace(/^\s*[-•*]\s*/, "").toLowerCase()
@@ -112,7 +112,7 @@ export async function mergePatients({ survivor, duplicates, details }) {
   // Medicare: the kept record's own, or the first duplicate's if it has none
   if (!cur["Medicare Number"]) {
     const mc = duplicates.find((d) => d.medicareNo);
-    if (mc) { fields["Medicare Number"] = mc.medicareNo; fields["Medicare IRN"] = mc.medicareIrn || ""; }
+    if (mc) { fields["Medicare Number"] = mc.medicareNo; fields["Medicare IRN"] = mc.medicareIrn || ""; fields["Medicare Expiry"] = mc.medicareExp || ""; }
   }
   const own = new Set([survivor.pttId, survivor.id].filter(Boolean));
   const mergedIds = [...new Set([...(survivor.mergedIds || []), ...duplicates.flatMap(patientIds)])]

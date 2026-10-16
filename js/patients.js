@@ -78,6 +78,7 @@ export function patientFromData(id, d) {
     address: d.Address || "",
     medicareNo: String(d["Medicare Number"] ?? ""),
     medicareIrn: String(d["Medicare IRN"] ?? ""),
+    medicareExp: String(d["Medicare Expiry"] ?? ""),
     // Use DobKey if it's readable, otherwise work it out from DOB (any common format)
     dobKey: toDateKeyLoose(d.DobKey) || toDateKeyLoose(d.DOB),
     dob: typeof d.DOB === "string" ? d.DOB : "",
@@ -151,11 +152,16 @@ export async function updatePatient(current, input, staff) {
     Object.assign(updates, { Mobile: mobile, PhoneKey: mobile });
   }
   if (address !== current.address) updates.Address = address;
-  // Only when the edit form sends them, so older screens never wipe them
-  if (input.medicareNo !== undefined || input.medicareIrn !== undefined) {
-    const mc = cleanMedicare(input);
+  // Only what the edit form sends, so older screens never wipe anything
+  if (input.medicareNo !== undefined || input.medicareIrn !== undefined || input.medicareExp !== undefined) {
+    const mc = cleanMedicare({
+      medicareNo: input.medicareNo ?? current.medicareNo,
+      medicareIrn: input.medicareIrn ?? current.medicareIrn,
+      medicareExp: input.medicareExp ?? current.medicareExp,
+    });
     if (mc.no !== current.medicareNo) updates["Medicare Number"] = mc.no;
     if (mc.irn !== current.medicareIrn) updates["Medicare IRN"] = mc.irn;
+    if (mc.exp !== current.medicareExp) updates["Medicare Expiry"] = mc.exp;
   }
   if (!Object.keys(updates).length) return { changed: false };
 
@@ -217,16 +223,37 @@ export function formatMedicare(s) {
   const d = medicareDigits(s);
   return d.length === 10 ? `${d.slice(0, 4)} ${d.slice(4, 9)} ${d.slice(9)}` : String(s ?? "");
 }
-// Checks what was typed. Returns { no, irn } or throws a message for staff.
+// The card's "valid to" month: "03/28", "3/2028" or "2028-03" -> "2028-03". "" if empty, null if it can't be read.
+const monthKey = (y, mo) => (mo >= 1 && mo <= 12 && y >= 2000 && y <= 2100 ? `${y}-${String(mo).padStart(2, "0")}` : null);
+export function medicareExpiryKey(s) {
+  const t = String(s ?? "").trim();
+  if (!t) return "";
+  let m = /^(\d{4})-(\d{1,2})$/.exec(t);
+  if (m) return monthKey(+m[1], +m[2]);
+  m = /^(\d{1,2})\s*[/.\- ]\s*(\d{2}|\d{4})$/.exec(t);
+  return m ? monthKey(m[2].length === 2 ? 2000 + +m[2] : +m[2], +m[1]) : null;
+}
+// "2028-03" -> "03/2028"
+export function formatMedicareExpiry(k) {
+  const m = /^(\d{4})-(\d{2})$/.exec(k || "");
+  return m ? `${m[2]}/${m[1]}` : "";
+}
+// A card is valid to the end of its month
+export function medicareExpired(k) {
+  const d = new Date();
+  return !!k && k < `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+// Checks what was typed. Returns { no, irn, exp } or throws a message for staff.
 function cleanMedicare(input) {
   const no = medicareDigits(input.medicareNo);
   const irn = String(input.medicareIrn ?? "").replace(/\D/g, "");
+  const exp = medicareExpiryKey(input.medicareExp);
   if (no && !medicareValid(no)) throw new Error("Check the Medicare number. It's the 10 digits on the card.");
   if (irn && !/^[1-9]$/.test(irn)) throw new Error("The Medicare reference number is one digit, 1 to 9, beside the patient's name on the card.");
-  if (irn && !no) throw new Error("Add the Medicare number as well as the reference number.");
-  return { no, irn };
+  if (exp === null) throw new Error("Check the Medicare expiry. Type it as it is on the card, for example 03/2028.");
+  if ((irn || exp) && !no) throw new Error("Add the Medicare number as well.");
+  return { no, irn, exp: exp || "" };
 }
-
 // Phone search that copes with numbers stored as 61…, 0… or without the leading 0
 export async function searchPatientsByPhone(term) {
   const core = phoneCore(term);
@@ -361,6 +388,7 @@ export async function createPatient(input) {
     "Patient Name": `${first} ${last}`,
     "Medicare Number": mc.no,
     "Medicare IRN": mc.irn,
+    "Medicare Expiry": mc.exp,
     NameKey: nameKey,
     Email: email,
     EmailKey: email.toLowerCase(),

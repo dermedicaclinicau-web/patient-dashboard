@@ -1,4 +1,4 @@
-import { getPatient, updatePatient, patientIds, formatMedicare } from "./patients.js";
+import { getPatient, updatePatient, patientIds, formatMedicare, formatMedicareExpiry, medicareExpired } from "./patients.js";
 import { fetchDayAppointments, fetchPreconsult } from "./appointments.js";
 import { fetchOpenReminders, completeReminder } from "./reminders.js";
 import { openReminderDialog } from "./reminder-dialog.js";
@@ -342,6 +342,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     f.address.value = patient.address;
     f.medicareNo.value = formatMedicare(patient.medicareNo);
     f.medicareIrn.value = patient.medicareIrn || "";
+    f.medicareExp.value = formatMedicareExpiry(patient.medicareExp);
     f.pttId.value = patient.pttId || patient.id;
     formError.textContent = "";
     dialog.showModal();
@@ -363,6 +364,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
         address: f.address.value,
         medicareNo: f.medicareNo.value,
         medicareIrn: f.medicareIrn.value,
+        medicareExp: f.medicareExp.value,
       }, staff);
       if (changed) {
         patient = (await getPatient(patient.id)) || patient;
@@ -716,7 +718,9 @@ function barHtml(p, today = [], pre = null) {
       <div><dt>Email</dt><dd>${show(p.email)}</dd></div>
       <div><dt>Address</dt><dd>${show(p.address)}</dd></div>
       <div><dt>Medicare</dt><dd>${show(p.medicareNo, `${escapeHtml(formatMedicare(p.medicareNo))}${
-        p.medicareIrn ? ` <span class="pb-age">· Ref ${escapeHtml(p.medicareIrn)}</span>` : ""}`)}</dd></div>
+        p.medicareIrn ? ` <span class="pb-age">· Ref ${escapeHtml(p.medicareIrn)}</span>` : ""}${
+        p.medicareExp ? ` <span class="pb-age">· Exp ${escapeHtml(formatMedicareExpiry(p.medicareExp))}</span>${
+          medicareExpired(p.medicareExp) ? ' <span class="missing">expired</span>' : ""}` : ""}`)}</dd></div>
     </dl>`;
 }
 
@@ -849,6 +853,7 @@ function dialogHtml() {
           <label class="field full"><span>Address</span><input name="address" maxlength="200" /></label>
           <label class="field"><span>Medicare number</span><input name="medicareNo" inputmode="numeric" maxlength="14" placeholder="2123 45670 1" autocomplete="off" /></label>
           <label class="field"><span>Medicare reference no.</span><input name="medicareIrn" inputmode="numeric" maxlength="1" placeholder="1–9" autocomplete="off" /></label>
+          <label class="field"><span>Medicare expiry</span><input name="medicareExp" maxlength="7" placeholder="MM/YYYY" autocomplete="off" /></label>
           <label class="field full"><span>Patient ID (can't be changed)</span><input name="pttId" disabled /></label>
         </div>
         <p class="form-error" role="alert"></p>
