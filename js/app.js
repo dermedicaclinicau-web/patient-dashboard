@@ -31,6 +31,7 @@ import { initChat, teardownChat } from "./chat.js";
 import { openMyPhoto } from "./my-photo.js";
 import { mountKnowledge } from "./knowledge.js";
 import { mountScanner } from "./scanner.js";
+import { mountEmailFlows } from "./email-flows.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -253,7 +254,9 @@ const PAGES = {
   inventory: (el, param) => mountInventory(el, { param, staff: currentStaff }),
   reports: (el, param) => mountReports(el, { param, staff: currentStaff }),
   staff: (el) => mountStaffManager(el, { staff: currentStaff }),
-  settings: (el, param) => mountSettings(el, { param, staff: currentStaff }),
+  settings: (el, param) => (String(param || "").split("/")[0] === "flows"
+    ? mountEmailFlows(el, { param, staff: currentStaff })
+    : mountSettings(el, { param, staff: currentStaff })),
   help: (el, param) => mountKnowledge(el, { param, staff: currentStaff }),
   scanner: (el) => mountScanner(el, { staff: currentStaff }),
 };
@@ -267,7 +270,9 @@ const PAGE_PERM = {
   scanner: "menu.scanner",
 };
 
-const pageAllowed = (p) => {
+// Email flow builders who aren't Admins can open System configuration, but only its Email flows
+const pageAllowed = (p, param = "") => {
+  if (p === "settings" && can("flows.build") && (!param || String(param).split("/")[0] === "flows")) return true;
   const need = PAGE_PERM[p];
   if (!need) return true;
   return need === "admin" ? isAdminNow() : can(need);
@@ -283,7 +288,10 @@ function router() {
   if (!currentStaff) return;
 
   const [, page = "", ...rest] = location.hash.split("/");
-  if (!PAGES[page] || !pageAllowed(page)) {
+  let param = "";
+  try { param = decodeURIComponent(rest.join("/")); } catch { /* malformed URL, ignore */ }
+
+  if (!PAGES[page] || !pageAllowed(page, param)) {
     const first = firstAllowedPage();
     if (first && first !== page) { location.replace(`#/${first}`); return; } // fires hashchange → router runs again
     els.navItems.forEach((a) => a.classList.remove("active"));
@@ -291,9 +299,11 @@ function router() {
       Your account doesn't have access to any pages yet. Please ask an Admin.</div></section>`;
     return;
   }
-
-  let param = "";
-  try { param = decodeURIComponent(rest.join("/")); } catch { /* malformed URL, ignore */ }
+  // Not an Admin: System configuration only shows Email flows
+  if (page === "settings" && !isAdminNow() && param.split("/")[0] !== "flows") {
+    location.replace("#/settings/flows");
+    return;
+  }
 
   const navKey = ["patient", "fill", "form-record", "ssp"].includes(page) ? "patients"
     : ["image-bank", "aftercare-bank", "ssp-products", "specialist-bank"].includes(page) ? "forms" : page;

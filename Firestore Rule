@@ -605,6 +605,44 @@ match /inv_count_drafts/{id} {
         && request.resource.data.updatedAt == request.time;
     }
 
+    // ===================== Email flows =====================
+
+    function validFlow(d) {
+      return d.keys().hasOnly(['name', 'description', 'status', 'trigger', 'steps', 'stop', 'style',
+                               'createdAt', 'createdBy', 'createdByUid',
+                               'updatedAt', 'updatedBy', 'updatedByUid'])
+        && d.name is string && d.name.size() > 0 && d.name.size() <= 120
+        && d.get('description', '') is string && d.get('description', '').size() <= 300
+        && d.status in ['draft', 'live', 'archived']
+        && d.trigger is map
+        && d.steps is list && d.steps.size() <= 40
+        && d.get('stop', {}) is map
+        && d.get('style', {}) is map;
+    }
+
+    // Flows: built in System configuration → Email flows. Archived, never deleted.
+    match /email_flows/{flowId} {
+      allow read: if can('flows.build');
+      allow create: if can('flows.build') && validFlow(request.resource.data)
+        && request.resource.data.status == 'draft'
+        && request.resource.data.createdByUid == request.auth.uid
+        && request.resource.data.updatedByUid == request.auth.uid
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.updatedAt == request.time;
+      allow update: if can('flows.build') && validFlow(request.resource.data)
+        && request.resource.data.createdByUid == resource.data.createdByUid
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedByUid == request.auth.uid
+        && request.resource.data.updatedAt == request.time;
+      allow delete: if false;
+    }
+
+    // Patients moving through a flow (written by Apps Script only, from step 2)
+    match /email_flow_runs/{runId} {
+      allow read: if can('flows.build');
+      allow write: if false;
+    }
+    
     // ===================== Image Bank =====================
 
     // The details of each picture (the files are in Storage)

@@ -3041,6 +3041,7 @@ const PERMS_ = [
   ['tasks.run', 'Sending', 'Run tasks'],
   ['tasks.build', 'Building', 'Build task types'],
   ['forms.build', 'Building', 'Build forms, Image Bank and Aftercare Bank'],
+  ['flows.build', 'Building', 'Build email flows (System configuration)'],
   ['ssp.create', 'Skin Script', 'Create Skin Script Protocols'],
   ['ssp.config', 'Skin Script', 'Skin Script products and design'],
   ['menu.inventory', 'Inventory', 'Inventory menu (open Inventory)'],
