@@ -73,7 +73,7 @@ const STAFF_TO = [
   ["roles", "Everyone in a role"],
   ["staff", "Chosen staff"],
 ];
-
+const STAFF_SHORT = { ssp_creator: "SSP clinician", sold_by: "Who sold it", roles: "A role", staff: "Chosen staff" };
 // Blanks for messages, filled in for each patient when the email is sent
 const PATIENT_TOKENS = [
   { title: "Patient", tokens: ["First name", "Full name"] },
@@ -153,7 +153,10 @@ function summary(s) {
   if (s.type === "email") return c.subject.trim() || "No subject yet";
   if (s.type === "wait") return `${Number(c.num) || 0} ${unitWord(c.num, c.unit)}`;
   if (s.type === "branch") return label(CONDS, c.cond);
-  if (s.type === "staff") return c.subject.trim() ? `${label(STAFF_TO, c.to)}: ${c.subject.trim()}` : label(STAFF_TO, c.to);
+  if (s.type === "staff") {
+    const to = c.to === "roles" && c.roles.length ? c.roles.join(", ") : STAFF_SHORT[c.to] || "Staff";
+    return c.subject.trim() ? `To ${to} · ${c.subject.trim()}` : `To ${to}`;
+  }
   return "No more cards on this path";
 }
 
@@ -565,11 +568,12 @@ async function mountFlowEditor(container, { id, staff }) {
     const t = TYPES[s.type];
     const probs = stepProblems(s, depth);
     const on = sel === s.id;
-    return `<div class="ef-card${on ? " is-sel" : ""}${probs.length ? " is-bad" : ""}" data-pick="${esc(s.id)}" tabindex="0" role="button" aria-pressed="${on}">
+    const full = summary(s);
+    return `<div class="ef-card${on ? " is-sel" : ""}${probs.length ? " is-bad" : ""}" data-pick="${esc(s.id)}" tabindex="0" role="button" aria-pressed="${on}" title="${esc(full)}">
       <span class="ef-ico ${t.tone}">${I[t.icon]}</span>
       <span class="ef-card-main">
-        <small>${esc(t.label)}${s.type === "email" && s.cfg.promo ? " · <em>Promotional</em>" : ""}</small>
-        <strong>${esc(summary(s))}</strong>
+        <small>${esc(depth > 1 ? t.short : t.label)}${s.type === "email" && s.cfg.promo ? " · <em>Promotional</em>" : ""}</small>
+        <strong>${esc(full)}</strong>
         ${probs.length ? `<em class="ef-card-warn">${esc(probs[0])}</em>` : ""}
       </span>
     </div>`;
