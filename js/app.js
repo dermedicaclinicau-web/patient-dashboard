@@ -31,7 +31,6 @@ import { initChat, teardownChat } from "./chat.js";
 import { openMyPhoto } from "./my-photo.js";
 import { mountKnowledge } from "./knowledge.js";
 import { mountScanner } from "./scanner.js";
-import { mountEmailFlows } from "./email-flows.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -254,9 +253,17 @@ const PAGES = {
   inventory: (el, param) => mountInventory(el, { param, staff: currentStaff }),
   reports: (el, param) => mountReports(el, { param, staff: currentStaff }),
   staff: (el) => mountStaffManager(el, { staff: currentStaff }),
-  settings: (el, param) => (String(param || "").split("/")[0] === "flows"
-    ? mountEmailFlows(el, { param, staff: currentStaff })
-    : mountSettings(el, { param, staff: currentStaff })),
+  settings: (el, param) => {
+    if (String(param || "").split("/")[0] !== "flows") return mountSettings(el, { param, staff: currentStaff });
+    // Loaded only when needed, so a problem here can't stop the rest of the portal
+    return import("./email-flows.js")
+      .then((m) => m.mountEmailFlows(el, { param, staff: currentStaff }))
+      .catch((err) => {
+        console.error("Email flows failed to load:", err);
+        el.innerHTML = `<section class="page"><div class="state error"><strong>Email flows couldn't load</strong>
+          ${escapeHtml(err && err.message ? err.message : "Refresh and try again.")}</div></section>`;
+      });
+  },
   help: (el, param) => mountKnowledge(el, { param, staff: currentStaff }),
   scanner: (el) => mountScanner(el, { staff: currentStaff }),
 };
