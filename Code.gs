@@ -262,31 +262,68 @@ function json_(obj) {
 
 
 // ===================== Sessions =====================
+// A session is a signed pass: "s1.<staff id>.<expiry>.<signature>". Apps Script checks the signature itself,
+// so nothing is stored, and a busy cache can't log anyone out. Renewed by the access check (staffMe_).
+// Older sessions (64 hex characters, kept in the cache) still work until they expire.
+
+const SESSION_TTL_ = 12 * 60 * 60; // 12 hours, renewed while the portal is open
+
+// Secret key for signing sessions. Lives only in Script Properties. Changing it logs everyone out.
+function sessionKey_() {
+  const p = PropertiesService.getScriptProperties();
+  let v = p.getProperty('SESSION_KEY');
+  if (!v) {
+    const lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      v = p.getProperty('SESSION_KEY');
+      if (!v) { v = Utilities.getUuid() + Utilities.getUuid(); p.setProperty('SESSION_KEY', v); }
+    } finally { lock.releaseLock(); }
+  }
+  return v;
+}
+
+function sessionSig_(payload) {
+  return Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(payload, sessionKey_())).replace(/=+$/, '');
+}
 
 function createSession_(staff) {
-  const token = (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, '');
-  CacheService.getScriptCache().put(
-    'sess_' + token,
-    JSON.stringify({ uid: staff.id, name: staff.name, role: staff.role }),
-    SESSION_SECONDS
-  );
-  return token;
+  const payload = 's1.' + b64url_(String(staff.id)) + '.' + (Math.floor(Date.now() / 1000) + SESSION_TTL_);
+  return payload + '.' + sessionSig_(payload);
+}
+
+// { uid } from a signed session, or null if it's not one, has been changed, or has expired
+function readSignedSession_(token) {
+  const m = /^s1\.([A-Za-z0-9_-]{1,200})\.(\d{9,11})\.([A-Za-z0-9_-]{20,60})$/.exec(String(token || ''));
+  if (!m) return null;
+  const payload = 's1.' + m[1] + '.' + m[2];
+  if (sessionSig_(payload) !== m[3]) return null;
+  if (Number(m[2]) * 1000 < Date.now()) return null;
+  try {
+    const s = m[1].replace(/-/g, '+').replace(/_/g, '/');
+    const uid = Utilities.newBlob(Utilities.base64Decode(s + '==='.slice((s.length + 3) % 4))).getDataAsString();
+    return uid ? { uid: uid, name: '', role: '' } : null;
+  } catch (e) { return null; }
 }
 
 function getSession_(token) {
-  if (!/^[a-f0-9]{64}$/i.test(token || '')) return null;
-  const cache = CacheService.getScriptCache();
-  const raw = cache.get('sess_' + token);
-  if (!raw) return null;
-  const sess = JSON.parse(raw);
+  let sess = readSignedSession_(token);
+  if (!sess) {
+    // An older session from before signed passes
+    if (!/^[a-f0-9]{64}$/i.test(token || '')) return null;
+    const raw = CacheService.getScriptCache().get('sess_' + token);
+    if (!raw) return null;
+    sess = JSON.parse(raw);
+  }
   if (sess.uid === 'test') { sess.perms = PERMS_ALL_.slice(); return sess; } // editor test functions
   let s = null;
   try {
     s = getStaffDocs_().filter(function (x) { return x.id === sess.uid; })[0] || null;
   } catch (e) {
-    return sess; // Firestore hiccup: keep the session working
+    sess.perms = sess.perms || [];
+    return sess; // Firestore hiccup: stay logged in (actions needing access say so instead)
   }
-  if (!s || s.active === false) { cache.remove('sess_' + token); return null; }
+  if (!s || s.active === false) return null;
   sess.name = s.name || sess.name;
   sess.role = s.role || sess.role;
   sess.perms = effectivePerms_(s);
@@ -3150,7 +3187,8 @@ function staffMe_(session) {
     staffName: s.name, staffRole: s.role, staffPhoto: s.photo, staffEmail: s.email,
     injector: s.injector === true, perms: perms,
   });
-  return { ok: true, role: s.role, name: s.name, perms: perms, injector: s.injector === true, token: token };
+  return { ok: true, role: s.role, name: s.name, perms: perms, injector: s.injector === true, token: token,
+    session: createSession_(s) };
 }
 function rolesGet_() {
   const d = rolesData_();

@@ -324,14 +324,36 @@ function goBack() {
 let accessTimer = null;
 let lastAccessCheck = 0;
 
+// What counts as "your access": role, injector, and the permissions as a set (order doesn't matter)
+const accessSig = (s) => JSON.stringify([
+  String((s && s.role) || "").toLowerCase(),
+  !!(s && s.injector === true),
+  [...((s && Array.isArray(s.perms)) ? s.perms : [])].sort(),
+]);
+
 // Picks up access changes made by an Admin (every 5 minutes, and when returning to the tab)
 async function checkAccess() {
   if (!currentStaff || Date.now() - lastAccessCheck < 60000) return;
   lastAccessCheck = Date.now();
+  const before = currentStaff;                    // access as it was before this check
   try {
     const res = await refreshAccess();
-    if (!res.changed || !currentStaff) return;
-    currentStaff = { ...currentStaff, role: res.role, perms: res.perms, injector: res.injector };
+    if (!res || !res.changed || !currentStaff) return;
+    const next = {
+      ...currentStaff,
+      role: res.role || currentStaff.role,
+      perms: Array.isArray(res.perms) ? res.perms : currentStaff.perms,
+      injector: typeof res.injector === "boolean" ? res.injector : currentStaff.injector,
+    };
+    if (accessSig(next) === accessSig(before)) return; // nothing that matters changed: stay quiet
+    const had = new Set(before.perms || []);
+    const has = new Set(next.perms || []);
+    console.info("Access changed:", {
+      role: before.role !== next.role ? `${before.role} → ${next.role}` : "same",
+      added: [...has].filter((p) => !had.has(p)),
+      removed: [...had].filter((p) => !has.has(p)),
+    });
+    currentStaff = next;
     setPerms(currentStaff);
     renderStaff(currentStaff);
     applyNav();

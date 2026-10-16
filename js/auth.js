@@ -30,7 +30,7 @@ export async function loginWithPin(pin) {
 
   const data = await res.json().catch(() => ({ ok: false, error: "SERVER_ERROR" }));
   if (!data.ok) throw new Error(ERROR_MESSAGES[data.error] || ERROR_MESSAGES.SERVER_ERROR);
-    sessionStorage.setItem("appSession", data.session || "");
+  sessionStorage.setItem("appSession", data.session || "");
 
   // Session-only login: closing the tab/browser logs out (safer on shared clinic PCs)
   await setPersistence(auth, browserSessionPersistence);
@@ -42,25 +42,50 @@ export function logout() {
   return signOut(auth);
 }
 
-// Calls back with a staff profile (from the token's custom claims), or null if logged out
+// The claims inside the login token already on this computer (used when the network is briefly down)
+function cachedClaims(user) {
+  try {
+    const part = String(user.accessToken || "").split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+    const bytes = Uint8Array.from(atob(part), (c) => c.charCodeAt(0));
+    return JSON.parse(new TextDecoder().decode(bytes));
+  } catch { return null; }
+}
+
+// Calls back with a staff profile (from the token's custom claims), or null if logged out.
+// A network blip never logs anyone out: it retries, then uses the token already on this computer.
 export function watchAuth(callback) {
   return onAuthStateChanged(auth, async (user) => {
     if (!user) return callback(null);
-    try {
-      const { claims } = await user.getIdTokenResult();
-      callback({
-        uid: user.uid,
-        name: sessionStorage.getItem(`staffName:${user.uid}`) || claims.staffName || "Staff",
-        role: claims.staffRole || "",
-        photo: claims.staffPhoto || "",
-        email: claims.staffEmail || "",
-        injector: claims.injector === true,
-        perms: Array.isArray(claims.perms) ? claims.perms : [],
-       });
-    } catch (err) {
-      console.error("Failed to read staff profile:", err);
-      await signOut(auth);
+    let claims = null;
+    for (let i = 0; i < 3 && !claims; i++) {
+      try {
+        claims = (await user.getIdTokenResult()).claims;
+      } catch (err) {
+        if (/user-disabled|user-token-expired|invalid-user-token|user-not-found/.test(String(err && err.code))) {
+          console.warn("Sign-in is no longer valid:", err);
+          await signOut(auth);
+          return;
+        }
+        console.warn(`Couldn't read the login token (try ${i + 1} of 3):`, err);
+        await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+      }
     }
+    if (!claims) claims = cachedClaims(user);
+    if (auth.currentUser !== user) return; // signed out or switched user while retrying
+    if (!claims) {
+      console.error("Login token couldn't be read; signing out.");
+      await signOut(auth);
+      return;
+    }
+    callback({
+      uid: user.uid,
+      name: sessionStorage.getItem(`staffName:${user.uid}`) || claims.staffName || "Staff",
+      role: claims.staffRole || "",
+      photo: claims.staffPhoto || "",
+      email: claims.staffEmail || "",
+      injector: claims.injector === true,
+      perms: Array.isArray(claims.perms) ? claims.perms : [],
+    });
   });
 }
 
