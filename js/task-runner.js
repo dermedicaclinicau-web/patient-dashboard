@@ -17,6 +17,7 @@ import { formatChoice, fillTemplate, fillTemplateHtml, emailShell, clinicDetails
 import { createRichEditor } from "./rich-editor.js";
 import { openImagePicker } from "./image-bank.js";
 import { upcomingAppointments, formatUpcoming, apptWhen, apptDetail, niceDay } from "./upcoming-appts.js";
+import { pickSendTime, fmtSendTime } from "./task-later.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -29,6 +30,7 @@ const I = {
   doc: ic('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>'),
   x: ic('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
   user: ic('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
+  clock: ic('<circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/>'),
 };
 const CAT_LABEL = { patient: "To Patient", staff: "To Staff" };
 const todayLong = () => new Date().toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" });
@@ -52,6 +54,8 @@ function runError(err) {
     case "PDF_FAILED": return "One of the attachments couldn't be prepared. Try again.";
     case "INVALID_PIN": return "The server hasn't been updated yet. In Apps Script, deploy a new version.";
     case "SERVER_ERROR": return "The server hit an error. Check Apps Script → Executions for details.";
+    case "BAD_TIME": return "Choose a time at least 5 minutes from now.";
+    case "TOO_FAR": return "Emails can be scheduled up to 90 days ahead.";
     default: return err && err.message && !err.code ? err.message : `Couldn't send${err && err.code ? ` (${err.code})` : ""}. Try again.`;
   }
 }
@@ -137,6 +141,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
           <div class="ff-bar-title"><strong>${esc(task.name)}</strong><span>${CAT_LABEL[task.category]} · Email</span></div>
           <div class="ff-bar-actions">
             <a class="ff-btn is-quiet" href="${backHref}">Cancel</a>
+            <button type="button" class="ff-btn" data-act="later">${I.clock}<span>Schedule</span></button>
             <button type="button" class="ff-btn is-primary" data-act="send">${I.send}<span>Send email</span></button>
           </div>
         </div>
@@ -742,7 +747,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   subjectEl.addEventListener("input", () => { st.subjectEdited = true; st.touched = true; resetBtn.hidden = false; });
   resetBtn.addEventListener("click", () => { renderMessage(true); noteEl.textContent = "Click into the message to change any wording."; });
 
-  /* ---------- Sending ---------- */
+  /* ---------- Sending: now, or scheduled for later ---------- */
   function problems() {
     const out = [];
     if (aboutPatient && !st.patient) out.push(task.category === "patient" ? "Choose the patient in the To box." : "Choose the patient this is about.");
@@ -767,48 +772,49 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     return out;
   }
 
-  sendBtn.addEventListener("click", async () => {
-    if (st.sending) return;
+  // Shows the first problem; true if there was one
+  function showProblems() {
     const list = problems();
-    if (list.length) {
-      msgEl.textContent = list[0] + (list.length > 1 ? ` (and ${list.length - 1} more)` : "");
-      if (!st.patient) { const s = root.querySelector(".pc-input"); if (s) s.focus(); }
-      return;
+    if (!list.length) { msgEl.textContent = ""; return false; }
+    msgEl.textContent = list[0] + (list.length > 1 ? ` (and ${list.length - 1} more)` : "");
+    if (!st.patient) { const s = root.querySelector(".pc-input"); if (s) s.focus(); }
+    return true;
+  }
+
+  const laterBtn = $('[data-act="later"]');
+  const btnLabel = (b, t) => { b.querySelector("span").textContent = t; };
+  const busy = (on) => { st.sending = on; sendBtn.disabled = on; laterBtn.disabled = on; };
+  const shell = (bodyHtml) => emailShell(bodyHtml, task.style, {
+    clinic: clinicDetails(st.letterhead), hasLogo: !!(st.letterhead && st.letterhead.logo),
+  });
+  const whoFor = () => ({
+    taskId: task.id,
+    patientId: st.patient ? st.patient.id : "",
+    to: task.category === "patient" ? $('[data-role="to-input"]').value.trim() : "",
+    cc: ccEl.value.trim(),
+    staffIds: fixedStaff ? [] : [...st.staffSel],
+  });
+
+  async function buildAttachments(btn) {
+    const out = [];
+    if (!st.atts.length) return out;
+    btnLabel(btn, "Preparing PDFs…");
+    for (const a of st.atts) {
+      out.push(a.mode === "blank"
+        ? await printablePdf({ templateId: a.id, patient: st.patient })
+        : await savedFormPdf(a.subId));
     }
-    msgEl.textContent = "";
-    st.sending = true;
-    sendBtn.disabled = true;
-    const label = sendBtn.querySelector("span");
+    return out;
+  }
+
+  sendBtn.addEventListener("click", async () => {
+    if (st.sending || showProblems()) return;
+    busy(true);
     try {
-      const attachments = [];
-      if (st.atts.length) {
-        label.textContent = "Preparing PDFs…";
-        for (const a of st.atts) {
-          const att = a.mode === "blank"
-            ? await printablePdf({ templateId: a.id, patient: st.patient })
-            : await savedFormPdf(a.subId);
-          console.info(att.pdf
-            ? `Attachment "${att.name}" (${a.mode}): ${Math.round(att.pdf.length * 0.75 / 1024)} KB PDF`
-            : `Attachment "${att.name}" (${a.mode}): the browser couldn't make it, so the server will`);
-          attachments.push(att);
-        }
-      }
-      label.textContent = "Sending…";
-      const to = task.category === "patient" ? $('[data-role="to-input"]').value.trim() : "";
-      const res = await callApi({
-        action: "sendTaskEmail",
-        taskId: task.id,
-        patientId: st.patient ? st.patient.id : "",
-        to,
-        cc: ccEl.value.trim(),
-        staffIds: fixedStaff ? [] : [...st.staffSel],
-        subject: subjectEl.value.trim(),
-        html: emailShell(editor.getHtml(), task.style, {
-          clinic: clinicDetails(st.letterhead),
-          hasLogo: !!(st.letterhead && st.letterhead.logo),
-        }),
-        attachments,
-      });
+      const attachments = await buildAttachments(sendBtn);
+      btnLabel(sendBtn, "Sending…");
+      const res = await callApi({ action: "sendTaskEmail", ...whoFor(),
+        subject: subjectEl.value.trim(), html: shell(editor.getHtml()), attachments });
       st.touched = false;
       showToast(task.category === "patient"
         ? `Sent to ${st.patient.name}`
@@ -817,10 +823,61 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     } catch (err) {
       console.error("Task send failed:", err);
       msgEl.textContent = runError(err);
-      sendBtn.disabled = false;
-      label.textContent = "Send email";
+      btnLabel(sendBtn, "Send email");
     } finally {
-      st.sending = false;
+      busy(false);
+    }
+  });
+
+  // Blanks the server fills in when a scheduled email goes, so they're right on the day
+  const LATER = ["upcoming appointments", "today"];
+  const hasTok = (text, k) => new RegExp(`\\{\\s*${k}\\s*\\}`, "i").test(text || "");
+
+  function laterMessage() {
+    const vals = values();
+    LATER.forEach((k) => vals.delete(k)); // left as {blanks}
+    const subject = st.subjectEdited ? subjectEl.value.trim()
+      : fillTemplate(task.subject, vals).replace(/\[\[([^|\]]+)\|[^\]]+\]\]/g, "$1").trim();
+    const body = st.bodyEdited ? editor.getHtml() : fillTemplateHtml(task.body, vals);
+    return {
+      subject, body,
+      fills: LATER.some((k) => hasTok(subject, k) || hasTok(body, k)),
+      // Changed wording keeps the appointments and date as they are now
+      frozen: LATER.some((k) => (st.bodyEdited && hasTok(task.body, k)) || (st.subjectEdited && hasTok(task.subject, k))),
+    };
+  }
+
+  laterBtn.addEventListener("click", async () => {
+    if (st.sending || showProblems()) return;
+    const msg = laterMessage();
+    const pick = await pickSendTime({
+      intro: msg.fills
+        ? "The upcoming appointments and the date are filled in when it's sent, so they're up to date on the day."
+        : "It's sent exactly as it is now.",
+      warning: msg.frozen
+        ? "You've changed the wording, so the appointments and date stay as they are now. To have them filled in on the day, cancel this, press “Reset to the task's wording”, then schedule."
+        : "",
+    });
+    if (!pick) return;
+    busy(true);
+    try {
+      const attachments = await buildAttachments(laterBtn);
+      btnLabel(laterBtn, "Scheduling…");
+      await callApi({
+        action: "scheduleTaskEmail", op: "create", ...whoFor(),
+        subject: msg.subject, html: shell(msg.body), attachments,
+        sendAt: new Date(pick.ms).toISOString(),
+        appts: { months: st.appts.months, services: st.appts.services, staff: st.appts.staff },
+      });
+      st.touched = false;
+      showToast(`Scheduled for ${fmtSendTime(pick.ms)}`);
+      location.hash = patientId ? backHref : "#/tasks/history/scheduled";
+    } catch (err) {
+      console.error("Task schedule failed:", err);
+      msgEl.textContent = runError(err);
+      btnLabel(laterBtn, "Schedule");
+    } finally {
+      busy(false);
     }
   });
 

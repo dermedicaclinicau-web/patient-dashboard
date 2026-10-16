@@ -595,6 +595,12 @@ match /inv_count_drafts/{id} {
       allow write: if false;
     }
 
+    // Emails scheduled for later from Task Manager (written only by Apps Script)
+    match /task_scheduled/{id} {
+      allow read: if isStaff();
+      allow write: if false;
+    }
+
     // Clinic closed days, shared by every scheduled task
     match /task_settings/{docId} {
       allow read: if isStaff();
@@ -642,7 +648,7 @@ match /inv_count_drafts/{id} {
       allow read: if can('flows.build');
       allow write: if false;
     }
-    
+
     // ===================== Image Bank =====================
 
     // The details of each picture (the files are in Storage)

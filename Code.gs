@@ -44,6 +44,7 @@ function doPost(e) {
     if (body.action === 'recordingRules') return json_(handleRecordingRules_(body));
     if (body.action === 'scanner') return json_(scannerAction_(body));
     if (body.action === 'records') return json_(handleRecords_(body));
+    if (body.action === 'scheduleTaskEmail') return json_(handleScheduleTaskEmail_(body));
     
 
     const pin = String(body.pin || '').trim();
@@ -3446,6 +3447,7 @@ function runScheduledTasks() {
   try {
     const cfg = getConfig_();
     const now = Date.now();
+    try { runScheduledTaskEmails_(cfg); } catch (e) { console.error('Scheduled emails: ' + (e && e.stack ? e.stack : e)); }
     const tasks = fsListAll_(cfg, 'task_types')
       .map(function (d) { return { id: d.name.split('/').pop(), t: fromFields_(d.fields || {}) }; })
       .filter(function (x) {
@@ -3496,6 +3498,420 @@ function handleScheduledTask_(body) {
   return { ok: true, to: me.email };
 }
 
+// ===================== Task Manager: emails scheduled for later =====================
+// "Schedule" on the task screen saves the finished email in task_scheduled. runScheduledTasks (every 15 minutes)
+// sends it when it's due, filling in {Upcoming appointments} and {Today} on the day, so the patient gets the
+// schedule as it is then. Attachments wait in a Drive folder and are binned once sent or cancelled.
+
+const SCHED_COL_ = 'task_scheduled';
+const SCHED_MAX_DAYS_ = 90;
+const SCHED_APPTS_RE_ = function () { return /\{\s*upcoming appointments\s*\}/gi; };
+const SCHED_TODAY_RE_ = function () { return /\{\s*today\s*\}/gi; };
+
+function handleScheduleTaskEmail_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!can_(session, 'tasks.run')) return { ok: false, error: 'FORBIDDEN' };
+  const op = String(body.op || '');
+  try {
+    if (op === 'create') return schedCreate_(body, session);
+    const id = String(body.id || '');
+    if (!/^sch_[A-Za-z0-9]{10,40}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
+    if (op === 'cancel' || op === 'reschedule' || op === 'sendNow') return schedChange_(op, id, body, session);
+  } catch (err) {
+    console.error('Scheduled email ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: false, error: 'SERVER_ERROR', detail: String(err && err.message ? err.message : err).slice(0, 300) };
+  }
+  return { ok: false, error: 'BAD_REQUEST' };
+}
+
+// At least 4 minutes from now, at most 90 days
+function schedTimeOk_(raw) {
+  const ms = Date.parse(String(raw || ''));
+  const now = Date.now();
+  if (!ms || ms < now + 4 * 60000) return { error: 'BAD_TIME' };
+  if (ms > now + SCHED_MAX_DAYS_ * 86400000) return { error: 'TOO_FAR' };
+  return { ms: ms };
+}
+
+// Where attachments wait until their email goes (made the first time it's needed)
+function schedAttFolder_() {
+  const p = PropertiesService.getScriptProperties();
+  const id = p.getProperty('SCHEDULED_ATT_FOLDER_ID');
+  if (id) {
+    try { const f = DriveApp.getFolderById(id); if (!f.isTrashed()) return f; } catch (e) { /* made again below */ }
+  }
+  const f = DriveApp.createFolder('Dermedica portal: scheduled email attachments');
+  p.setProperty('SCHEDULED_ATT_FOLDER_ID', f.getId());
+  return f;
+}
+
+// A task attachment from the browser as a PDF (the browser's PDF, or made here from the form)
+function taskAttachmentBlob_(a) {
+  a = a || {};
+  const name = cleanFileName_(a.name, 'Attachment');
+  const bytes = pdfBytes_(a.pdf);
+  if (bytes) return Utilities.newBlob(bytes, MimeType.PDF, name);
+  const html = sanitizePdfHtml_(a.html);
+  if (!html || html.length > 4000000) return null;
+  try { return Utilities.newBlob(html, 'text/html', 'form.html').getAs(MimeType.PDF).setName(name); }
+  catch (err) { console.error('Scheduled attachment PDF failed: ' + err); return null; }
+}
+
+function schedCreate_(body, session) {
+  const taskId = String(body.taskId || '').trim();
+  if (!/^[A-Za-z0-9_-]{10,40}$/.test(taskId)) return { ok: false, error: 'BAD_REQUEST' };
+  const when = schedTimeOk_(body.sendAt);
+  if (when.error) return { ok: false, error: when.error };
+
+  const cfg = getConfig_();
+  const task = fsGetDoc_(cfg, 'task_types/' + taskId);
+  if (!task || task.status !== 'live') return { ok: false, error: 'TASK_NOT_LIVE' };
+  if (task.channel !== 'email') return { ok: false, error: 'BAD_REQUEST' };
+
+  const subject = String(body.subject || '').trim().slice(0, 200);
+  const html = sanitizeEmailHtml_(body.html);
+  if (!subject || !html || html.length > 200000) return { ok: false, error: 'BAD_REQUEST' };
+  const cc = String(body.cc || '').trim();
+  if (cc && !isEmail_(cc)) return { ok: false, error: 'BAD_EMAIL' };
+
+  const patientId = String(body.patientId || '').trim();
+  let patient = null;
+  if (patientId) {
+    if (!recDocIdOk_(patientId)) return { ok: false, error: 'BAD_REQUEST' };
+    patient = fsGetDoc_(cfg, 'patient_list/' + encodeURIComponent(patientId));
+    if (!patient) return { ok: false, error: 'NO_PATIENT' };
+  }
+  const patientName = patient
+    ? String(patient['Patient Name'] || ((patient['First Name'] || '') + ' ' + (patient['Last Name'] || '')).trim())
+    : '';
+
+  const recips = task.recipients || {};
+  let to = '';
+  let staffIds = [];
+  if (task.category === 'patient') {
+    if (!patient) return { ok: false, error: 'NO_PATIENT' };
+    to = String(body.to || '').trim();
+    if (!isEmail_(to)) return { ok: false, error: 'BAD_EMAIL' };
+  } else {
+    if (recips.aboutPatient && !patient) return { ok: false, error: 'NO_PATIENT' };
+    staffIds = (recips.mode === 'fixed' ? (recips.staffIds || []) : (Array.isArray(body.staffIds) ? body.staffIds : []))
+      .map(String).filter(function (x) { return /^[A-Za-z0-9_-]{1,80}$/.test(x); }).slice(0, TASK_MAX_RECIPIENTS_);
+    if (!staffIds.length) return { ok: false, error: 'NO_RECIPIENTS' };
+  }
+
+  // Attachments wait in Drive until the email goes
+  const wanted = Array.isArray(body.attachments) ? body.attachments.slice(0, 3) : [];
+  const atts = [];
+  if (wanted.length) {
+    const blobs = wanted.map(taskAttachmentBlob_);
+    if (blobs.some(function (b) { return !b; })) return { ok: false, error: 'PDF_FAILED' };
+    const folder = schedAttFolder_();
+    blobs.forEach(function (b) {
+      const f = folder.createFile(b);
+      atts.push({ fileId: f.getId(), name: b.getName() });
+    });
+  }
+
+  const a = body.appts || {};
+  const id = 'sch_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20);
+  const now = new Date().toISOString();
+  commitWrites_(cfg, [updateWrite_(cfg, SCHED_COL_ + '/' + id, {
+    taskId: taskId, taskName: String(task.name || ''), category: String(task.category || ''),
+    patientId: patientId, patientName: patientName, to: to, cc: cc, staffIds: staffIds,
+    subject: subject, html: html, attachments: atts,
+    appts: { months: [3, 6, 12].indexOf(Number(a.months)) !== -1 ? Number(a.months) : 6,
+      services: a.services !== false, staff: a.staff !== false },
+    fillsLater: SCHED_APPTS_RE_().test(html) || SCHED_TODAY_RE_().test(html) || SCHED_TODAY_RE_().test(subject),
+    sendAt: new Date(when.ms).toISOString(), sendAtMs: when.ms,
+    status: 'scheduled', attempts: 0, lastError: '',
+    createdAt: now, createdBy: String(session.name || ''), createdByUid: String(session.uid || ''), updatedAt: now,
+  })]);
+  console.log('"' + task.name + '" scheduled for ' + new Date(when.ms).toISOString() + ' by ' + session.name);
+  return { ok: true, id: id, sendAt: new Date(when.ms).toISOString() };
+}
+
+// Cancel, change the time, or send now: the person who scheduled it, or someone who builds task types
+function schedChange_(op, id, body, session) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) return { ok: false, error: 'BUSY' };
+  try {
+    const cfg = getConfig_();
+    const rec = fsGetDoc_(cfg, SCHED_COL_ + '/' + id);
+    if (!rec) return { ok: false, error: 'NOT_FOUND' };
+    if (rec.createdByUid !== session.uid && !can_(session, 'tasks.build')) return { ok: false, error: 'FORBIDDEN' };
+    if (['scheduled', 'failed'].indexOf(rec.status) === -1) return { ok: false, error: 'NOT_WAITING' };
+    rec._id = id;
+    const now = new Date().toISOString();
+    const who = String(session.name || '');
+
+    if (op === 'cancel') {
+      fsPatch_(cfg, SCHED_COL_ + '/' + id, { status: 'cancelled', cancelledAt: now, cancelledBy: who, updatedAt: now });
+      schedTrashAtts_(rec);
+      return { ok: true };
+    }
+    if (op === 'reschedule') {
+      const when = schedTimeOk_(body.sendAt);
+      if (when.error) return { ok: false, error: when.error };
+      fsPatch_(cfg, SCHED_COL_ + '/' + id, {
+        sendAt: new Date(when.ms).toISOString(), sendAtMs: when.ms, status: 'scheduled',
+        attempts: 0, lastError: '', updatedAt: now, updatedBy: who,
+      });
+      return { ok: true, sendAt: new Date(when.ms).toISOString() };
+    }
+    const r = schedSendOne_(cfg, rec, Date.now());
+    return r.ok ? { ok: true, sent: r.sent } : { ok: false, error: 'SEND_FAILED', detail: r.error };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// The trigger (runScheduledTasks) calls this every 15 minutes
+function runScheduledTaskEmails_(cfg) {
+  const started = Date.now();
+  // A send that crashed part-way is never sent twice automatically: it's marked for a person to check
+  fsQuery_(cfg, SCHED_COL_, 'status', 'EQUAL', 'sending', 20).forEach(function (r) {
+    if (r.sendingAt && started - Date.parse(r.sendingAt) > 30 * 60000) {
+      fsPatch_(cfg, SCHED_COL_ + '/' + r._id, {
+        status: 'failed', lastError: 'It may or may not have gone. Check Task history → Sent before sending it again.',
+      });
+    }
+  });
+  fsQuery_(cfg, SCHED_COL_, 'status', 'EQUAL', 'scheduled', 300)
+    .filter(function (r) { return Number(r.sendAtMs || 0) <= started; })
+    .sort(function (a, b) { return Number(a.sendAtMs) - Number(b.sendAtMs); })
+    .slice(0, 40)
+    .forEach(function (r) {
+      if (Date.now() - started > 4 * 60000) return; // the rest go in the next run
+      schedSendOne_(cfg, r, started);
+    });
+}
+
+function schedSendOne_(cfg, rec, nowMs) {
+  const path = SCHED_COL_ + '/' + rec._id;
+  fsPatch_(cfg, path, { status: 'sending', sendingAt: new Date().toISOString() });
+  try {
+    const res = schedDeliver_(cfg, rec);
+    fsPatch_(cfg, path, { status: 'sent', sentAt: new Date().toISOString(), runId: res.runId, sentTo: res.to, lastError: '' });
+    schedTrashAtts_(rec);
+    return { ok: true, sent: res.count };
+  } catch (e) {
+    const msg = String(e && e.message ? e.message : e).slice(0, 300);
+    const attempts = Number(rec.attempts || 0) + 1;
+    const final = e.final === true || attempts >= 3;
+    fsPatch_(cfg, path, { status: final ? 'failed' : 'scheduled', attempts: attempts, lastError: msg,
+      updatedAt: new Date().toISOString() });
+    console.error('Scheduled email ' + rec._id + (final ? ' failed: ' : ' will retry: ') + msg);
+    if (final) schedTellCreator_(rec, msg);
+    return { ok: false, error: msg };
+  }
+}
+
+// Builds and sends one scheduled email. Errors with .final = true aren't retried.
+function schedDeliver_(cfg, rec) {
+  const fail = function (m) { const e = new Error(m); e.final = true; throw e; };
+
+  // The patient, following a merge to the record that was kept
+  let pid = String(rec.patientId || '');
+  let patient = null;
+  for (let i = 0; pid && i < 4; i++) {
+    patient = fsGetDoc_(cfg, 'patient_list/' + encodeURIComponent(pid));
+    const next = patient ? String(patient.MergedInto || '') : '';
+    if (!next || next === pid) break;
+    pid = next;
+  }
+  if (rec.patientId && !patient) fail('The patient record is no longer there.');
+  const pName = patient
+    ? String(patient['Patient Name'] || ((patient['First Name'] || '') + ' ' + (patient['Last Name'] || '')).trim())
+    : String(rec.patientName || '');
+
+  const recipients = [];
+  if (rec.category === 'patient') {
+    let to = String(rec.to || '').trim();
+    if (!isEmail_(to) && patient) to = String(patient.Email || '').trim();
+    if (!isEmail_(to)) fail("There's no email address for " + (pName || 'the patient') + '.');
+    recipients.push({ name: pName, first: String((patient && patient['First Name']) || pName.split(' ')[0] || ''), email: to });
+  } else {
+    const byId = {};
+    getStaffDocs_().forEach(function (s) { byId[s.id] = s; });
+    (rec.staffIds || []).forEach(function (sid) {
+      const s = byId[String(sid)];
+      if (s && s.active !== false && isEmail_(s.email)) recipients.push({ name: s.name, first: String(s.name || '').split(' ')[0], email: s.email });
+    });
+    if (!recipients.length) fail('None of the chosen staff have an email address.');
+  }
+  if (MailApp.getRemainingDailyQuota() < recipients.length) throw new Error("The clinic's daily email limit was reached. It will try again.");
+
+  // Filled in now, so they're right on the day
+  const todayText = Utilities.formatDate(new Date(), REC_TZ_, 'd MMMM yyyy');
+  let html = String(rec.html || '');
+  let subject = String(rec.subject || '');
+  if (SCHED_APPTS_RE_().test(html) || SCHED_APPTS_RE_().test(subject)) {
+    const appts = patient ? schedUpcomingHtml_(cfg, pid, patient, rec.appts || {}) : '';
+    html = html.replace(SCHED_APPTS_RE_(), appts);
+    subject = subject.replace(SCHED_APPTS_RE_(), '').replace(/\s{2,}/g, ' ').trim();
+  }
+  html = sanitizeEmailHtml_(html.replace(SCHED_TODAY_RE_(), todayText));
+  subject = subject.replace(SCHED_TODAY_RE_(), todayText);
+  if (!subject || !html) fail('The email is empty.');
+
+  const attachments = (rec.attachments || []).map(function (a) {
+    try { return DriveApp.getFileById(String(a.fileId)).getBlob().setName(String(a.name || 'Attachment.pdf')); }
+    catch (e) { return null; }
+  });
+  if (attachments.some(function (b) { return !b; })) fail('An attachment saved with this email is missing.');
+
+  const cc = isEmail_(String(rec.cc || '').trim()) ? String(rec.cc).trim() : '';
+  const escH = function (s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
+  const inlined = inlineTaskImages_(cfg, html);
+  const hasImages = Object.keys(inlined.images).length > 0;
+  recipients.forEach(function (r) {
+    const subj = subject.replace(/\{First name\}/gi, r.first).replace(/\{Full name\}/gi, r.name);
+    const body = fillPersonTagsInLinks_(inlined.html, { 'first name': r.first, 'full name': r.name })
+      .replace(/\{First name\}/gi, escH(r.first)).replace(/\{Full name\}/gi, escH(r.name));
+    const mail = { to: r.email, subject: subj, htmlBody: body, body: emailHtmlToText_(body), name: 'Dermedica Clinic' };
+    if (cc) mail.cc = cc;
+    if (attachments.length) mail.attachments = attachments;
+    if (hasImages) mail.inlineImages = inlined.images;
+    MailApp.sendEmail(mail);
+  });
+
+  const runId = 'run_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20);
+  try {
+    commitWrites_(cfg, [updateWrite_(cfg, 'task_runs/' + runId, {
+      taskId: String(rec.taskId || ''), taskName: String(rec.taskName || ''), category: String(rec.category || ''),
+      patientId: pid, patientName: pName,
+      recipients: recipients.map(function (r) { return { name: r.name, email: r.email }; }),
+      cc: cc, subject: subject, html: html.slice(0, 100000),
+      attachments: attachments.map(function (b) { return b.getName(); }),
+      sentAt: new Date().toISOString(),
+      sentBy: String(rec.createdBy || '') + ' (scheduled)', sentByUid: String(rec.createdByUid || ''),
+      scheduled: true, scheduledId: String(rec._id || ''),
+    })]);
+  } catch (e) { console.warn('Scheduled email sent, but the history log failed: ' + e); }
+  return { runId: runId, count: recipients.length, to: recipients.map(function (r) { return r.email; }).join(', ') };
+}
+
+// The patient's bookings from the appointment book. The same rules as js/upcoming-appts.js.
+const SCHED_CANCELLED_ = /cancel|no.?show|\bdna\b|did not attend/i;
+const SCHED_NOT_PERSON_ = /^unassigned$|\broom\b|^dermedica clinician$/i;
+function schedNorm_(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim(); }
+
+function schedUpcomingHtml_(cfg, pid, p, opts) {
+  const none = 'There are no upcoming appointments booked at the moment.';
+  const months = [3, 6, 12].indexOf(Number(opts.months)) !== -1 ? Number(opts.months) : 6;
+  const today = Utilities.formatDate(new Date(), REC_TZ_, 'yyyy-MM-dd');
+  const nowP = new Date(Date.now() + SCH_PERTH_);
+  const nowMin = nowP.getUTCHours() * 60 + nowP.getUTCMinutes();
+  const t = today.split('-').map(Number);
+  const end = Utilities.formatDate(new Date(Date.UTC(t[0], t[1] - 1 + months, t[2], 12)), 'UTC', 'yyyy-MM-dd');
+
+  // Match on the patient's ID; only fall back to the name when a booking has no ID
+  const ids = {};
+  [pid, p.PttID].concat(Array.isArray(p.MergedIds) ? p.MergedIds : []).forEach(function (x) {
+    x = String(x == null ? '' : x).trim().toLowerCase();
+    if (x) ids[x] = true;
+  });
+  const names = {};
+  [p['Patient Name'], (p['First Name'] || '') + ' ' + (p['Last Name'] || '')]
+    .concat(Array.isArray(p.MergedNames) ? p.MergedNames : [])
+    .forEach(function (n) { n = schedNorm_(n); if (n) names[n] = true; });
+
+  const days = schedApptDays_(cfg, today, end);
+  if (!days.length) {
+    // No future days uploaded yet: the pre-consultation sheet's list, like the task screen
+    const key = docId_(p.PttID || pid);
+    const pre = key ? fsGetDoc_(cfg, 'pcn_results/' + encodeURIComponent(key)) : null;
+    const lines = String((pre && pre.futureVisits) || '').split(/\r?\n/)
+      .map(function (s) { return s.trim(); }).filter(Boolean);
+    return lines.length ? lines.map(function (l) { return '• ' + invEsc_(l); }).join('<br>') : none;
+  }
+
+  // One visit can be several lines (one per service or staff member): merged by date + time
+  const byTime = {};
+  days.forEach(function (d) {
+    const key = String(d.date || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return;
+    (d.appointments || []).forEach(function (a) {
+      const aid = String(a.patientId || '').trim().toLowerCase();
+      const mine = aid ? !!ids[aid] : !!names[schedNorm_(a.patientName)];
+      if (!mine || SCHED_CANCELLED_.test(String(a.status || ''))) return;
+      const mins = Number(a.sortMinutes);
+      if (key === today && isFinite(mins) && mins < nowMin) return; // earlier today: already happened
+      const time = String(a.time || '').trim();
+      const k = key + '|' + time;
+      const row = byTime[k] || (byTime[k] = { date: key, time: time, sort: isFinite(mins) ? mins : 0, services: [], staff: [] });
+      (a.services || []).forEach(function (s) {
+        s = String(s || '').trim();
+        if (s && row.services.indexOf(s) === -1) row.services.push(s);
+      });
+      const who = String(a.staff || '').trim();
+      if (who && !SCHED_NOT_PERSON_.test(who) && row.staff.indexOf(who) === -1) row.staff.push(who);
+    });
+  });
+
+  const rows = Object.keys(byTime).map(function (k) { return byTime[k]; })
+    .sort(function (x, y) { return x.date.localeCompare(y.date) || x.sort - y.sort; });
+  if (!rows.length) return none;
+  return rows.map(function (r) {
+    const m = r.date.split('-').map(Number);
+    const when = Utilities.formatDate(new Date(Date.UTC(m[0], m[1] - 1, m[2], 12)), 'UTC', 'EEE d MMM yyyy') +
+      (r.time ? ', ' + r.time : '');
+    const who = r.staff.length < 3 ? r.staff.join(' and ')
+      : r.staff.slice(0, -1).join(', ') + ' and ' + r.staff[r.staff.length - 1];
+    const detail = [opts.services !== false ? r.services.join(', ') : '',
+      opts.staff !== false && who ? 'with ' + who : ''].filter(Boolean).join(' ');
+    return '• <strong>' + invEsc_(when) + '</strong>' + (detail ? ': ' + invEsc_(detail) : '');
+  }).join('<br>');
+}
+
+
+// appts_by_day documents from one date to another
+function schedApptDays_(cfg, fromKey, toKey) {
+  const res = UrlFetchApp.fetch('https://firestore.googleapis.com/v1/' + fsBase_(cfg) + ':runQuery', {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) },
+    payload: JSON.stringify({ structuredQuery: {
+      from: [{ collectionId: 'appts_by_day' }],
+      where: { compositeFilter: { op: 'AND', filters: [
+        { fieldFilter: { field: { fieldPath: 'date' }, op: 'GREATER_THAN_OR_EQUAL', value: { stringValue: fromKey } } },
+        { fieldFilter: { field: { fieldPath: 'date' }, op: 'LESS_THAN_OR_EQUAL', value: { stringValue: toKey } } },
+      ] } },
+      orderBy: [{ field: { fieldPath: 'date' } }],
+      limit: 400,
+    } }),
+  });
+  if (res.getResponseCode() !== 200) throw new Error('Appointment book not read (' + res.getResponseCode() + ')');
+  return JSON.parse(res.getContentText())
+    .filter(function (r) { return r.document; })
+    .map(function (r) { return fromFields_(r.document.fields || {}); });
+}
+
+function schedTrashAtts_(rec) {
+  (rec.attachments || []).forEach(function (a) {
+    try { DriveApp.getFileById(String(a.fileId)).setTrashed(true); } catch (e) { /* already gone */ }
+  });
+}
+
+// Tells the person who scheduled it that it couldn't be sent
+function schedTellCreator_(rec, msg) {
+  try {
+    const who = getStaffDocs_().filter(function (s) { return s.id === rec.createdByUid; })[0];
+    if (!who || !isEmail_(who.email) || MailApp.getRemainingDailyQuota() < 1) return;
+    const due = Utilities.formatDate(new Date(Number(rec.sendAtMs)), REC_TZ_, 'EEE d MMM, h:mm a');
+    const html = invEmailWrap_(
+      '<h2 style="margin:0 0 6px;font-size:20px;color:#b91c1c">A scheduled email wasn\'t sent</h2>' +
+      '<p style="margin:0 0 12px;color:#475569"><strong>' + invEsc_(rec.taskName) + '</strong>' +
+        (rec.patientName ? ' for ' + invEsc_(rec.patientName) : '') + ', due ' + invEsc_(due) + '.</p>' +
+      '<p style="margin:0;padding:10px 12px;border-radius:8px;background:#fef2f2;color:#991b1b">' + invEsc_(msg) + '</p>',
+      'tasks/history/scheduled', 'Open scheduled emails');
+    MailApp.sendEmail({
+      to: who.email, name: 'Dermedica Portal',
+      subject: 'Not sent: ' + rec.taskName + (rec.patientName ? ' for ' + rec.patientName : ''),
+      htmlBody: html, body: emailHtmlToText_(html),
+    });
+  } catch (e) { console.warn('Creator not told about the failed email: ' + e); }
+}
 // ===================== Task Manager → To Print =====================
 // Emails the PDF to the clinic printer once per copy, and logs it in Task history.
 function handlePrintTask_(body) {
