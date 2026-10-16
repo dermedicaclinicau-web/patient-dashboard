@@ -3,7 +3,7 @@
 // Step 1: building and saving only. Nothing is sent from this page.
 
 // ⚠ Use the same two import lines as the top of task-types.js (path to db, Firebase version)
-import { db } from "./firebase.js";
+import { db } from "./firebase-config.js";
 import {
   collection, doc, getDoc, getDocs, addDoc, updateDoc, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
