@@ -39,7 +39,7 @@ const CSS = `
   .pdfdoc .lh-lines { font-size: 8.5pt; color: #64748b; line-height: 1.5; }
   .pdfdoc h1 { font-family: Georgia, serif; font-size: 19pt; font-weight: normal; color: #0f172a; margin: 4px 0 4px; }
   .pdfdoc .meta { font-size: 9.5pt; color: #64748b; margin: 0 0 14px; }
-  .pdfdoc .q { padding: 9px 0; border-bottom: 1px solid #d9d9d9; page-break-inside: avoid; }
+  .pdfdoc .q { padding: 9px 0; page-break-inside: avoid; }
   .pdfdoc .ql { font-size: 9.5pt; font-weight: bold; color: #1a1a1a; margin-bottom: 4px; }
   .pdfdoc .qa { font-size: 11pt; line-height: 1.45; }
   .pdfdoc table.qi { width: 100%; border-collapse: collapse; }
@@ -162,11 +162,11 @@ function pdfInv(f, s) {
     return esc(fmtInv(inv.col, s[k]));
   };
   // Same look as the form: light rows, a dark line above Total and Amount due, the amount due in amber
-  const L = "padding:4px 16px 4px 8px;";
+  const L = "padding:4px 16px 4px 8px;text-align:left;";
   const R = "padding:4px 8px;text-align:right;white-space:nowrap;";
-  const r = (l, k, big = false, due = false) => {
+  const r = (l, k, big = false, due = false, extra = "") => {
     const b = big ? "font-weight:bold;font-size:11pt;border-top:2px solid #0f172a;" : "";
-    return `<tr><td style="${L}${b}">${esc(l)}</td><td style="${R}${b}${due && s && s.due > 0 ? "color:#b45309;" : ""}">${v(k)}</td></tr>`;
+    return `<tr><td style="${L}${b}${extra}">${esc(l)}</td><td style="${R}${b}${extra}${due && s && s.due > 0 ? "color:#b45309;" : ""}">${v(k)}</td></tr>`;
   };
   const hasD = inv.disc !== "none";
   const dl = `Discount${inv.disc === "percent" && s && s.discIn ? ` (${+s.discIn}%)` : ""}`;
@@ -177,12 +177,12 @@ function pdfInv(f, s) {
   if (inv.pay) {
     const pays = s && Array.isArray(s.pays) ? s.pays : [];
     const dash = "border-top:1px dashed #dde3ea;";
-    rows += s
+    const lines = s
       ? pays.map((p, i) => `<tr><td style="${L}${i ? "" : dash}">Paid${p.method ? ` · ${esc(p.method)}` : ""}</td>` +
           `<td style="${R}${i ? "" : dash}">${esc(fmtInv(inv.col, p.amount))}</td></tr>`).join("")
       : `<tr><td style="${L}${dash}">Paid by <span class="bl-in" style="width:110px"></span></td>` +
           `<td style="${R}${dash}"><span class="bl-in" style="width:90px"></span></td></tr>`;
-    rows += r("Amount due", "due", true, true);
+    rows += lines + r("Amount paid", "paid", false, false, lines ? "" : dash) + r("Amount due", "due", true, true);
   }
   return `<table style="width:320px;max-width:100%;margin:8px 0 0 auto;border-collapse:collapse;font-size:10.5pt;color:#0f172a;">${rows}</table>`;
 }
@@ -407,14 +407,19 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
     const after = { normal: 0, more: 12, most: 24 }[st.space] || 0;
     const box = `text-align:${st.align} !important;${after ? `margin-bottom:${after}px;` : ""}`;
 
-    if (f.type === "button") { // a PDF can't be clicked: the text, with the link written underneath
+    if (f.type === "button") { // a clickable button in the PDF, looking the same as on the form
       const href = buttonHref(f, tags);
-      if (!href || href.startsWith("#")) return ""; // portal pages mean nothing on paper
-      const shown = href.replace(/^(mailto|tel):/i, "");
-      // Real links, so the button and the address can be clicked in the PDF (the address stays for printed copies)
-      return `<div class="block" style="${box}">` +
-        `<a href="${esc(href)}" target="_blank" rel="noopener" style="display:inline-block;padding:6px 14px;border:1.5px solid #0f766e;border-radius:8px;color:#0f766e;font-weight:bold;font-size:10pt;text-decoration:none;">${esc(f.label || "Link")}</a>` +
-        `<div style="font-size:8.5pt;color:#475569;margin-top:4px;word-break:break-all;"><a href="${esc(href)}" target="_blank" rel="noopener" style="color:#475569;text-decoration:none;">${esc(shown)}</a></div></div>`;
+      if (!href || href.startsWith("#")) return ""; // portal pages mean nothing outside the portal
+      const looks = {
+        primary: "background:#0f766e;border:1.5px solid #0f766e;color:#ffffff;",
+        outline: "background:#ffffff;border:1.5px solid #0f766e;color:#0f766e;",
+        soft: "background:#e6f4f2;border:1.5px solid #e6f4f2;color:#115e59;",
+      };
+      const sizes = { small: "padding:6px 12px;font-size:9pt;", medium: "padding:9px 16px;font-size:10.5pt;", large: "padding:12px 22px;font-size:11.5pt;" };
+      const help = f.help ? `<div style="margin:0 0 6px;font-size:9pt;color:#64748b;">${esc(f.help)}</div>` : "";
+      return `<div class="block" style="${box}">${help}` +
+        `<a href="${esc(href)}" target="_blank" rel="noopener" style="display:inline-block;${looks[f.look] || looks.primary}${sizes[f.size] || sizes.medium}` +
+        `border-radius:9px;font-weight:bold;text-decoration:none;-webkit-print-color-adjust:exact;print-color-adjust:exact;">${esc(f.label || "Open link")}</a></div>`;
     }
     if (f.type === "text_block") {
       const fs = { small: 9, normal: 10, large: 11.5 }[st.textSize] || 10;
