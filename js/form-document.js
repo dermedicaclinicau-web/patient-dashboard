@@ -48,9 +48,9 @@ const CSS = `
   .pdfdoc .none { color: #94a3b8; font-style: italic; }
   .pdfdoc .note { color: #475569; }
   .pdfdoc ul { margin: 2px 0; padding-left: 18px; }
-  .pdfdoc table.grid { width: 100%; border-collapse: collapse; font-size: 9.5pt; }
-  .pdfdoc table.grid th, .pdfdoc table.grid td { border: 1px solid #333; padding: 5px 7px; text-align: left; color: #1a1a1a; }
-  .pdfdoc table.grid th { background: #ececec; }
+  .pdfdoc table.grid { width: 100%; border-collapse: collapse; font-size: 10pt; }
+  .pdfdoc table.grid th, .pdfdoc table.grid td { border: 1px solid #dde3ea; padding: 6px 8px; text-align: left; color: #0f172a; }
+  .pdfdoc table.grid th { background: #f8fafb; font-weight: 600; }
   .pdfdoc table.kv { border-collapse: collapse; font-size: 10.5pt; }
   .pdfdoc table.kv td { padding: 3px 18px 3px 0; vertical-align: top; }
   .pdfdoc table.kv td.k { color: #64748b; font-size: 9.5pt; }
@@ -147,7 +147,7 @@ function gridStart(f, cols) {
 // The Total row inside a table, and Subtotal / GST / Total under it. s = null: empty lines (blank printable)
 function pdfTotalRow(f, cols, s) {
   if (!cols.some((c) => c.total && isNumCol(c))) return "";
-  const cell = "font-weight:bold;background:#f2f2f2;";
+  const cell = "font-weight:bold;background:#f8fafb;";
   return `<tr>${cols.map((c, i) => (c.total && isNumCol(c)
     ? `<td style="${cell}text-align:right;">${s ? esc(fmtCol(c, s.sums[c.id])) : ""}</td>`
     : `<td style="${cell}">${i === 0 ? "Total" : ""}</td>`)).join("")}</tr>`;
@@ -161,11 +161,13 @@ function pdfInv(f, s) {
     if (k === "due" && s.due < 0) return `${esc(fmtInv(inv.col, -s.due))} credit`;
     return esc(fmtInv(inv.col, s[k]));
   };
-  const r = (l, k, big) => {
-    const b = big ? "font-weight:bold;border-top:1.5px solid #1a1a1a;" : "";
-    return `<tr><td style="padding:3px 16px 3px 0;${b}">${esc(l)}</td><td style="padding:3px 0;text-align:right;${b}">${v(k)}</td></tr>`;
+  // Same look as the form: light rows, a dark line above Total and Amount due, the amount due in amber
+  const L = "padding:4px 16px 4px 8px;";
+  const R = "padding:4px 8px;text-align:right;white-space:nowrap;";
+  const r = (l, k, big = false, due = false) => {
+    const b = big ? "font-weight:bold;font-size:11pt;border-top:2px solid #0f172a;" : "";
+    return `<tr><td style="${L}${b}">${esc(l)}</td><td style="${R}${b}${due && s && s.due > 0 ? "color:#b45309;" : ""}">${v(k)}</td></tr>`;
   };
-  const cell = "padding:3px 16px 3px 0;";
   const hasD = inv.disc !== "none";
   const dl = `Discount${inv.disc === "percent" && s && s.discIn ? ` (${+s.discIn}%)` : ""}`;
   const top = hasD ? r("Subtotal", "base") + r(dl, "disc") : "";
@@ -174,15 +176,17 @@ function pdfInv(f, s) {
     : top + r("Total", "total", true);
   if (inv.pay) {
     const pays = s && Array.isArray(s.pays) ? s.pays : [];
+    const dash = "border-top:1px dashed #dde3ea;";
     rows += s
-      ? pays.map((p) => `<tr><td style="${cell}">Paid${p.method ? ` · ${esc(p.method)}` : ""}</td>` +
-          `<td style="padding:3px 0;text-align:right;">${esc(fmtInv(inv.col, p.amount))}</td></tr>`).join("")
-      : `<tr><td style="${cell}">Paid by <span class="bl-in" style="width:110px"></span></td>` +
-          `<td style="padding:3px 0;text-align:right;"><span class="bl-in" style="width:90px"></span></td></tr>`;
-    rows += r("Amount due", "due", true);
+      ? pays.map((p, i) => `<tr><td style="${L}${i ? "" : dash}">Paid${p.method ? ` · ${esc(p.method)}` : ""}</td>` +
+          `<td style="${R}${i ? "" : dash}">${esc(fmtInv(inv.col, p.amount))}</td></tr>`).join("")
+      : `<tr><td style="${L}${dash}">Paid by <span class="bl-in" style="width:110px"></span></td>` +
+          `<td style="${R}${dash}"><span class="bl-in" style="width:90px"></span></td></tr>`;
+    rows += r("Amount due", "due", true, true);
   }
-  return `<table style="margin:6px 0 0 auto;border-collapse:collapse;font-size:10pt;">${rows}</table>`;
+  return `<table style="width:320px;max-width:100%;margin:8px 0 0 auto;border-collapse:collapse;font-size:10.5pt;color:#0f172a;">${rows}</table>`;
 }
+
 // Empty lines, tick-boxes and a signature box, for filling in by hand
 function blankAnswer(f) {
   const line = '<div class="bl"></div>';
@@ -407,9 +411,10 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
       const href = buttonHref(f, tags);
       if (!href || href.startsWith("#")) return ""; // portal pages mean nothing on paper
       const shown = href.replace(/^(mailto|tel):/i, "");
+      // Real links, so the button and the address can be clicked in the PDF (the address stays for printed copies)
       return `<div class="block" style="${box}">` +
-        `<span style="display:inline-block;padding:6px 14px;border:1.5px solid #0f766e;border-radius:8px;color:#0f766e;font-weight:bold;font-size:10pt;">${esc(f.label || "Link")}</span>` +
-        `<div style="font-size:8.5pt;color:#475569;margin-top:4px;word-break:break-all;">${esc(shown)}</div></div>`;
+        `<a href="${esc(href)}" target="_blank" rel="noopener" style="display:inline-block;padding:6px 14px;border:1.5px solid #0f766e;border-radius:8px;color:#0f766e;font-weight:bold;font-size:10pt;text-decoration:none;">${esc(f.label || "Link")}</a>` +
+        `<div style="font-size:8.5pt;color:#475569;margin-top:4px;word-break:break-all;"><a href="${esc(href)}" target="_blank" rel="noopener" style="color:#475569;text-decoration:none;">${esc(shown)}</a></div></div>`;
     }
     if (f.type === "text_block") {
       const fs = { small: 9, normal: 10, large: 11.5 }[st.textSize] || 10;
