@@ -421,10 +421,10 @@ function wire(card, k) {
         <strong>Done. ${num(res.rows)} appointments are in alltimeappts.</strong>
         <div>Took ${Math.max(1, Math.round((res.ms || 0) / 1000))} seconds${res.before ? ` · it had ${num(res.before)} rows before` : ""}.</div>
         ${sum.badDates ? `<div class="du-warn">${num(sum.badDates)} rows had a date that couldn't be read, so it was kept as text.</div>` : ""}
-        ${sum.unmatchedNames ? `<details><summary>${num(sum.unmatchedNames)} patients weren't found in patientlist (${num(sum.unmatchedRows)} rows)</summary>
+        ${sum.unmatchedNames ? `<details><summary>${num(sum.unmatchedNames)} patients weren't found in the Patient List (${num(sum.unmatchedRows)} rows)</summary>
           <ul>${sample.map((n) => `<li>${esc(n)} <small class="muted">(${num(sum.unmatched[n])})</small></li>`).join("")}</ul>
           ${sum.unmatchedNames > sample.length ? '<small class="muted">Showing the ones with the most appointments.</small>' : ""}</details>` : ""}
-        <div class="muted">Categories (N) and Patient IDs (O) are filled in, so you don't need to run runPrerequisite. Run the rest of your PCN scripts as usual.</div>
+        <div class="muted">Categories (N) and Patient IDs (O) are filled in. When the other uploads are done, use Run PCN update below.</div>
       </div>`;
     showToast("Day Sheet uploaded to alltimeappts");
   }

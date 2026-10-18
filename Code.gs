@@ -7928,7 +7928,7 @@ function upDsStart_(body, session) {
   // One upload at a time (a flag, not the script lock, so the 15-minute jobs never block an upload)
   const cache = CacheService.getScriptCache();
   const busy = cache.get('up_ds_active');
-  if (busy && !body.force && Date.now() - Number(busy) < 20 * 60000) {
+  if (busy && !body.force && Date.now() - Number(busy) < 3 * 60000) {
     return { ok: true, problem: 'Another Day Sheet upload is still running. Try again in a few minutes.' };
   }
   try {
@@ -7950,6 +7950,7 @@ function upDsStart_(body, session) {
     sheet.getRange(2, 13, total, 1).setNumberFormat('$#,##0.00');   // M
     SpreadsheetApp.flush();
 
+    try { ptFsEntries_(); } catch (e) { console.warn('Portal patient list not read yet: ' + e); }
     const token = Utilities.getUuid().replace(/-/g, '');
     cache.put('up_ds_active', String(Date.now()), 1800);
     cache.put(UP_DS_CACHE_ + token, JSON.stringify({
@@ -8113,25 +8114,19 @@ function upInvCleanName_(t) {
 }
 function upInvWords_(full) { return uniq_(full.split(' ').filter(function (w) { return w.length > 1; })); }
 
-// PTT LIST (A name, H Patient ID) → a function: customer name → { id, how }
-// Exact name first; otherwise the most shared words (2 or more). Two different patients equally close: left blank.
+// Invoice Record: exact name, then the most shared words (2 or more). Portal first, then PTT LIST.
+// Two different patients equally close: left blank.
 function upInvPatientMatcher_(ss) {
-  const sh = ss.getSheetByName(UP_INV_PTT_TAB_);
-  if (!sh) throw new Error('Sheet tab not found: ' + UP_INV_PTT_TAB_);
-  const last = sh.getLastRow();
-  const exact = {};   // whole cleaned name → ID ('' when two different patients have it)
-  const ids = [];     // person index → ID
-  const byWord = {};  // word → person indexes
-  if (last >= 2) {
-    sh.getRange(2, 1, last - 1, 8).getValues().forEach(function (r) {
-      const id = String(r[7] == null ? '' : r[7]).trim();
-      const full = upInvCleanName_(r[0]);
-      if (!id || !full) return;
-      exact[full] = (full in exact && exact[full] !== id) ? '' : id;
-      const i = ids.push(id) - 1;
-      upInvWords_(full).forEach(function (w) { (byWord[w] = byWord[w] || []).push(i); });
-    });
-  }
+  const entries = ptEntries_(ss, UP_INV_PTT_TAB_);
+  const exact = ptMap_(entries, upInvCleanName_);
+  const ids = [];     // name entry → Patient ID
+  const byWord = {};  // word → name entries
+  entries.fs.concat(entries.sheet).forEach(function (e) {
+    const full = upInvCleanName_(e[1]);
+    if (!full) return;
+    const i = ids.push(e[0]) - 1;
+    upInvWords_(full).forEach(function (w) { (byWord[w] = byWord[w] || []).push(i); });
+  });
   return function (name) {
     const full = upInvCleanName_(name);
     if (!full) return { id: '', how: 'blank' };
@@ -8296,26 +8291,16 @@ const UP_PKG_MAX_ROWS_ = 50000;
 
 // fillCustomerPackagesColumnM: exact name (ignoring capitals), then letters only without " NEW".
 // Two different patients with the same name: left blank.
+// Customer Packages: exact name (ignoring capitals), then letters only without " NEW". Portal first, then patientlist.
 function upPkgMatcher_(ss) {
-  const sh = ss.getSheetByName(UPLOAD_TABS_.patients);
-  if (!sh) throw new Error('Sheet tab not found: ' + UPLOAD_TABS_.patients);
   const norm = function (s) { return String(s == null ? '' : s).toLowerCase().trim(); };
   const clean = function (s) {
     return String(s == null ? '' : s).replace(/[^A-Za-z ]/g, '').replace(/\sNEW$/i, '')
       .toLowerCase().replace(/\s+/g, ' ').trim();
   };
-  const exact = {};
-  const cleaned = {};
-  const put = function (map, k, id) { if (k) map[k] = (k in map && map[k] !== id) ? null : id; };
-  const last = sh.getLastRow();
-  if (last >= 2) {
-    sh.getRange(2, 1, last - 1, 8).getValues().forEach(function (r) {
-      const id = String(r[7] == null ? '' : r[7]).trim();
-      if (!r[0] || !id) return;
-      put(exact, norm(r[0]), id);
-      put(cleaned, clean(r[0]), id);
-    });
-  }
+  const entries = ptEntries_(ss, UPLOAD_TABS_.patients);
+  const exact = ptMap_(entries, norm);
+  const cleaned = ptMap_(entries, clean);
   return function (name) {
     const a = norm(name);
     if (a in exact) return exact[a] ? { id: exact[a], how: 'exact' } : { id: '', how: 'ambiguous' };
@@ -8902,6 +8887,85 @@ function upMoney_(raw) {
   return m ? (m[1] || m[2] ? -1 : 1) * Number(m[3].replace(/,/g, '')) : s;
 }
 
+/* ---------- Patient IDs: the portal's Patient List (Firestore) first, the sheet as a fallback ---------- */
+
+const PT_CACHE_ = 'pt_fs_names_v1';
+
+// Every portal patient: { list: [[PttID, [names…]]], all: { PttID: 1 } } (all includes merged-away records).
+// Merged-away records aren't matched; the record they were merged into carries their old names (MergedNames).
+// Remembered for 10 minutes, in parts (one cache value holds 100 KB at most).
+function ptFsEntries_() {
+  const cache = CacheService.getScriptCache();
+  const head = cache.get(PT_CACHE_);
+  if (head) {
+    const keys = [];
+    for (let i = 0; i < Number(head); i++) keys.push(PT_CACHE_ + '_' + i);
+    const got = cache.getAll(keys);
+    if (keys.length && keys.every(function (k) { return got[k]; })) {
+      try { return JSON.parse(keys.map(function (k) { return got[k]; }).join('')); } catch (e) { /* read again below */ }
+    }
+  }
+  const list = [];
+  const all = {};
+  fsListAll_(getConfig_(), 'patient_list', ['PttID', 'Patient Name', 'First Name', 'Last Name', 'MergedInto', 'MergedNames'])
+    .forEach(function (d) {
+      const f = fromFields_(d.fields || {});
+      const id = String(f.PttID == null ? '' : f.PttID).trim();
+      if (!id) return;
+      all[id] = 1;
+      if (f.MergedInto) return;
+      const names = uniq_([f['Patient Name'], ((f['First Name'] || '') + ' ' + (f['Last Name'] || '')).trim()]
+        .concat(Array.isArray(f.MergedNames) ? f.MergedNames : [])
+        .map(function (n) { return String(n == null ? '' : n).replace(/\s+/g, ' ').trim(); })
+        .filter(Boolean));
+      if (names.length) list.push([id, names]);
+    });
+  const out = { list: list, all: all };
+  try {
+    const json = JSON.stringify(out);
+    const parts = {};
+    let n = 0;
+    for (let i = 0; i < json.length; i += 45000) parts[PT_CACHE_ + '_' + (n++)] = json.slice(i, i + 45000);
+    cache.putAll(parts, 600);
+    cache.put(PT_CACHE_, String(n), 600);
+  } catch (e) { console.warn('Patient names not remembered: ' + e); }
+  return out;
+}
+
+// { fs: [[id, name]…], sheet: [[id, name]…] }. Sheet rows only for Patient IDs Firestore doesn't have.
+// If Firestore can't be read, the sheet is used on its own (as before).
+function ptEntries_(ss, tab) {
+  let fs = { list: [], all: {} };
+  try { fs = ptFsEntries_(); }
+  catch (e) { console.warn('Portal patient list not read, using the sheet only: ' + e); }
+  const fsPairs = [];
+  fs.list.forEach(function (p) { p[1].forEach(function (n) { fsPairs.push([p[0], n]); }); });
+  const sheetPairs = [];
+  const sh = ss.getSheetByName(tab);
+  if (sh && sh.getLastRow() >= 2) {
+    sh.getRange(2, 1, sh.getLastRow() - 1, 8).getValues().forEach(function (r) {
+      const id = String(r[7] == null ? '' : r[7]).trim();
+      const name = String(r[0] == null ? '' : r[0]).trim();
+      if (id && name && !fs.all[id]) sheetPairs.push([id, name]);
+    });
+  }
+  return { fs: fsPairs, sheet: sheetPairs };
+}
+
+// name key → Patient ID, or null when two different patients share it. Firestore wins for any key it has.
+function ptMap_(entries, keyFn) {
+  const map = {};
+  const fromFs = {};
+  const put = function (k, id, isFs) {
+    if (!k || (!isFs && fromFs[k])) return;
+    if (isFs) fromFs[k] = true;
+    map[k] = (k in map && map[k] !== id) ? null : id;
+  };
+  entries.fs.forEach(function (e) { put(keyFn(e[1]), e[0], true); });
+  entries.sheet.forEach(function (e) { put(keyFn(e[1]), e[0], false); });
+  return map;
+}
+
 /* ---------- The same rules as the PCN spreadsheet's runPrerequisite ---------- */
 
 // fillCategoriesColN: first match wins, in this order
@@ -8974,113 +9038,7 @@ function pcnCleanStaff_(value) {
   return text;
 }
 
-// patientlist: normalised name (A) → Patient ID (H). The first row with a name wins.
+// Day Sheet: normalised name → Patient ID (portal first, then patientlist). Duplicate names → blank.
 function pcnPatientLookup_(ss) {
-  const sh = ss.getSheetByName(UPLOAD_TABS_.patients);
-  if (!sh) throw new Error('Sheet tab not found: ' + UPLOAD_TABS_.patients);
-  const last = sh.getLastRow();
-  const lookup = {};
-  if (last < 2) return lookup;
-  sh.getRange(2, 1, last - 1, 8).getValues().forEach(function (r) {
-    const n = pcnNormalizeName_(r[0]);
-    if (n && !(n in lookup)) lookup[n] = String(r[7] == null ? '' : r[7]).trim();
-  });
-  return lookup;
-}
-
-
-function uploadDaySheet_(body, session) {
-  const started = Date.now();
-  const lock = LockService.getScriptLock();
-  if (!lock.tryLock(30000)) return { ok: true, problem: 'Another update is running. Try again in a minute.' };
-  try {
-    const rows = Utilities.parseCsv(uploadText_(body));
-
-    // The header row (Timely can put a title line or two above it)
-    let h = -1;
-    for (let i = 0; i < Math.min(rows.length, 15); i++) {
-      const r = rows[i] || [];
-      if (/date/i.test(String(r[0] || '')) && /status/i.test(String(r[7] || '')) && /service/i.test(String(r[9] || ''))) { h = i; break; }
-    }
-    if (h < 0) {
-      return { ok: true, problem: "This doesn't look like the Timely Day Sheet. The columns should start Appointment Date, Patient Name… with Status in H and ServiceName in J." };
-    }
-
-    const ss = SpreadsheetApp.openById(APPTS_SHEET_ID);
-    const sheet = ss.getSheetByName(UPLOAD_TABS_.daysheet);
-    if (!sheet) throw new Error('Sheet tab not found: ' + UPLOAD_TABS_.daysheet);
-    const tz = ss.getSpreadsheetTimeZone();
-    const lookup = pcnPatientLookup_(ss);
-
-    const out = [];
-    const unmatched = {};
-    let badDates = 0;
-    for (let i = h + 1; i < rows.length; i++) {
-      const r = rows[i];
-      if (!r || !r.some(function (c) { return String(c == null ? '' : c).trim(); })) continue; // blank line
-      const cell = function (k) { return String(r[k] == null ? '' : r[k]); };
-      const rawDate = cell(0).trim();
-      const key = upDateKey_(rawDate);
-      if (rawDate && !key) badDates++;
-      const name = pcnCleanPatientName_(cell(1));
-      const norm = pcnNormalizeName_(name);
-      const pid = norm ? (lookup[norm] || '') : '';
-      if (name && !pid) unmatched[name] = (unmatched[name] || 0) + 1;
-      out.push([
-        key ? (stats.dates[key] || (stats.dates[key] = Utilities.parseDate(key, tz, 'yyyy-MM-dd'))) : rawDate, // A (a real date)
-        name,                                                       // B Patient Name
-        upMoney_(cell(2)),                                          // C Outstanding Balance
-        cell(3), cell(4), cell(5), cell(6), cell(7),                // D Contact # · E Resources · F Symbol2 · G StartTime · H Status
-        pcnCleanStaff_(cell(8)),                                    // I StaffName
-        cell(9), cell(10), cell(11),                                // J ServiceName · K ResourceName · L LocationName
-        upMoney_(cell(12)),                                         // M Price
-        pcnCategory_(rawDate, cell(9)),                             // N PCN Categories
-        pid,                                                        // O Patient ID
-      ]);
-    }
-    if (!out.length) return { ok: true, problem: 'The file has no appointments in it.' };
-
-    // Much smaller than what's there now: check before clearing
-    const before = Math.max(0, sheet.getLastRow() - 1);
-    if (!body.force && before > 1000 && out.length < before * 0.7) {
-      return { ok: true, needsForce: true, before: before, rows: out.length,
-        problem: 'This file has ' + out.length + ' rows, but alltimeappts has ' + before + ' now. ' +
-          'Check it is the "All time" export. Replace it anyway?' };
-    }
-
-    // Clear A2:R (the header stays), make room, then write in batches
-    const maxCols = Math.min(18, sheet.getMaxColumns());
-    if (sheet.getLastRow() >= 2) sheet.getRange(2, 1, sheet.getLastRow() - 1, maxCols).clearContent();
-    if (sheet.getMaxRows() < out.length + 1) sheet.insertRowsAfter(sheet.getMaxRows(), out.length + 1 - sheet.getMaxRows());
-    sheet.getRange(2, 2, out.length, 11).setNumberFormat('@');           // B:L as text (mobiles keep their 0)
-    sheet.getRange(2, 14, out.length, 2).setNumberFormat('@');           // N:O as text
-    sheet.getRange(2, 1, out.length, 1).setNumberFormat('d/m/yyyy');     // A
-    sheet.getRange(2, 3, out.length, 1).setNumberFormat('$#,##0.00');    // C
-    sheet.getRange(2, 13, out.length, 1).setNumberFormat('$#,##0.00');   // M
-    for (let i = 0; i < out.length; i += UPLOAD_CHUNK_) {
-      const part = out.slice(i, i + UPLOAD_CHUNK_);
-      sheet.getRange(2 + i, 1, part.length, 15).setValues(part);
-    }
-    SpreadsheetApp.flush();
-
-    const names = Object.keys(unmatched).sort(function (a, b) { return unmatched[b] - unmatched[a]; });
-    const unmatchedRows = names.reduce(function (a, n) { return a + unmatched[n]; }, 0);
-    const res = {
-      rows: out.length, before: before, badDates: badDates, ms: Date.now() - started, at: new Date().toISOString(),
-      unmatched: { names: names.length, rows: unmatchedRows,
-        sample: names.slice(0, 20).map(function (n) { return { name: n, rows: unmatched[n] }; }) },
-    };
-    try {
-      const cfg = getConfig_();
-      commitWrites_(cfg, [updateWrite_(cfg, 'data_uploads/daysheet', {
-        kind: 'daysheet', fileName: String(body.fileName || '').slice(0, 150), rows: res.rows, before: before,
-        badDates: badDates, unmatchedNames: names.length, unmatchedRows: unmatchedRows, ms: res.ms,
-        at: res.at, by: String(session.name || ''), byUid: String(session.uid || ''),
-      })]);
-    } catch (e) { console.warn('Day sheet uploaded, but the upload log failed: ' + e); }
-    console.log('Day sheet: ' + out.length + ' rows into alltimeappts in ' + res.ms + ' ms by ' + session.name);
-    return Object.assign({ ok: true }, res);
-  } finally {
-    lock.releaseLock();
-  }
+  return ptMap_(ptEntries_(ss, UPLOAD_TABS_.patients), pcnNormalizeName_);
 }
