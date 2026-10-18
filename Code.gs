@@ -7871,6 +7871,8 @@ function handleUpload_(body) {
     if (op === 'daysheetStart') return upDsStart_(body, session);
     if (op === 'daysheetChunk') return upDsChunk_(body, session);
     if (op === 'daysheetFinish') return upDsFinish_(body, session);
+    if (op === 'invoices') return upInvoices_(body, session);
+    if (op === 'invoicesSync') return upInvSync_();
   } catch (err) {
     console.error('Upload ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
     return { ok: true, problem: 'Something went wrong: ' + String(err && err.message ? err.message : err).slice(0, 300) };
@@ -8019,6 +8021,269 @@ function upDsFinish_(body, session) {
   cache.remove('up_ds_active');
   console.log('Day sheet: ' + res.rows + ' rows into alltimeappts in ' + res.ms + ' ms by ' + session.name);
   return Object.assign({ ok: true }, res);
+}
+
+/* ---------- 2) Invoice Record → INVOICE RECORD (added to the bottom, new invoices only) ---------- */
+
+const UP_INV_TAB_ = 'INVOICE RECORD';
+const UP_INV_PTT_TAB_ = 'PTT LIST';
+const UP_INV_MAX_ROWS_ = 20000;
+
+// Timely product names → the names the clinic uses (matched ignoring capitals and extra spaces)
+const UP_INV_PRODUCT_FIX_ = {
+  'Dermedica Sunscreen SPF 50+': 'Dermedica Sunscreen',
+  'Dermedica Handsfree Sunscreen SPF 50+': 'Dermedica Sunscreen',
+  'XXX Dermedica Handsfree Sunscreen SPF 50+': 'Dermedica Sunscreen',
+  'ZO Wrinkle + Texture Repair': 'ZO Wrinkle and Texture Serum',
+  'ZO Wrinkle + Texture Repair 0.5% Retinol 50ml': 'ZO Wrinkle and Texture Serum',
+  'Dermedica Ultra Moist': 'Dermedica UltraMoist',
+  'K-Ceutic Post Treatment cream': 'K Ceutic Post Treatment cream',
+  'Dermedica Pro B Hydrate': 'Dermedica Pro B Plus',
+  'XxDermedica Pro B Hydrate': 'Dermedica Pro B Plus',
+  'Dermedica Moisture Plus': 'Dermedica Moisture Plus',
+  'Dermedica Moisture Plus 30ml': 'Dermedica Moisture Plus',
+  'ZO Exfoliating Polish': 'ZO Exfoliating Polish',
+  'ZO Exfoliating Polish 16.2g': 'ZO Exfoliating Polish',
+  'Zo Gentle Cleanser': 'Zo Gentle Cleanser',
+  'Zo Gentle Cleanser 200ml': 'Zo Gentle Cleanser',
+  'Zo Gentle Cleanser 60ml': 'Zo Gentle Cleanser',
+  'ZO Hydrating Crème': 'ZO Hydrating Creme',
+  'ZO Hydrating Crème 113g': 'ZO Hydrating Creme',
+  'ZO Hydrating Creme 58g': 'ZO Hydrating Creme',
+  'ZO Skin Primer Broad Spectrum SPF30': 'ZO Oclipse Sunscreen',
+  'ZO Retinol Skin Brightener  1% 50ml': 'ZO Retinol Skin Brightener 1%',
+  'ZO Retinol Skin Brightener .25%': 'ZO Retinol Skin Brightener .25%',
+  'ZO Retinol Skin Brightener .25% 50mL': 'ZO Retinol Skin Brightener .25%',
+  'ZO Illuminating AOX Serum': 'ZO Illuminating AOX Serum',
+  'ZO Illuminating AOX Serum 30mL': 'ZO Illuminating AOX Serum',
+  'ZO Illuminating AOX Serum 50mL': 'ZO Illuminating AOX Serum',
+  'ZO Vitamin C Self-Activating 50ml': 'ZO Vitamin C',
+  'ZO Vitamin C 50mL': 'ZO Vitamin C',
+  'ZO Oclipse Sunscreen & Primer SPF 30 15ml': 'ZO Oclipse Sunscreen',
+  'ZO Oclipse Sunscreen & Primer SPF 30': 'ZO Oclipse Sunscreen',
+  'ZO Sunscreen Primer 15ml': 'ZO Oclipse Sunscreen',
+  'Daily Power Defense 15ml': 'ZO Daily Power Defence',
+  'ZO Daily Power Defence 15mL': 'ZO Daily Power Defence',
+  'ZO Daily Power Defense 50ml': 'ZO Daily Power Defence',
+  '/Dermedica Hyaluronic Serum': 'Dermedica Hyaluronic Serum',
+  'Dermedica A Plus serum 30ml': 'Dermedica Vitamin A Plus serum',
+  'Vitamin A serum 30ml Dermedica': 'Dermedica Vitamin A Plus serum',
+  'Dermedica Vitamin A Plus serum 30ml': 'Dermedica Vitamin A Plus serum',
+  'Dermedica Vitamin A+ 30ml': 'Dermedica Vitamin A Plus serum',
+  'Dermedica Barrier Balance 30mL': 'Dermedica Barrier Balance',
+  'Dermedica BRIGHT C 30ml': 'Dermedica Bright C',
+  'Dermedica UltraMoist 50mL $': 'Dermedica UltraMoist',
+  'ZO Intense Eye + EYE MASK promo': 'ZO Intense Eye Cream',
+  'Zo Intense Eye Creme 8g': 'ZO Intense Eye Cream',
+  'ZO Rozatrol 50mL': 'ZO Rozatrol',
+  'ZO Firming Serum 28ml': 'ZO Firming Serum',
+  'ZO Exfoliating Cleanser 60mL': 'ZO Exfoliating Cleanser',
+  'ZO Complex A+ 27mL': 'ZO Complex A+',
+  'ZO COMPLEXION  Renewal Pads': 'ZO Complexion Renewal Pads',
+  'ZO Exfoliation Accelerator 50ml': 'ZO Exfoliation Accelerator',
+  'ZO Brightalive Skin Brightener REMASTERED 50ml': 'ZO BrightAlive Skin Brightener',
+  'ZO BrightAlive Skin Brightener REMASTERED 50ml': 'ZO BrightAlive Skin Brightener',
+  'ZO Balancing Cleansing Emulsion 200ml': 'ZO Balancing Cleansing Emulsion',
+  'ZO Balancing Cleansing Emulsion 60ml': 'ZO Balancing Cleansing Emulsion',
+  'ZO Body Smoothing Cream 70g': 'ZO Body Smoothing Cream',
+  'ZO Body Smoothing Creme 70g': 'ZO Body Smoothing Cream',
+};
+let upInvFix_ = null;
+function upInvFixKey_(s) { return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); }
+
+// The same clean-up as PI_cleanProductNames: size + bracket on the end, then the replacement list
+function upInvCleanProduct_(raw) {
+  let t = String(raw == null ? '' : raw).replace(/\u00A0/g, ' ').trim();
+  if (!t) return '';
+  t = t.replace(/\s*\d+\s*(mL|ML|ml|g|mg|oz)?\s*\([^)]*\)$/i, '').replace(/\s*\([^)]*\)$/i, '').trim();
+  if (!upInvFix_) {
+    upInvFix_ = {};
+    Object.keys(UP_INV_PRODUCT_FIX_).forEach(function (k) { upInvFix_[upInvFixKey_(k)] = UP_INV_PRODUCT_FIX_[k]; });
+  }
+  return upInvFix_[upInvFixKey_(t)] || t;
+}
+
+// PI_fillPatientIDColumnD's cleanText
+function upInvCleanName_(t) {
+  return String(t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/\(.*?\)/g, '').replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+function upInvWords_(full) { return uniq_(full.split(' ').filter(function (w) { return w.length > 1; })); }
+
+// PTT LIST (A name, H Patient ID) → a function: customer name → { id, how }
+// Exact name first; otherwise the most shared words (2 or more). Two different patients equally close: left blank.
+function upInvPatientMatcher_(ss) {
+  const sh = ss.getSheetByName(UP_INV_PTT_TAB_);
+  if (!sh) throw new Error('Sheet tab not found: ' + UP_INV_PTT_TAB_);
+  const last = sh.getLastRow();
+  const exact = {};   // whole cleaned name → ID ('' when two different patients have it)
+  const ids = [];     // person index → ID
+  const byWord = {};  // word → person indexes
+  if (last >= 2) {
+    sh.getRange(2, 1, last - 1, 8).getValues().forEach(function (r) {
+      const id = String(r[7] == null ? '' : r[7]).trim();
+      const full = upInvCleanName_(r[0]);
+      if (!id || !full) return;
+      exact[full] = (full in exact && exact[full] !== id) ? '' : id;
+      const i = ids.push(id) - 1;
+      upInvWords_(full).forEach(function (w) { (byWord[w] = byWord[w] || []).push(i); });
+    });
+  }
+  return function (name) {
+    const full = upInvCleanName_(name);
+    if (!full) return { id: '', how: 'blank' };
+    if (full in exact) return exact[full] ? { id: exact[full], how: 'exact' } : { id: '', how: 'ambiguous' };
+    const score = {};
+    upInvWords_(full).forEach(function (w) {
+      (byWord[w] || []).forEach(function (i) { score[i] = (score[i] || 0) + 1; });
+    });
+    let best = 0;
+    let top = {};
+    Object.keys(score).forEach(function (i) {
+      if (score[i] > best) { best = score[i]; top = {}; }
+      if (score[i] === best) top[ids[i]] = true;
+    });
+    if (best < 2) return { id: '', how: 'none' };
+    const list = Object.keys(top);
+    return list.length === 1 ? { id: list[0], how: 'words' } : { id: '', how: 'ambiguous' };
+  };
+}
+
+// rows from the portal: [Invoice ID, InvoiceDate, CustomerName, StaffName, Product Name] (CSV columns A, B, C, E, G)
+function upInvoices_(body, session) {
+  let rows;
+  try { rows = JSON.parse(uploadText_(body)); }
+  catch (e) { return { ok: true, problem: "The file didn't arrive properly. Upload it again." }; }
+  if (!Array.isArray(rows) || !rows.length) return { ok: true, problem: 'The file has no invoices in it.' };
+  if (rows.length > UP_INV_MAX_ROWS_) {
+    return { ok: true, problem: 'The file has ' + rows.length + ' lines. This upload is for one day of invoices.' };
+  }
+
+  const cache = CacheService.getScriptCache();
+  const busy = cache.get('up_inv_active');
+  if (busy && Date.now() - Number(busy) < 3 * 60000) {
+    return { ok: true, problem: 'Another Invoice Record upload is running. Try again in a minute.' };
+  }
+  cache.put('up_inv_active', String(Date.now()), 600);
+  try {
+    const started = Date.now();
+    const ss = SpreadsheetApp.openById(SSP_SHEET_ID);
+    const sheet = ss.getSheetByName(UP_INV_TAB_);
+    if (!sheet) throw new Error('Sheet tab not found: ' + UP_INV_TAB_);
+    const tz = ss.getSpreadsheetTimeZone();
+    const today = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+    const txt = function (v) { return String(v == null ? '' : v).replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim(); };
+
+    let noProduct = 0;
+    let badDates = 0;
+    const lines = [];
+    rows.forEach(function (r) {
+      if (!Array.isArray(r)) return;
+      const id = txt(r[0]), rawDate = txt(r[1]), name = txt(r[2]), staff = txt(r[3]);
+      const product = upInvCleanProduct_(r[4]);
+      if (!id && !name && !product) return;
+      if (!product) { noProduct++; return; }   // services and the like
+      const key = upDateKey_(rawDate);
+      if (rawDate && !key) badDates++;
+      lines.push({ id: id, rawDate: rawDate, key: key, name: name, staff: staff, product: product });
+    });
+    if (!lines.length) return { ok: true, problem: 'The file has no product lines in it.', noProduct: noProduct };
+
+    // Should be yesterday's: check before adding a big range
+    const keys = lines.map(function (l) { return l.key; }).filter(Boolean).sort();
+    const from = keys[0] || '';
+    const to = keys[keys.length - 1] || '';
+    if (!body.force && from && (flowDays_(from, to) > 7 || flowDays_(from, today) > 14)) {
+      return { ok: true, needsForce: true,
+        problem: 'This file has invoices from ' + recLongDate_(from) + ' to ' + recLongDate_(to) + ". It should only be yesterday's. " +
+          'Invoices already in INVOICE RECORD will still be skipped. Add the rest anyway?' };
+    }
+
+    // Invoices already in the sheet are skipped (all their lines), and the new rows go after the last Invoice ID
+    const last = sheet.getLastRow();
+    const have = {};
+    let lastA = 1;
+    if (last >= 2) {
+      sheet.getRange(2, 1, last - 1, 1).getDisplayValues().forEach(function (r, i) {
+        const v = txt(r[0]);
+        if (v) { have[v] = true; lastA = i + 2; }
+      });
+    }
+    const fresh = lines.filter(function (l) { return !l.id || !have[l.id]; });
+    const base = {
+      ok: true, from: from, to: to, noProduct: noProduct, badDates: badDates,
+      skippedInvoices: uniq_(lines.filter(function (l) { return l.id && have[l.id]; }).map(function (l) { return l.id; })).length,
+    };
+    if (!fresh.length) return Object.assign(base, { rows: 0 });
+
+    const match = upInvPatientMatcher_(ss);
+    const memo = {};
+    const unmatched = {};
+    const ambiguous = {};
+    let matched = 0;
+    const out = fresh.map(function (l) {
+      const m = memo[l.name] || (memo[l.name] = match(l.name));
+      if (m.id) matched++;
+      else if (m.how === 'ambiguous') ambiguous[l.name] = (ambiguous[l.name] || 0) + 1;
+      else if (l.name) unmatched[l.name] = (unmatched[l.name] || 0) + 1;
+      return [
+        l.id,                                                       // A Invoice ID
+        l.key ? Utilities.parseDate(l.key, tz, 'yyyy-MM-dd') : l.rawDate, // B InvoiceDate (a real date)
+        l.name,                                                     // C CustomerName
+        m.id,                                                       // D Patient ID (blank when not sure)
+        l.staff,                                                    // E StaffName
+        l.product,                                                  // F Product Name (cleaned)
+      ];
+    });
+
+    const start = lastA + 1;
+    const end = start + out.length - 1;
+    if (sheet.getMaxRows() < end) sheet.insertRowsAfter(sheet.getMaxRows(), end - sheet.getMaxRows());
+    sheet.getRange(start, 1, out.length, 1).setNumberFormat('@');        // A as text
+    sheet.getRange(start, 2, out.length, 1).setNumberFormat('d/m/yyyy'); // B
+    sheet.getRange(start, 3, out.length, 4).setNumberFormat('@');        // C:F as text
+    sheet.getRange(start, 1, out.length, 6).setValues(out);
+    SpreadsheetApp.flush();
+
+    const top = function (o) {
+      return Object.keys(o).sort(function (a, b) { return o[b] - o[a]; }).slice(0, 20)
+        .map(function (n) { return { name: n, rows: o[n] }; });
+    };
+    const res = Object.assign(base, {
+      rows: out.length, startRow: start, endRow: end, matched: matched,
+      unmatched: { names: Object.keys(unmatched).length, sample: top(unmatched) },
+      ambiguous: { names: Object.keys(ambiguous).length, sample: top(ambiguous) },
+      ms: Date.now() - started, at: new Date().toISOString(),
+    });
+    try {
+      fsPatch_(getConfig_(), 'data_uploads/invoices', {
+        status: 'done', kind: 'invoices', fileName: String(body.fileName || '').slice(0, 150),
+        rows: res.rows, startRow: start, from: from, to: to, skippedInvoices: res.skippedInvoices,
+        unmatchedNames: res.unmatched.names + res.ambiguous.names, ms: res.ms, at: res.at,
+        by: String(session.name || ''), byUid: String(session.uid || ''),
+      });
+    } catch (e) { console.warn('Invoices added, but the upload log failed: ' + e); }
+    console.log('Invoice Record: ' + out.length + ' line(s) added at row ' + start + ' by ' + session.name);
+    return res;
+  } finally {
+    cache.remove('up_inv_active');
+  }
+}
+
+// After an upload: the portal's skincare records (purchases → Email Flows) updated straight away
+function upInvSync_() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) return { ok: true, later: true };  // a scheduled job is running; the next sync picks it up
+  try {
+    const n = syncSkincare_(getConfig_());
+    try {
+      PropertiesService.getScriptProperties().setProperty('LAST_SYNCED_SSP_UPDATE',
+        DriveApp.getFileById(SSP_SHEET_ID).getLastUpdated().toISOString());
+    } catch (e) { /* the next sync just runs again */ }
+    return { ok: true, patients: n };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // The uploaded file as text (sent compressed by the portal when the browser can)

@@ -1,6 +1,5 @@
-// Task Manager → Daily uploads: Timely CSVs go straight into the PCN spreadsheet.
-// The file is read here in pieces, only columns A–M are kept, and the rows go to Apps Script in batches.
-// Nothing is saved anywhere.
+// Task Manager → Daily uploads: Timely CSVs go straight into the clinic spreadsheets.
+// The file is read here in pieces and only the columns needed are sent. Nothing is saved anywhere.
 import { db } from "./firebase-config.js";
 import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
@@ -10,23 +9,29 @@ import { showToast } from "./utils.js";
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const MAX_BYTES = 1024 * 1024 * 1024; // 1 GB
-const KEEP = 13;                      // columns A–M (the CSV's column N is dropped)
-const BATCH = 8000;                   // rows per request
+const KEEP = 13;                      // columns A–M
+const BATCH = 8000;                   // Day Sheet rows per request
+const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const num = (n) => Number(n || 0).toLocaleString("en-AU");
 const when = (iso) => {
   const d = new Date(iso);
   return isNaN(d) ? "" : d.toLocaleString("en-AU", { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
 };
+const day = (key) => {
+  const d = new Date(`${key}T12:00:00`);
+  return isNaN(d) ? key : d.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+};
 const pause = () => new Promise((r) => setTimeout(r, 0));
 
 const KINDS = [
-  { key: "daysheet", title: "Day Sheet (all time)", ready: true,
+  { key: "daysheet", title: "Day Sheet (all time)", ready: true, sniff: [/status/, /service/],
     blurb: "Every appointment from Timely, including cancelled. Replaces everything in alltimeappts, then fills in the PCN category (N) and Patient ID (O)." },
-  { key: "invoices", title: "Invoice Record (yesterday)", ready: false, blurb: "Yesterday's invoices from Timely." },
+  { key: "invoices", title: "Invoice Record (yesterday)", ready: true, sniff: [/invoice/, /customer/, /product/],
+    blurb: "Yesterday's invoices from Timely. Added to the bottom of INVOICE RECORD (invoices already there are skipped), with Patient IDs and tidy product names." },
   { key: "packages", title: "Customer Packages", ready: false, blurb: "Patients' active packages from Timely." },
 ];
 
-/* ---------- Reading the CSV in pieces (quotes, commas and new lines inside quotes) ---------- */
+/* ---------- Reading the CSV ---------- */
 
 // Which character separates the columns (comma, semicolon or tab), from the first lines
 async function sniffDelim(file) {
@@ -54,10 +59,10 @@ async function readCsv(file, delim, onProgress) {
     if (first) { first = false; if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1); }
     for (let i = 0; i < text.length; i++) {
       const c = text[i];
-      if (afterQ) {                                  // just saw a quote inside quotes
+      if (afterQ) {
         afterQ = false;
-        if (c === '"') { if (keep) field += '"'; continue; } // "" = a quote mark
-        inQ = false;                                 // otherwise the quoted part has ended
+        if (c === '"') { if (keep) field += '"'; continue; }
+        inQ = false;
       }
       if (inQ) {
         if (c === '"') afterQ = true;
@@ -81,7 +86,7 @@ async function readCsv(file, delim, onProgress) {
       const { value, done } = await reader.read();
       if (done) break;
       eat(value);
-      if (++pieces % 20 === 0) await pause(); // lets the progress bar move
+      if (++pieces % 20 === 0) await pause();
     }
   } else {
     eat(await file.text());
@@ -90,7 +95,14 @@ async function readCsv(file, delim, onProgress) {
   return rows;
 }
 
-/* ---------- Sending a batch (compressed where the browser can) ---------- */
+const colList = (r) => (r || []).slice(0, 20).map((c, i) => `${LETTERS[i]}: ${String(c || "").slice(0, 30) || "(blank)"}`).join(" · ");
+function headerError(all, delim, expect) {
+  const sep = delim === "," ? "commas" : delim === ";" ? "semicolons" : "tabs";
+  return new Error(`Couldn't find the header row (expected ${expect}; separated by ${sep}). The file starts with ${colList(all[0])}. ` +
+    "Nothing was changed. Copy this message for whoever looks after the portal.");
+}
+
+/* ---------- Sending (compressed where the browser can) ---------- */
 
 function toB64(bytes) {
   let s = "";
@@ -116,14 +128,15 @@ function errText(err) {
   return (err && err.message) || "Couldn't upload. Try again.";
 }
 
-function lastLine(d) {
+function lastLine(d, k) {
   if (d.status === "running" && d.startedAt && (!d.at || d.startedAt > d.at)) {
     return Date.now() - Date.parse(d.startedAt) > 15 * 60000
       ? `⚠ The last upload (started ${when(d.startedAt)}${d.startedBy ? ` by ${d.startedBy}` : ""}) didn't finish, so alltimeappts may be incomplete. Upload the file again.`
       : `An upload started ${when(d.startedAt)}${d.startedBy ? ` by ${d.startedBy}` : ""} is still running.`;
   }
-  return d.at ? `Last uploaded ${when(d.at)}${d.by ? ` by ${d.by}` : ""} · ${num(d.rows)} rows${
-    d.unmatchedNames ? ` · ${num(d.unmatchedNames)} patients not matched` : ""}` : "Not uploaded from the portal yet.";
+  if (!d.at) return "Not uploaded from the portal yet.";
+  const what = k.key === "invoices" ? `${num(d.rows)} lines added${d.to ? ` (to ${day(d.to)})` : ""}` : `${num(d.rows)} rows`;
+  return `Last uploaded ${when(d.at)}${d.by ? ` by ${d.by}` : ""} · ${what}${d.unmatchedNames ? ` · ${num(d.unmatchedNames)} patients not matched` : ""}`;
 }
 
 function cardHtml(k, i) {
@@ -155,13 +168,13 @@ function wire(card, k) {
   const msg = card.querySelector('[data-role="msg"]');
   const result = card.querySelector('[data-role="result"]');
   const lastEl = card.querySelector('[data-role="last"]');
-  let file = null, running = false;
+  let file = null, running = false, wroteSome = false;
 
   const setMsg = (t, bad = false) => { msg.textContent = t || ""; msg.classList.toggle("is-bad", bad); };
   const setBar = (p) => { bar.hidden = p === null; if (p !== null) bar.firstElementChild.style.width = `${Math.round(p * 100)}%`; };
   const guard = (e) => { e.preventDefault(); e.returnValue = ""; };
   const showLast = () => getDoc(doc(db, "data_uploads", k.key))
-    .then((s) => { if (card.isConnected) lastEl.textContent = s.exists() ? lastLine(s.data()) : "Not uploaded from the portal yet."; })
+    .then((s) => { if (card.isConnected) lastEl.textContent = s.exists() ? lastLine(s.data(), k) : "Not uploaded from the portal yet."; })
     .catch(() => { lastEl.textContent = ""; });
   const clearFile = () => {
     file = null; input.value = "";
@@ -177,14 +190,14 @@ function wire(card, k) {
     setMsg("");
     if (!f) return;
     if (!/\.csv$/i.test(f.name)) { setMsg("Choose the CSV file Timely exported (its name ends in .csv).", true); return; }
-    if (f.size > MAX_BYTES) { setMsg("That file is over 1 GB. Check it's the Day Sheet export.", true); return; }
+    if (f.size > MAX_BYTES) { setMsg("That file is over 1 GB. Check it's the right export.", true); return; }
     const head = (await f.slice(0, 6000).text()).toLowerCase();
-    if (!/date/.test(head) || !/status/.test(head) || !/service/.test(head)) {
-      setMsg("This doesn't look like the Timely Day Sheet. Check you exported the right report.", true);
+    if (!k.sniff.every((re) => re.test(head))) {
+      setMsg(`This doesn't look like the Timely ${k.title.replace(/\s*\(.*\)$/, "")} export. Check you exported the right report.`, true);
       return;
     }
     file = f;
-    fname.textContent = `${f.name} · ${(f.size / 1048576).toFixed(0)} MB`;
+    fname.textContent = `${f.name} · ${f.size > 1048576 ? `${(f.size / 1048576).toFixed(0)} MB` : `${Math.max(1, Math.round(f.size / 1024))} KB`}`;
     drop.classList.add("has-file");
     btn.disabled = false;
   }
@@ -199,7 +212,66 @@ function wire(card, k) {
     }
   }
 
-  function done(res, sum) {
+  async function readFile(share) {
+    setMsg("Reading the file…");
+    setBar(0);
+    const delim = await sniffDelim(file);
+    const all = await readCsv(file, delim, (p) => { setBar(p * share); setMsg(`Reading the file… ${Math.round(p * 100)}%`); });
+    return { all, delim };
+  }
+
+  /* ---------- 1) Day Sheet ---------- */
+
+  async function runDaySheet() {
+    const { all, delim } = await readFile(0.3);
+    // Timely names some columns "Textbox14" etc., so the header is found by the ones with real names (G, H and J)
+    const isHeader = (r) => /^\s*start\s*time\s*$/i.test(r[6] || "") && /^\s*status\s*$/i.test(r[7] || "") && /service/i.test(r[9] || "");
+    const h = all.slice(0, 30).findIndex(isHeader);
+    if (h < 0) throw headerError(all, delim, "StartTime in G, Status in H, ServiceName in J");
+    const sample = all.slice(h + 1, h + 21).filter((r) => String(r[0] || "").trim());
+    const datey = sample.filter((r) => /\d{1,4}[\/.-]\d{1,2}[\/.-]\d{1,4}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}/.test(String(r[0]))).length;
+    if (sample.length && datey < sample.length / 2) {
+      throw new Error(`Column A doesn't look like appointment dates (it starts with "${String(sample[0][0]).slice(0, 30)}"). ` +
+        `The header row has ${colList(all[h])}. Nothing was changed. Copy this message for whoever looks after the portal.`);
+    }
+    const rows = all.slice(h + 1).map((r) => { r = r.slice(0, KEEP); while (r.length < KEEP) r.push(""); return r; });
+    all.length = 0;
+    if (!rows.length) throw new Error("The file has no appointments in it.");
+
+    setMsg(`Found ${num(rows.length)} appointments. Getting alltimeappts ready…`);
+    let start = await send({ action: "upload", op: "daysheetStart", total: rows.length, fileName: file.name });
+    if (start.needsForce) {
+      const ok = await confirmDialog({ title: "Replace alltimeappts?", message: start.problem, confirmLabel: "Replace it", tone: "warning" });
+      if (!ok) { setMsg("Nothing was changed."); setBar(null); return; }
+      start = await send({ action: "upload", op: "daysheetStart", total: rows.length, fileName: file.name, force: true });
+    }
+    if (start.problem) throw new Error(start.problem);
+    wroteSome = true;
+
+    const sum = { unmatched: {}, badDates: 0 };
+    for (let i = 0; i < rows.length; i += BATCH) {
+      const part = rows.slice(i, i + BATCH);
+      setMsg(`Writing ${num(Math.min(i + part.length, rows.length))} of ${num(rows.length)}… keep this page open.`);
+      const packed = await packJson(part);
+      const res = await send({ action: "upload", op: "daysheetChunk", token: start.token, offset: i, gzip: packed.gzip, data: packed.data });
+      if (res.problem) throw new Error(res.problem);
+      sum.badDates += Number(res.badDates || 0);
+      Object.entries(res.unmatched || {}).forEach(([n, c]) => { sum.unmatched[n] = (sum.unmatched[n] || 0) + Number(c || 0); });
+      setBar(0.3 + 0.7 * ((i + part.length) / rows.length));
+    }
+    sum.unmatchedNames = Object.keys(sum.unmatched).length;
+    sum.unmatchedRows = Object.values(sum.unmatched).reduce((a, b) => a + b, 0);
+
+    const fin = await send({ action: "upload", op: "daysheetFinish", token: start.token,
+      summary: { badDates: sum.badDates, unmatchedNames: sum.unmatchedNames, unmatchedRows: sum.unmatchedRows } });
+    if (fin.problem) throw new Error(fin.problem);
+    setMsg("");
+    setBar(null);
+    doneDaySheet(fin, sum);
+    clearFile();
+  }
+
+  function doneDaySheet(res, sum) {
     const sample = Object.keys(sum.unmatched).sort((a, b) => sum.unmatched[b] - sum.unmatched[a]).slice(0, 20);
     result.innerHTML = `
       <div class="du-result">
@@ -214,80 +286,91 @@ function wire(card, k) {
     showToast("Day Sheet uploaded to alltimeappts");
   }
 
+  /* ---------- 2) Invoice Record ---------- */
+
+  async function runInvoices() {
+    const { all, delim } = await readFile(0.4);
+    const isHeader = (r) => /invoice/i.test(r[0] || "") && /customer/i.test(r[2] || "") && /product/i.test(r[6] || "");
+    const h = all.slice(0, 30).findIndex(isHeader);
+    if (h < 0) throw headerError(all, delim, "InvoiceIdSequential in A, CustomerName in C, Product Name in G");
+    // CSV A, B, C, E, G → INVOICE RECORD A, B, C, E, F (D, the Patient ID, is filled in by Apps Script)
+    const rows = all.slice(h + 1)
+      .map((r) => [r[0], r[1], r[2], r[4], r[6]].map((c) => String(c ?? "").trim()))
+      .filter((r) => r.some(Boolean));
+    if (!rows.length) throw new Error("The file has no invoices in it.");
+
+    setMsg(`Found ${num(rows.length)} lines. Adding the new ones to INVOICE RECORD…`);
+    setBar(0.5);
+    const packed = await packJson(rows);
+    const payload = { action: "upload", op: "invoices", fileName: file.name, gzip: packed.gzip, data: packed.data };
+    let res = await send(payload);
+    if (res.needsForce) {
+      const ok = await confirmDialog({ title: "Add these invoices?", message: res.problem, confirmLabel: "Add them", tone: "warning" });
+      if (!ok) { setMsg("Nothing was changed."); setBar(null); return; }
+      res = await send(Object.assign({}, payload, { force: true }));
+    }
+    if (res.problem) throw new Error(res.problem);
+
+    res.synced = "none";
+    if (res.rows) {
+      setMsg("Updating the portal's skincare records…");
+      setBar(0.8);
+      try {
+        const s = await send({ action: "upload", op: "invoicesSync" });
+        res.synced = s.later ? "later" : "done";
+      } catch (e) {
+        console.warn("Skincare sync after upload failed:", e);
+        res.synced = "failed";
+      }
+    }
+    setMsg("");
+    setBar(null);
+    doneInvoices(res);
+    clearFile();
+  }
+
+  function doneInvoices(res) {
+    const range = res.from ? (res.from === res.to ? day(res.from) : `${day(res.from)} to ${day(res.to)}`) : "";
+    const list = (o) => ((o && o.sample) || []).map((x) => `<li>${esc(x.name)} <small class="muted">(${num(x.rows)})</small></li>`).join("");
+    const plural = (n, w) => `${num(n)} ${w}${n === 1 ? "" : "s"}`;
+    const sync = {
+      done: "The portal's skincare records are updated, so purchases and Email Flows can see them now.",
+      later: "Another job was running, so the portal will pick these up at the next sync.",
+      failed: "The portal couldn't be updated just now. The daily sync will pick these up.",
+    }[res.synced] || "";
+    result.innerHTML = `
+      <div class="du-result">
+        ${res.rows
+          ? `<strong>Done. ${plural(res.rows, "product line")} added to INVOICE RECORD (rows ${num(res.startRow)}–${num(res.endRow)}).</strong>`
+          : "<strong>Nothing new to add. Every invoice in this file is already in INVOICE RECORD.</strong>"}
+        ${range ? `<div>Invoices from ${esc(range)}.</div>` : ""}
+        ${res.skippedInvoices ? `<div>${plural(res.skippedInvoices, "invoice")} already in the sheet, so skipped.</div>` : ""}
+        ${res.noProduct ? `<div class="muted">${plural(res.noProduct, "line")} had no product (services and the like), so left out.</div>` : ""}
+        ${res.badDates ? `<div class="du-warn">${plural(res.badDates, "line")} had a date that couldn't be read, so it was kept as text.</div>` : ""}
+        ${res.rows ? `<div>Patient IDs filled in for ${num(res.matched)} of ${num(res.rows)} lines.</div>` : ""}
+        ${res.ambiguous && res.ambiguous.names ? `<details><summary>${plural(res.ambiguous.names, "name")} matched more than one patient, so Patient ID was left blank</summary><ul>${list(res.ambiguous)}</ul></details>` : ""}
+        ${res.unmatched && res.unmatched.names ? `<details><summary>${plural(res.unmatched.names, "name")} weren't found in PTT LIST</summary><ul>${list(res.unmatched)}</ul></details>` : ""}
+        ${sync ? `<div class="muted">${esc(sync)}</div>` : ""}
+      </div>`;
+    showToast(res.rows ? "Invoices added to INVOICE RECORD" : "No new invoices to add");
+  }
+
+  /* ---------- Run ---------- */
+
   async function run() {
     if (!file || running) return;
     running = true;
+    wroteSome = false;
     btn.disabled = true;
     input.disabled = true;
     btn.textContent = "Working…";
     result.innerHTML = "";
     window.addEventListener("beforeunload", guard);
-    let wroteSome = false;
     try {
-      // 1. Read the file (only A–M kept)
-      setMsg("Reading the file…");
-      setBar(0);
-      const delim = await sniffDelim(file);
-      const all = await readCsv(file, delim, (p) => { setBar(p * 0.3); setMsg(`Reading the file… ${Math.round(p * 100)}%`); });
-
-      // The header: the first row (of 30) that has a date, a status and a service column, wherever they are
-      // Timely names some columns "Textbox14" etc., so the header is found by the ones with real names (G, H and J)
-      const isHeader = (r) => /^\s*start\s*time\s*$/i.test(r[6] || "") && /^\s*status\s*$/i.test(r[7] || "") && /service/i.test(r[9] || "");
-      const h = all.slice(0, 30).findIndex(isHeader);
-      const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-      const list = (r) => r.slice(0, 20).map((c, i) => `${letters[i]}: ${String(c || "").slice(0, 30) || "(blank)"}`).join(" · ");
-      const sepName = delim === "," ? "commas" : delim === ";" ? "semicolons" : "tabs";
-      if (h < 0) {
-        throw new Error(`Couldn't find the header row (separated by ${sepName}). The file starts with ${list(all[0] || [])}. ` +
-          "Nothing was changed. Copy this message for whoever looks after the portal.");
-      }
-      // Column A must hold dates: check the first few appointments rather than the header's name
-      const sample = all.slice(h + 1, h + 21).filter((r) => String(r[0] || "").trim());
-      const datey = sample.filter((r) => /\d{1,4}[\/.-]\d{1,2}[\/.-]\d{1,4}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}/.test(String(r[0]))).length;
-      if (sample.length && datey < sample.length / 2) {
-        throw new Error(`Column A doesn't look like appointment dates (it starts with "${String(sample[0][0]).slice(0, 30)}"). ` +
-          `The header row has ${list(all[h])}. Nothing was changed. Copy this message for whoever looks after the portal.`);
-      }
-      const rows = all.slice(h + 1).map((r) => { r = r.slice(0, KEEP); while (r.length < KEEP) r.push(""); return r; });
-      all.length = 0;
-      if (!rows.length) throw new Error("The file has no appointments in it.");
-
-      // 2. Start (clears A2:R)
-      setMsg(`Found ${num(rows.length)} appointments. Getting alltimeappts ready…`);
-      let start = await send({ action: "upload", op: "daysheetStart", total: rows.length, fileName: file.name });
-      if (start.needsForce) {
-        const ok = await confirmDialog({ title: "Replace alltimeappts?", message: start.problem, confirmLabel: "Replace it", tone: "warning" });
-        if (!ok) { setMsg("Nothing was changed."); setBar(null); return; }
-        start = await send({ action: "upload", op: "daysheetStart", total: rows.length, fileName: file.name, force: true });
-      }
-      if (start.problem) throw new Error(start.problem);
-      wroteSome = true;
-
-      // 3. The rows, in batches
-      const sum = { unmatched: {}, badDates: 0 };
-      for (let i = 0; i < rows.length; i += BATCH) {
-        const part = rows.slice(i, i + BATCH);
-        setMsg(`Writing ${num(Math.min(i + part.length, rows.length))} of ${num(rows.length)}… keep this page open.`);
-        const packed = await packJson(part);
-        const res = await send({ action: "upload", op: "daysheetChunk", token: start.token, offset: i, gzip: packed.gzip, data: packed.data });
-        if (res.problem) throw new Error(res.problem);
-        sum.badDates += Number(res.badDates || 0);
-        Object.entries(res.unmatched || {}).forEach(([n, c]) => { sum.unmatched[n] = (sum.unmatched[n] || 0) + Number(c || 0); });
-        setBar(0.3 + 0.7 * ((i + part.length) / rows.length));
-      }
-      sum.unmatchedNames = Object.keys(sum.unmatched).length;
-      sum.unmatchedRows = Object.values(sum.unmatched).reduce((a, b) => a + b, 0);
-
-      // 4. Finish
-      const fin = await send({ action: "upload", op: "daysheetFinish", token: start.token,
-        summary: { badDates: sum.badDates, unmatchedNames: sum.unmatchedNames, unmatchedRows: sum.unmatchedRows } });
-      if (fin.problem) throw new Error(fin.problem);
-      setMsg("");
-      setBar(null);
-      done(fin, sum);
-      clearFile();
+      if (k.key === "daysheet") await runDaySheet();
+      else if (k.key === "invoices") await runInvoices();
     } catch (err) {
-      console.error("Day sheet upload failed:", err);
+      console.error(`${k.key} upload failed:`, err);
       setBar(null);
       setMsg(errText(err) + (wroteSome ? " alltimeappts is only partly filled, so upload the file again." : ""), true);
     } finally {
@@ -317,7 +400,7 @@ export function mountDataUploader(main) {
     <div class="tb-head">
       <div>
         <h3 class="tm-h">Daily uploads</h3>
-        <p class="muted tm-sub">Upload the Timely exports here. Each file goes straight into the PCN spreadsheet and isn't kept.</p>
+        <p class="muted tm-sub">Upload the Timely exports here. Each file goes straight into the clinic spreadsheets and isn't kept.</p>
       </div>
     </div>
     <div class="du-grid">
@@ -327,5 +410,6 @@ export function mountDataUploader(main) {
         <p class="muted">Updates the PCN sheet (today, past, future, cancelled, overdue and pcn_results), then syncs it to the portal.</p>
       </section>
     </div>`;
-  KINDS.filter((k) => k.ready).forEach((k) => wire(main.querySelector(`[data-kind="${k.key}"]`), k));
+  KINDS.filter((k) => k.ready).forEach((k) => wire(card(main, k), k));
 }
+const card = (main, k) => main.querySelector(`[data-kind="${k.key}"]`);
