@@ -141,6 +141,107 @@ function lastLine(d, k) {
   return `Last uploaded ${when(d.at)}${d.by ? ` by ${d.by}` : ""} · ${what}${d.unmatchedNames ? ` · ${num(d.unmatchedNames)} patients not matched` : ""}`;
 }
 
+/* ---------- 4) Run PCN update ---------- */
+
+const PCN_STEPS = [
+  ["visits", "Today's, past and future visits"],
+  ["overdue", "Overdue list and cancelled appointments"],
+  ["results1", "Pre-consult: today, future visits, overdue, Skin Script, packages"],
+  ["results2", "Pre-consult: Wrinkle Relaxer, Filler, RestoraGlow, Laser, Firm"],
+  ["results3", "Pre-consult: all past visits, Other Injectables, Body, Hydra, Collagen"],
+  ["sync", "Send it to the portal"],
+];
+
+function pcnCardHtml(n) {
+  return `
+    <section class="tb-card du-card" data-kind="pcn">
+      <h4><span class="tb-num">${n}</span>Run PCN update</h4>
+      <p class="muted">Rebuilds pcn_appts_today, past_visits, future-visits, overduecategory, cancelled_appointments and pcn_results
+        from alltimeappts, then sends it to the portal. Upload today's Day Sheet and Customer Packages first.</p>
+      <ol class="du-steps">${PCN_STEPS.map(([k, label]) =>
+        `<li data-step="${k}"><span class="du-step-dot"></span><span>${esc(label)}</span><small class="muted" data-role="t"></small></li>`).join("")}</ol>
+      <div class="du-acts"><button type="button" class="ff-btn is-primary" data-act="pcn">Run PCN update</button></div>
+      <p class="du-msg" data-role="msg" aria-live="polite"></p>
+      <small class="muted" data-role="last"></small>
+    </section>`;
+}
+
+function wirePcn(card) {
+  const btn = card.querySelector('[data-act="pcn"]');
+  const msg = card.querySelector('[data-role="msg"]');
+  const lastEl = card.querySelector('[data-role="last"]');
+  const items = [...card.querySelectorAll("[data-step]")];
+  let running = false;
+  const setMsg = (t, bad = false) => { msg.textContent = t || ""; msg.classList.toggle("is-bad", bad); };
+  const guard = (e) => { e.preventDefault(); e.returnValue = ""; };
+  const todayKey = new Date().toLocaleDateString("en-CA", { timeZone: "Australia/Perth" });
+  const keyOf = (iso) => (iso ? new Date(iso).toLocaleDateString("en-CA", { timeZone: "Australia/Perth" }) : "");
+
+  const showLast = () => Promise.all([getDoc(doc(db, "data_uploads", "pcn")), getDoc(doc(db, "data_uploads", "daysheet"))])
+    .then(([p, ds]) => {
+      if (!card.isConnected) return;
+      const d = p.exists() ? p.data() : {};
+      const parts = [];
+      if (d.status === "running" && d.startedAt && Date.now() - Date.parse(d.startedAt) < 15 * 60000) {
+        parts.push(`Running now (started ${when(d.startedAt)}${d.startedBy ? ` by ${d.startedBy}` : ""}).`);
+      } else if (d.status === "failed") {
+        parts.push(`⚠ The last run stopped ${when(d.failedAt)}: ${d.error || "it failed"}.`);
+      } else if (d.at) {
+        parts.push(`Last run ${when(d.at)}${d.by ? ` by ${d.by}` : ""} · ${Math.max(1, Math.round((d.ms || 0) / 1000))} seconds.`);
+      } else {
+        parts.push("Not run from the portal yet.");
+      }
+      const dsAt = ds.exists() ? ds.data().at : "";
+      if (keyOf(dsAt) !== todayKey) parts.push("⚠ Today's Day Sheet hasn't been uploaded yet.");
+      lastEl.textContent = parts.join(" ");
+    })
+    .catch(() => { lastEl.textContent = ""; });
+
+  async function run() {
+    if (running) return;
+    running = true;
+    btn.disabled = true;
+    btn.textContent = "Running…";
+    items.forEach((li) => { li.className = ""; li.querySelector('[data-role="t"]').textContent = ""; });
+    setMsg("Keep this page open. It usually takes a few minutes.");
+    window.addEventListener("beforeunload", guard);
+    let token = "";
+    let cur = null;
+    try {
+      for (const [step] of PCN_STEPS) {
+        cur = card.querySelector(`[data-step="${step}"]`);
+        cur.classList.add("is-run");
+        const res = await callApi({ action: "upload", op: "pcnStep", step, token });
+        if (res.problem) throw new Error(res.problem);
+        token = res.token || token;
+        cur.classList.remove("is-run");
+        cur.classList.add("is-done");
+        const later = step === "sync" && res.info && res.info.later;
+        cur.querySelector('[data-role="t"]').textContent =
+          later ? "at the next sync" : `${Math.max(1, Math.round((res.ms || 0) / 1000))}s`;
+        if (res.done) {
+          setMsg(`Done in ${Math.max(1, Math.round((res.totalMs || 0) / 1000))} seconds.` +
+            (later ? " Another job was running, so the portal gets it at the next sync." : " The portal is up to date."));
+          showToast("PCN update finished");
+        }
+      }
+    } catch (err) {
+      console.error("PCN update failed:", err);
+      if (cur) { cur.classList.remove("is-run"); cur.classList.add("is-bad"); }
+      setMsg(errText(err), true);
+    } finally {
+      running = false;
+      btn.disabled = false;
+      btn.textContent = "Run PCN update";
+      window.removeEventListener("beforeunload", guard);
+      showLast();
+    }
+  }
+
+  btn.addEventListener("click", run);
+  showLast();
+}
+
 function cardHtml(k, i) {
   const head = `<h4><span class="tb-num">${i + 1}</span>${esc(k.title)}${k.ready ? "" : ' <small class="muted du-soon">Coming next</small>'}</h4>`;
   if (!k.ready) return `<section class="tb-card du-card is-soon">${head}<p class="muted">${esc(k.blurb)}</p></section>`;
@@ -452,11 +553,9 @@ export function mountDataUploader(main) {
     </div>
     <div class="du-grid">
       ${KINDS.map(cardHtml).join("")}
-      <section class="tb-card du-card is-soon">
-        <h4><span class="tb-num">4</span>Run PCN update <small class="muted du-soon">Coming next</small></h4>
-        <p class="muted">Updates the PCN sheet (today, past, future, cancelled, overdue and pcn_results), then syncs it to the portal.</p>
-      </section>
+      ${pcnCardHtml(KINDS.length + 1)}
     </div>`;
   KINDS.filter((k) => k.ready).forEach((k) => wire(card(main, k), k));
+  wirePcn(main.querySelector('[data-kind="pcn"]'));
 }
 const card = (main, k) => main.querySelector(`[data-kind="${k.key}"]`);

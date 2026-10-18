@@ -6564,3 +6564,14 @@ a.md-quiet:hover { border-color: var(--primary); }
 
 .du-bar { height: 8px; overflow: hidden; border-radius: 999px; background: #e2e8f0; }
 .du-bar span { display: block; width: 0; height: 100%; border-radius: 999px; background: var(--primary); transition: width .2s; }
+
+.du-steps { margin: 4px 0 12px; padding: 0; list-style: none; display: grid; gap: 6px; }
+.du-steps li { display: flex; align-items: center; gap: 8px; font-size: 14px; color: #64748b; }
+.du-steps li small { margin-left: auto; }
+.du-step-dot { width: 14px; height: 14px; flex: none; border: 2px solid #cbd5e1; border-radius: 50%; }
+.du-steps li.is-run, .du-steps li.is-done { color: inherit; }
+.du-steps li.is-run { font-weight: 600; }
+.du-steps li.is-run .du-step-dot { border-color: var(--primary); border-top-color: transparent; animation: du-spin .8s linear infinite; }
+.du-steps li.is-done .du-step-dot { background: var(--primary); border-color: var(--primary); }
+.du-steps li.is-bad .du-step-dot { background: #dc2626; border-color: #dc2626; }
+@keyframes du-spin { to { transform: rotate(360deg); } }

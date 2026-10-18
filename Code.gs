@@ -7874,6 +7874,7 @@ function handleUpload_(body) {
     if (op === 'invoices') return upInvoices_(body, session);
     if (op === 'invoicesSync') return upInvSync_();
     if (op === 'packages') return upPackages_(body, session);
+    if (op === 'pcnStep') return upPcnStep_(body, session);
   } catch (err) {
     console.error('Upload ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
     return { ok: true, problem: 'Something went wrong: ' + String(err && err.message ? err.message : err).slice(0, 300) };
@@ -8423,6 +8424,423 @@ function upPackages_(body, session) {
     return res;
   } finally {
     cache.remove('up_pkg_active');
+  }
+}
+
+/* ---------- 4) Run PCN update: the PCN spreadsheet's runPCN steps, one request each ---------- */
+// visits   → pcn_appts_today, past_visits, future-visits
+// overdue  → overduecategory (Patient ID in E), cancelled_appointments
+// results1 → pcn_results C, J, K, L, M    results2 → D–H    results3 → I, N–Q
+// sync     → pcn_results + appointments to the portal
+// pcn_results is never cleared first: each column is overwritten whole, so a failed step leaves the last values
+// (not blanks), and the portal is only updated once every step has worked.
+
+const PCN_STEPS_ = ['visits', 'overdue', 'results1', 'results2', 'results3', 'sync'];
+const PCN_STEP_NAME_ = {
+  visits: "Today's, past and future visits", overdue: 'Overdue list and cancelled appointments',
+  results1: 'pcn_results C, J, K, L and M', results2: 'pcn_results D to H', results3: 'pcn_results I and N to Q',
+  sync: 'Sending it to the portal',
+};
+const PCN_OVERDUE_MONTHS_ = {
+  'Wrinkle Relaxer': 4, 'Filler/Radiesse': 9, 'Firm/Ulthera/eST': 9, 'Laser/OPL/Peel': 6,
+  'RestoraGlow/RF/DermaGlow/Skin Needling': 6, 'Body Sculpting': 10, 'Other Injectables': 9,
+};
+
+function upPcnStep_(body, session) {
+  const step = String(body.step || '');
+  const i = PCN_STEPS_.indexOf(step);
+  if (i < 0) return { ok: false, error: 'BAD_REQUEST' };
+  const cache = CacheService.getScriptCache();
+  let token = String(body.token || '');
+  let st;
+  if (i === 0) {
+    const busyRaw = cache.get('pcn_run_active');
+    if (busyRaw) {
+      const b = JSON.parse(busyRaw);
+      if (Date.now() - Number(b.at || 0) < 8 * 60000) {
+        return { ok: true, problem: 'A PCN update' + (b.by ? ' started by ' + b.by : '') + ' is still running. Try again in a few minutes.' };
+      }
+    }
+    token = Utilities.getUuid().replace(/-/g, '');
+    st = { next: 0, started: Date.now(), times: {}, info: {} };
+    try {
+      fsPatch_(getConfig_(), 'data_uploads/pcn', {
+        status: 'running', startedAt: new Date().toISOString(), startedBy: String(session.name || ''), error: '',
+      });
+    } catch (e) { console.warn('PCN log not saved: ' + e); }
+  } else {
+    if (!/^[a-f0-9]{32}$/.test(token)) return { ok: false, error: 'BAD_REQUEST' };
+    const raw = cache.get('pcn_run_' + token);
+    if (!raw) return { ok: true, problem: 'This update ran out of time. Start it again.' };
+    st = JSON.parse(raw);
+    if (st.next !== i) return { ok: true, problem: 'The steps got out of order. Start the update again.' };
+  }
+  cache.put('pcn_run_active', JSON.stringify({ at: Date.now(), by: String(session.name || '') }), 1800);
+
+  const t0 = Date.now();
+  let info;
+  try {
+    const ctx = pcnCtx_();
+    if (step === 'visits') info = pcnStepVisits_(ctx);
+    else if (step === 'overdue') info = pcnStepOverdue_(ctx);
+    else if (step === 'results1') info = pcnStepResults1_(ctx);
+    else if (step === 'results2') info = pcnStepResults2_(ctx);
+    else if (step === 'results3') info = pcnStepResults3_(ctx);
+    else info = pcnStepSync_(ctx);
+  } catch (err) {
+    console.error('PCN step ' + step + ' failed: ' + (err && err.stack ? err.stack : err));
+    const msg = String(err && err.message ? err.message : err).slice(0, 300);
+    cache.remove('pcn_run_active');
+    cache.remove('pcn_run_' + token);
+    try {
+      fsPatch_(getConfig_(), 'data_uploads/pcn', { status: 'failed', failedStep: step, error: msg, failedAt: new Date().toISOString() });
+    } catch (e) { /* not essential */ }
+    return { ok: true, problem: PCN_STEP_NAME_[step] + ' failed: ' + msg +
+      (step === 'sync' ? ' The sheets are updated, and the daily sync will send them to the portal.'
+        : ' Nothing was sent to the portal. Run the update again.') };
+  }
+
+  const ms = Date.now() - t0;
+  st.times[step] = ms;
+  st.info[step] = info;
+  st.next = i + 1;
+  const done = st.next >= PCN_STEPS_.length;
+  if (done) {
+    cache.remove('pcn_run_active');
+    cache.remove('pcn_run_' + token);
+    try {
+      fsPatch_(getConfig_(), 'data_uploads/pcn', {
+        status: 'done', at: new Date().toISOString(), by: String(session.name || ''), byUid: String(session.uid || ''),
+        ms: Date.now() - st.started, times: st.times, info: st.info, error: '',
+      });
+    } catch (e) { console.warn('PCN log not saved: ' + e); }
+    console.log('PCN update done in ' + (Date.now() - st.started) + ' ms by ' + session.name);
+  } else {
+    cache.put('pcn_run_' + token, JSON.stringify(st), 3600);
+  }
+  return { ok: true, token: token, step: step, ms: ms, info: info, done: done, totalMs: Date.now() - st.started };
+}
+
+/* ---- Shared ---- */
+
+// Midnight today and tomorrow in the spreadsheet's own time zone (not the script's)
+function pcnCtx_() {
+  const ss = SpreadsheetApp.openById(APPTS_SHEET_ID);
+  const tz = ss.getSpreadsheetTimeZone();
+  const todayKey = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+  return {
+    ss: ss, tz: tz, todayKey: todayKey,
+    today: Utilities.parseDate(todayKey, tz, 'yyyy-MM-dd').getTime(),
+    tomorrow: Utilities.parseDate(flowAddDaysKey_(todayKey, 1), tz, 'yyyy-MM-dd').getTime(),
+  };
+}
+function pcnSheet_(ctx, name) {
+  const s = ctx.ss.getSheetByName(name);
+  if (!s) throw new Error('Sheet tab not found: ' + name);
+  return s;
+}
+function pcnReadAppts_(ctx) {
+  const sh = pcnSheet_(ctx, UPLOAD_TABS_.daysheet);
+  const last = sh.getLastRow();
+  return last < 2 ? [] : sh.getRange(2, 1, last - 1, 15).getValues(); // A:O
+}
+function pcnKey_(v) { return String(v == null ? '' : v).toLowerCase().trim(); }
+function pcnIsDate_(v) { return v instanceof Date && !isNaN(v); }
+function pcnFmt_(ctx, t) { return Utilities.formatDate(new Date(t), ctx.tz, 'd/M/yyyy'); }
+
+// 'exact': only "Cancelled" left out · 'dns': cancelled / did not show · 'full': also no show / DNA
+function pcnStatusOk_(raw, mode) {
+  if (mode === 'exact') return String(raw == null ? '' : raw).trim() !== 'Cancelled';
+  const s = String(raw || '').toLowerCase();
+  if (s.indexOf('cancelled') !== -1 || s.indexOf('did not show') !== -1) return false;
+  return mode !== 'full' || (s.indexOf('no show') === -1 && s.indexOf('dna') === -1);
+}
+
+// Clears A2:<cols> to the bottom of the tab, then writes the rows
+function pcnWrite_(sheet, cols, rows) {
+  const max = sheet.getMaxRows();
+  if (max >= 2) sheet.getRange(2, 1, max - 1, cols).clearContent();
+  if (!rows.length) return;
+  if (sheet.getMaxRows() < rows.length + 1) sheet.insertRowsAfter(sheet.getMaxRows(), rows.length + 1 - sheet.getMaxRows());
+  sheet.getRange(2, 1, rows.length, cols).setValues(rows);
+}
+
+// pcn_results column B down to the last patient (rows below are handled in results1)
+function pcnKeys_(ctx) {
+  const sheet = pcnSheet_(ctx, RESULTS_SHEET_NAME);
+  const last = sheet.getLastRow();
+  const all = last >= 2 ? sheet.getRange(2, 2, last - 1, 1).getValues().map(function (r) { return r[0]; }) : [];
+  let n = all.length;
+  while (n && pcnKey_(all[n - 1]) === '') n--;
+  return { sheet: sheet, last: last, keys: all.slice(0, n) };
+}
+function pcnPut_(sheet, col, vals) {
+  if (vals.length) sheet.getRange(2, col, vals.length, 1).setValues(vals.map(function (v) { return [v]; }));
+}
+
+// The history engine for D–I and N–Q. opt: { cat (null = every category except LED), mode, limit, dropEmpty }
+function pcnHistory_(ctx, appts, keys, opt) {
+  const want = opt.cat == null ? null : pcnKey_(opt.cat);
+  const lookup = {};
+  for (let r = 0; r < appts.length; r++) {
+    const row = appts[r];
+    if (!pcnIsDate_(row[0])) continue;
+    const t = row[0].getTime();
+    if (t >= ctx.today) continue;
+    const key = pcnKey_(row[14]);
+    if (!key || !pcnStatusOk_(row[7], opt.mode)) continue;
+    const cat = pcnKey_(row[13]);
+    if (want === null ? cat === 'led' : cat !== want) continue;
+    const byDay = lookup[key] || (lookup[key] = {});
+    (byDay[t] || (byDay[t] = [])).push(row);
+  }
+  return keys.map(function (k) {
+    const key = pcnKey_(k);
+    const byDay = key ? lookup[key] : null;
+    if (!byDay) return '';
+    return Object.keys(byDay).map(Number).sort(function (a, b) { return b - a; }).slice(0, opt.limit)
+      .map(function (t) {
+        const vals = byDay[t].filter(function (rw) { return rw[9] !== '' && rw[9] != null; })
+          .map(function (rw) { return rw[8] ? rw[9] + ' (' + rw[8] + ')' : String(rw[9]); });
+        if (opt.dropEmpty && !vals.length) return '';
+        return pcnFmt_(ctx, t) + ' - ' + vals.join(', ');
+      })
+      .filter(function (l) { return l !== ''; })
+      .join('\n');
+  });
+}
+
+/* ---- Step: visits (updateTodayVisits + getpttidcolk, updatePastVisits, updateFutureVisits) ---- */
+
+function pcnStepVisits_(ctx) {
+  const data = pcnReadAppts_(ctx);
+  const past = [];
+  const future = [];
+  const todays = [];
+  data.forEach(function (r) {
+    if (!pcnIsDate_(r[0])) return;
+    const t = r[0].getTime();
+    const status = String(r[7] == null ? '' : r[7]).trim();
+    // Today: A–J, then K = the Patient ID from column O. Only "Cancelled" left out (as before).
+    if (t >= ctx.today && t < ctx.tomorrow && status !== 'Cancelled') {
+      todays.push([r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[14]]);
+    }
+    if (status === 'Cancelled' || status === 'Did not show') return;
+    // Past / future: A–J, K = O (Patient ID), L = N (category)
+    (t < ctx.today ? past : future).push([r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[14], r[13]]);
+  });
+  past.sort(function (a, b) { return a[0] - b[0]; });
+  future.sort(function (a, b) { return a[0] - b[0]; });
+  todays.sort(function (a, b) { return toMinutes_(String(a[6] || '')) - toMinutes_(String(b[6] || '')); }); // by start time
+
+  pcnWrite_(pcnSheet_(ctx, APPTS_SHEET_NAME), 11, todays);
+  pcnWrite_(pcnSheet_(ctx, PAST_VISITS_SHEET_NAME), 12, past);
+  pcnWrite_(pcnSheet_(ctx, FUTURE_VISITS_SHEET_NAME), 12, future);
+  SpreadsheetApp.flush();
+  return { today: todays.length, past: past.length, future: future.length };
+}
+
+/* ---- Step: overdue (generateOverdueList + fillOverdueCategoryColumnE) and cancelledAppointmentsReport ---- */
+
+function pcnStepOverdue_(ctx) {
+  const data = pcnReadAppts_(ctx);
+
+  // Overdue: per patient (Patient ID, or the name when there isn't one) and category
+  const latest = {};
+  const booked = {};
+  const cancelled = [];
+  data.forEach(function (r) {
+    if (!pcnIsDate_(r[0])) return;
+    const t = r[0].getTime();
+    const s = String(r[7] || '').toLowerCase();
+
+    if ((s.indexOf('cancelled') !== -1 || s.indexOf('did not') !== -1) && t < ctx.tomorrow) {
+      cancelled.push([r[0], r[1], r[8], r[9], r[13], r[14]]); // A, B, I, J, N, O
+    }
+
+    const name = String(r[1] == null ? '' : r[1]).trim();
+    const cat = String(r[13] == null ? '' : r[13]).trim();
+    if (!name || !(cat in PCN_OVERDUE_MONTHS_)) return;
+    if (s.indexOf('cancelled') !== -1 || s.indexOf('did not show') !== -1) return; // a no-show isn't a visit
+    const id = String(r[14] == null ? '' : r[14]).trim();
+    const key = (id ? 'id:' + id : 'nm:' + name.toLowerCase()) + '|' + cat;
+    if (!latest[key] || t > latest[key].t) latest[key] = { t: t, d: r[0], name: name, id: id, cat: cat };
+    if (t >= ctx.today) booked[key] = true;
+  });
+
+  const tp = ctx.todayKey.split('-').map(Number);
+  const rows = [];
+  Object.keys(latest).forEach(function (k) {
+    if (booked[k]) return;
+    const x = latest[k];
+    const limit = PCN_OVERDUE_MONTHS_[x.cat];
+    const lastKey = Utilities.formatDate(x.d, ctx.tz, 'yyyy-MM-dd');
+    if (lastKey >= flowAddMonthsKey_(ctx.todayKey, -limit)) return;
+    const lp = lastKey.split('-').map(Number);
+    const over = (tp[0] - lp[0]) * 12 + (tp[1] - lp[1]) - limit;
+    let text;
+    if (over >= 12) {
+      const yrs = Math.round((over / 12) * 10) / 10;
+      text = yrs + ' year' + (yrs !== 1 ? 's' : '') + ' overdue';
+    } else {
+      text = over + ' month' + (over !== 1 ? 's' : '') + ' overdue';
+    }
+    rows.push([x.name, x.d, x.cat, Utilities.formatDate(x.d, ctx.tz, 'MMMM d, yyyy') + ' - ' + x.cat + ' (' + text + ')', x.id]);
+  });
+
+  let od = ctx.ss.getSheetByName('overduecategory');
+  if (!od) od = ctx.ss.insertSheet('overduecategory');
+  const max = od.getMaxRows();
+  od.getRange(1, 1, max, 5).clearContent(); // values only: the tab's formatting stays
+  const out = [['Name', 'Last Visit', 'Category', 'Summary', 'Patient ID']].concat(rows);
+  if (od.getMaxRows() < out.length) od.insertRowsAfter(od.getMaxRows(), out.length - od.getMaxRows());
+  od.getRange(1, 1, out.length, 5).setValues(out);
+  if (rows.length) od.getRange(2, 2, rows.length, 1).setNumberFormat('mmmm d, yyyy');
+
+  cancelled.sort(function (a, b) { return b[0] - a[0]; });
+  pcnWrite_(pcnSheet_(ctx, 'cancelled_appointments'), 6, cancelled);
+  SpreadsheetApp.flush();
+  return { overdue: rows.length, cancelled: cancelled.length };
+}
+
+/* ---- Step: results1 — pcn_results C, J, K, L, M ---- */
+
+function pcnStepResults1_(ctx) {
+  const k = pcnKeys_(ctx);
+  const n = k.keys.length;
+  if (k.last > n + 1) k.sheet.getRange(n + 2, 3, k.last - n - 1, 15).clearContent(); // C:Q below the patient list
+  if (!n) return { patients: 0 };
+
+  // C: today's appointments (from pcn_appts_today G:K)
+  const todaySh = pcnSheet_(ctx, APPTS_SHEET_NAME);
+  const tl = todaySh.getLastRow();
+  const todays = {};
+  if (tl >= 2) {
+    todaySh.getRange(2, 7, tl - 1, 5).getValues().forEach(function (r) {
+      const key = pcnKey_(r[4]);
+      if (!key) return;
+      const g = r[0], i = r[2], j = r[3];
+      const s = g && j && i ? g + ' - ' + j + ' (' + i + ')' : g && j ? g + ' - ' + j : g ? String(g) : j ? String(j) : '';
+      if (s) (todays[key] = todays[key] || []).push(s);
+    });
+  }
+  pcnPut_(k.sheet, 3, k.keys.map(function (v) {
+    const l = todays[pcnKey_(v)];
+    return l && l.length ? l.join('\n') : 'No Scheduled Appointments today';
+  }));
+
+  // J: future visits from tomorrow (from future-visits), soonest 6
+  const fv = pcnSheet_(ctx, FUTURE_VISITS_SHEET_NAME);
+  const fl = fv.getLastRow();
+  const fut = {};
+  if (fl >= 2) {
+    fv.getRange(2, 1, fl - 1, 11).getValues().forEach(function (r) {
+      if (!pcnIsDate_(r[0])) return;
+      const t = r[0].getTime();
+      const key = pcnKey_(r[10]);
+      if (t < ctx.tomorrow || !key || !pcnStatusOk_(r[7], 'full')) return;
+      const byDay = fut[key] || (fut[key] = {});
+      (byDay[t] || (byDay[t] = [])).push(r);
+    });
+  }
+  pcnPut_(k.sheet, 10, k.keys.map(function (v) {
+    const byDay = fut[pcnKey_(v)];
+    if (!pcnKey_(v) || !byDay) return '';
+    return Object.keys(byDay).map(Number).sort(function (a, b) { return a - b; }).slice(0, 6).map(function (t) {
+      return pcnFmt_(ctx, t) + ' - ' + byDay[t]
+        .filter(function (r) { return r[9] !== '' && r[9] != null; })
+        .map(function (r) { return r[9] + (r[8] !== '' && r[8] != null ? ' (' + r[8] + ')' : ''); })
+        .join(', ');
+    }).join('\n');
+  }));
+
+  // K: overdue summaries (overduecategory D, matched on E)
+  const od = pcnSheet_(ctx, 'overduecategory');
+  const ol = od.getLastRow();
+  const over = {};
+  if (ol >= 2) {
+    od.getRange(2, 4, ol - 1, 2).getValues().forEach(function (r) {
+      const key = pcnKey_(r[1]);
+      if (key && r[0] !== '') (over[key] = over[key] || []).push(r[0]);
+    });
+  }
+  pcnPut_(k.sheet, 11, k.keys.map(function (v) { const l = over[pcnKey_(v)]; return l ? l.join('\n') : ''; }));
+
+  // L: Skin Script date (skin_script B, matched on D, first one found)
+  const sk = pcnSheet_(ctx, 'skin_script');
+  const sl = sk.getLastRow();
+  const ssp = {};
+  if (sl >= 1) {
+    sk.getRange(1, 2, sl, 3).getValues().forEach(function (r) {
+      const key = pcnKey_(r[2]);
+      if (key && r[0] !== '' && !(key in ssp)) ssp[key] = r[0];
+    });
+  }
+  pcnPut_(k.sheet, 12, k.keys.map(function (v) { const key = pcnKey_(v); return key && key in ssp ? ssp[key] : ''; }));
+
+  // M: packages (customer_packages G and H, matched on M)
+  const pk = pcnSheet_(ctx, UP_PKG_TAB_);
+  const pl = pk.getLastRow();
+  const pkgs = {};
+  if (pl >= 2) {
+    pk.getRange(2, 7, pl - 1, 7).getValues().forEach(function (r) {
+      const key = pcnKey_(r[6]);
+      if (key && r[0] !== '' && r[0] != null) (pkgs[key] = pkgs[key] || []).push(r[0] + ' - Remaining (' + r[1] + ')');
+    });
+  }
+  pcnPut_(k.sheet, 13, k.keys.map(function (v) { const l = pkgs[pcnKey_(v)]; return l ? l.join('\n') : ''; }));
+
+  SpreadsheetApp.flush();
+  return { patients: n };
+}
+
+/* ---- Step: results2 — D Wrinkle Relaxer, E Filler, F RestoraGlow, G Laser, H Firm ---- */
+
+function pcnStepResults2_(ctx) {
+  const k = pcnKeys_(ctx);
+  if (!k.keys.length) return { patients: 0 };
+  const appts = pcnReadAppts_(ctx);
+  const head = k.sheet.getRange(1, 4, 1, 14).getValues()[0]; // D1:Q1 hold the category names
+  [[4, 'exact'], [5, 'exact'], [6, 'dns'], [7, 'dns'], [8, 'dns']].forEach(function (c) {
+    pcnPut_(k.sheet, c[0], pcnHistory_(ctx, appts, k.keys, { cat: head[c[0] - 4], mode: c[1], limit: 10 }));
+  });
+  SpreadsheetApp.flush();
+  return { patients: k.keys.length };
+}
+
+/* ---- Step: results3 — I all past visits, N Other Injectables, O Body, P Hydra, Q Collagen ---- */
+
+function pcnStepResults3_(ctx) {
+  const k = pcnKeys_(ctx);
+  if (!k.keys.length) return { patients: 0 };
+  const appts = pcnReadAppts_(ctx);
+  const head = k.sheet.getRange(1, 4, 1, 14).getValues()[0];
+  pcnPut_(k.sheet, 9, pcnHistory_(ctx, appts, k.keys, { cat: null, mode: 'dns', limit: 20, dropEmpty: true }));
+  [[14, 'full'], [15, 'dns'], [16, 'dns'], [17, 'dns']].forEach(function (c) {
+    pcnPut_(k.sheet, c[0], pcnHistory_(ctx, appts, k.keys, { cat: head[c[0] - 4], mode: c[1], limit: 10 }));
+  });
+  SpreadsheetApp.flush();
+  return { patients: k.keys.length };
+}
+
+/* ---- Step: sync — the main part of syncSheetsToFirestore, straight away ---- */
+
+function pcnStepSync_(ctx) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) return { later: true }; // a scheduled job is running; the next sync sends it
+  try {
+    const cfg = getConfig_();
+    const patients = syncResults_(ctx.ss, cfg);
+    const days = syncAppointments_(ctx.ss, cfg);
+    let updated = '';
+    try { updated = DriveApp.getFileById(APPTS_SHEET_ID).getLastUpdated().toISOString(); } catch (e) { /* not essential */ }
+    commitWrites_(cfg, [updateWrite_(cfg, 'sync_meta/pcn', {
+      sheetUpdatedAt: updated, syncedAt: new Date().toISOString(), patients: patients, days: days,
+    })]);
+    if (updated) PropertiesService.getScriptProperties().setProperty('LAST_SYNCED_SHEET_UPDATE', updated);
+    return { patients: patients, days: days };
+  } finally {
+    lock.releaseLock();
   }
 }
 
