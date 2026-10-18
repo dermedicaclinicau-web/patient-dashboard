@@ -28,14 +28,27 @@ const KINDS = [
 
 /* ---------- Reading the CSV in pieces (quotes, commas and new lines inside quotes) ---------- */
 
-async function readCsv(file, onProgress) {
+// Which character separates the columns (comma, semicolon or tab), from the first lines
+async function sniffDelim(file) {
+  const head = (await file.slice(0, 65536).text()).replace(/^\uFEFF/, "");
+  const lines = head.split(/\r?\n/).filter((l) => l.trim()).slice(0, 15);
+  const most = (ch) => Math.max(0, ...lines.map((l) => l.split(ch).length - 1));
+  const best = [",", ";", "\t"].map((ch) => [ch, most(ch)]).sort((a, b) => b[1] - a[1])[0];
+  return best[1] ? best[0] : ",";
+}
+
+// Reads the CSV in pieces (quotes, separators and new lines inside quotes).
+// The first 30 rows keep every column (to find the header); after that only A–M are kept.
+async function readCsv(file, delim, onProgress) {
   const rows = [];
   let field = "", row = [], col = 0, fresh = true, inQ = false, afterQ = false, seen = 0, first = true, pieces = 0;
-  const endField = () => { if (col < KEEP) row.push(field); col++; field = ""; fresh = true; };
+  let keep = true;
+  const setKeep = () => { keep = col < KEEP || rows.length < 30; };
+  const endField = () => { if (keep) row.push(field); col++; field = ""; fresh = true; setKeep(); };
   const endRow = () => {
     endField();
     if (row.some((x) => x !== "")) rows.push(row);
-    row = []; col = 0;
+    row = []; col = 0; setKeep();
   };
   const eat = (text) => {
     if (first) { first = false; if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1); }
@@ -43,20 +56,20 @@ async function readCsv(file, onProgress) {
       const c = text[i];
       if (afterQ) {                                  // just saw a quote inside quotes
         afterQ = false;
-        if (c === '"') { if (col < KEEP) field += '"'; continue; } // "" = a quote mark
+        if (c === '"') { if (keep) field += '"'; continue; } // "" = a quote mark
         inQ = false;                                 // otherwise the quoted part has ended
       }
       if (inQ) {
         if (c === '"') afterQ = true;
-        else if (col < KEEP) field += c;
+        else if (keep) field += c;
         continue;
       }
       if (c === '"' && fresh) { inQ = true; fresh = false; continue; }
-      if (c === ",") { endField(); continue; }
+      if (c === delim) { endField(); continue; }
       if (c === "\n") { endRow(); continue; }
       if (c === "\r") continue;
       fresh = false;
-      if (col < KEEP) field += c;
+      if (keep) field += c;
     }
     seen += text.length;
     if (onProgress) onProgress(Math.min(1, seen / Math.max(1, file.size)));
@@ -214,10 +227,25 @@ function wire(card, k) {
       // 1. Read the file (only A–M kept)
       setMsg("Reading the file…");
       setBar(0);
-      const all = await readCsv(file, (p) => { setBar(p * 0.3); setMsg(`Reading the file… ${Math.round(p * 100)}%`); });
-      const h = all.slice(0, 15).findIndex((r) => /date/i.test(r[0] || "") && /status/i.test(r[7] || "") && /service/i.test(r[9] || ""));
-      if (h < 0) throw new Error("Couldn't find the header row (Appointment Date … Status in H … ServiceName in J). Check it's the Day Sheet export.");
-      const rows = all.slice(h + 1).map((r) => { while (r.length < KEEP) r.push(""); return r; });
+      const delim = await sniffDelim(file);
+      const all = await readCsv(file, delim, (p) => { setBar(p * 0.3); setMsg(`Reading the file… ${Math.round(p * 100)}%`); });
+
+      // The header: the first row (of 30) that has a date, a status and a service column, wherever they are
+      const at = (r, re) => r.findIndex((c) => re.test(String(c || "")));
+      const h = all.slice(0, 30).findIndex((r) => at(r, /date/i) >= 0 && at(r, /status/i) >= 0 && at(r, /service/i) >= 0);
+      const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+      const list = (r) => r.slice(0, 20).map((c, i) => `${letters[i]}: ${String(c || "").slice(0, 30) || "(blank)"}`).join(" · ");
+      const sepName = delim === "," ? "commas" : delim === ";" ? "semicolons" : "tabs";
+      if (h < 0) {
+        throw new Error(`Couldn't find the header row (separated by ${sepName}). The file starts with ${list(all[0] || [])}. ` +
+          "Nothing was changed. Copy this message for whoever looks after the portal.");
+      }
+      const hr = all[h];
+      if (!/date/i.test(hr[0] || "") || !/status/i.test(hr[7] || "") || !/service/i.test(hr[9] || "")) {
+        throw new Error(`The columns are in a different order from alltimeappts (Date in A, Status in H, ServiceName in J). ` +
+          `This file has ${list(hr)}. Nothing was changed. Copy this message for whoever looks after the portal.`);
+      }
+      const rows = all.slice(h + 1).map((r) => { r = r.slice(0, KEEP); while (r.length < KEEP) r.push(""); return r; });
       all.length = 0;
       if (!rows.length) throw new Error("The file has no appointments in it.");
 
