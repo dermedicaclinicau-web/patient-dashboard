@@ -1,5 +1,6 @@
 // Task Manager → Daily uploads: Timely CSVs go straight into the PCN spreadsheet.
-// The file is read in the browser, sent compressed to Apps Script and written to the sheet. It isn't saved anywhere.
+// The file is read here in pieces, only columns A–M are kept, and the rows go to Apps Script in batches.
+// Nothing is saved anywhere.
 import { db } from "./firebase-config.js";
 import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
@@ -8,12 +9,15 @@ import { showToast } from "./utils.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const MAX_BYTES = 80 * 1024 * 1024;
+const MAX_BYTES = 1024 * 1024 * 1024; // 1 GB
+const KEEP = 13;                      // columns A–M (the CSV's column N is dropped)
+const BATCH = 8000;                   // rows per request
 const num = (n) => Number(n || 0).toLocaleString("en-AU");
 const when = (iso) => {
   const d = new Date(iso);
   return isNaN(d) ? "" : d.toLocaleString("en-AU", { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
 };
+const pause = () => new Promise((r) => setTimeout(r, 0));
 
 const KINDS = [
   { key: "daysheet", title: "Day Sheet (all time)", ready: true,
@@ -22,17 +26,69 @@ const KINDS = [
   { key: "packages", title: "Customer Packages", ready: false, blurb: "Patients' active packages from Timely." },
 ];
 
-// The file, compressed (gzip) where the browser can, as base64
-function toB64(buf) {
-  const bytes = new Uint8Array(buf);
+/* ---------- Reading the CSV in pieces (quotes, commas and new lines inside quotes) ---------- */
+
+async function readCsv(file, onProgress) {
+  const rows = [];
+  let field = "", row = [], col = 0, fresh = true, inQ = false, afterQ = false, seen = 0, first = true, pieces = 0;
+  const endField = () => { if (col < KEEP) row.push(field); col++; field = ""; fresh = true; };
+  const endRow = () => {
+    endField();
+    if (row.some((x) => x !== "")) rows.push(row);
+    row = []; col = 0;
+  };
+  const eat = (text) => {
+    if (first) { first = false; if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1); }
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (afterQ) {                                  // just saw a quote inside quotes
+        afterQ = false;
+        if (c === '"') { if (col < KEEP) field += '"'; continue; } // "" = a quote mark
+        inQ = false;                                 // otherwise the quoted part has ended
+      }
+      if (inQ) {
+        if (c === '"') afterQ = true;
+        else if (col < KEEP) field += c;
+        continue;
+      }
+      if (c === '"' && fresh) { inQ = true; fresh = false; continue; }
+      if (c === ",") { endField(); continue; }
+      if (c === "\n") { endRow(); continue; }
+      if (c === "\r") continue;
+      fresh = false;
+      if (col < KEEP) field += c;
+    }
+    seen += text.length;
+    if (onProgress) onProgress(Math.min(1, seen / Math.max(1, file.size)));
+  };
+
+  if (file.stream && typeof TextDecoderStream !== "undefined") {
+    const reader = file.stream().pipeThrough(new TextDecoderStream()).getReader();
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      eat(value);
+      if (++pieces % 20 === 0) await pause(); // lets the progress bar move
+    }
+  } else {
+    eat(await file.text());
+  }
+  if (field !== "" || row.length || !fresh) endRow();
+  return rows;
+}
+
+/* ---------- Sending a batch (compressed where the browser can) ---------- */
+
+function toB64(bytes) {
   let s = "";
   for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
   return btoa(s);
 }
-async function pack(file) {
-  if (typeof CompressionStream === "undefined") return { gzip: false, data: toB64(await file.arrayBuffer()) };
-  const buf = await new Response(file.stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer();
-  return { gzip: true, data: toB64(buf) };
+async function packJson(value) {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  if (typeof CompressionStream === "undefined") return { gzip: false, data: toB64(bytes) };
+  const buf = await new Response(new Blob([bytes]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer();
+  return { gzip: true, data: toB64(new Uint8Array(buf)) };
 }
 
 function errText(err) {
@@ -48,8 +104,13 @@ function errText(err) {
 }
 
 function lastLine(d) {
-  return `Last uploaded ${when(d.at)}${d.by ? ` by ${d.by}` : ""} · ${num(d.rows)} rows${
-    d.unmatchedNames ? ` · ${num(d.unmatchedNames)} patients not matched` : ""}`;
+  if (d.status === "running" && d.startedAt && (!d.at || d.startedAt > d.at)) {
+    return Date.now() - Date.parse(d.startedAt) > 15 * 60000
+      ? `⚠ The last upload (started ${when(d.startedAt)}${d.startedBy ? ` by ${d.startedBy}` : ""}) didn't finish, so alltimeappts may be incomplete. Upload the file again.`
+      : `An upload started ${when(d.startedAt)}${d.startedBy ? ` by ${d.startedBy}` : ""} is still running.`;
+  }
+  return d.at ? `Last uploaded ${when(d.at)}${d.by ? ` by ${d.by}` : ""} · ${num(d.rows)} rows${
+    d.unmatchedNames ? ` · ${num(d.unmatchedNames)} patients not matched` : ""}` : "Not uploaded from the portal yet.";
 }
 
 function cardHtml(k, i) {
@@ -62,9 +123,10 @@ function cardHtml(k, i) {
       <label class="du-drop">
         <input type="file" accept=".csv,text/csv" data-file hidden />
         <strong data-role="fname">Choose the CSV, or drop it here</strong>
-        <small>The file is read and written to the sheet. It isn't saved anywhere.</small>
+        <small>The file is read here and written to the sheet. It isn't saved anywhere.</small>
       </label>
       <div class="du-acts"><button type="button" class="ff-btn is-primary" data-act="run" disabled>Upload and run</button></div>
+      <div class="du-bar" data-role="bar" hidden><span></span></div>
       <p class="du-msg" data-role="msg" aria-live="polite"></p>
       <div data-role="result"></div>
       <small class="muted" data-role="last"></small>
@@ -76,18 +138,20 @@ function wire(card, k) {
   const drop = card.querySelector(".du-drop");
   const fname = card.querySelector('[data-role="fname"]');
   const btn = card.querySelector('[data-act="run"]');
+  const bar = card.querySelector('[data-role="bar"]');
   const msg = card.querySelector('[data-role="msg"]');
   const result = card.querySelector('[data-role="result"]');
   const lastEl = card.querySelector('[data-role="last"]');
-  let file = null, packed = null, running = false;
+  let file = null, running = false;
 
   const setMsg = (t, bad = false) => { msg.textContent = t || ""; msg.classList.toggle("is-bad", bad); };
+  const setBar = (p) => { bar.hidden = p === null; if (p !== null) bar.firstElementChild.style.width = `${Math.round(p * 100)}%`; };
   const guard = (e) => { e.preventDefault(); e.returnValue = ""; };
   const showLast = () => getDoc(doc(db, "data_uploads", k.key))
     .then((s) => { if (card.isConnected) lastEl.textContent = s.exists() ? lastLine(s.data()) : "Not uploaded from the portal yet."; })
     .catch(() => { lastEl.textContent = ""; });
   const clearFile = () => {
-    file = null; packed = null; input.value = "";
+    file = null; input.value = "";
     fname.textContent = "Choose the CSV, or drop it here";
     drop.classList.remove("has-file");
     btn.disabled = true;
@@ -100,66 +164,108 @@ function wire(card, k) {
     setMsg("");
     if (!f) return;
     if (!/\.csv$/i.test(f.name)) { setMsg("Choose the CSV file Timely exported (its name ends in .csv).", true); return; }
-    if (f.size > MAX_BYTES) { setMsg("That file is too big to upload in one go.", true); return; }
+    if (f.size > MAX_BYTES) { setMsg("That file is over 1 GB. Check it's the Day Sheet export.", true); return; }
     const head = (await f.slice(0, 6000).text()).toLowerCase();
     if (!/date/.test(head) || !/status/.test(head) || !/service/.test(head)) {
       setMsg("This doesn't look like the Timely Day Sheet. Check you exported the right report.", true);
       return;
     }
     file = f;
-    fname.textContent = `${f.name} · ${(f.size / 1048576).toFixed(1)} MB`;
+    fname.textContent = `${f.name} · ${(f.size / 1048576).toFixed(0)} MB`;
     drop.classList.add("has-file");
     btn.disabled = false;
   }
 
-  function done(res) {
-    const u = res.unmatched || {};
+  // One request, tried twice if the connection drops
+  async function send(payload) {
+    try { return await callApi(payload); }
+    catch (err) {
+      if (err && err.code) throw err;
+      await new Promise((r) => setTimeout(r, 2000));
+      return callApi(payload);
+    }
+  }
+
+  function done(res, sum) {
+    const sample = Object.keys(sum.unmatched).sort((a, b) => sum.unmatched[b] - sum.unmatched[a]).slice(0, 20);
     result.innerHTML = `
       <div class="du-result">
         <strong>Done. ${num(res.rows)} appointments are in alltimeappts.</strong>
         <div>Took ${Math.max(1, Math.round((res.ms || 0) / 1000))} seconds${res.before ? ` · it had ${num(res.before)} rows before` : ""}.</div>
-        ${res.badDates ? `<div class="du-warn">${num(res.badDates)} rows had a date that couldn't be read, so it was kept as text.</div>` : ""}
-        ${u.names ? `<details><summary>${num(u.names)} patients weren't found in patientlist (${num(u.rows)} rows)</summary>
-          <ul>${(u.sample || []).map((x) => `<li>${esc(x.name)} <small class="muted">(${num(x.rows)})</small></li>`).join("")}</ul>
-          ${u.names > (u.sample || []).length ? '<small class="muted">Showing the ones with the most appointments.</small>' : ""}</details>` : ""}
+        ${sum.badDates ? `<div class="du-warn">${num(sum.badDates)} rows had a date that couldn't be read, so it was kept as text.</div>` : ""}
+        ${sum.unmatchedNames ? `<details><summary>${num(sum.unmatchedNames)} patients weren't found in patientlist (${num(sum.unmatchedRows)} rows)</summary>
+          <ul>${sample.map((n) => `<li>${esc(n)} <small class="muted">(${num(sum.unmatched[n])})</small></li>`).join("")}</ul>
+          ${sum.unmatchedNames > sample.length ? '<small class="muted">Showing the ones with the most appointments.</small>' : ""}</details>` : ""}
         <div class="muted">Categories (N) and Patient IDs (O) are filled in, so you don't need to run runPrerequisite. Run the rest of your PCN scripts as usual.</div>
       </div>`;
     showToast("Day Sheet uploaded to alltimeappts");
   }
 
-  async function run(force) {
+  async function run() {
     if (!file || running) return;
     running = true;
-    let again = false;
     btn.disabled = true;
     input.disabled = true;
     btn.textContent = "Working…";
+    result.innerHTML = "";
     window.addEventListener("beforeunload", guard);
+    let wroteSome = false;
     try {
-      if (!packed) { setMsg("Reading the file…"); packed = await pack(file); }
-      setMsg("Uploading and updating alltimeappts. This can take a couple of minutes, so keep this page open.");
-      const res = await callApi({ action: "upload", op: "daysheet", fileName: file.name, gzip: packed.gzip, data: packed.data, force: force === true });
-      if (res.problem) {
-        setMsg(res.problem, true);
-        if (res.needsForce) {
-          again = await confirmDialog({ title: "Replace alltimeappts?", message: res.problem, confirmLabel: "Replace it", tone: "warning" });
-        }
-        return;
+      // 1. Read the file (only A–M kept)
+      setMsg("Reading the file…");
+      setBar(0);
+      const all = await readCsv(file, (p) => { setBar(p * 0.3); setMsg(`Reading the file… ${Math.round(p * 100)}%`); });
+      const h = all.slice(0, 15).findIndex((r) => /date/i.test(r[0] || "") && /status/i.test(r[7] || "") && /service/i.test(r[9] || ""));
+      if (h < 0) throw new Error("Couldn't find the header row (Appointment Date … Status in H … ServiceName in J). Check it's the Day Sheet export.");
+      const rows = all.slice(h + 1).map((r) => { while (r.length < KEEP) r.push(""); return r; });
+      all.length = 0;
+      if (!rows.length) throw new Error("The file has no appointments in it.");
+
+      // 2. Start (clears A2:R)
+      setMsg(`Found ${num(rows.length)} appointments. Getting alltimeappts ready…`);
+      let start = await send({ action: "upload", op: "daysheetStart", total: rows.length, fileName: file.name });
+      if (start.needsForce) {
+        const ok = await confirmDialog({ title: "Replace alltimeappts?", message: start.problem, confirmLabel: "Replace it", tone: "warning" });
+        if (!ok) { setMsg("Nothing was changed."); setBar(null); return; }
+        start = await send({ action: "upload", op: "daysheetStart", total: rows.length, fileName: file.name, force: true });
       }
+      if (start.problem) throw new Error(start.problem);
+      wroteSome = true;
+
+      // 3. The rows, in batches
+      const sum = { unmatched: {}, badDates: 0 };
+      for (let i = 0; i < rows.length; i += BATCH) {
+        const part = rows.slice(i, i + BATCH);
+        setMsg(`Writing ${num(Math.min(i + part.length, rows.length))} of ${num(rows.length)}… keep this page open.`);
+        const packed = await packJson(part);
+        const res = await send({ action: "upload", op: "daysheetChunk", token: start.token, offset: i, gzip: packed.gzip, data: packed.data });
+        if (res.problem) throw new Error(res.problem);
+        sum.badDates += Number(res.badDates || 0);
+        Object.entries(res.unmatched || {}).forEach(([n, c]) => { sum.unmatched[n] = (sum.unmatched[n] || 0) + Number(c || 0); });
+        setBar(0.3 + 0.7 * ((i + part.length) / rows.length));
+      }
+      sum.unmatchedNames = Object.keys(sum.unmatched).length;
+      sum.unmatchedRows = Object.values(sum.unmatched).reduce((a, b) => a + b, 0);
+
+      // 4. Finish
+      const fin = await send({ action: "upload", op: "daysheetFinish", token: start.token,
+        summary: { badDates: sum.badDates, unmatchedNames: sum.unmatchedNames, unmatchedRows: sum.unmatchedRows } });
+      if (fin.problem) throw new Error(fin.problem);
       setMsg("");
-      done(res);
+      setBar(null);
+      done(fin, sum);
       clearFile();
-      showLast();
     } catch (err) {
       console.error("Day sheet upload failed:", err);
-      setMsg(errText(err), true);
+      setBar(null);
+      setMsg(errText(err) + (wroteSome ? " alltimeappts is only partly filled, so upload the file again." : ""), true);
     } finally {
       running = false;
       input.disabled = false;
       btn.textContent = "Upload and run";
       btn.disabled = !file;
       window.removeEventListener("beforeunload", guard);
-      if (again) run(true);
+      showLast();
     }
   }
 
@@ -171,7 +277,7 @@ function wire(card, k) {
     drop.classList.remove("is-over");
     if (e.dataTransfer && e.dataTransfer.files[0]) choose(e.dataTransfer.files[0]);
   });
-  btn.addEventListener("click", () => run(false));
+  btn.addEventListener("click", run);
   showLast();
 }
 

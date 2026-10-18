@@ -6561,3 +6561,6 @@ a.md-quiet:hover { border-color: var(--primary); }
 .du-result details summary { cursor: pointer; font-weight: 600; color: #92400e; }
 .du-result ul { margin: .4rem 0 0; padding-left: 1.1rem; }
 .du-warn { color: #92400e; font-weight: 600; }
+
+.du-bar { height: 8px; overflow: hidden; border-radius: 999px; background: #e2e8f0; }
+.du-bar span { display: block; width: 0; height: 100%; border-radius: 999px; background: var(--primary); transition: width .2s; }

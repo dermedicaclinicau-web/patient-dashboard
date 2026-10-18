@@ -7868,12 +7868,157 @@ function handleUpload_(body) {
   if (!can_(session, 'data.upload')) return { ok: false, error: 'FORBIDDEN' };
   const op = String(body.op || '');
   try {
-    if (op === 'daysheet') return uploadDaySheet_(body, session);
+    if (op === 'daysheetStart') return upDsStart_(body, session);
+    if (op === 'daysheetChunk') return upDsChunk_(body, session);
+    if (op === 'daysheetFinish') return upDsFinish_(body, session);
   } catch (err) {
     console.error('Upload ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
     return { ok: true, problem: 'Something went wrong: ' + String(err && err.message ? err.message : err).slice(0, 300) };
   }
   return { ok: false, error: 'BAD_REQUEST' };
+}
+
+/* ---------- 1) Day Sheet → alltimeappts, in batches (start, then batches, then finish) ---------- */
+
+const UP_DS_MAX_ROWS_ = 500000;   // 18 columns × 500k rows stays under Google Sheets' 10 million cells
+const UP_DS_CACHE_ = 'up_ds_';
+
+function upDsSheet_() {
+  const ss = SpreadsheetApp.openById(APPTS_SHEET_ID);
+  const sheet = ss.getSheetByName(UPLOAD_TABS_.daysheet);
+  if (!sheet) throw new Error('Sheet tab not found: ' + UPLOAD_TABS_.daysheet);
+  return { ss: ss, sheet: sheet };
+}
+
+// One CSV row (A–M) → the 15 columns of alltimeappts, with the same rules as runPrerequisite
+function upDsRow_(r, tz, lookup, stats) {
+  const cell = function (k) { return String(r[k] == null ? '' : r[k]); };
+  const rawDate = cell(0).trim();
+  const key = upDateKey_(rawDate);
+  if (rawDate && !key) stats.badDates++;
+  const name = pcnCleanPatientName_(cell(1));
+  const norm = pcnNormalizeName_(name);
+  const pid = norm ? (lookup[norm] || '') : '';
+  if (name && !pid) stats.unmatched[name] = (stats.unmatched[name] || 0) + 1;
+  return [
+    key ? (stats.dates[key] || (stats.dates[key] = Utilities.parseDate(key, tz, 'yyyy-MM-dd'))) : rawDate, // A (a real date)
+    name,                                                       // B Patient Name
+    upMoney_(cell(2)),                                          // C Outstanding Balance
+    cell(3), cell(4), cell(5), cell(6), cell(7),                // D Contact # · E Resources · F Symbol2 · G StartTime · H Status
+    pcnCleanStaff_(cell(8)),                                    // I StaffName
+    cell(9), cell(10), cell(11),                                // J ServiceName · K ResourceName · L LocationName
+    upMoney_(cell(12)),                                         // M Price
+    pcnCategory_(rawDate, cell(9)),                             // N PCN Categories
+    pid,                                                        // O Patient ID
+  ];
+}
+
+// Checks the size, clears A2:R and gets the rows and formats ready
+function upDsStart_(body, session) {
+  const total = Math.floor(Number(body.total) || 0);
+  if (total < 1) return { ok: true, problem: 'The file has no appointments in it.' };
+  if (total > UP_DS_MAX_ROWS_) {
+    return { ok: true, problem: 'The file has ' + total + ' rows, more than one Google Sheets tab can hold. Talk to Bethany before uploading.' };
+  }
+  // One upload at a time (a flag, not the script lock, so the 15-minute jobs never block an upload)
+  const cache = CacheService.getScriptCache();
+  const busy = cache.get('up_ds_active');
+  if (busy && !body.force && Date.now() - Number(busy) < 20 * 60000) {
+    return { ok: true, problem: 'Another Day Sheet upload is still running. Try again in a few minutes.' };
+  }
+  try {
+    const sheet = upDsSheet_().sheet;
+    const before = Math.max(0, sheet.getLastRow() - 1);
+    if (!body.force && before > 1000 && total < before * 0.7) {
+      return { ok: true, needsForce: true, before: before,
+        problem: 'This file has ' + total + ' rows, but alltimeappts has ' + before + ' now. ' +
+          'Check it is the "All time" export. Replace it anyway?' };
+    }
+    if (sheet.getMaxColumns() < 15) sheet.insertColumnsAfter(sheet.getMaxColumns(), 15 - sheet.getMaxColumns());
+    const maxCols = Math.min(18, sheet.getMaxColumns());
+    if (sheet.getLastRow() >= 2) sheet.getRange(2, 1, sheet.getLastRow() - 1, maxCols).clearContent(); // A2:R, header kept
+    if (sheet.getMaxRows() < total + 1) sheet.insertRowsAfter(sheet.getMaxRows(), total + 1 - sheet.getMaxRows());
+    sheet.getRange(2, 2, total, 11).setNumberFormat('@');           // B:L as text (mobiles keep their 0)
+    sheet.getRange(2, 14, total, 2).setNumberFormat('@');           // N:O as text
+    sheet.getRange(2, 1, total, 1).setNumberFormat('d/m/yyyy');     // A
+    sheet.getRange(2, 3, total, 1).setNumberFormat('$#,##0.00');    // C
+    sheet.getRange(2, 13, total, 1).setNumberFormat('$#,##0.00');   // M
+    SpreadsheetApp.flush();
+
+    const token = Utilities.getUuid().replace(/-/g, '');
+    cache.put('up_ds_active', String(Date.now()), 1800);
+    cache.put(UP_DS_CACHE_ + token, JSON.stringify({
+      total: total, before: before, done: {}, started: Date.now(),
+      fileName: String(body.fileName || '').slice(0, 150),
+    }), 21600);
+    try {
+      fsPatch_(getConfig_(), 'data_uploads/daysheet', {
+        status: 'running', startedAt: new Date().toISOString(), startedBy: String(session.name || ''),
+      });
+    } catch (e) { console.warn('Upload log not saved: ' + e); }
+    return { ok: true, token: token, before: before };
+  } catch (err) {
+    cache.remove('up_ds_active');
+    throw err;
+  }
+}
+
+// One batch of rows, written at its place in the sheet (sending the same batch again is safe)
+function upDsChunk_(body, session) {
+  const token = String(body.token || '');
+  if (!/^[a-f0-9]{32}$/.test(token)) return { ok: false, error: 'BAD_REQUEST' };
+  const cache = CacheService.getScriptCache();
+  const raw = cache.get(UP_DS_CACHE_ + token);
+  if (!raw) return { ok: true, problem: 'This upload ran out of time. Upload the file again.' };
+  const st = JSON.parse(raw);
+  const offset = Math.floor(Number(body.offset));
+  let rows;
+  try { rows = JSON.parse(uploadText_(body)); }
+  catch (e) { return { ok: true, problem: "Part of the file didn't arrive properly. Upload it again." }; }
+  if (!Array.isArray(rows) || !rows.length || !(offset >= 0) || offset + rows.length > st.total) {
+    return { ok: false, error: 'BAD_REQUEST' };
+  }
+
+  {
+    const s = upDsSheet_();
+    const tz = s.ss.getSpreadsheetTimeZone();
+    const lookup = pcnPatientLookup_(s.ss);
+    const stats = { unmatched: {}, badDates: 0, dates: {} };
+    const out = rows.map(function (r) { return upDsRow_(Array.isArray(r) ? r : [], tz, lookup, stats); });
+    s.sheet.getRange(2 + offset, 1, out.length, 15).setValues(out);
+    SpreadsheetApp.flush();
+    st.done[offset] = out.length;
+    cache.put(UP_DS_CACHE_ + token, JSON.stringify(st), 21600);
+    cache.put('up_ds_active', String(Date.now()), 1800); // still going
+    return { ok: true, written: out.length, unmatched: stats.unmatched, badDates: stats.badDates };
+  }
+}
+
+// Every row arrived: save the summary
+function upDsFinish_(body, session) {
+  const token = String(body.token || '');
+  if (!/^[a-f0-9]{32}$/.test(token)) return { ok: false, error: 'BAD_REQUEST' };
+  const cache = CacheService.getScriptCache();
+  const raw = cache.get(UP_DS_CACHE_ + token);
+  if (!raw) return { ok: true, problem: 'This upload ran out of time. Upload the file again.' };
+  const st = JSON.parse(raw);
+  const got = Object.keys(st.done).reduce(function (a, k) { return a + Number(st.done[k] || 0); }, 0);
+  if (got !== st.total) return { ok: true, problem: 'Only ' + got + ' of ' + st.total + ' rows arrived. Upload the file again.' };
+
+  const sm = body.summary || {};
+  const n = function (v) { v = Math.floor(Number(v) || 0); return v < 0 ? 0 : v; };
+  const res = { rows: st.total, before: st.before, ms: Date.now() - st.started, at: new Date().toISOString() };
+  try {
+    fsPatch_(getConfig_(), 'data_uploads/daysheet', {
+      status: 'done', kind: 'daysheet', fileName: st.fileName, rows: res.rows, before: res.before,
+      badDates: n(sm.badDates), unmatchedNames: n(sm.unmatchedNames), unmatchedRows: n(sm.unmatchedRows),
+      ms: res.ms, at: res.at, by: String(session.name || ''), byUid: String(session.uid || ''),
+    });
+  } catch (e) { console.warn('Day sheet uploaded, but the upload log failed: ' + e); }
+  cache.remove(UP_DS_CACHE_ + token);
+  cache.remove('up_ds_active');
+  console.log('Day sheet: ' + res.rows + ' rows into alltimeappts in ' + res.ms + ' ms by ' + session.name);
+  return Object.assign({ ok: true }, res);
 }
 
 // The uploaded file as text (sent compressed by the portal when the browser can)
@@ -7999,7 +8144,6 @@ function pcnPatientLookup_(ss) {
   return lookup;
 }
 
-/* ---------- 1) Day Sheet → alltimeappts ---------- */
 
 function uploadDaySheet_(body, session) {
   const started = Date.now();
@@ -8039,7 +8183,7 @@ function uploadDaySheet_(body, session) {
       const pid = norm ? (lookup[norm] || '') : '';
       if (name && !pid) unmatched[name] = (unmatched[name] || 0) + 1;
       out.push([
-        key ? Utilities.parseDate(key, tz, 'yyyy-MM-dd') : rawDate, // A Appointment Date (a real date)
+        key ? (stats.dates[key] || (stats.dates[key] = Utilities.parseDate(key, tz, 'yyyy-MM-dd'))) : rawDate, // A (a real date)
         name,                                                       // B Patient Name
         upMoney_(cell(2)),                                          // C Outstanding Balance
         cell(3), cell(4), cell(5), cell(6), cell(7),                // D Contact # · E Resources · F Symbol2 · G StartTime · H Status
