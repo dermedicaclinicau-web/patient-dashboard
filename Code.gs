@@ -7873,6 +7873,7 @@ function handleUpload_(body) {
     if (op === 'daysheetFinish') return upDsFinish_(body, session);
     if (op === 'invoices') return upInvoices_(body, session);
     if (op === 'invoicesSync') return upInvSync_();
+    if (op === 'packages') return upPackages_(body, session);
   } catch (err) {
     console.error('Upload ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
     return { ok: true, problem: 'Something went wrong: ' + String(err && err.message ? err.message : err).slice(0, 300) };
@@ -8283,6 +8284,145 @@ function upInvSync_() {
     return { ok: true, patients: n };
   } finally {
     lock.releaseLock();
+  }
+}
+
+/* ---------- 3) Customer Packages → customer_packages (A2:M replaced) ---------- */
+
+const UP_PKG_TAB_ = 'customer_packages';
+const UP_PKG_MAX_ROWS_ = 50000;
+
+// fillCustomerPackagesColumnM: exact name (ignoring capitals), then letters only without " NEW".
+// Two different patients with the same name: left blank.
+function upPkgMatcher_(ss) {
+  const sh = ss.getSheetByName(UPLOAD_TABS_.patients);
+  if (!sh) throw new Error('Sheet tab not found: ' + UPLOAD_TABS_.patients);
+  const norm = function (s) { return String(s == null ? '' : s).toLowerCase().trim(); };
+  const clean = function (s) {
+    return String(s == null ? '' : s).replace(/[^A-Za-z ]/g, '').replace(/\sNEW$/i, '')
+      .toLowerCase().replace(/\s+/g, ' ').trim();
+  };
+  const exact = {};
+  const cleaned = {};
+  const put = function (map, k, id) { if (k) map[k] = (k in map && map[k] !== id) ? null : id; };
+  const last = sh.getLastRow();
+  if (last >= 2) {
+    sh.getRange(2, 1, last - 1, 8).getValues().forEach(function (r) {
+      const id = String(r[7] == null ? '' : r[7]).trim();
+      if (!r[0] || !id) return;
+      put(exact, norm(r[0]), id);
+      put(cleaned, clean(r[0]), id);
+    });
+  }
+  return function (name) {
+    const a = norm(name);
+    if (a in exact) return exact[a] ? { id: exact[a], how: 'exact' } : { id: '', how: 'ambiguous' };
+    const b = clean(name);
+    if (b in cleaned) return cleaned[b] ? { id: cleaned[b], how: 'cleaned' } : { id: '', how: 'ambiguous' };
+    return { id: '', how: 'none' };
+  };
+}
+
+// rows from the portal: CSV columns A–L, in order
+function upPackages_(body, session) {
+  let rows;
+  try { rows = JSON.parse(uploadText_(body)); }
+  catch (e) { return { ok: true, problem: "The file didn't arrive properly. Upload it again." }; }
+  if (!Array.isArray(rows)) return { ok: false, error: 'BAD_REQUEST' };
+  const t = function (v) { return String(v == null ? '' : v).replace(/\u00A0/g, ' ').trim(); };
+  const data = rows.filter(function (r) { return Array.isArray(r) && r.some(function (c) { return t(c); }); });
+  if (!data.length) return { ok: true, problem: 'The file has no packages in it.' };
+  if (data.length > UP_PKG_MAX_ROWS_) return { ok: true, problem: 'The file has ' + data.length + ' lines, which is far more than expected.' };
+
+  const cache = CacheService.getScriptCache();
+  const busy = cache.get('up_pkg_active');
+  if (busy && Date.now() - Number(busy) < 3 * 60000) {
+    return { ok: true, problem: 'Another Customer Packages upload is running. Try again in a minute.' };
+  }
+  cache.put('up_pkg_active', String(Date.now()), 600);
+  try {
+    const started = Date.now();
+    const ss = SpreadsheetApp.openById(APPTS_SHEET_ID);
+    const sheet = ss.getSheetByName(UP_PKG_TAB_);
+    if (!sheet) throw new Error('Sheet tab not found: ' + UP_PKG_TAB_);
+    const tz = ss.getSpreadsheetTimeZone();
+
+    const before = Math.max(0, sheet.getLastRow() - 1);
+    if (!body.force && before > 50 && data.length < before * 0.5) {
+      return { ok: true, needsForce: true, before: before,
+        problem: 'This file has ' + data.length + ' lines, but customer_packages has ' + before + ' now. ' +
+          "Check it's the full Customer Packages export. Replace it anyway?" };
+    }
+
+    const match = upPkgMatcher_(ss);
+    const memo = {};
+    const unmatched = {};
+    const ambiguous = {};
+    let matched = 0;
+    let badDates = 0;
+    const count = function (v) { const s = t(v); return /^-?\d+(\.\d+)?$/.test(s) ? Number(s) : s; };
+    const out = data.map(function (r) {
+      const name = t(r[0]);
+      const rawExp = t(r[3]);
+      const key = upDateKey_(rawExp);
+      if (rawExp && !key) badDates++;
+      const m = name ? (memo[name] || (memo[name] = match(name))) : { id: '', how: 'blank' };
+      if (m.id) matched++;
+      else if (m.how === 'ambiguous') ambiguous[name] = (ambiguous[name] || 0) + 1;
+      else if (name) unmatched[name] = (unmatched[name] || 0) + 1;
+      return [
+        name,                                                      // A CustomerName
+        t(r[1]),                                                   // B PackageName
+        t(r[2]),                                                   // C Status
+        key ? Utilities.parseDate(key, tz, 'yyyy-MM-dd') : rawExp, // D DateExpires2 (a real date)
+        upMoney_(r[4]),                                            // E Paid
+        upMoney_(r[5]),                                            // F Price
+        t(r[6]),                                                   // G Service Name
+        count(r[7]),                                               // H Remaining
+        count(r[8]),                                               // I Used
+        upMoney_(r[9]),                                            // J ServicePrice
+        upMoney_(r[10]),                                           // K InvoiceAmount
+        upMoney_(r[11]),                                           // L ServicePrice1
+        m.id,                                                      // M Patient ID (blank when not sure)
+      ];
+    });
+
+    // Clear A2:M (the header and anything right of M stay), then write
+    if (sheet.getMaxColumns() < 13) sheet.insertColumnsAfter(sheet.getMaxColumns(), 13 - sheet.getMaxColumns());
+    const last = sheet.getLastRow();
+    if (last >= 2) sheet.getRange(2, 1, last - 1, 13).clearContent();
+    if (sheet.getMaxRows() < out.length + 1) sheet.insertRowsAfter(sheet.getMaxRows(), out.length + 1 - sheet.getMaxRows());
+    const len = out.length;
+    sheet.getRange(2, 1, len, 3).setNumberFormat('@');           // A:C text
+    sheet.getRange(2, 4, len, 1).setNumberFormat('d/m/yyyy');    // D
+    sheet.getRange(2, 5, len, 2).setNumberFormat('$#,##0.00');   // E:F
+    sheet.getRange(2, 7, len, 1).setNumberFormat('@');           // G text
+    sheet.getRange(2, 10, len, 3).setNumberFormat('$#,##0.00');  // J:L
+    sheet.getRange(2, 13, len, 1).setNumberFormat('@');          // M text
+    sheet.getRange(2, 1, len, 13).setValues(out);
+    SpreadsheetApp.flush();
+
+    const top = function (o) {
+      return Object.keys(o).sort(function (a, b) { return o[b] - o[a]; }).slice(0, 20)
+        .map(function (n) { return { name: n, rows: o[n] }; });
+    };
+    const res = {
+      ok: true, rows: len, before: before, matched: matched, badDates: badDates,
+      unmatched: { names: Object.keys(unmatched).length, sample: top(unmatched) },
+      ambiguous: { names: Object.keys(ambiguous).length, sample: top(ambiguous) },
+      ms: Date.now() - started, at: new Date().toISOString(),
+    };
+    try {
+      fsPatch_(getConfig_(), 'data_uploads/packages', {
+        status: 'done', kind: 'packages', fileName: String(body.fileName || '').slice(0, 150),
+        rows: len, before: before, unmatchedNames: res.unmatched.names + res.ambiguous.names,
+        ms: res.ms, at: res.at, by: String(session.name || ''), byUid: String(session.uid || ''),
+      });
+    } catch (e) { console.warn('Packages uploaded, but the upload log failed: ' + e); }
+    console.log('Customer packages: ' + len + ' line(s) by ' + session.name);
+    return res;
+  } finally {
+    cache.remove('up_pkg_active');
   }
 }
 

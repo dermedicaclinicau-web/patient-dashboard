@@ -28,7 +28,8 @@ const KINDS = [
     blurb: "Every appointment from Timely, including cancelled. Replaces everything in alltimeappts, then fills in the PCN category (N) and Patient ID (O)." },
   { key: "invoices", title: "Invoice Record (yesterday)", ready: true, sniff: [/invoice/, /customer/, /description|product/],
     blurb: "Yesterday's invoices from Timely. Added to the bottom of INVOICE RECORD (invoices already there are skipped), with Patient IDs and tidy product names." },
-  { key: "packages", title: "Customer Packages", ready: false, blurb: "Patients' active packages from Timely." },
+  { key: "packages", title: "Customer Packages", ready: true, sniff: [/customer/, /package/],
+    blurb: "Patients' packages from Timely. Replaces everything in customer_packages (A to M), then fills in the Patient ID (M)." },
 ];
 
 /* ---------- Reading the CSV ---------- */
@@ -135,7 +136,8 @@ function lastLine(d, k) {
       : `An upload started ${when(d.startedAt)}${d.startedBy ? ` by ${d.startedBy}` : ""} is still running.`;
   }
   if (!d.at) return "Not uploaded from the portal yet.";
-  const what = k.key === "invoices" ? `${num(d.rows)} lines added${d.to ? ` (to ${day(d.to)})` : ""}` : `${num(d.rows)} rows`;
+  const what = k.key === "invoices" ? `${num(d.rows)} lines added${d.to ? ` (to ${day(d.to)})` : ""}`
+    : k.key === "packages" ? `${num(d.rows)} package lines` : `${num(d.rows)} rows`;
   return `Last uploaded ${when(d.at)}${d.by ? ` by ${d.by}` : ""} · ${what}${d.unmatchedNames ? ` · ${num(d.unmatchedNames)} patients not matched` : ""}`;
 }
 
@@ -355,6 +357,50 @@ function wire(card, k) {
     showToast(res.rows ? "Invoices added to INVOICE RECORD" : "No new invoices to add");
   }
 
+  /* ---------- 3) Customer Packages ---------- */
+
+  async function runPackages() {
+    const { all, delim } = await readFile(0.5);
+    const isHeader = (r) => /customer/i.test(r[0] || "") && /package/i.test(r[1] || "") && /service/i.test(r[6] || "");
+    const h = all.slice(0, 30).findIndex(isHeader);
+    if (h < 0) throw headerError(all, delim, "CustomerName in A, PackageName in B, Service Name in G");
+    const rows = all.slice(h + 1)
+      .map((r) => { r = r.slice(0, 12).map((c) => String(c ?? "").trim()); while (r.length < 12) r.push(""); return r; })
+      .filter((r) => r.some(Boolean));
+    if (!rows.length) throw new Error("The file has no packages in it.");
+
+    setMsg(`Found ${num(rows.length)} package lines. Replacing customer_packages…`);
+    setBar(0.6);
+    const packed = await packJson(rows);
+    const payload = { action: "upload", op: "packages", fileName: file.name, gzip: packed.gzip, data: packed.data };
+    let res = await send(payload);
+    if (res.needsForce) {
+      const ok = await confirmDialog({ title: "Replace customer_packages?", message: res.problem, confirmLabel: "Replace it", tone: "warning" });
+      if (!ok) { setMsg("Nothing was changed."); setBar(null); return; }
+      res = await send(Object.assign({}, payload, { force: true }));
+    }
+    if (res.problem) throw new Error(res.problem);
+    setMsg("");
+    setBar(null);
+    donePackages(res);
+    clearFile();
+  }
+
+  function donePackages(res) {
+    const list = (o) => ((o && o.sample) || []).map((x) => `<li>${esc(x.name)} <small class="muted">(${num(x.rows)})</small></li>`).join("");
+    const plural = (n, w) => `${num(n)} ${w}${n === 1 ? "" : "s"}`;
+    result.innerHTML = `
+      <div class="du-result">
+        <strong>Done. ${plural(res.rows, "package line")} are in customer_packages.</strong>
+        <div>Took ${Math.max(1, Math.round((res.ms || 0) / 1000))} seconds${res.before ? ` · it had ${num(res.before)} rows before` : ""}.</div>
+        <div>Patient IDs filled in for ${num(res.matched)} of ${num(res.rows)} lines.</div>
+        ${res.badDates ? `<div class="du-warn">${plural(res.badDates, "line")} had an expiry date that couldn't be read, so it was kept as text.</div>` : ""}
+        ${res.ambiguous && res.ambiguous.names ? `<details><summary>${plural(res.ambiguous.names, "name")} matched more than one patient, so Patient ID was left blank</summary><ul>${list(res.ambiguous)}</ul></details>` : ""}
+        ${res.unmatched && res.unmatched.names ? `<details><summary>${plural(res.unmatched.names, "name")} weren't found in patientlist</summary><ul>${list(res.unmatched)}</ul></details>` : ""}
+      </div>`;
+    showToast("Customer Packages uploaded");
+  }
+  
   /* ---------- Run ---------- */
 
   async function run() {
@@ -369,6 +415,7 @@ function wire(card, k) {
     try {
       if (k.key === "daysheet") await runDaySheet();
       else if (k.key === "invoices") await runInvoices();
+      else if (k.key === "packages") await runPackages();
     } catch (err) {
       console.error(`${k.key} upload failed:`, err);
       setBar(null);
