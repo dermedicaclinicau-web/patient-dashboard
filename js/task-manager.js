@@ -17,6 +17,7 @@ import { can, isInjector } from "./perms.js";
 import { mountStockCount } from "./stock-count.js";
 import { renderCountCard } from "./count-card.js";
 import { mountEndOfDaySettings } from "./end-of-day-admin.js";
+import { mountDataUploader } from "./data-uploader.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -35,6 +36,7 @@ const I = {
   chev: ic('<polyline points="9 18 15 12 9 6"/>'),
   back: ic('<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>'),
   moon: ic('<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>'),
+  upload: ic('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>'),  
 };
 
 const CATEGORIES = [
@@ -82,6 +84,7 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
         ${link("new", "#/tasks/new", I.plus, "Create new task")}
         ${canCountAny() ? link("count", "#/tasks/count", I.count, "Opening count") : ""}
         ${link("history", "#/tasks/history", I.history, "Task history")}
+        ${can("data.upload") ? link("uploads", "#/tasks/uploads", I.upload, "Daily uploads") : ""}
         ${isAdmin ? link("types", "#/tasks/types", I.types, "Task types") : ""}
         ${isAdmin ? link("end-of-day", "#/tasks/end-of-day", I.moon, "End of day") : ""}
       </nav>
@@ -91,6 +94,11 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
   const main = root.querySelector('[data-role="main"]');
 
   if (view === "history") { mountTaskHistory(main, { patientId: sub }); return; }
+  if (view === "uploads") {
+    if (!can("data.upload")) { main.innerHTML = '<div class="tm-empty">You don\'t have access to Daily uploads.</div>'; return; }
+    mountDataUploader(main);
+    return;
+  }
   if (view === "end-of-day") {
     if (!isAdmin) { main.innerHTML = '<div class="tm-empty">Only admins can set up End of day.</div>'; return; }
     mountEndOfDaySettings(main, { staff, embedded: true });

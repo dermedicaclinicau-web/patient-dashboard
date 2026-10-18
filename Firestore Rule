@@ -15,6 +15,10 @@ service cloud.firestore {
       return request.auth != null && request.auth.token.staffRole is string;
     }
 
+    match /data_uploads/{kind} {
+      allow read: if request.auth != null;
+      allow write: if false; // written by Apps Script only
+    }
     // A permission from the login token (Admins have everything)
     function can(p) {
       return isAdmin() || (isStaff() && request.auth.token.perms is list && p in request.auth.token.perms);
@@ -184,17 +188,17 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-match /inv_open/{id} {
-  allow read: if isStaff();
-  allow create: if isStaff()
-    && request.resource.data.openedByUid == request.auth.uid
-    && request.resource.data.status in ['open', 'finished'];
-  allow update: if isStaff()
-    && resource.data.status == 'open'
-    && request.resource.data.productId == resource.data.productId
-    && request.resource.data.openedByUid == resource.data.openedByUid;
-  allow delete: if false;
-}
+    match /inv_open/{id} {
+      allow read: if isStaff();
+      allow create: if isStaff()
+        && request.resource.data.openedByUid == request.auth.uid
+        && request.resource.data.status in ['open', 'finished'];
+      allow update: if isStaff()
+        && resource.data.status == 'open'
+        && request.resource.data.productId == resource.data.productId
+        && request.resource.data.openedByUid == resource.data.openedByUid;
+      allow delete: if false;
+    }
 
     // Requests to release stock from JT storage to the Shelf (Dr Teh approves)
     match /inv_releases/{id} {

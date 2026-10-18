@@ -47,6 +47,7 @@ function doPost(e) {
     if (body.action === 'scheduleTaskEmail') return json_(handleScheduleTaskEmail_(body));
     if (body.action === 'emailFlow') return json_(handleEmailFlow_(body));
     if (body.action === 'staffTask') return json_(handleStaffTask_(body));
+    if (body.action === 'upload') return json_(handleUpload_(body));
 
     const pin = String(body.pin || '').trim();
 
@@ -3054,6 +3055,7 @@ const PERMS_ = [
   ['tasks.build', 'Building', 'Build task types'],
   ['forms.build', 'Building', 'Build forms, Image Bank and Aftercare Bank'],
   ['flows.build', 'Building', 'Build email flows (System configuration)'],
+  ['data.upload', 'Building', 'Daily uploads: Timely day sheet, invoices and packages'],
   ['ssp.create', 'Skin Script', 'Create Skin Script Protocols'],
   ['ssp.config', 'Skin Script', 'Skin Script products and design'],
   ['menu.inventory', 'Inventory', 'Inventory menu (open Inventory)'],
@@ -7847,6 +7849,249 @@ function handleStaffTask_(body) {
   } catch (err) {
     console.error('Staff task ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
     return { ok: false, error: 'SERVER_ERROR', detail: String(err && err.message ? err.message : err).slice(0, 300) };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ===================== Daily uploads (Task Manager → Daily uploads) =====================
+// Timely CSVs uploaded in the portal go straight into the PCN spreadsheet. The file itself is never saved.
+// 1) Day Sheet → alltimeappts: A–M from the CSV (its column N is dropped), then N = PCN category and
+//    O = Patient ID, using the same rules as the spreadsheet's runPrerequisite.
+
+const UPLOAD_TABS_ = { daysheet: 'alltimeappts', patients: 'patientlist' };
+const UPLOAD_CHUNK_ = 5000;
+
+function handleUpload_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!can_(session, 'data.upload')) return { ok: false, error: 'FORBIDDEN' };
+  const op = String(body.op || '');
+  try {
+    if (op === 'daysheet') return uploadDaySheet_(body, session);
+  } catch (err) {
+    console.error('Upload ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: true, problem: 'Something went wrong: ' + String(err && err.message ? err.message : err).slice(0, 300) };
+  }
+  return { ok: false, error: 'BAD_REQUEST' };
+}
+
+// The uploaded file as text (sent compressed by the portal when the browser can)
+function uploadText_(body) {
+  const b64 = String(body.data || '');
+  if (!b64) throw new Error('The file is missing. Choose it again.');
+  if (b64.length > 45 * 1024 * 1024) throw new Error('The file is too big to upload in one go.');
+  let blob = Utilities.newBlob(Utilities.base64Decode(b64), body.gzip ? 'application/x-gzip' : 'text/csv', 'upload');
+  if (body.gzip) blob = Utilities.ungzip(blob);
+  return blob.getDataAsString('UTF-8').replace(/^\uFEFF/, '');
+}
+
+// "18/10/2026", "2026-10-18", "18 Oct 2026", "Sat 18 Oct 2026", "October 18, 2026" → "2026-10-18" (Australian day first)
+function upDateKey_(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const ok = function (y, mo, d) {
+    y = Number(y); mo = Number(mo); d = Number(d);
+    if (y < 100) y += 2000;
+    return mo >= 1 && mo <= 12 && d >= 1 && d <= 31 ? y + '-' + pad2_(mo) + '-' + pad2_(d) : '';
+  };
+  let m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);
+  if (m) return ok(m[1], m[2], m[3]);
+  m = /^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/.exec(s);
+  if (m) return ok(m[3], m[2], m[1]);
+  m = /^(?:[A-Za-z]{3,9},?\s+)?(\d{1,2})\s+([A-Za-z]{3,9})\.?,?\s+(\d{4})/.exec(s);
+  if (m && MONTHS_[m[2].slice(0, 3).toLowerCase()]) return ok(m[3], MONTHS_[m[2].slice(0, 3).toLowerCase()], m[1]);
+  m = /^(?:[A-Za-z]{3,9},?\s+)?([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})/.exec(s);
+  if (m && MONTHS_[m[1].slice(0, 3).toLowerCase()]) return ok(m[3], MONTHS_[m[1].slice(0, 3).toLowerCase()], m[2]);
+  return '';
+}
+
+// "$1,234.50" → 1234.5 (as pasting the CSV would); anything else stays as Timely wrote it
+function upMoney_(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  const m = /^(-)?\$?\s*(-)?([\d,]+(?:\.\d+)?)$/.exec(s);
+  return m ? (m[1] || m[2] ? -1 : 1) * Number(m[3].replace(/,/g, '')) : s;
+}
+
+/* ---------- The same rules as the PCN spreadsheet's runPrerequisite ---------- */
+
+// fillCategoriesColN: first match wins, in this order
+const PCN_CATEGORY_RULES_ = [
+  [/(Dr Consult \[in-clinic\] NP|Consultation with Dr-New Patient|Consultation with Dr-New Patient \[in-clinic\]|Consult with Nurse-New Patient|Consult with Dr-New Patient|Consult with Dr for new patient-Online booking)/i, 'Consultation New Patient'],
+  [/(vibro|Vibro LED)/i, 'Vibro'],
+  [/(wr|wrinkle)/i, 'Wrinkle Relaxer'],
+  [/(filler|dermal filler|radiesse)/i, 'Filler/Radiesse'],
+  [/(trusculpt|vanquish|fat|fat freezing|flex)/i, 'Body Sculpting'],
+  [/(restoraglow|refresh|dermaglow|skin needling)/i, 'RestoraGlow/RF/DermaGlow/Skin Needling'],
+  [/(laser|opl|peel|bbl|clear complexion|genesis)/i, 'Laser/OPL/Peel'],
+  [/(ulthera|firm|eskin tight|skintight|skin lifting)/i, 'Firm/Ulthera/eST'],
+  [/(hydrarepair|skin needling|collagen growth)/i, 'Hydrarepair/SkinRemod/CG'],
+  [/(Collagen activator|Add on Collagen activator)/i, 'Collagen activator'],
+  [/(prophilo|rejuran)/i, 'Other Injectables'],
+  [/(led)/i, 'LED'],
+];
+function pcnCategory_(dateRaw, service) {
+  if (!String(dateRaw == null ? '' : dateRaw)) return '';
+  const text = String(service == null ? '' : service);
+  if (!text) return 'Add Ons';
+  for (let i = 0; i < PCN_CATEGORY_RULES_.length; i++) {
+    if (PCN_CATEGORY_RULES_[i][0].test(text)) return PCN_CATEGORY_RULES_[i][1];
+  }
+  return 'Other';
+}
+
+// cleanPatientNames (display name: the " NEW" marker removed, casing kept)
+function pcnCleanPatientName_(value) {
+  if (!value) return '';
+  return String(value)
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\u00A0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\s+NEW$/, '')
+    .trim();
+}
+
+// populatePatientId's normalizeName (for matching only)
+function pcnNormalizeName_(name) {
+  if (!name) return '';
+  let s = String(name)
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\u00A0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^[Xx]\s*/, '');
+  s = s.replace(/\s+NEW$/i, '');
+  s = s.replace(/[^A-Za-z ]+$/, '');
+  return s.trim().toLowerCase();
+}
+
+// cleanStaff (order matters)
+function pcnCleanStaff_(value) {
+  if (!value) return '';
+  const text = String(value).replace(/[\*\^]/g, '').replace(/\s+/g, ' ').trim();
+  if (/Dr\s*Teh/i.test(text)) return 'Dr Teh';
+  if (/Archived/i.test(text)) return 'Nurse';
+  if (/Jacquie/i.test(text)) return 'Jacquie';
+  if (/Joshna/i.test(text)) return 'Joshna';
+  if (/Allie/i.test(text)) return 'Allie';
+  if (/Eva/i.test(text)) return 'Eva';
+  if (/Brooke/i.test(text)) return 'Brooke';
+  if (/Jess/i.test(text)) return 'Jess';
+  if (/Rebekah/i.test(text)) return 'Rebekah';
+  if (/Jody/i.test(text)) return 'Jody';
+  if (/Dermedica Pk/i.test(text)) return 'Park Room';
+  if (/Tahlya/i.test(text)) return 'Tahlya';
+  return text;
+}
+
+// patientlist: normalised name (A) → Patient ID (H). The first row with a name wins.
+function pcnPatientLookup_(ss) {
+  const sh = ss.getSheetByName(UPLOAD_TABS_.patients);
+  if (!sh) throw new Error('Sheet tab not found: ' + UPLOAD_TABS_.patients);
+  const last = sh.getLastRow();
+  const lookup = {};
+  if (last < 2) return lookup;
+  sh.getRange(2, 1, last - 1, 8).getValues().forEach(function (r) {
+    const n = pcnNormalizeName_(r[0]);
+    if (n && !(n in lookup)) lookup[n] = String(r[7] == null ? '' : r[7]).trim();
+  });
+  return lookup;
+}
+
+/* ---------- 1) Day Sheet → alltimeappts ---------- */
+
+function uploadDaySheet_(body, session) {
+  const started = Date.now();
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) return { ok: true, problem: 'Another update is running. Try again in a minute.' };
+  try {
+    const rows = Utilities.parseCsv(uploadText_(body));
+
+    // The header row (Timely can put a title line or two above it)
+    let h = -1;
+    for (let i = 0; i < Math.min(rows.length, 15); i++) {
+      const r = rows[i] || [];
+      if (/date/i.test(String(r[0] || '')) && /status/i.test(String(r[7] || '')) && /service/i.test(String(r[9] || ''))) { h = i; break; }
+    }
+    if (h < 0) {
+      return { ok: true, problem: "This doesn't look like the Timely Day Sheet. The columns should start Appointment Date, Patient Name… with Status in H and ServiceName in J." };
+    }
+
+    const ss = SpreadsheetApp.openById(APPTS_SHEET_ID);
+    const sheet = ss.getSheetByName(UPLOAD_TABS_.daysheet);
+    if (!sheet) throw new Error('Sheet tab not found: ' + UPLOAD_TABS_.daysheet);
+    const tz = ss.getSpreadsheetTimeZone();
+    const lookup = pcnPatientLookup_(ss);
+
+    const out = [];
+    const unmatched = {};
+    let badDates = 0;
+    for (let i = h + 1; i < rows.length; i++) {
+      const r = rows[i];
+      if (!r || !r.some(function (c) { return String(c == null ? '' : c).trim(); })) continue; // blank line
+      const cell = function (k) { return String(r[k] == null ? '' : r[k]); };
+      const rawDate = cell(0).trim();
+      const key = upDateKey_(rawDate);
+      if (rawDate && !key) badDates++;
+      const name = pcnCleanPatientName_(cell(1));
+      const norm = pcnNormalizeName_(name);
+      const pid = norm ? (lookup[norm] || '') : '';
+      if (name && !pid) unmatched[name] = (unmatched[name] || 0) + 1;
+      out.push([
+        key ? Utilities.parseDate(key, tz, 'yyyy-MM-dd') : rawDate, // A Appointment Date (a real date)
+        name,                                                       // B Patient Name
+        upMoney_(cell(2)),                                          // C Outstanding Balance
+        cell(3), cell(4), cell(5), cell(6), cell(7),                // D Contact # · E Resources · F Symbol2 · G StartTime · H Status
+        pcnCleanStaff_(cell(8)),                                    // I StaffName
+        cell(9), cell(10), cell(11),                                // J ServiceName · K ResourceName · L LocationName
+        upMoney_(cell(12)),                                         // M Price
+        pcnCategory_(rawDate, cell(9)),                             // N PCN Categories
+        pid,                                                        // O Patient ID
+      ]);
+    }
+    if (!out.length) return { ok: true, problem: 'The file has no appointments in it.' };
+
+    // Much smaller than what's there now: check before clearing
+    const before = Math.max(0, sheet.getLastRow() - 1);
+    if (!body.force && before > 1000 && out.length < before * 0.7) {
+      return { ok: true, needsForce: true, before: before, rows: out.length,
+        problem: 'This file has ' + out.length + ' rows, but alltimeappts has ' + before + ' now. ' +
+          'Check it is the "All time" export. Replace it anyway?' };
+    }
+
+    // Clear A2:R (the header stays), make room, then write in batches
+    const maxCols = Math.min(18, sheet.getMaxColumns());
+    if (sheet.getLastRow() >= 2) sheet.getRange(2, 1, sheet.getLastRow() - 1, maxCols).clearContent();
+    if (sheet.getMaxRows() < out.length + 1) sheet.insertRowsAfter(sheet.getMaxRows(), out.length + 1 - sheet.getMaxRows());
+    sheet.getRange(2, 2, out.length, 11).setNumberFormat('@');           // B:L as text (mobiles keep their 0)
+    sheet.getRange(2, 14, out.length, 2).setNumberFormat('@');           // N:O as text
+    sheet.getRange(2, 1, out.length, 1).setNumberFormat('d/m/yyyy');     // A
+    sheet.getRange(2, 3, out.length, 1).setNumberFormat('$#,##0.00');    // C
+    sheet.getRange(2, 13, out.length, 1).setNumberFormat('$#,##0.00');   // M
+    for (let i = 0; i < out.length; i += UPLOAD_CHUNK_) {
+      const part = out.slice(i, i + UPLOAD_CHUNK_);
+      sheet.getRange(2 + i, 1, part.length, 15).setValues(part);
+    }
+    SpreadsheetApp.flush();
+
+    const names = Object.keys(unmatched).sort(function (a, b) { return unmatched[b] - unmatched[a]; });
+    const unmatchedRows = names.reduce(function (a, n) { return a + unmatched[n]; }, 0);
+    const res = {
+      rows: out.length, before: before, badDates: badDates, ms: Date.now() - started, at: new Date().toISOString(),
+      unmatched: { names: names.length, rows: unmatchedRows,
+        sample: names.slice(0, 20).map(function (n) { return { name: n, rows: unmatched[n] }; }) },
+    };
+    try {
+      const cfg = getConfig_();
+      commitWrites_(cfg, [updateWrite_(cfg, 'data_uploads/daysheet', {
+        kind: 'daysheet', fileName: String(body.fileName || '').slice(0, 150), rows: res.rows, before: before,
+        badDates: badDates, unmatchedNames: names.length, unmatchedRows: unmatchedRows, ms: res.ms,
+        at: res.at, by: String(session.name || ''), byUid: String(session.uid || ''),
+      })]);
+    } catch (e) { console.warn('Day sheet uploaded, but the upload log failed: ' + e); }
+    console.log('Day sheet: ' + out.length + ' rows into alltimeappts in ' + res.ms + ' ms by ' + session.name);
+    return Object.assign({ ok: true }, res);
   } finally {
     lock.releaseLock();
   }

@@ -6543,3 +6543,21 @@ a.md-quiet:hover { border-color: var(--primary); }
 .fe-staffview.is-on { background: #0f766e; color: #fff; border-color: #0f766e; }
 /* Live form: out of sight, but still answered and calculated */
 .ff-sheet .fe-field.is-livehide { display: none !important; }
+
+/* ---------- Task Manager → Daily uploads ---------- */
+.du-grid { display: grid; gap: 1rem; }
+.du-card.is-soon { opacity: .6; }
+.du-soon { margin-left: auto; font-weight: 500; }
+.du-drop { display: flex; flex-direction: column; align-items: center; gap: .25rem; padding: 1.4rem 1rem; border: 2px dashed #cbd5e1;
+  border-radius: 12px; background: var(--surface-2); text-align: center; cursor: pointer; transition: border-color .15s, background .15s; }
+.du-drop:hover, .du-drop.is-over { border-color: var(--primary); background: var(--primary-soft); }
+.du-drop.has-file { border-style: solid; border-color: var(--primary); background: #f0fdfa; }
+.du-drop small { font-size: .8rem; color: var(--muted); }
+.du-acts { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.du-msg { margin: 0; font-size: .88rem; color: #334155; }
+.du-msg:empty { display: none; }
+.du-msg.is-bad { color: var(--danger); font-weight: 600; }
+.du-result { display: grid; gap: .35rem; padding: .8rem .95rem; border: 1px solid #a7f3d0; border-radius: 10px; background: #ecfdf5; font-size: .9rem; }
+.du-result details summary { cursor: pointer; font-weight: 600; color: #92400e; }
+.du-result ul { margin: .4rem 0 0; padding-left: 1.1rem; }
+.du-warn { color: #92400e; font-weight: 600; }
