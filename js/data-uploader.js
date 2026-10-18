@@ -26,7 +26,7 @@ const pause = () => new Promise((r) => setTimeout(r, 0));
 const KINDS = [
   { key: "daysheet", title: "Day Sheet (all time)", ready: true, sniff: [/status/, /service/],
     blurb: "Every appointment from Timely, including cancelled. Replaces everything in alltimeappts, then fills in the PCN category (N) and Patient ID (O)." },
-  { key: "invoices", title: "Invoice Record (yesterday)", ready: true, sniff: [/invoice/, /customer/, /product/],
+  { key: "invoices", title: "Invoice Record (yesterday)", ready: true, sniff: [/invoice/, /customer/, /description|product/],
     blurb: "Yesterday's invoices from Timely. Added to the bottom of INVOICE RECORD (invoices already there are skipped), with Patient IDs and tidy product names." },
   { key: "packages", title: "Customer Packages", ready: false, blurb: "Patients' active packages from Timely." },
 ];
@@ -290,9 +290,9 @@ function wire(card, k) {
 
   async function runInvoices() {
     const { all, delim } = await readFile(0.4);
-    const isHeader = (r) => /invoice/i.test(r[0] || "") && /customer/i.test(r[2] || "") && /product/i.test(r[6] || "");
+    const isHeader = (r) => /invoice/i.test(r[0] || "") && /customer/i.test(r[2] || "") && /description|product/i.test(r[6] || "");
     const h = all.slice(0, 30).findIndex(isHeader);
-    if (h < 0) throw headerError(all, delim, "InvoiceIdSequential in A, CustomerName in C, Product Name in G");
+    if (h < 0) throw headerError(all, delim, "InvoiceIdSequential in A, CustomerName in C, Description in G");
     // CSV A, B, C, E, G → INVOICE RECORD A, B, C, E, F (D, the Patient ID, is filled in by Apps Script)
     const rows = all.slice(h + 1)
       .map((r) => [r[0], r[1], r[2], r[4], r[6]].map((c) => String(c ?? "").trim()))
