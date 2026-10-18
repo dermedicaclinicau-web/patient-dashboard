@@ -7875,6 +7875,7 @@ function handleUpload_(body) {
     if (op === 'invoicesSync') return upInvSync_();
     if (op === 'packages') return upPackages_(body, session);
     if (op === 'pcnStep') return upPcnStep_(body, session);
+    if (op === 'pcnStop') return upPcnStop_(body, session);
   } catch (err) {
     console.error('Upload ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
     return { ok: true, problem: 'Something went wrong: ' + String(err && err.message ? err.message : err).slice(0, 300) };
@@ -8519,6 +8520,26 @@ function upPcnStep_(body, session) {
     cache.put('pcn_run_' + token, JSON.stringify(st), 3600);
   }
   return { ok: true, token: token, step: step, ms: ms, info: info, done: done, totalMs: Date.now() - st.started };
+}
+
+// Stop: called by the portal once the step that was running has finished. Ends the run so a new one can start.
+function upPcnStop_(body, session) {
+  const token = String(body.token || '');
+  if (!/^[a-f0-9]{32}$/.test(token)) return { ok: false, error: 'BAD_REQUEST' };
+  const cache = CacheService.getScriptCache();
+  const raw = cache.get('pcn_run_' + token);
+  cache.remove('pcn_run_' + token);
+  cache.remove('pcn_run_active');
+  const st = raw ? JSON.parse(raw) : null;
+  const last = st && st.next > 0 ? PCN_STEPS_[st.next - 1] : '';
+  try {
+    fsPatch_(getConfig_(), 'data_uploads/pcn', {
+      status: 'stopped', stoppedAt: new Date().toISOString(), stoppedBy: String(session.name || ''),
+      stoppedAfter: last ? PCN_STEP_NAME_[last] : '', error: '',
+    });
+  } catch (e) { console.warn('PCN log not saved: ' + e); }
+  console.log('PCN update stopped by ' + session.name + (last ? ' after ' + last : ''));
+  return { ok: true };
 }
 
 /* ---- Shared ---- */

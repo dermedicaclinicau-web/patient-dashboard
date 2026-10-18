@@ -6574,4 +6574,5 @@ a.md-quiet:hover { border-color: var(--primary); }
 .du-steps li.is-run .du-step-dot { border-color: var(--primary); border-top-color: transparent; animation: du-spin .8s linear infinite; }
 .du-steps li.is-done .du-step-dot { background: var(--primary); border-color: var(--primary); }
 .du-steps li.is-bad .du-step-dot { background: #dc2626; border-color: #dc2626; }
+.du-steps li.is-skip { opacity: .5; text-decoration: line-through; }
 @keyframes du-spin { to { transform: rotate(360deg); } }

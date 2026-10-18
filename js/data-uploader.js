@@ -160,7 +160,10 @@ function pcnCardHtml(n) {
         from alltimeappts, then sends it to the portal. Upload today's Day Sheet and Customer Packages first.</p>
       <ol class="du-steps">${PCN_STEPS.map(([k, label]) =>
         `<li data-step="${k}"><span class="du-step-dot"></span><span>${esc(label)}</span><small class="muted" data-role="t"></small></li>`).join("")}</ol>
-      <div class="du-acts"><button type="button" class="ff-btn is-primary" data-act="pcn">Run PCN update</button></div>
+      <div class="du-acts">
+        <button type="button" class="ff-btn is-primary" data-act="pcn">Run PCN update</button>
+        <button type="button" class="ff-btn" data-act="pcn-stop" hidden>Stop</button>
+      </div>
       <p class="du-msg" data-role="msg" aria-live="polite"></p>
       <small class="muted" data-role="last"></small>
     </section>`;
@@ -168,12 +171,15 @@ function pcnCardHtml(n) {
 
 function wirePcn(card) {
   const btn = card.querySelector('[data-act="pcn"]');
+  const stopBtn = card.querySelector('[data-act="pcn-stop"]');
   const msg = card.querySelector('[data-role="msg"]');
   const lastEl = card.querySelector('[data-role="last"]');
   const items = [...card.querySelectorAll("[data-step]")];
   let running = false;
+  let stopAsked = false;
   const setMsg = (t, bad = false) => { msg.textContent = t || ""; msg.classList.toggle("is-bad", bad); };
   const guard = (e) => { e.preventDefault(); e.returnValue = ""; };
+  const label = (step) => (PCN_STEPS.find((s) => s[0] === step) || [step, step])[1];
   const todayKey = new Date().toLocaleDateString("en-CA", { timeZone: "Australia/Perth" });
   const keyOf = (iso) => (iso ? new Date(iso).toLocaleDateString("en-CA", { timeZone: "Australia/Perth" }) : "");
 
@@ -186,6 +192,9 @@ function wirePcn(card) {
         parts.push(`Running now (started ${when(d.startedAt)}${d.startedBy ? ` by ${d.startedBy}` : ""}).`);
       } else if (d.status === "failed") {
         parts.push(`⚠ The last run stopped ${when(d.failedAt)}: ${d.error || "it failed"}.`);
+      } else if (d.status === "stopped") {
+        parts.push(`⚠ The last run was stopped ${when(d.stoppedAt)}${d.stoppedBy ? ` by ${d.stoppedBy}` : ""}` +
+          `${d.stoppedAfter ? ` after "${d.stoppedAfter}"` : " before it started"}. Run it again to finish.`);
       } else if (d.at) {
         parts.push(`Last run ${when(d.at)}${d.by ? ` by ${d.by}` : ""} · ${Math.max(1, Math.round((d.ms || 0) / 1000))} seconds.`);
       } else {
@@ -200,15 +209,22 @@ function wirePcn(card) {
   async function run() {
     if (running) return;
     running = true;
+    stopAsked = false;
     btn.disabled = true;
     btn.textContent = "Running…";
+    stopBtn.hidden = false;
+    stopBtn.disabled = false;
+    stopBtn.textContent = "Stop";
     items.forEach((li) => { li.className = ""; li.querySelector('[data-role="t"]').textContent = ""; });
     setMsg("Keep this page open. It usually takes a few minutes.");
     window.addEventListener("beforeunload", guard);
     let token = "";
     let cur = null;
+    let lastDone = "";
+    let finished = false;
     try {
       for (const [step] of PCN_STEPS) {
+        if (stopAsked) break;
         cur = card.querySelector(`[data-step="${step}"]`);
         cur.classList.add("is-run");
         const res = await callApi({ action: "upload", op: "pcnStep", step, token });
@@ -216,14 +232,28 @@ function wirePcn(card) {
         token = res.token || token;
         cur.classList.remove("is-run");
         cur.classList.add("is-done");
+        lastDone = step;
         const later = step === "sync" && res.info && res.info.later;
         cur.querySelector('[data-role="t"]').textContent =
           later ? "at the next sync" : `${Math.max(1, Math.round((res.ms || 0) / 1000))}s`;
+        cur = null;
         if (res.done) {
+          finished = true;
           setMsg(`Done in ${Math.max(1, Math.round((res.totalMs || 0) / 1000))} seconds.` +
             (later ? " Another job was running, so the portal gets it at the next sync." : " The portal is up to date."));
           showToast("PCN update finished");
         }
+      }
+
+      if (stopAsked && !finished) {
+        items.forEach((li) => { if (!li.classList.contains("is-done")) li.classList.add("is-skip"); });
+        if (token) {
+          try { await callApi({ action: "upload", op: "pcnStop", token }); }
+          catch (e) { console.warn("Stop not recorded:", e); }
+        }
+        setMsg(lastDone
+          ? `Stopped after "${label(lastDone)}". Nothing was sent to the portal, so staff still see the previous data. Run the update again when you're ready.`
+          : "Stopped. Nothing was changed.");
       }
     } catch (err) {
       console.error("PCN update failed:", err);
@@ -233,10 +263,20 @@ function wirePcn(card) {
       running = false;
       btn.disabled = false;
       btn.textContent = "Run PCN update";
+      stopBtn.hidden = true;
       window.removeEventListener("beforeunload", guard);
       showLast();
     }
   }
+
+  // Stops before the next step (the step that's running can't be interrupted, so it finishes first)
+  stopBtn.addEventListener("click", () => {
+    if (!running || stopAsked) return;
+    stopAsked = true;
+    stopBtn.disabled = true;
+    stopBtn.textContent = "Stopping after this step…";
+    setMsg("Stopping. The step that's running now will finish first.");
+  });
 
   btn.addEventListener("click", run);
   showLast();
