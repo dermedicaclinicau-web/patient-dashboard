@@ -231,8 +231,9 @@ function wire(card, k) {
       const all = await readCsv(file, delim, (p) => { setBar(p * 0.3); setMsg(`Reading the file… ${Math.round(p * 100)}%`); });
 
       // The header: the first row (of 30) that has a date, a status and a service column, wherever they are
-      const at = (r, re) => r.findIndex((c) => re.test(String(c || "")));
-      const h = all.slice(0, 30).findIndex((r) => at(r, /date/i) >= 0 && at(r, /status/i) >= 0 && at(r, /service/i) >= 0);
+      // Timely names some columns "Textbox14" etc., so the header is found by the ones with real names (G, H and J)
+      const isHeader = (r) => /^\s*start\s*time\s*$/i.test(r[6] || "") && /^\s*status\s*$/i.test(r[7] || "") && /service/i.test(r[9] || "");
+      const h = all.slice(0, 30).findIndex(isHeader);
       const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
       const list = (r) => r.slice(0, 20).map((c, i) => `${letters[i]}: ${String(c || "").slice(0, 30) || "(blank)"}`).join(" · ");
       const sepName = delim === "," ? "commas" : delim === ";" ? "semicolons" : "tabs";
@@ -240,10 +241,12 @@ function wire(card, k) {
         throw new Error(`Couldn't find the header row (separated by ${sepName}). The file starts with ${list(all[0] || [])}. ` +
           "Nothing was changed. Copy this message for whoever looks after the portal.");
       }
-      const hr = all[h];
-      if (!/date/i.test(hr[0] || "") || !/status/i.test(hr[7] || "") || !/service/i.test(hr[9] || "")) {
-        throw new Error(`The columns are in a different order from alltimeappts (Date in A, Status in H, ServiceName in J). ` +
-          `This file has ${list(hr)}. Nothing was changed. Copy this message for whoever looks after the portal.`);
+      // Column A must hold dates: check the first few appointments rather than the header's name
+      const sample = all.slice(h + 1, h + 21).filter((r) => String(r[0] || "").trim());
+      const datey = sample.filter((r) => /\d{1,4}[\/.-]\d{1,2}[\/.-]\d{1,4}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}/.test(String(r[0]))).length;
+      if (sample.length && datey < sample.length / 2) {
+        throw new Error(`Column A doesn't look like appointment dates (it starts with "${String(sample[0][0]).slice(0, 30)}"). ` +
+          `The header row has ${list(all[h])}. Nothing was changed. Copy this message for whoever looks after the portal.`);
       }
       const rows = all.slice(h + 1).map((r) => { r = r.slice(0, KEEP); while (r.length < KEEP) r.push(""); return r; });
       all.length = 0;
