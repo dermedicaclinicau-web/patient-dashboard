@@ -6774,3 +6774,17 @@ a.md-quiet:hover { border-color: var(--primary); }
   .mb-side { position: static; max-height: none; }
   .mb-mail.is-mobile { width: 100%; max-width: 375px; }
 }
+
+/* Email builder inside Form Builder's layout */
+.mb-shell .mb-stage { padding: 1.25rem .75rem 2rem; border-radius: 14px; transition: background .2s; }
+.mb-blk.is-drop-before { box-shadow: inset 0 3px 0 var(--primary); }
+.mb-blk.is-drop-after { box-shadow: inset 0 -3px 0 var(--primary); }
+.mb-blk[draggable="true"] { cursor: grab; }
+.mb-thumb { width: 72px; height: 72px; overflow: hidden; border-radius: 8px; }
+.mb-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.mb-colh { color: var(--primary); }
+.mb-side-acts { display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin-top: .75rem;
+  padding-top: .75rem; border-top: 1px solid var(--border); }
+.mb-side-acts .fe-remove { margin: 0; }
+.mb-shell .fe-inspector .re-area { min-height: 140px; }
+.mt-note, .fb-mk-note { margin: -.4rem 0 .9rem; font-size: .84rem; }

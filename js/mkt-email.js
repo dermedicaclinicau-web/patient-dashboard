@@ -1,6 +1,7 @@
 // Marketing emails: the content blocks, the email they make, and the starter designs.
 // Built from tables and inline styles, so it looks the same in Gmail, Outlook and Apple Mail.
 // The clinic's details and the Unsubscribe link go in <div data-mkt-footer> when it's sent.
+import { cleanRichHtml } from "./rich-html.js";
 
 export const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -21,7 +22,11 @@ export const FONTS = [
   ["'Trebuchet MS', Arial, sans-serif", "Trebuchet"],
 ];
 export const DEFAULT_STYLE = { bg: "#f1f5f9", body: "#ffffff", text: "#1e293b", accent: "#0f766e", font: FONTS[0][0] };
-export const MERGE_TAGS = [["{First name}", "The patient's first name"], ["{Full name}", "The patient's full name"]];
+export const MERGE_TAGS = [
+  ["{First name}", "The patient's first name"],
+  ["{Last name}", "The patient's last name"],
+  ["{Full name}", "The patient's full name"],
+];
 
 const col = () => ({ src: "", title: "A title", html: "<p>A few words about it.</p>", label: "", href: "" });
 export const BLOCKS = {
@@ -56,33 +61,36 @@ export function cleanDesign(d) {
   return { style: styleOf(d), blocks };
 }
 
-/* ---------- Text from the editor: only simple formatting is kept ---------- */
-const RICH_OK = { P: 1, BR: 1, STRONG: 1, B: 1, EM: 1, I: 1, U: 1, A: 1, UL: 1, OL: 1, LI: 1 };
-export function cleanRich(html) {
-  const doc = new DOMParser().parseFromString(`<div>${String(html || "")}</div>`, "text/html");
+/* ---------- Text from Form Builder's editor, made email-safe ---------- */
+export const cleanRich = (html) => cleanRichHtml(String(html || ""));
+
+// Every element gets its look written on it (email apps ignore style sheets). The editor's own
+// settings (colour, size, alignment) come after the defaults, so they win.
+const RICH_STYLE = {
+  P: () => "margin:0 0 14px;",
+  H1: (st) => `margin:0 0 12px;font-size:26px;line-height:1.25;font-weight:bold;color:${st.text};`,
+  H2: (st) => `margin:4px 0 10px;font-size:21px;line-height:1.3;font-weight:bold;color:${st.text};`,
+  H3: (st) => `margin:4px 0 8px;font-size:18px;line-height:1.35;font-weight:bold;color:${st.text};`,
+  UL: () => "margin:0 0 14px;padding-left:22px;",
+  OL: () => "margin:0 0 14px;padding-left:22px;",
+  LI: () => "margin:0 0 6px;",
+  A: (st) => `color:${st.accent};text-decoration:underline;`,
+  HR: () => "border:none;border-top:1px solid #e2e8f0;margin:20px 0;",
+};
+export function emailRich(html, st) {
+  const doc = new DOMParser().parseFromString(`<div>${cleanRich(html)}</div>`, "text/html");
   const root = doc.body.firstChild;
-  const walk = (node) => {
-    [...node.childNodes].forEach((n) => {
-      if (n.nodeType === 3) return;
-      if (n.nodeType !== 1) { n.remove(); return; }
-      walk(n);
-      const tag = n.tagName;
-      if (tag === "DIV") { const p = doc.createElement("p"); p.append(...n.childNodes); n.replaceWith(p); return; }
-      if (!RICH_OK[tag]) { n.replaceWith(...n.childNodes); return; }
-      const href = tag === "A" ? safeUrl(n.getAttribute("href")) : "";
-      [...n.attributes].forEach((a) => n.removeAttribute(a.name));
-      if (tag === "A") { if (href) n.setAttribute("href", href); else n.replaceWith(...n.childNodes); }
-    });
-  };
-  walk(root);
-  return root.innerHTML.trim();
+  root.querySelectorAll("img").forEach((im) => { if (!safeUrl(im.getAttribute("src"))) im.remove(); }); // pictures go in Image blocks
+  root.querySelectorAll("a").forEach((a) => {
+    const h = safeUrl(a.getAttribute("href"));
+    if (h) a.setAttribute("href", h); else a.replaceWith(...a.childNodes);
+  });
+  root.querySelectorAll("*").forEach((el) => {
+    const d = RICH_STYLE[el.tagName];
+    if (d) el.setAttribute("style", d(st) + (el.getAttribute("style") || ""));
+  });
+  return root.innerHTML;
 }
-const styleRich = (html, st) => String(html || "")
-  .replace(/<p>/g, '<p style="margin:0 0 14px;">')
-  .replace(/<ul>/g, '<ul style="margin:0 0 14px;padding-left:22px;">')
-  .replace(/<ol>/g, '<ol style="margin:0 0 14px;padding-left:22px;">')
-  .replace(/<li>/g, '<li style="margin:0 0 6px;">')
-  .replace(/<a href=/g, `<a style="color:${st.accent};text-decoration:underline;" href=`);
 
 /* ---------- Blocks → email HTML ---------- */
 const IN = 536; // 600px email, 32px each side
@@ -113,7 +121,7 @@ export function blockHtml(b, st, preview = false) {
         `<h1 style="margin:0;font-family:${st.font};font-size:${size}px;line-height:1.25;font-weight:bold;color:${st.text};">${esc(b.text).replace(/\n/g, "<br>")}</h1>`);
     }
     case "text":
-      return box(`padding:10px 32px 2px;text-align:${a};${font(st)}`, styleRich(cleanRich(b.html), st));
+      return box(`padding:10px 32px 2px;text-align:${a};${font(st)}`, emailRich(b.html, st));
     case "image": {
       const w = b.edge ? 600 : Math.round(IN * Math.min(100, Math.max(20, Number(b.width) || 100)) / 100);
       const pic = safeUrl(b.src) ? img(b.src, b.alt, w, b.href, b.edge ? "" : `margin:${mg(a)};border-radius:8px;`)
@@ -139,8 +147,8 @@ export function blockHtml(b, st, preview = false) {
         (safeUrl(c.src) ? img(c.src, c.title, 252, c.href, "margin:0 0 12px;border-radius:8px;") : preview ? ph(252, 150, "margin:0 0 12px;") : "") +
         `<div style="${font(st, 15)}">` +
         (c.title ? `<div style="font-size:17px;font-weight:bold;margin:0 0 6px;">${esc(c.title)}</div>` : "") +
-        styleRich(cleanRich(c.html), st) + (c.label ? btn(c.label, c.href, st.accent, "#ffffff", st) : "") + "</div></div></div>";
-      return box("padding:16px 24px 0;font-size:0;", (b.items || []).slice(0, 2).map(cell).join(""));
+        emailRich(c.html, st) + (c.label ? btn(c.label, c.href, st.accent, "#ffffff", st) : "") + "</div></div></div>";
+        return box("padding:16px 24px 0;font-size:0;", (b.items || []).slice(0, 2).map(cell).join(""));
     }
     case "divider":
       return box("padding:10px 32px;", `<div style="height:1px;line-height:1px;font-size:1px;background:${hex(b.color, "#e2e8f0")};">&nbsp;</div>`);

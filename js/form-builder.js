@@ -5,6 +5,7 @@ import {
 import { mountFormEditor } from "./form-editor.js";
 import { openDuplicateDialog } from "./form-duplicate.js";
 import { openMarkingSetsDialog } from "./marking-sets.js";
+import { listTemplates as listMarketingEmails, openNewTemplateDialog, setBuilderBack } from "./mkt-templates.js";
 
 const svg = (p) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -24,6 +25,7 @@ const ICONS = {
   copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
   heart: '<path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78L12 21.23l8.84-8.84a5.5 5.5 0 0 0 0-7.78z"/>',
   specialist: '<path d="M4 3v6a5 5 0 0 0 10 0V3"/><path d="M9 14v2a5 5 0 0 0 10 0v-3"/><circle cx="19" cy="11" r="2"/>',
+  marketing: '<path d="M3 11v2a1 1 0 0 0 1 1h2l5 4V6L6 10H4a1 1 0 0 0-1 1z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/>',
 };
 
 function editedAgo(date) {
@@ -63,6 +65,7 @@ export function mountFormBuilder(container, { isAdmin = false, staff = null, tem
 function mountLibrary(container, { isAdmin, staff }) {
   const ui = { cat: "all", status: "all", q: "" };
   let templates = [];
+  let mkt = null; // marketing emails (null: not loaded, or no Marketing access)
 
   // A fresh root on every visit, so listeners never pile up on #content
   const root = document.createElement("section");
@@ -105,9 +108,10 @@ function mountLibrary(container, { isAdmin, staff }) {
   const $ = (s) => root.querySelector(s);
 
   function renderCats() {
-    const counts = { all: templates.length };
+    const counts = { all: templates.length, marketing: mkt ? mkt.length : 0 };
     templates.forEach((t) => { counts[t.category] = (counts[t.category] || 0) + 1; });
-    $('[data-role="cats"]').innerHTML = [{ key: "all", label: "All forms" }, ...FORM_CATEGORIES]
+    $('[data-role="cats"]').innerHTML = [{ key: "all", label: "All forms" }, ...FORM_CATEGORIES,
+      ...(mkt ? [{ key: "marketing", label: "Marketing emails" }] : [])]
       .map((c) => `
         <button type="button" class="fb-cat${ui.cat === c.key ? " active" : ""}" data-cat="${c.key}"
                 ${ui.cat === c.key ? 'aria-current="true"' : ""}>
@@ -118,6 +122,26 @@ function mountLibrary(container, { isAdmin, staff }) {
   function renderList() {
     const list = $('[data-role="list"]');
     const q = ui.q.trim().toLowerCase();
+    if (ui.cat === "marketing") {
+      const rows = (mkt || []).filter((t) => !q || `${t.name} ${t.subject}`.toLowerCase().includes(q));
+      const note = '<p class="muted fb-mk-note">Built in the email builder, with the Image Bank and the same text editor as forms. Also in Task Manager → Marketing.</p>';
+      list.innerHTML = note + (rows.length ? `<div class="fb-list">${rows.map((t) => `
+        <div class="fb-rowwrap">
+          <a class="fb-row" data-mkrow href="#/tasks/marketing/templates/${encodeURIComponent(t.id)}">
+            <span class="fb-row-icon">${svg(ICONS.marketing)}</span>
+            <span class="fb-row-main">
+              <span class="fb-row-name">${escapeHtml(t.name)}</span>
+              <span class="fb-row-meta"><span>Marketing email</span><span>${escapeHtml(t.subject || "No subject yet")}</span>
+                ${t.updatedAt ? `<span>${escapeHtml(editedAgo(t.updatedAt))}</span>` : ""}</span>
+            </span>
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS.chevron}</svg>
+          </a>
+        </div>`).join("")}</div>`
+        : (mkt && mkt.length
+          ? `<div class="state"><strong>No marketing emails match “${escapeHtml(ui.q.trim())}”</strong>Check the spelling.</div>`
+          : '<div class="state"><strong>Design your first marketing email</strong>Start from a ready-made design.<div class="retry"><button type="button" class="btn-primary" data-act="new">New marketing email</button></div></div>'));
+      return;
+    }
 
     if (!templates.length) {
       list.innerHTML = isAdmin
@@ -163,6 +187,11 @@ function mountLibrary(container, { isAdmin, staff }) {
       '<div class="fb-list"><div class="skeleton fb-skel"></div><div class="skeleton fb-skel"></div><div class="skeleton fb-skel"></div></div>';
     try {
       templates = await listFormTemplates({ isAdmin, force });
+      if (isAdmin) {
+        listMarketingEmails()
+          .then((l) => { mkt = l; if (root.isConnected) { renderCats(); if (ui.cat === "marketing") renderList(); } })
+          .catch((err) => { console.warn("Marketing emails not listed:", err); mkt = null; });
+      }
       renderCats();
       renderList();
     } catch (err) {
@@ -253,7 +282,12 @@ function mountLibrary(container, { isAdmin, staff }) {
       return;
     }
     if (e.target.closest('[data-act="marking-sets"]')) { openMarkingSetsDialog({ staff }); return; }
-    if (e.target.closest('[data-act="new"]')) { openNewForm(); return; }
+    if (e.target.closest("[data-mkrow]")) { setBuilderBack("#/forms"); return; }
+    if (e.target.closest('[data-act="new"]')) {
+      if (ui.cat === "marketing") { setBuilderBack("#/forms"); openNewTemplateDialog(staff); }
+      else openNewForm();
+      return;
+    }
     if (e.target.closest('[data-act="retry"]')) load(true);
   });
   $('[data-role="q"]').addEventListener("input", (e) => { ui.q = e.target.value; renderList(); });

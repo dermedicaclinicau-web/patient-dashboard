@@ -9670,7 +9670,9 @@ function mktTestTemplate_(cfg, body, session) {
   let who = { name: String(session.name || ''), first: String(session.name || '').split(' ')[0] };
   const pid = String(body.patientId || '').trim();
   if (pid && recDocIdOk_(pid)) { const p = flowPatient_(cfg, pid); if (p) who = flowWho_(p); }
-  const vals = { 'first name': who.first || 'there', 'full name': who.name || 'there', 'patient name': who.name || '' };
+  const parts = String(who.name || '').trim().split(/\s+/);
+  const vals = { 'first name': who.first || 'there', 'last name': parts.length > 1 ? parts[parts.length - 1] : '',
+    'full name': who.name || 'there', 'patient name': who.name || '' };
   const subject = '[Test] ' + (flowFill_(String(t.subject || ''), vals, false).replace(/\s+/g, ' ').trim().slice(0, 190)
     || 'A message from Dermedica');
   const filled = sanitizeEmailHtml_(flowFillHtml_(raw, vals));
