@@ -1,7 +1,7 @@
 import {
   categoryLabel, getFormTemplate, getFormVersion, saveFormTemplate, publishFormTemplate,
   formSnapshot, listFormTemplates, getLetterhead, saveLetterhead, RX_KINDS, rxKindGuess,
-  FORM_CATEGORIES, changeFormCategory,
+  FORM_CATEGORIES, changeFormCategory, formGroup, saveFormOnline,
 } from "./form-templates.js";
 import {
   esc, svg, ICONS, FIELD_TYPES, FIELD_GROUPS, CHOICE_TYPES, FILLS, FILLS_FOR,
@@ -35,6 +35,8 @@ import { listSpecialists, specialitiesOf } from "./specialists-api.js";
 import { openSpecialistBankDialog } from "./specialist-bank.js";
 import { tagPickerHtml, collectTagNodes, applyTagNodes, SAMPLE_TAGS, formFieldTags, tagUsedBy, renameTagRefs, tagRefRe } from "./form-tags.js";
 import { mountRichTextField } from "./rich-field.js";
+import { onlineBlockers, ONLINE_NO_CATS } from "./form-live.js";
+import { listStaffDetails } from "./staff-details.js";
 
 const UI = {
   up: '<polyline points="18 15 12 9 6 15"/>',
@@ -542,6 +544,57 @@ export async function mountFormEditor(container, { templateId, staff }) {
     `<label class="fe-insp-field"><span class="fe-insp-label">${label}</span>${control}${
       note ? `<small class="fe-note">${note}</small>` : ""}</label>`;
 
+  /* ---------- Patients fill it in online ---------- */
+  let staffList = null;
+  listStaffDetails().then((l) => { staffList = l; if (root.isConnected && sel === FORM) renderInspector(); })
+    .catch((err) => { console.warn("Staff not loaded:", err); staffList = []; });
+  let onlineSaving = Promise.resolve();
+
+  function onlineHtml() {
+    const head = '<span class="fe-insp-label">Patients fill it in online</span>';
+    if (ONLINE_NO_CATS.includes(tpl.category)) {
+      return `<div class="fe-insp-field">${head}<small class="fe-note">Treatment records and prescriptions are filled in by clinicians, so they can't be sent to patients.</small></div>`;
+    }
+    const o = tpl.online || {};
+    const on = o.on === true;
+    const blk = onlineBlockers(fields);
+    const ids = new Set(Array.isArray(o.notify) ? o.notify : []);
+    return `<div class="fe-insp-field fe-online">${head}
+      <label class="fe-check"><input type="checkbox" data-online="on"${on ? " checked" : ""}${blk.length && !on ? " disabled" : ""} />
+        Patients can fill this in from a link in an email</label>
+      ${blk.length ? `<small class="fe-note fe-bad">${on ? "Patients can't open it while the form has" : "Not available while the form has"}: ${esc(blk.join(", "))}.</small>` : ""}
+      ${on ? `<span class="fe-insp-sub"><small>Tell these staff when a patient fills it in</small></span>
+        <div class="fe-parts">${staffList ? (staffList.length ? staffList.map((s) => `<label class="fe-check"><input type="checkbox" data-online-staff="${esc(s.id)}"${
+          ids.has(s.id) ? " checked" : ""} /> ${esc(s.name)}</label>`).join("") : '<small class="fe-note">No staff found.</small>') : '<small class="fe-note">Loading staff…</small>'}</div>
+        <small class="fe-note">Nobody ticked: the Admins are told.</small>
+        <label class="fe-check"><input type="checkbox" data-online="todo"${o.todo !== false ? " checked" : ""} /> Add a to-do to their task list</label>
+        ${status !== "live" ? '<small class="fe-note">Publish the form so patients can open it.</small>' : ""}` : ""}
+      <small class="fe-note">Their name, email and other details are filled in for them (never their Medicare details). It's saved to their record as
+        "Filled in online by the patient". Changes take effect straight away, without publishing again.</small>
+    </div>`;
+  }
+
+  function saveOnline(el) {
+    const o = { on: false, notify: [], todo: true, ...(tpl.online || {}) };
+    if (el.dataset.online === "on") o.on = el.checked;
+    else if (el.dataset.online === "todo") o.todo = el.checked;
+    else {
+      const set = new Set(o.notify || []);
+      if (el.checked) set.add(el.dataset.onlineStaff); else set.delete(el.dataset.onlineStaff);
+      o.notify = [...set];
+    }
+    o.group = formGroup({ name, settings });
+    tpl.online = o;
+    renderInspector();
+    onlineSaving = onlineSaving
+      .then(() => saveFormOnline(templateId, o, staff))
+      .then(() => { if (el.dataset.online === "on") showToast(o.on ? "Patients can now fill this in online." : "Turned off for patients."); })
+      .catch((err) => {
+        console.error("Online setting not saved:", err);
+        showToast(err.code === "permission-denied" ? "Not saved. Check the Firestore rules have been published." : "Not saved. Try again.");
+      });
+  }
+
   function renderFormSettings() {
     const live = status === "live";
     insp.innerHTML = `
@@ -562,6 +615,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
         <small class="fe-note">Where this form is listed: on patient pages, in Task Manager and in the Form Builder.
           Changes straight away${status === "live" ? ", without publishing again" : ""}. Forms already saved for patients keep their category.</small>
       </label>
+      ${onlineHtml()}
       ${["consent", "treatment"].includes(tpl.category) ? `
       <label class="fe-insp-field"><span class="fe-insp-label">Treatment group</span>
         <select class="fb-select" data-s="group">
@@ -1035,6 +1089,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
   insp.addEventListener("input", (e) => {
     if (e.target.closest(".re")) return;
+    if (e.target.dataset.online !== undefined || e.target.dataset.onlineStaff !== undefined) { saveOnline(e.target); return; }
     const el = e.target;
     if (el.dataset.s) {
       settings[el.dataset.s] = el.type === "checkbox" ? el.checked : el.value;

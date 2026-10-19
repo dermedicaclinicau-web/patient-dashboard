@@ -10,6 +10,13 @@ export const safeUrl = (u) => {
   const s = String(u || "").trim();
   return /^(https:\/\/|mailto:|tel:)[^\s"'<>]+$/i.test(s) ? s : "";
 };
+// "Open a form" buttons: the form page. Each patient's own link is put in when the email is sent (Code.gs mktFormLinks_).
+export const FORM_PAGE = "https://dermedicaclinicau-web.github.io/patient-dashboard/form.html";
+export const linkOf = (x) => (x && x.link === "form"
+  ? (/^[A-Za-z0-9_-]{10,40}$/.test(String(x.formId || "")) ? `${FORM_PAGE}#f=${x.formId}` : "")
+  : String((x && x.href) || ""));
+const linkProblem = (x, label) => (x.link === "form"
+  ? `The "${label}" button needs a form chosen.` : `The "${label}" button has no link yet.`);
 export const uid = () => Math.random().toString(36).slice(2, 10);
 const hex = (c, d) => (/^#[0-9a-f]{3,8}$/i.test(String(c || "")) ? String(c) : d);
 const oneOf = (v, list, d) => (list.includes(v) ? v : d);
@@ -37,7 +44,7 @@ export function shapeCss(b) {
 }
 
 const col = () => ({ src: "", title: "A title", html: "<p>A few words about it.</p>", label: "", href: "" });
-const btnItem = (label = "Button", style = "filled") => ({ label, href: "", style });
+const btnItem = (label = "Button", style = "filled") => ({ label, href: "", style, link: "url", formId: "", formName: "" });
 export const BLOCKS = {
   header: { label: "Logo header", make: () => ({ logo: "", logoWidth: 160, align: "center", bg: "", text: "DERMEDICA" }) },
   heading: { label: "Heading", make: () => ({ text: "A heading", size: "large", align: "left" }) },
@@ -46,7 +53,7 @@ export const BLOCKS = {
   image: { label: "Image", make: () => ({ src: "", alt: "", href: "", caption: "", width: 100, align: "center", edge: false, ...SHAPE() }) },
   imagetext: { label: "Picture and text", make: () => ({ src: "", alt: "", href: "", side: "left", title: "A title",
     html: "<p>A few words to go with the picture.</p>", label: "", btnHref: "", ...SHAPE() }) },
-  button: { label: "Button", make: () => ({ label: "Book now", href: "", bg: "", color: "#ffffff", align: "center", full: false }) },
+  button: { label: "Button", make: () => ({ label: "Book now", href: "", link: "url", formId: "", formName: "", bg: "", color: "#ffffff", align: "center", full: false }) },
   buttons: { label: "Buttons side by side", make: () => ({ items: [btnItem("Book now"), btnItem("Shop skincare", "outline")],
     bg: "", color: "#ffffff", align: "center", same: false }) },
   product: { label: "Product", make: () => ({ src: "", name: "Product name", price: "", desc: "A short line about the product.", href: "", label: "Shop now", ...SHAPE() }) },
@@ -75,7 +82,8 @@ export function cleanDesign(d) {
     if (b.type === "buttons") {
       const list = Array.isArray(b.items) && b.items.length ? b.items : BLOCKS.buttons.make().items;
       b.items = list.slice(0, 3).map((it) => ({ label: String((it && it.label) || "Button"), href: String((it && it.href) || ""),
-        style: it && it.style === "outline" ? "outline" : "filled" }));
+        style: it && it.style === "outline" ? "outline" : "filled", link: it && it.link === "form" ? "form" : "url",
+        formId: String((it && it.formId) || ""), formName: String((it && it.formName) || "") }));
     }
   });
   return { style: styleOf(d), blocks };
@@ -173,12 +181,12 @@ export function blockHtml(b, st, preview = false) {
         `<div style="padding:${right ? "6px 20px 0 0" : "6px 0 0 20px"};">${text}</div></div></div>`);
     }
     case "button":
-      return box(`padding:14px 32px;text-align:${a};`, btn(b.label || "Button", b.href, hex(b.bg, st.accent), hex(b.color, "#ffffff"), st, b.full === true));
+      return box(`padding:14px 32px;text-align:${a};`, btn(b.label || "Button", linkOf(b), hex(b.bg, st.accent), hex(b.color, "#ffffff"), st, b.full === true));
     case "buttons": {
       const bg = hex(b.bg, st.accent);
       const fg = hex(b.color, "#ffffff");
       return box(`padding:14px 26px 4px;text-align:${a};`, (b.items || []).slice(0, 3).map((it) =>
-        btn(it.label || "Button", it.href, bg, fg, st, false, it.style === "outline", `margin:0 6px 10px;${b.same ? "min-width:150px;" : ""}`)).join(""));
+        btn(it.label || "Button", linkOf(it), bg, fg, st, false, it.style === "outline", `margin:0 6px 10px;${b.same ? "min-width:150px;" : ""}`)).join(""));
     }
     case "product": {
       const pic = safeUrl(b.src) ? img(b.src, b.name, 200, b.href, shapeCss(b)) : preview ? ph(200, 200) : "";
@@ -249,8 +257,8 @@ export function checkDesign(t) {
   const blocks = (t.design && t.design.blocks) || [];
   if (!blocks.length) out.push("The email is empty. Add a block.");
   blocks.forEach((b) => {
-    if (b.type === "button" && !safeUrl(b.href)) out.push(`The "${b.label || "Button"}" button has no link yet.`);
-    if (b.type === "buttons") (b.items || []).forEach((it) => { if (!safeUrl(it.href)) out.push(`The "${it.label || "Button"}" button has no link yet.`); });
+    if (b.type === "button" && !safeUrl(linkOf(b))) out.push(linkProblem(b, b.label || "Button"));
+    if (b.type === "buttons") (b.items || []).forEach((it) => { if (!safeUrl(linkOf(it))) out.push(linkProblem(it, it.label || "Button")); });
     if (b.type === "image" && !safeUrl(b.src)) out.push("An image block has no picture yet.");
     if (b.type === "imagetext") {
       if (!safeUrl(b.src)) out.push("A picture and text block has no picture yet.");

@@ -66,6 +66,7 @@ function normalise(snap) {
     fields: Array.isArray(d.fields) ? d.fields : [],
     fieldCount: Array.isArray(d.fields) ? d.fields.length : 0,
     settings: d.settings && typeof d.settings === "object" ? d.settings : {},
+    online: d.online && typeof d.online === "object" ? d.online : null,
     version: Number(d.version || 0),
     publishedAt: toDate(d.publishedAt),
     publishedBy: d.publishedBy || "",
@@ -226,6 +227,25 @@ export async function changeFormCategory(id, category, staff) {
   });
   cache = null;
   publishedCache = null; // the patient dashboard lists pick it up straight away
+}
+// "Patients can fill this in online": saved straight away, without publishing again.
+// online: { on, notify: [staff ids], todo, group }
+export async function saveFormOnline(id, online, staff) {
+  const uid = currentUid();
+  const o = online || {};
+  await updateDoc(doc(db, COLLECTION, id), {
+    online: {
+      on: o.on === true,
+      notify: (Array.isArray(o.notify) ? o.notify : []).map(String).filter((x) => /^[A-Za-z0-9_-]{1,80}$/.test(x)).slice(0, 20),
+      todo: o.todo !== false,
+      group: String(o.group || "").slice(0, 40),
+    },
+    updatedAt: serverTimestamp(),
+    updatedBy: (staff && staff.name) || "",
+    updatedByUid: uid,
+  });
+  cache = null;
+  publishedCache = null;
 }
 /* ===================== Publishing ===================== */
 

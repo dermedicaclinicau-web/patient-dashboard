@@ -50,6 +50,7 @@ function doPost(e) {
     if (body.action === 'upload') return json_(handleUpload_(body));
     if (body.action === 'marketing') return json_(handleMarketing_(body));
     if (body.action === 'marketingPublic') return json_(handleMarketingPublic_(body)); // the unsubscribe page (no login)
+    if (body.action === 'publicForm') return json_(handlePublicForm_(body)); // a patient's online form (no login)
 
     const pin = String(body.pin || '').trim();
 
@@ -9682,7 +9683,7 @@ function mktTestTemplate_(cfg, body, session) {
     'full name': who.name || 'there', 'patient name': who.name || '' };
   const subject = '[Test] ' + (flowFill_(String(body.subject || t.subject || ''), vals, false).replace(/\s+/g, ' ').trim().slice(0, 190)
     || 'A message from Dermedica');
-  const filled = sanitizeEmailHtml_(flowFillHtml_(raw, vals));
+  const filled = mktFormLinks_(sanitizeEmailHtml_(flowFillHtml_(raw, vals)), 'test', pid && recDocIdOk_(pid) ? pid : '');
   const banner = '<div style="margin:0 auto 12px;max-width:600px;padding:10px 14px;border:1px dashed #f59e0b;border-radius:10px;' +
     'background:#fffbeb;color:#92400e;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.5">' +
     '<strong>Test of the template "' + invEsc_(t.name || '') + '".</strong> Filled in as ' + invEsc_(who.name || 'you') +
@@ -10124,6 +10125,7 @@ function mktSendBatch_(cfg, c, deadline) {
     if (isEmail_(String(r.e || '')) && !supp[mktEmailKey_(r.e)]) {
       const vals = { 'first name': r.f || 'there', 'last name': r.l || '', 'full name': r.n || 'there', 'patient name': r.n || '' };
       let body = flowFillHtml_(html0, vals);
+      body = mktFormLinks_(body, c._id, r.p);   // "Open a form" buttons get this patient's own link
       let tail = mktFooterHtml_(r.p, r.e, c._id);
       if (track) {
         body = body.replace(/__MKTL(\d+)__/g, function (m, i) {
@@ -10305,7 +10307,7 @@ function mktClick_(body) {
     cache.put(k, '1', 30);
     try { mktRecordClick_(cfg, tok); } catch (e) { console.warn('Click not recorded: ' + e); }
   }
-  return { ok: true, url: url };
+  return { ok: true, url: mktFormLinks_(url, tok.cid, tok.pid) };
 }
 
 function mktRecordClick_(cfg, tok) {
@@ -10445,4 +10447,316 @@ function testMarketingTracking() {
   console.log('Open picture address: ' + (mktWebAppUrl_() || 'MISSING. Add WEBAPP_URL (the /exec address) in Script Properties.'));
   console.log('Click page: ' + MKT_TRACK_PAGE_);
   console.log('Bounces found: ' + mktCheckBounces_(getConfig_(), true));
+}
+
+/* ===================== Online forms: a patient fills in a form from a link ===================== */
+// An "Open a form" button in a marketing email links to form.html#f=<form>. When the email goes out, mktFormLinks_ swaps it
+// for the patient's own signed link: form.html#t=p1.<form, patient, campaign, expiry>.<signature>.
+// The page asks for the form (op "get"), and sends the answers back (op "submit"). They're checked against the published
+// form and saved to form_submissions, in the same write as online_forms/{key}, so each link can be sent once only.
+// Only forms with "Patients can fill this in online" ticked (form_templates/{id}.online.on), and never treatment
+// records, prescriptions or forms with staff-only fields (the same list as js/form-live.js).
+
+const PF_DONE_ = 'online_forms';
+const PF_PAGE_ = PORTAL_URL_ + 'form.html';
+const PF_DAYS_ = 60;
+const PF_LAYOUT_ = ['text_block', 'space', 'letterhead', 'watermark', 'button'];
+const PF_NO_CATS_ = ['treatment', 'prescription'];
+const PF_OK_TYPES_ = ['patient', 'short_text', 'long_text', 'email', 'number', 'date', 'record_date', 'dropdown',
+  'single_choice', 'checkboxes', 'checkbox_notes', 'sub_checks', 'table', 'calculation', 'signature', 'image',
+  'text_block', 'space', 'letterhead', 'watermark', 'button'];
+const PF_NO_REQUIRE_ = ['calculation', 'image', 'patient', 'text_block', 'space', 'letterhead', 'watermark', 'button'];
+const PF_FILLS_ = { 'patient.name': 'name', 'patient.firstName': 'firstName', 'patient.lastName': 'lastName', 'patient.dob': 'dobKey',
+  'patient.email': 'email', 'patient.mobile': 'mobile', 'patient.address': 'address' };
+const PF_PARTS_ = { name: 'name', dob: 'dobKey', mobile: 'mobile', email: 'email', address: 'address', pttId: 'pttId' };
+
+function pfToken_(tid, pid, cid, exp) {
+  const payload = 'p1.' + b64url_(JSON.stringify([String(tid), String(pid || ''), String(cid || ''), exp || Date.now() + PF_DAYS_ * 86400000]));
+  return payload + '.' + mktSig_(payload).slice(0, 22);
+}
+function pfRead_(t) {
+  const m = /^p1\.([A-Za-z0-9_-]{4,600})\.([A-Za-z0-9_-]{22})$/.exec(String(t || ''));
+  if (!m || mktSig_('p1.' + m[1]).slice(0, 22) !== m[2]) return null;
+  try {
+    const s = m[1].replace(/-/g, '+').replace(/_/g, '/');
+    const a = JSON.parse(Utilities.newBlob(Utilities.base64Decode(s + '==='.slice((s.length + 3) % 4))).getDataAsString());
+    if (!Array.isArray(a) || !/^[A-Za-z0-9_-]{10,40}$/.test(String(a[0]))) return null;
+    const pid = a[1] ? docId_(a[1]) : '';
+    if (a[1] && !pid) return null;
+    return { tid: String(a[0]), pid: pid, cid: String(a[2] || ''), exp: Number(a[3]) || 0, raw: m[0] };
+  } catch (e) { return null; }
+}
+const pfDoneKey_ = function (tok) { return 'o_' + flowHash_([tok.tid, tok.pid, tok.cid].join('|')); };
+
+// form.html#f=<id> links in an email → this patient's own link
+function mktFormLinks_(html, cid, pid) {
+  return String(html || '').replace(/https:\/\/[^"'\s<>]*\/form\.html#f=([A-Za-z0-9_-]{10,40})/g, function (m, id) {
+    return m.indexOf(PF_PAGE_) === 0 ? PF_PAGE_ + '#t=' + pfToken_(id, pid, cid) : m;
+  });
+}
+
+function pfBlocked_(fields) {
+  return (fields || []).some(function (f) {
+    return !f || PF_OK_TYPES_.indexOf(f.type) === -1 ||
+      (f.type === 'image' && (f.source === 'staff' || f.annotate === true)) ||
+      (f.type === 'signature' && f.signer === 'practitioner');
+  });
+}
+
+function pfLoad_(cfg, tok) {
+  const tpl = fsGetDoc_(cfg, 'form_templates/' + tok.tid);
+  if (!tpl || tpl.status !== 'live' || !(tpl.online && tpl.online.on === true) || PF_NO_CATS_.indexOf(tpl.category) !== -1 ||
+      !Number(tpl.version)) return { problem: 'UNAVAILABLE' };
+  const ver = fsGetDoc_(cfg, 'form_templates/' + tok.tid + '/versions/' + Number(tpl.version));
+  if (!ver || !Array.isArray(ver.fields) || pfBlocked_(ver.fields)) return { problem: 'UNAVAILABLE' };
+  const doc = tok.pid ? flowPatient_(cfg, tok.pid) : null;
+  if (tok.pid && !doc) return { problem: 'NO_PATIENT' };
+  return { tpl: tpl, ver: ver, doc: doc, test: !tok.pid || tok.cid === 'test' };
+}
+
+// Only the details this form uses (never Medicare)
+function pfPatient_(doc, fields) {
+  const w = flowWho_(doc);
+  const all = { name: w.name, firstName: w.first, lastName: String(doc['Last Name'] || ''), dobKey: String(doc.DobKey || ''),
+    email: String(doc.Email || ''), mobile: String(doc.Mobile || ''), address: String(doc.Address || ''), pttId: String(doc.PttID || doc._id) };
+  const need = { name: true, firstName: true, lastName: true };
+  (fields || []).forEach(function (f) {
+    if (PF_FILLS_[f.fill]) need[PF_FILLS_[f.fill]] = true;
+    if (f.type === 'patient') {
+      (Array.isArray(f.parts) && f.parts.length ? f.parts : ['name', 'dob', 'address'])
+        .forEach(function (k) { if (PF_PARTS_[k]) need[PF_PARTS_[k]] = true; });
+    }
+  });
+  const txt = JSON.stringify(fields || []).toLowerCase();
+  if (/\{\s*(date of birth|patient age)\s*\}/.test(txt)) need.dobKey = true;
+  if (/\{\s*patient address\s*\}/.test(txt)) need.address = true;
+  if (/\{\s*patient mobile\s*\}/.test(txt)) need.mobile = true;
+  if (/\{\s*patient email\s*\}/.test(txt)) need.email = true;
+  if (/\{\s*patient id\s*\}/.test(txt)) need.pttId = true;
+  const out = {};
+  Object.keys(need).forEach(function (k) { out[k] = all[k]; });
+  return out;
+}
+
+// The Patient details block on the saved form, from their record (the patient can't change it)
+function pfPatientAnswer_(doc, f) {
+  const w = flowWho_(doc);
+  const all = {
+    name: w.name, dob: recLongDate_(doc.DobKey) || String(doc.DOB || ''), mobile: recMobile_(doc.Mobile),
+    email: String(doc.Email || ''), address: String(doc.Address || ''), pttId: String(doc.PttID || doc._id),
+    medicare: recMedicare_(doc['Medicare Number']), medicareIrn: String(doc['Medicare IRN'] || ''),
+    medicareExp: recMedicareExp_(doc['Medicare Expiry']),
+  };
+  const out = {};
+  (Array.isArray(f.parts) && f.parts.length ? f.parts : ['name', 'dob', 'address'])
+    .forEach(function (k) { if (k in all) out[k] = all[k]; });
+  return out;
+}
+
+function pfPatientTags_(doc, recordDate, today) {
+  const w = flowWho_(doc);
+  return {
+    'patient name': w.name, 'first name': w.first, 'last name': String(doc['Last Name'] || ''),
+    'date of birth': recLongDate_(doc.DobKey) || String(doc.DOB || ''), 'patient age': recAge_(doc.DobKey, recordDate),
+    'patient address': String(doc.Address || ''), 'patient mobile': recMobile_(doc.Mobile), 'patient email': String(doc.Email || ''),
+    'patient id': String(doc.PttID || doc._id), 'medicare number': recMedicare_(doc['Medicare Number']),
+    'medicare reference number': String(doc['Medicare IRN'] || ''), 'medicare expiry': recMedicareExp_(doc['Medicare Expiry']),
+    'record date': recLongDate_(recordDate), 'today': recLongDate_(today), 'my name': '',
+  };
+}
+
+// A picture for the page (Firebase Storage first, then the older Google Drive bank)
+function pfImage_(cfg, id) {
+  if (!/^[A-Za-z0-9_-]{10,80}$/.test(String(id || ''))) return '';
+  let blob = null;
+  try {
+    const m = fsGetDoc_(cfg, 'image_bank/' + id);
+    if (m && m.fullPath) blob = storageImageBlob_(cfg, String(m.fullPath), String(m.name || 'image'));
+  } catch (e) { /* tried the Drive bank below */ }
+  if (!blob) {
+    const root = String(PropertiesService.getScriptProperties().getProperty('IMAGE_BANK_FOLDER_ID') || '').trim();
+    const f = root ? bankFile_(root, id) : null;
+    blob = f ? emailImageBlob_(f) : null;
+  }
+  if (!blob || blob.getBytes().length > 2500000) return '';
+  return 'data:' + (blob.getContentType() || 'image/png') + ';base64,' + Utilities.base64Encode(blob.getBytes());
+}
+
+// Answers from the browser: plain values only, kept to a sensible size (no lists inside lists: Firestore can't store them)
+function pfClean_(v, d) {
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'string') return v.slice(0, 5000);
+  if (typeof v === 'number') return isFinite(v) ? v : null;
+  if (typeof v === 'boolean') return v;
+  if (d > 4) return null;
+  if (Array.isArray(v)) return v.slice(0, 60).map(function (x) { return Array.isArray(x) ? null : pfClean_(x, d + 1); });
+  if (typeof v === 'object') {
+    const o = {};
+    Object.keys(v).slice(0, 40).forEach(function (k) { if (k.length <= 200) o[k] = pfClean_(v[k], d + 1); });
+    return o;
+  }
+  return null;
+}
+function pfBlank_(v) {
+  return v === null || v === undefined || v === '' || (Array.isArray(v) && !v.length);
+}
+
+function handlePublicForm_(body) {
+  const tok = pfRead_(body.t);
+  if (!tok) return { ok: true, problem: 'BAD_LINK' };
+  if (tok.exp && tok.exp < Date.now()) return { ok: true, problem: 'EXPIRED' };
+  const cache = CacheService.getScriptCache();
+  const rk = 'pf_rl_' + flowHash_(tok.raw);
+  const n = Number(cache.get(rk) || 0);
+  if (n >= 60) return { ok: true, problem: 'BUSY' };
+  cache.put(rk, String(n + 1), 3600);
+  try {
+    const cfg = getConfig_();
+    const L = pfLoad_(cfg, tok);
+    if (L.problem) return { ok: true, problem: L.problem };
+    const op = String(body.op || '');
+    if (op === 'get') return pfGet_(cfg, tok, L);
+    if (op === 'submit') return pfSubmit_(cfg, tok, L, body);
+    return { ok: false, error: 'BAD_REQUEST' };
+  } catch (err) {
+    console.error('Online form failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: true, problem: 'SERVER' };
+  }
+}
+
+function pfGet_(cfg, tok, L) {
+  if (!L.test && fsGetDoc_(cfg, PF_DONE_ + '/' + pfDoneKey_(tok))) return { ok: true, done: true };
+  const images = {};
+  L.ver.fields.forEach(function (f) {
+    if (f.type === 'image' && f.fileId && !(f.fileId in images)) images[f.fileId] = pfImage_(cfg, f.fileId);
+  });
+  let lh = null;
+  try { lh = fsGetDoc_(cfg, 'form_settings/letterhead'); } catch (e) { /* the page shows the form without it */ }
+  return {
+    ok: true, test: L.test,
+    form: { name: String(L.ver.name || ''), fields: L.ver.fields, settings: L.ver.settings || {}, version: Number(L.tpl.version) },
+    letterhead: lh || {}, images: images, patient: L.doc ? pfPatient_(L.doc, L.ver.fields) : {},
+  };
+}
+
+function pfSubmit_(cfg, tok, L, body) {
+  if (L.test) return { ok: true, problem: 'TEST' };
+  if (Number(body.version) !== Number(L.tpl.version)) return { ok: true, problem: 'CHANGED' };
+  const inA = body.answers && typeof body.answers === 'object' ? body.answers : {};
+  const inS = body.signatures && typeof body.signatures === 'object' ? body.signatures : {};
+  if (JSON.stringify(inA).length + JSON.stringify(inS).length > 850000) return { ok: true, problem: 'TOO_BIG' };
+
+  const doc = L.doc;
+  const fields = L.ver.fields;
+  const byId = {};
+  fields.forEach(function (f) { if (f && f.id) byId[f.id] = f; });
+  const today = flowKey_(Date.now());
+  const answers = {};
+  Object.keys(inA).forEach(function (k) {
+    const m = /^(.+?)(__x|__d|__p)?$/.exec(k);
+    const f = m && byId[m[1]];
+    if (!f || PF_LAYOUT_.indexOf(f.type) !== -1 || f.type === 'patient') return;
+    answers[k] = pfClean_(inA[k], 0);
+  });
+  const signatures = {};
+  fields.forEach(function (f) {
+    if (f.type === 'patient') answers[f.id] = pfPatientAnswer_(doc, f);
+    if (f.type !== 'signature') return;
+    const s = inS[f.id];
+    if (typeof s === 'string' && s.length < 400000 && /^data:image\/png;base64,[A-Za-z0-9+\/=]+$/.test(s)) {
+      signatures[f.id] = s;
+      const a = answers[f.id] && typeof answers[f.id] === 'object' ? answers[f.id] : {};
+      answers[f.id] = { signed: true, name: String(a.name || '').slice(0, 120), date: today };
+    } else {
+      delete answers[f.id];
+    }
+  });
+  // Questions that always show and must be answered
+  const missing = fields.some(function (f) {
+    if (f.required !== true || f.showWhen || f.liveHide || PF_NO_REQUIRE_.indexOf(f.type) !== -1) return false;
+    return f.type === 'signature' ? !signatures[f.id] : pfBlank_(answers[f.id]);
+  });
+  if (missing) return { ok: true, problem: 'INCOMPLETE' };
+
+  // The record date: their Record date answer (today or up to 30 days back), otherwise today
+  const rdF = fields.filter(function (f) { return f.type === 'record_date'; })[0];
+  let recordDate = rdF && typeof answers[rdF.id] === 'string' ? answers[rdF.id] : String(body.recordDate || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(recordDate) || recordDate > today || flowDays_(recordDate, today) > 30) recordDate = today;
+
+  // Tags: the patient's come from their record
+  const tagsIn = inA.__tags && typeof inA.__tags === 'object' ? inA.__tags : {};
+  const tags = {};
+  Object.keys(tagsIn).slice(0, 150).forEach(function (k) {
+    if (k.length <= 80 && typeof tagsIn[k] === 'string') tags[k] = tagsIn[k].slice(0, 1000);
+  });
+  answers.__tags = Object.assign(tags, pfPatientTags_(doc, recordDate, today));
+
+  // Details they changed on the form (their record isn't changed: staff are told)
+  const changed = [];
+  const digits = function (s) { return String(s || '').replace(/\D/g, '').replace(/^61(4\d{8})$/, '0$1'); };
+  const norm = function (s) { return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); };
+  fields.forEach(function (f) {
+    const v = answers[f.id];
+    if (typeof v !== 'string' || !v.trim()) return;
+    if (f.fill === 'patient.email' && norm(v) !== norm(doc.Email)) changed.push({ what: 'Email', from: String(doc.Email || ''), to: v });
+    if (f.fill === 'patient.mobile' && digits(v) !== digits(doc.Mobile)) changed.push({ what: 'Mobile', from: recMobile_(doc.Mobile), to: v });
+    if (f.fill === 'patient.address' && norm(v) !== norm(doc.Address)) changed.push({ what: 'Address', from: String(doc.Address || ''), to: v });
+  });
+
+  const now = new Date();
+  const s = L.ver.settings || {};
+  const who = flowWho_(doc);
+  const subId = 'pf' + Utilities.getUuid().replace(/-/g, '').slice(0, 18);
+  const sub = {
+    templateId: tok.tid, templateName: String(L.ver.name || L.tpl.name || 'Form'), category: String(L.tpl.category || ''),
+    group: String(s.group || (L.tpl.online && L.tpl.online.group) || ''), version: Number(L.tpl.version),
+    patientId: doc._id, patientPttId: String(doc.PttID || ''), patientName: who.name, recordDate: recordDate,
+    answers: answers, signatures: signatures, createdAt: now, createdBy: 'Patient (online)', createdByUid: '',
+    online: { campaignId: tok.cid, at: now.toISOString(), changed: changed.slice(0, 5) },
+  };
+  const key = pfDoneKey_(tok);
+  const base = fsBase_(cfg);
+  const ok = mktCommit_(cfg, [
+    { update: { name: base + '/' + PF_DONE_ + '/' + key, fields: toFields_({
+      templateId: tok.tid, patientId: doc._id, campaignId: tok.cid, submissionId: subId, at: now.toISOString() }) },
+      currentDocument: { exists: false } },
+    { update: { name: base + '/form_submissions/' + subId, fields: toFields_(sub) }, currentDocument: { exists: false } },
+  ]);
+  if (!ok) return { ok: true, problem: fsGetDoc_(cfg, PF_DONE_ + '/' + key) ? 'DONE' : 'SERVER' };
+
+  try { pfNotify_(cfg, L, sub, subId); } catch (e) { console.warn('Online form saved, but staff not told: ' + e); }
+  if (/^[A-Za-z0-9_-]{10,40}$/.test(tok.cid)) {
+    try { mktOnce_(cfg, tok.cid, 'forms', doc._id, { at: now.toISOString(), submissionId: subId }, [mktInc_('stats.forms')]); }
+    catch (e) { /* not a campaign (a flow), or not essential */ }
+  }
+  console.log('Online form "' + sub.templateName + '" filled in by ' + mktMask_(doc.Email) + ' (' + subId + ')');
+  return { ok: true };
+}
+
+// The staff chosen in Form settings (nobody chosen: the Admins) get an email, and a to-do if it's ticked
+function pfNotify_(cfg, L, sub, subId) {
+  const o = L.tpl.online || {};
+  const ids = (Array.isArray(o.notify) ? o.notify : []).map(String);
+  const all = getStaffDocs_().filter(function (x) { return x.active !== false; });
+  let who = all.filter(function (x) { return ids.indexOf(x.id) !== -1; });
+  if (!who.length) who = all.filter(function (x) { return /^admin$/i.test(String(x.role || '')); });
+  const ch = sub.online.changed || [];
+  const inner = '<h2 style="margin:0 0 6px;font-size:20px;color:#0f766e">' + invEsc_(sub.patientName) + ' filled in ' + invEsc_(sub.templateName) + '</h2>' +
+    '<p style="margin:0 0 12px;color:#475569">Filled in online by the patient, ' + invEsc_(recLongDate_(sub.recordDate)) + '. It\'s saved to their record.</p>' +
+    (ch.length ? '<p style="margin:0 0 6px"><strong>They changed their details on the form.</strong> Their record hasn\'t been changed:</p><ul style="margin:0 0 12px;padding-left:20px">' +
+      ch.map(function (c) { return '<li>' + invEsc_(c.what) + ': ' + invEsc_(c.from || '(none)') + ' → <strong>' + invEsc_(c.to) + '</strong></li>'; }).join('') + '</ul>' : '');
+  const html = invEmailWrap_(inner, 'form-record/' + subId, 'Open the form');
+  const to = uniq_(who.map(function (x) { return isEmail_(x.email) ? x.email : ''; }));
+  if (to.length && MailApp.getRemainingDailyQuota() > 0) {
+    MailApp.sendEmail({ to: to.join(','), name: 'Dermedica Portal', subject: 'Online form: ' + sub.patientName + ' filled in ' + sub.templateName,
+      htmlBody: html, body: emailHtmlToText_(html) });
+  }
+  if (o.todo !== false && who.length) {
+    staffTodoCreate_(cfg, {
+      recipients: who.map(function (x) { return { id: x.id, name: x.name }; }),
+      text: 'Review: ' + sub.patientName + ' filled in ' + sub.templateName + ' online' + (ch.length ? ' (details changed)' : ''),
+      due: flowKey_(Date.now()), patientId: sub.patientId, patientName: sub.patientName,
+      taskId: '', taskName: 'Online form', runId: subId, by: 'Online form', byUid: '',
+    });
+  }
 }

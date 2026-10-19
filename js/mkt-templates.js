@@ -18,6 +18,7 @@ import {
   footerPreview, checkDesign,
 } from "./mkt-email.js";
 import { openCropper } from "./mkt-crop.js";
+import { listPublishedForms } from "./form-templates.js";
 
 const COL = "mkt_templates";
 const EMAIL_RE = /[^\s@,;<>"']+@[^\s@,;<>"']+\.[^\s@,;<>"']+/g;
@@ -188,6 +189,18 @@ async function sspProducts() {
   }
   return sspCache;
 }
+// Published forms patients can fill in online (Form Builder → Form settings)
+let formsCache = null;
+async function loadOnlineForms() {
+  if (!formsCache) {
+    try {
+      formsCache = (await listPublishedForms())
+        .filter((t) => t.online && t.online.on === true && !["treatment", "prescription"].includes(t.category))
+        .map((t) => ({ id: t.id, name: t.name }));
+    } catch (err) { console.warn("Forms not loaded:", err); formsCache = []; }
+  }
+  return formsCache;
+}
 
 /* ===================== The list ===================== */
 
@@ -350,6 +363,16 @@ const fShape = (b, label = "Picture shape") => `<div class="fe-insp-field"><span
   fCheck("circle", "Circle (crop it to Square first)", b.circle) +
   fRange("border", "Border", Number(b.border) || 0, 0, 8, "px") +
   fColor("borderColor", "Border colour", b.borderColor, "#e2e8f0", false);
+// Where a button goes: a web page, or a form for the patient to fill in
+const fLink = (p, it) => fSeg(`${p}link`, "Button opens", [["url", "A web page"], ["form", "A form to fill in"]], it.link === "form" ? "form" : "url") +
+  (it.link === "form"
+    ? setting("Form", `<select class="fb-select" data-k="${p}formId"><option value="">${
+        formsCache ? (formsCache.length ? "Choose a form…" : "No forms are set up for online filling yet") : "Loading forms…"}</option>${
+        (formsCache || []).map((x) => `<option value="${esc(x.id)}"${x.id === it.formId ? " selected" : ""}>${esc(x.name)}</option>`).join("")}${
+        it.formId && formsCache && !formsCache.some((x) => x.id === it.formId)
+          ? `<option value="${esc(it.formId)}" selected>${esc(it.formName || "This form")} (not online any more)</option>` : ""}</select>`,
+        "Each patient gets their own link, with their details already filled in. To list a form here, tick “Patients can fill this in online” in its Form settings.")
+    : fText(`${p}href`, "Link", it.href, "https://"));
 const fRich = (k, label) => `<div class="fe-insp-field"><span class="fe-insp-label">${label}</span><div data-rt="${k}"></div></div>`;
 const tagChips = () => `<div class="fe-insp-field"><span class="fe-insp-label">Insert a tag</span>
   <div class="fe-chiprow">${MERGE_TAGS.map(([tag, help]) =>
@@ -534,12 +557,12 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
         fText("label", "Button text (optional)", b.label) + fText("btnHref", "Button link", b.btnHref, "https://") +
         fText("href", "Picture link (optional)", b.href, "https://") + tagChips() +
         '<p class="fe-note fe-pad">On phones the text goes under the picture.</p>';
-      case "button": return fText("label", "Button text", b.label) + tagChips() + fText("href", "Link", b.href, "https://dermedica.com.au/book") +
+      case "button": return fText("label", "Button text", b.label) + tagChips() + fLink("", b) +
         `<div class="fe-two">${fColor("bg", "Button colour", b.bg, st.accent)}${fColor("color", "Text colour", b.color, "#ffffff")}</div>` +
         fAlign(b.align) + fCheck("full", "Full width", b.full);
       case "buttons": return b.items.map((it, i) => `<div class="fe-insp-field mb-subhead"><span class="fe-insp-label mb-colh">Button ${i + 1}</span>${
           b.items.length > 1 ? `<button type="button" class="lh-btn is-quiet" data-btn-del="${i}">Remove</button>` : ""}</div>` +
-          fText(`items.${i}.label`, "Text", it.label) + fText(`items.${i}.href`, "Link", it.href, "https://") +
+          fText(`items.${i}.label`, "Text", it.label) + fLink(`items.${i}.`, it) +
           fSeg(`items.${i}.style`, "Style", [["filled", "Filled"], ["outline", "Outline"]], it.style)).join("") +
         (b.items.length < 3 ? '<button type="button" class="lh-btn mb-addbtn" data-act="btn-add">+ Add a button</button>' : "") +
         tagChips() +
@@ -591,6 +614,9 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       <div class="mb-side-acts"><button type="button" class="lh-btn" data-act="done">Done</button>
         <button type="button" class="fe-remove" data-act="remove">${ICONS.trash}Remove</button></div>`;
     mountEditors();
+    if ((b.type === "button" || b.type === "buttons") && !formsCache) {
+      loadOnlineForms().then(() => { if (sel === b.id) drawSide(); });
+    }
     if (b.type === "product" && !sspCache) {
       sspProducts().then(() => { if (sel === b.id) drawSide(); }).catch((err) => console.warn("Catalogue not loaded:", err));
     }
@@ -758,7 +784,13 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
     const k = el.dataset.k;
     if (!k) return;
     if (el.type === "checkbox") setPath(target(), k, el.checked);
-    else if (el.type === "radio" || el.tagName === "SELECT") setPath(target(), k, el.value);
+    else if (el.type === "radio" || el.tagName === "SELECT") {
+      setPath(target(), k, el.value);
+      if (/formId$/.test(k)) {
+        const fm = (formsCache || []).find((x) => x.id === el.value);
+        setPath(target(), k.replace(/formId$/, "formName"), fm ? fm.name : "");
+      }
+    }
     else return;
     drawSide();
     changed();
@@ -791,7 +823,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
     if (cr) { cropPicture(target(), cr.dataset.crop, cr); return; }
     if (e.target.closest('[data-act="btn-add"]')) {
       const b = selBlock();
-      if (b && b.items.length < 3) { b.items.push({ label: "Button", href: "", style: "filled" }); drawSide(); changed(); }
+      if (b && b.items.length < 3) { b.items.push({ label: "Button", href: "", style: "filled", link: "url", formId: "", formName: "" }); drawSide(); changed(); }
       return;
     }
     const bd = e.target.closest("[data-btn-del]");

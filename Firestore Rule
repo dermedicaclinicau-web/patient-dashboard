@@ -28,6 +28,11 @@ service cloud.firestore {
       allow read: if request.auth != null;
       allow write: if false;
     }
+    // Online forms already sent back by patients, one per link (written by Apps Script only)
+    match /online_forms/{id} {
+      allow read: if isStaff();
+      allow write: if false;
+    }
 
     match /mkt_templates/{id} {
     allow read: if can('marketing.manage');
@@ -74,18 +79,18 @@ service cloud.firestore {
     }
     // Results: written by Apps Script only
     match /{sub}/{rid} {
-      allow read: if can('marketing.manage') && sub in ['opens', 'clicks', 'unsubs', 'bounces'];
+      allow read: if can('marketing.manage') && sub in ['opens', 'clicks', 'unsubs', 'bounces', 'forms'];
       allow write: if false;
     }
   }
-  
+
     // A permission from the login token (Admins have everything)
     function can(p) {
       return isAdmin() || (isStaff() && request.auth.token.perms is list && p in request.auth.token.perms);
     }
 
     function validFormTemplate(d) {
-      return d.keys().hasOnly(['name', 'category', 'status', 'fields', 'settings', 'version',
+      return d.keys().hasOnly(['name', 'category', 'status', 'fields', 'settings', 'version', 'online',
                                'createdAt', 'createdBy', 'createdByUid',
                                'updatedAt', 'updatedBy', 'updatedByUid',
                                'publishedAt', 'publishedBy'])

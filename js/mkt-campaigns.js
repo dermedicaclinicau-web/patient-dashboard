@@ -103,6 +103,7 @@ function normC(snap) {
     stats: {
       opens: Number(st.opens) || 0, opensTotal: Number(st.opensTotal) || 0, clicks: Number(st.clicks) || 0,
       clicksTotal: Number(st.clicksTotal) || 0, unsubscribes: Number(st.unsubscribes) || 0, bounces: Number(st.bounces) || 0,
+      forms: Number(st.forms) || 0,
     },
     dailyCap: Number(x.dailyCap) || 800, sendAtMs: Number(x.sendAtMs) || 0,
     total: Number(x.total || 0), sent: Number(x.sent || 0), skipped: Number(x.skipped || 0), failed: Number(x.failed || 0),
@@ -670,7 +671,7 @@ function mountDraft(page, c, staff) {
 }
 
 /* ---------- Scheduled, sending or sent: followed live ---------- */
-
+const hasForm = (c) => /\/form\.html#f=/.test(c.html) || c.links.some((l) => /\/form\.html#f=/.test(l.url));
 function reportHtml(c) {
   const s = c.stats;
   const sent = c.sent;
@@ -679,6 +680,7 @@ function reportHtml(c) {
     <div class="mc-stats">
       ${c.track ? statBox("Opened", rate(s.opens, sent), `${n0(s.opens)} patients`) +
         statBox("Clicked", rate(s.clicks, sent), `${n0(s.clicks)} patients${s.opens ? ` · ${pct(s.clicks, s.opens)}% of those who opened` : ""}`) : ""}
+      ${hasForm(c) ? statBox("Filled in the form", rate(s.forms, sent), `${n0(s.forms)} patients`) : ""}
       ${statBox("Unsubscribed", rate(s.unsubscribes, sent), `${n0(s.unsubscribes)} patients`)}
       ${statBox("Bounced", rate(s.bounces, sent), `${n0(s.bounces)} addresses`)}
     </div>

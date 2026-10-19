@@ -28,6 +28,7 @@ function normalise(snap) {
     signatures: d.signatures && typeof d.signatures === "object" ? d.signatures : {},
     deliveries: Array.isArray(d.deliveries) ? d.deliveries : [],
     moves: Array.isArray(d.moves) ? d.moves : [],
+    online: d.online && typeof d.online === "object" ? d.online : null,
     createdAt: toDate(d.createdAt),
     createdBy: d.createdBy || "",
   };
