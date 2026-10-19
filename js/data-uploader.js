@@ -141,6 +141,133 @@ function lastLine(d, k) {
   return `Last uploaded ${when(d.at)}${d.by ? ` by ${d.by}` : ""} · ${what}${d.unmatchedNames ? ` · ${num(d.unmatchedNames)} patients not matched` : ""}`;
 }
 
+/* ---------- Names that weren't matched: link them to a patient ---------- */
+
+const SHEETS = { daysheet: "alltimeappts", invoices: "INVOICE RECORD", packages: "customer_packages" };
+const plural = (n, w) => `${num(n)} ${w}${n === 1 ? "" : "s"}`;
+const sampleOf = (o, n = 30) => Object.keys(o || {}).sort((a, b) => o[b] - o[a]).slice(0, n).map((name) => ({ name, rows: o[name] }));
+const born = (key) => {
+  const d = new Date(`${key}T12:00:00`);
+  return key && !isNaN(d) ? d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
+};
+
+function fixLists({ amb = [], ambN = 0, un = [], unN = 0, open = false }) {
+  const block = (items, n, label) => !n ? "" : `
+    <details class="du-fix"${open ? " open" : ""}><summary>${label}</summary>
+      <ul class="du-fixlist">${(items || []).map((x) => `
+        <li data-name="${esc(x.name)}"><div class="du-fixrow">
+          <span>${esc(x.name)} <small class="muted">(${num(x.rows)})</small></span>
+          <button type="button" class="ff-btn du-fixbtn" data-act="fix">Link to a patient</button>
+        </div></li>`).join("")}</ul>
+      ${n > (items || []).length ? `<small class="muted">Showing the ${num((items || []).length)} with the most rows.</small>` : ""}
+    </details>`;
+  return block(amb, ambN, `${plural(ambN, "name")} matched more than one patient`) +
+    block(un, unN, `${plural(unN, "name")} ${unN === 1 ? "wasn't" : "weren't"} found in the Patient List`);
+}
+
+const refillBar = () => `
+  <div class="du-refill" data-role="refill" hidden>
+    <span data-role="refill-n"></span>
+    <button type="button" class="ff-btn" data-act="refill-now">Fill in Patient IDs now</button>
+  </div>`;
+
+async function fixSearch(li, q) {
+  const hits = li && li.querySelector('[data-role="hits"]');
+  if (!hits) return;
+  const ask = String(q || "").trim();
+  li.dataset.q = ask;
+  if (ask.length < 2) { hits.innerHTML = ""; return; }
+  hits.innerHTML = '<p class="muted">Searching…</p>';
+  try {
+    const res = await callApi({ action: "upload", op: "ptSearch", q: ask });
+    if (li.dataset.q !== ask) return;
+    const list = res.results || [];
+    const keys = list.map((r) => r.name.toLowerCase().replace(/\s+/g, " ").trim());
+    const dupe = keys.some((k, i) => keys.indexOf(k) !== i);
+    hits.innerHTML = !list.length
+      ? '<p class="muted">No patients found. Try fewer words, or just the surname.</p>'
+      : (dupe ? `<p class="du-warn">More than one patient has this name. If they're the same person, merge them in Patient List first.</p>` : "") +
+        list.map((r) => `
+          <button type="button" class="du-fixhit" data-act="fix-pick" data-id="${esc(r.id)}" data-label="${esc(r.name)}">
+            <strong>${esc(r.name)}</strong>
+            <small>ID ${esc(r.id)}${r.dob ? ` · born ${esc(born(r.dob))}` : ""}${r.mobile ? ` · ${esc(r.mobile)}` : ""}${(r.also || []).length ? ` · also ${esc(r.also.join(", "))}` : ""}</small>
+          </button>`).join("");
+  } catch (err) {
+    hits.innerHTML = `<p class="du-warn">${esc(errText(err))}</p>`;
+  }
+}
+
+function fixOpen(li) {
+  if (li.querySelector(".du-fixpanel")) return;
+  li.insertAdjacentHTML("beforeend", `
+    <div class="du-fixpanel">
+      <input type="search" class="fe-input du-fixq" placeholder="Search the Patient List" aria-label="Search the Patient List" value="${esc(li.dataset.name)}" />
+      <div class="du-fixhits" data-role="hits"></div>
+      <div class="du-fixacts">
+        <button type="button" class="ff-btn" data-act="fix-notpt">Not a patient</button>
+        <button type="button" class="ff-btn is-quiet" data-act="fix-close">Cancel</button>
+      </div>
+    </div>`);
+  const q = li.querySelector(".du-fixq");
+  q.focus();
+  q.select();
+  fixSearch(li, li.dataset.name);
+}
+
+function fixSet(li, text) {
+  li.querySelector(".du-fixpanel")?.remove();
+  const row = li.querySelector(".du-fixrow");
+  row.querySelectorAll(".du-fixed, [data-act]").forEach((n) => n.remove());
+  li.classList.toggle("is-fixed", !!text);
+  row.insertAdjacentHTML("beforeend", text
+    ? `<span class="du-fixed">✓ ${esc(text)}</span><button type="button" class="ff-btn is-quiet" data-act="fix-undo">Undo</button>`
+    : `<button type="button" class="ff-btn du-fixbtn" data-act="fix">Link to a patient</button>`);
+}
+
+function wireFix(box, onRefill) {
+  let timer = 0;
+  const count = () => {
+    const n = box.querySelectorAll("li.is-fixed").length;
+    const bar = box.querySelector('[data-role="refill"]');
+    if (!bar) return;
+    bar.hidden = !n;
+    bar.querySelector('[data-role="refill-n"]').textContent = `${plural(n, "name")} sorted.`;
+  };
+  box.addEventListener("click", async (e) => {
+    const b = e.target.closest("button[data-act]");
+    if (!b || !box.contains(b)) return;
+    const act = b.dataset.act;
+    if (act === "refill-now") { onRefill(); return; }
+    const li = b.closest("li[data-name]");
+    if (!li) return;
+    if (act === "fix") { fixOpen(li); return; }
+    if (act === "fix-close") { li.querySelector(".du-fixpanel")?.remove(); return; }
+    if (act !== "fix-pick" && act !== "fix-notpt" && act !== "fix-undo") return;
+    b.disabled = true;
+    try {
+      const payload = { action: "upload", op: "ptLink", name: li.dataset.name };
+      if (act === "fix-pick") payload.pttId = b.dataset.id;
+      if (act === "fix-notpt") payload.notPatient = true;
+      if (act === "fix-undo") payload.remove = true;
+      const res = await callApi(payload);
+      if (res.problem) throw new Error(res.problem);
+      fixSet(li, act === "fix-undo" ? null
+        : act === "fix-notpt" ? "Marked as not a patient"
+        : `Linked to ${b.dataset.label} (ID ${b.dataset.id})`);
+      count();
+    } catch (err) {
+      b.disabled = false;
+      showToast(errText(err));
+    }
+  });
+  box.addEventListener("input", (e) => {
+    const q = e.target.closest(".du-fixq");
+    if (!q) return;
+    clearTimeout(timer);
+    timer = setTimeout(() => fixSearch(q.closest("li[data-name]"), q.value), 300);
+  });
+}
+
 /* ---------- 4) Run PCN update ---------- */
 
 const PCN_STEPS = [
@@ -294,7 +421,10 @@ function cardHtml(k, i) {
         <strong data-role="fname">Choose the CSV, or drop it here</strong>
         <small>The file is read here and written to the sheet. It isn't saved anywhere.</small>
       </label>
-      <div class="du-acts"><button type="button" class="ff-btn is-primary" data-act="run" disabled>Upload and run</button></div>
+      <div class="du-acts">
+        <button type="button" class="ff-btn is-primary" data-act="run" disabled>Upload and run</button>
+        <button type="button" class="ff-btn" data-act="refill">Fill in missing Patient IDs</button>
+      </div>
       <div class="du-bar" data-role="bar" hidden><span></span></div>
       <p class="du-msg" data-role="msg" aria-live="polite"></p>
       <div data-role="result"></div>
@@ -307,6 +437,7 @@ function wire(card, k) {
   const drop = card.querySelector(".du-drop");
   const fname = card.querySelector('[data-role="fname"]');
   const btn = card.querySelector('[data-act="run"]');
+  const refillBtn = card.querySelector('[data-act="refill"]');
   const bar = card.querySelector('[data-role="bar"]');
   const msg = card.querySelector('[data-role="msg"]');
   const result = card.querySelector('[data-role="result"]');
@@ -391,7 +522,7 @@ function wire(card, k) {
     if (start.problem) throw new Error(start.problem);
     wroteSome = true;
 
-    const sum = { unmatched: {}, badDates: 0 };
+    const sum = { unmatched: {}, ambiguous: {}, skipped: 0, badDates: 0 };
     for (let i = 0; i < rows.length; i += BATCH) {
       const part = rows.slice(i, i + BATCH);
       setMsg(`Writing ${num(Math.min(i + part.length, rows.length))} of ${num(rows.length)}… keep this page open.`);
@@ -400,10 +531,12 @@ function wire(card, k) {
       if (res.problem) throw new Error(res.problem);
       sum.badDates += Number(res.badDates || 0);
       Object.entries(res.unmatched || {}).forEach(([n, c]) => { sum.unmatched[n] = (sum.unmatched[n] || 0) + Number(c || 0); });
+      Object.entries(res.ambiguous || {}).forEach(([n, c]) => { sum.ambiguous[n] = (sum.ambiguous[n] || 0) + Number(c || 0); });
+      sum.skipped += Number(res.skipped || 0);
       setBar(0.3 + 0.7 * ((i + part.length) / rows.length));
     }
-    sum.unmatchedNames = Object.keys(sum.unmatched).length;
-    sum.unmatchedRows = Object.values(sum.unmatched).reduce((a, b) => a + b, 0);
+    sum.unmatchedNames = Object.keys(sum.unmatched).length + Object.keys(sum.ambiguous).length;
+    sum.unmatchedRows = [...Object.values(sum.unmatched), ...Object.values(sum.ambiguous)].reduce((a, b) => a + b, 0);
 
     const fin = await send({ action: "upload", op: "daysheetFinish", token: start.token,
       summary: { badDates: sum.badDates, unmatchedNames: sum.unmatchedNames, unmatchedRows: sum.unmatchedRows } });
@@ -415,20 +548,20 @@ function wire(card, k) {
   }
 
   function doneDaySheet(res, sum) {
-    const sample = Object.keys(sum.unmatched).sort((a, b) => sum.unmatched[b] - sum.unmatched[a]).slice(0, 20);
     result.innerHTML = `
       <div class="du-result">
         <strong>Done. ${num(res.rows)} appointments are in alltimeappts.</strong>
         <div>Took ${Math.max(1, Math.round((res.ms || 0) / 1000))} seconds${res.before ? ` · it had ${num(res.before)} rows before` : ""}.</div>
         ${sum.badDates ? `<div class="du-warn">${num(sum.badDates)} rows had a date that couldn't be read, so it was kept as text.</div>` : ""}
-        ${sum.unmatchedNames ? `<details><summary>${num(sum.unmatchedNames)} patients weren't found in the Patient List (${num(sum.unmatchedRows)} rows)</summary>
-          <ul>${sample.map((n) => `<li>${esc(n)} <small class="muted">(${num(sum.unmatched[n])})</small></li>`).join("")}</ul>
-          ${sum.unmatchedNames > sample.length ? '<small class="muted">Showing the ones with the most appointments.</small>' : ""}</details>` : ""}
+        ${sum.skipped ? `<div class="muted">${plural(sum.skipped, "staff booking")} left out (not patients).</div>` : ""}
+        ${fixLists({ amb: sampleOf(sum.ambiguous), ambN: Object.keys(sum.ambiguous).length,
+          un: sampleOf(sum.unmatched), unN: Object.keys(sum.unmatched).length })}
+        ${refillBar()}
         <div class="muted">Categories (N) and Patient IDs (O) are filled in. When the other uploads are done, use Run PCN update below.</div>
       </div>`;
     showToast("Day Sheet uploaded to alltimeappts");
   }
-
+  
   /* ---------- 2) Invoice Record ---------- */
 
   async function runInvoices() {
@@ -491,8 +624,8 @@ function wire(card, k) {
         ${res.noProduct ? `<div class="muted">${plural(res.noProduct, "line")} had no product (services and the like), so left out.</div>` : ""}
         ${res.badDates ? `<div class="du-warn">${plural(res.badDates, "line")} had a date that couldn't be read, so it was kept as text.</div>` : ""}
         ${res.rows ? `<div>Patient IDs filled in for ${num(res.matched)} of ${num(res.rows)} lines.</div>` : ""}
-        ${res.ambiguous && res.ambiguous.names ? `<details><summary>${plural(res.ambiguous.names, "name")} matched more than one patient, so Patient ID was left blank</summary><ul>${list(res.ambiguous)}</ul></details>` : ""}
-        ${res.unmatched && res.unmatched.names ? `<details><summary>${plural(res.unmatched.names, "name")} weren't found in PTT LIST</summary><ul>${list(res.unmatched)}</ul></details>` : ""}
+        ${fixLists({ amb: res.ambiguous?.sample, ambN: res.ambiguous?.names || 0, un: res.unmatched?.sample, unN: res.unmatched?.names || 0 })}
+        ${refillBar()}
         ${sync ? `<div class="muted">${esc(sync)}</div>` : ""}
       </div>`;
     showToast(res.rows ? "Invoices added to INVOICE RECORD" : "No new invoices to add");
@@ -536,12 +669,52 @@ function wire(card, k) {
         <div>Took ${Math.max(1, Math.round((res.ms || 0) / 1000))} seconds${res.before ? ` · it had ${num(res.before)} rows before` : ""}.</div>
         <div>Patient IDs filled in for ${num(res.matched)} of ${num(res.rows)} lines.</div>
         ${res.badDates ? `<div class="du-warn">${plural(res.badDates, "line")} had an expiry date that couldn't be read, so it was kept as text.</div>` : ""}
-        ${res.ambiguous && res.ambiguous.names ? `<details><summary>${plural(res.ambiguous.names, "name")} matched more than one patient, so Patient ID was left blank</summary><ul>${list(res.ambiguous)}</ul></details>` : ""}
-        ${res.unmatched && res.unmatched.names ? `<details><summary>${plural(res.unmatched.names, "name")} weren't found in patientlist</summary><ul>${list(res.unmatched)}</ul></details>` : ""}
+        ${fixLists({ amb: res.ambiguous?.sample, ambN: res.ambiguous?.names || 0, un: res.unmatched?.sample, unN: res.unmatched?.names || 0 })}
+        ${refillBar()}
       </div>`;
     showToast("Customer Packages uploaded");
   }
   
+  /* ---------- Fill in missing Patient IDs (after names are linked) ---------- */
+
+  async function runRefill() {
+    if (running) return;
+    running = true;
+    btn.disabled = true;
+    refillBtn.disabled = true;
+    input.disabled = true;
+    refillBtn.textContent = "Filling in…";
+    setMsg(`Filling in missing Patient IDs in ${SHEETS[k.key]}… keep this page open.`);
+    try {
+      const res = await send({ action: "upload", op: "refill", kind: k.key });
+      if (res.problem) throw new Error(res.problem);
+      if (k.key === "invoices" && res.filled) {
+        try { await send({ action: "upload", op: "invoicesSync" }); } catch (e) { console.warn("Skincare sync after refill failed:", e); }
+      }
+      setMsg("");
+      const still = (res.unmatched?.names || 0) + (res.ambiguous?.names || 0);
+      result.innerHTML = `
+        <div class="du-result">
+          <strong>${res.filled ? `Filled in ${plural(res.filled, "Patient ID")} in ${SHEETS[k.key]}.` : "No more Patient IDs could be filled in."}</strong>
+          <div>${still ? `${plural(still, "name")} still need a patient. Link them below, then fill in again.` : "Every patient name is matched."}</div>
+          ${res.skipped ? `<div class="muted">${plural(res.skipped, "staff booking")} left out (not patients).</div>` : ""}
+          ${fixLists({ amb: res.ambiguous?.sample, ambN: res.ambiguous?.names || 0, un: res.unmatched?.sample, unN: res.unmatched?.names || 0, open: true })}
+          ${refillBar()}
+          ${k.key === "daysheet" && res.filled ? '<div class="muted">Run PCN update so the portal shows them.</div>' : ""}
+        </div>`;
+    } catch (err) {
+      console.error(`${k.key} refill failed:`, err);
+      setMsg(errText(err), true);
+    } finally {
+      running = false;
+      input.disabled = false;
+      btn.disabled = !file;
+      refillBtn.disabled = false;
+      refillBtn.textContent = "Fill in missing Patient IDs";
+      showLast();
+    }
+  }
+
   /* ---------- Run ---------- */
 
   async function run() {
@@ -551,6 +724,7 @@ function wire(card, k) {
     btn.disabled = true;
     input.disabled = true;
     btn.textContent = "Working…";
+    refillBtn.disabled = true;
     result.innerHTML = "";
     window.addEventListener("beforeunload", guard);
     try {
@@ -566,6 +740,7 @@ function wire(card, k) {
       input.disabled = false;
       btn.textContent = "Upload and run";
       btn.disabled = !file;
+      refillBtn.disabled = false;
       window.removeEventListener("beforeunload", guard);
       showLast();
     }
@@ -580,6 +755,8 @@ function wire(card, k) {
     if (e.dataTransfer && e.dataTransfer.files[0]) choose(e.dataTransfer.files[0]);
   });
   btn.addEventListener("click", run);
+  refillBtn.addEventListener("click", runRefill);
+  wireFix(result, runRefill);
   showLast();
 }
 

@@ -7875,7 +7875,9 @@ function handleUpload_(body) {
     if (op === 'invoicesSync') return upInvSync_();
     if (op === 'packages') return upPackages_(body, session);
     if (op === 'pcnStep') return upPcnStep_(body, session);
-    if (op === 'pcnStop') return upPcnStop_(body, session);
+    if (op === 'ptSearch') return upPtSearch_(body);
+    if (op === 'ptLink') return upPtLink_(body, session);
+    if (op === 'refill') return upRefill_(body, session);
   } catch (err) {
     console.error('Upload ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
     return { ok: true, problem: 'Something went wrong: ' + String(err && err.message ? err.message : err).slice(0, 300) };
@@ -7896,15 +7898,20 @@ function upDsSheet_() {
 }
 
 // One CSV row (A–M) → the 15 columns of alltimeappts, with the same rules as runPrerequisite
-function upDsRow_(r, tz, lookup, stats) {
+function upDsRow_(r, tz, match, stats) {
   const cell = function (k) { return String(r[k] == null ? '' : r[k]); };
   const rawDate = cell(0).trim();
   const key = upDateKey_(rawDate);
   if (rawDate && !key) stats.badDates++;
   const name = pcnCleanPatientName_(cell(1));
-  const norm = pcnNormalizeName_(name);
-  const pid = norm ? (lookup[norm] || '') : '';
-  if (name && !pid) stats.unmatched[name] = (stats.unmatched[name] || 0) + 1;
+  const m = name ? match(name) : { id: '', how: 'blank' };
+  if (name && !m.id) {
+    if (m.how === 'skip') stats.skipped++;
+    else {
+      const bucket = m.how === 'ambiguous' ? stats.ambiguous : stats.unmatched;
+      bucket[name] = (bucket[name] || 0) + 1;
+    }
+  }
   return [
     key ? (stats.dates[key] || (stats.dates[key] = Utilities.parseDate(key, tz, 'yyyy-MM-dd'))) : rawDate, // A (a real date)
     name,                                                       // B Patient Name
@@ -7914,7 +7921,7 @@ function upDsRow_(r, tz, lookup, stats) {
     cell(9), cell(10), cell(11),                                // J ServiceName · K ResourceName · L LocationName
     upMoney_(cell(12)),                                         // M Price
     pcnCategory_(rawDate, cell(9)),                             // N PCN Categories
-    pid,                                                        // O Patient ID
+    m.id || '',                                                 // O Patient ID (blank when not sure)
   ];
 }
 
@@ -7985,19 +7992,18 @@ function upDsChunk_(body, session) {
     return { ok: false, error: 'BAD_REQUEST' };
   }
 
-  {
-    const s = upDsSheet_();
-    const tz = s.ss.getSpreadsheetTimeZone();
-    const lookup = pcnPatientLookup_(s.ss);
-    const stats = { unmatched: {}, badDates: 0, dates: {} };
-    const out = rows.map(function (r) { return upDsRow_(Array.isArray(r) ? r : [], tz, lookup, stats); });
-    s.sheet.getRange(2 + offset, 1, out.length, 15).setValues(out);
-    SpreadsheetApp.flush();
-    st.done[offset] = out.length;
-    cache.put(UP_DS_CACHE_ + token, JSON.stringify(st), 21600);
-    cache.put('up_ds_active', String(Date.now()), 1800); // still going
-    return { ok: true, written: out.length, unmatched: stats.unmatched, badDates: stats.badDates };
-  }
+  const s = upDsSheet_();
+  const tz = s.ss.getSpreadsheetTimeZone();
+  const match = ptMatcher_(s.ss, UPLOAD_TABS_.patients);
+  const stats = { unmatched: {}, ambiguous: {}, skipped: 0, badDates: 0, dates: {} };
+  const out = rows.map(function (r) { return upDsRow_(Array.isArray(r) ? r : [], tz, match, stats); });
+  s.sheet.getRange(2 + offset, 1, out.length, 15).setValues(out);
+  SpreadsheetApp.flush();
+  st.done[offset] = out.length;
+  cache.put(UP_DS_CACHE_ + token, JSON.stringify(st), 21600);
+  cache.put('up_ds_active', String(Date.now()), 1800); // still going
+  return { ok: true, written: out.length, unmatched: stats.unmatched, ambiguous: stats.ambiguous,
+    skipped: stats.skipped, badDates: stats.badDates };
 }
 
 // Every row arrived: save the summary
@@ -8114,39 +8120,10 @@ function upInvCleanName_(t) {
 }
 function upInvWords_(full) { return uniq_(full.split(' ').filter(function (w) { return w.length > 1; })); }
 
-// Invoice Record: exact name, then the most shared words (2 or more). Portal first, then PTT LIST.
-// Two different patients equally close: left blank.
+// Invoice Record: the shared name matching, then the most shared words (portal first, then PTT LIST)
 function upInvPatientMatcher_(ss) {
-  const entries = ptEntries_(ss, UP_INV_PTT_TAB_);
-  const exact = ptMap_(entries, upInvCleanName_);
-  const ids = [];     // name entry → Patient ID
-  const byWord = {};  // word → name entries
-  entries.fs.concat(entries.sheet).forEach(function (e) {
-    const full = upInvCleanName_(e[1]);
-    if (!full) return;
-    const i = ids.push(e[0]) - 1;
-    upInvWords_(full).forEach(function (w) { (byWord[w] = byWord[w] || []).push(i); });
-  });
-  return function (name) {
-    const full = upInvCleanName_(name);
-    if (!full) return { id: '', how: 'blank' };
-    if (full in exact) return exact[full] ? { id: exact[full], how: 'exact' } : { id: '', how: 'ambiguous' };
-    const score = {};
-    upInvWords_(full).forEach(function (w) {
-      (byWord[w] || []).forEach(function (i) { score[i] = (score[i] || 0) + 1; });
-    });
-    let best = 0;
-    let top = {};
-    Object.keys(score).forEach(function (i) {
-      if (score[i] > best) { best = score[i]; top = {}; }
-      if (score[i] === best) top[ids[i]] = true;
-    });
-    if (best < 2) return { id: '', how: 'none' };
-    const list = Object.keys(top);
-    return list.length === 1 ? { id: list[0], how: 'words' } : { id: '', how: 'ambiguous' };
-  };
+  return ptMatcher_(ss, UP_INV_PTT_TAB_, { words: true });
 }
-
 // rows from the portal: [Invoice ID, InvoiceDate, CustomerName, StaffName, Product Name] (CSV columns A, B, C, E, G)
 function upInvoices_(body, session) {
   let rows;
@@ -8223,7 +8200,7 @@ function upInvoices_(body, session) {
       const m = memo[l.name] || (memo[l.name] = match(l.name));
       if (m.id) matched++;
       else if (m.how === 'ambiguous') ambiguous[l.name] = (ambiguous[l.name] || 0) + 1;
-      else if (l.name) unmatched[l.name] = (unmatched[l.name] || 0) + 1;
+      else if (l.name && m.how !== 'skip') unmatched[l.name] = (unmatched[l.name] || 0) + 1;
       return [
         l.id,                                                       // A Invoice ID
         l.key ? Utilities.parseDate(l.key, tz, 'yyyy-MM-dd') : l.rawDate, // B InvoiceDate (a real date)
@@ -8292,22 +8269,9 @@ const UP_PKG_MAX_ROWS_ = 50000;
 // fillCustomerPackagesColumnM: exact name (ignoring capitals), then letters only without " NEW".
 // Two different patients with the same name: left blank.
 // Customer Packages: exact name (ignoring capitals), then letters only without " NEW". Portal first, then patientlist.
+// Customer Packages: the shared name matching (portal first, then patientlist)
 function upPkgMatcher_(ss) {
-  const norm = function (s) { return String(s == null ? '' : s).toLowerCase().trim(); };
-  const clean = function (s) {
-    return String(s == null ? '' : s).replace(/[^A-Za-z ]/g, '').replace(/\sNEW$/i, '')
-      .toLowerCase().replace(/\s+/g, ' ').trim();
-  };
-  const entries = ptEntries_(ss, UPLOAD_TABS_.patients);
-  const exact = ptMap_(entries, norm);
-  const cleaned = ptMap_(entries, clean);
-  return function (name) {
-    const a = norm(name);
-    if (a in exact) return exact[a] ? { id: exact[a], how: 'exact' } : { id: '', how: 'ambiguous' };
-    const b = clean(name);
-    if (b in cleaned) return cleaned[b] ? { id: cleaned[b], how: 'cleaned' } : { id: '', how: 'ambiguous' };
-    return { id: '', how: 'none' };
-  };
+  return ptMatcher_(ss, UPLOAD_TABS_.patients);
 }
 
 // rows from the portal: CSV columns A–L, in order
@@ -8356,7 +8320,7 @@ function upPackages_(body, session) {
       const m = name ? (memo[name] || (memo[name] = match(name))) : { id: '', how: 'blank' };
       if (m.id) matched++;
       else if (m.how === 'ambiguous') ambiguous[name] = (ambiguous[name] || 0) + 1;
-      else if (name) unmatched[name] = (unmatched[name] || 0) + 1;
+      else if (name && m.how !== 'skip') unmatched[name] = (unmatched[name] || 0) + 1;
       return [
         name,                                                      // A CustomerName
         t(r[1]),                                                   // B PackageName
@@ -8889,9 +8853,9 @@ function upMoney_(raw) {
 
 /* ---------- Patient IDs: the portal's Patient List (Firestore) first, the sheet as a fallback ---------- */
 
-const PT_CACHE_ = 'pt_fs_names_v1';
+const PT_CACHE_ = 'pt_fs_names_v2';
 
-// Every portal patient: { list: [[PttID, [names…]]], all: { PttID: 1 } } (all includes merged-away records).
+// Every portal patient: { list: [[PttID, [names…], mobile, DobKey]], all: { PttID: 1 } } (all includes merged-away records).
 // Merged-away records aren't matched; the record they were merged into carries their old names (MergedNames).
 // Remembered for 10 minutes, in parts (one cache value holds 100 KB at most).
 function ptFsEntries_() {
@@ -8907,7 +8871,8 @@ function ptFsEntries_() {
   }
   const list = [];
   const all = {};
-  fsListAll_(getConfig_(), 'patient_list', ['PttID', 'Patient Name', 'First Name', 'Last Name', 'MergedInto', 'MergedNames'])
+  fsListAll_(getConfig_(), 'patient_list',
+    ['PttID', 'Patient Name', 'First Name', 'Last Name', 'MergedInto', 'MergedNames', 'Mobile', 'DobKey'])
     .forEach(function (d) {
       const f = fromFields_(d.fields || {});
       const id = String(f.PttID == null ? '' : f.PttID).trim();
@@ -8918,7 +8883,7 @@ function ptFsEntries_() {
         .concat(Array.isArray(f.MergedNames) ? f.MergedNames : [])
         .map(function (n) { return String(n == null ? '' : n).replace(/\s+/g, ' ').trim(); })
         .filter(Boolean));
-      if (names.length) list.push([id, names]);
+      if (names.length) list.push([id, names, String(f.Mobile == null ? '' : f.Mobile).trim(), String(f.DobKey || '')]);
     });
   const out = { list: list, all: all };
   try {
@@ -9013,7 +8978,7 @@ function pcnNormalizeName_(name) {
     .replace(/\u00A0/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
-    .replace(/^[Xx]\s*/, '');
+    .replace(/^[Xx]+(?=\s|[A-Z])\s*/, ''); // "X Jane Smith" / "XJane" (archived in Timely), but not "Xavier"
   s = s.replace(/\s+NEW$/i, '');
   s = s.replace(/[^A-Za-z ]+$/, '');
   return s.trim().toLowerCase();
@@ -9038,7 +9003,269 @@ function pcnCleanStaff_(value) {
   return text;
 }
 
-// Day Sheet: normalised name → Patient ID (portal first, then patientlist). Duplicate names → blank.
-function pcnPatientLookup_(ss) {
-  return ptMap_(ptEntries_(ss, UPLOAD_TABS_.patients), pcnNormalizeName_);
+/* ---------- Matching Timely names to patients ---------- */
+// Tried in order. The first step that knows the name decides; two different patients at that step → left blank.
+//  1 link       a name someone linked in Daily uploads (patient_name_links), or marked "Not a patient"
+//  2 exact      capitals, extra spaces, " NEW" and an "X" in front ignored (as before)
+//  3 clean      notes in brackets or quotes, "}}", "**", "!!" and punctuation removed; a nickname or maiden name
+//               in brackets is also tried ("Theodosia (Sia) Florias" → "Sia Florias", "Debora Orme (Waller)" → "Debora Waller")
+//  4 order      the same words in any order
+//  5 first+last middle names ignored
+//  6 words      invoices only: the most shared words (2 or more)
+// Staff bookings aren't patients and are left out of the not-found list.
+// A numbered name ("Sharon White #2") means there are two people with that name: only an exact match or a link.
+
+const PT_LINKS_ = 'patient_name_links';
+const PT_NOT_PATIENT_RE_ = /\bstaff\b|clinic\s*co-?ordinator/i;
+const PT_NUMBERED_RE_ = /#\s*\d/;
+
+function ptBase_(s) {
+  return String(s == null ? '' : s).normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '').replace(/[\u00A0\s]+/g, ' ')
+    .replace(/[\u2018\u2019\u02BC`\u00B4]/g, "'").replace(/[\u201C\u201D]/g, '"')
+    .toLowerCase().trim();
+}
+
+// The key a link is saved under: the name as Timely writes it (so "Sharon White #1" and "#2" stay separate)
+function ptLinkKey_(s) { return ptBase_(s).replace(/\s+new$/, '').trim(); }
+
+function ptClean_(s) {
+  return ptBase_(String(s == null ? '' : s).replace(/^[\s*!#]*[Xx]+(?=\s|[A-Z])/, ''))
+    .replace(/\([^)]*\)|\[[^\]]*\]|\{[^}]*\}|"[^"]*"/g, ' ')  // notes in brackets or quotes
+    .replace(/[(){}\[\]"].*$/, ' ')                           // a stray bracket: the rest is a note ("Gleeson } BF")
+    .replace(/#\s*\d+/g, ' ')
+    .replace(/'/g, '')                                         // O'Donoghue = ODonoghue
+    .replace(/[^a-z]+/g, ' ')                                  // hyphens, "!!", "**", digits
+    .replace(/\s+/g, ' ').trim()
+    .replace(/ new$/, '');
+}
+
+// A single word in brackets or quotes, tried as the first name and as the surname
+function ptAlts_(raw, clean) {
+  const toks = clean ? clean.split(' ') : [];
+  if (toks.length < 2) return [];
+  const out = [];
+  const re = /\(([^)]*)\)|"([^"]*)"|\u201C([^\u201D]*)\u201D/g;
+  const s = String(raw == null ? '' : raw);
+  let m;
+  while ((m = re.exec(s))) {
+    const w = ptClean_(m[1] || m[2] || m[3] || '');
+    if (w.length < 2 || w.indexOf(' ') !== -1) continue;
+    out.push([w].concat(toks.slice(1)).join(' '), toks.slice(0, -1).concat([w]).join(' '));
+  }
+  return out;
+}
+function ptSorted_(c) { return c ? c.split(' ').sort().join(' ') : ''; }
+function ptFirstLast_(c) { const t = c ? c.split(' ') : []; return t.length >= 2 ? t[0] + ' ' + t[t.length - 1] : ''; }
+
+function ptTop_(o, n) {
+  return Object.keys(o).sort(function (a, b) { return o[b] - o[a]; }).slice(0, n || 30)
+    .map(function (k) { return { name: k, rows: o[k] }; });
+}
+
+// key → Patient ID, or null when two different patients share it. Firestore wins for any key it has.
+function ptMapMulti_(entries, keysFn) {
+  const map = Object.create(null);
+  const fromFs = Object.create(null);
+  const add = function (e, isFs) {
+    uniq_(keysFn(e[1]).filter(Boolean)).forEach(function (k) {
+      if (!isFs && fromFs[k]) return;
+      if (isFs) fromFs[k] = true;
+      map[k] = (k in map && map[k] !== e[0]) ? null : e[0];
+    });
+  };
+  entries.fs.forEach(function (e) { add(e, true); });
+  entries.sheet.forEach(function (e) { add(e, false); });
+  return map;
+}
+
+function ptWordMatcher_(entries) {
+  const ids = [];
+  const byWord = Object.create(null);
+  const wordsOf = function (n) { return uniq_(ptClean_(n).split(' ').filter(function (w) { return w.length > 1; })); };
+  entries.fs.concat(entries.sheet).forEach(function (e) {
+    const w = wordsOf(e[1]);
+    if (!w.length) return;
+    const i = ids.push(e[0]) - 1;
+    w.forEach(function (x) { (byWord[x] = byWord[x] || []).push(i); });
+  });
+  return function (name) {
+    const score = {};
+    wordsOf(name).forEach(function (w) { (byWord[w] || []).forEach(function (i) { score[i] = (score[i] || 0) + 1; }); });
+    let best = 0;
+    let top = {};
+    Object.keys(score).forEach(function (i) {
+      if (score[i] > best) { best = score[i]; top = {}; }
+      if (score[i] === best) top[ids[i]] = true;
+    });
+    if (best < 2) return null;
+    const list = Object.keys(top);
+    return list.length === 1 ? { id: list[0], how: 'words' } : { id: '', how: 'ambiguous' };
+  };
+}
+
+// Names linked in Daily uploads: { key: PttID or "-" (not a patient) }. Remembered 10 minutes.
+function ptLinks_() {
+  const cache = CacheService.getScriptCache();
+  const hit = cache.get('pt_links_v1');
+  if (hit) return JSON.parse(hit);
+  const out = {};
+  try {
+    fsListAll_(getConfig_(), PT_LINKS_, ['key', 'pttId']).forEach(function (d) {
+      const f = fromFields_(d.fields || {});
+      if (f.key && f.pttId) out[String(f.key)] = String(f.pttId);
+    });
+  } catch (e) { console.warn('Name links not read: ' + e); return out; }
+  try { cache.put('pt_links_v1', JSON.stringify(out), 600); } catch (e) { /* not essential */ }
+  return out;
+}
+
+// name → { id, how }   how: link · exact · clean · order · firstlast · words · ambiguous · skip · none · blank
+function ptMatcher_(ss, tab, opts) {
+  opts = opts || {};
+  const entries = ptEntries_(ss, tab);
+  const links = ptLinks_();
+  const tiers = [
+    ['exact', function (n) { return [pcnNormalizeName_(n)]; }],
+    ['clean', function (n) { const c = ptClean_(n); return [c].concat(ptAlts_(n, c)); }],
+    ['order', function (n) { return [ptSorted_(ptClean_(n))]; }],
+    ['firstlast', function (n) { return [ptFirstLast_(ptClean_(n))]; }],
+  ];
+  const maps = tiers.map(function (t) { return ptMapMulti_(entries, t[1]); });
+  const words = opts.words ? ptWordMatcher_(entries) : null;
+  const memo = Object.create(null);
+  return function (name) {
+    const raw = String(name == null ? '' : name).replace(/\s+/g, ' ').trim();
+    if (!raw) return { id: '', how: 'blank' };
+    if (memo[raw]) return memo[raw];
+    let res = null;
+    const lk = ptLinkKey_(raw);
+    const link = Object.prototype.hasOwnProperty.call(links, lk) ? links[lk] : '';
+    if (link) res = link === '-' ? { id: '', how: 'skip' } : { id: link, how: 'link' };
+    else if (PT_NOT_PATIENT_RE_.test(raw)) res = { id: '', how: 'skip' };
+    else {
+      const upto = PT_NUMBERED_RE_.test(raw) ? 1 : tiers.length;
+      for (let i = 0; i < upto && !res; i++) {
+        const found = {};
+        let seen = false;
+        tiers[i][1](raw).forEach(function (k) {
+          if (!k || !(k in maps[i])) return;
+          seen = true;
+          found[maps[i][k] || '?'] = true;
+        });
+        if (!seen) continue;
+        const ids = Object.keys(found);
+        res = ids.length === 1 && ids[0] !== '?' ? { id: ids[0], how: tiers[i][0] } : { id: '', how: 'ambiguous' };
+      }
+      if (!res && words && upto > 1) res = words(raw);
+    }
+    return (memo[raw] = res || { id: '', how: 'none' });
+  };
+}
+
+/* ---------- Daily uploads: link a name, then fill in the missing Patient IDs ---------- */
+
+function upPtSearch_(body) {
+  const words = uniq_(ptClean_(String(body.q || '').slice(0, 120)).split(' ').filter(function (w) { return w.length > 1; }));
+  if (!words.length) return { ok: true, results: [] };
+  const need = words.length >= 3 ? 2 : 1;
+  const out = [];
+  ptFsEntries_().list.forEach(function (p) {
+    let best = 0;
+    p[1].forEach(function (n) {
+      const toks = ptClean_(n).split(' ');
+      const hit = words.filter(function (w) { return toks.some(function (t) { return t.indexOf(w) === 0; }); }).length;
+      if (hit > best) best = hit;
+    });
+    if (best >= need) out.push({ id: p[0], name: p[1][0], also: p[1].slice(1, 3), mobile: p[2] || '', dob: p[3] || '', score: best });
+  });
+  out.sort(function (a, b) { return b.score - a.score || a.name.localeCompare(b.name); });
+  return { ok: true, results: out.slice(0, 12) };
+}
+
+function upPtLink_(body, session) {
+  const name = String(body.name || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  const key = ptLinkKey_(name);
+  if (!key) return { ok: false, error: 'BAD_REQUEST' };
+  const cfg = getConfig_();
+  const path = PT_LINKS_ + '/n_' + flowHash_(key);
+  if (body.remove === true) {
+    commitWrites_(cfg, [deleteWrite_(cfg, path)]);
+  } else {
+    let id = '-';
+    if (body.notPatient !== true) {
+      id = String(body.pttId || '').trim();
+      if (!ptFsEntries_().list.some(function (p) { return p[0] === id; })) {
+        return { ok: true, problem: "That patient isn't in the Patient List (or was merged into another record)." };
+      }
+    }
+    commitWrites_(cfg, [updateWrite_(cfg, path, {
+      key: key, name: name, pttId: id, by: String(session.name || ''), byUid: String(session.uid || ''),
+      at: new Date().toISOString(),
+    })]);
+  }
+  CacheService.getScriptCache().remove('pt_links_v1');
+  return { ok: true };
+}
+
+function upRefillDef_(kind) {
+  if (kind === 'daysheet') return { file: APPTS_SHEET_ID, tab: UPLOAD_TABS_.daysheet, nameCol: 2, idCol: 15, pt: UPLOAD_TABS_.patients, busy: 'up_ds_active' };
+  if (kind === 'packages') return { file: APPTS_SHEET_ID, tab: UP_PKG_TAB_, nameCol: 1, idCol: 13, pt: UPLOAD_TABS_.patients, busy: 'up_pkg_active' };
+  if (kind === 'invoices') return { file: SSP_SHEET_ID, tab: UP_INV_TAB_, nameCol: 3, idCol: 4, pt: UP_INV_PTT_TAB_, busy: 'up_inv_active', words: true };
+  return null;
+}
+
+// Fills in only the blank Patient IDs (IDs already there are never changed)
+function upRefill_(body, session) {
+  const kind = String(body.kind || '');
+  const def = upRefillDef_(kind);
+  if (!def) return { ok: false, error: 'BAD_REQUEST' };
+  const cache = CacheService.getScriptCache();
+  const busy = cache.get(def.busy);
+  if (busy && Date.now() - Number(busy) < 3 * 60000) {
+    return { ok: true, problem: 'An upload is running. Try again when it has finished.' };
+  }
+  cache.put(def.busy, String(Date.now()), 600);
+  try {
+    const started = Date.now();
+    const ss = SpreadsheetApp.openById(def.file);
+    const sh = ss.getSheetByName(def.tab);
+    if (!sh) throw new Error('Sheet tab not found: ' + def.tab);
+    const last = sh.getLastRow();
+    const res = { ok: true, kind: kind, rows: Math.max(0, last - 1), filled: 0, skipped: 0 };
+    const unmatched = {};
+    const ambiguous = {};
+    if (last >= 2) {
+      const names = sh.getRange(2, def.nameCol, last - 1, 1).getDisplayValues();
+      const idRange = sh.getRange(2, def.idCol, last - 1, 1);
+      const ids = idRange.getValues();
+      const match = ptMatcher_(ss, def.pt, { words: def.words });
+      ids.forEach(function (r, i) {
+        if (String(r[0] == null ? '' : r[0]).trim()) return;
+        const name = String(names[i][0] || '').trim();
+        if (!name) return;
+        const m = match(name);
+        if (m.id) { r[0] = m.id; res.filled++; }
+        else if (m.how === 'skip') res.skipped++;
+        else {
+          const b = m.how === 'ambiguous' ? ambiguous : unmatched;
+          b[name] = (b[name] || 0) + 1;
+        }
+      });
+      if (res.filled) { idRange.setValues(ids); SpreadsheetApp.flush(); }
+    }
+    res.unmatched = { names: Object.keys(unmatched).length, sample: ptTop_(unmatched, 40) };
+    res.ambiguous = { names: Object.keys(ambiguous).length, sample: ptTop_(ambiguous, 40) };
+    res.ms = Date.now() - started;
+    try {
+      fsPatch_(getConfig_(), 'data_uploads/' + kind, {
+        unmatchedNames: res.unmatched.names + res.ambiguous.names,
+        refilledAt: new Date().toISOString(), refilledBy: String(session.name || ''),
+      });
+    } catch (e) { console.warn('Refill log not saved: ' + e); }
+    console.log(def.tab + ': ' + res.filled + ' Patient ID(s) filled in by ' + session.name);
+    return res;
+  } finally {
+    cache.remove(def.busy);
+  }
 }
