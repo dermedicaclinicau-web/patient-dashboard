@@ -19,6 +19,16 @@ service cloud.firestore {
       allow read: if request.auth != null;
       allow write: if false; // written by Apps Script only
     }
+    
+    match /marketing_consent_log/{id} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+    match /email_suppress/{id} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
     // A permission from the login token (Admins have everything)
     function can(p) {
       return isAdmin() || (isStaff() && request.auth.token.perms is list && p in request.auth.token.perms);

@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en-AU">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex" />
+  <title>Email preferences · Dermedica</title>
+  <style>
+    :root { --teal: #0f766e; --ink: #1e293b; --muted: #64748b; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px 16px;
+      background: #f1f5f9; font: 16px/1.6 Arial, Helvetica, sans-serif; color: var(--ink); }
+    .card { width: min(480px, 100%); padding: 32px 28px; border-radius: 16px; background: #fff;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, .08); text-align: center; }
+    .brand { margin: 0 0 18px; font-size: 13px; font-weight: 700; letter-spacing: .14em; color: var(--teal); }
+    h1 { margin: 0 0 10px; font-size: 22px; }
+    p { margin: 0 0 14px; color: var(--muted); }
+    strong { color: var(--ink); }
+    button { min-width: 200px; height: 46px; padding: 0 22px; border: 0; border-radius: 10px;
+      background: var(--teal); color: #fff; font: 600 16px Arial, Helvetica, sans-serif; cursor: pointer; }
+    button.quiet { background: none; color: var(--teal); text-decoration: underline; min-width: 0; height: auto; padding: 8px; }
+    button[disabled] { opacity: .6; cursor: default; }
+    .small { margin-top: 18px; font-size: 13px; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main class="card" aria-live="polite">
+    <p class="brand">DERMEDICA</p>
+    <div data-v="loading"><p>Loading…</p></div>
+
+    <div data-v="on" hidden>
+      <h1>Unsubscribe from marketing emails?</h1>
+      <p>You're receiving Dermedica news and offers at <strong data-role="email"></strong>.</p>
+      <button type="button" data-act="unsubscribe">Unsubscribe</button>
+      <p class="small">You'll still get emails about your appointments and treatments.</p>
+    </div>
+
+    <div data-v="off" hidden>
+      <h1>You've been unsubscribed</h1>
+      <p>We won't send news or offers to <strong data-role="email"></strong> any more.
+        You'll still get emails about your appointments and treatments.</p>
+      <button type="button" class="quiet" data-act="resubscribe">Unsubscribed by mistake? Resubscribe</button>
+    </div>
+
+    <div data-v="bounced" hidden>
+      <h1>We can't email this address</h1>
+      <p>Emails to <strong data-role="email"></strong> haven't been getting through. Please call the clinic to update your details.</p>
+    </div>
+
+    <div data-v="bad" hidden>
+      <h1>This link isn't working</h1>
+      <p data-role="why">It may have been copied incompletely. Use the Unsubscribe link at the bottom of the email again,
+        or reply to the email and we'll take you off the list.</p>
+    </div>
+  </main>
+
+  <script>
+    const API = "https://script.google.com/macros/s/AKfycbzb4J7itwDNblPVtBbbZoxdcd2DOqmiZTMXeI7lnRIKuCV92YjJ6hHgS74wz3G9uqOuSA/exec";
+    const token = new URLSearchParams(location.search).get("t") || "";
+    const views = document.querySelectorAll("[data-v]");
+    const show = (v) => views.forEach((el) => { el.hidden = el.dataset.v !== v; });
+
+    async function call(op) {
+      const res = await fetch(API, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },   // no preflight: Apps Script accepts this
+        body: JSON.stringify({ action: "marketingPublic", op, t: token }),
+      });
+      return res.json();
+    }
+
+    function render(r) {
+      if (!r || r.problem) {
+        if (r && r.problem === "BUSY") document.querySelector('[data-role="why"]').textContent = "Please try again in a little while.";
+        if (r && r.problem === "SERVER") document.querySelector('[data-role="why"]').textContent =
+          "Something went wrong on our side. Please try again, or reply to the email and we'll take you off the list.";
+        show("bad");
+        return;
+      }
+      document.querySelectorAll('[data-role="email"]').forEach((el) => { el.textContent = r.email; });
+      show(r.bounced ? "bounced" : r.subscribed ? "on" : "off");
+    }
+
+    document.addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-act]");
+      if (!b) return;
+      b.disabled = true;
+      try { render(await call(b.dataset.act)); }
+      catch (err) { render({ problem: "SERVER" }); }
+      finally { b.disabled = false; }
+    });
+
+    if (!token) show("bad");
+    else call("status").then(render).catch(() => render({ problem: "SERVER" }));
+  </script>
+</body>
+</html>

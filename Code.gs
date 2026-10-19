@@ -48,6 +48,8 @@ function doPost(e) {
     if (body.action === 'emailFlow') return json_(handleEmailFlow_(body));
     if (body.action === 'staffTask') return json_(handleStaffTask_(body));
     if (body.action === 'upload') return json_(handleUpload_(body));
+    if (body.action === 'marketing') return json_(handleMarketing_(body));
+    if (body.action === 'marketingPublic') return json_(handleMarketingPublic_(body)); // the unsubscribe page (no login)
 
     const pin = String(body.pin || '').trim();
 
@@ -646,18 +648,6 @@ function syncAppointments_(ss, cfg, deadline) {
   return dates.length;
 }
 
-  // Remove day documents INSIDE the synced date range that no longer have any appointments
-  const first = dates[0];
-  const last = dates[dates.length - 1];
-  listDocIds_(cfg, 'appts_by_day').forEach(function (id) {
-    if (/^\d{4}-\d{2}-\d{2}$/.test(id) && id >= first && id <= last && !days[id]) {
-      writes.push(deleteWrite_(cfg, 'appts_by_day/' + id));
-    }
-  });
-
-  commitWrites_(cfg, writes, 100);
-  return dates.length;
-}
 
 // Shared column layout for all three tabs:
 // A Date | B Patient Name | C Outstanding Balance | D Contact # | E Resources | F Symbol
@@ -892,17 +882,6 @@ function syncSkincare_(cfg) {
     .map(function (id) { return 'skincare/' + id; });
 
   syncCommitChanged_(cfg, 'skincare', docs, deletes, 40, Date.now() + 4 * 60000); // long instructions: small batches
-  return keys.length;
-}
-
-  // Remove patients no longer in either sheet
-  const keep = {};
-  keys.forEach(function (k) { keep[k] = true; });
-  listDocIds_(cfg, 'skincare').forEach(function (id) {
-    if (!keep[id]) writes.push(deleteWrite_(cfg, 'skincare/' + id));
-  });
-
-  commitWrites_(cfg, writes, 50); // smaller batches: these documents hold long instructions
   return keys.length;
 }
 
@@ -3145,6 +3124,7 @@ const PERMS_ = [
   ['forms.build', 'Building', 'Build forms, Image Bank and Aftercare Bank'],
   ['flows.build', 'Building', 'Build email flows (System configuration)'],
   ['data.upload', 'Building', 'Daily uploads: Timely day sheet, invoices and packages'],
+  ['marketing.manage', 'Building', 'Marketing: campaigns and the do-not-contact list'],
   ['ssp.create', 'Skin Script', 'Create Skin Script Protocols'],
   ['ssp.config', 'Skin Script', 'Skin Script products and design'],
   ['menu.inventory', 'Inventory', 'Inventory menu (open Inventory)'],
@@ -6872,7 +6852,7 @@ function flowFact_(cfg, key, run, ctx) {
     case 'pt.age': { const a = recAge_(ctx.doc.DobKey, today); v = a === '' ? null : Number(a); break; }
     case 'pt.email': v = isEmail_(ctx.who.email); break;
     case 'pt.mobile': v = String(ctx.doc.Mobile || '').replace(/\D/g, '').length >= 8; break;
-    case 'pt.marketing': v = ctx.doc['Marketing OK'] === true; break; // marketing consent arrives in Step 4
+    case 'pt.marketing': v = mktCanEmail_(cfg, ctx.doc, ctx.who.email); break;
   }
   ctx._f[key] = v;
   return v;
@@ -7038,13 +7018,14 @@ function flowSendPatient_(cfg, flow, step, run, ctx, memo, tester) {
   let body = String(c.html);
   if (FLOW_SSP_TABLE_RE_().test(body)) body = flowInsertSspTable_(body, flowSspTableHtml_(cfg, ctx, memo, (flow.style || {}).accent));
   let html = sanitizeEmailHtml_(flowFillHtml_(body, vals));
+  if (c.promo) html += mktFooterHtml_(tester ? '' : ctx.pid, tester ? tester.email : ctx.who.email, tester ? 'test' : 'flow_' + flow._id);
   let subject = flowFill_(String(c.subject || '').replace(FLOW_SSP_TABLE_RE_(), ''), vals, false)
     .replace(/\s+/g, ' ').trim().slice(0, 200) || 'A message from Dermedica';
   let to = ctx.who.email;
   if (tester) {
     html = flowTestBanner_(flow.name, 'This would have gone to ' + ctx.who.name +
       (isEmail_(to) ? ' <' + to + '>' : ' (no email on their record)') + '.' +
-      (c.promo ? ' It\'s promotional, so patients won\'t get it until marketing consent is added.' : '')) + html;
+      (c.promo ? " It's promotional, so it isn't sent to anyone on the do-not-contact list." : ''));
     subject = '[Test] ' + subject;
     to = tester.email;
   }
@@ -7589,8 +7570,8 @@ function flowStep_(cfg, flow, run, memo, deadline) {
     if (s.type === 'email') {
       const why = flowStopWhy_(cfg, flow, run, ctx, !!tester);
       if (why) { note('Stopped: ' + why); save({ status: 'stopped', reason: why, next: '' }); return; }
-      if (c.promo && !tester) {
-        note('Skipped a promotional email (marketing consent is still to come).');
+      if (c.promo && !tester && !mktCanEmail_(cfg, ctx.doc, ctx.who.email)) {
+        note("Skipped a promotional email: they're on the do-not-contact list.");
         next = afterId;
         continue;
       }
@@ -7744,7 +7725,7 @@ function flowTestRun_(body, session) {
       flowSendPatient_(cfg, flow, s, run, ctx, memo, me);
       sent++;
       steps.push('Email “' + flowFill_(String(c.subject || '').replace(FLOW_SSP_TABLE_RE_(), ''), flowVals_(cfg, run, ctx, memo, false), false) + '”' +
-        (c.promo ? ' (promotional: patients won\'t get it until marketing consent is added)' : '') + '. Sent to you.');
+        (c.promo ? ' (promotional: not sent to anyone on the do-not-contact list)' : '') + '. Sent to you.');
       next = afterId;
       continue;
     }
@@ -9383,4 +9364,312 @@ function upRefill_(body, session) {
   } finally {
     cache.remove(def.busy);
   }
+}
+
+// ===================== Marketing: consent, unsubscribe and the do-not-email list =====================
+// Every patient can receive marketing emails unless they're on the do-not-contact list:
+//   · patient_list/{id}: 'Marketing OK' false (missing = yes) and 'Marketing Consent' { status, at, by, source, note }
+//   · email_suppress/{hash of the email}: unsubscribed (email link), dnc (added by staff) or bounced addresses.
+//     Kept per address, so it also covers duplicate patient records that share an email.
+//   · marketing_consent_log: every change, kept as the record (Spam Act 2003).
+// Unsubscribe links are signed per patient + email, so a link can't be changed to unsubscribe someone else.
+
+const MKT_SUPPRESS_ = 'email_suppress';
+const MKT_LOG_ = 'marketing_consent_log';
+const MKT_PAGE_ = PORTAL_URL_ + 'unsubscribe.html';
+const MKT_SOURCES_ = ['Told staff', 'Do not contact list', 'New patient form', 'Update details form', 'Replied by email',
+  'Imported', 'Unsubscribe link', 'Resubscribed'];
+const MKT_DNC_REASONS_ = ['Asked not to be contacted', 'Opted out', 'Complained', 'Other'];
+
+/* ---------- Signed unsubscribe links ---------- */
+
+// Secret for unsubscribe links. Lives only in Script Properties. Changing it breaks every link already sent.
+function mktKey_() {
+  const p = PropertiesService.getScriptProperties();
+  let v = p.getProperty('MARKETING_KEY');
+  if (!v) {
+    const lock = LockService.getScriptLock();
+    lock.waitLock(10000);
+    try {
+      v = p.getProperty('MARKETING_KEY');
+      if (!v) { v = Utilities.getUuid() + Utilities.getUuid(); p.setProperty('MARKETING_KEY', v); }
+    } finally { lock.releaseLock(); }
+  }
+  return v;
+}
+
+function mktEmail_(e) { return String(e || '').trim().toLowerCase(); }
+function mktEmailKey_(e) { return 'e_' + flowHash_(mktEmail_(e)); }
+function mktSig_(payload) {
+  return Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(payload, mktKey_())).replace(/=+$/, '').slice(0, 32);
+}
+
+// "u1.<patient, email, campaign>.<signature>"
+function mktToken_(pid, email, campaignId) {
+  const payload = 'u1.' + b64url_(JSON.stringify([String(pid || ''), mktEmail_(email), String(campaignId || '')]));
+  return payload + '.' + mktSig_(payload);
+}
+
+function mktReadToken_(t) {
+  const m = /^u1\.([A-Za-z0-9_-]{4,800})\.([A-Za-z0-9_-]{32})$/.exec(String(t || ''));
+  if (!m) return null;
+  if (mktSig_('u1.' + m[1]) !== m[2]) return null;
+  try {
+    const s = m[1].replace(/-/g, '+').replace(/_/g, '/');
+    const a = JSON.parse(Utilities.newBlob(Utilities.base64Decode(s + '==='.slice((s.length + 3) % 4))).getDataAsString());
+    return Array.isArray(a) && isEmail_(a[1]) ? { pid: String(a[0] || ''), email: a[1], cid: String(a[2] || '') } : null;
+  } catch (e) { return null; }
+}
+
+// The link that goes in the footer of every marketing email
+function mktUnsubUrl_(pid, email, campaignId) {
+  return MKT_PAGE_ + '?t=' + encodeURIComponent(mktToken_(pid, email, campaignId));
+}
+
+function mktMask_(email) {
+  const m = /^([^@]{1,2})[^@]*(@.+)$/.exec(mktEmail_(email));
+  return m ? m[1] + '•••' + m[2] : '';
+}
+
+/* ---------- Who can be emailed ---------- */
+
+// Is this address on the do-not-contact list? { reason, at, … } or null
+function mktSuppressed_(cfg, email) {
+  if (!isEmail_(mktEmail_(email))) return null;
+  try { return fsGetDoc_(cfg, MKT_SUPPRESS_ + '/' + mktEmailKey_(email)); }
+  catch (e) { return { reason: 'unknown', at: '' }; }   // unsure: treat as suppressed, never risk it
+}
+
+// Every patient can be sent marketing unless they're turned off ('Marketing OK' false) or their address
+// is on the do-not-contact list (unsubscribed, added by staff, or bounced).
+function mktCanEmail_(cfg, patientDoc, email) {
+  const to = mktEmail_(email || (patientDoc && patientDoc.Email));
+  if (!patientDoc || patientDoc['Marketing OK'] === false || !isEmail_(to)) return false;
+  return !mktSuppressed_(cfg, to);
+}
+
+// The footer every marketing email ends with: who it's from and a working unsubscribe link (Spam Act 2003)
+function mktFooterHtml_(pid, email, campaignId) {
+  if (!isEmail_(mktEmail_(email))) return '';
+  const addr = String(PropertiesService.getScriptProperties().getProperty('MKT_FOOTER_ADDRESS') || '').trim();
+  return '<div style="margin:24px 0 0;padding:14px 0 0;border-top:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;' +
+    'font-size:12px;line-height:1.5;color:#94a3b8;text-align:center">' +
+    'Sent by Dermedica' + (addr ? ' · ' + invEsc_(addr) : '') + '. You\'re receiving this because you\'re a Dermedica patient.<br>' +
+    '<a href="' + invEsc_(mktUnsubUrl_(pid, email, campaignId)) + '" style="color:#64748b;text-decoration:underline">Unsubscribe</a>' +
+    ' from news and offers. You\'ll still get emails about your appointments.</div>';
+}
+
+/* ---------- Changing consent ---------- */
+
+// Sets consent on the patient (following a merge), updates the do-not-contact list and logs it, in one commit.
+// meta: { by, byUid, source, note, email, campaignId, dnc (added by staff), why }
+function mktSetConsent_(cfg, pid, yes, meta) {
+  meta = meta || {};
+  const now = new Date().toISOString();
+  const pdoc = pid ? flowPatient_(cfg, pid) : null;
+  const email = mktEmail_(meta.email || (pdoc && pdoc.Email));
+  const source = MKT_SOURCES_.indexOf(meta.source) !== -1 ? meta.source : 'Told staff';
+  const patientId = pdoc ? pdoc._id : String(pid || '');
+  const writes = [];
+
+  if (pdoc) {
+    writes.push(patchWrite_(cfg, 'patient_list/' + pdoc._id, {
+      'Marketing OK': yes,
+      'Marketing Consent': {
+        status: yes ? 'yes' : 'no', at: now, by: String(meta.by || ''), byUid: String(meta.byUid || ''),
+        source: source, note: String(meta.note || '').slice(0, 300),
+      },
+    }));
+  }
+  if (isEmail_(email)) {
+    const path = MKT_SUPPRESS_ + '/' + mktEmailKey_(email);
+    if (!yes) {
+      writes.push(updateWrite_(cfg, path, {
+        email: email, reason: meta.dnc ? 'dnc' : 'unsubscribed', why: String(meta.why || '').slice(0, 80),
+        note: String(meta.note || '').slice(0, 300), at: now, by: String(meta.by || ''),
+        patientId: patientId, source: source, campaignId: String(meta.campaignId || ''),
+      }));
+    } else {
+      // Saying yes lifts an unsubscribe or a staff entry, but never a bounce (that address doesn't work)
+      const cur = mktSuppressed_(cfg, email);
+      if (cur && cur.reason !== 'bounced') writes.push(deleteWrite_(cfg, path));
+    }
+  }
+  writes.push(updateWrite_(cfg, MKT_LOG_ + '/c_' + Date.now() + '_' + Utilities.getUuid().slice(0, 8), {
+    patientId: patientId, patientName: pdoc ? flowWho_(pdoc).name : '',
+    email: email, status: yes ? 'yes' : 'no', source: source, why: String(meta.why || '').slice(0, 80),
+    note: String(meta.note || '').slice(0, 300), by: String(meta.by || ''), byUid: String(meta.byUid || ''),
+    campaignId: String(meta.campaignId || ''), at: now,
+  }));
+  commitWrites_(cfg, writes);
+  return { patientId: pdoc ? pdoc._id : '', email: email };
+}
+
+/* ---------- Staff: Task Manager → Marketing, and the patient page ---------- */
+
+function handleMarketing_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  const op = String(body.op || '');
+  const manage = can_(session, 'marketing.manage');
+  try {
+    const cfg = getConfig_();
+    if (op === 'setConsent') {   // the patient page
+      if (!can_(session, 'patients.edit') && !manage) return { ok: false, error: 'FORBIDDEN' };
+      const pid = String(body.patientId || '').trim();
+      if (!recDocIdOk_(pid)) return { ok: false, error: 'BAD_REQUEST' };
+      const r = mktSetConsent_(cfg, pid, body.yes === true, {
+        by: session.name, byUid: session.uid, source: String(body.source || 'Told staff'), note: String(body.note || ''),
+        dnc: body.yes !== true,
+      });
+      return r.patientId ? { ok: true, patientId: r.patientId } : { ok: false, error: 'NO_PATIENT' };
+    }
+    if (!manage) return { ok: false, error: 'FORBIDDEN' };
+    if (op === 'list') return { ok: true, rows: mktList_(cfg) };
+    if (op === 'search') return upPtSearch_(body);
+    if (op === 'block') return mktBlock_(cfg, body, session);
+    if (op === 'blockMany') return mktBlockMany_(cfg, body, session);
+    if (op === 'unblock') return mktUnblock_(cfg, body, session);
+    if (op === 'link') {   // a test unsubscribe link for a patient
+      const p = flowPatient_(cfg, String(body.patientId || ''));
+      if (!p || !isEmail_(p.Email)) return { ok: false, error: 'NO_EMAIL' };
+      return { ok: true, url: mktUnsubUrl_(p._id, p.Email, 'test') };
+    }
+  } catch (err) {
+    console.error('Marketing ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: false, error: 'SERVER_ERROR', detail: String(err && err.message ? err.message : err).slice(0, 300) };
+  }
+  return { ok: false, error: 'BAD_REQUEST' };
+}
+
+// Everyone on the do-not-contact list: suppressed addresses, plus patients turned off who have no address on it
+function mktList_(cfg) {
+  const out = Object.create(null);
+  fsListAll_(cfg, MKT_SUPPRESS_).forEach(function (d) {
+    const f = fromFields_(d.fields || {});
+    const k = d.name.split('/').pop();
+    out[k] = {
+      key: k, email: String(f.email || ''), reason: String(f.reason || 'unsubscribed'), why: String(f.why || ''),
+      note: String(f.note || ''), source: String(f.source || ''), at: String(f.at || ''), by: String(f.by || ''),
+      patientId: String(f.patientId || ''), name: '',
+    };
+  });
+  fsQuery_(cfg, 'patient_list', quoteField_('Marketing OK'), 'EQUAL', false, 3000).forEach(function (p) {
+    if (p.MergedInto) return;
+    const email = mktEmail_(p.Email);
+    const k = isEmail_(email) ? mktEmailKey_(email) : 'p_' + p._id;
+    if (out[k]) { out[k].patientId = out[k].patientId || p._id; out[k].name = flowWho_(p).name; return; }
+    const c = p['Marketing Consent'] || {};
+    out[k] = {
+      key: k, email: email, reason: 'dnc', why: '', note: String(c.note || ''), source: String(c.source || ''),
+      at: String(c.at || ''), by: String(c.by || ''), patientId: p._id, name: flowWho_(p).name,
+    };
+  });
+  const rows = Object.keys(out).map(function (k) { return out[k]; });
+  const need = rows.filter(function (r) { return r.patientId && !r.name; });
+  if (need.length) {
+    const got = fsBatchGet_(cfg, uniq_(need.map(function (r) { return 'patient_list/' + r.patientId; })));
+    need.forEach(function (r) { const p = got['patient_list/' + r.patientId]; if (p) r.name = flowWho_(p).name; });
+  }
+  return rows.sort(function (a, b) { return String(b.at).localeCompare(String(a.at)); });
+}
+
+function mktBlock_(cfg, body, session) {
+  const pid = String(body.patientId || '').trim();
+  const email = mktEmail_(body.email);
+  if (!pid && !isEmail_(email)) return { ok: false, error: 'BAD_REQUEST' };
+  if (pid && !recDocIdOk_(pid)) return { ok: false, error: 'BAD_REQUEST' };
+  const why = MKT_DNC_REASONS_.indexOf(body.why) !== -1 ? body.why : 'Other';
+  const r = mktSetConsent_(cfg, pid, false, {
+    by: session.name, byUid: session.uid, source: 'Do not contact list', note: String(body.note || ''),
+    email: email, dnc: true, why: why,
+  });
+  if (pid && !r.patientId) return { ok: false, error: 'NO_PATIENT' };
+  return { ok: true, noEmail: !isEmail_(r.email) };
+}
+
+// Pasted addresses: each goes on the list, and any patient with that address is turned off too
+function mktBlockMany_(cfg, body, session) {
+  const emails = uniq_((Array.isArray(body.emails) ? body.emails : []).map(mktEmail_).filter(isEmail_)).slice(0, 1000);
+  if (!emails.length) return { ok: false, error: 'BAD_REQUEST' };
+  const why = MKT_DNC_REASONS_.indexOf(body.why) !== -1 ? body.why : 'Opted out';
+  const byEmail = Object.create(null);
+  fsListAll_(cfg, 'patient_list', ['Email', 'MergedInto']).forEach(function (d) {
+    const f = fromFields_(d.fields || {});
+    const e = mktEmail_(f.Email);
+    if (isEmail_(e) && !f.MergedInto) (byEmail[e] = byEmail[e] || []).push(d.name.split('/').pop());
+  });
+  const now = new Date().toISOString();
+  const by = String(session.name || '');
+  const consent = { status: 'no', at: now, by: by, byUid: String(session.uid || ''), source: 'Do not contact list', note: why };
+  const writes = [];
+  let matched = 0;
+  emails.forEach(function (e) {
+    const pids = byEmail[e] || [];
+    if (pids.length) matched++;
+    writes.push(updateWrite_(cfg, MKT_SUPPRESS_ + '/' + mktEmailKey_(e), {
+      email: e, reason: 'dnc', why: why, note: 'Added from a pasted list', at: now, by: by,
+      patientId: pids[0] || '', source: 'Do not contact list', campaignId: '',
+    }));
+    pids.forEach(function (id) {
+      writes.push(patchWrite_(cfg, 'patient_list/' + id, { 'Marketing OK': false, 'Marketing Consent': consent }));
+    });
+    writes.push(updateWrite_(cfg, MKT_LOG_ + '/c_' + Date.now() + '_' + Utilities.getUuid().slice(0, 8), {
+      patientId: pids[0] || '', patientName: '', email: e, status: 'no', source: 'Do not contact list', why: why,
+      note: 'Added from a pasted list', by: by, byUid: String(session.uid || ''), campaignId: '', at: now,
+    }));
+  });
+  commitWrites_(cfg, writes, 300);
+  console.log('Do not contact: ' + emails.length + ' address(es) added by ' + by);
+  return { ok: true, added: emails.length, matched: matched };
+}
+
+function mktUnblock_(cfg, body, session) {
+  const pid = String(body.patientId || '').trim();
+  const email = mktEmail_(body.email);
+  const note = String(body.note || '').trim().slice(0, 300);
+  if (!note) return { ok: true, problem: 'Add a note saying why they can be contacted again.' };
+  if (!pid && !isEmail_(email)) return { ok: false, error: 'BAD_REQUEST' };
+  const cur = isEmail_(email) ? mktSuppressed_(cfg, email) : null;
+  if (cur && cur.reason === 'bounced') {
+    return { ok: true, problem: "Emails to this address bounce, so it stays on the list. Update the patient's email address instead." };
+  }
+  mktSetConsent_(cfg, pid, true, { by: session.name, byUid: session.uid, source: 'Told staff', note: note, email: email });
+  return { ok: true };
+}
+
+/* ---------- Public: the unsubscribe page (no login, only a signed link) ---------- */
+
+function handleMarketingPublic_(body) {
+  const tok = mktReadToken_(body.t);
+  if (!tok) return { ok: true, problem: 'BAD_LINK' };
+  const cache = CacheService.getScriptCache();
+  const rk = 'mkt_rl_' + flowHash_(String(body.t));
+  const n = Number(cache.get(rk) || 0);
+  if (n >= 20) return { ok: true, problem: 'BUSY' };
+  cache.put(rk, String(n + 1), 3600);
+
+  const op = String(body.op || 'status');
+  try {
+    const cfg = getConfig_();
+    if (op === 'unsubscribe' || op === 'resubscribe') {
+      const yes = op === 'resubscribe';
+      mktSetConsent_(cfg, tok.pid, yes, {
+        by: 'The patient', source: yes ? 'Resubscribed' : 'Unsubscribe link', email: tok.email, campaignId: tok.cid,
+      });
+      console.log('Marketing: ' + mktMask_(tok.email) + (yes ? ' resubscribed' : ' unsubscribed') + (tok.cid ? ' (' + tok.cid + ')' : ''));
+    }
+    const s = mktSuppressed_(cfg, tok.email);
+    return { ok: true, email: mktMask_(tok.email), subscribed: !s, bounced: !!(s && s.reason === 'bounced') };
+  } catch (err) {
+    console.error('Unsubscribe page failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: true, problem: 'SERVER' };
+  }
+}
+
+// Run from the editor: logs a working unsubscribe link for one patient, to try the page
+function testMarketingLink() {
+  const pid = 'PASTE_A_PATIENT_ID';
+  const p = flowPatient_(getConfig_(), pid);
+  console.log(p && isEmail_(p.Email) ? mktUnsubUrl_(p._id, p.Email, 'test') : 'That patient has no email address.');
 }

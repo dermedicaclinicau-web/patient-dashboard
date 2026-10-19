@@ -18,6 +18,7 @@ import { mountStockCount } from "./stock-count.js";
 import { renderCountCard } from "./count-card.js";
 import { mountEndOfDaySettings } from "./end-of-day-admin.js";
 import { mountDataUploader } from "./data-uploader.js";
+import { mountMarketing } from "./marketing.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -37,6 +38,7 @@ const I = {
   back: ic('<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>'),
   moon: ic('<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>'),
   upload: ic('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>'),  
+  megaphone: ic('<path d="M3 11v2a1 1 0 0 0 1 1h2l5 4V6L6 10H4a1 1 0 0 0-1 1z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/>'),
 };
 
 const CATEGORIES = [
@@ -85,6 +87,7 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
         ${canCountAny() ? link("count", "#/tasks/count", I.count, "Opening count") : ""}
         ${link("history", "#/tasks/history", I.history, "Task history")}
         ${can("data.upload") ? link("uploads", "#/tasks/uploads", I.upload, "Daily uploads") : ""}
+        ${can("marketing.manage") ? link("marketing", "#/tasks/marketing", I.megaphone, "Marketing") : ""}
         ${isAdmin ? link("types", "#/tasks/types", I.types, "Task types") : ""}
         ${isAdmin ? link("end-of-day", "#/tasks/end-of-day", I.moon, "End of day") : ""}
       </nav>
@@ -97,6 +100,11 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
   if (view === "uploads") {
     if (!can("data.upload")) { main.innerHTML = '<div class="tm-empty">You don\'t have access to Daily uploads.</div>'; return; }
     mountDataUploader(main);
+    return;
+  }
+  if (view === "marketing") {
+    if (!can("marketing.manage")) { main.innerHTML = '<div class="tm-empty">You don\'t have access to Marketing.</div>'; return; }
+    mountMarketing(main);
     return;
   }
   if (view === "end-of-day") {

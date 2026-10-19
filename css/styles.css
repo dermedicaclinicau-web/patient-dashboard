@@ -6622,3 +6622,30 @@ a.md-quiet:hover { border-color: var(--primary); }
 .inv-pd-nolot p { margin: 0; font-size: .85rem; }
 .inv-lot-act { width: 1%; text-align: right; white-space: nowrap; }
 .inv-lot-act .lh-btn { height: 30px; padding: 0 .7rem; font-size: .8rem; }
+
+/* Task Manager → Marketing */
+.mk-card { display: grid; gap: .75rem; }
+.mk-card.is-soon { opacity: .75; }
+.mk-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .6rem; }
+.mk-head h4 { margin: 0; }
+.mk-n { margin-left: .4rem; padding: .05rem .5rem; border-radius: 999px; background: #fee2e2; color: #991b1b;
+  font-size: .75rem; font-style: normal; font-weight: 700; }
+.mk-n:empty { display: none; }
+.mk-acts { display: flex; flex-wrap: wrap; gap: .5rem; }
+.mk-tools { display: flex; flex-wrap: wrap; gap: .5rem; }
+.mk-tools .fe-input { flex: 1 1 240px; }
+.mk-tools .fb-select { width: auto; }
+.mk-scroll { max-height: 60vh; overflow: auto; border: 1px solid var(--border); border-radius: 10px; }
+.mk-table { margin: 0; }
+.mk-table thead th { position: sticky; top: 0; z-index: 1; }
+.mk-table td { vertical-align: top; }
+.mk-table td small { display: block; margin-top: .1rem; font-size: .78rem; color: var(--muted); }
+.mk-act { width: 1%; white-space: nowrap; text-align: right; }
+.mk-act .lh-btn { height: 30px; padding: 0 .7rem; font-size: .8rem; }
+.mk-why { display: inline-block; padding: .1rem .5rem; border-radius: 999px; font-size: .75rem; font-weight: 700; }
+.mk-why.is-unsubscribed { background: #e0f2fe; color: #075985; }
+.mk-why.is-dnc { background: #fef3c7; color: #92400e; }
+.mk-why.is-bounced { background: #fee2e2; color: #991b1b; }
+.mk-hits { display: grid; gap: .3rem; max-height: 240px; overflow: auto; }
+.mk-hits p { margin: 0; font-size: .85rem; }
+.mk-picked { margin: 0; padding: .55rem .75rem; border-radius: 10px; background: #f0fdf4; color: #166534; }
