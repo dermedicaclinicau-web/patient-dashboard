@@ -344,7 +344,8 @@ const tagChips = () => `<div class="fe-insp-field"><span class="fe-insp-label">I
 
 export async function mountTemplateBuilder(container, { id, staff = null } = {}) {
   const backHref = builderBack();
-  const backLink = `<a class="back-link" href="${esc(backHref)}">← ${backHref === "#/forms" ? "Form Builder" : "Email templates"}</a>`;
+  const backLink = `<a class="back-link" href="${esc(backHref)}">← ${backHref === "#/forms" ? "Form Builder"
+    : /\/campaigns\//.test(backHref) ? "Campaign" : "Email templates"}</a>`;
   container.innerHTML = `<section class="page wide">${backLink}<div class="skeleton" style="height:420px;border-radius:14px"></div></section>`;
   let t;
   try { t = await getTemplate(id); }

@@ -54,6 +54,26 @@ service cloud.firestore {
     allow delete: if false;
   }
 
+  match /mkt_campaigns/{id} {
+    allow read: if can('marketing.manage');
+    allow create: if can('marketing.manage')
+      && request.resource.data.status == 'draft'
+      && request.resource.data.name is string && request.resource.data.name.size() <= 120
+      && request.resource.data.createdByUid == request.auth.uid;
+    allow update: if can('marketing.manage')
+      && resource.data.status == 'draft'
+      && request.resource.data.status in ['draft', 'archived']
+      && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'name', 'templateId', 'templateName', 'subject', 'fromName', 'replyTo', 'audience', 'dailyCap',
+        'status', 'updatedAt', 'updatedBy', 'updatedByUid'])
+      && request.resource.data.updatedByUid == request.auth.uid;
+    allow delete: if false;
+    match /queue/{q} {
+      allow read: if can('marketing.manage');
+      allow write: if false;
+    }
+  }
+
     // A permission from the login token (Admins have everything)
     function can(p) {
       return isAdmin() || (isStaff() && request.auth.token.perms is list && p in request.auth.token.perms);

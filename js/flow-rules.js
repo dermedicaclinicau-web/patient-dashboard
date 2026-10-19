@@ -206,13 +206,15 @@ export function mountProductPicker(host, arr, { onChange = () => {}, names = [],
 }
 
 // The rule builder. group ({ match, rules }) is changed in place; onChange is called after every change.
-export function mountRuleBuilder(host, group, { onChange = () => {}, names = [], empty = "" } = {}) {
-  const groups = [...new Set(RULE_FIELDS.map((f) => f.group))];
+// only: the field keys to offer (Campaigns leaves out "this purchase" and "this visit")
+export function mountRuleBuilder(host, group, { onChange = () => {}, names = [], empty = "", only = null } = {}) {
+  const fields = Array.isArray(only) ? RULE_FIELDS.filter((f) => only.includes(f.key)) : RULE_FIELDS;
+  const groups = [...new Set(fields.map((f) => f.group))];
 
   function ruleHtml(r, i) {
     const f = FIELD[r.field];
     const fieldSel = `<select class="fb-select fr-field" data-rf="${i}" aria-label="What to check">${groups.map((g) =>
-      `<optgroup label="${esc(g)}">${RULE_FIELDS.filter((x) => x.group === g).map((x) =>
+      `<optgroup label="${esc(g)}">${fields.filter((x) => x.group === g).map((x) =>
         `<option value="${x.key}"${x.key === r.field ? " selected" : ""}>${esc(x.label)}</option>`).join("")}</optgroup>`).join("")}</select>`;
     const opSel = `<select class="fb-select fr-op" data-ro="${i}" aria-label="How to compare">${opsFor(f).map(([v, l]) =>
       `<option value="${v}"${v === r.op ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
@@ -278,7 +280,10 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
     onChange();
   });
   host.addEventListener("click", (e) => {
-    if (e.target.closest("[data-radd]")) { group.rules.push(newRule()); render(); onChange(); return; }
+    if (e.target.closest("[data-radd]")) {
+      group.rules.push(newRule(fields.some((f) => f.key === "appt.has_future") ? "appt.has_future" : fields[0].key));
+      render(); onChange(); return;
+    }
     const x = e.target.closest("[data-rx]");
     if (x) { group.rules.splice(Number(x.dataset.rx), 1); render(); onChange(); }
   });

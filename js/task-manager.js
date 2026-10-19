@@ -20,6 +20,7 @@ import { mountEndOfDaySettings } from "./end-of-day-admin.js";
 import { mountDataUploader } from "./data-uploader.js";
 import { mountMarketing } from "./marketing.js";
 import { mountTemplateBuilder } from "./mkt-templates.js";
+import { mountCampaignEditor } from "./mkt-campaigns.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -70,7 +71,13 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
     mountTemplateBuilder(container, { id: decodeURIComponent(parts[2]), staff });
     return;
   }
+  if (view === "marketing" && sub === "campaigns" && parts[2]) {
+    if (!can("marketing.manage")) { container.innerHTML = '<section class="page"><div class="state"><strong>No access</strong>Ask an Admin for Marketing access.</div></section>'; return; }
+    mountCampaignEditor(container, { id: decodeURIComponent(parts[2]), staff });
+    return;
+  }
 
+  
   if (view === "types" && sub) {
     if (isAdmin) { mountTaskEditor(container, { id: sub, staff }); return; }
     container.innerHTML = '<section class="page"><div class="state"><strong>Admins only</strong>Only admins can edit task types.</div></section>';

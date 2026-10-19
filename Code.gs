@@ -9531,6 +9531,9 @@ function handleMarketing_(body) {
     if (op === 'blockMany') return mktBlockMany_(cfg, body, session);
     if (op === 'unblock') return mktUnblock_(cfg, body, session);
     if (op === 'testTemplate') return mktTestTemplate_(cfg, body, session);
+    if (op === 'campaignCount') return mktCount_(cfg, body, session);
+    if (op === 'campaignSchedule') return mktSchedule_(cfg, body, session);
+    if (op === 'campaignControl') return mktControl_(cfg, body, session);
     if (op === 'link') {   // a test unsubscribe link for a patient
       const p = flowPatient_(cfg, String(body.patientId || ''));
       if (!p || !isEmail_(p.Email)) return { ok: false, error: 'NO_EMAIL' };
@@ -9673,7 +9676,7 @@ function mktTestTemplate_(cfg, body, session) {
   const parts = String(who.name || '').trim().split(/\s+/);
   const vals = { 'first name': who.first || 'there', 'last name': parts.length > 1 ? parts[parts.length - 1] : '',
     'full name': who.name || 'there', 'patient name': who.name || '' };
-  const subject = '[Test] ' + (flowFill_(String(t.subject || ''), vals, false).replace(/\s+/g, ' ').trim().slice(0, 190)
+  const subject = '[Test] ' + (flowFill_(String(body.subject || t.subject || ''), vals, false).replace(/\s+/g, ' ').trim().slice(0, 190)
     || 'A message from Dermedica');
   const filled = sanitizeEmailHtml_(flowFillHtml_(raw, vals));
   const banner = '<div style="margin:0 auto 12px;max-width:600px;padding:10px 14px;border:1px dashed #f59e0b;border-radius:10px;' +
@@ -9688,6 +9691,387 @@ function mktTestTemplate_(cfg, body, session) {
   cache.put(rk, String(used + to.length), 3600);
   console.log('Template "' + t.name + '" test sent to ' + to.length + ' address(es) by ' + session.name);
   return { ok: true, sent: to.length, to: to };
+}
+
+/* ===================== Marketing: campaigns ===================== */
+// A campaign is drafted in the portal (mkt_campaigns/{id}, status "draft"). Scheduling takes a copy of the template's
+// email, so changing the template afterwards never changes the campaign. When it's time, runCampaigns picks the
+// patients (the same rules as Email flows), saves them in mkt_campaigns/{id}/queue, then sends in batches between
+// 9 am and 6 pm Perth, keeping MKT_RESERVE_ of the day's emails free for the rest of the portal.
+// The do-not-contact list is checked when the list is made and again just before each email goes.
+// Statuses: draft → scheduled → building (choosing patients) → sending → sent. Also paused, cancelled.
+
+const MKT_CAMPAIGNS_ = 'mkt_campaigns';
+const MKT_CSTATE_ = 'mkt_campaign_state';   // Apps Script only: progress while choosing patients
+const MKT_CHUNK_ = 250;                     // patients per queue document
+const MKT_RESERVE_ = 300;                   // emails a day always left for appointments, forms and tasks
+const MKT_PER_RUN_ = 120;                   // emails per 10-minute run
+const MKT_DAILY_DEFAULT_ = 800;
+// Rules that make sense without a purchase or visit (the same list as CAMPAIGN_FIELDS in js/mkt-campaigns.js)
+const MKT_RULE_FIELDS_ = ['hist.bought', 'hist.days_since', 'appt.has_future', 'appt.next_days', 'appt.last_days', 'appt.visits',
+  'appt.future_service', 'appt.past_service', 'ssp.active', 'ssp.age_days', 'ssp.expiry_days', 'plan.status', 'plan.due',
+  'plan.overdue', 'form.saved', 'pt.age', 'pt.email', 'pt.mobile'];
+
+function mktAudience_(a) {
+  a = a || {};
+  const g = a.rules || {};
+  const rules = (Array.isArray(g.rules) ? g.rules : [])
+    .filter(function (r) { return r && MKT_RULE_FIELDS_.indexOf(r.field) !== -1; }).slice(0, 20);
+  return { mode: a.mode === 'rules' ? 'rules' : 'all', rules: { match: g.match === 'any' ? 'any' : 'all', rules: rules } };
+}
+
+// Everyone who can be sent marketing: one per email address (merged duplicates and shared addresses count once),
+// with an email, not turned off and not on the do-not-contact list. withVisits: their visits too, for the rules.
+function mktPool_(cfg, withVisits) {
+  const supp = {};
+  fsListAll_(cfg, MKT_SUPPRESS_, ['email']).forEach(function (d) { supp[d.name.split('/').pop()] = true; });
+  const pres = {};
+  if (withVisits) {
+    fsListAll_(cfg, 'pcn_results', ['patientId'].concat(PLAN_VISIT_FIELDS_)).forEach(function (d) {
+      const o = fromFields_(d.fields || {});
+      o._key = d.name.split('/').pop();
+      pres[o._key] = o;
+    });
+  }
+  const stats = { patients: 0, noEmail: 0, optedOut: 0, shared: 0 };
+  const seen = {};
+  const list = [];
+  fsListAll_(cfg, 'patient_list', ['PttID', 'Patient Name', 'First Name', 'Last Name', 'Email', 'Mobile', 'DobKey',
+    'Marketing OK', 'MergedInto', 'MergedIds', 'MergedNames']).forEach(function (d) {
+    const f = fromFields_(d.fields || {});
+    if (f.MergedInto) return;
+    f._id = d.name.split('/').pop();
+    stats.patients++;
+    const email = mktEmail_(f.Email);
+    if (!isEmail_(email)) { stats.noEmail++; return; }
+    if (f['Marketing OK'] === false || supp[mktEmailKey_(email)]) { stats.optedOut++; return; }
+    const key = docId_(f.PttID || f._id);
+    list.push({ key: f._id, doc: f, email: email, pre: pres[key] || { patientId: String(f.PttID || f._id), _key: key } });
+  });
+  list.sort(function (a, b) { return a.key < b.key ? -1 : a.key > b.key ? 1 : 0; });
+  // Two records with the same address: the first one only
+  const out = list.filter(function (e) {
+    if (seen[e.email]) { stats.shared++; return false; }
+    seen[e.email] = true;
+    return true;
+  });
+  return { list: out, stats: stats };
+}
+
+// Does this patient match the campaign's rules? (Everyone always does.)
+function mktMatches_(cfg, aud, e, memo) {
+  if (aud.mode !== 'rules') return true;
+  memo.pts = memo.pts || {};
+  memo.pts[String(e.pre.patientId || '').trim()] = e.doc;   // already read, so the rules don't read it again
+  const ctx = flowLazyCtx_(cfg, e.pre, memo);
+  const run = { patientId: e.doc._id, kind: 'campaign', product: '', purchaseDate: flowKey_(Date.now()), sourceKey: e.pre._key };
+  return flowGroupOk_(cfg, aud.rules, run, ctx);
+}
+
+// "Count patients" in the portal (up to about 3½ minutes; a big rule list may only be partly checked)
+function mktCount_(cfg, body, session) {
+  const aud = mktAudience_(body.audience);
+  if (aud.mode === 'rules' && !aud.rules.rules.length) return { ok: true, problem: 'Add at least one rule, or send it to everyone.' };
+  const cache = CacheService.getScriptCache();
+  const rk = 'mkt_count_' + session.uid;
+  const used = Number(cache.get(rk) || 0);
+  if (used >= 20) return { ok: true, problem: "You've counted a lot in the last hour. Try again a bit later." };
+  cache.put(rk, String(used + 1), 3600);
+
+  const started = Date.now();
+  const pool = mktPool_(cfg, aud.mode === 'rules');
+  if (aud.mode === 'all') {
+    return { ok: true, count: pool.list.length, checked: pool.list.length, total: pool.list.length, partial: false, excluded: pool.stats };
+  }
+  const memo = {};
+  let checked = 0;
+  let count = 0;
+  const sample = [];
+  for (let i = 0; i < pool.list.length; i++) {
+    if (Date.now() - started > 210000) break;
+    let ok = false;
+    try { ok = mktMatches_(cfg, aud, pool.list[i], memo); } catch (e) { ok = false; }
+    checked++;
+    if (!ok) continue;
+    count++;
+    if (sample.length < 12) sample.push(flowWho_(pool.list[i].doc).name);
+  }
+  return { ok: true, count: count, checked: checked, total: pool.list.length, partial: checked < pool.list.length,
+    sample: sample, excluded: pool.stats };
+}
+
+// "Send now" / "Schedule": a copy of the email is taken, and the runner takes it from here
+function mktSchedule_(cfg, body, session) {
+  const id = String(body.campaignId || '');
+  if (!/^[A-Za-z0-9_-]{10,40}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(15000)) return { ok: true, problem: 'Busy. Try again in a moment.' };
+  try {
+    const path = MKT_CAMPAIGNS_ + '/' + id;
+    const c = fsGetDoc_(cfg, path);
+    if (!c) return { ok: false, error: 'NOT_FOUND' };
+    if (c.status !== 'draft') return { ok: true, problem: 'This campaign has already been scheduled.' };
+    const tid = String(c.templateId || '');
+    const t = /^[A-Za-z0-9_-]{10,40}$/.test(tid) ? fsGetDoc_(cfg, MKT_TEMPLATES_ + '/' + tid) : null;
+    if (!t || t.status === 'archived') return { ok: true, problem: 'Choose the email it sends.' };
+    const html = sanitizeEmailHtml_(String(t.html || ''));
+    if (!html) return { ok: true, problem: 'That email template is empty.' };
+    const subject = String(c.subject || t.subject || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+    if (!subject) return { ok: true, problem: 'Add a subject line.' };
+    const aud = mktAudience_(c.audience);
+    if (aud.mode === 'rules' && !aud.rules.rules.length) return { ok: true, problem: 'Add at least one rule, or send it to everyone.' };
+    let at = Date.now();
+    if (body.now !== true) {
+      at = Date.parse(String(body.sendAt || ''));
+      if (!at || at < Date.now() + 4 * 60000) return { ok: true, problem: 'Choose a time at least 5 minutes from now.' };
+      if (at > Date.now() + 90 * 86400000) return { ok: true, problem: 'Choose a time in the next 90 days.' };
+    }
+    const replyTo = String(c.replyTo || '').trim();
+    const now = new Date().toISOString();
+    commitWrites_(cfg, [deleteWrite_(cfg, MKT_CSTATE_ + '/' + id)]);
+    fsPatch_(cfg, path, {
+      status: 'scheduled', sendAtMs: at, sendAt: new Date(at).toISOString(), html: html, subject: subject,
+      templateName: String(t.name || ''), audience: aud,
+      dailyCap: Math.max(50, Math.min(1400, Number(c.dailyCap) || MKT_DAILY_DEFAULT_)),
+      fromName: String(c.fromName || '').replace(/[\r\n"<>]/g, '').trim().slice(0, 80) || 'Dermedica Clinic',
+      replyTo: isEmail_(replyTo) ? replyTo : '',
+      total: 0, sent: 0, skipped: 0, failed: 0, cursor: 0, built: false, failures: [], waiting: '', lastError: '', note: '',
+      buildChecked: 0, buildTotal: 0, startedAt: '', finishedAt: '', sentDay: '', sentDayN: 0,
+      scheduledAt: now, scheduledBy: String(session.name || ''), scheduledByUid: String(session.uid || ''),
+    });
+    console.log('Campaign "' + c.name + '" scheduled for ' + new Date(at).toISOString() + ' by ' + session.name);
+    return { ok: true, sendAt: new Date(at).toISOString() };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Pause, resume, cancel, or (before it starts) back to a draft
+function mktControl_(cfg, body, session) {
+  const id = String(body.campaignId || '');
+  const act = String(body.act || '');
+  if (!/^[A-Za-z0-9_-]{10,40}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(15000)) return { ok: true, problem: 'Busy. Try again in a moment.' };
+  try {
+    const path = MKT_CAMPAIGNS_ + '/' + id;
+    const c = fsGetDoc_(cfg, path);
+    if (!c) return { ok: false, error: 'NOT_FOUND' };
+    const now = new Date().toISOString();
+    const who = String(session.name || '');
+    if (act === 'pause') {
+      if (['scheduled', 'building', 'sending'].indexOf(c.status) === -1) return { ok: true, problem: "It isn't sending, so it can't be paused." };
+      fsPatch_(cfg, path, { status: 'paused', pausedFrom: c.status, pausedAt: now, pausedBy: who, waiting: '' });
+    } else if (act === 'resume') {
+      if (c.status !== 'paused') return { ok: true, problem: "It isn't paused." };
+      const back = ['scheduled', 'building', 'sending'].indexOf(c.pausedFrom) !== -1 ? c.pausedFrom : 'sending';
+      fsPatch_(cfg, path, { status: back, resumedAt: now, resumedBy: who });
+    } else if (act === 'cancel') {
+      if (['sent', 'cancelled', 'draft'].indexOf(c.status) !== -1) return { ok: true, problem: "It can't be cancelled now." };
+      fsPatch_(cfg, path, { status: 'cancelled', cancelledAt: now, cancelledBy: who, waiting: '', finishedAt: now });
+    } else if (act === 'unschedule') {
+      if (c.status !== 'scheduled' || c.startedAt) return { ok: true, problem: "It's already started, so it can only be paused or cancelled." };
+      fsPatch_(cfg, path, { status: 'draft', sendAtMs: 0, updatedAt: now, updatedBy: who });
+      commitWrites_(cfg, [deleteWrite_(cfg, MKT_CSTATE_ + '/' + id)]);
+    } else {
+      return { ok: false, error: 'BAD_REQUEST' };
+    }
+    console.log('Campaign ' + id + ': ' + act + ' by ' + who);
+    return { ok: true };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/* ---------- The runner (its own 10-minute trigger: installCampaignSender) ---------- */
+// It doesn't take the script lock, so sending never makes the rest of the portal wait.
+
+function runCampaigns() {
+  const cache = CacheService.getScriptCache();
+  const busy = Number(cache.get('mkt_runner') || 0);
+  if (busy && Date.now() - busy < 7 * 60000) return;
+  cache.put('mkt_runner', String(Date.now()), 600);
+  try {
+    const cfg = getConfig_();
+    const deadline = Date.now() + 4.5 * 60000;
+    fsQuery_(cfg, MKT_CAMPAIGNS_, 'status', 'IN', ['scheduled', 'building', 'sending'], 30)
+      .sort(function (a, b) { return Number(a.sendAtMs || 0) - Number(b.sendAtMs || 0); })
+      .forEach(function (c) {
+        if (Date.now() > deadline) return;
+        try { mktRunOne_(cfg, c, deadline); }
+        catch (e) {
+          console.error('Campaign ' + c._id + ': ' + (e && e.stack ? e.stack : e));
+          try {
+            fsPatch_(cfg, MKT_CAMPAIGNS_ + '/' + c._id, {
+              lastError: String(e && e.message ? e.message : e).slice(0, 300), updatedAt: new Date().toISOString(),
+            });
+          } catch (e2) { /* not essential */ }
+        }
+      });
+  } finally {
+    cache.remove('mkt_runner');
+  }
+}
+
+function mktRunOne_(cfg, c, deadline) {
+  const path = MKT_CAMPAIGNS_ + '/' + c._id;
+  if (c.status === 'scheduled') {
+    if (Number(c.sendAtMs || 0) > Date.now()) return;
+    fsPatch_(cfg, path, { status: 'building', startedAt: new Date().toISOString(), waiting: 'Choosing who it goes to…', lastError: '' });
+    c.status = 'building';
+  }
+  if (c.status === 'building' && !mktBuild_(cfg, c, deadline)) return;
+  mktSendBatch_(cfg, c, deadline);
+}
+
+// Works through every patient, saving the ones who match. A big list carries on in the next run.
+// Returns true once the list is finished and sending can start.
+function mktBuild_(cfg, c, deadline) {
+  const path = MKT_CAMPAIGNS_ + '/' + c._id;
+  const spath = MKT_CSTATE_ + '/' + c._id;
+  const st = fsGetDoc_(cfg, spath) || {};
+  const after = String(st.after || '');
+  let chunks = Number(st.chunks || 0);
+  let total = Number(st.total || 0);
+  const pending = Array.isArray(st.pending) ? st.pending : [];
+  const aud = mktAudience_(c.audience);
+  const pool = mktPool_(cfg, aud.mode === 'rules').list;
+  const memo = {};
+  let i = 0;
+  while (i < pool.length && after && pool[i].key <= after) i++;
+  let last = after;
+  for (; i < pool.length; i++) {
+    if (Date.now() > deadline - 20000) break;   // leaves time to save
+    const e = pool[i];
+    last = e.key;
+    let ok = false;
+    try { ok = mktMatches_(cfg, aud, e, memo); } catch (err) { console.warn('Campaign ' + c._id + ', ' + e.key + ': ' + err); }
+    if (!ok) continue;
+    const w = flowWho_(e.doc);
+    const parts = String(w.name || '').trim().split(/\s+/);
+    pending.push({ p: e.doc._id, e: e.email, f: w.first || '', n: w.name || '', l: parts.length > 1 ? parts[parts.length - 1] : '' });
+    total++;
+  }
+  const finished = i >= pool.length;
+  const writes = [];
+  while (pending.length >= MKT_CHUNK_ || (finished && pending.length)) {
+    writes.push(updateWrite_(cfg, path + '/queue/q' + chunks, { n: chunks, list: pending.splice(0, MKT_CHUNK_) }));
+    chunks++;
+  }
+  writes.push(updateWrite_(cfg, spath, { after: last, chunks: chunks, total: total, pending: pending, at: new Date().toISOString() }));
+  commitWrites_(cfg, writes, 20);
+
+  const now = fsGetDoc_(cfg, path) || {};
+  if (now.status !== 'building') return false;   // paused or cancelled meanwhile
+  if (!finished) {
+    fsPatch_(cfg, path, { buildChecked: i, buildTotal: pool.length,
+      waiting: 'Choosing who it goes to… (' + i + ' of ' + pool.length + ' patients checked)' });
+    return false;
+  }
+  if (!total) {
+    fsPatch_(cfg, path, { status: 'sent', built: true, total: 0, buildChecked: pool.length, buildTotal: pool.length,
+      finishedAt: new Date().toISOString(), waiting: '', note: 'Nobody matched the rules when it was time to send.' });
+    return false;
+  }
+  fsPatch_(cfg, path, { status: 'sending', built: true, total: total, chunks: chunks, cursor: 0,
+    buildChecked: pool.length, buildTotal: pool.length, builtAt: new Date().toISOString(), waiting: '' });
+  c.status = 'sending'; c.total = total; c.cursor = 0; c.sent = 0; c.skipped = 0; c.failed = 0; c.waiting = '';
+  return true;
+}
+
+// One batch. Progress is saved after every email, so a crash never sends one twice.
+function mktSendBatch_(cfg, c, deadline) {
+  if (c.status !== 'sending') return;
+  const path = MKT_CAMPAIGNS_ + '/' + c._id;
+  const wait = function (txt) { if (String(c.waiting || '') !== txt) fsPatch_(cfg, path, { waiting: txt }); };
+  if (flowSendWindow_(Date.now()) > Date.now()) { wait('Waiting for sending hours (9 am to 6 pm).'); return; }
+  const day = flowKey_(Date.now());
+  let today = c.sentDay === day ? Number(c.sentDayN || 0) : 0;
+  const cap = Math.max(50, Math.min(1400, Number(c.dailyCap) || MKT_DAILY_DEFAULT_));
+  if (today >= cap) { wait("Today's limit for this campaign is reached. It carries on tomorrow from 9 am."); return; }
+  if (MailApp.getRemainingDailyQuota() <= MKT_RESERVE_) {
+    wait("The clinic's email allowance for today is nearly used. It carries on tomorrow from 9 am.");
+    return;
+  }
+
+  const supp = {};
+  fsListAll_(cfg, MKT_SUPPRESS_, ['email']).forEach(function (d) { supp[d.name.split('/').pop()] = true; });
+  const html0 = String(c.html || '');
+  const subject0 = String(c.subject || '');
+  const fromName = String(c.fromName || 'Dermedica Clinic');
+  const replyTo = isEmail_(String(c.replyTo || '')) ? String(c.replyTo) : '';
+  const total = Number(c.total || 0);
+  let cursor = Number(c.cursor || 0);
+  let sent = Number(c.sent || 0);
+  let skipped = Number(c.skipped || 0);
+  let failed = Number(c.failed || 0);
+  const failures = Array.isArray(c.failures) ? c.failures.slice(-99) : [];
+  let chunk = null;
+  let chunkN = -1;
+  let n = 0;
+  let stop = '';
+
+  while (cursor < total && n < MKT_PER_RUN_ && today < cap && Date.now() < deadline) {
+    if (n && n % 25 === 0) {   // paused or cancelled in the portal?
+      const s = (fsGetDoc_(cfg, path) || {}).status;
+      if (s !== 'sending') { stop = 'status'; break; }
+    }
+    if (MailApp.getRemainingDailyQuota() <= MKT_RESERVE_) { stop = 'quota'; break; }
+    const q = Math.floor(cursor / MKT_CHUNK_);
+    if (q !== chunkN) {
+      chunk = fsGetDoc_(cfg, path + '/queue/q' + q);
+      chunkN = q;
+      if (!chunk) throw new Error('Part of the list of patients is missing.');
+    }
+    const r = (chunk.list || [])[cursor % MKT_CHUNK_] || {};
+    let result = 'skipped';
+    if (isEmail_(String(r.e || '')) && !supp[mktEmailKey_(r.e)]) {
+      const vals = { 'first name': r.f || 'there', 'last name': r.l || '', 'full name': r.n || 'there', 'patient name': r.n || '' };
+      const html = mktPlaceFooter_(flowFillHtml_(html0, vals), mktFooterHtml_(r.p, r.e, c._id));
+      const mail = {
+        to: r.e, name: fromName, htmlBody: html, body: emailHtmlToText_(html),
+        subject: flowFill_(subject0, vals, false).replace(/\s+/g, ' ').trim().slice(0, 200) || 'News from Dermedica',
+      };
+      if (replyTo) mail.replyTo = replyTo;
+      try {
+        MailApp.sendEmail(mail);
+        result = 'sent';
+        today++;
+        n++;
+      } catch (e) {
+        const msg = String(e && e.message ? e.message : e);
+        if (/too many|quota|limit/i.test(msg)) { stop = 'quota'; break; }   // not this patient's fault: tried again later
+        result = 'failed';
+        failures.push({ email: mktMask_(r.e), patientId: String(r.p || ''), error: msg.slice(0, 160), at: new Date().toISOString() });
+      }
+    }
+    cursor++;
+    if (result === 'sent') sent++; else if (result === 'failed') failed++; else skipped++;
+    const patch = { cursor: cursor, sent: sent, skipped: skipped, failed: failed, sentDay: day, sentDayN: today,
+      lastSentAt: new Date().toISOString(), waiting: '' };
+    if (result === 'failed') patch.failures = failures.slice(-100);
+    fsPatch_(cfg, path, patch);
+    c.waiting = '';
+  }
+
+  if (stop === 'status') return;
+  if (cursor >= total) {
+    fsPatch_(cfg, path, { status: 'sent', finishedAt: new Date().toISOString(), waiting: '' });
+    console.log('Campaign "' + c.name + '" finished: ' + sent + ' sent, ' + skipped + ' skipped, ' + failed + ' failed.');
+  } else if (stop === 'quota') {
+    fsPatch_(cfg, path, { waiting: "The clinic's email allowance for today is nearly used. It carries on tomorrow from 9 am." });
+  } else if (today >= cap) {
+    fsPatch_(cfg, path, { waiting: "Today's limit for this campaign is reached. It carries on tomorrow from 9 am." });
+  }
+}
+
+// Run ONCE from the editor to start sending campaigns (every 10 minutes)
+function installCampaignSender() {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return t.getHandlerFunction() === 'runCampaigns'; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('runCampaigns').timeBased().everyMinutes(10).create();
+  console.log('Campaign sender installed (every 10 minutes).');
 }
 
 /* ---------- Public: the unsubscribe page (no login, only a signed link) ---------- */

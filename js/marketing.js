@@ -4,6 +4,7 @@ import { callApi } from "./appointments.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 import { mountTemplateList } from "./mkt-templates.js";
+import { mountCampaignList } from "./mkt-campaigns.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -41,15 +42,18 @@ const MK_HEAD = `
 const mkTabs = (on) => `<nav class="mk-tabs" aria-label="Marketing">${[
   ["dnc", "#/tasks/marketing", "Do not contact"],
   ["templates", "#/tasks/marketing/templates", "Email templates"],
-  ["campaigns", "", "Campaigns"],
-].map(([k, href, label]) => (href
-  ? `<a href="${href}"${k === on ? ' class="is-on" aria-current="page"' : ""}>${label}</a>`
-  : `<span class="is-soon">${label} <small>coming next</small></span>`)).join("")}</nav>`;
+  ["campaigns", "#/tasks/marketing/campaigns", "Campaigns"],
+].map(([k, href, label]) => `<a href="${href}"${k === on ? ' class="is-on" aria-current="page"' : ""}>${label}</a>`).join("")}</nav>`;
 
 export function mountMarketing(main, { sub = "", staff = null } = {}) {
   if (sub === "templates") {
     main.innerHTML = `${MK_HEAD}${mkTabs("templates")}<div data-role="tpl"></div>`;
     mountTemplateList(main.querySelector('[data-role="tpl"]'), { staff });
+    return;
+  }
+  if (sub === "campaigns") {
+    main.innerHTML = `${MK_HEAD}${mkTabs("campaigns")}<div data-role="camp"></div>`;
+    mountCampaignList(main.querySelector('[data-role="camp"]'), { staff });
     return;
   }
   main.innerHTML = `
@@ -72,7 +76,7 @@ export function mountMarketing(main, { sub = "", staff = null } = {}) {
       <div data-role="list"><div class="skeleton" style="height:160px;border-radius:12px"></div></div>
     </section>`;
 
-    
+
   const listEl = main.querySelector('[data-role="list"]');
   const nEl = main.querySelector('[data-role="n"]');
   const qEl = main.querySelector('[data-role="q"]');
