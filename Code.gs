@@ -83,10 +83,14 @@ function doPost(e) {
   }
 }
 
-// Health check + warm-up. "?warm=1" pre-loads the staff list so the real login is faster.
-// Returns nothing sensitive.
+// Health check + warm-up ("?warm=1"), and marketing email opens ("?o=<token>"). Returns nothing sensitive.
 function doGet(e) {
-  if (e && e.parameter && e.parameter.warm) {
+  const p = (e && e.parameter) || {};
+  if (p.o) {
+    try { mktOpen_(String(p.o)); } catch (err) { console.warn('Open not recorded: ' + err); }
+    return ContentService.createTextOutput('');
+  }
+  if (p.warm) {
     try { getStaffDocs_(); } catch (err) { console.warn('Warm-up failed: ' + err); }
   }
   return json_({ ok: true, status: 'alive' });
@@ -9711,13 +9715,34 @@ const MKT_DAILY_DEFAULT_ = 800;
 const MKT_RULE_FIELDS_ = ['hist.bought', 'hist.days_since', 'appt.has_future', 'appt.next_days', 'appt.last_days', 'appt.visits',
   'appt.future_service', 'appt.past_service', 'ssp.active', 'ssp.age_days', 'ssp.expiry_days', 'plan.status', 'plan.due',
   'plan.overdue', 'form.saved', 'pt.age', 'pt.email', 'pt.mobile'];
+// "Make a list from this": who, from an earlier campaign
+const MKT_LIST_KINDS_ = ['opened', 'notOpened', 'clicked', 'notClicked', 'link'];
 
 function mktAudience_(a) {
   a = a || {};
   const g = a.rules || {};
   const rules = (Array.isArray(g.rules) ? g.rules : [])
     .filter(function (r) { return r && MKT_RULE_FIELDS_.indexOf(r.field) !== -1; }).slice(0, 20);
-  return { mode: a.mode === 'rules' ? 'rules' : 'all', rules: { match: g.match === 'any' ? 'any' : 'all', rules: rules } };
+  const l = a.list || {};
+  const list = {
+    campaignId: /^[A-Za-z0-9_-]{10,40}$/.test(String(l.campaignId || '')) ? String(l.campaignId) : '',
+    kind: MKT_LIST_KINDS_.indexOf(l.kind) !== -1 ? String(l.kind) : 'opened',
+    link: Math.max(0, Math.min(39, Math.floor(Number(l.link) || 0))),
+    name: String(l.name || '').slice(0, 120), label: String(l.label || '').slice(0, 80),
+  };
+  const mode = a.mode === 'rules' ? 'rules' : (a.mode === 'list' && list.campaignId ? 'list' : 'all');
+  return { mode: mode, rules: { match: g.match === 'any' ? 'any' : 'all', rules: rules }, list: list };
+}
+function mktNeedsVisits_(aud) { return aud.mode !== 'all' && aud.rules.rules.length > 0; }
+
+// Why a list from an earlier campaign can't be used, or ''
+function mktListProblem_(cfg, aud, selfId) {
+  if (aud.mode !== 'list') return '';
+  if (selfId && aud.list.campaignId === selfId) return "A campaign can't use its own results.";
+  const src = fsGetDoc_(cfg, MKT_CAMPAIGNS_ + '/' + aud.list.campaignId);
+  if (!src || !Number(src.sent || 0)) return "The campaign this list comes from hasn't sent any emails yet.";
+  if (src.track !== true) return "That campaign didn't track opens and clicks, so there's no list to make.";
+  return '';
 }
 
 // Everyone who can be sent marketing: one per email address (merged duplicates and shared addresses count once),
@@ -9749,7 +9774,6 @@ function mktPool_(cfg, withVisits) {
     list.push({ key: f._id, doc: f, email: email, pre: pres[key] || { patientId: String(f.PttID || f._id), _key: key } });
   });
   list.sort(function (a, b) { return a.key < b.key ? -1 : a.key > b.key ? 1 : 0; });
-  // Two records with the same address: the first one only
   const out = list.filter(function (e) {
     if (seen[e.email]) { stats.shared++; return false; }
     seen[e.email] = true;
@@ -9758,9 +9782,70 @@ function mktPool_(cfg, withVisits) {
   return { list: out, stats: stats };
 }
 
-// Does this patient match the campaign's rules? (Everyone always does.)
+// Lists every document under a path such as "mkt_campaigns/<id>/clicks" (fsListAll_ only does top-level collections)
+function mktListPath_(cfg, path, maskFields) {
+  const mask = (maskFields || []).map(function (f) { return '&mask.fieldPaths=' + encodeURIComponent(quoteField_(f)); }).join('');
+  const docs = [];
+  let pageToken = '';
+  let pages = 0;
+  do {
+    const res = UrlFetchApp.fetch('https://firestore.googleapis.com/v1/' + fsBase_(cfg) + '/' + path + '?pageSize=300' + mask +
+      (pageToken ? '&pageToken=' + encodeURIComponent(pageToken) : ''), {
+      headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) }, muteHttpExceptions: true,
+    });
+    if (res.getResponseCode() !== 200) throw new Error('Firestore list ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
+    const body = JSON.parse(res.getContentText());
+    (body.documents || []).forEach(function (d) { docs.push(d); });
+    pageToken = body.nextPageToken || '';
+    pages++;
+  } while (pageToken && pages < 200);
+  return docs;
+}
+
+// The patients in a list from an earlier campaign: { patientDocId: true }
+function mktListSet_(cfg, list) {
+  const base = MKT_CAMPAIGNS_ + '/' + list.campaignId;
+  const ids = function (sub) {
+    const s = {};
+    listDocIds_(cfg, base + '/' + sub).forEach(function (x) { s[x] = true; });
+    return s;
+  };
+  if (list.kind === 'opened') return ids('opens');
+  if (list.kind === 'clicked') return ids('clicks');
+  if (list.kind === 'link') {
+    const s = {};
+    mktListPath_(cfg, base + '/clicks', ['links']).forEach(function (d) {
+      const f = fromFields_(d.fields || {});
+      if ((Array.isArray(f.links) ? f.links : []).map(Number).indexOf(list.link) !== -1) s[d.name.split('/').pop()] = true;
+    });
+    return s;
+  }
+  // Didn't open / didn't click: everyone it reached so far, less those who did
+  const src = fsGetDoc_(cfg, base) || {};
+  const not = ids(list.kind === 'notOpened' ? 'opens' : 'clicks');
+  const upto = Number(src.cursor || 0);
+  const paths = [];
+  for (let i = 0; i < Number(src.chunks || 0); i++) paths.push(base + '/queue/q' + i);
+  const got = paths.length ? fsBatchGet_(cfg, paths) : {};
+  const s = {};
+  Object.keys(got).forEach(function (k) {
+    const q = Number((/\/q(\d+)$/.exec(k) || [])[1] || 0);
+    (got[k].list || []).forEach(function (r, j) {
+      const id = docId_(r.p);
+      if (id && q * MKT_CHUNK_ + j < upto && !not[id]) s[id] = true;
+    });
+  });
+  return s;
+}
+
+// Does this patient match the campaign's audience?
 function mktMatches_(cfg, aud, e, memo) {
-  if (aud.mode !== 'rules') return true;
+  if (aud.mode === 'all') return true;
+  if (aud.mode === 'list') {
+    if (!memo.listSet) memo.listSet = mktListSet_(cfg, aud.list);
+    if (!memo.listSet[e.doc._id]) return false;
+    if (!aud.rules.rules.length) return true;
+  }
   memo.pts = memo.pts || {};
   memo.pts[String(e.pre.patientId || '').trim()] = e.doc;   // already read, so the rules don't read it again
   const ctx = flowLazyCtx_(cfg, e.pre, memo);
@@ -9772,6 +9857,8 @@ function mktMatches_(cfg, aud, e, memo) {
 function mktCount_(cfg, body, session) {
   const aud = mktAudience_(body.audience);
   if (aud.mode === 'rules' && !aud.rules.rules.length) return { ok: true, problem: 'Add at least one rule, or send it to everyone.' };
+  const lp = mktListProblem_(cfg, aud, String(body.campaignId || ''));
+  if (lp) return { ok: true, problem: lp };
   const cache = CacheService.getScriptCache();
   const rk = 'mkt_count_' + session.uid;
   const used = Number(cache.get(rk) || 0);
@@ -9779,7 +9866,7 @@ function mktCount_(cfg, body, session) {
   cache.put(rk, String(used + 1), 3600);
 
   const started = Date.now();
-  const pool = mktPool_(cfg, aud.mode === 'rules');
+  const pool = mktPool_(cfg, mktNeedsVisits_(aud));
   if (aud.mode === 'all') {
     return { ok: true, count: pool.list.length, checked: pool.list.length, total: pool.list.length, partial: false, excluded: pool.stats };
   }
@@ -9800,7 +9887,7 @@ function mktCount_(cfg, body, session) {
     sample: sample, excluded: pool.stats };
 }
 
-// "Send now" / "Schedule": a copy of the email is taken, and the runner takes it from here
+// "Send now" / "Schedule": a copy of the email is taken (its links ready for tracking), and the runner takes it from here
 function mktSchedule_(cfg, body, session) {
   const id = String(body.campaignId || '');
   if (!/^[A-Za-z0-9_-]{10,40}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
@@ -9820,25 +9907,31 @@ function mktSchedule_(cfg, body, session) {
     if (!subject) return { ok: true, problem: 'Add a subject line.' };
     const aud = mktAudience_(c.audience);
     if (aud.mode === 'rules' && !aud.rules.rules.length) return { ok: true, problem: 'Add at least one rule, or send it to everyone.' };
+    const lp = mktListProblem_(cfg, aud, id);
+    if (lp) return { ok: true, problem: lp };
     let at = Date.now();
     if (body.now !== true) {
       at = Date.parse(String(body.sendAt || ''));
       if (!at || at < Date.now() + 4 * 60000) return { ok: true, problem: 'Choose a time at least 5 minutes from now.' };
       if (at > Date.now() + 90 * 86400000) return { ok: true, problem: 'Choose a time in the next 90 days.' };
     }
+    const track = c.track !== false;
+    const prep = track ? mktPrepLinks_(html) : { html: html, links: [] };
     const replyTo = String(c.replyTo || '').trim();
     const now = new Date().toISOString();
     commitWrites_(cfg, [deleteWrite_(cfg, MKT_CSTATE_ + '/' + id)]);
     fsPatch_(cfg, path, {
-      status: 'scheduled', sendAtMs: at, sendAt: new Date(at).toISOString(), html: html, subject: subject,
-      templateName: String(t.name || ''), audience: aud,
+      status: 'scheduled', sendAtMs: at, sendAt: new Date(at).toISOString(), html: prep.html, links: prep.links, track: track,
+      subject: subject, templateName: String(t.name || ''), audience: aud,
       dailyCap: Math.max(50, Math.min(1400, Number(c.dailyCap) || MKT_DAILY_DEFAULT_)),
       fromName: String(c.fromName || '').replace(/[\r\n"<>]/g, '').trim().slice(0, 80) || 'Dermedica Clinic',
       replyTo: isEmail_(replyTo) ? replyTo : '',
-      total: 0, sent: 0, skipped: 0, failed: 0, cursor: 0, built: false, failures: [], waiting: '', lastError: '', note: '',
+      total: 0, sent: 0, skipped: 0, failed: 0, cursor: 0, chunks: 0, built: false, failures: [], waiting: '', lastError: '', note: '',
       buildChecked: 0, buildTotal: 0, startedAt: '', finishedAt: '', sentDay: '', sentDayN: 0,
+      stats: { opens: 0, opensTotal: 0, clicks: 0, clicksTotal: 0, unsubscribes: 0, bounces: 0 }, linkClicks: {},
       scheduledAt: now, scheduledBy: String(session.name || ''), scheduledByUid: String(session.uid || ''),
     });
+    CacheService.getScriptCache().remove('mkl_' + id);
     console.log('Campaign "' + c.name + '" scheduled for ' + new Date(at).toISOString() + ' by ' + session.name);
     return { ok: true, sendAt: new Date(at).toISOString() };
   } finally {
@@ -9894,6 +9987,7 @@ function runCampaigns() {
   try {
     const cfg = getConfig_();
     const deadline = Date.now() + 4.5 * 60000;
+    try { mktCheckBounces_(cfg, false); } catch (e) { console.warn('Bounce check failed: ' + e); }
     fsQuery_(cfg, MKT_CAMPAIGNS_, 'status', 'IN', ['scheduled', 'building', 'sending'], 30)
       .sort(function (a, b) { return Number(a.sendAtMs || 0) - Number(b.sendAtMs || 0); })
       .forEach(function (c) {
@@ -9935,7 +10029,7 @@ function mktBuild_(cfg, c, deadline) {
   let total = Number(st.total || 0);
   const pending = Array.isArray(st.pending) ? st.pending : [];
   const aud = mktAudience_(c.audience);
-  const pool = mktPool_(cfg, aud.mode === 'rules').list;
+  const pool = mktPool_(cfg, mktNeedsVisits_(aud)).list;
   const memo = {};
   let i = 0;
   while (i < pool.length && after && pool[i].key <= after) i++;
@@ -9970,7 +10064,7 @@ function mktBuild_(cfg, c, deadline) {
   }
   if (!total) {
     fsPatch_(cfg, path, { status: 'sent', built: true, total: 0, buildChecked: pool.length, buildTotal: pool.length,
-      finishedAt: new Date().toISOString(), waiting: '', note: 'Nobody matched the rules when it was time to send.' });
+      finishedAt: new Date().toISOString(), waiting: '', note: 'Nobody matched when it was time to send.' });
     return false;
   }
   fsPatch_(cfg, path, { status: 'sending', built: true, total: total, chunks: chunks, cursor: 0,
@@ -10000,6 +10094,8 @@ function mktSendBatch_(cfg, c, deadline) {
   const subject0 = String(c.subject || '');
   const fromName = String(c.fromName || 'Dermedica Clinic');
   const replyTo = isEmail_(String(c.replyTo || '')) ? String(c.replyTo) : '';
+  const track = c.track === true;
+  const web = track ? mktWebAppUrl_() : '';
   const total = Number(c.total || 0);
   let cursor = Number(c.cursor || 0);
   let sent = Number(c.sent || 0);
@@ -10027,7 +10123,18 @@ function mktSendBatch_(cfg, c, deadline) {
     let result = 'skipped';
     if (isEmail_(String(r.e || '')) && !supp[mktEmailKey_(r.e)]) {
       const vals = { 'first name': r.f || 'there', 'last name': r.l || '', 'full name': r.n || 'there', 'patient name': r.n || '' };
-      const html = mktPlaceFooter_(flowFillHtml_(html0, vals), mktFooterHtml_(r.p, r.e, c._id));
+      let body = flowFillHtml_(html0, vals);
+      let tail = mktFooterHtml_(r.p, r.e, c._id);
+      if (track) {
+        body = body.replace(/__MKTL(\d+)__/g, function (m, i) {
+          return invEsc_(MKT_TRACK_PAGE_ + '#' + mktTrackTok_(c._id, r.p, Number(i)));
+        });
+        if (web) {
+          tail += '<img src="' + invEsc_(web + '?o=' + mktTrackTok_(c._id, r.p)) + '" width="1" height="1" alt="" ' +
+            'style="display:block;width:1px;height:1px;border:0;">';
+        }
+      }
+      const html = mktPlaceFooter_(body, tail);
       const mail = {
         to: r.e, name: fromName, htmlBody: html, body: emailHtmlToText_(html),
         subject: flowFill_(subject0, vals, false).replace(/\s+/g, ' ').trim().slice(0, 200) || 'News from Dermedica',
@@ -10065,7 +10172,7 @@ function mktSendBatch_(cfg, c, deadline) {
   }
 }
 
-// Run ONCE from the editor to start sending campaigns (every 10 minutes)
+// Run ONCE from the editor, as the account that sends (info@), to start sending campaigns (every 10 minutes)
 function installCampaignSender() {
   ScriptApp.getProjectTriggers()
     .filter(function (t) { return t.getHandlerFunction() === 'runCampaigns'; })
@@ -10074,9 +10181,230 @@ function installCampaignSender() {
   console.log('Campaign sender installed (every 10 minutes).');
 }
 
-/* ---------- Public: the unsubscribe page (no login, only a signed link) ---------- */
+/* ===================== Marketing: opens, clicks, unsubscribes and bounces ===================== */
+// Opens: a 1×1 picture at the end of each email, loaded from this web app (doGet ?o=<token>).
+// Clicks: each web link goes to r.html#<token> on the portal, which tells this script (op "click") and is sent on
+//   to the real address. The address comes from the campaign (links[]), never from the link, so it can't be misused.
+// Tokens are signed: "m1.<campaign, patient[, link]>.<signature>".
+// Each patient gets one document per campaign in opens/, clicks/, unsubs/ and bounces/ (mkt_campaigns/{id}/…),
+// and the campaign's counters (stats.*, linkClicks.l<n>) go up in the same write, so they can't drift apart.
+
+const MKT_TRACK_PAGE_ = PORTAL_URL_ + 'r.html';
+const MKT_A_RE_ = /(<a\b[^>]*?\shref\s*=\s*")(https?:\/\/[^"]+)("[^>]*>)([\s\S]*?)(<\/a>)/gi;
+const MKT_BOUNCE_LABEL_ = 'Portal-bounces-checked';
+
+// The web app's /exec address (Script Property WEBAPP_URL). Without it, opens aren't tracked.
+function mktWebAppUrl_() {
+  const u = String(PropertiesService.getScriptProperties().getProperty('WEBAPP_URL') || '').trim();
+  return /^https:\/\/script\.google\.com\/macros\/s\/[A-Za-z0-9_-]+\/exec$/.test(u) ? u : '';
+}
+
+function mktTrackTok_(cid, pid, link) {
+  const payload = 'm1.' + b64url_(JSON.stringify(link === undefined ? [String(cid), String(pid)] : [String(cid), String(pid), link]));
+  return payload + '.' + mktSig_(payload).slice(0, 22);
+}
+function mktReadTrack_(t) {
+  const m = /^m1\.([A-Za-z0-9_-]{4,400})\.([A-Za-z0-9_-]{22})$/.exec(String(t || ''));
+  if (!m || mktSig_('m1.' + m[1]).slice(0, 22) !== m[2]) return null;
+  try {
+    const s = m[1].replace(/-/g, '+').replace(/_/g, '/');
+    const a = JSON.parse(Utilities.newBlob(Utilities.base64Decode(s + '==='.slice((s.length + 3) % 4))).getDataAsString());
+    if (!Array.isArray(a) || !/^[A-Za-z0-9_-]{10,40}$/.test(String(a[0])) || !docId_(a[1])) return null;
+    const link = a.length > 2 ? Math.floor(Number(a[2])) : -1;
+    if (a.length > 2 && !(link >= 0 && link < 40)) return null;
+    return { cid: String(a[0]), pid: docId_(a[1]), link: link };
+  } catch (e) { return null; }
+}
+
+// Every web link in the email becomes __MKTL<n>__; each patient's own tracked link goes in when it's sent
+function mktPrepLinks_(html) {
+  const links = [];
+  const out = String(html || '').replace(MKT_A_RE_, function (m, a, url, b, inner, c) {
+    if (links.length >= 40) return m;
+    const text = emailHtmlToText_(inner).replace(/\s+/g, ' ').trim().slice(0, 80) || (/<img\b/i.test(inner) ? 'Picture' : 'Link');
+    links.push({ url: url.replace(/&amp;/g, '&'), text: text });
+    return a + '__MKTL' + (links.length - 1) + '__' + b + inner + c;
+  });
+  return { html: out, links: links };
+}
+
+function mktInc_(fieldPath, n) { return { fieldPath: fieldPath, increment: { integerValue: String(n || 1) } }; }
+
+// One commit. True if it went through (a failed "only if new" check comes back false, not an error)
+function mktCommit_(cfg, writes) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const res = UrlFetchApp.fetch('https://firestore.googleapis.com/v1/' + fsBase_(cfg) + ':commit', {
+      method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+      headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) },
+      payload: JSON.stringify({ writes: writes }),
+    });
+    const code = res.getResponseCode();
+    if (code !== 429 && code < 500) return code === 200;
+    Utilities.sleep(500 * (attempt + 1));
+  }
+  return false;
+}
+
+// First time for this patient: saves mkt_campaigns/{cid}/{sub}/{pid} and adds to the counters, together.
+// Already there: nothing changes, and it returns false.
+function mktOnce_(cfg, cid, sub, pid, data, fts) {
+  const base = fsBase_(cfg) + '/' + MKT_CAMPAIGNS_ + '/' + cid;
+  return mktCommit_(cfg, [
+    { update: { name: base + '/' + sub + '/' + pid, fields: toFields_(data) }, currentDocument: { exists: false } },
+    { transform: { document: base, fieldTransforms: fts }, currentDocument: { exists: true } },
+  ]);
+}
+function mktBump_(cfg, docPath, fts) {
+  return mktCommit_(cfg, [{ transform: { document: fsBase_(cfg) + '/' + docPath, fieldTransforms: fts }, currentDocument: { exists: true } }]);
+}
+
+// doGet ?o=<token>
+function mktOpen_(t) {
+  const tok = mktReadTrack_(t);
+  if (!tok || tok.link !== -1) return;
+  const cache = CacheService.getScriptCache();
+  const k = 'mko_' + flowHash_(t);
+  if (cache.get(k)) return;   // email apps often load the picture twice in a row
+  cache.put(k, '1', 120);
+  const cfg = getConfig_();
+  const total = [mktInc_('stats.opensTotal')];
+  if (!mktOnce_(cfg, tok.cid, 'opens', tok.pid, { at: new Date().toISOString(), patientId: tok.pid },
+      [mktInc_('stats.opens')].concat(total))) {
+    mktBump_(cfg, MKT_CAMPAIGNS_ + '/' + tok.cid, total);
+  }
+}
+
+// The real address of link n in a campaign (remembered for 6 hours)
+function mktCampaignLink_(cfg, cid, n) {
+  const cache = CacheService.getScriptCache();
+  const k = 'mkl_' + cid;
+  let links = null;
+  const hit = cache.get(k);
+  if (hit) links = JSON.parse(hit);
+  else {
+    const c = fsGetDoc_(cfg, MKT_CAMPAIGNS_ + '/' + cid);
+    links = c && Array.isArray(c.links) ? c.links.map(function (l) { return String((l && l.url) || ''); }) : [];
+    try { cache.put(k, JSON.stringify(links), 21600); } catch (e) { /* not essential */ }
+  }
+  // Tags like {First name} can't be filled in here, so they're left out
+  const u = String(links[n] || '').replace(FLOW_TOKEN_RE_, '').trim();
+  return /^https?:\/\/[^\s"'<>]+$/i.test(u) ? u : '';
+}
+
+// r.html → { url } to send them on to
+function mktClick_(body) {
+  const t = String(body.t || '');
+  const tok = mktReadTrack_(t);
+  if (!tok || tok.link < 0) return { ok: true, problem: 'BAD_LINK' };
+  const cfg = getConfig_();
+  const url = mktCampaignLink_(cfg, tok.cid, tok.link);
+  if (!url) return { ok: true, problem: 'BAD_LINK' };
+  const cache = CacheService.getScriptCache();
+  const k = 'mkc_' + flowHash_(t);
+  if (!cache.get(k)) {
+    cache.put(k, '1', 30);
+    try { mktRecordClick_(cfg, tok); } catch (e) { console.warn('Click not recorded: ' + e); }
+  }
+  return { ok: true, url: url };
+}
+
+function mktRecordClick_(cfg, tok) {
+  const now = new Date().toISOString();
+  const per = [mktInc_('stats.clicksTotal'), mktInc_('linkClicks.l' + tok.link)];
+  const first = mktOnce_(cfg, tok.cid, 'clicks', tok.pid, { at: now, patientId: tok.pid, links: [tok.link] },
+    [mktInc_('stats.clicks')].concat(per));
+  if (!first) {
+    mktBump_(cfg, MKT_CAMPAIGNS_ + '/' + tok.cid, per);
+    mktBump_(cfg, MKT_CAMPAIGNS_ + '/' + tok.cid + '/clicks/' + tok.pid,
+      [{ fieldPath: 'links', appendMissingElements: { values: [{ integerValue: String(tok.link) }] } }]);
+  }
+  // A click means they opened it, even if their email app blocked the pictures
+  mktOnce_(cfg, tok.cid, 'opens', tok.pid, { at: now, patientId: tok.pid, fromClick: true }, [mktInc_('stats.opens')]);
+}
+
+// Counted once per patient per campaign (flows and tests have no campaign, so aren't counted)
+function mktCountUnsub_(cfg, tok) {
+  const pid = docId_(tok.pid);
+  if (!pid || !/^[A-Za-z0-9_-]{10,40}$/.test(String(tok.cid || ''))) return;
+  try { mktOnce_(cfg, tok.cid, 'unsubs', pid, { at: new Date().toISOString(), patientId: pid }, [mktInc_('stats.unsubscribes')]); }
+  catch (e) { console.warn('Unsubscribe not counted: ' + e); }
+}
+
+/* ---------- Bounces: "Address not found" emails in the sending account's inbox (hourly) ---------- */
+
+function mktCheckBounces_(cfg, force) {
+  const props = PropertiesService.getScriptProperties();
+  if (!force && Date.now() - Number(props.getProperty('MKT_BOUNCE_AT') || 0) < 55 * 60000) return 0;
+  props.setProperty('MKT_BOUNCE_AT', String(Date.now()));
+  const label = GmailApp.getUserLabelByName(MKT_BOUNCE_LABEL_) || GmailApp.createLabel(MKT_BOUNCE_LABEL_);
+  const threads = GmailApp.search('from:(mailer-daemon OR postmaster) newer_than:7d -label:' + MKT_BOUNCE_LABEL_, 0, 40);
+  let n = 0;
+  threads.forEach(function (th) {
+    try {
+      th.getMessages().forEach(function (msg) {
+        if (!/mailer-daemon|postmaster/i.test(msg.getFrom())) return;
+        const b = mktParseBounce_(msg);
+        if (b && b.hard) { mktRecordBounce_(cfg, b); n++; }
+      });
+      th.addLabel(label);
+    } catch (e) { console.warn('Bounce email ' + th.getId() + ' not read: ' + e); }
+  });
+  if (n) console.log('Bounces: ' + n + ' address(es) put on do not contact.');
+  return n;
+}
+
+// { email, hard, why, track: { cid, pid } | null } or null
+function mktParseBounce_(msg) {
+  const body = String(msg.getPlainBody() || '');
+  let to = String(msg.getHeader('X-Failed-Recipients') || '').split(',')[0].trim();
+  if (!isEmail_(to)) {
+    const m = /(?:wasn't delivered to|failed permanently:|could not be delivered to)\s*<?([^\s<>@]+@[^\s<>]+?)>?[\s.,]/i.exec(body);
+    to = m ? m[1] : '';
+  }
+  to = mktEmail_(to);
+  if (!isEmail_(to)) return null;
+  const soft = /\b4\.\d{1,3}\.\d{1,3}\b|temporar|mailbox (?:is )?full|over quota|quota exceeded|try again later/i.test(body);
+  const hard = /\b5\.1\.\d{1,3}\b|\b550\b|\b553\b|address not found|does(?: not|n't) exist|no such user|user unknown|recipient (?:address )?rejected|unable to receive mail/i.test(body);
+  const code = (/\b5\.\d{1,3}\.\d{1,3}\b/.exec(body) || [''])[0];
+  // Which campaign: from a tracked link, the open picture or the unsubscribe link in the original email
+  const all = String(msg.getBody() || '') + '\n' + body;
+  let track = null;
+  const m1 = /m1\.[A-Za-z0-9_-]{4,400}\.[A-Za-z0-9_-]{22}/.exec(all);
+  if (m1) track = mktReadTrack_(m1[0]);
+  if (!track) {
+    const u1 = /u1\.[A-Za-z0-9_-]{4,800}\.[A-Za-z0-9_-]{32}/.exec(all);
+    const u = u1 ? mktReadToken_(u1[0]) : null;
+    if (u && docId_(u.pid)) track = { cid: u.cid, pid: docId_(u.pid), link: -1 };
+  }
+  return { email: to, hard: hard && !soft, why: code ? 'Bounced (' + code + ')' : 'Bounced', track: track };
+}
+
+function mktRecordBounce_(cfg, b) {
+  const now = new Date().toISOString();
+  const t = b.track;
+  commitWrites_(cfg, [
+    updateWrite_(cfg, MKT_SUPPRESS_ + '/' + mktEmailKey_(b.email), {
+      email: b.email, reason: 'bounced', why: 'Email bounced', note: b.why, at: now, by: 'Bounce check',
+      patientId: t ? t.pid : '', source: 'Email bounced', campaignId: t ? t.cid : '',
+    }),
+    updateWrite_(cfg, MKT_LOG_ + '/c_' + Date.now() + '_' + Utilities.getUuid().slice(0, 8), {
+      patientId: t ? t.pid : '', patientName: '', email: b.email, status: 'no', source: 'Email bounced', why: 'Email bounced',
+      note: b.why, by: 'Bounce check', byUid: '', campaignId: t ? t.cid : '', at: now,
+    }),
+  ]);
+  if (t && /^[A-Za-z0-9_-]{10,40}$/.test(String(t.cid || ''))) {
+    try { mktOnce_(cfg, t.cid, 'bounces', t.pid, { at: now, email: mktMask_(b.email) }, [mktInc_('stats.bounces')]); }
+    catch (e) { console.warn('Bounce not counted: ' + e); }
+  }
+}
+
+/* ---------- Public: the unsubscribe page and r.html (no login, only signed links) ---------- */
 
 function handleMarketingPublic_(body) {
+  if (String(body.op || '') === 'click') {
+    try { return mktClick_(body); }
+    catch (err) { console.error('Click failed: ' + (err && err.stack ? err.stack : err)); return { ok: true, problem: 'SERVER' }; }
+  }
   const tok = mktReadToken_(body.t);
   if (!tok) return { ok: true, problem: 'BAD_LINK' };
   const cache = CacheService.getScriptCache();
@@ -10090,9 +10418,11 @@ function handleMarketingPublic_(body) {
     const cfg = getConfig_();
     if (op === 'unsubscribe' || op === 'resubscribe') {
       const yes = op === 'resubscribe';
+      const wasIn = !mktSuppressed_(cfg, tok.email);
       mktSetConsent_(cfg, tok.pid, yes, {
         by: 'The patient', source: yes ? 'Resubscribed' : 'Unsubscribe link', email: tok.email, campaignId: tok.cid,
       });
+      if (!yes && wasIn) mktCountUnsub_(cfg, tok);
       console.log('Marketing: ' + mktMask_(tok.email) + (yes ? ' resubscribed' : ' unsubscribed') + (tok.cid ? ' (' + tok.cid + ')' : ''));
     }
     const s = mktSuppressed_(cfg, tok.email);
@@ -10108,4 +10438,11 @@ function testMarketingLink() {
   const pid = 'PASTE_A_PATIENT_ID';
   const p = flowPatient_(getConfig_(), pid);
   console.log(p && isEmail_(p.Email) ? mktUnsubUrl_(p._id, p.Email, 'test') : 'That patient has no email address.');
+}
+
+// Run from the editor: checks tracking is set up, and reads the inbox for bounces straight away
+function testMarketingTracking() {
+  console.log('Open picture address: ' + (mktWebAppUrl_() || 'MISSING. Add WEBAPP_URL (the /exec address) in Script Properties.'));
+  console.log('Click page: ' + MKT_TRACK_PAGE_);
+  console.log('Bounces found: ' + mktCheckBounces_(getConfig_(), true));
 }

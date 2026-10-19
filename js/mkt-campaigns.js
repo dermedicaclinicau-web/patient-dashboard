@@ -1,6 +1,7 @@
 // Task Manager → Marketing → Campaigns: the list (#/tasks/marketing/campaigns) and one campaign (…/campaigns/<id>).
 // A draft is saved here. "Send now" or "Schedule" hands it to Apps Script (Code.gs → Marketing: campaigns),
-// which chooses the patients when it's time and sends in batches. The page follows it live.
+// which chooses the patients when it's time and sends in batches. The page follows it live, with its results
+// (opens, clicks, unsubscribes, bounces) and "Make a list from this" for a follow-up campaign.
 import { db, auth } from "./firebase-config.js";
 import {
   collection, doc, addDoc, updateDoc, onSnapshot, serverTimestamp,
@@ -28,10 +29,13 @@ const FILTERS = [
   ["all", "All", () => true], ["draft", "Drafts", (s) => s === "draft"], ["scheduled", "Scheduled", (s) => s === "scheduled"],
   ["sending", "Sending", (s) => ["building", "sending", "paused"].includes(s)], ["sent", "Sent", (s) => ["sent", "cancelled"].includes(s)],
 ];
+const LIST_SHORT = { opened: "opened", notOpened: "didn't open", clicked: "clicked", notClicked: "didn't click" };
 const EMAIL_RE = /[^\s@,;<>"']+@[^\s@,;<>"']+\.[^\s@,;<>"']+/g;
 
 const n0 = (v) => Number(v || 0).toLocaleString("en-AU");
 const pct = (a, b) => (Number(b) > 0 ? Math.min(100, Math.round((Number(a || 0) / Number(b)) * 100)) : 0);
+const rate = (n, of) => (Number(of) > 0 ? `${(Math.round((Number(n || 0) / Number(of)) * 1000) / 10).toLocaleString("en-AU")}%` : "–");
+const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return ""; } };
 const toDate = (v) => {
   if (v && typeof v.toDate === "function") return v.toDate();
   if (typeof v === "string" && v) { const d = new Date(v); return isNaN(d) ? null : d; }
@@ -48,7 +52,27 @@ const errText = (err, fallback) => (err && err.code === "permission-denied"
   ? "You don't have access to campaigns. Check Marketing access in Staff, and that the Firestore rules are published."
   : (err && err.message) || fallback);
 const pill = (s) => `<span class="mc-pill ${(STATUS[s] || STATUS.draft)[1]}">${esc((STATUS[s] || [s])[0])}</span>`;
-const audText = (c) => (c.audience.mode === "rules" ? describeGroup(c.audience.rules) : "Everyone who can receive marketing emails");
+const statBox = (label, val, help = "") => `<div class="mc-stat"><small>${esc(label)}</small><strong>${val}</strong>${help ? `<em>${esc(help)}</em>` : ""}</div>`;
+
+/* ---------- Who it goes to ---------- */
+const audMode = (m) => (m === "rules" || m === "list" ? m : "all");
+const cleanList = (l) => {
+  const x = l || {};
+  return { campaignId: String(x.campaignId || ""), kind: String(x.kind || "opened"), link: Number(x.link) || 0,
+    name: String(x.name || "").slice(0, 120), label: String(x.label || "").slice(0, 80) };
+};
+function listText(l) {
+  const n = `“${l.name || "an earlier campaign"}”`;
+  if (l.kind === "link") return `Clicked “${l.label || "a link"}” in ${n}`;
+  return ({ opened: `Opened ${n}`, notOpened: `Didn't open ${n}`, clicked: `Clicked a link in ${n}`,
+    notClicked: `Didn't click a link in ${n}` })[l.kind] || `From ${n}`;
+}
+function audText(c) {
+  const a = c.audience;
+  if (a.mode === "rules") return describeGroup(a.rules);
+  if (a.mode === "list") return listText(a.list) + (a.rules.rules.length ? ` · and ${describeGroup(a.rules)}` : "");
+  return "Everyone who can receive marketing emails";
+}
 
 function openDialog(html, cls = "") {
   const dlg = document.createElement("dialog");
@@ -65,12 +89,21 @@ function openDialog(html, cls = "") {
 function normC(snap) {
   const x = snap.data() || {};
   const a = x.audience || {};
+  const st = x.stats || {};
+  const status = x.status === "archived" || STATUS[x.status] ? String(x.status) : "draft";
   return {
-    id: snap.id, name: String(x.name || "Untitled campaign"),
-    status: x.status === "archived" || STATUS[x.status] ? String(x.status) : "draft",
+    id: snap.id, name: String(x.name || "Untitled campaign"), status,
     templateId: String(x.templateId || ""), templateName: String(x.templateName || ""),
     subject: String(x.subject || ""), fromName: String(x.fromName || "Dermedica Clinic"), replyTo: String(x.replyTo || ""),
-    audience: { mode: a.mode === "rules" ? "rules" : "all", rules: cleanGroup(a.rules || blankGroup()) },
+    audience: { mode: audMode(a.mode), rules: cleanGroup(a.rules || blankGroup()), list: cleanList(a.list) },
+    // Drafts track by default; a scheduled campaign shows what it was actually sent with
+    track: status === "draft" ? x.track !== false : x.track === true,
+    links: (Array.isArray(x.links) ? x.links : []).map((l) => ({ url: String((l && l.url) || ""), text: String((l && l.text) || "") })),
+    linkClicks: x.linkClicks && typeof x.linkClicks === "object" ? x.linkClicks : {},
+    stats: {
+      opens: Number(st.opens) || 0, opensTotal: Number(st.opensTotal) || 0, clicks: Number(st.clicks) || 0,
+      clicksTotal: Number(st.clicksTotal) || 0, unsubscribes: Number(st.unsubscribes) || 0, bounces: Number(st.bounces) || 0,
+    },
     dailyCap: Number(x.dailyCap) || 800, sendAtMs: Number(x.sendAtMs) || 0,
     total: Number(x.total || 0), sent: Number(x.sent || 0), skipped: Number(x.skipped || 0), failed: Number(x.failed || 0),
     buildChecked: Number(x.buildChecked || 0), buildTotal: Number(x.buildTotal || 0),
@@ -83,13 +116,13 @@ function normC(snap) {
 
 async function createCampaign(base, staff) {
   const uid = me();
+  const a = base.audience || {};
   const ref = await addDoc(collection(db, COL), {
     name: String(base.name || "").replace(/\s+/g, " ").trim().slice(0, 120) || "Untitled campaign",
     status: "draft", templateId: base.templateId || "", templateName: base.templateName || "", subject: base.subject || "",
     fromName: base.fromName || "Dermedica Clinic", replyTo: base.replyTo || "",
-    audience: { mode: base.audience && base.audience.mode === "rules" ? "rules" : "all",
-      rules: cleanGroup((base.audience && base.audience.rules) || blankGroup()) },
-    dailyCap: Number(base.dailyCap) || 800,
+    audience: { mode: audMode(a.mode), rules: cleanGroup(a.rules || blankGroup()), list: cleanList(a.list) },
+    dailyCap: Number(base.dailyCap) || 800, track: base.track !== false,
     createdAt: serverTimestamp(), createdBy: who(staff), createdByUid: uid,
     updatedAt: serverTimestamp(), updatedBy: who(staff), updatedByUid: uid,
   });
@@ -101,8 +134,8 @@ async function saveDraft(c, staff) {
     name: String(c.name || "").replace(/\s+/g, " ").trim().slice(0, 120) || "Untitled campaign",
     templateId: c.templateId, templateName: c.templateName, subject: String(c.subject || "").slice(0, 200),
     fromName: String(c.fromName || "").slice(0, 80), replyTo: String(c.replyTo || "").trim().slice(0, 254),
-    audience: { mode: c.audience.mode, rules: cleanGroup(c.audience.rules) },
-    dailyCap: Number(c.dailyCap) || 800,
+    audience: { mode: c.audience.mode, rules: cleanGroup(c.audience.rules), list: cleanList(c.audience.list) },
+    dailyCap: Number(c.dailyCap) || 800, track: c.track !== false,
     updatedAt: serverTimestamp(), updatedBy: who(staff), updatedByUid: me(),
   });
 }
@@ -170,7 +203,10 @@ function rowWhen(c) {
   if (c.status === "scheduled") return `Sends ${when(new Date(c.sendAtMs))}`;
   if (c.status === "building") return "Choosing patients…";
   if (c.status === "sending" || c.status === "paused") return `${n0(c.sent)} of ${n0(c.total)} sent`;
-  if (c.status === "sent") return `${n0(c.sent)} sent${c.finishedAt ? ` · ${when(c.finishedAt)}` : ""}`;
+  if (c.status === "sent") {
+    const opened = c.track && c.sent ? ` · ${rate(c.stats.opens, c.sent)} opened` : "";
+    return `${n0(c.sent)} sent${opened}${c.finishedAt ? ` · ${when(c.finishedAt)}` : ""}`;
+  }
   return "Cancelled";
 }
 
@@ -270,6 +306,7 @@ export async function mountCampaignEditor(container, { id, staff = null } = {}) 
 }
 
 /* ---------- A draft: the five steps ---------- */
+// Each mode gets its own fresh element, so its listeners go when it does
 
 function mountDraft(page, c, staff) {
   const root = document.createElement("div");
@@ -282,6 +319,7 @@ function mountDraft(page, c, staff) {
   let tagTarget = null;
   const stepHead = (key, title) => `<div class="mc-step-h"><span class="mc-tick" data-tick="${key}" aria-hidden="true"></span>
     <div><h4>${title}</h4><small class="muted" data-sum="${key}"></small></div></div>`;
+  const hasList = !!c.audience.list.campaignId;
 
   root.innerHTML = `
     ${BACK}
@@ -296,12 +334,16 @@ function mountDraft(page, c, staff) {
     <section class="tb-card mc-step">
       ${stepHead("to", "To")}
       <div class="mc-opts">
+        ${hasList ? `<label class="mc-opt"><input type="radio" name="mc-aud" value="list"${c.audience.mode === "list" ? " checked" : ""} />
+          <span><strong>${esc(listText(c.audience.list))}</strong><small>Worked out when it sends, from that campaign's results so far</small></span></label>` : ""}
         <label class="mc-opt"><input type="radio" name="mc-aud" value="all"${c.audience.mode === "all" ? " checked" : ""} />
           <span><strong>Everyone</strong><small>Every patient who can receive marketing emails</small></span></label>
         <label class="mc-opt"><input type="radio" name="mc-aud" value="rules"${c.audience.mode === "rules" ? " checked" : ""} />
           <span><strong>Patients who match rules</strong><small>The same rules as Email flows, for example last visit more than 180 days ago</small></span></label>
       </div>
-      <div class="mc-rules" data-role="rules"${c.audience.mode === "rules" ? "" : " hidden"}><p class="muted">Loading…</p></div>
+      <p class="fe-note mc-rules-hint" data-role="ruleshint"${c.audience.mode === "list" ? "" : " hidden"}>
+        Optional: only those on the list who also match these rules.</p>
+      <div class="mc-rules" data-role="rules"${c.audience.mode === "all" ? " hidden" : ""}><p class="muted">Loading…</p></div>
       <div class="mc-count"><button type="button" class="lh-btn" data-act="count">Count patients</button><span data-role="count"></span></div>
       <p class="fe-note">Always left out: anyone on the do-not-contact list, patients with no email address and merged duplicates.
         Patients who share an email address get one email between them.</p>
@@ -352,13 +394,17 @@ function mountDraft(page, c, staff) {
         <select class="fb-select" data-k="dailyCap">${CAPS.map(([v, l]) =>
           `<option value="${v}"${Number(c.dailyCap) === v ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
         <small class="fe-note">Big lists go out over several days. 300 of the clinic's daily emails are always kept free for appointments, forms and tasks.</small></label>
+      <label class="fe-check mc-track"><input type="checkbox" data-role="track"${c.track ? " checked" : ""} /> Track opens and clicks</label>
+      <small class="fe-note">Shows who opened it and which links they clicked, and lets you make a follow-up list from them.</small>
       <div data-role="checks"></div>
       <div class="lh-actions"><button type="button" class="btn-primary" data-act="schedule">Send now</button></div>
     </section>`;
 
   const $ = (r) => root.querySelector(`[data-role="${r}"]`);
   const stateEl = $("state");
+  const rulesHost = $("rules");
   const tplOf = () => (templates || []).find((t) => t.id === c.templateId) || null;
+  const later = () => root.querySelector('input[name="mc-when"]:checked').value === "later";
 
   /* ---------- Saving ---------- */
   const setState = (s, msg = "") => {
@@ -387,8 +433,8 @@ function mountDraft(page, c, staff) {
   /* ---------- What's done, and what's still needed ---------- */
   function problems() {
     const out = [];
-    if (c.audience.mode === "rules") {
-      const p = groupProblem(c.audience.rules, true);
+    if (c.audience.mode !== "all") {
+      const p = groupProblem(c.audience.rules, c.audience.mode === "rules");
       if (p) out.push(`To: ${p}.`);
     }
     if (!String(c.fromName || "").trim()) out.push("From: add a from name.");
@@ -414,14 +460,13 @@ function mountDraft(page, c, staff) {
     sum("from", `${c.fromName || "No name yet"}${c.replyTo ? ` · replies to ${c.replyTo}` : ""}`);
     sum("subject", c.subject || (t && t.subject ? `${t.subject} (from the template)` : "No subject yet"));
     sum("content", t ? t.name : c.templateId ? "That template has been deleted" : "No email chosen yet");
-    sum("send", later() ? "Scheduled" : "Now");
+    sum("send", `${later() ? "Scheduled" : "Now"}${c.track ? " · tracking opens and clicks" : ""}`);
     const subj = root.querySelector('[data-k="subject"]');
     subj.placeholder = t && t.subject ? t.subject : "What's new at Dermedica";
     $("checks").innerHTML = p.length
       ? `<div class="mb-checks"><strong>Before sending</strong><ul>${p.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>`
       : `<div class="mb-checks is-ok">Ready to send${lastCount ? ` to ${n0(lastCount.count)} patients` : ""}. Send yourself a test first.</div>`;
   }
-  const later = () => root.querySelector('input[name="mc-when"]:checked').value === "later";
 
   /* ---------- The email ---------- */
   function drawTemplates() {
@@ -442,24 +487,24 @@ function mountDraft(page, c, staff) {
     .catch((err) => { console.error(err); $("tpl").innerHTML = '<option value="">Couldn\'t load the templates</option>'; });
 
   /* ---------- Who it goes to ---------- */
-  const rulesHost = $("rules");
   loadProductNames().catch(() => []).then((names) => {
     if (!root.isConnected) return;
     mountRuleBuilder(rulesHost, c.audience.rules, {
-      names, only: CAMPAIGN_FIELDS, empty: "Add a rule to choose who it goes to.",
+      names, only: CAMPAIGN_FIELDS, empty: c.audience.mode === "list" ? "No extra rules: the whole list." : "Add a rule to choose who it goes to.",
       onChange: () => { lastCount = null; $("count").textContent = ""; touch(); },
     });
   });
 
   async function count() {
-    const p = c.audience.mode === "rules" ? groupProblem(c.audience.rules, true) : "";
+    const p = c.audience.mode !== "all" ? groupProblem(c.audience.rules, c.audience.mode === "rules") : "";
     if (p) { showToast(p); return; }
     const btn = root.querySelector('[data-act="count"]');
     const out = $("count");
     btn.disabled = true;
     out.innerHTML = '<span class="muted">Counting… this can take a minute with rules</span>';
     try {
-      const res = await callApi({ action: "marketing", op: "campaignCount", audience: { mode: c.audience.mode, rules: cleanGroup(c.audience.rules) } });
+      const res = await callApi({ action: "marketing", op: "campaignCount", campaignId: c.id,
+        audience: { mode: c.audience.mode, rules: cleanGroup(c.audience.rules), list: cleanList(c.audience.list) } });
       if (res.problem) { out.innerHTML = `<span class="du-warn">${esc(res.problem)}</span>`; return; }
       lastCount = res;
       const x = res.excluded || {};
@@ -482,7 +527,7 @@ function mountDraft(page, c, staff) {
     if (!t) { showToast("Choose the email first."); return; }
     const dlg = openDialog(`
       <form class="lh-form" novalidate>
-        <div class="lh-dialog-head"><h3>Send a test</h3><p>With this campaign's subject, starting with [Test].</p></div>
+        <div class="lh-dialog-head"><h3>Send a test</h3><p>With this campaign's subject, starting with [Test]. Tests aren't tracked.</p></div>
         <label class="lh-field"><span class="lh-label">Send to</span>
           <textarea name="to" rows="3" placeholder="you@dermedica.com.au">${esc((staff && staff.email) || "")}</textarea>
           <small class="fe-note">Up to 5 addresses, one per line.</small></label>
@@ -555,8 +600,9 @@ function mountDraft(page, c, staff) {
     const el = e.target;
     if (el.closest(".mc-rules")) return;
     if (el.name === "mc-aud") {
-      c.audience.mode = el.value === "rules" ? "rules" : "all";
-      rulesHost.hidden = c.audience.mode !== "rules";
+      c.audience.mode = audMode(el.value);
+      rulesHost.hidden = c.audience.mode === "all";
+      $("ruleshint").hidden = c.audience.mode !== "list";
       lastCount = null;
       $("count").textContent = "";
       touch();
@@ -567,12 +613,12 @@ function mountDraft(page, c, staff) {
       root.querySelector('[data-act="schedule"]').textContent = later() ? "Schedule" : "Send now";
       if (later() && !$("at").value) {
         const d = new Date(Date.now() + 86400000);
-        d.setHours(9, 0, 0, 0);
         $("at").value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}T09:00`;
       }
       refresh();
       return;
     }
+    if (el.dataset.role === "track") { c.track = el.checked; touch(); return; }
     if (el.dataset.role === "tpl") {
       const t = (templates || []).find((x) => x.id === el.value);
       c.templateId = t ? t.id : "";
@@ -612,6 +658,7 @@ function mountDraft(page, c, staff) {
       if (!ok) return;
       try {
         clearTimeout(timer);
+        dirty = false;
         await updateDoc(doc(db, COL, c.id), { status: "archived", updatedAt: serverTimestamp(), updatedBy: who(staff), updatedByUid: me() });
         location.hash = LIST_HREF;
       } catch (err) { showToast(errText(err, "Couldn't delete it.")); }
@@ -623,6 +670,33 @@ function mountDraft(page, c, staff) {
 }
 
 /* ---------- Scheduled, sending or sent: followed live ---------- */
+
+function reportHtml(c) {
+  const s = c.stats;
+  const sent = c.sent;
+  const lists = [["opened", "Opened"], ["notOpened", "Didn't open"], ["clicked", "Clicked"], ["notClicked", "Didn't click"]];
+  return `<h4 class="mc-h">Results</h4>
+    <div class="mc-stats">
+      ${c.track ? statBox("Opened", rate(s.opens, sent), `${n0(s.opens)} patients`) +
+        statBox("Clicked", rate(s.clicks, sent), `${n0(s.clicks)} patients${s.opens ? ` · ${pct(s.clicks, s.opens)}% of those who opened` : ""}`) : ""}
+      ${statBox("Unsubscribed", rate(s.unsubscribes, sent), `${n0(s.unsubscribes)} patients`)}
+      ${statBox("Bounced", rate(s.bounces, sent), `${n0(s.bounces)} addresses`)}
+    </div>
+    ${c.track
+      ? '<p class="fe-note">Opens are a guide, not exact. Apple Mail loads every email\'s pictures by itself, which counts as an open, and some email apps block pictures, so those people only count once they click.</p>'
+      : '<p class="fe-note">Opens and clicks weren\'t tracked for this campaign.</p>'}
+    ${c.track && c.links.length ? `<h4 class="mc-h">Links</h4>
+      <div class="mk-scroll"><table class="inv-table mc-links">
+        <thead><tr><th>Link</th><th>Clicks</th><th></th></tr></thead>
+        <tbody>${c.links.map((l, i) => `<tr>
+          <td><strong>${esc(l.text || "Link")}</strong><small>${esc(host(l.url))}</small></td>
+          <td>${n0(c.linkClicks[`l${i}`])}</td>
+          <td class="mk-act"><button type="button" class="lh-btn" data-mklist="link" data-link="${i}">Make a list</button></td>
+        </tr>`).join("")}</tbody></table></div>` : ""}
+    ${c.track ? `<h4 class="mc-h">Make a list from this</h4>
+      <p class="fe-note">Starts a new campaign for these patients. Its list is worked out when it sends, so anyone who opens or clicks before then is included.</p>
+      <div class="mc-acts">${lists.map(([k, l]) => `<button type="button" class="lh-btn" data-mklist="${k}">${esc(l)}</button>`).join("")}</div>` : ""}`;
+}
 
 function mountView(page, c0, staff) {
   const root = document.createElement("div");
@@ -636,6 +710,7 @@ function mountView(page, c0, staff) {
     </div>
     <p class="mc-wait" data-v="wait" hidden></p>
     <section class="tb-card mc-prog" data-v="prog"></section>
+    <section class="tb-card mc-report" data-v="report" hidden></section>
     <div class="mc-grid">
       <section class="tb-card"><h4 class="mc-h">Details</h4><dl class="mc-dl" data-v="dl"></dl></section>
       <section class="tb-card"><h4 class="mc-h">The email</h4>
@@ -662,12 +737,35 @@ function mountView(page, c0, staff) {
     } catch (err) { showToast(errText(err, "Couldn't do that. Try again.")); }
   };
 
+  async function makeList(btn) {
+    const kind = btn.dataset.mklist;
+    const link = Number(btn.dataset.link) || 0;
+    const label = kind === "link" ? ((c.links[link] || {}).text || "a link") : "";
+    const resend = kind === "notOpened"; // usually the same email again
+    btn.disabled = true;
+    try {
+      const nid = await createCampaign({
+        name: `${c.name}: ${kind === "link" ? `clicked ${label}` : LIST_SHORT[kind]}`.slice(0, 120),
+        templateId: resend ? c.templateId : "", templateName: resend ? c.templateName : "", subject: resend ? c.subject : "",
+        fromName: c.fromName, replyTo: c.replyTo, dailyCap: c.dailyCap, track: true,
+        audience: { mode: "list", rules: blankGroup(), list: { campaignId: c.id, kind, link, name: c.name, label } },
+      }, staff);
+      showToast("New campaign made from the list");
+      location.hash = `${LIST_HREF}/${encodeURIComponent(nid)}`;
+    } catch (err) {
+      showToast(errText(err, "Couldn't make the list."));
+      btn.disabled = false;
+    }
+  }
+
   root.addEventListener("click", async (e) => {
     const b = e.target.closest("[data-ctl]");
     if (b) { b.disabled = true; await control(b.dataset.ctl); if (b.isConnected) b.disabled = false; return; }
+    const ml = e.target.closest("[data-mklist]");
+    if (ml) { makeList(ml); return; }
     if (e.target.closest('[data-act="dup"]')) {
       try {
-        const nid = await createCampaign({ ...c, name: `Copy of ${c.name}`.slice(0, 120) }, staff);
+        const nid = await createCampaign({ ...c, track: true, name: `Copy of ${c.name}`.slice(0, 120) }, staff);
         location.hash = `${LIST_HREF}/${encodeURIComponent(nid)}`;
       } catch (err) { showToast(errText(err, "Couldn't duplicate it.")); }
     }
@@ -694,23 +792,28 @@ function mountView(page, c0, staff) {
     v("wait").hidden = !wait;
     v("wait").classList.toggle("is-bad", !!c.lastError);
 
-    const stat = (label, val, help = "") => `<div class="mc-stat"><small>${esc(label)}</small><strong>${val}</strong>${help ? `<em>${esc(help)}</em>` : ""}</div>`;
     v("prog").innerHTML = c.status === "scheduled"
       ? `<p class="mc-big">Scheduled for <strong>${esc(when(new Date(c.sendAtMs)))}</strong>. The patients are chosen then, so anyone who unsubscribes before it goes is left out.</p>`
       : `${progressHtml(c)}<div class="mc-stats">
-          ${stat("Patients", n0(c.total || (c.status === "building" ? "…" : 0)))}
-          ${stat("Sent", n0(c.sent))}
-          ${stat("Skipped", n0(c.skipped), "Unsubscribed before it reached them")}
-          ${stat("Couldn't send", n0(c.failed))}
+          ${statBox("Patients", n0(c.total || (c.status === "building" ? "…" : 0)))}
+          ${statBox("Sent", n0(c.sent))}
+          ${statBox("Skipped", n0(c.skipped), "Unsubscribed before it reached them")}
+          ${statBox("Couldn't send", n0(c.failed))}
         </div>${eta(c) ? `<p class="muted mc-eta">${esc(eta(c))}, sending up to ${n0(c.dailyCap)} a day between 9 am and 6 pm.</p>` : ""}`;
+
+    const rep = v("report");
+    rep.hidden = !(c.sent > 0);
+    if (c.sent > 0) rep.innerHTML = reportHtml(c);
 
     const row = (k, val) => (val ? `<dt>${esc(k)}</dt><dd>${esc(val)}</dd>` : "");
     v("dl").innerHTML = row("To", audText(c)) + row("Email", c.templateName) + row("Subject", c.subject) +
       row("From", c.fromName) + row("Replies go to", c.replyTo) + row("Most a day", n0(c.dailyCap)) +
+      row("Tracking", c.track ? "Opens and clicks" : "Off") +
       row("Scheduled by", c.scheduledBy) + row("Made by", c.createdBy);
 
     if (!frameSet && c.html) {
-      root.querySelector(".mc-frame").srcdoc = `<!doctype html><html><body style="margin:0">${c.html}</body></html>`;
+      // The links are swapped for each patient's own when it's sent; here they just don't go anywhere
+      root.querySelector(".mc-frame").srcdoc = `<!doctype html><html><body style="margin:0">${c.html.replace(/__MKTL\d+__/g, "#")}</body></html>`;
       frameSet = true;
     }
 

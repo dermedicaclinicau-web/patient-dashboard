@@ -64,7 +64,7 @@ service cloud.firestore {
       && resource.data.status == 'draft'
       && request.resource.data.status in ['draft', 'archived']
       && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-        'name', 'templateId', 'templateName', 'subject', 'fromName', 'replyTo', 'audience', 'dailyCap',
+        'name', 'templateId', 'templateName', 'subject', 'fromName', 'replyTo', 'audience', 'dailyCap', 'track',
         'status', 'updatedAt', 'updatedBy', 'updatedByUid'])
       && request.resource.data.updatedByUid == request.auth.uid;
     allow delete: if false;
@@ -72,8 +72,13 @@ service cloud.firestore {
       allow read: if can('marketing.manage');
       allow write: if false;
     }
+    // Results: written by Apps Script only
+    match /{sub}/{rid} {
+      allow read: if can('marketing.manage') && sub in ['opens', 'clicks', 'unsubs', 'bounces'];
+      allow write: if false;
+    }
   }
-
+  
     // A permission from the login token (Admins have everything)
     function can(p) {
       return isAdmin() || (isStaff() && request.auth.token.perms is list && p in request.auth.token.perms);

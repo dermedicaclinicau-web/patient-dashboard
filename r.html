@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Dermedica</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f1f5f9;
+      font-family: Arial, Helvetica, sans-serif; color: #1e293b; }
+    .box { max-width: 420px; margin: 16px; padding: 28px 30px; background: #fff; border-radius: 14px; text-align: center; }
+    .spin { width: 28px; height: 28px; margin: 0 auto 14px; border: 3px solid #e2e8f0; border-top-color: #0f766e;
+      border-radius: 50%; animation: s 0.8s linear infinite; }
+    @keyframes s { to { transform: rotate(360deg); } }
+    a { color: #0f766e; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <div class="box" id="box"><div class="spin"></div><p>Taking you there…</p></div>
+  <script>
+    (function () {
+      var API = "https://script.google.com/macros/s/AKfycbzb4J7itwDNblPVtBbbZoxdcd2DOqmiZTMXeI7lnRIKuCV92YjJ6hHgS74wz3G9uqOuSA/exec";
+      var box = document.getElementById("box");
+      var t = "";
+      try { t = decodeURIComponent((location.hash || "").slice(1)); } catch (e) { t = ""; }
+      var done = false;
+      function fail() {
+        if (done) return;
+        done = true;
+        box.innerHTML = "";
+        var p = document.createElement("p");
+        p.textContent = "Sorry, this link isn't working right now.";
+        var a = document.createElement("a");
+        a.href = "https://dermedica.com.au";
+        a.textContent = "Go to the Dermedica website";
+        box.appendChild(p);
+        box.appendChild(a);
+      }
+      if (!/^m1\./.test(t)) { fail(); return; }
+      var timer = setTimeout(fail, 12000);
+      fetch(API, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ action: "marketingPublic", op: "click", t: t })
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+          if (done) return;
+          if (res && res.ok && /^https?:\/\//i.test(res.url || "")) {
+            done = true;
+            clearTimeout(timer);
+            location.replace(res.url);
+          } else { clearTimeout(timer); fail(); }
+        })
+        .catch(function () { clearTimeout(timer); fail(); });
+    })();
+  </script>
+</body>
+</html>

@@ -6853,3 +6853,12 @@ a.md-quiet:hover { border-color: var(--primary); }
 .mc-fails { margin: 0; padding-left: 1.1rem; font-size: .85rem; }
 .mc-fails li { margin-bottom: .3rem; }
 @media (max-width: 760px) { .mc-grid { grid-template-columns: 1fr; } .mc-row { grid-template-columns: 1fr; } }
+
+/* Campaigns: results */
+.mc-report .mc-stats { margin-top: 8px; }
+.mc-report .mc-h { margin-top: 18px; }
+.mc-report .mc-h:first-child { margin-top: 0; }
+.mc-links td small { display: block; margin-top: 2px; color: var(--muted, #64748b); font-size: 12px; }
+.mc-links td:nth-child(2) { width: 80px; font-variant-numeric: tabular-nums; font-weight: 600; }
+.mc-rules-hint { margin: 8px 0 0; }
+.mc-track { margin: 12px 0 2px; }
