@@ -7128,3 +7128,19 @@ a.md-rrow:hover strong, .md-rgrp > summary:hover strong { color: var(--primary);
   .md .md-tasks .md-task { flex-direction: column; }
   .md .md-task-acts { justify-content: flex-start; }
 }
+
+/* Staff → Edit → Work schedule */
+.st-sched { margin: 12px 0; padding: 10px 12px; border: 1px solid var(--border, #e5e7eb); border-radius: 10px; }
+.st-sched > summary { cursor: pointer; font-weight: 600; }
+.st-week { display: grid; gap: 6px; margin: 10px 0 6px; }
+.st-day { display: grid; grid-template-columns: 130px 110px auto 110px; align-items: center; gap: 8px; }
+.st-day input[type="time"]:disabled { opacity: .4; }
+.st-leave { margin: 12px 0 8px; display: grid; gap: 6px; }
+.st-leave-row { display: grid; grid-template-columns: 140px auto 140px 130px 1fr auto; align-items: center; gap: 6px; }
+@media (max-width: 640px) {
+  .st-day { grid-template-columns: 1fr 1fr auto 1fr; }
+  .st-day .fe-check { grid-column: 1 / -1; }
+  .st-leave-row { grid-template-columns: 1fr auto 1fr; }
+}
+/* Task Manager → End of day → Reminder */
+.eod-remind-row { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0; }

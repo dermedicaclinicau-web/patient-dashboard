@@ -150,6 +150,7 @@ function getStaffDocs_() {
       prescriberNo: field_(f, 'Prescriber Number'),
       ahpraNo: field_(f, 'AHPRA Number'),
       quals: field_(f, 'Qualifications'),
+      schedule: f['Schedule'] ? fromValue_(f['Schedule']) : null,
     };
   });
   try {
@@ -2915,6 +2916,7 @@ function handleStaff_(body) {
   const op = String(body.op || '');
   if (op === 'me') return staffMe_(session); // anyone logged in
   if (op === 'setPhoto') return staffSetPhoto_(String(body.photo || ''), session); // anyone: their own photo
+  if (op === 'mySchedule') return staffMySchedule_(session); // anyone: their own schedule
   if (!/^admin$/i.test(String(session.role || ''))) return { ok: false, error: 'FORBIDDEN' };
   try {
     if (op === 'roles') return rolesGet_();
@@ -2942,8 +2944,9 @@ function staffList_() {
       active: s.active !== false, lastLogin: s.lastLogin || '', hasPin: !!(s.pinHash || s.pin),
       injector: s.injector === true,
       providerNo: s.providerNo || '', prescriberNo: s.prescriberNo || '', ahpraNo: s.ahpraNo || '', quals: s.quals || '',
-      access: s.access || { allow: [], deny: [] } };
-    }).sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
+      access: s.access || { allow: [], deny: [] },
+      schedule: s.schedule || null };
+  }).sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
   return { ok: true, staff: staff, roles: roleNames_(), locked: isLockedOut_() };
 }
 
@@ -2960,6 +2963,56 @@ function staffRegClean_(p) {
   if (out.prescriberNo && !/^\d{6,7}$/.test(out.prescriberNo)) return { error: 'BAD_PRESCRIBER' };
   if (out.ahpraNo && !/^[A-Z]{3}\d{10}$/.test(out.ahpraNo)) return { error: 'BAD_AHPRA' };
   return out;
+}
+
+// Work schedule (Staff → Edit → Work schedule): the usual week, leave, and their name in the appointment book.
+// { schedule } (null when nothing is set) or { error }
+const SCHED_DAY_KEYS_ = ['mo', 'tu', 'we', 'th', 'fr', 'sa', 'su'];
+const LEAVE_TYPES_ = ['Annual leave', 'Sick', 'Other'];
+function hmMin_(s) {
+  const m = /^(\d{2}):(\d{2})$/.exec(String(s || ''));
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+function staffSchedClean_(raw) {
+  if (!raw || typeof raw !== 'object') return { schedule: null };
+  const hm = function (v) { v = String(v || ''); return /^([01]\d|2[0-3]):[0-5]\d$/.test(v) ? v : ''; };
+  const dk = function (v) { v = String(v || ''); return /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : ''; };
+  const week = {};
+  let any = false;
+  for (let i = 0; i < SCHED_DAY_KEYS_.length; i++) {
+    const k = SCHED_DAY_KEYS_[i];
+    const d = (raw.week && raw.week[k]) || {};
+    if (d.on !== true) { week[k] = { on: false, start: '', end: '' }; continue; }
+    const s = hm(d.start), e = hm(d.end);
+    if (!s || !e || e <= s) return { error: 'BAD_HOURS' };
+    week[k] = { on: true, start: s, end: e };
+    any = true;
+  }
+  const cutoff = Utilities.formatDate(new Date(Date.now() - 90 * 86400000), REC_TZ_, 'yyyy-MM-dd');
+  const leave = [];
+  const list = Array.isArray(raw.leave) ? raw.leave : [];
+  for (let i = 0; i < list.length && leave.length < 40; i++) {
+    const l = list[i] || {};
+    const from = dk(l.from);
+    const to = dk(l.to) || from;
+    if (!from) continue;
+    if (to < from) return { error: 'BAD_LEAVE' };
+    if (to < cutoff) continue;   // leave that ended over 90 days ago is tidied away
+    leave.push({ from: from, to: to, type: LEAVE_TYPES_.indexOf(l.type) !== -1 ? l.type : 'Other', note: staffClean_(l.note, 120) });
+  }
+  leave.sort(function (a, b) { return a.from.localeCompare(b.from); });
+  const apptName = staffClean_(raw.apptName, 80);
+  if (!any && !leave.length && !apptName) return { schedule: null };
+  return { schedule: { week: week, leave: leave, apptName: apptName } };
+}
+
+// Anyone logged in: their own work schedule (for the End of day reminder)
+function staffMySchedule_(session) {
+  let s = null;
+  try { s = getStaffDocs_().filter(function (x) { return x.id === session.uid; })[0] || null; }
+  catch (e) { return { ok: false, error: 'BUSY' }; }
+  if (!s) return { ok: false, error: 'UNAUTHORIZED' };
+  return { ok: true, schedule: staffSchedClean_(s.schedule).schedule || null };
 }
 
 function staffSave_(p, session) {
@@ -2979,6 +3032,10 @@ function staffSave_(p, session) {
   const reg = staffRegClean_(p);
   if (reg.error) return { ok: false, error: reg.error };
 
+  const sched = staffSchedClean_(p.schedule);
+  if (sched.error) return { ok: false, error: sched.error };
+  const schedule = sched.schedule;
+
   if (p.id) {
     const cur = all.filter(function (s) { return s.id === String(p.id); })[0];
     if (!cur) return { ok: false, error: 'NOT_FOUND' };
@@ -2996,13 +3053,14 @@ function staffSave_(p, session) {
     if ((cur.ahpraNo || '') !== reg.ahpraNo) changes.push('AHPRA number');
     if ((cur.quals || '') !== reg.quals) changes.push('title');
     if (JSON.stringify(cur.access || { allow: [], deny: [] }) !== JSON.stringify(access)) changes.push('access');
+    if (JSON.stringify(staffSchedClean_(cur.schedule).schedule || null) !== JSON.stringify(schedule)) changes.push('work schedule');
 
     // The change and its Activity entry in one write
     commitWrites_(cfg, [
       patchWrite_(cfg, STAFF_COLLECTION + '/' + cur.id, {
         'Staff Name': name, 'Role': role, 'Email address': email, 'Profile Photo': photo, 'Access': access,
         'Injector': injector, 'Provider Number': reg.providerNo, 'Prescriber Number': reg.prescriberNo,
-        'AHPRA Number': reg.ahpraNo, 'Qualifications': reg.quals,
+        'AHPRA Number': reg.ahpraNo, 'Qualifications': reg.quals, 'Schedule': schedule,
         'Updated At': now, 'Updated By': String(session.name || ''),
       }),
       staffAuditWrite_(cfg, session, 'Edited', { id: cur.id, name: name }, changes.join(', ')),
@@ -3020,7 +3078,7 @@ function staffSave_(p, session) {
       'Staff Name': name, 'Role': role, 'Email address': email, 'Profile Photo': photo,
       'PIN': '', 'PIN Hash': pinHash_(pin), 'Active': true, 'Access': access, 'Injector': injector,
       'Provider Number': reg.providerNo, 'Prescriber Number': reg.prescriberNo,
-      'AHPRA Number': reg.ahpraNo, 'Qualifications': reg.quals,
+      'AHPRA Number': reg.ahpraNo, 'Qualifications': reg.quals, 'Schedule': schedule,
       'Created At': now, 'Created By': String(session.name || ''),
     }),
     staffAuditWrite_(cfg, session, 'Added', { id: id, name: name }, 'role ' + role),
@@ -4485,6 +4543,7 @@ function runNotifications() {
   try { notifyRunDigests_(cfg, rules, now); } catch (e) { console.error('Digests: ' + (e && e.stack ? e.stack : e)); }
   try { notifyCountCheck_(cfg, rules, now); } catch (e) { console.error('Count check: ' + (e && e.stack ? e.stack : e)); }
   try { chatHelpReminders_(cfg); } catch (e) { console.error('Chat reminders: ' + (e && e.stack ? e.stack : e)); }
+  try { eodReminders_(cfg, now); } catch (e) { console.error('End of day reminders: ' + (e && e.stack ? e.stack : e)); }
 }
 
 // Run ONCE from the editor to start notifications
@@ -5714,6 +5773,46 @@ function chatHelpReminders_(cfg) {
     } catch (e) {
       console.error('Chat reminder ' + c._id + ': ' + (e && e.stack ? e.stack : e));
     }
+  });
+}
+
+// ===================== End of day: an email if someone started their day but didn't end it =====================
+// An hour after their rostered finish (Staff → Edit → Work schedule), once a day. Only staff with a schedule.
+
+function eodReminders_(cfg, now) {
+  const today = Utilities.formatDate(new Date(now), REC_TZ_, 'yyyy-MM-dd');
+  const dk = SCHED_DAY_KEYS_[Number(Utilities.formatDate(new Date(now), REC_TZ_, 'u')) - 1];   // u: 1 = Monday
+  const p = new Date(now + SCH_PERTH_);
+  const nowMin = p.getUTCHours() * 60 + p.getUTCMinutes();
+  const cache = CacheService.getScriptCache();
+  const sentKey = function (s) { return 'eod_rem_' + s.id + '_' + today; };
+
+  const due = getStaffDocs_().filter(function (s) {
+    const sc = s.schedule;
+    if (s.active === false || !isEmail_(s.email) || !sc || !sc.week) return false;
+    const d = sc.week[dk];
+    if (!d || d.on !== true) return false;
+    if ((sc.leave || []).some(function (l) { return l.from <= today && today <= l.to; })) return false;
+    const end = hmMin_(d.end);
+    return end !== null && nowMin >= end + 60 && nowMin < end + 240 && !cache.get(sentKey(s));
+  });
+  if (!due.length) return;
+
+  const days = fsBatchGet_(cfg, due.map(function (s) { return 'inv_kitdays/' + s.id + '__' + today; }));
+  due.forEach(function (s) {
+    const d = days['inv_kitdays/' + s.id + '__' + today];
+    if (!d || !d.start || d.end) return;            // didn't start today, or already ended
+    if (MailApp.getRemainingDailyQuota() < 1) return;
+    cache.put(sentKey(s), '1', 21600);
+    const html = invEmailWrap_(
+      '<h2 style="margin:0 0 6px;font-size:20px;color:#0f766e">You didn\'t end your day</h2>' +
+      '<p style="margin:0 0 12px;color:#475569">You started your day in the portal today, but End of day wasn\'t done.' +
+        (s.injector ? ' Tomorrow\'s kit count is checked against tonight\'s, so please do it whenever you can.' : '') + '</p>' +
+      '<p style="margin:0;color:#475569">Still at the clinic? Open the portal and press <strong>End my day</strong>.</p>',
+      'home', 'Open the portal');
+    MailApp.sendEmail({ to: s.email, name: 'Dermedica Portal', subject: 'Reminder: End of day not done',
+      htmlBody: html, body: emailHtmlToText_(html) });
+    console.log('End of day reminder sent to ' + s.name);
   });
 }
 

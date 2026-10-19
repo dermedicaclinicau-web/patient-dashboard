@@ -377,6 +377,16 @@ export const GUIDE = [
         "When the order is sent, the requests it covers change to Ordered and the requesters are emailed.",
         "A product with more than one supplier? Choose who to order from in the **Order from** box first.",
       ] },
+      { id: "send", q: "Emailing an order to the supplier", steps: [
+        "Open the purchase order and press **Send to supplier**.", // CHECK
+        "The subject and message are filled in from the supplier's purchase order email (or the standard wording), with this order's details and items.",
+        "Check the email address and the wording, change anything just for this order, then send.",
+      ], tips: [
+        "The order changes to Sent, and the requests it covers become Ordered. The people who asked are emailed.",
+        "Sending the same order again is noted on its history as **Emailed again**.",
+        "Ordered by phone or on their website instead? Mark it as sent rather than emailing it.",
+        "To change the wording for every order to this supplier, edit their purchase order email (Managing products and suppliers).",
+      ] },
       { id: "new", q: "A purchase order without a request", steps: [
         "Open [Purchase orders](#/inventory/orders) and press **+ New purchase order**.",
         "Choose the supplier. Tick **Start with this supplier's low stock** to fill it in for you.",
@@ -431,6 +441,18 @@ export const GUIDE = [
         "Fill in how it's given to staff (e.g. vial), how it's bought (e.g. box of 10), and when to reorder.",
         "Tick **Needs a batch / lot number and expiry date** for injectables.",
         "Choose how it's used in treatments: one per patient, opened and shared, or carried in kits.",
+      ] },
+      { id: "po-email", q: "A supplier's purchase order email", steps: [
+        "Open the supplier and go to **Purchase order email**.", // CHECK
+        "Write the subject and message the way this supplier likes their orders. Leave both empty to use the standard wording.",
+        "Use tags for the parts that change with each order. They're filled in when the order is sent: **{Contact first name}**, **{Contact name}**, **{Supplier}**, **{PO number}**, **{Order date}**, **{Account number}**, **{Item count}** and **{My name}**.",
+        "Type **{Order table}** where the list of items should go. Leave it out and the items go after your message.",
+        "Save the supplier.",
+      ], tips: [
+        "No contact name on the supplier? {Contact first name} and {Contact name} say \"there\", so \"Hi {Contact first name}\" still reads well.",
+        "No account number on the supplier? {Account number} is left blank.",
+        "Capitals and spacing in tags don't matter. A tag the portal doesn't know is left exactly as typed, so check the spelling.",
+        "The wording can still be changed on each order before it's sent.",
       ] },
       { id: "bulk", q: "Changing many products at once", steps: [
         "On [Products](#/inventory/products), tick the products (or a whole category).",

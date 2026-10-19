@@ -1,5 +1,5 @@
 ﻿{
-    "version":  "20261020-054403",
+    "version":  "20261020-063314",
     "files":  [
                   "./js/aftercare-api.js",
                   "./js/aftercare-bank.js",
@@ -117,6 +117,7 @@
                   "./js/scanner.js",
                   "./js/service-links.js",
                   "./js/settings.js",
+                  "./js/shift.js",
                   "./js/skincare-view.js",
                   "./js/skincare.js",
                   "./js/soap-panel.js",

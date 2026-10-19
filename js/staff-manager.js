@@ -24,6 +24,8 @@ const ERR = {
   BAD_PROVIDER: "Check the provider number: 6 digits, then a location character and a letter (e.g. 2345671A).",
   BAD_PRESCRIBER: "Check the prescriber number: 6 or 7 digits.",
   BAD_AHPRA: "Check the AHPRA number: 3 letters and 10 digits (e.g. MED0001234567).",
+  BAD_HOURS: "Check the work hours: each working day needs a start and a finish, with the finish after the start.",
+  BAD_LEAVE: "Check the leave dates: leave can't end before it starts.",
 };
 const errText = (err) => ERR[err && err.code] ||
   (err && err.code ? `Something went wrong (${err.code}). Check Apps Script → Executions.` : (err && err.message) || "Something went wrong.");
@@ -31,6 +33,78 @@ const when = (iso) => {
   const d = iso ? new Date(iso) : null;
   return d && !isNaN(d) ? d.toLocaleString("en-AU", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" }) : "";
 };
+const SCHED_DAYS = [["mo", "Monday"], ["tu", "Tuesday"], ["we", "Wednesday"], ["th", "Thursday"], ["fr", "Friday"], ["sa", "Saturday"], ["su", "Sunday"]];
+const LEAVE_TYPES = ["Annual leave", "Sick", "Other"];
+const isoDay = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+const shortDay = (k) => new Date(`${k}T12:00:00`).toLocaleDateString("en-AU", { day: "numeric", month: "short" });
+const leaveNow = (s) => {
+  const t = isoDay();
+  const l = ((s.schedule && s.schedule.leave) || []).find((x) => x.from <= t && t <= x.to);
+  return l ? ` · On leave until ${shortDay(l.to)}` : "";
+};
+
+const leaveRow = (l = {}) => `<div class="st-leave-row">
+    <input class="fe-input" type="date" data-lv="from" value="${esc(l.from || "")}" aria-label="Leave from" />
+    <span class="muted">to</span>
+    <input class="fe-input" type="date" data-lv="to" value="${esc(l.to || "")}" aria-label="Leave to" />
+    <select class="fb-select" data-lv="type" aria-label="Type of leave">${LEAVE_TYPES.map((t) =>
+      `<option${t === (l.type || "Annual leave") ? " selected" : ""}>${t}</option>`).join("")}</select>
+    <input class="fe-input" data-lv="note" maxlength="120" placeholder="Note (optional)" value="${esc(l.note || "")}" />
+    <button type="button" class="hx-x" data-act="leave-rm" aria-label="Remove this leave" title="Remove">×</button>
+  </div>`;
+
+function schedHtml(s) {
+  const sc = (s && s.schedule) || {};
+  const week = sc.week || {};
+  const any = Object.values(week).some((d) => d && d.on) || (sc.leave || []).length || sc.apptName;
+  return `
+    <details class="st-sched"${any ? " open" : ""}>
+      <summary>Work schedule <small class="muted" data-role="schedsum"></small></summary>
+      <p class="fe-note">Used to pop up End of day before they finish, and to email them if they forget. Leave it empty to use the clinic finish time.</p>
+      <div class="st-week">${SCHED_DAYS.map(([k, label]) => {
+        const d = week[k] || {};
+        return `<div class="st-day" data-day="${k}">
+          <label class="fe-check"><input type="checkbox" data-sd="on"${d.on ? " checked" : ""} /> ${label}</label>
+          <input class="fe-input" type="time" data-sd="start" value="${esc(d.start || "08:30")}" aria-label="${label} start" />
+          <span class="muted">to</span>
+          <input class="fe-input" type="time" data-sd="end" value="${esc(d.end || "17:00")}" aria-label="${label} finish" />
+        </div>`;
+      }).join("")}</div>
+      <button type="button" class="lh-btn is-quiet" data-act="sched-copy">Give every working day the first day's hours</button>
+      <div class="st-leave"><span class="lh-label">Leave</span>
+        <div data-role="leave">${(sc.leave || []).map(leaveRow).join("")}</div>
+        <button type="button" class="lh-btn is-quiet" data-act="leave-add">+ Add leave</button>
+      </div>
+      <label class="lh-field"><span class="lh-label">Name in the appointment book (optional)</span>
+        <input name="apptName" maxlength="80" placeholder="e.g. Dr Teh" value="${esc(sc.apptName || "")}" /></label>
+      <small class="fe-note">For clinicians: if their last appointment runs past their finish time, End of day waits until it's nearly over.</small>
+    </details>`;
+}
+
+function readSched(dlg) {
+  const week = {};
+  for (const [k, label] of SCHED_DAYS) {
+    const row = dlg.querySelector(`[data-day="${k}"]`);
+    const on = row.querySelector('[data-sd="on"]').checked;
+    const start = row.querySelector('[data-sd="start"]').value;
+    const end = row.querySelector('[data-sd="end"]').value;
+    if (on && (!start || !end || end <= start)) {
+      return { error: `${label}: the finish time needs to be after the start time.`, focus: row.querySelector('[data-sd="end"]') };
+    }
+    week[k] = { on, start: on ? start : "", end: on ? end : "" };
+  }
+  const leave = [];
+  for (const row of dlg.querySelectorAll(".st-leave-row")) {
+    const g = (f) => row.querySelector(`[data-lv="${f}"]`).value.trim();
+    const from = g("from");
+    const to = g("to") || from;
+    if (!from && !g("to")) continue;
+    if (!from) return { error: "Each leave needs its first day.", focus: row.querySelector('[data-lv="from"]') };
+    if (to < from) return { error: "Leave can't end before it starts.", focus: row.querySelector('[data-lv="to"]') };
+    leave.push({ from, to, type: g("type"), note: g("note") });
+  }
+  return { schedule: { week, leave, apptName: dlg.querySelector('[name="apptName"]').value.trim() } };
+}
 
 // Shows a button is working: spinner, wording, disabled. After 4 seconds: "Still saving…". Returns done() to put it back.
 function busy(btn, text = "Saving…") {
@@ -115,7 +189,7 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
         <div class="st-main">
           <strong>${esc(s.name || "Unnamed")}${me && (me.uid === s.id || me.id === s.id) ? ' <em class="st-you">You</em>' : ""}</strong>
           <small>${esc(s.email || "No email")} · ${s.lastLogin ? `Last login ${esc(when(s.lastLogin))}` : "Never logged in"}${s.injector ? " · Injector" : ""}${
-            s.providerNo ? ` · Provider ${esc(s.providerNo)}` : ""}${esc(exceptions(s))}</small>
+            s.providerNo ? ` · Provider ${esc(s.providerNo)}` : ""}${esc(exceptions(s))}${esc(leaveNow(s))}</small>
         </div>
         <span class="st-role is-${esc(String(s.role || "").toLowerCase())}">${esc(s.role || "No role")}</span>
         <span class="st-status ${s.active ? "is-on" : "is-off"}">${s.active ? "Active" : "Turned off"}</span>
@@ -437,6 +511,7 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
               <input name="quals" maxlength="150" placeholder="e.g. Dr Jane Smith, MBBS FRACGP" value="${esc(s ? s.quals || "" : "")}" /></label>
           </div>
         </fieldset>
+        ${schedHtml(s)}
         ${isNew ? pinChoice("PIN") : ""}
         ${accessHtml(s)}
         <p class="lh-error" role="alert" hidden></p>
@@ -512,6 +587,34 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
     };
     syncAccess();
     form.elements.role.addEventListener("change", syncAccess);
+    // Work schedule: times only for working days, a summary in the heading, leave rows, copy hours
+    const syncSched = () => {
+      const on = [];
+      dlg.querySelectorAll("[data-day]").forEach((row) => {
+        const ticked = row.querySelector('[data-sd="on"]').checked;
+        row.querySelectorAll('input[type="time"]').forEach((i) => { i.disabled = !ticked; });
+        if (ticked) on.push(SCHED_DAYS.find(([k]) => k === row.dataset.day)[1].slice(0, 3));
+      });
+      dlg.querySelector('[data-role="schedsum"]').textContent = on.length ? on.join(", ") : "not set: uses the clinic finish time";
+    };
+    syncSched();
+    dlg.addEventListener("change", (e) => { if (e.target.matches('[data-sd="on"]')) syncSched(); });
+    dlg.addEventListener("click", (e) => {
+      if (e.target.closest('[data-act="leave-add"]')) {
+        dlg.querySelector('[data-role="leave"]').insertAdjacentHTML("beforeend", leaveRow());
+        dlg.querySelector('.st-leave-row:last-child [data-lv="from"]').focus();
+        return;
+      }
+      const rm = e.target.closest('[data-act="leave-rm"]');
+      if (rm) { rm.closest(".st-leave-row").remove(); return; }
+      if (e.target.closest('[data-act="sched-copy"]')) {
+        const rows = [...dlg.querySelectorAll("[data-day]")].filter((r) => r.querySelector('[data-sd="on"]').checked);
+        if (!rows.length) { showToast("Tick their working days first."); return; }
+        const s0 = rows[0].querySelector('[data-sd="start"]').value;
+        const e0 = rows[0].querySelector('[data-sd="end"]').value;
+        rows.slice(1).forEach((r) => { r.querySelector('[data-sd="start"]').value = s0; r.querySelector('[data-sd="end"]').value = e0; });
+      }
+    });
     dlg.addEventListener("change", (e) => { if (e.target.matches("[data-acc]")) syncAccess(); });
     dlg.addEventListener("click", (e) => {
       if (!e.target.closest('[data-act="acc-reset"]')) return;
@@ -528,6 +631,14 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
       if (uploading) { err.textContent = "Wait for the photo to finish uploading."; err.hidden = false; return; }
       const btn = form.querySelector('[type="submit"]');
       err.hidden = true;
+      const sr = readSched(dlg);
+      if (sr.error) {
+        err.textContent = sr.error;
+        err.hidden = false;
+        dlg.querySelector(".st-sched").open = true;
+        if (sr.focus) sr.focus.focus();
+        return;
+      }
       const access = { allow: [], deny: [] };
       dlg.querySelectorAll("[data-acc]").forEach((sel) => {
         if (sel.value === "allow") access.allow.push(sel.dataset.acc);
@@ -539,7 +650,7 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
         email: f.email.value, photo: f.photo.value, pin: isNew ? readPin(form) : "", access,
         injector: f.injector.checked,
         providerNo: f.providerNo.value, prescriberNo: f.prescriberNo.value,
-        ahpraNo: f.ahpraNo.value, quals: f.quals.value,
+        ahpraNo: f.ahpraNo.value, quals: f.quals.value,schedule: sr.schedule,
       };
       saving = true;
       const done = busy(btn, isNew ? "Adding…" : "Saving…");

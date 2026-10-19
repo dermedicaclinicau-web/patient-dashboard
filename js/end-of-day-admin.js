@@ -54,6 +54,20 @@ export function mountEndOfDaySettings(container, { staff = null, embedded = fals
         <label class="fe-check"><input type="checkbox" data-s="kitCheck"${c.kitCheck ? " checked" : ""} />
           Injectors count their kit (units left) before answering</label>
       </section>
+      <section class="tb-card eod-set">
+        <h4>Reminder</h4>
+        <label class="fe-check"><input type="checkbox" data-s="prompt"${c.prompt ? " checked" : ""} />
+          Pop up End of day before each person finishes</label>
+        <div class="eod-remind-row">
+          <label class="lh-field"><span class="lh-label">How long before</span>
+            <select class="fb-select" data-s="remindBefore">${[0, 5, 10, 15, 30, 45, 60].map((n) =>
+              `<option value="${n}"${c.remindBefore === n ? " selected" : ""}>${n ? `${n} minutes` : "At their finish time"}</option>`).join("")}</select></label>
+          <label class="lh-field"><span class="lh-label">Clinic finish time</span>
+            <input class="fe-input" type="time" data-s="finishTime" value="${esc(c.finishTime)}" /></label>
+        </div>
+        <small class="muted">Each person's finish time comes from their work schedule in Staff. The clinic finish time is for anyone
+          without one. If a clinician's last appointment runs late, they're reminded before it ends instead.</small>
+      </section>
       <section class="tb-card">
         <h4>Questions</h4>
         ${c.questions.length ? c.questions.map((q, i) => qHtml(q, i, c.questions.length)).join("")
@@ -93,6 +107,9 @@ export function mountEndOfDaySettings(container, { staff = null, embedded = fals
     const el = e.target;
     if (el.dataset.s === "kitCheck") { st.cfg.kitCheck = el.checked; markDirty(); return; }
     if (el.dataset.s === "who") { st.cfg.who = el.value; markDirty(); return; }
+    if (el.dataset.s === "prompt") { st.cfg.prompt = el.checked; markDirty(); return; }
+    if (el.dataset.s === "remindBefore") { st.cfg.remindBefore = Number(el.value); markDirty(); return; }
+    if (el.dataset.s === "finishTime") { st.cfg.finishTime = el.value; markDirty(); return; }
     const box = el.closest(".eod-qe");
     const k = el.dataset.k;
     if (!box || !k || k === "type") return;

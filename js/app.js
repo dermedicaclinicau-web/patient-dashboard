@@ -24,7 +24,7 @@ import { initUpdateCheck } from "./updates.js";
 import { mountMyDashboard } from "./my-dashboard.js";
 import { mountReports } from "./reports.js";
 import { mountSettings } from "./settings.js";
-import { initEndOfDay, teardownEndOfDay } from "./end-of-day.js";
+import { initEndOfDay, teardownEndOfDay, endOfDayPending, askEndBeforeLogout, openEndOfDay } from "./end-of-day.js";
 import { mountStaffDays } from "./staff-days.js";
 import { initTopbar, closeTopbarMenu } from "./topbar.js";
 import { initChat, teardownChat } from "./chat.js";
@@ -167,6 +167,11 @@ els.logoutBtn.addEventListener("click", async () => {
     confirmLabel: "Log out",
     tone: "warning",
   }))) return;
+  if (endOfDayPending()) {
+    const v = await askEndBeforeLogout();
+    if (v === "stay") return;
+    if (v === "end") { openEndOfDay(); return; }   // its "Save and log out" comes back here, with the day ended
+  }
   if (hasUnsavedNotes() && !(await confirmDialog({
     title: "Unsaved clinical notes",
     message: "You have unsaved changes to clinical notes. Logging out will discard them.",

@@ -16,6 +16,9 @@ export const MOODS = [[1, "😞", "Rough"], [2, "🙁", "Not great"], [3, "😐"
 export const DEFAULT_EOD = {
   who: "all",
   kitCheck: true,
+  prompt: true,
+  remindBefore: 15,
+  finishTime: "17:30",
   questions: [
     { id: "q_mood", type: "mood", label: "How was your day?", help: "", required: true, options: [] },
     { id: "q_good", type: "long", label: "Anything good happen today?", help: "", required: false, options: [] },
@@ -43,6 +46,9 @@ export function cleanEodSettings(s = {}) {
   return {
     who: s.who === "injectors" ? "injectors" : "all",
     kitCheck: s.kitCheck !== false,
+    prompt: s.prompt !== false,
+    remindBefore: [0, 5, 10, 15, 30, 45, 60].includes(Number(s.remindBefore)) ? Number(s.remindBefore) : 15,
+    finishTime: /^([01]\d|2[0-3]):[0-5]\d$/.test(s.finishTime || "") ? s.finishTime : "17:30",
     questions: (Array.isArray(s.questions) ? s.questions : []).map(cleanQuestion).filter((q) => q.label).slice(0, 30),
   };
 }

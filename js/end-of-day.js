@@ -6,6 +6,8 @@ import { can } from "./perms.js";
 import { escapeHtml, showToast } from "./utils.js";
 import { openStartOfDayEdit } from "./start-of-day.js";
 import { kitCountHtml, wireKitCount, readKitCount } from "./kit-count.js";
+import { isRecorderBusy } from "./recorder.js";
+import { myFinish, minToText, hhmmToMin } from "./shift.js";
 
 const esc = (s) => escapeHtml(String(s ?? "")); // always text (ratings are numbers)
 const MOON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
@@ -26,17 +28,67 @@ let btn = null;
 let me = null;
 let onLogout = null;
 let gen = 0;
-// "End my day" starts pulsing from this time (minutes after midnight): 17 * 60 = 5:00 pm
-const NUDGE_FROM = 17 * 60;
-let nudgeTimer = null;
+let tick = null;
+// started / ended today, and when this person finishes (minutes after midnight)
+const st = { cfg: null, show: false, started: false, ended: false, finish: null, remind: 15, prompt: true, planAt: 0, dayKey: "" };
 
-// Pulse "End my day" in the evening, until the day is ended
+const nowMin = () => { const n = new Date(); return n.getHours() * 60 + n.getMinutes(); };
+const nudgeFrom = () => {
+  const f = st.finish ?? hhmmToMin(st.cfg && st.cfg.finishTime) ?? 17 * 60 + 30;
+  return f - st.remind;
+};
+// Closed without ending: asked again in a while (kept through a page refresh)
+const snoozeKey = () => (me ? `eod-snooze:${me.uid}:${dayKey()}` : "");
+const snoozedUntil = () => { try { return Number(localStorage.getItem(snoozeKey())) || 0; } catch { return 0; } };
+function snooze(mins = 15) {
+  if (!me) return;
+  try { localStorage.setItem(snoozeKey(), String(Date.now() + mins * 60000)); } catch { /* storage blocked */ }
+}
+
+// Started today and not ended yet (for the logout check)
+export const endOfDayPending = () => !!me && st.show && !st.ended;
+
+// Pulse "End my day" from shortly before they finish, until the day is ended
 function syncNudge() {
   if (!btn) return;
-  const now = new Date();
-  const on = !btn.classList.contains("is-done") && now.getHours() * 60 + now.getMinutes() >= NUDGE_FROM;
+  const on = !st.ended && nowMin() >= nudgeFrom();
   btn.classList.toggle("is-nudge", on);
-  if (!btn.classList.contains("is-done")) btn.title = on ? "Time to end your day" : "Finish your day";
+  if (!st.ended) btn.title = on ? "Time to end your day" : "Finish your day";
+}
+
+async function refreshDay() {
+  st.dayKey = dayKey();
+  st.planAt = 0;
+  try {
+    const day = await getMyKitDay();
+    st.started = !!(day && (day.start || day.end));
+    setLabel(!!(day && day.end), day && day.end ? day.end.at : null);
+  } catch (err) { console.warn("Day check failed:", err); }
+}
+
+async function plan() {
+  st.planAt = Date.now() + 15 * 60000;   // worked out again every 15 minutes (appointments change)
+  try { st.finish = (await myFinish(me, st.cfg)).finish; }
+  catch (err) { console.warn("Finish time not worked out:", err); }
+}
+
+// Opens End of day by itself once it's time, but never on top of another window or during a recording
+function maybePrompt() {
+  if (!endOfDayPending() || !st.prompt) return;
+  if (nowMin() < nudgeFrom() || Date.now() < snoozedUntil()) return;
+  if (document.visibilityState !== "visible" || document.querySelector("dialog[open]")) return;
+  if (isRecorderBusy()) return;
+  openEndOfDay({ prompted: true });
+}
+
+async function tickFn() {
+  const g = gen;
+  if (!me) return;
+  if (st.dayKey !== dayKey()) await refreshDay();   // after midnight
+  if (Date.now() > st.planAt) await plan();
+  if (g !== gen || !me) return;
+  syncNudge();
+  maybePrompt();
 }
 
 /* ---------- The day pill in the top bar ---------- */
@@ -53,7 +105,7 @@ function getButton() {
     b.hidden = true;
     host.appendChild(b);
   }
-  if (!b.dataset.bound) { b.dataset.bound = "1"; b.addEventListener("click", openEndOfDay); }
+  if (!b.dataset.bound) { b.dataset.bound = "1"; b.addEventListener("click", () => openEndOfDay()); }
   return b;
 }
 
@@ -63,15 +115,18 @@ export async function initEndOfDay(staff, { onLogout: lo } = {}) {
   const g = ++gen;
   btn = getButton();
   if (!btn || !staff) return;
-  btn = getButton();
-  if (!btn || !staff) return;
-  clearInterval(nudgeTimer);
-  nudgeTimer = setInterval(syncNudge, 60 * 1000);   // checked every minute
+  clearInterval(tick);
+  tick = setInterval(tickFn, 60 * 1000);   // checked every minute
   try {
     const [cfg, day] = await Promise.all([getEndOfDaySettings(), getMyKitDay().catch(() => null)]);
     if (g !== gen) return;
-    btn.hidden = !(cfg.who === "all" || staff.injector === true);
+    Object.assign(st, {
+      cfg, show: cfg.who === "all" || staff.injector === true, prompt: cfg.prompt !== false,
+      remind: Number(cfg.remindBefore) || 0, started: !!(day && (day.start || day.end)), dayKey: dayKey(), planAt: 0,
+    });
+    btn.hidden = !st.show;
     setLabel(!!(day && day.end), day && day.end ? day.end.at : null);
+    tickFn();
   } catch (err) {
     console.warn("End of day setup failed:", err);
     if (g === gen) { btn.hidden = false; setLabel(false); }
@@ -79,6 +134,7 @@ export async function initEndOfDay(staff, { onLogout: lo } = {}) {
 }
 
 function setLabel(ended, at = null) {
+  st.ended = ended;
   if (!btn) return;
   btn.classList.toggle("is-done", ended);
   btn.innerHTML = ended
@@ -87,16 +143,42 @@ function setLabel(ended, at = null) {
   btn.title = ended ? "See what you entered today" : "Finish your day";
   syncNudge();
 }
+
+// Logging out before the day is ended: "end" | "logout" | "stay"
+export function askEndBeforeLogout() {
+  return new Promise((resolve) => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog eod-ask";
+    dlg.innerHTML = `<div class="lh-form">
+      <div class="lh-dialog-head"><h3>You haven't ended your day</h3>
+        <p>End it now before you log out? It only takes a minute${me && me.injector === true ? ", and tomorrow's kit count is checked against it" : ""}.</p></div>
+      <div class="lh-actions">
+        <button type="button" class="lh-btn is-quiet" data-v="stay">Cancel</button>
+        <button type="button" class="lh-btn" data-v="logout">Log out anyway</button>
+        <button type="button" class="lh-btn is-primary" data-v="end">End my day</button>
+      </div></div>`;
+    let v = "stay";
+    dlg.addEventListener("click", (e) => { const b = e.target.closest("[data-v]"); if (b) { v = b.dataset.v; dlg.close(); } });
+    dlg.addEventListener("close", () => { dlg.remove(); resolve(v); });
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    setTimeout(() => dlg.querySelector('[data-v="end"]').focus(), 30);
+  });
+}
+
 // On logout: hide (not remove) the button, so the next person to log in still has it
 export function teardownEndOfDay() {
   gen++;
   me = null;
-  clearInterval(nudgeTimer);
-  nudgeTimer = null;
+  clearInterval(tick);
+  tick = null;
+  Object.assign(st, { cfg: null, show: false, started: false, ended: false, finish: null, planAt: 0, dayKey: "" });
   if (btn) { btn.hidden = true; btn.innerHTML = ""; btn.classList.remove("is-done", "is-nudge"); }
   btn = null;
-  document.querySelectorAll("dialog.eod-dlg").forEach((d) => d.remove());
+  document.querySelectorAll("dialog.eod-dlg, dialog.eod-ask").forEach((d) => d.remove());
 }
+
+window.addEventListener("kitday:changed", () => { if (me) refreshDay(); });
 
 /* ---------- The window ---------- */
 
@@ -121,15 +203,21 @@ async function kitForEnd(day) {
 
 
 
-async function openEndOfDay() {
+export async function openEndOfDay({ prompted = false } = {}) {
   const staff = me;
   if (!staff || document.querySelector("dialog.eod-dlg")) return; // one window at a time
+  const lead = prompted
+    ? (st.finish !== null && nowMin() < st.finish ? `You finish at ${minToText(st.finish)}. Time to end your day.` : "Time to end your day.")
+    : "";
   const dlg = document.createElement("dialog");
   dlg.className = "lh-dialog eod-dlg";
-  dlg.innerHTML = `<div class="lh-form"><div class="lh-dialog-head"><h3>End of day</h3><p>${esc(todayText())}</p></div>
+  dlg.innerHTML = `<div class="lh-form"><div class="lh-dialog-head"><h3>End of day</h3><p>${esc(lead || todayText())}</p></div>
     <div class="skeleton" style="height:220px;border-radius:12px"></div></div>`;
   document.body.appendChild(dlg);
-  dlg.addEventListener("close", () => dlg.remove());
+  dlg.addEventListener("close", () => {
+    if (!st.ended) snooze(15);   // closed without ending: asked again in 15 minutes
+    dlg.remove();
+  });
   dlg.showModal();
 
   let cfg, day, kit = [];
@@ -146,7 +234,7 @@ async function openEndOfDay() {
     dlg.querySelector('[data-act="close"]')?.addEventListener("click", () => dlg.close());
     return;
   }
-  if (dlg.open) renderForm(dlg, staff, cfg, day, kit);
+  if (dlg.open) renderForm(dlg, staff, cfg, day, kit, lead);
 }
 
 // One row: batch and expiry (filled in, editable), and the counts (always empty)
@@ -204,10 +292,10 @@ function readAnswer(form, q, i) {
   return v;
 }
 
-function renderForm(dlg, staff, cfg, day, kit) {
+function renderForm(dlg, staff, cfg, day, kit, lead = "") {
   const editLink = can("tasks.build") ? '<a class="eod-edit" href="#/tasks/end-of-day">Edit these questions</a>' : "";
   dlg.innerHTML = `<form class="lh-form eod-form" novalidate>
-    <div class="lh-dialog-head"><h3>End of day</h3><p>${esc(todayText())} · Thanks for today, ${esc(firstName(staff.name))}.</p></div>
+    <div class="lh-dialog-head"><h3>End of day</h3><p>${esc(lead || `${todayText()} · Thanks for today, ${firstName(staff.name)}.`)}</p></div>
     ${staff.injector === true && day && day.start ? `<p class="eod-fix">Wrong count this morning?
       <button type="button" class="rc-link" data-act="sod-edit">Edit start of day</button></p>` : ""}
     ${kitHtml(kit)}
@@ -216,7 +304,7 @@ function renderForm(dlg, staff, cfg, day, kit) {
     <p class="lh-error" role="alert" hidden></p>
     <div class="lh-actions">
       ${editLink}
-      <button type="button" class="lh-btn is-quiet" data-act="cancel">Not yet</button>
+      <button type="button" class="lh-btn is-quiet" data-act="cancel">${lead ? "Remind me in 15 minutes" : "Not yet"}</button>
       <button type="submit" class="lh-btn" value="save">Save</button>
       ${onLogout ? '<button type="submit" class="lh-btn is-primary" value="logout">Save and log out</button>' : ""}
     </div></form>`;
