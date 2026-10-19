@@ -365,6 +365,63 @@ export async function setTracking(product, on, splits, staff) {
   });
 }
 
+
+// Corrects a batch's number and/or expiry (a typo, a wrong date). The quantity doesn't change.
+// both: also correct the same batch in the other place. A batch that already exists with the new details is added to.
+export async function correctLot(product, lot, { batch, expiry, both = true }, staff) {
+  const nb = clip(batch, 40);
+  const ne = KEY_RE.test(expiry || "") ? expiry : "";
+  if (!nb) throw new Error(`Enter the ${batchName(product).toLowerCase()} number.`);
+  if (!ne) throw new Error("Enter the expiry date.");
+  if (nb === lot.batch && ne === lot.expiry) throw new Error("Nothing has changed.");
+  const by = who(staff);
+  const byUid = uid();
+  const pRef = doc(db, "inv_products", product.id);
+  const pairs = (both ? ["shelf", "jt"] : [lot.loc]).map((loc) => ({
+    loc,
+    fromRef: doc(db, "inv_lots", lotId(product.id, loc, lot.batch, lot.expiry)),
+    toRef: doc(db, "inv_lots", lotId(product.id, loc, nb, ne)),
+  }));
+
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    const pSnap = await tx.get(pRef);
+    if (!pSnap.exists()) throw new Error("This product no longer exists.");
+    if (pSnap.data().tracked !== true) throw new Error("This product doesn't track batch and expiry.");
+    for (const x of pairs) {
+      x.from = await tx.get(x.fromRef);
+      x.to = x.toRef.id === x.fromRef.id ? x.from : await tx.get(x.toRef);
+    }
+
+    // ---- Writes ----
+    const lines = [];
+    pairs.forEach((x) => {
+      const q = x.from.exists() ? Number(x.from.data().qty) || 0 : 0;
+      if (q <= 0) return;
+      if (x.toRef.id === x.fromRef.id) {
+        // Only capitals or spacing changed: the same document, new wording
+        tx.update(x.fromRef, { batch: nb, expiry: ne, updatedAt: serverTimestamp() });
+      } else {
+        const have = x.to.exists() ? Number(x.to.data().qty) || 0 : 0;
+        tx.set(x.toRef, {
+          productId: product.id, loc: x.loc, batch: nb, expiry: ne, qty: have + q,
+          updatedAt: serverTimestamp(), ...(x.to.exists() ? {} : { createdAt: serverTimestamp() }),
+        }, { merge: true });
+        tx.update(x.fromRef, { qty: 0, updatedAt: serverTimestamp() });
+      }
+      lines.push({ loc: x.loc, batch: lot.batch, expiry: lot.expiry, delta: -q }, { loc: x.loc, batch: nb, expiry: ne, delta: q });
+    });
+    if (!lines.length) throw new Error("That batch has no stock left. Reload and try again.");
+    tx.set(doc(collection(db, "inv_moves")), {
+      type: "tracking", productId: product.id, productName: String(pSnap.data().name || product.name),
+      unit: String(pSnap.data().stockUnit || product.stockUnit || "item"), lines,
+      reason: "Batch details corrected",
+      note: `${lot.batch || "-"} (exp ${lot.expiry || "-"}) → ${nb} (exp ${ne}) · totals unchanged`.slice(0, 500),
+      ref: "", by, byUid, at: serverTimestamp(),
+    });
+  });
+}
+
 /* ===================== Batches (lots) ===================== */
 
 const slug = (s) => String(s || "").trim().toUpperCase().replace(/[^A-Z0-9-]+/g, "_").slice(0, 40);
