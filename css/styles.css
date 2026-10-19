@@ -6615,3 +6615,10 @@ a.md-quiet:hover { border-color: var(--primary); }
   .inv-trk-row { grid-template-columns: 1fr 1fr; }
   .inv-trk { margin-left: 0; }
 }
+/* Inventory: product window, stock without lot / expiry, and correcting a batch */
+.inv-pd-nolot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .6rem 1rem;
+  padding: .75rem .9rem; border: 1px solid #fde68a; border-radius: 12px; background: #fffbeb; }
+.inv-pd-nolot h4 { margin: 0 0 .15rem; }
+.inv-pd-nolot p { margin: 0; font-size: .85rem; }
+.inv-lot-act { width: 1%; text-align: right; white-space: nowrap; }
+.inv-lot-act .lh-btn { height: 30px; padding: 0 .7rem; font-size: .8rem; }

@@ -7,7 +7,7 @@ import {
   productSuppliers, supplierTerms, suppliesProduct, suggestOrderFor,
   listCounts, listInvestigations, dayKey, 
   isSharedProduct, listOpenContainers, openContainer, finishContainer, openState, expectedUses, FINISH_REASONS,
-  setStartingStock, PO_EMAIL_TAGS, fillPoTemplate, poNumberBase, PO_ORDER_TAG_RE, setTracking,
+  setStartingStock, PO_EMAIL_TAGS, fillPoTemplate, poNumberBase, PO_ORDER_TAG_RE, setTracking, correctLot,
 } from "./inventory-api.js";
 import { renderInvestigations, mountInvestigation } from "./investigations.js";
 import { mountPurchaseOrder } from "./purchase-order.js";
@@ -1320,7 +1320,65 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       if (first) first.focus();
     });
   }
-  
+
+  // Correct one batch's number or expiry (the quantity stays the same)
+  function editLotDialog(p, lot) {
+    const bl = batchName(p);
+    const other = lotsOf(p.id).find((l) => l.loc !== lot.loc && l.batch === lot.batch && l.expiry === lot.expiry);
+    return new Promise((resolve) => {
+      let saved = false;
+      const d2 = openDialog("inv-dlg", `
+        <form class="lh-form" novalidate>
+          <div class="lh-dialog-head"><h3>Correct ${esc(bl.toLowerCase())}: ${esc(p.name)}</h3>
+            <p>${esc(locLabel(lot.loc))} · ${esc(batchText(p, lot.batch) || "No number")} · Exp ${esc(niceDate(lot.expiry) || "none")} ·
+              ${esc(plural(lot.qty, p.stockUnit))}. For a typo or a wrong date: how many stays the same.</p></div>
+          <div class="inv-two">
+            <label class="lh-field"><span class="lh-label">${esc(bl)} number</span>
+              <input name="batch" maxlength="40" value="${esc(lot.batch)}" autocomplete="off" /></label>
+            <label class="lh-field"><span class="lh-label">Expiry date</span>
+              <input name="expiry" type="date" value="${esc(lot.expiry)}" /></label>
+          </div>
+          ${other ? `<label class="fe-check"><input type="checkbox" name="both" checked />
+            Also correct the ${esc(plural(other.qty, p.stockUnit))} of the same ${esc(bl.toLowerCase())} in ${esc(locLabel(other.loc))}</label>` : ""}
+          ${p.usage === "kit" ? `<small class="fe-note">Vials already taken into injectors' kits keep the details they had.</small>` : ""}
+          <p class="lh-error" role="alert" hidden></p>
+          <div class="lh-actions">
+            <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+            <button type="submit" class="lh-btn is-primary">Save</button>
+          </div>
+        </form>`);
+      const form = d2.querySelector("form");
+      const err = d2.querySelector(".lh-error");
+      d2.querySelector('[data-act="cancel"]').addEventListener("click", () => d2.close());
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        err.hidden = true;
+        const f = form.elements;
+        if (f.expiry.validity && f.expiry.validity.badInput) {
+          err.textContent = "That expiry date doesn't exist. Check the day (e.g. September has 30 days).";
+          err.hidden = false;
+          return;
+        }
+        const btn = form.querySelector('[type="submit"]');
+        btn.disabled = true;
+        try {
+          await correctLot(p, lot, { batch: f.batch.value, expiry: f.expiry.value, both: !!(f.both && f.both.checked) }, staff);
+          saved = true;
+          d2.close();
+          showToast(`${bl} details corrected`);
+        } catch (ex) {
+          console.error("Correct batch failed:", ex);
+          err.textContent = errText(ex, "Couldn't save. Try again.");
+          err.hidden = false;
+          btn.disabled = false;
+        }
+      });
+      d2.addEventListener("close", () => resolve(saved));
+      form.elements.batch.focus();
+      form.elements.batch.select();
+    });
+  }
+
   /* ---------- Supplier editor ---------- */
   function editSupplier(s) {
     const isNew = !s;
@@ -1797,12 +1855,18 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
             <button type="button" class="lh-btn is-quiet" data-act="edit">Edit product</button>` : ""}
         </div>` : ""}
         ${isSharedProduct(p) ? sharedSecHtml(p) : ""}
+        ${!p.tracked && canManage && p.stock.shelf + p.stock.jt > 0 ? `<div class="inv-pd-sec inv-pd-nolot">
+          <div><h4>Lot and expiry</h4>
+            <p class="muted">This stock has no ${esc(batchName(p).toLowerCase())} number or expiry date, so expiry warnings can't work for it.</p></div>
+          <button type="button" class="lh-btn${p.category === "injectable" ? " is-primary" : ""}" data-act="add-lots">Add lot &amp; expiry…</button>
+        </div>` : ""}
         ${p.tracked ? `<div class="inv-pd-sec"><h4>Stock by ${esc(batchName(p).toLowerCase())} <small>(oldest expiry first)</small></h4>${lots.length
-          ? `<table class="inv-table"><thead><tr><th>Storage</th><th>${esc(batchName(p))}</th><th>Expiry</th><th>Qty</th></tr></thead><tbody>${lots.map((l) => {
+          ? `<table class="inv-table"><thead><tr><th>Storage</th><th>${esc(batchName(p))}</th><th>Expiry</th><th>Qty</th>${canManage ? "<th></th>" : ""}</tr></thead><tbody>${lots.map((l, i) => {
            const ex = expiryState(l.expiry);
-              return `<tr><td>${esc(locLabel(l.loc))}</td><td>${esc(l.batch)}</td>
-                <td>${esc(niceDate(l.expiry))}${ex ? ` <span class="inv-flag is-${ex === "expired" ? "bad" : "warn"}">${ex === "expired" ? "Expired" : "Soon"}</span>` : ""}</td>
-                <td>${esc(qtyText(p, l.qty))}</td></tr>`;
+              return `<tr><td>${esc(locLabel(l.loc))}</td><td>${esc(l.batch || "—")}</td>
+                <td>${esc(niceDate(l.expiry) || "—")}${ex ? ` <span class="inv-flag is-${ex === "expired" ? "bad" : "warn"}">${ex === "expired" ? "Expired" : "Soon"}</span>` : ""}</td>
+                <td>${esc(qtyText(p, l.qty))}</td>
+                ${canManage ? `<td class="inv-lot-act"><button type="button" class="lh-btn" data-editlot="${i}">Edit</button></td>` : ""}</tr>`;
             }).join("")}</tbody></table>`
           : '<p class="tb-none">No batches in stock.</p>'}</div>` : ""}
         ${productSuppliers(p).length ? `<div class="inv-pd-sec"><h4>Supplier${productSuppliers(p).length > 1 ? "s" : ""}</h4>${
@@ -1835,6 +1899,16 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       if (fin) {
         const c = st.open.find((x) => x.id === fin.dataset.finish);
         if (c && await finishSharedDialog(c, p)) { await load(); if (dlg.open) draw(); }
+        return;
+      }
+      if (e.target.closest('[data-act="add-lots"]')) {
+        if (await trackingDialog(p, true)) { await load(); if (dlg.open) draw(); }
+        return;
+      }
+      const el = e.target.closest("[data-editlot]");
+      if (el) {
+        const lot = lotsOf(id)[Number(el.dataset.editlot)];
+        if (lot && await editLotDialog(p, lot)) { await load(); if (dlg.open) draw(); }
         return;
       }
       if (e.target.closest('[data-act="edit"]')) { dlg.close(); editProduct(p); return; }
