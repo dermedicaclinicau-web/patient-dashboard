@@ -6919,7 +6919,13 @@ dialog.lh-dialog.ch-dlg { width: min(1400px, 96vw); max-width: 96vw; height: 92v
 .ch-dev { margin: 10px auto; }
 .ch-frame { flex: 1; width: 100%; margin: 0 auto; border: 0; background: #fff; transition: width .2s; }
 .ch-frame.is-mobile { width: 375px; border-left: 1px solid #e5e7eb; border-right: 1px solid #e5e7eb; }
-.ch-notes { padding: 8px 18px 12px; border-top: 1px solid #e5e7eb; max-height: 18vh; overflow: auto; }
+.ch-bottom { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; padding: 10px 18px 12px; border-top: 1px solid #e5e7eb; max-height: 28vh; overflow: auto; }
+.ch-bottom strong { display: block; margin: 0 0 6px; font-size: 13px; }
+.ch-link { display: grid; grid-template-columns: minmax(0, 1fr) 200px minmax(0, 1fr); gap: 6px; align-items: center; margin: 0 0 6px; }
+.ch-link-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.ch-link .fe-input, .ch-link .fb-select { min-width: 0; padding: 6px 8px; font-size: 12.5px; }
+.ch-link-note { font-size: 12px; color: #027a48; }
+@media (max-width: 900px) { .ch-bottom { grid-template-columns: 1fr; } }
 @media (max-width: 900px) {
   .ch-split { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
   .ch-code { border-right: 0; }

@@ -235,6 +235,31 @@ export function customNotes(code, pad = true) {
   return n;
 }
 
+// Every link in the custom HTML, in order: [{ href, text, formId }]
+const A_RE = () => /<a\b((?:[^>"']|"[^"]*"|'[^']*')*)>([\s\S]*?)<\/a\s*>/gi;
+export function customLinks(code) {
+  const out = [];
+  String(code || "").replace(A_RE(), (m, attrs, inner) => {
+    const h = /\shref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(attrs);
+    const href = (h ? (h[1] ?? h[2] ?? h[3] ?? "") : "").replace(/&amp;/g, "&").trim();
+    const text = inner.replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/\s+/g, " ").trim().slice(0, 60)
+      || (/<img\b/i.test(inner) ? "Picture" : "Link");
+    const f = /\/form\.html#f=([A-Za-z0-9_-]{10,40})/.exec(href);
+    out.push({ href, text, formId: f ? f[1] : "" });
+    return m;
+  });
+  return out;
+}
+// Changes the address of link number n (counting from 0), leaving the rest of the code exactly as it was
+export function setCustomLink(code, n, href) {
+  let i = -1;
+  return String(code || "").replace(A_RE(), (m, attrs, inner) => {
+    if (++i !== n) return m;
+    const v = ` href="${esc(href)}"`;
+    const na = /\shref\s*=/i.test(attrs) ? attrs.replace(/\shref\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/i, v) : v + attrs;
+    return `<a${na}>${inner}</a>`;
+  });
+}
 // The palette: pieces written the way email apps need (styles on each element, columns that stack on phones)
 const cf = (st, size = 15) => `font-family:${st.font};font-size:${size}px;line-height:1.6;color:${st.text};`;
 const pPic = (w, h) => `<img src="https://placehold.co/${w}x${h}/e2e8f0/64748b/png?text=Picture" alt="Describe the picture" width="${w}" ` +

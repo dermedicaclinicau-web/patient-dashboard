@@ -15,7 +15,7 @@ import { createRichEditor } from "./rich-editor.js";
 import { makeResizable } from "./panel-resize.js";
 import {
   esc, safeUrl, uid, BLOCKS, FONTS, MERGE_TAGS, STARTERS, styleOf, cleanDesign, newBlock, blockHtml, renderEmail,
-  footerPreview, checkDesign, CUSTOM_PIECES, customNotes,
+  footerPreview, checkDesign, CUSTOM_PIECES, customNotes, customLinks, setCustomLink, FORM_PAGE,
 } from "./mkt-email.js";
 import { openCropper } from "./mkt-crop.js";
 import { listPublishedForms } from "./form-templates.js";
@@ -746,14 +746,43 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
             <iframe class="ch-frame" sandbox="" title="Preview"></iframe>
           </div>
         </div>
-        <div class="ch-notes" data-role="chnotes"></div>
+        <div class="ch-bottom">
+          <div class="ch-links"><strong>Links and buttons</strong><div data-role="chlinks"></div></div>
+          <div class="ch-notes"><strong>Checks</strong><div data-role="chnotes"></div></div>
+        </div>
       </div>`, "ch-dlg");
     const ta = dlg.querySelector(".ch-code");
     const frame = dlg.querySelector(".ch-frame");
     const notes = dlg.querySelector('[data-role="chnotes"]');
+    const linksBox = dlg.querySelector('[data-role="chlinks"]');
     let pt = 0;
-    const preview = () => { frame.srcdoc = previewDoc(b); notes.innerHTML = htmlNotes(b); };
+
+    // Each link: a web page (type the address) or a form to fill in (each patient gets their own link when it's sent)
+    function drawLinks() {
+      const list = customLinks(ta.value);
+      if (!list.length) { linksBox.innerHTML = '<p class="muted">No links or buttons yet.</p>'; return; }
+      const forms = formsCache || [];
+      linksBox.innerHTML = list.map((l, i) => {
+        const gone = l.formId && !forms.some((f) => f.id === l.formId);
+        const url = /^(https?:|mailto:|tel:)/i.test(l.href) && l.href !== "https://" ? l.href : "";
+        return `<div class="ch-link">
+          <span class="ch-link-text" title="${esc(l.text)}">${esc(l.text)}</span>
+          <select class="fb-select" data-linkkind="${i}" aria-label="Where ${esc(l.text)} goes">
+            <option value="url"${l.formId ? "" : " selected"}>A web page</option>
+            <optgroup label="A form to fill in">${forms.length
+              ? forms.map((f) => `<option value="form:${esc(f.id)}"${f.id === l.formId ? " selected" : ""}>${esc(f.name)}</option>`).join("")
+              : `<option disabled>${formsCache ? "No forms are set up for online filling" : "Loading forms…"}</option>`}${
+              gone ? `<option value="form:${esc(l.formId)}" selected>This form (not online any more)</option>` : ""}</optgroup>
+          </select>
+          ${l.formId ? '<small class="ch-link-note">Each patient gets their own link</small>'
+            : `<input class="fe-input" data-linkurl="${i}" value="${esc(url)}" placeholder="https://" aria-label="Link for ${esc(l.text)}" />`}
+        </div>`;
+      }).join("");
+    }
+    const preview = () => { frame.srcdoc = previewDoc(b); notes.innerHTML = htmlNotes(b); drawLinks(); };
     const update = () => { b.code = ta.value; changed(); clearTimeout(pt); pt = setTimeout(preview, 300); };
+    const setLink = (i, href) => { ta.value = setCustomLink(ta.value, i, href); update(); drawLinks(); };
+
     ta.value = b.code || "";
     ta.addEventListener("input", update);
     ta.addEventListener("keydown", (e) => { if (e.key === "Tab" && !e.shiftKey) { e.preventDefault(); insertText(ta, "  "); } });
@@ -793,6 +822,12 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
 
     dlg.addEventListener("change", async (e) => {
       const el = e.target;
+      if (el.matches("[data-linkkind]")) {
+        const v = el.value;
+        setLink(Number(el.dataset.linkkind), v.startsWith("form:") ? `${FORM_PAGE}#f=${v.slice(5)}` : "https://");
+        return;
+      }
+      if (el.matches("[data-linkurl]")) { setLink(Number(el.dataset.linkurl), el.value.trim() || "https://"); return; }
       const f = el.files && el.files[0];
       if (!f) return;
       el.value = "";
@@ -817,9 +852,10 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
 
     dlg.addEventListener("close", () => { clearTimeout(pt); b.code = ta.value; drawCanvas(); drawSide(); });
     preview();
+    loadOnlineForms().then(() => { if (dlg.open) drawLinks(); });
     ta.focus();
   }
-
+  
   /* ---------- Blocks: add, move, copy, delete ---------- */
   function insertBlock(type, at) {
     const nb = newBlock(type);
@@ -1099,7 +1135,8 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
   // Does the email have a button that opens a form?
   const hasFormButton = () => blocks().some((b) =>
     (b.type === "button" && b.link === "form" && b.formId) ||
-    (b.type === "buttons" && (b.items || []).some((it) => it.link === "form" && it.formId)));
+    (b.type === "buttons" && (b.items || []).some((it) => it.link === "form" && it.formId)) ||
+    (b.type === "html" && customLinks(b.code).some((l) => l.formId)));
 
   /* ---------- Send a test ---------- */
   async function sendTest() {
