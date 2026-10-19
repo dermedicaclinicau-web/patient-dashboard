@@ -6598,3 +6598,20 @@ a.md-quiet:hover { border-color: var(--primary); }
   justify-content: space-between; gap: .75rem; padding: .6rem .8rem; border-radius: 10px; background: var(--primary); color: #fff; }
 .du-refill[hidden] { display: none; }
 .du-refill .ff-btn { border-color: #fff; background: #fff; color: var(--primary); }
+
+/* Inventory: switching batch & expiry on a product with stock */
+.inv-trk { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .75rem; margin: -.15rem 0 .35rem 1.9rem; }
+.inv-trk .fe-note { flex: 1 1 260px; margin: 0; }
+.inv-trk-sec { display: grid; gap: .45rem; padding: .75rem .85rem; border: 1px solid var(--border); border-radius: 12px; }
+.inv-trk-sec h4 { display: flex; justify-content: space-between; align-items: baseline; margin: 0; font-size: .95rem; }
+.inv-trk-sec h4 small { font-size: .8rem; font-weight: 600; }
+.inv-trk-sec h4 small.is-ok { color: #047857; }
+.inv-trk-sec h4 small.is-bad { color: var(--danger); }
+.inv-trk-head, .inv-trk-row { display: grid; grid-template-columns: 1.4fr 1fr 96px 36px; gap: .45rem; align-items: center; }
+.inv-trk-head span { font-size: .75rem; font-weight: 600; color: var(--muted); }
+.inv-trk-row [hidden] { visibility: hidden; display: inline-flex; }
+@media (max-width: 560px) {
+  .inv-trk-head { display: none; }
+  .inv-trk-row { grid-template-columns: 1fr 1fr; }
+  .inv-trk { margin-left: 0; }
+}

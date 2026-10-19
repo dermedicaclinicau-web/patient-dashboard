@@ -7,7 +7,7 @@ import {
   productSuppliers, supplierTerms, suppliesProduct, suggestOrderFor,
   listCounts, listInvestigations, dayKey, 
   isSharedProduct, listOpenContainers, openContainer, finishContainer, openState, expectedUses, FINISH_REASONS,
-  setStartingStock, PO_EMAIL_TAGS, fillPoTemplate, poNumberBase, PO_ORDER_TAG_RE,
+  setStartingStock, PO_EMAIL_TAGS, fillPoTemplate, poNumberBase, PO_ORDER_TAG_RE, setTracking,
 } from "./inventory-api.js";
 import { renderInvestigations, mountInvestigation } from "./investigations.js";
 import { mountPurchaseOrder } from "./purchase-order.js";
@@ -1028,7 +1028,9 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         <p class="inv-hint" data-role="pack"></p>
         <label class="fe-check"><input type="checkbox" name="tracked"${x.tracked ? " checked" : ""}${hasStock ? " disabled" : ""} />
           Needs a batch / lot number and expiry date (e.g. Xeomin, Belotero)</label>
-        ${hasStock ? '<small class="fe-note">This can only be changed while there is no stock. Count it to zero first.</small>' : ""}
+        ${hasStock ? `<div class="inv-trk">
+          <small class="fe-note" data-role="trknote"></small>
+          <button type="button" class="lh-btn" data-act="trk"></button></div>` : ""}
         <label class="lh-field"><span class="lh-label">What the packaging calls it</span>
           <input name="batchLabel" maxlength="20" list="inv-batch-names" placeholder="Batch" value="${val(x.batchLabel && x.batchLabel !== "Batch" ? x.batchLabel : "")}" />
           <datalist id="inv-batch-names"><option value="Batch"></option><option value="Lot"></option><option value="LOT"></option><option value="Batch / Lot"></option></datalist>
@@ -1102,6 +1104,28 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     syncInv();
     form.elements.investigate.addEventListener("change", syncInv);
     dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+
+    // A product with stock: batch & expiry is switched with its own window, so the stock is converted properly
+    const syncTrk = () => {
+      const note = dlg.querySelector('[data-role="trknote"]');
+      if (!note) return;
+      note.textContent = x.tracked
+        ? "It has stock. Turning this off adds its batches together into one amount on the Shelf and in JT storage."
+        : "It has stock, so turning this on means entering the batch and expiry date of what's there now.";
+      dlg.querySelector('[data-act="trk"]').textContent = x.tracked ? "Turn off…" : "Turn on…";
+      form.elements.tracked.checked = !!x.tracked;
+    };
+    syncTrk();
+    const trkBtn = dlg.querySelector('[data-act="trk"]');
+    if (trkBtn) trkBtn.addEventListener("click", async () => {
+      const on = !x.tracked;
+      if (await trackingDialog(p, on, form.elements.batchLabel.value.trim())) {
+        x.tracked = on;
+        syncTrk();
+        load();
+      }
+    });
+
     dlg.addEventListener("click", (e) => {
       if (e.target.closest('[data-act="alt-add"]')) {
         dlg.querySelector('[data-role="alts"]').insertAdjacentHTML("beforeend", altRow());
@@ -1156,6 +1180,147 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     form.elements.name.focus();
   }
 
+  /* ---------- Batch & expiry on / off for a product that has stock ---------- */
+  async function trackingDialog(p, on, labelTyped = "") {
+    if (st.invs.some((v) => v.productId === p.id)) {
+      showToast(`${p.name} has an open investigation. Close it first, then change this.`);
+      return false;
+    }
+    if (!on) {
+      const ok = await confirmDialog({
+        title: `Stop tracking batch and expiry for ${p.name}?`,
+        message: `Its batches are added together: Shelf ${p.stock.shelf}, JT storage ${p.stock.jt}. ` +
+          "Their batch numbers and expiry dates are dropped, and expiry warnings stop. The totals don't change.",
+        confirmLabel: "Turn it off", tone: "warning",
+      });
+      if (!ok) return false;
+      try {
+        await setTracking(p, false, [], staff);
+        showToast("Batch and expiry turned off");
+        return true;
+      } catch (ex) {
+        console.error("Tracking off failed:", ex);
+        showToast(errText(ex, "Couldn't change it. Try again."));
+        return false;
+      }
+    }
+
+    const bl = labelTyped || batchName(p);
+    const blLow = bl.toLowerCase();
+    const locs = LOCATIONS.filter((l) => p.stock[l.key] > 0);
+    const row = (qty = "") => `
+      <div class="inv-trk-row" data-trkrow>
+        <input class="fe-input" data-k="batch" maxlength="40" placeholder="${esc(bl)} number" aria-label="${esc(bl)} number" autocomplete="off" />
+        <input class="fe-input" data-k="expiry" type="date" aria-label="Expiry date" />
+        <input class="fe-input inv-num" data-k="qty" type="number" min="1" step="1" inputmode="numeric" value="${qty}" aria-label="How many" />
+        <button type="button" class="ib-tool is-danger" data-act="trk-rm" aria-label="Remove" title="Remove">×</button>
+      </div>`;
+
+    return new Promise((resolve) => {
+      let saved = false;
+      const dlg = openDialog("inv-dlg", `
+        <form class="lh-form" novalidate>
+          <div class="lh-dialog-head"><h3>Track ${esc(blLow)} and expiry: ${esc(p.name)}</h3>
+            <p>Check the labels of what's there now and enter each ${esc(blLow)} with its expiry date. They need to add up to
+              what's in stock, so the totals don't change.</p></div>
+          ${locs.map((l) => `
+            <section class="inv-trk-sec" data-loc="${l.key}">
+              <h4>${esc(l.label)} <small data-role="sum"></small></h4>
+              <div class="inv-trk-head"><span>${esc(bl)}</span><span>Expiry</span><span>How many</span><span></span></div>
+              <div data-role="rows">${row(p.stock[l.key])}</div>
+              <button type="button" class="hx-add" data-act="trk-add">+ Another ${esc(blLow)}</button>
+            </section>`).join("")}
+          <small class="fe-note">Only a month and year on the box? Use the last day of that month.</small>
+          <p class="lh-error" role="alert" hidden></p>
+          <div class="lh-actions">
+            <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+            <button type="submit" class="lh-btn is-primary">Turn on batch &amp; expiry</button>
+          </div>
+        </form>`);
+      const form = dlg.querySelector("form");
+      const err = dlg.querySelector(".lh-error");
+
+      const sync = () => dlg.querySelectorAll(".inv-trk-sec").forEach((sec) => {
+        const loc = sec.dataset.loc;
+        const typed = [...sec.querySelectorAll('[data-k="qty"]')].reduce((a, el) => a + (parseInt(el.value, 10) || 0), 0);
+        const sum = sec.querySelector('[data-role="sum"]');
+        sum.textContent = `${typed} of ${plural(p.stock[loc], p.stockUnit)}`;
+        sum.className = typed === p.stock[loc] ? "is-ok" : "is-bad";
+        const rows = sec.querySelectorAll("[data-trkrow]");
+        rows.forEach((r) => { r.querySelector('[data-act="trk-rm"]').hidden = rows.length < 2; });
+      });
+      sync();
+      form.addEventListener("input", sync);
+
+      dlg.addEventListener("click", (e) => {
+        if (e.target.closest('[data-act="cancel"]')) { dlg.close(); return; }
+        const add = e.target.closest('[data-act="trk-add"]');
+        if (add) {
+          const sec = add.closest(".inv-trk-sec");
+          sec.querySelector('[data-role="rows"]').insertAdjacentHTML("beforeend", row());
+          const rows = sec.querySelectorAll("[data-trkrow]");
+          rows[rows.length - 1].querySelector('[data-k="batch"]').focus();
+          sync();
+          return;
+        }
+        const rm = e.target.closest('[data-act="trk-rm"]');
+        if (rm) { rm.closest("[data-trkrow]").remove(); sync(); }
+      });
+
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        err.hidden = true;
+        const splits = [];
+        try {
+          dlg.querySelectorAll(".inv-trk-sec").forEach((sec) => {
+            const loc = sec.dataset.loc;
+            let total = 0;
+            sec.querySelectorAll("[data-trkrow]").forEach((r) => {
+              const batch = r.querySelector('[data-k="batch"]').value.trim();
+              const exp = r.querySelector('[data-k="expiry"]');
+              const qty = parseInt(r.querySelector('[data-k="qty"]').value, 10);
+              if (!batch && !exp.value && !qty) return;   // an empty extra row
+              if (!batch) throw new Error(`Enter the ${blLow} number for each row.`);
+              if (!exp.value) {
+                throw new Error(exp.validity && exp.validity.badInput
+                  ? "One of the expiry dates doesn't exist. Check the day (e.g. September has 30 days)."
+                  : `Enter the expiry date for ${bl} ${batch}.`);
+              }
+              if (!(qty >= 1)) throw new Error(`Enter how many for ${bl} ${batch}.`);
+              total += qty;
+              splits.push({ loc, batch, expiry: exp.value, qty });
+            });
+            if (total !== p.stock[loc]) {
+              throw new Error(`${locLabel(loc)}: ${total} entered, but there ${p.stock[loc] === 1 ? "is" : "are"} ${plural(p.stock[loc], p.stockUnit)}. They need to add up.`);
+            }
+          });
+        } catch (ex) {
+          err.textContent = ex.message;
+          err.hidden = false;
+          return;
+        }
+        const btn = form.querySelector('[type="submit"]');
+        btn.disabled = true;
+        btn.textContent = "Saving…";
+        try {
+          await setTracking(p, true, splits, staff);
+          saved = true;
+          dlg.close();
+          showToast(`${p.name} now tracks ${blLow} and expiry`);
+        } catch (ex) {
+          console.error("Tracking on failed:", ex);
+          err.textContent = errText(ex, "Couldn't save. Try again.");
+          err.hidden = false;
+          btn.disabled = false;
+          btn.textContent = "Turn on batch & expiry";
+        }
+      });
+      dlg.addEventListener("close", () => resolve(saved));
+      const first = dlg.querySelector('[data-k="batch"]');
+      if (first) first.focus();
+    });
+  }
+  
   /* ---------- Supplier editor ---------- */
   function editSupplier(s) {
     const isNew = !s;

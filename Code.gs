@@ -538,8 +538,9 @@ function syncSheetsToFirestore() {
     const cfg = getConfig_();
     const ss = SpreadsheetApp.openById(APPTS_SHEET_ID);
 
-    const patients = syncResults_(ss, cfg);
-    const days = syncAppointments_(ss, cfg);
+    const deadline = Date.now() + 5 * 60000;
+    const patients = syncResults_(ss, cfg, deadline);
+    const days = syncAppointments_(ss, cfg, deadline);
 
     commitWrites_(cfg, [updateWrite_(cfg, 'sync_meta/pcn', {
       sheetUpdatedAt: sheetUpdated,
@@ -556,10 +557,11 @@ function syncSheetsToFirestore() {
   }
 }
 
-// Run manually to force a full sync even if the sheet hasn't changed
+// Run manually to force a full sync even if the sheet hasn't changed (everything is sent again)
 function forceSync() {
   PropertiesService.getScriptProperties().deleteProperty('LAST_SYNCED_SHEET_UPDATE');
   PropertiesService.getScriptProperties().deleteProperty('LAST_SYNCED_SSP_UPDATE');
+  syncResetHashes_();
   syncSheetsToFirestore();
 }
 
@@ -573,7 +575,7 @@ function installSyncTrigger() {
 }
 
 // ---- pcn_results -> Firestore 'pcn_results/{PatientID}' ----
-function syncResults_(ss, cfg) {
+function syncResults_(ss, cfg, deadline) {
   const sheet = ss.getSheetByName(RESULTS_SHEET_NAME);
   if (!sheet) throw new Error('Sheet tab not found: ' + RESULTS_SHEET_NAME);
 
@@ -582,36 +584,32 @@ function syncResults_(ss, cfg) {
     ? sheet.getRange(2, 1, lastRow - 1, RESULT_FIELDS_.length).getDisplayValues()
     : [];
 
-  const writes = [];
-  const keep = {};
-
+  const docs = {};
   rows.forEach(function (r) {
     const data = {};
     RESULT_FIELDS_.forEach(function (key, i) { data[key] = String(r[i] || '').trim(); });
-
     const id = docId_(data.patientId);
-    if (!id || keep[id]) return; // skip blank IDs; for duplicate IDs the first row wins
-    keep[id] = true;
-
+    if (!id || docs[id]) return; // skip blank IDs; for duplicate IDs the first row wins
     data.nameKey = data.patientName.toLowerCase().replace(/\s+/g, ' ').trim(); // for name fallback
-    writes.push(updateWrite_(cfg, 'pcn_results/' + id, data));
+    docs[id] = { path: 'pcn_results/' + id, data: data };
   });
 
   // Safety net: never wipe Firestore because the sheet was caught empty mid-upload
-  if (!writes.length) throw new Error('pcn_results looks empty. Sync aborted to protect existing data.');
+  if (!Object.keys(docs).length) throw new Error('pcn_results looks empty. Sync aborted to protect existing data.');
 
   // Remove patients that are no longer in the sheet
-  listDocIds_(cfg, 'pcn_results').forEach(function (id) {
-    if (!keep[id]) writes.push(deleteWrite_(cfg, 'pcn_results/' + id));
-  });
+  const deletes = listDocIds_(cfg, 'pcn_results')
+    .filter(function (id) { return !docs[id]; })
+    .map(function (id) { return 'pcn_results/' + id; });
 
-  commitWrites_(cfg, writes);
-  return Object.keys(keep).length;
+  syncCommitChanged_(cfg, 'pcn_results', docs, deletes, 200, deadline);
+  return Object.keys(docs).length;
 }
+
 
 // ---- Appointments -> Firestore 'appts_by_day/{YYYY-MM-DD}' ----
 // Sources: pcn_appts_today (wins for its own dates) + past_visits + future-visits
-function syncAppointments_(ss, cfg) {
+function syncAppointments_(ss, cfg, deadline) {
   const tz = ss.getSpreadsheetTimeZone();
   const days = {};
   const groups = {};
@@ -634,9 +632,19 @@ function syncAppointments_(ss, cfg) {
   const dates = Object.keys(days).sort();
   if (!dates.length) return 0;
 
-  const writes = dates.map(function (d) {
-    return updateWrite_(cfg, 'appts_by_day/' + d, { date: d, appointments: days[d] });
-  });
+  const docs = {};
+  dates.forEach(function (d) { docs[d] = { path: 'appts_by_day/' + d, data: { date: d, appointments: days[d] } }; });
+
+  // Remove day documents INSIDE the synced date range that no longer have any appointments
+  const first = dates[0];
+  const last = dates[dates.length - 1];
+  const deletes = listDocIds_(cfg, 'appts_by_day')
+    .filter(function (id) { return /^\d{4}-\d{2}-\d{2}$/.test(id) && id >= first && id <= last && !days[id]; })
+    .map(function (id) { return 'appts_by_day/' + id; });
+
+  syncCommitChanged_(cfg, 'appts_by_day', docs, deletes, 25, deadline); // day documents are big: small batches
+  return dates.length;
+}
 
   // Remove day documents INSIDE the synced date range that no longer have any appointments
   const first = dates[0];
@@ -712,19 +720,29 @@ function deleteWrite_(cfg, path) {
   return { delete: fsBase_(cfg) + '/' + path };
 }
 
+// Retries when Firestore is busy or throttling (429 / 409 / 5xx), waiting longer each time
 function commitWrites_(cfg, writes, batchSize) {
   const size = batchSize || SYNC_BATCH_;
   for (let i = 0; i < writes.length; i += size) {
-    const res = UrlFetchApp.fetch('https://firestore.googleapis.com/v1/' + fsBase_(cfg) + ':commit', {
-      method: 'post',
-      contentType: 'application/json',
-      headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) },
-      payload: JSON.stringify({ writes: writes.slice(i, i + size) }),
-      muteHttpExceptions: true,
-    });
-    if (res.getResponseCode() !== 200) {
-      throw new Error('Firestore commit ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 500));
+    let wait = 1000;
+    for (let attempt = 0; ; attempt++) {
+      const res = UrlFetchApp.fetch('https://firestore.googleapis.com/v1/' + fsBase_(cfg) + ':commit', {
+        method: 'post',
+        contentType: 'application/json',
+        headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) },
+        payload: JSON.stringify({ writes: writes.slice(i, i + size) }),
+        muteHttpExceptions: true,
+      });
+      const code = res.getResponseCode();
+      if (code === 200) break;
+      if ((code === 429 || code === 409 || code >= 500) && attempt < 5) {
+        Utilities.sleep(wait + Math.floor(Math.random() * 400));
+        wait *= 2;
+        continue;
+      }
+      throw new Error('Firestore commit ' + code + ': ' + res.getContentText().slice(0, 500));
     }
+    if (writes.length > size * 3 && i + size < writes.length) Utilities.sleep(200); // a gentle pace on big syncs
   }
 }
 
@@ -853,16 +871,29 @@ function syncSkincare_(cfg) {
   const keys = Object.keys(patients);
   if (!keys.length) throw new Error('SSP / invoice sheets look empty. Skincare sync aborted to protect existing data.');
 
-  const writes = keys.map(function (key) {
+  const docs = {};
+  keys.forEach(function (key) {
     const p = patients[key];
-    return updateWrite_(cfg, 'skincare/' + key, {
-      patientId: p.patientId,
-      patientName: p.patientName,
-      nameKey: p.nameKey,
-      protocols: Object.keys(p.protocols).map(function (k) { return p.protocols[k]; }),
-      purchases: p.purchases,
-    });
+    docs[key] = {
+      path: 'skincare/' + key,
+      data: {
+        patientId: p.patientId,
+        patientName: p.patientName,
+        nameKey: p.nameKey,
+        protocols: Object.keys(p.protocols).map(function (k) { return p.protocols[k]; }),
+        purchases: p.purchases,
+      },
+    };
   });
+
+  // Remove patients no longer in either sheet
+  const deletes = listDocIds_(cfg, 'skincare')
+    .filter(function (id) { return !docs[id]; })
+    .map(function (id) { return 'skincare/' + id; });
+
+  syncCommitChanged_(cfg, 'skincare', docs, deletes, 40, Date.now() + 4 * 60000); // long instructions: small batches
+  return keys.length;
+}
 
   // Remove patients no longer in either sheet
   const keep = {};
@@ -1066,6 +1097,64 @@ function transcribeStage_(cfg, job) {
     'Source': 'Dashboard recording',
     'Created At': new Date().toISOString(),
   })]);
+}
+
+/* ---------- Sending only what changed ---------- */
+// A fingerprint of every document sent is kept in sync_hashes/{name}. Documents whose content hasn't changed
+// aren't written again. Progress is saved after every batch, so a run that stops part-way carries on next time.
+// forceSync() clears the fingerprints, so everything is sent again.
+
+const SYNC_HASH_COL_ = 'sync_hashes';
+
+function syncHashes_(cfg, name) {
+  try {
+    const d = fsGetDoc_(cfg, SYNC_HASH_COL_ + '/' + name);
+    return (d && d.h && typeof d.h === 'object') ? d.h : {};
+  } catch (e) {
+    console.warn('Sync fingerprints not read (' + name + '), sending everything: ' + e);
+    return {};
+  }
+}
+
+// docs: { id: { path, data } }   deletes: [path]   deadline: stop before this time (ms)
+function syncCommitChanged_(cfg, name, docs, deletes, batchSize, deadline) {
+  const prev = syncHashes_(cfg, name);
+  const next = {};
+  const items = [];
+  Object.keys(docs).forEach(function (id) {
+    const h = flowHash_(JSON.stringify(docs[id].data)).slice(0, 12);
+    if (prev[id] === h) { next[id] = h; return; }
+    items.push({ w: updateWrite_(cfg, docs[id].path, docs[id].data), id: id, h: h });
+  });
+  (deletes || []).forEach(function (p) { items.push({ w: deleteWrite_(cfg, p) }); });
+
+  const size = batchSize || SYNC_BATCH_;
+  let err = null;
+  for (let i = 0; i < items.length && !err; i += size) {
+    if (deadline && Date.now() > deadline) {
+      err = new Error('Not everything was sent in time. Press "Send to the portal again" to send the rest.');
+      break;
+    }
+    const part = items.slice(i, i + size);
+    try {
+      commitWrites_(cfg, part.map(function (x) { return x.w; }), size);
+      part.forEach(function (x) { if (x.id) next[x.id] = x.h; });
+    } catch (e) { err = e; }
+  }
+  // Saved even after a failure, so the next run only sends what's still to go
+  try {
+    commitWrites_(cfg, [updateWrite_(cfg, SYNC_HASH_COL_ + '/' + name, { h: next, at: new Date().toISOString() })]);
+  } catch (e) { console.warn('Sync fingerprints not saved (' + name + '): ' + e); }
+  if (err) throw err;
+  console.log('Sync ' + name + ': ' + items.length + ' write(s), ' + (Object.keys(docs).length - items.length + (deletes || []).length) + ' unchanged');
+  return items.length;
+}
+
+function syncResetHashes_() {
+  const cfg = getConfig_();
+  commitWrites_(cfg, ['pcn_results', 'appts_by_day', 'skincare'].map(function (n) {
+    return deleteWrite_(cfg, SYNC_HASH_COL_ + '/' + n);
+  }));
 }
 
 // STEP 2: transcript -> Recorder's callGeminiComplex + formatSoapFromJSON -> Status "Draft"
@@ -7878,6 +7967,8 @@ function handleUpload_(body) {
     if (op === 'ptSearch') return upPtSearch_(body);
     if (op === 'ptLink') return upPtLink_(body, session);
     if (op === 'refill') return upRefill_(body, session);
+    if (op === 'pcnStop') return upPcnStop_(body, session);
+    if (op === 'pcnSync') return upPcnSync_(session);
   } catch (err) {
     console.error('Upload ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
     return { ok: true, problem: 'Something went wrong: ' + String(err && err.message ? err.message : err).slice(0, 300) };
@@ -8446,7 +8537,7 @@ function upPcnStep_(body, session) {
       fsPatch_(getConfig_(), 'data_uploads/pcn', { status: 'failed', failedStep: step, error: msg, failedAt: new Date().toISOString() });
     } catch (e) { /* not essential */ }
     return { ok: true, problem: PCN_STEP_NAME_[step] + ' failed: ' + msg +
-      (step === 'sync' ? ' The sheets are updated, and the daily sync will send them to the portal.'
+      (step === 'sync' ? ' The sheets are updated. Press "Send to the portal again" to finish.'
         : ' Nothing was sent to the portal. Run the update again.') };
   }
 
@@ -8800,8 +8891,9 @@ function pcnStepSync_(ctx) {
   if (!lock.tryLock(30000)) return { later: true }; // a scheduled job is running; the next sync sends it
   try {
     const cfg = getConfig_();
-    const patients = syncResults_(ctx.ss, cfg);
-    const days = syncAppointments_(ctx.ss, cfg);
+    const deadline = Date.now() + 4.5 * 60000;
+    const patients = syncResults_(ctx.ss, cfg, deadline);
+    const days = syncAppointments_(ctx.ss, cfg, deadline);
     let updated = '';
     try { updated = DriveApp.getFileById(APPTS_SHEET_ID).getLastUpdated().toISOString(); } catch (e) { /* not essential */ }
     commitWrites_(cfg, [updateWrite_(cfg, 'sync_meta/pcn', {
@@ -8814,6 +8906,29 @@ function pcnStepSync_(ctx) {
   }
 }
 
+// "Send to the portal again" after the last step failed or ran out of time
+function upPcnSync_(session) {
+  const cache = CacheService.getScriptCache();
+  const busyRaw = cache.get('pcn_run_active');
+  if (busyRaw && Date.now() - Number(JSON.parse(busyRaw).at || 0) < 8 * 60000) {
+    return { ok: true, problem: 'A PCN update is still running. Try again in a few minutes.' };
+  }
+  cache.put('pcn_run_active', JSON.stringify({ at: Date.now(), by: String(session.name || '') }), 1800);
+  const t0 = Date.now();
+  try {
+    const info = pcnStepSync_(pcnCtx_());
+    try {
+      fsPatch_(getConfig_(), 'data_uploads/pcn', {
+        status: 'done', at: new Date().toISOString(), by: String(session.name || ''), byUid: String(session.uid || ''), error: '',
+      });
+    } catch (e) { console.warn('PCN log not saved: ' + e); }
+    return { ok: true, info: info, ms: Date.now() - t0 };
+  } catch (err) {
+    return { ok: true, problem: String(err && err.message ? err.message : err).slice(0, 300) };
+  } finally {
+    cache.remove('pcn_run_active');
+  }
+}
 // The uploaded file as text (sent compressed by the portal when the browser can)
 function uploadText_(body) {
   const b64 = String(body.data || '');

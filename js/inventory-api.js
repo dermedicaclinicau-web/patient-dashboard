@@ -31,6 +31,7 @@ export const MOVE_TYPES = {
   investigation: "Investigation closed",  "shared-open": "Opened for sharing", "shared-finish": "Opened one finished",
   baseline: "Starting stock set",
   sale: "Sold",
+  tracking: "Batch & expiry changed",
 };
 export const EXPIRY_SOON_DAYS = 60;
 
@@ -265,6 +266,103 @@ export async function saveProduct(id, data, staff) {
   }
   const ref = await addDoc(collection(db, "inv_products"), { ...clean, stock: { shelf: 0, jt: 0 }, ...stamp(staff, true) });
   return ref.id;
+}
+
+/* ---------- Turning batch & expiry on or off for a product that already has stock ---------- */
+// The totals never change. On: the plain amount in each place becomes the batches typed in (they must add up).
+// Off: every batch in each place is added together into one plain amount. One transaction, logged in Activity.
+// splits (on only): [{ loc, batch, expiry, qty }]
+export async function setTracking(product, on, splits, staff) {
+  const by = who(staff);
+  const byUid = uid();
+  const pRef = doc(db, "inv_products", product.id);
+  const plainId = (loc) => lotId(product.id, loc, "", "");
+  const label = batchName(product).toLowerCase();
+
+  const want = new Map();
+  let ids;
+  if (on) {
+    (Array.isArray(splits) ? splits : []).forEach((s) => {
+      const loc = s.loc === "jt" ? "jt" : "shelf";
+      const batch = clip(s.batch, 40);
+      const expiry = KEY_RE.test(s.expiry || "") ? s.expiry : "";
+      const qty = parseInt(s.qty, 10);
+      if (!batch || !expiry) throw new Error(`Each ${label} needs its number and expiry date.`);
+      if (!(qty >= 1)) throw new Error(`Each ${label} needs how many (1 or more).`);
+      const id = lotId(product.id, loc, batch, expiry);
+      const w = want.get(id) || { loc, batch, expiry, qty: 0 };
+      w.qty += qty;
+      want.set(id, w);
+    });
+    if (!want.size) throw new Error(`Enter at least one ${label}.`);
+    ids = [...new Set([plainId("shelf"), plainId("jt"), ...want.keys()])];
+  } else {
+    const snap = await getDocs(query(collection(db, "inv_lots"), where("productId", "==", product.id)));
+    ids = [...new Set([plainId("shelf"), plainId("jt"), ...snap.docs.map((d) => d.id)])];
+  }
+
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    const pSnap = await tx.get(pRef);
+    if (!pSnap.exists()) throw new Error("This product no longer exists.");
+    const snaps = new Map();
+    for (const id of ids) snaps.set(id, await tx.get(doc(db, "inv_lots", id)));
+    const pd = pSnap.data();
+    if ((pd.tracked === true) === on) throw new Error("Someone has just changed this. Reload and try again.");
+    const s = pd.stock || {};
+    const stock = { shelf: Number(s.shelf) || 0, jt: Number(s.jt) || 0 };
+    const unit = String(pd.stockUnit || product.stockUnit || "item");
+
+    // ---- Writes ----
+    const lines = [];
+    const put = (id, d, qty) => {
+      const sn = snaps.get(id);
+      tx.set(doc(db, "inv_lots", id), {
+        productId: product.id, loc: d.loc, batch: d.batch, expiry: d.expiry, qty,
+        updatedAt: serverTimestamp(), ...(sn && sn.exists() ? {} : { createdAt: serverTimestamp() }),
+      }, { merge: true });
+    };
+
+    if (on) {
+      LOCATIONS.forEach(({ key }) => {
+        const typed = [...want.values()].filter((w) => w.loc === key).reduce((a, w) => a + w.qty, 0);
+        if (typed !== stock[key]) {
+          throw new Error(`${locLabel(key)} has ${plural(stock[key], unit)}, but ${typed} have been entered. They need to add up. ` +
+            "If stock has just been used, close this, reload and try again.");
+        }
+      });
+      LOCATIONS.forEach(({ key }) => {
+        const sn = snaps.get(plainId(key));
+        if (sn.exists() && Number(sn.data().qty)) tx.update(sn.ref, { qty: 0, updatedAt: serverTimestamp() });
+        if (stock[key]) lines.push({ loc: key, batch: "", expiry: "", delta: -stock[key] });
+      });
+      want.forEach((w, id) => {
+        const sn = snaps.get(id);
+        put(id, w, (sn.exists() ? Number(sn.data().qty) || 0 : 0) + w.qty);
+        lines.push({ loc: w.loc, batch: w.batch, expiry: w.expiry, delta: w.qty });
+      });
+    } else {
+      snaps.forEach((sn, id) => {
+        if (!sn.exists() || id === plainId("shelf") || id === plainId("jt")) return;
+        const d = sn.data();
+        const q = Number(d.qty) || 0;
+        if (!q) return;
+        tx.update(sn.ref, { qty: 0, updatedAt: serverTimestamp() });
+        lines.push({ loc: d.loc === "jt" ? "jt" : "shelf", batch: String(d.batch || ""), expiry: String(d.expiry || ""), delta: -q });
+      });
+      LOCATIONS.forEach(({ key }) => {
+        if (stock[key] || snaps.get(plainId(key)).exists()) put(plainId(key), { loc: key, batch: "", expiry: "" }, stock[key]);
+        if (stock[key]) lines.push({ loc: key, batch: "", expiry: "", delta: stock[key] });
+      });
+    }
+
+    tx.update(pRef, { tracked: on, updatedAt: serverTimestamp(), updatedBy: by, updatedByUid: byUid });
+    tx.set(doc(collection(db, "inv_moves")), {
+      type: "tracking", productId: product.id, productName: String(pd.name || product.name), unit,
+      lines, reason: on ? "Batch & expiry turned on" : "Batch & expiry turned off", note: "Totals unchanged", ref: "",
+      by, byUid, at: serverTimestamp(),
+    });
+  });
 }
 
 /* ===================== Batches (lots) ===================== */

@@ -290,6 +290,7 @@ function pcnCardHtml(n) {
       <div class="du-acts">
         <button type="button" class="ff-btn is-primary" data-act="pcn">Run PCN update</button>
         <button type="button" class="ff-btn" data-act="pcn-stop" hidden>Stop</button>
+        <button type="button" class="ff-btn" data-act="pcn-resend" hidden>Send to the portal again</button>
       </div>
       <p class="du-msg" data-role="msg" aria-live="polite"></p>
       <small class="muted" data-role="last"></small>
@@ -299,6 +300,7 @@ function pcnCardHtml(n) {
 function wirePcn(card) {
   const btn = card.querySelector('[data-act="pcn"]');
   const stopBtn = card.querySelector('[data-act="pcn-stop"]');
+  const resendBtn = card.querySelector('[data-act="pcn-resend"]');
   const msg = card.querySelector('[data-role="msg"]');
   const lastEl = card.querySelector('[data-role="last"]');
   const items = [...card.querySelectorAll("[data-step]")];
@@ -342,6 +344,7 @@ function wirePcn(card) {
     stopBtn.hidden = false;
     stopBtn.disabled = false;
     stopBtn.textContent = "Stop";
+    resendBtn.hidden = true;
     items.forEach((li) => { li.className = ""; li.querySelector('[data-role="t"]').textContent = ""; });
     setMsg("Keep this page open. It usually takes a few minutes.");
     window.addEventListener("beforeunload", guard);
@@ -385,6 +388,7 @@ function wirePcn(card) {
     } catch (err) {
       console.error("PCN update failed:", err);
       if (cur) { cur.classList.remove("is-run"); cur.classList.add("is-bad"); }
+      if (cur && cur.dataset.step === "sync") resendBtn.hidden = false;
       setMsg(errText(err), true);
     } finally {
       running = false;
@@ -404,7 +408,35 @@ function wirePcn(card) {
     stopBtn.textContent = "Stopping after this step…";
     setMsg("Stopping. The step that's running now will finish first.");
   });
-
+  // Only the last step again: sends whatever didn't reach the portal
+  resendBtn.addEventListener("click", async () => {
+    if (running) return;
+    running = true;
+    btn.disabled = true;
+    resendBtn.disabled = true;
+    resendBtn.textContent = "Sending…";
+    const li = card.querySelector('[data-step="sync"]');
+    li.className = "is-run";
+    setMsg("Sending to the portal… keep this page open.");
+    try {
+      const res = await callApi({ action: "upload", op: "pcnSync" });
+      if (res.problem) throw new Error(res.problem);
+      li.className = "is-done";
+      li.querySelector('[data-role="t"]').textContent = `${Math.max(1, Math.round((res.ms || 0) / 1000))}s`;
+      resendBtn.hidden = true;
+      setMsg(res.info && res.info.later ? "Another job was running, so the portal gets it at the next sync." : "Done. The portal is up to date.");
+      showToast("Sent to the portal");
+    } catch (err) {
+      li.className = "is-bad";
+      setMsg(errText(err), true);
+    } finally {
+      running = false;
+      btn.disabled = false;
+      resendBtn.disabled = false;
+      resendBtn.textContent = "Send to the portal again";
+      showLast();
+    }
+  });
   btn.addEventListener("click", run);
   showLast();
 }
