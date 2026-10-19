@@ -9530,6 +9530,7 @@ function handleMarketing_(body) {
     if (op === 'block') return mktBlock_(cfg, body, session);
     if (op === 'blockMany') return mktBlockMany_(cfg, body, session);
     if (op === 'unblock') return mktUnblock_(cfg, body, session);
+    if (op === 'testTemplate') return mktTestTemplate_(cfg, body, session);
     if (op === 'link') {   // a test unsubscribe link for a patient
       const p = flowPatient_(cfg, String(body.patientId || ''));
       if (!p || !isEmail_(p.Email)) return { ok: false, error: 'NO_EMAIL' };
@@ -9636,6 +9637,55 @@ function mktUnblock_(cfg, body, session) {
   }
   mktSetConsent_(cfg, pid, true, { by: session.name, byUid: session.uid, source: 'Told staff', note: note, email: email });
   return { ok: true };
+}
+
+/* ---------- Email templates: send a test ---------- */
+// The template's finished email is saved in mkt_templates/{id}.html by the portal. Only {First name} / {Full name}
+// are filled in here, and the footer goes where the template keeps room for it.
+// Pictures are hosted (Firebase Storage), so they're left as they are (not attached).
+
+const MKT_TEMPLATES_ = 'mkt_templates';
+
+function mktPlaceFooter_(html, footer) {
+  const re = /<div data-mkt-footer=""><\/div>/;
+  return re.test(html) ? html.replace(re, function () { return footer; }) : html + footer;
+}
+
+function mktTestTemplate_(cfg, body, session) {
+  const id = String(body.templateId || '');
+  if (!/^[A-Za-z0-9_-]{10,40}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
+  const t = fsGetDoc_(cfg, MKT_TEMPLATES_ + '/' + id);
+  if (!t || t.status === 'archived') return { ok: true, problem: 'This template no longer exists.' };
+  const to = uniq_((Array.isArray(body.to) ? body.to : []).map(mktEmail_).filter(isEmail_)).slice(0, 5);
+  if (!to.length) return { ok: true, problem: 'Add an email address to send it to.' };
+  const raw = String(t.html || '');
+  if (!raw.trim()) return { ok: true, problem: 'The template is empty. Add a block first.' };
+
+  const cache = CacheService.getScriptCache();
+  const rk = 'mkt_test_' + session.uid;
+  const used = Number(cache.get(rk) || 0);
+  if (used + to.length > 30) return { ok: true, problem: "You've sent a lot of tests in the last hour. Try again a bit later." };
+  if (MailApp.getRemainingDailyQuota() < to.length) return { ok: true, problem: "The clinic's daily email limit has been reached. Try again tomorrow." };
+
+  let who = { name: String(session.name || ''), first: String(session.name || '').split(' ')[0] };
+  const pid = String(body.patientId || '').trim();
+  if (pid && recDocIdOk_(pid)) { const p = flowPatient_(cfg, pid); if (p) who = flowWho_(p); }
+  const vals = { 'first name': who.first || 'there', 'full name': who.name || 'there', 'patient name': who.name || '' };
+  const subject = '[Test] ' + (flowFill_(String(t.subject || ''), vals, false).replace(/\s+/g, ' ').trim().slice(0, 190)
+    || 'A message from Dermedica');
+  const filled = sanitizeEmailHtml_(flowFillHtml_(raw, vals));
+  const banner = '<div style="margin:0 auto 12px;max-width:600px;padding:10px 14px;border:1px dashed #f59e0b;border-radius:10px;' +
+    'background:#fffbeb;color:#92400e;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.5">' +
+    '<strong>Test of the template "' + invEsc_(t.name || '') + '".</strong> Filled in as ' + invEsc_(who.name || 'you') +
+    '. The Unsubscribe link at the bottom works, so only press it if you want this address taken off marketing.</div>';
+
+  to.forEach(function (addr) {
+    const html = banner + mktPlaceFooter_(filled, mktFooterHtml_('', addr, 'test'));
+    MailApp.sendEmail({ to: addr, subject: subject, htmlBody: html, body: emailHtmlToText_(html), name: 'Dermedica Clinic' });
+  });
+  cache.put(rk, String(used + to.length), 3600);
+  console.log('Template "' + t.name + '" test sent to ' + to.length + ' address(es) by ' + session.name);
+  return { ok: true, sent: to.length, to: to };
 }
 
 /* ---------- Public: the unsubscribe page (no login, only a signed link) ---------- */

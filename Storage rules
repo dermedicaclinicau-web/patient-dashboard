@@ -38,15 +38,23 @@ service firebase.storage {
     }
 
     match /staff_photos/{folder}/{file} {
-  allow read: if isStaff();
-  allow create: if isStaff()
-    && (request.auth.uid == folder || isAdmin())
-    && request.resource.size < 2 * 1024 * 1024
-    && request.resource.contentType == 'image/jpeg';
-  allow update, delete: if false;
-}
+      allow read: if isStaff();
+      allow create: if isStaff()
+        && (request.auth.uid == folder || isAdmin())
+        && request.resource.size < 2 * 1024 * 1024
+        && request.resource.contentType == 'image/jpeg';
+      allow update, delete: if false;
+    }
 
-
+    match /mkt_images/{file} {
+      allow read: if true;
+      allow create: if request.auth != null
+        && (request.auth.token.get('staffRole', '').lower() == 'admin'
+          || 'marketing.manage' in request.auth.token.get('perms', []))
+        && request.resource.size < 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/(png|jpeg|gif|webp)');
+      allow update, delete: if false;
+    }
     // Photos taken or uploaded while filling in a form. Staff only.
     // Never changed or deleted from a browser (part of the clinical record).
     match /form_photos/{patientId}/{fileName} {

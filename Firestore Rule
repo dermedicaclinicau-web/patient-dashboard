@@ -19,7 +19,7 @@ service cloud.firestore {
       allow read: if request.auth != null;
       allow write: if false; // written by Apps Script only
     }
-    
+
     match /marketing_consent_log/{id} {
       allow read: if request.auth != null;
       allow write: if false;
@@ -28,6 +28,22 @@ service cloud.firestore {
       allow read: if request.auth != null;
       allow write: if false;
     }
+
+    match /mkt_templates/{id} {
+  allow read: if can('marketing.manage');
+  allow create: if can('marketing.manage')
+    && request.resource.data.name is string && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 120
+    && request.resource.data.html is string && request.resource.data.html.size() < 400000
+    && request.resource.data.design is map
+    && request.resource.data.createdByUid == request.auth.uid;
+  allow update: if can('marketing.manage')
+    && request.resource.data.name is string && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 120
+    && request.resource.data.html is string && request.resource.data.html.size() < 400000
+    && request.resource.data.design is map
+    && request.resource.data.createdByUid == resource.data.createdByUid
+    && request.resource.data.updatedByUid == request.auth.uid;
+  allow delete: if false;
+}
 
     // A permission from the login token (Admins have everything)
     function can(p) {

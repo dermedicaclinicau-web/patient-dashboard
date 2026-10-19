@@ -19,6 +19,7 @@ import { renderCountCard } from "./count-card.js";
 import { mountEndOfDaySettings } from "./end-of-day-admin.js";
 import { mountDataUploader } from "./data-uploader.js";
 import { mountMarketing } from "./marketing.js";
+import { mountTemplateBuilder } from "./mkt-templates.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -64,6 +65,12 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
   if (view === "print" && sub) { mountPrintTask(container, { templateId: sub, patientId: parts[2] || "", staff }); return; }
   if (view === "order") { mountOrderRequest(container, { param: sub, staff }); return; }
   if (view === "count") { mountStockCount(container, { param: sub, staff }); return; }
+  if (view === "marketing" && sub === "templates" && parts[2]) {
+    if (!can("marketing.manage")) { container.innerHTML = '<section class="page"><div class="state"><strong>No access</strong>Ask an Admin for Marketing access.</div></section>'; return; }
+    mountTemplateBuilder(container, { id: decodeURIComponent(parts[2]), staff });
+    return;
+  }
+
   if (view === "types" && sub) {
     if (isAdmin) { mountTaskEditor(container, { id: sub, staff }); return; }
     container.innerHTML = '<section class="page"><div class="state"><strong>Admins only</strong>Only admins can edit task types.</div></section>';
@@ -104,7 +111,7 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
   }
   if (view === "marketing") {
     if (!can("marketing.manage")) { main.innerHTML = '<div class="tm-empty">You don\'t have access to Marketing.</div>'; return; }
-    mountMarketing(main);
+    mountMarketing(main, { sub, staff });
     return;
   }
   if (view === "end-of-day") {
