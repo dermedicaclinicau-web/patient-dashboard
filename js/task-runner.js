@@ -16,7 +16,7 @@ import { showToast, formatDobLong, formatMobile } from "./utils.js";
 import { formatChoice, fillTemplate, fillTemplateHtml, emailShell, clinicDetails, EMAIL_RE } from "./task-tokens.js";
 import { createRichEditor } from "./rich-editor.js";
 import { openImagePicker } from "./image-bank.js";
-import { upcomingAppointments, formatUpcoming, apptWhen, apptDetail, niceDay } from "./upcoming-appts.js";
+import { upcomingAppointments, formatUpcoming, upcomingLines, niceDay } from "./upcoming-appts.js";
 import { pickSendTime, fmtSendTime } from "./task-later.js";
 import { listSspRecords } from "./ssp-api.js";
 
@@ -693,10 +693,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     else if (!a.items.length) list = '<p class="tb-none">No upcoming appointments booked. The email will say so.</p>';
     else if (a.source === "sheet") list = `<ul class="tr-appts">${a.items.map((x) => `<li>${esc(x.line)}</li>`).join("")}</ul>`;
     else {
-      list = `<ul class="tr-appts">${a.items.map((x) => {
-        const d = apptDetail(x, opts);
-        return `<li><strong>${esc(apptWhen(x))}</strong>${d ? `<span>${esc(d)}</span>` : ""}</li>`;
-      }).join("")}</ul>`;
+      list = `<ul class="tr-appts">${upcomingLines(a.items, opts).map((h) => `<li>${h}</li>`).join("")}</ul>`;
     }
     const notes = [];
     if (a.status === "" && a.source === "sheet") {

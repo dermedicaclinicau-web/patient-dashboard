@@ -68,11 +68,39 @@ export async function upcomingAppointments(patient, { months = 6 } = {}) {
   return { items, daysFound, lastKey, toKey };
 }
 
+const joinNames = (l) => (l.length < 3 ? l.join(" and ") : `${l.slice(0, -1).join(", ")} and ${l[l.length - 1]}`);
+// Two visits: "A and B". Three or more: "A; B and C" (services already use commas)
+const joinVisits = (l) => (l.length < 3 ? l.join(" and ") : `${l.slice(0, -1).join("; ")} and ${l[l.length - 1]}`);
+
+// One line per day. Visits that day are joined with "and"; "with …" goes once at the end
+// when every visit that day is with the same people, otherwise after each visit.
+export function upcomingLines(items, { services = true, staff = true } = {}, html = true) {
+  const days = [];
+  items.forEach((x) => {
+    const last = days[days.length - 1];
+    if (last && last.dateKey === x.dateKey) last.visits.push(x);
+    else days.push({ dateKey: x.dateKey, visits: [x] });
+  });
+  const e = (s) => (html ? esc(s) : s);
+  return days.map(({ visits }) => {
+    const sig = (v) => [...v.staff].sort().join("|");
+    const sameStaff = visits.every((v) => sig(v) === sig(visits[0]));
+    const parts = visits.map((v, i) => {
+      const when = i === 0 ? apptWhen(v) : v.time;
+      const detail = [services && v.services.join(", "),
+        staff && !sameStaff && v.staff.length && `with ${joinNames(v.staff)}`].filter(Boolean).join(" ");
+      const w = when ? (html ? `<strong>${esc(when)}</strong>` : when) : "";
+      return w + (detail ? `${w ? ": " : ""}${e(detail)}` : "");
+    });
+    const tail = staff && sameStaff && visits[0].staff.length ? ` ${e(`with ${joinNames(visits[0].staff)}`)}` : "";
+    return joinVisits(parts) + tail;
+  });
+}
+
 // The blank's value: bold date and time, then the details. { text } for the subject, { html } for the message.
 export function formatUpcoming(items, opts = {}) {
-  const rows = items.map((x) => ({ when: apptWhen(x), detail: apptDetail(x, opts) }));
   return {
-    text: rows.map((r) => `• ${r.when}${r.detail ? `: ${r.detail}` : ""}`).join("\n"),
-    html: rows.map((r) => `• <strong>${esc(r.when)}</strong>${r.detail ? `: ${esc(r.detail)}` : ""}`).join("<br>"),
+    text: upcomingLines(items, opts, false).map((l) => `• ${l}`).join("\n"),
+    html: upcomingLines(items, opts, true).map((l) => `• ${l}`).join("<br>"),
   };
 }

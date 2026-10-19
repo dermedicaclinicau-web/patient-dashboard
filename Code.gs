@@ -3955,18 +3955,42 @@ function schedUpcomingHtml_(cfg, pid, p, opts) {
   const rows = Object.keys(byTime).map(function (k) { return byTime[k]; })
     .sort(function (x, y) { return x.date.localeCompare(y.date) || x.sort - y.sort; });
   if (!rows.length) return none;
-  return rows.map(function (r) {
-    const m = r.date.split('-').map(Number);
-    const when = Utilities.formatDate(new Date(Date.UTC(m[0], m[1] - 1, m[2], 12)), 'UTC', 'EEE d MMM yyyy') +
-      (r.time ? ', ' + r.time : '');
-    const who = r.staff.length < 3 ? r.staff.join(' and ')
-      : r.staff.slice(0, -1).join(', ') + ' and ' + r.staff[r.staff.length - 1];
-    const detail = [opts.services !== false ? r.services.join(', ') : '',
-      opts.staff !== false && who ? 'with ' + who : ''].filter(Boolean).join(' ');
-    return '• <strong>' + invEsc_(when) + '</strong>' + (detail ? ': ' + invEsc_(detail) : '');
+
+  // One bullet per day. Visits that day are joined with "and"; "with …" goes once at the end
+  // when every visit that day is with the same people.
+  const joinNames = function (list) {
+    return list.length < 3 ? list.join(' and ') : list.slice(0, -1).join(', ') + ' and ' + list[list.length - 1];
+  };
+  const showSvc = opts.services !== false;
+  const showStaff = opts.staff !== false;
+  const byDay = [];
+  rows.forEach(function (r) {
+    const last = byDay[byDay.length - 1];
+    if (last && last.date === r.date) last.visits.push(r);
+    else byDay.push({ date: r.date, visits: [r] });
+  });
+
+  return byDay.map(function (d) {
+    const m = d.date.split('-').map(Number);
+    const dayText = Utilities.formatDate(new Date(Date.UTC(m[0], m[1] - 1, m[2], 12)), 'UTC', 'EEE d MMM yyyy');
+    const who = function (v) { return v.staff.slice().sort().join('|'); };
+    const sameStaff = d.visits.every(function (v) { return who(v) === who(d.visits[0]); });
+
+    const parts = d.visits.map(function (v, i) {
+      const when = i === 0 ? dayText + (v.time ? ', ' + v.time : '') : v.time;
+      const bits = [];
+      if (showSvc && v.services.length) bits.push(invEsc_(v.services.join(', ')));
+      if (showStaff && !sameStaff && v.staff.length) bits.push('with ' + invEsc_(joinNames(v.staff)));
+      const whenHtml = when ? '<strong>' + invEsc_(when) + '</strong>' : '';
+      return whenHtml + (bits.length ? (whenHtml ? ': ' : '') + bits.join(' ') : '');
+    });
+
+    // Two visits: "A and B". Three or more: "A; B and C" (services already use commas)
+    let line = parts.length < 3 ? parts.join(' and ') : parts.slice(0, -1).join('; ') + ' and ' + parts[parts.length - 1];
+    if (showStaff && sameStaff && d.visits[0].staff.length) line += ' with ' + invEsc_(joinNames(d.visits[0].staff));
+    return '• ' + line;
   }).join('<br>');
 }
-
 
 // appts_by_day documents from one date to another
 function schedApptDays_(cfg, fromKey, toKey) {
@@ -10742,17 +10766,26 @@ function pfBlocked_(fields) {
   });
 }
 
-function pfLoad_(cfg, tok) {
-  const tpl = fsGetDoc_(cfg, 'form_templates/' + tok.tid);
+// The template and the patient (and anything in extraPaths) in ONE Firestore request
+function pfLoad_(cfg, tok, extraPaths) {
+  const tPath = 'form_templates/' + tok.tid;
+  const pPath = tok.pid ? 'patient_list/' + tok.pid : '';
+  const got = fsBatchGet_(cfg, [tPath].concat(pPath ? [pPath] : [], extraPaths || []));
+  const tpl = got[tPath];
   if (!tpl || tpl.status !== 'live' || !(tpl.online && tpl.online.on === true) || PF_NO_CATS_.indexOf(tpl.category) !== -1 ||
       !Number(tpl.version)) return { problem: 'UNAVAILABLE' };
   const ver = pfCached_('pf_ver_' + tok.tid + '_' + Number(tpl.version), 21600, function () {
     return fsGetDoc_(cfg, 'form_templates/' + tok.tid + '/versions/' + Number(tpl.version));
   });
   if (!ver || !Array.isArray(ver.fields) || pfBlocked_(ver.fields)) return { problem: 'UNAVAILABLE' };
-  const doc = tok.pid ? flowPatient_(cfg, tok.pid) : null;
-  if (tok.pid && !doc) return { problem: 'NO_PATIENT' };
-  return { tpl: tpl, ver: ver, doc: doc, test: !tok.pid || tok.cid === 'test' };
+  let doc = null;
+  if (tok.pid) {
+    doc = got[pPath] || null;
+    if (doc && !doc.MergedInto) doc._id = tok.pid;
+    else doc = flowPatient_(cfg, tok.pid);   // merged (or not found by ID): follow it the slow way
+    if (!doc) return { problem: 'NO_PATIENT' };
+  }
+  return { tpl: tpl, ver: ver, doc: doc, test: !tok.pid || tok.cid === 'test', got: got };
 }
 
 // Only the details this form uses (never Medicare)
@@ -10891,12 +10924,22 @@ function handlePublicForm_(body) {
   if (n >= 60) return { ok: true, problem: 'BUSY' };
   cache.put(rk, String(n + 1), 3600);
   try {
+    const t0 = Date.now();
     const cfg = getConfig_();
-    const L = pfLoad_(cfg, tok);
-    if (L.problem) return { ok: true, problem: L.problem };
     const op = String(body.op || '');
     const picks = pfPicks_(body.picks);
-    if (op === 'get') return pfGet_(cfg, tok, L, picks);
+    const test = !tok.pid || tok.cid === 'test';
+    // "get" also needs the letterhead and the "already sent" check: read with the template and patient
+    const extra = op === 'get'
+      ? ['form_settings/letterhead'].concat(test ? [] : [PF_DONE_ + '/' + pfDoneKey_(tok, picks)])
+      : [];
+    const L = pfLoad_(cfg, tok, extra);
+    if (L.problem) return { ok: true, problem: L.problem };
+    if (op === 'get') {
+      const r = pfGet_(cfg, tok, L, picks);
+      console.log('Online form get: ' + (Date.now() - t0) + ' ms');
+      return r;
+    }
     if (op === 'images') return pfImages_(cfg, L);
     if (op === 'submit') return pfSubmit_(cfg, tok, L, body, picks);
     return { ok: false, error: 'BAD_REQUEST' };
@@ -10907,13 +10950,11 @@ function handlePublicForm_(body) {
 }
 
 function pfGet_(cfg, tok, L, picks) {
-  if (!L.test && fsGetDoc_(cfg, PF_DONE_ + '/' + pfDoneKey_(tok, picks))) return { ok: true, done: true };  // Pictures are fetched separately (op "images"), so the form shows without waiting for them
-  const ids = uniq_(L.ver.fields
+  if (!L.test && L.got[PF_DONE_ + '/' + pfDoneKey_(tok, picks)]) return { ok: true, done: true };
+    const ids = uniq_(L.ver.fields
     .filter(function (f) { return f && f.type === 'image' && f.fileId; })
     .map(function (f) { return String(f.fileId); }));
-  let lh = null;
-  try { lh = pfCached_('pf_lh_v1', 600, function () { return fsGetDoc_(cfg, 'form_settings/letterhead'); }); }
-  catch (e) { /* the page shows the form without it */ }
+  const lh = L.got['form_settings/letterhead'] || null;
   return {
     ok: true, test: L.test,
     form: { name: String(L.ver.name || ''), fields: L.ver.fields, settings: L.ver.settings || {}, version: Number(L.tpl.version) },
@@ -11062,4 +11103,24 @@ function pfNotify_(cfg, L, sub, subId) {
       taskId: '', taskName: 'Online form', runId: subId, by: 'Online form', byUid: '',
     });
   }
+}
+
+// Every 5 minutes in the day: wakes the web app so patients opening a form don't wait for it to start up
+function keepWarm() {
+  const url = mktWebAppUrl_();
+  if (!url) return;
+  const h = Number(Utilities.formatDate(new Date(), 'Australia/Perth', 'H'));
+  if (h < 7 || h >= 21) return;   // nobody's opening forms overnight
+  try { UrlFetchApp.fetch(url + '?warm=1', { muteHttpExceptions: true, followRedirects: true }); }
+  catch (e) { /* not essential */ }
+}
+
+// Run ONCE from the editor
+function installKeepWarm() {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return t.getHandlerFunction() === 'keepWarm'; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('keepWarm').timeBased().everyMinutes(5).create();
+  keepWarm();
+  console.log('Keep-warm installed (every 5 minutes, 7 am to 9 pm Perth).');
 }
