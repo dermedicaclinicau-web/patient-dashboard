@@ -17,6 +17,7 @@ import {
   esc, safeUrl, uid, BLOCKS, FONTS, MERGE_TAGS, STARTERS, styleOf, cleanDesign, newBlock, blockHtml, renderEmail,
   footerPreview, checkDesign,
 } from "./mkt-email.js";
+import { openCropper } from "./mkt-crop.js";
 
 const COL = "mkt_templates";
 const EMAIL_RE = /[^\s@,;<>"']+@[^\s@,;<>"']+\.[^\s@,;<>"']+/g;
@@ -49,6 +50,10 @@ const ICONS = {
   divider: ic('<line x1="3" y1="12" x2="21" y2="12"/>'),
   spacer: ic('<path d="M12 4v16M8 8l4-4 4 4M8 16l4 4 4-4"/>'),
   social: ic('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.6 13.5l6.8 4M15.4 6.5l-6.8 4"/>'),
+  buttons: ic('<rect x="2" y="9" width="9" height="6" rx="3"/><rect x="13" y="9" width="9" height="6" rx="3"/>'),
+  imagetext: ic('<rect x="3" y="5" width="8" height="8" rx="1.5"/><line x1="14" y1="7" x2="21" y2="7"/><line x1="14" y1="11" x2="21" y2="11"/><line x1="3" y1="17" x2="21" y2="17"/>'),
+  quote: ic('<path d="M7 7h4v4H8a3 3 0 0 0 3 3v2a5 5 0 0 1-5-5zM14 7h4v4h-3a3 3 0 0 0 3 3v2a5 5 0 0 1-5-5z"/>'),
+  offer: ic('<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>'),
   up: ic('<polyline points="18 15 12 9 6 15"/>'),
   down: ic('<polyline points="6 9 12 15 18 9"/>'),
   copy: ic('<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>'),
@@ -57,8 +62,9 @@ const ICONS = {
 };
 // The palette, grouped like Form Builder's
 const PAL = [
-  ["Text", ["heading", "text", "button"]],
-  ["Pictures and products", ["image", "product", "columns"]],
+  ["Text", ["heading", "text", "quote"]],
+  ["Buttons", ["button", "buttons"]],
+  ["Pictures and products", ["image", "imagetext", "product", "columns", "offer"]],
   ["Layout", ["header", "divider", "spacer", "social"]],
 ];
 
@@ -155,11 +161,11 @@ async function bankUrl(bankId) {
   await remember(bankId, url).catch((err) => console.warn("Picture link not remembered:", err));
   return url;
 }
-// { src, name } or null if cancelled
+// { src, name, bankId } or null if cancelled
 async function pickPicture(staff) {
   const img = await openImagePicker({ isAdmin: isAdminOf(staff) });
   if (!img) return null;
-  return { src: await bankUrl(img.id), name: img.name || "" };
+  return { src: await bankUrl(img.id), name: img.name || "", bankId: img.id };
 }
 async function uploadPicture(file) {
   if (!/^image\/(png|jpe?g|gif|webp)$/i.test(file.type)) throw new Error("Choose a picture (JPG, PNG, GIF or WebP).");
@@ -167,8 +173,9 @@ async function uploadPicture(file) {
   let saved = null;
   try { saved = await bankUpload("", file); } catch (err) { throw new Error(bankError(err)); }
   const url = await hostBlob(await shrink(file));
-  if (saved && saved.image && saved.image.id) await remember(saved.image.id, url).catch(() => {});
-  return { src: url, name: (saved && saved.image && saved.image.name) || file.name };
+  const bankId = (saved && saved.image && saved.image.id) || "";
+  if (bankId) await remember(bankId, url).catch(() => {});
+  return { src: url, name: (saved && saved.image && saved.image.name) || file.name, bankId };
 }
 
 let sspCache = null;
@@ -332,10 +339,17 @@ const fImage = (k, label, v, n = "") => `<div class="fe-insp-field"><span class=
   ${safeUrl(v) ? `<div class="fe-img-pick"><span class="fe-img-thumb mb-thumb"><img src="${esc(v)}" alt="" /></span></div>` : ""}
   <div class="fe-img-btns">
     <button type="button" class="lh-btn" data-pick="${k}">${v ? "Change" : "Choose from Image Bank"}</button>
+    ${v ? `<button type="button" class="lh-btn" data-crop="${k}">Crop</button>` : ""}
     <label class="lh-btn">Upload from computer<input type="file" data-upload="${k}" accept="image/png,image/jpeg,image/webp,image/gif" hidden /></label>
     ${v ? `<button type="button" class="lh-btn is-quiet" data-reset="${k}">Remove</button>` : ""}
   </div>
   <small class="fe-note">${n || "Uploads are saved into the Image Bank so you can reuse them."}</small></div>`;
+// Rounded corners, circle and border (the whole block's pictures)
+const fShape = (b, label = "Picture shape") => `<div class="fe-insp-field"><span class="fe-insp-label mb-colh">${label}</span></div>` +
+  fRange("radius", "Rounded corners", Number(b.radius) || 0, 0, 48, "px") +
+  fCheck("circle", "Circle (crop it to Square first)", b.circle) +
+  fRange("border", "Border", Number(b.border) || 0, 0, 8, "px") +
+  fColor("borderColor", "Border colour", b.borderColor, "#e2e8f0", false);
 const fRich = (k, label) => `<div class="fe-insp-field"><span class="fe-insp-label">${label}</span><div data-rt="${k}"></div></div>`;
 const tagChips = () => `<div class="fe-insp-field"><span class="fe-insp-label">Insert a tag</span>
   <div class="fe-chiprow">${MERGE_TAGS.map(([tag, help]) =>
@@ -505,24 +519,47 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       case "heading": return fArea("text", "Heading", b.text) + tagChips() +
         fSeg("size", "Size", [["large", "Large"], ["medium", "Medium"], ["small", "Small"]], b.size) + fAlign(b.align);
       case "text": return fRich("html", "Text") + tagChips() + fAlign(b.align);
-      case "image": return fImage("src", "Picture", b.src, "Wide pictures look best. Uploads are saved into the Image Bank.") +
+      case "quote": return fArea("text", "Quote", b.text) + fText("name", "Who said it (optional)", b.name, "Sarah, patient") +
+        tagChips() + fColor("bg", "Background", b.bg, "#f8fafc") + fAlign(b.align);
+      case "image": return fImage("src", "Picture", b.src, "Wide pictures look best. Crop to change the shape.") +
         fText("alt", "Describe the picture", b.alt, "", "Read out by screen readers, and shown if pictures are blocked.") +
+        fText("caption", "Caption (optional)", b.caption, "Shown under the picture") +
         fText("href", "Link (optional)", b.href, "https://") +
         fCheck("edge", "Edge to edge (no side margins)", b.edge) +
-        (b.edge ? "" : fRange("width", "Width", b.width, 20, 100, "%") + fAlign(b.align));
+        (b.edge ? "" : fRange("width", "Width", b.width, 20, 100, "%") + fAlign(b.align) + fShape(b));
+      case "imagetext": return fImage("src", "Picture", b.src) +
+        fText("alt", "Describe the picture", b.alt) +
+        fSeg("side", "Picture on the", [["left", "Left"], ["right", "Right"]], b.side) + fShape(b) +
+        fText("title", "Title", b.title) + fRich("html", "Text") +
+        fText("label", "Button text (optional)", b.label) + fText("btnHref", "Button link", b.btnHref, "https://") +
+        fText("href", "Picture link (optional)", b.href, "https://") + tagChips() +
+        '<p class="fe-note fe-pad">On phones the text goes under the picture.</p>';
       case "button": return fText("label", "Button text", b.label) + tagChips() + fText("href", "Link", b.href, "https://dermedica.com.au/book") +
         `<div class="fe-two">${fColor("bg", "Button colour", b.bg, st.accent)}${fColor("color", "Text colour", b.color, "#ffffff")}</div>` +
         fAlign(b.align) + fCheck("full", "Full width", b.full);
+      case "buttons": return b.items.map((it, i) => `<div class="fe-insp-field mb-subhead"><span class="fe-insp-label mb-colh">Button ${i + 1}</span>${
+          b.items.length > 1 ? `<button type="button" class="lh-btn is-quiet" data-btn-del="${i}">Remove</button>` : ""}</div>` +
+          fText(`items.${i}.label`, "Text", it.label) + fText(`items.${i}.href`, "Link", it.href, "https://") +
+          fSeg(`items.${i}.style`, "Style", [["filled", "Filled"], ["outline", "Outline"]], it.style)).join("") +
+        (b.items.length < 3 ? '<button type="button" class="lh-btn mb-addbtn" data-act="btn-add">+ Add a button</button>' : "") +
+        tagChips() +
+        `<div class="fe-two">${fColor("bg", "Button colour", b.bg, st.accent)}${fColor("color", "Text colour", b.color, "#ffffff")}</div>` +
+        fAlign(b.align) + fCheck("same", "Make them the same width", b.same) +
+        '<p class="fe-note fe-pad">On phones they go one under the other if there isn\'t room side by side.</p>';
       case "product": return setting("Fill in from the Skin Script catalogue",
           `<select class="fb-select" data-act="catalogue"><option value="">${sspCache ? "Choose a product…" : "Loading the catalogue…"}</option>${
             (sspCache || []).map((p) => `<option value="${esc(p.id)}">${esc(p.name)}${p.size ? ` · ${esc(p.size)}` : ""}</option>`).join("")}</select>`) +
-        fImage("src", "Picture", b.src) + fText("name", "Name", b.name) + fText("price", "Price (optional)", b.price, "$89") +
+        fImage("src", "Picture", b.src) + fShape(b) + fText("name", "Name", b.name) + fText("price", "Price (optional)", b.price, "$89") +
         fArea("desc", "Description", b.desc) + fText("label", "Button text (optional)", b.label) + fText("href", "Link", b.href, "https://");
       case "columns": return [0, 1].map((i) => `<div class="fe-insp-field"><span class="fe-insp-label mb-colh">${i ? "Right" : "Left"} column</span></div>` +
         fImage(`items.${i}.src`, "Picture (optional)", b.items[i].src) + fText(`items.${i}.title`, "Title", b.items[i].title) +
         fRich(`items.${i}.html`, "Text") + fText(`items.${i}.label`, "Button text (optional)", b.items[i].label) +
         fText(`items.${i}.href`, "Button link", b.items[i].href, "https://")).join("") + tagChips() +
+        fShape(b, "Picture shape (both columns)") +
         '<p class="fe-note fe-pad">On phones the right column goes under the left one.</p>';
+      case "offer": return fText("title", "Headline", b.title, "20% off") + fArea("text", "Details", b.text, "Your next skin treatment") +
+        fText("code", "Code (optional)", b.code, "GLOW20") + fText("note", "Small print (optional)", b.note, "Ends 31 October") +
+        tagChips() + fColor("bg", "Background", b.bg, "#f0fdfa");
       case "divider": return fColor("color", "Line colour", b.color, "#e2e8f0", false);
       case "spacer": return fRange("size", "Height", b.size, 4, 120, "px");
       case "social": return fText("facebook", "Facebook", b.facebook, "https://facebook.com/…") +
@@ -532,8 +569,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
     }
     return "";
   }
-
-  // Form Builder's text editor in the settings panel (Text blocks and the two columns)
+    // Form Builder's text editor in the settings panel (Text blocks and the two columns)
   function mountEditors() {
     side.querySelectorAll("[data-rt]").forEach((host) => {
       const key = host.dataset.rt;
@@ -560,6 +596,45 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
     }
   }
   const select = (bid) => { if (sel === bid) return; sel = bid; drawCanvas(); drawSide(); };
+  // A new picture forgets the old crop, and remembers its Image Bank original (for cropping later)
+  const setPicture = (tgt, key, p) => {
+    setPath(tgt, key, p.src);
+    setPath(tgt, `${key}Bank`, p.bankId || "");
+    setPath(tgt, `${key}Crop`, null);
+    if (key === "src" && !tgt.alt) tgt.alt = String(p.name || "").replace(/\.[^.]+$/, "");
+  };
+
+  // Crops from the original (the Image Bank picture), so cropping again never loses quality
+  async function cropPicture(tgt, key, btn) {
+    const bankId = getPath(tgt, `${key}Bank`);
+    btn.disabled = true;
+    let blob;
+    try {
+      const from = bankId ? await bankImage(bankId) : getPath(tgt, key);
+      blob = await (await fetch(from)).blob();
+    } catch (err) {
+      console.error("Picture for cropping failed:", err);
+      showToast("Couldn't load this picture to crop. Choose it again from the Image Bank, then crop it.");
+      if (btn.isConnected) btn.disabled = false;
+      return;
+    }
+    if (btn.isConnected) btn.disabled = false;
+    let out;
+    try { out = await openCropper(blob, getPath(tgt, `${key}Crop`)); }
+    catch (err) { showToast(err.message); return; }
+    if (!out) return;
+    try {
+      showToast("Saving the cropped picture…");
+      setPath(tgt, key, await hostBlob(out.blob));
+      setPath(tgt, `${key}Crop`, out.state);
+      drawSide();
+      changed();
+      showToast("Picture cropped");
+    } catch (err) {
+      console.error("Cropped picture not saved:", err);
+      showToast(errText(err, "Couldn't save the cropped picture."));
+    }
+  }
 
   /* ---------- Blocks: add, move, copy, delete ---------- */
   function insertBlock(type, at) {
@@ -663,7 +738,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       const tgt = target();
       const key = el.dataset.upload;
       uploadPicture(f)
-        .then((p) => { setPath(tgt, key, p.src); if (key === "src" && !tgt.alt) tgt.alt = p.name.replace(/\.[^.]+$/, ""); drawSide(); changed(); showToast("Picture added"); })
+        .then((p) => { setPicture(tgt, key, p); drawSide(); changed(); showToast("Picture added"); })
         .catch((err) => { console.error("Upload failed:", err); showToast(errText(err, "Couldn't upload that picture.")); });
       return;
     }
@@ -711,6 +786,21 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       el.dispatchEvent(new Event("input", { bubbles: true }));
       return;
     }
+
+    const cr = e.target.closest("[data-crop]");
+    if (cr) { cropPicture(target(), cr.dataset.crop, cr); return; }
+    if (e.target.closest('[data-act="btn-add"]')) {
+      const b = selBlock();
+      if (b && b.items.length < 3) { b.items.push({ label: "Button", href: "", style: "filled" }); drawSide(); changed(); }
+      return;
+    }
+    const bd = e.target.closest("[data-btn-del]");
+    if (bd) {
+      const b = selBlock();
+      if (b && b.items.length > 1) { b.items.splice(Number(bd.dataset.btnDel), 1); drawSide(); changed(); }
+      return;
+    }
+    
     if (e.target.closest('[data-act="done"]')) { sel = null; drawCanvas(); drawSide(); return; }
     if (e.target.closest('[data-act="remove"]')) { if (sel) blockTool("del", sel); return; }
     const reset = e.target.closest("[data-reset]");
@@ -723,8 +813,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       pickPicture(staff)
         .then((p) => {
           if (!p) return;
-          setPath(tgt, key, p.src);
-          if (key === "src" && !tgt.alt) tgt.alt = p.name.replace(/\.[^.]+$/, "");
+          setPicture(tgt, key, p);
           drawSide();
           changed();
         })

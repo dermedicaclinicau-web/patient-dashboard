@@ -6862,3 +6862,21 @@ a.md-quiet:hover { border-color: var(--primary); }
 .mc-links td:nth-child(2) { width: 80px; font-variant-numeric: tabular-nums; font-weight: 600; }
 .mc-rules-hint { margin: 8px 0 0; }
 .mc-track { margin: 12px 0 2px; }
+
+/* Email builder: extra blocks */
+.mb-subhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.mb-addbtn { margin: 2px 0 12px; }
+
+/* Crop dialog */
+.mcrop-dlg { width: min(640px, 96vw); }
+.mcrop-ratios { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.mcrop-ratios .ch-chip.is-on { background: #0f766e; border-color: #0f766e; color: #fff; }
+.mcrop-wrap { display: flex; justify-content: center; padding: 14px; background: #0f172a; border-radius: 12px; }
+.mcrop-frame { position: relative; overflow: hidden; cursor: grab; touch-action: none; user-select: none;
+  outline: 2px solid rgba(255, 255, 255, 0.9); }
+.mcrop-frame.is-drag { cursor: grabbing; }
+.mcrop-frame img { position: absolute; top: 0; left: 0; max-width: none; pointer-events: none; }
+.mcrop-frame.is-square::after { content: ""; position: absolute; inset: 0; border-radius: 50%; pointer-events: none;
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.55); }
+.mcrop-zoom { display: flex; align-items: center; gap: 10px; margin: 12px 0 0; }
+.mcrop-zoom input { flex: 1; }
