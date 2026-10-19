@@ -15,7 +15,7 @@ import { createRichEditor } from "./rich-editor.js";
 import { makeResizable } from "./panel-resize.js";
 import {
   esc, safeUrl, uid, BLOCKS, FONTS, MERGE_TAGS, STARTERS, styleOf, cleanDesign, newBlock, blockHtml, renderEmail,
-  footerPreview, checkDesign,
+  footerPreview, checkDesign, CUSTOM_PIECES, customNotes,
 } from "./mkt-email.js";
 import { openCropper } from "./mkt-crop.js";
 import { listPublishedForms } from "./form-templates.js";
@@ -55,6 +55,7 @@ const ICONS = {
   imagetext: ic('<rect x="3" y="5" width="8" height="8" rx="1.5"/><line x1="14" y1="7" x2="21" y2="7"/><line x1="14" y1="11" x2="21" y2="11"/><line x1="3" y1="17" x2="21" y2="17"/>'),
   quote: ic('<path d="M7 7h4v4H8a3 3 0 0 0 3 3v2a5 5 0 0 1-5-5zM14 7h4v4h-3a3 3 0 0 0 3 3v2a5 5 0 0 1-5-5z"/>'),
   offer: ic('<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>'),
+  html: ic('<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>'),
   up: ic('<polyline points="18 15 12 9 6 15"/>'),
   down: ic('<polyline points="6 9 12 15 18 9"/>'),
   copy: ic('<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>'),
@@ -66,7 +67,7 @@ const PAL = [
   ["Text", ["heading", "text", "quote"]],
   ["Buttons", ["button", "buttons"]],
   ["Pictures and products", ["image", "imagetext", "product", "columns", "offer"]],
-  ["Layout", ["header", "divider", "spacer", "social"]],
+  ["Layout", ["header", "divider", "spacer", "social", "html"]],
 ];
 
 function openDialog(html, cls = "") {
@@ -379,6 +380,25 @@ const tagChips = () => `<div class="fe-insp-field"><span class="fe-insp-label">I
     `<button type="button" class="fe-ins is-field" data-taginsert="${esc(tag)}" title="${esc(help)}">${esc(tag)}</button>`).join("")}</div>
   <small class="fe-note">Click in a box first, then a tag. It's filled in with each patient's details when the email is sent.</small></div>`;
 
+  // Puts text where the cursor is in a code box, as if it was typed
+function insertText(ta, text) {
+  const s = ta.selectionStart ?? ta.value.length;
+  const e = ta.selectionEnd ?? s;
+  ta.value = ta.value.slice(0, s) + text + ta.value.slice(e);
+  ta.focus();
+  ta.setSelectionRange(s + text.length, s + text.length);
+  ta.dispatchEvent(new Event("input", { bubbles: true }));
+}
+const htmlNotes = (b) => {
+  const n = customNotes(b.code, b.pad !== false);
+  return n.length ? `<ul class="mb-htmlnotes">${n.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>`
+    : '<p class="mb-htmlok">Looks email-safe.</p>';
+};
+const picTag = (p) => `<img src="${esc(p.src)}" alt="${esc(String(p.name || "").replace(/\.[^.]+$/, ""))}" width="536" ` +
+  'style="display:block;width:100%;max-width:536px;height:auto;border:0;border-radius:8px;">\n';
+const pieceOptions = () => CUSTOM_PIECES.map(([g, list]) => `<optgroup label="${esc(g)}">${list.map(([k, l]) =>
+  `<option value="${esc(k)}">${esc(l)}</option>`).join("")}</optgroup>`).join("");
+
 export async function mountTemplateBuilder(container, { id, staff = null } = {}) {
   const backHref = builderBack();
   const backLink = `<a class="back-link" href="${esc(backHref)}">← ${backHref === "#/forms" ? "Form Builder"
@@ -585,6 +605,14 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
         tagChips() + fColor("bg", "Background", b.bg, "#f0fdfa");
       case "divider": return fColor("color", "Line colour", b.color, "#e2e8f0", false);
       case "spacer": return fRange("size", "Height", b.size, 4, 120, "px");
+      case "html": return fCheck("pad", "Side margins (turn off for designs 600px wide)", b.pad !== false) +
+        `<div class="fe-insp-field"><span class="fe-insp-label">HTML</span>
+          <textarea class="fe-input mb-code" data-k="code" rows="12" spellcheck="false" aria-label="HTML">${esc(b.code)}</textarea>
+          <div class="mb-row mb-code-acts">
+            <button type="button" class="lh-btn is-primary" data-act="html-big">Open the big editor</button>
+            <select class="fb-select" data-act="snip" aria-label="Add a piece"><option value="">Add a piece…</option>${pieceOptions()}</select>
+          </div></div>` +
+        tagChips() + `<div class="fe-insp-field"><span class="fe-insp-label">Checks</span><div data-role="htmlnotes">${htmlNotes(b)}</div></div>`;
       case "social": return fText("facebook", "Facebook", b.facebook, "https://facebook.com/…") +
         fText("instagram", "Instagram", b.instagram, "https://instagram.com/…") + fText("tiktok", "TikTok", b.tiktok, "https://tiktok.com/@…") +
         fText("website", "Website", b.website, "https://dermedica.com.au") + fAlign(b.align) +
@@ -660,6 +688,136 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       console.error("Cropped picture not saved:", err);
       showToast(errText(err, "Couldn't save the cropped picture."));
     }
+  }
+  /* ---------- Custom HTML ---------- */
+  const pieceCode = (key) => {
+    for (const [, list] of CUSTOM_PIECES) {
+      const p = list.find((x) => x[0] === key);
+      if (p) return p[2](styleOf(t.design)) + "\n";
+    }
+    return "";
+  };
+  const drawHtmlNotes = () => {
+    const box = side.querySelector('[data-role="htmlnotes"]');
+    const b = selBlock();
+    if (box && b && b.type === "html") box.innerHTML = htmlNotes(b);
+  };
+  // The block on its own, in the email's colours, kept apart from the portal's styles
+  const previewDoc = (b) => {
+    const st = styleOf(t.design);
+    return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>` +
+      `<body style="margin:0;padding:16px 8px;background:${st.bg};">` +
+      `<table role="presentation" align="center" width="100%" cellpadding="0" cellspacing="0" border="0" ` +
+      `style="width:100%;max-width:600px;margin:0 auto;background:${st.body};border-radius:12px;"><tr><td style="padding:0;">` +
+      `${blockHtml(b, st, true)}</td></tr></table></body></html>`;
+  };
+
+  function openHtmlEditor(b) {
+    const orig = b.code;
+    const st = styleOf(t.design);
+    const dlg = openDialog(`
+      <div class="ch-wrap">
+        <div class="ch-head">
+          <div><h3>Custom HTML</h3><p class="muted">Changes save as you type. Pieces go in where your cursor is.</p></div>
+          <div class="ch-head-acts">
+            <label class="lh-btn">Open an .html file<input type="file" data-ch="file" accept=".html,.htm,text/html" hidden /></label>
+            <button type="button" class="lh-btn is-quiet" data-ch="undo">Undo my changes</button>
+            <button type="button" class="lh-btn is-primary" data-ch="done">Done</button>
+          </div>
+        </div>
+        <div class="ch-pal">
+          ${CUSTOM_PIECES.map(([g, list]) => `<div class="ch-pal-row"><span>${esc(g)}</span>${list.map(([k, l]) =>
+            `<button type="button" class="ch-chip" data-piece="${esc(k)}">${esc(l)}</button>`).join("")}</div>`).join("")}
+          <div class="ch-pal-row"><span>Insert</span>
+            <button type="button" class="ch-chip" data-ch="pic">Picture from Image Bank</button>
+            <label class="ch-chip">Upload a picture<input type="file" data-ch="upload" accept="image/png,image/jpeg,image/webp,image/gif" hidden /></label>
+            ${[["accent", "Accent"], ["text", "Text"], ["body", "Email background"], ["bg", "Page background"]].map(([k, l]) =>
+              `<button type="button" class="ch-chip ch-sw" data-color="${esc(st[k])}" title="Insert ${esc(st[k])}"><i style="background:${esc(st[k])}"></i>${esc(l)}</button>`).join("")}
+            ${MERGE_TAGS.map(([tag, help]) => `<button type="button" class="ch-chip is-tag" data-tag="${esc(tag)}" title="${esc(help)}">${esc(tag)}</button>`).join("")}
+          </div>
+        </div>
+        <div class="ch-split">
+          <textarea class="ch-code" spellcheck="false" aria-label="HTML"></textarea>
+          <div class="ch-prev">
+            <div class="pt-tabs ch-dev" role="group" aria-label="Preview size">
+              <button type="button" class="active" data-chdev="desktop">Desktop</button>
+              <button type="button" data-chdev="mobile">Mobile</button>
+            </div>
+            <iframe class="ch-frame" sandbox="" title="Preview"></iframe>
+          </div>
+        </div>
+        <div class="ch-notes" data-role="chnotes"></div>
+      </div>`, "ch-dlg");
+    const ta = dlg.querySelector(".ch-code");
+    const frame = dlg.querySelector(".ch-frame");
+    const notes = dlg.querySelector('[data-role="chnotes"]');
+    let pt = 0;
+    const preview = () => { frame.srcdoc = previewDoc(b); notes.innerHTML = htmlNotes(b); };
+    const update = () => { b.code = ta.value; changed(); clearTimeout(pt); pt = setTimeout(preview, 300); };
+    ta.value = b.code || "";
+    ta.addEventListener("input", update);
+    ta.addEventListener("keydown", (e) => { if (e.key === "Tab" && !e.shiftKey) { e.preventDefault(); insertText(ta, "  "); } });
+    dlg.addEventListener("mousedown", (e) => { if (e.target.closest("[data-piece], [data-color], [data-tag]")) e.preventDefault(); });
+
+    dlg.addEventListener("click", async (e) => {
+      const pc = e.target.closest("[data-piece]");
+      if (pc) { insertText(ta, pieceCode(pc.dataset.piece)); return; }
+      const c = e.target.closest("[data-color]");
+      if (c) { insertText(ta, c.dataset.color); return; }
+      const tg = e.target.closest("[data-tag]");
+      if (tg) { insertText(ta, tg.dataset.tag); return; }
+      const dv = e.target.closest("[data-chdev]");
+      if (dv) {
+        frame.classList.toggle("is-mobile", dv.dataset.chdev === "mobile");
+        dlg.querySelectorAll("[data-chdev]").forEach((x) => x.classList.toggle("active", x === dv));
+        return;
+      }
+      const act = e.target.closest("button[data-ch]");
+      if (!act) return;
+      if (act.dataset.ch === "done") { dlg.close(); return; }
+      if (act.dataset.ch === "undo") {
+        if (ta.value === orig) return;
+        if (!(await confirmDialog({ title: "Undo your changes?", message: "The HTML goes back to how it was when you opened this editor.",
+          confirmLabel: "Undo changes", tone: "warning" }))) return;
+        ta.value = orig;
+        update();
+        return;
+      }
+      if (act.dataset.ch === "pic") {
+        act.disabled = true;
+        try { const p = await pickPicture(staff); if (p) insertText(ta, picTag(p)); }
+        catch (err) { console.error("Picture failed:", err); showToast(errText(err, "Couldn't use that picture.")); }
+        finally { act.disabled = false; }
+      }
+    });
+
+    dlg.addEventListener("change", async (e) => {
+      const el = e.target;
+      const f = el.files && el.files[0];
+      if (!f) return;
+      el.value = "";
+      if (el.dataset.ch === "upload") {
+        try { insertText(ta, picTag(await uploadPicture(f))); showToast("Picture added"); }
+        catch (err) { console.error("Upload failed:", err); showToast(errText(err, "Couldn't upload that picture.")); }
+        return;
+      }
+      if (el.dataset.ch === "file") {
+        if (f.size > 1024 * 1024) { showToast("That file is over 1 MB. Its pictures need to be links, not embedded."); return; }
+        const text = await f.text();
+        if (ta.value.trim() && !(await confirmDialog({ title: "Replace the HTML?",
+          message: `What's in this block now is replaced by ${f.name}.`, confirmLabel: "Replace", tone: "warning" }))) return;
+        ta.value = text;
+        if (b.pad !== false && /width\s*[:=]\s*["']?6\d\d/i.test(text)) {
+          b.pad = false;
+          showToast("Side margins turned off, so the 600px design fits.");
+        }
+        update();
+      }
+    });
+
+    dlg.addEventListener("close", () => { clearTimeout(pt); b.code = ta.value; drawCanvas(); drawSide(); });
+    preview();
+    ta.focus();
   }
 
   /* ---------- Blocks: add, move, copy, delete ---------- */
@@ -753,6 +911,11 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       if (out) out.textContent = el.value + el.dataset.out;
     }
     changed();
+    if (k === "code") drawHtmlNotes();
+  });
+  // Tab in a code box makes a space instead of moving on (Shift+Tab still moves on)
+  side.addEventListener("keydown", (e) => {
+    if (e.key === "Tab" && !e.shiftKey && e.target.matches("textarea.mb-code")) { e.preventDefault(); insertText(e.target, "  "); }
   });
   side.addEventListener("change", (e) => {
     if (e.target.closest(".re")) return;
@@ -779,6 +942,13 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       });
       drawSide();
       changed();
+      return;
+    }
+    if (el.matches('[data-act="snip"]')) {
+      const code = pieceCode(el.value);
+      el.value = "";
+      const ta = side.querySelector('textarea[data-k="code"]');
+      if (ta && code) insertText(ta, code);
       return;
     }
     const k = el.dataset.k;
@@ -818,7 +988,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       el.dispatchEvent(new Event("input", { bubbles: true }));
       return;
     }
-
+    if (e.target.closest('[data-act="html-big"]')) { const b = selBlock(); if (b) openHtmlEditor(b); return; }
     const cr = e.target.closest("[data-crop]");
     if (cr) { cropPicture(target(), cr.dataset.crop, cr); return; }
     if (e.target.closest('[data-act="btn-add"]')) {
@@ -930,7 +1100,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
   const hasFormButton = () => blocks().some((b) =>
     (b.type === "button" && b.link === "form" && b.formId) ||
     (b.type === "buttons" && (b.items || []).some((it) => it.link === "form" && it.formId)));
-    
+
   /* ---------- Send a test ---------- */
   async function sendTest() {
     await save();

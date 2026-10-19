@@ -62,6 +62,7 @@ export const BLOCKS = {
   divider: { label: "Divider", make: () => ({ color: "#e2e8f0" }) },
   spacer: { label: "Space", make: () => ({ size: 24 }) },
   social: { label: "Social links", make: () => ({ facebook: "", instagram: "", tiktok: "", website: "", align: "center" }) },
+  html: { label: "Custom HTML", make: () => ({ code: CUSTOM_START, pad: true }) },
 };
 export const newBlock = (type) => ({ id: uid(), type, ...BLOCKS[type].make() });
 
@@ -78,6 +79,7 @@ export function cleanDesign(d) {
     .filter((b) => b && BLOCKS[b.type])
     .map((b) => ({ ...BLOCKS[b.type].make(), ...b, id: String(b.id || uid()) }));
   blocks.forEach((b) => {
+    if (b.type === "html") { b.code = String(b.code || "").slice(0, 150000); b.pad = b.pad !== false; }
     if (b.type === "columns") b.items = [0, 1].map((i) => ({ ...col(), ...((Array.isArray(b.items) && b.items[i]) || {}) }));
     if (b.type === "buttons") {
       const list = Array.isArray(b.items) && b.items.length ? b.items : BLOCKS.buttons.make().items;
@@ -119,6 +121,198 @@ export function emailRich(html, st) {
   });
   return root.innerHTML;
 }
+
+/* ---------- Custom HTML block ---------- */
+// Your own HTML, made email-safe: <style> rules are copied onto each element (email apps ignore style sheets),
+// and anything unsafe, or that email apps don't show, is taken out. Pictures must be https:// links.
+const CUSTOM_START = '<h2 style="margin:0 0 10px;font-size:24px;line-height:1.3;">Your own design</h2>\n' +
+  '<p style="margin:0 0 14px;">Hi {First name}, write HTML here, or add pieces from the palette.</p>';
+const CH_DROP = "script,noscript,style,iframe,frame,frameset,object,embed,applet,form,input,button,textarea,select,option," +
+  "link,meta,base,title,svg,math,video,audio,canvas,template";
+const chHref = (u) => /^(https?:\/\/|mailto:|tel:)[^\s"'<>]+$/i.test(String(u || "").trim().replace(/\{[^{}]{1,40}\}/g, "x"));
+let chMemo = { code: null, out: null };
+
+// → { html, info }   (remembered for the last code, as it's drawn on every change)
+export function customHtml(code) {
+  const src = String(code || "");
+  if (chMemo.code === src) return chMemo.out;
+  const info = { removed: [], dropped: false, outlook: false, flex: false, position: false,
+    embedded: 0, http: 0, noAlt: 0, noHref: 0, maxW: 0, placeholder: false };
+  const doc = new DOMParser().parseFromString(src, "text/html");
+
+  // Comments go (Outlook-only code lives in them)
+  const tw = doc.createTreeWalker(doc, NodeFilter.SHOW_COMMENT);
+  const comments = [];
+  while (tw.nextNode()) comments.push(tw.currentNode);
+  comments.forEach((c) => { if (/\[if\s/i.test(c.nodeValue || "")) info.outlook = true; c.remove(); });
+
+  // <style> rules → each element's own style. Later rules win, and the element's own style wins over all of them.
+  const extra = new Map();
+  const bodyCss = [];
+  doc.querySelectorAll("style").forEach((s) => {
+    let rules = [];
+    try { const sh = new CSSStyleSheet(); sh.replaceSync(s.textContent || ""); rules = [...sh.cssRules]; }
+    catch { info.dropped = true; }
+    rules.forEach((r) => {
+      if (!(r instanceof CSSStyleRule)) { info.dropped = true; return; }   // @media, @font-face…
+      r.selectorText.split(",").map((x) => x.trim()).forEach((sel) => {
+        if (!sel) return;
+        if (sel.includes(":")) { info.dropped = true; return; }            // :hover and the like
+        if (/^(html|body)$/i.test(sel)) { bodyCss.push(r.style.cssText); return; }
+        let els;
+        try { els = doc.body.querySelectorAll(sel); } catch { info.dropped = true; return; }
+        els.forEach((el) => { if (!extra.has(el)) extra.set(el, []); extra.get(el).push(r.style.cssText); });
+      });
+    });
+  });
+  extra.forEach((list, el) => el.setAttribute("style", `${list.join(" ")} ${el.getAttribute("style") || ""}`.trim()));
+
+  doc.body.querySelectorAll(CH_DROP).forEach((el) => {
+    const n = el.tagName.toLowerCase();
+    if (n !== "style" && !info.removed.includes(n)) info.removed.push(n);
+    el.remove();
+  });
+
+  doc.body.querySelectorAll("*").forEach((el) => {
+    [...el.attributes].forEach((a) => {
+      const n = a.name.toLowerCase();
+      if (n.startsWith("on") || n === "srcset" || n === "contenteditable" || n.startsWith("data-mkt")) el.removeAttribute(a.name);
+    });
+    const css = el.getAttribute("style") || "";
+    if (/expression\s*\(|javascript:|behavior\s*:|-moz-binding|@import/i.test(css)) el.removeAttribute("style");
+    else if (css) {
+      if (/display\s*:\s*(inline-)?(flex|grid)\b/i.test(css)) info.flex = true;
+      if (/position\s*:\s*(absolute|fixed|sticky)/i.test(css)) info.position = true;
+      for (const m of css.matchAll(/(?:^|[;\s])(?:max-|min-)?width\s*:\s*(\d+)px/gi)) info.maxW = Math.max(info.maxW, Number(m[1]));
+    }
+    const wAttr = Number(el.getAttribute("width"));
+    if (wAttr > 0) info.maxW = Math.max(info.maxW, wAttr);
+    if (el.hasAttribute("href")) {
+      const h = el.getAttribute("href").trim();
+      if (chHref(h)) el.setAttribute("href", h); else el.removeAttribute("href");
+    }
+    if (el.hasAttribute("background") && !/^https:\/\/[^\s"'<>]+$/i.test(el.getAttribute("background"))) el.removeAttribute("background");
+    if (el.tagName === "IMG") {
+      const s = String(el.getAttribute("src") || "").trim();
+      if (!/^https:\/\/[^\s"'<>]+$/i.test(s)) {
+        if (/^data:/i.test(s)) info.embedded++; else if (s) info.http++;
+        el.remove();
+        return;
+      }
+      if (/placehold\.co/i.test(s)) info.placeholder = true;
+      if (!String(el.getAttribute("alt") || "").trim()) info.noAlt++;
+    }
+  });
+  info.noHref = doc.body.querySelectorAll("a:not([href])").length;
+
+  // A pasted full email: its <body> look is kept on a wrapper
+  const bs = [...bodyCss, doc.body.getAttribute("style") || ""].join(" ").trim();
+  const bgAttr = doc.body.getAttribute("bgcolor") || "";
+  const bg = /^#[0-9a-f]{3,8}$/i.test(bgAttr) ? `background-color:${bgAttr};` : "";
+  let html = doc.body.innerHTML.trim();
+  if (html && (bs || bg)) html = `<div style="${esc(bg + bs)}">${html}</div>`;
+  chMemo = { code: src, out: { html, info } };
+  return chMemo.out;
+}
+
+// Notes for the person editing (what was changed, and what won't look right)
+export function customNotes(code, pad = true) {
+  const i = customHtml(code).info;
+  const n = [];
+  const s = (k, one, many) => (k === 1 ? one : many);
+  if (i.dropped) n.push("Your <style> rules were copied onto each element. Rules for phones (@media) and hover effects can't be, so they were left out.");
+  if (i.removed.length) n.push(`Left out (unsafe, or email apps don't show them): ${i.removed.map((x) => `<${x}>`).join(", ")}.`);
+  if (i.outlook) n.push("Outlook-only code (<!--[if mso]>) was left out.");
+  if (i.flex) n.push("Flex and grid layouts break in Outlook and partly in Gmail. Use the column pieces instead.");
+  if (i.position) n.push("Most email apps ignore position: absolute / fixed.");
+  if (i.embedded) n.push(`${i.embedded} embedded ${s(i.embedded, "picture was", "pictures were")} left out. Use "Picture from Image Bank" instead.`);
+  if (i.http) n.push(`${i.http} ${s(i.http, "picture wasn't an https:// link, so it was", "pictures weren't https:// links, so they were")} left out.`);
+  if (i.noAlt) n.push(`${i.noAlt} ${s(i.noAlt, "picture has", "pictures have")} no description (alt="…"). It's shown when pictures are blocked.`);
+  if (i.noHref) n.push(`${i.noHref} ${s(i.noHref, "link or button has", "links or buttons have")} no address yet (replace https:// with the real link).`);
+  if (i.placeholder) n.push("Swap the placeholder pictures for your own.");
+  const max = pad ? 536 : 600;
+  if (i.maxW > max) n.push(`Something is ${i.maxW}px wide, but there's ${max}px of room.${pad ? " Turn off Side margins, or make it narrower." : " Make it 600px or less."}`);
+  return n;
+}
+
+// The palette: pieces written the way email apps need (styles on each element, columns that stack on phones)
+const cf = (st, size = 15) => `font-family:${st.font};font-size:${size}px;line-height:1.6;color:${st.text};`;
+const pPic = (w, h) => `<img src="https://placehold.co/${w}x${h}/e2e8f0/64748b/png?text=Picture" alt="Describe the picture" width="${w}" ` +
+  `style="display:block;width:100%;max-width:${w}px;height:auto;border:0;border-radius:8px;">`;
+const pBtn = (st, label, outline = false, extra = "") => `<a href="https://" style="display:inline-block;padding:${outline ? "11px 26px" : "13px 28px"};` +
+  `border-radius:8px;${outline ? `border:2px solid ${st.accent};color:${st.accent};` : `background:${st.accent};color:#ffffff;`}` +
+  `font-family:${st.font};font-size:15px;font-weight:bold;line-height:1.2;text-decoration:none;${extra}">${label}</a>`;
+const pCols = (st, n) => {
+  const w = n === 2 ? 252 : 162; // + 16px padding: 2 × 268 or 3 × 178 fits the 536px inside the margins
+  const cell = (i) => `  <div style="display:inline-block;width:100%;max-width:${w + 16}px;vertical-align:top;">
+    <div style="padding:0 8px 16px;text-align:left;${cf(st)}">
+      ${pPic(w, Math.round(w * 0.66))}
+      <div style="margin:12px 0 6px;font-size:17px;font-weight:bold;">Title ${i}</div>
+      <div style="margin:0 0 12px;">A few words about it.</div>
+    </div>
+  </div>`;
+  return `<div style="font-size:0;text-align:center;">\n${Array.from({ length: n }, (_, i) => cell(i + 1)).join("\n")}\n</div>`;
+};
+const pSide = (st, right) => `<div dir="${right ? "rtl" : "ltr"}" style="font-size:0;">
+  <div dir="ltr" style="display:inline-block;width:100%;max-width:220px;vertical-align:top;">
+    ${pPic(220, 180)}
+  </div>
+  <div dir="ltr" style="display:inline-block;width:100%;max-width:316px;vertical-align:top;text-align:left;">
+    <div style="padding:${right ? "6px 20px 0 0" : "6px 0 0 20px"};${cf(st)}">
+      <div style="margin:0 0 6px;font-size:18px;font-weight:bold;">A title</div>
+      <div style="margin:0 0 14px;">A few words to go with the picture.</div>
+      ${pBtn(st, "Find out more")}
+    </div>
+  </div>
+</div>`;
+
+// [group, [[key, label, (style) => html]]]
+export const CUSTOM_PIECES = [
+  ["Layouts", [
+    ["cols2", "2 columns", (st) => pCols(st, 2)],
+    ["cols3", "3 columns", (st) => pCols(st, 3)],
+    ["picleft", "Picture left", (st) => pSide(st, false)],
+    ["picright", "Picture right", (st) => pSide(st, true)],
+  ]],
+  ["Content", [
+    ["heading", "Heading", (st) => `<h2 style="margin:0 0 10px;font-family:${st.font};font-size:24px;line-height:1.3;font-weight:bold;color:${st.text};">A heading</h2>`],
+    ["para", "Paragraph", (st) => `<p style="margin:0 0 14px;${cf(st, 16)}">Hi {First name}, write your message here.</p>`],
+    ["banner", "Banner", (st) => `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+  <tr><td style="padding:32px 28px;border-radius:12px;background:${st.accent};text-align:center;font-family:${st.font};color:#ffffff;">
+    <h2 style="margin:0 0 8px;font-size:26px;line-height:1.25;color:#ffffff;">A big headline</h2>
+    <p style="margin:0 0 18px;font-size:16px;line-height:1.6;color:#ffffff;">A line to go with it.</p>
+    <a href="https://" style="display:inline-block;padding:13px 28px;border-radius:8px;background:#ffffff;color:${st.accent};font-size:15px;font-weight:bold;text-decoration:none;">Book now</a>
+  </td></tr>
+</table>`],
+    ["offer", "Offer box", (st) => `<div style="padding:24px 22px;border:2px dashed ${st.accent};border-radius:14px;background:#f0fdfa;text-align:center;${cf(st)}">
+  <div style="font-size:30px;line-height:1.15;font-weight:bold;color:${st.accent};">20% off</div>
+  <div style="margin:6px 0 0;">Your next skin treatment</div>
+  <div style="margin:14px 0 0;"><span style="display:inline-block;padding:8px 18px;border-radius:8px;background:#ffffff;border:1px solid ${st.accent};font-family:'Courier New',Courier,monospace;font-size:18px;font-weight:bold;letter-spacing:2px;">GLOW20</span></div>
+  <div style="margin:12px 0 0;font-size:12px;color:#64748b;">Offer ends [date].</div>
+</div>`],
+    ["quote", "Quote", (st) => `<div style="padding:22px 26px;border-left:4px solid ${st.accent};border-radius:8px;background:#f8fafc;${cf(st, 17)}">
+  <div style="font-style:italic;">“The team made me feel so comfortable.”</div>
+  <div style="margin-top:10px;font-size:14px;font-weight:bold;color:${st.accent};">A happy patient</div>
+</div>`],
+    ["ticks", "Tick list", (st) => `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+${["First benefit", "Second benefit", "Third benefit"].map((x) => `  <tr>
+    <td width="28" style="padding:4px 0;vertical-align:top;font-family:${st.font};font-size:16px;font-weight:bold;color:${st.accent};">✓</td>
+    <td style="padding:4px 0;${cf(st)}">${x}</td>
+  </tr>`).join("\n")}
+</table>`],
+  ]],
+  ["Buttons", [
+    ["button", "Button", (st) => `<div style="padding:6px 0;text-align:center;">${pBtn(st, "Book now")}</div>`],
+    ["buttons", "Two buttons", (st) => `<div style="padding:6px 0;text-align:center;">
+  ${pBtn(st, "Book now", false, "margin:0 6px 10px;")}
+  ${pBtn(st, "Shop skincare", true, "margin:0 6px 10px;")}
+</div>`],
+  ]],
+  ["Spacing", [
+    ["divider", "Divider", () => '<div style="margin:16px 0;height:1px;line-height:1px;font-size:1px;background:#e2e8f0;">&nbsp;</div>'],
+    ["space", "Space", () => '<div style="height:24px;line-height:24px;font-size:1px;">&nbsp;</div>'],
+  ]],
+];
 
 /* ---------- Blocks → email HTML ---------- */
 const IN = 536; // 600px email, 32px each side
@@ -221,6 +415,13 @@ export function blockHtml(b, st, preview = false) {
       const h = Math.min(120, Math.max(4, Number(b.size) || 24));
       return box("padding:0;", `<div style="height:${h}px;line-height:${h}px;font-size:1px;">&nbsp;</div>`);
     }
+    case "html": {
+      const c = customHtml(b.code);
+      if (!c.html) {
+        return preview ? box("padding:12px 32px;text-align:center;", `<span style="${font(st, 13)}color:#94a3b8;">Write some HTML, or add a piece from the palette</span>`) : "";
+      }
+      return box(`padding:${b.pad === false ? "0" : "10px 32px"};${font(st)}`, c.html);
+    }
     case "social": {
       const links = [["facebook", "Facebook"], ["instagram", "Instagram"], ["tiktok", "TikTok"], ["website", "Website"]]
         .filter(([k]) => safeUrl(b[k]));
@@ -266,6 +467,14 @@ export function checkDesign(t) {
     }
     if (b.type === "product" && b.label && !safeUrl(b.href)) out.push(`The product "${b.name}" has no link yet.`);
     if (b.type === "columns") (b.items || []).forEach((c) => { if (c.label && !safeUrl(c.href)) out.push(`The "${c.label}" button in two columns has no link yet.`); });
+    if (b.type === "html") {
+      const c = customHtml(b.code);
+      const words = c.html.replace(/<[^>]*>/g, " ").replace(/&nbsp;/g, " ").trim();
+      if (!words && !/<img\b/i.test(c.html)) out.push("A custom HTML block is empty.");
+      if (c.info.noHref) out.push("A custom HTML block has a link or button with no address yet.");
+      if (c.info.placeholder) out.push("A custom HTML block still has placeholder pictures.");
+      if (bracket.test(words)) out.push("Some text still has [square-bracket] placeholders to fill in.");
+    }
     if ((b.type === "text" && bracket.test(b.html || "")) || (b.type === "imagetext" && bracket.test(b.html || "")) ||
         (b.type === "quote" && bracket.test(b.text || "")) || (b.type === "offer" && bracket.test(`${b.title} ${b.text} ${b.note}`))) {
       out.push("Some text still has [square-bracket] placeholders to fill in.");
