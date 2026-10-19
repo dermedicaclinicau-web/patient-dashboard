@@ -6961,3 +6961,54 @@ a.md-quiet:hover { border-color: var(--primary); }
   .ch-code { border-right: 0; }
 }
 
+/* ---------- Custom HTML editor: tidy-up ---------- */
+
+/* Header: a little tighter */
+.ch-dlg .ch-head { padding: .75rem 1.25rem .65rem; }
+
+/* Palette: groups flow side by side instead of 5 stacked rows */
+.ch-dlg .ch-pal { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 0;
+  max-height: none; padding: .55rem 1.25rem; }
+.ch-dlg .ch-pal-row { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .3rem;
+  padding: 0 .9rem; border-left: 1px solid var(--border); }
+.ch-dlg .ch-pal-row:first-child { padding-left: 0; border-left: 0; }
+.ch-dlg .ch-pal-row > span { flex: none; margin-right: .2rem; font-size: .66rem; }
+.ch-dlg .ch-chip { padding: 3px 9px; font-size: 12px; }
+
+/* Desktop / Mobile: smaller */
+.ch-dlg .ch-dev { height: 36px; margin: .45rem auto; }
+.ch-dlg .ch-dev button { padding: 0 .8rem; font-size: .82rem; }
+
+/* Bottom: Links (wide) | Checks (narrow), each scrolls on its own */
+.ch-dlg .ch-bottom { grid-template-columns: minmax(0, 1.8fr) minmax(220px, 1fr); gap: 0; padding: 0;
+  max-height: none; overflow: visible; background: #fff; }
+.ch-dlg .ch-links, .ch-dlg .ch-notes { max-height: 30vh; overflow: auto; padding: .7rem 1.25rem; }
+.ch-dlg .ch-notes { border-left: 1px solid var(--border); background: var(--surface-2); }
+.ch-dlg .ch-bottom strong { display: block; margin: 0 0 .4rem; font-size: .68rem; font-weight: 700;
+  letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.ch-dlg .ch-links > strong::after { content: " · form buttons get each patient's own link when sent";
+  font-weight: 500; letter-spacing: 0; text-transform: none; }
+
+/* One link = one row: text | goes to | answer */
+.ch-dlg .ch-link { grid-template-columns: minmax(140px, 1fr) minmax(170px, 1.1fr) minmax(170px, 1.1fr);
+  align-items: start; gap: .4rem .6rem; margin: 0; padding: .5rem 0; border-bottom: 1px solid var(--border); }
+.ch-dlg .ch-link:last-child { border-bottom: 0; }
+.ch-dlg .ch-link-text { padding-top: .45rem; font-size: .8rem; font-weight: 600; }
+.ch-dlg .ch-link-note { display: none; }            /* said once in the heading instead */
+.ch-dlg .ch-link .fb-select, .ch-dlg .ch-link .fe-input { width: 100%; height: 34px; padding: 4px 8px; font-size: 12.5px; }
+.ch-dlg .ch-ans { grid-column: auto; display: flex; flex-direction: column; align-items: stretch; gap: .3rem; padding: 0; }
+.ch-dlg .ch-ans .fb-select, .ch-dlg .ch-ans .fe-input { max-width: none; }
+.ch-dlg .ch-ans .fe-check { padding: 0; font-size: .8rem; }
+
+/* Checks (also used in the side panel) */
+.mb-htmlok { margin: 0; font-size: .85rem; font-weight: 600; color: #047857; }
+.mb-htmlok::before { content: "✓ "; }
+.mb-htmlnotes { display: grid; gap: .3rem; margin: 0; padding-left: 1.1rem; font-size: .82rem; line-height: 1.45; color: #92400e; }
+
+@media (max-width: 900px) {
+  .ch-dlg .ch-bottom { grid-template-columns: 1fr; }
+  .ch-dlg .ch-notes { border-left: 0; border-top: 1px solid var(--border); }
+  .ch-dlg .ch-link { grid-template-columns: 1fr 1fr; }
+  .ch-dlg .ch-link-text { grid-column: 1 / -1; padding-top: 0; }
+  .ch-dlg .ch-pal-row { padding: 0; border-left: 0; width: 100%; }
+}
