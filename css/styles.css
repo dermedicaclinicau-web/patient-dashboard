@@ -6884,3 +6884,10 @@ a.md-quiet:hover { border-color: var(--primary); }
    .ff-online { margin: 0 0 12px; padding: 10px 14px; border-radius: 10px; background: #f0fdfa; color: #134e4a; font-size: 14px; }
    .ff-online span { display: block; margin-top: 4px; color: #92400e; }
    .fe-online .fe-parts { max-height: 180px; overflow: auto; }
+
+.ef-match { display: grid; gap: 8px; }
+.ef-mgroup { border: 1px solid #e5e7eb; border-radius: 10px; padding: 8px 10px; background: #fff; }
+.ef-mgroup > summary { cursor: pointer; font-weight: 600; font-size: 13px; color: #0f172a; }
+.ef-mgroup[open] > summary { margin-bottom: 8px; }
+.ef-mgroup > .lh-btn { margin: 0 0 8px; }
+.ef-run-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }

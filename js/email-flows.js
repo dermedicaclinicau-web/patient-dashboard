@@ -543,7 +543,8 @@ async function mountFlowEditor(container, { id, staff }) {
   let mode = loaded.sendMode === "real" ? "real" : "test"; // testing: every email goes to the person who turned it on
   let runs = null, runsErr = "", runsLoading = false;
   let productNames = [], serviceNames = [];
-  let matchOut = "";       // the last "Who matches today?" answer
+  let matchData = null;    // the last "See who's next" answer
+  let holds = null, holdsErr = false, holdsLoading = false;
   const lhReady = getLetterhead().then((lh) => { letterhead = lh || {}; }).catch(() => { letterhead = {}; });
   let editor = null, lastText = null;
   let dirty = false, saving = false, saveTimer = null;
@@ -972,8 +973,9 @@ async function mountFlowEditor(container, { id, staff }) {
           Also start patients who already match when it's turned on</label>
         <small class="muted">Off: the first morning only notes who already matches. From then on, patients start as they newly match.</small>
         <div class="ef-match">
-          <button type="button" class="lh-btn" data-act="preview-match">Who matches today?</button>
-          <div data-role="match-out">${matchOut}</div>
+          <button type="button" class="lh-btn" data-act="preview-match">See who's next</button>
+          <small class="muted">Everyone who matches today, and whether they'll start. Start or hold anyone before the next check.</small>
+          <div data-role="match-out">${matchData ? matchHtml(matchData) : ""}</div>
         </div>`;
     }
     return `
@@ -996,6 +998,7 @@ async function mountFlowEditor(container, { id, staff }) {
       <div class="ef-side-head"><span class="ef-ico is-trigger">${I[TRIG_ICON[t.event] || "cart"]}</span>
         <div><strong>Flow settings</strong><small>Click a card on the left to set it up</small></div></div>
       <section class="ef-sec" data-role="runs"></section>
+      <section class="ef-sec" data-role="holds"></section>
       <section class="ef-sec"><h4>About this flow</h4>
         <label class="tb-field"><span>Name</span><input class="fe-input" data-f="name" maxlength="120" value="${esc(flow.name)}" /></label>
         <label class="tb-field"><span>Description <small>(optional)</small></span>
@@ -1116,6 +1119,7 @@ async function mountFlowEditor(container, { id, staff }) {
       side.innerHTML = flowSettingsHtml();
       mountSettingsRules();
       renderRuns();
+      renderHolds();
       return;
     }
     const s = r.list[r.i];
@@ -1198,7 +1202,7 @@ async function mountFlowEditor(container, { id, staff }) {
     if (el.closest(".re")) return; // the message editor reports its own changes
     if (el.dataset.f !== undefined) {
       setFlowValue(el.dataset.f, el);
-      if (el.dataset.f === "trigger.event") matchOut = "";
+      if (el.dataset.f === "trigger.event") matchData = null;
       renderCanvas();
       changed();
       if (RERENDER_PATHS.includes(el.dataset.f)) renderSide();
@@ -1232,35 +1236,240 @@ async function mountFlowEditor(container, { id, staff }) {
   });
 
   // "Who matches today?" for a daily check
+  /* ---------- See who's next, Start now, Hold and Start again ---------- */
+  const MATCH_ST = {
+    will: ["Starts at the next check", "is-active"],
+    later: ["Starts the day after (daily limit)", "is-active"],
+    baseline: ["Matched before it was turned on", ""],
+    active: ["Already in this flow", "is-test"],
+    done: ["Already been through it", ""],
+    noemail: ["No email address", "is-failed"],
+    held: ["Held", "is-failed"],
+    nopatient: ["Not in the Patient List", "is-failed"],
+    released: ["Released: check again", ""],
+  };
+  const actError = (ex) => ({
+    NOT_LIVE: "Turn the flow on first.",
+    HELD: "This patient is held. Release them first.",
+    ALREADY: "They're already in this flow.",
+    NOT_FINISHED: "They're still in this flow.",
+    BUSY: "The flows are running right now. Try again in a minute.",
+    NO_PATIENT: "That patient couldn't be found.",
+    FORBIDDEN: "You need Build email flows access.",
+    RATE_LIMITED: "You've checked a lot in the last hour. Try again later.",
+  }[ex && ex.code] || (ex && ex.detail) || "Couldn't do that. Try again.");
+
+  function matchRow(r) {
+    const [lbl, cls] = MATCH_ST[r.state] || [r.state, ""];
+    const live = status === "live";
+    const acts = [
+      live && r.id && !["held", "active", "nopatient"].includes(r.state)
+        ? `<button type="button" class="lh-btn is-quiet" data-startnow="${esc(r.id)}">Start now</button>` : "",
+      r.id && !["held", "nopatient"].includes(r.state)
+        ? `<button type="button" class="lh-btn is-quiet" data-hold="${esc(r.id)}" data-name="${esc(r.name || "")}">Hold</button>` : "",
+      r.state === "held" ? `<button type="button" class="lh-btn is-quiet" data-release="${esc(r.id)}">Release</button>` : "",
+    ].filter(Boolean).join("");
+    const nm = `<strong>${esc(r.name || "Unknown")}</strong>`;
+    return `<div class="ef-run">
+      <div class="ef-run-top">${r.id ? `<a href="#/patient/${encodeURIComponent(r.id)}">${nm}</a>` : nm}
+        <span class="ef-st ${cls}">${esc(lbl)}</span></div>
+      ${r.note ? `<small>${esc(r.note)}</small>` : ""}
+      ${acts ? `<div class="ef-run-acts">${acts}</div>` : ""}
+    </div>`;
+  }
+  function matchHtml(d) {
+    if (d.error) return `<p class="tb-none tb-bad">${esc(d.error)}</p>`;
+    const rows = d.rows || [];
+    const inState = (...ks) => rows.filter((r) => ks.includes(r.state));
+    const next = inState("will", "later");
+    const before = inState("baseline");
+    const rest = inState("active", "done", "noemail", "held", "nopatient", "released");
+    const live = status === "live";
+    const startBtn = (act, list) => live && list.length
+      ? `<button type="button" class="lh-btn" data-act="${act}">Start ${list.length > 50 ? "the first 50" : `all ${list.length}`} now</button>` : "";
+    const group = (title, list, btn, open) => list.length
+      ? `<details class="ef-mgroup"${open ? " open" : ""}><summary>${esc(title)} (${list.length})</summary>${btn}${list.map(matchRow).join("")}</details>` : "";
+    return `
+      <p class="tb-ready">${d.count} patient${d.count === 1 ? "" : "s"} match${d.count === 1 ? "es" : ""} today
+        ${d.partial ? `(checked ${d.checked} of ${d.total}, so there may be more)` : `(out of ${d.total})`}</p>
+      ${!live ? '<p class="tb-info">The flow is off. Turn it on to start anyone.</p>'
+        : mode !== "real" ? '<p class="tb-info">The flow is testing, so anyone you start sends their emails to you, marked [Test].</p>' : ""}
+      ${group("Will start at the next check", next, startBtn("start-all", next), true)}
+      ${group("Matched before it was turned on", before, startBtn("start-before", before), !next.length)}
+      ${group("Won't start", rest, "", false)}
+      ${d.more ? `<small class="muted">${d.more} more not shown.</small>` : ""}
+      ${!rows.length ? '<p class="tb-none">Nobody matches today.</p>' : ""}`;
+  }
+  const drawMatch = () => {
+    const o = side.querySelector('[data-role="match-out"]');
+    if (o) o.innerHTML = matchData ? matchHtml(matchData) : "";
+  };
+  const setRowState = (ids, state) => {
+    if (!matchData || !matchData.rows) return;
+    const s = new Set(ids);
+    matchData.rows.forEach((r) => { if (s.has(r.id)) { r.state = state; r.note = ""; } });
+    drawMatch();
+  };
+
   async function previewMatches(btn) {
-    const out = side.querySelector('[data-role="match-out"]');
     const p = groupProblem(flow.trigger.rules, true);
-    if (p) { if (out) out.innerHTML = `<p class="tb-none tb-bad">${esc(p)}.</p>`; return; }
+    if (p) { matchData = { error: `${p}.` }; drawMatch(); return; }
     btn.disabled = true;
     btn.textContent = "Checking every patient…";
+    const out = side.querySelector('[data-role="match-out"]');
     if (out) out.innerHTML = '<p class="tb-none">This can take a minute or two.</p>';
     try {
       await settle();
-      const res = await callApi({ action: "emailFlow", op: "preview", flowId: id });
-      matchOut = `<p class="tb-ready">${res.count} patient${res.count === 1 ? "" : "s"} match${res.count === 1 ? "es" : ""} today
-          ${res.partial ? ` (checked ${res.checked} of ${res.total}, so there may be more)` : ` (out of ${res.total})`}</p>
-        ${res.sample && res.sample.length ? `<ul>${res.sample.map((x) => `<li><a href="#/patient/${encodeURIComponent(x.id)}">${esc(x.name || "Unknown")}</a></li>`).join("")}</ul>
-          ${res.count > res.sample.length ? `<small class="muted">and ${res.count - res.sample.length} more</small>` : ""}` : ""}`;
+      matchData = await callApi({ action: "emailFlow", op: "preview", flowId: id });
     } catch (ex) {
       console.error("Preview failed:", ex);
-      matchOut = `<p class="tb-none tb-bad">${esc(ex && ex.code === "RATE_LIMITED" ? "You've checked a lot in the last hour. Try again later."
-        : (ex && ex.detail) || "Couldn't check right now. Try again.")}</p>`;
+      matchData = { error: actError(ex) };
     } finally {
-      const o = side.querySelector('[data-role="match-out"]');
-      if (o) o.innerHTML = matchOut;
-      if (btn.isConnected) { btn.disabled = false; btn.textContent = "Who matches today?"; }
+      drawMatch();
+      if (btn.isConnected) { btn.disabled = false; btn.textContent = "See who's next"; }
     }
+  }
+
+  async function startNow(ids, btn) {
+    const many = ids.length > 1;
+    if (!(await confirmDialog({
+      title: many ? `Start the flow for ${ids.length} patients now?` : "Start the flow for this patient now?",
+      message: mode !== "real"
+        ? "The flow is testing, so the emails come to you, marked [Test]."
+        : "Their first email goes now (or at 9 am if it's after hours), then the rest follow the flow.",
+      confirmLabel: "Start now", tone: "info",
+    }))) return;
+    btn.disabled = true;
+    try {
+      await settle();
+      const r = await callApi({ action: "emailFlow", op: "startNow", flowId: id, patientIds: ids });
+      const sk = r.skipped || [];
+      showToast(`${r.started} started${sk.length ? `. ${sk.length} skipped: ${sk.slice(0, 3).map((x) => `${x.name || "a patient"} (${x.why})`).join(", ")}` : "."}`);
+      const skipped = new Set(sk.map((x) => x.id));
+      setRowState(ids.filter((x) => !skipped.has(x)), "active");
+      runs = null;
+      renderRuns();
+    } catch (ex) {
+      console.error("Start now failed:", ex);
+      showToast(actError(ex));
+    } finally {
+      if (btn.isConnected) btn.disabled = false;
+    }
+  }
+
+  async function holdPatient(pid, name, btn) {
+    if (!(await confirmDialog({
+      title: `Hold ${name || "this patient"}?`,
+      message: "They won't start this flow, and if they're in it now, it stops for them. You can release them any time under Held patients.",
+      confirmLabel: "Hold", tone: "danger",
+    }))) return;
+    btn.disabled = true;
+    try {
+      const r = await callApi({ action: "emailFlow", op: "hold", flowId: id, patientId: pid });
+      showToast(r.stopped ? "Held, and the flow stopped for them." : "Held. They won't start this flow.");
+      setRowState([pid, r.patientId], "held");
+      holds = null;
+      renderHolds();
+      runs = null;
+      renderRuns();
+    } catch (ex) {
+      console.error("Hold failed:", ex);
+      showToast(actError(ex));
+      if (btn.isConnected) btn.disabled = false;
+    }
+  }
+
+  async function releasePatient(pid, btn) {
+    btn.disabled = true;
+    try {
+      await callApi({ action: "emailFlow", op: "release", flowId: id, patientId: pid });
+      showToast("Released. They can start this flow again.");
+      setRowState([pid], "released");
+      holds = null;
+      renderHolds();
+      runs = null;
+      renderRuns();
+    } catch (ex) {
+      console.error("Release failed:", ex);
+      showToast(actError(ex));
+      if (btn.isConnected) btn.disabled = false;
+    }
+  }
+
+  async function restartRun(runId, name, btn) {
+    if (!(await confirmDialog({
+      title: `Start the flow again for ${name || "this patient"}?`,
+      message: mode !== "real" ? "It starts from the first card. The flow is testing, so the emails come to you."
+        : "It starts from the first card, and their first email goes now (or at 9 am).",
+      confirmLabel: "Start again", tone: "info",
+    }))) return;
+    btn.disabled = true;
+    try {
+      await settle();
+      await callApi({ action: "emailFlow", op: "restart", runId });
+      showToast("Started again.");
+      runs = null;
+      renderRuns();
+    } catch (ex) {
+      console.error("Start again failed:", ex);
+      showToast(actError(ex));
+      if (btn.isConnected) btn.disabled = false;
+    }
+  }
+
+  async function loadHolds() {
+    if (holdsLoading) return;
+    holdsLoading = true;
+    try {
+      const r = await callApi({ action: "emailFlow", op: "holds", flowId: id });
+      holds = r.holds || [];
+      holdsErr = false;
+    } catch (ex) {
+      console.warn("Holds failed:", ex);
+      holds = [];
+      holdsErr = true;
+    } finally {
+      holdsLoading = false;
+    }
+    if (root.isConnected) { renderHolds(); renderRuns(); }
+  }
+  function renderHolds() {
+    const box = side.querySelector('[data-role="holds"]');
+    if (!box) return;
+    if (holds === null) {
+      box.innerHTML = '<h4>Held patients</h4><p class="tb-none">Loading…</p>';
+      loadHolds();
+      return;
+    }
+    box.innerHTML = `<h4>Held patients</h4>
+      ${holdsErr ? '<p class="tb-none tb-bad">Couldn\'t load. Press Refresh above.</p>' : ""}
+      ${!holds.length && !holdsErr ? '<p class="tb-none">Nobody is held. Hold someone from See who\'s next, or from Patients in this flow.</p>' : ""}
+      ${holds.map((h) => `<div class="ef-run">
+        <div class="ef-run-top"><a href="#/patient/${encodeURIComponent(h.patientId)}"><strong>${esc(h.patientName || "Unknown")}</strong></a>
+          <button type="button" class="lh-btn is-quiet" data-release="${esc(h.patientId)}">Release</button></div>
+        <small>Held by ${esc(h.by || "staff")}${h.at ? ` · ${esc(new Date(h.at).toLocaleDateString("en-AU", { day: "numeric", month: "short" }))}` : ""}</small>
+      </div>`).join("")}`;
   }
 
   side.addEventListener("click", async (e) => {
     const pm = e.target.closest('[data-act="preview-match"]');
     if (pm) { previewMatches(pm); return; }
-    if (e.target.closest('[data-act="runs-refresh"]')) { runs = null; renderRuns(); return; }
+    if (e.target.closest('[data-act="runs-refresh"]')) { runs = null; holds = null; renderRuns(); renderHolds(); return; }
+    const sn = e.target.closest("[data-startnow]");
+    if (sn) { startNow([sn.dataset.startnow], sn); return; }
+    const sa = e.target.closest('[data-act="start-all"], [data-act="start-before"]');
+    if (sa) {
+      const want = sa.dataset.act === "start-all" ? ["will", "later"] : ["baseline"];
+      const ids = ((matchData && matchData.rows) || []).filter((r) => want.includes(r.state) && r.id).map((r) => r.id).slice(0, 50);
+      if (ids.length) startNow(ids, sa);
+      return;
+    }
+    const hd = e.target.closest("[data-hold]");
+    if (hd) { holdPatient(hd.dataset.hold, hd.dataset.name, hd); return; }
+    const rl = e.target.closest("[data-release]");
+    if (rl) { releasePatient(rl.dataset.release, rl); return; }
+    const rs = e.target.closest("[data-restart]");
+    if (rs) { restartRun(rs.dataset.restart, rs.dataset.name, rs); return; }
     const stopRun = e.target.closest("[data-stoprun]");
     if (stopRun) {
       if (!(await confirmDialog({
@@ -1371,16 +1580,24 @@ async function mountFlowEditor(container, { id, staff }) {
     const step = at ? at.list[at.i] : null;
     const next = step ? `Next: ${TYPES[step.type].short}${step.type === "email" && step.cfg.subject ? ` · ${step.cfg.subject}` : ""}${
       Number(r.dueAt) > Date.now() ? ` · ${runWhen(r.dueAt)}` : ""}` : "";
+    const held = !!r.patientId && (holds || []).some((h) => h.patientId === r.patientId);
+    const acts = [
+      r.status === "active" ? `<button type="button" class="lh-btn is-quiet" data-stoprun="${esc(r.id)}">Stop for this patient</button>` : "",
+      r.status !== "active" && r.patientId && status === "live" && !held
+        ? `<button type="button" class="lh-btn is-quiet" data-restart="${esc(r.id)}" data-name="${esc(r.patientName || "")}">Start again</button>` : "",
+      r.patientId && !held ? `<button type="button" class="lh-btn is-quiet" data-hold="${esc(r.patientId)}" data-name="${esc(r.patientName || "")}">Hold</button>` : "",
+      held ? '<span class="ef-st is-failed">Held</span>' : "",
+    ].filter(Boolean).join("");
     return `<div class="ef-run">
       <div class="ef-run-top"><strong>${esc(r.patientName || "Unknown patient")}</strong>
         <span class="ef-st ${testing ? "is-test" : cls}">${testing ? "Testing" : esc(lbl)}</span></div>
       <small>${esc([...runWhat(r), `${Number(r.sent) || 0} sent`].filter(Boolean).join(" · "))}</small>
       ${next ? `<small>${esc(next)}</small>` : ""}
       ${r.reason && r.status !== "active" ? `<small>${esc(r.reason)}</small>` : ""}
-      ${r.status === "active" ? `<button type="button" class="lh-btn is-quiet" data-stoprun="${esc(r.id)}">Stop for this patient</button>` : ""}
+      ${acts ? `<div class="ef-run-acts">${acts}</div>` : ""}
     </div>`;
   }
-
+  
   function renderRuns() {
     const box = side.querySelector('[data-role="runs"]');
     if (!box) return;

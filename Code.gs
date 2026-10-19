@@ -6824,7 +6824,13 @@ function flowFact_(cfg, key, run, ctx) {
       v = !!run.product && s.active && s.items.some(function (it) { return flowSameProduct_(it.name, run.product); });
       break;
     }
-    case 'visit.service': v = Array.isArray(run.visitServices) ? run.visitServices : []; break;
+    case 'visit.service': {
+      // Daily checks and campaigns have no "this visit": their most recent visit is used
+      if (Array.isArray(run.visitServices) && run.visitServices.length) v = run.visitServices;
+      else if (run.kind === 'daily' || run.kind === 'campaign') { const p = ctx.visits(); v = p.length ? p[p.length - 1].services : []; }
+      else v = [];
+      break;
+    }
     case 'visit.staff': v = Array.isArray(run.visitStaff) ? run.visitStaff : []; break;
     case 'hist.bought': v = flowPurchases_(cfg, run, ctx).map(function (p) { return String(p.product || ''); }); break;
     case 'hist.times': v = run.product ? flowPurchases_(cfg, run, ctx).filter(function (p) { return flowSameProduct_(p.product, run.product); }).length : 0; break;
@@ -7177,6 +7183,25 @@ function flowGapUntil_(cfg, flow, ctx) {
   return last ? last + days * 86400000 : 0;
 }
 
+/* ---------- Held patients: never start this flow (and stop it if they're in it) ---------- */
+
+const FLOW_HOLDS_ = 'email_flow_holds';   // Apps Script only; the portal reads it through op "holds"
+function flowHoldId_(flowId, pid) { return flowPart_(flowId) + '__' + flowPart_(pid); }
+function flowHoldSet_(cfg, flowId) {
+  const s = {};
+  fsQuery_(cfg, FLOW_HOLDS_, 'flowId', 'EQUAL', flowId, 2000).forEach(function (h) { if (h.patientId) s[h.patientId] = true; });
+  return s;
+}
+// Remembered for the rest of this run
+function flowHeld_(cfg, memo, flowId, pid) {
+  memo.holds = memo.holds || {};
+  if (!(flowId in memo.holds)) {
+    try { memo.holds[flowId] = flowHoldSet_(cfg, flowId); }
+    catch (e) { console.warn('Holds not read for ' + flowId + ': ' + e); memo.holds[flowId] = {}; }
+  }
+  return !!(pid && memo.holds[flowId][pid]);
+}
+
 /* ---------- The 15-minute run ---------- */
 
 function runEmailFlows_(cfg, deadline) {
@@ -7293,6 +7318,7 @@ function flowEnrol_(cfg, flows, memo) {
       return;
     }
     memo.pts[doc._id] = doc;
+    if (flowHeld_(cfg, memo, f._id, doc._id)) return;
     // "Only start for patients who…": not a match means no run at all
     const trun = Object.assign({ patientId: doc._id }, base);
     if (flowHasRules_((f.trigger || {}).rules)) {
@@ -7377,6 +7403,7 @@ function flowEnrolVisits_(cfg, flows, memo) {
         const doc = memo.pts[v.pid];
         if (!doc) return;
         memo.pts[doc._id] = doc;
+        if (flowHeld_(cfg, memo, f._id, doc._id)) return;
         const base = {
           kind: 'visit', purchaseDate: v.date, visitDate: v.date, visitServices: v.services, visitStaff: v.staff,
           sourceKey: docId_(doc.PttID || doc._id), sourceId: v.pid,
@@ -7487,6 +7514,7 @@ function flowDailyChecks_(cfg, flows, memo, budgetEnd) {
 function flowStartDaily_(cfg, f, pre, ctx, memo, today) {
   const doc = ctx.doc;
   if (!doc || !doc._id) return false;
+  if (flowHeld_(cfg, memo, f._id, doc._id)) return false;
   const t = f.trigger || {};
   const repeat = Math.max(0, Math.floor(Number(t.repeatDays) || 0));
   const mine = fsQuery_(cfg, FLOW_RUNS_, 'patientId', 'EQUAL', doc._id, 100)
@@ -7519,6 +7547,7 @@ function flowStep_(cfg, flow, run, memo, deadline) {
 
   const ctx = flowCtx_(cfg, run, memo);
   if (!ctx) { note('Stopped: the patient record is no longer there.'); save({ status: 'stopped', reason: 'The patient record is no longer there.', next: '' }); return; }
+  if (flowHeld_(cfg, memo, flow._id, ctx.pid)) { note('Stopped: held for this flow.'); save({ status: 'stopped', reason: 'Held by staff.', next: '' }); return; }
   let tester = null;
   if (run.mode === 'test') {
     tester = flowTester_(run.testUid);
@@ -7649,6 +7678,11 @@ function handleEmailFlow_(body) {
     if (op === 'test') return flowTestRun_(body, session);
     if (op === 'preview') return flowPreview_(body, session);
     if (op === 'stopRun') return flowStopRun_(String(body.id || ''), session);
+    if (op === 'hold') return flowHold_(body, session);
+    if (op === 'release') return flowRelease_(body, session);
+    if (op === 'holds') return flowHolds_(body);
+    if (op === 'startNow') return flowStartNow_(body, session);
+    if (op === 'restart') return flowRestart_(body, session);
   } catch (err) {
     console.error('Email flow ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
     return { ok: false, error: 'SERVER_ERROR', detail: String(err && err.message ? err.message : err).slice(0, 300) };
@@ -7740,7 +7774,7 @@ function flowTestRun_(body, session) {
   return { ok: true, to: me.email, sent: sent, steps: steps };
 }
 
-// "Who matches today?" for a daily check: everyone checked against the saved rules (up to about 4 minutes)
+// "See who's next" for a daily check: everyone who matches today, and what happens to each of them (up to about 4 minutes)
 function flowPreview_(body, session) {
   const flowId = String(body.flowId || '');
   if (!/^[A-Za-z0-9_-]{5,60}$/.test(flowId)) return { ok: false, error: 'BAD_REQUEST' };
@@ -7760,8 +7794,27 @@ function flowPreview_(body, session) {
   const today = flowKey_(Date.now());
   const pool = flowDailyPool_(cfg);
   const memo = {};
-  let checked = 0, count = 0;
-  const sample = [];
+
+  // Where each patient stands
+  const live = flow.status === 'live';
+  const st = fsGetDoc_(cfg, FLOW_STATE_ + '/' + flowId) || {};
+  const sameRun = live && st.liveAt === String(flow.liveAt || '');
+  const allBaseline = t.existing !== true && !(sameRun && st.ready);   // the first check would only note them
+  const baseline = {};
+  if (sameRun && st.ready) (st.baseline || []).forEach(function (k) { baseline[k] = true; });
+  const repeat = Math.max(0, Math.floor(Number(t.repeatDays) || 0));
+  const cap = Math.min(200, Math.max(1, Number(t.dailyMax) || 25));
+  const runsBy = {};
+  fsQuery_(cfg, FLOW_RUNS_, 'flowId', 'EQUAL', flowId, 3000).forEach(function (r) {
+    if (r.status === 'skipped' || !r.patientId) return;
+    const x = runsBy[r.patientId] || (runsBy[r.patientId] = { active: false, last: 0 });
+    if (r.status === 'active') x.active = true;
+    x.last = Math.max(x.last, Date.parse(String(r.startedAt || '')) || 0);
+  });
+  const held = flowHoldSet_(cfg, flowId);
+
+  let checked = 0, count = 0, will = 0;
+  const rows = [];
   for (let i = 0; i < pool.length; i++) {
     if (Date.now() - started > 240000) break;
     const pre = pool[i];
@@ -7772,12 +7825,174 @@ function flowPreview_(body, session) {
     checked++;
     if (!ok) continue;
     count++;
-    if (sample.length < 20) {
-      const d = ctx.doc;
-      sample.push({ id: String(d._id || ''), name: (d._id ? ctx.who.name : '') || String(pre.patientName || '') });
-    }
+    const d = ctx.doc;
+    const pid = String(d._id || '');
+    const name = (pid ? ctx.who.name : '') || String(pre.patientName || '');
+    const x = runsBy[pid];
+    let state, note = '';
+    if (!pid) state = 'nopatient';
+    else if (held[pid]) state = 'held';
+    else if (x && x.active) state = 'active';
+    else if (x && x.last && (!repeat || Date.now() - x.last < repeat * 86400000)) {
+      state = 'done';
+      note = repeat ? 'Can start again from ' + recLongDate_(flowKey_(x.last + repeat * 86400000)) + '.' : 'Each patient goes through it once.';
+    } else if (allBaseline || baseline[pre._key]) {
+      state = 'baseline';
+      note = '"Also start patients who already match" is off, so they were only noted.';
+    } else if (!isEmail_(ctx.who.email)) {
+      state = 'noemail';
+      note = 'While testing, their emails still come to you. Sending to patients, they are skipped.';
+    } else { state = will < cap ? 'will' : 'later'; will++; }
+    if (rows.length < 400) rows.push({ id: pid, name: name, state: state, note: note });
   }
-  return { ok: true, total: pool.length, checked: checked, count: count, sample: sample, partial: checked < pool.length };
+  const order = ['will', 'later', 'baseline', 'active', 'done', 'noemail', 'held', 'nopatient'];
+  rows.sort(function (a, b) { return order.indexOf(a.state) - order.indexOf(b.state) || String(a.name).localeCompare(String(b.name)); });
+  return { ok: true, total: pool.length, checked: checked, count: count, partial: checked < pool.length,
+    rows: rows, more: Math.max(0, count - rows.length), live: live, mode: flow.sendMode === 'real' ? 'real' : 'test' };
+}
+
+// Hold a patient: they never start this flow, and it stops for them now if they're in it
+function flowHold_(body, session) {
+  const flowId = String(body.flowId || '');
+  if (!/^[A-Za-z0-9_-]{5,60}$/.test(flowId)) return { ok: false, error: 'BAD_REQUEST' };
+  const cfg = getConfig_();
+  const doc = flowPatient_(cfg, String(body.patientId || ''));
+  if (!doc) return { ok: false, error: 'NO_PATIENT' };
+  const now = new Date().toISOString();
+  const who = String(session.name || 'staff');
+  const writes = [updateWrite_(cfg, FLOW_HOLDS_ + '/' + flowHoldId_(flowId, doc._id), {
+    flowId: flowId, patientId: doc._id, patientName: flowWho_(doc).name, note: String(body.note || '').slice(0, 200),
+    by: who, byUid: String(session.uid || ''), at: now,
+  })];
+  let stopped = 0;
+  fsQuery_(cfg, FLOW_RUNS_, 'patientId', 'EQUAL', doc._id, 200).forEach(function (r) {
+    if (r.flowId !== flowId || r.status !== 'active') return;
+    writes.push(patchWrite_(cfg, FLOW_RUNS_ + '/' + r._id, { status: 'stopped', reason: 'Held by ' + who + '.', next: '', updatedAt: now }));
+    stopped++;
+  });
+  commitWrites_(cfg, writes);
+  console.log('Flow ' + flowId + ': ' + flowWho_(doc).name + ' held by ' + who);
+  return { ok: true, patientId: doc._id, stopped: stopped };
+}
+
+function flowRelease_(body, session) {
+  const flowId = String(body.flowId || '');
+  const pid = String(body.patientId || '');
+  if (!/^[A-Za-z0-9_-]{5,60}$/.test(flowId) || !recDocIdOk_(pid)) return { ok: false, error: 'BAD_REQUEST' };
+  const cfg = getConfig_();
+  commitWrites_(cfg, [deleteWrite_(cfg, FLOW_HOLDS_ + '/' + flowHoldId_(flowId, pid))]);
+  console.log('Flow ' + flowId + ': ' + pid + ' released by ' + session.name);
+  return { ok: true };
+}
+
+function flowHolds_(body) {
+  const flowId = String(body.flowId || '');
+  if (!/^[A-Za-z0-9_-]{5,60}$/.test(flowId)) return { ok: false, error: 'BAD_REQUEST' };
+  const list = fsQuery_(getConfig_(), FLOW_HOLDS_, 'flowId', 'EQUAL', flowId, 2000).map(function (h) {
+    return { patientId: String(h.patientId || ''), patientName: String(h.patientName || ''), by: String(h.by || ''),
+      at: String(h.at || ''), note: String(h.note || '') };
+  }).sort(function (a, b) { return b.at.localeCompare(a.at); });
+  return { ok: true, holds: list };
+}
+
+// Runs a new run's first cards straight away (emails still wait for 9 am to 6 pm)
+function flowKick_(cfg, flow, ids, memo) {
+  const deadline = Date.now() + 90000;
+  ids.forEach(function (rid) {
+    if (Date.now() > deadline) return;   // the 15-minute run picks up the rest
+    const r = fsGetDoc_(cfg, FLOW_RUNS_ + '/' + rid);
+    if (!r) return;
+    r._id = rid;
+    try { flowStep_(cfg, flow, r, memo, deadline); } catch (e) { flowFail_(cfg, flow, r, e); }
+  });
+}
+
+// "Start now" from See who's next: daily-check flows only. The rules are checked again first.
+function flowStartNow_(body, session) {
+  const flowId = String(body.flowId || '');
+  if (!/^[A-Za-z0-9_-]{5,60}$/.test(flowId)) return { ok: false, error: 'BAD_REQUEST' };
+  const ids = uniq_((Array.isArray(body.patientIds) ? body.patientIds : []).map(String)).slice(0, 50);
+  if (!ids.length) return { ok: false, error: 'BAD_REQUEST' };
+  const cfg = getConfig_();
+  const flow = fsGetDoc_(cfg, 'email_flows/' + flowId);
+  if (!flow || flow.status !== 'live') return { ok: false, error: 'NOT_LIVE' };
+  flow._id = flowId;
+  if (((flow.trigger || {}).event || 'purchase') !== 'daily') return { ok: false, error: 'BAD_REQUEST' };
+  if (!Array.isArray(flow.steps) || !flow.steps.length) return { ok: false, error: 'NOT_LIVE' };
+
+  const lock = LockService.getScriptLock();   // so the 15-minute run can't step the same patients at the same time
+  if (!lock.tryLock(30000)) return { ok: false, error: 'BUSY' };
+  try {
+    const memo = { pts: {} };
+    const today = flowKey_(Date.now());
+    const made = [];
+    const skipped = [];
+    ids.forEach(function (raw) {
+      const doc = flowPatient_(cfg, raw);
+      if (!doc) { skipped.push({ id: raw, name: '', why: 'not found' }); return; }
+      memo.pts[doc._id] = doc;
+      const name = flowWho_(doc).name;
+      if (flowHeld_(cfg, memo, flowId, doc._id)) { skipped.push({ id: doc._id, name: name, why: 'held' }); return; }
+      if (fsQuery_(cfg, FLOW_RUNS_, 'patientId', 'EQUAL', doc._id, 100).some(function (r) { return r.flowId === flowId && r.status === 'active'; })) {
+        skipped.push({ id: doc._id, name: name, why: 'already in the flow' });
+        return;
+      }
+      const run = { patientId: doc._id, kind: 'daily', product: '', purchaseDate: today, sourceKey: docId_(doc.PttID || doc._id) };
+      const ctx = flowCtx_(cfg, run, memo);
+      if (!ctx || !flowGroupOk_(cfg, flow.trigger.rules, run, ctx)) { skipped.push({ id: doc._id, name: name, why: "doesn't match the rules now" }); return; }
+      const rid = flowPart_(flowId) + '__' + flowPart_(doc._id) + '__m' + Date.now().toString(36) + Math.floor(Math.random() * 1000);
+      commitWrites_(cfg, [updateWrite_(cfg, FLOW_RUNS_ + '/' + rid, flowNewRun_(flow, doc, {
+        kind: 'daily', purchaseDate: today, sourceKey: run.sourceKey, sourceId: String(doc.PttID || doc._id),
+        apptKeys: (flow.stop || {}).booking === true ? flowUpcoming_(cfg, doc, memo) : [],
+        events: [{ at: new Date().toISOString(), what: 'Started now by ' + String(session.name || 'staff') + '.' }],
+      }))]);
+      made.push(rid);
+    });
+    flowKick_(cfg, flow, made, memo);
+    console.log('Flow ' + flowId + ': ' + made.length + ' started now by ' + session.name);
+    return { ok: true, started: made.length, skipped: skipped };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// "Start again" on a finished, stopped or failed run: the same purchase, visit or daily check, from the first card
+function flowRestart_(body, session) {
+  const rid = String(body.runId || '');
+  if (!/^[A-Za-z0-9_-]{5,200}$/.test(rid)) return { ok: false, error: 'BAD_REQUEST' };
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) return { ok: false, error: 'BUSY' };
+  try {
+    const cfg = getConfig_();
+    const old = fsGetDoc_(cfg, FLOW_RUNS_ + '/' + rid);
+    if (!old) return { ok: false, error: 'NOT_FOUND' };
+    if (old.status === 'active') return { ok: false, error: 'NOT_FINISHED' };
+    if (!old.patientId || !/^[A-Za-z0-9_-]{5,60}$/.test(String(old.flowId || ''))) return { ok: false, error: 'NO_PATIENT' };
+    const flow = fsGetDoc_(cfg, 'email_flows/' + old.flowId);
+    if (!flow || flow.status !== 'live' || !Array.isArray(flow.steps) || !flow.steps.length) return { ok: false, error: 'NOT_LIVE' };
+    flow._id = String(old.flowId);
+    const memo = { pts: {} };
+    const doc = flowPatient_(cfg, String(old.patientId));
+    if (!doc) return { ok: false, error: 'NO_PATIENT' };
+    memo.pts[doc._id] = doc;
+    if (flowHeld_(cfg, memo, flow._id, doc._id)) return { ok: false, error: 'HELD' };
+    if (fsQuery_(cfg, FLOW_RUNS_, 'patientId', 'EQUAL', doc._id, 100).some(function (r) { return r.flowId === flow._id && r.status === 'active'; })) {
+      return { ok: false, error: 'ALREADY' };
+    }
+    const nid = rid.replace(/__r[a-z0-9]+$/, '') + '__r' + Date.now().toString(36);
+    commitWrites_(cfg, [updateWrite_(cfg, FLOW_RUNS_ + '/' + nid, flowNewRun_(flow, doc, {
+      kind: String(old.kind || 'purchase'), product: String(old.product || ''), purchaseDate: String(old.purchaseDate || flowKey_(Date.now())),
+      invoiceId: String(old.invoiceId || ''), soldBy: String(old.soldBy || ''), visitDate: String(old.visitDate || ''),
+      visitServices: Array.isArray(old.visitServices) ? old.visitServices : [], visitStaff: Array.isArray(old.visitStaff) ? old.visitStaff : [],
+      sourceKey: String(old.sourceKey || ''), sourceId: String(old.sourceId || ''),
+      apptKeys: (flow.stop || {}).booking === true ? flowUpcoming_(cfg, doc, memo) : [],
+      events: [{ at: new Date().toISOString(), what: 'Started again by ' + String(session.name || 'staff') + '.' }],
+    }))]);
+    flowKick_(cfg, flow, [nid], memo);
+    return { ok: true, id: nid };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function flowStopRun_(id, session) {
