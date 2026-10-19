@@ -14,14 +14,18 @@
   <script>
     // Ask for the form straight away, while the page's code is still downloading
     (function () {
-      var t = "";
-      try { t = new URLSearchParams(location.hash.slice(1)).get("t") || ""; } catch (e) { /* left empty */ }
+      var t = "", a = [];
+      try {
+        var p = new URLSearchParams(location.hash.slice(1));
+        t = p.get("t") || "";
+        a = p.getAll("a").slice(0, 5);
+      } catch (e) { /* left empty */ }
       if (!/^p1\./.test(t)) return;
-      window.__pfT = t;
+      window.__pfHash = location.hash;
       window.__pfGet = fetch("https://script.google.com/macros/s/AKfycbzb4J7itwDNblPVtBbbZoxdcd2DOqmiZTMXeI7lnRIKuCV92YjJ6hHgS74wz3G9uqOuSA/exec", {
         method: "POST",
         headers: { "Content-Type": "text/plain;charset=utf-8" },
-        body: JSON.stringify({ action: "publicForm", op: "get", t: t }),
+        body: JSON.stringify({ action: "publicForm", op: "get", t: t, picks: a }),
       }).then(function (r) { return r.json(); });
     })();
   </script>

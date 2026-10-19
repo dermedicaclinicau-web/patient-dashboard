@@ -103,16 +103,16 @@ async function main() {
     return i > 0 ? { id: s.slice(0, i), value: s.slice(i + 1).trim() } : null;
   }).filter((x) => x && x.value).slice(0, 5);
   const lock = params.get("lock") === "1";
-  // form.html already asked for the form while this code downloaded
-  const early = window.__pfT === t && window.__pfGet ? window.__pfGet : null;
+  const picksRaw = params.getAll("a").slice(0, 5);   // sent as they are, so the server tells each button apart
+  // form.html already asked for this exact link while this code downloaded
+  const early = window.__pfHash === location.hash && window.__pfGet ? window.__pfGet : null;
   let res;
-  try { res = early ? await early.catch(() => call({ op: "get", t })) : await call({ op: "get", t }); }
+  try { res = early ? await early.catch(() => call({ op: "get", t, picks: picksRaw })) : await call({ op: "get", t, picks: picksRaw }); }
   catch { state("SERVER"); return; }
   if (!res || res.problem) { state((res && res.problem) || "SERVER"); return; }
   if (res.done) { state("DONE"); return; }
-  mountForm(t, res, { picks, lock });
+  mountForm(t, res, { picks, lock, picksRaw });
 }
-
 // Pictures arrive after the form is showing, so they never hold it up
 function loadImages(t, res, sheet) {
   const put = (imgs) => $all(sheet, "[data-bank-img]").forEach((el) => {
@@ -409,7 +409,8 @@ function mountForm(t, res, pre = {}) {
     sendBtn.textContent = "Sending…";
     msgEl.textContent = "";
     try {
-      const r = await call({ op: "submit", t, answers, signatures, recordDate: recordDate(), version: ver.version, picked: kept });
+      const r = await call({ op: "submit", t, answers, signatures, recordDate: recordDate(), version: ver.version,
+        picked: kept, picks: pre.picksRaw || [] });
       if (r && r.ok && !r.problem) {
         sent = true;
         thanks(after, patient.firstName, false);
@@ -434,3 +435,5 @@ function mountForm(t, res, pre = {}) {
 }
 
 main();
+// Another button in the same email, opened in this same tab: only the #… part changes, so load it fresh
+window.addEventListener("hashchange", () => location.reload());

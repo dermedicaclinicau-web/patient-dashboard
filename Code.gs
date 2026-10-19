@@ -10713,7 +10713,19 @@ function pfRead_(t) {
     return { tid: String(a[0]), pid: pid, cid: String(a[2] || ''), exp: Number(a[3]) || 0, raw: m[0] };
   } catch (e) { return null; }
 }
-const pfDoneKey_ = function (tok) { return 'o_' + flowHash_([tok.tid, tok.pid, tok.cid].join('|')); };
+const PF_LINK_MAX_ = 10;   // sends allowed from one email link (all its buttons together)
+// The answers a button fills in (from its link), tidied, so each button counts as its own form
+function pfPicks_(raw) {
+  return (Array.isArray(raw) ? raw : []).slice(0, 5)
+    .map(function (s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 200); })
+    .filter(function (s) { return /^[a-z0-9_-]{1,80}:./.test(s); })
+    .sort();
+}
+const pfLinkKey_ = function (tok) { return 'o_' + flowHash_([tok.tid, tok.pid, tok.cid].join('|')); };
+// No preset answer: the same key as before (so forms already sent are still recognised)
+const pfDoneKey_ = function (tok, picks) {
+  return picks && picks.length ? 'o_' + flowHash_([tok.tid, tok.pid, tok.cid, picks.join('|')].join('|')) : pfLinkKey_(tok);
+};
 
 // form.html#f=<id> links in an email → this patient's own link
 function mktFormLinks_(html, cid, pid) {
@@ -10883,9 +10895,10 @@ function handlePublicForm_(body) {
     const L = pfLoad_(cfg, tok);
     if (L.problem) return { ok: true, problem: L.problem };
     const op = String(body.op || '');
-    if (op === 'get') return pfGet_(cfg, tok, L);
+    const picks = pfPicks_(body.picks);
+    if (op === 'get') return pfGet_(cfg, tok, L, picks);
     if (op === 'images') return pfImages_(cfg, L);
-    if (op === 'submit') return pfSubmit_(cfg, tok, L, body);
+    if (op === 'submit') return pfSubmit_(cfg, tok, L, body, picks);
     return { ok: false, error: 'BAD_REQUEST' };
   } catch (err) {
     console.error('Online form failed: ' + (err && err.stack ? err.stack : err));
@@ -10893,9 +10906,8 @@ function handlePublicForm_(body) {
   }
 }
 
-function pfGet_(cfg, tok, L) {
-  if (!L.test && fsGetDoc_(cfg, PF_DONE_ + '/' + pfDoneKey_(tok))) return { ok: true, done: true };
-  // Pictures are fetched separately (op "images"), so the form shows without waiting for them
+function pfGet_(cfg, tok, L, picks) {
+  if (!L.test && fsGetDoc_(cfg, PF_DONE_ + '/' + pfDoneKey_(tok, picks))) return { ok: true, done: true };  // Pictures are fetched separately (op "images"), so the form shows without waiting for them
   const ids = uniq_(L.ver.fields
     .filter(function (f) { return f && f.type === 'image' && f.fileId; })
     .map(function (f) { return String(f.fileId); }));
@@ -10912,7 +10924,7 @@ function pfGet_(cfg, tok, L) {
   };
 }
 
-function pfSubmit_(cfg, tok, L, body) {
+function pfSubmit_(cfg, tok, L, body, picks) {
   if (L.test) return { ok: true, problem: 'TEST' };
   if (Number(body.version) !== Number(L.tpl.version)) return { ok: true, problem: 'CHANGED' };
   const inA = body.answers && typeof body.answers === 'object' ? body.answers : {};
@@ -10995,11 +11007,16 @@ function pfSubmit_(cfg, tok, L, body) {
      createdBy: testLive ? 'Patient (online) · Test' : 'Patient (online)', createdByUid: '',
      online: { campaignId: tok.cid, at: now.toISOString(), changed: changed.slice(0, 5), test: testLive, picked: picked },
   };
-  const key = pfDoneKey_(tok);
+  const key = pfDoneKey_(tok, picks);
+  if (picks.length) {   // several buttons, one link: a sensible limit
+    const sent = fsQuery_(cfg, PF_DONE_, 'linkKey', 'EQUAL', pfLinkKey_(tok), PF_LINK_MAX_ + 1).length;
+    if (sent >= PF_LINK_MAX_) return { ok: true, problem: 'DONE' };
+  }
   const base = fsBase_(cfg);
   const ok = mktCommit_(cfg, [
     { update: { name: base + '/' + PF_DONE_ + '/' + key, fields: toFields_({
-      templateId: tok.tid, patientId: doc._id, campaignId: tok.cid, submissionId: subId, at: now.toISOString() }) },
+      templateId: tok.tid, patientId: doc._id, campaignId: tok.cid, submissionId: subId, at: now.toISOString(),
+      linkKey: pfLinkKey_(tok), picks: picks }) },
       currentDocument: { exists: false } },
     { update: { name: base + '/form_submissions/' + subId, fields: toFields_(sub) }, currentDocument: { exists: false } },
   ]);
