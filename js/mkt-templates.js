@@ -926,7 +926,11 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
     }
     measure();
   }
-
+  // Does the email have a button that opens a form?
+  const hasFormButton = () => blocks().some((b) =>
+    (b.type === "button" && b.link === "form" && b.formId) ||
+    (b.type === "buttons" && (b.items || []).some((it) => it.link === "form" && it.formId)));
+    
   /* ---------- Send a test ---------- */
   async function sendTest() {
     await save();
@@ -942,6 +946,9 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
           <input type="search" class="fe-input" data-role="q" placeholder="Search for a patient" autocomplete="off" /></label>
         <div class="mk-hits" data-role="hits"></div>
         <p class="mk-picked" data-role="picked" hidden></p>
+        ${hasFormButton() ? `<label class="fe-check"><input type="checkbox" name="real" /> Let me send the form for real</label>
+          <small class="fe-note">The form button opens the form for the patient above. Pressing Send saves it to their record
+            (marked as a test) and tells the staff, like a real patient. Use a test patient.</small>` : ""}
         <p class="lh-error" role="alert" hidden></p>
         <div class="lh-actions">
           <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
@@ -987,13 +994,28 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       const to = [...new Set((form.elements.to.value.match(EMAIL_RE) || []).map((x) => x.toLowerCase()))];
       if (!to.length) { err.textContent = "Add an email address to send it to."; err.hidden = false; return; }
       if (to.length > 5) { err.textContent = "Send to 5 addresses at most."; err.hidden = false; return; }
+      const real = !!(form.elements.real && form.elements.real.checked);
+      if (real && !patient) {
+        err.textContent = 'Choose the patient in "Fill in the tags as". The form is saved to their record.';
+        err.hidden = false;
+        q.focus();
+        return;
+      }
+      if (real && !/test/i.test(patient.name)) {
+        const go = await confirmDialog({
+          title: `Save the test to ${patient.name}'s record?`,
+          message: "If you send the form, it's saved to this patient's record (marked as a test). A test patient is safer.",
+          confirmLabel: "Send the test", tone: "warning",
+        });
+        if (!go) return;
+      }
       err.hidden = true;
       const btn = form.querySelector('[type="submit"]');
       btn.disabled = true;
       btn.textContent = "Sending…";
       try {
         if (!(await save())) throw new Error("The latest changes couldn't be saved, so the test wasn't sent.");
-        const res = await callApi({ action: "marketing", op: "testTemplate", templateId: t.id, to, patientId: patient ? patient.id : "" });
+        const res = await callApi({ action: "marketing", op: "testTemplate", templateId: t.id, to, patientId: patient ? patient.id : "", real });
         if (res.problem) throw new Error(res.problem);
         dlg.close();
         showToast(`Test sent to ${to.join(", ")}`);

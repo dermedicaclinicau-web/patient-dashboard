@@ -9675,28 +9675,36 @@ function mktTestTemplate_(cfg, body, session) {
   if (used + to.length > 30) return { ok: true, problem: "You've sent a lot of tests in the last hour. Try again a bit later." };
   if (MailApp.getRemainingDailyQuota() < to.length) return { ok: true, problem: "The clinic's daily email limit has been reached. Try again tomorrow." };
 
-  let who = { name: String(session.name || ''), first: String(session.name || '').split(' ')[0] };
+  // "Let me send the form for real": the form links work like a patient's own, for the patient chosen
+  const real = body.real === true;
   const pid = String(body.patientId || '').trim();
-  if (pid && recDocIdOk_(pid)) { const p = flowPatient_(cfg, pid); if (p) who = flowWho_(p); }
+  const p = pid && recDocIdOk_(pid) ? flowPatient_(cfg, pid) : null;
+  if (real && !p) return { ok: true, problem: 'Choose the patient in "Fill in the tags as" to send the form for real.' };
+  let who = { name: String(session.name || ''), first: String(session.name || '').split(' ')[0] };
+  if (p) who = flowWho_(p);
   const parts = String(who.name || '').trim().split(/\s+/);
   const vals = { 'first name': who.first || 'there', 'last name': parts.length > 1 ? parts[parts.length - 1] : '',
     'full name': who.name || 'there', 'patient name': who.name || '' };
   const subject = '[Test] ' + (flowFill_(String(body.subject || t.subject || ''), vals, false).replace(/\s+/g, ' ').trim().slice(0, 190)
     || 'A message from Dermedica');
-  const filled = mktFormLinks_(sanitizeEmailHtml_(flowFillHtml_(raw, vals)), 'test', pid && recDocIdOk_(pid) ? pid : '');
+  const cid = real ? PF_TESTLIVE_ + Utilities.getUuid().replace(/-/g, '').slice(0, 16) : 'test';
+  const filled = mktFormLinks_(sanitizeEmailHtml_(flowFillHtml_(raw, vals)), cid, p ? p._id : '');
   const banner = '<div style="margin:0 auto 12px;max-width:600px;padding:10px 14px;border:1px dashed #f59e0b;border-radius:10px;' +
     'background:#fffbeb;color:#92400e;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:1.5">' +
-    '<strong>Test of the template "' + invEsc_(t.name || '') + '".</strong> Filled in as ' + invEsc_(who.name || 'you') +
-    '. The Unsubscribe link at the bottom works, so only press it if you want this address taken off marketing.</div>';
+    '<strong>Test of the template "' + invEsc_(t.name || '') + '".</strong> Filled in as ' + invEsc_(who.name || 'you') + '. ' +
+    (real ? '<strong>The form button works for real:</strong> sending the form saves it to ' + invEsc_(who.name) +
+      '\'s record (marked as a test) and tells the staff. ' : '') +
+    'The Unsubscribe link at the bottom works, so only press it if you want this address taken off marketing.</div>';
 
   to.forEach(function (addr) {
     const html = banner + mktPlaceFooter_(filled, mktFooterHtml_('', addr, 'test'));
     MailApp.sendEmail({ to: addr, subject: subject, htmlBody: html, body: emailHtmlToText_(html), name: 'Dermedica Clinic' });
   });
   cache.put(rk, String(used + to.length), 3600);
-  console.log('Template "' + t.name + '" test sent to ' + to.length + ' address(es) by ' + session.name);
+  console.log('Template "' + t.name + '" test sent to ' + to.length + ' address(es) by ' + session.name + (real ? ' (form for real)' : ''));
   return { ok: true, sent: to.length, to: to };
 }
+
 
 /* ===================== Marketing: campaigns ===================== */
 // A campaign is drafted in the portal (mkt_campaigns/{id}, status "draft"). Scheduling takes a copy of the template's
@@ -10460,6 +10468,10 @@ function testMarketingTracking() {
 const PF_DONE_ = 'online_forms';
 const PF_PAGE_ = PORTAL_URL_ + 'form.html';
 const PF_DAYS_ = 60;
+
+const PF_TESTLIVE_ = 'tl_';   // "Let me send the form for real" in a template test: works like a real link, marked as a test
+function pfIsTestLive_(cid) { return String(cid || '').indexOf(PF_TESTLIVE_) === 0; }
+
 const PF_LAYOUT_ = ['text_block', 'space', 'letterhead', 'watermark', 'button'];
 const PF_NO_CATS_ = ['treatment', 'prescription'];
 const PF_OK_TYPES_ = ['patient', 'short_text', 'long_text', 'email', 'number', 'date', 'record_date', 'dropdown',
@@ -10680,6 +10692,8 @@ function pfGet_(cfg, tok, L) {
     form: { name: String(L.ver.name || ''), fields: L.ver.fields, settings: L.ver.settings || {}, version: Number(L.tpl.version) },
     letterhead: lh || {}, imageIds: ids, patient: L.doc ? pfPatient_(L.doc, L.ver.fields) : {},
     after: pfAfter_(L.tpl),
+    testLive: pfIsTestLive_(tok.cid),
+
   };
 }
 
@@ -10749,14 +10763,17 @@ function pfSubmit_(cfg, tok, L, body) {
 
   const now = new Date();
   const s = L.ver.settings || {};
+  const testLive = pfIsTestLive_(tok.cid);
   const who = flowWho_(doc);
   const subId = 'pf' + Utilities.getUuid().replace(/-/g, '').slice(0, 18);
   const sub = {
-    templateId: tok.tid, templateName: String(L.ver.name || L.tpl.name || 'Form'), category: String(L.tpl.category || ''),
+     templateId: tok.tid, templateName: (testLive ? '[Test] ' : '') + String(L.ver.name || L.tpl.name || 'Form'),
+     category: String(L.tpl.category || ''),
     group: String(s.group || (L.tpl.online && L.tpl.online.group) || ''), version: Number(L.tpl.version),
     patientId: doc._id, patientPttId: String(doc.PttID || ''), patientName: who.name, recordDate: recordDate,
-    answers: answers, signatures: signatures, createdAt: now, createdBy: 'Patient (online)', createdByUid: '',
-    online: { campaignId: tok.cid, at: now.toISOString(), changed: changed.slice(0, 5) },
+     answers: answers, signatures: signatures, createdAt: now,
+     createdBy: testLive ? 'Patient (online) · Test' : 'Patient (online)', createdByUid: '',
+     online: { campaignId: tok.cid, at: now.toISOString(), changed: changed.slice(0, 5), test: testLive },
   };
   const key = pfDoneKey_(tok);
   const base = fsBase_(cfg);
@@ -10769,7 +10786,7 @@ function pfSubmit_(cfg, tok, L, body) {
   if (!ok) return { ok: true, problem: fsGetDoc_(cfg, PF_DONE_ + '/' + key) ? 'DONE' : 'SERVER' };
 
   try { pfNotify_(cfg, L, sub, subId); } catch (e) { console.warn('Online form saved, but staff not told: ' + e); }
-  if (/^[A-Za-z0-9_-]{10,40}$/.test(tok.cid)) {
+  if (!testLive && /^[A-Za-z0-9_-]{10,40}$/.test(tok.cid)) {
     try { mktOnce_(cfg, tok.cid, 'forms', doc._id, { at: now.toISOString(), submissionId: subId }, [mktInc_('stats.forms')]); }
     catch (e) { /* not a campaign (a flow), or not essential */ }
   }
@@ -10785,6 +10802,7 @@ function pfNotify_(cfg, L, sub, subId) {
   let who = all.filter(function (x) { return ids.indexOf(x.id) !== -1; });
   if (!who.length) who = all.filter(function (x) { return /^admin$/i.test(String(x.role || '')); });
   const ch = sub.online.changed || [];
+  const tag = sub.online.test ? '[Test] ' : '';
   const inner = '<h2 style="margin:0 0 6px;font-size:20px;color:#0f766e">' + invEsc_(sub.patientName) + ' filled in ' + invEsc_(sub.templateName) + '</h2>' +
     '<p style="margin:0 0 12px;color:#475569">Filled in online by the patient, ' + invEsc_(recLongDate_(sub.recordDate)) + '. It\'s saved to their record.</p>' +
     (ch.length ? '<p style="margin:0 0 6px"><strong>They changed their details on the form.</strong> Their record hasn\'t been changed:</p><ul style="margin:0 0 12px;padding-left:20px">' +
@@ -10792,13 +10810,13 @@ function pfNotify_(cfg, L, sub, subId) {
   const html = invEmailWrap_(inner, 'form-record/' + subId, 'Open the form');
   const to = uniq_(who.map(function (x) { return isEmail_(x.email) ? x.email : ''; }));
   if (to.length && MailApp.getRemainingDailyQuota() > 0) {
-    MailApp.sendEmail({ to: to.join(','), name: 'Dermedica Portal', subject: 'Online form: ' + sub.patientName + ' filled in ' + sub.templateName,
+      MailApp.sendEmail({ to: to.join(','), name: 'Dermedica Portal', subject: tag + 'Online form: ' + sub.patientName + ' filled in ' + sub.templateName,
       htmlBody: html, body: emailHtmlToText_(html) });
   }
   if (o.todo !== false && who.length) {
     staffTodoCreate_(cfg, {
       recipients: who.map(function (x) { return { id: x.id, name: x.name }; }),
-      text: 'Review: ' + sub.patientName + ' filled in ' + sub.templateName + ' online' + (ch.length ? ' (details changed)' : ''),
+      text: tag + 'Review: ' + sub.patientName + ' filled in ' + sub.templateName + ' online' + (ch.length ? ' (details changed)' : ''),
       due: flowKey_(Date.now()), patientId: sub.patientId, patientName: sub.patientName,
       taskId: '', taskName: 'Online form', runId: subId, by: 'Online form', byUid: '',
     });

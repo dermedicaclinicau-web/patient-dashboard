@@ -135,7 +135,9 @@ function mountForm(t, res) {
 
   box.innerHTML = `
     ${test ? `<p class="pf-test">This is a test link. You can try the form, but it can't be sent.
-      <button type="button" class="pf-linkbtn" data-act="thanks">See the thank-you page</button></p>` : ""}
+      <button type="button" class="pf-linkbtn" data-act="thanks">See the thank-you page</button></p>`
+      : res.testLive ? `<p class="pf-test"><strong>Staff test.</strong> This works for real: sending it saves the form to
+      ${esc(patient.name || "this patient")}'s record, marked as a test, and tells the staff.</p>` : ""}
     <p class="pf-hi">${patient.firstName ? `Hi <strong>${esc(patient.firstName)}</strong>, please` : "Please"} fill in this form for Dermedica.
       Your details are already filled in, so it only takes a few minutes.</p>
     <div class="fe-sheet ff-sheet pf-sheet" data-role="sheet">
