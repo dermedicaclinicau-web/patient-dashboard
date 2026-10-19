@@ -10976,6 +10976,11 @@ function pfSubmit_(cfg, tok, L, body) {
     if (f.fill === 'patient.address' && norm(v) !== norm(doc.Address)) changed.push({ what: 'Address', from: String(doc.Address || ''), to: v });
   });
 
+  // The answer the button in the email chose (for the staff email; the answer itself is in answers)
+  const picked = (Array.isArray(body.picked) ? body.picked : []).slice(0, 5).map(function (x) {
+    const f = x && byId[String(x.id || '')];
+    return f ? { question: String(f.label || f.title || 'Question').slice(0, 120), answer: String(x.a || '').slice(0, 200) } : null;
+  }).filter(Boolean);
   const now = new Date();
   const s = L.ver.settings || {};
   const testLive = pfIsTestLive_(tok.cid);
@@ -10988,7 +10993,7 @@ function pfSubmit_(cfg, tok, L, body) {
     patientId: doc._id, patientPttId: String(doc.PttID || ''), patientName: who.name, recordDate: recordDate,
      answers: answers, signatures: signatures, createdAt: now,
      createdBy: testLive ? 'Patient (online) · Test' : 'Patient (online)', createdByUid: '',
-     online: { campaignId: tok.cid, at: now.toISOString(), changed: changed.slice(0, 5), test: testLive },
+     online: { campaignId: tok.cid, at: now.toISOString(), changed: changed.slice(0, 5), test: testLive, picked: picked },
   };
   const key = pfDoneKey_(tok);
   const base = fsBase_(cfg);
@@ -11018,8 +11023,11 @@ function pfNotify_(cfg, L, sub, subId) {
   if (!who.length) who = all.filter(function (x) { return /^admin$/i.test(String(x.role || '')); });
   const ch = sub.online.changed || [];
   const tag = sub.online.test ? '[Test] ' : '';
+  const pk = sub.online.picked || [];
   const inner = '<h2 style="margin:0 0 6px;font-size:20px;color:#0f766e">' + invEsc_(sub.patientName) + ' filled in ' + invEsc_(sub.templateName) + '</h2>' +
     '<p style="margin:0 0 12px;color:#475569">Filled in online by the patient, ' + invEsc_(recLongDate_(sub.recordDate)) + '. It\'s saved to their record.</p>' +
+    (pk.length ? '<p style="margin:0 0 12px">Chosen from the email: ' + pk.map(function (x) {
+      return invEsc_(x.question) + ' → <strong>' + invEsc_(x.answer) + '</strong>'; }).join(', ') + '</p>' : '') +
     (ch.length ? '<p style="margin:0 0 6px"><strong>They changed their details on the form.</strong> Their record hasn\'t been changed:</p><ul style="margin:0 0 12px;padding-left:20px">' +
       ch.map(function (c) { return '<li>' + invEsc_(c.what) + ': ' + invEsc_(c.from || '(none)') + ' → <strong>' + invEsc_(c.to) + '</strong></li>'; }).join('') + '</ul>' : '');
   const html = invEmailWrap_(inner, 'form-record/' + subId, 'Open the form');
@@ -11031,7 +11039,8 @@ function pfNotify_(cfg, L, sub, subId) {
   if (o.todo !== false && who.length) {
     staffTodoCreate_(cfg, {
       recipients: who.map(function (x) { return { id: x.id, name: x.name }; }),
-      text: tag + 'Review: ' + sub.patientName + ' filled in ' + sub.templateName + ' online' + (ch.length ? ' (details changed)' : ''),
+      text: tag + 'Review: ' + sub.patientName + ' filled in ' + sub.templateName + ' online' + (ch.length ? ' (details changed)' : '') +
+        (pk.length ? ' · chose ' + pk.map(function (x) { return x.answer; }).join(', ') : ''),
       due: flowKey_(Date.now()), patientId: sub.patientId, patientName: sub.patientName,
       taskId: '', taskName: 'Online form', runId: subId, by: 'Online form', byUid: '',
     });

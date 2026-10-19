@@ -15,7 +15,7 @@ import { createRichEditor } from "./rich-editor.js";
 import { makeResizable } from "./panel-resize.js";
 import {
   esc, safeUrl, uid, BLOCKS, FONTS, MERGE_TAGS, STARTERS, styleOf, cleanDesign, newBlock, blockHtml, renderEmail,
-  footerPreview, checkDesign, CUSTOM_PIECES, customNotes, customLinks, setCustomLink, FORM_PAGE,
+  footerPreview, checkDesign, CUSTOM_PIECES, customNotes, customLinks, setCustomLink, FORM_PAGE, formLink, readFormLink,
 } from "./mkt-email.js";
 import { openCropper } from "./mkt-crop.js";
 import { listPublishedForms } from "./form-templates.js";
@@ -192,17 +192,27 @@ async function sspProducts() {
 }
 // Published forms patients can fill in online (Form Builder → Form settings)
 let formsCache = null;
+// Published forms patients can fill in online (Form Builder → Form settings), with the questions a button can answer
+const ANSWERABLE = ["single_choice", "dropdown", "checkboxes", "short_text", "long_text", "number"];
+const CHOICE = ["single_choice", "dropdown", "checkboxes"];
+const optText = (o) => (typeof o === "string" ? o : String((o && (o.label ?? o.value ?? o.text)) || ""));
+const formQuestions = (fields) => (Array.isArray(fields) ? fields : [])
+  .filter((f) => f && f.id && ANSWERABLE.includes(f.type) && String(f.label || f.title || "").trim())
+  .map((f) => ({
+    id: String(f.id), label: String(f.label || f.title).replace(/\s+/g, " ").trim().slice(0, 80),
+    options: CHOICE.includes(f.type) ? (Array.isArray(f.options) ? f.options : []).map(optText).map((s) => s.trim()).filter(Boolean) : [],
+  }));
 async function loadOnlineForms() {
   if (!formsCache) {
     try {
       formsCache = (await listPublishedForms())
         .filter((t) => t.online && t.online.on === true && !["treatment", "prescription"].includes(t.category))
-        .map((t) => ({ id: t.id, name: t.name }));
+        .map((t) => ({ id: t.id, name: t.name, questions: formQuestions(t.fields) }));
     } catch (err) { console.warn("Forms not loaded:", err); formsCache = []; }
   }
   return formsCache;
 }
-
+const questionsOf = (formId) => ((formsCache || []).find((x) => x.id === formId) || {}).questions || [];
 /* ===================== The list ===================== */
 
 const thumb = (t) => `<div class="mt-thumb-in">${renderEmail(t)}</div>`;
@@ -365,6 +375,20 @@ const fShape = (b, label = "Picture shape") => `<div class="fe-insp-field"><span
   fRange("border", "Border", Number(b.border) || 0, 0, 8, "px") +
   fColor("borderColor", "Border colour", b.borderColor, "#e2e8f0", false);
 // Where a button goes: a web page, or a form for the patient to fill in
+// A button's "Answer a question for them" settings (p = the path prefix, it = the button)
+const fAnswer = (p, it) => {
+  const qs = questionsOf(it.formId);
+  if (!qs.length) return "";
+  const q = qs.find((x) => x.id === it.ansQ);
+  return setting("Answer a question for them (optional)", `<select class="fb-select" data-k="${p}ansQ"><option value="">No</option>${
+      qs.map((x) => `<option value="${esc(x.id)}"${x.id === it.ansQ ? " selected" : ""}>${esc(x.label)}</option>`).join("")}</select>`,
+      "Two buttons can open the same form with different answers, for example Option A and Option B.") +
+    (q ? (q.options.length
+      ? setting("Their answer", `<select class="fb-select" data-k="${p}ansA"><option value="">Choose…</option>${
+          q.options.map((o) => `<option value="${esc(o)}"${o === it.ansA ? " selected" : ""}>${esc(o)}</option>`).join("")}</select>`)
+      : fText(`${p}ansA`, "Their answer", it.ansA)) + fCheck(`${p}ansLock`, "Lock it, so they can't change it", it.ansLock) : "");
+};
+// Where a button goes: a web page, or a form for the patient to fill in
 const fLink = (p, it) => fSeg(`${p}link`, "Button opens", [["url", "A web page"], ["form", "A form to fill in"]], it.link === "form" ? "form" : "url") +
   (it.link === "form"
     ? setting("Form", `<select class="fb-select" data-k="${p}formId"><option value="">${
@@ -372,7 +396,8 @@ const fLink = (p, it) => fSeg(`${p}link`, "Button opens", [["url", "A web page"]
         (formsCache || []).map((x) => `<option value="${esc(x.id)}"${x.id === it.formId ? " selected" : ""}>${esc(x.name)}</option>`).join("")}${
         it.formId && formsCache && !formsCache.some((x) => x.id === it.formId)
           ? `<option value="${esc(it.formId)}" selected>${esc(it.formName || "This form")} (not online any more)</option>` : ""}</select>`,
-        "Each patient gets their own link, with their details already filled in. To list a form here, tick “Patients can fill this in online” in its Form settings.")
+        "Each patient gets their own link, with their details already filled in. To list a form here, tick “Patients can fill this in online” in its Form settings.") +
+      (it.formId ? fAnswer(p, it) : "")
     : fText(`${p}href`, "Link", it.href, "https://"));
 const fRich = (k, label) => `<div class="fe-insp-field"><span class="fe-insp-label">${label}</span><div data-rt="${k}"></div></div>`;
 const tagChips = () => `<div class="fe-insp-field"><span class="fe-insp-label">Insert a tag</span>
@@ -763,22 +788,37 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       if (!list.length) { linksBox.innerHTML = '<p class="muted">No links or buttons yet.</p>'; return; }
       const forms = formsCache || [];
       linksBox.innerHTML = list.map((l, i) => {
-        const gone = l.formId && !forms.some((f) => f.id === l.formId);
+        const fl = readFormLink(l.href);
+        const gone = fl && !forms.some((f) => f.id === fl.id);
         const url = /^(https?:|mailto:|tel:)/i.test(l.href) && l.href !== "https://" ? l.href : "";
+        const qs = fl ? questionsOf(fl.id) : [];
+        const q = fl && qs.find((x) => x.id === fl.q);
         return `<div class="ch-link">
           <span class="ch-link-text" title="${esc(l.text)}">${esc(l.text)}</span>
           <select class="fb-select" data-linkkind="${i}" aria-label="Where ${esc(l.text)} goes">
-            <option value="url"${l.formId ? "" : " selected"}>A web page</option>
+            <option value="url"${fl ? "" : " selected"}>A web page</option>
             <optgroup label="A form to fill in">${forms.length
-              ? forms.map((f) => `<option value="form:${esc(f.id)}"${f.id === l.formId ? " selected" : ""}>${esc(f.name)}</option>`).join("")
+              ? forms.map((f) => `<option value="form:${esc(f.id)}"${fl && f.id === fl.id ? " selected" : ""}>${esc(f.name)}</option>`).join("")
               : `<option disabled>${formsCache ? "No forms are set up for online filling" : "Loading forms…"}</option>`}${
-              gone ? `<option value="form:${esc(l.formId)}" selected>This form (not online any more)</option>` : ""}</optgroup>
+              gone ? `<option value="form:${esc(fl.id)}" selected>This form (not online any more)</option>` : ""}</optgroup>
           </select>
-          ${l.formId ? '<small class="ch-link-note">Each patient gets their own link</small>'
+          ${fl ? '<small class="ch-link-note">Each patient gets their own link</small>'
             : `<input class="fe-input" data-linkurl="${i}" value="${esc(url)}" placeholder="https://" aria-label="Link for ${esc(l.text)}" />`}
+          ${fl && qs.length ? `<div class="ch-ans">
+            <select class="fb-select" data-ansq="${i}" aria-label="Answer a question for them">
+              <option value="">Answer a question for them? No</option>
+              ${qs.map((x) => `<option value="${esc(x.id)}"${x.id === fl.q ? " selected" : ""}>${esc(x.label)}</option>`).join("")}
+            </select>
+            ${q ? (q.options.length
+              ? `<select class="fb-select" data-ansa="${i}" aria-label="Their answer"><option value="">Their answer…</option>${
+                  q.options.map((o) => `<option value="${esc(o)}"${o === fl.a ? " selected" : ""}>${esc(o)}</option>`).join("")}</select>`
+              : `<input class="fe-input" data-ansa="${i}" value="${esc(fl.a)}" placeholder="Their answer" aria-label="Their answer" />`) +
+              `<label class="fe-check"><input type="checkbox" data-anslock="${i}"${fl.lock ? " checked" : ""} /> Lock it</label>` : ""}
+          </div>` : ""}
         </div>`;
       }).join("");
     }
+    
     const preview = () => { frame.srcdoc = previewDoc(b); notes.innerHTML = htmlNotes(b); drawLinks(); };
     const update = () => { b.code = ta.value; changed(); clearTimeout(pt); pt = setTimeout(preview, 300); };
     const setLink = (i, href) => { ta.value = setCustomLink(ta.value, i, href); update(); drawLinks(); };
@@ -824,7 +864,18 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       const el = e.target;
       if (el.matches("[data-linkkind]")) {
         const v = el.value;
-        setLink(Number(el.dataset.linkkind), v.startsWith("form:") ? `${FORM_PAGE}#f=${v.slice(5)}` : "https://");
+        setLink(Number(el.dataset.linkkind), v.startsWith("form:") ? formLink(v.slice(5)) : "https://");
+        return;
+      }
+      if (el.matches("[data-ansq], [data-ansa], [data-anslock]")) {
+        const i = Number(el.dataset.ansq ?? el.dataset.ansa ?? el.dataset.anslock);
+        const l = customLinks(ta.value)[i];
+        const fl = l && readFormLink(l.href);
+        if (!fl) return;
+        if (el.matches("[data-ansq]")) { fl.q = el.value; fl.a = ""; }
+        else if (el.matches("[data-ansa]")) fl.a = el.value.trim();
+        else fl.lock = el.checked;
+        setLink(i, formLink(fl.id, fl));
         return;
       }
       if (el.matches("[data-linkurl]")) { setLink(Number(el.dataset.linkurl), el.value.trim() || "https://"); return; }
@@ -855,7 +906,7 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
     loadOnlineForms().then(() => { if (dlg.open) drawLinks(); });
     ta.focus();
   }
-  
+
   /* ---------- Blocks: add, move, copy, delete ---------- */
   function insertBlock(type, at) {
     const nb = newBlock(type);
@@ -995,7 +1046,10 @@ export async function mountTemplateBuilder(container, { id, staff = null } = {})
       if (/formId$/.test(k)) {
         const fm = (formsCache || []).find((x) => x.id === el.value);
         setPath(target(), k.replace(/formId$/, "formName"), fm ? fm.name : "");
+        setPath(target(), k.replace(/formId$/, "ansQ"), "");   // a different form: its questions are different
+        setPath(target(), k.replace(/formId$/, "ansA"), "");
       }
+      if (/ansQ$/.test(k)) setPath(target(), k.replace(/ansQ$/, "ansA"), "");
     }
     else return;
     drawSide();

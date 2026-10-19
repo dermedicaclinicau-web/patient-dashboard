@@ -6892,27 +6892,11 @@ a.md-quiet:hover { border-color: var(--primary); }
 .ef-mgroup > .lh-btn { margin: 0 0 8px; }
 .ef-run-acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 
-/* Custom HTML block */
-.mb-code, .ch-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.5; tab-size: 2; white-space: pre; }
-.mb-code { min-height: 220px; resize: vertical; }
-.mb-code-acts { flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-.mb-htmlnotes { margin: 0; padding-left: 18px; color: #b45309; font-size: 12.5px; line-height: 1.45; }
-.mb-htmlnotes li { margin: 0 0 4px; }
-.mb-htmlok { margin: 0; color: #027a48; font-size: 12.5px; }
-
-dialog.lh-dialog.ch-dlg { width: min(1400px, 96vw); max-width: 96vw; height: 92vh; max-height: 92vh; padding: 0; overflow: hidden; }
-.ch-wrap { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; height: 100%; }
-.ch-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #e5e7eb; }
-.ch-head h3 { margin: 0; }
-.ch-head p { margin: 2px 0 0; font-size: 13px; }
-.ch-head-acts { display: flex; gap: 8px; flex-wrap: wrap; }
-.ch-pal { display: grid; gap: 6px; padding: 10px 18px; border-bottom: 1px solid #e5e7eb; max-height: 28vh; overflow: auto; }
-.ch-pal-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-.ch-pal-row > span { width: 72px; font-size: 12px; font-weight: 600; color: #64748b; }
-.ch-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border: 1px solid #e2e8f0; border-radius: 999px; background: #fff; font-size: 12.5px; cursor: pointer; }
-.ch-chip:hover { border-color: #0f766e; color: #0f766e; }
-.ch-chip.is-tag { background: #f0fdfa; }
-.ch-sw i { width: 12px; height: 12px; border-radius: 50%; border: 1px solid rgba(0, 0, 0, .15); }
+.ch-dlg .ch-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border: 1px solid #e2e8f0; border-radius: 999px;
+  background: #fff; color: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer; }
+.ch-dlg .ch-chip:hover { border-color: #0f766e; color: #0f766e; }
+.ch-dlg .ch-chip.is-tag { background: #f0fdfa; }
+.ch-dlg .ch-sw i { width: 12px; height: 12px; border-radius: 50%; border: 1px solid rgba(0, 0, 0, .15); }
 .ch-split { display: grid; grid-template-columns: 1fr 1fr; min-height: 0; }
 .ch-code { width: 100%; height: 100%; padding: 14px; border: 0; border-right: 1px solid #1e293b; resize: none; outline: none; background: #0f172a; color: #e2e8f0; }
 .ch-prev { display: flex; flex-direction: column; min-height: 0; background: #f8fafc; }
@@ -6921,12 +6905,16 @@ dialog.lh-dialog.ch-dlg { width: min(1400px, 96vw); max-width: 96vw; height: 92v
 .ch-frame.is-mobile { width: 375px; border-left: 1px solid #e5e7eb; border-right: 1px solid #e5e7eb; }
 .ch-bottom { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; padding: 10px 18px 12px; border-top: 1px solid #e5e7eb; max-height: 28vh; overflow: auto; }
 .ch-bottom strong { display: block; margin: 0 0 6px; font-size: 13px; }
-.ch-link { display: grid; grid-template-columns: minmax(0, 1fr) 200px minmax(0, 1fr); gap: 6px; align-items: center; margin: 0 0 6px; }
-.ch-link-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
-.ch-link .fe-input, .ch-link .fb-select { min-width: 0; padding: 6px 8px; font-size: 12.5px; }
-.ch-link-note { font-size: 12px; color: #027a48; }
+.ch-dlg .ch-link { display: grid; grid-template-columns: minmax(0, 1fr) 200px minmax(0, 1fr); gap: 6px; align-items: center;
+  margin: 0 0 6px; padding: 0; color: inherit; font-size: inherit; cursor: default; }
+.ch-dlg .ch-link-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.ch-dlg .ch-link .fe-input, .ch-dlg .ch-link .fb-select { min-width: 0; padding: 6px 8px; font-size: 12.5px; }
+.ch-dlg .ch-link-note { font-size: 12px; color: #027a48; }
+.ch-dlg .ch-ans { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 0 6px 14px; }
+.ch-dlg .ch-ans .fb-select, .ch-dlg .ch-ans .fe-input { min-width: 0; max-width: 260px; padding: 6px 8px; font-size: 12.5px; }
 @media (max-width: 900px) { .ch-bottom { grid-template-columns: 1fr; } }
 @media (max-width: 900px) {
   .ch-split { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
   .ch-code { border-right: 0; }
 }
+

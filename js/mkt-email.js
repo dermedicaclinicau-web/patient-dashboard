@@ -13,8 +13,24 @@ export const safeUrl = (u) => {
 // "Open a form" buttons: the form page. Each patient's own link is put in when the email is sent (Code.gs mktFormLinks_).
 export const FORM_PAGE = "https://dermedicaclinicau-web.github.io/patient-dashboard/form.html";
 export const linkOf = (x) => (x && x.link === "form"
-  ? (/^[A-Za-z0-9_-]{10,40}$/.test(String(x.formId || "")) ? `${FORM_PAGE}#f=${x.formId}` : "")
+  ? (/^[A-Za-z0-9_-]{10,40}$/.test(String(x.formId || "")) ? formLink(x.formId, { q: x.ansQ, a: x.ansA, lock: x.ansLock }) : "")
   : String((x && x.href) || ""));
+// A form link, optionally answering one question: form.html#f=<id>&a=<question id>:<answer>[&lock=1]
+export function formLink(id, ans) {
+  let u = `${FORM_PAGE}#f=${id}`;
+  if (ans && ans.q) u += `&a=${encodeURIComponent(`${ans.q}:${ans.a || ""}`)}${ans.lock ? "&lock=1" : ""}`;
+  return u;
+}
+// → { id, q, a, lock } or null
+export function readFormLink(href) {
+  const m = /\/form\.html#f=([A-Za-z0-9_-]{10,40})(.*)$/.exec(String(href || "").replace(/&amp;/g, "&"));
+  if (!m) return null;
+  let p;
+  try { p = new URLSearchParams(m[2].replace(/^&/, "")); } catch { p = new URLSearchParams(); }
+  const a = p.get("a") || "";
+  const i = a.indexOf(":");
+  return { id: m[1], q: i > 0 ? a.slice(0, i) : "", a: i > 0 ? a.slice(i + 1) : "", lock: p.get("lock") === "1" };
+}
 const linkProblem = (x, label) => (x.link === "form"
   ? `The "${label}" button needs a form chosen.` : `The "${label}" button has no link yet.`);
 export const uid = () => Math.random().toString(36).slice(2, 10);
@@ -44,7 +60,8 @@ export function shapeCss(b) {
 }
 
 const col = () => ({ src: "", title: "A title", html: "<p>A few words about it.</p>", label: "", href: "" });
-const btnItem = (label = "Button", style = "filled") => ({ label, href: "", style, link: "url", formId: "", formName: "" });
+const btnItem = (label = "Button", style = "filled") => ({ label, href: "", style, link: "url", formId: "", formName: "",
+  ansQ: "", ansA: "", ansLock: false });
 export const BLOCKS = {
   header: { label: "Logo header", make: () => ({ logo: "", logoWidth: 160, align: "center", bg: "", text: "DERMEDICA" }) },
   heading: { label: "Heading", make: () => ({ text: "A heading", size: "large", align: "left" }) },
@@ -53,7 +70,8 @@ export const BLOCKS = {
   image: { label: "Image", make: () => ({ src: "", alt: "", href: "", caption: "", width: 100, align: "center", edge: false, ...SHAPE() }) },
   imagetext: { label: "Picture and text", make: () => ({ src: "", alt: "", href: "", side: "left", title: "A title",
     html: "<p>A few words to go with the picture.</p>", label: "", btnHref: "", ...SHAPE() }) },
-  button: { label: "Button", make: () => ({ label: "Book now", href: "", link: "url", formId: "", formName: "", bg: "", color: "#ffffff", align: "center", full: false }) },
+  button: { label: "Button", make: () => ({ label: "Book now", href: "", link: "url", formId: "", formName: "",
+    ansQ: "", ansA: "", ansLock: false, bg: "", color: "#ffffff", align: "center", full: false }) },
   buttons: { label: "Buttons side by side", make: () => ({ items: [btnItem("Book now"), btnItem("Shop skincare", "outline")],
     bg: "", color: "#ffffff", align: "center", same: false }) },
   product: { label: "Product", make: () => ({ src: "", name: "Product name", price: "", desc: "A short line about the product.", href: "", label: "Shop now", ...SHAPE() }) },
@@ -85,8 +103,8 @@ export function cleanDesign(d) {
       const list = Array.isArray(b.items) && b.items.length ? b.items : BLOCKS.buttons.make().items;
       b.items = list.slice(0, 3).map((it) => ({ label: String((it && it.label) || "Button"), href: String((it && it.href) || ""),
         style: it && it.style === "outline" ? "outline" : "filled", link: it && it.link === "form" ? "form" : "url",
-        formId: String((it && it.formId) || ""), formName: String((it && it.formName) || "") }));
-    }
+        formId: String((it && it.formId) || ""), formName: String((it && it.formName) || ""),
+        ansQ: String((it && it.ansQ) || ""), ansA: String((it && it.ansA) || ""), ansLock: !!(it && it.ansLock) }));    }
   });
   return { style: styleOf(d), blocks };
 }
@@ -485,6 +503,12 @@ export function checkDesign(t) {
   blocks.forEach((b) => {
     if (b.type === "button" && !safeUrl(linkOf(b))) out.push(linkProblem(b, b.label || "Button"));
     if (b.type === "buttons") (b.items || []).forEach((it) => { if (!safeUrl(linkOf(it))) out.push(linkProblem(it, it.label || "Button")); });
+    const noAns = (x, label) => { if (x.link === "form" && x.ansQ && !String(x.ansA || "").trim()) out.push(`The "${label}" button answers a question, but no answer is chosen.`); };
+    if (b.type === "button") noAns(b, b.label || "Button");
+    if (b.type === "buttons") (b.items || []).forEach((it) => noAns(it, it.label || "Button"));
+    if (b.type === "html" && customLinks(b.code).some((l) => { const f = readFormLink(l.href); return f && f.q && !f.a.trim(); })) {
+      out.push("A button in a custom HTML block answers a question, but no answer is chosen.");
+    }
     if (b.type === "image" && !safeUrl(b.src)) out.push("An image block has no picture yet.");
     if (b.type === "imagetext") {
       if (!safeUrl(b.src)) out.push("A picture and text block has no picture yet.");

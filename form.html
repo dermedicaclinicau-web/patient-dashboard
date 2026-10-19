@@ -14,14 +14,14 @@
   <script>
     // Ask for the form straight away, while the page's code is still downloading
     (function () {
-      var h = location.hash.slice(1);
-      try { h = decodeURIComponent(h); } catch (e) { /* left as it is */ }
-      if (!/^t=p1\./.test(h)) return;
-      window.__pfT = h.slice(2);
+      var t = "";
+      try { t = new URLSearchParams(location.hash.slice(1)).get("t") || ""; } catch (e) { /* left empty */ }
+      if (!/^p1\./.test(t)) return;
+      window.__pfT = t;
       window.__pfGet = fetch("https://script.google.com/macros/s/AKfycbzb4J7itwDNblPVtBbbZoxdcd2DOqmiZTMXeI7lnRIKuCV92YjJ6hHgS74wz3G9uqOuSA/exec", {
         method: "POST",
         headers: { "Content-Type": "text/plain;charset=utf-8" },
-        body: JSON.stringify({ action: "publicForm", op: "get", t: window.__pfT }),
+        body: JSON.stringify({ action: "publicForm", op: "get", t: t }),
       }).then(function (r) { return r.json(); });
     })();
   </script>
@@ -93,7 +93,7 @@
     .pf-sk.is-s { width: 70%; }
     .pf-load p { margin: 6px 0 0; text-align: center; }
     @keyframes pf-sh { to { background-position: -200% 0; } }
-
+    .pf-chosen { margin: 6px 0 0; font-size: 12.5px; color: #027a48; }
     /* Phones: the form fills the screen */
     @media (max-width: 640px) {
       .pf { padding: 0; }

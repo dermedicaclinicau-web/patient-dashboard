@@ -91,11 +91,18 @@ function thanks(after, first, preview) {
 }
 
 async function main() {
-  let h = "";
-  try { h = decodeURIComponent((location.hash || "").slice(1)); } catch { h = ""; }
-  if (/^f=/.test(h)) { state("TEMPLATE"); return; }
-  const t = h.replace(/^t=/, "");
+  // #t=<signed link>, and optionally &a=<question id>:<answer> (from the button they pressed) and &lock=1
+  const raw = (location.hash || "").slice(1);
+  let params;
+  try { params = new URLSearchParams(raw); } catch { params = new URLSearchParams(); }
+  if (params.has("f") && !params.has("t")) { state("TEMPLATE"); return; }
+  const t = params.get("t") || (/^p1\./.test(raw) ? raw.split("&")[0] : "");
   if (!/^p1\./.test(t)) { state("BAD_LINK"); return; }
+  const picks = params.getAll("a").map((s) => {
+    const i = s.indexOf(":");
+    return i > 0 ? { id: s.slice(0, i), value: s.slice(i + 1).trim() } : null;
+  }).filter((x) => x && x.value).slice(0, 5);
+  const lock = params.get("lock") === "1";
   // form.html already asked for the form while this code downloaded
   const early = window.__pfT === t && window.__pfGet ? window.__pfGet : null;
   let res;
@@ -103,7 +110,7 @@ async function main() {
   catch { state("SERVER"); return; }
   if (!res || res.problem) { state((res && res.problem) || "SERVER"); return; }
   if (res.done) { state("DONE"); return; }
-  mountForm(t, res);
+  mountForm(t, res, { picks, lock });
 }
 
 // Pictures arrive after the form is showing, so they never hold it up
@@ -116,8 +123,47 @@ function loadImages(t, res, sheet) {
   if (!(res.imageIds || []).length) return;
   call({ op: "images", t }).then((r) => { if (r && r.images) put(r.images); }).catch(() => { /* the form still works without them */ });
 }
+// Answers a question from the button they pressed in the email. Locked: the other choices are turned off.
+function prefillField(w, value, lock) {
+  const norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
+  const want = norm(value);
+  const fire = (el) => { el.dispatchEvent(new Event("change", { bubbles: true })); el.dispatchEvent(new Event("input", { bubbles: true })); };
+  const labelOf = (el) => norm((el.closest("label") || {}).textContent || "");
+  const choices = $all(w, 'input[type="radio"], input[type="checkbox"]');
+  let done = false;
+  if (choices.length) {
+    const hit = choices.find((x) => norm(x.value) === want) || choices.find((x) => labelOf(x) === want);
+    if (!hit) return false;
+    hit.checked = true;
+    fire(hit);
+    if (lock) {
+      choices.forEach((x) => { if (x !== hit && x.type === "radio") x.disabled = true; });
+      if (hit.type === "checkbox") hit.addEventListener("click", (e) => e.preventDefault());
+    }
+    done = true;
+  } else {
+    const sel = w.querySelector("select");
+    if (sel) {
+      const o = [...sel.options].find((x) => norm(x.value) === want || norm(x.textContent) === want);
+      if (!o) return false;
+      sel.value = o.value;
+      fire(sel);
+      if (lock) [...sel.options].forEach((x) => { if (x !== o) x.disabled = true; });
+      done = true;
+    } else {
+      const inp = w.querySelector('textarea.fe-in, input.fe-in:not([type="date"]):not([type="hidden"])');
+      if (!inp) return false;
+      inp.value = value;
+      fire(inp);
+      if (lock) inp.readOnly = true;
+      done = true;
+    }
+  }
+  if (done && lock) w.insertAdjacentHTML("beforeend", '<p class="pf-chosen">Chosen from the email.</p>');
+  return done;
+}
 
-function mountForm(t, res) {
+function mountForm(t, res, pre = {}) {
   const lh = normaliseLetterhead(res.letterhead || {});
   const ver = res.form || {};
   const test = res.test === true;
@@ -207,7 +253,13 @@ function mountForm(t, res) {
       $all(w, "[data-part]").forEach((el) => { el.value = PART[el.dataset.part] || ""; el.readOnly = true; });
     }
   });
-
+  // The answer from the button they pressed in the email
+  const picked = [];
+  (pre.picks || []).forEach((pk) => {
+    const f = fields.find((x) => x.id === pk.id);
+    const w = f && !LAYOUT.includes(f.type) && wrap(f.id);
+    if (w && prefillField(w, pk.value, pre.lock === true)) picked.push({ id: f.id, a: pk.value });
+  });
   /* ---------- Calculations, which questions show, tags ---------- */
   const rctx = () => ({ pads, calc, consent: {}, annots: {} });
   const updateCalcs = () => {
@@ -343,6 +395,11 @@ function mountForm(t, res) {
       if (f.type === "signature" && pads[f.id] && !pads[f.id].isEmpty()) signatures[f.id] = pads[f.id].toDataURL();
     });
     answers.__tags = liveTags();
+    // Only what they kept (when it isn't locked, they can change it)
+    const kept = picked.filter((pk) => {
+      const v = answers[pk.id];
+      return (typeof v === "string" ? v : JSON.stringify(v ?? "")).toLowerCase().includes(String(pk.a).toLowerCase());
+    });
     if (JSON.stringify({ answers, signatures }).length > 850000) {
       msgEl.textContent = "The form is too big to send. Clear the signature and sign again a little smaller.";
       return;
@@ -352,7 +409,7 @@ function mountForm(t, res) {
     sendBtn.textContent = "Sending…";
     msgEl.textContent = "";
     try {
-      const r = await call({ op: "submit", t, answers, signatures, recordDate: recordDate(), version: ver.version });
+      const r = await call({ op: "submit", t, answers, signatures, recordDate: recordDate(), version: ver.version, picked: kept });
       if (r && r.ok && !r.problem) {
         sent = true;
         thanks(after, patient.firstName, false);
