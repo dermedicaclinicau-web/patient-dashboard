@@ -559,6 +559,20 @@ export async function mountFormEditor(container, { templateId, staff }) {
     const on = o.on === true;
     const blk = onlineBlockers(fields);
     const ids = new Set(Array.isArray(o.notify) ? o.notify : []);
+    const a = o.after || {};
+    const badUrl = a.url && !/^https:\/\/[^\s"'<>]+$/i.test(String(a.url).trim());
+    const afterHtml = `<span class="fe-insp-sub"><small>After they send it</small></span>
+        <input class="fe-input" data-online-after="title" maxlength="120" placeholder="Thanks, {First name}. We've got your form."
+          value="${esc(a.title || "")}" aria-label="Thank-you heading" />
+        <textarea class="fe-input" data-online-after="text" rows="3" maxlength="600"
+          placeholder="It's been saved to your record at Dermedica. You can close this page." aria-label="Thank-you message">${esc(a.text || "")}</textarea>
+        <input class="fe-input" data-online-after="url" type="url" maxlength="500" placeholder="https://www.dermedica.com.au (optional)"
+          value="${esc(a.url || "")}" aria-label="Web page to send them to" />
+        ${badUrl ? '<small class="fe-note fe-bad">The web page must start with https://</small>' : ""}
+        <input class="fe-input" data-online-after="label" maxlength="40" placeholder="Visit our website"
+          value="${esc(a.label || "")}" aria-label="Button text" />
+        <label class="fe-check"><input type="checkbox" data-online-after="auto"${a.auto ? " checked" : ""} /> Take them to the web page by itself after 5 seconds</label>
+        <small class="fe-note">Empty boxes use the wording shown in grey. {First name} is filled in for them. Without a web page, they just see the thank-you message.</small>`;
     return `<div class="fe-insp-field fe-online">${head}
       <label class="fe-check"><input type="checkbox" data-online="on"${on ? " checked" : ""}${blk.length && !on ? " disabled" : ""} />
         Patients can fill this in from a link in an email</label>
@@ -568,12 +582,13 @@ export async function mountFormEditor(container, { templateId, staff }) {
           ids.has(s.id) ? " checked" : ""} /> ${esc(s.name)}</label>`).join("") : '<small class="fe-note">No staff found.</small>') : '<small class="fe-note">Loading staff…</small>'}</div>
         <small class="fe-note">Nobody ticked: the Admins are told.</small>
         <label class="fe-check"><input type="checkbox" data-online="todo"${o.todo !== false ? " checked" : ""} /> Add a to-do to their task list</label>
+        ${afterHtml}
         ${status !== "live" ? '<small class="fe-note">Publish the form so patients can open it.</small>' : ""}` : ""}
       <small class="fe-note">Their name, email and other details are filled in for them (never their Medicare details). It's saved to their record as
         "Filled in online by the patient". Changes take effect straight away, without publishing again.</small>
     </div>`;
   }
-
+  
   function saveOnline(el) {
     const o = { on: false, notify: [], todo: true, ...(tpl.online || {}) };
     if (el.dataset.online === "on") o.on = el.checked;
@@ -593,6 +608,24 @@ export async function mountFormEditor(container, { templateId, staff }) {
         console.error("Online setting not saved:", err);
         showToast(err.code === "permission-denied" ? "Not saved. Check the Firestore rules have been published." : "Not saved. Try again.");
       });
+  }
+  
+  // The thank-you wording and web page: saved a moment after typing stops (the panel isn't redrawn, so typing isn't interrupted)
+  let afterTimer = 0;
+  function saveAfter(el) {
+    const o = { on: false, notify: [], todo: true, ...(tpl.online || {}) };
+    o.after = { ...(o.after || {}), [el.dataset.onlineAfter]: el.type === "checkbox" ? el.checked : el.value };
+    o.group = formGroup({ name, settings });
+    tpl.online = o;
+    clearTimeout(afterTimer);
+    afterTimer = setTimeout(() => {
+      onlineSaving = onlineSaving
+        .then(() => saveFormOnline(templateId, tpl.online, staff))
+        .catch((err) => {
+          console.error("Thank-you settings not saved:", err);
+          showToast(err.code === "permission-denied" ? "Not saved. Check the Firestore rules have been published." : "Not saved. Try again.");
+        });
+    }, 800);
   }
 
   function renderFormSettings() {
@@ -1089,6 +1122,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
   insp.addEventListener("input", (e) => {
     if (e.target.closest(".re")) return;
+    if (e.target.dataset.onlineAfter !== undefined) { saveAfter(e.target); return; }
     if (e.target.dataset.online !== undefined || e.target.dataset.onlineStaff !== undefined) { saveOnline(e.target); return; }
     const el = e.target;
     if (el.dataset.s) {

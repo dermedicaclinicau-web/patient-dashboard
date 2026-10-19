@@ -6880,3 +6880,7 @@ a.md-quiet:hover { border-color: var(--primary); }
   box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.55); }
 .mcrop-zoom { display: flex; align-items: center; gap: 10px; margin: 12px 0 0; }
 .mcrop-zoom input { flex: 1; }
+
+   .ff-online { margin: 0 0 12px; padding: 10px 14px; border-radius: 10px; background: #f0fdfa; color: #134e4a; font-size: 14px; }
+   .ff-online span { display: block; margin-top: 4px; color: #92400e; }
+   .fe-online .fe-parts { max-height: 180px; overflow: auto; }

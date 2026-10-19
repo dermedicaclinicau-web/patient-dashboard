@@ -1,34 +1,119 @@
 <!doctype html>
-<html lang="en">
+<html lang="en-AU">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="robots" content="noindex" />
   <meta name="referrer" content="no-referrer" />
-  <title>Dermedica</title>
-  <link rel="stylesheet" href="styles.css" />
+  <meta name="format-detection" content="telephone=no, date=no, email=no, address=no" />
+  <meta name="theme-color" content="#0f766e" />
+  <title>Dermedica · Your form</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=1" />
+  <link rel="preconnect" href="https://script.google.com" crossorigin />
+  <link rel="preconnect" href="https://script.googleusercontent.com" crossorigin />
+  <script>
+    // Ask for the form straight away, while the page's code is still downloading
+    (function () {
+      var h = location.hash.slice(1);
+      try { h = decodeURIComponent(h); } catch (e) { /* left as it is */ }
+      if (!/^t=p1\./.test(h)) return;
+      window.__pfT = h.slice(2);
+      window.__pfGet = fetch("https://script.google.com/macros/s/AKfycbzb4J7itwDNblPVtBbbZoxdcd2DOqmiZTMXeI7lnRIKuCV92YjJ6hHgS74wz3G9uqOuSA/exec", {
+        method: "POST",
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        body: JSON.stringify({ action: "publicForm", op: "get", t: window.__pfT }),
+      }).then(function (r) { return r.json(); });
+    })();
+  </script>
+  <link rel="modulepreload" href="js/public-form.js" />
+  <link rel="modulepreload" href="js/form-fields.js" />
+  <link rel="modulepreload" href="js/form-live.js" />
+  <link rel="modulepreload" href="js/form-tags.js" />
+  <link rel="modulepreload" href="js/form-calc.js" />
+  <link rel="modulepreload" href="js/form-letterhead.js" />
+  <link rel="modulepreload" href="js/form-conditions.js" />
+  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500&display=swap"
+        media="print" onload="this.media='all'" />
   <style>
-    body.pf-body { margin: 0; background: #f1f5f9; color: #1e293b; font-family: Arial, Helvetica, sans-serif; }
-    .pf { max-width: 860px; margin: 0 auto; padding: 16px 12px 48px; }
-    .pf-sheet { margin: 0 auto; }
-    .pf-state { max-width: 460px; margin: 12vh auto 0; padding: 28px 30px; background: #fff; border-radius: 14px; text-align: center; line-height: 1.55; }
-    .pf-state h1 { margin: 0 0 8px; font-size: 20px; color: #0f172a; }
-    .pf-state p { margin: 0 0 8px; color: #475569; }
-    .pf-hi { margin: 0 0 12px; padding: 12px 16px; border-radius: 12px; background: #fff; color: #334155; line-height: 1.5; }
-    .pf-test { margin: 0 0 12px; padding: 10px 14px; border: 1px dashed #f59e0b; border-radius: 10px; background: #fffbeb; color: #92400e; font-size: 14px; }
-    .pf-foot { position: sticky; bottom: 0; margin: 16px 0 0; padding: 14px 16px; background: #fff; border-radius: 14px;
-      box-shadow: 0 -4px 20px rgba(15, 23, 42, .08); text-align: center; }
-    .pf-send { width: 100%; max-width: 360px; padding: 14px 20px; border: 0; border-radius: 10px; background: #0f766e; color: #fff;
-      font-size: 16px; font-weight: bold; cursor: pointer; }
-    .pf-send:disabled { opacity: .55; cursor: default; }
-    .pf-msg { margin: 0 0 10px; color: #b91c1c; font-size: 14px; }
-    .pf-msg:empty { display: none; }
-    .pf-privacy { margin: 10px 0 0; color: #64748b; font-size: 12px; }
+    body.pf-body { background: #f1f5f9; color: #1e293b; }
+    .pf { max-width: 820px; margin: 0 auto; padding: 20px 16px 0; }
+
+    /* Messages above the form */
+    .pf-hi { margin: 0 0 14px; padding: 14px 18px; border-radius: 14px; background: #fff; color: #334155; line-height: 1.55;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, .05); }
+    .pf-hi strong { color: #0f172a; }
+    .pf-test { margin: 0 0 14px; padding: 10px 14px; border: 1px dashed #f59e0b; border-radius: 10px; background: #fffbeb;
+      color: #92400e; font-size: 14px; line-height: 1.5; }
+    .pf-linkbtn { margin-left: 4px; padding: 0; border: 0; background: none; color: #92400e; font: inherit; font-weight: 700;
+      text-decoration: underline; cursor: pointer; }
+
+    /* The form itself */
+    .pf .fe-sheet { max-width: none; padding: 2rem 2.25rem 2.25rem; border-radius: 16px; }
+    .pf .fe-lh-wrap { margin-bottom: 1.25rem; }
+    .pf .fe-field { margin: 0 -.5rem; padding: .75rem .5rem; }
+    .pf .fe-in, .pf select, .pf textarea { font-size: 16px; }   /* 16px stops iPhones zooming in */
+    .pf .fe-opt { min-height: 36px; }
+    .pf .fe-opt input { width: 20px; height: 20px; }
+    .pf .sig-canvas { height: 180px; }
+    .pf .sig-pad { max-width: none; }
     .pf .is-livehide { display: none !important; }
+
+    /* Send bar, always in reach */
+    .pf-foot { position: sticky; bottom: 0; z-index: 5; margin: 16px -16px 0; padding: 14px 16px calc(14px + env(safe-area-inset-bottom));
+      border-top: 1px solid #e2e8f0; background: rgba(255, 255, 255, .96); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+      text-align: center; }
+    .pf-send { width: 100%; max-width: 380px; min-height: 52px; padding: 0 20px; border: 0; border-radius: 12px; background: #0f766e;
+      color: #fff; font: inherit; font-size: 17px; font-weight: 700; cursor: pointer; box-shadow: 0 6px 16px -6px rgba(15, 118, 110, .55); }
+    .pf-send:hover { background: #115e59; }
+    .pf-send:disabled { opacity: .55; cursor: default; box-shadow: none; }
+    .pf-msg { margin: 0 0 10px; color: #b91c1c; font-size: 14px; font-weight: 600; }
+    .pf-msg:empty { display: none; }
+    .pf-privacy { margin: 8px 0 0; color: #64748b; font-size: 12px; }
+
+    /* Loading, messages and thank you */
+    .pf-state { max-width: 480px; margin: 10vh auto 0; padding: 32px 28px; border-radius: 16px; background: #fff; text-align: center;
+      line-height: 1.6; box-shadow: 0 10px 30px rgba(15, 23, 42, .08); }
+    .pf-state h1 { margin: 0 0 8px; font-size: 22px; color: #0f172a; }
+    .pf-state p { margin: 0 0 10px; color: #475569; }
+    .pf-state small { color: #94a3b8; }
+    .pf-tick { display: grid; place-items: center; width: 60px; height: 60px; margin: 0 auto 16px; border-radius: 50%;
+      background: #ecfdf5; color: #047857; }
+    .pf-tick svg { width: 30px; height: 30px; }
+    .pf-go { display: inline-block; margin: 8px 0 10px; padding: 14px 26px; border-radius: 12px; background: #0f766e; color: #fff;
+      font-weight: 700; text-decoration: none; }
+    .pf-go:hover { background: #115e59; }
+    .pf-auto { font-size: 13px; }
+    .pf-preview { margin-bottom: 14px !important; padding: 8px 12px; border-radius: 8px; background: #fffbeb; color: #92400e !important;
+      font-size: 13px; }
+    .pf-load { display: grid; gap: 12px; text-align: left; }
+    .pf-sk { height: 16px; border-radius: 8px; background: linear-gradient(90deg, #e2e8f0 25%, #f1f5f9 50%, #e2e8f0 75%);
+      background-size: 200% 100%; animation: pf-sh 1.2s infinite; }
+    .pf-sk.is-h { width: 55%; height: 22px; }
+    .pf-sk.is-s { width: 70%; }
+    .pf-load p { margin: 6px 0 0; text-align: center; }
+    @keyframes pf-sh { to { background-position: -200% 0; } }
+
+    /* Phones: the form fills the screen */
+    @media (max-width: 640px) {
+      .pf { padding: 0; }
+      .pf-hi, .pf-test { margin: 12px; }
+      .pf .fe-sheet { padding: 1.25rem 1rem 1.5rem; border-right: 0; border-left: 0; border-radius: 0; }
+      .pf .fe-patient { grid-template-columns: 1fr; }
+      .pf-foot { margin: 0; }
+      .pf-state { margin: 6vh 12px 0; padding: 26px 20px; }
+    }
   </style>
 </head>
 <body class="pf-body">
-  <main class="pf" id="pf"><div class="pf-state"><p>Loading your form…</p></div></main>
+  <main class="pf" id="pf">
+    <div class="pf-state">
+      <div class="pf-load" aria-hidden="true">
+        <div class="pf-sk is-h"></div><div class="pf-sk"></div><div class="pf-sk is-s"></div><div class="pf-sk"></div>
+      </div>
+      <p>Loading your form…</p>
+    </div>
+  </main>
   <script type="module" src="js/public-form.js"></script>
 </body>
 </html>

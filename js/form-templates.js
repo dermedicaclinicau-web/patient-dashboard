@@ -229,16 +229,25 @@ export async function changeFormCategory(id, category, staff) {
   publishedCache = null; // the patient dashboard lists pick it up straight away
 }
 // "Patients can fill this in online": saved straight away, without publishing again.
-// online: { on, notify: [staff ids], todo, group }
+// online: { on, notify: [staff ids], todo, group, after: { title, text, url, label, auto } }
 export async function saveFormOnline(id, online, staff) {
   const uid = currentUid();
   const o = online || {};
+  const a = o.after || {};
+  const url = String(a.url || "").trim();
   await updateDoc(doc(db, COLLECTION, id), {
     online: {
       on: o.on === true,
       notify: (Array.isArray(o.notify) ? o.notify : []).map(String).filter((x) => /^[A-Za-z0-9_-]{1,80}$/.test(x)).slice(0, 20),
       todo: o.todo !== false,
       group: String(o.group || "").slice(0, 40),
+      after: {
+        title: String(a.title || "").slice(0, 120),
+        text: String(a.text || "").slice(0, 600),
+        url: /^https:\/\/[^\s"'<>]+$/i.test(url) ? url.slice(0, 500) : "",
+        label: String(a.label || "").slice(0, 40),
+        auto: a.auto === true,
+      },
     },
     updatedAt: serverTimestamp(),
     updatedBy: (staff && staff.name) || "",
@@ -247,6 +256,7 @@ export async function saveFormOnline(id, online, staff) {
   cache = null;
   publishedCache = null;
 }
+
 /* ===================== Publishing ===================== */
 
 // Saves a frozen copy as versions/{n+1} and makes the form live, in one step.

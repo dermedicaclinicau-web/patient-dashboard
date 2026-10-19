@@ -10507,7 +10507,9 @@ function pfLoad_(cfg, tok) {
   const tpl = fsGetDoc_(cfg, 'form_templates/' + tok.tid);
   if (!tpl || tpl.status !== 'live' || !(tpl.online && tpl.online.on === true) || PF_NO_CATS_.indexOf(tpl.category) !== -1 ||
       !Number(tpl.version)) return { problem: 'UNAVAILABLE' };
-  const ver = fsGetDoc_(cfg, 'form_templates/' + tok.tid + '/versions/' + Number(tpl.version));
+  const ver = pfCached_('pf_ver_' + tok.tid + '_' + Number(tpl.version), 21600, function () {
+    return fsGetDoc_(cfg, 'form_templates/' + tok.tid + '/versions/' + Number(tpl.version));
+  });
   if (!ver || !Array.isArray(ver.fields) || pfBlocked_(ver.fields)) return { problem: 'UNAVAILABLE' };
   const doc = tok.pid ? flowPatient_(cfg, tok.pid) : null;
   if (tok.pid && !doc) return { problem: 'NO_PATIENT' };
@@ -10568,6 +10570,11 @@ function pfPatientTags_(doc, recordDate, today) {
 // A picture for the page (Firebase Storage first, then the older Google Drive bank)
 function pfImage_(cfg, id) {
   if (!/^[A-Za-z0-9_-]{10,80}$/.test(String(id || ''))) return '';
+  try {
+    const hosted = fsGetDoc_(cfg, 'mkt_bank_images/' + id);
+    const u = String((hosted && hosted.url) || '');
+    if (/^https:\/\/firebasestorage\.googleapis\.com\//.test(u)) return u;
+  } catch (e) { /* the picture itself is sent below */ }
   let blob = null;
   try {
     const m = fsGetDoc_(cfg, 'image_bank/' + id);
@@ -10601,6 +10608,40 @@ function pfBlank_(v) {
   return v === null || v === undefined || v === '' || (Array.isArray(v) && !v.length);
 }
 
+// Remembers a small read for a while (only things that rarely change). Nothing is remembered when it's missing or too big.
+function pfCached_(key, secs, fn) {
+  const cache = CacheService.getScriptCache();
+  const hit = cache.get(key);
+  if (hit) { try { return JSON.parse(hit); } catch (e) { /* read again below */ } }
+  const v = fn();
+  if (v) { try { const s = JSON.stringify(v); if (s.length < 95000) cache.put(key, s, secs); } catch (e) { /* not essential */ } }
+  return v;
+}
+
+// What the patient sees after sending (Form Builder → Form settings → Patients fill it in online)
+function pfAfter_(tpl) {
+  const a = (tpl && tpl.online && tpl.online.after) || {};
+  const url = String(a.url || '').trim();
+  return {
+    title: String(a.title || '').slice(0, 120),
+    text: String(a.text || '').slice(0, 600),
+    url: /^https:\/\/[^\s"'<>]+$/i.test(url) ? url.slice(0, 500) : '',
+    label: String(a.label || '').slice(0, 40),
+    auto: a.auto === true,
+  };
+}
+
+// The form's pictures, asked for once the form is showing
+function pfImages_(cfg, L) {
+  const started = Date.now();
+  const out = {};
+  L.ver.fields.forEach(function (f) {
+    if (!f || f.type !== 'image' || !f.fileId || (f.fileId in out) || Date.now() - started > 20000) return;
+    out[f.fileId] = pfImage_(cfg, String(f.fileId));
+  });
+  return { ok: true, images: out };
+}
+
 function handlePublicForm_(body) {
   const tok = pfRead_(body.t);
   if (!tok) return { ok: true, problem: 'BAD_LINK' };
@@ -10616,6 +10657,7 @@ function handlePublicForm_(body) {
     if (L.problem) return { ok: true, problem: L.problem };
     const op = String(body.op || '');
     if (op === 'get') return pfGet_(cfg, tok, L);
+    if (op === 'images') return pfImages_(cfg, L);
     if (op === 'submit') return pfSubmit_(cfg, tok, L, body);
     return { ok: false, error: 'BAD_REQUEST' };
   } catch (err) {
@@ -10626,16 +10668,18 @@ function handlePublicForm_(body) {
 
 function pfGet_(cfg, tok, L) {
   if (!L.test && fsGetDoc_(cfg, PF_DONE_ + '/' + pfDoneKey_(tok))) return { ok: true, done: true };
-  const images = {};
-  L.ver.fields.forEach(function (f) {
-    if (f.type === 'image' && f.fileId && !(f.fileId in images)) images[f.fileId] = pfImage_(cfg, f.fileId);
-  });
+  // Pictures are fetched separately (op "images"), so the form shows without waiting for them
+  const ids = uniq_(L.ver.fields
+    .filter(function (f) { return f && f.type === 'image' && f.fileId; })
+    .map(function (f) { return String(f.fileId); }));
   let lh = null;
-  try { lh = fsGetDoc_(cfg, 'form_settings/letterhead'); } catch (e) { /* the page shows the form without it */ }
+  try { lh = pfCached_('pf_lh_v1', 600, function () { return fsGetDoc_(cfg, 'form_settings/letterhead'); }); }
+  catch (e) { /* the page shows the form without it */ }
   return {
     ok: true, test: L.test,
     form: { name: String(L.ver.name || ''), fields: L.ver.fields, settings: L.ver.settings || {}, version: Number(L.tpl.version) },
-    letterhead: lh || {}, images: images, patient: L.doc ? pfPatient_(L.doc, L.ver.fields) : {},
+    letterhead: lh || {}, imageIds: ids, patient: L.doc ? pfPatient_(L.doc, L.ver.fields) : {},
+    after: pfAfter_(L.tpl),
   };
 }
 

@@ -9,17 +9,28 @@ import { letterheadHtml, normaliseLetterhead } from "./form-letterhead.js";
 import { evaluateCalcs, formatCalc } from "./form-calc.js";
 import { signaturePad, readField, applyVisibility, isBlank, fieldTagValues } from "./form-live.js";
 import { tagValues, collectTagNodes, applyTagNodes } from "./form-tags.js";
-import { formatDobLong, formatMobile } from "./utils.js";
 
 const API = "https://script.google.com/macros/s/AKfycbzb4J7itwDNblPVtBbbZoxdcd2DOqmiZTMXeI7lnRIKuCV92YjJ6hHgS74wz3G9uqOuSA/exec";
 const CLINIC = "Dermedica Clinic · info@dermedica.com.au · 9205 1995";
 const LAYOUT = ["text_block", "space", "letterhead", "watermark", "button"];
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const TICK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
 const box = document.getElementById("pf");
 const $all = (el, s) => [...el.querySelectorAll(s)];
 const todayIso = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+// "1985-03-12" → "12 March 1985"
+const dobLong = (k) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(k || ""));
+  return m ? `${Number(m[3])} ${MONTHS[Number(m[2]) - 1]} ${m[1]}` : "";
+};
+// "0412345678" → "0412 345 678"
+const mobileNice = (s) => {
+  const d = String(s || "").replace(/\D/g, "");
+  return /^04\d{8}$/.test(d) ? `${d.slice(0, 4)} ${d.slice(4, 7)} ${d.slice(7)}` : String(s || "");
 };
 
 const MSG = {
@@ -32,9 +43,9 @@ const MSG = {
   TEMPLATE: ["This is the form's general link", "It only works from an email sent to a patient, where it has their own link."],
   SERVER: ["Something went wrong", "Try again in a few minutes. If it keeps happening, contact the clinic."],
 };
-function state(key, title = "", text = "") {
+function state(key) {
   const [t, m] = MSG[key] || MSG.SERVER;
-  box.innerHTML = `<div class="pf-state"><h1>${esc(title || t)}</h1><p>${esc(text || m)}</p><p><small>${esc(CLINIC)}</small></p></div>`;
+  box.innerHTML = `<div class="pf-state"><h1>${esc(t)}</h1><p>${esc(m)}</p><p><small>${esc(CLINIC)}</small></p></div>`;
   window.scrollTo(0, 0);
 }
 async function call(body) {
@@ -46,23 +57,71 @@ async function call(body) {
   return res.json();
 }
 
+// The thank-you page: the clinic's own wording (Form settings), a button to the website, and an optional automatic redirect
+function thanks(after, first, preview) {
+  const a = after || {};
+  const fill = (s) => String(s || "").replace(/\{\s*first name\s*\}/gi, first || "").replace(/\s+([,.!?])/g, "$1").trim();
+  const title = fill(a.title) || `Thanks${first ? `, ${first}` : ""}. We've got your form.`;
+  const text = fill(a.text) || "It's been saved to your record at Dermedica. You can close this page.";
+  const url = /^https:\/\/[^\s"'<>]+$/i.test(String(a.url || "")) ? String(a.url) : "";
+  box.innerHTML = `<div class="pf-state">
+      ${preview ? '<p class="pf-preview">Preview: this is what patients see after they send the form.</p>' : ""}
+      <div class="pf-tick">${TICK}</div>
+      <h1>${esc(title)}</h1>
+      <p>${esc(text).replace(/\n/g, "<br>")}</p>
+      ${url ? `<a class="pf-go" href="${esc(url)}" rel="noopener">${esc(a.label || "Visit our website")}</a>` : ""}
+      ${url && a.auto ? `<p class="pf-auto">Taking you there in <span data-n>5</span> seconds…</p>` : ""}
+      ${preview ? '<p><button type="button" class="pf-linkbtn" data-act="back">Back to the form</button></p>' : ""}
+      <p><small>${esc(CLINIC)}</small></p>
+    </div>`;
+  window.scrollTo(0, 0);
+  if (preview) {
+    box.querySelector('[data-act="back"]').addEventListener("click", () => location.reload());
+    return;
+  }
+  if (url && a.auto) {
+    let n = 5;
+    const out = box.querySelector("[data-n]");
+    const timer = setInterval(() => {
+      n -= 1;
+      if (out) out.textContent = String(n);
+      if (n <= 0) { clearInterval(timer); location.href = url; }
+    }, 1000);
+  }
+}
+
 async function main() {
-  let t = "";
-  try { t = decodeURIComponent((location.hash || "").slice(1)); } catch { t = ""; }
-  if (/^f=/.test(t)) { state("TEMPLATE"); return; }
-  t = t.replace(/^t=/, "");
+  let h = "";
+  try { h = decodeURIComponent((location.hash || "").slice(1)); } catch { h = ""; }
+  if (/^f=/.test(h)) { state("TEMPLATE"); return; }
+  const t = h.replace(/^t=/, "");
   if (!/^p1\./.test(t)) { state("BAD_LINK"); return; }
+  // form.html already asked for the form while this code downloaded
+  const early = window.__pfT === t && window.__pfGet ? window.__pfGet : null;
   let res;
-  try { res = await call({ op: "get", t }); } catch { state("SERVER"); return; }
+  try { res = early ? await early.catch(() => call({ op: "get", t })) : await call({ op: "get", t }); }
+  catch { state("SERVER"); return; }
   if (!res || res.problem) { state((res && res.problem) || "SERVER"); return; }
   if (res.done) { state("DONE"); return; }
   mountForm(t, res);
+}
+
+// Pictures arrive after the form is showing, so they never hold it up
+function loadImages(t, res, sheet) {
+  const put = (imgs) => $all(sheet, "[data-bank-img]").forEach((el) => {
+    const src = String((imgs || {})[el.dataset.bankImg] || "");
+    if (/^(https:\/\/|data:image\/)/.test(src)) el.innerHTML = `<img src="${esc(src)}" alt="${esc(el.dataset.alt || "")}" />`;
+  });
+  if (res.images) { put(res.images); return; }
+  if (!(res.imageIds || []).length) return;
+  call({ op: "images", t }).then((r) => { if (r && r.images) put(r.images); }).catch(() => { /* the form still works without them */ });
 }
 
 function mountForm(t, res) {
   const lh = normaliseLetterhead(res.letterhead || {});
   const ver = res.form || {};
   const test = res.test === true;
+  const after = res.after || {};
   // Buttons to portal pages mean nothing here
   const fields = (ver.fields || []).map(normaliseField).filter(Boolean)
     .filter((f) => !(f.type === "button" && /^#/.test(String(f.url || "").trim())));
@@ -75,9 +134,10 @@ function mountForm(t, res) {
   const showLh = !(ver.settings && ver.settings.showLetterhead === false);
 
   box.innerHTML = `
-    ${test ? '<p class="pf-test">This is a test link. You can try the form, but it can\'t be sent.</p>' : ""}
-    <p class="pf-hi">${patient.firstName ? `Hi ${esc(patient.firstName)}, p` : "P"}lease fill in this form for Dermedica.
-      Your details are already filled in. It takes a few minutes.</p>
+    ${test ? `<p class="pf-test">This is a test link. You can try the form, but it can't be sent.
+      <button type="button" class="pf-linkbtn" data-act="thanks">See the thank-you page</button></p>` : ""}
+    <p class="pf-hi">${patient.firstName ? `Hi <strong>${esc(patient.firstName)}</strong>, please` : "Please"} fill in this form for Dermedica.
+      Your details are already filled in, so it only takes a few minutes.</p>
     <div class="fe-sheet ff-sheet pf-sheet" data-role="sheet">
       ${watermarkHtml(fields, lh)}
       ${showLh ? `<div class="fe-lh-wrap">${letterheadHtml(lh)}</div>` : ""}
@@ -97,12 +157,10 @@ function mountForm(t, res) {
   const msgEl = box.querySelector('[data-role="msg"]');
   const sendBtn = box.querySelector('[data-act="send"]');
   const wrap = (id) => sheet.querySelector(`[data-fid="${CSS.escape(id)}"]`);
+  const prev = box.querySelector('[data-act="thanks"]');
+  if (prev) prev.addEventListener("click", () => thanks(after, patient.firstName, true));
 
-  // Pictures from the Image Bank (sent with the form)
-  $all(sheet, "[data-bank-img]").forEach((el) => {
-    const src = (res.images || {})[el.dataset.bankImg];
-    el.innerHTML = src ? `<img src="${esc(src)}" alt="${esc(el.dataset.alt || "")}" />` : "";
-  });
+  loadImages(t, res, sheet);
   fields.forEach((f) => { if (f.liveHide) { const w = wrap(f.id); if (w) w.classList.add("is-livehide"); } });
   const tagNodes = collectTagNodes(sheet);
   const pads = {};
@@ -136,7 +194,7 @@ function mountForm(t, res) {
     "patient.address": patient.address, "today": todayIso(),
   };
   const PART = {
-    name: patient.name, dob: patient.dobKey ? formatDobLong(patient.dobKey) : "", mobile: patient.mobile ? formatMobile(patient.mobile) : "",
+    name: patient.name, dob: dobLong(patient.dobKey), mobile: mobileNice(patient.mobile),
     email: patient.email, address: patient.address, pttId: patient.pttId,
   };
   fields.forEach((f) => {
@@ -295,8 +353,7 @@ function mountForm(t, res) {
       const r = await call({ op: "submit", t, answers, signatures, recordDate: recordDate(), version: ver.version });
       if (r && r.ok && !r.problem) {
         sent = true;
-        state("", `Thanks${patient.firstName ? `, ${patient.firstName}` : ""}. We've got your form.`,
-          "It's been saved to your record at Dermedica. You can close this page.");
+        thanks(after, patient.firstName, false);
         return;
       }
       const pr = (r && r.problem) || "SERVER";
