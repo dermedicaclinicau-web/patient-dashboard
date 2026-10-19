@@ -40,6 +40,7 @@ const ICON = {
   note: '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="14 3 14 9 20 9"/><line x1="8" y1="14" x2="14" y2="14"/>',
   cal: '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
   chev: '<polyline points="6 9 12 15 18 9"/>',
+  info: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
 };
 const svg = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const card = (title, inner, cls = "", link = "") => `
@@ -54,7 +55,7 @@ const quiet = (title, text, href = "") => (href
 
 // The cards, in their default order. "notes" is for everyone; the rest need their dash.* tick.
 const DASH_CARDS = [
-  ["attention", "Needs my attention"], ["appts", "My appointments & notes"], ["tasks", "Tasks"], ["notes", "My notes"],
+  ["attention", "Needs you now"], ["appts", "My appointments & notes"], ["tasks", "Tasks"], ["notes", "My notes"],
   ["days", "Start & end of day"], ["kit", "My kit"], ["records", "My records"], ["usage", "What I used"],
   ["requests", "My requests"], ["stock", "Stock I use"], ["overview", "Clinic overview"],
 ];
@@ -412,39 +413,61 @@ export async function mountMyDashboard(container, { staff } = {}) {
       tone: "warn", text: `Your request ${reqNumber(r)} was declined${r.response ? `: ${r.response}` : ""}`,
       href: "#/inventory/requests", act: "View",
     }));
-    const attentionHtml = card("Needs my attention", att.length
-      ? `<ul class="md-att">${att.map((a) => `<li class="is-${a.tone}"><span>${esc(a.text)}</span>
-          ${a.sod
-            ? `<button type="button" class="lh-btn is-primary" data-sod="1">${esc(a.act)}</button>`
-            : a.notesId
-            ? `<button type="button" class="lh-btn" data-notes="${esc(a.notesId)}">${esc(a.act)}</button>`
-            : a.ttab
-              ? `<button type="button" class="lh-btn" data-ttab="${esc(a.ttab)}" data-goto="tasks">${esc(a.act)}</button>`
-              : `<a class="lh-btn" href="${a.href}">${esc(a.act)}</a>`}</li>`).join("")}</ul>`
-      : `<p class="md-clear">${svg(ICON.ok)} Nothing needs you right now.</p>`, "md-wide");
+    const toneIcon = { bad: ICON.alert, warn: ICON.alert, info: ICON.info, ok: ICON.ok };
+    const attAct = (a) => (a.sod
+      ? `<button type="button" class="lh-btn is-primary" data-sod="1">${esc(a.act)}</button>`
+      : a.notesId
+        ? `<button type="button" class="lh-btn" data-notes="${esc(a.notesId)}">${esc(a.act)}</button>`
+        : a.ttab
+          ? `<button type="button" class="lh-btn" data-ttab="${esc(a.ttab)}" data-goto="tasks">${esc(a.act)}</button>`
+          : `<a class="lh-btn" href="${a.href}">${esc(a.act)}</a>`);
+    const attentionHtml = !att.length
+      ? quiet("Needs you now", "Nothing needs you right now ✓")
+      : card("Needs you now", `<ul class="md-att">${att.map((a) => `<li class="is-${a.tone}">
+          <span class="md-att-ic">${svg(toneIcon[a.tone] || ICON.info)}</span>
+          <span class="md-att-t">${esc(a.text)}</span>${attAct(a)}</li>`).join("")}</ul>`,
+        "md-att-card", `<span class="md-count">${att.length}</span>`);
 
     /* ---------- My kit ---------- */
     const kitProducts = products.filter((p) => p.active && isKitProduct(p));
-    const kitHtml = !canKit || !kitProducts.length ? "" : card("My kit", `<div class="md-kits">${kitProducts.map((p) => {
+    const kitHtml = !canKit || !kitProducts.length ? "" : card("My kit", `<ul class="md-kitlist">${kitProducts.map((p) => {
       const ks = myKits.filter((k) => k.productId === p.id);
       const total = ks.reduce((a, k) => a + kitUnits(k), 0);
       const open = ks.reduce((a, k) => a + k.open, 0);
       const sealed = ks.reduce((a, k) => a + k.sealed, 0);
-      return `<div class="md-kit${total ? "" : " is-empty"}">
-        <strong>${fmt(total)}</strong><span>${esc(p.doseUnit)} of ${esc(p.name)}</span>
-        <small>${esc([open ? `${fmt(open)} in the opened ${p.stockUnit}` : "", sealed ? `${plural(sealed, p.stockUnit)} unopened` : "",
-          !total ? `Shelf has ${plural(p.stock.shelf, p.stockUnit)}` : ""].filter(Boolean).join(" · "))}</small></div>`;
-    }).join("")}</div>`, "", '<a class="md-link" href="#/inventory/kits">Open Kits</a>');
+      const sub = [open ? `${fmt(open)} in the opened ${p.stockUnit}` : "", sealed ? `${plural(sealed, p.stockUnit)} unopened` : "",
+        !total ? `Shelf has ${plural(p.stock.shelf, p.stockUnit)}` : ""].filter(Boolean).join(" · ");
+      return `<li class="${total ? "" : "is-empty"}"><span><strong>${esc(p.name)}</strong>${sub ? `<small>${esc(sub)}</small>` : ""}</span>
+        <b>${fmt(total)}<small>${esc(p.doseUnit)}</small></b></li>`;
+    }).join("")}</ul>`, "", '<a class="md-link" href="#/inventory/kits">Open Kits</a>');
 
-    /* ---------- My records ---------- */
+    /* ---------- My records (grouped by form) ---------- */
     const todayN = records.filter((s) => s.createdAt >= today).length;
     const weekN = records.filter((s) => now - s.createdAt < 7 * DAY).length;
+    const recGroups = new Map();
+    records.slice(0, 40).forEach((s) => {
+      const k = s.templateName || "Form";
+      if (!recGroups.has(k)) recGroups.set(k, []);
+      recGroups.get(k).push(s);
+    });
+    const whoList = (list) => {
+      const u = [...new Set(list.map((s) => s.patientName).filter(Boolean))];
+      return u.slice(0, 2).join(", ") + (u.length > 2 ? ` +${u.length - 2}` : "");
+    };
+    const recRow = ([name, list]) => (list.length === 1
+      ? `<li><a class="md-rrow" href="#/form-record/${encodeURIComponent(list[0].id)}">
+          <span><strong>${esc(name)}</strong><small>${esc(list[0].patientName || "")}</small></span>
+          <small>${esc(shortDay(list[0].createdAt))}</small></a></li>`
+      : `<li><details class="md-rgrp"><summary class="md-rrow">
+          <span><strong>${esc(name)} <em>×${list.length}</em></strong><small>${esc(whoList(list))}</small></span>
+          <small>${esc(shortDay(list[0].createdAt))}</small></summary>
+          <ul>${list.map((s) => `<li><a href="#/form-record/${encodeURIComponent(s.id)}"><span>${esc(s.patientName || "Patient")}</span>
+            <small>${esc(shortDay(s.createdAt))}</small></a></li>`).join("")}</ul></details></li>`);
     const recordsHtml = card("My records", `
       <div class="md-stats"><div><strong>${todayN}</strong><span>Today</span></div><div><strong>${weekN}</strong><span>Last 7 days</span></div></div>
-      ${records.length ? `<ul class="md-list">${records.slice(0, 6).map((s) => `<li><a href="#/form-record/${encodeURIComponent(s.id)}">
-          <strong>${esc(s.patientName)}</strong><span>${esc(s.templateName)}</span><small>${esc(shortDay(s.createdAt))}</small></a></li>`).join("")}</ul>`
+      ${records.length ? `<ul class="md-rlist">${[...recGroups].slice(0, 6).map(recRow).join("")}</ul>`
         : '<p class="tb-none">No forms saved in the last month.</p>'}`);
-
+        
     /* ---------- What I used ---------- */
     const agg = new Map();
     usage.forEach((u) => u.lines.forEach((l) => {
@@ -640,36 +663,44 @@ export async function mountMyDashboard(container, { staff } = {}) {
     const notesHtml = '<section class="md-card md-notes-card" data-role="notes"></section>';
     const daysHtml = '<section class="md-card md-wide" data-role="days"></section>';
 
-    /* ---------- Today strip ---------- */
-    const strip = [];
-    if (sodPending) strip.push({ tone: "warn", icon: ICON.kit, text: "Kit count not done", sod: true });
-    if (countLeft !== null) {
-      strip.push(countLeft
-        ? { tone: countLate ? "bad" : "warn", icon: ICON.count, text: `Opening count: ${countLeft} left · ${countLate ? "overdue" : `due ${countDueText}`}`, href: "#/tasks/count" }
-        : { tone: "ok", icon: ICON.count, text: "Opening count done ✓", href: "#/tasks/count" });
-    }
+    /* ---------- Today at a glance ---------- */
+    const kpis = [];
     if (show("appts")) {
       const next = appts.find((a) => Number(a.sortMinutes) >= nowMin);
-      strip.push({ tone: "info", icon: ICON.cal, goto: "appts",
-        text: appts.length ? `${appts.length} appointment${appts.length === 1 ? "" : "s"}${next && next.time ? ` · next ${next.time}` : ""}` : "No appointments today" });
+      kpis.push({ label: "Appointments today", icon: ICON.cal, value: appts.length, attr: 'data-goto-card="appts"',
+        sub: appts.length ? (next && next.time ? `Next at ${next.time}` : "All done for today") : "None booked" });
     }
-    if (drafts.length) strip.push({ tone: "warn", icon: ICON.note, text: `${drafts.length} note${drafts.length === 1 ? "" : "s"} to review`, notesId: drafts[drafts.length - 1].id });
     if (show("tasks")) {
       const od = mineList.filter((t) => t.dueDate && t.dueDate < todayKey).length;
       const due = mineList.filter((t) => t.dueDate && t.dueDate <= todayKey).length;
-      strip.push({ tone: od ? "bad" : due ? "warn" : "ok", icon: ICON.ok, ttab: "mine",
-        text: due ? `${due} task${due === 1 ? "" : "s"} due${od ? ` · ${od} overdue` : ""}` : "No tasks due" });
+      kpis.push({ label: "My tasks due", icon: ICON.ok, value: due, tone: od ? "bad" : due ? "warn" : "ok",
+        sub: od ? `${od} overdue` : due ? "Due today" : "All clear", attr: 'data-ttab="mine" data-goto="tasks"' });
     }
-    const pillHtml = (p) => {
-      const inner = `${svg(p.icon)}<span>${esc(p.text)}</span>`;
-      const cls = `md-pill is-${p.tone}`;
-      if (p.href) return `<a class="${cls}" href="${p.href}">${inner}</a>`;
-      if (p.sod) return `<button type="button" class="${cls}" data-sod="1">${inner}</button>`;
-      if (p.notesId) return `<button type="button" class="${cls}" data-notes="${esc(p.notesId)}">${inner}</button>`;
-      if (p.ttab) return `<button type="button" class="${cls}" data-ttab="${p.ttab}" data-goto="tasks">${inner}</button>`;
-      return `<button type="button" class="${cls}" data-goto-card="${esc(p.goto)}">${inner}</button>`;
-    };
-    const stripHtml = strip.length ? `<div class="md-strip">${strip.map(pillHtml).join("")}</div>` : "";
+    if (countLeft !== null) {
+      kpis.push({ label: "Opening count", icon: ICON.count, value: countLeft || "Done", unit: countLeft ? "left" : "",
+        tone: countLeft ? (countLate ? "bad" : "warn") : "ok", href: "#/tasks/count",
+        sub: countLeft ? (countLate ? `Overdue · due ${countDueText}` : `Due by ${countDueText}`) : "Everything counted" });
+    }
+    if (canKit && kitProducts.length) {
+      const kitIds = new Set(kitProducts.map((p) => p.id));
+      const units = myKits.filter((k) => kitIds.has(k.productId)).reduce((a, k) => a + kitUnits(k), 0);
+      kpis.push({ label: "My kit", icon: ICON.kit, value: fmt(units),
+        unit: kitProducts.length === 1 ? kitProducts[0].doseUnit : "units",
+        tone: sodPending || !units ? "warn" : "",
+        sub: sodPending ? "Count not done yet" : !units ? "Your kit is empty" : kitProducts.map((p) => p.name).join(", "),
+        attr: sodPending ? 'data-sod="1"' : "", href: sodPending ? "" : "#/inventory/kits" });
+    }
+    if (drafts.length && kpis.length < 5) {
+      kpis.push({ label: "Notes to review", icon: ICON.note, value: drafts.length, tone: "warn",
+        sub: `Oldest: ${drafts[drafts.length - 1].patientName || "patient"}`, attr: `data-notes="${esc(drafts[drafts.length - 1].id)}"` });
+    }
+    const kpiHtml = kpis.length ? `<div class="md-kpis">${kpis.map((p) => {
+      const inner = `<span class="md-kpi-l">${svg(p.icon)}${esc(p.label)}</span>
+        <span class="md-kpi-v">${esc(String(p.value))}${p.unit ? `<small>${esc(p.unit)}</small>` : ""}</span>
+        <span class="md-kpi-s">${esc(p.sub)}</span>`;
+      const cls = `md-kpi${p.tone ? ` is-${p.tone}` : ""}`;
+      return p.href ? `<a class="${cls}" href="${p.href}">${inner}</a>` : `<button type="button" class="${cls}" ${p.attr || ""}>${inner}</button>`;
+    }).join("")}</div>` : "";
 
     /* ---------- Quick actions (only what this person can do) ---------- */
     const qa = [
@@ -680,20 +711,35 @@ export async function mountMyDashboard(container, { staff } = {}) {
       show("notes") && `<button type="button" class="md-qa" data-act="new-note">${svg(ICON.note)}New note</button>`,
       can("menu.calendar") && `<a class="md-qa" href="#/calendar">${svg(ICON.cal)}Calendar</a>`,
     ].filter(Boolean);
-    const qaHtml = qa.length ? `<div class="md-qas">${qa.join("")}</div>` : "";
+    const qaTop = qa.length ? `<div class="md-qas md-qas-top">${qa.join("")}</div>` : "";
+    const qaCard = qa.length ? `<section class="md-card md-qa-card"><div class="md-card-head"><h3>Quick actions</h3></div>
+      <div class="md-qagrid">${qa.join("")}</div></section>` : "";
 
-    /* ---------- The cards, in this person's order ---------- */
+    /* ---------- The cards: work on the left, tools on the right, each in this person's order ---------- */
+    const SIDE = new Set(["notes", "kit", "requests", "stock"]);
     const CARDS = [["attention", attentionHtml], ["appts", apptHtml], ["tasks", tasksHtml], ["notes", notesHtml], ["days", daysHtml],
       ["kit", kitHtml], ["records", recordsHtml], ["usage", usedHtml], ["requests", reqHtml], ["stock", stockHtml], ["overview", overviewHtml]];
     const shown = byOrder(CARDS, readOrder(me)).filter(([k, h]) => h && show(k));
-    body.innerHTML = `${stripHtml}${qaHtml}${shown.length
-      ? `<div class="md-grid">${shown.map(([, h]) => h).join("")}</div>`
+    const mainCards = shown.filter(([k]) => !SIDE.has(k));
+    const sideCards = shown.filter(([k]) => SIDE.has(k));
+    const hasSide = !!(qaCard || sideCards.length);
+    body.innerHTML = `${kpiHtml}${qaTop}${shown.length || qaCard
+      ? `<div class="md-layout${hasSide ? "" : " is-single"}">
+          <div class="md-col md-main">${mainCards.map(([, h]) => h).join("")}</div>
+          ${hasSide ? `<div class="md-col md-side">${qaCard}${sideCards.map(([, h]) => h).join("")}</div>` : ""}
+        </div>`
       : '<div class="tm-empty">Nothing to show yet. Use <strong>Customise</strong> to choose your cards, or ask an Admin to turn some on for you.</div>'}`;
 
-    const grid = body.querySelector(".md-grid");
+    const grid = body.querySelector(".md-layout");
     if (grid) {
-      [...grid.children].forEach((el, i) => { if (shown[i]) el.dataset.card = shown[i][0]; });
-      mountMyNotes(body.querySelector('[data-role="notes"]'));
+      const tag = (col, list) => {
+        if (!col) return;
+        [...col.querySelectorAll(":scope > .md-card:not(.md-qa-card)")].forEach((el, i) => { if (list[i]) el.dataset.card = list[i][0]; });
+      };
+      tag(grid.querySelector(".md-main"), mainCards);
+      tag(grid.querySelector(".md-side"), sideCards);
+      const notesEl = grid.querySelector('[data-role="notes"]');
+      if (notesEl) mountMyNotes(notesEl);
       addFolds(grid, me);
     }
     // Start & end of day fills itself in a moment later: give it its ⌄ button once its header appears
@@ -701,7 +747,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     renderDayCard(daysEl); // Admins only; does nothing if the card is hidden
     if (grid && daysEl) {
       if (daysEl.querySelector(".md-card-head")) {
-        addFolds(grid, me);   // it drew straight away
+        addFolds(grid, me);
       } else {
         const mo = new MutationObserver(() => {
           if (!daysEl.isConnected) { mo.disconnect(); return; }
@@ -717,7 +763,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
   /* ---------- Collapsing a card (remembered per person) ---------- */
   function addFolds(grid, me) {
     const folded = readSet(foldKey(me));
-    grid.querySelectorAll(":scope > [data-card]").forEach((el) => {
+    grid.querySelectorAll(".md-col > [data-card]").forEach((el) => {
       const head = el.querySelector(".md-card-head");
       if (!head || head.querySelector(".md-fold")) return;
       const k = el.dataset.card;
