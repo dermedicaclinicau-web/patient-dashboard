@@ -22,6 +22,8 @@ const dates = (m) => {
 
 export const helpId = (staffUid) => `help__${staffUid}`;
 export const dmId = (a, b) => `dm__${[a, b].sort().join("__")}`;
+// A message id made in the browser, so the message can show on screen before it's saved
+export const newMessageId = (chatId) => doc(collection(db, "chats", chatId, "messages")).id;
 // Only links inside the portal (#/…) are kept
 export const safePage = (p) => (p && PAGE_RE.test(String(p.hash || ""))
   ? { hash: String(p.hash).slice(0, 300), label: String(p.label || "").slice(0, 80) } : null);
@@ -66,19 +68,20 @@ export async function listAllChats() {
   return s.docs.map(normChat);
 }
 
-// The latest 150 messages of one conversation, live, oldest first
+// The latest 150 messages of one conversation, live, oldest first. pending: not saved on the server yet.
 export function watchMessages(chatId, onChange, onError = () => {}) {
-  return onSnapshot(query(collection(db, "chats", chatId, "messages"), orderBy("at"), limitToLast(150)), (s) => {
-    onChange(s.docs.map((d) => {
-      const x = d.data({ serverTimestamps: "estimate" }) || {};
-      return { id: d.id, text: String(x.text || ""), by: String(x.by || ""), byUid: String(x.byUid || ""),
-        at: toDate(x.at), page: safePage(x.page), edited: x.edited === true, deleted: x.deleted === true };
-    }));
-  }, onError);
+  return onSnapshot(query(collection(db, "chats", chatId, "messages"), orderBy("at"), limitToLast(150)),
+    { includeMetadataChanges: true }, (s) => {
+      onChange(s.docs.map((d) => {
+        const x = d.data({ serverTimestamps: "estimate" }) || {};
+        return { id: d.id, text: String(x.text || ""), by: String(x.by || ""), byUid: String(x.byUid || ""),
+          at: toDate(x.at), page: safePage(x.page), edited: x.edited === true, deleted: x.deleted === true,
+          pending: d.metadata.hasPendingWrites };
+      }));
+    }, onError);
 }
-
 // The conversation (created on the first message) and the message, together
-export async function sendMessage(chat, text, page, staff) {
+export async function sendMessage(chat, text, page, staff, msgId = "") {
   const me = uid();
   const by = String((staff && staff.name) || "").slice(0, 120);
   const body = String(text || "").trim().slice(0, 4000);
@@ -92,7 +95,8 @@ export async function sendMessage(chat, text, page, staff) {
     ...(chat.kind === "help" && chat.members[0] === me ? { status: "open" } : {}),   // a new Help message reopens it
     ...(chat.kind === "group" ? { name: String(chat.name || "").slice(0, 60), createdByUid: chat.createdByUid } : {}),
   }, { merge: true });
-  b.set(doc(collection(cRef, "messages")), { text: body, by, byUid: me, at: serverTimestamp(), page: safePage(page) });
+  const mRef = msgId ? doc(cRef, "messages", msgId) : doc(collection(cRef, "messages"));
+  b.set(mRef, { text: body, by, byUid: me, at: serverTimestamp(), page: safePage(page) });
   await b.commit();
 }
 

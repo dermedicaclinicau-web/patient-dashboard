@@ -1,14 +1,14 @@
 // The chat bubble (bottom-right on every page): Help to the admins, messages between staff, and group chats.
 // A new message: a chime, a pop-up, a red badge, "(2)" in the tab title, and a desktop alert when the portal is in the background.
 // Your own messages can be edited or deleted; any chat can be removed from your own list.
-import {
-  watchChats, watchMessages, sendMessage, markRead, setChatStatus, listAllChats, isUnread, isHiddenFor, helpId, dmId,
-  newGroupId, watchAway, saveAway, editMessage, deleteMessage, hideChat,
-} from "./chat-api.js";
 import { fetchStaffList } from "./task-types.js";
 import { isAdmin } from "./perms.js";
 import { confirmDialog } from "./dialog.js";
 import { escapeHtml, getInitials, hueFromString, showToast } from "./utils.js";
+import {
+  watchChats, watchMessages, sendMessage, markRead, setChatStatus, listAllChats, isUnread, isHiddenFor, helpId, dmId,
+  newGroupId, watchAway, saveAway, editMessage, deleteMessage, hideChat, newMessageId,
+} from "./chat-api.js";
 
 const HELP_NAME = "Bethany";   // who answers Help
 const esc = (s) => escapeHtml(String(s ?? ""));
@@ -50,6 +50,20 @@ const niceBack = (k) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(k || "");
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "short" }) : "";
 };
+
+// "Today", "Yesterday", "Mon 12 Oct" (and the year if it isn't this year)
+const dayLabel = (d) => {
+  const k = keyOf(d);
+  if (k === keyOf(new Date())) return "Today";
+  if (k === dayFromNow(-1)) return "Yesterday";
+  return d.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short",
+    ...(d.getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}) });
+};
+const timeOf = (d) => (d ? d.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }) : "");
+// Phones and iPads: Enter makes a new line, the Send button sends
+const isTouch = () => !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+// One tap for you on Help. The last one also marks it as sorted.
+const QUICK_REPLIES = ["On my way", "Looking into it now", "Can you call me?", "All sorted ✓"];
 // kind: "help" | "group" | "" (a person)
 const avatar = (name, kind = "") => (kind === "help" ? `<span class="ch-av is-help">${I.help}</span>`
   : kind === "group" ? `<span class="ch-av is-group">${I.group}</span>`
@@ -68,6 +82,7 @@ let allChats = null;         // Admins: every conversation, loaded on demand
 let staffList = null;
 let staffById = new Map();
 const drafts = new Map();    // conversations not created yet (no message sent)
+const pendingSends = new Map();   // message id → { chatId, text, page, at, failed, sent }: shown before it's saved
 const lastSeen = new Map();  // chat id → the last message time already known (for the chime)
 const groupSel = new Set();  // people ticked for a new group
 let loaded = false;
@@ -112,6 +127,7 @@ export function teardownChat() {
   chats = [];
   allChats = null;
   drafts.clear();
+  pendingSends.clear();
   lastSeen.clear();
   groupSel.clear();
   loaded = false;
@@ -230,6 +246,7 @@ function render() {
     if (sb && current) sb.textContent = current.status === "sorted" ? "Reopen" : "Mark as sorted";
     const hs = panel.querySelector('[data-role="helpsub"]');
     if (hs) { hs.textContent = helpSub(); hs.classList.toggle("is-away", awayOn()); }
+    updateSeen();
   }
 }
 
@@ -398,10 +415,12 @@ function openThread(id) {
       : c.kind === "group" ? "Say hello to start the group." : "No messages yet."}</p></div>
     ${canWrite ? `<div class="ch-editing" data-role="editing" hidden><span>Editing your message</span>
         <button type="button" class="rc-link" data-act="canceledit">Cancel</button></div>
+      ${adminHelp ? `<div class="ch-replies">${QUICK_REPLIES.map((q) =>
+        `<button type="button" class="ch-chip" data-reply="${esc(q)}">${esc(q)}</button>`).join("")}</div>` : ""}
       <form class="ch-comp" novalidate>
         <div class="ch-emo" data-role="emo" hidden>${EMOJI.map((x) => `<button type="button" data-emo="${x}">${x}</button>`).join("")}</div>
         <button type="button" class="ch-ic ch-emo-btn" data-act="emoji" aria-label="Add emoji" title="Emoji">${I.smile}</button>
-        <textarea rows="1" maxlength="4000" placeholder="Type your message" aria-label="Message"></textarea>
+        <textarea rows="1" maxlength="4000" placeholder="${isTouch() ? "Type your message" : "Type your message (Shift+Enter for a new line)"}" aria-label="Message"></textarea>
         <button type="submit" class="ch-send" aria-label="Send">${I.send}</button></form>
       <label class="ch-link"><input type="checkbox" data-role="withpage"${helpStaff ? " checked" : ""} /> Include a link to this page</label>`
       : '<p class="ch-ro">You\'re viewing a chat between staff. Only they can reply.</p>'}`;
@@ -409,7 +428,7 @@ function openThread(id) {
   if (chats.some((x) => x.id === id) || (allChats || []).some((x) => x.id === id)) startMessages(id);
   readIfViewing();
   const ta = panel.querySelector("textarea");
-  if (ta) setTimeout(() => ta.focus(), 30);
+  if (ta && !isTouch()) setTimeout(() => ta.focus(), 30);
 }
 
 function startMessages(id) {
@@ -423,11 +442,29 @@ function drawMessages(msgs, first) {
   const box = panel && panel.querySelector('[data-role="msgs"]');
   if (!box || view !== "thread") return;
   msgList = msgs;
+  // Messages still on their way: shown until the saved copy arrives
+  const ids = new Set(msgs.map((m) => m.id));
+  const local = [];
+  pendingSends.forEach((p, id) => {
+    if (ids.has(id)) { if (p.sent) pendingSends.delete(id); return; }
+    if (p.chatId !== openId) return;
+    local.push({ id, text: p.text, by: me.name, byUid: me.uid, at: p.at, page: p.page,
+      local: true, failed: p.failed, pending: !p.failed && !p.sent });
+  });
+  const all = msgs.concat(local);
+  if (!all.length) return;
   const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
-  if (!msgs.length) return;
-  box.innerHTML = msgs.map((m) => {
+  let prevDay = "";
+  let prev = null;
+  box.innerHTML = all.map((m) => {
     const mine = m.byUid === me.uid;
-    const canAct = mine && canWriteNow && !m.deleted;
+    const day = m.at ? keyOf(m.at) : prevDay;
+    const divider = day && day !== prevDay ? `<p class="ch-day"><span>${esc(dayLabel(m.at))}</span></p>` : "";
+    // Several in a row from the same person, within 5 minutes: one name above them
+    const run = !divider && prev && prev.byUid === m.byUid && m.at && prev.at && m.at - prev.at < 5 * 60000;
+    prevDay = day;
+    prev = m;
+    const canAct = mine && canWriteNow && !m.deleted && !m.local;
     const text = String(m.text || "").trim();
     const bubble = m.deleted
       ? '<div class="ch-m-b is-deleted">Message deleted</div>'
@@ -436,13 +473,42 @@ function drawMessages(msgs, first) {
     const acts = canAct ? `<span class="ch-m-acts" hidden>
         <button type="button" data-act="medit" data-mid="${esc(m.id)}">Edit</button>
         <button type="button" class="is-danger" data-act="mdel" data-mid="${esc(m.id)}">Delete</button></span>` : "";
-    return `<div class="ch-m${mine ? " is-me" : ""}">
-      ${mine ? "" : `<small class="ch-m-by">${esc(m.by)}</small>`}
+    const status = m.failed
+      ? `<button type="button" class="ch-m-retry" data-act="retry" data-mid="${esc(m.id)}">Not sent · Tap to retry</button>
+         · <button type="button" class="ch-m-retry" data-act="discard" data-mid="${esc(m.id)}">Remove</button>`
+      : m.pending ? "Sending…" : esc(timeOf(m.at));
+    return `${divider}<div class="ch-m${mine ? " is-me" : ""}${run ? " is-run" : ""}${m.pending ? " is-pending" : ""}${m.failed ? " is-failed" : ""}">
+      ${mine || run ? "" : `<small class="ch-m-by">${esc(m.by)}</small>`}
       ${bubble}${acts}
-      <small class="ch-m-meta">${m.page && !m.deleted ? `<a href="${esc(m.page.hash)}">${I.link} ${esc(m.page.label || "Page")}</a> · ` : ""}${esc(when(m.at))}${m.edited && !m.deleted ? " · edited" : ""}</small>
+      <small class="ch-m-meta">${m.page && !m.deleted ? `<a href="${esc(m.page.hash)}">${I.link} ${esc(m.page.label || "Page")}</a> · ` : ""}${status}${m.edited && !m.deleted ? " · edited" : ""}</small>
     </div>`;
-  }).join("");
+  }).join("") + '<p class="ch-seen" data-role="seen" hidden></p>';
+  updateSeen();
   if (first || atBottom) box.scrollTop = box.scrollHeight;
+}
+
+const redrawMessages = (toBottom = false) => { if (view === "thread") drawMessages(msgList, toBottom); };
+
+// "Seen" under my last message, once someone else has read it
+function seenText() {
+  if (!current || !me) return "";
+  const last = [...msgList].reverse().find((m) => !m.deleted);
+  if (!last || last.byUid !== me.uid || !last.at || last.pending) return "";
+  if ([...pendingSends.values()].some((p) => p.chatId === current.id && !p.sent)) return "";
+  const read = current.readAt || {};
+  const pool = current.kind === "help" ? Object.keys(read) : current.members;
+  const who = pool.filter((u) => u !== me.uid && read[u] && read[u] >= last.at)
+    .map((u) => nameOf(current, u).split(/\s+/)[0]);
+  if (!who.length) return "";
+  if (current.kind === "dm") return "Seen";
+  return `Seen by ${who.slice(0, 3).join(", ")}${who.length > 3 ? ` +${who.length - 3}` : ""}`;
+}
+function updateSeen() {
+  const el = panel && panel.querySelector('[data-role="seen"]');
+  if (!el) return;
+  const t = seenText();
+  el.textContent = t;
+  el.hidden = !t;
 }
 
 // Where they are now, so the other person can go straight there
@@ -455,39 +521,71 @@ function pageInfo() {
 
 const isLastMsg = (id) => msgList.length > 0 && msgList[msgList.length - 1].id === id;
 
+function sendErr(err) {
+  return err && err.code === "permission-denied"
+    ? "Couldn't save. Check the chats Firestore rule has been published."
+    : err && err.message && !err.code ? err.message : "Couldn't send. Check your connection and try again.";
+}
+
 async function send(form) {
   if (!current) return;
   const ta = form.querySelector("textarea");
-  const btn = form.querySelector('[type="submit"]');
   const text = ta.value.trim();
-  if (!text || btn.disabled) return;
-  btn.disabled = true;
-  try {
-    if (editing) {
-      // Saving an edit to one of my messages
+  if (!text) return;
+  hideEmoji();
+  if (editing) {
+    // Saving an edit to one of my messages
+    const btn = form.querySelector('[type="submit"]');
+    if (btn.disabled) return;
+    btn.disabled = true;
+    try {
       const id = editing;
       const old = msgList.find((x) => x.id === id);
       if (!old || old.deleted) throw new Error("That message can't be edited any more.");
       if (old.text !== text) await editMessage(current.id, id, text, isLastMsg(id));
       stopEdit();
-    } else {
-      const withPage = !!(panel.querySelector('[data-role="withpage"]') || {}).checked;
-      await sendMessage(current, text, withPage ? pageInfo() : null, me);
-      ta.value = "";
-      ta.style.height = "";
-      if (!msgUnsub) startMessages(current.id);
+    } catch (err) {
+      console.error("Chat edit failed:", err);
+      showToast(sendErr(err));
     }
-    hideEmoji();
-  } catch (err) {
-    console.error("Chat send failed:", err);
-    showToast(err && err.code === "permission-denied"
-      ? "Couldn't save. Check the chats Firestore rule has been published."
-      : err && err.message && !err.code ? err.message : "Couldn't send. Check your connection and try again.");
+    btn.disabled = false;
+    ta.focus();
+    return;
   }
-  btn.disabled = false;
+  // A new message: on screen straight away, saved in the background
+  const withPage = !!(panel.querySelector('[data-role="withpage"]') || {}).checked;
+  ta.value = "";
+  ta.style.height = "";
   ta.focus();
+  deliver(current, newMessageId(current.id), text, withPage ? pageInfo() : null);
 }
 
+async function deliver(chat, id, text, page) {
+  pendingSends.set(id, { chatId: chat.id, text, page, at: new Date(), failed: false, sent: false });
+  if (openId === chat.id) redrawMessages(true);
+  try {
+    await sendMessage(chat, text, page, me, id);
+    const p = pendingSends.get(id);
+    if (p) p.sent = true;
+    // A brand-new chat: start listening now it exists
+    if (view === "thread" && openId === chat.id && !msgUnsub) startMessages(chat.id);
+  } catch (err) {
+    console.error("Chat send failed:", err);
+    const p = pendingSends.get(id);
+    if (p) p.failed = true;
+    showToast(sendErr(err));
+  }
+  if (openId === chat.id) redrawMessages();
+}
+
+// Admins on Help: one-tap replies
+function quickReply(text) {
+  if (!current) return;
+  deliver(current, newMessageId(current.id), text, null);
+  if (text === "All sorted ✓" && current.status !== "sorted") {
+    setChatStatus(current.id, "sorted").catch((err) => console.warn("Mark sorted failed:", err));
+  }
+}
 /* ---------- My own messages: edit and delete ---------- */
 
 // Tapping one of my messages shows Edit / Delete under it
@@ -745,7 +843,7 @@ async function submitAway(form) {
 
 async function onClick(e) {
   if (!e.target.closest('.ch-emo, [data-act="emoji"]')) hideEmoji();   // a tap anywhere else closes the emoji panel
-  const t = e.target.closest("[data-act],[data-open],[data-dm],[data-pick],[data-back],[data-emo],[data-mine]");
+  const t = e.target.closest("[data-act],[data-open],[data-dm],[data-pick],[data-back],[data-emo],[data-mine],[data-reply]");
   if (!t || !me) return;
   if (t.dataset.emo) { insertEmoji(t.dataset.emo); return; }
   if (t.dataset.open) { hidePop(); openThread(t.dataset.open); return; }
@@ -773,6 +871,13 @@ async function onClick(e) {
     case "medit": startEdit(t.dataset.mid); break;
     case "mdel": removeMsg(t.dataset.mid); break;
     case "canceledit": stopEdit(); break;
+    case "retry": {
+      const p = pendingSends.get(t.dataset.mid);
+      const chat = p && chatFor(p.chatId);
+      if (chat) deliver(chat, t.dataset.mid, p.text, p.page);
+      break;
+    }
+    case "discard": pendingSends.delete(t.dataset.mid); redrawMessages(); break;
     case "hide": hideThread(); break;
     case "mute":
       try { localStorage.setItem(muteKey(), muted() ? "0" : "1"); } catch { /* ignore */ }
@@ -820,8 +925,9 @@ function onKey(e) {
     toggleMsgActs(e.target);
     return;
   }
-  // Enter sends, Shift + Enter starts a new line
-  if (e.key === "Enter" && !e.shiftKey && e.target.matches(".ch-comp textarea")) {
+  // Enter sends, Shift + Enter starts a new line. On phones and iPads Enter is a new line (the Send button sends).
+  // Not while a word is still being typed (predictive text, accents).
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !isTouch() && e.target.matches(".ch-comp textarea")) {
     e.preventDefault();
     e.target.form.requestSubmit();
   }

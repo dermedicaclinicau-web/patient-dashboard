@@ -7237,3 +7237,23 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
 .md-trow.is-leaving .md-tcheck { border-color: #10b981; background: #10b981; color: #fff; }
 .md-trow.is-leaving .md-ttitle, .task.is-leaving .task-text { text-decoration: line-through; }
 .tk-c.is-pending .tk-c-b { opacity: .65; border-style: dashed; }
+
+/* Chat: sending, not sent, day dividers, seen, quick replies */
+.ch-m.is-pending .ch-m-b { opacity: .7; }
+.ch-m.is-failed .ch-m-b { opacity: .75; outline: 1px dashed #dc2626; outline-offset: 2px; }
+.ch-m-retry { padding: 0; border: 0; background: none; color: #dc2626; font: inherit; text-decoration: underline; cursor: pointer; }
+.ch-m.is-run { margin-top: -6px; }
+.ch-day { display: flex; justify-content: center; margin: 12px 0 6px; }
+.ch-day span { padding: 2px 10px; border-radius: 999px; background: rgba(15, 23, 42, .06); font-size: 11px; color: #64748b; }
+.ch-seen { margin: 2px 6px 4px; text-align: right; font-size: 11px; color: #64748b; }
+.ch-replies { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px 0; }
+
+/* Chat on phones: full screen, bigger buttons, no zooming in on iPhone */
+@media (max-width: 600px) {
+  .ch.is-open .ch-panel {
+    position: fixed; inset: 0; width: auto; height: 100dvh; max-height: none; border-radius: 0; z-index: 1000;
+  }
+  .ch.is-open .ch-bubble { display: none; }
+  .ch-comp textarea { font-size: 16px; }
+  .ch-hd .ch-ic, .ch-send { min-width: 44px; min-height: 44px; }
+}
