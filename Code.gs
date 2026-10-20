@@ -11530,6 +11530,57 @@ const RECALL_REASONS_ = [
 const RECALL_OUTCOMES_ = { no_answer: 'No answer', voicemail: 'Left voicemail', spoke: 'Spoke to them',
   texted: 'Sent a text', booked: 'Booked' };
 
+// Services that never count as a treatment visit (Recall settings → Not recalled from these services)
+const RECALL_SKIP_ = ['Review', 'Consult', 'Touch up', 'Top up', 'Follow up'];
+
+// A service matches if it contains any of the words. Capitals, spaces and punctuation are ignored.
+function recallSkipFn_(words) {
+  const ws = (words || []).map(function (w) { return String(w || '').toLowerCase().replace(/[^a-z0-9]/g, ''); })
+    .filter(function (w) { return w.length >= 3; });
+  const memo = Object.create(null);
+  return function (svc) {
+    const s = String(svc == null ? '' : svc);
+    if (s in memo) return memo[s];
+    const k = s.toLowerCase().replace(/[^a-z0-9]/g, '');
+    return (memo[s] = ws.some(function (w) { return k.indexOf(w) !== -1; }));
+  };
+}
+
+// Search keys saved on each card (the board's search box looks these up)
+function recallKeys_(name, mobile, email) {
+  const n = String(name || '').toLowerCase().replace(/[^a-z0-9' -]/g, ' ').replace(/\s+/g, ' ').trim();
+  const parts = n ? n.split(' ') : [];
+  let d = String(mobile || '').replace(/\D/g, '');
+  if (/^614\d{8}$/.test(d)) d = '0' + d.slice(2);
+  return {
+    nameKey: n,
+    nameKeyR: parts.length > 1 ? [parts[parts.length - 1]].concat(parts.slice(0, -1)).join(' ') : n,
+    mobileKey: d,
+    emailKey: String(email || '').trim().toLowerCase(),
+  };
+}
+
+// Every service in the appointment book for a recalled treatment, with how often it's used (for Recall settings)
+function recallServices_(cfg) {
+  const cache = CacheService.getScriptCache();
+  const hit = cache.get('recall_svcs_v1');
+  if (hit) return JSON.parse(hit);
+  const cats = Object.create(null);
+  recallSettings_(cfg).categories.forEach(function (c) { cats[c.key.toLowerCase()] = c.key; });
+  const by = Object.create(null);
+  pcnReadAppts_(pcnCtx_()).forEach(function (r) {
+    const cat = cats[String(r[13] == null ? '' : r[13]).trim().toLowerCase()];
+    const s = String(r[9] == null ? '' : r[9]).replace(/\s+/g, ' ').trim();
+    if (!cat || !s) return;
+    const k = cat + '|' + s;
+    (by[k] = by[k] || { service: s, category: cat, n: 0 }).n++;
+  });
+  const out = Object.keys(by).map(function (k) { return by[k]; })
+    .sort(function (a, b) { return b.n - a.n; }).slice(0, 800);
+  try { const j = JSON.stringify(out); if (j.length < 95000) cache.put('recall_svcs_v1', j, 21600); } catch (e) { /* not essential */ }
+  return out;
+}
+
 function recallSettings_(cfg) {
   let d = null;
   try { d = fsGetDoc_(cfg, RECALL_SET_ + '/config'); } catch (e) { console.warn('Recall settings not read: ' + e); }
@@ -11557,6 +11608,9 @@ function recallSettings_(cfg) {
     perDay: int(d.perDay, 1, 100, 15),
     skipLeave: d.skipLeave !== false,
     reasons: reasons.length ? reasons : RECALL_REASONS_,
+    skipServices: (Array.isArray(d.skipServices) ? d.skipServices : RECALL_SKIP_)
+      .map(function (s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, 40); })
+      .filter(function (s) { return s.replace(/[^A-Za-z0-9]/g, '').length >= 3; }).slice(0, 40),
     updatedAt: String(d.updatedAt || ''),
   };
 }
@@ -11633,7 +11687,7 @@ function recallRun_(force) {
     res.assigned = recallAssign_(cfg, set, today);
     commitWrites_(cfg, [updateWrite_(cfg, RECALL_SET_ + '/status', {
       at: new Date().toISOString(), made: res.made, booked: res.booked, visited: res.visited, reopened: res.reopened,
-      back: res.back, offCat: res.offCat, assigned: res.assigned, rows: res.rows, ms: res.ms,
+      back: res.back, offCat: res.offCat, retired: res.retired, assigned: res.assigned, rows: res.rows, ms: res.ms,
     })]);
     props.setProperty('RECALL_SIG', sig);
     props.setProperty('RECALL_ROWS', String(res.rows));
@@ -11649,15 +11703,18 @@ function recallCheck_(cfg, set, today, force) {
   const rows = pcnReadAppts_(ctx);
   const was = Number(PropertiesService.getScriptProperties().getProperty('RECALL_ROWS') || 0);
   if (!force && was > 1000 && rows.length < was * 0.7) {
-    throw new Error('The appointment book has ' + rows.length + " rows, but had " + was + " last time. Recall wasn't changed.");
+    throw new Error('The appointment book has ' + rows.length + ' rows, but had ' + was + " last time. Recall wasn't changed.");
   }
 
-  // Each patient's last visit and next booking, per treatment
+  // Each patient's last treatment visit and next treatment booking, per treatment.
+  // Services on the "Not recalled" list (reviews, consults, touch-ups) don't count.
   const catOf = Object.create(null);
   set.categories.forEach(function (c) { catOf[c.key.toLowerCase()] = c; });
+  const skip = recallSkipFn_(set.skipServices);
   const pts = recallPatients_(cfg);
   const pidOf = Object.create(null);
   const groups = Object.create(null);
+  const skipped = Object.create(null);   // patient|treatment → past days that had a skipped service
   const anyFuture = Object.create(null);
   rows.forEach(function (r) {
     if (!pcnIsDate_(r[0]) || !pcnStatusOk_(r[7], 'dns')) return;   // cancelled and no-shows don't count
@@ -11672,6 +11729,10 @@ function recallCheck_(cfg, set, today, force) {
     const cat = catOf[String(r[13] == null ? '' : r[13]).trim().toLowerCase()];
     if (!cat) return;
     const k = pid + '|' + cat.key;
+    if (skip(r[9])) {
+      if (!future) (skipped[k] = skipped[k] || Object.create(null))[dk] = true;
+      return;
+    }
     const g = groups[k] || (groups[k] = { pid: pid, cat: cat, last: '', staff: '', svc: [], future: '' });
     if (future) { if (!g.future || dk < g.future) g.future = dk; return; }
     if (dk > g.last) { g.last = dk; g.staff = String(r[8] == null ? '' : r[8]).trim(); g.svc = []; }
@@ -11683,7 +11744,7 @@ function recallCheck_(cfg, set, today, force) {
 
   const now = new Date().toISOString();
   const writes = [];
-  const sum = { made: 0, booked: 0, visited: 0, reopened: 0, back: 0, offCat: 0 };
+  const sum = { made: 0, booked: 0, visited: 0, reopened: 0, back: 0, offCat: 0, retired: 0 };
   const add = function (c, what) {
     return (Array.isArray(c.log) ? c.log : []).concat([{ at: now, by: 'Recall', byUid: '', kind: 'auto', what: what, note: '' }]).slice(-80);
   };
@@ -11695,49 +11756,68 @@ function recallCheck_(cfg, set, today, force) {
     .forEach(function (c) {
       const path = RECALL_COL_ + '/' + c._id;
       const key = c.patientId + '|' + c.category;
-      const put = function (patch, what) { patch.log = add(c, what); patch.updatedAt = now; writes.push(patchWrite_(cfg, path, patch)); };
-      const cat = catOf[String(c.category || '').toLowerCase()];
-      if (!cat || !cat.on) {
-        put({ status: 'closed', closeReason: 'Recall is turned off for this treatment', closedAt: now, closedBy: 'Recall' },
-          'Closed: recall is turned off for ' + c.category);
-        sum.offCat++;
-        return;
-      }
-      if (live[key]) {
-        put({ status: 'closed', closeReason: 'Duplicate', closedAt: now, closedBy: 'Recall' }, 'Closed: a newer card is open');
-        return;
-      }
-      const g = groups[key];
-      if (g && g.last > String(c.lastVisit || '')) {
-        put({ status: 'closed', closeReason: 'Came in', visitedOn: g.last, closedAt: now, closedBy: 'Recall', remindOn: '' },
-          'Came in on ' + recLongDate_(g.last));
-        sum.visited++;
-        return;
-      }
-      live[key] = true;
-      if (g && g.future) {
-        if (c.status !== 'booked' || c.bookedFor !== g.future) {
-          put({ status: 'booked', bookedFor: g.future, bookedAt: c.bookedAt || now, remindOn: '' },
-            'Booked for ' + recLongDate_(g.future) + ' (in the appointment book)');
-          if (c.status !== 'booked') sum.booked++;
+      const lv = String(c.lastVisit || '');
+      const fix = c.nameKey ? null : recallKeys_(c.patientName, c.mobile, c.email);   // search keys on older cards
+      let touched = false;
+      const put = function (patch, what) {
+        touched = true;
+        if (fix) Object.assign(patch, fix);
+        patch.log = add(c, what);
+        patch.updatedAt = now;
+        writes.push(patchWrite_(cfg, path, patch));
+      };
+      (function () {
+        const cat = catOf[String(c.category || '').toLowerCase()];
+        if (!cat || !cat.on) {
+          put({ status: 'closed', closeReason: 'Recall is turned off for this treatment', closedAt: now, closedBy: 'Recall' },
+            'Closed: recall is turned off for ' + c.category);
+          sum.offCat++;
+          return;
         }
-        return;
-      }
-      if (c.status === 'booked') {
-        const phoned = !c.bookedFor;
-        if (!phoned || Date.now() - (Date.parse(String(c.bookedAt || '')) || 0) > 3 * 86400000) {
-          put({ status: 'open', stage: c.assignedToId ? 'call' : 'due', bookedFor: '', bookedAt: '' },
-            phoned ? "Marked as booked, but it isn't in the appointment book"
-              : 'The booking for ' + recLongDate_(c.bookedFor) + ' is no longer in the appointment book');
-          sum.reopened++;
+        const g = groups[key];
+        // Started by a visit that's now on the "Not recalled" list: a new card comes from the real treatment visit
+        if (skipped[key] && skipped[key][lv] && (!g || g.last < lv)) {
+          put({ status: 'closed', closeReason: 'Last visit was not a treatment', closedAt: now, closedBy: 'Recall', remindOn: '' },
+            'Closed: the visit on ' + recLongDate_(lv) + " was a service that isn't recalled");
+          sum.retired++;
+          return;
         }
-        return;
-      }
-      if (c.stage === 'later' && c.remindOn && String(c.remindOn) <= today) {
-        put({ stage: c.assignedToId ? 'call' : 'due', remindOn: '', pauseReason: '' },
-          c.pauseReason ? 'Back on the list (was paused: ' + c.pauseReason + ')' : 'Reminder: call them back today');
-        sum.back++;
-      }
+        if (live[key]) {
+          put({ status: 'closed', closeReason: 'Duplicate', closedAt: now, closedBy: 'Recall' }, 'Closed: a newer card is open');
+          return;
+        }
+        if (g && g.last > lv) {
+          put({ status: 'closed', closeReason: 'Came in', visitedOn: g.last, closedAt: now, closedBy: 'Recall', remindOn: '' },
+            'Came in on ' + recLongDate_(g.last));
+          sum.visited++;
+          return;
+        }
+        live[key] = true;
+        if (g && g.future) {
+          if (c.status !== 'booked' || c.bookedFor !== g.future) {
+            put({ status: 'booked', bookedFor: g.future, bookedAt: c.bookedAt || now, remindOn: '' },
+              'Booked for ' + recLongDate_(g.future) + ' (in the appointment book)');
+            if (c.status !== 'booked') sum.booked++;
+          }
+          return;
+        }
+        if (c.status === 'booked') {
+          const phoned = !c.bookedFor;
+          if (!phoned || Date.now() - (Date.parse(String(c.bookedAt || '')) || 0) > 3 * 86400000) {
+            put({ status: 'open', stage: c.assignedToId ? 'call' : 'due', bookedFor: '', bookedAt: '' },
+              phoned ? "Marked as booked, but it isn't in the appointment book"
+                : 'The booking for ' + recLongDate_(c.bookedFor) + ' is no longer in the appointment book');
+            sum.reopened++;
+          }
+          return;
+        }
+        if (c.stage === 'later' && c.remindOn && String(c.remindOn) <= today) {
+          put({ stage: c.assignedToId ? 'call' : 'due', remindOn: '', pauseReason: '' },
+            c.pauseReason ? 'Back on the list (was paused: ' + c.pauseReason + ')' : 'Reminder: call them back today');
+          sum.back++;
+        }
+      })();
+      if (!touched && fix) writes.push(patchWrite_(cfg, path, fix));
     });
 
   // New cards: due (or due within the lead days), nothing booked, last visit not too long ago
@@ -11750,15 +11830,27 @@ function recallCheck_(cfg, set, today, force) {
     if (set.anyFuturePauses && anyFuture[g.pid]) return;
     const due = flowAddMonthsKey_(g.last, g.cat.months);
     if (due > until) return;
-    want.push({ id: flowPart_(g.pid) + '__' + flowPart_(g.cat.key) + '__' + g.last.replace(/-/g, ''), g: g, due: due });
+    want.push({ id: flowPart_(g.pid) + '__' + flowPart_(g.cat.key) + '__' + g.last.replace(/-/g, ''), k: k, g: g, due: due });
   });
-  // A card closed for this same visit ("Not interested") isn't made again
+  // A card closed for this same visit ("Not interested") isn't made again. One closed as "Came in" by a visit
+  // that's now on the "Not recalled" list goes back on the list.
   const have = want.length ? fsBatchGet_(cfg, want.map(function (w) { return RECALL_COL_ + '/' + w.id; })) : {};
   want.forEach(function (w) {
-    if (have[RECALL_COL_ + '/' + w.id]) return;
+    const old = have[RECALL_COL_ + '/' + w.id];
+    if (old) {
+      if (old.status === 'closed' && old.closeReason === 'Came in' && skipped[w.k] && skipped[w.k][String(old.visitedOn || '')]) {
+        writes.push(patchWrite_(cfg, RECALL_COL_ + '/' + w.id, Object.assign({
+          status: 'open', stage: 'due', assignedToId: '', assignedToName: '', assignedDay: '',
+          closeReason: '', closedAt: '', closedBy: '', visitedOn: '', updatedAt: now,
+          log: add(old, 'Back on the list: the visit on ' + recLongDate_(old.visitedOn) + " was a service that isn't recalled"),
+        }, recallKeys_(old.patientName, old.mobile, old.email))));
+        sum.reopened++;
+      }
+      return;
+    }
     const doc = pts.doc(w.g.pid) || {};
     const who = flowWho_(doc);
-    writes.push(updateWrite_(cfg, RECALL_COL_ + '/' + w.id, {
+    writes.push(updateWrite_(cfg, RECALL_COL_ + '/' + w.id, Object.assign({
       patientId: w.g.pid, pttId: String(doc.PttID || w.g.pid), patientName: who.name,
       mobile: String(doc.Mobile || ''), email: String(doc.Email || ''),
       category: w.g.cat.key, months: w.g.cat.months, lastVisit: w.g.last, lastStaff: w.g.staff, lastServices: w.g.svc,
@@ -11767,7 +11859,7 @@ function recallCheck_(cfg, set, today, force) {
       closeReason: '', closedAt: '', closedBy: '',
       log: [{ at: now, by: 'Recall', byUid: '', kind: 'auto', what: 'Due for ' + w.g.cat.key + ' (last visit ' + recLongDate_(w.g.last) + ')', note: '' }],
       createdAt: now, updatedAt: now,
-    }));
+    }, recallKeys_(who.name, doc.Mobile, doc.Email))));
     sum.made++;
   });
 
@@ -11838,6 +11930,10 @@ function handleRecall_(body) {
       try { return recallRun_(true); }
       catch (e) { return { ok: true, problem: String(e && e.message ? e.message : e).slice(0, 300) }; }
     }
+    if (op === 'services') {
+      if (!manage) return { ok: false, error: 'FORBIDDEN' };
+      return { ok: true, services: recallServices_(getConfig_()) };
+    }
     const id = String(body.id || '');
     if (!/^[A-Za-z0-9_-]{5,200}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
     if (CacheService.getScriptCache().get('recall_run')) return { ok: true, problem: 'Recall is updating its list. Try again in a minute.' };
@@ -11875,7 +11971,7 @@ function recallAction_(op, id, body, session) {
     const remind = String(body.remindOn || '');
     if (!out && !note && !remind) return { ok: true, problem: 'Choose what happened, or write a note.' };
     if (remind && !dateOk(remind)) return { ok: true, problem: 'Choose a call-back date after today.' };
-    patch = {};
+    patch = out ? { lastCallAt: now, lastCallBy: uid, lastCallDay: today } : {};
     if (out === 'booked') {
       add('call', 'Booked');
       Object.assign(patch, { status: 'booked', bookedFor: '', bookedAt: now, remindOn: '', pauseReason: '' });

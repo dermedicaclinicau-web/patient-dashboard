@@ -90,13 +90,15 @@ service cloud.firestore {
     }
     // Recall settings (config: the settings page) and the last check (status: Apps Script only)
     match /recall_settings/{id} {
-      allow read: if isStaff();
-      allow write: if can('recall.manage') && id == 'config'
-        && request.resource.data.updatedByUid == request.auth.uid
-        && request.resource.data.categories is list && request.resource.data.categories.size() <= 30
-        && request.resource.data.team is list && request.resource.data.team.size() <= 30
-        && request.resource.data.reasons is list && request.resource.data.reasons.size() <= 20;
-    }
+  allow read: if isStaff();
+  allow write: if can('recall.manage') && id == 'config'
+    && request.resource.data.updatedByUid == request.auth.uid
+    && request.resource.data.categories is list && request.resource.data.categories.size() <= 30
+    && request.resource.data.team is list && request.resource.data.team.size() <= 30
+    && request.resource.data.reasons is list && request.resource.data.reasons.size() <= 20
+    && (!('skipServices' in request.resource.data)
+        || (request.resource.data.skipServices is list && request.resource.data.skipServices.size() <= 40));
+}
 
     // A permission from the login token (Admins have everything)
     function can(p) {

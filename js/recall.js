@@ -1,23 +1,23 @@
 // Recall (#/recall): patients due for their next treatment, worked by the recall team.
 // The cards (recalls/{id}) are made, booked and closed by Apps Script (Code.gs → Recall) from the appointment book.
-// Every change here goes through Apps Script (action "recall"), so each card keeps a full history.
+// Every change goes through Apps Script (action "recall"), so each card keeps a full history.
+// Only the tab on screen is loaded, 50 at a time; the numbers come from Firestore count queries.
 import { db, auth } from "./firebase-config.js";
-import { collection, query, where, onSnapshot, getDocs, getDoc, doc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { collection, query, where, orderBy, limit, onSnapshot, getDocs, getDoc, doc, getCountFromServer }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 import { normRecallSettings } from "./recall-settings.js";
 
 const COL = "recalls";
-const COLS = [
-  ["due", "Waiting", "Shared out to the team each day"],
-  ["call", "To call", ""],
-  ["later", "Call back later", ""],
-  ["booked", "Booked", "Closes when they come in"],
-];
+const PAGE = 50;
 const OUTCOMES = [["no_answer", "No answer"], ["voicemail", "Left voicemail"], ["spoke", "Spoke to them"],
   ["texted", "Sent a text"], ["booked", "Booked"]];
-const PAGE = 40;
+const QUICK = [["no_answer", "No answer"], ["voicemail", "Left voicemail"], ["texted", "Sent a text"], ["booked", "Booked"]];
+const LABEL = Object.fromEntries(OUTCOMES);
+const GROUPS = [["Just due · last 30 days", (d) => d <= 30], ["Overdue · 1 to 6 months", (d) => d > 30 && d <= 182],
+  ["Lapsed · over 6 months", (d) => d > 182]];
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -25,17 +25,34 @@ const todayKey = () => fmtKey(new Date());
 const keyDate = (k) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(k || ""); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; };
 const addDays = (k, n) => { const d = keyDate(k); d.setDate(d.getDate() + n); return fmtKey(d); };
 const nice = (k) => { const d = keyDate(k); return d ? d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : ""; };
-const short = (k) => { const d = keyDate(k); return d ? d.toLocaleDateString("en-AU", { day: "numeric", month: "short" }) : ""; };
+const short = (k) => { const d = keyDate(k); return d ? d.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" }) : ""; };
 const daysFrom = (a, b) => { const x = keyDate(a), y = keyDate(b); return x && y ? Math.round((y - x) / 86400000) : 0; };
 const when = (iso) => { const d = new Date(iso || ""); return isNaN(d) ? "" : d.toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }); };
 const first = (n) => String(n || "").split(" ")[0];
-const tagClass = (cat) => { let h = 0; for (const ch of String(cat)) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return `rc-t${h % 6}`; };
-const colOf = (c) => (c.status === "booked" ? "booked" : c.stage === "call" || c.stage === "later" ? c.stage : "due");
+const plural = (n, w) => `${Number(n).toLocaleString()} ${w}${n === 1 ? "" : "s"}`;
+const initials = (n) => String(n || "").trim().split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
 const me = () => (auth.currentUser && auth.currentUser.uid) || "";
 const can = (staff, p) => !!staff && (/^admin$/i.test(String(staff.role || "")) || (Array.isArray(staff.perms) && staff.perms.includes(p)));
+const nameKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9' -]/g, " ").replace(/\s+/g, " ").trim(); // same as recallKeys_
+const blank = () => ({ out: "", note: "", remind: "", reason: "", until: "" });
 const errText = (err, fallback) => (err && err.code === "permission-denied"
   ? "You don't have access to Recall. Check Recall access in Staff, and that the Firestore rules are published."
   : (err && err.message) || fallback);
+
+function dueText(c, t) {
+  if (c.status === "booked") return c.bookedFor ? `Booked for ${short(c.bookedFor)}` : "Booked by phone";
+  if (c.stage === "later") return c.pauseReason ? `Paused until ${short(c.remindOn)}` : `Call back ${short(c.remindOn)}`;
+  const d = daysFrom(c.dueDate, t);
+  if (d < 0) return `Due in ${plural(-d, "day")}`;
+  if (d === 0) return "Due today";
+  if (d < 60) return `Due ${plural(d, "day")} ago`;
+  return `${plural(Math.round(d / 30.4), "month")} overdue`;
+}
+function lateness(c, t) {
+  if (c.status !== "open" || c.stage === "later") return "";
+  const d = daysFrom(c.dueDate, t);
+  return d > 182 ? "is-old" : d > 30 ? "is-late" : "";
+}
 
 function norm(snap) {
   const x = snap.data() || {};
@@ -59,117 +76,285 @@ export function mountRecall(container, { staff = null } = {}) {
     <div class="rc-top"><h2>Recall</h2><span class="inv-spacer"></span>
       ${can(staff, "recall.manage") ? '<a class="lh-btn is-quiet" href="#/settings/recall">Recall settings</a>' : ""}</div>
     <div class="rc-stats" data-role="stats"></div>
-    <div class="rc-tools">
-      <input type="search" class="fe-input" data-role="q" placeholder="Find a patient by name, mobile or email" aria-label="Find a patient" />
-      <select class="fb-select" data-role="cat" aria-label="Treatment"><option value="">All treatments</option></select>
-      <select class="fb-select" data-role="who" aria-label="Whose">
-        <option value="all">Everyone's</option><option value="mine">Mine</option><option value="nobody">Not given to anyone</option></select>
+    <div class="rc-bar">
+      <div class="rc-tabs" data-role="tabs" role="tablist"></div>
+      <select class="fb-select rc-who" data-role="who" aria-label="Whose calls"></select>
+      <span class="inv-spacer"></span>
+      <input type="search" class="fe-input rc-q" data-role="q" placeholder="Find a patient by name, mobile or email" aria-label="Find a patient" />
     </div>
+    <div class="rc-chips" data-role="chips"></div>
     <div class="rc-layout">
-      <div class="rc-board" data-role="board"><div class="skeleton" style="height:320px;border-radius:14px"></div></div>
+      <div data-role="list"></div>
       <aside class="tb-card rc-panel" data-role="panel" aria-label="Recall card" hidden></aside>
     </div>`;
   container.replaceChildren(root);
   const $ = (r) => root.querySelector(`[data-role="${r}"]`);
-  const WIDE = window.matchMedia("(min-width: 1400px)");   // the card sits beside the board (same as styles.css)
 
-  let cards = null;
-  const extra = new Map();   // cards no longer on the board (closed), still open in the panel
-  const ui = { q: "", cat: "", who: "all", shown: {} };
-  let sel = "";
-  let panelSig = "";
-  let draft = { out: "", note: "", remind: "", reason: "", until: "" };
-  let busy = false;
-  let back = null;
-  let people = [];
+  const ui = { tab: "mine", who: "mine", cat: "", q: "" };
   let settings = normRecallSettings({});
+  let people = [];
+  let sections = [];
+  let found = null;          // search results (null when not searching)
+  let searching = false;
+  const extra = new Map();   // cards that have left the list, still open in the panel
+  let counts = {};
+  let chipCounts = {};
+  let sel = "";
+  let seenSel = false;
+  let panelSig = "";
+  let draft = blank();
+  let busy = false;
+  let countTimer = 0, countSeq = 0, searchTimer = 0, searchSeq = 0;
 
-  getDoc(doc(db, "recall_settings", "config")).then((s) => { settings = normRecallSettings(s.exists() ? s.data() : {}); drawPanel(true); }).catch(() => {});
-  callApi({ action: "staffList" }).then((r) => { people = (r && r.staff) || []; drawPanel(true); }).catch(() => {});
-
-  async function loadBack() {
-    const start = `${todayKey().slice(0, 8)}01`;
-    try {
-      const [a, b] = await Promise.all([
-        getDocs(query(collection(db, COL), where("bookedAt", ">=", keyDate(start).toISOString()))),
-        getDocs(query(collection(db, COL), where("visitedOn", ">=", start))),
-      ]);
-      const ids = new Set();
-      a.forEach((d) => ids.add(d.id));
-      b.forEach((d) => ids.add(d.id));
-      back = ids.size;
-    } catch (err) { console.warn("Recall: this month's count failed:", err); back = null; }
-    drawStats();
+  /* ---------- What each tab loads ---------- */
+  function tabBase(tab) {
+    if (tab === "mine") {
+      const w = [where("status", "==", "open"), where("stage", "==", "call")];
+      if (ui.who === "mine") w.push(where("assignedToId", "==", me()));
+      else if (ui.who !== "all") w.push(where("assignedToId", "==", ui.who));
+      return w;
+    }
+    if (tab === "waiting") return [where("status", "==", "open"), where("stage", "==", "due")];
+    if (tab === "later") return [where("status", "==", "open"), where("stage", "==", "later")];
+    return [where("status", "==", "booked")];
   }
-  loadBack();
-
-  /* ---------- The board ---------- */
-  function visible() {
-    const q = ui.q.trim().toLowerCase();
-    const uid = me();
-    return [...cards.values()].filter((c) =>
-      (!ui.cat || c.category === ui.cat) &&
-      (ui.who === "all" || (ui.who === "mine" ? c.assignedToId === uid : !c.assignedToId)) &&
-      (!q || `${c.patientName} ${c.mobile} ${c.email}`.toLowerCase().includes(q)));
+  function tabSections() {
+    const t = todayKey(), d30 = addDays(t, -30), d182 = addDays(t, -182);
+    const base = [...tabBase(ui.tab), ...(ui.cat ? [where("category", "==", ui.cat)] : [])];
+    const due = ["dueDate", "desc"];
+    if (ui.tab === "waiting") return [
+      { key: "just", title: "Just due · last 30 days", where: [...base, where("dueDate", ">=", d30)], order: due },
+      { key: "over", title: "Overdue · 1 to 6 months", where: [...base, where("dueDate", "<", d30), where("dueDate", ">=", d182)], order: due },
+      { key: "lapsed", title: "Lapsed · over 6 months", where: [...base, where("dueDate", "<", d182)], order: due, lazy: true },
+    ];
+    if (ui.tab === "later") return [{ key: "later", title: "", where: base, order: ["remindOn", "asc"] }];
+    if (ui.tab === "booked") return [{ key: "booked", title: "", where: base, order: ["bookedFor", "asc"] }];
+    return [{ key: "mine", title: "", where: base, order: due }];
   }
-  const sorter = {
-    due: (a, b) => a.dueDate.localeCompare(b.dueDate),
-    call: (a, b) => a.dueDate.localeCompare(b.dueDate),
-    later: (a, b) => a.remindOn.localeCompare(b.remindOn),
-    booked: (a, b) => (a.bookedFor || "9").localeCompare(b.bookedFor || "9"),
+
+  const inRows = (id) => sections.some((s) => s.rows.some((x) => x.id === id));
+  function findCard(id) {
+    for (const s of sections) { const c = s.rows.find((x) => x.id === id); if (c) return c; }
+    return extra.get(id) || (found && found.find((x) => x.id === id)) || null;
+  }
+
+  function stopAll() { sections.forEach((s) => { if (s.stop) s.stop(); s.stop = null; }); }
+
+  function listen(sec) {
+    if (sec.stop) sec.stop();
+    const q = query(collection(db, COL), ...sec.where, orderBy(sec.order[0], sec.order[1]), limit(sec.n));
+    sec.stop = onSnapshot(q, (snap) => {
+      if (!root.isConnected) { stopAll(); return; }
+      sec.rows = snap.docs.map(norm);
+      sec.more = snap.size >= sec.n;
+      sec.loaded = true;
+      sec.error = "";
+      const here = sel ? inRows(sel) : false;
+      if (sel && seenSel && !here) keepOpen(sel);   // the open card has left this list
+      seenSel = here;
+      drawList();
+      drawPanel(false);
+      scheduleCounts();
+    }, (err) => {
+      if (!root.isConnected) return;
+      console.error("Recall list failed. If this mentions an index, open the link to create it:", err);
+      sec.loaded = true;
+      sec.error = /index/i.test(String(err && err.message)) ? "This list needs a Firestore index. An Admin can create it from the link in the browser console."
+        : errText(err, "Couldn't load this list.");
+      drawList();
+    });
+  }
+
+  function build() {
+    stopAll();
+    sections = tabSections().map((s) => ({ ...s, n: PAGE, rows: [], loaded: false, more: false, error: "", open: !s.lazy, count: null, stop: null }));
+    sections.filter((s) => s.open).forEach(listen);
+    drawTabs(); drawWho(); drawChips(); drawList(); drawPanel(true);
+    scheduleCounts(0);
+  }
+
+  /* ---------- Numbers ---------- */
+  const countOf = async (cons) => {
+    try { return (await getCountFromServer(query(collection(db, COL), ...cons))).data().count; }
+    catch (err) { console.warn("Recall count failed:", err); return null; }
   };
+  function scheduleCounts(delay = 1500) { clearTimeout(countTimer); countTimer = setTimeout(loadCounts, delay); }
 
-  function cardHtml(c) {
-    const t = todayKey();
-    const over = daysFrom(c.dueDate, t);
-    const line = c.status === "booked" ? esc(c.bookedFor ? `Booked for ${short(c.bookedFor)}` : "Booked by phone")
-      : c.stage === "later" ? esc(`${c.pauseReason ? "Paused until" : "Call"} ${short(c.remindOn)}`)
-      : over > 0 ? `<span class="rc-late">${over} day${over === 1 ? "" : "s"} overdue</span>`
-      : esc(`Due ${short(c.dueDate)}`);
-    const right = [first(c.assignedToName), c.attempts ? `${c.attempts} tr${c.attempts === 1 ? "y" : "ies"}` : ""].filter(Boolean).join(" · ");
-    return `<button type="button" class="rc-card${c.id === sel ? " is-on" : ""}" data-card="${esc(c.id)}">
-      <strong>${esc(c.patientName || "Unknown patient")}</strong>
-      <span class="rc-tag ${tagClass(c.category)}">${esc(c.category)}</span>
-      <span class="rc-meta"><span>${line}</span><span>${esc(right)}</span></span></button>`;
+  async function loadCounts() {
+    if (!root.isConnected) return;
+    const seq = ++countSeq;
+    const t = todayKey(), uid = me();
+    const cat = ui.cat ? [where("category", "==", ui.cat)] : [];
+    const cats = settings.categories.filter((c) => c.on).map((c) => c.key);
+    const jobs = {
+      mine: countOf([...tabBase("mine"), ...cat]),
+      waiting: countOf([...tabBase("waiting"), ...cat]),
+      later: countOf([...tabBase("later"), ...cat]),
+      booked: countOf([...tabBase("booked"), ...cat]),
+      myOpen: countOf([where("status", "==", "open"), where("stage", "==", "call"), where("assignedToId", "==", uid)]),
+      logged: countOf([where("lastCallBy", "==", uid), where("lastCallDay", "==", t)]),
+      newWeek: countOf([where("status", "==", "open"), where("dueDate", ">=", addDays(t, -7)), where("dueDate", "<=", t), orderBy("dueDate", "desc")]),
+      bookedMonth: countOf([where("bookedAt", ">=", keyDate(`${t.slice(0, 8)}01`).toISOString())]),
+    };
+    cats.forEach((k) => { jobs[`cat:${k}`] = countOf([...tabBase(ui.tab), where("category", "==", k)]); });
+    sections.forEach((s) => { if (s.title) jobs[`sec:${s.key}`] = countOf([...s.where, orderBy(s.order[0], s.order[1])]); });
+    const keys = Object.keys(jobs);
+    const vals = await Promise.all(keys.map((k) => jobs[k]));
+    if (seq !== countSeq || !root.isConnected) return;
+    counts = Object.fromEntries(keys.map((k, i) => [k, vals[i]]));
+    chipCounts = Object.fromEntries(cats.map((k) => [k, counts[`cat:${k}`]]));
+    sections.forEach((s) => { if (`sec:${s.key}` in counts) s.count = counts[`sec:${s.key}`]; });
+    drawStats(); drawTabs(); drawChips(); drawList();
   }
 
+  /* ---------- Search ---------- */
+  async function runSearch() {
+    const q = ui.q.trim();
+    const seq = ++searchSeq;
+    if (q.length < 2) { found = null; searching = false; drawTabs(); drawWho(); drawChips(); drawList(); return; }
+    const look = (field, p) => getDocs(query(collection(db, COL), where(field, ">=", p), where(field, "<=", `${p}\uf8ff`), orderBy(field), limit(25)));
+    const jobs = [];
+    if (q.includes("@")) jobs.push(look("emailKey", q.toLowerCase()));
+    else {
+      const digits = q.replace(/\D/g, "");
+      if (digits.length >= 3 && digits.length >= q.replace(/[\s()+-]/g, "").length) {
+        jobs.push(look("mobileKey", digits.replace(/^614/, "04").replace(/^4/, "04")));
+      } else {
+        const k = nameKey(q);
+        if (k.length >= 2) jobs.push(look("nameKey", k), look("nameKeyR", k));
+      }
+    }
+    if (!jobs.length) { found = []; searching = false; drawList(); return; }
+    searching = true;
+    drawTabs(); drawWho(); drawChips(); drawList();
+    try {
+      const snaps = await Promise.all(jobs);
+      if (seq !== searchSeq) return;
+      const seen = new Set();
+      const out = [];
+      snaps.forEach((s) => s.docs.forEach((d) => {
+        if (seen.has(d.id)) return;
+        seen.add(d.id);
+        const c = norm(d);
+        if (c.status !== "closed") out.push(c);
+      }));
+      found = out.sort((a, b) => a.patientName.localeCompare(b.patientName)).slice(0, 30);
+    } catch (err) {
+      console.error("Recall search failed:", err);
+      found = [];
+      showToast(errText(err, "Couldn't search. Try again."));
+    } finally {
+      if (seq === searchSeq) { searching = false; drawList(); }
+    }
+  }
+
+  /* ---------- Drawing ---------- */
   function drawStats() {
-    if (!cards) return;
-    const uid = me();
-    const open = [...cards.values()].filter((c) => c.status === "open");
-    const box = (label, val, cls = "") => `<div class="rc-stat"><small>${esc(label)}</small><strong class="${cls}">${esc(String(val))}</strong></div>`;
-    $("stats").innerHTML = box("Due now", open.length) +
-      box("Waiting for the team", open.filter((c) => colOf(c) === "due").length) +
-      box("Mine to call", open.filter((c) => c.stage === "call" && c.assignedToId === uid).length) +
-      box("Booked or came in this month", back == null ? "–" : back, "rc-good");
+    const v = (x) => (x == null ? "–" : Number(x).toLocaleString());
+    const box = (label, val, cls = "") => `<div class="rc-stat"><small>${esc(label)}</small><strong class="${cls}">${esc(v(val))}</strong></div>`;
+    $("stats").innerHTML = box("My calls", counts.myOpen) + box("Called today", counts.logged) +
+      box("Newly due this week", counts.newWeek) + box("Booked this month", counts.bookedMonth, "rc-good");
   }
 
-  function drawBoard() {
-    if (!cards) return;
-    const cats = [...new Set([...cards.values()].map((c) => c.category))].sort();
-    const catSel = $("cat");
-    if (ui.cat && !cats.includes(ui.cat)) cats.push(ui.cat);
-    catSel.innerHTML = `<option value="">All treatments</option>${cats.map((c) =>
-      `<option value="${esc(c)}"${c === ui.cat ? " selected" : ""}>${esc(c)}</option>`).join("")}`;
-    const rows = visible();
-    $("board").innerHTML = COLS.map(([k, label, help]) => {
-      const list = rows.filter((c) => colOf(c) === k).sort(sorter[k]);
-      const n = ui.shown[k] || PAGE;
-      return `<div class="rc-col">
-        <div class="rc-col-h"><strong>${esc(label)}</strong><em>${list.length}</em></div>
-        ${help ? `<small class="rc-col-help">${esc(help)}</small>` : ""}
-        ${list.length ? list.slice(0, n).map(cardHtml).join("") : '<p class="muted rc-none">Nobody here.</p>'}
-        ${list.length > n ? `<button type="button" class="lh-btn is-quiet rc-more" data-more="${k}">Show ${Math.min(PAGE, list.length - n)} more</button>` : ""}
-      </div>`;
+  function drawTabs() {
+    const searchingNow = ui.q.trim().length >= 2;
+    const tab = (k, label) => {
+      const n = counts[k];
+      const on = ui.tab === k && !searchingNow;
+      return `<button type="button" class="rc-tab${on ? " is-on" : ""}" data-tab="${k}" role="tab" aria-selected="${on}">${esc(label)}${n != null ? ` <em>${n.toLocaleString()}</em>` : ""}</button>`;
+    };
+    $("tabs").innerHTML = tab("mine", ui.who === "mine" ? "My calls" : "Calls") + tab("waiting", "Waiting") +
+      tab("later", "Call back") + tab("booked", "Booked");
+  }
+
+  function drawWho() {
+    const s = $("who");
+    s.hidden = ui.tab !== "mine" || ui.q.trim().length >= 2;
+    const team = new Set(settings.team);
+    const opts = [["mine", "Mine"], ["all", "Everyone's"],
+      ...people.filter((p) => team.has(p.id) && p.id !== me()).map((p) => [p.id, p.name])];
+    if (!opts.some(([k]) => k === ui.who)) opts.push([ui.who, "Someone else"]);
+    s.innerHTML = opts.map(([k, l]) => `<option value="${esc(k)}"${k === ui.who ? " selected" : ""}>${esc(l)}</option>`).join("");
+  }
+
+  function drawChips() {
+    const box = $("chips");
+    box.hidden = ui.q.trim().length >= 2;
+    const cats = settings.categories.filter((c) => c.on).map((c) => c.key)
+      .filter((k) => (chipCounts[k] || 0) > 0 || k === ui.cat);
+    box.innerHTML = `<button type="button" class="rc-chip${!ui.cat ? " is-on" : ""}" data-cat="">All treatments</button>` +
+      cats.map((k) => `<button type="button" class="rc-chip${ui.cat === k ? " is-on" : ""}" data-cat="${esc(k)}">${esc(k)}${
+        chipCounts[k] != null ? ` <em>${chipCounts[k].toLocaleString()}</em>` : ""}</button>`).join("");
+  }
+
+  function rowHtml(c, t) {
+    const on = c.id === sel;
+    const meta = [esc(c.category), `<span class="${lateness(c, t)}">${esc(dueText(c, t))}</span>`,
+      c.lastStaff ? esc(`last with ${c.lastStaff}`) : ""].filter(Boolean).join(" · ");
+    const side = [c.attempts ? `${c.attempts} tr${c.attempts === 1 ? "y" : "ies"}` : "",
+      c.assignedToId && c.assignedToId !== me() ? first(c.assignedToName) : ""].filter(Boolean).join(" · ");
+    const tel = c.mobile.replace(/[^\d+]/g, "");
+    return `<div class="rc-item${on ? " is-on" : ""}" data-card="${esc(c.id)}" role="button" tabindex="0" aria-expanded="${on}">
+        <span class="rc-av" aria-hidden="true">${esc(initials(c.patientName))}</span>
+        <span class="rc-main"><strong>${esc(c.patientName || "Unknown patient")}</strong><small>${meta}</small></span>
+        ${side ? `<span class="rc-side">${esc(side)}</span>` : ""}
+        ${tel ? `<a class="lh-btn rc-call" href="tel:${esc(tel)}">Call</a>` : ""}
+      </div>${on && c.status === "open" ? `<div class="rc-quick">${QUICK.map(([k, l]) =>
+        `<button type="button" class="rc-qb${k === "booked" ? " is-ok" : ""}" data-quick="${k}">${esc(l)}</button>`).join("")}
+        <button type="button" class="rc-qb" data-act="details">Note or call back…</button></div>` : ""}`;
+  }
+
+  function groupedRows(rows, t) {
+    return GROUPS.map(([title, test]) => {
+      const list = rows.filter((c) => test(daysFrom(c.dueDate, t)));
+      return list.length ? `<div class="rc-sub-h">${esc(title)}</div><div class="rc-list">${list.map((c) => rowHtml(c, t)).join("")}</div>` : "";
     }).join("");
+  }
+
+  function emptyText(sec) {
+    if (ui.cat) return `Nobody here for ${ui.cat}.`;
+    if (sec.key === "mine") {
+      if (ui.who !== "mine") return "No calls here right now.";
+      return counts.waiting ? "No calls given to you right now. New ones are shared out from Waiting every hour." : "Nothing to call right now.";
+    }
+    return { just: "Nobody newly due.", over: "Nobody in this group.", lapsed: "Nobody in this group.",
+      later: "No call-backs or pauses.", booked: "Nobody booked from Recall right now." }[sec.key] || "Nobody here.";
+  }
+
+  function sectionHtml(sec, t) {
+    const head = sec.title ? `<div class="rc-sec-h"><span>${esc(sec.title)}</span>${sec.count != null ? `<em>${sec.count.toLocaleString()}</em>` : ""}</div>` : "";
+    if (!sec.open) {
+      return `<div class="rc-sec"><button type="button" class="rc-lapsed" data-open="${sec.key}"><span>${esc(sec.title)}${
+        sec.count != null ? ` · ${plural(sec.count, "patient")}` : ""}</span><em>Show</em></button></div>`;
+    }
+    if (sec.error) return `<div class="rc-sec">${head}<p class="rc-empty">${esc(sec.error)}</p></div>`;
+    if (!sec.loaded) return `<div class="rc-sec">${head}<div class="skeleton" style="height:140px;border-radius:12px"></div></div>`;
+    const body = !sec.rows.length ? `<p class="rc-empty">${esc(emptyText(sec))}</p>`
+      : sec.key === "mine" ? groupedRows(sec.rows, t)
+        : `<div class="rc-list">${sec.rows.map((c) => rowHtml(c, t)).join("")}</div>`;
+    const more = sec.more ? `<button type="button" class="lh-btn is-quiet rc-more" data-more="${sec.key}">Load ${PAGE} more</button>` : "";
+    return `<div class="rc-sec">${head}${body}${more}</div>`;
+  }
+
+  function drawList() {
+    const t = todayKey();
+    const box = $("list");
+    if (ui.q.trim().length >= 2) {
+      if (searching || !found) { box.innerHTML = '<div class="skeleton" style="height:140px;border-radius:12px"></div>'; return; }
+      box.innerHTML = `<div class="rc-sec"><div class="rc-sec-h"><span>Matching patients</span><em>${found.length}</em></div>${
+        found.length ? `<div class="rc-list">${found.map((c) => rowHtml(c, t)).join("")}</div>`
+          : `<p class="rc-empty">No open recall for “${esc(ui.q.trim())}”.</p>`}</div>`;
+      return;
+    }
+    box.innerHTML = sections.map((s) => sectionHtml(s, t)).join("");
   }
 
   /* ---------- One card ---------- */
   function drawPanel(force) {
     const p = $("panel");
-    const c = sel ? (cards && cards.get(sel)) || extra.get(sel) : null;
+    const c = sel ? findCard(sel) : null;
     if (!c) { p.hidden = true; p.innerHTML = ""; panelSig = ""; return; }
-    const sig = `${c.id}|${c.updatedAt}|${c.status}`;
+    const sig = `${c.id}|${c.updatedAt}|${c.status}|${people.length}`;
     if (!force && sig === panelSig) return;
     panelSig = sig;
     p.hidden = false;
@@ -182,7 +367,7 @@ export function mountRecall(container, { staff = null } = {}) {
     const reason = settings.reasons.find((r) => r.label === draft.reason);
     const sub = [
       c.category,
-      `due ${nice(c.dueDate)}${over > 0 ? ` (${over} day${over === 1 ? "" : "s"} ago)` : ""}`,
+      `due ${nice(c.dueDate)}${over > 0 ? ` (${plural(over, "day")} ago)` : ""}`,
       c.lastVisit ? `last visit ${nice(c.lastVisit)}${c.lastStaff ? ` with ${c.lastStaff}` : ""}` : "",
     ].filter(Boolean).join(" · ");
 
@@ -193,7 +378,7 @@ export function mountRecall(container, { staff = null } = {}) {
     } else if (c.status === "booked") {
       work = `<div class="rc-state is-ok">${c.bookedFor
         ? `Booked for ${esc(nice(c.bookedFor))}. The card closes by itself when they come in.`
-        : "Marked as booked by phone. If it isn't in the appointment book within 3 days, the card goes back to To call."}</div>
+        : "Marked as booked by phone. If it isn't in the appointment book within 3 days, the card goes back to My calls."}</div>
         <button type="button" class="lh-btn" data-act="reopen">Not booked after all</button>`;
     } else {
       work = `
@@ -237,20 +422,23 @@ export function mountRecall(container, { staff = null } = {}) {
   }
 
   function select(id) {
-    sel = id;
-    draft = { out: "", note: "", remind: "", reason: "", until: "" };
-    drawBoard();
+    sel = sel === id ? "" : id;
+    seenSel = sel ? inRows(sel) : false;
+    draft = blank();
+    drawList();
     drawPanel(true);
-    if (!WIDE.matches) $("panel").scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   async function act(op, extraBody, btn) {
-    if (busy) return false;
+    if (busy || !sel) return false;
+    const id = sel;
     busy = true;
     if (btn) btn.disabled = true;
     try {
-      const res = await callApi({ action: "recall", op, id: sel, ...extraBody });
+      const res = await callApi({ action: "recall", op, id, ...extraBody });
       if (res && res.problem) { showToast(res.problem); return false; }
+      scheduleCounts(800);
+      if (!inRows(id)) keepOpen(id);
       return true;
     } catch (err) {
       showToast(errText(err, "Couldn't save. Try again."));
@@ -261,58 +449,72 @@ export function mountRecall(container, { staff = null } = {}) {
     }
   }
 
-  // A card that's left the board (closed) stays open in the panel
   async function keepOpen(id) {
     try { const s = await getDoc(doc(db, COL, id)); if (s.exists()) extra.set(id, norm(s)); } catch { /* the panel just closes */ }
     if (sel === id) drawPanel(true);
   }
 
-  /* ---------- Live ---------- */
-  const stop = onSnapshot(query(collection(db, COL), where("status", "in", ["open", "booked"])), (snap) => {
-    if (!root.isConnected) { stop(); return; }
-    cards = new Map(snap.docs.map((d) => [d.id, norm(d)]));
-    if (sel && !cards.has(sel) && !extra.has(sel)) keepOpen(sel);
-    drawStats();
-    drawBoard();
-    drawPanel(false);
-  }, (err) => {
-    if (!root.isConnected) return;
-    console.error("Recall failed:", err);
-    $("board").innerHTML = `<div class="tm-empty is-error">${esc(errText(err, "Couldn't load Recall."))}</div>`;
-  });
-  window.addEventListener("hashchange", function off() {
-    setTimeout(() => { if (!root.isConnected) { stop(); window.removeEventListener("hashchange", off); } }, 0);
-  });
-
   /* ---------- Events ---------- */
   root.addEventListener("input", (e) => {
     const r = e.target.dataset.role;
-    if (r === "q") { ui.q = e.target.value; ui.shown = {}; drawBoard(); }
-    else if (r === "note") draft.note = e.target.value;
+    if (r === "q") {
+      ui.q = e.target.value;
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(runSearch, 300);
+    } else if (r === "note") draft.note = e.target.value;
   });
   root.addEventListener("change", async (e) => {
     const el = e.target;
     const r = el.dataset.role;
-    if (r === "cat") { ui.cat = el.value; ui.shown = {}; drawBoard(); return; }
-    if (r === "who") { ui.who = el.value; ui.shown = {}; drawBoard(); return; }
+    if (r === "who") { ui.who = el.value; sel = ""; build(); return; }
     if (r === "remind") { draft.remind = el.value; return; }
     if (r === "until") { draft.until = el.value; return; }
     if (r === "reason") { draft.reason = el.value; drawPanel(true); return; }
-    if (r === "assign") {
-      if (!(await act("assign", { toId: el.value }, el))) drawPanel(true);
-    }
+    if (r === "assign" && !(await act("assign", { toId: el.value }, el))) drawPanel(true);
+  });
+  root.addEventListener("keydown", (e) => {
+    const row = e.target.closest && e.target.closest(".rc-item");
+    if (row && e.target === row && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); select(row.dataset.card); }
   });
   root.addEventListener("click", async (e) => {
-    const card = e.target.closest("[data-card]");
-    if (card) { select(card.dataset.card); return; }
+    if (e.target.closest('a[href^="tel:"]')) return;
+    const tb = e.target.closest("[data-tab]");
+    if (tb) { ui.tab = tb.dataset.tab; ui.q = ""; $("q").value = ""; found = null; sel = ""; build(); return; }
+    const ch = e.target.closest("[data-cat]");
+    if (ch) { ui.cat = ch.dataset.cat; sel = ""; build(); return; }
+    const opn = e.target.closest("[data-open]");
+    if (opn) {
+      const s = sections.find((x) => x.key === opn.dataset.open);
+      if (s) { s.open = true; listen(s); drawList(); }
+      return;
+    }
     const more = e.target.closest("[data-more]");
-    if (more) { ui.shown[more.dataset.more] = (ui.shown[more.dataset.more] || PAGE) + PAGE; drawBoard(); return; }
+    if (more) {
+      const s = sections.find((x) => x.key === more.dataset.more);
+      if (s) { s.n += PAGE; more.disabled = true; more.textContent = "Loading…"; listen(s); }
+      return;
+    }
+    const qb = e.target.closest("[data-quick]");
+    if (qb) {
+      const k = qb.dataset.quick;
+      if (await act("log", { outcome: k, note: "", remindOn: "" }, qb)) showToast(`${LABEL[k]}: saved`);
+      return;
+    }
+    const row = e.target.closest("[data-card]");
+    if (row) { select(row.dataset.card); return; }
     const out = e.target.closest("[data-out]");
     if (out) { draft.out = draft.out === out.dataset.out ? "" : out.dataset.out; drawPanel(true); return; }
-    if (e.target.closest('[data-act="deselect"]')) { sel = ""; drawBoard(); drawPanel(true); return; }
 
     const b = e.target.closest("[data-act]");
     if (!b) return;
+    if (b.dataset.act === "deselect") { sel = ""; drawList(); drawPanel(true); return; }
+    if (b.dataset.act === "details") {
+      const p = $("panel");
+      p.scrollIntoView({ behavior: "smooth", block: "start" });
+      const note = p.querySelector('[data-role="note"]');
+      if (note) note.focus({ preventScroll: true });
+      return;
+    }
     if (b.dataset.act === "save") {
       if (!draft.out && !draft.note.trim() && !draft.remind) { showToast("Choose what happened, or write a note."); return; }
       if (await act("log", { outcome: draft.out, note: draft.note, remindOn: draft.remind }, b)) {
@@ -327,17 +529,29 @@ export function mountRecall(container, { staff = null } = {}) {
       if (!r) { showToast("Choose a reason."); return; }
       if (r.askDate && !draft.until) { showToast("Choose when to start recalling them again."); return; }
       if (r.dnc && !(await confirmDialog({ title: "Don't contact again?", message: "Recall stops, and they go on the do-not-contact list for marketing emails.", confirmLabel: "Stop and add to the list", tone: "danger" }))) return;
-      const id = sel;
       if (await act("close", { reason: r.label, until: draft.until, note: draft.note }, b)) {
-        draft = { out: "", note: "", remind: "", reason: "", until: "" };
+        draft = blank();
         drawPanel(true);
         showToast(r.askDate ? "Paused" : "Recall stopped");
-        if (!r.askDate) keepOpen(id);
       }
       return;
     }
     if (b.dataset.act === "reopen") {
-      if (await act("reopen", {}, b)) { extra.delete(sel); showToast("Reopened"); }
+      if (await act("reopen", {}, b)) showToast("Reopened");
     }
   });
+
+  window.addEventListener("hashchange", function off() {
+    setTimeout(() => {
+      if (!root.isConnected) { stopAll(); clearTimeout(countTimer); clearTimeout(searchTimer); window.removeEventListener("hashchange", off); }
+    }, 0);
+  });
+
+  /* ---------- Start ---------- */
+  getDoc(doc(db, "recall_settings", "config"))
+    .then((s) => { settings = normRecallSettings(s.exists() ? s.data() : {}); drawWho(); drawChips(); drawPanel(true); scheduleCounts(0); })
+    .catch(() => {});
+  callApi({ action: "staffList" }).then((r) => { people = (r && r.staff) || []; drawWho(); drawPanel(true); }).catch(() => {});
+  drawStats();
+  build();
 }

@@ -17,6 +17,16 @@ export const RECALL_REASONS = [
   { label: "Don't contact again", askDate: false, dnc: true },
 ];
 
+// Services that never count as a treatment visit (the same default as RECALL_SKIP_ in Code.gs)
+export const RECALL_SKIP = ["Review", "Consult", "Touch up", "Top up", "Follow up"];
+export const skipNorm = (s) => String(s ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+const skipWords = (list) => {
+  const seen = new Set();
+  return list.map((w) => String(w ?? "").replace(/\s+/g, " ").trim().slice(0, 40))
+    .filter((w) => { const k = skipNorm(w); return k.length >= 3 && !seen.has(k) && seen.add(k); })
+    .slice(0, 40);
+};
+
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const int = (v, lo, hi, d) => { const n = Math.floor(Number(v)); return v !== "" && v != null && Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d; };
 const when = (v) => {
@@ -44,6 +54,7 @@ export function normRecallSettings(x = {}) {
     team: Array.isArray(x.team) ? x.team.map(String).slice(0, 30) : [],
     perDay: int(x.perDay, 1, 100, 15), skipLeave: x.skipLeave !== false,
     reasons: reasons.length ? reasons : RECALL_REASONS.slice(),
+    skipServices: skipWords(Array.isArray(x.skipServices) ? x.skipServices : RECALL_SKIP),
   };
 }
 
@@ -74,6 +85,8 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
     return;
   }
   let dirty = false;
+  let services = null;      // the appointment book's services, loaded when asked
+  let servicesBusy = false;
   const $ = (r) => root.querySelector(`[data-role="${r}"]`);
 
   const statusText = () => (status && status.at
@@ -94,6 +107,7 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
       team: [...root.querySelectorAll("[data-team]")].filter((i) => i.checked).map((i) => i.dataset.team),
       perDay: Number($("perDay").value) || 15,
       skipLeave: $("skipLeave").checked,
+      skipServices: [...root.querySelectorAll("[data-skip]")].map((el) => el.dataset.skip),
       reasons: [...root.querySelectorAll("[data-reason]")].map((r) => ({
         label: r.querySelector('[data-f="label"]').value.replace(/\s+/g, " ").trim().slice(0, 60),
         askDate: r.querySelector('[data-f="ask"]').checked, dnc: r.querySelector('[data-f="dnc"]').checked,
@@ -105,6 +119,51 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
     const el = $("state");
     el.className = `fe-state is-${dirty ? "dirty" : "saved"}`;
     el.textContent = dirty ? "Unsaved changes" : "All changes saved";
+  }
+
+  function matchesHtml() {
+    if (!services) {
+      return `<button type="button" class="lh-btn is-quiet" data-act="load-svcs"${servicesBusy ? " disabled" : ""}>${
+        servicesBusy ? "Looking through the appointment book…" : "Show which services these match"}</button>`;
+    }
+    if (!set.skipServices.length) return "";
+    return `<div class="rs-match">${set.skipServices.map((w) => {
+      const k = skipNorm(w);
+      const hits = services.filter((s) => skipNorm(s.service).includes(k));
+      const n = hits.reduce((a, s) => a + s.n, 0);
+      return `<div><strong>${esc(w)}</strong> <small>${hits.length
+        ? `${hits.length} service${hits.length === 1 ? "" : "s"}, ${n.toLocaleString()} visits`
+        : "matches nothing in the appointment book"}</small>${hits.length ? `<ul>${hits.slice(0, 6).map((s) =>
+          `<li>${esc(s.service)} <em>${esc(s.category)} · ${s.n.toLocaleString()}</em></li>`).join("")}${
+          hits.length > 6 ? `<li class="muted">and ${hits.length - 6} more</li>` : ""}</ul>` : ""}</div>`;
+    }).join("")}</div>`;
+  }
+
+  function addSkip() {
+    const w = $("skipNew").value.replace(/\s+/g, " ").trim();
+    if (skipNorm(w).length < 3) { showToast("Use at least 3 letters."); return; }
+    set = { ...set, ...collect(true) };
+    if (set.skipServices.some((x) => skipNorm(x) === skipNorm(w))) { showToast("That's already on the list."); return; }
+    if (set.skipServices.length >= 40) { showToast("The list is full."); return; }
+    set.skipServices.push(w.slice(0, 40));
+    dirty = true;
+    draw();
+    $("skipNew").focus();
+  }
+
+  async function loadServices() {
+    if (servicesBusy) return;
+    servicesBusy = true;
+    $("skipMatches").innerHTML = matchesHtml();
+    try {
+      const res = await callApi({ action: "recall", op: "services" });
+      services = Array.isArray(res.services) ? res.services : [];
+    } catch (err) {
+      showToast(errText(err, "Couldn't read the appointment book. Try again."));
+    } finally {
+      servicesBusy = false;
+      if (root.isConnected) $("skipMatches").innerHTML = matchesHtml();
+    }
   }
 
   function draw() {
@@ -163,6 +222,15 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
               <button type="button" class="lh-btn is-quiet" data-rm="${i}" aria-label="Remove ${esc(r.label)}">×</button></div>`).join("")}</div>
           ${set.reasons.length < 20 ? '<button type="button" class="lh-btn is-quiet" data-act="add-reason">+ Add a reason</button>' : ""}
         </section>
+        <section class="tb-card">
+          <h4 class="mc-h">Not recalled from these services</h4>
+          <p class="fe-note">A visit for a service with any of these words in its name doesn't count as a treatment, so it doesn't start or reset a recall. Capitals and spaces are ignored.</p>
+          <div class="rs-skip">${set.skipServices.length ? set.skipServices.map((w, i) => `<span class="rs-word" data-skip="${esc(w)}">${esc(w)}
+            <button type="button" data-rm-skip="${i}" aria-label="Remove ${esc(w)}">×</button></span>`).join("") : '<span class="muted">None yet.</span>'}</div>
+          <div class="rc-row"><input class="fe-input" data-role="skipNew" maxlength="40" placeholder="Touch up" aria-label="Add a word" />
+            <button type="button" class="lh-btn" data-act="add-skip">Add</button></div>
+          <div data-role="skipMatches">${matchesHtml()}</div>
+        </section>
 
         <section class="tb-card">
           <h4 class="mc-h">Texts and emails</h4>
@@ -217,8 +285,21 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
 
   root.addEventListener("input", () => { dirty = true; setState(); });
   root.addEventListener("change", () => { dirty = true; setState(); });
+  root.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && e.target.dataset.role === "skipNew") { e.preventDefault(); addSkip(); }
+  });
   root.addEventListener("click", (e) => {
     if (e.target.closest('[data-act="save"]')) { save(); return; }
+    if (e.target.closest('[data-act="add-skip"]')) { addSkip(); return; }
+    if (e.target.closest('[data-act="load-svcs"]')) { loadServices(); return; }
+    const rs = e.target.closest("[data-rm-skip]");
+    if (rs) {
+      set = { ...set, ...collect(true) };
+      set.skipServices.splice(Number(rs.dataset.rmSkip), 1);
+      dirty = true;
+      draw();
+      return;
+    }
     const ck = e.target.closest('[data-act="check"]');
     if (ck) { check(ck); return; }
     if (e.target.closest('[data-act="add-reason"]')) {
