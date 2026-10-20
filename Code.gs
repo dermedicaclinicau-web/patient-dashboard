@@ -11892,10 +11892,16 @@ function recallAssign_(cfg, set, today) {
     if (l) { if (c.assignedDay === today) l.today++; if (c.stage === 'call') l.open++; }
     if (!c.assignedToId && c.stage !== 'later') waiting.push(c);
   });
-  waiting.sort(function (a, b) { return String(a.dueDate).localeCompare(String(b.dueDate)); });
+  // Most recently due first (they're the likeliest to book), then anyone due soon (Recall settings → lead days)
+  waiting.sort(function (a, b) {
+    const fa = String(a.dueDate) > today ? 1 : 0;
+    const fb = String(b.dueDate) > today ? 1 : 0;
+    return fa - fb || (fa ? String(a.dueDate).localeCompare(String(b.dueDate)) : String(b.dueDate).localeCompare(String(a.dueDate)));
+  });
   waiting.forEach(function (c) {
     const pick = Object.keys(load).map(function (k) { return load[k]; })
-      .filter(function (l) { return l.today < set.perDay; })
+      // Up to the daily number of new calls, and never more than two days' worth waiting to be made
+      .filter(function (l) { return l.today < set.perDay && l.open < set.perDay * 2; })
       .sort(function (a, b) { return a.today - b.today || a.open - b.open || String(a.s.name).localeCompare(String(b.s.name)); })[0];
     const log = Array.isArray(c.log) ? c.log : [];
     if (!pick) {
@@ -12040,4 +12046,26 @@ function installRecall() {
     .forEach(function (t) { ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger('runRecall').timeBased().everyHours(1).create();
   console.log('Recall installed (every hour). First check: ' + JSON.stringify(recallRun_(true)));
+}
+
+// Run ONCE from the editor after changing the order: cards shared out automatically that nobody has worked yet
+// go back to Waiting, then are shared out again, most recently due first. Cards someone has called, noted
+// or given to a person by hand are left alone.
+function recallReshare() {
+  const cfg = getConfig_();
+  const now = new Date().toISOString();
+  const writes = [];
+  fsQuery_(cfg, RECALL_COL_, 'status', 'EQUAL', 'open', 10000).forEach(function (c) {
+    if (c.stage !== 'call' || !c.assignedToId || Number(c.attempts || 0) > 0) return;
+    const log = Array.isArray(c.log) ? c.log : [];
+    if (log.some(function (l) { return l && l.kind !== 'auto'; })) return;   // someone has worked it
+    writes.push(patchWrite_(cfg, RECALL_COL_ + '/' + c._id, {
+      stage: 'due', assignedToId: '', assignedToName: '', assignedDay: '', updatedAt: now,
+      log: log.concat([{ at: now, by: 'Recall', byUid: '', kind: 'auto',
+        what: 'Back to waiting (shared again, most recently due first)', note: '' }]).slice(-80),
+    }));
+  });
+  if (writes.length) commitWrites_(cfg, writes, 100);
+  const shared = recallAssign_(cfg, recallSettings_(cfg), flowKey_(Date.now()));
+  console.log(writes.length + ' card(s) back to waiting. ' + shared + ' shared out again.');
 }

@@ -2,6 +2,7 @@
 // The cards (recalls/{id}) are made, booked and closed by Apps Script (Code.gs → Recall) from the appointment book.
 // Every change goes through Apps Script (action "recall"), so each card keeps a full history.
 // Only the tab on screen is loaded, 50 at a time; the numbers come from Firestore count queries.
+// With a Last visit filter on, each tab is one list sorted by last visit (Firestore can only sort by the date it filters on).
 import { db, auth } from "./firebase-config.js";
 import { collection, query, where, orderBy, limit, onSnapshot, getDocs, getDoc, doc, getCountFromServer }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -18,19 +19,45 @@ const QUICK = [["no_answer", "No answer"], ["voicemail", "Left voicemail"], ["te
 const LABEL = Object.fromEntries(OUTCOMES);
 const GROUPS = [["Just due · last 30 days", (d) => d <= 30], ["Overdue · 1 to 6 months", (d) => d > 30 && d <= 182],
   ["Lapsed · over 6 months", (d) => d > 182]];
+const LV_OPTS = [["", "Last visit: any time"], ["3", "Last visit: past 3 months"], ["3-6", "Last visit: 3 to 6 months ago"],
+  ["6-12", "Last visit: 6 to 12 months ago"], ["12+", "Last visit: over a year ago"], ["custom", "Last visit: choose dates…"]];
+const PICKS = [["Tomorrow", (t) => addDays(t, 1)], ["Next week", (t) => addDays(t, 7)],
+  ["2 weeks", (t) => addDays(t, 14)], ["1 month", (t) => addMonths(t, 1)]];
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const todayKey = () => fmtKey(new Date());
 const keyDate = (k) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(k || ""); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; };
 const addDays = (k, n) => { const d = keyDate(k); d.setDate(d.getDate() + n); return fmtKey(d); };
+const addMonths = (k, n) => {
+  const d = keyDate(k);
+  const day = d.getDate();
+  d.setDate(1);
+  d.setMonth(d.getMonth() + n);
+  d.setDate(Math.min(day, new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()));
+  return fmtKey(d);
+};
 const nice = (k) => { const d = keyDate(k); return d ? d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : ""; };
 const short = (k) => { const d = keyDate(k); return d ? d.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" }) : ""; };
 const daysFrom = (a, b) => { const x = keyDate(a), y = keyDate(b); return x && y ? Math.round((y - x) / 86400000) : 0; };
 const when = (iso) => { const d = new Date(iso || ""); return isNaN(d) ? "" : d.toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }); };
 const first = (n) => String(n || "").split(" ")[0];
 const plural = (n, w) => `${Number(n).toLocaleString()} ${w}${n === 1 ? "" : "s"}`;
-const initials = (n) => String(n || "").trim().split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
+const ago = (days) => (days < 60 ? plural(days, "day") : plural(Math.round(days / 30.4), "month"));
+// "Xuan (shwen) Ting" → "XT": nicknames in brackets or quotes and stray marks are ignored
+const initials = (n) => {
+  const w = String(n || "").replace(/\([^)]*\)|\[[^\]]*\]|"[^"]*"/g, " ").split(/\s+/)
+    .map((x) => x.replace(/[^A-Za-z']/g, "")).filter((x) => /[A-Za-z]/.test(x));
+  return w.length ? (w[0][0] + (w.length > 1 ? w[w.length - 1][0] : "")).toUpperCase() : "?";
+};
+// "61414498026" → "0414 498 026"; anything else is shown as it is
+const mobileText = (m) => {
+  let d = String(m || "").replace(/\D/g, "");
+  if (/^614\d{8}$/.test(d)) d = `0${d.slice(2)}`;
+  if (/^4\d{8}$/.test(d)) d = `0${d}`;
+  return /^04\d{8}$/.test(d) ? `${d.slice(0, 4)} ${d.slice(4, 7)} ${d.slice(7)}` : String(m || "").trim();
+};
+const telOf = (m) => mobileText(m).replace(/[^\d+]/g, "");
 const me = () => (auth.currentUser && auth.currentUser.uid) || "";
 const can = (staff, p) => !!staff && (/^admin$/i.test(String(staff.role || "")) || (Array.isArray(staff.perms) && staff.perms.includes(p)));
 const nameKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9' -]/g, " ").replace(/\s+/g, " ").trim(); // same as recallKeys_
@@ -38,6 +65,8 @@ const blank = () => ({ out: "", note: "", remind: "", reason: "", until: "" });
 const errText = (err, fallback) => (err && err.code === "permission-denied"
   ? "You don't have access to Recall. Check Recall access in Staff, and that the Firestore rules are published."
   : (err && err.message) || fallback);
+const getPref = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v === "1"; } catch { return d; } };
+const setPref = (k, v) => { try { localStorage.setItem(k, v ? "1" : "0"); } catch { /* not essential */ } };
 
 function dueText(c, t) {
   if (c.status === "booked") return c.bookedFor ? `Booked for ${short(c.bookedFor)}` : "Booked by phone";
@@ -79,6 +108,7 @@ export function mountRecall(container, { staff = null } = {}) {
     <div class="rc-bar">
       <div class="rc-tabs" data-role="tabs" role="tablist"></div>
       <select class="fb-select rc-who" data-role="who" aria-label="Whose calls"></select>
+      <span class="rc-lv" data-role="lvbox"></span>
       <span class="inv-spacer"></span>
       <input type="search" class="fe-input rc-q" data-role="q" placeholder="Find a patient by name, mobile or email" aria-label="Find a patient" />
     </div>
@@ -90,7 +120,7 @@ export function mountRecall(container, { staff = null } = {}) {
   container.replaceChildren(root);
   const $ = (r) => root.querySelector(`[data-role="${r}"]`);
 
-  const ui = { tab: "mine", who: "mine", cat: "", q: "" };
+  const ui = { tab: "mine", who: "mine", cat: "", q: "", lv: "", lvFrom: "", lvTo: "" };
   let settings = normRecallSettings({});
   let people = [];
   let sections = [];
@@ -104,7 +134,26 @@ export function mountRecall(container, { staff = null } = {}) {
   let panelSig = "";
   let draft = blank();
   let busy = false;
+  let autoNext = getPref("rc_autonext", true);
   let countTimer = 0, countSeq = 0, searchTimer = 0, searchSeq = 0;
+
+  /* ---------- Last visit filter ---------- */
+  function lvRange() {
+    const t = todayKey();
+    switch (ui.lv) {
+      case "3": return { from: addMonths(t, -3), to: t };
+      case "3-6": return { from: addMonths(t, -6), to: addDays(addMonths(t, -3), -1) };
+      case "6-12": return { from: addMonths(t, -12), to: addDays(addMonths(t, -6), -1) };
+      case "12+": return { from: "", to: addDays(addMonths(t, -12), -1) };
+      case "custom": {
+        let a = ui.lvFrom, b = ui.lvTo;
+        if (a && b && a > b) [a, b] = [b, a];
+        return a || b ? { from: a, to: b } : null;
+      }
+      default: return null;
+    }
+  }
+  const lvWhere = (r) => [...(r.from ? [where("lastVisit", ">=", r.from)] : []), ...(r.to ? [where("lastVisit", "<=", r.to)] : [])];
 
   /* ---------- What each tab loads ---------- */
   function tabBase(tab) {
@@ -121,6 +170,8 @@ export function mountRecall(container, { staff = null } = {}) {
   function tabSections() {
     const t = todayKey(), d30 = addDays(t, -30), d182 = addDays(t, -182);
     const base = [...tabBase(ui.tab), ...(ui.cat ? [where("category", "==", ui.cat)] : [])];
+    const lv = lvRange();
+    if (lv) return [{ key: ui.tab, title: "", where: [...base, ...lvWhere(lv)], order: ["lastVisit", "desc"] }];
     const due = ["dueDate", "desc"];
     if (ui.tab === "waiting") return [
       { key: "just", title: "Just due · last 30 days", where: [...base, where("dueDate", ">=", d30)], order: due },
@@ -169,7 +220,7 @@ export function mountRecall(container, { staff = null } = {}) {
     stopAll();
     sections = tabSections().map((s) => ({ ...s, n: PAGE, rows: [], loaded: false, more: false, error: "", open: !s.lazy, count: null, stop: null }));
     sections.filter((s) => s.open).forEach(listen);
-    drawTabs(); drawWho(); drawChips(); drawList(); drawPanel(true);
+    drawTabs(); drawWho(); drawLv(); drawChips(); drawList(); drawPanel(true);
     scheduleCounts(0);
   }
 
@@ -185,18 +236,20 @@ export function mountRecall(container, { staff = null } = {}) {
     const seq = ++countSeq;
     const t = todayKey(), uid = me();
     const cat = ui.cat ? [where("category", "==", ui.cat)] : [];
+    const lv = lvRange();
+    const lvc = lv ? [...lvWhere(lv), orderBy("lastVisit", "desc")] : [];   // the same indexes as the lists
     const cats = settings.categories.filter((c) => c.on).map((c) => c.key);
     const jobs = {
-      mine: countOf([...tabBase("mine"), ...cat]),
-      waiting: countOf([...tabBase("waiting"), ...cat]),
-      later: countOf([...tabBase("later"), ...cat]),
-      booked: countOf([...tabBase("booked"), ...cat]),
+      mine: countOf([...tabBase("mine"), ...cat, ...lvc]),
+      waiting: countOf([...tabBase("waiting"), ...cat, ...lvc]),
+      later: countOf([...tabBase("later"), ...cat, ...lvc]),
+      booked: countOf([...tabBase("booked"), ...cat, ...lvc]),
       myOpen: countOf([where("status", "==", "open"), where("stage", "==", "call"), where("assignedToId", "==", uid)]),
       logged: countOf([where("lastCallBy", "==", uid), where("lastCallDay", "==", t)]),
       newWeek: countOf([where("status", "==", "open"), where("dueDate", ">=", addDays(t, -7)), where("dueDate", "<=", t), orderBy("dueDate", "desc")]),
       bookedMonth: countOf([where("bookedAt", ">=", keyDate(`${t.slice(0, 8)}01`).toISOString())]),
     };
-    cats.forEach((k) => { jobs[`cat:${k}`] = countOf([...tabBase(ui.tab), where("category", "==", k)]); });
+    cats.forEach((k) => { jobs[`cat:${k}`] = countOf([...tabBase(ui.tab), where("category", "==", k), ...lvc]); });
     sections.forEach((s) => { if (s.title) jobs[`sec:${s.key}`] = countOf([...s.where, orderBy(s.order[0], s.order[1])]); });
     const keys = Object.keys(jobs);
     const vals = await Promise.all(keys.map((k) => jobs[k]));
@@ -211,7 +264,7 @@ export function mountRecall(container, { staff = null } = {}) {
   async function runSearch() {
     const q = ui.q.trim();
     const seq = ++searchSeq;
-    if (q.length < 2) { found = null; searching = false; drawTabs(); drawWho(); drawChips(); drawList(); return; }
+    if (q.length < 2) { found = null; searching = false; drawTabs(); drawWho(); drawLv(); drawChips(); drawList(); return; }
     const look = (field, p) => getDocs(query(collection(db, COL), where(field, ">=", p), where(field, "<=", `${p}\uf8ff`), orderBy(field), limit(25)));
     const jobs = [];
     if (q.includes("@")) jobs.push(look("emailKey", q.toLowerCase()));
@@ -226,7 +279,7 @@ export function mountRecall(container, { staff = null } = {}) {
     }
     if (!jobs.length) { found = []; searching = false; drawList(); return; }
     searching = true;
-    drawTabs(); drawWho(); drawChips(); drawList();
+    drawTabs(); drawWho(); drawLv(); drawChips(); drawList();
     try {
       const snaps = await Promise.all(jobs);
       if (seq !== searchSeq) return;
@@ -277,6 +330,17 @@ export function mountRecall(container, { staff = null } = {}) {
     s.innerHTML = opts.map(([k, l]) => `<option value="${esc(k)}"${k === ui.who ? " selected" : ""}>${esc(l)}</option>`).join("");
   }
 
+  function drawLv() {
+    const box = $("lvbox");
+    box.hidden = ui.q.trim().length >= 2;
+    const t = todayKey();
+    box.innerHTML = `<select class="fb-select" data-role="lv" aria-label="Last visit">${LV_OPTS.map(([k, l]) =>
+      `<option value="${k}"${k === ui.lv ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>` +
+      (ui.lv === "custom" ? `
+        <label>From <input type="date" class="fe-input" data-role="lvFrom" max="${t}" value="${esc(ui.lvFrom)}" /></label>
+        <label>to <input type="date" class="fe-input" data-role="lvTo" max="${t}" value="${esc(ui.lvTo)}" /></label>` : "");
+  }
+
   function drawChips() {
     const box = $("chips");
     box.hidden = ui.q.trim().length >= 2;
@@ -293,12 +357,15 @@ export function mountRecall(container, { staff = null } = {}) {
       c.lastStaff ? esc(`last with ${c.lastStaff}`) : ""].filter(Boolean).join(" · ");
     const side = [c.attempts ? `${c.attempts} tr${c.attempts === 1 ? "y" : "ies"}` : "",
       c.assignedToId && c.assignedToId !== me() ? first(c.assignedToName) : ""].filter(Boolean).join(" · ");
-    const tel = c.mobile.replace(/[^\d+]/g, "");
+    const tel = telOf(c.mobile);
+    const contact = tel ? `<a class="lh-btn rc-call" href="tel:${esc(tel)}">Call</a>`
+      : c.email ? `<span class="rc-nomob">No mobile</span><a class="lh-btn is-quiet rc-call" href="mailto:${esc(c.email)}">Email</a>`
+        : '<span class="rc-nomob">No mobile or email</span>';
     return `<div class="rc-item${on ? " is-on" : ""}" data-card="${esc(c.id)}" role="button" tabindex="0" aria-expanded="${on}">
         <span class="rc-av" aria-hidden="true">${esc(initials(c.patientName))}</span>
         <span class="rc-main"><strong>${esc(c.patientName || "Unknown patient")}</strong><small>${meta}</small></span>
         ${side ? `<span class="rc-side">${esc(side)}</span>` : ""}
-        ${tel ? `<a class="lh-btn rc-call" href="tel:${esc(tel)}">Call</a>` : ""}
+        ${contact}
       </div>${on && c.status === "open" ? `<div class="rc-quick">${QUICK.map(([k, l]) =>
         `<button type="button" class="rc-qb${k === "booked" ? " is-ok" : ""}" data-quick="${k}">${esc(l)}</button>`).join("")}
         <button type="button" class="rc-qb" data-act="details">Note or call back…</button></div>` : ""}`;
@@ -312,6 +379,7 @@ export function mountRecall(container, { staff = null } = {}) {
   }
 
   function emptyText(sec) {
+    if (lvRange()) return ui.cat ? `Nobody here for ${ui.cat} with a last visit in those dates.` : "Nobody here with a last visit in those dates.";
     if (ui.cat) return `Nobody here for ${ui.cat}.`;
     if (sec.key === "mine") {
       if (ui.who !== "mine") return "No calls here right now.";
@@ -349,6 +417,19 @@ export function mountRecall(container, { staff = null } = {}) {
     box.innerHTML = sections.map((s) => sectionHtml(s, t)).join("");
   }
 
+  // The rows in the order they're on screen (for "open the next patient")
+  function shownIds() {
+    if (ui.q.trim().length >= 2) return (found || []).map((c) => c.id);
+    const t = todayKey();
+    const out = [];
+    sections.forEach((s) => {
+      if (!s.open || !s.loaded) return;
+      if (s.key === "mine") GROUPS.forEach(([, test]) => s.rows.forEach((c) => { if (test(daysFrom(c.dueDate, t))) out.push(c.id); }));
+      else s.rows.forEach((c) => out.push(c.id));
+    });
+    return out;
+  }
+
   /* ---------- One card ---------- */
   function drawPanel(force) {
     const p = $("panel");
@@ -365,9 +446,10 @@ export function mountRecall(container, { staff = null } = {}) {
     const ppl = [...people].sort((a, b) => (team.has(b.id) - team.has(a.id)) || String(a.name).localeCompare(String(b.name)));
     if (c.assignedToId && !ppl.some((s) => s.id === c.assignedToId)) ppl.unshift({ id: c.assignedToId, name: c.assignedToName || "Someone" });
     const reason = settings.reasons.find((r) => r.label === draft.reason);
+    const tel = telOf(c.mobile);
     const sub = [
       c.category,
-      `due ${nice(c.dueDate)}${over > 0 ? ` (${plural(over, "day")} ago)` : ""}`,
+      `due ${nice(c.dueDate)}${over > 0 ? ` (${ago(over)} ago)` : ""}`,
       c.lastVisit ? `last visit ${nice(c.lastVisit)}${c.lastStaff ? ` with ${c.lastStaff}` : ""}` : "",
     ].filter(Boolean).join(" · ");
 
@@ -383,6 +465,8 @@ export function mountRecall(container, { staff = null } = {}) {
     } else {
       work = `
         <h4 class="rc-h">Log a call</h4>
+        <label class="fe-check rc-auto"><input type="checkbox" data-role="auto"${autoNext ? " checked" : ""} />
+          Open the next patient after logging a call</label>
         <div class="rc-outs">${OUTCOMES.map(([k, l]) => `<button type="button" class="ch-chip${draft.out === k ? " is-on" : ""}" data-out="${k}">${esc(l)}</button>`).join("")}</div>
         <textarea class="fe-input rc-note" data-role="note" rows="2" maxlength="1000" placeholder="Prefers Thursday mornings">${esc(draft.note)}</textarea>
         <div class="rc-row">
@@ -390,6 +474,8 @@ export function mountRecall(container, { staff = null } = {}) {
           <span class="inv-spacer"></span>
           <button type="button" class="btn-primary" data-act="save">Save</button>
         </div>
+        <div class="rc-picks">${PICKS.map(([l, fn], i) =>
+          `<button type="button" class="rc-chip${draft.remind === fn(t) ? " is-on" : ""}" data-pick="${i}">${esc(l)}</button>`).join("")}</div>
         <h4 class="rc-h">Stop recall</h4>
         <div class="rc-row">
           <select class="fb-select" data-role="reason" aria-label="Reason">
@@ -406,7 +492,7 @@ export function mountRecall(container, { staff = null } = {}) {
         <button type="button" class="lh-btn is-quiet" data-act="deselect" aria-label="Close">×</button></div>
       <p class="rc-sub">${esc(sub)}${c.lastServices.length ? `<br>${esc(c.lastServices.join(", "))}` : ""}</p>
       <div class="rc-links">
-        ${c.mobile ? `<a class="lh-btn" href="tel:${esc(c.mobile.replace(/[^\d+]/g, ""))}">Call ${esc(c.mobile)}</a>` : ""}
+        ${tel ? `<a class="lh-btn" href="tel:${esc(tel)}">Call ${esc(mobileText(c.mobile))}</a>` : '<span class="rc-nomob">No mobile on file</span>'}
         ${c.email ? `<a class="lh-btn is-quiet" href="mailto:${esc(c.email)}">Email</a>` : ""}
         ${c.patientId ? `<a class="lh-btn is-quiet" href="#/patient/${encodeURIComponent(c.patientId)}">Patient page</a>` : ""}
       </div>
@@ -421,12 +507,24 @@ export function mountRecall(container, { staff = null } = {}) {
         ${l.note ? `<p>${esc(l.note)}</p>` : ""}<small>${esc(when(l.at))}${l.by ? ` · ${esc(l.by)}` : ""}</small></li>`).join("")}</ul>`;
   }
 
-  function select(id) {
-    sel = sel === id ? "" : id;
-    seenSel = sel ? inRows(sel) : false;
+  function openCard(id) {
+    sel = id;
+    seenSel = inRows(id);
     draft = blank();
     drawList();
     drawPanel(true);
+    const row = root.querySelector(`[data-card="${CSS.escape(id)}"]`);
+    if (row) row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+  function select(id) {
+    if (sel === id) { sel = ""; seenSel = false; draft = blank(); drawList(); drawPanel(true); return; }
+    openCard(id);
+  }
+  // After logging a call: the next open card that was below this one
+  function goNext(fromId, ids) {
+    const i = ids.indexOf(fromId);
+    const next = ids.slice(i + 1).find((id) => { const c = findCard(id); return c && c.status === "open"; });
+    if (next) openCard(next);
   }
 
   async function act(op, extraBody, btn) {
@@ -467,7 +565,16 @@ export function mountRecall(container, { staff = null } = {}) {
     const el = e.target;
     const r = el.dataset.role;
     if (r === "who") { ui.who = el.value; sel = ""; build(); return; }
-    if (r === "remind") { draft.remind = el.value; return; }
+    if (r === "lv") {
+      ui.lv = el.value;
+      sel = "";
+      if (ui.lv === "custom" && !ui.lvFrom && !ui.lvTo) { drawLv(); return; }   // wait for a date
+      build();
+      return;
+    }
+    if (r === "lvFrom" || r === "lvTo") { ui[r] = el.value; sel = ""; build(); return; }
+    if (r === "auto") { autoNext = el.checked; setPref("rc_autonext", autoNext); return; }
+    if (r === "remind") { draft.remind = el.value; drawPanel(true); return; }
     if (r === "until") { draft.until = el.value; return; }
     if (r === "reason") { draft.reason = el.value; drawPanel(true); return; }
     if (r === "assign" && !(await act("assign", { toId: el.value }, el))) drawPanel(true);
@@ -477,7 +584,14 @@ export function mountRecall(container, { staff = null } = {}) {
     if (row && e.target === row && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); select(row.dataset.card); }
   });
   root.addEventListener("click", async (e) => {
-    if (e.target.closest('a[href^="tel:"]')) return;
+    if (e.target.closest('a[href^="tel:"], a[href^="mailto:"]')) return;
+    const pk = e.target.closest("[data-pick]");
+    if (pk) {
+      const v = PICKS[Number(pk.dataset.pick)][1](todayKey());
+      draft.remind = draft.remind === v ? "" : v;
+      drawPanel(true);
+      return;
+    }
     const tb = e.target.closest("[data-tab]");
     if (tb) { ui.tab = tb.dataset.tab; ui.q = ""; $("q").value = ""; found = null; sel = ""; build(); return; }
     const ch = e.target.closest("[data-cat]");
@@ -497,7 +611,11 @@ export function mountRecall(container, { staff = null } = {}) {
     const qb = e.target.closest("[data-quick]");
     if (qb) {
       const k = qb.dataset.quick;
-      if (await act("log", { outcome: k, note: "", remindOn: "" }, qb)) showToast(`${LABEL[k]}: saved`);
+      const ids = shownIds(), from = sel;
+      if (await act("log", { outcome: k, note: "", remindOn: "" }, qb)) {
+        showToast(`${LABEL[k]}: saved`);
+        if (autoNext) goNext(from, ids);
+      }
       return;
     }
     const row = e.target.closest("[data-card]");
@@ -517,10 +635,12 @@ export function mountRecall(container, { staff = null } = {}) {
     }
     if (b.dataset.act === "save") {
       if (!draft.out && !draft.note.trim() && !draft.remind) { showToast("Choose what happened, or write a note."); return; }
+      const ids = shownIds(), from = sel, logged = !!draft.out;
       if (await act("log", { outcome: draft.out, note: draft.note, remindOn: draft.remind }, b)) {
         draft = { ...draft, out: "", note: "", remind: "" };
         drawPanel(true);
         showToast("Saved");
+        if (autoNext && logged) goNext(from, ids);
       }
       return;
     }
@@ -529,10 +649,12 @@ export function mountRecall(container, { staff = null } = {}) {
       if (!r) { showToast("Choose a reason."); return; }
       if (r.askDate && !draft.until) { showToast("Choose when to start recalling them again."); return; }
       if (r.dnc && !(await confirmDialog({ title: "Don't contact again?", message: "Recall stops, and they go on the do-not-contact list for marketing emails.", confirmLabel: "Stop and add to the list", tone: "danger" }))) return;
+      const ids = shownIds(), from = sel;
       if (await act("close", { reason: r.label, until: draft.until, note: draft.note }, b)) {
         draft = blank();
         drawPanel(true);
         showToast(r.askDate ? "Paused" : "Recall stopped");
+        if (autoNext) goNext(from, ids);
       }
       return;
     }

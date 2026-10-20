@@ -200,7 +200,7 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
 
         <section class="tb-card">
           <h4 class="mc-h">Recall team</h4>
-          <p class="fe-note">New cards are shared between these people in turn, oldest due first. Anyone with Recall access can still pick up any card.</p>
+          <p class="fe-note">New cards are shared between these people in turn, most recently due first, and nobody gets more than two days' worth waiting. Anyone with Recall access can still pick up any card.</p>
           <div class="rs-team">${people.length ? people.map((s) => `<label class="rs-person">
               <input type="checkbox" data-team="${esc(s.id)}"${team.has(s.id) ? " checked" : ""} />
               <span>${esc(s.name)}</span><small>${esc(s.role || "")}</small></label>`).join("")

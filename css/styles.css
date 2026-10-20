@@ -7479,3 +7479,12 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
 .rs-person small { margin-left: auto; color: #64748b; font-size: .75rem; }
 .rs-reason { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; margin: 0 0 .5rem; }
 .rs-reason .fe-input { flex: 1; min-width: 160px; }
+
+/* Recall: last visit filter, no-mobile tag, call-back picks */
+.rc-lv { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 14px; color: #475569; }
+.rc-lv[hidden] { display: none; }
+.rc-lv .fb-select { width: auto; }
+.rc-lv .fe-input { width: auto; padding: .4rem .55rem; }
+.rc-nomob { flex: 0 0 auto; padding: 2px 8px; border-radius: 999px; background: #f1f5f9; color: #64748b; font-size: 12px; white-space: nowrap; }
+.rc-picks { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 4px; }
+.rc-auto { margin: 0 0 8px; padding: 0; font-size: 13px; color: #475569; }
