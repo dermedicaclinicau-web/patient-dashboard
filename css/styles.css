@@ -7307,3 +7307,29 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
 .mc-person-main small { font-size: .78rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mc-person .lh-btn { flex: none; height: 32px; padding: 0 .75rem; font-size: .8rem; }
 .mc-count .lh-btn.is-quiet { margin-left: .4rem; }
+
+.mc-whobox .mc-who-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mc-whobox .mc-filters { margin: 8px 0; flex-wrap: wrap; }
+.mc-whotable td small { display: block; font-size: 12px; color: var(--muted, #64748b); }
+.mc-whotable td a { color: inherit; text-decoration: none; }
+.mc-whotable td a:hover strong { text-decoration: underline; }
+.mc-num { background: none; border: 0; padding: 0; font: inherit; color: var(--accent, #0f766e); text-decoration: underline; cursor: pointer; }
+
+/* Campaign page: the Who list beside the page on wide screens, below it on narrower ones */
+.mc-view { display: grid; grid-template-columns: minmax(0, 1080px); gap: 20px; align-items: start; }
+.mc-main { min-width: 0; }
+@media (min-width: 1500px) {
+  .mc-view { grid-template-columns: minmax(0, 1080px) minmax(380px, 1fr); }
+  .mc-side { position: sticky; top: 16px; max-height: calc(100vh - 32px); display: flex; flex-direction: column; overflow: hidden; }
+  .mc-side .mc-who-list { flex: 1; min-height: 0; overflow: auto; }
+}
+
+/* Clickable result boxes and link rows */
+.mc-stat.is-link { display: block; width: 100%; text-align: left; font: inherit; color: inherit; cursor: pointer;
+  border: 1px solid transparent; transition: border-color .15s, box-shadow .15s; }
+.mc-stat.is-link:hover { border-color: var(--accent, #0f766e); }
+.mc-stat.is-active { border-color: var(--accent, #0f766e); box-shadow: 0 0 0 3px rgba(15, 118, 110, .15); }
+.mc-linkrow { cursor: pointer; }
+.mc-linkrow:hover td { background: #f8fafc; }
+.mc-linkrow.is-active td { background: #f0fdfa; }
+.mc-linkrow .mc-num { color: var(--accent, #0f766e); font-weight: 700; text-decoration: underline; }

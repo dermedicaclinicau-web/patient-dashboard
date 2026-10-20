@@ -4,7 +4,7 @@
 // (opens, clicks, unsubscribes, bounces) and "Make a list from this" for a follow-up campaign.
 import { db, auth } from "./firebase-config.js";
 import {
-  collection, doc, addDoc, updateDoc, onSnapshot, serverTimestamp,
+  collection, doc, addDoc, updateDoc, onSnapshot, serverTimestamp, getDoc, getDocs,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
 import { confirmDialog } from "./dialog.js";
@@ -53,6 +53,9 @@ const errText = (err, fallback) => (err && err.code === "permission-denied"
   : (err && err.message) || fallback);
 const pill = (s) => `<span class="mc-pill ${(STATUS[s] || STATUS.draft)[1]}">${esc((STATUS[s] || [s])[0])}</span>`;
 const statBox = (label, val, help = "") => `<div class="mc-stat"><small>${esc(label)}</small><strong>${val}</strong>${help ? `<em>${esc(help)}</em>` : ""}</div>`;
+// The same box, but clicking it shows who (f: a WHO_FILTERS key)
+const statLink = (label, val, help, f) => `<button type="button" class="mc-stat is-link" data-whof="${f}" title="See who">` +
+  `<small>${esc(label)}</small><strong>${val}</strong>${help ? `<em>${esc(help)}</em>` : ""}</button>`;
 
 /* ---------- Who it goes to ---------- */
 const audMode = (m) => (m === "rules" || m === "list" ? m : "all");
@@ -112,6 +115,7 @@ function normC(snap) {
     },
     dailyCap: Number(x.dailyCap) || 800, sendAtMs: Number(x.sendAtMs) || 0,
     total: Number(x.total || 0), sent: Number(x.sent || 0), skipped: Number(x.skipped || 0), failed: Number(x.failed || 0),
+    chunks: Number(x.chunks || 0), cursor: Number(x.cursor || 0),
     buildChecked: Number(x.buildChecked || 0), buildTotal: Number(x.buildTotal || 0),
     failures: Array.isArray(x.failures) ? x.failures : [], waiting: String(x.waiting || ""), lastError: String(x.lastError || ""),
     note: String(x.note || ""), html: String(x.html || ""),
@@ -798,26 +802,83 @@ function reportHtml(c) {
   const lists = [["opened", "Opened"], ["notOpened", "Didn't open"], ["clicked", "Clicked"], ["notClicked", "Didn't click"]];
   return `<h4 class="mc-h">Results</h4>
     <div class="mc-stats">
-      ${c.track ? statBox("Opened", rate(s.opens, sent), `${n0(s.opens)} patients`) +
-        statBox("Clicked", rate(s.clicks, sent), `${n0(s.clicks)} patients${s.opens ? ` · ${pct(s.clicks, s.opens)}% of those who opened` : ""}`) : ""}
-      ${hasForm(c) ? statBox("Filled in the form", rate(s.forms, sent), `${n0(s.forms)} patients`) : ""}
-      ${statBox("Unsubscribed", rate(s.unsubscribes, sent), `${n0(s.unsubscribes)} patients`)}
-      ${statBox("Bounced", rate(s.bounces, sent), `${n0(s.bounces)} addresses`)}
+      ${c.track ? statLink("Opened", rate(s.opens, sent), `${n0(s.opens)} patients`, "opened") +
+        statLink("Clicked", rate(s.clicks, sent), `${n0(s.clicks)} patients${s.opens ? ` · ${pct(s.clicks, s.opens)}% of those who opened` : ""}`, "clicked") : ""}
+      ${hasForm(c) ? statLink("Filled in the form", rate(s.forms, sent), `${n0(s.forms)} patients`, "forms") : ""}
+      ${statLink("Unsubscribed", rate(s.unsubscribes, sent), `${n0(s.unsubscribes)} patients`, "unsub")}
+      ${statLink("Bounced", rate(s.bounces, sent), `${n0(s.bounces)} addresses`, "bounced")}
     </div>
     ${c.track
       ? '<p class="fe-note">Opens are a guide, not exact. Apple Mail loads every email\'s pictures by itself, which counts as an open, and some email apps block pictures, so those people only count once they click.</p>'
       : '<p class="fe-note">Opens and clicks weren\'t tracked for this campaign.</p>'}
     ${c.track && c.links.length ? `<h4 class="mc-h">Links</h4>
+      <p class="fe-note">Click a link to see who clicked it.</p>
       <div class="mk-scroll"><table class="inv-table mc-links">
         <thead><tr><th>Link</th><th>Clicks</th><th></th></tr></thead>
-        <tbody>${c.links.map((l, i) => `<tr>
+        <tbody>${c.links.map((l, i) => `<tr class="mc-linkrow" data-wholink="${i}" title="See who clicked this">
           <td><strong>${esc(l.text || "Link")}</strong><small>${esc(host(l.url))}</small></td>
-          <td>${n0(c.linkClicks[`l${i}`])}</td>
+          <td><span class="mc-num">${n0(c.linkClicks[`l${i}`])}</span></td>
           <td class="mk-act"><button type="button" class="lh-btn" data-mklist="link" data-link="${i}">Make a list</button></td>
         </tr>`).join("")}</tbody></table></div>` : ""}
     ${c.track ? `<h4 class="mc-h">Make a list from this</h4>
       <p class="fe-note">Starts a new campaign for these patients. Its list is worked out when it sends, so anyone who opens or clicks before then is included.</p>
       <div class="mc-acts">${lists.map(([k, l]) => `<button type="button" class="lh-btn" data-mklist="${k}">${esc(l)}</button>`).join("")}</div>` : ""}`;
+}
+/* ---------- Who opened, clicked… (read when asked, from the campaign's results) ---------- */
+const QUEUE_CHUNK = 250; // the same as MKT_CHUNK_ in Code.gs
+const WHO_FILTERS = [
+  ["sent", "Everyone sent", () => true],
+  ["opened", "Opened", (x) => !!x.open],
+  ["clicked", "Clicked", (x, link) => x.clicks.length > 0 && (link < 0 || x.clicks.includes(link))],
+  ["forms", "Filled in the form", (x) => !!x.form],
+  ["notOpened", "Didn't open", (x) => !x.open && !x.failed],
+  ["unsub", "Unsubscribed", (x) => !!x.unsub],
+  ["bounced", "Bounced", (x) => !!x.bounce],
+];
+const isoWhen = (v) => { const d = toDate(v); return d ? when(d) : ""; };
+
+// Everyone the campaign reached, with what each of them did
+async function loadWho(c) {
+  const chunks = await Promise.all(Array.from({ length: c.chunks }, (_, i) => getDoc(doc(db, COL, c.id, "queue", `q${i}`))));
+  const [opens, clicks, forms, unsubs, bounces] = await Promise.all(
+    ["opens", "clicks", "forms", "unsubs", "bounces"].map(async (name) => {
+      const m = new Map();
+      (await getDocs(collection(db, COL, c.id, name))).forEach((d) => m.set(d.id, d.data() || {}));
+      return m;
+    }));
+  const failed = new Set(c.failures.map((f) => String(f.patientId || "")));
+  const rows = [];
+  chunks.forEach((s, q) => {
+    ((s.exists() && s.data().list) || []).forEach((r, j) => {
+      if (q * QUEUE_CHUNK + j >= c.cursor) return;   // not reached yet
+      const id = String(r.p || "");
+      rows.push({
+        id, name: String(r.n || "") || "Unknown patient", email: String(r.e || ""),
+        open: opens.has(id) ? opens.get(id).at || "yes" : "",
+        clicks: ((clicks.get(id) || {}).links || []).map(Number).sort((a, b) => a - b),
+        form: forms.has(id), unsub: unsubs.has(id), bounce: bounces.has(id), failed: failed.has(id),
+      });
+    });
+  });
+  return rows.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function whoCsv(c, rows) {
+  const cell = (v) => {
+    let s = String(v ?? "");
+    if (/^[=+\-@]/.test(s)) s = `'${s}`;   // so Excel never runs it as a formula
+    return `"${s.replace(/"/g, '""')}"`;
+  };
+  const link = (i) => (c.links[i] || {}).text || `Link ${i + 1}`;
+  const lines = [["Name", "Email", "Opened", "Clicked", "Filled in the form", "Unsubscribed", "Bounced"],
+    ...rows.map((x) => [x.name, x.email, x.open ? isoWhen(x.open) || "Yes" : "", x.clicks.map(link).join("; "),
+      x.form ? "Yes" : "", x.unsub ? "Yes" : "", x.bounce ? "Yes" : ""])];
+  const blob = new Blob(["\ufeff" + lines.map((l) => l.map(cell).join(",")).join("\r\n")], { type: "text/csv;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${c.name.replace(/[\\/:*?"<>|]+/g, "-")} - results.csv`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
 function mountView(page, c0, staff) {
@@ -825,25 +886,121 @@ function mountView(page, c0, staff) {
   page.replaceChildren(root);
   root.innerHTML = `
     ${BACK}
-    <div class="mc-head">
-      <div class="mc-title"><h2 data-v="name"></h2><div class="mc-sub" data-v="sub"></div></div>
-      <span class="inv-spacer"></span>
-      <div class="mc-acts" data-v="acts"></div>
-    </div>
-    <p class="mc-wait" data-v="wait" hidden></p>
-    <section class="tb-card mc-prog" data-v="prog"></section>
-    <section class="tb-card mc-report" data-v="report" hidden></section>
-    <div class="mc-grid">
-      <section class="tb-card"><h4 class="mc-h">Details</h4><dl class="mc-dl" data-v="dl"></dl></section>
-      <section class="tb-card"><h4 class="mc-h">The email</h4>
-        <iframe class="mc-frame" sandbox title="The email this campaign sends"></iframe>
-        <small class="fe-note">Tags like {First name} are filled in for each patient.</small></section>
-    </div>
-    <section class="tb-card" data-v="fails" hidden></section>`;
+    <div class="mc-view">
+      <div class="mc-main">
+        <div class="mc-head">
+          <div class="mc-title"><h2 data-v="name"></h2><div class="mc-sub" data-v="sub"></div></div>
+          <span class="inv-spacer"></span>
+          <div class="mc-acts" data-v="acts"></div>
+        </div>
+        <p class="mc-wait" data-v="wait" hidden></p>
+        <section class="tb-card mc-prog" data-v="prog"></section>
+        <section class="tb-card mc-report" data-v="report" hidden></section>
+        <div class="mc-grid">
+          <section class="tb-card"><h4 class="mc-h">Details</h4><dl class="mc-dl" data-v="dl"></dl></section>
+          <section class="tb-card"><h4 class="mc-h">The email</h4>
+            <iframe class="mc-frame" sandbox title="The email this campaign sends"></iframe>
+            <small class="fe-note">Tags like {First name} are filled in for each patient.</small></section>
+        </div>
+        <section class="tb-card" data-v="fails" hidden></section>
+      </div>
+      <aside class="tb-card mc-whobox mc-side" data-v="whobox" aria-label="Who" hidden></aside>
+    </div>`;
   const v = (k) => root.querySelector(`[data-v="${k}"]`);
   let c = c0;
   let frameSet = false;
 
+  /* ---------- Who ---------- */
+  const SIDE = window.matchMedia("(min-width: 1500px)");   // the list sits beside the page
+  const who = { rows: null, f: c0.track ? "opened" : "sent", link: -1, q: "", busy: false, tried: false, shown: 200 };
+  const whoRows = () => {
+    const fn = (WHO_FILTERS.find((x) => x[0] === who.f) || WHO_FILTERS[0])[2];
+    const q = who.q.trim().toLowerCase();
+    return who.rows.filter((x) => fn(x, who.link) && (!q || `${x.name} ${x.email}`.toLowerCase().includes(q)));
+  };
+  // The result box or link row for what's showing is highlighted
+  function markActive() {
+    const on = !!who.rows;
+    root.querySelectorAll(".mc-stat[data-whof]").forEach((b) =>
+      b.classList.toggle("is-active", on && b.dataset.whof === who.f && who.link < 0));
+    root.querySelectorAll("tr[data-wholink]").forEach((r) =>
+      r.classList.toggle("is-active", on && who.f === "clicked" && Number(r.dataset.wholink) === who.link));
+  }
+  function drawWho() {
+    const box = v("whobox");
+    if (!who.rows) {
+      box.innerHTML = `<h4 class="mc-h">Who</h4>
+        <p class="fe-note">Click a result or a link to see each patient.</p>
+        <button type="button" class="lh-btn" data-act="who-load"${who.busy ? " disabled" : ""}>${who.busy ? "Loading…" : "See who"}</button>`;
+      return;
+    }
+    if (!box.querySelector('[data-role="who-q"]')) {   // built once, so the search box keeps its place while you type
+      box.innerHTML = `<div class="mc-who-top"><h4 class="mc-h">Who</h4><span class="inv-spacer"></span>
+          <button type="button" class="lh-btn is-quiet" data-act="who-load">Refresh</button>
+          <button type="button" class="lh-btn is-quiet" data-act="who-csv">Download CSV</button></div>
+        <div class="pt-tabs mc-filters" data-role="who-f" role="group" aria-label="Show"></div>
+        <div class="mc-who-head">
+          <select class="fb-select" data-role="who-link" aria-label="Which link" hidden></select>
+          <input type="search" class="fe-input" data-role="who-q" placeholder="Find a patient by name or email" aria-label="Find a patient" />
+        </div>
+        <div class="mc-who-list" data-role="who-list"></div>`;
+    }
+    drawWhoList();
+  }
+  function drawWhoList() {
+    const box = v("whobox");
+    const form = hasForm(c);
+    box.querySelector('[data-role="who-f"]').innerHTML = WHO_FILTERS
+      .filter(([k]) => k !== "forms" || form)
+      .map(([k, l, fn]) => `<button type="button" data-whof="${k}" class="${who.f === k ? "active" : ""}">${esc(l)} <em>${
+        n0(who.rows.filter((x) => fn(x, -1)).length)}</em></button>`).join("");
+    const sel = box.querySelector('[data-role="who-link"]');
+    sel.hidden = !(who.f === "clicked" && c.links.length);
+    sel.innerHTML = `<option value="-1">Any link</option>${c.links.map((l, i) =>
+      `<option value="${i}"${who.link === i ? " selected" : ""}>${esc(l.text || `Link ${i + 1}`)}</option>`).join("")}`;
+    const rows = whoRows();
+    const linkText = (i) => esc((c.links[i] || {}).text || `Link ${i + 1}`);
+    const dash = '<span class="muted">–</span>';
+    const flags = (x) => [x.failed && "Couldn't send", x.bounce && "Bounced", x.unsub && "Unsubscribed"]
+      .filter(Boolean).map((t) => `<span class="mc-pill is-cancel">${t}</span>`).join(" ");
+    box.querySelector('[data-role="who-list"]').innerHTML = rows.length ? `
+      <div class="mk-scroll"><table class="inv-table mc-whotable">
+        <thead><tr><th>Patient</th><th>Opened</th><th>Clicked</th>${form ? "<th>Form</th>" : ""}<th></th></tr></thead>
+        <tbody>${rows.slice(0, who.shown).map((x) => `<tr>
+          <td><a href="#/patient/${encodeURIComponent(x.id)}"><strong>${esc(x.name)}</strong></a><small>${esc(x.email)}</small></td>
+          <td>${x.open ? esc(isoWhen(x.open) || "Yes") : dash}</td>
+          <td>${x.clicks.length ? x.clicks.map(linkText).join(", ") : dash}</td>
+          ${form ? `<td>${x.form ? "✓" : ""}</td>` : ""}
+          <td>${flags(x)}</td></tr>`).join("")}</tbody></table></div>
+      ${rows.length > who.shown ? `<button type="button" class="lh-btn is-quiet" data-act="who-more">Show ${n0(Math.min(200, rows.length - who.shown))} more</button>` : ""}
+      ${c.skipped ? `<p class="fe-note">${n0(c.skipped)} on this list unsubscribed before it reached them, so weren't sent it.</p>` : ""}`
+      : `<p class="muted">${who.q ? "Nobody matches that search." : "Nobody here yet."}</p>`;
+    markActive();
+  }
+  async function loadWhoNow() {
+    if (who.busy) return;
+    who.busy = true;
+    who.tried = true;
+    const btn = v("whobox").querySelector('[data-act="who-load"]');
+    if (btn) { btn.disabled = true; btn.textContent = "Loading…"; }
+    try { who.rows = await loadWho(c); }
+    catch (err) { console.error("Who failed:", err); showToast(errText(err, "Couldn't load the list. Try again.")); }
+    finally {
+      who.busy = false;
+      if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = who.rows ? "Refresh" : "See who"; }
+    }
+    drawWho();
+  }
+  // A result box, a link row or a filter: show those patients
+  async function showWho(f, link = -1) {
+    who.f = f;
+    who.link = link;
+    who.shown = 200;
+    if (who.rows) drawWhoList(); else await loadWhoNow();
+    if (!SIDE.matches) v("whobox").scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  /* ---------- Pause, cancel, make a list ---------- */
   const control = async (act) => {
     const msgs = {
       cancel: ["Cancel this campaign?", "It stops now. Emails already sent can't be taken back.", "Cancel campaign", "danger"],
@@ -880,17 +1037,32 @@ function mountView(page, c0, staff) {
     }
   }
 
+  /* ---------- Events ---------- */
   root.addEventListener("click", async (e) => {
     const b = e.target.closest("[data-ctl]");
     if (b) { b.disabled = true; await control(b.dataset.ctl); if (b.isConnected) b.disabled = false; return; }
-    const ml = e.target.closest("[data-mklist]");
+    const ml = e.target.closest("[data-mklist]");   // before the link row, so "Make a list" doesn't also open the list
     if (ml) { makeList(ml); return; }
     if (e.target.closest('[data-act="dup"]')) {
       try {
         const nid = await createCampaign({ ...c, track: true, name: `Copy of ${c.name}`.slice(0, 120) }, staff);
         location.hash = `${LIST_HREF}/${encodeURIComponent(nid)}`;
       } catch (err) { showToast(errText(err, "Couldn't duplicate it.")); }
+      return;
     }
+    if (e.target.closest('[data-act="who-load"]')) { loadWhoNow(); return; }
+    if (e.target.closest('[data-act="who-csv"]')) { if (who.rows) whoCsv(c, whoRows()); return; }
+    if (e.target.closest('[data-act="who-more"]')) { who.shown += 200; drawWhoList(); return; }
+    const wf = e.target.closest("[data-whof]");
+    if (wf) { showWho(wf.dataset.whof); return; }
+    const wl = e.target.closest("[data-wholink]");
+    if (wl) { showWho("clicked", Number(wl.dataset.wholink)); return; }
+  });
+  root.addEventListener("input", (e) => {
+    if (e.target.dataset.role === "who-q") { who.q = e.target.value; who.shown = 200; drawWhoList(); }
+  });
+  root.addEventListener("change", (e) => {
+    if (e.target.dataset.role === "who-link") { who.link = Number(e.target.value); who.shown = 200; drawWhoList(); }
   });
 
   function update(next) {
@@ -918,7 +1090,7 @@ function mountView(page, c0, staff) {
       ? `<p class="mc-big">Scheduled for <strong>${esc(when(new Date(c.sendAtMs)))}</strong>. The patients are chosen then, so anyone who unsubscribes before it goes is left out.</p>`
       : `${progressHtml(c)}<div class="mc-stats">
           ${statBox("Patients", n0(c.total || (c.status === "building" ? "…" : 0)))}
-          ${statBox("Sent", n0(c.sent))}
+          ${c.sent ? statLink("Sent", n0(c.sent), "", "sent") : statBox("Sent", n0(c.sent))}
           ${statBox("Skipped", n0(c.skipped), "Unsubscribed before it reached them")}
           ${statBox("Couldn't send", n0(c.failed))}
         </div>${eta(c) ? `<p class="muted mc-eta">${esc(eta(c))}, sending up to ${n0(c.dailyCap)} a day between 9 am and 6 pm.</p>` : ""}`;
@@ -926,6 +1098,13 @@ function mountView(page, c0, staff) {
     const rep = v("report");
     rep.hidden = !(c.sent > 0);
     if (c.sent > 0) rep.innerHTML = reportHtml(c);
+
+    // The Who list: shown (and loaded once) as soon as anything has been sent
+    const wb = v("whobox");
+    wb.hidden = !(c.sent > 0);
+    if (c.sent > 0 && !wb.innerHTML) drawWho();
+    if (c.sent > 0 && !who.rows && !who.busy && !who.tried) loadWhoNow();
+    markActive();
 
     const row = (k, val) => (val ? `<dt>${esc(k)}</dt><dd>${esc(val)}</dd>` : "");
     v("dl").innerHTML = row("To", audText(c)) + row("Email", c.templateName) + row("Subject", c.subject) +
