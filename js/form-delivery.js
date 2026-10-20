@@ -111,18 +111,31 @@ const waitForImages = (el) => Promise.all([...el.querySelectorAll("img")].map((i
 // opts (Skin Script): { margin: mm }. Forms use the defaults.
 // The document is handed to the PDF maker as its own piece of HTML (the same way as the treatment plan's patient copy),
 // so the portal page behind it can't change the layout or end up in the picture.
+const A4_PX = 794;   // A4 width at 96 dpi
+
 async function renderPdf(doc, opts = {}) {
   const html2pdf = await loadHtml2Pdf();
+  // Skin Script (has its own margin): the PDF is the full A4 width and the document draws its own side margins,
+  // like the preview, so nothing can be pushed off the edge. The PDF tool only adds the top and bottom margins.
+  const ownSides = Number(opts.margin) > 0 && Number(opts.width) > 0;
   const margin = Number(opts.margin) || 12;
   const settings = {
-    margin: [margin, margin, margin, margin],
+    margin: ownSides ? [margin, 0, margin, 0] : [margin, margin, margin, margin],
     filename: doc.fileName,
     image: { type: "jpeg", quality: 0.92 },
-    html2canvas: { scale: 2, backgroundColor: "#ffffff", logging: false, scrollX: 0, scrollY: 0 },
+    html2canvas: {
+      scale: 2, backgroundColor: "#ffffff", logging: false, scrollX: 0, scrollY: 0,
+      // The picture is taken in a window exactly one page wide, so it can't come out off-centre
+      ...(ownSides ? { windowWidth: A4_PX } : {}),
+    },
     jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
     pagebreak: { mode: ["css", "legacy"], avoid: [".q", ".block", "tr", ".sig"] },
   };
-  const source = `<style>${doc.css}</style><div class="pdfdoc">${doc.inner}</div>`;
+  const body = `<style>${doc.css}</style><div class="pdfdoc">${doc.inner}</div>`;
+  const source = ownSides
+    ? `<div style="width:${A4_PX}px;margin:0;padding:0;background:#fff;">
+        <div style="width:${Math.round(Number(opts.width))}px;margin:0 auto;">${body}</div></div>`
+    : body;
   const sx = window.scrollX, sy = window.scrollY;
   try {
     if (document.fonts && document.fonts.ready) await document.fonts.ready.catch(() => {});

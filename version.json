@@ -1,6 +1,6 @@
 ﻿{
-    "version":  "20261020-105043",
     "files":  [
+                  "./js/js/updater.js",
                   "./js/aftercare-api.js",
                   "./js/aftercare-bank.js",
                   "./js/aftercare-field.js",
@@ -157,7 +157,10 @@
                   "./js/upcoming-appts.js",
                   "./js/updates.js",
                   "./js/utils.js",
+                  "./js/version.js",
                   "./css/styles.css",
                   "./index.html"
-              ]
+              ],
+    "version":  "20261020-120114",
+    "v":  "20261020-120114"
 }
