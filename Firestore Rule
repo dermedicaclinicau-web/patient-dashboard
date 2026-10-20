@@ -83,6 +83,20 @@ service cloud.firestore {
       allow write: if false;
     }
   }
+    // Recall: cards are made and changed by Apps Script only; the recall team reads them
+    match /recalls/{id} {
+      allow read: if can('recall.work') || can('recall.manage');
+      allow write: if false;
+    }
+    // Recall settings (config: the settings page) and the last check (status: Apps Script only)
+    match /recall_settings/{id} {
+      allow read: if isStaff();
+      allow write: if can('recall.manage') && id == 'config'
+        && request.resource.data.updatedByUid == request.auth.uid
+        && request.resource.data.categories is list && request.resource.data.categories.size() <= 30
+        && request.resource.data.team is list && request.resource.data.team.size() <= 30
+        && request.resource.data.reasons is list && request.resource.data.reasons.size() <= 20;
+    }
 
     // A permission from the login token (Admins have everything)
     function can(p) {

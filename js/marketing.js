@@ -5,6 +5,11 @@ import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 import { mountTemplateList } from "./mkt-templates.js";
 import { mountCampaignList } from "./mkt-campaigns.js";
+import { mountRecall } from "./recall.js";
+import { mountRecallSettings } from "./recall-settings.js";
+
+// #/recall           → mountRecall(container, { staff })
+// #/settings/recall  → mountRecallSettings(container, { staff })
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));

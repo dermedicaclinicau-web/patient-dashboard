@@ -49,6 +49,7 @@ function doPost(e) {
     if (body.action === 'staffTask') return json_(handleStaffTask_(body));
     if (body.action === 'upload') return json_(handleUpload_(body));
     if (body.action === 'marketing') return json_(handleMarketing_(body));
+    if (body.action === 'recall') return json_(handleRecall_(body));
     if (body.action === 'marketingPublic') return json_(handleMarketingPublic_(body)); // the unsubscribe page (no login)
     if (body.action === 'publicForm') return json_(handlePublicForm_(body)); // a patient's online form (no login)
 
@@ -3192,6 +3193,8 @@ const PERMS_ = [
   ['tasks.history', 'Task Manager', 'Task history'],
   ['data.upload', 'Task Manager', 'Daily uploads: Timely day sheet, invoices and packages'],
   ['marketing.manage', 'Task Manager', 'Marketing: campaigns, email templates and the do-not-contact list'],
+  ['recall.work', 'Recall', 'Recall: work the list (call, log, give to someone, stop)'],
+  ['recall.manage', 'Recall', 'Recall settings: intervals, the recall team and reasons'],
   ['tasks.build', 'Task Manager', 'Task types and End of day setup'],
   ['forms.build', 'Building', 'Build forms, Image Bank and Aftercare Bank'],
   ['flows.build', 'Building', 'Build email flows (System configuration)'],
@@ -3233,7 +3236,7 @@ const ROLE_DEFAULTS_ = {
     'tasks.patient', 'tasks.staff', 'tasks.print', 'tasks.history',
     'menu.inventory', 'inventory.view', 'inventory.request', 'inventory.receive', 'inventory.order', 'inventory.count', 'menu.reports',
     'menu.scanner', 'scanner.billing', 'scanner.docket',
-    'dash.attention', 'dash.appts', 'dash.tasks', 'dash.requests', 'dash.overview'],
+    'dash.attention', 'dash.appts', 'dash.tasks', 'dash.requests', 'dash.overview', 'recall.work'],
 };
 
 
@@ -9191,6 +9194,7 @@ function pcnStepVisits_(ctx) {
 
 function pcnStepOverdue_(ctx) {
   const data = pcnReadAppts_(ctx);
+  const months = recallMonthsMap_(getConfig_());   // Recall settings (the same intervals as Recall)
 
   // Overdue: per patient (Patient ID, or the name when there isn't one) and category
   const latest = {};
@@ -9207,7 +9211,7 @@ function pcnStepOverdue_(ctx) {
 
     const name = String(r[1] == null ? '' : r[1]).trim();
     const cat = String(r[13] == null ? '' : r[13]).trim();
-    if (!name || !(cat in PCN_OVERDUE_MONTHS_)) return;
+    if (!name || !(cat in months)) return;
     if (s.indexOf('cancelled') !== -1 || s.indexOf('did not show') !== -1) return; // a no-show isn't a visit
     const id = String(r[14] == null ? '' : r[14]).trim();
     const key = (id ? 'id:' + id : 'nm:' + name.toLowerCase()) + '|' + cat;
@@ -9220,7 +9224,7 @@ function pcnStepOverdue_(ctx) {
   Object.keys(latest).forEach(function (k) {
     if (booked[k]) return;
     const x = latest[k];
-    const limit = PCN_OVERDUE_MONTHS_[x.cat];
+    const limit = months[x.cat];
     const lastKey = Utilities.formatDate(x.d, ctx.tz, 'yyyy-MM-dd');
     if (lastKey >= flowAddMonthsKey_(ctx.todayKey, -limit)) return;
     const lp = lastKey.split('-').map(Number);
@@ -11501,4 +11505,443 @@ function installKeepWarm() {
   ScriptApp.newTrigger('keepWarm').timeBased().everyMinutes(5).create();
   keepWarm();
   console.log('Keep-warm installed (every 5 minutes, 7 am to 9 pm Perth).');
+}
+
+// ===================== Recall =====================
+// Patients due for their next treatment: one card per patient, treatment and last visit (recalls/{id}).
+// recallRun_ makes cards from the appointment book (alltimeappts), books them when an appointment appears, closes them
+// when they come in, and shares new cards between the recall team. Staff work the cards through handleRecall_,
+// so every change is logged. Settings: recall_settings/config (the portal's Recall settings page).
+
+const RECALL_COL_ = 'recalls';
+const RECALL_SET_ = 'recall_settings';
+const RECALL_CATS_ = [   // [category, months, on] (the same as RECALL_CATEGORIES in js/recall-settings.js)
+  ['Wrinkle Relaxer', 4, true], ['Filler/Radiesse', 9, true], ['Laser/OPL/Peel', 6, true],
+  ['RestoraGlow/RF/DermaGlow/Skin Needling', 6, true], ['Firm/Ulthera/eST', 9, true], ['Body Sculpting', 10, true],
+  ['Other Injectables', 9, true], ['Hydrarepair/SkinRemod/CG', 6, false], ['Collagen activator', 6, false],
+];
+const RECALL_REASONS_ = [
+  { label: 'Not interested', askDate: false, dnc: false },
+  { label: 'Treated elsewhere', askDate: false, dnc: false },
+  { label: 'Pregnant or breastfeeding', askDate: true, dnc: false },
+  { label: 'Moved away', askDate: false, dnc: false },
+  { label: "Don't contact again", askDate: false, dnc: true },
+];
+const RECALL_OUTCOMES_ = { no_answer: 'No answer', voicemail: 'Left voicemail', spoke: 'Spoke to them',
+  texted: 'Sent a text', booked: 'Booked' };
+
+function recallSettings_(cfg) {
+  let d = null;
+  try { d = fsGetDoc_(cfg, RECALL_SET_ + '/config'); } catch (e) { console.warn('Recall settings not read: ' + e); }
+  d = d || {};
+  const int = function (v, lo, hi, def) { const n = Math.floor(Number(v)); return isFinite(n) && v !== '' && v != null ? Math.max(lo, Math.min(hi, n)) : def; };
+  const seen = {};
+  const cats = [];
+  (Array.isArray(d.categories) && d.categories.length ? d.categories
+    : RECALL_CATS_.map(function (c) { return { key: c[0], months: c[1], on: c[2] }; }))
+    .forEach(function (c) {
+      const key = String((c && c.key) || '').trim().slice(0, 80);
+      if (!key || seen[key]) return;
+      seen[key] = true;
+      cats.push({ key: key, months: int(c.months, 1, 36, 6), on: c.on !== false });
+    });
+  const reasons = (Array.isArray(d.reasons) && d.reasons.length ? d.reasons : RECALL_REASONS_).map(function (r) {
+    return { label: String((r && r.label) || '').trim().slice(0, 60), askDate: !!(r && r.askDate), dnc: !!(r && r.dnc) };
+  }).filter(function (r) { return r.label; }).slice(0, 20);
+  return {
+    categories: cats,
+    maxAgeMonths: int(d.maxAgeMonths, 3, 60, 24),
+    leadDays: int(d.leadDays, 0, 60, 0),
+    anyFuturePauses: d.anyFuturePauses === true,
+    team: (Array.isArray(d.team) ? d.team : []).map(String).filter(Boolean).slice(0, 30),
+    perDay: int(d.perDay, 1, 100, 15),
+    skipLeave: d.skipLeave !== false,
+    reasons: reasons.length ? reasons : RECALL_REASONS_,
+    updatedAt: String(d.updatedAt || ''),
+  };
+}
+
+// { category: months } for the treatments that are recalled (the PCN overdue list uses this too)
+function recallMonthsMap_(cfg) {
+  const out = {};
+  recallSettings_(cfg).categories.forEach(function (c) { if (c.on) out[c.key] = c.months; });
+  return Object.keys(out).length ? out : PCN_OVERDUE_MONTHS_;
+}
+
+// Every patient by PttID (and doc ID), following merges to the record that was kept
+function recallPatients_(cfg) {
+  const byId = Object.create(null);
+  const byPtt = Object.create(null);
+  fsListAll_(cfg, 'patient_list', ['PttID', 'Patient Name', 'First Name', 'Last Name', 'Mobile', 'Email', 'MergedInto'])
+    .forEach(function (d) {
+      const f = fromFields_(d.fields || {});
+      const id = d.name.split('/').pop();
+      byId[id] = f;
+      const ptt = String(f.PttID == null ? '' : f.PttID).trim().toLowerCase();
+      if (ptt) byPtt[ptt] = id;
+      if (!byPtt[id.toLowerCase()]) byPtt[id.toLowerCase()] = id;
+    });
+  const kept = function (id) {
+    for (let i = 0; i < 5 && byId[id] && byId[id].MergedInto && byId[String(byId[id].MergedInto)]; i++) id = String(byId[id].MergedInto);
+    return byId[id] ? id : '';
+  };
+  return {
+    find: function (ptt) { const id = byPtt[String(ptt || '').trim().toLowerCase()]; return id ? kept(id) : ''; },
+    doc: function (id) { return byId[id] || null; },
+  };
+}
+
+// Working today? (Staff → Work schedule: no schedule counts as available)
+function recallAvailable_(s, today) {
+  const sc = staffSchedClean_(s.schedule).schedule;
+  if (!sc) return true;
+  if ((sc.leave || []).some(function (l) { return l.from <= today && today <= l.to; })) return false;
+  const any = SCHED_DAY_KEYS_.some(function (k) { return sc.week[k] && sc.week[k].on; });
+  if (!any) return true;
+  const dk = SCHED_DAY_KEYS_[Number(Utilities.formatDate(new Date(), REC_TZ_, 'u')) - 1];
+  return !!(sc.week[dk] && sc.week[dk].on);
+}
+
+/* ---------- The check ---------- */
+
+// The hourly trigger. The full check runs once a day, after each Day Sheet upload and after settings change;
+// the other hours only share out waiting cards.
+function runRecall() {
+  try { const r = recallRun_(false); if (!r.quick) console.log('Recall: ' + JSON.stringify(r)); }
+  catch (e) { console.error('Recall: ' + (e && e.stack ? e.stack : e)); }
+}
+
+function recallRun_(force) {
+  const cache = CacheService.getScriptCache();
+  if (cache.get('up_ds_active') || cache.get('pcn_run_active')) {
+    return { ok: true, later: true, why: 'A Day Sheet upload or PCN update is running. Recall checks again after it.' };
+  }
+  if (cache.get('recall_run')) return { ok: true, later: true, why: 'Recall is already checking. Try again in a minute.' };
+  cache.put('recall_run', '1', 600);
+  try {
+    const cfg = getConfig_();
+    const ds = fsGetDoc_(cfg, 'data_uploads/daysheet') || {};
+    if (ds.status === 'running') return { ok: true, later: true, why: 'A Day Sheet upload is running. Recall checks again after it.' };
+    const set = recallSettings_(cfg);
+    const today = flowKey_(Date.now());
+    const props = PropertiesService.getScriptProperties();
+    const sig = [today, String(ds.at || ''), set.updatedAt].join('|');
+    if (!force && props.getProperty('RECALL_SIG') === sig) {
+      return { ok: true, quick: true, assigned: recallAssign_(cfg, set, today) };
+    }
+    const res = recallCheck_(cfg, set, today, force);
+    res.assigned = recallAssign_(cfg, set, today);
+    commitWrites_(cfg, [updateWrite_(cfg, RECALL_SET_ + '/status', {
+      at: new Date().toISOString(), made: res.made, booked: res.booked, visited: res.visited, reopened: res.reopened,
+      back: res.back, offCat: res.offCat, assigned: res.assigned, rows: res.rows, ms: res.ms,
+    })]);
+    props.setProperty('RECALL_SIG', sig);
+    props.setProperty('RECALL_ROWS', String(res.rows));
+    return Object.assign({ ok: true }, res);
+  } finally {
+    cache.remove('recall_run');
+  }
+}
+
+function recallCheck_(cfg, set, today, force) {
+  const t0 = Date.now();
+  const ctx = pcnCtx_();
+  const rows = pcnReadAppts_(ctx);
+  const was = Number(PropertiesService.getScriptProperties().getProperty('RECALL_ROWS') || 0);
+  if (!force && was > 1000 && rows.length < was * 0.7) {
+    throw new Error('The appointment book has ' + rows.length + " rows, but had " + was + " last time. Recall wasn't changed.");
+  }
+
+  // Each patient's last visit and next booking, per treatment
+  const catOf = Object.create(null);
+  set.categories.forEach(function (c) { catOf[c.key.toLowerCase()] = c; });
+  const pts = recallPatients_(cfg);
+  const pidOf = Object.create(null);
+  const groups = Object.create(null);
+  const anyFuture = Object.create(null);
+  rows.forEach(function (r) {
+    if (!pcnIsDate_(r[0]) || !pcnStatusOk_(r[7], 'dns')) return;   // cancelled and no-shows don't count
+    const ptt = String(r[14] == null ? '' : r[14]).trim();
+    if (!ptt) return;                                               // no Patient ID: we can't be sure who it is
+    if (!(ptt in pidOf)) pidOf[ptt] = pts.find(ptt);
+    const pid = pidOf[ptt];
+    if (!pid) return;
+    const dk = Utilities.formatDate(r[0], ctx.tz, 'yyyy-MM-dd');
+    const future = r[0].getTime() >= ctx.today;                     // today's appointments count as booked
+    if (future && (!anyFuture[pid] || dk < anyFuture[pid])) anyFuture[pid] = dk;
+    const cat = catOf[String(r[13] == null ? '' : r[13]).trim().toLowerCase()];
+    if (!cat) return;
+    const k = pid + '|' + cat.key;
+    const g = groups[k] || (groups[k] = { pid: pid, cat: cat, last: '', staff: '', svc: [], future: '' });
+    if (future) { if (!g.future || dk < g.future) g.future = dk; return; }
+    if (dk > g.last) { g.last = dk; g.staff = String(r[8] == null ? '' : r[8]).trim(); g.svc = []; }
+    if (dk === g.last) {
+      const s = String(r[9] == null ? '' : r[9]).trim();
+      if (s && g.svc.indexOf(s) === -1 && g.svc.length < 5) g.svc.push(s);
+    }
+  });
+
+  const now = new Date().toISOString();
+  const writes = [];
+  const sum = { made: 0, booked: 0, visited: 0, reopened: 0, back: 0, offCat: 0 };
+  const add = function (c, what) {
+    return (Array.isArray(c.log) ? c.log : []).concat([{ at: now, by: 'Recall', byUid: '', kind: 'auto', what: what, note: '' }]).slice(-80);
+  };
+  const live = Object.create(null);   // patient|treatment with a card still open or booked
+
+  // Cards already open or booked (newest visit first, so a duplicate is the older one)
+  fsQuery_(cfg, RECALL_COL_, 'status', 'IN', ['open', 'booked'], 10000)
+    .sort(function (a, b) { return String(b.lastVisit || '').localeCompare(String(a.lastVisit || '')); })
+    .forEach(function (c) {
+      const path = RECALL_COL_ + '/' + c._id;
+      const key = c.patientId + '|' + c.category;
+      const put = function (patch, what) { patch.log = add(c, what); patch.updatedAt = now; writes.push(patchWrite_(cfg, path, patch)); };
+      const cat = catOf[String(c.category || '').toLowerCase()];
+      if (!cat || !cat.on) {
+        put({ status: 'closed', closeReason: 'Recall is turned off for this treatment', closedAt: now, closedBy: 'Recall' },
+          'Closed: recall is turned off for ' + c.category);
+        sum.offCat++;
+        return;
+      }
+      if (live[key]) {
+        put({ status: 'closed', closeReason: 'Duplicate', closedAt: now, closedBy: 'Recall' }, 'Closed: a newer card is open');
+        return;
+      }
+      const g = groups[key];
+      if (g && g.last > String(c.lastVisit || '')) {
+        put({ status: 'closed', closeReason: 'Came in', visitedOn: g.last, closedAt: now, closedBy: 'Recall', remindOn: '' },
+          'Came in on ' + recLongDate_(g.last));
+        sum.visited++;
+        return;
+      }
+      live[key] = true;
+      if (g && g.future) {
+        if (c.status !== 'booked' || c.bookedFor !== g.future) {
+          put({ status: 'booked', bookedFor: g.future, bookedAt: c.bookedAt || now, remindOn: '' },
+            'Booked for ' + recLongDate_(g.future) + ' (in the appointment book)');
+          if (c.status !== 'booked') sum.booked++;
+        }
+        return;
+      }
+      if (c.status === 'booked') {
+        const phoned = !c.bookedFor;
+        if (!phoned || Date.now() - (Date.parse(String(c.bookedAt || '')) || 0) > 3 * 86400000) {
+          put({ status: 'open', stage: c.assignedToId ? 'call' : 'due', bookedFor: '', bookedAt: '' },
+            phoned ? "Marked as booked, but it isn't in the appointment book"
+              : 'The booking for ' + recLongDate_(c.bookedFor) + ' is no longer in the appointment book');
+          sum.reopened++;
+        }
+        return;
+      }
+      if (c.stage === 'later' && c.remindOn && String(c.remindOn) <= today) {
+        put({ stage: c.assignedToId ? 'call' : 'due', remindOn: '', pauseReason: '' },
+          c.pauseReason ? 'Back on the list (was paused: ' + c.pauseReason + ')' : 'Reminder: call them back today');
+        sum.back++;
+      }
+    });
+
+  // New cards: due (or due within the lead days), nothing booked, last visit not too long ago
+  const minLast = flowAddMonthsKey_(today, -set.maxAgeMonths);
+  const until = flowAddDaysKey_(today, set.leadDays);
+  const want = [];
+  Object.keys(groups).forEach(function (k) {
+    const g = groups[k];
+    if (!g.cat.on || !g.last || g.future || live[k] || g.last < minLast) return;
+    if (set.anyFuturePauses && anyFuture[g.pid]) return;
+    const due = flowAddMonthsKey_(g.last, g.cat.months);
+    if (due > until) return;
+    want.push({ id: flowPart_(g.pid) + '__' + flowPart_(g.cat.key) + '__' + g.last.replace(/-/g, ''), g: g, due: due });
+  });
+  // A card closed for this same visit ("Not interested") isn't made again
+  const have = want.length ? fsBatchGet_(cfg, want.map(function (w) { return RECALL_COL_ + '/' + w.id; })) : {};
+  want.forEach(function (w) {
+    if (have[RECALL_COL_ + '/' + w.id]) return;
+    const doc = pts.doc(w.g.pid) || {};
+    const who = flowWho_(doc);
+    writes.push(updateWrite_(cfg, RECALL_COL_ + '/' + w.id, {
+      patientId: w.g.pid, pttId: String(doc.PttID || w.g.pid), patientName: who.name,
+      mobile: String(doc.Mobile || ''), email: String(doc.Email || ''),
+      category: w.g.cat.key, months: w.g.cat.months, lastVisit: w.g.last, lastStaff: w.g.staff, lastServices: w.g.svc,
+      dueDate: w.due, status: 'open', stage: 'due', assignedToId: '', assignedToName: '', assignedDay: '',
+      remindOn: '', pauseReason: '', attempts: 0, bookedFor: '', bookedAt: '', visitedOn: '',
+      closeReason: '', closedAt: '', closedBy: '',
+      log: [{ at: now, by: 'Recall', byUid: '', kind: 'auto', what: 'Due for ' + w.g.cat.key + ' (last visit ' + recLongDate_(w.g.last) + ')', note: '' }],
+      createdAt: now, updatedAt: now,
+    }));
+    sum.made++;
+  });
+
+  if (writes.length) commitWrites_(cfg, writes, 100);
+  return Object.assign(sum, { rows: rows.length, ms: Date.now() - t0 });
+}
+
+// Shares waiting cards between the recall team: oldest due first, to whoever has had the fewest today,
+// up to each person's daily limit. Cards held by someone no longer active go back to waiting.
+function recallAssign_(cfg, set, today) {
+  const all = getStaffDocs_();
+  const active = {};
+  all.forEach(function (s) { if (s.active !== false) active[s.id] = true; });
+  const team = all.filter(function (s) {
+    return set.team.indexOf(s.id) !== -1 && s.active !== false && (!set.skipLeave || recallAvailable_(s, today));
+  });
+  const open = fsQuery_(cfg, RECALL_COL_, 'status', 'EQUAL', 'open', 10000);
+  const now = new Date().toISOString();
+  const writes = [];
+  const load = {};
+  team.forEach(function (s) { load[s.id] = { s: s, today: 0, open: 0 }; });
+  const waiting = [];
+  open.forEach(function (c) {
+    if (c.assignedToId && !active[c.assignedToId]) {   // left, or turned off: back to waiting
+      c.assignedToId = '';
+      if (c.stage === 'call') c.stage = 'due';
+      c._freed = true;
+    }
+    const l = load[c.assignedToId];
+    if (l) { if (c.assignedDay === today) l.today++; if (c.stage === 'call') l.open++; }
+    if (!c.assignedToId && c.stage !== 'later') waiting.push(c);
+  });
+  waiting.sort(function (a, b) { return String(a.dueDate).localeCompare(String(b.dueDate)); });
+  waiting.forEach(function (c) {
+    const pick = Object.keys(load).map(function (k) { return load[k]; })
+      .filter(function (l) { return l.today < set.perDay; })
+      .sort(function (a, b) { return a.today - b.today || a.open - b.open || String(a.s.name).localeCompare(String(b.s.name)); })[0];
+    const log = Array.isArray(c.log) ? c.log : [];
+    if (!pick) {
+      if (c._freed) {
+        writes.push(patchWrite_(cfg, RECALL_COL_ + '/' + c._id, { assignedToId: '', assignedToName: '', assignedDay: '', stage: 'due', updatedAt: now,
+          log: log.concat([{ at: now, by: 'Recall', byUid: '', kind: 'auto', what: 'Back to waiting (the person it was given to is no longer active)', note: '' }]).slice(-80) }));
+      }
+      return;
+    }
+    pick.today++;
+    pick.open++;
+    writes.push(patchWrite_(cfg, RECALL_COL_ + '/' + c._id, {
+      stage: 'call', assignedToId: pick.s.id, assignedToName: String(pick.s.name || ''), assignedDay: today, updatedAt: now,
+      log: log.concat([{ at: now, by: 'Recall', byUid: '', kind: 'auto', what: 'Given to ' + pick.s.name + ' (shared in turn)', note: '' }]).slice(-80),
+    }));
+  });
+  if (writes.length) commitWrites_(cfg, writes, 100);
+  return writes.length;
+}
+
+/* ---------- From the portal ---------- */
+
+function handleRecall_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  const op = String(body.op || '');
+  const manage = can_(session, 'recall.manage');
+  if (!manage && !can_(session, 'recall.work')) return { ok: false, error: 'FORBIDDEN' };
+  try {
+    if (op === 'refresh') {
+      if (!manage) return { ok: false, error: 'FORBIDDEN' };
+      try { return recallRun_(true); }
+      catch (e) { return { ok: true, problem: String(e && e.message ? e.message : e).slice(0, 300) }; }
+    }
+    const id = String(body.id || '');
+    if (!/^[A-Za-z0-9_-]{5,200}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
+    if (CacheService.getScriptCache().get('recall_run')) return { ok: true, problem: 'Recall is updating its list. Try again in a minute.' };
+    const unlock = staffTaskLock_('rc_' + id);
+    if (!unlock) return { ok: true, problem: 'Someone else is saving this card. Try again.' };
+    try { return recallAction_(op, id, body, session); }
+    finally { unlock(); }
+  } catch (err) {
+    console.error('Recall ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: false, error: 'SERVER_ERROR', detail: String(err && err.message ? err.message : err).slice(0, 300) };
+  }
+}
+
+function recallAction_(op, id, body, session) {
+  const cfg = getConfig_();
+  const path = RECALL_COL_ + '/' + id;
+  const c = fsGetDoc_(cfg, path);
+  if (!c) return { ok: false, error: 'NOT_FOUND' };
+  const now = new Date().toISOString();
+  const today = flowKey_(Date.now());
+  const who = String(session.name || 'Staff');
+  const uid = String(session.uid || '');
+  const note = String(body.note || '').replace(/\r/g, '').trim().slice(0, 1000);
+  const log = (Array.isArray(c.log) ? c.log : []).slice(-78);
+  const add = function (kind, what, withNote) {
+    log.push({ at: now, by: who, byUid: uid, kind: kind, what: what, note: withNote === false ? '' : note });
+  };
+  const dateOk = function (d) { return /^\d{4}-\d{2}-\d{2}$/.test(d) && d > today && flowDays_(today, d) <= 730; };
+  let patch = null;
+
+  if (op === 'log') {
+    if (c.status !== 'open') return { ok: true, problem: 'This card is booked or closed. Reopen it first.' };
+    const out = String(body.outcome || '');
+    if (out && !RECALL_OUTCOMES_[out]) return { ok: false, error: 'BAD_REQUEST' };
+    const remind = String(body.remindOn || '');
+    if (!out && !note && !remind) return { ok: true, problem: 'Choose what happened, or write a note.' };
+    if (remind && !dateOk(remind)) return { ok: true, problem: 'Choose a call-back date after today.' };
+    patch = {};
+    if (out === 'booked') {
+      add('call', 'Booked');
+      Object.assign(patch, { status: 'booked', bookedFor: '', bookedAt: now, remindOn: '', pauseReason: '' });
+    } else {
+      add(out ? 'call' : 'note', out ? RECALL_OUTCOMES_[out] : 'Note');
+      if (out === 'no_answer' || out === 'voicemail') patch.attempts = Number(c.attempts || 0) + 1;
+      if (remind) {
+        add('status', 'Call back on ' + recLongDate_(remind), false);
+        Object.assign(patch, { stage: 'later', remindOn: remind, pauseReason: '' });
+      }
+    }
+    if (!c.assignedToId) {   // logging a call on a waiting card makes it yours
+      Object.assign(patch, { assignedToId: uid, assignedToName: who, assignedDay: today });
+      if (!patch.stage && out !== 'booked') patch.stage = 'call';
+    }
+  } else if (op === 'assign') {
+    const toId = String(body.toId || '');
+    if (toId === String(c.assignedToId || '')) return { ok: true, already: true };
+    if (!toId) {
+      add('status', 'Back to waiting', false);
+      patch = { assignedToId: '', assignedToName: '', assignedDay: '', stage: c.stage === 'later' ? 'later' : 'due' };
+    } else {
+      const s = getStaffDocs_().filter(function (x) { return x.id === toId && x.active !== false; })[0];
+      if (!s) return { ok: false, error: 'NO_STAFF' };
+      add('status', 'Given to ' + s.name, false);
+      patch = { assignedToId: s.id, assignedToName: String(s.name || ''), assignedDay: today, stage: c.stage === 'later' ? 'later' : 'call' };
+    }
+  } else if (op === 'close') {
+    if (c.status === 'closed') return { ok: true, already: true };
+    const r = recallSettings_(cfg).reasons.filter(function (x) { return x.label === String(body.reason || ''); })[0];
+    if (!r) return { ok: true, problem: 'Choose a reason.' };
+    if (r.askDate) {   // paused, not closed: back on the list on that date
+      const until = String(body.until || '');
+      if (!dateOk(until)) return { ok: true, problem: 'Choose when to start recalling them again.' };
+      add('status', r.label + ': paused until ' + recLongDate_(until));
+      patch = { status: 'open', stage: 'later', remindOn: until, pauseReason: r.label, bookedFor: '', bookedAt: '' };
+    } else {
+      add('status', 'Closed: ' + r.label);
+      patch = { status: 'closed', closeReason: r.label, closedAt: now, closedBy: who, remindOn: '' };
+      if (r.dnc) {
+        try {
+          mktSetConsent_(cfg, c.patientId, false, { by: who, byUid: uid, source: 'Do not contact list',
+            note: 'From Recall' + (note ? ': ' + note : ''), dnc: true, why: 'Asked not to be contacted' });
+        } catch (e) { console.warn('Recall closed, but do-not-contact not saved: ' + e); }
+      }
+    }
+  } else if (op === 'reopen') {
+    if (c.status === 'open') return { ok: true, already: true };
+    if (c.status === 'closed' && c.closeReason === 'Came in') {
+      return { ok: true, problem: "They've been in since. A new card is made when they're next due." };
+    }
+    add('status', c.status === 'booked' ? 'Not booked after all' : 'Reopened');
+    patch = { status: 'open', stage: c.assignedToId ? 'call' : 'due', closeReason: '', closedAt: '', closedBy: '', bookedFor: '', bookedAt: '' };
+  }
+  if (!patch) return { ok: false, error: 'BAD_REQUEST' };
+  patch.log = log.slice(-80);
+  patch.updatedAt = now;
+  commitWrites_(cfg, [patchWrite_(cfg, path, patch)]);
+  return { ok: true };
+}
+
+// Run ONCE from the editor: checks every hour, and does the first check now
+function installRecall() {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return t.getHandlerFunction() === 'runRecall'; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('runRecall').timeBased().everyHours(1).create();
+  console.log('Recall installed (every hour). First check: ' + JSON.stringify(recallRun_(true)));
 }
