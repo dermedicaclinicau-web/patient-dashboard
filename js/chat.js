@@ -420,9 +420,12 @@ function openThread(id) {
       <form class="ch-comp" novalidate>
         <div class="ch-emo" data-role="emo" hidden>${EMOJI.map((x) => `<button type="button" data-emo="${x}">${x}</button>`).join("")}</div>
         <button type="button" class="ch-ic ch-emo-btn" data-act="emoji" aria-label="Add emoji" title="Emoji">${I.smile}</button>
-        <textarea rows="1" maxlength="4000" placeholder="${isTouch() ? "Type your message" : "Type your message (Shift+Enter for a new line)"}" aria-label="Message"></textarea>
+        <textarea rows="2" maxlength="4000" placeholder="Type a message…" aria-label="Message"></textarea>
         <button type="submit" class="ch-send" aria-label="Send">${I.send}</button></form>
-      <label class="ch-link"><input type="checkbox" data-role="withpage"${helpStaff ? " checked" : ""} /> Include a link to this page</label>`
+      <div class="ch-under">
+        <label class="ch-link"><input type="checkbox" data-role="withpage"${helpStaff ? " checked" : ""} /> Include a link to this page</label>
+        ${isTouch() ? "" : '<small class="ch-hint">Enter to send · Shift+Enter for a new line</small>'}
+      </div>`
       : '<p class="ch-ro">You\'re viewing a chat between staff. Only they can reply.</p>'}`;
   stopMessages();
   if (chats.some((x) => x.id === id) || (allChats || []).some((x) => x.id === id)) startMessages(id);
@@ -935,8 +938,11 @@ function onKey(e) {
 
 function onInput(e) {
   if (e.target.matches(".ch-comp textarea")) {
+    // Grows as you type, up to about 7 lines; a scrollbar only after that
+    const MAX = 180;
     e.target.style.height = "";
-    e.target.style.height = `${Math.min(120, e.target.scrollHeight)}px`;
+    e.target.style.height = `${Math.min(MAX, e.target.scrollHeight + 2)}px`;
+    e.target.style.overflowY = e.target.scrollHeight > MAX ? "auto" : "hidden";
   } else if (e.target.dataset.role === "find") {
     drawPeople(e.target.value.trim().toLowerCase());
   } else if (e.target.dataset.role === "gfind") {
