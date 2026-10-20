@@ -7144,3 +7144,90 @@ a.md-rrow:hover strong, .md-rgrp > summary:hover strong { color: var(--primary);
 }
 /* Task Manager → End of day → Reminder */
 .eod-remind-row { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0; }
+
+/* ---------- Task panel (Asana-style) ---------- */
+dialog.tk-dlg { margin: 0 0 0 auto; width: min(520px, 100vw); height: 100dvh; max-height: none; padding: 0; border: 0;
+  border-radius: 0; background: #fff; box-shadow: -20px 0 50px -20px rgba(15, 23, 42, .35); animation: tk-in .18s ease-out; }
+dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
+@keyframes tk-in { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+.tk-wrap { display: flex; flex-direction: column; height: 100%; }
+.tk-head { display: flex; flex-direction: column; gap: .55rem; padding: 1rem 1.25rem .9rem; border-bottom: 1px solid var(--border); }
+.tk-head-top { display: flex; align-items: center; justify-content: space-between; }
+.tk-kicker { font-size: .72rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.tk-x { width: 32px; height: 32px; border: none; border-radius: 8px; background: none; color: var(--muted); font-size: 1.4rem; line-height: 1; cursor: pointer; }
+.tk-x:hover { background: var(--surface-2); color: var(--text); }
+.tk-title { margin: 0; font-size: 1.15rem; line-height: 1.35; }
+.tk-pt { align-self: flex-start; color: var(--primary); font-size: .88rem; font-weight: 600; text-decoration: none; }
+.tk-pt:hover { text-decoration: underline; }
+.tk-ro { margin: 0; font-size: .78rem; color: var(--muted); }
+
+.tk-status { display: flex; flex-wrap: wrap; gap: .35rem; }
+.tk-st { height: 32px; padding: 0 .85rem; border: 1px solid var(--border); border-radius: 999px; background: #fff; color: #475569;
+  font: inherit; font-size: .8rem; font-weight: 600; cursor: pointer; transition: background .15s, border-color .15s, color .15s; }
+.tk-st:hover:not(:disabled) { border-color: #94a3b8; color: var(--text); }
+.tk-st:disabled { cursor: default; opacity: .7; }
+.tk-st:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.tk-st.is-on.is-open, .tk-pill.is-open { background: #f1f5f9; border-color: #94a3b8; color: #0f172a; }
+.tk-st.is-on.is-progress, .tk-pill.is-progress { background: #eff6ff; border-color: #3b82f6; color: #1d4ed8; }
+.tk-st.is-on.is-hold, .tk-pill.is-hold { background: #fffbeb; border-color: #f59e0b; color: #92400e; }
+.tk-st.is-on.is-done, .tk-pill.is-done { background: #ecfdf5; border-color: #10b981; color: #047857; }
+.tk-pill { display: inline-flex; align-items: center; height: 22px; padding: 0 .6rem; border: 1px solid; border-radius: 999px;
+  font-size: .72rem; font-weight: 700; white-space: nowrap; }
+
+.tk-meta { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: .55rem 1rem; align-items: center; margin: 0;
+  padding: .9rem 1.25rem; border-bottom: 1px solid var(--border); font-size: .88rem; }
+.tk-meta dt { color: var(--muted); font-weight: 600; font-size: .8rem; }
+.tk-meta dd { display: flex; align-items: center; gap: .5rem; margin: 0; min-width: 0; }
+.tk-meta .fb-select, .tk-meta .fe-input { max-width: 260px; padding: .4rem .6rem; font-size: .88rem; }
+.tk-meta .fe-input.is-overdue { border-color: #fca5a5; color: #b91c1c; }
+.tk-late { color: #b91c1c; font-weight: 600; }
+
+.tk-feed { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: .7rem; padding: 1rem 1.25rem; background: #fafbfc; }
+.tk-c { display: flex; gap: .6rem; }
+.tk-av { width: 30px; height: 30px; flex: none; display: grid; place-items: center; border-radius: 50%; font-size: .7rem; font-weight: 700;
+  background: hsl(var(--h) 45% 92%); color: hsl(var(--h) 40% 30%); }
+.tk-c-b { flex: 1; min-width: 0; padding: .55rem .75rem; border: 1px solid var(--border); border-radius: 4px 12px 12px 12px; background: #fff; }
+.tk-c-b header { display: flex; justify-content: space-between; gap: .5rem; font-size: .8rem; }
+.tk-c-b p { margin: .2rem 0 0; font-size: .9rem; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tk-e { display: flex; justify-content: space-between; gap: .75rem; padding-left: 2.4rem; font-size: .78rem; color: var(--muted); }
+.tk-e small { flex: none; }
+.tk-empty { margin: auto; color: var(--muted); font-size: .88rem; }
+
+.tk-comp { display: flex; flex-direction: column; gap: .5rem; padding: .75rem 1.25rem 1rem; border-top: 1px solid var(--border); }
+.tk-comp textarea { width: 100%; box-sizing: border-box; resize: vertical; min-height: 60px; }
+.tk-comp-acts { display: flex; align-items: center; justify-content: space-between; gap: .75rem; }
+.tk-dlg.is-busy .tk-st, .tk-dlg.is-busy select, .tk-dlg.is-busy input, .tk-dlg.is-busy .tk-comp button { opacity: .6; pointer-events: none; }
+@media (max-width: 560px) { .tk-meta { grid-template-columns: 1fr; } }
+
+/* ---------- My dashboard: task rows (Asana-style) ---------- */
+.md-tlist { list-style: none; margin: 0 0 .75rem; padding: 0; display: flex; flex-direction: column; gap: .5rem; }
+.md-trow { display: flex; align-items: flex-start; gap: .75rem; padding: .7rem .85rem; text-align: left;
+  border: 1px solid var(--border); border-radius: 12px; background: #fff; transition: border-color .15s, box-shadow .15s; }
+.md-trow:hover { border-color: #cbd5e1; box-shadow: 0 2px 10px -6px rgba(15, 23, 42, .25); }
+.md-trow.is-overdue { border-left: 3px solid #ef4444; }
+.md-tcheck { flex: none; display: grid; place-items: center; width: 24px; height: 24px; margin-top: 1px; padding: 0;
+  border: 1.5px solid #cbd5e1; border-radius: 50%; background: #fff; color: transparent; font-size: .75rem; font-weight: 700;
+  cursor: pointer; transition: all .15s; }
+.md-tcheck:hover, .md-tcheck:focus-visible { border-color: #10b981; background: #ecfdf5; color: #10b981; outline: none; }
+.md-trow.is-done .md-tcheck { border-color: #10b981; background: #10b981; color: #fff; cursor: default; }
+.md-tbody { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .3rem; cursor: pointer; }
+.md-tbody:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; border-radius: 6px; }
+.md-ttitle { font-weight: 600; line-height: 1.35; color: var(--text); overflow-wrap: anywhere; }
+.md-trow.is-done .md-ttitle { color: var(--muted); text-decoration: line-through; }
+.md-tmeta { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .65rem; font-size: .78rem; color: var(--muted); }
+.md-tmeta a { color: var(--primary); font-weight: 600; text-decoration: none; }
+.md-tmeta a:hover { text-decoration: underline; }
+.md-tdue.is-late { color: #b91c1c; font-weight: 600; }
+.md-twho { display: inline-flex; align-items: center; gap: .3rem; }
+.md-twho .tk-av { width: 20px; height: 20px; font-size: .58rem; }
+.md-tcount { display: inline-flex; align-items: center; gap: .2rem; }
+.md-tcount svg { width: 13px; height: 13px; }
+.md-tnote { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .8rem; font-style: italic; color: #475569; }
+.md-trow .md-task-acts { flex: none; display: flex; align-items: center; gap: .3rem; }
+@media (max-width: 640px) { .md-trow { flex-wrap: wrap; } .md-trow .md-task-acts { width: 100%; justify-content: flex-end; } }
+
+/* Patient page reminders: open the task window */
+.task-main.is-clickable { cursor: pointer; border-radius: 8px; }
+.task-main.is-clickable:hover .task-text { text-decoration: underline; text-underline-offset: 2px; }
+.task-main.is-clickable:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+.task-meta .tk-pill { margin-left: .4rem; }

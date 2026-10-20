@@ -2,6 +2,7 @@ import { db, auth } from "./firebase-config.js";
 import { collection, query, where, getDocs, addDoc, updateDoc, doc }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { patientIds } from "./patients.js";
+import { callApi } from "./appointments.js";
 
 // Open (not completed) reminders for one patient, soonest due first.
 // Matches on the patient's Firestore doc ID OR their PttID.
@@ -32,14 +33,12 @@ export function addReminder(patient, { taskText, dueDate, assignedToId = "", ass
     createdAt: new Date().toISOString(),
     createdBy: (staff && staff.name) || "",
     createdByUid: auth.currentUser.uid,
+    notes: [],
+    history: [{ at: new Date().toISOString(), by: (staff && staff.name) || "", what: "Added" }],
   });
 }
 
-export function completeReminder(id, staff) {
-  return updateDoc(doc(db, "staff-task-list", id), {
-    status: "Completed",
-    completedAt: new Date().toISOString(),
-    completedBy: (staff && staff.name) || "",
-    completedByUid: auth.currentUser.uid,
-  });
+// Through Apps Script, like the dashboard: it's added to the activity trail and whoever assigned it is told
+export function completeReminder(id, staff, note = "") {
+  return callApi({ action: "staffTask", op: "status", id, status: "Completed", note });
 }

@@ -4,6 +4,7 @@ import { collection, query, where, getDocs } from "https://www.gstatic.com/fireb
 import { patientIds } from "./patients.js";
 import { mountTaskHistory } from "./task-history.js";
 import { escapeHtml, toDateKey, parseDateKey, formatShortDate } from "./utils.js";
+import { statusPillHtml, isTaskOpen } from "./task-panel.js";
 
 const svg = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const CHEV = svg('<polyline points="6 9 12 15 18 9"/>').replace("<svg ", '<svg class="sum-chev" ');
@@ -16,7 +17,8 @@ const toD = (v) => {
   const d = new Date(v);
   return isNaN(d) ? null : d;
 };
-const isOpenTask = (t) => String(t.status || "").trim().toLowerCase() === "open";
+// Anything not Completed is still open (Open, In progress, On hold)
+const isOpenTask = (t) => isTaskOpen(t);
 const wasOpen = () => { try { return !!(JSON.parse(localStorage.getItem(OPEN_KEY)) || {})["tasks-section"]; } catch { return false; } };
 
 export function patientTasksSectionHtml() {
@@ -78,24 +80,27 @@ export function mountPatientTasks(root, patient) {
     const overdue = open && !!due && dueKey < toDateKey();
     const doneAt = toD(t.completedAt || t.doneAt || t.updatedAt);
     const doneBy = t.completedBy || t.doneBy || t.updatedBy || "";
+    const comments = Array.isArray(t.notes) ? t.notes.length : 0;
     const meta = open
       ? [due ? `Due ${formatShortDate(due)}` : dueKey ? `Due ${dueKey}` : "No due date",
-        t.assignedToName ? `For ${t.assignedToName}` : "", t.createdBy ? `Added by ${t.createdBy}` : ""]
+        t.assignedToName ? `For ${t.assignedToName}` : "For anyone", t.createdBy ? `Added by ${t.createdBy}` : ""]
       : [`Done${doneAt ? ` ${formatShortDate(doneAt)}` : ""}${doneBy ? ` by ${doneBy}` : ""}`,
         due ? `was due ${formatShortDate(due)}` : "", t.createdBy ? `added by ${t.createdBy}` : ""];
-    const status = String(t.status || "").trim();
+    if (comments) meta.push(`${comments} comment${comments === 1 ? "" : "s"}`);
+    const status = String(t.status || "Open").trim();
     return `
       <li class="task${open ? " has-action" : " is-done"}${overdue ? " is-overdue" : ""}">
-        <div class="task-main">
+        <div class="task-main is-clickable" data-action="task-open" data-id="${escapeHtml(t.id)}" role="button" tabindex="0"
+          title="Open this task">
           <span class="task-text">${escapeHtml(t.taskText || "Untitled reminder")}</span>
           <span class="task-meta">${meta.filter(Boolean).map(escapeHtml).join(" · ")}${
             overdue ? '<span class="task-flag">Overdue</span>' : ""}${
-            !open && status && !/^(done|completed?)$/i.test(status) ? `<span class="task-flag neutral">${escapeHtml(status)}</span>` : ""}</span>
+            open && status.toLowerCase() !== "open" ? statusPillHtml(t) : ""}</span>
         </div>
         ${open ? `<button type="button" class="task-done" data-action="task-done" data-id="${escapeHtml(t.id)}" title="Mark as done">${TICK}Done</button>` : ""}
       </li>`;
   }
-
+  
   function drawStaff() {
     const all = st.tasks || [];
     const open = all.filter(isOpenTask).sort((a, b) => String(a.dueDate || "9999").localeCompare(String(b.dueDate || "9999")));

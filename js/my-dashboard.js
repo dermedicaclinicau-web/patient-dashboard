@@ -2,7 +2,8 @@
 // Only reads existing data: kits, borrows, JT releases, requests, treatment usage and saved forms.
 // Today strip and quick actions at the top; each person can reorder, hide and collapse the cards (kept on this device).
 // Tasks: done, notes, passing on and reopening go through Apps Script (staffTask), which tells the person who assigned it.
-import { can, isInjector } from "./perms.js";
+import { can, isInjector, isAdmin } from "./perms.js";
+import { openTaskPanel, statusPillHtml } from "./task-panel.js";
 import {
   listProducts, listAllLots, listKits, listLoans, listReleases, listRequests, listMyUsage, listShortUsage, listPos,
   isKitProduct, kitUnits, expiryState, plural, unitPlural, lowAt, myUid, reqNumber, REQ_STATUS, REL_STATUS, countDue, countLocs, dayKey, listCountsOn,
@@ -14,7 +15,6 @@ import { doc, getDoc, getDocs, collection, query, where, FieldPath } from "https
 import { showSoapPanel } from "./soap-panel.js";
 import { parseRecordDate } from "./transcripts.js";
 import { callApi } from "./appointments.js";
-import { fetchStaffList } from "./task-types.js";
 import { showToast } from "./utils.js";
 import { renderDayCard } from "./staff-days.js";
 import { openStartOfDayKit } from "./start-of-day.js";
@@ -41,6 +41,7 @@ const ICON = {
   cal: '<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
   chev: '<polyline points="6 9 12 15 18 9"/>',
   info: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
+  chat: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
 };
 const svg = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const card = (title, inner, cls = "", link = "") => `
@@ -89,9 +90,9 @@ async function myAppointments(staff, key) {
   }).sort((a, b) => (a.sortMinutes || 0) - (b.sortMinutes || 0));
 }
 
-// Every open staff task (reminders from patient pages, and tasks from Task Manager), soonest due first
+// Every staff task that isn't done (Open, In progress, On hold), soonest due first
 async function openTasks() {
-  const snap = await getDocs(query(collection(db, "staff-task-list"), where("status", "==", "Open")));
+  const snap = await getDocs(query(collection(db, "staff-task-list"), where("status", "in", ["Open", "In progress", "On hold"])));
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }))
     .sort((a, b) => String(a.dueDate || "9999").localeCompare(String(b.dueDate || "9999")));
 }
@@ -152,16 +153,6 @@ function taskDialog({ title, intro = "", inner, submit = "", cancel = "Cancel", 
   dlg.showModal();
   return dlg;
 }
-
-const notesListHtml = (t) => {
-  const list = Array.isArray(t.notes) ? t.notes : [];
-  const hist = Array.isArray(t.history) ? t.history : [];
-  const rows = [
-    ...list.map((n) => ({ at: Date.parse(n.at) || 0, html: `${esc(n.text)}<small>${esc(n.by || "")} · ${esc(new Date(Date.parse(n.at)).toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }))}</small>` })),
-    ...hist.map((h) => ({ at: Date.parse(h.at) || 0, html: `<em>${esc(h.what)}</em><small>${esc(h.by || "")} · ${esc(new Date(Date.parse(h.at)).toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }))}</small>` })),
-  ].sort((a, b) => a.at - b.at);
-  return rows.length ? `<ul class="md-tnotes">${rows.map((r) => `<li>${r.html}</li>`).join("")}</ul>` : "";
-};
 
 // My consultation notes (from recordings), newest first. Reviewed or still a Draft.
 async function myNotes(staff) {
@@ -593,42 +584,41 @@ export async function mountMyDashboard(container, { staff } = {}) {
     const doneRecent = myCreated.filter((t) => t.status === "Completed" && now - toMs(t.completedAt) < 7 * DAY)
       .sort((a, b) => toMs(b.completedAt) - toMs(a.completedAt));
 
-    const lastNote = (t) => {
-      const n = Array.isArray(t.notes) && t.notes.length ? t.notes[t.notes.length - 1] : null;
-      return n ? `<em class="md-task-note">“${esc(n.text)}” · ${esc(n.by || "")}</em>` : "";
-    };
-    const taskMain = (t, sub) => {
-      const inner = `<span>${esc(t.taskText || "Untitled reminder")}${lastNote(t)}</span><strong>${esc(t.patientName || "")}</strong><small>${sub}</small>`;
-      return t.patientId ? `<a href="#/patient/${encodeURIComponent(t.patientId)}">${inner}</a>` : `<div class="md-task-main">${inner}</div>`;
-    };
-    const taskLi = (t, who) => {
-      const overdue = !!t.dueDate && t.dueDate < todayKey;
-      const whoText = who === "to"
-        ? (t.assignedToName ? `For ${t.assignedToName}` : "For anyone")
-        : (t.createdBy ? `From ${t.createdBy}` : "");
-      const sub = `${overdue ? "Overdue · " : t.dueDate === todayKey ? "Today · " : ""}${esc(niceKey(t.dueDate) || "No due date")}${whoText ? ` · ${esc(whoText)}` : ""}`;
-      return `<li class="md-task${overdue ? " is-overdue" : ""}">
-        ${taskMain(t, sub)}
+    const initials = (n) => String(n || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase() || "?";
+    const hue = (s) => [...String(s || "")].reduce((a, c) => (a * 31 + c.charCodeAt(0)) % 360, 7);
+    const avatarHtml = (n) => `<span class="tk-av" style="--h:${hue(n)}">${esc(initials(n))}</span>`;
+    // One task, Asana-style: tick on the left, click anywhere else to open it
+    const taskRow = (t, who, done = false) => {
+      const overdue = !done && !!t.dueDate && t.dueDate < todayKey;
+      const comments = Array.isArray(t.notes) ? t.notes.length : 0;
+      const last = comments ? t.notes[comments - 1] : null;
+      const doneAt = toMs(t.completedAt);
+      const dueText = done
+        ? `Done by ${t.completedBy || "someone"}${doneAt ? ` · ${shortDay(new Date(doneAt))}` : ""}`
+        : `${overdue ? "Overdue · " : t.dueDate === todayKey ? "Today · " : ""}${niceKey(t.dueDate) || "No due date"}`;
+      const personHtml = who === "to"
+        ? `<span class="md-twho" title="Who it's for">${t.assignedToName ? `${avatarHtml(t.assignedToName)}${esc(t.assignedToName)}` : "For anyone"}</span>`
+        : t.createdBy ? `<span class="md-twho">From ${esc(t.createdBy)}</span>` : "";
+      const patientHtml = !t.patientName ? ""
+        : t.patientId ? `<a href="#/patient/${encodeURIComponent(t.patientId)}">${esc(t.patientName)}</a>` : `<span>${esc(t.patientName)}</span>`;
+      return `<li class="md-trow${overdue ? " is-overdue" : ""}${done ? " is-done" : ""}">
+        ${done ? '<span class="md-tcheck" aria-hidden="true">✓</span>'
+          : `<button type="button" class="md-tcheck" data-task-done="${esc(t.id)}" title="Mark as done" aria-label="Mark as done">✓</button>`}
+        <div class="md-tbody" data-task-open="${esc(t.id)}" role="button" tabindex="0" aria-label="Open task: ${esc(t.taskText || "Task")}">
+          <span class="md-ttitle">${esc(t.taskText || "Untitled reminder")}</span>
+          <span class="md-tmeta">${done ? "" : statusPillHtml(t)}${patientHtml}
+            <span class="md-tdue${overdue ? " is-late" : ""}">${esc(dueText)}</span>${personHtml}
+            ${comments ? `<span class="md-tcount" title="${comments} comment${comments === 1 ? "" : "s"}">${svg(ICON.chat)}${comments}</span>` : ""}</span>
+          ${last ? `<span class="md-tnote">“${esc(last.text)}” · ${esc(last.by || "")}</span>` : ""}
+        </div>
         <div class="md-task-acts">
           ${t.runId ? `<button type="button" class="lh-btn is-quiet" data-task-email="${esc(t.runId)}" title="Open the email it came from">Email</button>` : ""}
-          <button type="button" class="lh-btn is-quiet" data-task-note="${esc(t.id)}">Note</button>
-          <button type="button" class="lh-btn is-quiet" data-task-pass="${esc(t.id)}">Pass on</button>
-          <button type="button" class="lh-btn md-done" data-task-done="${esc(t.id)}" title="Mark as done">✓ Done</button>
+          ${done ? `<button type="button" class="lh-btn is-quiet" data-task-reopen="${esc(t.id)}">Reopen</button>` : ""}
         </div></li>`;
     };
-    const doneLi = (t) => {
-      const when = toMs(t.completedAt);
-      const sub = `Done by ${esc(t.completedBy || "someone")}${when ? ` · ${esc(shortDay(new Date(when)))}` : ""}`;
-      return `<li class="md-task is-done">
-        ${taskMain(t, sub)}
-        <div class="md-task-acts">
-          <button type="button" class="lh-btn is-quiet" data-task-note="${esc(t.id)}">Notes</button>
-          <button type="button" class="lh-btn is-quiet" data-task-reopen="${esc(t.id)}">Reopen</button>
-        </div></li>`;
-    };
-    const group = (title, list, who, render = taskLi) => (list.length ? `
+    const group = (title, list, who, done = false) => (list.length ? `
       <p class="md-grp">${esc(title)} <em>${list.length}</em></p>
-      <ul class="md-list md-tasks">${list.slice(0, 10).map((t) => render(t, who)).join("")}</ul>
+      <ul class="md-tlist">${list.slice(0, 10).map((t) => taskRow(t, who, done)).join("")}</ul>
       ${list.length > 10 ? `<small class="muted">and ${list.length - 10} more</small>` : ""}` : "");
 
     const tasksInner = () => {
@@ -637,7 +627,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
         .map(([k, l]) => `<button type="button" class="md-ttab${tab === k ? " is-on" : ""}" data-ttab="${k}">${esc(l)}</button>`).join("")}</div>`;
       if (tab === "created") {
         return tabs + (createdList.length || doneRecent.length
-          ? group("Waiting on others", createdList, "to") + group("Done in the last 7 days", doneRecent, "to", doneLi)
+          ? group("Waiting on others", createdList, "to") + group("Done in the last 7 days", doneRecent, "to", true)
           : '<p class="tb-none">No tasks you\'ve assigned to others.</p>');
       }
       if (tab === "all") {
@@ -823,52 +813,14 @@ export async function mountMyDashboard(container, { staff } = {}) {
     });
   }
 
-  function noteDialog(t) {
-    const done = t.status === "Completed";
-    taskDialog({
-      title: done ? "Notes" : "Add a note", intro: taskLabel(t),
-      inner: `${notesListHtml(t) || '<p class="tb-none">No notes yet.</p>'}
-        ${done ? "" : `<label class="lh-field"><span class="lh-label">New note</span>
-          <textarea name="note" rows="3" maxlength="500" placeholder="e.g. Left a message, will try again tomorrow"></textarea></label>`}`,
-      submit: done ? "" : "Add note", cancel: done ? "Close" : "Cancel",
-      onSubmit: done ? null : async (form) => {
-        const note = form.elements.note.value.trim();
-        if (!note) throw new Error("Write a note first.");
-        await taskCall("note", t.id, { note });
-        showToast("Note added");
-        load();
-      },
+    // The task window (status, who it's for, due date, comments). The dashboard reloads once it closes, if anything changed.
+  function openTask(id) {
+    let changed = false;
+    const dlg = openTaskPanel(id, {
+      staff: { uid: myUid(), name: staff && staff.name, role: isAdmin() ? "Admin" : "" },
+      onChange: () => { changed = true; },
     });
-  }
-
-  function passDialog(t) {
-    const dlg = taskDialog({
-      title: "Pass it on", intro: taskLabel(t),
-      inner: `<label class="lh-field"><span class="lh-label">To</span>
-          <select class="fb-select" name="toId"><option value="">Loading staff…</option></select></label>
-        <label class="lh-field"><span class="lh-label">Note <small>(optional)</small></span>
-          <textarea name="note" rows="3" maxlength="500" placeholder="e.g. I'm away tomorrow, can you call her?"></textarea></label>
-        <small class="muted">They get an email, and it moves to their task list.</small>`,
-      submit: "Pass it on",
-      onSubmit: async (form) => {
-        const toId = form.elements.toId.value;
-        if (!toId) throw new Error("Choose who to pass it to.");
-        const r = await taskCall("passOn", t.id, { toId, note: form.elements.note.value.trim() });
-        showToast(`Passed on to ${r.assignedToName || "them"}`);
-        load();
-      },
-    });
-    fetchStaffList().then((list) => {
-      const sel = dlg.querySelector('[name="toId"]');
-      if (!sel) return;
-      const options = list.filter((s) => s.id !== t.assignedToId);
-      sel.innerHTML = '<option value="">Choose someone</option>' + options.map((s) =>
-        `<option value="${esc(s.id)}">${esc(s.name)}${s.role ? ` (${esc(s.role)})` : ""}</option>`).join("");
-    }).catch((err) => {
-      console.warn("Staff list failed:", err);
-      const sel = dlg.querySelector('[name="toId"]');
-      if (sel) sel.innerHTML = '<option value="">Couldn\'t load staff. Close and try again.</option>';
-    });
+    dlg.addEventListener("close", () => { if (changed && root.isConnected) load(); });
   }
 
   function emailDialog(runId) {
@@ -927,10 +879,8 @@ export async function mountMyDashboard(container, { staff } = {}) {
     }
     const td = e.target.closest("[data-task-done]");
     if (td) { const t = taskMap.get(td.dataset.taskDone); if (t) doneDialog(t); return; }
-    const tn = e.target.closest("[data-task-note]");
-    if (tn) { const t = taskMap.get(tn.dataset.taskNote); if (t) noteDialog(t); return; }
-    const tp = e.target.closest("[data-task-pass]");
-    if (tp) { const t = taskMap.get(tp.dataset.taskPass); if (t) passDialog(t); return; }
+    const to = e.target.closest("[data-task-open]");
+    if (to && !e.target.closest("a")) { openTask(to.dataset.taskOpen); return; }
     const te = e.target.closest("[data-task-email]");
     if (te) { emailDialog(te.dataset.taskEmail); return; }
     const tr = e.target.closest("[data-task-reopen]");
@@ -947,6 +897,13 @@ export async function mountMyDashboard(container, { staff } = {}) {
       return;
     }
     if (e.target.closest('[data-act="customise"]')) openCustomise();
+  });
+
+  root.addEventListener("keydown", (e) => {
+    if ((e.key === "Enter" || e.key === " ") && e.target.matches("[data-task-open]")) {
+      e.preventDefault();
+      openTask(e.target.dataset.taskOpen);
+    }
   });
 
   /* ---------- Customise: which cards, and in what order ---------- */

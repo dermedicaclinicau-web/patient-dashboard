@@ -32,6 +32,8 @@ import {
 import { listSubmissionsForPatient } from "./form-submissions.js";
 import { showSoapPanel } from "./soap-panel.js";
 import { fetchPatientRecords } from "./records.js";
+import { openTaskPanel, statusPillHtml } from "./task-panel.js";
+import { myUid } from "./inventory-api.js";
 
 /* ===================== Config ===================== */
 
@@ -201,6 +203,8 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     if (t.closest("[data-action='merge-info']")) { mergeInfo(); return; }
     if (t.closest("[data-action='add-reminder']")) { addReminderFlow(); return; }
     if (t.closest("[data-action='create-ssp']")) { location.hash = `#/ssp/new/${encodeURIComponent(patient.id)}`; return; }
+    const openT = t.closest("[data-action='task-open']");
+    if (openT && !t.closest("a")) { openTask(openT.dataset.id); return; }
     const doneBtn = t.closest("[data-action='task-done']");
     if (doneBtn) { completeTask(doneBtn); return; }
     if (t.closest(".back-btn, [data-action='back']")) { if (onBack) onBack(); return; }
@@ -237,6 +241,13 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       });
     }
   }, true);
+
+  root.addEventListener("keydown", (e) => {
+    if ((e.key === "Enter" || e.key === " ") && e.target.matches("[data-action='task-open']")) {
+      e.preventDefault();
+      openTask(e.target.dataset.id);
+    }
+  });
 
   // Close any open record-badge menu (e.g. "Tx Record ×2") when clicking elsewhere
   const closeBadgeMenus = (e) => {
@@ -628,13 +639,25 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       if (tasksView) tasksView.reload();
     } catch (err) {
       console.error("Completing reminder failed:", err);
-      showToast(err.code === "permission-denied"
-        ? "You don't have permission to update reminders."
+      showToast(err.code === "FORBIDDEN" || err.code === "permission-denied"
+        ? "You don't have permission to update this reminder."
+        : err.code === "UNAUTHORIZED" ? "Your session has expired. Log out and back in."
         : "Couldn't update the reminder.");
       if (btn.isConnected) { btn.disabled = false; btn.innerHTML = `${ICONS.tick}Done`; }
     }
   }
-
+  function openTask(id) {
+    let changed = false;
+    const dlg = openTaskPanel(id, {
+      staff: { uid: myUid(), name: staff && staff.name, role: staff && staff.role },
+      onChange: () => { changed = true; },
+    });
+    dlg.addEventListener("close", () => {
+      if (!changed || !root.isConnected) return;
+      loadReminders();
+      if (tasksView) tasksView.reload();
+    });
+  }
   // Today's appointment: fills the highlight block AND the "Appt today" chip
   async function loadToday() {
     try {
@@ -1124,21 +1147,24 @@ function remindersHtml(tasks) {
     const dueKey = String(t.dueDate || "").trim();
     const due = parseDateKey(dueKey);
     const overdue = !!due && dueKey < today;
-    const status = String(t.status || "").trim();
+    const status = String(t.status || "Open").trim();
+    const comments = Array.isArray(t.notes) ? t.notes.length : 0;
 
     const meta = [
       due ? `Due ${formatShortDate(due)}` : (dueKey ? `Due ${dueKey}` : "No due date"),
-      t.assignedToName ? `For ${t.assignedToName}` : "",
+      t.assignedToName ? `For ${t.assignedToName}` : "For anyone",
       t.createdBy ? `Added by ${t.createdBy}` : "",
+      comments ? `${comments} comment${comments === 1 ? "" : "s"}` : "",
     ].filter(Boolean).map(escapeHtml).join(" · ");
 
     const flags =
       (overdue ? `<span class="task-flag">Overdue</span>` : "") +
-      (status && status.toLowerCase() !== "open" ? `<span class="task-flag neutral">${escapeHtml(status)}</span>` : "");
+      (status.toLowerCase() !== "open" ? statusPillHtml(t) : "");
 
     return `
       <li class="task has-action${overdue ? " is-overdue" : ""}">
-        <div class="task-main">
+        <div class="task-main is-clickable" data-action="task-open" data-id="${escapeHtml(t.id)}" role="button" tabindex="0"
+          title="Open this task">
           <span class="task-text">${escapeHtml(t.taskText || "Untitled reminder")}</span>
           <span class="task-meta">${meta}${flags}</span>
         </div>
@@ -1146,8 +1172,6 @@ function remindersHtml(tasks) {
       </li>`;
   }).join("")}</ul>`;
 }
-
-
 /* ===================== Social history ===================== */
 
 // "Aug 13, 2026"

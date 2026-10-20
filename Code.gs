@@ -8183,13 +8183,20 @@ function staffTodoTell_(toUid, subject, heading, extraHtml, t) {
   } catch (e) { console.warn('Task email not sent: ' + e); }
 }
 
+const TASK_STATUSES_ = ['Open', 'In progress', 'On hold', 'Completed'];
+
 function handleStaffTask_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
-  const op = String(body.op || '');
+  let op = String(body.op || '');
+  // The older buttons, as the new actions
+  if (op === 'done') { op = 'status'; body.status = 'Completed'; }
+  if (op === 'reopen') { op = 'status'; body.status = 'Open'; }
+  if (op === 'note') op = 'comment';
+  if (op === 'passOn') op = 'assign';
   const id = String(body.id || '');
   if (!/^[A-Za-z0-9_-]{5,80}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
-  const note = String(body.note || '').replace(/\r/g, '').trim().slice(0, 500);
+  const note = String(body.note || '').replace(/\r/g, '').trim().slice(0, 1000);
 
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(20000)) return { ok: false, error: 'BUSY' };
@@ -8201,62 +8208,81 @@ function handleStaffTask_(body) {
     const admin = /^admin$/i.test(String(session.role || ''));
     const isAssignee = !!t.assignedToId && t.assignedToId === session.uid;
     const isCreator = !!t.createdByUid && t.createdByUid === session.uid;
-    if (!admin && !isAssignee && !isCreator && t.assignedToId) return { ok: false, error: 'FORBIDDEN' };
+    const canEdit = admin || isAssignee || isCreator || !t.assignedToId;
+    if (op !== 'comment' && op !== 'status' && !canEdit) return { ok: false, error: 'FORBIDDEN' };
 
     const now = new Date();
+    const at = now.toISOString();
     const who = String(session.name || 'Staff');
-    const history = (Array.isArray(t.history) ? t.history : []).slice(-40);
-    const notes = (Array.isArray(t.notes) ? t.notes : []).slice(-40);
-    const addNote = function () { if (note) notes.push({ at: now.toISOString(), by: who, byUid: String(session.uid || ''), text: note }); };
+    const cur = TASK_STATUSES_.indexOf(t.status) !== -1 ? t.status : 'Open';
+    const history = (Array.isArray(t.history) ? t.history : []).slice(-60);
+    const notes = (Array.isArray(t.notes) ? t.notes : []).slice(-100);
+    const addNote = function () { if (note) notes.push({ at: at, by: who, byUid: String(session.uid || ''), text: note }); };
     const noteHtml = note ? '<p style="margin:0;padding:10px 12px;border-radius:8px;background:#f0fdfa;color:#134e4a">“' +
       invEsc_(note).replace(/\n/g, '<br>') + '”</p>' : '';
+    const short = String(t.taskText || 'Task').slice(0, 80);
+    // Emails everyone listed except the person who did it
+    const tell = function (uids, subject, heading, extra) {
+      uniq_(uids.map(String).filter(function (u) { return u && u !== session.uid; }))
+        .forEach(function (u) { staffTodoTell_(u, subject, heading, extra, t); });
+    };
 
-    if (op === 'done') {
-      if (t.status === 'Completed') return { ok: true, already: true };
+    if (op === 'status') {
+      const next = String(body.status || '');
+      if (TASK_STATUSES_.indexOf(next) === -1) return { ok: false, error: 'BAD_STATUS' };
+      if (next === cur) return { ok: true, already: true };
       addNote();
-      history.push({ at: now.toISOString(), by: who, what: 'Marked as done' });
-      fsPatch_(cfg, path, { status: 'Completed', completedAt: now, completedBy: who, completedByUid: String(session.uid || ''),
-        notes: notes, history: history });
-      if (t.createdByUid && t.createdByUid !== session.uid) {
-        staffTodoTell_(t.createdByUid, 'Done: ' + String(t.taskText || 'Task').slice(0, 80), who + ' has done a task you assigned', noteHtml, t);
+      history.push({ at: at, by: who, what: 'Status: ' + cur + ' → ' + next });
+      const patch = { status: next, notes: notes, history: history, updatedAt: now };
+      if (next === 'Completed') { patch.completedAt = now; patch.completedBy = who; patch.completedByUid = String(session.uid || ''); }
+      else if (cur === 'Completed') { patch.completedAt = null; patch.completedBy = ''; patch.completedByUid = ''; }
+      fsPatch_(cfg, path, patch);
+      if (next === 'Completed') tell([t.createdByUid], 'Done: ' + short, who + ' has done a task you assigned', noteHtml);
+      else if (cur === 'Completed') tell([t.assignedToId], 'Reopened: ' + short, who + ' reopened a task for you', noteHtml);
+      else if (next === 'On hold') tell([t.createdByUid, t.assignedToId], 'On hold: ' + short, who + ' put a task on hold', noteHtml);
+      return { ok: true, status: next };
+    }
+
+    if (op === 'assign') {
+      if (cur === 'Completed') return { ok: false, error: 'DONE' };
+      const toId = String(body.toId || '');
+      let to = null;
+      if (toId) {
+        to = getStaffDocs_().filter(function (s) { return s.id === toId && s.active !== false; })[0];
+        if (!to) return { ok: false, error: 'NO_STAFF' };
       }
+      if ((to ? to.id : '') === String(t.assignedToId || '')) return { ok: true, already: true };
+      addNote();
+      history.push({ at: at, by: who, what: to
+        ? (t.assignedToName ? 'Passed on from ' + t.assignedToName + ' to ' + to.name : 'Assigned to ' + to.name)
+        : 'Made it a task for anyone' });
+      fsPatch_(cfg, path, { assignedToId: to ? to.id : '', assignedToName: to ? String(to.name || '') : '',
+        notes: notes, history: history, updatedAt: now });
+      if (to) {
+        tell([to.id], 'Task for you: ' + short, who + ' passed a task on to you',
+          noteHtml + (t.dueDate ? '<p style="margin:10px 0 0;color:#475569">Due ' + invEsc_(recLongDate_(t.dueDate) || t.dueDate) + '</p>' : ''));
+      }
+      if (t.createdByUid !== (to && to.id)) {
+        tell([t.createdByUid], 'Passed on: ' + short, who + ' passed your task on to ' + (to ? String(to.name || '') : 'anyone'), noteHtml);
+      }
+      return { ok: true, assignedToName: to ? String(to.name || '') : '' };
+    }
+
+    if (op === 'due') {
+      const due = String(body.due || '');
+      if (due && !/^\d{4}-\d{2}-\d{2}$/.test(due)) return { ok: false, error: 'BAD_REQUEST' };
+      if (due === String(t.dueDate || '')) return { ok: true, already: true };
+      history.push({ at: at, by: who, what: 'Due date: ' + (due ? recLongDate_(due) : 'none') });
+      fsPatch_(cfg, path, { dueDate: due, history: history, updatedAt: now });
       return { ok: true };
     }
-    if (op === 'reopen') {
-      if (t.status !== 'Completed') return { ok: true, already: true };
-      addNote();
-      history.push({ at: now.toISOString(), by: who, what: 'Reopened' });
-      fsPatch_(cfg, path, { status: 'Open', completedAt: null, completedBy: '', completedByUid: '', notes: notes, history: history });
-      if (t.assignedToId && t.assignedToId !== session.uid) {
-        staffTodoTell_(t.assignedToId, 'Reopened: ' + String(t.taskText || 'Task').slice(0, 80), who + ' reopened a task for you', noteHtml, t);
-      }
-      return { ok: true };
-    }
-    if (op === 'note') {
+
+    if (op === 'comment') {
       if (!note) return { ok: false, error: 'NO_NOTE' };
       addNote();
-      fsPatch_(cfg, path, { notes: notes });
+      fsPatch_(cfg, path, { notes: notes, updatedAt: now });
+      tell([t.assignedToId, t.createdByUid], 'Comment: ' + short, who + ' commented on a task', noteHtml);
       return { ok: true };
-    }
-    if (op === 'passOn') {
-      if (t.status === 'Completed') return { ok: false, error: 'DONE' };
-      const toId = String(body.toId || '');
-      const to = getStaffDocs_().filter(function (s) { return s.id === toId && s.active !== false; })[0];
-      if (!to) return { ok: false, error: 'NO_STAFF' };
-      if (to.id === t.assignedToId) return { ok: true, already: true };
-      addNote();
-      history.push({ at: now.toISOString(), by: who,
-        what: 'Passed on' + (t.assignedToName ? ' from ' + t.assignedToName : '') + ' to ' + String(to.name || '') });
-      fsPatch_(cfg, path, { assignedToId: to.id, assignedToName: String(to.name || ''), notes: notes, history: history });
-      if (to.id !== session.uid) {
-        staffTodoTell_(to.id, 'Task for you: ' + String(t.taskText || 'Task').slice(0, 80), who + ' passed a task on to you',
-          noteHtml + (t.dueDate ? '<p style="margin:10px 0 0;color:#475569">Due ' + invEsc_(recLongDate_(t.dueDate) || t.dueDate) + '</p>' : ''), t);
-      }
-      if (t.createdByUid && t.createdByUid !== session.uid && t.createdByUid !== to.id) {
-        staffTodoTell_(t.createdByUid, 'Passed on: ' + String(t.taskText || 'Task').slice(0, 80),
-          who + ' passed your task on to ' + String(to.name || ''), noteHtml, t);
-      }
-      return { ok: true, assignedToName: String(to.name || '') };
     }
     return { ok: false, error: 'BAD_REQUEST' };
   } catch (err) {
@@ -8266,6 +8292,7 @@ function handleStaffTask_(body) {
     lock.releaseLock();
   }
 }
+
 
 // ===================== Daily uploads (Task Manager → Daily uploads) =====================
 // Timely CSVs uploaded in the portal go straight into the PCN spreadsheet. The file itself is never saved.
