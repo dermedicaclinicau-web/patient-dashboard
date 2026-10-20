@@ -68,15 +68,14 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     const p = rawProduct(l);
     return p && isKitProduct(p) && l.loc !== "kit" ? { ...p, fromStore: true } : p;
   };
-  // Where each line starts. Admins: their kit if it has this product, otherwise JT storage.
+  // Admins: their kit if it has this product right now, otherwise JT storage (until they choose)
   function fixLoc(l) {
     const p = rawProduct(l);
     if (!p || !isKitProduct(p)) { if (l.loc === "kit") l.loc = defLoc; return; }
     if (!adminStore) { l.loc = "kit"; return; }
-    if (l.locSet) return;
+    if (l.userLoc) return;
     const inKit = canKit && stock.kits.some((k) => k.productId === p.id && kitUnits(k) > 0);
     l.loc = inKit ? "kit" : "jt";
-    l.locSet = true;
   }
   const nameOf = (l) => (productOf(l) || {}).name || (l.item && l.item.name) || "Product";
   const whereOf = (l) => (l.loc === "jt" ? "JT storage" : "Shelf");
@@ -325,7 +324,8 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
         <p class="fe-help">This product isn't on the inventory list any more. Ask an Admin to update the form.</p></div>`;
     }
     if (shared(p)) return sharedLineHtml(l, i, p, req);
-    const kit = isKitProduct(p);
+    const kit = isKit(p);
+    const rawKit = isKitProduct(p);
     if (kit && !canKit) {
       return `<div class="cs-line" data-i="${i}"><div class="cs-head"><strong>${esc(p.name)}${req}</strong></div>
         <p class="fe-help">${esc(p.name)} comes from injectors' own kits. Ask an Admin to give you kit access in Staff.</p></div>`;
@@ -334,13 +334,16 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     const info = kit
       ? `${fmt(stock.kits.filter((k) => k.productId === p.id).reduce((a, k) => a + kitUnits(k), 0))} ${p.doseUnit} in your kit`
       : `${whereOf(l)}: ${plural(p.stock[l.loc], p.stockUnit)}${dosed(p) ? ` · ${fmt(p.dosePer)} ${p.doseUnit} each` : ""}`;
+    const locSel = !rawKit || adminStore
+      ? `<select class="fe-in cs-loc" data-f="loc" aria-label="Taken from">
+          ${rawKit && canKit ? `<option value="kit"${l.loc === "kit" ? " selected" : ""}>My kit</option>` : ""}
+          <option value="shelf"${l.loc === "shelf" ? " selected" : ""}>Shelf</option>
+          <option value="jt"${l.loc === "jt" ? " selected" : ""}>JT storage</option></select>`
+      : "";
     return `<div class="cs-line${shortOf(l, src) > 0 ? " is-short" : ""}" data-i="${i}">
       <div class="cs-head">
         <strong>${esc(p.name)}${req}</strong><small>${esc(info)}</small>${linkNoteHtml(l)}
-        ${kit && !adminStore ? "" : `<select class="fe-in cs-loc" data-f="loc" aria-label="Taken from">
-          ${adminStore && isKitProduct(p) && canKit ? `<option value="kit"${l.loc === "kit" ? " selected" : ""}>My kit</option>` : ""}
-          <option value="shelf"${l.loc === "shelf" ? " selected" : ""}>Shelf</option>
-          <option value="jt"${l.loc === "jt" ? " selected" : ""}>JT storage</option></select>`}
+        ${locSel}
         ${l.extra ? '<button type="button" class="hx-x" data-cs="remove-line" aria-label="Remove">×</button>' : ""}
       </div>
       ${dosed(p) ? `<div class="cs-cols"><span>${esc(batchName(p))}</span><span>${esc(p.doseUnit)} injected</span><span>${esc(unitPlural(p.stockUnit))} opened</span></div>` : ""}
@@ -355,7 +358,6 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
       </div>
     </div>`;
   }
-
   function addHtml() {
     if (f.allowExtra === false || !stock) return "";
     const listed = new Set(lines.map((l) => l.productId));
@@ -454,7 +456,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
         // Kit ↔ storage: keep the units given, worked out again for where they now come from
         const was = clinicalTotal(l);
         l.loc = el.value;
-        l.locSet = true;
+        l.userLoc = true;
         const p1 = productOf(l);
         if (isKit(p1) || dosed(p1)) fillFrom(l, was); else l.rows = [newRow()];
       } else {
