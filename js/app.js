@@ -31,6 +31,8 @@ import { initChat, teardownChat } from "./chat.js";
 import { openMyPhoto } from "./my-photo.js";
 import { mountKnowledge } from "./knowledge.js";
 import { mountScanner } from "./scanner.js";
+import { mountRecall } from "./recall.js";
+import { mountRecallSettings } from "./recall-settings.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -258,7 +260,9 @@ const PAGES = {
   inventory: (el, param) => mountInventory(el, { param, staff: currentStaff }),
   reports: (el, param) => mountReports(el, { param, staff: currentStaff }),
   staff: (el) => mountStaffManager(el, { staff: currentStaff }),
+  recall: (el) => mountRecall(el, { staff: currentStaff }),
   settings: (el, param) => {
+    if (String(param || "").split("/")[0] === "recall") return mountRecallSettings(el, { staff: currentStaff });
     if (String(param || "").split("/")[0] !== "flows") return mountSettings(el, { param, staff: currentStaff });
     // Loaded only when needed, so a problem here can't stop the rest of the portal
     return import("./email-flows.js")
@@ -284,13 +288,16 @@ const PAGE_PERM = {
 
 // Email flow builders who aren't Admins can open System configuration, but only its Email flows
 const pageAllowed = (p, param = "") => {
+  if (p === "recall") return can("recall.work") || can("recall.manage");
+  if (p === "settings" && String(param).split("/")[0] === "recall") return can("recall.manage");
   if (p === "settings" && can("flows.build") && (!param || String(param).split("/")[0] === "flows")) return true;
   const need = PAGE_PERM[p];
   if (!need) return true;
   return need === "admin" ? isAdminNow() : can(need);
 };
-const firstAllowedPage = () => ["calendar", "patients", "tasks", "inventory", "scanner", "reports", "forms", "staff", "help"].find(pageAllowed) || "";
+const firstAllowedPage = () => ["calendar", "patients", "tasks", "recall", "inventory", "scanner", "reports", "forms", "staff", "help"].find(pageAllowed) || "";
 const currentPage = () => location.hash.split("/")[1] || "";
+const currentParam = () => { try { return decodeURIComponent(location.hash.split("/").slice(2).join("/")); } catch { return ""; } };
 
 function applyNav() {
   els.navItems.forEach((a) => { a.hidden = !pageAllowed(a.dataset.page); });
@@ -312,13 +319,14 @@ function router() {
     return;
   }
   // Not an Admin: System configuration only shows Email flows
-  if (page === "settings" && !isAdminNow() && param.split("/")[0] !== "flows") {
+  if (page === "settings" && !isAdminNow() && !["flows", "recall"].includes(param.split("/")[0])) {
     location.replace("#/settings/flows");
     return;
   }
 
   const navKey = ["patient", "fill", "form-record", "ssp"].includes(page) ? "patients"
-    : ["image-bank", "aftercare-bank", "ssp-products", "specialist-bank"].includes(page) ? "forms" : page;
+    : ["image-bank", "aftercare-bank", "ssp-products", "specialist-bank"].includes(page) ? "forms"
+    : page === "settings" && param.split("/")[0] === "recall" ? "recall" : page;
     els.navItems.forEach((a) => {
     const active = a.dataset.page === navKey;
     a.classList.toggle("active", active);
@@ -381,7 +389,7 @@ async function checkAccess() {
     applyNav();
     initEndOfDay(currentStaff);
     refreshStartOfDayButton(currentStaff);
-    if (!pageAllowed(currentPage())) router();
+    if (!pageAllowed(currentPage(), currentParam())) router();
     showToast("Your access has been updated");
   } catch (err) {
     console.warn("Access check failed:", err);

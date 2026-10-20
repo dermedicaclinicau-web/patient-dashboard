@@ -317,6 +317,7 @@ export function mountRecall(container, { staff = null } = {}) {
       if (!draft.out && !draft.note.trim() && !draft.remind) { showToast("Choose what happened, or write a note."); return; }
       if (await act("log", { outcome: draft.out, note: draft.note, remindOn: draft.remind }, b)) {
         draft = { ...draft, out: "", note: "", remind: "" };
+        drawPanel(true);
         showToast("Saved");
       }
       return;
@@ -329,6 +330,7 @@ export function mountRecall(container, { staff = null } = {}) {
       const id = sel;
       if (await act("close", { reason: r.label, until: draft.until, note: draft.note }, b)) {
         draft = { out: "", note: "", remind: "", reason: "", until: "" };
+        drawPanel(true);
         showToast(r.askDate ? "Paused" : "Recall stopped");
         if (!r.askDate) keepOpen(id);
       }
