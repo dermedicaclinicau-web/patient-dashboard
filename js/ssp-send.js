@@ -123,7 +123,7 @@ export async function openSspPreview({ record, patient = null, staff = null, onS
       });
       if (a === "email") run(b, "Preparing…", async () => {
         const saved = await ensureSaved();
-        await openSspEmail({ rec: saved, patient, staff, settings, letterhead, pdf });
+        await openSspEmail({ rec: saved, patient, staff, settings, letterhead, pdf, fileName: doc.fileName });
       });
     });
     dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
@@ -140,7 +140,7 @@ export async function openSspPreview({ record, patient = null, staff = null, onS
 
 /* ===================== Email ===================== */
 
-async function openSspEmail({ rec, patient, staff, settings, letterhead, pdf }) {
+async function openSspEmail({ rec, patient, staff, settings, letterhead, pdf, fileName: givenName = "" }) {
   let tpl = null;
   const s = settings || {};
   if (s.emailSource === "template" && s.emailTemplate) {
@@ -164,7 +164,9 @@ async function openSspEmail({ rec, patient, staff, settings, letterhead, pdf }) 
   (tpl ? tpl.fields : []).forEach((f) => { if (String(f.label || "").trim()) set(f.label.trim(), ""); });
 
   const onFile = String(p.email || "").trim();
-  const fileName = (await pdf().catch(() => null) || {}).fileName || "Skin Script Protocol.pdf";
+  const fileName = givenName || "Skin Script Protocol.pdf";
+  pdf().catch(() => {});   // made in the background while they check the email
+  const nItems = Array.isArray(rec.items) ? rec.items.length : 0;
 
   return new Promise((resolve) => {
     let busy = false;
@@ -173,7 +175,7 @@ async function openSspEmail({ rec, patient, staff, settings, letterhead, pdf }) 
     dlg.innerHTML = `
       <form class="lh-form" novalidate>
         <div class="lh-dialog-head"><h3>Email Skin Script Protocol</h3>
-          <p>${esc(rec.patientName || "")}${tpl ? ` · Template: ${esc(tpl.name)}` : ""}</p></div>
+          <p>${esc(rec.patientName || "")} · ${nItems} product${nItems === 1 ? "" : "s"} · valid until ${esc(longDate(rec.validUntil))}${tpl ? ` · Template: ${esc(tpl.name)}` : ""}</p></div>
         <div class="ac-ed-two">
           <label class="lh-field"><span class="lh-label">To</span><input type="email" name="to" maxlength="254" value="${esc(onFile)}" /></label>
           <label class="lh-field"><span class="lh-label">CC (optional)</span><input type="email" name="cc" maxlength="254" value="${esc((tpl && tpl.recipients.cc) || "")}" /></label>
@@ -249,4 +251,22 @@ async function openSspEmail({ rec, patient, staff, settings, letterhead, pdf }) 
     dlg.showModal();
     (onFile ? form.elements.subject : form.elements.to).focus();
   });
+}
+
+/* ===================== Straight to the email (patient page) ===================== */
+
+// A saved protocol, emailed without opening the preview first. Resolves when the window closes.
+export async function emailSspRecord({ record, patient = null, staff = null } = {}) {
+  if (!record || !record.id) throw new Error("This protocol isn't saved in the portal, so it can't be emailed from here.");
+  const [settings, letterhead] = await Promise.all([
+    getSspSettings().catch(() => null),
+    getLetterhead().catch(() => null),
+  ]);
+  const doc = buildSspDocument({ record, letterhead, settings });
+  let job = null;
+  const pdf = () => {
+    if (!job) job = docToPdf(doc).catch((e) => { job = null; throw e; });
+    return job;
+  };
+  return openSspEmail({ rec: record, patient, staff, settings, letterhead, pdf, fileName: doc.fileName });
 }

@@ -1,9 +1,11 @@
 import { fetchSkincare, lastPurchaseMap, purchaseStatus, normProduct, monthsSince } from "./skincare.js";
-import { escapeHtml, formatDobLong } from "./utils.js";
-import { listSspRecords } from "./ssp-api.js";
-import { openSspPreview } from "./ssp-send.js";
+import { escapeHtml, formatDobLong, showToast } from "./utils.js";
+import { listSspRecords, createSspRecord } from "./ssp-api.js";
+import { openSspPreview, emailSspRecord } from "./ssp-send.js";
+import { getSspSettings } from "./ssp-settings.js";
 import { patientIds } from "./patients.js";
 import { setSspIntent } from "./ssp-edit.js";
+import { confirmDialog } from "./dialog.js";
 import { can } from "./perms.js";
 
 const PAGE = 10;
@@ -100,6 +102,44 @@ async function fetchAllSkincare(patient) {
   return { ...res, protocols };
 }
 
+/* ===================== Sheet protocols: saved into the portal so they can be sent ===================== */
+
+const isoAddMonths = (iso, n) => {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(y, m - 1 + n, d);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+};
+const todayIso = () => isoAddMonths(new Date().toISOString().slice(0, 10), 0);
+
+// The portal version of an SSP_NEW protocol. Keeps the sheet's record ID, so the patient page shows it once
+// and the sheet isn't written to again.
+async function sheetRecord(p, patient) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(p.date || "")) {
+    throw new Error("This protocol has no date, so it can't be sent. Use Duplicate to make a new one.");
+  }
+  const settings = await getSspSettings().catch(() => null);
+  const months = (settings && settings.validMonths) || 3;
+  const items = sheetItems(p)
+    .map((it) => ({ ...it, productId: "", size: "", step: it.step || "F", name: String(it.name || "").slice(0, 150),
+      amText: String(it.amText || "").slice(0, 3000), pmText: String(it.pmText || "").slice(0, 3000) }))
+    .filter((it) => it.name && (it.am || it.pm));
+  if (!items.length) throw new Error("This protocol has no products on it, so there's nothing to send.");
+  return {
+    recordId: p.recordId || `SSP-${p.date.replace(/-/g, "")}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`,
+    patientId: patient.id,
+    patientPttId: patient.pttId || "",
+    patientName: patient.name || "",
+    recordDate: p.date,
+    validUntil: isoAddMonths(p.date, months),
+    items: items.slice(0, 150),
+  };
+}
+
+const sendErr = (err) => (err && err.code === "permission-denied"
+  ? "Only staff who can create Skin Scripts can send older protocols. Ask an admin, or check the ssp_records rule."
+  : err && err.code ? "Couldn't do that. Check your connection and try again."
+  : (err && err.message) || "Something went wrong. Try again.");
+
 /* ===================== Behaviour ===================== */
 
 export function mountSkincare(root, patient, staff = null) {
@@ -167,6 +207,18 @@ export function mountSkincare(root, patient, staff = null) {
     if (card.open) load();
   }, true);
 
+    // One action at a time per button, with a readable message if it fails
+  async function busyBtn(btn, fn) {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    try { await fn(); } catch (err) {
+      console.error("Skin Script action failed:", err);
+      showToast(sendErr(err));
+    } finally {
+      if (btn.isConnected) btn.disabled = false;
+    }
+  }
+
   grid.addEventListener("click", (e) => {
     const refresh = e.target.closest("[data-sk-action='refresh']");
     if (refresh) {
@@ -198,14 +250,37 @@ export function mountSkincare(root, patient, staff = null) {
       location.hash = `#/ssp/new/${encodeURIComponent(patient.id)}`;
       return;
     }
-    // View / Email / Print on a protocol saved in the portal
+    // Email / Print on an older protocol from the sheet: saved into the portal once, then sent
+    const sh = e.target.closest("[data-sk-sheet]");
+    if (sh) {
+      const p = data && data.protocols[Number(sh.dataset.idx)];
+      if (!p || p.portal) return;
+      busyBtn(sh, async () => {
+        const rec = await sheetRecord(p, patient);
+        if (rec.validUntil < todayIso() && !(await confirmDialog({
+          title: "This protocol has expired",
+          message: `It was valid until ${formatDobLong(rec.validUntil)}. Send it anyway, or use Duplicate to make an up-to-date one.`,
+          confirmLabel: "Send anyway", tone: "warning",
+        }))) return;
+        const id = await createSspRecord(rec, staff);
+        const saved = { id, ...rec, createdBy: (staff && staff.name) || "" };
+        if (sh.dataset.skSheet === "email") await emailSspRecord({ record: saved, patient, staff });
+        else await openSspPreview({ record: saved, patient, staff, autoAction: "print" });
+        if (grid.isConnected) load(true);   // now shows as a portal protocol, with any email / print
+      });
+      return;
+    }
+    // View / Email / Print on a protocol saved in the portal. Email goes straight to the email window.
     const act = e.target.closest("[data-sk-ssp]");
     if (act) {
       const p = data && data.protocols.find((x) => x.portal && x.portal.id === act.dataset.id);
       if (!p) return;
-      const auto = { email: "email", print: "print" }[act.dataset.skSsp] || "";
-      openSspPreview({ record: p.portal, patient, staff, autoAction: auto })
-        .then(() => { if (grid.isConnected) load(true); }); // shows any new email / print
+      const kind = act.dataset.skSsp;
+      busyBtn(act, async () => {
+        if (kind === "email") await emailSspRecord({ record: p.portal, patient, staff });
+        else await openSspPreview({ record: p.portal, patient, staff, autoAction: kind === "print" ? "print" : "" });
+        if (grid.isConnected) load(true);   // shows any new email / print
+      });
     }
   });
 
@@ -308,8 +383,8 @@ function protocolHtml(p, isLatest, lastMap, idx = 0) {
     ? `<button type="button" class="ssp-btn" data-sk-ssp="view" data-id="${id}">${ICONS.eye}View</button>
        <button type="button" class="ssp-btn" data-sk-ssp="email" data-id="${id}">${ICONS.mail}Email to Patient</button>
        <button type="button" class="ssp-btn" data-sk-ssp="print" data-id="${id}">${ICONS.print}Print</button>${editBtns}`
-    : `<button type="button" class="ssp-btn" data-soon="Email to patient">${ICONS.mail}Email to Patient</button>
-       <button type="button" class="ssp-btn" data-soon="Print protocol">${ICONS.print}Print</button>${editBtns}`;
+    : `<button type="button" class="ssp-btn" data-sk-sheet="email" data-idx="${idx}">${ICONS.mail}Email to Patient</button>
+       <button type="button" class="ssp-btn" data-sk-sheet="print" data-idx="${idx}">${ICONS.print}Print</button>${editBtns}`;
 
   return `
     <details class="ssp-protocol" ${isLatest ? "open" : ""}>
