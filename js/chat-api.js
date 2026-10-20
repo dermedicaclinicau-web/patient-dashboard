@@ -6,6 +6,7 @@ import { db, auth } from "./firebase-config.js";
 import {
   collection, doc, getDocs, onSnapshot, query, where, orderBy, limitToLast, writeBatch, updateDoc, setDoc, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getStorage, ref as sRef, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 
 const toDate = (v) => (v && typeof v.toDate === "function" ? v.toDate() : null);
 const uid = () => {
@@ -19,6 +20,35 @@ const dates = (m) => {
   Object.entries(m || {}).forEach(([k, v]) => { out[k] = toDate(v); });
   return out;
 };
+
+/* ---------- Pictures ---------- */
+// Files live at chat_images/<chat>/<message id>.<ext>. Their links are fetched when shown (the Storage rule checks
+// it's someone in the chat), and remembered for this visit.
+const IMG_EXT = { "image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp" };
+const urlCache = new Map();
+const urlJobs = new Map();
+export const cachedImageUrl = (path) => urlCache.get(path) || "";
+export function chatImageUrl(path) {
+  if (urlCache.has(path)) return Promise.resolve(urlCache.get(path));
+  if (!urlJobs.has(path)) {
+    urlJobs.set(path, getDownloadURL(sRef(getStorage(), path))
+      .then((u) => { urlCache.set(path, u); return u; })
+      .finally(() => urlJobs.delete(path)));
+  }
+  return urlJobs.get(path);
+}
+// img: { blob, w, h, type } → { path, w, h, type }
+export async function uploadChatImage(chatId, msgId, img) {
+  const me = uid();
+  const ext = IMG_EXT[img.type];
+  if (!ext) throw new Error("That kind of picture can't be sent.");
+  const path = `chat_images/${chatId}/${msgId}.${ext}`;
+  const r = sRef(getStorage(), path);
+  await uploadBytes(r, img.blob, { contentType: img.type, customMetadata: { byUid: me } });
+  try { urlCache.set(path, await getDownloadURL(r)); } catch { /* fetched when shown */ }
+  return { path, w: Math.round(img.w) || 0, h: Math.round(img.h) || 0, type: img.type };
+}
+const previewText = (body, hasImage) => (hasImage ? (body ? `📷 ${body}` : "📷 Photo") : body).slice(0, 200);
 
 export const helpId = (staffUid) => `help__${staffUid}`;
 export const dmId = (a, b) => `dm__${[a, b].sort().join("__")}`;
@@ -76,51 +106,53 @@ export function watchMessages(chatId, onChange, onError = () => {}) {
         const x = d.data({ serverTimestamps: "estimate" }) || {};
         return { id: d.id, text: String(x.text || ""), by: String(x.by || ""), byUid: String(x.byUid || ""),
           at: toDate(x.at), page: safePage(x.page), edited: x.edited === true, deleted: x.deleted === true,
+          image: x.image && typeof x.image.path === "string"
+            ? { path: x.image.path, w: Number(x.image.w) || 0, h: Number(x.image.h) || 0 } : null,
           pending: d.metadata.hasPendingWrites };
       }));
     }, onError);
 }
-// The conversation (created on the first message) and the message, together
-export async function sendMessage(chat, text, page, staff, msgId = "") {
+// The conversation (created on the first message) and the message, together. image: { path, w, h, type } (already uploaded)
+export async function sendMessage(chat, text, page, staff, msgId = "", image = null) {
   const me = uid();
   const by = String((staff && staff.name) || "").slice(0, 120);
   const body = String(text || "").trim().slice(0, 4000);
-  if (!body) throw new Error("Type a message first.");
+  const img = image && image.path ? { path: image.path, w: image.w, h: image.h, type: image.type } : null;
+  if (!body && !img) throw new Error("Type a message first.");
   const cRef = doc(db, "chats", chat.id);
   const b = writeBatch(db);
   b.set(cRef, {
     kind: chat.kind, members: chat.members, names: { ...(chat.names || {}), [me]: by },
-    lastText: body.slice(0, 200), lastAt: serverTimestamp(), lastBy: me, lastByName: by,
+    lastText: previewText(body, !!img), lastAt: serverTimestamp(), lastBy: me, lastByName: by,
     readAt: { [me]: serverTimestamp() }, updatedAt: serverTimestamp(),
     ...(chat.kind === "help" && chat.members[0] === me ? { status: "open" } : {}),   // a new Help message reopens it
     ...(chat.kind === "group" ? { name: String(chat.name || "").slice(0, 60), createdByUid: chat.createdByUid } : {}),
   }, { merge: true });
   const mRef = msgId ? doc(cRef, "messages", msgId) : doc(collection(cRef, "messages"));
-  b.set(mRef, { text: body, by, byUid: me, at: serverTimestamp(), page: safePage(page) });
+  b.set(mRef, { text: body, by, byUid: me, at: serverTimestamp(), page: safePage(page), ...(img ? { image: img } : {}) });
   await b.commit();
 }
-
 // My own message, changed. If it's the latest one, the chat list preview changes too
-// (lastAt stays the same, so nobody gets a new-message alert).
-export async function editMessage(chatId, msgId, text, isLast) {
+// (lastAt stays the same, so nobody gets a new-message alert). A picture's caption can be emptied.
+export async function editMessage(chatId, msgId, text, isLast, hasImage = false) {
   uid();
   const body = String(text || "").trim().slice(0, 4000);
-  if (!body) throw new Error("Type a message first.");
+  if (!body && !hasImage) throw new Error("Type a message first.");
   const b = writeBatch(db);
   b.update(doc(db, "chats", chatId, "messages", msgId), { text: body, edited: true, editedAt: serverTimestamp() });
-  if (isLast) b.update(doc(db, "chats", chatId), { lastText: body.slice(0, 200), updatedAt: serverTimestamp() });
+  if (isLast) b.update(doc(db, "chats", chatId), { lastText: previewText(body, hasImage), updatedAt: serverTimestamp() });
   await b.commit();
 }
-
-// My own message, deleted for everyone. It keeps its place in the conversation as "Message deleted".
-export async function deleteMessage(chatId, msgId, isLast) {
+// My own message, deleted for everyone. It keeps its place as "Message deleted", and its picture is removed.
+export async function deleteMessage(chatId, msgId, isLast, imagePath = "") {
   uid();
   const b = writeBatch(db);
-  b.update(doc(db, "chats", chatId, "messages", msgId), { text: "", page: null, deleted: true, deletedAt: serverTimestamp() });
+  b.update(doc(db, "chats", chatId, "messages", msgId),
+    { text: "", page: null, image: null, deleted: true, deletedAt: serverTimestamp() });
   if (isLast) b.update(doc(db, "chats", chatId), { lastText: "Message deleted", updatedAt: serverTimestamp() });
   await b.commit();
+  if (imagePath) deleteObject(sRef(getStorage(), imagePath)).catch((err) => console.warn("Chat picture not removed:", err));
 }
-
 // Removes a chat from MY list only (it comes back when a new message arrives)
 export async function hideChat(chatId) {
   const me = uid();

@@ -1117,30 +1117,42 @@ match /inv_count_drafts/{id} {
       allow delete: if false;
 
       match /messages/{messageId} {
+        // A picture on a message: only its own file in this chat's folder
+        function okImage(img) {
+          return img is map
+            && img.keys().hasOnly(['path', 'w', 'h', 'type'])
+            && img.path is string
+            && img.path.matches('chat_images/' + chatId + '/' + messageId + '[.](jpg|png|gif|webp)')
+            && img.w is int && img.h is int
+            && img.type in ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+        }
         allow read: if isStaff() && (isAdmin()
           || request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.members);
         allow create: if isStaff()
           && request.resource.data.byUid == request.auth.uid
-          && request.resource.data.text is string
-          && request.resource.data.text.size() > 0 && request.resource.data.text.size() <= 4000
+          && request.resource.data.text is string && request.resource.data.text.size() <= 4000
+          && (request.resource.data.get('image', null) == null || okImage(request.resource.data.image))
+          && (request.resource.data.text.size() > 0 || request.resource.data.get('image', null) != null)
           && (request.auth.uid in getAfter(/databases/$(database)/documents/chats/$(chatId)).data.members
             || (isAdmin() && getAfter(/databases/$(database)/documents/chats/$(chatId)).data.kind == 'help'));
-        // Edit or delete: only the person who sent it, only the text, and never after it's been deleted
+        // Edit or delete: only the person who sent it. The picture can't be swapped; deleting removes it.
         allow update: if isStaff()
           && resource.data.byUid == request.auth.uid
           && resource.data.get('deleted', false) != true
           && request.resource.data.diff(resource.data).affectedKeys()
-               .hasOnly(['text', 'page', 'edited', 'editedAt', 'deleted', 'deletedAt'])
+               .hasOnly(['text', 'page', 'edited', 'editedAt', 'deleted', 'deletedAt', 'image'])
           && request.resource.data.text is string && request.resource.data.text.size() <= 4000
-          && ((request.resource.data.get('deleted', false) == true && request.resource.data.text == '')
-            || (request.resource.data.get('deleted', false) != true && request.resource.data.text.size() > 0))
+          && ((request.resource.data.get('deleted', false) == true && request.resource.data.text == ''
+                && request.resource.data.get('image', null) == null)
+            || (request.resource.data.get('deleted', false) != true
+                && request.resource.data.get('image', null) == resource.data.get('image', null)
+                && (request.resource.data.text.size() > 0 || resource.data.get('image', null) != null)))
           && (request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.members
             || (isAdmin() && get(/databases/$(database)/documents/chats/$(chatId)).data.kind == 'help'));
         allow delete: if false;
       }
     }
-    
-    
+
     match /scans/{id} {
       allow read: if isStaff();
       allow create: if isStaff() && request.resource.data.byUid == request.auth.uid

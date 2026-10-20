@@ -9,6 +9,26 @@ service firebase.storage {
     function isAdmin() {
       return isStaff() && request.auth.token.staffRole.lower() == 'admin';
     }
+
+        // Chat pictures: only the people in that chat (and Admins) can open them. The sender can delete their own.
+    match /chat_images/{chatId}/{file} {
+      function chatMember() {
+        return chatId == 'help__' + request.auth.uid
+          || (chatId.matches('dm__.+') && request.auth.uid in chatId.split('__'))
+          || (firestore.exists(/databases/(default)/documents/chats/$(chatId))
+            && request.auth.uid in firestore.get(/databases/(default)/documents/chats/$(chatId)).data.members);
+      }
+      allow get: if isStaff() && (isAdmin() || chatMember());
+      allow list: if false;
+      allow create: if isStaff()
+        && (chatMember() || (isAdmin() && chatId.matches('help__.+')))
+        && file.matches('[A-Za-z0-9]+[.](jpg|png|gif|webp)')
+        && request.resource.size < 6 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|gif|webp)')
+        && request.resource.metadata.byUid == request.auth.uid;
+      allow update: if false;
+      allow delete: if isStaff() && resource.metadata.byUid == request.auth.uid;
+    }
     
     // The Scanner tick for this kind of scan (Admins have them all)
     function canScan(kind) {

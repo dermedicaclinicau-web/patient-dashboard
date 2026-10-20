@@ -8,12 +8,14 @@ import { escapeHtml, getInitials, hueFromString, showToast } from "./utils.js";
 import {
   watchChats, watchMessages, sendMessage, markRead, setChatStatus, listAllChats, isUnread, isHiddenFor, helpId, dmId,
   newGroupId, watchAway, saveAway, editMessage, deleteMessage, hideChat, newMessageId,
+  uploadChatImage, chatImageUrl, cachedImageUrl,
 } from "./chat-api.js";
 
 const HELP_NAME = "Bethany";   // who answers Help
 const esc = (s) => escapeHtml(String(s ?? ""));
 const svg = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const I = {
+  clip: svg('<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>'),
   chat: svg('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>'),
   x: svg('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>'),
   back: svg('<polyline points="15 18 9 12 15 6"/>'),
@@ -97,6 +99,141 @@ let audio = null;
 let popTimer = null;
 let baseTitle = "";
 let pendingOpen = "";        // a conversation to open from a link (e.g. the reminder email)
+let attach = null;           // the picture waiting to be sent: { blob, url, w, h, type }
+
+/* ---------- Pictures ---------- */
+// Shrunk to about 1600px before sending. Screenshots stay PNG (sharp text); photos become JPEG. GIFs are sent as they are.
+const IMG_MAX = 1600;
+const toBlob = (c, type, q) => new Promise((res) => c.toBlob(res, type, q));
+async function prepImage(file) {
+  const type = String(file.type || "").toLowerCase().replace("image/jpg", "image/jpeg");
+  if (!/^image\/(png|jpeg|gif|webp)$/.test(type)) throw new Error("Choose a picture (JPG, PNG, GIF or WebP).");
+  if (file.size > 25 * 1024 * 1024) throw new Error("That picture is over 25 MB.");
+  const src = URL.createObjectURL(file);
+  try {
+    const im = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = () => rej(new Error("That picture couldn't be opened."));
+      i.src = src;
+    });
+    const w0 = im.naturalWidth;
+    const h0 = im.naturalHeight;
+    if (type === "image/gif" || (w0 <= IMG_MAX && h0 <= IMG_MAX && file.size <= 1.5 * 1024 * 1024)) {
+      if (file.size > 5 * 1024 * 1024) throw new Error("That picture is over 5 MB.");
+      return { blob: file, w: w0, h: h0, type };
+    }
+    const k = Math.min(1, IMG_MAX / Math.max(w0, h0));
+    const c = document.createElement("canvas");
+    c.width = Math.round(w0 * k);
+    c.height = Math.round(h0 * k);
+    const g = c.getContext("2d");
+    g.imageSmoothingQuality = "high";
+    if (type === "image/png") {
+      g.drawImage(im, 0, 0, c.width, c.height);
+      const png = await toBlob(c, "image/png");
+      if (png && png.size <= 1.5 * 1024 * 1024) return { blob: png, w: c.width, h: c.height, type: "image/png" };
+      g.clearRect(0, 0, c.width, c.height);   // a big PNG is usually a photo: JPEG on white
+    }
+    g.fillStyle = "#ffffff";
+    g.fillRect(0, 0, c.width, c.height);
+    g.drawImage(im, 0, 0, c.width, c.height);
+    const jpg = await toBlob(c, "image/jpeg", 0.85);
+    if (!jpg) throw new Error("That picture couldn't be made ready.");
+    return { blob: jpg, w: c.width, h: c.height, type: "image/jpeg" };
+  } finally {
+    URL.revokeObjectURL(src);
+  }
+}
+
+function drawAttach() {
+  const box = panel && panel.querySelector('[data-role="att"]');
+  if (!box) return;
+  box.hidden = !attach;
+  box.innerHTML = attach ? `<img src="${esc(attach.url)}" alt="" /><span>Add a caption, or just press Send</span>
+    <button type="button" class="ch-ic" data-act="unattach" aria-label="Remove the picture" title="Remove">${I.x}</button>` : "";
+}
+function clearAttach() {
+  if (attach && attach.url) URL.revokeObjectURL(attach.url);
+  attach = null;
+  drawAttach();
+}
+async function setAttach(file) {
+  if (!file || !isOpen() || view !== "thread" || !canWriteNow) return;
+  if (editing) { showToast("Finish editing your message first."); return; }
+  try {
+    const img = await prepImage(file);
+    clearAttach();
+    attach = { ...img, url: URL.createObjectURL(img.blob) };
+    drawAttach();
+    const ta = panel.querySelector(".ch-comp textarea");
+    if (ta && !isTouch()) ta.focus();
+  } catch (err) {
+    showToast((err && err.message) || "Couldn't use that picture.");
+  }
+}
+// Ctrl+V / Cmd+V a screenshot into the message box
+function onPaste(e) {
+  if (!isOpen() || view !== "thread" || !canWriteNow) return;
+  const f = [...((e.clipboardData && e.clipboardData.files) || [])].find((x) => /^image\//.test(x.type));
+  if (!f) return;
+  e.preventDefault();
+  setAttach(f);
+}
+const hasFiles = (e) => !!(e.dataTransfer && [...e.dataTransfer.types].includes("Files"));
+function onDragOver(e) {
+  if (!hasFiles(e) || view !== "thread" || !canWriteNow) return;
+  e.preventDefault();
+  panel.classList.add("is-drop");
+}
+function onDragLeave(e) {
+  if (!panel.contains(e.relatedTarget)) panel.classList.remove("is-drop");
+}
+function onDrop(e) {
+  panel.classList.remove("is-drop");
+  if (!hasFiles(e)) return;
+  e.preventDefault();
+  const f = [...e.dataTransfer.files].find((x) => /^image\//.test(x.type));
+  if (f) setAttach(f); else showToast("Only pictures can be sent in chat.");
+}
+
+// A picture in a message: from this device while sending, otherwise from Storage
+function imgHtml(m, own) {
+  const im = m.image;
+  const ratio = im.w && im.h ? ` style="aspect-ratio:${im.w}/${im.h}"` : "";
+  const src = im.local || cachedImageUrl(im.path);
+  return `<button type="button" class="ch-m-img" data-zoom="${esc(m.id)}"${own ? ' data-own="1"' : ""} aria-label="Open the picture">` +
+    `<img alt="Picture"${ratio}${src ? ` src="${esc(src)}"` : ` data-chimg="${esc(im.path)}"`} /></button>`;
+}
+function loadImages(box) {
+  box.querySelectorAll("img[data-chimg]").forEach((el) => {
+    chatImageUrl(el.dataset.chimg)
+      .then((u) => { if (u && el.isConnected) { el.src = u; el.removeAttribute("data-chimg"); } })
+      .catch(() => { const b = el.closest(".ch-m-img"); if (b) b.classList.add("is-broken"); });
+  });
+}
+// Full size, with Delete for my own
+function zoomImage(btn) {
+  const img = btn.querySelector("img");
+  const src = img && (img.currentSrc || img.src);
+  if (!src) return;
+  const mid = btn.dataset.own ? btn.dataset.zoom : "";
+  const d = document.createElement("dialog");
+  d.className = "ch-zoom";
+  d.innerHTML = `<img src="${esc(src)}" alt="Picture" />
+    <div class="ch-zoom-bar">
+      <a class="lh-btn" href="${esc(src)}" target="_blank" rel="noopener">Open in a new tab</a>
+      ${mid ? '<button type="button" class="lh-btn" data-zdel>Delete</button>' : ""}
+      <button type="button" class="lh-btn is-primary" data-zx>Close</button>
+    </div>`;
+  document.body.appendChild(d);
+  d.addEventListener("close", () => d.remove());
+  d.addEventListener("click", (e) => {
+    if (e.target === d || e.target.closest("[data-zx]")) d.close();
+    else if (e.target.closest("[data-zdel]")) { d.close(); removeMsg(mid); }
+  });
+  d.showModal();
+}
 
 /* ---------- Start and stop ---------- */
 
@@ -128,6 +265,7 @@ export function teardownChat() {
   allChats = null;
   drafts.clear();
   pendingSends.clear();
+  attach = null;
   lastSeen.clear();
   groupSel.clear();
   loaded = false;
@@ -168,6 +306,10 @@ function build() {
   root.addEventListener("keydown", onKey);
   root.addEventListener("input", onInput);
   root.addEventListener("change", onChange);
+  root.addEventListener("paste", onPaste);
+  root.addEventListener("dragover", onDragOver);
+  root.addEventListener("dragleave", onDragLeave);
+  root.addEventListener("drop", onDrop);
   document.addEventListener("pointerdown", unlockAudio);        // browsers only allow sound after a click
   document.addEventListener("visibilitychange", readIfViewing);
   window.addEventListener("hashchange", checkChatLink);
@@ -329,6 +471,7 @@ function showPanel() {
   hidePop();
 }
 function hidePanel() {
+  clearAttach();
   panel.hidden = true;
   root.classList.remove("is-open");
   stopMessages();
@@ -396,6 +539,7 @@ function openThread(id) {
   current = c;
   msgList = [];
   editing = "";
+  clearAttach();
   const isMember = c.members.includes(me.uid);
   const canWrite = isMember || (admin && c.kind === "help");
   canWriteNow = canWrite;
@@ -417,8 +561,11 @@ function openThread(id) {
         <button type="button" class="rc-link" data-act="canceledit">Cancel</button></div>
       ${adminHelp ? `<div class="ch-replies">${QUICK_REPLIES.map((q) =>
         `<button type="button" class="ch-chip" data-reply="${esc(q)}">${esc(q)}</button>`).join("")}</div>` : ""}
+      <div class="ch-att" data-role="att" hidden></div>
       <form class="ch-comp" novalidate>
         <div class="ch-emo" data-role="emo" hidden>${EMOJI.map((x) => `<button type="button" data-emo="${x}">${x}</button>`).join("")}</div>
+        <button type="button" class="ch-ic ch-clip" data-act="attach" aria-label="Add a picture" title="Add a picture or screenshot">${I.clip}</button>
+        <input type="file" accept="image/*" data-role="file" hidden />
         <button type="button" class="ch-ic ch-emo-btn" data-act="emoji" aria-label="Add emoji" title="Emoji">${I.smile}</button>
         <textarea rows="2" maxlength="4000" placeholder="Type a message…" aria-label="Message"></textarea>
         <button type="submit" class="ch-send" aria-label="Send">${I.send}</button></form>
@@ -449,10 +596,14 @@ function drawMessages(msgs, first) {
   const ids = new Set(msgs.map((m) => m.id));
   const local = [];
   pendingSends.forEach((p, id) => {
-    if (ids.has(id)) { if (p.sent) pendingSends.delete(id); return; }
+    if (ids.has(id)) {
+      if (p.sent) { if (p.img && p.img.url) URL.revokeObjectURL(p.img.url); pendingSends.delete(id); }
+      return;
+    }
     if (p.chatId !== openId) return;
     local.push({ id, text: p.text, by: me.name, byUid: me.uid, at: p.at, page: p.page,
-      local: true, failed: p.failed, pending: !p.failed && !p.sent });
+      local: true, failed: p.failed, pending: !p.failed && !p.sent,
+      image: p.img ? { local: p.img.url, path: p.img.path || "", w: p.img.w, h: p.img.h } : null });
   });
   const all = msgs.concat(local);
   if (!all.length) return;
@@ -469,10 +620,12 @@ function drawMessages(msgs, first) {
     prev = m;
     const canAct = mine && canWriteNow && !m.deleted && !m.local;
     const text = String(m.text || "").trim();
+    const pic = m.image && !m.deleted ? imgHtml(m, canAct) : "";
     const bubble = m.deleted
       ? '<div class="ch-m-b is-deleted">Message deleted</div>'
-      : `<div class="ch-m-b${onlyEmoji(text) ? " is-emoji" : ""}"${canAct
-        ? ` data-mine="${esc(m.id)}" role="button" tabindex="0" title="Tap to edit or delete"` : ""}>${esc(m.text)}</div>`;
+      : `<div class="ch-m-b${pic ? " is-img" : onlyEmoji(text) ? " is-emoji" : ""}"${canAct
+        ? ` data-mine="${esc(m.id)}" role="button" tabindex="0" title="Tap to edit or delete"` : ""}>${pic}${
+          pic ? (text ? `<span class="ch-m-cap">${esc(m.text)}</span>` : "") : esc(m.text)}</div>`;
     const acts = canAct ? `<span class="ch-m-acts" hidden>
         <button type="button" data-act="medit" data-mid="${esc(m.id)}">Edit</button>
         <button type="button" class="is-danger" data-act="mdel" data-mid="${esc(m.id)}">Delete</button></span>` : "";
@@ -487,6 +640,7 @@ function drawMessages(msgs, first) {
     </div>`;
   }).join("") + '<p class="ch-seen" data-role="seen" hidden></p>';
   updateSeen();
+  loadImages(box);
   if (first || atBottom) box.scrollTop = box.scrollHeight;
 }
 
@@ -525,7 +679,13 @@ function pageInfo() {
 const isLastMsg = (id) => msgList.length > 0 && msgList[msgList.length - 1].id === id;
 
 function sendErr(err) {
-  return err && err.code === "permission-denied"
+  const code = String((err && err.code) || "");
+  if (code.startsWith("storage/")) {
+    return code === "storage/unauthorized"
+      ? "Couldn't upload the picture. Check the chat_images Storage rule has been published."
+      : "Couldn't upload the picture. Check your connection and try again.";
+  }
+  return code === "permission-denied"
     ? "Couldn't save. Check the chats Firestore rule has been published."
     : err && err.message && !err.code ? err.message : "Couldn't send. Check your connection and try again.";
 }
@@ -534,18 +694,18 @@ async function send(form) {
   if (!current) return;
   const ta = form.querySelector("textarea");
   const text = ta.value.trim();
-  if (!text) return;
   hideEmoji();
   if (editing) {
-    // Saving an edit to one of my messages
+    // Saving an edit to one of my messages (a picture's caption can be emptied)
     const btn = form.querySelector('[type="submit"]');
     if (btn.disabled) return;
+    const id = editing;
+    const old = msgList.find((x) => x.id === id);
+    if (!text && !(old && old.image)) return;
     btn.disabled = true;
     try {
-      const id = editing;
-      const old = msgList.find((x) => x.id === id);
       if (!old || old.deleted) throw new Error("That message can't be edited any more.");
-      if (old.text !== text) await editMessage(current.id, id, text, isLastMsg(id));
+      if (old.text !== text) await editMessage(current.id, id, text, isLastMsg(id), !!old.image);
       stopEdit();
     } catch (err) {
       console.error("Chat edit failed:", err);
@@ -555,19 +715,30 @@ async function send(form) {
     ta.focus();
     return;
   }
+  if (!text && !attach) return;
+  // A brand-new group is made by its first message, so it starts with words
+  if (attach && current.kind === "group" && !chats.some((c) => c.id === current.id)) {
+    showToast("Send a message first to start the group, then add pictures.");
+    return;
+  }
   // A new message: on screen straight away, saved in the background
   const withPage = !!(panel.querySelector('[data-role="withpage"]') || {}).checked;
+  const img = attach;
+  attach = null;          // the picture now belongs to the message being sent (not revoked here)
+  drawAttach();
   ta.value = "";
   ta.style.height = "";
-  ta.focus();
-  deliver(current, newMessageId(current.id), text, withPage ? pageInfo() : null);
+  if (!isTouch()) ta.focus();
+  deliver(current, newMessageId(current.id), text, withPage ? pageInfo() : null, img);
 }
 
-async function deliver(chat, id, text, page) {
-  pendingSends.set(id, { chatId: chat.id, text, page, at: new Date(), failed: false, sent: false });
+// img: { blob, url, w, h, type } (+ path once uploaded, so a retry doesn't upload it again)
+async function deliver(chat, id, text, page, img = null) {
+  pendingSends.set(id, { chatId: chat.id, text, page, img, at: new Date(), failed: false, sent: false });
   if (openId === chat.id) redrawMessages(true);
   try {
-    await sendMessage(chat, text, page, me, id);
+    if (img && !img.path) Object.assign(img, await uploadChatImage(chat.id, id, img));
+    await sendMessage(chat, text, page, me, id, img);
     const p = pendingSends.get(id);
     if (p) p.sent = true;
     // A brand-new chat: start listening now it exists
@@ -580,6 +751,7 @@ async function deliver(chat, id, text, page) {
   }
   if (openId === chat.id) redrawMessages();
 }
+
 
 // Admins on Help: one-tap replies
 function quickReply(text) {
@@ -633,7 +805,8 @@ async function removeMsg(mid) {
   if (!ok) return;
   if (editing === mid) stopEdit();
   try {
-    await deleteMessage(current.id, mid, isLastMsg(mid));
+    const m = msgList.find((x) => x.id === mid);
+    await deleteMessage(current.id, mid, isLastMsg(mid), m && m.image ? m.image.path : "");
   } catch (err) {
     console.error("Delete message failed:", err);
     showToast(err && err.code === "permission-denied"
@@ -846,20 +1019,24 @@ async function submitAway(form) {
 
 async function onClick(e) {
   if (!e.target.closest('.ch-emo, [data-act="emoji"]')) hideEmoji();   // a tap anywhere else closes the emoji panel
-  const t = e.target.closest("[data-act],[data-open],[data-dm],[data-pick],[data-back],[data-emo],[data-mine],[data-reply]");
+  const t = e.target.closest("[data-act],[data-open],[data-dm],[data-pick],[data-back],[data-emo],[data-mine],[data-reply],[data-zoom]");
   if (!t || !me) return;
+  if (t.dataset.zoom !== undefined) { zoomImage(t); return; }
   if (t.dataset.emo) { insertEmoji(t.dataset.emo); return; }
   if (t.dataset.open) { hidePop(); openThread(t.dataset.open); return; }
   if (t.dataset.dm) { startDm(t.dataset.dm); return; }
   if (t.dataset.pick) { pickMany(t.dataset.pick); return; }
   if (t.dataset.back) { const f = panel.querySelector('[name="back"]'); if (f) f.value = t.dataset.back; return; }
   if (t.dataset.mine) { toggleMsgActs(t); return; }
+  if (t.dataset.reply) { quickReply(t.dataset.reply); return; }
   switch (t.dataset.act) {
     case "toggle":
       if (isOpen()) hidePanel(); else { showPanel(); drawList(); }
       break;
     case "close": hidePanel(); break;
-    case "back": stopMessages(); drawList(); break;
+    case "back": clearAttach(); stopMessages(); drawList(); break;
+    case "attach": { const f = panel.querySelector('[data-role="file"]'); if (f) f.click(); break; }
+    case "unattach": clearAttach(); break;
     case "new": drawNew(); break;
     case "group": drawGroup(); break;
     case "mkgroup": createGroup(); break;
@@ -877,10 +1054,16 @@ async function onClick(e) {
     case "retry": {
       const p = pendingSends.get(t.dataset.mid);
       const chat = p && chatFor(p.chatId);
-      if (chat) deliver(chat, t.dataset.mid, p.text, p.page);
+      if (chat) deliver(chat, t.dataset.mid, p.text, p.page, p.img);
       break;
     }
-    case "discard": pendingSends.delete(t.dataset.mid); redrawMessages(); break;
+    case "discard": {
+      const p = pendingSends.get(t.dataset.mid);
+      if (p && p.img && p.img.url) URL.revokeObjectURL(p.img.url);
+      pendingSends.delete(t.dataset.mid);
+      redrawMessages();
+      break;
+    }
     case "hide": hideThread(); break;
     case "mute":
       try { localStorage.setItem(muteKey(), muted() ? "0" : "1"); } catch { /* ignore */ }
@@ -951,6 +1134,12 @@ function onInput(e) {
 }
 
 function onChange(e) {
+  if (e.target.dataset.role === "file") {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (f) setAttach(f);
+    return;
+  }
   const id = e.target.dataset.gsel;
   if (!id) return;
   if (e.target.checked) groupSel.add(id); else groupSel.delete(id);
