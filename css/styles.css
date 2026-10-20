@@ -7316,13 +7316,33 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
 .mc-num { background: none; border: 0; padding: 0; font: inherit; color: var(--accent, #0f766e); text-decoration: underline; cursor: pointer; }
 
 /* Campaign page: the Who list beside the page on wide screens, below it on narrower ones */
-.mc-view { display: grid; grid-template-columns: minmax(0, 1080px); gap: 20px; align-items: start; }
+.page.mc:has(.mc-view) { max-width: none; }   /* a sent campaign uses the whole width; drafts stay narrow */
+.mc-view { display: grid; grid-template-columns: minmax(0, 1100px); gap: 20px; align-items: start; }
 .mc-main { min-width: 0; }
-@media (min-width: 1500px) {
-  .mc-view { grid-template-columns: minmax(0, 1080px) minmax(380px, 1fr); }
-  .mc-side { position: sticky; top: 16px; max-height: calc(100vh - 32px); display: flex; flex-direction: column; overflow: hidden; }
+@media (min-width: 1600px) {
+  .mc-view { grid-template-columns: minmax(0, 1100px) minmax(440px, 1fr); }
+  .mc-side { position: sticky; top: calc(var(--topbar-h) + 16px); max-height: calc(100vh - var(--topbar-h) - 32px);
+    display: flex; flex-direction: column; overflow: hidden; }
   .mc-side .mc-who-list { flex: 1; min-height: 0; overflow: auto; }
+  .mc-side .mc-who-list .mk-scroll { max-height: none; overflow: visible; border: 0; }
 }
+
+/* Who: filter buttons wrap neatly instead of spilling out of their box */
+.mc-whobox .mc-filters { height: auto; flex-wrap: wrap; gap: 4px; }
+.mc-whobox .mc-filters button { height: 34px; }
+.mc-whobox .mc-filters em { margin-left: .3rem; font-style: normal; font-size: .75rem; opacity: .7; }
+.mc-whobox .mc-who-head { display: flex; gap: .5rem; margin: 0 0 .6rem; }
+.mc-whobox .mc-who-head .fe-input { flex: 1; min-width: 0; }
+.mc-whobox .mc-who-head .fb-select { width: auto; max-width: 45%; padding: .45rem .6rem; font-size: .88rem; }
+
+/* Who: a tidy table, with dates on one line */
+.mc-whotable { width: 100%; }
+.mc-whotable thead th { position: sticky; top: 0; z-index: 1; white-space: nowrap; }
+.mc-whotable td { padding: .55rem .7rem; vertical-align: middle; }
+.mc-whotable td:first-child { min-width: 200px; }
+.mc-whotable td:nth-child(2) { white-space: nowrap; font-size: .85rem; color: #334155; }
+.mc-whotable td:nth-child(3) { font-size: .85rem; }
+.mc-whotable td small { margin-top: .1rem; overflow-wrap: anywhere; }
 
 /* Clickable result boxes and link rows */
 .mc-stat.is-link { display: block; width: 100%; text-align: left; font: inherit; color: inherit; cursor: pointer;

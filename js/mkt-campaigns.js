@@ -836,6 +836,11 @@ const WHO_FILTERS = [
   ["bounced", "Bounced", (x) => !!x.bounce],
 ];
 const isoWhen = (v) => { const d = toDate(v); return d ? when(d) : ""; };
+// "20 Oct, 1:58 pm" for the Who table
+const shortWhen = (v) => {
+  const d = toDate(v);
+  return d && !isNaN(d) ? d.toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "";
+};
 
 // Everyone the campaign reached, with what each of them did
 async function loadWho(c) {
@@ -968,7 +973,7 @@ function mountView(page, c0, staff) {
         <thead><tr><th>Patient</th><th>Opened</th><th>Clicked</th>${form ? "<th>Form</th>" : ""}<th></th></tr></thead>
         <tbody>${rows.slice(0, who.shown).map((x) => `<tr>
           <td><a href="#/patient/${encodeURIComponent(x.id)}"><strong>${esc(x.name)}</strong></a><small>${esc(x.email)}</small></td>
-          <td>${x.open ? esc(isoWhen(x.open) || "Yes") : dash}</td>
+          <td>${x.open ? esc(shortWhen(x.open) || "Yes") : dash}</td>
           <td>${x.clicks.length ? x.clicks.map(linkText).join(", ") : dash}</td>
           ${form ? `<td>${x.form ? "✓" : ""}</td>` : ""}
           <td>${flags(x)}</td></tr>`).join("")}</tbody></table></div>
