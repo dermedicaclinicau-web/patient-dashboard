@@ -7290,3 +7290,20 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
 .ch-zoom::backdrop { background: rgba(15, 23, 42, .82); }
 .ch-zoom img { display: block; max-width: 96vw; max-height: 84vh; margin: 0 auto; border-radius: 10px; }
 .ch-zoom-bar { display: flex; justify-content: center; gap: 8px; margin-top: 10px; }
+
+/* Campaigns: see who, and leave patients out */
+.mc-exnote { margin: .4rem 0 0; font-size: .85rem; color: #92400e; }
+.mc-who { margin: .6rem 0 .75rem; padding: .75rem; border: 1px solid var(--border); border-radius: 12px; background: var(--surface-2); }
+.mc-who-head { display: flex; gap: .5rem; align-items: center; margin-bottom: .6rem; }
+.mc-who-head .fe-input { flex: 1; min-width: 0; }
+.mc-who-h { margin: .7rem 0 .35rem; font-size: .72rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.mc-who-h:first-child { margin-top: 0; }
+.mc-people { display: flex; flex-direction: column; gap: .3rem; max-height: 420px; margin: 0 0 .5rem; padding: 0; overflow: auto; list-style: none; }
+.mc-person { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: .45rem .7rem;
+  border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+.mc-person.is-out { border-color: #fde68a; background: #fffbeb; }
+.mc-person-main { display: flex; flex-direction: column; min-width: 0; }
+.mc-person-main strong { font-size: .9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-person-main small { font-size: .78rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-person .lh-btn { flex: none; height: 32px; padding: 0 .75rem; font-size: .8rem; }
+.mc-count .lh-btn.is-quiet { margin-left: .4rem; }

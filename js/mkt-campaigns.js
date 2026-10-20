@@ -61,6 +61,11 @@ const cleanList = (l) => {
   return { campaignId: String(x.campaignId || ""), kind: String(x.kind || "opened"), link: Number(x.link) || 0,
     name: String(x.name || "").slice(0, 120), label: String(x.label || "").slice(0, 80) };
 };
+// Patients left out by hand. Kept with the campaign; their email address is left out too (it can be shared).
+const MAX_EXCLUDE = 500;
+const cleanExclude = (l) => (Array.isArray(l) ? l : []).filter((x) => x && x.id).slice(0, MAX_EXCLUDE)
+  .map((x) => ({ id: String(x.id).slice(0, 80), name: String(x.name || "").slice(0, 120),
+    email: String(x.email || "").trim().toLowerCase().slice(0, 254) }));
 function listText(l) {
   const n = `“${l.name || "an earlier campaign"}”`;
   if (l.kind === "link") return `Clicked “${l.label || "a link"}” in ${n}`;
@@ -95,7 +100,7 @@ function normC(snap) {
     id: snap.id, name: String(x.name || "Untitled campaign"), status,
     templateId: String(x.templateId || ""), templateName: String(x.templateName || ""),
     subject: String(x.subject || ""), fromName: String(x.fromName || "Dermedica Clinic"), replyTo: String(x.replyTo || ""),
-    audience: { mode: audMode(a.mode), rules: cleanGroup(a.rules || blankGroup()), list: cleanList(a.list) },
+    audience: { mode: audMode(a.mode), rules: cleanGroup(a.rules || blankGroup()), list: cleanList(a.list), exclude: cleanExclude(a.exclude) },
     // Drafts track by default; a scheduled campaign shows what it was actually sent with
     track: status === "draft" ? x.track !== false : x.track === true,
     links: (Array.isArray(x.links) ? x.links : []).map((l) => ({ url: String((l && l.url) || ""), text: String((l && l.text) || "") })),
@@ -122,7 +127,7 @@ async function createCampaign(base, staff) {
     name: String(base.name || "").replace(/\s+/g, " ").trim().slice(0, 120) || "Untitled campaign",
     status: "draft", templateId: base.templateId || "", templateName: base.templateName || "", subject: base.subject || "",
     fromName: base.fromName || "Dermedica Clinic", replyTo: base.replyTo || "",
-    audience: { mode: audMode(a.mode), rules: cleanGroup(a.rules || blankGroup()), list: cleanList(a.list) },
+    audience: { mode: audMode(a.mode), rules: cleanGroup(a.rules || blankGroup()), list: cleanList(a.list), exclude: cleanExclude(a.exclude) },
     dailyCap: Number(base.dailyCap) || 800, track: base.track !== false,
     createdAt: serverTimestamp(), createdBy: who(staff), createdByUid: uid,
     updatedAt: serverTimestamp(), updatedBy: who(staff), updatedByUid: uid,
@@ -135,7 +140,8 @@ async function saveDraft(c, staff) {
     name: String(c.name || "").replace(/\s+/g, " ").trim().slice(0, 120) || "Untitled campaign",
     templateId: c.templateId, templateName: c.templateName, subject: String(c.subject || "").slice(0, 200),
     fromName: String(c.fromName || "").slice(0, 80), replyTo: String(c.replyTo || "").trim().slice(0, 254),
-    audience: { mode: c.audience.mode, rules: cleanGroup(c.audience.rules), list: cleanList(c.audience.list) },
+    audience: { mode: c.audience.mode, rules: cleanGroup(c.audience.rules), list: cleanList(c.audience.list),
+      exclude: cleanExclude(c.audience.exclude) },
     dailyCap: Number(c.dailyCap) || 800, track: c.track !== false,
     updatedAt: serverTimestamp(), updatedBy: who(staff), updatedByUid: me(),
   });
@@ -316,6 +322,9 @@ function mountDraft(page, c, staff) {
   let dirty = false;
   let saving = null;
   let lastCount = null;
+  let showWho = false;   // the list of patients is open
+  let whoQ = "";         // its search box
+  let whoShown = 100;
   let templates = null;
   let tagTarget = null;
   const stepHead = (key, title) => `<div class="mc-step-h"><span class="mc-tick" data-tick="${key}" aria-hidden="true"></span>
@@ -346,6 +355,8 @@ function mountDraft(page, c, staff) {
         Optional: only those on the list who also match these rules.</p>
       <div class="mc-rules" data-role="rules"${c.audience.mode === "all" ? " hidden" : ""}><p class="muted">Loading…</p></div>
       <div class="mc-count"><button type="button" class="lh-btn" data-act="count">Count patients</button><span data-role="count"></span></div>
+      <div data-role="excl"></div>
+      <div class="mc-who" data-role="who" hidden></div>
       <p class="fe-note">Always left out: anyone on the do-not-contact list, patients with no email address and merged duplicates.
         Patients who share an email address get one email between them.</p>
     </section>
@@ -457,7 +468,8 @@ function mountDraft(page, c, staff) {
       if (el) el.classList.toggle("is-done", done[k]);
     });
     const sum = (k, v) => { const el = root.querySelector(`[data-sum="${k}"]`); if (el) el.textContent = v; };
-    sum("to", audText(c) + (lastCount ? ` · ${n0(lastCount.count)} patients` : ""));
+    const nOut = c.audience.exclude.length;
+    sum("to", audText(c) + (lastCount ? ` · ${n0(sendCount())} patients` : "") + (nOut ? ` · ${n0(nOut)} left out by you` : ""));
     sum("from", `${c.fromName || "No name yet"}${c.replyTo ? ` · replies to ${c.replyTo}` : ""}`);
     sum("subject", c.subject || (t && t.subject ? `${t.subject} (from the template)` : "No subject yet"));
     sum("content", t ? t.name : c.templateId ? "That template has been deleted" : "No email chosen yet");
@@ -466,7 +478,7 @@ function mountDraft(page, c, staff) {
     subj.placeholder = t && t.subject ? t.subject : "What's new at Dermedica";
     $("checks").innerHTML = p.length
       ? `<div class="mb-checks"><strong>Before sending</strong><ul>${p.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>`
-      : `<div class="mb-checks is-ok">Ready to send${lastCount ? ` to ${n0(lastCount.count)} patients` : ""}. Send yourself a test first.</div>`;
+      : `<div class="mb-checks is-ok">Ready to send${lastCount ? ` to ${n0(sendCount())} patients` : ""}. Send yourself a test first.</div>`;
   }
 
   /* ---------- The email ---------- */
@@ -492,9 +504,99 @@ function mountDraft(page, c, staff) {
     if (!root.isConnected) return;
     mountRuleBuilder(rulesHost, c.audience.rules, {
       names, only: CAMPAIGN_FIELDS, empty: c.audience.mode === "list" ? "No extra rules: the whole list." : "Add a rule to choose who it goes to.",
-      onChange: () => { lastCount = null; $("count").textContent = ""; touch(); },
+      onChange: () => { lastCount = null; drawCount(); touch(); },
     });
   });
+
+  /* ---------- Who it goes to: count, see who, leave people out ---------- */
+  const exIds = () => new Set(c.audience.exclude.map((x) => x.id));
+  const people = () => (lastCount && Array.isArray(lastCount.people) ? lastCount.people : null);
+  const leftOutOf = () => { const p = people(); if (!p) return 0; const s = exIds(); return p.filter((x) => s.has(x.id)).length; };
+  const sendCount = () => (lastCount ? Math.max(0, Number(lastCount.count || 0) - leftOutOf()) : 0);
+  const niceIso = (iso) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || "");
+    return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
+  };
+  const personHtml = (x, out) => `<li class="mc-person${out ? " is-out" : ""}">
+    <span class="mc-person-main"><strong>${esc(x.name || "Unknown patient")}</strong>
+      <small>${esc([x.email, x.last ? `last visit ${niceIso(x.last)}` : ""].filter(Boolean).join(" · "))}</small></span>
+    <button type="button" class="lh-btn${out ? "" : " is-quiet"}" data-${out ? "incl" : "excl"}="${esc(x.id)}">${out ? "Include again" : "Leave out"}</button></li>`;
+
+  function drawCount() {
+    const out = $("count");
+    const ex = c.audience.exclude;
+    if (lastCount) {
+      const res = lastCount;
+      const x = res.excluded || {};
+      const left = leftOutOf();
+      const send = sendCount();
+      const p = people();
+      out.innerHTML = `<strong>${n0(send)} patient${send === 1 ? "" : "s"} will get this</strong>` +
+        (left ? ` <span class="muted">· ${n0(res.count)} match, ${n0(left)} left out by you</span>` : "") +
+        (res.partial ? ` <span class="muted">(checked ${n0(res.checked)} of ${n0(res.total)}; the full list is worked out when it sends)</span>` : "") +
+        (p ? ` <button type="button" class="lh-btn is-quiet" data-act="who">${showWho ? "Hide the list" : "See who"}</button>` : "") +
+        `<small class="muted mc-excl">Not included: ${n0(x.optedOut)} on the do-not-contact list, ${n0(x.noEmail)} with no email address${
+          x.shared ? `, ${n0(x.shared)} sharing an address with another patient` : ""}.${
+          !p && res.sample && res.sample.length ? ` For example: ${esc(res.sample.slice(0, 6).join(", "))}.` : ""}${
+          !p ? " (Seeing everyone by name needs the latest Apps Script version.)" : ""}</small>`;
+    } else {
+      out.textContent = "";
+    }
+    // Left out by hand: shown even before counting
+    $("excl").innerHTML = ex.length && !showWho
+      ? `<p class="mc-exnote">${n0(ex.length)} patient${ex.length === 1 ? "" : "s"} left out by you · <button type="button" class="rc-link" data-act="who">Manage</button></p>`
+      : "";
+    drawWho();
+  }
+
+  function drawWho() {
+    const box = $("who");
+    box.hidden = !showWho;
+    if (!showWho) { box.innerHTML = ""; return; }
+    if (!box.querySelector('[data-role="who-q"]')) {   // built once, so the search box keeps its place while you type
+      box.innerHTML = `<div class="mc-who-head">
+          <input type="search" class="fe-input" data-role="who-q" placeholder="Find a patient by name or email" aria-label="Find a patient" value="${esc(whoQ)}" />
+          <button type="button" class="lh-btn is-quiet" data-act="who">Close</button></div>
+        <div data-role="who-list"></div>`;
+    }
+    drawWhoList();
+  }
+
+  function drawWhoList() {
+    const list = $("who").querySelector('[data-role="who-list"]');
+    if (!list) return;
+    const q = whoQ.trim().toLowerCase();
+    const hit = (x) => !q || `${x.name || ""} ${x.email || ""}`.toLowerCase().includes(q);
+    const s = exIds();
+    const out = c.audience.exclude.filter(hit);
+    const p = people();
+    const rows = p ? p.filter((x) => !s.has(x.id) && hit(x)) : [];
+    const more = rows.length - whoShown;
+    list.innerHTML = `
+      ${out.length ? `<h5 class="mc-who-h">Left out by you (${n0(c.audience.exclude.length)})</h5>
+        <ul class="mc-people">${out.map((x) => personHtml(x, true)).join("")}</ul>` : ""}
+      ${p ? `<h5 class="mc-who-h">Will get this (${n0(p.length - leftOutOf())}${lastCount.peopleMore ? "+" : ""})</h5>
+        ${rows.length ? `<ul class="mc-people">${rows.slice(0, whoShown).map((x) => personHtml(x, false)).join("")}</ul>`
+          : `<p class="muted">${q ? "Nobody matches that search." : "Nobody left on the list."}</p>`}
+        ${more > 0 ? `<button type="button" class="lh-btn is-quiet" data-act="who-more">Show ${n0(Math.min(100, more))} more · ${n0(more)} not shown yet</button>` : ""}
+        ${lastCount.peopleMore ? `<p class="fe-note">Another ${n0(lastCount.peopleMore)} match but aren't listed here. Narrow the rules to see them.</p>` : ""}`
+      : '<p class="fe-note">Press Count patients to see everyone who matches.</p>'}`;
+  }
+
+  function leaveOut(id) {
+    if (c.audience.exclude.some((x) => x.id === id)) return;
+    if (c.audience.exclude.length >= MAX_EXCLUDE) { showToast(`Up to ${MAX_EXCLUDE} patients can be left out. Use a rule instead.`); return; }
+    const p = (people() || []).find((x) => x.id === id);
+    if (!p) return;
+    c.audience.exclude = [...c.audience.exclude, { id: p.id, name: p.name || "", email: String(p.email || "").toLowerCase() }];
+    touch();
+    drawCount();
+  }
+  function includeAgain(id) {
+    c.audience.exclude = c.audience.exclude.filter((x) => x.id !== id);
+    touch();
+    drawCount();
+  }
 
   async function count() {
     const p = c.audience.mode !== "all" ? groupProblem(c.audience.rules, c.audience.mode === "rules") : "";
@@ -504,16 +606,12 @@ function mountDraft(page, c, staff) {
     btn.disabled = true;
     out.innerHTML = '<span class="muted">Counting… this can take a minute with rules</span>';
     try {
-      const res = await callApi({ action: "marketing", op: "campaignCount", campaignId: c.id,
+      const res = await callApi({ action: "marketing", op: "campaignCount", campaignId: c.id, withPeople: true,
         audience: { mode: c.audience.mode, rules: cleanGroup(c.audience.rules), list: cleanList(c.audience.list) } });
       if (res.problem) { out.innerHTML = `<span class="du-warn">${esc(res.problem)}</span>`; return; }
       lastCount = res;
-      const x = res.excluded || {};
-      out.innerHTML = `<strong>${n0(res.count)} patient${res.count === 1 ? "" : "s"} will get this</strong>` +
-        (res.partial ? ` <span class="muted">(checked ${n0(res.checked)} of ${n0(res.total)}; the full list is worked out when it sends)</span>` : "") +
-        `<small class="muted mc-excl">Not included: ${n0(x.optedOut)} on the do-not-contact list, ${n0(x.noEmail)} with no email address${
-          x.shared ? `, ${n0(x.shared)} sharing an address with another patient` : ""}.${
-          res.sample && res.sample.length ? ` For example: ${esc(res.sample.slice(0, 6).join(", "))}.` : ""}</small>`;
+      whoShown = 100;
+      drawCount();
       refresh();
     } catch (err) {
       out.innerHTML = `<span class="du-warn">${esc(errText(err, "Couldn't count. Try again."))}</span>`;
@@ -570,7 +668,9 @@ function mountDraft(page, c, staff) {
       sendAt = new Date(ms).toISOString();
     }
     if (!(await save())) { showToast("The latest changes couldn't be saved. Try again."); return; }
-    const howMany = lastCount ? `${n0(lastCount.count)} patients${lastCount.partial ? " or more" : ""}` : "everyone who matches when it's time";
+    const nOut = c.audience.exclude.length;
+    const howMany = (lastCount ? `${n0(sendCount())} patients${lastCount.partial ? " or more" : ""}` : "everyone who matches when it's time") +
+      (nOut ? ` (leaving out the ${n0(nOut)} you chose)` : "");
     const ok = await confirmDialog({
       title: later() ? `Schedule "${c.name}"?` : `Send "${c.name}" now?`,
       message: `It goes to ${howMany}, ${later() ? `starting ${when(new Date(sendAt))}` : "starting within 10 minutes"}, ` +
@@ -594,6 +694,7 @@ function mountDraft(page, c, staff) {
   root.addEventListener("input", (e) => {
     const el = e.target;
     if (el.closest(".mc-rules")) return; // the rule builder saves itself
+    if (el.dataset.role === "who-q") { whoQ = el.value; whoShown = 100; drawWhoList(); return; }
     if (el.dataset.role === "name") { c.name = el.value; touch(); return; }
     if (el.dataset.k && el.tagName !== "SELECT") { c[el.dataset.k] = el.value; touch(); }
   });
@@ -605,7 +706,7 @@ function mountDraft(page, c, staff) {
       rulesHost.hidden = c.audience.mode === "all";
       $("ruleshint").hidden = c.audience.mode !== "list";
       lastCount = null;
-      $("count").textContent = "";
+      drawCount();
       touch();
       return;
     }
@@ -643,6 +744,18 @@ function mountDraft(page, c, staff) {
       return;
     }
     if (e.target.closest('[data-role="edit"]')) { setBuilderBack(`${LIST_HREF}/${encodeURIComponent(c.id)}`); return; }
+    if (e.target.closest('[data-act="who"]')) {
+      showWho = !showWho;
+      whoShown = 100;
+      drawCount();
+      if (showWho) { const f = root.querySelector('[data-role="who-q"]'); if (f) f.focus(); }
+      return;
+    }
+    if (e.target.closest('[data-act="who-more"]')) { whoShown += 100; drawWhoList(); return; }
+    const exb = e.target.closest("[data-excl]");
+    if (exb) { leaveOut(exb.dataset.excl); return; }
+    const inb = e.target.closest("[data-incl]");
+    if (inb) { includeAgain(inb.dataset.incl); return; }
     if (e.target.closest('[data-act="count"]')) { count(); return; }
     if (e.target.closest('[data-act="test"]')) { sendTest(); return; }
     if (e.target.closest('[data-act="schedule"]')) { schedule(); return; }
@@ -666,6 +779,7 @@ function mountDraft(page, c, staff) {
     }
   });
 
+  drawCount();
   refresh();
   return { close() { if (dirty) save(); clearTimeout(timer); } };
 }
@@ -811,6 +925,7 @@ function mountView(page, c0, staff) {
     v("dl").innerHTML = row("To", audText(c)) + row("Email", c.templateName) + row("Subject", c.subject) +
       row("From", c.fromName) + row("Replies go to", c.replyTo) + row("Most a day", n0(c.dailyCap)) +
       row("Tracking", c.track ? "Opens and clicks" : "Off") +
+      row("Left out by you", c.audience.exclude.length ? `${n0(c.audience.exclude.length)} patients` : "") +
       row("Scheduled by", c.scheduledBy) + row("Made by", c.createdBy);
 
     if (!frameSet && c.html) {

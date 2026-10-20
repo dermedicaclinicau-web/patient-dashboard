@@ -10240,7 +10240,29 @@ function mktAudience_(a) {
     name: String(l.name || '').slice(0, 120), label: String(l.label || '').slice(0, 80),
   };
   const mode = a.mode === 'rules' ? 'rules' : (a.mode === 'list' && list.campaignId ? 'list' : 'all');
-  return { mode: mode, rules: { match: g.match === 'any' ? 'any' : 'all', rules: rules }, list: list };
+  // Patients left out by hand in the portal (kept when the campaign is scheduled)
+  const exclude = (Array.isArray(a.exclude) ? a.exclude : []).slice(0, 500).map(function (x) {
+    return { id: String((x && x.id) || '').slice(0, 80), name: String((x && x.name) || '').slice(0, 120),
+      email: mktEmail_((x && x.email) || '').slice(0, 254) };
+  }).filter(function (x) { return x.id; });
+  return { mode: mode, rules: { match: g.match === 'any' ? 'any' : 'all', rules: rules }, list: list, exclude: exclude };
+}
+
+// The patients left out by hand, and their email addresses (a shared address is left out too)
+function mktExcluded_(aud) {
+  const ids = {}, emails = {};
+  (aud.exclude || []).forEach(function (x) {
+    ids[x.id] = true;
+    if (isEmail_(x.email)) emails[x.email] = true;
+  });
+  return { ids: ids, emails: emails };
+}
+
+// One patient for the "See who" list in the portal
+const MKT_PEOPLE_MAX_ = 3000;
+function mktPerson_(e, today) {
+  const v = planVisits_(e.pre, [], today).filter(function (x) { return !x.future; });
+  return { id: e.doc._id, name: flowWho_(e.doc).name, email: e.email, last: v.length ? v[v.length - 1].dateKey : '' };
 }
 function mktNeedsVisits_(aud) { return aud.mode !== 'all' && aud.rules.rules.length > 0; }
 
@@ -10362,7 +10384,8 @@ function mktMatches_(cfg, aud, e, memo) {
   return flowGroupOk_(cfg, aud.rules, run, ctx);
 }
 
-// "Count patients" in the portal (up to about 3½ minutes; a big rule list may only be partly checked)
+// "Count patients" in the portal (up to about 3½ minutes; a big rule list may only be partly checked).
+// withPeople: also every patient who matches (for "See who" and "Leave out"), up to MKT_PEOPLE_MAX_
 function mktCount_(cfg, body, session) {
   const aud = mktAudience_(body.audience);
   if (aud.mode === 'rules' && !aud.rules.rules.length) return { ok: true, problem: 'Add at least one rule, or send it to everyone.' };
@@ -10375,9 +10398,23 @@ function mktCount_(cfg, body, session) {
   cache.put(rk, String(used + 1), 3600);
 
   const started = Date.now();
-  const pool = mktPool_(cfg, mktNeedsVisits_(aud));
+  const withPeople = body.withPeople === true;
+  const pool = mktPool_(cfg, mktNeedsVisits_(aud) || withPeople);   // visits too, for "last visit" in the list
+  const today = flowKey_(Date.now());
+  const people = [];
+  let peopleMore = 0;
+  const addPerson = function (e) {
+    if (!withPeople) return;
+    if (people.length < MKT_PEOPLE_MAX_) people.push(mktPerson_(e, today));
+    else peopleMore++;
+  };
+  const byName = function () { people.sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); }); };
+
   if (aud.mode === 'all') {
-    return { ok: true, count: pool.list.length, checked: pool.list.length, total: pool.list.length, partial: false, excluded: pool.stats };
+    pool.list.forEach(addPerson);
+    byName();
+    return { ok: true, count: pool.list.length, checked: pool.list.length, total: pool.list.length, partial: false,
+      excluded: pool.stats, people: withPeople ? people : undefined, peopleMore: peopleMore };
   }
   const memo = {};
   let checked = 0;
@@ -10391,11 +10428,12 @@ function mktCount_(cfg, body, session) {
     if (!ok) continue;
     count++;
     if (sample.length < 12) sample.push(flowWho_(pool.list[i].doc).name);
+    addPerson(pool.list[i]);
   }
+  byName();
   return { ok: true, count: count, checked: checked, total: pool.list.length, partial: checked < pool.list.length,
-    sample: sample, excluded: pool.stats };
+    sample: sample, excluded: pool.stats, people: withPeople ? people : undefined, peopleMore: peopleMore };
 }
-
 // "Send now" / "Schedule": a copy of the email is taken (its links ready for tracking), and the runner takes it from here
 function mktSchedule_(cfg, body, session) {
   const id = String(body.campaignId || '');
@@ -10538,6 +10576,7 @@ function mktBuild_(cfg, c, deadline) {
   let total = Number(st.total || 0);
   const pending = Array.isArray(st.pending) ? st.pending : [];
   const aud = mktAudience_(c.audience);
+  const ex = mktExcluded_(aud);
   const pool = mktPool_(cfg, mktNeedsVisits_(aud)).list;
   const memo = {};
   let i = 0;
@@ -10547,6 +10586,7 @@ function mktBuild_(cfg, c, deadline) {
     if (Date.now() > deadline - 20000) break;   // leaves time to save
     const e = pool[i];
     last = e.key;
+    if (ex.ids[e.doc._id] || ex.emails[e.email]) continue;   // left out by hand in the portal
     let ok = false;
     try { ok = mktMatches_(cfg, aud, e, memo); } catch (err) { console.warn('Campaign ' + c._id + ', ' + e.key + ': ' + err); }
     if (!ok) continue;
