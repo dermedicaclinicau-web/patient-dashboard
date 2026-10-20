@@ -224,6 +224,8 @@ function getAccessToken_(cfg) {
 
 // Firebase custom token, which the browser exchanges via signInWithCustomToken()
 function createCustomToken_(uid, claims) {
+  const size = Utilities.newBlob(JSON.stringify(claims)).getBytes().length;
+  if (size > 900) console.warn('Login token for ' + uid + ' carries ' + size + ' bytes of details (keep under about 1,000).');
   const cfg = getConfig_();
   const now = Math.floor(Date.now() / 1000);
   return signJwt_({
@@ -2216,6 +2218,7 @@ function handleSendTaskEmail_(body) {
   const task = fsGetDoc_(cfg, 'task_types/' + taskId);
   if (!task || task.status !== 'live') return { ok: false, error: 'TASK_NOT_LIVE' };
   if (task.channel !== 'email') return { ok: false, error: 'BAD_REQUEST' };
+  if (!can_(session, task.category === 'patient' ? 'tasks.patient' : 'tasks.staff')) return { ok: false, error: 'FORBIDDEN' };
 
   const subjectRaw = String(body.subject || '').trim().slice(0, 200);
   const htmlRaw = sanitizeEmailHtml_(body.html);
@@ -3182,12 +3185,16 @@ const PERMS_ = [
   ['consult.record', 'Consultations', 'Record consultations and edit notes'],
   ['consult.delete', 'Consultations', 'Delete any recording (staff can always delete their own)'],
   ['send.patients', 'Sending', 'Email and print to patients'],
-  ['tasks.run', 'Sending', 'Run tasks'],
-  ['tasks.build', 'Building', 'Build task types'],
+  ['tasks.run', 'Task Manager', 'Run tasks (turn this off to stop all task sending and printing)'],
+  ['tasks.patient', 'Task Manager', 'Create new task → To Patient'],
+  ['tasks.staff', 'Task Manager', 'Create new task → To Staff'],
+  ['tasks.print', 'Task Manager', 'Create new task → To Print'],
+  ['tasks.history', 'Task Manager', 'Task history'],
+  ['data.upload', 'Task Manager', 'Daily uploads: Timely day sheet, invoices and packages'],
+  ['marketing.manage', 'Task Manager', 'Marketing: campaigns, email templates and the do-not-contact list'],
+  ['tasks.build', 'Task Manager', 'Task types and End of day setup'],
   ['forms.build', 'Building', 'Build forms, Image Bank and Aftercare Bank'],
   ['flows.build', 'Building', 'Build email flows (System configuration)'],
-  ['data.upload', 'Building', 'Daily uploads: Timely day sheet, invoices and packages'],
-  ['marketing.manage', 'Building', 'Marketing: campaigns and the do-not-contact list'],
   ['ssp.create', 'Skin Script', 'Create Skin Script Protocols'],
   ['ssp.config', 'Skin Script', 'Skin Script products and design'],
   ['menu.inventory', 'Inventory', 'Inventory menu (open Inventory)'],
@@ -3218,10 +3225,12 @@ const PERMS_ = [
 const PERMS_ALL_ = PERMS_.map(function (p) { return p[0]; });
 const ROLE_DEFAULTS_ = {
   Clinician: ['menu.patients', 'menu.calendar', 'menu.tasks', 'patients.edit', 'clinical.view', 'billing.view',
-    'consult.record', 'send.patients', 'tasks.run', 'ssp.create', 'menu.inventory', 'inventory.request', 'inventory.receive',
+    'consult.record', 'send.patients', 'tasks.run', 'tasks.patient', 'tasks.staff', 'tasks.print', 'tasks.history', 
+    'ssp.create', 'menu.inventory', 'inventory.request', 'inventory.receive',
     'menu.scanner', 'scanner.billing', 'scanner.docket',
     'dash.attention', 'dash.appts', 'dash.tasks', 'dash.kit', 'dash.records', 'dash.usage', 'dash.requests', 'dash.stock'],
   Reception: ['menu.patients', 'menu.calendar', 'menu.tasks', 'patients.edit', 'send.patients', 'tasks.run',
+    'tasks.patient', 'tasks.staff', 'tasks.print', 'tasks.history',
     'menu.inventory', 'inventory.view', 'inventory.request', 'inventory.receive', 'inventory.order', 'inventory.count', 'menu.reports',
     'menu.scanner', 'scanner.billing', 'scanner.docket',
     'dash.attention', 'dash.appts', 'dash.tasks', 'dash.requests', 'dash.overview'],
@@ -3250,6 +3259,43 @@ function grantScannerAccess() {
   });
   CacheService.getScriptCache().remove('roles_cfg_v2');
   console.log('Scanner access added to: ' + (changed.join(', ') || 'nobody (already had it)'));
+}
+
+// Run ONCE from the editor after adding the Task Manager ticks: everyone who can run tasks keeps every section.
+// Untick sections afterwards in Staff → Roles & access (or per person in their Edit window).
+function grantTaskSections() {
+  const cfg = getConfig_();
+  const add = ['tasks.patient', 'tasks.staff', 'tasks.print', 'tasks.history'];
+  const roleNames = [];
+  const doc = fsGetDoc_(cfg, 'staff_roles/config');
+  if (doc && doc.roles) {
+    const roles = doc.roles;
+    Object.keys(roles).forEach(function (r) {
+      const list = Array.isArray(roles[r]) ? roles[r].slice() : [];
+      if (list.indexOf('tasks.run') === -1) return;
+      add.forEach(function (p) { if (list.indexOf(p) === -1) list.push(p); });
+      roles[r] = list;
+      roleNames.push(r);
+    });
+    fsPatch_(cfg, 'staff_roles/config', {
+      roles: roles, updatedAt: new Date().toISOString(), updatedBy: 'grantTaskSections (editor)',
+    });
+  }
+  // People given "Always allow: Run tasks" in their own Edit window
+  let people = 0;
+  staffFresh_().forEach(function (s) {
+    const acc = s.access || {};
+    const allow = Array.isArray(acc.allow) ? acc.allow.slice() : [];
+    const deny = Array.isArray(acc.deny) ? acc.deny.slice() : [];
+    if (allow.indexOf('tasks.run') === -1) return;
+    add.forEach(function (p) { if (allow.indexOf(p) === -1 && deny.indexOf(p) === -1) allow.push(p); });
+    fsPatch_(cfg, STAFF_COLLECTION + '/' + s.id, { 'Access': { allow: allow, deny: deny } });
+    people++;
+  });
+  CacheService.getScriptCache().remove('roles_cfg_v2');
+  CacheService.getScriptCache().remove('staff_docs_v1');
+  console.log('Task Manager sections added to roles: ' + (roleNames.join(', ') || 'none (defaults apply)') +
+    ' · and ' + people + ' person/people with their own exception.');
 }
 
 // Role names + each role's ticks, from staff_roles/config (defaults until it's first saved).
@@ -3719,6 +3765,7 @@ function schedCreate_(body, session) {
   const task = fsGetDoc_(cfg, 'task_types/' + taskId);
   if (!task || task.status !== 'live') return { ok: false, error: 'TASK_NOT_LIVE' };
   if (task.channel !== 'email') return { ok: false, error: 'BAD_REQUEST' };
+  if (!can_(session, task.category === 'patient' ? 'tasks.patient' : 'tasks.staff')) return { ok: false, error: 'FORBIDDEN' };
 
   const subject = String(body.subject || '').trim().slice(0, 200);
   const html = sanitizeEmailHtml_(body.html);
@@ -4101,7 +4148,7 @@ function schedTellCreator_(rec, msg) {
 function handlePrintTask_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
-  if (!can_(session, 'tasks.run')) return { ok: false, error: 'FORBIDDEN' };
+  if (!can_(session, 'tasks.run') || !can_(session, 'tasks.print')) return { ok: false, error: 'FORBIDDEN' };
 
   const cfg = getConfig_();
   const settings = fsGetDoc_(cfg, 'form_settings/printing') || {};

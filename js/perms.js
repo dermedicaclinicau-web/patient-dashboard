@@ -6,8 +6,10 @@ import { callApi } from "./appointments.js";
 export const PERM_KEYS = [
   "menu.patients", "menu.calendar", "menu.forms", "menu.tasks",
   "patients.edit", "patients.merge", "clinical.view", "billing.view",
-  "consult.record", "consult.delete", "send.patients", "tasks.run",
-  "tasks.build", "forms.build", "ssp.create", "ssp.config",
+  "consult.record", "consult.delete", "send.patients",
+  "tasks.run", "tasks.patient", "tasks.staff", "tasks.print", "tasks.history",
+  "tasks.build", "forms.build", "flows.build", "data.upload", "marketing.manage",
+  "ssp.create", "ssp.config",
   "menu.inventory", "inventory.view", "inventory.request", "inventory.receive", "inventory.order", "inventory.manage",
   "inventory.kit", "inventory.jt", "inventory.count", "menu.reports",
   "dash.attention", "dash.appts", "dash.tasks", "dash.kit", "dash.records", "dash.usage", "dash.requests", "dash.stock", "dash.overview",

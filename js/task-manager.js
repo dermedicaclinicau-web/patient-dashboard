@@ -44,26 +44,40 @@ const I = {
 };
 
 const CATEGORIES = [
-  { key: "patient", title: "To Patient", icon: I.patient, tone: "teal",
+  { key: "patient", title: "To Patient", icon: I.patient, tone: "teal", perm: "tasks.patient", needRun: true,
     blurb: "Email information to a patient, such as their treatment info or schedule." },
-  { key: "staff", title: "To Staff", icon: I.staff, tone: "violet",
+  { key: "staff", title: "To Staff", icon: I.staff, tone: "violet", perm: "tasks.staff", needRun: true,
     blurb: "Email a reminder or a note to one or more staff members." },
-  { key: "print", title: "To Print", icon: I.print, tone: "amber",
+  { key: "print", title: "To Print", icon: I.print, tone: "amber", perm: "tasks.print", needRun: true,
     blurb: "Print any form: blank, with a patient's details, or a completed copy." },
   { key: "order", title: "To Order", icon: I.box, tone: "sky", href: "#/tasks/order", perm: "inventory.request",
     blurb: "Ask the ordering team for stock: products running low, or something new." },
-  ];
+];
 
-  // Counting access (Shelf / JT storage) or an injector's kit
+// A category card shows when the person has its tick (and "Run tasks", for the sending ones)
+const catAllowed = (c) => (!c.perm || [].concat(c.perm).some((k) => can(k))) && (!c.needRun || can("tasks.run"));
+
+// Counting access (Shelf / JT storage) or an injector's kit
 const canCountAny = () => can("inventory.count") || can("inventory.order") || can("inventory.manage") || isInjector();
 export function mountTaskManager(container, { param = "", isAdmin = false, staff = null } = {}) {
   const parts = String(param || "").split("/").filter(Boolean);
   const view = parts[0] || "new";
   const sub = parts[1] || "";
+  const noAccess = (msg) => {
+    container.innerHTML = `<section class="page"><div class="state"><strong>No access</strong>${esc(msg)}</div></section>`;
+  };
 
   // Full-page screens
-  if (view === "run" && sub) { mountTaskRunner(container, { taskId: sub, patientId: parts[2] || "", staff }); return; }
-  if (view === "print" && sub) { mountPrintTask(container, { templateId: sub, patientId: parts[2] || "", staff }); return; }
+  if (view === "run" && sub) {
+    if (!can("tasks.run") || !(can("tasks.patient") || can("tasks.staff"))) { noAccess("Ask an Admin for access to run tasks."); return; }
+    mountTaskRunner(container, { taskId: sub, patientId: parts[2] || "", staff });
+    return;
+  }
+  if (view === "print" && sub) {
+    if (!can("tasks.run") || !can("tasks.print")) { noAccess("Ask an Admin for access to To Print."); return; }
+    mountPrintTask(container, { templateId: sub, patientId: parts[2] || "", staff });
+    return;
+  }
   if (view === "order") { mountOrderRequest(container, { param: sub, staff }); return; }
   if (view === "count") { mountStockCount(container, { param: sub, staff }); return; }
   if (view === "marketing" && sub === "templates" && parts[2]) {
@@ -83,6 +97,21 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
     container.innerHTML = '<section class="page"><div class="state"><strong>Admins only</strong>Only admins can edit task types.</div></section>';
     return;
   }
+  // Which sections this person can open. A section they can't use goes to the first one they can.
+  const allowed = {
+    new: CATEGORIES.some(catAllowed) || canCountAny(),
+    history: can("tasks.history"),
+    uploads: can("data.upload"),
+    marketing: can("marketing.manage"),
+    types: isAdmin,
+    "end-of-day": isAdmin,
+  };
+  if (view in allowed && !allowed[view]) {
+    const first = Object.keys(allowed).find((k) => allowed[k]);
+    if (first) location.replace(`#/tasks/${first}`);
+    else noAccess("Your account doesn't have access to any part of Task Manager yet. Please ask an Admin.");
+    return;
+  }
 
   const root = document.createElement("section");
   root.className = "page wide";
@@ -97,11 +126,11 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
     </div>
     <div class="tm-layout">
       <nav class="tm-menu" aria-label="Task Manager">
-        ${link("new", "#/tasks/new", I.plus, "Create new task")}
+        ${allowed.new ? link("new", "#/tasks/new", I.plus, "Create new task") : ""}
         ${canCountAny() ? link("count", "#/tasks/count", I.count, "Opening count") : ""}
-        ${link("history", "#/tasks/history", I.history, "Task history")}
-        ${can("data.upload") ? link("uploads", "#/tasks/uploads", I.upload, "Daily uploads") : ""}
-        ${can("marketing.manage") ? link("marketing", "#/tasks/marketing", I.megaphone, "Marketing") : ""}
+        ${allowed.history ? link("history", "#/tasks/history", I.history, "Task history") : ""}
+        ${allowed.uploads ? link("uploads", "#/tasks/uploads", I.upload, "Daily uploads") : ""}
+        ${allowed.marketing ? link("marketing", "#/tasks/marketing", I.megaphone, "Marketing") : ""}
         ${isAdmin ? link("types", "#/tasks/types", I.types, "Task types") : ""}
         ${isAdmin ? link("end-of-day", "#/tasks/end-of-day", I.moon, "End of day") : ""}
       </nav>
@@ -131,7 +160,12 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
     mountTaskTypes(main, { staff });
     return;
   }
-  if (sub && CATEGORIES.some((c) => c.key === sub)) { renderCategory(main, sub, isAdmin); return; }
+  const cat = sub && CATEGORIES.find((c) => c.key === sub);
+  if (cat) {
+    if (!catAllowed(cat)) { main.innerHTML = `<div class="tm-empty">You don't have access to ${esc(cat.title)} tasks.</div>`; return; }
+    renderCategory(main, sub, isAdmin);
+    return;
+  }
   renderCategories(main, staff);
 }
 
@@ -148,7 +182,7 @@ function renderCategories(main, staff = null) {
     ${canCountAny() ? '<div class="tm-today" data-role="count-card"></div>' : ""}
     ${steps(0)}
     <h3 class="tm-h">What kind of task?</h3>
-    <div class="tm-cats">${CATEGORIES.filter((c) => !c.perm || [].concat(c.perm).some((k) => can(k))).map((c) => `
+    <div class="tm-cats">${CATEGORIES.filter(catAllowed).map((c) => `
       <a class="tm-cat tone-${c.tone}" href="${c.href || `#/tasks/new/${c.key}`}">
         <span class="tm-cat-icon">${c.icon}</span>
         <span class="tm-cat-title">${esc(c.title)}</span>
