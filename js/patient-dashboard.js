@@ -34,6 +34,8 @@ import { showSoapPanel } from "./soap-panel.js";
 import { fetchPatientRecords } from "./records.js";
 import { openTaskPanel, statusPillHtml } from "./task-panel.js";
 import { myUid } from "./inventory-api.js";
+import { db } from "./firebase-config.js";
+import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 /* ===================== Config ===================== */
 
@@ -108,8 +110,22 @@ const PA_BADGES = {
   summary: { short: "Summary", full: "Summary" },
 };
 // "No Tx Record" warning on injectables visits from this date (YYYY-MM-DD). Visits before the portal had
-// treatment records aren't checked. Set to "" to turn the warning off.
-const PA_TX_CHECK_FROM = "2026-07-01";
+// treatment records aren't checked. Set in Firestore: ui_settings/records → txCheckFrom ("" turns the warning off).
+// Until it's read, or if it can't be, the default is used.
+const PA_TX_CHECK_DEFAULT = "2026-07-01";
+let paTxCheckFrom = PA_TX_CHECK_DEFAULT;
+let paTxCheckLoad = null;
+function loadTxCheckFrom() {
+  if (!paTxCheckLoad) {
+    paTxCheckLoad = getDoc(doc(db, "ui_settings", "records"))
+      .then((snap) => {
+        const v = snap.exists() ? snap.data().txCheckFrom : undefined;
+        if (v === "" || (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v))) paTxCheckFrom = v;
+      })
+      .catch((err) => { console.warn("Tx Record check date not read, using the default:", err); });
+  }
+  return paTxCheckLoad;
+}
 
 // Which badge a completed form gets ("" = no badge)
 function paFormKind(s) {
@@ -399,6 +415,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   renderTop();
 
   // Load everything in parallel
+  loadTxCheckFrom();
   loadToday();
   setRecordingPatient(patient); // shows "Ready to record" for this patient
   loadPreconsultData();
@@ -557,6 +574,8 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     } else {
       console.warn("Record badges: prescriptions failed:", scripts.reason);
     }
+    await loadTxCheckFrom(); // already read by now (it started with the page); this just makes sure
+    if (!root.isConnected) return;
     pastForms = list;
     pastFormsLoaded = recs.status === "fulfilled"; // "No Tx Record" only when treatment records actually loaded
     pushPastRecords();
@@ -1073,7 +1092,7 @@ function paBadgesHtml(recs, missing) {
 
 function paCardHtml(v, recs, formsLoaded) {
   const day = v.date.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" });
-  const missing = formsLoaded && !!PA_TX_CHECK_FROM && v.key >= PA_TX_CHECK_FROM && v.key < toDateKey()
+  const missing = formsLoaded && !!paTxCheckFrom && v.key >= paTxCheckFrom && v.key < toDateKey()
     && v.items.some((it) => it.kind === "inj") && !(recs || []).some((r) => r.kind === "tx");
   return `
     <article class="pa-card${missing ? " is-missing" : ""}">
