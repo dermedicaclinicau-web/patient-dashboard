@@ -7353,3 +7353,19 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
 .mc-linkrow:hover td { background: #f8fafc; }
 .mc-linkrow.is-active td { background: #f0fdfa; }
 .mc-linkrow .mc-num { color: var(--accent, #0f766e); font-weight: 700; text-decoration: underline; }
+
+/* Campaigns: leave out anyone already sent an earlier campaign */
+.mc-skip { display: flex; flex-direction: column; gap: .45rem; margin: 0 0 .75rem; padding: .75rem; border: 1px solid var(--border); border-radius: 10px; }
+.mc-skip-head { display: flex; flex-direction: column; gap: .1rem; }
+.mc-skip-head strong { font-size: .9rem; }
+.mc-skip-head small { font-size: .8rem; }
+.mc-skip .fb-select { max-width: 520px; padding: .5rem .7rem; font-size: .9rem; }
+.mc-skip .fe-note, .mc-skip .muted { margin: 0; }
+
+/* Campaigns: send in batches */
+.mc-pace { margin: .25rem 0 .5rem; }
+.mc-pace-row { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.mc-pace-row .fb-select { width: auto; padding: .5rem .7rem; font-size: .9rem; }
+.mc-pace-set { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .5rem; font-size: .9rem; }
+.mc-pace-set[hidden] { display: none; }
+.mc-pace-set .fe-input { width: 90px; text-align: center; }

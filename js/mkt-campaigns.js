@@ -30,6 +30,18 @@ const FILTERS = [
   ["sending", "Sending", (s) => ["building", "sending", "paused"].includes(s)], ["sent", "Sent", (s) => ["sent", "cancelled"].includes(s)],
 ];
 const LIST_SHORT = { opened: "opened", notOpened: "didn't open", clicked: "clicked", notClicked: "didn't click" };
+// Send in batches: n emails every `mins` minutes (n 0 = all at once). The same rules as mktPace_ in Code.gs.
+const PACE_MINS = [[10, "10 minutes"], [20, "20 minutes"], [30, "30 minutes"], [60, "1 hour"], [120, "2 hours"]];
+const PACE_DEFAULT = { n: 100, mins: 30 };
+const SEND_MINUTES = 540;   // 9 am to 6 pm
+const cleanPace = (p) => {
+  const n = Math.floor(Number(p && p.n) || 0);
+  const mins = Number(p && p.mins) || 0;
+  return n >= 10 && n <= 300 && PACE_MINS.some(([m]) => m === mins) ? { n, mins } : { n: 0, mins: 0 };
+};
+const paceText = (p) => (p && p.n ? `${Number(p.n).toLocaleString("en-AU")} every ${(PACE_MINS.find(([m]) => m === p.mins) || [0, `${p.mins} minutes`])[1]}` : "All at once");
+// Emails a day it can actually send: the batches, or "Most emails a day", whichever is lower
+const perDay = (c) => (c.pace && c.pace.n ? Math.min(c.dailyCap, Math.floor(SEND_MINUTES / c.pace.mins) * c.pace.n) : c.dailyCap);
 const EMAIL_RE = /[^\s@,;<>"']+@[^\s@,;<>"']+\.[^\s@,;<>"']+/g;
 
 const n0 = (v) => Number(v || 0).toLocaleString("en-AU");
@@ -69,17 +81,30 @@ const MAX_EXCLUDE = 500;
 const cleanExclude = (l) => (Array.isArray(l) ? l : []).filter((x) => x && x.id).slice(0, MAX_EXCLUDE)
   .map((x) => ({ id: String(x.id).slice(0, 80), name: String(x.name || "").slice(0, 120),
     email: String(x.email || "").trim().toLowerCase().slice(0, 254) }));
+
+// Earlier campaigns: anyone they were sent to is left out of this one
+const MAX_SKIP = 20;
+const cleanSkip = (l) => {
+  const seen = new Set();
+  return (Array.isArray(l) ? l : []).filter((x) => x && x.id && !seen.has(String(x.id)) && seen.add(String(x.id)))
+    .slice(0, MAX_SKIP).map((x) => ({ id: String(x.id).slice(0, 80), name: String(x.name || "").slice(0, 120) }));
+};
+const skipText = (a) => (!a.skip.length ? ""
+  : ` · not anyone already sent ${a.skip.length === 1 ? `“${a.skip[0].name || "an earlier campaign"}”` : `${a.skip.length} earlier campaigns`}`);
+
 function listText(l) {
   const n = `“${l.name || "an earlier campaign"}”`;
   if (l.kind === "link") return `Clicked “${l.label || "a link"}” in ${n}`;
   return ({ opened: `Opened ${n}`, notOpened: `Didn't open ${n}`, clicked: `Clicked a link in ${n}`,
     notClicked: `Didn't click a link in ${n}` })[l.kind] || `From ${n}`;
 }
+
 function audText(c) {
   const a = c.audience;
-  if (a.mode === "rules") return describeGroup(a.rules);
-  if (a.mode === "list") return listText(a.list) + (a.rules.rules.length ? ` · and ${describeGroup(a.rules)}` : "");
-  return "Everyone who can receive marketing emails";
+  const base = a.mode === "rules" ? describeGroup(a.rules)
+    : a.mode === "list" ? listText(a.list) + (a.rules.rules.length ? ` · and ${describeGroup(a.rules)}` : "")
+    : "Everyone who can receive marketing emails";
+  return base + skipText(a);
 }
 
 function openDialog(html, cls = "") {
@@ -103,7 +128,8 @@ function normC(snap) {
     id: snap.id, name: String(x.name || "Untitled campaign"), status,
     templateId: String(x.templateId || ""), templateName: String(x.templateName || ""),
     subject: String(x.subject || ""), fromName: String(x.fromName || "Dermedica Clinic"), replyTo: String(x.replyTo || ""),
-    audience: { mode: audMode(a.mode), rules: cleanGroup(a.rules || blankGroup()), list: cleanList(a.list), exclude: cleanExclude(a.exclude) },
+    audience: { mode: audMode(a.mode), rules: cleanGroup(a.rules || blankGroup()), list: cleanList(a.list), exclude: cleanExclude(a.exclude),
+      skip: cleanSkip(a.skip) },
     // Drafts track by default; a scheduled campaign shows what it was actually sent with
     track: status === "draft" ? x.track !== false : x.track === true,
     links: (Array.isArray(x.links) ? x.links : []).map((l) => ({ url: String((l && l.url) || ""), text: String((l && l.text) || "") })),
@@ -113,7 +139,7 @@ function normC(snap) {
       clicksTotal: Number(st.clicksTotal) || 0, unsubscribes: Number(st.unsubscribes) || 0, bounces: Number(st.bounces) || 0,
       forms: Number(st.forms) || 0,
     },
-    dailyCap: Number(x.dailyCap) || 800, sendAtMs: Number(x.sendAtMs) || 0,
+    dailyCap: Number(x.dailyCap) || 800, sendAtMs: Number(x.sendAtMs) || 0, pace: cleanPace(x.pace),
     total: Number(x.total || 0), sent: Number(x.sent || 0), skipped: Number(x.skipped || 0), failed: Number(x.failed || 0),
     chunks: Number(x.chunks || 0), cursor: Number(x.cursor || 0),
     buildChecked: Number(x.buildChecked || 0), buildTotal: Number(x.buildTotal || 0),
@@ -131,8 +157,10 @@ async function createCampaign(base, staff) {
     name: String(base.name || "").replace(/\s+/g, " ").trim().slice(0, 120) || "Untitled campaign",
     status: "draft", templateId: base.templateId || "", templateName: base.templateName || "", subject: base.subject || "",
     fromName: base.fromName || "Dermedica Clinic", replyTo: base.replyTo || "",
-    audience: { mode: audMode(a.mode), rules: cleanGroup(a.rules || blankGroup()), list: cleanList(a.list), exclude: cleanExclude(a.exclude) },
+    audience: { mode: audMode(a.mode), rules: cleanGroup(a.rules || blankGroup()), list: cleanList(a.list), exclude: cleanExclude(a.exclude),
+      skip: cleanSkip(a.skip) },
     dailyCap: Number(base.dailyCap) || 800, track: base.track !== false,
+    pace: base.pace === undefined ? PACE_DEFAULT : cleanPace(base.pace),
     createdAt: serverTimestamp(), createdBy: who(staff), createdByUid: uid,
     updatedAt: serverTimestamp(), updatedBy: who(staff), updatedByUid: uid,
   });
@@ -145,8 +173,8 @@ async function saveDraft(c, staff) {
     templateId: c.templateId, templateName: c.templateName, subject: String(c.subject || "").slice(0, 200),
     fromName: String(c.fromName || "").slice(0, 80), replyTo: String(c.replyTo || "").trim().slice(0, 254),
     audience: { mode: c.audience.mode, rules: cleanGroup(c.audience.rules), list: cleanList(c.audience.list),
-      exclude: cleanExclude(c.audience.exclude) },
-    dailyCap: Number(c.dailyCap) || 800, track: c.track !== false,
+      exclude: cleanExclude(c.audience.exclude), skip: cleanSkip(c.audience.skip) },
+    dailyCap: Number(c.dailyCap) || 800, track: c.track !== false, pace: cleanPace(c.pace),
     updatedAt: serverTimestamp(), updatedBy: who(staff), updatedByUid: me(),
   });
 }
@@ -164,7 +192,7 @@ function progressHtml(c) {
 function eta(c) {
   const left = c.total - (c.sent + c.skipped + c.failed);
   if (!["sending", "paused"].includes(c.status) || left <= 0) return "";
-  const days = Math.ceil(left / Math.max(1, c.dailyCap));
+  const days = Math.ceil(left / Math.max(1, perDay(c)));
   return days <= 1 ? "Should finish today or tomorrow" : `About ${days} more sending days`;
 }
 
@@ -364,6 +392,7 @@ function mountDraft(page, c, staff) {
       <p class="fe-note mc-rules-hint" data-role="ruleshint"${c.audience.mode === "list" ? "" : " hidden"}>
         Optional: only those on the list who also match these rules.</p>
       <div class="mc-rules" data-role="rules"${c.audience.mode === "all" ? " hidden" : ""}><p class="muted">Loading…</p></div>
+      <div class="mc-skip" data-role="skip"></div>
       <div class="mc-count"><button type="button" class="lh-btn" data-act="count">Count patients</button><span data-role="count"></span></div>
       <div data-role="excl"></div>
       <div class="mc-who" data-role="who" hidden></div>
@@ -416,6 +445,23 @@ function mountDraft(page, c, staff) {
         <select class="fb-select" data-k="dailyCap">${CAPS.map(([v, l]) =>
           `<option value="${v}"${Number(c.dailyCap) === v ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
         <small class="fe-note">Big lists go out over several days. 300 of the clinic's daily emails are always kept free for appointments, forms and tasks.</small></label>
+      <div class="lh-field mc-pace">
+        <span class="lh-label">Send in batches</span>
+        <div class="mc-pace-row">
+          <select class="fb-select" data-role="pace-on" aria-label="Send in batches">
+            <option value="on"${c.pace.n ? " selected" : ""}>In batches</option>
+            <option value="off"${c.pace.n ? "" : " selected"}>All at once (fastest)</option>
+          </select>
+          <span class="mc-pace-set" data-role="pace-set"${c.pace.n ? "" : " hidden"}>
+            <input type="number" class="fe-input" data-role="pace-n" min="10" max="300" step="10" inputmode="numeric"
+              value="${c.pace.n || PACE_DEFAULT.n}" aria-label="Emails in each batch" />
+            <span>emails every</span>
+            <select class="fb-select" data-role="pace-mins" aria-label="How often">${PACE_MINS.map(([m, l]) =>
+              `<option value="${m}"${(c.pace.mins || PACE_DEFAULT.mins) === m ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
+          </span>
+        </div>
+        <small class="fe-note" data-role="pace-note"></small>
+      </div>
       <label class="fe-check mc-track"><input type="checkbox" data-role="track"${c.track ? " checked" : ""} /> Track opens and clicks</label>
       <small class="fe-note">Shows who opened it and which links they clicked, and lets you make a follow-up list from them.</small>
       <div data-role="checks"></div>
@@ -483,12 +529,31 @@ function mountDraft(page, c, staff) {
     sum("from", `${c.fromName || "No name yet"}${c.replyTo ? ` · replies to ${c.replyTo}` : ""}`);
     sum("subject", c.subject || (t && t.subject ? `${t.subject} (from the template)` : "No subject yet"));
     sum("content", t ? t.name : c.templateId ? "That template has been deleted" : "No email chosen yet");
-    sum("send", `${later() ? "Scheduled" : "Now"}${c.track ? " · tracking opens and clicks" : ""}`);
+    sum("send", `${later() ? "Scheduled" : "Now"} · ${c.pace.n ? `in batches of ${paceText(c.pace)}` : "all at once"}${c.track ? " · tracking opens and clicks" : ""}`);
     const subj = root.querySelector('[data-k="subject"]');
     subj.placeholder = t && t.subject ? t.subject : "What's new at Dermedica";
     $("checks").innerHTML = p.length
       ? `<div class="mb-checks"><strong>Before sending</strong><ul>${p.map((x) => `<li>${esc(x)}</li>`).join("")}</ul></div>`
       : `<div class="mb-checks is-ok">Ready to send${lastCount ? ` to ${n0(sendCount())} patients` : ""}. Send yourself a test first.</div>`;
+  }
+
+  /* ---------- Send in batches ---------- */
+  let lastPace = c.pace.n ? c.pace : PACE_DEFAULT;   // remembered while "All at once" is chosen
+  function drawPace() {
+    $("pace-set").hidden = !c.pace.n;
+    const day = perDay(c);
+    $("pace-note").textContent = c.pace.n
+      ? `About ${n0(day)} a day between 9 am and 6 pm` +
+        (day < Math.floor(SEND_MINUTES / c.pace.mins) * c.pace.n ? ` ("Most emails a day" keeps it to ${n0(c.dailyCap)})` : "") +
+        ". Each batch starts within 10 minutes of when it's due. Steady batches are easier on Gmail and other inboxes, so fewer go to spam."
+      : `Up to 120 every 10 minutes, and up to ${n0(c.dailyCap)} a day.`;
+  }
+  function readPace() {
+    const n = Math.round(Number($("pace-n").value) || 0);
+    const mins = Number($("pace-mins").value) || PACE_DEFAULT.mins;
+    const p = cleanPace({ n, mins });
+    if (p.n) { c.pace = p; lastPace = p; }
+    return !!p.n;
   }
 
   /* ---------- The email ---------- */
@@ -518,6 +583,34 @@ function mountDraft(page, c, staff) {
     });
   });
 
+  /* ---------- Leave out anyone already sent an earlier campaign ---------- */
+  let pastList = null;   // other campaigns that have sent at least one email
+  getDocs(collection(db, COL)).then((snap) => {
+    const t = (x) => (x.finishedAt || x.startedAt || x.updatedAt || new Date(0)).getTime();
+    pastList = snap.docs.map(normC).filter((x) => x.id !== c.id && x.status !== "archived" && x.sent > 0)
+      .sort((a, b) => t(b) - t(a));
+  }).catch((err) => { console.error("Earlier campaigns failed:", err); pastList = []; })
+    .then(() => { if (root.isConnected) drawSkip(); });
+
+  function drawSkip() {
+    const box = $("skip");
+    const s = c.audience.skip;
+    const chosen = new Set(s.map((x) => x.id));
+    const opts = (pastList || []).filter((x) => !chosen.has(x.id));
+    const sentOn = (x) => (x.finishedAt || x.startedAt ? ` · ${when(x.finishedAt || x.startedAt)}` : "");
+    box.innerHTML = `
+      <div class="mc-skip-head"><strong>Leave out anyone already sent</strong>
+        <small class="muted">Patients who were sent any of these won't get this one (matched by patient and by email address).</small></div>
+      ${s.length ? `<div class="fr-chips">${s.map((x) => `<span class="fr-chip">${esc(x.name || "Earlier campaign")}
+        <button type="button" data-unskip="${esc(x.id)}" aria-label="Stop leaving out ${esc(x.name)}">×</button></span>`).join("")}</div>` : ""}
+      ${pastList === null ? '<p class="muted">Loading campaigns…</p>'
+        : !pastList.length ? '<p class="fe-note">No earlier campaigns have been sent yet.</p>'
+        : opts.length && s.length < MAX_SKIP ? `<select class="fb-select" data-role="skip-add" aria-label="Add an earlier campaign">
+            <option value="">+ Add a campaign…</option>${opts.map((x) =>
+              `<option value="${esc(x.id)}">${esc(x.name)} · ${n0(x.sent)} sent${esc(sentOn(x))}</option>`).join("")}</select>` : ""}`;
+  }
+  const skipChanged = () => { lastCount = null; drawSkip(); drawCount(); touch(); };
+
   /* ---------- Who it goes to: count, see who, leave people out ---------- */
   const exIds = () => new Set(c.audience.exclude.map((x) => x.id));
   const people = () => (lastCount && Array.isArray(lastCount.people) ? lastCount.people : null);
@@ -546,7 +639,8 @@ function mountDraft(page, c, staff) {
         (res.partial ? ` <span class="muted">(checked ${n0(res.checked)} of ${n0(res.total)}; the full list is worked out when it sends)</span>` : "") +
         (p ? ` <button type="button" class="lh-btn is-quiet" data-act="who">${showWho ? "Hide the list" : "See who"}</button>` : "") +
         `<small class="muted mc-excl">Not included: ${n0(x.optedOut)} on the do-not-contact list, ${n0(x.noEmail)} with no email address${
-          x.shared ? `, ${n0(x.shared)} sharing an address with another patient` : ""}.${
+          x.shared ? `, ${n0(x.shared)} sharing an address with another patient` : ""}${
+          x.alreadySent ? `, ${n0(x.alreadySent)} already sent an earlier campaign you chose` : ""}.${
           !p && res.sample && res.sample.length ? ` For example: ${esc(res.sample.slice(0, 6).join(", "))}.` : ""}${
           !p ? " (Seeing everyone by name needs the latest Apps Script version.)" : ""}</small>`;
     } else {
@@ -617,7 +711,8 @@ function mountDraft(page, c, staff) {
     out.innerHTML = '<span class="muted">Counting… this can take a minute with rules</span>';
     try {
       const res = await callApi({ action: "marketing", op: "campaignCount", campaignId: c.id, withPeople: true,
-        audience: { mode: c.audience.mode, rules: cleanGroup(c.audience.rules), list: cleanList(c.audience.list) } });
+        audience: { mode: c.audience.mode, rules: cleanGroup(c.audience.rules), list: cleanList(c.audience.list),
+          skip: cleanSkip(c.audience.skip) } });
       if (res.problem) { out.innerHTML = `<span class="du-warn">${esc(res.problem)}</span>`; return; }
       lastCount = res;
       whoShown = 100;
@@ -684,7 +779,8 @@ function mountDraft(page, c, staff) {
     const ok = await confirmDialog({
       title: later() ? `Schedule "${c.name}"?` : `Send "${c.name}" now?`,
       message: `It goes to ${howMany}, ${later() ? `starting ${when(new Date(sendAt))}` : "starting within 10 minutes"}, ` +
-        `between 9 am and 6 pm, up to ${n0(c.dailyCap)} a day. You can pause or cancel it while it's sending.`,
+        `between 9 am and 6 pm, ${c.pace.n ? `in batches of ${paceText(c.pace)}, ` : ""}up to ${n0(perDay(c))} a day. ` +
+        "You can pause or cancel it while it's sending.",
       confirmLabel: later() ? "Schedule" : "Send now", tone: "primary",
     });
     if (!ok) return;
@@ -705,12 +801,18 @@ function mountDraft(page, c, staff) {
     const el = e.target;
     if (el.closest(".mc-rules")) return; // the rule builder saves itself
     if (el.dataset.role === "who-q") { whoQ = el.value; whoShown = 100; drawWhoList(); return; }
+    if (el.dataset.role === "pace-n") { if (readPace()) { drawPace(); touch(); } return; }
     if (el.dataset.role === "name") { c.name = el.value; touch(); return; }
     if (el.dataset.k && el.tagName !== "SELECT") { c[el.dataset.k] = el.value; touch(); }
   });
   root.addEventListener("change", (e) => {
     const el = e.target;
     if (el.closest(".mc-rules")) return;
+    if (el.dataset.role === "skip-add") {
+      const x = (pastList || []).find((p) => p.id === el.value);
+      if (x) { c.audience.skip = cleanSkip([...c.audience.skip, { id: x.id, name: x.name }]); skipChanged(); }
+      return;
+    }
     if (el.name === "mc-aud") {
       c.audience.mode = audMode(el.value);
       rulesHost.hidden = c.audience.mode === "all";
@@ -731,6 +833,29 @@ function mountDraft(page, c, staff) {
       return;
     }
     if (el.dataset.role === "track") { c.track = el.checked; touch(); return; }
+    if (el.dataset.role === "pace-on") {
+      c.pace = el.value === "on" ? lastPace : { n: 0, mins: 0 };
+      if (c.pace.n) { $("pace-n").value = c.pace.n; $("pace-mins").value = c.pace.mins; }
+      drawPace();
+      touch();
+      return;
+    }
+    if (el.dataset.role === "pace-mins") {
+      if (!readPace()) {   // the number box isn't valid yet: keep the last good size with the new time
+        c.pace = cleanPace({ n: lastPace.n, mins: Number(el.value) });
+        lastPace = c.pace;
+        $("pace-n").value = c.pace.n;
+      }
+      drawPace();
+      touch();
+      return;
+    }
+    if (el.dataset.role === "pace-n") {   // leaving the box: show the number that's actually saved
+      if (!readPace()) showToast("A batch can be 10 to 300 emails.");
+      el.value = c.pace.n || lastPace.n;
+      drawPace();
+      return;
+    }
     if (el.dataset.role === "tpl") {
       const t = (templates || []).find((x) => x.id === el.value);
       c.templateId = t ? t.id : "";
@@ -739,7 +864,7 @@ function mountDraft(page, c, staff) {
       touch();
       return;
     }
-    if (el.dataset.k === "dailyCap") { c.dailyCap = Number(el.value) || 800; touch(); }
+    if (el.dataset.k === "dailyCap") { c.dailyCap = Number(el.value) || 800; drawPace(); touch(); }
   });
   root.addEventListener("focusin", (e) => { if (e.target.dataset && e.target.dataset.k === "subject") tagTarget = e.target; });
   root.addEventListener("mousedown", (e) => { if (e.target.closest("[data-tag]")) e.preventDefault(); });
@@ -762,6 +887,8 @@ function mountDraft(page, c, staff) {
       return;
     }
     if (e.target.closest('[data-act="who-more"]')) { whoShown += 100; drawWhoList(); return; }
+    const unskip = e.target.closest("[data-unskip]");
+    if (unskip) { c.audience.skip = c.audience.skip.filter((x) => x.id !== unskip.dataset.unskip); skipChanged(); return; }
     const exb = e.target.closest("[data-excl]");
     if (exb) { leaveOut(exb.dataset.excl); return; }
     const inb = e.target.closest("[data-incl]");
@@ -789,6 +916,8 @@ function mountDraft(page, c, staff) {
     }
   });
 
+  drawSkip();
+  drawPace();
   drawCount();
   refresh();
   return { close() { if (dirty) save(); clearTimeout(timer); } };
@@ -916,7 +1045,7 @@ function mountView(page, c0, staff) {
   let frameSet = false;
 
   /* ---------- Who ---------- */
-  const SIDE = window.matchMedia("(min-width: 1500px)");   // the list sits beside the page
+  const SIDE = window.matchMedia("(min-width: 1600px)");   // the list sits beside the page (same as styles.css)
   const who = { rows: null, f: c0.track ? "opened" : "sent", link: -1, q: "", busy: false, tried: false, shown: 200 };
   const whoRows = () => {
     const fn = (WHO_FILTERS.find((x) => x[0] === who.f) || WHO_FILTERS[0])[2];
@@ -1098,7 +1227,8 @@ function mountView(page, c0, staff) {
           ${c.sent ? statLink("Sent", n0(c.sent), "", "sent") : statBox("Sent", n0(c.sent))}
           ${statBox("Skipped", n0(c.skipped), "Unsubscribed before it reached them")}
           ${statBox("Couldn't send", n0(c.failed))}
-        </div>${eta(c) ? `<p class="muted mc-eta">${esc(eta(c))}, sending up to ${n0(c.dailyCap)} a day between 9 am and 6 pm.</p>` : ""}`;
+        </div>${eta(c) ? `<p class="muted mc-eta">${esc(eta(c))}, sending up to ${n0(perDay(c))} a day between 9 am and 6 pm${
+          c.pace.n ? `, in batches of ${esc(paceText(c.pace))}` : ""}.</p>` : ""}`;
 
     const rep = v("report");
     rep.hidden = !(c.sent > 0);
@@ -1114,8 +1244,11 @@ function mountView(page, c0, staff) {
     const row = (k, val) => (val ? `<dt>${esc(k)}</dt><dd>${esc(val)}</dd>` : "");
     v("dl").innerHTML = row("To", audText(c)) + row("Email", c.templateName) + row("Subject", c.subject) +
       row("From", c.fromName) + row("Replies go to", c.replyTo) + row("Most a day", n0(c.dailyCap)) +
+      row("Batches", paceText(c.pace)) +
       row("Tracking", c.track ? "Opens and clicks" : "Off") +
       row("Left out by you", c.audience.exclude.length ? `${n0(c.audience.exclude.length)} patients` : "") +
+      row("Not sent again to", c.audience.skip.map((x) => x.name || "an earlier campaign").join(", ")
+        ? `Anyone already sent ${c.audience.skip.map((x) => `“${x.name || "an earlier campaign"}”`).join(", ")}` : "") +
       row("Scheduled by", c.scheduledBy) + row("Made by", c.createdBy);
 
     if (!frameSet && c.html) {

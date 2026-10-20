@@ -10220,6 +10220,15 @@ const MKT_CHUNK_ = 250;                     // patients per queue document
 const MKT_RESERVE_ = 300;                   // emails a day always left for appointments, forms and tasks
 const MKT_PER_RUN_ = 120;                   // emails per 10-minute run
 const MKT_DAILY_DEFAULT_ = 800;
+// Send in batches: n emails every `mins` minutes (n 0 = all at once). The runner goes every 10 minutes,
+// so batch times are multiples of 10.
+const MKT_PACE_MINS_ = [10, 20, 30, 60, 120];
+function mktPace_(p) {
+  p = p || {};
+  const n = Math.floor(Number(p.n) || 0);
+  const mins = Number(p.mins) || 0;
+  return n >= 10 && n <= 300 && MKT_PACE_MINS_.indexOf(mins) !== -1 ? { n: n, mins: mins } : { n: 0, mins: 0 };
+}
 // Rules that make sense without a purchase or visit (the same list as CAMPAIGN_FIELDS in js/mkt-campaigns.js)
 const MKT_RULE_FIELDS_ = ['hist.bought', 'hist.days_since', 'appt.has_future', 'appt.next_days', 'appt.last_days', 'appt.visits',
   'appt.future_service', 'appt.past_service', 'appt.visit_between', 'appt.last_between', 'ssp.active', 'ssp.age_days', 'ssp.expiry_days', 'plan.status', 'plan.due',
@@ -10245,7 +10254,16 @@ function mktAudience_(a) {
     return { id: String((x && x.id) || '').slice(0, 80), name: String((x && x.name) || '').slice(0, 120),
       email: mktEmail_((x && x.email) || '').slice(0, 254) };
   }).filter(function (x) { return x.id; });
-  return { mode: mode, rules: { match: g.match === 'any' ? 'any' : 'all', rules: rules }, list: list, exclude: exclude };
+  // Earlier campaigns: anyone they were sent to is left out (kept when the campaign is scheduled)
+  const skip = [];
+  const seenSkip = {};
+  (Array.isArray(a.skip) ? a.skip : []).forEach(function (x) {
+    const id = String((x && x.id) || '');
+    if (!/^[A-Za-z0-9_-]{10,40}$/.test(id) || seenSkip[id] || skip.length >= 20) return;
+    seenSkip[id] = true;
+    skip.push({ id: id, name: String((x && x.name) || '').slice(0, 120) });
+  });
+  return { mode: mode, rules: { match: g.match === 'any' ? 'any' : 'all', rules: rules }, list: list, exclude: exclude, skip: skip };
 }
 
 // The patients left out by hand, and their email addresses (a shared address is left out too)
@@ -10256,6 +10274,45 @@ function mktExcluded_(aud) {
     if (isEmail_(x.email)) emails[x.email] = true;
   });
   return { ids: ids, emails: emails };
+}
+
+// Patients (and their addresses) already sent the campaigns chosen in "Leave out anyone already sent".
+// Only the part of each queue it has reached so far, and not anyone whose email failed.
+function mktSkipSet_(cfg, aud, selfId) {
+  const ids = {}, emails = {};
+  (aud.skip || []).forEach(function (s) {
+    if (s.id === selfId) return;
+    const base = MKT_CAMPAIGNS_ + '/' + s.id;
+    const c = fsGetDoc_(cfg, base);
+    if (!c) return;
+    const upto = Number(c.cursor || 0);
+    const failed = {};
+    (Array.isArray(c.failures) ? c.failures : []).forEach(function (f) { if (f && f.patientId) failed[String(f.patientId)] = true; });
+    const paths = [];
+    for (let i = 0; i < Number(c.chunks || 0); i++) paths.push(base + '/queue/q' + i);
+    const got = paths.length ? fsBatchGet_(cfg, paths) : {};
+    Object.keys(got).forEach(function (k) {
+      const q = Number((/\/q(\d+)$/.exec(k) || [])[1] || 0);
+      (got[k].list || []).forEach(function (r, j) {
+        const id = docId_(r.p);
+        if (!id || q * MKT_CHUNK_ + j >= upto || failed[id]) return;
+        ids[id] = true;
+        const e = mktEmail_(r.e);
+        if (isEmail_(e)) emails[e] = true;
+      });
+    });
+  });
+  return { ids: ids, emails: emails };
+}
+
+// Takes them off the pool, and notes how many (shown under Count patients)
+function mktSkipPool_(cfg, aud, pool, selfId) {
+  pool.stats.alreadySent = 0;
+  if (!aud.skip || !aud.skip.length) return;
+  const s = mktSkipSet_(cfg, aud, selfId);
+  const before = pool.list.length;
+  pool.list = pool.list.filter(function (e) { return !s.ids[e.doc._id] && !s.emails[e.email]; });
+  pool.stats.alreadySent = before - pool.list.length;
 }
 
 // One patient for the "See who" list in the portal
@@ -10400,6 +10457,7 @@ function mktCount_(cfg, body, session) {
   const started = Date.now();
   const withPeople = body.withPeople === true;
   const pool = mktPool_(cfg, mktNeedsVisits_(aud) || withPeople);   // visits too, for "last visit" in the list
+  mktSkipPool_(cfg, aud, pool, String(body.campaignId || ''));      // already sent an earlier campaign you chose
   const today = flowKey_(Date.now());
   const people = [];
   let peopleMore = 0;
@@ -10471,6 +10529,7 @@ function mktSchedule_(cfg, body, session) {
       status: 'scheduled', sendAtMs: at, sendAt: new Date(at).toISOString(), html: prep.html, links: prep.links, track: track,
       subject: subject, templateName: String(t.name || ''), audience: aud,
       dailyCap: Math.max(50, Math.min(1400, Number(c.dailyCap) || MKT_DAILY_DEFAULT_)),
+      pace: mktPace_(c.pace), paceAt: 0, paceN: 0,
       fromName: String(c.fromName || '').replace(/[\r\n"<>]/g, '').trim().slice(0, 80) || 'Dermedica Clinic',
       replyTo: isEmail_(replyTo) ? replyTo : '',
       total: 0, sent: 0, skipped: 0, failed: 0, cursor: 0, chunks: 0, built: false, failures: [], waiting: '', lastError: '', note: '',
@@ -10577,7 +10636,9 @@ function mktBuild_(cfg, c, deadline) {
   const pending = Array.isArray(st.pending) ? st.pending : [];
   const aud = mktAudience_(c.audience);
   const ex = mktExcluded_(aud);
-  const pool = mktPool_(cfg, mktNeedsVisits_(aud)).list;
+  const pp = mktPool_(cfg, mktNeedsVisits_(aud));
+  mktSkipPool_(cfg, aud, pp, c._id);   // already sent an earlier campaign you chose
+  const pool = pp.list;
   const memo = {};
   let i = 0;
   while (i < pool.length && after && pool[i].key <= after) i++;
@@ -10637,6 +10698,19 @@ function mktSendBatch_(cfg, c, deadline) {
     return;
   }
 
+  // Batches: how many this batch can still send
+  const pace = mktPace_(c.pace);
+  const span = pace.mins * 60000;
+  let paceAt = Number(c.paceAt || 0);
+  let paceN = Number(c.paceN || 0);
+  let room = MKT_PER_RUN_;
+  const nextBatch = function () { return Utilities.formatDate(new Date(paceAt + span), REC_TZ_, 'h:mm a'); };
+  if (pace.n) {
+    if (!paceAt || Date.now() - paceAt >= span) { paceAt = Date.now(); paceN = 0; }   // a new batch
+    room = Math.min(room, pace.n - paceN);
+    if (room <= 0) { wait('This batch of ' + pace.n + ' has gone. The next batch starts about ' + nextBatch() + '.'); return; }
+  }
+
   const supp = {};
   fsListAll_(cfg, MKT_SUPPRESS_, ['email']).forEach(function (d) { supp[d.name.split('/').pop()] = true; });
   const html0 = String(c.html || '');
@@ -10656,7 +10730,7 @@ function mktSendBatch_(cfg, c, deadline) {
   let n = 0;
   let stop = '';
 
-  while (cursor < total && n < MKT_PER_RUN_ && today < cap && Date.now() < deadline) {
+  while (cursor < total && n < room && today < cap && Date.now() < deadline) {
     if (n && n % 25 === 0) {   // paused or cancelled in the portal?
       const s = (fsGetDoc_(cfg, path) || {}).status;
       if (s !== 'sending') { stop = 'status'; break; }
@@ -10695,6 +10769,7 @@ function mktSendBatch_(cfg, c, deadline) {
         result = 'sent';
         today++;
         n++;
+        paceN++;
       } catch (e) {
         const msg = String(e && e.message ? e.message : e);
         if (/too many|quota|limit/i.test(msg)) { stop = 'quota'; break; }   // not this patient's fault: tried again later
@@ -10705,7 +10780,7 @@ function mktSendBatch_(cfg, c, deadline) {
     cursor++;
     if (result === 'sent') sent++; else if (result === 'failed') failed++; else skipped++;
     const patch = { cursor: cursor, sent: sent, skipped: skipped, failed: failed, sentDay: day, sentDayN: today,
-      lastSentAt: new Date().toISOString(), waiting: '' };
+      paceAt: paceAt, paceN: paceN, lastSentAt: new Date().toISOString(), waiting: '' };
     if (result === 'failed') patch.failures = failures.slice(-100);
     fsPatch_(cfg, path, patch);
     c.waiting = '';
@@ -10719,6 +10794,8 @@ function mktSendBatch_(cfg, c, deadline) {
     fsPatch_(cfg, path, { waiting: "The clinic's email allowance for today is nearly used. It carries on tomorrow from 9 am." });
   } else if (today >= cap) {
     fsPatch_(cfg, path, { waiting: "Today's limit for this campaign is reached. It carries on tomorrow from 9 am." });
+  } else if (pace.n && paceN >= pace.n) {
+    fsPatch_(cfg, path, { waiting: 'This batch of ' + pace.n + ' has gone. The next batch starts about ' + nextBatch() + '.' });
   }
 }
 

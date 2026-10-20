@@ -69,7 +69,7 @@ service cloud.firestore {
       && resource.data.status == 'draft'
       && request.resource.data.status in ['draft', 'archived']
       && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-        'name', 'templateId', 'templateName', 'subject', 'fromName', 'replyTo', 'audience', 'dailyCap', 'track',
+        'name', 'templateId', 'templateName', 'subject', 'fromName', 'replyTo', 'audience', 'dailyCap', 'track', 'pace',
         'status', 'updatedAt', 'updatedBy', 'updatedByUid'])
       && request.resource.data.updatedByUid == request.auth.uid;
     allow delete: if false;
