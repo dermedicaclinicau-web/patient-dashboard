@@ -28,9 +28,9 @@ const shared = (p) => isSharedProduct(p);
 // A kit product an Admin takes straight from the Shelf or JT storage counts as storage, not kit
 const isKit = (p) => isKitProduct(p) && !p.fromStore;
 // A Shelf product measured by dose, e.g. a 1 mL syringe of filler
-const dosed = (p) => !!p && !isKitProduct(p) && !shared(p) && !!p.dosePer;
+const dosed = (p) => !!p && !isKit(p) && !shared(p) && !!p.dosePer;
 // What the clinician records: units (kit), mL (dosed), or items
-const clinicalUnit = (p) => (isKitProduct(p) || dosed(p) ? p.doseUnit : shared(p) ? (p.dosePer ? p.doseUnit : "use") : p.stockUnit);
+const clinicalUnit = (p) => (isKit(p) || dosed(p) ? p.doseUnit : shared(p) ? (p.dosePer ? p.doseUnit : "use") : p.stockUnit);
 // Syringes needed for a dose: 2.2 mL of a 1.5 mL syringe = 2
 const syringesFor = (p, dose) => (dose > 0 ? Math.max(1, Math.ceil(dose / p.dosePer - 1e-9)) : "");
 
@@ -85,7 +85,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
   function sources(l) {
     const p = productOf(l);
     if (!p || shared(p)) return [];
-    if (isKitProduct(p)) {
+    if (isKit(p)) {
       return stock.kits.filter((k) => k.productId === p.id && kitUnits(k) > 0).map((k) => ({
         ref: k.id, batch: k.batch, expiry: k.expiry, avail: kitUnits(k),
         label: `${batchText(p, k.batch) || "No number"} · Exp ${niceDate(k.expiry)} · ${fmt(kitUnits(k))} ${k.doseUnit}${k.open ? ` (${fmt(k.open)} opened)` : ""}`,
@@ -276,8 +276,8 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     const cu = clinicalUnit(p);
     if (max && total > max) return `<span class="cs-warn">${fmt(total)} ${esc(cu)} is more than the ${esc(max)} allowed. Check the amount.</span>`;
     if (short > 0) {
-      const su = isKitProduct(p) ? p.doseUnit : unitPlural(p.stockUnit);
-      return `<span class="cs-warn">Short by ${fmt(short)} ${esc(su)}. ${isKitProduct(p)
+      const su = isKit(p) ? p.doseUnit : unitPlural(p.stockUnit);
+      return `<span class="cs-warn">Short by ${fmt(short)} ${esc(su)}. ${isKit(p)
         ? "Take from the Shelf or borrow from a colleague, otherwise it's saved and flagged."
         : f.ifShort === "block" ? "Restock before saving." : "It will be saved and flagged for the ordering team."}</span>`;
     }
@@ -291,11 +291,11 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
       return `<span class="cs-ok">✓ ${fmt(total)} ${esc(cu)} · ${esc(plural(syr, p.stockUnit))} opened</span>${
         waste ? ` <span class="cs-waste">${fmt(waste)} ${esc(cu)} discarded</span>` : ""}`;
     }
-    return `<span class="cs-ok">✓ ${fmt(total)} ${esc(isKitProduct(p) || total === 1 ? cu : unitPlural(cu))}</span>`;
+    return `<span class="cs-ok">✓ ${fmt(total)} ${esc(isKit(p) || total === 1 ? cu : unitPlural(cu))}</span>`;
   }
 
   function rowHtml(l, p, src, r, j) {
-    const kit = isKitProduct(p);
+    const kit = isKit(p);
     const pick = kit || p.tracked
       ? `<select class="fe-in" data-f="ref" aria-label="Batch">${src.length
           ? src.map((s) => `<option value="${esc(s.ref)}"${s.ref === r.ref ? " selected" : ""}>${esc(s.label)}</option>`).join("")
@@ -504,7 +504,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
           amount: 1, dose: r2(Math.max(0, num(r.dose))), finish: !!r.finish }],
       };
     }
-    const kit = isKitProduct(p);
+    const kit = isKit(p);
     if (kit && !canKit) return null;
     const src = sources(l);
     const rows = l.rows.map((r) => {
@@ -543,7 +543,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
         }
         continue;
       }
-      if (p && isKitProduct(p) && !canKit && req) return `${name} has to be recorded by an injector with a kit.`;
+      if (p && isKit(p) && !canKit && req) return `${name} has to be recorded by an injector with a kit.`;
       const total = p ? clinicalTotal(l, p) : l.rows.reduce((a, r) => a + num(r.amount), 0);
       if (req && !(total > 0)) return `${name}: enter how much was used.`;
       if (!p) continue;
