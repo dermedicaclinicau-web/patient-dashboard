@@ -263,8 +263,13 @@ export function mountCampaignList(box, { staff = null } = {}) {
       .sort((a, b) => (b.updatedAt ? b.updatedAt.getTime() : 0) - (a.updatedAt ? a.updatedAt.getTime() : 0));
     draw();
   }, (err) => {
+    if (!box.isConnected) return;   // left the page (or logged out): nothing to show
     console.error("Campaigns failed:", err);
     listEl.innerHTML = `<div class="tm-empty is-error">${esc(errText(err, "Couldn't load the campaigns."))}</div>`;
+  });
+  // Stops listening as soon as you leave the list
+  window.addEventListener("hashchange", function off() {
+    setTimeout(() => { if (!box.isConnected) { stop(); window.removeEventListener("hashchange", off); } }, 0);
   });
 
   box.addEventListener("click", (e) => {
@@ -307,6 +312,7 @@ export async function mountCampaignEditor(container, { id, staff = null } = {}) 
     if (mode !== "view") { mode = "view"; view = mountView(root, c, staff); }
     view.update(c);
   }, (err) => {
+    if (!root.isConnected) return;
     console.error("Campaign failed:", err);
     root.innerHTML = `${BACK}<div class="state error"><strong>Couldn't open the campaign</strong>${esc(errText(err, "Try again."))}</div>`;
   });
@@ -544,7 +550,7 @@ function mountDraft(page, c, staff) {
     }
     // Left out by hand: shown even before counting
     $("excl").innerHTML = ex.length && !showWho
-      ? `<p class="mc-exnote">${n0(ex.length)} patient${ex.length === 1 ? "" : "s"} left out by you · <button type="button" class="rc-link" data-act="who">Manage</button></p>`
+      ? `<p class="mc-exnote">${n0(ex.length)} patient${ex.length === 1 ? "" : "s"} left out by you · <button type="button" class="lh-btn is-quiet" data-act="who">Manage</button></p>`
       : "";
     drawWho();
   }
