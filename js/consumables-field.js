@@ -12,7 +12,7 @@ import {
   plural, unitPlural, fefo, lotId, INV_CATEGORIES, batchName, batchText,
 } from "./inventory-api.js";
 import { takeFromShelfDialog, borrowDialog } from "./inventory-kits.js";
-import { isInjector } from "./perms.js";
+import { isInjector, isAdmin } from "./perms.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(2));
@@ -25,6 +25,8 @@ const niceDate = (key) => {
 const shortDate = (d) => (d ? d.toLocaleDateString("en-AU", { day: "numeric", month: "short" }) : "");
 const isTeh = (staff) => /\bteh\b/i.test(String((staff && staff.name) || ""));
 const shared = (p) => isSharedProduct(p);
+// A kit product an Admin takes straight from the Shelf or JT storage counts as storage, not kit
+const isKit = (p) => isKitProduct(p) && !p.fromStore;
 // A Shelf product measured by dose, e.g. a 1 mL syringe of filler
 const dosed = (p) => !!p && !isKitProduct(p) && !shared(p) && !!p.dosePer;
 // What the clinician records: units (kit), mL (dosed), or items
@@ -51,6 +53,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
   const host = w && w.querySelector("[data-cs-host]");
   if (!host) return;
   const canKit = isInjector();
+    const adminStore = isAdmin();
   const defLoc = isTeh(staff) ? "jt" : "shelf";
   let stock = null, failed = false;
   // use: shared products only (null = not decided yet)
@@ -59,7 +62,22 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     productId: it.productId, item: it, extra: false, loc: defLoc, rows: [newRow(it.amount ?? null)],
   }));
 
-  const productOf = (l) => (stock ? stock.products.find((p) => p.id === l.productId) : null);
+  const rawProduct = (l) => (stock ? stock.products.find((p) => p.id === l.productId) : null);
+  // Kit products come from the kit, unless an Admin chooses the Shelf or JT storage
+  const productOf = (l) => {
+    const p = rawProduct(l);
+    return p && isKitProduct(p) && l.loc !== "kit" ? { ...p, fromStore: true } : p;
+  };
+  // Where each line starts. Admins: their kit if it has this product, otherwise JT storage.
+  function fixLoc(l) {
+    const p = rawProduct(l);
+    if (!p || !isKitProduct(p)) { if (l.loc === "kit") l.loc = defLoc; return; }
+    if (!adminStore) { l.loc = "kit"; return; }
+    if (l.locSet) return;
+    const inKit = canKit && stock.kits.some((k) => k.productId === p.id && kitUnits(k) > 0);
+    l.loc = inKit ? "kit" : "jt";
+    l.locSet = true;
+  }
   const nameOf = (l) => (productOf(l) || {}).name || (l.item && l.item.name) || "Product";
   const whereOf = (l) => (l.loc === "jt" ? "JT storage" : "Shelf");
   // The amount the clinician gave (units / mL / items)
@@ -319,7 +337,8 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     return `<div class="cs-line${shortOf(l, src) > 0 ? " is-short" : ""}" data-i="${i}">
       <div class="cs-head">
         <strong>${esc(p.name)}${req}</strong><small>${esc(info)}</small>${linkNoteHtml(l)}
-        ${kit ? "" : `<select class="fe-in cs-loc" data-f="loc" aria-label="Taken from">
+        ${kit && !adminStore ? "" : `<select class="fe-in cs-loc" data-f="loc" aria-label="Taken from">
+          ${adminStore && isKitProduct(p) && canKit ? `<option value="kit"${l.loc === "kit" ? " selected" : ""}>My kit</option>` : ""}
           <option value="shelf"${l.loc === "shelf" ? " selected" : ""}>Shelf</option>
           <option value="jt"${l.loc === "jt" ? " selected" : ""}>JT storage</option></select>`}
         ${l.extra ? '<button type="button" class="hx-x" data-cs="remove-line" aria-label="Remove">×</button>' : ""}
@@ -356,6 +375,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     }
     if (!stock) return;
     lines.forEach((l) => {
+      fixLoc(l);
       applyPresets(l);
       const p = productOf(l);
       if (p && shared(p)) fixShared(l, p); else fixRefs(l);
@@ -428,7 +448,21 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     const l = lines[Number(li.dataset.i)];
     if (el.dataset.f === "use" || el.dataset.f === "finish") { l.rows[0][el.dataset.f] = el.checked; onChange(); draw(); return; }
     if (el.dataset.f === "ref") { l.rows[Number(el.closest(".cs-row").dataset.j)].ref = el.value; onChange(); draw(); }
-    else if (el.dataset.f === "loc") { l.loc = el.value; l.rows.forEach((r) => { r.ref = ""; }); onChange(); draw(); }
+    else if (el.dataset.f === "loc") {
+      const p0 = rawProduct(l);
+      if (p0 && isKitProduct(p0)) {
+        // Kit ↔ storage: keep the units given, worked out again for where they now come from
+        const was = clinicalTotal(l);
+        l.loc = el.value;
+        l.locSet = true;
+        const p1 = productOf(l);
+        if (isKit(p1) || dosed(p1)) fillFrom(l, was); else l.rows = [newRow()];
+      } else {
+        l.loc = el.value;
+        l.rows.forEach((r) => { r.ref = ""; });
+      }
+      onChange(); draw();
+    }
   });
 
   host.addEventListener("click", async (e) => {
