@@ -630,22 +630,24 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   async function completeTask(btn) {
     const id = btn.dataset.id;
     if (!id || btn.disabled) return;
-    btn.disabled = true;
-    btn.textContent = "Saving…";
+    // The same task can be in Reminders and in Tasks: both change straight away
+    const btns = [...root.querySelectorAll(`[data-action='task-done'][data-id="${CSS.escape(id)}"]`)];
+    btns.forEach((b) => { b.disabled = true; b.closest("li")?.classList.add("is-leaving"); });
+    showToast("Reminder marked as done");
     try {
       await completeReminder(id, staff);
-      showToast("Reminder marked as done");
-      await loadReminders();
+      loadReminders();
       if (tasksView) tasksView.reload();
     } catch (err) {
       console.error("Completing reminder failed:", err);
+      btns.forEach((b) => { b.disabled = false; b.closest("li")?.classList.remove("is-leaving"); });
       showToast(err.code === "FORBIDDEN" || err.code === "permission-denied"
         ? "You don't have permission to update this reminder."
         : err.code === "UNAUTHORIZED" ? "Your session has expired. Log out and back in."
         : "Couldn't update the reminder.");
-      if (btn.isConnected) { btn.disabled = false; btn.innerHTML = `${ICONS.tick}Done`; }
     }
   }
+  
   function openTask(id) {
     let changed = false;
     const dlg = openTaskPanel(id, {

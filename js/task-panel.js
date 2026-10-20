@@ -64,18 +64,22 @@ export function openTaskPanel(id, { staff: me = null, onChange = null } = {}) {
   const canEdit = () => !!t && (isAdmin || !t.assignedToId || t.assignedToId === me?.uid || t.createdByUid === me?.uid);
   const $ = (s) => dlg.querySelector(s);
 
-  async function act(op, extra = {}, ok = "") {
+  // optimistic(t) → how the task looks once saved, shown straight away (put back if the save fails)
+  async function act(op, extra = {}, ok = "", optimistic = null) {
     if (busy) return false;
     busy = true;
-    dlg.classList.add("is-busy");
+    const before = t;
+    if (optimistic && t) { t = optimistic(t); draw(); if (ok) showToast(ok); }
+    else dlg.classList.add("is-busy");
     try {
       await callApi({ action: "staffTask", op, id, ...extra });
-      if (ok) showToast(ok);
-      if (onChange) onChange();
+      if (ok && !optimistic) showToast(ok);
+      if (onChange) onChange(t);   // the task as it is now
       return true;
     } catch (ex) {
+      if (optimistic) t = before;
       showToast(errText(ex));
-      draw();   // puts the controls back as they were
+      draw();
       return false;
     } finally {
       busy = false;
@@ -100,18 +104,28 @@ export function openTaskPanel(id, { staff: me = null, onChange = null } = {}) {
       e.preventDefault();
       const note = ta.value.trim();
       if (!note) { ta.focus(); return; }
-      if (await act("comment", { note })) { ta.value = ""; firstFeed = true; }
+      ta.value = "";
+      firstFeed = true;
+      const sent = await act("comment", { note }, "", (x) => ({ ...x,
+        notes: [...(x.notes || []), { at: new Date().toISOString(), by: (me && me.name) || "You", text: note, pending: true }] }));
+      if (!sent) ta.value = note;   // nothing lost if it fails
     });
     dlg.addEventListener("click", (e) => {
       if (e.target.closest('[data-act="close"]') || e.target.closest(".tk-pt")) { dlg.close(); return; }
       const st = e.target.closest("[data-status]");
       if (st && !st.disabled && st.dataset.status !== taskStatus(t)) {
-        act("status", { status: st.dataset.status }, st.dataset.status === "Completed" ? "Task completed" : "");
+        const v = st.dataset.status;
+        act("status", { status: v }, v === "Completed" ? "Task completed" : "", (x) => ({ ...x, status: v,
+          ...(v === "Completed" ? { completedAt: new Date().toISOString(), completedBy: (me && me.name) || "" } : {}) }));
       }
     });
     dlg.addEventListener("change", (e) => {
-      if (e.target.matches('[data-f="assign"]')) act("assign", { toId: e.target.value }, "Task passed on");
-      if (e.target.matches('[data-f="due"]')) act("due", { due: e.target.value });
+      const v = e.target.value;
+      if (e.target.matches('[data-f="assign"]')) {
+        act("assign", { toId: v }, "Task passed on", (x) => ({ ...x, assignedToId: v,
+          assignedToName: (staff.find((s) => s.id === v) || {}).name || "" }));
+      }
+      if (e.target.matches('[data-f="due"]')) act("due", { due: v }, "", (x) => ({ ...x, dueDate: v }));
     });
     built = true;
   }
@@ -146,16 +160,17 @@ export function openTaskPanel(id, { staff: me = null, onChange = null } = {}) {
       </dl>`;
 
     const feed = [
-      ...(t.notes || []).map((n) => ({ kind: "c", at: n.at, by: n.by, text: n.text })),
+      ...(t.notes || []).map((n) => ({ kind: "c", at: n.at, by: n.by, text: n.text, pending: !!n.pending })),
       ...(t.history || []).map((h) => ({ kind: "e", at: h.at, by: h.by, text: h.what })),
     ].sort((a, b) => (toDate(a.at) || 0) - (toDate(b.at) || 0));
     const el = $('[data-r="feed"]');
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
     el.innerHTML = feed.length ? feed.map((f) => f.kind === "c"
-      ? `<div class="tk-c">${avatar(f.by)}<div class="tk-c-b"><header><strong>${esc(f.by || "Staff")}</strong>
-          <small class="muted">${esc(when(f.at))}</small></header><p>${esc(f.text)}</p></div></div>`
+      ? `<div class="tk-c${f.pending ? " is-pending" : ""}">${avatar(f.by)}<div class="tk-c-b"><header><strong>${esc(f.by || "Staff")}</strong>
+          <small class="muted">${f.pending ? "Sending…" : esc(when(f.at))}</small></header><p>${esc(f.text)}</p></div></div>`
       : `<div class="tk-e"><span>${esc(f.by || "")} · ${esc(f.text)}</span><small>${esc(when(f.at))}</small></div>`).join("")
       : '<p class="tk-empty">No comments yet.</p>';
+      
     if (firstFeed || nearBottom) { el.scrollTop = el.scrollHeight; firstFeed = false; }
   }
 

@@ -7231,3 +7231,9 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
 .task-main.is-clickable:hover .task-text { text-decoration: underline; text-underline-offset: 2px; }
 .task-main.is-clickable:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
 .task-meta .tk-pill { margin-left: .4rem; }
+
+/* A task saving in the background */
+.md-trow.is-leaving, .task.is-leaving { opacity: .5; pointer-events: none; transition: opacity .2s; }
+.md-trow.is-leaving .md-tcheck { border-color: #10b981; background: #10b981; color: #fff; }
+.md-trow.is-leaving .md-ttitle, .task.is-leaving .task-text { text-decoration: line-through; }
+.tk-c.is-pending .tk-c-b { opacity: .65; border-style: dashed; }

@@ -3,7 +3,7 @@
 // Today strip and quick actions at the top; each person can reorder, hide and collapse the cards (kept on this device).
 // Tasks: done, notes, passing on and reopening go through Apps Script (staffTask), which tells the person who assigned it.
 import { can, isInjector, isAdmin } from "./perms.js";
-import { openTaskPanel, statusPillHtml } from "./task-panel.js";
+import { openTaskPanel, statusPillHtml, isTaskOpen } from "./task-panel.js";
 import {
   listProducts, listAllLots, listKits, listLoans, listReleases, listRequests, listMyUsage, listShortUsage, listPos,
   isKitProduct, kitUnits, expiryState, plural, unitPlural, lowAt, myUid, reqNumber, REQ_STATUS, REL_STATUS, countDue, countLocs, dayKey, listCountsOn,
@@ -215,6 +215,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
   let drawTasks = () => {};
   let loadedAt = 0;
   let taskMap = new Map();
+  let taskState = { tasks: [], myCreated: [] };
 
   // "Updated 2 min ago", kept current while the page is open
   const updatedEl = root.querySelector('[data-role="updated"]');
@@ -575,14 +576,21 @@ export async function mountMyDashboard(container, { staff } = {}) {
       "", '<a class="md-link" href="#/calendar">Open Calendar</a>');
 
     /* ---------- Tasks: mine, ones I assigned, everyone ---------- */
-    taskMap = new Map([...tasks, ...myCreated].map((t) => [t.id, t]));
     const in7 = dayKey(new Date(Date.now() + 7 * DAY));
     const sortDue = (a, b) => String(a.dueDate || "9999").localeCompare(String(b.dueDate || "9999"));
-    const mineList = tasks.filter(isMine).sort(sortDue);
-    const createdList = tasks.filter((t) => t.createdByUid === me && !isMine(t)).sort(sortDue);
-    const dueNowList = tasks.filter((t) => t.dueDate && t.dueDate <= todayKey).sort(sortDue);
-    const doneRecent = myCreated.filter((t) => t.status === "Completed" && now - toMs(t.completedAt) < 7 * DAY)
-      .sort((a, b) => toMs(b.completedAt) - toMs(a.completedAt));
+    taskState = { tasks, myCreated };
+    const taskLists = () => {
+      const ts = taskState.tasks;
+      return {
+        mineList: ts.filter(isMine).sort(sortDue),
+        createdList: ts.filter((t) => t.createdByUid === me && !isMine(t)).sort(sortDue),
+        dueNowList: ts.filter((t) => t.dueDate && t.dueDate <= todayKey).sort(sortDue),
+        doneRecent: taskState.myCreated.filter((t) => t.status === "Completed" && now - toMs(t.completedAt) < 7 * DAY)
+          .sort((a, b) => toMs(b.completedAt) - toMs(a.completedAt)),
+      };
+    };
+    taskMap = new Map([...tasks, ...myCreated].map((t) => [t.id, t]));
+    const { mineList } = taskLists();   // for the tiles at the top
 
     const initials = (n) => String(n || "?").trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase() || "?";
     const hue = (s) => [...String(s || "")].reduce((a, c) => (a * 31 + c.charCodeAt(0)) % 360, 7);
@@ -622,6 +630,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
       ${list.length > 10 ? `<small class="muted">and ${list.length - 10} more</small>` : ""}` : "");
 
     const tasksInner = () => {
+      const { mineList, createdList, dueNowList, doneRecent } = taskLists();
       const tab = readTaskTab();
       const tabs = `<div class="md-ttabs">${[["mine", `Mine (${mineList.length})`], ["created", `I assigned (${createdList.length})`], ["all", "Everyone"]]
         .map(([k, l]) => `<button type="button" class="md-ttab${tab === k ? " is-on" : ""}" data-ttab="${k}">${esc(l)}</button>`).join("")}</div>`;
@@ -806,9 +815,19 @@ export async function mountMyDashboard(container, { staff } = {}) {
         ${tellsSomeone ? `<small class="muted">${esc(t.createdBy || "The person who assigned it")} gets an email to say it's done.</small>` : ""}`,
       submit: "✓ Done",
       onSubmit: async (form) => {
-        await taskCall("done", t.id, { note: form.elements.note.value.trim() });
+        const note = form.elements.note.value.trim();
+        const before = taskMap.get(t.id) || t;
+        // Done straight away; put back if the save fails
+        patchTask({ ...before, status: "Completed", completedAt: new Date().toISOString(),
+          completedBy: (staff && staff.name) || "" });
         showToast("Task marked as done");
-        load();
+        taskCall("done", t.id, { note })
+          .then(() => load())
+          .catch((err) => {
+            console.error("Done failed:", err);
+            patchTask(before);
+            showToast(taskErr(err));
+          });
       },
     });
   }
@@ -818,9 +837,23 @@ export async function mountMyDashboard(container, { staff } = {}) {
     let changed = false;
     const dlg = openTaskPanel(id, {
       staff: { uid: myUid(), name: staff && staff.name, role: isAdmin() ? "Admin" : "" },
-      onChange: () => { changed = true; },
+      onChange: (nt) => { changed = true; patchTask(nt); },
     });
     dlg.addEventListener("close", () => { if (changed && root.isConnected) load(); });
+  }
+
+  // One task changed: update the Tasks card straight away (the rest of the dashboard reloads quietly afterwards)
+  function patchTask(nt) {
+    if (!nt || !nt.id) return;
+    const put = (list) => {
+      const i = list.findIndex((x) => x.id === nt.id);
+      if (i === -1) list.push(nt); else list[i] = { ...list[i], ...nt };
+    };
+    if (isTaskOpen(nt)) put(taskState.tasks);
+    else taskState.tasks = taskState.tasks.filter((x) => x.id !== nt.id);
+    if (nt.createdByUid === myUid()) put(taskState.myCreated);
+    taskMap.set(nt.id, nt);
+    drawTasks();
   }
 
   function emailDialog(runId) {

@@ -980,22 +980,29 @@ match /inv_count_drafts/{id} {
       allow write: if false;
     }
 
-    // Staff tasks / reminders
+    // Staff tasks / reminders. Reminders are added from the patient page; every change after that
+    // (status, comments, who it's for, due date) goes through Apps Script, which also sends the emails.
     match /staff-task-list/{taskId} {
       allow read: if isStaff();
       allow create: if isStaff()
         && request.resource.data.keys().hasOnly([
              'patientId', 'patientName', 'taskText', 'dueDate', 'status',
              'assignedToId', 'assignedToName',
-             'createdAt', 'createdBy', 'createdByUid'])
+             'createdAt', 'createdBy', 'createdByUid',
+             'notes', 'history'])
         && request.resource.data.taskText is string
         && request.resource.data.taskText.size() > 0
         && request.resource.data.taskText.size() <= 500
         && request.resource.data.dueDate is string
         && request.resource.data.dueDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
         && request.resource.data.status == 'Open'
-        && request.resource.data.createdByUid == request.auth.uid;
-      // Staff can only mark a task as done, stamped with their own identity
+        && request.resource.data.createdByUid == request.auth.uid
+        // A new reminder starts with no comments and one history line ("Added")
+        && request.resource.data.get('notes', []) is list
+        && request.resource.data.get('notes', []).size() == 0
+        && request.resource.data.get('history', []) is list
+        && request.resource.data.get('history', []).size() <= 1;
+      // Older screens could mark a task as done directly. Kept so nothing breaks; the portal now uses Apps Script.
       allow update: if isStaff()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
              'status', 'completedAt', 'completedBy', 'completedByUid'])

@@ -4538,6 +4538,7 @@ function runNotifications() {
   const cfg = getConfig_();
   const now = Date.now();
   const rules = notifyRules_(cfg);
+  try { staffTaskMailRun_(cfg); } catch (e) { console.error('Task emails: ' + (e && e.stack ? e.stack : e)); }
   try { notifyProcessPending_(cfg, 20, rules, true); } catch (e) { console.error('Outbox: ' + (e && e.stack ? e.stack : e)); }
   try { notifyLowScan_(cfg, rules); } catch (e) { console.error('Low stock scan: ' + (e && e.stack ? e.stack : e)); }
   try { notifyRunDigests_(cfg, rules, now); } catch (e) { console.error('Digests: ' + (e && e.stack ? e.stack : e)); }
@@ -8185,6 +8186,19 @@ function staffTodoTell_(toUid, subject, heading, extraHtml, t) {
 
 const TASK_STATUSES_ = ['Open', 'In progress', 'On hold', 'Completed'];
 
+const STAFF_TASK_MAIL_ = 'staff_task_mail';   // task emails waiting to go (sent by runNotifications)
+
+// A short lock for this one task. Not the script lock, so the background jobs never make staff wait.
+function staffTaskLock_(id) {
+  const cache = CacheService.getScriptCache();
+  const k = 'stl_' + id;
+  for (let i = 0; i < 10; i++) {
+    if (!cache.get(k)) { cache.put(k, '1', 15); return function () { cache.remove(k); }; }
+    Utilities.sleep(300);
+  }
+  return null;
+}
+
 function handleStaffTask_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
@@ -8198,8 +8212,8 @@ function handleStaffTask_(body) {
   if (!/^[A-Za-z0-9_-]{5,80}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
   const note = String(body.note || '').replace(/\r/g, '').trim().slice(0, 1000);
 
-  const lock = LockService.getScriptLock();
-  if (!lock.tryLock(20000)) return { ok: false, error: 'BUSY' };
+  const unlock = staffTaskLock_(id);
+  if (!unlock) return { ok: false, error: 'BUSY' };
   try {
     const cfg = getConfig_();
     const path = 'staff-task-list/' + id;
@@ -8221,11 +8235,19 @@ function handleStaffTask_(body) {
     const noteHtml = note ? '<p style="margin:0;padding:10px 12px;border-radius:8px;background:#f0fdfa;color:#134e4a">“' +
       invEsc_(note).replace(/\n/g, '<br>') + '”</p>' : '';
     const short = String(t.taskText || 'Task').slice(0, 80);
-    // Emails everyone listed except the person who did it
+
+    // Emails are queued (sent within 5 minutes), so nobody waits for them
+    const mails = [];
     const tell = function (uids, subject, heading, extra) {
-      uniq_(uids.map(String).filter(function (u) { return u && u !== session.uid; }))
-        .forEach(function (u) { staffTodoTell_(u, subject, heading, extra, t); });
+      uniq_(uids.filter(Boolean).map(String).filter(function (u) { return u !== session.uid; })).forEach(function (u) {
+        mails.push(updateWrite_(cfg, STAFF_TASK_MAIL_ + '/m_' + Date.now() + '_' + Utilities.getUuid().slice(0, 8), {
+          toUid: u, subject: subject, heading: heading, extra: extra || '',
+          taskText: String(t.taskText || ''), patientName: String(t.patientName || ''), at: at,
+        }));
+      });
     };
+    // The change and its emails in one write
+    const save = function (patch) { commitWrites_(cfg, [patchWrite_(cfg, path, patch)].concat(mails)); };
 
     if (op === 'status') {
       const next = String(body.status || '');
@@ -8236,10 +8258,10 @@ function handleStaffTask_(body) {
       const patch = { status: next, notes: notes, history: history, updatedAt: now };
       if (next === 'Completed') { patch.completedAt = now; patch.completedBy = who; patch.completedByUid = String(session.uid || ''); }
       else if (cur === 'Completed') { patch.completedAt = null; patch.completedBy = ''; patch.completedByUid = ''; }
-      fsPatch_(cfg, path, patch);
       if (next === 'Completed') tell([t.createdByUid], 'Done: ' + short, who + ' has done a task you assigned', noteHtml);
       else if (cur === 'Completed') tell([t.assignedToId], 'Reopened: ' + short, who + ' reopened a task for you', noteHtml);
       else if (next === 'On hold') tell([t.createdByUid, t.assignedToId], 'On hold: ' + short, who + ' put a task on hold', noteHtml);
+      save(patch);
       return { ok: true, status: next };
     }
 
@@ -8256,15 +8278,15 @@ function handleStaffTask_(body) {
       history.push({ at: at, by: who, what: to
         ? (t.assignedToName ? 'Passed on from ' + t.assignedToName + ' to ' + to.name : 'Assigned to ' + to.name)
         : 'Made it a task for anyone' });
-      fsPatch_(cfg, path, { assignedToId: to ? to.id : '', assignedToName: to ? String(to.name || '') : '',
-        notes: notes, history: history, updatedAt: now });
       if (to) {
         tell([to.id], 'Task for you: ' + short, who + ' passed a task on to you',
           noteHtml + (t.dueDate ? '<p style="margin:10px 0 0;color:#475569">Due ' + invEsc_(recLongDate_(t.dueDate) || t.dueDate) + '</p>' : ''));
       }
-      if (t.createdByUid !== (to && to.id)) {
+      if (t.createdByUid && t.createdByUid !== (to && to.id)) {
         tell([t.createdByUid], 'Passed on: ' + short, who + ' passed your task on to ' + (to ? String(to.name || '') : 'anyone'), noteHtml);
       }
+      save({ assignedToId: to ? to.id : '', assignedToName: to ? String(to.name || '') : '',
+        notes: notes, history: history, updatedAt: now });
       return { ok: true, assignedToName: to ? String(to.name || '') : '' };
     }
 
@@ -8273,15 +8295,15 @@ function handleStaffTask_(body) {
       if (due && !/^\d{4}-\d{2}-\d{2}$/.test(due)) return { ok: false, error: 'BAD_REQUEST' };
       if (due === String(t.dueDate || '')) return { ok: true, already: true };
       history.push({ at: at, by: who, what: 'Due date: ' + (due ? recLongDate_(due) : 'none') });
-      fsPatch_(cfg, path, { dueDate: due, history: history, updatedAt: now });
+      save({ dueDate: due, history: history, updatedAt: now });
       return { ok: true };
     }
 
     if (op === 'comment') {
       if (!note) return { ok: false, error: 'NO_NOTE' };
       addNote();
-      fsPatch_(cfg, path, { notes: notes, updatedAt: now });
       tell([t.assignedToId, t.createdByUid], 'Comment: ' + short, who + ' commented on a task', noteHtml);
+      save({ notes: notes, updatedAt: now });
       return { ok: true };
     }
     return { ok: false, error: 'BAD_REQUEST' };
@@ -8289,10 +8311,23 @@ function handleStaffTask_(body) {
     console.error('Staff task ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
     return { ok: false, error: 'SERVER_ERROR', detail: String(err && err.message ? err.message : err).slice(0, 300) };
   } finally {
-    lock.releaseLock();
+    unlock();
   }
 }
 
+// runNotifications sends the queued task emails (up to 40 a run)
+function staffTaskMailRun_(cfg) {
+  const docs = fsListAll_(cfg, STAFF_TASK_MAIL_).slice(0, 40);
+  if (!docs.length) return;
+  const gone = [];
+  docs.forEach(function (d) {
+    const m = fromFields_(d.fields || {});
+    staffTodoTell_(String(m.toUid || ''), String(m.subject || 'Task'), String(m.heading || ''), String(m.extra || ''),
+      { taskText: m.taskText, patientName: m.patientName });
+    gone.push(deleteWrite_(cfg, d.name.split('/documents/')[1]));
+  });
+  commitWrites_(cfg, gone);
+}
 
 // ===================== Daily uploads (Task Manager → Daily uploads) =====================
 // Timely CSVs uploaded in the portal go straight into the PCN spreadsheet. The file itself is never saved.
