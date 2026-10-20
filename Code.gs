@@ -4098,7 +4098,7 @@ function schedUpcomingHtml_(cfg, pid, p, opts) {
 }
 
 // appts_by_day documents from one date to another
-function schedApptDays_(cfg, fromKey, toKey) {
+function schedApptDays_(cfg, fromKey, toKey, max) {
   const res = UrlFetchApp.fetch('https://firestore.googleapis.com/v1/' + fsBase_(cfg) + ':runQuery', {
     method: 'post', contentType: 'application/json', muteHttpExceptions: true,
     headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) },
@@ -4109,7 +4109,7 @@ function schedApptDays_(cfg, fromKey, toKey) {
         { fieldFilter: { field: { fieldPath: 'date' }, op: 'LESS_THAN_OR_EQUAL', value: { stringValue: toKey } } },
       ] } },
       orderBy: [{ field: { fieldPath: 'date' } }],
-      limit: 400,
+      limit: max || 400,
     } }),
   });
   if (res.getResponseCode() !== 200) throw new Error('Appointment book not read (' + res.getResponseCode() + ')');
@@ -6665,6 +6665,7 @@ const FLOW_FIELD_TYPE_ = {
   'hist.bought': 'products', 'hist.times': 'number', 'hist.days_since': 'number',
   'appt.has_future': 'bool', 'appt.next_days': 'number', 'appt.last_days': 'number', 'appt.visits': 'number',
   'appt.future_service': 'text', 'appt.past_service': 'text',
+  'appt.visit_between': 'range', 'appt.last_between': 'range',
   'ssp.active': 'bool', 'ssp.age_days': 'number', 'ssp.expiry_days': 'number',
   'plan.status': 'choice', 'plan.due': 'bool', 'plan.overdue': 'bool',
   'form.saved': 'form',
@@ -6674,6 +6675,7 @@ const FLOW_FIELD_TYPE_ = {
 const FLOW_RULE_COST_ = {
   'buy.product': 0, 'buy.sold_by': 0, 'visit.service': 0, 'visit.staff': 0,
   'appt.has_future': 0, 'appt.next_days': 0, 'appt.last_days': 0, 'appt.visits': 0, 'appt.future_service': 0, 'appt.past_service': 0,
+  'appt.last_between': 0, 'appt.visit_between': 1,
   'pt.age': 1, 'pt.email': 1, 'pt.mobile': 1, 'pt.marketing': 1,
   'buy.first': 2, 'hist.bought': 2, 'hist.times': 2, 'hist.days_since': 2, 'plan.status': 2, 'plan.due': 2, 'plan.overdue': 2, 'form.saved': 2,
   'buy.in_ssp': 3, 'ssp.active': 3, 'ssp.age_days': 3, 'ssp.expiry_days': 3,
@@ -7056,6 +7058,20 @@ function flowRuleOk_(cfg, r, run, ctx) {
     });
     return r.op === 'none' ? !has : has;
   }
+  if (type === 'range') {
+    const from = String(r.from || '');
+    const to = String(r.to || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || to < from) return false;
+    let has;
+    if (r.field === 'appt.last_between') {
+      const p = ctx.visits();
+      const last = p.length ? p[p.length - 1].dateKey : '';
+      has = !!last && last >= from && last <= to;
+    } else {
+      has = flowVisitedIn_(cfg, ctx, from, to);
+    }
+    return r.op === 'no' ? !has : has;
+  }
   const v = flowFact_(cfg, r.field, run, ctx);
   if (type === 'bool') return r.op === 'no' ? v !== true : v === true;
   if (type === 'number') {
@@ -7079,6 +7095,43 @@ function flowRuleOk_(cfg, r, run, ctx) {
   }
   if (type === 'choice') return r.op === 'not' ? v !== String(r.value) : v === String(r.value);
   return false;
+}
+
+// Did this patient have a visit between two dates? From the appointment book (every visit, not only recent ones).
+// The visits in that range are read once per run and remembered. Cancelled and no-shows don't count.
+function flowVisitedIn_(cfg, ctx, from, to) {
+  const today = flowKey_(Date.now());
+  if (to > today) to = today;
+  if (from > to) return false;
+  const memo = ctx.memo;
+  memo.vset = memo.vset || {};
+  const key = from + '|' + to;
+  let set = memo.vset[key];
+  if (!set) {
+    set = { ids: {}, names: {} };
+    let start = from;
+    for (let page = 0; page < 30 && start <= to; page++) {
+      const days = schedApptDays_(cfg, start, to, 150);
+      days.forEach(function (d) {
+        (d.appointments || []).forEach(function (a) {
+          if (SCHED_CANCELLED_.test(String(a.status || ''))) return;
+          const id = String(a.patientId || '').trim().toLowerCase();
+          if (id) set.ids[id] = true;
+          else { const n = schedNorm_(a.patientName); if (n) set.names[n] = true; }
+        });
+      });
+      if (days.length < 150) break;
+      start = flowAddDaysKey_(String(days[days.length - 1].date), 1);
+    }
+    memo.vset[key] = set;
+  }
+  const doc = ctx.doc;
+  if (!doc || !doc._id) return false;
+  const ids = [doc._id, doc.PttID].concat(Array.isArray(doc.MergedIds) ? doc.MergedIds : []);
+  if (ids.some(function (x) { x = String(x == null ? '' : x).trim().toLowerCase(); return x && set.ids[x]; })) return true;
+  const names = [doc['Patient Name'], (doc['First Name'] || '') + ' ' + (doc['Last Name'] || '')]
+    .concat(Array.isArray(doc.MergedNames) ? doc.MergedNames : []);
+  return names.some(function (n) { n = schedNorm_(n); return n && set.names[n]; });
 }
 
 // A set of rules: all (or any) of them. No rules at all counts as a match. Cheapest rules are checked first.
@@ -10169,7 +10222,7 @@ const MKT_PER_RUN_ = 120;                   // emails per 10-minute run
 const MKT_DAILY_DEFAULT_ = 800;
 // Rules that make sense without a purchase or visit (the same list as CAMPAIGN_FIELDS in js/mkt-campaigns.js)
 const MKT_RULE_FIELDS_ = ['hist.bought', 'hist.days_since', 'appt.has_future', 'appt.next_days', 'appt.last_days', 'appt.visits',
-  'appt.future_service', 'appt.past_service', 'ssp.active', 'ssp.age_days', 'ssp.expiry_days', 'plan.status', 'plan.due',
+  'appt.future_service', 'appt.past_service', 'appt.visit_between', 'appt.last_between', 'ssp.active', 'ssp.age_days', 'ssp.expiry_days', 'plan.status', 'plan.due',
   'plan.overdue', 'form.saved', 'pt.age', 'pt.email', 'pt.mobile'];
 // "Make a list from this": who, from an earlier campaign
 const MKT_LIST_KINDS_ = ['opened', 'notOpened', 'clicked', 'notClicked', 'link'];

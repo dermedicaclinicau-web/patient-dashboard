@@ -7,6 +7,27 @@ import { collection, getDocs, doc, getDoc } from "https://www.gstatic.com/fireba
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const rid = () => "r_" + Math.random().toString(36).slice(2, 9);
+const isoOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const isIso = (s) => /^\d{4}-\d{2}-\d{2}$/.test(String(s || ""));
+const niceDay = (k) => {
+  if (!isIso(k)) return "…";
+  const [y, m, d] = k.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" });
+};
+// [from, to] for a quick pick: "month:0" this month, "month:-1" last month, "ym:2025-03" a month, "year:2024" a year
+function quickRange(v) {
+  const now = new Date();
+  let m = /^month:(-?\d+)$/.exec(v);
+  if (m) {
+    const a = new Date(now.getFullYear(), now.getMonth() + Number(m[1]), 1);
+    return [isoOf(a), isoOf(new Date(a.getFullYear(), a.getMonth() + 1, 0))];
+  }
+  m = /^ym:(\d{4})-(\d{2})$/.exec(v);
+  if (m) return [isoOf(new Date(+m[1], +m[2] - 1, 1)), isoOf(new Date(+m[1], +m[2], 0))];
+  m = /^year:(\d{4})$/.exec(v);
+  if (m) return [`${m[1]}-01-01`, `${m[1]}-12-31`];
+  return null;
+}
 
 export const PLAN_STATUSES = [
   ["none", "No treatment plan"], ["proposed", "Proposed"], ["sent", "Sent"], ["accepted", "Accepted"],
@@ -32,6 +53,10 @@ export const RULE_FIELDS = [
   { key: "appt.visits", group: "Appointments", label: "Number of past visits", type: "number" },
   { key: "appt.future_service", group: "Appointments", label: "A future booking's service", type: "text", hint: "e.g. Laser" },
   { key: "appt.past_service", group: "Appointments", label: "A past visit's service", type: "text", hint: "e.g. Wrinkle Relaxer" },
+  { key: "appt.visit_between", group: "Appointments", label: "Visits between two dates", type: "range",
+    ops: [["yes", "had a visit"], ["no", "had no visit"]] },
+  { key: "appt.last_between", group: "Appointments", label: "Last visit date", type: "range",
+    ops: [["yes", "was between"], ["no", "wasn't between"]] },
 
   { key: "ssp.active", group: "Skin Script", label: "Has an active Skin Script", type: "bool" },
   { key: "ssp.age_days", group: "Skin Script", label: "Time since their Skin Script was made", type: "number", unit: "days" },
@@ -58,9 +83,10 @@ const OPS = {
   choice: [["is", "is"], ["not", "is not"]],
   form: [["has", "has one named"], ["none", "has none named"]],
 };
-const opsFor = (f) => OPS[f.type] || OPS.bool;
+const opsFor = (f) => f.ops || OPS[f.type] || OPS.bool;
 function defaults(f) {
-  return { op: opsFor(f)[0][0], value: f.type === "products" ? [] : f.type === "choice" ? f.options[0][0] : "", days: "" };
+  return { op: opsFor(f)[0][0], value: f.type === "products" ? [] : f.type === "choice" ? f.options[0][0] : "", days: "",
+    ...(f.type === "range" ? { from: "", to: "" } : {}) };
 }
 
 export const blankGroup = () => ({ match: "all", rules: [] });
@@ -85,7 +111,9 @@ export function cleanGroup(g) {
       else if (f.type === "bool") value = "";
       else value = String(value ?? "");
       const days = f.type === "form" && r.days !== "" && r.days !== null && r.days !== undefined ? Number(r.days) : "";
-      return { id: String(r.id || rid()), field: f.key, op, value, days };
+      const out = { id: String(r.id || rid()), field: f.key, op, value, days };
+      if (f.type === "range") { out.from = isIso(r.from) ? r.from : ""; out.to = isIso(r.to) ? r.to : ""; }
+      return out;
     }),
   };
 }
@@ -100,6 +128,10 @@ export function groupProblem(g, required) {
     if (f.type === "number" && !(r.value !== "" && Number.isFinite(Number(r.value)) && Number(r.value) >= 0)) return `Add a number to "${f.label}"`;
     if ((f.type === "text" || f.type === "form") && !String(r.value || "").trim()) return `Fill in "${f.label}"`;
     if (f.type === "products" && !(Array.isArray(r.value) && r.value.length)) return `Choose a product for "${f.label}"`;
+    if (f.type === "range") {
+      if (!isIso(r.from) || !isIso(r.to)) return `Choose both dates for "${f.label}"`;
+      if (r.to < r.from) return `"${f.label}": the second date is before the first`;
+    }
   }
   return "";
 }
@@ -109,6 +141,11 @@ export function describeRule(r) {
   if (!f) return "Unknown rule";
   const op = (opsFor(f).find((o) => o[0] === r.op) || opsFor(f)[0])[1];
   if (f.type === "bool") return `${f.label}: ${op}`;
+  if (f.type === "range") {
+    const span = `${niceDay(r.from)} and ${niceDay(r.to)}`;
+    if (r.field === "appt.last_between") return `Last visit ${r.op === "no" ? "not between" : "between"} ${span}`;
+    return `${r.op === "no" ? "No visit" : "Visited"} between ${span}`;
+  }
   if (f.type === "number") return `${f.label} ${op} ${r.value === "" ? "…" : r.value}${f.unit ? " " + f.unit : ""}`;
   if (f.type === "choice") return `${f.label} ${op} ${((f.options.find((o) => o[0] === r.value) || [])[1] || "…").toLowerCase()}`;
   if (f.type === "products") {
@@ -219,6 +256,7 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
     const opSel = `<select class="fb-select fr-op" data-ro="${i}" aria-label="How to compare">${opsFor(f).map(([v, l]) =>
       `<option value="${v}"${v === r.op ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
     let val = "";
+    let quick = "";
     if (f.type === "number") {
       val = `<input class="fe-input fr-num" type="number" min="0" step="1" inputmode="numeric" data-rv="${i}" value="${esc(r.value)}" aria-label="Number" />
         ${f.unit ? `<span class="fr-unit">${esc(f.unit)}</span>` : ""}`;
@@ -232,12 +270,31 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
         <span class="fr-unit">in the last</span>
         <input class="fe-input fr-num" type="number" min="0" step="1" data-rd="${i}" value="${esc(r.days)}" placeholder="any" aria-label="Days" />
         <span class="fr-unit">days</span>`;
+    } else if (f.type === "range") {
+      const y = new Date().getFullYear();
+      val = `<input class="fe-input fr-date" type="date" data-rfrom="${i}" value="${esc(r.from || "")}" aria-label="From" />
+        <span class="fr-unit">and</span>
+        <input class="fe-input fr-date" type="date" data-rto="${i}" value="${esc(r.to || "")}" aria-label="To" />`;
+      quick = `<div class="fr-row fr-quick">
+        <select class="fb-select" data-rq="${i}" aria-label="Quick pick">
+          <option value="">Quick pick…</option>
+          <option value="month:0">This month</option>
+          <option value="month:-1">Last month</option>
+          <option value="year:${y}">This year</option>
+          <option value="year:${y - 1}">Last year</option>
+          <optgroup label="A whole year">${Array.from({ length: 8 }, (_, k) => y - k)
+            .map((n) => `<option value="year:${n}">${n}</option>`).join("")}</optgroup>
+        </select>
+        <span class="fr-unit">or a whole month</span>
+        <input class="fe-input fr-date" type="month" data-rmonth="${i}" aria-label="A whole month" />
+      </div>`;
     }
     return `<div class="fr-rule">
       ${i ? `<span class="fr-join">${group.match === "any" ? "or" : "and"}</span>` : ""}
       <div class="fr-row">${fieldSel}</div>
       <div class="fr-row">${opSel}${val}
         <button type="button" class="fr-x" data-rx="${i}" aria-label="Remove this rule" title="Remove">×</button></div>
+      ${quick}
       ${f.type === "products" ? `<div class="fr-pp" data-pp-host="${i}"></div>` : ""}
     </div>`;
   }
@@ -266,6 +323,22 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       const f = FIELD[el.value];
       if (!r || !f) return;
       Object.assign(r, { field: f.key }, defaults(f));
+      render();
+      onChange();
+      return;
+    }
+    if (d.rfrom !== undefined || d.rto !== undefined) {
+      const r = group.rules[Number(d.rfrom ?? d.rto)];
+      if (!r) return;
+      if (d.rfrom !== undefined) r.from = el.value; else r.to = el.value;
+      onChange();
+      return;
+    }
+    if (d.rq !== undefined || d.rmonth !== undefined) {
+      const r = group.rules[Number(d.rq ?? d.rmonth)];
+      const span = quickRange(d.rq !== undefined ? el.value : `ym:${el.value}`);
+      if (!r || !span) return;
+      [r.from, r.to] = span;
       render();
       onChange();
       return;

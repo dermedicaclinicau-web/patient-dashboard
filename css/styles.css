@@ -7268,3 +7268,7 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
 .ch-under .ch-link { padding: 0; }
 .ch-hint { font-size: .72rem; color: var(--muted); white-space: nowrap; }
 @media (max-width: 600px) { .ch-comp textarea { font-size: 16px; } }
+
+/* Rules: date range */
+.fr-date { width: auto; min-width: 9.5rem; flex: 0 1 auto; }
+.fr-quick { flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
