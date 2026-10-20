@@ -123,17 +123,16 @@ async function renderPdf(doc, opts = {}) {
     margin: ownSides ? [margin, 0, margin, 0] : [margin, margin, margin, margin],
     filename: doc.fileName,
     image: { type: "jpeg", quality: 0.92 },
-    html2canvas: {
-      scale: 2, backgroundColor: "#ffffff", logging: false, scrollX: 0, scrollY: 0,
-      // The picture is taken in a window exactly one page wide, so it can't come out off-centre
-      ...(ownSides ? { windowWidth: A4_PX } : {}),
-    },
+    html2canvas: { scale: 2, backgroundColor: "#ffffff", logging: false, scrollX: 0, scrollY: 0 },
     jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
     pagebreak: { mode: ["css", "legacy"], avoid: [".q", ".block", "tr", ".sig"] },
   };
   const body = `<style>${doc.css}</style><div class="pdfdoc">${doc.inner}</div>`;
+  // The PDF tool centres its page box on the screen, and the scrollbar can make that centring differ
+  // between the screen and the copy it takes the picture from. Pinned to the left edge, both match.
+  const pin = "<style>.html2pdf__container{left:0 !important;right:auto !important;margin:0 !important;}</style>";
   const source = ownSides
-    ? `<div style="width:${A4_PX}px;margin:0;padding:0;background:#fff;">
+    ? `${pin}<div style="width:${A4_PX}px;margin:0;padding:0;background:#fff;">
         <div style="width:${Math.round(Number(opts.width))}px;margin:0 auto;">${body}</div></div>`
     : body;
   const sx = window.scrollX, sy = window.scrollY;
