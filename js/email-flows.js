@@ -82,6 +82,8 @@ const CONDS = [
   ["rules", "Build my own rules…"],
 ];
 const UNITS = [["days", "days", 365], ["weeks", "weeks", 52], ["months", "months", 12]];
+const SKIP_REPEAT = [[0, "Always send it"], [7, "7 days"], [14, "14 days"], [30, "30 days"], [60, "60 days"],
+  [90, "90 days"], [180, "6 months"], [365, "A year"]];
 const STAFF_TO = [
   ["ssp_creator", "The clinician who made their Skin Script"],
   ["sold_by", "Whoever sold the product"],
@@ -167,7 +169,7 @@ function insertSspTable(html, table) {
 const newId = () => "s_" + Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-3);
 
 function blank(type) {
-  const cfg = type === "email" ? { subject: "", body: "", promo: false, mode: "rich", code: "", bare: false }
+  const cfg = type === "email" ? { subject: "", body: "", promo: false, mode: "rich", code: "", bare: false, skipDays: 0 }
     : type === "wait" ? { num: 1, unit: "weeks" }
     : type === "branch" ? { cond: "in_ssp", rules: blankGroup(), yes: [], no: [] }
     : type === "staff" ? { to: "ssp_creator", roles: [], staffIds: [], subject: "", message: "" }
@@ -772,7 +774,8 @@ async function mountFlowEditor(container, { id, staff }) {
       data-pick="${esc(s.id)}" tabindex="0" role="button" aria-pressed="${on}" title="${esc(full)}">
       <span class="ef-ico ${t.tone}">${I[t.icon]}</span>
       <span class="ef-card-main">
-        <small>${esc(t.label)}${s.type === "email" && s.cfg.promo ? " · <em>Promotional</em>" : ""}</small>
+        <small>${esc(t.label)}${s.type === "email" && s.cfg.promo ? " · <em>Promotional</em>" : ""}${
+          s.type === "email" && Number(s.cfg.skipDays) ? ` · Not within ${esc(label(SKIP_REPEAT, s.cfg.skipDays).toLowerCase())}` : ""}</small>
         <strong>${esc(full)}</strong>
         ${probs.length ? `<em class="ef-card-warn">${esc(probs[0])}</em>` : ""}
       </span>
@@ -1102,6 +1105,9 @@ async function mountFlowEditor(container, { id, staff }) {
           <label class="fe-check"><input type="checkbox" data-k="promo" data-rerender${c.promo ? " checked" : ""} />
             This is promotional <small class="muted">(an offer, a reorder reminder or a booking invitation)</small></label>
           ${c.promo ? '<p class="tb-info">Promotional emails only go to patients who agreed to marketing emails, and always end with an unsubscribe link.</p>' : ""}
+          <label class="tb-field"><span>Don't send if they've had this email in the last</span>
+            <select class="fb-select" data-k="skipDays">${opt(SKIP_REPEAT, Number(c.skipDays) || 0)}</select>
+            <small class="muted">From this flow. The card is skipped and the flow carries on to the next one.</small></label>
         </section>
         <section class="ef-sec"><h4>Preview <small>(with example details)</small></h4><div data-role="prev"></div></section>`;
     }
@@ -1290,7 +1296,7 @@ async function mountFlowEditor(container, { id, staff }) {
     if (!s) return;
     if (el.dataset.k) {
       const k = el.dataset.k;
-      s.cfg[k] = el.type === "checkbox" ? el.checked : k === "num" ? Number(el.value) : el.value;
+      s.cfg[k] = el.type === "checkbox" ? el.checked : k === "num" || k === "skipDays" ? Number(el.value) : el.value;
     } else if (el.dataset.rolecheck !== undefined) {
       const set = new Set(s.cfg.roles);
       if (el.checked) set.add(el.dataset.rolecheck); else set.delete(el.dataset.rolecheck);

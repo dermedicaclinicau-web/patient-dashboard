@@ -7854,6 +7854,24 @@ function flowStep_(cfg, flow, run, memo, deadline) {
         next = afterId;
         continue;
       }
+      const skipDays = Math.max(0, Math.floor(Number(c.skipDays) || 0));
+      if (skipDays) {
+        const had = flowRecentSend_(cfg, flow, s, ctx.pid, run.mode === 'test' ? 'test' : 'real', skipDays);
+        if (had) {
+          note('Skipped “' + String(c.subject || '').slice(0, 120) + '”: they had it on ' + Utilities.formatDate(new Date(had), REC_TZ_, 'd MMM yyyy'));
+          next = afterId;
+          continue;
+        }
+      }
+      const skipDays = Math.max(0, Math.floor(Number(c.skipDays) || 0));
+      if (skipDays) {
+        const had = flowRecentSend_(cfg, flow, s, ctx.pid, run.mode === 'test' ? 'test' : 'real', skipDays);
+        if (had) {
+          note('Skipped “' + String(c.subject || '').slice(0, 120) + '”: they had it on ' + Utilities.formatDate(new Date(had), REC_TZ_, 'd MMM yyyy'));
+          next = afterId;
+          continue;
+        }
+      }
       if (!tester) {
         const gap = flowGapUntil_(cfg, flow, ctx);
         if (gap > Date.now()) {
@@ -7873,7 +7891,10 @@ function flowStep_(cfg, flow, run, memo, deadline) {
       sent++;
       next = afterId;
       note('Emailed “' + String(c.subject || '').slice(0, 120) + '”' + (tester ? ' to ' + to + ' (testing)' : ''));
-      save(Object.assign({ next: next, sent: sent, dueAt: Date.now() }, tester ? {} : { lastEmailAt: new Date().toISOString() }));
+      run.sentCards = Object.assign({}, run.sentCards || {});
+      run.sentCards[s.id] = new Date().toISOString();   // for "Don't send if they've had this email in the last…"
+      save(Object.assign({ next: next, sent: sent, dueAt: Date.now(), sentCards: run.sentCards },
+        tester ? {} : { lastEmailAt: new Date().toISOString() }));
       continue;
     }
     next = afterId; // a card type this version doesn't know
@@ -8008,6 +8029,14 @@ function flowTestRun_(body, session) {
     if (s.type === 'email') {
       const why = flowStopWhy_(cfg, flow, run, ctx, false);
       if (why) { steps.push('Stop rule: ' + why + ' The real flow would stop here.'); ended = true; break; }
+      const sd = Math.max(0, Math.floor(Number(c.skipDays) || 0));
+      const had = sd ? flowRecentSend_(cfg, flow, s, ctx.pid, 'real', sd) : 0;
+      if (had) steps.push('Heads up: they had this email on ' + Utilities.formatDate(new Date(had), REC_TZ_, 'd MMM yyyy') +
+        ', so the real flow would skip it. Sent to you anyway so you can see it.');
+      const sd = Math.max(0, Math.floor(Number(c.skipDays) || 0));
+      const had = sd ? flowRecentSend_(cfg, flow, s, ctx.pid, 'real', sd) : 0;
+      if (had) steps.push('Heads up: they had this email on ' + Utilities.formatDate(new Date(had), REC_TZ_, 'd MMM yyyy') +
+        ', so the real flow would skip it. Sent to you anyway so you can see it.');
       flowSendPatient_(cfg, flow, s, run, ctx, memo, me);
       sent++;
       steps.push('Email “' + flowFill_(String(c.subject || '').replace(FLOW_SSP_TABLE_RE_(), ''), flowVals_(cfg, run, ctx, memo, false), false) + '”' +
@@ -13656,4 +13685,25 @@ function flowStartPurchase_(body, session) {
   } finally {
     lock.releaseLock();
   }
+}
+
+// When this patient last had this email card from this flow (ms), if it was within `days`, else 0.
+// Looks at every run of the flow for them: the card's send time, and older runs' history (matched by subject).
+// mode: 'real' or 'test' (test emails don't count against real ones, and the other way round)
+function flowRecentSend_(cfg, flow, s, pid, mode, days) {
+  if (!pid) return 0;
+  const since = Date.now() - days * 86400000;
+  const subj = 'Emailed “' + String((s.cfg || {}).subject || '').slice(0, 120) + '”';
+  let last = 0;
+  fsQuery_(cfg, FLOW_RUNS_, 'patientId', 'EQUAL', pid, 200).forEach(function (r) {
+    if (r.flowId !== flow._id || (r.mode === 'test') !== (mode === 'test')) return;
+    const a = Date.parse(String((r.sentCards || {})[s.id] || '')) || 0;
+    if (a > last) last = a;
+    (Array.isArray(r.events) ? r.events : []).forEach(function (e) {
+      if (String((e && e.what) || '').indexOf(subj) !== 0) return;
+      const t = Date.parse(String(e.at || '')) || 0;
+      if (t > last) last = t;
+    });
+  });
+  return last >= since ? last : 0;
 }
