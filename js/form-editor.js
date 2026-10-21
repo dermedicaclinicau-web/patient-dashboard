@@ -1281,6 +1281,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
             unit: p ? (kit || p.dosePer ? p.doseUnit : p.stockUnit) : (o && o.unit) || "",
             required: o ? o.required : false, amount: o ? o.amount : null, max: o ? o.max : null,
             from: o ? o.from || "" : "",
+            multi: o ? o.multi !== false : true,
           };
         });
         changed(); renderStage(); renderInspector();

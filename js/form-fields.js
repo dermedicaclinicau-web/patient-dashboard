@@ -1046,6 +1046,7 @@ export function cleanField(f) {
           amount: Number(it.amount) > 0 ? Number(it.amount) : null,
           max: Number(it.max) > 0 ? Number(it.max) : null,
           from: /^[A-Za-z0-9_-]{1,40}$/.test(it.from || "") ? it.from : "",
+          multi: it.multi !== false,
         }));
       out.allowExtra = f.allowExtra !== false;
       out.ifShort = pick(f.ifShort, ["flag", "block"], "flag");
@@ -1863,6 +1864,7 @@ function typeSettings(f, ctx = {}) {
               ${linkable.map((x) => `<option value="${esc(x.id)}"${it.from === x.id ? " selected" : ""}>${esc(linkName(x))}</option>`).join("")}
             </select></label>
           <label class="fe-check"><input type="checkbox" data-ci="${i}" data-cik="required"${it.required ? " checked" : ""} /> Must be filled in</label>
+          <label class="fe-check"><input type="checkbox" data-ci="${i}" data-cik="multi"${it.multi !== false ? " checked" : ""} /> Can use more than one batch</label>
           <div class="fe-two">
             <label class="fe-insp-sub"><small>Default amount</small><div class="fe-num"><input class="fe-input" type="number" min="0" step="any" data-ci="${i}" data-cik="amount" value="${it.amount ?? ""}" placeholder="None" /><span>${esc(it.unit)}</span></div></label>
             <label class="fe-insp-sub"><small>Most allowed</small><div class="fe-num"><input class="fe-input" type="number" min="0" step="any" data-ci="${i}" data-cik="max" value="${it.max ?? ""}" placeholder="No limit" /><span>${esc(it.unit)}</span></div></label>
@@ -2143,7 +2145,7 @@ export function applyInput(f, el) {
     const it = f.items && f.items[Number(el.dataset.ci)];
     if (!it) return false;
     if (el.dataset.cik === "from") { it.from = el.value; return true; }
-    if (el.dataset.cik === "required") it.required = el.checked;
+    if (el.dataset.cik === "required" || el.dataset.cik === "multi") it[el.dataset.cik] = el.checked;
     else { const n = Number(el.value); it[el.dataset.cik] = el.value === "" || !(n > 0) ? null : n; }
     return true;
   }

@@ -9,10 +9,12 @@
 // (Take from Shelf and Borrow happen straight away: they're real handovers, logged on their own.)
 import {
   listProducts, listAllLots, listKits, listOpenContainers, isKitProduct, isSharedProduct, openState, kitUnits,
-  plural, unitPlural, fefo, lotId, INV_CATEGORIES, batchName, batchText,
+  plural, unitPlural, fefo, lotId, INV_CATEGORIES, batchName, batchText, createRequest, suggestOrder,
 } from "./inventory-api.js";
 import { takeFromShelfDialog, borrowDialog } from "./inventory-kits.js";
-import { isInjector, isAdmin } from "./perms.js";
+import { isInjector, isAdmin, can } from "./perms.js";
+import { confirmDialog } from "./dialog.js";
+import { showToast } from "./utils.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(2));
@@ -53,7 +55,11 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
   const host = w && w.querySelector("[data-cs-host]");
   if (!host) return;
   const canKit = isInjector();
-    const adminStore = isAdmin();
+  const adminStore = isAdmin();
+  // Stock numbers: Manage inventory (and Admins) only. Everyone else counts blind.
+  const seeStock = can("inventory.manage");
+  // Form Builder → Consumables → "Can use more than one batch" (on unless it's been turned off)
+  const multiOf = (l) => !(l.item && l.item.multi === false);
   const defLoc = isTeh(staff) ? "jt" : "shelf";
   let stock = null, failed = false;
   // use: shared products only (null = not decided yet)
@@ -82,23 +88,26 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
   // The amount the clinician gave (units / mL / items)
   const clinicalTotal = (l, p = productOf(l)) => l.rows.reduce((a, r) => a + num(dosed(p) ? r.dose : r.amount), 0);
 
+  // Where each row can come from. label: with what's left (Manage inventory). plain: batch and expiry only.
   function sources(l) {
     const p = productOf(l);
     if (!p || shared(p)) return [];
     if (isKit(p)) {
       return stock.kits.filter((k) => k.productId === p.id && kitUnits(k) > 0).map((k) => ({
         ref: k.id, batch: k.batch, expiry: k.expiry, avail: kitUnits(k),
+        plain: `${batchText(p, k.batch) || "No number"} · Exp ${niceDate(k.expiry)}`,
         label: `${batchText(p, k.batch) || "No number"} · Exp ${niceDate(k.expiry)} · ${fmt(kitUnits(k))} ${k.doseUnit}${k.open ? ` (${fmt(k.open)} opened)` : ""}`,
       }));
     }
     if (!p.tracked) {
       const id = lotId(p.id, l.loc, "", "");
       const lot = stock.lots.find((x) => x.id === id);
-      return [{ ref: id, batch: "", expiry: "", avail: lot ? lot.qty : 0,
+      return [{ ref: id, batch: "", expiry: "", avail: lot ? lot.qty : 0, plain: whereOf(l),
         label: `${whereOf(l)} · ${plural(lot ? lot.qty : 0, p.stockUnit)}` }];
     }
     return stock.lots.filter((x) => x.productId === p.id && x.loc === l.loc && x.qty > 0).sort(fefo).map((x) => ({
       ref: x.id, batch: x.batch, expiry: x.expiry, avail: x.qty,
+      plain: `${batchText(p, x.batch)} · Exp ${niceDate(x.expiry)}`,
       label: `${batchText(p, x.batch)} · Exp ${niceDate(x.expiry)} · ${plural(x.qty, p.stockUnit)}`,
     }));
   }
@@ -116,7 +125,8 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     });
     const fresh = stock.lots.filter((x) => x.productId === p.id && x.loc === l.loc && x.qty > 0).sort(fefo).map((x) => ({
       value: `new:${x.id}`, lot: x,
-      label: `${p.tracked ? `${batchText(p, x.batch)} · Exp ${niceDate(x.expiry)} · ` : ""}${plural(x.qty, p.stockUnit)} on the ${whereOf(l)}`,
+      label: `${p.tracked ? `${batchText(p, x.batch)} · Exp ${niceDate(x.expiry)} · ` : ""}${seeStock
+        ? `${plural(x.qty, p.stockUnit)} on the ${whereOf(l)}` : `from the ${whereOf(l)}`}`,
     }));
     return { open, fresh };
   }
@@ -166,7 +176,8 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     return `<div class="cs-line${sharedShort(l, p) ? " is-short" : ""}" data-i="${i}">
       <div class="cs-head">
         <strong>${esc(p.name)}${req}</strong>
-        <small>${esc(`${o.open.length} open · ${whereOf(l)}: ${plural(p.stock[l.loc], p.stockUnit)} sealed`)}</small>${linkNoteHtml(l)}
+        <small>${esc(seeStock ? `${o.open.length} open · ${whereOf(l)}: ${plural(p.stock[l.loc], p.stockUnit)} sealed`
+          : `${o.open.length} open`)}</small>${linkNoteHtml(l)}
         <select class="fe-in cs-loc" data-f="loc" aria-label="Open new ones from">
           <option value="shelf"${l.loc === "shelf" ? " selected" : ""}>Shelf</option>
           <option value="jt"${l.loc === "jt" ? " selected" : ""}>JT storage</option></select>
@@ -218,6 +229,11 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     if (!val) { l.rows = [newRow()]; return; }
     if (!p) { l.rows = [newRow(val)]; return; }
     if (dosed(p)) { l.rows = [{ ...newRow(), dose: val, amount: syringesFor(p, val) }]; return; }
+    if (!multiOf(l)) {   // one batch only: everything on it (flagged if it isn't enough)
+      const s = sources(l)[0];
+      l.rows = [{ ...newRow(), ref: s ? s.ref : "", amount: r2(val) }];
+      return;
+    }
     let left = val;
     const rows = [];
     for (const s of sources(l)) {
@@ -231,6 +247,18 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     }
     l.rows = rows;
   }
+
+  // A linked line split across batches by hand: the first row takes what's left of the linked total
+  function restToFirst(l) {
+    const p = productOf(l);
+    if (!p || !l.rows.length) return;
+    const dz = dosed(p);
+    const others = l.rows.slice(1).reduce((a, x) => a + num(dz ? x.dose : x.amount), 0);
+    const r0 = l.rows[0];
+    const rest = r2(Math.max(0, num(l.linkVal) - others));
+    if (dz) { r0.dose = rest; if (r0.auto) r0.amount = syringesFor(p, rest); } else r0.amount = rest;
+  }
+
   function linkNoteHtml(l) {
     const from = l.item && l.item.from;
     if (!from || !linked) return "";
@@ -275,6 +303,11 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     const max = l.item && l.item.max;
     const cu = clinicalUnit(p);
     if (max && total > max) return `<span class="cs-warn">${fmt(total)} ${esc(cu)} is more than the ${esc(max)} allowed. Check the amount.</span>`;
+    if (short > 0 && !seeStock) {   // blind: say there isn't enough, never how much there is
+      return `<span class="cs-warn">Not enough ${isKit(p) ? "in your kit" : `in ${esc(whereOf(l))}`} for this amount. ${isKit(p)
+        ? "Take from the Shelf or borrow from a colleague, otherwise it's saved and flagged."
+        : f.ifShort === "block" ? "Ask the ordering team to restock before saving." : "It will be saved and flagged for the ordering team."}</span>`;
+    }
     if (short > 0) {
       const su = isKit(p) ? p.doseUnit : unitPlural(p.stockUnit);
       return `<span class="cs-warn">Short by ${fmt(short)} ${esc(su)}. ${isKit(p)
@@ -298,9 +331,9 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     const kit = isKit(p);
     const pick = kit || p.tracked
       ? `<select class="fe-in" data-f="ref" aria-label="Batch">${src.length
-          ? src.map((s) => `<option value="${esc(s.ref)}"${s.ref === r.ref ? " selected" : ""}>${esc(s.label)}</option>`).join("")
+          ? src.map((s) => `<option value="${esc(s.ref)}"${s.ref === r.ref ? " selected" : ""}>${esc(seeStock ? s.label : s.plain)}</option>`).join("")
           : `<option value="">${kit ? "Nothing in your kit" : "None in stock here"}</option>`}</select>`
-      : `<span class="cs-src">${esc(src[0] ? src[0].label : "")}</span>`;
+      : `<span class="cs-src">${esc(src[0] ? (seeStock ? src[0].label : src[0].plain) : "")}</span>`;
     const del = l.rows.length > 1 ? '<button type="button" class="hx-x" data-cs="remove-row" aria-label="Remove">×</button>' : "<span></span>";
     if (dosed(p)) {
       return `<div class="cs-row is-dosed" data-j="${j}">${pick}
@@ -314,6 +347,51 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
       <div class="fe-num"><input class="fe-in" type="number" min="0" step="${kit ? "0.5" : "1"}" inputmode="decimal" data-f="amount"
         value="${esc(r.amount)}" placeholder="0" aria-label="Amount used" /><span>${esc(kit ? p.doseUnit : unitPlural(p.stockUnit))}</span></div>
       ${del}</div>`;
+  }
+
+  /* ---------- Batch cards and the table (kit products and products with batch & expiry) ---------- */
+  const expMY = (k) => { const m = /^(\d{4})-(\d{2})/.exec(k || ""); return m ? `${m[2]}/${m[1]}` : "—"; };
+  const availText = (p, s) => (isKit(p) ? `${fmt(s.avail)} ${p.doseUnit}`
+    : dosed(p) ? `${fmt(s.avail * p.dosePer)} ${p.doseUnit} · ${plural(s.avail, p.stockUnit)}` : plural(s.avail, p.stockUnit));
+  const leftText = (p, src) => `${availText(p, { avail: src.reduce((a, s) => a + s.avail, 0) })} left`;
+
+  function cardsHtml(l, p, src) {
+    if (!src.length) return `<p class="cs-none">${isKit(p) ? "Nothing in your kit" : `None in ${esc(whereOf(l))}`}</p>`;
+    const used = new Set(l.rows.map((r) => r.ref));
+    const max = Math.max(1, ...src.map((s) => s.avail));
+    return `<div class="cs-cards">${src.map((s) => {
+      const on = used.has(s.ref);
+      return `<button type="button" class="cs-card${on ? " is-on" : ""}" data-cs="pick" data-ref="${esc(s.ref)}" aria-pressed="${on}">
+        <span class="cs-card-top"><strong>${esc(s.batch || "No number")}</strong>${on ? "<em>Selected</em>" : ""}</span>
+        <small>Exp ${esc(expMY(s.expiry))}</small>
+        ${seeStock ? `<span class="cs-card-left">${esc(availText(p, s))}</span>
+          <span class="cs-bar"><i style="width:${Math.round((s.avail / max) * 100)}%"></i></span>` : ""}
+      </button>`;
+    }).join("")}${multiOf(l) && src.length > l.rows.length
+      ? '<button type="button" class="cs-card cs-card-add" data-cs="add-row">+ Add batch</button>' : ""}</div>`;
+  }
+
+  function tableHtml(l, p, src) {
+    const dz = dosed(p);
+    const cu = clinicalUnit(p);
+    const opt = (r) => (src.length
+      ? src.map((x) => `<option value="${esc(x.ref)}"${x.ref === r.ref ? " selected" : ""}>${esc(seeStock ? x.label : x.plain)}</option>`).join("")
+      : `<option value="">${isKit(p) ? "Nothing in your kit" : "None in stock here"}</option>`);
+    return `<table class="cs-table"><thead><tr><th>${esc(batchName(p))}</th><th>Expiry</th><th>${esc(cu)} used</th>${
+      dz ? `<th>${esc(unitPlural(p.stockUnit))} opened</th>` : ""}<th></th></tr></thead><tbody>${l.rows.map((r, j) => {
+      const s = src.find((x) => x.ref === r.ref);
+      return `<tr class="cs-row" data-j="${j}">
+        <td><select class="fe-in" data-f="ref" aria-label="${esc(batchName(p))}">${opt(r)}</select></td>
+        <td class="cs-exp">${esc(s ? expMY(s.expiry) : "—")}</td>
+        <td><div class="fe-num"><input class="fe-in" type="number" min="0" step="${isKit(p) ? "0.5" : dz ? "0.1" : "1"}" inputmode="decimal"
+          data-f="${dz ? "dose" : "amount"}" value="${esc(dz ? r.dose : r.amount)}" placeholder="0" aria-label="${esc(cu)} used" /><span>${esc(cu)}</span></div></td>
+        ${dz ? `<td><div class="fe-num"><input class="fe-in" type="number" min="0" step="1" inputmode="numeric" data-f="amount"
+          value="${esc(r.amount)}" placeholder="0" aria-label="${esc(unitPlural(p.stockUnit))} opened" /></div></td>` : ""}
+        <td>${l.rows.length > 1 ? '<button type="button" class="hx-x" data-cs="remove-row" aria-label="Remove this batch">×</button>' : ""}</td>
+      </tr>`;
+    }).join("")}</tbody>
+      <tfoot><tr><td colspan="${dz ? 5 : 4}">Total ${esc(cu)} used: <strong data-role="total">${esc(fmt(clinicalTotal(l, p)))}</strong> ${esc(cu)}</td></tr></tfoot>
+    </table>`;
   }
 
   function lineHtml(l, i) {
@@ -340,9 +418,27 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
           <option value="shelf"${l.loc === "shelf" ? " selected" : ""}>Shelf</option>
           <option value="jt"${l.loc === "jt" ? " selected" : ""}>JT storage</option></select>`
       : "";
+    if (kit || p.tracked) {   // batches: cards to choose from, and a table of what was used
+      return `<div class="cs-line cs-v2${shortOf(l, src) > 0 ? " is-short" : ""}" data-i="${i}">
+        <div class="cs-head">
+          <strong>${esc(p.name)}${req}</strong>${linkNoteHtml(l)}
+          ${locSel}
+          ${seeStock ? `<button type="button" class="cs-restock" data-cs="restock" title="${kit
+            ? "Take more from the Shelf into your kit" : "Ask the ordering team for more"}">Restock · ${esc(leftText(p, src))}</button>` : ""}
+          ${l.extra ? '<button type="button" class="hx-x" data-cs="remove-line" aria-label="Remove">×</button>' : ""}
+        </div>
+        ${cardsHtml(l, p, src)}
+        ${tableHtml(l, p, src)}
+        <div class="cs-foot">
+          <span data-role="msg">${msgHtml(l)}</span>
+          <span class="cs-acts">${kit ? `${p.stock.shelf > 0 ? '<button type="button" class="cs-link" data-cs="take">Take from Shelf</button>' : ""}
+            <button type="button" class="cs-link" data-cs="borrow">Borrow from a colleague</button>` : ""}</span>
+        </div>
+      </div>`;
+    }
     return `<div class="cs-line${shortOf(l, src) > 0 ? " is-short" : ""}" data-i="${i}">
       <div class="cs-head">
-        <strong>${esc(p.name)}${req}</strong><small>${esc(info)}</small>${linkNoteHtml(l)}
+        <strong>${esc(p.name)}${req}</strong>${seeStock ? `<small>${esc(info)}</small>` : ""}${linkNoteHtml(l)}
         ${locSel}
         ${l.extra ? '<button type="button" class="hx-x" data-cs="remove-line" aria-label="Remove">×</button>' : ""}
       </div>
@@ -351,7 +447,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
       <div class="cs-foot">
         <span data-role="msg">${msgHtml(l)}</span>
         <span class="cs-acts">
-          ${src.length > l.rows.length ? '<button type="button" class="cs-link" data-cs="add-row">+ Another batch</button>' : ""}
+          ${multiOf(l) && src.length > l.rows.length ? '<button type="button" class="cs-link" data-cs="add-row">+ Another batch</button>' : ""}
           ${kit ? `${p.stock.shelf > 0 ? '<button type="button" class="cs-link" data-cs="take">Take from Shelf</button>' : ""}
             <button type="button" class="cs-link" data-cs="borrow">Borrow from a colleague</button>` : ""}
         </span>
@@ -412,7 +508,13 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     const l = lines[Number(li.dataset.i)];
     const r = l.rows[Number(rowEl.dataset.j)];
     const p = productOf(l);
-    if (l.item && l.item.from) l.manual = true; // their own figure wins until "Use the linked total"
+    // Linked line: changing the first row (or the only row) counts as "by hand". Changing a later batch keeps it
+    // linked, and the first row takes what's left of the linked total.
+    const j = Number(rowEl.dataset.j);
+    const main = !p || shared(p) || key === (dosed(p) ? "dose" : "amount");
+    const linkedLine = !!(l.item && l.item.from);
+    const split = linkedLine && !l.manual && main && j > 0 && !(p && shared(p));
+    if (linkedLine && main && !split) l.manual = true;
     if (key === "dose") {
       r.dose = el.value;
       if (p && shared(p)) {                               // typing an amount means it was used
@@ -430,6 +532,18 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
       r.amount = el.value;
       if (dosed(p)) r.auto = el.value === "";             // typed a syringe count: stop auto-filling
     }
+    if (split) {
+      l.split = true;
+      restToFirst(l);
+      const r0 = l.rows[0];
+      const row0 = li.querySelector('.cs-row[data-j="0"]');
+      if (row0) {
+        const d = row0.querySelector('[data-f="dose"]'); if (d) d.value = r0.dose;
+        const a = row0.querySelector('[data-f="amount"]'); if (a) a.value = r0.amount;
+      }
+    }
+    const tot = li.querySelector('[data-role="total"]');
+    if (tot && p) tot.textContent = fmt(clinicalTotal(l, p));
     li.querySelector('[data-role="msg"]').innerHTML = msgHtml(l);
     li.classList.toggle("is-short", shortOf(l) > 0);
     onChange();
@@ -458,6 +572,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
         l.loc = el.value;
         l.userLoc = true;
         const p1 = productOf(l);
+        l.split = false;
         if (isKit(p1) || dosed(p1)) fillFrom(l, was); else l.rows = [newRow()];
       } else {
         l.loc = el.value;
@@ -467,6 +582,34 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     }
   });
 
+  // Restock (Manage inventory): a kit → take more from the Shelf; Shelf / JT storage → an order request
+  async function restock(l) {
+    const p = productOf(l);
+    if (!p) return;
+    if (isKit(p)) {
+      if (await takeFromShelfDialog(p, staff)) await refresh(true);
+      return;
+    }
+    const qty = suggestOrder(p, l.loc);
+    const ok = await confirmDialog({
+      title: `Ask for more ${p.name}?`,
+      message: `This sends an order request to the ordering team for ${plural(qty, p.orderUnit)} for ${whereOf(l)}.`,
+      confirmLabel: "Send request", tone: "info",
+    });
+    if (!ok) return;
+    try {
+      await createRequest({
+        items: [{ productId: p.id, name: p.name, supplierId: p.supplierId, qty, unitKind: "order",
+          unit: p.orderUnit, stockQty: qty * p.packSize }],
+        loc: l.loc, urgency: "normal", note: `Asked for from a treatment record (${f.label || "Products used"})`,
+      }, staff);
+      showToast(`Order request sent for ${p.name}.`);
+    } catch (err) {
+      console.error("Order request failed:", err);
+      showToast(err && err.message && !err.code ? err.message : "Couldn't send the request. Try again.");
+    }
+  }
+
   host.addEventListener("click", async (e) => {
     const b = e.target.closest("[data-cs]");
     if (!b) return;
@@ -474,9 +617,32 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     const l = li ? lines[Number(li.dataset.i)] : null;
     if (!l) return;
     const act = b.dataset.cs;
-    if (act === "relink") { l.manual = false; l.linkVal = undefined; w.csSync(); onChange(); return; }
-    if (act === "add-row") { if (l.item && l.item.from) l.manual = true; l.rows.push(newRow()); draw(); }
-    else if (act === "remove-row") { if (l.item && l.item.from) l.manual = true; l.rows.splice(Number(b.closest(".cs-row").dataset.j), 1); onChange(); draw(); }
+    const li2 = lines.indexOf(l);
+    const focusRow = (j) => setTimeout(() => {
+      const el = host.querySelector(`.cs-line[data-i="${li2}"] .cs-row[data-j="${j}"] input`);
+      if (el) el.focus();
+    }, 0);
+    if (act === "relink") { l.manual = false; l.split = false; l.linkVal = undefined; w.csSync(); onChange(); return; }
+    if (act === "pick") {   // a batch card: use it (or, if it's already in the table, go to its row)
+      const ref = b.dataset.ref;
+      const at = l.rows.findIndex((r) => r.ref === ref);
+      if (at >= 0) { focusRow(at); return; }
+      const first = l.rows[0];
+      const firstUsed = first && (num(first.amount) > 0 || num(first.dose) > 0);
+      if (firstUsed && multiOf(l)) { l.rows.push({ ...newRow(), ref }); l.split = true; }
+      else if (first) first.ref = ref;
+      onChange(); draw();
+      focusRow(l.rows.findIndex((r) => r.ref === ref));
+      return;
+    }
+    if (act === "restock") { await restock(l); return; }
+    if (act === "add-row") { l.rows.push(newRow()); l.split = true; draw(); focusRow(l.rows.length - 1); }
+    else if (act === "remove-row") {
+      l.rows.splice(Number(b.closest(".cs-row").dataset.j), 1);
+      if (l.rows.length < 2) l.split = false;
+      if (l.item && l.item.from && !l.manual) { if (l.split) restToFirst(l); else fillFrom(l, num(l.linkVal)); }
+      onChange(); draw();
+    }
     else if (act === "remove-line") { lines.splice(lines.indexOf(l), 1); onChange(); draw(); }
     else if (act === "take" || act === "borrow") {
       const p = productOf(l);
@@ -576,7 +742,8 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
         if (note) note.outerHTML = linkNoteHtml(l);
         return;
       }
-      fillFrom(l, val);
+      if (l.split && l.rows.length > 1) restToFirst(l);   // split across batches by hand: the first row takes the rest
+      else fillFrom(l, val);
       redraw = true;
     });
     if (redraw) draw();

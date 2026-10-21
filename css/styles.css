@@ -7808,3 +7808,42 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
   .fe-chart-hq .fe-imgq, .fe-chart-hq .fe-imgq-row { justify-content: flex-start; }
   .fe-chart .fe-img-box { --img-w: 100%; }
 }
+
+/* ---------- Consumables: batch cards and table ---------- */
+.cs-v2 { gap: .65rem; overflow-x: auto; }
+.cs-v2 .cs-head { align-items: center; }
+.cs-restock { display: inline-flex; align-items: center; height: 38px; padding: 0 .9rem; border: 1px solid #a7f3d0; border-radius: 10px;
+  background: #ecfdf5; color: #047857; font: inherit; font-size: .85rem; font-weight: 700; white-space: nowrap; cursor: pointer; }
+.cs-restock:hover { border-color: #047857; }
+.cs-cards { display: flex; flex-wrap: wrap; gap: .5rem; padding: .6rem; border: 1px solid #c4e8e0; border-radius: 12px; background: #f0fdf9; }
+.cs-card { display: flex; flex-direction: column; align-items: flex-start; gap: .15rem; min-width: 150px; padding: .55rem .75rem;
+  border: 1.5px solid var(--border); border-radius: 10px; background: #fff; font: inherit; text-align: left; cursor: pointer; }
+.cs-card:hover { border-color: #5eead4; }
+.cs-card.is-on { border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary-soft); }
+.cs-card:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.cs-card-top { display: flex; align-items: center; justify-content: space-between; gap: .5rem; width: 100%; }
+.cs-card-top em { padding: .05rem .45rem; border-radius: 999px; background: var(--primary); color: #fff; font-size: .62rem;
+  font-style: normal; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.cs-card small { font-size: .78rem; color: var(--muted); }
+.cs-card-left { font-size: .82rem; font-weight: 600; color: #047857; }
+.cs-bar { display: block; width: 100%; height: 4px; overflow: hidden; border-radius: 999px; background: #e2e8f0; }
+.cs-bar i { display: block; height: 100%; background: var(--primary); }
+.cs-card-add { justify-content: center; align-items: center; border-style: dashed; color: var(--primary); font-weight: 600; }
+.cs-none { margin: 0; font-size: .85rem; color: var(--muted); }
+
+.cs-table { width: 100%; min-width: 520px; border-collapse: collapse; font-size: .9rem; }
+.cs-table tr.cs-row { display: table-row; }
+.cs-table th { padding: .45rem .5rem; background: var(--surface-2); text-align: left; font-size: .72rem; font-weight: 700;
+  letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.cs-table td { padding: .4rem .5rem; border-top: 1px solid var(--border); vertical-align: middle; }
+.cs-table td:first-child { width: 42%; }
+.cs-table td:last-child { width: 36px; text-align: center; }
+.cs-table .fe-num { max-width: 170px; }
+.cs-table .cs-exp { white-space: nowrap; color: #334155; }
+.cs-table tfoot td { text-align: right; background: var(--surface-2); color: #334155; font-size: .88rem; }
+.cs-table tfoot strong { color: var(--primary); font-size: 1rem; }
+
+/* Not enough: the line flashes amber twice */
+@keyframes cs-flash { 0%, 100% { box-shadow: none; } 30%, 70% { box-shadow: 0 0 0 3px rgba(245, 158, 11, .45); } }
+.cs-line.is-short { animation: cs-flash 1.2s ease-in-out 2; }
+@media (prefers-reduced-motion: reduce) { .cs-line.is-short { animation: none; } }
