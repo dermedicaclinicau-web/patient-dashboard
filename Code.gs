@@ -7207,7 +7207,7 @@ function flowVals_(cfg, run, ctx, memo, forStaff) {
     'ssp expiry date': s.expires ? (recLongDate_(s.expires) || s.expires) : '',
   };
 }
-function flowFill_(text, vals, html) {
+function flowFillBase_(text, vals, html) {
   return String(text || '').replace(FLOW_TOKEN_RE_, function (m, k) {
     const key = k.toLowerCase().replace(/\s+/g, ' ');
     if (!(key in vals)) return m;
@@ -7216,7 +7216,7 @@ function flowFill_(text, vals, html) {
   });
 }
 // Blanks inside links are made URL-safe; everywhere else they're filled as text
-function flowFillHtml_(html, vals) {
+function flowFillHtmlBase_(html, vals) {
   const links = String(html || '').replace(/(\shref\s*=\s*")([^"]*)(")/gi, function (m, a, url, c) {
     return a + url.replace(FLOW_TOKEN_RE_, function (t, k) {
       const key = k.toLowerCase().replace(/\s+/g, ' ');
@@ -13328,4 +13328,42 @@ function flowBirthdayOk_(cfg, r, run, ctx) {
   if (r.op === 'next') { let o = on(t[0]); if (o < today) o = on(t[0] + 1); return (o - today) / DAY <= n; }
   if (r.op === 'last') { let o = on(t[0]); if (o > today) o = on(t[0] - 1); return (today - o) / DAY <= n; }
   return false;
+}
+
+// ===================== Date blanks: {Today}, {Today + 30 days}, {Today + 2 weeks}, {Today + 3 months} =====================
+// Worked out in Perth time when each message is sent. Every flow and recall message goes through these two.
+function flowFill_() {
+  const a = Array.prototype.slice.call(arguments);
+  a[0] = flowDateTokens_(a[0]);
+  return flowFillBase_.apply(null, a);
+}
+function flowFillHtml_() {
+  const a = Array.prototype.slice.call(arguments);
+  a[0] = flowDateTokens_(a[0]);
+  return flowFillHtmlBase_.apply(null, a);
+}
+
+const FLOW_DATE_SP_ = '(?:\\s|&nbsp;|\\u00a0)*';
+const FLOW_DATE_RE_ = new RegExp('\\{' + FLOW_DATE_SP_ + 'today' + FLOW_DATE_SP_ +
+  '(?:([+-])' + FLOW_DATE_SP_ + '(\\d{1,4})' + FLOW_DATE_SP_ + '(days?|weeks?|months?|years?)?)?' + FLOW_DATE_SP_ + '\\}', 'gi');
+
+function flowDateTokens_(s) {
+  if (s === null || s === undefined) return s;
+  return String(s).replace(FLOW_DATE_RE_, function (all, sign, num, unit) {
+    let n = num ? Number(num) : 0;
+    if (sign === '-') n = -n;
+    const u = String(unit || 'days').toLowerCase();
+    const k = Utilities.formatDate(new Date(), 'Australia/Perth', 'yyyy-MM-dd').split('-').map(Number);
+    const d = new Date(Date.UTC(k[0], k[1] - 1, k[2]));
+    if (/^day/.test(u)) d.setUTCDate(d.getUTCDate() + n);
+    else if (/^week/.test(u)) d.setUTCDate(d.getUTCDate() + 7 * n);
+    else {
+      const months = /^year/.test(u) ? 12 * n : n;
+      const day = d.getUTCDate();
+      d.setUTCDate(1);
+      d.setUTCMonth(d.getUTCMonth() + months);
+      d.setUTCDate(Math.min(day, new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate()));
+    }
+    return Utilities.formatDate(d, 'UTC', 'd MMMM yyyy');
+  });
 }

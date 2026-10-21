@@ -24,6 +24,7 @@ import { fetchStaffList } from "./task-types.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 import { settingsHeaderHtml } from "./settings.js";
+import { fillDateTokens, dateInsertHtml, dateInsertName } from "./date-tokens.js";
 
 const COL = "email_flows";
 const BASE = "#/settings/flows";
@@ -1051,7 +1052,9 @@ async function mountFlowEditor(container, { id, staff }) {
             <input class="fe-input" data-k="subject" data-tokens maxlength="200" value="${esc(c.subject)}" /></label>
           <div class="tb-field"><span>Message</span><div data-role="editor"></div></div>
           ${chipsHtml(PATIENT_TOKENS)}
-          <small class="muted">Tap a blank to add it where your cursor is. Blanks fill in with each patient's details when it's sent.</small>
+          ${dateInsertHtml()}
+          <small class="muted">Tap a blank to add it where your cursor is. Blanks fill in with each patient's details when it's sent.
+            Dates like {Today + 30 days} are worked out on the day it goes out.</small>
           <label class="fe-check"><input type="checkbox" data-k="promo" data-rerender${c.promo ? " checked" : ""} />
             This is promotional <small class="muted">(an offer, a reorder reminder or a booking invitation)</small></label>
           ${c.promo ? '<p class="tb-info">Promotional emails only go to patients who agreed to marketing emails, and always end with an unsubscribe link.</p>' : ""}
@@ -1170,8 +1173,8 @@ async function mountFlowEditor(container, { id, staff }) {
     box.innerHTML = `
       <div class="tb-mail">
         <div class="tb-mail-row"><span>To</span><span>Jane Citizen &lt;jane@example.com&gt;</span></div>
-        <div class="tb-mail-row"><span>Subject</span><strong>${subjectHtml(fillTemplate(s.cfg.subject, vals)) || "<em>No subject yet</em>"}</strong></div>
-        <div class="tb-mail-body tb-mail-shell" data-role="shell">${emailShell(insertSspTable(fillTemplateHtml(s.cfg.body || "", vals), sampleSspTable(flow.style.accent)) + (s.cfg.promo ? UNSUB : ""),
+        <div class="tb-mail-row"><span>Subject</span><strong>${subjectHtml(fillTemplate(fillDateTokens(s.cfg.subject), vals)) || "<em>No subject yet</em>"}</strong></div>
+        <div class="tb-mail-body tb-mail-shell" data-role="shell">${emailShell(insertSspTable(fillTemplateHtml(fillDateTokens(s.cfg.body || ""), vals), sampleSspTable(flow.style.accent)) + (s.cfg.promo ? UNSUB : ""),
           flow.style, { clinic: clinicDetails(letterhead), hasLogo: !!(letterhead && letterhead.logo) })}</div>
       </div>`;
     hydrateRichImages(box.querySelector('[data-role="shell"]'), { logo: (letterhead && letterhead.logo) || "" });
@@ -1195,7 +1198,7 @@ async function mountFlowEditor(container, { id, staff }) {
   }
 
   side.addEventListener("focusin", (e) => { if (e.target.matches("[data-tokens]")) lastText = e.target; });
-  side.addEventListener("mousedown", (e) => { if (e.target.closest("[data-token]")) e.preventDefault(); });
+  side.addEventListener("mousedown", (e) => { if (e.target.closest('[data-token], [data-act="date-ins"]')) e.preventDefault(); });
 
   side.addEventListener("input", (e) => {
     const el = e.target;
@@ -1490,9 +1493,10 @@ async function mountFlowEditor(container, { id, staff }) {
       }
       return;
     }
-    const tok = e.target.closest("[data-token]");
+    const di = e.target.closest('[data-act="date-ins"]');
+    const tok = di || e.target.closest("[data-token]");
     if (tok) {
-      const name = tok.dataset.token;
+      const name = di ? dateInsertName(di.closest(".ef-dateins")) : tok.dataset.token;
       if (lastText && lastText.isConnected) {
         const el = lastText;
         const ins = `{${name}}`;

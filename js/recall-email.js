@@ -11,6 +11,7 @@ import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 import { normRecallSettings } from "./recall-settings.js";
 import { loadRecallEmailTemplates } from "./recall-emails.js";
+import { fillDateTokens } from "./date-tokens.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -176,8 +177,8 @@ function compose(email, cardId) {
     setTimeout(() => main.querySelector('[data-role="subject"]').focus(), 30);
   }
   function apply(t) {
-    main.querySelector('[data-role="subject"]').value = t ? fillTemplate(t.subject, vals) : "";
-    editor.setHtml(t ? fillTemplateHtml(t.body || "", vals) : "");
+    main.querySelector('[data-role="subject"]').value = t ? fillTemplate(fillDateTokens(t.subject), vals) : "";
+    editor.setHtml(t ? fillTemplateHtml(fillDateTokens(t.body || ""), vals) : "");
     touched = false;
   }
   const showErr = (m) => { const el = main.querySelector(".rem-err"); el.textContent = m; el.hidden = !m; };

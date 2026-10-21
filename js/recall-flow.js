@@ -19,6 +19,7 @@ import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 import { normRecallSettings, recallTabsHtml } from "./recall-settings.js";
 import { loadRecallEmailTemplates } from "./recall-emails.js";
+import { fillDateTokens } from "./date-tokens.js";
 
 const MAX_STEPS = 40;
 let WHO_CACHE = null;   // the last "Who's in the flow" answer, so reopening it is instant
@@ -634,7 +635,7 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
     ]);
   }
   function smsPreview(text) {
-    let t = fillTemplate(String(text || ""), sampleVals()).replace(/\s+/g, " ").trim();
+    let t = fillTemplate(fillDateTokens(String(text || "")), sampleVals()).replace(/\s+/g, " ").trim();
     if (!/reply\s+stop/i.test(t)) t += `${t ? " " : ""}${STOP_LINE}`;
     const parts = t.length <= 160 ? 1 : Math.ceil(t.length / 153);
     return `<strong>Preview:</strong> ${esc(t)}<br><small>${t.length} characters · ${parts} text${parts === 1 ? "" : "s"} each</small>`;
@@ -806,8 +807,8 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
     const vals = sampleVals();
     box.innerHTML = `<div class="tb-mail">
         <div class="tb-mail-row"><span>To</span><span>Sarah Citizen &lt;sarah@example.com&gt;</span></div>
-        <div class="tb-mail-row"><span>Subject</span><strong>${subjectHtml(fillTemplate(s.cfg.subject, vals)) || "<em>No subject yet</em>"}</strong></div>
-        <div class="tb-mail-body tb-mail-shell" data-role="shell">${emailShell(fillTemplateHtml(s.cfg.body || "", vals), flow.style,
+        <div class="tb-mail-row"><span>Subject</span><strong>${subjectHtml(fillTemplate(fillDateTokens(s.cfg.subject), vals)) || "<em>No subject yet</em>"}</strong></div>
+        <div class="tb-mail-body tb-mail-shell" data-role="shell">${emailShell(fillTemplateHtml(fillDateTokens(s.cfg.body || ""), vals), flow.style,
           { clinic: clinicDetails(letterhead), hasLogo: !!(letterhead && letterhead.logo) })}</div></div>`;
     hydrateRichImages(box.querySelector('[data-role="shell"]'), { logo: (letterhead && letterhead.logo) || "" });
   }
