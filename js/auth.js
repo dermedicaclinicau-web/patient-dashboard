@@ -39,7 +39,66 @@ export async function loginWithPin(pin) {
 
 export function logout() {
   sessionStorage.clear();
+  if (TAB_CH) TAB_CH.postMessage({ t: "logout" });   // every other portal tab logs out too
   return signOut(auth);
+}
+
+/* ---------- Sharing the login between tabs ----------
+   A new tab asks the open portal tabs for their login and uses it. Nothing is stored on the computer,
+   so once every portal tab is closed, the next one asks for a PIN again. */
+const TAB_CH = typeof BroadcastChannel === "function" ? new BroadcastChannel("dermedica-portal-login") : null;
+
+if (TAB_CH) {
+  TAB_CH.addEventListener("message", (e) => {
+    const m = e.data || {};
+    const user = auth.currentUser;
+    if (m.t === "ask" && user) {
+      const session = sessionStorage.getItem("appSession");
+      if (session) {
+        TAB_CH.postMessage({ t: "give", id: m.id, session, uid: user.uid,
+          name: sessionStorage.getItem(`staffName:${user.uid}`) || "" });
+      }
+    } else if (m.t === "logout" && user) {
+      sessionStorage.clear();
+      signOut(auth);
+    }
+  });
+}
+
+// The login from another open portal tab, or null if none answers in time
+function askOtherTabs(ms = 800) {
+  if (!TAB_CH) return Promise.resolve(null);
+  const id = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  return new Promise((resolve) => {
+    const finish = (v) => { clearTimeout(timer); TAB_CH.removeEventListener("message", onMsg); resolve(v); };
+    const onMsg = (e) => { const m = e.data || {}; if (m.t === "give" && m.id === id && m.session) finish(m); };
+    const timer = setTimeout(() => finish(null), ms);
+    TAB_CH.addEventListener("message", onMsg);
+    TAB_CH.postMessage({ t: "ask", id });
+  });
+}
+
+// Signs this tab in with another tab's login. true if it worked.
+async function loginFromOtherTab() {
+  const got = await askOtherTabs();
+  if (!got) return false;
+  try {
+    const res = await fetch(LOGIN_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ action: "staff", op: "me", session: got.session }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!data || !data.ok || !data.token) return false;   // expired or turned off: the PIN screen shows
+    sessionStorage.setItem("appSession", data.session || got.session);
+    if (got.uid && got.name) sessionStorage.setItem(`staffName:${got.uid}`, got.name);
+    await setPersistence(auth, browserSessionPersistence);
+    await signInWithCustomToken(auth, data.token);
+    return true;
+  } catch (err) {
+    console.warn("Login from another tab failed:", err);
+    return false;
+  }
 }
 
 // The claims inside the login token already on this computer (used when the network is briefly down)
@@ -53,9 +112,16 @@ function cachedClaims(user) {
 
 // Calls back with a staff profile (from the token's custom claims), or null if logged out.
 // A network blip never logs anyone out: it retries, then uses the token already on this computer.
+let firstCheck = true;   // only a tab that has just opened borrows another tab's login
 export function watchAuth(callback) {
   return onAuthStateChanged(auth, async (user) => {
-    if (!user) return callback(null);
+    if (!user) {
+      const tryTabs = firstCheck;
+      firstCheck = false;
+      if (tryTabs && await loginFromOtherTab()) return;   // signing in: this runs again with the user
+      return callback(null);
+    }
+    firstCheck = false;
     let claims = null;
     for (let i = 0; i < 3 && !claims; i++) {
       try {
