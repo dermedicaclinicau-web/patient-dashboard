@@ -2,7 +2,7 @@ import { fetchDayAppointments } from "./appointments.js";
 import { escapeHtml, getInitials, toDateKey, showToast } from "./utils.js";
 import { listProducts, isKitProduct, getMyKitDay, saveKitDayStart, saveDayStart, plural } from "./inventory-api.js";
 import { db } from "./firebase-config.js";
-import { collection, getDocs, query, where, FieldPath } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { collection, getDocs, query, where, FieldPath, doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { kitCountHtml, wireKitCount, readKitCount, kitBatchOptions } from "./kit-count.js";
 
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -70,11 +70,61 @@ async function kitToday(staff) {
 }
 
 // The batches to choose from (in my kit, then on the Shelf), added just before the count is shown
-async function addBatchOptions(kit) {
+const normB = (s) => String(s || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+const isoKey = (s) => (typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : "");
+const keyOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+// The batch each kit product was last counted with, looking back 14 days (newest first):
+// that day's End of Day, or its Start of Day if it wasn't ended. Ended with 0 left → null (the vial was finished).
+async function lastCountedBatches(staff) {
+  const out = new Map();
+  if (!staff || !staff.uid) return out;
+  const keys = [];
+  for (let i = 1; i <= 14; i++) { const d = new Date(); d.setDate(d.getDate() - i); keys.push(keyOf(d)); }
+  const snaps = await Promise.all(keys.map((k) =>
+    getDoc(doc(db, "inv_kitdays", `${staff.uid}__${k}`)).catch(() => null)));
+  for (const s of snaps) {
+    if (!s || !s.exists()) continue;
+    const day = s.data() || {};
+    const seenToday = new Set();
+    for (const part of [day.end, day.start]) {
+      ((part && part.items) || []).forEach((it) => {
+        if (!it || out.has(it.productId) || seenToday.has(it.productId)) return;
+        seenToday.add(it.productId);
+        const rows = it.rows || [];
+        const r = rows.find((x) => x.inUse) || rows[0];
+        out.set(it.productId, r && r.batch ? { batch: String(r.batch), expiry: isoKey(r.expiry) } : null);
+      });
+    }
+  }
+  return out;
+}
+
+// The batches to choose from (in my kit, then on the Shelf), with the one to pre-select:
+// editing → this morning's batch; otherwise → the batch last counted
+async function addBatchOptions(kit, staff) {
   if (!kit || kit.error || kit.withOptions) return kit;
-  const opts = await kitBatchOptions(kit.products.map(({ p }) => p))
-    .catch((err) => { console.warn("Batch list not loaded:", err); return new Map(); });
-  kit.products = kit.products.map((x) => ({ ...x, options: opts.get(x.p.id) || [] }));
+  const warn = (what) => (err) => { console.warn(`${what} not loaded:`, err); return new Map(); };
+  const products = kit.products.map(({ p }) => p);
+  const [opts, last] = await Promise.all([
+    kitBatchOptions(products).catch(warn("Batch list")),
+    kit.edit ? Promise.resolve(new Map()) : lastCountedBatches(staff).catch(warn("Last batches")),
+  ]);
+  const editRow = (pid) => {
+    const it = ((kit.edit && kit.edit.items) || []).find((x) => x.productId === pid);
+    const rows = (it && it.rows) || [];
+    const r = rows.find((x) => x.inUse) || rows[0];
+    return r && r.batch ? { batch: String(r.batch), expiry: isoKey(r.expiry) } : null;
+  };
+  kit.products = kit.products.map((x) => {
+    const options = [...(opts.get(x.p.id) || [])];
+    const prev = x.p.tracked ? (kit.edit ? editRow(x.p.id) : last.get(x.p.id)) : null;
+    // Always in the list, even if the records say it's used up
+    if (prev && !options.some((o) => normB(o.batch) === normB(prev.batch))) {
+      options.unshift({ batch: prev.batch, expiry: prev.expiry, where: "kit" });
+    }
+    return { ...x, options, batch: prev ? prev.batch : "", expiry: prev ? prev.expiry : "" };
+  });
   kit.withOptions = true;
   return kit;
 }
@@ -213,7 +263,7 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
   // The kit check loads while they read the welcome (an error means "don't know": the day isn't started without the count)
   const kitP = (kit || noKit ? Promise.resolve(kit)
     : kitToday(staff).catch((err) => { console.warn("Kit check failed:", err); return { error: true }; }))
-    .then(addBatchOptions);
+    .then((k) => addBatchOptions(k, staff));
 
   const startBtn = dlg.querySelector('[data-act="start"]');
   const kitBox = dlg.querySelector('[data-role="kit"]');
@@ -319,11 +369,7 @@ function renderKit(dlg, staff, kit, close) {
   const edit = kit.edit || null;
   const products = kit.products.map(({ p }) => p);
   const submitLabel = edit ? "Save changes" : "Save and start my day";
-  const earlierRow = (pid) => {
-    const it = edit ? (edit.items || []).find((x) => x.productId === pid) : null;
-    const rows = (it && it.rows) || [];
-    return rows.find((r) => r.inUse) || rows[0] || {};
-  };
+
 
   card.innerHTML = `
     <form class="sod-kitform" novalidate>
@@ -332,10 +378,7 @@ function renderKit(dlg, staff, kit, close) {
       <p class="sod-sub">${edit
         ? "Enter what's left in your kit right now. This replaces this morning's count (it stays on record)."
         : "How much is left in your kit? Put 0 if you have none."}</p>
-      <div class="kc-list">${kitCountHtml(kit.products.map(({ p, options = [] }) => {
-        const r = earlierRow(p.id);
-        return { p, options, batch: r.batch || "", expiry: r.expiry || "" };
-      }))}</div>
+      <div class="kc-list">${kitCountHtml(kit.products)}</div>
       <p class="lh-error" role="alert" hidden></p>
       <div class="sod-kit-acts">
         <button type="button" class="lh-btn is-quiet" data-act="later">${edit ? "Cancel" : "Remind me later"}</button>

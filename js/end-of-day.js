@@ -202,7 +202,15 @@ async function kitForEnd(day) {
   // The batches to choose from (in my kit, then on the Shelf)
   const opts = await kitBatchOptions(list.map((k) => k.p))
     .catch((err) => { console.warn("Batch list not loaded:", err); return new Map(); });
-  return list.map((k) => ({ ...k, options: opts.get(k.p.id) || [] }));
+  // This morning's batch is always in the list, even if the records say it's used up
+  const norm = (s) => String(s || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return list.map((k) => {
+    const options = [...(opts.get(k.p.id) || [])];
+    if (k.p.tracked && k.batch && !options.some((o) => norm(o.batch) === norm(k.batch))) {
+      options.unshift({ batch: k.batch, expiry: k.expiry || "", where: "kit" });
+    }
+    return { ...k, options };
+  });
 }
 
 
