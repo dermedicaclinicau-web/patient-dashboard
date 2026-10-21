@@ -138,7 +138,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
   const st = {
     products: [], suppliers: [], lots: [], requests: [], q: "", cat: "", view: "all", flagged: false, showInactive: false,
-    reqFilter: "open", reqView: "list", pos: [], poFilter: "draft", lineSup: {},
+    reqFilter: "open", reqView: "list", pos: [], poFilter: "sent", lineSup: {},
     sel: new Set(), pq: "", pcat: "", psup: "",  pcount: "",
     counts: [], invs: [], lastCounts: new Map(), open: [],
     quick: false, qv: new Map(),   // Stock → Update digital count: on/off, and what's been typed ("productId|loc" → "12")
@@ -2054,8 +2054,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const rows = st.pos.filter((p) => f === "all" || p.status === f);
     body.innerHTML = `
       <div class="inv-tools">
-        ${segF("po-f", [["draft", "Drafts", n("draft")], ["sent", "Sent", n("sent")], ["part", "Part received", n("part")],
-          ["received", "Received"], ["cancelled", "Cancelled"], ["all", "All"]], f, "poFilter")}
+        ${segF("po-f", [["sent", "Sent", n("sent")], ["part", "Part received", n("part")],
+          ["received", "Received"], ["cancelled", "Cancelled"], ["all", "All"], ["draft", "Drafts", n("draft")]], f, "poFilter")}
         <span class="inv-spacer"></span>
         ${canMove ? '<button type="button" class="btn-primary" data-act="new-po">+ New purchase order</button>' : ""}
       </div>
