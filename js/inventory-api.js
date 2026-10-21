@@ -881,6 +881,113 @@ export async function markPoSent(po, { via = "", note = "", sentDate = "" }, sta
   return done;
 }
 
+// Changing an order after it was sent (wrong item or quantity). One transaction: the order, its history and its requests.
+// Lines with stock received can't be removed, go below what arrived, or change product / pack.
+// "received" always comes from the order itself, never from the browser. The number and supplier never change.
+export async function amendPo(poId, { lines, expectedDate, notesToSupplier, internalNote, gst, reason }, staff) {
+  const why = clip(reason, 300);
+  if (!why) throw new Error("Add a reason for the change, e.g. Wrong quantity entered.");
+  const by = who(staff);
+  const poRef = doc(db, "inv_pos", poId);
+  let result = null;
+
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    const s = await tx.get(poRef);
+    if (!s.exists()) throw new Error("This purchase order no longer exists.");
+    const po = normalisePo(s);
+    if (!["sent", "part"].includes(po.status)) {
+      throw new Error(`This order is ${PO_STATUS[po.status].toLowerCase()}, so it can't be changed here.`);
+    }
+    if (po.historical) throw new Error("This order was recorded from before the portal, so it can't be changed.");
+    const reqSnaps = [];
+    for (const rid of po.requestIds) reqSnaps.push(await tx.get(doc(db, "inv_requests", rid)));
+
+    // ---- Check the new lines against the order ----
+    const next = (Array.isArray(lines) ? lines : [])
+      .filter((l) => l.productId || String(l.name || "").trim()).map(cleanPoLine);
+    if (!next.length) throw new Error("An order needs at least one item. To call it off, cancel the order instead.");
+    const keys = new Set();
+    next.forEach((l) => { while (keys.has(l.key)) l.key = Math.random().toString(36).slice(2, 10); keys.add(l.key); });
+    const oldBy = new Map(po.lines.map((l) => [l.key, l]));
+    const amt = (l, n) => plural(n, l.orderUnit);
+
+    po.lines.forEach((o) => {
+      if (o.received > 0 && !keys.has(o.key)) {
+        throw new Error(`${o.name}: ${amt(o, o.received)} already arrived, so it can't be removed.`);
+      }
+    });
+    next.forEach((l) => {
+      const o = oldBy.get(l.key);
+      l.received = o ? o.received : 0;
+      if (!o || !o.received) return;
+      if (l.qty < o.received) throw new Error(`${o.name}: ${amt(o, o.received)} already arrived, so it can't be less than that.`);
+      if (l.productId !== o.productId || l.packSize !== o.packSize) {
+        throw new Error(`${o.name}: some has already arrived, so its product and pack can't change. Change the quantity, or add a new line.`);
+      }
+    });
+
+    // ---- What changed (for the history) ----
+    const money = (n) => (n === null || n === undefined ? "no price" : `$${Number(n).toFixed(2)}`);
+    const changes = [];
+    po.lines.forEach((o) => {
+      const l = next.find((x) => x.key === o.key);
+      if (!l) { changes.push(`Removed ${o.name} (${amt(o, o.qty)})`); return; }
+      if (l.productId !== o.productId || l.name !== o.name) changes.push(`${o.name} → ${l.name}`);
+      if (l.qty !== o.qty) changes.push(`${l.name}: ${o.qty} → ${l.qty}`);
+      if ((l.unitCost ?? null) !== (o.unitCost ?? null)) changes.push(`${l.name}: ${money(o.unitCost)} → ${money(l.unitCost)}`);
+      if (l.loc !== o.loc) changes.push(`${l.name}: for ${locLabel(o.loc)} → ${locLabel(l.loc)}`);
+    });
+    next.forEach((l) => { if (!oldBy.has(l.key)) changes.push(`Added ${l.name} (${amt(l, l.qty)})`); });
+    const exp = KEY_RE.test(expectedDate || "") ? expectedDate : "";
+    const nts = clip(notesToSupplier, 2000), inn = clip(internalNote, 1000), g = gst === true;
+    if (exp !== po.expectedDate) changes.push(`Needed by: ${po.expectedDate || "none"} → ${exp || "none"}`);
+    if (nts !== po.notesToSupplier) changes.push("Notes to supplier changed");
+    if (inn !== po.internalNote) changes.push("Internal note changed");
+    if (g !== po.gst) changes.push(g ? "GST added" : "GST removed");
+    if (!changes.length) throw new Error("Nothing has changed.");
+
+    // ---- Requests: items taken off this order ----
+    const had = new Set(po.lines.flatMap((l) => l.sources.map((x) => `${x.r}:${x.i}`)));
+    const has = new Set(next.flatMap((l) => l.sources.map((x) => `${x.r}:${x.i}`)));
+    const lost = new Set([...had].filter((k) => !has.has(k)).map((k) => k.split(":")[0]));
+    const stillIds = [...new Set(next.flatMap((l) => l.sources.map((x) => x.r)))];
+
+    const allIn = next.every((l) => l.received >= l.qty);
+    const status = allIn ? "received" : po.status;
+    const at = new Date().toISOString();
+
+    // ---- Writes ----
+    tx.update(poRef, {
+      lines: next, status, requestIds: stillIds, expectedDate: exp, notesToSupplier: nts, internalNote: inn, gst: g,
+      total: poTotals({ lines: next, gst: g }).total,
+      ...(status === "received" ? { receivedAt: serverTimestamp() } : {}),
+      amendedAt: serverTimestamp(), amendedBy: by, amendCount: (Number(s.data().amendCount) || 0) + 1,
+      updatedAt: serverTimestamp(), updatedBy: by,
+      events: arrayUnion({ at, by, action: status === "received" ? "Changed (now fully received)" : "Changed after sending",
+        note: `${why} · ${changes.join(" · ")}`.slice(0, 300) }),
+    });
+
+    const reopened = [];
+    reqSnaps.forEach((r) => {
+      if (!r.exists() || !lost.has(r.id)) return;
+      const gone = !stillIds.includes(r.id);
+      const back = r.data().status === "ordered";
+      if (back) reopened.push(r.id);
+      tx.update(r.ref, {
+        ...(gone ? { poIds: arrayRemove(poId), poNumbers: arrayRemove(po.number) } : {}),
+        ...(back ? { status: "open", response: "" } : {}),
+        updatedAt: serverTimestamp(),
+        events: arrayUnion({ at, by, action: back ? "Back to open: taken off the purchase order" : "Item taken off the purchase order",
+          note: `${po.number} · ${why}`.slice(0, 300) }),
+      });
+    });
+
+    result = { status, changes, number: po.number, requestIds: stillIds, reopened };
+  });
+  return result;
+}
+
 // Cancel a draft, or a sent order where nothing has arrived. Its requests go back to Open.
 export async function cancelPo(po, reason, staff) {
   if (po.lines.some((l) => l.received > 0)) throw new Error("Stock has already been received on this order, so it can't be cancelled.");
