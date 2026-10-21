@@ -7658,3 +7658,23 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
   .re-grid { grid-template-columns: minmax(0, 1fr); }
   .re-side { position: static; }
 }
+
+/* Recall flow: Who's in the flow */
+.rf-who { width: min(860px, 95vw); max-height: 88vh; padding: 1.25rem 1.35rem; display: flex; flex-direction: column; gap: .75rem; }
+.rf-who[open] { display: flex; }
+.rf-who-head { display: flex; align-items: flex-start; gap: .5rem; }
+.rf-who-head > div { flex: 1; min-width: 0; }
+.rf-who-head h3 { margin: 0 0 .25rem; font-size: 1.15rem; }
+.rf-who-head p { margin: 0; font-size: .88rem; line-height: 1.45; }
+.rf-who-tabs { flex-wrap: wrap; }
+.rf-who-q { height: 38px; }
+.rf-who-list { flex: 1; min-height: 200px; overflow: auto; display: flex; flex-direction: column; gap: .4rem; padding-right: .25rem; }
+.rf-who-row { display: flex; align-items: center; gap: .75rem; padding: .55rem .75rem; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+.rf-who-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .15rem; }
+.rf-who-main a, .rf-who-main strong { font-weight: 600; color: var(--text); text-decoration: none; }
+.rf-who-main a:hover { color: var(--primary); text-decoration: underline; }
+.rf-who-main small { color: var(--muted); font-size: .8rem; line-height: 1.4; }
+.rf-who-more { margin: .25rem 0 0; font-size: .8rem; text-align: center; }
+@media (max-width: 700px) {
+  .rf-who { width: 100vw; max-width: none; height: 100dvh; max-height: none; border-radius: 0; }
+}

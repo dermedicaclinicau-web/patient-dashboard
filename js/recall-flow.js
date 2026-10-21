@@ -36,6 +36,7 @@ const I = {
   repeat: ic('<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>'),
   stop: ic('<circle cx="12" cy="12" r="9"/><line x1="9" y1="9" x2="15" y2="15"/><line x1="15" y1="9" x2="9" y2="15"/>'),
   bolt: ic('<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>'),
+  users: ic('<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.9"/><path d="M16 3.1a4 4 0 0 1 0 7.8"/>'),
   plus: ic('<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>'),
   back: ic('<line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/>'),
   trash: ic('<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>'),
@@ -273,6 +274,7 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
             <span><span data-role="sub"></span> · <span data-role="state">All changes saved</span></span></div>
           <span class="tb-pill" data-role="pill"></span>
           <div class="ff-bar-actions">
+            <button type="button" class="ff-btn" data-act="who">${I.users}<span>Who's in the flow</span></button>
             <button type="button" class="ff-btn" data-act="test">${I.mail}<span>Test with a patient</span></button>
             <button type="button" class="ff-btn is-primary" data-act="live"><span>Turn on</span></button>
           </div>
@@ -992,11 +994,140 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
     form.elements.q.focus();
   }
 
+  /* ---------- Who's in the flow ---------- */
+  function whoDialog() {
+    const kd = (k) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(k || ""); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; };
+    const day = (k) => { const d = kd(k); return d ? d.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" }) : ""; };
+    const at = (ms) => (ms ? new Date(ms).toLocaleString("en-AU", { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "");
+    const TABS = [["next", "Starting next"], ["later", "Coming up"], ["inFlow", "In the flow now"],
+      ["quiet", "Quiet time"], ["along", "Riding along"], ["nomatch", "Not starting"]];
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog rf-who";
+    dlg.innerHTML = `
+      <div class="rf-who-head">
+        <div><h3>Who's in the flow</h3><p class="muted" data-role="sum">Checking every waiting card. This can take a minute…</p></div>
+        <button type="button" class="lh-btn is-quiet" data-act="refresh">Refresh</button>
+        <button type="button" class="lh-btn is-quiet" data-act="x" aria-label="Close">×</button>
+      </div>
+      <div class="rc-tabs rf-who-tabs" data-role="tabs" role="tablist"></div>
+      <input type="search" class="fe-input rf-who-q" data-role="q" placeholder="Find a patient by name" aria-label="Find a patient" />
+      <div class="rf-who-list" data-role="list"><div class="skeleton" style="height:220px;border-radius:12px"></div></div>`;
+    const $d = (r) => dlg.querySelector(`[data-role="${r}"]`);
+    let data = null, tab = "next", q = "";
+
+    const what = (r) => `${r.category}${r.alsoDue && r.alsoDue.length ? ` + ${r.alsoDue.join(", ")}` : ""}`;
+    function line(r) {
+      if (tab === "next") return `${what(r)} · due ${day(r.dueDate)}${r.waited ? " · waiting since an earlier day" : ""}`;
+      if (tab === "later") return `${what(r)} · due ${day(r.dueDate)} · starts around <strong>${esc(day(r.day))}</strong>`;
+      if (tab === "quiet") return `${what(r)} · can start from <strong>${esc(day(r.until))}</strong>`;
+      if (tab === "along") return `${esc(r.category)} · ${r.already ? "with" : "joins"} their ${esc(r.joinedCat || "other")} recall`;
+      if (tab === "nomatch") return `${what(r)} · doesn't match the start rules, so the recall team calls them as usual`;
+      const sent = [r.texts ? `${r.texts} text${r.texts === 1 ? "" : "s"}` : "", r.emails ? `${r.emails} email${r.emails === 1 ? "" : "s"}` : ""]
+        .filter(Boolean).join(", ");
+      const st = r.state === "wait" ? `Waiting until ${at(r.at)}${r.next ? ` · then ${r.next}` : ""}`
+        : r.state === "run" ? `${r.next || "Next card"} · ${r.at > Date.now() ? at(r.at) : "at the next check"}`
+        : r.state === "team" ? `With ${r.with || "the recall team"}${r.next ? ` · then ${r.next}` : ""}`
+        : `Trying again on ${day(r.on)} (round ${r.round + 1})`;
+      return `${what(r)} · ${esc(st)}${sent ? ` · ${esc(sent)} sent` : ""}${r.replied ? ' <span class="rc-tag is-yes">Replied</span>' : ""}`;
+    }
+    const safe = (s) => s;   // line() escapes what it adds; names and categories are escaped below
+    function drawTabs() {
+      $d("tabs").innerHTML = TABS.map(([k, l]) => {
+        const n = data ? data[`${k}Count`] : null;
+        return `<button type="button" class="rc-tab${tab === k ? " is-on" : ""}" data-tab="${k}" role="tab" aria-selected="${tab === k}">${esc(l)}${
+          n != null ? ` <em>${Number(n).toLocaleString()}</em>` : ""}</button>`;
+      }).join("");
+    }
+    function drawList() {
+      const box = $d("list");
+      if (!data) return;
+      const all = data[tab] || [];
+      const rows = q ? all.filter((r) => r.name.toLowerCase().includes(q)) : all;
+      const total = data[`${tab}Count`] || 0;
+      const empty = { next: "Nobody starts at the next check.", later: "Nobody else is waiting to start.",
+        inFlow: "Nobody is in the flow yet.", quiet: "Nobody is waiting for quiet time.",
+        along: "Nobody has a second treatment riding along.", nomatch: "Everyone matches the start rules." }[tab];
+      box.innerHTML = rows.length ? rows.map((r) => `<div class="rf-who-row">
+          <span class="rc-av" aria-hidden="true">${esc((r.name.match(/\b[A-Za-z]/g) || ["?"]).slice(0, 2).join("").toUpperCase())}</span>
+          <span class="rf-who-main">${r.patientId ? `<a href="#/patient/${encodeURIComponent(r.patientId)}">${esc(r.name || "Unknown patient")}</a>`
+            : `<strong>${esc(r.name || "Unknown patient")}</strong>`}<small>${safe(line({ ...r, category: esc(r.category),
+              alsoDue: (r.alsoDue || []).map(esc), next: r.next ? esc(r.next) : "", with: esc(r.with || "") }))}</small></span>
+          ${tab === "nomatch" ? "" : `<button type="button" class="lh-btn is-quiet" data-skip="${esc(r.id)}" data-name="${esc(r.name)}">${
+            tab === "inFlow" ? "Take out" : "Keep out"}</button>`}
+        </div>`).join("") + (total > all.length ? `<p class="muted rf-who-more">Showing the first ${all.length} of ${total.toLocaleString()}.</p>` : "")
+        : `<p class="rc-empty">${esc(q ? "Nobody here by that name." : empty)}</p>`;
+    }
+    function drawSum() {
+      const d = data;
+      const parts = [];
+      if (!d.on) parts.push("The flow is off, so nobody starts until you turn it on. This is who would.");
+      parts.push(`${d.nextCount.toLocaleString()} start${d.nextCount === 1 ? "s" : ""} at the next check (${d.left} of ${d.cap} left today).`);
+      if (d.laterCount) parts.push(`${d.laterCount.toLocaleString()} more after that, about ${d.cap} a day: the last around ${day(d.lastDay)}.`);
+      parts.push(`${d.inFlowCount.toLocaleString()} in the flow now.`);
+      if (d.unchecked) parts.push(`${d.unchecked} couldn't be checked in time. Press Refresh to try again.`);
+      $d("sum").textContent = parts.join(" ");
+    }
+    async function load() {
+      const btn = dlg.querySelector('[data-act="refresh"]');
+      btn.disabled = true;
+      $d("list").innerHTML = '<div class="skeleton" style="height:220px;border-radius:12px"></div>';
+      try {
+        await settle();
+        const res = await callApi({ action: "recall", op: "flowPreview" });
+        if (res.problem) { $d("sum").textContent = res.problem; $d("list").innerHTML = ""; return; }
+        data = res;
+        if (!data[`${tab}Count`] && data.inFlowCount) tab = data.nextCount ? "next" : "inFlow";
+        drawSum(); drawTabs(); drawList();
+      } catch (err) {
+        console.error("Who's in the flow failed:", err);
+        $d("sum").textContent = err && err.code === "UNAUTHORIZED" ? "Your login has timed out. Log out and back in, then try again."
+          : "Couldn't check. Press Refresh to try again.";
+        $d("list").innerHTML = "";
+      } finally {
+        if (btn.isConnected) btn.disabled = false;
+      }
+    }
+
+    dlg.addEventListener("input", (e) => { if (e.target.dataset.role === "q") { q = e.target.value.trim().toLowerCase(); drawList(); } });
+    dlg.addEventListener("click", async (e) => {
+      if (e.target.closest('[data-act="x"]') || e.target.closest('a[href^="#/patient/"]')) { dlg.close(); return; }
+      if (e.target.closest('[data-act="refresh"]')) { load(); return; }
+      const tb = e.target.closest("[data-tab]");
+      if (tb) { tab = tb.dataset.tab; drawTabs(); drawList(); return; }
+      const sk = e.target.closest("[data-skip]");
+      if (!sk) return;
+      const inNow = tab === "inFlow";
+      if (!(await confirmDialog({
+        title: `${inNow ? "Take" : "Keep"} ${sk.dataset.name || "this patient"} out of the flow?`,
+        message: inNow ? "No more automatic texts or emails for this recall. Their card goes to the recall team as usual."
+          : "They won't get automatic texts or emails for this recall. Their card goes to the recall team as usual.",
+        confirmLabel: inNow ? "Take out" : "Keep out", tone: "warning",
+      }))) return;
+      sk.disabled = true;
+      try {
+        const r = await callApi({ action: "recall", op: "flowSkip", id: sk.dataset.skip });
+        if (r.problem) { showToast(r.problem); sk.disabled = false; return; }
+        data[tab] = data[tab].filter((x) => x.id !== sk.dataset.skip);
+        data[`${tab}Count`] = Math.max(0, data[`${tab}Count`] - 1);
+        drawSum(); drawTabs(); drawList();
+        showToast(inNow ? "Taken out of the flow." : "Kept out of the flow.");
+      } catch (err) {
+        console.error("Keep out failed:", err);
+        showToast("Couldn't do that. Try again.");
+        sk.disabled = false;
+      }
+    });
+    dlg.addEventListener("close", () => dlg.remove());
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    load();
+  }
   /* ---------- Top bar ---------- */
   root.querySelector(".ff-bar").addEventListener("click", async (e) => {
     const act = e.target.closest("[data-act]");
     if (!act) return;
     if (act.dataset.act === "test") { testDialog(); return; }
+    if (act.dataset.act === "who") { whoDialog(); return; }
     if (act.dataset.act !== "live") return;
     if (flow.on) {
       if (!(await confirmDialog({ title: "Turn the recall flow off?",

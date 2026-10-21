@@ -11963,6 +11963,10 @@ function handleRecall_(body) {
       return { ok: true, services: recallServices_(getConfig_()) };
     }
     if (op === 'sendEmail') return recallSendEmail_(body, session);   // anyone with Recall access (checked above)
+    if (op === 'flowPreview' || op === 'flowSkip') {
+      if (!manage) return { ok: false, error: 'FORBIDDEN' };
+      return op === 'flowPreview' ? recallFlowPreview_(body, session) : recallFlowSkip_(body, session);
+    }
     if (op === 'flowTest') {
       if (!manage) return { ok: false, error: 'FORBIDDEN' };
       return recallFlowTest_(body, session);
@@ -13014,5 +13018,143 @@ function recallSendEmail_(body, session) {
     log: (Array.isArray(card.log) ? card.log : []).concat([{ at: now, by: String((me && me.name) || 'Staff'), byUid: session.uid,
       kind: 'email', what: 'Email sent: ' + subject, note: 'To ' + to }]).slice(-80),
   });
+  return { ok: true };
+}
+
+// ===================== Recall flow: who's in it, and who's next (Flow tab → Who's in the flow) =====================
+const RECALL_STEP_NAMES_ = { text: 'Text', email: 'Email', wait: 'Wait', branch: 'If / else', team: 'Recall team', cycle: 'Try again', end: 'End' };
+
+// A dry run of recallFlowRun_ step 2 (keep the two in step): nothing is sent or saved
+function recallFlowPreview_(body, session) {
+  const cfg = getConfig_();
+  const flow = fsGetDoc_(cfg, RECALL_FLOW_DOC_);
+  if (!flow || !Array.isArray(flow.steps) || !flow.steps.length) return { ok: true, problem: 'Add some cards to the flow first.' };
+  const set = recallSettings_(cfg);
+  const t = flow.trigger || {};
+  const today = flowKey_(Date.now());
+  const nowMs = Date.now();
+  const memo = { pts: {}, pc: {} };
+  const deadline = Date.now() + 4 * 60000;
+  const MAXL = 300;
+  const row = function (c, extra) {
+    return Object.assign({ id: c._id, name: String(c.patientName || ''), patientId: String(c.patientId || ''),
+      category: String(c.category || ''), dueDate: String(c.dueDate || ''),
+      alsoDue: Array.isArray(c.alsoDue) ? c.alsoDue : [] }, extra || {});
+  };
+  const stepName = function (id) {
+    const loc = id ? flowFind_(flow.steps, id) : null;
+    if (!loc) return '';
+    const s = loc.list[loc.i];
+    return (RECALL_STEP_NAMES_[s.type] || s.type) + (s.type === 'email' && s.cfg && s.cfg.subject ? ': ' + s.cfg.subject : '');
+  };
+
+  // Already in the flow
+  const live = fsQuery_(cfg, RECALL_COL_, 'flowState', 'IN', ['run', 'wait', 'team', 'cycle', 'joined'], 3000)
+    .filter(function (c) { return c.status === 'open'; });
+  const order = { run: 0, wait: 1, team: 2, cycle: 3 };
+  const inFlow = live.filter(function (c) { return c.flowState in order; }).map(function (c) {
+    return row(c, { state: c.flowState, next: stepName(c.flowNext), at: Number(c.flowDueAt || 0), on: String(c.remindOn || ''),
+      with: String(c.assignedToName || ''), texts: Number(c.texts || 0), emails: Number(c.emails || 0),
+      replied: c.replyOpen === true, round: Number(c.flowCycle || 1) });
+  }).sort(function (a, b) { return order[a.state] - order[b.state] || (a.at || 0) - (b.at || 0); });
+  const along = live.filter(function (c) { return c.flowState === 'joined'; })
+    .map(function (c) { return row(c, { joinedCat: String(c.joinedCat || ''), already: true }); });
+
+  // Who starts, and when (the same steps as recallFlowRun_)
+  const win = Number(t.withinDays);
+  const from = win > 0 ? flowAddDaysKey_(today, -win) : '';
+  const pool = (from ? fsQuery_(cfg, RECALL_COL_, 'dueDate', 'GREATER_THAN_OR_EQUAL', from, 3000)
+    : fsQuery_(cfg, RECALL_COL_, 'status', 'EQUAL', 'open', 10000))
+    .concat(fsQuery_(cfg, RECALL_COL_, 'flowState', 'EQUAL', 'released', 1000));
+  const seen = {};
+  const cands = pool.filter(function (c) {
+    if (seen[c._id]) return false;
+    seen[c._id] = true;
+    return c.status === 'open' && c.stage === 'due' && !c.assignedToId && String(c.dueDate) <= today
+      && (!c.flowState || c.flowState === 'queued' || c.flowState === 'released');
+  });
+  const byPt = {};
+  cands.forEach(function (c) { const k = c.patientId || c._id; (byPt[k] = byPt[k] || []).push(c); });
+  const waitedFirst = function (g) { return g.some(function (c) { return c.flowState === 'queued' || c.flowState === 'released'; }) ? 0 : 1; };
+  const newest = function (g) { return g.reduce(function (m, c) { return String(c.dueDate) > m ? String(c.dueDate) : m; }, ''); };
+  const groups = Object.keys(byPt).map(function (k) {
+    return byPt[k].sort(function (a, b) {
+      return recallPri_(flow, set, a.category) - recallPri_(flow, set, b.category) || String(b.dueDate).localeCompare(String(a.dueDate));
+    });
+  }).sort(function (a, b) { return waitedFirst(a) - waitedFirst(b) || newest(b).localeCompare(newest(a)); });
+
+  const started = Number(PropertiesService.getScriptProperties().getProperty('RECALL_FLOW_' + today) || 0);
+  const cap = Math.max(1, Math.min(500, Number(t.dailyMax) || 25));
+  const quiet = Math.max(0, Number(t.quietDays) || 0);
+  const starts = [], quietL = [], nomatch = [];
+  let unchecked = 0;
+  groups.forEach(function (g) {
+    if (Date.now() > deadline) { unchecked += g.length; return; }
+    try {
+      const ids = g.map(function (c) { return c._id; });
+      const others = g[0].patientId ? recallPatientCards_(cfg, g[0].patientId, memo)
+        .filter(function (x) { return x.status === 'open' && ids.indexOf(x._id) === -1; }) : [];
+      const running = others.filter(function (x) {
+        return ['run', 'wait', 'team', 'cycle'].indexOf(String(x.flowState || '')) !== -1 || !!x.assignedToId;
+      }).sort(function (a, b) { return recallPri_(flow, set, a.category) - recallPri_(flow, set, b.category); })[0];
+      if (running) { g.forEach(function (c) { along.push(row(c, { joinedCat: String(running.category || '') })); }); return; }
+      const last = others.concat(g).reduce(function (m, x) {
+        [x.lastTextAt, x.lastEmailAt].forEach(function (v) { if (v && String(v) > m) m = String(v); });
+        return m;
+      }, '');
+      if (quiet && last && nowMs - Date.parse(last) < quiet * 86400000) {
+        const free = flowKey_(Date.parse(last) + quiet * 86400000);
+        g.forEach(function (c) { quietL.push(row(c, { until: free })); });
+        return;
+      }
+      let lead = null;
+      for (let i = 0; i < g.length && !lead; i++) {
+        if (!flowHasRules_(t.rules) || recallFlowMatches_(cfg, t.rules, g[i], memo, today)) lead = g[i];
+      }
+      if (!lead) { g.forEach(function (c) { nomatch.push(row(c)); }); return; }
+      const also = g.filter(function (c) { return c !== lead; }).map(function (c) { return c.category; })
+        .concat(others.filter(function (x) { return x.stage === 'due' && !x.assignedToId && x.flowState !== 'joined'; })
+          .map(function (x) { return x.category; }))
+        .filter(function (k, i, a) { return k && k !== lead.category && a.indexOf(k) === i; });
+      starts.push(row(lead, { alsoDue: also, waited: lead.flowState === 'queued' || lead.flowState === 'released' }));
+    } catch (e) {
+      console.warn('Recall flow preview ' + g[0]._id + ': ' + e);
+      unchecked += g.length;
+    }
+  });
+  const left = Math.max(0, cap - started);
+  starts.forEach(function (r, i) { r.day = flowAddDaysKey_(today, i < left ? 0 : 1 + Math.floor((i - left) / cap)); });
+  const next = starts.filter(function (r) { return r.day === today; });
+  const later = starts.filter(function (r) { return r.day !== today; });
+  const cut = function (a) { return a.slice(0, MAXL); };
+  return {
+    ok: true, on: flow.on === true, cap: cap, started: started, left: left, quietDays: quiet, today: today,
+    next: cut(next), nextCount: next.length,
+    later: cut(later), laterCount: later.length, lastDay: starts.length ? starts[starts.length - 1].day : '',
+    inFlow: cut(inFlow), inFlowCount: inFlow.length,
+    quiet: cut(quietL), quietCount: quietL.length,
+    along: cut(along), alongCount: along.length,
+    nomatch: cut(nomatch), nomatchCount: nomatch.length,
+    unchecked: unchecked,
+  };
+}
+
+// "Keep out": out of the flow (or stopped), and the card goes to the recall team as usual
+function recallFlowSkip_(body, session) {
+  const cfg = getConfig_();
+  const id = String(body.id || '');
+  const c = id ? fsGetDoc_(cfg, RECALL_COL_ + '/' + id) : null;
+  if (!c) return { ok: true, problem: "That card couldn't be found. Press Refresh." };
+  if (c.status !== 'open') return { ok: true, problem: 'That card is already booked or closed.' };
+  const me = getStaffDocs_().filter(function (s) { return s.id === session.uid; })[0];
+  const now = new Date().toISOString();
+  const was = String(c.flowState || '');
+  const patch = {
+    flowState: 'skip', flowNext: '', joinedTo: '', joinedCat: '', updatedAt: now,
+    log: (Array.isArray(c.log) ? c.log : []).concat([{ at: now, by: String((me && me.name) || 'Staff'), byUid: session.uid, kind: 'flow',
+      what: ['run', 'wait', 'team', 'cycle'].indexOf(was) !== -1 ? 'Taken out of the recall flow' : 'Kept out of the recall flow', note: '' }]).slice(-80),
+  };
+  if (was === 'cycle') Object.assign(patch, { stage: 'due', remindOn: '', pauseReason: '' });
+  fsPatch_(cfg, RECALL_COL_ + '/' + id, patch);
   return { ok: true };
 }

@@ -1249,6 +1249,7 @@ async function mountFlowEditor(container, { id, staff }) {
     released: ["Released: check again", ""],
   };
   const actError = (ex) => ({
+    UNAUTHORIZED: "Your login has timed out. Log out and back in, then try again. Your flow is saved.",
     NOT_LIVE: "Turn the flow on first.",
     HELD: "This patient is held. Release them first.",
     ALREADY: "They're already in this flow.",
