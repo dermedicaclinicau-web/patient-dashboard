@@ -34,6 +34,12 @@ import { mountScanner } from "./scanner.js";
 import { mountRecall } from "./recall.js";
 import { mountRecallSettings } from "./recall-settings.js";
 
+
+// iPad: menu links can't be lifted and dragged (works even if the menu is added later)
+document.addEventListener("dragstart", (e) => {
+  if (e.target.closest && e.target.closest(".nav-item")) e.preventDefault();
+});
+
 const $ = (id) => document.getElementById(id);
 
 const views = {
