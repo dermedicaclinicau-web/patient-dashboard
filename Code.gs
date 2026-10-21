@@ -7863,17 +7863,8 @@ function flowStep_(cfg, flow, run, memo, deadline) {
           continue;
         }
       }
-      const skipDays = Math.max(0, Math.floor(Number(c.skipDays) || 0));
-      if (skipDays) {
-        const had = flowRecentSend_(cfg, flow, s, ctx.pid, run.mode === 'test' ? 'test' : 'real', skipDays);
-        if (had) {
-          note('Skipped “' + String(c.subject || '').slice(0, 120) + '”: they had it on ' + Utilities.formatDate(new Date(had), REC_TZ_, 'd MMM yyyy'));
-          next = afterId;
-          continue;
-        }
-      }
       if (!tester) {
-        const gap = flowGapUntil_(cfg, flow, ctx);
+        const gap = flowGapUntil_(cfg, flow, ctx);        
         if (gap > Date.now()) {
           note('Waiting: another automatic email went to them recently.');
           save({ next: next, dueAt: gap });
@@ -8033,10 +8024,7 @@ function flowTestRun_(body, session) {
       const had = sd ? flowRecentSend_(cfg, flow, s, ctx.pid, 'real', sd) : 0;
       if (had) steps.push('Heads up: they had this email on ' + Utilities.formatDate(new Date(had), REC_TZ_, 'd MMM yyyy') +
         ', so the real flow would skip it. Sent to you anyway so you can see it.');
-      const sd = Math.max(0, Math.floor(Number(c.skipDays) || 0));
-      const had = sd ? flowRecentSend_(cfg, flow, s, ctx.pid, 'real', sd) : 0;
-      if (had) steps.push('Heads up: they had this email on ' + Utilities.formatDate(new Date(had), REC_TZ_, 'd MMM yyyy') +
-        ', so the real flow would skip it. Sent to you anyway so you can see it.');
+
       flowSendPatient_(cfg, flow, s, run, ctx, memo, me);
       sent++;
       steps.push('Email “' + flowFill_(String(c.subject || '').replace(FLOW_SSP_TABLE_RE_(), ''), flowVals_(cfg, run, ctx, memo, false), false) + '”' +

@@ -7721,3 +7721,16 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
 .fr-group-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
 .fr-group .fr-rule { background: #fff; }
 .fr-group .fr-add { align-self: flex-start; }
+
+/* Recall panel: a long History makes the panel scroll, it never squashes the note box */
+.page.rc .rc-panel > * { flex-shrink: 0; }
+.page.rc .rc-panel .rc-note {
+  display: block;
+  min-height: 76px;
+  max-height: 240px;
+  padding: .6rem .75rem;
+  line-height: 1.5;
+  overflow-y: auto;
+  resize: vertical;
+}
+.page.rc .rc-panel .rc-note + .rc-row { margin-top: .6rem; }

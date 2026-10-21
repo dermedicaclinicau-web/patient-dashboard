@@ -77,6 +77,8 @@ const errText = (err, fallback) => (err && err.code === "permission-denied"
   : (err && err.message) || fallback);
 const getPref = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v === "1"; } catch { return d; } };
 const setPref = (k, v) => { try { localStorage.setItem(k, v ? "1" : "0"); } catch { /* not essential */ } };
+// The note box grows with what's typed (up to 240px, then it scrolls)
+const grow = (ta) => { ta.style.height = "auto"; ta.style.height = `${Math.min(ta.scrollHeight + 2, 240)}px`; };
 
 function dueText(c, t) {
   if (c.status === "booked") return c.bookedFor ? `Booked for ${short(c.bookedFor)}` : "Booked by phone";
@@ -518,7 +520,7 @@ export function mountRecall(container, { staff = null } = {}) {
         <label class="fe-check rc-auto"><input type="checkbox" data-role="auto"${autoNext ? " checked" : ""} />
           Open the next patient after logging a call</label>
         <div class="rc-outs">${OUTCOMES.map(([k, l]) => `<button type="button" class="ch-chip${draft.out === k ? " is-on" : ""}" data-out="${k}">${esc(l)}</button>`).join("")}</div>
-        <textarea class="fe-input rc-note" data-role="note" rows="2" maxlength="1000" placeholder="Prefers Thursday mornings">${esc(draft.note)}</textarea>
+        <textarea class="fe-input rc-note" data-role="note" rows="4" maxlength="1000" placeholder="Prefers Thursday mornings">${esc(draft.note)}</textarea>
         <div class="rc-row">
           <label>Call back on <input type="date" class="fe-input" data-role="remind" min="${addDays(t, 1)}" value="${esc(draft.remind)}" /></label>
           <span class="inv-spacer"></span>
@@ -564,6 +566,9 @@ export function mountRecall(container, { staff = null } = {}) {
       <h4 class="rc-h">History</h4>
       <ul class="rc-log">${c.log.slice().reverse().map((l) => `<li><strong>${esc(l.what)}</strong>
         ${l.note ? `<p>${esc(l.note)}</p>` : ""}<small>${esc(when(l.at))}${l.by ? ` · ${esc(l.by)}` : ""}</small></li>`).join("")}</ul>`;
+        
+            const noteBox = p.querySelector('[data-role="note"]');
+    if (noteBox) grow(noteBox);
   }
 
   function openCard(id) {
@@ -618,7 +623,7 @@ export function mountRecall(container, { staff = null } = {}) {
       ui.q = e.target.value;
       clearTimeout(searchTimer);
       searchTimer = setTimeout(runSearch, 300);
-    } else if (r === "note") draft.note = e.target.value;
+    } else if (r === "note") { draft.note = e.target.value; grow(e.target); }
     else if (r === "sms") {
       draft.sms = e.target.value;
       const info = $("smsInfo");
