@@ -49,8 +49,7 @@ export function mountEndOfDaySettings(container, { staff = null, embedded = fals
                Admins see the answers on My dashboard → Start &amp; end of day.</p></div></div>`}
       <section class="tb-card eod-set">
         <h4>Who sees End my day</h4>
-        <div class="fe-seg">${[["all", "Everyone"], ["injectors", "Injectors only"]].map(([v, l]) =>
-          `<label class="fe-seg-btn"><input type="radio" name="eod-who" data-s="who" value="${v}"${c.who === v ? " checked" : ""} /><span>${l}</span></label>`).join("")}</div>
+        <p class="muted">Everyone. Injectors count their kit first, then answer the questions.</p>
         <label class="fe-check"><input type="checkbox" data-s="kitCheck"${c.kitCheck ? " checked" : ""} />
           Injectors count their kit (units left) before answering</label>
       </section>

@@ -121,7 +121,7 @@ export async function initEndOfDay(staff, { onLogout: lo } = {}) {
     const [cfg, day] = await Promise.all([getEndOfDaySettings(), getMyKitDay().catch(() => null)]);
     if (g !== gen) return;
     Object.assign(st, {
-      cfg, show: cfg.who === "all" || staff.injector === true, prompt: cfg.prompt !== false,
+      cfg, show: true, prompt: cfg.prompt !== false,   // End of day is for everyone; injectors also count their kit
       remind: Number(cfg.remindBefore) || 0, started: !!(day && (day.start || day.end)), dayKey: dayKey(), planAt: 0,
     });
     btn.hidden = !st.show;

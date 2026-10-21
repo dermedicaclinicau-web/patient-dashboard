@@ -44,7 +44,7 @@ export function cleanQuestion(q = {}) {
 
 export function cleanEodSettings(s = {}) {
   return {
-    who: s.who === "injectors" ? "injectors" : "all",
+    who: "all",   // End of day is always for everyone
     kitCheck: s.kitCheck !== false,
     prompt: s.prompt !== false,
     remindBefore: [0, 5, 10, 15, 30, 45, 60].includes(Number(s.remindBefore)) ? Number(s.remindBefore) : 15,
