@@ -119,6 +119,7 @@ export function mountRecall(container, { staff = null } = {}) {
   root.className = "page rc";
   root.innerHTML = `
     <div class="rc-top"><h2>Recall</h2><span class="inv-spacer"></span>
+      <a class="lh-btn is-quiet" href="#/recall/messages">Texts & emails</a>
       ${can(staff, "recall.manage") ? '<a class="lh-btn is-quiet" href="#/settings/recall">Recall settings</a>' : ""}</div>
     <div class="rc-stats" data-role="stats"></div>
     <div class="rc-bar">

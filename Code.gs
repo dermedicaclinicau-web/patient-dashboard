@@ -11963,6 +11963,7 @@ function handleRecall_(body) {
       return { ok: true, services: recallServices_(getConfig_()) };
     }
     if (op === 'sendEmail') return recallSendEmail_(body, session);   // anyone with Recall access (checked above)
+    if (op === 'messages') return recallMessages_(body);   // anyone with Recall access
     if (op === 'flowPreview' || op === 'flowSkip') {
       if (!manage) return { ok: false, error: 'FORBIDDEN' };
       return op === 'flowPreview' ? recallFlowPreview_(body, session) : recallFlowSkip_(body, session);
@@ -12558,6 +12559,7 @@ function recallFlowSend_(cfg, set, s, c, test) {
   const mail = { to: to, subject: (test ? '[Test] ' : '') + subject, htmlBody: inl.html, body: emailHtmlToText_(inl.html), name: 'Dermedica Clinic' };
   if (Object.keys(inl.images).length) mail.inlineImages = inl.images;
   MailApp.sendEmail(mail);
+  if (!test) recallLogEmail_(cfg, c, to, subject, 'Recall flow', '', true);
   return { sent: true, what: 'Email sent: ' + subject };
 }
 
@@ -13018,6 +13020,7 @@ function recallSendEmail_(body, session) {
     log: (Array.isArray(card.log) ? card.log : []).concat([{ at: now, by: String((me && me.name) || 'Staff'), byUid: session.uid,
       kind: 'email', what: 'Email sent: ' + subject, note: 'To ' + to }]).slice(-80),
   });
+  recallLogEmail_(cfg, Object.assign({}, card, { _id: id }), to, subject, String((me && me.name) || 'Staff'), session.uid, false);
   return { ok: true };
 }
 
@@ -13157,4 +13160,75 @@ function recallFlowSkip_(body, session) {
   if (was === 'cycle') Object.assign(patch, { stage: 'due', remindOn: '', pauseReason: '' });
   fsPatch_(cfg, RECALL_COL_ + '/' + id, patch);
   return { ok: true };
+}
+
+// ===================== Recall: Texts & emails page (#/recall/messages) =====================
+// Texts and replies come straight from Textmagic (the real record, with delivery status).
+// Emails are logged in recall_messages when they're sent (Gmail doesn't report delivery).
+
+function recallLogEmail_(cfg, c, to, subject, by, byUid, auto) {
+  try {
+    fsPatch_(cfg, 'recall_messages/' + Utilities.getUuid(), {
+      kind: 'email', at: new Date().toISOString(), to: String(to || ''), subject: String(subject || '').slice(0, 200),
+      cardId: String(c._id || ''), patientId: String(c.patientId || ''), patientName: String(c.patientName || ''),
+      category: String(c.category || ''), by: String(by || ''), byUid: String(byUid || ''), auto: !!auto,
+    });
+  } catch (e) { console.warn('Recall email log: ' + e); }
+}
+
+function recallTmGet_(path) {
+  const p = PropertiesService.getScriptProperties();
+  const user = p.getProperty('TextMagicUser'), key = p.getProperty('TextMagic');
+  if (!user || !key) return null;
+  const r = UrlFetchApp.fetch('https://rest.textmagic.com/api/v2' + path, {
+    method: 'get', headers: { 'X-TM-Username': user, 'X-TM-Key': key }, muteHttpExceptions: true,
+  });
+  if (r.getResponseCode() >= 300) throw new Error('Textmagic ' + r.getResponseCode() + ': ' + r.getContentText().slice(0, 200));
+  return JSON.parse(r.getContentText());
+}
+
+// "61414498026" or "0414 498 026" → "0414498026" (the same as mobileKey on recall cards)
+function recallMobKey_(s) {
+  let d = String(s || '').replace(/\D/g, '');
+  if (/^614\d{8}$/.test(d)) d = '0' + d.slice(2);
+  if (/^4\d{8}$/.test(d)) d = '0' + d;
+  return /^04\d{8}$/.test(d) ? d : '';
+}
+
+function recallMessages_(body) {
+  const cfg = getConfig_();
+  const kind = body.kind === 'replies' ? 'replies' : 'messages';
+  const page = Math.max(1, Math.min(500, Math.floor(Number(body.page) || 1)));
+  let res;
+  try { res = recallTmGet_('/' + kind + '?page=' + page + '&limit=50'); }
+  catch (e) { return { ok: true, problem: "Couldn't reach Textmagic: " + String(e && e.message ? e.message : e).slice(0, 200) }; }
+  if (!res) return { ok: true, problem: "Textmagic isn't set up yet. Add TextMagic and TextMagicUser in Script Properties." };
+  const list = Array.isArray(res.resources) ? res.resources : [];
+  const phoneOf = function (x) { return kind === 'replies' ? x.sender : x.receiver; };
+
+  // Which patient each number belongs to (their recall card, open ones first)
+  const keys = list.map(function (x) { return recallMobKey_(phoneOf(x)); }).filter(function (k, i, a) { return k && a.indexOf(k) === i; });
+  const cards = {};
+  for (let i = 0; i < keys.length; i += 30) {
+    try {
+      fsQuery_(cfg, RECALL_COL_, 'mobileKey', 'IN', keys.slice(i, i + 30), 300).forEach(function (c) {
+        const k = String(c.mobileKey || '');
+        const was = cards[k];
+        if (!was || (was.status !== 'open' && c.status === 'open')
+          || (was.status === c.status && String(c.updatedAt || '') > String(was.updatedAt || ''))) cards[k] = c;
+      });
+    } catch (e) { console.warn('Recall messages: card lookup ' + e); }
+  }
+  const rows = list.map(function (x) {
+    const k = recallMobKey_(phoneOf(x));
+    const c = k ? cards[k] : null;
+    const tmName = [x.firstName, x.lastName].filter(Boolean).join(' ');
+    return {
+      id: String(x.id || ''), at: String(x.messageTime || ''), phone: k || String(phoneOf(x) || ''),
+      text: String(x.text || ''), status: String(x.status || ''), parts: Number(x.partsCount || 0),
+      name: c ? String(c.patientName || '') : tmName, patientId: c ? String(c.patientId || '') : '',
+      category: c ? String(c.category || '') : '',
+    };
+  });
+  return { ok: true, rows: rows, page: page, pageCount: Number(res.pageCount || 1) };
 }

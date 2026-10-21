@@ -93,6 +93,10 @@ service cloud.firestore {
       allow read: if can('recall.work') || can('recall.manage');
       allow write: if false;
     }
+    match /recall_messages/{id} {
+      allow read: if can('recall.work') || can('recall.manage');
+      allow write: if false;
+    }
     // Recall settings (config: the settings page) and the last check (status: Apps Script only)
     match /recall_settings/{id} {
       allow read: if isStaff();

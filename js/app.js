@@ -260,7 +260,16 @@ const PAGES = {
   inventory: (el, param) => mountInventory(el, { param, staff: currentStaff }),
   reports: (el, param) => mountReports(el, { param, staff: currentStaff }),
   staff: (el) => mountStaffManager(el, { staff: currentStaff }),
-  recall: (el) => mountRecall(el, { staff: currentStaff }),
+  recall: (el, param) => {
+    if (String(param || "").split("/")[0] !== "messages") return mountRecall(el, { staff: currentStaff });
+    return import("./recall-messages.js")
+      .then((m) => m.mountRecallMessages(el, { staff: currentStaff }))
+      .catch((err) => {
+        console.error("Texts & emails failed to load:", err);
+        el.innerHTML = `<section class="page"><div class="state error"><strong>Texts & emails couldn't load</strong>
+          ${escapeHtml(err && err.message ? err.message : "Refresh and try again.")}</div></section>`;
+      });
+  },
   settings: (el, param) => {
     if (String(param || "").split("/")[0] === "recall") {
       const sub = String(param).split("/")[1] || "";
