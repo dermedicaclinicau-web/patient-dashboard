@@ -96,6 +96,7 @@
                   "./js/print-task.js",
                   "./js/public-form.js",
                   "./js/purchase-order.js",
+                  "./js/recall-flow.js",
                   "./js/recall-settings.js",
                   "./js/recall.js",
                   "./js/receive-po.js",
@@ -163,6 +164,6 @@
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261021-083015",
-    "v":  "20261021-083015"
+    "version":  "20261021-084637",
+    "v":  "20261021-084637"
 }

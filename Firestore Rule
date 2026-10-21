@@ -96,16 +96,21 @@ service cloud.firestore {
     // Recall settings (config: the settings page) and the last check (status: Apps Script only)
     match /recall_settings/{id} {
       allow read: if isStaff();
-      allow write: if can('recall.manage') && id == 'config'
-        && request.resource.data.updatedByUid == request.auth.uid
-        && request.resource.data.categories is list && request.resource.data.categories.size() <= 30
-        && request.resource.data.team is list && request.resource.data.team.size() <= 30
-        && request.resource.data.reasons is list && request.resource.data.reasons.size() <= 20
-        && (!('skipServices' in request.resource.data)
-            || (request.resource.data.skipServices is list && request.resource.data.skipServices.size() <= 40))
-        && (!('sms' in request.resource.data) || request.resource.data.sms is map);
+      allow write: if can('recall.manage') && request.resource.data.updatedByUid == request.auth.uid && (
+        (id == 'config'
+          && request.resource.data.categories is list && request.resource.data.categories.size() <= 30
+          && request.resource.data.team is list && request.resource.data.team.size() <= 30
+          && request.resource.data.reasons is list && request.resource.data.reasons.size() <= 20
+          && (!('skipServices' in request.resource.data)
+              || (request.resource.data.skipServices is list && request.resource.data.skipServices.size() <= 40))
+          && (!('sms' in request.resource.data) || request.resource.data.sms is map))
+        || (id == 'flow'
+          && request.resource.data.steps is list && request.resource.data.steps.size() <= 40
+          && request.resource.data.trigger is map && request.resource.data.stop is map
+          && request.resource.data.on is bool));
     }
-    // A permission from the login token (Admins have everything)
+    
+        // A permission from the login token (Admins have everything)
     function can(p) {
       return isAdmin() || (isStaff() && request.auth.token.perms is list && p in request.auth.token.perms);
     }

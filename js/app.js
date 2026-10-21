@@ -262,7 +262,16 @@ const PAGES = {
   staff: (el) => mountStaffManager(el, { staff: currentStaff }),
   recall: (el) => mountRecall(el, { staff: currentStaff }),
   settings: (el, param) => {
-    if (String(param || "").split("/")[0] === "recall") return mountRecallSettings(el, { staff: currentStaff });
+    if (String(param || "").split("/")[0] === "recall") {
+      if (String(param).split("/")[1] !== "flow") return mountRecallSettings(el, { staff: currentStaff });
+      return import("./recall-flow.js")
+        .then((m) => m.mountRecallFlow(el, { staff: currentStaff }))
+        .catch((err) => {
+          console.error("Recall flow failed to load:", err);
+          el.innerHTML = `<section class="page"><div class="state error"><strong>The recall flow couldn't load</strong>
+            ${escapeHtml(err && err.message ? err.message : "Refresh and try again.")}</div></section>`;
+        });
+    }
     if (String(param || "").split("/")[0] !== "flows") return mountSettings(el, { param, staff: currentStaff });
     // Loaded only when needed, so a problem here can't stop the rest of the portal
     return import("./email-flows.js")

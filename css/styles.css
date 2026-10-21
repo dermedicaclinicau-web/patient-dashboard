@@ -7499,3 +7499,10 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
 .rc-reply p { margin: 4px 0 0; white-space: pre-wrap; color: #1e293b; }
 .rc-sms { display: grid; gap: 6px; margin: 0 0 12px; padding: 10px; border: 1px solid #99d5cf; border-radius: 12px; background: #f0fdfa; }
 .rc-sms textarea { width: 100%; box-sizing: border-box; resize: vertical; }
+
+/* Recall flow: card colours, and the flow tag on the board */
+.ef-card.is-t-text { --bar: #0284c7; }
+.ef-card.is-t-team { --bar: #d97706; }
+.ef-card.is-t-cycle, .ef-card.is-t-end { --bar: #475569; }
+.rc-tag.is-flow { background: #ede9fe; color: #5b21b6; }
+.ef-page .mk-tabs { margin-bottom: .75rem; }

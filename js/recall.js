@@ -107,6 +107,7 @@ function norm(snap) {
       ? { at: String(x.reply.at || ""), text: String(x.reply.text || ""), kind: String(x.reply.kind || "other") } : null,
     replyOpen: x.replyOpen === true, months: Number(x.months) || 0,
     lastTextAt: s("lastTextAt"), textHoldUntil: s("textHoldUntil"), texts: Number(x.texts) || 0,
+    flowState: s("flowState"), flowDueAt: Number(x.flowDueAt) || 0,
     log: Array.isArray(x.log) ? x.log : [], updatedAt: s("updatedAt"),
   };
 }
@@ -372,6 +373,10 @@ export function mountRecall(container, { staff = null } = {}) {
       c.assignedToId && c.assignedToId !== me() ? first(c.assignedToName) : ""].filter(Boolean).join(" · ");
     const tag = c.replyOpen && c.reply
       ? `<span class="rc-tag is-${esc(c.reply.kind)}">${esc(REPLY_TAG[c.reply.kind] || "Replied")}</span>`
+      : c.status === "open" && c.flowState === "wait" && c.flowDueAt
+        ? `<span class="rc-tag is-flow">Flow: waiting until ${esc(short(fmtKey(new Date(c.flowDueAt))))}</span>`
+      : c.status === "open" && c.flowState === "run" ? '<span class="rc-tag is-flow">Flow: sending soon</span>'
+      : c.status === "open" && c.flowState === "queued" ? '<span class="rc-tag is-flow">Flow: starts soon</span>'
       : c.status === "open" && !c.assignedToId && c.textHoldUntil > t ? '<span class="rc-tag">Texted · waiting for a reply</span>' : "";
     const tel = telOf(c.mobile);
     const contact = tel ? `<a class="lh-btn rc-call" href="tel:${esc(tel)}">Call</a>`

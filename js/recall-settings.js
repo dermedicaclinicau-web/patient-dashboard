@@ -31,6 +31,10 @@ export const RECALL_SMS_NAMES = {
 export const RECALL_SMS_TEMPLATE = "Hi {First name}, it's Dermedica. It's been about {Months} months since your {Treatment}, " +
   "so you're due for your next one. Reply YES and we'll call you to book.";
 const SMS_TOKENS = ["{First name}", "{Treatment}", "{Months}", "{Clinic phone}"];
+// The Settings | Flow tabs (recall-flow.js uses them too)
+export const recallTabsHtml = (active) => `<nav class="mk-tabs" aria-label="Recall settings">
+  <a href="#/settings/recall"${active === "settings" ? ' class="is-on" aria-current="page"' : ""}>Settings</a>
+  <a href="#/settings/recall/flow"${active === "flow" ? ' class="is-on" aria-current="page"' : ""}>Flow</a></nav>`;
 const STOP_LINE = "Reply STOP to opt out.";
 
 export const skipNorm = (s) => String(s ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -143,11 +147,11 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
         askDate: r.querySelector('[data-f="ask"]').checked, dnc: r.querySelector('[data-f="dnc"]').checked,
       })).filter((r) => keepEmpty || (r.label && !seen.has(r.label.toLowerCase()) && seen.add(r.label.toLowerCase()))),
       sms: {
-        on: $("smsOn").checked,
+        on: false,
         template: $("smsTpl").value.slice(0, 560) || RECALL_SMS_TEMPLATE,
         phone: $("smsPhone").value.replace(/[^\d +()-]/g, "").trim().slice(0, 30),
-        waitDays: Number($("smsWait").value) || 7,
-        perDay: Number($("smsPerDay").value) || 30,
+        waitDays: set.sms.waitDays,
+        perDay: set.sms.perDay,
       },
     };
   }
@@ -276,6 +280,7 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
     const team = new Set(set.team);
     root.innerHTML = `
       <a class="back-link" href="#/recall">← Recall</a>
+      ${recallTabsHtml("settings")}
       <div class="mc-head">
         <h2 style="margin:0">Recall settings</h2>
         <span class="fe-state is-saved" data-role="state"></span>
@@ -322,13 +327,8 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
         <section class="tb-card">
           <h4 class="mc-h">Texts</h4>
           <p class="fe-note" data-role="smsStatus"></p>
-          <label class="fe-check"><input type="checkbox" data-role="smsOn"${set.sms.on ? " checked" : ""} />
-            Send a text automatically when someone becomes due</label>
-          <p class="fe-note">Only to patients who became due in the last 7 days, between 9 am and 6 pm, and never to anyone on the
-            do-not-contact list. Staff can also send a text from any card. Replies go onto the card, and STOP puts them on the do-not-contact list.</p>
-          <div class="rc-row">Give the card to the recall team if they haven't replied or booked within
-            <select class="fb-select" data-role="smsWait">${opts([3, 5, 7, 10, 14], set.sms.waitDays, (d) => `${d} days`)}</select></div>
-          <div class="rc-row">Up to <select class="fb-select" data-role="smsPerDay">${opts([10, 20, 30, 50, 100], set.sms.perDay, (n) => String(n))}</select> automatic texts a day</div>
+          <p class="fe-note">This is the message staff start from when they press Send text on a card. Automatic texts and emails
+            are set up in the <a href="#/settings/recall/flow">Flow</a> tab. Replies go onto the card, and STOP puts them on the do-not-contact list.</p>
           <label class="lh-field"><span class="lh-label">Clinic phone (for {Clinic phone})</span>
             <input class="fe-input" data-role="smsPhone" maxlength="30" value="${esc(set.sms.phone)}" placeholder="08 9000 0000" /></label>
           <label class="lh-field"><span class="lh-label">The message</span>

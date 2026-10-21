@@ -6986,6 +6986,7 @@ function flowPurchases_(cfg, run, ctx) {
 // One fact about the patient (or this purchase / visit), worked out once per run
 function flowFact_(cfg, key, run, ctx) {
   if (key in ctx._f) return ctx._f[key];
+  if (String(key).indexOf('rc.') === 0) { ctx._f[key] = recallFact_(cfg, key, run, ctx); return ctx._f[key]; }
   const today = flowKey_(Date.now());
   let v = null;
   switch (key) {
@@ -7049,6 +7050,7 @@ function flowFact_(cfg, key, run, ctx) {
 function flowRuleOk_(cfg, r, run, ctx) {
   const type = FLOW_FIELD_TYPE_[r && r.field];
   if (!type) return false;
+  if (type === 'names' || r.field === 'rc.due_between') return recallRuleOk_(cfg, r, run, ctx);
   if (type === 'form') {
     const want = flowNorm_(r.value);
     if (!want) return false;
@@ -11617,7 +11619,7 @@ function recallSettings_(cfg) {
       .map(function (s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, 40); })
       .filter(function (s) { return s.replace(/[^A-Za-z0-9]/g, '').length >= 3; }).slice(0, 40),
     sms: {
-      on: sm.on === true,
+      on: false,   // automatic texts are now cards in the Recall flow
       template: String(sm.template || RECALL_SMS_TEMPLATE_).slice(0, 560),
       phone: String(sm.phone || '').replace(/[^\d +()-]/g, '').trim().slice(0, 30),
       waitDays: int(sm.waitDays, 1, 30, 7),
@@ -11904,7 +11906,8 @@ function recallAssign_(cfg, set, today) {
     const l = load[c.assignedToId];
     if (l) { if (c.assignedDay === today) l.today++; if (c.stage === 'call') l.open++; }
     // Waiting for an automatic text, or for a reply to one: not shared out yet
-    const held = (c.textHoldUntil && String(c.textHoldUntil) > today && !c.replyOpen) || recallWantsText_(c, set, today);
+    const held = (c.textHoldUntil && String(c.textHoldUntil) > today && !c.replyOpen) || recallWantsText_(c, set, today)
+      || ['run', 'wait', 'queued', 'cycle'].indexOf(String(c.flowState || '')) !== -1;   // the Recall flow has it
     if (c._freed && held) {
       writes.push(patchWrite_(cfg, RECALL_COL_ + '/' + c._id, { assignedToId: '', assignedToName: '', assignedDay: '', stage: 'due', updatedAt: now,
         log: (Array.isArray(c.log) ? c.log : []).concat([{ at: now, by: 'Recall', byUid: '', kind: 'auto', what: 'Back to waiting (the person it was given to is no longer active)', note: '' }]).slice(-80) }));
@@ -11959,6 +11962,10 @@ function handleRecall_(body) {
       if (!manage) return { ok: false, error: 'FORBIDDEN' };
       return { ok: true, services: recallServices_(getConfig_()) };
     }
+    if (op === 'flowTest') {
+      if (!manage) return { ok: false, error: 'FORBIDDEN' };
+      return recallFlowTest_(body, session);
+    }
     if (op === 'smsStatus' || op === 'smsTest') {
       if (!manage) return { ok: false, error: 'FORBIDDEN' };
       return recallSmsAdmin_(op, body, session);
@@ -12000,7 +12007,7 @@ function recallAction_(op, id, body, session) {
     const remind = String(body.remindOn || '');
     if (!out && !note && !remind) return { ok: true, problem: 'Choose what happened, or write a note.' };
     if (remind && !dateOk(remind)) return { ok: true, problem: 'Choose a call-back date after today.' };
-    patch = out ? { lastCallAt: now, lastCallBy: uid, lastCallDay: today } : {};
+    patch = out ? { lastCallAt: now, lastCallBy: uid, lastCallDay: today, lastOutcome: out } : {};
     if (out === 'booked') {
       add('call', 'Booked');
       Object.assign(patch, { status: 'booked', bookedFor: '', bookedAt: now, remindOn: '', pauseReason: '' });
@@ -12222,7 +12229,7 @@ function recallWantsText_(c, set, today) {
 }
 
 function recallTextSafe_(cfg, set, today) {
-  try { return recallAutoText_(cfg, set, today); }
+  try { return recallFlowRun_(cfg, set, today); }
   catch (e) { console.error('Recall texts: ' + (e && e.stack ? e.stack : e)); return 0; }
 }
 
@@ -12374,7 +12381,9 @@ function recallOneReply_(cfg, set, x, memo) {
 
   const log = (Array.isArray(card.log) ? card.log : []).concat([entry]);
   const patch = { replyOpen: true, reply: reply, textHoldUntil: '', updatedAt: now };
-  if (card.status === 'open') {
+  if (card.status === 'open' && ['run', 'wait', 'queued'].indexOf(String(card.flowState || '')) !== -1) {
+    // In the Recall flow: the flow decides what happens next (a Wait set to "or until they reply" moves on at the next check)
+  } else if (card.status === 'open') {
     const active = getStaffDocs_().filter(function (s) { return s.active !== false; });
     const find = function (sid) { return active.filter(function (s) { return s.id === sid; })[0] || null; };
     let to = card.assignedToId ? find(card.assignedToId) : null;
@@ -12418,4 +12427,421 @@ function recallSmsAdmin_(op, body, session) {
   catch (e) { return { ok: true, problem: "The test wasn't sent: " + String(e && e.message ? e.message : e) }; }
   cache.put(rk, String(used + 1), 3600);
   return { ok: true };
+}
+
+// ===================== Recall: the flow (Recall settings → Flow) =====================
+// recall_settings/flow: { on, trigger: { rules, withinDays, dailyMax }, stop: { rules }, steps, style }.
+// Runs every hour inside recallRun_, before cards are shared out. A card's place in the flow is kept on the card:
+//   flowState: queued (starts when there's room today) · run (sending, or waiting for 9 am) · wait · team · cycle · skip · done
+//   flowNext (the next card's id), flowDueAt, flowReply, flowTeam, flowCycle, flowStartedAt
+// Booked, came in or STOP: the card leaves "open", so the flow stops. Staff picking up a card take it over.
+
+const RECALL_FLOW_DOC_ = RECALL_SET_ + '/flow';
+const RECALL_FLOW_LIVE_ = ['run', 'wait', 'team', 'cycle', 'queued'];
+
+// The "This recall" rules (flow-rules.js → group "This recall")
+Object.assign(FLOW_FIELD_TYPE_, {
+  'rc.category': 'names', 'rc.service': 'text', 'rc.staff': 'text', 'rc.months': 'number', 'rc.overdue': 'number',
+  'rc.due_between': 'range', 'rc.cycle': 'number', 'rc.tries': 'number', 'rc.texts': 'number', 'rc.emails': 'number',
+  'rc.last_out': 'choice', 'rc.replied': 'bool', 'rc.replied_yes': 'bool', 'rc.reply_text': 'text',
+  'rc.assigned': 'bool', 'rc.assigned_to': 'text', 'rc.other_due': 'bool',
+});
+Object.keys(FLOW_FIELD_TYPE_).forEach(function (k) {
+  if (k.indexOf('rc.') === 0) FLOW_RULE_COST_[k] = k === 'rc.other_due' ? 2 : 0;
+});
+
+function recallFact_(cfg, key, run, ctx) {
+  const c = run.rc || {};
+  const today = flowKey_(Date.now());
+  const since = String(c.flowStartedAt || '');
+  const rep = c.reply && c.reply.kind !== 'stop' && String(c.reply.at || '') >= since ? c.reply : null;
+  switch (key) {
+    case 'rc.category': return [String(c.category || '')];
+    case 'rc.service': return Array.isArray(c.lastServices) ? c.lastServices : [];
+    case 'rc.staff': return String(c.lastStaff || '');
+    case 'rc.months': { const d = c.lastVisit ? flowDays_(c.lastVisit, today) : null; return d === null ? null : Math.round(d / 30.4); }
+    case 'rc.overdue': return c.dueDate ? flowDays_(c.dueDate, today) : null;
+    case 'rc.cycle': return Number(c.flowCycle || 1);
+    case 'rc.tries': return Number(c.attempts || 0);
+    case 'rc.texts': return Number(c.texts || 0);
+    case 'rc.emails': return Number(c.emails || 0);
+    case 'rc.last_out': return String(c.lastOutcome || 'none');
+    case 'rc.replied': return !!rep;
+    case 'rc.replied_yes': return !!(rep && rep.kind === 'yes');
+    case 'rc.reply_text': return rep ? String(rep.text || '') : '';
+    case 'rc.assigned': return !!c.assignedToId;
+    case 'rc.assigned_to': return String(c.assignedToName || '');
+    case 'rc.other_due':
+      return !!c.patientId && fsQuery_(cfg, RECALL_COL_, 'patientId', 'EQUAL', c.patientId, 50)
+        .some(function (x) { return x._id !== c._id && x.status === 'open'; });
+  }
+  return null;
+}
+
+// "Treatment category is one of …" and "Due date between …"
+function recallRuleOk_(cfg, r, run, ctx) {
+  if (r.field === 'rc.due_between') {
+    const from = String(r.from || ''), to = String(r.to || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || to < from) return false;
+    const d = String((run.rc || {}).dueDate || '');
+    const has = !!d && d >= from && d <= to;
+    return r.op === 'no' ? !has : has;
+  }
+  const wanted = (Array.isArray(r.value) ? r.value : []).map(flowNorm_).filter(Boolean);
+  if (!wanted.length) return false;
+  const v = flowFact_(cfg, r.field, run, ctx);
+  const has = (Array.isArray(v) ? v : [v]).some(function (x) { return wanted.indexOf(flowNorm_(x)) !== -1; });
+  return r.op === 'none' ? !has : has;
+}
+
+// The blanks in recall texts and emails
+function recallFlowVals_(c, set) {
+  const cat = set.categories.filter(function (x) { return x.key === c.category; })[0];
+  const d = c.lastVisit ? flowDays_(c.lastVisit, flowKey_(Date.now())) : null;
+  const name = String(c.patientName || '');
+  return {
+    'first name': name.replace(/\([^)]*\)/g, ' ').trim().split(/\s+/)[0] || 'there',
+    'full name': name || 'there',
+    'treatment': (cat && cat.smsName) || 'treatment',
+    'months': String(d !== null ? Math.max(1, Math.round(d / 30.4)) : (cat ? cat.months : '')),
+    'due date': recLongDate_(c.dueDate) || '',
+    'last visit': recLongDate_(c.lastVisit) || '',
+    'last seen with': String(c.lastStaff || '') || 'our team',
+    'clinic phone': set.sms.phone || '',
+  };
+}
+
+// One text or email card. test: { email, mobile, steps } sends to the person testing instead.
+function recallFlowSend_(cfg, set, s, c, test) {
+  const k = s.cfg || {};
+  const vals = recallFlowVals_(c, set);
+  const what = s.type === 'text' ? 'Text' : 'Email';
+  if (!test) {
+    const b = recallTextBlocked_(cfg, c.patientId);
+    if (b) return { sent: false, what: what + ' skipped: on the do-not-contact list' };
+  }
+  if (s.type === 'text') {
+    const auth = tmAuth_();
+    if (!auth) return { sent: false, what: "Text skipped: Textmagic isn't set up" };
+    const to = recallPhone61_(test ? test.mobile : c.mobile);
+    if (!to) return { sent: false, what: test ? 'Text skipped: no test mobile was given' : 'Text skipped: no mobile number' };
+    const text = recallSmsText_(flowFill_(k.message, vals, false));
+    try { tmSend_(auth, to, (test ? '[Test] ' : '') + text); }
+    catch (e) { return { sent: false, what: 'Text not sent: ' + String(e && e.message ? e.message : e).slice(0, 150) }; }
+    return { sent: true, what: 'Text sent' + (test ? ' to ' + test.mobile : ''), text: text };
+  }
+  const to = test ? test.email : mktEmail_(c.email);
+  if (!isEmail_(to)) return { sent: false, what: 'Email skipped: no email address' };
+  if (!test) {
+    const sup = mktSuppressed_(cfg, to);
+    if (sup && sup.reason === 'bounced') return { sent: false, what: 'Email skipped: emails to this address bounce' };
+  }
+  if (MailApp.getRemainingDailyQuota() < MKT_RESERVE_ / 3) return { sent: false, what: "Email not sent: the clinic's daily email limit is nearly used" };
+  const subject = flowFill_(k.subject, vals, false).replace(/\s+/g, ' ').trim().slice(0, 200) || 'A message from Dermedica';
+  let html = sanitizeEmailHtml_(flowFillHtml_(String(k.html || k.body || ''), vals)) + mktFooterHtml_(test ? '' : c.patientId, to, 'recall');
+  if (test) html = flowTestBanner_('Recall', 'This would have gone to ' + (c.patientName || 'the patient') + '.') + html;
+  const inl = inlineTaskImages_(cfg, html);
+  const mail = { to: to, subject: (test ? '[Test] ' : '') + subject, htmlBody: inl.html, body: emailHtmlToText_(inl.html), name: 'Dermedica Clinic' };
+  if (Object.keys(inl.images).length) mail.inlineImages = inl.images;
+  MailApp.sendEmail(mail);
+  return { sent: true, what: 'Email sent: ' + subject };
+}
+
+// Who a "Give to the recall team" card goes to
+function recallFlowPerson_(cfg, set, k, c, memo) {
+  const active = getStaffDocs_().filter(function (s) { return s.active !== false; });
+  if (k.who === 'person') return active.filter(function (s) { return s.id === String(k.personId || ''); })[0] || null;
+  if (k.who === 'last') {
+    const n = flowNorm_(c.lastStaff);
+    const hit = n && active.filter(function (s) {
+      const sn = flowNorm_(s.name);
+      return sn === n || sn.split(' ')[0] === n || sn.indexOf(n) !== -1;
+    })[0];
+    if (hit) return hit;
+  }
+  return recallPickPerson_(cfg, set, memo);
+}
+
+// Moves one card along from c.flowNext until it has to wait. base: changes saved with it.
+function recallFlowAdvance_(cfg, flow, set, c, memo, test, base) {
+  const now = new Date().toISOString();
+  const today = flowKey_(Date.now());
+  const log = (Array.isArray(c.log) ? c.log : []).slice(-70);
+  const note = function (what, text) {
+    if (test) test.steps.push(what + (text ? ': "' + text + '"' : ''));
+    else log.push({ at: now, by: 'Recall flow', byUid: '', kind: 'flow', what: what, note: text || '' });
+  };
+  const patch = Object.assign({}, base || {});
+  const run = { _id: c._id || 'test', patientId: c.patientId, kind: 'recall', product: '', purchaseDate: today,
+    sourceKey: docId_(c.pttId || c.patientId), rc: c, apptKeys: [] };
+  let ctx = null;
+  try { ctx = c.patientId ? flowCtx_(cfg, run, memo) : null; } catch (e) { console.warn('Recall flow: patient not read: ' + e); }
+  const done = function (extra) { Object.assign(patch, { flowState: 'done', flowNext: '' }, extra || {}); };
+  let next = String(c.flowNext || '');
+  let sent = 0;
+  let halted = false;
+
+  for (let n = 0; n < 15 && !halted; n++) {
+    if (!next) { note('The flow has finished. The card goes to the recall team as usual'); done(); halted = true; break; }
+    const loc = flowFind_(flow.steps, next);
+    if (!loc) { note('The flow stopped: it was changed and its next card was removed'); done(); halted = true; break; }
+    const s = loc.list[loc.i];
+    const k = s.cfg || {};
+    const after = flowAfter_(loc);
+    const afterId = after ? String(after.id || '') : '';
+
+    if (s.type === 'text' || s.type === 'email') {
+      if (!test && ctx && flowHasRules_((flow.stop || {}).rules) && flowGroupOk_(cfg, flow.stop.rules, run, ctx)) {
+        note('The flow stopped: one of its stop rules matched'); done(); halted = true; break;
+      }
+      const win = flowSendWindow_(Date.now());
+      if (!test && win > Date.now()) { Object.assign(patch, { flowState: 'run', flowNext: next, flowDueAt: win }); halted = true; break; }
+      const r = recallFlowSend_(cfg, set, s, c, test);
+      note(r.what, r.text);
+      if (r.sent) {
+        sent++;
+        if (s.type === 'text') {
+          c.texts = Number(c.texts || 0) + 1;
+          Object.assign(patch, { texts: c.texts, lastTextAt: now, lastTextBy: '', lastTextByName: 'Recall flow' });
+        } else {
+          c.emails = Number(c.emails || 0) + 1;
+          patch.emails = c.emails;
+        }
+      }
+      next = afterId;
+      continue;
+    }
+    if (s.type === 'wait') {
+      note('Waiting ' + flowWaitText_(k) + (k.reply !== false ? ', or until they reply' : '') + (test ? ' (skipped in a test)' : ''));
+      if (test) { next = afterId; continue; }
+      Object.assign(patch, { flowState: 'wait', flowNext: afterId, flowDueAt: flowAddWait_(Date.now(), k), flowReply: k.reply !== false });
+      halted = true;
+      break;
+    }
+    if (s.type === 'branch') {
+      const yes = ctx ? flowGroupOk_(cfg, k.rules, run, ctx) : false;
+      note('If / else: ' + (yes ? 'Yes' : 'No'));
+      const path = (yes ? k.yes : k.no) || [];
+      next = path.length ? String(path[0].id || '') : afterId;
+      continue;
+    }
+    if (s.type === 'team') {
+      const to = recallFlowPerson_(cfg, set, k, c, memo);
+      note(to ? 'Given to ' + to.name + ' to call' : 'Waiting for the recall team');
+      if (test) { next = afterId; continue; }
+      Object.assign(patch, {
+        flowState: 'team', flowNext: afterId,
+        flowTeam: { tries0: Number(c.attempts || 0), tries: Number(k.tries) || 0,
+          until: Number(k.days) > 0 ? flowAddDaysKey_(today, Number(k.days)) : '' },
+        stage: to ? 'call' : 'due', assignedToId: to ? to.id : '', assignedToName: to ? String(to.name || '') : '',
+        assignedDay: to ? today : '',
+      });
+      halted = true;
+      break;
+    }
+    if (s.type === 'cycle') {
+      const max = Math.max(1, Number(k.max) || 1);
+      const round = Number(c.flowCycle || 1);
+      const reason = String(k.reason || 'No response').slice(0, 60);
+      if (round > max) {
+        note('Recall closed after ' + round + ' rounds: ' + reason);
+        if (!test) done({ status: 'closed', closeReason: reason, closedAt: now, closedBy: 'Recall flow', remindOn: '' });
+        halted = true;
+        break;
+      }
+      const num = Math.max(1, Math.floor(Number(k.num) || 1));
+      const back = k.unit === 'weeks' ? flowAddDaysKey_(today, 7 * num) : flowAddMonthsKey_(today, num);
+      note('Trying again on ' + recLongDate_(back));
+      if (!test) {
+        Object.assign(patch, { flowState: 'cycle', flowNext: '', stage: 'later', remindOn: back, pauseReason: 'Recall flow',
+          assignedToId: '', assignedToName: '', assignedDay: '' });
+      }
+      halted = true;
+      break;
+    }
+    if (s.type === 'end') {
+      const reason = String(k.reason || 'No response').slice(0, 60);
+      note('Recall closed: ' + reason);
+      if (!test) done({ status: 'closed', closeReason: reason, closedAt: now, closedBy: 'Recall flow', remindOn: '' });
+      halted = true;
+      break;
+    }
+    next = afterId;   // a card type this version doesn't know
+  }
+  if (!halted) Object.assign(patch, { flowState: 'run', flowNext: next, flowDueAt: Date.now() });   // carries on next hour
+  if (test) return { sent: sent };
+  patch.log = log.slice(-80);
+  patch.updatedAt = now;
+  fsPatch_(cfg, RECALL_COL_ + '/' + c._id, patch);
+  return { sent: sent };
+}
+
+// A card already in the flow: is it time for the next step?
+function recallFlowTick_(cfg, flow, set, c, memo, today, nowMs) {
+  const st = String(c.flowState || '');
+  const now = new Date().toISOString();
+  const add = function (what) {
+    return (Array.isArray(c.log) ? c.log : []).concat([{ at: now, by: 'Recall flow', byUid: '', kind: 'flow', what: what, note: '' }]).slice(-80);
+  };
+  if ((st === 'run' || st === 'wait') && c.assignedToId) {   // someone picked it up: they take over
+    fsPatch_(cfg, RECALL_COL_ + '/' + c._id, { flowState: 'done', flowNext: '', updatedAt: now,
+      log: add('The flow stopped: ' + (c.assignedToName || 'someone') + ' has it now') });
+    return 0;
+  }
+  if (st === 'run' || st === 'wait') {
+    const replied = c.flowReply === true && c.replyOpen === true;
+    if (Number(c.flowDueAt || 0) > nowMs && !replied) return 0;
+    return recallFlowAdvance_(cfg, flow, set, c, memo, null).sent;
+  }
+  if (st === 'team') {
+    if (c.stage === 'later') return 0;   // a staff call-back: their decision
+    const tm = c.flowTeam || {};
+    const tries = Number(tm.tries || 0) > 0 && Number(c.attempts || 0) - Number(tm.tries0 || 0) >= Number(tm.tries);
+    const late = !!tm.until && String(tm.until) <= today;
+    if (!tries && !late) return 0;
+    c.log = add(tries ? 'Moved on after ' + tm.tries + ' call' + (Number(tm.tries) === 1 ? '' : 's') + ' without a booking'
+      : 'Moved on: the recall team had it for long enough');
+    Object.assign(c, { stage: 'due', assignedToId: '', assignedToName: '', assignedDay: '' });
+    return recallFlowAdvance_(cfg, flow, set, c, memo, null, { stage: 'due', assignedToId: '', assignedToName: '', assignedDay: '' }).sent;
+  }
+  if (st === 'cycle') {
+    if (c.stage === 'later' && c.remindOn && String(c.remindOn) > today) return 0;
+    c.flowCycle = Number(c.flowCycle || 1) + 1;
+    c.log = add('Starting the flow again (round ' + c.flowCycle + ')');
+    c.flowNext = String((flow.steps[0] || {}).id || '');
+    c.flowStartedAt = now;
+    return recallFlowAdvance_(cfg, flow, set, c, memo, null,
+      { flowCycle: c.flowCycle, flowStartedAt: now, stage: 'due', remindOn: '', pauseReason: '', replyOpen: false }).sent;
+  }
+  return 0;
+}
+
+// Every hour (recallRun_ → recallTextSafe_). Returns how many texts and emails went.
+function recallFlowRun_(cfg, set, today) {
+  let flow = null;
+  try { flow = fsGetDoc_(cfg, RECALL_FLOW_DOC_); } catch (e) { console.warn('Recall flow not read: ' + e); return 0; }
+  const nowIso = new Date().toISOString();
+  if (!flow || flow.on !== true || !Array.isArray(flow.steps) || !flow.steps.length) {
+    // Turned off: cards still in it go back to the recall team as usual
+    const writes = fsQuery_(cfg, RECALL_COL_, 'flowState', 'IN', ['run', 'wait', 'queued'], 3000).map(function (c) {
+      return patchWrite_(cfg, RECALL_COL_ + '/' + c._id, { flowState: 'done', flowNext: '', updatedAt: nowIso,
+        log: (Array.isArray(c.log) ? c.log : []).concat([{ at: nowIso, by: 'Recall flow', byUid: '', kind: 'flow',
+          what: 'The flow was turned off. The card goes to the recall team as usual', note: '' }]).slice(-80) });
+    });
+    if (writes.length) commitWrites_(cfg, writes, 100);
+    return 0;
+  }
+  const t = flow.trigger || {};
+  const memo = { pts: {} };
+  const deadline = Date.now() + 3.5 * 60000;
+  const nowMs = Date.now();
+  let sent = 0;
+
+  // 1. Cards already in the flow
+  fsQuery_(cfg, RECALL_COL_, 'flowState', 'IN', ['run', 'wait', 'team', 'cycle'], 3000).forEach(function (c) {
+    if (Date.now() > deadline || c.status !== 'open') return;   // booked or closed: the flow has stopped for it
+    try { sent += recallFlowTick_(cfg, flow, set, c, memo, today, nowMs); }
+    catch (e) { console.error('Recall flow ' + c._id + ': ' + (e && e.stack ? e.stack : e)); }
+  });
+
+  // 2. Cards that have become due start it (queued ones first, then most recently due)
+  const win = Number(t.withinDays);
+  const from = win > 0 ? flowAddDaysKey_(today, -win) : '';
+  const pool = from ? fsQuery_(cfg, RECALL_COL_, 'dueDate', 'GREATER_THAN_OR_EQUAL', from, 3000)
+    : fsQuery_(cfg, RECALL_COL_, 'status', 'EQUAL', 'open', 10000);
+  const cands = pool.filter(function (c) {
+    return c.status === 'open' && c.stage === 'due' && !c.assignedToId && String(c.dueDate) <= today
+      && (!c.flowState || c.flowState === 'queued');
+  }).sort(function (a, b) {
+    return (a.flowState === 'queued' ? 0 : 1) - (b.flowState === 'queued' ? 0 : 1) || String(b.dueDate).localeCompare(String(a.dueDate));
+  });
+  const props = PropertiesService.getScriptProperties();
+  const pk = 'RECALL_FLOW_' + today;
+  let started = Number(props.getProperty(pk) || 0);
+  const cap = Math.max(1, Math.min(500, Number(t.dailyMax) || 25));
+  const first = String((flow.steps[0] || {}).id || '');
+  const queue = [];
+  for (let i = 0; i < cands.length; i++) {
+    if (Date.now() > deadline) break;
+    const c = cands[i];
+    if (started >= cap) {
+      if (c.flowState !== 'queued') queue.push(patchWrite_(cfg, RECALL_COL_ + '/' + c._id, { flowState: 'queued' }));
+      continue;
+    }
+    try {
+      if (flowHasRules_(t.rules)) {
+        const run = { _id: c._id, patientId: c.patientId, kind: 'recall', product: '', purchaseDate: today,
+          sourceKey: docId_(c.pttId || c.patientId), rc: c, apptKeys: [] };
+        const ctx = flowCtx_(cfg, run, memo);
+        if (!ctx || !flowGroupOk_(cfg, t.rules, run, ctx)) {
+          fsPatch_(cfg, RECALL_COL_ + '/' + c._id, { flowState: 'skip', updatedAt: nowIso,
+            log: (Array.isArray(c.log) ? c.log : []).concat([{ at: nowIso, by: 'Recall flow', byUid: '', kind: 'flow',
+              what: "Not started in the flow: they don't match its start rules", note: '' }]).slice(-80) });
+          continue;
+        }
+      }
+      started++;
+      props.setProperty(pk, String(started));
+      c.flowNext = first;
+      c.flowCycle = 1;
+      c.flowStartedAt = nowIso;
+      c.log = (Array.isArray(c.log) ? c.log : []).concat([{ at: nowIso, by: 'Recall flow', byUid: '', kind: 'flow', what: 'Started the recall flow', note: '' }]);
+      sent += recallFlowAdvance_(cfg, flow, set, c, memo, null, { flowState: 'run', flowCycle: 1, flowStartedAt: nowIso }).sent;
+    } catch (e) { console.error('Recall flow start ' + c._id + ': ' + (e && e.stack ? e.stack : e)); }
+  }
+  if (queue.length) commitWrites_(cfg, queue, 100);
+  if (sent) console.log('Recall flow: ' + sent + ' text(s) and email(s) sent.');
+  return sent;
+}
+
+// Recall settings → Flow → Test with a patient: the whole flow now, waits skipped, everything to the person testing
+function recallFlowTest_(body, session) {
+  const cfg = getConfig_();
+  const flow = fsGetDoc_(cfg, RECALL_FLOW_DOC_);
+  if (!flow || !Array.isArray(flow.steps) || !flow.steps.length) return { ok: true, problem: 'Add some cards to the flow first.' };
+  const me = getStaffDocs_().filter(function (s) { return s.id === session.uid; })[0];
+  if (!me || !isEmail_(me.email)) return { ok: true, problem: 'Add your email address in Staff first, so the test emails reach you.' };
+  const doc = flowPatient_(cfg, String(body.patientId || ''));
+  if (!doc) return { ok: true, problem: "That patient couldn't be found." };
+  const cache = CacheService.getScriptCache();
+  const rk = 'rc_flowtest_' + session.uid;
+  const used = Number(cache.get(rk) || 0);
+  if (used >= 15) return { ok: true, problem: "You've run a lot of tests in the last hour. Try again a bit later." };
+  cache.put(rk, String(used + 1), 3600);
+
+  const set = recallSettings_(cfg);
+  const cat = String(body.category || '');
+  let c = fsQuery_(cfg, RECALL_COL_, 'patientId', 'EQUAL', doc._id, 50)
+    .filter(function (x) { return !cat || x.category === cat; })
+    .sort(function (a, b) {
+      return (a.status === 'open' ? 0 : 1) - (b.status === 'open' ? 0 : 1) || String(b.dueDate).localeCompare(String(a.dueDate));
+    })[0];
+  const steps = [];
+  if (!c) {
+    const w = flowWho_(doc);
+    const def = set.categories.filter(function (x) { return x.key === cat; })[0] || set.categories.filter(function (x) { return x.on; })[0] || set.categories[0];
+    c = { _id: 'test', patientId: doc._id, pttId: String(doc.PttID || doc._id), patientName: w.name, mobile: String(doc.Mobile || ''),
+      email: String(doc.Email || ''), category: def ? def.key : '', months: def ? def.months : 6, lastVisit: '', lastServices: [],
+      lastStaff: '', dueDate: flowKey_(Date.now()), attempts: 0, texts: 0, emails: 0 };
+    steps.push("They have no recall card" + (cat ? ' for ' + cat : '') + ', so an example one was used (' + c.category + ').');
+  } else {
+    c = JSON.parse(JSON.stringify(c));
+    steps.push('Using their ' + c.category + ' recall card (due ' + recLongDate_(c.dueDate) + ').');
+  }
+  c.flowNext = String(flow.steps[0].id || '');
+  c.flowCycle = 1;
+  c.flowStartedAt = new Date().toISOString();
+  const memo = { pts: {} };
+  memo.pts[doc._id] = doc;
+  const t = flow.trigger || {};
+  if (flowHasRules_(t.rules)) {
+    const run = { _id: c._id, patientId: doc._id, kind: 'recall', product: '', purchaseDate: flowKey_(Date.now()),
+      sourceKey: docId_(c.pttId || doc._id), rc: c, apptKeys: [] };
+    const ctx = flowCtx_(cfg, run, memo);
+    steps.push(ctx && flowGroupOk_(cfg, t.rules, run, ctx) ? 'They match the start rules.'
+      : "Heads up: they don't match the start rules, so the real flow wouldn't start for them. The test carries on anyway.");
+  }
+  const test = { email: me.email, mobile: String(body.mobile || ''), steps: steps };
+  const r = recallFlowAdvance_(cfg, flow, set, c, memo, test);
+  return { ok: true, steps: test.steps, sent: r.sent, to: me.email };
 }

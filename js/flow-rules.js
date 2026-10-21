@@ -34,7 +34,30 @@ export const PLAN_STATUSES = [
   ["in_progress", "In progress"], ["completed", "Completed"], ["closed", "Closed"],
 ];
 
+export const RECALL_OUTCOMES = [["none", "No calls yet"], ["no_answer", "No answer"], ["voicemail", "Left voicemail"],
+  ["spoke", "Spoke to them"], ["texted", "Sent a text"]];
+
 export const RULE_FIELDS = [
+  // Recall flow only (recall: true): about this recall card
+  { key: "rc.category", group: "This recall", label: "Treatment category", type: "names", recall: true },
+  { key: "rc.service", group: "This recall", label: "Last treatment's service", type: "text", hint: "e.g. Lip", recall: true },
+  { key: "rc.staff", group: "This recall", label: "Last seen with", type: "text", hint: "Staff name", recall: true },
+  { key: "rc.months", group: "This recall", label: "Time since their last treatment", type: "number", unit: "months", recall: true },
+  { key: "rc.overdue", group: "This recall", label: "Time overdue", type: "number", unit: "days", recall: true },
+  { key: "rc.due_between", group: "This recall", label: "Due date", type: "range", recall: true,
+    ops: [["yes", "was between"], ["no", "wasn't between"]] },
+  { key: "rc.cycle", group: "This recall", label: "Round of the flow (1 = the first time)", type: "number", recall: true },
+  { key: "rc.tries", group: "This recall", label: "Calls tried so far", type: "number", recall: true },
+  { key: "rc.texts", group: "This recall", label: "Texts sent so far", type: "number", recall: true },
+  { key: "rc.emails", group: "This recall", label: "Recall emails sent so far", type: "number", recall: true },
+  { key: "rc.last_out", group: "This recall", label: "Last call outcome", type: "choice", options: RECALL_OUTCOMES, recall: true },
+  { key: "rc.replied", group: "This recall", label: "They replied to a text", type: "bool", recall: true },
+  { key: "rc.replied_yes", group: "This recall", label: "They replied YES", type: "bool", recall: true },
+  { key: "rc.reply_text", group: "This recall", label: "Their reply", type: "text", hint: "e.g. busy", recall: true },
+  { key: "rc.assigned", group: "This recall", label: "Given to someone", type: "bool", recall: true },
+  { key: "rc.assigned_to", group: "This recall", label: "Given to", type: "text", hint: "Staff name", recall: true },
+  { key: "rc.other_due", group: "This recall", label: "Has another treatment due too", type: "bool", recall: true },
+
   { key: "buy.product", group: "This purchase", label: "Product bought", type: "products" },
   { key: "buy.first", group: "This purchase", label: "It's the first time they've bought it", type: "bool" },
   { key: "buy.in_ssp", group: "This purchase", label: "It's in their Skin Script", type: "bool" },
@@ -74,18 +97,23 @@ export const RULE_FIELDS = [
   { key: "pt.marketing", group: "Patient", label: "Agreed to marketing emails", type: "bool" },
 ];
 const FIELD = Object.fromEntries(RULE_FIELDS.map((f) => [f.key, f]));
+// What the Recall flow offers: this recall, plus everything about the patient (not "this purchase" or "this visit")
+export const RECALL_RULE_KEYS = RULE_FIELDS
+  .filter((f) => f.recall || (!["This purchase", "This visit"].includes(f.group) && f.key !== "hist.times"))
+  .map((f) => f.key);
 
 const OPS = {
   bool: [["yes", "Yes"], ["no", "No"]],
   number: [["gt", "more than"], ["lt", "less than"], ["eq", "exactly"]],
   text: [["contains", "contains"], ["not_contains", "doesn't contain"]],
   products: [["any", "any of"], ["none", "none of"]],
+  names: [["any", "is one of"], ["none", "is not one of"]],
   choice: [["is", "is"], ["not", "is not"]],
   form: [["has", "has one named"], ["none", "has none named"]],
 };
 const opsFor = (f) => f.ops || OPS[f.type] || OPS.bool;
 function defaults(f) {
-  return { op: opsFor(f)[0][0], value: f.type === "products" ? [] : f.type === "choice" ? f.options[0][0] : "", days: "",
+  return { op: opsFor(f)[0][0], value: f.type === "products" || f.type === "names" ? [] : f.type === "choice" ? f.options[0][0] : "", days: "",
     ...(f.type === "range" ? { from: "", to: "" } : {}) };
 }
 
@@ -105,7 +133,7 @@ export function cleanGroup(g) {
       const d = defaults(f);
       const op = opsFor(f).some((o) => o[0] === r.op) ? r.op : d.op;
       let value = r.value;
-      if (f.type === "products") value = (Array.isArray(value) ? value : []).map(String).filter(Boolean).slice(0, 40);
+      if (f.type === "products" || f.type === "names") value = (Array.isArray(value) ? value : []).map(String).filter(Boolean).slice(0, 40);
       else if (f.type === "number") value = value === "" || value === null || value === undefined ? "" : Number(value);
       else if (f.type === "choice") value = f.options.some((o) => o[0] === value) ? value : d.value;
       else if (f.type === "bool") value = "";
@@ -128,6 +156,7 @@ export function groupProblem(g, required) {
     if (f.type === "number" && !(r.value !== "" && Number.isFinite(Number(r.value)) && Number(r.value) >= 0)) return `Add a number to "${f.label}"`;
     if ((f.type === "text" || f.type === "form") && !String(r.value || "").trim()) return `Fill in "${f.label}"`;
     if (f.type === "products" && !(Array.isArray(r.value) && r.value.length)) return `Choose a product for "${f.label}"`;
+    if (f.type === "names" && !(Array.isArray(r.value) && r.value.length)) return `Choose at least one for "${f.label}"`;
     if (f.type === "range") {
       if (!isIso(r.from) || !isIso(r.to)) return `Choose both dates for "${f.label}"`;
       if (r.to < r.from) return `"${f.label}": the second date is before the first`;
@@ -148,7 +177,7 @@ export function describeRule(r) {
   }
   if (f.type === "number") return `${f.label} ${op} ${r.value === "" ? "…" : r.value}${f.unit ? " " + f.unit : ""}`;
   if (f.type === "choice") return `${f.label} ${op} ${((f.options.find((o) => o[0] === r.value) || [])[1] || "…").toLowerCase()}`;
-  if (f.type === "products") {
+  if (f.type === "products" || f.type === "names") {
     const list = Array.isArray(r.value) ? r.value : [];
     return `${f.label} ${op} ${list.length ? (list.length > 2 ? `${list.slice(0, 2).join(", ")} +${list.length - 2}` : list.join(", ")) : "…"}`;
   }
@@ -244,8 +273,9 @@ export function mountProductPicker(host, arr, { onChange = () => {}, names = [],
 
 // The rule builder. group ({ match, rules }) is changed in place; onChange is called after every change.
 // only: the field keys to offer (Campaigns leaves out "this purchase" and "this visit")
-export function mountRuleBuilder(host, group, { onChange = () => {}, names = [], empty = "", only = null } = {}) {
-  const fields = Array.isArray(only) ? RULE_FIELDS.filter((f) => only.includes(f.key)) : RULE_FIELDS;
+// lists: the choices for "names" rules, e.g. { "rc.category": ["Wrinkle Relaxer", …] }
+export function mountRuleBuilder(host, group, { onChange = () => {}, names = [], empty = "", only = null, lists = {} } = {}) {
+  const fields = Array.isArray(only) ? RULE_FIELDS.filter((f) => only.includes(f.key)) : RULE_FIELDS.filter((f) => !f.recall);
   const groups = [...new Set(fields.map((f) => f.group))];
 
   function ruleHtml(r, i) {
@@ -295,7 +325,7 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       <div class="fr-row">${opSel}${val}
         <button type="button" class="fr-x" data-rx="${i}" aria-label="Remove this rule" title="Remove">×</button></div>
       ${quick}
-      ${f.type === "products" ? `<div class="fr-pp" data-pp-host="${i}"></div>` : ""}
+      ${f.type === "products" || f.type === "names" ? `<div class="fr-pp" data-pp-host="${i}"></div>` : ""}
     </div>`;
   }
 
@@ -310,7 +340,12 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
     host.querySelectorAll("[data-pp-host]").forEach((el) => {
       const r = group.rules[Number(el.dataset.ppHost)];
       if (!Array.isArray(r.value)) r.value = [];
-      mountProductPicker(el, r.value, { onChange, names });
+      const f = FIELD[r.field];
+      if (f && f.type === "names") {
+        mountProductPicker(el, r.value, { onChange, names: lists[r.field] || [], placeholder: "Choose or type one", none: "None chosen yet" });
+      } else {
+        mountProductPicker(el, r.value, { onChange, names });
+      }
     });
   }
 
