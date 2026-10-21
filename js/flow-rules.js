@@ -312,46 +312,60 @@ export function mountProductPicker(host, arr, { onChange = () => {}, names = [],
 }
 
 // The rule builder. group ({ match, rules }) is changed in place; onChange is called after every change.
-// only: the field keys to offer (Campaigns leaves out "this purchase" and "this visit")
-// lists: the choices for "names" rules, e.g. { "rc.category": ["Wrinkle Relaxer", …] }
+// A rule list can hold groups (one level): { type: "group", match, rules }.
+// only: the field keys to offer. lists: the choices for "names" rules, e.g. { "rc.category": [...] }
 export function mountRuleBuilder(host, group, { onChange = () => {}, names = [], empty = "", only = null, lists = {} } = {}) {
   const fields = Array.isArray(only) ? RULE_FIELDS.filter((f) => only.includes(f.key)) : RULE_FIELDS.filter((f) => !f.recall);
   const groups = [...new Set(fields.map((f) => f.group))];
+  const firstKey = fields.some((f) => f.key === "appt.has_future") ? "appt.has_future" : fields[0].key;
+  const MAX = 20, TOTAL = 40;
 
-  function ruleHtml(r, i) {
+  // "3" is the 4th item; "3.1" is the 2nd rule in the group at item 3
+  const at = (path) => {
+    const [a, b] = String(path).split(".").map(Number);
+    if (b === undefined || Number.isNaN(b)) return { list: group.rules, i: a };
+    const g = group.rules[a];
+    return isGroup(g) ? { list: g.rules, i: b } : null;
+  };
+  const ruleAt = (path) => { const l = at(path); return l ? l.list[l.i] : null; };
+  const matchSel = (attr, cur) => `<select class="fb-select" ${attr}>
+    <option value="all"${cur !== "any" ? " selected" : ""}>all</option>
+    <option value="any"${cur === "any" ? " selected" : ""}>any</option></select>`;
+
+  function ruleHtml(r, p, join) {
     const f = FIELD[r.field];
-    const fieldSel = `<select class="fb-select fr-field" data-rf="${i}" aria-label="What to check">${groups.map((g) =>
+    const fieldSel = `<select class="fb-select fr-field" data-rf="${p}" aria-label="What to check">${groups.map((g) =>
       `<optgroup label="${esc(g)}">${fields.filter((x) => x.group === g).map((x) =>
         `<option value="${x.key}"${x.key === r.field ? " selected" : ""}>${esc(x.label)}</option>`).join("")}</optgroup>`).join("")}</select>`;
-    const opSel = `<select class="fb-select fr-op" data-ro="${i}" aria-label="How to compare">${opsFor(f).map(([v, l]) =>
+    const opSel = `<select class="fb-select fr-op" data-ro="${p}" aria-label="How to compare">${opsFor(f).map(([v, l]) =>
       `<option value="${v}"${v === r.op ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
     let val = "";
     let quick = "";
     if (f.type === "number") {
-      val = `<input class="fe-input fr-num" type="number" min="0" step="1" inputmode="numeric" data-rv="${i}" value="${esc(r.value)}" aria-label="Number" />
+      val = `<input class="fe-input fr-num" type="number" min="0" step="1" inputmode="numeric" data-rv="${p}" value="${esc(r.value)}" aria-label="Number" />
         ${f.unit ? `<span class="fr-unit">${esc(f.unit)}</span>` : ""}`;
     } else if (f.type === "birthday") {
       if (r.op === "next" || r.op === "last") {
-        val = `<input class="fe-input fr-num" type="number" min="1" max="60" step="1" inputmode="numeric" data-rv="${i}" value="${esc(r.value)}" aria-label="Days" />
+        val = `<input class="fe-input fr-num" type="number" min="1" max="60" step="1" inputmode="numeric" data-rv="${p}" value="${esc(r.value)}" aria-label="Days" />
           <span class="fr-unit">days</span>`;
       }
     } else if (f.type === "text") {
-      val = `<input class="fe-input fr-val" data-rv="${i}" maxlength="80" placeholder="${esc(f.hint || "")}" value="${esc(r.value)}" aria-label="Text" />`;
+      val = `<input class="fe-input fr-val" data-rv="${p}" maxlength="80" placeholder="${esc(f.hint || "")}" value="${esc(r.value)}" aria-label="Text" />`;
     } else if (f.type === "choice") {
-      val = `<select class="fb-select fr-val" data-rv="${i}" aria-label="Value">${f.options.map(([v, l]) =>
+      val = `<select class="fb-select fr-val" data-rv="${p}" aria-label="Value">${f.options.map(([v, l]) =>
         `<option value="${v}"${v === r.value ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
     } else if (f.type === "form") {
-      val = `<input class="fe-input fr-val" data-rv="${i}" maxlength="80" placeholder="e.g. Consent" value="${esc(r.value)}" aria-label="Form name" />
+      val = `<input class="fe-input fr-val" data-rv="${p}" maxlength="80" placeholder="e.g. Consent" value="${esc(r.value)}" aria-label="Form name" />
         <span class="fr-unit">in the last</span>
-        <input class="fe-input fr-num" type="number" min="0" step="1" data-rd="${i}" value="${esc(r.days)}" placeholder="any" aria-label="Days" />
+        <input class="fe-input fr-num" type="number" min="0" step="1" data-rd="${p}" value="${esc(r.days)}" placeholder="any" aria-label="Days" />
         <span class="fr-unit">days</span>`;
     } else if (f.type === "range") {
       const y = new Date().getFullYear();
-      val = `<input class="fe-input fr-date" type="date" data-rfrom="${i}" value="${esc(r.from || "")}" aria-label="From" />
+      val = `<input class="fe-input fr-date" type="date" data-rfrom="${p}" value="${esc(r.from || "")}" aria-label="From" />
         <span class="fr-unit">and</span>
-        <input class="fe-input fr-date" type="date" data-rto="${i}" value="${esc(r.to || "")}" aria-label="To" />`;
+        <input class="fe-input fr-date" type="date" data-rto="${p}" value="${esc(r.to || "")}" aria-label="To" />`;
       quick = `<div class="fr-row fr-quick">
-        <select class="fb-select" data-rq="${i}" aria-label="Quick pick">
+        <select class="fb-select" data-rq="${p}" aria-label="Quick pick">
           <option value="">Quick pick…</option>
           <option value="month:0">This month</option>
           <option value="month:-1">Last month</option>
@@ -361,29 +375,52 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
             .map((n) => `<option value="year:${n}">${n}</option>`).join("")}</optgroup>
         </select>
         <span class="fr-unit">or a whole month</span>
-        <input class="fe-input fr-date" type="month" data-rmonth="${i}" aria-label="A whole month" />
+        <input class="fe-input fr-date" type="month" data-rmonth="${p}" aria-label="A whole month" />
       </div>`;
     }
     return `<div class="fr-rule">
-      ${i ? `<span class="fr-join">${group.match === "any" ? "or" : "and"}</span>` : ""}
+      ${join ? `<span class="fr-join">${join}</span>` : ""}
       <div class="fr-row">${fieldSel}</div>
       <div class="fr-row">${opSel}${val}
-        <button type="button" class="fr-x" data-rx="${i}" aria-label="Remove this rule" title="Remove">×</button></div>
+        <button type="button" class="fr-x" data-rx="${p}" aria-label="Remove this rule" title="Remove">×</button></div>
       ${quick}
-      ${f.type === "products" || f.type === "names" ? `<div class="fr-pp" data-pp-host="${i}"></div>` : ""}
+      ${f.type === "products" || f.type === "names" ? `<div class="fr-pp" data-pp-host="${p}"></div>` : ""}
+    </div>`;
+  }
+
+  function groupHtml(g, i, join, canAdd) {
+    const inner = g.match === "any" ? "or" : "and";
+    return `<div class="fr-rule fr-group-wrap">
+      ${join ? `<span class="fr-join">${join}</span>` : ""}
+      <div class="fr-group">
+        <div class="fr-group-head">
+          <label class="fr-match">Match ${matchSel(`data-gm="${i}" aria-label="Match all or any in this group"`, g.match)} of these</label>
+          <button type="button" class="fr-x" data-gx="${i}" aria-label="Remove this group" title="Remove group">×</button>
+        </div>
+        ${g.rules.length ? `<div class="fr-rules">${g.rules.map((r, j) => ruleHtml(r, `${i}.${j}`, j ? inner : "")).join("")}</div>`
+          : '<p class="fr-empty">Add a rule to this group, or remove it.</p>'}
+        ${canAdd && g.rules.length < MAX ? `<button type="button" class="fr-add" data-gadd="${i}">+ Add a rule to this group</button>` : ""}
+      </div>
     </div>`;
   }
 
   function render() {
+    const join = group.match === "any" ? "or" : "and";
+    const canAdd = ruleCount(group) < TOTAL;
+    const room = group.rules.length < MAX && canAdd;
     host.innerHTML = `<div class="fr">
-      ${group.rules.length > 1 ? `<label class="fr-match">Match
-        <select class="fb-select" data-rm><option value="all"${group.match !== "any" ? " selected" : ""}>all</option>
-          <option value="any"${group.match === "any" ? " selected" : ""}>any</option></select> of these rules</label>` : ""}
-      ${group.rules.length ? `<div class="fr-rules">${group.rules.map(ruleHtml).join("")}</div>` : (empty ? `<p class="fr-empty">${esc(empty)}</p>` : "")}
-      ${group.rules.length < 20 ? '<button type="button" class="fr-add" data-radd>+ Add a rule</button>' : ""}
+      ${group.rules.length > 1 ? `<label class="fr-match">Match ${matchSel('data-rm aria-label="Match all or any"', group.match)} of these</label>` : ""}
+      ${group.rules.length ? `<div class="fr-rules">${group.rules.map((x, i) => (isGroup(x)
+        ? groupHtml(x, i, i ? join : "", canAdd)
+        : ruleHtml(x, String(i), i ? join : ""))).join("")}</div>` : (empty ? `<p class="fr-empty">${esc(empty)}</p>` : "")}
+      ${room ? `<div class="fr-adds">
+        <button type="button" class="fr-add" data-radd>+ Add a rule</button>
+        <button type="button" class="fr-add" data-gnew>+ Add a group</button>
+      </div>` : ""}
     </div>`;
     host.querySelectorAll("[data-pp-host]").forEach((el) => {
-      const r = group.rules[Number(el.dataset.ppHost)];
+      const r = ruleAt(el.dataset.ppHost);
+      if (!r) return;
       if (!Array.isArray(r.value)) r.value = [];
       const f = FIELD[r.field];
       if (f && f.type === "names") {
@@ -398,8 +435,13 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
     const el = e.target;
     const d = el.dataset;
     if (d.rm !== undefined) { group.match = el.value === "any" ? "any" : "all"; render(); onChange(); return; }
+    if (d.gm !== undefined) {
+      const g = group.rules[Number(d.gm)];
+      if (isGroup(g)) { g.match = el.value === "any" ? "any" : "all"; render(); onChange(); }
+      return;
+    }
     if (d.rf !== undefined) {
-      const r = group.rules[Number(d.rf)];
+      const r = ruleAt(d.rf);
       const f = FIELD[el.value];
       if (!r || !f) return;
       Object.assign(r, { field: f.key }, defaults(f));
@@ -408,14 +450,14 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       return;
     }
     if (d.rfrom !== undefined || d.rto !== undefined) {
-      const r = group.rules[Number(d.rfrom ?? d.rto)];
+      const r = ruleAt(d.rfrom ?? d.rto);
       if (!r) return;
       if (d.rfrom !== undefined) r.from = el.value; else r.to = el.value;
       onChange();
       return;
     }
     if (d.rq !== undefined || d.rmonth !== undefined) {
-      const r = group.rules[Number(d.rq ?? d.rmonth)];
+      const r = ruleAt(d.rq ?? d.rmonth);
       const span = quickRange(d.rq !== undefined ? el.value : `ym:${el.value}`);
       if (!r || !span) return;
       [r.from, r.to] = span;
@@ -423,9 +465,9 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       onChange();
       return;
     }
-    const idx = d.ro ?? d.rv ?? d.rd;
-    if (idx === undefined) return;
-    const r = group.rules[Number(idx)];
+    const p = d.ro ?? d.rv ?? d.rd;
+    if (p === undefined) return;
+    const r = ruleAt(p);
     if (!r) return;
     const ft = FIELD[r.field].type;
     if (d.ro !== undefined) {
@@ -437,13 +479,29 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
     else r.value = ft === "number" || ft === "birthday" ? (el.value === "" ? "" : Number(el.value)) : el.value;
     onChange();
   });
+
   host.addEventListener("click", (e) => {
     if (e.target.closest("[data-radd]")) {
-      group.rules.push(newRule(fields.some((f) => f.key === "appt.has_future") ? "appt.has_future" : fields[0].key));
+      group.rules.push(newRule(firstKey));
       render(); onChange(); return;
     }
+    if (e.target.closest("[data-gnew]")) {
+      group.rules.push({ id: rid(), type: "group", match: "any", rules: [newRule(firstKey)] });
+      render(); onChange(); return;
+    }
+    const ga = e.target.closest("[data-gadd]");
+    if (ga) {
+      const g = group.rules[Number(ga.dataset.gadd)];
+      if (isGroup(g) && g.rules.length < MAX && ruleCount(group) < TOTAL) { g.rules.push(newRule(firstKey)); render(); onChange(); }
+      return;
+    }
+    const gx = e.target.closest("[data-gx]");
+    if (gx) { group.rules.splice(Number(gx.dataset.gx), 1); render(); onChange(); return; }
     const x = e.target.closest("[data-rx]");
-    if (x) { group.rules.splice(Number(x.dataset.rx), 1); render(); onChange(); }
+    if (x) {
+      const l = at(x.dataset.rx);
+      if (l) { l.list.splice(l.i, 1); render(); onChange(); }
+    }
   });
   render();
 }
