@@ -7734,3 +7734,6 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
   resize: vertical;
 }
 .page.rc .rc-panel .rc-note + .rc-row { margin-top: .6rem; }
+
+.po-table tr.po-locked td { background: #f8fafc; }
+.po-table tr.po-locked .po-src { color: #b45309; }

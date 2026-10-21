@@ -3,7 +3,7 @@ import {
   PO_STATUS, REQ_STATUS, LOCATIONS, locLabel, plural, unitPlural, lowAt, suggestOrder, reqNumber, batchName,
   getPo, savePo, renumberPo, markPoSent, cancelPo, poTotals, lineFromProduct, cleanPoLine, supplierSnapshot,
   listProducts, listSuppliers, listRequests, supplierTerms, suppliesProduct, suggestOrderFor, dayKey, productSuppliers,
-  recordPastReceipt, getBaseline, syncReceivedRequests, fillPoTemplate, PO_ORDER_TAG_RE,
+  recordPastReceipt, getBaseline, syncReceivedRequests, fillPoTemplate, PO_ORDER_TAG_RE, amendPo,
 } from "./inventory-api.js";
 import { renderDeliveries } from "./po-deliveries.js";
 import { deliveryError } from "./form-delivery.js";
@@ -75,7 +75,10 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
   const canOrder = can("inventory.order") || can("inventory.manage");
   const byId = new Map(products.map((p) => [p.id, p]));
   let dirty = false, saving = false, timer = null, reqs = null;
-  const editable = () => canOrder && po.status === "draft";
+  let amending = false;   // changing an order that's already been sent (saved only with "Save changes")
+  const drafting = () => canOrder && po.status === "draft";
+  const editable = () => drafting() || (canOrder && amending);
+  const lockedLine = (l) => amending && (Number(l.received) || 0) > 0;   // some of it has arrived
   const supplierFull = () => suppliers.find((s) => s.id === po.supplierId) || null;
     // This PO's supplier's code, price and pack for a product. Not linked: no code or price (the PDF says "to be confirmed").
   const termsFor = (p) => supplierTerms(p, po.supplierId)
@@ -108,13 +111,14 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
   function changed() {
     dirty = true;
     msgEl.textContent = "";
+    if (amending) { setState("Not saved yet: press Save changes"); return; }   // never autosaved
     setState("Unsaved changes");
     clearTimeout(timer);
     timer = setTimeout(flush, 800);
   }
   async function flush() {
     clearTimeout(timer);
-    if (!dirty || saving || !editable()) return;
+    if (!dirty || saving || !drafting()) return;
     saving = true;
     dirty = false;
     setState("Saving…");
@@ -153,7 +157,9 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     // Backdated orders show their date; a backdated send shows the day only (no made-up time)
     const dated = po.backdated && po.orderDate ? ` · dated ${niceDate(po.orderDate)}` : "";
     const sentText = po.sentDate ? `Sent ${niceDate(po.sentDate)}` : po.sentAt ? `Sent ${when(po.sentAt)}` : "";
-    $('[data-role="sub"]').innerHTML = `${esc((po.supplier.name || "No supplier") + dated)} · ${editable()
+    $('[data-role="sub"]').innerHTML = `${esc((po.supplier.name || "No supplier") + dated)} · ${amending
+      ? `<strong>Changing a sent order</strong> · <span data-role="state">${dirty ? "Not saved yet: press Save changes" : "No changes yet"}</span>`
+      : editable()
       ? `<span data-role="state">${dirty ? "Unsaved changes" : "All changes saved"}</span>`
       : esc(sentText ? `${sentText}${po.sentVia ? ` (${po.sentVia})` : ""}` : PO_STATUS[po.status])}`;
     const pill = $('[data-role="pill"]');
@@ -161,12 +167,18 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     pill.textContent = PO_STATUS[po.status];
     const nothingIn = po.lines.every((l) => !l.received);
     const acts = [];
+    if (amending) {
+      $('[data-role="acts"]').innerHTML = `<button type="button" class="ff-btn is-quiet" data-act="amend-discard">Discard changes</button>
+        <button type="button" class="ff-btn is-primary" data-act="amend-save">${I.check}<span>Save changes</span></button>`;
+      return;
+    }
     if (canOrder && po.status === "draft") {
       acts.unshift('<button type="button" class="ff-btn is-quiet" data-act="cancel">Cancel PO</button>');
       acts.push(`<button type="button" class="ff-btn" data-act="mark-sent">${I.check}<span>Mark as sent</span></button>`);
       acts.push(`<button type="button" class="ff-btn is-primary" data-act="send">${I.send}<span>Send to supplier</span></button>`);
     } else if (canOrder && (po.status === "sent" || po.status === "part")) {
       if (po.status === "sent" && nothingIn) acts.unshift('<button type="button" class="ff-btn is-quiet" data-act="cancel">Cancel PO</button>');
+      if (!po.historical) acts.push(`<button type="button" class="ff-btn" data-act="amend">${I.doc}<span>Change order</span></button>`);
       acts.push(`<button type="button" class="ff-btn" data-act="resend">${I.send}<span>Email again</span></button>`);
       acts.push(`<a class="ff-btn is-primary" href="#/inventory/receive/${encodeURIComponent(po.id)}">${I.check}<span>Receive stock</span></a>`);
     }
@@ -185,7 +197,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     return `
       <section class="tb-card">
         <h4><span class="tb-num">1</span>Supplier</h4>
-        ${editable()
+        ${drafting()
           ? `<select class="fb-select" data-k="supplierId" aria-label="Supplier">${suppliers.filter((x) => x.active || x.id === po.supplierId).map((x) =>
               `<option value="${esc(x.id)}"${x.id === po.supplierId ? " selected" : ""}>${esc(x.name)}</option>`).join("")}</select>`
           : `<strong>${esc(po.supplier.name)}</strong>`}
@@ -202,30 +214,37 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
         ${po.status !== "draft" ? `<td>${l.received} of ${l.qty}</td>` : ""}</tr>`;
     }
     const named = !l.productId && (l.custom || l.name);
+    const locked = lockedLine(l);
+    const got = Number(l.received) || 0;
     return `
-      <tr data-i="${i}">
-        <td>${named
+      <tr data-i="${i}"${locked ? ' class="po-locked"' : ""}>
+        <td>${locked
+          ? `<strong>${esc(l.name)}</strong>${l.supplierCode ? ` <small class="po-code">${esc(l.supplierCode)}</small>` : ""}
+             <small class="po-src">Some has arrived, so only the quantity and “For” can change</small>`
+          : named
           ? `<input class="fe-input" data-l="name" maxlength="150" placeholder="Item name, brand and size" value="${esc(l.name)}" aria-label="Item" />`
           : `<button type="button" class="fb-select po-pick${l.productId ? "" : " is-empty"}" data-l="pick"
               aria-haspopup="listbox" aria-expanded="false" aria-label="Product">${esc(
               l.productId ? `${(byId.get(l.productId) || {}).name || l.name}${byId.get(l.productId) && !byId.get(l.productId).active ? " (inactive)" : ""}`
                 : "Search for a product…")}</button>`}
           ${l.sources.length ? `<small class="po-src">From ${l.sources.length} request item${l.sources.length === 1 ? "" : "s"}</small>` : ""}</td>
-        <td><div class="po-qty"><input class="fe-input" type="number" min="1" max="9999" step="1" data-l="qty" value="${l.qty}" aria-label="Quantity" />
+        <td><div class="po-qty"><input class="fe-input" type="number" min="${locked ? got : 1}" max="9999" step="1" data-l="qty" value="${l.qty}" aria-label="Quantity" />
           <small>${esc(unitPlural(l.orderUnit))}</small></div></td>
         <td><select class="fb-select" data-l="loc" aria-label="For">${LOCATIONS.map((x) =>
           `<option value="${x.key}"${x.key === l.loc ? " selected" : ""}>${esc(x.label)}</option>`).join("")}</select></td>
-        <td><button type="button" class="ib-tool is-danger" data-l="remove" aria-label="Remove" title="Remove">×</button></td>
+        ${amending ? `<td>${got} of ${l.qty}</td>` : ""}
+        <td>${locked ? "" : '<button type="button" class="ib-tool is-danger" data-l="remove" aria-label="Remove" title="Remove">×</button>'}</td>
       </tr>`;
-  }
-  
+  }  
   function itemsCard() {
     const ed = editable();
     return `
       <section class="tb-card">
         <h4><span class="tb-num">2</span>Items</h4>
+        ${amending ? `<p class="tb-info">You're changing an order that's already gone to the supplier. Nothing is saved until you press
+          <strong>Save changes</strong>, and you can email them the updated order afterwards.</p>` : ""}
         ${po.lines.length ? `<div class="po-table-wrap"><table class="inv-table po-table"><thead><tr>
-            <th>Item</th><th>Qty</th><th>For</th>${ed ? "<th></th>" : po.status !== "draft" ? "<th>Received</th>" : ""}
+            <th>Item</th><th>Qty</th><th>For</th>${amending ? "<th>Received</th><th></th>" : ed ? "<th></th>" : po.status !== "draft" ? "<th>Received</th>" : ""}
           </tr></thead><tbody>${po.lines.map(lineRow).join("")}</tbody></table></div>`
           : '<p class="tb-none">No items yet.</p>'}
         ${ed ? `<div class="or-add">
@@ -258,11 +277,13 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       <section class="tb-card">
         <h4><span class="tb-num">3</span>Details</h4>
         <div class="po-dates">
-          <label class="tb-field"><span>Order date</span>
+          ${amending ? `<div class="tb-field"><span>Order date</span><strong>${esc(niceDate(po.orderDate) || "Not set")}</strong>
+            <small class="muted">Can't be changed once it's been sent: the PO number follows it.</small></div>`
+          : `<label class="tb-field"><span>Order date</span>
             <input class="fe-input" type="date" data-k="orderDate" value="${esc(po.orderDate || today)}" max="${today}" />
             <small class="muted">${po.backdated
               ? '<span class="po-tag">backdated</span> The PO number follows this date.'
-              : "Change it for an order placed earlier, e.g. one from the old app."}</small></label>
+              : "Change it for an order placed earlier, e.g. one from the old app."}</small></label>`}
           <label class="tb-field po-needed"><span>Needed by (optional)</span>
             <input class="fe-input" type="date" data-k="expectedDate" value="${esc(po.expectedDate)}" /></label>
         </div>
@@ -543,7 +564,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
           esc(po.notesToSupplier).replace(/\n/g, "<br>")}</p>` : "");
   }
 
-  async function sendDialog(again) {
+  async function sendDialog(again, amended = false) {
     const p = problems();
     if (p) { msgEl.textContent = p; return; }
     await settle();
@@ -557,13 +578,16 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       : `<p>Hi ${esc(first || "there")},</p>` +
         `<p>Please see our purchase order <strong>${esc(po.number)}</strong> below${s.accountNo ? ` (account ${esc(s.accountNo)})` : ""}.</p>` +
         "<p>Please reply to confirm the order, pricing and the expected delivery date.</p>";
-    const subject = ownSubject ? fillPoTemplate(ownSubject, tpl) : `Purchase order ${po.number} - Dermedica`;
+    const baseSubject = ownSubject ? fillPoTemplate(ownSubject, tpl) : `Purchase order ${po.number} - Dermedica`;
+    const subject = amended ? `Amended: ${baseSubject}` : baseSubject;
     // A template usually signs off itself, so the sign-off starts empty (it can still be typed in)
     const signoff = ownBody ? "" : `Kind regards,\n${(staff && staff.name) || "The team"}\nDermedica`;
+    const amendNote = amended
+      ? `<p><strong>Please note: this is an updated order.</strong> It replaces ${esc(po.number)} as we sent it earlier.</p>` : "";
     const tagged = PO_ORDER_TAG_RE.test(message);   // the supplier's message says where the order goes
     const dlg = openDialog("ec-dialog ac-mail", `
       <form class="lh-form ec-form" novalidate>
-        <div class="lh-dialog-head"><h3>${again ? "Email the purchase order again" : "Send to supplier"}</h3>
+        <div class="lh-dialog-head"><h3>${amended ? "Email the amended order" : again ? "Email the purchase order again" : "Send to supplier"}</h3>
           <p data-role="orderwhere">${tagged ? "The order goes where {Order table} is in your message."
             : "The order is written into the email, below your message."} Nothing is attached.</p>
           ${ownBody || ownSubject ? `<p class="fe-note">Filled in from ${esc(s.name || "this supplier")}'s saved email.
@@ -592,7 +616,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     const form = dlg.querySelector("form");
     const err = dlg.querySelector(".lh-error");
     const editor = createRichEditor(dlg.querySelector('[data-role="editor"]'), { accent: () => "#0f766e" });
-    editor.setHtml(message);
+    editor.setHtml(amendNote + message);
     // If {Order table} is typed or deleted, the wording about where the order goes follows it
     const syncWhere = () => {
       const t = PO_ORDER_TAG_RE.test(editor.getHtml());
@@ -804,7 +828,98 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       }
     });
   }
+  /* ---------- Changing a sent order ---------- */
+  async function startAmend() {
+    try { const fresh = await getPo(id); if (fresh) po = fresh; } catch (err) { console.warn("PO not refreshed:", err); }
+    if (!["sent", "part"].includes(po.status)) {
+      renderAll(); renderDv();
+      showToast(`This order is now ${PO_STATUS[po.status].toLowerCase()}, so it can't be changed.`);
+      return;
+    }
+    amending = true;
+    dirty = false;
+    msgEl.textContent = "";
+    renderAll();
+  }
 
+  async function discardAmend() {
+    if (dirty && !confirm("Discard your changes to this order?")) return;
+    closeCombo();
+    amending = false;
+    dirty = false;
+    msgEl.textContent = "";
+    await reload();
+  }
+
+  function amendSaveDialog() {
+    if (!dirty) { msgEl.textContent = "Nothing has changed yet."; return; }
+    const p = problems();
+    if (p) { msgEl.textContent = p; return; }
+    closeCombo();
+    const s = supplierFull() || po.supplier;
+    const dlg = openDialog("inv-dlg", `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>Save changes to ${esc(po.number)}</h3>
+          <p>The changes and your reason are added to the order's history.${po.requestIds.length
+            ? " Requests whose items were taken off this order go back to Open." : ""}</p></div>
+        <label class="lh-field"><span class="lh-label">Reason for the change</span>
+          <input name="reason" maxlength="300" placeholder="e.g. Wrong quantity entered" autocomplete="off" /></label>
+        <label class="fe-check"><input type="checkbox" name="email"${s.email ? " checked" : " disabled"} />
+          Email the amended order to the supplier next${s.email ? "" : " (no order email on file)"}</label>
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Keep editing</button>
+          <button type="submit" class="lh-btn is-primary">Save changes</button>
+        </div>
+      </form>`);
+    const form = dlg.querySelector("form");
+    const err = dlg.querySelector(".lh-error");
+    let busy = false;
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => { if (!busy) dlg.close(); });
+    dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const reason = form.elements.reason.value.trim();
+      if (!reason) { err.textContent = "Add a reason, so everyone can see why it changed."; err.hidden = false; return; }
+      const wantEmail = form.elements.email.checked;
+      busy = true;
+      err.hidden = true;
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      btn.textContent = "Saving…";
+      try {
+        const res = await amendPo(id, {
+          lines: po.lines, expectedDate: po.expectedDate, notesToSupplier: po.notesToSupplier,
+          internalNote: po.internalNote, gst: po.gst, reason,
+        }, staff);
+        amending = false;
+        dirty = false;
+        let done = [];
+        if (res.status === "received") {
+          try { done = await syncReceivedRequests(res.requestIds, staff); } catch (ex) { console.warn("Requests not updated", ex); }
+        }
+        busy = false;
+        dlg.close();
+        showToast([
+          `${res.number} updated`,
+          res.status === "received" ? "everything on it has now arrived" : "",
+          res.reopened.length ? `${res.reopened.length} request${res.reopened.length === 1 ? "" : "s"} back to Open` : "",
+          done.length ? `${done.length} request${done.length === 1 ? "" : "s"} marked Received` : "",
+        ].filter(Boolean).join(" · "));
+        await reload();
+        if (wantEmail && ["sent", "part"].includes(po.status)) sendDialog(true, true);
+      } catch (ex) {
+        console.error("Amend PO failed:", ex);
+        busy = false;
+        err.textContent = ex && ex.code === "permission-denied" ? "Only the ordering team can change purchase orders."
+          : ex && ex.message && !ex.code ? ex.message : "Couldn't save. Try again.";
+        err.hidden = false;
+        btn.disabled = false;
+        btn.textContent = "Save changes";
+      }
+    });
+    form.elements.reason.focus();
+  }
   async function cancelDialog() {
     await settle();
     const dlg = openDialog("inv-dlg", `
@@ -845,7 +960,9 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     }
     const rm = e.target.closest('[data-l="remove"]');
     if (rm) {
-      po.lines.splice(Number(rm.closest("[data-i]").dataset.i), 1);
+      const ri = Number(rm.closest("[data-i]").dataset.i);
+      if (lockedLine(po.lines[ri])) { msgEl.textContent = "Some of this has arrived, so it can't be removed."; return; }
+      po.lines.splice(ri, 1);
       renderLeft(); renderRight(); changed();
       return;
     }
@@ -877,6 +994,9 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     else if (act === "mark-sent") markSentDialog();
     else if (act === "past") pastDialog();
     else if (act === "cancel") cancelDialog();
+    else if (act === "amend") startAmend();
+    else if (act === "amend-discard") discardAmend();
+    else if (act === "amend-save") amendSaveDialog();
   });
 
   renderAll();
