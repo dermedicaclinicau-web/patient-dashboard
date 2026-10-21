@@ -667,6 +667,12 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
           <select class="fb-select" data-f="trigger.quietDays">${opt(QUIET, t.quietDays)}</select>
           <small class="muted">Counts texts and emails from any recall, including ones staff send from a card.</small></label>
       </section>
+      <section class="ef-sec"><h4>Calls already given out</h4>
+        <p class="tb-info">Cards shared out before the flow was turned on stay in people's My calls, and the flow doesn't touch them.
+          Move them into the flow and they start it before newly due patients, within the daily limit.</p>
+        <label class="fe-check"><input type="checkbox" data-role="adoptAll" /> Also move cards that already have a call logged</label>
+        <button type="button" class="lh-btn" data-act="adopt">Move calls into the flow…</button>
+      </section>
       <section class="ef-sec"><h4>Always</h4>
         <p class="tb-info">Booked, came in, or replied STOP: the flow stops. If someone picks up the card or logs a call, they take over and the flow stops.
           Texts and emails go between 9 am and 6 pm, and never to anyone on the do-not-contact list. When the flow finishes, the card goes to the recall team as usual.</p>
@@ -850,6 +856,8 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
   });
 
   side.addEventListener("click", async (e) => {
+    const ad = e.target.closest('[data-act="adopt"]');
+    if (ad) { adoptCalls(ad); return; }
     const tok = e.target.closest("[data-token]");
     if (tok) {
       const name = tok.dataset.token;
@@ -994,6 +1002,47 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
     form.elements.q.focus();
   }
 
+  /* ---------- Move calls given out before the flow into it ---------- */
+  async function adoptCalls(btn) {
+    const box = side.querySelector('[data-role="adoptAll"]');
+    const all = !!(box && box.checked);
+    const mode = all ? "all" : "untouched";
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Counting…";
+    try {
+      await settle();
+      const d = await callApi({ action: "recall", op: "flowAdopt", mode, dryRun: true });
+      if (d.problem) { showToast(d.problem); return; }
+      if (!d.count) {
+        showToast(d.withCalls
+          ? `Nothing to move. ${d.withCalls} given-out card${d.withCalls === 1 ? " has" : "s have"} a call logged: tick the box to move ${d.withCalls === 1 ? "it" : "those"} too.`
+          : "Nothing to move: no calls are given out.");
+        return;
+      }
+      const per = Number(flow.trigger.dailyMax) || 25;
+      const days = Math.ceil(d.count / per);
+      const ok = await confirmDialog({
+        title: `Move ${d.count} call${d.count === 1 ? "" : "s"} into the flow?`,
+        message: `${d.byPerson.map((p) => `${p.name}: ${p.n}`).join("\n")}\n\n` +
+          `They leave My calls now, and start the flow before newly due patients, up to ${per} a day` +
+          `${days > 1 ? `, so all of them have started in about ${days} days` : ""}.` +
+          `${!all && d.withCalls ? `\n\n${d.withCalls} with a call already logged stay where they are.` : ""}`,
+        confirmLabel: "Move them", tone: "warning",
+      });
+      if (!ok) return;
+      btn.textContent = "Moving…";
+      const r = await callApi({ action: "recall", op: "flowAdopt", mode, dryRun: false });
+      if (r.problem) { showToast(r.problem); return; }
+      showToast(`${r.moved} moved into the flow. They start at the next hourly check.`);
+    } catch (err) {
+      console.error("Move calls into the flow failed:", err);
+      showToast(err && err.code === "UNAUTHORIZED" ? "Your login has timed out. Log out and back in, then try again." : "Couldn't move them. Try again.");
+    } finally {
+      if (btn.isConnected) { btn.disabled = false; btn.textContent = label; }
+    }
+  }
+  
   /* ---------- Who's in the flow ---------- */
   function whoDialog() {
     const kd = (k) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(k || ""); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; };

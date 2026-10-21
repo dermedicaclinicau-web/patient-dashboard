@@ -11964,8 +11964,9 @@ function handleRecall_(body) {
     }
     if (op === 'sendEmail') return recallSendEmail_(body, session);   // anyone with Recall access (checked above)
     if (op === 'messages') return recallMessages_(body);   // anyone with Recall access
-    if (op === 'flowPreview' || op === 'flowSkip') {
+    if (op === 'flowPreview' || op === 'flowSkip' || op === 'flowAdopt') {
       if (!manage) return { ok: false, error: 'FORBIDDEN' };
+      if (op === 'flowAdopt') return recallFlowAdopt_(body, session);
       return op === 'flowPreview' ? recallFlowPreview_(body, session) : recallFlowSkip_(body, session);
     }
     if (op === 'flowTest') {
@@ -13231,4 +13232,37 @@ function recallMessages_(body) {
     };
   });
   return { ok: true, rows: rows, page: page, pageCount: Number(res.pageCount || 1) };
+}
+
+// ===================== Recall flow: move calls shared out before the flow into it =====================
+// Cards become "released": held from sharing, and started by recallFlowRun_ before newly due ones (any due date)
+function recallFlowAdopt_(body, session) {
+  const cfg = getConfig_();
+  const flow = fsGetDoc_(cfg, RECALL_FLOW_DOC_);
+  if (!flow || flow.on !== true) return { ok: true, problem: 'Turn the flow on first, so the cards have somewhere to go.' };
+  const all = body.mode === 'all';
+  const given = fsQuery_(cfg, RECALL_COL_, 'stage', 'EQUAL', 'call', 5000).filter(function (c) {
+    return c.status === 'open' && !!c.assignedToId && !c.replyOpen
+      && ['run', 'wait', 'team', 'cycle', 'joined'].indexOf(String(c.flowState || '')) === -1;   // not the flow's own
+  });
+  const called = function (c) { return Number(c.attempts || 0) > 0 || !!c.lastCallAt; };
+  const move = given.filter(function (c) { return all || !called(c); });
+  const withCalls = all ? 0 : given.filter(called).length;
+  const per = {};
+  move.forEach(function (c) { const n = String(c.assignedToName || 'Someone'); per[n] = (per[n] || 0) + 1; });
+  const byPerson = Object.keys(per).sort(function (a, b) { return per[b] - per[a]; }).map(function (n) { return { name: n, n: per[n] }; });
+  if (body.dryRun) return { ok: true, count: move.length, byPerson: byPerson, withCalls: withCalls };
+
+  const me = getStaffDocs_().filter(function (s) { return s.id === session.uid; })[0];
+  const now = new Date().toISOString();
+  const writes = move.map(function (c) {
+    return patchWrite_(cfg, RECALL_COL_ + '/' + c._id, {
+      stage: 'due', assignedToId: '', assignedToName: '', assignedDay: '',
+      flowState: 'released', flowNext: '', joinedTo: '', joinedCat: '', updatedAt: now,
+      log: (Array.isArray(c.log) ? c.log : []).concat([{ at: now, by: String((me && me.name) || 'Staff'), byUid: session.uid, kind: 'flow',
+        what: 'Moved from ' + String(c.assignedToName || 'someone') + "'s calls into the recall flow", note: '' }]).slice(-80),
+    });
+  });
+  if (writes.length) commitWrites_(cfg, writes, 100);
+  return { ok: true, moved: writes.length };
 }
