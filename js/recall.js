@@ -10,6 +10,7 @@ import { callApi } from "./appointments.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 import { normRecallSettings } from "./recall-settings.js";
+import { installRecallEmail } from "./recall-email.js"; installRecallEmail();
 
 const COL = "recalls";
 const PAGE = 50;
@@ -468,7 +469,11 @@ export function mountRecall(container, { staff = null } = {}) {
     const firstName = String(c.patientName || "").replace(/\([^)]*\)/g, " ").trim().split(/\s+/)[0] || "there";
     return String(s.template || "")
       .replace(/\{\s*first name\s*\}/gi, firstName)
-      .replace(/\{\s*treatment\s*\}/gi, (cat && cat.smsName) || "treatment")
+      .replace(/\{\s*treatment\s*\}/gi, () => {
+        const names = [c.category, ...c.alsoDue].map((k) => (settings.categories.find((x) => x.key === k) || {}).smsName || "treatment")
+          .filter((n, i, a) => a.indexOf(n) === i);
+        return names.length <= 1 ? names[0] || "treatment" : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+      })
       .replace(/\{\s*months\s*\}/gi, String(months))
       .replace(/\{\s*clinic phone\s*\}/gi, s.phone || "")
       .replace(/\s+/g, " ").trim();
@@ -540,7 +545,7 @@ export function mountRecall(container, { staff = null } = {}) {
       <div class="rc-links">
         ${tel ? `<a class="lh-btn" href="tel:${esc(tel)}">Call ${esc(mobileText(c.mobile))}</a>` : '<span class="rc-nomob">No mobile on file</span>'}
         ${tel && c.status !== "closed" ? '<button type="button" class="lh-btn" data-act="sms">Send text</button>' : ""}
-        ${c.email ? `<a class="lh-btn is-quiet" href="mailto:${esc(c.email)}">Email</a>` : ""}
+        ${c.email ? `<a class="lh-btn is-quiet" href="mailto:${esc(c.email)}" data-card="${esc(c.id)}">Email</a>` : ""}
         ${c.patientId ? `<a class="lh-btn is-quiet" href="#/patient/${encodeURIComponent(c.patientId)}">Patient page</a>` : ""}
       </div>
       ${draft.sms == null ? "" : `<div class="rc-sms">

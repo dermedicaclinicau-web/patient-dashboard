@@ -107,7 +107,10 @@ service cloud.firestore {
         || (id == 'flow'
           && request.resource.data.steps is list && request.resource.data.steps.size() <= 40
           && request.resource.data.trigger is map && request.resource.data.stop is map
-          && request.resource.data.on is bool));
+          && request.resource.data.on is bool)
+        || (id == 'emails'
+          && request.resource.data.templates is list && request.resource.data.templates.size() <= 30
+          && request.resource.data.style is map));
     }
     
         // A permission from the login token (Admins have everything)

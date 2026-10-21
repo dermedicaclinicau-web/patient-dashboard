@@ -31,10 +31,13 @@ export const RECALL_SMS_NAMES = {
 export const RECALL_SMS_TEMPLATE = "Hi {First name}, it's Dermedica. It's been about {Months} months since your {Treatment}, " +
   "so you're due for your next one. Reply YES and we'll call you to book.";
 const SMS_TOKENS = ["{First name}", "{Treatment}", "{Months}", "{Clinic phone}"];
-// The Settings | Flow tabs (recall-flow.js uses them too)
-export const recallTabsHtml = (active) => `<nav class="mk-tabs" aria-label="Recall settings">
-  <a href="#/settings/recall"${active === "settings" ? ' class="is-on" aria-current="page"' : ""}>Settings</a>
-  <a href="#/settings/recall/flow"${active === "flow" ? ' class="is-on" aria-current="page"' : ""}>Flow</a></nav>`;
+// The Settings | Flow | Email templates tabs (recall-flow.js and recall-emails.js use them too)
+export const recallTabsHtml = (active) => `<nav class="mk-tabs" aria-label="Recall settings">${[
+  ["settings", "#/settings/recall", "Settings"],
+  ["flow", "#/settings/recall/flow", "Flow"],
+  ["emails", "#/settings/recall/emails", "Email templates"],
+].map(([k, href, l]) => `<a href="${href}"${active === k ? ' class="is-on" aria-current="page"' : ""}>${l}</a>`).join("")}</nav>`;
+
 const STOP_LINE = "Reply STOP to opt out.";
 
 export const skipNorm = (s) => String(s ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");

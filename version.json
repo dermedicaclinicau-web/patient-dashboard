@@ -96,6 +96,8 @@
                   "./js/print-task.js",
                   "./js/public-form.js",
                   "./js/purchase-order.js",
+                  "./js/recall-email.js",
+                  "./js/recall-emails.js",
                   "./js/recall-flow.js",
                   "./js/recall-settings.js",
                   "./js/recall.js",
@@ -164,6 +166,6 @@
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261021-090256",
-    "v":  "20261021-090256"
+    "version":  "20261021-094551",
+    "v":  "20261021-094551"
 }

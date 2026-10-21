@@ -18,6 +18,7 @@ import { fetchStaffList } from "./task-types.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 import { normRecallSettings, recallTabsHtml } from "./recall-settings.js";
+import { loadRecallEmailTemplates } from "./recall-emails.js";
 
 const MAX_STEPS = 40;
 const MAX_DEPTH = 3;
@@ -259,6 +260,8 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
   let editor = null, lastText = null;
   let dirty = false, saving = false, saveTimer = null;
   const lhReady = getLetterhead().then((lh) => { letterhead = lh || {}; }).catch(() => { letterhead = {}; });
+  let emailTpls = [];
+  loadRecallEmailTemplates().then((x) => { emailTpls = x.templates; }).catch((err) => console.warn("Email templates not loaded:", err));
 
   root.innerHTML = `
     <a class="back-link" href="#/recall">← Recall</a>
@@ -690,6 +693,9 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
     }
     if (s.type === "email") {
       return `<section class="ef-sec">
+          ${emailTpls.length ? `<label class="tb-field"><span>Start from a template</span>
+            <select class="fb-select" data-role="tpl"><option value="">Choose a template…</option>${emailTpls.map((t) =>
+              `<option value="${esc(t.id)}">${t.isDefault ? "★ " : ""}${esc(t.name)}</option>`).join("")}</select></label>` : ""}
           <label class="tb-field"><span>Subject</span><input class="fe-input" data-k="subject" data-tokens maxlength="200" value="${esc(c.subject)}" /></label>
           <div class="tb-field"><span>Message</span><div data-role="editor"></div></div>
           ${chips()}
@@ -823,6 +829,14 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
       return;
     }
     const s = selStep();
+    if (s && s.type === "email" && el.dataset.role === "tpl" && el.value) {
+      const t = emailTpls.find((x) => x.id === el.value);
+      if (!t) return;
+      s.cfg.subject = t.subject;
+      s.cfg.body = t.body;
+      changed(); renderCanvas(); renderSide();
+      return;
+    }
     if (!s || !el.dataset.k) return;
     const k = el.dataset.k;
     s.cfg[k] = el.type === "checkbox" ? el.checked : NUM_K.includes(k) ? Number(el.value) : el.value;

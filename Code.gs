@@ -11962,6 +11962,7 @@ function handleRecall_(body) {
       if (!manage) return { ok: false, error: 'FORBIDDEN' };
       return { ok: true, services: recallServices_(getConfig_()) };
     }
+    if (op === 'sendEmail') return recallSendEmail_(body, session);   // anyone with Recall access (checked above)
     if (op === 'flowTest') {
       if (!manage) return { ok: false, error: 'FORBIDDEN' };
       return recallFlowTest_(body, session);
@@ -12972,4 +12973,46 @@ function recallFlowTest_(body, session) {
   const test = { email: me.email, mobile: String(body.mobile || ''), steps: steps };
   const r = recallFlowAdvance_(cfg, flow, set, c, memo, test);
   return { ok: true, steps: test.steps, sent: r.sent, to: me.email };
+}
+
+// ===================== Recall: emailing a patient from a card (the compose window) =====================
+function recallSendEmail_(body, session) {
+  const cfg = getConfig_();
+  const id = String(body.id || '');
+  const card = id ? fsGetDoc_(cfg, RECALL_COL_ + '/' + id) : null;
+  if (!card) return { ok: false, error: 'NOT_FOUND', detail: "That recall card couldn't be found. Refresh and try again." };
+  const to = String(body.to || '').trim();
+  if (!isEmail_(to)) return { ok: false, error: 'BAD_EMAIL', detail: 'Check the email address.' };
+  if (recallTextBlocked_(cfg, card.patientId)) {
+    return { ok: false, error: 'DNC', detail: "They're on the do-not-contact list, so recall emails can't be sent." };
+  }
+  const sup = mktSuppressed_(cfg, to);
+  if (sup && sup.reason === 'bounced') return { ok: false, error: 'BOUNCED', detail: 'Emails to this address bounce. Check it with the patient.' };
+  const subject = String(body.subject || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  if (!subject) return { ok: false, error: 'NO_SUBJECT', detail: 'Add a subject.' };
+  const raw = String(body.html || '');
+  if (raw.length > 400000) return { ok: false, error: 'TOO_BIG', detail: 'The email is too big. Use fewer or smaller pictures.' };
+  if (!emailHtmlToText_(raw).replace(/\s+/g, '')) return { ok: false, error: 'EMPTY', detail: 'Write a message first.' };
+  if (MailApp.getRemainingDailyQuota() < 5) return { ok: false, error: 'QUOTA', detail: "The clinic's daily email limit is used up. Try again tomorrow." };
+
+  const cache = CacheService.getScriptCache();
+  const rk = 'rc_mail_' + session.uid;
+  const used = Number(cache.get(rk) || 0);
+  if (used >= 60) return { ok: false, error: 'RATE', detail: "You've sent a lot of emails in the last hour. Try again a bit later." };
+  cache.put(rk, String(used + 1), 3600);
+
+  const html = sanitizeEmailHtml_(raw) + mktFooterHtml_(card.patientId, to, 'recall');
+  const inl = inlineTaskImages_(cfg, html);
+  const mail = { to: to, subject: subject, htmlBody: inl.html, body: emailHtmlToText_(inl.html), name: 'Dermedica Clinic' };
+  if (Object.keys(inl.images).length) mail.inlineImages = inl.images;
+  MailApp.sendEmail(mail);
+
+  const me = getStaffDocs_().filter(function (s) { return s.id === session.uid; })[0];
+  const now = new Date().toISOString();
+  fsPatch_(cfg, RECALL_COL_ + '/' + id, {
+    emails: Number(card.emails || 0) + 1, lastEmailAt: now, lastEmailBy: session.uid, updatedAt: now,
+    log: (Array.isArray(card.log) ? card.log : []).concat([{ at: now, by: String((me && me.name) || 'Staff'), byUid: session.uid,
+      kind: 'email', what: 'Email sent: ' + subject, note: 'To ' + to }]).slice(-80),
+  });
+  return { ok: true };
 }

@@ -263,12 +263,15 @@ const PAGES = {
   recall: (el) => mountRecall(el, { staff: currentStaff }),
   settings: (el, param) => {
     if (String(param || "").split("/")[0] === "recall") {
-      if (String(param).split("/")[1] !== "flow") return mountRecallSettings(el, { staff: currentStaff });
-      return import("./recall-flow.js")
-        .then((m) => m.mountRecallFlow(el, { staff: currentStaff }))
+      const sub = String(param).split("/")[1] || "";
+      const lazy = sub === "flow" ? ["./recall-flow.js", "mountRecallFlow", "recall flow"]
+        : sub === "emails" ? ["./recall-emails.js", "mountRecallEmails", "email templates"] : null;
+      if (!lazy) return mountRecallSettings(el, { staff: currentStaff });
+      return import(lazy[0])
+        .then((m) => m[lazy[1]](el, { staff: currentStaff }))
         .catch((err) => {
-          console.error("Recall flow failed to load:", err);
-          el.innerHTML = `<section class="page"><div class="state error"><strong>The recall flow couldn't load</strong>
+          console.error(`Recall ${lazy[2]} failed to load:`, err);
+          el.innerHTML = `<section class="page"><div class="state error"><strong>The ${lazy[2]} couldn't load</strong>
             ${escapeHtml(err && err.message ? err.message : "Refresh and try again.")}</div></section>`;
         });
     }
