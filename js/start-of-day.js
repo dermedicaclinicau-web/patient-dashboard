@@ -3,7 +3,7 @@ import { escapeHtml, getInitials, toDateKey, showToast } from "./utils.js";
 import { listProducts, isKitProduct, getMyKitDay, saveKitDayStart, saveDayStart, plural } from "./inventory-api.js";
 import { db } from "./firebase-config.js";
 import { collection, getDocs, query, where, FieldPath } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { kitCountHtml, wireKitCount, readKitCount } from "./kit-count.js";
+import { kitCountHtml, wireKitCount, readKitCount, kitBatchOptions } from "./kit-count.js";
 
 const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July",
@@ -67,6 +67,16 @@ async function kitToday(staff) {
   const [kp, day] = await Promise.all([kitProductsFor(staff), getMyKitDay()]);
   if (day && (day.start || day.end)) return null;
   return kp.length ? { products: kp.map((p) => ({ p })) } : null;
+}
+
+// The batches to choose from (in my kit, then on the Shelf), added just before the count is shown
+async function addBatchOptions(kit) {
+  if (!kit || kit.error || kit.withOptions) return kit;
+  const opts = await kitBatchOptions(kit.products.map(({ p }) => p))
+    .catch((err) => { console.warn("Batch list not loaded:", err); return new Map(); });
+  kit.products = kit.products.map((x) => ({ ...x, options: opts.get(x.p.id) || [] }));
+  kit.withOptions = true;
+  return kit;
 }
 
 // The welcome once per day. The kit count until it's done (it comes back at the next login if put off).
@@ -201,8 +211,9 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
   });
 
   // The kit check loads while they read the welcome (an error means "don't know": the day isn't started without the count)
-  const kitP = kit || noKit ? Promise.resolve(kit)
-    : kitToday(staff).catch((err) => { console.warn("Kit check failed:", err); return { error: true }; });
+  const kitP = (kit || noKit ? Promise.resolve(kit)
+    : kitToday(staff).catch((err) => { console.warn("Kit check failed:", err); return { error: true }; }))
+    .then(addBatchOptions);
 
   const startBtn = dlg.querySelector('[data-act="start"]');
   const kitBox = dlg.querySelector('[data-role="kit"]');
@@ -215,7 +226,7 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
     kitBox.innerHTML = `<section class="sod-you sod-kitq">
         <p class="sod-you-h">Your kit</p>
         <p class="sod-note">How much is left in your kit? Put 0 if you have none.</p>
-        <div class="kc-list">${kitCountHtml(kitShown.map((p) => ({ p })))}</div>
+        <div class="kc-list">${kitCountHtml(k.products)}</div>
         <p class="lh-error" role="alert" hidden></p>
       </section>`;
     wireKitCount(kitBox);
@@ -279,7 +290,9 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
 
   if (kitOnly && kit) {
     kitMode = true;
-    renderKit(dlg, staff, kit, close);
+    dlg.classList.add("is-kit");
+    dlg.querySelector(".sod-card").innerHTML = '<div class="skeleton" style="height:220px;border-radius:14px"></div>';
+    kitP.then((k) => { if (dlg.isConnected && mine === session) renderKit(dlg, staff, k, close); });
     return;
   }
   setTimeout(() => startBtn.focus(), 50);
@@ -319,9 +332,9 @@ function renderKit(dlg, staff, kit, close) {
       <p class="sod-sub">${edit
         ? "Enter what's left in your kit right now. This replaces this morning's count (it stays on record)."
         : "How much is left in your kit? Put 0 if you have none."}</p>
-      <div class="kc-list">${kitCountHtml(products.map((p) => {
+      <div class="kc-list">${kitCountHtml(kit.products.map(({ p, options = [] }) => {
         const r = earlierRow(p.id);
-        return { p, batch: r.batch || "", expiry: r.expiry || "" };
+        return { p, options, batch: r.batch || "", expiry: r.expiry || "" };
       }))}</div>
       <p class="lh-error" role="alert" hidden></p>
       <div class="sod-kit-acts">

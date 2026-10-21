@@ -5,7 +5,7 @@ import { listProducts, listKits, isKitProduct, getMyKitDay, saveKitDayEnd, listM
 import { can } from "./perms.js";
 import { escapeHtml, showToast } from "./utils.js";
 import { openStartOfDayEdit } from "./start-of-day.js";
-import { kitCountHtml, wireKitCount, readKitCount } from "./kit-count.js";
+import { kitCountHtml, wireKitCount, readKitCount, kitBatchOptions } from "./kit-count.js";
 import { isRecorderBusy } from "./recorder.js";
 import { myFinish, minToText, hhmmToMin } from "./shift.js";
 
@@ -192,13 +192,17 @@ async function kitForEnd(day) {
     if (l.kind === "kit") used.set(l.productId, (used.get(l.productId) || 0) + (Number(l.total) || 0));
   }));
   const start = new Map(((day && day.start && !day.start.notInjecting && day.start.items) || []).map((it) => [it.productId, it]));
-  return products.filter((p) => isKitProduct(p) && (p.active || start.has(p.id))).map((p) => {
+  const list = products.filter((p) => isKitProduct(p) && (p.active || start.has(p.id))).map((p) => {
     const s = start.get(p.id) || null;
     const rows = (s && s.rows) || [];
     const r = rows.find((x) => x.inUse) || rows[0] || kits.find((k) => k.productId === p.id) || {};
     return { p, used: r1(used.get(p.id) || 0), start: s,
       batch: p.tracked ? r.batch || "" : "", expiry: p.tracked ? r.expiry || "" : "" };
   });
+  // The batches to choose from (in my kit, then on the Shelf)
+  const opts = await kitBatchOptions(list.map((k) => k.p))
+    .catch((err) => { console.warn("Batch list not loaded:", err); return new Map(); });
+  return list.map((k) => ({ ...k, options: opts.get(k.p.id) || [] }));
 }
 
 

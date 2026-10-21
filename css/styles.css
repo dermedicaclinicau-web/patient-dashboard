@@ -7737,3 +7737,10 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
 
 .po-table tr.po-locked td { background: #f8fafc; }
 .po-table tr.po-locked .po-src { color: #b45309; }
+
+.kc-exp { display: flex; align-items: center; gap: .6rem; }
+.kc-exp strong { font-variant-numeric: tabular-nums; }
+.kc-exp-in { max-width: 11rem; }
+.kc-exp-note { display: block; min-height: 1em; font-size: .8rem; color: #64748b; }
+.kc-exp-note.is-bad { color: #b91c1c; }
+.kc-exp-note.is-warn { color: #b45309; }
