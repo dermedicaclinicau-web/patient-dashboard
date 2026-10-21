@@ -7928,6 +7928,8 @@ function handleEmailFlow_(body) {
     if (op === 'holds') return flowHolds_(body);
     if (op === 'startNow') return flowStartNow_(body, session);
     if (op === 'restart') return flowRestart_(body, session);
+    if (op === 'purchasePreview') return flowPurchasePreview_(body, session);
+    if (op === 'startPurchase') return flowStartPurchase_(body, session);
   } catch (err) {
     console.error('Email flow ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
     return { ok: false, error: 'SERVER_ERROR', detail: String(err && err.message ? err.message : err).slice(0, 300) };
@@ -13446,4 +13448,212 @@ function flowBoughtBetweenOk_(cfg, r, run, ctx) {
   }
   const has = dates.some(function (d) { return d >= from && d <= to; });
   return r.op === 'none' ? !has : has;
+}
+
+// ===================== Purchase flows: who bought recently, and starting the ones it missed =====================
+
+const FLOW_BUY_WINDOWS_ = [7, 14, 30, 60, 90];
+
+// The run a purchase starts: the same ID flowEnrol_ uses, so it never starts twice
+function flowBuyRunId_(flowId, sid, p) {
+  return flowPart_(flowId) + '__' + flowPart_(sid) + '__' + flowHash_([p.invoiceId, p.product, p.date].join('|'));
+}
+
+function flowPurchasePreview_(body, session) {
+  const flowId = String(body.flowId || '');
+  if (!/^[A-Za-z0-9_-]{5,60}$/.test(flowId)) return { ok: false, error: 'BAD_REQUEST' };
+  const cfg = getConfig_();
+  const flow = fsGetDoc_(cfg, 'email_flows/' + flowId);
+  if (!flow || flow.status === 'archived') return { ok: false, error: 'NOT_FOUND' };
+  flow._id = flowId;
+  const t = flow.trigger || {};
+  if ((t.event || 'purchase') !== 'purchase') return { ok: false, error: 'BAD_REQUEST' };
+  const cache = CacheService.getScriptCache();
+  const rk = 'flowbuys_' + session.uid;
+  const used = Number(cache.get(rk) || 0);
+  if (used >= 20) return { ok: false, error: 'RATE_LIMITED' };
+  cache.put(rk, String(used + 1), 3600);
+
+  const started = Date.now();
+  const days = FLOW_BUY_WINDOWS_.indexOf(Number(body.days)) !== -1 ? Number(body.days) : 14;
+  const today = flowKey_(Date.now());
+  const from = flowAddDaysKey_(today, -days);
+  const live = flow.status === 'live';
+  const liveMs = Date.parse(String(flow.liveAt || ''));
+  const liveKey = liveMs ? flowKey_(liveMs) : today;
+  const autoFrom = flowKey_(Date.now() - FLOW_LOOKBACK_DAYS_ * 86400000);
+  const memo = { pts: {} };
+  const productOk = function (product) {
+    if (t.scope === 'catalogue') return !!flowProduct_(cfg, memo, product);
+    if (t.scope === 'list') return (Array.isArray(t.products) ? t.products : []).some(function (n) { return flowSameProduct_(n, product); });
+    return true;
+  };
+
+  // Matching purchases in the window: newest first, one per patient and product
+  const all = [];
+  fsListAll_(cfg, 'skincare', ['patientId', 'patientName', 'purchases']).forEach(function (d) {
+    const sk = fromFields_(d.fields || {});
+    const key = d.name.split('/').pop();
+    (Array.isArray(sk.purchases) ? sk.purchases : []).forEach(function (p) {
+      const date = String(p.date || '');
+      const product = String(p.product || '').trim();
+      if (!product || !/^\d{4}-\d{2}-\d{2}$/.test(date) || date < from || date > today || !productOk(product)) return;
+      all.push({ key: key, sid: String(sk.patientId || '').trim(), name: String(sk.patientName || ''),
+        product: product, date: date, invoiceId: String(p.invoiceId || ''), soldBy: String(p.staff || '') });
+    });
+  });
+  all.sort(function (a, b) { return b.date.localeCompare(a.date); });
+  const seen = {};
+  const list = all.filter(function (r) {
+    const k = (r.sid || 'n:' + r.key) + '|' + flowNorm_(r.product);
+    if (seen[k]) return false;
+    seen[k] = true;
+    return true;
+  });
+
+  // This flow's runs and holds, and the patients in one read
+  const runs = fsQuery_(cfg, FLOW_RUNS_, 'flowId', 'EQUAL', flowId, 5000);
+  const held = flowHoldSet_(cfg, flowId);
+  const got = fsBatchGet_(cfg, uniq_(list.map(function (r) { return r.sid; }).filter(recDocIdOk_))
+    .map(function (s) { return 'patient_list/' + s; }));
+  const RUN_WORD = { done: 'Finished', stopped: 'Stopped', failed: 'Not sent', skipped: 'Skipped' };
+
+  const rows = list.map(function (r) {
+    const row = { id: '', name: r.name, product: r.product, date: r.date, invoiceId: r.invoiceId, key: r.key, state: '', note: '', runId: '' };
+    if (!r.sid) { row.state = 'noid'; row.note = 'The invoice line has no Patient ID. Link the name in Daily uploads, then check again.'; return row; }
+    let doc = got['patient_list/' + r.sid] || null;
+    if (doc && !doc.MergedInto) doc._id = r.sid;
+    else doc = Date.now() - started < 200000 ? flowPatient_(cfg, r.sid) : null;   // merged, or saved under a different ID
+    if (!doc) { row.state = 'nopatient'; row.note = 'Patient ID ' + r.sid + " isn't in the Patient List."; return row; }
+    memo.pts[doc._id] = doc;
+    row.id = doc._id;
+    row.name = flowWho_(doc).name || r.name;
+    if (held[doc._id]) { row.state = 'held'; return row; }
+
+    const base = flowBuyRunId_(flowId, r.sid, r);
+    const mine = runs.filter(function (x) { return x._id === base || x._id.indexOf(base + '__r') === 0; })
+      .sort(function (a, b) { return String(b.startedAt || '').localeCompare(String(a.startedAt || '')); })[0];
+    if (mine) {
+      row.runId = mine._id;
+      if (mine.status === 'active') { row.state = 'active'; return row; }
+      row.state = 'ran';
+      row.note = (RUN_WORD[mine.status] || 'Finished') + (mine.reason && mine.status !== 'done' ? ': ' + mine.reason : '');
+      return row;
+    }
+    const earlier = runs.some(function (x) {
+      return x.status === 'active' && x.patientId === doc._id && flowSameProduct_(x.product, r.product);
+    });
+    if (earlier && (flow.stop || {}).rebuy === false) {
+      row.state = 'active';
+      row.note = 'Already in this flow for an earlier purchase of this product.';
+      return row;
+    }
+    if (flowHasRules_(t.rules)) {
+      if (Date.now() - started > 210000) { row.state = 'unchecked'; row.note = 'Start rules not checked: the list was too long.'; return row; }
+      const run = { patientId: doc._id, kind: 'purchase', product: r.product, purchaseDate: r.date, invoiceId: r.invoiceId,
+        soldBy: r.soldBy, sourceKey: r.key, sourceId: r.sid };
+      let ok = false;
+      try { const ctx = flowCtx_(cfg, run, memo); ok = !!ctx && flowGroupOk_(cfg, t.rules, run, ctx); } catch (e) { ok = false; }
+      if (!ok) { row.state = 'norules'; return row; }
+    }
+    if (!isEmail_(String(doc.Email || '').trim())) {
+      row.state = 'noemail';
+      row.note = 'While testing, their emails still come to you. Sending to patients, the flow stops for them.';
+      return row;
+    }
+    const auto = r.date >= autoFrom && r.date >= liveKey;
+    row.state = !live ? 'off' : auto ? 'will' : 'old';
+    if (row.state === 'old') {
+      row.note = r.date < liveKey ? 'Bought before the flow was turned on.'
+        : 'Bought more than ' + FLOW_LOOKBACK_DAYS_ + " days ago, so it won't start by itself.";
+    }
+    if (earlier && live) row.note = (row.note ? row.note + ' ' : '') + 'Their current run for this product starts over.';
+    return row;
+  });
+
+  const order = ['will', 'old', 'noemail', 'unchecked', 'off', 'active', 'ran', 'norules', 'held', 'noid', 'nopatient'];
+  rows.sort(function (a, b) { return order.indexOf(a.state) - order.indexOf(b.state) || b.date.localeCompare(a.date); });
+  return { ok: true, days: days, total: rows.length, rows: rows.slice(0, 400), more: Math.max(0, rows.length - 400),
+    live: live, mode: flow.sendMode === 'real' ? 'real' : 'test' };
+}
+
+// "Start now" from See recent purchases. Everything is checked again here; the browser's list isn't trusted.
+function flowStartPurchase_(body, session) {
+  const flowId = String(body.flowId || '');
+  if (!/^[A-Za-z0-9_-]{5,60}$/.test(flowId)) return { ok: false, error: 'BAD_REQUEST' };
+  const items = (Array.isArray(body.items) ? body.items : []).slice(0, 50);
+  if (!items.length) return { ok: false, error: 'BAD_REQUEST' };
+  const cfg = getConfig_();
+  const flow = fsGetDoc_(cfg, 'email_flows/' + flowId);
+  if (!flow || flow.status !== 'live' || !Array.isArray(flow.steps) || !flow.steps.length) return { ok: false, error: 'NOT_LIVE' };
+  flow._id = flowId;
+  const t = flow.trigger || {};
+  if ((t.event || 'purchase') !== 'purchase') return { ok: false, error: 'BAD_REQUEST' };
+
+  const lock = LockService.getScriptLock();   // so the 15-minute run can't start the same purchase at the same time
+  if (!lock.tryLock(30000)) return { ok: false, error: 'BUSY' };
+  try {
+    const memo = { pts: {} };
+    const sks = {};
+    const who = String(session.name || 'staff');
+    const made = [];
+    const skipped = [];
+    items.forEach(function (it, i) {
+      it = it || {};
+      const skip = function (why, name) { skipped.push({ i: i, name: String(name || it.name || ''), why: why }); };
+      const key = String(it.key || '');
+      if (!recDocIdOk_(key)) return skip('not found');
+      if (!(key in sks)) sks[key] = fsGetDoc_(cfg, 'skincare/' + encodeURIComponent(key));
+      const sk = sks[key];
+      const p = sk && (Array.isArray(sk.purchases) ? sk.purchases : []).filter(function (x) {
+        return String(x.date || '') === String(it.date || '') && String(x.product || '').trim() === String(it.product || '').trim()
+          && String(x.invoiceId || '') === String(it.invoiceId || '');
+      })[0];
+      if (!p) return skip('the purchase is no longer in the Invoice Record');
+      const sid = String(sk.patientId || '').trim();
+      if (!sid) return skip('no Patient ID on the invoice', sk.patientName);
+      const doc = flowPatient_(cfg, sid);
+      if (!doc) return skip('not in the Patient List', sk.patientName);
+      memo.pts[doc._id] = doc;
+      const name = flowWho_(doc).name;
+      if (flowHeld_(cfg, memo, flowId, doc._id)) return skip('held', name);
+
+      const product = String(p.product).trim();
+      const date = String(p.date);
+      const base = { kind: 'purchase', product: product, purchaseDate: date, invoiceId: String(p.invoiceId || ''),
+        soldBy: String(p.staff || ''), sourceKey: key, sourceId: sid };
+      const trun = Object.assign({ patientId: doc._id }, base);
+      if (flowHasRules_(t.rules)) {
+        const ctx = flowCtx_(cfg, trun, memo);
+        if (!ctx || !flowGroupOk_(cfg, t.rules, trun, ctx)) return skip("doesn't match the start rules", name);
+      }
+      const baseId = flowBuyRunId_(flowId, sid, { invoiceId: base.invoiceId, product: product, date: date });
+      const theirs = fsQuery_(cfg, FLOW_RUNS_, 'patientId', 'EQUAL', doc._id, 100)
+        .filter(function (r) { return r.flowId === flowId && r.status === 'active'; });
+      if (theirs.some(function (r) { return r._id === baseId || r._id.indexOf(baseId + '__r') === 0; })) {
+        return skip('already in this flow for this purchase', name);
+      }
+      const same = theirs.filter(function (r) { return flowSameProduct_(r.product, product); });
+      if (same.length && (flow.stop || {}).rebuy === false) return skip('already in this flow for this product', name);
+
+      const now = new Date().toISOString();
+      const rid = fsGetDoc_(cfg, FLOW_RUNS_ + '/' + baseId) ? baseId + '__r' + Date.now().toString(36) : baseId;
+      const writes = same.map(function (r) {
+        return patchWrite_(cfg, FLOW_RUNS_ + '/' + r._id, {
+          status: 'stopped', reason: 'Started again for a newer purchase by ' + who + '.', next: '', updatedAt: now,
+        });
+      });
+      writes.push(updateWrite_(cfg, FLOW_RUNS_ + '/' + rid, flowNewRun_(flow, doc, Object.assign({}, base, {
+        apptKeys: (flow.stop || {}).booking === true ? flowUpcoming_(cfg, doc, memo) : [],
+        events: [{ at: now, what: 'Started by ' + who + ': bought ' + product + ' on ' + (recLongDate_(date) || date) }],
+      }))));
+      commitWrites_(cfg, writes);
+      made.push(rid);
+    });
+    flowKick_(cfg, flow, made, memo);
+    console.log('Flow ' + flowId + ': ' + made.length + ' purchase run(s) started by ' + who);
+    return { ok: true, started: made.length, skipped: skipped };
+  } finally {
+    lock.releaseLock();
+  }
 }

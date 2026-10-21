@@ -566,6 +566,7 @@ async function mountFlowEditor(container, { id, staff }) {
   let runs = null, runsErr = "", runsLoading = false;
   let productNames = [], serviceNames = [];
   let matchData = null;    // the last "See who's next" answer
+  let buyData = null, buyDays = 14;   // the last "See recent purchases" answer
   let holds = null, holdsErr = false, holdsLoading = false;
   const lhReady = getLetterhead().then((lh) => { letterhead = lh || {}; }).catch(() => { letterhead = {}; });
   let editor = null, lastText = null;
@@ -1006,7 +1007,15 @@ async function mountFlowEditor(container, { id, staff }) {
       ${t.scope === "list" ? `<div class="tb-field"><span>Products</span><div class="fr-pp" data-role="trig-products"></div>
         <small class="muted">Sizes count as the same product, so "Hydrating Serum" also matches "Hydrating Serum 30ml".</small></div>` : ""}
       <div class="tb-field"><span>Only start for patients who… <small>(optional)</small></span><div data-role="trig-rules"></div></div>
-      <p class="tb-info">Purchases come from the invoice sync (the INVOICE RECORD sheet), checked each time it updates. Each purchase starts the flow once for that patient and product. Scanner billing sheets and sales will be added next.</p>`;
+      <p class="tb-info">Purchases come from the invoice sync (the INVOICE RECORD sheet), checked each time it updates. Each purchase starts the flow once for that patient and product. Scanner billing sheets and sales will be added next.</p>
+      <div class="ef-match">
+        <label class="tb-field"><span>Purchases in the last</span>
+          <select class="fb-select" data-role="pwin">${[7, 14, 30, 60, 90].map((d) =>
+            `<option value="${d}"${d === buyDays ? " selected" : ""}>${d} days</option>`).join("")}</select></label>
+        <button type="button" class="lh-btn" data-act="preview-buys">See recent purchases</button>
+        <small class="muted">Everyone who bought a matching product, and whether the flow starts for them. Start anyone it missed.</small>
+        <div data-role="buys-out">${buyData ? buyHtml(buyData) : ""}</div>
+      </div>`;
   }
 
   function flowSettingsHtml() {
@@ -1263,9 +1272,10 @@ async function mountFlowEditor(container, { id, staff }) {
   side.addEventListener("input", (e) => {
     const el = e.target;
     if (el.closest(".re")) return; // the message editor reports its own changes
+    if (el.dataset.role === "pwin") { buyDays = Number(el.value) || 14; return; }
     if (el.dataset.f !== undefined) {
       setFlowValue(el.dataset.f, el);
-      if (el.dataset.f === "trigger.event") matchData = null;
+      if (el.dataset.f === "trigger.event") { matchData = null; buyData = null; }
       renderCanvas();
       changed();
       if (RERENDER_PATHS.includes(el.dataset.f)) renderSide();
@@ -1369,10 +1379,12 @@ async function mountFlowEditor(container, { id, staff }) {
     if (o) o.innerHTML = matchData ? matchHtml(matchData) : "";
   };
   const setRowState = (ids, state) => {
-    if (!matchData || !matchData.rows) return;
-    const s = new Set(ids);
-    matchData.rows.forEach((r) => { if (s.has(r.id)) { r.state = state; r.note = ""; } });
+    const s = new Set(ids.filter(Boolean));
+    [matchData, buyData].forEach((d) => {
+      if (d && d.rows) d.rows.forEach((r) => { if (s.has(r.id)) { r.state = state; r.note = ""; } });
+    });
     drawMatch();
+    drawBuys();
   };
 
   async function previewMatches(btn) {
@@ -1391,6 +1403,113 @@ async function mountFlowEditor(container, { id, staff }) {
     } finally {
       drawMatch();
       if (btn.isConnected) { btn.disabled = false; btn.textContent = "See who's next"; }
+    }
+  }
+
+  /* ---------- See recent purchases (purchase flows) ---------- */
+  const BUY_ST = {
+    will: ["Starts at the next check", "is-active"], old: ["Won't start by itself", ""],
+    off: ["Would start (the flow is off)", ""], noemail: ["No email address", "is-failed"],
+    unchecked: ["Rules not checked", ""], active: ["In this flow now", "is-test"], ran: ["Been through it", ""],
+    norules: ["Doesn't match the start rules", ""], held: ["Held", "is-failed"],
+    noid: ["No Patient ID on the invoice", "is-failed"], nopatient: ["Not in the Patient List", "is-failed"],
+    released: ["Released: check again", ""],
+  };
+  const CAN_START = ["will", "old", "noemail", "unchecked"];
+  const niceKey = (k) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(k || "");
+    return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
+  };
+  function buyRow(r, i) {
+    const [lbl, cls] = BUY_ST[r.state] || [r.state, ""];
+    const live = status === "live";
+    const acts = [
+      live && CAN_START.includes(r.state) ? `<button type="button" class="lh-btn is-quiet" data-pstart="${i}">Start now</button>` : "",
+      live && r.state === "ran" && r.runId
+        ? `<button type="button" class="lh-btn is-quiet" data-restart="${esc(r.runId)}" data-name="${esc(r.name || "")}">Start again</button>` : "",
+      r.id && !["held", "nopatient", "noid"].includes(r.state)
+        ? `<button type="button" class="lh-btn is-quiet" data-hold="${esc(r.id)}" data-name="${esc(r.name || "")}">Hold</button>` : "",
+      r.state === "held" ? `<button type="button" class="lh-btn is-quiet" data-release="${esc(r.id)}">Release</button>` : "",
+    ].filter(Boolean).join("");
+    const nm = `<strong>${esc(r.name || "Unknown")}</strong>`;
+    return `<div class="ef-run">
+      <div class="ef-run-top">${r.id ? `<a href="#/patient/${encodeURIComponent(r.id)}">${nm}</a>` : nm}
+        <span class="ef-st ${cls}">${esc(lbl)}</span></div>
+      <small>${esc(r.product)} · bought ${esc(niceKey(r.date))}</small>
+      ${r.note ? `<small>${esc(r.note)}</small>` : ""}
+      ${acts ? `<div class="ef-run-acts">${acts}</div>` : ""}
+    </div>`;
+  }
+  function buyHtml(d) {
+    if (d.error) return `<p class="tb-none tb-bad">${esc(d.error)}</p>`;
+    const rows = d.rows || [];
+    const pick = (...ks) => rows.map((r, i) => [r, i]).filter(([r]) => ks.includes(r.state));
+    const will = pick("will");
+    const can = pick("old", "noemail", "unchecked", "off");
+    const rest = pick("active", "ran", "norules", "held", "noid", "nopatient", "released");
+    const live = status === "live";
+    const startable = (list) => list.filter(([r]) => CAN_START.includes(r.state)).length;
+    const btn = (grp, list) => (live && startable(list)
+      ? `<button type="button" class="lh-btn" data-act="buys-start" data-grp="${grp}">Start ${startable(list) > 50 ? "the first 50" : `all ${startable(list)}`} now</button>` : "");
+    const group = (title, list, b, open) => (list.length
+      ? `<details class="ef-mgroup"${open ? " open" : ""}><summary>${esc(title)} (${list.length})</summary>${b}${list.map(([r, i]) => buyRow(r, i)).join("")}</details>` : "");
+    return `
+      <p class="tb-ready">${d.total} matching purchase${d.total === 1 ? "" : "s"} in the last ${d.days} days</p>
+      ${!live ? '<p class="tb-info">The flow is off. Turn it on to start anyone.</p>'
+        : mode !== "real" ? '<p class="tb-info">The flow is testing, so anyone you start sends their emails to you, marked [Test].</p>' : ""}
+      ${group("Starts at the next check", will, btn("will", will), true)}
+      ${group("Won't start by itself", can, btn("can", can), !will.length)}
+      ${group("Already in it, or can't start", rest, "", false)}
+      ${d.more ? `<small class="muted">${d.more} more not shown. Choose a shorter time to see them all.</small>` : ""}
+      ${!rows.length ? '<p class="tb-none">No matching purchases in that time.</p>' : ""}`;
+  }
+  function drawBuys() {
+    const o = side.querySelector('[data-role="buys-out"]');
+    if (o) o.innerHTML = buyData ? buyHtml(buyData) : "";
+  }
+  async function previewBuys(btn) {
+    btn.disabled = true;
+    btn.textContent = "Checking purchases…";
+    const out = side.querySelector('[data-role="buys-out"]');
+    if (out) out.innerHTML = '<p class="tb-none">This can take a minute.</p>';
+    try {
+      await settle();
+      buyData = await callApi({ action: "emailFlow", op: "purchasePreview", flowId: id, days: buyDays });
+    } catch (ex) {
+      console.error("Purchase preview failed:", ex);
+      buyData = { error: actError(ex) };
+    } finally {
+      drawBuys();
+      if (btn.isConnected) { btn.disabled = false; btn.textContent = "See recent purchases"; }
+    }
+  }
+  async function startBuys(idxs, btn) {
+    const items = idxs.map((i) => ((buyData && buyData.rows) || [])[i]).filter(Boolean);
+    if (!items.length) return;
+    if (!(await confirmDialog({
+      title: items.length > 1 ? `Start the flow for ${items.length} purchases now?` : `Start the flow for ${items[0].name || "this patient"} now?`,
+      message: mode !== "real"
+        ? "The flow is testing, so the emails come to you, marked [Test]."
+        : "Their first email goes now (or at 9 am if it's after hours), then the rest follow the flow.",
+      confirmLabel: "Start now", tone: "info",
+    }))) return;
+    btn.disabled = true;
+    try {
+      await settle();
+      const r = await callApi({ action: "emailFlow", op: "startPurchase", flowId: id,
+        items: items.map((x) => ({ key: x.key, invoiceId: x.invoiceId, product: x.product, date: x.date, name: x.name })) });
+      const sk = r.skipped || [];
+      const bad = new Set(sk.map((x) => x.i));
+      items.forEach((x, n) => { if (!bad.has(n)) { x.state = "active"; x.note = ""; } });
+      drawBuys();
+      showToast(`${r.started} started${sk.length ? `. ${sk.length} skipped: ${sk.slice(0, 3).map((x) => `${x.name || "a patient"} (${x.why})`).join(", ")}` : "."}`);
+      runs = null;
+      renderRuns();
+    } catch (ex) {
+      console.error("Start purchases failed:", ex);
+      showToast(actError(ex));
+    } finally {
+      if (btn.isConnected) btn.disabled = false;
     }
   }
 
@@ -1518,6 +1637,17 @@ async function mountFlowEditor(container, { id, staff }) {
   side.addEventListener("click", async (e) => {
     const pm = e.target.closest('[data-act="preview-match"]');
     if (pm) { previewMatches(pm); return; }
+    const pb = e.target.closest('[data-act="preview-buys"]');
+    if (pb) { previewBuys(pb); return; }
+    const ps = e.target.closest("[data-pstart]");
+    if (ps) { startBuys([Number(ps.dataset.pstart)], ps); return; }
+    const bs = e.target.closest('[data-act="buys-start"]');
+    if (bs) {
+      const want = bs.dataset.grp === "will" ? ["will"] : ["old", "noemail", "unchecked"];
+      const idxs = ((buyData && buyData.rows) || []).map((r, i) => (want.includes(r.state) ? i : -1)).filter((i) => i >= 0).slice(0, 50);
+      if (idxs.length) startBuys(idxs, bs);
+      return;
+    }
     if (e.target.closest('[data-act="runs-refresh"]')) { runs = null; holds = null; renderRuns(); renderHolds(); return; }
     const sn = e.target.closest("[data-startnow]");
     if (sn) { startNow([sn.dataset.startnow], sn); return; }
