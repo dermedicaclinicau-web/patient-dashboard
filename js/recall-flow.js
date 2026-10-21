@@ -21,6 +21,7 @@ import { normRecallSettings, recallTabsHtml } from "./recall-settings.js";
 import { loadRecallEmailTemplates } from "./recall-emails.js";
 
 const MAX_STEPS = 40;
+let WHO_CACHE = null;   // the last "Who's in the flow" answer, so reopening it is instant
 const MAX_DEPTH = 3;
 const STOP_LINE = "Reply STOP to opt out.";
 
@@ -1042,19 +1043,23 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
       if (btn.isConnected) { btn.disabled = false; btn.textContent = label; }
     }
   }
-  
+
   /* ---------- Who's in the flow ---------- */
   function whoDialog() {
     const kd = (k) => { const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(k || ""); return m ? new Date(+m[1], +m[2] - 1, +m[3]) : null; };
     const day = (k) => { const d = kd(k); return d ? d.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" }) : ""; };
     const at = (ms) => (ms ? new Date(ms).toLocaleString("en-AU", { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "");
+    const age = (iso) => {
+      const m = Math.round((Date.now() - new Date(iso || 0).getTime()) / 60000);
+      return m < 1 ? "Checked just now" : m < 60 ? `Checked ${m} min ago` : `Checked ${Math.round(m / 60)} h ago`;
+    };
     const TABS = [["next", "Starting next"], ["later", "Coming up"], ["inFlow", "In the flow now"],
       ["quiet", "Quiet time"], ["along", "Riding along"], ["nomatch", "Not starting"]];
     const dlg = document.createElement("dialog");
     dlg.className = "lh-dialog rf-who";
     dlg.innerHTML = `
       <div class="rf-who-head">
-        <div><h3>Who's in the flow</h3><p class="muted" data-role="sum">Checking every waiting card. This can take a minute…</p></div>
+        <div><h3>Who's in the flow</h3><p class="muted" data-role="sum">Checking the waiting cards…</p></div>
         <button type="button" class="lh-btn is-quiet" data-act="refresh">Refresh</button>
         <button type="button" class="lh-btn is-quiet" data-act="x" aria-label="Close">×</button>
       </div>
@@ -1062,12 +1067,13 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
       <input type="search" class="fe-input rf-who-q" data-role="q" placeholder="Find a patient by name" aria-label="Find a patient" />
       <div class="rf-who-list" data-role="list"><div class="skeleton" style="height:220px;border-radius:12px"></div></div>`;
     const $d = (r) => dlg.querySelector(`[data-role="${r}"]`);
-    let data = null, tab = "next", q = "";
+    let data = WHO_CACHE, tab = "next", q = "", loading = false;
 
-    const what = (r) => `${r.category}${r.alsoDue && r.alsoDue.length ? ` + ${r.alsoDue.join(", ")}` : ""}`;
+    const what = (r) => `${esc(r.category)}${r.alsoDue && r.alsoDue.length ? ` + ${esc(r.alsoDue.join(", "))}` : ""}`;
     function line(r) {
-      if (tab === "next") return `${what(r)} · due ${day(r.dueDate)}${r.waited ? " · waiting since an earlier day" : ""}`;
-      if (tab === "later") return `${what(r)} · due ${day(r.dueDate)} · starts around <strong>${esc(day(r.day))}</strong>`;
+      if (tab === "next") return `${what(r)} · due ${esc(day(r.dueDate))}${r.waited ? " · waiting since an earlier day" : ""}`;
+      if (tab === "later") return `${what(r)} · due ${esc(day(r.dueDate))} · starts around <strong>${esc(day(r.day))}</strong>` +
+        (r.unsure ? ' <span class="muted">(start rules checked on the day)</span>' : "");
       if (tab === "quiet") return `${what(r)} · can start from <strong>${esc(day(r.until))}</strong>`;
       if (tab === "along") return `${esc(r.category)} · ${r.already ? "with" : "joins"} their ${esc(r.joinedCat || "other")} recall`;
       if (tab === "nomatch") return `${what(r)} · doesn't match the start rules, so the recall team calls them as usual`;
@@ -1079,7 +1085,6 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
         : `Trying again on ${day(r.on)} (round ${r.round + 1})`;
       return `${what(r)} · ${esc(st)}${sent ? ` · ${esc(sent)} sent` : ""}${r.replied ? ' <span class="rc-tag is-yes">Replied</span>' : ""}`;
     }
-    const safe = (s) => s;   // line() escapes what it adds; names and categories are escaped below
     function drawTabs() {
       $d("tabs").innerHTML = TABS.map(([k, l]) => {
         const n = data ? data[`${k}Count`] : null;
@@ -1088,53 +1093,59 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
       }).join("");
     }
     function drawList() {
-      const box = $d("list");
       if (!data) return;
       const all = data[tab] || [];
       const rows = q ? all.filter((r) => r.name.toLowerCase().includes(q)) : all;
       const total = data[`${tab}Count`] || 0;
       const empty = { next: "Nobody starts at the next check.", later: "Nobody else is waiting to start.",
         inFlow: "Nobody is in the flow yet.", quiet: "Nobody is waiting for quiet time.",
-        along: "Nobody has a second treatment riding along.", nomatch: "Everyone matches the start rules." }[tab];
-      box.innerHTML = rows.length ? rows.map((r) => `<div class="rf-who-row">
+        along: "Nobody has a second treatment riding along.", nomatch: "Everyone checked matches the start rules." }[tab];
+      $d("list").innerHTML = rows.length ? rows.map((r) => `<div class="rf-who-row">
           <span class="rc-av" aria-hidden="true">${esc((r.name.match(/\b[A-Za-z]/g) || ["?"]).slice(0, 2).join("").toUpperCase())}</span>
           <span class="rf-who-main">${r.patientId ? `<a href="#/patient/${encodeURIComponent(r.patientId)}">${esc(r.name || "Unknown patient")}</a>`
-            : `<strong>${esc(r.name || "Unknown patient")}</strong>`}<small>${safe(line({ ...r, category: esc(r.category),
-              alsoDue: (r.alsoDue || []).map(esc), next: r.next ? esc(r.next) : "", with: esc(r.with || "") }))}</small></span>
-          ${tab === "nomatch" ? "" : `<button type="button" class="lh-btn is-quiet" data-skip="${esc(r.id)}" data-name="${esc(r.name)}">${
+            : `<strong>${esc(r.name || "Unknown patient")}</strong>`}<small>${line({ ...r, next: r.next || "", with: r.with || "" })}</small></span>
+          ${tab === "nomatch" || tab === "along" ? "" : `<button type="button" class="lh-btn is-quiet" data-skip="${esc(r.id)}" data-name="${esc(r.name)}">${
             tab === "inFlow" ? "Take out" : "Keep out"}</button>`}
         </div>`).join("") + (total > all.length ? `<p class="muted rf-who-more">Showing the first ${all.length} of ${total.toLocaleString()}.</p>` : "")
         : `<p class="rc-empty">${esc(q ? "Nobody here by that name." : empty)}</p>`;
     }
     function drawSum() {
+      if (!data) return;
       const d = data;
       const parts = [];
       if (!d.on) parts.push("The flow is off, so nobody starts until you turn it on. This is who would.");
       parts.push(`${d.nextCount.toLocaleString()} start${d.nextCount === 1 ? "s" : ""} at the next check (${d.left} of ${d.cap} left today).`);
       if (d.laterCount) parts.push(`${d.laterCount.toLocaleString()} more after that, about ${d.cap} a day: the last around ${day(d.lastDay)}.`);
       parts.push(`${d.inFlowCount.toLocaleString()} in the flow now.`);
-      if (d.unchecked) parts.push(`${d.unchecked} couldn't be checked in time. Press Refresh to try again.`);
+      parts.push(loading ? `${age(d.checkedAt)} · updating…` : `${age(d.checkedAt)}.`);
       $d("sum").textContent = parts.join(" ");
     }
+    const drawAll = () => { drawSum(); drawTabs(); drawList(); };
+
     async function load() {
+      if (loading) return;
+      loading = true;
       const btn = dlg.querySelector('[data-act="refresh"]');
       btn.disabled = true;
-      $d("list").innerHTML = '<div class="skeleton" style="height:220px;border-radius:12px"></div>';
+      if (data) drawSum();
+      else $d("list").innerHTML = '<div class="skeleton" style="height:220px;border-radius:12px"></div>';
       try {
         await settle();
         const res = await callApi({ action: "recall", op: "flowPreview" });
         if (res.problem) { $d("sum").textContent = res.problem; $d("list").innerHTML = ""; return; }
-        data = res;
-        if (!data[`${tab}Count`] && data.inFlowCount) tab = data.nextCount ? "next" : "inFlow";
-        drawSum(); drawTabs(); drawList();
+        data = WHO_CACHE = res;
+        if (!data[`${tab}Count`]) tab = data.nextCount ? "next" : data.inFlowCount ? "inFlow" : data.laterCount ? "later" : tab;
       } catch (err) {
         console.error("Who's in the flow failed:", err);
+        if (!data) $d("list").innerHTML = "";
         $d("sum").textContent = err && err.code === "UNAUTHORIZED" ? "Your login has timed out. Log out and back in, then try again."
           : "Couldn't check. Press Refresh to try again.";
-        $d("list").innerHTML = "";
+        return;
       } finally {
+        loading = false;
         if (btn.isConnected) btn.disabled = false;
       }
+      if (dlg.open) drawAll();
     }
 
     dlg.addEventListener("input", (e) => { if (e.target.dataset.role === "q") { q = e.target.value.trim().toLowerCase(); drawList(); } });
@@ -1158,7 +1169,7 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
         if (r.problem) { showToast(r.problem); sk.disabled = false; return; }
         data[tab] = data[tab].filter((x) => x.id !== sk.dataset.skip);
         data[`${tab}Count`] = Math.max(0, data[`${tab}Count`] - 1);
-        drawSum(); drawTabs(); drawList();
+        drawAll();
         showToast(inNow ? "Taken out of the flow." : "Kept out of the flow.");
       } catch (err) {
         console.error("Keep out failed:", err);
@@ -1169,8 +1180,15 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
     dlg.addEventListener("close", () => dlg.remove());
     document.body.appendChild(dlg);
     dlg.showModal();
-    load();
+
+    // Show the last answer straight away; check again if it's more than 2 minutes old
+    if (data) {
+      if (!data[`${tab}Count`]) tab = data.nextCount ? "next" : data.inFlowCount ? "inFlow" : tab;
+      drawAll();
+    }
+    if (!data || Date.now() - new Date(data.checkedAt || 0).getTime() > 120000) load();
   }
+  
   /* ---------- Top bar ---------- */
   root.querySelector(".ff-bar").addEventListener("click", async (e) => {
     const act = e.target.closest("[data-act]");

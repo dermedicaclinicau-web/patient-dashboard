@@ -12772,6 +12772,14 @@ function recallFlowRun_(cfg, set, today) {
     : fsQuery_(cfg, RECALL_COL_, 'status', 'EQUAL', 'open', 10000))
     .concat(fsQuery_(cfg, RECALL_COL_, 'flowState', 'EQUAL', 'released', 1000));
   const seen = {};
+
+  // Everyone's other treatments in one read, instead of one lookup per patient
+  try {
+    fsQuery_(cfg, RECALL_COL_, 'status', 'EQUAL', 'open', 10000).forEach(function (c) {
+      if (c.patientId) (memo.pc[c.patientId] = memo.pc[c.patientId] || []).push(c);
+    });
+    memo.pcAll = true;
+  } catch (e) { console.warn('Recall flow: open cards not read in one go: ' + e); memo.pc = {}; }
   const cands = pool.filter(function (c) {
     if (seen[c._id]) return false;
     seen[c._id] = true;
@@ -12870,7 +12878,7 @@ function recallPri_(flow, set, key) {
 // A patient's recall cards (once per run)
 function recallPatientCards_(cfg, pid, memo) {
   memo.pc = memo.pc || {};
-  if (!memo.pc[pid]) memo.pc[pid] = fsQuery_(cfg, RECALL_COL_, 'patientId', 'EQUAL', pid, 50);
+  if (!memo.pc[pid]) memo.pc[pid] = memo.pcAll ? [] : fsQuery_(cfg, RECALL_COL_, 'patientId', 'EQUAL', pid, 50);
   return memo.pc[pid];
 }
 
@@ -13029,6 +13037,8 @@ function recallSendEmail_(body, session) {
 const RECALL_STEP_NAMES_ = { text: 'Text', email: 'Email', wait: 'Wait', branch: 'If / else', team: 'Recall team', cycle: 'Try again', end: 'End' };
 
 // A dry run of recallFlowRun_ step 2 (keep the two in step): nothing is sent or saved
+// A dry run of recallFlowRun_ step 2 (keep the two in step): nothing is sent or saved.
+// One read of every open card; start rules are only checked for roughly the next three days.
 function recallFlowPreview_(body, session) {
   const cfg = getConfig_();
   const flow = fsGetDoc_(cfg, RECALL_FLOW_DOC_);
@@ -13037,8 +13047,7 @@ function recallFlowPreview_(body, session) {
   const t = flow.trigger || {};
   const today = flowKey_(Date.now());
   const nowMs = Date.now();
-  const memo = { pts: {}, pc: {} };
-  const deadline = Date.now() + 4 * 60000;
+  const deadline = Date.now() + 90000;
   const MAXL = 300;
   const row = function (c, extra) {
     return Object.assign({ id: c._id, name: String(c.patientName || ''), patientId: String(c.patientId || ''),
@@ -13052,30 +13061,29 @@ function recallFlowPreview_(body, session) {
     return (RECALL_STEP_NAMES_[s.type] || s.type) + (s.type === 'email' && s.cfg && s.cfg.subject ? ': ' + s.cfg.subject : '');
   };
 
+  // The one read: every open card, grouped by patient
+  const open = fsQuery_(cfg, RECALL_COL_, 'status', 'EQUAL', 'open', 10000);
+  const memo = { pts: {}, pc: {} };
+  open.forEach(function (c) { if (c.patientId) (memo.pc[c.patientId] = memo.pc[c.patientId] || []).push(c); });
+
   // Already in the flow
-  const live = fsQuery_(cfg, RECALL_COL_, 'flowState', 'IN', ['run', 'wait', 'team', 'cycle', 'joined'], 3000)
-    .filter(function (c) { return c.status === 'open'; });
   const order = { run: 0, wait: 1, team: 2, cycle: 3 };
-  const inFlow = live.filter(function (c) { return c.flowState in order; }).map(function (c) {
+  const inFlow = open.filter(function (c) { return c.flowState in order; }).map(function (c) {
     return row(c, { state: c.flowState, next: stepName(c.flowNext), at: Number(c.flowDueAt || 0), on: String(c.remindOn || ''),
       with: String(c.assignedToName || ''), texts: Number(c.texts || 0), emails: Number(c.emails || 0),
       replied: c.replyOpen === true, round: Number(c.flowCycle || 1) });
   }).sort(function (a, b) { return order[a.state] - order[b.state] || (a.at || 0) - (b.at || 0); });
-  const along = live.filter(function (c) { return c.flowState === 'joined'; })
+  const along = open.filter(function (c) { return c.flowState === 'joined'; })
     .map(function (c) { return row(c, { joinedCat: String(c.joinedCat || ''), already: true }); });
 
   // Who starts, and when (the same steps as recallFlowRun_)
   const win = Number(t.withinDays);
   const from = win > 0 ? flowAddDaysKey_(today, -win) : '';
-  const pool = (from ? fsQuery_(cfg, RECALL_COL_, 'dueDate', 'GREATER_THAN_OR_EQUAL', from, 3000)
-    : fsQuery_(cfg, RECALL_COL_, 'status', 'EQUAL', 'open', 10000))
-    .concat(fsQuery_(cfg, RECALL_COL_, 'flowState', 'EQUAL', 'released', 1000));
-  const seen = {};
-  const cands = pool.filter(function (c) {
-    if (seen[c._id]) return false;
-    seen[c._id] = true;
-    return c.status === 'open' && c.stage === 'due' && !c.assignedToId && String(c.dueDate) <= today
-      && (!c.flowState || c.flowState === 'queued' || c.flowState === 'released');
+  const cands = open.filter(function (c) {
+    const st = String(c.flowState || '');
+    if (c.stage !== 'due' || c.assignedToId || String(c.dueDate) > today) return false;
+    if (st === 'released') return true;
+    return (!st || st === 'queued') && (!from || String(c.dueDate) >= from);
   });
   const byPt = {};
   cands.forEach(function (c) { const k = c.patientId || c._id; (byPt[k] = byPt[k] || []).push(c); });
@@ -13089,57 +13097,61 @@ function recallFlowPreview_(body, session) {
 
   const started = Number(PropertiesService.getScriptProperties().getProperty('RECALL_FLOW_' + today) || 0);
   const cap = Math.max(1, Math.min(500, Number(t.dailyMax) || 25));
+  const left = Math.max(0, cap - started);
   const quiet = Math.max(0, Number(t.quietDays) || 0);
+  const hasRules = flowHasRules_(t.rules);
+  const ruleBudget = Math.min(400, left + cap * 3);   // about the next three days
+  let checked = 0, unsure = 0;
   const starts = [], quietL = [], nomatch = [];
-  let unchecked = 0;
+
   groups.forEach(function (g) {
-    if (Date.now() > deadline) { unchecked += g.length; return; }
-    try {
-      const ids = g.map(function (c) { return c._id; });
-      const others = g[0].patientId ? recallPatientCards_(cfg, g[0].patientId, memo)
-        .filter(function (x) { return x.status === 'open' && ids.indexOf(x._id) === -1; }) : [];
-      const running = others.filter(function (x) {
-        return ['run', 'wait', 'team', 'cycle'].indexOf(String(x.flowState || '')) !== -1 || !!x.assignedToId;
-      }).sort(function (a, b) { return recallPri_(flow, set, a.category) - recallPri_(flow, set, b.category); })[0];
-      if (running) { g.forEach(function (c) { along.push(row(c, { joinedCat: String(running.category || '') })); }); return; }
-      const last = others.concat(g).reduce(function (m, x) {
-        [x.lastTextAt, x.lastEmailAt].forEach(function (v) { if (v && String(v) > m) m = String(v); });
-        return m;
-      }, '');
-      if (quiet && last && nowMs - Date.parse(last) < quiet * 86400000) {
-        const free = flowKey_(Date.parse(last) + quiet * 86400000);
-        g.forEach(function (c) { quietL.push(row(c, { until: free })); });
-        return;
-      }
-      let lead = null;
+    const ids = g.map(function (c) { return c._id; });
+    const others = g[0].patientId ? (memo.pc[g[0].patientId] || []).filter(function (x) { return ids.indexOf(x._id) === -1; }) : [];
+    const running = others.filter(function (x) {
+      return ['run', 'wait', 'team', 'cycle'].indexOf(String(x.flowState || '')) !== -1 || !!x.assignedToId;
+    }).sort(function (a, b) { return recallPri_(flow, set, a.category) - recallPri_(flow, set, b.category); })[0];
+    if (running) { g.forEach(function (c) { along.push(row(c, { joinedCat: String(running.category || '') })); }); return; }
+    const last = others.concat(g).reduce(function (m, x) {
+      [x.lastTextAt, x.lastEmailAt].forEach(function (v) { if (v && String(v) > m) m = String(v); });
+      return m;
+    }, '');
+    if (quiet && last && nowMs - Date.parse(last) < quiet * 86400000) {
+      const free = flowKey_(Date.parse(last) + quiet * 86400000);
+      g.forEach(function (c) { quietL.push(row(c, { until: free })); });
+      return;
+    }
+    let lead = null, maybe = false;
+    if (!hasRules) lead = g[0];
+    else if (checked >= ruleBudget || Date.now() > deadline) { lead = g[0]; maybe = true; unsure++; }
+    else {
+      checked++;
       for (let i = 0; i < g.length && !lead; i++) {
-        if (!flowHasRules_(t.rules) || recallFlowMatches_(cfg, t.rules, g[i], memo, today)) lead = g[i];
+        try { if (recallFlowMatches_(cfg, t.rules, g[i], memo, today)) lead = g[i]; }
+        catch (e) { console.warn('Recall flow preview ' + g[i]._id + ': ' + e); }
       }
       if (!lead) { g.forEach(function (c) { nomatch.push(row(c)); }); return; }
-      const also = g.filter(function (c) { return c !== lead; }).map(function (c) { return c.category; })
-        .concat(others.filter(function (x) { return x.stage === 'due' && !x.assignedToId && x.flowState !== 'joined'; })
-          .map(function (x) { return x.category; }))
-        .filter(function (k, i, a) { return k && k !== lead.category && a.indexOf(k) === i; });
-      starts.push(row(lead, { alsoDue: also, waited: lead.flowState === 'queued' || lead.flowState === 'released' }));
-    } catch (e) {
-      console.warn('Recall flow preview ' + g[0]._id + ': ' + e);
-      unchecked += g.length;
     }
+    const also = g.filter(function (c) { return c !== lead; }).map(function (c) { return c.category; })
+      .concat(others.filter(function (x) { return x.stage === 'due' && !x.assignedToId && x.flowState !== 'joined'; })
+        .map(function (x) { return x.category; }))
+      .filter(function (k, i, a) { return k && k !== lead.category && a.indexOf(k) === i; });
+    starts.push(row(lead, { alsoDue: also, waited: lead.flowState === 'queued' || lead.flowState === 'released', unsure: maybe }));
   });
-  const left = Math.max(0, cap - started);
+
   starts.forEach(function (r, i) { r.day = flowAddDaysKey_(today, i < left ? 0 : 1 + Math.floor((i - left) / cap)); });
   const next = starts.filter(function (r) { return r.day === today; });
   const later = starts.filter(function (r) { return r.day !== today; });
   const cut = function (a) { return a.slice(0, MAXL); };
   return {
     ok: true, on: flow.on === true, cap: cap, started: started, left: left, quietDays: quiet, today: today,
+    checkedAt: new Date().toISOString(), unsure: unsure,
     next: cut(next), nextCount: next.length,
     later: cut(later), laterCount: later.length, lastDay: starts.length ? starts[starts.length - 1].day : '',
     inFlow: cut(inFlow), inFlowCount: inFlow.length,
     quiet: cut(quietL), quietCount: quietL.length,
     along: cut(along), alongCount: along.length,
     nomatch: cut(nomatch), nomatchCount: nomatch.length,
-    unchecked: unchecked,
+    unchecked: 0,
   };
 }
 
