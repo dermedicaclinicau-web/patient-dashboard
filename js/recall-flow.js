@@ -63,7 +63,15 @@ const WITHIN = [[7, "Became due in the last 7 days"], [14, "Became due in the la
   [90, "Became due in the last 90 days"], [0, "Everyone waiting, most recently due first"]];
 const DAILY = [[10, "10"], [25, "25"], [50, "50"], [100, "100"], [200, "200"]];
 const MAXES = [[1, "1 time"], [2, "2 times"], [3, "3 times"], [4, "4 times"], [5, "5 times"]];
-const TOKENS = ["First name", "Full name", "Treatment", "Months", "Due date", "Last visit", "Last seen with", "Clinic phone"];
+const TOKENS = ["First name", "Full name", "Treatment", "Main treatment", "Months", "Due date", "Last visit", "Last seen with", "Clinic phone"];
+const QUIET = [[0, "None"], [7, "7 days"], [14, "14 days"], [30, "30 days"], [60, "60 days"]];
+// Every treatment, in priority order: the saved order first, then any new ones in Treatments order
+const cleanPriority = (list, set) => {
+  const keys = ((set && set.categories) || []).map((c) => c.key);
+  const out = (Array.isArray(list) ? list : []).map(String).filter((k, i, a) => keys.includes(k) && a.indexOf(k) === i);
+  keys.forEach((k) => { if (!out.includes(k)) out.push(k); });
+  return out;
+};
 
 /* ===================== Cards ===================== */
 
@@ -174,7 +182,7 @@ function defaultFlow(set) {
   const replied = () => ({ match: "all", rules: [newRule("rc.replied")] });
   return {
     on: false,
-    trigger: { rules: blankGroup(), withinDays: 7, dailyMax: 25 },
+    trigger: { rules: blankGroup(), withinDays: 7, dailyMax: 25, quietDays: 14, priority: cleanPriority([], set) },
     stop: { rules: blankGroup() },
     style: { background: EMAIL_BACKGROUNDS[0], accent: EMAIL_ACCENTS[0], width: 600, logo: true, footer: true },
     steps: [
@@ -204,7 +212,7 @@ function snapshot(d, set) {
   const t = d.trigger || {}, st = d.stop || {};
   return {
     on: d.on === true,
-    trigger: { withinDays: 7, dailyMax: 25, ...t, rules: cleanGroup(t.rules) },
+    trigger: { withinDays: 7, dailyMax: 25, quietDays: 14, ...t, rules: cleanGroup(t.rules), priority: cleanPriority(t.priority, set) },
     stop: { rules: cleanGroup(st.rules) },
     style: { ...base.style, ...(d.style || {}) },
     steps: cleanSteps(d.steps),
@@ -613,6 +621,7 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
     const c = clinicDetails(letterhead);
     return new Map([
       ["first name", "Sarah"], ["full name", "Sarah Citizen"], ["treatment", (cat && cat.smsName) || "treatment"],
+      ["main treatment", (cat && cat.smsName) || "treatment"],
       ["months", String((cat && cat.months) || 4)], ["due date", "14 October 2026"], ["last visit", "14 June 2026"],
       ["last seen with", "Dr Teh"], ["clinic phone", settings.sms.phone || c.phone || ""],
       ["clinic email", c.email || ""], ["clinic address", c.address || ""],
@@ -639,6 +648,19 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
         <label class="tb-field"><span>Start at most this many a day</span><select class="fb-select" data-f="trigger.dailyMax">${opt(DAILY, t.dailyMax)}</select>
           <small class="muted">The rest start the next day, before anyone newer.</small></label>
         <div class="tb-field"><span>Only start for… <small>(optional)</small></span><div data-role="trig-rules"></div></div>
+      </section>
+      <section class="ef-sec"><h4>Due for more than one treatment</h4>
+        <p class="tb-info">They get one flow, for the treatment highest on this list. Their other treatments join it: {Treatment} names
+          them all (e.g. "wrinkle relaxer and skin treatment"), and nobody calls about them separately. If the main one is booked, the
+          others wait. If the flow closes it, or they reply STOP, the others close too. Otherwise they start the flow after the quiet time.</p>
+        <ol class="rf-pri">${t.priority.map((k, i) => `<li>
+          <span class="rf-pri-n">${i + 1}</span><span class="rf-pri-name">${esc(k)}</span>
+          <button type="button" class="ib-tool" data-pri="${i}:-1"${i === 0 ? " disabled" : ""} aria-label="Move ${esc(k)} up" title="Move up">${I.up}</button>
+          <button type="button" class="ib-tool" data-pri="${i}:1"${i === t.priority.length - 1 ? " disabled" : ""} aria-label="Move ${esc(k)} down" title="Move down">${I.down}</button>
+        </li>`).join("")}</ol>
+        <label class="tb-field"><span>Quiet time between recall messages to the same patient</span>
+          <select class="fb-select" data-f="trigger.quietDays">${opt(QUIET, t.quietDays)}</select>
+          <small class="muted">Counts texts and emails from any recall, including ones staff send from a card.</small></label>
       </section>
       <section class="ef-sec"><h4>Always</h4>
         <p class="tb-info">Booked, came in, or replied STOP: the flow stops. If someone picks up the card or logs a call, they take over and the flow stops.
@@ -826,6 +848,19 @@ export async function mountRecallFlow(container, { staff = null } = {}) {
         el.dispatchEvent(new Event("input", { bubbles: true }));
       } else if (editor) editor.insertToken(name);
       else showToast("Click in the message first.");
+      return;
+    }
+    const pr = e.target.closest("[data-pri]");
+    if (pr) {
+      const [i, dir] = pr.dataset.pri.split(":").map(Number);
+      const p = flow.trigger.priority;
+      const j = i + dir;
+      if (j < 0 || j >= p.length) return;
+      [p[i], p[j]] = [p[j], p[i]];
+      changed();
+      renderSide();
+      const again = side.querySelector(`[data-pri="${j}:${dir}"]`) || side.querySelector(`[data-pri="${j}:${-dir}"]`);
+      if (again) again.focus();
       return;
     }
     if (e.target.closest('[data-act="close"]')) { sel = null; renderCanvas(); renderSide(); return; }
