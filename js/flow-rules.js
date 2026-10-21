@@ -120,50 +120,74 @@ function defaults(f) {
 }
 
 export const blankGroup = () => ({ match: "all", rules: [] });
-export const ruleCount = (g) => (g && Array.isArray(g.rules) ? g.rules.length : 0);
+// Groups: { id, type: "group", match, rules: [rules] } inside a set of rules (one level deep)
+const isGroup = (x) => !!x && Array.isArray(x.rules);
+// How many rules, counting the ones inside groups
+export const ruleCount = (g) => (g && Array.isArray(g.rules)
+  ? g.rules.reduce((n, x) => n + (isGroup(x) ? x.rules.length : 1), 0) : 0);
 export function newRule(field = "appt.has_future") {
   const f = FIELD[field] || RULE_FIELDS[0];
   return { id: rid(), field: f.key, ...defaults(f) };
+}
+
+function cleanRule(r) {
+  const f = FIELD[r.field];
+  const d = defaults(f);
+  const op = opsFor(f).some((o) => o[0] === r.op) ? r.op : d.op;
+  let value = r.value;
+  if (f.type === "products" || f.type === "names") value = (Array.isArray(value) ? value : []).map(String).filter(Boolean).slice(0, 40);
+  else if (f.type === "number" || f.type === "birthday") value = value === "" || value === null || value === undefined ? "" : Number(value);
+  else if (f.type === "choice") value = f.options.some((o) => o[0] === value) ? value : d.value;
+  else if (f.type === "bool") value = "";
+  else value = String(value ?? "");
+  const days = f.type === "form" && r.days !== "" && r.days !== null && r.days !== undefined ? Number(r.days) : "";
+  const out = { id: String(r.id || rid()), field: f.key, op, value, days };
+  if (f.type === "range") { out.from = isIso(r.from) ? r.from : ""; out.to = isIso(r.to) ? r.to : ""; }
+  return out;
 }
 
 export function cleanGroup(g) {
   const src = g && typeof g === "object" ? g : {};
   return {
     match: src.match === "any" ? "any" : "all",
-    rules: (Array.isArray(src.rules) ? src.rules : []).filter((r) => r && FIELD[r.field]).slice(0, 20).map((r) => {
-      const f = FIELD[r.field];
-      const d = defaults(f);
-      const op = opsFor(f).some((o) => o[0] === r.op) ? r.op : d.op;
-      let value = r.value;
-      if (f.type === "products" || f.type === "names") value = (Array.isArray(value) ? value : []).map(String).filter(Boolean).slice(0, 40);
-      else if (f.type === "number" || f.type === "birthday") value = value === "" || value === null || value === undefined ? "" : Number(value);
-      else if (f.type === "choice") value = f.options.some((o) => o[0] === value) ? value : d.value;
-      else if (f.type === "bool") value = "";
-      else value = String(value ?? "");
-      const days = f.type === "form" && r.days !== "" && r.days !== null && r.days !== undefined ? Number(r.days) : "";
-      const out = { id: String(r.id || rid()), field: f.key, op, value, days };
-      if (f.type === "range") { out.from = isIso(r.from) ? r.from : ""; out.to = isIso(r.to) ? r.to : ""; }
-      return out;
-    }),
+    rules: (Array.isArray(src.rules) ? src.rules : []).map((x) => {
+      if (isGroup(x)) {
+        return { id: String(x.id || rid()), type: "group", match: x.match === "any" ? "any" : "all",
+          rules: x.rules.filter((r) => r && !isGroup(r) && FIELD[r.field]).slice(0, 20).map(cleanRule) };
+      }
+      return x && FIELD[x.field] ? cleanRule(x) : null;
+    }).filter(Boolean).slice(0, 20),
   };
+}
+
+// What's wrong with one rule, or ""
+function ruleProblem(r) {
+  const f = FIELD[r.field];
+  if (!f) return "A rule uses something that no longer exists";
+  if (f.type === "number" && !(r.value !== "" && Number.isFinite(Number(r.value)) && Number(r.value) >= 0)) return `Add a number to "${f.label}"`;
+  if (f.type === "birthday" && (r.op === "next" || r.op === "last")
+    && !(r.value !== "" && Number.isInteger(Number(r.value)) && Number(r.value) >= 1 && Number(r.value) <= 60)) return 'Choose 1 to 60 days for "Birthday"';
+  if ((f.type === "text" || f.type === "form") && !String(r.value || "").trim()) return `Fill in "${f.label}"`;
+  if (f.type === "products" && !(Array.isArray(r.value) && r.value.length)) return `Choose a product for "${f.label}"`;
+  if (f.type === "names" && !(Array.isArray(r.value) && r.value.length)) return `Choose at least one for "${f.label}"`;
+  if (f.type === "range") {
+    if (!isIso(r.from) || !isIso(r.to)) return `Choose both dates for "${f.label}"`;
+    if (r.to < r.from) return `"${f.label}": the second date is before the first`;
+  }
+  return "";
 }
 
 // The first thing wrong with a set of rules, or ""
 export function groupProblem(g, required) {
   const rules = (g && g.rules) || [];
-  if (required && !rules.length) return "Add at least one rule";
-  for (const r of rules) {
-    const f = FIELD[r.field];
-    if (!f) return "A rule uses something that no longer exists";
-    if (f.type === "number" && !(r.value !== "" && Number.isFinite(Number(r.value)) && Number(r.value) >= 0)) return `Add a number to "${f.label}"`;
-    if (f.type === "birthday" && (r.op === "next" || r.op === "last")
-      && !(r.value !== "" && Number.isInteger(Number(r.value)) && Number(r.value) >= 1 && Number(r.value) <= 60)) return 'Choose 1 to 60 days for "Birthday"';
-    if ((f.type === "text" || f.type === "form") && !String(r.value || "").trim()) return `Fill in "${f.label}"`;
-    if (f.type === "products" && !(Array.isArray(r.value) && r.value.length)) return `Choose a product for "${f.label}"`;
-    if (f.type === "names" && !(Array.isArray(r.value) && r.value.length)) return `Choose at least one for "${f.label}"`;
-    if (f.type === "range") {
-      if (!isIso(r.from) || !isIso(r.to)) return `Choose both dates for "${f.label}"`;
-      if (r.to < r.from) return `"${f.label}": the second date is before the first`;
+  if (required && !ruleCount(g)) return "Add at least one rule";
+  for (const x of rules) {
+    if (isGroup(x)) {
+      if (!x.rules.length) return "A group has no rules yet. Add one, or remove the group";
+      for (const r of x.rules) { const p = ruleProblem(r); if (p) return p; }
+    } else {
+      const p = ruleProblem(x);
+      if (p) return p;
     }
   }
   return "";
@@ -177,6 +201,7 @@ export function describeRule(r) {
   if (f.type === "range") {
     const span = `${niceDay(r.from)} and ${niceDay(r.to)}`;
     if (r.field === "appt.last_between") return `Last visit ${r.op === "no" ? "not between" : "between"} ${span}`;
+    if (r.field === "rc.due_between") return `Due date ${r.op === "no" ? "not between" : "between"} ${span}`;
     return `${r.op === "no" ? "No visit" : "Visited"} between ${span}`;
   }
   if (f.type === "birthday") {
@@ -193,10 +218,16 @@ export function describeRule(r) {
   if (f.type === "form") return `${f.label} ${op} "${r.value || "…"}"${r.days ? ` in the last ${r.days} days` : ""}`;
   return `${f.label} ${op} "${r.value || "…"}"`;
 }
+function describeItem(x) {
+  if (!isGroup(x)) return describeRule(x);
+  if (!x.rules.length) return "(an empty group)";
+  const j = x.match === "any" ? " or " : " and ";
+  return `(${x.rules.slice(0, 2).map(describeRule).join(j)}${x.rules.length > 2 ? `${j}…` : ""})`;
+}
 export function describeGroup(g) {
   const rules = (g && g.rules) || [];
   if (!rules.length) return "No rules yet";
-  const first = describeRule(rules[0]);
+  const first = describeItem(rules[0]);
   return rules.length > 1 ? `${first} · ${g.match === "any" ? "or" : "and"} ${rules.length - 1} more` : first;
 }
 

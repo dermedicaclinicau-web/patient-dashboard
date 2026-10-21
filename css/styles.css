@@ -7713,3 +7713,11 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
   font-size: .8rem; line-height: 1.5; white-space: pre; tab-size: 2; resize: vertical; background: #0f172a; color: #e2e8f0; border-radius: 10px; }
 .ef-code::placeholder { color: #64748b; }
 .ef-codeprev { display: block; width: 100%; min-height: 240px; border: 0; border-top: 1px solid var(--border); background: #fff; }
+
+/* Rule builder: groups */
+.fr-adds { display: flex; flex-wrap: wrap; gap: .5rem; }
+.fr-group { display: flex; flex-direction: column; gap: .5rem; padding: .65rem .7rem; border: 1px dashed #cbd5e1;
+  border-radius: 10px; background: #f8fafc; }
+.fr-group-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.fr-group .fr-rule { background: #fff; }
+.fr-group .fr-add { align-self: flex-start; }

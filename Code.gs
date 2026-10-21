@@ -1549,18 +1549,25 @@ function handleSendTreatmentEmail_(body) {
   return { ok: true, entry: entry };
 }
 
-// Removes anything unsafe from the staff-edited message
-function sanitizeEmailHtml_(html) {
+// Removes anything unsafe from an email. keepStyle: keep <style> blocks (emails written in HTML code)
+function sanitizeEmailHtml_(html, keepStyle) {
+  const tags = (keepStyle ? '' : 'style|') + 'script|iframe|object|embed|form|input|button|textarea|select|link|meta';
   return String(html || '')
-    .replace(/<\s*(script|style|iframe|object|embed|form|input|button|textarea|select|link|meta)\b[\s\S]*?(<\s*\/\s*\1\s*>|\/?>)/gi, '')
+    // Whole blocks: the tags and everything inside them
+    .replace(/<\s*(script|iframe|object|embed)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
+    .replace(/<\s*style\b[^>]*>([\s\S]*?)<\s*\/\s*style\s*>/gi, function (m, css) {
+      return keepStyle && !/expression\s*\(|javascript:|@import|behavior\s*:/i.test(css) ? m : '';
+    })
+    // Any of these tags left on their own (their contents stay)
+    .replace(new RegExp('<\\s*\\/?\\s*(' + tags + ')\\b[^>]*>', 'gi'), '')
     .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
     .replace(/(href|src)\s*=\s*("|')\s*javascript:[^"']*\2/gi, '$1="#"')
     .trim();
 }
-
 // Readable plain text for the audit sheet
 function emailHtmlToText_(html) {
   return String(html || '')
+    .replace(/<style\b[\s\S]*?<\/style>/gi, '')
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/(p|div)>/gi, '\n\n')
     .replace(/<li[^>]*>/gi, '• ')
@@ -2365,7 +2372,8 @@ function inlineTaskImages_(cfg, html) {
       }
       if (blob) { key = 'img' + n++; images[key] = blob; }
     }
-    if (!key) return '';
+    // Not an Image Bank picture or the logo: an ordinary https picture is kept as it is (email apps load it)
+    if (!key) return /\ssrc\s*=\s*["']https:\/\//i.test(tag) ? tag : '';
     return tag
       .replace(/\s(?:src|data-bank|data-logo)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
       .replace(/^<img/i, '<img src="cid:' + key + '"');
@@ -7142,13 +7150,17 @@ function flowVisitedIn_(cfg, ctx, from, to) {
 }
 
 // A set of rules: all (or any) of them. No rules at all counts as a match. Cheapest rules are checked first.
+// An item with its own "rules" is a group (one level), checked with its own all / any. Empty groups are ignored.
 function flowGroupOk_(cfg, g, run, ctx) {
-  const rules = g && Array.isArray(g.rules) ? g.rules.slice() : [];
+  const isGroup = function (x) { return !!x && Array.isArray(x.rules); };
+  const rules = (g && Array.isArray(g.rules) ? g.rules : []).filter(function (x) { return x && (!isGroup(x) || x.rules.length); });
   if (!rules.length) return true;
-  rules.sort(function (a, b) { return (FLOW_RULE_COST_[a.field] || 3) - (FLOW_RULE_COST_[b.field] || 3); });
-  const ok = function (r) { return flowRuleOk_(cfg, r, run, ctx); };
+  const cost = function (x) { return isGroup(x) ? 4 : (FLOW_RULE_COST_[x.field] || 3); };
+  rules.sort(function (a, b) { return cost(a) - cost(b); });
+  const ok = function (x) { return isGroup(x) ? flowGroupOk_(cfg, x, run, ctx) : flowRuleOk_(cfg, x, run, ctx); };
   return g.match === 'any' ? rules.some(ok) : rules.every(ok);
 }
+
 function flowHasRules_(g) { return !!(g && Array.isArray(g.rules) && g.rules.length); }
 
 // If / else. c is the card's settings (or an older card's condition name).
@@ -7259,7 +7271,7 @@ function flowSendPatient_(cfg, flow, step, run, ctx, memo, tester) {
   const vals = flowVals_(cfg, run, ctx, memo, false);
   let body = String(c.html);
   if (FLOW_SSP_TABLE_RE_().test(body)) body = flowInsertSspTable_(body, flowSspTableHtml_(cfg, ctx, memo, (flow.style || {}).accent));
-  let html = sanitizeEmailHtml_(flowFillHtml_(body, vals));
+  let html = sanitizeEmailHtml_(flowFillHtml_(body, vals), c.mode === 'html');
   if (c.promo) html += mktFooterHtml_(tester ? '' : ctx.pid, tester ? tester.email : ctx.who.email, tester ? 'test' : 'flow_' + flow._id);
   let subject = flowFill_(String(c.subject || '').replace(FLOW_SSP_TABLE_RE_(), ''), vals, false)
     .replace(/\s+/g, ' ').trim().slice(0, 200) || 'A message from Dermedica';
@@ -7267,7 +7279,7 @@ function flowSendPatient_(cfg, flow, step, run, ctx, memo, tester) {
   if (tester) {
     html = flowTestBanner_(flow.name, 'This would have gone to ' + ctx.who.name +
       (isEmail_(to) ? ' <' + to + '>' : ' (no email on their record)') + '.' +
-      (c.promo ? " It's promotional, so it isn't sent to anyone on the do-not-contact list." : ''));
+      (c.promo ? " It's promotional, so it isn't sent to anyone on the do-not-contact list." : '')) + html;
     subject = '[Test] ' + subject;
     to = tester.email;
   }
@@ -10247,8 +10259,14 @@ const MKT_LIST_KINDS_ = ['opened', 'notOpened', 'clicked', 'notClicked', 'link']
 function mktAudience_(a) {
   a = a || {};
   const g = a.rules || {};
-  const rules = (Array.isArray(g.rules) ? g.rules : [])
-    .filter(function (r) { return r && MKT_RULE_FIELDS_.indexOf(r.field) !== -1; }).slice(0, 20);
+  const okRule = function (r) { return r && MKT_RULE_FIELDS_.indexOf(r.field) !== -1; };
+  const rules = (Array.isArray(g.rules) ? g.rules : []).map(function (r) {
+    if (r && Array.isArray(r.rules)) {   // a group: its allowed rules, with its own all / any
+      const kids = r.rules.filter(okRule).slice(0, 20);
+      return kids.length ? { id: String(r.id || ''), type: 'group', match: r.match === 'any' ? 'any' : 'all', rules: kids } : null;
+    }
+    return okRule(r) ? r : null;
+  }).filter(Boolean).slice(0, 20);
   const l = a.list || {};
   const list = {
     campaignId: /^[A-Za-z0-9_-]{10,40}$/.test(String(l.campaignId || '')) ? String(l.campaignId) : '',
