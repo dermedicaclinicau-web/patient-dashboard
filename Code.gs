@@ -7051,6 +7051,7 @@ function flowRuleOk_(cfg, r, run, ctx) {
   const type = FLOW_FIELD_TYPE_[r && r.field];
   if (!type) return false;
   if (type === 'names' || r.field === 'rc.due_between') return recallRuleOk_(cfg, r, run, ctx);
+  if (type === 'birthday') return flowBirthdayOk_(cfg, r, run, ctx);
   if (type === 'form') {
     const want = flowNorm_(r.value);
     if (!want) return false;
@@ -13277,4 +13278,54 @@ function recallFlowAdopt_(body, session) {
   });
   if (writes.length) commitWrites_(cfg, writes, 100);
   return { ok: true, moved: writes.length };
+}
+
+// ===================== Flow rules: Birthday (Patient → Birthday) =====================
+FLOW_FIELD_TYPE_['pt.birthday'] = 'birthday';
+FLOW_RULE_COST_['pt.birthday'] = 1;
+
+// { m, d } from the patient's date of birth, whichever field and format it's in
+function flowDob_(p) {
+  const keys = ['DOB', 'Dob', 'dob', 'DateOfBirth', 'Date of Birth', 'DateofBirth', 'Date Of Birth', 'BirthDate', 'Birthdate', 'Birthday', 'birthDate'];
+  for (let i = 0; i < keys.length; i++) {
+    const v = p[keys[i]];
+    if (v === undefined || v === null || v === '') continue;
+    if (v instanceof Date && !isNaN(v)) {
+      const k = Utilities.formatDate(v, 'Australia/Perth', 'M-d').split('-');
+      return { m: Number(k[0]), d: Number(k[1]) };
+    }
+    const s = String(v).trim();
+    let m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);                    // 1985-03-14
+    if (m) return okDob_(+m[2], +m[3]);
+    m = /^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})/.exec(s);           // 14/03/1985 (day first, as in Australia)
+    if (m) return okDob_(+m[2], +m[1]);
+  }
+  return null;
+}
+function okDob_(m, d) { return m >= 1 && m <= 12 && d >= 1 && d <= 31 ? { m: m, d: d } : null; }
+
+function flowBirthdayOk_(cfg, r, run, ctx) {
+  if (!('_bday' in ctx._f)) {
+    let b = null;
+    try {
+      const p = ctx.pt || ctx.patient || ctx.doc || (run.patientId ? flowPatient_(cfg, run.patientId) : null);
+      b = p ? flowDob_(p) : null;
+    } catch (e) { console.warn('Birthday rule: patient not read: ' + e); }
+    ctx._f._bday = b;
+  }
+  const b = ctx._f._bday;
+  if (!b) return false;                              // no date of birth on file: never matches
+  const t = flowKey_(Date.now()).split('-').map(Number);
+  const today = Date.UTC(t[0], t[1] - 1, t[2]);
+  const DAY = 86400000;
+  const on = function (year) {                       // 29 Feb → 28 Feb in other years
+    const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+    return Date.UTC(year, b.m - 1, b.m === 2 && b.d === 29 && !leap ? 28 : b.d);
+  };
+  if (r.op === 'month') return b.m === t[1];
+  if (r.op === 'today') return on(t[0]) === today;
+  const n = Math.max(0, Math.floor(Number(r.value) || 0));
+  if (r.op === 'next') { let o = on(t[0]); if (o < today) o = on(t[0] + 1); return (o - today) / DAY <= n; }
+  if (r.op === 'last') { let o = on(t[0]); if (o > today) o = on(t[0] - 1); return (today - o) / DAY <= n; }
+  return false;
 }

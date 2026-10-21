@@ -92,6 +92,8 @@ export const RULE_FIELDS = [
   { key: "form.saved", group: "Saved forms", label: "Saved forms", type: "form" },
 
   { key: "pt.age", group: "Patient", label: "Age", type: "number", unit: "years" },
+  { key: "pt.birthday", group: "Patient", label: "Birthday", type: "birthday",
+    ops: [["today", "is today"], ["next", "is in the next"], ["last", "was in the past"], ["month", "is this month"]] },
   { key: "pt.email", group: "Patient", label: "Has an email address", type: "bool" },
   { key: "pt.mobile", group: "Patient", label: "Has a mobile number", type: "bool" },
   { key: "pt.marketing", group: "Patient", label: "Agreed to marketing emails", type: "bool" },
@@ -134,7 +136,7 @@ export function cleanGroup(g) {
       const op = opsFor(f).some((o) => o[0] === r.op) ? r.op : d.op;
       let value = r.value;
       if (f.type === "products" || f.type === "names") value = (Array.isArray(value) ? value : []).map(String).filter(Boolean).slice(0, 40);
-      else if (f.type === "number") value = value === "" || value === null || value === undefined ? "" : Number(value);
+      else if (f.type === "number" || f.type === "birthday") value = value === "" || value === null || value === undefined ? "" : Number(value);
       else if (f.type === "choice") value = f.options.some((o) => o[0] === value) ? value : d.value;
       else if (f.type === "bool") value = "";
       else value = String(value ?? "");
@@ -154,6 +156,8 @@ export function groupProblem(g, required) {
     const f = FIELD[r.field];
     if (!f) return "A rule uses something that no longer exists";
     if (f.type === "number" && !(r.value !== "" && Number.isFinite(Number(r.value)) && Number(r.value) >= 0)) return `Add a number to "${f.label}"`;
+    if (f.type === "birthday" && (r.op === "next" || r.op === "last")
+      && !(r.value !== "" && Number.isInteger(Number(r.value)) && Number(r.value) >= 1 && Number(r.value) <= 60)) return 'Choose 1 to 60 days for "Birthday"';
     if ((f.type === "text" || f.type === "form") && !String(r.value || "").trim()) return `Fill in "${f.label}"`;
     if (f.type === "products" && !(Array.isArray(r.value) && r.value.length)) return `Choose a product for "${f.label}"`;
     if (f.type === "names" && !(Array.isArray(r.value) && r.value.length)) return `Choose at least one for "${f.label}"`;
@@ -174,6 +178,11 @@ export function describeRule(r) {
     const span = `${niceDay(r.from)} and ${niceDay(r.to)}`;
     if (r.field === "appt.last_between") return `Last visit ${r.op === "no" ? "not between" : "between"} ${span}`;
     return `${r.op === "no" ? "No visit" : "Visited"} between ${span}`;
+  }
+  if (f.type === "birthday") {
+    if (r.op === "today" || r.op === "month") return `Birthday ${op}`;
+    const n = r.value === "" ? "…" : r.value;
+    return `Birthday ${op} ${n} day${Number(n) === 1 ? "" : "s"}`;
   }
   if (f.type === "number") return `${f.label} ${op} ${r.value === "" ? "…" : r.value}${f.unit ? " " + f.unit : ""}`;
   if (f.type === "choice") return `${f.label} ${op} ${((f.options.find((o) => o[0] === r.value) || [])[1] || "…").toLowerCase()}`;
@@ -290,6 +299,11 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
     if (f.type === "number") {
       val = `<input class="fe-input fr-num" type="number" min="0" step="1" inputmode="numeric" data-rv="${i}" value="${esc(r.value)}" aria-label="Number" />
         ${f.unit ? `<span class="fr-unit">${esc(f.unit)}</span>` : ""}`;
+    } else if (f.type === "birthday") {
+      if (r.op === "next" || r.op === "last") {
+        val = `<input class="fe-input fr-num" type="number" min="1" max="60" step="1" inputmode="numeric" data-rv="${i}" value="${esc(r.value)}" aria-label="Days" />
+          <span class="fr-unit">days</span>`;
+      }
     } else if (f.type === "text") {
       val = `<input class="fe-input fr-val" data-rv="${i}" maxlength="80" placeholder="${esc(f.hint || "")}" value="${esc(r.value)}" aria-label="Text" />`;
     } else if (f.type === "choice") {
@@ -382,9 +396,14 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
     if (idx === undefined) return;
     const r = group.rules[Number(idx)];
     if (!r) return;
-    if (d.ro !== undefined) r.op = el.value;
+    const ft = FIELD[r.field].type;
+    if (d.ro !== undefined) {
+      r.op = el.value;
+      // Birthday: the days box only shows for "in the next" and "in the past"
+      if (ft === "birthday") { if ((r.op === "next" || r.op === "last") && r.value === "") r.value = 7; render(); }
+    }
     else if (d.rd !== undefined) r.days = el.value === "" ? "" : Number(el.value);
-    else r.value = FIELD[r.field].type === "number" ? (el.value === "" ? "" : Number(el.value)) : el.value;
+    else r.value = ft === "number" || ft === "birthday" ? (el.value === "" ? "" : Number(el.value)) : el.value;
     onChange();
   });
   host.addEventListener("click", (e) => {
