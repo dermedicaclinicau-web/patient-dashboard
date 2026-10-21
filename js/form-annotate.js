@@ -29,7 +29,8 @@ const segDist = (px, py, ax, ay, bx, by) => {
 
 // sets: the marking sets staff can use on this picture (in the order they were ticked).
 // marks: the older single-set option, still accepted.
-export function createAnnotator(box, src, { base = "", sets = null, marks = null } = {}) {
+// compact: one toolbar row (values, then Freehand icons), with the total shown in headTotal (the Compact bar)
+export function createAnnotator(box, src, { base = "", sets = null, marks = null, compact = false, headTotal = null } = {}) {
   const order = (Array.isArray(sets) ? sets : marks ? [marks] : [])
     .filter((s) => s && Array.isArray(s.values) && s.values.length);
   const marking = order.length > 0;
@@ -51,28 +52,33 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     </div>`;
 
   box.classList.add("is-drawing");
-  box.innerHTML = `
-    <div class="an-tools" role="toolbar" aria-label="Drawing tools">
-      <div class="an-seg">
-        ${marking ? `<button type="button" class="an-btn is-on" data-tool="mark" aria-pressed="true">${I.mark}<span>Mark</span></button>` : ""}
-        <button type="button" class="an-btn${marking ? "" : " is-on"}" data-tool="pen" aria-pressed="${!marking}">${I.pen}<span>Draw</span></button>
-        <button type="button" class="an-btn" data-tool="dot" aria-pressed="false">${I.dot}<span>Dot</span></button>
-        <button type="button" class="an-btn" data-tool="erase" aria-pressed="false" title="Tap one mark, dot or line to remove it">${I.erase}<span>Erase</span></button>
-      </div>
-      <div class="an-colours"${marking ? " hidden" : ""}>${COLOURS.map(([c, l], i) =>
-        `<button type="button" class="an-swatch${i === 0 ? " is-on" : ""}" data-colour="${c}" style="--c:${c}" aria-label="${l}" aria-pressed="${i === 0}"></button>`).join("")}</div>
-      <div class="an-seg" data-role="sizes"${marking ? " hidden" : ""}>
-        <button type="button" class="an-btn is-on" data-size="thin" aria-pressed="true">Thin</button>
-        <button type="button" class="an-btn" data-size="thick" aria-pressed="false">Thick</button>
-      </div>
-      <span class="an-spacer"></span>
-      <button type="button" class="an-btn" data-act="undo" disabled>${I.undo}<span>Undo</span></button>
-      <button type="button" class="an-btn" data-act="clear" disabled>Clear</button>
-    </div>
-    ${marking ? `<div class="an-marks${order.length === 1 ? " has-one" : ""}" data-role="marks">${order.map(rowHtml).join("")}</div>` : ""}
-    <div class="an-stage"><img alt="" draggable="false" /><canvas aria-label="${marking
-      ? "Marking area. Tap to place the chosen value." : "Drawing area. Draw or tap to mark the picture."}"></canvas></div>
-    ${marking ? '<div class="an-total" data-role="total" aria-live="polite"></div>' : ""}`;
+  const toolBtns = `${marking ? `<button type="button" class="an-btn is-on" data-tool="mark" aria-pressed="true"${compact ? " hidden" : ""}>${I.mark}<span>Mark</span></button>` : ""}
+      <button type="button" class="an-btn${marking ? "" : " is-on"}" data-tool="pen" aria-pressed="${!marking}" title="Draw">${I.pen}<span>Draw</span></button>
+      <button type="button" class="an-btn" data-tool="dot" aria-pressed="false" title="Dot">${I.dot}<span>Dot</span></button>
+      <button type="button" class="an-btn" data-tool="erase" aria-pressed="false" title="Tap one mark, dot or line to remove it">${I.erase}<span>Erase</span></button>`;
+  const styleBtns = `<div class="an-colours"${marking ? " hidden" : ""}>${COLOURS.map(([c, l], i) =>
+      `<button type="button" class="an-swatch${i === 0 ? " is-on" : ""}" data-colour="${c}" style="--c:${c}" aria-label="${l}" aria-pressed="${i === 0}"></button>`).join("")}</div>
+    <div class="an-seg" data-role="sizes"${marking ? " hidden" : ""}>
+      <button type="button" class="an-btn is-on" data-size="thin" aria-pressed="true">Thin</button>
+      <button type="button" class="an-btn" data-size="thick" aria-pressed="false">Thick</button>
+    </div>`;
+  const editBtns = `<span class="an-spacer"></span>
+    <button type="button" class="an-btn" data-act="undo" disabled>${I.undo}<span>Undo</span></button>
+    <button type="button" class="an-btn" data-act="clear" disabled>Clear</button>`;
+  const marksHtml = marking ? `<div class="an-marks${order.length === 1 ? " has-one" : ""}" data-role="marks">${order.map(rowHtml).join("")}</div>` : "";
+  const stageHtml = `<div class="an-stage"><img alt="" draggable="false" /><canvas aria-label="${marking
+    ? "Marking area. Tap to place the chosen value." : "Drawing area. Draw or tap to mark the picture."}"></canvas></div>`;
+  const totalHtml = marking ? '<div class="an-total" data-role="total" aria-live="polite"></div>' : "";
+
+  box.innerHTML = compact
+    ? `<div class="an-tools is-compact" role="toolbar" aria-label="Marking tools">
+        ${marksHtml}
+        <div class="an-seg an-free"><span class="an-free-l">Freehand</span>${toolBtns}</div>
+        ${styleBtns}${editBtns}
+      </div>${totalHtml}${stageHtml}`
+    : `<div class="an-tools" role="toolbar" aria-label="Drawing tools">
+        <div class="an-seg">${toolBtns}</div>${styleBtns}${editBtns}
+      </div>${marksHtml}${stageHtml}${totalHtml}`;
 
   const img = box.querySelector(".an-stage img");
   const stage = box.querySelector(".an-stage");
@@ -193,8 +199,29 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     return out;
   }
 
+  // Compact bar: "Total: 6 units" (and Treatment / Touch-up when tags are used)
+  function showHead() {
+    if (!headTotal) return;
+    if (!primary) { headTotal.innerHTML = ""; return; }
+    const f = setFigures(primary);
+    const tags = f.byTag ? Object.entries(f.byTag).filter(([, n]) => n > 0).map(([t, n]) => `${t} ${fmt(n)}`) : [];
+    headTotal.innerHTML = `Total:<b class="${f.total ? "" : "is-zero"}">${esc(fmt(f.total))}</b>${esc(primary.unit || "")}${
+      tags.length > 1 ? `<small>${esc(tags.join(" · "))}</small>` : ""}`;
+  }
+
   function showTotal() {
+    showHead();
     if (!totalEl) return;
+    if (compact) {   // the line under the toolbar: how to use it, plus any other sets' figures
+      const others = order.filter((s) => s !== primary).map(setFigures).filter((x) => x.n).map((x) => (x.type === "label"
+        ? `${x.name}: ${x.counts.map((c) => `${c.code} × ${c.n}`).join(", ")}`
+        : `${x.name}: ${fmt(x.total)}${x.unit ? ` ${x.unit}` : ""}`));
+      totalEl.innerHTML = `<span>${tool === "erase"
+        ? "Tap a mark, dot or line to remove it · Undo brings it back"
+        : "Tap the picture to place the chosen value · tap it again to remove it · Erase removes dots and lines"}</span>${
+        others.map((o) => `<span><b>${esc(o)}</b></span>`).join("")}`;
+      return;
+    }
     if (tool === "erase") {
       totalEl.innerHTML = "<span>Tap a mark, dot or line to remove it. Undo brings it back.</span>";
       return;
@@ -403,7 +430,9 @@ export function attachAnnotators(root, fields, { markSets = [] } = {}) {
     bankImage(f.fileId)
       .then((src) => {
         if (!box.isConnected) return;
-        map[f.id] = createAnnotator(box, src, { sets });
+        const chart = f.chartLayout === "header";
+        const head = chart && box.closest(".fe-chart") ? box.closest(".fe-chart").querySelector("[data-chart-total]") : null;
+        map[f.id] = createAnnotator(box, src, { sets, compact: chart, headTotal: head });
         if (wantsMarks && sets.length < ids.length) {
           box.insertAdjacentHTML("afterbegin", `<p class="an-warn">${sets.length
             ? "One of this picture's marking sets has been deleted."

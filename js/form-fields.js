@@ -833,7 +833,7 @@ export function createField(type, id) {
       f.source = "bank"; f.fileId = ""; f.fileName = ""; f.size = "medium"; f.caption = ""; f.alt = ""; f.max = 1;
       f.annotate = false; f.widthPct = 50; f.heightPx = null; f.allowBank = true;
       f.photoLayout = "grid"; f.perRow = 2;
-      f.markMode = "draw"; f.markSetId = ""; f.markSetIds = []; f.questions = [];
+      f.markMode = "draw"; f.markSetId = ""; f.markSetIds = []; f.questions = []; f.chartLayout = "stack";
       break;
     case "watermark": f.source = "text"; f.text = "DRAFT"; f.opacity = 10; f.angle = -30; f.size = "large"; break;
     case "letterhead": f.line1 = LETTERHEAD[0]; f.line2 = LETTERHEAD[1]; break;
@@ -1000,6 +1000,7 @@ export function cleanField(f) {
       out.allowBank = f.allowBank !== false;
       out.photoLayout = pick(f.photoLayout, ["grid", "stack"], "grid");
       out.perRow = int(f.perRow, 2, 4, 2);
+      out.chartLayout = out.source === "bank" && f.chartLayout === "header" ? "header" : "stack";
       out.markMode = out.annotate && f.markMode === "marks" ? "marks" : "draw";
       out.markSetIds = markSetIdsOf(f).filter((id) => /^[A-Za-z0-9_-]{1,40}$/.test(id)).slice(0, 6);
       out.markSetId = out.markSetIds[0] || ""; // for older pages
@@ -1009,6 +1010,7 @@ export function cleanField(f) {
         type: iqType(q),
         options: (Array.isArray(q && q.options) ? q.options : []).map((o) => clip(o, 100)).filter((o) => o.trim()).slice(0, 10),
         required: !!(q && q.required === true),
+        place: q && (q.place === "head" || q.place === "below") ? q.place : "",
       }));
       break;
     case "watermark":
@@ -1184,6 +1186,8 @@ export function renderField(f, ctx = {}) {
     : "";
   const help = f.help && hasHelp(f.type) ? `<div class="fe-help">${esc(f.help)}</div>` : "";
   // Layout settings (answer below or beside, gap, alignment, width, spacing) wrap the field
+  // Compact picture: title, questions and total in one bar above it
+  if (!ctx.raw && f.type === "image" && f.source !== "staff" && f.chartLayout === "header" && f.fileId) return chartHtml(f, ctx);
   if (!ctx.raw && (ANSWER_TYPES.includes(f.type) || f.type === "text_block")) return layoutField(f, ctx, q, help);
   const head = ctx.noHead ? "" : q + help;
   const opts = Array.isArray(f.options) && f.options.length ? f.options : ["Option 1"];
@@ -1330,11 +1334,13 @@ export function renderField(f, ctx = {}) {
         ? `data-annot-img="${id}"`
         : `data-bank-img="${esc(f.fileId)}" data-alt="${esc(f.alt || "")}"`;
       const { pct, maxH } = imageSizing(f);
+      // Compact: the toolbar uses the full width, and the picture keeps its chosen size
+      const boxW = ctx.chart ? `width:100%;--img-w:${pct}%;` : `width:${pct}%;`;
       return `<figure class="fe-img${maxH ? " has-max-h" : ""}${f.annotate ? " can-draw" : ""}">` +
-        `<span class="fe-img-box" style="width:${pct}%;${maxH ? `--img-max-h:${maxH}px;` : ""}" ${hook}><span class="fe-img-loading">${svg(ICONS.image)}</span></span>` +
+        `<span class="fe-img-box" style="${boxW}${maxH ? `--img-max-h:${maxH}px;` : ""}" ${hook}><span class="fe-img-loading">${svg(ICONS.image)}</span></span>` +
         (!live && f.annotate ? `<span class="fe-img-draw-tag">${svg(ICONS.signature)}${
           f.markMode === "marks" ? "Staff place unit marks on this" : "Staff can draw on this"}</span>` : "") +
-        `${cap}</figure>` + imageQsHtml(f, live);
+        `${cap}</figure>` + imageQsHtml(f, live, ctx.chart ? "below" : "");
     }
     case "aftercare": {
       if (live) return head + '<div class="ac-host" data-ac-host><p class="fe-help">Loading aftercare…</p></div>';
@@ -1430,6 +1436,22 @@ export function renderField(f, ctx = {}) {
     }
     
   return "";
+}
+
+// Compact picture: the bar (title · questions in the bar · total), then the toolbar, picture and the questions under it
+function chartHtml(f, ctx) {
+  const live = !!ctx.live;
+  const title = fieldStyle(f).hideLabel ? "" : String(f.label || "").trim();
+  const total = isMarkImage(f) ? (live ? "" : '<span class="muted">Total shows here</span>') : "";
+  return `<div class="fe-chart">
+    <div class="fe-chart-head">
+      <strong class="fe-chart-title">${esc(title)}</strong>
+      <div class="fe-chart-hq">${imageQsHtml(f, live, "head")}</div>
+      <div class="fe-chart-total" data-chart-total aria-live="polite">${total}</div>
+    </div>
+    ${f.help ? `<div class="fe-help fe-chart-help">${esc(f.help)}</div>` : ""}
+    <div class="fe-chart-body">${renderField(f, { ...ctx, raw: true, chart: true })}</div>
+  </div>`;
 }
 
 /* ===================== Settings panel (type-specific part) ===================== */
@@ -1553,6 +1575,11 @@ function typeSettings(f, ctx = {}) {
           ].map(([v, l]) => `<option value="${v}"${imgMode(f) === v ? " selected" : ""}>${l}</option>`).join("")}</select>`,
             "For face charts and injection points. Markings are saved with the patient's form; the picture in the Image Bank never changes.") +
           (imgMode(f) === "marks" ? markSetSettings(f, ctx) : "") +
+          setting("Layout", choose("chartLayout", [
+            ["stack", "Title above, questions under the picture"],
+            ["header", "Compact: title, questions and total in one bar"],
+          ], f.chartLayout === "header" ? "header" : "stack", false, true),
+            "Compact is the face-chart look from the old app. Choose where each question goes below.") +
           imageQuestionsSettings(f) +
           caption +
           setting("Description", `<input class="fe-input" data-k="alt" maxlength="200" value="${esc(f.alt || "")}" />`,
@@ -1865,6 +1892,10 @@ export const IQ_TYPES = [
 ];
 export const iqType = (q) => (IQ_TYPES.some(([k]) => k === (q && q.type)) ? q.type : "radio");
 export const iqHasOptions = (q) => ["radio", "checks", "dropdown"].includes(iqType(q));
+// Compact layout: in the bar above the picture ("head") or under it ("below").
+// Automatic: choices go in the bar, typed answers under the picture.
+export const iqPlace = (q) => (q && (q.place === "head" || q.place === "below") ? q.place
+  : ["text", "long"].includes(iqType(q)) ? "below" : "head");
 
 function markSetSettings(f, ctx) {
   const sets = ctx.markSets;
@@ -1900,16 +1931,22 @@ function imageQuestionsSettings(f) {
           <label class="fe-check"><input type="checkbox" data-iq="${i}" data-iqk="required"${q.required ? " checked" : ""} /> Required</label>
         </div>
         ${iqHasOptions(q) ? `<textarea class="fe-input" data-iq="${i}" data-iqk="options" rows="2" placeholder="One choice per line">${esc((q.options || []).join("\n"))}</textarea>` : ""}
+        ${f.chartLayout === "header" ? `<label class="fe-insp-sub"><small>Where</small>
+          <select class="fb-select" data-iq="${i}" data-iqk="place" aria-label="Where question ${i + 1} goes">${[
+            ["", "Automatic"], ["head", "In the bar above the picture"], ["below", "Under the picture"],
+          ].map(([v, l]) => `<option value="${v}"${(q.place || "") === v ? " selected" : ""}>${l}</option>`).join("")}</select></label>` : ""}
       </div>`).join("")}
     ${qs.length < 5 ? '<button type="button" class="hx-add" data-act="iqadd">+ Add a question</button>' : ""}
     <small class="fe-note">Shown right under the picture, for example Treatment or Touch-up, or a comment about the areas.</small></div>`;
 }
 
-export function imageQsHtml(f, live) {
-  const qs = (Array.isArray(f.questions) ? f.questions : []).filter((q) => String(q.label || "").trim());
+// place: "" = every question, "head" / "below" = only the ones for that place (Compact layout)
+export function imageQsHtml(f, live, place = "") {
+  const qs = (Array.isArray(f.questions) ? f.questions : [])
+    .filter((q) => String(q.label || "").trim() && (!place || iqPlace(q) === place));
   if (!qs.length) return "";
   const inert = live ? "" : ' tabindex="-1"';
-  return `<div class="fe-imgq">${qs.map((q) => {
+  return `<div class="fe-imgq${place ? ` is-${place}` : ""}">${qs.map((q) => {
     const t = iqType(q);
     const opts = Array.isArray(q.options) ? q.options : [];
     const name = `iq-${esc(f.id)}-${esc(q.id)}`;

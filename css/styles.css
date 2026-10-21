@@ -6,6 +6,7 @@
   --radius: 14px; --radius-sm: 10px;
   --shadow-md: 0 8px 24px rgba(15, 23, 42, .08);
   --topbar-h: 64px; --sidebar-w: 232px;
+  --form-w: 1080px;   /* the widest a form gets (live form, saved forms, Form Builder) */
   --font-serif: "Fraunces", Georgia, "Times New Roman", serif;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1544,7 +1545,7 @@ body.sp-dragging .sp-head { cursor: grabbing; }
 .fe-pal-item:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
 
 .fe-stage { min-width: 0; }
-.fe-sheet { max-width: 760px; margin: 0 auto; padding: 2.5rem 3rem 3rem; background: #fff; border: 1px solid var(--border);
+.fe-sheet { max-width: var(--form-w); margin: 0 auto; padding: clamp(1.5rem, 3vw, 2.5rem) clamp(1.25rem, 3.5vw, 3rem) clamp(1.75rem, 3vw, 3rem); background: #fff; border: 1px solid var(--border);
   border-radius: 6px; box-shadow: 0 10px 30px -18px rgba(15, 23, 42, .25); }
 .fe-letter { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 1rem;
   padding-bottom: .75rem; margin-bottom: 1.5rem; border-bottom: 2px solid var(--primary); }
@@ -1812,7 +1813,6 @@ textarea.fe-input { resize: vertical; line-height: 1.5; }
 .fp-empty a { color: var(--primary); font-weight: 600; }
 
 /* ---------- Fill in a form ---------- */
-.ff-wrap { max-width: 860px; margin: 0 auto; }
 .ff-top { display: flex; align-items: flex-end; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
 .ff-top h2 { margin: 0; }
 .ff-top p { margin: .25rem 0 0; }
@@ -1937,7 +1937,7 @@ ul.ff-log { display: flex; flex-direction: column; gap: .2rem; margin: 0 0 1rem;
 .fe-title-settings { gap: .45rem; }
 
 /* ---------- Fill-in / saved form page: floating action bar ---------- */
-.ff-wrap { max-width: 920px; margin: 0 auto; }
+.ff-wrap { max-width: var(--form-w); margin: 0 auto; }
 .ff-bar { position: sticky; top: .75rem; z-index: 30; margin: 0 0 1.25rem; border: 1px solid var(--border);
   border-radius: 14px; background: rgba(255, 255, 255, .92); -webkit-backdrop-filter: saturate(1.4) blur(10px);
   backdrop-filter: saturate(1.4) blur(10px); box-shadow: 0 6px 24px rgba(15, 23, 42, .07); }
@@ -7761,3 +7761,50 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
 .fpm-search { position: sticky; top: 0; z-index: 1; background: var(--surface, #fff); padding: 6px 12px 8px; }
 .fpm-search input { width: 100%; }
 .fpm-none { margin: 8px 2px 2px; font-size: .85rem; color: #64748b; }
+
+/* Forms on iPad and laptops: less space between questions that sit side by side */
+@media (max-width: 1100px) {
+  .fe-fields { column-gap: 1.25rem; }
+}
+
+/* ---------- Pictures: Compact layout (title, questions and total in one bar) ---------- */
+.fe-chart { overflow: hidden; border: 1px solid var(--border); border-radius: 14px; background: #fff; }
+.fe-chart-head { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: .5rem 1rem;
+  padding: .7rem 1rem; border-bottom: 1px solid var(--border); background: var(--surface-2); }
+.fe-chart-title { font-size: 1.02rem; font-weight: 700; }
+.fe-chart-hq .fe-imgq { display: flex; flex-wrap: wrap; justify-content: center; gap: .4rem 1.25rem; margin: 0; }
+.fe-chart-hq .fe-imgq-row { justify-content: center; }
+.fe-chart-hq .fe-imgq-l { font-size: .88rem; }
+.fe-chart-total { justify-self: end; text-align: right; font-size: .95rem; white-space: nowrap; }
+.fe-chart-total b { margin: 0 .25rem; font-size: 1.4rem; color: var(--primary); font-variant-numeric: tabular-nums; }
+.fe-chart-total b.is-zero { color: var(--danger); }
+.fe-chart-total small { display: block; font-size: .74rem; color: var(--muted); }
+.fe-chart-help { margin: .6rem 1rem 0; }
+.fe-chart-body { padding: .75rem 1rem 1rem; }
+.fe-chart .fe-img { margin: 0; }
+.fe-chart .fe-imgq.is-below { margin-top: .9rem; }
+
+/* The picture keeps its chosen size; the toolbar uses the full width */
+.fe-chart .fe-img-box > img, .fe-chart .fe-img-box > .fe-img-loading, .fe-chart .an-view, .fe-chart .an-stage {
+  width: var(--img-w, 100%); max-width: 100%; margin-left: auto; margin-right: auto; }
+
+/* One toolbar row */
+.an-tools.is-compact { gap: .5rem .75rem; padding: 0 0 .35rem; border: 0; background: none; }
+.an-tools.is-compact .an-marks { flex-direction: row; flex-wrap: wrap; align-items: center; gap: .4rem .9rem; margin: 0; }
+.an-tools.is-compact .an-setrow { padding: 0; border: 0; background: none; }
+.an-tools.is-compact .an-marks.has-one .an-setname { display: none; }
+.an-tools.is-compact .an-free { align-items: center; padding: 2px; border: 1px dashed var(--border); border-radius: 999px; background: #fff; }
+.an-free-l { padding: 0 .3rem 0 .55rem; font-size: .72rem; color: var(--muted); }
+.an-tools.is-compact .an-free .an-btn { width: 34px; height: 32px; justify-content: center; padding: 0; border-radius: 999px; }
+.an-tools.is-compact .an-free .an-btn span { display: none; }
+.an-tools.is-compact > .an-btn { height: 34px; border-radius: 999px; }
+.an-tools.is-compact > [data-act="clear"]:not(:disabled) { border-color: #fecaca; color: var(--danger); }
+.an-tools.is-compact + .an-total { display: flex; flex-wrap: wrap; gap: .3rem 1rem; margin: 0 0 .6rem; font-size: .8rem; color: var(--muted); }
+
+/* iPad portrait and phones: title and total on one line, the questions underneath */
+@media (max-width: 760px) {
+  .fe-chart-head { grid-template-columns: minmax(0, 1fr) auto; }
+  .fe-chart-hq { grid-column: 1 / -1; order: 3; }
+  .fe-chart-hq .fe-imgq, .fe-chart-hq .fe-imgq-row { justify-content: flex-start; }
+  .fe-chart .fe-img-box { --img-w: 100%; }
+}

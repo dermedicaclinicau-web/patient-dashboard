@@ -1017,6 +1017,11 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
       writeImageQs(f, w, saved.questions);
       const sum = markSummary(saved);
       const fig = w.querySelector("figure");
+      const head = w.querySelector("[data-chart-total]");   // Compact layout: the total sits in the bar
+      if (head) {
+        head.innerHTML = Number.isFinite(Number(saved.total))
+          ? `Total:<b>${esc(String(+Number(saved.total).toFixed(2)))}</b>${esc(saved.unit || "")}` : "";
+      }
       if (sum && fig) fig.insertAdjacentHTML("beforeend", `<p class="an-sum">${esc(sum)}</p>`);
       if (f.annotate && f.fileId) {
         const box = w.querySelector("[data-annot-img]");
