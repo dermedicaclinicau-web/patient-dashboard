@@ -290,25 +290,34 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
       </div>
       <p class="muted" data-role="status">${esc(statusText())}</p>
       <div class="rs-grid">
-        <section class="tb-card">
-          <h4 class="mc-h">Treatments</h4>
-          <p class="fe-note">A patient is due this long after their last visit for that treatment, unless one is already booked.
-            The PCN overdue list uses the same intervals. "Called in texts" is how the treatment is named in recall texts:
-            keep it general, without brand or medicine names.</p>
-          <table class="inv-table rs-cats"><thead><tr><th>Recall</th><th>Treatment</th><th>Every</th><th>Called in texts</th></tr></thead>
-            <tbody>${set.categories.map((c) => `<tr data-cat="${esc(c.key)}">
-              <td><input type="checkbox" data-f="on"${c.on ? " checked" : ""} aria-label="Recall ${esc(c.key)}" /></td>
-              <td>${esc(c.key)}</td>
-              <td><select class="fb-select" data-f="months" aria-label="Every">${opts(Array.from({ length: 24 }, (_, i) => i + 1), c.months,
-                (m) => `${m} month${m === 1 ? "" : "s"}`)}</select></td>
-              <td><input class="fe-input" data-f="smsName" maxlength="60" value="${esc(c.smsName)}" aria-label="Called in texts" /></td></tr>`).join("")}</tbody></table>
-          <div class="rc-row">Not recalled if their last visit was more than
-            <select class="fb-select" data-role="maxAge">${opts([6, 12, 18, 24, 36, 48], set.maxAgeMonths, (m) => `${m} months`)}</select> ago</div>
-          <div class="rc-row">Cards appear
-            <select class="fb-select" data-role="lead">${opts([0, 7, 14, 30], set.leadDays,
-              (d) => (d ? `${d} days before they're due` : "on the day they're due"))}</select></div>
-          <label class="fe-check"><input type="checkbox" data-role="pause"${set.anyFuturePauses ? " checked" : ""} />
-            Don't recall anyone who has any appointment booked (they'll be in soon)</label>
+        <section class="tb-card rs-wide">
+          <div class="rs-card-head">
+            <h4 class="mc-h">Treatments</h4>
+            <p class="fe-note">A patient is due this long after their last visit for that treatment, unless one is already booked.
+              The PCN overdue list uses the same intervals. "Called in texts" is how the treatment is named in recall texts:
+              keep it general, without brand or medicine names.</p>
+          </div>
+          <div class="rs-table-wrap">
+            <table class="rs-cats">
+              <thead><tr><th>Recall</th><th>Treatment</th><th>Every</th><th>Called in texts</th></tr></thead>
+              <tbody>${set.categories.map((c) => `<tr data-cat="${esc(c.key)}">
+                <td><input type="checkbox" data-f="on"${c.on ? " checked" : ""} aria-label="Recall ${esc(c.key)}" /></td>
+                <td class="rs-cat-name">${esc(c.key)}</td>
+                <td><select class="fb-select" data-f="months" aria-label="Every">${opts(Array.from({ length: 24 }, (_, i) => i + 1), c.months,
+                  (m) => `${m} month${m === 1 ? "" : "s"}`)}</select></td>
+                <td><input class="fe-input" data-f="smsName" maxlength="60" value="${esc(c.smsName)}" aria-label="Called in texts" /></td>
+              </tr>`).join("")}</tbody>
+            </table>
+          </div>
+          <div class="rs-opts">
+            <label class="rs-opt"><span>Not recalled if their last visit was more than</span>
+              <select class="fb-select" data-role="maxAge">${opts([6, 12, 18, 24, 36, 48], set.maxAgeMonths, (m) => `${m} months ago`)}</select></label>
+            <label class="rs-opt"><span>Cards appear</span>
+              <select class="fb-select" data-role="lead">${opts([0, 7, 14, 30], set.leadDays,
+                (d) => (d ? `${d} days before they're due` : "on the day they're due"))}</select></label>
+            <label class="fe-check rs-opt-check"><input type="checkbox" data-role="pause"${set.anyFuturePauses ? " checked" : ""} />
+              <span>Don't recall anyone who has any appointment booked (they'll be in soon)</span></label>
+          </div>
         </section>
 
         <section class="tb-card">
