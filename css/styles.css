@@ -7702,3 +7702,14 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
 .ef-dateins { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin: .25rem 0; font-size: .85rem; color: #334155; }
 .ef-dateins .fe-input { width: 72px; height: 34px; }
 .ef-dateins .fb-select { height: 34px; }
+
+/* Email flows: HTML code */
+.ef-msg-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; width: 100%; }
+.ef-mode { display: inline-flex; padding: 2px; border: 1px solid var(--border); border-radius: 999px; background: #f8fafc; }
+.ef-mode button { padding: .25rem .75rem; border: 0; border-radius: 999px; background: transparent; font: inherit; font-size: .8rem;
+  font-weight: 600; color: var(--muted); cursor: pointer; }
+.ef-mode button.is-on { background: #fff; color: var(--primary-hover); box-shadow: 0 1px 3px rgba(15, 23, 42, .12); }
+.ef-code { width: 100%; min-height: 280px; padding: .7rem .8rem; font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: .8rem; line-height: 1.5; white-space: pre; tab-size: 2; resize: vertical; background: #0f172a; color: #e2e8f0; border-radius: 10px; }
+.ef-code::placeholder { color: #64748b; }
+.ef-codeprev { display: block; width: 100%; min-height: 240px; border: 0; border-top: 1px solid var(--border); background: #fff; }

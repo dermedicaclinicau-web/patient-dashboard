@@ -113,6 +113,22 @@ const SAMPLE = {
   "pm instructions": "Apply 2 pumps before your moisturiser.", "when to use": "Every day",
   "ssp clinician": "Dr Teh", "ssp date": "2 September 2026", "ssp expiry date": "2 September 2027",
 };
+// "Start from a basic layout" for HTML code
+const STARTER_HTML = `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="font-family:Arial,Helvetica,sans-serif;color:#1e293b">
+  <tr><td style="padding:24px 0 8px;font-size:22px;font-weight:700">Happy birthday, {First name}!</td></tr>
+  <tr><td style="padding:8px 0;font-size:15px;line-height:1.6">
+    As a thank you for being part of the Dermedica family, here's a little gift from us.</td></tr>
+  <tr><td style="padding:16px 0">
+    <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="border:2px dashed #5fae96;border-radius:12px">
+      <tr><td align="center" style="padding:20px">
+        <div style="font-size:28px;font-weight:700;color:#5fae96">15% OFF</div>
+        <div style="font-size:14px;color:#475569;margin-top:4px">any treatment · valid until {Today + 30 days}</div>
+      </td></tr></table></td></tr>
+  <tr><td align="center" style="padding:8px 0 24px">
+    <a href="tel:{Clinic phone}" style="display:inline-block;padding:12px 28px;background:#5fae96;color:#ffffff;text-decoration:none;border-radius:999px;font-weight:700">Call to book</a>
+  </td></tr>
+  <tr><td style="font-size:14px;line-height:1.6">Kind regards,<br>The Dermedica team</td></tr>
+</table>`;
 const UNSUB = '<p style="margin:18px 0 0;font-size:12px;color:#64748b">You\'re getting this because you agreed to emails from Dermedica. <a href="#">Unsubscribe</a></p>';
 
 // {Skin Script table}: an example for the preview. The real one is built for each patient when the email is sent (Code.gs).
@@ -151,7 +167,7 @@ function insertSspTable(html, table) {
 const newId = () => "s_" + Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-3);
 
 function blank(type) {
-  const cfg = type === "email" ? { subject: "", body: "", promo: false }
+  const cfg = type === "email" ? { subject: "", body: "", promo: false, mode: "rich", code: "", bare: false }
     : type === "wait" ? { num: 1, unit: "weeks" }
     : type === "branch" ? { cond: "in_ssp", rules: blankGroup(), yes: [], no: [] }
     : type === "staff" ? { to: "ssp_creator", roles: [], staffIds: [], subject: "", message: "" }
@@ -214,7 +230,7 @@ function stepProblems(s, depth) {
   const out = [];
   if (s.type === "email") {
     if (!c.subject.trim()) out.push("Add a subject");
-    if (!plainText(c.body)) out.push("Write the message");
+    if (c.mode === "html" ? !String(c.code || "").trim() : !plainText(c.body)) out.push("Write the message");
   } else if (s.type === "wait") {
     const max = (UNITS.find((u) => u[0] === c.unit) || UNITS[0])[2];
     const n = Number(c.num);
@@ -277,7 +293,12 @@ function rendered(steps, style, lh) {
   const vals = new Map([["clinic phone", c.phone || ""], ["clinic email", c.email || ""], ["clinic address", c.address || ""]]);
   walk(copy, (s) => {
     if (s.type === "email") {
-      s.cfg.html = emailShell(fillTemplateHtml(s.cfg.body || "", vals), style, { clinic: c, hasLogo: !!lh.logo });
+      if (s.cfg.mode === "html") {
+        const code = fillTemplateHtml(String(s.cfg.code || ""), vals);
+        s.cfg.html = s.cfg.bare ? code : emailShell(code, style, { clinic: c, hasLogo: !!lh.logo });
+      } else {
+        s.cfg.html = emailShell(fillTemplateHtml(s.cfg.body || "", vals), style, { clinic: c, hasLogo: !!lh.logo });
+      }
     }
   });
   return copy;
@@ -1050,7 +1071,21 @@ async function mountFlowEditor(container, { id, staff }) {
         <section class="ef-sec">
           <label class="tb-field"><span>Subject</span>
             <input class="fe-input" data-k="subject" data-tokens maxlength="200" value="${esc(c.subject)}" /></label>
-          <div class="tb-field"><span>Message</span><div data-role="editor"></div></div>
+          <div class="tb-field"><span class="ef-msg-head">Message
+              <span class="ef-mode" role="group" aria-label="How to write the message">
+                <button type="button" data-mode="rich" class="${c.mode !== "html" ? "is-on" : ""}" aria-pressed="${c.mode !== "html"}">Editor</button>
+                <button type="button" data-mode="html" class="${c.mode === "html" ? "is-on" : ""}" aria-pressed="${c.mode === "html"}">HTML code</button>
+              </span></span>
+            ${c.mode === "html" ? `
+              <textarea class="fe-input ef-code" data-k="code" data-tokens rows="16" maxlength="100000" spellcheck="false"
+                placeholder="&lt;table width=&quot;100%&quot; …&gt;">${esc(c.code)}</textarea>
+              ${String(c.code || "").trim() ? "" : '<button type="button" class="lh-btn is-quiet" data-act="code-starter">Start from a basic layout</button>'}
+              <label class="fe-check"><input type="checkbox" data-k="bare"${c.bare ? " checked" : ""} />
+                Use my own full design <small class="muted">(no clinic logo, background or footer around it)</small></label>
+              <small class="muted">Use inline styles (style="…") and tables for layout: that's what email apps show reliably.
+                Scripts and forms are removed when it's sent.</small>`
+            : '<div data-role="editor"></div>'}
+          </div>
           ${chipsHtml(PATIENT_TOKENS)}
           ${dateInsertHtml()}
           <small class="muted">Tap a blank to add it where your cursor is. Blanks fill in with each patient's details when it's sent.
@@ -1137,7 +1172,8 @@ async function mountFlowEditor(container, { id, staff }) {
         <button type="button" class="ib-tool is-danger" data-act="remove" aria-label="Remove card" title="Remove">${I.trash}</button>
       </div>
       ${stepBodyHtml(s)}`;
-    if (s.type === "email") {
+    if (s.type === "email" && s.cfg.mode === "html") renderPreview();
+    if (s.type === "email" && s.cfg.mode !== "html") {
       editor = createRichEditor(side.querySelector('[data-role="editor"]'), {
         onInput: () => { s.cfg.body = editor.getHtml(); changed(); renderCanvas(); renderPreview(); },
         onFocus: () => { lastText = null; },
@@ -1170,15 +1206,39 @@ async function mountFlowEditor(container, { id, staff }) {
     const s = selStep();
     if (!box || !s || s.type !== "email") return;
     const vals = sampleVals();
-    box.innerHTML = `
-      <div class="tb-mail">
-        <div class="tb-mail-row"><span>To</span><span>Jane Citizen &lt;jane@example.com&gt;</span></div>
-        <div class="tb-mail-row"><span>Subject</span><strong>${subjectHtml(fillTemplate(fillDateTokens(s.cfg.subject), vals)) || "<em>No subject yet</em>"}</strong></div>
-        <div class="tb-mail-body tb-mail-shell" data-role="shell">${emailShell(insertSspTable(fillTemplateHtml(fillDateTokens(s.cfg.body || ""), vals), sampleSspTable(flow.style.accent)) + (s.cfg.promo ? UNSUB : ""),
-          flow.style, { clinic: clinicDetails(letterhead), hasLogo: !!(letterhead && letterhead.logo) })}</div>
-      </div>`;
-    hydrateRichImages(box.querySelector('[data-role="shell"]'), { logo: (letterhead && letterhead.logo) || "" });
+    const lh = letterhead || {};
+    const head = `
+      <div class="tb-mail-row"><span>To</span><span>Jane Citizen &lt;jane@example.com&gt;</span></div>
+      <div class="tb-mail-row"><span>Subject</span><strong>${subjectHtml(fillTemplate(fillDateTokens(s.cfg.subject), vals)) || "<em>No subject yet</em>"}</strong></div>`;
+    const fill = (html) => insertSspTable(fillTemplateHtml(fillDateTokens(html || ""), vals), sampleSspTable(flow.style.accent)) + (s.cfg.promo ? UNSUB : "");
+    const shell = (inner) => emailShell(inner, flow.style, { clinic: clinicDetails(lh), hasLogo: !!lh.logo });
+
+    if (s.cfg.mode === "html") {
+      // Your own HTML: shown in a frame of its own, so its styles can't affect the portal
+      const inner = fill(s.cfg.code);
+      const html = s.cfg.bare ? inner : shell(inner);
+      box.innerHTML = `<div class="tb-mail">${head}<iframe class="ef-codeprev" sandbox="allow-same-origin allow-popups" title="Email preview"></iframe></div>`;
+      const fr = box.querySelector("iframe");
+      fr.addEventListener("load", () => {
+        try {
+          const d = fr.contentDocument;
+          hydrateRichImages(d.body, { logo: lh.logo || "" });
+          const fit = () => { fr.style.height = Math.min(1600, Math.max(240, d.documentElement.scrollHeight + 4)) + "px"; };
+          fit();
+          d.querySelectorAll("img").forEach((img) => img.addEventListener("load", fit));
+        } catch (err) { console.warn("Preview frame:", err); }
+      });
+      fr.srcdoc = /<html[\s>]/i.test(html) ? html
+        : `<!doctype html><html><head><meta charset="utf-8"><base target="_blank"></head><body style="margin:0">${html}</body></html>`;
+      return;
+    }
+    box.innerHTML = `<div class="tb-mail">${head}
+      <div class="tb-mail-body tb-mail-shell" data-role="shell">${shell(fill(s.cfg.body))}</div></div>`;
+    hydrateRichImages(box.querySelector('[data-role="shell"]'), { logo: lh.logo || "" });
   }
+  // While typing HTML: update the preview when you pause, not on every key
+  let prevTimer = 0;
+  const previewSoon = () => { clearTimeout(prevTimer); prevTimer = setTimeout(renderPreview, 350); };
 
   function loadStaff() {
     if (staffList !== null || staffError) return;
@@ -1235,7 +1295,7 @@ async function mountFlowEditor(container, { id, staff }) {
     changed();
     renderCanvas();
     if (el.dataset.rerender !== undefined) renderSide();
-    else if (s.type === "email") renderPreview();
+    else if (s.type === "email") previewSoon();
   });
 
   // "Who matches today?" for a daily check
@@ -1511,6 +1571,32 @@ async function mountFlowEditor(container, { id, staff }) {
       } else {
         showToast("Click in the subject or message first.");
       }
+      return;
+    }
+    const md = e.target.closest("[data-mode]");
+    if (md) {
+      const s = selStep();
+      if (!s || s.type !== "email" || s.cfg.mode === md.dataset.mode) return;
+      if (md.dataset.mode === "html") {
+        if (!String(s.cfg.code || "").trim()) s.cfg.code = editor ? editor.getHtml() : s.cfg.body || "";
+        s.cfg.mode = "html";
+      } else {
+        if (!(await confirmDialog({
+          title: "Go back to the editor?",
+          message: "The editor only keeps simple formatting, so custom layout, tables and styles may not show there. Your HTML code is kept, so you can switch back to it any time.",
+          confirmLabel: "Use the editor", tone: "warning",
+        }))) return;
+        s.cfg.mode = "rich";
+        if (!plainText(s.cfg.body)) s.cfg.body = s.cfg.code || "";
+      }
+      changed(); renderCanvas(); renderSide();
+      return;
+    }
+    if (e.target.closest('[data-act="code-starter"]')) {
+      const s = selStep();
+      if (!s || s.type !== "email") return;
+      s.cfg.code = STARTER_HTML;
+      changed(); renderCanvas(); renderSide();
       return;
     }
     if (e.target.closest('[data-act="close"]')) { sel = null; renderCanvas(); renderSide(); return; }
