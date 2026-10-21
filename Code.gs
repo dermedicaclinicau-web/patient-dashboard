@@ -7061,6 +7061,7 @@ function flowRuleOk_(cfg, r, run, ctx) {
   if (type === 'names' || r.field === 'rc.due_between') return recallRuleOk_(cfg, r, run, ctx);
   if (type === 'birthday') return flowBirthdayOk_(cfg, r, run, ctx);
   if (type === 'year') return flowBirthYearOk_(cfg, r, run, ctx);
+  if (type === 'prange') return flowBoughtBetweenOk_(cfg, r, run, ctx);
   if (type === 'form') {
     const want = flowNorm_(r.value);
     if (!want) return false;
@@ -10251,7 +10252,7 @@ function mktPace_(p) {
   return n >= 10 && n <= 300 && MKT_PACE_MINS_.indexOf(mins) !== -1 ? { n: n, mins: mins } : { n: 0, mins: 0 };
 }
 // Rules that make sense without a purchase or visit (the same list as CAMPAIGN_FIELDS in js/mkt-campaigns.js)
-const MKT_RULE_FIELDS_ = ['hist.bought', 'hist.days_since', 'appt.has_future', 'appt.next_days', 'appt.last_days', 'appt.visits',
+const MKT_RULE_FIELDS_ = ['hist.bought', 'hist.bought_between', 'hist.days_since', 'appt.has_future', 'appt.next_days', 'appt.last_days', 'appt.visits',
   'appt.future_service', 'appt.past_service', 'appt.visit_between', 'appt.last_between', 'ssp.active', 'ssp.age_days', 'ssp.expiry_days', 'plan.status', 'plan.due',
   'plan.overdue', 'form.saved', 'pt.age', 'pt.birth_year', 'pt.birthday', 'pt.email', 'pt.mobile'];
 // "Make a list from this": who, from an earlier campaign
@@ -13421,4 +13422,28 @@ function flowDateTokens_(s) {
     }
     return Utilities.formatDate(d, 'UTC', 'd MMMM yyyy');
   });
+}
+
+// ===================== Flow rules: Purchases between two dates (Purchase history) =====================
+FLOW_FIELD_TYPE_['hist.bought_between'] = 'prange';
+FLOW_RULE_COST_['hist.bought_between'] = 2;
+
+// last: their most recent purchase (of these products) was in the range · any: bought in the range · none: didn't
+// No products chosen means any product. Purchases come from the Invoice Record (skincare/{key}.purchases).
+function flowBoughtBetweenOk_(cfg, r, run, ctx) {
+  const from = String(r.from || ''), to = String(r.to || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || to < from) return false;
+  const want = Array.isArray(r.value) ? r.value.filter(Boolean) : [];
+  const dates = flowPurchases_(cfg, run, ctx)
+    .filter(function (p) {
+      return /^\d{4}-\d{2}-\d{2}$/.test(String(p.date || '')) &&
+        (!want.length || want.some(function (w) { return flowSameProduct_(p.product, w); }));
+    })
+    .map(function (p) { return String(p.date); });
+  if (r.op === 'last') {
+    const last = dates.sort().pop();
+    return !!last && last >= from && last <= to;
+  }
+  const has = dates.some(function (d) { return d >= from && d <= to; });
+  return r.op === 'none' ? !has : has;
 }

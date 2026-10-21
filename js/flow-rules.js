@@ -67,6 +67,8 @@ export const RULE_FIELDS = [
   { key: "visit.staff", group: "This visit", label: "Seen by", type: "text", hint: "Staff name" },
 
   { key: "hist.bought", group: "Purchase history", label: "Has ever bought", type: "products" },
+  { key: "hist.bought_between", group: "Purchase history", label: "Purchases between two dates", type: "prange",
+    ops: [["last", "last bought between"], ["any", "bought between"], ["none", "didn't buy between"]] },
   { key: "hist.times", group: "Purchase history", label: "Times they've bought this product", type: "number" },
   { key: "hist.days_since", group: "Purchase history", label: "Time since their previous purchase", type: "number", unit: "days" },
 
@@ -117,10 +119,11 @@ const OPS = {
 };
 const opsFor = (f) => f.ops || OPS[f.type] || OPS.bool;
 function defaults(f) {
-  return { op: opsFor(f)[0][0], value: f.type === "products" || f.type === "names" ? [] : f.type === "choice" ? f.options[0][0] : "", days: "",
-    ...(f.type === "range" ? { from: "", to: "" } : {}), ...(f.type === "year" ? { value2: "" } : {}) };
+  const list = f.type === "products" || f.type === "names" || f.type === "prange";
+  return { op: opsFor(f)[0][0], value: list ? [] : f.type === "choice" ? f.options[0][0] : "", days: "",
+    ...(f.type === "range" || f.type === "prange" ? { from: "", to: "" } : {}),
+    ...(f.type === "year" ? { value2: "" } : {}) };
 }
-
 export const blankGroup = () => ({ match: "all", rules: [] });
 // Groups: { id, type: "group", match, rules: [rules] } inside a set of rules (one level deep)
 const isGroup = (x) => !!x && Array.isArray(x.rules);
@@ -137,14 +140,14 @@ function cleanRule(r) {
   const d = defaults(f);
   const op = opsFor(f).some((o) => o[0] === r.op) ? r.op : d.op;
   let value = r.value;
-  if (f.type === "products" || f.type === "names") value = (Array.isArray(value) ? value : []).map(String).filter(Boolean).slice(0, 40);
+  if (f.type === "products" || f.type === "names" || f.type === "prange") value = (Array.isArray(value) ? value : []).map(String).filter(Boolean).slice(0, 40);
   else if (f.type === "number" || f.type === "birthday" || f.type === "year") value = value === "" || value === null || value === undefined ? "" : Number(value);
   else if (f.type === "choice") value = f.options.some((o) => o[0] === value) ? value : d.value;
   else if (f.type === "bool") value = "";
   else value = String(value ?? "");
   const days = f.type === "form" && r.days !== "" && r.days !== null && r.days !== undefined ? Number(r.days) : "";
   const out = { id: String(r.id || rid()), field: f.key, op, value, days };
-  if (f.type === "range") { out.from = isIso(r.from) ? r.from : ""; out.to = isIso(r.to) ? r.to : ""; }
+  if (f.type === "range" || f.type === "prange") { out.from = isIso(r.from) ? r.from : ""; out.to = isIso(r.to) ? r.to : ""; }
   if (f.type === "year") out.value2 = r.value2 === "" || r.value2 === null || r.value2 === undefined ? "" : Number(r.value2);
   return out;
 }
@@ -178,7 +181,7 @@ function ruleProblem(r) {
   if ((f.type === "text" || f.type === "form") && !String(r.value || "").trim()) return `Fill in "${f.label}"`;
   if (f.type === "products" && !(Array.isArray(r.value) && r.value.length)) return `Choose a product for "${f.label}"`;
   if (f.type === "names" && !(Array.isArray(r.value) && r.value.length)) return `Choose at least one for "${f.label}"`;
-  if (f.type === "range") {
+  if (f.type === "range" || f.type === "prange") {
     if (!isIso(r.from) || !isIso(r.to)) return `Choose both dates for "${f.label}"`;
     if (r.to < r.from) return `"${f.label}": the second date is before the first`;
   }
@@ -206,6 +209,12 @@ export function describeRule(r) {
   if (!f) return "Unknown rule";
   const op = (opsFor(f).find((o) => o[0] === r.op) || opsFor(f)[0])[1];
   if (f.type === "bool") return `${f.label}: ${op}`;
+  if (f.type === "prange") {
+    const list = Array.isArray(r.value) ? r.value : [];
+    const what = list.length ? (list.length > 2 ? `${list.slice(0, 2).join(", ")} +${list.length - 2}` : list.join(", ")) : "any product";
+    const verb = r.op === "last" ? "Last bought" : r.op === "none" ? "Didn't buy" : "Bought";
+    return `${verb} ${what} between ${niceDay(r.from)} and ${niceDay(r.to)}`;
+  }
   if (f.type === "range") {
     const span = `${niceDay(r.from)} and ${niceDay(r.to)}`;
     if (r.field === "appt.last_between") return `Last visit ${r.op === "no" ? "not between" : "between"} ${span}`;
@@ -377,7 +386,7 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
         <span class="fr-unit">in the last</span>
         <input class="fe-input fr-num" type="number" min="0" step="1" data-rd="${p}" value="${esc(r.days)}" placeholder="any" aria-label="Days" />
         <span class="fr-unit">days</span>`;
-    } else if (f.type === "range") {
+    } else if (f.type === "range" || f.type === "prange") {
       const y = new Date().getFullYear();
       val = `<input class="fe-input fr-date" type="date" data-rfrom="${p}" value="${esc(r.from || "")}" aria-label="From" />
         <span class="fr-unit">and</span>
@@ -402,7 +411,7 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       <div class="fr-row">${opSel}${val}
         <button type="button" class="fr-x" data-rx="${p}" aria-label="Remove this rule" title="Remove">×</button></div>
       ${quick}
-      ${f.type === "products" || f.type === "names" ? `<div class="fr-pp" data-pp-host="${p}"></div>` : ""}
+      ${f.type === "products" || f.type === "names" || f.type === "prange" ? `<div class="fr-pp" data-pp-host="${p}"></div>` : ""}
     </div>`;
   }
 
@@ -443,6 +452,8 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       const f = FIELD[r.field];
       if (f && f.type === "names") {
         mountProductPicker(el, r.value, { onChange, names: lists[r.field] || [], placeholder: "Choose or type one", none: "None chosen yet" });
+      } else if (f && f.type === "prange") {
+        mountProductPicker(el, r.value, { onChange, names, placeholder: "Type a product, or leave empty for any", none: "Any product" });
       } else {
         mountProductPicker(el, r.value, { onChange, names });
       }
