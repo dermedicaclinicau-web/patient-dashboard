@@ -7488,3 +7488,14 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
 .rc-nomob { flex: 0 0 auto; padding: 2px 8px; border-radius: 999px; background: #f1f5f9; color: #64748b; font-size: 12px; white-space: nowrap; }
 .rc-picks { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 4px; }
 .rc-auto { margin: 0 0 8px; padding: 0; font-size: 13px; color: #475569; }
+
+/* Recall: texts and replies */
+.rc-tag { flex: 0 0 auto; padding: 2px 9px; border-radius: 999px; background: #f1f5f9; color: #475569; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.rc-tag.is-other { background: #e0f2fe; color: #075985; }
+.rc-tag.is-yes { background: #dcfce7; color: #166534; }
+.rc-tag.is-stop { background: #fee2e2; color: #991b1b; }
+.rc-reply { margin: 0 0 12px; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc; font-size: 14px; }
+.rc-reply.is-open { border-color: #7dd3fc; background: #f0f9ff; }
+.rc-reply p { margin: 4px 0 0; white-space: pre-wrap; color: #1e293b; }
+.rc-sms { display: grid; gap: 6px; margin: 0 0 12px; padding: 10px; border: 1px solid #99d5cf; border-radius: 12px; background: #f0fdfa; }
+.rc-sms textarea { width: 100%; box-sizing: border-box; resize: vertical; }

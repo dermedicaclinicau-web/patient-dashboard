@@ -1,4 +1,4 @@
-// System configuration → Recall (#/settings/recall): intervals, the recall team and the reasons for stopping.
+// System configuration → Recall (#/settings/recall): intervals, the recall team, reasons for stopping and texts.
 // Saved in recall_settings/config. Apps Script (Code.gs → Recall) reads it every time it checks.
 import { db, auth } from "./firebase-config.js";
 import { doc, getDoc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -19,6 +19,20 @@ export const RECALL_REASONS = [
 
 // Services that never count as a treatment visit (the same default as RECALL_SKIP_ in Code.gs)
 export const RECALL_SKIP = ["Review", "Consult", "Touch up", "Top up", "Follow up"];
+
+// What each treatment is called in texts (the same as RECALL_SMS_NAMES_ in Code.gs).
+// Kept general on purpose: Australian advertising rules don't allow prescription medicines to be named.
+export const RECALL_SMS_NAMES = {
+  "Wrinkle Relaxer": "anti-wrinkle treatment", "Filler/Radiesse": "filler treatment", "Laser/OPL/Peel": "laser or peel treatment",
+  "RestoraGlow/RF/DermaGlow/Skin Needling": "skin treatment", "Firm/Ulthera/eST": "skin tightening treatment",
+  "Body Sculpting": "body sculpting treatment", "Other Injectables": "skin booster treatment",
+  "Hydrarepair/SkinRemod/CG": "skin treatment", "Collagen activator": "collagen treatment",
+};
+export const RECALL_SMS_TEMPLATE = "Hi {First name}, it's Dermedica. It's been about {Months} months since your {Treatment}, " +
+  "so you're due for your next one. Reply YES and we'll call you to book.";
+const SMS_TOKENS = ["{First name}", "{Treatment}", "{Months}", "{Clinic phone}"];
+const STOP_LINE = "Reply STOP to opt out.";
+
 export const skipNorm = (s) => String(s ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
 const skipWords = (list) => {
   const seen = new Set();
@@ -36,18 +50,25 @@ const when = (v) => {
 const errText = (err, fallback) => (err && err.code === "permission-denied"
   ? "You don't have access to Recall settings. Check Recall access in Staff, and that the Firestore rules are published."
   : (err && err.message) || fallback);
+const smsName = (key, v) => String(v || RECALL_SMS_NAMES[key] || "treatment").replace(/\s+/g, " ").trim().slice(0, 60);
 
 export function normRecallSettings(x = {}) {
   const seen = new Set();
   const saved = Array.isArray(x.categories) && x.categories.length ? x.categories
     : RECALL_CATEGORIES.map(([key, months, on]) => ({ key, months, on }));
   const categories = saved
-    .map((c) => ({ key: String((c && c.key) || "").trim().slice(0, 80), months: int(c && c.months, 1, 36, 6), on: !(c && c.on === false) }))
+    .map((c) => {
+      const key = String((c && c.key) || "").trim().slice(0, 80);
+      return { key, months: int(c && c.months, 1, 36, 6), on: !(c && c.on === false), smsName: smsName(key, c && c.smsName) };
+    })
     .filter((c) => c.key && !seen.has(c.key) && seen.add(c.key));
-  RECALL_CATEGORIES.forEach(([key, months]) => { if (!seen.has(key)) { seen.add(key); categories.push({ key, months, on: false }); } });
+  RECALL_CATEGORIES.forEach(([key, months]) => {
+    if (!seen.has(key)) { seen.add(key); categories.push({ key, months, on: false, smsName: smsName(key) }); }
+  });
   const reasons = (Array.isArray(x.reasons) && x.reasons.length ? x.reasons : RECALL_REASONS)
     .map((r) => ({ label: String((r && r.label) || "").trim().slice(0, 60), askDate: !!(r && r.askDate), dnc: !!(r && r.dnc) }))
     .filter((r) => r.label).slice(0, 20);
+  const sm = x.sms && typeof x.sms === "object" ? x.sms : {};
   return {
     categories, maxAgeMonths: int(x.maxAgeMonths, 3, 60, 24), leadDays: int(x.leadDays, 0, 60, 0),
     anyFuturePauses: x.anyFuturePauses === true,
@@ -55,6 +76,13 @@ export function normRecallSettings(x = {}) {
     perDay: int(x.perDay, 1, 100, 15), skipLeave: x.skipLeave !== false,
     reasons: reasons.length ? reasons : RECALL_REASONS.slice(),
     skipServices: skipWords(Array.isArray(x.skipServices) ? x.skipServices : RECALL_SKIP),
+    sms: {
+      on: sm.on === true,
+      template: String(sm.template || RECALL_SMS_TEMPLATE).slice(0, 560),
+      phone: String(sm.phone || "").slice(0, 30),
+      waitDays: int(sm.waitDays, 1, 30, 7),
+      perDay: int(sm.perDay, 1, 300, 30),
+    },
   };
 }
 
@@ -87,11 +115,12 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
   let dirty = false;
   let services = null;      // the appointment book's services, loaded when asked
   let servicesBusy = false;
+  let smsState = { text: "Checking Textmagic…", ok: null };
   const $ = (r) => root.querySelector(`[data-role="${r}"]`);
 
   const statusText = () => (status && status.at
     ? `Last checked ${when(status.at)}: ${Number(status.made || 0)} new, ${Number(status.booked || 0)} booked, ` +
-      `${Number(status.visited || 0)} came in, ${Number(status.assigned || 0)} shared out.`
+      `${Number(status.visited || 0)} came in, ${Number(status.texted || 0)} texted, ${Number(status.assigned || 0)} shared out.`
     : 'Not checked yet. Run installRecall once in Apps Script, or press "Check for due patients now".');
 
   // What's on screen. keepEmpty keeps a new reason row while it's being typed.
@@ -100,6 +129,7 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
     return {
       categories: [...root.querySelectorAll("[data-cat]")].map((r) => ({
         key: r.dataset.cat, on: r.querySelector('[data-f="on"]').checked, months: Number(r.querySelector('[data-f="months"]').value) || 6,
+        smsName: smsName(r.dataset.cat, r.querySelector('[data-f="smsName"]').value),
       })),
       maxAgeMonths: Number($("maxAge").value) || 24,
       leadDays: Number($("lead").value) || 0,
@@ -112,6 +142,13 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
         label: r.querySelector('[data-f="label"]').value.replace(/\s+/g, " ").trim().slice(0, 60),
         askDate: r.querySelector('[data-f="ask"]').checked, dnc: r.querySelector('[data-f="dnc"]').checked,
       })).filter((r) => keepEmpty || (r.label && !seen.has(r.label.toLowerCase()) && seen.add(r.label.toLowerCase()))),
+      sms: {
+        on: $("smsOn").checked,
+        template: $("smsTpl").value.slice(0, 560) || RECALL_SMS_TEMPLATE,
+        phone: $("smsPhone").value.replace(/[^\d +()-]/g, "").trim().slice(0, 30),
+        waitDays: Number($("smsWait").value) || 7,
+        perDay: Number($("smsPerDay").value) || 30,
+      },
     };
   }
 
@@ -121,6 +158,75 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
     el.textContent = dirty ? "Unsaved changes" : "All changes saved";
   }
 
+  /* ---------- Texts ---------- */
+  function smsSample() {
+    const tpl = $("smsTpl") ? $("smsTpl").value : set.sms.template;
+    const phone = $("smsPhone") ? $("smsPhone").value.trim() : set.sms.phone;
+    const firstOn = set.categories.find((c) => c.on) || set.categories[0];
+    const nameInput = firstOn && root.querySelector(`[data-cat="${CSS.escape(firstOn.key)}"] [data-f="smsName"]`);
+    let t = String(tpl || "")
+      .replace(/\{\s*first name\s*\}/gi, "Sarah")
+      .replace(/\{\s*treatment\s*\}/gi, smsName(firstOn ? firstOn.key : "", nameInput ? nameInput.value : firstOn && firstOn.smsName))
+      .replace(/\{\s*months\s*\}/gi, String(firstOn ? firstOn.months : 4))
+      .replace(/\{\s*clinic phone\s*\}/gi, phone || "")
+      .replace(/\s+/g, " ").trim();
+    if (!/reply\s+stop/i.test(t)) t += `${t ? " " : ""}${STOP_LINE}`;
+    const parts = t.length <= 160 ? 1 : Math.ceil(t.length / 153);
+    return { text: t, info: `${t.length} characters · ${parts} text${parts === 1 ? "" : "s"} each` };
+  }
+  function drawPreview() {
+    const p = smsSample();
+    const el = $("smsPreview");
+    if (el) el.innerHTML = `<strong>Preview:</strong> ${esc(p.text)}<br><small>${esc(p.info)}</small>`;
+  }
+  function drawSmsState() {
+    const el = $("smsStatus");
+    if (!el) return;
+    el.className = `fe-note${smsState.ok === false ? " du-warn" : ""}`;
+    el.textContent = smsState.text;
+  }
+  async function checkSms() {
+    try {
+      const r = await callApi({ action: "recall", op: "smsStatus" });
+      if (r.ready) {
+        smsState = { ok: true, text: `Textmagic connected as ${r.user}` +
+          (r.from ? `, sending from ${r.from}` : "") +
+          (r.balance != null ? ` · credit ${r.balance}${r.currency ? ` ${r.currency}` : ""}` : "") +
+          (r.from ? "." : ". Add TextMagicFrom in Script Properties so texts come from your dedicated number and replies come back.") };
+      } else {
+        smsState = { ok: false, text: r.problem || "Textmagic isn't set up yet." };
+      }
+    } catch (err) {
+      smsState = { ok: false, text: errText(err, "Couldn't check Textmagic.") };
+    }
+    if (root.isConnected) drawSmsState();
+  }
+  async function testSms(btn) {
+    const to = $("smsTestTo").value.trim();
+    if (!to) { showToast("Type the mobile to send the test to."); return; }
+    btn.disabled = true;
+    try {
+      const r = await callApi({ action: "recall", op: "smsTest", to, text: smsSample().text });
+      showToast(r.problem || "Test sent. It should arrive in a few seconds.");
+    } catch (err) {
+      showToast(errText(err, "Couldn't send the test."));
+    } finally {
+      if (btn.isConnected) btn.disabled = false;
+    }
+  }
+  function insertTok(tok) {
+    const ta = $("smsTpl");
+    const a = ta.selectionStart ?? ta.value.length;
+    const b = ta.selectionEnd ?? a;
+    ta.value = ta.value.slice(0, a) + tok + ta.value.slice(b);
+    ta.focus();
+    ta.setSelectionRange(a + tok.length, a + tok.length);
+    dirty = true;
+    setState();
+    drawPreview();
+  }
+
+  /* ---------- Not recalled from these services ---------- */
   function matchesHtml() {
     if (!services) {
       return `<button type="button" class="lh-btn is-quiet" data-act="load-svcs"${servicesBusy ? " disabled" : ""}>${
@@ -182,13 +288,15 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
         <section class="tb-card">
           <h4 class="mc-h">Treatments</h4>
           <p class="fe-note">A patient is due this long after their last visit for that treatment, unless one is already booked.
-            The PCN overdue list uses the same intervals.</p>
-          <table class="inv-table rs-cats"><thead><tr><th>Recall</th><th>Treatment</th><th>Every</th></tr></thead>
+            The PCN overdue list uses the same intervals. "Called in texts" is how the treatment is named in recall texts:
+            keep it general, without brand or medicine names.</p>
+          <table class="inv-table rs-cats"><thead><tr><th>Recall</th><th>Treatment</th><th>Every</th><th>Called in texts</th></tr></thead>
             <tbody>${set.categories.map((c) => `<tr data-cat="${esc(c.key)}">
               <td><input type="checkbox" data-f="on"${c.on ? " checked" : ""} aria-label="Recall ${esc(c.key)}" /></td>
               <td>${esc(c.key)}</td>
               <td><select class="fb-select" data-f="months" aria-label="Every">${opts(Array.from({ length: 24 }, (_, i) => i + 1), c.months,
-                (m) => `${m} month${m === 1 ? "" : "s"}`)}</select></td></tr>`).join("")}</tbody></table>
+                (m) => `${m} month${m === 1 ? "" : "s"}`)}</select></td>
+              <td><input class="fe-input" data-f="smsName" maxlength="60" value="${esc(c.smsName)}" aria-label="Called in texts" /></td></tr>`).join("")}</tbody></table>
           <div class="rc-row">Not recalled if their last visit was more than
             <select class="fb-select" data-role="maxAge">${opts([6, 12, 18, 24, 36, 48], set.maxAgeMonths, (m) => `${m} months`)}</select> ago</div>
           <div class="rc-row">Cards appear
@@ -212,6 +320,26 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
         </section>
 
         <section class="tb-card">
+          <h4 class="mc-h">Texts</h4>
+          <p class="fe-note" data-role="smsStatus"></p>
+          <label class="fe-check"><input type="checkbox" data-role="smsOn"${set.sms.on ? " checked" : ""} />
+            Send a text automatically when someone becomes due</label>
+          <p class="fe-note">Only to patients who became due in the last 7 days, between 9 am and 6 pm, and never to anyone on the
+            do-not-contact list. Staff can also send a text from any card. Replies go onto the card, and STOP puts them on the do-not-contact list.</p>
+          <div class="rc-row">Give the card to the recall team if they haven't replied or booked within
+            <select class="fb-select" data-role="smsWait">${opts([3, 5, 7, 10, 14], set.sms.waitDays, (d) => `${d} days`)}</select></div>
+          <div class="rc-row">Up to <select class="fb-select" data-role="smsPerDay">${opts([10, 20, 30, 50, 100], set.sms.perDay, (n) => String(n))}</select> automatic texts a day</div>
+          <label class="lh-field"><span class="lh-label">Clinic phone (for {Clinic phone})</span>
+            <input class="fe-input" data-role="smsPhone" maxlength="30" value="${esc(set.sms.phone)}" placeholder="08 9000 0000" /></label>
+          <label class="lh-field"><span class="lh-label">The message</span>
+            <textarea class="fe-input" data-role="smsTpl" rows="5" maxlength="560">${esc(set.sms.template)}</textarea></label>
+          <div class="rs-skip">${SMS_TOKENS.map((t) => `<button type="button" class="ch-chip" data-tok="${esc(t)}">${esc(t)}</button>`).join("")}</div>
+          <p class="fe-note" data-role="smsPreview"></p>
+          <div class="rc-row"><input class="fe-input" data-role="smsTestTo" maxlength="20" placeholder="Your mobile, 04…" aria-label="Send a test to" />
+            <button type="button" class="lh-btn" data-act="sms-test">Send a test</button></div>
+        </section>
+
+        <section class="tb-card">
           <h4 class="mc-h">Reasons for stopping</h4>
           <p class="fe-note">"Ask for a date" pauses the card until then instead of closing it.
             "Do not contact" also puts them on the do-not-contact list.</p>
@@ -222,6 +350,7 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
               <button type="button" class="lh-btn is-quiet" data-rm="${i}" aria-label="Remove ${esc(r.label)}">×</button></div>`).join("")}</div>
           ${set.reasons.length < 20 ? '<button type="button" class="lh-btn is-quiet" data-act="add-reason">+ Add a reason</button>' : ""}
         </section>
+
         <section class="tb-card">
           <h4 class="mc-h">Not recalled from these services</h4>
           <p class="fe-note">A visit for a service with any of these words in its name doesn't count as a treatment, so it doesn't start or reset a recall. Capitals and spaces are ignored.</p>
@@ -231,14 +360,10 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
             <button type="button" class="lh-btn" data-act="add-skip">Add</button></div>
           <div data-role="skipMatches">${matchesHtml()}</div>
         </section>
-
-        <section class="tb-card">
-          <h4 class="mc-h">Texts and emails</h4>
-          <p class="fe-note">Coming next: on the due date a text through Textmagic, an email a week later, then the recall team.
-            Until then, due patients go straight to the team.</p>
-        </section>
       </div>`;
     setState();
+    drawSmsState();
+    drawPreview();
   }
 
   async function save() {
@@ -274,7 +399,7 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
       else {
         status = { ...res, at: new Date().toISOString() };
         $("status").textContent = statusText();
-        showToast(`Done: ${Number(res.made || 0)} new cards, ${Number(res.assigned || 0)} shared out`);
+        showToast(`Done: ${Number(res.made || 0)} new cards, ${Number(res.texted || 0)} texted, ${Number(res.assigned || 0)} shared out`);
       }
     } catch (err) {
       showToast(errText(err, "Couldn't check. Try again."));
@@ -283,8 +408,18 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
     }
   }
 
-  root.addEventListener("input", () => { dirty = true; setState(); });
-  root.addEventListener("change", () => { dirty = true; setState(); });
+  root.addEventListener("input", (e) => {
+    if (e.target.dataset.role === "smsTestTo") return;   // not a setting
+    dirty = true;
+    setState();
+    const r = e.target.dataset.role;
+    if (r === "smsTpl" || r === "smsPhone" || e.target.dataset.f === "smsName") drawPreview();
+  });
+  root.addEventListener("change", (e) => {
+    if (e.target.dataset.role === "smsTestTo") return;
+    dirty = true;
+    setState();
+  });
   root.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && e.target.dataset.role === "skipNew") { e.preventDefault(); addSkip(); }
   });
@@ -292,6 +427,10 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
     if (e.target.closest('[data-act="save"]')) { save(); return; }
     if (e.target.closest('[data-act="add-skip"]')) { addSkip(); return; }
     if (e.target.closest('[data-act="load-svcs"]')) { loadServices(); return; }
+    const tk = e.target.closest("[data-tok]");
+    if (tk) { insertTok(tk.dataset.tok); return; }
+    const st = e.target.closest('[data-act="sms-test"]');
+    if (st) { testSms(st); return; }
     const rs = e.target.closest("[data-rm-skip]");
     if (rs) {
       set = { ...set, ...collect(true) };
@@ -321,4 +460,5 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
   });
   window.addEventListener("beforeunload", (e) => { if (dirty && root.isConnected) e.preventDefault(); });
   draw();
+  checkSms();
 }

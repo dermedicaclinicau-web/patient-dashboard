@@ -24,6 +24,15 @@ const LV_OPTS = [["", "Last visit: any time"], ["3", "Last visit: past 3 months"
 const PICKS = [["Tomorrow", (t) => addDays(t, 1)], ["Next week", (t) => addDays(t, 7)],
   ["2 weeks", (t) => addDays(t, 14)], ["1 month", (t) => addMonths(t, 1)]];
 
+const REPLY_TAG = { yes: "Wants to book", stop: "Opted out", other: "Replied" };
+const STOP_LINE = "Reply STOP to opt out.";
+const withStop = (t) => { const s = String(t || "").replace(/\s+/g, " ").trim(); return /reply\s+stop/i.test(s) ? s : `${s}${s ? " " : ""}${STOP_LINE}`; };
+const smsInfo = (t) => {
+  const n = withStop(t).length;
+  const parts = n <= 160 ? 1 : Math.ceil(n / 153);
+  return `${n} characters · ${parts} text${parts === 1 ? "" : "s"}${/reply\s+stop/i.test(String(t || "")) ? "" : ` · "${STOP_LINE}" is added at the end`}`;
+};
+
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmtKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const todayKey = () => fmtKey(new Date());
@@ -61,7 +70,7 @@ const telOf = (m) => mobileText(m).replace(/[^\d+]/g, "");
 const me = () => (auth.currentUser && auth.currentUser.uid) || "";
 const can = (staff, p) => !!staff && (/^admin$/i.test(String(staff.role || "")) || (Array.isArray(staff.perms) && staff.perms.includes(p)));
 const nameKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9' -]/g, " ").replace(/\s+/g, " ").trim(); // same as recallKeys_
-const blank = () => ({ out: "", note: "", remind: "", reason: "", until: "" });
+const blank = () => ({ out: "", note: "", remind: "", reason: "", until: "", sms: null });
 const errText = (err, fallback) => (err && err.code === "permission-denied"
   ? "You don't have access to Recall. Check Recall access in Staff, and that the Firestore rules are published."
   : (err && err.message) || fallback);
@@ -94,6 +103,10 @@ function norm(snap) {
     assignedToId: s("assignedToId"), assignedToName: s("assignedToName"), remindOn: s("remindOn"), pauseReason: s("pauseReason"),
     attempts: Number(x.attempts) || 0, bookedFor: s("bookedFor"), bookedAt: s("bookedAt"),
     closeReason: s("closeReason"), closedAt: s("closedAt"), closedBy: s("closedBy"),
+    reply: x.reply && typeof x.reply === "object"
+      ? { at: String(x.reply.at || ""), text: String(x.reply.text || ""), kind: String(x.reply.kind || "other") } : null,
+    replyOpen: x.replyOpen === true, months: Number(x.months) || 0,
+    lastTextAt: s("lastTextAt"), textHoldUntil: s("textHoldUntil"), texts: Number(x.texts) || 0,
     log: Array.isArray(x.log) ? x.log : [], updatedAt: s("updatedAt"),
   };
 }
@@ -357,6 +370,9 @@ export function mountRecall(container, { staff = null } = {}) {
       c.lastStaff ? esc(`last with ${c.lastStaff}`) : ""].filter(Boolean).join(" · ");
     const side = [c.attempts ? `${c.attempts} tr${c.attempts === 1 ? "y" : "ies"}` : "",
       c.assignedToId && c.assignedToId !== me() ? first(c.assignedToName) : ""].filter(Boolean).join(" · ");
+    const tag = c.replyOpen && c.reply
+      ? `<span class="rc-tag is-${esc(c.reply.kind)}">${esc(REPLY_TAG[c.reply.kind] || "Replied")}</span>`
+      : c.status === "open" && !c.assignedToId && c.textHoldUntil > t ? '<span class="rc-tag">Texted · waiting for a reply</span>' : "";
     const tel = telOf(c.mobile);
     const contact = tel ? `<a class="lh-btn rc-call" href="tel:${esc(tel)}">Call</a>`
       : c.email ? `<span class="rc-nomob">No mobile</span><a class="lh-btn is-quiet rc-call" href="mailto:${esc(c.email)}">Email</a>`
@@ -364,6 +380,7 @@ export function mountRecall(container, { staff = null } = {}) {
     return `<div class="rc-item${on ? " is-on" : ""}" data-card="${esc(c.id)}" role="button" tabindex="0" aria-expanded="${on}">
         <span class="rc-av" aria-hidden="true">${esc(initials(c.patientName))}</span>
         <span class="rc-main"><strong>${esc(c.patientName || "Unknown patient")}</strong><small>${meta}</small></span>
+        ${tag}
         ${side ? `<span class="rc-side">${esc(side)}</span>` : ""}
         ${contact}
       </div>${on && c.status === "open" ? `<div class="rc-quick">${QUICK.map(([k, l]) =>
@@ -372,10 +389,11 @@ export function mountRecall(container, { staff = null } = {}) {
   }
 
   function groupedRows(rows, t) {
-    return GROUPS.map(([title, test]) => {
-      const list = rows.filter((c) => test(daysFrom(c.dueDate, t)));
-      return list.length ? `<div class="rc-sub-h">${esc(title)}</div><div class="rc-list">${list.map((c) => rowHtml(c, t)).join("")}</div>` : "";
-    }).join("");
+    const block = (title, list) => (list.length
+      ? `<div class="rc-sub-h">${esc(title)}</div><div class="rc-list">${list.map((c) => rowHtml(c, t)).join("")}</div>` : "");
+    const rest = rows.filter((c) => !c.replyOpen);
+    return block("Replied · follow up first", rows.filter((c) => c.replyOpen)) +
+      GROUPS.map(([title, test]) => block(title, rest.filter((c) => test(daysFrom(c.dueDate, t))))).join("");
   }
 
   function emptyText(sec) {
@@ -424,10 +442,27 @@ export function mountRecall(container, { staff = null } = {}) {
     const out = [];
     sections.forEach((s) => {
       if (!s.open || !s.loaded) return;
-      if (s.key === "mine") GROUPS.forEach(([, test]) => s.rows.forEach((c) => { if (test(daysFrom(c.dueDate, t))) out.push(c.id); }));
+      if (s.key === "mine") {
+        s.rows.forEach((c) => { if (c.replyOpen) out.push(c.id); });
+        GROUPS.forEach(([, test]) => s.rows.forEach((c) => { if (!c.replyOpen && test(daysFrom(c.dueDate, t))) out.push(c.id); }));
+      }
       else s.rows.forEach((c) => out.push(c.id));
     });
     return out;
+  }
+
+  // The text for this card, from Recall settings → Texts
+  function fillSms(c) {
+    const s = settings.sms || {};
+    const cat = settings.categories.find((x) => x.key === c.category);
+    const months = c.lastVisit ? Math.max(1, Math.round(daysFrom(c.lastVisit, todayKey()) / 30.4)) : (cat ? cat.months : "");
+    const firstName = String(c.patientName || "").replace(/\([^)]*\)/g, " ").trim().split(/\s+/)[0] || "there";
+    return String(s.template || "")
+      .replace(/\{\s*first name\s*\}/gi, firstName)
+      .replace(/\{\s*treatment\s*\}/gi, (cat && cat.smsName) || "treatment")
+      .replace(/\{\s*months\s*\}/gi, String(months))
+      .replace(/\{\s*clinic phone\s*\}/gi, s.phone || "")
+      .replace(/\s+/g, " ").trim();
   }
 
   /* ---------- One card ---------- */
@@ -491,11 +526,20 @@ export function mountRecall(container, { staff = null } = {}) {
       <div class="rc-p-top"><h3>${esc(c.patientName || "Unknown patient")}</h3>
         <button type="button" class="lh-btn is-quiet" data-act="deselect" aria-label="Close">×</button></div>
       <p class="rc-sub">${esc(sub)}${c.lastServices.length ? `<br>${esc(c.lastServices.join(", "))}` : ""}</p>
+      ${c.reply ? `<div class="rc-reply${c.replyOpen ? " is-open" : ""}"><strong>${esc(REPLY_TAG[c.reply.kind] || "Replied")} · ${esc(when(c.reply.at))}</strong>
+        <p>${esc(c.reply.text)}</p></div>` : ""}
       <div class="rc-links">
         ${tel ? `<a class="lh-btn" href="tel:${esc(tel)}">Call ${esc(mobileText(c.mobile))}</a>` : '<span class="rc-nomob">No mobile on file</span>'}
+        ${tel && c.status !== "closed" ? '<button type="button" class="lh-btn" data-act="sms">Send text</button>' : ""}
         ${c.email ? `<a class="lh-btn is-quiet" href="mailto:${esc(c.email)}">Email</a>` : ""}
         ${c.patientId ? `<a class="lh-btn is-quiet" href="#/patient/${encodeURIComponent(c.patientId)}">Patient page</a>` : ""}
       </div>
+      ${draft.sms == null ? "" : `<div class="rc-sms">
+        <textarea class="fe-input" data-role="sms" rows="4" maxlength="560" aria-label="Text message">${esc(draft.sms)}</textarea>
+        <div class="rc-row"><small class="fe-note" data-role="smsInfo">${esc(smsInfo(draft.sms))}</small><span class="inv-spacer"></span>
+          <button type="button" class="lh-btn is-quiet" data-act="sms-cancel">Cancel</button>
+          <button type="button" class="btn-primary" data-act="sms-send">Send to ${esc(mobileText(c.mobile))}</button></div>
+      </div>`}
       ${c.status === "closed" ? "" : `<div class="rc-row">Given to
         <select class="fb-select" data-role="assign" aria-label="Given to">
           <option value="">Nobody yet (waiting)</option>${ppl.map((s) =>
@@ -560,6 +604,11 @@ export function mountRecall(container, { staff = null } = {}) {
       clearTimeout(searchTimer);
       searchTimer = setTimeout(runSearch, 300);
     } else if (r === "note") draft.note = e.target.value;
+    else if (r === "sms") {
+      draft.sms = e.target.value;
+      const info = $("smsInfo");
+      if (info) info.textContent = smsInfo(draft.sms);
+    }
   });
   root.addEventListener("change", async (e) => {
     const el = e.target;
@@ -626,6 +675,21 @@ export function mountRecall(container, { staff = null } = {}) {
     const b = e.target.closest("[data-act]");
     if (!b) return;
     if (b.dataset.act === "deselect") { sel = ""; drawList(); drawPanel(true); return; }
+    if (b.dataset.act === "sms") {
+      const c = findCard(sel);
+      if (!c) return;
+      draft.sms = fillSms(c);
+      drawPanel(true);
+      const ta = $("sms");
+      if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+      return;
+    }
+    if (b.dataset.act === "sms-cancel") { draft.sms = null; drawPanel(true); return; }
+    if (b.dataset.act === "sms-send") {
+      if (String(draft.sms || "").trim().length < 10) { showToast("Write the message first."); return; }
+      if (await act("text", { text: draft.sms }, b)) { draft.sms = null; drawPanel(true); showToast("Text sent"); }
+      return;
+    }
     if (b.dataset.act === "details") {
       const p = $("panel");
       p.scrollIntoView({ behavior: "smooth", block: "start" });

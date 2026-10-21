@@ -4595,6 +4595,7 @@ function runNotifications() {
   try { notifyCountCheck_(cfg, rules, now); } catch (e) { console.error('Count check: ' + (e && e.stack ? e.stack : e)); }
   try { chatHelpReminders_(cfg); } catch (e) { console.error('Chat reminders: ' + (e && e.stack ? e.stack : e)); }
   try { eodReminders_(cfg, now); } catch (e) { console.error('End of day reminders: ' + (e && e.stack ? e.stack : e)); }
+  try { recallReplies_(cfg); } catch (e) { console.error('Recall replies: ' + (e && e.stack ? e.stack : e)); }
 }
 
 // Run ONCE from the editor to start notifications
@@ -9887,7 +9888,7 @@ const MKT_SUPPRESS_ = 'email_suppress';
 const MKT_LOG_ = 'marketing_consent_log';
 const MKT_PAGE_ = PORTAL_URL_ + 'unsubscribe.html';
 const MKT_SOURCES_ = ['Told staff', 'Do not contact list', 'New patient form', 'Update details form', 'Replied by email',
-  'Imported', 'Unsubscribe link', 'Resubscribed'];
+  'Imported', 'Unsubscribe link', 'Resubscribed', 'Replied STOP to a text'];
 const MKT_DNC_REASONS_ = ['Asked not to be contacted', 'Opted out', 'Complained', 'Other'];
 
 /* ---------- Signed unsubscribe links ---------- */
@@ -11594,11 +11595,15 @@ function recallSettings_(cfg) {
       const key = String((c && c.key) || '').trim().slice(0, 80);
       if (!key || seen[key]) return;
       seen[key] = true;
-      cats.push({ key: key, months: int(c.months, 1, 36, 6), on: c.on !== false });
+      cats.push({
+        key: key, months: int(c.months, 1, 36, 6), on: c.on !== false,
+        smsName: String((c && c.smsName) || RECALL_SMS_NAMES_[key] || 'treatment').replace(/\s+/g, ' ').trim().slice(0, 60),
+      });
     });
   const reasons = (Array.isArray(d.reasons) && d.reasons.length ? d.reasons : RECALL_REASONS_).map(function (r) {
     return { label: String((r && r.label) || '').trim().slice(0, 60), askDate: !!(r && r.askDate), dnc: !!(r && r.dnc) };
   }).filter(function (r) { return r.label; }).slice(0, 20);
+  const sm = d.sms && typeof d.sms === 'object' ? d.sms : {};
   return {
     categories: cats,
     maxAgeMonths: int(d.maxAgeMonths, 3, 60, 24),
@@ -11611,6 +11616,13 @@ function recallSettings_(cfg) {
     skipServices: (Array.isArray(d.skipServices) ? d.skipServices : RECALL_SKIP_)
       .map(function (s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, 40); })
       .filter(function (s) { return s.replace(/[^A-Za-z0-9]/g, '').length >= 3; }).slice(0, 40),
+    sms: {
+      on: sm.on === true,
+      template: String(sm.template || RECALL_SMS_TEMPLATE_).slice(0, 560),
+      phone: String(sm.phone || '').replace(/[^\d +()-]/g, '').trim().slice(0, 30),
+      waitDays: int(sm.waitDays, 1, 30, 7),
+      perDay: int(sm.perDay, 1, 300, 30),
+    },
     updatedAt: String(d.updatedAt || ''),
   };
 }
@@ -11681,13 +11693,14 @@ function recallRun_(force) {
     const props = PropertiesService.getScriptProperties();
     const sig = [today, String(ds.at || ''), set.updatedAt].join('|');
     if (!force && props.getProperty('RECALL_SIG') === sig) {
-      return { ok: true, quick: true, assigned: recallAssign_(cfg, set, today) };
+      return { ok: true, quick: true, texted: recallTextSafe_(cfg, set, today), assigned: recallAssign_(cfg, set, today) };
     }
     const res = recallCheck_(cfg, set, today, force);
+    res.texted = recallTextSafe_(cfg, set, today);
     res.assigned = recallAssign_(cfg, set, today);
     commitWrites_(cfg, [updateWrite_(cfg, RECALL_SET_ + '/status', {
       at: new Date().toISOString(), made: res.made, booked: res.booked, visited: res.visited, reopened: res.reopened,
-      back: res.back, offCat: res.offCat, retired: res.retired, assigned: res.assigned, rows: res.rows, ms: res.ms,
+      back: res.back, offCat: res.offCat, retired: res.retired, texted: res.texted, assigned: res.assigned, rows: res.rows, ms: res.ms,
     })]);
     props.setProperty('RECALL_SIG', sig);
     props.setProperty('RECALL_ROWS', String(res.rows));
@@ -11890,7 +11903,13 @@ function recallAssign_(cfg, set, today) {
     }
     const l = load[c.assignedToId];
     if (l) { if (c.assignedDay === today) l.today++; if (c.stage === 'call') l.open++; }
-    if (!c.assignedToId && c.stage !== 'later') waiting.push(c);
+    // Waiting for an automatic text, or for a reply to one: not shared out yet
+    const held = (c.textHoldUntil && String(c.textHoldUntil) > today && !c.replyOpen) || recallWantsText_(c, set, today);
+    if (c._freed && held) {
+      writes.push(patchWrite_(cfg, RECALL_COL_ + '/' + c._id, { assignedToId: '', assignedToName: '', assignedDay: '', stage: 'due', updatedAt: now,
+        log: (Array.isArray(c.log) ? c.log : []).concat([{ at: now, by: 'Recall', byUid: '', kind: 'auto', what: 'Back to waiting (the person it was given to is no longer active)', note: '' }]).slice(-80) }));
+    }
+    if (!c.assignedToId && c.stage !== 'later' && !held) waiting.push(c);
   });
   // Most recently due first (they're the likeliest to book), then anyone due soon (Recall settings → lead days)
   waiting.sort(function (a, b) {
@@ -11939,6 +11958,10 @@ function handleRecall_(body) {
     if (op === 'services') {
       if (!manage) return { ok: false, error: 'FORBIDDEN' };
       return { ok: true, services: recallServices_(getConfig_()) };
+    }
+    if (op === 'smsStatus' || op === 'smsTest') {
+      if (!manage) return { ok: false, error: 'FORBIDDEN' };
+      return recallSmsAdmin_(op, body, session);
     }
     const id = String(body.id || '');
     if (!/^[A-Za-z0-9_-]{5,200}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
@@ -11993,6 +12016,32 @@ function recallAction_(op, id, body, session) {
       Object.assign(patch, { assignedToId: uid, assignedToName: who, assignedDay: today });
       if (!patch.stage && out !== 'booked') patch.stage = 'call';
     }
+    patch.replyOpen = false;   // a reply has been followed up
+  } else if (op === 'text') {
+    if (c.status === 'closed') return { ok: true, problem: 'This card is closed. Reopen it first.' };
+    const auth = tmAuth_();
+    if (!auth) return { ok: true, problem: "Texts aren't set up yet. Add TextMagic, TextMagicUser and TextMagicFrom in Apps Script → Script Properties." };
+    const phone = recallPhone61_(c.mobile);
+    if (!phone) return { ok: true, problem: "There's no Australian mobile number on their record." };
+    const h = Number(Utilities.formatDate(new Date(), REC_TZ_, 'H'));
+    if (h < 8 || h >= 20) return { ok: true, problem: 'Texts can only be sent between 8 am and 8 pm.' };
+    const blocked = recallTextBlocked_(cfg, c.patientId);
+    if (blocked) return { ok: true, problem: blocked + " Recall texts can't be sent to them." };
+    const text = recallSmsText_(body.text);
+    if (text.replace(/reply\s+stop\s+to\s+opt\s+out\.?/i, '').trim().length < 10) return { ok: true, problem: 'Write the message first.' };
+    const cache = CacheService.getScriptCache();
+    const rk = 'rc_sms_' + uid;
+    const used = Number(cache.get(rk) || 0);
+    if (used >= 60) return { ok: true, problem: "You've sent a lot of texts in the last hour. Try again a bit later." };
+    try { tmSend_(auth, phone, text); }
+    catch (e) { return { ok: true, problem: "The text wasn't sent: " + String(e && e.message ? e.message : e) }; }
+    cache.put(rk, String(used + 1), 3600);
+    log.push({ at: now, by: who, byUid: uid, kind: 'text', what: 'Text sent', note: text });
+    patch = { lastTextAt: now, lastTextBy: uid, lastTextByName: who, texts: Number(c.texts || 0) + 1,
+      lastCallAt: now, lastCallBy: uid, lastCallDay: today, replyOpen: false };
+    if (c.status === 'open' && !c.assignedToId) {
+      Object.assign(patch, { assignedToId: uid, assignedToName: who, assignedDay: today, stage: c.stage === 'later' ? 'later' : 'call' });
+    }
   } else if (op === 'assign') {
     const toId = String(body.toId || '');
     if (toId === String(c.assignedToId || '')) return { ok: true, already: true };
@@ -12024,6 +12073,7 @@ function recallAction_(op, id, body, session) {
         } catch (e) { console.warn('Recall closed, but do-not-contact not saved: ' + e); }
       }
     }
+    patch.replyOpen = false;
   } else if (op === 'reopen') {
     if (c.status === 'open') return { ok: true, already: true };
     if (c.status === 'closed' && c.closeReason === 'Came in') {
@@ -12038,6 +12088,7 @@ function recallAction_(op, id, body, session) {
   commitWrites_(cfg, [patchWrite_(cfg, path, patch)]);
   return { ok: true };
 }
+
 
 // Run ONCE from the editor: checks every hour, and does the first check now
 function installRecall() {
@@ -12068,4 +12119,303 @@ function recallReshare() {
   if (writes.length) commitWrites_(cfg, writes, 100);
   const shared = recallAssign_(cfg, recallSettings_(cfg), flowKey_(Date.now()));
   console.log(writes.length + ' card(s) back to waiting. ' + shared + ' shared out again.');
+}
+
+// ===================== Recall: texts (Textmagic) =====================
+// Script Properties: TextMagic (the API key), TextMagicUser (the username), TextMagicFrom (the dedicated number, e.g. 61412345678).
+// Sending: "Send text" on each card, and (Recall settings → Texts) an automatic text when someone becomes due.
+// Replies: checked every 5 minutes (runNotifications). Each goes on the matching card; STOP puts them on do not contact.
+
+const TM_API_ = 'https://rest.textmagic.com/api/v2';
+const RECALL_REPLIES_ = 'recall_replies';
+// Kept general on purpose: Australian advertising rules don't allow prescription medicines to be named
+const RECALL_SMS_NAMES_ = {
+  'Wrinkle Relaxer': 'anti-wrinkle treatment', 'Filler/Radiesse': 'filler treatment', 'Laser/OPL/Peel': 'laser or peel treatment',
+  'RestoraGlow/RF/DermaGlow/Skin Needling': 'skin treatment', 'Firm/Ulthera/eST': 'skin tightening treatment',
+  'Body Sculpting': 'body sculpting treatment', 'Other Injectables': 'skin booster treatment',
+  'Hydrarepair/SkinRemod/CG': 'skin treatment', 'Collagen activator': 'collagen treatment',
+};
+const RECALL_SMS_TEMPLATE_ = "Hi {First name}, it's Dermedica. It's been about {Months} months since your {Treatment}, " +
+  "so you're due for your next one. Reply YES and we'll call you to book.";
+
+function tmAuth_() {
+  const p = PropertiesService.getScriptProperties();
+  let key = String(p.getProperty('TextMagic') || '').trim();
+  let user = String(p.getProperty('TextMagicUser') || '').trim();
+  if (!user && key.indexOf(':') > 0) {   // "username:key" in one property
+    user = key.slice(0, key.indexOf(':')).trim();
+    key = key.slice(key.indexOf(':') + 1).trim();
+  }
+  const from = String(p.getProperty('TextMagicFrom') || '').replace(/\D/g, '');
+  return key && user ? { key: key, user: user, from: from } : null;
+}
+
+function tmFetch_(auth, method, path, payload) {
+  const opt = { method: method, muteHttpExceptions: true, headers: { 'X-TM-Username': auth.user, 'X-TM-Key': auth.key } };
+  if (payload) opt.payload = payload;
+  const res = UrlFetchApp.fetch(TM_API_ + path, opt);
+  const code = res.getResponseCode();
+  let body = {};
+  try { body = JSON.parse(res.getContentText() || '{}'); } catch (e) { /* not JSON */ }
+  if (code >= 300) {
+    const err = new Error(code === 401
+      ? 'Textmagic refused the username or API key. Check the Script Properties.'
+      : String(body.message || ('Textmagic error ' + code)).slice(0, 200));
+    err.code = code;
+    throw err;
+  }
+  return body;
+}
+
+// "0414 498 026" / "61414498026" / "+61 414…" → "61414498026" (Australian mobiles only), or ''
+function recallPhone61_(m) {
+  let d = String(m || '').replace(/\D/g, '');
+  if (/^04\d{8}$/.test(d)) d = '61' + d.slice(1);
+  if (/^4\d{8}$/.test(d)) d = '61' + d;
+  return /^614\d{8}$/.test(d) ? d : '';
+}
+function recallPhone04_(m) { const d = recallPhone61_(m); return d ? '0' + d.slice(2) : ''; }
+
+// The opt-out line is always on the end (Spam Act 2003)
+function recallSmsText_(t) {
+  let s = String(t || '').replace(/\s+/g, ' ').trim();
+  if (!/reply\s+stop/i.test(s)) s += (s ? ' ' : '') + 'Reply STOP to opt out.';
+  return s.slice(0, 612);
+}
+
+function recallSmsFill_(tpl, c, set) {
+  const cat = set.categories.filter(function (x) { return x.key === c.category; })[0];
+  const d = c.lastVisit ? flowDays_(c.lastVisit, flowKey_(Date.now())) : null;
+  const months = d !== null ? Math.max(1, Math.round(d / 30.4)) : (cat ? cat.months : '');
+  const first = String(c.patientName || '').replace(/\([^)]*\)/g, ' ').trim().split(/\s+/)[0] || 'there';
+  return String(tpl || '')
+    .replace(/\{\s*first name\s*\}/gi, first)
+    .replace(/\{\s*treatment\s*\}/gi, (cat && cat.smsName) || 'treatment')
+    .replace(/\{\s*months\s*\}/gi, String(months))
+    .replace(/\{\s*clinic phone\s*\}/gi, set.sms.phone || '')
+    .replace(/\s+/g, ' ').trim();
+}
+
+function tmSend_(auth, phone61, text) {
+  const payload = { text: text, phones: phone61 };
+  if (auth.from) payload.from = auth.from;
+  const r = tmFetch_(auth, 'post', '/messages', payload);
+  return String(r.id || r.messageId || '');
+}
+
+// Why they can't be texted, or ''
+function recallTextBlocked_(cfg, pid) {
+  const p = pid ? fsGetDoc_(cfg, 'patient_list/' + encodeURIComponent(pid)) : null;
+  if (p && p['Marketing OK'] === false) return "They're on the do-not-contact list.";
+  const e = p ? mktEmail_(p.Email) : '';
+  if (isEmail_(e)) {
+    const s = mktSuppressed_(cfg, e);
+    if (s && s.reason !== 'bounced') return "They're on the do-not-contact list.";
+  }
+  return '';
+}
+
+// A card that should get an automatic text before it's shared out
+function recallWantsText_(c, set, today) {
+  return !!(set.sms && set.sms.on) && !c.textAutoAt && !c.assignedToId && c.stage === 'due' && c.status === 'open'
+    && String(c.dueDate) <= today && String(c.dueDate) >= flowAddDaysKey_(today, -7) && !!recallPhone61_(c.mobile);
+}
+
+function recallTextSafe_(cfg, set, today) {
+  try { return recallAutoText_(cfg, set, today); }
+  catch (e) { console.error('Recall texts: ' + (e && e.stack ? e.stack : e)); return 0; }
+}
+
+// Newly due patients (last 7 days), 9 am to 6 pm, up to the daily limit
+function recallAutoText_(cfg, set, today) {
+  if (!set.sms.on) return 0;
+  const h = Number(Utilities.formatDate(new Date(), REC_TZ_, 'H'));
+  if (h < 9 || h >= 18) return 0;
+  const auth = tmAuth_();
+  if (!auth) return 0;
+  const props = PropertiesService.getScriptProperties();
+  const pk = 'RECALL_SMS_' + today;
+  let sent = Number(props.getProperty(pk) || 0);
+  if (sent >= set.sms.perDay) return 0;
+  const cards = fsQuery_(cfg, RECALL_COL_, 'dueDate', 'GREATER_THAN_OR_EQUAL', flowAddDaysKey_(today, -7), 3000)
+    .filter(function (c) { return recallWantsText_(c, set, today); })
+    .sort(function (a, b) { return String(b.dueDate).localeCompare(String(a.dueDate)); });
+  let n = 0;
+  for (let i = 0; i < cards.length && sent < set.sms.perDay; i++) {
+    const c = cards[i];
+    const path = RECALL_COL_ + '/' + c._id;
+    const now = new Date().toISOString();
+    const log = Array.isArray(c.log) ? c.log : [];
+    const note = function (what, text) {
+      return log.concat([{ at: now, by: 'Recall', byUid: '', kind: text ? 'text' : 'auto', what: what, note: text || '' }]).slice(-80);
+    };
+    const blocked = recallTextBlocked_(cfg, c.patientId);
+    if (blocked) {
+      fsPatch_(cfg, path, { textAutoAt: now, textAuto: 'skipped', updatedAt: now, log: note('No automatic text: on the do-not-contact list') });
+      continue;
+    }
+    const text = recallSmsText_(recallSmsFill_(set.sms.template, c, set));
+    try {
+      tmSend_(auth, recallPhone61_(c.mobile), text);
+    } catch (e) {
+      console.warn('Recall text to ' + c._id + ' failed: ' + e);
+      if (e && e.code === 401) break;   // wrong key: stop for now
+      fsPatch_(cfg, path, { textAutoAt: now, textAuto: 'failed', updatedAt: now,
+        log: note('Automatic text not sent: ' + String(e && e.message ? e.message : e).slice(0, 150)) });
+      continue;
+    }
+    sent++;
+    n++;
+    props.setProperty(pk, String(sent));
+    fsPatch_(cfg, path, {
+      textAutoAt: now, textAuto: 'sent', lastTextAt: now, lastTextBy: '', lastTextByName: 'Recall',
+      texts: Number(c.texts || 0) + 1, textHoldUntil: flowAddDaysKey_(today, set.sms.waitDays), updatedAt: now,
+      log: note('Text sent (automatic)', text),
+    });
+  }
+  if (n) console.log('Recall: ' + n + ' automatic text(s) sent.');
+  return n;
+}
+
+/* ---------- Replies ---------- */
+
+function recallReplyKind_(t) {
+  const s = String(t || '').toLowerCase().replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (/^(stop|stop all|unsubscribe|opt out|optout|remove me)( |$)/.test(s)) return 'stop';
+  if (/^(yes|yep|yeah|yes please|y|ok|okay|sure|please)( |$)/.test(s)) return 'yes';
+  return 'other';
+}
+
+// The team member with the fewest open calls (for a reply to a card nobody had)
+function recallPickPerson_(cfg, set, memo) {
+  const today = flowKey_(Date.now());
+  if (!memo.team) {
+    memo.team = getStaffDocs_()
+      .filter(function (s) { return set.team.indexOf(s.id) !== -1 && s.active !== false && (!set.skipLeave || recallAvailable_(s, today)); })
+      .map(function (s) {
+        return { s: s, open: fsQuery_(cfg, RECALL_COL_, 'assignedToId', 'EQUAL', s.id, 500)
+          .filter(function (c) { return c.status === 'open' && c.stage === 'call'; }).length };
+      });
+  }
+  const pick = memo.team.slice().sort(function (a, b) { return a.open - b.open; })[0];
+  if (!pick) return null;
+  pick.open++;
+  return pick.s;
+}
+
+// Every 5 minutes. The first run only notes where to start, so old replies aren't loaded.
+function recallReplies_(cfg) {
+  const auth = tmAuth_();
+  if (!auth) return 0;
+  const props = PropertiesService.getScriptProperties();
+  const last = Number(props.getProperty('TM_LAST_REPLY_ID') || 0);
+  const r = tmFetch_(auth, 'get', '/replies?page=1&limit=100&orderBy=id&direction=desc');
+  const list = (Array.isArray(r.resources) ? r.resources : []).map(function (x) {
+    return { id: Number(x.id) || 0, from: String(x.sender || ''), text: String(x.text || ''), at: String(x.messageTime || '') };
+  }).filter(function (x) { return x.id; });
+  if (!list.length) return 0;
+  const top = Math.max.apply(null, list.map(function (x) { return x.id; }));
+  if (!last) { props.setProperty('TM_LAST_REPLY_ID', String(top)); return 0; }
+  const fresh = list.filter(function (x) { return x.id > last; }).sort(function (a, b) { return a.id - b.id; });
+  if (!fresh.length) return 0;
+  const set = recallSettings_(cfg);
+  const memo = {};
+  fresh.forEach(function (x) {
+    try { recallOneReply_(cfg, set, x, memo); }
+    catch (e) { console.error('Recall reply ' + x.id + ': ' + (e && e.stack ? e.stack : e)); }
+    props.setProperty('TM_LAST_REPLY_ID', String(x.id));
+  });
+  console.log('Recall: ' + fresh.length + ' text reply(ies).');
+  return fresh.length;
+}
+
+function recallOneReply_(cfg, set, x, memo) {
+  const phone = recallPhone04_(x.from);
+  const kind = recallReplyKind_(x.text);
+  const now = new Date().toISOString();
+  const at = Date.parse(x.at) ? new Date(Date.parse(x.at)).toISOString() : now;
+  const text = x.text.slice(0, 1000);
+  const cards = phone ? fsQuery_(cfg, RECALL_COL_, 'mobileKey', 'EQUAL', phone, 50) : [];
+  const live = cards.filter(function (c) { return c.status !== 'closed'; });
+  // The card they were texted about, otherwise their most recently due open card
+  const card = live.filter(function (c) { return c.lastTextAt; })
+    .sort(function (a, b) { return String(b.lastTextAt).localeCompare(String(a.lastTextAt)); })[0]
+    || live.filter(function (c) { return c.status === 'open'; })
+      .sort(function (a, b) { return String(b.dueDate).localeCompare(String(a.dueDate)); })[0]
+    || live[0] || null;
+  const any = card || cards[0] || null;
+  const pid = any ? String(any.patientId || '') : '';
+
+  commitWrites_(cfg, [updateWrite_(cfg, RECALL_REPLIES_ + '/r_' + x.id, {
+    tmId: String(x.id), phone: phone || x.from, text: text, at: at, kind: kind,
+    cardId: card ? card._id : '', patientId: pid, patientName: any ? String(any.patientName || '') : '', seenAt: now,
+  })]);
+
+  const what = kind === 'stop' ? 'Replied STOP' : kind === 'yes' ? 'Replied: wants to book' : 'Replied';
+  const entry = { at: at, by: 'Patient', byUid: '', kind: 'reply', what: what, note: text };
+  const reply = { at: at, text: text.slice(0, 500), kind: kind };
+
+  if (kind === 'stop') {
+    if (pid) {
+      try {
+        mktSetConsent_(cfg, pid, false, { by: 'The patient', source: 'Replied STOP to a text', dnc: true, why: 'Opted out',
+          note: 'Replied "' + text.slice(0, 80) + '" to a recall text' });
+      } catch (e) { console.warn('STOP not saved to do not contact: ' + e); }
+    }
+    const writes = live.map(function (c) {
+      const p = { reply: reply, replyOpen: false, updatedAt: now, log: (Array.isArray(c.log) ? c.log : []).concat([entry]).slice(-80) };
+      if (c.status === 'open') Object.assign(p, { status: 'closed', closeReason: 'Replied STOP', closedAt: now, closedBy: 'Patient', remindOn: '' });
+      return patchWrite_(cfg, RECALL_COL_ + '/' + c._id, p);
+    });
+    if (writes.length) commitWrites_(cfg, writes);
+    return;
+  }
+  if (!card) return;   // saved in recall_replies for someone to look at
+
+  const log = (Array.isArray(card.log) ? card.log : []).concat([entry]);
+  const patch = { replyOpen: true, reply: reply, textHoldUntil: '', updatedAt: now };
+  if (card.status === 'open') {
+    const active = getStaffDocs_().filter(function (s) { return s.active !== false; });
+    const find = function (sid) { return active.filter(function (s) { return s.id === sid; })[0] || null; };
+    let to = card.assignedToId ? find(card.assignedToId) : null;
+    if (!to) {
+      to = (card.lastTextBy && find(card.lastTextBy)) || recallPickPerson_(cfg, set, memo);
+      if (to) log.push({ at: now, by: 'Recall', byUid: '', kind: 'auto', what: 'Given to ' + to.name + ' to follow up the reply', note: '' });
+    }
+    Object.assign(patch, {
+      stage: to ? 'call' : 'due', remindOn: '', pauseReason: '',
+      assignedToId: to ? to.id : '', assignedToName: to ? String(to.name || '') : '', assignedDay: to ? flowKey_(Date.now()) : '',
+    });
+  }
+  patch.log = log.slice(-80);
+  commitWrites_(cfg, [patchWrite_(cfg, RECALL_COL_ + '/' + card._id, patch)]);
+}
+
+/* ---------- Recall settings: status and a test text ---------- */
+
+function recallSmsAdmin_(op, body, session) {
+  const auth = tmAuth_();
+  if (!auth) {
+    return { ok: true, ready: false,
+      problem: 'Add TextMagic (the API key), TextMagicUser and TextMagicFrom in Apps Script → Project Settings → Script Properties.' };
+  }
+  if (op === 'smsStatus') {
+    try {
+      const u = tmFetch_(auth, 'get', '/user');
+      return { ok: true, ready: true, user: String(u.username || auth.user), from: auth.from,
+        balance: u.balance != null ? Number(u.balance) : null, currency: String((u.currency && u.currency.id) || '') };
+    } catch (e) {
+      return { ok: true, ready: false, problem: String(e && e.message ? e.message : e) };
+    }
+  }
+  const to = recallPhone61_(body.to);
+  if (!to) return { ok: true, problem: 'Type an Australian mobile number, like 0412 345 678.' };
+  const cache = CacheService.getScriptCache();
+  const rk = 'rc_smstest_' + session.uid;
+  const used = Number(cache.get(rk) || 0);
+  if (used >= 10) return { ok: true, problem: "You've sent a lot of tests in the last hour. Try again a bit later." };
+  try { tmSend_(auth, to, '[Test] ' + recallSmsText_(body.text)); }
+  catch (e) { return { ok: true, problem: "The test wasn't sent: " + String(e && e.message ? e.message : e) }; }
+  cache.put(rk, String(used + 1), 3600);
+  return { ok: true };
 }
