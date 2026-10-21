@@ -33,7 +33,7 @@ import { mountKnowledge } from "./knowledge.js";
 import { mountScanner } from "./scanner.js";
 import { mountRecall } from "./recall.js";
 import { mountRecallSettings } from "./recall-settings.js";
-
+import "./menu-search.js";
 
 // iPad: menu links can't be lifted and dragged (works even if the menu is added later)
 document.addEventListener("dragstart", (e) => {

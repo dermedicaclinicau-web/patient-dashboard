@@ -7756,3 +7756,8 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
 @media (pointer: coarse) {
   .nav-item { min-height: 44px; align-items: center; }
 }
+
+/* Search box in long pop-up menus (Email the patient) */
+.fpm-search { position: sticky; top: 0; z-index: 1; background: var(--surface, #fff); padding: 6px 12px 8px; }
+.fpm-search input { width: 100%; }
+.fpm-none { margin: 8px 2px 2px; font-size: .85rem; color: #64748b; }
