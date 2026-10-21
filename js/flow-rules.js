@@ -94,6 +94,8 @@ export const RULE_FIELDS = [
   { key: "pt.age", group: "Patient", label: "Age", type: "number", unit: "years" },
   { key: "pt.birthday", group: "Patient", label: "Birthday", type: "birthday",
     ops: [["today", "is today"], ["next", "is in the next"], ["last", "was in the past"], ["month", "is this month"]] },
+  { key: "pt.birth_year", group: "Patient", label: "Year of birth", type: "year",
+    ops: [["eq", "is"], ["lt", "is before"], ["gt", "is after"], ["between", "is between"]] },
   { key: "pt.email", group: "Patient", label: "Has an email address", type: "bool" },
   { key: "pt.mobile", group: "Patient", label: "Has a mobile number", type: "bool" },
   { key: "pt.marketing", group: "Patient", label: "Agreed to marketing emails", type: "bool" },
@@ -116,7 +118,7 @@ const OPS = {
 const opsFor = (f) => f.ops || OPS[f.type] || OPS.bool;
 function defaults(f) {
   return { op: opsFor(f)[0][0], value: f.type === "products" || f.type === "names" ? [] : f.type === "choice" ? f.options[0][0] : "", days: "",
-    ...(f.type === "range" ? { from: "", to: "" } : {}) };
+    ...(f.type === "range" ? { from: "", to: "" } : {}), ...(f.type === "year" ? { value2: "" } : {}) };
 }
 
 export const blankGroup = () => ({ match: "all", rules: [] });
@@ -136,13 +138,14 @@ function cleanRule(r) {
   const op = opsFor(f).some((o) => o[0] === r.op) ? r.op : d.op;
   let value = r.value;
   if (f.type === "products" || f.type === "names") value = (Array.isArray(value) ? value : []).map(String).filter(Boolean).slice(0, 40);
-  else if (f.type === "number" || f.type === "birthday") value = value === "" || value === null || value === undefined ? "" : Number(value);
+  else if (f.type === "number" || f.type === "birthday" || f.type === "year") value = value === "" || value === null || value === undefined ? "" : Number(value);
   else if (f.type === "choice") value = f.options.some((o) => o[0] === value) ? value : d.value;
   else if (f.type === "bool") value = "";
   else value = String(value ?? "");
   const days = f.type === "form" && r.days !== "" && r.days !== null && r.days !== undefined ? Number(r.days) : "";
   const out = { id: String(r.id || rid()), field: f.key, op, value, days };
   if (f.type === "range") { out.from = isIso(r.from) ? r.from : ""; out.to = isIso(r.to) ? r.to : ""; }
+  if (f.type === "year") out.value2 = r.value2 === "" || r.value2 === null || r.value2 === undefined ? "" : Number(r.value2);
   return out;
 }
 
@@ -167,6 +170,11 @@ function ruleProblem(r) {
   if (f.type === "number" && !(r.value !== "" && Number.isFinite(Number(r.value)) && Number(r.value) >= 0)) return `Add a number to "${f.label}"`;
   if (f.type === "birthday" && (r.op === "next" || r.op === "last")
     && !(r.value !== "" && Number.isInteger(Number(r.value)) && Number(r.value) >= 1 && Number(r.value) <= 60)) return 'Choose 1 to 60 days for "Birthday"';
+  if (f.type === "year") {
+    const now = new Date().getFullYear();
+    const ok = (v) => v !== "" && Number.isInteger(Number(v)) && Number(v) >= 1900 && Number(v) <= now;
+    if (!ok(r.value) || (r.op === "between" && !ok(r.value2))) return `Type a year, like 1985, for "${f.label}"`;
+  }
   if ((f.type === "text" || f.type === "form") && !String(r.value || "").trim()) return `Fill in "${f.label}"`;
   if (f.type === "products" && !(Array.isArray(r.value) && r.value.length)) return `Choose a product for "${f.label}"`;
   if (f.type === "names" && !(Array.isArray(r.value) && r.value.length)) return `Choose at least one for "${f.label}"`;
@@ -208,6 +216,11 @@ export function describeRule(r) {
     if (r.op === "today" || r.op === "month") return `Birthday ${op}`;
     const n = r.value === "" ? "…" : r.value;
     return `Birthday ${op} ${n} day${Number(n) === 1 ? "" : "s"}`;
+  }
+  if (f.type === "year") {
+    const a = r.value === "" ? "…" : r.value;
+    if (r.op === "between") return `Born between ${a} and ${r.value2 === "" || r.value2 === undefined ? "…" : r.value2}`;
+    return `Born ${r.op === "lt" ? "before" : r.op === "gt" ? "after" : "in"} ${a}`;
   }
   if (f.type === "number") return `${f.label} ${op} ${r.value === "" ? "…" : r.value}${f.unit ? " " + f.unit : ""}`;
   if (f.type === "choice") return `${f.label} ${op} ${((f.options.find((o) => o[0] === r.value) || [])[1] || "…").toLowerCase()}`;
@@ -349,6 +362,11 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
         val = `<input class="fe-input fr-num" type="number" min="1" max="60" step="1" inputmode="numeric" data-rv="${p}" value="${esc(r.value)}" aria-label="Days" />
           <span class="fr-unit">days</span>`;
       }
+    } else if (f.type === "year") {
+      const max = new Date().getFullYear();
+      val = `<input class="fe-input fr-num" type="number" min="1900" max="${max}" step="1" inputmode="numeric" data-rv="${p}" value="${esc(r.value)}" placeholder="1985" aria-label="Year" />
+        ${r.op === "between" ? `<span class="fr-unit">and</span>
+        <input class="fe-input fr-num" type="number" min="1900" max="${max}" step="1" inputmode="numeric" data-rv2="${p}" value="${esc(r.value2 ?? "")}" placeholder="1989" aria-label="Second year" />` : ""}`;
     } else if (f.type === "text") {
       val = `<input class="fe-input fr-val" data-rv="${p}" maxlength="80" placeholder="${esc(f.hint || "")}" value="${esc(r.value)}" aria-label="Text" />`;
     } else if (f.type === "choice") {
@@ -465,6 +483,13 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       onChange();
       return;
     }
+    if (d.rv2 !== undefined) {
+      const r = ruleAt(d.rv2);
+      if (!r) return;
+      r.value2 = el.value === "" ? "" : Number(el.value);
+      onChange();
+      return;
+    }
     const p = d.ro ?? d.rv ?? d.rd;
     if (p === undefined) return;
     const r = ruleAt(p);
@@ -474,9 +499,10 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       r.op = el.value;
       // Birthday: the days box only shows for "in the next" and "in the past"
       if (ft === "birthday") { if ((r.op === "next" || r.op === "last") && r.value === "") r.value = 7; render(); }
+      if (ft === "year") render();   // shows or hides the second year box
     }
     else if (d.rd !== undefined) r.days = el.value === "" ? "" : Number(el.value);
-    else r.value = ft === "number" || ft === "birthday" ? (el.value === "" ? "" : Number(el.value)) : el.value;
+    else r.value = ft === "number" || ft === "birthday" || ft === "year" ? (el.value === "" ? "" : Number(el.value)) : el.value;
     onChange();
   });
 

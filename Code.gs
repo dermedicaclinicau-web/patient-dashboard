@@ -7060,6 +7060,7 @@ function flowRuleOk_(cfg, r, run, ctx) {
   if (!type) return false;
   if (type === 'names' || r.field === 'rc.due_between') return recallRuleOk_(cfg, r, run, ctx);
   if (type === 'birthday') return flowBirthdayOk_(cfg, r, run, ctx);
+  if (type === 'year') return flowBirthYearOk_(cfg, r, run, ctx);
   if (type === 'form') {
     const want = flowNorm_(r.value);
     if (!want) return false;
@@ -10252,7 +10253,7 @@ function mktPace_(p) {
 // Rules that make sense without a purchase or visit (the same list as CAMPAIGN_FIELDS in js/mkt-campaigns.js)
 const MKT_RULE_FIELDS_ = ['hist.bought', 'hist.days_since', 'appt.has_future', 'appt.next_days', 'appt.last_days', 'appt.visits',
   'appt.future_service', 'appt.past_service', 'appt.visit_between', 'appt.last_between', 'ssp.active', 'ssp.age_days', 'ssp.expiry_days', 'plan.status', 'plan.due',
-  'plan.overdue', 'form.saved', 'pt.age', 'pt.email', 'pt.mobile'];
+  'plan.overdue', 'form.saved', 'pt.age', 'pt.birth_year', 'pt.birthday', 'pt.email', 'pt.mobile'];
 // "Make a list from this": who, from an earlier campaign
 const MKT_LIST_KINDS_ = ['opened', 'notOpened', 'clicked', 'notClicked', 'link'];
 
@@ -13298,40 +13299,60 @@ function recallFlowAdopt_(body, session) {
   return { ok: true, moved: writes.length };
 }
 
-// ===================== Flow rules: Birthday (Patient → Birthday) =====================
+// ===================== Flow rules: Birthday and Year of birth (Patient) =====================
 FLOW_FIELD_TYPE_['pt.birthday'] = 'birthday';
+FLOW_FIELD_TYPE_['pt.birth_year'] = 'year';
 FLOW_RULE_COST_['pt.birthday'] = 1;
+FLOW_RULE_COST_['pt.birth_year'] = 1;
 
-// { m, d } from the patient's date of birth, whichever field and format it's in
+// { y, m, d } from the patient's date of birth, whichever field and format it's in (y is 0 if the year isn't known)
 function flowDob_(p) {
-  const keys = ['DOB', 'Dob', 'dob', 'DateOfBirth', 'Date of Birth', 'DateofBirth', 'Date Of Birth', 'BirthDate', 'Birthdate', 'Birthday', 'birthDate'];
+  const keys = ['DobKey', 'DOB', 'Dob', 'dob', 'DateOfBirth', 'Date of Birth', 'DateofBirth', 'Date Of Birth',
+    'BirthDate', 'Birthdate', 'Birthday', 'birthDate'];
+  const yy = Number(Utilities.formatDate(new Date(), 'Australia/Perth', 'yy'));
+  const mon = function (s) { return MONTHS_[String(s).slice(0, 3).toLowerCase()] || 0; };
   for (let i = 0; i < keys.length; i++) {
     const v = p[keys[i]];
     if (v === undefined || v === null || v === '') continue;
     if (v instanceof Date && !isNaN(v)) {
-      const k = Utilities.formatDate(v, 'Australia/Perth', 'M-d').split('-');
-      return { m: Number(k[0]), d: Number(k[1]) };
+      const k = Utilities.formatDate(v, 'Australia/Perth', 'yyyy-M-d').split('-').map(Number);
+      return okDob_(k[0], k[1], k[2]);
     }
     const s = String(v).trim();
-    let m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);                    // 1985-03-14
-    if (m) return okDob_(+m[2], +m[3]);
-    m = /^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})/.exec(s);           // 14/03/1985 (day first, as in Australia)
-    if (m) return okDob_(+m[2], +m[1]);
+    let m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s);                        // 1985-03-14
+    if (m) return okDob_(+m[1], +m[2], +m[3]);
+    m = /^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})/.exec(s);               // 14/03/1985 (day first, as in Australia)
+    if (m) {
+      let y = +m[3];
+      if (y < 100) y += y > yy ? 1900 : 2000;                                // 14/03/85 → 1985
+      return okDob_(y, +m[2], +m[1]);
+    }
+    m = /^(?:[A-Za-z]+,?\s+)?(\d{1,2})\s+([A-Za-z]{3,9})\.?,?\s+(\d{4})/.exec(s);   // 14 March 1985
+    if (m && mon(m[2])) return okDob_(+m[3], mon(m[2]), +m[1]);
+    m = /^([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})/.exec(s);                // March 14, 1985
+    if (m && mon(m[1])) return okDob_(+m[3], mon(m[1]), +m[2]);
   }
   return null;
 }
-function okDob_(m, d) { return m >= 1 && m <= 12 && d >= 1 && d <= 31 ? { m: m, d: d } : null; }
+function okDob_(y, m, d) {
+  return m >= 1 && m <= 12 && d >= 1 && d <= 31 ? { y: y >= 1900 && y <= 2100 ? y : 0, m: m, d: d } : null;
+}
 
-function flowBirthdayOk_(cfg, r, run, ctx) {
-  if (!('_bday' in ctx._f)) {
+// Their date of birth, worked out once per patient per run
+function flowDobOf_(cfg, run, ctx) {
+  if (!('_dob' in ctx._f)) {
     let b = null;
     try {
       const p = ctx.pt || ctx.patient || ctx.doc || (run.patientId ? flowPatient_(cfg, run.patientId) : null);
       b = p ? flowDob_(p) : null;
-    } catch (e) { console.warn('Birthday rule: patient not read: ' + e); }
-    ctx._f._bday = b;
+    } catch (e) { console.warn('Date of birth rule: patient not read: ' + e); }
+    ctx._f._dob = b;
   }
-  const b = ctx._f._bday;
+  return ctx._f._dob;
+}
+
+function flowBirthdayOk_(cfg, r, run, ctx) {
+  const b = flowDobOf_(cfg, run, ctx);
   if (!b) return false;                              // no date of birth on file: never matches
   const t = flowKey_(Date.now()).split('-').map(Number);
   const today = Date.UTC(t[0], t[1] - 1, t[2]);
@@ -13346,6 +13367,22 @@ function flowBirthdayOk_(cfg, r, run, ctx) {
   if (r.op === 'next') { let o = on(t[0]); if (o < today) o = on(t[0] + 1); return (o - today) / DAY <= n; }
   if (r.op === 'last') { let o = on(t[0]); if (o > today) o = on(t[0] - 1); return (today - o) / DAY <= n; }
   return false;
+}
+
+// Year of birth: is / before / after / between (both years included)
+function flowBirthYearOk_(cfg, r, run, ctx) {
+  const b = flowDobOf_(cfg, run, ctx);
+  if (!b || !b.y) return false;                      // no year of birth on file: never matches
+  const a = Math.floor(Number(r.value));
+  if (!(a >= 1900 && a <= 2100)) return false;
+  if (r.op === 'lt') return b.y < a;
+  if (r.op === 'gt') return b.y > a;
+  if (r.op === 'between') {
+    const z = Math.floor(Number(r.value2));
+    if (!(z >= 1900 && z <= 2100)) return false;
+    return b.y >= Math.min(a, z) && b.y <= Math.max(a, z);
+  }
+  return b.y === a;
 }
 
 // ===================== Date blanks: {Today}, {Today + 30 days}, {Today + 2 weeks}, {Today + 3 months} =====================
