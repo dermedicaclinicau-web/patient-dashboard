@@ -363,7 +363,7 @@ service cloud.firestore {
         && request.resource.data.lines is list && request.resource.data.lines.size() <= 400
         && ((request.resource.data.kind == 'opening' && (can('inventory.count') || invOrder()))
           || (request.resource.data.kind == 'kit' && invKit()));
-      allow update: if (can('menu.reports')
+      allow update: if ((can('menu.reports') || invUse() || can('data.upload'))
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lines', 'openCount', 'updatedAt', 'updatedBy', 'events']))
         // An injector correcting their Start of Day retires their own earlier kit check (it stays on record)
         || (invKit() && resource.data.kind == 'kit' && resource.data.byUid == request.auth.uid
@@ -396,7 +396,15 @@ service cloud.firestore {
           && (request.auth.uid != resource.data.openedByUid || resource.data.get('aloneApproved', false) == true)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
                'status', 'recount', 'outcome', 'outcomeNote', 'closedAt', 'closedBy', 'closedByUid', 'events', 'updatedAt'])
-        ) || invManage();
+        ) || invManage()
+        // Invoices uploaded after the count: digital corrected, closed only as "Sold before the count"
+        || ((invUse() || can('data.upload'))
+          && resource.data.status != 'closed'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+               'digital', 'variance', 'recount', 'status', 'outcome', 'outcomeNote', 'applied',
+               'closedAt', 'closedBy', 'closedByUid', 'events', 'updatedAt'])
+          && (request.resource.data.status == resource.data.status
+            || (request.resource.data.status == 'closed' && request.resource.data.outcome == 'late-invoice')));
       allow delete: if false;
     }
 

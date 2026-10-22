@@ -2109,8 +2109,10 @@ export async function saveCount({ kind, lines, note = "" }, staff) {
     const moves = times.length
       ? await listMovesBetween(new Date(Math.min(...times) - 1000), new Date(latest)).catch(() => [])
       : [];
+    // Invoice sales dated before today were really sold before the count, whenever they were uploaded
     const movedSince = (a) => (!a.countedAt ? 0 : moves
-      .filter((m) => m.productId === a.p.id && m.at && m.at.getTime() > a.countedAt)
+      .filter((m) => m.productId === a.p.id && m.at && m.at.getTime() > a.countedAt
+        && !(m.effectiveDate && m.effectiveDate < dayKey()))
       .reduce((s, m) => s + (m.lines || [])
         .filter((x) => x.loc === a.loc && (!a.p.tracked || ((x.batch || "") === a.batch && (x.expiry || "") === a.expiry)))
         .reduce((t, x) => t + (Number(x.delta) || 0), 0), 0));
@@ -2777,6 +2779,8 @@ export const INV_OUTCOMES = {
     help: "A delivery was put away or entered wrongly. Name the purchase order in the note." },
   extra: { label: "Extra stock found", adjust: true, sign: 1,
     help: "More is there than digital shows. Added to stock." },
+  "late-invoice": { label: "Sold before the count", adjust: false, system: true,
+    help: "Sold before the count, but its invoice was uploaded after it. Closed automatically when the invoices were uploaded." },
   baseline: { label: "Starting stock set", adjust: false, system: true,
     help: "Closed when the starting stock was set from an opening count." },
 };
@@ -3617,6 +3621,8 @@ export async function recordSale(sale, staff, { also = null, saleId = "", deduct
 
     // ---- Writes ----
     const reason = source === "pos" ? "Checkout" : source === "invoice" ? "Timely invoice" : "Billing sheet scan";
+    // Invoice sales count as sold on the invoice date, whenever they're uploaded
+    const effective = source === "invoice" && KEY_RE.test(sale.apptDate || "") ? sale.apptDate : "";
     const who2 = [sale.invoiceId && `Invoice ${sale.invoiceId}`, sale.patientName, sale.provider].filter(Boolean).join(" · ");
     const out = items.map((it) => {
       const ps = prods.get(it.productId);
@@ -3644,7 +3650,8 @@ export async function recordSale(sale, staff, { also = null, saleId = "", deduct
         logMove(tx, staff, {
           type: "sale", productId: it.productId, productName: String(pd.name || ""), unit: String(pd.stockUnit || "item"),
           lines: rows.map((r) => ({ loc: "shelf", batch: r.batch, expiry: r.expiry, delta: -r.taken })),
-          reason, note: who2.slice(0, 500), ref: saleRef.id,
+          reason, note: [effective && `Sold ${effective}`, who2].filter(Boolean).join(" · ").slice(0, 500), ref: saleRef.id,
+          effectiveDate: effective,
         });
       }
       return {
@@ -3776,6 +3783,7 @@ export async function applyInvoiceSales(rows, staff, onProgress = () => {}) {
   });
   res.unlinked = [...unlinked.values()].sort((a, b) => b.lines - a.lines);
 
+  const applied = [];   // sold this time: used to correct counts done before the upload
   const queue = [...sales.values()];
   const total = queue.length;
   let done = 0;
@@ -3791,6 +3799,7 @@ export async function applyInvoiceSales(rows, staff, onProgress = () => {}) {
         else {
           res.applied++;
           const l = r.lines[0];
+          if (l) applied.push({ saleId: r.id, productId: s.productId, date: s.date, rows: l.rows || [] });
           if (l && l.short > 0) res.short.push({ invoiceId: s.invoiceId, patientName: s.patientName, name: l.name, short: l.short, unit: l.unit });
         }
       } catch (err) {
@@ -3801,5 +3810,114 @@ export async function applyInvoiceSales(rows, staff, onProgress = () => {}) {
       onProgress(++done, total);
     }
   }));
+  res.backdated = await backdateCounts(applied, staff)
+    .catch((err) => { console.warn("Counts not corrected:", err); return { lines: 0, closed: 0, skipped: [], failed: 1 }; });
   return res;
+}
+
+/* ---------- Invoices uploaded after a count: the count is corrected as if the sale was on the invoice date ---------- */
+// An opening count done after the sale day, but before the invoices were uploaded, compared against digital that still
+// included what was sold. Each affected Shelf line gets its digital and difference corrected. A difference that becomes 0
+// is matched; an investigation that becomes 0 closes as "Sold before the count". Accepted, explained or starting-stock
+// lines are never changed (stock was already adjusted for them): they're listed instead.
+// applied: [{ saleId, productId, date, rows: [{ batch, expiry, taken }] }]
+async function backdateCounts(applied, staff) {
+  const out = { lines: 0, closed: 0, skipped: [], failed: 0 };
+  const list = applied.filter((a) => (a.rows || []).some((r) => Number(r.taken) > 0));
+  if (!list.length) return out;
+  const from = addDaysKey(list.map((a) => a.date).sort()[0], 1);
+  const counts = (await listCounts({ from })).filter((c) => c.kind === "opening" && !c.superseded);
+  const by = who(staff);
+  const me = uid();
+
+  for (const c of counts) {
+    // What each Shelf line should also have had taken off
+    const adds = new Map();
+    c.lines.forEach((l, i) => {
+      if (l.loc !== "shelf") return;
+      let n = 0;
+      const ids = [];
+      list.forEach((a) => {
+        if (a.productId !== l.productId || a.date >= c.dateKey) return;   // sold on or after the count day: not affected
+        if ((l.lateSaleIds || []).includes(a.saleId)) return;              // already corrected
+        const t = a.rows.filter((r) => (r.batch || "") === (l.batch || "") && (r.expiry || "") === (l.expiry || ""))
+          .reduce((s, r) => s + (Number(r.taken) || 0), 0);
+        if (t) { n += t; ids.push(a.saleId); }
+      });
+      if (n) adds.set(i, { n, ids });
+    });
+    if (!adds.size) continue;
+
+    try {
+      let changed = 0, closed = 0;
+      const skipped = [];
+      await runTransaction(db, async (tx) => {
+        changed = 0; closed = 0; skipped.length = 0;
+        // ---- Reads ----
+        const cRef = doc(db, "inv_counts", c.id);
+        const s = await tx.get(cRef);
+        if (!s.exists()) return;
+        const lines = (Array.isArray(s.data().lines) ? s.data().lines : []).map((l) => ({ ...l }));
+        const invs = new Map();
+        for (const [i] of adds) {
+          const l = lines[i];
+          if (l && l.status === "investigating" && l.investigationId && !invs.has(l.investigationId)) {
+            invs.set(l.investigationId, await tx.get(doc(db, "inv_investigations", l.investigationId)));
+          }
+        }
+
+        // ---- Writes ----
+        const at = new Date().toISOString();
+        adds.forEach(({ n, ids }, i) => {
+          const l = lines[i];
+          if (!l) return;
+          if (["accepted", "explained", "baseline"].includes(l.status)) { skipped.push(`${l.productName} (${c.dateKey})`); return; }
+          l.system = Math.max(0, (Number(l.system) || 0) - n);
+          l.variance = (Number(l.counted) || 0) - l.system;
+          l.lateSales = (Number(l.lateSales) || 0) + n;
+          l.lateSaleIds = [...(l.lateSaleIds || []), ...ids].slice(-50);
+          changed++;
+          if (l.status !== "investigating") { l.status = l.variance ? "open" : "ok"; return; }
+
+          const iSnap = invs.get(l.investigationId);
+          if (!iSnap || !iSnap.exists() || iSnap.data().status === "closed") return;
+          const x = iSnap.data();
+          const digital = Math.max(0, (Number(x.digital) || 0) - n);
+          const upd = { digital, variance: (Number(x.counted) || 0) - digital, updatedAt: serverTimestamp() };
+          if (x.recount) {   // the recount was also before the upload
+            const rd = Math.max(0, (Number(x.recount.digital) || 0) - n);
+            upd.recount = { ...x.recount, digital: rd, variance: (Number(x.recount.counted) || 0) - rd };
+          }
+          const left = upd.recount ? upd.recount.variance : upd.variance;
+          if (!left) {
+            Object.assign(upd, {
+              status: "closed", outcome: "late-invoice", applied: 0,
+              outcomeNote: "Sold before the count; the invoice was uploaded after it. Stock wasn't changed.",
+              closedAt: serverTimestamp(), closedBy: by, closedByUid: me,
+            });
+            l.status = "explained";
+            l.note = "Sold before the count; invoice uploaded later";
+            closed++;
+          }
+          upd.events = arrayUnion({ at, by,
+            action: left ? "Corrected: sold before the count, invoice uploaded later" : "Closed: sold before the count, invoice uploaded later",
+            note: `${n} sold on invoices dated before the count. Difference now ${left > 0 ? "+" : ""}${left}` });
+          tx.update(iSnap.ref, upd);
+        });
+        if (!changed) return;
+        tx.update(cRef, {
+          lines, openCount: lines.filter((l) => l.status === "open").length, updatedAt: serverTimestamp(), updatedBy: by,
+          events: arrayUnion({ at, by, action: "Corrected for invoices uploaded after the count",
+            note: `${changed} line${changed === 1 ? "" : "s"}` }),
+        });
+      });
+      out.lines += changed;
+      out.closed += closed;
+      out.skipped.push(...skipped);
+    } catch (err) {
+      console.warn("Count not corrected:", c.id, err);
+      out.failed++;
+    }
+  }
+  return out;
 }

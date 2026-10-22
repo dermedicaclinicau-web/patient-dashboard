@@ -708,6 +708,18 @@ function wire(card, k, staff) {
     if (st.before && !st.applied && !st.already) {
       parts.push(`<div class="muted">These invoices are from before ${esc(day(st.startDate))}, when stock starts coming off, so stock wasn't changed.</div>`);
     }
+    const bd = st.backdated;
+    if (bd && bd.lines) {
+      parts.push(`<div>Counts done before this upload were corrected for ${plural(bd.lines, "line")}${
+        bd.closed ? ` (${plural(bd.closed, "investigation")} closed: sold before the count)` : ""}.</div>`);
+    }
+    if (bd && bd.skipped && bd.skipped.length) {
+      parts.push(`<div class="du-warn">Already accepted or explained, so not changed: ${esc(bd.skipped.slice(0, 10).join(", "))}${
+        bd.skipped.length > 10 ? "…" : ""}. Check them in Reporting → Count differences.</div>`);
+    }
+    if (bd && bd.failed) {
+      parts.push(`<div class="du-warn">${plural(bd.failed, "count")} couldn't be corrected. Check the Firestore rules for inv_counts and inv_investigations.</div>`);
+    }
     if (info && info.noQty) parts.push('<div class="muted">No quantity column was found, so each invoice line counts as 1.</div>');
     if (info && info.noDate) parts.push(`<div class="du-warn">${plural(info.noDate, "line")} had a date that couldn't be read, so stock wasn't taken off for them.</div>`);
     if (st.short.length) {
