@@ -170,7 +170,14 @@ async function addBatchOptions(kit, staff) {
   kit.withOptions = true;
   return kit;
 }
-
+// ?sod=preview#/ : the full welcome any time, for any staff member. Nothing is saved or snoozed.
+export async function previewStartOfDay(staff) {
+  if (current || !staff) return;
+  const kp = await kitProductsFor(staff).catch(() => []);
+  if (current) return;
+  const kit = kp.length ? { products: kp.map((p) => ({ p })) } : null;
+  showStartOfDay(staff, kit ? { kit, preview: true } : { noKit: true, preview: true });
+}
 // Until today's start is saved, the welcome comes back (after login, between pages, on waking, every 5 minutes).
 // It can be put off for 15 minutes, never just dismissed.
 export async function maybeShowStartOfDay(staff) {
@@ -237,7 +244,7 @@ const saveErrText = (ex) => (ex && ex.code === "permission-denied"
   ? "Couldn't save. Check the Firestore rules for inv_kitdays, inv_counts and inv_investigations have been published."
   : (ex && ex.message && !ex.code) ? ex.message : "Couldn't save. Check your connection and try again.");
 
-export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = false } = {}) {
+export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = false, preview = false } = {}) {
   closeStartOfDay();
   const mine = session;
 
@@ -263,7 +270,7 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
 
       <p class="sod-eyebrow">Good ${part} · ${esc(dateText)}</p>
       <h2 id="sod-title" class="sod-title serif">Welcome, ${esc(name)}</h2>
-      <p class="sod-sub">Have a great day today!</p>
+      <p class="sod-sub">${preview ? "Preview · nothing is saved" : "Have a great day today!"}</p>
 
       <div class="sod-stats">
         <div class="sod-stat"><strong data-stat="appts">–</strong><span>appointments today</span></div>
@@ -341,7 +348,12 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
       startBtn.disabled = false;
       return;
     }
-
+    // Preview: the kit question can be tried out, but nothing is saved
+    if (preview) {
+      close();
+      showToast("Preview only. Nothing was saved.");
+      return;
+    }
     // Kit count + start of day, together
     if (kitShown) {
       const errEl = kitBox.querySelector(".lh-error");
