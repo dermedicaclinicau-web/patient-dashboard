@@ -7869,3 +7869,36 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
 .cs-table.is-vial th:last-child { white-space: nowrap; }
 .cs-table.is-vial .fe-num { max-width: 220px; }
 .cs-table.is-vial .fe-num input { min-width: 100px; text-align: right; font-weight: 600; }
+
+
+/* Phones: batch on top, expiry underneath */
+@media (max-width: 560px) {
+  .sod .kc-batch { grid-template-columns: minmax(0, 1fr); gap: .5rem; }
+}
+/* ---------- Start of Day: a wider, roomier welcome ---------- */
+.sod { width: min(640px, calc(100vw - 2rem)); }
+.sod-card { padding: 0 2.25rem 2rem; }
+.sod-hero { height: 140px; margin: 0 -2.25rem; }
+.sod-title { font-size: 2.1rem; }
+.sod-stats { gap: 1rem; }
+.sod-stat { padding: 1rem; }
+.sod-you, .sod-kitq { padding: 1rem 1.15rem; }
+
+/* Your kit: name and units on one line, batch and expiry side by side */
+.sod-kitq .kc { padding: 1rem 1.1rem; border-color: #c4e8e0; border-radius: 14px;
+  background: linear-gradient(180deg, #fff 0%, #f6fcfb 100%); box-shadow: 0 2px 8px -4px rgba(15, 118, 110, .2); }
+.sod-kitq .kc-q { flex-wrap: nowrap; align-items: center; }
+.sod-kitq .kc-q strong { font-size: 1.05rem; }
+.sod-kitq .kc-units input { width: 120px; height: 48px; font-size: 1.25rem; }
+.sod-kitq .kc-batch { grid-template-columns: minmax(0, 1fr) auto; gap: 1rem; margin-top: .9rem; padding-top: .9rem; }
+.sod-kitq .kc-exp strong { font-size: 1.05rem; }
+
+.sod-btn { height: 56px; font-size: 1.1rem; }
+
+/* Phones: back to the narrow layout */
+@media (max-width: 560px) {
+  .sod-card { padding: 0 1.25rem 1.5rem; }
+  .sod-hero { margin: 0 -1.25rem; }
+  .sod-title { font-size: 1.7rem; }
+  .sod-kitq .kc-q { flex-wrap: wrap; }
+}
