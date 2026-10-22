@@ -7923,3 +7923,29 @@ dialog.lh-dialog.inv-dlg.kit-set-dlg { width: min(760px, 96vw); }
 .sod-later { display: block; margin: .75rem auto 0; padding: .3rem .6rem; border: none; background: none;
   color: var(--muted); font: inherit; font-size: .88rem; font-weight: 600; cursor: pointer; }
 .sod-later:hover { color: var(--text); text-decoration: underline; }
+
+/* ---------- My dashboard: My notes in the narrow right-hand column ---------- */
+@media (min-width: 1101px) {
+  .md-side .mn-grid { grid-template-columns: minmax(0, 1fr); gap: .6rem; }
+
+  /* "Add a note": a slim button instead of a big tile */
+  .md-side .mn-addtile,
+  .md-side .mn-grid > .mn-addtile:only-child {
+    flex-direction: row; justify-content: flex-start; gap: .65rem;
+    min-height: 0; padding: .55rem .8rem; border-width: 1.5px; border-radius: 12px; text-align: left;
+  }
+  .md-side .mn-addtile-plus { width: 30px; height: 30px; box-shadow: none; }
+  .md-side .mn-addtile-plus svg { width: 17px; height: 17px; }
+  .md-side .mn-addtile strong { font-size: .92rem; }
+
+  /* Each note: full width, footer on one line */
+  .md-side .mn-note { min-height: 0; padding: .7rem .85rem .4rem; }
+  .md-side .mn-foot { flex-wrap: nowrap; }
+  .md-side .mn-foot small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .md-side .mn-acts { flex: none; }
+  .md-side .mn-acts button { width: 28px; height: 28px; }
+  .md-side .mn-acts button svg { width: 15px; height: 15px; }
+
+  /* Header: the "Only you can see these" note stays small */
+  .md-side .mn .md-card-head small { font-size: .74rem; }
+}
