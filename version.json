@@ -106,6 +106,7 @@
                   "./js/recall-emails.js",
                   "./js/recall-flow.js",
                   "./js/recall-messages.js",
+                  "./js/recall-results.js",
                   "./js/recall-settings.js",
                   "./js/recall.js",
                   "./js/receive-po.js",
@@ -174,6 +175,6 @@
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261022-162442",
-    "v":  "20261022-162442"
+    "version":  "20261022-220229",
+    "v":  "20261022-220229"
 }

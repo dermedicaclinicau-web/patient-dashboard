@@ -12029,6 +12029,14 @@ function handleRecall_(body) {
       if (!manage) return { ok: false, error: 'FORBIDDEN' };
       return { ok: true, services: recallServices_(getConfig_()) };
     }
+    if (op === 'services') {
+      if (!manage) return { ok: false, error: 'FORBIDDEN' };
+      return { ok: true, services: recallServices_(getConfig_()) };
+    }
+    if (op === 'results') {
+      if (!manage) return { ok: false, error: 'FORBIDDEN' };
+      return recallResults_(body);
+    }
     if (op === 'sendEmail') return recallSendEmail_(body, session);   // anyone with Recall access (checked above)
     if (op === 'messages') return recallMessages_(body);   // anyone with Recall access
     if (op === 'flowPreview' || op === 'flowSkip' || op === 'flowAdopt') {
@@ -13848,4 +13856,212 @@ function smsTellSender_(portal, kind, text) {
     MailApp.sendEmail({ to: s.email, name: 'Dermedica Portal', subject: 'Text reply from ' + name,
       htmlBody: html, body: emailHtmlToText_(html) });
   } catch (e) { console.warn('Text reply email not sent: ' + e); }
+}
+
+// ===================== Recall: results (Recall → Results) =====================
+// Worked out from the cards themselves: every card that became due in the period, and what its History
+// says happened before it was booked. Nothing extra is saved on the cards. Remembered for 10 minutes.
+
+const RECALL_RES_SKIP_ = { 'Duplicate': 1, 'Recall is turned off for this treatment': 1, 'Last visit was not a treatment': 1 };
+const RECALL_RES_REOPEN_ = /^(Not booked after all|Reopened|Marked as booked, but|The booking for |Back on the list: the visit)/;
+const RECALL_RES_CALL_ = { 'No answer': 1, 'Left voicemail': 1, 'Spoke to them': 1 };
+const RECALL_RES_FIELDS_ = ['category', 'dueDate', 'status', 'closeReason', 'bookedAt', 'visitedOn', 'flowStartedAt', 'log'];
+const RECALL_RES_NEAR_ = 30 * 86400000;   // a contact counts towards a booking if it was in the 30 days before
+
+// Every card due between two dates, only the fields the results need, 500 at a time
+function recallResultsCards_(cfg, from, to) {
+  const out = [];
+  let after = null;
+  for (let page = 0; page < 30; page++) {
+    const sq = {
+      from: [{ collectionId: RECALL_COL_ }],
+      select: { fields: RECALL_RES_FIELDS_.map(function (f) { return { fieldPath: f }; }) },
+      where: { compositeFilter: { op: 'AND', filters: [
+        { fieldFilter: { field: { fieldPath: 'dueDate' }, op: 'GREATER_THAN_OR_EQUAL', value: { stringValue: from } } },
+        { fieldFilter: { field: { fieldPath: 'dueDate' }, op: 'LESS_THAN_OR_EQUAL', value: { stringValue: to } } },
+      ] } },
+      orderBy: [{ field: { fieldPath: 'dueDate' } }, { field: { fieldPath: '__name__' } }],
+      limit: 500,
+    };
+    if (after) sq.startAt = { values: [{ stringValue: after.due }, { referenceValue: after.name }], before: false };
+    const res = UrlFetchApp.fetch('https://firestore.googleapis.com/v1/' + fsBase_(cfg) + ':runQuery', {
+      method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+      headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) },
+      payload: JSON.stringify({ structuredQuery: sq }),
+    });
+    if (res.getResponseCode() !== 200) {
+      throw new Error('Recall cards not read (' + res.getResponseCode() + '): ' + res.getContentText().slice(0, 200));
+    }
+    const docs = JSON.parse(res.getContentText()).filter(function (r) { return r.document; }).map(function (r) { return r.document; });
+    docs.forEach(function (d) { const o = fromFields_(d.fields || {}); o._id = d.name.split('/').pop(); out.push(o); });
+    if (docs.length < 500) break;
+    const last = docs[docs.length - 1];
+    after = { due: String(fromFields_(last.fields || {}).dueDate || ''), name: last.name };
+  }
+  return out;
+}
+
+// What happened to one card, from its History.
+// { result: booked | open | lost, reason, via: call | reply | text | email | self, by, tries, flow, days }
+function recallOutcome_(c) {
+  const log = Array.isArray(c.log) ? c.log : [];
+  const ok = c.status === 'booked' || (c.status === 'closed' && c.closeReason === 'Came in');
+
+  // The booking that stuck: the first one after the last time it was reopened
+  let bi = -1;
+  if (ok) {
+    let from = 0;
+    for (let i = log.length - 1; i >= 0; i--) {
+      if (RECALL_RES_REOPEN_.test(String((log[i] || {}).what || ''))) { from = i + 1; break; }
+    }
+    for (let i = from; i < log.length; i++) {
+      const l = log[i] || {};
+      const w = String(l.what || '');
+      if ((l.kind === 'call' && w === 'Booked') || (l.kind === 'auto' && /^(Booked for |Came in on )/.test(w))) { bi = i; break; }
+    }
+  }
+
+  const o = {
+    result: ok ? 'booked' : c.status === 'open' ? 'open' : 'lost',
+    reason: ok ? '' : String(c.closeReason || ''),
+    via: '', by: '', tries: 0, flow: !!c.flowStartedAt, days: null,
+  };
+  let last = null;
+  let lastStaff = null;
+  const end = bi >= 0 ? bi : log.length;
+  for (let i = 0; i < end; i++) {
+    const l = log[i] || {};
+    const w = String(l.what || '');
+    const staff = !!l.byUid;
+    let type = '';
+    if (l.kind === 'flow' || l.by === 'Recall flow') {
+      type = /^Text sent/.test(w) ? 'text' : /^Email sent/.test(w) ? 'email' : '';
+      if (type || /^(Started the recall flow|Joined their|Starting the flow again)/.test(w)) o.flow = true;
+    } else if (l.kind === 'text') {
+      type = 'text';
+      if (!staff) o.flow = true;   // the older automatic text
+    } else if (l.kind === 'email') {
+      type = 'email';
+    } else if (l.kind === 'call') {
+      if (RECALL_RES_CALL_[w]) { type = 'call'; o.tries++; }
+      else if (w === 'Sent a text') type = 'text';
+    } else if (l.kind === 'reply' && !/STOP/i.test(w)) {
+      type = 'reply';
+    }
+    if (!type) continue;
+    last = { type: type, at: String(l.at || ''), by: staff ? String(l.by || '') : '' };
+    if (staff) lastStaff = last;
+  }
+  if (!ok) return o;
+
+  const be = bi >= 0 ? log[bi] : null;
+  const ms = Date.parse(String((be && be.at) || c.bookedAt || ''));
+  o.days = flowDays_(c.dueDate, ms ? flowKey_(ms) : String(c.visitedOn || ''));
+  const near = function (t) { return !!t && (!ms || ms - (Date.parse(t.at) || 0) <= RECALL_RES_NEAR_); };
+  if (be && be.kind === 'call') {   // staff logged it as booked: that was a call
+    o.tries++;
+    o.via = near(last) && last.type === 'reply' ? 'reply' : 'call';
+    o.by = String(be.by || '');
+  } else {
+    o.via = near(last) ? last.type : 'self';
+    o.by = near(lastStaff) ? lastStaff.by : '';
+  }
+  if (!o.by && o.flow && o.via !== 'self') o.by = 'Recall flow';
+  return o;
+}
+
+function recallResults_(body) {
+  const cfg = getConfig_();
+  const today = flowKey_(Date.now());
+  let from = String(body.from || '');
+  let to = String(body.to || '');
+  const span = [30, 90, 180, 365].indexOf(Number(body.days)) !== -1 ? Number(body.days) : 0;
+  if (span) { from = flowAddDaysKey_(today, -span); to = today; }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || to < from) return { ok: true, problem: 'Choose the dates.' };
+  if (flowDays_(from, to) > 731) return { ok: true, problem: 'Choose up to two years at a time.' };
+
+  const cache = CacheService.getScriptCache();
+  const ck = 'rc_res_' + from + '_' + to;
+  if (!body.fresh) {
+    const hit = cache.get(ck);
+    if (hit) return JSON.parse(hit);
+  }
+
+  const cards = recallResultsCards_(cfg, from, to).filter(function (c) {
+    return !(c.status === 'closed' && RECALL_RES_SKIP_[String(c.closeReason || '')]);
+  });
+
+  let total = 0, booked = 0, open = 0, lost = 0;
+  const cats = {}, people = {}, reasons = {}, months = {}, dayList = [];
+  const via = { call: 0, reply: 0, text: 0, email: 0, self: 0 };
+  const tries = { t0: 0, t1: 0, t2: 0, t3: 0 };
+  const flow = { cards: 0, booked: 0, noCall: 0, afterCall: 0, open: 0, lost: 0 };
+  const person = function (n) { return people[n] || (people[n] = { name: n, calls: 0, texts: 0, emails: 0, booked: 0 }); };
+
+  cards.forEach(function (c) {
+    const o = recallOutcome_(c);
+    const key = String(c.category || 'Other');
+    const cat = cats[key] || (cats[key] = { key: key, due: 0, booked: 0, open: 0, lost: 0, days: [] });
+    const mk = String(c.dueDate || '').slice(0, 7);
+    const mo = months[mk] || (months[mk] = { month: mk, due: 0, booked: 0 });
+    total++; cat.due++; mo.due++;
+
+    // What each person did on these cards
+    (Array.isArray(c.log) ? c.log : []).forEach(function (l) {
+      if (!l || !l.byUid || !l.by) return;
+      const w = String(l.what || '');
+      if (l.kind === 'call' && (RECALL_RES_CALL_[w] || w === 'Booked')) person(l.by).calls++;
+      else if (l.kind === 'text' || (l.kind === 'call' && w === 'Sent a text')) person(l.by).texts++;
+      else if (l.kind === 'email') person(l.by).emails++;
+    });
+
+    if (o.flow) flow.cards++;
+    if (o.result === 'booked') {
+      booked++; cat.booked++; mo.booked++;
+      via[o.via] = (via[o.via] || 0) + 1;
+      tries[o.tries >= 3 ? 't3' : 't' + o.tries]++;
+      if (o.by && o.by !== 'Recall flow') person(o.by).booked++;
+      if (o.flow) { flow.booked++; if (o.tries === 0) flow.noCall++; else flow.afterCall++; }
+      if (o.days !== null) { dayList.push(o.days); cat.days.push(o.days); }
+    } else if (o.result === 'open') {
+      open++; cat.open++;
+      if (o.flow) flow.open++;
+    } else {
+      lost++; cat.lost++;
+      if (o.flow) flow.lost++;
+      const r = o.reason || 'Other';
+      reasons[r] = (reasons[r] || 0) + 1;
+    }
+  });
+
+  const median = function (a) {
+    if (!a.length) return null;
+    const s = a.slice().sort(function (x, y) { return x - y; });
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : Math.round((s[m - 1] + s[m]) / 2);
+  };
+  const days = {
+    n: dayList.length, median: median(dayList),
+    avg: dayList.length ? Math.round(dayList.reduce(function (t, x) { return t + x; }, 0) / dayList.length) : null,
+    early: 0, w1: 0, m1: 0, m3: 0, later: 0,
+  };
+  dayList.forEach(function (d) {
+    days[d < 0 ? 'early' : d <= 7 ? 'w1' : d <= 30 ? 'm1' : d <= 90 ? 'm3' : 'later']++;
+  });
+
+  const out = {
+    ok: true, from: from, to: to, checkedAt: new Date().toISOString(),
+    total: total, booked: booked, open: open, lost: lost, via: via, tries: tries, flow: flow, days: days,
+    cats: Object.keys(cats).map(function (k) {
+      const c = cats[k];
+      return { key: c.key, due: c.due, booked: c.booked, open: c.open, lost: c.lost, median: median(c.days) };
+    }).sort(function (a, b) { return b.due - a.due; }),
+    people: Object.keys(people).map(function (k) { return people[k]; })
+      .sort(function (a, b) { return b.booked - a.booked || b.calls - a.calls; }),
+    reasons: Object.keys(reasons).map(function (k) { return { label: k, n: reasons[k] }; })
+      .sort(function (a, b) { return b.n - a.n; }),
+    months: Object.keys(months).sort().map(function (k) { return months[k]; }),
+  };
+  try { const j = JSON.stringify(out); if (j.length < 95000) cache.put(ck, j, 600); } catch (e) { /* not essential */ }
+  return out;
 }

@@ -33,6 +33,7 @@ export const MOVE_TYPES = {
   baseline: "Starting stock set",
   sale: "Sold",
   tracking: "Batch & expiry changed",
+  undo: "Write-off undone",
 };
 export const EXPIRY_SOON_DAYS = 60;
 
@@ -455,12 +456,34 @@ export async function listMoves({ productId = "", max = 150 } = {}) {
   const snap = await getDocs(productId
     ? query(col, where("productId", "==", productId))
     : query(col, orderBy("at", "desc"), limit(max)));
-  return snap.docs
+  const list = snap.docs
     .map((d) => { const x = d.data() || {}; return { id: d.id, ...x, at: toDate(x.at) }; })
-    .sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0))
-    .slice(0, max);
+    .sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0));
+  // Write-offs that have since been undone are marked, so they show as Undone
+  const undone = new Set(list.filter((m) => m.type === "undo").map((m) => String(m.undoOf || "")));
+  return list.map((m) => (undone.has(m.id) ? { ...m, undone: true } : m)).slice(0, max);
 }
 
+// Every write-off that has been undone (their ids)
+export async function undoneWriteoffs() {
+  const snap = await getDocs(query(collection(db, "inv_moves"), where("type", "==", "undo")));
+  return new Set(snap.docs.map((d) => String(d.data().undoOf || "")).filter(Boolean));
+}
+
+// Activity between two dates, optionally only some types (e.g. ["kit-discard", "writeoff"]).
+// Asking for write-offs (wastage): ones that were undone are left out.
+export async function listMovesBetween(from, to, types = null) {
+  const snap = await getDocs(query(collection(db, "inv_moves"), where("at", ">=", from), where("at", "<", to)));
+  let list = snap.docs
+    .map((d) => { const x = d.data() || {}; return { id: d.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [], at: toDate(x.at) }; })
+    .filter((m) => !types || types.includes(m.type))
+    .sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0));
+  if (types && types.includes("writeoff")) {
+    const undone = await undoneWriteoffs();
+    list = list.filter((m) => !(m.type === "writeoff" && undone.has(m.id)));
+  }
+  return list;
+}
 /* ===================== Changing stock ===================== */
 
 // ops: [{ loc, batch, expiry, delta }], all applied together.
@@ -2781,6 +2804,8 @@ export const INV_OUTCOMES = {
     help: "More is there than digital shows. Added to stock." },
   "late-invoice": { label: "Sold before the count", adjust: false, system: true,
     help: "Sold before the count, but its invoice was uploaded after it. Closed automatically when the invoices were uploaded." },
+  "late-record": { label: "Used before the count", adjust: false, system: true,
+    help: "Used on a patient before the count, but recorded afterwards (from a paper record). Closed automatically when it was recorded." },
   baseline: { label: "Starting stock set", adjust: false, system: true,
     help: "Closed when the starting stock was set from an opening count." },
 };
@@ -3817,30 +3842,44 @@ export async function applyInvoiceSales(rows, staff, onProgress = () => {}) {
   return res;
 }
 
-/* ---------- Invoices uploaded after a count: the count is corrected as if the sale was on the invoice date ---------- */
-// An opening count done after the sale day, but before the invoices were uploaded, compared against digital that still
-// included what was sold. Each affected Shelf line gets its digital and difference corrected. A difference that becomes 0
-// is matched; an investigation that becomes 0 closes as "Sold before the count". Accepted, explained or starting-stock
-// lines are never changed (stock was already adjusted for them): they're listed instead.
-// applied: [{ saleId, productId, date, rows: [{ batch, expiry, taken }] }]
-async function backdateCounts(applied, staff) {
+// An opening count done after the day stock left, but before it was entered, compared against digital that still
+// included it. Each affected line gets its digital and difference corrected. A difference that becomes 0 is matched;
+// an investigation that becomes 0 closes by itself. Accepted, explained or starting-stock lines are never changed
+// (stock was already adjusted for them): they're listed instead.
+// applied: [{ saleId, productId, date, loc ("shelf" if missing), rows: [{ batch, expiry, taken }] }]
+// kind: "sale" (Timely invoices, sales recorded by hand) or "use" (treatments recorded from paper)
+// before: only counts saved before this moment (e.g. a write-off that already took the stock off digital)
+async function backdateCounts(applied, staff, { kind = "sale", before = null } = {}) {
   const out = { lines: 0, closed: 0, skipped: [], failed: 0 };
   const list = applied.filter((a) => (a.rows || []).some((r) => Number(r.taken) > 0));
   if (!list.length) return out;
+  const T = kind === "use" ? {
+    outcome: "late-record", line: "Used before the count; recorded later",
+    inv: "Used on a patient before the count; recorded afterwards. Stock wasn't changed.",
+    fixed: "Corrected: used before the count, recorded later", closed: "Closed: used before the count, recorded later",
+    what: "used on patients before the count", count: "Corrected for treatments recorded after the count",
+  } : {
+    outcome: "late-invoice", line: "Sold before the count; invoice uploaded later",
+    inv: "Sold before the count; the invoice was uploaded after it. Stock wasn't changed.",
+    fixed: "Corrected: sold before the count, invoice uploaded later", closed: "Closed: sold before the count, invoice uploaded later",
+    what: "sold on invoices dated before the count", count: "Corrected for invoices uploaded after the count",
+  };
   const from = addDaysKey(list.map((a) => a.date).sort()[0], 1);
-  const counts = (await listCounts({ from })).filter((c) => c.kind === "opening" && !c.superseded);
+  const counts = (await listCounts({ from }))
+    .filter((c) => c.kind === "opening" && !c.superseded && (!before || (c.at && c.at < before)));
   const by = who(staff);
   const me = uid();
 
   for (const c of counts) {
-    // What each Shelf line should also have had taken off
+    // What each line should also have had taken off
     const adds = new Map();
     c.lines.forEach((l, i) => {
-      if (l.loc !== "shelf") return;
+      if (l.loc === "kit") return;
       let n = 0;
       const ids = [];
       list.forEach((a) => {
-        if (a.productId !== l.productId || a.date >= c.dateKey) return;   // sold on or after the count day: not affected
+        if (a.productId !== l.productId || (a.loc || "shelf") !== l.loc) return;
+        if (a.date >= c.dateKey) return;                                   // on or after the count day: not affected
         if ((l.lateSaleIds || []).includes(a.saleId)) return;              // already corrected
         const t = a.rows.filter((r) => (r.batch || "") === (l.batch || "") && (r.expiry || "") === (l.expiry || ""))
           .reduce((s, r) => s + (Number(r.taken) || 0), 0);
@@ -3886,31 +3925,28 @@ async function backdateCounts(applied, staff) {
           const x = iSnap.data();
           const digital = Math.max(0, (Number(x.digital) || 0) - n);
           const upd = { digital, variance: (Number(x.counted) || 0) - digital, updatedAt: serverTimestamp() };
-          if (x.recount) {   // the recount was also before the upload
+          if (x.recount) {   // the recount was also before it was entered
             const rd = Math.max(0, (Number(x.recount.digital) || 0) - n);
             upd.recount = { ...x.recount, digital: rd, variance: (Number(x.recount.counted) || 0) - rd };
           }
           const left = upd.recount ? upd.recount.variance : upd.variance;
           if (!left) {
             Object.assign(upd, {
-              status: "closed", outcome: "late-invoice", applied: 0,
-              outcomeNote: "Sold before the count; the invoice was uploaded after it. Stock wasn't changed.",
+              status: "closed", outcome: T.outcome, applied: 0, outcomeNote: T.inv,
               closedAt: serverTimestamp(), closedBy: by, closedByUid: me,
             });
             l.status = "explained";
-            l.note = "Sold before the count; invoice uploaded later";
+            l.note = T.line;
             closed++;
           }
-          upd.events = arrayUnion({ at, by,
-            action: left ? "Corrected: sold before the count, invoice uploaded later" : "Closed: sold before the count, invoice uploaded later",
-            note: `${n} sold on invoices dated before the count. Difference now ${left > 0 ? "+" : ""}${left}` });
+          upd.events = arrayUnion({ at, by, action: left ? T.fixed : T.closed,
+            note: `${n} ${T.what}. Difference now ${left > 0 ? "+" : ""}${left}` });
           tx.update(iSnap.ref, upd);
         });
         if (!changed) return;
         tx.update(cRef, {
           lines, openCount: lines.filter((l) => l.status === "open").length, updatedAt: serverTimestamp(), updatedBy: by,
-          events: arrayUnion({ at, by, action: "Corrected for invoices uploaded after the count",
-            note: `${changed} line${changed === 1 ? "" : "s"}` }),
+          events: arrayUnion({ at, by, action: T.count, note: `${changed} line${changed === 1 ? "" : "s"}` }),
         });
       });
       out.lines += changed;
@@ -3943,4 +3979,163 @@ export async function recordManualSale(product, { date, qty, patientName = "", n
       .catch((err) => { console.warn("Counts not corrected:", err); return { lines: 0, closed: 0, skipped: [], failed: 1 }; })
     : { lines: 0, closed: 0, skipped: [], failed: 0 };
   return { ...r, backdated };
+}/* ===================== Undoing a write-off, and treatments recorded from paper ===================== */
+
+// Puts a write-off's stock back into the same batches. The write-off stays in the activity, marked Undone,
+// and is left out of wastage. A fixed id means it can only ever be undone once.
+export async function undoMove(move, reason, staff) {
+  if (!move || move.type !== "writeoff") throw new Error("Only write-offs can be undone.");
+  const why = clip(reason, 300);
+  if (!why) throw new Error("Add a reason, e.g. Written off by mistake.");
+  const lines = (move.lines || [])
+    .map((l) => ({ loc: l.loc === "jt" ? "jt" : "shelf", batch: String(l.batch || ""), expiry: String(l.expiry || ""), delta: -(Number(l.delta) || 0) }))
+    .filter((l) => l.delta > 0);
+  if (!lines.length) throw new Error("There's nothing to put back.");
+  const me = uid();
+  const by = who(staff);
+  const pRef = doc(db, "inv_products", move.productId);
+  const refs = lines.map((l) => doc(db, "inv_lots", lotId(move.productId, l.loc, l.batch, l.expiry)));
+  const undoRef = doc(db, "inv_moves", `undo__${move.id}`);
+
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    if ((await tx.get(undoRef)).exists()) throw new Error("This write-off has already been undone. Reload to see it.");
+    const pSnap = await tx.get(pRef);
+    if (!pSnap.exists()) throw new Error("This product no longer exists.");
+    const snaps = [];
+    for (const r of refs) snaps.push(await tx.get(r));
+
+    // ---- Writes ----
+    const pd = pSnap.data();
+    const st = pd.stock || {};
+    const stock = { shelf: Number(st.shelf) || 0, jt: Number(st.jt) || 0 };
+    lines.forEach((l, i) => {
+      const s = snaps[i];
+      const have = s.exists() ? Number(s.data().qty) || 0 : 0;
+      tx.set(refs[i], {
+        productId: move.productId, loc: l.loc, batch: l.batch, expiry: l.expiry, qty: have + l.delta,
+        updatedAt: serverTimestamp(), ...(s.exists() ? {} : { createdAt: serverTimestamp() }),
+      }, { merge: true });
+      stock[l.loc] += l.delta;
+    });
+    tx.update(pRef, { stock, stockAt: serverTimestamp() });
+    tx.set(undoRef, {
+      type: "undo", undoOf: move.id, productId: move.productId, productName: String(pd.name || move.productName || ""),
+      unit: String(pd.stockUnit || move.unit || "item"), lines, reason: "Write-off undone", note: why, ref: "",
+      by, byUid: me, at: serverTimestamp(),
+    });
+  });
+}
+
+// Stock used on a patient but recorded on paper (or a form outside the portal), dated when it happened.
+// It's saved as that patient's treatment usage on that date: it counts as usage (not waste), clears
+// "booked but nothing recorded", and opening counts done since are corrected.
+// fromMove: an accidental write-off of that same stock. It's undone instead, so stock doesn't change twice.
+export async function recordPaperUse(product, {
+  patientId, patientName, date, loc = "shelf", batch = "", expiry = "", qty = 1, dose = "", note = "", fromMove = null,
+}, staff) {
+  if (isKitProduct(product) || isSharedProduct(product)) {
+    throw new Error("Kit and shared products are recorded on a treatment record, so they can't be added this way yet.");
+  }
+  if (!KEY_RE.test(date || "") || date > dayKey()) throw new Error("Choose the date it was used. It can't be in the future.");
+  const pid = clip(patientId, 150);
+  const pname = clip(patientName, 150);
+  if (!pid || !pname) throw new Error("Choose the patient.");
+  const why = clip(note, 300);
+  const me = uid();
+  const by = who(staff);
+
+  let lines;
+  if (fromMove) {
+    if (fromMove.type !== "writeoff" || fromMove.productId !== product.id) throw new Error("That isn't a write-off of this product.");
+    lines = (fromMove.lines || []).filter((l) => Number(l.delta) < 0).map((l) => ({
+      loc: l.loc === "jt" ? "jt" : "shelf", batch: String(l.batch || ""), expiry: String(l.expiry || ""), n: -Number(l.delta),
+    }));
+  } else {
+    const n = parseInt(qty, 10);
+    if (!(n >= 1 && n <= 99)) throw new Error("Enter how many (1 to 99).");
+    if (product.tracked && (!clip(batch, 40) || !KEY_RE.test(expiry || ""))) throw new Error("Choose which batch it came from.");
+    lines = [{ loc: loc === "jt" ? "jt" : "shelf", batch: product.tracked ? clip(batch, 40) : "", expiry: product.tracked ? expiry : "", n }];
+  }
+  if (!lines.length) throw new Error("There's nothing to record.");
+
+  const total = lines.reduce((a, l) => a + l.n, 0);
+  const per = Number(product.dosePer) || 0;
+  const given = product.doseUnit && dose !== "" && dose !== null ? Math.round(Math.max(0, Number(dose) || 0) * 100) / 100 : 0;
+  const r2 = (n) => Math.round(n * 100) / 100;
+
+  const pRef = doc(db, "inv_products", product.id);
+  const refs = lines.map((l) => doc(db, "inv_lots", lotId(product.id, l.loc, l.batch, l.expiry)));
+  const undoRef = fromMove ? doc(db, "inv_moves", `undo__${fromMove.id}`) : null;
+  const uRef = doc(collection(db, "inv_usage"));
+
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    const pSnap = await tx.get(pRef);
+    if (!pSnap.exists()) throw new Error("This product no longer exists.");
+    if (undoRef && (await tx.get(undoRef)).exists()) throw new Error("This write-off has already been undone. Reload to see it.");
+    const snaps = [];
+    if (!fromMove) for (const r of refs) snaps.push(await tx.get(r));
+
+    // ---- Writes ----
+    const pd = pSnap.data();
+    const unit = String(pd.stockUnit || product.stockUnit || "item");
+    if (!fromMove) {
+      const st = pd.stock || {};
+      const stock = { shelf: Number(st.shelf) || 0, jt: Number(st.jt) || 0 };
+      lines.forEach((l, i) => {
+        const have = snaps[i].exists() ? Number(snaps[i].data().qty) || 0 : 0;
+        if (have < l.n) {
+          throw new Error(`Only ${plural(have, unit)} in ${locLabel(l.loc)}${l.batch ? ` (${batchText(product, l.batch)})` : ""}.`);
+        }
+        tx.update(refs[i], { qty: have - l.n, updatedAt: serverTimestamp() });
+        stock[l.loc] = Math.max(0, stock[l.loc] - l.n);
+      });
+      tx.update(pRef, { stock, stockAt: serverTimestamp() });
+    } else {
+      // The write-off already took it off stock: it's undone, and the same stock becomes this patient's usage
+      tx.set(undoRef, {
+        type: "undo", undoOf: fromMove.id, productId: product.id, productName: String(pd.name || product.name), unit,
+        lines: lines.map((l) => ({ loc: l.loc, batch: l.batch, expiry: l.expiry, delta: l.n })),
+        reason: "Write-off undone", note: `Used on ${pname} on ${date} instead${why ? ` · ${why}` : ""}`.slice(0, 500),
+        ref: uRef.id, by, byUid: me, at: serverTimestamp(),
+      });
+    }
+    tx.set(doc(collection(db, "inv_moves")), {
+      type: "use", productId: product.id, productName: String(pd.name || product.name), unit,
+      lines: lines.map((l) => ({ loc: l.loc, batch: l.batch, expiry: l.expiry, delta: -l.n })),
+      reason: "Treatment (paper record)",
+      note: [`${pname} · used ${date}`, given ? `${given} ${product.doseUnit} given` : "", why].filter(Boolean).join(" · ").slice(0, 500),
+      ref: uRef.id, effectiveDate: date, paper: true, by, byUid: me, at: serverTimestamp(),
+    });
+
+    // The usage record, dated when it was used (like a treatment record saved that day)
+    const rows = lines.map((l) => {
+      const d = given ? r2(given * (l.n / total)) : 0;
+      return { batch: l.batch, expiry: l.expiry, amount: l.n, taken: l.n, from: l.loc, dose: d,
+        waste: per && d ? Math.max(0, r2(l.n * per - d)) : 0 };
+    });
+    tx.set(uRef, {
+      submissionId: "", source: "paper", patientId: pid, patientName: pname, formName: "Paper record",
+      recordDate: date, short: false, note: why, fromWriteoff: fromMove ? fromMove.id : "",
+      lines: [{
+        productId: product.id, name: String(pd.name || product.name), kind: "storage", stockUnit: unit, unit,
+        batchLabel: String(pd.batchLabel || "Batch"), doseUnit: String(pd.doseUnit || ""),
+        doseTotal: r2(rows.reduce((a, r) => a + r.dose, 0)), waste: r2(rows.reduce((a, r) => a + r.waste, 0)),
+        total, short: 0, rows,
+      }],
+      by, byUid: me, at: Timestamp.fromDate(new Date(`${date}T12:00:00`)), enteredAt: serverTimestamp(),
+    });
+  });
+
+  // Opening counts since that day are corrected. A write-off already took it off digital,
+  // so only counts done before the write-off need it.
+  const backdated = date < dayKey()
+    ? await backdateCounts(
+      lines.map((l, i) => ({ saleId: `${uRef.id}:${i}`, productId: product.id, date, loc: l.loc,
+        rows: [{ batch: l.batch, expiry: l.expiry, taken: l.n }] })),
+      staff, { kind: "use", before: fromMove && fromMove.at instanceof Date ? fromMove.at : null },
+    ).catch((err) => { console.warn("Counts not corrected:", err); return { lines: 0, closed: 0, skipped: [], failed: 1 }; })
+    : { lines: 0, closed: 0, skipped: [], failed: 0 };
+  return { usageId: uRef.id, backdated };
 }

@@ -267,15 +267,20 @@ const PAGES = {
   reports: (el, param) => mountReports(el, { param, staff: currentStaff }),
   staff: (el) => mountStaffManager(el, { staff: currentStaff }),
   recall: (el, param) => {
-    if (String(param || "").split("/")[0] !== "messages") return mountRecall(el, { staff: currentStaff });
-    return import("./recall-messages.js")
-      .then((m) => m.mountRecallMessages(el, { staff: currentStaff }))
+    const sub = String(param || "").split("/")[0];
+    const lazy = sub === "messages" ? ["./recall-messages.js", "mountRecallMessages", "Texts & emails"]
+      : sub === "results" ? ["./recall-results.js", "mountRecallResults", "Recall results"] : null;
+    if (!lazy) return mountRecall(el, { staff: currentStaff });
+    // Loaded only when needed, so a problem here can't stop the rest of the portal
+    return import(lazy[0])
+      .then((m) => m[lazy[1]](el, { staff: currentStaff }))
       .catch((err) => {
-        console.error("Texts & emails failed to load:", err);
-        el.innerHTML = `<section class="page"><div class="state error"><strong>Texts & emails couldn't load</strong>
+        console.error(`${lazy[2]} failed to load:`, err);
+        el.innerHTML = `<section class="page"><div class="state error"><strong>${escapeHtml(lazy[2])} couldn't load</strong>
           ${escapeHtml(err && err.message ? err.message : "Refresh and try again.")}</div></section>`;
       });
   },
+  
   settings: (el, param) => {
     if (String(param || "").split("/")[0] === "recall") {
       const sub = String(param).split("/")[1] || "";

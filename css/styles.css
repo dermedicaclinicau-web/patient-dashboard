@@ -8025,3 +8025,42 @@ dialog.lh-dialog.inv-dlg.kit-set-dlg { width: min(760px, 96vw); }
   background: #fef2f2; color: #991b1b; font-size: .85rem; line-height: 1.4;
 }
 .rc-links .lh-btn[disabled] { opacity: .45; cursor: not-allowed; }
+
+/* Recall results */
+.rr-intro { margin: .25rem .25rem 1rem; font-size: .85rem; }
+.rr-dates { display: inline-flex; align-items: center; gap: .4rem; }
+.rr .rc-stats { margin-bottom: 1rem; }
+.rr-sub { display: block; margin-top: .15rem; font-size: .75rem; color: #64748b; }
+.rr-note { margin: 0 0 1rem; padding: .6rem .8rem; border-radius: 10px; background: #fffbeb; color: #92400e; font-size: .85rem; }
+.rr-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+.rr-card { padding: 1rem 1.1rem; }
+.rr-card .mc-h { margin: 0 0 .75rem; }
+.rr-wide { grid-column: 1 / -1; }
+.rr-row { display: grid; grid-template-columns: minmax(120px, 190px) 1fr auto; align-items: center; gap: .6rem; padding: .3rem 0; font-size: .88rem; }
+.rr-bar { height: 8px; border-radius: 999px; background: #eef2f6; overflow: hidden; }
+.rr-bar i { display: block; height: 100%; border-radius: inherit; background: #0f766e; }
+.rr-val { white-space: nowrap; font-size: .82rem; color: #475569; }
+.rr-val b { color: #0f172a; }
+.rr-scroll { overflow-x: auto; }
+.rr-table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+.rr-table th { text-align: left; font-weight: 600; font-size: .75rem; color: #64748b; padding: .4rem .5rem; border-bottom: 1px solid #e5e7eb; white-space: nowrap; }
+.rr-table td { padding: .5rem; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
+.rr-table .n { text-align: right; font-variant-numeric: tabular-nums; }
+.rr-rate { display: flex; align-items: center; gap: .5rem; min-width: 140px; }
+.rr-rate .rr-bar { flex: 1; }
+.rr-big { margin: 0 0 .75rem; font-size: .9rem; color: #475569; }
+.rr-big b { display: block; font-size: 1.6rem; line-height: 1.2; color: #0f766e; }
+.rr-help-line { margin: .6rem 0 0; font-size: .8rem; color: #64748b; }
+.rr-help { margin-top: .5rem; font-size: .83rem; color: #475569; }
+.rr-help summary { cursor: pointer; font-weight: 600; }
+.rr-help li { margin: .3rem 0; }
+.rr-body.is-loading { opacity: .5; pointer-events: none; transition: opacity .15s; }
+@media (max-width: 640px) {
+  .rr-row { grid-template-columns: 1fr auto; }
+  .rr-row .rr-bar { grid-column: 1 / -1; order: 3; }
+}
+
+/* Inventory activity: undo / used on a patient */
+.inv-m-acts { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .4rem; }
+.inv-m-acts .lh-btn { padding: .2rem .6rem; font-size: .78rem; }
+.inv-moves li.is-undone .inv-m-main > strong { text-decoration: line-through; color: #64748b; }
