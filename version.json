@@ -8,6 +8,8 @@
                   "./js/app.js",
                   "./js/appointments.js",
                   "./js/auth.js",
+                  "./js/billing-check-api.js",
+                  "./js/billing-check.js",
                   "./js/billing-rx-view.js",
                   "./js/billing-scans.js",
                   "./js/calendar-badges.js",
@@ -54,6 +56,7 @@
                   "./js/inventory-kits.js",
                   "./js/inventory.js",
                   "./js/investigations.js",
+                  "./js/invoice-links.js",
                   "./js/kit-admin.js",
                   "./js/kit-count.js",
                   "./js/knowledge-content.js",
@@ -129,6 +132,7 @@
                   "./js/shift.js",
                   "./js/skincare-view.js",
                   "./js/skincare.js",
+                  "./js/sms-dialog.js",
                   "./js/soap-panel.js",
                   "./js/soap.js",
                   "./js/specialist-bank.js",
@@ -170,6 +174,6 @@
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261022-101641",
-    "v":  "20261022-101641"
+    "version":  "20261022-162442",
+    "v":  "20261022-162442"
 }
