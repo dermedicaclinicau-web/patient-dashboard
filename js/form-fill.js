@@ -124,11 +124,11 @@ function consentHtml(f, res, { canStart = false, waiting = false } = {}) {
   const id = esc(f.consentFormId || "");
   return `<div class="fe-consent is-warn">${icon}<span>No ${rx ? "prescription" : "signed consent"} in the last ${months} months.${
     f.block ? ` This form can't be saved until ${rx ? "there's a valid prescription" : "one is signed"}.` : ""}${
-    waiting ? `<small class="fe-consent-wait">Open in another tab. This updates by itself when it's saved.</small>` : ""}</span>${
+    waiting ? `<small class="fe-consent-wait">Opened in a new tab. This updates by itself when it's saved.</small>` : ""}</span>${
     canStart && f.consentFormId ? `<span class="fe-consent-acts">
-      <button type="button" class="ff-btn is-primary fe-consent-go" data-consent-go="${id}" data-kind="${kind}">Fill in ${noun} now</button>
-      <button type="button" class="ff-btn fe-consent-tab" data-consent-tab="${id}" data-kind="${kind}"
-        title="Opens the ${noun} in a new tab. This form stays open and updates when it's saved.">Open in new tab ↗</button>
+      <button type="button" class="ff-btn is-primary fe-consent-go" data-consent-tab="${id}" data-kind="${kind}"
+        title="Opens the ${noun} in a new tab. This form stays open and updates when it's saved.">${
+        waiting ? `Go to the ${noun} tab ↗` : `Fill in ${noun} now ↗`}</button>
     </span>` : ""}</div>`;
 }
 function writeField(f, w, v) {
@@ -731,30 +731,8 @@ export async function mountFormFill(container, param, { staff, embedded = null }
   });
   fields.filter((f) => f.type === "table").forEach((f) => syncTableRows(f, wrap(f.id)));
 
-    // "Fill in consent now": keep the answers so far, then open the consent form
-  root.addEventListener("click", (e) => {
-    // "Open in new tab": this form stays exactly as it is
-    const tabBtn = e.target.closest("[data-consent-tab]");
-    if (tabBtn) {
-      const cid = tabBtn.dataset.consentTab;
-      const kind = tabBtn.dataset.kind || "Consent";
-      const w = window.open(`${location.pathname}${location.search}#/fill/${encodeURIComponent(pid)}/${encodeURIComponent(cid)}`,
-        tabName({ p: pid, t: cid, n: ver.name, k: kind }));
-      if (!w) {
-        showToast(`The browser blocked the new tab. Allow pop-ups for the portal, or use “Fill in ${kind.toLowerCase()} now”.`);
-        return;
-      }
-      waitingFor.add(cid);
-      paintConsents();
-      return;
-    }
-    // The consent tab: the patient's profile in another tab
-    if (e.target.closest('[data-act="open-profile"]')) {
-      window.open(`${location.pathname}${location.search}${patientHref}`, "_blank");
-      return;
-    }
-    const go = e.target.closest("[data-consent-go]");
-    if (!go) return;
+  // The same-tab way (used if the browser blocks the new tab): keep the answers so far, open the consent here, come back after
+  function fillHere(cid, kind) {
     const draft = {};
     fields.forEach((f) => {
       if (LAYOUT.includes(f.type) || ["photo", "signature", "image", "aftercare", "consumables", "consent_status", "prescription_status"].includes(f.type)) return;
@@ -767,15 +745,38 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     });
     writeReturn({
       at: Date.now(), patientId: pid, templateId: tid, templateName: ver.name,
-      consentId: go.dataset.consentGo,
-      kind: go.dataset.kind || "Consent",
+      consentId: cid, kind,
       returnHash: `#/fill/${encodeURIComponent(pid)}/${encodeURIComponent(tid)}`,
       answers: draft,
     });
     dirty = false; // the answers are kept, so don't ask "Leave without saving?"
-    location.hash = `#/fill/${encodeURIComponent(pid)}/${encodeURIComponent(go.dataset.consentGo)}`;
-  });
+    location.hash = `#/fill/${encodeURIComponent(pid)}/${encodeURIComponent(cid)}`;
+  }
 
+  root.addEventListener("click", (e) => {
+    // "Fill in consent / prescription now": a new tab, so this form stays exactly as it is
+    const btn = e.target.closest("[data-consent-tab], [data-consent-go]");
+    if (btn) {
+      const cid = btn.dataset.consentTab || btn.dataset.consentGo;
+      const kind = btn.dataset.kind || "Consent";
+      const w = window.open(`${location.pathname}${location.search}#/fill/${encodeURIComponent(pid)}/${encodeURIComponent(cid)}`,
+        tabName({ p: pid, t: cid, n: ver.name, k: kind }));
+      if (w) {
+        try { w.focus(); } catch { /* ignore */ }
+        waitingFor.add(cid);
+        paintConsents();
+        return;
+      }
+      // Pop-ups blocked: the same-tab way instead
+      showToast(`Opening the ${kind.toLowerCase()} here. You'll come back to ${ver.name} when it's saved.`);
+      fillHere(cid, kind);
+      return;
+    }
+    // The consent tab: the patient's profile in another tab
+    if (e.target.closest('[data-act="open-profile"]')) {
+      window.open(`${location.pathname}${location.search}${patientHref}`, "_blank");
+    }
+  });
   /* ---------- Checking and saving ---------- */
   function problems() {
     const out = [];
