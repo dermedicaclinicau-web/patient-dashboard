@@ -253,7 +253,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       const counted = days.filter((d) => (d.start && d.start.items.length) || (d.end && d.end.items.length));
       const people = new Map();
       const add = (id, name) => { if (id && !people.has(id)) people.set(id, { uid: String(id), name: String(name || "Unnamed") }); };
-      staffList.forEach((s) => { if (s.injector === true || s.carriesKit === true) add(s.uid || s.authUid, s.name); });
+      staffList.forEach((s) => { if (s.injector === true || s.carriesKit === true) add(s.id || s.uid, s.name); });
       kits.forEach((k) => add(k.staffUid, k.staffName));
       counted.forEach((d) => add(d.staffUid, d.staffName));
       const injectors = [...people.values()].sort((a, b) => a.name.localeCompare(b.name, "en-AU"));

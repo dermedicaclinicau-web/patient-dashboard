@@ -2206,6 +2206,8 @@ function handleStaffList_(body) {
     .filter(function (s) { return s.name && s.active !== false; })
     .map(function (s) {
       return { id: s.id, name: s.name, role: s.role, hasEmail: !!s.email,
+        photo: s.photo || '',                 // profile photo link (chat avatars)
+        injector: s.injector === true,        // carries a kit (Inventory → Set an injector's kit, chat "Injectors")
         providerNo: s.providerNo || '', prescriberNo: s.prescriberNo || '', ahpraNo: s.ahpraNo || '', quals: s.quals || '' };
     })
     .sort(function (a, b) { return a.name.localeCompare(b.name); });
