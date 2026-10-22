@@ -75,6 +75,8 @@ const blank = () => ({ out: "", note: "", remind: "", reason: "", until: "", sms
 const errText = (err, fallback) => (err && err.code === "permission-denied"
   ? "You don't have access to Recall. Check Recall access in Staff, and that the Firestore rules are published."
   : (err && err.message) || fallback);
+const dncTitle = (c) => `On the do-not-contact list${c.dncWhy ? ` (${c.dncWhy})` : ""}. ` +
+  "No recall texts or emails. Calls and messages about their care are fine.";
 const getPref = (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v === "1"; } catch { return d; } };
 const setPref = (k, v) => { try { localStorage.setItem(k, v ? "1" : "0"); } catch { /* not essential */ } };
 // The note box grows with what's typed (up to 240px, then it scrolls)
@@ -112,6 +114,7 @@ function norm(snap) {
     lastTextAt: s("lastTextAt"), textHoldUntil: s("textHoldUntil"), texts: Number(x.texts) || 0,
     flowState: s("flowState"), flowDueAt: Number(x.flowDueAt) || 0,
     joinedCat: s("joinedCat"), alsoDue: Array.isArray(x.alsoDue) ? x.alsoDue.map(String) : [],
+    dnc: x.dnc === true, dncWhy: s("dncWhy"),
     log: Array.isArray(x.log) ? x.log : [], updatedAt: s("updatedAt"),
   };
 }
@@ -388,11 +391,12 @@ export function mountRecall(container, { staff = null } = {}) {
       : c.status === "open" && c.alsoDue.length ? `<span class="rc-tag">Also due: ${esc(c.alsoDue.join(", "))}</span>` : "";
     const tel = telOf(c.mobile);
     const contact = tel ? `<a class="lh-btn rc-call" href="tel:${esc(tel)}">Call</a>`
-      : c.email ? `<span class="rc-nomob">No mobile</span><a class="lh-btn is-quiet rc-call" href="mailto:${esc(c.email)}">Email</a>`
-        : '<span class="rc-nomob">No mobile or email</span>';
+      : c.email && !c.dnc ? `<span class="rc-nomob">No mobile</span><a class="lh-btn is-quiet rc-call" href="mailto:${esc(c.email)}">Email</a>`
+        : `<span class="rc-nomob">${c.email ? "No mobile" : "No mobile or email"}</span>`;
     return `<div class="rc-item${on ? " is-on" : ""}" data-card="${esc(c.id)}" role="button" tabindex="0" aria-expanded="${on}">
         <span class="rc-av" aria-hidden="true">${esc(initials(c.patientName))}</span>
-        <span class="rc-main"><strong>${esc(c.patientName || "Unknown patient")}</strong><small>${meta}</small></span>
+        <span class="rc-main"><strong>${esc(c.patientName || "Unknown patient")}${c.dnc
+          ? ` <span class="rc-dnc" title="${esc(dncTitle(c))}">Do not contact</span>` : ""}</strong><small>${meta}</small></span>
         ${tag}
         ${side ? `<span class="rc-side">${esc(side)}</span>` : ""}
         ${contact}
@@ -545,10 +549,15 @@ export function mountRecall(container, { staff = null } = {}) {
       <p class="rc-sub">${esc(sub)}${c.lastServices.length ? `<br>${esc(c.lastServices.join(", "))}` : ""}</p>
       ${c.reply ? `<div class="rc-reply${c.replyOpen ? " is-open" : ""}"><strong>${esc(REPLY_TAG[c.reply.kind] || "Replied")} · ${esc(when(c.reply.at))}</strong>
         <p>${esc(c.reply.text)}</p></div>` : ""}
+      ${c.dnc ? `<div class="rc-dnc-note"><strong>Do not contact</strong> · ${esc(dncTitle(c))}</div>` : ""}
       <div class="rc-links">
         ${tel ? `<a class="lh-btn" href="tel:${esc(tel)}">Call ${esc(mobileText(c.mobile))}</a>` : '<span class="rc-nomob">No mobile on file</span>'}
-        ${tel && c.status !== "closed" ? '<button type="button" class="lh-btn" data-act="sms">Send text</button>' : ""}
-        ${c.email ? `<a class="lh-btn is-quiet" href="mailto:${esc(c.email)}" data-card="${esc(c.id)}">Email</a>` : ""}
+        ${tel && c.status !== "closed" ? (c.dnc
+          ? `<button type="button" class="lh-btn" disabled title="${esc(dncTitle(c))}">Send text</button>`
+          : '<button type="button" class="lh-btn" data-act="sms">Send text</button>') : ""}
+        ${c.email ? (c.dnc
+          ? `<button type="button" class="lh-btn is-quiet" disabled title="${esc(dncTitle(c))}">Email</button>`
+          : `<a class="lh-btn is-quiet" href="mailto:${esc(c.email)}" data-card="${esc(c.id)}">Email</a>`) : ""}
         ${c.patientId ? `<a class="lh-btn is-quiet" href="#/patient/${encodeURIComponent(c.patientId)}">Patient page</a>` : ""}
       </div>
       ${draft.sms == null ? "" : `<div class="rc-sms">

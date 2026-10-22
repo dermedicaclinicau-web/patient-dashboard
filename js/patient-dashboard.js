@@ -736,6 +736,7 @@ function barHtml(p, today = [], pre = null) {
 
   const chips = [
     p.pttId && `<span class="chip">ID ${escapeHtml(p.pttId)}</span>`,
+    p.marketingOk === false && dncChipHtml(p),
     today.length && `<span class="chip chip-today">Appt today ${escapeHtml(today[0].time || "")}</span>`,
     pre && pre.overdue && overdueChipHtml(pre.overdue),
     p.mergedIds && p.mergedIds.length &&
@@ -771,6 +772,20 @@ function barHtml(p, today = [], pre = null) {
         p.medicareExp ? ` <span class="pb-age">· Exp ${escapeHtml(formatMedicareExpiry(p.medicareExp))}</span>${
           medicareExpired(p.medicareExp) ? ' <span class="missing">expired</span>' : ""}` : ""}`)}</dd></div>
     </dl>`;
+}
+
+// "Do not contact" chip: why and when on hover. Care messages are still allowed, so the label says so.
+function dncChipHtml(p) {
+  const c = p.marketingConsent || {};
+  const d = c.at ? new Date(c.at) : null;
+  const bits = [
+    c.source,
+    d && !isNaN(d) ? d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "",
+    c.by && c.by !== "The patient" ? `by ${c.by}` : "",
+  ].filter(Boolean).join(" · ");
+  const title = `On the do-not-contact list${bits ? ` (${bits})` : ""}${c.note ? `: ${c.note}` : ""}. ` +
+    "No marketing or recall emails and texts. Messages about their appointments and care are fine.";
+  return `<span class="chip chip-dnc" title="${escapeHtml(title)}">Do not contact · marketing & recall</span>`;
 }
 
 // "Overdue treatments" chip with a bubble listing what's due (hover on desktop, tap on iPad)

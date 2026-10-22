@@ -85,6 +85,11 @@ export function patientFromData(id, d) {
     mergedIds: Array.isArray(d.MergedIds) ? d.MergedIds.map(String) : [],
     mergedNames: Array.isArray(d.MergedNames) ? d.MergedNames.map(String) : [],
     mergedInto: String(d.MergedInto || ""),
+    marketingOk: d["Marketing OK"] !== false,
+    marketingConsent: d["Marketing Consent"] && typeof d["Marketing Consent"] === "object" ? {
+      source: String(d["Marketing Consent"].source || ""), at: String(d["Marketing Consent"].at || ""),
+      by: String(d["Marketing Consent"].by || ""), note: String(d["Marketing Consent"].note || ""),
+    } : null,
   };
 }
 

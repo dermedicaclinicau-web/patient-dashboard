@@ -220,6 +220,11 @@ export function mountPatientList(container) {
           <option value="45-54">45–54</option>
           <option value="55-200">55+</option>
         </select>
+        <select class="pt-select" data-filter="contact" aria-label="Contact filter">
+          <option value="all">All contact</option>
+          <option value="dnc">Do not contact</option>
+          <option value="ok">Can be contacted</option>
+        </select>
         <div class="pt-view" role="group" aria-label="View">
           <button type="button" data-view="grid" title="Cards" aria-label="Show as cards">${ICONS.grid}</button>
           <button type="button" data-view="list" title="List" aria-label="Show as a list">${ICONS.list}</button>
@@ -243,7 +248,7 @@ export function mountPatientList(container) {
   const refreshBtn = q(".pt-refresh");
 
   const state = {
-    mode: "name", term: "", birthday: "all", age: "all", seq: 0, view: readView(),
+    mode: "name", term: "", birthday: "all", age: "all", contact: "all", seq: 0, view: readView(),
     client: { list: [], shown: CLIENT_PAGE, groups: null, shownGroups: GROUP_PAGE },
   };
   const pageSize = () => (state.view === "list" ? LIST_PAGE : CLIENT_PAGE);
@@ -299,7 +304,7 @@ export function mountPatientList(container) {
   function render(all) {
     const today = new Date();
     const query = buildQuery(state.term);
-    let list = all.filter((p) => birthdayOk(p, state.birthday, today) && ageOk(p, state.age));
+    let list = all.filter((p) => birthdayOk(p, state.birthday, today) && ageOk(p, state.age) && contactOk(p, state.contact));
 
     if (state.mode === "dupes") {
       let groups = findDuplicates(list);
@@ -334,7 +339,7 @@ export function mountPatientList(container) {
     moreBtn.hidden = list.length <= shown;
 
     const n = list.length.toLocaleString();
-    const filtered = state.birthday !== "all" || state.age !== "all";
+    const filtered = state.birthday !== "all" || state.age !== "all" || state.contact !== "all";
     meta.textContent = state.term
       ? `${n} result${list.length === 1 ? "" : "s"} for “${state.term}”`
       : filtered ? `${n} patient${list.length === 1 ? "" : "s"} match` : "";
@@ -490,6 +495,12 @@ function ageOk(p, filter) {
   return age !== null && age >= lo && age <= hi;
 }
 
+function contactOk(p, filter) {
+  if (filter === "dnc") return p.marketingOk === false;
+  if (filter === "ok") return p.marketingOk !== false;
+  return true;
+}
+
 function findDuplicates(list) {
   const rules = [
     ["Same name & date of birth", (p) => (p.nameKey && p.dobKey ? `${p.nameKey}|${p.dobKey}` : ""),
@@ -528,7 +539,8 @@ function cardHtml(p) {
           <span class="pt-avatar" style="--h:${hueFromString(p.name)}">${escapeHtml(getInitials(p.name))}</span>
           <div class="pt-ident">
             <span class="pt-name">${escapeHtml(p.name)}</span>
-            <span class="pt-id">ID ${escapeHtml(p.pttId || p.id)}</span>
+            <span class="pt-id">ID ${escapeHtml(p.pttId || p.id)}${p.marketingOk === false
+              ? ' <span class="pt-dnc" title="On the do-not-contact list: no marketing or recall messages">Do not contact</span>' : ""}</span>
           </div>
         </div>
         <div class="pt-contact">

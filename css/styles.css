@@ -8012,3 +8012,16 @@ dialog.lh-dialog.inv-dlg.kit-set-dlg { width: min(760px, 96vw); }
 .sms-meta { display: flex; justify-content: space-between; align-items: center; gap: .75rem; font-size: .8rem; color: var(--muted, #6b7280); }
 .sms-meta .is-warn { color: #b45309; font-weight: 600; }
 .sms-phone { color: var(--muted, #6b7280); }
+
+/* Do not contact (marketing & recall) */
+.chip.chip-dnc { background: #fef2f2; color: #b91c1c; border-color: #fecaca; }
+.pt-dnc, .rc-dnc {
+  display: inline-block; margin-left: .4rem; padding: .05rem .45rem; border-radius: 999px;
+  background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca;
+  font-size: .7rem; font-weight: 600; line-height: 1.5; vertical-align: middle; white-space: nowrap;
+}
+.rc-dnc-note {
+  margin: .5rem 0; padding: .55rem .75rem; border-radius: 10px;
+  background: #fef2f2; color: #991b1b; font-size: .85rem; line-height: 1.4;
+}
+.rc-links .lh-btn[disabled] { opacity: .45; cursor: not-allowed; }

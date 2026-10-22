@@ -6597,7 +6597,8 @@ function recMoveLegacy_(def, kind, rid, body, session) {
 // to reading every patient if the index is missing or more than 3 days old.
 
 const PATIENT_INDEX_FIELDS_ = ['PttID', 'First Name', 'Last Name', 'Patient Name', 'NameKey', 'Email', 'Mobile',
-  'Address', 'DobKey', 'DOB', 'Medicare Number', 'Medicare IRN', 'Medicare Expiry', 'MergedIds', 'MergedNames', 'MergedInto'];
+  'Address', 'DobKey', 'DOB', 'Medicare Number', 'Medicare IRN', 'Medicare Expiry', 'MergedIds', 'MergedNames', 'MergedInto',
+  'Marketing OK'];
 const PATIENT_INDEX_PART_ = 400000; // characters per document (Firestore's limit is 1 MiB)
 
 function buildPatientIndex() {
@@ -10052,6 +10053,18 @@ function mktSetConsent_(cfg, pid, yes, meta) {
     campaignId: String(meta.campaignId || ''), at: now,
   }));
   commitWrites_(cfg, writes);
+
+  // Their open recall cards show the change straight away (the daily check also keeps them right)
+  if (patientId) {
+    try {
+      const dn = yes ? { dnc: false, dncWhy: '' }
+        : { dnc: true, dncWhy: [source, recLongDate_(now.slice(0, 10))].filter(Boolean).join(' · ') };
+      const cw = fsQuery_(cfg, RECALL_COL_, 'patientId', 'EQUAL', patientId, 50)
+        .filter(function (c) { return c.status !== 'closed'; })
+        .map(function (c) { return patchWrite_(cfg, RECALL_COL_ + '/' + c._id, dn); });
+      if (cw.length) commitWrites_(cfg, cw);
+    } catch (e) { console.warn('Recall cards not updated for do not contact: ' + e); }
+  }
   return { patientId: pdoc ? pdoc._id : '', email: email };
 }
 
@@ -11679,12 +11692,19 @@ function recallMonthsMap_(cfg) {
   recallSettings_(cfg).categories.forEach(function (c) { if (c.on) out[c.key] = c.months; });
   return Object.keys(out).length ? out : PCN_OVERDUE_MONTHS_;
 }
-
+// { dnc, dncWhy } for a recall card, from the patient record ('Marketing OK' false = on the do-not-contact list)
+function recallDncOf_(p) {
+  if (!p || p['Marketing OK'] !== false) return { dnc: false, dncWhy: '' };
+  const c = p['Marketing Consent'] || {};
+  const at = String(c.at || '').slice(0, 10);
+  return { dnc: true, dncWhy: [String(c.source || 'Do not contact list'), at ? recLongDate_(at) : ''].filter(Boolean).join(' · ') };
+}
 // Every patient by PttID (and doc ID), following merges to the record that was kept
 function recallPatients_(cfg) {
   const byId = Object.create(null);
   const byPtt = Object.create(null);
-  fsListAll_(cfg, 'patient_list', ['PttID', 'Patient Name', 'First Name', 'Last Name', 'Mobile', 'Email', 'MergedInto'])
+  fsListAll_(cfg, 'patient_list', ['PttID', 'Patient Name', 'First Name', 'Last Name', 'Mobile', 'Email', 'MergedInto',
+    'Marketing OK', 'Marketing Consent'])
     .forEach(function (d) {
       const f = fromFields_(d.fields || {});
       const id = d.name.split('/').pop();
@@ -11817,10 +11837,13 @@ function recallCheck_(cfg, set, today, force) {
       const key = c.patientId + '|' + c.category;
       const lv = String(c.lastVisit || '');
       const fix = c.nameKey ? null : recallKeys_(c.patientName, c.mobile, c.email);   // search keys on older cards
+      const dn = recallDncOf_(pts.doc(c.patientId));
+      const dncFix = (c.dnc === true) !== dn.dnc || String(c.dncWhy || '') !== dn.dncWhy ? dn : null;
       let touched = false;
       const put = function (patch, what) {
         touched = true;
         if (fix) Object.assign(patch, fix);
+        if (dncFix) Object.assign(patch, dncFix);
         patch.log = add(c, what);
         patch.updatedAt = now;
         writes.push(patchWrite_(cfg, path, patch));
@@ -11876,7 +11899,7 @@ function recallCheck_(cfg, set, today, force) {
           sum.back++;
         }
       })();
-      if (!touched && fix) writes.push(patchWrite_(cfg, path, fix));
+      if (!touched && (fix || dncFix)) writes.push(patchWrite_(cfg, path, Object.assign({}, fix || {}, dncFix || {})));
     });
 
   // New cards: due (or due within the lead days), nothing booked, last visit not too long ago
@@ -11918,7 +11941,7 @@ function recallCheck_(cfg, set, today, force) {
       closeReason: '', closedAt: '', closedBy: '',
       log: [{ at: now, by: 'Recall', byUid: '', kind: 'auto', what: 'Due for ' + w.g.cat.key + ' (last visit ' + recLongDate_(w.g.last) + ')', note: '' }],
       createdAt: now, updatedAt: now,
-    }, recallKeys_(who.name, doc.Mobile, doc.Email))));
+    }, recallKeys_(who.name, doc.Mobile, doc.Email), recallDncOf_(doc))));
     sum.made++;
   });
 
@@ -12834,7 +12857,7 @@ function recallFlowRun_(cfg, set, today) {
   const cands = pool.filter(function (c) {
     if (seen[c._id]) return false;
     seen[c._id] = true;
-    return c.status === 'open' && c.stage === 'due' && !c.assignedToId && String(c.dueDate) <= today
+    return c.status === 'open' && c.stage === 'due' && !c.assignedToId && c.dnc !== true && String(c.dueDate) <= today
       && (!c.flowState || c.flowState === 'queued' || c.flowState === 'released');
   });
   const byPt = {};
@@ -13042,36 +13065,38 @@ function recallFlowTest_(body, session) {
 }
 
 // ===================== Recall: emailing a patient from a card (the compose window) =====================
+// ===================== Recall: emailing a patient from a card (the compose window) =====================
+// Problems come back as { ok: true, problem } so callApi passes the message through to the window.
 function recallSendEmail_(body, session) {
   const cfg = getConfig_();
   const id = String(body.id || '');
   const card = id ? fsGetDoc_(cfg, RECALL_COL_ + '/' + id) : null;
-  if (!card) return { ok: false, error: 'NOT_FOUND', detail: "That recall card couldn't be found. Refresh and try again." };
+  if (!card) return { ok: true, problem: "That recall card couldn't be found. Refresh and try again." };
   const to = String(body.to || '').trim();
-  if (!isEmail_(to)) return { ok: false, error: 'BAD_EMAIL', detail: 'Check the email address.' };
+  if (!isEmail_(to)) return { ok: true, problem: 'Check the email address.' };
   if (recallTextBlocked_(cfg, card.patientId)) {
-    return { ok: false, error: 'DNC', detail: "They're on the do-not-contact list, so recall emails can't be sent." };
+    return { ok: true, problem: "They're on the do-not-contact list, so recall emails can't be sent." };
   }
   const sup = mktSuppressed_(cfg, to);
-  if (sup && sup.reason === 'bounced') return { ok: false, error: 'BOUNCED', detail: 'Emails to this address bounce. Check it with the patient.' };
+  if (sup && sup.reason === 'bounced') return { ok: true, problem: 'Emails to this address bounce. Check it with the patient.' };
   const subject = String(body.subject || '').replace(/\s+/g, ' ').trim().slice(0, 200);
-  if (!subject) return { ok: false, error: 'NO_SUBJECT', detail: 'Add a subject.' };
+  if (!subject) return { ok: true, problem: 'Add a subject.' };
   const raw = String(body.html || '');
-  if (raw.length > 400000) return { ok: false, error: 'TOO_BIG', detail: 'The email is too big. Use fewer or smaller pictures.' };
-  if (!emailHtmlToText_(raw).replace(/\s+/g, '')) return { ok: false, error: 'EMPTY', detail: 'Write a message first.' };
-  if (MailApp.getRemainingDailyQuota() < 5) return { ok: false, error: 'QUOTA', detail: "The clinic's daily email limit is used up. Try again tomorrow." };
+  if (raw.length > 400000) return { ok: true, problem: 'The email is too big. Use fewer or smaller pictures.' };
+  if (!emailHtmlToText_(raw).replace(/\s+/g, '')) return { ok: true, problem: 'Write a message first.' };
+  if (MailApp.getRemainingDailyQuota() < 5) return { ok: true, problem: "The clinic's daily email limit is used up. Try again tomorrow." };
 
   const cache = CacheService.getScriptCache();
   const rk = 'rc_mail_' + session.uid;
   const used = Number(cache.get(rk) || 0);
-  if (used >= 60) return { ok: false, error: 'RATE', detail: "You've sent a lot of emails in the last hour. Try again a bit later." };
-  cache.put(rk, String(used + 1), 3600);
+  if (used >= 60) return { ok: true, problem: "You've sent a lot of emails in the last hour. Try again a bit later." };
 
   const html = sanitizeEmailHtml_(raw) + mktFooterHtml_(card.patientId, to, 'recall');
   const inl = inlineTaskImages_(cfg, html);
   const mail = { to: to, subject: subject, htmlBody: inl.html, body: emailHtmlToText_(inl.html), name: 'Dermedica Clinic' };
   if (Object.keys(inl.images).length) mail.inlineImages = inl.images;
   MailApp.sendEmail(mail);
+  cache.put(rk, String(used + 1), 3600);   // counted only once it's actually sent
 
   const me = getStaffDocs_().filter(function (s) { return s.id === session.uid; })[0];
   const now = new Date().toISOString();
@@ -13132,7 +13157,7 @@ function recallFlowPreview_(body, session) {
   const from = win > 0 ? flowAddDaysKey_(today, -win) : '';
   const cands = open.filter(function (c) {
     const st = String(c.flowState || '');
-    if (c.stage !== 'due' || c.assignedToId || String(c.dueDate) > today) return false;
+    if (c.stage !== 'due' || c.assignedToId || c.dnc === true || String(c.dueDate) > today) return false;
     if (st === 'released') return true;
     return (!st || st === 'queued') && (!from || String(c.dueDate) >= from);
   });
