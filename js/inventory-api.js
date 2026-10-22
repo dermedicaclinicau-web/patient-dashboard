@@ -33,7 +33,7 @@ export const MOVE_TYPES = {
   baseline: "Starting stock set",
   sale: "Sold",
   tracking: "Batch & expiry changed",
-  undo: "Write-off undone",
+  undo: "Undone",
 };
 export const EXPIRY_SOON_DAYS = 60;
 
@@ -3065,7 +3065,7 @@ export async function listUnrecordedTreatments({ fromKey, toKey, productId = "" 
       const same = (aid && String(u.patientId || "").trim().toLowerCase() === aid) || (!!an && normPerson(u.patientName) === an);
       if (!same) return false;
       const uk = KEY_RE.test(u.recordDate || "") ? u.recordDate : u.at ? dayKey(u.at) : "";
-      return uk >= a.dateKey && uk <= lastKey && u.lines.some((l) => pids.has(l.productId));
+      return uk >= a.dateKey && uk <= lastKey && u.lines.some((l) => pids.has(l.productId) && (Number(l.total) || 0) > 0);
     });
     if (!recorded) {
       items.push({
@@ -3973,12 +3973,15 @@ export async function recordManualSale(product, { date, qty, patientName = "", n
   return { ...r, backdated };
 }/* ===================== Undoing a write-off, and treatments recorded from paper ===================== */
 
-// Puts a write-off's stock back into the same batches. The write-off stays in the activity, marked Undone,
-// and is left out of wastage. A fixed id means it can only ever be undone once.
+// Undoes a write-off, or a "Used on a patient" paper record. Stock goes back into the same batches, the entry
+// stays in the activity marked Undone, and a fixed id means it can only ever be undone once.
+// A paper record's usage is cleared on the patient's record (the original is kept, with the reason), so it no
+// longer counts as usage. Write-offs that were undone are left out of wastage.
 export async function undoMove(move, reason, staff) {
-  if (!move || move.type !== "writeoff") throw new Error("Only write-offs can be undone.");
+  const paper = !!move && move.type === "use" && move.paper === true && !!move.ref;
+  if (!move || (move.type !== "writeoff" && !paper)) throw new Error("Only write-offs and paper records can be undone here.");
   const why = clip(reason, 300);
-  if (!why) throw new Error("Add a reason, e.g. Written off by mistake.");
+  if (!why) throw new Error(paper ? "Add a reason, e.g. Recorded on the wrong patient." : "Add a reason, e.g. Written off by mistake.");
   const lines = (move.lines || [])
     .map((l) => ({ loc: l.loc === "jt" ? "jt" : "shelf", batch: String(l.batch || ""), expiry: String(l.expiry || ""), delta: -(Number(l.delta) || 0) }))
     .filter((l) => l.delta > 0);
@@ -3988,12 +3991,15 @@ export async function undoMove(move, reason, staff) {
   const pRef = doc(db, "inv_products", move.productId);
   const refs = lines.map((l) => doc(db, "inv_lots", lotId(move.productId, l.loc, l.batch, l.expiry)));
   const undoRef = doc(db, "inv_moves", `undo__${move.id}`);
+  const uRef = paper ? doc(db, "inv_usage", String(move.ref)) : null;
 
   await runTransaction(db, async (tx) => {
     // ---- Reads ----
-    if ((await tx.get(undoRef)).exists()) throw new Error("This write-off has already been undone. Reload to see it.");
+    if ((await tx.get(undoRef)).exists()) throw new Error("This has already been undone. Reload to see it.");
     const pSnap = await tx.get(pRef);
     if (!pSnap.exists()) throw new Error("This product no longer exists.");
+    const uSnap = uRef ? await tx.get(uRef) : null;
+    if (uRef && !uSnap.exists()) throw new Error("The patient's usage record for this can't be found.");
     const snaps = [];
     for (const r of refs) snaps.push(await tx.get(r));
 
@@ -4011,9 +4017,29 @@ export async function undoMove(move, reason, staff) {
       stock[l.loc] += l.delta;
     });
     tx.update(pRef, { stock, stockAt: serverTimestamp() });
+
+    if (uSnap) {
+      // The patient's usage: nothing used now. The first version is kept in "original".
+      const u = uSnap.data();
+      const cleared = (Array.isArray(u.lines) ? u.lines : []).map((l) => ({
+        ...l, total: 0, short: 0, doseTotal: 0, waste: 0,
+        rows: (Array.isArray(l.rows) ? l.rows : []).map((r) => ({ ...r, amount: 0, taken: 0, dose: 0, waste: 0 })),
+      }));
+      tx.update(uRef, {
+        lines: cleared, short: false,
+        ...(u.original ? {} : { original: u.lines }),
+        corrected: true, correctedAt: serverTimestamp(), correctedBy: by, correctedByUid: me,
+        corrections: arrayUnion({
+          at: new Date().toISOString(), by, byUid: me, reason: `Undone: ${why}`.slice(0, 300),
+          changes: ["Paper record undone: nothing used, stock put back"],
+        }),
+      });
+    }
+
     tx.set(undoRef, {
       type: "undo", undoOf: move.id, productId: move.productId, productName: String(pd.name || move.productName || ""),
-      unit: String(pd.stockUnit || move.unit || "item"), lines, reason: "Write-off undone", note: why, ref: "",
+      unit: String(pd.stockUnit || move.unit || "item"), lines,
+      reason: paper ? "Paper record undone" : "Write-off undone", note: why, ref: paper ? String(move.ref) : "",
       by, byUid: me, at: serverTimestamp(),
     });
   });

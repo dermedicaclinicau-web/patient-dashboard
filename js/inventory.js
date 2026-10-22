@@ -70,21 +70,23 @@ function linesText(m, label = "Batch") {
   return (m.lines || []).map((l) => `${locLabel(l.loc)} ${l.delta > 0 ? "+" : "−"}${Math.abs(l.delta)}${
     l.batch ? ` (${label} ${l.batch})` : ""}`).join(" · ");
 }
-// acts: show Undo / Used on a patient… on write-offs that haven't been undone (Manage inventory)
+// acts: Undo on write-offs and paper records that haven't been undone; "Used on a patient…" on write-offs (Manage inventory)
 function movesHtml(moves, showProduct = true, labelOf = () => "Batch", acts = false) {
   if (!moves.length) return '<p class="tb-none">No stock changes yet.</p>';
+  const undoable = (m) => !!m.id && !m.undone && (m.type === "writeoff" || (m.type === "use" && m.paper === true));
   return `<ul class="inv-moves">${moves.map((m) => `
     <li${m.undone ? ' class="is-undone"' : ""}>
       <span class="inv-m-when">${esc(when(m.at))}</span>
       <span class="inv-m-main"><strong>${esc(MOVE_TYPES[m.type] || m.type)}</strong>${m.undone ? ' <span class="inv-flag">Undone</span>' : ""}${
         showProduct ? ` · ${esc(m.productName || "")}` : ""}
         <small>${esc(linesText(m, labelOf(m.productId)))}${m.reason ? ` · ${esc(m.reason)}` : ""}${m.note ? ` · ${esc(m.note)}` : ""}</small>
-        ${acts && m.type === "writeoff" && !m.undone && m.id ? `<span class="inv-m-acts">
+        ${acts && undoable(m) ? `<span class="inv-m-acts">
           <button type="button" class="lh-btn is-quiet" data-undo="${esc(m.id)}">Undo</button>
-          <button type="button" class="lh-btn is-quiet" data-touse="${esc(m.id)}">Used on a patient…</button></span>` : ""}</span>
+          ${m.type === "writeoff" ? `<button type="button" class="lh-btn is-quiet" data-touse="${esc(m.id)}">Used on a patient…</button>` : ""}</span>` : ""}</span>
       <span class="inv-m-by">${esc(m.by || "")}</span>
     </li>`).join("")}</ul>`;
 }
+
 export function mountInventory(container, { param = "", staff = null } = {}) {
   uiStaff = staff;
   const parts = String(param || "").split("/");
@@ -1903,20 +1905,25 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     }
 
     function undoDialog(p, m) {
+      const paper = m.type === "use";
       return new Promise((resolve) => {
         let saved = false;
         const d2 = openDialog("inv-dlg", `
           <form class="lh-form" novalidate>
-            <div class="lh-dialog-head"><h3>Undo this write-off?</h3>
+            <div class="lh-dialog-head"><h3>${paper ? "Undo this paper record?" : "Undo this write-off?"}</h3>
               <p>${esc(when(m.at))}${m.by ? ` by ${esc(m.by)}` : ""}: ${esc(linesText(m, batchName(p)))}${m.reason ? ` · ${esc(m.reason)}` : ""}${
-                m.note ? ` · ${esc(m.note)}` : ""}. It goes back into stock, and the write-off is marked Undone (and left out of wastage).</p></div>
-            <label class="lh-field"><span class="lh-label">Why</span><input name="why" maxlength="300" placeholder="e.g. Written off by mistake" /></label>
-            <p class="inv-hint">Was it actually used on a patient? Close this and choose <strong>Used on a patient…</strong>,
-              so it's on their record and counts as usage.</p>
+                m.note ? ` · ${esc(m.note)}` : ""}.</p>
+              <p>${paper
+                ? "It goes back into stock, and the patient's usage is cleared (the original stays on their record, with your reason). Opening counts corrected for it aren't changed back: check Count differences afterwards."
+                : "It goes back into stock, and the write-off is marked Undone (and left out of wastage)."}</p></div>
+            <label class="lh-field"><span class="lh-label">Why</span>
+              <input name="why" maxlength="300" placeholder="${paper ? "e.g. Recorded on the wrong patient" : "e.g. Written off by mistake"}" /></label>
+            ${paper ? "" : `<p class="inv-hint">Was it actually used on a patient? Close this and choose <strong>Used on a patient…</strong>,
+              so it's on their record and counts as usage.</p>`}
             <p class="lh-error" role="alert" hidden></p>
             <div class="lh-actions">
               <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
-              <button type="submit" class="lh-btn is-primary">Undo write-off</button>
+              <button type="submit" class="lh-btn is-primary">${paper ? "Undo paper record" : "Undo write-off"}</button>
             </div>
           </form>`);
         const form = d2.querySelector("form");
@@ -1931,7 +1938,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
             await undoMove(m, form.elements.why.value, staff);
             saved = true;
             d2.close();
-            showToast("Write-off undone. It's back in stock.");
+            showToast(paper ? "Paper record undone. It's back in stock and off the patient's usage." : "Write-off undone. It's back in stock.");
           } catch (ex) {
             console.error("Undo failed:", ex);
             err.textContent = errText(ex, "Couldn't undo it. Try again.");
@@ -1943,7 +1950,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         form.elements.why.focus();
       });
     }
-
+    
     // Used on a patient, recorded on paper. from: a write-off to turn into this instead.
     function paperUseDialog(p, from = null) {
       const today = dayKey();

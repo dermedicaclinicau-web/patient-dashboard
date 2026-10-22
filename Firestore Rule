@@ -404,7 +404,7 @@ service cloud.firestore {
                'digital', 'variance', 'recount', 'status', 'outcome', 'outcomeNote', 'applied',
                'closedAt', 'closedBy', 'closedByUid', 'events', 'updatedAt'])
           && (request.resource.data.status == resource.data.status
-            || (request.resource.data.status == 'closed' && request.resource.data.outcome == 'late-invoice')));
+            || (request.resource.data.status == 'closed' && request.resource.data.outcome in ['late-invoice', 'late-record'])));
       allow delete: if false;
     }
 
