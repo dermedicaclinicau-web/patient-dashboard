@@ -1,9 +1,10 @@
 // Scanner (#/scanner): photograph a billing sheet with the products on it.
 // Gemini reads the handwriting and the labels; the portal matches both to the product list and flags anything that doesn't line up.
 // The sheet is matched to that day's booking, so the scan shows on the patient's dashboard.
-// Saving takes what was given off the Shelf (a sale, oldest expiry first) and keeps the scan with its photo.
+// Saving keeps the scan and its photo as a record of what was given. Stock comes off the Shelf when the
+// Timely invoices are uploaded, and the two are compared in Reporting.
 import { listProducts, INV_CATEGORIES, plural } from "./inventory-api.js";
-import { preparePhoto, readBillingSheet, readDocket, readPrescription, startReview, reviewBilling, saveBillingScan, earlierSales, findBooking, money } from "./scanner-api.js";
+import { preparePhoto, readBillingSheet, readDocket, readPrescription, startReview, reviewBilling, saveBillingScan, earlierScans, findBooking, money } from "./scanner-api.js";
 import { mountRxResult } from "./scanner-rx.js";
 import { rxProductList } from "./rx-products.js";
 import { mountDocketResult } from "./scanner-docket.js";
@@ -52,8 +53,10 @@ export function mountScanner(container, { staff = null } = {}) {
   };
 
   const sellCount = () => st.lines.reduce((a, l) => a + (l.product ? l.take || 0 : 0), 0);
-  const sellText = () => (sellCount() ? `Saving takes ${plural(sellCount(), "product")} off the Shelf.` : "Nothing will come off the Shelf.");
-  const saveLabel = () => (sellCount() ? `Save and take ${sellCount()} off Shelf` : "Save");
+  const sellText = () => (sellCount()
+    ? `${plural(sellCount(), "product")} recorded as given. Stock comes off the Shelf when the Timely invoices are uploaded.`
+    : "No products recorded as given.");
+  const saveLabel = () => "Save";
   // NEW: the booked name when matched, else the name read from the sheet
   const patientName = () => (st.patient && st.patient.name) || (st.review && st.review.patientName) || "";
 
@@ -121,9 +124,9 @@ export function mountScanner(container, { staff = null } = {}) {
     const bad = l.flags.some((f) => f[0] === "bad");
     const written = l.written.map((w) => `“${w.text}”${w.qty > 1 ? ` ×${w.qty}` : ""}`).join(", ");
     const seenAs = !l.product && l.seenText.length ? ` (${l.seenText.join(", ")})` : "";
-    const take = l.product ? `<label class="scan-take">Off Shelf
+    const take = l.product ? `<label class="scan-take">Given
         <input type="number" min="0" max="99" step="1" inputmode="numeric" data-take="${i}" value="${l.take || 0}"
-          aria-label="How many ${esc(l.product.name)} come off the Shelf" />
+          aria-label="How many ${esc(l.product.name)} were given" />
         <small>${Number(l.product.stock.shelf) || 0} on Shelf now</small></label>` : "";
     return `<div class="scan-row${l.flags.length ? (bad ? " is-bad" : " is-warn") : ""}">
       <div class="scan-row-main">
@@ -359,18 +362,18 @@ export function mountScanner(container, { staff = null } = {}) {
 
   async function save(btn) {
     if (st.busy) return;
-    const selling = st.lines.filter((l) => l.product && l.take > 0);
-    const who = patientName();   // NEW: the same name the sale is saved under
+    const given = st.lines.filter((l) => l.product && l.take > 0);
+    const who = patientName();
 
-    // The same patient already had some of these checked out today? Ask before taking them off again.
-    if (selling.length) {
-      const before = await earlierSales({ ...st.review, patientName: who }, selling.map((l) => l.productId)).catch(() => []);
+    // This patient's billing sheet already scanned today with some of these? Probably the same sheet twice.
+    if (given.length) {
+      const before = await earlierScans(who, given.map((l) => l.productId)).catch(() => []);
       if (before.length) {
         const ok = await confirmDialog({
-          title: "Already checked out today?",
-          message: `${before.map((b) => `${b.qty} × ${b.name}${b.by ? ` (by ${b.by})` : ""}`).join(", ")} ${before.length === 1 ? "was" : "were"} already `
-            + `taken off the Shelf for ${who} today. Take ${selling.length === 1 ? "it" : "them"} off again?`,
-          confirmLabel: "Take off again", tone: "warning",
+          title: "Already scanned today?",
+          message: `A billing sheet for ${who} with ${before.map((b) => `${b.qty} × ${b.name}${b.by ? ` (by ${b.by})` : ""}`).join(", ")} `
+            + "was already scanned today. Save this one as well?",
+          confirmLabel: "Save as well", tone: "warning",
         });
         if (!ok) return;
       }
@@ -381,29 +384,22 @@ export function mountScanner(container, { staff = null } = {}) {
     btn.textContent = "Saving…";
     try {
       const note = root.querySelector('[data-role="note"]');
-      const res = await saveBillingScan({ photo: st.photo, result: st.result, review: st.review,
+      await saveBillingScan({ photo: st.photo, result: st.result, review: st.review,
         note: note ? note.value : "", patient: st.patient }, staff);
-      const sale = res.sale;
-      const short = sale ? sale.lines.filter((l) => l.short > 0) : [];
-      const taken = sale ? sale.lines.reduce((a, l) => a + l.taken, 0) : 0;
-      showToast(!sale ? "Saved. Nothing came off the Shelf."
-        : short.length
-          ? `Saved. ${short.map((l) => l.name).join(", ")}: the Shelf showed fewer than were given. Count ${short.length === 1 ? "it" : "them"} to put the numbers right.`
-          : `Saved. ${plural(taken, "product")} taken off the Shelf.`);
-      productsReady = loadProducts();   // fresh Shelf numbers for the next scan
+      showToast("Saved. It's checked against the Timely invoice when the invoices are uploaded.");
       again();
     } catch (err) {
       console.error("Save scan failed:", err);
       showToast(err && err.code === "permission-denied"
-        ? "You don't have access to take stock off the Shelf. Ask an Admin to check your Inventory access in Staff."
-        : (err && err.message && !err.code) ? err.message : "Couldn't save. Nothing was taken off the Shelf. Try again.");
+        ? "You don't have access to save billing sheets. Ask an Admin to tick Scan billing sheets."
+        : (err && err.message && !err.code) ? err.message : "Couldn't save. Try again.");
       btn.disabled = false;
       btn.textContent = saveLabel();
     } finally {
       st.busy = false;
     }
   }
-
+  
   /* ---------- Taps, pinch and buttons ---------- */
   const pts = new Map();
   let pinch = null, tap = null;
