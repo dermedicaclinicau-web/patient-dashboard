@@ -5,6 +5,9 @@ import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase
 import { callApi } from "./appointments.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
+import { applyInvoiceSales } from "./inventory-api.js";
+import { openInvoiceLinks } from "./invoice-links.js";
+import { can } from "./perms.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -22,7 +25,23 @@ const day = (key) => {
   return isNaN(d) ? key : d.toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
 };
 const pause = () => new Promise((r) => setTimeout(r, 0));
-
+// The invoice date as YYYY-MM-DD: 2026-10-21, 21/10/2026 (Australian day first), 21-10-26 or 21 Oct 2026. "" when unreadable.
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+function invDay(v) {
+  const t = String(v || "").trim();
+  const mk = (y, mo, d) => {
+    const dt = new Date(y, mo - 1, d);
+    return dt.getFullYear() === y && dt.getMonth() === mo - 1 && dt.getDate() === d
+      ? `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}` : "";
+  };
+  let m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(t);
+  if (m) return mk(+m[1], +m[2], +m[3]);
+  m = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})\b/.exec(t);
+  if (m) return mk(+m[3] < 100 ? 2000 + +m[3] : +m[3], +m[2], +m[1]);
+  m = /^(\d{1,2})\s+([A-Za-z]{3,9})\.?\s+(\d{4})/.exec(t);
+  if (m) { const mo = MONTHS.indexOf(m[2].slice(0, 3).toLowerCase()); return mo < 0 ? "" : mk(+m[3], mo + 1, +m[1]); }
+  return "";
+}
 const KINDS = [
   { key: "daysheet", title: "Day Sheet (all time)", ready: true, sniff: [/status/, /service/],
     blurb: "Every appointment from Timely, including cancelled. Replaces everything in alltimeappts, then fills in the PCN category (N) and Patient ID (O)." },
@@ -464,7 +483,7 @@ function cardHtml(k, i) {
     </section>`;
 }
 
-function wire(card, k) {
+function wire(card, k, staff) {
   const input = card.querySelector("[data-file]");
   const drop = card.querySelector(".du-drop");
   const fname = card.querySelector('[data-role="fname"]');
@@ -475,7 +494,8 @@ function wire(card, k) {
   const result = card.querySelector('[data-role="result"]');
   const lastEl = card.querySelector('[data-role="last"]');
   let file = null, running = false, wroteSome = false;
-
+  let lastSold = null;   // the last upload's invoice lines, to apply again after names are linked
+  const canLink = can("inventory.manage");
   const setMsg = (t, bad = false) => { msg.textContent = t || ""; msg.classList.toggle("is-bad", bad); };
   const setBar = (p) => { bar.hidden = p === null; if (p !== null) bar.firstElementChild.style.width = `${Math.round(p * 100)}%`; };
   const guard = (e) => { e.preventDefault(); e.returnValue = ""; };
@@ -607,6 +627,22 @@ function wire(card, k) {
       .filter((r) => r.some(Boolean));
     if (!rows.length) throw new Error("The file has no invoices in it.");
 
+    // The same lines for stock. A quantity column is used when there is one in A–M (later columns aren't kept).
+    const head = (all[h] || []).map((c) => String(c || "").toLowerCase().replace(/[^a-z]/g, ""));
+    const qi = head.findIndex((c) => /^(qty|quantity|units|unitssold|qtysold)$/.test(c));
+    const qtyCol = qi >= 0 && qi < KEEP ? qi : -1;
+    let noDate = 0;
+    const sold = all.slice(h + 1).map((r) => {
+      const product = String(r[6] ?? "").trim();
+      const invoiceId = String(r[0] ?? "").trim();
+      if (!product || !invoiceId) return null;
+      const date = invDay(r[1]);
+      if (!date) { noDate++; return null; }
+      return { invoiceId, date, patientName: String(r[2] ?? "").trim(), staffName: String(r[4] ?? "").trim(), product,
+        qty: qtyCol >= 0 ? String(r[qtyCol] ?? "").replace(/[,\s]/g, "") : "" };
+    }).filter(Boolean);
+    all.length = 0;
+
     setMsg(`Found ${num(rows.length)} lines. Adding the new ones to INVOICE RECORD…`);
     setBar(0.5);
     const packed = await packJson(rows);
@@ -622,7 +658,7 @@ function wire(card, k) {
     res.synced = "none";
     if (res.rows) {
       setMsg("Updating the portal's skincare records…");
-      setBar(0.8);
+      setBar(0.7);
       try {
         const s = await send({ action: "upload", op: "invoicesSync" });
         res.synced = s.later ? "later" : "done";
@@ -631,16 +667,74 @@ function wire(card, k) {
         res.synced = "failed";
       }
     }
+
+    // Retail stock: every line, every time. Invoices already applied are skipped, so nothing comes off twice.
+    setMsg("Taking sold products off the Shelf…");
+    setBar(0.85);
+    lastSold = { rows: sold, noQty: qtyCol < 0, noDate, unlinked: [] };
+    const st = await applyStock(sold, (d, t) => setMsg(`Taking sold products off the Shelf… ${d} of ${t}`));
+    lastSold.unlinked = st.unlinked || [];
+
     setMsg("");
     setBar(null);
-    doneInvoices(res);
+    doneInvoices(res, st);
     clearFile();
   }
 
-  function doneInvoices(res) {
+  // Never stops the upload: the invoices are already in the sheet
+  async function applyStock(sold, onProgress) {
+    try { return await applyInvoiceSales(sold, staff, onProgress); }
+    catch (err) {
+      console.error("Invoice stock failed:", err);
+      return { error: err && err.code === "permission-denied" ? "you don't have access to Inventory" : (err && err.message) || "it didn't work" };
+    }
+  }
+
+  function stockHtml(st, info) {
+    if (!st) return "";
+    if (st.error) {
+      return `<div class="du-stock du-warn">Retail stock wasn't updated: ${esc(st.error)}. The invoices were still added.
+        Upload the same file again later to update stock (nothing is taken off twice).</div>`;
+    }
+    if (!st.started) {
+      return `<div class="du-stock muted">Retail stock isn't taken off from invoices yet.
+        Set the start date in Inventory → Products → Invoice links.</div>`;
+    }
+    const lst = (items, fn) => `<ul class="du-stocklist">${items.slice(0, 40).map(fn).join("")}</ul>${
+      items.length > 40 ? `<small class="muted">and ${num(items.length - 40)} more.</small>` : ""}`;
+    const parts = [];
+    parts.push(`<strong>Retail stock: ${st.applied ? `${plural(st.applied, "sold product")} taken off the Shelf.` : "nothing new to take off the Shelf."}</strong>`);
+    if (st.already) parts.push(`<div class="muted">${plural(st.already, "product")} had already been taken off from an earlier upload.</div>`);
+    if (st.before && !st.applied && !st.already) {
+      parts.push(`<div class="muted">These invoices are from before ${esc(day(st.startDate))}, when stock starts coming off, so stock wasn't changed.</div>`);
+    }
+    if (info && info.noQty) parts.push('<div class="muted">No quantity column was found, so each invoice line counts as 1.</div>');
+    if (info && info.noDate) parts.push(`<div class="du-warn">${plural(info.noDate, "line")} had a date that couldn't be read, so stock wasn't taken off for them.</div>`);
+    if (st.short.length) {
+      parts.push(`<details class="du-fix" open><summary>${plural(st.short.length, "product")} sold that the Shelf didn't have (saved short, to count and check)</summary>
+        ${lst(st.short, (s) => `<li>${esc(s.name)}: short by ${esc(plural(s.short, s.unit))} · invoice ${esc(s.invoiceId)}${s.patientName ? ` · ${esc(s.patientName)}` : ""}</li>`)}</details>`);
+    }
+    if (st.refunds.length) {
+      parts.push(`<details class="du-fix"><summary>${plural(st.refunds.length, "refund")} (put these back on the Shelf by hand if they came back)</summary>
+        ${lst(st.refunds, (r) => `<li>${esc(r.product)} × ${num(r.qty)} · invoice ${esc(r.invoiceId)}${r.patientName ? ` · ${esc(r.patientName)}` : ""}</li>`)}</details>`);
+    }
+    if (st.failed.length) {
+      parts.push(`<details class="du-fix" open><summary class="du-warn">${plural(st.failed.length, "product")} couldn't be taken off. Upload the file again to retry them.</summary>
+        ${lst(st.failed, (f) => `<li>${esc(f.name || "A product")} · invoice ${esc(f.invoiceId)}: ${esc(f.msg)}</li>`)}</details>`);
+    }
+    if (st.unlinked.length) {
+      parts.push(`<details class="du-fix" open><summary>${plural(st.unlinked.length, "name")} on these invoices ${st.unlinked.length === 1 ? "isn't" : "aren't"} linked to a stock product</summary>
+        ${lst(st.unlinked, (u) => `<li>${esc(u.name)} <small class="muted">(${num(u.lines)})</small></li>`)}
+        ${canLink
+          ? '<button type="button" class="ff-btn is-primary" data-act="inv-link">Link them</button> <small class="muted">Services and vouchers: choose “Not a stock item”, once.</small>'
+          : '<small class="muted">Ask someone with Manage inventory to link them in Inventory → Products → Invoice links, then upload this file again.</small>'}
+      </details>`);
+    }
+    return `<div class="du-stock">${parts.join("")}</div>`;
+  }
+
+  function doneInvoices(res, st) {
     const range = res.from ? (res.from === res.to ? day(res.from) : `${day(res.from)} to ${day(res.to)}`) : "";
-    const list = (o) => ((o && o.sample) || []).map((x) => `<li>${esc(x.name)} <small class="muted">(${num(x.rows)})</small></li>`).join("");
-    const plural = (n, w) => `${num(n)} ${w}${n === 1 ? "" : "s"}`;
     const sync = {
       done: "The portal's skincare records are updated, so purchases and Email Flows can see them now.",
       later: "Another job was running, so the portal will pick these up at the next sync.",
@@ -659,10 +753,31 @@ function wire(card, k) {
         ${fixLists({ amb: res.ambiguous?.sample, ambN: res.ambiguous?.names || 0, un: res.unmatched?.sample, unN: res.unmatched?.names || 0 })}
         ${refillBar()}
         ${sync ? `<div class="muted">${esc(sync)}</div>` : ""}
+        <div data-role="stock">${stockHtml(st, lastSold)}</div>
       </div>`;
     showToast(res.rows ? "Invoices added to INVOICE RECORD" : "No new invoices to add");
   }
 
+  // "Link them": save the links, then take the newly linked products off straight away
+  result.addEventListener("click", async (e) => {
+    const b = e.target.closest('[data-act="inv-link"]');
+    if (!b || running || !lastSold) return;
+    const ok = await openInvoiceLinks({ staff, unlinked: lastSold.unlinked });
+    if (!ok) return;
+    const box = result.querySelector('[data-role="stock"]');
+    if (box) box.innerHTML = '<div class="du-stock muted">Taking the newly linked products off the Shelf…</div>';
+    running = true;
+    btn.disabled = true;
+    try {
+      const st = await applyStock(lastSold.rows);
+      lastSold.unlinked = (st && st.unlinked) || [];
+      if (box && box.isConnected) box.innerHTML = stockHtml(st, lastSold);
+      if (st && st.applied) showToast(`${plural(st.applied, "sold product")} taken off the Shelf`);
+    } finally {
+      running = false;
+      btn.disabled = !file;
+    }
+  });
   /* ---------- 3) Customer Packages ---------- */
 
   async function runPackages() {
@@ -792,7 +907,7 @@ function wire(card, k) {
   showLast();
 }
 
-export function mountDataUploader(main) {
+export function mountDataUploader(main, { staff = null } = {}) {
   main.innerHTML = `
     <div class="tb-head">
       <div>
@@ -804,7 +919,7 @@ export function mountDataUploader(main) {
       ${KINDS.map(cardHtml).join("")}
       ${pcnCardHtml(KINDS.length + 1)}
     </div>`;
-  KINDS.filter((k) => k.ready).forEach((k) => wire(card(main, k), k));
+  KINDS.filter((k) => k.ready).forEach((k) => wire(card(main, k), k, staff));
   wirePcn(main.querySelector('[data-kind="pcn"]'));
 }
 const card = (main, k) => main.querySelector(`[data-kind="${k.key}"]`);

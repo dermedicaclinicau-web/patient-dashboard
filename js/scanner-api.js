@@ -5,7 +5,7 @@ import { db, auth } from "./firebase-config.js";
 import { collection, doc, setDoc, getDoc, getDocs, query, where, updateDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { getStorage, ref as sRef, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 import { callApi } from "./appointments.js";
-import { dayKey, recordSale, listSalesOn, listPos } from "./inventory-api.js";
+import { dayKey, listPos } from "./inventory-api.js";
 import { fetchPatients, findPatientsById, patientIds } from "./patients.js";
 
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
@@ -159,7 +159,6 @@ export function reviewBilling(lines, result, products) {
       flags.push(["warn", `Fee ${money(fee)}, retail price ${money(r2(price * qty))}`]);
     }
     if (p && !l.fixed && l.conf < 0.6) flags.push(["warn", "Check this is the right product"]);
-    if (p && take > shelf) flags.push(["warn", `The Shelf shows ${shelf} in the system`]);
     return { ...l, product: p, qty, fee, feeFrom, take, flags };
   });
 
@@ -174,15 +173,17 @@ export function reviewBilling(lines, result, products) {
   };
 }
 
-/* ---------- Already checked out today? ---------- */
-// The same patient's sales today that include any of these products: [{ name, qty, by }]
-export async function earlierSales(review, productIds) {
-  const name = normName(review.patientName);
+/* ---------- Already scanned today? ---------- */
+// The same patient's billing sheets scanned today that include any of these products: [{ name, qty, by }]
+export async function earlierScans(patientName, productIds) {
+  const name = normName(patientName);
   if (!name) return [];
   const want = new Set(productIds);
-  return (await listSalesOn(dayKey()))
-    .filter((s) => !s.voided && normName(s.patientName) === name)
-    .flatMap((s) => s.lines.filter((l) => want.has(l.productId)).map((l) => ({ name: l.name, qty: l.qty, by: s.by })));
+  const snap = await getDocs(query(collection(db, "scans"), where("dateKey", "==", dayKey())));
+  return snap.docs.map((d) => d.data())
+    .filter((s) => s.kind === "billing" && s.status !== "deleted" && normName(s.patientName) === name)
+    .flatMap((s) => (s.lines || []).filter((l) => want.has(l.productId) && (Number(l.take) || 0) > 0)
+      .map((l) => ({ name: l.productName || "a product", qty: Number(l.take) || 0, by: s.by || "" })));
 }
 
 
@@ -227,10 +228,10 @@ export async function findBooking(review) {
   return { date, list, match: bestScore >= 2 ? best : null };
 }
 
-/* ---------- Saving: the scan, and the sale that takes the products off the Shelf ---------- */
-// Returns { id, sale } (sale is null when nothing came off the Shelf)
-// Returns { id, sale } (sale is null when nothing came off the Shelf)
-// patient: the booking this sheet was matched to { id (Patient ID), name, time, staff }, or null
+/* ---------- Saving: the billing sheet, kept as a record of what was given ---------- */
+// Stock isn't changed here. It comes off the Shelf when the Timely invoices are uploaded (Daily uploads),
+// and each sheet is compared with that patient's invoice (Reporting → Billing vs invoices).
+// patient: the booking this sheet was matched to { id (Patient ID), name, time, staff }, or null. Returns { id }.
 export async function saveBillingScan({ photo, result, review, note = "", patient = null }, staff) {
   const uid = auth.currentUser && auth.currentUser.uid;
   if (!uid) throw new Error("Your session has ended. Log in again.");
@@ -247,9 +248,7 @@ export async function saveBillingScan({ photo, result, review, note = "", patien
   }
   const cleanNote = String(note || "").trim().slice(0, 1000);
   const patientName = patient && patient.name ? patient.name : review.patientName;
-  const sell = review.lines.filter((l) => l.product && l.take > 0)
-    .map((l) => ({ productId: l.productId, qty: l.take, fee: l.fee }));
-  const data = {
+  await setDoc(ref, {
     kind: "billing", dateKey: key, status: review.flagCount ? "flagged" : "ok", flagCount: review.flagCount, note: cleanNote,
     // The patient: from the booking when matched (shown on their dashboard), and the name exactly as read from the sheet
     patientName, readName: review.patientName,
@@ -260,23 +259,17 @@ export async function saveBillingScan({ photo, result, review, note = "", patien
     lines: review.lines.map((l) => ({
       productId: l.productId, productName: l.product ? l.product.name : "",
       written: l.written.map((w) => w.text).join(" / "), qty: l.qty, fee: l.fee, feeFrom: l.feeFrom || "",
-      seen: l.seen, take: l.take || 0,
+      seen: l.seen, take: l.take || 0,   // take = how many were given to the patient
       seenAs: l.seenText.join(" / ").slice(0, 300), fixed: !!l.fixed, flags: l.flags.map((f) => f[1]),
     })),
     productsTotal: review.productsTotal,
+    stockChanged: false,   // invoices take the stock off, not the scan
     photo: file, raw: JSON.stringify(result).slice(0, 20000), saleId: "",
     by: String((staff && staff.name) || "").slice(0, 120), byUid: uid, at: serverTimestamp(),
-  };
-  if (!sell.length) {
-    await setDoc(ref, data);
-    return { id: ref.id, sale: null };
-  }
-  const sale = await recordSale({
-    source: "scan", scanId: ref.id, patientName, apptDate: review.apptDate,
-    provider: review.provider, note: cleanNote, lines: sell,
-  }, staff, { also: (tx, saleId) => tx.set(ref, { ...data, saleId }) });
-  return { id: ref.id, sale };
+  });
+  return { id: ref.id };
 }
+
 /* ---------- Delivery dockets ---------- */
 const ymd = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || "")) ? String(v) : "");
 const expiryOf = (v) => { const s = String(v || "").trim(); return /^\d{4}-\d{2}(-\d{2})?$/.test(s) ? s : ""; };

@@ -3565,11 +3565,14 @@ export async function listSalesOn(key = dayKey()) {
   });
 }
 
-// sale = { source: "scan" | "pos", scanId, patientName, apptDate, provider, note, lines: [{ productId, qty, fee }] }
-// also(tx, saleId): extra writes in the same transaction (e.g. the scan record). Returns { id, lines, short }.
-export async function recordSale(sale, staff, { also = null } = {}) {
+// sale = { source: "scan" | "pos" | "invoice", scanId, invoiceId, patientName, apptDate, provider, note, lines: [{ productId, qty, fee }] }
+// saleId (optional): a fixed record id, so the same sale is never recorded twice. The second time returns { already: true }.
+// deduct: false saves the record without changing stock (a billing sheet kept as evidence).
+// also(tx, saleId): extra writes in the same transaction (e.g. the scan record). Returns { id, lines, short, already }.
+export async function recordSale(sale, staff, { also = null, saleId = "", deduct = true } = {}) {
   const me = uid();
   const by = who(staff);
+  const source = ["pos", "invoice"].includes(sale.source) ? sale.source : "scan";
   const want = new Map();
   (sale.lines || []).forEach((l) => {
     const pid = clip(l.productId, 60);
@@ -3588,46 +3591,54 @@ export async function recordSale(sale, staff, { also = null } = {}) {
 
   // Each product's Shelf batches, oldest expiry first. Their quantities are read again inside the transaction.
   const lotIds = new Map();
-  await Promise.all(items.map(async (it) => {
-    const snap = await getDocs(query(collection(db, "inv_lots"), where("productId", "==", it.productId)));
-    lotIds.set(it.productId, snap.docs.map(normaliseLot).filter((l) => l.loc === "shelf" && l.qty > 0).sort(fefo).map((l) => l.id));
-  }));
+  if (deduct) {
+    await Promise.all(items.map(async (it) => {
+      const snap = await getDocs(query(collection(db, "inv_lots"), where("productId", "==", it.productId)));
+      lotIds.set(it.productId, snap.docs.map(normaliseLot).filter((l) => l.loc === "shelf" && l.qty > 0).sort(fefo).map((l) => l.id));
+    }));
+  }
 
-  const saleRef = doc(collection(db, "inv_sales"));
+  const saleRef = saleId ? doc(db, "inv_sales", clip(saleId, 140)) : doc(collection(db, "inv_sales"));
   let result = null;
   await runTransaction(db, async (tx) => {
     // ---- Reads ----
+    if (saleId) {
+      const was = await tx.get(saleRef);
+      if (was.exists()) { result = { id: saleRef.id, lines: [], short: false, already: true }; return; }
+    }
     const prods = new Map();
     const lots = new Map();
     for (const it of items) {
       const ps = await tx.get(doc(db, "inv_products", it.productId));
-      if (!ps.exists()) throw new Error("A product on this sale no longer exists. Scan it again.");
+      if (!ps.exists()) throw new Error("A product on this sale no longer exists.");
       prods.set(it.productId, ps);
       for (const id of lotIds.get(it.productId) || []) lots.set(id, await tx.get(doc(db, "inv_lots", id)));
     }
 
     // ---- Writes ----
-    const reason = sale.source === "pos" ? "Checkout" : "Billing sheet scan";
-    const who2 = [sale.patientName, sale.provider].filter(Boolean).join(" · ");
+    const reason = source === "pos" ? "Checkout" : source === "invoice" ? "Timely invoice" : "Billing sheet scan";
+    const who2 = [sale.invoiceId && `Invoice ${sale.invoiceId}`, sale.patientName, sale.provider].filter(Boolean).join(" · ");
     const out = items.map((it) => {
       const ps = prods.get(it.productId);
       const pd = ps.data();
       let left = it.qty;
       const rows = [];
-      for (const id of lotIds.get(it.productId) || []) {
-        if (!left) break;
-        const s = lots.get(id);
-        if (!s || !s.exists()) continue;
-        const d = s.data();
-        const have = Number(d.qty) || 0;
-        if (have <= 0) continue;
-        const n = Math.min(have, left);
-        tx.update(s.ref, { qty: have - n, updatedAt: serverTimestamp() });
-        rows.push({ batch: String(d.batch || ""), expiry: String(d.expiry || ""), taken: n });
-        left -= n;
+      if (deduct) {
+        for (const id of lotIds.get(it.productId) || []) {
+          if (!left) break;
+          const s = lots.get(id);
+          if (!s || !s.exists()) continue;
+          const d = s.data();
+          const have = Number(d.qty) || 0;
+          if (have <= 0) continue;
+          const n = Math.min(have, left);
+          tx.update(s.ref, { qty: have - n, updatedAt: serverTimestamp() });
+          rows.push({ batch: String(d.batch || ""), expiry: String(d.expiry || ""), taken: n });
+          left -= n;
+        }
       }
       const taken = it.qty - left;
-      if (taken) {
+      if (deduct && taken) {
         const st = pd.stock || {};
         tx.update(ps.ref, { stock: { shelf: Math.max(0, (Number(st.shelf) || 0) - taken), jt: Number(st.jt) || 0 }, stockAt: serverTimestamp() });
         logMove(tx, staff, {
@@ -3638,19 +3649,19 @@ export async function recordSale(sale, staff, { also = null } = {}) {
       }
       return {
         productId: it.productId, name: String(pd.name || ""), unit: String(pd.stockUnit || "item"),
-        qty: it.qty, fee: it.hasFee ? it.fee : null, taken, short: it.qty - taken, rows,
+        qty: it.qty, fee: it.hasFee ? it.fee : null, taken: deduct ? taken : 0, short: deduct ? it.qty - taken : 0, rows,
       };
     });
     const short = out.some((l) => l.short > 0);
     tx.set(saleRef, {
-      source: sale.source === "pos" ? "pos" : "scan", scanId: clip(sale.scanId, 40),
+      source, scanId: clip(sale.scanId, 40), invoiceId: clip(sale.invoiceId, 60),
       patientName: clip(sale.patientName, 150), apptDate: KEY_RE.test(sale.apptDate || "") ? sale.apptDate : "",
       provider: clip(sale.provider, 80), note: clip(sale.note, 500),
-      lines: out, short, total: round2(out.reduce((a, l) => a + (l.fee || 0), 0)),
+      lines: out, short, deducted: deduct, total: round2(out.reduce((a, l) => a + (l.fee || 0), 0)),
       voided: false, dateKey: dayKey(), by, byUid: me, at: serverTimestamp(),
     });
     if (also) also(tx, saleRef.id, out);
-    result = { id: saleRef.id, lines: out, short };
+    result = { id: saleRef.id, lines: out, short, already: false };
   });
   return result;
 }
@@ -3690,4 +3701,105 @@ export function fillPoTemplate(text, { po, supplier, staff }) {
     const v = vals[k.toLowerCase().replace(/\s+/g, " ")];
     return v === undefined ? all : v;
   });
+}
+
+/* ===================== Timely invoices: what was sold comes off the Shelf ===================== */
+// Invoices are the source of truth for retail. Each invoice line whose product name links to a stock product
+// comes off the Shelf (oldest expiry first). One record per invoice + product, so uploading the same invoice again,
+// or linking a name later and applying again, never takes anything off twice.
+// Nothing dated before the start date is applied. No start date = nothing is applied at all.
+
+export const INVOICE_NOT_STOCK = "-";
+export const invoiceNameKey = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+export async function getInvoiceSettings() {
+  const s = await getDoc(doc(db, "inv_settings", "invoices"));
+  const d = s.exists() ? s.data() : {};
+  return {
+    startDate: KEY_RE.test(d.startDate || "") ? d.startDate : "",
+    links: (Array.isArray(d.links) ? d.links : [])
+      .map((l) => ({ name: clip(l && l.name, 150), productId: clip(l && l.productId, 60) }))
+      .filter((l) => l.name && l.productId),
+    by: String(d.updatedBy || ""), at: toDate(d.updatedAt),
+  };
+}
+
+export async function saveInvoiceSettings({ startDate = "", links = [] }, staff) {
+  if (startDate && (!KEY_RE.test(startDate) || startDate > dayKey())) throw new Error("Check the start date: it can't be in the future.");
+  const seen = new Set();
+  const clean = (Array.isArray(links) ? links : [])
+    .map((l) => ({ name: clip(l && l.name, 150), productId: clip(l && l.productId, 60) }))
+    .filter((l) => l.name && l.productId && !seen.has(invoiceNameKey(l.name)) && seen.add(invoiceNameKey(l.name)))
+    .slice(0, 1000);
+  await setDoc(doc(db, "inv_settings", "invoices"), { startDate: startDate || "", links: clean, ...stamp(staff) });
+}
+
+// rows: [{ invoiceId, date: "YYYY-MM-DD", patientName, staffName, product, qty }]  (qty optional: 1 when missing)
+export async function applyInvoiceSales(rows, staff, onProgress = () => {}) {
+  const [cfg, products] = await Promise.all([getInvoiceSettings(), listProducts()]);
+  const res = { started: !!cfg.startDate, startDate: cfg.startDate, applied: 0, already: 0, before: 0,
+    short: [], unlinked: [], refunds: [], failed: [] };
+  if (!cfg.startDate) return res;
+
+  const live = new Map(products.filter((p) => p.active).map((p) => [p.id, p]));
+  const link = new Map([...live.values()].map((p) => [invoiceNameKey(p.name), p.id]));   // exact name matches link by themselves
+  cfg.links.forEach((l) => link.set(invoiceNameKey(l.name), l.productId));                // saved links win
+
+  const sales = new Map();
+  const unlinked = new Map();
+  (rows || []).forEach((r) => {
+    const invoiceId = clip(r.invoiceId, 60);
+    const date = KEY_RE.test(r.date || "") ? r.date : "";
+    const name = clip(r.product, 150);
+    if (!invoiceId || !date || !name) return;
+    if (date < cfg.startDate) { res.before++; return; }
+    const key = invoiceNameKey(name);
+    const pid = link.get(key);
+    if (pid === INVOICE_NOT_STOCK) return;
+    const q = r.qty === undefined || r.qty === null || r.qty === "" ? 1 : Number(r.qty);
+    if (!Number.isFinite(q) || q === 0) return;
+    if (q < 0) {   // refunds are listed for staff, not put back automatically
+      res.refunds.push({ invoiceId, date, patientName: clip(r.patientName, 150), product: name, qty: -q });
+      return;
+    }
+    if (!pid || !live.has(pid)) {
+      const u = unlinked.get(key) || { name, lines: 0, last: "" };
+      u.lines++;
+      if (date > u.last) u.last = date;
+      unlinked.set(key, u);
+      return;
+    }
+    const id = `invoice__${slug(invoiceId)}__${pid}`;
+    const s = sales.get(id) || { id, invoiceId, date, patientName: clip(r.patientName, 150), staffName: clip(r.staffName, 80), productId: pid, qty: 0 };
+    s.qty += Math.max(1, Math.round(q));
+    sales.set(id, s);
+  });
+  res.unlinked = [...unlinked.values()].sort((a, b) => b.lines - a.lines);
+
+  const queue = [...sales.values()];
+  const total = queue.length;
+  let done = 0;
+  await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
+    while (queue.length) {
+      const s = queue.shift();
+      try {
+        const r = await recordSale({
+          source: "invoice", invoiceId: s.invoiceId, patientName: s.patientName, apptDate: s.date, provider: s.staffName,
+          lines: [{ productId: s.productId, qty: s.qty }],
+        }, staff, { saleId: s.id });
+        if (r.already) res.already++;
+        else {
+          res.applied++;
+          const l = r.lines[0];
+          if (l && l.short > 0) res.short.push({ invoiceId: s.invoiceId, patientName: s.patientName, name: l.name, short: l.short, unit: l.unit });
+        }
+      } catch (err) {
+        console.error("Invoice sale failed:", s.invoiceId, err);
+        res.failed.push({ invoiceId: s.invoiceId, name: (live.get(s.productId) || {}).name || "",
+          msg: err && err.code === "permission-denied" ? "No access to Inventory" : (err && err.message) || "Couldn't save" });
+      }
+      onProgress(++done, total);
+    }
+  }));
+  return res;
 }

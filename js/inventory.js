@@ -24,11 +24,13 @@ import { openProductImport, exportProductsCsv } from "./inventory-import.js";
 import { renderNotifications } from "./notifications.js";
 import { renderServiceLinks } from "./service-links.js";
 import { enableUiText } from "./ui-text.js";
+import { openInvoiceLinks } from "./invoice-links.js";
+import { renderBillingCheck } from "./billing-check.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const SEARCH = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
-const TABS = [["stock", "Stock"], ["kits", "Kits"], ["investigations", "Investigations"], ["requests", "Requests"],
+const TABS = [["stock", "Stock"], ["kits", "Kits"], ["investigations", "Investigations"], ["billing", "Billing check"], ["requests", "Requests"],
   ["receive", "Receive delivery"], ["orders", "Purchase orders"], ["products", "Products"], ["services", "Service links"],
   ["suppliers", "Suppliers"], ["activity", "Activity"], ["notifications", "Notifications"]];
 const niceDate = (key) => {
@@ -94,7 +96,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   const showKits = canKit || canJt || canManage;
   const showInv = canMove || can("inventory.count") || can("menu.reports");
   const TAB_OK = {
-    stock: canView, kits: showKits, investigations: showInv, requests: canRequest || canMove, receive: canReceive,
+    stock: canView, kits: showKits, investigations: showInv, billing: showInv, requests: canRequest || canMove, receive: canReceive,
     orders: canMove, products: canView, services: canManage, suppliers: canView, activity: canView, notifications: canManage,
   };
   const tabs = TABS.filter(([k]) => TAB_OK[k]);
@@ -212,6 +214,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     else if (tab === "receive") mountReceivePo(body, "", staff);
     else if (tab === "kits") renderKitsTab();
     else if (tab === "investigations") renderInvestigations(body, { staff });
+    else if (tab === "billing") renderBillingCheck(body, { staff });
     else if (tab === "services") {
       if (canManage) renderServiceLinks(body, { staff, products: st.products });
       else body.innerHTML = '<div class="tm-empty">Only Manage inventory can link services to products.</div>';
@@ -470,7 +473,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         </select>
         <label class="fe-check"><input type="checkbox" data-f="showInactive"${st.showInactive ? " checked" : ""} /> Show inactive</label>
         <span class="inv-spacer"></span>
-        ${canManage ? `<button type="button" class="ff-btn" data-act="export-products">Export CSV</button>
+        ${canManage ? `<button type="button" class="ff-btn" data-act="invoice-links">Invoice links</button>
+          <button type="button" class="ff-btn" data-act="export-products">Export CSV</button>
           <button type="button" class="ff-btn is-primary" data-act="import-products">Import products</button>` : ""}
       </div>
       ${canManage ? `<div class="inv-bulk" data-role="bulk" hidden>
@@ -2310,6 +2314,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     if (rq) { handleReq(rq.dataset.id, rq.dataset.req); return; }
     if (e.target.closest('[data-act="req-settings"]')) { reqSettings(); return; }
     if (e.target.closest('[data-act="import-products"]')) { openProductImport({ products: st.products, suppliers: st.suppliers, staff, onDone: load }); return; }
+    if (e.target.closest('[data-act="invoice-links"]')) { openInvoiceLinks({ staff }).then((ok) => { if (ok) load(); }); return; }
     if (e.target.closest('[data-act="export-products"]')) { exportProductsCsv(st.products, st.suppliers); return; }
     if (e.target.closest('[data-act="new-product"]')) { editProduct(null); return; }
     if (e.target.closest('[data-act="new-supplier"]')) { editSupplier(null); return; }

@@ -8,6 +8,7 @@ import {
   kitOvernightEvidence, saveRecount, allowAloneRecount, closeInvestigation, listProducts, plural, unitPlural, myUid, dayKey,
 } from "./inventory-api.js";
 import { can } from "./perms.js";
+import { billingCheck, BC_TYPES } from "./billing-check-api.js";
 import { showToast } from "./utils.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -109,7 +110,14 @@ export async function mountInvestigation(container, { id, staff } = {}) {
     ev = null;
     evErr = "";
     draw();
-    (isOvernight(x) ? kitOvernightEvidence(x) : investigationEvidence(x))
+    (isOvernight(x) ? kitOvernightEvidence(x) : investigationEvidence(x).then(async (r) => {
+      // Shelf products: billing sheets against Timely invoices over the same days
+      if (x.loc === "shelf") {
+        r.billing = await billingCheck({ fromKey: dayKey(r.since), toKey: dayKey(r.countAt), productId: x.productId })
+          .catch((err) => { console.warn("Billing check failed:", err); return null; });
+      }
+      return r;
+    }))
       .then((r) => { ev = r; })
       .catch((err) => { console.warn("Record check failed:", err); evErr = "Couldn't check the records. Reload to try again."; })
       .finally(() => { if (root.isConnected) drawEvidence(); });
@@ -347,6 +355,9 @@ export async function mountInvestigation(container, { id, staff } = {}) {
       ...e.pos.map((po) => `<li><strong>Delivery not fully put away</strong> · <a href="#/inventory/po/${encodeURIComponent(po.id)}">${esc(po.number)}</a> · ${
         esc(PO_STATUS[po.status] || po.status)}</li>`),
       ...e.rels.map((r) => `<li><strong>JT storage release waiting</strong> · ${esc(plural(r.qty, r.unit))} for ${esc(r.requestedBy || "")}</li>`),
+      ...((e.billing && e.billing.items) || []).filter((b) => b.type !== "nosheet").map((b) => `<li><strong>${esc(BC_TYPES[b.type].label)}</strong> · ${
+        esc(b.patientName)} · ${esc(niceKey(b.day))} · billing sheet ${b.given}, invoice ${b.invoiced}${
+        b.staff.length ? ` · ${esc(b.staff.join(", "))}` : ""}${b.check ? ` · checked: “${esc(b.check.note)}”` : ""}</li>`),
     ];
     return `<p class="muted">${e.sinceCount ? `Last count that matched: <strong>${esc(day(e.since))}</strong>`
         : "No matching count in the last 120 days, so this covers the 30 days before the count"}. Digital was <strong>${esc(plural(e.digitalAtSince, unit))}</strong> then.</p>
@@ -355,7 +366,9 @@ export async function mountInvestigation(container, { id, staff } = {}) {
       ${flags.length ? `<div class="ivx-flags"><strong>Could explain it</strong><ul>${flags.join("")}</ul></div>`
         : '<p class="ivx-none">Nothing in the records explains the difference.</p>'}
       ${e.booked && !e.booked.configured ? '<p class="muted ivx-note">Bookings aren\'t checked yet. Link services to products in Inventory → Service links.</p>' : ""}
-      ${e.booked && e.booked.failed ? '<p class="muted ivx-note">Bookings couldn\'t be checked this time. Reload to try again.</p>' : ""}`;
+      ${e.booked && e.booked.failed ? '<p class="muted ivx-note">Bookings couldn\'t be checked this time. Reload to try again.</p>' : ""}
+      ${e.billing && !e.billing.started ? '<p class="muted ivx-note">Billing sheets aren\'t compared with invoices yet. Set the start date in Inventory → Products → Invoice links.</p>' : ""}
+      ${e.billing && e.billing.waiting ? `<p class="muted ivx-note">${e.billing.waiting} billing sheet line${e.billing.waiting === 1 ? " is" : "s are"} waiting for their invoice upload.</p>` : ""}`;
   }
 
   root.addEventListener("click", async (e) => {

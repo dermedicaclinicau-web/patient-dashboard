@@ -142,7 +142,7 @@ export function mountTaskManager(container, { param = "", isAdmin = false, staff
   if (view === "history") { mountTaskHistory(main, { patientId: sub }); return; }
   if (view === "uploads") {
     if (!can("data.upload")) { main.innerHTML = '<div class="tm-empty">You don\'t have access to Daily uploads.</div>'; return; }
-    mountDataUploader(main);
+    mountDataUploader(main, { staff });
     return;
   }
   if (view === "marketing") {

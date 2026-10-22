@@ -228,6 +228,7 @@ service cloud.firestore {
     function invReceive() { return invOrder() || can('inventory.receive'); }  // ticks off deliveries
     function invStock() { return invOrder() || invKit() || invJt() || invReceive(); }
     function invUse() { return invStock() || can('consult.record'); }         // records products used in treatments
+    function invSell() { return invUse() || can('data.upload'); }            // invoice uploads take sold stock off the Shelf
     function invReport() { return can('menu.reports'); }                      // reviews count differences
     function kitOk() {
       return request.resource.data.sealed is int && request.resource.data.sealed >= 0
@@ -246,14 +247,14 @@ service cloud.firestore {
       allow create: if invManage() && request.resource.data.name is string
         && request.resource.data.stock.shelf == 0 && request.resource.data.stock.jt == 0;
       allow update: if (invManage() && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['stock', 'stockAt']))
-        || ((invUse() || invReport()) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stock', 'stockAt']));
+        || ((invSell() || invReport()) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stock', 'stockAt']));
       allow delete: if false;
     }
 
     // Batches on the Shelf and in JT storage
     match /inv_lots/{id} {
       allow read: if isStaff();
-      allow create, update: if (invUse() || invReport()) && request.resource.data.qty is int && request.resource.data.qty >= 0;
+      allow create, update: if (invSell() || invReport()) && request.resource.data.qty is int && request.resource.data.qty >= 0;
       allow delete: if false;
     }
 
@@ -267,7 +268,8 @@ service cloud.firestore {
           || (invReceive() && request.resource.data.type == 'receive')
           || (invKit() && request.resource.data.type in ['kit-take', 'kit-open', 'kit-return', 'kit-discard', 'kit-use', 'kit-borrow'])
           || (invJt() && request.resource.data.type == 'release')
-          || (invUse() && request.resource.data.type in ['use', 'sale']));
+          || (invUse() && request.resource.data.type in ['use', 'sale'])
+          || (invSell() && request.resource.data.type == 'sale'));
       allow update, delete: if false;
     }
 
@@ -332,7 +334,7 @@ service cloud.firestore {
     // (patient, form, staff and the first original are locked).
     match /inv_usage/{id} {
       allow read: if isStaff();
-      allow create: if invUse() && request.resource.data.byUid == request.auth.uid;
+      allow create: if invSell() && request.resource.data.byUid == request.auth.uid;
       allow update: if
         (
           (invReport() || invOrder())
@@ -1211,6 +1213,16 @@ match /inv_count_drafts/{id} {
         && request.resource.data.voided == false;
       allow update, delete: if false;
     }
+    // Billing check: "Mark checked" notes, one per mismatch. Saved once, never changed.
+    match /inv_billing_checks/{id} {
+      allow read: if isStaff();
+      allow create: if (invManage() || invOrder() || invReport())
+        && request.resource.data.byUid == request.auth.uid
+        && request.resource.data.note is string
+        && request.resource.data.note.size() > 0 && request.resource.data.note.size() <= 500;
+      allow update, delete: if false;
+    }
+
     // Saved forms moved to another patient (written by Apps Script only)
     match /record_moves/{id} {
       allow read: if can('records.move');
