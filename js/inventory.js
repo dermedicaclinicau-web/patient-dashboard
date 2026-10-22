@@ -8,7 +8,9 @@ import {
   listCounts, listInvestigations, dayKey, 
   isSharedProduct, listOpenContainers, openContainer, finishContainer, openState, expectedUses, FINISH_REASONS,
   setStartingStock, PO_EMAIL_TAGS, fillPoTemplate, poNumberBase, PO_ORDER_TAG_RE, setTracking, correctLot,
+  listKits, listKitDays,
 } from "./inventory-api.js";
+import { openSetKitDialog } from "./kit-admin.js";
 import { renderInvestigations, mountInvestigation } from "./investigations.js";
 import { mountPurchaseOrder } from "./purchase-order.js";
 import { fetchStaffList } from "./task-types.js";
@@ -208,7 +210,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     function render() {
     if (tab === "stock") renderStock();
     else if (tab === "receive") mountReceivePo(body, "", staff);
-    else if (tab === "kits") renderKits(body, { staff, products: st.products, lots: st.lots, canKit, canJt, canManage, reload: load });
+    else if (tab === "kits") renderKitsTab();
     else if (tab === "investigations") renderInvestigations(body, { staff });
     else if (tab === "services") {
       if (canManage) renderServiceLinks(body, { staff, products: st.products });
@@ -224,7 +226,45 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     }
     else renderActivity();
   }
+  /* ---------- Kits (admins: set an injector's kit) ---------- */
+  function renderKitsTab() {
+    const opts = { staff, products: st.products, lots: st.lots, canKit, canJt, canManage, reload: load };
+    if (!canManage) { renderKits(body, opts); return; }
+    body.innerHTML = `
+      <div class="inv-tools kit-admin-bar">
+        <p class="muted">Moving someone over from the old app, or their kit is wrong? Set it to what they physically have.</p>
+        <span class="inv-spacer"></span>
+        <button type="button" class="ff-btn is-primary" data-act="set-kit">Set an injector's kit</button>
+      </div>
+      <div data-role="kits"></div>`;
+    renderKits(body.querySelector('[data-role="kits"]'), opts);
+  }
 
+  // Injectors from the staff list, their kit records, and anyone who counted a kit in the last 30 days
+  async function openSetKit(uid = "") {
+    const btn = body.querySelector('[data-act="set-kit"]');
+    if (btn) { btn.disabled = true; btn.textContent = "Loading…"; }
+    try {
+      const [kits, staffList, days] = await Promise.all([
+        listKits(),
+        fetchStaffList().catch(() => []),
+        listKitDays(new Date(Date.now() - 30 * 864e5), new Date(Date.now() + 864e5)).catch(() => []),
+      ]);
+      const counted = days.filter((d) => (d.start && d.start.items.length) || (d.end && d.end.items.length));
+      const people = new Map();
+      const add = (id, name) => { if (id && !people.has(id)) people.set(id, { uid: String(id), name: String(name || "Unnamed") }); };
+      staffList.forEach((s) => { if (s.injector === true || s.carriesKit === true) add(s.uid || s.authUid, s.name); });
+      kits.forEach((k) => add(k.staffUid, k.staffName));
+      counted.forEach((d) => add(d.staffUid, d.staffName));
+      const injectors = [...people.values()].sort((a, b) => a.name.localeCompare(b.name, "en-AU"));
+      openSetKitDialog({ staff, injectors, products: st.products, kits, days: counted, uid, onSaved: load });
+    } catch (err) {
+      console.error("Set kit failed to open:", err);
+      showToast(errText(err, "Couldn't load the kits. Try again."));
+    } finally {
+      if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = "Set an injector's kit"; }
+    }
+  }
   /* ---------- Stock ---------- */
   function renderStock() {
     const active = st.products.filter((p) => p.active);
@@ -2250,6 +2290,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   /* ---------- Events ---------- */
   root.addEventListener("click", (e) => {
     if (tab === "receive" && body.contains(e.target)) return;   // the receiving screen handles its own clicks
+    if (e.target.closest('[data-act="set-kit"]')) { openSetKit(); return; }
     if (e.target.closest('[data-act="quick"]')) { toggleQuick(); return; }
     if (e.target.closest('[data-act="quick-discard"]')) { st.qv.clear(); renderStockList(); syncQuickBar(); return; }
     const qs = e.target.closest('[data-act="quick-save"]');

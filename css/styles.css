@@ -7903,3 +7903,18 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
   .sod-kitq .kc-q { flex-wrap: wrap; }
   .sod-kitq .kc-batch { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Start of Day: stock for today's bookings */
+.sod-you-tasks > .sod-stock.is-low { background: #fffbeb; color: #92400e; }
+.sod-you-tasks > .sod-stock.is-low small { color: #b45309; }
+
+/* Inventory → Kits: Set an injector's kit */
+dialog.lh-dialog.inv-dlg.kit-set-dlg { width: min(760px, 96vw); }
+.kit-set-table .fe-input { width: 100%; min-width: 0; }
+.kit-set-table td { vertical-align: middle; }
+.kit-set-table td:last-child, .kit-set-table th:last-child { width: 40px; text-align: center; }
+.kit-set-total { margin: 0; font-size: .95rem; }
+.kit-set-total strong { color: var(--primary); }
+
+.kit-admin-bar { margin-bottom: 1rem; padding: .7rem .9rem; border: 1px dashed var(--border); border-radius: 12px; background: #fff; }
+.kit-admin-bar p { margin: 0; font-size: .88rem; }

@@ -1,6 +1,8 @@
 import { fetchDayAppointments } from "./appointments.js";
 import { escapeHtml, getInitials, toDateKey, showToast } from "./utils.js";
-import { listProducts, isKitProduct, getMyKitDay, saveKitDayStart, saveDayStart, plural } from "./inventory-api.js";
+import { listProducts, isKitProduct, getMyKitDay, saveKitDayStart, saveDayStart, plural, unitPlural,
+  getServiceLinks, serviceKey, listOpenContainers } from "./inventory-api.js";
+import { can } from "./perms.js";
 import { db } from "./firebase-config.js";
 import { collection, getDocs, query, where, FieldPath, doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { kitCountHtml, wireKitCount, readKitCount, kitBatchOptions } from "./kit-count.js";
@@ -18,6 +20,7 @@ const ICO = {
   cal: svg('<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>'),
   task: svg('<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'),
   note: svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/>'),
+  box: svg('<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/>'),
 };
 const esc = escapeHtml;
 const niceDate = (key) => {
@@ -436,14 +439,84 @@ async function myTasksDue(staff, key) {
     .sort((a, b) => String(a.dueDate).localeCompare(String(b.dueDate)));
 }
 
-// How many of my consultation notes are still a Draft
-async function myDraftNotes(staff) {
-  const name = String(staff.name || "").trim();
-  if (!name) return 0;
-  const snap = await getDocs(query(collection(db, "appointment_transcripts"), where(new FieldPath("Staff Name"), "==", name)));
-  return snap.docs.filter((d) => !/^reviewed$/i.test(String((d.data() || {}).Status || ""))).length;
+// A note's date, from whichever date field it has (YYYY-MM-DD, DD/MM/YYYY, a Firestore Timestamp or a number)
+function noteDate(x) {
+  const v = x["Appointment Date"] ?? x["Date"] ?? x.date ?? x.appointmentDate ?? x["Created At"] ?? x.createdAt ?? x.timestamp;
+  if (!v) return null;
+  if (typeof v.toDate === "function") return v.toDate();
+  if (v instanceof Date) return v;
+  if (typeof v === "number") return new Date(v);
+  const s = String(v).trim();
+  let m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  if (m) return new Date(+m[1], +m[2] - 1, +m[3]);
+  m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(s);
+  if (m) return new Date(+m[3], +m[2] - 1, +m[1]);
+  const d = new Date(s);
+  return isNaN(d) ? null : d;
 }
 
+// My Draft consultation notes: from the last 7 days (to review now), and older ones
+const NOTE_DAYS = 7;
+async function myDraftNotes(staff) {
+  const name = String(staff.name || "").trim();
+  if (!name) return { recent: 0, older: 0 };
+  const snap = await getDocs(query(collection(db, "appointment_transcripts"), where(new FieldPath("Staff Name"), "==", name)));
+  const from = new Date();
+  from.setHours(0, 0, 0, 0);
+  from.setDate(from.getDate() - NOTE_DAYS);
+  let recent = 0, older = 0;
+  snap.docs.forEach((d) => {
+    const x = d.data() || {};
+    if (!/^draft$/i.test(String(x.Status || "").trim())) return;   // Reviewed, deleted, old imports: not counted
+    const when = noteDate(x);
+    if (when && when >= from) recent++; else older++;
+  });
+  return { recent, older };
+}
+// Managers: stock for today's bookings, through Inventory → Service links.
+// Services linked to the same products are one group, and each booking counts once per group.
+// Returns null when no service links are set up.
+const NOT_SEEN = /cancel|no.?show|did not (attend|arrive)|\bdna\b|resched/i;
+async function stockForToday(appts) {
+  const live = (appts || []).filter((a) => !NOT_SEEN.test(String(a.status || "")));
+  if (!live.length) return [];
+  const links = await getServiceLinks();
+  if (!links.length) return null;
+  const byService = new Map(links.map((l) => [serviceKey(l.service), l]));
+  const groups = new Map();
+  live.forEach((a) => {
+    const seen = new Set();
+    (a.services || []).forEach((s) => {
+      const l = byService.get(serviceKey(s));
+      if (!l) return;
+      const k = [...l.productIds].sort().join(",");
+      if (seen.has(k)) return;
+      seen.add(k);
+      const g = groups.get(k) || { pids: l.productIds, services: new Set(), bookings: 0 };
+      g.services.add(l.service);
+      g.bookings++;
+      groups.set(k, g);
+    });
+  });
+  if (!groups.size) return [];
+
+  const [products, opens] = await Promise.all([listProducts(), listOpenContainers().catch(() => [])]);
+  const byId = new Map(products.map((p) => [p.id, p]));
+  return [...groups.values()].map((g) => {
+    const ps = g.pids.map((id) => byId.get(id)).filter((p) => p && p.active);
+    if (!ps.length) return null;
+    const kit = ps.every(isKitProduct);
+    const shelf = ps.reduce((a, p) => a + p.stock.shelf, 0);
+    const jt = ps.reduce((a, p) => a + p.stock.jt, 0);
+    const vialUnits = Math.round(opens.filter((c) => c.kind === "vial" && g.pids.includes(c.productId))
+      .reduce((a, c) => a + Math.max(0, (c.size || 0) - c.used), 0) * 10) / 10;
+    return {
+      name: ps.length === 1 ? ps[0].name : [...g.services][0],
+      bookings: g.bookings, shelf, jt, unit: ps[0].stockUnit, doseUnit: ps[0].doseUnit || "units",
+      kit, vialUnits, low: !kit && shelf + jt < g.bookings,
+    };
+  }).filter(Boolean).sort((a, b) => (b.low - a.low) || b.bookings - a.bookings);
+}
 async function loadStats(dlg, staff) {
   const wrap = dlg.querySelector(".sod-stats");
   const you = dlg.querySelector('[data-role="foryou"]');
@@ -464,6 +537,10 @@ async function loadStats(dlg, staff) {
 
   // For you today
   if (!you || !you.isConnected) return;
+  const stock = can("inventory.manage") && appts
+    ? await stockForToday(appts).catch((err) => { console.warn("Start of Day stock failed:", err); return []; })
+    : [];
+  if (!you.isConnected) return;
   if (tkR.status === "rejected") console.warn("Start of Day tasks failed:", tkR.reason);
   if (ntR.status === "rejected") console.warn("Start of Day notes failed:", ntR.reason);
   const lines = [];
@@ -487,9 +564,24 @@ async function loadStats(dlg, staff) {
       overdue ? ` · ${overdue} overdue` : ""}
       <span class="sod-you-tasks">${tasks.slice(0, 3).map(item).join("")}${tasks.length > 3 ? `<small>and ${tasks.length - 3} more</small>` : ""}</span></span></li>`);
   }
-
-  const drafts = ntR.status === "fulfilled" ? ntR.value : 0;
-  if (drafts) lines.push(`<li>${ICO.note}<span><strong>${drafts} consultation note${drafts === 1 ? "" : "s"}</strong> to review</span></li>`);
+  if (stock === null) {
+    lines.push(`<li>${ICO.box}<span><strong>Stock for today</strong><small>Link services to products in Inventory → Service links to see this.</small></span></li>`);
+  } else if (stock.length) {
+    const low = stock.filter((s) => s.low).length;
+    const row = (s) => {
+      const where = [s.shelf && `${plural(s.shelf, s.unit)} on the Shelf`, s.jt && `${plural(s.jt, s.unit)} in JT storage`]
+        .filter(Boolean).join(", ") || `No ${unitPlural(s.unit)} in stock`;
+      const vial = s.kit && s.vialUnits ? `Opened vial ${s.vialUnits} ${s.doseUnit} · ` : "";
+      return `<span class="sod-stock${s.low ? " is-low" : ""}">${esc(s.name)} · ${s.bookings} booking${s.bookings === 1 ? "" : "s"}<small>${esc(vial + where)}</small></span>`;
+    };
+    lines.push(`<li class="${low ? "is-bad" : ""}">${ICO.box}<span><strong>Stock for today</strong>${low ? ` · ${low} may run short` : ""}
+      <span class="sod-you-tasks">${stock.slice(0, 4).map(row).join("")}${stock.length > 4 ? `<small>and ${stock.length - 4} more</small>` : ""}</span></span></li>`);
+  }
+  const notes = ntR.status === "fulfilled" ? ntR.value : { recent: 0, older: 0 };
+  if (notes.recent) {
+    lines.push(`<li>${ICO.note}<span><strong>${notes.recent} consultation note${notes.recent === 1 ? "" : "s"}</strong> from the last week to review${
+      notes.older ? `<small>and ${notes.older} older on My dashboard</small>` : ""}</span></li>`);
+  }
 
   you.innerHTML = `<p class="sod-you-h">For you today</p>
     ${lines.length ? `<ul>${lines.join("")}</ul>` : '<p class="sod-note">Nothing waiting for you. Enjoy your day!</p>'}

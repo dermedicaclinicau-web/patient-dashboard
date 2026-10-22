@@ -274,7 +274,10 @@ service cloud.firestore {
     // Injectors' kits. The owner changes their own; a colleague borrowing can only REDUCE the opened-vial units.
     match /inv_kits/{id} {
       allow read: if isStaff();
-      allow create: if invKit() && request.resource.data.staffUid == request.auth.uid && kitOk();
+      // Injectors create their own; Manage inventory can set anyone's (Inventory → Kits → Set an injector's kit)
+      allow create: if kitOk() && (
+          (invKit() && request.resource.data.staffUid == request.auth.uid)
+          || invManage());
       allow update: if kitOk() && (
           (invKit() && resource.data.staffUid == request.auth.uid
             && request.resource.data.staffUid == request.auth.uid)

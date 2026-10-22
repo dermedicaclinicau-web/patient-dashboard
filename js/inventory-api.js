@@ -1485,6 +1485,83 @@ export async function kitDiscard(kit, { units = 0, vials = 0, reason = "", note 
   });
 }
 
+// Admin: set an injector's kit to what they physically have (e.g. moving over from the old app).
+// rows: [{ batch, expiry, sealed, open }] for one product. Their other batches of that product go to 0.
+// Logged as "kit-count" with staffUid and deltaUnits, so Kit reconciliation stays right.
+export async function setKitBalance({ staffUid, staffName, product, rows, note = "" }, staff) {
+  if (!isKitProduct(product)) throw new Error("This product isn't carried in kits.");
+  const target = clip(staffUid, 128);
+  if (!target) throw new Error("Choose the injector.");
+  const why = clip(note, 300);
+  if (!why) throw new Error("Add a note, e.g. Moved over from the old app.");
+  const per = Number(product.dosePer) || 0;
+  const unit = product.doseUnit || "units";
+
+  const want = new Map();
+  (Array.isArray(rows) ? rows : []).forEach((r) => {
+    const batch = clip(r.batch, 40);
+    const expiry = KEY_RE.test(r.expiry || "") ? r.expiry : "";
+    const sealed = Math.max(0, parseInt(r.sealed, 10) || 0);
+    const open = round1(Math.max(0, Number(r.open) || 0));
+    if (!sealed && !open) return;
+    if (product.tracked && (!batch || !expiry)) {
+      throw new Error(`Each ${batchName(product).toLowerCase()} needs its number and expiry date.`);
+    }
+    if (per && open > per) throw new Error(`The opened ${product.stockUnit} can't hold more than ${per} ${unit}.`);
+    const id = kitId(target, product.id, batch, expiry);
+    const w = want.get(id) || { batch, expiry, sealed: 0, open: 0 };
+    w.sealed += sealed;
+    w.open = round1(w.open + open);
+    want.set(id, w);
+  });
+
+  // Their current batches of this product (any not entered go to 0)
+  const snap = await getDocs(query(collection(db, "inv_kits"), where("staffUid", "==", target)));
+  const ids = [...new Set([
+    ...snap.docs.filter((d) => d.data().productId === product.id).map((d) => d.id),
+    ...want.keys(),
+  ])];
+
+  let result = null;
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    const snaps = new Map();
+    for (const id of ids) snaps.set(id, await tx.get(doc(db, "inv_kits", id)));
+
+    // ---- Writes ----
+    const lines = [];
+    let before = 0, after = 0, changed = false;
+    snaps.forEach((s, id) => {
+      const old = s.exists() ? normaliseKit(s) : null;
+      const w = want.get(id) || { batch: old ? old.batch : "", expiry: old ? old.expiry : "", sealed: 0, open: 0 };
+      const oS = old ? old.sealed : 0;
+      const oO = old ? old.open : 0;
+      before += oS * per + oO;
+      after += w.sealed * per + w.open;
+      if (oS === w.sealed && Math.abs(oO - w.open) < 0.01) return;
+      changed = true;
+      tx.set(doc(db, "inv_kits", id), {
+        staffUid: target, staffName: clip(staffName, 120) || (old ? old.staffName : ""),
+        productId: product.id, productName: product.name, batch: w.batch, expiry: w.expiry,
+        dosePer: per, doseUnit: unit, sealed: w.sealed, open: w.open,
+        updatedAt: serverTimestamp(), ...(old ? {} : { createdAt: serverTimestamp() }),
+      }, { merge: true });
+      if (w.sealed !== oS) lines.push({ loc: "kit", batch: w.batch, expiry: w.expiry, delta: w.sealed - oS });
+    });
+    if (!changed) throw new Error("Nothing has changed.");
+    before = round1(before);
+    after = round1(after);
+    logMove(tx, staff, {
+      type: "kit-count", productId: product.id, productName: product.name, unit,
+      staffUid: target, deltaUnits: round1(after - before), lines,
+      reason: "Kit set by admin",
+      note: `${clip(staffName, 120) || "Injector"}'s kit: ${before} → ${after} ${unit} · ${why}`.slice(0, 500),
+    });
+    result = { before, after, unit };
+  });
+  return result;
+}
+
 /* ---------- JT storage releases: an injector asks, Dr Teh approves, it moves JT → Shelf ---------- */
 
 export const REL_STATUS = { pending: "Waiting", approved: "On the Shelf", declined: "Declined", cancelled: "Cancelled" };
