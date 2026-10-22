@@ -66,10 +66,23 @@ const timeOf = (d) => (d ? d.toLocaleTimeString("en-AU", { hour: "numeric", minu
 const isTouch = () => !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
 // One tap for you on Help. The last one also marks it as sorted.
 const QUICK_REPLIES = ["On my way", "Looking into it now", "Can you call me?", "All sorted ✓"];
-// kind: "help" | "group" | "" (a person)
-const avatar = (name, kind = "") => (kind === "help" ? `<span class="ch-av is-help">${I.help}</span>`
-  : kind === "group" ? `<span class="ch-av is-group">${I.group}</span>`
-  : `<span class="ch-av" style="--h:${hueFromString(name || "?")}">${esc(getInitials(name || "?"))}</span>`);
+// A person's profile photo: mine from my login, everyone else's from the staff list. "" if none.
+const photoOf = (u) => {
+  if (!u || !me) return "";
+  const s = String(u) === me.uid ? me : staffById.get(String(u));
+  return String((s && (s.photo || s.photoUrl)) || "");
+};
+// Whose face a conversation shows: the other person in a chat for two, the staff member on an admin's Help chat
+const faceOf = (c) => (c.kind === "dm" ? c.members.find((u) => u !== me.uid) || c.members[0]
+  : c.kind === "help" && c.members[0] !== me.uid ? c.members[0] : "");
+// kind: "help" | "group" | "" (a person). u: their ID, for the photo (initials show if there isn't one, or it won't load).
+const avatar = (name, kind = "", u = "") => {
+  if (kind === "help") return `<span class="ch-av is-help">${I.help}</span>`;
+  if (kind === "group") return `<span class="ch-av is-group">${I.group}</span>`;
+  const photo = photoOf(u);
+  return `<span class="ch-av" style="--h:${hueFromString(name || "?")}">${esc(getInitials(name || "?"))}${photo
+    ? `<img src="${esc(photo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()" />` : ""}</span>`;
+};
 
 let me = null;
 let admin = false;
@@ -454,7 +467,7 @@ function notify(c) {
 
 function popup(c) {
   const pop = root.querySelector('[data-role="pop"]');
-  pop.innerHTML = `<button type="button" class="ch-pop-in" data-open="${esc(c.id)}">${avatar(c.lastByName, c.kind === "group" ? "group" : "")}
+  pop.innerHTML = `<button type="button" class="ch-pop-in" data-open="${esc(c.id)}">${avatar(c.lastByName, c.kind === "group" ? "group" : "", c.lastBy)}
       <span><strong>${esc(fromText(c))}</strong><small>${esc(c.lastText)}</small></span></button>
     <button type="button" class="ch-ic" data-act="popx" aria-label="Dismiss">${I.x}</button>`;
   pop.hidden = false;
@@ -490,7 +503,7 @@ const row = (c) => {
   const helpRow = c.kind === "help" && c.members[0] === me.uid;
   const empty = helpRow ? (awayOn() ? helpSub() : "Ask anything about the portal") : c.kind === "group" ? membersText(c) : "";
   return `<button type="button" class="ch-row${unread ? " is-unread" : ""}" data-open="${esc(c.id)}">
-    ${avatar(titleOf(c), kindOf(c))}
+    ${avatar(titleOf(c), kindOf(c), faceOf(c))}
     <span class="ch-row-main">
       <span class="ch-row-top"><strong>${esc(titleOf(c))}</strong><small>${esc(when(c.lastAt))}</small></span>
       <small class="ch-row-last">${c.lastAt ? `${c.lastBy === me.uid ? "You: " : c.kind === "group" ? `${esc((c.lastByName || "").split(/\s+/)[0])}: ` : ""}${esc(c.lastText)}` : esc(empty)}</small>
@@ -549,7 +562,7 @@ function openThread(id) {
   const canHide = !helpStaff && (isMember || adminHelp) && chats.some((x) => x.id === id);
   const sub = helpStaff ? `<small data-role="helpsub" class="${awayOn() ? "is-away" : ""}">${esc(helpSub())}</small>`
     : c.kind === "group" ? `<small>${esc(membersText(c))}</small>` : "";
-  panel.innerHTML = `${head(`${avatar(titleOf(c), kindOf(c))}<span class="ch-hd-t"><strong>${esc(titleOf(c))}</strong>${sub}</span>`, {
+  panel.innerHTML = `${head(`${avatar(titleOf(c), kindOf(c), faceOf(c))}<span class="ch-hd-t"><strong>${esc(titleOf(c))}</strong>${sub}</span>`, {
       back: true,
       extra: `${adminHelp ? `<button type="button" class="lh-btn" data-act="sorted">${c.status === "sorted" ? "Reopen" : "Mark as sorted"}</button>` : ""}${
         canHide ? `<button type="button" class="ch-ic" data-act="hide" aria-label="Remove from my list" title="Remove from my list">${I.trash}</button>` : ""}`,
@@ -881,7 +894,7 @@ function drawPeople(q) {
   if (!box) return;
   if (!staffList) { box.innerHTML = '<p class="ch-none">Couldn\'t load the staff list. Try again.</p>'; return; }
   const list = staffList.filter((s) => String(s.id) !== me.uid && (!q || String(s.name || "").toLowerCase().includes(q)));
-  box.innerHTML = list.map((s) => `<button type="button" class="ch-row" data-dm="${esc(s.id)}">${avatar(s.name)}
+  box.innerHTML = list.map((s) => `<button type="button" class="ch-row" data-dm="${esc(s.id)}">${avatar(s.name, "", s.id)}
       <span class="ch-row-main"><strong>${esc(s.name)}</strong><small class="ch-row-last">${esc(s.role || "")}</small></span></button>`).join("")
     || '<p class="ch-none">No one matches.</p>';
 }
@@ -928,7 +941,7 @@ function drawGroupPeople(q) {
   if (!staffList) { box.innerHTML = '<p class="ch-none">Couldn\'t load the staff list. Try again.</p>'; return; }
   const list = staffList.filter((s) => String(s.id) !== me.uid && (!q || String(s.name || "").toLowerCase().includes(q)));
   box.innerHTML = list.map((s) => `<label class="ch-row ch-pick">
-      <input type="checkbox" data-gsel="${esc(s.id)}"${groupSel.has(String(s.id)) ? " checked" : ""} />${avatar(s.name)}
+      <input type="checkbox" data-gsel="${esc(s.id)}"${groupSel.has(String(s.id)) ? " checked" : ""} />${avatar(s.name, "", s.id)}
       <span class="ch-row-main"><strong>${esc(s.name)}</strong><small class="ch-row-last">${esc(s.role || "")}</small></span></label>`).join("")
     || '<p class="ch-none">No one matches.</p>';
   syncGroupCount();

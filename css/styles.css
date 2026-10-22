@@ -7949,3 +7949,7 @@ dialog.lh-dialog.inv-dlg.kit-set-dlg { width: min(760px, 96vw); }
   /* Header: the "Only you can see these" note stays small */
   .md-side .mn .md-card-head small { font-size: .74rem; }
 }
+
+/* Chat: profile photos over the initials */
+.ch-av { position: relative; overflow: hidden; }
+.ch-av img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
