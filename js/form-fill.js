@@ -61,6 +61,35 @@ function readReturn() {
 function writeReturn(r) { try { sessionStorage.setItem(RETURN_KEY, JSON.stringify(r)); } catch { /* storage full or private mode */ } }
 function clearReturn() { try { sessionStorage.removeItem(RETURN_KEY); } catch { /* ignore */ } }
 
+// "Open in new tab": the consent tab knows what it was opened for from its window name,
+// and tells the other tabs when a form is saved (BroadcastChannel, or localStorage on older browsers)
+const TAB_PREFIX = "dm-consent:";
+const tabName = (o) => TAB_PREFIX + encodeURIComponent(JSON.stringify(o));
+function readTabMode(pid, tid) {
+  const n = String(window.name || "");
+  if (!n.startsWith(TAB_PREFIX)) return null;
+  try {
+    const o = JSON.parse(decodeURIComponent(n.slice(TAB_PREFIX.length)));
+    return o && o.p === pid && o.t === tid ? o : null;
+  } catch { return null; }
+}
+const SAVED_CH = "dm-forms";
+function announceSaved(msg) {
+  try { const bc = new BroadcastChannel(SAVED_CH); bc.postMessage(msg); bc.close(); } catch { /* not supported */ }
+  try { localStorage.setItem("dm.formSaved", JSON.stringify({ ...msg, at: Date.now() })); } catch { /* ignore */ }
+}
+function onFormSaved(fn) {
+  const handle = (m) => { if (m && m.type === "form-saved") fn(m); };
+  let bc = null;
+  try { bc = new BroadcastChannel(SAVED_CH); bc.onmessage = (e) => handle(e.data); } catch { bc = null; }
+  const onStorage = (e) => {
+    if (e.key !== "dm.formSaved" || !e.newValue) return;
+    try { handle(JSON.parse(e.newValue)); } catch { /* ignore */ }
+  };
+  if (!bc) window.addEventListener("storage", onStorage);
+  return () => { if (bc) bc.close(); window.removeEventListener("storage", onStorage); };
+}
+
 function niceDate(key) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
   if (!m) return key || "";
@@ -80,8 +109,8 @@ function sheetHtml({ name, fields, settings, letterhead }) {
     }).join("")}</div>`;
 }
 
-// Consent check and Prescription check: what was found, or a button to fill one in now
-function consentHtml(f, res, { canStart = false } = {}) {
+// Consent check and Prescription check: what was found, or buttons to fill one in now (here, or in a new tab)
+function consentHtml(f, res, { canStart = false, waiting = false } = {}) {
   const rx = f.type === "prescription_status";
   const months = Number(f.months) || (rx ? 6 : 12);
   const icon = svg(ICONS[f.type] || ICONS.consent_status);
@@ -90,15 +119,18 @@ function consentHtml(f, res, { canStart = false } = {}) {
       res.submissionId ? ` <a href="#/form-record/${encodeURIComponent(res.submissionId)}">View it</a>`
       : res.link ? ` <a href="${esc(res.link)}" target="_blank" rel="noopener noreferrer">View PDF</a>` : ""}</span></div>`;
   }
+  const kind = rx ? "Prescription" : "Consent";
+  const noun = rx ? "prescription" : "consent";
+  const id = esc(f.consentFormId || "");
   return `<div class="fe-consent is-warn">${icon}<span>No ${rx ? "prescription" : "signed consent"} in the last ${months} months.${
-    f.block ? ` This form can't be saved until ${rx ? "there's a valid prescription" : "one is signed"}.` : ""}</span>${
-    canStart && f.consentFormId
-      ? `<button type="button" class="ff-btn is-primary fe-consent-go" data-consent-go="${esc(f.consentFormId)}" data-kind="${rx ? "Prescription" : "Consent"}">Fill in ${
-          rx ? "prescription" : "consent"} now</button>` : ""}</div>`;
+    f.block ? ` This form can't be saved until ${rx ? "there's a valid prescription" : "one is signed"}.` : ""}${
+    waiting ? `<small class="fe-consent-wait">Open in another tab. This updates by itself when it's saved.</small>` : ""}</span>${
+    canStart && f.consentFormId ? `<span class="fe-consent-acts">
+      <button type="button" class="ff-btn is-primary fe-consent-go" data-consent-go="${id}" data-kind="${kind}">Fill in ${noun} now</button>
+      <button type="button" class="ff-btn fe-consent-tab" data-consent-tab="${id}" data-kind="${kind}"
+        title="Opens the ${noun} in a new tab. This form stays open and updates when it's saved.">Open in new tab ↗</button>
+    </span>` : ""}</div>`;
 }
-
-
-
 function writeField(f, w, v) {
   const set = (el, val) => { if (el) el.value = val ?? ""; };
   switch (f.type) {
@@ -299,7 +331,8 @@ async function checkConsents(consentFields, patient) {
 export async function mountFormFill(container, param, { staff, embedded = null } = {}) {
   const [pid = "", tid = ""] = String(param || "").split("/");
   const patientHref = `#/patient/${encodeURIComponent(pid)}`;
-  const ret = embedded ? null : readReturn();
+  const tabMode = embedded ? null : readTabMode(pid, tid);   // opened with "Open in new tab"
+  const ret = embedded || tabMode ? null : readReturn();
   const isConsentLeg = !!(ret && ret.patientId === pid && ret.consentId === tid);   // filling in the consent
   const isReturnLeg = !!(ret && ret.patientId === pid && ret.templateId === tid && !isConsentLeg); // back on the treatment form
   const exitHref = isConsentLeg ? ret.returnHash : patientHref;
@@ -363,7 +396,10 @@ export async function mountFormFill(container, param, { staff, embedded = null }
         </div>
         <p class="ff-msg" data-role="msg" aria-live="polite"></p>
         ${isConsentLeg ? `<p class="ff-return">${esc(ret.kind || "Consent")} for <strong>${esc(ret.templateName)}</strong>. When you save, you'll go back to it.</p>` : ""}
-      </div>
+        ${tabMode ? `<p class="ff-return">${esc(tabMode.k || "Consent")} for <strong>${esc(tabMode.n)}</strong>, which is open in your other tab.
+          When you save, this tab closes and that form updates.
+          <button type="button" class="ff-btn is-quiet ff-profile" data-act="open-profile">Patient profile ↗</button></p>` : ""}      
+        </div>
       <div class="fe-sheet ff-sheet" data-role="sheet">${sheetHtml({ name: ver.name, fields, settings: ver.settings, letterhead })}</div>
     </div>`;
 
@@ -613,25 +649,56 @@ export async function mountFormFill(container, param, { staff, embedded = null }
   }
   refresh();
 
-  // Consent checks run in the background
+  // Consent checks run in the background, and again when a consent is saved in another tab
   const consentFields = fields.filter((f) => f.type === "consent_status" || f.type === "prescription_status");
   let consentReady = !consentFields.length;
-  if (consentFields.length) {
-    checkConsents(consentFields, patient)
+  const waitingFor = new Set();   // consent forms opened in a new tab and not found yet
+  let consentJob = null;
+  const paintConsents = () => consentFields.forEach((f) => {
+    const el = wrap(f.id) && wrap(f.id).querySelector(".fe-consent");
+    if (el) el.outerHTML = consentHtml(f, consent[f.id], { canStart: !embedded, waiting: waitingFor.has(f.consentFormId) }); // no leaving the overlay mid-task
+  });
+  function runConsentCheck(again = false) {
+    if (!consentFields.length) return Promise.resolve();
+    if (consentJob) return consentJob;
+    const before = new Set(consentFields.filter((f) => consent[f.id] && consent[f.id].found).map((f) => f.id));
+    consentJob = checkConsents(consentFields, patient)
       .then((res) => Object.assign(consent, res))
       .catch((err) => {
         console.warn("Consent check failed:", err);
-        consentFields.forEach((f) => { consent[f.id] = { found: false, date: "", submissionId: "", name: "" }; });
+        if (!again) consentFields.forEach((f) => { consent[f.id] = { found: false, date: "", submissionId: "", name: "" }; });
       })
       .finally(() => {
+        consentJob = null;
         consentReady = true;
         if (!root.isConnected) return;
-        consentFields.forEach((f) => {
-          const el = wrap(f.id) && wrap(f.id).querySelector(".fe-consent");
-          if (el) el.outerHTML = consentHtml(f, consent[f.id], { canStart: !embedded }); // no leaving the overlay mid-task
-        });
+        const found = consentFields.filter((f) => consent[f.id] && consent[f.id].found && !before.has(f.id));
+        found.forEach((f) => waitingFor.delete(f.consentFormId));
+        paintConsents();
         refresh();
+        if (again && found.length) {
+          showToast(`${found.map((f) => consent[f.id].name || "It").join(", ")} is now on file. Carry on with ${ver.name}.`);
+        }
       });
+    return consentJob;
+  }
+  runConsentCheck();
+
+  if (consentFields.length && !embedded) {
+    // A consent or prescription saved for this patient in another tab: check again
+    const offSaved = onFormSaved((m) => {
+      if (!root.isConnected) { offSaved(); return; }
+      if (m.patientId !== patient.id) return;
+      if (consentFields.some((f) => f.consentFormId === m.templateId) || ["consent", "prescription"].includes(m.category)) {
+        runConsentCheck(true);
+      }
+    });
+    // Backup: coming back to this tab while waiting for one
+    const onVis = () => {
+      if (!root.isConnected) { document.removeEventListener("visibilitychange", onVis); return; }
+      if (document.visibilityState === "visible" && waitingFor.size) runConsentCheck(true);
+    };
+    document.addEventListener("visibilitychange", onVis);
   }
 
   sheet.addEventListener("input", (e) => {
@@ -666,6 +733,26 @@ export async function mountFormFill(container, param, { staff, embedded = null }
 
     // "Fill in consent now": keep the answers so far, then open the consent form
   root.addEventListener("click", (e) => {
+    // "Open in new tab": this form stays exactly as it is
+    const tabBtn = e.target.closest("[data-consent-tab]");
+    if (tabBtn) {
+      const cid = tabBtn.dataset.consentTab;
+      const kind = tabBtn.dataset.kind || "Consent";
+      const w = window.open(`${location.pathname}${location.search}#/fill/${encodeURIComponent(pid)}/${encodeURIComponent(cid)}`,
+        tabName({ p: pid, t: cid, n: ver.name, k: kind }));
+      if (!w) {
+        showToast(`The browser blocked the new tab. Allow pop-ups for the portal, or use “Fill in ${kind.toLowerCase()} now”.`);
+        return;
+      }
+      waitingFor.add(cid);
+      paintConsents();
+      return;
+    }
+    // The consent tab: the patient's profile in another tab
+    if (e.target.closest('[data-act="open-profile"]')) {
+      window.open(`${location.pathname}${location.search}${patientHref}`, "_blank");
+      return;
+    }
     const go = e.target.closest("[data-consent-go]");
     if (!go) return;
     const draft = {};
@@ -775,7 +862,17 @@ export async function mountFormFill(container, param, { staff, embedded = null }
       if (inp) inp.focus({ preventScroll: true });
     }
   }
-
+  // The consent tab, once saved: says so, then closes itself
+  function showTabDone() {
+    root.innerHTML = `<div class="state ff-tab-done"><strong>${esc(ver.name)} saved</strong>
+      ${esc(tabMode.n)} in your other tab has been updated. This tab will close by itself.
+      <div class="retry">
+        <button type="button" class="btn-primary" data-act="tab-close">Close this tab</button>
+        <a class="btn-ghost" href="${patientHref}">Open ${esc(patient.name)}'s page</a>
+      </div></div>`;
+    root.querySelector('[data-act="tab-close"]').addEventListener("click", () => window.close());
+    setTimeout(() => window.close(), 1500);
+  }
   async function save(kind) {
     if (saving) return;
     if (!consentReady) { msgEl.textContent = "Still checking consent records. Try again in a moment."; return; }
@@ -850,7 +947,13 @@ export async function mountFormFill(container, param, { staff, embedded = null }
         }),
       } : undefined);
       dirty = false;
+      // Any other tab with this patient's form open checks its consents again
+      announceSaved({ type: "form-saved", patientId: patient.id, templateId: tid, category: tpl.category, submissionId: id });
       if (embedded) { embedded.onSaved(id); return; }
+      if (tabMode) {
+        window.name = "";   // this tab is an ordinary tab again
+        if (kind === "save") { showTabDone(); return; }
+      }
       if (kind === "save" && isConsentLeg) {
         location.hash = ret.returnHash;
         showToast(`${ver.name} saved. Back to ${ret.templateName}.`);

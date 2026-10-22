@@ -7953,3 +7953,11 @@ dialog.lh-dialog.inv-dlg.kit-set-dlg { width: min(760px, 96vw); }
 /* Chat: profile photos over the initials */
 .ch-av { position: relative; overflow: hidden; }
 .ch-av img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+
+/* Consent check: Fill in now + Open in new tab */
+.fe-consent-acts { display: flex; flex-wrap: wrap; gap: .5rem; margin-left: auto; }
+.fe-consent-acts .fe-consent-go { margin-left: 0; }
+.fe-consent-wait { display: block; margin-top: 3px; font-weight: 600; }
+.ff-return .ff-profile { margin-left: .5rem; padding: .2rem .7rem; font-size: .85rem; }
+.ff-tab-done .retry { display: flex; flex-wrap: wrap; gap: .6rem; justify-content: center; }
+@media (max-width: 640px) { .fe-consent-acts { margin-left: 0; width: 100%; } }
