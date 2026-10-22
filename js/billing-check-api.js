@@ -39,10 +39,11 @@ export async function billingCheck({ fromKey, toKey, productId = "" }) {
     getDocs(query(collection(db, "scans"), where("dateKey", ">=", from), where("dateKey", "<=", addDays(toKey, 7)))),
     getDocs(query(collection(db, "inv_billing_checks"), where("day", ">=", from), where("day", "<=", toKey))).catch(() => ({ docs: [] })),
   ]);
-  const sales = saleSnap.docs.map((d) => d.data()).filter((s) => s.source === "invoice" && !s.voided);
+  const sales = saleSnap.docs.map((d) => d.data()).filter((s) => (s.source === "invoice" || s.source === "manual") && !s.voided);
   const upData = up && up.exists() ? up.data() : {};
-  // The latest invoice day uploaded: sheets after it are still waiting for their invoice
-  out.upTo = [KEY_RE.test(upData.to || "") ? upData.to : "", ...sales.map((s) => s.apptDate || "")].sort().pop() || "";
+  // The latest invoice day uploaded (hand-recorded sales don't count): sheets after it are still waiting for their invoice
+  out.upTo = [KEY_RE.test(upData.to || "") ? upData.to : "",
+    ...sales.filter((s) => s.source === "invoice").map((s) => s.apptDate || "")].sort().pop() || "";
   const checks = new Map(checkSnap.docs.map((d) => [d.id, d.data()]));
 
   // One group per day + patient
@@ -62,6 +63,7 @@ export async function billingCheck({ fromKey, toKey, productId = "" }) {
   sales.forEach((s) => {
     const g = group(s.apptDate, s.patientName);
     if (s.invoiceId) g.invoiceIds.add(String(s.invoiceId));
+    else if (s.source === "manual") g.invoiceIds.add("recorded by hand");
     if (s.provider) g.staff.add(String(s.provider));
     (s.lines || []).forEach((l) => { if (l.productId) add(g.invoiced, l.productId, l.name, Number(l.qty) || 0); });
   });

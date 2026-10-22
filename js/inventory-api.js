@@ -3576,7 +3576,7 @@ export async function listSalesOn(key = dayKey()) {
 export async function recordSale(sale, staff, { also = null, saleId = "", deduct = true } = {}) {
   const me = uid();
   const by = who(staff);
-  const source = ["pos", "invoice"].includes(sale.source) ? sale.source : "scan";
+  const source = ["pos", "invoice", "manual"].includes(sale.source) ? sale.source : "scan";
   const want = new Map();
   (sale.lines || []).forEach((l) => {
     const pid = clip(l.productId, 60);
@@ -3620,10 +3620,12 @@ export async function recordSale(sale, staff, { also = null, saleId = "", deduct
     }
 
     // ---- Writes ----
-    const reason = source === "pos" ? "Checkout" : source === "invoice" ? "Timely invoice" : "Billing sheet scan";
-    // Invoice sales count as sold on the invoice date, whenever they're uploaded
-    const effective = source === "invoice" && KEY_RE.test(sale.apptDate || "") ? sale.apptDate : "";
-    const who2 = [sale.invoiceId && `Invoice ${sale.invoiceId}`, sale.patientName, sale.provider].filter(Boolean).join(" · ");
+    const reason = source === "pos" ? "Checkout" : source === "invoice" ? "Timely invoice"
+      : source === "manual" ? "Recorded by hand" : "Billing sheet scan";
+    // Invoice and hand-recorded sales count as sold on their date, whenever they're entered
+    const effective = (source === "invoice" || source === "manual") && KEY_RE.test(sale.apptDate || "") ? sale.apptDate : "";
+    const who2 = [sale.invoiceId && `Invoice ${sale.invoiceId}`, sale.patientName, sale.provider,
+      source === "manual" && sale.note].filter(Boolean).join(" · ");
     const out = items.map((it) => {
       const ps = prods.get(it.productId);
       const pd = ps.data();
@@ -3920,4 +3922,25 @@ async function backdateCounts(applied, staff) {
     }
   }
   return out;
+}
+
+/* ---------- A sale recorded by hand (not on a Timely invoice), dated when it happened ---------- */
+// E.g. a sample, a staff purchase, or a sale from before invoices started taking stock off.
+// Comes off the Shelf (oldest expiry first). Opening counts done after that date are corrected, like a late invoice.
+export async function recordManualSale(product, { date, qty, patientName = "", note = "" }, staff) {
+  if (!KEY_RE.test(date || "") || date > dayKey()) throw new Error("Choose the date it was sold. It can't be in the future.");
+  const n = parseInt(qty, 10);
+  if (!(n >= 1 && n <= 99)) throw new Error("Enter how many (1 to 99).");
+  const why = clip(note, 300);
+  if (!why) throw new Error("Add a note saying why it's recorded here, e.g. Sold before invoices took stock off.");
+  const r = await recordSale({
+    source: "manual", patientName: clip(patientName, 150), apptDate: date, note: why,
+    lines: [{ productId: product.id, qty: n }],
+  }, staff);
+  const l = r.lines[0];
+  const backdated = date < dayKey() && l
+    ? await backdateCounts([{ saleId: r.id, productId: product.id, date, rows: l.rows || [] }], staff)
+      .catch((err) => { console.warn("Counts not corrected:", err); return { lines: 0, closed: 0, skipped: [], failed: 1 }; })
+    : { lines: 0, closed: 0, skipped: [], failed: 0 };
+  return { ...r, backdated };
 }

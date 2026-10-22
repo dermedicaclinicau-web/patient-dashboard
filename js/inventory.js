@@ -8,7 +8,7 @@ import {
   listCounts, listInvestigations, dayKey, 
   isSharedProduct, listOpenContainers, openContainer, finishContainer, openState, expectedUses, FINISH_REASONS,
   setStartingStock, PO_EMAIL_TAGS, fillPoTemplate, poNumberBase, PO_ORDER_TAG_RE, setTracking, correctLot,
-  listKits, listKitDays,
+  listKits, listKitDays, recordManualSale,
 } from "./inventory-api.js";
 import { openSetKitDialog } from "./kit-admin.js";
 import { renderInvestigations, mountInvestigation } from "./investigations.js";
@@ -1834,6 +1834,70 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       });
     }
 
+    // A sale that isn't on a Timely invoice, dated when it happened
+    function saleDialog(p) {
+      const today = dayKey();
+      return new Promise((resolve) => {
+        let saved = false;
+        const d2 = openDialog("inv-dlg", `
+          <form class="lh-form" novalidate>
+            <div class="lh-dialog-head"><h3>Record a sale: ${esc(p.name)}</h3>
+              <p>Only for sales that <strong>aren't on a Timely invoice</strong>, or were before invoices started taking stock off.
+                Anything on an invoice comes off when the invoices are uploaded, so recording it here too would take it off twice.</p></div>
+            <div class="inv-two">
+              <label class="lh-field"><span class="lh-label">Date sold</span>
+                <input type="date" name="date" value="${today}" max="${today}" /></label>
+              <label class="lh-field"><span class="lh-label">How many</span>
+                <div class="fe-num"><input class="fe-input" name="qty" type="number" min="1" max="99" step="1" value="1" inputmode="numeric" />
+                  <span>${esc(unitPlural(p.stockUnit))}</span></div></label>
+            </div>
+            <label class="lh-field"><span class="lh-label">Patient or who it was for (optional)</span>
+              <input name="who" maxlength="150" placeholder="e.g. Jane Smith" /></label>
+            <label class="lh-field"><span class="lh-label">Why it's recorded here</span>
+              <input name="note" maxlength="300" placeholder="e.g. Invoice 1234, sold before invoices took stock off · Sample" /></label>
+            <p class="inv-hint">It comes off the Shelf, oldest expiry first (Shelf now: ${esc(plural(p.stock.shelf, p.stockUnit))}).
+              Opening counts done after that date are corrected, so a difference it explains closes by itself.</p>
+            <p class="lh-error" role="alert" hidden></p>
+            <div class="lh-actions">
+              <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+              <button type="submit" class="lh-btn is-primary">Record sale</button>
+            </div>
+          </form>`);
+        const form = d2.querySelector("form");
+        const err = d2.querySelector(".lh-error");
+        d2.querySelector('[data-act="cancel"]').addEventListener("click", () => d2.close());
+        form.addEventListener("submit", async (e) => {
+          e.preventDefault();
+          err.hidden = true;
+          const f = form.elements;
+          const btn = form.querySelector('[type="submit"]');
+          btn.disabled = true;
+          btn.textContent = "Saving…";
+          try {
+            const r = await recordManualSale(p, { date: f.date.value, qty: f.qty.value, patientName: f.who.value, note: f.note.value }, staff);
+            saved = true;
+            d2.close();
+            const l = r.lines[0];
+            const bd = r.backdated || {};
+            showToast([
+              `Sale recorded${l && l.short ? `, but the Shelf showed ${l.short} fewer than that` : ""}.`,
+              bd.lines ? `${bd.lines} count line${bd.lines === 1 ? "" : "s"} corrected${bd.closed ? `, ${bd.closed} investigation${bd.closed === 1 ? "" : "s"} closed` : ""}.` : "",
+              bd.skipped && bd.skipped.length ? `Already accepted, so not changed: ${bd.skipped.join(", ")}.` : "",
+            ].filter(Boolean).join(" "));
+          } catch (ex) {
+            console.error("Record sale failed:", ex);
+            err.textContent = errText(ex, "Couldn't save. Try again.");
+            err.hidden = false;
+            btn.disabled = false;
+            btn.textContent = "Record sale";
+          }
+        });
+        d2.addEventListener("close", () => resolve(saved));
+        f2focus(form);
+      });
+    }
+    const f2focus = (form) => { const q = form.elements.qty; if (q) { q.focus(); q.select(); } };
+
     function finishSharedDialog(c, p) {
       return new Promise((resolve) => {
         const exp = expectedUses(c);
@@ -1893,6 +1957,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           ${canMove || canRequest ? `<div class="inv-pd-acts">
           ${canManage ? '<button type="button" class="lh-btn is-primary" data-stock="add">Add stock</button>' : ""}
           ${canMove ? '<button type="button" class="lh-btn" data-stock="move">Move Shelf ⇄ JT</button>' : ""}
+          ${canMove ? '<button type="button" class="lh-btn" data-act="sale">Record a sale</button>' : ""}
           ${canRequest ? '<button type="button" class="lh-btn" data-act="request">Request more</button>' : ""}
           ${canManage ? `<button type="button" class="lh-btn" data-stock="count">Count</button>
             <button type="button" class="lh-btn" data-stock="writeoff">Write off</button>
@@ -1935,6 +2000,10 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       if (e.target.closest('[data-act="close"]')) { dlg.close(); return; }
       const p = st.products.find((x) => x.id === id);
       if (!p) return;
+      if (e.target.closest('[data-act="sale"]')) {
+        if (await saleDialog(p)) { await load(); if (dlg.open) draw(); }
+        return;
+      }
       if (e.target.closest('[data-act="open-new"]')) {
         if (await openSharedDialog(p)) { await load(); if (dlg.open) draw(); }
         return;
