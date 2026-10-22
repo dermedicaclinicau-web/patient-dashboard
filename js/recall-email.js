@@ -198,21 +198,26 @@ function compose(email, cardId) {
     const btn = main.querySelector('[data-act="send"]');
     btn.disabled = true;
     btn.querySelector("span").textContent = "Sending…";
+    const reset = () => {
+      sending = false;
+      btn.disabled = false;
+      btn.querySelector("span").textContent = "Send";
+    };
     try {
       const html = emailShell(body, tpls.style, { clinic: clinicDetails(lh), hasLogo: !!lh.logo });
       const res = await callApi({ action: "recall", op: "sendEmail", id: card.id, to: email, subject, html });
+      // The server said why it can't send (do-not-contact, bounced address, too big…): show it, keep the draft
+      if (res && res.problem) { reset(); showErr(res.problem); return; }
       if (res && res.ok === false) throw Object.assign(new Error(res.error || "Failed"), { detail: res.detail });
       showToast(`Email sent to ${card.patientName || email}.`);
       destroy();
     } catch (err) {
       console.error("Recall email failed:", err);
-      sending = false;
-      btn.disabled = false;
-      btn.querySelector("span").textContent = "Send";
+      reset();
       showErr((err && err.detail) || "The email couldn't be sent. Check your connection and try again.");
     }
   }
-
+  
   box.addEventListener("click", async (e) => {
     const act = e.target.closest("[data-act]");
     if (!act) return;
