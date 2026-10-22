@@ -9,7 +9,7 @@
 // (Take from Shelf and Borrow happen straight away: they're real handovers, logged on their own.)
 import {
   listProducts, listAllLots, listKits, listOpenContainers, isKitProduct, isSharedProduct, openState, kitUnits,
-  plural, unitPlural, fefo, lotId, INV_CATEGORIES, batchName, batchText, createRequest, suggestOrder,
+  plural, unitPlural, fefo, lotId, INV_CATEGORIES, batchName, batchText, createRequest, suggestOrder, openContainer,
 } from "./inventory-api.js";
 import { takeFromShelfDialog, borrowDialog } from "./inventory-kits.js";
 import { isInjector, isAdmin, can } from "./perms.js";
@@ -30,9 +30,11 @@ const shared = (p) => isSharedProduct(p);
 // A kit product an Admin takes straight from the Shelf or JT storage counts as storage, not kit
 const isKit = (p) => isKitProduct(p) && !p.fromStore;
 // A Shelf product measured by dose, e.g. a 1 mL syringe of filler
-const dosed = (p) => !!p && !isKit(p) && !shared(p) && !!p.dosePer;
-// What the clinician records: units (kit), mL (dosed), or items
-const clinicalUnit = (p) => (isKit(p) || dosed(p) ? p.doseUnit : shared(p) ? (p.dosePer ? p.doseUnit : "use") : p.stockUnit);
+// A kit product taken from JT storage / the Shelf: units come out of that place's opened vial
+const vial = (p) => !!p && isKitProduct(p) && !!p.fromStore;
+const dosed = (p) => !!p && !isKit(p) && !shared(p) && !vial(p) && !!p.dosePer;
+// What the clinician records: units (kit and opened vials), mL (dosed), or items
+const clinicalUnit = (p) => (isKit(p) || vial(p) || dosed(p) ? p.doseUnit : shared(p) ? (p.dosePer ? p.doseUnit : "use") : p.stockUnit);
 // Syringes needed for a dose: 2.2 mL of a 1.5 mL syringe = 2
 const syringesFor = (p, dose) => (dose > 0 ? Math.max(1, Math.ceil(dose / p.dosePer - 1e-9)) : "");
 
@@ -111,7 +113,38 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
       label: `${batchText(p, x.batch)} · Exp ${niceDate(x.expiry)} · ${plural(x.qty, p.stockUnit)}`,
     }));
   }
+  /* ---------- Opened vials in JT storage / on the Shelf ---------- */
+  function vialStock(l, p) {
+    const open = (stock.open || []).filter((c) => c.productId === p.id && c.kind === "vial" && c.from === l.loc)
+      .map((c) => ({ id: c.id, batch: c.batch, expiry: c.expiry, left: r2(Math.max(0, (c.size || p.dosePer) - c.used)) }))
+      .filter((c) => c.left > 0);
+    const lots = stock.lots.filter((x) => x.productId === p.id && x.loc === l.loc && x.qty > 0).sort(fefo);
+    const units = r2(open.reduce((a, c) => a + c.left, 0) + lots.reduce((a, x) => a + x.qty, 0) * p.dosePer);
+    return { open, lots, units };
+  }
 
+  // The dose is more than what's left in the opened vial(s): time to Restock
+  const needsVial = (l, p) => vialSplit(l, p, clinicalTotal(l, p)).rows.some((x) => x.isNew);
+  const vialsLeft = (v) => v.lots.reduce((a, x) => a + x.qty, 0);
+  // Which vials a dose comes from: the opened one first, then new ones. { rows: [{ batch, expiry, units, isNew }], short }
+  function vialSplit(l, p, want) {
+    const v = vialStock(l, p);
+    let left = r2(want);
+    const rows = [];
+    v.open.forEach((c) => {
+      if (left <= 0) return;
+      const t = r2(Math.min(left, c.left));
+      if (t > 0) { rows.push({ batch: c.batch, expiry: c.expiry, units: t, isNew: false }); left = r2(left - t); }
+    });
+    v.lots.forEach((x) => {
+      for (let q = x.qty; q > 0 && left > 0; q--) {
+        const t = r2(Math.min(left, p.dosePer));
+        rows.push({ batch: x.batch, expiry: x.expiry, units: t, isNew: true });
+        left = r2(left - t);
+      }
+    });
+    return { rows, short: left > 0.001 ? left : 0, stock: v };
+  }
   /* ---------- Shared products ---------- */
   // Opened containers first, then sealed ones that could be opened (oldest expiry first)
   function sharedOptions(l, p) {
@@ -228,6 +261,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     }
     if (!val) { l.rows = [newRow()]; return; }
     if (!p) { l.rows = [newRow(val)]; return; }
+    if (vial(p)) { l.rows = [{ ...newRow(), amount: r2(val) }]; return; }
     if (dosed(p)) { l.rows = [{ ...newRow(), dose: val, amount: syringesFor(p, val) }]; return; }
     if (!multiOf(l)) {   // one batch only: everything on it (flagged if it isn't enough)
       const s = sources(l)[0];
@@ -280,6 +314,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
   function shortOf(l, src = sources(l)) {
     const p = productOf(l);
     if (p && shared(p)) return sharedShort(l, p);
+    if (p && vial(p)) return vialSplit(l, p, clinicalTotal(l, p)).short;
     const used = new Map();
     let short = 0;
     l.rows.forEach((r) => {
@@ -309,12 +344,21 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
         : f.ifShort === "block" ? "Ask the ordering team to restock before saving." : "It will be saved and flagged for the ordering team."}</span>`;
     }
     if (short > 0) {
-      const su = isKit(p) ? p.doseUnit : unitPlural(p.stockUnit);
+      const su = isKit(p) || vial(p) ? p.doseUnit : unitPlural(p.stockUnit);
       return `<span class="cs-warn">Short by ${fmt(short)} ${esc(su)}. ${isKit(p)
         ? "Take from the Shelf or borrow from a colleague, otherwise it's saved and flagged."
         : f.ifShort === "block" ? "Restock before saving." : "It will be saved and flagged for the ordering team."}</span>`;
     }
     if (!(total > 0)) return "";
+    if (vial(p)) {
+      const sp = vialSplit(l, p, total);
+      if (sp.rows.some((x) => x.isNew)) {
+        const left = sp.stock.open.reduce((a, c) => a + c.left, 0);
+        return `<span class="cs-warn">${left > 0 ? `Only ${esc(fmt(left))} ${esc(cu)} left in the opened ${esc(p.stockUnit)}.` : `No ${esc(p.stockUnit)} is open.`}
+          Press Restock to open a new one. (If you don't, it's opened when you save.)</span>`;
+      }
+      return `<span class="cs-ok">✓ ${fmt(total)} ${esc(cu)} from the opened ${esc(p.stockUnit)}</span>`;
+    }
     if (dosed(p)) {
       const syr = l.rows.reduce((a, r) => a + num(r.amount), 0);
       const waste = Math.max(0, r2(syr * p.dosePer - total));
@@ -348,7 +392,46 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
         value="${esc(r.amount)}" placeholder="0" aria-label="Amount used" /><span>${esc(kit ? p.doseUnit : unitPlural(p.stockUnit))}</span></div>
       ${del}</div>`;
   }
-
+  /* ---------- Opened vial: cards (in use / next) and one row of units ---------- */
+  function vialCells(l, p) {
+    const want = num(l.rows[0] && l.rows[0].amount);
+    const sp = vialSplit(l, p, want);
+    const parts = want > 0 && sp.rows.length ? sp.rows
+      : (sp.stock.open[0] ? [sp.stock.open[0]] : sp.stock.lots[0] ? [sp.stock.lots[0]] : []);
+    const uniq = (list) => list.filter((x, k, a) => a.indexOf(x) === k);
+    return {
+      batch: parts.length ? uniq(parts.map((x) => x.batch || "No number")).map(esc).join(" → ") : "—",
+      exp: parts.length ? uniq(parts.map((x) => expMY(x.expiry))).map(esc).join(" → ") : "—",
+    };
+  }
+  function vialCardsHtml(l, p) {
+    const v = vialStock(l, p);
+    if (!v.open.length) {
+      return `<div class="cs-cards"><div class="cs-card cs-card-empty"><strong>No vial open</strong>
+        <small>${v.lots.length ? "Press Restock to open one." : `None left in ${esc(whereOf(l))}. Order more.`}</small></div></div>`;
+    }
+    return `<div class="cs-cards">${v.open.map((c) => `<div class="cs-card is-on cs-card-vial">
+        <span class="cs-card-top"><strong>${esc(c.batch || "No number")}</strong><em>In use</em></span>
+        <small>Exp ${esc(expMY(c.expiry))}</small>
+        <span class="cs-vial-left"><b>${esc(fmt(c.left))}</b> ${esc(p.doseUnit)} remaining</span>
+        <span class="cs-bar"><i style="width:${Math.round(Math.min(1, c.left / p.dosePer) * 100)}%"></i></span>
+      </div>`).join("")}</div>`;
+  }
+  
+  
+  function vialTableHtml(l, p) {
+    const r = l.rows[0] || newRow();
+    const c = vialCells(l, p);
+    return `<table class="cs-table"><thead><tr><th>${esc(batchName(p))}</th><th>Expiry</th><th>${esc(p.doseUnit)} used</th></tr></thead>
+      <tbody><tr class="cs-row" data-j="0">
+        <td class="cs-exp" data-role="vbatch">${c.batch}</td>
+        <td class="cs-exp" data-role="vexp">${c.exp}</td>
+        <td><div class="fe-num"><input class="fe-in" type="number" min="0" step="0.5" inputmode="decimal" data-f="amount"
+          value="${esc(r.amount)}" placeholder="0" aria-label="${esc(p.doseUnit)} used" /><span>${esc(p.doseUnit)}</span></div></td>
+      </tr></tbody>
+      <tfoot><tr><td colspan="3">Total ${esc(p.doseUnit)} used: <strong data-role="total">${esc(fmt(num(r.amount)))}</strong> ${esc(p.doseUnit)}</td></tr></tfoot>
+    </table>`;
+  }
   /* ---------- Batch cards and the table (kit products and products with batch & expiry) ---------- */
   const expMY = (k) => { const m = /^(\d{4})-(\d{2})/.exec(k || ""); return m ? `${m[2]}/${m[1]}` : "—"; };
   const availText = (p, s) => (isKit(p) ? `${fmt(s.avail)} ${p.doseUnit}`
@@ -418,6 +501,23 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
           <option value="shelf"${l.loc === "shelf" ? " selected" : ""}>Shelf</option>
           <option value="jt"${l.loc === "jt" ? " selected" : ""}>JT storage</option></select>`
       : "";
+    if (vial(p)) {   // JT storage / the Shelf: the opened vial, then the next one
+      const v = vialStock(l, p);
+      const nv = vialsLeft(v);
+      return `<div class="cs-line cs-v2${shortOf(l) > 0 || needsVial(l, p) ? " is-short" : ""}" data-i="${i}">
+        <div class="cs-head">
+          <strong>${esc(p.name)}${req}</strong>${linkNoteHtml(l)}
+          ${locSel}
+          ${seeStock ? `<button type="button" class="cs-restock${nv ? "" : " is-out"}" data-cs="restock"
+            title="${nv ? `Open a new ${esc(p.stockUnit)}` : "Ask the ordering team for more"}">${nv
+            ? `Restock · ${esc(plural(nv, p.stockUnit))} left` : "Order more · none left"}</button>` : ""}
+          ${l.extra ? '<button type="button" class="hx-x" data-cs="remove-line" aria-label="Remove">×</button>' : ""}
+        </div>
+        ${vialCardsHtml(l, p)}
+        ${vialTableHtml(l, p)}
+        <div class="cs-foot"><span data-role="msg">${msgHtml(l)}</span></div>
+      </div>`;
+    }
     if (kit || p.tracked) {   // batches: cards to choose from, and a table of what was used
       return `<div class="cs-line cs-v2${shortOf(l, src) > 0 ? " is-short" : ""}" data-i="${i}">
         <div class="cs-head">
@@ -544,8 +644,13 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     }
     const tot = li.querySelector('[data-role="total"]');
     if (tot && p) tot.textContent = fmt(clinicalTotal(l, p));
+    if (p && vial(p)) {   // the batch and expiry follow which vial(s) the dose comes from
+      const c = vialCells(l, p);
+      const vb = li.querySelector('[data-role="vbatch"]'); if (vb) vb.innerHTML = c.batch;
+      const ve = li.querySelector('[data-role="vexp"]'); if (ve) ve.innerHTML = c.exp;
+    }
     li.querySelector('[data-role="msg"]').innerHTML = msgHtml(l);
-    li.classList.toggle("is-short", shortOf(l) > 0);
+    li.classList.toggle("is-short", shortOf(l) > 0 || !!(p && vial(p) && needsVial(l, p)));
     onChange();
   });
 
@@ -573,7 +678,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
         l.userLoc = true;
         const p1 = productOf(l);
         l.split = false;
-        if (isKit(p1) || dosed(p1)) fillFrom(l, was); else l.rows = [newRow()];
+        if (isKit(p1) || dosed(p1) || vial(p1)) fillFrom(l, was); else l.rows = [newRow()];
       } else {
         l.loc = el.value;
         l.rows.forEach((r) => { r.ref = ""; });
@@ -586,6 +691,31 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
   async function restock(l) {
     const p = productOf(l);
     if (!p) return;
+    if (vial(p)) {
+      const v = vialStock(l, p);
+      const lot = v.lots[0];   // oldest expiry first
+      if (lot) {
+        const nv = vialsLeft(v);
+        const left = v.open.reduce((a, c) => a + c.left, 0);
+        const ok = await confirmDialog({
+          title: `Open a new ${p.stockUnit} of ${p.name}?`,
+          message: `1 ${p.stockUnit} (${batchText(p, lot.batch) || "no batch number"}, Exp ${expMY(lot.expiry)}) comes off ${whereOf(l)}. `
+            + `${plural(nv - 1, p.stockUnit)} left after this.${left > 0 ? ` The ${fmt(left)} ${p.doseUnit} left in the opened one are used first.` : ""}`,
+          confirmLabel: `Open ${p.stockUnit}`, tone: "info",
+        });
+        if (!ok) return;
+        try {
+          await openContainer(p, lot, staff);
+          await refresh(true);
+          showToast(`New ${p.stockUnit} opened: ${fmt(p.dosePer)} ${p.doseUnit} ready.`);
+        } catch (err) {
+          console.error("Open vial failed:", err);
+          showToast(err && err.message && !err.code ? err.message : "Couldn't open it. Try again.");
+        }
+        return;
+      }
+      // None left: falls through to the order request below
+    }
     if (isKit(p)) {
       if (await takeFromShelfDialog(p, staff)) await refresh(true);
       return;
@@ -668,6 +798,16 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
         doseUnit: p.dosePer ? p.doseUnit : "", dosePer: 0, batchLabel: batchName(p), loc: l.loc, block: f.ifShort === "block",
         rows: [{ ref: c ? c.id : "", lot: lot ? lot.id : "", batch: src.batch || "", expiry: src.expiry || "",
           amount: 1, dose: r2(Math.max(0, num(r.dose))), finish: !!r.finish }],
+      };
+    }
+    if (vial(p)) {
+      const units = r2(num(l.rows[0] && l.rows[0].amount));
+      if (!(units > 0)) return null;
+      const v = vialStock(l, p);
+      return {
+        fid: f.id, productId: p.id, name: p.name, kind: "vial", unit: p.doseUnit, stockUnit: p.stockUnit,
+        doseUnit: p.doseUnit, dosePer: p.dosePer, batchLabel: batchName(p), loc: l.loc, block: f.ifShort === "block",
+        rows: [{ amount: units, openIds: v.open.map((c) => c.id), lots: v.lots.map((x) => x.id) }],
       };
     }
     const kit = isKit(p);
@@ -754,6 +894,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
 // "0.8 mL (1 syringe, 0.2 mL discarded)" for dosed Shelf products, "2 mL (from an opened tube)" for shared ones,
 // otherwise "20 units" / "1 needle"
 export function consumableAmountText(l, r, withStock = true) {
+  if (l.kind === "vial") return `${fmt(r.amount)} ${l.unit}${withStock && r.opened ? ` (new ${l.stockUnit || "vial"} opened)` : ""}`;
   if (l.kind === "shared") {
     const amt = r.dose ? `${fmt(r.dose)} ${l.doseUnit}` : "Used";
     const extra = !r.taken ? ["none in stock"]
@@ -774,7 +915,8 @@ export function consumablesViewHtml(v) {
   const from = (l, r) => (r.from === "kit" ? "Clinician's kit"
     : r.from === "open" ? `Opened ${l.unit}`
     : `${r.from === "jt" ? "JT storage" : "Shelf"}${l.kind === "shared" && r.opened ? ` (new ${l.unit} opened)` : ""}`);
-  const shortText = (l) => (l.kind === "shared" ? "None in stock" : `Stock short by ${fmt(l.short)} ${l.kind === "kit" ? l.unit : unitPlural(l.unit)}`);
+  const shortText = (l) => (l.kind === "shared" ? "None in stock"
+    : `Stock short by ${fmt(l.short)} ${l.kind === "kit" || l.kind === "vial" ? l.unit : unitPlural(l.unit)}`);
   return `<table class="inv-table cs-view"><thead><tr><th>Product</th><th>Amount</th><th>Batch / Lot</th><th>Expiry</th><th>From</th></tr></thead><tbody>${
   lines.map((l) => (l.rows && l.rows.length ? l.rows : [{ amount: l.total }]).map((r, i) => `<tr>
       <td>${i ? "" : `<strong>${esc(l.name)}</strong>${l.short > 0 ? ` <span class="inv-flag is-warn">${esc(shortText(l))}</span>` : ""}`}</td>

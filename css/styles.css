@@ -7847,3 +7847,18 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
 @keyframes cs-flash { 0%, 100% { box-shadow: none; } 30%, 70% { box-shadow: 0 0 0 3px rgba(245, 158, 11, .45); } }
 .cs-line.is-short { animation: cs-flash 1.2s ease-in-out 2; }
 @media (prefers-reduced-motion: reduce) { .cs-line.is-short { animation: none; } }
+
+/* Consumables: the next vial to be opened */
+.cs-card-top em.is-next { background: #e2e8f0; color: #334155; }
+.cs-v2 div.cs-card { cursor: default; }
+
+/* Consumables: the opened vial */
+.cs-card-vial { min-width: 220px; }
+.cs-vial-left { font-size: .95rem; color: #047857; }
+.cs-vial-left b { font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.cs-card-empty { min-width: 220px; border-style: dashed; cursor: default; }
+.cs-card-empty strong { color: #b45309; }
+.cs-restock.is-out { border-color: #fecaca; background: #fef2f2; color: #b91c1c; }
+@keyframes cs-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(15, 118, 110, .45); } 60% { box-shadow: 0 0 0 7px rgba(15, 118, 110, 0); } }
+.cs-line.is-short .cs-restock:not(.is-out) { animation: cs-pulse 1.4s ease-out 3; }
+@media (prefers-reduced-motion: reduce) { .cs-line.is-short .cs-restock { animation: none; } }

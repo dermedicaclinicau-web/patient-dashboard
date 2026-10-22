@@ -29,6 +29,7 @@ export const MOVE_TYPES = {
   "kit-borrow": "Borrowed from a colleague", "kit-count": "Kit count adjusted",
   "use-correct": "Usage corrected", "kit-correct": "Kit usage corrected",
   investigation: "Investigation closed",  "shared-open": "Opened for sharing", "shared-finish": "Opened one finished",
+  "vial-open": "Vial opened (storage)",
   baseline: "Starting stock set",
   sale: "Sold",
   tracking: "Batch & expiry changed",
@@ -1632,6 +1633,10 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
     for (const r of l.rows) {
       if (l.kind === "kit") await getOnce(kitSnaps, "inv_kits", r.ref);
       else if (l.kind === "shared") { if (r.ref) await getOnce(openSnaps, "inv_open", r.ref); else await getOnce(lotSnaps, "inv_lots", r.lot); }
+      else if (l.kind === "vial") {
+        for (const id of r.openIds || []) await getOnce(openSnaps, "inv_open", id);
+        for (const id of r.lots || []) await getOnce(lotSnaps, "inv_lots", id);
+      }
       else await getOnce(lotSnaps, "inv_lots", r.ref);
     }
     if (l.kind !== "kit") await getOnce(prodSnaps, "inv_products", l.productId);
@@ -1639,6 +1644,55 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
 
   const kits = new Map(), lots = new Map(), opens = new Map(), newOpens = [];
   const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+    // Kit products in JT storage / on the Shelf (e.g. Xeomin): units come out of that place's opened vial.
+  // When it runs out, the next vial (oldest expiry first) is opened automatically. Nothing is thrown away.
+  function vialLine(l) {
+    const r0 = l.rows[0] || {};
+    const loc = l.loc === "jt" ? "jt" : "shelf";
+    const size = Number(l.dosePer) || 0;
+    let left = round1(Math.max(0, Number(r0.amount) || 0));
+    const rows = [];
+    for (const id of r0.openIds || []) {
+      if (left <= 0.001) break;
+      const snap = openSnaps.get(id);
+      if (!snap || !snap.exists() || snap.data().status !== "open") continue;
+      const d = snap.data();
+      const cap = Number(d.size) || size;
+      const s = opens.get(id) || { uses: parseInt(d.uses, 10) || 0, used: Number(d.used) || 0, finish: false };
+      const take = round1(Math.min(left, Math.max(0, cap - s.used)));
+      if (take <= 0) { s.finish = true; opens.set(id, s); continue; }
+      s.uses += 1;
+      s.used = round1(s.used + take);
+      if (s.used >= cap - 0.05) s.finish = true;   // used up
+      opens.set(id, s);
+      rows.push({ openId: id, batch: String(d.batch || ""), expiry: String(d.expiry || ""), amount: take, taken: take,
+        from: loc, dose: take, waste: 0, opened: false, finished: s.finish });
+      left = round1(left - take);
+    }
+    for (const id of r0.lots || []) {
+      if (left <= 0.001 || !size) break;
+      const snap = lotSnaps.get(id);
+      if (!snap || !snap.exists()) continue;
+      const d = snap.data();
+      const s = lots.get(id) || { qty: Number(d.qty) || 0, loc: d.loc === "jt" ? "jt" : "shelf" };
+      const batch = String(d.batch || ""), expiry = String(d.expiry || "");
+      while (left > 0.001 && s.qty >= 1) {
+        s.qty -= 1;
+        const take = round1(Math.min(left, size));
+        const finish = take >= size - 0.05;
+        const ref = doc(collection(db, "inv_open"));
+        newOpens.push({ ref, productId: l.productId, name: l.name, batch, expiry, loc: s.loc, dose: take, finish, kind: "vial" });
+        rows.push({ openId: ref.id, batch, expiry, amount: take, taken: take, from: s.loc, dose: take, waste: 0, opened: true, finished: finish });
+        left = round1(left - take);
+      }
+      lots.set(id, s);
+    }
+    if (left > 0.001) {   // not enough in stock: saved short, like every other product
+      rows.push({ openId: "", batch: "", expiry: "", amount: left, taken: 0, from: loc, dose: left, waste: 0, opened: false, finished: false });
+    }
+    return rows;
+  }
 
   // Shared products: one use of an opened container, or opening a new one from a batch
   function sharedRow(l, r) {
@@ -1676,7 +1730,7 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
   }
 
   const out = lines.map((l) => {
-    const rows = l.rows.map((r) => {
+    const rows = l.kind === "vial" ? vialLine(l) : l.rows.map((r) => {
       if (l.kind === "shared") return sharedRow(l, r);
       const want = l.kind === "kit" ? round1(r.amount) : Math.max(0, Math.round(Number(r.amount) || 0));
       let taken = 0, from = l.kind === "kit" ? "kit" : (l.loc === "jt" ? "jt" : "shelf");
@@ -1710,7 +1764,8 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
     const total = round1(rows.reduce((a, r) => a + r.amount, 0));
     const short = round1(rows.reduce((a, r) => a + (r.amount - r.taken), 0));
     return { fid: l.fid, productId: clip(l.productId, 60), name: clip(l.name, 150),
-      kind: ["kit", "shared"].includes(l.kind) ? l.kind : "storage",
+      kind: ["kit", "shared", "vial"].includes(l.kind) ? l.kind : "storage",
+      stockUnit: clip(l.stockUnit || "", 30),
       unit: clip(l.unit, 30), batchLabel: clip(l.batchLabel || "", 20), doseUnit: clip(l.doseUnit || "", 20),
       doseTotal: r2(rows.reduce((a, r) => a + r.dose, 0)), waste: r2(rows.reduce((a, r) => a + r.waste, 0)),
       total, short, rows, block: l.block === true };
@@ -1730,7 +1785,7 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
     const stock = { shelf: Number(st.shelf) || 0, jt: Number(st.jt) || 0 };
     let touched = false;
     out.filter((l) => l.kind !== "kit" && l.productId === pid).forEach((l) => l.rows.forEach((r) => {
-      const n = l.kind === "shared" ? (r.opened ? 1 : 0) : r.taken;   // shared: only a newly opened one leaves stock
+      const n = l.kind === "shared" || l.kind === "vial" ? (r.opened ? 1 : 0) : r.taken;   // only a newly opened one leaves stock
       if (!n) return;
       stock[r.from] = Math.max(0, stock[r.from] - n);
       touched = true;
@@ -1744,10 +1799,22 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
   newOpens.forEach((n) => {
     const snap = prodSnaps.get(n.productId);
     tx.set(n.ref, openDocData(n.productId, snap && snap.exists() ? snap.data() : { name: n.name }, n, staff, {
-      uses: 1, used: n.dose, lastUsedAt: serverTimestamp(), ...(n.finish ? finishedFields("Empty", staff) : {}),
+      uses: 1, used: n.dose, lastUsedAt: serverTimestamp(), ...(n.kind ? { kind: n.kind } : {}),
+      ...(n.finish ? finishedFields("Empty", staff) : {}),
     }));
   });
   out.forEach((l) => {
+    if (l.kind === "vial") {
+      const opened = l.rows.filter((r) => r.opened);
+      logMove(tx, staff, {
+        type: "use", productId: l.productId, productName: l.name, unit: l.stockUnit || "vial",
+        lines: opened.map((r) => ({ loc: r.from, batch: r.batch, expiry: r.expiry, delta: -1 })),
+        reason: "Treatment",
+        note: [`${patientName} · ${formName}`, `${l.total} ${l.unit} from the opened ${l.stockUnit || "vial"}`,
+          opened.length ? `${opened.length} new ${l.stockUnit || "vial"} opened` : ""].filter(Boolean).join(" · ").slice(0, 500),
+      });
+      return;
+    }
     if (l.kind === "shared") {
       const opened = l.rows.filter((r) => r.opened);
       if (opened.length) {
@@ -2473,6 +2540,7 @@ export async function correctUsage(id, changes, reason, staff) {
       const r = l && l.rows[c.ri];
       if (!r) throw new Error("This record has changed. Reload and try again.");
       if (l.kind === "shared") throw new Error(`${l.name} is shared across patients, so its uses can't be corrected here.`);
+      if (l.kind === "vial") throw new Error(`${l.name} came from an opened vial in storage, so it can't be corrected here yet.`);
       const kit = l.kind === "kit";
       const amount = kit ? round1(Math.max(0, Number(c.amount) || 0)) : Math.max(0, Math.round(Number(c.amount) || 0));
       const dose = kit ? amount : l.doseUnit ? Math.round(Math.max(0, Number(c.dose) || 0) * 100) / 100 : 0;
@@ -2924,6 +2992,7 @@ function normaliseOpen(d) {
   const x = d.data() || {};
   return {
     id: d.id, productId: String(x.productId || ""), productName: String(x.productName || ""), unit: String(x.unit || "item"),
+    kind: x.kind === "vial" ? "vial" : "shared",   // "vial": a kit product's opened vial in JT storage / on the Shelf
     size: Number(x.size) || 0, doseUnit: String(x.doseUnit || ""), perUse: Number(x.perUse) || 0,
     batch: String(x.batch || ""), expiry: String(x.expiry || ""), from: x.from === "jt" ? "jt" : "shelf",
     status: x.status === "finished" ? "finished" : "open",
@@ -2984,8 +3053,11 @@ function finishedFields(reason, staff, note = "") {
 }
 
 // Open one now (from the product's stock window): 1 comes off that batch
+// Shared products: opened to use across patients. Kit products (e.g. Xeomin) in JT storage / on the Shelf:
+// Restock opens the next vial, and its units are used until it's empty.
 export async function openContainer(product, lot, staff) {
-  if (!isSharedProduct(product)) throw new Error("This product isn't set up as shared across patients.");
+  const vialKind = isKitProduct(product);
+  if (!isSharedProduct(product) && !vialKind) throw new Error("This product isn't set up as shared across patients.");
   if (!lot || !["shelf", "jt"].includes(lot.loc)) throw new Error("Choose which one to open.");
   const pRef = doc(db, "inv_products", product.id);
   const lRef = doc(db, "inv_lots", lot.id);
@@ -3002,11 +3074,11 @@ export async function openContainer(product, lot, staff) {
     stock[lot.loc] = Math.max(0, stock[lot.loc] - 1);
     tx.update(lRef, { qty: have - 1, updatedAt: serverTimestamp() });
     tx.update(pRef, { stock, stockAt: serverTimestamp() });
-    tx.set(oRef, openDocData(product.id, pd, lot, staff));
+    tx.set(oRef, openDocData(product.id, pd, lot, staff, vialKind ? { kind: "vial" } : {}));
     logMove(tx, staff, {
-      type: "shared-open", productId: product.id, productName: product.name, unit: product.stockUnit,
+      type: vialKind ? "vial-open" : "shared-open", productId: product.id, productName: product.name, unit: product.stockUnit,
       lines: [{ loc: lot.loc, batch: lot.batch || "", expiry: lot.expiry || "", delta: -1 }],
-      reason: "Opened for sharing", ref: oRef.id,
+      reason: vialKind ? "Vial opened (restock)" : "Opened for sharing", ref: oRef.id,
     });
   });
   return oRef.id;
