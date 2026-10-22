@@ -53,7 +53,46 @@ function friendlyName(name) {
 function seenKey(staff) {
   return `sod:${staff.uid}:${toDateKey()}`;
 }
+/* ---------- Not started yet: it comes back until it's done ---------- */
+const SNOOZE_MIN = 15;
+const snoozeKey = (staff) => `sod-snooze:${staff.uid}:${toDateKey()}`;
+const snoozedNow = (staff) => {
+  try { return Date.now() < Number(localStorage.getItem(snoozeKey(staff)) || 0); } catch { return false; }
+};
+const snooze = (staff) => {
+  try { localStorage.setItem(snoozeKey(staff), String(Date.now() + SNOOZE_MIN * 60000)); } catch { /* ignore */ }
+};
 
+let watchStaff = null;
+let watching = false;
+let checking = false;
+let startedKey = "";   // "<uid>:<date>" once today is known to be started (no more checks today)
+
+function watchStartOfDay(staff) {
+  watchStaff = staff;
+  if (watching) return;
+  watching = true;
+  const again = () => { if (watchStaff && document.visibilityState === "visible") checkStartOfDay(watchStaff); };
+  setInterval(again, 5 * 60000);
+  document.addEventListener("visibilitychange", again);
+  window.addEventListener("hashchange", again);
+}
+
+async function checkStartOfDay(staff) {
+  const today = `${staff.uid}:${toDateKey()}`;
+  if (checking || current || startedKey === today || snoozedNow(staff)) return;
+  checking = true;
+  try {
+    const mine = session;
+    const st = await dayState(staff).catch((err) => { console.warn("Day check failed:", err); return undefined; });
+    if (mine !== session || current || watchStaff !== staff) return;
+    if (st === null) { startedKey = today; return; }   // started today
+    if (st === undefined) return;                        // couldn't check: try again later
+    showStartOfDay(staff, st.kit ? { kit: st.kit } : { noKit: true });
+  } finally {
+    checking = false;
+  }
+}
 /* ---------- Kit ---------- */
 
 // Everyone ticked as carrying a kit counts every active kit product (e.g. Xeomin), whatever the system thinks
@@ -132,16 +171,14 @@ async function addBatchOptions(kit, staff) {
   return kit;
 }
 
-// The welcome once per day. The kit count until it's done (it comes back at the next login if put off).
+// Until today's start is saved, the welcome comes back (after login, between pages, on waking, every 5 minutes).
+// It can be put off for 15 minutes, never just dismissed.
 export async function maybeShowStartOfDay(staff) {
   if (!staff) return;
   refreshStartOfDayButton(staff);
-  let seen = false;
-  try { seen = !!localStorage.getItem(seenKey(staff)); } catch { /* storage blocked: show it */ }
-  if (!seen) { showStartOfDay(staff); return; }
-  const mine = session;
-  const kit = await kitToday(staff).catch((err) => { console.warn("Kit check failed:", err); return null; });
-  if (kit && mine === session && !current) showStartOfDay(staff, { kit, kitOnly: true });
+  if (new URLSearchParams(location.search).get("sod") === "preview") { previewStartOfDay(staff); return; }
+  watchStartOfDay(staff);
+  checkStartOfDay(staff);
 }
 
 export function closeStartOfDay() {
@@ -241,6 +278,7 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
       <div data-role="kit"></div>
 
       <button type="button" class="sod-btn" data-act="start">Start my day</button>
+      ${preview ? "" : `<button type="button" class="sod-later" data-act="later">Remind me in ${SNOOZE_MIN} minutes</button>`}
     </div>`;
 
   document.body.appendChild(dlg);
@@ -256,11 +294,12 @@ export function showStartOfDay(staff, { kit = null, kitOnly = false, noKit = fal
     dlg.classList.add("closing");
     setTimeout(() => { if (current === dlg) closeStartOfDay(); }, 180);
   };
-  dlg.addEventListener("cancel", (e) => { e.preventDefault(); close(); });   // Esc: the kit count comes back at the next login
-  // Welcome only: click outside, or follow a link (a task, My dashboard) to close
+  // Not started yet: it can only be put off (back in 15 minutes), never just clicked away
+  const later = () => { if (!preview) snooze(staff); close(); };
+  dlg.addEventListener("cancel", (e) => { e.preventDefault(); later(); });
   dlg.addEventListener("click", (e) => {
-    if (kitMode && !e.target.closest('a[href^="#/"]')) return;
-    if (e.target === dlg || e.target.closest('a[href^="#/"]')) close();
+    if (e.target.closest('[data-act="later"]')) { later(); return; }
+    if (e.target.closest('a[href^="#/"]')) later();   // a task or My dashboard: go there, the welcome comes back
   });
 
   // The kit check loads while they read the welcome (an error means "don't know": the day isn't started without the count)
@@ -395,8 +434,9 @@ function renderKit(dlg, staff, kit, close) {
   wireKitCount(card);
   card.addEventListener("input", () => showErr(""));
   card.querySelector('[data-act="later"]').addEventListener("click", () => {
+    if (!edit) snooze(staff);
     close();
-    if (!edit) showToast("No problem. Press “Start my day” at the top when you're ready to count your kit.");
+    if (!edit) showToast(`No problem. I'll remind you again in ${SNOOZE_MIN} minutes.`);
   });
 
   form.addEventListener("submit", async (e) => {
@@ -708,6 +748,8 @@ export async function refreshStartOfDayButton(staff) {
 
 // On logout
 export function hideStartOfDayButton() {
+  watchStaff = null;
+  startedKey = "";
   btnStaff = null;
   btnCheck++;
   setPending(false);

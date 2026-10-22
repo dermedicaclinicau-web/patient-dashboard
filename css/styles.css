@@ -7918,3 +7918,8 @@ dialog.lh-dialog.inv-dlg.kit-set-dlg { width: min(760px, 96vw); }
 
 .kit-admin-bar { margin-bottom: 1rem; padding: .7rem .9rem; border: 1px dashed var(--border); border-radius: 12px; background: #fff; }
 .kit-admin-bar p { margin: 0; font-size: .88rem; }
+
+/* Start of Day: put it off for 15 minutes */
+.sod-later { display: block; margin: .75rem auto 0; padding: .3rem .6rem; border: none; background: none;
+  color: var(--muted); font: inherit; font-size: .88rem; font-weight: 600; cursor: pointer; }
+.sod-later:hover { color: var(--text); text-decoration: underline; }
