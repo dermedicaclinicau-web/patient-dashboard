@@ -2137,7 +2137,6 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           ${canManage ? '<button type="button" class="lh-btn is-primary" data-stock="add">Add stock</button>' : ""}
           ${canMove ? '<button type="button" class="lh-btn" data-stock="move">Move Shelf ⇄ JT</button>' : ""}
           ${canMove ? '<button type="button" class="lh-btn" data-act="sale">Record a sale</button>' : ""}
-          ${canMove ? '<button type="button" class="lh-btn" data-act="sale">Record a sale</button>' : ""}
           ${canMove && !isKitProduct(p) && !isSharedProduct(p) ? '<button type="button" class="lh-btn" data-act="paper">Used on a patient</button>' : ""}
           ${canRequest ? '<button type="button" class="lh-btn" data-act="request">Request more</button>' : ""}
           ${canManage ? `<button type="button" class="lh-btn" data-stock="count">Count</button>

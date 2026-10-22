@@ -2541,14 +2541,6 @@ export async function listUsageBetween(from, to) {
     .sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0));
 }
 
-// Activity between two dates, optionally only some types (e.g. ["kit-discard", "writeoff"])
-export async function listMovesBetween(from, to, types = null) {
-  const snap = await getDocs(query(collection(db, "inv_moves"), where("at", ">=", from), where("at", "<", to)));
-  return snap.docs
-    .map((d) => { const x = d.data() || {}; return { id: d.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [], at: toDate(x.at) }; })
-    .filter((m) => !types || types.includes(m.type))
-    .sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0));
-}
 
 /* ===================== Reporting: kit reconciliation and saved short ===================== */
 
