@@ -50,6 +50,7 @@ function doPost(e) {
     if (body.action === 'upload') return json_(handleUpload_(body));
     if (body.action === 'marketing') return json_(handleMarketing_(body));
     if (body.action === 'recall') return json_(handleRecall_(body));
+    if (body.action === 'sms') return json_(handleSms_(body));
     if (body.action === 'marketingPublic') return json_(handleMarketingPublic_(body)); // the unsubscribe page (no login)
     if (body.action === 'publicForm') return json_(handlePublicForm_(body)); // a patient's online form (no login)
 
@@ -3196,6 +3197,7 @@ const PERMS_ = [
   ['consult.record', 'Consultations', 'Record consultations and edit notes'],
   ['consult.delete', 'Consultations', 'Delete any recording (staff can always delete their own)'],
   ['send.patients', 'Sending', 'Email and print to patients'],
+  ['sms.send', 'Sending', 'Text patients from their page (Textmagic)'],
   ['tasks.run', 'Task Manager', 'Run tasks (turn this off to stop all task sending and printing)'],
   ['tasks.patient', 'Task Manager', 'Create new task → To Patient'],
   ['tasks.staff', 'Task Manager', 'Create new task → To Staff'],
@@ -12400,12 +12402,19 @@ function recallOneReply_(cfg, set, x, memo) {
       .sort(function (a, b) { return String(b.dueDate).localeCompare(String(a.dueDate)); })[0]
     || live[0] || null;
   const any = card || cards[0] || null;
-  const pid = any ? String(any.patientId || '') : '';
+  // The newest text sent from a patient page to this number. If it's newer than the recall text, the reply is to it.
+  const portal = phone ? fsQuery_(cfg, SMS_COL_, 'phone', 'EQUAL', phone, 50)
+    .sort(function (a, b) { return String(b.at).localeCompare(String(a.at)); })[0] || null : null;
+  const toPortal = !!portal && (!card || !card.lastTextAt || String(portal.at) > String(card.lastTextAt));
+  const pid = any ? String(any.patientId || '') : portal ? String(portal.patientId || '') : '';
 
   commitWrites_(cfg, [updateWrite_(cfg, RECALL_REPLIES_ + '/r_' + x.id, {
     tmId: String(x.id), phone: phone || x.from, text: text, at: at, kind: kind,
-    cardId: card ? card._id : '', patientId: pid, patientName: any ? String(any.patientName || '') : '', seenAt: now,
+    cardId: card && !toPortal ? card._id : '', patientId: pid,
+    patientName: any ? String(any.patientName || '') : portal ? String(portal.patientName || '') : '', seenAt: now,
+    toPortal: toPortal,
   })]);
+  if (toPortal) smsTellSender_(portal, kind, text);
 
   const what = kind === 'stop' ? 'Replied STOP' : kind === 'yes' ? 'Replied: wants to book' : 'Replied';
   const entry = { at: at, by: 'Patient', byUid: '', kind: 'reply', what: what, note: text };
@@ -12426,7 +12435,7 @@ function recallOneReply_(cfg, set, x, memo) {
     if (writes.length) commitWrites_(cfg, writes);
     return;
   }
-  if (!card) return;   // saved in recall_replies for someone to look at
+  if (!card || toPortal) return;   // saved in recall_replies (a reply to a patient-page text shows in their conversation)
 
   const log = (Array.isArray(card.log) ? card.log : []).concat([entry]);
   const patch = { replyOpen: true, reply: reply, textHoldUntil: '', updatedAt: now };
@@ -13696,4 +13705,122 @@ function flowRecentSend_(cfg, flow, s, pid, mode, days) {
     });
   });
   return last >= since ? last : 0;
+}
+
+// ===================== Patient page → SMS (Textmagic) =====================
+// Staff text a patient from their page. Sent here, so the Textmagic key never reaches the browser.
+// Each text is kept in sms_messages; replies arrive through recallReplies_ (every 5 minutes) into recall_replies.
+
+const SMS_COL_ = 'sms_messages';
+const SMS_MAX_ = 612;
+
+function handleSms_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!can_(session, 'sms.send')) return { ok: false, error: 'FORBIDDEN' };
+  const op = String(body.op || '');
+  try {
+    const cfg = getConfig_();
+    const doc = flowPatient_(cfg, String(body.patientId || ''));
+    if (!doc) return { ok: true, problem: "This patient couldn't be found." };
+    if (op === 'thread') return smsThread_(cfg, doc);
+    if (op === 'send') return smsSend_(cfg, doc, body, session);
+  } catch (err) {
+    console.error('SMS ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: true, problem: 'Something went wrong: ' + String(err && err.message ? err.message : err).slice(0, 200) };
+  }
+  return { ok: false, error: 'BAD_REQUEST' };
+}
+
+// On the do-not-contact list, or replied STOP: texts about their care only
+function smsBlock_(cfg, doc) {
+  const c = doc['Marketing Consent'] || {};
+  const stop = doc['Marketing OK'] === false && c.source === 'Replied STOP to a text';
+  const why = recallTextBlocked_(cfg, doc._id);
+  if (!stop && !why) return { dnc: false, stop: false, why: '' };
+  return {
+    dnc: true, stop: stop,
+    why: stop ? 'They replied STOP to a text' + (c.at ? ' on ' + recLongDate_(String(c.at).slice(0, 10)) : '') + '.'
+      : "They're on the do-not-contact list" + (c.source ? ' (' + c.source + ')' : '') + '.',
+  };
+}
+
+// Texts from patient pages, Recall texts, and replies to this number: oldest first, the last 60
+function smsThread_(cfg, doc) {
+  const phone = recallPhone04_(doc.Mobile);
+  const ids = uniq_([String(doc._id)].concat(Array.isArray(doc.MergedIds) ? doc.MergedIds.map(String) : [])).slice(0, 10);
+  const items = [];
+  ids.forEach(function (id) {
+    fsQuery_(cfg, SMS_COL_, 'patientId', 'EQUAL', id, 200).forEach(function (m) {
+      items.push({ dir: 'out', at: String(m.at || ''), text: String(m.text || ''), by: String(m.by || ''), src: '' });
+    });
+    fsQuery_(cfg, RECALL_COL_, 'patientId', 'EQUAL', id, 50).forEach(function (c) {
+      (Array.isArray(c.log) ? c.log : []).forEach(function (l) {
+        if (!l || !l.note) return;
+        const isText = l.kind === 'text' || (l.kind === 'flow' && /^Text sent/.test(String(l.what || '')));
+        if (isText) items.push({ dir: 'out', at: String(l.at || ''), text: String(l.note), by: String(l.by || ''), src: 'Recall' });
+      });
+    });
+  });
+  if (phone) {
+    fsQuery_(cfg, RECALL_REPLIES_, 'phone', 'EQUAL', phone, 200).forEach(function (r) {
+      items.push({ dir: 'in', at: String(r.at || ''), text: String(r.text || ''), kind: String(r.kind || '') });
+    });
+  }
+  items.sort(function (a, b) { return a.at.localeCompare(b.at); });
+  return {
+    ok: true, ready: !!tmAuth_(), mobile: phone, items: items.slice(-60), blocked: smsBlock_(cfg, doc),
+  };
+}
+
+function smsSend_(cfg, doc, body, session) {
+  const auth = tmAuth_();
+  if (!auth) return { ok: true, problem: "Texts aren't set up yet. Add TextMagic, TextMagicUser and TextMagicFrom in Script Properties." };
+  const phone61 = recallPhone61_(doc.Mobile);
+  if (!phone61) return { ok: true, problem: "There's no Australian mobile number on their record." };
+  const h = Number(Utilities.formatDate(new Date(), REC_TZ_, 'H'));
+  if (h < 7 || h >= 21) return { ok: true, problem: 'Texts can only be sent between 7 am and 9 pm.' };
+  const text = String(body.text || '').replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').trim();
+  if (text.length < 2) return { ok: true, problem: 'Write the message first.' };
+  if (text.length > SMS_MAX_) return { ok: true, problem: 'The message is too long. Keep it under ' + SMS_MAX_ + ' characters.' };
+  const blk = smsBlock_(cfg, doc);
+  if (blk.dnc && body.service !== true) {
+    return { ok: true, problem: blk.why + ' Tick "This is about their appointment or care" to send it.' };
+  }
+  const cache = CacheService.getScriptCache();
+  const rk = 'sms_rl_' + session.uid;
+  const used = Number(cache.get(rk) || 0);
+  if (used >= 60) return { ok: true, problem: "You've sent a lot of texts in the last hour. Try again a bit later." };
+
+  let tmId = '';
+  try { tmId = tmSend_(auth, phone61, text); }
+  catch (e) { return { ok: true, problem: "The text wasn't sent: " + String(e && e.message ? e.message : e).slice(0, 200) }; }
+  cache.put(rk, String(used + 1), 3600);
+
+  const at = new Date().toISOString();
+  const who = String(session.name || 'Staff');
+  commitWrites_(cfg, [updateWrite_(cfg, SMS_COL_ + '/s_' + Date.now() + '_' + Utilities.getUuid().slice(0, 8), {
+    patientId: String(doc._id), patientName: flowWho_(doc).name, phone: recallPhone04_(doc.Mobile), text: text,
+    at: at, by: who, byUid: String(session.uid || ''), tmId: String(tmId || ''), service: blk.dnc,
+  })]);
+  console.log('SMS to ' + flowWho_(doc).name + ' by ' + who);
+  return { ok: true, item: { dir: 'out', at: at, text: text, by: who, src: '' } };
+}
+
+// A reply to a patient-page text: the person who sent it gets an email
+function smsTellSender_(portal, kind, text) {
+  try {
+    const s = getStaffDocs_().filter(function (x) { return x.id === portal.byUid; })[0];
+    if (!s || s.active === false || !isEmail_(s.email) || MailApp.getRemainingDailyQuota() < 1) return;
+    const name = String(portal.patientName || 'A patient');
+    const html = invEmailWrap_(
+      '<h2 style="margin:0 0 6px;font-size:20px;color:#0f766e">' + invEsc_(name) + ' replied to your text</h2>' +
+      '<p style="margin:0 0 6px;color:#64748b;font-size:13px">You wrote: “' + invEsc_(String(portal.text || '').slice(0, 200)) + '”</p>' +
+      '<p style="margin:0 0 6px;padding:12px 14px;border-radius:10px;background:#f0fdfa;color:#134e4a;white-space:pre-wrap">' +
+        invEsc_(text) + '</p>' +
+      (kind === 'stop' ? '<p style="margin:10px 0 0;color:#b91c1c">They replied STOP, so they\'re now on the do-not-contact list.</p>' : ''),
+      'patient/' + encodeURIComponent(String(portal.patientId || '')), "Open the patient's page");
+    MailApp.sendEmail({ to: s.email, name: 'Dermedica Portal', subject: 'Text reply from ' + name,
+      htmlBody: html, body: emailHtmlToText_(html) });
+  } catch (e) { console.warn('Text reply email not sent: ' + e); }
 }

@@ -34,6 +34,8 @@ import { showSoapPanel } from "./soap-panel.js";
 import { fetchPatientRecords } from "./records.js";
 import { openTaskPanel, statusPillHtml } from "./task-panel.js";
 import { myUid } from "./inventory-api.js";
+import { can } from "./perms.js";
+import { openSmsDialog } from "./sms-dialog.js";
 import { db } from "./firebase-config.js";
 import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
@@ -218,6 +220,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     if (refreshBtn) { refreshAll(refreshBtn); return; }
     if (t.closest("[data-action='merge-info']")) { mergeInfo(); return; }
     if (t.closest("[data-action='add-reminder']")) { addReminderFlow(); return; }
+    if (t.closest("[data-action='sms']")) { openSmsDialog({ patient }); return; }
     if (t.closest("[data-action='create-ssp']")) { location.hash = `#/ssp/new/${encodeURIComponent(patient.id)}`; return; }
     const openT = t.closest("[data-action='task-open']");
     if (openT && !t.closest("a")) { openTask(openT.dataset.id); return; }
@@ -750,7 +753,9 @@ function barHtml(p, today = [], pre = null) {
       </div>
       <div class="pb-actions">
         ${roundLink(tel && `tel:${tel}`, "phone", "Call", "No mobile number on file")}
-        ${roundLink(tel && `sms:${tel}`, "sms", "SMS", "No mobile number on file")}
+        ${tel && can("sms.send")
+          ? `<button type="button" class="round-btn" data-action="sms" aria-label="Text" title="Text">${ICONS.sms}</button>`
+          : roundLink(tel && `sms:${tel}`, "sms", "SMS", "No mobile number on file")}
         <button type="button" class="round-btn" data-task-picker="patient" data-email="${escapeHtml(p.email || "")}" aria-label="Email" title="Email">${ICONS.mail}</button>
         <button type="button" class="round-btn" data-action="add-reminder" aria-label="Add reminder" title="Add reminder">${ICONS.bell}</button>
         <button type="button" class="btn-ghost sm pb-edit">${ICONS.edit}<span>Edit</span></button>
