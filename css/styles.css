@@ -7862,3 +7862,10 @@ dialog.tk-dlg::backdrop { background: rgba(15, 23, 42, .25); }
 @keyframes cs-pulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(15, 118, 110, .45); } 60% { box-shadow: 0 0 0 7px rgba(15, 118, 110, 0); } }
 .cs-line.is-short .cs-restock:not(.is-out) { animation: cs-pulse 1.4s ease-out 3; }
 @media (prefers-reduced-motion: reduce) { .cs-line.is-short .cs-restock { animation: none; } }
+
+/* Opened vial table: no remove column, so Units used gets proper room */
+.cs-table.is-vial td:first-child { width: 35%; }
+.cs-table.is-vial td:last-child { width: 220px; text-align: left; }
+.cs-table.is-vial th:last-child { white-space: nowrap; }
+.cs-table.is-vial .fe-num { max-width: 220px; }
+.cs-table.is-vial .fe-num input { min-width: 100px; text-align: right; font-weight: 600; }

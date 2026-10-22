@@ -61,6 +61,7 @@
                   "./js/marking-sets.js",
                   "./js/master-plan-api.js",
                   "./js/master-plan-review.js",
+                  "./js/menu-search.js",
                   "./js/merge-dialog.js",
                   "./js/merge-patients.js",
                   "./js/mkt-campaigns.js",
@@ -168,6 +169,6 @@
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261021-201743",
-    "v":  "20261021-201743"
+    "version":  "20261022-082010",
+    "v":  "20261022-082010"
 }

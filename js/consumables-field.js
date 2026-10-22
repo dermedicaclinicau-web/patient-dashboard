@@ -422,7 +422,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
   function vialTableHtml(l, p) {
     const r = l.rows[0] || newRow();
     const c = vialCells(l, p);
-    return `<table class="cs-table"><thead><tr><th>${esc(batchName(p))}</th><th>Expiry</th><th>${esc(p.doseUnit)} used</th></tr></thead>
+    return `<table class="cs-table is-vial"><thead><tr><th>${esc(batchName(p))}</th><th>Expiry</th><th>${esc(p.doseUnit)} used</th></tr></thead>
       <tbody><tr class="cs-row" data-j="0">
         <td class="cs-exp" data-role="vbatch">${c.batch}</td>
         <td class="cs-exp" data-role="vexp">${c.exp}</td>
