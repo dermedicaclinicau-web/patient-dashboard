@@ -11,7 +11,7 @@ export const PERM_KEYS = [
   "tasks.build", "forms.build", "flows.build", "data.upload", "marketing.manage",
   "ssp.create", "ssp.config",
   "menu.inventory", "inventory.view", "inventory.request", "inventory.receive", "inventory.order", "inventory.manage",
-  "inventory.kit", "inventory.jt", "inventory.count", "menu.reports",
+  "inventory.kit", "inventory.jt", "inventory.count", "menu.reports", "reports.patients",
   "dash.attention", "dash.appts", "dash.tasks", "dash.kit", "dash.records", "dash.usage", "dash.requests", "dash.stock", "dash.overview",
   "menu.scanner", "scanner.billing", "scanner.docket", "scanner.rx", "inventory.history", "records.move",
 ];

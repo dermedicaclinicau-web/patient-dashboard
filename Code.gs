@@ -22,6 +22,7 @@ function doPost(e) {
 
     // Non-login requests
     if (body.action === 'renewSession') return json_(handleRenewSession_(body)); // expired session, still signed in
+    if (body.action === 'reports') return json_(handleReports_(body));
     if (body.action === 'appointments') return json_(handleAppointments_(body));
     if (body.action === 'preconsult') return json_(handlePreconsult_(body));
     if (body.action === 'processRecording') return json_(handleProcessRecording_(body));
@@ -3262,6 +3263,7 @@ const PERMS_ = [
   ['scanner.docket', 'Scanner', 'Scan delivery dockets'],
   ['scanner.rx', 'Scanner', 'Scan product prescriptions (adds them to the patient)'],
   ['menu.reports', 'Menus', 'Reporting: variance, wastage, kit reconciliation and usage'],
+  ['reports.patients', 'Menus', 'Reporting: patient lists (packages left, Skin Scripts expiring, new patients) with contact details'],
   ['dash.attention', 'My dashboard', 'Needs my attention'],
   ['dash.appts', 'My dashboard', 'My appointments today'],
   ['dash.tasks', 'My dashboard', 'Open staff tasks'],
@@ -14145,4 +14147,197 @@ function inventoryFindSentPo_(p) {
   });
   out.sort(function (a, b) { return a.date < b.date ? -1 : 1; });
   return { messages: out };
+}
+
+// ===================== Reporting: patient lists =====================
+// Reporting → Packages left, Skin Scripts expiring and New patients not back. Worked out from the PCN sheets
+// (alltimeappts, customer_packages, SSP_NEW) and Firestore (patient_list, ssp_records). Each answer is remembered
+// for 10 minutes; "Refresh" works it out again. Contacts are logged by the portal in report_contacts.
+
+const REP_OPS_ = ['packages', 'ssp', 'newpts'];
+const REP_PKG_DONE_ = /expir|cancel|refund|void|complete|closed|inactive|used up/i;   // package statuses that can't be used
+
+function handleReports_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!can_(session, 'reports.patients')) return { ok: false, error: 'FORBIDDEN' };
+  const op = String(body.op || '');
+  if (REP_OPS_.indexOf(op) === -1) return { ok: false, error: 'BAD_REQUEST' };
+  const key = 'rep_' + op + '_v1';
+  if (body.fresh !== true) {
+    const hit = repCacheGet_(key);
+    if (hit) return Object.assign({ ok: true, cached: true }, hit);
+  }
+  const cache = CacheService.getScriptCache();
+  if (cache.get('up_ds_active') || cache.get('pcn_run_active')) {
+    return { ok: true, problem: 'A Day Sheet upload or PCN update is running. Try again in a few minutes.' };
+  }
+  try {
+    const t0 = Date.now();
+    const cfg = getConfig_();
+    const ctx = pcnCtx_();
+    const pts = recallPatients_(cfg);
+    const idx = repVisits_(ctx, pts);
+    const rows = op === 'packages' ? repPackages_(ctx, pts, idx)
+      : op === 'ssp' ? repSsp_(cfg, ctx, pts, idx) : repNewPts_(ctx, pts, idx);
+    const out = { rows: rows, at: new Date().toISOString(), today: ctx.todayKey, ms: Date.now() - t0 };
+    repCachePut_(key, out);
+    console.log('Report ' + op + ': ' + rows.length + ' row(s) in ' + out.ms + ' ms for ' + session.name);
+    return Object.assign({ ok: true }, out);
+  } catch (err) {
+    console.error('Report ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: true, problem: "The report couldn't be made: " + String(err && err.message ? err.message : err).slice(0, 200) };
+  }
+}
+
+// Every patient's visits from the appointment book: first and last visit, how many visit days, next booking.
+// Keyed by the patient record kept after merges (or "ptt:<id>" when the ID isn't in the Patient List).
+// Cancelled, no-shows and DNA don't count. Today's appointments count as booked.
+function repVisits_(ctx, pts) {
+  const idx = Object.create(null);
+  const keyOf = Object.create(null);
+  pcnReadAppts_(ctx).forEach(function (r) {
+    if (!pcnIsDate_(r[0]) || !pcnStatusOk_(r[7], 'full')) return;
+    const ptt = String(r[14] == null ? '' : r[14]).trim();
+    if (!ptt) return;
+    if (!(ptt in keyOf)) keyOf[ptt] = pts.find(ptt) || ('ptt:' + ptt);
+    const k = keyOf[ptt];
+    const x = idx[k] || (idx[k] = { name: '', first: '', firstSvc: [], firstStaff: '', last: '', next: '', nextSvc: [],
+      days: Object.create(null), n: 0 });
+    if (!x.name) x.name = String(r[1] == null ? '' : r[1]).trim();
+    const dk = Utilities.formatDate(r[0], ctx.tz, 'yyyy-MM-dd');
+    const svc = String(r[9] == null ? '' : r[9]).trim();
+    const add = function (list) { if (svc && list.indexOf(svc) === -1 && list.length < 4) list.push(svc); };
+    if (r[0].getTime() >= ctx.today) {
+      if (!x.next || dk < x.next) { x.next = dk; x.nextSvc = []; }
+      if (dk === x.next) add(x.nextSvc);
+      return;
+    }
+    if (!x.days[dk]) { x.days[dk] = true; x.n++; }
+    if (!x.first || dk < x.first) { x.first = dk; x.firstSvc = []; x.firstStaff = String(r[8] == null ? '' : r[8]).trim(); }
+    if (dk === x.first) add(x.firstSvc);
+    if (dk > x.last) x.last = dk;
+  });
+  return idx;
+}
+
+// Name, mobile, email and do-not-contact from their patient record (or just the name, if they're not linked)
+function repWho_(pts, key, name) {
+  const d = key && key.indexOf('ptt:') !== 0 ? pts.doc(key) : null;
+  if (!d) return { id: '', name: String(name || ''), mobile: '', email: '', dnc: false };
+  const w = flowWho_(d);
+  return { id: key, name: w.name || String(name || ''), mobile: recMobile_(d.Mobile), email: String(d.Email || ''),
+    dnc: d['Marketing OK'] === false };
+}
+
+// customer_packages: one row per service in a package. Grouped into one row per patient + package.
+function repPackages_(ctx, pts, idx) {
+  const sh = pcnSheet_(ctx, UP_PKG_TAB_);
+  const last = sh.getLastRow();
+  const rows = last >= 2 ? sh.getRange(2, 1, last - 1, 13).getValues() : [];
+  const num = function (v) {
+    const n = typeof v === 'number' ? v : Number(String(v == null ? '' : v).replace(/[$,\s]/g, ''));
+    return isFinite(n) ? n : 0;
+  };
+  const groups = Object.create(null);
+  rows.forEach(function (r) {
+    const left = num(r[7]);                                          // H Remaining
+    if (!(left > 0)) return;
+    const status = String(r[2] == null ? '' : r[2]).trim();         // C Status
+    if (REP_PKG_DONE_.test(status)) return;
+    const exp = pcnIsDate_(r[3]) ? Utilities.formatDate(r[3], ctx.tz, 'yyyy-MM-dd') : upDateKey_(String(r[3] == null ? '' : r[3]));
+    if (exp && exp < ctx.todayKey) return;                           // expired: can't be used now
+    const name = String(r[0] == null ? '' : r[0]).trim();
+    const pkg = String(r[1] == null ? '' : r[1]).trim() || 'Package';
+    const ptt = String(r[12] == null ? '' : r[12]).trim();          // M Patient ID
+    const key = ptt ? (pts.find(ptt) || ('ptt:' + ptt)) : '';
+    const g = groups[(key || 'n:' + name.toLowerCase()) + '|' + pkg.toLowerCase() + '|' + exp]
+      || (groups[(key || 'n:' + name.toLowerCase()) + '|' + pkg.toLowerCase() + '|' + exp] =
+        { key: key, ptt: ptt, name: name, pkg: pkg, status: status, expires: exp, left: 0, value: 0, lines: [] });
+    const price = num(r[9]);                                         // J ServicePrice
+    g.left += left;
+    if (price > 0) g.value += price * left;
+    if (g.lines.length < 8) g.lines.push({ svc: String(r[6] == null ? '' : r[6]).trim(), left: left, used: num(r[8]) });
+  });
+  return Object.keys(groups).map(function (k) {
+    const g = groups[k];
+    const v = (g.key && idx[g.key]) || {};
+    return Object.assign(repWho_(pts, g.key, g.name), {
+      ptt: g.ptt, pkg: g.pkg, status: g.status, expires: g.expires, left: g.left, value: Math.round(g.value), lines: g.lines,
+      last: v.last || '', next: v.next || '', nextSvc: v.nextSvc || [],
+    });
+  });
+}
+
+// Each patient's most recent Skin Script (portal ones first, then SSP_NEW), expiring between a year ago and 4 months ahead
+function repSsp_(cfg, ctx, pts, idx) {
+  let months = 12;
+  try { const s = fsGetDoc_(cfg, 'form_settings/ssp'); if (s && Number(s.validMonths) > 0) months = Number(s.validMonths); }
+  catch (e) { /* 12 months */ }
+  const best = Object.create(null);
+  const put = function (key, name, date, validUntil, by) {
+    if (!key || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
+    const cur = best[key];
+    if (cur && cur.date >= date) return;                              // keep the newest (a portal one wins a tie)
+    const vu = String(validUntil || '').slice(0, 10);
+    best[key] = { name: String(name || ''), date: date, by: String(by || ''),
+      expires: /^\d{4}-\d{2}-\d{2}$/.test(vu) ? vu : flowAddMonthsKey_(date, months) };
+  };
+  fsListAll_(cfg, 'ssp_records', ['patientId', 'patientPttId', 'patientName', 'recordDate', 'validUntil', 'createdBy'])
+    .forEach(function (d) {
+      const f = fromFields_(d.fields || {});
+      put(pts.find(f.patientId) || pts.find(f.patientPttId), f.patientName, String(f.recordDate || ''),
+        String(f.validUntil || ''), f.createdBy);
+    });
+  const sh = SpreadsheetApp.openById(SSP_SHEET_ID).getSheetByName(SSP_SHEET_NAME);
+  if (sh && sh.getLastRow() >= 2) {
+    const tz = sh.getParent().getSpreadsheetTimeZone();
+    sh.getRange(2, 1, sh.getLastRow() - 1, 4).getValues().forEach(function (r) {   // A record · B date · C name · D Patient ID
+      const ptt = String(r[3] == null ? '' : r[3]).trim();
+      if (ptt) put(pts.find(ptt), String(r[2] == null ? '' : r[2]).trim(), sheetDateKey_(r[1], tz), '', '');
+    });
+  }
+  const lo = flowAddDaysKey_(ctx.todayKey, -365);
+  const hi = flowAddDaysKey_(ctx.todayKey, 120);
+  return Object.keys(best).filter(function (k) { return best[k].expires >= lo && best[k].expires <= hi; }).map(function (k) {
+    const s = best[k];
+    const v = idx[k] || {};
+    return Object.assign(repWho_(pts, k, s.name), {
+      date: s.date, expires: s.expires, by: s.by, last: v.last || '', next: v.next || '', nextSvc: v.nextSvc || [],
+    });
+  });
+}
+
+// One visit day in the last 12 months, and nothing booked
+function repNewPts_(ctx, pts, idx) {
+  const lo = flowAddDaysKey_(ctx.todayKey, -365);
+  return Object.keys(idx).filter(function (k) { const x = idx[k]; return x.n === 1 && !x.next && x.first >= lo; })
+    .map(function (k) {
+      const x = idx[k];
+      return Object.assign(repWho_(pts, k, x.name), { first: x.first, firstSvc: x.firstSvc, firstStaff: x.firstStaff });
+    });
+}
+
+// Remembered in parts (one cache value holds 100 KB at most)
+function repCacheGet_(key) {
+  const c = CacheService.getScriptCache();
+  const n = Number(c.get(key) || 0);
+  if (!n) return null;
+  const keys = [];
+  for (let i = 0; i < n; i++) keys.push(key + '_' + i);
+  const got = c.getAll(keys);
+  if (!keys.every(function (k) { return got[k]; })) return null;
+  try { return JSON.parse(keys.map(function (k) { return got[k]; }).join('')); } catch (e) { return null; }
+}
+function repCachePut_(key, val) {
+  try {
+    const json = JSON.stringify(val);
+    if (json.length > 3000000) return;
+    const parts = {};
+    let n = 0;
+    for (let i = 0; i < json.length; i += 45000) parts[key + '_' + (n++)] = json.slice(i, i + 45000);
+    const c = CacheService.getScriptCache();
+    c.putAll(parts, 600);
+    c.put(key, String(n), 600);
+  } catch (e) { console.warn('Report not remembered: ' + e); }
 }

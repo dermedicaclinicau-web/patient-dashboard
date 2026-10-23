@@ -24,6 +24,20 @@ service cloud.firestore {
         && request.resource.data.devices.size() <= 30;
       allow delete: if false;
     }
+
+    // Reporting → patient lists: who's been contacted (one per list and patient)
+    match /report_contacts/{id} {
+      allow read: if can('reports.patients');
+      allow create, update: if can('reports.patients')
+        && request.resource.data.keys().hasOnly(['list', 'key', 'patientId', 'patientName', 'outcome', 'note', 'until', 'by', 'byUid', 'at'])
+        && request.resource.data.list in ['packages', 'ssp', 'newpts']
+        && id == request.resource.data.list + '__' + request.resource.data.key
+        && request.resource.data.outcome in ['booked', 'spoke', 'message', 'sent', 'callback', 'not_interested']
+        && request.resource.data.note is string && request.resource.data.note.size() <= 500
+        && request.resource.data.until is string
+        && request.resource.data.byUid == request.auth.uid;
+      allow delete: if false;
+    }
     
     match /data_uploads/{kind} {
       allow read: if request.auth != null;

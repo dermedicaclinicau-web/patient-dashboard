@@ -10,6 +10,7 @@ import { can } from "./perms.js";
 import { showToast } from "./utils.js";
 import { renderPlanReports } from "./plan-reports.js";
 import { MOODS } from "./end-of-day-api.js";
+import { mountPatientReport, PATIENT_TABS } from "./patient-reports.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(2));
@@ -73,7 +74,8 @@ function openDialog(html) {
 
 export function mountReports(container, { param = "", staff = null } = {}) {
   const first = String(param || "").split("/")[0];
-  const tab = TABS.some(([k]) => k === first) ? first : "variance";
+  const tabs = can("reports.patients") ? TABS.concat(PATIENT_TABS) : TABS;
+  const tab = tabs.some(([k]) => k === first) ? first : "variance";
   const root = document.createElement("section");
   root.className = "page wide";
   container.replaceChildren(root);
@@ -83,7 +85,7 @@ export function mountReports(container, { param = "", staff = null } = {}) {
   }
   root.innerHTML = `
     <div class="fb-head"><div><h2>Reporting</h2><p class="muted">Count differences, wastage, kits and usage.</p></div></div>
-    <nav class="pt-tabs inv-tabs" aria-label="Reporting">${TABS.map(([k, l]) =>
+    <nav class="pt-tabs inv-tabs" aria-label="Reporting">${tabs.map(([k, l]) =>
       `<a href="#/reports/${k}"${k === tab ? ' class="active" aria-current="page"' : ""}>${esc(l)}</a>`).join("")}</nav>
     <div data-role="body">${SKELETON}</div>`;
   const body = root.querySelector('[data-role="body"]');
@@ -95,6 +97,7 @@ export function mountReports(container, { param = "", staff = null } = {}) {
   else if (tab === "opened") mountOpened(body);
   else if (tab === "kits") mountKitRecon(body);
   else if (tab === "plans") renderPlanReports(body, { staff });
+  else if (PATIENT_TABS.some(([k]) => k === tab)) mountPatientReport(body, tab, staff);
   else mountShort(body, staff);
 }
 

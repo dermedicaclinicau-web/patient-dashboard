@@ -8406,3 +8406,8 @@ body.ff-handing { overflow: hidden; }
   background: none; color: var(--muted); font: inherit; font-size: 12.5px; cursor: pointer; }
 .ch-refresh:hover { background: #f1f5f9; color: var(--primary); }
 @media (max-width: 640px) { .fr-bar { top: 8px; flex-wrap: wrap; } }
+
+/* Reporting → patient lists */
+.pr-contact { min-width: 180px; }
+.pr-contact .rp-done { margin-bottom: 6px; }
+.pr-outs { display: grid; gap: 6px; }
