@@ -10,6 +10,7 @@ import {
   newGroupId, watchAway, saveAway, editMessage, deleteMessage, hideChat, newMessageId,
   uploadChatImage, chatImageUrl, cachedImageUrl,
 } from "./chat-api.js";
+import { startPresence, stopPresence, watchPresence } from "./presence.js";
 
 const HELP_NAME = "Bethany";   // who answers Help
 const esc = (s) => escapeHtml(String(s ?? ""));
@@ -76,12 +77,39 @@ const photoOf = (u) => {
 const faceOf = (c) => (c.kind === "dm" ? c.members.find((u) => u !== me.uid) || c.members[0]
   : c.kind === "help" && c.members[0] !== me.uid ? c.members[0] : "");
 // kind: "help" | "group" | "" (a person). u: their ID, for the photo (initials show if there isn't one, or it won't load).
+/* ---------- Who's on the portal ---------- */
+const presOf = (u) => presence.get(String(u || "")) || { status: "offline", device: "", lastAt: 0 };
+// "today 2:14 pm", "yesterday 4:30 pm", "Tue 2:14 pm", "12 Oct"
+function seenWhen(ms) {
+  const d = new Date(ms);
+  const t = timeOf(d);
+  const k = keyOf(d);
+  if (k === keyOf(new Date())) return `today ${t}`;
+  if (k === dayFromNow(-1)) return `yesterday ${t}`;
+  if (Date.now() - ms < 6 * 86400000) return `${d.toLocaleDateString("en-AU", { weekday: "short" })} ${t}`;
+  return d.toLocaleDateString("en-AU", { day: "numeric", month: "short" });
+}
+const ON_DEVICE = { phone: "their phone", iPad: "an iPad", tablet: "a tablet" };
+function presText(u) {
+  const p = presOf(u);
+  if (p.status === "online") return `Online now${ON_DEVICE[p.device] ? ` · on ${ON_DEVICE[p.device]}` : ""}`;
+  if (p.status === "away") return "Away";
+  return p.lastAt ? `Last seen ${seenWhen(p.lastAt)}` : "";
+}
+const presDot = (u) => {
+  const s = presOf(u).status;
+  return s === "offline" ? "" : `<span class="ch-pres is-${s}" title="${s === "online" ? "Online now" : "Away"}"></span>`;
+};
+
+// kind: "help" | "group" | "" (a person). u: their ID, for the photo and the online dot.
 const avatar = (name, kind = "", u = "") => {
   if (kind === "help") return `<span class="ch-av is-help">${I.help}</span>`;
   if (kind === "group") return `<span class="ch-av is-group">${I.group}</span>`;
   const photo = photoOf(u);
-  return `<span class="ch-av" style="--h:${hueFromString(name || "?")}">${esc(getInitials(name || "?"))}${photo
+  const face = `<span class="ch-av" style="--h:${hueFromString(name || "?")}">${esc(getInitials(name || "?"))}${photo
     ? `<img src="${esc(photo)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()" />` : ""}</span>`;
+  const dot = u && me && String(u) !== me.uid ? presDot(u) : "";
+  return dot ? `<span class="ch-avw">${face}${dot}</span>` : face;
 };
 
 let me = null;
@@ -91,6 +119,8 @@ let panel = null;
 let unsub = null;
 let msgUnsub = null;
 let awayUnsub = null;
+let presUnsub = null;
+let presence = new Map();    // uid → { status, device, lastAt }, live
 let away = { on: false, back: "", note: "" };
 let chats = [];              // every conversation I can see, live
 let allChats = null;         // Admins: every conversation, loaded on demand
@@ -262,6 +292,8 @@ export function initChat(staff) {
   build();
   unsub = watchChats(me.uid, admin, onChats, (err) => console.warn("Chat failed to load:", err));
   awayUnsub = watchAway((a) => { away = a; render(); });
+  startPresence(me);
+  presUnsub = watchPresence((m) => { presence = m; onPresence(); }, (err) => console.warn("Presence failed to load:", err));
   loadStaff().then(render);
   checkChatLink();
 }
@@ -269,8 +301,11 @@ export function initChat(staff) {
 export function teardownChat() {
   if (unsub) unsub();
   if (awayUnsub) awayUnsub();
+  if (presUnsub) presUnsub();
+  stopPresence();
+  presence = new Map();
   stopMessages();
-  unsub = awayUnsub = null;
+  unsub = awayUnsub = presUnsub = null;
   if (root) root.remove();
   root = panel = null;
   me = null;
@@ -405,6 +440,36 @@ function render() {
   }
 }
 
+// Someone came online, went away or left: update what's on screen (keeping the list's scroll position)
+function onPresence() {
+  if (!root || !me || !isOpen()) return;
+  if (view === "list") {
+    const sc = panel.querySelector(".ch-list");
+    const top = sc ? sc.scrollTop : 0;
+    drawList();
+    const sc2 = panel.querySelector(".ch-list");
+    if (sc2) sc2.scrollTop = top;
+  } else if (view === "new") {
+    const f = panel.querySelector('[data-role="find"]');
+    drawPeople(((f && f.value) || "").trim().toLowerCase());
+  } else if (view === "thread") {
+    updatePresSub();
+  }
+}
+
+// The chat header: "Online now" / "Last seen …", and the dot on their picture
+function updatePresSub() {
+  if (!panel || !current) return;
+  const u = faceOf(current);
+  const el = panel.querySelector('[data-role="presub"]');
+  if (el) {
+    el.textContent = u ? presText(u) : "";
+    el.classList.toggle("is-online", presOf(u).status === "online");
+  }
+  const av = panel.querySelector(".ch-hd > .ch-avw, .ch-hd > .ch-av");
+  if (av && u) av.outerHTML = avatar(titleOf(current), kindOf(current), u);
+}
+
 function syncBadge() {
   const n = myChats().filter((c) => isUnread(c, me.uid)).length;
   const badge = root.querySelector('[data-role="badge"]');
@@ -511,6 +576,21 @@ const row = (c) => {
     </span>${unread ? '<span class="ch-dot" aria-label="Unread"></span>' : ""}</button>`;
 };
 
+// The faces of everyone on the portal now (online first). Tap one to message them.
+function hereHtml() {
+  if (!staffList) return "";
+  const rank = (s) => (presOf(s.id).status === "online" ? 0 : 1);
+  const here = staffList.filter((s) => String(s.id) !== me.uid && presOf(s.id).status !== "offline")
+    .sort((a, b) => rank(a) - rank(b) || String(a.name || "").localeCompare(String(b.name || "")));
+  return `<div class="ch-online">
+    <p class="ch-sec">On the portal now${here.length ? ` (${here.length})` : ""}</p>
+    ${here.length ? `<div class="ch-online-row">${here.map((s) => `
+      <button type="button" class="ch-online-p" data-dm="${esc(s.id)}" title="${esc(`${s.name} · ${presText(s.id)}`)}">
+        ${avatar(s.name, "", s.id)}<span class="ch-online-n">${esc(String(s.name || "").split(/\s+/)[0])}</span></button>`).join("")}</div>`
+      : '<p class="ch-none">No one else is on the portal right now.</p>'}
+  </div>`;
+}
+
 function drawList() {
   view = "list";
   editing = "";
@@ -531,6 +611,7 @@ function drawList() {
         title="${muted() ? "Sound is off" : "Sound is on"}">${muted() ? I.bellOff : I.bell}</button>` })}
     ${awayBar}${ask}
     <div class="ch-list">
+      ${hereHtml()}
       ${myHelp ? row(myHelp) : ""}
       ${admin ? `<p class="ch-sec">Help inbox</p>${help.map(row).join("") || '<p class="ch-none">No help requests.</p>'}` : ""}
       <p class="ch-sec">Your chats</p>
@@ -561,7 +642,8 @@ function openThread(id) {
   // Remove from my list: saved conversations I'm part of (not my own Help chat, which is always there)
   const canHide = !helpStaff && (isMember || adminHelp) && chats.some((x) => x.id === id);
   const sub = helpStaff ? `<small data-role="helpsub" class="${awayOn() ? "is-away" : ""}">${esc(helpSub())}</small>`
-    : c.kind === "group" ? `<small>${esc(membersText(c))}</small>` : "";
+    : c.kind === "group" ? `<small>${esc(membersText(c))}</small>`
+    : c.kind === "dm" && isMember ? '<small data-role="presub"></small>' : "";
   panel.innerHTML = `${head(`${avatar(titleOf(c), kindOf(c), faceOf(c))}<span class="ch-hd-t"><strong>${esc(titleOf(c))}</strong>${sub}</span>`, {
       back: true,
       extra: `${adminHelp ? `<button type="button" class="lh-btn" data-act="sorted">${c.status === "sorted" ? "Reopen" : "Mark as sorted"}</button>` : ""}${
@@ -587,6 +669,7 @@ function openThread(id) {
         ${isTouch() ? "" : '<small class="ch-hint">Enter to send · Shift+Enter for a new line</small>'}
       </div>`
       : '<p class="ch-ro">You\'re viewing a chat between staff. Only they can reply.</p>'}`;
+  updatePresSub();
   stopMessages();
   if (chats.some((x) => x.id === id) || (allChats || []).some((x) => x.id === id)) startMessages(id);
   readIfViewing();
@@ -893,9 +976,12 @@ function drawPeople(q) {
   const box = panel.querySelector('[data-role="people"]');
   if (!box) return;
   if (!staffList) { box.innerHTML = '<p class="ch-none">Couldn\'t load the staff list. Try again.</p>'; return; }
-  const list = staffList.filter((s) => String(s.id) !== me.uid && (!q || String(s.name || "").toLowerCase().includes(q)));
+  const rank = (s) => ({ online: 0, away: 1 }[presOf(s.id).status] ?? 2);
+  const list = staffList.filter((s) => String(s.id) !== me.uid && (!q || String(s.name || "").toLowerCase().includes(q)))
+    .sort((a, b) => rank(a) - rank(b) || String(a.name || "").localeCompare(String(b.name || "")));
   box.innerHTML = list.map((s) => `<button type="button" class="ch-row" data-dm="${esc(s.id)}">${avatar(s.name, "", s.id)}
-      <span class="ch-row-main"><strong>${esc(s.name)}</strong><small class="ch-row-last">${esc(s.role || "")}</small></span></button>`).join("")
+      <span class="ch-row-main"><strong>${esc(s.name)}</strong><small class="ch-row-last${presOf(s.id).status === "online" ? " is-online" : ""}">${
+        esc([s.role, presText(s.id)].filter(Boolean).join(" · "))}</small></span></button>`).join("")
     || '<p class="ch-none">No one matches.</p>';
 }
 
