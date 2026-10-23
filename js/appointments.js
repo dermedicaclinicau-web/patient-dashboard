@@ -1,4 +1,4 @@
-import { LOGIN_ENDPOINT, db } from "./firebase-config.js";
+import { LOGIN_ENDPOINT, db, auth } from "./firebase-config.js";
 import { doc, getDoc, collection, query, where, limit, getDocs }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { patientIds } from "./patients.js";
@@ -50,26 +50,58 @@ export async function fetchDayAppointments(dateKey) {
   }
 }
 
-// Shared Apps Script caller
-export async function callApi(payload) {
-  const session = sessionStorage.getItem("appSession");
-  if (!session) throw unauthorized();
-
+// One request to Apps Script → its answer, or an error you can show
+async function postApi(body) {
   let res;
   try {
     res = await fetch(LOGIN_ENDPOINT, {
       method: "POST",
-      headers: { "Content-Type": "text/plain;charset=utf-8" },
-      body: JSON.stringify({ ...payload, session }),
+      headers: { "Content-Type": "text/plain;charset=utf-8" },   // avoids a CORS preflight
+      body: JSON.stringify(body),
     });
   } catch {
     throw new Error("Can't reach the server. Check your internet connection.");
   }
-
   const data = await res.json().catch(() => null);
   if (!data) throw new Error("Unexpected response from the server.");
+  return data;
+}
+
+// The Apps Script session lasts 12 hours. When it has run out but the person is still signed in
+// (e.g. an iPad left asleep overnight), a new one is made from their Firebase login.
+// Several requests failing at once share one renewal.
+let renewing = null;
+function renewSession() {
+  if (!renewing) {
+    renewing = (async () => {
+      const user = auth.currentUser;
+      if (!user) return false;
+      let idToken = "";
+      try { idToken = await user.getIdToken(); } catch { return false; }   // refreshed by Firebase if needed
+      const data = await postApi({ action: "renewSession", idToken }).catch(() => null);
+      if (!data || !data.ok || !data.session) return false;
+      sessionStorage.setItem("appSession", data.session);
+      console.info("Session renewed.");
+      return true;
+    })().finally(() => { renewing = null; });
+  }
+  return renewing;
+}
+
+// Shared Apps Script caller
+export async function callApi(payload, retried = false) {
+  if (!sessionStorage.getItem("appSession") && !(await renewSession())) throw unauthorized();
+  const data = await postApi({ ...payload, session: sessionStorage.getItem("appSession") });
+
+  // A renewed session (the access check every 5 minutes sends one): kept, so it never runs out while in use
+  if (typeof data.session === "string" && /^s1\./.test(data.session)) sessionStorage.setItem("appSession", data.session);
+
   if (!data.ok) {
-    if (data.error === "UNAUTHORIZED") throw unauthorized();
+    if (data.error === "UNAUTHORIZED") {
+      // Refused before anything ran, so trying again once is safe
+      if (!retried && await renewSession()) return callApi(payload, true);
+      throw unauthorized();
+    }
     const e = new Error(data.detail ? String(data.detail) : "Couldn't load data. Please try again.");
     e.code = data.error;
     e.detail = data.detail || "";

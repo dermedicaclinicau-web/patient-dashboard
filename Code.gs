@@ -21,6 +21,7 @@ function doPost(e) {
     const body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
 
     // Non-login requests
+    if (body.action === 'renewSession') return json_(handleRenewSession_(body)); // expired session, still signed in
     if (body.action === 'appointments') return json_(handleAppointments_(body));
     if (body.action === 'preconsult') return json_(handlePreconsult_(body));
     if (body.action === 'processRecording') return json_(handleProcessRecording_(body));
@@ -343,6 +344,32 @@ function getSession_(token) {
   sess.role = s.role || sess.role;
   sess.perms = effectivePerms_(s);
   return sess;
+}
+
+// A new Apps Script session from the person's Firebase login. Used when the 12-hour session has run out
+// (e.g. an iPad left asleep overnight) but they're still signed in to the portal.
+// Google checks the login is genuine, current and not turned off (accounts:lookup).
+function handleRenewSession_(body) {
+  const idToken = String(body.idToken || '');
+  if (idToken.length > 4000 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(idToken)) {
+    return { ok: false, error: 'UNAUTHORIZED' };
+  }
+  const key = String(PropertiesService.getScriptProperties().getProperty('FIREBASE_API_KEY') || '').trim();
+  if (!key) { console.warn('renewSession: FIREBASE_API_KEY is missing from Script Properties'); return { ok: false, error: 'UNAUTHORIZED' }; }
+
+  const res = UrlFetchApp.fetch('https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=' + encodeURIComponent(key), {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    payload: JSON.stringify({ idToken: idToken }),
+  });
+  if (res.getResponseCode() !== 200) return { ok: false, error: 'UNAUTHORIZED' };   // expired, revoked or not genuine
+  const u = (JSON.parse(res.getContentText()).users || [])[0];
+  if (!u || !u.localId || u.disabled) return { ok: false, error: 'UNAUTHORIZED' };
+
+  let s = null;
+  try { s = getStaffDocs_().filter(function (x) { return x.id === u.localId; })[0] || null; }
+  catch (e) { return { ok: false, error: 'BUSY' }; }
+  if (!s || s.active === false) return { ok: false, error: 'UNAUTHORIZED' };
+  return { ok: true, session: createSession_(s) };
 }
 // ===================== Appointments (Google Sheet) =====================
 
