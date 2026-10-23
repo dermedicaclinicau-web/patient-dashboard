@@ -24,10 +24,14 @@ const niceDate = (key) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
 };
+// Only one Scanner holds the camera: this switches off the one before
+let releaseCamera = null;
+
 // NEW: a booking → the patient saved with the scan
 const fromBooking = (a) => (a ? { id: String(a.patientId || ""), name: a.patientName || "", time: a.time || "", staff: a.staff || "" } : null);
 
 export function mountScanner(container, { staff = null } = {}) {
+  if (releaseCamera) releaseCamera();   // an earlier Scanner (the page drawn again) lets go of the camera
   const root = document.createElement("section");
   root.className = "page scan";
   container.replaceChildren(root);
@@ -310,10 +314,10 @@ export function mountScanner(container, { staff = null } = {}) {
       setTip(n === "NotAllowedError" || n === "SecurityError"
         ? "Camera access is blocked. Allow the camera for this site in Settings, or use Camera app or Upload below."
         : n === "NotReadableError" || n === "TrackStartError" || n === "AbortError"
-          ? "The camera is being used by another app or tab (Teams, Zoom, another portal tab). Close it, then tap here to try again."
+          ? "The camera is being used by another app or tab (Teams, Zoom, another portal tab). Close it, then tap Try again."
         : n === "NotFoundError" || n === "OverconstrainedError"
           ? "No camera was found on this device. Use Upload below."
-        : "Couldn't start the camera. Tap here to try again, or use Camera app or Upload below.", true);
+        : "Couldn't start the camera. Tap Try again, or use Upload or Camera app below.", true);
     } finally {
       st.starting = false;
     }
@@ -597,19 +601,28 @@ export function mountScanner(container, { staff = null } = {}) {
     }
   });
 
-  // The camera is switched off when leaving the page or putting the iPad down, and back on when you return
-  const onVis = () => {
-    if (document.hidden) stopCamera();
-    else if (st.mode === "camera" && root.isConnected) startCamera();
-  };
-  const onHash = () => {
-    if (location.hash.startsWith("#/scanner")) return;
+  // The camera is switched off when leaving the page, putting the iPad down, refreshing,
+  // or when this Scanner is no longer on screen. It comes back on when you return.
+  const cleanup = () => {
     stopCamera();
     window.removeEventListener("hashchange", onHash);
     document.removeEventListener("visibilitychange", onVis);
+    window.removeEventListener("pagehide", stopCamera);
+    if (releaseCamera === cleanup) releaseCamera = null;
+  };
+  const onVis = () => {
+    if (!root.isConnected) { cleanup(); return; }
+    if (document.hidden) stopCamera();
+    else if (st.mode === "camera") startCamera();
+  };
+  const onHash = () => {
+    if (location.hash.startsWith("#/scanner") && root.isConnected) return;
+    cleanup();
   };
   window.addEventListener("hashchange", onHash);
   document.addEventListener("visibilitychange", onVis);
+  window.addEventListener("pagehide", stopCamera);   // a refresh or closed tab never leaves the camera stuck
+  releaseCamera = cleanup;
 
   render();
 }
