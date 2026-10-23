@@ -8100,3 +8100,12 @@ dialog.lh-dialog.inv-dlg.kit-set-dlg { width: min(760px, 96vw); }
   font-size: .76rem; font-weight: 700; }
 .po-ev-view svg { width: 13px; height: 13px; }
 .po-ev-nocopy { color: #94a3b8; font-style: italic; }
+
+.po-ev-find { display: inline-flex; align-items: center; gap: .35rem; align-self: flex-start; margin-top: .3rem;
+  padding: .2rem .65rem; border: 1px dashed #99d5cf; border-radius: 999px; background: #fff; color: var(--primary);
+  font: inherit; font-size: .76rem; font-weight: 700; cursor: pointer; }
+.po-ev-find svg { width: 13px; height: 13px; }
+.po-ev-find:hover { border-style: solid; background: var(--primary-soft); }
+.po-ev-find:disabled { opacity: .7; cursor: wait; }
+.po-gm-ok { color: #047857; }
+.po-gm-bad { color: #b45309; }

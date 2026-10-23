@@ -80,6 +80,30 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
   const loadEmails = () => listPoEmails(id)
     .then((list) => { emails = list; })
     .catch((err) => { console.warn("Sent emails not loaded:", err); emails = []; });
+  // This account's Gmail Sent folder (through Apps Script): every email about this PO it sent
+  const findInGmail = () => callApi({
+    action: "inventory", op: "findSentPo", poId: id, poNumber: po.number,
+    to: po.sentTo || (po.supplier && po.supplier.email) || "",
+  }).then((r) => (r && Array.isArray(r.messages) ? r.messages : []));
+  const gmailTime = (x) => Date.parse(x.date) || 0;
+  // The message sent closest to a moment (within 10 minutes), or null
+  const nearestTo = (list, t, timeOf, max = 10 * 60000) => {
+    let best = null, gap = max;
+    list.forEach((x) => { const g = Math.abs(timeOf(x) - t); if (g <= gap) { gap = g; best = x; } });
+    return best;
+  };
+  // Keeps a copy of Gmail messages that History doesn't have yet
+  async function keepFromGmail(list) {
+    const have = emails || [];
+    const fresh = list.filter((x) => !have.some((m) => m.gmailId === x.id)
+      && !have.some((m) => !m.gmailId && Math.abs(m.time - gmailTime(x)) < 2 * 60000));   // already saved when sent
+    await Promise.allSettled(fresh.map((x) => savePoEmail(id, {
+      to: x.to, cc: x.cc, from: x.from, subject: x.subject, html: x.html, sentAt: x.date,
+      kind: /^amended/i.test(x.subject || "") ? "amended" : "sent", gmailId: x.id, link: x.link,
+    }, staff)));
+    await loadEmails();
+  }
+    
   let amending = false;   // changing an order that's already been sent (saved only with "Save changes")
   const drafting = () => canOrder && po.status === "draft";
   const editable = () => drafting() || (canOrder && amending);
@@ -342,10 +366,10 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
         <small>${esc(e.by || "")} · ${esc(when(new Date(e.time)))}</small>`;
       if (e.mail) {
         return `<li><button type="button" class="po-ev-mail" data-mail="${esc(e.mail.id)}" title="See the email that was sent">
-          ${inner}<span class="po-ev-view">${I.send}View the email</span></button></li>`;
+          ${inner}<span class="po-ev-view">${I.send}View the email${e.mail.gmailId ? " · from Gmail" : ""}</span></button></li>`;
       }
       const noCopy = e.emailish && emails !== null
-        ? '<small class="po-ev-nocopy">No copy saved. It was sent before email previews were added.</small>' : "";
+        ? `<button type="button" class="po-ev-find" data-find="${e.time}">${I.send}Find it in Gmail's Sent folder</button>` : "";
       return `<li>${inner}${noCopy}</li>`;
     }).join("")}</ul>`;
   }
@@ -358,8 +382,11 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
 
   // The email as it was sent
   function emailPreview(m) {
-    const gmail = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(`in:sent subject:"${m.subject}"`)}`;
     const row = (label, v) => (v ? `<div><span>${esc(label)}</span>${esc(v)}</div>` : "");
+    const gmailRow = m.gmailId
+      ? `<div><span>Gmail</span><strong class="po-gm-ok">✓ In the Sent folder</strong>${
+          m.link ? ` <a href="${esc(m.link)}" target="_blank" rel="noopener">Open in Gmail ↗</a>` : ""}</div>`
+      : `<div><span>Gmail</span><span data-role="verify"><button type="button" class="lh-btn" data-act="verify">Check it's in Gmail</button></span></div>`;
     const dlg = openDialog("th-dialog", `
       <div class="th-head">
         <div><h3>${esc(m.subject || "Purchase order email")}</h3>
@@ -371,8 +398,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
         ${row("To", m.to)}
         ${row("CC", m.cc)}
         ${row("Sent by", m.by)}
-        <div><span>Check</span><a href="${esc(gmail)}" target="_blank" rel="noopener">Find it in Gmail's Sent folder ↗</a>
-          <small class="muted">(when you're signed in to the account it was sent from)</small></div>
+        ${gmailRow}
       </div>
       ${m.html ? '<iframe class="th-frame" sandbox="" title="The email that was sent"></iframe>'
         : `<p class="tb-none" style="padding:0 1.2rem 1.2rem">${m.tooBig
@@ -381,7 +407,29 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     const frame = dlg.querySelector("iframe");
     if (frame) frame.srcdoc = m.html;
     dlg.querySelector('[data-act="close"]').addEventListener("click", () => dlg.close());
+
+    const vb = dlg.querySelector('[data-act="verify"]');
+    if (vb) vb.addEventListener("click", async () => {
+      const box = dlg.querySelector('[data-role="verify"]');
+      vb.disabled = true;
+      vb.textContent = "Looking in Gmail…";
+      try {
+        const hit = nearestTo(await findInGmail(), m.time, gmailTime);
+        if (!dlg.open) return;
+        box.innerHTML = hit
+          ? `<strong class="po-gm-ok">✓ Found in the Sent folder</strong> · ${esc(when(new Date(gmailTime(hit))))} to ${esc(hit.to)}${
+              hit.link ? ` · <a href="${esc(hit.link)}" target="_blank" rel="noopener">Open in Gmail ↗</a>` : ""}`
+          : '<strong class="po-gm-bad">Not found in this account\'s Sent folder</strong> <small class="muted">around that time. It may have been deleted from Sent.</small>';
+      } catch (err) {
+        console.error("Gmail check failed:", err);
+        if (!dlg.open) return;
+        vb.disabled = false;
+        vb.textContent = "Check it's in Gmail";
+        showToast(err && err.code === "UNAUTHORIZED" ? "Your session has expired. Log out and back in." : "Couldn't check Gmail. Try again.");
+      }
+    });
   }
+  
   const renderAll = () => { renderBar(); renderLeft(); renderRight(); };
 
   // Deliveries: only once the order has gone out (drafts have nothing to show)
@@ -1032,6 +1080,32 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     if (mv) {
       const m = (emails || []).find((x) => x.id === mv.dataset.mail);
       if (m) emailPreview(m);
+      return;
+    }
+    const fb = e.target.closest("[data-find]");
+    if (fb) {
+      const t = Number(fb.dataset.find) || 0;
+      fb.disabled = true;
+      fb.textContent = "Looking in Gmail…";
+      findInGmail().then(async (list) => {
+        if (!root.isConnected) return;
+        if (!list.length) {
+          fb.outerHTML = '<small class="po-ev-nocopy">Not found in this account\'s Sent folder.</small>';
+          return;
+        }
+        await keepFromGmail(list);
+        if (!root.isConnected) return;
+        renderRight();
+        const hit = nearestTo(list, t, gmailTime);
+        const m = hit && (emails || []).find((x) => x.gmailId === hit.id);
+        if (m) emailPreview(m);
+        else showToast(`Found ${list.length} email${list.length === 1 ? "" : "s"} for ${po.number} in Gmail. They're now in History.`);
+      }).catch((err) => {
+        console.error("Gmail search failed:", err);
+        if (fb.isConnected) { fb.disabled = false; fb.innerHTML = `${I.send}Find it in Gmail's Sent folder`; }
+        showToast(err && err.code === "UNAUTHORIZED" ? "Your session has expired. Log out and back in."
+          : "Couldn't search Gmail. Check the Apps Script has been deployed.");
+      });
       return;
     }
     const pk = e.target.closest('[data-l="pick"]');

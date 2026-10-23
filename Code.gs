@@ -14065,3 +14065,39 @@ function recallResults_(body) {
   try { const j = JSON.stringify(out); if (j.length < 95000) cache.put(ck, j, 600); } catch (e) { /* not essential */ }
   return out;
 }
+
+// Inventory → a purchase order's emails, straight from this account's Gmail Sent folder.
+// Only messages sent BY this account (or its "Send mail as" aliases) that mention the PO number.
+function inventoryFindSentPo_(p) {
+  var number = String(p.poNumber || '').trim();
+  if (!/^PO-[A-Z0-9-]{3,40}$/i.test(number)) return { messages: [], reason: 'BAD_NUMBER' };
+  var to = String(p.to || '').trim().toLowerCase();
+  if (!/^[^\s@"]+@[^\s@"]+\.[^\s@"]+$/.test(to)) to = '';
+
+  var mine = [Session.getEffectiveUser().getEmail()].concat(GmailApp.getAliases())
+    .map(function (a) { return String(a).toLowerCase(); });
+  var fromMe = function (from) {
+    var f = String(from || '').toLowerCase();
+    return mine.some(function (a) { return a && f.indexOf(a) !== -1; });
+  };
+
+  var q = 'in:sent "' + number + '"' + (to ? ' to:' + to : '');
+  var out = [];
+  GmailApp.search(q, 0, 10).forEach(function (t) {
+    t.getMessages().forEach(function (m) {
+      if (out.length >= 8 || m.isDraft() || !fromMe(m.getFrom())) return;
+      var subject = m.getSubject() || '';
+      var html = m.getBody() || '';
+      if (subject.indexOf(number) === -1 && html.indexOf(number) === -1) return;
+      if (to && (String(m.getTo()) + ',' + String(m.getCc())).toLowerCase().indexOf(to) === -1) return;
+      var tooBig = html.length > 800000;
+      out.push({
+        id: m.getId(), date: m.getDate().toISOString(), subject: subject,
+        from: m.getFrom(), to: m.getTo(), cc: m.getCc(),
+        html: tooBig ? '' : html, tooBig: tooBig, link: t.getPermalink(),
+      });
+    });
+  });
+  out.sort(function (a, b) { return a.date < b.date ? -1 : 1; });
+  return { messages: out };
+}

@@ -4162,17 +4162,22 @@ export async function recordPaperUse(product, {
 /* ===================== Purchase order emails: a copy of each one sent ===================== */
 // Saved by the portal once Apps Script confirms the email went out. Never edited afterwards.
 
-export async function savePoEmail(poId, { to, cc = "", from = "", subject, html, kind = "sent" }, staff) {
+export async function savePoEmail(poId, { to, cc = "", from = "", subject, html, kind = "sent", sentAt = "", gmailId = "", link = "" }, staff) {
   const body = String(html || "");
   const tooBig = body.length > 900000;   // Firestore's 1 MB limit: keep the details, drop the body
-  await addDoc(collection(db, "inv_po_emails"), {
+  const data = {
     poId: clip(poId, 60), to: clip(to, 254), cc: clip(cc, 254), from: clip(from, 254),
     subject: clip(subject, 200), html: tooBig ? "" : body, tooBig,
     kind: ["sent", "again", "amended"].includes(kind) ? kind : "sent",
-    by: who(staff), byUid: uid(), sentAt: new Date().toISOString(), at: serverTimestamp(),
-  });
+    gmailId: clip(gmailId, 60), link: /^https:\/\/mail\.google\.com\//.test(link || "") ? String(link).slice(0, 500) : "",
+    by: who(staff), byUid: uid(),
+    sentAt: sentAt && !isNaN(Date.parse(sentAt)) ? new Date(sentAt).toISOString() : new Date().toISOString(),
+    at: serverTimestamp(),
+  };
+  // A Gmail message has a fixed id, so the same one is never kept twice
+  if (data.gmailId) await setDoc(doc(db, "inv_po_emails", `gmail__${data.gmailId.replace(/[^\w-]/g, "")}`), data);
+  else await addDoc(collection(db, "inv_po_emails"), data);
 }
-
 // Every email sent for one purchase order, oldest first
 export async function listPoEmails(poId) {
   const snap = await getDocs(query(collection(db, "inv_po_emails"), where("poId", "==", poId)));
