@@ -7,6 +7,7 @@ import {
   setPersistence,
   browserSessionPersistence,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { clearAllDrafts } from "./form-draft.js";
 
 const ERROR_MESSAGES = {
   INVALID_PIN: "Incorrect PIN. Please try again.",
@@ -38,6 +39,7 @@ export async function loginWithPin(pin) {
 }
 
 export function logout() {
+  clearAllDrafts();                                   // unsaved form answers leave this device
   sessionStorage.clear();
   if (TAB_CH) TAB_CH.postMessage({ t: "logout" });   // every other portal tab logs out too
   return signOut(auth);
@@ -59,6 +61,7 @@ if (TAB_CH) {
           name: sessionStorage.getItem(`staffName:${user.uid}`) || "" });
       }
     } else if (m.t === "logout" && user) {
+      clearAllDrafts();
       sessionStorage.clear();
       signOut(auth);
     }

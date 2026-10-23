@@ -32,6 +32,7 @@ import { tagValues, collectTagNodes, applyTagNodes, fillTags, formFieldTags } fr
 import { mountRichTextField } from "./rich-field.js";
 import { openMoveRecordDialog, canMoveRecords, movesHtml } from "./record-move.js";
 import { signaturePad, readField, applyVisibility, isBlank, fieldTagValues } from "./form-live.js";
+import { readDraft, writeDraft, clearDraft, pruneDrafts, askResumeDraft } from "./form-draft.js";
 export { readField, applyVisibility, answerTagText, fieldTagValues } from "./form-live.js";
 
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -418,6 +419,15 @@ export async function mountFormFill(container, param, { staff, embedded = null }
   let calc = {};
   let shown = new Set(fields.map((f) => f.id));
   let dirty = false, saving = false;
+    // Unsaved answers kept on this device (form-draft.js). Off until any old draft has been offered.
+  let draftReady = false, draftPending = false, draftDone = false, draftTimer = 0;
+  function noteChange() {
+    dirty = true;
+    draftPending = true;
+    if (!draftReady || draftDone) return;
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(saveDraftNow, 1500);
+  }
 
   // Signature pads (with name + date), and photos (coming next)
   fields.forEach((f) => {
@@ -474,11 +484,11 @@ export async function mountFormFill(container, param, { staff, embedded = null }
   });
   // Referral specialist: from the Specialist Bank. Staff can add or correct one here.
   fields.filter((f) => f.type === "specialist").forEach((f) => {
-    mountSpecialistField(wrap(f.id), f, { staff, onChange: () => { dirty = true; } });
+    mountSpecialistField(wrap(f.id), f, { staff, onChange: noteChange });
   });
   // Rich text answers: their starting text fills in from the patient now, and from the specialist once chosen
   fields.filter((f) => f.type === "rich_text").forEach((f) => {
-    mountRichTextField(wrap(f.id), f, { onChange: () => { dirty = true; }, tags: tagValues({ patient, staff, recordDate: todayIso() }) });
+    mountRichTextField(wrap(f.id), f, { onChange: noteChange, tags: tagValues({ patient, staff, recordDate: todayIso() }) });
   });
 
   const P = {
@@ -701,6 +711,80 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     document.addEventListener("visibilitychange", onVis);
   }
 
+  /* ---------- Unsaved answers kept on this device ---------- */
+  // Never kept: things that can't be stored safely or come back by themselves
+  const NO_DRAFT = ["photo", "signature", "image", "aftercare", "consumables", "consent_status",
+    "prescription_status", "patient", "calculation"];
+
+  function draftAnswers() {
+    const a = {};
+    fields.forEach((f) => {
+      if (LAYOUT.includes(f.type) || NO_DRAFT.includes(f.type)) return;
+      const w = wrap(f.id);
+      if (!w || w.hidden) return;
+      a[f.id] = readField(f, w, rctx());
+      const x = readExtras(f, w);
+      if (x) a[`${f.id}__x`] = x;
+      if (f.type === "table") Object.assign(a, tableInvRead(f, w)); // discount and payments
+    });
+    return a;
+  }
+
+  function restoreAnswers(a) {
+    fields.forEach((f) => {
+      const w = wrap(f.id);
+      if (!w || !(f.id in a)) return;
+      tableInvWrite(f, w, a);
+      writeField(f, w, a[f.id]);
+      writeExtras(f, w, a[`${f.id}__x`]);
+    });
+    $all(sheet, "[data-linked]").forEach((el) => { if (el.value) el.dataset.touched = "1"; });
+  }
+
+  // Works on the page even after leaving it, so the last few seconds of typing are never lost
+  function saveDraftNow() {
+    clearTimeout(draftTimer);
+    if (!draftReady || !draftPending || draftDone) return;
+    draftPending = false;
+    writeDraft(pid, tid, { version: ver.version, by: (staff && staff.name) || "", answers: draftAnswers() });
+  }
+  const onDraftHide = () => { if (document.visibilityState === "hidden") saveDraftNow(); };
+  const onDraftLeave = () => { if (root.isConnected) return; saveDraftNow(); stopDraft(); };
+  function stopDraft() {
+    clearTimeout(draftTimer);
+    document.removeEventListener("visibilitychange", onDraftHide);
+    window.removeEventListener("pagehide", saveDraftNow);
+    window.removeEventListener("hashchange", onDraftLeave);
+  }
+  function finishDraft() { draftDone = true; stopDraft(); clearDraft(pid, tid); }
+  document.addEventListener("visibilitychange", onDraftHide);
+  window.addEventListener("pagehide", saveDraftNow);
+  window.addEventListener("hashchange", onDraftLeave);
+
+  // An earlier draft of this form for this patient: offer to put it back
+  (async () => {
+    pruneDrafts();
+    const old = isReturnLeg ? null : readDraft(pid, tid);
+    if (old && Object.keys(old.answers).length) {
+      const resume = await askResumeDraft(old, { updated: Number(old.version) !== Number(ver.version) });
+      if (!root.isConnected) return;
+      if (resume) {
+        restoreAnswers(old.answers);
+        dirty = true;
+        refresh();
+        const redo = fields.some((f) => ["signature", "aftercare", "consumables"].includes(f.type)
+          || (f.type === "image" && (f.source === "staff" || f.annotate)));
+        showToast(redo
+          ? "Answers put back. Add any signatures, photos, drawings, aftercare and products again."
+          : "Answers put back.");
+      } else {
+        clearDraft(pid, tid);
+      }
+    }
+    draftPending = false; // anything that happened while setting up isn't staff typing
+    draftReady = true;
+  })();
+
   sheet.addEventListener("input", (e) => {
     if (e.target.matches && e.target.matches("[data-linked]")) e.target.dataset.touched = "1"; // staff typed: stop following
     const clinPick = e.target.closest("[data-clin-pick]");
@@ -708,7 +792,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
       const d = staffList.find((s) => s.id === clinPick.value);
       fillClin(clinPick.closest("[data-fid]"), d || {}, true);
     }
-    dirty = true;
+    noteChange();
     refresh();
     const w = e.target.closest("[data-fid]");
     if (w && w.classList.contains("is-invalid")) {
@@ -727,7 +811,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
 
     // Tables: + Add a row / remove an added row
   sheet.addEventListener("click", (e) => {
-    if (tableClick(e.target, fields)) { dirty = true; refresh(); }
+    if (tableClick(e.target, fields)) { noteChange(); refresh(); }
   });
   fields.filter((f) => f.type === "table").forEach((f) => syncTableRows(f, wrap(f.id)));
 
@@ -948,6 +1032,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
         }),
       } : undefined);
       dirty = false;
+      finishDraft();
       // Any other tab with this patient's form open checks its consents again
       announceSaved({ type: "form-saved", patientId: patient.id, templateId: tid, category: tpl.category, submissionId: id });
       if (embedded) { embedded.onSaved(id); return; }
@@ -987,7 +1072,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
       if (!e.target.closest('[data-act="emb-cancel"]')) return;
       if (dirty && !(await confirmDialog({
         title: "Close without saving?",
-        message: "The answers on this form haven't been saved and will be lost.",
+        message: "Typed answers are kept on this device for 12 hours, so you can carry on later. Signatures, photos and drawings will be lost.",
         confirmLabel: "Close without saving", tone: "warning",
       }))) return;
       dirty = false;
@@ -1009,7 +1094,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     e.stopPropagation();
     const ok = await confirmDialog({
       title: "Leave without saving?",
-      message: "The answers on this form haven't been saved and will be lost.",
+      message: "Typed answers are kept on this device for 12 hours, so you can carry on later. Signatures, photos and drawings will be lost.",
       confirmLabel: "Leave without saving",
       tone: "warning",
     });

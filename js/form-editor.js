@@ -10,7 +10,7 @@ import {
   markSetIdsOf, prefillSettings, prefillSummary, renameInPrefill, tidyPrefill, subExtrasHtml,
   tableCols, tableTotal, tableClick, spanClass, tableRecalc, tableProblem, BUTTON_URL_RE, syncButtons, canLiveHide,
 } from "./form-fields.js";
-import { evaluateCalcs, formatCalc } from "./form-calc.js";
+import { evaluateCalcs, formatCalc, calcRefs } from "./form-calc.js";
 import { DEFAULT_LETTERHEAD, letterheadHtml, openLetterheadDialog } from "./form-letterhead.js";
 import { openPrinterDialog } from "./form-delivery.js";
 import { conditionSettingsHtml, applyConditionInput, applyConditionClick, conditionSummary, conditionProblem } from "./form-conditions.js";
@@ -160,6 +160,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
         <button type="button" class="btn-ghost fe-dup" data-act="duplicate" title="Make a new draft with these questions">Duplicate</button>
         <button type="button" class="btn-ghost fe-savenow" data-act="save-now" data-role="savenow" disabled>Save draft</button>
         <button type="button" class="btn-ghost fe-unpub" data-act="unpublish" data-role="unpublish" hidden>Unpublish</button>
+        <button type="button" class="btn-ghost fe-discard" data-act="discard" data-role="discard" hidden>Discard changes</button>
         <button type="button" class="btn-primary fe-publish" data-act="publish" data-role="publish">Publish</button>
       </div>
     </div>
@@ -270,6 +271,11 @@ export async function mountFormEditor(container, { templateId, staff }) {
       unpub.hidden = !live;
       unpub.disabled = publishing;
       unpub.title = "Take this form off the patient dashboard and keep it as a draft";
+    }
+    const disc = $('[data-role="discard"]');
+    if (disc) {
+      disc.hidden = publishing || !(version > 0 && publishedSig && signature() !== publishedSig);
+      disc.title = `Put the form back to version ${version}, exactly as staff see it`;
     }
   }
 
@@ -402,6 +408,40 @@ export async function mountFormEditor(container, { templateId, staff }) {
     } catch (err) {
       console.error("Unpublish failed:", err);
       showToast("Couldn't unpublish. Try again.");
+    }
+  }
+
+  async function discardChanges() {
+    const ok = await confirmDialog({
+      title: "Discard unpublished changes?",
+      message: `The form goes back to version ${version}, exactly as staff see it. Everything changed since then is lost. This can't be undone.`,
+      confirm: "Discard changes",
+    });
+    if (!ok || !root.isConnected) return;
+    await settle();
+    try {
+      const v = await getFormVersion(templateId, version);
+      if (!v) throw new Error(`Version ${version} couldn't be found.`);
+      if (!root.isConnected) return;
+      name = v.name;
+      nameInput.value = name;
+      fields.splice(0, fields.length, ...v.fields.map(normaliseField).filter(Boolean));
+      Object.keys(settings).forEach((k) => delete settings[k]);
+      Object.assign(settings, { showLetterhead: true, ...(v.settings || {}) });
+      sel = FORM;
+      dirty = false;
+      await saveFormTemplate(templateId, { name, fields, settings }, staff);
+      publishedSig = signature();
+      setState("saved");
+      renderStage();
+      renderInspector();
+      renderPublish();
+      showToast(`Back to version ${version}.`);
+    } catch (err) {
+      console.error("Discard changes failed:", err);
+      showToast(err.code === "permission-denied" ? "You don't have permission to edit this form."
+        : err.code ? "Couldn't discard the changes. Check your connection and try again." : err.message);
+      if (root.isConnected) renderPublish();
     }
   }
 
@@ -917,6 +957,60 @@ export async function mountFormEditor(container, { templateId, staff }) {
     if (label && f.type !== "patient") { label.focus(); label.select(); }
   }
 
+  // Everything else on the form that uses this question
+  function fieldUses(f) {
+    const nm = (x) => `“${String(x.label || "").trim() || FIELD_TYPES[x.type].name}”`;
+    const out = [];
+    fields.forEach((x) => {
+      if (x.id === f.id) return;
+      if (x.showWhen && Array.isArray(x.showWhen.rules) && x.showWhen.rules.some((r) => r && r.q === f.id)) {
+        out.push(`the show-when rule on ${nm(x)}`);
+      }
+      if (x.type === "calculation" && calcRefs(x.formula).some((r) => r === f.id || r.startsWith(`${f.id}.`))) {
+        out.push(`the calculation ${nm(x)}`);
+      }
+      if (x.type === "consumables") {
+        (x.items || []).filter((it) => it.from === f.id)
+          .forEach((it) => out.push(`the ${it.name || "product"} amount in ${nm(x)}`));
+      }
+    });
+    const tn = tagOwnerName(f);
+    if (tn) {
+      tagUsedBy(fields, tn, f.id).forEach((x) => out.push(`the {${tn}} tag in ${nm(x)}`));
+      if (tagRefRe(tn, "i").test(name)) out.push(`the {${tn}} tag in the form title`);
+    }
+    return [...new Set(out)];
+  }
+
+  async function removeField(id) {
+    const f = fields.find((x) => x.id === id);
+    if (!f) return;
+    const uses = fieldUses(f);
+    if (uses.length) {
+      const list = uses.length > 6 ? [...uses.slice(0, 6), `${uses.length - 6} more`] : uses;
+      const ok = await confirmDialog({
+        title: `Remove “${String(f.label || "").trim() || FIELD_TYPES[f.type].name}”?`,
+        message: `It's used by ${list.join(", ")}. Those stop working until you change them.`,
+        confirm: "Remove anyway",
+      });
+      if (!ok || !root.isConnected) return;
+    }
+    const i = fields.findIndex((x) => x.id === id);
+    if (i < 0) return;
+    const [gone] = fields.splice(i, 1);
+    sel = fields[i] ? fields[i].id : fields[i - 1] ? fields[i - 1].id : FORM;
+    showToast("Removed", () => {
+      fields.splice(Math.min(i, fields.length), 0, gone);
+      sel = gone.id;
+      changed();
+      renderStage();
+      renderInspector();
+    });
+    changed();
+    renderStage();
+    renderInspector();
+  }
+
   function tool(action, id) {
     const i = fields.findIndex((f) => f.id === id);
     if (i < 0) return;
@@ -932,16 +1026,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
       fields.splice(i + 1, 0, c);
       sel = c.id;
     } else if (action === "remove") {
-      const [gone] = fields.splice(i, 1);
-      sel = fields[i] ? fields[i].id : fields[i - 1] ? fields[i - 1].id : FORM;
-      showToast("Removed", () => {
-        fields.splice(Math.min(i, fields.length), 0, gone);
-        sel = gone.id;
-        changed();
-        renderStage();
-        renderInspector();
-      });
-    } else {
+      removeField(id);
       return;
     }
     changed();
@@ -1055,6 +1140,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     if (e.target.closest('[data-act="staff-view"]')) { staffView = !staffView; renderStage(); return; }
     if (e.target.closest('[data-act="publish"]')) { publish(); return; }
     if (e.target.closest('.fe-top [data-act="unpublish"]')) { unpublish(); return; }
+    if (e.target.closest('[data-act="discard"]')) { discardChanges(); return; }
     if (e.target.closest('.fe-top [data-act="duplicate"]')) {
       openDuplicateDialog({ name, category: tpl.category, fields, settings }, staff);
       return;
