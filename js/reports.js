@@ -11,6 +11,7 @@ import { showToast } from "./utils.js";
 import { renderPlanReports } from "./plan-reports.js";
 import { MOODS } from "./end-of-day-api.js";
 import { mountPatientReport, PATIENT_TABS } from "./patient-reports.js";
+import { mountRetention } from "./retention-report.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(2));
@@ -31,7 +32,8 @@ const monthLabel = (k) => { const [y, m] = k.split("-").map(Number); return new 
 const daysAgoKey = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return dayKey(d); };
 const SKELETON = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
 const TABS = [["variance", "Count differences"], ["investigations", "Investigations"], ["notrecorded", "Not recorded"], ["wastage", "Wastage"],
-  ["kits", "Kit reconciliation"], ["usage", "Usage"], ["opened", "Opened containers"], ["short", "Saved short"], ["plans", "Treatment plans"]];
+  ["kits", "Kit reconciliation"], ["usage", "Usage"], ["opened", "Opened containers"], ["short", "Saved short"], ["plans", "Treatment plans"],
+  ["retention", "Retention"]];
 const errText = (err, fallback) => (err && err.code === "permission-denied"
   ? "You don't have access to do this. Check the Firestore rules have been published, and your Reporting access in Staff."
   : err && err.message && !err.code ? err.message : fallback);
@@ -98,6 +100,7 @@ export function mountReports(container, { param = "", staff = null } = {}) {
   else if (tab === "kits") mountKitRecon(body);
   else if (tab === "plans") renderPlanReports(body, { staff });
   else if (PATIENT_TABS.some(([k]) => k === tab)) mountPatientReport(body, tab, staff);
+  else if (tab === "retention") mountRetention(body);
   else mountShort(body, staff);
 }
 
