@@ -8088,3 +8088,15 @@ dialog.lh-dialog.inv-dlg.kit-set-dlg { width: min(760px, 96vw); }
 .md-rec-card .rec-job .rec-pt { max-width: none; }
 .md-rec-card .rec-job-st { margin-right: auto; }
 @media (max-width: 640px) { .md-rec-card .rec-job { flex-wrap: wrap; } }
+
+/* Purchase order → History: open the email that was sent */
+.po-events .po-ev-mail { display: flex; flex-direction: column; align-items: flex-start; gap: .15rem; width: 100%;
+  padding: .55rem .7rem; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2);
+  color: inherit; font: inherit; text-align: left; cursor: pointer; transition: border-color .15s, background .15s; }
+.po-events .po-ev-mail:hover { border-color: var(--primary); background: var(--primary-soft); }
+.po-events .po-ev-mail:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.po-ev-view { display: inline-flex; align-items: center; gap: .35rem; margin-top: .25rem; padding: .15rem .6rem;
+  border-radius: 999px; background: #fff; border: 1px solid #99d5cf; color: var(--primary);
+  font-size: .76rem; font-weight: 700; }
+.po-ev-view svg { width: 13px; height: 13px; }
+.po-ev-nocopy { color: #94a3b8; font-style: italic; }

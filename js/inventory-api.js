@@ -4157,3 +4157,28 @@ export async function recordPaperUse(product, {
     : { lines: 0, closed: 0, skipped: [], failed: 0 };
   return { usageId: uRef.id, backdated };
 }
+
+
+/* ===================== Purchase order emails: a copy of each one sent ===================== */
+// Saved by the portal once Apps Script confirms the email went out. Never edited afterwards.
+
+export async function savePoEmail(poId, { to, cc = "", from = "", subject, html, kind = "sent" }, staff) {
+  const body = String(html || "");
+  const tooBig = body.length > 900000;   // Firestore's 1 MB limit: keep the details, drop the body
+  await addDoc(collection(db, "inv_po_emails"), {
+    poId: clip(poId, 60), to: clip(to, 254), cc: clip(cc, 254), from: clip(from, 254),
+    subject: clip(subject, 200), html: tooBig ? "" : body, tooBig,
+    kind: ["sent", "again", "amended"].includes(kind) ? kind : "sent",
+    by: who(staff), byUid: uid(), sentAt: new Date().toISOString(), at: serverTimestamp(),
+  });
+}
+
+// Every email sent for one purchase order, oldest first
+export async function listPoEmails(poId) {
+  const snap = await getDocs(query(collection(db, "inv_po_emails"), where("poId", "==", poId)));
+  return snap.docs.map((d) => {
+    const x = d.data() || {};
+    const time = Date.parse(x.sentAt || "") || (toDate(x.at) ? toDate(x.at).getTime() : 0);
+    return { id: d.id, ...x, time };
+  }).sort((a, b) => a.time - b.time);
+}

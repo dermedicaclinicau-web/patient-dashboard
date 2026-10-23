@@ -4,6 +4,7 @@ import {
   getPo, savePo, renumberPo, markPoSent, cancelPo, poTotals, lineFromProduct, cleanPoLine, supplierSnapshot,
   listProducts, listSuppliers, listRequests, supplierTerms, suppliesProduct, suggestOrderFor, dayKey, productSuppliers,
   recordPastReceipt, getBaseline, syncReceivedRequests, fillPoTemplate, PO_ORDER_TAG_RE, amendPo,
+  savePoEmail, listPoEmails,
 } from "./inventory-api.js";
 import { renderDeliveries } from "./po-deliveries.js";
 import { deliveryError } from "./form-delivery.js";
@@ -75,6 +76,10 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
   const canOrder = can("inventory.order") || can("inventory.manage");
   const byId = new Map(products.map((p) => [p.id, p]));
   let dirty = false, saving = false, timer = null, reqs = null;
+  let emails = null;   // copies of the emails sent (null = still loading)
+  const loadEmails = () => listPoEmails(id)
+    .then((list) => { emails = list; })
+    .catch((err) => { console.warn("Sent emails not loaded:", err); emails = []; });
   let amending = false;   // changing an order that's already been sent (saved only with "Save changes")
   const drafting = () => canOrder && po.status === "draft";
   const editable = () => drafting() || (canOrder && amending);
@@ -305,13 +310,77 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
       <span class="rq-status is-${r.status}">${esc(REQ_STATUS[r.status])}</span></li>`).join("")}</ul>`
       : '<p class="tb-none">The linked requests could not be found.</p>';
   }
+  // History entries about emailing the supplier ("Marked as sent" is not an email)
+  const isEmailEvent = (e) => /email|sent to supplier/i.test(e.action || "") && !/marked/i.test(e.action || "");
+
+  // Each email entry is matched to the saved copy sent closest to it (within 10 minutes).
+  // A copy with no matching entry still shows, so nothing sent is ever hidden.
+  function historyEntries() {
+    const list = po.events.map((e) => ({ ...e, time: Date.parse(e.at) || 0, mail: null, emailish: isEmailEvent(e) }));
+    const used = new Set();
+    list.filter((e) => e.emailish).forEach((e) => {
+      let best = null, gap = 10 * 60000;
+      (emails || []).forEach((m) => {
+        if (used.has(m.id)) return;
+        const g = Math.abs(m.time - e.time);
+        if (g <= gap) { gap = g; best = m; }
+      });
+      if (best) { used.add(best.id); e.mail = best; }
+    });
+    (emails || []).filter((m) => !used.has(m.id)).forEach((m) => list.push({
+      action: m.kind === "amended" ? "Amended order emailed" : m.kind === "again" ? "Emailed again" : "Sent to supplier",
+      note: `To ${m.to}`, by: m.by, time: m.time, at: new Date(m.time).toISOString(), mail: m, emailish: true,
+    }));
+    return list.sort((a, b) => b.time - a.time);
+  }
+
+  function historyHtml() {
+    const list = historyEntries();
+    if (!list.length) return '<p class="tb-none">Nothing yet.</p>';
+    return `<ul class="po-events">${list.map((e) => {
+      const inner = `<strong>${esc(e.action)}</strong>${e.note ? ` · ${esc(e.note)}` : ""}
+        <small>${esc(e.by || "")} · ${esc(when(new Date(e.time)))}</small>`;
+      if (e.mail) {
+        return `<li><button type="button" class="po-ev-mail" data-mail="${esc(e.mail.id)}" title="See the email that was sent">
+          ${inner}<span class="po-ev-view">${I.send}View the email</span></button></li>`;
+      }
+      const noCopy = e.emailish && emails !== null
+        ? '<small class="po-ev-nocopy">No copy saved. It was sent before email previews were added.</small>' : "";
+      return `<li>${inner}${noCopy}</li>`;
+    }).join("")}</ul>`;
+  }
+
   function renderRight() {
     right.innerHTML = `
       <section class="tb-card"><h4>Requests on this order</h4>${reqsHtml()}</section>
-      <section class="tb-card"><h4>History</h4>${po.events.length
-        ? `<ul class="po-events">${po.events.slice().reverse().map((e) => `<li><strong>${esc(e.action)}</strong>${e.note ? ` · ${esc(e.note)}` : ""}
-            <small>${esc(e.by || "")} · ${esc(when(new Date(e.at)))}</small></li>`).join("")}</ul>`
-        : '<p class="tb-none">Nothing yet.</p>'}</section>`;
+      <section class="tb-card"><h4>History</h4>${historyHtml()}</section>`;
+  }
+
+  // The email as it was sent
+  function emailPreview(m) {
+    const gmail = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(`in:sent subject:"${m.subject}"`)}`;
+    const row = (label, v) => (v ? `<div><span>${esc(label)}</span>${esc(v)}</div>` : "");
+    const dlg = openDialog("th-dialog", `
+      <div class="th-head">
+        <div><h3>${esc(m.subject || "Purchase order email")}</h3>
+          <p class="muted">${m.kind === "amended" ? "Amended order · " : m.kind === "again" ? "Sent again · " : ""}Sent ${esc(when(new Date(m.time)))}</p></div>
+        <button type="button" class="ib-tool" data-act="close" aria-label="Close" title="Close">×</button>
+      </div>
+      <div class="th-meta">
+        ${row("From", m.from || "The clinic's main address")}
+        ${row("To", m.to)}
+        ${row("CC", m.cc)}
+        ${row("Sent by", m.by)}
+        <div><span>Check</span><a href="${esc(gmail)}" target="_blank" rel="noopener">Find it in Gmail's Sent folder ↗</a>
+          <small class="muted">(when you're signed in to the account it was sent from)</small></div>
+      </div>
+      ${m.html ? '<iframe class="th-frame" sandbox="" title="The email that was sent"></iframe>'
+        : `<p class="tb-none" style="padding:0 1.2rem 1.2rem">${m.tooBig
+          ? "The email was too big to keep a copy of, but the details above show it was sent."
+          : "No copy of the message was kept."}</p>`}`);
+    const frame = dlg.querySelector("iframe");
+    if (frame) frame.srcdoc = m.html;
+    dlg.querySelector('[data-act="close"]').addEventListener("click", () => dlg.close());
   }
   const renderAll = () => { renderBar(); renderLeft(); renderRight(); };
 
@@ -323,7 +392,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
   }
 
   async function reload() {
-    try { po = await getPo(id); } catch (err) { console.error(err); }
+    try { [po] = await Promise.all([getPo(id), loadEmails()]); } catch (err) { console.error(err); }
     if (root.isConnected && po) { renderAll(); renderDv(); }
   }
 
@@ -674,13 +743,19 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
         : msgHtml + table;
       const body = placed.replace(new RegExp(PO_ORDER_TAG_RE.source, "gi"), "")
         + (sign ? `<p>${esc(sign).replace(/\n/g, "<br>")}</p>` : "");
+      const mailSubject = form.elements.subject.value.trim() || `Purchase order ${po.number}`;
+      const mailHtml = emailShell(body, {}, { clinic: clinicDetails(letterhead), hasLogo: !!(letterhead && letterhead.logo) });
       try {
         await callApi({
           action: "inventory", op: "sendPo", poId: id, to, cc,
           from: fromSel.value, makeDefault: !defBox.hidden && form.elements.makeDefault.checked,
-          subject: form.elements.subject.value.trim() || `Purchase order ${po.number}`,
-          html: emailShell(body, {}, { clinic: clinicDetails(letterhead), hasLogo: !!(letterhead && letterhead.logo) }),
+          subject: mailSubject, html: mailHtml,
         });
+        // Sent: keep a copy for History. If saving the copy fails, the email has still gone.
+        await savePoEmail(id, {
+          to, cc, from: fromSel.value, subject: mailSubject, html: mailHtml,
+          kind: amended ? "amended" : again ? "again" : "sent",
+        }, staff).catch((ex) => console.warn("Copy of the sent email not saved:", ex));
         busy = false;
         dlg.close();
         showToast(`${po.number} emailed to ${to}`);
@@ -953,6 +1028,12 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
   }
 
   root.addEventListener("click", (e) => {
+    const mv = e.target.closest("[data-mail]");
+    if (mv) {
+      const m = (emails || []).find((x) => x.id === mv.dataset.mail);
+      if (m) emailPreview(m);
+      return;
+    }
     const pk = e.target.closest('[data-l="pick"]');
     if (pk) {
       if (combo && combo.btn === pk) closeCombo(); else openCombo(pk);
@@ -1001,6 +1082,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
 
   renderAll();
   renderDv();
+  loadEmails().then(() => { if (root.isConnected) renderRight(); });
   listRequests({ max: 300 })
     .then((list) => { reqs = list; if (root.isConnected) renderRight(); })
     .catch(() => { reqs = []; if (root.isConnected) renderRight(); });

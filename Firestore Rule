@@ -516,6 +516,13 @@ match /inv_count_drafts/{id} {
       allow delete: if false;
     }
 
+    match /inv_po_emails/{id} {
+      allow read: if request.auth != null;                 // same as who can read purchase orders
+      allow create: if request.auth != null
+        && request.resource.data.byUid == request.auth.uid;
+      allow update, delete: if false;                      // a copy of what was sent is never changed
+    }
+
     // Deliveries received against a purchase order
     match /inv_receipts/{id} {
       allow read: if can('menu.inventory') || invReceive();
