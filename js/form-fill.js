@@ -31,7 +31,7 @@ import { mountSpecialistField } from "./specialist-field.js";
 import { tagValues, collectTagNodes, applyTagNodes, fillTags, formFieldTags } from "./form-tags.js";
 import { mountRichTextField } from "./rich-field.js";
 import { openMoveRecordDialog, canMoveRecords, movesHtml } from "./record-move.js";
-import { signaturePad, readField, applyVisibility, isBlank, fieldTagValues } from "./form-live.js";
+import { signaturePad, readField, applyVisibility, isBlank, fieldTagValues, ONLINE_TYPES } from "./form-live.js";
 import { readDraft, writeDraft, clearDraft, pruneDrafts, askResumeDraft } from "./form-draft.js";
 export { readField, applyVisibility, answerTagText, fieldTagValues } from "./form-live.js";
 import { loadClinicalAlerts, clinicalBannerHtml, allergyChipText } from "./clinical-alerts.js";
@@ -44,12 +44,67 @@ const BAR_ICONS = {
   mail: ic('<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>'),
   check: ic('<polyline points="20 6 9 17 4 12"/>'),
   send: ic('<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>'),
+  hand: ic('<rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/>'),
 };
 
 const LAYOUT = ["text_block", "space", "letterhead", "watermark", "button"]; // nothing is saved for these
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ALERT_CATEGORIES = ["consent", "treatment", "prescription", "rx"]; // forms that show allergies and medical history
+
+// Hand to patient: the questions a patient sees (the same as filling in online, minus the record date)
+const forPatient = (f) => ONLINE_TYPES.includes(f.type) && f.type !== "record_date" && !f.liveHide
+  && !(f.type === "image" && (f.source === "staff" || f.annotate === true))
+  && !(f.type === "signature" && f.signer === "practitioner")
+  && !(f.type === "table" && tableInvoice(f)); // invoices and payments stay with staff
+// Locked for the patient: survives a refresh in this tab only
+const HAND_KEY = "dm.handover";
+function readHand(pid, tid) {
+  try {
+    const h = JSON.parse(sessionStorage.getItem(HAND_KEY) || "null");
+    return h && h.p === pid && h.t === tid && h.h ? h.h : "";
+  } catch { return ""; }
+}
+function writeHand(pid, tid, h) { try { sessionStorage.setItem(HAND_KEY, JSON.stringify({ p: pid, t: tid, h })); } catch { /* ignore */ } }
+function clearHand() { try { sessionStorage.removeItem(HAND_KEY); } catch { /* ignore */ } }
+async function hashCode(code) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`dm-hand:${code}`));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// A small window asking for the hand-over code. Resolves with the code, or null if cancelled.
+function askCode({ title, text, confirm, hide = false, check }) {
+  return new Promise((resolve) => {
+    let result = null;
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog fe-confirm";
+    dlg.innerHTML = `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>${esc(title)}</h3><p>${esc(text)}</p></div>
+        <input class="ho-pin" type="${hide ? "password" : "text"}" inputmode="numeric" autocomplete="off" maxlength="6" aria-label="Code" />
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="no">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">${esc(confirm)}</button>
+        </div>
+      </form>`;
+    const input = dlg.querySelector("input");
+    const err = dlg.querySelector(".lh-error");
+    input.addEventListener("input", () => { input.value = input.value.replace(/\D/g, "").slice(0, 6); err.hidden = true; });
+    dlg.querySelector('[data-act="no"]').addEventListener("click", () => dlg.close());
+    dlg.querySelector("form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const msg = await check(input.value);
+      if (msg) { err.textContent = msg; err.hidden = false; input.select(); return; }
+      result = input.value;
+      dlg.close();
+    });
+    dlg.addEventListener("close", () => { dlg.remove(); resolve(result); });
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    input.focus();
+  });
+}
 
 const isoOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const todayIso = () => isoOf(new Date());
@@ -339,6 +394,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
   const ret = embedded || tabMode ? null : readReturn();
   const isConsentLeg = !!(ret && ret.patientId === pid && ret.consentId === tid);   // filling in the consent
   const isReturnLeg = !!(ret && ret.patientId === pid && ret.templateId === tid && !isConsentLeg); // back on the treatment form
+  const handSaved = embedded || tabMode ? "" : readHand(pid, tid); // locked for the patient before a refresh
   const exitHref = isConsentLeg ? ret.returnHash : patientHref;
   const back = embedded ? "" : `<a class="back-link" href="${patientHref}">← Back to patient</a>`;
   const root = document.createElement("section");
@@ -377,6 +433,9 @@ export async function mountFormFill(container, param, { staff, embedded = null }
 
   const fields = ver.fields.map(normaliseField).filter(Boolean);
   const showAlerts = ALERT_CATEGORIES.includes(tpl.category) && can("clinical.view");
+  const offerLast = tpl.category !== "consent" && !isReturnLeg; // consent is always given fresh
+  const offerHand = !embedded && fields.some((f) => forPatient(f)
+    && !LAYOUT.includes(f.type) && !["patient", "calculation", "image"].includes(f.type));
   root.innerHTML = `
     <div class="ff-wrap">
       <div class="ff-bar" role="region" aria-label="Form actions">
@@ -394,6 +453,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
             <button type="button" class="ff-btn is-quiet" data-act="emb-cancel">Cancel</button>
             <button type="button" class="ff-btn is-primary" data-save="save">${BAR_ICONS.check}<span>${esc(embedded.saveLabel || "Save")}</span></button>` : `
             <a class="ff-btn is-quiet" href="${exitHref}">Cancel</a>
+            ${offerHand ? `<button type="button" class="ff-btn" data-act="handover">${BAR_ICONS.hand}<span>Hand to patient</span></button>` : ""}
             <button type="button" class="ff-btn" data-save="print">${BAR_ICONS.print}<span>Save &amp; print</span></button>
             <button type="button" class="ff-btn" data-save="email">${BAR_ICONS.mail}<span>Save &amp; email</span></button>
             <button type="button" class="ff-btn is-primary" data-save="save">${BAR_ICONS.check}<span>Save</span></button>`}
@@ -405,7 +465,23 @@ export async function mountFormFill(container, param, { staff, embedded = null }
           When you save, this tab closes and that form updates.
           <button type="button" class="ff-btn is-quiet ff-profile" data-act="open-profile">Patient profile ↗</button></p>` : ""}      
         </div>
+      ${offerLast ? '<div class="ff-last" data-role="last" hidden></div>' : ""}
       ${showAlerts ? `<div data-role="alerts">${clinicalBannerHtml(null)}</div>` : ""}
+      ${offerHand ? `<div class="ho-bar" data-role="ho-bar" hidden>
+        <p><strong>Please fill in your part of this form.</strong> Tap I've finished when you're done.</p>
+        <span class="ho-acts">
+          <button type="button" class="ho-staff" data-act="ho-unlock">Staff</button>
+          <button type="button" class="ff-btn is-primary" data-act="ho-finish">I've finished</button>
+        </span>
+      </div>
+      <div class="ho-done" data-role="ho-done" hidden>
+        <h2>Thank you${patient.firstName ? `, ${esc(patient.firstName)}` : ""}</h2>
+        <p>Please hand the iPad back to the staff member.</p>
+        <div class="retry">
+          <button type="button" class="btn-ghost" data-act="ho-back">Back to my answers</button>
+          <button type="button" class="btn-primary" data-act="ho-unlock">Staff: take it back</button>
+        </div>
+      </div>` : ""}
       <div class="fe-sheet ff-sheet" data-role="sheet">${sheetHtml({ name: ver.name, fields, settings: ver.settings, letterhead })}</div>
     </div>`;
 
@@ -790,7 +866,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     pruneDrafts();
     const old = isReturnLeg ? null : readDraft(pid, tid);
     if (old && Object.keys(old.answers).length) {
-      const resume = await askResumeDraft(old, { updated: Number(old.version) !== Number(ver.version) });
+      const resume = handSaved ? true : await askResumeDraft(old, { updated: Number(old.version) !== Number(ver.version) });
       if (!root.isConnected) return;
       if (resume) {
         restoreAnswers(old.answers);
@@ -809,7 +885,169 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     draftReady = true;
   })();
 
-  sheet.addEventListener("input", (e) => {
+
+  /* ---------- Start from the last one ---------- */
+  // Never copied from an earlier visit: anything that belongs to today
+  const NO_COPY = [...NO_DRAFT, "record_date", "date", "clinician"];
+  const lastEl = root.querySelector('[data-role="last"]');
+  let lastSub = null;
+
+  if (lastEl) {
+    listSubmissionsForPatient([patient.id, ...patientIds(patient)]) // newest first, answers included
+      .then((subs) => {
+        const prev = subs.find((s) => s.templateId === tid);
+        if (!prev || !root.isConnected) return;
+        lastSub = prev;
+        lastEl.innerHTML = `
+          <span>${esc(ver.name)} was last filled in for ${esc(patient.firstName || patient.name)} on
+            <strong>${esc(niceDate(prev.recordDate))}</strong>${prev.createdBy ? ` by ${esc(prev.createdBy)}` : ""}.</span>
+          <span class="ff-last-acts">
+            <button type="button" class="ff-btn" data-act="copy-last">Start from that one</button>
+            <button type="button" class="ff-btn is-quiet" data-act="copy-dismiss">No thanks</button>
+          </span>`;
+        lastEl.hidden = false;
+      })
+      .catch((err) => console.warn("Last form not checked:", err));
+
+    lastEl.addEventListener("click", (e) => {
+      if (e.target.closest('[data-act="copy-last"]')) copyLast();
+      else if (e.target.closest('[data-act="copy-dismiss"]')) lastEl.hidden = true;
+    });
+  }
+
+  async function copyLast() {
+    if (!lastSub) return;
+    if (dirty && !(await confirmDialog({
+      title: "Replace your answers?",
+      message: `Answers you've already typed will be replaced with the ones from ${niceDate(lastSub.recordDate)}.`,
+      confirmLabel: "Replace", tone: "warning",
+    }))) return;
+    if (!root.isConnected) return;
+
+    const a = lastSub.answers || {};
+    const pick = {};
+    fields.forEach((f) => {
+      if (LAYOUT.includes(f.type) || NO_COPY.includes(f.type) || f.fill || !(f.id in a)) return; // f.fill: fills in by itself
+      pick[f.id] = a[f.id];
+      if (`${f.id}__x` in a) pick[`${f.id}__x`] = a[`${f.id}__x`];
+      if (f.type === "table") Object.assign(pick, tableInvRead(f, wrap(f.id))); // today's discount and payments stay
+    });
+    if (!Object.keys(pick).some((k) => !k.includes("__"))) {
+      showToast("There was nothing on that form to copy.");
+      lastEl.hidden = true;
+      return;
+    }
+    restoreAnswers(pick);
+    noteChange();
+    refresh();
+    lastEl.hidden = true;
+    const changed = Number(lastSub.version) !== Number(ver.version);
+    showToast(`Answers copied from ${niceDate(lastSub.recordDate)}. Check each one${
+      changed ? ", and any questions added since" : ""}, then add today's signatures and photos.`);
+  }
+
+  /* ---------- Hand to patient ---------- */
+  let handLock = "";   // the hashed code while the patient has the iPad
+  let handFails = 0, handWaitUntil = 0;
+  const wrapEl = root.querySelector(".ff-wrap");
+  const hoBar = root.querySelector('[data-role="ho-bar"]');
+  const hoDone = root.querySelector('[data-role="ho-done"]');
+
+  // Swiping back stays on this page while it's locked
+  const onHandPop = () => {
+    if (!root.isConnected) { window.removeEventListener("popstate", onHandPop); document.body.classList.remove("ff-handing"); return; }
+    if (handLock) history.pushState({ dmHand: 1 }, "", location.href);
+  };
+
+  function enterHandover() {
+    wrapEl.classList.add("is-handover");
+    document.body.classList.add("ff-handing");
+    fields.forEach((f) => { const w = wrap(f.id); if (w && !forPatient(f)) w.classList.add("is-staffonly"); });
+    hoBar.hidden = false;
+    hoDone.hidden = true;
+    sheet.hidden = false;
+    history.pushState({ dmHand: 1 }, "", location.href);
+    window.addEventListener("popstate", onHandPop);
+    const el = document.documentElement;
+    const fs = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (fs) { try { const p = fs.call(el); if (p && p.catch) p.catch(() => {}); } catch { /* not allowed here */ } }
+    wrapEl.scrollTop = 0;
+  }
+
+  function leaveHandover() {
+    handLock = "";
+    clearHand();
+    wrapEl.classList.remove("is-handover");
+    document.body.classList.remove("ff-handing");
+    $all(sheet, ".is-staffonly").forEach((w) => w.classList.remove("is-staffonly"));
+    hoBar.hidden = true;
+    hoDone.hidden = true;
+    sheet.hidden = false;
+    msgEl.textContent = "";
+    window.removeEventListener("popstate", onHandPop);
+    const out = document.exitFullscreen || document.webkitExitFullscreen;
+    if ((document.fullscreenElement || document.webkitFullscreenElement) && out) {
+      try { const p = out.call(document); if (p && p.catch) p.catch(() => {}); } catch { /* ignore */ }
+    }
+    refresh();
+    window.scrollTo(0, 0);
+    showToast("Back to you. Check the patient's answers, then save.");
+  }
+
+  async function startHandover() {
+    const code = await askCode({
+      title: "Hand to the patient",
+      text: "Choose a 4 to 6 digit code. You'll need it to take the iPad back. The patient only sees their own questions.",
+      confirm: "Hand over",
+      check: (v) => (/^\d{4,6}$/.test(v) ? "" : "Use 4 to 6 numbers."),
+    });
+    if (!code || !root.isConnected) return;
+    handLock = await hashCode(code);
+    writeHand(pid, tid, handLock);
+    handFails = 0;
+    enterHandover();
+  }
+
+  async function unlockHandover() {
+    const code = await askCode({
+      title: "Staff only",
+      text: "Enter the code chosen when the iPad was handed over.",
+      confirm: "Unlock",
+      hide: true,
+      check: async (v) => {
+        if (Date.now() < handWaitUntil) return "Too many tries. Wait 30 seconds, then try again.";
+        if ((await hashCode(v)) === handLock) return "";
+        handFails++;
+        if (handFails >= 5) { handFails = 0; handWaitUntil = Date.now() + 30000; return "Too many tries. Wait 30 seconds, then try again."; }
+        return "That code isn't right.";
+      },
+    });
+    if (code && root.isConnected) leaveHandover();
+  }
+
+  // The patient's required questions only; staff questions are checked when staff save
+  function patientFinished() {
+    refresh();
+    const mine = problems().filter((p) => { const f = fields.find((x) => x.id === p.id); return f && forPatient(f); });
+    showProblems(mine);
+    if (mine.length) return;
+    sheet.hidden = true;
+    hoBar.hidden = true;
+    hoDone.hidden = false;
+    wrapEl.scrollTop = 0;
+  }
+
+  if (offerHand) {
+    root.addEventListener("click", (e) => {
+      if (e.target.closest('[data-act="handover"]')) startHandover();
+      else if (e.target.closest('[data-act="ho-finish"]')) patientFinished();
+      else if (e.target.closest('[data-act="ho-unlock"]')) unlockHandover();
+      else if (e.target.closest('[data-act="ho-back"]')) { hoDone.hidden = true; sheet.hidden = false; hoBar.hidden = false; }
+    });
+    if (handSaved) { handLock = handSaved; enterHandover(); } // refreshed while the patient had it
+  }
+
+    sheet.addEventListener("input", (e) => {
     if (e.target.matches && e.target.matches("[data-linked]")) e.target.dataset.touched = "1"; // staff typed: stop following
     const clinPick = e.target.closest("[data-clin-pick]");
     if (clinPick) {

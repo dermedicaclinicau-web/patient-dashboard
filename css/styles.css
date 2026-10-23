@@ -8132,3 +8132,35 @@ dialog.lh-dialog.inv-dlg.kit-set-dlg { width: min(760px, 96vw); }
   background: #dc2626; color: #fff; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
 @media (max-width: 640px) { .ca-row { grid-template-columns: 1fr; gap: 2px; } }
 @media print { .ca-banner, .ff-allergy { display: none; } }
+
+/* Fill in: start from the last one */
+.ff-last { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .6rem 1rem;
+  margin: 0 0 1rem; padding: .7rem 1rem; border: 1px solid #bfdbfe; border-radius: 12px;
+  background: #eff6ff; color: #1e40af; font-size: .9rem; }
+.ff-last-acts { display: flex; flex-wrap: wrap; gap: .4rem; }
+
+/* Hand to patient */
+body.ff-handing { overflow: hidden; }
+.ff-wrap.is-handover { position: fixed; inset: 0; z-index: 2000; max-width: none; margin: 0;
+  padding: 1rem clamp(.75rem, 3vw, 2rem) 2.5rem; overflow-y: auto; -webkit-overflow-scrolling: touch; background: var(--bg); }
+.ff-wrap.is-handover > :not(.ff-sheet):not(.ho-bar):not(.ho-done) { display: none !important; }
+.ff-wrap.is-handover .ff-sheet { max-width: var(--form-w); margin: 0 auto; }
+.ff-wrap.is-handover .fe-field.is-staffonly { display: none !important; }
+.ff-wrap.is-handover .fe-in, .ff-wrap.is-handover textarea, .ff-wrap.is-handover select { font-size: 16px; }
+.ho-bar { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: .75rem 1rem; max-width: var(--form-w); margin: 0 auto 1rem; padding: .75rem 1rem; border: 1px solid var(--border);
+  border-radius: 14px; background: rgba(255, 255, 255, .96); box-shadow: 0 6px 24px rgba(15, 23, 42, .08); }
+.ho-bar p { margin: 0; font-size: 1rem; }
+.ho-acts { display: flex; align-items: center; gap: .5rem; }
+.ho-bar .ff-btn.is-primary { height: 48px; padding: 0 1.4rem; font-size: 1rem; }
+.ho-staff { padding: .35rem .6rem; border: none; background: none; color: var(--muted); font: inherit; font-size: .8rem;
+  text-decoration: underline; cursor: pointer; }
+.ho-done { max-width: 560px; margin: 12vh auto 0; padding: 2.5rem 2rem; text-align: center; background: #fff;
+  border: 1px solid var(--border); border-radius: 20px; box-shadow: 0 10px 30px -12px rgba(15, 23, 42, .2); }
+.ho-done h2 { margin: 0 0 .5rem; font-family: var(--font-serif); font-size: 1.8rem; font-weight: 500; }
+.ho-done p { margin: 0 0 1.5rem; color: var(--muted); font-size: 1.05rem; }
+.ho-done .retry { display: flex; flex-wrap: wrap; justify-content: center; gap: .6rem; }
+.ho-pin { width: 100%; height: 56px; box-sizing: border-box; border: 1px solid var(--border); border-radius: 12px;
+  font: inherit; font-size: 1.6rem; letter-spacing: .5em; text-align: center; }
+.ho-pin:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+@media print { .ff-last, .ho-bar, .ho-done { display: none !important; } }
