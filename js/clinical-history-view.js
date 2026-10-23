@@ -18,7 +18,7 @@ const ICONS = {
 };
 
 // Heading aliases are tried in order (plural first)
-const SECTIONS = {
+export const SECTIONS = {
   social: { title: "Social History", aliases: ["SOCIAL HISTORY"], tone: "teal",
     empty: "No social history recorded.", item: "detail", placeholder: "e.g. Smoker: No" },
   meds: { title: "Medication", aliases: ["CURRENT MEDICATIONS", "MEDICATIONS", "MEDICATION"], tone: "blue",
@@ -31,13 +31,13 @@ const SECTIONS = {
 
 const ROWS = [["social", "meds", "hx-row1"], ["conditions", "allergies", "hx-row2"]];
 
-const NONE_RE = /^(nil\b|none\b|no known|nkda|nkfa|n\/a|not applicable|denies|no\s+(allerg|medic|condition|significant))/i;
+export const NONE_RE = /^(nil\b|none\b|no known|nkda|nkfa|n\/a|not applicable|denies|no\s+(allerg|medic|condition|significant))/i;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const fmtDate = (d) => (d && !isNaN(d) ? `${MONTHS[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}` : "");
 const fmt = (r) => (r.date ? fmtDate(r.date) : (r.dateText || "Undated"));
 const norm = (s) => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
 // For matching items: "- Smoker: No." == "smoker: no"
-const normItem = (s) => norm(String(s || "").replace(/^\s*[-•*]\s*/, "")).replace(/[.;,\s]+$/, "");
+export const normItem = (s) => norm(String(s || "").replace(/^\s*[-•*]\s*/, "")).replace(/[.;,\s]+$/, "");
 const newId = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 
 /* ===================== Per-page state ===================== */

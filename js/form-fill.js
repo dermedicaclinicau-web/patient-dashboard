@@ -34,6 +34,8 @@ import { openMoveRecordDialog, canMoveRecords, movesHtml } from "./record-move.j
 import { signaturePad, readField, applyVisibility, isBlank, fieldTagValues } from "./form-live.js";
 import { readDraft, writeDraft, clearDraft, pruneDrafts, askResumeDraft } from "./form-draft.js";
 export { readField, applyVisibility, answerTagText, fieldTagValues } from "./form-live.js";
+import { loadClinicalAlerts, clinicalBannerHtml, allergyChipText } from "./clinical-alerts.js";
+import { can } from "./perms.js";
 
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const BAR_ICONS = {
@@ -47,6 +49,7 @@ const BAR_ICONS = {
 const LAYOUT = ["text_block", "space", "letterhead", "watermark", "button"]; // nothing is saved for these
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const ALERT_CATEGORIES = ["consent", "treatment", "prescription"]; // forms that show allergies and medical history
 
 const isoOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const todayIso = () => isoOf(new Date());
@@ -373,7 +376,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
   if (!ver) { fail("Couldn't open this form", "The published copy is missing. Ask an admin to publish it again."); return; }
 
   const fields = ver.fields.map(normaliseField).filter(Boolean);
-
+  const showAlerts = ALERT_CATEGORIES.includes(tpl.category) && can("clinical.view");
   root.innerHTML = `
     <div class="ff-wrap">
       <div class="ff-bar" role="region" aria-label="Form actions">
@@ -384,6 +387,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
           <div class="ff-bar-title">
             <strong>${esc(ver.name)}</strong>
             <span>${esc(patient.name)} · ${esc(categoryLabel(tpl.category))} · Version ${ver.version}</span>
+            ${showAlerts ? '<button type="button" class="ff-allergy" data-role="allergy-chip" hidden></button>' : ""}
           </div>
           <span class="ff-progress" data-role="progress" hidden></span>
           <div class="ff-bar-actions">${embedded ? `
@@ -401,11 +405,31 @@ export async function mountFormFill(container, param, { staff, embedded = null }
           When you save, this tab closes and that form updates.
           <button type="button" class="ff-btn is-quiet ff-profile" data-act="open-profile">Patient profile ↗</button></p>` : ""}      
         </div>
+      ${showAlerts ? `<div data-role="alerts">${clinicalBannerHtml(null)}</div>` : ""}
       <div class="fe-sheet ff-sheet" data-role="sheet">${sheetHtml({ name: ver.name, fields, settings: ver.settings, letterhead })}</div>
     </div>`;
 
   const sheet = root.querySelector('[data-role="sheet"]');
   hydrateBankImages(sheet);
+  // Allergies and medical history, loaded in the background (the form never waits for it)
+  if (showAlerts) {
+    const host = root.querySelector('[data-role="alerts"]');
+    const chip = root.querySelector('[data-role="allergy-chip"]');
+    chip.addEventListener("click", () => host.scrollIntoView({ block: "start", behavior: "smooth" }));
+    loadClinicalAlerts(patient)
+      .then((a) => {
+        if (!root.isConnected) return;
+        host.innerHTML = clinicalBannerHtml(a);
+        const t = allergyChipText(a);
+        chip.textContent = t;
+        chip.title = t ? `${t}. Tap to see the details.` : "";
+        chip.hidden = !t;
+      })
+      .catch((err) => {
+        console.warn("Allergy banner failed:", err);
+        if (root.isConnected) host.innerHTML = clinicalBannerHtml(null, { error: true });
+      });
+  }
   const annots = attachAnnotators(sheet, fields, { markSets });
   const msgEl = root.querySelector('[data-role="msg"]');
   const progressEl = root.querySelector('[data-role="progress"]');
