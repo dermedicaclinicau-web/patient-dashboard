@@ -8064,3 +8064,27 @@ dialog.lh-dialog.inv-dlg.kit-set-dlg { width: min(760px, 96vw); }
 .inv-m-acts { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .4rem; }
 .inv-m-acts .lh-btn { padding: .2rem .6rem; font-size: .78rem; }
 .inv-moves li.is-undone .inv-m-main > strong { text-decoration: line-through; color: #64748b; }
+
+/* Menu: recordings count beside My dashboard */
+.nav-badge { margin-left: auto; min-width: 22px; height: 22px; padding: 0 6px; flex: none; border-radius: 999px;
+  display: inline-grid; place-items: center; background: #64748b; color: #fff; font-size: .72rem; font-weight: 700; }
+.nav-badge.is-ready { background: var(--primary); }
+.nav-badge.is-bad { background: var(--danger); }
+.nav-badge.is-busy { animation: nav-badge-busy 1.6s ease-in-out infinite; }
+.nav-badge.is-pulse { animation: nav-badge-pulse 1.2s ease-out 2; }
+@keyframes nav-badge-busy { 50% { opacity: .55; } }
+@keyframes nav-badge-pulse { 0% { box-shadow: 0 0 0 0 rgba(15, 118, 110, .55); } 100% { box-shadow: 0 0 0 9px rgba(15, 118, 110, 0); } }
+@media (prefers-reduced-motion: reduce) { .nav-badge.is-busy, .nav-badge.is-pulse { animation: none; } }
+
+/* My dashboard: Recordings on this device */
+.md-rec-slot { margin-bottom: 1rem; }
+.md-rec-card.is-bad { border-color: #fecaca; }
+.md-rec-card .md-count { margin-right: auto; }
+.md-rec-card.is-bad .md-count { background: #fee2e2; color: #b91c1c; }
+.md-rec-card:not(.is-bad) .md-count { background: var(--primary-soft); color: var(--primary); }
+.md-rec-note { margin: -.35rem 0 0; font-size: .8rem; }
+.md-rec-card .rec-tray { flex-direction: column; align-items: stretch; gap: .4rem; padding: 0; background: none; }
+.md-rec-card .rec-job { display: flex; border-radius: 12px; padding: .35rem .5rem .35rem .35rem; }
+.md-rec-card .rec-job .rec-pt { max-width: none; }
+.md-rec-card .rec-job-st { margin-right: auto; }
+@media (max-width: 640px) { .md-rec-card .rec-job { flex-wrap: wrap; } }

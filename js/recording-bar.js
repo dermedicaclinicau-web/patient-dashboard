@@ -47,7 +47,73 @@ const otherPatientWarning = (L) => (context && L.patient && context.id !== L.pat
 
 const stageText = (j) => (j.stage === "writing" || j.stage === "transcribed" ? "Writing notes…"
   : j.stage === "transcribing" ? "Transcribing…" : "Starting…");
+const BAD = ["failed", "error", "recovered"];
+const BUSY = ["uploading", "processing"];
+const jobViews = new Set();   // the "Recordings on this device" cards that are open (My dashboard)
+let lastReady = 0;
 
+// Counts only, never names (hover text on the menu badge)
+function summaryText(jobs) {
+  const n = (f) => jobs.filter(f).length;
+  const parts = [
+    [n((j) => j.status === "ready"), "notes ready"],
+    [n((j) => BUSY.includes(j.status)), "processing"],
+    [n((j) => BAD.includes(j.status)), "need attention"],
+  ].filter(([c]) => c).map(([c, t]) => `${c} ${t}`);
+  return `${jobs.length} recording${jobs.length === 1 ? "" : "s"}: ${parts.join(", ")}`;
+}
+
+// The number beside "My dashboard" in the menu
+function renderNavBadge(jobs) {
+  const link = document.querySelector('.nav-item[data-page="home"]');
+  if (!link) return;
+  let b = link.querySelector(".nav-badge");
+  if (!jobs.length) {
+    if (b) b.remove();
+    link.removeAttribute("title");
+    lastReady = 0;
+    return;
+  }
+  if (!b) {
+    b = document.createElement("span");
+    link.appendChild(b);
+  }
+  const bad = jobs.some((j) => BAD.includes(j.status));
+  const ready = jobs.filter((j) => j.status === "ready").length;
+  b.className = `nav-badge ${bad ? "is-bad" : ready ? "is-ready" : "is-busy"}`;
+  b.textContent = jobs.length > 9 ? "9+" : String(jobs.length);
+  link.title = summaryText(jobs);
+  if (ready > lastReady) {   // a short pulse when more notes become ready
+    b.classList.remove("is-pulse");
+    void b.offsetWidth;
+    b.classList.add("is-pulse");
+  }
+  lastReady = ready;
+}
+
+// My dashboard: the recordings on this device, live. Only shows when there's something in it.
+export function mountRecordingJobs(el) {
+  if (!el) return;
+  el.addEventListener("click", onClick);
+  const draw = (jobs) => {
+    if (!el.isConnected) { jobViews.delete(draw); return; }
+    el.hidden = !jobs.length;
+    if (!jobs.length) { el.innerHTML = ""; return; }
+    const ready = jobs.filter((j) => j.status === "ready").length;
+    const bad = jobs.some((j) => BAD.includes(j.status));
+    el.innerHTML = `<section class="md-card md-rec-card${bad ? " is-bad" : ""}">
+      <div class="md-card-head">
+        <h3>Recordings on this device</h3>
+        <span class="md-count">${jobs.length}</span>
+        ${ready > 1 ? '<button type="button" class="rec-link" data-rec="clear-ready">Hide all ready</button>' : ""}
+      </div>
+      <p class="muted md-rec-note">Uploads and notes carry on in the background. Finished notes also appear on each patient's page.</p>
+      <div class="rec-tray">${jobs.map(jobHtml).join("")}</div>
+    </section>`;
+  };
+  jobViews.add(draw);
+  draw(getState().jobs);
+}
 export function initRecordingBar(currentStaff) {
   staff = currentStaff;
   bar = document.getElementById("rec-bar");
@@ -90,11 +156,10 @@ function announce(s) {
     ready.forEach((j) => markAnnounced(j.recId));
     return;
   }
-  ready.forEach((j) => {
-    if (toasted.has(j.recId)) return;
-    toasted.add(j.recId);
-    showToast(`Notes ready for ${j.patient ? j.patient.name : "your last patient"}. Review them when you're done.`);
-  });
+  const fresh = ready.filter((j) => !toasted.has(j.recId));
+  if (!fresh.length) return;
+  fresh.forEach((j) => toasted.add(j.recId));
+  showToast(`Notes are ready for ${fresh.length} recording${fresh.length === 1 ? "" : "s"}. They're on My dashboard when you're done.`);
 }
 
 /* ---------- Drawing ---------- */
@@ -190,13 +255,13 @@ function render(s) {
     if (t) t.textContent = fmt(L.elapsedMs);
     s.jobs.forEach((j) => {
       if (j.status !== "uploading") return;
-      const el = bar.querySelector(`[data-job="${CSS.escape(j.recId)}"]`);
-      if (!el) return;
       const pct = Math.round((j.progress || 0) * 100);
-      const fill = el.querySelector(".rec-mini span");
-      if (fill) fill.style.width = `${pct}%`;
-      const p = el.querySelector(".rec-mini-pct");
-      if (p) p.textContent = `${pct}%`;
+      document.querySelectorAll(`[data-job="${CSS.escape(j.recId)}"]`).forEach((el) => {
+        const fill = el.querySelector(".rec-mini span");
+        if (fill) fill.style.width = `${pct}%`;
+        const p = el.querySelector(".rec-mini-pct");
+        if (p) p.textContent = `${pct}%`;
+      });
     });
     return;
   }
@@ -204,10 +269,11 @@ function render(s) {
 
   const { cls, html, top } = liveParts(L);
   const liveRow = html ? `<div class="rec-live ${cls}">${html}</div>` : "";
-  const tray = s.jobs.length ? `<div class="rec-tray">${s.jobs.map(jobHtml).join("")}</div>` : "";
   bar.className = "rec-bar is-stack";
-  bar.innerHTML = liveRow + tray;
-  bar.hidden = !(liveRow || tray);
+  bar.innerHTML = liveRow;          // only the live recording; the background ones are on My dashboard
+  bar.hidden = !liveRow;
+  renderNavBadge(s.jobs);
+  jobViews.forEach((fn) => fn(s.jobs));
   if (slot) { slot.innerHTML = top; slot.hidden = !top; }
   // Lets the sticky patient header and sidebar sit below the bar
   document.documentElement.style.setProperty("--recbar-h", bar.hidden ? "0px" : `${bar.offsetHeight}px`);
@@ -240,9 +306,8 @@ async function onClick(e) {
       resumeRecording();
     } else if (action === "complete") {
       if (!confirm("Complete this appointment? The recording uploads in the background.")) return;
-      const who = getState().live.patient;
       await completeRecording();
-      showToast(`${who ? `${who.name}'s recording` : "The recording"} is uploading in the background. You can start the next appointment.`);
+      showToast("The recording is uploading in the background. You can start the next appointment.");
     } else if (action === "cancel") {
       if (confirm("Cancel and delete this recording? This can't be undone.")) await cancelRecording();
     } else if (action === "open") {
@@ -253,6 +318,8 @@ async function onClick(e) {
       if (job && job.transcriptId) { markAnnounced(job.recId); showSoapPanel(job.transcriptId, { mode: "open" }); }
     } else if (action === "job-dismiss") {
       dismissJob(id);
+    } else if (action === "clear-ready") {
+      getState().jobs.filter((j) => j.status === "ready").forEach((j) => dismissJob(j.recId));
     } else if (action === "job-upload") {
       uploadNow(id);
     } else if (action === "job-process") {

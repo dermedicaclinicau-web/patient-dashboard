@@ -19,6 +19,7 @@ import { showToast } from "./utils.js";
 import { renderDayCard } from "./staff-days.js";
 import { openStartOfDayKit } from "./start-of-day.js";
 import { mountMyNotes } from "./my-notes.js";
+import { mountRecordingJobs } from "./recording-bar.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(1));
@@ -199,9 +200,11 @@ export async function mountMyDashboard(container, { staff } = {}) {
         <button type="button" class="btn-ghost" data-act="refresh">${svg(ICON.refresh)} Refresh</button>
       </div>
     </div>
+    <div data-role="rec-jobs" class="md-rec-slot" hidden></div>
     <div data-role="body"><div class="skeleton" style="height:320px;border-radius:14px"></div></div>`;
   container.replaceChildren(root);
   const body = root.querySelector('[data-role="body"]');
+  mountRecordingJobs(root.querySelector('[data-role="rec-jobs"]'));   // live; outside body, so Refresh doesn't redraw it
 
   const canKit = isInjector();
   const canManage = can("inventory.manage");
