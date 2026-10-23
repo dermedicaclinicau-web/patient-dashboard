@@ -27,6 +27,38 @@ const niceDate = (key) => {
 // Only one Scanner holds the camera: this switches off the one before
 let releaseCamera = null;
 
+// A camera shutter click, made by the browser (no sound file). Plays from the shutter tap itself, so the iPad allows it.
+// A short buzz too, on phones that can (Android). iPhones and iPads stay quiet when their silent switch is on.
+let audioCtx = null;
+function shutterSound() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (AC) {
+      audioCtx = audioCtx || new AC();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      const ctx = audioCtx;
+      const now = ctx.currentTime;
+      const click = (at, len, gain, freq) => {
+        const n = Math.max(1, Math.floor(ctx.sampleRate * len));
+        const buf = ctx.createBuffer(1, n, ctx.sampleRate);
+        const d = buf.getChannelData(0);
+        for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / n, 3);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        const f = ctx.createBiquadFilter();
+        f.type = "bandpass"; f.frequency.value = freq; f.Q.value = 0.8;
+        const g = ctx.createGain();
+        g.gain.value = gain;
+        src.connect(f).connect(g).connect(ctx.destination);
+        src.start(now + at);
+      };
+      click(0, 0.05, 0.9, 2600);     // the shutter opening
+      click(0.07, 0.07, 0.7, 1500);  // and closing
+    }
+  } catch { /* no sound on this device */ }
+  try { if (navigator.vibrate) navigator.vibrate(25); } catch { /* ignore */ }
+}
+
 // NEW: a booking → the patient saved with the scan
 const fromBooking = (a) => (a ? { id: String(a.patientId || ""), name: a.patientName || "", time: a.time || "", staff: a.staff || "" } : null);
 
@@ -373,8 +405,11 @@ export function mountScanner(container, { staff = null } = {}) {
 
   // Takes exactly what's on screen (including digital zoom)
   async function shoot() {
+    if (st.shooting || st.mode !== "camera") return;   // a double tap takes one photo
     const v = root.querySelector(".scan-vf video");
     if (!v || !v.videoWidth) { showToast("The camera isn't ready yet."); return; }
+    st.shooting = true;
+    shutterSound();
     const z = st.hw ? 1 : st.zoom;
     const k = Math.max(v.offsetWidth / v.videoWidth, v.offsetHeight / v.videoHeight);
     const sw = v.offsetWidth / k / z, sh = v.offsetHeight / k / z;
@@ -448,7 +483,7 @@ export function mountScanner(container, { staff = null } = {}) {
   function again() {
     if (st.photoUrl) URL.revokeObjectURL(st.photoUrl);
     Object.assign(st, { mode: "camera", photo: null, photoUrl: "", base64: "", result: null, lines: [], review: null, error: "",
-      fixing: -1, camErr: "", booking: null, patient: null, pickPatient: false });   // NEW: patient reset
+      fixing: -1, camErr: "", booking: null, patient: null, pickPatient: false, shooting: false });
     render();
   }
 
@@ -528,7 +563,34 @@ export function mountScanner(container, { staff = null } = {}) {
       return;
     }
     const kd = e.target.closest("[data-kind]");
-    if (kd) { if (st.mode !== "busy" && !st.busy && st.kind !== kd.dataset.kind) { st.kind = kd.dataset.kind; again(); } return; }
+    if (kd) {
+      const k = kd.dataset.kind;
+      if (st.mode === "busy" || st.busy || st.kind === k) return;
+      if (st.mode === "camera") {
+        // Same camera, same viewfinder: only the tab and the hint change (no flicker, zoom kept)
+        st.kind = k;
+        root.querySelectorAll("[data-kind]").forEach((b) => {
+          const on = b.dataset.kind === k;
+          b.classList.toggle("is-on", on);
+          b.setAttribute("aria-selected", String(on));
+        });
+        const tip = root.querySelector('[data-role="tip"]');
+        if (tip) tip.textContent = tipText();
+        return;
+      }
+      if (["result", "rx", "docket"].includes(st.mode)) {
+        // A scan being checked: ask before throwing it away
+        confirmDialog({
+          title: "Leave this scan?",
+          message: "It hasn't been saved. Switching starts a new scan.",
+          confirmLabel: "Switch", cancelLabel: "Stay", tone: "warning",
+        }).then((ok) => { if (ok && root.isConnected) { st.kind = k; again(); } });
+        return;
+      }
+      st.kind = k;
+      again();
+      return;
+    }
     const z = e.target.closest("[data-zoom]");
     if (z) { st.zoom = Number(z.dataset.zoom); applyZoom(); return; }
     const fx = e.target.closest("[data-fix]");
