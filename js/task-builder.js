@@ -590,10 +590,10 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
           ${Object.entries(TASK_FIELD_TYPES).map(([k, l]) => `<button type="button" class="fe-ins" data-addfield="${k}">+ ${esc(l)}</button>`).join("")}
           ${hasTx ? "" : '<button type="button" class="fe-ins is-smart" data-addfield="treatments">+ Treatments (from Treatment information)</button>'}
           ${hasAc ? "" : '<button type="button" class="fe-ins is-smart" data-addfield="aftercare">+ Aftercare (from Aftercare Bank)</button>'}
-          ${hasPr ? "" : '<button type="button" class="fe-ins is-smart" data-addfield="products">+ Products (from Skin Script Products)</button>'}
-          ${aboutPt && !hasAppts ? '<button type="button" class="fe-ins is-smart" data-addappts="">+ Upcoming appointments (from the appointment book)</button>' : ""}
           ${task.category === "patient" && !/\{\s*skin script\s*\}/i.test(`${task.subject} ${task.body}`)
-            ? '<button type="button" class="fe-ins is-smart" data-addssp="">+ Skin Script protocol (from the patient\'s page)</button>' : ""}
+            ? '<button type="button" class="fe-ins is-smart" data-addssp="">+ Patient\'s Skin Script record (the protocol table)</button>' : ""}
+          ${hasPr ? "" : '<button type="button" class="fe-ins is-smart" data-addfield="products">+ Product list with shop links (from Skin Script Products)</button>'}
+          ${aboutPt && !hasAppts ? '<button type="button" class="fe-ins is-smart" data-addappts="">+ Upcoming appointments (from the appointment book)</button>' : ""}
         </div>
       </section>`;
   }
@@ -916,7 +916,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
             { clinic: clinicDetails(letterhead), hasLogo })}</div>
           ${attNames.length || usesSsp ? `<div class="tb-mail-att">${attNames.map((p) => `<span class="tb-att">${I.doc}${esc(p.name)}.pdf${
             p.mode === "fill" ? " <small>(filled in when sent)</small>" : p.mode === "saved" ? " <small>(saved copy)</small>" : ""}</span>`).join("")}${
-            usesSsp ? `<span class="tb-att">${I.doc}Skin Script Protocol.pdf <small>(only if staff tick it)</small></span>` : ""}</div>` : ""}
+            ""}</div>` : ""}
         </div>
         <small class="muted">Highlighted parts are filled in from the fields when the task is run. Choices show real examples from your lists.</small>
       </div>`;

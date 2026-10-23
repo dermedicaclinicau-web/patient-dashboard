@@ -275,10 +275,8 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
       </label>`;
     }).join("")}</div>
       <p class="tr-ssp-note">The table goes in the email where <strong>{Skin Script}</strong> is.</p>
-      <label class="fe-check"><input type="checkbox" data-ssp-attach${s.attach ? " checked" : ""} /> Also attach it as a PDF (for printing)</label>
       <div class="tr-ssp-acts">
         <button type="button" class="lh-btn" data-act="ssp-preview">Preview the email</button>
-        ${s.attach ? '<button type="button" class="lh-btn is-quiet" data-act="ssp-pdf">Preview the PDF</button>' : ""}
       </div>`;
   }
 
@@ -990,8 +988,8 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
       else if (st.ssp.status === "error" || st.ssp.status === "blocked") out.push("Their Skin Scripts couldn't be loaded. Press Try again on the Skin Script card.");
       else if (!st.ssp.list.length) out.push("There's no Skin Script on file for this patient. Create one first.");
       else if (!chosenSsp()) out.push("Choose which Skin Script to send.");
-      else if (!SSP_TOKEN.test(editor.getHtml()) && !st.ssp.attach) {
-        out.push("{Skin Script} was removed from the message. Press “Reset to the task's wording”, or tick “Also attach it as a PDF”.");
+      else if (!SSP_TOKEN.test(editor.getHtml())) {
+        out.push("{Skin Script} was removed from the message. Press “Reset to the task's wording” to put it back.");
       }
     }
     task.fields.forEach((f) => { if (f.required && isEmpty(st.answers[f.id])) out.push(`Answer “${f.label}”.`); });
@@ -1026,7 +1024,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
 
   async function buildAttachments(btn) {
     const out = [];
-    const ssp = st.patient && uses("skin script") && st.ssp.attach ? chosenSsp() : null;
+    const ssp = null; // the Skin Script goes in the email body, not as a PDF
     if (!st.atts.length && !ssp) return out;
     btnLabel(btn, "Preparing PDFs…");
     for (const a of st.atts) {
