@@ -616,8 +616,10 @@ async function doDelete(btn) {
     // Refresh the patient page so the deleted notes disappear from its sections
     if (location.hash.startsWith("#/patient/")) window.dispatchEvent(new HashChangeEvent("hashchange"));
   } catch (err) {
-    console.error("Delete failed:", err);
+    console.error("Delete failed:", err.code || "(no code)", err.detail || "", err);
     const messages = {
+      BAD_REQUEST: "This record's ID isn't in the expected format, so it can't be deleted here.",
+      SERVER_ERROR: `Couldn't delete: ${err.detail || "something went wrong on the server"}.`,
       FORBIDDEN: "Only the clinician who recorded this, or an Admin, can delete it.",
       REVIEWED: "Reviewed notes can't be deleted.",
       NOT_FOUND: "This recording has already been deleted.",

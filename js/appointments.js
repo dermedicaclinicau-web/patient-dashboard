@@ -70,8 +70,10 @@ export async function callApi(payload) {
   if (!data) throw new Error("Unexpected response from the server.");
   if (!data.ok) {
     if (data.error === "UNAUTHORIZED") throw unauthorized();
-    const e = new Error("Couldn't load data. Please try again.");
+    const e = new Error(data.detail ? String(data.detail) : "Couldn't load data. Please try again.");
     e.code = data.error;
+    e.detail = data.detail || "";
+    console.warn("Apps Script said no:", payload.action, payload.op || "", data.error, data.detail || "");
     throw e;
   }
   return data;

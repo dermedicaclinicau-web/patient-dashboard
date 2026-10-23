@@ -1383,6 +1383,14 @@ function regenerateNotes() {
 // ===================== Delete a recording (wrong patient / accidental recording) =====================
 
 function handleDeleteRecording_(body) {
+  try { return deleteRecording_(body); }
+  catch (err) {
+    console.error('Delete recording failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: false, error: 'SERVER_ERROR', detail: String(err && err.message ? err.message : err).slice(0, 300) };
+  }
+}
+
+function deleteRecording_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
 
