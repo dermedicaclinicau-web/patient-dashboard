@@ -74,6 +74,7 @@
                   "./js/mkt-crop.js",
                   "./js/mkt-email.js",
                   "./js/mkt-templates.js",
+                  "./js/mobile-nav.js",
                   "./js/my-dashboard.js",
                   "./js/my-notes.js",
                   "./js/my-photo.js",
@@ -177,6 +178,6 @@
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261023-132334",
-    "v":  "20261023-132334"
+    "version":  "20261023-135926",
+    "v":  "20261023-135926"
 }
