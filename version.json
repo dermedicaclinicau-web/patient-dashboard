@@ -86,6 +86,7 @@
                   "./js/panel-resize.js",
                   "./js/patient-dashboard.js",
                   "./js/patient-list.js",
+                  "./js/patient-reports.js",
                   "./js/patient-tasks.js",
                   "./js/patients.js",
                   "./js/perms.js",
@@ -125,6 +126,7 @@
                   "./js/reminder-dialog.js",
                   "./js/reminders.js",
                   "./js/reports.js",
+                  "./js/retention-report.js",
                   "./js/rich-editor.js",
                   "./js/rich-field.js",
                   "./js/rich-html.js",
@@ -180,6 +182,6 @@
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261023-163521",
-    "v":  "20261023-163521"
+    "version":  "20261023-220332",
+    "v":  "20261023-220332"
 }
