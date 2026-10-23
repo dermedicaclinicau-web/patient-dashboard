@@ -32,6 +32,7 @@
                   "./js/end-of-day.js",
                   "./js/firebase-config.js",
                   "./js/flow-rules.js",
+                  "./js/force-refresh.js",
                   "./js/form-annotate.js",
                   "./js/form-builder.js",
                   "./js/form-calc.js",
@@ -101,6 +102,7 @@
                   "./js/plan-workflow-settings.js",
                   "./js/po-deliveries.js",
                   "./js/po-document.js",
+                  "./js/presence.js",
                   "./js/print-queue.js",
                   "./js/print-task.js",
                   "./js/public-form.js",
@@ -178,6 +180,6 @@
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261023-135926",
-    "v":  "20261023-135926"
+    "version":  "20261023-155537",
+    "v":  "20261023-155537"
 }

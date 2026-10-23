@@ -11,6 +11,7 @@ import {
   uploadChatImage, chatImageUrl, cachedImageUrl,
 } from "./chat-api.js";
 import { startPresence, stopPresence, watchPresence } from "./presence.js";
+import { requestRefresh } from "./force-refresh.js";
 
 const HELP_NAME = "Bethany";   // who answers Help
 const esc = (s) => escapeHtml(String(s ?? ""));
@@ -621,6 +622,7 @@ function drawList() {
       <button type="button" class="lh-btn is-primary" data-act="new">${I.plus}<span>New message</span></button>
       ${admin ? '<button type="button" class="lh-btn" data-act="all">All staff chats</button>' : ""}
     </footer>
+    ${admin ? '<button type="button" class="ch-refresh" data-act="refreshall">↻ Update everyone\'s portal</button>' : ""}
     <p class="ch-note"></p>`;
 }
 
@@ -1140,6 +1142,25 @@ async function onClick(e) {
     case "group": drawGroup(); break;
     case "mkgroup": createGroup(); break;
     case "all": drawAll(); break;
+    case "refreshall": {
+      const ok = await confirmDialog({
+        title: "Update everyone's portal?",
+        message: "Every open portal refreshes to get your latest changes. Anyone recording, handing a form to a patient, "
+          + "or typing is refreshed once they've finished. Push your changes to GitHub first, and wait about a minute for them to go live.",
+        confirmLabel: "Update everyone",
+      });
+      if (!ok) break;
+      try {
+        await requestRefresh(me);
+        showToast("Sent. Open portals will refresh within the next minute or so. Press Ctrl+Shift+R to refresh this one.");
+      } catch (err) {
+        console.error("Refresh request failed:", err);
+        showToast(err && err.code === "permission-denied"
+          ? "Couldn't send. Check the app_settings Firestore rule lets admins write."
+          : "Couldn't send. Try again.");
+      }
+      break;
+    }
     case "awayset": drawAway(); break;
     case "awayoff":
       try { await saveAway({ on: false }, me); showToast("Staff now see you're available"); }
