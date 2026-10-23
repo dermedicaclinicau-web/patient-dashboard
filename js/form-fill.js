@@ -49,7 +49,7 @@ const BAR_ICONS = {
 const LAYOUT = ["text_block", "space", "letterhead", "watermark", "button"]; // nothing is saved for these
 const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const ALERT_CATEGORIES = ["consent", "treatment", "prescription"]; // forms that show allergies and medical history
+const ALERT_CATEGORIES = ["consent", "treatment", "prescription", "rx"]; // forms that show allergies and medical history
 
 const isoOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const todayIso = () => isoOf(new Date());
