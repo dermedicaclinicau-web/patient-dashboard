@@ -218,7 +218,71 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     if (!rec) return html.replace(SSP_TOKEN_P, "").replace(SSP_TOKEN, "");
     const settings = await getSspSettings().catch(() => null);
     const table = buildSspEmailHtml({ record: rec, settings });
-    return SSP_TOKEN_P.test(html) ? html.replace(SSP_TOKEN_P, () => table) : html.replace(SSP_TOKEN, () => table);
+    if (SSP_TOKEN_P.test(html)) return html.replace(SSP_TOKEN_P, () => table); // on its own paragraph
+    // On its own line at the end of a paragraph (after Shift+Enter): end the paragraph, then the table
+    const END_OF_P = /<br\s*\/?>\s*(?:<[^>\/][^>]*>\s*)*\{\s*skin script\s*\}\s*(?:<\/(?!p>)[^>]+>\s*)*<\/p>/i;
+    if (END_OF_P.test(html)) return html.replace(END_OF_P, () => `</p>${table}`);
+    return html.replace(SSP_TOKEN, () => table);
+  }
+
+  /* ---------- The Skin Script table shown inside the message box ---------- */
+  // The editor only ever holds {Skin Script}. The real table is shown in its place (not editable),
+  // and swapped back to {Skin Script} whenever the message is read, so sending works exactly as before.
+  let sspSettings = null;
+  const editArea = () => editor.area; // the editor's message box
+  const isLoneToken = (el) => /^\s*\{\s*skin script\s*\}\s*$/i.test(el.textContent || "");
+
+  function sspLiveHtml() {
+    if (!st.patient) return '<p class="tr-ssp-live-note">Choose the patient. Their Skin Script table shows here.</p>';
+    if (st.ssp.status === "loading" || st.ssp.list === null || !sspSettings) return '<p class="tr-ssp-live-note">Loading their Skin Script…</p>';
+    if (st.ssp.status) return '<p class="tr-ssp-live-note">Couldn\'t load their Skin Script. Press Try again on the left.</p>';
+    const rec = chosenSsp();
+    if (!rec) return '<p class="tr-ssp-live-note">There\'s no Skin Script on file for this patient yet.</p>';
+    return buildSspEmailHtml({ record: rec, settings: sspSettings });
+  }
+
+  // Shows the table wherever {Skin Script} is in the message box (and refreshes tables already shown)
+  function showSspInEditor() {
+    const area = editArea();
+    if (!area || !uses("skin script")) return;
+    const html = sspLiveHtml();
+    area.querySelectorAll("[data-ssp-live]").forEach((w) => { w.innerHTML = html; });
+    const walker = document.createTreeWalker(area, NodeFilter.SHOW_TEXT);
+    const hits = [];
+    while (walker.nextNode()) {
+      const t = walker.currentNode;
+      if (SSP_TOKEN.test(t.nodeValue) && !t.parentElement.closest("[data-ssp-live]")) hits.push(t);
+    }
+    hits.forEach((t) => {
+      const w = document.createElement("div");
+      w.className = "tr-ssp-live";
+      w.contentEditable = "false";
+      w.innerHTML = html;
+      // {Skin Script} on its own line: the table takes that line's place
+      let block = t.parentElement;
+      while (block && block !== area && block.parentElement !== area) block = block.parentElement;
+      if (block && block !== area && isLoneToken(block)) { w.dataset.sspLive = "block"; block.replaceWith(w); return; }
+      // {Skin Script} after other words: the table goes right where it was
+      w.dataset.sspLive = "inline";
+      const m = SSP_TOKEN.exec(t.nodeValue);
+      const rest = t.splitText(m.index);
+      rest.nodeValue = rest.nodeValue.slice(m[0].length);
+      rest.parentNode.insertBefore(w, rest);
+    });
+  }
+
+  // The message as HTML, with each shown table put back to {Skin Script}
+  function bodyHtml() {
+    const area = editArea();
+    const swaps = (area ? [...area.querySelectorAll("[data-ssp-live]")] : []).map((w) => {
+      let r;
+      if (w.dataset.sspLive === "block") { r = document.createElement("p"); r.textContent = "{Skin Script}"; }
+      else r = document.createTextNode("{Skin Script}");
+      w.replaceWith(r);
+      return [w, r];
+    });
+    try { return editor.getHtml(); }
+    finally { swaps.forEach(([w, r]) => r.replaceWith(w)); }
   }
 
   function loadSsp(p) {
@@ -274,7 +338,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
             r.createdBy && `by ${r.createdBy}`].filter(Boolean).join(" · "))}</small></span>
       </label>`;
     }).join("")}</div>
-      <p class="tr-ssp-note">The table goes in the email where <strong>{Skin Script}</strong> is.</p>
+      <p class="tr-ssp-note">The table shows in the message on the right. Choose a different one here to change it.</p>
       <div class="tr-ssp-acts">
         <button type="button" class="lh-btn" data-act="ssp-preview">Preview the email</button>
       </div>`;
@@ -304,7 +368,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   async function previewSspEmail(btn) {
     btn.disabled = true;
     let html;
-    try { html = shell(await withSsp(editor.getHtml())); }
+    try { html = shell(await withSsp(bodyHtml())); }
     catch (err) { console.error("Email preview failed:", err); showToast("Couldn't show the email. Try again."); return; }
     finally { btn.disabled = false; }
     const logo = st.letterhead && st.letterhead.logo;
@@ -376,6 +440,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     if (!st.bodyEdited || force) editor.setHtml(fillTemplateHtml(task.body, vals));
     if (force) { st.subjectEdited = false; st.bodyEdited = false; }
     resetBtn.hidden = !(st.subjectEdited || st.bodyEdited);
+    showSspInEditor();
   }
 
   /* ---------- Searchable patient dropdown ---------- */
@@ -988,7 +1053,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
       else if (st.ssp.status === "error" || st.ssp.status === "blocked") out.push("Their Skin Scripts couldn't be loaded. Press Try again on the Skin Script card.");
       else if (!st.ssp.list.length) out.push("There's no Skin Script on file for this patient. Create one first.");
       else if (!chosenSsp()) out.push("Choose which Skin Script to send.");
-      else if (!SSP_TOKEN.test(editor.getHtml())) {
+      else if (!SSP_TOKEN.test(bodyHtml())) {
         out.push("{Skin Script} was removed from the message. Press “Reset to the task's wording” to put it back.");
       }
     }
@@ -1046,7 +1111,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
       const attachments = await buildAttachments(sendBtn);
       btnLabel(sendBtn, "Sending…");
       const res = await callApi({ action: "sendTaskEmail", ...whoFor(),
-        subject: subjectEl.value.trim(), html: shell(await withSsp(editor.getHtml())), attachments });
+        subject: subjectEl.value.trim(), html: shell(await withSsp(bodyHtml())), attachments });
       st.touched = false;
       showToast(task.category === "patient"
         ? `Sent to ${st.patient.name}`
@@ -1070,7 +1135,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     LATER.forEach((k) => vals.delete(k)); // left as {blanks}
     const subject = st.subjectEdited ? subjectEl.value.trim()
       : fillTemplate(task.subject, vals).replace(/\[\[([^|\]]+)\|[^\]]+\]\]/g, "$1").trim();
-    const body = st.bodyEdited ? editor.getHtml() : fillTemplateHtml(task.body, vals);
+    const body = st.bodyEdited ? bodyHtml() : fillTemplateHtml(task.body, vals);
     return {
       subject, body,
       fills: LATER.some((k) => hasTok(subject, k) || hasTok(body, k)),
@@ -1133,6 +1198,12 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   }
 
   getLetterhead().then((lh) => { st.letterhead = lh; if (root.isConnected) renderMessage(); }).catch(() => {});
+  if (uses("skin script")) {
+    getSspSettings()
+      .then((s) => { sspSettings = s || {}; })
+      .catch(() => { sspSettings = {}; }) // the table still shows, with the standard colours
+      .finally(() => { if (root.isConnected) showSspInEditor(); });
+  }
   if (task.attachments.length) {
     listPublishedForms().then((list) => { st.printables = list; if (root.isConnected) renderAttachments(); }).catch(() => {});
   }

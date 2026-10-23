@@ -8369,3 +8369,11 @@ body.ff-handing { overflow: hidden; }
 /* Task Manager: Skin Script card note */
 .tr-ssp-note { margin: .5rem 0 .25rem; font-size: .82rem; color: var(--muted); }
 .tr-ssp-note strong { color: var(--primary); font-weight: 600; }
+
+/* Task Manager: the Skin Script table shown inside the message box */
+.tr-ssp-live { position: relative; margin: 8px 0 14px; padding: 26px 10px 8px; border: 1px dashed #99d5cc;
+  border-radius: 10px; background: #fff; cursor: default; user-select: none; }
+.tr-ssp-live::before { content: "Skin Script table · choose a different one on the left"; position: absolute;
+  top: 6px; left: 10px; font-size: 11px; font-weight: 600; color: var(--primary); }
+.tr-ssp-live-note { margin: 0; font-size: .9rem; color: var(--muted); }
+.tr-ssp-live table { pointer-events: none; }
