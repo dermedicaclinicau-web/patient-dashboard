@@ -14165,7 +14165,7 @@ function handleReports_(body) {
   if (!can_(session, 'reports.patients')) return { ok: false, error: 'FORBIDDEN' };
   const op = String(body.op || '');
   if (REP_OPS_.indexOf(op) === -1) return { ok: false, error: 'BAD_REQUEST' };
-  const key = 'rep_' + op + '_v2';
+  const key = 'rep_' + op + '_v3';
   if (body.fresh !== true) {
     const hit = repCacheGet_(key);
     if (hit) return Object.assign({ ok: true, cached: true }, hit);
@@ -14182,6 +14182,8 @@ function handleReports_(body) {
     const idx = repVisits_(ctx, pts);
     const rows = op === 'packages' ? repPackages_(ctx, pts, idx)
       : op === 'ssp' ? repSsp_(cfg, ctx, pts, idx) : repNewPts_(ctx, pts, idx);
+    const sent = repSent_(cfg, pts);
+    rows.forEach(function (r) { if (r.id && sent[r.id]) r.sent = sent[r.id]; });
     const out = { rows: rows, at: new Date().toISOString(), today: ctx.todayKey, ms: Date.now() - t0 };
     repCachePut_(key, out);
     console.log('Report ' + op + ': ' + rows.length + ' row(s) in ' + out.ms + ' ms for ' + session.name);
@@ -14323,6 +14325,55 @@ function repNewPts_(ctx, pts, idx) {
       const x = idx[k];
       return Object.assign(repWho_(pts, k, x.name), { first: x.first, firstSvc: x.firstSvc, firstCat: x.firstCat, firstStaff: x.firstStaff });
     });
+}
+
+// What's already been sent to each patient in the last 30 days, newest first:
+// Task Manager emails, texts from the patient page, and Recall calls, texts and emails (staff or the Recall flow).
+// → { patientKey: { at, how: "email"|"text"|"call", src, what, by, auto } }
+function repSent_(cfg, pts) {
+  const since = new Date(Date.now() - 30 * 86400000).toISOString();
+  const out = Object.create(null);
+  const add = function (pid, c) {
+    const k = pid ? pts.find(String(pid)) : '';
+    if (!k || !c.at || c.at < since) return;
+    if (!out[k] || c.at > out[k].at) out[k] = c;
+  };
+
+  try {   // Task Manager (and Email flows) emails to patients
+    fsQuery_(cfg, 'task_runs', 'sentAt', 'GREATER_THAN', since, 5000).forEach(function (r) {
+      if (r.category !== 'patient' || !r.patientId || r.taskName === 'Aftercare email') return;
+      const auto = r.flow === true;
+      add(r.patientId, { at: String(r.sentAt || ''), how: 'email', src: auto ? 'Email flow' : 'Task Manager',
+        what: String(r.taskName || r.subject || '').replace(/^Email flow: /, '').slice(0, 80),
+        by: auto ? '' : String(r.sentBy || '').replace(/ \(scheduled\)$/, ''), auto: auto });
+    });
+  } catch (e) { console.warn('Report: task history not read: ' + e); }
+
+  try {   // Texts from the patient page
+    fsQuery_(cfg, SMS_COL_, 'at', 'GREATER_THAN', since, 5000).forEach(function (m) {
+      add(m.patientId, { at: String(m.at || ''), how: 'text', src: 'Patient page', what: '', by: String(m.by || ''), auto: false });
+    });
+  } catch (e) { console.warn('Report: texts not read: ' + e); }
+
+  try {   // Recall: what's in each card's history
+    fsQuery_(cfg, RECALL_COL_, 'updatedAt', 'GREATER_THAN', since, 5000).forEach(function (c) {
+      (Array.isArray(c.log) ? c.log : []).forEach(function (l) {
+        if (!l || String(l.at || '') < since) return;
+        const w = String(l.what || '');
+        let how = '';
+        if (l.kind === 'call') how = w === 'Sent a text' ? 'text' : 'call';
+        else if (l.kind === 'text') how = 'text';
+        else if (l.kind === 'email') how = 'email';
+        else if (l.kind === 'flow') how = /^Text sent/.test(w) ? 'text' : /^Email sent/.test(w) ? 'email' : '';
+        if (!how) return;
+        const auto = !l.byUid;
+        add(c.patientId, { at: String(l.at), how: how, src: auto ? 'Recall flow' : 'Recall',
+          what: how === 'call' ? w : '', by: auto ? '' : String(l.by || ''), auto: auto });
+      });
+    });
+  } catch (e) { console.warn('Report: recall history not read: ' + e); }
+
+  return out;
 }
 
 // Remembered in parts (one cache value holds 100 KB at most)

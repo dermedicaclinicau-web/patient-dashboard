@@ -8462,6 +8462,7 @@ body.ff-handing { overflow: hidden; }
 .pr-log { display: inline-flex; align-items: center; gap: 6px; }
 .pr-log svg { width: 14px; height: 14px; }
 .pr-outs { display: grid; gap: 6px; }
+.pr-contact .pr-sent { margin-bottom: 6px; }
 
 /* Phones: each patient is a card */
 @media (max-width: 760px) {

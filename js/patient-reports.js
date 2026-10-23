@@ -43,12 +43,16 @@ const OUT = Object.fromEntries(OUTCOMES);
 // The same key on every list, safe for a Firestore document ID
 const rowKey = (r) => String(r.id || `ptt_${r.ptt || r.name}`).replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 120);
 
-// Off the list for now: not interested (until changed), call back (until the date), anything else (14 days)
-function contacted(c, today) {
-  if (!c) return false;
-  if (c.outcome === "callback") return !!c.until && c.until > today;
-  if (c.outcome === "not_interested") return true;
-  return !!c.at && Date.now() - c.at.getTime() < 14 * 864e5;
+const RECENT = 14 * 864e5;
+const HOW = { call: "Called", text: "Texted", email: "Emailed" };
+
+// Off the list for now: a logged contact (not interested until changed, call back until the date, anything else
+// for 14 days), or anything sent from Task Manager, the patient page or Recall in the last 14 days
+function contacted(c, sent, today) {
+  if (c && c.outcome === "callback") return !!c.until && c.until > today;
+  if (c && c.outcome === "not_interested") return true;
+  if (c && c.at && Date.now() - c.at.getTime() < RECENT) return true;
+  return !!(sent && Date.now() - Date.parse(sent.at) < RECENT);
 }
 
 async function loadContacts(kind) {
@@ -264,7 +268,7 @@ export function mountPatientReport(body, kind, staff) {
       if (!L.match(r, st.f, st.today)) return;
       if (q && ![r.name, r.mobile, r.email, r.pkg].join(" ").toLowerCase().includes(q)) return;
       const c = st.contacts.get(rowKey(r));
-      if (!st.done && contacted(c, st.today)) { hidden++; return; }
+      if (!st.done && contacted(c, r.sent, st.today)) { hidden++; return; }
       base.push({ r, c });
     });
     base.sort((a, b) => L.sort(a.r, b.r, st.today));
@@ -293,12 +297,21 @@ export function mountPatientReport(body, kind, staff) {
     }).join("")}${rest ? `<p class="pr-bar-more">+ ${rest} more in smaller groups</p>` : ""}</section>`;
   }
 
-  const contactCell = (c, i) => `${c ? `<div class="rp-done"><span class="inv-flag ${c.outcome === "booked" ? "is-ok"
-    : c.outcome === "not_interested" ? "is-bad" : "is-info"}">${esc(OUT[c.outcome] || c.outcome)}</span>
-      <small>${esc([c.at ? c.at.toLocaleDateString("en-AU", { day: "numeric", month: "short" }) : "", c.by,
-        c.outcome === "callback" && c.until ? `call back ${nice(c.until)}` : ""].filter(Boolean).join(" · "))}</small>
-      ${c.note ? `<small>“${esc(c.note)}”</small>` : ""}</div>` : ""}
-    <button type="button" class="lh-btn pr-log" data-log="${i}">${I.chat}<span>${c ? "Update" : "Log contact"}</span></button>`;
+  const day = (d) => d.toLocaleDateString("en-AU", { day: "numeric", month: "short" });
+  // The latest of: what was logged here, and what was sent from Task Manager, the patient page or Recall
+  const contactCell = (c, s, i) => {
+    const sentAt = s ? new Date(s.at) : null;
+    const showSent = s && !isNaN(sentAt) && (!c || !c.at || sentAt > c.at);
+    return `${c ? `<div class="rp-done"><span class="inv-flag ${c.outcome === "booked" ? "is-ok"
+      : c.outcome === "not_interested" ? "is-bad" : "is-info"}">${esc(OUT[c.outcome] || c.outcome)}</span>
+        <small>${esc([c.at ? day(c.at) : "", c.by,
+          c.outcome === "callback" && c.until ? `call back ${nice(c.until)}` : ""].filter(Boolean).join(" · "))}</small>
+        ${c.note ? `<small>“${esc(c.note)}”</small>` : ""}</div>` : ""}
+      ${showSent ? `<div class="rp-done pr-sent"><span class="inv-flag ${s.auto ? "is-info" : "is-ok"}">${esc(HOW[s.how] || "Contacted")}${
+          s.what ? ` · ${esc(s.what)}` : ""}</span>
+        <small>${esc([day(sentAt), s.by, s.src].filter(Boolean).join(" · "))}${s.auto ? " · automatic" : ""}</small></div>` : ""}
+      <button type="button" class="lh-btn pr-log" data-log="${i}">${I.chat}<span>${c ? "Update" : "Log contact"}</span></button>`;
+  };
 
   function draw() {
     const { base, list, hidden } = compute();
@@ -312,14 +325,14 @@ export function mountPatientReport(body, kind, staff) {
       <div class="pr-listhead"><strong>${plural(list.length, "patient")}</strong>
         ${g ? `<span class="pr-chip is-consult">${esc(g.title)}: ${esc(st.pick.v)}</span>
           <button type="button" class="rc-link" data-act="unpick">Show everyone</button>` : ""}
-        ${hidden ? `<span class="muted">· ${hidden} already contacted (hidden)</span>` : ""}
+        ${hidden ? `<span class="muted">· ${hidden} contacted recently (hidden)</span>` : ""}
         <span class="inv-spacer"></span>
         ${st.at ? `<small class="muted">Worked out at ${esc(new Date(st.at).toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }))}</small>` : ""}
       </div>
       ${list.length ? `<section class="tb-card"><div class="rp-scroll"><table class="inv-table rp-table pr-table">
           <thead><tr>${heads.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead>
           <tbody>${shown.map((x, i) => {
-            const cells = [patientCell(x.r), ...L.cells(x.r, st.today), contactCell(x.c, i)];
+            const cells = [patientCell(x.r), ...L.cells(x.r, st.today), contactCell(x.c, x.r.sent, i)];
             return `<tr>${cells.map((c, j) => `<td data-label="${esc(heads[j])}"${j === cells.length - 1 ? ' class="pr-contact"' : ""}>${c}</td>`).join("")}</tr>`;
           }).join("")}</tbody>
         </table></div>${list.length > 500 ? `<p class="muted rp-note">Showing the first 500. Export CSV for all ${list.length}.</p>` : ""}</section>`
@@ -423,9 +436,14 @@ export function mountPatientReport(body, kind, staff) {
     if (!list.length) { showToast("Nothing to export."); return; }
     downloadCsv(`${kind}-${st.today}.csv`, [
       ["Patient", "Patient ID", "Mobile", "Email", "Do not contact", ...L.csvHead, "Last visit", "Next booking",
-        "Contact", "Contacted on", "Contacted by", "Note"],
-      ...list.map(({ r, c }) => [r.name, r.ptt || r.id, r.mobile, r.email, r.dnc ? "Yes" : "", ...L.csvRow(r), r.last || "", r.next || "",
-        c ? OUT[c.outcome] || c.outcome : "", c && c.at ? keyOf(c.at) : "", c ? c.by || "" : "", c ? c.note || "" : ""]),
+        "Contact", "Contacted on", "Contacted by", "Note", "Last message", "Sent on", "Sent by"],
+      ...list.map(({ r, c }) => {
+        const s = r.sent;
+        return [r.name, r.ptt || r.id, r.mobile, r.email, r.dnc ? "Yes" : "", ...L.csvRow(r), r.last || "", r.next || "",
+          c ? OUT[c.outcome] || c.outcome : "", c && c.at ? keyOf(c.at) : "", c ? c.by || "" : "", c ? c.note || "" : "",
+          s ? `${HOW[s.how] || "Contacted"}${s.what ? ` (${s.what})` : ""} · ${s.src}${s.auto ? " (automatic)" : ""}` : "",
+          s ? String(s.at).slice(0, 10) : "", s ? s.by || "" : ""];
+      }),
     ]);
   }
 
