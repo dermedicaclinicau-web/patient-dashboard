@@ -2,7 +2,7 @@
 // Route: #/tasks/run/<taskId>            (from Task Manager)
 //        #/tasks/run/<taskId>/<patientId> (from the patient page's Email button)
 import { getTaskType, fetchStaffList, TASK_CHOICE_TYPES, parseAttachment } from "./task-types.js";
-import { printablePdf, savedFormPdf, previewSavedForm } from "./form-delivery.js";
+import { printablePdf, savedFormPdf, previewSavedForm, docToPdf, showPdfPreview } from "./form-delivery.js";
 import { getSubmission, listSubmissionsForPatient } from "./form-submissions.js";
 import { getPatient, patientIds } from "./patients.js";
 import { mountFormFill } from "./form-fill.js";
@@ -19,6 +19,8 @@ import { openImagePicker } from "./image-bank.js";
 import { upcomingAppointments, formatUpcoming, upcomingLines, niceDay } from "./upcoming-appts.js";
 import { pickSendTime, fmtSendTime } from "./task-later.js";
 import { listSspRecords } from "./ssp-api.js";
+import { buildSspDocument, longDate, marginPx } from "./ssp-document.js"; // marginPx: the page shown if the PDF can't be made
+import { getSspSettings } from "./ssp-settings.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -127,6 +129,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     todo: { on: true, due: "" },
     touchedFields: new Set(), // choice fields staff have ticked themselves (not overwritten by the Skin Script)
     sspNote: "",
+    ssp: { list: null, id: "", status: "", pdfFor: "", pdfJob: null }, // {Skin Script}: the patient's protocols and the chosen one
     combo: { results: [], active: -1, status: "", seq: 0 },
     // Attachments: { mode: "blank"|"fill"|"saved", id, subId, tags, saved }
     atts: task.attachments.map(parseAttachment).map((a) => ({ ...a, subId: "", tags: null, saved: undefined })),
@@ -202,6 +205,113 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   }
   const isEmpty = (v) => v == null || v === "" || (Array.isArray(v) && !v.length);
 
+  /* ---------- {Skin Script}: the patient's protocol, attached as a PDF ---------- */
+  const chosenSsp = () => (st.ssp.list || []).find((r) => r.id === st.ssp.id) || null;
+
+  function sspLine() {
+    if (!st.patient) return "";
+    if (st.ssp.status === "loading") return "(loading Skin Script…)";
+    const r = chosenSsp();
+    if (!r) return "";
+    return `Your Skin Script Protocol from ${longDate(r.recordDate)} is attached${
+      r.validUntil ? `. It's valid until ${longDate(r.validUntil)}` : ""}.`;
+  }
+
+  function loadSsp(p) {
+    st.ssp = { list: null, id: "", status: "", pdfFor: "", pdfJob: null };
+    if (!p || !uses("skin script")) { renderSspCard(); return; }
+    st.ssp.status = "loading";
+    renderSspCard();
+    listSspRecords([p.id, ...patientIds(p)])
+      .then((list) => {
+        if (st.patient !== p) return;
+        st.ssp.list = list.filter((r) => Array.isArray(r.items) && r.items.length); // newest first
+        st.ssp.id = st.ssp.list[0] ? st.ssp.list[0].id : "";
+        st.ssp.status = "";
+      })
+      .catch((err) => {
+        console.warn("Skin Scripts not loaded:", err);
+        if (st.patient !== p) return;
+        st.ssp.list = [];
+        st.ssp.status = err && err.code === "permission-denied" ? "blocked" : "error";
+      })
+      .finally(() => {
+        if (st.patient !== p || !root.isConnected) return;
+        renderSspCard();
+        renderMessage();
+        if (st.bodyEdited) noteEl.textContent = "The Skin Script has loaded. Press “Reset to the task's wording” to put its line in the email.";
+      });
+  }
+
+  function sspCardHtml() {
+    const s = st.ssp;
+    const head = `<h4>Skin Script protocol${s.list && s.list.length ? ` <small>${s.list.length} on file</small>` : ""}</h4>`;
+    if (s.status === "loading" || s.list === null) return head + '<p class="tb-none">Looking for their Skin Scripts…</p>';
+    if (s.status === "blocked") return head + '<p class="tb-none tb-bad">Skin Scripts are blocked. Check the ssp_records Firestore rule allows read.</p>';
+    if (s.status === "error") {
+      return head + `<p class="tb-none tb-bad">Couldn't load their Skin Scripts. Check your connection.</p>
+        <div class="tr-ssp-acts"><button type="button" class="lh-btn" data-act="ssp-reload">Try again</button></div>`;
+    }
+    if (!s.list.length) {
+      return head + `<p class="tb-none">There's no Skin Script on file for ${esc(st.patient.name)} yet.</p>
+        <div class="tr-ssp-acts">
+          <a class="lh-btn" href="#/ssp/new/${encodeURIComponent(st.patient.id)}" target="_blank" rel="noopener">Create one in a new tab</a>
+          <button type="button" class="lh-btn is-quiet" data-act="ssp-reload">Check again</button>
+        </div>`;
+    }
+    const today = isoToday();
+    return head + `<div class="tr-ssp-list">${s.list.map((r, i) => {
+      const n = r.items.length;
+      return `<label class="tr-ssp">
+        <input type="radio" name="tr-ssp" data-ssp value="${esc(r.id)}"${r.id === s.id ? " checked" : ""} />
+        <span><strong>${esc(longDate(r.recordDate) || "No date")}${i === 0 ? '<em class="tr-ssp-tag">Latest</em>' : ""}${
+          r.validUntil && r.validUntil < today ? '<em class="tr-ssp-tag is-old">Expired</em>' : ""}</strong>
+          <small>${esc([`${n} product${n === 1 ? "" : "s"}`, r.validUntil && `valid until ${longDate(r.validUntil)}`,
+            r.createdBy && `by ${r.createdBy}`].filter(Boolean).join(" · "))}</small></span>
+      </label>`;
+    }).join("")}</div>
+      <div class="tr-ssp-acts">
+        <button type="button" class="lh-btn" data-act="ssp-preview">Preview</button>
+        <small class="muted">Attached to the email as a PDF.</small>
+      </div>`;
+  }
+
+  function renderSspCard() {
+    const box = left.querySelector('[data-role="ssp-card"]');
+    if (box) box.innerHTML = sspCardHtml();
+  }
+
+  // The same document and PDF as the Skin Script card's Email button. Made once per protocol.
+  async function sspDoc(rec) {
+    const [settings, lh] = await Promise.all([
+      getSspSettings().catch(() => null),
+      st.letterhead || getLetterhead().catch(() => null),
+    ]);
+    return buildSspDocument({ record: rec, letterhead: lh, settings });
+  }
+  function sspPdf(rec) {
+    if (st.ssp.pdfFor === rec.id && st.ssp.pdfJob) return st.ssp.pdfJob;
+    st.ssp.pdfFor = rec.id;
+    st.ssp.pdfJob = sspDoc(rec).then(docToPdf).catch((e) => { st.ssp.pdfJob = null; throw e; });
+    return st.ssp.pdfJob;
+  }
+
+  // The real PDF, exactly as it will be attached (made once, then reused when sending)
+  async function previewSsp(btn) {
+    const rec = chosenSsp();
+    if (!rec) return;
+    btn.disabled = true;
+    let doc;
+    try { doc = await sspDoc(rec); }
+    catch (err) { console.error("Skin Script preview failed:", err); showToast("Couldn't show the Skin Script. Try again."); return; }
+    finally { btn.disabled = false; }
+    // If this device can't make the PDF, the page it's made from is shown instead
+    const fallbackHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{margin:0;background:#e2e8f0}
+      .pg{width:794px;max-width:100%;margin:16px auto;background:#fff;box-sizing:border-box;padding:${marginPx(doc.margin)}px}${doc.css}</style></head>
+      <body><div class="pg"><div class="pdfdoc">${doc.inner}</div></div></body></html>`;
+    showPdfPreview(() => sspPdf(rec).then((o) => o.blob), { fileName: doc.fileName, fallbackHtml });
+  }
+
   function values() {
     const m = new Map();
     const set = (k, v) => m.set(k.toLowerCase(), v == null ? "" : typeof v === "object" ? v : String(v));
@@ -220,6 +330,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     set("Upcoming appointments", st.smart.appointments);
     set("Treatment plan", st.smart.plan);
     set("Aftercare", ""); // only filled in when emailing aftercare from a form
+    set("Skin Script", sspLine());
     const tx = task.fields.find((f) => TASK_CHOICE_TYPES.includes(f.type) && f.source === "treatments");
     if (tx) set("Treatment info", formatChoice({ ...tx, display: "links" }, chosen(tx)));
     // From an attached form that's been filled in (its Referral specialist)
@@ -508,6 +619,9 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     if (uses("upcoming appointments") && st.patient) {
       h += `<section class="tb-card" data-role="appts-card">${apptCardHtml()}</section>`;
     }
+    if (uses("skin script") && st.patient) {
+      h += `<section class="tb-card" data-role="ssp-card">${sspCardHtml()}</section>`;
+    }
     left.innerHTML = h;
   }
 
@@ -619,6 +733,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   function loadSmart() {
     const p = st.patient;
     st.smart = { appointments: "", plan: "" };
+    loadSsp(p);
     if (!p) { st.appts.items = null; st.appts.status = ""; renderMessage(); return; }
     const jobs = [];
     if (uses("upcoming appointments")) {
@@ -729,6 +844,13 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   /* ---------- Events ---------- */
   left.addEventListener("input", (e) => {
     const el = e.target;
+    if (el.dataset.ssp !== undefined) {
+      st.ssp.id = el.value;
+      st.touched = true;
+      renderMessage();
+      if (st.bodyEdited) noteEl.textContent = "You chose a different Skin Script. Press “Reset to the task's wording” to update its line in the email.";
+      return;
+    }
     if (el.dataset.todo !== undefined) {
       if (el.dataset.todo === "on") { st.todo.on = el.checked; renderLeft(); }
       else st.todo.due = el.value;
@@ -773,6 +895,9 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
 
   root.addEventListener("click", (e) => {
     if (e.target.closest('[data-act="change-patient"]')) { clearPatient(); return; }
+    const sp = e.target.closest('[data-act="ssp-preview"]');
+    if (sp) { previewSsp(sp); return; }
+    if (e.target.closest('[data-act="ssp-reload"]')) { loadSsp(st.patient); return; }
     const ts = e.target.closest('[data-act="to-specialist"]');
     if (ts) {
       const input = $('[data-role="to-input"]');
@@ -821,6 +946,12 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
         if (a.mode === "saved" && !a.subId) out.push(`There's no saved “${formName(a.id)}” for this patient. Fill one in under the email.`);
       });
     }
+    if (st.patient && uses("skin script")) {
+      if (st.ssp.status === "loading" || st.ssp.list === null) out.push("Still looking for their Skin Script. Try again in a moment.");
+      else if (st.ssp.status === "error" || st.ssp.status === "blocked") out.push("Their Skin Scripts couldn't be loaded. Press Try again on the Skin Script card.");
+      else if (!st.ssp.list.length) out.push("There's no Skin Script on file for this patient. Create one first.");
+      else if (!chosenSsp()) out.push("Choose which Skin Script to send.");
+    }
     task.fields.forEach((f) => { if (f.required && isEmpty(st.answers[f.id])) out.push(`Answer “${f.label}”.`); });
     if (!subjectEl.value.trim()) out.push("Add a subject.");
     if (!editor.text().trim()) out.push("The message is empty.");
@@ -853,12 +984,17 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
 
   async function buildAttachments(btn) {
     const out = [];
-    if (!st.atts.length) return out;
+    const ssp = st.patient && uses("skin script") ? chosenSsp() : null;
+    if (!st.atts.length && !ssp) return out;
     btnLabel(btn, "Preparing PDFs…");
     for (const a of st.atts) {
       out.push(a.mode === "blank"
         ? await printablePdf({ templateId: a.id, patient: st.patient })
         : await savedFormPdf(a.subId));
+    }
+    if (ssp) {
+      const made = await sspPdf(ssp);
+      out.push({ name: made.fileName, pdf: made.pdf }); // the same { name, pdf } as printablePdf and savedFormPdf
     }
     return out;
   }

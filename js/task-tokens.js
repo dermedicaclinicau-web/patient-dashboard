@@ -58,6 +58,10 @@ const SMART = {
       text: "IPL Hair Removal Aftercare Instructions",
     },
   },
+  "Skin Script": {
+    hint: "The patient's Skin Script Protocol, attached as a PDF. Staff choose which one and can preview it before sending.",
+    sample: "Your Skin Script Protocol from 12 October 2026 is attached. It's valid until 12 January 2027.",
+  },
 };
 
 const SPECIALIST_TOKENS = ["Specialist name", "Specialist speciality", "Specialist practice", "Specialist email", "Specialist phone", "Specialist address"];
@@ -118,7 +122,7 @@ export function tokenGroups(task, { staffName = "", letterhead = null, sources =
   if (aboutPatient) {
     const tx = treatmentsField(task);
     groups.push({ title: "Smart blocks", tokens: Object.entries(SMART)
-      .filter(([n]) => (n !== "Treatment info" || tx) && (n !== "Aftercare" || task.category === "patient"))
+      .filter(([n]) => (n !== "Treatment info" || tx) && (!["Aftercare", "Skin Script"].includes(n) || task.category === "patient"))
       .map(([n, s]) => tok(n, n === "Treatment info" ? fieldSample({ ...tx, display: "links" }, sources) : s.sample, "smart", s.hint)) });
   }
   return groups;
@@ -178,6 +182,8 @@ export function taskProblems(task) {
       out.push(`{${n}} only works in To Patient tasks. For the patient's details use {${STAFF_SWAP[lower]}}${about ? "" : " (and tick “This is about a patient”)"}.`);
     } else if (task.category === "staff" && lower === "date of birth") {
       out.push("{Date of birth} only works in To Patient tasks. Remove it from this staff task.");
+    } else if (task.category === "staff" && lower === "skin script") {
+      out.push("{Skin Script} only works in To Patient tasks. Remove it from this staff task.");
     } else if (task.category === "staff" && lower === "aftercare") {
       out.push("{Aftercare} only works in To Patient tasks. Add an Aftercare field in step 3 and use {Aftercare instructions}.");
     } else if (task.category === "staff" && !about && BUILT_IN.includes(lower)) {

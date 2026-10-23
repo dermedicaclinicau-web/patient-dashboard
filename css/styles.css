@@ -8164,3 +8164,18 @@ body.ff-handing { overflow: hidden; }
   font: inherit; font-size: 1.6rem; letter-spacing: .5em; text-align: center; }
 .ho-pin:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
 @media print { .ff-last, .ho-bar, .ho-done { display: none !important; } }
+
+/* Task Manager: the Skin Script protocol to attach */
+.tr-ssp-list { display: flex; flex-direction: column; gap: .4rem; }
+.tr-ssp { display: flex; align-items: flex-start; gap: .6rem; padding: .6rem .75rem; border: 1px solid var(--border);
+  border-radius: 10px; background: #fff; cursor: pointer; }
+.tr-ssp:has(input:checked) { border-color: var(--primary); background: var(--primary-soft); }
+.tr-ssp input { flex: none; margin-top: .2rem; accent-color: var(--primary); }
+.tr-ssp > span { display: flex; flex-direction: column; gap: .1rem; min-width: 0; }
+.tr-ssp strong { font-size: .92rem; }
+.tr-ssp small { font-size: .8rem; color: var(--muted); }
+.tr-ssp-tag { margin-left: .4rem; padding: .05rem .45rem; border-radius: 999px; background: #ecfdf5; color: #047857;
+  font-size: .7rem; font-style: normal; font-weight: 700; }
+.tr-ssp-tag.is-old { background: #fef3c7; color: #92400e; }
+.tr-ssp-acts { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin-top: .5rem; }
+.tr-ssp-acts a.lh-btn { text-decoration: none; }

@@ -592,6 +592,8 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
           ${hasAc ? "" : '<button type="button" class="fe-ins is-smart" data-addfield="aftercare">+ Aftercare (from Aftercare Bank)</button>'}
           ${hasPr ? "" : '<button type="button" class="fe-ins is-smart" data-addfield="products">+ Products (from Skin Script Products)</button>'}
           ${aboutPt && !hasAppts ? '<button type="button" class="fe-ins is-smart" data-addappts="">+ Upcoming appointments (from the appointment book)</button>' : ""}
+          ${task.category === "patient" && !/\{\s*skin script\s*\}/i.test(`${task.subject} ${task.body}`)
+            ? '<button type="button" class="fe-ins is-smart" data-addssp="">+ Skin Script protocol (from the patient\'s page)</button>' : ""}
         </div>
       </section>`;
   }
@@ -898,6 +900,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
       return p ? { name: p.name, mode } : null;
     }).filter(Boolean);
     const hasLogo = !!(letterhead && letterhead.logo);
+    const usesSsp = task.category === "patient" && /\{\s*skin script\s*\}/i.test(`${task.subject} ${task.body}`);
 
     preview.innerHTML = `
       <div class="tb-prev">
@@ -911,8 +914,9 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
           <div class="tb-mail-row"><span>Subject</span><strong>${subjectHtml(fillTemplate(task.subject, values)) || "<em>No subject yet</em>"}</strong></div>
           <div class="tb-mail-body tb-mail-shell" data-role="shell">${emailShell(fillTemplateHtml(task.body, values), task.style,
             { clinic: clinicDetails(letterhead), hasLogo })}</div>
-          ${attNames.length ? `<div class="tb-mail-att">${attNames.map((p) => `<span class="tb-att">${I.doc}${esc(p.name)}.pdf${
-            p.mode === "fill" ? " <small>(filled in when sent)</small>" : p.mode === "saved" ? " <small>(saved copy)</small>" : ""}</span>`).join("")}</div>` : ""}
+          ${attNames.length || usesSsp ? `<div class="tb-mail-att">${attNames.map((p) => `<span class="tb-att">${I.doc}${esc(p.name)}.pdf${
+            p.mode === "fill" ? " <small>(filled in when sent)</small>" : p.mode === "saved" ? " <small>(saved copy)</small>" : ""}</span>`).join("")}${
+            usesSsp ? `<span class="tb-att">${I.doc}Skin Script Protocol.pdf <small>(chosen when sent)</small></span>` : ""}</div>` : ""}
         </div>
         <small class="muted">Highlighted parts are filled in from the fields when the task is run. Choices show real examples from your lists.</small>
       </div>`;
@@ -932,7 +936,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   }
 
   form.addEventListener("focusin", (e) => { if (e.target.matches("[data-tokens]")) lastText = e.target; });
-  form.addEventListener("mousedown", (e) => { if (e.target.closest("[data-token], [data-addappts]")) e.preventDefault(); });
+  form.addEventListener("mousedown", (e) => { if (e.target.closest("[data-token], [data-addappts], [data-addssp]")) e.preventDefault(); });
 
   form.addEventListener("input", (e) => {
     const el = e.target;
@@ -1058,6 +1062,14 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
       renderForm();
       changed();
       showToast("Added {Upcoming appointments} to the message. It fills in with the patient's bookings when the task is run.");
+      return;
+    }
+    if (e.target.closest("[data-addssp]")) {
+      editor.insertToken("Skin Script");
+      task.body = editor.getHtml();
+      renderForm();
+      changed();
+      showToast("Added {Skin Script}. When the task is run, staff choose the patient's protocol and it's attached as a PDF.");
       return;
     }
     const add = e.target.closest("[data-addfield]");
