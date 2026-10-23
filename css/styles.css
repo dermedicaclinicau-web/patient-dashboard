@@ -8179,3 +8179,6 @@ body.ff-handing { overflow: hidden; }
 .tr-ssp-tag.is-old { background: #fef3c7; color: #92400e; }
 .tr-ssp-acts { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin-top: .5rem; }
 .tr-ssp-acts a.lh-btn { text-decoration: none; }
+
+/* Scanner: the camera message can be tapped to try again */
+.scan-tip.is-bad { cursor: pointer; }

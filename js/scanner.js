@@ -207,18 +207,44 @@ export function mountScanner(container, { staff = null } = {}) {
     st.torch = false;
   }
 
+  // Starts the camera, or shows the one already running in the current viewfinder
+  // (switching Billing sheet / Delivery docket / Prescription draws a new one)
   async function startCamera() {
-    if (st.starting || st.stream) return;
+    if (st.starting) return;
+    if (st.stream) {
+      const v = root.querySelector(".scan-vf video");
+      if (v && v.srcObject !== st.stream) { v.srcObject = st.stream; v.play().catch(() => {}); }
+      const tb = root.querySelector('[data-act="torch"]');
+      if (tb) tb.hidden = !st.canTorch;
+      applyZoom();
+      return;
+    }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setTip("This browser can't show the camera here. Use Camera app or Upload below.", true);
       return;
     }
     st.starting = true;
+    // Best first. Some laptop webcams fail at the full size instead of choosing a smaller one.
+    const tries = [
+      { facingMode: { ideal: "environment" }, width: { ideal: 4032 }, height: { ideal: 3024 } },
+      { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      { facingMode: { ideal: "environment" } },
+      true,
+    ];
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: { facingMode: { ideal: "environment" }, width: { ideal: 4032 }, height: { ideal: 3024 } },
-      });
+      let stream = null, lastErr = null;
+      for (const video of tries) {
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({ audio: false, video });
+          break;
+        } catch (err) {
+          lastErr = err;
+          const n = err && err.name;
+          if (n === "NotAllowedError" || n === "SecurityError" || n === "NotFoundError") break; // trying again won't help
+          if (n === "NotReadableError" || n === "AbortError") await new Promise((r) => setTimeout(r, 400)); // let it finish closing
+        }
+      }
+      if (!stream) throw lastErr || new Error("No camera");
       if (!root.isConnected || st.mode !== "camera") { stream.getTracks().forEach((t) => t.stop()); return; }
       st.stream = stream;
       st.track = stream.getVideoTracks()[0];
@@ -234,9 +260,14 @@ export function mountScanner(container, { staff = null } = {}) {
       applyZoom();
     } catch (err) {
       console.warn("Camera failed:", err);
-      setTip(err && err.name === "NotAllowedError"
+      const n = err && err.name;
+      setTip(n === "NotAllowedError" || n === "SecurityError"
         ? "Camera access is blocked. Allow the camera for this site in Settings, or use Camera app or Upload below."
-        : "Couldn't start the camera. Use Camera app or Upload below.", true);
+        : n === "NotReadableError" || n === "TrackStartError" || n === "AbortError"
+          ? "The camera is being used by another app or tab (Teams, Zoom, another portal tab). Close it, then tap here to try again."
+        : n === "NotFoundError" || n === "OverconstrainedError"
+          ? "No camera was found on this device. Use Upload below."
+        : "Couldn't start the camera. Tap here to try again, or use Camera app or Upload below.", true);
     } finally {
       st.starting = false;
     }
@@ -429,6 +460,12 @@ export function mountScanner(container, { staff = null } = {}) {
   root.addEventListener("pointercancel", up);
 
   root.addEventListener("click", (e) => {
+    if (e.target.closest('[data-role="tip"]') && st.camErr && st.mode === "camera") {
+      st.camErr = "";
+      stopCamera();
+      render();   // draws the viewfinder again and starts the camera
+      return;
+    }
     const kd = e.target.closest("[data-kind]");
     if (kd) { if (st.mode !== "busy" && !st.busy && st.kind !== kd.dataset.kind) { st.kind = kd.dataset.kind; again(); } return; }
     const z = e.target.closest("[data-zoom]");
