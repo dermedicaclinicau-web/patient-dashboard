@@ -59,8 +59,16 @@ const SMART = {
     },
   },
   "Skin Script": {
-    hint: "The patient's Skin Script Protocol, attached as a PDF. Staff choose which one and can preview it before sending.",
-    sample: "Your Skin Script Protocol from 12 October 2026 is attached. It's valid until 12 January 2027.",
+    hint: "The patient's Skin Script Protocol as a table in the email. Staff choose which one and can preview the email before sending.",
+    sample: {
+      html: '<p style="margin:0 0 10px"><strong>Skin Script record date:</strong> 12 October 2026</p>' +
+        '<table width="100%" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;border:1px solid #ece9e2;margin:0 0 12px;font-family:Arial,sans-serif;font-size:13px">' +
+        '<tr><th style="padding:8px 10px;background:#f4f2ed;text-align:left;font-size:11px">STEP</th><th style="padding:8px 10px;background:#f4f2ed;text-align:left;font-size:11px">☀ MORNING</th><th style="padding:8px 10px;background:#f4f2ed;text-align:left;font-size:11px">✨ EVENING</th></tr>' +
+        '<tr><td style="padding:9px 10px;background:#ede9fe;color:#6d28d9;font-weight:bold">Step A</td><td style="padding:9px 10px"><b>Dermedica Essential Cleanser</b><br>Apply a pea-sized amount, then rinse off</td><td style="padding:9px 10px;background:#faf9f6"></td></tr>' +
+        '<tr><td style="padding:9px 10px;background:#fef3c7;color:#b45309;font-weight:bold">Step E</td><td style="padding:9px 10px"><b>Dermedica Sunscreen</b><br>Apply 2 large pea size amounts</td><td style="padding:9px 10px;background:#faf9f6"></td></tr>' +
+        '</table><p style="margin:0 0 14px">This Skin Script Protocol is valid until <strong>12 January 2027</strong>.</p>',
+      text: "Skin Script record date: 12 October 2026 (table)",
+    },
   },
 };
 

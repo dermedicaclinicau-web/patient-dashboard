@@ -19,7 +19,7 @@ import { openImagePicker } from "./image-bank.js";
 import { upcomingAppointments, formatUpcoming, upcomingLines, niceDay } from "./upcoming-appts.js";
 import { pickSendTime, fmtSendTime } from "./task-later.js";
 import { listSspRecords } from "./ssp-api.js";
-import { buildSspDocument, longDate, marginPx } from "./ssp-document.js"; // marginPx: the page shown if the PDF can't be made
+import { buildSspDocument, longDate, marginPx, buildSspEmailHtml } from "./ssp-document.js"; // marginPx: the page shown if the PDF can't be made
 import { getSspSettings } from "./ssp-settings.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -129,7 +129,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     todo: { on: true, due: "" },
     touchedFields: new Set(), // choice fields staff have ticked themselves (not overwritten by the Skin Script)
     sspNote: "",
-    ssp: { list: null, id: "", status: "", pdfFor: "", pdfJob: null }, // {Skin Script}: the patient's protocols and the chosen one
+    ssp: { list: null, id: "", status: "", pdfFor: "", pdfJob: null, attach: false }, // {Skin Script}: the patient's protocols, the chosen one, and "also attach the PDF"
     combo: { results: [], active: -1, status: "", seq: 0 },
     // Attachments: { mode: "blank"|"fill"|"saved", id, subId, tags, saved }
     atts: task.attachments.map(parseAttachment).map((a) => ({ ...a, subId: "", tags: null, saved: undefined })),
@@ -208,17 +208,21 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   /* ---------- {Skin Script}: the patient's protocol, attached as a PDF ---------- */
   const chosenSsp = () => (st.ssp.list || []).find((r) => r.id === st.ssp.id) || null;
 
-  function sspLine() {
-    if (!st.patient) return "";
-    if (st.ssp.status === "loading") return "(loading Skin Script…)";
-    const r = chosenSsp();
-    if (!r) return "";
-    return `Your Skin Script Protocol from ${longDate(r.recordDate)} is attached${
-      r.validUntil ? `. It's valid until ${longDate(r.validUntil)}` : ""}.`;
+  // {Skin Script} stays as a placeholder in the message box, and becomes the table when the email is sent.
+  // A paragraph holding only the placeholder is replaced whole, so the table never ends up inside a paragraph.
+  const SSP_TOKEN = /\{\s*skin script\s*\}/i;
+  const SSP_TOKEN_P = /<p[^>]*>\s*(?:<[^>]+>\s*)*\{\s*skin script\s*\}\s*(?:<\/[^>]+>\s*)*<\/p>/i;
+  async function withSsp(html) {
+    if (!SSP_TOKEN.test(html)) return html;
+    const rec = st.patient && uses("skin script") ? chosenSsp() : null;
+    if (!rec) return html.replace(SSP_TOKEN_P, "").replace(SSP_TOKEN, "");
+    const settings = await getSspSettings().catch(() => null);
+    const table = buildSspEmailHtml({ record: rec, settings });
+    return SSP_TOKEN_P.test(html) ? html.replace(SSP_TOKEN_P, () => table) : html.replace(SSP_TOKEN, () => table);
   }
 
   function loadSsp(p) {
-    st.ssp = { list: null, id: "", status: "", pdfFor: "", pdfJob: null };
+    st.ssp = { list: null, id: "", status: "", pdfFor: "", pdfJob: null, attach: st.ssp.attach };
     if (!p || !uses("skin script")) { renderSspCard(); return; }
     st.ssp.status = "loading";
     renderSspCard();
@@ -239,7 +243,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
         if (st.patient !== p || !root.isConnected) return;
         renderSspCard();
         renderMessage();
-        if (st.bodyEdited) noteEl.textContent = "The Skin Script has loaded. Press “Reset to the task's wording” to put its line in the email.";
+        // The table goes in when the email is sent, so there's nothing to reset
       });
   }
 
@@ -270,9 +274,11 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
             r.createdBy && `by ${r.createdBy}`].filter(Boolean).join(" · "))}</small></span>
       </label>`;
     }).join("")}</div>
+      <p class="tr-ssp-note">The table goes in the email where <strong>{Skin Script}</strong> is.</p>
+      <label class="fe-check"><input type="checkbox" data-ssp-attach${s.attach ? " checked" : ""} /> Also attach it as a PDF (for printing)</label>
       <div class="tr-ssp-acts">
-        <button type="button" class="lh-btn" data-act="ssp-preview">Preview</button>
-        <small class="muted">Attached to the email as a PDF.</small>
+        <button type="button" class="lh-btn" data-act="ssp-preview">Preview the email</button>
+        ${s.attach ? '<button type="button" class="lh-btn is-quiet" data-act="ssp-pdf">Preview the PDF</button>' : ""}
       </div>`;
   }
 
@@ -296,8 +302,34 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     return st.ssp.pdfJob;
   }
 
+  // The whole email, exactly as the patient will get it, with the Skin Script table in place
+  async function previewSspEmail(btn) {
+    btn.disabled = true;
+    let html;
+    try { html = shell(await withSsp(editor.getHtml())); }
+    catch (err) { console.error("Email preview failed:", err); showToast("Couldn't show the email. Try again."); return; }
+    finally { btn.disabled = false; }
+    const logo = st.letterhead && st.letterhead.logo;
+    if (logo) html = html.replace(/<img\b([^>]*?)\bdata-logo\b([^>]*)>/gi, `<img$1$2 src="${logo}">`);
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog th-dialog";
+    dlg.innerHTML = `
+      <div class="th-head">
+        <div><h3>${esc(subjectEl.value.trim() || "The email")}</h3>
+          <p class="muted">How the email will look, with the Skin Script table in it.</p></div>
+        <button type="button" class="lh-btn is-quiet" data-act="close">Close</button>
+      </div>
+      <iframe class="th-frame" sandbox="allow-popups allow-popups-to-escape-sandbox" title="The email"></iframe>`;
+    dlg.querySelector("iframe").srcdoc =
+      `<!DOCTYPE html><html><head><meta charset="utf-8"><base target="_blank"></head><body style="margin:0">${html}</body></html>`;
+    dlg.querySelector('[data-act="close"]').addEventListener("click", () => dlg.close());
+    dlg.addEventListener("close", () => dlg.remove());
+    document.body.appendChild(dlg);
+    dlg.showModal();
+  }
+
   // The real PDF, exactly as it will be attached (made once, then reused when sending)
-  async function previewSsp(btn) {
+  async function previewSspPdf(btn) {
     const rec = chosenSsp();
     if (!rec) return;
     btn.disabled = true;
@@ -330,7 +362,6 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     set("Upcoming appointments", st.smart.appointments);
     set("Treatment plan", st.smart.plan);
     set("Aftercare", ""); // only filled in when emailing aftercare from a form
-    set("Skin Script", sspLine());
     const tx = task.fields.find((f) => TASK_CHOICE_TYPES.includes(f.type) && f.source === "treatments");
     if (tx) set("Treatment info", formatChoice({ ...tx, display: "links" }, chosen(tx)));
     // From an attached form that's been filled in (its Referral specialist)
@@ -844,11 +875,17 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   /* ---------- Events ---------- */
   left.addEventListener("input", (e) => {
     const el = e.target;
+    if (el.dataset.sspAttach !== undefined) {
+      st.ssp.attach = el.checked;
+      st.touched = true;
+      renderSspCard();
+      return;
+    }
     if (el.dataset.ssp !== undefined) {
       st.ssp.id = el.value;
       st.touched = true;
       renderMessage();
-      if (st.bodyEdited) noteEl.textContent = "You chose a different Skin Script. Press “Reset to the task's wording” to update its line in the email.";
+      // The table for the chosen protocol goes in when the email is sent
       return;
     }
     if (el.dataset.todo !== undefined) {
@@ -896,7 +933,9 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   root.addEventListener("click", (e) => {
     if (e.target.closest('[data-act="change-patient"]')) { clearPatient(); return; }
     const sp = e.target.closest('[data-act="ssp-preview"]');
-    if (sp) { previewSsp(sp); return; }
+    if (sp) { previewSspEmail(sp); return; }
+    const spp = e.target.closest('[data-act="ssp-pdf"]');
+    if (spp) { previewSspPdf(spp); return; }
     if (e.target.closest('[data-act="ssp-reload"]')) { loadSsp(st.patient); return; }
     const ts = e.target.closest('[data-act="to-specialist"]');
     if (ts) {
@@ -951,6 +990,9 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
       else if (st.ssp.status === "error" || st.ssp.status === "blocked") out.push("Their Skin Scripts couldn't be loaded. Press Try again on the Skin Script card.");
       else if (!st.ssp.list.length) out.push("There's no Skin Script on file for this patient. Create one first.");
       else if (!chosenSsp()) out.push("Choose which Skin Script to send.");
+      else if (!SSP_TOKEN.test(editor.getHtml()) && !st.ssp.attach) {
+        out.push("{Skin Script} was removed from the message. Press “Reset to the task's wording”, or tick “Also attach it as a PDF”.");
+      }
     }
     task.fields.forEach((f) => { if (f.required && isEmpty(st.answers[f.id])) out.push(`Answer “${f.label}”.`); });
     if (!subjectEl.value.trim()) out.push("Add a subject.");
@@ -984,7 +1026,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
 
   async function buildAttachments(btn) {
     const out = [];
-    const ssp = st.patient && uses("skin script") ? chosenSsp() : null;
+    const ssp = st.patient && uses("skin script") && st.ssp.attach ? chosenSsp() : null;
     if (!st.atts.length && !ssp) return out;
     btnLabel(btn, "Preparing PDFs…");
     for (const a of st.atts) {
@@ -1006,7 +1048,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
       const attachments = await buildAttachments(sendBtn);
       btnLabel(sendBtn, "Sending…");
       const res = await callApi({ action: "sendTaskEmail", ...whoFor(),
-        subject: subjectEl.value.trim(), html: shell(editor.getHtml()), attachments });
+        subject: subjectEl.value.trim(), html: shell(await withSsp(editor.getHtml())), attachments });
       st.touched = false;
       showToast(task.category === "patient"
         ? `Sent to ${st.patient.name}`
@@ -1057,7 +1099,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
       btnLabel(laterBtn, "Scheduling…");
       await callApi({
         action: "scheduleTaskEmail", op: "create", ...whoFor(),
-        subject: msg.subject, html: shell(msg.body), attachments,
+        subject: msg.subject, html: shell(await withSsp(msg.body)), attachments,
         sendAt: new Date(pick.ms).toISOString(),
         appts: { months: st.appts.months, services: st.appts.services, staff: st.appts.staff },
       });

@@ -8365,3 +8365,7 @@ body.ff-handing { overflow: hidden; }
 }
 @keyframes mnav-up { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .mnav-sheet[open] { animation: none; } }
+
+/* Task Manager: Skin Script card note */
+.tr-ssp-note { margin: .5rem 0 .25rem; font-size: .82rem; color: var(--muted); }
+.tr-ssp-note strong { color: var(--primary); font-weight: 600; }

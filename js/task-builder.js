@@ -916,7 +916,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
             { clinic: clinicDetails(letterhead), hasLogo })}</div>
           ${attNames.length || usesSsp ? `<div class="tb-mail-att">${attNames.map((p) => `<span class="tb-att">${I.doc}${esc(p.name)}.pdf${
             p.mode === "fill" ? " <small>(filled in when sent)</small>" : p.mode === "saved" ? " <small>(saved copy)</small>" : ""}</span>`).join("")}${
-            usesSsp ? `<span class="tb-att">${I.doc}Skin Script Protocol.pdf <small>(chosen when sent)</small></span>` : ""}</div>` : ""}
+            usesSsp ? `<span class="tb-att">${I.doc}Skin Script Protocol.pdf <small>(only if staff tick it)</small></span>` : ""}</div>` : ""}
         </div>
         <small class="muted">Highlighted parts are filled in from the fields when the task is run. Choices show real examples from your lists.</small>
       </div>`;
@@ -1069,7 +1069,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
       task.body = editor.getHtml();
       renderForm();
       changed();
-      showToast("Added {Skin Script}. When the task is run, staff choose the patient's protocol and it's attached as a PDF.");
+      showToast("Added {Skin Script}. When the task is run, staff choose the patient's protocol and its table goes in the email.");
       return;
     }
     const add = e.target.closest("[data-addfield]");

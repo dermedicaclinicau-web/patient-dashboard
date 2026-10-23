@@ -152,3 +152,55 @@ export function buildSspDocument({ record, letterhead = null, settings = null })
     .replace(/[\\/:*?"<>|]+/g, "-");
   return { inner, css: cssFor(P), fileName, margin: P.margin, widthPx: pageWidthPx(P.margin) };
 }
+
+/* ===================== In the body of an email ===================== */
+// The same table, written for email programs (Gmail, Outlook, phones): a plain table with every style inline.
+export function buildSspEmailHtml({ record, settings = null }) {
+  const s = { ...SSP_DEFAULTS, ...(settings || {}) };
+  const P = { ...PDF_DEFAULTS, ...(s.pdf || {}) };
+  const stepSet = P.steps || {};
+  const headerBg = col(P.headerBg, PDF_DEFAULTS.headerBg);
+  const items = Array.isArray(record.items) ? record.items : [];
+  const font = "font-family:Arial,Helvetica,sans-serif";
+  const cellCss = `padding:9px 10px;border-bottom:1px solid #ece9e2;vertical-align:top;font-size:13px;line-height:1.45;color:#1e293b;${font}`;
+
+  const cell = (it, which) => {
+    if (!it) return `<td style="${cellCss};background-color:#faf9f6;width:41%">&nbsp;</td>`;
+    const text = which === "am" ? it.amText : it.pmText;
+    const when = P.showWhen !== false ? [(it.days || []).join(", "), it.notes].filter(Boolean).join(" · ") : "";
+    return `<td style="${cellCss};background-color:#ffffff;width:41%">
+      <div style="margin:0 0 3px;font-weight:bold;color:#0f172a">${esc(it.name)}${
+        P.showSize && it.size ? ` <span style="font-weight:normal;color:#64748b">(${esc(it.size)})</span>` : ""}</div>
+      ${text ? `<div>${esc(text).replace(/\n/g, "<br>")}</div>` : ""}
+      ${when ? `<div style="margin-top:4px;font-size:12px;color:#64748b">${esc(when)}</div>` : ""}</td>`;
+  };
+
+  const rows = SSP_STEPS.map((step) => {
+    const inStep = items.filter((i) => i.step === step.key);
+    const am = inStep.filter((i) => i.am);
+    const pm = inStep.filter((i) => i.pm);
+    const n = Math.max(am.length, pm.length);
+    if (!n) return "";
+    const o = stepSet[step.key] || {};
+    const label = o.label || step.label;
+    const sub = o.sub ?? step.sub;
+    const tone = P.stepColours !== false ? col(o.tone, step.tone) : "#ffffff";
+    const ink = P.stepColours !== false ? col(o.ink, step.ink) : "#334155";
+    let h = "";
+    for (let i = 0; i < n; i++) {
+      h += `<tr>${i === 0 ? `<td rowspan="${n}" style="${cellCss};background-color:${tone};width:18%">
+          <div style="font-weight:bold;color:${ink}">${esc(label)}</div>${
+          sub ? `<div style="margin-top:2px;font-size:11px;color:${ink}">${esc(sub)}</div>` : ""}</td>` : ""}
+        ${cell(am[i], "am")}${cell(pm[i], "pm")}</tr>`;
+    }
+    return h;
+  }).join("");
+
+  const th = `padding:8px 10px;background-color:${headerBg};text-align:left;font-size:11px;font-weight:bold;letter-spacing:.06em;text-transform:uppercase;color:#334155;${font}`;
+  return `<p style="margin:0 0 10px"><strong>Skin Script record date:</strong> ${esc(longDate(record.recordDate))}</p>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="width:100%;border-collapse:collapse;border:1px solid #ece9e2;margin:0 0 12px">
+<tr><th style="${th};width:18%">Step</th><th style="${th};width:41%">${P.icons !== false ? "☀ " : ""}${esc(P.morning || "Morning")}</th><th style="${th};width:41%">${P.icons !== false ? "✨ " : ""}${esc(P.evening || "Evening")}</th></tr>
+${rows || `<tr><td colspan="3" style="${cellCss}">No products on this protocol.</td></tr>`}
+</table>
+${record.validUntil ? `<p style="margin:0 0 14px">This Skin Script Protocol is valid until <strong>${esc(longDate(record.validUntil))}</strong>.</p>` : ""}`;
+}
