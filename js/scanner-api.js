@@ -187,6 +187,16 @@ export async function earlierScans(patientName, productIds) {
 }
 
 
+/* ---------- Today's scans (the strip under the camera) ---------- */
+// Every scan saved today on any device, newest first
+export async function todaysScans() {
+  const snap = await getDocs(query(collection(db, "scans"), where("dateKey", "==", dayKey())));
+  const ms = (v) => (v && typeof v.toMillis === "function" ? v.toMillis() : 0);
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+    .filter((s) => s.status !== "deleted")
+    .sort((a, b) => ms(b.at) - ms(a.at));
+}
+
 /* ---------- The patient: matched to that day's booking ---------- */
 // "2:15PM" / "2:15 pm" → 855
 const minutesOf = (t) => {
