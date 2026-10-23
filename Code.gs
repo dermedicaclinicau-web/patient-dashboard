@@ -14155,6 +14155,8 @@ function inventoryFindSentPo_(p) {
 // for 10 minutes; "Refresh" works it out again. Contacts are logged by the portal in report_contacts.
 
 const REP_OPS_ = ['packages', 'ssp', 'newpts'];
+// Timely sometimes puts a no-show or cancellation in the service instead of the status
+const REP_NOT_VISIT_ = /\bno[\s-]?show\b|\bdna\b|did not (attend|show)|\bcancel/i;
 const REP_PKG_DONE_ = /expir|cancel|refund|void|complete|closed|inactive|used up/i;   // package statuses that can't be used
 
 function handleReports_(body) {
@@ -14163,7 +14165,7 @@ function handleReports_(body) {
   if (!can_(session, 'reports.patients')) return { ok: false, error: 'FORBIDDEN' };
   const op = String(body.op || '');
   if (REP_OPS_.indexOf(op) === -1) return { ok: false, error: 'BAD_REQUEST' };
-  const key = 'rep_' + op + '_v1';
+  const key = 'rep_' + op + '_v2';
   if (body.fresh !== true) {
     const hit = repCacheGet_(key);
     if (hit) return Object.assign({ ok: true, cached: true }, hit);
@@ -14198,11 +14200,12 @@ function repVisits_(ctx, pts) {
   const keyOf = Object.create(null);
   pcnReadAppts_(ctx).forEach(function (r) {
     if (!pcnIsDate_(r[0]) || !pcnStatusOk_(r[7], 'full')) return;
+    if (REP_NOT_VISIT_.test(String(r[9] == null ? '' : r[9]))) return;   // "NO SHOW" as the service
     const ptt = String(r[14] == null ? '' : r[14]).trim();
     if (!ptt) return;
     if (!(ptt in keyOf)) keyOf[ptt] = pts.find(ptt) || ('ptt:' + ptt);
     const k = keyOf[ptt];
-    const x = idx[k] || (idx[k] = { name: '', first: '', firstSvc: [], firstStaff: '', last: '', next: '', nextSvc: [],
+    const x = idx[k] || (idx[k] = { name: '', first: '', firstSvc: [], firstCat: [], firstStaff: '', last: '', next: '', nextSvc: [],
       days: Object.create(null), n: 0 });
     if (!x.name) x.name = String(r[1] == null ? '' : r[1]).trim();
     const dk = Utilities.formatDate(r[0], ctx.tz, 'yyyy-MM-dd');
@@ -14214,8 +14217,12 @@ function repVisits_(ctx, pts) {
       return;
     }
     if (!x.days[dk]) { x.days[dk] = true; x.n++; }
-    if (!x.first || dk < x.first) { x.first = dk; x.firstSvc = []; x.firstStaff = String(r[8] == null ? '' : r[8]).trim(); }
-    if (dk === x.first) add(x.firstSvc);
+    if (!x.first || dk < x.first) { x.first = dk; x.firstSvc = []; x.firstCat = []; x.firstStaff = String(r[8] == null ? '' : r[8]).trim(); }
+    if (dk === x.first) {
+      add(x.firstSvc);
+      const cat = String(r[13] == null ? '' : r[13]).trim();   // N: the PCN category
+      if (cat && x.firstCat.indexOf(cat) === -1 && x.firstCat.length < 4) x.firstCat.push(cat);
+    }
     if (dk > x.last) x.last = dk;
   });
   return idx;
@@ -14314,7 +14321,7 @@ function repNewPts_(ctx, pts, idx) {
   return Object.keys(idx).filter(function (k) { const x = idx[k]; return x.n === 1 && !x.next && x.first >= lo; })
     .map(function (k) {
       const x = idx[k];
-      return Object.assign(repWho_(pts, k, x.name), { first: x.first, firstSvc: x.firstSvc, firstStaff: x.firstStaff });
+      return Object.assign(repWho_(pts, k, x.name), { first: x.first, firstSvc: x.firstSvc, firstCat: x.firstCat, firstStaff: x.firstStaff });
     });
 }
 

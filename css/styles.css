@@ -8408,6 +8408,71 @@ body.ff-handing { overflow: hidden; }
 @media (max-width: 640px) { .fr-bar { top: 8px; flex-wrap: wrap; } }
 
 /* Reporting → patient lists */
-.pr-contact { min-width: 180px; }
+.pr-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 4px 0 14px; }
+.pr-card { display: flex; align-items: flex-start; gap: 12px; padding: 16px; border: 1px solid #e2e8f0; border-top: 3px solid var(--tone);
+  border-radius: 14px; background: #fff; }
+.pr-card-i { display: grid; flex-shrink: 0; place-items: center; width: 40px; height: 40px; border-radius: 11px; background: var(--tone-bg); color: var(--tone); }
+.pr-card-i svg { width: 20px; height: 20px; }
+.pr-card strong { display: block; font-size: 26px; line-height: 1.1; color: #0f172a; font-variant-numeric: tabular-nums; }
+.pr-card span { display: block; margin-top: 3px; font-size: 13px; font-weight: 600; color: #334155; }
+.pr-card small { display: block; margin-top: 2px; font-size: 12px; color: #64748b; }
+.pr-card.is-teal { --tone: #0f766e; --tone-bg: #f0fdfa; }
+.pr-card.is-amber { --tone: #b45309; --tone-bg: #fffbeb; }
+.pr-card.is-rose { --tone: #be123c; --tone-bg: #fff1f2; }
+.pr-card.is-violet { --tone: #6d28d9; --tone-bg: #f5f3ff; }
+.pr-card.is-slate { --tone: #475569; --tone-bg: #f1f5f9; }
+
+.pr-breaks { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.pr-break { padding: 14px 16px; border: 1px solid #e2e8f0; border-radius: 14px; background: #fff; }
+.pr-break h4 { margin: 0 0 8px; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: #64748b; }
+.pr-bar { display: grid; grid-template-columns: minmax(100px, 40%) 1fr 36px; align-items: center; gap: 10px; width: 100%;
+  padding: 6px 8px; border: 0; border-radius: 8px; background: none; font: inherit; text-align: left; cursor: pointer; }
+.pr-bar:hover { background: #f8fafc; }
+.pr-bar.is-on { background: #f0fdfa; box-shadow: inset 0 0 0 1px #99f6e4; }
+.pr-bar-l { overflow: hidden; font-size: 13px; color: #1e293b; text-overflow: ellipsis; white-space: nowrap; }
+.pr-bar-t { height: 8px; overflow: hidden; border-radius: 99px; background: #f1f5f9; }
+.pr-bar-t span { display: block; height: 100%; border-radius: 99px; background: #5eead4; transition: width .3s; }
+.pr-bar.is-on .pr-bar-t span, .pr-bar:hover .pr-bar-t span { background: #0f766e; }
+.pr-bar-n { font-size: 13px; font-weight: 700; text-align: right; color: #334155; font-variant-numeric: tabular-nums; }
+.pr-bar-more { margin: 6px 8px 0; font-size: 12px; color: #94a3b8; }
+
+.pr-listhead { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 8px; font-size: 14px; color: #334155; }
+.pr-table td { vertical-align: top; }
+.pr-who { display: flex; align-items: flex-start; gap: 10px; }
+.pr-av { display: grid; flex-shrink: 0; place-items: center; width: 36px; height: 36px; border-radius: 50%;
+  background: hsl(var(--h) 60% 92%); color: hsl(var(--h) 45% 30%); font-size: 12px; font-weight: 700; }
+.pr-name { font-weight: 700; color: #0f766e; text-decoration: none; }
+.pr-name:hover { text-decoration: underline; }
+.pr-meta { display: flex; flex-wrap: wrap; gap: 2px 12px; margin-top: 3px; font-size: 12px; }
+.pr-meta a { display: inline-flex; align-items: center; gap: 4px; color: #64748b; text-decoration: none; }
+.pr-meta a:hover { color: #0f766e; }
+.pr-meta svg { width: 12px; height: 12px; }
+.pr-flags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.pr-pill { display: inline-block; margin-top: 4px; padding: 1px 9px; border-radius: 99px; font-size: 11.5px; font-weight: 600; white-space: nowrap; }
+.pr-pill.is-ok { background: #f0fdfa; color: #0f766e; }
+.pr-pill.is-warn { background: #fffbeb; color: #b45309; }
+.pr-pill.is-bad { background: #fff1f2; color: #be123c; }
+.pr-chip { display: inline-block; margin: 0 4px 3px 0; padding: 2px 10px; border-radius: 99px; background: #ecfdf5; color: #047857;
+  font-size: 12px; font-weight: 600; }
+.pr-chip.is-consult { background: #eef2ff; color: #4338ca; }
+.pr-sub { display: block; margin-top: 2px; font-size: 12px; color: #64748b; }
+.pr-big { display: block; font-size: 18px; font-weight: 700; color: #0f172a; }
+.pr-contact { min-width: 170px; }
 .pr-contact .rp-done { margin-bottom: 6px; }
+.pr-log { display: inline-flex; align-items: center; gap: 6px; }
+.pr-log svg { width: 14px; height: 14px; }
 .pr-outs { display: grid; gap: 6px; }
+
+/* Phones: each patient is a card */
+@media (max-width: 760px) {
+  .pr-cards { grid-template-columns: 1fr 1fr; }
+  .pr-card { flex-direction: column; gap: 8px; padding: 12px; }
+  .pr-card strong { font-size: 22px; }
+  .pr-breaks { grid-template-columns: 1fr; }
+  .pr-table thead { display: none; }
+  .pr-table, .pr-table tbody, .pr-table tr, .pr-table td { display: block; width: 100%; }
+  .pr-table tr { margin-bottom: 10px; padding: 12px; border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; }
+  .pr-table td { padding: 4px 0; border: 0; }
+  .pr-table td[data-label]:not(:first-child)::before { content: attr(data-label); display: block; margin-top: 6px;
+    font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #94a3b8; }
+}

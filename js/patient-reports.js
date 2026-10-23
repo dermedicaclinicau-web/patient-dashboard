@@ -1,16 +1,16 @@
 // Reporting → patient lists: Packages left, Skin Scripts expiring, New patients not back.
 // The lists are worked out by Apps Script (action "reports"); contacts are logged in Firestore report_contacts.
+// Each list has summary cards, two breakdowns you can click to filter by, and the patients.
 import { db, auth } from "./firebase-config.js";
 import { collection, doc, getDocs, query, where, setDoc, serverTimestamp }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
-import { showToast } from "./utils.js";
+import { showToast, getInitials, hueFromString } from "./utils.js";
 import { downloadCsv } from "./reports.js";
 
 export const PATIENT_TABS = [["packages", "Packages left"], ["ssp", "Skin Scripts expiring"], ["newpts", "New patients not back"]];
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const SKEL = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
 const pad = (n) => String(n).padStart(2, "0");
 const keyOf = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const todayKey = () => keyOf(new Date());
@@ -19,7 +19,22 @@ const addDays = (k, n) => { const d = parse(k); d.setDate(d.getDate() + n); retu
 const nice = (k) => { const d = parse(k); return d ? d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : ""; };
 const between = (a, b) => { const x = parse(a), y = parse(b); return x && y ? Math.round((y - x) / 864e5) : null; };
 const money = (n) => `$${Math.round(n).toLocaleString("en-AU")}`;
-const rel = (d) => (d === null ? "" : d === 0 ? "today" : d > 0 ? `in ${d} day${d === 1 ? "" : "s"}` : `${-d} day${d === -1 ? "" : "s"} ago`);
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+const rel = (d) => (d === null ? "" : d === 0 ? "today" : d > 0 ? `in ${plural(d, "day")}` : `${plural(-d, "day")} ago`);
+
+const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+const I = {
+  users: ic('<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>'),
+  cal: ic('<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>'),
+  money: ic('<line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>'),
+  clock: ic('<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>'),
+  alert: ic('<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>'),
+  chat: ic('<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>'),
+  spark: ic('<path d="M12 3l1.9 5.8L20 10l-6.1 1.2L12 17l-1.9-5.8L4 10l6.1-1.2z"/>'),
+  phone: ic('<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>'),
+  mail: ic('<path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/>'),
+  doc: ic('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>'),
+};
 
 const OUTCOMES = [["booked", "Booked"], ["spoke", "Spoke to them"], ["message", "Left a message"],
   ["sent", "Sent a text or email"], ["callback", "Call back later"], ["not_interested", "Not interested"]];
@@ -46,14 +61,41 @@ async function loadContacts(kind) {
   return m;
 }
 
-/* ---------- Shared cells ---------- */
-const patientCell = (r) => `${r.id ? `<a href="#/patient/${encodeURIComponent(r.id)}"><strong>${esc(r.name || "Patient")}</strong></a>`
-  : `<strong>${esc(r.name || "Patient")}</strong> <span class="inv-flag is-warn" title="No Patient ID, or it isn't in the Patient List">Not linked</span>`}${
-  r.dnc ? ' <span class="inv-flag is-bad">Do not contact</span>' : ""}${
-  r.mobile || r.email ? `<br><small class="muted">${esc([r.mobile, r.email].filter(Boolean).join(" · "))}</small>` : ""}`;
-const lastCell = (r, today) => (r.last ? `${esc(nice(r.last))}<br><small class="muted">${esc(rel(between(today, r.last)))}</small>` : "—");
-const nextCell = (r) => (r.next ? `${esc(nice(r.next))}${(r.nextSvc || []).length ? `<br><small class="muted">${esc(r.nextSvc.join(", "))}</small>` : ""}`
+/* ---------- Shared pieces ---------- */
+const patientCell = (r) => {
+  const name = r.name || "Patient";
+  const tel = String(r.mobile || "").replace(/\s/g, "");
+  const flags = `${r.dnc ? '<span class="inv-flag is-bad">Do not contact</span>' : ""}${
+    r.id ? "" : '<span class="inv-flag is-warn" title="No Patient ID, or it isn\'t in the Patient List">Not linked</span>'}`;
+  return `<div class="pr-who"><span class="pr-av" style="--h:${hueFromString(name)}">${esc(getInitials(name))}</span>
+    <div>${r.id ? `<a class="pr-name" href="#/patient/${encodeURIComponent(r.id)}">${esc(name)}</a>` : `<span class="pr-name">${esc(name)}</span>`}
+      <div class="pr-meta">${tel ? `<a href="tel:${esc(tel)}">${I.phone}${esc(r.mobile)}</a>` : ""}${
+        r.email ? `<a href="mailto:${esc(r.email)}">${I.mail}${esc(r.email)}</a>` : ""}</div>
+      ${flags ? `<div class="pr-flags">${flags}</div>` : ""}</div></div>`;
+};
+const pill = (cls, text) => `<span class="pr-pill is-${cls}">${esc(text)}</span>`;
+const lastCell = (r, today) => {
+  if (!r.last) return '<span class="muted">—</span>';
+  const d = -between(today, r.last);
+  return `${esc(nice(r.last))}<br>${pill(d > 180 ? "bad" : d > 90 ? "warn" : "ok", rel(-d))}`;
+};
+const nextCell = (r) => (r.next ? `${esc(nice(r.next))}${(r.nextSvc || []).length ? `<span class="pr-sub">${esc(r.nextSvc.join(", "))}</span>` : ""}`
   : '<span class="muted">Nothing booked</span>');
+const sum = (list, f) => list.reduce((a, x) => a + (Number(f(x.r)) || 0), 0);
+
+// New patients: a consult (or a Medicare item / review) only, or what they had
+const consultOnly = (r) => (r.firstSvc || []).length > 0 && r.firstSvc.every((s) => /consult|medicare|review/i.test(s));
+const firstKind = (r) => (consultOnly(r) ? "Consult only"
+  : (r.firstCat || []).find((c) => !/consult|^other$|^add ons$/i.test(c)) || "Other treatment");
+const expBucket = (r, today) => {
+  const d = between(today, r.expires);
+  return d === null ? "No expiry" : d <= 30 ? "Within 30 days" : d <= 90 ? "31 to 90 days" : "Later";
+};
+const sspBucket = (r, today) => {
+  const d = between(today, r.expires);
+  return d >= 0 ? "Expires in the next 30 days" : d >= -30 ? "Expired in the last 30 days"
+    : d >= -90 ? "Expired 1 to 3 months ago" : "Expired 3 to 12 months ago";
+};
 
 /* ---------- The three lists ---------- */
 const LISTS = {
@@ -72,20 +114,29 @@ const LISTS = {
       return true;
     },
     sort: (a, b) => (a.expires || "9999").localeCompare(b.expires || "9999") || (b.value || 0) - (a.value || 0),
-    stats(list, today) {
-      const value = list.reduce((a, x) => a + (x.r.value || 0), 0);
+    cards(list, today) {
+      const value = sum(list, (r) => r.value);
       const soon = list.filter((x) => { const d = between(today, x.r.expires); return d !== null && d <= 30; }).length;
-      return [[new Set(list.map((x) => x.r.id || x.r.name)).size, "Patients"], [list.reduce((a, x) => a + (x.r.left || 0), 0), "Visits left"],
-        [value ? money(value) : "—", "Value of visits left"], [soon, "Expire in the next 30 days", soon ? "is-warn" : ""]];
+      return [
+        { v: new Set(list.map((x) => x.r.id || x.r.name)).size, l: "Patients", sub: plural(list.length, "package") + " with visits left", tone: "teal", icon: I.users },
+        { v: sum(list, (r) => r.left), l: "Visits left", sub: "on these packages", tone: "violet", icon: I.cal },
+        { v: value ? money(value) : "—", l: "Already paid for", sub: "the value of those visits", tone: "amber", icon: I.money },
+        { v: soon, l: "Expire within 30 days", sub: soon ? "contact these first" : "none expiring soon", tone: soon ? "rose" : "slate", icon: I.alert },
+      ];
     },
+    groups: [
+      { k: "exp", title: "Expires", order: ["Within 30 days", "31 to 90 days", "Later", "No expiry"], of: expBucket },
+      { k: "pkg", title: "Package", of: (r) => r.pkg },
+    ],
     head: ["Package", "Visits left", "Expires", "Last visit", "Next booking", "Value"],
     cells: (r, today) => {
       const d = between(today, r.expires);
       return [
-        `${esc(r.pkg)}${r.status ? `<br><small class="muted">${esc(r.status)}</small>` : ""}`,
-        `<strong>${esc(r.left)}</strong>${(r.lines || []).length ? `<br><small class="muted">${esc(r.lines.map((l) => `${l.svc || "Service"} ×${l.left}`).join(", "))}</small>` : ""}`,
-        r.expires ? `${esc(nice(r.expires))}<br><small class="${d !== null && d <= 30 ? "rp-neg" : "muted"}">${esc(rel(d))}</small>` : '<span class="muted">No expiry</span>',
-        lastCell(r, today), nextCell(r), r.value ? esc(money(r.value)) : "—",
+        `<strong>${esc(r.pkg)}</strong>${r.status ? `<span class="pr-sub">${esc(r.status)}</span>` : ""}`,
+        `<span class="pr-big">${esc(r.left)}</span>${(r.lines || []).length
+          ? `<span class="pr-sub">${esc(r.lines.map((l) => `${l.svc || "Service"} ×${l.left}`).join(", "))}</span>` : ""}`,
+        r.expires ? `${esc(nice(r.expires))}<br>${pill(d <= 30 ? "bad" : d <= 90 ? "warn" : "ok", rel(d))}` : '<span class="muted">No expiry</span>',
+        lastCell(r, today), nextCell(r), r.value ? `<strong>${esc(money(r.value))}</strong>` : "—",
       ];
     },
     csvHead: ["Package", "Status", "Visits left", "Services left", "Expires", "Value ($)"],
@@ -109,16 +160,27 @@ const LISTS = {
       return d >= -90 && d <= 30;
     },
     sort: (a, b, today) => Math.abs(between(today, a.expires)) - Math.abs(between(today, b.expires)),
-    stats(list, today) {
+    cards(list, today) {
       const soon = list.filter((x) => between(today, x.r.expires) >= 0).length;
-      return [[list.length, "Patients"], [soon, "Still valid, expiring soon"], [list.length - soon, "Already expired", list.length - soon ? "is-warn" : ""]];
+      const stale = list.filter((x) => !x.r.last || between(x.r.last, today) > 180).length;
+      return [
+        { v: list.length, l: "Patients", sub: "due a Skin Script review", tone: "teal", icon: I.users },
+        { v: soon, l: "Expiring soon", sub: "still valid for now", tone: "amber", icon: I.clock },
+        { v: list.length - soon, l: "Expired", sub: "no current Skin Script", tone: list.length - soon ? "rose" : "slate", icon: I.alert },
+        { v: stale, l: "Not seen in 6+ months", sub: "may need a full skin review", tone: "violet", icon: I.cal },
+      ];
     },
+    groups: [
+      { k: "when", title: "When", of: sspBucket, order: ["Expires in the next 30 days", "Expired in the last 30 days",
+        "Expired 1 to 3 months ago", "Expired 3 to 12 months ago"] },
+      { k: "by", title: "Skin Script made by", of: (r) => r.by || "Not recorded" },
+    ],
     head: ["Skin Script", "Expires", "Last visit", "Next booking"],
     cells: (r, today) => {
       const d = between(today, r.expires);
       return [
-        `${esc(nice(r.date))}${r.by ? `<br><small class="muted">by ${esc(r.by)}</small>` : ""}`,
-        `${esc(nice(r.expires))}<br><small class="${d < 0 ? "rp-neg" : "muted"}">${d < 0 ? "Expired " : "Expires "}${esc(rel(d))}</small>`,
+        `<strong>${esc(nice(r.date))}</strong>${r.by ? `<span class="pr-sub">by ${esc(r.by)}</span>` : ""}`,
+        `${esc(nice(r.expires))}<br>${pill(d < -30 ? "bad" : d < 0 ? "warn" : "ok", d < 0 ? `Expired ${rel(d)}` : `Expires ${rel(d)}`)}`,
         lastCell(r, today), nextCell(r),
       ];
     },
@@ -138,30 +200,46 @@ const LISTS = {
       return d !== null && d >= lo && d <= hi;
     },
     sort: (a, b) => String(b.first).localeCompare(String(a.first)),
-    stats(list) {
-      const by = {};
-      list.forEach((x) => { const s = x.r.firstStaff || "Unknown"; by[s] = (by[s] || 0) + 1; });
-      const top = Object.entries(by).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([n, c]) => `${n} (${c})`).join(", ");
-      return [[list.length, "Patients"], [top || "—", "Seen most by"]];
+    cards(list, today) {
+      const n = list.length;
+      const c = list.filter((x) => consultOnly(x.r)).length;
+      const avg = n ? Math.round(sum(list, (r) => between(r.first, today)) / n) : 0;
+      return [
+        { v: n, l: "Didn't come back", sub: "one visit, nothing booked", tone: "teal", icon: I.users },
+        { v: c, l: "Consult only", sub: n ? `${Math.round((c / n) * 100)}% didn't start treatment` : "", tone: "violet", icon: I.chat },
+        { v: n - c, l: "Had a treatment", sub: "but haven't returned", tone: "amber", icon: I.spark },
+        { v: n ? `${avg} days` : "—", l: "Since their visit", sub: "on average", tone: "slate", icon: I.clock },
+      ];
     },
-    head: ["Their visit", "Treatment", "With"],
-    cells: (r, today) => [
-      `${esc(nice(r.first))}<br><small class="muted">${esc(rel(between(today, r.first)))}</small>`,
-      esc((r.firstSvc || []).join(", ") || "—"), esc(r.firstStaff || "—"),
+    groups: [
+      { k: "kind", title: "Their visit was for", of: firstKind },
+      { k: "staff", title: "Seen by", of: (r) => r.firstStaff },
     ],
-    csvHead: ["Visit date", "Treatment", "With"],
-    csvRow: (r) => [r.first, (r.firstSvc || []).join("; "), r.firstStaff],
+    head: ["Their visit", "Treatment", "With"],
+    cells: (r, today) => {
+      const d = between(r.first, today);
+      const kind = firstKind(r);
+      return [
+        `${esc(nice(r.first))}<br>${pill(d > 150 ? "bad" : d > 90 ? "warn" : "ok", rel(-d))}`,
+        `<span class="pr-chip${kind === "Consult only" ? " is-consult" : ""}">${esc(kind)}</span>${
+          (r.firstSvc || []).length ? `<span class="pr-sub">${esc(r.firstSvc.join(", "))}</span>` : ""}`,
+        esc(r.firstStaff || "—"),
+      ];
+    },
+    csvHead: ["Visit date", "Visit was for", "Treatment", "With"],
+    csvRow: (r) => [r.first, firstKind(r), (r.firstSvc || []).join("; "), r.firstStaff],
   },
 };
 
 /* ---------- The page ---------- */
 export function mountPatientReport(body, kind, staff) {
   const L = LISTS[kind];
-  const st = { rows: [], contacts: new Map(), f: {}, q: "", done: false, at: "", today: todayKey(), list: [] };
+  const st = { rows: [], contacts: new Map(), f: {}, q: "", done: false, pick: null, at: "", today: todayKey(), list: [] };
   L.filters.forEach((x) => { st.f[x.k] = x.def; });
-  body.innerHTML = `<p class="muted rp-range">${esc(L.intro)}</p><div data-role="tools"></div><div data-role="out">${SKEL}</div>`;
+  body.innerHTML = `<p class="muted rp-range">${esc(L.intro)}</p><div data-role="tools"></div><div data-role="out"></div>`;
   const toolsEl = body.querySelector('[data-role="tools"]');
   const out = body.querySelector('[data-role="out"]');
+  const gval = (g, r) => g.of(r, st.today) || "Not recorded";
 
   function drawTools() {
     toolsEl.innerHTML = `<div class="inv-tools rp-tools">
@@ -177,19 +255,42 @@ export function mountPatientReport(body, kind, staff) {
     </div>`;
   }
 
+  // The filters, search and "already contacted" → base; a clicked bar narrows base → list
   function compute() {
     const q = st.q.trim().toLowerCase();
     let hidden = 0;
-    const list = [];
+    const base = [];
     st.rows.forEach((r) => {
       if (!L.match(r, st.f, st.today)) return;
       if (q && ![r.name, r.mobile, r.email, r.pkg].join(" ").toLowerCase().includes(q)) return;
       const c = st.contacts.get(rowKey(r));
       if (!st.done && contacted(c, st.today)) { hidden++; return; }
-      list.push({ r, c });
+      base.push({ r, c });
     });
-    list.sort((a, b) => L.sort(a.r, b.r, st.today));
-    return { list, hidden };
+    base.sort((a, b) => L.sort(a.r, b.r, st.today));
+    const g = st.pick && L.groups.find((x) => x.k === st.pick.g);
+    const list = g ? base.filter((x) => gval(g, x.r) === st.pick.v) : base;
+    return { base, list, hidden };
+  }
+
+  const cardHtml = (c) => `<div class="pr-card is-${c.tone || "teal"}"><span class="pr-card-i">${c.icon || ""}</span>
+    <div><strong>${esc(String(c.v))}</strong><span>${esc(c.l)}</span>${c.sub ? `<small>${esc(c.sub)}</small>` : ""}</div></div>`;
+
+  function breakHtml(g, base) {
+    const counts = new Map();
+    base.forEach((x) => { const v = gval(g, x.r); counts.set(v, (counts.get(v) || 0) + 1); });
+    const rows = g.order ? g.order.filter((v) => counts.has(v)).map((v) => [v, counts.get(v)])
+      : [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    const top = rows.slice(0, 7);
+    const rest = rows.slice(7).reduce((a, [, n]) => a + n, 0);
+    const max = Math.max(1, ...top.map(([, n]) => n));
+    return `<section class="pr-break"><h4>${esc(g.title)}</h4>${top.map(([v, n]) => {
+      const on = st.pick && st.pick.g === g.k && st.pick.v === v;
+      return `<button type="button" class="pr-bar${on ? " is-on" : ""}" data-pick="${esc(g.k)}" data-v="${esc(v)}"
+          title="${on ? "Show everyone" : `Show only ${esc(v)}`}">
+        <span class="pr-bar-l">${esc(v)}</span><span class="pr-bar-t"><span style="width:${Math.max(4, Math.round((n / max) * 100))}%"></span></span>
+        <span class="pr-bar-n">${n}</span></button>`;
+    }).join("")}${rest ? `<p class="pr-bar-more">+ ${rest} more in smaller groups</p>` : ""}</section>`;
   }
 
   const contactCell = (c, i) => `${c ? `<div class="rp-done"><span class="inv-flag ${c.outcome === "booked" ? "is-ok"
@@ -197,23 +298,32 @@ export function mountPatientReport(body, kind, staff) {
       <small>${esc([c.at ? c.at.toLocaleDateString("en-AU", { day: "numeric", month: "short" }) : "", c.by,
         c.outcome === "callback" && c.until ? `call back ${nice(c.until)}` : ""].filter(Boolean).join(" · "))}</small>
       ${c.note ? `<small>“${esc(c.note)}”</small>` : ""}</div>` : ""}
-    <button type="button" class="lh-btn" data-log="${i}">${c ? "Update" : "Log contact"}</button>`;
+    <button type="button" class="lh-btn pr-log" data-log="${i}">${I.chat}<span>${c ? "Update" : "Log contact"}</span></button>`;
 
   function draw() {
-    const { list, hidden } = compute();
+    const { base, list, hidden } = compute();
     st.list = list;
+    const g = st.pick && L.groups.find((x) => x.k === st.pick.g);
     const shown = list.slice(0, 500);
+    const heads = ["Patient", ...L.head, "Contact"];
     out.innerHTML = `
-      <p class="muted rp-range">${list.length} on the list${hidden ? ` · ${hidden} already contacted (hidden)` : ""}${
-        st.at ? ` · worked out at ${esc(new Date(st.at).toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }))}` : ""}</p>
-      ${list.length ? `<div class="inv-stats">${L.stats(list, st.today).map(([v, l, cls]) =>
-          `<div class="inv-stat ${cls || ""}"><strong>${esc(String(v))}</strong><span>${esc(l)}</span></div>`).join("")}</div>
-        <section class="tb-card"><div class="rp-scroll"><table class="inv-table rp-table">
-          <thead><tr><th>Patient</th>${L.head.map((h) => `<th>${esc(h)}</th>`).join("")}<th>Contact</th></tr></thead>
-          <tbody>${shown.map((x, i) => `<tr><td>${patientCell(x.r)}</td>${L.cells(x.r, st.today).map((c) => `<td>${c}</td>`).join("")}
-            <td class="pr-contact">${contactCell(x.c, i)}</td></tr>`).join("")}</tbody>
+      <div class="pr-cards">${L.cards(list, st.today).map(cardHtml).join("")}</div>
+      ${base.length ? `<div class="pr-breaks">${L.groups.map((x) => breakHtml(x, base)).join("")}</div>` : ""}
+      <div class="pr-listhead"><strong>${plural(list.length, "patient")}</strong>
+        ${g ? `<span class="pr-chip is-consult">${esc(g.title)}: ${esc(st.pick.v)}</span>
+          <button type="button" class="rc-link" data-act="unpick">Show everyone</button>` : ""}
+        ${hidden ? `<span class="muted">· ${hidden} already contacted (hidden)</span>` : ""}
+        <span class="inv-spacer"></span>
+        ${st.at ? `<small class="muted">Worked out at ${esc(new Date(st.at).toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }))}</small>` : ""}
+      </div>
+      ${list.length ? `<section class="tb-card"><div class="rp-scroll"><table class="inv-table rp-table pr-table">
+          <thead><tr>${heads.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead>
+          <tbody>${shown.map((x, i) => {
+            const cells = [patientCell(x.r), ...L.cells(x.r, st.today), contactCell(x.c, i)];
+            return `<tr>${cells.map((c, j) => `<td data-label="${esc(heads[j])}"${j === cells.length - 1 ? ' class="pr-contact"' : ""}>${c}</td>`).join("")}</tr>`;
+          }).join("")}</tbody>
         </table></div>${list.length > 500 ? `<p class="muted rp-note">Showing the first 500. Export CSV for all ${list.length}.</p>` : ""}</section>`
-        : `<div class="tm-empty">${hidden ? "Everyone on this list has been contacted. 👍" : "Nobody matches. 👍"}</div>`}`;
+        : `<div class="tm-empty">${hidden ? "Everyone here has been contacted. 👍" : "Nobody matches. 👍"}</div>`}`;
   }
 
   async function load(fresh = false) {
@@ -323,7 +433,7 @@ export function mountPatientReport(body, kind, staff) {
     const k = e.target.dataset.f;
     if (!k || k === "q") return;
     if (k === "done") st.done = e.target.checked;
-    else st.f[k] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+    else { st.f[k] = e.target.type === "checkbox" ? e.target.checked : e.target.value; st.pick = null; }
     draw();
   });
   let qTimer = null;
@@ -334,6 +444,14 @@ export function mountPatientReport(body, kind, staff) {
     qTimer = setTimeout(draw, 200);
   });
   body.addEventListener("click", (e) => {
+    const pk = e.target.closest("[data-pick]");
+    if (pk) {
+      const same = st.pick && st.pick.g === pk.dataset.pick && st.pick.v === pk.dataset.v;
+      st.pick = same ? null : { g: pk.dataset.pick, v: pk.dataset.v };
+      draw();
+      return;
+    }
+    if (e.target.closest('[data-act="unpick"]')) { st.pick = null; draw(); return; }
     const lg = e.target.closest("[data-log]");
     if (lg) { const x = st.list[Number(lg.dataset.log)]; if (x) logContact(x.r); return; }
     if (e.target.closest('[data-act="refresh"]')) { load(true); return; }
