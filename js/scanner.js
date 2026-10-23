@@ -66,13 +66,22 @@ export function mountScanner(container, { staff = null } = {}) {
         aria-selected="${st.kind === k}" data-kind="${k}">${label}</button>`).join("")}
     </div></div>`);
 
+  // The viewfinder before the camera picture arrives: starting, or why it can't
+  const tipText = () => (st.kind === "docket" ? "Fit the whole delivery docket inside the frame"
+    : st.kind === "rx" ? "Fit the whole prescription inside the frame" : "Fit the billing sheet and the products inside the frame");
+  const waitHtml = () => (st.camErr
+    ? `${I.camera}<strong>The camera couldn't start</strong><p>${esc(st.camErr)}</p>
+       <button type="button" class="lh-btn" data-act="cam-retry">Try again</button>`
+    : `<span class="scan-wait-spin" aria-hidden="true"></span><strong>Starting the camera…</strong>
+       <p>If your device asks to use the camera, tap Allow.</p>`);
+
   const cameraHtml = () => `${headHtml()}
     <div class="scan-vf" data-role="vf">
       <video playsinline muted autoplay></video>
       <div class="scan-frame" aria-hidden="true"></div>
       <span class="scan-focus" data-role="focus" aria-hidden="true"></span>
-      <p class="scan-tip${st.camErr ? " is-bad" : ""}" data-role="tip">${esc(st.camErr || (st.kind === "docket" ? "Fit the whole delivery docket inside the frame"
-        : st.kind === "rx" ? "Fit the whole prescription inside the frame" : "Fit the billing sheet and the products inside the frame"))}</p>
+      <div class="scan-wait" data-role="wait" aria-live="polite">${waitHtml()}</div>
+      <p class="scan-tip" data-role="tip">${esc(tipText())}</p>
       <div class="scan-zoom" role="group" aria-label="Zoom">${[1, 1.5, 2].map((z) =>
         `<button type="button" data-zoom="${z}" class="${z === st.zoom ? "is-on" : ""}">${z}×</button>`).join("")}</div>
       <button type="button" class="scan-torch" data-act="torch" aria-label="Torch" hidden>${I.bolt}</button>
@@ -201,6 +210,8 @@ export function mountScanner(container, { staff = null } = {}) {
 
   /* ---------- Camera ---------- */
   function stopCamera() {
+    const vf = root.querySelector('[data-role="vf"]');
+    if (vf) vf.classList.remove("is-live");
     if (st.stream) st.stream.getTracks().forEach((t) => t.stop());
     st.stream = null;
     st.track = null;
@@ -224,6 +235,7 @@ export function mountScanner(container, { staff = null } = {}) {
     if (st.stream) {
       const v = root.querySelector(".scan-vf video");
       if (v && v.srcObject !== st.stream) { v.srcObject = st.stream; v.play().catch(() => {}); }
+      markLive(v);
       const tb = root.querySelector('[data-act="torch"]');
       if (tb) tb.hidden = !st.canTorch;
       applyZoom();
@@ -287,7 +299,7 @@ export function mountScanner(container, { staff = null } = {}) {
       st.canTorch = !!caps.torch;
       st.canFocus = Array.isArray(caps.focusMode) && caps.focusMode.includes("single-shot");
       const v = root.querySelector(".scan-vf video");
-      if (v) { v.srcObject = stream; await v.play().catch(() => {}); }
+      if (v) { v.srcObject = stream; markLive(v); await v.play().catch(() => {}); }
       const tb = root.querySelector('[data-act="torch"]');
       if (tb) tb.hidden = !st.canTorch;
       st.camErr = "";
@@ -309,8 +321,19 @@ export function mountScanner(container, { staff = null } = {}) {
 
   function setTip(text, bad = false) {
     st.camErr = bad ? text : "";
+    const wait = root.querySelector('[data-role="wait"]');
+    if (wait) wait.innerHTML = waitHtml();
     const tip = root.querySelector('[data-role="tip"]');
-    if (tip) { tip.textContent = text; tip.classList.toggle("is-bad", bad); }
+    if (tip && !bad) tip.textContent = text;
+  }
+
+  // The picture has arrived: fade it in and show the frame and zoom buttons
+  function markLive(v) {
+    const vf = root.querySelector('[data-role="vf"]');
+    if (!v || !vf) return;
+    const on = () => { if (v.isConnected) vf.classList.add("is-live"); };
+    if (v.readyState >= 2 && !v.paused) on();
+    else v.addEventListener("playing", on, { once: true });
   }
 
   function applyZoom() {
@@ -509,6 +532,7 @@ export function mountScanner(container, { staff = null } = {}) {
     const b = e.target.closest("[data-act]");
     if (!b) return;
     const act = b.dataset.act;
+    if (act === "cam-retry") { st.camErr = ""; stopCamera(); render(); return; }
     if (act === "shoot") shoot();
     else if (act === "torch" && st.track) {
       st.torch = !st.torch;

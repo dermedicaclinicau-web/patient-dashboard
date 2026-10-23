@@ -8182,3 +8182,21 @@ body.ff-handing { overflow: hidden; }
 
 /* Scanner: the camera message can be tapped to try again */
 .scan-tip.is-bad { cursor: pointer; }
+
+/* Scanner: the viewfinder while the camera starts (instead of a black box) */
+.scan-vf { background: linear-gradient(160deg, #0f766e 0%, #134e4a 100%); }
+.scan-vf video { opacity: 0; transition: opacity .25s ease; }
+.scan-vf.is-live video { opacity: 1; }
+.scan-vf:not(.is-live) .scan-frame,
+.scan-vf:not(.is-live) .scan-zoom,
+.scan-vf:not(.is-live) .scan-tip,
+.scan-vf:not(.is-live) .scan-torch { display: none; }
+.scan-wait { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: .7rem; padding: 1.5rem; text-align: center; color: #fff; }
+.scan-vf.is-live .scan-wait { display: none; }
+.scan-wait svg { width: 44px; height: 44px; opacity: .9; }
+.scan-wait strong { font-size: 1.05rem; }
+.scan-wait p { max-width: 320px; margin: 0; font-size: .9rem; line-height: 1.45; opacity: .92; }
+.scan-wait .lh-btn { border-color: #fff; background: #fff; color: #0f766e; }
+.scan-wait-spin { width: 36px; height: 36px; border: 4px solid rgba(255, 255, 255, .35); border-top-color: #fff;
+  border-radius: 50%; animation: scan-spin .8s linear infinite; }
