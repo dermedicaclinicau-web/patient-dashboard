@@ -4162,7 +4162,7 @@ export async function recordPaperUse(product, {
 /* ===================== Purchase order emails: a copy of each one sent ===================== */
 // Saved by the portal once Apps Script confirms the email went out. Never edited afterwards.
 
-export async function savePoEmail(poId, { to, cc = "", from = "", subject, html, kind = "sent", sentAt = "", gmailId = "", link = "" }, staff) {
+export async function savePoEmail(poId, { to, cc = "", from = "", subject, html, kind = "sent", sentAt = "", gmailId = "", link = "", sentBy = "" }, staff) {
   const body = String(html || "");
   const tooBig = body.length > 900000;   // Firestore's 1 MB limit: keep the details, drop the body
   const data = {
@@ -4170,7 +4170,8 @@ export async function savePoEmail(poId, { to, cc = "", from = "", subject, html,
     subject: clip(subject, 200), html: tooBig ? "" : body, tooBig,
     kind: ["sent", "again", "amended"].includes(kind) ? kind : "sent",
     gmailId: clip(gmailId, 60), link: /^https:\/\/mail\.google\.com\//.test(link || "") ? String(link).slice(0, 500) : "",
-    by: who(staff), byUid: uid(),
+    by: clip(sentBy, 120) || who(staff), byUid: uid(),
+    foundBy: gmailId ? who(staff) : "",   // Gmail copies: who brought the copy in (not who sent it)
     sentAt: sentAt && !isNaN(Date.parse(sentAt)) ? new Date(sentAt).toISOString() : new Date().toISOString(),
     at: serverTimestamp(),
   };

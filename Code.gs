@@ -4283,6 +4283,16 @@ function handleInventory_(body) {
       const def = poSenderDefault_();
       return { ok: true, primary: s.primary, aliases: s.aliases, defaultFrom: def && okSender_(def, s) ? def : s.primary };
     }
+    if (op === 'findSentPo') {
+      if (!ordering && !can_(session, 'menu.inventory')) return { ok: false, error: 'FORBIDDEN' };
+      if (!okId(body.poId)) return { ok: false, error: 'BAD_REQUEST' };
+      // The PO number and supplier come from the PO itself, not from the browser
+      const po = fsGetDoc_(getConfig_(), 'inv_pos/' + String(body.poId));
+      if (!po) return { ok: false, error: 'NOT_FOUND' };
+      const sentTo = (String(po.sentTo || '').match(/[^\s@,;<>()]+@[^\s@,;<>()]+\.[^\s@,;<>()]+/) || [''])[0];
+      const to = sentTo || String((po.supplier && po.supplier.email) || '');
+      return Object.assign({ ok: true }, inventoryFindSentPo_({ poNumber: String(po.number || ''), to: to }));
+    }
   } catch (err) {
     console.error('Inventory ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
     return { ok: false, error: 'SERVER_ERROR' };

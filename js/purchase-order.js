@@ -86,6 +86,20 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     to: po.sentTo || (po.supplier && po.supplier.email) || "",
   }).then((r) => (r && Array.isArray(r.messages) ? r.messages : []));
   const gmailTime = (x) => Date.parse(x.date) || 0;
+
+  // Who sent it. Portal copies record that themselves. Gmail copies don't know,
+  // so it comes from the History entry closest to when it was sent.
+  function senderOf(m) {
+    if (!m.gmailId) return m.by || "";
+    let best = null, gap = 10 * 60000;
+    po.events.forEach((e) => {
+      if (!isEmailEvent(e)) return;
+      const g = Math.abs((Date.parse(e.at) || 0) - m.time);
+      if (g <= gap) { gap = g; best = e; }
+    });
+    return best ? best.by || "" : m.sentBy || "";
+  }
+
   // The message sent closest to a moment (within 10 minutes), or null
   const nearestTo = (list, t, timeOf, max = 10 * 60000) => {
     let best = null, gap = max;
@@ -100,6 +114,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     await Promise.allSettled(fresh.map((x) => savePoEmail(id, {
       to: x.to, cc: x.cc, from: x.from, subject: x.subject, html: x.html, sentAt: x.date,
       kind: /^amended/i.test(x.subject || "") ? "amended" : "sent", gmailId: x.id, link: x.link,
+      sentBy: senderOf({ gmailId: x.id, time: gmailTime(x) }),
     }, staff)));
     await loadEmails();
   }
@@ -353,7 +368,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     });
     (emails || []).filter((m) => !used.has(m.id)).forEach((m) => list.push({
       action: m.kind === "amended" ? "Amended order emailed" : m.kind === "again" ? "Emailed again" : "Sent to supplier",
-      note: `To ${m.to}`, by: m.by, time: m.time, at: new Date(m.time).toISOString(), mail: m, emailish: true,
+      note: `To ${m.to}`, by: senderOf(m), time: m.time, at: new Date(m.time).toISOString(), mail: m, emailish: true,
     }));
     return list.sort((a, b) => b.time - a.time);
   }
@@ -397,7 +412,8 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
         ${row("From", m.from || "The clinic's main address")}
         ${row("To", m.to)}
         ${row("CC", m.cc)}
-        ${row("Sent by", m.by)}
+        ${row("Sent by", senderOf(m) || "Not recorded")}
+        ${m.gmailId ? row("Copy found by", m.foundBy || m.by) : ""}
         ${gmailRow}
       </div>
       ${m.html ? '<iframe class="th-frame" sandbox="" title="The email that was sent"></iframe>'
