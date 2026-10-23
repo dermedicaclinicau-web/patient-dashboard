@@ -195,10 +195,14 @@ const LISTS = {
   newpts: {
     intro: "Patients who came in once and haven't been back, with nothing booked.",
     filters: [
-      { k: "since", type: "select", label: "Their visit was", def: "30-180", options: [["30-90", "1 to 3 months ago"],
-        ["30-180", "1 to 6 months ago"], ["90-180", "3 to 6 months ago"], ["180-365", "6 to 12 months ago"], ["0-365", "In the last 12 months"]] },
+      { k: "since", type: "select", label: "Their visit was", def: "30-180", tools: true, options: [["30-90", "1 to 3 months ago"],
+        ["30-180", "1 to 6 months ago"], ["90-180", "3 to 6 months ago"], ["180-365", "6 to 12 months ago"],
+        ["0-365", "In the last 12 months"], ["custom", "Choose dates"]] },
+      { k: "from", type: "date", label: "From", def: "", showIf: (f) => f.since === "custom" },
+      { k: "to", type: "date", label: "To", def: "", showIf: (f) => f.since === "custom" },
     ],
     match(r, f, today) {
+      if (f.since === "custom") return String(r.first) >= (f.from || "0000") && String(r.first) <= (f.to || "9999");
       const [lo, hi] = String(f.since).split("-").map(Number);
       const d = between(r.first, today);
       return d !== null && d >= lo && d <= hi;
@@ -247,7 +251,10 @@ export function mountPatientReport(body, kind, staff) {
 
   function drawTools() {
     toolsEl.innerHTML = `<div class="inv-tools rp-tools">
-      ${L.filters.map((x) => (x.type === "check"
+      ${L.filters.filter((x) => !x.showIf || x.showIf(st.f)).map((x) => (x.type === "date"
+        ? `<label class="rp-from">${esc(x.label)} <input class="fe-in" type="date" data-f="${x.k}" min="${addDays(todayKey(), -365)}"
+            max="${todayKey()}" value="${esc(st.f[x.k] || "")}" /></label>`
+        : x.type === "check"
         ? `<label class="fe-check"><input type="checkbox" data-f="${x.k}"${st.f[x.k] ? " checked" : ""} /> ${esc(x.label)}</label>`
         : `<label class="rp-from">${esc(x.label)} <select class="fb-select" data-f="${x.k}">${x.options.map(([v, l]) =>
           `<option value="${v}"${st.f[x.k] === v ? " selected" : ""}>${esc(l)}</option>`).join("")}</select></label>`)).join("")}
@@ -452,6 +459,7 @@ export function mountPatientReport(body, kind, staff) {
     if (!k || k === "q") return;
     if (k === "done") st.done = e.target.checked;
     else { st.f[k] = e.target.type === "checkbox" ? e.target.checked : e.target.value; st.pick = null; }
+    if ((L.filters.find((x) => x.k === k) || {}).tools) drawTools();
     draw();
   });
   let qTimer = null;

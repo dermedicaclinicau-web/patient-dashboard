@@ -14166,7 +14166,7 @@ function handleReports_(body) {
   if (REP_OPS_.indexOf(op) === -1 && op !== 'retention') return { ok: false, error: 'BAD_REQUEST' };
   // Retention is numbers only (no patient details), so Reporting access is enough
   if (!can_(session, op === 'retention' ? 'menu.reports' : 'reports.patients')) return { ok: false, error: 'FORBIDDEN' };
-  const key = 'rep_' + op + '_v3';
+  const key = 'rep_' + op + '_v4';
   if (body.fresh !== true) {
     const hit = repCacheGet_(key);
     if (hit) return Object.assign({ ok: true, cached: true }, hit);
@@ -14385,12 +14385,21 @@ function repSent_(cfg, pts) {
   return out;
 }
 
-// Reporting → Retention: numbers only. Every patient's visit days from the appointment book (cancellations,
-// no-shows and "NO SHOW" services left out), then: the last 24 months, new-patient cohorts, clinicians and first visits.
-// "Came back within N days" is only counted once N days have passed, so recent visits never look worse than they are.
+// Reporting → Retention: every patient's visits from the last 3 years, compact, so the portal can work out any
+// date range, clinician, treatment or patient type instantly. Numbers only, no names.
+// Each patient: [first visit ever, booked (1/0), then per visit: day, clinician (index, list or -1), treatments (bits), kind]
+// Days are counted from 2000-01-01. Cancellations, no-shows and "NO SHOW" services don't count as visits.
 function repRetention_(ctx, pts) {
-  const T = ctx.todayKey;
-  const per = Object.create(null);   // patient → { d: { day: { s: staff[], c: categories[], v: services[] } }, future }
+  const DAY0 = Date.UTC(2000, 0, 1);
+  const dn = function (dk) { const p = dk.split('-').map(Number); return Math.round((Date.UTC(p[0], p[1] - 1, p[2]) - DAY0) / 864e5); };
+  const today = dn(ctx.todayKey);
+  const keep = today - 1096;   // about 3 years
+  const dict = function () {
+    const ix = Object.create(null), list = [];
+    return { list: list, of: function (s) { if (!(s in ix)) { ix[s] = list.length; list.push(s); } return ix[s]; } };
+  };
+  const S = dict(), C = dict(), K = dict();
+  const per = Object.create(null);
   const keyOf = Object.create(null);
   pcnReadAppts_(ctx).forEach(function (r) {
     if (!pcnIsDate_(r[0]) || !pcnStatusOk_(r[7], 'full')) return;
@@ -14409,93 +14418,35 @@ function repRetention_(ctx, pts) {
     if (cat && v.c.indexOf(cat) === -1) v.c.push(cat);
     if (svc && v.v.length < 6 && v.v.indexOf(svc) === -1) v.v.push(svc);
   });
-
-  const cut90 = flowAddDaysKey_(T, -90);
-  const cut180 = flowAddDaysKey_(T, -180);
-  const cut365 = flowAddDaysKey_(T, -365);
-  const from15 = flowAddDaysKey_(T, -455);   // visits from 15 to 3 months ago: time to have come back
-  const from18 = flowAddDaysKey_(T, -548);
-  const monthKeys = [];
-  for (let i = 23; i >= 0; i--) monthKeys.push(flowAddMonthsKey_(T.slice(0, 7) + '-01', -i).slice(0, 7));
-  const M = {};
-  monthKeys.forEach(function (m) { M[m] = { m: m, seen: 0, fresh: 0, meas: 0, ret: 0 }; });
-  const C = {}, S = {}, K = {};
-  const k = { active: 0, newYear: 0, visitsYear: 0, lapsed: 0, kMeas: 0, kRet: 0, nMeas: 0, nRet: 0 };
   const kindOf = function (v) {
     if (v.v.length && v.v.every(function (s) { return /consult|medicare|review/i.test(s); })) return 'Consult only';
     return v.c.filter(function (c) { return !/consult|^other$|^add ons$/i.test(c); })[0] || 'Other treatment';
   };
 
+  let lapsed = 0;
+  const out = [];
   Object.keys(per).forEach(function (key) {
     const p = per[key];
     const days = Object.keys(p.d).sort();
     if (!days.length) return;
-    const first = days[0];
-    const last = days[days.length - 1];
-    const back = function (i, n) { return i + 1 < days.length && flowDays_(days[i], days[i + 1]) <= n; };
-
-    const year = days.filter(function (d) { return d > cut365; }).length;
-    if (year) { k.active++; k.visitsYear += year; }
-    if (first > cut365) k.newYear++;
-    if (days.length >= 3 && last <= cut180 && last > cut365 && !p.future) k.lapsed++;
-
-    // Each month they were seen: their last visit that month, and did they come back within 90 days
-    const lastIn = {};
-    days.forEach(function (d, i) { lastIn[d.slice(0, 7)] = i; });
-    Object.keys(lastIn).forEach(function (m) {
-      const x = M[m];
-      if (!x) return;
-      const i = lastIn[m];
-      x.seen++;
-      if (first.slice(0, 7) === m) x.fresh++;
-      if (days[i] <= cut90) { x.meas++; if (back(i, 90)) x.ret++; }
+    const first = dn(days[0]);
+    const last = dn(days[days.length - 1]);
+    if (days.length >= 3 && last <= today - 180 && last > today - 365 && !p.future) lapsed++;
+    if (last < keep) return;   // nothing in the last 3 years
+    const row = [first, p.future ? 1 : 0];
+    days.forEach(function (dk) {
+      const d = dn(dk);
+      if (d < keep) return;
+      const v = p.d[dk];
+      const s = v.s.map(S.of);
+      let cm = 0;
+      v.c.forEach(function (c) { const i = C.of(c); if (i < 30) cm |= (1 << i); });
+      row.push(d, s.length === 1 ? s[0] : s.length ? s : -1, cm, K.of(kindOf(v)));
     });
-
-    // Every visit 3 to 15 months ago: overall and by clinician (and their new patients)
-    days.forEach(function (d, i) {
-      if (d > cut90 || d <= from15) return;
-      const ok = back(i, 90);
-      k.kMeas++;
-      if (ok) k.kRet++;
-      p.d[d].s.forEach(function (s) {
-        const x = S[s] || (S[s] = { name: s, visits: 0, ret: 0, nNew: 0, nRet: 0 });
-        x.visits++;
-        if (ok) x.ret++;
-        if (i === 0) { x.nNew++; if (ok) x.nRet++; }
-      });
-    });
-
-    // New patients: by the month they started (last 18 months), and by what their first visit was for
-    if (first > from18) {
-      const cm = first.slice(0, 7);
-      const c = C[cm] || (C[cm] = { m: cm, n: 0, r90: [0, 0], r180: [0, 0], r365: [0, 0] });
-      c.n++;
-      [[90, 'r90', cut90], [180, 'r180', cut180], [365, 'r365', cut365]].forEach(function (z) {
-        if (first <= z[2]) { c[z[1]][0]++; if (back(0, z[0])) c[z[1]][1]++; }
-      });
-    }
-    if (first > from15 && first <= cut90) {
-      const ok = back(0, 90);
-      k.nMeas++;
-      if (ok) k.nRet++;
-      const kd = kindOf(p.d[first]);
-      const x = K[kd] || (K[kd] = { kind: kd, n: 0, ret: 0 });
-      x.n++;
-      if (ok) x.ret++;
-    }
+    out.push(row);
   });
-
-  return {
-    kpis: k,
-    months: monthKeys.map(function (m) { return M[m]; }),
-    cohorts: Object.keys(C).sort().map(function (m) { return C[m]; }),
-    staff: Object.keys(S).map(function (s) { return S[s]; })
-      .filter(function (x) { return x.visits >= 10; })
-      .sort(function (a, b) { return b.visits - a.visits; }),
-    kinds: Object.keys(K).map(function (x) { return K[x]; }).sort(function (a, b) { return b.n - a.n; }),
-  };
+  return { todayN: today, keepN: keep, staff: S.list, cats: C.list, kinds: K.list, pts: out, lapsed: lapsed };
 }
-
 
 // Remembered in parts (one cache value holds 100 KB at most)
 function repCacheGet_(key) {
@@ -14511,7 +14462,7 @@ function repCacheGet_(key) {
 function repCachePut_(key, val) {
   try {
     const json = JSON.stringify(val);
-    if (json.length > 3000000) return;
+    if (json.length > 6000000) return;
     const parts = {};
     let n = 0;
     for (let i = 0; i < json.length; i += 45000) parts[key + '_' + (n++)] = json.slice(i, i + 45000);

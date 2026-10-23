@@ -8490,7 +8490,7 @@ body.ff-handing { overflow: hidden; }
 .rt-legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 3px; vertical-align: -1px; }
 .rt-legend .is-new::before { background: #0f766e; }
 .rt-legend .is-ret::before { background: #99f6e4; }
-.rt-chart { display: grid; grid-template-columns: repeat(24, minmax(26px, 1fr)); gap: 6px; align-items: end; overflow-x: auto; padding-bottom: 4px; }
+.rt-chart { display: grid; gap: 6px; align-items: end; overflow-x: auto; padding-bottom: 4px; }
 .rt-col { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 26px; }
 .rt-bar { display: flex; flex-direction: column-reverse; width: 100%; max-width: 30px; height: 160px; overflow: hidden; border-radius: 6px 6px 0 0; background: #f8fafc; }
 .rt-bar span { display: block; width: 100%; transition: height .3s; }
@@ -8525,3 +8525,5 @@ body.ff-handing { overflow: hidden; }
   .rt-chart { grid-template-columns: repeat(24, 26px); }
   .rt-bar { height: 120px; }
 }
+.rt-tools { row-gap: 8px; }
+.rt-summary { margin: 2px 0 10px; font-size: 15px; color: #0f172a; }
