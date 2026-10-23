@@ -206,7 +206,17 @@ export function mountScanner(container, { staff = null } = {}) {
     st.track = null;
     st.torch = false;
   }
+  // Phones and tablets (iPads report themselves as a Mac, but have a touch screen)
+  const isMobile = () => /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+    || (navigator.maxTouchPoints > 1 && /Macintosh/i.test(navigator.userAgent));
 
+  // The main back camera: not the ultra-wide, telephoto or depth lens. Names are only readable once the camera is allowed.
+  async function backCameraId() {
+    const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "videoinput");
+    const backs = cams.filter((d) => /back|rear|environment/i.test(d.label));
+    const main = backs.find((d) => !/ultra|wide|tele|depth|macro/i.test(d.label)) || backs[0];
+    return main ? main.deviceId : "";
+  }
   // Starts the camera, or shows the one already running in the current viewfinder
   // (switching Billing sheet / Delivery docket / Prescription draws a new one)
   async function startCamera() {
@@ -224,8 +234,15 @@ export function mountScanner(container, { staff = null } = {}) {
       return;
     }
     st.starting = true;
-    // Best first. Some laptop webcams fail at the full size instead of choosing a smaller one.
+    // Best first. Phones and tablets insist on the back camera; if that fails they fall back gently.
+    // Some laptop webcams fail at the full size instead of choosing a smaller one.
+    const back = isMobile() ? [
+      { facingMode: { exact: "environment" }, width: { ideal: 4032 }, height: { ideal: 3024 } },
+      { facingMode: { exact: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      { facingMode: { exact: "environment" } },
+    ] : [];
     const tries = [
+      ...back,
       { facingMode: { ideal: "environment" }, width: { ideal: 4032 }, height: { ideal: 3024 } },
       { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
       { facingMode: { ideal: "environment" } },
@@ -245,6 +262,23 @@ export function mountScanner(container, { staff = null } = {}) {
         }
       }
       if (!stream) throw lastErr || new Error("No camera");
+      // A phone that still opened the front camera: switch to the main back camera
+      if (isMobile()) {
+        const t = stream.getVideoTracks()[0];
+        const facing = t && t.getSettings ? t.getSettings().facingMode : "";
+        const label = (t && t.label) || "";
+        if (facing === "user" || /front|facetime|selfie/i.test(label)) {
+          const id = await backCameraId().catch(() => "");
+          if (id) {
+            try {
+              const better = await navigator.mediaDevices.getUserMedia({ audio: false, video: {
+                deviceId: { exact: id }, width: { ideal: 4032 }, height: { ideal: 3024 } } });
+              stream.getTracks().forEach((x) => x.stop());
+              stream = better;
+            } catch (err) { console.warn("Couldn't switch to the back camera:", err); }
+          }
+        }
+      }
       if (!root.isConnected || st.mode !== "camera") { stream.getTracks().forEach((t) => t.stop()); return; }
       st.stream = stream;
       st.track = stream.getVideoTracks()[0];
