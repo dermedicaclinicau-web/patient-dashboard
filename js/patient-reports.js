@@ -101,6 +101,16 @@ const sspBucket = (r, today) => {
     : d >= -90 ? "Expired 1 to 3 months ago" : "Expired 3 to 12 months ago";
 };
 
+// Filters on every list
+const SHARED = [
+  { k: "dnc", type: "check", label: "Hide do not contact", def: false },
+  { k: "via", type: "select", label: "Contact by", def: "any", options: [["any", "Any"], ["mobile", "Has a mobile"], ["email", "Has an email"]] },
+];
+const sharedOk = (r, f) => (!f.dnc || !r.dnc) && (f.via === "any" || (f.via === "mobile" ? !!r.mobile : !!r.email));
+// A choice list from the patients on the list ("Anyone", then each name A–Z)
+const choicesOf = (rows, of, all) => [["all", all],
+  ...[...new Set(rows.map(of).filter(Boolean))].sort((a, b) => a.localeCompare(b, "en-AU")).map((v) => [v, v])];
+
 /* ---------- The three lists ---------- */
 const LISTS = {
   packages: {
@@ -150,12 +160,24 @@ const LISTS = {
   ssp: {
     intro: "Patients whose most recent Skin Script has expired or is about to. A good reason to book a skin review.",
     filters: [
-      { k: "win", type: "select", label: "Show", def: "both", options: [["soon", "Expiring in the next 30 days"],
-        ["recent", "Expired in the last 90 days"], ["both", "Both of those"], ["older", "Expired 3 to 12 months ago"]] },
+      { k: "win", type: "select", label: "Show", def: "both", tools: true, options: [["soon", "Expiring in the next 30 days"],
+        ["recent", "Expired in the last 90 days"], ["both", "Both of those"], ["older", "Expired 3 to 12 months ago"], ["custom", "Choose dates"]] },
+      { k: "from", type: "date", label: "Expires from", def: "", showIf: (f) => f.win === "custom", range: (t) => [addDays(t, -365), addDays(t, 120)] },
+      { k: "to", type: "date", label: "to", def: "", showIf: (f) => f.win === "custom", range: (t) => [addDays(t, -365), addDays(t, 120)] },
+      { k: "by", type: "select", label: "Made by", def: "all", dyn: (rows) => choicesOf(rows, (r) => r.by || "Not recorded", "Anyone") },
+      { k: "seen", type: "select", label: "Last visit", def: "any", options: [["any", "Any time"], ["0-90", "In the last 3 months"],
+        ["90-180", "3 to 6 months ago"], ["180-365", "6 to 12 months ago"], ["365-99999", "Over a year ago"]] },
       { k: "nb", type: "check", label: "Only patients with nothing booked", def: true },
     ],
     match(r, f, today) {
       if (f.nb && r.next) return false;
+      if (f.by !== "all" && (r.by || "Not recorded") !== f.by) return false;
+      if (f.seen !== "any") {
+        const [lo, hi] = f.seen.split("-").map(Number);
+        const s = r.last ? between(r.last, today) : 99999;
+        if (s < lo || s > hi) return false;
+      }
+      if (f.win === "custom") return String(r.expires) >= (f.from || "0000") && String(r.expires) <= (f.to || "9999");
       const d = between(today, r.expires);
       if (d === null) return false;
       if (f.win === "soon") return d >= 0 && d <= 30;
@@ -200,8 +222,15 @@ const LISTS = {
         ["0-365", "In the last 12 months"], ["custom", "Choose dates"]] },
       { k: "from", type: "date", label: "From", def: "", showIf: (f) => f.since === "custom" },
       { k: "to", type: "date", label: "To", def: "", showIf: (f) => f.since === "custom" },
+      { k: "staff", type: "select", label: "Seen by", def: "all", dyn: (rows) => choicesOf(rows, (r) => r.firstStaff, "Any clinician") },
+      { k: "kind", type: "select", label: "Visit was for", def: "all",
+        dyn: (rows) => [["all", "Anything"], ["Consult only", "Consult only"], ["treated", "Had a treatment"],
+          ...choicesOf(rows.filter((r) => !consultOnly(r)), firstKind, "").slice(1)] },
     ],
     match(r, f, today) {
+      if (f.staff !== "all" && r.firstStaff !== f.staff) return false;
+      if (f.kind === "treated" && consultOnly(r)) return false;
+      if (f.kind !== "all" && f.kind !== "treated" && firstKind(r) !== f.kind) return false;
       if (f.since === "custom") return String(r.first) >= (f.from || "0000") && String(r.first) <= (f.to || "9999");
       const [lo, hi] = String(f.since).split("-").map(Number);
       const d = between(r.first, today);
@@ -243,36 +272,47 @@ const LISTS = {
 export function mountPatientReport(body, kind, staff) {
   const L = LISTS[kind];
   const st = { rows: [], contacts: new Map(), f: {}, q: "", done: false, pick: null, at: "", today: todayKey(), list: [] };
-  L.filters.forEach((x) => { st.f[x.k] = x.def; });
+  const allFilters = () => L.filters.concat(SHARED);
+  const defaults = () => { const f = {}; allFilters().forEach((x) => { f[x.k] = x.def; }); return f; };
+  st.f = defaults();
   body.innerHTML = `<p class="muted rp-range">${esc(L.intro)}</p><div data-role="tools"></div><div data-role="out"></div>`;
   const toolsEl = body.querySelector('[data-role="tools"]');
   const out = body.querySelector('[data-role="out"]');
   const gval = (g, r) => g.of(r, st.today) || "Not recorded";
 
   function drawTools() {
+    const opt = (v, l, cur) => `<option value="${esc(v)}"${String(cur) === String(v) ? " selected" : ""}>${esc(l)}</option>`;
     toolsEl.innerHTML = `<div class="inv-tools rp-tools">
-      ${L.filters.filter((x) => !x.showIf || x.showIf(st.f)).map((x) => (x.type === "date"
-        ? `<label class="rp-from">${esc(x.label)} <input class="fe-in" type="date" data-f="${x.k}" min="${addDays(todayKey(), -365)}"
-            max="${todayKey()}" value="${esc(st.f[x.k] || "")}" /></label>`
-        : x.type === "check"
-        ? `<label class="fe-check"><input type="checkbox" data-f="${x.k}"${st.f[x.k] ? " checked" : ""} /> ${esc(x.label)}</label>`
-        : `<label class="rp-from">${esc(x.label)} <select class="fb-select" data-f="${x.k}">${x.options.map(([v, l]) =>
-          `<option value="${v}"${st.f[x.k] === v ? " selected" : ""}>${esc(l)}</option>`).join("")}</select></label>`)).join("")}
+      ${allFilters().filter((x) => !x.showIf || x.showIf(st.f)).map((x) => {
+        if (x.type === "date") {
+          const [mn, mx] = x.range ? x.range(st.today) : [addDays(st.today, -365), st.today];
+          return `<label class="rp-from">${esc(x.label)} <input class="fe-in" type="date" data-f="${x.k}" min="${mn}" max="${mx}"
+            value="${esc(st.f[x.k] || "")}" /></label>`;
+        }
+        if (x.type === "check") {
+          return `<label class="fe-check"><input type="checkbox" data-f="${x.k}"${st.f[x.k] ? " checked" : ""} /> ${esc(x.label)}</label>`;
+        }
+        const options = x.dyn ? x.dyn(st.rows) : x.options;
+        // A remembered choice that's no longer on the list goes back to the default
+        if (!options.some(([v]) => String(v) === String(st.f[x.k]))) st.f[x.k] = x.def;
+        return `<label class="rp-from">${esc(x.label)} <select class="fb-select" data-f="${x.k}">${
+          options.map(([v, l]) => opt(v, l, st.f[x.k])).join("")}</select></label>`;
+      }).join("")}
       <input type="search" class="fe-input rp-find" data-f="q" placeholder="${esc(L.find || "Filter: patient or mobile")}" value="${esc(st.q)}" aria-label="Filter" />
       <label class="fe-check"><input type="checkbox" data-f="done"${st.done ? " checked" : ""} /> Show people already contacted</label>
+      <button type="button" class="rc-link" data-act="reset">Reset</button>
       <span class="inv-spacer"></span>
       <button type="button" class="ff-btn" data-act="refresh">Refresh</button>
       <button type="button" class="ff-btn" data-act="csv">Export CSV</button>
     </div>`;
   }
-
   // The filters, search and "already contacted" → base; a clicked bar narrows base → list
   function compute() {
     const q = st.q.trim().toLowerCase();
     let hidden = 0;
     const base = [];
     st.rows.forEach((r) => {
-      if (!L.match(r, st.f, st.today)) return;
+      if (!sharedOk(r, st.f) || !L.match(r, st.f, st.today)) return;
       if (q && ![r.name, r.mobile, r.email, r.pkg].join(" ").toLowerCase().includes(q)) return;
       const c = st.contacts.get(rowKey(r));
       if (!st.done && contacted(c, r.sent, st.today)) { hidden++; return; }
@@ -364,6 +404,7 @@ export function mountPatientReport(body, kind, staff) {
       if (!out.isConnected) return;
       if (res.problem) { out.innerHTML = `<div class="tm-empty is-error">${esc(res.problem)}</div>`; return; }
       Object.assign(st, { rows: Array.isArray(res.rows) ? res.rows : [], at: res.at || "", today: res.today || todayKey(), contacts });
+      drawTools();
       draw();
     } catch (err) {
       console.error(`${kind} report failed:`, err);
@@ -459,7 +500,7 @@ export function mountPatientReport(body, kind, staff) {
     if (!k || k === "q") return;
     if (k === "done") st.done = e.target.checked;
     else { st.f[k] = e.target.type === "checkbox" ? e.target.checked : e.target.value; st.pick = null; }
-    if ((L.filters.find((x) => x.k === k) || {}).tools) drawTools();
+    if ((allFilters().find((x) => x.k === k) || {}).tools) drawTools();
     draw();
   });
   let qTimer = null;
@@ -478,6 +519,12 @@ export function mountPatientReport(body, kind, staff) {
       return;
     }
     if (e.target.closest('[data-act="unpick"]')) { st.pick = null; draw(); return; }
+    if (e.target.closest('[data-act="reset"]')) {
+      Object.assign(st, { f: defaults(), q: "", done: false, pick: null });
+      drawTools();
+      draw();
+      return;
+    }
     const lg = e.target.closest("[data-log]");
     if (lg) { const x = st.list[Number(lg.dataset.log)]; if (x) logContact(x.r); return; }
     if (e.target.closest('[data-act="refresh"]')) { load(true); return; }
