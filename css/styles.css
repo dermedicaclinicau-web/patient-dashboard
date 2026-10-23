@@ -8255,3 +8255,113 @@ body.ff-handing { overflow: hidden; }
 .scan-today-main small { color: var(--muted); font-size: .76rem; }
 .scan-today-flag { color: #b45309; font-weight: 600; }
 .scan-today a { text-decoration: none; }
+
+/* ===================== Phones: tighter, calmer layout ===================== */
+@media (max-width: 640px) {
+  :root { --topbar-h: 56px; }
+  .topbar { padding: 0 .75rem; }
+  .content { padding: .85rem .75rem 4.5rem; }
+
+  /* Menu: one slim strip of icons with small labels; the fade shows there's more to swipe to */
+  .sidebar { gap: .1rem; padding: .3rem .4rem; scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(90deg, #000 85%, transparent); mask-image: linear-gradient(90deg, #000 85%, transparent); }
+  .sidebar::-webkit-scrollbar { display: none; }
+  .nav-item { flex-direction: column; justify-content: center; gap: .15rem; min-width: 64px; min-height: 50px;
+    padding: .3rem .45rem; font-size: .68rem; text-align: center; }
+  .nav-item svg { width: 20px; height: 20px; }
+
+  /* Page titles */
+  .fb-head { margin-bottom: .75rem; }
+  .fb-head h2, .page-head h2, .pt-title h2 { font-size: 1.3rem; }
+
+  /* Text boxes at 16px, so iPhones don't zoom in when you tap one */
+  .fe-input, .fe-in, .fb-select, .dk-input, .pc-input, .rx-fields input,
+  .search-box input, .pt-search input, .hv-search input, .ib-search input,
+  .lh-dialog input:not([type="checkbox"]):not([type="radio"]):not([type="color"]),
+  .lh-dialog select, .lh-dialog textarea, .ch-comp textarea { font-size: 16px; }
+
+  /* Windows slide up from the bottom, full width */
+  .lh-dialog:not(.ssd):not(.pdf-prev):not(.ch-dlg):not(.tr-fill-dlg):not(.sup-dlg),
+  .dialog, .em-dialog, .cd-dialog {
+    width: 100vw; max-width: 100vw; margin: auto 0 0; border-radius: 18px 18px 0 0; max-height: 92dvh;
+  }
+
+  /* Form and task top bars: secondary buttons show their icon only (the name stays for screen readers) */
+  .ff-bar { top: .35rem; }
+  .ff-bar-inner { gap: .5rem; padding: .55rem .6rem; }
+  .ff-bar-actions .ff-btn:not(.is-primary):not(.is-quiet) span {
+    position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .ff-bar-actions .ff-btn:not(.is-primary):not(.is-quiet) { flex: 0 0 44px; padding: 0; }
+
+  /* Chat button: smaller, and hidden on the Scanner so it never covers the shutter */
+  .ch-bubble { width: 50px; height: 50px; right: .75rem; bottom: .75rem; }
+  body:has(.page.scan) .ch-bubble, body:has(.page.scan) .ch-pop { display: none; }
+
+  /* Scanner: the viewfinder fills the space, the hint sits beside the torch (not under it) */
+  .page.scan { max-width: none; }
+  .scan-head { margin: 0 0 .5rem; }
+  .scan-modes { display: flex; width: 100%; }
+  .scan-mode { flex: 1; padding: .45rem .3rem; font-size: .82rem; }
+  .scan-vf { aspect-ratio: auto; height: calc(100dvh - 300px); min-height: 320px; max-height: none; border-radius: 14px; }
+  .scan-tip { top: .55rem; left: .55rem; right: 3.4rem; width: auto; max-width: none; transform: none;
+    padding: .35rem .65rem; border-radius: 10px; font-size: .78rem; text-align: left; }
+  .scan-torch { top: .5rem; right: .5rem; }
+  .scan-bar { padding: .6rem .25rem .25rem; }
+  .scan-shutter { width: 68px; height: 68px; }
+}
+
+/* ===================== Phones: bottom bar and More ===================== */
+.mnav { display: none; }
+@media (max-width: 640px) {
+  .sidebar { display: none !important; }   /* the bottom bar replaces the strip */
+
+  .mnav { position: fixed; left: 0; right: 0; bottom: 0; z-index: 45; display: grid;
+    grid-template-columns: repeat(var(--n, 5), minmax(0, 1fr));
+    padding: .3rem .25rem calc(.3rem + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border); background: rgba(255, 255, 255, .96);
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); box-shadow: 0 -6px 18px -12px rgba(15, 23, 42, .25); }
+  .mnav-item { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .15rem;
+    min-height: 52px; padding: .2rem .1rem; border: 0; border-radius: 12px; background: none; color: var(--muted);
+    font: inherit; font-size: .68rem; font-weight: 600; text-decoration: none; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+  .mnav-item svg { box-sizing: border-box; width: 46px; height: 28px; padding: 3px 12px; border-radius: 999px; transition: background .15s; }
+  .mnav-item { font-size: .64rem; }
+  .mnav-item span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mnav-item.is-on { color: var(--primary); }
+  .mnav-item.is-on svg { background: var(--primary-soft); }
+  .mnav-item:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+  .mnav-item .nav-badge { position: absolute; top: 0; left: calc(50% + 8px); min-width: 18px; height: 18px; margin: 0; font-size: .62rem; }
+  .mnav-dot { position: absolute; top: 4px; left: calc(50% + 12px); width: 8px; height: 8px; border-radius: 50%; background: var(--danger); }
+
+  /* Hidden while typing (it would sit on the keyboard) and while the patient has the iPad */
+  body.ff-handing .mnav,
+  body:has(:is(input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="range"]), textarea, [contenteditable="true"]):focus) .mnav { display: none; }
+
+  /* Room for the bar, and things that sit at the bottom moved above it */
+  .content { padding-bottom: calc(5.75rem + env(safe-area-inset-bottom)); }
+  .ch-bubble { bottom: calc(4.75rem + env(safe-area-inset-bottom)); }
+  .ch-pop { bottom: calc(9rem + env(safe-area-inset-bottom)); }
+  .toast, .fe-toast, .rcv-toast { bottom: calc(5.25rem + env(safe-area-inset-bottom)); }
+  .inv-bulk, .pq { bottom: calc(4.9rem + env(safe-area-inset-bottom)); }
+  .scan-vf { height: calc(100dvh - 310px); }
+
+  /* More: a sheet that slides up */
+  .mnav-sheet[open] { position: fixed; inset: auto 0 0 0; width: 100vw; max-width: 100vw; max-height: 80dvh; margin: 0;
+    padding: 0 0 env(safe-area-inset-bottom); overflow: auto; border: 0; border-radius: 20px 20px 0 0; background: #fff;
+    box-shadow: 0 -20px 50px -20px rgba(15, 23, 42, .4); animation: mnav-up .2s ease-out; }
+  .mnav-sheet::backdrop { background: rgba(15, 23, 42, .4); }
+  .mnav-sheet-in { padding: .4rem 1rem 1rem; }
+  .mnav-sheet-in::before { content: ""; display: block; width: 40px; height: 4px; margin: .3rem auto .8rem; border-radius: 999px; background: #cbd5e1; }
+  .mnav-sheet-head { display: flex; align-items: center; justify-content: space-between; gap: .75rem; margin-bottom: .75rem; }
+  .mnav-sheet-head strong { font-size: 1.05rem; }
+  .mnav-hint { margin: -.25rem 0 .75rem; font-size: .82rem; color: var(--muted); }
+  .mnav-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .5rem; }
+  .mnav-tile { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .4rem;
+    min-height: 84px; padding: .6rem .35rem; border: 1px solid var(--border); border-radius: 14px; background: var(--surface-2);
+    color: var(--text); font: inherit; font-size: .78rem; font-weight: 600; line-height: 1.25; text-align: center; text-decoration: none; cursor: pointer; }
+  .mnav-tile svg { width: 24px; height: 24px; color: var(--primary); }
+  .mnav-tile.is-on, .mnav-tile.is-pinned { border-color: var(--primary); background: var(--primary-soft); }
+  .mnav-check { position: absolute; top: 6px; right: 9px; color: var(--primary); font-style: normal; font-weight: 800; }
+  .mnav-tile .nav-badge { position: absolute; top: 6px; right: 8px; margin: 0; }
+}
+@keyframes mnav-up { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .mnav-sheet[open] { animation: none; } }
