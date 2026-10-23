@@ -217,7 +217,15 @@ export function mountPatientReport(body, kind, staff) {
   }
 
   async function load(fresh = false) {
-    out.innerHTML = SKEL;
+    const t0 = Date.now();
+    const note = "The first time can take up to a minute or two: it reads the whole appointment book. After that it's quick for 10 minutes.";
+    out.innerHTML = `<div class="tm-empty"><strong>Working it out…</strong><br><small class="muted" data-role="secs">${esc(note)}</small></div>`;
+    const tick = setInterval(() => {
+      const el = out.querySelector('[data-role="secs"]');
+      if (!el) { clearInterval(tick); return; }
+      const s = Math.round((Date.now() - t0) / 1000);
+      if (s >= 5) el.textContent = `${s} seconds… ${note}`;
+    }, 1000);
     try {
       const [res, contacts] = await Promise.all([
         callApi({ action: "reports", op: kind, fresh }),
@@ -235,6 +243,8 @@ export function mountPatientReport(body, kind, staff) {
         : err && (err.code === "INVALID_PIN" || err.code === "BAD_REQUEST")
           ? "The server hasn't been updated yet. In Apps Script, deploy a new version."
           : (err && err.message) || "Couldn't load the report. Try again.")}</div>`;
+    } finally {
+      clearInterval(tick);
     }
   }
 
