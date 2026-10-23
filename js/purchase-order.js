@@ -4,7 +4,7 @@ import {
   getPo, savePo, renumberPo, markPoSent, cancelPo, poTotals, lineFromProduct, cleanPoLine, supplierSnapshot,
   listProducts, listSuppliers, listRequests, supplierTerms, suppliesProduct, suggestOrderFor, dayKey, productSuppliers,
   recordPastReceipt, getBaseline, syncReceivedRequests, fillPoTemplate, PO_ORDER_TAG_RE, amendPo,
-  savePoEmail, listPoEmails,
+  savePoEmail, listPoEmails, PO_MAX_QTY,
 } from "./inventory-api.js";
 import { renderDeliveries } from "./po-deliveries.js";
 import { deliveryError } from "./form-delivery.js";
@@ -272,7 +272,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
               l.productId ? `${(byId.get(l.productId) || {}).name || l.name}${byId.get(l.productId) && !byId.get(l.productId).active ? " (inactive)" : ""}`
                 : "Search for a product…")}</button>`}
           ${l.sources.length ? `<small class="po-src">From ${l.sources.length} request item${l.sources.length === 1 ? "" : "s"}</small>` : ""}</td>
-        <td><div class="po-qty"><input class="fe-input" type="number" min="${locked ? got : 1}" max="9999" step="1" data-l="qty" value="${l.qty}" aria-label="Quantity" />
+        <td><div class="po-qty"><input class="fe-input" type="number" min="${locked ? got : 1}" max="${PO_MAX_QTY}" step="1" data-l="qty" value="${l.qty}" aria-label="Quantity" />
           <small>${esc(unitPlural(l.orderUnit))}</small></div></td>
         <td><select class="fb-select" data-l="loc" aria-label="For">${LOCATIONS.map((x) =>
           `<option value="${x.key}"${x.key === l.loc ? " selected" : ""}>${esc(x.label)}</option>`).join("")}</select></td>
@@ -654,7 +654,7 @@ export async function mountPurchaseOrder(container, { id, staff } = {}) {
     const row = el.closest("[data-i]");
     if (!row) return;
     const l = po.lines[Number(row.dataset.i)];
-    if (el.dataset.l === "qty") l.qty = Math.min(9999, Math.max(1, parseInt(el.value, 10) || 1));
+    if (el.dataset.l === "qty") l.qty = Math.min(PO_MAX_QTY, Math.max(1, parseInt(el.value, 10) || 1));
     else if (el.dataset.l === "name") l.name = el.value;
     else return;
     changed();

@@ -648,7 +648,7 @@ export async function saveRequestSettings({ notifyIds, urgentOnly }, staff) {
 }
 
 /* ===================== Purchase orders ===================== */
-
+export const PO_MAX_QTY = 999999;   // most of one item on a purchase order (in the supplier's order units)
 export const PO_STATUS = { draft: "Draft", sent: "Sent", part: "Part received", received: "Received", cancelled: "Cancelled" };
 const PO_LIVE = ["sent", "part", "received"];
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
@@ -667,7 +667,7 @@ export function cleanPoLine(l = {}) {
     productId: clip(l.productId, 60),
     name: clip(l.name, 150),
     supplierCode: clip(l.supplierCode, 60),
-    qty: Math.min(9999, Math.max(1, parseInt(l.qty, 10) || 1)),
+    qty: Math.min(PO_MAX_QTY, Math.max(1, parseInt(l.qty, 10) || 1)),
     orderUnit: clip(l.orderUnit, 30) || "unit",
     packSize: Math.max(1, parseInt(l.packSize, 10) || 1),
     stockUnit: clip(l.stockUnit, 30) || "unit",
@@ -1169,7 +1169,7 @@ export async function receivePo(poId, receipt, staff) {
     for (const r of receipt.lines || []) {
       const line = po.lines.find((l) => l.key === r.key);
       if (!line) throw new Error("This order has been changed by someone else. Reload and try again.");
-      const arrived = Math.min(9999, Math.max(0, parseInt(r.arrived, 10) || 0));
+      const arrived = Math.min(PO_MAX_QTY, Math.max(0, parseInt(r.arrived, 10) || 0));
       if (!arrived) continue;
       const splits = cleanSplits(r.splits, line.loc);
       if (line.productId) {
