@@ -6,32 +6,56 @@ import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const blank = () => ({ text: "", product: "", strengths: "", quantity: "", directions: "", repeats: "", conf: 1, fixed: true });
+const TYPE_IT = "__type";   // the "Not on the list: type the name" option
+const blank = () => ({ text: "", medicine: "", product: "", custom: false, customName: "",
+  strengths: "", quantity: "", directions: "", repeats: "", conf: 1, fixed: true });
+const firstLine = (s) => String(s || "").split(/\n/)[0].trim().slice(0, 150);
 
 export function mountRxResult(el, { photo, photoUrl, result, staff, onAgain }) {
   const products = rxProductList();
   const review = reviewRx(result, products);
   const today = dayKey();
+  // The correct medicine name from the scan (kept even if reviewRx doesn't pass it on)
+  const raw = Array.isArray(result && result.items) ? result.items : [];
+  const medOf = (x, i) => String(x.medicine
+    || (raw.find((r) => r && String(r.text || "") === String(x.text || "")) || raw[i] || {}).medicine || "").trim();
   const st = { patient: null, candidates: [], finding: true, pick: false, q: "", hits: [], searching: false,
-    date: review.date, items: review.items.length ? review.items.map((x) => ({ ...x })) : [blank()], note: "", busy: false };
+    date: review.date,
+    items: review.items.length
+      ? review.items.map((x, i) => ({ ...blank(), ...x, medicine: medOf(x, i), custom: false, customName: "" }))
+      : [blank()],
+    note: "", busy: false };
   let timer = null, seq = 0;
 
-  const prodOptions = (cur) => `<option value="">Choose the product…</option>${products.map((n) =>
-    `<option${n === cur ? " selected" : ""}>${esc(n)}</option>`).join("")}`;
+  const prodOptions = (it) => `<option value="">Choose the product…</option>${products.map((n) =>
+    `<option${!it.custom && n === it.product ? " selected" : ""}>${esc(n)}</option>`).join("")}
+    <option disabled>──────────</option>
+    <option value="${TYPE_IT}"${it.custom ? " selected" : ""}>Not on the list: type the name…</option>`;
 
   function itemFlags(it) {
-    if (!it.product) return [["bad", it.text ? "Not matched: choose the product" : "Choose the product"]];
+    if (it.custom) {
+      return it.customName.trim()
+        ? [["warn", "Not on the prescription product list. Check the name before saving."]]
+        : [["bad", "Type the product name"]];
+    }
+    if (!it.product) return [["bad", it.text ? "Not matched: choose the product, or type its name" : "Choose the product"]];
     if (!it.fixed && it.conf < 0.6) return [["warn", "Check this is the right product"]];
     return [];
   }
   function itemHtml(it, i) {
     const fl = itemFlags(it);
+    const readAs = it.medicine && it.medicine.toLowerCase() !== firstLine(it.text).toLowerCase() ? it.medicine : "";
+    const suggest = !it.product && !it.custom && (it.medicine || it.text) ? (it.medicine || firstLine(it.text)) : "";
     return `<div class="rx-item${fl.some((f) => f[0] === "bad") ? " is-bad" : fl.length ? " is-warn" : ""}" data-i="${i}">
       <div class="rx-item-top">
-        <select class="fb-select" data-rx="product" aria-label="Product">${prodOptions(it.product)}</select>
+        <select class="fb-select" data-rx="product" aria-label="Product">${prodOptions(it)}</select>
         <button type="button" class="ib-tool is-danger" data-act="rx-remove" aria-label="Remove this item" title="Remove">×</button>
       </div>
+      ${it.custom ? `<input class="fe-input rx-custom" data-rx="customName" maxlength="150" value="${esc(it.customName)}"
+          placeholder="e.g. Minomycin (minocycline) 50 mg" aria-label="Product name" />` : ""}
       ${it.text ? `<small class="muted">Written: ${esc(it.text).replace(/\n/g, " / ")}</small>` : ""}
+      ${readAs ? `<small class="muted">Reads as: <strong>${esc(readAs)}</strong></small>` : ""}
+      ${suggest ? `<button type="button" class="scan-pat-btn rx-use" data-act="rx-useread">Use “${esc(suggest)}”</button>` : ""}
       <div class="rx-fields">
         <label><span>Strengths</span><input class="fe-input" data-rx="strengths" maxlength="300" value="${esc(it.strengths)}" placeholder="e.g. 4% HQ, 2% kojic acid" /></label>
         <label><span>Quantity</span><input class="fe-input" data-rx="quantity" maxlength="60" value="${esc(it.quantity)}" placeholder="e.g. 50g, 100" /></label>
@@ -41,6 +65,15 @@ export function mountRxResult(el, { photo, photoUrl, result, staff, onAgain }) {
       ${fl.map(([t, m]) => `<span class="scan-flag is-${t}">${esc(m)}</span>`).join("")}
     </div>`;
   }
+  const redrawItem = (i, focusName = false) => {
+    const row = el.querySelector(`.rx-item[data-i="${i}"]`);
+    if (!row) return;
+    row.outerHTML = itemHtml(st.items[i], i);
+    if (focusName) {
+      const inp = el.querySelector(`.rx-item[data-i="${i}"] [data-rx="customName"]`);
+      if (inp) { inp.focus(); inp.setSelectionRange(inp.value.length, inp.value.length); }
+    }
+  };
 
   const hitList = () => (st.q.trim().length >= 2 ? st.hits : st.candidates);
   function hitsHtml() {
@@ -121,9 +154,28 @@ export function mountRxResult(el, { photo, photoUrl, result, staff, onAgain }) {
     if (!st.patient) { showToast("Choose the patient first."); return; }
     if (!/^\d{4}-\d{2}-\d{2}$/.test(st.date || "")) { showToast("Enter the prescription date."); return; }
     if (st.date > today) { showToast("The prescription date can't be in the future."); return; }
-    const items = st.items.filter((it) => it.product || it.text || it.strengths || it.quantity);
-    if (!items.length) { showToast("Add what was prescribed."); return; }
-    if (items.some((it) => !it.product)) { showToast("Choose the product for every item, or remove it."); return; }
+    const filled = st.items.filter((it) => it.product || it.customName.trim() || it.text || it.strengths || it.quantity);
+    if (!filled.length) { showToast("Add what was prescribed."); return; }
+    if (filled.some((it) => (it.custom ? !it.customName.trim() : !it.product))) {
+      showToast("Choose the product, or type its name, for every item. Or remove it.");
+      return;
+    }
+    // Typed names: one last look before they go on the patient's record
+    const typed = filled.filter((it) => it.custom).map((it) => it.customName.trim());
+    if (typed.length) {
+      const ok = await confirmDialog({
+        title: typed.length === 1 ? "Not on the product list" : `${typed.length} items not on the product list`,
+        message: `${typed.map((n) => `“${n}”`).join(", ")} ${typed.length === 1 ? "isn't" : "aren't"} on the prescription product list. `
+          + "Check the name against the script, then save it as typed.",
+        confirmLabel: "Save as typed", tone: "warning",
+      });
+      if (!ok) return;
+    }
+    const items = filled.map((it) => {
+      const out = { ...it, product: it.custom ? it.customName.trim().slice(0, 150) : it.product, custom: !!it.custom };
+      delete out.customName;
+      return out;
+    });
 
     const dup = await rxScanExists(review.scriptNumber).catch(() => null);
     if (dup) {
@@ -179,6 +231,11 @@ export function mountRxResult(el, { photo, photoUrl, result, staff, onAgain }) {
       st.items.splice(Number(row.dataset.i), 1);
       if (!st.items.length) st.items.push(blank());
       drawItems();
+    } else if (act === "rx-useread") {   // the name as read, typed in for them
+      const i = Number(b.closest("[data-i]").dataset.i);
+      const it = st.items[i];
+      Object.assign(it, { custom: true, product: "", fixed: true, customName: it.medicine || firstLine(it.text) });
+      redrawItem(i, true);
     } else if (act === "rx-big") {
       const big = el.querySelector('[data-role="rx-big"]');
       if (big) big.hidden = !big.hidden;
@@ -199,11 +256,18 @@ export function mountRxResult(el, { photo, photoUrl, result, staff, onAgain }) {
   });
   el.addEventListener("change", (e) => {
     const t = e.target;
-    if (t.dataset.rx !== "product") return;
     const row = t.closest("[data-i]");
+    if (!row) return;
     const i = Number(row.dataset.i);
-    st.items[i].product = t.value;
-    st.items[i].fixed = true;
-    row.outerHTML = itemHtml(st.items[i], i);
+    const it = st.items[i];
+    if (t.dataset.rx === "customName") { redrawItem(i); return; }   // leaving the box: the flag updates
+    if (t.dataset.rx !== "product") return;
+    if (t.value === TYPE_IT) {
+      Object.assign(it, { custom: true, product: "", fixed: true, customName: it.customName || it.medicine || firstLine(it.text) });
+      redrawItem(i, true);
+      return;
+    }
+    Object.assign(it, { custom: false, product: t.value, fixed: true });
+    redrawItem(i);
   });
 }

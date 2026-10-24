@@ -6422,7 +6422,8 @@ function scanRx_(body) {
     let product = byLower[String(it.product || '').trim().toLowerCase()] || '';
     if (fading && FADING_RE_.test(text)) { product = fading; it.confidence = Math.max(Number(it.confidence) || 0, 0.95); }
     return {
-      text: text.slice(0, 500), product: product, strengths: String(it.strengths || '').slice(0, 300),
+      text: text.slice(0, 500), medicine: String(it.medicine || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+      product: product, strengths: String(it.strengths || '').slice(0, 300),
       quantity: String(it.quantity || '').slice(0, 60), directions: String(it.directions || '').slice(0, 300),
       repeats: String(it.repeats || '').slice(0, 20), confidence: Math.max(0, Math.min(1, Number(it.confidence) || 0)),
     };
@@ -6453,18 +6454,22 @@ function scanRxPrompt_(products) {
     '2. date: the date written next to the doctor\'s signature, as YYYY-MM-DD. It is Australian: DAY/MONTH/YEAR,',
     '   and a 2-digit year is 20YY (28/4/26 = 2026-04-28). Use "" if you can\'t read it.',
     '3. scriptNumber: the printed number at the top right (e.g. AC22102718). prescriber: the doctor\'s name printed at the top.',
-    '4. items: one per medicine or compound. text = exactly as written. strengths = any percentages or doses (e.g. "4% HQ, 2% kojic acid").',
+    '4. items: one per medicine or compound. text = exactly as written (spelling and abbreviations as on the script).',
+    '   medicine = the medicine\'s correct name, properly spelled, the way a pharmacist would write it: the brand name with',
+    '   the generic name in brackets, then the strength, e.g. "Minomycin (minocycline) 50 mg", "Epiduo (adapalene 0.1% /',
+    '   benzoyl peroxide 2.5%) gel". Add the form (tablets, capsules, cream, gel) only if it is written. If only the generic',
+    '   "Epiduo (adapalene 0.1% / benzoyl peroxide 2.5%) gel", "Roaccutane (isotretinoin) 20 mg capsules". If only the generic',   // ← delete this line
+    '   is written, use just the generic. Correct the spelling, but NEVER change the medicine, strength or amount from what',
+    '   strengths = any percentages or doses (e.g. "4% HQ, 2% kojic acid").',
     '   quantity = the amount to supply (often circled, e.g. "100", "20", "50g"). directions = how to use it, in plain English',
     '   ("bd" = twice a day, "tds" = three times a day, "QID" = four times a day, "nocte" = at night, "ii" = two).',
-    '   repeats = number of repeats if written, else "".',
+    '   repeats = number of repeats if written ("+ 5 rpt" = 5), else "".',
     '',
     'RULES',
     '- A compound with ANY of hydroquinone (HQ), kojic acid, ascorbic acid or dexamethasone is ONE item, product "' + FADING_CREAM_ + '".',
     '  Put all its ingredients in strengths, and the total amount (e.g. 50g) in quantity.',
-    '- product must be copied EXACTLY from the list below. Choose the one the medicine is (brand or generic name). If none fits, use "".',
-    '  Never make up a product name.',
-    '- Ignore the printed form labels, PBS boxes, signatures and the yellow section.',
-    '- Give each item a confidence from 0 to 1.',
+    '- product must be copied EXACTLY from the list below. Match on the brand OR the generic name (e.g. a script for',
+    '  "Minomycin" matches a list entry "Minocycline"). If none fits, use "": staff will type it in. Never make up a product name.',
     '',
     'Prescription products:',
     products.join('\n'),
@@ -6482,13 +6487,14 @@ const SCAN_RX_SCHEMA_ = {
     prescriber: { type: 'STRING' },
     items: { type: 'ARRAY', items: { type: 'OBJECT', properties: {
       text: { type: 'STRING', description: 'The medicine exactly as written' },
+      medicine: { type: 'STRING', description: 'The correct full name: brand (generic) strength form' },
       product: { type: 'STRING', description: 'An exact name from the product list, or empty' },
       strengths: { type: 'STRING' },
       quantity: { type: 'STRING' },
       directions: { type: 'STRING' },
       repeats: { type: 'STRING' },
       confidence: { type: 'NUMBER' },
-    }, required: ['text', 'product', 'confidence'] } },
+    }, required: ['text', 'medicine', 'product', 'confidence'] } },
   },
   required: ['patientName', 'date', 'items'],
 };
@@ -14728,4 +14734,117 @@ function repCachePut_(key, val) {
     c.putAll(parts, 600);
     c.put(key, String(n), 600);
   } catch (e) { console.warn('Report not remembered: ' + e); }
+}
+
+// A Drive file ID, or a photo link (e.g. a Firebase Storage link from a saved scan)
+const SCAN_TEST_FILE_ID_ = 'https://firebasestorage.googleapis.com/v0/b/disco-serenity-428708-t8.firebasestorage.app/o/scans%2Fbilling%2F2026-10-24%2FYFsn6NSYpHJ08pZm8A6R.jpg?alt=media&token=21a3fd22-2fdc-4322-8de3-d58b6e6c86b9';
+
+function testScanner() {
+  const p = PropertiesService.getScriptProperties();
+  const cfg = getConfig_();
+  const fast = p.getProperty('CLAUDE_FAST_MODEL') || 'claude-haiku-5-5';
+  const main = p.getProperty('CLAUDE_MODEL') || 'claude-sonnet-5-5';
+
+  // 1) The key
+  const rawKey = p.getProperty('ClaudeApi') || '';
+  if (!rawKey) { console.log('✗ Script Property "ClaudeApi" is missing.'); return; }
+  console.log('Key: ' + rawKey.trim().length + ' characters, starts "' + rawKey.trim().slice(0, 7) + '…"' +
+    (rawKey !== rawKey.trim() ? '  ⚠ HAS SPACES OR A NEW LINE AT THE START/END: remove them in Script Properties' : ''));
+  console.log('Models: sort = ' + fast + ' · read = ' + main);
+
+  // 2) The photo
+  const src = scanTestSource_(SCAN_TEST_FILE_ID_);
+  if (!src) return;
+  const full = src.full;
+  const small = src.small || src.full;
+  const fullB64 = Utilities.base64Encode(full.getBytes());
+  const smallB64 = src.small ? Utilities.base64Encode(small.getBytes()) : fullB64;
+  const fullMime = full.getContentType() || 'image/jpeg';
+  const smallMime = small.getContentType() || 'image/jpeg';
+  console.log('Photo: ' + Math.round(fullB64.length / 1024) + ' KB (base64)' +
+    (src.small ? ' · resized ' + Math.round(smallB64.length / 1024) + ' KB' : ' · as saved by the scanner (not resized)'));
+
+  // 3) The product list (sorted by id, so the prompt is the same every time and can be cached)
+  const products = fsListAll_(cfg, 'inv_products', ['name', 'brand', 'active'])
+    .map(function (d) {
+      const f = fromFields_(d.fields || {});
+      return { id: d.name.split('/').pop(), name: String(f.name || ''), brand: String(f.brand || ''), active: f.active };
+    })
+    .filter(function (x) { return x.name && x.active !== false; })
+    .sort(function (a, b) { return a.id < b.id ? -1 : 1; });
+  console.log('Products: ' + products.length);
+
+  const run = function (label, fn) {
+    const t0 = Date.now();
+    try {
+      const out = fn();
+      console.log('✓ ' + label + ': ' + (Date.now() - t0) + ' ms');
+      return out;
+    } catch (e) {
+      console.log('✗ ' + label + ': ' + (Date.now() - t0) + ' ms · ' + ((e && e.message) || e));
+      return null;
+    }
+  };
+
+  // 4) Sort step: Claude fast model
+  const sorted = run('Claude sort (' + fast + ')', function () {
+    return claudeJson_(SCAN_CLASSIFY_PROMPT_, smallB64, smallMime, SCAN_CLASSIFY_SCHEMA_, fast, 1024);
+  });
+  if (sorted) console.log('   → ' + JSON.stringify(sorted));
+  const kind = sorted && (sorted.kind === 'billing' || sorted.kind === 'docket') ? sorted.kind : 'docket';
+  if (!sorted || ['billing', 'docket'].indexOf(sorted.kind) === -1) console.log('   (reading it as a docket)');
+
+  const prompt = kind === 'billing' ? scanBillingPrompt_(products) : scanDocketPrompt_(products);
+  const schema = kind === 'billing' ? SCAN_BILLING_SCHEMA_ : SCAN_DOCKET_SCHEMA_;
+  const summary = function (r) {
+    if (!r) return;
+    const lines = kind === 'billing' ? (r.written || []) : (r.lines || []);
+    console.log('   → ' + lines.length + ' line(s)' + (kind === 'docket' ? ' · form ' + r.formType + ' · ' + (r.transferType || 'no tick') : '') +
+      ' · first: ' + JSON.stringify(lines[0] || {}).slice(0, 250));
+  };
+
+  // 5) Read step: Claude main model, twice (the second should use the cached prompt)
+  summary(run('Claude read (' + main + ')', function () { return claudeJson_(prompt, smallB64, smallMime, schema, main, 8192); }));
+  run('Claude read again (cache)', function () { return claudeJson_(prompt, smallB64, smallMime, schema, main, 8192); });
+  if (src.small) {
+    if (fullB64.length <= 10 * 1024 * 1024) {
+      run('Claude read, full size', function () { return claudeJson_(prompt, fullB64, fullMime, schema, main, 8192); });
+    } else {
+      console.log('✗ Full-size photo is over 10 MB: Claude would refuse it.');
+    }
+  }
+
+  // 6) Gemini, for comparison
+  summary(run('Gemini read', function () { return geminiJson_(prompt, smallB64, smallMime, schema); }));
+}
+
+// { full, small } from a Drive file ID (small = resized to 2000 px) or a photo link (small = null)
+// { full, small } from a Drive file ID (small = resized to 2000 px) or a Firebase Storage link (small = null)
+function scanTestSource_(ref) {
+  ref = String(ref || '').trim();
+  try {
+    if (/^https:\/\//i.test(ref)) {
+      // https://firebasestorage.googleapis.com/v0/b/<bucket>/o/<path>?alt=media&token=…
+      const m = /\/v0\/b\/([^\/]+)\/o\/([^?#]+)/.exec(ref);
+      if (!m) { console.log('✗ That link isn\'t a Firebase Storage link.'); return null; }
+      const bucket = m[1];
+      const path = decodeURIComponent(m[2]);
+      // Read through storage.googleapis.com with the service account (already allowed, like the consultation audio)
+      const res = UrlFetchApp.fetch('https://storage.googleapis.com/storage/v1/b/' + encodeURIComponent(bucket) +
+        '/o/' + encodeURIComponent(path) + '?alt=media', {
+        headers: { Authorization: 'Bearer ' + getAccessToken_(getConfig_()) }, muteHttpExceptions: true,
+      });
+      if (res.getResponseCode() !== 200) {
+        console.log('✗ The photo returned HTTP ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
+        return null;
+      }
+      console.log('Photo: ' + path);
+      return { full: res.getBlob(), small: null };
+    }
+    const file = DriveApp.getFileById(ref);
+    return { full: file.getBlob(), small: scanTestResize_(file.getId(), 2000) };
+  } catch (e) {
+    console.log('✗ The photo could not be opened: ' + e);
+    return null;
+  }
 }
