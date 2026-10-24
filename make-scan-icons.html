@@ -1,0 +1,32 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Make Dermedica Scan icons</title>
+<body style="font-family:system-ui,sans-serif;padding:24px;background:#f1f5f9">
+<h1 style="margin:0 0 6px">Dermedica Scan icons</h1>
+<p style="margin:0 0 18px;color:#475569">Click each icon to download it, then put them in the <strong>img</strong> folder.</p>
+<div id="out" style="display:flex;gap:24px;align-items:flex-end;flex-wrap:wrap"></div>
+<script>
+// Square corners: iPhone and Android round the corners themselves
+const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" fill="#0f766e"/>
+  <path d="M22 20l3-5h14l3 5h6a4 4 0 0 1 4 4v20a4 4 0 0 1-4 4H16a4 4 0 0 1-4-4V24a4 4 0 0 1 4-4z" fill="#fff"/>
+  <circle cx="32" cy="34" r="9" fill="#0f766e"/>
+  <circle cx="32" cy="34" r="5.5" fill="#fff"/>
+  <circle cx="45" cy="26" r="1.8" fill="#0f766e"/>
+</svg>`;
+const img = new Image();
+img.onload = () => {
+  [180, 192, 512].forEach((n) => {
+    const c = document.createElement("canvas");
+    c.width = c.height = n;
+    c.getContext("2d").drawImage(img, 0, 0, n, n);
+    const a = document.createElement("a");
+    a.download = `scan-${n}.png`;
+    a.href = c.toDataURL("image/png");
+    a.style.cssText = "text-align:center;color:#0f172a;text-decoration:none";
+    a.innerHTML = `<img src="${a.href}" width="${Math.min(n, 160)}" style="display:block;margin:0 auto 6px;border-radius:22%"><strong>scan-${n}.png</strong>`;
+    document.getElementById("out").appendChild(a);
+  });
+};
+img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+</script>
