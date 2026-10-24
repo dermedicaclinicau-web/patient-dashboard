@@ -196,6 +196,9 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
         <div class="st-acts">
           <button type="button" class="lh-btn" data-edit="${esc(s.id)}">Edit</button>
           <button type="button" class="lh-btn" data-pin="${esc(s.id)}">Reset PIN</button>
+          <button type="button" class="lh-btn is-quiet st-pop${s.eodPopup === false ? " is-off" : ""}" data-pop="${esc(s.id)}"
+            aria-pressed="${s.eodPopup !== false}" title="Whether End of day pops up by itself before they finish">${
+            s.eodPopup === false ? "Pop-up: Off" : "Pop-up: On"}</button>
           <button type="button" class="lh-btn ${s.active ? "st-danger" : "is-primary"}" data-toggle="${esc(s.id)}">${s.active ? "Turn off" : "Turn on"}</button>
         </div>
       </div>`).join("")}</div>
@@ -486,6 +489,9 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
         <label class="fe-check st-injector"><input type="checkbox" name="injector"${s && s.injector ? " checked" : ""} />
           Injector: carries their own kit (e.g. Xeomin)</label>
         <small class="fe-note">Gives them My kit, the kit check, and kit products in treatment records. Works with any role, including Admin.</small>
+        <label class="fe-check"><input type="checkbox" name="eodPopup"${!s || s.eodPopup !== false ? " checked" : ""} />
+          Pop up End of day before they finish</label>
+        <small class="fe-note">Off: End of day doesn't open by itself. They still have the End my day button in the top bar.</small>
         <label class="lh-field"><span class="lh-label">Email (optional)</span><input type="email" name="email" maxlength="254" value="${esc(s ? s.email : "")}" /></label>
         <div class="lh-field"><span class="lh-label">Photo (optional)</span>
           <div class="st-photo-pick">
@@ -648,7 +654,7 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
       const payload = {
         id: s ? s.id : "", name: f.name.value, role: f.role.value,
         email: f.email.value, photo: f.photo.value, pin: isNew ? readPin(form) : "", access,
-        injector: f.injector.checked,
+        injector: f.injector.checked, eodPopup: f.eodPopup.checked,
         providerNo: f.providerNo.value, prescriberNo: f.prescriberNo.value,
         ahpraNo: f.ahpraNo.value, quals: f.quals.value,schedule: sr.schedule,
       };
@@ -748,6 +754,21 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
       showToast(errText(ex));
     }
   }
+
+  // One click: changes straight away, put back if the save fails
+  async function togglePopup(s, btn) {
+    if (!s || btn.disabled) return;
+    const on = s.eodPopup === false;
+    const set = (v) => { list = list.map((x) => (x.id === s.id ? { ...x, eodPopup: v } : x)); renderStaff(); };
+    set(on);
+    try {
+      await api("setEodPopup", { id: s.id, on });
+      showToast(`End of day pop-up ${on ? "on" : "off"} for ${s.name}. It applies within about 15 minutes.`);
+    } catch (ex) {
+      set(!on);
+      showToast(errText(ex));
+    }
+  }
   /* ---------- Events ---------- */
   root.addEventListener("click", async (e) => {
     const t = e.target;
@@ -757,6 +778,8 @@ export function mountStaffManager(container, { staff: me = null } = {}) {
     if (ed) { editStaff(find(ed.dataset.edit)); return; }
     const pn = t.closest("[data-pin]");
     if (pn) { resetPin(find(pn.dataset.pin)); return; }
+    const pp = t.closest("[data-pop]");
+    if (pp) { togglePopup(find(pp.dataset.pop), pp); return; }
     const tg = t.closest("[data-toggle]");
     if (tg) { if (!tg.disabled) toggle(find(tg.dataset.toggle), tg); return; }
     if (t.closest('[data-act="add-role"]')) { addRole(); return; }

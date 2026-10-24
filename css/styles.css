@@ -8615,3 +8615,6 @@ body.ff-handing { overflow: hidden; }
 
 .rc-appt { color: #0f766e; font-weight: 600; }
 .rc-tag.is-cb { background: #fef3c7; color: #92400e; }
+
+.st-pop { min-width: 7.5rem; }
+.st-pop.is-off { color: #94a3b8; border-style: dashed; }

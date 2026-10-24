@@ -155,6 +155,7 @@ function getStaffDocs_() {
       ahpraNo: field_(f, 'AHPRA Number'),
       quals: field_(f, 'Qualifications'),
       schedule: f['Schedule'] ? fromValue_(f['Schedule']) : null,
+      eodPopup: !(f['EOD Popup'] && f['EOD Popup'].booleanValue === false),   // missing = on
     };
   });
   try {
@@ -2976,6 +2977,7 @@ function handleStaff_(body) {
     if (op === 'save') return staffSave_(body.staff || {}, session);
     if (op === 'resetPin') return staffResetPin_(String(body.id || ''), String(body.pin || ''), session);
     if (op === 'setActive') return staffSetActive_(String(body.id || ''), body.active === true, session);
+    if (op === 'setEodPopup') return staffSetEodPopup_(String(body.id || ''), body.on === true, session);
     if (op === 'unlock') {
       CacheService.getScriptCache().remove('pin_fails');
       staffAudit_(getConfig_(), session, 'Unlocked logins', {}, '');
@@ -2996,7 +2998,7 @@ function staffList_() {
       injector: s.injector === true,
       providerNo: s.providerNo || '', prescriberNo: s.prescriberNo || '', ahpraNo: s.ahpraNo || '', quals: s.quals || '',
       access: s.access || { allow: [], deny: [] },
-      schedule: s.schedule || null };
+      schedule: s.schedule || null, eodPopup: s.eodPopup !== false };
   }).sort(function (a, b) { return String(a.name).localeCompare(String(b.name)); });
   return { ok: true, staff: staff, roles: roleNames_(), locked: isLockedOut_() };
 }
@@ -3063,7 +3065,7 @@ function staffMySchedule_(session) {
   try { s = getStaffDocs_().filter(function (x) { return x.id === session.uid; })[0] || null; }
   catch (e) { return { ok: false, error: 'BUSY' }; }
   if (!s) return { ok: false, error: 'UNAUTHORIZED' };
-  return { ok: true, schedule: staffSchedClean_(s.schedule).schedule || null };
+  return { ok: true, schedule: staffSchedClean_(s.schedule).schedule || null, popup: s.eodPopup !== false };
 }
 
 function staffSave_(p, session) {
@@ -3086,6 +3088,7 @@ function staffSave_(p, session) {
   const sched = staffSchedClean_(p.schedule);
   if (sched.error) return { ok: false, error: sched.error };
   const schedule = sched.schedule;
+  const popupOf = (cur) => (p.eodPopup === undefined ? !(cur && cur.eodPopup === false) : p.eodPopup !== false);
 
   if (p.id) {
     const cur = all.filter(function (s) { return s.id === String(p.id); })[0];
@@ -3105,13 +3108,15 @@ function staffSave_(p, session) {
     if ((cur.quals || '') !== reg.quals) changes.push('title');
     if (JSON.stringify(cur.access || { allow: [], deny: [] }) !== JSON.stringify(access)) changes.push('access');
     if (JSON.stringify(staffSchedClean_(cur.schedule).schedule || null) !== JSON.stringify(schedule)) changes.push('work schedule');
+    const eodPopup = popupOf(cur);
+    if ((cur.eodPopup !== false) !== eodPopup) changes.push(eodPopup ? 'End of day pop-up on' : 'End of day pop-up off');
 
     // The change and its Activity entry in one write
     commitWrites_(cfg, [
       patchWrite_(cfg, STAFF_COLLECTION + '/' + cur.id, {
         'Staff Name': name, 'Role': role, 'Email address': email, 'Profile Photo': photo, 'Access': access,
         'Injector': injector, 'Provider Number': reg.providerNo, 'Prescriber Number': reg.prescriberNo,
-        'AHPRA Number': reg.ahpraNo, 'Qualifications': reg.quals, 'Schedule': schedule,
+        'AHPRA Number': reg.ahpraNo, 'Qualifications': reg.quals, 'Schedule': schedule, 'EOD Popup': eodPopup,
         'Updated At': now, 'Updated By': String(session.name || ''),
       }),
       staffAuditWrite_(cfg, session, 'Edited', { id: cur.id, name: name }, changes.join(', ')),
@@ -3129,7 +3134,7 @@ function staffSave_(p, session) {
       'Staff Name': name, 'Role': role, 'Email address': email, 'Profile Photo': photo,
       'PIN': '', 'PIN Hash': pinHash_(pin), 'Active': true, 'Access': access, 'Injector': injector,
       'Provider Number': reg.providerNo, 'Prescriber Number': reg.prescriberNo,
-      'AHPRA Number': reg.ahpraNo, 'Qualifications': reg.quals, 'Schedule': schedule,
+      'AHPRA Number': reg.ahpraNo, 'Qualifications': reg.quals, 'Schedule': schedule, 'EOD Popup': popupOf(null),
       'Created At': now, 'Created By': String(session.name || ''),
     }),
     staffAuditWrite_(cfg, session, 'Added', { id: id, name: name }, 'role ' + role),
@@ -3172,6 +3177,22 @@ function staffSetActive_(id, active, session) {
   ]);
   CacheService.getScriptCache().remove('staff_docs_v1');
   return { ok: true, firebase: firebase };
+}
+
+// Staff list → Pop-up On / Off: whether End of day opens by itself for this person
+function staffSetEodPopup_(id, on, session) {
+  const cur = staffFresh_().filter(function (s) { return s.id === id; })[0];
+  if (!cur) return { ok: false, error: 'NOT_FOUND' };
+  if ((cur.eodPopup !== false) === on) return { ok: true, on: on };
+  const cfg = getConfig_();
+  commitWrites_(cfg, [
+    patchWrite_(cfg, STAFF_COLLECTION + '/' + id, {
+      'EOD Popup': on, 'Updated At': new Date().toISOString(), 'Updated By': String(session.name || ''),
+    }),
+    staffAuditWrite_(cfg, session, on ? 'End of day pop-up on' : 'End of day pop-up off', cur, ''),
+  ]);
+  CacheService.getScriptCache().remove('staff_docs_v1');
+  return { ok: true, on: on };
 }
 
 // Only a photo uploaded into this person's own folder: staff_photos/<their id>/…

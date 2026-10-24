@@ -8,6 +8,7 @@ import { openStartOfDayEdit } from "./start-of-day.js";
 import { kitCountHtml, wireKitCount, readKitCount, kitBatchOptions } from "./kit-count.js";
 import { isRecorderBusy } from "./recorder.js";
 import { myFinish, minToText, hhmmToMin } from "./shift.js";
+import { callApi } from "./appointments.js";
 
 const esc = (s) => escapeHtml(String(s ?? "")); // always text (ratings are numbers)
 const MOON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
@@ -30,7 +31,7 @@ let onLogout = null;
 let gen = 0;
 let tick = null;
 // started / ended today, and when this person finishes (minutes after midnight)
-const st = { cfg: null, show: false, started: false, ended: false, finish: null, remind: 15, prompt: true, planAt: 0, dayKey: "" };
+const st = { cfg: null, show: false, started: false, ended: false, finish: null, remind: 15, prompt: true, popup: true, planAt: 0, dayKey: "" };
 
 const nowMin = () => { const n = new Date(); return n.getHours() * 60 + n.getMinutes(); };
 const nudgeFrom = () => {
@@ -67,14 +68,16 @@ async function refreshDay() {
 }
 
 async function plan() {
-  st.planAt = Date.now() + 15 * 60000;   // worked out again every 15 minutes (appointments change)
+  st.planAt = Date.now() + 15 * 60000;   // worked out again every 15 minutes (appointments and settings change)
   try { st.finish = (await myFinish(me, st.cfg)).finish; }
   catch (err) { console.warn("Finish time not worked out:", err); }
+  try { const r = await callApi({ action: "staff", op: "mySchedule" }); st.popup = r.popup !== false; }
+  catch (err) { console.warn("Pop-up setting not read:", err); }
 }
 
 // Opens End of day by itself once it's time, but never on top of another window or during a recording
 function maybePrompt() {
-  if (!endOfDayPending() || !st.prompt) return;
+  if (!endOfDayPending() || !st.prompt || !st.popup) return;   // clinic-wide setting, then this person's
   if (nowMin() < nudgeFrom() || Date.now() < snoozedUntil()) return;
   if (document.visibilityState !== "visible" || document.querySelector("dialog[open]")) return;
   if (isRecorderBusy()) return;
@@ -172,7 +175,7 @@ export function teardownEndOfDay() {
   me = null;
   clearInterval(tick);
   tick = null;
-  Object.assign(st, { cfg: null, show: false, started: false, ended: false, finish: null, planAt: 0, dayKey: "" });
+  Object.assign(st, { cfg: null, show: false, started: false, ended: false, finish: null, popup: true, planAt: 0, dayKey: "" });
   if (btn) { btn.hidden = true; btn.innerHTML = ""; btn.classList.remove("is-done", "is-nudge"); }
   btn = null;
   document.querySelectorAll("dialog.eod-dlg, dialog.eod-ask").forEach((d) => d.remove());
