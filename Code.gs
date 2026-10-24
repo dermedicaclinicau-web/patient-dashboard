@@ -6328,22 +6328,34 @@ function scanDocket_(body) {
 
 function scanDocketPrompt_(products) {
   return [
-    'You are reading a photo of a supplier\'s delivery docket (packing slip, delivery note or tax invoice) that came with',
-    'a delivery to Dermedica, a skin clinic. Dermedica is always the CUSTOMER, never the supplier.',
+    'You are reading a photo of a delivery docket for Dermedica, a skin clinic. Dermedica is always the CUSTOMER, never the supplier.',
+    'It is either a SUPPLIER\'s docket (packing slip, delivery note or tax invoice, with their letterhead) or Dermedica\'s own',
+    'printed "Delivery Docket Form" (title "Delivery Docket Form", tick boxes "New delivery from Supplier" and',
+    '"Internal transfer from JT store").',
     '',
     'Read:',
-    '1. supplier: the company that sent the goods (from the letterhead or logo).',
-    '2. docketNumber: the docket, delivery note or invoice number. docketDate: its date as YYYY-MM-DD.',
-    '3. poNumber: the clinic\'s purchase order number if printed (often labelled "PO", "Your ref", "Customer order", "Order no").',
-    '4. Every product line: the description as printed (text), the product code, the quantity SUPPLIED (not ordered;',
-    '   back-ordered or not supplied = 0), the unit (box, vial, each…), the batch or lot number and the expiry date',
-    '   (YYYY-MM-DD, or YYYY-MM if only the month is printed). If one product has several batches, give one line per batch.',
-    '   Ignore freight, GST, discounts and totals.',
-    '5. If someone has handwritten or stamped who received it and when (a "Received by" box or signature line):',
-    '   receivedBy (the name), receivedDate (YYYY-MM-DD) and receivedTime (24-hour HH:MM). Otherwise "".',
+    '1. formType: "dermedica" for Dermedica\'s own Delivery Docket Form, otherwise "supplier".',
+    '2. transferType (Dermedica form only): "transfer" if "Internal transfer from JT store" is ticked, "delivery" if',
+    '   "New delivery from Supplier" is ticked, "" if neither or it\'s a supplier docket. A tick, cross or scribble in or',
+    '   over the box counts as ticked.',
+    '3. supplier: the company that sent the goods (letterhead or logo, or the name written next to "New delivery from Supplier").',
+    '   "" for an internal transfer.',
+    '4. docketNumber: the docket, delivery note or invoice number. docketDate: its date as YYYY-MM-DD.',
+    '5. poNumber: the clinic\'s purchase order number if printed (often labelled "PO", "Your ref", "Customer order", "Order no").',
+    '6. Every product line: the description as written (text), the product code, the quantity SUPPLIED (not ordered;',
+    '   back-ordered or not supplied = 0), the unit, the batch or lot number and the expiry date (YYYY-MM-DD, or YYYY-MM',
+    '   if only the month is written). Ignore freight, GST, discounts and totals.',
+    '   BATCHES: if one product row lists several batch numbers (one under another in the batch column), give one line per',
+    '   batch number written, with qty 1 each, even if the same batch is written more than once. If only one batch is',
+    '   written, use the row\'s quantity. formQty: the number in the row\'s Qty column (the same on every line of that row).',
+    '   toShelf / toJt (Dermedica form only): the numbers written in the "To Store Rm" and "To JT" columns for that row,',
+    '   or null if empty.',
+    '7. Who received it: receivedBy (the name), receivedDate (YYYY-MM-DD, Australian day first: 16/10/26 = 2026-10-16)',
+    '   and receivedTime (24-hour HH:MM). Otherwise "".',
     '',
     'Match every product line to ONE id from the product list below, using the brand, name, strength and size.',
-    'If nothing fits, use "". Never make up an id. Give each match a confidence from 0 to 1.',
+    'Short names are common: "Balance" = Belotero Balance, "Radiesse" = Radiesse. If nothing fits, use "". Never make up an id.',
+    'Give each match a confidence from 0 to 1.',
     '',
     'Products (id | brand | name):',
     products.map((p) => p.id + ' | ' + p.brand + ' | ' + p.name).join('\n'),
@@ -6353,6 +6365,8 @@ function scanDocketPrompt_(products) {
 const SCAN_DOCKET_SCHEMA_ = {
   type: 'OBJECT',
   properties: {
+    formType: { type: 'STRING', enum: ['supplier', 'dermedica'] },
+    transferType: { type: 'STRING', enum: ['delivery', 'transfer', ''], description: 'Dermedica form only: which box is ticked' },
     supplier: { type: 'STRING' },
     docketNumber: { type: 'STRING' },
     docketDate: { type: 'STRING', description: 'YYYY-MM-DD, or empty' },
@@ -6361,9 +6375,12 @@ const SCAN_DOCKET_SCHEMA_ = {
     receivedDate: { type: 'STRING', description: 'YYYY-MM-DD, or empty' },
     receivedTime: { type: 'STRING', description: '24-hour HH:MM, or empty' },
     lines: { type: 'ARRAY', items: { type: 'OBJECT', properties: {
-      text: { type: 'STRING', description: 'The line as printed' },
+      text: { type: 'STRING', description: 'The line as written' },
       code: { type: 'STRING' },
-      qty: { type: 'INTEGER', description: 'Quantity supplied' },
+      qty: { type: 'INTEGER', description: 'Quantity supplied (for this batch)' },
+      formQty: { type: 'INTEGER', nullable: true, description: "The row's Qty column" },
+      toShelf: { type: 'INTEGER', nullable: true },
+      toJt: { type: 'INTEGER', nullable: true },
       unit: { type: 'STRING' },
       batch: { type: 'STRING' },
       expiry: { type: 'STRING', description: 'YYYY-MM-DD or YYYY-MM, or empty' },
@@ -6373,6 +6390,7 @@ const SCAN_DOCKET_SCHEMA_ = {
   },
   required: ['supplier', 'docketNumber', 'lines'],
 };
+
 
 /* ---------- Scanner: product prescriptions ---------- */
 // body: { op: "rx", image, mime, rxProducts: ["Epiduo", "Fading Cream", …] }   (the clinic's prescription product names)

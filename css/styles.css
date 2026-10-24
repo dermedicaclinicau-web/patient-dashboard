@@ -8543,3 +8543,17 @@ body.ff-handing { overflow: hidden; }
 .scan-choose-btn svg { width: 42px; height: 42px; color: #0f766e; }
 .scan-choose-btn:hover, .scan-choose-btn:active { border-color: #0f766e; background: #f0fdfa; }
 .scan-shot-sm img { max-height: 220px; object-fit: contain; }
+
+/* Scanner → Delivery Docket Form: new delivery or internal transfer */
+.dk-mode { display: grid; gap: .4rem; margin: .8rem 0; }
+.dk-mode-btns { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
+.dk-mode-btn {
+  display: grid; gap: .15rem; text-align: left; padding: .7rem .85rem; border-radius: 12px;
+  border: 1.5px solid var(--line, #e2e8f0); background: var(--card, #fff); cursor: pointer; font: inherit;
+}
+.dk-mode-btn small { color: var(--muted, #64748b); font-size: .8rem; }
+.dk-mode-btn.is-on { border-color: #0f766e; background: #f0fdfa; box-shadow: 0 0 0 3px rgba(15, 118, 110, .12); }
+.dk-mode-btn.is-on strong { color: #0f766e; }
+.scan-flag.is-ok { background: #ecfdf5; color: #047857; }
+.dk-f-jt { flex: 1 1 14rem; }
+.dk-f-jt select { width: 100%; }

@@ -369,12 +369,17 @@ export function reviewDocket(result, products) {
     receivedByText: String(result.receivedBy || "").slice(0, 120),
     receivedDate: ymd(result.receivedDate),
     receivedTime: /^\d{2}:\d{2}$/.test(String(result.receivedTime || "")) ? result.receivedTime : "",
+    formType: result.formType === "dermedica" ? "dermedica" : "supplier",
+    transferType: ["delivery", "transfer"].includes(result.transferType) ? result.transferType : "",
     lines: joinDocketLines((result.lines || []).slice(0, 60).map((l) => ({
       productId: known.has(String(l.productId || "")) ? String(l.productId) : "",
       text: String(l.text || "").slice(0, 150), code: String(l.code || "").slice(0, 60),
       qty: Math.max(0, parseInt(l.qty, 10) || 0), unit: String(l.unit || "").slice(0, 30),
       batch: String(l.batch || "").slice(0, 60), expiry: expiryOf(l.expiry),
       conf: conf(l.confidence), fixed: false, count: 1,
+      formQty: Number.isFinite(Number(l.formQty)) && l.formQty !== null ? parseInt(l.formQty, 10) : null,
+      toShelf: Number.isFinite(Number(l.toShelf)) && l.toShelf !== null ? parseInt(l.toShelf, 10) : null,
+      toJt: Number.isFinite(Number(l.toJt)) && l.toJt !== null ? parseInt(l.toJt, 10) : null,
     }))),
   };
 }
@@ -475,6 +480,18 @@ export async function linkDocketReceipt(scanId, receiptId) {
   if (!scanId) return;
   await updateDoc(doc(db, "scans", scanId), { status: "received", receiptId: String(receiptId || ""), linkedAt: serverTimestamp() });
 }
+
+// After an internal transfer (Delivery Docket Form → JT storage to the Shelf): the scan records what moved
+export async function markDocketTransferred(scanId, { moved = [], releases = [] } = {}) {
+  if (!scanId) return;
+  await updateDoc(doc(db, "scans", scanId), {
+    status: "transferred", transferType: "transfer",
+    moved: moved.map((m) => ({ productId: m.productId, name: m.name, qty: m.qty, unit: m.unit })).slice(0, 60),
+    releaseIds: releases.map((r) => r.id).slice(0, 40),
+    linkedAt: serverTimestamp(),
+  });
+}
+
 
 /* ---------- Product prescriptions ---------- */
 export async function readPrescription(base64, rxProducts) {

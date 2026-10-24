@@ -303,7 +303,7 @@ export async function setTracking(product, on, splits, staff) {
     ids = [...new Set([plainId("shelf"), plainId("jt"), ...snap.docs.map((d) => d.id)])];
   }
 
-  await runTransaction(db, async (tx) => {
+  return runTransaction(db, async (tx) => {
     // ---- Reads ----
     const pSnap = await tx.get(pRef);
     if (!pSnap.exists()) throw new Error("This product no longer exists.");
@@ -4187,4 +4187,130 @@ export async function listPoEmails(poId) {
     const time = Date.parse(x.sentAt || "") || (toDate(x.at) ? toDate(x.at).getTime() : 0);
     return { id: d.id, ...x, time };
   }).sort((a, b) => a.time - b.time);
+}
+
+/* ===================== Internal transfer: JT storage → Shelf (the Dermedica Delivery Docket Form) ===================== */
+
+// The JT storage batch a docket line means. Batch numbers ignore capitals and spacing; an expiry read as
+// "2027-03" matches a lot saved as "2027-03-31". → { match, sameBatch, options }
+export function findJtLot(product, lots, batch, expiry) {
+  const jt = lots.filter((l) => l.productId === product.id && l.loc === "jt" && l.qty > 0).sort(fefo);
+  if (!product.tracked) return { match: jt[0] || null, sameBatch: [], options: jt };
+  const nb = normBatch(batch);
+  const same = nb ? jt.filter((l) => normBatch(l.batch) === nb) : [];
+  const month = String(expiry || "").slice(0, 7);
+  const match = same.find((l) => !month || String(l.expiry || "").startsWith(month)) || null;
+  return { match, sameBatch: same, options: jt };
+}
+
+// lines: [{ productId, batch, expiry, qty }], with batch and expiry exactly as the JT lot has them (from findJtLot).
+// One transaction for the whole docket: JT storage → Shelf, the activity log, and the JT storage release
+// requests for these products that the move fully covers (oldest first) are approved.
+// scanId gives each product a fixed activity id, so the same docket can only move once.
+// Returns { moved: [{ productId, name, qty, unit }], releases: [{ id, productName, qty, requestedBy }] }
+export async function transferFromJt(lines, { scanId = "", note = "" } = {}, staff) {
+  const me = uid();
+  const by = who(staff);
+  const want = new Map();
+  (lines || []).forEach((l) => {
+    const pid = clip(l.productId, 60);
+    const qty = parseInt(l.qty, 10);
+    if (!pid || !(qty >= 1)) return;
+    if (!want.has(pid)) want.set(pid, []);
+    want.get(pid).push({ batch: clip(l.batch, 40), expiry: KEY_RE.test(l.expiry || "") ? l.expiry : "", qty });
+  });
+  if (!want.size) throw new Error("Nothing to move.");
+  const tag = slug(scanId) || Date.now().toString(36);
+
+  // Pending release requests for these products (each is checked again inside the transaction)
+  const relSnap = await getDocs(query(collection(db, "inv_releases"), where("status", "==", "pending")));
+  const relIds = relSnap.docs.filter((d) => want.has(String(d.data().productId || ""))).map((d) => d.id);
+
+  return runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    const prods = new Map(), moves = new Map(), lots = new Map();
+    for (const [pid, list] of want) {
+      const ps = await tx.get(doc(db, "inv_products", pid));
+      if (!ps.exists()) throw new Error("A product on this docket no longer exists.");
+      prods.set(pid, ps);
+      const mRef = doc(db, "inv_moves", `jtmove__${tag}__${pid}`);
+      moves.set(pid, { ref: mRef, snap: await tx.get(mRef) });
+      const tracked = ps.data().tracked === true;
+      for (const w of list) {
+        const b = tracked ? w.batch : "", e = tracked ? w.expiry : "";
+        for (const loc of ["jt", "shelf"]) {
+          const id = lotId(pid, loc, b, e);
+          if (!lots.has(id)) {
+            const s = await tx.get(doc(db, "inv_lots", id));
+            lots.set(id, { ref: s.ref, exists: s.exists(), qty: s.exists() ? Number(s.data().qty) || 0 : 0,
+              productId: pid, loc, batch: b, expiry: e, touched: false });
+          }
+        }
+      }
+    }
+    const rels = [];
+    for (const id of relIds) {
+      const s = await tx.get(doc(db, "inv_releases", id));
+      if (s.exists() && s.data().status === "pending") rels.push(normaliseRelease(s));
+    }
+    if ([...moves.values()].some((m) => m.snap.exists())) throw new Error("This docket has already been moved to the Shelf.");
+
+    // ---- Work out, then write ----
+    const out = [];
+    const firstLot = new Map();   // productId → the first batch moved (shown on an approved request)
+    for (const [pid, list] of want) {
+      const pd = prods.get(pid).data();
+      const tracked = pd.tracked === true;
+      const unit = String(pd.stockUnit || "item");
+      const s = pd.stock || {};
+      const stock = { shelf: Number(s.shelf) || 0, jt: Number(s.jt) || 0 };
+      const mLines = [];
+      for (const w of list) {
+        const b = tracked ? w.batch : "", e = tracked ? w.expiry : "";
+        if (tracked && (!b || !e)) throw new Error(`${pd.name}: choose which ${String(pd.batchLabel || "batch").toLowerCase()} in JT storage.`);
+        const jt = lots.get(lotId(pid, "jt", b, e));
+        const sh = lots.get(lotId(pid, "shelf", b, e));
+        if (jt.qty < w.qty) {
+          throw new Error(`${pd.name}: JT storage only has ${plural(jt.qty, unit)}${b ? ` of ${b}` : ""}, so ${w.qty} can't be moved.`);
+        }
+        jt.qty -= w.qty; jt.touched = true;
+        sh.qty += w.qty; sh.touched = true;
+        stock.jt = Math.max(0, stock.jt - w.qty);
+        stock.shelf += w.qty;
+        mLines.push({ loc: "jt", batch: b, expiry: e, delta: -w.qty }, { loc: "shelf", batch: b, expiry: e, delta: w.qty });
+        if (!firstLot.has(pid)) firstLot.set(pid, { batch: b, expiry: e });
+      }
+      tx.update(prods.get(pid).ref, { stock, stockAt: serverTimestamp() });
+      tx.set(moves.get(pid).ref, {
+        type: "move", productId: pid, productName: String(pd.name || ""), unit, lines: mLines,
+        reason: "JT storage → Shelf", note: ["Delivery docket form (internal transfer)", clip(note, 300)].filter(Boolean).join(" · "),
+        ref: clip(scanId, 40), by, byUid: me, at: serverTimestamp(),
+      });
+      out.push({ productId: pid, name: String(pd.name || ""), qty: list.reduce((a, w) => a + w.qty, 0), unit });
+    }
+    lots.forEach((l) => {
+      if (!l.touched) return;
+      tx.set(l.ref, { productId: l.productId, loc: l.loc, batch: l.batch, expiry: l.expiry, qty: l.qty,
+        updatedAt: serverTimestamp(), ...(l.exists ? {} : { createdAt: serverTimestamp() }) }, { merge: true });
+    });
+
+    // Release requests this move covers in full, oldest first
+    const left = new Map(out.map((o) => [o.productId, o.qty]));
+    const approved = [];
+    rels.sort((a, b) => (a.createdAt ? a.createdAt.getTime() : 0) - (b.createdAt ? b.createdAt.getTime() : 0))
+      .forEach((r) => {
+        const n = left.get(r.productId) || 0;
+        if (r.qty > n) return;
+        left.set(r.productId, n - r.qty);
+        const f = firstLot.get(r.productId) || { batch: "", expiry: "" };
+        tx.update(doc(db, "inv_releases", r.id), {
+          status: "approved", batch: f.batch, expiry: f.expiry,
+          response: "Moved to the Shelf with the delivery docket form", scanId: clip(scanId, 40),
+          handledBy: by, handledByUid: me, handledAt: serverTimestamp(), updatedAt: serverTimestamp(),
+        });
+        approved.push({ id: r.id, productName: r.productName, qty: r.qty, requestedBy: r.requestedBy });
+      });
+
+    return { moved: out, releases: approved };
+  });
 }
