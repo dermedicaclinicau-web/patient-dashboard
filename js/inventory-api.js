@@ -34,6 +34,8 @@ export const MOVE_TYPES = {
   sale: "Sold",
   tracking: "Batch & expiry changed",
   undo: "Undone",
+  return: "Returned by a patient",
+  "supplier-return": "Returned to supplier",
 };
 export const EXPIRY_SOON_DAYS = 60;
 
@@ -2798,7 +2800,9 @@ export const INV_OUTCOMES = {
     help: "Sold before the count, but its invoice was uploaded after it. Closed automatically when the invoices were uploaded." },
   "late-record": { label: "Used before the count", adjust: false, system: true,
     help: "Used on a patient before the count, but recorded afterwards (from a paper record). Closed automatically when it was recorded." },
-  baseline: { label: "Starting stock set", adjust: false, system: true,
+  "late-return": { label: "Returned before the count", adjust: false, system: true,
+    help: "A patient returned it before the count, but it was recorded afterwards. Closed automatically when it was recorded." },
+   baseline: { label: "Starting stock set", adjust: false, system: true,
     help: "Closed when the starting stock was set from an opening count." },
 };
 
@@ -3845,17 +3849,28 @@ async function backdateCounts(applied, staff, { kind = "sale", before = null } =
   const out = { lines: 0, closed: 0, skipped: [], failed: 0 };
   const list = applied.filter((a) => (a.rows || []).some((r) => Number(r.taken) > 0));
   if (!list.length) return out;
-  const T = kind === "use" ? {
-    outcome: "late-record", line: "Used before the count; recorded later",
-    inv: "Used on a patient before the count; recorded afterwards. Stock wasn't changed.",
-    fixed: "Corrected: used before the count, recorded later", closed: "Closed: used before the count, recorded later",
-    what: "used on patients before the count", count: "Corrected for treatments recorded after the count",
-  } : {
-    outcome: "late-invoice", line: "Sold before the count; invoice uploaded later",
-    inv: "Sold before the count; the invoice was uploaded after it. Stock wasn't changed.",
-    fixed: "Corrected: sold before the count, invoice uploaded later", closed: "Closed: sold before the count, invoice uploaded later",
-    what: "sold on invoices dated before the count", count: "Corrected for invoices uploaded after the count",
+  const TEXT = {
+    use: {
+      outcome: "late-record", line: "Used before the count; recorded later",
+      inv: "Used on a patient before the count; recorded afterwards. Stock wasn't changed.",
+      fixed: "Corrected: used before the count, recorded later", closed: "Closed: used before the count, recorded later",
+      what: "used on patients before the count", count: "Corrected for treatments recorded after the count",
+    },
+    sale: {
+      outcome: "late-invoice", line: "Sold before the count; invoice uploaded later",
+      inv: "Sold before the count; the invoice was uploaded after it. Stock wasn't changed.",
+      fixed: "Corrected: sold before the count, invoice uploaded later", closed: "Closed: sold before the count, invoice uploaded later",
+      what: "sold on invoices dated before the count", count: "Corrected for invoices uploaded after the count",
+    },
+    // Returns put stock back, so the count's digital goes UP instead of down
+    return: {
+      outcome: "late-return", line: "Returned before the count; recorded later", add: true,
+      inv: "A patient returned it before the count; it was recorded afterwards. Stock wasn't changed.",
+      fixed: "Corrected: returned before the count, recorded later", closed: "Closed: returned before the count, recorded later",
+      what: "returned by patients before the count", count: "Corrected for returns recorded after the count",
+    },
   };
+  const T = TEXT[kind] || TEXT.sale;
   const from = addDaysKey(list.map((a) => a.date).sort()[0], 1);
   const counts = (await listCounts({ from }))
     .filter((c) => c.kind === "opening" && !c.superseded && (!before || (c.at && c.at < before)));
@@ -3905,7 +3920,8 @@ async function backdateCounts(applied, staff, { kind = "sale", before = null } =
           const l = lines[i];
           if (!l) return;
           if (["accepted", "explained", "baseline"].includes(l.status)) { skipped.push(`${l.productName} (${c.dateKey})`); return; }
-          l.system = Math.max(0, (Number(l.system) || 0) - n);
+          const d = T.add ? -n : n;                                         // NEW
+          l.system = Math.max(0, (Number(l.system) || 0) - d);              // was - n
           l.variance = (Number(l.counted) || 0) - l.system;
           l.lateSales = (Number(l.lateSales) || 0) + n;
           l.lateSaleIds = [...(l.lateSaleIds || []), ...ids].slice(-50);
@@ -3915,10 +3931,10 @@ async function backdateCounts(applied, staff, { kind = "sale", before = null } =
           const iSnap = invs.get(l.investigationId);
           if (!iSnap || !iSnap.exists() || iSnap.data().status === "closed") return;
           const x = iSnap.data();
-          const digital = Math.max(0, (Number(x.digital) || 0) - n);
+          const digital = Math.max(0, (Number(x.digital) || 0) - d);        // was - n
           const upd = { digital, variance: (Number(x.counted) || 0) - digital, updatedAt: serverTimestamp() };
           if (x.recount) {   // the recount was also before it was entered
-            const rd = Math.max(0, (Number(x.recount.digital) || 0) - n);
+            const rd = Math.max(0, (Number(x.recount.digital) || 0) - d);   // was - n
             upd.recount = { ...x.recount, digital: rd, variance: (Number(x.recount.counted) || 0) - rd };
           }
           const left = upd.recount ? upd.recount.variance : upd.variance;
@@ -4319,4 +4335,200 @@ export async function transferFromJt(lines, { scanId = "", note = "", approve = 
 
     return { moved: out, releases: approved };
   });
+}
+
+/* ===================== Returns: from a patient, or back to the supplier ===================== */
+
+export const RETURN_REASONS = ["Faulty", "Wrong item sent", "Expired or short-dated", "Recall", "Damaged in delivery", "Other"];
+export const RETURN_STATUS = { awaiting: "Waiting for credit", credited: "Credited", none: "No credit" };
+
+// A patient brings a product back. resell: sealed, so it goes back into stock (that place and batch).
+// Otherwise it's recorded only: it left stock when it was sold. invoiceId links it to that Timely sale,
+// so one sale can't be returned more times than it sold. Opening counts done since its date are corrected.
+export async function recordPatientReturn(product, {
+  date, qty, resell = true, loc = "shelf", batch = "", expiry = "", invoiceId = "", patientName = "", note = "",
+}, staff) {
+  if (isKitProduct(product) || isSharedProduct(product)) throw new Error("Kit and shared products can't be returned this way.");
+  const today = dayKey();
+  if (!KEY_RE.test(date || "") || date > today) throw new Error("Choose the date it was returned. It can't be in the future.");
+  const n = parseInt(qty, 10);
+  if (!(n >= 1 && n <= 99)) throw new Error("Enter how many (1 to 99).");
+  const tracked = product.tracked === true;
+  const place = loc === "jt" ? "jt" : "shelf";
+  const b = resell && tracked ? clip(batch, 40) : "";
+  const e = resell && tracked && KEY_RE.test(expiry || "") ? expiry : "";
+  if (resell && tracked && (!b || !e)) {
+    throw new Error(`Enter its ${batchName(product).toLowerCase()} number and expiry date (they're on the box).`);
+  }
+  const inv = clip(invoiceId, 60);
+  const pname = clip(patientName, 150);
+  const why = clip(note, 300);
+  const me = uid();
+  const by = who(staff);
+
+  // Already returned against this sale (checked again against the sale inside the transaction)
+  const saleRef = inv ? doc(db, "inv_sales", `invoice__${slug(inv)}__${product.id}`) : null;
+  let before = 0;
+  if (saleRef) {
+    const snap = await getDocs(query(collection(db, "inv_returns"), where("saleId", "==", saleRef.id)));
+    before = snap.docs.reduce((a, d) => a + (Number(d.data().qty) || 0), 0);
+  }
+
+  const pRef = doc(db, "inv_products", product.id);
+  const lRef = resell ? doc(db, "inv_lots", lotId(product.id, place, b, e)) : null;
+  const rRef = doc(collection(db, "inv_returns"));
+
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    const pSnap = await tx.get(pRef);
+    if (!pSnap.exists()) throw new Error("This product no longer exists.");
+    const sSnap = saleRef ? await tx.get(saleRef) : null;
+    const lSnap = lRef ? await tx.get(lRef) : null;
+    if (sSnap) {
+      if (!sSnap.exists()) throw new Error(`No sale of ${product.name} on invoice ${inv} was found. Check the number, or leave it empty.`);
+      const line = (sSnap.data().lines || []).find((l) => l.productId === product.id);
+      const sold = line ? Number(line.qty) || 0 : 0;
+      if (before + n > sold) {
+        throw new Error(`Invoice ${inv} sold ${plural(sold, product.stockUnit)}${
+          before ? `, and ${before} ${before === 1 ? "has" : "have"} already been returned` : ""}.`);
+      }
+    }
+
+    // ---- Writes ----
+    const pd = pSnap.data();
+    const unit = String(pd.stockUnit || product.stockUnit || "item");
+    if (lRef) {
+      const have = lSnap.exists() ? Number(lSnap.data().qty) || 0 : 0;
+      tx.set(lRef, {
+        productId: product.id, loc: place, batch: b, expiry: e, qty: have + n,
+        updatedAt: serverTimestamp(), ...(lSnap.exists() ? {} : { createdAt: serverTimestamp() }),
+      }, { merge: true });
+      const st = pd.stock || {};
+      const stock = { shelf: Number(st.shelf) || 0, jt: Number(st.jt) || 0 };
+      stock[place] += n;
+      tx.update(pRef, { stock, stockAt: serverTimestamp() });
+    }
+    logMove(tx, staff, {
+      type: "return", productId: product.id, productName: String(pd.name || product.name), unit,
+      lines: lRef ? [{ loc: place, batch: b, expiry: e, delta: n }] : [],
+      reason: resell ? "Back in stock" : "Can't be resold",
+      note: [pname, inv && `Invoice ${inv}`, `Returned ${date}`, !resell && `${plural(n, unit)} not put back`, why]
+        .filter(Boolean).join(" · ").slice(0, 500),
+      ref: rRef.id, effectiveDate: date,
+    });
+    tx.set(rRef, {
+      kind: "patient", productId: product.id, productName: String(pd.name || product.name), unit,
+      date, qty: n, resell: !!resell, loc: resell ? place : "", batch: b, expiry: e,
+      invoiceId: inv, saleId: saleRef ? saleRef.id : "", patientName: pname, note: why,
+      status: "none", by, byUid: me, at: serverTimestamp(),
+    });
+  });
+
+  // Back on the shelf before a count that was done before this was entered: that count is corrected
+  const backdated = resell && date < today
+    ? await backdateCounts([{ saleId: rRef.id, productId: product.id, date, loc: place, rows: [{ batch: b, expiry: e, taken: n }] }],
+      staff, { kind: "return" })
+      .catch((err) => { console.warn("Counts not corrected:", err); return { lines: 0, closed: 0, skipped: [], failed: 1 }; })
+    : { lines: 0, closed: 0, skipped: [], failed: 0 };
+  return { id: rRef.id, backdated };
+}
+
+// Stock sent back to the supplier. It comes off stock now (not wastage), and waits for its credit.
+// lot: { loc, batch, expiry }. poId (optional): the order it came on, which gets a line in its history.
+export async function recordSupplierReturn(product, {
+  lot, qty, reason, supplierId, supplierName = "", poId = "", raNumber = "", credit = "", noCredit = false, note = "",
+}, staff) {
+  const n = parseInt(qty, 10);
+  if (!(n >= 1 && n <= 9999)) throw new Error("Enter how many are going back.");
+  if (!lot) throw new Error("Choose which stock is going back.");
+  const why = RETURN_REASONS.includes(reason) ? reason : "Other";
+  const text = clip(note, 300);
+  if (why === "Other" && !text) throw new Error("Add a note saying why it's going back.");
+  const sid = clip(supplierId, 60);
+  if (!sid) throw new Error("Choose the supplier.");
+  const tracked = product.tracked === true;
+  const place = lot.loc === "jt" ? "jt" : "shelf";
+  const b = tracked ? clip(lot.batch, 40) : "";
+  const e = tracked && KEY_RE.test(lot.expiry || "") ? lot.expiry : "";
+  if (tracked && (!b || !e)) throw new Error(`Choose which ${batchName(product).toLowerCase()} is going back.`);
+  const amount = noCredit ? null : moneyOrNull(credit);
+  const ra = clip(raNumber, 60);
+  const me = uid();
+  const by = who(staff);
+
+  const pRef = doc(db, "inv_products", product.id);
+  const lRef = doc(db, "inv_lots", lotId(product.id, place, b, e));
+  const rRef = doc(collection(db, "inv_returns"));
+  const poRef = poId ? doc(db, "inv_pos", clip(poId, 60)) : null;
+
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    const pSnap = await tx.get(pRef);
+    const lSnap = await tx.get(lRef);
+    const poSnap = poRef ? await tx.get(poRef) : null;
+    if (!pSnap.exists()) throw new Error("This product no longer exists.");
+    if (poSnap && !poSnap.exists()) throw new Error("That purchase order no longer exists.");
+    const pd = pSnap.data();
+    const unit = String(pd.stockUnit || product.stockUnit || "item");
+    const have = lSnap.exists() ? Number(lSnap.data().qty) || 0 : 0;
+    if (have < n) throw new Error(`Only ${plural(have, unit)} in ${locLabel(place)}${b ? ` (${batchText(product, b)})` : ""}.`);
+    const poNumber = poSnap ? String(poSnap.data().number || "") : "";
+    const sname = clip(supplierName, 120);
+
+    // ---- Writes ----
+    tx.update(lRef, { qty: have - n, updatedAt: serverTimestamp() });
+    const st = pd.stock || {};
+    const stock = { shelf: Number(st.shelf) || 0, jt: Number(st.jt) || 0 };
+    stock[place] = Math.max(0, stock[place] - n);
+    tx.update(pRef, { stock, stockAt: serverTimestamp() });
+    logMove(tx, staff, {
+      type: "supplier-return", productId: product.id, productName: String(pd.name || product.name), unit,
+      lines: [{ loc: place, batch: b, expiry: e, delta: -n }],
+      reason: why,
+      note: [sname && `To ${sname}`, poNumber, ra && `Return no. ${ra}`,
+        amount !== null ? `Credit $${amount.toFixed(2)} expected` : noCredit ? "No credit expected" : "", text]
+        .filter(Boolean).join(" · ").slice(0, 500),
+      ref: rRef.id, poId: poRef ? poRef.id : "",
+    });
+    tx.set(rRef, {
+      kind: "supplier", productId: product.id, productName: String(pd.name || product.name), unit,
+      date: dayKey(), qty: n, loc: place, batch: b, expiry: e, reason: why, note: text,
+      supplierId: sid, supplierName: sname, poId: poRef ? poRef.id : "", poNumber, raNumber: ra,
+      credit: amount, status: noCredit ? "none" : "awaiting",
+      by, byUid: me, at: serverTimestamp(),
+    });
+    if (poRef) {
+      tx.update(poRef, {
+        returnIds: arrayUnion(rRef.id), updatedAt: serverTimestamp(), updatedBy: by,
+        events: arrayUnion({ at: new Date().toISOString(), by, action: "Stock returned to supplier",
+          note: [`${plural(n, unit)} × ${pd.name || product.name}`, why, ra && `Return no. ${ra}`].filter(Boolean).join(" · ").slice(0, 300) }),
+      });
+    }
+  });
+  return rRef.id;
+}
+
+// The supplier's credit note arrived. Only once.
+export async function markReturnCredited(id, { amount = "", creditNoteNo = "", note = "" }, staff) {
+  const ref = doc(db, "inv_returns", id);
+  await runTransaction(db, async (tx) => {
+    const s = await tx.get(ref);
+    if (!s.exists()) throw new Error("This return no longer exists.");
+    if (s.data().status !== "awaiting") throw new Error("Someone has already marked this one. Reload to see it.");
+    tx.update(ref, {
+      status: "credited", creditReceived: moneyOrNull(amount), creditNoteNo: clip(creditNoteNo, 60), creditNote: clip(note, 300),
+      creditedBy: who(staff), creditedByUid: uid(), creditedAt: serverTimestamp(),
+    });
+  });
+}
+
+// Returns for one product (or all), newest first
+export async function listReturns({ productId = "" } = {}) {
+  const col = collection(db, "inv_returns");
+  const snap = await getDocs(productId ? query(col, where("productId", "==", productId)) : col);
+  return snap.docs.map((d) => {
+    const x = d.data() || {};
+    return { id: d.id, ...x, qty: Number(x.qty) || 0, credit: x.credit ?? null, creditReceived: x.creditReceived ?? null,
+      at: toDate(x.at), creditedAt: toDate(x.creditedAt) };
+  }).sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0));
 }

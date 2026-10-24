@@ -288,7 +288,7 @@ service cloud.firestore {
       allow create: if request.resource.data.byUid == request.auth.uid
         && (invManage()
           || (invReport() && request.resource.data.type in ['count', 'kit-count', 'use-correct', 'kit-correct'])
-          || (invOrder() && request.resource.data.type == 'move')
+          || (invOrder() && request.resource.data.type in ['move', 'return', 'supplier-return'])
           || (invReceive() && request.resource.data.type == 'receive')
           || (invKit() && request.resource.data.type in ['kit-take', 'kit-open', 'kit-return', 'kit-discard', 'kit-use', 'kit-borrow'])
           || (invJt() && request.resource.data.type == 'release')
@@ -428,7 +428,7 @@ service cloud.firestore {
                'digital', 'variance', 'recount', 'status', 'outcome', 'outcomeNote', 'applied',
                'closedAt', 'closedBy', 'closedByUid', 'events', 'updatedAt'])
           && (request.resource.data.status == resource.data.status
-            || (request.resource.data.status == 'closed' && request.resource.data.outcome in ['late-invoice', 'late-record'])));
+            || (request.resource.data.status == 'closed' && request.resource.data.outcome in ['late-invoice', 'late-record', 'late-return'])));
       allow delete: if false;
     }
 
@@ -1252,6 +1252,22 @@ match /inv_count_drafts/{id} {
         && request.resource.data.voided == false;
       allow update, delete: if false;
     }
+
+    // Returns: from patients, and back to suppliers. Supplier returns wait for their credit, marked once.
+    match /inv_returns/{id} {
+      allow read: if isStaff();
+      allow create: if invOrder() && request.resource.data.byUid == request.auth.uid
+        && request.resource.data.kind in ['patient', 'supplier']
+        && request.resource.data.qty is int && request.resource.data.qty >= 1
+        && request.resource.data.status in ['none', 'awaiting'];
+      allow update: if invOrder() && resource.data.status == 'awaiting'
+        && request.resource.data.status == 'credited'
+        && request.resource.data.creditedByUid == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+             'status', 'creditReceived', 'creditNoteNo', 'creditNote', 'creditedBy', 'creditedByUid', 'creditedAt']);
+      allow delete: if false;
+    }
+    
     // Billing check: "Mark checked" notes, one per mismatch. Saved once, never changed.
     match /inv_billing_checks/{id} {
       allow read: if isStaff();

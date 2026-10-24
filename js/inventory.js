@@ -9,6 +9,7 @@ import {
   isSharedProduct, listOpenContainers, openContainer, finishContainer, openState, expectedUses, FINISH_REASONS,
   setStartingStock, PO_EMAIL_TAGS, fillPoTemplate, poNumberBase, PO_ORDER_TAG_RE, setTracking, correctLot,
   listKits, listKitDays, recordManualSale, undoMove, recordPaperUse, isKitProduct,
+  recordPatientReturn, recordSupplierReturn, markReturnCredited, listReturns, RETURN_REASONS, RETURN_STATUS,
 } from "./inventory-api.js";
 import { searchPatients } from "./task-runner.js";
 import { openSetKitDialog } from "./kit-admin.js";
@@ -27,6 +28,7 @@ import { renderServiceLinks } from "./service-links.js";
 import { enableUiText } from "./ui-text.js";
 import { openInvoiceLinks } from "./invoice-links.js";
 import { renderBillingCheck } from "./billing-check.js";
+
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -1786,6 +1788,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const dlg = openDialog("inv-dlg inv-pdlg", '<div class="lh-form" data-role="pd"></div>');
     const box = dlg.querySelector('[data-role="pd"]');
     let pdMoves = [];   // the activity shown, for Undo / Used on a patient…
+    let pdReturns = [];   // the returns shown, for Credit received
     const canOpen = canMove || can("consult.record");
     function sharedSecHtml(p) {
       const list = st.open.filter((c) => c.productId === p.id);
@@ -2124,6 +2127,231 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       });
     }
 
+    const returnText = (p, r) => (r.kind === "supplier"
+      ? [`${plural(r.qty, p.stockUnit)} to ${r.supplierName || "the supplier"}`, r.reason, r.poNumber,
+          r.raNumber && `Return no. ${r.raNumber}`, r.credit !== null && `credit ${money(r.credit)} expected`].filter(Boolean).join(" · ")
+      : [`${plural(r.qty, p.stockUnit)} from ${r.patientName || "a patient"}`,
+          r.resell ? `back in ${locLabel(r.loc)}${r.batch ? ` (${batchText(p, r.batch)})` : ""}` : "not resellable",
+          r.invoiceId && `Invoice ${r.invoiceId}`].filter(Boolean).join(" · "));
+
+    // Only shown once the product has a return
+    const returnsHtml = (p, list) => (!list.length ? "" : `<div class="inv-pd-sec"><h4>Returns</h4><ul class="inv-open">${
+      list.slice(0, 10).map((r) => {
+        const s = r.kind === "supplier" ? r.status : "";
+        return `<li><span><strong>${r.kind === "supplier" ? "Back to the supplier" : "From a patient"}</strong> · ${esc(niceDate(r.date) || when(r.at))}
+            <small>${esc(returnText(p, r))}${r.by ? ` · ${esc(r.by)}` : ""}</small></span>
+          ${s ? `<span class="inv-flag is-${s === "awaiting" ? "warn" : "info"}">${esc(RETURN_STATUS[s] || s)}${
+            s === "credited" && r.creditReceived !== null ? ` ${esc(money(r.creditReceived))}` : ""}</span>` : "<span></span>"}
+          ${s === "awaiting" && canMove ? `<button type="button" class="lh-btn" data-credit="${esc(r.id)}">Credit received</button>` : "<span></span>"}</li>`;
+      }).join("")}</ul></div>`);
+
+    // A patient brings it back, or it goes back to the supplier
+    function returnDialog(p) {
+      const today = dayKey();
+      const unit = p.stockUnit;
+      const lots = lotsOf(p.id);
+      const batches = [...new Map(lots.map((l) => [`${l.batch}|${l.expiry}`, l])).values()];
+      const sups = productSuppliers(p).map((t) => supplierOf(t.supplierId)).filter(Boolean);
+      const supList = sups.length ? sups : st.suppliers.filter((s) => s.active);
+      const pos = st.pos.filter((po) => ["part", "received"].includes(po.status) && po.lines.some((l) => l.productId === p.id));
+      const each = p.cost !== null && p.cost !== undefined ? p.cost / Math.max(1, p.packSize) : null;
+      const bn = batchName(p);
+
+      const batchHtml = p.tracked ? `
+        <label class="lh-field"><span class="lh-label">${esc(bn)}</span>
+          <select class="fb-select" name="pbatch">${batches.map((l, i) =>
+            `<option value="${i}">${esc(`${batchText(p, l.batch)} · Exp ${niceDate(l.expiry)}`)}</option>`).join("")}
+            <option value="new">Another ${esc(bn.toLowerCase())}…</option></select></label>
+        <div class="inv-two" data-role="pnew" hidden>
+          <label class="lh-field"><span class="lh-label">${esc(bn)} number</span><input name="pbn" maxlength="40" autocomplete="off" /></label>
+          <label class="lh-field"><span class="lh-label">Expiry date</span><input name="pbe" type="date" /></label>
+        </div>` : "";
+      const fromHtml = p.tracked
+        ? (lots.length ? `<label class="lh-field"><span class="lh-label">Which one</span><select class="fb-select" name="slot">${lots.map((l, i) =>
+            `<option value="${i}">${esc(`${locLabel(l.loc)} · ${batchText(p, l.batch)} · Exp ${niceDate(l.expiry)} · ${plural(l.qty, unit)}`)}${
+              expiryState(l.expiry) === "expired" ? " · EXPIRED" : ""}</option>`).join("")}</select></label>`
+          : '<p class="tb-none">There is no stock to send back.</p>')
+        : `<div class="lh-field"><span class="lh-label">Taken from</span>${seg("sloc", LOCATIONS.map((l) => [l.key, `${l.label} (${p.stock[l.key]})`]),
+            p.stock.shelf > 0 ? "shelf" : "jt")}</div>`;
+
+      return new Promise((resolve) => {
+        let saved = false, creditTyped = false;
+        const d2 = openDialog("inv-dlg", `
+          <form class="lh-form" novalidate>
+            <div class="lh-dialog-head"><h3>Return: ${esc(p.name)}</h3></div>
+            <div class="lh-field">${seg("kind", [["patient", "From a patient"], ["supplier", "Back to the supplier"]], "patient")}</div>
+
+            <div data-kind="patient">
+              <p class="inv-hint">A product a patient brought back. It came off stock when it was sold, so only a sealed one goes back in.</p>
+              <div class="inv-two">
+                <label class="lh-field"><span class="lh-label">Date returned</span><input type="date" name="pdate" value="${today}" max="${today}" /></label>
+                <label class="lh-field"><span class="lh-label">How many</span>
+                  <div class="fe-num"><input class="fe-input" name="pqty" type="number" min="1" max="99" step="1" value="1" inputmode="numeric" />
+                    <span>${esc(unitPlural(unit))}</span></div></label>
+                <label class="lh-field"><span class="lh-label">Patient (optional)</span><input name="who" maxlength="150" placeholder="e.g. Jane Smith" /></label>
+                <label class="lh-field"><span class="lh-label">Timely invoice no. (optional)</span><input name="inv" maxlength="60" placeholder="e.g. 35775" />
+                  <small class="fe-note">Links it to the sale, so it can't be returned twice.</small></label>
+              </div>
+              <div class="lh-field"><span class="lh-label">Its condition</span>
+                ${seg("cond", [["resell", "Sealed: back into stock"], ["discard", "Opened or damaged: can't be resold"]], "resell")}</div>
+              <div data-role="resell">
+                <div class="lh-field"><span class="lh-label">Put back in</span>${seg("ploc", LOCATIONS.map((l) => [l.key, l.label]), "shelf")}</div>
+                ${batchHtml}
+              </div>
+            </div>
+
+            <div data-kind="supplier" hidden>
+              <p class="inv-hint">Faulty, wrong item, expired or a recall. It comes off stock now and isn't counted as wastage.</p>
+              ${fromHtml}
+              <div class="inv-two">
+                <label class="lh-field"><span class="lh-label">How many</span>
+                  <div class="fe-num"><input class="fe-input" name="sqty" type="number" min="1" step="1" value="1" inputmode="numeric" />
+                    <span>${esc(unitPlural(unit))}</span></div></label>
+                <label class="lh-field"><span class="lh-label">Supplier</span>${supList.length
+                  ? `<select class="fb-select" name="sup">${supList.map((s) => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join("")}</select>`
+                  : '<span class="tb-none">Add a supplier first, in the Suppliers tab.</span>'}</label>
+                <label class="lh-field"><span class="lh-label">Why</span>
+                  <select class="fb-select" name="reason">${RETURN_REASONS.map((r) => `<option>${esc(r)}</option>`).join("")}</select></label>
+                <label class="lh-field"><span class="lh-label">Came on order (optional)</span>
+                  <select class="fb-select" name="po"><option value="">Not linked to an order</option>${pos.map((po) =>
+                    `<option value="${esc(po.id)}">${esc(`${po.number} · ${po.supplier.name} · ${niceDate(po.orderDate)}`)}</option>`).join("")}</select></label>
+                <label class="lh-field"><span class="lh-label">Their return number (optional)</span><input name="ra" maxlength="60" placeholder="RA / authorisation no." /></label>
+                <label class="lh-field"><span class="lh-label">Credit expected, $</span>
+                  <input name="credit" type="number" min="0" step="0.01" inputmode="decimal" /></label>
+              </div>
+              <label class="fe-check"><input type="checkbox" name="noCredit" /> No credit expected (e.g. they're replacing it)</label>
+            </div>
+
+            <label class="lh-field"><span class="lh-label">Note (optional)</span><input name="note" maxlength="300" /></label>
+            <p class="lh-error" role="alert" hidden></p>
+            <div class="lh-actions">
+              <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+              <button type="submit" class="lh-btn is-primary">Record return</button>
+            </div>
+          </form>`);
+        const form = d2.querySelector("form");
+        const f = form.elements;
+        const err = d2.querySelector(".lh-error");
+        const submit = form.querySelector('[type="submit"]');
+
+        const fillCredit = () => {
+          if (creditTyped || each === null) return;
+          const n = parseInt(f.sqty.value, 10) || 0;
+          f.credit.value = n ? (Math.round(n * each * 100) / 100).toFixed(2) : "";
+        };
+        const sync = () => {
+          const k = f.kind.value;
+          d2.querySelectorAll("[data-kind]").forEach((el) => { el.hidden = el.dataset.kind !== k; });
+          d2.querySelector('[data-role="resell"]').hidden = f.cond.value !== "resell";
+          if (p.tracked) d2.querySelector('[data-role="pnew"]').hidden = f.pbatch.value !== "new";
+          f.credit.disabled = f.noCredit.checked;
+          submit.textContent = k === "patient" ? "Record return" : "Send back";
+          submit.hidden = k === "supplier" && ((p.tracked && !lots.length) || !supList.length);
+        };
+        fillCredit();
+        sync();
+        form.addEventListener("change", sync);
+        form.addEventListener("input", (e) => {
+          if (e.target.name === "credit") creditTyped = true;
+          if (e.target.name === "sqty") fillCredit();
+        });
+        d2.querySelector('[data-act="cancel"]').addEventListener("click", () => d2.close());
+
+        form.addEventListener("submit", async (e) => {
+          e.preventDefault();
+          err.hidden = true;
+          const k = f.kind.value;
+          submit.disabled = true;
+          submit.textContent = "Saving…";
+          try {
+            if (k === "patient") {
+              let batch = "", expiry = "";
+              if (f.cond.value === "resell" && p.tracked) {
+                if (f.pbatch.value === "new") {
+                  if (f.pbe.validity && f.pbe.validity.badInput) throw new Error("That expiry date doesn't exist. Check the day.");
+                  batch = f.pbn.value.trim();
+                  expiry = f.pbe.value;
+                } else {
+                  const l = batches[Number(f.pbatch.value)];
+                  batch = l.batch;
+                  expiry = l.expiry;
+                }
+              }
+              const r = await recordPatientReturn(p, {
+                date: f.pdate.value, qty: f.pqty.value, resell: f.cond.value === "resell", loc: f.ploc.value,
+                batch, expiry, invoiceId: f.inv.value, patientName: f.who.value, note: f.note.value,
+              }, staff);
+              const bd = r.backdated || {};
+              showToast([
+                f.cond.value === "resell" ? `Return recorded. ${plural(parseInt(f.pqty.value, 10), unit)} back in ${locLabel(f.ploc.value)}.`
+                  : "Return recorded. Stock wasn't changed.",
+                bd.lines ? `${bd.lines} count line${bd.lines === 1 ? "" : "s"} corrected${bd.closed ? `, ${bd.closed} investigation${bd.closed === 1 ? "" : "s"} closed` : ""}.` : "",
+                bd.skipped && bd.skipped.length ? `Already accepted, so not changed: ${bd.skipped.join(", ")}.` : "",
+              ].filter(Boolean).join(" "));
+            } else {
+              const lot = p.tracked ? lots[Number(f.slot.value)] : { loc: f.sloc.value, batch: "", expiry: "" };
+              const s = supList.find((x) => x.id === f.sup.value) || null;
+              await recordSupplierReturn(p, {
+                lot, qty: f.sqty.value, reason: f.reason.value, supplierId: s ? s.id : "", supplierName: s ? s.name : "",
+                poId: f.po.value, raNumber: f.ra.value, credit: f.credit.value, noCredit: f.noCredit.checked, note: f.note.value,
+              }, staff);
+              showToast(f.noCredit.checked ? "Returned to the supplier." : "Returned to the supplier. It's waiting for its credit.");
+            }
+            saved = true;
+            d2.close();
+          } catch (ex) {
+            console.error("Return failed:", ex);
+            err.textContent = errText(ex, "Couldn't save. Try again.");
+            err.hidden = false;
+            submit.disabled = false;
+            submit.textContent = k === "patient" ? "Record return" : "Send back";
+          }
+        });
+        d2.addEventListener("close", () => resolve(saved));
+      });
+    }
+
+    function creditDialog(r) {
+      return new Promise((resolve) => {
+        let saved = false;
+        const d2 = openDialog("inv-dlg", `
+          <form class="lh-form" novalidate>
+            <div class="lh-dialog-head"><h3>Credit received: ${esc(r.productName)}</h3>
+              <p>${esc(plural(r.qty, r.unit))} back to ${esc(r.supplierName || "the supplier")} on ${esc(niceDate(r.date))}${
+                r.credit !== null ? ` · ${esc(money(r.credit))} expected` : ""}.</p></div>
+            <div class="inv-two">
+              <label class="lh-field"><span class="lh-label">Amount credited, $</span>
+                <input name="amount" type="number" min="0" step="0.01" value="${r.credit !== null ? esc(Number(r.credit).toFixed(2)) : ""}" /></label>
+              <label class="lh-field"><span class="lh-label">Credit note no. (optional)</span><input name="cn" maxlength="60" /></label>
+            </div>
+            <label class="lh-field"><span class="lh-label">Note (optional)</span><input name="note" maxlength="300" /></label>
+            <p class="lh-error" role="alert" hidden></p>
+            <div class="lh-actions">
+              <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+              <button type="submit" class="lh-btn is-primary">Mark credited</button>
+            </div>
+          </form>`);
+        const form = d2.querySelector("form");
+        d2.querySelector('[data-act="cancel"]').addEventListener("click", () => d2.close());
+        form.addEventListener("submit", async (e) => {
+          e.preventDefault();
+          const btn = form.querySelector('[type="submit"]');
+          btn.disabled = true;
+          try {
+            await markReturnCredited(r.id, { amount: form.elements.amount.value, creditNoteNo: form.elements.cn.value, note: form.elements.note.value }, staff);
+            saved = true;
+            d2.close();
+            showToast("Marked credited");
+          } catch (ex) {
+            const err = d2.querySelector(".lh-error");
+            err.textContent = errText(ex, "Couldn't save. Try again.");
+            err.hidden = false;
+            btn.disabled = false;
+          }
+        });
+        d2.addEventListener("close", () => resolve(saved));
+      });
+    }
     function draw() {
       const p = st.products.find((x) => x.id === id);
       if (!p) { dlg.close(); return; }
@@ -2145,6 +2373,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           ${canMove ? '<button type="button" class="lh-btn" data-stock="move">Move Shelf ⇄ JT</button>' : ""}
           ${canMove ? '<button type="button" class="lh-btn" data-act="sale">Record a sale</button>' : ""}
           ${canMove && !isKitProduct(p) && !isSharedProduct(p) ? '<button type="button" class="lh-btn" data-act="paper">Used on a patient</button>' : ""}
+          ${canMove && !isKitProduct(p) && !isSharedProduct(p) ? '<button type="button" class="lh-btn" data-act="return">Return…</button>' : ""}
           ${canRequest ? '<button type="button" class="lh-btn" data-act="request">Request more</button>' : ""}
           ${canManage ? `<button type="button" class="lh-btn" data-stock="count">Count</button>
             <button type="button" class="lh-btn" data-stock="writeoff">Write off</button>
@@ -2177,10 +2406,15 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
             return `<p class="inv-pd-sup"><strong>${esc(s.name)}</strong>${t.main ? ' <span class="inv-flag is-info">Main</span>' : ""}${
               bits.map((b) => ` · ${b}`).join("")}</p>`;
           }).join("")}</div>` : ""}
+        <div data-role="returns"></div>
         <div class="inv-pd-sec"><h4>Recent activity</h4><div data-role="moves"><p class="tb-none">Loading…</p></div></div>`;
       listMoves({ productId: id, max: 15 })
         .then((m) => { pdMoves = m; const el = box.querySelector('[data-role="moves"]'); if (el) el.innerHTML = movesHtml(m, false, labelOf, canManage); })
-        .catch(() => { const el = box.querySelector('[data-role="moves"]'); if (el) el.innerHTML = '<p class="tb-none tb-bad">Couldn\'t load the activity.</p>'; });    }
+        .catch(() => { const el = box.querySelector('[data-role="moves"]'); if (el) el.innerHTML = '<p class="tb-none tb-bad">Couldn\'t load the activity.</p>'; });
+      listReturns({ productId: id })
+        .then((list) => { pdReturns = list; const el = box.querySelector('[data-role="returns"]'); if (el) el.innerHTML = returnsHtml(p, list); })
+        .catch((err) => console.warn("Returns not loaded:", err));
+    }
 
     box.addEventListener("click", async (e) => {
       if (e.target.closest('[data-act="close"]')) { dlg.close(); return; }
@@ -2192,6 +2426,16 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       }
       if (e.target.closest('[data-act="paper"]')) {
         if (await paperUseDialog(p)) { await load(); if (dlg.open) draw(); }
+        return;
+      }
+      if (e.target.closest('[data-act="return"]')) {
+        if (await returnDialog(p)) { await load(); if (dlg.open) draw(); }
+        return;
+      }
+      const cr = e.target.closest("[data-credit]");
+      if (cr) {
+        const r = pdReturns.find((x) => x.id === cr.dataset.credit);
+        if (r && await creditDialog(r)) { if (dlg.open) draw(); }
         return;
       }
       const un = e.target.closest("[data-undo]");
