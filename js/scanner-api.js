@@ -31,7 +31,10 @@ const scanAi = () => { try { return localStorage.getItem(SCAN_AI_KEY) || ""; } c
 // Every scanner request goes through here: adds the AI choice, and logs how long each step took
 async function scanCall(body) {
   const ai = scanAi();
-  const res = await callApi(ai ? { ...body, ai } : body);
+  const extra = {};
+  if (ai) extra.ai = ai;
+  if (scanJob && !String(body.op || "").startsWith("job")) extra.jobId = scanJob;   // Finish later: this read's ID
+  const res = await callApi({ ...body, ...extra });
   if (res && res.timing) {
     const t = res.timing;
     console.log(`Scanner timing (${t.ai}): ` +
@@ -518,7 +521,8 @@ export function reviewRx(result, rxProducts) {
     let product = byLower.get(String(it.product || "").trim().toLowerCase()) || "";
     if (fading && FADING_RE.test(`${text} ${strengths}`)) product = fading;
     return {
-      text, product, strengths, quantity: String(it.quantity || "").slice(0, 60),
+      text, product, strengths, medicine: String(it.medicine || "").replace(/\s+/g, " ").trim().slice(0, 200),
+      quantity: String(it.quantity || "").slice(0, 60),
       directions: String(it.directions || "").slice(0, 300), repeats: String(it.repeats || "").slice(0, 20),
       conf: conf(it.confidence), fixed: false,
     };
@@ -602,7 +606,8 @@ export async function saveRxScan({ photo, result, review, patient, date, items, 
     patientName: patient.name, readName: review.patientName,
     recordDate: date, scriptNumber: review.scriptNumber, prescriber: review.prescriber,
     items: items.map((it) => ({
-      product: it.product, text: it.text, strengths: String(it.strengths || "").trim().slice(0, 300),
+      product: it.product, text: it.text, medicine: String(it.medicine || "").trim().slice(0, 200), custom: it.custom === true,
+      strengths: String(it.strengths || "").trim().slice(0, 300),
       quantity: String(it.quantity || "").trim().slice(0, 60), directions: String(it.directions || "").trim().slice(0, 300),
       repeats: String(it.repeats || "").trim().slice(0, 20), fixed: !!it.fixed,
     })),
@@ -611,3 +616,27 @@ export async function saveRxScan({ photo, result, review, patient, date, items, 
   });
   return { id: ref.id };
 }
+
+
+
+/* ---------- Finish later (scan_jobs) ---------- */
+let scanJob = "";
+// Sets the job ID sent with the next read. Clearing with ("", id) only clears it if it's still that read's.
+export function setScanJob(id, ifWas) { if (ifWas === undefined || scanJob === ifWas) scanJob = id || ""; }
+export function newScanJobId() {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  return "sj_" + Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+// The Finish later requests. A "problem" from Apps Script becomes an error, so the Scanner can show it.
+async function jobCall(op, fields) {
+  const r = await scanCall({ action: "scanner", op, ...fields });
+  if (r && r.problem) throw new Error(r.problem);
+  return r;
+}
+export const parkScan = (jobId, base64, kind, readAs) =>
+  jobCall("jobPark", { jobId, image: base64, mime: "image/jpeg", kind, readAs });
+export const scanJobs = () => jobCall("jobList", {}).then((r) => (r && r.jobs) || []);
+export const openScanJob = (jobId) => jobCall("jobOpen", { jobId });
+export const finishScanJob = (jobId) => jobCall("jobDone", { jobId }).catch(() => {});

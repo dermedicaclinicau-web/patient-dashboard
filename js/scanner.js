@@ -8,7 +8,8 @@
 // Auto (takes the photo when held still) and Space / Enter to take the photo on a computer.
 import { listProducts, INV_CATEGORIES, plural } from "./inventory-api.js";
 import { preparePhoto, readBillingSheet, readDocket, readPrescription, startReview, reviewBilling, saveBillingScan,
-  earlierScans, findBooking, money, searchPatientsQuick, todaysScans, readAuto, smallCopy } from "./scanner-api.js";
+  earlierScans, findBooking, money, searchPatientsQuick, todaysScans, readAuto, smallCopy,
+  setScanJob, newScanJobId, parkScan, scanJobs, openScanJob, finishScanJob } from "./scanner-api.js";
 import { mountRxResult } from "./scanner-rx.js";
 import { rxProductList } from "./rx-products.js";
 import { mountDocketResult } from "./scanner-docket.js";
@@ -158,6 +159,14 @@ const blobToB64 = (b) => new Promise((res, rej) => {
   r.readAsDataURL(b);
 });
 
+const b64ToBlob = (b64, type) => {
+  const s = atob(b64);
+  const a = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i);
+  return new Blob([a], { type });
+};
+const JOB_STATE = { reading: "Still reading…", ready: "Ready to check", failed: "Couldn't read it" };
+
 /* ===================== An unfinished scan, kept on this device ===================== */
 // One at a time: kept from when the photo is taken until the scan is saved or discarded.
 const PDB = "dm-scanner", PSTORE = "pending";
@@ -221,6 +230,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     step: 0, busyT0: 0, secTimer: 0,              // progress while reading
     pq: "", phits: [], psearching: false,         // billing: search all patients
     readAs: "", autoInfo: null, changing: false, prevMode: "",   // Auto-detect: what it was read as
+    jobId: "", openJob: "", jobs: null, jobsAt: 0,   // Finish later: this read, a parked scan being checked, the list
   };
   // Photos are docket pages: the Docket tab, or Auto-detect after "+ Add a page"
   const collecting = () => st.kind === "docket" || (st.kind === "auto" && st.pages.length > 0);
@@ -299,6 +309,23 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     </details>`;
   };
 
+  // Scans put aside with Finish later
+  const jobsHtml = () => {
+    const j = st.jobs;
+    if (!j || !j.length) return "";
+    return `<div class="scan-jobs"><strong>Ready to check</strong><ul>${j.map((x) => {
+      const at = x.parkedAt ? new Date(x.parkedAt).toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }) : "";
+      const k = AUTO_NAMES[x.readAs] ? x.readAs : AUTO_NAMES[x.kind] ? x.kind : "auto";
+      return `<li class="is-${esc(x.status)}">
+        <span class="scan-today-k is-${esc(k)}">${esc(KIND_TAG[k] || "Scan")}</span>
+        <span class="scan-today-main"><strong>${esc(x.label || AUTO_NAMES[k] || "Scan")}</strong>
+          <small>${esc([at, JOB_STATE[x.status] || ""].filter(Boolean).join(" · "))}</small></span>
+        ${x.status === "reading" ? "" : `<button type="button" class="scan-pat-btn" data-jobopen="${esc(x.id)}">Open</button>`}
+        <button type="button" class="scan-pat-btn" data-jobdrop="${esc(x.id)}">Discard</button>
+      </li>`;
+    }).join("")}</ul></div>`;
+  };
+
   const cameraHtml = () => `${headHtml()}
     <div data-role="pending-host">${pendingHtml()}</div>
     ${collecting() && st.pages.length
@@ -321,6 +348,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
       <label class="scan-side">${I.camera}<span>Camera app</span><input type="file" accept="image/*" capture="environment" data-role="file" hidden /></label>
     </div>
     ${isMobile() ? "" : '<p class="scan-keys">Tip: press Space to take the photo.</p>'}
+    <div data-role="jobs-host">${jobsHtml()}</div>
     <div data-role="today-host">${todayHtml()}</div>`;
 
   const stepNames = () => {
@@ -340,6 +368,8 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
       <div class="scan-busy">
         <ol class="scan-steps" data-role="steps">${stepsHtml()}</ol>
         <small class="scan-secs" data-role="secs"></small>
+        <button type="button" class="lh-btn scan-later" data-act="finish-later" hidden>Finish later</button>
+        <small class="dk-muted" data-role="later-tip" hidden>Taking longer than usual. Carry on scanning, and find it under Ready to check.</small>
       </div></div>`;
   // Auto-detect: what it was read as, with a way out
   const bannerHtml = (failed = false) => (st.kind !== "auto" || !st.readAs ? "" : `<div class="scan-auto-read${failed ? " is-failed" : ""}">
@@ -512,7 +542,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
       : st.mode === "pages" ? pagesHtml() : st.mode === "error" ? errorHtml() : st.mode === "choose" ? chooseHtml() : resultHtml();
     const n2 = root.querySelector('[data-role="note"]');
     if (n2 && note) n2.value = note;
-    if (st.mode === "camera") { startCamera(); loadToday(); }
+    if (st.mode === "camera") { startCamera(); loadToday(); loadJobs(); }
     if (st.mode === "busy") st.secTimer = setInterval(tickSecs, 1000);
   }
 
@@ -769,6 +799,11 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     if (!el || !st.busyT0) { clearInterval(st.secTimer); return; }
     const s = Math.round((Date.now() - st.busyT0) / 1000);
     el.textContent = s >= 3 ? `${s} seconds` : "";
+    if (s >= 10 && st.jobId && st.base64) {   // slow: offer Finish later
+      const b = root.querySelector('[data-act="finish-later"]');
+      const t = root.querySelector('[data-role="later-tip"]');
+      if (b && b.hidden) { b.hidden = false; if (t) t.hidden = false; }
+    }
   }
 
   // The photo read as one kind
@@ -801,17 +836,26 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     st.fixing = -1;
     st.step = 1;
     st.changing = false;
+    const job = newScanJobId();
+    st.jobId = job;
     render();
+    const mine = () => st.jobId === job;   // false once Finish later or Scan again lets it go
     try {
       const t0 = performance.now();
       let kind = st.kind === "auto" ? st.readAs : st.kind;
+      setScanJob(job);
       if (kind) {
-        st.result = await readKind(kind);
+        const res = await readKind(kind);
+        setScanJob("", job);
+        if (!mine()) return;
+        st.result = res;
       } else {
         // Auto-detect: Apps Script works out what it is, then reads it, in one request
         await productsReady;
         const thumb = await smallCopy(st.photo).catch(() => "");
         const r = await readAuto(st.base64, thumb, products, rxProductList());
+        setScanJob("", job);
+        if (!mine()) return;
         const a = r.auto || {};
         st.autoInfo = a;
         console.log(`Scanner: auto "${a.kind || "?"}" (${Math.round((a.confidence || 0) * 100)}%, ${a.ms || "?"} ms to sort)`);
@@ -827,15 +871,94 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
       if (kind) {
         setStep(2);
         await showResult(kind);
+        if (!mine()) return;
       } else {
         st.mode = "choose";   // not sure, something else, or no access: ask
       }
     } catch (err) {
+      setScanJob("", job);
+      if (!mine()) return;
       console.error("Scan failed:", err);
       st.error = (err && err.message) || "The scanner couldn't read that photo. Try again.";
       st.mode = "error";
     } finally {
-      st.busyT0 = 0;
+      if (mine()) st.busyT0 = 0;
+    }
+    if (mine() && root.isConnected) render();
+  }
+
+    /* ===================== Finish later ===================== */
+  async function finishLater(btn) {
+    const job = st.jobId;
+    if (!job || !st.base64 || btn.disabled) return;
+    btn.disabled = true;
+    btn.textContent = "Keeping it…";
+    try {
+      await parkScan(job, st.base64, st.kind, st.readAs);
+    } catch (err) {
+      console.warn("Finish later failed:", err);
+      showToast((err && err.message) || "Couldn't keep it. Wait for it instead.");
+      if (btn.isConnected) { btn.disabled = false; btn.textContent = "Finish later"; }
+      return;
+    }
+    // It finished while the photo was being kept: they're looking at it, and it's marked done when they finish
+    if (st.mode !== "busy" || st.jobId !== job) { st.openJob = job; return; }
+    showToast("Still reading. You'll find it under Ready to check.");
+    again();   // lets go of this read, so its answer is ignored when it arrives
+  }
+
+  let jobsTimer = 0;
+  function loadJobs(force = false) {
+    if (!force && st.jobsAt && Date.now() - st.jobsAt < 15000) return;
+    st.jobsAt = Date.now();
+    scanJobs()
+      .then((list) => { st.jobs = list; })
+      .catch((err) => { console.warn("Ready to check didn't load:", err); st.jobsAt = 0; })
+      .finally(() => {
+        const h = root.querySelector('[data-role="jobs-host"]');
+        if (h) h.innerHTML = jobsHtml();
+        clearTimeout(jobsTimer);
+        if (root.isConnected && st.mode === "camera" && (st.jobs || []).some((x) => x.status === "reading")) {
+          jobsTimer = setTimeout(() => loadJobs(true), 8000);   // check again until it's read
+        }
+      });
+  }
+
+  async function openJob(id, btn) {
+    if (st.busy) return;
+    if (btn) { btn.disabled = true; btn.textContent = "Opening…"; }
+    let j;
+    try { j = await openScanJob(id); }
+    catch (err) {
+      showToast((err && err.message) || "That scan couldn't be opened.");
+      loadJobs(true);
+      return;
+    }
+    if (!root.isConnected) return;
+    if (j.status === "reading") { showToast("It's still reading. Try again in a moment."); loadJobs(true); return; }
+    if (!j.image) { showToast("The photo for that scan is missing. Discard it and scan again."); loadJobs(true); return; }
+
+    stopCamera();
+    if (st.photoUrl) URL.revokeObjectURL(st.photoUrl);
+    const blob = b64ToBlob(j.image, "image/jpeg");
+    Object.assign(st, { photo: blob, photoUrl: URL.createObjectURL(blob), base64: j.image, readThisSession: true,
+      pendingInfo: null, openJob: id, autoInfo: j.auto || null, error: "", result: null, changing: false });
+    if (KINDS.some(([k]) => k === j.kind)) setKind(j.kind);
+    st.readAs = st.kind === "auto" && AUTO_NAMES[j.readAs] ? j.readAs : "";
+    const kind = st.kind === "auto" ? st.readAs : st.kind;
+
+    if (j.status === "failed") {
+      st.error = j.problem || "The scanner couldn't read that photo. Try again.";
+      st.mode = "error";   // Try again reads the same photo
+    } else if (!kind || (st.autoInfo && st.autoInfo.notAllowed)) {
+      st.mode = "choose";
+    } else if (!j.result) {
+      st.error = "The answer for that scan is missing. Tap Try again.";
+      st.mode = "error";
+    } else {
+      st.result = j.result;
+      await productsReady;
+      await showResult(kind);
     }
     if (root.isConnected) render();
   }
@@ -898,13 +1021,14 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
 
   /* ===================== Starting again, and saving ===================== */
   function again() {
+    if (st.openJob) { const id = st.openJob; finishScanJob(id).finally(() => loadJobs(true)); }
     if (st.photoUrl) URL.revokeObjectURL(st.photoUrl);
     st.pageUrls.forEach((u) => URL.revokeObjectURL(u));
     pendingClear();   // saved, or staff chose to start again
     Object.assign(st, { mode: "camera", photo: null, photoUrl: "", base64: "", result: null, lines: [], review: null, error: "",
       fixing: -1, camErr: "", booking: null, patient: null, pickPatient: false, shooting: false,
       pages: [], pageUrls: [], step: 0, busyT0: 0, todayAt: 0, pq: "", phits: [], psearching: false,
-      readAs: "", autoInfo: null, changing: false, prevMode: "" });
+      readAs: "", autoInfo: null, changing: false, prevMode: "", jobId: "", openJob: "", jobsAt: 0 });
     render();
   }
 
@@ -1089,6 +1213,16 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
       return;
     }
 
+    const jo = e.target.closest("[data-jobopen]");
+    if (jo) { openJob(jo.dataset.jobopen, jo); return; }
+    const jd = e.target.closest("[data-jobdrop]");
+    if (jd) {
+      confirmDialog({ title: "Discard this scan?", message: "It hasn't been saved. Its photo is deleted.",
+        confirmLabel: "Discard", tone: "warning" })
+        .then((ok) => { if (ok) finishScanJob(jd.dataset.jobdrop).finally(() => loadJobs(true)); });
+      return;
+    }
+
     const pd = e.target.closest("[data-pagedel]");
     if (pd) {
       const i = Number(pd.dataset.pagedel);
@@ -1131,6 +1265,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     else if (act === "pend-drop") dropPending();
     else if (act === "again") again();
     else if (act === "retry") analyse();
+    else if (act === "finish-later") finishLater(b);
     else if (act === "save") save(b);
     else if (act === "pickpat") {
       st.pickPatient = !st.pickPatient;
@@ -1219,6 +1354,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     document.removeEventListener("keydown", onKey);
     window.removeEventListener("pagehide", stopCamera);
     if (releaseCamera === cleanup) releaseCamera = null;
+    clearTimeout(jobsTimer);
   };
   const onVis = () => {
     if (!root.isConnected) { cleanup(); return; }

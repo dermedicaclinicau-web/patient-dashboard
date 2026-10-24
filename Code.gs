@@ -4659,6 +4659,7 @@ function runNotifications() {
   try { chatHelpReminders_(cfg); } catch (e) { console.error('Chat reminders: ' + (e && e.stack ? e.stack : e)); }
   try { eodReminders_(cfg, now); } catch (e) { console.error('End of day reminders: ' + (e && e.stack ? e.stack : e)); }
   try { recallReplies_(cfg); } catch (e) { console.error('Recall replies: ' + (e && e.stack ? e.stack : e)); }
+  try { scanJobsSweep_(cfg); } catch (e) { console.error('Scan jobs: ' + (e && e.stack ? e.stack : e)); }
 }
 
 // Run ONCE from the editor to start notifications
@@ -5935,21 +5936,27 @@ function eodReminders_(cfg, now) {
 function testChatReminders() {
   chatHelpReminders_(getConfig_());
 }
-// Picks Gemini or Claude for this request, and logs how long each step took
+// Picks Gemini or Claude for this request, logs how long each step took, and keeps the answer in
+// scan_jobs (so "Finish later" can pick it up, and the timings can be reviewed with scanTimingReport)
 function scannerAction_(body) {
+  const op = String((body && body.op) || '');
+  if (SCAN_JOB_OPS_.indexOf(op) !== -1) return scanJobAction_(body);
   SCAN_AI_ = scanProvider_(body);
   SCAN_TIMES_ = [];
+  SCAN_SESSION_ = getSession_(String(body.session || ''));   // scannerActionInner_ still does the login check
   const t0 = Date.now();
   const res = scannerActionInner_(body);
+  const total = Date.now() - t0;
   if (SCAN_TIMES_.length) {
-    const total = Date.now() - t0;
     console.log('Scanner timing: ' + SCAN_TIMES_.map(function (t) {
       return t.step + ' ' + t.ms + ' ms (' + t.ai + ', ' + t.model + ')';
     }).join(' + ') + ' = ' + total + ' ms total');
     if (res && typeof res === 'object') res.timing = { ai: SCAN_AI_, steps: SCAN_TIMES_, ms: total };
   }
+  if (res && res.ok && SCAN_SESSION_) scanJobSave_(body, res, total);
   return res;
 }
+
 
 /* ===================== Scanner: photos read by Gemini ===================== */
 // body: { op: "billing" | "docket" | "rx" | "auto", image: base64 JPEG, mime, … }
@@ -6084,6 +6091,246 @@ function scanProvider_(body) {
   const want = String((body && body.ai) || p.getProperty('SCAN_AI') || 'claude').toLowerCase();
   if (want === 'gemini') return 'gemini';
   return p.getProperty('ClaudeApi') ? 'claude' : 'gemini';   // no key: straight to Gemini
+}
+
+/* ===================== Scanner: Finish later (scan_jobs) ===================== */
+// Every read is saved in scan_jobs/{id}: its timing, and the answer. "Finish later" adds the photo
+// (Storage: scan_jobs/{id}.jpg) and parked: true, so the scan shows under Ready to check.
+// Only Apps Script reads and writes scan_jobs. Kept 7 days (parked and unchecked: 30 days).
+
+var SCAN_SESSION_ = null;
+const SCAN_JOBS_ = 'scan_jobs';
+const SCAN_JOB_RE_ = /^sj_[A-Za-z0-9]{16,40}$/;
+const SCAN_JOB_OPS_ = ['jobPark', 'jobList', 'jobOpen', 'jobDone'];
+const SCAN_JOB_NAMES_ = { billing: 'Billing sheet', docket: 'Delivery docket', rx: 'Prescription' };
+
+// Never stops the scan if it can't be saved (about 0.2 s)
+function scanJobSave_(body, res, total) {
+  try {
+    const want = String(body.jobId || '');
+    const id = SCAN_JOB_RE_.test(want) ? want : 'sj_' + Utilities.getUuid().replace(/-/g, '');
+    const op = String(body.op || '');
+    const auto = res.auto || null;
+    const s = SCAN_SESSION_;
+    fsPatch_(getConfig_(), SCAN_JOBS_ + '/' + id, {
+      kind: op, readAs: auto ? String(auto.kind || '') : op,
+      status: res.problem ? 'failed' : 'ready', problem: String(res.problem || '').slice(0, 300),
+      resultJson: res.result ? JSON.stringify(res.result) : '', autoJson: auto ? JSON.stringify(auto) : '',
+      ai: String(SCAN_AI_ || ''), steps: SCAN_TIMES_, ms: total,
+      byUid: String(s.uid || ''), by: String(s.name || ''), at: new Date().toISOString(),
+    });
+  } catch (e) { console.warn('Scan job not saved: ' + e); }
+}
+
+function scanJobStatus_(j, now) {
+  if (j.status === 'ready' || j.status === 'failed') return j.status;
+  // Apps Script stops at 6 minutes: a read that hasn't finished by then never will
+  return now - (Date.parse(j.parkedAt || '') || 0) > 7 * 60000 ? 'failed' : 'reading';
+}
+
+function scanJobLabel_(j) {
+  let r = null;
+  try { r = JSON.parse(j.resultJson || 'null'); } catch (e) { /* no label */ }
+  if (!r) return '';
+  if ((j.readAs || j.phoneReadAs) === 'docket') {
+    return r.transferType === 'transfer' ? 'Internal transfer' : String(r.supplier || 'Delivery docket');
+  }
+  return String(r.patientName || '');
+}
+
+function scanJobAction_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!can_(session, 'menu.scanner')) return { ok: false, error: 'FORBIDDEN' };
+  const op = String(body.op || '');
+  const cfg = getConfig_();
+  const now = Date.now();
+  try {
+    if (op === 'jobList') return { ok: true, jobs: scanJobList_(cfg, session, now) };
+    const id = String(body.jobId || '');
+    if (!SCAN_JOB_RE_.test(id)) return { ok: false, error: 'BAD_REQUEST' };
+    const path = SCAN_JOBS_ + '/' + id;
+    const job = fsGetDoc_(cfg, path);
+    if (job && job.byUid && job.byUid !== session.uid) return { ok: false, error: 'FORBIDDEN' };
+
+    if (op === 'jobPark') {
+      if (job && job.parked === true) return { ok: true };
+      const image = String(body.image || '');
+      if (!image || image.length > 10 * 1024 * 1024) return { ok: true, problem: "The photo couldn't be kept. Wait for it instead." };
+      const photoPath = scanJobPutPhoto_(cfg, id, image, String(body.mime || 'image/jpeg'));
+      // Its own fields only, so a read that finishes at the same moment isn't overwritten
+      fsPatch_(cfg, path, {
+        parked: true, parkedAt: new Date().toISOString(), photoPath: photoPath, done: false, reminded: false,
+        phoneKind: String(body.kind || '').slice(0, 20), phoneReadAs: String(body.readAs || '').slice(0, 20),
+        byUid: String(session.uid || ''), by: String(session.name || ''),
+      });
+      return { ok: true };
+    }
+    if (op === 'jobDone') {
+      if (!job) return { ok: true };
+      if (job.photoPath) scanJobDelPhoto_(cfg, job.photoPath);
+      fsPatch_(cfg, path, { done: true, doneAt: new Date().toISOString(), photoPath: '' });
+      return { ok: true };
+    }
+    if (op === 'jobOpen') {
+      if (!job || job.done === true) return { ok: true, problem: "That scan isn't there any more." };
+      const status = scanJobStatus_(job, now);
+      const out = {
+        ok: true, status: status, kind: String(job.kind || job.phoneKind || ''),
+        readAs: String(job.readAs || job.phoneReadAs || ''),
+        problem: status === 'failed' ? String(job.problem || "The read didn't finish. Tap Try again.") : '',
+        result: null, auto: null, image: '',
+      };
+      try { out.result = JSON.parse(job.resultJson || 'null'); } catch (e) { /* none */ }
+      try { out.auto = JSON.parse(job.autoJson || 'null'); } catch (e) { /* none */ }
+      if (status !== 'reading' && job.photoPath) out.image = Utilities.base64Encode(scanJobGetPhoto_(cfg, job.photoPath).getBytes());
+      return out;
+    }
+  } catch (err) {
+    console.error('Scan job ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: true, problem: 'Something went wrong. Try again.' };
+  }
+  return { ok: false, error: 'BAD_REQUEST' };
+}
+
+// This person's parked scans from the last 3 days that haven't been finished
+function scanJobList_(cfg, session, now) {
+  return fsQuery_(cfg, SCAN_JOBS_, 'parked', 'EQUAL', true, 300)
+    .filter(function (j) {
+      return j.byUid === session.uid && j.done !== true && now - (Date.parse(j.parkedAt || '') || 0) < 3 * 864e5;
+    })
+    .map(function (j) {
+      return { id: j._id, status: scanJobStatus_(j, now), kind: String(j.kind || j.phoneKind || ''),
+        readAs: String(j.readAs || j.phoneReadAs || ''), label: scanJobLabel_(j), parkedAt: String(j.parkedAt || '') };
+    })
+    .sort(function (a, b) { return b.parkedAt.localeCompare(a.parkedAt); });
+}
+
+/* ---------- The photo (Firebase Storage, through the service account) ---------- */
+
+function scanJobBucket_() {
+  const b = String(PropertiesService.getScriptProperties().getProperty('STORAGE_BUCKET') || '')
+    .trim().replace(/^gs:\/\//i, '').split('/')[0];
+  if (!b) throw new Error('Missing STORAGE_BUCKET script property.');
+  return b;
+}
+function scanJobPutPhoto_(cfg, id, b64, mime) {
+  const name = 'scan_jobs/' + id + '.jpg';
+  const res = UrlFetchApp.fetch('https://storage.googleapis.com/upload/storage/v1/b/' + encodeURIComponent(scanJobBucket_()) +
+    '/o?uploadType=media&name=' + encodeURIComponent(name), {
+    method: 'post', contentType: /^image\/(jpeg|png|webp)$/.test(mime) ? mime : 'image/jpeg',
+    payload: Utilities.base64Decode(b64), muteHttpExceptions: true,
+    headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) },
+  });
+  if (res.getResponseCode() !== 200) throw new Error('Photo not kept (' + res.getResponseCode() + '): ' + res.getContentText().slice(0, 200));
+  return name;
+}
+function scanJobGetPhoto_(cfg, path) {
+  if (!/^scan_jobs\/sj_[A-Za-z0-9]{16,40}\.jpg$/.test(String(path))) throw new Error('Unexpected photo path');
+  const res = UrlFetchApp.fetch('https://storage.googleapis.com/storage/v1/b/' + encodeURIComponent(scanJobBucket_()) +
+    '/o/' + encodeURIComponent(path) + '?alt=media', {
+    headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) }, muteHttpExceptions: true,
+  });
+  if (res.getResponseCode() !== 200) throw new Error('Photo not read (' + res.getResponseCode() + ')');
+  return res.getBlob();
+}
+function scanJobDelPhoto_(cfg, path) {
+  if (!/^scan_jobs\/sj_[A-Za-z0-9]{16,40}\.jpg$/.test(String(path))) return;
+  try {
+    UrlFetchApp.fetch('https://storage.googleapis.com/storage/v1/b/' + encodeURIComponent(scanJobBucket_()) +
+      '/o/' + encodeURIComponent(path), {
+      method: 'delete', headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) }, muteHttpExceptions: true,
+    });
+  } catch (e) { console.warn('Scan photo not deleted: ' + e); }
+}
+
+/* ---------- Every 5 minutes (runNotifications): the backup email, and tidying up ---------- */
+
+function scanJobsSweep_(cfg) {
+  const now = Date.now();
+  const staff = {};
+  getStaffDocs_().forEach(function (s) { staff[s.id] = s; });
+  const gone = [];
+
+  fsQuery_(cfg, SCAN_JOBS_, 'parked', 'EQUAL', true, 300).forEach(function (j) {
+    const parked = Date.parse(j.parkedAt || '') || 0;
+    if (now - parked > 30 * 864e5 || j.done === true && now - parked > 7 * 864e5) {
+      if (j.photoPath) scanJobDelPhoto_(cfg, j.photoPath);
+      gone.push(deleteWrite_(cfg, SCAN_JOBS_ + '/' + j._id));
+      return;
+    }
+    if (j.done === true || j.reminded === true) return;
+    const status = scanJobStatus_(j, now);
+    if (status === 'reading') return;
+    const readyAt = Date.parse(j.at || '') || parked;
+    if (status === 'ready' && now - readyAt < 30 * 60000) return;   // give them half an hour first
+    const s = staff[j.byUid];
+    if (s && s.active !== false && isEmail_(s.email) && MailApp.getRemainingDailyQuota() > 0) {
+      const what = SCAN_JOB_NAMES_[j.readAs || j.phoneReadAs] || 'Scan';
+      const label = scanJobLabel_(j);
+      const failed = status === 'failed';
+      const html = invEmailWrap_(
+        '<h2 style="margin:0 0 6px;font-size:20px;color:' + (failed ? '#b45309' : '#0f766e') + '">' +
+          (failed ? "A scan couldn't be read" : 'A scan is waiting to be checked') + '</h2>' +
+        '<p style="margin:0 0 12px;color:#475569"><strong>' + invEsc_(what) + '</strong>' + (label ? ' · ' + invEsc_(label) : '') +
+          ', put aside with Finish later at ' + invEsc_(Utilities.formatDate(new Date(parked), REC_TZ_, 'h:mm a')) + '.</p>' +
+        '<p style="margin:0">' + (failed ? 'Open it from Ready to check on the Scanner and tap Try again.'
+          : "It isn't saved yet. Open it from Ready to check on the Scanner, check it and save it.") + '</p>',
+        'scanner', 'Open the Scanner');
+      MailApp.sendEmail({ to: s.email, name: 'Dermedica Portal', htmlBody: html, body: emailHtmlToText_(html),
+        subject: (failed ? "Couldn't read: " : 'Waiting to be checked: ') + what + (label ? ' · ' + label : '') });
+    }
+    fsPatch_(cfg, SCAN_JOBS_ + '/' + j._id, { reminded: true });
+  });
+
+  // Scans that were never parked are only timing logs: kept 7 days
+  const cut = new Date(now - 7 * 864e5).toISOString();
+  fsQuery_(cfg, SCAN_JOBS_, 'at', 'LESS_THAN', cut, 200).forEach(function (j) {
+    if (j.parked === true) return;   // handled above
+    gone.push(deleteWrite_(cfg, SCAN_JOBS_ + '/' + j._id));
+  });
+  if (gone.length) commitWrites_(cfg, gone, 200);
+}
+
+/* ---------- Run from the editor: how long scans took over the last 7 days ---------- */
+
+function scanTimingReport() {
+  const cfg = getConfig_();
+  const since = new Date(Date.now() - 7 * 864e5).toISOString();
+  const res = UrlFetchApp.fetch('https://firestore.googleapis.com/v1/' + fsBase_(cfg) + ':runQuery', {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) },
+    payload: JSON.stringify({ structuredQuery: {
+      from: [{ collectionId: SCAN_JOBS_ }],
+      select: { fields: ['ms', 'kind', 'readAs', 'ai', 'status', 'parked'].map(function (f) { return { fieldPath: f }; }) },
+      where: { fieldFilter: { field: { fieldPath: 'at' }, op: 'GREATER_THAN', value: { stringValue: since } } },
+      limit: 5000,
+    } }),
+  });
+  if (res.getResponseCode() !== 200) throw new Error('Scan jobs not read (' + res.getResponseCode() + '): ' + res.getContentText().slice(0, 200));
+  const rows = JSON.parse(res.getContentText()).filter(function (r) { return r.document; })
+    .map(function (r) { return fromFields_(r.document.fields || {}); })
+    .filter(function (j) { return Number(j.ms) > 0; });
+  if (!rows.length) { console.log('No scans logged in the last 7 days yet.'); return; }
+
+  const line = function (label, list) {
+    const ms = list.map(function (j) { return Number(j.ms); }).sort(function (a, b) { return a - b; });
+    const at = function (p) { return ms[Math.min(ms.length - 1, Math.floor(p * ms.length))] / 1000; };
+    const over = ms.filter(function (x) { return x > 10000; }).length;
+    console.log(label + ': ' + ms.length + ' scans · median ' + at(0.5).toFixed(1) + ' s · 90% under ' + at(0.9).toFixed(1) +
+      ' s · slowest ' + at(1).toFixed(1) + ' s · over 10 s: ' + over + ' (' + Math.round(over * 100 / ms.length) + '%)');
+  };
+  const by = function (key) {
+    const g = {};
+    rows.forEach(function (j) { const k = String(j[key] || '?'); (g[k] = g[k] || []).push(j); });
+    Object.keys(g).sort().forEach(function (k) { line('  ' + key + ' ' + k, g[k]); });
+  };
+  line('All', rows);
+  by('readAs');
+  by('ai');
+  console.log('Failed: ' + rows.filter(function (j) { return j.status === 'failed'; }).length +
+    ' · Finish later used: ' + rows.filter(function (j) { return j.parked === true; }).length);
+  console.log('(Apps Script time only. The phone adds preparing the photo and the network, usually 1 to 2 s.)');
 }
 /** One AI call for the scanner. fast = the sorting step (small model). */
 function scanAiJson_(prompt, image, mime, schema, fast) {
@@ -6458,8 +6705,8 @@ function scanRxPrompt_(products) {
     '   medicine = the medicine\'s correct name, properly spelled, the way a pharmacist would write it: the brand name with',
     '   the generic name in brackets, then the strength, e.g. "Minomycin (minocycline) 50 mg", "Epiduo (adapalene 0.1% /',
     '   benzoyl peroxide 2.5%) gel". Add the form (tablets, capsules, cream, gel) only if it is written. If only the generic',
-    '   "Epiduo (adapalene 0.1% / benzoyl peroxide 2.5%) gel", "Roaccutane (isotretinoin) 20 mg capsules". If only the generic',   // ← delete this line
     '   is written, use just the generic. Correct the spelling, but NEVER change the medicine, strength or amount from what',
+    '   is written. If you can\'t read the medicine, copy text.',
     '   strengths = any percentages or doses (e.g. "4% HQ, 2% kojic acid").',
     '   quantity = the amount to supply (often circled, e.g. "100", "20", "50g"). directions = how to use it, in plain English',
     '   ("bd" = twice a day, "tds" = three times a day, "QID" = four times a day, "nocte" = at night, "ii" = two).',

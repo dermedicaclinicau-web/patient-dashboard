@@ -8562,3 +8562,13 @@ body.ff-handing { overflow: hidden; }
 .rx-item .fe-input { color: #0f172a; }
 .rx-item .fe-input::placeholder { color: #94a3b8; opacity: 1; }
 .rx-note { width: 100%; min-height: 64px; resize: vertical; font: inherit; line-height: 1.4; }
+
+/* Scanner: Finish later */
+.scan-later { margin-top: 12px; }
+.scan-jobs { margin: 12px 0 0; padding: 12px 14px; border: 1px solid #99f6e4; border-radius: 12px; background: #f0fdfa; }
+.scan-jobs > strong { display: block; margin-bottom: 8px; color: #0f766e; }
+.scan-jobs ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.scan-jobs li { display: flex; align-items: center; gap: 10px; }
+.scan-jobs li .scan-today-main { flex: 1; min-width: 0; }
+.scan-jobs li.is-failed small { color: #b45309; }
+.scan-jobs li.is-reading small { color: #64748b; font-style: italic; }
