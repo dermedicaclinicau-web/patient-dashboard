@@ -12,6 +12,7 @@ import { fetchPatients, findPatientsById, patientIds } from "./patients.js";
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const num = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : r2(v));
 const conf = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? 1 : Number(v));
+const intOrNull = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : parseInt(v, 10));
 const normName = (s) => String(s || "").toLowerCase().replace(/[^a-z]+/g, " ").trim();
 export const money = (n) => (n === null || n === undefined ? "" : `$${Number.isInteger(Number(n)) ? Number(n) : Number(n).toFixed(2)}`);
 
@@ -377,9 +378,7 @@ export function reviewDocket(result, products) {
       qty: Math.max(0, parseInt(l.qty, 10) || 0), unit: String(l.unit || "").slice(0, 30),
       batch: String(l.batch || "").slice(0, 60), expiry: expiryOf(l.expiry),
       conf: conf(l.confidence), fixed: false, count: 1,
-      formQty: Number.isFinite(Number(l.formQty)) && l.formQty !== null ? parseInt(l.formQty, 10) : null,
-      toShelf: Number.isFinite(Number(l.toShelf)) && l.toShelf !== null ? parseInt(l.toShelf, 10) : null,
-      toJt: Number.isFinite(Number(l.toJt)) && l.toJt !== null ? parseInt(l.toJt, 10) : null,
+      formQty: intOrNull(l.formQty), toShelf: intOrNull(l.toShelf), toJt: intOrNull(l.toJt),
     }))),
   };
 }

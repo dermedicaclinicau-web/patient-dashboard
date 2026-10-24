@@ -208,9 +208,9 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
       const p = byId.get(l.productId) || null;
       if (l.skip) return { i, l, p, state: "skip" };
       if (!p) return { i, l, p, state: "bad", msg: "Choose the product, or tap “Don't move this”" };
-      if (!l.qty) return { i, l, p, state: "skip", msg: "Quantity is 0, so nothing moves" };
       const f = findJtLot(p, s.lots, l.batch, l.expiry);
       const lot = l.jtLot ? f.options.find((x) => x.id === l.jtLot) || null : f.match;
+      if (!l.qty) return { i, l, p, f, lot, state: "skip", msg: "Quantity is 0, so nothing moves" };
       const bn = batchName(p);
       if (!lot) {
         return { i, l, p, f, state: "bad", msg: !f.options.length ? `There's no ${p.name} in JT storage.`
@@ -477,7 +477,7 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
       title: "Move these to the Shelf?",
       message: `${go.map((x) => `${plural(x.l.qty, x.p.stockUnit)} of ${x.p.name}${x.p.tracked ? ` (${batchText(x.p, x.lot.batch)})` : ""}`)
         .join(", ")}. They come out of JT storage and go onto the Shelf now.${waiting.length
-        ? ` Waiting requests this covers are approved: ${waiting.map((r) => `${r.requestedBy} (${plural(r.qty, r.unit)} ${r.productName})`).join(", ")}.` : ""}`,
+        ? ` Waiting requests this covers are approved too: ${waiting.map((r) => `${r.requestedBy} (${plural(r.qty, r.unit)} ${r.productName})`).join(", ")}.` : ""}`,
       confirmLabel: "Move to the Shelf",
     });
     if (!ok) return;
@@ -488,15 +488,29 @@ export function mountDocketResult(el, { photo, photoUrl, result, products, staff
     try {
       await saveScanOnce(null);
       const w = who();
-      const res = await transferFromJt(
-        go.map((x) => ({ productId: x.p.id, batch: x.lot.batch, expiry: x.lot.expiry, qty: x.l.qty })),
-        { scanId: s.scanId, note: [w && `Moved by ${w.name}`, s.note].filter(Boolean).join(" · ") }, staff);
+      const moveLines = go.map((x) => ({ productId: x.p.id, batch: x.lot.batch, expiry: x.lot.expiry, qty: x.l.qty }));
+      const moveNote = [w && `Moved by ${w.name}`, s.note].filter(Boolean).join(" · ");
+
+      // First try with the waiting JT requests approved. If this person isn't allowed to approve releases,
+      // the whole transaction is rolled back (nothing moved), so it's tried again without approving them.
+      let res;
+      let notApproved = false;
+      try {
+        res = await transferFromJt(moveLines, { scanId: s.scanId, note: moveNote, approve: waiting.length > 0 }, staff);
+      } catch (err) {
+        if (!(err && err.code === "permission-denied" && waiting.length)) throw err;
+        console.warn("No access to approve JT releases, moving without approving them:", err);
+        res = await transferFromJt(moveLines, { scanId: s.scanId, note: moveNote, approve: false }, staff);
+        notApproved = true;
+      }
+
       await markDocketTransferred(s.scanId, res).catch((err) => console.warn("Scan not marked as transferred:", err));
       res.releases.forEach((r) => callApi({ action: "inventory", op: "notifyReleaseUpdate", releaseId: r.id })
         .catch((err) => console.warn("Release email failed:", err)));
       const n = res.moved.reduce((a, m) => a + m.qty, 0);
       showToast(`${plural(n, "item")} moved to the Shelf${res.releases.length
-        ? ` · ${res.releases.length} JT request${res.releases.length === 1 ? "" : "s"} approved` : ""}.`);
+        ? ` · ${res.releases.length} JT request${res.releases.length === 1 ? "" : "s"} approved`
+        : notApproved ? " · the waiting JT requests are left for a JT approver" : ""}.`);
       onAgain();
     } catch (err) {
       console.error("JT transfer failed:", err);

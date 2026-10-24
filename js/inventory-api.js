@@ -4208,7 +4208,7 @@ export function findJtLot(product, lots, batch, expiry) {
 // requests for these products that the move fully covers (oldest first) are approved.
 // scanId gives each product a fixed activity id, so the same docket can only move once.
 // Returns { moved: [{ productId, name, qty, unit }], releases: [{ id, productName, qty, requestedBy }] }
-export async function transferFromJt(lines, { scanId = "", note = "" } = {}, staff) {
+export async function transferFromJt(lines, { scanId = "", note = "", approve = true } = {}, staff) {
   const me = uid();
   const by = who(staff);
   const want = new Map();
@@ -4223,8 +4223,14 @@ export async function transferFromJt(lines, { scanId = "", note = "" } = {}, sta
   const tag = slug(scanId) || Date.now().toString(36);
 
   // Pending release requests for these products (each is checked again inside the transaction)
-  const relSnap = await getDocs(query(collection(db, "inv_releases"), where("status", "==", "pending")));
-  const relIds = relSnap.docs.filter((d) => want.has(String(d.data().productId || ""))).map((d) => d.id);
+  // approve: false leaves them for a JT approver (staff without access to approve releases)
+  let relIds = [];
+  if (approve) {
+    try {
+      const relSnap = await getDocs(query(collection(db, "inv_releases"), where("status", "==", "pending")));
+      relIds = relSnap.docs.filter((d) => want.has(String(d.data().productId || ""))).map((d) => d.id);
+    } catch (err) { console.warn("JT release requests not read:", err); }
+  }
 
   return runTransaction(db, async (tx) => {
     // ---- Reads ----

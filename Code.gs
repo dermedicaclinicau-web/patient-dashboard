@@ -4305,8 +4305,12 @@ function handleInventory_(body) {
       return invNotifyLoan_(String(body.loanId), session);
     }
     if (op === 'notifyReleaseUpdate') {
-      if (!can_(session, 'inventory.jt') && !can_(session, 'inventory.manage')) return { ok: false, error: 'FORBIDDEN' };
       if (!okId(body.releaseId)) return { ok: false, error: 'BAD_REQUEST' };
+      if (!can_(session, 'inventory.jt') && !can_(session, 'inventory.manage')) {
+        // Approved by this person through the Delivery Docket Form (internal transfer)
+        const rel = fsGetDoc_(getConfig_(), 'inv_releases/' + String(body.releaseId));
+        if (!rel || !rel.scanId || rel.handledByUid !== session.uid) return { ok: false, error: 'FORBIDDEN' };
+      }
       return invNotifyReleaseUpdate_(String(body.releaseId));
     }
     if (op === 'sendPo') {
@@ -6072,15 +6076,15 @@ function scanAuto_(body, allowed) {
 
 // ===== Scanner AI switch (Gemini / Claude) =====
 // Per execution: which AI this request uses, and how long each call took.
-var SCAN_AI_ = 'gemini';
+var SCAN_AI_ = 'claude';
 var SCAN_TIMES_ = [];
 
 function scanProvider_(body) {
   const p = PropertiesService.getScriptProperties();
-  const want = String((body && body.ai) || p.getProperty('SCAN_AI') || 'gemini').toLowerCase();
-  return (want === 'claude' && p.getProperty('ClaudeApi')) ? 'claude' : 'gemini';
+  const want = String((body && body.ai) || p.getProperty('SCAN_AI') || 'claude').toLowerCase();
+  if (want === 'gemini') return 'gemini';
+  return p.getProperty('ClaudeApi') ? 'claude' : 'gemini';   // no key: straight to Gemini
 }
-
 /** One AI call for the scanner. fast = the sorting step (small model). */
 function scanAiJson_(prompt, image, mime, schema, fast) {
   const p = PropertiesService.getScriptProperties();
@@ -6366,7 +6370,7 @@ const SCAN_DOCKET_SCHEMA_ = {
   type: 'OBJECT',
   properties: {
     formType: { type: 'STRING', enum: ['supplier', 'dermedica'] },
-    transferType: { type: 'STRING', enum: ['delivery', 'transfer', ''], description: 'Dermedica form only: which box is ticked' },
+    transferType: { type: 'STRING', description: 'Dermedica form only: "transfer", "delivery", or "" if neither box is ticked' },
     supplier: { type: 'STRING' },
     docketNumber: { type: 'STRING' },
     docketDate: { type: 'STRING', description: 'YYYY-MM-DD, or empty' },

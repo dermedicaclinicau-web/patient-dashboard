@@ -279,10 +279,12 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
       const at = s.at && typeof s.at.toDate === "function" ? s.at.toDate() : null;
       const time = at ? at.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }) : "";
       const who = s.kind === "docket"
-        ? `${s.supplierName || "Delivery docket"}${s.poNumber ? ` · ${s.poNumber}` : ""}`
+        ? (s.status === "transferred" ? "Internal transfer · JT storage → Shelf"
+          : `${s.supplierName || "Delivery docket"}${s.poNumber ? ` · ${s.poNumber}` : ""}`)
         : (s.patientName || "Patient not read");
       const status = s.kind === "billing" ? (Number(s.flagCount) ? `${s.flagCount} to check` : "All matched")
-        : s.kind === "docket" ? ({ received: "Received", linked: "Linked to an order", unlinked: "No order linked" }[s.status] || "")
+        : s.kind === "docket" ? ({ received: "Received", linked: "Linked to an order", unlinked: "No order linked",
+            transferred: "Moved to the Shelf" }[s.status] || "")
         : Array.isArray(s.items) ? plural(s.items.length, "item") : "";
       return `<li>
         <span class="scan-today-k is-${esc(s.kind)}">${esc(KIND_TAG[s.kind] || s.kind)}</span>
