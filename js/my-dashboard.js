@@ -103,6 +103,17 @@ async function myCreatedTasks(uid) {
   const snap = await getDocs(query(collection(db, "staff-task-list"), where("createdByUid", "==", uid)));
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
+
+// Recall call-backs due today (or missed on an earlier day) for me. Uses the same query as Recall's "My calls" count.
+async function myCallBacks(uid) {
+  if (!uid) return [];
+  const snap = await getDocs(query(collection(db, "recalls"),
+    where("status", "==", "open"), where("stage", "==", "call"), where("assignedToId", "==", uid)));
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+    .filter((c) => c.callBackDue)
+    .sort((a, b) => String(a.callBackDue).localeCompare(String(b.callBackDue)));
+}
+
 const TASK_TAB_KEY = "dm.dash.tasktab";
 const readTaskTab = () => { try { return localStorage.getItem(TASK_TAB_KEY) || "mine"; } catch { return "mine"; } };
 const saveTaskTab = (v) => { try { localStorage.setItem(TASK_TAB_KEY, v); } catch { /* private mode */ } };
@@ -235,7 +246,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     const hidden = readSet(hideKey(me0));
     const show = (k) => allowedCard(k) && !hidden.has(k);
     const todayKey = dayKey();
-    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts, notes, formsT, invs, unrec, countCfg, myDay, myCreated] = await Promise.all([
+    const [products, lots, kits, loans, rels, myReqs, usage, records, shorts, pos, allReqs, countsToday, appts, tasks, openCounts, allShorts, notes, formsT, invs, unrec, countCfg, myDay, myCreated, callBacks] = await Promise.all([
       safe(listProducts(), []),
       safe(listAllLots(), []),
       safe(listKits(), []),
@@ -261,6 +272,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
       safe(getCountSettings(), { dueBy: "10:00" }),
       canKit ? safe(getMyKitDay(), null) : null,
       show("tasks") ? safe(myCreatedTasks(me0), []) : [],
+      show("attention") && (can("recall.work") || can("recall.manage")) ? safe(myCallBacks(me0), []) : [],
     ]);
     if (!root.isConnected) return;
 
@@ -364,6 +376,17 @@ export async function mountMyDashboard(container, { staff } = {}) {
         text: `${drafts.length} consultation note${drafts.length === 1 ? "" : "s"} to review${
           drafts.length > 1 ? ` (oldest: ${oldest.patientName || "patient"}${oldest.date ? `, ${shortDay(oldest.date)}` : ""})` : ` (${oldest.patientName || "patient"})`}`,
         act: "Review" });
+    }
+    // Recall: patients I said I'd call back
+    if (callBacks.length) {
+      const late = callBacks.filter((c) => String(c.callBackDue) < todayKey).length;
+      const names = callBacks.slice(0, 3).map((c) => c.patientName || "a patient").join(", ");
+      att.push({
+        tone: late ? "bad" : "warn",
+        text: `${callBacks.length} recall call-back${callBacks.length === 1 ? "" : "s"} due${
+          late ? ` (${late} from an earlier day)` : " today"}: ${names}${callBacks.length > 3 ? ` and ${callBacks.length - 3} more` : ""}`,
+        href: "#/recall", act: "Call",
+      });
     }
     const myOverdue = tasks.filter((t) => isMine(t) && t.dueDate && t.dueDate < todayKey).length;
     if (myOverdue) att.push({ tone: "bad", ttab: "mine",

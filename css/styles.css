@@ -8614,3 +8614,4 @@ body.ff-handing { overflow: hidden; }
 @keyframes rc-spin { to { transform: rotate(360deg); } }
 
 .rc-appt { color: #0f766e; font-weight: 600; }
+.rc-tag.is-cb { background: #fef3c7; color: #92400e; }

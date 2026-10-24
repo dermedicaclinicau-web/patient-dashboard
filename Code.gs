@@ -12463,7 +12463,8 @@ function recallCheck_(cfg, set, today, force) {
           if (c.stage === 'later' && String(c.remindOn || '') >= until) return;   // already paused long enough
           const fs = String(c.flowState || '');
           const inFlow = ['run', 'wait', 'team', 'cycle', 'queued', 'released', 'joined'].indexOf(fs) !== -1;
-          put(Object.assign({ stage: 'later', remindOn: until, pauseReason: 'Has an appointment on ' + recLongDate_(appt), apptPaused: appt },
+          put(Object.assign({ stage: 'later', remindOn: until, pauseReason: 'Has an appointment on ' + recLongDate_(appt), apptPaused: appt,
+              callBackDue: '' },
             inFlow ? { flowState: 'paused', pausedFlow: fs, flowNext: '' } : {}),
             'Paused: they have an appointment on ' + recLongDate_(appt) + (inFlow ? '. The recall flow is paused too' : '') +
             ". Back on the list the day after, if they're still due");
@@ -12471,7 +12472,8 @@ function recallCheck_(cfg, set, today, force) {
           return;
         }
         if (c.stage === 'later' && c.remindOn && String(c.remindOn) <= today) {
-          put(Object.assign({ stage: c.assignedToId ? 'call' : 'due', remindOn: '', pauseReason: '', apptPaused: '' },
+          put(Object.assign({ stage: c.assignedToId ? 'call' : 'due', remindOn: '', pauseReason: '', apptPaused: '',
+              callBackDue: !c.apptPaused && !c.pauseReason ? today : '' },   // only call-backs staff set, not pauses
             c.flowState === 'paused' ? { flowState: 'released', pausedFlow: '' } : {}),
             c.apptPaused ? 'Back on the list: their appointment on ' + recLongDate_(c.apptPaused) + " has passed and they're still due"
               : c.pauseReason ? 'Back on the list (was paused: ' + c.pauseReason + ')' : 'Reminder: call them back today');
@@ -12754,6 +12756,10 @@ function recallAction_(op, id, body, session) {
     patch = { status: 'open', stage: c.assignedToId ? 'call' : 'due', closeReason: '', closedAt: '', closedBy: '', bookedFor: '', bookedAt: '' };
   }
   if (!patch) return { ok: false, error: 'BAD_REQUEST' };
+  // Working the card clears "call back today". A note, or passing it to someone, doesn't.
+  const worked = op === 'close' || op === 'reopen' || op === 'text' ||
+    (op === 'log' && !!(String(body.outcome || '') || String(body.remindOn || '')));
+  if (worked && c.callBackDue) patch.callBackDue = '';
   patch.log = log.slice(-80);
   patch.updatedAt = now;
   commitWrites_(cfg, [patchWrite_(cfg, path, patch)]);

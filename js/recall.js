@@ -114,7 +114,7 @@ function norm(snap) {
     lastTextAt: s("lastTextAt"), textHoldUntil: s("textHoldUntil"), texts: Number(x.texts) || 0,
     flowState: s("flowState"), flowDueAt: Number(x.flowDueAt) || 0,
     joinedCat: s("joinedCat"), alsoDue: Array.isArray(x.alsoDue) ? x.alsoDue.map(String) : [],
-    dnc: x.dnc === true, dncWhy: s("dncWhy"), nextAppt: s("nextAppt"),
+    dnc: x.dnc === true, dncWhy: s("dncWhy"), nextAppt: s("nextAppt"), callBackDue: s("callBackDue"),
     log: Array.isArray(x.log) ? x.log : [], updatedAt: s("updatedAt"),
   };
 }
@@ -394,6 +394,8 @@ export function mountRecall(container, { staff = null } = {}) {
     const tag = sv ? `<span class="rc-tag is-saving">${esc(sv)}…</span>`
       : c.replyOpen && c.reply
         ? `<span class="rc-tag is-${esc(c.reply.kind)}">${esc(REPLY_TAG[c.reply.kind] || "Replied")}</span>`
+      : c.callBackDue && c.status === "open" && c.stage === "call"
+        ? `<span class="rc-tag is-cb">${c.callBackDue < t ? `Call back · since ${esc(short(c.callBackDue))}` : "Call back today"}</span>`
       : c.status === "open" && c.flowState === "wait" && c.flowDueAt
         ? `<span class="rc-tag is-flow">Flow: waiting until ${esc(short(fmtKey(new Date(c.flowDueAt))))}</span>`
       : c.status === "open" && c.flowState === "joined" ? `<span class="rc-tag is-flow">With their ${esc(c.joinedCat || "other")} recall</span>`
@@ -417,12 +419,15 @@ export function mountRecall(container, { staff = null } = {}) {
         `<button type="button" class="rc-qb" data-quick="${k}">${esc(l)}</button>`).join("")}
         <button type="button" class="rc-qb" data-act="details">Note or call back…</button></div>` : ""}`;
   }
+  const isCallBack = (c) => !!c.callBackDue && !c.replyOpen && c.status === "open" && c.stage === "call";
+  const callBacks = (rows) => rows.filter(isCallBack).sort((a, b) => a.callBackDue.localeCompare(b.callBackDue));
 
   function groupedRows(rows, t) {
     const block = (title, list) => (list.length
       ? `<div class="rc-sub-h">${esc(title)}</div><div class="rc-list">${list.map((c) => rowHtml(c, t)).join("")}</div>` : "");
-    const rest = rows.filter((c) => !c.replyOpen);
+    const rest = rows.filter((c) => !c.replyOpen && !isCallBack(c));
     return block("Replied · follow up first", rows.filter((c) => c.replyOpen)) +
+      block("Call back today · as promised", callBacks(rows)) +
       GROUPS.map(([title, test]) => block(title, rest.filter((c) => test(daysFrom(c.dueDate, t))))).join("");
   }
 
@@ -475,7 +480,10 @@ export function mountRecall(container, { staff = null } = {}) {
       if (!s.open || !s.loaded) return;
       if (s.key === "mine") {
         s.rows.forEach((c) => { if (c.replyOpen) out.push(c.id); });
-        GROUPS.forEach(([, test]) => s.rows.forEach((c) => { if (!c.replyOpen && test(daysFrom(c.dueDate, t))) out.push(c.id); }));
+        callBacks(s.rows).forEach((c) => out.push(c.id));
+        GROUPS.forEach(([, test]) => s.rows.forEach((c) => {
+          if (!c.replyOpen && !isCallBack(c) && test(daysFrom(c.dueDate, t))) out.push(c.id);
+        }));
       }
       else s.rows.forEach((c) => out.push(c.id));
     });
