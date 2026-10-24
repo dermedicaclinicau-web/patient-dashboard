@@ -124,7 +124,7 @@ export function mountRxResult(el, { photo, photoUrl, result, staff, onAgain }) {
       <div class="rx-items" data-role="items">${st.items.map(itemHtml).join("")}</div>
       <button type="button" class="hx-add" data-act="rx-add">+ Add another item</button></section>
     <label class="lh-field"><span class="lh-label">Note (optional)</span>
-      <textarea data-role="rxnote" rows="2" maxlength="1000" placeholder="e.g. Patient brought in a paper script"></textarea></label>
+      <textarea class="fe-input rx-note" data-role="rxnote" rows="2" maxlength="1000" placeholder="e.g. Patient brought in a paper script"></textarea></label>
     <div class="scan-acts">
       <button type="button" class="lh-btn" data-act="rx-again">Scan again</button>
       <button type="button" class="lh-btn is-primary" data-act="rx-save">Save to patient</button>

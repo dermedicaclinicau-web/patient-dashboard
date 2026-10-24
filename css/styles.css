@@ -8557,3 +8557,8 @@ body.ff-handing { overflow: hidden; }
 .scan-flag.is-ok { background: #ecfdf5; color: #047857; }
 .dk-f-jt { flex: 1 1 14rem; }
 .dk-f-jt select { width: 100%; }
+
+/* Prescription: values read from the script look filled in, hints stay grey */
+.rx-item .fe-input { color: #0f172a; }
+.rx-item .fe-input::placeholder { color: #94a3b8; opacity: 1; }
+.rx-note { width: 100%; min-height: 64px; resize: vertical; font: inherit; line-height: 1.4; }
