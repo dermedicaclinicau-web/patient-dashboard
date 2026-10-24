@@ -8612,3 +8612,5 @@ body.ff-handing { overflow: hidden; }
 .rc-saving-line { margin: 0 0 10px; padding: 8px 12px; border-radius: 8px; background: #f1f5f9; color: #475569; font-size: 13px; }
 .rc-panel.is-saving .rc-work { opacity: .55; pointer-events: none; }
 @keyframes rc-spin { to { transform: rotate(360deg); } }
+
+.rc-appt { color: #0f766e; font-weight: 600; }

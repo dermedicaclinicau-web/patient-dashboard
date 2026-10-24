@@ -12397,11 +12397,16 @@ function recallCheck_(cfg, set, today, force) {
       const fix = c.nameKey ? null : recallKeys_(c.patientName, c.mobile, c.email);   // search keys on older cards
       const dn = recallDncOf_(pts.doc(c.patientId));
       const dncFix = (c.dnc === true) !== dn.dnc || String(c.dncWhy || '') !== dn.dncWhy ? dn : null;
+            // Their next appointment (any treatment), for the board's Upcoming visit filter
+      const nextAppt = anyFuture[c.patientId] || '';
+      const apptFix = typeof c.hasAppt !== 'boolean' || c.hasAppt !== !!nextAppt || String(c.nextAppt || '') !== nextAppt
+        ? { nextAppt: nextAppt, hasAppt: !!nextAppt } : null;
       let touched = false;
       const put = function (patch, what) {
         touched = true;
         if (fix) Object.assign(patch, fix);
         if (dncFix) Object.assign(patch, dncFix);
+        if (apptFix) Object.assign(patch, apptFix);
         patch.log = add(c, what);
         patch.updatedAt = now;
         writes.push(patchWrite_(cfg, path, patch));
@@ -12473,7 +12478,9 @@ function recallCheck_(cfg, set, today, force) {
           sum.back++;
         }
       })();
-      if (!touched && (fix || dncFix)) writes.push(patchWrite_(cfg, path, Object.assign({}, fix || {}, dncFix || {})));
+      if (!touched && (fix || dncFix || apptFix)) {
+        writes.push(patchWrite_(cfg, path, Object.assign({}, fix || {}, dncFix || {}, apptFix || {})));
+      }
     });
 
   // New cards: due (or due within the lead days), nothing booked, last visit not too long ago
@@ -12497,7 +12504,8 @@ function recallCheck_(cfg, set, today, force) {
       if (old.status === 'closed' && old.closeReason === 'Came in' && skipped[w.k] && skipped[w.k][String(old.visitedOn || '')]) {
         writes.push(patchWrite_(cfg, RECALL_COL_ + '/' + w.id, Object.assign({
           status: 'open', stage: 'due', assignedToId: '', assignedToName: '', assignedDay: '',
-          closeReason: '', closedAt: '', closedBy: '', visitedOn: '', updatedAt: now,
+          closeReason: '', closedAt: '', closedBy: '',
+      nextAppt: anyFuture[w.g.pid] || '', hasAppt: !!anyFuture[w.g.pid], visitedOn: '', updatedAt: now,
           log: add(old, 'Back on the list: the visit on ' + recLongDate_(old.visitedOn) + " was a service that isn't recalled"),
         }, recallKeys_(old.patientName, old.mobile, old.email))));
         sum.reopened++;
@@ -15110,4 +15118,38 @@ function scanTestSource_(ref) {
     console.log('✗ The photo could not be opened: ' + e);
     return null;
   }
+}
+
+// Run from the editor: open recall cards whose patient has an upcoming appointment, and why they're not paused yet
+function recallCheckPauses() {
+  const cfg = getConfig_();
+  const set = recallSettings_(cfg);
+  console.log('"Don\'t recall anyone with an appointment booked": ' + (set.anyFuturePauses ? 'ON' : 'OFF. Tick it in Recall settings and Save.'));
+  const ctx = pcnCtx_();
+  const pts = recallPatients_(cfg);
+  const byPid = {};
+  const byName = {};
+  pcnReadAppts_(ctx).forEach(function (r) {
+    if (!pcnIsDate_(r[0]) || r[0].getTime() < ctx.today || !pcnStatusOk_(r[7], 'dns')) return;
+    const dk = Utilities.formatDate(r[0], ctx.tz, 'yyyy-MM-dd');
+    const ptt = String(r[14] == null ? '' : r[14]).trim();
+    const pid = ptt ? pts.find(ptt) : '';
+    if (pid) { if (!byPid[pid] || dk < byPid[pid]) byPid[pid] = dk; return; }
+    const n = schedNorm_(r[1]);
+    if (n && (!byName[n] || dk < byName[n])) byName[n] = dk;
+  });
+  let willPause = 0, noId = 0;
+  fsQuery_(cfg, RECALL_COL_, 'status', 'EQUAL', 'open', 10000).forEach(function (c) {
+    if (c.stage === 'later') return;
+    const who = c.patientName + ' (' + c.category + (c.assignedToName ? ', with ' + c.assignedToName : '') + ')';
+    if (byPid[c.patientId]) {
+      willPause++;
+      console.log('Has a booking on ' + byPid[c.patientId] + ', not paused yet: ' + who);
+    } else if (byName[schedNorm_(c.patientName)]) {
+      noId++;
+      console.log('Booking on ' + byName[schedNorm_(c.patientName)] + ' has NO Patient ID: ' + who);
+    }
+  });
+  console.log(willPause + ' will pause at the next full check (press "Check for due patients now"). ' +
+    noId + " can't be paused: link their name in Daily uploads, then fill in the missing Patient IDs.");
 }

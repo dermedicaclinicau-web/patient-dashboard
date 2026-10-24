@@ -114,7 +114,7 @@ function norm(snap) {
     lastTextAt: s("lastTextAt"), textHoldUntil: s("textHoldUntil"), texts: Number(x.texts) || 0,
     flowState: s("flowState"), flowDueAt: Number(x.flowDueAt) || 0,
     joinedCat: s("joinedCat"), alsoDue: Array.isArray(x.alsoDue) ? x.alsoDue.map(String) : [],
-    dnc: x.dnc === true, dncWhy: s("dncWhy"),
+    dnc: x.dnc === true, dncWhy: s("dncWhy"), nextAppt: s("nextAppt"),
     log: Array.isArray(x.log) ? x.log : [], updatedAt: s("updatedAt"),
   };
 }
@@ -132,6 +132,11 @@ export function mountRecall(container, { staff = null } = {}) {
       <div class="rc-tabs" data-role="tabs" role="tablist"></div>
       <select class="fb-select rc-who" data-role="who" aria-label="Whose calls"></select>
       <span class="rc-lv" data-role="lvbox"></span>
+      <select class="fb-select rc-who" data-role="appt" aria-label="Upcoming visit">
+        <option value="">Upcoming visit: any</option>
+        <option value="yes">Has an upcoming visit</option>
+        <option value="no">No upcoming visit</option>
+      </select>
       <span class="inv-spacer"></span>
       <input type="search" class="fe-input rc-q" data-role="q" placeholder="Find a patient by name, mobile or email" aria-label="Find a patient" />
     </div>
@@ -143,7 +148,8 @@ export function mountRecall(container, { staff = null } = {}) {
   container.replaceChildren(root);
   const $ = (r) => root.querySelector(`[data-role="${r}"]`);
 
-  const ui = { tab: "mine", who: "mine", cat: "", q: "", lv: "", lvFrom: "", lvTo: "" };
+  const ui = { tab: "mine", who: "mine", cat: "", q: "", lv: "", lvFrom: "", lvTo: "", appt: "" };
+  const apptWhere = () => (ui.appt ? [where("hasAppt", "==", ui.appt === "yes")] : []);
   let settings = normRecallSettings({});
   let people = [];
   let sections = [];
@@ -192,7 +198,7 @@ export function mountRecall(container, { staff = null } = {}) {
   }
   function tabSections() {
     const t = todayKey(), d30 = addDays(t, -30), d182 = addDays(t, -182);
-    const base = [...tabBase(ui.tab), ...(ui.cat ? [where("category", "==", ui.cat)] : [])];
+    const base = [...tabBase(ui.tab), ...(ui.cat ? [where("category", "==", ui.cat)] : []), ...apptWhere()];
     const lv = lvRange();
     if (lv) return [{ key: ui.tab, title: "", where: [...base, ...lvWhere(lv)], order: ["lastVisit", "desc"] }];
     const due = ["dueDate", "desc"];
@@ -258,7 +264,7 @@ export function mountRecall(container, { staff = null } = {}) {
     if (!root.isConnected) return;
     const seq = ++countSeq;
     const t = todayKey(), uid = me();
-    const cat = ui.cat ? [where("category", "==", ui.cat)] : [];
+    const cat = [...(ui.cat ? [where("category", "==", ui.cat)] : []), ...apptWhere()];
     const lv = lvRange();
     const lvc = lv ? [...lvWhere(lv), orderBy("lastVisit", "desc")] : [];   // the same indexes as the lists
     const cats = settings.categories.filter((c) => c.on).map((c) => c.key);
@@ -272,7 +278,7 @@ export function mountRecall(container, { staff = null } = {}) {
       newWeek: countOf([where("status", "==", "open"), where("dueDate", ">=", addDays(t, -7)), where("dueDate", "<=", t), orderBy("dueDate", "desc")]),
       bookedMonth: countOf([where("bookedAt", ">=", keyDate(`${t.slice(0, 8)}01`).toISOString())]),
     };
-    cats.forEach((k) => { jobs[`cat:${k}`] = countOf([...tabBase(ui.tab), where("category", "==", k), ...lvc]); });
+    cats.forEach((k) => { jobs[`cat:${k}`] = countOf([...tabBase(ui.tab), where("category", "==", k), ...apptWhere(), ...lvc]); });
     sections.forEach((s) => { if (s.title) jobs[`sec:${s.key}`] = countOf([...s.where, orderBy(s.order[0], s.order[1])]); });
     const keys = Object.keys(jobs);
     const vals = await Promise.all(keys.map((k) => jobs[k]));
@@ -356,6 +362,8 @@ export function mountRecall(container, { staff = null } = {}) {
   function drawLv() {
     const box = $("lvbox");
     box.hidden = ui.q.trim().length >= 2;
+    $("appt").hidden = box.hidden;
+    $("appt").value = ui.appt;
     const t = todayKey();
     box.innerHTML = `<select class="fb-select" data-role="lv" aria-label="Last visit">${LV_OPTS.map(([k, l]) =>
       `<option value="${k}"${k === ui.lv ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>` +
@@ -377,7 +385,9 @@ export function mountRecall(container, { staff = null } = {}) {
   function rowHtml(c, t) {
     const on = c.id === sel;
     const meta = [esc(c.category), `<span class="${lateness(c, t)}">${esc(dueText(c, t))}</span>`,
-      c.lastStaff ? esc(`last with ${c.lastStaff}`) : ""].filter(Boolean).join(" · ");
+      c.lastStaff ? esc(`last with ${c.lastStaff}`) : "",
+      c.nextAppt && c.status === "open" && c.nextAppt >= t ? `<span class="rc-appt">Appt ${esc(short(c.nextAppt))}</span>` : ""]
+      .filter(Boolean).join(" · ");
     const side = [c.attempts ? `${c.attempts} tr${c.attempts === 1 ? "y" : "ies"}` : "",
       c.assignedToId && c.assignedToId !== me() ? first(c.assignedToName) : ""].filter(Boolean).join(" · ");
     const sv = saving.get(c.id);
@@ -417,6 +427,7 @@ export function mountRecall(container, { staff = null } = {}) {
   }
 
   function emptyText(sec) {
+    if (ui.appt) return ui.appt === "yes" ? "Nobody here with an upcoming visit." : "Nobody here without an upcoming visit.";
     if (lvRange()) return ui.cat ? `Nobody here for ${ui.cat} with a last visit in those dates.` : "Nobody here with a last visit in those dates.";
     if (ui.cat) return `Nobody here for ${ui.cat}.`;
     if (sec.key === "mine") {
@@ -653,6 +664,7 @@ export function mountRecall(container, { staff = null } = {}) {
     const el = e.target;
     const r = el.dataset.role;
     if (r === "who") { ui.who = el.value; sel = ""; build(); return; }
+    if (r === "appt") { ui.appt = el.value; sel = ""; build(); return; }
     if (r === "lv") {
       ui.lv = el.value;
       sel = "";
