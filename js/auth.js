@@ -6,6 +6,7 @@ import {
   onAuthStateChanged,
   setPersistence,
   browserSessionPersistence,
+  browserLocalPersistence,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { clearAllDrafts } from "./form-draft.js";
 
@@ -16,7 +17,8 @@ const ERROR_MESSAGES = {
   SERVER_ERROR: "Something went wrong. Please try again.",
 };
 
-export async function loginWithPin(pin) {
+// remember: stay signed in on this device after it's closed (the scanner app's "Keep me signed in"). The portal never asks for this.
+export async function loginWithPin(pin, { remember = false } = {}) {
   let res;
   try {
     res = await fetch(LOGIN_ENDPOINT, {
@@ -34,7 +36,7 @@ export async function loginWithPin(pin) {
   sessionStorage.setItem("appSession", data.session || "");
 
   // Session-only login: closing the tab/browser logs out (safer on shared clinic PCs)
-  await setPersistence(auth, browserSessionPersistence);
+  await setPersistence(auth, remember ? browserLocalPersistence : browserSessionPersistence);
   await signInWithCustomToken(auth, data.token);
 }
 

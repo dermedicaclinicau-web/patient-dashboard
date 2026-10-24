@@ -1,0 +1,65 @@
+/* Dermedica Scan (scan.html): the Scanner on its own, for phones and tablets */
+html, body.scan-app { height: 100%; }
+body.scan-app { margin: 0; background: #f1f5f9; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+.scan-app .ch-bubble, .scan-app .mnav { display: none !important; }
+
+.sa-boot { position: fixed; inset: 0; display: grid; place-items: center; background: #0f766e; }
+.sa-spin { width: 36px; height: 36px; border: 3px solid rgba(255, 255, 255, .3); border-top-color: #fff; border-radius: 50%; animation: sa-spin .8s linear infinite; }
+@keyframes sa-spin { to { transform: rotate(360deg); } }
+
+/* PIN */
+.sa-login { box-sizing: border-box; display: grid; place-items: center; min-height: 100dvh;
+  padding: max(24px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom));
+  background: linear-gradient(160deg, #0f766e, #134e4a); }
+.sa-login-card { width: min(380px, 100%); padding: 28px 24px 22px; border-radius: 24px; background: #fff;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, .25); text-align: center; }
+.sa-login-card.shake { animation: sa-shake .35s; }
+@keyframes sa-shake { 20%, 60% { transform: translateX(-8px); } 40%, 80% { transform: translateX(8px); } }
+.sa-logo { font-size: 22px; font-weight: 700; color: #0f172a; }
+.sa-logo b { color: #0f766e; }
+.sa-hint { margin: 6px 0 18px; color: #64748b; }
+.sa-dots { display: flex; justify-content: center; gap: 12px; min-height: 18px; }
+.sa-dots span { width: 14px; height: 14px; border: 2px solid #94a3b8; border-radius: 50%; transition: background .15s; }
+.sa-dots span.is-on { border-color: #0f766e; background: #0f766e; }
+.sa-err { min-height: 20px; margin: 10px 0 8px; font-size: 14px; color: #be123c; }
+.sa-keys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.sa-keys button { height: 64px; border: 0; border-radius: 16px; background: #f1f5f9; color: #0f172a; font: inherit;
+  font-size: 26px; font-weight: 600; touch-action: manipulation; user-select: none; }
+.sa-keys button:active { background: #ccfbf1; }
+.sa-keys .is-del { font-size: 22px; color: #475569; }
+.sa-keys .is-go { background: #0f766e; color: #fff; font-size: 17px; }
+.sa-keys .is-go:disabled { opacity: .4; }
+.sa-keep { display: block; margin-top: 18px; font-size: 14px; text-align: left; color: #334155; }
+.sa-keep small { display: block; margin: 3px 0 0 24px; color: #94a3b8; }
+
+/* The app */
+.sa-app { display: flex; flex-direction: column; min-height: 100dvh; }
+.sa-bar { position: sticky; top: 0; z-index: 30; display: flex; align-items: center; gap: 10px;
+  padding: calc(8px + env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) 8px max(14px, env(safe-area-inset-left));
+  background: #0f766e; color: #fff; }
+.sa-brand { font-size: 17px; font-weight: 700; }
+.sa-brand b { font-weight: 600; opacity: .8; }
+.sa-sp { flex: 1; }
+.sa-who { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.sa-av { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; background: rgba(255, 255, 255, .2);
+  font-size: 12px; font-weight: 700; }
+.sa-btn { padding: 8px 12px; border: 1px solid rgba(255, 255, 255, .45); border-radius: 10px; background: transparent; color: #fff;
+  font: inherit; font-size: 13px; touch-action: manipulation; }
+.sa-btn:active { background: rgba(255, 255, 255, .15); }
+.sa-main { flex: 1; padding: 10px max(10px, env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left)); }
+.scan-app .sa-main .page { max-width: 900px; margin: 0 auto; padding: 0; }
+
+/* Bigger, easier taps */
+.scan-app .scan-mode { min-height: 46px; font-size: 16px; }
+.scan-app .lh-btn { min-height: 44px; }
+.scan-app .scan-vf { height: calc(100dvh - 290px - env(safe-area-inset-top) - env(safe-area-inset-bottom)); min-height: 300px; }
+
+/* Phones: just the initials in the bar */
+@media (max-width: 480px) {
+  .sa-name, .sa-brand b { display: none; }
+}
+/* Phone on its side: the camera gets as much room as possible */
+@media (orientation: landscape) and (max-height: 600px) {
+  .sa-bar { padding-top: calc(4px + env(safe-area-inset-top)); padding-bottom: 4px; }
+  .scan-app .scan-vf { height: calc(100dvh - 170px); }
+}

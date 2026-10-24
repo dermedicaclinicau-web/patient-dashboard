@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en-AU">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Dermedica Scan</title>
+  <meta name="theme-color" content="#0f766e" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Dermedica Scan" />
+  <link rel="manifest" href="scan.webmanifest" />
+  <link rel="apple-touch-icon" href="img/scan-180.png" />
+  <link rel="icon" href="img/scan-192.png" />
+  <link rel="stylesheet" href="css/styles.css" />
+  <link rel="stylesheet" href="css/scan-app.css" />
+</head>
+<body class="scan-app">
+  <div id="sa-boot" class="sa-boot"><span class="sa-spin" aria-label="Loading"></span></div>
+
+  <section id="sa-login" class="sa-login" hidden>
+    <div class="sa-login-card" id="sa-card">
+      <div class="sa-logo">Dermedica <b>Scan</b></div>
+      <p class="sa-hint" id="sa-note">Enter your PIN</p>
+      <div class="sa-dots" id="sa-dots" aria-live="polite"></div>
+      <p class="sa-err" id="sa-err" role="alert"></p>
+      <div class="sa-keys" id="sa-keys">
+        <button type="button" data-k="1">1</button><button type="button" data-k="2">2</button><button type="button" data-k="3">3</button>
+        <button type="button" data-k="4">4</button><button type="button" data-k="5">5</button><button type="button" data-k="6">6</button>
+        <button type="button" data-k="7">7</button><button type="button" data-k="8">8</button><button type="button" data-k="9">9</button>
+        <button type="button" data-k="del" class="is-del" aria-label="Delete">⌫</button>
+        <button type="button" data-k="0">0</button>
+        <button type="button" data-k="go" class="is-go" id="sa-go" disabled>Unlock</button>
+      </div>
+      <label class="sa-keep"><input type="checkbox" id="sa-keep" /> Keep me signed in on this device
+        <small>Only on your own phone. Without it, the app locks after 10 minutes of no use.</small></label>
+    </div>
+  </section>
+
+  <div id="sa-app" class="sa-app" hidden>
+    <header class="sa-bar">
+      <span class="sa-brand">Dermedica <b>Scan</b></span>
+      <span class="sa-sp"></span>
+      <span class="sa-who"><span class="sa-av" id="sa-av"></span><span class="sa-name" id="sa-name"></span></span>
+      <button type="button" class="sa-btn" id="sa-switch">Switch user</button>
+    </header>
+    <main id="sa-main" class="sa-main"></main>
+  </div>
+
+  <script type="module" src="js/scan-app.js"></script>
+</body>
+</html>
