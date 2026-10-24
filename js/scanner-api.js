@@ -2,7 +2,7 @@
 // matched to the product list here, then saved: the scan (Firestore: scans, photo in Storage) and,
 // in the same transaction, the sale that takes the products off the Shelf.
 import { db, auth } from "./firebase-config.js";
-import { collection, doc, setDoc, getDoc, getDocs, query, where, updateDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { collection, doc, setDoc, getDoc, getDocs, query, where, updateDoc, serverTimestamp, runTransaction } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { getStorage, ref as sRef, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 import { callApi } from "./appointments.js";
 import { dayKey, listPos } from "./inventory-api.js";
@@ -248,6 +248,54 @@ export async function todaysScans() {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }))
     .filter((s) => s.status !== "deleted")
     .sort((a, b) => ms(b.at) - ms(a.at));
+}
+
+/* ---------- A saved scan: review, correct or delete (Scanner → Today) ---------- */
+// Only the scan record changes: billing sheets and prescriptions never took stock off.
+const SCAN_EDIT_KEYS = {
+  billing: ["patientName", "patientPttId", "bookedWith", "bookedAt", "apptDate", "apptTime", "provider",
+    "lines", "productsTotal", "flagCount", "status", "note"],
+  rx: ["patientId", "patientPttId", "patientIds", "patientName", "recordDate", "prescriber", "scriptNumber", "items", "note"],
+};
+
+export async function getScan(id) {
+  const s = await getDoc(doc(db, "scans", String(id || "")));
+  return s.exists() ? { id: s.id, ...s.data() } : null;
+}
+
+// changes: only the fields that changed. summary: ["Patient: A → B", …] for the history.
+// remove: mark it deleted instead. One transaction; the first version is kept in "original".
+export async function updateScan(id, changes, { reason, summary = [], remove = false }, staff) {
+  const uid = auth.currentUser && auth.currentUser.uid;
+  if (!uid) throw new Error("Your session has ended. Log in again.");
+  const why = String(reason || "").trim().slice(0, 300);
+  if (!why) throw new Error(remove ? "Add why it's being deleted." : "Add why it's being changed.");
+  const by = String((staff && staff.name) || "").slice(0, 120);
+  const ref = doc(db, "scans", id);
+  await runTransaction(db, async (tx) => {
+    const s = await tx.get(ref);
+    if (!s.exists()) throw new Error("This scan no longer exists.");
+    const d = s.data();
+    if (d.status === "deleted") throw new Error("This scan has already been deleted.");
+    const keys = SCAN_EDIT_KEYS[d.kind];
+    if (!keys) throw new Error("This kind of scan can't be changed here.");
+    const patch = {};
+    if (remove) Object.assign(patch, { status: "deleted", deleteReason: why, deletedAt: serverTimestamp(), deletedBy: by });
+    else Object.keys(changes || {}).forEach((k) => { if (keys.includes(k)) patch[k] = changes[k]; });
+    if (!Object.keys(patch).length) throw new Error("Nothing has changed.");
+    if (!d.original) {
+      const o = {};
+      keys.forEach((k) => { if (d[k] !== undefined) o[k] = d[k]; });
+      patch.original = o;
+    }
+    patch.edits = [...(Array.isArray(d.edits) ? d.edits : []), {
+      at: new Date().toISOString(), by, byUid: uid, reason: why, deleted: !!remove,
+      changes: summary.slice(0, 20).map((x) => String(x).slice(0, 300)),
+    }].slice(-30);
+    patch.editCount = (Number(d.editCount) || 0) + 1;
+    Object.assign(patch, { editedAt: serverTimestamp(), editedBy: by, editedByUid: uid });
+    tx.update(ref, patch);
+  });
 }
 
 /* ---------- The patient: matched to that day's booking ---------- */

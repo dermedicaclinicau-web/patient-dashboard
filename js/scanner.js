@@ -17,6 +17,7 @@ import { showToast } from "./utils.js";
 import { confirmDialog } from "./dialog.js";
 import { warmUpLogin } from "./auth.js";
 import { can } from "./perms.js";
+import { openScanReview } from "./scanner-review.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const svg = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -292,15 +293,15 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
         ? (s.status === "transferred" ? "Internal transfer · JT storage → Shelf"
           : `${s.supplierName || "Delivery docket"}${s.poNumber ? ` · ${s.poNumber}` : ""}`)
         : (s.patientName || "Patient not read");
-      const status = s.kind === "billing" ? (Number(s.flagCount) ? `${s.flagCount} to check` : "All matched")
+      const status = s.kind === "billing" ? (Number(s.flagCount) ? `${s.flagCount} to check` : s.editCount ? "Checked" : "All matched")
         : s.kind === "docket" ? ({ received: "Received", linked: "Linked to an order", unlinked: "No order linked",
             transferred: "Moved to the Shelf" }[s.status] || "")
         : Array.isArray(s.items) ? plural(s.items.length, "item") : "";
-      return `<li>
+      return `<li data-scanopen="${esc(s.id)}">
         <span class="scan-today-k is-${esc(s.kind)}">${esc(KIND_TAG[s.kind] || s.kind)}</span>
         <span class="scan-today-main"><strong>${esc(who)}</strong>
-          <small>${esc([time, s.by && `by ${s.by}`, status].filter(Boolean).join(" · "))}</small></span>
-        ${s.photo && s.photo.url ? `<a class="scan-pat-btn" href="${esc(s.photo.url)}" target="_blank" rel="noopener">Photo</a>` : ""}
+          <small>${esc([time, s.by && `by ${s.by}`, status, s.editCount && s.kind !== "billing" ? "changed" : ""].filter(Boolean).join(" · "))}</small></span>
+        <button type="button" class="scan-pat-btn" data-scanopen="${esc(s.id)}">Review</button>
       </li>`;
     };
     return `<details class="scan-today" data-role="today"${st.todayOpen ? " open" : ""}>
@@ -1155,12 +1156,21 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     e.preventDefault();
     shoot();
   };
-
+  let reviewing = false;   // one review window at a time
   root.addEventListener("click", (e) => {
     if (e.target.closest('[data-role="tip"]') && st.camErr && st.mode === "camera") {
       st.camErr = "";
       stopCamera();
       render();
+      return;
+    }
+    const so = e.target.closest("[data-scanopen]");
+    if (so) {
+      if (reviewing) return;
+      reviewing = true;
+      productsReady
+        .then(() => openScanReview({ id: so.dataset.scanopen, products, onChanged: () => loadToday(true) }))
+        .finally(() => { reviewing = false; });
       return;
     }
     const kd = e.target.closest("[data-kind]");

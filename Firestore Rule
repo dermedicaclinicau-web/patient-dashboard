@@ -1236,14 +1236,34 @@ match /inv_count_drafts/{id} {
         && ((request.resource.data.kind == 'billing' && can('scanner.billing'))
           || (request.resource.data.kind == 'docket' && can('scanner.docket'))
           || (request.resource.data.kind == 'rx' && can('scanner.rx')));
+      // Delivery dockets: linked to the delivery received, or the internal transfer done
       allow update: if isStaff() && resource.data.kind == 'docket'
-        && resource.data.status != 'received'
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'receiptId', 'linkedAt'])
-        && request.resource.data.status == 'received'
-        && request.resource.data.receiptId is string && request.resource.data.receiptId.size() > 0;
+        && !(resource.data.status in ['received', 'transferred'])
+        && ((request.resource.data.status == 'received'
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'receiptId', 'linkedAt'])
+              && request.resource.data.receiptId is string && request.resource.data.receiptId.size() > 0)
+          || (request.resource.data.status == 'transferred'
+              && request.resource.data.diff(resource.data).affectedKeys()
+                   .hasOnly(['status', 'transferType', 'moved', 'releaseIds', 'linkedAt'])));
+      // Billing sheets and prescriptions: corrected or deleted from Scanner → Today, with the history kept
+      allow update: if isStaff() && resource.data.kind in ['billing', 'rx']
+        && resource.data.status != 'deleted'
+        && can('scanner.' + resource.data.kind)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+             'patientName', 'patientPttId', 'bookedWith', 'bookedAt', 'apptDate', 'apptTime', 'provider',
+             'lines', 'productsTotal', 'flagCount', 'status', 'note',
+             'patientId', 'patientIds', 'recordDate', 'prescriber', 'scriptNumber', 'items',
+             'deleteReason', 'deletedAt', 'deletedBy',
+             'original', 'edits', 'editCount', 'editedAt', 'editedBy', 'editedByUid'])
+        && request.resource.data.status in ['ok', 'flagged', 'saved', 'deleted']
+        && request.resource.data.editedByUid == request.auth.uid
+        && request.resource.data.editCount == resource.data.get('editCount', 0) + 1
+        && request.resource.data.edits is list && request.resource.data.edits.size() <= 30
+        && (!('original' in resource.data) || request.resource.data.original == resource.data.original);
       allow delete: if false;
     }
-    // Sales: products checked out to patients (Scanner now, the checkout later). Never edited from a browser.
+    
+        // Sales: products checked out to patients (Scanner now, the checkout later). Never edited from a browser.
     match /inv_sales/{id} {
       allow read: if isStaff();
       allow create: if invUse() && request.resource.data.byUid == request.auth.uid
@@ -1267,7 +1287,7 @@ match /inv_count_drafts/{id} {
              'status', 'creditReceived', 'creditNoteNo', 'creditNote', 'creditedBy', 'creditedByUid', 'creditedAt']);
       allow delete: if false;
     }
-    
+
     // Billing check: "Mark checked" notes, one per mismatch. Saved once, never changed.
     match /inv_billing_checks/{id} {
       allow read: if isStaff();
