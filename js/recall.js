@@ -16,7 +16,7 @@ const COL = "recalls";
 const PAGE = 50;
 const OUTCOMES = [["no_answer", "No answer"], ["voicemail", "Left voicemail"], ["spoke", "Spoke to them"],
   ["texted", "Sent a text"], ["booked", "Booked"]];
-const QUICK = [["no_answer", "No answer"], ["voicemail", "Left voicemail"], ["texted", "Sent a text"], ["booked", "Booked"]];
+const QUICK = [["no_answer", "No answer"], ["voicemail", "Left voicemail"], ["texted", "Sent a text"], ["booked", "Mark booked"]];
 const LABEL = Object.fromEntries(OUTCOMES);
 const GROUPS = [["Just due · last 30 days", (d) => d <= 30], ["Overdue · 1 to 6 months", (d) => d > 30 && d <= 182],
   ["Lapsed · over 6 months", (d) => d > 182]];
@@ -156,7 +156,7 @@ export function mountRecall(container, { staff = null } = {}) {
   let seenSel = false;
   let panelSig = "";
   let draft = blank();
-  let busy = false;
+  const saving = new Map();   // card id → what's being saved ("Saving: No answer")
   let autoNext = getPref("rc_autonext", true);
   let countTimer = 0, countSeq = 0, searchTimer = 0, searchSeq = 0;
 
@@ -380,8 +380,10 @@ export function mountRecall(container, { staff = null } = {}) {
       c.lastStaff ? esc(`last with ${c.lastStaff}`) : ""].filter(Boolean).join(" · ");
     const side = [c.attempts ? `${c.attempts} tr${c.attempts === 1 ? "y" : "ies"}` : "",
       c.assignedToId && c.assignedToId !== me() ? first(c.assignedToName) : ""].filter(Boolean).join(" · ");
-    const tag = c.replyOpen && c.reply
-      ? `<span class="rc-tag is-${esc(c.reply.kind)}">${esc(REPLY_TAG[c.reply.kind] || "Replied")}</span>`
+    const sv = saving.get(c.id);
+    const tag = sv ? `<span class="rc-tag is-saving">${esc(sv)}…</span>`
+      : c.replyOpen && c.reply
+        ? `<span class="rc-tag is-${esc(c.reply.kind)}">${esc(REPLY_TAG[c.reply.kind] || "Replied")}</span>`
       : c.status === "open" && c.flowState === "wait" && c.flowDueAt
         ? `<span class="rc-tag is-flow">Flow: waiting until ${esc(short(fmtKey(new Date(c.flowDueAt))))}</span>`
       : c.status === "open" && c.flowState === "joined" ? `<span class="rc-tag is-flow">With their ${esc(c.joinedCat || "other")} recall</span>`
@@ -401,8 +403,8 @@ export function mountRecall(container, { staff = null } = {}) {
         ${tag}
         ${side ? `<span class="rc-side">${esc(side)}</span>` : ""}
         ${contact}
-      </div>${on && c.status === "open" ? `<div class="rc-quick">${QUICK.map(([k, l]) =>
-        `<button type="button" class="rc-qb${k === "booked" ? " is-ok" : ""}" data-quick="${k}">${esc(l)}</button>`).join("")}
+      </div>${on && c.status === "open" && !sv ? `<div class="rc-quick">${QUICK.map(([k, l]) =>
+        `<button type="button" class="rc-qb" data-quick="${k}">${esc(l)}</button>`).join("")}
         <button type="button" class="rc-qb" data-act="details">Note or call back…</button></div>` : ""}`;
   }
 
@@ -492,10 +494,12 @@ export function mountRecall(container, { staff = null } = {}) {
     const p = $("panel");
     const c = sel ? findCard(sel) : null;
     if (!c) { p.hidden = true; p.innerHTML = ""; panelSig = ""; return; }
-    const sig = `${c.id}|${c.updatedAt}|${c.status}|${people.length}`;
+    const sv = saving.get(c.id) || "";
+    const sig = `${c.id}|${c.updatedAt}|${c.status}|${people.length}|${sv}`;
     if (!force && sig === panelSig) return;
     panelSig = sig;
     p.hidden = false;
+    p.classList.toggle("is-saving", !!sv);
 
     const t = todayKey();
     const over = daysFrom(c.dueDate, t);
@@ -572,7 +576,7 @@ export function mountRecall(container, { staff = null } = {}) {
           <option value="">Nobody yet (waiting)</option>${ppl.map((s) =>
             `<option value="${esc(s.id)}"${s.id === c.assignedToId ? " selected" : ""}>${esc(s.name)}${team.size && !team.has(s.id) ? " (not in the recall team)" : ""}</option>`).join("")}
         </select></div>`}
-      ${work}
+      ${sv ? `<p class="rc-saving-line" role="status">${esc(sv)}…</p>` : ""}<div class="rc-work">${work}</div>
       <h4 class="rc-h">History</h4>
       <ul class="rc-log">${c.log.slice().reverse().map((l) => `<li><strong>${esc(l.what)}</strong>
         ${l.note ? `<p>${esc(l.note)}</p>` : ""}<small>${esc(when(l.at))}${l.by ? ` · ${esc(l.by)}` : ""}</small></li>`).join("")}</ul>`;
@@ -594,30 +598,35 @@ export function mountRecall(container, { staff = null } = {}) {
     if (sel === id) { sel = ""; seenSel = false; draft = blank(); drawList(); drawPanel(true); return; }
     openCard(id);
   }
-  // After logging a call: the next open card that was below this one
+  // After logging a call: the next open card that was below this one (not one still saving)
   function goNext(fromId, ids) {
     const i = ids.indexOf(fromId);
-    const next = ids.slice(i + 1).find((id) => { const c = findCard(id); return c && c.status === "open"; });
+    const next = ids.slice(i + 1).find((id) => { const c = findCard(id); return c && c.status === "open" && !saving.has(id); });
     if (next) openCard(next);
   }
 
-  async function act(op, extraBody, btn) {
-    if (busy || !sel) return false;
-    const id = sel;
-    busy = true;
+  // Saves through Apps Script (1 to 3 seconds). The card shows "Saving…" meanwhile; other cards can be worked.
+  async function act(op, extraBody, { id = sel, label = "Saving", btn = null } = {}) {
+    if (!id) return false;
+    if (saving.has(id)) { showToast("Still saving the last change. One moment."); return false; }
+    const c = findCard(id);
+    saving.set(id, label);
     if (btn) btn.disabled = true;
+    drawList();
+    if (id === sel) drawPanel(true);
     try {
       const res = await callApi({ action: "recall", op, id, ...extraBody });
-      if (res && res.problem) { showToast(res.problem); return false; }
+      if (res && res.problem) { showToast(`${c && c.patientName ? `${c.patientName}: ` : ""}${res.problem}`); return false; }
       scheduleCounts(800);
-      if (!inRows(id)) keepOpen(id);
+      if (sel === id && !inRows(id)) keepOpen(id);
       return true;
     } catch (err) {
-      showToast(errText(err, "Couldn't save. Try again."));
+      showToast(`${c && c.patientName ? `${c.patientName}: ` : ""}${errText(err, "Couldn't save. Try again.")}`);
       return false;
     } finally {
-      busy = false;
+      saving.delete(id);
       if (btn && btn.isConnected) btn.disabled = false;
+      if (root.isConnected) { drawList(); if (id === sel) drawPanel(true); }
     }
   }
 
@@ -656,7 +665,7 @@ export function mountRecall(container, { staff = null } = {}) {
     if (r === "remind") { draft.remind = el.value; drawPanel(true); return; }
     if (r === "until") { draft.until = el.value; return; }
     if (r === "reason") { draft.reason = el.value; drawPanel(true); return; }
-    if (r === "assign" && !(await act("assign", { toId: el.value }, el))) drawPanel(true);
+    if (r === "assign" && !(await act("assign", { toId: el.value }, { label: "Saving", btn: el }))) drawPanel(true);
   });
   root.addEventListener("keydown", (e) => {
     const row = e.target.closest && e.target.closest(".rc-item");
@@ -689,11 +698,12 @@ export function mountRecall(container, { staff = null } = {}) {
     }
     const qb = e.target.closest("[data-quick]");
     if (qb) {
-      const k = qb.dataset.quick;
-      const ids = shownIds(), from = sel;
-      if (await act("log", { outcome: k, note: "", remindOn: "" }, qb)) {
-        showToast(`${LABEL[k]}: saved`);
-        if (autoNext) goNext(from, ids);
+      const k = qb.dataset.quick, from = sel, ids = shownIds();
+      if (saving.has(from)) return;
+      const c = findCard(from);
+      if (autoNext) goNext(from, ids);   // straight on: this one saves in the background
+      if (await act("log", { outcome: k, note: "", remindOn: "" }, { id: from, label: `Saving: ${LABEL[k]}` })) {
+        showToast(`${c ? `${first(c.patientName)}: ` : ""}${LABEL[k]} saved`);
       }
       return;
     }
@@ -717,7 +727,7 @@ export function mountRecall(container, { staff = null } = {}) {
     if (b.dataset.act === "sms-cancel") { draft.sms = null; drawPanel(true); return; }
     if (b.dataset.act === "sms-send") {
       if (String(draft.sms || "").trim().length < 10) { showToast("Write the message first."); return; }
-      if (await act("text", { text: draft.sms }, b)) { draft.sms = null; drawPanel(true); showToast("Text sent"); }
+      if (await act("text", { text: draft.sms }, { label: "Sending the text", btn: b })) { draft.sms = null; drawPanel(true); showToast("Text sent"); }
       return;
     }
     if (b.dataset.act === "details") {
@@ -729,12 +739,18 @@ export function mountRecall(container, { staff = null } = {}) {
     }
     if (b.dataset.act === "save") {
       if (!draft.out && !draft.note.trim() && !draft.remind) { showToast("Choose what happened, or write a note."); return; }
-      const ids = shownIds(), from = sel, logged = !!draft.out;
-      if (await act("log", { outcome: draft.out, note: draft.note, remindOn: draft.remind }, b)) {
-        draft = { ...draft, out: "", note: "", remind: "" };
-        drawPanel(true);
-        showToast("Saved");
-        if (autoNext && logged) goNext(from, ids);
+      const from = sel, ids = shownIds(), kept = { ...draft };
+      if (saving.has(from)) { showToast("Still saving the last change. One moment."); return; }
+      const c = findCard(from);
+      const what = kept.out ? LABEL[kept.out] : kept.remind ? "Call back" : "Note";
+      const jump = autoNext && !!kept.out;   // straight on to the next patient; this one saves in the background
+      if (jump) goNext(from, ids);
+      const ok = await act("log", { outcome: kept.out, note: kept.note, remindOn: kept.remind }, { id: from, label: `Saving: ${what}` });
+      if (ok) {
+        if (sel === from) { draft = { ...draft, out: "", note: "", remind: "" }; drawPanel(true); }
+        showToast(`${c ? `${first(c.patientName)}: ` : ""}${what} saved`);
+      } else if (jump && sel !== from) {
+        sel = from; seenSel = inRows(from); draft = kept; drawList(); drawPanel(true);   // back to it, with what was typed
       }
       return;
     }
@@ -744,16 +760,16 @@ export function mountRecall(container, { staff = null } = {}) {
       if (r.askDate && !draft.until) { showToast("Choose when to start recalling them again."); return; }
       if (r.dnc && !(await confirmDialog({ title: "Don't contact again?", message: "Recall stops, and they go on the do-not-contact list for marketing emails.", confirmLabel: "Stop and add to the list", tone: "danger" }))) return;
       const ids = shownIds(), from = sel;
-      if (await act("close", { reason: r.label, until: draft.until, note: draft.note }, b)) {
+      if (await act("close", { reason: r.label, until: draft.until, note: draft.note }, { label: r.askDate ? "Pausing" : "Stopping recall", btn: b })) {
         draft = blank();
         drawPanel(true);
         showToast(r.askDate ? "Paused" : "Recall stopped");
-        if (autoNext) goNext(from, ids);
+        if (autoNext && sel === from) goNext(from, ids);
       }
       return;
     }
     if (b.dataset.act === "reopen") {
-      if (await act("reopen", {}, b)) showToast("Reopened");
+      if (await act("reopen", {}, { label: "Reopening", btn: b })) showToast("Reopened");
     }
   });
 

@@ -8603,3 +8603,12 @@ body.ff-handing { overflow: hidden; }
   .scan-rev-line select { grid-column: 1 / -1; }
   .scan-rev-dl { grid-template-columns: 1fr; }
 }
+
+.rc-tag.is-saving { background: #f1f5f9; color: #475569; }
+.rc-tag.is-saving::before, .rc-saving-line::before {
+  content: ""; display: inline-block; width: 10px; height: 10px; margin-right: 6px; vertical-align: -1px;
+  border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: rc-spin .8s linear infinite;
+}
+.rc-saving-line { margin: 0 0 10px; padding: 8px 12px; border-radius: 8px; background: #f1f5f9; color: #475569; font-size: 13px; }
+.rc-panel.is-saving .rc-work { opacity: .55; pointer-events: none; }
+@keyframes rc-spin { to { transform: rotate(360deg); } }

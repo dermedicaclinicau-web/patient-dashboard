@@ -127,7 +127,7 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
 
   const statusText = () => (status && status.at
     ? `Last checked ${when(status.at)}: ${Number(status.made || 0)} new, ${Number(status.booked || 0)} booked, ` +
-      `${Number(status.visited || 0)} came in, ${Number(status.texted || 0)} texted, ${Number(status.assigned || 0)} shared out.`
+      `${Number(status.visited || 0)} came in, ${Number(status.paused || 0)} paused (appointment booked), ${Number(status.texted || 0)} texted, ${Number(status.assigned || 0)} shared out.`
     : 'Not checked yet. Run installRecall once in Apps Script, or press "Check for due patients now".');
 
   // What's on screen. keepEmpty keeps a new reason row while it's being typed.
@@ -319,7 +319,7 @@ export async function mountRecallSettings(container, { staff = null } = {}) {
               <select class="fb-select" data-role="lead">${opts([0, 7, 14, 30], set.leadDays,
                 (d) => (d ? `${d} days before they're due` : "on the day they're due"))}</select></label>
             <label class="fe-check rs-opt-check"><input type="checkbox" data-role="pause"${set.anyFuturePauses ? " checked" : ""} />
-              <span>Don't recall anyone who has any appointment booked (they'll be in soon)</span></label>
+              <span>Don't recall anyone with an appointment booked, for any treatment. Their card is paused until the day after it.</span></label>
           </div>
         </section>
 

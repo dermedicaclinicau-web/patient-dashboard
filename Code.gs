@@ -12324,7 +12324,7 @@ function recallRun_(force) {
     res.assigned = recallAssign_(cfg, set, today);
     commitWrites_(cfg, [updateWrite_(cfg, RECALL_SET_ + '/status', {
       at: new Date().toISOString(), made: res.made, booked: res.booked, visited: res.visited, reopened: res.reopened,
-      back: res.back, offCat: res.offCat, retired: res.retired, texted: res.texted, assigned: res.assigned, rows: res.rows, ms: res.ms,
+      back: res.back, offCat: res.offCat, retired: res.retired, paused: res.paused, texted: res.texted, assigned: res.assigned, rows: res.rows, ms: res.ms,
     })]);
     props.setProperty('RECALL_SIG', sig);
     props.setProperty('RECALL_ROWS', String(res.rows));
@@ -12381,7 +12381,7 @@ function recallCheck_(cfg, set, today, force) {
 
   const now = new Date().toISOString();
   const writes = [];
-  const sum = { made: 0, booked: 0, visited: 0, reopened: 0, back: 0, offCat: 0, retired: 0 };
+  const sum = { made: 0, booked: 0, visited: 0, reopened: 0, back: 0, offCat: 0, retired: 0, paused: 0 };
   const add = function (c, what) {
     return (Array.isArray(c.log) ? c.log : []).concat([{ at: now, by: 'Recall', byUid: '', kind: 'auto', what: what, note: '' }]).slice(-80);
   };
@@ -12451,9 +12451,25 @@ function recallCheck_(cfg, set, today, force) {
           }
           return;
         }
+        // Any appointment booked (for any treatment): paused until the day after it. Recall settings → the tick.
+        const appt = set.anyFuturePauses ? anyFuture[c.patientId] : '';
+        if (appt) {
+          const until = flowAddDaysKey_(appt, 1);
+          if (c.stage === 'later' && String(c.remindOn || '') >= until) return;   // already paused long enough
+          const fs = String(c.flowState || '');
+          const inFlow = ['run', 'wait', 'team', 'cycle', 'queued', 'released', 'joined'].indexOf(fs) !== -1;
+          put(Object.assign({ stage: 'later', remindOn: until, pauseReason: 'Has an appointment on ' + recLongDate_(appt), apptPaused: appt },
+            inFlow ? { flowState: 'paused', pausedFlow: fs, flowNext: '' } : {}),
+            'Paused: they have an appointment on ' + recLongDate_(appt) + (inFlow ? '. The recall flow is paused too' : '') +
+            ". Back on the list the day after, if they're still due");
+          sum.paused++;
+          return;
+        }
         if (c.stage === 'later' && c.remindOn && String(c.remindOn) <= today) {
-          put({ stage: c.assignedToId ? 'call' : 'due', remindOn: '', pauseReason: '' },
-            c.pauseReason ? 'Back on the list (was paused: ' + c.pauseReason + ')' : 'Reminder: call them back today');
+          put(Object.assign({ stage: c.assignedToId ? 'call' : 'due', remindOn: '', pauseReason: '', apptPaused: '' },
+            c.flowState === 'paused' ? { flowState: 'released', pausedFlow: '' } : {}),
+            c.apptPaused ? 'Back on the list: their appointment on ' + recLongDate_(c.apptPaused) + " has passed and they're still due"
+              : c.pauseReason ? 'Back on the list (was paused: ' + c.pauseReason + ')' : 'Reminder: call them back today');
           sum.back++;
         }
       })();
@@ -12587,10 +12603,6 @@ function handleRecall_(body) {
       if (!manage) return { ok: false, error: 'FORBIDDEN' };
       return { ok: true, services: recallServices_(getConfig_()) };
     }
-    if (op === 'services') {
-      if (!manage) return { ok: false, error: 'FORBIDDEN' };
-      return { ok: true, services: recallServices_(getConfig_()) };
-    }
     if (op === 'results') {
       if (!manage) return { ok: false, error: 'FORBIDDEN' };
       return recallResults_(body);
@@ -12647,7 +12659,11 @@ function recallAction_(op, id, body, session) {
     const remind = String(body.remindOn || '');
     if (!out && !note && !remind) return { ok: true, problem: 'Choose what happened, or write a note.' };
     if (remind && !dateOk(remind)) return { ok: true, problem: 'Choose a call-back date after today.' };
-    patch = out ? { lastCallAt: now, lastCallBy: uid, lastCallDay: today, lastOutcome: out } : {};
+    const isCall = ['no_answer', 'voicemail', 'spoke'].indexOf(out) !== -1;   // only these count as a call
+    patch = {};
+    if (isCall) Object.assign(patch, { lastCallAt: now, lastCallBy: uid, lastCallDay: today });
+    if (out === 'texted') Object.assign(patch, { lastTextAt: now, lastTextBy: uid, lastTextByName: who, texts: Number(c.texts || 0) + 1 });
+    if (out) patch.lastOutcome = out;
     if (out === 'booked') {
       add('call', 'Booked');
       Object.assign(patch, { status: 'booked', bookedFor: '', bookedAt: now, remindOn: '', pauseReason: '' });
@@ -12659,11 +12675,12 @@ function recallAction_(op, id, body, session) {
         Object.assign(patch, { stage: 'later', remindOn: remind, pauseReason: '' });
       }
     }
-    if (!c.assignedToId) {   // logging a call on a waiting card makes it yours
+    // Doing something with a waiting card (a call, a text, booked or a call-back date) makes it yours. A note doesn't.
+    if (!c.assignedToId && (out || remind)) {
       Object.assign(patch, { assignedToId: uid, assignedToName: who, assignedDay: today });
       if (!patch.stage && out !== 'booked') patch.stage = 'call';
     }
-    patch.replyOpen = false;   // a reply has been followed up
+    if (out) patch.replyOpen = false;   // a reply has been followed up
   } else if (op === 'text') {
     if (c.status === 'closed') return { ok: true, problem: 'This card is closed. Reopen it first.' };
     const auth = tmAuth_();
@@ -12684,8 +12701,7 @@ function recallAction_(op, id, body, session) {
     catch (e) { return { ok: true, problem: "The text wasn't sent: " + String(e && e.message ? e.message : e) }; }
     cache.put(rk, String(used + 1), 3600);
     log.push({ at: now, by: who, byUid: uid, kind: 'text', what: 'Text sent', note: text });
-    patch = { lastTextAt: now, lastTextBy: uid, lastTextByName: who, texts: Number(c.texts || 0) + 1,
-      lastCallAt: now, lastCallBy: uid, lastCallDay: today, replyOpen: false };
+    patch = { lastTextAt: now, lastTextBy: uid, lastTextByName: who, texts: Number(c.texts || 0) + 1, replyOpen: false };
     if (c.status === 'open' && !c.assignedToId) {
       Object.assign(patch, { assignedToId: uid, assignedToName: who, assignedDay: today, stage: c.stage === 'later' ? 'later' : 'call' });
     }
