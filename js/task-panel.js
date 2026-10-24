@@ -1,6 +1,6 @@
 // A staff task opened like Asana: status, who it's for, due date, and a comment trail. Updates live.
 import { db } from "./firebase-config.js";
-import { doc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { doc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
 import { showToast } from "./utils.js";
 
@@ -87,10 +87,45 @@ export function openTaskPanel(id, { staff: me = null, onChange = null } = {}) {
     }
   }
 
+  // The email the task came from (Task Manager → To Staff), shown under Details. Loaded once per task.
+  let detailsFor = null;
+  function loadDetails() {
+    const box = $('[data-r="details"]');
+    if (!box || !t) return;
+    const runId = String(t.runId || "");
+    if (detailsFor === runId) return;
+    detailsFor = runId;
+    if (!runId) { box.innerHTML = ""; return; }   // a reminder from a patient page: the title is the whole task
+    box.innerHTML = '<section class="tk-details"><p class="tk-details-wait">Loading the details…</p></section>';
+    getDoc(doc(db, "task_runs", runId)).then((snap) => {
+      if (!dlg.isConnected || detailsFor !== runId) return;
+      const r = snap.exists() ? snap.data() : null;
+      if (!r || !r.html) { box.innerHTML = ""; return; }
+      const name = String(t.assignedToName || "");
+      const html = String(r.html)
+        .replace(/\{\s*first name\s*\}/gi, esc(name.split(" ")[0] || "there"))
+        .replace(/\{\s*full name\s*\}/gi, esc(name || "there"));
+      box.innerHTML = `<details class="tk-details" open>
+        <summary>Details <small>${esc([r.sentBy && `from ${r.sentBy}`, when(r.sentAt)].filter(Boolean).join(" · "))}</small></summary>
+        <iframe class="tk-mail" sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox" title="Task details"></iframe>
+      </details>`;
+      const fr = box.querySelector("iframe");
+      fr.addEventListener("load", () => {
+        try { fr.style.height = `${fr.contentDocument.documentElement.scrollHeight + 4}px`; } catch { /* keeps its default height */ }
+      });
+      fr.srcdoc = `<!DOCTYPE html><html><head><meta charset="utf-8"><base target="_blank">
+        <style>body{margin:0;font-family:Arial,Helvetica,sans-serif}</style></head><body>${html}</body></html>`;
+    }).catch((err) => {
+      console.warn("Task details not loaded:", err);
+      if (detailsFor === runId) box.innerHTML = '<p class="tk-ro">Couldn\'t load the task details. Check your connection.</p>';
+    });
+  }
+
   function build() {
     dlg.innerHTML = `<div class="tk-wrap">
       <div data-r="head"></div>
       <div data-r="meta"></div>
+      <div data-r="details"></div>
       <div class="tk-feed" data-r="feed"></div>
       <form class="tk-comp" novalidate>
         <textarea class="fe-input" rows="2" maxlength="1000" placeholder="Add a comment… (Ctrl+Enter to send)" aria-label="Comment"></textarea>
@@ -172,6 +207,7 @@ export function openTaskPanel(id, { staff: me = null, onChange = null } = {}) {
       : '<p class="tk-empty">No comments yet.</p>';
       
     if (firstFeed || nearBottom) { el.scrollTop = el.scrollHeight; firstFeed = false; }
+    loadDetails();
   }
 
   const unsub = onSnapshot(doc(db, "staff-task-list", id), (snap) => {

@@ -8572,3 +8572,11 @@ body.ff-handing { overflow: hidden; }
 .scan-jobs li .scan-today-main { flex: 1; min-width: 0; }
 .scan-jobs li.is-failed small { color: #b45309; }
 .scan-jobs li.is-reading small { color: #64748b; font-style: italic; }
+
+/* Task window: the email the task came from */
+.tk-details { margin: 0 24px 12px; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; }
+.tk-details > summary { cursor: pointer; padding: 10px 14px; font-weight: 600; color: #0f172a; }
+.tk-details > summary small { margin-left: 6px; font-weight: 400; color: #64748b; }
+.tk-details-wait { margin: 0; padding: 10px 14px; color: #64748b; font-size: 13px; }
+.tk-mail { display: block; width: 100%; min-height: 120px; max-height: 45vh; border: 0;
+  border-top: 1px solid #e2e8f0; border-radius: 0 0 10px 10px; }
