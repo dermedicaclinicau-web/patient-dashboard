@@ -69,6 +69,30 @@ export async function readBillingSheet(base64, products) {
   return res.result;
 }
 
+// A small copy, for working out what the photo is (quicker than the full one)
+export async function smallCopy(blob) {
+  return (await preparePhoto(blob, 768, 0.7)).base64;
+}
+
+// Auto: Apps Script works out whether it's a billing sheet, docket or prescription, then reads it, in one request.
+// → { auto: { kind, guess, confidence, looksLike, notAllowed? }, result, problem }
+export async function readAuto(base64, thumb, products, rxProducts) {
+  const sell = new Set(sellable(products).map((p) => p.id));
+  let res;
+  try {
+    res = await callApi({
+      action: "scanner", op: "auto", mime: "image/jpeg", image: base64, thumb,
+      products: products.map((p) => ({ id: p.id, name: p.name, brand: p.brand || "", sell: sell.has(p.id) })),
+      rxProducts,
+    });
+  } catch (err) {
+    if (err && err.code === "UNAUTHORIZED") throw err;
+    console.error("Scanner call failed:", err);
+    throw new Error(err && err.message && !err.code ? err.message : "The scanner couldn't be reached. Try again.");
+  }
+  return { auto: res.auto || null, result: res.result || null, problem: res.problem || "" };
+}
+
 /* ---------- Matching and checking ---------- */
 // Words that tell products apart. Brand words don't count, so "ZO DPD" never pairs with "ZO Rozatrol" just for being ZO.
 const BRAND_WORDS = new Set(["dermedica", "zo", "skin", "health", "zein", "obagi", "by", "md", "the", "and", "of", "with", "ml"]);

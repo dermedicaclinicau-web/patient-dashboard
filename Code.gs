@@ -5933,15 +5933,19 @@ function testChatReminders() {
 }
 
 /* ===================== Scanner: photos read by Gemini ===================== */
-// body: { op: "billing", image: base64 JPEG, mime, products: [{ id, name, brand }] }
+// body: { op: "billing" | "docket" | "rx" | "auto", image: base64 JPEG, mime, … }
+// "auto": works out which of the three it is (from a small copy, body.thumb), then reads it as that, in one request.
 // Always answers ok: true (after the login check), so callApi doesn't replace the message.
 // Problems come back in "problem".
 function scannerAction_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
   const op = String(body.op || '');
-  const kind = op === 'docket' ? 'docket' : op === 'rx' ? 'rx' : 'billing';
-  if (!can_(session, 'menu.scanner') || !can_(session, 'scanner.' + kind)) return { ok: false, error: 'FORBIDDEN' };
+  const allowed = SCAN_KINDS_.filter(function (k) { return can_(session, 'scanner.' + k); });
+  const kind = op === 'auto' ? 'auto' : op === 'docket' ? 'docket' : op === 'rx' ? 'rx' : 'billing';
+  if (!can_(session, 'menu.scanner') || (kind === 'auto' ? !allowed.length : allowed.indexOf(kind) === -1)) {
+    return { ok: false, error: 'FORBIDDEN' };
+  }
 
   const cache = CacheService.getScriptCache();
   const rlKey = 'scan_' + session.uid;
@@ -5950,6 +5954,7 @@ function scannerAction_(body) {
   cache.put(rlKey, String(n + 1), 3600);
 
   try {
+    if (kind === 'auto') return Object.assign({ ok: true }, scanAuto_(body, allowed));
     const result = kind === 'docket' ? scanDocket_(body) : kind === 'rx' ? scanRx_(body) : scanBilling_(body);
     return { ok: true, result: result };
   } catch (err) {
@@ -5957,6 +5962,101 @@ function scannerAction_(body) {
     return { ok: true, problem: String((err && err.message) || "The scanner couldn't read that photo. Try again.") };
   }
 }
+
+/* ---------- Scanner: Auto (which of the three is it?) ---------- */
+
+const SCAN_KINDS_ = ['billing', 'docket', 'rx'];
+const SCAN_AUTO_MIN_ = 0.6;   // below this it asks instead of guessing
+
+const SCAN_CLASSIFY_PROMPT_ = [
+  'You sort photos taken at Dermedica, a skin clinic in Perth, Australia. Say which ONE of these the photo shows.',
+  'Judge the PRINTED layout of the paper (titles, headings, boxes), not the handwriting.',
+  'Several pages may be joined top to bottom: judge them together.',
+  '',
+  '"billing": a Dermedica patient BILLING SHEET. Printed patient name top left, appointment date and time top right, the provider',
+  '  (e.g. "Dr Teh") far top right, and column headings such as "APPT NOTES", "SERVICES DONE TODAY", "PKG #", "PROV", "FEE",',
+  '  "Purchase Status", "BUYING PKG TODAY", "GRAND TOTAL", "TOTAL AMOUNT TO PAY" and a "NEXT APPT" box. Skincare bottles, tubes',
+  '  or boxes are often placed on or beside it: that is still "billing". With no products in the photo it is still "billing".',
+  '"docket": goods DELIVERED to the clinic. Either a supplier\'s delivery docket, packing slip, delivery note or tax invoice',
+  '  (supplier letterhead or logo, product codes, quantities ordered or supplied, often batch and expiry, Dermedica as the customer),',
+  '  OR Dermedica\'s own printed "Delivery Docket Form" (title "Delivery Docket Form", a table headed "Product name" and',
+  '  "Quantity delivered", tick boxes "New delivery from Supplier" and "Internal transfer from JT store"). That form has no',
+  '  supplier letterhead and is still "docket".',
+  '"rx": a doctor\'s PRESCRIPTION pad slip. Printed doctor name and qualifications at the top (e.g. "Dr Joanna Teh, MBBS"),',
+  '  a script number at the top right, printed fields such as "Patient\'s full name", "Medicare no.", "Entitlement no.",',
+  '  tick boxes for "PBS", "RPBS" and "Brand substitution not permitted", a handwritten medicine in the middle, a signature and date.',
+  '"other": clearly none of these. For example an Injectable Treatment Record (face diagram, consumables table, product stickers),',
+  '  a To-Book note, a consent or medical form, a Return Product Form, a receipt or EFTPOS slip, a shelf of boxes, products with',
+  '  no paperwork, or anything unrelated. Put what it is in looksLike, starting with "a" or "an", e.g. "an injectable treatment record".',
+  '"unsure": you can\'t tell, e.g. the photo is too blurry, dark or cut off to see the printed headings.',
+  '',
+  'confidence: 0 to 1, how sure you are. Below 0.6 means you are guessing. Never guess between billing, docket and rx: use "unsure".',
+].join('\n');
+
+const SCAN_CLASSIFY_SCHEMA_ = {
+  type: 'OBJECT',
+  properties: {
+    kind: { type: 'STRING', enum: ['billing', 'docket', 'rx', 'other', 'unsure'] },
+    confidence: { type: 'NUMBER' },
+    looksLike: { type: 'STRING', description: 'For "other": what it is, e.g. "an injectable treatment record". Otherwise empty.' },
+  },
+  required: ['kind', 'confidence'],
+};
+
+// The fast model first (Script Property SCAN_CLASSIFY_MODEL, default gemini-2.5-flash-lite), then the main one
+function scanClassify_(image, mime) {
+  const fast = PropertiesService.getScriptProperties().getProperty('SCAN_CLASSIFY_MODEL') || 'gemini-2.5-flash-lite';
+  try { return geminiJson_(SCAN_CLASSIFY_PROMPT_, image, mime, SCAN_CLASSIFY_SCHEMA_, fast); }
+  catch (e) {
+    console.warn('Scanner: ' + fast + " couldn't sort the photo, trying the main model: " + e);
+    return geminiJson_(SCAN_CLASSIFY_PROMPT_, image, mime, SCAN_CLASSIFY_SCHEMA_);
+  }
+}
+
+// → { auto: { kind, guess, confidence, looksLike, ms, notAllowed? }, result?, problem? }
+// auto.kind: billing | docket | rx (read, result attached) · other · unsure (the phone asks which it is)
+function scanAuto_(body, allowed) {
+  const image = String(body.image || '');
+  if (!image) throw new Error('The photo is missing. Take it again.');
+  if (image.length > 12 * 1024 * 1024) throw new Error('The photo is too big. Take it again.');
+  const thumb = String(body.thumb || '');
+  const mime = String(body.mime || 'image/jpeg');
+
+  const t0 = Date.now();
+  let d = null;
+  try { d = scanClassify_(thumb && thumb.length < 3 * 1024 * 1024 ? thumb : image, mime); }
+  catch (e) { console.warn('Scanner: the photo could not be sorted: ' + e); }
+  d = d || {};
+  const guess = SCAN_KINDS_.indexOf(d.kind) !== -1 ? d.kind : '';
+  const conf = Math.max(0, Math.min(1, Number(d.confidence) || 0));
+  const sure = conf >= SCAN_AUTO_MIN_;
+  const auto = {
+    kind: guess && sure ? guess : d.kind === 'other' && sure ? 'other' : 'unsure',
+    guess: guess, confidence: Math.round(conf * 100) / 100,
+    looksLike: String(d.looksLike || '').replace(/\s+/g, ' ').trim().slice(0, 80),
+    ms: Date.now() - t0,
+  };
+  console.log('Scanner: sorted as ' + auto.kind + ' (said ' + (d.kind || 'nothing') + ', ' + auto.confidence + ') in ' + auto.ms + ' ms');
+
+  if (SCAN_KINDS_.indexOf(auto.kind) === -1) return { auto: auto };
+  if (allowed.indexOf(auto.kind) === -1) { auto.notAllowed = true; return { auto: auto }; }
+
+  const sub = Object.assign({}, body, { op: auto.kind });
+  if (auto.kind === 'billing') {   // only what can be handed to a patient (the same rule as the phone's)
+    const all = Array.isArray(body.products) ? body.products : [];
+    const sell = all.filter(function (p) { return p && p.sell === true; });
+    sub.products = sell.length ? sell : all;
+  }
+  try {
+    const result = auto.kind === 'docket' ? scanDocket_(sub) : auto.kind === 'rx' ? scanRx_(sub) : scanBilling_(sub);
+    return { auto: auto, result: result };
+  } catch (err) {
+    console.error('Scanner (auto, ' + auto.kind + ') failed: ' + (err && err.stack || err));
+    return { auto: auto, problem: String((err && err.message) || "The scanner couldn't read that photo. Try again.") };
+  }
+}
+
+
 function scanBilling_(body) {
   if (body.op !== 'billing') throw new Error('Unknown scanner action.');
   const image = String(body.image || '');
@@ -6021,11 +6121,11 @@ const SCAN_BILLING_SCHEMA_ = {
 // One photo + instructions in, JSON (matching the schema) out. Retries when Gemini is busy.
 // Thinking makes Gemini slower and reading a sheet doesn't need it. Models differ in what they accept,
 // so the fastest setting is tried first, and whichever one works is remembered for 6 hours.
-function geminiJson_(prompt, imageB64, mime, schema) {
+function geminiJson_(prompt, imageB64, mime, schema, modelOverride) {
   const props = PropertiesService.getScriptProperties();
   const key = props.getProperty('GEMINI_API_KEY');
   if (!key) throw new Error("The scanner isn't set up yet. Add GEMINI_API_KEY in Script Properties.");
-  const model = props.getProperty('GEMINI_MODEL') || 'gemini-2.5-flash';
+  const model = modelOverride || props.getProperty('GEMINI_MODEL') || 'gemini-2.5-flash';
   const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent';
   const budget = Math.max(0, parseInt(props.getProperty('SCAN_THINKING') || '0', 10) || 0);
   const tries = [{ thinkingBudget: budget }, { thinkingLevel: 'low' }, null];   // fastest first; null = model default

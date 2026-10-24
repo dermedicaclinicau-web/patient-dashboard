@@ -8,7 +8,7 @@
 // Auto (takes the photo when held still) and Space / Enter to take the photo on a computer.
 import { listProducts, INV_CATEGORIES, plural } from "./inventory-api.js";
 import { preparePhoto, readBillingSheet, readDocket, readPrescription, startReview, reviewBilling, saveBillingScan,
-  earlierScans, findBooking, money, searchPatientsQuick, todaysScans } from "./scanner-api.js";
+  earlierScans, findBooking, money, searchPatientsQuick, todaysScans, readAuto, smallCopy } from "./scanner-api.js";
 import { mountRxResult } from "./scanner-rx.js";
 import { rxProductList } from "./rx-products.js";
 import { mountDocketResult } from "./scanner-docket.js";
@@ -28,10 +28,16 @@ const niceDate = (key) => {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
   return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "";
 };
-const KIND_KEY = "dm.scanKind";   // the last tab used on this device
+const KIND_KEY = "dm.scanKind2";   // the last tab used on this device
 const AUTO_KEY = "dm.scanAuto";   // Auto on or off on this device
 const MAX_PAGES = 3;
-const KIND_TAG = { billing: "Billing", docket: "Docket", rx: "Prescription" };
+const KIND_TAG = { billing: "Billing", docket: "Docket", rx: "Prescription", auto: "Scan" };
+const AUTO_NAMES = { billing: "Billing sheet", docket: "Delivery docket", rx: "Prescription" };
+const KIND_ICON = {
+  billing: svg('<path d="M5 3h14v18l-3-2-2 2-2-2-2 2-2-2-3 2z"/><path d="M9 8h6M9 12h6M9 16h3"/>'),
+  docket: svg('<rect x="1" y="6" width="14" height="11" rx="1"/><path d="M15 10h4l3 3v4h-7"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/>'),
+  rx: svg('<rect x="5" y="2" width="14" height="20" rx="2"/><path d="M9 7h3a2 2 0 0 1 0 4H9V7zm0 4v5m3-5 4 5"/>'),
+};
 const readLocal = (k) => { try { return localStorage.getItem(k) || ""; } catch { return ""; } };
 const writeLocal = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } };
 
@@ -180,14 +186,17 @@ const pendingClear = () => idbDo("readwrite", (s) => s.delete("current")).catch(
 // A booking → the patient saved with the scan
 const fromBooking = (a) => (a ? { id: String(a.patientId || ""), name: a.patientName || "", time: a.time || "", staff: a.staff || "" } : null);
 
-export function mountScanner(container, { staff = null } = {}) {
+// kindPicker: false hides the type tabs (the Dermedica Scan app: Auto-detect only)
+export function mountScanner(container, { staff = null, kindPicker = true } = {}) {
   if (releaseCamera) releaseCamera();   // an earlier Scanner (the page drawn again) lets go of the camera
   const root = document.createElement("section");
   root.className = "page scan";
   container.replaceChildren(root);
   // Which kinds of scan this person can do (Staff → Roles & access)
-  const KINDS = [["billing", "Billing sheet"], ["docket", "Delivery docket"], ["rx", "Prescription"]].filter(([k]) => can(`scanner.${k}`));
-  if (!KINDS.length) {
+  // With two or more, "Auto-detect" works out which one the photo is
+  const REAL = [["billing", "Billing sheet"], ["docket", "Delivery docket"], ["rx", "Prescription"]].filter(([k]) => can(`scanner.${k}`));
+  const KINDS = REAL.length < 2 ? REAL : kindPicker ? [["auto", "Auto-detect"]].concat(REAL) : [["auto", "Auto-detect"]];
+  if (!REAL.length) {
     root.innerHTML = `<div class="state"><strong>No scanner access</strong>
       Ask an Admin to tick “Scan billing sheets”, “Scan delivery dockets” or “Scan product prescriptions” for your role in Staff → Roles &amp; access.</div>`;
     return;
@@ -211,7 +220,10 @@ export function mountScanner(container, { staff = null } = {}) {
     today: null, todayAt: 0, todayOpen: false,    // today's scans
     step: 0, busyT0: 0, secTimer: 0,              // progress while reading
     pq: "", phits: [], psearching: false,         // billing: search all patients
+    readAs: "", autoInfo: null, changing: false, prevMode: "",   // Auto-detect: what it was read as
   };
+  // Photos are docket pages: the Docket tab, or Auto-detect after "+ Add a page"
+  const collecting = () => st.kind === "docket" || (st.kind === "auto" && st.pages.length > 0);
   const setKind = (k) => { st.kind = k; writeLocal(KIND_KEY, k); };
 
   const sellCount = () => st.lines.reduce((a, l) => a + (l.product ? l.take || 0 : 0), 0);
@@ -228,8 +240,9 @@ export function mountScanner(container, { staff = null } = {}) {
         aria-selected="${st.kind === k}" data-kind="${k}">${label}</button>`).join("")}
     </div></div>`);
 
-  const tipText = () => (st.kind === "docket"
+  const tipText = () => (collecting()
     ? (st.pages.length ? `Page ${st.pages.length + 1}: fit the whole page inside the frame` : "Fit the whole delivery docket inside the frame")
+    : st.kind === "auto" ? "Fit the whole billing sheet, docket or prescription inside the frame"
     : st.kind === "rx" ? "Fit the whole prescription inside the frame" : "Fit the billing sheet and the products inside the frame");
 
   // The viewfinder before the camera picture arrives: starting, or why it can't
@@ -244,7 +257,7 @@ export function mountScanner(container, { staff = null } = {}) {
     if (!p) return "";
     const when = new Date(p.at).toLocaleString("en-AU", { weekday: "short", hour: "numeric", minute: "2-digit" });
     return `<div class="scan-pending" role="status">
-      <span><strong>A ${esc(KIND_TAG[p.kind].toLowerCase())} scan wasn't finished</strong>
+      <span><strong>${p.kind === "auto" ? "A scan" : `A ${esc(KIND_TAG[p.kind].toLowerCase())} scan`} wasn't finished</strong>
         (taken ${esc(when)}${p.by ? ` by ${esc(p.by)}` : ""}). It's kept on this device.</span>
       <button type="button" class="lh-btn is-primary" data-act="pend-open">Open it</button>
       <button type="button" class="lh-btn is-quiet" data-act="pend-drop">Discard</button>
@@ -286,7 +299,7 @@ export function mountScanner(container, { staff = null } = {}) {
 
   const cameraHtml = () => `${headHtml()}
     <div data-role="pending-host">${pendingHtml()}</div>
-    ${st.kind === "docket" && st.pages.length
+    ${collecting() && st.pages.length
       ? `<button type="button" class="scan-pageback" data-act="page-back">← Back to ${plural(st.pages.length, "page")}</button>` : ""}
     <div class="scan-vf" data-role="vf">
       <video playsinline muted autoplay></video>
@@ -308,11 +321,16 @@ export function mountScanner(container, { staff = null } = {}) {
     ${isMobile() ? "" : '<p class="scan-keys">Tip: press Space to take the photo.</p>'}
     <div data-role="today-host">${todayHtml()}</div>`;
 
-  const stepNames = () => [
-    "Preparing the photo",
-    st.kind === "docket" ? "Reading the docket" : st.kind === "rx" ? "Reading the prescription" : "Reading the handwriting and products",
-    st.kind === "rx" ? "Getting it ready to check" : st.kind === "docket" ? "Finding the purchase order" : "Matching products and the booking",
-  ];
+  const stepNames = () => {
+    const k = st.kind === "auto" ? st.readAs : st.kind;
+    return [
+      "Preparing the photo",
+      !k ? "Working out what it is, then reading it"
+        : k === "docket" ? "Reading the docket" : k === "rx" ? "Reading the prescription" : "Reading the handwriting and products",
+      k === "docket" ? "Finding the purchase order" : k === "billing" ? "Matching products and the booking" : "Getting it ready to check",
+    ];
+  };
+  
   const stepsHtml = () => stepNames().map((t, i) =>
     `<li class="${i < st.step ? "is-done" : i === st.step ? "is-on" : ""}">${esc(t)}</li>`).join("");
   const busyHtml = () => `${headHtml()}
@@ -321,8 +339,39 @@ export function mountScanner(container, { staff = null } = {}) {
         <ol class="scan-steps" data-role="steps">${stepsHtml()}</ol>
         <small class="scan-secs" data-role="secs"></small>
       </div></div>`;
+  // Auto-detect: what it was read as, with a way out
+  const bannerHtml = (failed = false) => (st.kind !== "auto" || !st.readAs ? "" : `<div class="scan-auto-read${failed ? " is-failed" : ""}">
+      <span>${failed ? "Tried to read it as" : "Read as"} <strong>${esc(AUTO_NAMES[st.readAs])}</strong></span>
+      ${!failed && st.readAs === "docket" && st.pages.length < MAX_PAGES
+        ? '<button type="button" class="scan-pat-btn" data-act="auto-page">+ Add a page</button>' : ""}
+      ${REAL.length > 1 ? '<button type="button" class="scan-pat-btn" data-act="auto-change">Not right? Change</button>' : ""}
+    </div>`);
 
-  const errorHtml = () => `${headHtml()}
+  // Not sure, something else, no access, or "Change": choose, and the same photo is read again
+  const chooseHtml = () => {
+    const a = st.autoInfo || {};
+    const options = REAL.filter(([k]) => !(st.changing && k === st.readAs) && !(a.notAllowed && k === a.kind));
+    const msg = st.changing
+      ? "<strong>What is it?</strong><p>Choose the right one and the same photo is read again.</p>"
+      : a.notAllowed
+        ? `<strong>This looks like a ${esc(AUTO_NAMES[a.kind].toLowerCase())}</strong>
+           <p>Your access doesn't include scanning these. Ask someone who can${options.length ? ", or choose below if it's something else" : ""}.</p>`
+        : a.kind === "other"
+          ? `<strong>This doesn't look like something the scanner reads</strong>
+             <p>${a.looksLike ? `It looks like ${esc(a.looksLike)}. ` : ""}If it is one of these, choose it.</p>`
+          : "<strong>Which is it?</strong><p>The scanner couldn't tell from the photo. Choose one and it's read straight away.</p>";
+    return `${headHtml()}
+      ${st.photoUrl ? `<div class="scan-shot scan-shot-sm"><img src="${st.photoUrl}" alt="The photo" /></div>` : ""}
+      <div class="scan-choose">${msg}
+        <div class="scan-choose-btns">${options.map(([k, label]) =>
+          `<button type="button" class="scan-choose-btn" data-readas="${k}">${KIND_ICON[k]}<span>${esc(label)}</span></button>`).join("")}</div>
+      </div>
+      <div class="scan-acts">${st.changing
+        ? '<button type="button" class="lh-btn" data-act="choose-back">Back</button>'
+        : '<button type="button" class="lh-btn" data-act="again">Scan again</button>'}</div>`;
+  };
+
+  const errorHtml = () => `${headHtml()}${bannerHtml(true)}
     ${st.photoUrl ? `<div class="scan-shot"><img src="${st.photoUrl}" alt="The photo" /></div>` : ""}
     <p class="scan-err">${esc(st.error)}</p>
     ${st.base64 ? '<p class="dk-muted">The photo is kept on this device, so you can try again later too.</p>' : ""}
@@ -417,7 +466,7 @@ export function mountScanner(container, { staff = null } = {}) {
   function resultHtml() {
     const r = st.review;
     const when = [r.apptDate && niceDate(r.apptDate), r.apptTime, r.provider].filter(Boolean).join(" · ");
-    return `${headHtml()}
+    return `${headHtml()}${bannerHtml()}
       <div class="scan-res-head">
         <button type="button" class="scan-thumb" data-act="big" aria-label="Show the photo larger"><img src="${st.photoUrl}" alt="" /></button>
         <div><strong>${esc(patientName() || "Patient name not read")}</strong>
@@ -443,13 +492,13 @@ export function mountScanner(container, { staff = null } = {}) {
   function render() {
     clearInterval(st.secTimer);
     if (st.mode === "rx") {   // the prescription screen draws itself
-      root.innerHTML = `${headHtml()}<div data-role="rx"></div>`;
+      root.innerHTML = `${headHtml()}${bannerHtml()}<div data-role="rx"></div>`;
       mountRxResult(root.querySelector('[data-role="rx"]'),
         { photo: st.photo, photoUrl: st.photoUrl, result: st.result, staff, onAgain: again });
       return;
     }
     if (st.mode === "docket") {   // the docket screen draws itself
-      root.innerHTML = `${headHtml()}<div data-role="docket"></div>`;
+      root.innerHTML = `${headHtml()}${bannerHtml()}<div data-role="docket"></div>`;
       mountDocketResult(root.querySelector('[data-role="docket"]'),
         { photo: st.photo, photoUrl: st.photoUrl, result: st.result, products, staff, onAgain: again });
       return;
@@ -458,7 +507,7 @@ export function mountScanner(container, { staff = null } = {}) {
     const noteEl = root.querySelector('[data-role="note"]');
     const note = noteEl ? noteEl.value : "";
     root.innerHTML = st.mode === "camera" ? cameraHtml() : st.mode === "busy" ? busyHtml()
-      : st.mode === "pages" ? pagesHtml() : st.mode === "error" ? errorHtml() : resultHtml();
+      : st.mode === "pages" ? pagesHtml() : st.mode === "error" ? errorHtml() : st.mode === "choose" ? chooseHtml() : resultHtml();
     const n2 = root.querySelector('[data-role="note"]');
     if (n2 && note) n2.value = note;
     if (st.mode === "camera") { startCamera(); loadToday(); }
@@ -668,7 +717,7 @@ export function mountScanner(container, { staff = null } = {}) {
       }
     }
     // Dockets: each photo is a page. The camera keeps running for the next one.
-    if (st.kind === "docket") {
+    if (collecting()) {
       st.pages.push(blob);
       st.pageUrls.push(URL.createObjectURL(blob));
       st.shooting = false;
@@ -704,7 +753,7 @@ export function mountScanner(container, { staff = null } = {}) {
       if (root.isConnected) render();
       return;
     }
-    pendingPut({ kind: st.kind, blob: st.photo, at: Date.now(), by: (staff && staff.name) || "", pages: blobs.length });
+    pendingPut({ kind: st.kind, readAs: st.readAs, blob: st.photo, at: Date.now(), by: (staff && staff.name) || "", pages: blobs.length });
     analyse();
   }
 
@@ -720,42 +769,64 @@ export function mountScanner(container, { staff = null } = {}) {
     el.textContent = s >= 3 ? `${s} seconds` : "";
   }
 
+  // The photo read as one kind
+  async function readKind(kind) {
+    if (kind === "rx") {   // matched to the prescription product list, not the stock products
+      const list = rxProductList();
+      if (!list.length) throw new Error("The prescription product list is empty. Ask an Admin to add it.");
+      return readPrescription(st.base64, list);
+    }
+    await productsReady;
+    if (!products.length) throw new Error("Couldn't load the product list. Check your connection and try again.");
+    return kind === "docket" ? readDocket(st.base64, products) : readBillingSheet(st.base64, products);
+  }
+
+  // Gets that kind's result screen ready
+  async function showResult(kind) {
+    if (kind === "rx" || kind === "docket") { st.mode = kind; return; }
+    st.lines = startReview(st.result, products);
+    rereview();
+    // Which booked patient this is. Never stops the scan if it can't be worked out.
+    st.booking = await findBooking(st.review).catch((err) => { console.warn("Booking match failed:", err); return null; });
+    st.patient = fromBooking(st.booking && st.booking.match);
+    st.pickPatient = false;
+    st.mode = "result";
+  }
+
   async function analyse() {
     if (!st.busyT0) st.busyT0 = Date.now();
     st.mode = "busy";
     st.fixing = -1;
     st.step = 1;
+    st.changing = false;
     render();
     try {
       const t0 = performance.now();
-      if (st.kind === "rx") {
-        // Prescriptions are matched to the prescription product list, not the stock products
-        const list = rxProductList();
-        if (!list.length) throw new Error("The prescription product list is empty. Ask an Admin to add it.");
-        st.result = await readPrescription(st.base64, list);
-        console.log(`Scanner: ${Math.round(performance.now() - t0)} ms to read the prescription`);
-        setStep(2);
-        st.mode = "rx";
+      let kind = st.kind === "auto" ? st.readAs : st.kind;
+      if (kind) {
+        st.result = await readKind(kind);
       } else {
+        // Auto-detect: Apps Script works out what it is, then reads it, in one request
         await productsReady;
-        if (!products.length) throw new Error("Couldn't load the product list. Check your connection and try again.");
-        if (st.kind === "docket") {
-          st.result = await readDocket(st.base64, products);
-          console.log(`Scanner: ${Math.round(performance.now() - t0)} ms to read the docket`);
-          setStep(2);
-          st.mode = "docket";
-        } else {
-          st.result = await readBillingSheet(st.base64, products);
-          console.log(`Scanner: ${Math.round(performance.now() - t0)} ms from sending the photo to the answer`);
-          setStep(2);
-          st.lines = startReview(st.result, products);
-          rereview();
-          // Which booked patient this is. Never stops the scan if it can't be worked out.
-          st.booking = await findBooking(st.review).catch((err) => { console.warn("Booking match failed:", err); return null; });
-          st.patient = fromBooking(st.booking && st.booking.match);
-          st.pickPatient = false;
-          st.mode = "result";
+        const thumb = await smallCopy(st.photo).catch(() => "");
+        const r = await readAuto(st.base64, thumb, products, rxProductList());
+        const a = r.auto || {};
+        st.autoInfo = a;
+        console.log(`Scanner: auto "${a.kind || "?"}" (${Math.round((a.confidence || 0) * 100)}%, ${a.ms || "?"} ms to sort)`);
+        if (AUTO_NAMES[a.kind] && !a.notAllowed) {
+          st.readAs = kind = a.kind;   // Try again and "Change" carry on from here
+          if (r.problem || !r.result) throw new Error(r.problem || "The scanner couldn't read that photo. Try again.");
+          st.result = r.result;
+        } else if (r.problem && !a.kind) {
+          throw new Error(r.problem);
         }
+      }
+      console.log(`Scanner: ${Math.round(performance.now() - t0)} ms from sending the photo to the answer`);
+      if (kind) {
+        setStep(2);
+        await showResult(kind);
+      } else {
+        st.mode = "choose";   // not sure, something else, or no access: ask
       }
     } catch (err) {
       console.error("Scan failed:", err);
@@ -774,6 +845,8 @@ export function mountScanner(container, { staff = null } = {}) {
     if (!p || !p.blob) { showToast("That scan isn't on this device any more."); render(); return; }
     stopCamera();
     setKind(p.kind);
+    st.readAs = p.kind === "auto" ? String(p.readAs || "") : "";
+    st.autoInfo = null;
     st.readThisSession = true;
     if (st.photoUrl) URL.revokeObjectURL(st.photoUrl);
     st.photo = p.blob;
@@ -794,7 +867,7 @@ export function mountScanner(container, { staff = null } = {}) {
     if (!force && st.todayAt && Date.now() - st.todayAt < 30000) return;
     st.todayAt = Date.now();
     todaysScans()
-      .then((list) => { st.today = list.filter((s) => KINDS.some(([k]) => k === s.kind)); })
+      .then((list) => { st.today = list.filter((s) => REAL.some(([k]) => k === s.kind)); })
       .catch((err) => { console.warn("Today's scans didn't load:", err); st.todayAt = 0; })
       .finally(() => {
         const h = root.querySelector('[data-role="today-host"]');
@@ -828,7 +901,8 @@ export function mountScanner(container, { staff = null } = {}) {
     pendingClear();   // saved, or staff chose to start again
     Object.assign(st, { mode: "camera", photo: null, photoUrl: "", base64: "", result: null, lines: [], review: null, error: "",
       fixing: -1, camErr: "", booking: null, patient: null, pickPatient: false, shooting: false,
-      pages: [], pageUrls: [], step: 0, busyT0: 0, todayAt: 0, pq: "", phits: [], psearching: false });
+      pages: [], pageUrls: [], step: 0, busyT0: 0, todayAt: 0, pq: "", phits: [], psearching: false,
+      readAs: "", autoInfo: null, changing: false, prevMode: "" });
     render();
   }
 
@@ -967,7 +1041,7 @@ export function mountScanner(container, { staff = null } = {}) {
     if (kd) {
       const k = kd.dataset.kind;
       if (st.mode === "busy" || st.busy || st.kind === k) return;
-      const unsaved = ["result", "rx", "docket", "pages"].includes(st.mode) || st.pages.length > 0 || (st.mode === "error" && !!st.base64);
+      const unsaved = ["result", "rx", "docket", "pages", "choose"].includes(st.mode) || st.pages.length > 0 || (st.mode === "error" && !!st.base64);
       if (st.mode === "camera" && !unsaved) {
         // Same camera, same viewfinder: only the tab and the hint change (no flicker, zoom kept)
         setKind(k);
@@ -1004,6 +1078,15 @@ export function mountScanner(container, { staff = null } = {}) {
       render();
       return;
     }
+
+    const ra = e.target.closest("[data-readas]");
+    if (ra) {   // "Which is it?" / "Change": the same photo, read as this
+      st.readAs = ra.dataset.readas;
+      st.result = null;
+      analyse();
+      return;
+    }
+
     const pd = e.target.closest("[data-pagedel]");
     if (pd) {
       const i = Number(pd.dataset.pagedel);
@@ -1032,6 +1115,14 @@ export function mountScanner(container, { staff = null } = {}) {
       showToast(st.auto ? "Auto is on: hold the device still over a sheet and the photo takes itself." : "Auto is off.");
     }
     else if (act === "page-add") { st.mode = "camera"; st.shooting = false; render(); }
+    else if (act === "auto-change") { st.prevMode = st.mode; st.changing = true; st.mode = "choose"; render(); }
+    else if (act === "choose-back") { st.changing = false; st.mode = st.prevMode || "camera"; render(); }
+    else if (act === "auto-page") {   // Auto-detect read it as a docket: more pages, then all read together
+      if (!st.pages.length && st.photo) { st.pages = [st.photo]; st.pageUrls = [URL.createObjectURL(st.photo)]; }
+      st.mode = "camera";
+      st.shooting = false;
+      render();
+    }
     else if (act === "page-back") { st.mode = "pages"; render(); }
     else if (act === "page-read") { if (st.pages.length) read(st.pages.slice()); }
     else if (act === "pend-open") openPending();

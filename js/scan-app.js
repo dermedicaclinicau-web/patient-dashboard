@@ -92,7 +92,7 @@ function openScanner() {
     main.innerHTML = `<section class="page"><div class="state"><strong>No scanner access</strong>
       Ask an Admin to tick “Scanner” for your role in Staff → Roles &amp; access.</div></section>`;
   } else {
-    mountScanner(main, { staff });
+    mountScanner(main, { staff, kindPicker: false });
   }
   startTimers();
 }
