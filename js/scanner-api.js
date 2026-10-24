@@ -8,11 +8,36 @@ import { callApi } from "./appointments.js";
 import { dayKey, listPos } from "./inventory-api.js";
 import { fetchPatients, findPatientsById, patientIds } from "./patients.js";
 
+
 const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const num = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : r2(v));
 const conf = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? 1 : Number(v));
 const normName = (s) => String(s || "").toLowerCase().replace(/[^a-z]+/g, " ").trim();
 export const money = (n) => (n === null || n === undefined ? "" : `$${Number.isInteger(Number(n)) ? Number(n) : Number(n).toFixed(2)}`);
+
+/* ---------- Testing: which AI reads the photo ---------- */
+// scan.html?ai=claude or ?ai=gemini picks it on this device (remembered). ?ai=off goes back to the default.
+const SCAN_AI_KEY = "dm.scanAi";
+(() => {
+  try {
+    const q = new URLSearchParams(location.search).get("ai");
+    if (q === "off") localStorage.removeItem(SCAN_AI_KEY);
+    else if (q === "claude" || q === "gemini") localStorage.setItem(SCAN_AI_KEY, q);
+  } catch { /* private mode */ }
+})();
+const scanAi = () => { try { return localStorage.getItem(SCAN_AI_KEY) || ""; } catch { return ""; } };
+
+// Every scanner request goes through here: adds the AI choice, and logs how long each step took
+async function scanCall(body) {
+  const ai = scanAi();
+  const res = await callApi(ai ? { ...body, ai } : body);
+  if (res && res.timing) {
+    const t = res.timing;
+    console.log(`Scanner timing (${t.ai}): ` +
+      (t.steps || []).map((s) => `${s.step} ${s.ms} ms (${s.ai}, ${s.model})`).join(" + ") + ` = ${t.ms} ms`);
+  }
+  return res;
+}
 
 /* ---------- The photo ---------- */
 // Drawn through an <img> so iPhone photos come out the right way up
@@ -55,7 +80,7 @@ const sellable = (products) => {
 export async function readBillingSheet(base64, products) {
   let res;
   try {
-    res = await callApi({
+    res = await scanCall({
       action: "scanner", op: "billing", mime: "image/jpeg", image: base64,
       products: sellable(products).map((p) => ({ id: p.id, name: p.name, brand: p.brand || "" })),
     });
@@ -80,7 +105,7 @@ export async function readAuto(base64, thumb, products, rxProducts) {
   const sell = new Set(sellable(products).map((p) => p.id));
   let res;
   try {
-    res = await callApi({
+    res = await scanCall({
       action: "scanner", op: "auto", mime: "image/jpeg", image: base64, thumb,
       products: products.map((p) => ({ id: p.id, name: p.name, brand: p.brand || "", sell: sell.has(p.id) })),
       rxProducts,
@@ -319,7 +344,7 @@ export const poSupplier = (po) => String((po && po.supplier && po.supplier.name)
 export async function readDocket(base64, products) {
   let res;
   try {
-    res = await callApi({
+    res = await scanCall({
       action: "scanner", op: "docket", mime: "image/jpeg", image: base64,
       products: products.map((p) => ({ id: p.id, name: p.name, brand: p.brand || "" })),
     });
@@ -455,7 +480,7 @@ export async function linkDocketReceipt(scanId, receiptId) {
 export async function readPrescription(base64, rxProducts) {
   let res;
   try {
-    res = await callApi({ action: "scanner", op: "rx", mime: "image/jpeg", image: base64, rxProducts });
+    res = await scanCall({ action: "scanner", op: "rx", mime: "image/jpeg", image: base64, rxProducts });
   } catch (err) {
     if (err && err.code === "UNAUTHORIZED") throw err;
     console.error("Prescription scanner call failed:", err);

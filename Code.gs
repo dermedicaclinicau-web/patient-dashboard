@@ -5931,13 +5931,28 @@ function eodReminders_(cfg, now) {
 function testChatReminders() {
   chatHelpReminders_(getConfig_());
 }
+// Picks Gemini or Claude for this request, and logs how long each step took
+function scannerAction_(body) {
+  SCAN_AI_ = scanProvider_(body);
+  SCAN_TIMES_ = [];
+  const t0 = Date.now();
+  const res = scannerActionInner_(body);
+  if (SCAN_TIMES_.length) {
+    const total = Date.now() - t0;
+    console.log('Scanner timing: ' + SCAN_TIMES_.map(function (t) {
+      return t.step + ' ' + t.ms + ' ms (' + t.ai + ', ' + t.model + ')';
+    }).join(' + ') + ' = ' + total + ' ms total');
+    if (res && typeof res === 'object') res.timing = { ai: SCAN_AI_, steps: SCAN_TIMES_, ms: total };
+  }
+  return res;
+}
 
 /* ===================== Scanner: photos read by Gemini ===================== */
 // body: { op: "billing" | "docket" | "rx" | "auto", image: base64 JPEG, mime, … }
 // "auto": works out which of the three it is (from a small copy, body.thumb), then reads it as that, in one request.
 // Always answers ok: true (after the login check), so callApi doesn't replace the message.
 // Problems come back in "problem".
-function scannerAction_(body) {
+function scannerActionInner_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
   const op = String(body.op || '');
@@ -6003,13 +6018,12 @@ const SCAN_CLASSIFY_SCHEMA_ = {
   required: ['kind', 'confidence'],
 };
 
-// The fast model first (Script Property SCAN_CLASSIFY_MODEL, default gemini-2.5-flash-lite), then the main one
+// The fast model first (Claude Haiku, or Gemini's SCAN_CLASSIFY_MODEL), then the main one
 function scanClassify_(image, mime) {
-  const fast = PropertiesService.getScriptProperties().getProperty('SCAN_CLASSIFY_MODEL') || 'gemini-2.5-flash-lite';
-  try { return geminiJson_(SCAN_CLASSIFY_PROMPT_, image, mime, SCAN_CLASSIFY_SCHEMA_, fast); }
+  try { return scanAiJson_(SCAN_CLASSIFY_PROMPT_, image, mime, SCAN_CLASSIFY_SCHEMA_, true); }
   catch (e) {
-    console.warn('Scanner: ' + fast + " couldn't sort the photo, trying the main model: " + e);
-    return geminiJson_(SCAN_CLASSIFY_PROMPT_, image, mime, SCAN_CLASSIFY_SCHEMA_);
+    console.warn("Scanner: the fast model couldn't sort the photo, trying the main model: " + e);
+    return scanAiJson_(SCAN_CLASSIFY_PROMPT_, image, mime, SCAN_CLASSIFY_SCHEMA_, false);
   }
 }
 
@@ -6056,6 +6070,128 @@ function scanAuto_(body, allowed) {
   }
 }
 
+// ===== Scanner AI switch (Gemini / Claude) =====
+// Per execution: which AI this request uses, and how long each call took.
+var SCAN_AI_ = 'gemini';
+var SCAN_TIMES_ = [];
+
+function scanProvider_(body) {
+  const p = PropertiesService.getScriptProperties();
+  const want = String((body && body.ai) || p.getProperty('SCAN_AI') || 'gemini').toLowerCase();
+  return (want === 'claude' && p.getProperty('ClaudeApi')) ? 'claude' : 'gemini';
+}
+
+/** One AI call for the scanner. fast = the sorting step (small model). */
+function scanAiJson_(prompt, image, mime, schema, fast) {
+  const p = PropertiesService.getScriptProperties();
+  const t0 = Date.now();
+  let ai = SCAN_AI_, model, out;
+
+  if (ai === 'claude') {
+    model = fast
+      ? (p.getProperty('CLAUDE_FAST_MODEL') || 'claude-haiku-5-5')
+      : (p.getProperty('CLAUDE_MODEL') || 'claude-sonnet-5-5');
+    try {
+      out = claudeJson_(prompt, image, mime, schema, model, fast ? 1024 : 8192);
+    } catch (e) {
+      console.warn('Scanner: Claude failed (' + e.message + '), falling back to Gemini');
+      ai = 'gemini (fallback)';
+      model = fast ? (p.getProperty('SCAN_CLASSIFY_MODEL') || 'gemini-2.5-flash-lite') : undefined;
+      out = geminiJson_(prompt, image, mime, schema, model);
+    }
+  } else {
+    model = fast ? (p.getProperty('SCAN_CLASSIFY_MODEL') || 'gemini-2.5-flash-lite') : undefined;
+    out = geminiJson_(prompt, image, mime, schema, model);
+  }
+
+  SCAN_TIMES_.push({ step: fast ? 'sort' : 'read', ai: ai, model: model || 'GEMINI_MODEL', ms: Date.now() - t0 });
+  return out;
+}
+
+function claudeJson_(prompt, image, mime, schema, model, maxTokens) {
+  const key = PropertiesService.getScriptProperties().getProperty('ClaudeApi');
+  if (!key) throw new Error('Script Property "ClaudeApi" is missing');
+
+  const body = {
+    model: model,
+    max_tokens: maxTokens || 8192,
+    // The long, unchanging prompt (with the product list) is cached between scans.
+    system: [{ type: 'text', text: prompt, cache_control: { type: 'ephemeral' } }],
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: mime || 'image/jpeg', data: image } },
+        { type: 'text', text: 'Read this photo and return the JSON.' }
+      ]
+    }],
+    output_config: {
+      format: { type: 'json_schema', schema: scanToJsonSchema_(schema) }
+    }
+  };
+  if (!/haiku-4/.test(model)) body.output_config.effort = 'low';
+  const thinking = claudeThinking_(model);
+  if (thinking) body.thinking = thinking;
+
+  const opts = {
+    method: 'post',
+    contentType: 'application/json',
+    muteHttpExceptions: true,
+    headers: { 'x-api-key': key, 'anthropic-version': '2026-10-21' },
+    payload: JSON.stringify(body)
+  };
+
+  const t0 = Date.now();
+  let data;
+  for (let attempt = 0; ; attempt++) {
+    const r = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', opts);
+    const code = r.getResponseCode();
+    if (code === 200) { data = JSON.parse(r.getContentText()); break; }
+    if ((code === 429 || code === 529 || code >= 500) && attempt < 2) {
+      Utilities.sleep(800 * (attempt + 1));
+      continue;
+    }
+    throw new Error('HTTP ' + code + ': ' + r.getContentText().slice(0, 300));
+  }
+
+  const u = data.usage || {};
+  console.log('Scanner: Claude ' + model + ' ' + (Date.now() - t0) + ' ms · in ' + (u.input_tokens || 0) +
+    ' (+' + (u.cache_read_input_tokens || 0) + ' cached, ' + (u.cache_creation_input_tokens || 0) +
+    ' cache-write) · out ' + (u.output_tokens || 0) + ' · stop ' + data.stop_reason);
+
+  if (data.stop_reason === 'refusal') throw new Error('Claude declined to read this photo');
+  if (data.stop_reason === 'max_tokens') throw new Error('Claude ran out of room (max_tokens)');
+
+  const text = (data.content || []).filter(function (b) { return b.type === 'text'; })
+    .map(function (b) { return b.text; }).join('');
+  return JSON.parse(text);
+}
+
+function claudeThinking_(model) {
+  if (/haiku-5/.test(model)) return { type: 'disabled' };       // fastest: no thinking
+  if (/sonnet-5-5/.test(model)) return { type: 'between_tools' }; // Sonnet 5.5's lowest setting
+  return null;                                                     // other models: their default
+}
+
+/** Converts the Gemini-style schemas (type: 'OBJECT', nullable) to JSON Schema for Claude. */
+function scanToJsonSchema_(s) {
+  if (!s || typeof s !== 'object') return s;
+  const out = {};
+  const type = s.type ? String(s.type).toLowerCase() : null;
+  if (type) out.type = s.nullable ? [type, 'null'] : type;
+  if (s.description) out.description = s.description;
+  if (s.enum) out.enum = s.nullable ? s.enum.concat([null]) : s.enum.slice();
+  if (type === 'object') {
+    out.properties = {};
+    Object.keys(s.properties || {}).forEach(function (k) {
+      out.properties[k] = scanToJsonSchema_(s.properties[k]);
+    });
+    // All fields required keeps the grammar small and fast; Claude sends "" or null when blank.
+    out.required = Object.keys(out.properties);
+    out.additionalProperties = false;
+  }
+  if (type === 'array' && s.items) out.items = scanToJsonSchema_(s.items);
+  return out;
+}
 
 function scanBilling_(body) {
   if (body.op !== 'billing') throw new Error('Unknown scanner action.');
@@ -6066,7 +6202,7 @@ function scanBilling_(body) {
     .map((p) => ({ id: String(p.id || '').slice(0, 60), name: String(p.name || '').slice(0, 150), brand: String(p.brand || '').slice(0, 80) }))
     .filter((p) => p.id && p.name);
   if (!products.length) throw new Error('The product list is empty.');
-  return geminiJson_(scanBillingPrompt_(products), image, String(body.mime || 'image/jpeg'), SCAN_BILLING_SCHEMA_);
+  return scanAiJson_(scanBillingPrompt_(products), image, String(body.mime || 'image/jpeg'), SCAN_BILLING_SCHEMA_, false);
 }
 
 function scanBillingPrompt_(products) {
@@ -6187,7 +6323,7 @@ function scanDocket_(body) {
     .map((p) => ({ id: String(p.id || '').slice(0, 60), name: String(p.name || '').slice(0, 150), brand: String(p.brand || '').slice(0, 80) }))
     .filter((p) => p.id && p.name);
   if (!products.length) throw new Error('The product list is empty.');
-  return geminiJson_(scanDocketPrompt_(products), image, String(body.mime || 'image/jpeg'), SCAN_DOCKET_SCHEMA_);
+  return scanAiJson_(scanDocketPrompt_(products), image, String(body.mime || 'image/jpeg'), SCAN_DOCKET_SCHEMA_, false);
 }
 
 function scanDocketPrompt_(products) {
@@ -6252,7 +6388,7 @@ function scanRx_(body) {
     .filter(Boolean)).slice(0, 400);
   if (!products.length) throw new Error('The prescription product list is empty.');
 
-  const out = geminiJson_(scanRxPrompt_(products), image, String(body.mime || 'image/jpeg'), SCAN_RX_SCHEMA_);
+  const out = scanAiJson_(scanRxPrompt_(products), image, String(body.mime || 'image/jpeg'), SCAN_RX_SCHEMA_, false);
 
   // Only exact names from the list are kept. Fading Cream is decided here too, not left to Gemini alone.
   const byLower = {};
