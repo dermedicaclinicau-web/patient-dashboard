@@ -2188,10 +2188,13 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
                 <label class="lh-field"><span class="lh-label">How many</span>
                   <div class="fe-num"><input class="fe-input" name="pqty" type="number" min="1" max="99" step="1" value="1" inputmode="numeric" />
                     <span>${esc(unitPlural(unit))}</span></div></label>
-                <label class="lh-field"><span class="lh-label">Patient (optional)</span><input name="who" maxlength="150" placeholder="e.g. Jane Smith" /></label>
                 <label class="lh-field"><span class="lh-label">Timely invoice no. (optional)</span><input name="inv" maxlength="60" placeholder="e.g. 35775" />
                   <small class="fe-note">Links it to the sale, so it can't be returned twice.</small></label>
               </div>
+              <label class="lh-field" data-role="pfind"><span class="lh-label">Patient (optional)</span>
+                <input type="search" name="pq" placeholder="Search your patient list by name" autocomplete="off" /></label>
+              <div class="ef-test-hits" data-role="phits"></div>
+              <div data-role="ppick"></div>
               <div class="lh-field"><span class="lh-label">Its condition</span>
                 ${seg("cond", [["resell", "Sealed: back into stock"], ["discard", "Opened or damaged: can't be resold"]], "resell")}</div>
               <div data-role="resell">
@@ -2234,6 +2237,38 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         const err = d2.querySelector(".lh-error");
         const submit = form.querySelector('[type="submit"]');
 
+        // Patient: picked from the patient list (or left empty)
+        let chosen = null, found = [], timer = null, seq = 0;
+        const hits = d2.querySelector('[data-role="phits"]');
+        const pick = d2.querySelector('[data-role="ppick"]');
+        const findBox = d2.querySelector('[data-role="pfind"]');
+        const showPick = () => {
+          pick.innerHTML = chosen ? `<div class="ef-chosen"><span><strong>${esc(chosen.name)}</strong><br>
+            <small class="muted">${esc([chosen.dob && `DOB ${chosen.dob}`, chosen.pttId && `ID ${chosen.pttId}`].filter(Boolean).join(" · "))}</small></span>
+            <button type="button" class="lh-btn is-quiet" data-act="unpick">Change</button></div>` : "";
+          findBox.hidden = !!chosen;
+          if (chosen) hits.innerHTML = "";
+        };
+        f.pq.addEventListener("input", () => {
+          clearTimeout(timer);
+          const q = f.pq.value;
+          if (q.trim().length < 2) { hits.innerHTML = ""; return; }
+          const my = ++seq;
+          timer = setTimeout(async () => {
+            try { found = await searchPatients(q); } catch (ex) { console.warn(ex); found = []; }
+            if (my !== seq || !d2.open) return;
+            hits.innerHTML = found.length ? found.map((x, i) => `<button type="button" class="ef-hit" data-hit="${i}">
+              <strong>${esc(x.name)}</strong><small>${esc([x.dob && `DOB ${x.dob}`, x.email].filter(Boolean).join(" · "))}</small></button>`).join("")
+              : '<p class="tb-none">No patients found. Try their last name.</p>';
+          }, 250);
+        });
+        f.pq.addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });   // Enter doesn't save the form
+        d2.addEventListener("click", (e) => {
+          if (e.target.closest('[data-act="unpick"]')) { chosen = null; showPick(); f.pq.value = ""; f.pq.focus(); return; }
+          const h = e.target.closest("[data-hit]");
+          if (h) { chosen = found[Number(h.dataset.hit)] || null; showPick(); }
+        });
+
         const fillCredit = () => {
           if (creditTyped || each === null) return;
           const n = parseInt(f.sqty.value, 10) || 0;
@@ -2265,6 +2300,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           submit.textContent = "Saving…";
           try {
             if (k === "patient") {
+              if (!chosen && f.pq.value.trim()) throw new Error("Choose the patient from the list, or clear the search box.");
               let batch = "", expiry = "";
               if (f.cond.value === "resell" && p.tracked) {
                 if (f.pbatch.value === "new") {
@@ -2279,7 +2315,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
               }
               const r = await recordPatientReturn(p, {
                 date: f.pdate.value, qty: f.pqty.value, resell: f.cond.value === "resell", loc: f.ploc.value,
-                batch, expiry, invoiceId: f.inv.value, patientName: f.who.value, note: f.note.value,
+                batch, expiry, invoiceId: f.inv.value, patientId: chosen ? chosen.id : "", patientName: chosen ? chosen.name : "", note: f.note.value,
               }, staff);
               const bd = r.backdated || {};
               showToast([
@@ -2307,7 +2343,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
             submit.textContent = k === "patient" ? "Record return" : "Send back";
           }
         });
-        d2.addEventListener("close", () => resolve(saved));
+        d2.addEventListener("close", () => { clearTimeout(timer); resolve(saved); });
       });
     }
 

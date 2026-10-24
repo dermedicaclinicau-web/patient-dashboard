@@ -4346,7 +4346,7 @@ export const RETURN_STATUS = { awaiting: "Waiting for credit", credited: "Credit
 // Otherwise it's recorded only: it left stock when it was sold. invoiceId links it to that Timely sale,
 // so one sale can't be returned more times than it sold. Opening counts done since its date are corrected.
 export async function recordPatientReturn(product, {
-  date, qty, resell = true, loc = "shelf", batch = "", expiry = "", invoiceId = "", patientName = "", note = "",
+  date, qty, resell = true, loc = "shelf", batch = "", expiry = "", invoiceId = "", patientId = "", patientName = "", note = "",
 }, staff) {
   if (isKitProduct(product) || isSharedProduct(product)) throw new Error("Kit and shared products can't be returned this way.");
   const today = dayKey();
@@ -4362,6 +4362,7 @@ export async function recordPatientReturn(product, {
   }
   const inv = clip(invoiceId, 60);
   const pname = clip(patientName, 150);
+  const pid = pname ? clip(patientId, 150) : "";
   const why = clip(note, 300);
   const me = uid();
   const by = who(staff);
@@ -4419,7 +4420,7 @@ export async function recordPatientReturn(product, {
     tx.set(rRef, {
       kind: "patient", productId: product.id, productName: String(pd.name || product.name), unit,
       date, qty: n, resell: !!resell, loc: resell ? place : "", batch: b, expiry: e,
-      invoiceId: inv, saleId: saleRef ? saleRef.id : "", patientName: pname, note: why,
+      invoiceId: inv, saleId: saleRef ? saleRef.id : "", patientId: pid, patientName: pname, note: why,
       status: "none", by, byUid: me, at: serverTimestamp(),
     });
   });
