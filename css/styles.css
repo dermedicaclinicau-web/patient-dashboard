@@ -8730,3 +8730,38 @@ dialog.lh-dialog.fe-cf-dlg { width: min(640px, calc(100vw - 2rem)); }
 @media (max-width: 640px) {
   .fe-bulk:not([hidden]) ~ .fe-toast { bottom: calc(9rem + env(safe-area-inset-bottom)); }
 }
+
+/* Form Builder: reusable blocks */
+.fe-blocks { margin: 0 0 .6rem; }
+.fe-blocks-h { margin: 0 .25rem .3rem; font-size: .75rem; font-weight: 600; color: var(--muted); }
+.fe-blk-list { display: grid; gap: .3rem; }
+.fe-blk-row { display: flex; align-items: stretch; gap: 2px; }
+.fe-blk-add { display: flex; flex: 1; align-items: center; gap: .5rem; min-width: 0; padding: .45rem .55rem;
+  border: 1px solid #ddd6fe; border-radius: 10px; background: #f5f3ff; color: #4c1d95; font: inherit; text-align: left; cursor: pointer; }
+.fe-blk-add:hover, .fe-blk-add:focus-visible { border-color: #7c3aed; background: #ede9fe; outline: none; }
+.fe-blk-add svg { width: 16px; height: 16px; flex: none; color: #7c3aed; }
+.fe-blk-add > span { display: flex; flex-direction: column; min-width: 0; }
+.fe-blk-add strong, .fe-blk-add small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fe-blk-add strong { font-size: .82rem; }
+.fe-blk-add small { font-size: .7rem; color: #6d28d9; }
+.fe-blk-x { width: 28px; flex: none; border: 0; border-radius: 8px; background: none; color: var(--muted); font-size: 1.1rem; cursor: pointer; }
+.fe-blk-x:hover { background: #fef2f2; color: var(--danger); }
+.fe-blk-empty { margin: 0 .25rem .2rem; font-size: .74rem; line-height: 1.4; color: var(--muted); }
+
+.fe-field.is-block { box-shadow: inset 3px 0 0 #a78bfa; }
+.fe-chip.is-blk { background: #f5f3ff; color: #6d28d9; }
+.fe-chip.is-blk.is-new { background: #fef3c7; color: #92400e; }
+.fe-ol-blk { color: #7c3aed; }
+
+.fe-blkbox { margin: .35rem 0 .5rem; padding: .7rem .75rem; border: 1px solid #ddd6fe; border-radius: 12px; background: #faf5ff; }
+.fe-blkbox.is-new { border-color: #fcd34d; background: #fffbeb; }
+.fe-blkbox .fe-insp-label { display: flex; align-items: center; gap: .35rem; color: #6d28d9; }
+.fe-blkbox .fe-insp-label svg { width: 14px; height: 14px; }
+.fe-blk-acts { display: flex; flex-wrap: wrap; gap: .35rem; margin: .25rem 0; }
+.fe-blk-acts .lh-btn { padding: .35rem .65rem; font-size: .78rem; }
+dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
+
+@media (max-width: 1280px) {
+  .fe-blocks { width: 100%; }
+  .fe-blk-list { grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); }
+}

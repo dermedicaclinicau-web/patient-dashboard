@@ -1,6 +1,6 @@
 import { db, auth } from "./firebase-config.js";
 import {
-  collection, getDocs, getDoc, addDoc, updateDoc, setDoc, doc, query, where, serverTimestamp, writeBatch,
+  collection, getDocs, getDoc, addDoc, updateDoc, setDoc, doc, query, where, serverTimestamp, writeBatch, runTransaction,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { cleanField } from "./form-fields.js";
 import { normaliseLetterhead, DEFAULT_LETTERHEAD } from "./form-letterhead.js";
@@ -75,6 +75,24 @@ function normalise(snap) {
   };
 }
 
+// Questions inserted from a reusable block: [{ gid, blockId, v, map: { blockQuestionId: formQuestionId } }]
+const ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
+function cleanBlockLinks(list) {
+  if (!Array.isArray(list)) return [];
+  return list.slice(0, 50).map((l) => {
+    const map = {};
+    Object.entries((l && l.map) || {}).slice(0, 300).forEach(([k, v]) => {
+      if (ID_RE.test(k) && typeof v === "string" && ID_RE.test(v)) map[k] = v;
+    });
+    return {
+      gid: String((l && l.gid) || "").slice(0, 40),
+      blockId: String((l && l.blockId) || "").slice(0, 40),
+      v: Math.max(1, Math.round(Number(l && l.v) || 1)),
+      map,
+    };
+  }).filter((l) => ID_RE.test(l.gid) && ID_RE.test(l.blockId) && Object.keys(l.map).length);
+}
+
 // The exact shape that gets saved and published. Also used to tell whether
 // a live form has changes that haven't been published yet.
 export function formSnapshot({ name, fields, settings }) {
@@ -89,6 +107,7 @@ export function formSnapshot({ name, fields, settings }) {
       titleAlign: settings && ["left", "center", "right"].includes(settings.titleAlign) ? settings.titleAlign : "left",
       titleSize: settings && ["small", "medium", "large"].includes(settings.titleSize) ? settings.titleSize : "medium",
       showMeta: !(settings && settings.showMeta === false),
+      blocks: cleanBlockLinks(settings && settings.blocks),
     },
   };
 }
@@ -353,5 +372,58 @@ export async function savePrintSettings({ printerEmail }, staff) {
     printerEmail: String(printerEmail || "").trim().slice(0, 254),
     updatedAt: serverTimestamp(),
     updatedBy: String((staff && staff.name) || "").slice(0, 120),
+  });
+}
+
+/* ---------- Reusable blocks (form_blocks) ---------- */
+const BLOCKS = "form_blocks";
+
+function blockFrom(d) {
+  const x = d.data() || {};
+  return {
+    id: d.id,
+    name: x.name || "Untitled block",
+    description: x.description || "",
+    fields: Array.isArray(x.fields) ? x.fields : [],
+    version: Number(x.version) || 1,
+    updatedAt: x.updatedAt && x.updatedAt.toDate ? x.updatedAt.toDate() : null,
+    updatedByName: x.updatedByName || "",
+  };
+}
+
+export async function listFormBlocks() {
+  const snap = await getDocs(query(collection(db, BLOCKS), where("status", "==", "active")));
+  return snap.docs.map(blockFrom).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// New block (no id) is version 1; saving an existing one makes the next version
+export async function saveFormBlock({ id, name, description = "", fields }, staff) {
+  const who = { updatedBy: (staff && staff.id) || "", updatedByName: (staff && staff.name) || "" };
+  const clean = {
+    name: String(name || "").trim().slice(0, 120) || "Untitled block",
+    description: String(description || "").trim().slice(0, 300),
+    fields: JSON.parse(JSON.stringify(fields || [])),   // drops undefined values, which Firestore refuses
+  };
+  if (id) {
+    const ref = doc(db, BLOCKS, id);
+    const version = await runTransaction(db, async (tx) => {
+      const cur = await tx.get(ref);
+      if (!cur.exists() || cur.data().status !== "active") {
+        throw Object.assign(new Error("This block has been deleted."), { code: "gone" });
+      }
+      const v = (Number(cur.data().version) || 1) + 1;
+      tx.update(ref, { ...clean, ...who, version: v, updatedAt: serverTimestamp() });
+      return v;
+    });
+    return { id, ...clean, version };
+  }
+  const ref = doc(collection(db, BLOCKS));
+  await setDoc(ref, { ...clean, ...who, version: 1, status: "active", createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+  return { id: ref.id, ...clean, version: 1 };
+}
+
+export async function archiveFormBlock(id, staff) {
+  await updateDoc(doc(db, BLOCKS, id), {
+    status: "archived", updatedAt: serverTimestamp(), updatedBy: (staff && staff.id) || "",
   });
 }

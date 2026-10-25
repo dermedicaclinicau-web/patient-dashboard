@@ -643,6 +643,25 @@ match /inv_count_drafts/{id} {
       }
     }
 
+    // Reusable form blocks: Form Builder access only. Archived, never deleted.
+    match /form_blocks/{blockId} {
+      function okBlock(d) {
+        return d.name is string && d.name.size() > 0 && d.name.size() <= 120
+          && d.get('description', '') is string && d.get('description', '').size() <= 300
+          && d.fields is list && d.fields.size() <= 300
+          && d.version is int && d.version >= 1;
+      }
+      allow read: if isStaff();
+      allow create: if can('forms.build') && okBlock(request.resource.data)
+        && request.resource.data.status == 'active'
+        && request.resource.data.version == 1;
+      allow update: if can('forms.build') && okBlock(request.resource.data)
+        && request.resource.data.status in ['active', 'archived']
+        && (request.resource.data.version == resource.data.version
+          || request.resource.data.version == resource.data.version + 1);
+      allow delete: if false;
+    }
+
     // Shared Form Builder settings: the letterhead, and the printer email address
     match /form_settings/{docId} {
       allow read: if isStaff();

@@ -2,6 +2,7 @@ import {
   categoryLabel, getFormTemplate, getFormVersion, saveFormTemplate, publishFormTemplate,
   formSnapshot, listFormTemplates, getLetterhead, saveLetterhead, RX_KINDS, rxKindGuess,
   FORM_CATEGORIES, changeFormCategory, formGroup, saveFormOnline,
+  listFormBlocks, saveFormBlock, archiveFormBlock,
 } from "./form-templates.js";
 import {
   esc, svg, ICONS, FIELD_TYPES, FIELD_GROUPS, CHOICE_TYPES, FILLS, FILLS_FOR,
@@ -46,6 +47,7 @@ const UI = {
   user: '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
   undo: '<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>',
   redo: '<polyline points="15 14 20 9 15 4"/><path d="M4 20v-7a4 4 0 0 1 4-4h12"/>',
+  block: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
   x: ICONS.x,
 };
 
@@ -139,6 +141,8 @@ export async function mountFormEditor(container, { templateId, staff }) {
   let previewTags = [];      // text with tags in it, on the Preview
   let staffView = false;     // Preview: hide the fields staff won't see
   const picked = new Set();  // questions selected together (outline ticks, Shift / Ctrl + click)
+  let blocks = null;         // saved blocks, once loaded
+  let blockIdx = new Map();  // question id -> { link, block, first } for questions inserted from a block
   let palTab = (() => { try { return localStorage.getItem("fe-paltab") === "outline" ? "outline" : "add"; } catch { return "add"; } })();
   const ctx = (live) => ({ live, fields, consentForms, prescriptionForms, letterhead, calcValues: null, aftercare: aftercareMap, emailTemplates, products, markSets, specialities });
   const current = () => fields.find((f) => f.id === sel) || null;
@@ -182,6 +186,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
         </div>
         <div class="fe-pal-add" data-role="paladd"${palTab === "add" ? "" : " hidden"}>
           <button type="button" class="lh-btn fe-copyfrom" data-act="copy-from">${svg(UI.copy)}Copy from another form</button>
+          <div class="fe-blocks" data-role="blocks"></div>
           <input type="search" class="fe-input fe-pal-search" data-role="palsearch" placeholder="Search fields" aria-label="Search fields" />
           <p class="fe-pal-hint">Click to add, or drag onto the page</p>
           ${FIELD_GROUPS.map(([g, types]) => `
@@ -633,8 +638,11 @@ export async function mountFormEditor(container, { templateId, staff }) {
     const condBad = cond ? conditionProblem(f, fields) : "";
     const pf = prefillSummary(f);
     const issue = bad ? bad.get(f.id) : "";
+    const blk = blockIdx.get(f.id);
+    const blkNew = blk && blk.block && blk.block.version > blk.link.v;
     const chips = [
       issue && `<span class="fe-chip is-problem-chip">${svg(WARN)}${esc(issue)}</span>`,
+      blk && blk.first === f.id && `<span class="fe-chip is-blk${blkNew ? " is-new" : ""}">${svg(UI.block)}${esc(blockChipText(blk))}</span>`,
       f.fill && `<span class="fe-chip">${svg(UI.user)}Auto-filled: ${esc(FILLS[f.fill] || f.fill)}</span>`,
       pf && `<span class="fe-chip">${svg('<polyline points="20 6 9 17 4 12"/>')}Pre-filled: ${esc(pf)}</span>`,
       (() => {
@@ -647,7 +655,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
       f.pdfHide && !f.liveHide && `<span class="fe-chip">${svg(NO_PDF)}Not on the PDF</span>`,
     ].filter(Boolean).join("");
     return `
-      <div class="fe-field${spanClass(f)}${on ? " is-selected" : ""}${cond ? " is-conditional" : ""}${f.liveHide ? " is-livehide" : ""}${issue ? " is-problem" : ""}${picked.has(f.id) ? " is-picked" : ""}" data-id="${esc(f.id)}" draggable="true" tabindex="0"
+      <div class="fe-field${spanClass(f)}${on ? " is-selected" : ""}${cond ? " is-conditional" : ""}${f.liveHide ? " is-livehide" : ""}${issue ? " is-problem" : ""}${picked.has(f.id) ? " is-picked" : ""}${blk ? " is-block" : ""}" data-id="${esc(f.id)}" draggable="true" tabindex="0"
            aria-label="${esc(FIELD_TYPES[f.type].name)}${f.label ? ": " + esc(f.label) : ""}">
         ${body}
         ${chips ? `<div class="fe-chips">${chips}</div>` : ""}
@@ -669,6 +677,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     const el = stage.querySelector(`.fe-field[data-id="${CSS.escape(f.id)}"]`);
     const i = fields.indexOf(f);
     if (!el || i < 0) { renderStage(); return; }
+    blockIdx = blockIndex();
     const t = document.createElement("template");
     t.innerHTML = fieldHtml(f, i, ctx(false), new Set(formFieldTags(fields).map((x) => x.f.id)), problemMap()).trim();
     const next = t.content.firstElementChild;
@@ -681,6 +690,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   function renderStage() {
     clearTimeout(fullTimer);
     for (const id of [...picked]) if (!fields.some((f) => f.id === id)) picked.delete(id);   // removed, or undone
+    blockIdx = blockIndex();
     const build = mode === "build";
     const c = ctx(!build);
     const tagOwners = new Set(formFieldTags(fields).map((t) => t.f.id));
@@ -963,6 +973,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     if (!f) { renderFormSettings(); return; }
 
     let h = `<div class="fe-insp-head">${svg(ICONS[f.type])}<span>${esc(FIELD_TYPES[f.type].name)}</span></div>`;
+    h += blockBoxHtml(f);
     if (hasLabel(f.type)) {
       const lbl = f.type === "button" ? "Button text" : f.type === "text_block" ? "Heading" : f.type === "table" ? "Table title"
         : f.type === "image" ? "Title (optional)" : "Question";
@@ -1224,8 +1235,9 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
   // Copies with new ids. Show-when rules, calculations and product amounts between the copied questions follow the copies.
   // keepOutside: references to questions that weren't copied stay (same form) or are cleared (another form).
-  function cloneFields(list, { keepOutside = true } = {}) {
-    const map = new Map(list.map((f) => [f.id, newId()]));
+  // ids: optional Map of source id -> id to use (so updated copies keep their ids)
+  function cloneFields(list, { keepOutside = true, ids = null } = {}) {
+    const map = new Map(list.map((f) => [f.id, (ids && ids.get(f.id)) || newId()]));
     const here = new Set(fields.map((f) => f.id));
     const keeps = (id) => keepOutside && here.has(id);
     const notes = { rules: 0, calcs: 0, amounts: 0 };
@@ -1263,7 +1275,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
       }
       return normaliseField(c);
     }).filter(Boolean);
-    return { copies, notes };
+    return { copies, notes, map };
   }
 
   // Moves questions (in their current order) so they sit just before beforeId (null = at the end)
@@ -1340,6 +1352,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     if (act === "clear") { picked.clear(); renderStage(); return; }
     if (act === "up" || act === "down") { moveBlock(list.map((f) => f.id), act === "up" ? -1 : 1); return; }
     if (act === "del") { removeMany(list); return; }
+    if (act === "block") { saveAsBlock(list); return; }
     if (act === "span") {
       list.filter((f) => !NO_SPAN.includes(f.type)).forEach((f) => { f.style = { ...(f.style || {}), span: val }; });
       changed();
@@ -1401,6 +1414,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
         ["full", "Full", "Full width"], ["half", "½", "Half"], ["third", "⅓", "Third"], ["twothirds", "⅔", "Two thirds"],
       ].map(([v, l, t]) => `<button type="button" data-bulkspan="${v}" title="${t}" aria-pressed="${span === v}"${span === v ? ' class="is-on"' : ""}>${l}</button>`).join("")}</span>` : ""}
       ${can.length ? `<button type="button" class="lh-btn" data-bulk="hide">${allHidden ? "Show to staff" : "Hide from staff"}</button>` : ""}
+      <button type="button" class="lh-btn" data-bulk="block" title="Save these questions to reuse on other forms">${svg(UI.block)}Save as block</button>
       <button type="button" class="lh-btn" data-bulk="copy" title="Duplicate (Ctrl+D)">${svg(UI.copy)}Duplicate</button>
       <button type="button" class="lh-btn st-danger" data-bulk="del" title="Remove (Delete)">${svg(UI.trash)}Remove</button>
       <button type="button" class="lh-btn is-quiet" data-bulk="clear" title="Clear the selection (Esc)">Clear</button>`;
@@ -1415,6 +1429,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     const keep = pal ? pal.scrollTop : 0;
     const bad = problemMap();
     const all = fields.length > 0 && fields.every((f) => picked.has(f.id));
+    const bi = blockIndex();
     host.innerHTML = fields.length ? `
       <div class="fe-ol-head">
         <label class="fe-check"><input type="checkbox" data-olall${all ? " checked" : ""} /> Select all</label>
@@ -1428,6 +1443,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
           f.required && canRequire(f.type) ? '<span class="fe-ol-req" title="Answer required">*</span>' : "",
           f.showWhen && Array.isArray(f.showWhen.rules) && f.showWhen.rules.length ? `<span title="Shown only for some answers">${svg(BRANCH)}</span>` : "",
           f.liveHide ? `<span title="Hidden from staff">${svg(EYE_OFF)}</span>` : "",
+          bi.has(f.id) ? `<span class="fe-ol-blk" title="${esc(blockChipText(bi.get(f.id)))}">${svg(UI.block)}</span>` : "",
           bad && bad.has(f.id) ? `<span class="is-bad" title="${esc(bad.get(f.id))}">${svg(WARN)}</span>` : "",
         ].join("");
         return `<li class="fe-ol-item${f.id === sel ? " is-on" : ""}${picked.has(f.id) ? " is-picked" : ""}" data-olid="${esc(f.id)}">
@@ -1595,6 +1611,273 @@ export async function mountFormEditor(container, { templateId, staff }) {
     });
     pickForm();
   }
+  /* ---------- Reusable blocks ---------- */
+  // settings.blocks: [{ gid, blockId, v, map: { blockQuestionId: thisFormQuestionId } }]
+  const blockLinks = () => (Array.isArray(settings.blocks) ? settings.blocks : []);
+  const blockById = (id) => (blocks || []).find((b) => b.id === id) || null;
+  const linkIds = (l) => Object.values(l.map || {});
+  const byName = (a, b) => a.name.localeCompare(b.name);
+  const cleanForBlock = (list) => {
+    const s = formSnapshot({ name: "", fields: list, settings: {} });
+    return (s && s.fields) || list;
+  };
+
+  function blockIndex() {
+    const here = new Set(fields.map((f) => f.id));
+    const m = new Map();
+    blockLinks().forEach((l) => {
+      const ids = new Set(linkIds(l).filter((id) => here.has(id)));
+      if (!ids.size) return;
+      const first = fields.find((f) => ids.has(f.id));
+      const block = blockById(l.blockId);
+      ids.forEach((id) => m.set(id, { link: l, block, first: first.id }));
+    });
+    return m;
+  }
+
+  function blockChipText(e) {
+    const b = e.block;
+    if (!b) return blocks === null ? "From a block" : "From a deleted block";
+    return `Block: ${b.name}${b.version > e.link.v ? ` · version ${b.version} available` : ""}`;
+  }
+
+  // Links questions to a block (taking them out of any block they were linked to before)
+  function linkFields(blockId, v, map) {
+    const ids = new Set(Object.values(map));
+    const others = blockLinks()
+      .map((l) => ({ ...l, map: Object.fromEntries(Object.entries(l.map || {}).filter(([, fid]) => !ids.has(fid))) }))
+      .filter((l) => Object.keys(l.map).length);
+    settings.blocks = [...others, { gid: newId(), blockId, v, map }];
+  }
+
+  function renderBlocks() {
+    const host = $('[data-role="blocks"]');
+    if (!host) return;
+    if (blocks === null) { host.innerHTML = '<p class="fe-blk-empty">Loading saved blocks…</p>'; return; }
+    host.innerHTML = `<div class="fe-blocks-h">Saved blocks</div>${blocks.length
+      ? `<div class="fe-blk-list">${blocks.map((b) => {
+          const n = b.fields.length;
+          return `<div class="fe-blk-row">
+            <button type="button" class="fe-blk-add" data-blkadd="${esc(b.id)}" title="${esc(b.description || "Insert this block")}">${svg(UI.block)}
+              <span><strong>${esc(b.name)}</strong><small>${n} question${n === 1 ? "" : "s"} · version ${b.version}</small></span>
+            </button>
+            <button type="button" class="fe-blk-x" data-blkdel="${esc(b.id)}" aria-label="Delete ${esc(b.name)}" title="Delete this block">×</button>
+          </div>`;
+        }).join("")}</div>`
+      : '<p class="fe-blk-empty">Select questions (tick them in the Outline) and choose Save as block to reuse them on other forms.</p>'}`;
+  }
+
+  function blockNameDialog({ count, note }) {
+    return new Promise((resolve) => {
+      let result = null;
+      const dlg = document.createElement("dialog");
+      dlg.className = "lh-dialog fe-blk-dlg";
+      dlg.innerHTML = `<form class="lh-form">
+        <div class="lh-dialog-head"><h3>Save as a block</h3>
+          <p>${count} question${count === 1 ? "" : "s"}. You can insert it into any form from the Add tab.</p></div>
+        <label class="lh-field"><span class="lh-label">Block name</span>
+          <input type="text" data-f="name" maxlength="120" placeholder="e.g. Medical history" /></label>
+        <label class="lh-field"><span class="lh-label">What it's for (optional)</span>
+          <input type="text" data-f="desc" maxlength="300" placeholder="Shown when you point at it in the Add tab" /></label>
+        ${note ? `<p class="fe-note">${esc(note)}</p>` : ""}
+        <p class="lh-error" data-role="err" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="no">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">Save block</button>
+        </div></form>`;
+      const form = dlg.querySelector("form");
+      const err = dlg.querySelector('[data-role="err"]');
+      form.addEventListener("submit", (e) => {
+        e.preventDefault();
+        const nm = form.querySelector('[data-f="name"]').value.trim();
+        const bad = !nm ? "Give the block a name."
+          : (blocks || []).some((b) => b.name.toLowerCase() === nm.toLowerCase()) ? "There's already a block with that name." : "";
+        if (bad) { err.textContent = bad; err.hidden = false; return; }
+        result = { name: nm, description: form.querySelector('[data-f="desc"]').value.trim() };
+        dlg.close();
+      });
+      dlg.querySelector('[data-act="no"]').addEventListener("click", () => dlg.close());
+      dlg.addEventListener("close", () => { dlg.remove(); resolve(result); });
+      document.body.appendChild(dlg);
+      dlg.showModal();
+      form.querySelector('[data-f="name"]').focus();
+    });
+  }
+
+  async function saveAsBlock(list) {
+    const use = list.filter((f) => !ONE_ONLY.includes(f.type));
+    if (!use.length) { showToast("Record dates and watermarks can't go in a block."); return; }
+    const ids = new Map(use.map((f) => [f.id, f.id]));
+    const { copies, notes } = cloneFields(use, { keepOutside: false, ids });
+    const out = notes.rules + notes.calcs + notes.amounts;
+    const note = [
+      use.length < list.length ? "Record dates and watermarks aren't included." : "",
+      out ? `${out} link${out === 1 ? "" : "s"} to questions outside the selection (show-when rules, formulas or product amounts) won't be in the block.` : "",
+    ].filter(Boolean).join(" ");
+    const res = await blockNameDialog({ count: use.length, note });
+    if (!res || !root.isConnected) return;
+    showToast("Saving the block…");
+    try {
+      const saved = await saveFormBlock({ name: res.name, description: res.description, fields: cleanForBlock(copies) }, staff);
+      if (!root.isConnected) return;
+      blocks = [...(blocks || []).filter((b) => b.id !== saved.id), saved].sort(byName);
+      linkFields(saved.id, saved.version, Object.fromEntries(use.map((f) => [f.id, f.id])));
+      picked.clear();
+      changed();
+      renderStage();
+      renderInspector();
+      renderBlocks();
+      showToast(`Saved “${saved.name}”. Insert it into any form from the Add tab.`);
+    } catch (err) {
+      console.error("Block not saved:", err);
+      showToast(err.code === "permission-denied" ? "Not saved. Check the Firestore rule for form_blocks has been published." : "Couldn't save the block. Try again.");
+    }
+  }
+
+  function insertBlock(id) {
+    const b = blockById(id);
+    if (!b) return;
+    const src = b.fields.map(normaliseField).filter(Boolean)
+      .filter((f) => !(ONE_ONLY.includes(f.type) && fields.some((x) => x.type === f.type)));
+    if (!src.length) { showToast("This block has no questions to add."); return; }
+    const { copies, map } = cloneFields(src, { keepOutside: false });
+    const i = fields.findIndex((f) => f.id === sel);
+    fields.splice(i < 0 ? fields.length : i + 1, 0, ...copies);
+    linkFields(b.id, b.version, Object.fromEntries(map));
+    picked.clear();
+    copies.forEach((c) => picked.add(c.id));
+    sel = copies[0].id;
+    changed();
+    renderStage();
+    renderInspector();
+    const el = stage.querySelector(`.fe-field[data-id="${CSS.escape(sel)}"]`);
+    if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
+    showToast(`Added “${b.name}” (${copies.length} question${copies.length === 1 ? "" : "s"}). They're selected, so you can move them together.`);
+  }
+
+  // Replace this form's copy with the latest version of the block
+  async function updateFromBlock(gid) {
+    const l = blockLinks().find((x) => x.gid === gid);
+    const b = l && blockById(l.blockId);
+    if (!l || !b) return;
+    const here = new Map(fields.map((f) => [f.id, f]));
+    const oldIds = linkIds(l).filter((id) => here.has(id));
+    const src = b.fields.map(normaliseField).filter(Boolean);
+    const ids = new Map(Object.entries(l.map || {}).filter(([, fid]) => here.has(fid)));
+    const kept = new Set(src.map((s) => ids.get(s.id)).filter(Boolean));
+    const gone = oldIds.filter((id) => !kept.has(id)).map((id) => here.get(id));
+    const uses = [...new Set(gone.flatMap((f) => fieldUses(f, new Set(oldIds))))];
+    const ok = await confirmDialog({
+      title: `Update to version ${b.version} of “${b.name}”?`,
+      message: `This form's ${oldIds.length} question${oldIds.length === 1 ? "" : "s"} from the block are replaced with the latest ${src.length}. `
+        + "Any changes made to them on this form only are lost. "
+        + (uses.length ? `Removed questions are used by ${uses.slice(0, 6).join(", ")}${uses.length > 6 ? ` and ${uses.length - 6} more` : ""}. ` : "")
+        + "Undo brings the old ones back. Publish afterwards so staff get it.",
+      confirm: "Update",
+      tone: "primary",
+    });
+    if (!ok || !root.isConnected) return;
+    const { copies, map } = cloneFields(src, { keepOutside: false, ids });
+    copies.forEach((c) => { const o = here.get(c.id); if (o && o.tag) c.tag = o.tag; });   // keep a tag name given on this form
+    const old = new Set(oldIds);
+    const at = fields.findIndex((f) => old.has(f.id));
+    const rest = fields.filter((f) => !old.has(f.id));
+    rest.splice(at < 0 ? rest.length : at, 0, ...copies);
+    fields.splice(0, fields.length, ...rest);
+    settings.blocks = blockLinks().map((x) => (x.gid === gid ? { ...x, v: b.version, map: Object.fromEntries(map) } : x));
+    picked.clear();
+    sel = copies.length ? copies[0].id : FORM;
+    changed();
+    renderStage();
+    renderInspector();
+    showToast(`Updated to version ${b.version}. Publish when you're ready.`);
+  }
+
+  // Send this form's copy back to the block as its next version
+  async function pushToBlock(gid) {
+    const l = blockLinks().find((x) => x.gid === gid);
+    const b = l && blockById(l.blockId);
+    if (!l || !b) return;
+    const rev = new Map(Object.entries(l.map || {}).map(([bid, fid]) => [fid, bid]));
+    const group = fields.filter((f) => rev.has(f.id));
+    if (!group.length) return;
+    const ok = await confirmDialog({
+      title: `Save as version ${b.version + 1} of “${b.name}”?`,
+      message: `The block becomes these ${group.length} question${group.length === 1 ? "" : "s"}, as they are on this form. `
+        + "Other forms that use it show “version available” and only change when someone updates them there.",
+      confirm: "Save to the block",
+      tone: "primary",
+    });
+    if (!ok || !root.isConnected) return;
+    const { copies } = cloneFields(group, { keepOutside: false, ids: new Map(group.map((f) => [f.id, rev.get(f.id)])) });
+    try {
+      const saved = await saveFormBlock({ id: b.id, name: b.name, description: b.description, fields: cleanForBlock(copies) }, staff);
+      if (!root.isConnected) return;
+      blocks = (blocks || []).map((x) => (x.id === saved.id ? saved : x));
+      settings.blocks = blockLinks().map((x) => (x.gid === gid ? { ...x, v: saved.version } : x));
+      changed();
+      renderStage();
+      renderInspector();
+      renderBlocks();
+      showToast(`“${saved.name}” is now version ${saved.version}.`);
+    } catch (err) {
+      console.error("Block not updated:", err);
+      showToast(err.code === "gone" ? err.message
+        : err.code === "permission-denied" ? "Not saved. Check the Firestore rule for form_blocks has been published." : "Couldn't save the block. Try again.");
+    }
+  }
+
+  function unlinkBlock(gid) {
+    settings.blocks = blockLinks().filter((x) => x.gid !== gid);
+    changed();
+    renderStage();
+    renderInspector();
+    showToast("Unlinked. The questions stay as ordinary questions.");
+  }
+
+  async function deleteBlock(id) {
+    const b = blockById(id);
+    if (!b) return;
+    const ok = await confirmDialog({
+      title: `Delete the block “${b.name}”?`,
+      message: "It's taken out of the Add tab. Forms that already use it keep their questions.",
+      confirm: "Delete block",
+    });
+    if (!ok || !root.isConnected) return;
+    try {
+      await archiveFormBlock(id, staff);
+      blocks = (blocks || []).filter((x) => x.id !== id);
+      renderBlocks();
+      renderStage();
+      if (current() && blockIdx.has(sel)) renderInspector();
+      showToast(`Deleted “${b.name}”.`);
+    } catch (err) {
+      console.error("Block not deleted:", err);
+      showToast("Couldn't delete the block. Try again.");
+    }
+  }
+
+  function blockBoxHtml(f) {
+    const e = blockIndex().get(f.id);
+    if (!e) return "";
+    const { link, block } = e;
+    const n = linkIds(link).filter((id) => fields.some((x) => x.id === id)).length;
+    const newer = block && block.version > link.v;
+    return `<div class="fe-insp-field fe-blkbox${newer ? " is-new" : ""}">
+      <span class="fe-insp-label">${svg(UI.block)}Part of a block</span>
+      ${block
+        ? `<strong>${esc(block.name)}</strong>
+           <small class="fe-note">${n} question${n === 1 ? "" : "s"} on this form. This form has version ${link.v}${
+             newer ? `, and version ${block.version} is available.` : ", the latest."}</small>`
+        : `<small class="fe-note">${blocks === null ? "Loading…" : "The block has been deleted. These questions stay on the form."}</small>`}
+      <div class="fe-blk-acts">
+        ${newer ? `<button type="button" class="lh-btn is-primary" data-blkupd="${esc(link.gid)}">Update to version ${block.version}</button>` : ""}
+        ${block ? `<button type="button" class="lh-btn" data-blkpush="${esc(link.gid)}">Save changes to the block</button>` : ""}
+        <button type="button" class="lh-btn is-quiet" data-blkunlink="${esc(link.gid)}">Unlink</button>
+      </div>
+      <small class="fe-note">Edits here stay on this form until you save them to the block. Questions you add next to it aren't part of the block.</small>
+    </div>`;
+  }
   function editLetterhead() {
     openLetterheadDialog({
       letterhead,
@@ -1714,6 +1997,10 @@ export async function mountFormEditor(container, { templateId, staff }) {
       return;
     }
     if (e.target.closest('[data-act="copy-from"]')) { openCopyFrom(); return; }
+    const ba = e.target.closest("[data-blkadd]");
+    if (ba) { insertBlock(ba.dataset.blkadd); return; }
+    const bd = e.target.closest("[data-blkdel]");
+    if (bd) { deleteBlock(bd.dataset.blkdel); return; }
     const bk = e.target.closest("[data-bulk]");
     if (bk) { if (!bk.disabled) bulk(bk.dataset.bulk); return; }
     const bs = e.target.closest("[data-bulkspan]");
@@ -1885,6 +2172,13 @@ export async function mountFormEditor(container, { templateId, staff }) {
     if (e.target.closest('[data-act="unpublish"]')) { unpublish(); return; }
     const f = current();
     if (!f) return;
+
+    const bu = e.target.closest("[data-blkupd]");
+    if (bu) { updateFromBlock(bu.dataset.blkupd); return; }
+    const bp = e.target.closest("[data-blkpush]");
+    if (bp) { pushToBlock(bp.dataset.blkpush); return; }
+    const bx = e.target.closest("[data-blkunlink]");
+    if (bx) { unlinkBlock(bx.dataset.blkunlink); return; }
 
     const ti = e.target.closest("[data-taginsert]");
     if (ti) {
@@ -2239,6 +2533,20 @@ export async function mountFormEditor(container, { templateId, staff }) {
   renderPublish();
   lastSnap = snap();   // the starting point for Undo
   syncUndo();
+  renderBlocks();
+  listFormBlocks()
+    .then((list) => {
+      blocks = list;
+      if (!root.isConnected) return;
+      renderBlocks();
+      renderStage();
+      if (current() && blockIdx.has(sel)) renderInspector();
+    })
+    .catch((err) => {
+      console.warn("Couldn't load blocks:", err);
+      blocks = [];
+      if (root.isConnected) renderBlocks();
+    });
   makeResizable(root);
   initStickyTop();
 
