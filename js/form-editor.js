@@ -44,6 +44,8 @@ const UI = {
   copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
   trash: '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>',
   user: '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+  undo: '<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>',
+  redo: '<polyline points="15 14 20 9 15 4"/><path d="M4 20v-7a4 4 0 0 1 4-4h12"/>',
   x: ICONS.x,
 };
 
@@ -126,6 +128,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
   let publishedAt = tpl.publishedAt || null;
   let publishedSig = version > 0 ? null : ""; // null = still loading the published copy
   let publishing = false;
+  let showIssues = false;     // after a Publish that found problems: they're outlined until fixed
 
   let aftercareMap = null;   // aftercare id -> aftercare, once loaded
   let emailTemplates = [];   // To Patient task types, for the aftercare email
@@ -156,6 +159,11 @@ export async function mountFormEditor(container, { templateId, staff }) {
           <button type="button" data-mode="build" class="active">Build</button>
           <button type="button" data-mode="preview">Preview</button>
         </div>
+        <div class="fe-undo" role="group" aria-label="Undo and redo">
+          <button type="button" class="btn-ghost fe-ur" data-act="undo" data-role="undo" aria-label="Undo" title="Undo (Ctrl+Z)" disabled>${svg(UI.undo)}</button>
+          <button type="button" class="btn-ghost fe-ur" data-act="redo" data-role="redo" aria-label="Redo" title="Redo (Ctrl+Shift+Z)" disabled>${svg(UI.redo)}</button>
+        </div>
+        <button type="button" class="btn-ghost fe-issues" data-act="issues" data-role="issues" hidden></button>
         <button type="button" class="btn-ghost fe-staffview" data-act="staff-view" data-role="staffview" hidden>Show as staff see it</button>
         <button type="button" class="btn-ghost fe-dup" data-act="duplicate" title="Make a new draft with these questions">Duplicate</button>
         <button type="button" class="btn-ghost fe-savenow" data-act="save-now" data-role="savenow" disabled>Save draft</button>
@@ -204,14 +212,78 @@ export async function mountFormEditor(container, { templateId, staff }) {
     if (sn) { sn.disabled = s === "saved" || s === "saving"; sn.textContent = s === "saving" ? "Saving…" : s === "saved" ? "Saved" : "Save draft"; }
   }
 
-  function changed() {
+  /* ---------- Undo / redo ---------- */
+  // Each step is the form as it was before a change, and which question was being worked on
+  const MAX_UNDO = 60;
+  const past = [], future = [];
+  const snap = () => JSON.stringify({ name, fields, settings });
+  let lastSnap = "";            // set once the page has drawn (see Start)
+  let burstKey = "", burstAt = 0;
+
+  function syncUndo() {
+    const u = $('[data-role="undo"]');
+    const r = $('[data-role="redo"]');
+    if (u) { u.disabled = !past.length; u.title = past.length ? `Undo (Ctrl+Z) · ${past.length} step${past.length === 1 ? "" : "s"}` : "Nothing to undo"; }
+    if (r) { r.disabled = !future.length; r.title = future.length ? "Redo (Ctrl+Shift+Z)" : "Nothing to redo"; }
+  }
+
+  // key: typing in the same box within a second is one step ("" = always its own step)
+  function record(key = "") {
+    const now = snap();
+    if (now === lastSnap) return;
+    const join = key && key === burstKey && Date.now() - burstAt < 1200 && past.length && !future.length;
+    if (!join) {
+      past.push({ data: lastSnap, sel });
+      if (past.length > MAX_UNDO) past.shift();
+    }
+    burstKey = key;
+    burstAt = Date.now();
+    future.length = 0;
+    lastSnap = now;
+    syncUndo();
+  }
+
+  function restore(e) {
+    const s = JSON.parse(e.data);
+    name = s.name;
+    nameInput.value = name;
+    fields.splice(0, fields.length, ...(s.fields || []).map(normaliseField).filter(Boolean));
+    Object.keys(settings).forEach((k) => delete settings[k]);
+    Object.assign(settings, s.settings || {});
+    sel = fields.some((f) => f.id === e.sel) ? e.sel : fields.some((f) => f.id === sel) ? sel : FORM;
+    lastSnap = snap();
+    burstKey = "";
+    dirty = true;
+    setState("dirty");
+    renderPublish();
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(flush, 900);
+    renderStage();
+    renderInspector();
+    syncUndo();
+  }
+
+  function undo() {
+    if (!past.length) return;
+    const e = past.pop();
+    future.push({ data: lastSnap, sel });
+    restore(e);
+  }
+  function redo() {
+    if (!future.length) return;
+    const e = future.pop();
+    past.push({ data: lastSnap, sel });
+    restore(e);
+  }
+
+  function changed(key = "") {
+    record(key);
     dirty = true;
     setState("dirty");
     renderPublish();
     clearTimeout(saveTimer);
     saveTimer = setTimeout(flush, 900);
   }
-
   async function flush() {
     clearTimeout(saveTimer);
     if (!dirty || saving) return;
@@ -272,6 +344,13 @@ export async function mountFormEditor(container, { templateId, staff }) {
       unpub.disabled = publishing;
       unpub.title = "Take this form off the patient dashboard and keep it as a draft";
     }
+    const iss = $('[data-role="issues"]');
+    if (iss) {
+      const n = showIssues ? publishProblems().length : 0;
+      iss.hidden = !n;
+      iss.textContent = `${n} to fix`;
+      iss.title = "See what needs fixing before publishing";
+    }
     const disc = $('[data-role="discard"]');
     if (disc) {
       disc.hidden = publishing || !(version > 0 && publishedSig && signature() !== publishedSig);
@@ -279,82 +358,121 @@ export async function mountFormEditor(container, { templateId, staff }) {
     }
   }
 
-  // The first thing that would stop the form working for staff, or null
-  function publishProblem() {
-    if (!fields.some((f) => !LAYOUT_ONLY.includes(f.type))) {
-      return { msg: "Add at least one question before publishing." };
+  // What would stop this question working for staff, or null
+  function fieldProblem(f) {
+    const label = String(f.label || "").trim();
+    const nm = label || FIELD_TYPES[f.type].name;
+    const cp = conditionProblem(f, fields);
+    if (cp) return { id: f.id, msg: `“${nm}”: ${cp}` };
+    if (hasLabel(f.type) && !["text_block", "image"].includes(f.type) && !label) {
+      return { id: f.id, msg: "This question needs a name." };
     }
-    for (const f of fields) {
-      const label = String(f.label || "").trim();
-      const cp = conditionProblem(f, fields);
-      if (cp) return { id: f.id, msg: `“${label || FIELD_TYPES[f.type].name}”: ${cp}` };
-      if (hasLabel(f.type) && !["text_block", "image"].includes(f.type) && !label) {
-        return { id: f.id, msg: "Every question needs a name. Add one to the highlighted question." };
+    if (f.liveHide && f.required && canRequire(f.type)) {
+      return { id: f.id, msg: `“${nm}” is hidden from staff but set as Answer required. Untick one of them.` };
+    }
+    if (CHOICE_TYPES.includes(f.type) && !f.options.some((o) => String(o).trim())) {
+      return { id: f.id, msg: `“${label}” needs at least one answer choice.` };
+    }
+    if (f.type === "button" && !BUTTON_URL_RE.test(String(f.url || "").trim())) {
+      return { id: f.id, msg: `“${label || "Button"}” needs a link starting with https://, mailto:, tel: or #/.` };
+    }
+    if (f.type === "calculation") {
+      const c = checkFormula(f, fields);
+      if (!c.ok) return { id: f.id, msg: `“${label || "Calculation"}”: ${c.error}` };
+    }
+    if (f.type === "table") {
+      const tp = tableProblem(f);
+      if (tp) return { id: f.id, msg: tp };
+      const bad = tableCols(f).find((c) => c.type === "dropdown" && !c.options.length);
+      if (bad) return { id: f.id, msg: `Table column “${bad.label || "Column"}” needs at least one choice.` };
+    }
+    if (f.type === "image" && f.source !== "staff") {
+      if (f.annotate && f.markMode === "marks" && markSets) {
+        const chosen = markSetIdsOf(f).map((id) => markSets.find((s) => s.id === id)).filter(Boolean);
+        if (!chosen.length) return { id: f.id, msg: "Choose at least one marking set for the picture, or change what staff can do with it." };
       }
-      if (f.liveHide && f.required && canRequire(f.type)) {
-        return { id: f.id, msg: `“${label || FIELD_TYPES[f.type].name}” is hidden from staff but set as Answer required. Untick one of them.` };
+      const badQ = (f.questions || []).find((q) => !String(q.label || "").trim() || (iqHasOptions(q) && !(q.options || []).length));
+      if (badQ) {
+        return { id: f.id, msg: String(badQ.label || "").trim()
+          ? `“${badQ.label}” under the picture needs at least one choice.` : "A question under the picture needs a name." };
       }
-      if (CHOICE_TYPES.includes(f.type) && !f.options.some((o) => String(o).trim())) {
-        return { id: f.id, msg: `“${label}” needs at least one answer choice.` };
-      }
-      if (f.type === "button" && !BUTTON_URL_RE.test(String(f.url || "").trim())) {
-        return { id: f.id, msg: `“${label || "Button"}” needs a link starting with https://, mailto:, tel: or #/.` };
-      }
-      if (f.type === "calculation") {
-        const c = checkFormula(f, fields);
-        if (!c.ok) return { id: f.id, msg: `“${label || "Calculation"}”: ${c.error}` };
-      }
-      if (f.type === "table") {
-        const tp = tableProblem(f);
-        if (tp) return { id: f.id, msg: tp };
-        const bad = tableCols(f).find((c) => c.type === "dropdown" && !c.options.length);
-        if (bad) return { id: f.id, msg: `Table column “${bad.label || "Column"}” needs at least one choice.` };
-      }
-      if (f.type === "image" && f.source !== "staff") {
-        if (f.annotate && f.markMode === "marks" && markSets) {
-          const chosen = markSetIdsOf(f).map((id) => markSets.find((s) => s.id === id)).filter(Boolean);
-          if (!chosen.length) return { id: f.id, msg: "Choose at least one marking set for the picture, or change what staff can do with it." };
-        }
-        const badQ = (f.questions || []).find((q) => !String(q.label || "").trim() || (iqHasOptions(q) && !(q.options || []).length));
-        if (badQ) {
-          return { id: f.id, msg: String(badQ.label || "").trim()
-            ? `“${badQ.label}” under the picture needs at least one choice.` : "A question under the picture needs a name." };
-        }
-      }
-      if (f.type === "consent_status" && !f.consentFormId) {
-        return { id: f.id, msg: "Choose which consent form the Consent check looks for." };
-      }
-      if (f.type === "consumables" && !(f.items || []).length) {
-        return { id: f.id, msg: "Choose at least one product for the Consumables field." };
-      }
-      if (f.type === "consumables") {
-        const bad = (f.items || []).find((it) => {
-          if (!it.from) return false;
-          const src = fields.find((x) => x.id === it.from);
-          return !src || !(isMarkImage(src) || ["calculation", "number"].includes(src.type));
-        });
-        if (bad) return { id: f.id, msg: `${bad.name}: the question its amount comes from has been removed or no longer has unit marks.` };
-      }
-      if (f.type === "prescription_status" && !f.consentFormId) {
-        return { id: f.id, msg: "Choose which prescription form the Prescription check looks for." };
-      }
+    }
+    if (f.type === "consent_status" && !f.consentFormId) {
+      return { id: f.id, msg: "Choose which consent form the Consent check looks for." };
+    }
+    if (f.type === "consumables" && !(f.items || []).length) {
+      return { id: f.id, msg: "Choose at least one product for the Consumables field." };
+    }
+    if (f.type === "consumables") {
+      const bad = (f.items || []).find((it) => {
+        if (!it.from) return false;
+        const src = fields.find((x) => x.id === it.from);
+        return !src || !(isMarkImage(src) || ["calculation", "number"].includes(src.type));
+      });
+      if (bad) return { id: f.id, msg: `${bad.name}: the question its amount comes from has been removed or no longer has unit marks.` };
+    }
+    if (f.type === "prescription_status" && !f.consentFormId) {
+      return { id: f.id, msg: "Choose which prescription form the Prescription check looks for." };
     }
     return null;
   }
 
+  // Everything that would stop the form working for staff: [{ id?, msg }]
+  function publishProblems() {
+    const out = [];
+    if (!fields.some((f) => !LAYOUT_ONLY.includes(f.type))) out.push({ msg: "Add at least one question before publishing." });
+    fields.forEach((f) => { const p = fieldProblem(f); if (p) out.push(p); });
+    return out;
+  }
+  const problemMap = () => (showIssues ? new Map(publishProblems().filter((p) => p.id).map((p) => [p.id, p.msg])) : null);
+
+  // Jumps to a question on the build page
+  function goTo(id) {
+    setMode("build");
+    sel = id;
+    renderStage();
+    renderInspector();
+    const el = stage.querySelector(`.fe-field[data-id="${CSS.escape(id)}"]`);
+    if (el) { el.scrollIntoView({ block: "center", behavior: "smooth" }); el.focus({ preventScroll: true }); }
+  }
+
+  function openProblems(list) {
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog fe-problems";
+    const where = (id) => {
+      const i = fields.findIndex((x) => x.id === id);
+      return i < 0 ? "" : `Question ${i + 1} · ${FIELD_TYPES[fields[i].type].name}`;
+    };
+    dlg.innerHTML = `<div class="lh-form">
+      <div class="lh-dialog-head"><h3>${list.length === 1 ? "1 thing" : `${list.length} things`} to fix before publishing</h3>
+        <p>They're outlined in red on the page. Fix them, then press Publish again.</p></div>
+      <ol class="fe-prob-list">${list.map((p) => `<li>
+        <span>${p.id ? `<small>${esc(where(p.id))}</small>` : ""}${esc(p.msg)}</span>
+        ${p.id ? `<button type="button" class="lh-btn" data-go="${esc(p.id)}">Go to it</button>` : ""}
+      </li>`).join("")}</ol>
+      <div class="lh-actions"><button type="button" class="lh-btn is-primary" data-act="close">OK</button></div>
+    </div>`;
+    dlg.addEventListener("click", (e) => {
+      const go = e.target.closest("[data-go]");
+      if (go) { dlg.close(); goTo(go.dataset.go); return; }
+      if (e.target.closest('[data-act="close"]')) dlg.close();
+    });
+    dlg.addEventListener("close", () => dlg.remove());
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    const first = dlg.querySelector("[data-go], [data-act='close']");
+    if (first) first.focus();
+  }
+
   async function publish() {
     if (publishing) return;
-    const problem = publishProblem();
-    if (problem) {
-      if (problem.id) {
-        setMode("build");
-        sel = problem.id;
-        renderStage();
-        renderInspector();
-        const el = stage.querySelector(`[data-id="${problem.id}"]`);
-        if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
-      }
-      showToast(problem.msg);
+    const problems = publishProblems();
+    if (problems.length) {
+      showIssues = true;
+      setMode("build");
+      renderStage();
+      renderPublish();
+      openProblems(problems);
       return;
     }
     if (status === "live") {
@@ -432,6 +550,10 @@ export async function mountFormEditor(container, { templateId, staff }) {
       dirty = false;
       await saveFormTemplate(templateId, { name, fields, settings }, staff);
       publishedSig = signature();
+      past.length = 0;
+      future.length = 0;
+      lastSnap = snap();
+      syncUndo();
       setState("saved");
       renderStage();
       renderInspector();
@@ -487,45 +609,75 @@ export async function mountFormEditor(container, { templateId, staff }) {
     });
   }
 
+  const BRANCH = '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>';
+  const EYE_OFF = '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/>';
+  const NO_PDF = '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><line x1="4" y1="4" x2="20" y2="20"/>';
+  const WARN = '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>';
+
+  // One question on the build page (also used to redraw just that question while typing)
+  function fieldHtml(f, i, c, tagOwners, bad) {
+    const body = renderField(f, c);
+    const on = f.id === sel;
+    const cond = conditionSummary(f, fields);
+    const condBad = cond ? conditionProblem(f, fields) : "";
+    const pf = prefillSummary(f);
+    const issue = bad ? bad.get(f.id) : "";
+    const chips = [
+      issue && `<span class="fe-chip is-problem-chip">${svg(WARN)}${esc(issue)}</span>`,
+      f.fill && `<span class="fe-chip">${svg(UI.user)}Auto-filled: ${esc(FILLS[f.fill] || f.fill)}</span>`,
+      pf && `<span class="fe-chip">${svg('<polyline points="20 6 9 17 4 12"/>')}Pre-filled: ${esc(pf)}</span>`,
+      (() => {
+        const tn = tagOwners.has(f.id) ? fieldTagName(f) : "";
+        const n = tn ? tagUsedBy(fields, tn, f.id).length : 0;
+        return n && `<span class="fe-chip is-tag">{${esc(tn)}} · used in ${n} place${n === 1 ? "" : "s"}</span>`;
+      })(),
+      cond && `<span class="fe-chip is-cond${condBad ? " is-bad" : ""}">${svg(BRANCH)}${esc(condBad || cond)}</span>`,
+      f.liveHide && `<span class="fe-chip is-livehide-chip">${svg(EYE_OFF)}Hidden from staff${f.liveHideShow ? " · on the PDF" : ""}</span>`,
+      f.pdfHide && !f.liveHide && `<span class="fe-chip">${svg(NO_PDF)}Not on the PDF</span>`,
+    ].filter(Boolean).join("");
+    return `
+      <div class="fe-field${spanClass(f)}${on ? " is-selected" : ""}${cond ? " is-conditional" : ""}${f.liveHide ? " is-livehide" : ""}${issue ? " is-problem" : ""}" data-id="${esc(f.id)}" draggable="true" tabindex="0"
+           aria-label="${esc(FIELD_TYPES[f.type].name)}${f.label ? ": " + esc(f.label) : ""}">
+        ${body}
+        ${chips ? `<div class="fe-chips">${chips}</div>` : ""}
+        ${on ? `
+        <div class="fe-tools">
+          <button type="button" data-tool="up" aria-label="Move up" title="Move up (Alt+↑)"${i === 0 ? " disabled" : ""}>${svg(UI.up)}</button>
+          <button type="button" data-tool="down" aria-label="Move down" title="Move down (Alt+↓)"${i === fields.length - 1 ? " disabled" : ""}>${svg(UI.down)}</button>
+          <button type="button" data-tool="copy" aria-label="Duplicate" title="Duplicate (Ctrl+D)">${svg(UI.copy)}</button>
+          <button type="button" data-tool="remove" aria-label="Remove" title="Remove (Delete)">${svg(UI.trash)}</button>
+        </div>` : ""}
+      </div>`;
+  }
+
+  // While typing in the settings panel: redraw just that question, and the whole page once typing stops
+  let fullTimer = 0;
+  function redraw(f) {
+    clearTimeout(fullTimer);
+    if (mode !== "build" || !f || f.type === "watermark") { renderStage(); return; }
+    const el = stage.querySelector(`.fe-field[data-id="${CSS.escape(f.id)}"]`);
+    const i = fields.indexOf(f);
+    if (!el || i < 0) { renderStage(); return; }
+    const t = document.createElement("template");
+    t.innerHTML = fieldHtml(f, i, ctx(false), new Set(formFieldTags(fields).map((x) => x.f.id)), problemMap()).trim();
+    const next = t.content.firstElementChild;
+    if (!next) { renderStage(); return; }
+    el.replaceWith(next);
+    hydrateBankImages(next);
+    fullTimer = setTimeout(() => { if (root.isConnected) renderStage(); }, 400);   // other questions that use this one catch up
+  }
+
   function renderStage() {
+    clearTimeout(fullTimer);
     const build = mode === "build";
     const c = ctx(!build);
-    const BRANCH = '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>';
     const tagOwners = new Set(formFieldTags(fields).map((t) => t.f.id));
+    const bad = build ? problemMap() : null;
     const items = fields.map((f, i) => {
+      if (build) return fieldHtml(f, i, c, tagOwners, bad);
       const body = renderField(f, c);
-      if (!build) return body ? `<div class="fe-field${spanClass(f)}${f.liveHide ? " is-livehide" : ""}" data-fid="${esc(f.id)}">${
+      return body ? `<div class="fe-field${spanClass(f)}${f.liveHide ? " is-livehide" : ""}" data-fid="${esc(f.id)}">${
         f.liveHide ? '<span class="fe-livehide-tag">Hidden from staff</span>' : ""}${body}</div>` : "";
-      const on = f.id === sel;
-      const cond = conditionSummary(f, fields);
-      const condBad = cond ? conditionProblem(f, fields) : "";
-      const pf = prefillSummary(f);
-      const chips = [
-        f.fill && `<span class="fe-chip">${svg(UI.user)}Auto-filled: ${esc(FILLS[f.fill] || f.fill)}</span>`,
-        pf && `<span class="fe-chip">${svg('<polyline points="20 6 9 17 4 12"/>')}Pre-filled: ${esc(pf)}</span>`,
-        (() => {
-          const tn = tagOwners.has(f.id) ? fieldTagName(f) : "";
-          const n = tn ? tagUsedBy(fields, tn, f.id).length : 0;
-          return n && `<span class="fe-chip is-tag">{${esc(tn)}} · used in ${n} place${n === 1 ? "" : "s"}</span>`;
-        })(),
-        cond && `<span class="fe-chip is-cond${condBad ? " is-bad" : ""}">${svg(BRANCH)}${esc(condBad || cond)}</span>`,
-        f.liveHide && `<span class="fe-chip is-livehide-chip">${svg('<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/>')}Hidden from staff${
-          f.liveHideShow ? " · on the PDF" : ""}</span>`,
-        f.pdfHide && !f.liveHide && `<span class="fe-chip">${svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><line x1="4" y1="4" x2="20" y2="20"/>')}Not on the PDF</span>`,
-      ].filter(Boolean).join("");
-      return `
-        <div class="fe-field${spanClass(f)}${on ? " is-selected" : ""}${cond ? " is-conditional" : ""}${f.liveHide ? " is-livehide" : ""}" data-id="${esc(f.id)}" draggable="true" tabindex="0"
-             aria-label="${esc(FIELD_TYPES[f.type].name)}${f.label ? ": " + esc(f.label) : ""}">
-          ${body}
-          ${chips ? `<div class="fe-chips">${chips}</div>` : ""}
-          ${on ? `
-          <div class="fe-tools">
-            <button type="button" data-tool="up" aria-label="Move up"${i === 0 ? " disabled" : ""}>${svg(UI.up)}</button>
-            <button type="button" data-tool="down" aria-label="Move down"${i === fields.length - 1 ? " disabled" : ""}>${svg(UI.down)}</button>
-            <button type="button" data-tool="copy" aria-label="Duplicate">${svg(UI.copy)}</button>
-            <button type="button" data-tool="remove" aria-label="Remove">${svg(UI.trash)}</button>
-          </div>` : ""}
-        </div>`;
     }).join("");
 
     const empty = build
@@ -578,7 +730,6 @@ export async function mountFormEditor(container, { templateId, staff }) {
       });
     }
   }
-
   /* ---------- Settings panel ---------- */
   const setting = (label, control, note = "") =>
     `<label class="fe-insp-field"><span class="fe-insp-label">${label}</span>${control}${
@@ -738,6 +889,19 @@ export async function mountFormEditor(container, { templateId, staff }) {
         <small class="fe-note">Used by Save &amp; print. Shared by every form.</small>
       </div>
       <p class="fe-note fe-pad">Click a question on the page to change it.</p>
+      <div class="fe-insp-field"><span class="fe-insp-label">Keyboard shortcuts</span>
+        <div class="fe-keys">
+          <span><kbd>Ctrl</kbd> <kbd>Z</kbd></span><span>Undo</span>
+          <span><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>Z</kbd></span><span>Redo</span>
+          <span><kbd>Ctrl</kbd> <kbd>S</kbd></span><span>Save the draft now</span>
+          <span><kbd>Ctrl</kbd> <kbd>D</kbd></span><span>Duplicate the selected question</span>
+          <span><kbd>Alt</kbd> <kbd>↑</kbd> <kbd>↓</kbd></span><span>Move it up or down</span>
+          <span><kbd>↑</kbd> <kbd>↓</kbd></span><span>Select the question above or below</span>
+          <span><kbd>Delete</kbd></span><span>Remove it (Undo brings it back)</span>
+          <span><kbd>Esc</kbd></span><span>Back to Form settings</span>
+        </div>
+        <small class="fe-note">On a Mac or an iPad keyboard, use ⌘ instead of Ctrl.</small>
+      </div>
       <div class="fe-danger">
         <button type="button" class="fe-remove" data-act="delete-form">${svg(UI.trash)}Delete this form</button>
       </div>`;
@@ -837,8 +1001,8 @@ export async function mountFormEditor(container, { templateId, staff }) {
         onInput: () => {
           tbField.html = ed.getHtml();
           tbField.text = ed.text().trim().slice(0, 5000); // plain copy for search and older pages
-          changed();
-          renderStage();
+          changed(`${tbField.id}:html`);
+          redraw(tbField);
         },
       });
       ed.setHtml(tbField.html || textToRichHtml(tbField.text));
@@ -849,7 +1013,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     if (rtHost && rtField && rtField.type === "rich_text") {
       const ed2 = createRichEditor(rtHost, {
         button: false,
-        onInput: () => { rtField.starter = ed2.getHtml(); changed(); renderStage(); },
+        onInput: () => { rtField.starter = ed2.getHtml(); changed(`${rtField.id}:starter`); redraw(rtField); },
       });
       ed2.setHtml(rtField.starter || "");
     }
@@ -1138,6 +1302,9 @@ export async function mountFormEditor(container, { templateId, staff }) {
     const m = e.target.closest("[data-mode]");
     if (m) { setMode(m.dataset.mode); renderStage(); return; }
     if (e.target.closest('[data-act="staff-view"]')) { staffView = !staffView; renderStage(); return; }
+    if (e.target.closest('[data-act="undo"]')) { undo(); return; }
+    if (e.target.closest('[data-act="redo"]')) { redo(); return; }
+    if (e.target.closest('[data-act="issues"]')) { const p = publishProblems(); if (p.length) openProblems(p); return; }
     if (e.target.closest('[data-act="publish"]')) { publish(); return; }
     if (e.target.closest('.fe-top [data-act="unpublish"]')) { unpublish(); return; }
     if (e.target.closest('[data-act="discard"]')) { discardChanges(); return; }
@@ -1213,7 +1380,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     const el = e.target;
     if (el.dataset.s) {
       settings[el.dataset.s] = el.type === "checkbox" ? el.checked : el.value;
-      changed();
+      changed(`s:${el.dataset.s}`);
       renderStage();
       return;
     }
@@ -1250,8 +1417,8 @@ export async function mountFormEditor(container, { templateId, staff }) {
     } else if (!applyInput(f, el)) {
       return;
     }
-    changed();
-    renderStage();
+    changed(`${f.id}:${el.dataset.k || (el.dataset.opt !== undefined ? `opt${el.dataset.opt}` : el.dataset.col !== undefined ? `col${el.dataset.col}${el.dataset.colk}` : "x")}`);
+    if (el.dataset.rerender !== undefined) renderStage(); else redraw(f);
     // Typing sub-options: refresh just that option's comment list (the textarea keeps focus)
     if (el.dataset.grpk === "subs") {
       const host = insp.querySelector(`[data-subx="${el.dataset.grp}"]`);
@@ -1396,7 +1563,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
       ta.focus();
       ta.setSelectionRange(pos, pos);
       changed();
-      renderStage();
+      redraw(f);
       const st = insp.querySelector('[data-role="calc-status"]');
       if (st) st.innerHTML = calcStatusHtml(f, fields);
       return;
@@ -1434,7 +1601,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     name = nameInput.value;
     const title = stage.querySelector(".fe-title");
     if (title) title.textContent = name || "Untitled form";
-    changed();
+    changed("name");
   });
   nameInput.addEventListener("blur", () => {
     if (!nameInput.value.trim()) {
@@ -1443,7 +1610,43 @@ export async function mountFormEditor(container, { templateId, staff }) {
       changed();
     }
   });
-
+  /* ---------- Keyboard shortcuts ---------- */
+  const isTyping = (t) => !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+  const onField = (t) => !!(t && t.closest && t.closest(".fe-field[data-id]"));
+  function focusSel() {
+    const el = stage.querySelector(`.fe-field[data-id="${CSS.escape(sel)}"]`);
+    if (el) el.focus();
+  }
+  const onKey = (e) => {
+    if (!root.isConnected) { document.removeEventListener("keydown", onKey); return; }
+    if (document.querySelector("dialog[open]")) return;
+    const mod = e.ctrlKey || e.metaKey;
+    const k = String(e.key || "").toLowerCase();
+    if (mod && k === "s") { e.preventDefault(); dirty = true; flush(); return; }
+    if (isTyping(e.target)) return;   // inside a box: the browser's own undo and typing
+    if (mod && k === "z") { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
+    if (mod && k === "y") { e.preventDefault(); redo(); return; }
+    if (mode !== "build") return;
+    const f = current();
+    if (mod && k === "d" && f) { e.preventDefault(); tool("copy", f.id); focusSel(); return; }
+    if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && f) {
+      e.preventDefault();
+      tool(e.key === "ArrowUp" ? "up" : "down", f.id);
+      focusSel();
+      return;
+    }
+    // Plain arrows and Delete only act when a question on the page has focus, so the page still scrolls normally
+    if (!mod && !e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && onField(e.target)) {
+      e.preventDefault();
+      const i = fields.findIndex((x) => x.id === sel);
+      const next = fields[Math.max(0, Math.min(fields.length - 1, (i < 0 ? 0 : i) + (e.key === "ArrowUp" ? -1 : 1)))];
+      if (next) { select(next.id); focusSel(); }
+      return;
+    }
+    if ((e.key === "Delete" || e.key === "Backspace") && f && onField(e.target)) { e.preventDefault(); removeField(f.id); return; }
+    if (e.key === "Escape" && sel !== FORM) select(FORM);
+  };
+  document.addEventListener("keydown", onKey);
   /* ---------- Drag and drop ---------- */
   let drag = null, dropAt = null;
   const clearLine = () => stage.querySelectorAll(".is-drop-before, .is-drop-after")
@@ -1517,6 +1720,8 @@ export async function mountFormEditor(container, { templateId, staff }) {
   renderStage();
   renderInspector();
   renderPublish();
+  lastSnap = snap();   // the starting point for Undo
+  syncUndo();
   makeResizable(root);
   initStickyTop();
 

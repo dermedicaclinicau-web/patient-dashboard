@@ -1,6 +1,5 @@
 ﻿{
     "files":  [
-                  "./js/js/updater.js",
                   "./js/aftercare-api.js",
                   "./js/aftercare-bank.js",
                   "./js/aftercare-field.js",
@@ -131,8 +130,10 @@
                   "./js/rich-field.js",
                   "./js/rich-html.js",
                   "./js/rx-products.js",
+                  "./js/scan-app.js",
                   "./js/scanner-api.js",
                   "./js/scanner-docket.js",
+                  "./js/scanner-review.js",
                   "./js/scanner-rx.js",
                   "./js/scanner.js",
                   "./js/service-links.js",
@@ -176,12 +177,14 @@
                   "./js/ui-text-settings.js",
                   "./js/ui-text.js",
                   "./js/upcoming-appts.js",
+                  "./js/updater.js",
                   "./js/updates.js",
                   "./js/utils.js",
                   "./js/version.js",
+                  "./css/scan-app.css",
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261024-074244",
-    "v":  "20261024-074244"
+    "version":  "20261025-114547",
+    "v":  "20261025-114547"
 }

@@ -8618,3 +8618,23 @@ body.ff-handing { overflow: hidden; }
 
 .st-pop { min-width: 7.5rem; }
 .st-pop.is-off { color: #94a3b8; border-style: dashed; }
+
+/* Form Builder: undo / redo, problems, shortcuts */
+.fe-undo { display: inline-flex; gap: 2px; }
+.fe-ur { display: inline-grid; place-items: center; width: 40px; height: 40px; padding: 0 !important; }
+.fe-ur svg { width: 17px; height: 17px; }
+.fe-ur:disabled { opacity: .35; cursor: default; }
+.fe-issues { border-color: #fecaca; background: #fef2f2; color: #b91c1c; font-weight: 700; }
+.fe-issues:hover { border-color: #b91c1c; background: #fee2e2; }
+.fe-field.is-problem { border-color: #fca5a5; background: #fef2f2; }
+.fe-chip.is-problem-chip { background: #fee2e2; color: #b91c1c; }
+dialog.lh-dialog.fe-problems { width: min(580px, calc(100vw - 2rem)); }
+.fe-prob-list { display: grid; gap: .5rem; max-height: 55vh; margin: 0; padding: 0; overflow: auto; list-style: none; }
+.fe-prob-list li { display: flex; align-items: center; gap: .75rem; padding: .6rem .75rem; border: 1px solid #fecaca;
+  border-radius: 10px; background: #fef2f2; }
+.fe-prob-list li > span { display: flex; flex: 1; flex-direction: column; gap: .15rem; min-width: 0; font-size: .9rem; }
+.fe-prob-list small { font-size: .75rem; color: var(--muted); }
+.fe-prob-list .lh-btn { flex: none; }
+.fe-keys { display: grid; grid-template-columns: auto 1fr; gap: .35rem .6rem; align-items: center; font-size: .78rem; color: var(--muted); }
+.fe-keys kbd { padding: .05rem .4rem; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; background: #fff;
+  color: var(--text); font: 600 .72rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
