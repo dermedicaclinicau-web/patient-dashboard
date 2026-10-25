@@ -138,6 +138,8 @@ export async function mountFormEditor(container, { templateId, staff }) {
   let previewAnnots = {};    // pictures being drawn on in Preview
   let previewTags = [];      // text with tags in it, on the Preview
   let staffView = false;     // Preview: hide the fields staff won't see
+  const picked = new Set();  // questions selected together (outline ticks, Shift / Ctrl + click)
+  let palTab = (() => { try { return localStorage.getItem("fe-paltab") === "outline" ? "outline" : "add"; } catch { return "add"; } })();
   const ctx = (live) => ({ live, fields, consentForms, prescriptionForms, letterhead, calcValues: null, aftercare: aftercareMap, emailTemplates, products, markSets, specialities });
   const current = () => fields.find((f) => f.id === sel) || null;
   const signature = () => JSON.stringify(formSnapshot({ name, fields, settings }));
@@ -173,25 +175,34 @@ export async function mountFormEditor(container, { templateId, staff }) {
       </div>
     </div>
     <div class="fe-shell is-build" data-role="shell">
-      <aside class="fe-palette" aria-label="Add a question">
-        <input type="search" class="fe-input fe-pal-search" data-role="palsearch" placeholder="Search fields" aria-label="Search fields" />
-        <p class="fe-pal-hint">Click to add, or drag onto the page</p>
-        ${FIELD_GROUPS.map(([g, types]) => `
-          <div class="fe-pal-group" data-group>
-            <div class="fe-pal-title">${esc(g)}</div>
-            ${types.map((t) => {
-              const d = FIELD_TYPES[t];
-              return `<button type="button" class="fe-pal-item" draggable="true" data-add="${t}"
-                        data-find="${esc((d.name + " " + d.was).toLowerCase())}"
-                        ${d.was !== d.name ? `title="Called “${esc(d.was)}” in the old builder"` : ""}>
-                        ${svg(ICONS[t])}<span>${esc(d.name)}</span></button>`;
-            }).join("")}
-          </div>`).join("")}
-        <p class="fe-pal-none" data-role="palnone" hidden>No fields match that search.</p>
+      <aside class="fe-palette" aria-label="Questions">
+        <div class="pt-tabs fe-paltabs" role="tablist" aria-label="Add or arrange questions">
+          <button type="button" role="tab" data-paltab="add"${palTab === "add" ? ' class="active" aria-selected="true"' : ' aria-selected="false"'}>Add</button>
+          <button type="button" role="tab" data-paltab="outline"${palTab === "outline" ? ' class="active" aria-selected="true"' : ' aria-selected="false"'}>Outline <em data-role="olcount"></em></button>
+        </div>
+        <div class="fe-pal-add" data-role="paladd"${palTab === "add" ? "" : " hidden"}>
+          <button type="button" class="lh-btn fe-copyfrom" data-act="copy-from">${svg(UI.copy)}Copy from another form</button>
+          <input type="search" class="fe-input fe-pal-search" data-role="palsearch" placeholder="Search fields" aria-label="Search fields" />
+          <p class="fe-pal-hint">Click to add, or drag onto the page</p>
+          ${FIELD_GROUPS.map(([g, types]) => `
+            <div class="fe-pal-group" data-group>
+              <div class="fe-pal-title">${esc(g)}</div>
+              ${types.map((t) => {
+                const d = FIELD_TYPES[t];
+                return `<button type="button" class="fe-pal-item" draggable="true" data-add="${t}"
+                          data-find="${esc((d.name + " " + d.was).toLowerCase())}"
+                          ${d.was !== d.name ? `title="Called “${esc(d.was)}” in the old builder"` : ""}>
+                          ${svg(ICONS[t])}<span>${esc(d.name)}</span></button>`;
+              }).join("")}
+            </div>`).join("")}
+          <p class="fe-pal-none" data-role="palnone" hidden>No fields match that search.</p>
+        </div>
+        <div class="fe-outline" data-role="outline"${palTab === "outline" ? "" : " hidden"}></div>
       </aside>
       <div class="fe-stage" data-role="stage"></div>
       <aside class="fe-inspector" data-role="inspector" aria-label="Settings"></aside>
-    </div>`;
+    </div>
+    <div class="fe-bulk" data-role="bulk" role="toolbar" aria-label="Selected questions" hidden></div>`;
 
   const $ = (s) => root.querySelector(s);
   const shell = $('[data-role="shell"]');
@@ -636,7 +647,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
       f.pdfHide && !f.liveHide && `<span class="fe-chip">${svg(NO_PDF)}Not on the PDF</span>`,
     ].filter(Boolean).join("");
     return `
-      <div class="fe-field${spanClass(f)}${on ? " is-selected" : ""}${cond ? " is-conditional" : ""}${f.liveHide ? " is-livehide" : ""}${issue ? " is-problem" : ""}" data-id="${esc(f.id)}" draggable="true" tabindex="0"
+      <div class="fe-field${spanClass(f)}${on ? " is-selected" : ""}${cond ? " is-conditional" : ""}${f.liveHide ? " is-livehide" : ""}${issue ? " is-problem" : ""}${picked.has(f.id) ? " is-picked" : ""}" data-id="${esc(f.id)}" draggable="true" tabindex="0"
            aria-label="${esc(FIELD_TYPES[f.type].name)}${f.label ? ": " + esc(f.label) : ""}">
         ${body}
         ${chips ? `<div class="fe-chips">${chips}</div>` : ""}
@@ -669,6 +680,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
 
   function renderStage() {
     clearTimeout(fullTimer);
+    for (const id of [...picked]) if (!fields.some((f) => f.id === id)) picked.delete(id);   // removed, or undone
     const build = mode === "build";
     const c = ctx(!build);
     const tagOwners = new Set(formFieldTags(fields).map((t) => t.f.id));
@@ -729,6 +741,8 @@ export async function mountFormEditor(container, { templateId, staff }) {
         h.innerHTML = '<p class="fe-help">Staff choose a specialist from the Specialist Bank here, or add a new one.</p>';
       });
     }
+    renderOutline();
+    renderBulk();
   }
   /* ---------- Settings panel ---------- */
   const setting = (label, control, note = "") =>
@@ -894,11 +908,15 @@ export async function mountFormEditor(container, { templateId, staff }) {
           <span><kbd>Ctrl</kbd> <kbd>Z</kbd></span><span>Undo</span>
           <span><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>Z</kbd></span><span>Redo</span>
           <span><kbd>Ctrl</kbd> <kbd>S</kbd></span><span>Save the draft now</span>
-          <span><kbd>Ctrl</kbd> <kbd>D</kbd></span><span>Duplicate the selected question</span>
-          <span><kbd>Alt</kbd> <kbd>↑</kbd> <kbd>↓</kbd></span><span>Move it up or down</span>
           <span><kbd>↑</kbd> <kbd>↓</kbd></span><span>Select the question above or below</span>
-          <span><kbd>Delete</kbd></span><span>Remove it (Undo brings it back)</span>
-          <span><kbd>Esc</kbd></span><span>Back to Form settings</span>
+          <span><kbd>Shift</kbd> + click</span><span>Select every question in between</span>
+          <span><kbd>Ctrl</kbd> + click</span><span>Add one to the selection, or take it out</span>
+          <span><kbd>Shift</kbd> <kbd>↑</kbd> <kbd>↓</kbd></span><span>Grow the selection</span>
+          <span><kbd>Ctrl</kbd> <kbd>A</kbd></span><span>Select every question</span>
+          <span><kbd>Ctrl</kbd> <kbd>D</kbd></span><span>Duplicate the selected question(s)</span>
+          <span><kbd>Alt</kbd> <kbd>↑</kbd> <kbd>↓</kbd></span><span>Move them up or down</span>
+          <span><kbd>Delete</kbd></span><span>Remove them (Undo brings them back)</span>
+          <span><kbd>Esc</kbd></span><span>Clear the selection, then back to Form settings</span>
         </div>
         <small class="fe-note">On a Mac or an iPad keyboard, use ⌘ instead of Ctrl.</small>
       </div>
@@ -1122,11 +1140,11 @@ export async function mountFormEditor(container, { templateId, staff }) {
   }
 
   // Everything else on the form that uses this question
-  function fieldUses(f) {
+  function fieldUses(f, skip = null) {
     const nm = (x) => `“${String(x.label || "").trim() || FIELD_TYPES[x.type].name}”`;
     const out = [];
     fields.forEach((x) => {
-      if (x.id === f.id) return;
+      if (x.id === f.id || (skip && skip.has(x.id))) return;
       if (x.showWhen && Array.isArray(x.showWhen.rules) && x.showWhen.rules.some((r) => r && r.q === f.id)) {
         out.push(`the show-when rule on ${nm(x)}`);
       }
@@ -1140,7 +1158,7 @@ export async function mountFormEditor(container, { templateId, staff }) {
     });
     const tn = tagOwnerName(f);
     if (tn) {
-      tagUsedBy(fields, tn, f.id).forEach((x) => out.push(`the {${tn}} tag in ${nm(x)}`));
+      tagUsedBy(fields, tn, f.id).filter((x) => !(skip && skip.has(x.id))).forEach((x) => out.push(`the {${tn}} tag in ${nm(x)}`));
       if (tagRefRe(tn, "i").test(name)) out.push(`the {${tn}} tag in the form title`);
     }
     return [...new Set(out)];
@@ -1197,7 +1215,386 @@ export async function mountFormEditor(container, { templateId, staff }) {
     renderStage();
     renderInspector();
   }
+  /* ---------- Several questions at once, the outline, and copying from another form ---------- */
+  const NO_SPAN = ["aftercare", "consumables", "letterhead", "watermark", "space"];   // these have no width setting
+  const ONE_ONLY = ["record_date", "watermark"];
+  const W_TAG = { half: "½", third: "⅓", twothirds: "⅔" };
+  const pickedFields = () => fields.filter((f) => picked.has(f.id));
+  const spanOf = (f) => spanClass(f).trim().replace("span-", "") || "full";
 
+  // Copies with new ids. Show-when rules, calculations and product amounts between the copied questions follow the copies.
+  // keepOutside: references to questions that weren't copied stay (same form) or are cleared (another form).
+  function cloneFields(list, { keepOutside = true } = {}) {
+    const map = new Map(list.map((f) => [f.id, newId()]));
+    const here = new Set(fields.map((f) => f.id));
+    const keeps = (id) => keepOutside && here.has(id);
+    const notes = { rules: 0, calcs: 0, amounts: 0 };
+    const copies = list.map((src) => {
+      const c = JSON.parse(JSON.stringify(src));
+      c.id = map.get(src.id);
+      delete c.tag;
+      if (c.showWhen && Array.isArray(c.showWhen.rules)) {
+        c.showWhen.rules = c.showWhen.rules.filter((r) => {
+          if (map.has(r.q)) { r.q = map.get(r.q); return true; }
+          if (keeps(r.q)) return true;
+          notes.rules++;
+          return false;
+        });
+        if (!c.showWhen.rules.length) c.showWhen = null;
+      }
+      if (c.type === "calculation" && c.formula) {
+        let broken = false;
+        c.formula = String(c.formula).replace(/\{([^}]*)\}/g, (m, raw) => {
+          const ref = raw.trim();
+          const dot = ref.indexOf(".");
+          const id = dot > 0 ? ref.slice(0, dot) : ref;
+          if (map.has(id)) return `{${map.get(id)}${dot > 0 ? ref.slice(dot) : ""}}`;
+          if (!keeps(id)) broken = true;
+          return m;
+        });
+        if (broken) notes.calcs++;
+      }
+      if (c.type === "consumables" && Array.isArray(c.items)) {
+        c.items.forEach((it) => {
+          if (!it.from) return;
+          if (map.has(it.from)) it.from = map.get(it.from);
+          else if (!keeps(it.from)) { it.from = ""; notes.amounts++; }
+        });
+      }
+      return normaliseField(c);
+    }).filter(Boolean);
+    return { copies, notes };
+  }
+
+  // Moves questions (in their current order) so they sit just before beforeId (null = at the end)
+  function moveTo(ids, beforeId) {
+    const set = new Set(ids);
+    const moving = fields.filter((f) => set.has(f.id));
+    const rest = fields.filter((f) => !set.has(f.id));
+    let at = beforeId ? rest.findIndex((f) => f.id === beforeId) : rest.length;
+    if (at < 0) at = rest.length;
+    rest.splice(at, 0, ...moving);
+    if (!rest.every((f, i) => f === fields[i])) {
+      fields.splice(0, fields.length, ...rest);
+      changed();
+    }
+    renderStage();
+    renderInspector();
+  }
+
+  // One place up or down, keeping their order
+  function moveBlock(ids, dir) {
+    const set = new Set(ids);
+    const idx = fields.map((f, i) => (set.has(f.id) ? i : -1)).filter((i) => i >= 0);
+    if (!idx.length || (dir < 0 && idx[0] === 0) || (dir > 0 && idx[idx.length - 1] === fields.length - 1)) return;
+    (dir < 0 ? idx : idx.slice().reverse()).forEach((i) => {
+      const j = i + dir;
+      [fields[i], fields[j]] = [fields[j], fields[i]];
+    });
+    changed();
+    renderStage();
+    renderInspector();
+  }
+
+  async function removeMany(list) {
+    if (!list.length) return;
+    const ids = new Set(list.map((f) => f.id));
+    const uses = [...new Set(list.flatMap((f) => fieldUses(f, ids)))];
+    const shown = uses.length > 6 ? [...uses.slice(0, 6), `${uses.length - 6} more`] : uses;
+    const ok = await confirmDialog({
+      title: `Remove ${list.length} question${list.length === 1 ? "" : "s"}?`,
+      message: uses.length
+        ? `They're used by ${shown.join(", ")}. Those stop working until you change them. Undo brings them back.`
+        : "Undo brings them back.",
+      confirm: "Remove",
+    });
+    if (!ok || !root.isConnected) return;
+    fields.splice(0, fields.length, ...fields.filter((f) => !ids.has(f.id)));
+    picked.clear();
+    if (ids.has(sel)) sel = FORM;
+    changed();
+    renderStage();
+    renderInspector();
+    showToast(`Removed ${list.length} question${list.length === 1 ? "" : "s"}`, () => undo());
+  }
+
+  // Shift + click: every question in between. Ctrl / ⌘ + click: add or take out one.
+  function pickClick(id, range) {
+    if (range && sel !== FORM) {
+      const a = fields.findIndex((f) => f.id === sel);
+      const b = fields.findIndex((f) => f.id === id);
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        for (let i = lo; i <= hi; i++) picked.add(fields[i].id);
+      }
+    } else {
+      if (!picked.size && sel !== FORM && sel !== id && fields.some((f) => f.id === sel)) picked.add(sel);
+      if (picked.has(id)) picked.delete(id); else picked.add(id);
+    }
+    renderStage();
+  }
+
+  function bulk(act, val) {
+    const list = pickedFields();
+    if (!list.length) return;
+    if (act === "clear") { picked.clear(); renderStage(); return; }
+    if (act === "up" || act === "down") { moveBlock(list.map((f) => f.id), act === "up" ? -1 : 1); return; }
+    if (act === "del") { removeMany(list); return; }
+    if (act === "span") {
+      list.filter((f) => !NO_SPAN.includes(f.type)).forEach((f) => { f.style = { ...(f.style || {}), span: val }; });
+      changed();
+      renderStage();
+      renderInspector();
+      return;
+    }
+    if (act === "hide") {
+      const can = list.filter(canLiveHide);
+      const hide = !can.every((f) => f.liveHide);
+      let unreq = 0;
+      can.forEach((f) => {
+        f.liveHide = hide;
+        if (!hide) f.liveHideShow = false;
+        if (hide && f.required && canRequire(f.type)) { f.required = false; unreq++; }
+      });
+      changed();
+      renderStage();
+      renderInspector();
+      showToast(hide
+        ? `Hidden from staff${unreq ? `. Answer required was turned off for ${unreq}, as staff can't see ${unreq === 1 ? "it" : "them"}` : ""}.`
+        : "Shown to staff again.");
+      return;
+    }
+    if (act === "copy") {
+      const ok = list.filter((f) => !ONE_ONLY.includes(f.type));
+      if (!ok.length) { showToast("A form can only have one of these."); return; }
+      const { copies } = cloneFields(ok, { keepOutside: true });
+      fields.splice(fields.indexOf(list[list.length - 1]) + 1, 0, ...copies);
+      picked.clear();
+      copies.forEach((c) => picked.add(c.id));
+      sel = copies[0].id;
+      changed();
+      renderStage();
+      renderInspector();
+      showToast(`${copies.length} duplicated. The copies are selected.${ok.length < list.length ? " (A form can only have one record date or watermark.)" : ""}`);
+    }
+  }
+
+  function renderBulk() {
+    const bar = $('[data-role="bulk"]');
+    if (!bar) return;
+    const list = pickedFields();
+    bar.hidden = mode !== "build" || !list.length;
+    if (bar.hidden) { bar.innerHTML = ""; return; }
+    const spans = list.filter((f) => !NO_SPAN.includes(f.type)).map(spanOf);
+    const span = spans.length && spans.every((s) => s === spans[0]) ? spans[0] : "";
+    const can = list.filter(canLiveHide);
+    const allHidden = can.length > 0 && can.every((f) => f.liveHide);
+    const first = fields.indexOf(list[0]);
+    const last = fields.indexOf(list[list.length - 1]);
+    bar.innerHTML = `
+      <strong>${list.length} selected</strong>
+      <span class="fe-bulk-grp">
+        <button type="button" class="lh-btn" data-bulk="up" aria-label="Move up" title="Move up (Alt+↑)"${first === 0 ? " disabled" : ""}>${svg(UI.up)}</button>
+        <button type="button" class="lh-btn" data-bulk="down" aria-label="Move down" title="Move down (Alt+↓)"${last === fields.length - 1 ? " disabled" : ""}>${svg(UI.down)}</button>
+      </span>
+      ${spans.length ? `<span class="fe-bulk-span" role="group" aria-label="Width on the page">${[
+        ["full", "Full", "Full width"], ["half", "½", "Half"], ["third", "⅓", "Third"], ["twothirds", "⅔", "Two thirds"],
+      ].map(([v, l, t]) => `<button type="button" data-bulkspan="${v}" title="${t}" aria-pressed="${span === v}"${span === v ? ' class="is-on"' : ""}>${l}</button>`).join("")}</span>` : ""}
+      ${can.length ? `<button type="button" class="lh-btn" data-bulk="hide">${allHidden ? "Show to staff" : "Hide from staff"}</button>` : ""}
+      <button type="button" class="lh-btn" data-bulk="copy" title="Duplicate (Ctrl+D)">${svg(UI.copy)}Duplicate</button>
+      <button type="button" class="lh-btn st-danger" data-bulk="del" title="Remove (Delete)">${svg(UI.trash)}Remove</button>
+      <button type="button" class="lh-btn is-quiet" data-bulk="clear" title="Clear the selection (Esc)">Clear</button>`;
+  }
+
+  function renderOutline() {
+    const cnt = $('[data-role="olcount"]');
+    if (cnt) cnt.textContent = fields.length ? String(fields.length) : "";
+    const host = $('[data-role="outline"]');
+    if (!host || palTab !== "outline" || mode !== "build") return;
+    const pal = $(".fe-palette");
+    const keep = pal ? pal.scrollTop : 0;
+    const bad = problemMap();
+    const all = fields.length > 0 && fields.every((f) => picked.has(f.id));
+    host.innerHTML = fields.length ? `
+      <div class="fe-ol-head">
+        <label class="fe-check"><input type="checkbox" data-olall${all ? " checked" : ""} /> Select all</label>
+        <small class="muted">Drag ⠿ to move</small>
+      </div>
+      <ol class="fe-ol-list">${fields.map((f, i) => {
+        const label = String(f.label || "").trim() || FIELD_TYPES[f.type].name;
+        const w = W_TAG[spanOf(f)];
+        const flags = [
+          w ? `<span class="fe-ol-w" title="Width on the page">${w}</span>` : "",
+          f.required && canRequire(f.type) ? '<span class="fe-ol-req" title="Answer required">*</span>' : "",
+          f.showWhen && Array.isArray(f.showWhen.rules) && f.showWhen.rules.length ? `<span title="Shown only for some answers">${svg(BRANCH)}</span>` : "",
+          f.liveHide ? `<span title="Hidden from staff">${svg(EYE_OFF)}</span>` : "",
+          bad && bad.has(f.id) ? `<span class="is-bad" title="${esc(bad.get(f.id))}">${svg(WARN)}</span>` : "",
+        ].join("");
+        return `<li class="fe-ol-item${f.id === sel ? " is-on" : ""}${picked.has(f.id) ? " is-picked" : ""}" data-olid="${esc(f.id)}">
+          <span class="fe-ol-grip" data-olgrip title="Drag to move" aria-hidden="true">⠿</span>
+          <input type="checkbox" data-olpick aria-label="Select ${esc(label)}"${picked.has(f.id) ? " checked" : ""} />
+          <button type="button" class="fe-ol-go" data-olgo title="${esc(label)}">
+            <span class="fe-ol-n">${i + 1}</span>${svg(ICONS[f.type] || ICONS.text_block)}<span class="fe-ol-label">${esc(label)}</span>
+          </button>
+          <span class="fe-ol-flags">${flags}</span>
+        </li>`;
+      }).join("")}</ol>`
+      : '<p class="fe-note fe-pad">No questions yet. Add them from the Add tab, or copy them from another form.</p>';
+    const allBox = host.querySelector("[data-olall]");
+    if (allBox) allBox.indeterminate = !all && picked.size > 0;
+    if (pal) pal.scrollTop = keep;
+  }
+
+  async function openCopyFrom() {
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog fe-cf-dlg";
+    dlg.innerHTML = '<div class="lh-form"><div class="lh-dialog-head"><h3>Copy questions from another form</h3><p>Loading forms…</p></div></div>';
+    dlg.addEventListener("close", () => dlg.remove());
+    document.body.appendChild(dlg);
+    dlg.showModal();
+
+    let forms;
+    try {
+      forms = (await listFormTemplates({ isAdmin: true, force: true }))
+        .filter((t) => t.id !== templateId && t.status !== "archived" && (t.fields || []).length);
+    } catch (err) {
+      console.error("Forms not loaded:", err);
+      if (dlg.open) dlg.innerHTML = `<div class="lh-form"><div class="lh-dialog-head"><h3>Copy questions from another form</h3>
+        <p class="lh-error">Couldn't load the forms. Check your connection and try again.</p></div>
+        <div class="lh-actions"><button type="button" class="lh-btn" data-cf="cancel">Close</button></div></div>`;
+      return;
+    }
+    if (!dlg.open) return;
+
+    const has = (type) => fields.some((f) => f.type === type);
+    const where = () => {
+      const f = current();
+      return f ? `after “${String(f.label || "").trim() || FIELD_TYPES[f.type].name}”` : "at the end of this form";
+    };
+    let src = null, qs = [];
+    const chosen = new Set();
+
+    const pickForm = () => {
+      const groups = FORM_CATEGORIES.map((c) => [c, forms.filter((t) => t.category === c.key)]).filter(([, l]) => l.length);
+      dlg.innerHTML = `<div class="lh-form">
+        <div class="lh-dialog-head"><h3>Copy questions from another form</h3>
+          <p>Choose a form, then tick the questions you want. The other form isn't changed.</p></div>
+        ${forms.length ? `<input type="search" class="fe-input" data-cf="q" placeholder="Search forms" aria-label="Search forms" />
+          <div class="fe-cf-forms">${groups.map(([c, list]) => `<div class="fe-cf-grp"><h4>${esc(c.label)}</h4>${list.map((t) => `
+            <button type="button" class="fe-cf-form" data-cfform="${esc(t.id)}" data-find="${esc(t.name.toLowerCase())}">
+              <strong>${esc(t.name)}</strong>
+              <small>${(t.fields || []).length} question${(t.fields || []).length === 1 ? "" : "s"} · ${t.status === "live" ? `Live, version ${t.version}` : "Draft"}</small>
+            </button>`).join("")}</div>`).join("")}
+            <p class="fe-note" data-role="cfnone" hidden>No forms match that search.</p></div>`
+          : '<p class="fe-note">There are no other forms with questions yet.</p>'}
+        <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-cf="cancel">Cancel</button></div></div>`;
+      const s = dlg.querySelector('[data-cf="q"]');
+      if (s) s.focus();
+    };
+
+    const pickQs = () => {
+      qs = (src.fields || []).map(normaliseField).filter(Boolean);
+      dlg.innerHTML = `<div class="lh-form">
+        <div class="lh-dialog-head"><h3>${esc(src.name)}</h3><p>Tick the questions to copy. They go ${esc(where())}.</p></div>
+        <div class="fe-cf-bar">
+          <button type="button" class="lh-btn is-quiet" data-cf="back">← All forms</button>
+          <label class="fe-check"><input type="checkbox" data-cf="all" /> Select all</label>
+        </div>
+        <ol class="fe-cf-qs">${qs.map((f, i) => {
+          const blocked = ONE_ONLY.includes(f.type) && has(f.type);
+          const cond = f.showWhen && Array.isArray(f.showWhen.rules) && f.showWhen.rules.length;
+          return `<li${blocked ? ' class="is-off"' : ""}><label class="fe-check">
+            <input type="checkbox" data-cfq="${esc(f.id)}"${blocked ? " disabled" : ""} />
+            <span class="fe-ol-n">${i + 1}</span>${svg(ICONS[f.type] || ICONS.text_block)}
+            <span class="fe-cf-q"><span>${esc(String(f.label || "").trim() || FIELD_TYPES[f.type].name)}</span>
+              <small>${esc(FIELD_TYPES[f.type].name)}${cond ? " · shown only for some answers" : ""}${blocked ? " · this form already has one" : ""}</small></span>
+          </label></li>`;
+        }).join("")}</ol>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-cf="cancel">Cancel</button>
+          <button type="button" class="lh-btn is-primary" data-cf="insert" disabled>Choose questions</button>
+        </div></div>`;
+    };
+
+    const syncInsert = () => {
+      const b = dlg.querySelector('[data-cf="insert"]');
+      const all = dlg.querySelector('[data-cf="all"]');
+      const boxes = [...dlg.querySelectorAll("[data-cfq]:not(:disabled)")];
+      if (b) {
+        b.disabled = !chosen.size;
+        b.textContent = chosen.size ? `Insert ${chosen.size} question${chosen.size === 1 ? "" : "s"}` : "Choose questions";
+      }
+      if (all) {
+        all.checked = boxes.length > 0 && boxes.every((x) => x.checked);
+        all.indeterminate = !all.checked && boxes.some((x) => x.checked);
+      }
+    };
+
+    const insert = () => {
+      const list = qs.filter((f) => chosen.has(f.id));
+      if (!list.length) return;
+      const { copies, notes } = cloneFields(list, { keepOutside: false });
+      if (!copies.length) return;
+      const i = fields.findIndex((f) => f.id === sel);
+      fields.splice(i < 0 ? fields.length : i + 1, 0, ...copies);
+      picked.clear();
+      copies.forEach((c) => picked.add(c.id));
+      sel = copies[0].id;
+      dlg.close();
+      changed();
+      renderStage();
+      renderInspector();
+      const el = stage.querySelector(`.fe-field[data-id="${CSS.escape(sel)}"]`);
+      if (el) el.scrollIntoView({ block: "center", behavior: "smooth" });
+      const extra = [
+        notes.rules && `${notes.rules} show-when rule${notes.rules === 1 ? " was" : "s were"} removed, as the question ${notes.rules === 1 ? "it" : "they"} used wasn't copied`,
+        notes.calcs && `check the formula in ${notes.calcs} calculation${notes.calcs === 1 ? "" : "s"}`,
+        notes.amounts && `${notes.amounts} product amount${notes.amounts === 1 ? " now asks" : "s now ask"} staff to type it`,
+      ].filter(Boolean);
+      showToast(`Copied ${copies.length} question${copies.length === 1 ? "" : "s"} from “${src.name}”. ${
+        extra.length ? `Note: ${extra.join("; ")}.` : "They're selected, so you can move them together."}`);
+    };
+
+    dlg.addEventListener("click", (e) => {
+      const f = e.target.closest("[data-cfform]");
+      if (f) { src = forms.find((x) => x.id === f.dataset.cfform) || null; chosen.clear(); if (src) pickQs(); return; }
+      const a = e.target.closest("[data-cf]");
+      if (!a) return;
+      if (a.dataset.cf === "cancel") dlg.close();
+      else if (a.dataset.cf === "back") { src = null; pickForm(); }
+      else if (a.dataset.cf === "insert") insert();
+    });
+    dlg.addEventListener("input", (e) => {
+      if (e.target.dataset.cf !== "q") return;
+      const q = e.target.value.trim().toLowerCase();
+      let any = false;
+      dlg.querySelectorAll(".fe-cf-grp").forEach((g) => {
+        let n = 0;
+        g.querySelectorAll("[data-cfform]").forEach((b) => {
+          const hit = !q || b.dataset.find.includes(q);
+          b.hidden = !hit;
+          if (hit) n++;
+        });
+        g.hidden = !n;
+        if (n) any = true;
+      });
+      const none = dlg.querySelector('[data-role="cfnone"]');
+      if (none) none.hidden = any;
+    });
+    dlg.addEventListener("change", (e) => {
+      if (e.target.dataset.cf === "all") {
+        dlg.querySelectorAll("[data-cfq]:not(:disabled)").forEach((b) => {
+          b.checked = e.target.checked;
+          if (b.checked) chosen.add(b.dataset.cfq); else chosen.delete(b.dataset.cfq);
+        });
+        syncInsert();
+        return;
+      }
+      const b = e.target.closest("[data-cfq]");
+      if (b) { if (b.checked) chosen.add(b.dataset.cfq); else chosen.delete(b.dataset.cfq); syncInsert(); }
+    });
+    pickForm();
+  }
   function editLetterhead() {
     openLetterheadDialog({
       letterhead,
@@ -1302,6 +1699,25 @@ export async function mountFormEditor(container, { templateId, staff }) {
     const m = e.target.closest("[data-mode]");
     if (m) { setMode(m.dataset.mode); renderStage(); return; }
     if (e.target.closest('[data-act="staff-view"]')) { staffView = !staffView; renderStage(); return; }
+    const pt = e.target.closest("[data-paltab]");
+    if (pt) {
+      palTab = pt.dataset.paltab;
+      try { localStorage.setItem("fe-paltab", palTab); } catch { /* storage blocked */ }
+      root.querySelectorAll("[data-paltab]").forEach((b) => {
+        const on = b === pt;
+        b.classList.toggle("active", on);
+        b.setAttribute("aria-selected", String(on));
+      });
+      $('[data-role="paladd"]').hidden = palTab !== "add";
+      $('[data-role="outline"]').hidden = palTab !== "outline";
+      renderOutline();
+      return;
+    }
+    if (e.target.closest('[data-act="copy-from"]')) { openCopyFrom(); return; }
+    const bk = e.target.closest("[data-bulk]");
+    if (bk) { if (!bk.disabled) bulk(bk.dataset.bulk); return; }
+    const bs = e.target.closest("[data-bulkspan]");
+    if (bs) { bulk("span", bs.dataset.bulkspan); return; }
     if (e.target.closest('[data-act="undo"]')) { undo(); return; }
     if (e.target.closest('[data-act="redo"]')) { redo(); return; }
     if (e.target.closest('[data-act="issues"]')) { const p = publishProblems(); if (p.length) openProblems(p); return; }
@@ -1349,7 +1765,12 @@ export async function mountFormEditor(container, { templateId, staff }) {
     if (!fieldEl) return;
     const t = e.target.closest("[data-tool]");
     if (t) { tool(t.dataset.tool, fieldEl.dataset.id); return; }
-    select(fieldEl.dataset.id);
+    const id = fieldEl.dataset.id;
+    if (e.shiftKey || e.ctrlKey || e.metaKey) { pickClick(id, e.shiftKey); return; }
+    const had = picked.size;
+    picked.clear();
+    if (id === sel) { if (had) renderStage(); return; }
+    select(id);
   });
 
   stage.addEventListener("keydown", (e) => {
@@ -1611,10 +2032,13 @@ export async function mountFormEditor(container, { templateId, staff }) {
     }
   });
   /* ---------- Keyboard shortcuts ---------- */
-  const isTyping = (t) => !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
-  const onField = (t) => !!(t && t.closest && t.closest(".fe-field[data-id]"));
-  function focusSel() {
-    const el = stage.querySelector(`.fe-field[data-id="${CSS.escape(sel)}"]`);
+  const isTyping = (t) => !!t && (t.isContentEditable || t.tagName === "TEXTAREA" || t.tagName === "SELECT"
+    || (t.tagName === "INPUT" && !["checkbox", "radio", "button"].includes(t.type)));
+  const onField = (t) => !!(t && t.closest && t.closest(".fe-field[data-id], [data-olid]"));
+  function focusSel(inOutline = false) {
+    const el = inOutline
+      ? root.querySelector(`[data-olid="${CSS.escape(sel)}"] [data-olgo]`)
+      : stage.querySelector(`.fe-field[data-id="${CSS.escape(sel)}"]`);
     if (el) el.focus();
   }
   const onKey = (e) => {
@@ -1622,31 +2046,130 @@ export async function mountFormEditor(container, { templateId, staff }) {
     if (document.querySelector("dialog[open]")) return;
     const mod = e.ctrlKey || e.metaKey;
     const k = String(e.key || "").toLowerCase();
+    const inOl = !!(e.target && e.target.closest && e.target.closest("[data-olid]"));
     if (mod && k === "s") { e.preventDefault(); dirty = true; flush(); return; }
     if (isTyping(e.target)) return;   // inside a box: the browser's own undo and typing
     if (mod && k === "z") { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
     if (mod && k === "y") { e.preventDefault(); redo(); return; }
     if (mode !== "build") return;
+    const many = picked.size > 0;
     const f = current();
-    if (mod && k === "d" && f) { e.preventDefault(); tool("copy", f.id); focusSel(); return; }
-    if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && f) {
+    const arrow = e.key === "ArrowUp" || e.key === "ArrowDown";
+    const dir = e.key === "ArrowUp" ? -1 : 1;
+
+    if (mod && k === "a" && onField(e.target)) {
       e.preventDefault();
-      tool(e.key === "ArrowUp" ? "up" : "down", f.id);
-      focusSel();
+      fields.forEach((x) => picked.add(x.id));
+      renderStage();
       return;
     }
-    // Plain arrows and Delete only act when a question on the page has focus, so the page still scrolls normally
-    if (!mod && !e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && onField(e.target)) {
+    if (mod && k === "d" && (many || f)) {
+      e.preventDefault();
+      if (many) bulk("copy"); else { tool("copy", f.id); focusSel(inOl); }
+      return;
+    }
+    if (e.altKey && arrow && (many || f)) {
+      e.preventDefault();
+      if (many) moveBlock([...picked], dir); else tool(dir < 0 ? "up" : "down", f.id);
+      focusSel(inOl);
+      return;
+    }
+    // Plain arrows and Delete only act when a question (on the page or in the outline) has focus
+    if (!mod && !e.altKey && arrow && onField(e.target)) {
       e.preventDefault();
       const i = fields.findIndex((x) => x.id === sel);
-      const next = fields[Math.max(0, Math.min(fields.length - 1, (i < 0 ? 0 : i) + (e.key === "ArrowUp" ? -1 : 1)))];
-      if (next) { select(next.id); focusSel(); }
+      const next = fields[Math.max(0, Math.min(fields.length - 1, (i < 0 ? 0 : i) + dir))];
+      if (!next) return;
+      if (e.shiftKey) {
+        if (sel !== FORM) picked.add(sel);
+        picked.add(next.id);
+        sel = next.id;
+        renderStage();
+        renderInspector();
+      } else {
+        picked.clear();
+        if (next.id === sel) renderStage(); else select(next.id);
+      }
+      focusSel(inOl);
       return;
     }
-    if ((e.key === "Delete" || e.key === "Backspace") && f && onField(e.target)) { e.preventDefault(); removeField(f.id); return; }
-    if (e.key === "Escape" && sel !== FORM) select(FORM);
+    if ((e.key === "Delete" || e.key === "Backspace") && onField(e.target) && (many || f)) {
+      e.preventDefault();
+      if (many) removeMany(pickedFields()); else removeField(f.id);
+      return;
+    }
+    if (e.key === "Escape") {
+      if (many) { picked.clear(); renderStage(); }
+      else if (sel !== FORM) select(FORM);
+    }
   };
   document.addEventListener("keydown", onKey);
+
+  /* ---------- Outline: jump, tick, drag to reorder (mouse, pen or finger) ---------- */
+  const olHost = $('[data-role="outline"]');
+  olHost.addEventListener("click", (e) => {
+    const go = e.target.closest("[data-olgo]");
+    if (go) goTo(go.closest("[data-olid]").dataset.olid);
+  });
+  olHost.addEventListener("change", (e) => {
+    if (e.target.matches("[data-olall]")) {
+      if (e.target.checked) fields.forEach((f) => picked.add(f.id)); else picked.clear();
+      renderStage();
+      return;
+    }
+    const box = e.target.closest("[data-olpick]");
+    if (!box) return;
+    const id = box.closest("[data-olid]").dataset.olid;
+    if (box.checked) picked.add(id); else picked.delete(id);
+    renderStage();
+    const again = olHost.querySelector(`[data-olid="${CSS.escape(id)}"] [data-olpick]`);
+    if (again) again.focus();
+  });
+
+  let olDrag = null;
+  const olClear = () => olHost.querySelectorAll(".is-drop-before, .is-drop-after")
+    .forEach((el) => el.classList.remove("is-drop-before", "is-drop-after"));
+  olHost.addEventListener("pointerdown", (e) => {
+    const grip = e.target.closest("[data-olgrip]");
+    if (!grip || mode !== "build") return;
+    const li = grip.closest("[data-olid]");
+    const id = li.dataset.olid;
+    const ids = picked.has(id) && picked.size > 1 ? pickedFields().map((f) => f.id) : [id];
+    const items = [...olHost.querySelectorAll("[data-olid]")];
+    e.preventDefault();
+    grip.setPointerCapture(e.pointerId);
+    olDrag = {
+      ids, li, items, y0: e.clientY, to: null,
+      mids: items.map((el) => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; }),
+    };
+    items.filter((el) => ids.includes(el.dataset.olid)).forEach((el) => el.classList.add("is-dragging"));
+    document.body.classList.add("is-arranging");
+  });
+  olHost.addEventListener("pointermove", (e) => {
+    if (!olDrag) return;
+    olDrag.li.style.transform = `translateY(${e.clientY - olDrag.y0}px)`;
+    let to = olDrag.mids.findIndex((m) => e.clientY < m);
+    if (to < 0) to = olDrag.items.length;
+    if (to === olDrag.to) return;
+    olDrag.to = to;
+    olClear();
+    const target = olDrag.items[to];
+    if (target) target.classList.add("is-drop-before");
+    else olDrag.items[olDrag.items.length - 1].classList.add("is-drop-after");
+  });
+  const olEnd = (cancel) => {
+    if (!olDrag) return;
+    const { ids, items, to } = olDrag;
+    olDrag = null;
+    document.body.classList.remove("is-arranging");
+    if (cancel || to === null) { renderOutline(); return; }
+    let k = to;
+    while (items[k] && ids.includes(items[k].dataset.olid)) k++;   // dropped among the ones being moved
+    if (ids.length === 1) sel = ids[0];
+    moveTo(ids, items[k] ? items[k].dataset.olid : null);
+  };
+  olHost.addEventListener("pointerup", () => olEnd(false));
+  olHost.addEventListener("pointercancel", () => olEnd(true));
   /* ---------- Drag and drop ---------- */
   let drag = null, dropAt = null;
   const clearLine = () => stage.querySelectorAll(".is-drop-before, .is-drop-after")
@@ -1699,19 +2222,13 @@ export async function mountFormEditor(container, { templateId, staff }) {
       addField(t, at);
       return;
     }
-    const from = fields.findIndex((f) => f.id === drag.id);
-    let to = dropAt;
+    const items = [...stage.querySelectorAll('[data-role="fields"] .fe-field[data-id]')];
+    const ids = picked.has(drag.id) && picked.size > 1 ? pickedFields().map((f) => f.id) : [drag.id];
+    let k = dropAt;
+    while (items[k] && ids.includes(items[k].dataset.id)) k++;
     endDrag();
-    if (from < 0) return;
-    if (to > from) to--;
-    if (to !== from) {
-      const [moved] = fields.splice(from, 1);
-      fields.splice(to, 0, moved);
-      sel = moved.id;
-      changed();
-    }
-    renderStage();
-    renderInspector();
+    if (ids.length === 1) sel = ids[0];
+    moveTo(ids, items[k] ? items[k].dataset.id : null);
   });
 
   root.addEventListener("dragend", endDrag);

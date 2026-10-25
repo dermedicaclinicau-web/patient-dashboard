@@ -8638,3 +8638,95 @@ dialog.lh-dialog.fe-problems { width: min(580px, calc(100vw - 2rem)); }
 .fe-keys { display: grid; grid-template-columns: auto 1fr; gap: .35rem .6rem; align-items: center; font-size: .78rem; color: var(--muted); }
 .fe-keys kbd { padding: .05rem .4rem; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 5px; background: #fff;
   color: var(--text); font: 600 .72rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
+
+  /* Form Builder: Add / Outline */
+.fe-paltabs { display: flex; height: 38px; margin-bottom: .6rem; }
+.fe-paltabs button { flex: 1; font-size: .85rem; }
+.fe-paltabs em { margin-left: .25rem; font-size: .72rem; font-style: normal; color: var(--muted); }
+.fe-copyfrom { width: 100%; gap: .35rem; margin-bottom: .55rem; font-size: .8rem; }
+.fe-copyfrom svg { width: 15px; height: 15px; }
+
+.fe-ol-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin: 0 .1rem .35rem; }
+.fe-ol-head .fe-check { padding: .2rem 0; font-size: .8rem; }
+.fe-ol-head small { font-size: .72rem; }
+.fe-ol-list { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.fe-ol-item { position: relative; display: flex; align-items: center; gap: .25rem; padding: .1rem .25rem;
+  border: 1px solid transparent; border-radius: 8px; background: #fff; }
+.fe-ol-item:hover { background: var(--surface-2); }
+.fe-ol-item.is-picked { background: #eef2ff; }
+.fe-ol-item.is-on { border-color: var(--primary); background: var(--primary-soft); }
+.fe-ol-item.is-dragging { z-index: 2; border-color: var(--primary); box-shadow: 0 10px 22px -8px rgba(15, 23, 42, .35); }
+.fe-ol-item.is-drop-before::before, .fe-ol-item.is-drop-after::after { content: ""; position: absolute; left: 4px; right: 4px;
+  height: 3px; border-radius: 3px; background: var(--primary); }
+.fe-ol-item.is-drop-before::before { top: -3px; }
+.fe-ol-item.is-drop-after::after { bottom: -3px; }
+.fe-ol-grip { display: grid; place-items: center; width: 24px; height: 32px; flex: none; color: #94a3b8; cursor: grab;
+  touch-action: none; user-select: none; -webkit-user-select: none; }
+.fe-ol-item.is-dragging .fe-ol-grip { cursor: grabbing; }
+.fe-ol-item input[type="checkbox"] { width: 16px; height: 16px; flex: none; accent-color: var(--primary); }
+.fe-ol-go { display: flex; flex: 1; align-items: center; gap: .35rem; min-width: 0; padding: .3rem .2rem; border: 0;
+  background: none; color: var(--text); font: inherit; font-size: .82rem; text-align: left; cursor: pointer; }
+.fe-ol-go svg { width: 14px; height: 14px; flex: none; color: var(--muted); }
+.fe-ol-n { flex: none; min-width: 1.3rem; font-size: .7rem; font-weight: 700; text-align: right; color: var(--muted); }
+.fe-ol-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fe-ol-flags { display: inline-flex; flex: none; align-items: center; gap: 3px; color: var(--muted); }
+.fe-ol-flags svg { width: 12px; height: 12px; }
+.fe-ol-flags .is-bad { color: var(--danger); }
+.fe-ol-req { font-weight: 700; color: var(--danger); }
+.fe-ol-w { padding: 0 .3rem; border-radius: 4px; background: var(--surface-2); font-size: .66rem; font-weight: 700; }
+
+/* Selected questions on the page */
+.fe-field.is-picked { border-color: #a5b4fc; background: #eef2ff; }
+
+/* The bar for selected questions */
+.fe-bulk { position: fixed; left: 50%; bottom: 1.25rem; z-index: 55; transform: translateX(-50%);
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: .45rem;
+  width: max-content; max-width: calc(100vw - 2rem); padding: .55rem .75rem; border: 1px solid #a5b4fc; border-radius: 14px;
+  background: #fff; box-shadow: 0 12px 32px rgba(16, 24, 40, .18); animation: inv-bulk-in .18s ease-out; }
+.fe-bulk[hidden] { display: none; }
+.fe-bulk strong { margin-right: .25rem; white-space: nowrap; }
+.fe-bulk .lh-btn { height: 34px; padding: 0 .7rem; font-size: .8rem; }
+.fe-bulk .lh-btn svg { width: 15px; height: 15px; }
+.fe-bulk-grp { display: inline-flex; gap: 2px; }
+.fe-bulk-grp .lh-btn { width: 34px; padding: 0; }
+.fe-bulk-span { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-2); }
+.fe-bulk-span button { min-width: 34px; height: 28px; padding: 0 .45rem; border: 0; border-radius: 7px; background: none;
+  color: var(--muted); font: inherit; font-size: .8rem; font-weight: 700; cursor: pointer; }
+.fe-bulk-span button.is-on { background: #fff; color: var(--text); box-shadow: 0 1px 3px rgba(15, 23, 42, .12); }
+@media (max-width: 640px) { .fe-bulk { bottom: calc(4.9rem + env(safe-area-inset-bottom)); } }
+
+/* Copy from another form */
+dialog.lh-dialog.fe-cf-dlg { width: min(640px, calc(100vw - 2rem)); }
+.fe-cf-forms { display: grid; gap: .75rem; max-height: 55vh; overflow: auto; }
+.fe-cf-grp { display: grid; gap: .3rem; }
+.fe-cf-grp h4 { margin: 0 0 .1rem; font-size: .72rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.fe-cf-form { display: flex; flex-direction: column; align-items: flex-start; gap: .1rem; padding: .55rem .75rem;
+  border: 1px solid var(--border); border-radius: 10px; background: #fff; font: inherit; text-align: left; cursor: pointer; }
+.fe-cf-form:hover, .fe-cf-form:focus-visible { border-color: var(--primary); background: var(--primary-soft); outline: none; }
+.fe-cf-form small { font-size: .78rem; color: var(--muted); }
+.fe-cf-bar { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.fe-cf-qs { display: grid; gap: 2px; max-height: 55vh; margin: 0; padding: 0; overflow: auto; list-style: none; }
+.fe-cf-qs .fe-check { gap: .45rem; padding: .4rem .5rem; border-radius: 8px; }
+.fe-cf-qs .fe-check:hover { background: var(--surface-2); }
+.fe-cf-qs li:has(input:checked) .fe-check { background: var(--primary-soft); }
+.fe-cf-qs li.is-off { opacity: .5; }
+.fe-cf-qs svg { width: 15px; height: 15px; flex: none; color: var(--muted); }
+.fe-cf-q { display: flex; flex-direction: column; min-width: 0; }
+.fe-cf-q small { font-size: .74rem; color: var(--muted); }
+
+/* Laptops and iPads: the Add / Outline panel sits above the page */
+@media (max-width: 1280px) {
+  .fe-palette { display: block; }
+  .fe-paltabs { max-width: 320px; }
+  .fe-pal-add { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .4rem; }
+  .fe-pal-add .fe-pal-search { flex: 1 1 200px; margin: 0; }
+  .fe-copyfrom { width: auto; margin: 0; }
+  .fe-outline { max-height: 45vh; overflow: auto; }
+}
+
+/* Form Builder: messages sit above the selection bar, and the page has room under it */
+.fe-bulk:not([hidden]) ~ .fe-toast { bottom: 5.5rem; }
+.page:has(.fe-bulk:not([hidden])) .fe-stage { padding-bottom: 5rem; }
+@media (max-width: 640px) {
+  .fe-bulk:not([hidden]) ~ .fe-toast { bottom: calc(9rem + env(safe-area-inset-bottom)); }
+}
