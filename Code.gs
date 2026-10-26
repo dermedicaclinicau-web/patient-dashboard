@@ -4639,7 +4639,7 @@ function invNotifyLoan_(id, session) {
       'inventory/kits', 'Confirm on Kits');
     MailApp.sendEmail({
       to: lender.email, name: 'Dermedica Clinic',
-      subject: rec.toName + ' borrowed ' + rec.units + ' ' + rec.doseUnit + ' of ' + rec.productName,
+      subject: rec.toName + ' took ' + rec.units + ' ' + rec.doseUnit + ' of ' + rec.productName,
       htmlBody: html, body: emailHtmlToText_(html),
     });
   }
@@ -5009,8 +5009,8 @@ function notifyContext_(cfg, ev, rule) {
       const ln = get('inv_loans/' + d.loanId);
       if (!ln || ln.status !== 'disputed') return null;
       return {
-        subject: 'Disputed borrow: ' + ln.units + ' ' + (ln.doseUnit || '') + ' of ' + (ln.productName || ''),
-        inner: h2('A borrow was disputed', '#b45309') +
+        subject: 'Disputed: ' + ln.units + ' ' + (ln.doseUnit || '') + ' of ' + (ln.productName || ''),
+        inner: h2('Units taken from a colleague were disputed', '#b45309') +
           sub('<strong>' + invEsc_(ln.fromName || '') + '</strong> disputed that <strong>' + invEsc_(ln.toName || '') + '</strong> took ' +
             invEsc_(ln.units + ' ' + (ln.doseUnit || '')) + ' of ' + invEsc_(ln.productName || '') + (ln.batch ? ' (batch ' + invEsc_(ln.batch) + ')' : '') + '.') +
           box(ln.response),
@@ -5245,7 +5245,7 @@ function notifyDigestContext_(cfg, rule, slot) {
       'reports/short', 'Open Saved short');
   }
   if (sec.loans) {
-    block('Borrows to confirm or disputed', 'borrows', fsQuery_(cfg, 'inv_loans', 'status', 'IN', ['unconfirmed', 'disputed'], 300).map(function (l) {
+    block('Units taken from colleagues', 'units taken', fsQuery_(cfg, 'inv_loans', 'status', 'IN', ['unconfirmed', 'disputed'], 300).map(function (l) {
       return invEsc_(l.toName || '') + ' took <strong>' + invEsc_(l.units + ' ' + (l.doseUnit || '')) + '</strong> of ' + invEsc_(l.productName || '') +
         ' from ' + invEsc_(l.fromName || '') + ' · ' + (l.status === 'disputed' ? '<span style="color:#b91c1c">disputed</span>' : 'waiting for confirmation');
     }), 'inventory/kits', 'Open Kits');
@@ -5279,7 +5279,7 @@ function notifyTest_(ruleId, session) {
       'request.created': 'a new order request is sent', 'request.updated': 'an order request is ordered or declined',
       'stock.arrived': 'stock arrives', 'stock.low': 'a product drops to its reorder level',
       'count.difference': 'a stock count finds differences', 'usage.short': 'a treatment is saved short',
-      'loan.disputed': 'a borrow between injectors is disputed',
+      'loan.disputed': 'units taken from a colleague are disputed',
       'investigation.opened': 'a count doesn\'t match digital and a recount is needed',
       'investigation.confirmed': 'a recount confirms a difference and an admin review is needed',
       'count.overdue': 'the opening count isn\'t finished by its due time',

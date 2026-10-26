@@ -9006,3 +9006,5 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 .cs-rs-tag { font-style: normal; font-size: 11px; font-weight: 600; padding: 1px 7px; margin-left: 4px; border-radius: 6px;
   background: #fef3c7; color: #92400e; vertical-align: 1px; }
 .cs-rs-go { color: #94a3b8; font-size: 20px; line-height: 1; }
+
+.cs-pending { color: #92400e; font-weight: 600; }

@@ -77,7 +77,7 @@ export async function takeFromShelfDialog(p, staff, lots = null) {
   let list;
   try { list = (lots || await listAllLots()).filter((l) => l.productId === p.id && l.loc === "shelf" && l.qty > 0).sort(fefo); }
   catch (err) { showToast(errText(err, "Couldn't load the Shelf.")); return false; }
-  if (!list.length) { showToast("There's nothing on the Shelf. Request it from JT storage on Inventory → Kits."); return false; }
+  if (!list.length) { showToast("There's nothing on the Shelf. Use Restock → Ask for a JT storage release."); return false; }
   return askDialog({
     title: `Take ${p.name} from the Shelf`,
     sub: "Unopened vials go into your kit straight away. The oldest expiry is listed first.",
@@ -106,14 +106,14 @@ export async function borrowDialog(p, staff) {
   catch (err) { showToast(errText(err, "Couldn't load the kits.")); return false; }
   if (!list.length) { showToast(`Nobody has ${p.name} in an opened vial right now.`); return false; }
   return askDialog({
-    title: `Borrow ${p.name} from a colleague`,
+    title: `Take ${p.name} from a colleague`,
     sub: "The units move into your kit straight away. Your colleague is asked to confirm.",
     inner: `<label class="lh-field"><span class="lh-label">From</span><select class="fb-select" name="k">${list.map((k, i) =>
         `<option value="${i}">${esc(k.staffName)} · ${esc(batchText(p, k.batch) || "No number")} · Exp ${esc(niceDate(k.expiry))} · ${fmt(k.open)} ${esc(k.doseUnit)} left</option>`).join("")}</select></label>
         <label class="lh-field"><span class="lh-label">How many ${esc(p.doseUnit)} you're taking</span>
         <input name="n" type="number" min="0.5" step="0.5" inputmode="decimal" /></label>
       <p class="inv-hint" data-role="hint"></p>`,
-    submit: "Borrow",
+    submit: "Take into my kit",
     onInput: (f, dlg) => {
       const k = list[Number(f.k.value)];
       dlg.querySelector('[data-role="hint"]').textContent = k ? `${k.staffName} has ${fmt(k.open)} ${k.doseUnit} left in that vial.` : "";
@@ -125,7 +125,30 @@ export async function borrowDialog(p, staff) {
       if (n > k.open + 0.01) throw new Error(`${k.staffName} only has ${fmt(k.open)} ${k.doseUnit} left.`);
       const id = await kitBorrow(k, n, staff);
       callApi({ action: "inventory", op: "notifyLoan", loanId: id }).catch((e) => console.warn("Loan email failed:", e));
-      return `${fmt(n)} ${k.doseUnit} borrowed from ${k.staffName}`;
+      return `${fmt(n)} ${k.doseUnit} taken from ${k.staffName}`;
+    },
+  });
+}
+export const takeFromColleagueDialog = borrowDialog;
+
+// Ask the approvers to release stock from JT storage to the Shelf (Kits page, and Restock on treatment records)
+export function jtReleaseDialog(p, staff) {
+  const jt = Number(p.stock && p.stock.jt) || 0;
+  if (jt <= 0) { showToast(`There's no ${p.name} in JT storage either. Ask the ordering team for more.`); return Promise.resolve(false); }
+  return askDialog({
+    title: `Ask for ${p.name} from JT storage`,
+    sub: "The Shelf is empty. Once it's approved, it's moved to the Shelf for you to take into your kit.",
+    inner: `<label class="lh-field"><span class="lh-label">How many ${esc(unitPlural(p.stockUnit))}</span>
+        <input name="n" type="number" min="1" max="${Math.min(10, jt)}" step="1" value="1" inputmode="numeric" /></label>
+      <label class="lh-field"><span class="lh-label">Note (optional)</span><input name="note" maxlength="500" placeholder="Fully booked Thursday" /></label>`,
+    submit: "Send request",
+    onSubmit: async (f) => {
+      const n = parseInt(f.n.value, 10);
+      if (!(n >= 1)) throw new Error("Enter how many.");
+      if (n > jt) throw new Error(`There ${jt === 1 ? "is" : "are"} only ${plural(jt, p.stockUnit)} in JT storage.`);
+      const id = await requestRelease(p, n, f.note.value, staff);
+      callApi({ action: "inventory", op: "notifyRelease", releaseId: id }).catch((e) => console.warn("Release email failed:", e));
+      return "Request sent. You'll get an email once it's approved.";
     },
   });
 }
@@ -195,7 +218,7 @@ export async function renderKits(body, { staff, products, lots, canKit, canJt, c
           : '<p class="tb-none">Nothing in your kit.</p>'}
         <div class="kit-foot">
           <span class="muted">Shelf: ${esc(plural(p.stock.shelf, unit))} · JT storage: ${esc(plural(p.stock.jt, unit))}</span>
-          <span class="kit-acts">${action}<button type="button" class="lh-btn" data-kit="borrow" data-pid="${esc(p.id)}">Borrow</button></span>
+    else if (p.stock.jt > 0) action = `<button type="button" class="lh-btn is-primary" data-kit="request" data-pid="${esc(p.id)}">Ask for a JT storage release</button>`;
         </div>
       </article>`;
   }
@@ -211,7 +234,7 @@ export async function renderKits(body, { staff, products, lots, canKit, canJt, c
     .slice(0, 20);
   const loanTone = (s) => (s === "confirmed" ? "approved" : s === "disputed" ? "declined" : "pending");
   const loansHtml = () => !loanShown.length ? "" : `
-    <section class="kit-sec"><h3>Borrowed and lent</h3>${loanShown.map((l) => `
+    <section class="kit-sec"><h3>Taken from colleagues</h3>${loanShown.map((l) => `
       <div class="kit-rel">
         <div><strong>${esc(l.toName)} took ${fmt(l.units)} ${esc(l.doseUnit)} of ${esc(l.productName)}</strong> from ${esc(l.fromName)}'s opened vial
           <small>${esc(when(l.createdAt))} · batch ${esc(l.batch || "—")}${l.respondedBy ? ` · ${esc(l.respondedBy)}` : ""}${l.response ? `: “${esc(l.response)}”` : ""}</small></div>
@@ -267,22 +290,7 @@ export async function renderKits(body, { staff, products, lots, canKit, canJt, c
     || '<div class="tm-empty">Kits are for staff who carry injectables. Ask an Admin to give you access in Staff.</div>';
 
   /* ---------- Dialogs ---------- */
-  const requestDialog = (p) => run(askDialog({
-    title: `Request ${p.name} from JT storage`,
-    sub: "The Shelf is empty. Once approved, it's moved to the Shelf for you to take into your kit.",
-    inner: `<label class="lh-field"><span class="lh-label">How many ${esc(unitPlural(p.stockUnit))}</span>
-        <input name="n" type="number" min="1" max="${Math.min(10, p.stock.jt)}" step="1" value="1" inputmode="numeric" /></label>
-      <label class="lh-field"><span class="lh-label">Note (optional)</span><input name="note" maxlength="500" placeholder="e.g. Fully booked Thursday" /></label>`,
-    submit: "Send request",
-    onSubmit: async (f) => {
-      const n = parseInt(f.n.value, 10);
-      if (!(n >= 1)) throw new Error("Enter how many.");
-      if (n > p.stock.jt) throw new Error(`There ${p.stock.jt === 1 ? "is" : "are"} only ${plural(p.stock.jt, p.stockUnit)} in JT storage.`);
-      const id = await requestRelease(p, n, f.note.value, staff);
-      callApi({ action: "inventory", op: "notifyRelease", releaseId: id }).catch((e) => console.warn("Release email failed:", e));
-      return "Request sent to JT storage";
-    },
-  }));
+  const requestDialog = (p) => run(jtReleaseDialog(p, staff));
 
   const discardDialog = (k) => run(askDialog({
     title: `Discard ${k.productName}`,
@@ -344,7 +352,7 @@ export async function renderKits(body, { staff, products, lots, canKit, canJt, c
   }));
 
   const disputeDialog = (l) => run(askDialog({
-    title: "Dispute this borrow?",
+    title: "Dispute what was taken?",
     sub: `${l.toName} recorded taking ${fmt(l.units)} ${l.doseUnit} of ${l.productName} from your opened vial.`,
     inner: `<label class="lh-field"><span class="lh-label">What happened?</span><textarea name="note" rows="2" maxlength="500" placeholder="e.g. Only 5 units were taken"></textarea></label>`,
     submit: "Dispute",

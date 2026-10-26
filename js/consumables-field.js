@@ -10,9 +10,9 @@
 import {
   listProducts, listAllLots, listKits, listOpenContainers, isKitProduct, isSharedProduct, openState, kitUnits,
   plural, unitPlural, fefo, lotId, INV_CATEGORIES, batchName, batchText, createRequest, suggestOrder, openContainer,
-  expiryState,
+  expiryState, listReleases, myUid,
 } from "./inventory-api.js";
-import { takeFromShelfDialog, borrowDialog } from "./inventory-kits.js";
+import { takeFromShelfDialog, borrowDialog, jtReleaseDialog } from "./inventory-kits.js";
 import { isInjector, isAdmin, can } from "./perms.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
@@ -54,8 +54,9 @@ let stockAt = 0;
 function loadStock(force = false) {
   if (!stockJob || force || Date.now() - stockAt > 10000) {
     stockAt = Date.now();
-    stockJob = Promise.all([listProducts(), listAllLots(), listKits({ mine: true }).catch(() => []), listOpenContainers().catch(() => [])])
-      .then(([products, lots, kits, open]) => ({ products, lots, kits, open }));
+    stockJob = Promise.all([listProducts(), listAllLots(), listKits({ mine: true }).catch(() => []),
+      listOpenContainers().catch(() => []), listReleases().catch(() => [])])
+      .then(([products, lots, kits, open, rels]) => ({ products, lots, kits, open, rels }));
     stockJob.catch(() => { stockJob = null; });
   }
   return stockJob;
@@ -608,7 +609,8 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
       : `${whereOf(l)}: ${plural(p.stock[l.loc], p.stockUnit)}${dosed(p) ? ` · ${fmt(p.dosePer)} ${p.doseUnit} each` : ""}`;
     // Kit products: where it comes from is changed with Restock. Other products: Shelf or JT storage.
     const locSel = rawKit
-      ? `<small class="cs-from">${esc(l.loc === "kit" ? "From your kit" : `From ${whereOf(l)} · opened ${p.stockUnit}`)}</small>`
+      ? `<small class="cs-from">${esc(l.loc === "kit" ? "From your kit" : `From ${whereOf(l)} · opened ${p.stockUnit}`)}${
+          pendingRel(p) ? ' · <span class="cs-pending">JT storage release requested · waiting for approval</span>' : ""}</small>`
       : `<select class="fe-in cs-loc" data-f="loc" aria-label="Taken from">
           <option value="shelf"${l.loc === "shelf" ? " selected" : ""}>Shelf</option>
           <option value="jt"${l.loc === "jt" ? " selected" : ""}>JT storage</option></select>`;
@@ -854,6 +856,10 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
         : nv ? `Opens a new ${p.stockUnit}${left}` : `None left in ${where}` };
   }
 
+  // This person's release request for the product that's still waiting, or undefined
+  const pendingRel = (p) => ((stock && stock.rels) || []).find((r) =>
+    r.productId === p.id && r.requestedByUid === myUid() && r.status === "pending");
+
   // Where Restock can take a kit product from, for this person
   function restockOptions(l) {
     const p = rawProduct(l);
@@ -876,6 +882,13 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
       opts.push({ k: "take", icon: "users", title: "Take from a colleague",
         sub: `${p.doseUnit} from their opened ${p.stockUnit}. They're asked to confirm.` });
     }
+    // Not an Admin and the Shelf is empty: ask the approvers to release some from JT storage
+    if (canKit && !adminStore && shelfN <= 0 && jtN > 0) {
+      const pend = pendingRel(p);
+      opts.push({ k: "release", icon: "send", title: "Ask for a JT storage release", off: !!pend,
+        sub: pend ? `Asked for ${plural(pend.qty, pend.unit || p.stockUnit)} · waiting for approval`
+          : "Sends a request to the approvers. Once it's approved, it goes on the Shelf." });
+    }
     if (seeStock && shelfN <= 0 && jtN <= 0) {
       opts.push({ k: "order", icon: "send", title: "Ask the ordering team for more", sub: "None left on the Shelf or in JT storage" });
     }
@@ -891,6 +904,10 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     if (!k) return;
     if (k === "kit") { setLoc(l, "kit"); return; }
     if (k === "order") { await orderMore(l); return; }
+    if (k === "release") {
+      if (await jtReleaseDialog(p0, staff)) await refresh(true);   // shows "waiting for approval" straight away
+      return;
+    }
     if (k === "take") {
       if (await borrowDialog(p0, staff)) { await refresh(true); setLoc(l, "kit"); }
       return;
