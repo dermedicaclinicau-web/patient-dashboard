@@ -177,7 +177,7 @@ function groupDays(entries) {
 
 /* ---------- Reporting → Kit reconciliation ---------- */
 export function mountKitReconciliation(body, { csv = null } = {}) {
-  const st = { staff: "", product: "", from: daysAgo(29), to: dayKey(), limit: 100, open: new Set(), people: [], products: [], problem: "" };
+  const st = { staff: "", product: "", from: "", to: "", limit: 100, open: new Set(), people: [], products: [], problem: "" };
 
   async function load() {
     body.innerHTML = SKEL;
@@ -327,6 +327,9 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
     const list = rows();
     const more = list.length - st.limit;
     body.innerHTML = `${toolsHtml()}
+      ${list.length ? `<p class="muted rp-range">${list.length} day${list.length === 1 ? "" : "s"} recorded${
+        st.from || st.to ? " in these dates" : ", newest first"}${more > 0 ? `. Showing ${st.limit}: press "Show more" at the bottom for the rest` : ""}.</p>`
+        : ""}
       ${list.length ? `<section class="tb-card"><div class="rp-scroll"><table class="inv-table rp-table kr-table">
         <thead><tr><th>Product</th><th>Injector Name</th><th>Date</th><th>Batch Number</th><th>Exp Date</th>
           <th class="n">Start Count</th><th class="n">End of Count</th><th class="n">Total Usage</th><th>Restock Record</th><th></th></tr></thead>
