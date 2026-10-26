@@ -4,6 +4,7 @@ import { searchPatients, warmPatients } from "./patient-list.js";
 import { listPublishedForms } from "./form-templates.js";
 import { escapeHtml as esc, showToast, formatDobLong, formatMobile } from "./utils.js";
 import { confirmDialog } from "./dialog.js";
+import { rxProductList } from "./rx-products.js";
 
 const pad = (n) => String(n).padStart(2, "0");
 const keyOf = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -20,9 +21,14 @@ const ago = (k) => {
   return n <= 0 ? "today" : n === 1 ? "yesterday" : n < 14 ? `${n} days ago` : n < 70 ? `${Math.round(n / 7)} weeks ago` : `${Math.round(n / 30.4)} months ago`;
 };
 
-const STATUS = { todo: ["To enter", "warn"], help: ["Need help", "bad"], skip: ["Not a record", "muted"], entered: ["Entered", "ok"] };
-const SKIP_REASONS = ["Already on the patient's file", "Blank or unreadable page", "Duplicate scan", "Consent form, not a treatment record",
-  "Not a patient record", "Other"];
+const STATUS = { todo: ["To enter", "warn"], help: ["Need help", "bad"], skip: ["Not a record", "muted"], entered: ["Entered", "ok"],
+  filed: ["Filed", "ok"] };
+const SKIP_REASONS = ["Already on the patient's file", "Blank or unreadable page", "Duplicate scan", "Not a patient record", "Other"];
+const FILE_TYPES = [["treatment", "Treatment record"], ["consent", "Consent"], ["rx", "Prescription"], ["billing", "Billing sheet"]];
+const FILE_NAME = Object.fromEntries(FILE_TYPES);
+const FILE_WHERE = { treatment: "Treatment Records", consent: "Consent Records", rx: "Product Prescriptions", billing: "Billing" };
+const DONE = ["entered", "skip", "filed"];
+const OTHER = "__other";
 const LINK_KIND = { treatment: "Treatment record", consent: "Consent" };
 const linkText = (l) => `${LINK_KIND[l.kind] || "Record"}${l.title ? `: ${l.title}` : ""} · ${l.patientName || "Unknown patient"}${
   l.date ? ` · ${niceDay(l.date)}` : ""}`;
@@ -64,7 +70,7 @@ export function mountPaperRecords(container, { staff } = {}) {
   function counts() {
     const f = st.files || [];
     const n = (s) => f.filter((x) => x.status === s).length;
-    return { todo: n("todo"), help: n("help"), done: n("entered") + n("skip"),
+    return { todo: n("todo"), help: n("help"), done: n("entered") + n("skip") + n("filed"),
       visits: st.visits ? st.visits.filter((x) => !x.res).length : null };
   }
   function drawTabs() {
@@ -81,7 +87,8 @@ export function mountPaperRecords(container, { staff } = {}) {
     const [label, tone] = STATUS[f.status] || STATUS.todo;
     const th = st.thumbs[f.id];
     const sub = [`Uploaded ${niceAt(f.created)}`, f.folder, f.kind === "pdf" ? "PDF" : "Photo"].filter(Boolean).join(" · ");
-    const extra = f.status === "entered" ? `${f.patientName} · treatment on ${niceDay(f.recordDate)}`
+    const extra = f.status === "filed" ? `${FILE_NAME[f.filedKind] || "Filed"}${f.filedTitle ? `: ${f.filedTitle}` : ""} · ${f.patientName} · ${niceDay(f.recordDate)}`
+      : f.status === "entered" ? `${f.patientName} · treatment on ${niceDay(f.recordDate)}`
       : f.status === "skip" ? f.reason : f.status === "help" ? `“${f.note}”` : "";
     return `<li class="ppr-row">
       <button type="button" class="ppr-thumb" data-open="${esc(f.id)}" data-thumb="${esc(f.id)}" aria-label="Open ${esc(f.name)}">${
@@ -112,7 +119,7 @@ export function mountPaperRecords(container, { staff } = {}) {
 
   function drawScans() {
     if (!st.files) { body.innerHTML = '<div class="skeleton sm"></div>'; return; }
-    const want = st.tab === "scans" ? ["todo"] : st.tab === "help" ? ["help"] : ["entered", "skip"];
+    const want = st.tab === "scans" ? ["todo"] : st.tab === "help" ? ["help"] : DONE;
     const qq = st.q.trim().toLowerCase();
     const dated = !!(st.sFrom || st.sTo);
     const inDates = (f) => (!st.sFrom || f.day >= st.sFrom) && (!st.sTo || f.day <= st.sTo);
@@ -123,7 +130,7 @@ export function mountPaperRecords(container, { staff } = {}) {
     if (st.tab === "done") list.sort((a, b) => String(b.at).localeCompare(String(a.at)));
     else if (st.sort === "new") list.reverse();
     const total = st.files.length;
-    const done = st.files.filter((f) => f.status === "entered" || f.status === "skip").length;
+    const done = st.files.filter((f) => DONE.includes(f.status)).length;
     const days = st.files.map((f) => f.day).filter(Boolean).sort();
     const first = days[0] || "";
     const last = days[days.length - 1] || todayKey();
@@ -285,13 +292,13 @@ export function mountPaperRecords(container, { staff } = {}) {
           <div data-role="pvisits"></div>
           <label class="lh-field"><span class="lh-label">Date of treatment</span>
             <input type="date" class="fe-input" name="date" max="${todayKey()}" value="${esc(f.recordDate || "")}" /></label>
-          <div class="lh-field"><span class="lh-label">Enter it on</span>
-            <div class="ppr-formrow"><select class="fb-select" name="form"><option value="">Loading forms…</option></select>
-              <button type="button" class="lh-btn" data-act="openform">Open the form</button></div>
-            <small class="fe-note">Opens in a new tab. Set the form's record date to the date of treatment. For now, write the
-              batch and units in the notes and leave Products used empty: it isn't backdated yet, and kit products would come off your own kit.</small></div>
+          <div class="lh-field"><span class="lh-label">What is it?</span>
+            <div class="ppr-types">${FILE_TYPES.map(([k, l]) =>
+              `<button type="button" class="ppr-type" data-type="${k}" aria-pressed="false">${esc(l)}</button>`).join("")}</div></div>
+          <div data-role="typebody"></div>
+          <label class="lh-field"><span class="lh-label">Clinician (optional)</span>
+            <input class="fe-input" name="who" maxlength="80" placeholder="As written on the paper" /></label>
           <p class="lh-error" role="alert" hidden></p>
-          <button type="button" class="lh-btn is-primary ppr-wide" data-act="entered">Mark as entered</button>
           <details class="ppr-more"${f.status === "help" ? " open" : ""}><summary>Not a treatment record, or need help?</summary>
             <label class="lh-field"><span class="lh-label">It isn't a record</span>
               <select class="fb-select" name="reason"><option value="">Choose why…</option>${SKIP_REASONS.map((r) =>
@@ -363,13 +370,101 @@ export function mountPaperRecords(container, { staff } = {}) {
       }
     })();
 
-    // The treatment record forms
-    listPublishedForms().then((list) => {
-      const forms = list.filter((t) => t.category === "treatment").sort((a, b) => String(a.name).localeCompare(String(b.name)));
-      $('[name="form"]').innerHTML = forms.length
-        ? `<option value="">Choose the form…</option>${forms.map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`).join("")}`
-        : '<option value="">No treatment record forms are published</option>';
-    }).catch(() => { $('[name="form"]').innerHTML = '<option value="">Couldn\'t load the forms</option>'; });
+    // What it's filed as
+    let rxList = [];
+    try { rxList = rxProductList() || []; } catch { rxList = []; }
+    const ft = { type: f.filedKind || "treatment", formId: "", consent: "", ctitle: "",
+      rx: [{ product: "", custom: !rxList.length, name: "" }] };
+    let forms = null;
+    const byName = (a, b) => String(a.name).localeCompare(String(b.name));
+
+    function typeBody() {
+      if (ft.type === "treatment") {
+        const tx = (forms || []).filter((t) => t.category === "treatment").sort(byName);
+        return `<label class="lh-field"><span class="lh-label">Which treatment record</span>
+            <select class="fb-select" name="form" data-ft="formId">${!forms ? '<option value="">Loading forms…</option>'
+              : `<option value="">Choose…</option>${tx.map((t) => `<option value="${esc(t.id)}"${t.id === ft.formId ? " selected" : ""}>${esc(t.name)}</option>`).join("")}`}</select></label>
+          <button type="button" class="lh-btn is-primary ppr-wide" data-act="file">File the scan as the record</button>
+          <small class="fe-note">Or type it in instead:</small>
+          <div class="ppr-formrow"><button type="button" class="lh-btn" data-act="openform">Enter it on the form ↗</button>
+            <button type="button" class="lh-btn" data-act="entered">Mark as entered</button></div>
+          <small class="fe-note">On the form, set the record date to the date of treatment and leave Products used empty for now.</small>`;
+      }
+      if (ft.type === "consent") {
+        const cs = (forms || []).filter((t) => t.category === "consent").sort(byName);
+        return `<label class="lh-field"><span class="lh-label">Which consent</span>
+            <select class="fb-select" data-ft="consent">${!forms ? '<option value="">Loading forms…</option>'
+              : `<option value="">Choose…</option>${cs.map((t) => `<option${t.name === ft.consent ? " selected" : ""}>${esc(t.name)}</option>`).join("")}
+                <option value="${OTHER}"${ft.consent === OTHER ? " selected" : ""}>Not on the list: type it…</option>`}</select></label>
+          ${ft.consent === OTHER ? `<input class="fe-input" data-ft="ctitle" maxlength="150" value="${esc(ft.ctitle)}"
+            placeholder="e.g. Wrinkle Relaxer consent" aria-label="Consent name" />` : ""}
+          <button type="button" class="lh-btn is-primary ppr-wide" data-act="file">File as a consent</button>`;
+      }
+      if (ft.type === "rx") {
+        return `<div class="lh-field"><span class="lh-label">What was prescribed</span>
+            ${ft.rx.map((it, i) => `<div class="ppr-rx" data-rx="${i}">
+              ${rxList.length ? `<select class="fb-select" data-rxf="product" aria-label="Product"><option value="">Choose…</option>${
+                rxList.map((n) => `<option${!it.custom && n === it.product ? " selected" : ""}>${esc(n)}</option>`).join("")}
+                <option value="${OTHER}"${it.custom ? " selected" : ""}>Not on the list: type it…</option></select>` : ""}
+              ${it.custom ? `<input class="fe-input" data-rxf="name" maxlength="150" value="${esc(it.name)}" placeholder="Product name" aria-label="Product name" />` : ""}
+              ${ft.rx.length > 1 ? `<button type="button" class="hx-x" data-act="rx-x" aria-label="Remove">×</button>` : ""}</div>`).join("")}
+            <button type="button" class="rc-link" data-act="rx-add">+ Add another</button></div>
+          <button type="button" class="lh-btn is-primary ppr-wide" data-act="file">File as a prescription</button>`;
+      }
+      return `<p class="fe-note">It shows under Billing on their page, with the scan. Stock isn't changed.</p>
+        <button type="button" class="lh-btn is-primary ppr-wide" data-act="file">File as a billing sheet</button>`;
+    }
+    function drawType() {
+      dlg.querySelectorAll("[data-type]").forEach((b) => {
+        const on = b.dataset.type === ft.type;
+        b.classList.toggle("is-on", on);
+        b.setAttribute("aria-pressed", String(on));
+      });
+      $('[data-role="typebody"]').innerHTML = typeBody();
+    }
+    listPublishedForms().then((list) => { forms = list || []; if (dlg.isConnected) drawType(); })
+      .catch(() => { forms = []; if (dlg.isConnected) drawType(); showToast("Couldn't load the forms."); });
+
+    async function fileAs() {
+      if (saving) return;
+      err.hidden = true;
+      if (!chosen) { fail("Choose the patient."); return; }
+      if (!dateIn.value) { fail("Choose the date on the paper."); return; }
+      const body = { action: "paper", op: "file", fileId: f.id, as: ft.type, patientId: chosen.id, recordDate: dateIn.value,
+        clinician: $('[name="who"]').value, note: $('[name="note"]').value };
+      if (ft.type === "treatment") {
+        const t = (forms || []).find((x) => x.id === ft.formId);
+        if (!t) { fail("Choose which treatment record it is."); return; }
+        body.title = t.name;
+      } else if (ft.type === "consent") {
+        body.title = (ft.consent === OTHER ? ft.ctitle : ft.consent).trim();
+        if (!body.title) { fail("Choose which consent it is."); return; }
+      } else if (ft.type === "rx") {
+        body.items = ft.rx.map((it) => ({ product: String(it.custom ? it.name : it.product).trim(), custom: !!it.custom }))
+          .filter((it) => it.product);
+        if (!body.items.length) { fail("Choose what was prescribed."); return; }
+      }
+      saving = true;
+      dlg.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+      try {
+        const r = await callApi(body);
+        if (r.problem) { fail(r.problem); return; }
+        Object.assign(f, { status: "filed", filedKind: ft.type, filedTitle: (r.filedAs && r.filedAs.title) || "", reason: "",
+          note: body.note.trim(), patientId: r.patientId, patientName: r.patientName, recordDate: r.recordDate, by: r.by || "", at: r.at || "" });
+        if (ft.type === "treatment" && st.visits) {
+          st.visits = st.visits.filter((v) => !(v.pid === r.patientId && v.date <= r.recordDate && r.recordDate <= addDays(v.date, 3)));
+        }
+        showToast(`Filed under ${FILE_WHERE[ft.type]} on ${r.patientName}'s page`);
+        draw();
+        goNext();
+      } catch (ex) {
+        console.error("Scan not filed:", ex);
+        fail(ex.message || "Couldn't file it. Try again.");
+      } finally {
+        saving = false;
+        dlg.querySelectorAll("button").forEach((b) => { b.disabled = false; });
+      }
+    }
 
     if (!st.visits) loadVisits().then(() => { if (dlg.open) drawPatientVisits(); });
 
@@ -394,7 +489,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       try {
         const r = await callApi({ action: "paper", op: "mark", fileId: f.id, status, ...extra });
         if (r.problem) { fail(r.problem); return; }
-        Object.assign(f, { status, note: extra.note || "", reason: extra.reason || "", patientId: r.patientId || "",
+        Object.assign(f, { status, filedKind: "", filedTitle: "", note: extra.note || "", reason: extra.reason || "", patientId: r.patientId || "",
           patientName: r.patientName || "", recordDate: r.recordDate || "", by: r.by || "", at: r.at || "" });
         // An entered scan counts as that visit's record
         if (status === "entered" && st.visits) {
@@ -412,8 +507,21 @@ export function mountPaperRecords(container, { staff } = {}) {
       }
     }
 
+    dlg.addEventListener("change", (e) => {
+      const t = e.target;
+      if (t.dataset.ft === "formId") ft.formId = t.value;
+      if (t.dataset.ft === "consent") { ft.consent = t.value; drawType(); return; }
+      if (t.dataset.rxf === "product") {
+        const it = ft.rx[Number(t.closest("[data-rx]").dataset.rx)];
+        if (t.value === OTHER) Object.assign(it, { custom: true, product: "" });
+        else Object.assign(it, { custom: false, product: t.value });
+        drawType();
+      }
+    });
     dlg.addEventListener("input", (e) => {
       err.hidden = true;
+      if (e.target.dataset.ft === "ctitle") { ft.ctitle = e.target.value; return; }
+      if (e.target.dataset.rxf === "name") { ft.rx[Number(e.target.closest("[data-rx]").dataset.rx)].name = e.target.value; return; }
       if (e.target.dataset.role !== "q") return;
       clearTimeout(timer);
       const t = e.target.value;
@@ -444,10 +552,22 @@ export function mountPaperRecords(container, { staff } = {}) {
         return;
       }
       const vd = e.target.closest("[data-vdate]");
-      if (vd) { dateIn.value = vd.dataset.vdate; drawPatientVisits(); return; }
+      if (vd) {
+        dateIn.value = vd.dataset.vdate;
+        const v = (st.visits || []).find((x) => x.pid === (chosen && chosen.id) && x.date === vd.dataset.vdate);
+        const whoIn = $('[name="who"]');
+        if (v && whoIn && !whoIn.value) whoIn.value = v.staff.join(" and ");   // the clinician from the Day Sheet
+        drawPatientVisits();
+        return;
+      }
+      const ty = e.target.closest("[data-type]");
+      if (ty) { ft.type = ty.dataset.type; err.hidden = true; drawType(); return; }
       const act = (e.target.closest("[data-act]") || {}).dataset?.act;
       if (!act) return;
       if (act === "close") { dlg.close(); return; }
+      if (act === "file") { fileAs(); return; }
+      if (act === "rx-add") { ft.rx.push({ product: "", custom: !rxList.length, name: "" }); drawType(); return; }
+      if (act === "rx-x") { ft.rx.splice(Number(e.target.closest("[data-rx]").dataset.rx), 1); drawType(); return; }
       if (act === "next") { goNext(); return; }
       if (act === "pt-change") { chosen = null; found = []; drawPt(); $('[data-role="q"]').focus(); return; }
       if (act === "rotate") {
@@ -479,6 +599,7 @@ export function mountPaperRecords(container, { staff } = {}) {
     dlg.addEventListener("close", () => { if (url) URL.revokeObjectURL(url); dlg.remove(); });
     document.body.appendChild(dlg);
     drawPt();
+    drawType();
     dlg.showModal();
     const first = $('[data-role="q"]');
     if (first) first.focus();

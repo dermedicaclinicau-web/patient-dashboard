@@ -78,7 +78,7 @@ const els = {
 };
 
 // Raise this each time paper-records.js changes, so browsers don't keep using an old copy
-const PAPER_V = 3;
+const PAPER_V = 4;
 
 let currentStaff = null;
 initFormPicker(els.content, { getStaff: () => currentStaff });

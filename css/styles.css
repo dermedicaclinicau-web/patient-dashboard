@@ -8948,6 +8948,11 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 .ppr-linked { color: #047857 !important; font-weight: 600; }
 .ppr-onfile { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid #a7f3d0; border-radius: 10px; background: #ecfdf5; font-size: 13px; color: #065f46; }
 .ppr-onfile .lh-btn { align-self: flex-start; margin-top: 6px; }
+.ppr-types { display: flex; flex-wrap: wrap; gap: 6px; }
+.ppr-type { padding: 7px 12px; border: 1px solid #cbd5e1; border-radius: 999px; background: #fff; font-size: 13px; cursor: pointer; }
+.ppr-type.is-on { border-color: #0f766e; background: #f0fdfa; color: #0f766e; font-weight: 600; }
+.ppr-rx { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+.ppr-rx .fb-select, .ppr-rx .fe-input { flex: 1; min-width: 0; }
 @media (max-width: 860px) {
   .ppr-split { grid-template-columns: 1fr; height: auto; }
   .ppr-view { border-right: 0; border-bottom: 1px solid #e2e8f0; }

@@ -15198,7 +15198,7 @@ const PAPER_SET_ = 'paper_settings/config';
 const PAPER_MIME_ = { 'application/pdf': 'pdf', 'image/jpeg': 'image', 'image/png': 'image', 'image/webp': 'image',
   'image/heic': 'image', 'image/heif': 'image' };
 const PAPER_MAX_BYTES_ = 15 * 1024 * 1024;
-const PAPER_STATUSES_ = ['todo', 'help', 'skip', 'entered'];
+const PAPER_STATUSES_ = ['todo', 'help', 'skip', 'entered', 'filed'];
 const PAPER_CATS_DEFAULT_ = ['Wrinkle Relaxer', 'Filler/Radiesse', 'Other Injectables'];
 const PAPER_SKIP_DEFAULT_ = ['Review', 'Consult'];
 const PAPER_FROM_DEFAULT_ = '2026-07-01';
@@ -15222,6 +15222,7 @@ function handlePaper_(body) {
     if (op === 'file') return paperFile_(String(body.fileId || ''));
     if (op === 'mark') return paperMark_(cfg, body, session);
     if (op === 'markLinked') return paperMarkLinked_(cfg, body, session);
+    if (op === 'file') return paperFileAs_(cfg, body, session);
     if (op === 'visits') return paperVisits_(cfg, body.fresh === true);
     if (op === 'resolve') return paperResolve_(cfg, body, session);
     if (op === 'settings') return Object.assign({ ok: true, allCats: paperAllCats_() }, paperSettings_(cfg));
@@ -15292,13 +15293,14 @@ function paperList_(cfg, fresh) {
     repCachePut_(PAPER_FKEY_, files);
   }
   const st = {};
-  fsListAll_(cfg, PAPER_SCANS_, ['status', 'note', 'reason', 'patientId', 'patientName', 'recordDate', 'by', 'at'])
+  fsListAll_(cfg, PAPER_SCANS_, ['status', 'note', 'reason', 'patientId', 'patientName', 'recordDate', 'by', 'at', 'filedAs'])
     .forEach(function (d) { st[d.name.split('/').pop()] = fromFields_(d.fields || {}); });
   const linked = paperLinked_(cfg);
   const out = files.map(function (f) {
     const s = st[f.id] || {};
     return Object.assign({}, f, {
       linked: linked[f.id] || null,
+      filedKind: s.filedAs ? String(s.filedAs.kind || '') : '', filedTitle: s.filedAs ? String(s.filedAs.title || '') : '',
       status: PAPER_STATUSES_.indexOf(s.status) !== -1 ? s.status : 'todo',
       note: String(s.note || ''), reason: String(s.reason || ''), patientId: String(s.patientId || ''),
       patientName: String(s.patientName || ''), recordDate: String(s.recordDate || ''), by: String(s.by || ''), at: String(s.at || ''),
@@ -15408,17 +15410,18 @@ function paperMark_(cfg, body, session) {
 
   const path = PAPER_SCANS_ + '/' + id;
   const cur = fsGetDoc_(cfg, path) || {};
+  if (cur.filedAs) paperUnfile_(cfg, cur.filedAs, session);   // no longer filed on the patient's page
   const now = new Date().toISOString();
   const who = String(session.name || '');
   const what = status === 'entered' ? 'Entered for ' + pname + ' (' + date + ')' : status === 'skip' ? 'Not a record: ' + reason
     : status === 'help' ? 'Needs help' : 'Back on the list';
   fsPatch_(cfg, path, {
     fileId: id, fileName: f.getName(), status: status, note: note, reason: reason,
-    patientId: pid, patientName: pname, recordDate: date, submissionId: String(body.submissionId || '').slice(0, 60),
+    filedAs: null, patientId: pid, patientName: pname, recordDate: date, submissionId: String(body.submissionId || '').slice(0, 60),
     by: who, byUid: String(session.uid || ''), at: now,
     history: (Array.isArray(cur.history) ? cur.history : []).concat([{ at: now, by: who, what: what, note: note }]).slice(-30),
   });
-  CacheService.getScriptCache().remove(PAPER_VKEY_);   // an entered scan counts as a record
+  CacheService.getScriptCache().removeAll([PAPER_VKEY_, 'paper_linked_v1']);   // an entered scan counts as a record
   return { ok: true, status: status, patientId: pid, patientName: pname, recordDate: date, by: who, at: now };
 }
 
@@ -15590,6 +15593,126 @@ function paperResolve_(cfg, body, session) {
     byUid: String(session.uid || ''), at: now });
   cache.remove(PAPER_VKEY_);
   return { ok: true, res: { status: status, note: note, by: String(session.name || ''), at: now } };
+}
+
+/* ---------- Filing a scan on the patient's page ---------- */
+// treatment / consent → treatment_records / consent_records (View opens the scan in Drive)
+// billing / rx → scans, like the Scanner's (a picture of the scan in Storage). Never changes stock.
+const PAPER_FILE_AS_ = { treatment: 'Treatment record', consent: 'Consent', rx: 'Product prescription', billing: 'Billing sheet' };
+
+function paperFileAs_(cfg, body, session) {
+  const id = String(body.fileId || '');
+  const f = paperFileOf_(id);
+  if (!f) return { ok: true, problem: "That scan isn't in the paper records folder any more." };
+  const as = String(body.as || '');
+  if (!PAPER_FILE_AS_[as]) return { ok: false, error: 'BAD_REQUEST' };
+  const p = flowPatient_(cfg, String(body.patientId || ''));
+  if (!p) return { ok: true, problem: 'Choose the patient.' };
+  const date = String(body.recordDate || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date > flowKey_(Date.now())) return { ok: true, problem: 'Choose the date on the paper.' };
+  const title = String(body.title || '').replace(/\s+/g, ' ').trim().slice(0, 150);
+  if ((as === 'treatment' || as === 'consent') && !title) {
+    return { ok: true, problem: as === 'consent' ? 'Choose which consent it is.' : 'Choose which treatment record it is.' };
+  }
+  const items = (Array.isArray(body.items) ? body.items : []).slice(0, 20).map(function (it) {
+    it = it || {};
+    return { product: String(it.product || '').replace(/\s+/g, ' ').trim().slice(0, 150), custom: it.custom === true,
+      text: '', medicine: '', strengths: '', quantity: '', directions: '', repeats: '', fixed: true };
+  }).filter(function (it) { return it.product; });
+  if (as === 'rx' && !items.length) return { ok: true, problem: 'Choose what was prescribed.' };
+  const clinician = String(body.clinician || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+  const note = String(body.note || '').replace(/\r/g, '').trim().slice(0, 500);
+
+  const path = PAPER_SCANS_ + '/' + id;
+  const cur = fsGetDoc_(cfg, path) || {};
+  if (cur.filedAs) paperUnfile_(cfg, cur.filedAs, session);   // filed before as something else
+
+  const who = String(session.name || '');
+  const now = new Date();
+  const w = flowWho_(p);
+  const ptt = String(p.PttID || p._id);
+  const recId = 'paper_' + id;
+  let filedAs;
+  if (as === 'treatment' || as === 'consent') {
+    const def = REC_LEGACY_[as];
+    const fields = {
+      'Record ID': 'PAPER-' + id.slice(0, 10), 'Patient ID': ptt, 'Patient Name': w.name, 'Record Date': date,
+      'Staff': clinician, 'Source': 'Paper scan', paperFileId: id, filedBy: who, filedAt: now.toISOString(),
+    };
+    fields[def.title] = title;
+    fields[def.link] = f.getUrl();
+    commitWrites_(cfg, [updateWrite_(cfg, def.col + '/' + recId, fields)]);
+    filedAs = { kind: as, col: def.col, id: recId, title: title };
+  } else {
+    const base = {
+      kind: as, dateKey: date, note: note, patientName: w.name, readName: '', patientPttId: ptt,
+      photo: paperToStorage_(cfg, f, as), raw: '', source: 'paper', paperFileId: id, driveUrl: f.getUrl(),
+      by: who, byUid: String(session.uid || ''), at: now,
+    };
+    const data = as === 'billing'
+      ? Object.assign(base, { status: 'ok', flagCount: 0, bookedWith: clinician, bookedAt: '', apptDate: date, apptTime: '',
+          provider: clinician, lines: [], productsTotal: 0, stockChanged: false, saleId: '' })
+      : Object.assign(base, { status: 'saved', patientId: p._id, recordDate: date, scriptNumber: '', prescriber: clinician, items: items,
+          patientIds: uniq_([p._id, ptt].concat(Array.isArray(p.MergedIds) ? p.MergedIds.map(String) : [])) });
+    commitWrites_(cfg, [updateWrite_(cfg, 'scans/' + recId, data)]);
+    filedAs = { kind: as, col: 'scans', id: recId,
+      title: as === 'rx' ? items.map(function (x) { return x.product; }).join(', ').slice(0, 150) : '' };
+  }
+
+  const what = 'Filed as ' + PAPER_FILE_AS_[as].toLowerCase() + (filedAs.title ? ' (' + filedAs.title + ')' : '') +
+    ' for ' + w.name + ' (' + date + ')';
+  fsPatch_(cfg, path, {
+    fileId: id, fileName: f.getName(), status: 'filed', note: note, reason: '', patientId: p._id, patientName: w.name,
+    recordDate: date, filedAs: filedAs, by: who, byUid: String(session.uid || ''), at: now.toISOString(),
+    history: (Array.isArray(cur.history) ? cur.history : []).concat([{ at: now.toISOString(), by: who, what: what, note: note }]).slice(-30),
+  });
+  CacheService.getScriptCache().removeAll([PAPER_VKEY_, 'paper_linked_v1']);
+  return { ok: true, status: 'filed', filedAs: filedAs, patientId: p._id, patientName: w.name, recordDate: date, by: who, at: now.toISOString() };
+}
+
+// Takes a filed copy off the patient's page (scans are marked deleted, like the Scanner's; records are removed)
+function paperUnfile_(cfg, fa, session) {
+  if (!fa || !/^paper_[A-Za-z0-9_-]+$/.test(String(fa.id || ''))) return;
+  try {
+    if (fa.col === 'scans') {
+      fsPatch_(cfg, 'scans/' + fa.id, { status: 'deleted', deleteReason: 'Taken off in Paper records',
+        deletedAt: new Date(), deletedBy: String(session.name || '') });
+    } else if (fa.col === 'treatment_records' || fa.col === 'consent_records') {
+      commitWrites_(cfg, [deleteWrite_(cfg, fa.col + '/' + fa.id)]);
+    }
+  } catch (e) { console.warn('Filed copy not removed (' + fa.col + '/' + fa.id + '): ' + e); }
+}
+
+// A picture of the scan in Firebase Storage (page 1 for PDFs), with a download link like the Scanner's photos
+function paperToStorage_(cfg, f, kind) {
+  let blob = null;
+  try {
+    const r = UrlFetchApp.fetch('https://drive.google.com/thumbnail?sz=w2000&id=' + encodeURIComponent(f.getId()), {
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() }, muteHttpExceptions: true, followRedirects: true,
+    });
+    const h = r.getHeaders();
+    if (r.getResponseCode() === 200 && /^image\//i.test(String(h['Content-Type'] || h['content-type'] || ''))) blob = r.getBlob();
+  } catch (e) { console.warn('Scan picture not made: ' + e); }
+  if (!blob && /^image\//.test(f.getMimeType())) blob = f.getBlob();
+  if (!blob) return null;   // the record still opens the scan in Drive (driveUrl)
+
+  const type = blob.getContentType() || 'image/jpeg';
+  const ext = /png/i.test(type) ? '.png' : /webp/i.test(type) ? '.webp' : '.jpg';
+  const bucket = scanJobBucket_();
+  const path = 'scans/' + kind + '/paper/' + f.getId() + ext;
+  const token = Utilities.getUuid();
+  const boundary = 'paper' + Utilities.getUuid().replace(/-/g, '');
+  const meta = JSON.stringify({ name: path, contentType: type, metadata: { firebaseStorageDownloadTokens: token } });
+  const head = Utilities.newBlob('--' + boundary + '\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n' + meta +
+    '\r\n--' + boundary + '\r\nContent-Type: ' + type + '\r\n\r\n').getBytes();
+  const tail = Utilities.newBlob('\r\n--' + boundary + '--\r\n').getBytes();
+  const res = UrlFetchApp.fetch('https://storage.googleapis.com/upload/storage/v1/b/' + encodeURIComponent(bucket) + '/o?uploadType=multipart', {
+    method: 'post', contentType: 'multipart/related; boundary=' + boundary, muteHttpExceptions: true,
+    headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) }, payload: head.concat(blob.getBytes(), tail),
+  });
+  if (res.getResponseCode() !== 200) throw new Error('Scan picture not saved (' + res.getResponseCode() + '): ' + res.getContentText().slice(0, 200));
+  return { path: path, name: f.getName(),
+    url: 'https://firebasestorage.googleapis.com/v0/b/' + bucket + '/o/' + encodeURIComponent(path) + '?alt=media&token=' + token };
 }
 
 // Run ONCE from the editor: checks the folder can be read (and approves Drive access)

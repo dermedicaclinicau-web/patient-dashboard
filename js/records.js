@@ -99,7 +99,7 @@ export async function fetchPatientRecords(patient) {
     return {
       id, title,
       category: categorize(title),
-      date: parseRecordDate(data["Record Date"]),
+      date: keyDate(String(data["Record Date"] || "")) || parseRecordDate(data["Record Date"]),
       dateText: String(data["Record Date"] || ""),
       staff: String(data.Staff || ""),
       link: String(data["PDF Link"] || ""),
