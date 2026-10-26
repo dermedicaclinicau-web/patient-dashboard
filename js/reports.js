@@ -13,7 +13,7 @@ import { MOODS } from "./end-of-day-api.js";
 import { mountPatientReport, PATIENT_TABS } from "./patient-reports.js";
 import { mountRetention } from "./retention-report.js";
 import { callApi } from "./appointments.js";
-import { mountKitDays } from "./kit-ledger.js";
+import { mountKitReconciliation } from "./kit-ledger.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(2));
@@ -1023,156 +1023,8 @@ function oldKitRows(list, products) {
 }
 
 function mountKitRecon(body) {
-  const st = { portal: [], old: [], oldProblem: "", source: "both", gapsOnly: false, noKit: false,
-    products: [], moves: [], loans: [], view: "summary", focus: "", ledgers: {} };
-  const n = (v) => (v ? fmt(v) : "—");
-  const dateOf = (k) => esc(shortDate(parseKey(k)) || "—");
-  const isNoKit = (r) => r.old && !r.hasKit;
-  const pool = () => (st.source === "portal" ? st.portal : st.source === "old" ? st.old : st.portal.concat(st.old));
-  // One injector's rows together (Portal first, then Old app)
-  const shown = () => pool().filter((r) => st.noKit || !isNoKit(r))
-    .sort((a, b) => a.staffName.localeCompare(b.staffName, "en-AU") || Number(!!a.old) - Number(!!b.old)
-      || a.productName.localeCompare(b.productName, "en-AU"));
-
-  async function load(fresh = false) {
-    body.innerHTML = SKELETON;
-    try {
-      const [products, kits, moves, loans, old] = await Promise.all([
-        listProducts(), listKits(), listKitMoves(), listAllLoans(),
-        callApi({ action: "inventory", op: "oldKitRecon", fresh })
-          .catch((e) => ({ problem: (e && e.message) || "The old app's kits couldn't be read." })),
-      ]);
-      Object.assign(st, { products, moves, loans });
-      st.portal = reconcileKits(new Map(products.map((p) => [p.id, p])), kits, moves, loans);
-      st.oldProblem = old && old.problem ? String(old.problem) : "";
-      st.old = oldKitRows(old && Array.isArray(old.rows) ? old.rows : [], products);
-      if (body.isConnected) draw();
-    } catch (err) {
-      console.error("Kit reconciliation failed:", err);
-      if (body.isConnected) body.innerHTML = `<div class="tm-empty is-error">${esc(errText(err, "Couldn't load the kits. Try again."))}</div>`;
-    }
-  }
-
-  const seg = (name, f, cur, opts) => `<div class="fe-seg">${opts.map(([v, l]) =>
-    `<label class="fe-seg-btn"><input type="radio" name="${name}" data-f="${f}" value="${v}"${cur === v ? " checked" : ""} /><span>${esc(l)}</span></label>`).join("")}</div>`;
-
-  function toolbar(extra = "") {
-    const noKitN = pool().filter(isNoKit).length;
-    return `<div class="inv-tools">
-        ${seg("rp-view", "view", st.view, [["summary", "Summary"], ["days", "Day by day"]])}
-        ${seg("rp-src", "source", st.source, [["portal", "Portal"], ["old", "Old app"], ["both", "Both"]])}
-        ${extra}
-        ${noKitN ? `<label class="fe-check"><input type="checkbox" data-f="nokit"${st.noKit ? " checked" : ""} /> Show staff with no kit (${noKitN})</label>` : ""}
-        <span class="inv-spacer"></span>
-        <button type="button" class="ff-btn" data-act="refresh">Refresh</button>
-        ${st.view === "summary" ? '<button type="button" class="ff-btn" data-act="csv">Export CSV</button>' : ""}
-      </div>
-      ${st.source !== "portal" && st.oldProblem ? `<p class="tb-bad rp-note">Old app: ${esc(st.oldProblem)}</p>` : ""}`;
-  }
-
-  function rowHtml(r) {
-    const noKit = isNoKit(r);
-    const opening = r.old
-      ? (r.hasKit ? `${esc(fmt(r.adjusted))} <small class="muted">first count ${dateOf(r.openingDate)}</small>` : "—")
-      : r.adjusted ? `${r.adjusted > 0 ? "+" : ""}${esc(fmt(r.adjusted))} <small class="muted">counts accepted</small>` : "—";
-    const now = noKit ? "—" : `<strong>${esc(fmt(r.now))}</strong>${r.old ? ` <small class="muted">last count ${dateOf(r.closingDate)}</small>` : ""}`;
-    const gap = noKit ? '<small class="muted">No kit in the old app</small>'
-      : r.ok ? '<span class="rp-ok">✓</span>'
-      : `<strong class="rp-neg">${r.gap > 0 ? "+" : ""}${esc(fmt(r.gap))}</strong>${r.gapValue !== null ? ` <small class="muted">${esc(money(r.gapValue))}</small>` : ""}`;
-    return `<tr class="${r.ok ? "" : "is-diff"}">
-      <td><strong>${esc(r.staffName)}</strong> <span class="inv-flag ${r.old ? "is-info" : "is-ok"}">${r.old ? "Old app" : "Portal"}</span>${
-        r.disputed ? ' <span class="inv-flag is-bad">Disputed</span>' : ""}</td>
-      <td>${esc(r.productName)} <small class="muted">(${esc(r.unit)})</small></td>
-      <td>${n(r.taken)}</td><td>${n(r.borrowedIn)}</td><td>${n(r.lentOut)}</td><td>${n(r.used)}</td>
-      <td>${n(r.discarded)}</td><td>${n(r.returned)}</td>
-      <td>${opening}</td><td>${r.expected === null ? "—" : esc(fmt(r.expected))}</td><td>${now}</td><td>${gap}</td>
-      <td><button type="button" class="lh-btn" data-hist="${esc(r.key)}">Day by day</button></td></tr>`;
-  }
-
-  function drawSummary() {
-    const all = shown();
-    const gaps = all.filter((r) => !r.ok);
-    const rows = st.gapsOnly ? gaps : all;
-    const priced = gaps.filter((r) => r.gapValue !== null);
-    const gapValue = priced.reduce((a, r) => a + Math.abs(r.gapValue), 0);
-    body.innerHTML = `
-      ${toolbar(`<label class="fe-check"><input type="checkbox" data-f="gaps"${st.gapsOnly ? " checked" : ""} /> Only show gaps</label>`)}
-      ${st.source !== "old" ? `<p class="muted rp-range">Portal, since each kit started: <strong>taken + borrowed in − lent out − used − discarded − returned ± counts accepted</strong>
-        should equal what's in the kit now.</p>` : ""}
-      ${st.source !== "portal" ? `<p class="muted rp-range">Old app: <strong>first start count + restocked + borrowed in − lent out − units on Wrinkle Relaxer records</strong>
-        should equal their last start count.</p>` : ""}
-      <div class="inv-stats">
-        <div class="inv-stat"><strong>${new Set(all.map((r) => r.uid)).size}</strong><span>Injectors</span></div>
-        <div class="inv-stat"><strong>${all.filter((r) => r.ok && !isNoKit(r)).length}</strong><span>Kits that add up</span></div>
-        <div class="inv-stat ${gaps.length ? "is-bad" : ""}"><strong>${gaps.length}</strong><span>With a gap</span></div>
-        <div class="inv-stat ${priced.length ? "is-bad" : ""}"><strong>${priced.length ? esc(money(gapValue)) : "—"}</strong><span>Gaps (at cost)</span></div>
-      </div>
-      ${gaps.length && priced.length < gaps.length ? '<p class="muted rp-note">Some gaps have no value because the product has no cost. Add it in Inventory → Products.</p>' : ""}
-      ${rows.length ? `<section class="tb-card"><div class="rp-scroll"><table class="inv-table rp-table rp-recon">
-        <thead><tr><th>Injector</th><th>Product</th><th>Taken</th><th>Borrowed in</th><th>Lent out</th><th>Used</th>
-          <th>Discarded</th><th>Returned</th><th>Opening / counts</th><th>Should have</th><th>In kit now</th><th>Gap</th><th></th></tr></thead>
-        <tbody>${rows.map(rowHtml).join("")}</tbody></table></div></section>`
-        : `<div class="tm-empty">${st.gapsOnly ? "No gaps. Every kit adds up. 👍"
-          : st.source === "old" ? "No old app kit records found." : "No kit activity yet."}</div>`}`;
-  }
-
-  // One entry per injector, with their Portal and Old app rows
-  function injectors() {
-    const m = new Map();
-    shown().forEach((r) => {
-      const x = m.get(r.uid) || { uid: r.uid, name: r.staffName, portal: null, old: null };
-      if (r.old) x.old = r; else if (!x.portal) x.portal = r;
-      m.set(r.uid, x);
-    });
-    return [...m.values()].sort((a, b) => a.name.localeCompare(b.name, "en-AU"));
-  }
-
-  function drawDays() {
-    body.innerHTML = `${toolbar()}
-      <p class="muted rp-range">One row per injector per day. Each count is checked against the balance before it;
-        press a row to see every entry and who each unit was used on.</p>
-      <div data-role="days"></div>`;
-    mountKitDays(body.querySelector('[data-role="days"]'), {
-      injectors: injectors(), products: st.products, moves: st.moves, loans: st.loans, source: st.source,
-      focus: st.focus, cache: st.ledgers, csv: downloadCsv, onFocus: (u) => { st.focus = u; },
-    });
-  }
-
-  const draw = () => (st.view === "days" ? drawDays() : drawSummary());
-
-  function exportCsv() {
-    const all = shown();
-    if (!all.length) { showToast("Nothing to export."); return; }
-    const cell = (v) => (v === null || v === undefined ? "" : v);
-    downloadCsv(`kit-reconciliation-${dayKey()}.csv`, [
-      ["Source", "Injector", "Product", "Unit", "Taken", "Borrowed in", "Lent out", "Used", "Discarded", "Returned",
-        "Opening / counts accepted", "First count date", "Should have", "In kit now", "Last count date", "Gap", "Gap value ($)", "Disputed"],
-      ...all.map((r) => [r.old ? "Old app" : "Portal", r.staffName, r.productName, r.unit, r.taken, r.borrowedIn, r.lentOut, r.used,
-        r.discarded, r.returned, isNoKit(r) ? "" : r.adjusted, r.old ? r.openingDate : "", cell(r.expected), cell(r.now),
-        r.old ? r.closingDate : "", isNoKit(r) ? "" : r.gap, cell(r.gapValue), r.disputed || ""]),
-    ]);
-  }
-
-  body.addEventListener("click", (e) => {
-    const h = e.target.closest("[data-hist]");
-    if (h) {
-      const r = pool().find((x) => x.key === h.dataset.hist);
-      if (r) { st.view = "days"; st.focus = r.uid; draw(); }
-      return;
-    }
-    if (e.target.closest('[data-act="refresh"]')) { st.ledgers = { fresh: true }; load(true); return; }
-    if (e.target.closest('[data-act="csv"]')) exportCsv();
-  });
-  body.addEventListener("change", (e) => {
-    const f = e.target.dataset.f;
-    if (f === "gaps") { st.gapsOnly = e.target.checked; draw(); }
-    else if (f === "nokit") { st.noKit = e.target.checked; draw(); }
-    else if (f === "source") { st.source = e.target.value; draw(); }
-    else if (f === "view") { st.view = e.target.value; if (st.view === "summary") st.focus = ""; draw(); }
-  });
-  load();
+  mountKitReconciliation(body, { csv: downloadCsv });
 }
-
 /* ===================== Start & end of day ===================== */
 
 export function mountDayReport(body) {

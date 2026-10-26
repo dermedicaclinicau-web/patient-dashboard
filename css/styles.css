@@ -9104,3 +9104,18 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 .kd2-why { max-width: 280px; }
 .kd2-why small { color: #9a3412 !important; }
 .kd2-detail { padding: 6px 4px 10px; }
+
+.kd2-table td small.kl-flag { color: #b45309; }
+
+/* Reporting → Kit reconciliation */
+.kr-table td { vertical-align: top; }
+.kr-table .n { text-align: right; white-space: nowrap; }
+.kr-table td small { display: block; color: #64748b; margin-top: 2px; }
+.kr-table td small.kr-bad { color: #b91c1c; font-weight: 600; }
+.kr-row.is-open td { background: #f0fdfa; }
+.kr-hist { width: 100%; margin: 4px 0 8px; background: #fff; }
+.kr-hist td { vertical-align: top; }
+.kr-hist td small { display: block; color: #64748b; }
+.kr-hist .n { text-align: right; white-space: nowrap; }
+.kr-hist tfoot td { font-weight: 600; background: #f8fafc; }
+.kr-more { display: block; margin: 8px auto 0; }
