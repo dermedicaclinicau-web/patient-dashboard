@@ -4,9 +4,9 @@ import { searchPatients, warmPatients } from "./patient-list.js";
 import { listPublishedForms, getFormTemplate, getFormVersion } from "./form-templates.js";
 import { normaliseField } from "./form-fields.js";
 import { mountConsumablesField, consumableAmountText } from "./consumables-field.js";
-import { consumeInTx, backdateCounts, getBaseline } from "./inventory-api.js";
+import { consumeInTx, backdateCounts, getBaseline, listProducts, listMoves, undoMove, dayKey } from "./inventory-api.js";
 import { db } from "./firebase-config.js";
-import { runTransaction, collection, query, where, getDocs, limit }
+import { runTransaction, collection, query, where, getDocs, getDoc, doc, limit }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { escapeHtml as esc, showToast, formatDobLong, formatMobile } from "./utils.js";
 import { confirmDialog } from "./dialog.js";
@@ -66,6 +66,55 @@ async function usageOf(subId) {
   const d = s.docs[0];
   return { id: d.id, lines: Array.isArray(d.data().lines) ? d.data().lines : [] };
 }
+
+/* ---------- Batches that are no longer in stock (backdated records) ---------- */
+
+// Inventory's products, once per page
+let prodMemo = null;
+const productsOnce = () => (prodMemo = prodMemo || listProducts().catch((e) => { prodMemo = null; throw e; }));
+
+// Every batch a product has ever had, empty ones too, oldest expiry first
+async function batchesEver(pid) {
+  const s = await getDocs(query(collection(db, "inv_lots"), where("productId", "==", pid)));
+  return s.docs.map((d) => {
+    const x = d.data() || {};
+    return { id: d.id, loc: x.loc === "jt" ? "jt" : "shelf", batch: String(x.batch || ""), expiry: String(x.expiry || ""), qty: Number(x.qty) || 0 };
+  }).sort((a, b) => (a.expiry || "9999").localeCompare(b.expiry || "9999") || a.loc.localeCompare(b.loc));
+}
+const normBatch = (s) => String(s || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+
+// Why a batch is empty now, for stock used on `date` and recorded later.
+// → { plan: "writeoff" | "counted" | "short" | "unknown", move, text }
+const COUNT_TYPES = ["count", "baseline", "investigation"];
+async function whyEmpty(p, lot, qty, date) {
+  if (!lot.id) return { plan: "unknown", text: "This batch was never in the inventory, so it's noted on the record only." };
+  const outs = (await listMoves({ productId: p.id, max: 1000 }))          // newest first
+    .filter((m) => m.at && dayKey(m.at) >= date)
+    .map((m) => ({ m, n: (m.lines || [])
+      .filter((l) => l.loc === lot.loc && (l.batch || "") === lot.batch && (l.expiry || "") === lot.expiry)
+      .reduce((a, l) => a + (Number(l.delta) || 0), 0) }))
+    .filter((x) => x.n < 0);
+  // The whole write-off was this one (undoing a bigger one would put the rest back too)
+  const wo = outs.find((x) => x.m.type === "writeoff" && !x.m.undone && -x.n === qty);
+  if (wo) {
+    return { plan: "writeoff", move: wo.m, text: `Written off on ${niceDay(dayKey(wo.m.at))}${wo.m.by ? ` by ${wo.m.by}` : ""}${
+      wo.m.note ? ` (${wo.m.note})` : ""}. The write-off is undone and becomes this patient's usage, so stock doesn't change.` };
+  }
+  const cnt = outs.find((x) => COUNT_TYPES.includes(x.m.type));
+  if (cnt) return { plan: "counted", move: cnt.m, text: `A count on ${niceDay(dayKey(cnt.m.at))} already took it off the digital count, so it's noted on the record only.` };
+  return { plan: "short", text: "Nothing in the activity explains why it ran out, so it's saved short for the ordering team to check. Nothing goes below zero." };
+}
+
+// One of these as a products-used line (the same shape the products field gives consumeInTx)
+function extraLine(x, fid) {
+  return {
+    fid, productId: x.p.id, name: x.p.name, kind: "storage", unit: x.p.stockUnit, stockUnit: x.p.stockUnit,
+    loc: x.lot.loc, dosePer: x.p.dosePer, doseUnit: x.p.doseUnit, batchLabel: x.p.batchLabel, block: false,
+    rows: [{ ref: x.lot.id || "", batch: x.lot.batch, expiry: x.lot.expiry, amount: x.qty, dose: x.dose }],
+    extra: x,
+  };
+}
+
 // Counts after a day, per "productId|loc": { date, adjusted, open }
 //   adjusted: a shortfall there was accepted, so the digital count already has it off
 //   open: a shortfall there hasn't been reviewed yet (the digital count still includes it)
@@ -564,7 +613,7 @@ export function mountPaperRecords(container, { staff } = {}) {
 
     /* ---------- Products used (treatment records) ---------- */
     // The form's own Consumables fields, mounted into prodEl (which moves with the treatment section)
-    const cs = { formId: "", fields: [], loading: false, err: "", mode: "stock", force: {}, counted: null };
+    const cs = { formId: "", fields: [], loading: false, err: "", mode: "stock", force: {}, counted: {}, extra: [] };
     const prodEl = document.createElement("div");
     prodEl.className = "ppr-cs-wrap";
     let csSeq = 0, csTimer = 0, lastType = "";
@@ -618,11 +667,13 @@ export function mountPaperRecords(container, { staff } = {}) {
           </div></div>
         <p class="fe-note" data-role="cs-when"></p>
         <div class="ppr-cs-fields"${cs.mode === "none" ? " hidden" : ""}>${cs.fields.map((x) => `<div class="ppr-cs-field" data-csf="${esc(x.id)}">
-          ${cs.fields.length > 1 && x.label ? `<span class="lh-label">${esc(x.label)}</span>` : ""}<div data-cs-host></div></div>`).join("")}</div>
+          ${cs.fields.length > 1 && x.label ? `<span class="lh-label">${esc(x.label)}</span>` : ""}<div data-cs-host></div></div>`).join("")}
+          <div data-role="extra"></div></div>
         <div data-role="cs-notes"></div>
       </div>`;
       cs.fields.forEach((x) => mountConsumablesField(prodEl.querySelector(`[data-csf="${CSS.escape(x.id)}"]`), x, { staff, onChange: noteCsSoon }));
       noteCs();
+      drawExtra();
     }
 
     function syncCsMode() {
@@ -672,12 +723,134 @@ export function mountPaperRecords(container, { staff } = {}) {
       }).join("");
     }
 
+    /* ---------- A batch that's no longer in stock ---------- */
+    const usedOn = () => dateIn.value;
+    const XTAG = { writeoff: "is-info", counted: "", short: "is-warn", unknown: "" };
+    function drawExtra() {
+      const host = prodEl.querySelector('[data-role="extra"]');
+      if (!host) return;
+      host.innerHTML = `${cs.extra.map((x, i) => `
+        <div class="ppr-cs-note ${XTAG[x.plan]}"><span><strong>${esc(x.p.name)}</strong> · ${esc(x.lot.batch || "No number")}${
+          x.lot.expiry ? ` · Exp ${esc(niceDay(x.lot.expiry))}` : ""} · ${x.qty} ${esc(x.p.stockUnit)}${
+          x.dose ? ` (${esc(x.dose)} ${esc(x.p.doseUnit)} given)` : ""}<br><small>${esc(x.text)}</small></span>
+          <button type="button" class="lh-btn is-quiet" data-xrm="${i}">Remove</button></div>`).join("")}
+        <button type="button" class="hx-add" data-act="x-add">+ A batch that's no longer in stock</button>`;
+    }
+    prodEl.addEventListener("click", (e) => {
+      if (saving) return;
+      const rm = e.target.closest("[data-xrm]");
+      if (rm) { cs.extra.splice(Number(rm.dataset.xrm), 1); drawExtra(); return; }
+      if (e.target.closest('[data-act="x-add"]')) addExtraDialog();
+    });
+
+    async function addExtraDialog() {
+      const date = usedOn();
+      if (!date) { fail("Choose the date of treatment first."); return; }
+      let ps;
+      try { ps = (await productsOnce()).filter((p) => p.active && p.usage === "storage"); }
+      catch { showToast("Couldn't load the products. Try again."); return; }
+      let batches = [];
+      const d2 = document.createElement("dialog");
+      d2.className = "lh-dialog inv-dlg";
+      d2.innerHTML = `
+        <form class="lh-form" novalidate>
+          <div class="lh-dialog-head"><h3>A batch that's no longer in stock</h3>
+            <p>Used on ${esc(niceDay(date))}. Enter it as it's written on the paper. The portal checks what happened to that batch.</p></div>
+          <label class="lh-field"><span class="lh-label">Product</span>
+            <select class="fb-select" name="pid"><option value="">Choose…</option>${ps.map((p) =>
+              `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></label>
+          <label class="lh-field" data-role="lotrow" hidden><span class="lh-label">Batch</span><select class="fb-select" name="lot"></select></label>
+          <div class="inv-two" data-role="typed" hidden>
+            <label class="lh-field"><span class="lh-label">Batch number</span><input class="fe-input" name="batch" maxlength="40" autocomplete="off" /></label>
+            <label class="lh-field"><span class="lh-label">Expiry date</span><input class="fe-input" name="expiry" type="date" /></label>
+          </div>
+          <div class="inv-two">
+            <label class="lh-field"><span class="lh-label" data-role="qtylbl">How many</span>
+              <input class="fe-input" name="qty" type="number" min="1" max="20" step="1" value="1" inputmode="numeric" /></label>
+            <label class="lh-field" data-role="doserow" hidden><span class="lh-label" data-role="doselbl">Amount given</span>
+              <input class="fe-input" name="dose" type="number" min="0" step="any" inputmode="decimal" /></label>
+          </div>
+          <p class="lh-error" role="alert" hidden></p>
+          <div class="lh-actions">
+            <button type="button" class="lh-btn is-quiet" data-act="x-cancel">Cancel</button>
+            <button type="submit" class="lh-btn is-primary">Add</button>
+          </div>
+        </form>`;
+      document.body.appendChild(d2);
+      d2.addEventListener("close", () => d2.remove());
+      d2.showModal();
+      const form = d2.querySelector("form");
+      const fe = form.elements;
+      const e2 = d2.querySelector(".lh-error");
+      const $2 = (r) => d2.querySelector(`[data-role="${r}"]`);
+      const prod = () => ps.find((p) => p.id === fe.pid.value) || null;
+      const syncTyped = () => { $2("typed").hidden = fe.lot.value !== "typed"; };
+
+      fe.pid.addEventListener("change", async () => {
+        const p = prod();
+        $2("lotrow").hidden = !p;
+        $2("doserow").hidden = !(p && p.doseUnit);
+        if (!p) return;
+        $2("qtylbl").textContent = `How many (${p.stockUnit})`;
+        $2("doselbl").textContent = `Amount given (${p.doseUnit})`;
+        fe.lot.innerHTML = "<option>Loading…</option>";
+        try { batches = (await batchesEver(p.id)).filter((l) => l.qty === 0); } catch { batches = []; }
+        fe.lot.innerHTML = batches.map((l, i) => `<option value="${i}">${esc(`${l.loc === "jt" ? "JT storage" : "Shelf"} · ${
+          l.batch || "No number"}${l.expiry ? ` · Exp ${niceDay(l.expiry)}` : ""} · none left`)}</option>`).join("")
+          + '<option value="typed">Not listed: type it in</option>';
+        syncTyped();
+      });
+      fe.lot.addEventListener("change", syncTyped);
+      d2.querySelector('[data-act="x-cancel"]').addEventListener("click", () => d2.close());
+
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        e2.hidden = true;
+        const p = prod();
+        const qty = parseInt(fe.qty.value, 10);
+        const dose = p && p.doseUnit && fe.dose.value !== "" ? Math.max(0, Number(fe.dose.value) || 0) : 0;
+        let lot = null;
+        try {
+          if (!p) throw new Error("Choose the product.");
+          if (!(qty >= 1)) throw new Error("Enter how many.");
+          if (fe.lot.value === "typed") {
+            const b = fe.batch.value.trim();
+            if (p.tracked && (!b || !fe.expiry.value)) throw new Error("Enter the batch number and expiry date from the paper.");
+            // A typed batch the inventory had (any capitals or spacing) is that batch
+            const all = await batchesEver(p.id);
+            lot = all.find((l) => normBatch(l.batch) === normBatch(b) && (!fe.expiry.value || l.expiry === fe.expiry.value))
+              || { id: "", loc: "shelf", batch: b, expiry: fe.expiry.value || "", qty: 0 };
+            if (lot.qty > 0) throw new Error("That batch still has stock. Choose it in the products list instead.");
+          } else {
+            lot = batches[Number(fe.lot.value)];
+            if (!lot) throw new Error("Choose the batch.");
+          }
+        } catch (ex) { e2.textContent = ex.message; e2.hidden = false; return; }
+
+        const btn = form.querySelector('[type="submit"]');
+        btn.disabled = true;
+        btn.textContent = "Checking…";
+        try {
+          const why = await whyEmpty(p, lot, qty, date);
+          cs.extra.push({ p, lot, qty, dose, ...why });
+          d2.close();
+          drawExtra();
+        } catch (ex) {
+          console.error("Batch check failed:", ex);
+          e2.textContent = "Couldn't check that batch's history. Try again.";
+          e2.hidden = false;
+          btn.disabled = false;
+          btn.textContent = "Add";
+        }
+      });
+    }
+
     // Ready to save? "" or what to fix
     async function csReady() {
       if (cs.mode === "none") return "";
       const m = csProblemAny();
       if (m) return m;
-      if (csPlanAll().length) {
+      if (csPlanAll().length || cs.extra.length) {
         if (!whoId()) return whoSel() && whoSel().value === OTHER
           ? "Products have to be recorded under someone on the staff list. Choose them, or if they've left, choose who's entering it."
           : "Choose who did the treatment, so the products are recorded under them.";
@@ -701,6 +874,13 @@ export function mountPaperRecords(container, { staff } = {}) {
         const c = cs.counted && cs.counted[k];
         (beforeStock(date) || (c && c.adjusted && !cs.force[k]) ? note : take).push(l);
       });
+      // Batches no longer in stock: a write-off becomes this usage, unexplained ones are saved short, the rest are noted
+      if (cs.mode !== "none") {
+        const fid = (cs.fields[0] && cs.fields[0].id) || "products";
+        cs.extra.forEach((x) => {
+          (beforeStock(date) || x.plan === "counted" || x.plan === "unknown" ? note : take).push(extraLine(x, fid));
+        });
+      }
       return { take, note };
     }
     // 1. Takes it off stock (once), dated the treatment day. 2. Corrects opening counts done since.
@@ -711,23 +891,44 @@ export function mountPaperRecords(container, { staff } = {}) {
       if (split.take.length) {
         let u = await usageOf(subId);   // a retry never takes it off twice
         if (!u) {
+          // Write-offs that were really this treatment: undone first, so their stock is back in the batch to take
+          for (const l of split.take.filter((x) => x.extra && x.extra.plan === "writeoff")) {
+            const done = await getDoc(doc(db, "inv_moves", `undo__${l.extra.move.id}`));
+            if (done.exists()) continue;
+            try {
+              await undoMove(l.extra.move, `Used on ${patientName} on ${recordDate} instead (paper record)`, staff);
+            } catch (ex) {
+              throw new Error(ex && ex.code === "permission-denied"
+                ? `${l.name}: turning its write-off into usage needs Inventory access. Ask someone with it to press Save products used.`
+                : `${l.name}: couldn't undo its write-off. ${(ex && ex.message) || "Try again."}`);
+            }
+          }
           const res = await runTransaction(db, (tx) => consumeInTx(tx, {
             submissionId: subId, lines: split.take, patientId, patientName, formName, recordDate, staff, paper: true,
           }));
           u = { id: res.usageId, lines: res.lines };
         }
-        // What left the Shelf / JT storage, per batch (kit lines aren't in opening counts)
-        const applied = [];
+        // What left the Shelf / JT storage, per batch (kit lines aren't in opening counts).
+        // A former write-off: counts after it already had it off, so only counts before it are corrected.
+        const groups = new Map();   // "" = normal; a move id = counts only up to that write-off
         u.lines.forEach((l, li) => (l.rows || []).forEach((row, ri) => {
           const n = l.kind === "storage" ? Number(row.taken) || 0
             : (l.kind === "vial" || l.kind === "shared") && row.opened ? 1 : 0;
           if (!n || !["shelf", "jt"].includes(row.from)) return;
-          applied.push({ saleId: `${u.id}:${li}:${ri}`, productId: l.productId, date: recordDate, loc: row.from,
+          const src = split.take[li] && split.take[li].extra;
+          const key = src && src.plan === "writeoff" ? src.move.id : "";
+          const g = groups.get(key) || { before: key ? src.move.at : null, list: [] };
+          g.list.push({ saleId: `${u.id}:${li}:${ri}`, productId: l.productId, date: recordDate, loc: row.from,
             rows: [{ batch: row.batch || "", expiry: row.expiry || "", taken: n }] });
+          groups.set(key, g);
         }));
-        if (applied.length && recordDate < todayKey()) {
-          corrected = await backdateCounts(applied, staff, { kind: "use" })
-            .catch((ex) => { console.warn("Counts not corrected:", ex); return null; });
+        if (groups.size && recordDate < todayKey()) {
+          corrected = { lines: 0, closed: 0, skipped: [], failed: 0 };
+          for (const g of groups.values()) {
+            const c = await backdateCounts(g.list, staff, { kind: "use", before: g.before })
+              .catch((ex) => { console.warn("Counts not corrected:", ex); return null; });
+            if (c) { corrected.lines += c.lines; corrected.closed += c.closed; corrected.skipped.push(...c.skipped); }
+          }
         }
       }
       const r = await callApi({ action: "paper", op: "products", fileId: f.id, clinicianId: whoId(),

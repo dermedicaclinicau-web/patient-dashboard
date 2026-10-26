@@ -85,6 +85,7 @@
                   "./js/notify-api.js",
                   "./js/order-request.js",
                   "./js/panel-resize.js",
+                  "./js/paper-records.js",
                   "./js/patient-dashboard.js",
                   "./js/patient-list.js",
                   "./js/patient-reports.js",
@@ -187,6 +188,6 @@
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261026-121530",
-    "v":  "20261026-121530"
+    "version":  "20261026-160403",
+    "v":  "20261026-160403"
 }
