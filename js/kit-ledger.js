@@ -123,11 +123,9 @@ function oldEntries(data) {
       value: r1(list.reduce((a, x) => a + (Number(x.units) || 0), 0)), batches: list });
   });
   (data.records || []).forEach((w) => {
-    const lines = w.lines || [];
     add({ ms: atTime(w.date, w.time), date: w.date, kind: "move", sub: "use", units: -r1(w.units),
-      patientName: w.patientName || "", type: uniqJoin(lines.map((d) => d.type)) || "Treatment",
-      areas: lines.map((d) => `${d.area || "Area"} ${fmt(d.units)}`).join(" · "),
-      batch: uniqJoin(lines.map((d) => d.batch)), expiry: uniqJoin(lines.map((d) => d.expiry), expMY) });
+      patientName: w.patientName || "", type: w.type || "Treatment", areas: w.areas || "",
+      batch: w.batch || "", expiry: w.expiry || "" });
   });
   return out;
 }
@@ -177,15 +175,16 @@ function groupDays(entries) {
 
 /* ---------- Reporting → Kit reconciliation ---------- */
 export function mountKitReconciliation(body, { csv = null } = {}) {
-  const st = { staff: "", product: "", from: "", to: "", limit: 100, open: new Set(), people: [], products: [], problem: "" };
+  const st = { staff: "", product: "", from: daysAgo(89), to: "", limit: 100, open: new Set(), people: [], products: [],
+    problem: "", oldProblem: "", loadingOld: false, base: null, old: {}, seq: 0 };
 
+  // Portal records: read once
   async function load() {
     body.innerHTML = SKEL;
     try {
-      const [products, kits, moves, loans, staffRes, old] = await Promise.all([
+      const [products, kits, moves, loans, staffRes] = await Promise.all([
         listProducts(), listKits(), listKitMoves(), listAllLoans(),
         callApi({ action: "staffList" }).catch(() => ({ staff: [] })),
-        callApi({ action: "inventory", op: "oldKitLedgerAll" }).catch((e) => ({ problem: (e && e.message) || "couldn't be read." })),
       ]);
       const kitPs = products.filter((p) => p.usage === "kit" && p.dosePer);
       if (!kitPs.length) { body.innerHTML = '<div class="tm-empty">No products are carried in kits yet.</div>'; return; }
@@ -193,11 +192,9 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
       const kitIds = new Set(kitPs.map((p) => p.id));
       st.products = kitPs;
       if (!st.product) st.product = oldProduct.id;
-      st.problem = old && old.problem ? `Old app records: ${old.problem}` : "";
 
       const staff = staffRes && Array.isArray(staffRes.staff) ? staffRes.staff : [];
       const byId = new Map(staff.map((s) => [s.id, s]));
-      const oldBy = new Map(((old && old.people) || []).map((p) => [p.key, p]));
       const uids = new Set(staff.filter((s) => s.injector).map((s) => s.id));
       kits.forEach((k) => { if (kitIds.has(k.productId) && k.staffUid) uids.add(k.staffUid); });
       moves.forEach((m) => {
@@ -206,30 +203,17 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
         if (m.staffUid) uids.add(m.staffUid);
       });
       loans.forEach((l) => { if (kitIds.has(l.productId)) { if (l.toUid) uids.add(l.toUid); if (l.fromUid) uids.add(l.fromUid); } });
-      oldBy.forEach((p) => { if (p.staffUid) uids.add(p.staffUid); });
 
+      st.problem = "";
       const data = await Promise.all([...uids].map(async (uid) => {
         let usage = [], days = [];
         try { [usage, days] = await Promise.all([listUsageByStaff(uid), listKitDaysFor(uid)]); }
         catch (e) { console.error("Kit records failed for", uid, e); st.problem = "Some portal records couldn't be loaded."; }
-        const o = oldBy.get(uid);
         const kitName = (kits.find((k) => k.staffUid === uid) || {}).staffName;
-        return { uid, usage, days, o, name: (byId.get(uid) || {}).name || (o && o.staffName) || kitName || "Unknown" };
+        return { uid, usage, days, name: (byId.get(uid) || {}).name || kitName || "Unknown" };
       }));
-
-      const people = [];
-      kitPs.forEach((product) => {
-        data.forEach((x) => {
-          const pe = portalEntries({ uid: x.uid, product, moves, loans, usage: x.usage, days: x.days });
-          const oe = product === oldProduct && x.o ? oldEntries(x.o) : [];
-          if (pe.length || oe.length) people.push({ uid: x.uid, name: x.name, product, L: mergeSources(pe, oe) });
-        });
-        if (product === oldProduct) {
-          oldBy.forEach((o, k) => { if (!o.staffUid) people.push({ uid: k, name: o.staffName, product, L: mergeSources([], oldEntries(o)) }); });
-        }
-      });
-      st.people = people;
-      if (body.isConnected) draw();
+      st.base = { kitPs, oldProduct, moves, loans, byId, data };
+      await loadOld(false);
     } catch (err) {
       console.error("Kit reconciliation failed:", err);
       if (body.isConnected) {
@@ -239,6 +223,54 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
     }
   }
 
+  // The old app's records for the chosen dates (asked for again when the dates change, remembered per range)
+  async function loadOld(fresh) {
+    const k = `${st.from || ""}|${st.to || ""}`;
+    if (!(k in st.old) || fresh) {
+      const my = ++st.seq;
+      st.loadingOld = true;
+      if (st.people.length) draw(); else body.innerHTML = SKEL;
+      let people = null;
+      try {
+        const r = await callApi({ action: "inventory", op: "oldKitLedgerAll", from: st.from || "", to: st.to || "", fresh: fresh === true });
+        if (r && r.problem) throw new Error(r.problem);
+        people = (r && r.people) || [];
+        st.oldProblem = "";
+      } catch (e) {
+        st.oldProblem = `Old app records: ${(e && e.message) || "couldn't be read."} Try a shorter date range.`;
+      }
+      if (my !== st.seq) return;
+      st.loadingOld = false;
+      if (people) st.old[k] = people;
+    }
+    build(st.old[k] || []);
+    if (body.isConnected) draw();
+  }
+
+  // Portal and old app together, one ledger per injector and product
+  function build(oldPeople) {
+    const b = st.base;
+    if (!b) return;
+    const oldBy = new Map(oldPeople.map((p) => [p.key, p]));
+    const have = new Set(b.data.map((x) => x.uid));
+    const people = [];
+    b.kitPs.forEach((product) => {
+      b.data.forEach((x) => {
+        const o = oldBy.get(x.uid);
+        const pe = portalEntries({ uid: x.uid, product, moves: b.moves, loans: b.loans, usage: x.usage, days: x.days });
+        const oe = product === b.oldProduct && o ? oldEntries(o) : [];
+        if (pe.length || oe.length) people.push({ uid: x.uid, name: x.name, product, L: mergeSources(pe, oe) });
+      });
+      if (product === b.oldProduct) {
+        oldBy.forEach((o, key) => {
+          if (have.has(key)) return;
+          people.push({ uid: key, name: (b.byId.get(key) || {}).name || o.staffName, product, L: mergeSources([], oldEntries(o)) });
+        });
+      }
+    });
+    st.people = people;
+  }
+  
   function rows() {
     const a = st.from || "0000-00-00", b = st.to || "9999-99-99";
     const out = [];
@@ -279,7 +311,9 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
         <span class="inv-spacer"></span>
         ${csv ? '<button type="button" class="ff-btn" data-act="kr-csv">Export CSV</button>' : ""}
       </div>
-      ${st.problem ? `<p class="tb-bad rp-note">${esc(st.problem)}</p>` : ""}`;
+      ${st.problem ? `<p class="tb-bad rp-note">${esc(st.problem)}</p>` : ""}
+      ${st.oldProblem ? `<p class="tb-bad rp-note">${esc(st.oldProblem)}</p>` : ""}
+      ${st.loadingOld ? `<p class="muted rp-note">Loading the old app's records for these dates…</p>` : ""}`;
   }
 
   function historyHtml(d) {
@@ -373,7 +407,7 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
     st[f] = ev.target.value;
     if (f === "product") st.staff = "";
     st.limit = 100;
-    draw();
+    if (f === "from" || f === "to") loadOld(false); else draw();
   });
 
   load();

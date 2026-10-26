@@ -4307,7 +4307,7 @@ function handleInventory_(body) {
     if (op === 'kitDay') return invKitDay_(body, session);
     if (op === 'oldKitLedgerAll') {
       if (!can_(session, 'menu.reports') && !can_(session, 'inventory.manage')) return { ok: false, error: 'FORBIDDEN' };
-      try { return Object.assign({ ok: true }, oldKitLedgerAll_(body.fresh === true)); }
+      try { return Object.assign({ ok: true }, oldKitLedgerAll_(body.fresh === true, String(body.from || ''), String(body.to || ''))); }
       catch (e) { return { ok: true, problem: String(e && e.message ? e.message : e).slice(0, 300) }; }
     }
     if (op === 'oldKitLedger') {
@@ -16213,11 +16213,11 @@ function oldKitLedger_(namesIn, fresh) {
   return res;
 }
 
-// Reporting → Kit reconciliation → Day by day: every injector's old-app ledger in one go.
-// Grouped like oldKitRecon_ (old names matched to the staff list), so each person's key matches their table row:
-// their staff ID, or "old:<name>" when the name isn't on the staff list. Read only. Remembered 15 minutes.
-function oldKitLedgerAll_(fresh) {
-  const key = 'old_kit_ledger_all_v1';
+// The old app's kits for every injector, kept small: one array per row. Remembered 15 minutes (the slow part).
+// rows:    [kind, date, at, count, batch, expiry, voided (1/0), note]
+// records: [date, time, patient, units, areas, type, batch, expiry]
+function oldKitBase_(fresh) {
+  const key = 'old_kit_base_v1';
   if (!fresh) { const hit = repCacheGet_(key); if (hit) return hit; }
 
   const staff = getStaffDocs_();
@@ -16233,6 +16233,14 @@ function oldKitLedgerAll_(fresh) {
     if (p.oldNames.indexOf(name) === -1) p.oldNames.push(name);
     return p;
   };
+  const my = function (s) {   // "2028-05-31" → "05/2028"
+    s = String(s || '').trim();
+    const m = /^(\d{4})-(\d{2})/.exec(s);
+    return m ? m[2] + '/' + m[1] : s;
+  };
+  const join = function (list) {
+    return list.filter(function (x, i, a) { return x && a.indexOf(x) === i; }).join(', ');
+  };
 
   const sheet = oldKitRows_();
   const voided = {};
@@ -16242,12 +16250,12 @@ function oldKitLedgerAll_(fresh) {
   });
   const seen = {};
   sheet.forEach(function (r) {
-    if (!r.staff) return;
+    if (!r.staff || r.kind === 'VOID') return;
     const k = [r.id, r.date, r.staff, r.count, r.batch].join('|');
     if (seen[k]) return;
     seen[k] = true;
-    personOf(r.staff).rows.push({ id: r.id, kind: r.kind, date: r.date, at: r.at, count: r.count, batch: r.batch,
-      expiry: r.expiry, note: r.note, voided: r.kind === 'RESTOCK' && !!voided[r.id.toUpperCase()] });
+    personOf(r.staff).rows.push([r.kind, r.date, r.at || 0, r.count, r.batch, r.expiry,
+      r.kind === 'RESTOCK' && voided[r.id.toUpperCase()] ? 1 : 0, String(r.note || '').slice(0, 80)]);
   });
 
   fsListAll_(getConfig_(), OLD_WR_COL_, ['Staff', 'Patient Name', 'Record Date', 'Record ID', 'treatment_details_map'])
@@ -16261,17 +16269,47 @@ function oldKitLedgerAll_(fresh) {
         x = x || {};
         return {
           area: String(x['Area Selected'] || '').trim(), batch: String(x['Batch Number'] || '').trim(),
-          expiry: String(x['Expiry Date'] || '').trim(), type: String(x.Type || '').trim(),
+          expiry: my(x['Expiry Date']), type: String(x.Type || '').trim(),
           units: Number(String(x['Total Units'] == null ? '' : x['Total Units']).replace(/[^\d.]/g, '')) || 0,
         };
       }).filter(function (x) { return x.units > 0; });
       const units = Math.round(lines.reduce(function (a, x) { return a + x.units; }, 0) * 10) / 10;
       if (!(units > 0)) return;
-      personOf(name).records.push({ recordId: String(f['Record ID'] || ''), date: date, time: t ? t[1] + ':' + t[2] : '',
-        patientName: String(f['Patient Name'] || '').trim(), lines: lines, units: units });
+      personOf(name).records.push([date, t ? t[1] + ':' + t[2] : '', String(f['Patient Name'] || '').trim(), units,
+        lines.map(function (x) { return (x.area || 'Area') + ' ' + x.units; }).join(' · '),
+        join(lines.map(function (x) { return x.type; })), join(lines.map(function (x) { return x.batch; })),
+        join(lines.map(function (x) { return x.expiry; }))]);
     });
 
   const res = { people: Object.keys(people).map(function (k) { return people[k]; }), at: new Date().toISOString() };
   repCachePut_(key, res, 900);
   return res;
+}
+
+// Reporting → Kit reconciliation: the old app's days between two dates ("" = no limit).
+// Each injector's last start count before "from" is included too, so the first count in the range can be checked.
+function oldKitLedgerAll_(fresh, from, to) {
+  const ok = function (k) { return /^\d{4}-\d{2}-\d{2}$/.test(k); };
+  from = ok(from) ? from : '';
+  to = ok(to) ? to : '';
+  const base = oldKitBase_(fresh);
+  const people = base.people.map(function (p) {
+    let start = from;
+    if (from) {
+      let prior = '';
+      p.rows.forEach(function (r) { if (r[0] === 'SOD' && r[1] < from && r[1] > prior) prior = r[1]; });
+      start = prior || from;
+    }
+    const inRange = function (d) { return (!start || d >= start) && (!to || d <= to); };
+    return {
+      key: p.key, staffUid: p.staffUid, staffName: p.staffName, oldNames: p.oldNames,
+      rows: p.rows.filter(function (r) { return inRange(r[1]); }).map(function (r) {
+        return { kind: r[0], date: r[1], at: r[2], count: r[3], batch: r[4], expiry: r[5], voided: r[6] === 1, note: r[7] };
+      }),
+      records: p.records.filter(function (x) { return inRange(x[0]); }).map(function (x) {
+        return { date: x[0], time: x[1], patientName: x[2], units: x[3], areas: x[4], type: x[5], batch: x[6], expiry: x[7] };
+      }),
+    };
+  }).filter(function (p) { return p.rows.length || p.records.length; });
+  return { people: people, at: base.at };
 }
