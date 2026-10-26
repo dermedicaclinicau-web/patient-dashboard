@@ -15297,7 +15297,7 @@ function paperList_(cfg, fresh) {
   }
   const st = {};
   fsListAll_(cfg, PAPER_SCANS_, ['status', 'note', 'reason', 'patientId', 'patientName', 'recordDate', 'by', 'at', 'filedAs',
-    'productsDone', 'productsTaken', 'products', 'productsAt'])
+    'productsDone', 'productsTaken', 'products', 'productsAt', 'productsFor'])
     .forEach(function (d) { st[d.name.split('/').pop()] = fromFields_(d.fields || {}); });
   const linked = paperLinked_(cfg);
   const out = files.map(function (f) {
@@ -15310,6 +15310,7 @@ function paperList_(cfg, fresh) {
       patientName: String(s.patientName || ''), recordDate: String(s.recordDate || ''), by: String(s.by || ''), at: String(s.at || ''),
       productsDone: s.productsDone === true, productsTaken: s.productsTaken === true,
       products: Array.isArray(s.products) ? s.products.map(String) : [], productsAt: String(s.productsAt || ''),
+      productsFor: String(s.productsFor || ''),
     });
   }).sort(function (a, b) { return a.created.localeCompare(b.created); });   // oldest first: work through the backlog in order
   return { ok: true, files: out, folderUrl: 'https://drive.google.com/drive/folders/' + paperRootId_() };
@@ -15723,9 +15724,24 @@ function paperProductsDone_(cfg, body, session) {
   };
   const taken = clean(body.taken);
   const noted = clean(body.noted);
+  // Who did the treatment: the usage is theirs (My dashboard → What I used, usage reports)
+  const cid = String(body.clinicianId || '');
+  const clin = cid ? getStaffDocs_().filter(function (s) { return s.id === cid; })[0] || null : null;
+  if (cid && !clin) return { ok: true, problem: "That clinician isn't on the staff list. Choose them again." };
+  if (taken.length && !clin) return { ok: true, problem: 'Choose who did the treatment, so the products are recorded under them.' };
   // Only say it came off stock once it really has
-  if (taken.length && !fsQuery_(cfg, 'inv_usage', 'submissionId', 'EQUAL', 'paper_' + id, 1).length) {
-    return { ok: true, problem: "The stock change wasn't found. Try again." };
+  const usage = fsQuery_(cfg, 'inv_usage', 'submissionId', 'EQUAL', 'paper_' + id, 5);
+  if (taken.length && !usage.length) return { ok: true, problem: "The stock change wasn't found. Try again." };
+  // The browser saved it as the person entering it (the rules require that). It's moved to the clinician here,
+  // and who entered it is kept. Done again on a retry, so it always ends up right.
+  if (clin) {
+    usage.forEach(function (u) {
+      fsPatch_(cfg, 'inv_usage/' + u._id, {
+        by: String(clin.name || ''), byUid: String(clin.id),
+        enteredBy: String(u.enteredBy || u.by || session.name || ''), enteredByUid: String(u.enteredByUid || u.byUid || session.uid || ''),
+        source: 'Paper record',
+      });
+    });
   }
   const none = body.none === true && !taken.length && !noted.length;
   const lines = taken.concat(noted.map(function (s) { return s + ' (noted, stock not changed)'; }));
@@ -15735,13 +15751,17 @@ function paperProductsDone_(cfg, body, session) {
     : 'Products used saved: ' + taken.length + ' taken off stock' + (noted.length ? ', ' + noted.length + ' noted only' : '');
   fsPatch_(cfg, path, {
     productsDone: true, productsTaken: taken.length > 0, products: lines, productsAt: now, productsBy: who,
+    productsFor: clin ? String(clin.name || '') : '', productsForUid: clin ? String(clin.id) : '',
     history: (Array.isArray(cur.history) ? cur.history : []).concat([{ at: now, by: who, what: what, note: '' }]).slice(-30),
   });
   try {
-    fsPatch_(cfg, cur.filedAs.col + '/' + cur.filedAs.id, { 'Products Used': none ? 'Not written on the paper' : lines.join('\n') });
+    const rec = { 'Products Used': none ? 'Not written on the paper' : lines.join('\n') };
+    if (clin) rec['Staff'] = String(clin.name || '');
+    fsPatch_(cfg, cur.filedAs.col + '/' + cur.filedAs.id, rec);
   } catch (e) { console.warn('Products not added to the record ' + cur.filedAs.id + ': ' + e); }
   console.log('Paper scan ' + id + ': ' + what + ' by ' + who);
-  return { ok: true, status: 'products', taken: taken.length > 0, products: lines, none: none, at: now };
+  return { ok: true, status: 'products', taken: taken.length > 0, products: lines, none: none, at: now,
+    clinician: clin ? String(clin.name || '') : '' };
 }
 
 // A picture of the scan in Firebase Storage (page 1 for PDFs), with a download link like the Scanner's photos

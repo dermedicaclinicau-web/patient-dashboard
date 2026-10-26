@@ -94,6 +94,10 @@ export function mountPaperRecords(container, { staff } = {}) {
   const st = { tab: "scans", files: null, visits: null, vMeta: { from: "", cats: [] }, q: "", vq: "", vStaff: "all", vCat: "all",
     showSorted: false, thumbs: {}, sFrom: "", sTo: "", sort: "old", sLink: "all", cfg: null };
   let cfgJob = null;
+  let staffJob = null;
+  const loadStaff = () => staffJob || (staffJob = callApi({ action: "staffList" })
+    .then((r) => (r && Array.isArray(r.staff) ? r.staff.filter((s) => s.name) : []))
+    .catch((e) => { staffJob = null; throw e; }));
   const loadCfg = () => cfgJob || (cfgJob = callApi({ action: "paper", op: "settings" })
     .then((r) => { st.cfg = r && !r.problem ? r : null; return st.cfg; })
     .catch((e) => { cfgJob = null; throw e; }));
@@ -135,7 +139,8 @@ export function mountPaperRecords(container, { staff } = {}) {
     const [label, tone] = STATUS[f.status] || STATUS.todo;
     const th = st.thumbs[f.id];
     const prodLine = f.status === "filed" && f.filedKind === "treatment"
-      ? (f.productsDone ? (f.products && f.products.length ? `Products: ${f.products.join(" · ")}` : "Products: not written on the paper")
+      ? (f.productsDone ? (f.products && f.products.length
+          ? `Products${f.productsFor ? ` (${f.productsFor})` : ""}: ${f.products.join(" · ")}` : "Products: not written on the paper")
         : "Products used not saved yet") : "";
     const sub = [`Uploaded ${niceAt(f.created)}`, f.folder, f.kind === "pdf" ? "PDF" : "Photo"].filter(Boolean).join(" · ");
     const extra = f.status === "filed" ? `${FILE_NAME[f.filedKind] || "Filed"}${f.filedTitle ? `: ${f.filedTitle}` : ""} · ${f.patientName} · ${niceDay(f.recordDate)}`
@@ -348,8 +353,10 @@ export function mountPaperRecords(container, { staff } = {}) {
             <div class="ppr-types">${FILE_TYPES.map(([k, l]) =>
               `<button type="button" class="ppr-type" data-type="${k}" aria-pressed="false">${esc(l)}</button>`).join("")}</div></div>
           <div data-role="typebody"></div>
-          <label class="lh-field"><span class="lh-label">Clinician (optional)</span>
-            <input class="fe-input" name="who" maxlength="80" placeholder="As written on the paper" /></label>
+          <label class="lh-field"><span class="lh-label">Clinician</span>
+            <select class="fb-select" name="whoId"><option value="">Loading staff…</option></select>
+            <input class="fe-input" name="who" maxlength="80" placeholder="Their name, as written on the paper" hidden />
+            <small class="fe-note" data-role="who-note">Products used are recorded under this person.</small></label>
           <p class="lh-error" role="alert" hidden></p>
           <p class="ppr-prog" data-role="prog" aria-live="polite" hidden></p>
           <details class="ppr-more"${f.status === "help" ? " open" : ""}><summary>Not a treatment record, or need help?</summary>
@@ -472,6 +479,71 @@ export function mountPaperRecords(container, { staff } = {}) {
       rx: [{ product: "", custom: !rxList.length, name: "" }] };
     let forms = null;
 
+    /* ---------- Who did the treatment ---------- */
+    let staffList = [];
+    const whoSel = () => $('[name="whoId"]');
+    const whoTxt = () => $('[name="who"]');
+    const normName = (s) => String(s || "").toLowerCase().replace(/^dr\.?\s+/, "").replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim();
+    // "Nicole", "Dr Teh", "Nicole Smith" → one staff member, or null if it isn't clear
+    function matchStaff(name) {
+      const n = normName(name);
+      if (!n) return null;
+      const exact = staffList.filter((s) => normName(s.name) === n);
+      if (exact.length === 1) return exact[0];
+      const first = staffList.filter((s) => normName(s.name).split(" ")[0] === n.split(" ")[0]);
+      if (first.length === 1) return first[0];
+      const part = staffList.filter((s) => normName(s.name).split(" ").includes(n));
+      return part.length === 1 ? part[0] : null;
+    }
+    const whoId = () => (whoSel() && whoSel().value !== OTHER ? whoSel().value : "");
+    const whoName = () => {
+      const sel = whoSel();
+      if (!sel) return "";
+      if (sel.value === OTHER) return whoTxt().value.trim();
+      const s = staffList.find((x) => x.id === sel.value);
+      return s ? s.name : "";
+    };
+    function syncWho() {
+      const sel = whoSel();
+      whoTxt().hidden = !sel || sel.value !== OTHER;
+      const note = $('[data-role="who-note"]');
+      if (note) note.textContent = sel && sel.value === OTHER
+        ? "Someone not on the staff list: products used stay recorded under you."
+        : "Products used are recorded under this person.";
+    }
+    function drawWho() {
+      const sel = whoSel();
+      if (!sel) return;
+      const keep = sel.value;
+      sel.innerHTML = `<option value="">Choose who did the treatment…</option>${staffList.map((s) =>
+        `<option value="${esc(s.id)}">${esc(s.name)}${s.role ? ` · ${esc(s.role)}` : ""}</option>`).join("")}
+        <option value="${OTHER}">Someone not on the staff list…</option>`;
+      sel.value = keep;
+      syncWho();
+    }
+    // From the Day Sheet ("Nicole", "Dr Teh") or the paper: the first name that matches a staff member
+    function setWho(names) {
+      const list = (Array.isArray(names) ? names : [names]).filter(Boolean);
+      const sel = whoSel();
+      if (!sel || !list.length) return;
+      const hit = list.map(matchStaff).find(Boolean);
+      if (hit) sel.value = hit.id;
+      else { sel.value = OTHER; whoTxt().value = list.join(" and "); }
+      syncWho();
+    }
+    loadStaff().then((list) => {
+      staffList = list;
+      if (!dlg.isConnected) return;
+      drawWho();
+      // Their visit that day on the Day Sheet says who it was with
+      const v = chosen && (st.visits || []).find((x) => x.pid === chosen.id && x.date === dateIn.value);
+      if (!whoSel().value && v && v.staff.length) setWho(v.staff);
+    }).catch((ex) => {
+      console.warn("Staff list not loaded:", ex);
+      const sel = whoSel();
+      if (sel) { sel.innerHTML = `<option value="${OTHER}" selected>Type the name</option>`; syncWho(); }
+    });
+
     /* ---------- Products used (treatment records) ---------- */
     // The form's own Consumables fields, mounted into prodEl (which moves with the treatment section)
     const cs = { formId: "", fields: [], loading: false, err: "", mode: "stock", force: {}, counted: null };
@@ -511,6 +583,7 @@ export function mountPaperRecords(container, { staff } = {}) {
           <span class="ppr-pill is-ok">${f.productsTaken ? "Taken off stock" : "Saved"}</span></div>
           ${list.length ? `<ul class="ppr-cs-list">${list.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>`
             : '<p class="fe-note">Not written on the paper.</p>'}
+          ${f.productsFor ? `<small class="fe-note">Recorded as used by <strong>${esc(f.productsFor)}</strong>.</small>` : ""}
           ${f.productsTaken ? '<small class="fe-note">To change these, correct the products used in Inventory (Manage inventory).</small>' : ""}</div>`;
         return;
       }
@@ -576,6 +649,15 @@ export function mountPaperRecords(container, { staff } = {}) {
       if (cs.mode === "none") return "";
       const m = csProblemAny();
       if (m) return m;
+      if (csPlanAll().length) {
+        if (!whoId()) return whoSel() && whoSel().value === OTHER
+          ? "Products have to be recorded under someone on the staff list. Choose them, or if they've left, choose who's entering it."
+          : "Choose who did the treatment, so the products are recorded under them.";
+        const kitLine = csPlanAll().find((l) => l.loc === "kit");
+        if (kitLine && whoId() !== staff.uid) {
+          return `${kitLine.name} comes from your own kit here, so it can't be recorded for ${whoName()}. Choose the Shelf or JT storage, or ask ${whoName()} to enter it.`;
+        }
+      }
       if (!st.cfg) { try { await loadCfg(); } catch { return "Couldn't load the Paper records settings. Try again."; } }
       await noteCs();
       if (csPlanAll().length && !beforeStock(dateIn.value) && cs.counted === null) {
@@ -600,11 +682,12 @@ export function mountPaperRecords(container, { staff } = {}) {
           submissionId: subId, lines: split.take, patientId, patientName, formName, recordDate, staff,
         }));
       }
-      const r = await callApi({ action: "paper", op: "products", fileId: f.id,
+      const r = await callApi({ action: "paper", op: "products", fileId: f.id, clinicianId: whoId(),
         taken: csSummary(split.take), noted: csSummary(split.note), none: cs.mode === "none" });
       if (r.problem) throw new Error(r.problem);
       if (!r || r.ok !== true || r.status !== "products") throw new Error(notSaved(r));
-      Object.assign(f, { productsDone: true, productsTaken: !!r.taken, products: r.products || [], productsAt: r.at || "" });
+      Object.assign(f, { productsDone: true, productsTaken: !!r.taken, products: r.products || [], productsAt: r.at || "",
+        productsFor: r.clinician || "" });
       return r;
     }
 
@@ -714,7 +797,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       if (!chosen) { fail("Choose the patient."); return; }
       if (!dateIn.value) { fail("Choose the date on the paper."); return; }
       const body = { action: "paper", op: "fileAs", fileId: f.id, as: ft.type, patientId: chosen.id, recordDate: dateIn.value,
-        clinician: $('[name="who"]').value, note: $('[name="note"]').value };
+        clinician: whoName(), note: $('[name="note"]').value };
       let formName = "";
       if (ft.type === "treatment") {
         const t = (forms || []).find((x) => x.id === ft.formId);
@@ -838,6 +921,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       const t = e.target;
       if (t.dataset.ft === "formId") { ft.formId = t.value; loadProducts(t.value); return; }
       if (t.dataset.csforce) { cs.force[t.dataset.csforce] = t.checked; return; }
+      if (t.name === "whoId") { syncWho(); if (t.value === OTHER) whoTxt().focus(); return; }
       if (t.dataset.ft === "consent") { ft.consent = t.value; drawType(); return; }
       if (t.dataset.rxf === "product") {
         const it = ft.rx[Number(t.closest("[data-rx]").dataset.rx)];
@@ -883,8 +967,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       if (vd) {
         dateIn.value = vd.dataset.vdate;
         const v = (st.visits || []).find((x) => x.pid === (chosen && chosen.id) && x.date === vd.dataset.vdate);
-        const whoIn = $('[name="who"]');
-        if (v && whoIn && !whoIn.value) whoIn.value = v.staff.join(" and ");   // the clinician from the Day Sheet
+        if (v && whoSel() && !whoSel().value) setWho(v.staff);   // the clinician from the Day Sheet
         noteCsSoon();
         drawPatientVisits();
         return;
