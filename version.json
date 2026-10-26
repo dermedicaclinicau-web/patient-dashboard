@@ -11,6 +11,7 @@
                   "./js/billing-check.js",
                   "./js/billing-rx-view.js",
                   "./js/billing-scans.js",
+                  "./js/booking-dialog.js",
                   "./js/calendar-badges.js",
                   "./js/calendar.js",
                   "./js/chat-api.js",
@@ -63,6 +64,7 @@
                   "./js/kit-count.js",
                   "./js/knowledge-content.js",
                   "./js/knowledge.js",
+                  "./js/manual-appts.js",
                   "./js/marketing.js",
                   "./js/marking-sets.js",
                   "./js/master-plan-api.js",
@@ -185,6 +187,6 @@
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261026-103639",
-    "v":  "20261026-103639"
+    "version":  "20261026-120918",
+    "v":  "20261026-120918"
 }

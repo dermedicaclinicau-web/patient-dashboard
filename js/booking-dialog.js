@@ -14,15 +14,8 @@ function defaultStart(dateKey) {
   return `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
 }
 
-async function searchPts(term) {
-  const t = term.trim();
-  const digits = t.replace(/\D/g, "");
-  let list;
-  if (digits.length >= 3 && digits.length >= t.replace(/[\s+()-]/g, "").length) list = await searchPatientsByPhone(t);
-  else if (t.includes("@")) list = (await fetchPatients({ mode: "email", term: t })).patients;
-  else list = (await fetchPatients({ mode: "name", term: t })).patients;
-  return list.filter((p) => !p.mergedInto).slice(0, 8);
-}
+// The same search as the Patients page (any word order, part words, email or mobile)
+const searchPts = (term) => searchPatients(term, 8);
 
 // Resolves { dateKey } once saved, or null
 export function openBookingDialog({ dateKey, staffNames = [], services = [], defaultStaff = "", existing = null }) {
