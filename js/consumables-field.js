@@ -39,6 +39,15 @@ const clinicalUnit = (p) => (isKit(p) || vial(p) || dosed(p) ? p.doseUnit : shar
 // Syringes needed for a dose: 2.2 mL of a 1.5 mL syringe = 2
 const syringesFor = (p, dose) => (dose > 0 ? Math.max(1, Math.ceil(dose / p.dosePer - 1e-9)) : "");
 
+const svg = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+const RS_ICON = {
+  kit: svg('<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/>'),
+  shelf: svg('<path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/>'),
+  lock: svg('<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>'),
+  users: svg('<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7"/><path d="M18 14.5a6 6 0 0 1 3.5 5.5"/>'),
+  send: svg('<path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/>'),
+};
+
 // Shared by every Consumables field on the same form (reloaded for each new form)
 let stockJob = null;
 let stockAt = 0;
@@ -116,6 +125,40 @@ function chooseVialDialog(p, lots, { where, openLeft = 0 }) {
     dlg.showModal();
     const sel = dlg.querySelector('input[name="lot"]:checked');
     if (sel) sel.focus();
+  });
+}
+
+// Restock: where to take a kit product from. opts: [{ k, icon, title, sub, off, admin }]. Resolves the chosen k, or null.
+function restockDialog(p, opts) {
+  return new Promise((resolve) => {
+    let out = null;
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog cs-rsdlg";
+    dlg.innerHTML = `
+      <div class="cs-rs-head">
+        <div><h3>Restock ${esc(p.name)}</h3><p>Where are you taking it from?</p></div>
+        <button type="button" class="hx-x" data-act="close" aria-label="Close">×</button>
+      </div>
+      <div class="cs-rs-list">${opts.map((o) => `
+        <button type="button" class="cs-rs-opt${o.off ? " is-off" : ""}" data-k="${esc(o.k)}"${o.off ? " disabled" : ""}>
+          <span class="cs-rs-ic">${RS_ICON[o.icon] || RS_ICON.shelf}</span>
+          <span class="cs-rs-main"><strong>${esc(o.title)}${o.admin ? ' <em class="cs-rs-tag">Admins only</em>' : ""}</strong>
+            <small>${esc(o.sub || "")}</small></span>
+          <span class="cs-rs-go" aria-hidden="true">›</span>
+        </button>`).join("")}
+      </div>`;
+    dlg.addEventListener("click", (e) => {
+      if (e.target.closest('[data-act="close"]')) { dlg.close(); return; }
+      const b = e.target.closest("[data-k]");
+      if (!b || b.disabled) return;
+      out = b.dataset.k;
+      dlg.close();
+    });
+    dlg.addEventListener("close", () => { dlg.remove(); resolve(out); });
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    const first = dlg.querySelector(".cs-rs-opt:not([disabled])");
+    if (first) first.focus();
   });
 }
 
@@ -408,13 +451,13 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     if (max && total > max) return `<span class="cs-warn">${fmt(total)} ${esc(cu)} is more than the ${esc(max)} allowed. Check the amount.</span>`;
     if (short > 0 && !seeStock) {   // blind: say there isn't enough, never how much there is
       return `<span class="cs-warn">Not enough ${isKit(p) ? "in your kit" : `in ${esc(whereOf(l))}`} for this amount. ${isKit(p)
-        ? "Take from the Shelf or borrow from a colleague, otherwise it's saved and flagged."
+        ? "Press Restock to take more, otherwise it's saved and flagged."
         : f.ifShort === "block" ? "Ask the ordering team to restock before saving." : "It will be saved and flagged for the ordering team."}</span>`;
     }
     if (short > 0) {
       const su = isKit(p) || vial(p) ? p.doseUnit : unitPlural(p.stockUnit);
       return `<span class="cs-warn">Short by ${fmt(short)} ${esc(su)}. ${isKit(p)
-        ? "Take from the Shelf or borrow from a colleague, otherwise it's saved and flagged."
+        ? "Press Restock to take more, otherwise it's saved and flagged."
         : f.ifShort === "block" ? "Restock before saving." : "It will be saved and flagged for the ordering team."}</span>`;
     }
     if (!(total > 0)) return "";
@@ -563,12 +606,12 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     const info = kit
       ? `${fmt(stock.kits.filter((k) => k.productId === p.id).reduce((a, k) => a + kitUnits(k), 0))} ${p.doseUnit} in your kit`
       : `${whereOf(l)}: ${plural(p.stock[l.loc], p.stockUnit)}${dosed(p) ? ` · ${fmt(p.dosePer)} ${p.doseUnit} each` : ""}`;
-    const locSel = !rawKit || adminStore
-      ? `<select class="fe-in cs-loc" data-f="loc" aria-label="Taken from">
-          ${rawKit && canKit ? `<option value="kit"${l.loc === "kit" ? " selected" : ""}>My kit</option>` : ""}
+    // Kit products: where it comes from is changed with Restock. Other products: Shelf or JT storage.
+    const locSel = rawKit
+      ? `<small class="cs-from">${esc(l.loc === "kit" ? "From your kit" : `From ${whereOf(l)} · opened ${p.stockUnit}`)}</small>`
+      : `<select class="fe-in cs-loc" data-f="loc" aria-label="Taken from">
           <option value="shelf"${l.loc === "shelf" ? " selected" : ""}>Shelf</option>
-          <option value="jt"${l.loc === "jt" ? " selected" : ""}>JT storage</option></select>`
-      : "";
+          <option value="jt"${l.loc === "jt" ? " selected" : ""}>JT storage</option></select>`;
     if (vial(p)) {   // JT storage / the Shelf: the opened vial, then the next one
       const v = vialStock(l, p);
       const nv = vialsLeft(v);
@@ -576,9 +619,8 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
         <div class="cs-head">
           <strong>${esc(p.name)}${req}</strong>${linkNoteHtml(l)}
           ${locSel}
-          ${seeStock ? `<button type="button" class="cs-restock${nv ? "" : " is-out"}" data-cs="restock"
-            title="${nv ? `Open a new ${esc(p.stockUnit)}` : "Ask the ordering team for more"}">${nv
-            ? `Restock · ${esc(plural(nv, p.stockUnit))} left` : "Order more · none left"}</button>` : ""}
+          <button type="button" class="cs-restock${nv ? "" : " is-out"}" data-cs="restock">Restock${seeStock
+            ? ` · ${nv ? `${esc(plural(nv, p.stockUnit))} left` : "none left here"}` : ""}</button>
           ${l.extra ? '<button type="button" class="hx-x" data-cs="remove-line" aria-label="Remove">×</button>' : ""}
         </div>
         ${vialCardsHtml(l, p)}
@@ -591,17 +633,13 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
         <div class="cs-head">
           <strong>${esc(p.name)}${req}</strong>${linkNoteHtml(l)}
           ${locSel}
-          ${seeStock ? `<button type="button" class="cs-restock" data-cs="restock" title="${kit
-            ? "Take more from the Shelf into your kit" : "Ask the ordering team for more"}">Restock · ${esc(leftText(p, src))}</button>` : ""}
+          ${rawKit || seeStock ? `<button type="button" class="cs-restock" data-cs="restock" title="${rawKit
+            ? "Take more into your kit" : "Ask the ordering team for more"}">Restock${seeStock ? ` · ${esc(leftText(p, src))}` : ""}</button>` : ""}
           ${l.extra ? '<button type="button" class="hx-x" data-cs="remove-line" aria-label="Remove">×</button>' : ""}
         </div>
         ${cardsHtml(l, p, src)}
         ${tableHtml(l, p, src)}
-        <div class="cs-foot">
-          <span data-role="msg">${msgHtml(l)}</span>
-          <span class="cs-acts">${kit ? `${p.stock.shelf > 0 ? '<button type="button" class="cs-link" data-cs="take">Take from Shelf</button>' : ""}
-            <button type="button" class="cs-link" data-cs="borrow">Borrow from a colleague</button>` : ""}</span>
-        </div>
+        <div class="cs-foot"><span data-role="msg">${msgHtml(l)}</span></div>
       </div>`;
     }
     return `<div class="cs-line${shortOf(l, src) > 0 ? " is-short" : ""}" data-i="${i}">
@@ -616,8 +654,6 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
         <span data-role="msg">${msgHtml(l)}</span>
         <span class="cs-acts">
           ${multiOf(l) && src.length > l.rows.length ? '<button type="button" class="cs-link" data-cs="add-row">+ Another batch</button>' : ""}
-          ${kit ? `${p.stock.shelf > 0 ? '<button type="button" class="cs-link" data-cs="take">Take from Shelf</button>' : ""}
-            <button type="button" class="cs-link" data-cs="borrow">Borrow from a colleague</button>` : ""}
         </span>
       </div>
     </div>`;
@@ -739,24 +775,138 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     if (el.dataset.f === "ref") { l.rows[Number(el.closest(".cs-row").dataset.j)].ref = el.value; onChange(); draw(); }
     else if (el.dataset.f === "loc") {
       const p0 = rawProduct(l);
-      if (p0 && isKitProduct(p0)) {
-        // Kit ↔ storage: keep the units given, worked out again for where they now come from
-        const was = clinicalTotal(l);
-        l.loc = el.value;
-        l.userLoc = true;
-        const p1 = productOf(l);
-        l.split = false;
-        if (isKit(p1) || dosed(p1) || vial(p1)) fillFrom(l, was); else l.rows = [newRow()];
-      } else {
-        l.loc = el.value;
-        l.rows.forEach((r) => { r.ref = ""; });
-      }
+      if (p0 && isKitProduct(p0)) { setLoc(l, el.value); return; }
+      l.loc = el.value;
+      l.rows.forEach((r) => { r.ref = ""; });
       onChange(); draw();
     }
   });
 
-  // Restock (Manage inventory): a kit → take more from the Shelf; Shelf / JT storage → an order request
+  // A kit product to another source: the units given are kept, worked out again for where they now come from
+  function setLoc(l, loc) {
+    const was = clinicalTotal(l);
+    l.loc = loc;
+    l.userLoc = true;
+    l.split = false;
+    const p1 = productOf(l);
+    if (isKit(p1) || dosed(p1) || vial(p1)) fillFrom(l, was); else l.rows = [newRow()];
+    onChange();
+    draw();
+  }
+
+  // Open a new vial in the place this line uses (staff choose the batch)
+  async function openVial(l) {
+    const p = productOf(l);
+    if (!p || !vial(p)) return;
+    const v = vialStock(l, p);
+    if (!v.lots.length) { showToast(`None left in ${whereOf(l)}.`); return; }
+    const left = r2(v.open.reduce((a, c) => a + c.left, 0));
+    const lot = await chooseVialDialog(p, v.lots, { where: whereOf(l), openLeft: left });
+    if (!lot) return;
+    try {
+      await openContainer(p, lot, staff);
+      await refresh(true);
+      showToast(`New ${p.stockUnit} opened (${batchText(p, lot.batch) || "no batch number"}): ${fmt(p.dosePer)} ${p.doseUnit} ready.`);
+    } catch (err) {
+      console.error("Open vial failed:", err);
+      showToast(err && err.message && !err.code ? err.message : "Couldn't open it. Try again.");
+    }
+  }
+
+  // An order request to the ordering team
+  async function orderMore(l, loc = l.loc === "kit" ? "shelf" : l.loc) {
+    const p = rawProduct(l);
+    if (!p) return;
+    const where = loc === "jt" ? "JT storage" : "Shelf";
+    const qty = suggestOrder(p, loc);
+    const ok = await confirmDialog({
+      title: `Ask for more ${p.name}?`,
+      message: `This sends an order request to the ordering team for ${plural(qty, p.orderUnit)} for ${where}.`,
+      confirmLabel: "Send request", tone: "info",
+    });
+    if (!ok) return;
+    try {
+      await createRequest({
+        items: [{ productId: p.id, name: p.name, supplierId: p.supplierId, qty, unitKind: "order",
+          unit: p.orderUnit, stockQty: qty * p.packSize }],
+        loc, urgency: "normal", note: `Asked for from a treatment record (${f.label || "Products used"})`,
+      }, staff);
+      showToast(`Order request sent for ${p.name}.`);
+    } catch (err) {
+      console.error("Order request failed:", err);
+      showToast(err && err.message && !err.code ? err.message : "Couldn't send the request. Try again.");
+    }
+  }
+
+  // The Shelf or JT storage's opened vial (Admins): use it, or open a new one if it's already in use
+  function vialOpt(p, l, loc) {
+    const v = vialStock({ loc }, p);
+    const where = loc === "jt" ? "JT storage" : "the Shelf";
+    const nv = vialsLeft(v);
+    const open = r2(v.open.reduce((a, c) => a + c.left, 0));
+    const left = seeStock ? ` · ${plural(nv, p.stockUnit)} left` : "";
+    if (l.loc === loc) {
+      return { k: loc, title: `Open a new ${p.stockUnit} from ${where}`, off: !nv,
+        sub: nv ? `Choose the batch${left}` : `None left in ${where}` };
+    }
+    return { k: loc, title: `From ${where.replace(/^the /, "the ")}`, off: !(open > 0 || nv),
+      sub: open > 0 ? (seeStock ? `${fmt(open)} ${p.doseUnit} in the opened ${p.stockUnit}` : `Uses its opened ${p.stockUnit}`)
+        : nv ? `Opens a new ${p.stockUnit}${left}` : `None left in ${where}` };
+  }
+
+  // Where Restock can take a kit product from, for this person
+  function restockOptions(l) {
+    const p = rawProduct(l);
+    const shelfN = num(p.stock && p.stock.shelf);
+    const jtN = num(p.stock && p.stock.jt);
+    const opts = [];
+    if (canKit && l.loc !== "kit") {
+      const u = stock.kits.filter((k) => k.productId === p.id).reduce((a, k) => a + kitUnits(k), 0);
+      opts.push({ k: "kit", icon: "kit", title: "Use my kit", off: !(u > 0),
+        sub: u > 0 ? (seeStock ? `${fmt(u)} ${p.doseUnit} in your kit` : "Your own kit") : "Nothing in your kit yet" });
+    }
+    if (canKit) {
+      opts.push({ k: "shelf", icon: "shelf", title: "From the Shelf", off: shelfN <= 0,
+        sub: shelfN > 0 ? `Into your kit${seeStock ? ` · ${plural(shelfN, p.stockUnit)} left` : ""}` : "None left on the Shelf" });
+    } else if (adminStore) {
+      opts.push({ ...vialOpt(p, l, "shelf"), icon: "shelf" });
+    }
+    if (adminStore) opts.push({ ...vialOpt(p, l, "jt"), icon: "lock", admin: true });
+    if (canKit) {
+      opts.push({ k: "take", icon: "users", title: "Take from a colleague",
+        sub: `${p.doseUnit} from their opened ${p.stockUnit}. They're asked to confirm.` });
+    }
+    if (seeStock && shelfN <= 0 && jtN <= 0) {
+      opts.push({ k: "order", icon: "send", title: "Ask the ordering team for more", sub: "None left on the Shelf or in JT storage" });
+    }
+    return opts;
+  }
+
+  // Restock: kit products → the overlay; everything else → an order request
   async function restock(l) {
+    const p0 = rawProduct(l);
+    if (!p0) return;
+    if (!isKitProduct(p0)) { await orderMore(l); return; }
+    const k = await restockDialog(p0, restockOptions(l));
+    if (!k) return;
+    if (k === "kit") { setLoc(l, "kit"); return; }
+    if (k === "order") { await orderMore(l); return; }
+    if (k === "take") {
+      if (await borrowDialog(p0, staff)) { await refresh(true); setLoc(l, "kit"); }
+      return;
+    }
+    if (k === "shelf" && canKit) {
+      if (await takeFromShelfDialog(p0, staff)) { await refresh(true); setLoc(l, "kit"); }
+      return;
+    }
+    // Admins: the Shelf's or JT storage's opened vial
+    if (l.loc !== k) {
+      setLoc(l, k);
+      if (!vialStock(l, p0).open.length) await openVial(l);
+      return;
+    }
+    await openVial(l);
+  }
     const p = productOf(l);
     if (!p) return;
     if (vial(p)) {
@@ -835,12 +985,6 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
       onChange(); draw();
     }
     else if (act === "remove-line") { lines.splice(lines.indexOf(l), 1); onChange(); draw(); }
-    else if (act === "take" || act === "borrow") {
-      const p = productOf(l);
-      if (!p) return;
-      const ok = act === "take" ? await takeFromShelfDialog(p, staff) : await borrowDialog(p, staff);
-      if (ok) await refresh(true);
-    }
   });
 
   // What gets taken off when the form is saved
