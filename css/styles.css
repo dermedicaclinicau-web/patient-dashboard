@@ -9008,3 +9008,23 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 .cs-rs-go { color: #94a3b8; font-size: 20px; line-height: 1; }
 
 .cs-pending { color: #92400e; font-weight: 600; }
+
+/* Consumables: the product heading. Name on the left, where it comes from and Restock on the right */
+.cs-line .cs-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.cs-line .cs-head > strong { flex: 1 1 auto; min-width: 0; }
+.cs-line .cs-head .cs-linknote { order: 5; flex-basis: 100%; margin: 0; }
+.cs-line .cs-head .cs-from {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 4px;
+  padding: 5px 10px; border-radius: 999px; background: #f1f5f9;
+  color: #334155; font-size: 12px; font-weight: 600; white-space: nowrap;
+}
+.cs-line .cs-head .cs-from .cs-pending { color: #92400e; }
+.cs-line .cs-head .cs-restock { flex: none; }
+
+/* Restock turns red only when it's needed: not enough open or in the kit, or none left */
+.cs-line.is-short .cs-restock,
+.cs-line .cs-restock.is-out {
+  background: #fef2f2; border-color: #fca5a5; color: #b91c1c;
+}
+.cs-line.is-short .cs-restock:hover,
+.cs-line .cs-restock.is-out:hover { background: #fee2e2; }
