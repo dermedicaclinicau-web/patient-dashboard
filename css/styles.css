@@ -9132,3 +9132,26 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 .kr-staff-opt { display: flex; align-items: center; gap: 8px; padding: 6px 4px; border-radius: 6px; cursor: pointer; font-weight: 400; }
 .kr-staff-opt:hover { background: #f0fdfa; }
 .kr-staff-opt small { color: #64748b; }
+
+.kr-views { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 14px; }
+.kr-view { padding: 7px 16px; border: 1px solid #cbd5e1; border-radius: 999px; background: #fff; color: #475569; font-weight: 600; cursor: pointer; }
+.kr-view.is-on { background: #0f766e; border-color: #0f766e; color: #fff; }
+.kr-tick { display: flex; align-items: center; gap: 6px; font-weight: 500; white-space: nowrap; }
+.kr-sec { margin: 18px 0 8px; font-size: 15px; color: #0f172a; }
+.kr-flag { display: inline-block; margin: 0 4px 4px 0; padding: 2px 8px; border-radius: 999px; background: #fef3c7; color: #92400e;
+  font-size: 12px; font-weight: 600; white-space: nowrap; }
+.kr-flag.is-bad { background: #fee2e2; color: #991b1b; }
+.kr-link { padding: 0; border: 0; background: none; color: #0f766e; font-weight: 700; text-align: left; cursor: pointer; }
+.kr-link:hover { text-decoration: underline; }
+.kr-ok { color: #027a48; font-weight: 600; }
+.kr-warn { color: #b45309; }
+.kr-bad { color: #b91c1c; }
+.kr-hist td small.kr-bad { color: #b91c1c; font-weight: 600; }
+.kr-hi { background: #fef3c7; }
+.kr-lo { background: #e0f2fe; }
+.kr-clinic td { background: #f8fafc; }
+.kr-stats { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 10px; }
+.kr-stat { min-width: 120px; padding: 10px 14px; border: 1px solid #e2e8f0; border-radius: 12px; background: #fff; }
+.kr-stat strong { display: block; font-size: 20px; color: #0f172a; }
+.kr-stat span { color: #64748b; font-size: 12px; }
+.kr-batch { align-items: flex-end; }
