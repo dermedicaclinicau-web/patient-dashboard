@@ -1,5 +1,5 @@
 // Calendar → Add booking: a last-minute booking, shown until the next Day Sheet upload has it
-import { fetchPatients, searchPatientsByPhone } from "./patients.js";
+import { searchPatients, warmPatients } from "./patient-list.js";
 import { saveManualAppt } from "./manual-appts.js";
 import { escapeHtml as esc, formatMobile, formatDobLong } from "./utils.js";
 
@@ -182,6 +182,7 @@ export function openBookingDialog({ dateKey, staffNames = [], services = [], def
     document.body.appendChild(dlg);
     drawPt();
     dlg.showModal();
+    warmPatients();   // the list loads while they start typing
     const first = dlg.querySelector('[data-role="q"]') || form.elements.staff;
     if (first) first.focus();
   });

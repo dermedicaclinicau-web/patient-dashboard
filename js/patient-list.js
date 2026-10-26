@@ -185,6 +185,39 @@ function scorePatient(p, q) {
   return Infinity;
 }
 
+/* ===================== Search for pickers elsewhere (e.g. Calendar → Add booking) ===================== */
+// The same search as the Patients page: name in any order, part words, email, or mobile.
+// Uses the same in-memory list, so after the first load it's instant.
+
+// Start loading the list early (e.g. when a window with a patient search opens)
+export function warmPatients() {
+  loadAll().then(() => refreshChanges()).catch(() => {});
+}
+
+export async function searchPatients(term, max = 8) {
+  const t = String(term || "").trim();
+  if (t.length < 2) return [];
+  const all = await loadAll();
+  await refreshChanges().catch(() => false);   // pick up patients added by others (at most every 2 minutes)
+  const list = allCache || all;
+
+  // Mostly digits: a mobile number (stored as 04…, 4… or 614…)
+  const digits = t.replace(/\D/g, "");
+  if (digits.length >= 3 && digits.length >= t.replace(/[\s+()-]/g, "").length) {
+    const core = phoneCore(t);
+    return list.filter((p) => phoneCore(p.mobile).includes(core))
+      .sort((a, b) => a._alt.localeCompare(b._alt)).slice(0, max);
+  }
+
+  const q = buildQuery(t);
+  return list
+    .map((p) => ({ p, s: scorePatient(p, q) }))
+    .filter((x) => x.s < Infinity)
+    .sort((a, b) => a.s - b.s || a.p._alt.localeCompare(b.p._alt))
+    .slice(0, max)
+    .map((x) => x.p);
+}
+
 /* ===================== Page ===================== */
 
 export function mountPatientList(container) {
