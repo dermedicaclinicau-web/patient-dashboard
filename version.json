@@ -62,6 +62,8 @@
                   "./js/invoice-links.js",
                   "./js/kit-admin.js",
                   "./js/kit-count.js",
+                  "./js/kit-days.js",
+                  "./js/kit-ledger.js",
                   "./js/knowledge-content.js",
                   "./js/knowledge.js",
                   "./js/manual-appts.js",
@@ -188,6 +190,6 @@
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261026-164030",
-    "v":  "20261026-164030"
+    "version":  "20261026-180747",
+    "v":  "20261026-180747"
 }

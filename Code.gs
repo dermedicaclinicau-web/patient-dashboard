@@ -4305,6 +4305,11 @@ function handleInventory_(body) {
   const okId = function (v) { return /^[A-Za-z0-9_-]{10,40}$/.test(String(v || '')); };
   try {
     if (op === 'kitDay') return invKitDay_(body, session);
+    if (op === 'oldKitLedger') {
+      if (!can_(session, 'menu.reports') && !can_(session, 'inventory.manage')) return { ok: false, error: 'FORBIDDEN' };
+      try { return Object.assign({ ok: true }, oldKitLedger_(body.names, body.fresh === true)); }
+      catch (e) { return { ok: true, problem: String(e && e.message ? e.message : e).slice(0, 300) }; }
+    }
     if (op === 'oldKitRecon') {
       if (!can_(session, 'menu.reports') && !can_(session, 'inventory.manage')) return { ok: false, error: 'FORBIDDEN' };
       try { return Object.assign({ ok: true }, oldKitRecon_(body.fresh === true)); }
@@ -16140,6 +16145,65 @@ function oldKitRecon_(fresh) {
   }).sort(function (a, b) { return String(a.staffName).localeCompare(String(b.staffName)); });
 
   const res = { rows: out, at: new Date().toISOString() };
+  repCachePut_(key, res, 900);
+  return res;
+}
+
+// Reporting → Kit reconciliation → History: one injector's old-app ledger. Every StartOfDayLog row (voided restocks
+// marked) and every Wrinkle Relaxer record with its patient, areas and batch. Read only. Remembered 15 minutes.
+// names: the names the old app used for them (exact, as on the Kit reconciliation row)
+function oldKitLedger_(namesIn, fresh) {
+  const names = uniq_((Array.isArray(namesIn) ? namesIn : []).map(function (s) {
+    return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, 80);
+  }).filter(Boolean)).slice(0, 6);
+  if (!names.length) throw new Error('Choose an injector.');
+  const want = {};
+  names.forEach(function (n) { want[n.toLowerCase()] = true; });
+  const mine = function (s) { return !!want[String(s == null ? '' : s).replace(/\s+/g, ' ').trim().toLowerCase()]; };
+  const key = 'old_kit_ledger_' + flowHash_(Object.keys(want).sort().join('|'));
+  if (!fresh) { const hit = repCacheGet_(key); if (hit) return hit; }
+
+  const sheet = oldKitRows_();
+  const voided = {};
+  sheet.forEach(function (r) {
+    const m = r.kind === 'VOID' ? /^VOID-(.+)$/i.exec(r.id) : null;
+    if (m) voided[m[1].toUpperCase()] = true;
+  });
+  const seen = {};
+  const rows = sheet.filter(function (r) {
+    if (!mine(r.staff)) return false;
+    const k = [r.id, r.date, r.staff, r.count, r.batch].join('|');
+    if (seen[k]) return false;
+    seen[k] = true;
+    return true;
+  }).map(function (r) {
+    return { id: r.id, kind: r.kind, date: r.date, at: r.at, count: r.count, batch: r.batch, expiry: r.expiry,
+      note: r.note, voided: r.kind === 'RESTOCK' && !!voided[r.id.toUpperCase()] };
+  });
+
+  const records = [];
+  fsListAll_(getConfig_(), OLD_WR_COL_, ['Staff', 'Patient Name', 'Record Date', 'Record ID', 'treatment_details_map'])
+    .forEach(function (d) {
+      const f = fromFields_(d.fields || {});
+      if (!mine(f.Staff)) return;
+      const date = String(f['Record Date'] || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
+      const t = /\d{8}-(\d{2})(\d{2})\d{2}/.exec(String(f['Record ID'] || ''));
+      const lines = (Array.isArray(f.treatment_details_map) ? f.treatment_details_map : []).map(function (x) {
+        x = x || {};
+        return {
+          area: String(x['Area Selected'] || '').trim(), batch: String(x['Batch Number'] || '').trim(),
+          expiry: String(x['Expiry Date'] || '').trim(), type: String(x.Type || '').trim(),
+          units: Number(String(x['Total Units'] == null ? '' : x['Total Units']).replace(/[^\d.]/g, '')) || 0,
+        };
+      }).filter(function (x) { return x.units > 0; });
+      const units = Math.round(lines.reduce(function (a, x) { return a + x.units; }, 0) * 10) / 10;
+      if (!(units > 0)) return;
+      records.push({ id: d.name.split('/').pop(), recordId: String(f['Record ID'] || ''), date: date,
+        time: t ? t[1] + ':' + t[2] : '', patientName: String(f['Patient Name'] || '').trim(), lines: lines, units: units });
+    });
+
+  const res = { staffName: names[0], rows: rows, records: records, at: new Date().toISOString() };
   repCachePut_(key, res, 900);
   return res;
 }

@@ -13,6 +13,7 @@ import { MOODS } from "./end-of-day-api.js";
 import { mountPatientReport, PATIENT_TABS } from "./patient-reports.js";
 import { mountRetention } from "./retention-report.js";
 import { callApi } from "./appointments.js";
+import { openKitLedger } from "./kit-ledger.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(2));
@@ -1010,7 +1011,7 @@ function oldKitRows(list, products) {
     return {
       key: `old|${o.staffUid || o.staffName}`, uid: o.staffUid || `old:${o.staffName}`, old: true, hasKit: has,
       staffName: o.staffName || "Unknown", oldNames: Array.isArray(o.oldNames) ? o.oldNames : [],
-      productName: p ? p.name : "Xeomin", unit: (p && p.doseUnit) || "units",
+      productId: p ? p.id : "", productName: p ? p.name : "Xeomin", unit: (p && p.doseUnit) || "units",
       taken: round1(o.taken), borrowedIn: round1(o.borrowedIn), lentOut: round1(o.lentOut), used: round1(o.used),
       discarded: 0, returned: 0, adjusted: has ? round1(o.opening) : 0,
       expected: has ? round1(o.shouldHave) : null, now: has ? round1(o.closing) : null, gap,
@@ -1022,12 +1023,16 @@ function oldKitRows(list, products) {
 }
 
 function mountKitRecon(body) {
-  const st = { portal: [], old: [], oldProblem: "", source: "both", gapsOnly: false };
+  const st = { portal: [], old: [], oldProblem: "", source: "both", gapsOnly: false, noKit: false,
+    products: [], moves: [], loans: [] };
   const n = (v) => (v ? fmt(v) : "—");
   const dateOf = (k) => esc(shortDate(parseKey(k)) || "—");
-  const shown = () => (st.source === "portal" ? st.portal : st.source === "old" ? st.old : st.portal.concat(st.old))
-    .slice().sort((a, b) => Number(a.ok) - Number(b.ok) || a.staffName.localeCompare(b.staffName, "en-AU")
-      || Number(!!a.old) - Number(!!b.old) || a.productName.localeCompare(b.productName, "en-AU"));
+  const isNoKit = (r) => r.old && !r.hasKit;
+  const pool = () => (st.source === "portal" ? st.portal : st.source === "old" ? st.old : st.portal.concat(st.old));
+  // One injector's rows together (Portal first, then Old app)
+  const shown = () => pool().filter((r) => st.noKit || !isNoKit(r))
+    .sort((a, b) => a.staffName.localeCompare(b.staffName, "en-AU") || Number(!!a.old) - Number(!!b.old)
+      || a.productName.localeCompare(b.productName, "en-AU"));
 
   async function load(fresh = false) {
     body.innerHTML = SKELETON;
@@ -1037,6 +1042,7 @@ function mountKitRecon(body) {
         callApi({ action: "inventory", op: "oldKitRecon", fresh })
           .catch((e) => ({ problem: (e && e.message) || "The old app's kits couldn't be read." })),
       ]);
+      Object.assign(st, { products, moves, loans });
       st.portal = reconcileKits(new Map(products.map((p) => [p.id, p])), kits, moves, loans);
       st.oldProblem = old && old.problem ? String(old.problem) : "";
       st.old = oldKitRows(old && Array.isArray(old.rows) ? old.rows : [], products);
@@ -1047,104 +1053,73 @@ function mountKitRecon(body) {
     }
   }
 
-  function portalHistHtml(r) {
-    const ev = r.events.slice().reverse().slice(0, 200);
-    return `<div class="rp-hist"><table class="inv-table">
-      <thead><tr><th>Date</th><th>What happened</th><th>Change</th><th>Balance</th><th>Details</th></tr></thead>
-      <tbody>${ev.map((e) => `<tr><td>${esc(shortDate(e.at))}</td><td>${esc(e.what)}</td>
-        <td class="${e.change < 0 ? "rp-neg" : "rp-pos"}">${e.change > 0 ? "+" : ""}${esc(fmt(e.change))}</td>
-        <td>${esc(fmt(e.balance))}</td><td>${esc(e.note || "")}</td></tr>`).join("")}</tbody></table>
-      ${r.events.length > 200 ? `<p class="muted rp-note">Showing the latest 200 of ${r.events.length}.</p>` : ""}
-      ${r.ok ? "" : `<p class="rp-note"><strong>To fix:</strong> ask ${esc(r.staffName)} to do a kit check (Task Manager → Opening count → My kit),
-        then Accept the difference in Count differences.</p>`}</div>`;
-  }
-
-  // The old app: each start count, what was recorded until the next one, and whether the next count matched
-  function oldHistHtml(r) {
-    const segs = r.segments.slice().reverse().slice(0, 200);
-    const a = r.after;
-    const after = a && (a.restock || a.inn || a.out || a.used)
-      ? `<p class="muted rp-note">After their last start count (${dateOf(r.closingDate)}): ${esc([
-          a.restock && `restocked ${fmt(a.restock)}`, a.inn && `borrowed in ${fmt(a.inn)}`,
-          a.out && `lent out ${fmt(a.out)}`, a.used && `used ${fmt(a.used)}`].filter(Boolean).join(", "))} ${esc(r.unit)}.
-          Not counted above: there's no later count to check it against.</p>` : "";
-    const otherNames = r.oldNames.filter((x) => x !== r.staffName);
-    return `<div class="rp-hist">
-      <p class="muted rp-note">From the old app (StartOfDayLog and Wrinkle Relaxer records).${otherNames.length
-        ? ` Recorded there as ${esc(otherNames.join(", "))}.` : ""} Newest first.</p>
-      ${segs.length ? `<table class="inv-table">
-        <thead><tr><th>Start count</th><th>Counted</th><th>Restocked</th><th>Borrowed in</th><th>Lent out</th><th>Used</th>
-          <th>Should be next</th><th>Next count</th><th>Gap</th></tr></thead>
-        <tbody>${segs.map((s) => {
-          const off = s.gap !== null && Math.abs(s.gap) >= 0.05;
-          return `<tr class="${off ? "is-diff" : ""}"><td>${dateOf(s.date)}</td><td>${esc(fmt(s.start))}</td>
-            <td>${n(s.restock)}</td><td>${n(s.inn)}</td><td>${n(s.out)}</td>
-            <td>${n(s.used)}${s.records ? ` <small class="muted">(${esc(plural(s.records, "record"))})</small>` : ""}</td>
-            <td>${esc(fmt(s.expected))}</td>
-            <td>${s.next === null ? "—" : `${esc(fmt(s.next))} <small class="muted">${dateOf(s.nextDate)}</small>`}</td>
-            <td>${s.gap === null ? "—" : !off ? '<span class="rp-ok">✓</span>'
-              : `<strong class="${s.gap < 0 ? "rp-neg" : "rp-pos"}">${s.gap > 0 ? "+" : ""}${esc(fmt(s.gap))}</strong>`}</td></tr>`;
-        }).join("")}</tbody></table>
-        ${r.segments.length > 200 ? `<p class="muted rp-note">Showing the latest 200 of ${r.segments.length}.</p>` : ""}`
-        : `<p class="muted rp-note">No start counts in the old app: ${esc(fmt(r.used))} ${esc(r.unit)} used on Wrinkle Relaxer records${
-          r.firstDate ? ` (${dateOf(r.firstDate)} to ${dateOf(r.lastDate)})` : ""}, probably from storage rather than a kit.</p>`}
-      ${after}</div>`;
-  }
-
   function rowHtml(r) {
-    const noKit = r.old && !r.hasKit;
-    const counts = r.old
-      ? (r.hasKit ? `+${esc(fmt(r.adjusted))} <small class="muted">first count ${dateOf(r.openingDate)}</small>` : "—")
-      : r.adjusted ? `${r.adjusted > 0 ? "+" : ""}${esc(fmt(r.adjusted))}` : "—";
+    const noKit = isNoKit(r);
+    const opening = r.old
+      ? (r.hasKit ? `${esc(fmt(r.adjusted))} <small class="muted">first count ${dateOf(r.openingDate)}</small>` : "—")
+      : r.adjusted ? `${r.adjusted > 0 ? "+" : ""}${esc(fmt(r.adjusted))} <small class="muted">counts accepted</small>` : "—";
     const now = noKit ? "—" : `<strong>${esc(fmt(r.now))}</strong>${r.old ? ` <small class="muted">last count ${dateOf(r.closingDate)}</small>` : ""}`;
     const gap = noKit ? '<small class="muted">No kit in the old app</small>'
       : r.ok ? '<span class="rp-ok">✓</span>'
-      : `<strong class="${r.gap < 0 ? "rp-neg" : "rp-pos"}">${r.gap > 0 ? "+" : ""}${esc(fmt(r.gap))}</strong>${
-        r.gapValue !== null ? ` <small class="muted">${esc(money(r.gapValue))}</small>` : ""}`;
+      : `<strong class="rp-neg">${r.gap > 0 ? "+" : ""}${esc(fmt(r.gap))}</strong>${r.gapValue !== null ? ` <small class="muted">${esc(money(r.gapValue))}</small>` : ""}`;
     return `<tr class="${r.ok ? "" : "is-diff"}">
-      <td><strong>${esc(r.staffName)}</strong>${r.old ? ' <span class="inv-flag is-info">Old app</span>' : ""}${
+      <td><strong>${esc(r.staffName)}</strong> <span class="inv-flag ${r.old ? "is-info" : "is-ok"}">${r.old ? "Old app" : "Portal"}</span>${
         r.disputed ? ' <span class="inv-flag is-bad">Disputed</span>' : ""}</td>
       <td>${esc(r.productName)} <small class="muted">(${esc(r.unit)})</small></td>
       <td>${n(r.taken)}</td><td>${n(r.borrowedIn)}</td><td>${n(r.lentOut)}</td><td>${n(r.used)}</td>
       <td>${n(r.discarded)}</td><td>${n(r.returned)}</td>
-      <td>${counts}</td><td>${r.expected === null ? "—" : esc(fmt(r.expected))}</td><td>${now}</td><td>${gap}</td>
-      <td><button type="button" class="lh-btn" data-hist="${esc(r.key)}">History</button></td></tr>
-      <tr class="rp-sub" data-histrow="${esc(r.key)}" hidden><td colspan="13">${r.old ? oldHistHtml(r) : portalHistHtml(r)}</td></tr>`;
+      <td>${opening}</td><td>${r.expected === null ? "—" : esc(fmt(r.expected))}</td><td>${now}</td><td>${gap}</td>
+      <td><button type="button" class="lh-btn" data-hist="${esc(r.key)}">History</button></td></tr>`;
   }
 
   function draw() {
     const all = shown();
+    const noKitN = pool().filter(isNoKit).length;
     const gaps = all.filter((r) => !r.ok);
-    const noKit = all.filter((r) => r.old && !r.hasKit).length;
     const rows = st.gapsOnly ? gaps : all;
-    const gapValue = gaps.reduce((a, r) => a + Math.abs(r.gapValue || 0), 0);
+    const priced = gaps.filter((r) => r.gapValue !== null);
+    const gapValue = priced.reduce((a, r) => a + Math.abs(r.gapValue), 0);
     const withOld = st.source !== "portal";
     body.innerHTML = `
       <div class="inv-tools">
         <div class="fe-seg">${[["portal", "Portal"], ["old", "Old app"], ["both", "Both"]].map(([v, l]) =>
           `<label class="fe-seg-btn"><input type="radio" name="rp-src" data-f="source" value="${v}"${st.source === v ? " checked" : ""} /><span>${esc(l)}</span></label>`).join("")}</div>
         <label class="fe-check"><input type="checkbox" data-f="gaps"${st.gapsOnly ? " checked" : ""} /> Only show gaps</label>
+        ${noKitN ? `<label class="fe-check"><input type="checkbox" data-f="nokit"${st.noKit ? " checked" : ""} /> Show staff with no kit (${noKitN})</label>` : ""}
         <span class="inv-spacer"></span>
         <button type="button" class="ff-btn" data-act="refresh">Refresh</button>
         <button type="button" class="ff-btn" data-act="csv">Export CSV</button>
       </div>
       ${st.source !== "old" ? `<p class="muted rp-range">Portal, since each kit started: <strong>taken + borrowed in − lent out − used − discarded − returned ± counts accepted</strong>
-        should equal what's in the kit now. A gap means something wasn't recorded.</p>` : ""}
+        should equal what's in the kit now.</p>` : ""}
       ${withOld ? `<p class="muted rp-range">Old app: <strong>first start count + restocked + borrowed in − lent out − units on Wrinkle Relaxer records</strong>
-        should equal their last start count. Open History to see which days didn't match.</p>` : ""}
+        should equal their last start count.</p>` : ""}
+      <p class="muted rp-range">Press <strong>History</strong> to see an injector's kit day by day: every count, who each unit was used on, and the likely cause of any difference.</p>
       ${withOld && st.oldProblem ? `<p class="tb-bad rp-note">Old app: ${esc(st.oldProblem)}</p>` : ""}
       <div class="inv-stats">
         <div class="inv-stat"><strong>${new Set(all.map((r) => r.uid)).size}</strong><span>Injectors</span></div>
-        <div class="inv-stat"><strong>${all.length - gaps.length - noKit}</strong><span>Kits that add up</span></div>
+        <div class="inv-stat"><strong>${all.filter((r) => r.ok && !isNoKit(r)).length}</strong><span>Kits that add up</span></div>
         <div class="inv-stat ${gaps.length ? "is-bad" : ""}"><strong>${gaps.length}</strong><span>With a gap</span></div>
-        <div class="inv-stat ${gaps.length ? "is-bad" : ""}"><strong>${esc(money(gapValue))}</strong><span>Gaps (at cost)</span></div>
+        <div class="inv-stat ${priced.length ? "is-bad" : ""}"><strong>${priced.length ? esc(money(gapValue)) : "—"}</strong><span>Gaps (at cost)</span></div>
       </div>
+      ${gaps.length && priced.length < gaps.length ? '<p class="muted rp-note">Some gaps have no value because the product has no cost. Add it in Inventory → Products.</p>' : ""}
       ${rows.length ? `<section class="tb-card"><div class="rp-scroll"><table class="inv-table rp-table rp-recon">
         <thead><tr><th>Injector</th><th>Product</th><th>Taken</th><th>Borrowed in</th><th>Lent out</th><th>Used</th>
-          <th>Discarded</th><th>Returned</th><th>Counts</th><th>Should have</th><th>In kit now</th><th>Gap</th><th></th></tr></thead>
+          <th>Discarded</th><th>Returned</th><th>Opening / counts</th><th>Should have</th><th>In kit now</th><th>Gap</th><th></th></tr></thead>
         <tbody>${rows.map(rowHtml).join("")}</tbody></table></div></section>`
         : `<div class="tm-empty">${st.gapsOnly ? "No gaps. Every kit adds up. 👍"
           : st.source === "old" ? "No old app kit records found." : "No kit activity yet."}</div>`}`;
+  }
+
+  // History: the injector's ledger, with both sources when they have both
+  function openLedger(r) {
+    const rows = [];
+    const p = st.portal.find((x) => x.uid === r.uid && x.productId === r.productId);
+    const o = st.old.find((x) => x.uid === r.uid);
+    if (p) rows.push({ src: "portal", row: p });
+    if (o) rows.push({ src: "old", row: o });
+    if (!rows.length) rows.push({ src: r.old ? "old" : "portal", row: r });
+    openKitLedger({ rows, start: r.old ? "old" : "portal", products: st.products, moves: st.moves, loans: st.loans, csv: downloadCsv });
   }
 
   function exportCsv() {
@@ -1153,31 +1128,31 @@ function mountKitRecon(body) {
     const cell = (v) => (v === null || v === undefined ? "" : v);
     downloadCsv(`kit-reconciliation-${dayKey()}.csv`, [
       ["Source", "Injector", "Product", "Unit", "Taken", "Borrowed in", "Lent out", "Used", "Discarded", "Returned",
-        "Counts (old app: first start count)", "First count date", "Should have", "In kit now (old app: last start count)",
-        "Last count date", "Gap", "Gap value ($)", "Disputed"],
+        "Opening / counts accepted", "First count date", "Should have", "In kit now", "Last count date", "Gap", "Gap value ($)", "Disputed"],
       ...all.map((r) => [r.old ? "Old app" : "Portal", r.staffName, r.productName, r.unit, r.taken, r.borrowedIn, r.lentOut, r.used,
-        r.discarded, r.returned, r.old && !r.hasKit ? "" : r.adjusted, r.old ? r.openingDate : "", cell(r.expected), cell(r.now),
-        r.old ? r.closingDate : "", r.old && !r.hasKit ? "" : r.gap, cell(r.gapValue), r.disputed || ""]),
+        r.discarded, r.returned, isNoKit(r) ? "" : r.adjusted, r.old ? r.openingDate : "", cell(r.expected), cell(r.now),
+        r.old ? r.closingDate : "", isNoKit(r) ? "" : r.gap, cell(r.gapValue), r.disputed || ""]),
     ]);
   }
 
   body.addEventListener("click", (e) => {
     const h = e.target.closest("[data-hist]");
     if (h) {
-      const row = body.querySelector(`[data-histrow="${CSS.escape(h.dataset.hist)}"]`);
-      if (row) { row.hidden = !row.hidden; h.textContent = row.hidden ? "History" : "Hide"; }
+      const r = pool().find((x) => x.key === h.dataset.hist);
+      if (r) openLedger(r);
       return;
     }
     if (e.target.closest('[data-act="refresh"]')) { load(true); return; }
     if (e.target.closest('[data-act="csv"]')) exportCsv();
   });
   body.addEventListener("change", (e) => {
-    if (e.target.dataset.f === "gaps") { st.gapsOnly = e.target.checked; draw(); }
-    if (e.target.dataset.f === "source") { st.source = e.target.value; draw(); }
+    const f = e.target.dataset.f;
+    if (f === "gaps") { st.gapsOnly = e.target.checked; draw(); }
+    else if (f === "nokit") { st.noKit = e.target.checked; draw(); }
+    else if (f === "source") { st.source = e.target.value; draw(); }
   });
   load();
 }
-
 
 /* ===================== Start & end of day ===================== */
 

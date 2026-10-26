@@ -4623,3 +4623,19 @@ export async function kitDayLedger(staffUid, key) {
   events.sort((a, b) => (a.at ? a.at.getTime() : 0) - (b.at ? b.at.getTime() : 0));
   return { day, events };
 }
+
+/* ===================== Reporting → Kit reconciliation → History ===================== */
+// Every treatment record one injector saved (newest and oldest), for the kit ledger
+export async function listUsageByStaff(staffUid) {
+  const snap = await getDocs(query(collection(db, "inv_usage"), where("byUid", "==", staffUid)));
+  return snap.docs.map((d) => {
+    const x = d.data() || {};
+    return { id: d.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [], at: toDate(x.at) };
+  });
+}
+
+// Every Start / End of Day one injector has done
+export async function listKitDaysFor(staffUid) {
+  const snap = await getDocs(query(collection(db, "inv_kitdays"), where("staffUid", "==", staffUid)));
+  return snap.docs.map(normaliseKitDay);
+}
