@@ -15230,6 +15230,7 @@ function handlePaper_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
   const op = String(body.op || '');
+
   // My dashboard: anyone logged in, their own visits only
   if (op === 'mine' || op === 'mineResolve') {
     try {
@@ -15240,8 +15241,8 @@ function handlePaper_(body) {
       return { ok: true, problem: "Your visits couldn't be checked. Try again in a minute." };
     }
   }
+
   if (!can_(session, 'paper.enter')) return { ok: false, error: 'FORBIDDEN' };
-  const op = String(body.op || '');
   const admin = /^admin$/i.test(String(session.role || ''));
   try {
     const cfg = getConfig_();
@@ -15268,7 +15269,6 @@ function handlePaper_(body) {
   }
   return { ok: false, error: 'BAD_REQUEST' };
 }
-
 /* ---------- The folder ---------- */
 
 // Is the file inside the paper records folder (any depth up to 6)? Not cached, so it can't leak into the Image Bank's checks.
