@@ -197,7 +197,7 @@ export async function renderKits(body, { staff, products, lots, canKit, canJt, c
     let action;
     if (p.stock.shelf > 0) action = `<button type="button" class="lh-btn is-primary" data-kit="take" data-pid="${esc(p.id)}">Take from Shelf</button>`;
     else if (pending) action = `<span class="inv-flag is-info">Asked JT storage for ${esc(plural(pending.qty, unit))} · waiting</span>`;
-    else if (p.stock.jt > 0) action = `<button type="button" class="lh-btn is-primary" data-kit="request" data-pid="${esc(p.id)}">Request from JT storage</button>`;
+    else if (p.stock.jt > 0) action = `<button type="button" class="lh-btn is-primary" data-kit="request" data-pid="${esc(p.id)}">Ask for a JT storage release</button>`;
     else action = `<a class="lh-btn" href="#/tasks/order/${encodeURIComponent(p.id)}">None in stock · request an order</a>`;
     return `
       <article class="kit-card">
@@ -218,7 +218,7 @@ export async function renderKits(body, { staff, products, lots, canKit, canJt, c
           : '<p class="tb-none">Nothing in your kit.</p>'}
         <div class="kit-foot">
           <span class="muted">Shelf: ${esc(plural(p.stock.shelf, unit))} · JT storage: ${esc(plural(p.stock.jt, unit))}</span>
-    else if (p.stock.jt > 0) action = `<button type="button" class="lh-btn is-primary" data-kit="request" data-pid="${esc(p.id)}">Ask for a JT storage release</button>`;
+          <span class="kit-acts">${action}<button type="button" class="lh-btn" data-kit="borrow" data-pid="${esc(p.id)}">Take from a colleague</button></span>
         </div>
       </article>`;
   }
