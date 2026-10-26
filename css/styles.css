@@ -8984,3 +8984,4 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 .ppr-cs-none { margin: 2px 0 10px; }
 .ppr-prodline { color: #0f766e; }
 .ppr-prodline.is-warn { color: #b45309; }
+.ppr-cs-note.is-info { background: #f0fdfa; border-color: #99f6e4; color: #115e59; }

@@ -63,7 +63,10 @@ async function usageExists(subId) {
   const s = await getDocs(query(collection(db, "inv_usage"), where("submissionId", "==", subId), limit(1)));
   return !s.empty;
 }
-// Stock counted after a day: { "productId|loc": "2026-10-25" } (the first count after it). Kit checks: only this person's kit.
+// Counts after a day, per "productId|loc": { date, adjusted, open }
+//   adjusted: a shortfall there was accepted, so the digital count already has it off
+//   open: a shortfall there hasn't been reviewed yet (the digital count still includes it)
+// Kit checks: only this person's kit.
 const countMemo = {};
 function countsAfter(dateKey, uid) {
   const k = `${dateKey}|${uid}`;
@@ -75,7 +78,11 @@ function countsAfter(dateKey, uid) {
         if (c.superseded === true || (c.kind === "kit" && c.byUid !== uid)) return;
         (c.lines || []).forEach((l) => {
           const key = `${l.productId}|${c.kind === "kit" ? "kit" : l.loc}`;
-          if (!out[key] || c.dateKey < out[key]) out[key] = c.dateKey;
+          const x = out[key] || (out[key] = { date: c.dateKey, adjusted: false, adjDate: "", open: false, openDate: "" });
+          if (c.dateKey < x.date) x.date = c.dateKey;
+          if (!((Number(l.variance) || 0) < 0)) return;   // only a shortfall matters
+          if (l.status === "open") { x.open = true; if (!x.openDate || c.dateKey < x.openDate) x.openDate = c.dateKey; }
+          else { x.adjusted = true; if (!x.adjDate || c.dateKey < x.adjDate) x.adjDate = c.dateKey; }
         });
       });
       return out;
@@ -84,6 +91,7 @@ function countsAfter(dateKey, uid) {
   }
   return countMemo[k];
 }
+
 const LOC_NAME = { kit: "Your kit", shelf: "The Shelf", jt: "JT storage" };
 // "Radiesse: 1.5 mL (1 syringe) (Lot A00263050)"
 const csSummary = (lines) => lines.map((l) => `${l.name}: ${l.rows.map((r) =>
@@ -636,11 +644,20 @@ export function mountPaperRecords(container, { staff } = {}) {
       }
       if (my !== csSeq || !host.isConnected) return;
       cs.counted = counted;
-      host.innerHTML = plan.filter((l) => counted[`${l.productId}|${l.loc}`]).map((l) => {
+      host.innerHTML = plan.map((l) => {
         const k = `${l.productId}|${l.loc}`;
-        return `<div class="ppr-cs-note"><span><strong>${esc(l.name)}</strong>: ${esc(LOC_NAME[l.loc] || "Stock")} was counted on
-          ${esc(niceDay(counted[k]))}, after this treatment. That count already took it off, so stock isn't changed again.</span>
-          <label class="fe-check"><input type="checkbox" data-csforce="${esc(k)}"${cs.force[k] ? " checked" : ""} /> Take it off anyway</label></div>`;
+        const c = counted[k];
+        const where = esc(LOC_NAME[l.loc] || "Stock");
+        if (c && c.adjusted) {
+          return `<div class="ppr-cs-note"><span><strong>${esc(l.name)}</strong>: ${where} was counted on ${esc(niceDay(c.adjDate))},
+            after this treatment, and the shortfall was accepted. The digital count already has it off, so it's noted on the record only.</span>
+            <label class="fe-check"><input type="checkbox" data-csforce="${esc(k)}"${cs.force[k] ? " checked" : ""} /> Take it off the digital count anyway</label></div>`;
+        }
+        if (c && c.open) {
+          return `<div class="ppr-cs-note is-info"><span><strong>${esc(l.name)}</strong>: the ${where} count on ${esc(niceDay(c.openDate))}
+            found a shortfall that hasn't been reviewed yet. Taking this off brings the digital count in line, so mention this record when it's reviewed.</span></div>`;
+        }
+        return "";
       }).join("");
     }
 
@@ -670,7 +687,8 @@ export function mountPaperRecords(container, { staff } = {}) {
       const take = [], note = [];
       csPlanAll().forEach((l) => {
         const k = `${l.productId}|${l.loc}`;
-        (beforeStock(date) || (cs.counted && cs.counted[k] && !cs.force[k]) ? note : take).push(l);
+        const c = cs.counted && cs.counted[k];
+        (beforeStock(date) || (c && c.adjusted && !cs.force[k]) ? note : take).push(l);
       });
       return { take, note };
     }
