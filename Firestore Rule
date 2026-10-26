@@ -1322,6 +1322,33 @@ match /inv_count_drafts/{id} {
       allow read: if can('records.move');
       allow write: if false;
     }
+
+    // Bookings added on the calendar, shown until the next Day Sheet upload has them. Removed, never deleted.
+    match /manual_appts/{id} {
+      function okAppt(d) {
+        return d.dateKey is string && d.dateKey.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+          && d.staff is string && d.staff.size() > 0 && d.staff.size() <= 80
+          && d.patientId is string && d.patientId.size() <= 80
+          && d.patientName is string && d.patientName.size() > 0 && d.patientName.size() <= 120
+          && d.time is string && d.time.size() <= 20
+          && d.sortMinutes is int && d.sortMinutes >= 0 && d.sortMinutes < 1440
+          && d.durationMin is int && d.durationMin > 0 && d.durationMin <= 480
+          && d.services is list && d.services.size() <= 10
+          && d.note is string && d.note.size() <= 500
+          && d.status in ['active', 'removed'];
+      }
+      allow read: if isStaff();
+      allow create: if can('calendar.book') && okAppt(request.resource.data)
+        && request.resource.data.status == 'active'
+        && request.resource.data.createdByUid == request.auth.uid;
+      allow update: if can('calendar.book') && okAppt(request.resource.data)
+        && request.resource.data.createdByUid == resource.data.createdByUid
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.updatedByUid == request.auth.uid;
+      allow delete: if false;
+    }
+
+    
     // ===================== Safety net =====================
     // Anything not allowed by a rule above stays locked
     // (this includes staff_roles and staff_audit, which only Apps Script writes)

@@ -3244,6 +3244,7 @@ function staffAuditList_() {
 const PERMS_ = [
   ['menu.patients', 'Menus', 'Patient List'],
   ['menu.calendar', 'Menus', 'Calendar'],
+  ['calendar.book', 'Menus', 'Calendar: add last-minute bookings (until the next Day Sheet upload)'],
   ['menu.forms', 'Menus', 'Form Builder (see forms)'],
   ['menu.tasks', 'Menus', 'Task Manager'],
   ['patients.edit', 'Patients', 'Add and edit patient details'],
@@ -3302,7 +3303,7 @@ const ROLE_DEFAULTS_ = {
     'ssp.create', 'menu.inventory', 'inventory.request', 'inventory.receive',
     'menu.scanner', 'scanner.billing', 'scanner.docket',
     'dash.attention', 'dash.appts', 'dash.tasks', 'dash.kit', 'dash.records', 'dash.usage', 'dash.requests', 'dash.stock'],
-  Reception: ['menu.patients', 'menu.calendar', 'menu.tasks', 'patients.edit', 'send.patients', 'tasks.run',
+  Reception: ['menu.patients', 'menu.calendar', 'calendar.book', 'menu.tasks', 'patients.edit', 'send.patients', 'tasks.run',
     'tasks.patient', 'tasks.staff', 'tasks.print', 'tasks.history',
     'menu.inventory', 'inventory.view', 'inventory.request', 'inventory.receive', 'inventory.order', 'inventory.count', 'menu.reports',
     'menu.scanner', 'scanner.billing', 'scanner.docket',

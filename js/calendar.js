@@ -5,8 +5,12 @@ import { openEndOfDay, endOfDayStatus } from "./end-of-day.js";
 import { minToText } from "./shift.js";
 import {
   escapeHtml, hueFromString, toDateKey, parseDateKey, addDays,
-  formatLongDate, formatShortDate, formatUpdated,
+  formatLongDate, formatShortDate, formatUpdated, showToast,
 } from "./utils.js";
+import { can } from "./perms.js";
+import { confirmDialog } from "./dialog.js";
+import { openBookingDialog } from "./booking-dialog.js";
+import { removeManualAppt } from "./manual-appts.js";
 
 // Column order, left to right. Each entry matches any staff name that CONTAINS it as whole words
 // (capitals, dots and spaces don't matter): "Teh" matches "Dr Joanna Teh" and "Dr. Teh".
@@ -49,6 +53,7 @@ export function mountCalendar(container, param) {
         </div>
 
         <div class="cal-actions">
+          ${can("calendar.book") ? '<button type="button" class="btn-primary cal-addbook" data-addbook>+ Add booking</button>' : ""}
           <button type="button" class="btn-ghost cal-refresh">${ICON_REFRESH}<span>Refresh</span></button>
         </div>
       </div>
@@ -65,6 +70,7 @@ export function mountCalendar(container, param) {
   const todayBtn = q("[data-nav='today']");
   const refreshBtn = q(".cal-refresh");
   const board = q(".cal-board");
+  let shown = [];   // the day's appointments on the board (to find a booking to edit)
 
   function renderHeader() {
     const d = parseDateKey(dateKey);
@@ -112,6 +118,7 @@ export function mountCalendar(container, param) {
       : "";
 
     const appts = data.appointments || [];
+    shown = appts;
     if (!appts.length) {
       board.innerHTML = `<div class="state"><strong>No appointments</strong>Nothing is scheduled for this day.</div>`;
       return;
@@ -198,12 +205,72 @@ export function mountCalendar(container, param) {
 
   refreshBtn.addEventListener("click", () => load(true));
 
+  /* ---------- Bookings added here ---------- */
+  // Names and services from the days already looked at, for the suggestions
+  function known(pick) {
+    const out = new Set();
+    cache.forEach((d) => (d.appointments || []).forEach((a) => pick(a).forEach((v) => { if (v) out.add(v); })));
+    return [...out];
+  }
+  function bookingChanged(key) {
+    cache.delete(key);
+    badgeCache.delete(key);
+    window.dispatchEvent(new Event("appts:changed"));   // End of Day works out the finish time again
+  }
+  async function openBooking(defaults = {}, existing = null) {
+    const res = await openBookingDialog({
+      dateKey,
+      defaultStaff: defaults.staff || "",
+      staffNames: known((a) => [a.staff]).filter((s) => !/^unassigned$/i.test(s)),
+      services: known((a) => a.services || []),
+      existing,
+    });
+    if (!res) return;
+    bookingChanged(res.dateKey);
+    if (existing && existing.dateKey !== res.dateKey) bookingChanged(existing.dateKey);
+    if (res.dateKey === dateKey) {
+      load(true);
+      showToast(existing ? "Booking updated" : "Booking added. Remember to book it in Timely too.");
+    } else {
+      load(true);
+      showToast(`Booking saved for ${formatShortDate(parseDateKey(res.dateKey))}.`);
+    }
+  }
+  async function removeBooking(a) {
+    const ok = await confirmDialog({
+      title: "Remove this booking?",
+      message: `${a.patientName} at ${a.time} with ${a.staff}. This only removes it from the portal calendar, not from Timely.`,
+      confirmLabel: "Remove", tone: "warning",
+    });
+    if (!ok) return;
+    try {
+      await removeManualAppt(a.manualId);
+      bookingChanged(dateKey);
+      load(true);
+      showToast("Booking removed");
+    } catch (err) {
+      console.error("Remove booking failed:", err);
+      showToast(err && err.code === "permission-denied"
+        ? "Not allowed. Check your “Add bookings” access." : "Couldn't remove it. Try again.");
+    }
+  }
+  const addBtn = q("[data-addbook]");
+  if (addBtn) addBtn.addEventListener("click", () => openBooking());
+
   board.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-action]");
     if (!btn) return;
     if (btn.dataset.action === "retry") load(true);
     if (btn.dataset.action === "relogin") logout();
     if (btn.dataset.action === "eod") openEndOfDay();
+    if (btn.dataset.action === "mappt-add") openBooking({ staff: btn.dataset.staff || "" });
+    if (btn.dataset.action === "mappt-edit" || btn.dataset.action === "mappt-remove") {
+      e.preventDefault();
+      const a = shown.find((x) => x.manualId === btn.dataset.id);
+      if (!a) return;
+      if (btn.dataset.action === "mappt-edit") openBooking({}, a);
+      else removeBooking(a);
+    }
   });
 
   load();
@@ -238,7 +305,9 @@ function staffColumn(name, appts) {
   appts.sort((a, b) => a.sortMinutes - b.sortMinutes || a.patientName.localeCompare(b.patientName));
   return `
     <div class="cal-col" style="--col-bg:${bg};--col-line:${line}">
-      <div class="cal-col-head">${escapeHtml(name)}</div>
+      <div class="cal-col-head">${escapeHtml(name)}${can("calendar.book") && !/^unassigned$/i.test(name)
+        ? `<button type="button" class="cal-col-add" data-action="mappt-add" data-staff="${escapeHtml(name)}"
+            aria-label="Add a booking with ${escapeHtml(name)}" title="Add a booking with ${escapeHtml(name)}">+</button>` : ""}</div>
       <div class="cal-col-body">${appts.map(apptCard).join("")}<div class="cal-eod-slot" data-eod-col="${escapeHtml(name)}"></div></div>
     </div>`;
 }
@@ -269,7 +338,27 @@ function badgeHtml(type) {
   return `<span class="cb ${cls}">${label}</span>`;
 }
 
+// A booking added in the portal: tagged, with Edit and Remove
+function manualCard(a) {
+  const services = (a.services || []).map((s) => `<span class="appt-service">${escapeHtml(s)}</span>`).join("");
+  const name = escapeHtml(a.patientName || "Unknown patient");
+  const idx = Number.isInteger(a._i) ? ` data-i="${a._i}"` : "";
+  const id = escapeHtml(a.manualId);
+  return `<div class="appt is-manual${a.notInTimely ? " is-missing" : ""}"${idx} title="${escapeHtml([a.timeRange, a.note].filter(Boolean).join(" · "))}">
+    <span class="appt-time">${escapeHtml(a.time || "—")}</span>
+    ${a.patientId ? `<a class="appt-name" href="#/patient/${encodeURIComponent(a.patientId)}">${name}</a>` : `<span class="appt-name">${name}</span>`}
+    <span class="appt-badges"></span>
+    ${services ? `<span class="appt-services">${services}</span>` : ""}
+    ${a.note ? `<span class="appt-note">${escapeHtml(a.note)}</span>` : ""}
+    <span class="appt-manual-tag">${a.notInTimely ? "Not in Timely yet" : "Added in portal"}${a.createdBy ? ` · ${escapeHtml(a.createdBy)}` : ""}</span>
+    ${can("calendar.book") ? `<span class="appt-manual-acts">
+      <button type="button" data-action="mappt-edit" data-id="${id}">Edit</button>
+      <button type="button" data-action="mappt-remove" data-id="${id}">Remove</button></span>` : ""}
+  </div>`;
+}
+
 function apptCard(a) {
+  if (a.manual) return manualCard(a);
   const services = (a.services || [])
     .map((s) => `<span class="appt-service">${escapeHtml(s)}</span>`)
     .join("");

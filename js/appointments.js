@@ -2,6 +2,7 @@ import { LOGIN_ENDPOINT, db, auth } from "./firebase-config.js";
 import { doc, getDoc, collection, query, where, limit, getDocs }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { patientIds } from "./patients.js";
+import { listManualAppts, mergeDay } from "./manual-appts.js";
 
 // "Data last uploaded" info, cached for 60 seconds
 let syncMeta = null;
@@ -34,15 +35,18 @@ function unauthorized() {
 // All appointments for one day ("2026-10-07"), from Firestore (synced from the sheet)
 export async function fetchDayAppointments(dateKey) {
   try {
-    const [snap, meta] = await Promise.all([
+    const [snap, meta, manual] = await Promise.all([
       getDoc(doc(db, "appts_by_day", dateKey)),
       getSyncMeta(),
+      // Bookings added on the calendar. If they can't be read, the Day Sheet still shows.
+      listManualAppts(dateKey).catch((err) => { console.warn("Calendar bookings not loaded:", err); return []; }),
     ]);
+    const sheet = snap.exists() ? (snap.data().appointments || []) : [];
     return {
       ok: true,
       date: dateKey,
       lastUpdated: meta.sheetUpdatedAt || null,
-      appointments: snap.exists() ? (snap.data().appointments || []) : [],
+      appointments: mergeDay(sheet, manual, meta.sheetUpdatedAt),
     };
   } catch (err) {
     console.error("Appointments load failed:", err);

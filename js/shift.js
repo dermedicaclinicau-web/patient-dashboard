@@ -1,7 +1,7 @@
 // A staff member's working day: their work schedule (Staff → Edit), their last appointment, or the clinic finish time.
 import { db } from "./firebase-config.js";
 import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { callApi } from "./appointments.js";
+import { callApi, fetchDayAppointments } from "./appointments.js";
 
 const DOW = ["su", "mo", "tu", "we", "th", "fr", "sa"];
 const pad = (n) => String(n).padStart(2, "0");
@@ -43,8 +43,7 @@ export function scheduleOn(schedule, d = new Date()) {
 // When this person's last appointment today ends (minutes), or null.
 // Matched on their "Name in the appointment book"; without one, on their full name (or first name for one-word bookings).
 async function lastApptEnd(staff, schedule, key) {
-  const snap = await getDoc(doc(db, "appts_by_day", key));
-  const list = snap.exists() && Array.isArray(snap.data().appointments) ? snap.data().appointments : [];
+  const list = (await fetchDayAppointments(key)).appointments;   // the Day Sheet plus bookings added on the calendar
   const want = norm(schedule && schedule.apptName);
   const me = norm(staff.name);
   const mine = (a) => {

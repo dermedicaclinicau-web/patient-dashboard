@@ -205,6 +205,8 @@ export function teardownEndOfDay() {
 }
 
 window.addEventListener("kitday:changed", () => { if (me) refreshDay(); });
+// A booking added or changed on the calendar: the finish time (and the calendar's End of Day button) follows
+window.addEventListener("appts:changed", () => { st.planAt = 0; if (me) tickFn(); });
 
 /* ---------- The window ---------- */
 
