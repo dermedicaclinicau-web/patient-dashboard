@@ -16213,27 +16213,85 @@ function oldKitLedger_(namesIn, fresh) {
   return res;
 }
 
-// The old app's kits for every injector, kept small: one array per row. Remembered 15 minutes (the slow part).
+// The old app's kits for every injector, kept small: one array per row.
 // rows:    [kind, date, at, count, batch, expiry, voided (1/0), note]
 // records: [date, time, patient, units, areas, type, batch, expiry]
-function oldKitBase_(fresh) {
-  const key = 'old_kit_base_v1';
-  if (!fresh) { const hit = repCacheGet_(key); if (hit) return hit; }
+// Built in the background (buildOldKitBase, hourly) and saved as a file in Drive, so the page never waits for it.
+const OLD_KIT_FILE_PROP_ = 'OLD_KIT_BASE_FILE';
+const OLD_KIT_CACHE_ = 'old_kit_base_v2';
 
+function oldKitBase_(fresh) {
+  if (fresh) return buildOldKitBase();
+  const hit = repCacheGet_(OLD_KIT_CACHE_);
+  if (hit) return hit;
+  const id = PropertiesService.getScriptProperties().getProperty(OLD_KIT_FILE_PROP_);
+  if (id) {
+    try {
+      const res = JSON.parse(DriveApp.getFileById(id).getBlob().getDataAsString());
+      repCachePut_(OLD_KIT_CACHE_, res, 21600);
+      return res;
+    } catch (e) { console.warn('Old kit file not read: ' + e); }
+  }
+  return buildOldKitBase();   // first time only
+}
+
+// The hourly trigger runs this (and you can run it from the editor)
+function buildOldKitBase() {
+  const t0 = Date.now();
+  const res = oldKitBaseBuild_();
+  const json = JSON.stringify(res);
+  const props = PropertiesService.getScriptProperties();
+  let id = props.getProperty(OLD_KIT_FILE_PROP_);
+  try {
+    if (id) DriveApp.getFileById(id).setContent(json);
+    else throw new Error('no file yet');
+  } catch (e) {
+    id = DriveApp.createFile('Dermedica portal: old app kits (do not delete).json', json, MimeType.PLAIN_TEXT).getId();
+    props.setProperty(OLD_KIT_FILE_PROP_, id);
+  }
+  repCachePut_(OLD_KIT_CACHE_, res, 21600);
+  const recs = res.people.reduce(function (a, p) { return a + p.records.length; }, 0);
+  const rows = res.people.reduce(function (a, p) { return a + p.rows.length; }, 0);
+  console.log('Old app kits built in ' + Math.round((Date.now() - t0) / 1000) + ' s: ' + res.people.length + ' people, ' +
+    rows + ' sheet rows, ' + recs + ' records, ' + Math.round(json.length / 1024) + ' KB');
+  return res;
+}
+
+// Run ONCE from the editor: builds it now, then every hour
+function installOldKitCache() {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return t.getHandlerFunction() === 'buildOldKitBase'; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('buildOldKitBase').timeBased().everyHours(1).create();
+  buildOldKitBase();
+}
+
+// The old app's kits for every injector, kept small: one array per row.
+// rows:    [kind, date, at, count, batch, expiry, voided (1/0), note]
+// records: [date, time, patient, units, areas, type, batch, expiry, patient's portal ID]
+function oldKitBaseBuild_() {
+  const cfg = getConfig_();
   const staff = getStaffDocs_();
   const who = {};
   const people = {};
+
+  // Old app names ("Dr Joanna Teh", "Allie") → the person on the portal's staff list
   const personOf = function (name) {
     if (!(name in who)) {
       const hits = staff.filter(function (s) { return kitSameStaff_(s.name, name); });
-      who[name] = hits.length === 1 ? { key: hits[0].id, uid: hits[0].id, name: hits[0].name } : { key: 'old:' + name, uid: '', name: name };
+      who[name] = hits.length === 1
+        ? { key: hits[0].id, uid: hits[0].id, name: hits[0].name }
+        : { key: 'old:' + name, uid: '', name: name };
     }
     const w = who[name];
-    const p = people[w.key] || (people[w.key] = { key: w.key, staffUid: w.uid, staffName: w.name, oldNames: [], rows: [], records: [] });
+    const p = people[w.key] || (people[w.key] = {
+      key: w.key, staffUid: w.uid, staffName: w.name, oldNames: [], rows: [], records: [],
+    });
     if (p.oldNames.indexOf(name) === -1) p.oldNames.push(name);
     return p;
   };
-  const my = function (s) {   // "2028-05-31" → "05/2028"
+
+  const my = function (s) {   // "2028-05-31" → "05/2028"; "08/2027" stays as it is
     s = String(s || '').trim();
     const m = /^(\d{4})-(\d{2})/.exec(s);
     return m ? m[2] + '/' + m[1] : s;
@@ -16241,49 +16299,95 @@ function oldKitBase_(fresh) {
   const join = function (list) {
     return list.filter(function (x, i, a) { return x && a.indexOf(x) === i; }).join(', ');
   };
+  const typeOf = function (t) {   // the old app wrote "Touchup"
+    t = String(t || '').trim();
+    return /^touch\s*-?\s*up$/i.test(t) ? 'Touch up' : t;
+  };
 
+  /* ---------- StartOfDayLog ---------- */
+
+  CacheService.getScriptCache().remove('old_kit_rows_v1');   // read the sheet fresh
   const sheet = oldKitRows_();
+
+  // VOID-RESTOCK-123 cancels RESTOCK-123
   const voided = {};
   sheet.forEach(function (r) {
     const m = r.kind === 'VOID' ? /^VOID-(.+)$/i.exec(r.id) : null;
     if (m) voided[m[1].toUpperCase()] = true;
   });
+
+  // BORROW-IN rows have no note: who it came from is the matching BORROW-OUT (same day and batch)
+  const outs = sheet.filter(function (r) { return r.kind === 'BORROW-OUT'; });
+
   const seen = {};
   sheet.forEach(function (r) {
     if (!r.staff || r.kind === 'VOID') return;
     const k = [r.id, r.date, r.staff, r.count, r.batch].join('|');
-    if (seen[k]) return;
+    if (seen[k]) return;   // the same row saved twice
     seen[k] = true;
-    personOf(r.staff).rows.push([r.kind, r.date, r.at || 0, r.count, r.batch, r.expiry,
-      r.kind === 'RESTOCK' && voided[r.id.toUpperCase()] ? 1 : 0, String(r.note || '').slice(0, 80)]);
+
+    let note = String(r.note || '').trim();
+    if (r.kind === 'BORROW-IN' && !note) {
+      const o = outs.filter(function (x) {
+        return x.date === r.date && String(x.batch) === String(r.batch) && !kitSameStaff_(x.staff, r.staff);
+      })[0];
+      if (o) note = 'From ' + o.staff;
+    }
+
+    personOf(r.staff).rows.push([
+      r.kind, r.date, r.at || 0, r.count, r.batch, r.expiry,
+      r.kind === 'RESTOCK' && voided[r.id.toUpperCase()] ? 1 : 0,
+      note.slice(0, 80),
+    ]);
   });
 
-  fsListAll_(getConfig_(), OLD_WR_COL_, ['Staff', 'Patient Name', 'Record Date', 'Record ID', 'treatment_details_map'])
+  /* ---------- wr_treatment_record ---------- */
+
+  // The old app's Patient ID ("221", "FB92A107") → the patient's page in the portal
+  let pts = null;
+  try { pts = paperPts_(cfg); }
+  catch (e) { console.warn('Old kits: patients not read, so History won\'t link to them: ' + e); }
+
+  fsListAll_(cfg, OLD_WR_COL_, ['Staff', 'Patient Name', 'Patient ID', 'Record Date', 'Record ID', 'treatment_details_map'])
     .forEach(function (d) {
       const f = fromFields_(d.fields || {});
       const name = String(f.Staff || '').replace(/\s+/g, ' ').trim();
       const date = String(f['Record Date'] || '').trim();
       if (!name || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
-      const t = /\d{8}-(\d{2})(\d{2})\d{2}/.exec(String(f['Record ID'] || ''));
+
+      const t = /\d{8}-(\d{2})(\d{2})\d{2}/.exec(String(f['Record ID'] || ''));   // WR-20251211-130536 → 13:05
       const lines = (Array.isArray(f.treatment_details_map) ? f.treatment_details_map : []).map(function (x) {
         x = x || {};
         return {
-          area: String(x['Area Selected'] || '').trim(), batch: String(x['Batch Number'] || '').trim(),
-          expiry: my(x['Expiry Date']), type: String(x.Type || '').trim(),
+          area: String(x['Area Selected'] || '').trim(),
+          batch: String(x['Batch Number'] || '').trim(),
+          expiry: my(x['Expiry Date']),
+          type: typeOf(x.Type),
           units: Number(String(x['Total Units'] == null ? '' : x['Total Units']).replace(/[^\d.]/g, '')) || 0,
         };
       }).filter(function (x) { return x.units > 0; });
+
       const units = Math.round(lines.reduce(function (a, x) { return a + x.units; }, 0) * 10) / 10;
       if (!(units > 0)) return;
-      personOf(name).records.push([date, t ? t[1] + ':' + t[2] : '', String(f['Patient Name'] || '').trim(), units,
+
+      const ptt = String(f['Patient ID'] == null ? '' : f['Patient ID']).trim();
+      let pid = '';
+      if (ptt && pts) { try { pid = pts.find(ptt) || ''; } catch (e) { pid = ''; } }
+
+      personOf(name).records.push([
+        date,
+        t ? t[1] + ':' + t[2] : '',
+        String(f['Patient Name'] || '').trim(),
+        units,
         lines.map(function (x) { return (x.area || 'Area') + ' ' + x.units; }).join(' · '),
-        join(lines.map(function (x) { return x.type; })), join(lines.map(function (x) { return x.batch; })),
-        join(lines.map(function (x) { return x.expiry; }))]);
+        join(lines.map(function (x) { return x.type; })),
+        join(lines.map(function (x) { return x.batch; })),
+        join(lines.map(function (x) { return x.expiry; })),
+        pid,
+      ]);
     });
 
-  const res = { people: Object.keys(people).map(function (k) { return people[k]; }), at: new Date().toISOString() };
-  repCachePut_(key, res, 900);
-  return res;
+  return { people: Object.keys(people).map(function (k) { return people[k]; }), at: new Date().toISOString() };
 }
 
 // Reporting → Kit reconciliation: the old app's days between two dates ("" = no limit).
@@ -16307,7 +16411,8 @@ function oldKitLedgerAll_(fresh, from, to) {
         return { kind: r[0], date: r[1], at: r[2], count: r[3], batch: r[4], expiry: r[5], voided: r[6] === 1, note: r[7] };
       }),
       records: p.records.filter(function (x) { return inRange(x[0]); }).map(function (x) {
-        return { date: x[0], time: x[1], patientName: x[2], units: x[3], areas: x[4], type: x[5], batch: x[6], expiry: x[7] };
+        return { date: x[0], time: x[1], patientName: x[2], units: x[3], areas: x[4], type: x[5], batch: x[6], expiry: x[7],
+          patientId: x[8] || '' };
       }),
     };
   }).filter(function (p) { return p.rows.length || p.records.length; });

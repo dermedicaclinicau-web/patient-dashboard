@@ -111,9 +111,9 @@ function oldEntries(data) {
     } else if (r.kind === "RESTOCK" && !r.voided) {
       add({ ...base, kind: "move", sub: "restock", units: r.count });
     } else if (r.kind === "BORROW-IN") {
-      add({ ...base, kind: "move", sub: "borrow", units: r.count, who: r.note || "a colleague" });
+      add({ ...base, kind: "move", sub: "borrow", units: r.count, who: String(r.note || "").replace(/^from\s+/i, "") || "a colleague" });
     } else if (r.kind === "BORROW-OUT") {
-      add({ ...base, kind: "move", sub: "lend", units: -r.count, who: r.note || "a colleague" });
+      add({ ...base, kind: "move", sub: "lend", units: -r.count, who: String(r.note || "").replace(/^to\s+/i, "") || "a colleague" });
     }
   });
   Object.values(counts).forEach((c) => {
@@ -124,7 +124,7 @@ function oldEntries(data) {
   });
   (data.records || []).forEach((w) => {
     add({ ms: atTime(w.date, w.time), date: w.date, kind: "move", sub: "use", units: -r1(w.units),
-      patientName: w.patientName || "", type: w.type || "Treatment", areas: w.areas || "",
+      patientName: w.patientName || "", patientId: w.patientId || "", type: w.type || "Treatment", areas: w.areas || "",
       batch: w.batch || "", expiry: w.expiry || "" });
   });
   return out;
@@ -277,7 +277,8 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
     st.people.forEach((p) => {
       if ((st.product && p.product.id !== st.product) || (st.staff && p.uid !== st.staff)) return;
       groupDays(p.L.filter((e) => e.date >= a && e.date <= b)).forEach((d) => {
-        if (!d.start && !d.end && !d.uses.length && !d.restocks.length && !d.colleagues.length) return;
+        const empty = (c) => !c || (!c.value && !(c.batches || []).some((x) => x.batch));
+        if (empty(d.start) && empty(d.end) && !d.uses.length && !d.restocks.length && !d.colleagues.length) return;
         out.push({ ...d, p, id: `${p.product.id}|${p.uid}|${d.date}` });
       });
     });
