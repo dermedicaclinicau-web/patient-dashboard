@@ -924,49 +924,6 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     }
     await openVial(l);
   }
-    const p = productOf(l);
-    if (!p) return;
-    if (vial(p)) {
-      const v = vialStock(l, p);
-      if (v.lots.length) {   // every batch in this place, oldest expiry first: staff choose which one they're opening
-        const left = r2(v.open.reduce((a, c) => a + c.left, 0));
-        const lot = await chooseVialDialog(p, v.lots, { where: whereOf(l), openLeft: left });
-        if (!lot) return;
-        try {
-          await openContainer(p, lot, staff);
-          await refresh(true);
-          showToast(`New ${p.stockUnit} opened (${batchText(p, lot.batch) || "no batch number"}): ${fmt(p.dosePer)} ${p.doseUnit} ready.`);
-        } catch (err) {
-          console.error("Open vial failed:", err);
-          showToast(err && err.message && !err.code ? err.message : "Couldn't open it. Try again.");
-        }
-        return;
-      }
-      // None left: falls through to the order request below
-    }
-    if (isKit(p)) {
-      if (await takeFromShelfDialog(p, staff)) await refresh(true);
-      return;
-    }
-    const qty = suggestOrder(p, l.loc);
-    const ok = await confirmDialog({
-      title: `Ask for more ${p.name}?`,
-      message: `This sends an order request to the ordering team for ${plural(qty, p.orderUnit)} for ${whereOf(l)}.`,
-      confirmLabel: "Send request", tone: "info",
-    });
-    if (!ok) return;
-    try {
-      await createRequest({
-        items: [{ productId: p.id, name: p.name, supplierId: p.supplierId, qty, unitKind: "order",
-          unit: p.orderUnit, stockQty: qty * p.packSize }],
-        loc: l.loc, urgency: "normal", note: `Asked for from a treatment record (${f.label || "Products used"})`,
-      }, staff);
-      showToast(`Order request sent for ${p.name}.`);
-    } catch (err) {
-      console.error("Order request failed:", err);
-      showToast(err && err.message && !err.code ? err.message : "Couldn't send the request. Try again.");
-    }
-  }
 
   host.addEventListener("click", async (e) => {
     const b = e.target.closest("[data-cs]");
