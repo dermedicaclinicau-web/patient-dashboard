@@ -210,10 +210,134 @@ function checkList(d) {
 }
 const flagHtml = (f) => `<span class="kr-flag${f.bad ? " is-bad" : ""}">${esc(f.t)}</span>`;
 
+/* ---------- How to use this (the guide) ---------- */
+const HELP_SECTIONS = [
+  ["What this report is", `
+    <p>Kit reconciliation shows everything that happened to each injector's kit, day by day: what they started with,
+    what came in, what was used on patients and what they finished with. If the numbers don't add up, it tells you where.</p>
+    <p>It brings together the <strong>old app</strong> (start-of-day counts and Wrinkle Relaxer records, February to October 2026)
+    and the <strong>portal</strong> (from October 2026) as one record. On a day the portal has records, only the portal is used,
+    so a treatment saved in both is never counted twice.</p>`],
+
+  ["The filters", `
+    <ul>
+      <li><strong>Staff</strong>: tick one or more injectors, or leave it on <em>All injectors</em>. Only staff with
+        <strong>Injector</strong> ticked in Staff management appear. If someone is missing, tick Injector on their staff record.</li>
+      <li><strong>From / To</strong>: the dates shown. It opens on the last 90 days. Clear both to see everything.</li>
+      <li><strong>Product</strong>: the kit product. The old app only recorded Xeomin.</li>
+      <li><strong>Only days that need checking</strong>: hides every day that adds up, so you only see the problems.</li>
+    </ul>`],
+
+  ["The summary (one line per injector)", `
+    <p>Above the table, one line for each injector covering the dates you've chosen.</p>
+    <ul>
+      <li><strong>Opening</strong>: their first start count in these dates.</li>
+      <li><strong>Restocked</strong>: units taken into their kit. Returns, discards and corrections are shown underneath.</li>
+      <li><strong>Colleagues</strong>: units received from (+) or given to (−) other injectors.</li>
+      <li><strong>Used on patients</strong>: units recorded on treatment records, and how many records.</li>
+      <li><strong>Closing</strong>: their last start count in these dates.</li>
+      <li><strong>Not accounted for</strong>: the opening count plus everything in and out, compared with the closing count.
+        <em>Adds up</em> is what you want. <em>4 missing</em> means 4 units left the kit with no record.
+        <em>2 extra</em> means there were more than there should have been (usually a restock that wasn't recorded).
+        It needs at least two start counts in the dates chosen.</li>
+      <li><strong>Needs checking</strong>: how many days have something to look at. Click it to see just those days.
+        It also shows expired batches used, days not counted, handovers not confirmed and batches in their kit expiring
+        within 60 days.</li>
+    </ul>
+    <p>Click an injector's name to see only their days.</p>`],
+
+  ["The days table", `
+    <ul>
+      <li><strong>Batch Number / Exp Date</strong>: the batch in their kit that day, from their start count
+        (or from their treatments if they didn't count).</li>
+      <li><strong>Start Count</strong>: what they counted at the start of the day. A red <em>expected</em> figure underneath
+        means it didn't match what they should have had from the day before.</li>
+      <li><strong>End of Count</strong>: their end-of-day count, if they did one. The old app rarely recorded these.</li>
+      <li><strong>Total Usage</strong>: units recorded on patients that day.</li>
+      <li><strong>Restock Record</strong>: units taken into the kit, with batch and expiry, and anything from or to a colleague.</li>
+      <li><strong>History</strong>: every patient treated that day, with the time, type of record, area and units.
+        Click a patient's name to open their page, or the type of record to open the record itself.</li>
+    </ul>`],
+
+  ["What the checks mean", `
+    <ul>
+      <li><span class="kr-flag">Not counted</span> Treatments were recorded, but there was no start count that day,
+        so nobody can say what was in the kit.</li>
+      <li><span class="kr-flag is-bad">5 not on a patient</span> The start count plus restocks, minus the patients, should have
+        left more than the end count. Those units left the kit without a patient record. Needs an end count that day.</li>
+      <li><span class="kr-flag">2 more than expected</span> There were more units at the end of the day than there should have been.
+        Usually a restock that wasn't recorded.</li>
+      <li><span class="kr-flag is-bad">Start −3</span> The start count was lower than what they had the day before (minus anything
+        used since). A plus sign means higher.</li>
+      <li><span class="kr-flag is-bad">Expired batch used</span> A patient was treated after the batch's expiry date.
+        Check the record straight away.</li>
+      <li><span class="kr-flag">Handover not confirmed</span> Units were taken from a colleague, but the colleague hasn't confirmed
+        it in the portal. <em>Disputed</em> means they said the amount was wrong.</li>
+    </ul>`],
+
+  ["When something doesn't add up", `
+    <ol>
+      <li>Tick <strong>Only days that need checking</strong>, or click <em>days to check</em> in the summary.</li>
+      <li>Start with the oldest day, because one wrong count makes the next day look wrong too.</li>
+      <li>Open <strong>History</strong> and compare the patients with the appointment book for that day.
+        A missing patient is the most common cause.</li>
+      <li>Check for a restock or handover that wasn't recorded (the <em>extra</em> checks), and a count that was
+        typed wrongly (a difference one day that is reversed the next).</li>
+      <li>If it's still unexplained, talk to the injector and note what happened.</li>
+    </ol>`],
+
+  ["Batch lookup", `
+    <p>Type a batch number and press <strong>Find</strong> to see every patient treated with that batch, and every time it came
+    into or left a kit. It covers the old app and the portal, all dates and all staff, whatever the other filters are set to.</p>
+    <p>Use it if a supplier or the TGA recalls a batch: you get the patient list in seconds. <strong>Export CSV</strong> gives you
+    the full list, with Patient IDs, to contact them. Treatments after the expiry date are marked.</p>
+    <p>Part of a batch number works too, as long as you type at least 4 characters.</p>`],
+
+  ["Dosing", `
+    <p>Average units for each injector, compared with the whole clinic, for the dates and staff chosen.</p>
+    <ul>
+      <li><strong>Units per treatment</strong>: treatments and touch ups are kept separate, because touch ups are much smaller.</li>
+      <li><strong>Units per area</strong>: averages for each area (forehead, frown, crow's feet…).
+        <span class="kr-hi">&nbsp;Amber&nbsp;</span> is 25% or more above the clinic's average;
+        <span class="kr-lo">&nbsp;blue&nbsp;</span> is 25% or more below. Only shown where someone has 3 or more treatments for that area.</li>
+    </ul>
+    <p>A difference isn't wrong in itself (some injectors see patients needing more), but it's useful for training and consistency.
+    Areas come from the old app's records for now, because portal records don't save the area yet.</p>`],
+
+  ["Exporting", `
+    <ul>
+      <li><strong>Days</strong>: <em>Export CSV</em> gives one line per patient for the days shown, with the day's counts and checks.
+        Use the filters first to export just what you need.</li>
+      <li><strong>Batch lookup</strong>: <em>Export CSV</em> gives every treatment and movement for that batch.</li>
+    </ul>`],
+
+  ["Good to know", `
+    <ul>
+      <li><strong>Dr Teh's old app days</strong> often show large differences. Her old app counts look like JT storage rather than
+        a kit, so those differences aren't missing stock.</li>
+      <li><strong>The old app's records</strong> are refreshed every hour. The portal's are always up to date.</li>
+      <li>Days where someone only logged a start count of 0 and nothing else are hidden, because they weren't carrying any.</li>
+      <li><strong>Treatments from the Shelf or JT storage</strong> (not the kit) appear in History and in Total Usage, but don't
+        count against the kit.</li>
+    </ul>`],
+];
+
+function helpHtml() {
+  return `<section class="tb-card kr-help">
+      <div class="kr-help-head">
+        <h3>How to use Kit reconciliation</h3>
+        <button type="button" class="lh-btn" data-act="kr-help">Close</button>
+      </div>
+      ${HELP_SECTIONS.map(([title, html], i) => `<details class="kr-help-sec"${i === 0 ? " open" : ""}>
+          <summary>${title}</summary><div class="kr-help-body">${html}</div></details>`).join("")}
+    </section>`;
+}
+
 /* ---------- Reporting → Kit reconciliation ---------- */
 export function mountKitReconciliation(body, { csv = null } = {}) {
   const st = {
     view: "days", staff: new Set(), staffOpen: false, product: "", from: daysAgo(89), to: "", onlyCheck: false, limit: 100,
+    help: false,
     open: new Set(), people: [], products: [], problem: "", oldProblem: "", loadingOld: false, base: null, old: {}, seq: 0,
     q: "", allPeople: null, loadingAll: false, allProblem: "",
   };
@@ -458,7 +582,9 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
 
   function tabsHtml() {
     return `<div class="kr-views">${[["days", "Days"], ["batch", "Batch lookup"], ["dosing", "Dosing"]].map(([v, l]) =>
-      `<button type="button" class="kr-view${st.view === v ? " is-on" : ""}" data-view="${v}">${l}</button>`).join("")}</div>`;
+      `<button type="button" class="kr-view${st.view === v ? " is-on" : ""}" data-view="${v}">${l}</button>`).join("")}
+      <button type="button" class="kr-view kr-help-btn${st.help ? " is-on" : ""}" data-act="kr-help">${st.help ? "Hide the guide" : "How to use this"}</button>
+    </div>`;
   }
 
   function toolsHtml() {
@@ -703,7 +829,7 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
 
   function draw() {
     const view = st.view === "batch" ? batchHtml() : st.view === "dosing" ? toolsHtml() + dosingHtml() : toolsHtml() + daysHtml();
-    body.innerHTML = tabsHtml() + view;
+    body.innerHTML = tabsHtml() + (st.help ? helpHtml() : "") + view;
   }
 
   function exportCsv() {
@@ -742,6 +868,7 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
 
   body.addEventListener("click", (ev) => {
     if (ev.target.closest("a")) return;
+    if (ev.target.closest('[data-act="kr-help"]')) { st.help = !st.help; draw(); return; }
     const dd = body.querySelector(".kr-staff");
     if (dd && dd.open && !ev.target.closest(".kr-staff")) { dd.open = false; st.staffOpen = false; }
 

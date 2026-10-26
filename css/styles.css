@@ -9155,3 +9155,14 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 .kr-stat strong { display: block; font-size: 20px; color: #0f172a; }
 .kr-stat span { color: #64748b; font-size: 12px; }
 .kr-batch { align-items: flex-end; }
+
+.kr-help-btn { margin-left: auto; }
+.kr-help { padding: 16px 18px; margin: 0 0 16px; }
+.kr-help-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.kr-help-head h3 { margin: 0; font-size: 17px; color: #0f172a; }
+.kr-help-sec { border-top: 1px solid #e2e8f0; }
+.kr-help-sec > summary { padding: 10px 2px; font-weight: 700; color: #0f766e; cursor: pointer; }
+.kr-help-body { padding: 0 2px 12px; color: #334155; line-height: 1.55; }
+.kr-help-body ul, .kr-help-body ol { margin: 6px 0; padding-left: 20px; }
+.kr-help-body li { margin: 0 0 6px; }
+.kr-help-body p { margin: 0 0 8px; }
