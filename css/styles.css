@@ -8959,3 +8959,11 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
   .ppr-canvas { max-height: 55vh; }
 }
 
+.ppr-dlg.is-saving .ppr-side { cursor: progress; }
+.ppr-dlg .lh-btn.is-busy { opacity: 1 !important; cursor: progress; display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+.ppr-dlg .lh-btn.is-done { opacity: 1 !important; background: #047857; border-color: #047857; color: #fff; }
+.ppr-spin { width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+  display: inline-block; animation: ppr-spin .7s linear infinite; flex: none; }
+@keyframes ppr-spin { to { transform: rotate(360deg); } }
+.ppr-prog { margin: 0; font-size: 13px; color: #475569; }
+

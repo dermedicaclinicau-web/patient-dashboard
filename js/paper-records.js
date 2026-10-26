@@ -299,6 +299,7 @@ export function mountPaperRecords(container, { staff } = {}) {
           <label class="lh-field"><span class="lh-label">Clinician (optional)</span>
             <input class="fe-input" name="who" maxlength="80" placeholder="As written on the paper" /></label>
           <p class="lh-error" role="alert" hidden></p>
+          <p class="ppr-prog" data-role="prog" aria-live="polite" hidden></p>
           <details class="ppr-more"${f.status === "help" ? " open" : ""}><summary>Not a treatment record, or need help?</summary>
             <label class="lh-field"><span class="lh-label">It isn't a record</span>
               <select class="fb-select" name="reason"><option value="">Choose why…</option>${SKIP_REASONS.map((r) =>
@@ -370,6 +371,46 @@ export function mountPaperRecords(container, { staff } = {}) {
       }
     })();
 
+    // Progress while saving: the button says what's happening, and a line underneath counts the seconds.
+    // Everything in the window is locked until it's done, so nothing is clicked twice.
+    function startProgress(btn, steps, hint = "") {
+      const prog = $('[data-role="prog"]');
+      const label = btn ? btn.innerHTML : "";
+      const locked = [...dlg.querySelectorAll("button, select, input, textarea")].filter((x) => !x.disabled);
+      locked.forEach((x) => { x.disabled = true; });
+      dlg.classList.add("is-saving");
+      const t0 = Date.now();
+      let text = steps[0][1];
+      const show = () => {
+        if (btn) btn.innerHTML = `<span class="ppr-spin" aria-hidden="true"></span>${esc(text)}`;
+        const s = Math.round((Date.now() - t0) / 1000);
+        prog.textContent = [hint, s >= 3 ? `${s} s` : ""].filter(Boolean).join(" · ");
+        prog.hidden = !prog.textContent;
+      };
+      if (btn) btn.classList.add("is-busy");
+      const timers = steps.slice(1).map(([ms, t]) => setTimeout(() => { text = t; show(); }, ms));
+      const tick = setInterval(show, 1000);
+      show();
+      const stop = () => { timers.forEach(clearTimeout); clearInterval(tick); dlg.classList.remove("is-saving"); };
+      return {
+        // Success: a tick on the button, then what happens next
+        done(msg, next) {
+          stop();
+          if (btn) { btn.classList.remove("is-busy"); btn.classList.add("is-done"); btn.innerHTML = `✓ ${esc(msg)}`; }
+          prog.textContent = next || "";
+          prog.hidden = !next;
+        },
+        // A problem: everything back as it was
+        fail() {
+          stop();
+          locked.forEach((x) => { x.disabled = false; });
+          if (btn) { btn.classList.remove("is-busy"); btn.innerHTML = label; }
+          prog.hidden = true;
+        },
+      };
+    }
+    const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+
     // What it's filed as
     let rxList = [];
     try { rxList = rxProductList() || []; } catch { rxList = []; }
@@ -425,7 +466,7 @@ export function mountPaperRecords(container, { staff } = {}) {
     listPublishedForms().then((list) => { forms = list || []; if (dlg.isConnected) drawType(); })
       .catch(() => { forms = []; if (dlg.isConnected) drawType(); showToast("Couldn't load the forms."); });
 
-    async function fileAs() {
+    async function fileAs(btn) {
       if (saving) return;
       err.hidden = true;
       if (!chosen) { fail("Choose the patient."); return; }
@@ -445,24 +486,34 @@ export function mountPaperRecords(container, { staff } = {}) {
         if (!body.items.length) { fail("Choose what was prescribed."); return; }
       }
       saving = true;
-      dlg.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+      const pic = ft.type === "billing" || ft.type === "rx";
+      const prog = startProgress(btn, pic
+        ? [[0, "Saving…"], [1500, "Making a picture of the scan…"], [5000, `Adding it to ${chosen.name}'s page…`],
+           [12000, "Still working. Big scans take a little longer…"]]
+        : [[0, "Filing…"], [2500, `Adding it to ${chosen.name}'s page…`], [10000, "Still working…"]],
+        pic ? "Usually 3 to 8 seconds. Keep this window open." : "");
+      let ok = false;
       try {
         const r = await callApi(body);
-        if (r.problem) { fail(r.problem); return; }
+        if (r.problem) { prog.fail(); fail(r.problem); return; }
+        ok = true;
         Object.assign(f, { status: "filed", filedKind: ft.type, filedTitle: (r.filedAs && r.filedAs.title) || "", reason: "",
           note: body.note.trim(), patientId: r.patientId, patientName: r.patientName, recordDate: r.recordDate, by: r.by || "", at: r.at || "" });
         if (ft.type === "treatment" && st.visits) {
           st.visits = st.visits.filter((v) => !(v.pid === r.patientId && v.date <= r.recordDate && r.recordDate <= addDays(v.date, 3)));
         }
-        showToast(`Filed under ${FILE_WHERE[ft.type]} on ${r.patientName}'s page`);
+        const where = `Filed under ${FILE_WHERE[ft.type]} on ${r.patientName}'s page`;
+        prog.done("Filed", `${where}. Opening the next scan…`);
+        showToast(where);
         draw();
+        await pause(900);   // long enough to see it worked
         goNext();
       } catch (ex) {
         console.error("Scan not filed:", ex);
+        if (!ok) prog.fail();
         fail(ex.message || "Couldn't file it. Try again.");
       } finally {
         saving = false;
-        dlg.querySelectorAll("button").forEach((b) => { b.disabled = false; });
       }
     }
 
@@ -481,29 +532,34 @@ export function mountPaperRecords(container, { staff } = {}) {
       if (n) openScan(n.id); else showToast("That was the last scan to sort. 👍");
     };
 
-    async function mark(status, extra = {}) {
+    async function mark(status, extra = {}, btn = null) {
       if (saving) return;
       err.hidden = true;
       saving = true;
-      dlg.querySelectorAll("button").forEach((b) => { b.disabled = true; });
+      const prog = startProgress(btn, [[0, "Saving…"], [6000, "Still working…"]]);
+      let ok = false;
       try {
         const r = await callApi({ action: "paper", op: "mark", fileId: f.id, status, ...extra });
-        if (r.problem) { fail(r.problem); return; }
+        if (r.problem) { prog.fail(); fail(r.problem); return; }
+        ok = true;
         Object.assign(f, { status, filedKind: "", filedTitle: "", note: extra.note || "", reason: extra.reason || "", patientId: r.patientId || "",
           patientName: r.patientName || "", recordDate: r.recordDate || "", by: r.by || "", at: r.at || "" });
         // An entered scan counts as that visit's record
         if (status === "entered" && st.visits) {
           st.visits = st.visits.filter((v) => !(v.pid === r.patientId && v.date <= r.recordDate && r.recordDate <= addDays(v.date, 3)));
         }
-        showToast({ entered: "Marked as entered", skip: "Marked as not a record", help: "Flagged for help", todo: "Back on the list" }[status]);
+        const msg = { entered: "Marked as entered", skip: "Marked as not a record", help: "Flagged for help", todo: "Back on the list" }[status];
+        prog.done("Saved", status === "todo" ? msg : `${msg}. Opening the next scan…`);
+        showToast(msg);
         draw();
+        await pause(700);
         if (status === "todo") dlg.close(); else goNext();
       } catch (ex) {
         console.error("Scan not saved:", ex);
+        if (!ok) prog.fail();
         fail(ex.message || "Couldn't save. Try again.");
       } finally {
         saving = false;
-        dlg.querySelectorAll("button").forEach((b) => { b.disabled = false; });
       }
     }
 
@@ -562,10 +618,11 @@ export function mountPaperRecords(container, { staff } = {}) {
       }
       const ty = e.target.closest("[data-type]");
       if (ty) { ft.type = ty.dataset.type; err.hidden = true; drawType(); return; }
-      const act = (e.target.closest("[data-act]") || {}).dataset?.act;
-      if (!act) return;
+      const actEl = e.target.closest("[data-act]");
+      const act = actEl && actEl.dataset.act;
+      if (!act || saving) return;
       if (act === "close") { dlg.close(); return; }
-      if (act === "file") { fileAs(); return; }
+      if (act === "file") { fileAs(actEl); return; }
       if (act === "rx-add") { ft.rx.push({ product: "", custom: !rxList.length, name: "" }); drawType(); return; }
       if (act === "rx-x") { ft.rx.splice(Number(e.target.closest("[data-rx]").dataset.rx), 1); drawType(); return; }
       if (act === "next") { goNext(); return; }
@@ -587,13 +644,13 @@ export function mountPaperRecords(container, { staff } = {}) {
       if (act === "entered") {
         if (!chosen) { fail("Choose the patient."); return; }
         if (!dateIn.value) { fail("Choose the date of the treatment."); return; }
-        mark("entered", { patientId: chosen.id, recordDate: dateIn.value });
+        mark("entered", { patientId: chosen.id, recordDate: dateIn.value }, actEl);
         return;
       }
-      if (act === "skip") mark("skip", { reason: $('[name="reason"]').value, note: $('[name="note"]').value });
-      if (act === "onfile") mark("skip", { reason: "Already on the patient's file", note: linkText(f.linked[0]) });
-      if (act === "help") mark("help", { note: $('[name="note"]').value });
-      if (act === "todo") mark("todo");
+      if (act === "skip") mark("skip", { reason: $('[name="reason"]').value, note: $('[name="note"]').value }, actEl);
+      if (act === "onfile") mark("skip", { reason: "Already on the patient's file", note: linkText(f.linked[0]) }, actEl);
+      if (act === "help") mark("help", { note: $('[name="note"]').value }, actEl);
+      if (act === "todo") mark("todo", {}, actEl);
     });
     dlg.addEventListener("cancel", (e) => { if (saving) e.preventDefault(); });
     dlg.addEventListener("close", () => { if (url) URL.revokeObjectURL(url); dlg.remove(); });

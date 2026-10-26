@@ -15264,8 +15264,10 @@ function paperFileOf_(id) {
   if (!DRIVE_ID_RE_.test(String(id || ''))) return null;
   let f;
   try { f = DriveApp.getFileById(id); } catch (e) { return null; }
-  if (f.isTrashed() || !PAPER_MIME_[f.getMimeType()] || !paperInside_(paperRootId_(), f)) return null;
-  return f;
+  if (f.isTrashed() || !PAPER_MIME_[f.getMimeType()]) return null;
+  const known = repCacheGet_(PAPER_FKEY_);   // listed from the folder in the last 10 minutes: no need to climb the folders
+  if (known && known.some(function (x) { return x.id === id; })) return f;
+  return paperInside_(paperRootId_(), f) ? f : null;
 }
 
 // Every scan in the folder (and two levels of subfolders), remembered 10 minutes, with its status
