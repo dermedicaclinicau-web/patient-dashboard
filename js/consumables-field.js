@@ -10,6 +10,7 @@
 import {
   listProducts, listAllLots, listKits, listOpenContainers, isKitProduct, isSharedProduct, openState, kitUnits,
   plural, unitPlural, fefo, lotId, INV_CATEGORIES, batchName, batchText, createRequest, suggestOrder, openContainer,
+  expiryState,
 } from "./inventory-api.js";
 import { takeFromShelfDialog, borrowDialog } from "./inventory-kits.js";
 import { isInjector, isAdmin, can } from "./perms.js";
@@ -49,6 +50,73 @@ function loadStock(force = false) {
     stockJob.catch(() => { stockJob = null; });
   }
   return stockJob;
+}
+
+// Restock: choose which batch the new vial comes from. Oldest expiry is chosen to start with; expired ones can't be.
+// lots: that place's batches with stock, oldest expiry first. Resolves the chosen lot, or null.
+function chooseVialDialog(p, lots, { where, openLeft = 0 }) {
+  return new Promise((resolve) => {
+    let out = null;
+    const total = lots.reduce((a, x) => a + x.qty, 0);
+    const first = lots.findIndex((x) => expiryState(x.expiry) !== "expired");
+    const unitOf = (n) => (n === 1 ? p.stockUnit : unitPlural(p.stockUnit));
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog cs-vdlg";
+    dlg.innerHTML = `<form class="lh-form" novalidate>
+      <div class="lh-dialog-head">
+        <h3>Open a new ${esc(p.stockUnit)} of ${esc(p.name)}</h3>
+        <p>Choose the ${esc(batchName(p).toLowerCase())} you're opening from ${esc(where)}. Check it matches the label on the ${esc(p.stockUnit)}.</p>
+      </div>
+      <div class="cs-vpick" role="radiogroup" aria-label="${esc(batchName(p))}">
+        ${lots.map((x, i) => {
+          const st = expiryState(x.expiry);
+          const off = st === "expired";
+          return `<label class="cs-vopt${off ? " is-off" : ""}">
+            <input type="radio" name="lot" value="${i}"${i === first ? " checked" : ""}${off ? " disabled" : ""} />
+            <span class="cs-vopt-tick" aria-hidden="true"></span>
+            <span class="cs-vopt-main">
+              <strong>${esc(batchText(p, x.batch) || "No batch number")}</strong>
+              <small>Exp ${esc(niceDate(x.expiry))}</small>
+              <span class="cs-vtags">
+                ${i === first ? '<em class="cs-vtag">Use first · oldest expiry</em>' : ""}
+                ${st === "soon" ? '<em class="cs-vtag is-soon">Expires soon</em>' : ""}
+                ${off ? '<em class="cs-vtag is-bad">Expired · can\'t be used</em>' : ""}
+              </span>
+            </span>
+            <span class="cs-vopt-qty"><b>${esc(x.qty)}</b><small>${esc(unitOf(x.qty))} left</small></span>
+          </label>`;
+        }).join("")}
+      </div>
+      <p class="cs-vnote" data-role="note"></p>
+      <div class="lh-actions">
+        <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+        <button type="submit" class="lh-btn is-primary"${first < 0 ? " disabled" : ""}>Open ${esc(p.stockUnit)}</button>
+      </div>
+    </form>`;
+    const note = dlg.querySelector('[data-role="note"]');
+    const showNote = () => {
+      if (first < 0) {
+        note.innerHTML = `<span class="cs-warn">Every ${esc(batchName(p).toLowerCase())} in ${esc(where)} has expired. Write them off and order more.</span>`;
+        return;
+      }
+      note.textContent = `${plural(total - 1, p.stockUnit)} left in ${where} after this.`
+        + (openLeft > 0 ? ` The ${fmt(openLeft)} ${p.doseUnit} left in the opened one are used first.` : "");
+    };
+    showNote();
+    dlg.querySelector("form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const sel = dlg.querySelector('input[name="lot"]:checked');
+      if (!sel) return;
+      out = lots[Number(sel.value)];
+      dlg.close();
+    });
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    dlg.addEventListener("close", () => { dlg.remove(); resolve(out); });
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    const sel = dlg.querySelector('input[name="lot"]:checked');
+    if (sel) sel.focus();
+  });
 }
 
 // linked(fieldId): the current total of a marked picture / Calculation / Number on the form (or null)
@@ -693,21 +761,14 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     if (!p) return;
     if (vial(p)) {
       const v = vialStock(l, p);
-      const lot = v.lots[0];   // oldest expiry first
-      if (lot) {
-        const nv = vialsLeft(v);
-        const left = v.open.reduce((a, c) => a + c.left, 0);
-        const ok = await confirmDialog({
-          title: `Open a new ${p.stockUnit} of ${p.name}?`,
-          message: `1 ${p.stockUnit} (${batchText(p, lot.batch) || "no batch number"}, Exp ${expMY(lot.expiry)}) comes off ${whereOf(l)}. `
-            + `${plural(nv - 1, p.stockUnit)} left after this.${left > 0 ? ` The ${fmt(left)} ${p.doseUnit} left in the opened one are used first.` : ""}`,
-          confirmLabel: `Open ${p.stockUnit}`, tone: "info",
-        });
-        if (!ok) return;
+      if (v.lots.length) {   // every batch in this place, oldest expiry first: staff choose which one they're opening
+        const left = r2(v.open.reduce((a, c) => a + c.left, 0));
+        const lot = await chooseVialDialog(p, v.lots, { where: whereOf(l), openLeft: left });
+        if (!lot) return;
         try {
           await openContainer(p, lot, staff);
           await refresh(true);
-          showToast(`New ${p.stockUnit} opened: ${fmt(p.dosePer)} ${p.doseUnit} ready.`);
+          showToast(`New ${p.stockUnit} opened (${batchText(p, lot.batch) || "no batch number"}): ${fmt(p.dosePer)} ${p.doseUnit} ready.`);
         } catch (err) {
           console.error("Open vial failed:", err);
           showToast(err && err.message && !err.code ? err.message : "Couldn't open it. Try again.");

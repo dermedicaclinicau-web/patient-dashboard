@@ -8835,3 +8835,41 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
   padding: 10px 12px; border: 1px solid #99f6e4; border-radius: 10px; background: #f0fdfa;
 }
 .bk-none { margin: 4px 0; color: #64748b; font-size: 13px; }
+
+/* Restock: choose which batch to open */
+.cs-vdlg { width: min(540px, 94vw); }
+.cs-vpick { display: flex; flex-direction: column; gap: 10px; margin: 4px 0 2px; max-height: 55vh; overflow: auto; padding: 2px; }
+.cs-vopt {
+  position: relative; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 14px;
+  padding: 14px 16px; border: 2px solid #e2e8f0; border-radius: 14px; background: #fff; cursor: pointer;
+  transition: border-color .15s, background .15s, box-shadow .15s;
+}
+.cs-vopt:hover { border-color: #99f6e4; }
+.cs-vopt input { position: absolute; opacity: 0; pointer-events: none; }
+.cs-vopt-tick {
+  width: 22px; height: 22px; border-radius: 50%; border: 2px solid #cbd5e1; background: #fff;
+  display: grid; place-items: center; flex-shrink: 0;
+}
+.cs-vopt-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cs-vopt-main strong { font-size: 16px; }
+.cs-vopt-main small { color: #64748b; font-size: 13px; }
+.cs-vopt-qty { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.1; }
+.cs-vopt-qty b { font-size: 22px; color: #0f766e; }
+.cs-vopt-qty small { color: #64748b; font-size: 12px; }
+.cs-vtags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.cs-vtag { font-style: normal; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: #ccfbf1; color: #115e59; }
+.cs-vtag.is-soon { background: #fef3c7; color: #92400e; }
+.cs-vtag.is-bad { background: #fee2e2; color: #b91c1c; }
+
+/* Selected */
+.cs-vopt:has(input:checked) { border-color: #0f766e; background: #f0fdfa; box-shadow: 0 0 0 3px rgba(15,118,110,.12); }
+.cs-vopt:has(input:checked) .cs-vopt-tick { border-color: #0f766e; background: #0f766e; }
+.cs-vopt:has(input:checked) .cs-vopt-tick::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #fff; }
+.cs-vopt:has(input:focus-visible) { outline: 3px solid #5eead4; outline-offset: 2px; }
+
+/* Expired: can't be chosen */
+.cs-vopt.is-off { cursor: not-allowed; opacity: .55; background: #f8fafc; }
+.cs-vopt.is-off:hover { border-color: #e2e8f0; }
+
+.cs-vnote { margin: 8px 0 0; font-size: 13px; color: #475569; }
+@media (max-width: 480px) { .cs-vopt { gap: 10px; padding: 12px; } .cs-vopt-qty b { font-size: 18px; } }
