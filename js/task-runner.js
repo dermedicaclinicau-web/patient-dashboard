@@ -118,7 +118,11 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   }
   if (!root.isConnected) return;
   if (!task || task.status !== "live") { fail("This task isn't available", "It may have been unpublished. Go back and choose another."); return; }
-
+  if (task.useFor === "treatmentInfo") {
+    fail("This email is sent from the consultation notes",
+      "Open the patient's consultation notes and use Treatment Info to Email.");
+    return;
+  }
   const aboutPatient = task.category === "patient" || task.recipients.aboutPatient;
   const fixedStaff = task.category === "staff" && task.recipients.mode === "fixed";
   const st = {

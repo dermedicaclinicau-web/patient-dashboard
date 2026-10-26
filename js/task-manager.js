@@ -308,7 +308,7 @@ async function renderCategory(main, key, isAdmin) {
       return;
     }
     
-    const tasks = (await listTaskTypes({ isAdmin: false })).filter((t) => t.category === key);
+    const tasks = (await listTaskTypes({ isAdmin: false })).filter((t) => t.category === key && !t.useFor);
     if (!list.isConnected) return;
     list.innerHTML = tasks.length
       ? tasks.map((t) => `

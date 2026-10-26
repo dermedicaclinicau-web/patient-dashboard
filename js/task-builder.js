@@ -2,6 +2,7 @@
 import {
   listTaskTypes, getTaskType, createTaskType, saveTaskType, taskSnapshot, fetchStaffList,
   TASK_FIELD_TYPES, TASK_CHOICE_TYPES, CHOICE_DISPLAYS, ATTACH_MODES, parseAttachment, attachmentKey,
+  TX_EMAIL_DEFAULT, clearTreatmentEmailFlag,
 } from "./task-types.js";
 import {
   tokenGroups, taskProblems, fillTemplate, sampleValues, subjectHtml, clinicDetails,
@@ -131,6 +132,7 @@ export async function mountTaskTypes(main, { staff } = {}) {
         <p class="muted tm-sub">Set a task up once, then anyone can run it from Create new task.</p>
       </div>
       <div class="ff-bar-actions">
+        <button type="button" class="ff-btn" data-act="tx-email" hidden>Set up the Treatment Info email</button>
         <button type="button" class="ff-btn" data-act="closed">Clinic closed days</button>
         <button type="button" class="ff-btn" data-act="starters">Add starter tasks</button>
         <button type="button" class="ff-btn is-primary" data-act="new">${I.plus}<span>New task type</span></button>
@@ -155,6 +157,8 @@ export async function mountTaskTypes(main, { staff } = {}) {
   };
 
   function render() {
+    const txBtn = main.querySelector('[data-act="tx-email"]');
+    if (txBtn) txBtn.hidden = types.some((t) => t.useFor === "treatmentInfo");
     if (!types.length) {
       list.innerHTML = `<div class="tm-empty"><strong>No task types yet.</strong><br>
         Start with three ready-made tasks you can edit (Send Treatment Info, Send Schedule and Staff reminder), or create your own.
@@ -170,7 +174,8 @@ export async function mountTaskTypes(main, { staff } = {}) {
         <span class="tm-task-icon">${t.category === "staff" ? I.staff : I.patient}</span>
         <span class="tm-task-main"><strong>${esc(t.name)}</strong>
           <small>${esc([CAT_LABEL[t.category], t.channel === "sms" ? "SMS" : "Email",
-            `${t.fields.length} field${t.fields.length === 1 ? "" : "s"}`, editedAgo(t.updatedAt)].filter(Boolean).join(" · ") + schedLine(t))}</small></span>
+            t.useFor === "treatmentInfo" ? "Used for Treatment Info to Email" : `${t.fields.length} field${t.fields.length === 1 ? "" : "s"}`,
+            editedAgo(t.updatedAt)].filter(Boolean).join(" · ") + schedLine(t))}</small></span>
         <span class="tb-pill ${t.status === "live" ? "is-live" : "is-draft"}">${t.status === "live" ? "Live" : "Draft"}</span>
         <span class="tm-task-go">${I.chev}</span>
       </a>`).join("")
@@ -192,6 +197,21 @@ export async function mountTaskTypes(main, { staff } = {}) {
   }
 
   main.addEventListener("click", async (e) => {
+    const tx = e.target.closest('[data-act="tx-email"]');
+    if (tx) {
+      tx.disabled = true;
+      try {
+        const newId = await createTaskType(TX_EMAIL_DEFAULT, staff);
+        await clearTreatmentEmailFlag(newId, staff).catch(() => {});
+        showToast("Created as a draft. Change the wording, then publish it.");
+        location.hash = `#/tasks/types/${encodeURIComponent(newId)}`;
+      } catch (err) {
+        console.error("Treatment Info email not created:", err);
+        showToast("Couldn't create it. Try again.");
+        tx.disabled = false;
+      }
+      return;
+    }
     const t = e.target.closest("[data-tab]");
     if (t) {
       tab = t.dataset.tab;
@@ -482,6 +502,12 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
           <div class="tb-field"><span>Sent by</span>
             ${seg("channel", [["email", "Email"], ["sms", "SMS · coming soon", true]], "email", 'data-set="channel"')}</div>
         </div>
+        ${task.category === "patient" ? `
+        <label class="fe-check tb-txmail"><input type="checkbox" data-set="useFor" data-rerender=""${task.useFor === "treatmentInfo" ? " checked" : ""} />
+          Use this for <strong>Treatment Info to Email</strong> <small class="muted">(the email sent from the consultation notes)</small></label>
+        ${task.useFor === "treatmentInfo" ? `<p class="tb-info">When it's published, the notes pop-up uses this email.
+          Put <strong>{Treatment details}</strong> where the treatments should go. It isn't listed in Create new task,
+          because it's sent from the notes.</p>` : ""}` : ""}
       </section>`;
   }
 
@@ -925,6 +951,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
 
   /* ---------- Editing ---------- */
   function setValue(path, v) {
+    if (path === "useFor") { task.useFor = v ? "treatmentInfo" : ""; return; }
     if (path === "category") {
       task.category = v === "staff" ? "staff" : "patient";
       task.recipients.mode = task.category === "staff" ? (task.recipients.mode === "fixed" ? "fixed" : "choose") : "patient";
@@ -944,6 +971,11 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     if (el.matches('[data-role="sch-psearch"]')) { schSearch(el.value); return; }
     if (el.dataset.set) {
       setValue(el.dataset.set, el.type === "checkbox" ? el.checked : el.value);
+      if (el.dataset.set === "useFor" && task.useFor) {
+        clearTreatmentEmailFlag(id, staff)
+          .then((names) => { if (names.length) showToast(`${names.join(", ")} is no longer used for Treatment Info to Email.`); })
+          .catch((err) => console.warn("Other Treatment Info email not cleared:", err));
+      }
       if (el.dataset.rerender !== undefined) {
         renderForm();
         if (el.dataset.set === "recipients.mode" && task.recipients.mode === "fixed") loadStaff();

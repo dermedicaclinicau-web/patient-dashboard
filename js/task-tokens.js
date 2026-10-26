@@ -73,9 +73,11 @@ const SMART = {
 };
 
 const SPECIALIST_TOKENS = ["Specialist name", "Specialist speciality", "Specialist practice", "Specialist email", "Specialist phone", "Specialist address"];
+export const TX_EMAIL_TOKENS = ["Treatment details", "Clinician", "Consultation date"];
 const BUILT_IN = ["first name", "full name", "email", "mobile", "date of birth", "patient name", "patient first name",
   "patient mobile", "patient email", "today", "staff name", "clinic phone", "clinic email", "clinic address",
-  ...Object.keys(SMART).map((k) => k.toLowerCase()), ...SPECIALIST_TOKENS.map((k) => k.toLowerCase())];
+  ...Object.keys(SMART).map((k) => k.toLowerCase()), ...SPECIALIST_TOKENS.map((k) => k.toLowerCase()),
+  ...TX_EMAIL_TOKENS.map((k) => k.toLowerCase())];
 const fillsForms = (task) => (task.attachments || []).some((a) => /^(fill|saved):/.test(String(a)));
 const treatmentsField = (task) => (task.fields || []).find((f) => TASK_CHOICE_TYPES.includes(f.type) && f.source === "treatments");
 
@@ -123,6 +125,19 @@ export function tokenGroups(task, { staffName = "", letterhead = null, sources =
       tok(n, samples[i], "", "From the Referral specialist on the attached form, once it's filled in")) });
   }
   
+  if (task.useFor === "treatmentInfo") {
+    groups.push({ title: "From the consultation notes", tokens: [
+      tok("Treatment details", {
+        html: '<h3>Wrinkle Relaxer</h3><p><strong>Forehead and frown lines</strong> · Quote: $350<br>'
+          + "Results show in about 2 weeks. A review is booked at 2 weeks.</p>"
+          + '<h3>DermaGlow</h3><p><strong>Full face</strong> · Quote: $280 per session<br>A course of 3, 4 weeks apart.</p>',
+        text: "Wrinkle Relaxer: Forehead and frown lines, $350\nDermaGlow: Full face, $280 per session",
+      }, "smart", "The treatments ticked in the notes, with their areas, quotes and comments"),
+      tok("Clinician", "Dr Joanna Teh", "", "Who did the consultation"),
+      tok("Consultation date", todayLong(), "", "The date of the recording"),
+    ] });
+  }
+
   const fields = (task.fields || []).filter((f) => String(f.label || "").trim());
   if (fields.length) {
     groups.push({ title: "Your fields", tokens: fields.map((f) => tok(f.label.trim(), fieldSample(f, sources), "field")) });
@@ -184,6 +199,10 @@ export function taskProblems(task) {
   [...tokensIn(task.subject), ...tokensIn(task.body)].forEach((n) => {
     const lower = n.toLowerCase();
     if (known.has(lower)) return;
+    if (TX_EMAIL_TOKENS.some((k) => k.toLowerCase() === lower) && task.useFor !== "treatmentInfo") {
+      out.push(`{${n}} only works in the Treatment Info email. Tick “Use this for Treatment Info to Email” in step 1, or remove it.`);
+      return;
+    }
     if (lower === "treatment info") {
       out.push("Add a Treatments field (connected to Treatment information) to use {Treatment info}.");
     } else if (task.category === "staff" && STAFF_SWAP[lower]) {
@@ -200,6 +219,9 @@ export function taskProblems(task) {
       out.push(`The message uses {${n}}, which isn't a blank this task has.`);
     }
   });
+  if (task.useFor === "treatmentInfo" && !/\{\s*treatment details\s*\}/i.test(String(task.body || ""))) {
+    out.push("Add {Treatment details} to the message. It's where the treatments from the notes go.");
+  }
   return [...new Set(out)];
 }
 

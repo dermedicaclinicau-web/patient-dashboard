@@ -1,11 +1,12 @@
 // Task types (Task Manager): saving, loading and tidying.
 import { db, auth } from "./firebase-config.js";
 import {
-  collection, getDocs, getDoc, addDoc, updateDoc, doc, query, where, serverTimestamp,
+  collection, getDocs, getDoc, addDoc, updateDoc, doc, query, where, limit, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
 import { cleanRichHtml, textToRichHtml } from "./rich-html.js";
 import { cleanSchedule } from "./task-schedule.js";
+
 
 const COL = "task_types";
 const CACHE_MS = 60 * 1000;
@@ -99,6 +100,7 @@ export function taskSnapshot(t = {}) {
     description: clip(t.description, 300),
     category,
     channel: t.channel === "sms" ? "sms" : "email",
+    useFor: category === "patient" && t.useFor === "treatmentInfo" ? "treatmentInfo" : "",
     fields: (Array.isArray(t.fields) ? t.fields : []).map(cleanTaskField).filter(Boolean).slice(0, 40),
     recipients: {
       mode: category === "staff" ? (r.mode === "fixed" ? "fixed" : "choose") : "patient",
@@ -190,4 +192,37 @@ export function fetchStaffList() {
       .catch((err) => { staffJob = null; throw err; });
   }
   return staffJob;
+}
+
+/* ---------- The Treatment Info to Email template (consultation notes) ---------- */
+
+export const TX_EMAIL_DEFAULT = {
+  name: "Treatment Info email (consultation notes)",
+  description: "The email sent from Treatment Info to Email in the consultation notes.",
+  category: "patient", channel: "email", useFor: "treatmentInfo", fields: [], attachments: [],
+  recipients: { mode: "patient", staffIds: [], cc: "", aboutPatient: false },
+  subject: "Your treatment information - Dermedica",
+  body: "Hi {First name},\n\nThank you for coming in to see {Clinician} on {Consultation date}. "
+    + "Here is the information about the treatments we discussed:\n\n{Treatment details}\n\n"
+    + "If you have any questions, or you'd like to book, just reply to this email or call us on {Clinic phone}.\n\n"
+    + "Kind regards,\n{Clinician}\nDermedica",
+};
+
+// The live task used by the notes overlay, or null (the built-in email is used instead)
+export async function getTreatmentEmailTask() {
+  const snap = await getDocs(query(collection(db, COL),
+    where("status", "==", "live"), where("useFor", "==", "treatmentInfo"), limit(1)));
+  return snap.empty ? null : normalise(snap.docs[0]);
+}
+
+// Only one task can be the Treatment Info email: takes the tick off every other one
+export async function clearTreatmentEmailFlag(exceptId, staff) {
+  const uid = currentUid();
+  const snap = await getDocs(query(collection(db, COL), where("useFor", "==", "treatmentInfo")));
+  const others = snap.docs.filter((d) => d.id !== exceptId);
+  await Promise.all(others.map((d) => updateDoc(d.ref, {
+    useFor: "", updatedAt: serverTimestamp(), updatedBy: (staff && staff.name) || "", updatedByUid: uid,
+  })));
+  cache = null;
+  return others.map((d) => String((d.data() || {}).name || "Another task"));
 }

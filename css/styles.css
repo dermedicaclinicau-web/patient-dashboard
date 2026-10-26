@@ -9237,3 +9237,8 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
   box-shadow: 0 0 0 1px #cbd5e1; background: var(--mdc, #fff); }
 .md-cpick .md-sw[data-mdc=""] { background: #fff linear-gradient(135deg, transparent 45%, #94a3b8 45%, #94a3b8 55%, transparent 55%); }
 .md-cpick .md-sw[aria-pressed="true"] { box-shadow: 0 0 0 3px #0f172a; }
+
+/* Treatment Info email from a Task types template */
+.em-preview.is-designed { padding: 0; background: transparent; }
+.em-tpl-note { color: #0f766e; }
+.tb-txmail { margin-top: 10px; }

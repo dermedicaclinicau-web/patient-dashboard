@@ -3,6 +3,7 @@ import { collection, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/
 import { getPatient } from "./patients.js";
 import { callApi } from "./appointments.js";
 import { escapeHtml, showToast } from "./utils.js";
+import { treatmentEmailTemplate, buildTreatmentEmail, showTreatmentEmail } from "./treatment-email-template.js";
 
 const str = (v) => String(v == null ? "" : v).trim();
 const norm = (s) => str(s).toLowerCase().replace(/\s+/g, " ");
@@ -163,12 +164,14 @@ function loadLinks() {
 /* ===================== Email content ===================== */
 
 // Inline styles so it looks right in every email app
-function buildEmailHtml({ firstName, items, links, staffName }) {
-  const blocks = items.map((it) => {
+// The treatments block on its own (used by the built-in email and by the Task types template).
+// Inline styles so it looks right in every email app.
+function treatmentBlocksHtml({ items, links, accent = "#0284c7" }) {
+  return items.map((it) => {
     const link = links.get(norm(it.name));
     const title = link
-      ? `<a href="${escapeHtml(link)}" style="color:#0284c7;font-weight:bold;text-decoration:none;">${escapeHtml(it.name)} &#8599;</a>`
-      : `<strong style="color:#0284c7;">${escapeHtml(it.name)}</strong>`;
+      ? `<a href="${escapeHtml(link)}" style="color:${accent};font-weight:bold;text-decoration:none;">${escapeHtml(it.name)} &#8599;</a>`
+      : `<strong style="color:${accent};">${escapeHtml(it.name)}</strong>`;
     const details = it.areas.map((a) => [
       a.areaName ? `<strong>Area/s:</strong> ${escapeHtml(a.areaName)}` : "",
       a.quote ? `Quote/Inclusions: ${escapeHtml(a.quote)}` : "",
@@ -176,15 +179,25 @@ function buildEmailHtml({ firstName, items, links, staffName }) {
     ].filter(Boolean).join("<br>")).join("<br><br>");
     return `<p style="margin:0 0 18px;">${title}${details ? "<br>" + details : ""}</p>`;
   }).join("");
+}
 
+// The built-in email, used when no Treatment Info email is published in Task types
+function buildEmailHtml({ firstName, items, links, staffName }) {
   return `
     <div style="font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:1.6;color:#1f2937;">
       <p style="margin:0 0 16px;">Hi ${escapeHtml(firstName || "there")},</p>
       <p style="margin:0 0 18px;">Please see below the treatment information you requested:</p>
-      ${blocks}
+      ${treatmentBlocksHtml({ items, links })}
       <p style="margin:0 0 16px;">If you have any questions, simply reply to this email or give us a call.</p>
       <p style="margin:0;">Kind regards,<br>${escapeHtml(staffName || "The Dermedica Team")}<br>Dermedica</p>
     </div>`;
+}
+
+// What's sent: pictures go as attachments (Apps Script adds them), so their on-screen copies are taken out
+function htmlForSending(el) {
+  const copy = el.cloneNode(true);
+  copy.querySelectorAll("img[data-logo], img[data-bank]").forEach((img) => img.removeAttribute("src"));
+  return copy.innerHTML;
 }
 
 /* ===================== The composer overlay ===================== */
@@ -212,15 +225,36 @@ export async function openEmailComposer({ items, recordId, record, staff, onSent
   if (!dlg.open) dlg.showModal();
 
   const patientKey = str(record["Patient Doc ID"]) || str(record["Patient ID"]);
-  const [patient, links] = await Promise.all([
+  const [patient, links, task] = await Promise.all([
     patientKey ? getPatient(patientKey).catch(() => null) : Promise.resolve(null),
     loadLinks(),
+    treatmentEmailTemplate(),
   ]);
   if (ctx !== myCtx) return; // closed meanwhile
 
   const email = patient ? str(patient.email) : "";
   const firstName = (patient && str(patient.firstName)) || str(record["Patient Name"]).split(/\s+/)[0] || "";
-  const html = buildEmailHtml({ firstName, items, links, staffName: staff ? staff.name : "" });
+
+  // The email written in Task types, if one is published; otherwise the built-in one
+  let subject = "Dermedica: Treatment Information";
+  let html = "";
+  let logo = "";
+  if (task) {
+    try {
+      const built = await buildTreatmentEmail({
+        task, record, staff, patient: patient || {},
+        blockHtml: treatmentBlocksHtml({ items, links, accent: task.style && task.style.accent }),
+      });
+      subject = built.subject || subject;
+      html = built.html;
+      logo = built.logo;
+    } catch (err) {
+      console.warn("Treatment Info template failed, using the built-in email:", err);
+    }
+  }
+  if (ctx !== myCtx) return;
+  const designed = !!html;
+  if (!designed) html = buildEmailHtml({ firstName, items, links, staffName: staff ? staff.name : "" });
 
   dlg.innerHTML = `
     <form class="em-form" novalidate>
@@ -235,12 +269,13 @@ export async function openEmailComposer({ items, recordId, record, staff, onSent
       ${email ? "" : `<p class="em-warn">There's no email address on file for this patient. Type one in to send.</p>`}
 
       <label class="em-field"><span>Subject</span>
-        <input type="text" name="subject" maxlength="200" value="Dermedica: Treatment Information" />
+        <input type="text" name="subject" maxlength="200" value="${escapeHtml(subject)}" />
       </label>
 
       <div class="em-field"><span>Message preview</span>
-        <div class="em-preview" contenteditable="true" role="textbox" aria-multiline="true">${html}</div>
-        <small>You can edit the message before sending.</small>
+        <div class="em-preview${designed ? " is-designed" : ""}" contenteditable="true" role="textbox" aria-multiline="true"></div>
+        <small>You can edit the message before sending.${designed
+          ? ` <span class="em-tpl-note">Wording from Task types → ${escapeHtml(task.name)}.</span>` : ""}</small>
       </div>
 
       <p class="em-error" role="alert"></p>
@@ -250,6 +285,10 @@ export async function openEmailComposer({ items, recordId, record, staff, onSent
         <button type="submit" class="em-send">${I.send}Send Email Now</button>
       </footer>
     </form>`;
+
+  const preview = dlg.querySelector(".em-preview");
+  if (designed) showTreatmentEmail(preview, html, logo);   // logo and pictures shown on screen
+  else preview.innerHTML = html;
 
   const toInput = dlg.querySelector("input[name='to']");
   (email ? dlg.querySelector(".em-send") : toInput).focus();
@@ -286,7 +325,7 @@ async function onSubmit(e) {
       recordId: myCtx.recordId,
       to,
       subject,
-      html: preview.innerHTML,
+      html: htmlForSending(preview),
       treatments: myCtx.items.map((i) => i.name),
     });
     showToast(`Email sent to ${to}`);

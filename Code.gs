@@ -1540,7 +1540,7 @@ function handleSendTreatmentEmail_(body) {
 
   if (!/^[A-Za-z0-9_-]{3,80}$/.test(recordId)) return { ok: false, error: 'BAD_REQUEST' };
   if (to.length > 254 || !/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(to)) return { ok: false, error: 'BAD_EMAIL' };
-  if (!html || html.length > 100000) return { ok: false, error: 'BAD_REQUEST' };
+  if (!html || html.length > 300000) return { ok: false, error: 'BAD_REQUEST' };
 
   // Rate limit per staff member + Gmail's daily allowance
   const cache = CacheService.getScriptCache();
@@ -1554,7 +1554,10 @@ function handleSendTreatmentEmail_(body) {
   const rec = fsGetDoc_(cfg, 'appointment_transcripts/' + recordId);
   if (!rec) return { ok: false, error: 'NOT_FOUND' };
 
-  MailApp.sendEmail({ to: to, subject: subject, htmlBody: html, name: 'Dermedica Clinic' });
+  const inlined = inlineTaskImages_(cfg, html);   // Image Bank pictures and the logo travel inside the email
+  const mail = { to: to, subject: subject, htmlBody: inlined.html, body: emailHtmlToText_(inlined.html), name: 'Dermedica Clinic' };
+  if (Object.keys(inlined.images).length) mail.inlineImages = inlined.images;
+  MailApp.sendEmail(mail);
   cache.put(rlKey, String(sentThisHour + 1), 3600);
 
   const entry = {
