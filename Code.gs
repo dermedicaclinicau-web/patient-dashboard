@@ -15221,6 +15221,7 @@ function handlePaper_(body) {
     if (op === 'thumbs') return paperThumbs_(body.ids);
     if (op === 'file') return paperFile_(String(body.fileId || ''));
     if (op === 'mark') return paperMark_(cfg, body, session);
+    if (op === 'markLinked') return paperMarkLinked_(cfg, body, session);
     if (op === 'visits') return paperVisits_(cfg, body.fresh === true);
     if (op === 'resolve') return paperResolve_(cfg, body, session);
     if (op === 'settings') return Object.assign({ ok: true, allCats: paperAllCats_() }, paperSettings_(cfg));
@@ -15293,15 +15294,74 @@ function paperList_(cfg, fresh) {
   const st = {};
   fsListAll_(cfg, PAPER_SCANS_, ['status', 'note', 'reason', 'patientId', 'patientName', 'recordDate', 'by', 'at'])
     .forEach(function (d) { st[d.name.split('/').pop()] = fromFields_(d.fields || {}); });
+  const linked = paperLinked_(cfg);
   const out = files.map(function (f) {
     const s = st[f.id] || {};
     return Object.assign({}, f, {
+      linked: linked[f.id] || null,
       status: PAPER_STATUSES_.indexOf(s.status) !== -1 ? s.status : 'todo',
       note: String(s.note || ''), reason: String(s.reason || ''), patientId: String(s.patientId || ''),
       patientName: String(s.patientName || ''), recordDate: String(s.recordDate || ''), by: String(s.by || ''), at: String(s.at || ''),
     });
   }).sort(function (a, b) { return a.created.localeCompare(b.created); });   // oldest first: work through the backlog in order
   return { ok: true, files: out, folderUrl: 'https://drive.google.com/drive/folders/' + paperRootId_() };
+}
+
+
+// Scans an older record (treatment_records / consent_records) already links to: { fileId: [{ kind, title, … }] }.
+// Exact: it's the same Drive file. Remembered 10 minutes.
+function paperLinked_(cfg) {
+  const hit = repCacheGet_('paper_linked_v1');
+  if (hit) return hit;
+  const pts = recallPatients_(cfg);
+  const out = {};
+  Object.keys(REC_LEGACY_).forEach(function (kind) {
+    const def = REC_LEGACY_[kind];
+    fsListAll_(cfg, def.col, ['Patient ID', 'Patient Name', 'Record Date', def.title, def.link]).forEach(function (d) {
+      const f = fromFields_(d.fields || {});
+      const fid = recDriveId_(f[def.link]);
+      if (!fid) return;
+      const ptt = String(f['Patient ID'] || '').trim();
+      const list = out[fid] || (out[fid] = []);
+      if (list.length >= 5) return;
+      list.push({
+        kind: kind, title: String(f[def.title] || ''), patientName: String(f['Patient Name'] || ''),
+        patientId: ptt ? pts.find(ptt) : '', date: sheetDateKey_(f['Record Date'], REC_TZ_), recordId: d.name.split('/').pop(),
+      });
+    });
+  });
+  repCachePut_('paper_linked_v1', out);
+  return out;
+}
+
+// "Mark these as already on file": only scans an older record really links to, and only ones still to sort
+function paperMarkLinked_(cfg, body, session) {
+  const ids = uniq_((Array.isArray(body.ids) ? body.ids : []).map(String)).slice(0, 500);
+  if (!ids.length) return { ok: false, error: 'BAD_REQUEST' };
+  const linked = paperLinked_(cfg);
+  const inFolder = {};
+  (repCacheGet_(PAPER_FKEY_) || []).forEach(function (f) { inFolder[f.id] = f.name; });
+  const cur = fsBatchGet_(cfg, ids.map(function (id) { return PAPER_SCANS_ + '/' + id; }));
+  const now = new Date().toISOString();
+  const who = String(session.name || '');
+  const done = [];
+  const writes = [];
+  ids.forEach(function (id) {
+    const l = linked[id];
+    const s = cur[PAPER_SCANS_ + '/' + id] || {};
+    if (!l || !l.length || !(id in inFolder) || (s.status && s.status !== 'todo')) return;
+    const what = (l[0].kind === 'consent' ? 'Consent' : 'Treatment record') + ' for ' + (l[0].patientName || 'a patient') +
+      (l[0].date ? ' (' + l[0].date + ')' : '');
+    writes.push(updateWrite_(cfg, PAPER_SCANS_ + '/' + id, {
+      fileId: id, fileName: inFolder[id], status: 'skip', reason: "Already on the patient's file", note: what,
+      patientId: l[0].patientId || '', patientName: l[0].patientName || '', recordDate: l[0].date || '',
+      submissionId: '', by: who, byUid: String(session.uid || ''), at: now,
+      history: (Array.isArray(s.history) ? s.history : []).concat([{ at: now, by: who, what: 'Already on file: ' + what, note: '' }]).slice(-30),
+    }));
+    done.push(id);
+  });
+  if (writes.length) commitWrites_(cfg, writes, 200);
+  return { ok: true, done: done, by: who, at: now };
 }
 
 function paperThumbs_(ids) {

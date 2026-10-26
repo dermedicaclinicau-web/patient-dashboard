@@ -3,6 +3,7 @@ import { callApi } from "./appointments.js";
 import { searchPatients, warmPatients } from "./patient-list.js";
 import { listPublishedForms } from "./form-templates.js";
 import { escapeHtml as esc, showToast, formatDobLong, formatMobile } from "./utils.js";
+import { confirmDialog } from "./dialog.js";
 
 const pad = (n) => String(n).padStart(2, "0");
 const keyOf = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -20,14 +21,19 @@ const ago = (k) => {
 };
 
 const STATUS = { todo: ["To enter", "warn"], help: ["Need help", "bad"], skip: ["Not a record", "muted"], entered: ["Entered", "ok"] };
-const SKIP_REASONS = ["Blank or unreadable page", "Duplicate scan", "Consent form, not a treatment record", "Not a patient record", "Other"];
+const SKIP_REASONS = ["Already on the patient's file", "Blank or unreadable page", "Duplicate scan", "Consent form, not a treatment record",
+  "Not a patient record", "Other"];
+const LINK_KIND = { treatment: "Treatment record", consent: "Consent" };
+const linkText = (l) => `${LINK_KIND[l.kind] || "Record"}${l.title ? `: ${l.title}` : ""} · ${l.patientName || "Unknown patient"}${
+  l.date ? ` · ${niceDay(l.date)}` : ""}`;
+const isLinked = (f) => !!(f.linked && f.linked.length);
 const RES = { none: "No treatment given", elsewhere: "Recorded somewhere else" };
 const ICON_FILE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
 
 export function mountPaperRecords(container, { staff } = {}) {
   const isAdmin = /^admin$/i.test(String((staff && staff.role) || ""));
   const st = { tab: "scans", files: null, visits: null, vMeta: { from: "", cats: [] }, q: "", vq: "", vStaff: "all", vCat: "all",
-    showSorted: false, thumbs: {} };
+    showSorted: false, thumbs: {}, sFrom: "", sTo: "", sort: "old", sLink: "all" };
 
   container.innerHTML = `
     <section class="page wide ppr-page">
@@ -72,8 +78,10 @@ export function mountPaperRecords(container, { staff } = {}) {
       <button type="button" class="ppr-thumb" data-open="${esc(f.id)}" data-thumb="${esc(f.id)}" aria-label="Open ${esc(f.name)}">${
         th ? `<img src="${esc(th)}" alt="" loading="lazy" />` : ICON_FILE}</button>
       <div class="ppr-main"><strong>${esc(f.name)}</strong><small>${esc(sub)}</small>${
-        extra ? `<small class="ppr-extra">${esc(extra)}${f.by ? ` · ${esc(f.by)}` : ""}</small>` : ""}</div>
-      <span class="ppr-pill is-${tone}">${esc(label)}</span>
+        extra ? `<small class="ppr-extra">${esc(extra)}${f.by ? ` · ${esc(f.by)}` : ""}</small>` : ""}${
+        isLinked(f) && f.status === "todo" ? `<small class="ppr-linked">On file: ${esc(linkText(f.linked[0]))}${
+          f.linked.length > 1 ? ` (+${f.linked.length - 1} more)` : ""}</small>` : ""}</div>
+      <span class="ppr-pill is-${isLinked(f) && f.status === "todo" ? "ok" : tone}">${esc(isLinked(f) && f.status === "todo" ? "Already on file" : label)}</span>
       <button type="button" class="lh-btn" data-open="${esc(f.id)}">${f.status === "todo" || f.status === "help" ? "Enter" : "View"}</button>
     </li>`;
   }
@@ -97,15 +105,40 @@ export function mountPaperRecords(container, { staff } = {}) {
     if (!st.files) { body.innerHTML = '<div class="skeleton sm"></div>'; return; }
     const want = st.tab === "scans" ? ["todo"] : st.tab === "help" ? ["help"] : ["entered", "skip"];
     const qq = st.q.trim().toLowerCase();
-    const list = st.files.filter((f) => want.includes(f.status)
+    const dated = !!(st.sFrom || st.sTo);
+    const inDates = (f) => (!st.sFrom || f.day >= st.sFrom) && (!st.sTo || f.day <= st.sTo);
+    const linkOk = (f) => st.tab !== "scans" || st.sLink === "all" || (st.sLink === "on" ? isLinked(f) : !isLinked(f));
+    const list = st.files.filter((f) => want.includes(f.status) && inDates(f) && linkOk(f)
       && (!qq || [f.name, f.folder, f.patientName].join(" ").toLowerCase().includes(qq)));
-    if (st.tab === "done") list.reverse();   // most recent first
+    // Done: most recently sorted first. Otherwise by the date scanned, the way chosen.
+    if (st.tab === "done") list.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+    else if (st.sort === "new") list.reverse();
     const total = st.files.length;
     const done = st.files.filter((f) => f.status === "entered" || f.status === "skip").length;
+    const days = st.files.map((f) => f.day).filter(Boolean).sort();
+    const first = days[0] || "";
+    const last = days[days.length - 1] || todayKey();
+    const range = st.sFrom && st.sTo ? `between ${niceDay(st.sFrom)} and ${niceDay(st.sTo)}`
+      : st.sFrom ? `from ${niceDay(st.sFrom)}` : `up to ${niceDay(st.sTo)}`;
     body.innerHTML = `
       ${st.tab === "scans" ? `<div class="ppr-progress" aria-hidden="true"><span style="width:${total ? Math.round((done / total) * 100) : 0}%"></span></div>
         <p class="muted ppr-sum">${done} of ${total} scan${total === 1 ? "" : "s"} sorted</p>` : ""}
-      <div class="ppr-tools"><input type="search" class="fe-input" data-f="q" placeholder="Filter by file name or patient" value="${esc(st.q)}" /></div>
+      <div class="ppr-tools">
+        <input type="search" class="fe-input" data-f="q" placeholder="Filter by file name or patient" value="${esc(st.q)}" />
+        <label class="ppr-date">Scanned from <input type="date" class="fe-input" data-f="sFrom" min="${esc(first)}" max="${esc(st.sTo || last)}" value="${esc(st.sFrom)}" /></label>
+        <label class="ppr-date">to <input type="date" class="fe-input" data-f="sTo" min="${esc(st.sFrom || first)}" max="${esc(last)}" value="${esc(st.sTo)}" /></label>
+        ${dated ? '<button type="button" class="rc-link" data-act="clear-dates">Clear dates</button>' : ""}
+        ${st.tab === "scans" ? `<select class="fb-select" data-f="sLink" aria-label="On a patient's file">
+          <option value="all"${st.sLink === "all" ? " selected" : ""}>All scans</option>
+          <option value="on"${st.sLink === "on" ? " selected" : ""}>Already on a patient's file (${st.files.filter((f) => f.status === "todo" && isLinked(f)).length})</option>
+          <option value="off"${st.sLink === "off" ? " selected" : ""}>Not on file yet</option></select>` : ""}
+        ${st.tab === "scans" && st.sLink === "on" && list.length
+          ? `<button type="button" class="lh-btn is-primary" data-act="bulk-linked">Mark ${Math.min(list.length, 500)} as already on file</button>` : ""}
+        ${st.tab !== "done" ? `<select class="fb-select" data-f="sort" aria-label="Sort">
+          <option value="old"${st.sort === "old" ? " selected" : ""}>Oldest first</option>
+          <option value="new"${st.sort === "new" ? " selected" : ""}>Newest first</option></select>` : ""}
+      </div>
+      ${dated ? `<p class="muted ppr-sum">${list.length} scan${list.length === 1 ? "" : "s"} ${esc(range)}</p>` : ""}
       ${list.length ? `<ul class="ppr-list">${list.slice(0, 300).map(rowHtml).join("")}</ul>${
         list.length > 300 ? `<p class="muted ppr-sum">Showing 300 of ${list.length}. Filter to find the others.</p>` : ""}`
         : `<div class="tm-empty">${st.tab === "scans" ? (total ? "Every scan is sorted. 👍" : "No scans in the folder yet.")
@@ -171,7 +204,7 @@ export function mountPaperRecords(container, { staff } = {}) {
     try {
       const r = await callApi({ action: "paper", op: "list", fresh });
       if (r.problem) throw new Error(r.problem);
-      st.files = r.files || [];
+      st.files = (r.files || []).map((f) => ({ ...f, day: f.created ? keyOf(new Date(f.created)) : "" }));
       if (r.folderUrl) {
         const a = container.querySelector('[data-role="folder"]');
         a.href = r.folderUrl;
@@ -229,6 +262,9 @@ export function mountPaperRecords(container, { staff } = {}) {
           <div class="ppr-canvas" data-role="canvas"><div class="skeleton sm"></div></div>
         </div>
         <div class="ppr-side">
+          ${isLinked(f) ? `<div class="ppr-onfile"><strong>Already on file</strong>${f.linked.map((l) => `<span>${esc(linkText(l))}${
+            l.patientId ? ` · <a href="#/patient/${encodeURIComponent(l.patientId)}" target="_blank" rel="noopener">Open their page ↗</a>` : ""}</span>`).join("")}
+            ${f.status === "todo" ? '<button type="button" class="lh-btn" data-act="onfile">Mark as already on file</button>' : ""}</div>` : ""}
           <div class="lh-field"><span class="lh-label">Patient</span><div data-role="pt"></div></div>
           <div data-role="pvisits"></div>
           <label class="lh-field"><span class="lh-label">Date of treatment</span>
@@ -323,7 +359,8 @@ export function mountPaperRecords(container, { staff } = {}) {
 
     // The next scan still to sort (after this one, in the list's order)
     const nextFile = () => {
-      const list = (st.files || []).filter((x) => x.status === "todo" && x.id !== f.id);
+      const list = (st.files || []).filter((x) => x.status === "todo" && x.id !== f.id
+        && (!st.sFrom || x.day >= st.sFrom) && (!st.sTo || x.day <= st.sTo));
       const at = (st.files || []).indexOf(f);
       return list.find((x) => st.files.indexOf(x) > at) || list[0] || null;
     };
@@ -418,6 +455,7 @@ export function mountPaperRecords(container, { staff } = {}) {
         return;
       }
       if (act === "skip") mark("skip", { reason: $('[name="reason"]').value, note: $('[name="note"]').value });
+      if (act === "onfile") mark("skip", { reason: "Already on the patient's file", note: linkText(f.linked[0]) });
       if (act === "help") mark("help", { note: $('[name="note"]').value });
       if (act === "todo") mark("todo");
     });
@@ -428,6 +466,39 @@ export function mountPaperRecords(container, { staff } = {}) {
     dlg.showModal();
     const first = $('[data-role="q"]');
     if (first) first.focus();
+  }
+
+  // Every scan in the list that an older record already links to: sorted in one go
+  async function bulkLinked(btn) {
+    const qq = st.q.trim().toLowerCase();
+    const ids = st.files.filter((f) => f.status === "todo" && isLinked(f)
+      && (!st.sFrom || f.day >= st.sFrom) && (!st.sTo || f.day <= st.sTo)
+      && (!qq || [f.name, f.folder, f.patientName].join(" ").toLowerCase().includes(qq)))
+      .map((f) => f.id).slice(0, 500);
+    if (!ids.length) return;
+    const ok = await confirmDialog({
+      title: `Mark ${ids.length} scan${ids.length === 1 ? "" : "s"} as already on file?`,
+      message: "Each one is the same Google Drive file an existing treatment record or consent links to. They move to Done, and can be put back at any time.",
+      confirmLabel: "Mark as already on file", tone: "info",
+    });
+    if (!ok) return;
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+    try {
+      const r = await callApi({ action: "paper", op: "markLinked", ids });
+      const done = new Set(r.done || []);
+      st.files.forEach((f) => {
+        if (!done.has(f.id)) return;
+        const l = f.linked[0];
+        Object.assign(f, { status: "skip", reason: "Already on the patient's file", note: linkText(l),
+          patientId: l.patientId || "", patientName: l.patientName || "", recordDate: l.date || "", by: r.by || "", at: r.at || "" });
+      });
+      showToast(`${done.size} scan${done.size === 1 ? "" : "s"} marked as already on file`);
+      draw();
+    } catch (ex) {
+      showToast(ex.message || "Couldn't save. Try again.");
+      btn.disabled = false;
+    }
   }
 
   /* ---------- Visits: no record needed ---------- */
@@ -555,6 +626,8 @@ export function mountPaperRecords(container, { staff } = {}) {
       return;
     }
     if (act && act.dataset.act === "settings") openSettings();
+    if (act && act.dataset.act === "clear-dates") { st.sFrom = ""; st.sTo = ""; draw(); }
+    if (act && act.dataset.act === "bulk-linked") bulkLinked(act);
   });
 
   let qt = 0;
@@ -572,7 +645,12 @@ export function mountPaperRecords(container, { staff } = {}) {
   });
   body.addEventListener("change", (e) => {
     const k = e.target.dataset.f;
-    if (k === "vStaff" || k === "vCat") { st[k] = e.target.value; draw(); }
+    if (k === "vStaff" || k === "vCat" || k === "sort" || k === "sLink") { st[k] = e.target.value; draw(); }
+    if (k === "sFrom" || k === "sTo") {
+      st[k] = e.target.value;
+      if (st.sFrom && st.sTo && st.sFrom > st.sTo) st[k === "sFrom" ? "sTo" : "sFrom"] = e.target.value;   // dates the wrong way round
+      draw();
+    }
     if (k === "showSorted") { st.showSorted = e.target.checked; draw(); }
   });
 
