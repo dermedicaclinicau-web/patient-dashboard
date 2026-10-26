@@ -1732,7 +1732,7 @@ export async function answerLoan(loan, ok, note, staff) {
 export async function consumeInTx(tx, { submissionId, lines, patientId, patientName, formName, recordDate, staff, paper = false }) {
   const me = uid();
   const uRef = doc(collection(db, "inv_usage"));
-  const late = paper && KEY_RE.test(recordDate || "") ? { effectiveDate: recordDate, ref: uRef.id, lateRecord: true } : {};
+  const late = paper && KEY_RE.test(recordDate || "") ? { effectiveDate: recordDate, ref: uRef.id } : {};
   const kitSnaps = new Map(), lotSnaps = new Map(), prodSnaps = new Map(), openSnaps = new Map();
   const getOnce = async (map, col, id) => { if (id && !map.has(id)) map.set(id, await tx.get(doc(db, col, id))); };
   for (const l of lines) {

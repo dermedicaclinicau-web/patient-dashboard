@@ -1109,7 +1109,7 @@ export function mountPaperRecords(container, { staff } = {}) {
           }
           draw();
         }
-        const taken = split.take.length;
+        const taken = split.take.filter((l) => !(l.extra && l.extra.plan === "short")).length;
         const where = `Filed under ${FILE_WHERE[ft.type]} on ${r.patientName}'s page${
           taken ? `, ${taken} product${taken === 1 ? "" : "s"} taken off stock` : ""}${correctedText(split.corrected)}`;
         prog.done("Filed", `${where}. Opening the next scan…`);
