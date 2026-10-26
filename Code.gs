@@ -15222,7 +15222,7 @@ function handlePaper_(body) {
     if (op === 'file') return paperFile_(String(body.fileId || ''));
     if (op === 'mark') return paperMark_(cfg, body, session);
     if (op === 'markLinked') return paperMarkLinked_(cfg, body, session);
-    if (op === 'file') return paperFileAs_(cfg, body, session);
+    if (op === 'fileAs') return paperFileAs_(cfg, body, session);
     if (op === 'visits') return paperVisits_(cfg, body.fresh === true);
     if (op === 'resolve') return paperResolve_(cfg, body, session);
     if (op === 'settings') return Object.assign({ ok: true, allCats: paperAllCats_() }, paperSettings_(cfg));
@@ -15324,7 +15324,7 @@ function paperLinked_(cfg) {
     fsListAll_(cfg, def.col, ['Patient ID', 'Patient Name', 'Record Date', def.title, def.link]).forEach(function (d) {
       const f = fromFields_(d.fields || {});
       const fid = recDriveId_(f[def.link]);
-      if (!fid) return;
+      if (!fid || d.name.split('/').pop().indexOf('paper_') === 0) return;   // filed from Paper records: not an older record
       const ptt = String(f['Patient ID'] || '').trim();
       const list = out[fid] || (out[fid] = []);
       if (list.length >= 5) return;

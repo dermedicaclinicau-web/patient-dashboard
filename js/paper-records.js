@@ -477,7 +477,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       err.hidden = true;
       if (!chosen) { fail("Choose the patient."); return; }
       if (!dateIn.value) { fail("Choose the date on the paper."); return; }
-      const body = { action: "paper", op: "file", fileId: f.id, as: ft.type, patientId: chosen.id, recordDate: dateIn.value,
+      const body = { action: "paper", op: "fileAs", fileId: f.id, as: ft.type, patientId: chosen.id, recordDate: dateIn.value,
         clinician: $('[name="who"]').value, note: $('[name="note"]').value };
       if (ft.type === "treatment") {
         const t = (forms || []).find((x) => x.id === ft.formId);
