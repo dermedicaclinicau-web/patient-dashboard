@@ -4305,6 +4305,11 @@ function handleInventory_(body) {
   const okId = function (v) { return /^[A-Za-z0-9_-]{10,40}$/.test(String(v || '')); };
   try {
     if (op === 'kitDay') return invKitDay_(body, session);
+    if (op === 'oldKitRecon') {
+      if (!can_(session, 'menu.reports') && !can_(session, 'inventory.manage')) return { ok: false, error: 'FORBIDDEN' };
+      try { return Object.assign({ ok: true }, oldKitRecon_(body.fresh === true)); }
+      catch (e) { return { ok: true, problem: String(e && e.message ? e.message : e).slice(0, 300) }; }
+    }
     if (op === 'notifyRequest') {
       if (!can_(session, 'inventory.request')) return { ok: false, error: 'FORBIDDEN' };
       if (!okId(body.requestId)) return { ok: false, error: 'BAD_REQUEST' };
@@ -16016,4 +16021,125 @@ function invKitDay_(body, session) {
       String(e && e.message ? e.message : e).slice(0, 150);
   }
   return out;
+}
+
+// ===================== Reporting → Kit reconciliation: the old app's kits =====================
+// Per injector: first start count + restocks + borrowed in − lent out − units used on Wrinkle Relaxer records
+// should equal their last start count. Each counted day is checked against the next one (History).
+// Read only. Remembered 15 minutes.
+function oldKitRecon_(fresh) {
+  const key = 'old_kit_recon_v1';
+  if (!fresh) { const hit = repCacheGet_(key); if (hit) return hit; }
+  const cfg = getConfig_();
+  const r1 = function (n) { return Math.round((Number(n) || 0) * 10) / 10; };
+
+  // The sheet: duplicates counted once, voided restocks left out
+  const seen = {};
+  const all = oldKitRows_().filter(function (r) {
+    const k = [r.id, r.date, r.staff, r.count, r.batch].join('|');
+    if (seen[k]) return false;
+    seen[k] = true;
+    return true;
+  });
+  const voided = {};
+  all.forEach(function (r) {
+    const m = r.kind === 'VOID' ? /^VOID-(.+)$/i.exec(r.id) : null;
+    if (m) voided[m[1].toUpperCase()] = true;
+  });
+  const rows = all.filter(function (r) { return r.kind !== 'VOID' && !voided[r.id.toUpperCase()]; });
+
+  // Units used, per record
+  const wr = fsListAll_(cfg, OLD_WR_COL_, ['Staff', 'Record Date', 'treatment_details_map']).map(function (d) {
+    const f = fromFields_(d.fields || {});
+    const units = (Array.isArray(f.treatment_details_map) ? f.treatment_details_map : []).reduce(function (a, x) {
+      x = x || {};
+      return a + (Number(String(x['Total Units'] == null ? '' : x['Total Units']).replace(/[^\d.]/g, '')) || 0);
+    }, 0);
+    return { staff: String(f.Staff || '').trim(), date: String(f['Record Date'] || '').trim(), units: units };
+  }).filter(function (x) { return x.staff && /^\d{4}-\d{2}-\d{2}$/.test(x.date) && x.units > 0; });
+
+  // One person per staff member (old names matched to the staff list)
+  const staff = getStaffDocs_();
+  const who = {};
+  const personOf = function (name) {
+    if (!(name in who)) {
+      const hits = staff.filter(function (s) { return kitSameStaff_(s.name, name); });
+      who[name] = hits.length === 1 ? { key: 'u:' + hits[0].id, uid: hits[0].id, name: hits[0].name }
+        : { key: 'n:' + kitNameKey_(name), uid: '', name: name };
+    }
+    return who[name];
+  };
+  const people = {};
+  const dayOf = function (name, date) {
+    const w = personOf(name);
+    const p = people[w.key] || (people[w.key] = { staffUid: w.uid, staffName: w.name, oldNames: [], days: {} });
+    if (p.oldNames.indexOf(name) === -1) p.oldNames.push(name);
+    return p.days[date] || (p.days[date] = { date: date, start: null, restock: 0, inn: 0, out: 0, used: 0, records: 0 });
+  };
+  rows.forEach(function (r) {
+    const d = dayOf(r.staff, r.date);
+    if (r.kind === 'SOD') d.start = r1((d.start || 0) + r.count);
+    else if (r.kind === 'RESTOCK') d.restock = r1(d.restock + r.count);
+    else if (r.kind === 'BORROW-IN') d.inn = r1(d.inn + r.count);
+    else if (r.kind === 'BORROW-OUT') d.out = r1(d.out + r.count);
+  });
+  wr.forEach(function (x) {
+    const d = dayOf(x.staff, x.date);
+    d.used = r1(d.used + x.units);
+    d.records++;
+  });
+
+  const out = Object.keys(people).map(function (k) {
+    const p = people[k];
+    const list = Object.keys(p.days).sort().map(function (dk) { return p.days[dk]; });
+    const counted = list.filter(function (d) { return d.start !== null; });
+    const sum = function (from, to, f) {   // days from (inclusive) to (exclusive)
+      return r1(list.filter(function (d) { return d.date >= from && (!to || d.date < to); })
+        .reduce(function (a, d) { return a + d[f]; }, 0));
+    };
+    const hasKit = counted.some(function (d) { return d.start > 0; }) || list.some(function (d) { return d.restock > 0; });
+
+    // Each counted day, up to the next count
+    const segments = counted.map(function (d, i) {
+      const next = counted[i + 1] || null;
+      const to = next ? next.date : '';
+      const s = { date: d.date, start: d.start, restock: sum(d.date, to, 'restock'), inn: sum(d.date, to, 'inn'),
+        out: sum(d.date, to, 'out'), used: sum(d.date, to, 'used'),
+        records: list.filter(function (x) { return x.date >= d.date && (!to || x.date < to); })
+          .reduce(function (a, x) { return a + x.records; }, 0) };
+      s.expected = r1(s.start + s.restock + s.inn - s.out - s.used);
+      s.nextDate = next ? next.date : '';
+      s.next = next ? next.start : null;
+      s.gap = next ? r1(next.start - s.expected) : null;
+      return s;
+    });
+
+    const first = counted[0] || null;
+    const last = counted[counted.length - 1] || null;
+    const row = {
+      staffUid: p.staffUid, staffName: p.staffName, oldNames: p.oldNames, hasKit: hasKit,
+      firstDate: list.length ? list[0].date : '', lastDate: list.length ? list[list.length - 1].date : '',
+      segments: segments,
+    };
+    if (hasKit && first && last) {
+      Object.assign(row, {
+        opening: first.start, openingDate: first.date, closing: last.start, closingDate: last.date,
+        taken: sum(first.date, last.date, 'restock'), borrowedIn: sum(first.date, last.date, 'inn'),
+        lentOut: sum(first.date, last.date, 'out'), used: sum(first.date, last.date, 'used'),
+        // After their last start count: shown in History, not counted (there's no later count to check)
+        after: { restock: sum(last.date, '', 'restock'), inn: sum(last.date, '', 'inn'),
+          out: sum(last.date, '', 'out'), used: sum(last.date, '', 'used') },
+      });
+      row.shouldHave = r1(row.opening + row.taken + row.borrowedIn - row.lentOut - row.used);
+      row.gap = r1(row.closing - row.shouldHave);
+    } else {
+      Object.assign(row, { opening: null, closing: null, taken: sum('', '', 'restock'), borrowedIn: sum('', '', 'inn'),
+        lentOut: sum('', '', 'out'), used: sum('', '', 'used'), shouldHave: null, gap: null });
+    }
+    return row;
+  }).sort(function (a, b) { return String(a.staffName).localeCompare(String(b.staffName)); });
+
+  const res = { rows: out, at: new Date().toISOString() };
+  repCachePut_(key, res, 900);
+  return res;
 }
