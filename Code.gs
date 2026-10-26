@@ -15229,6 +15229,17 @@ function paperRootId_() {
 function handlePaper_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  const op = String(body.op || '');
+  // My dashboard: anyone logged in, their own visits only
+  if (op === 'mine' || op === 'mineResolve') {
+    try {
+      const cfg = getConfig_();
+      return op === 'mine' ? paperMine_(cfg, session) : paperMineResolve_(cfg, body, session);
+    } catch (err) {
+      console.error('Paper ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+      return { ok: true, problem: "Your visits couldn't be checked. Try again in a minute." };
+    }
+  }
   if (!can_(session, 'paper.enter')) return { ok: false, error: 'FORBIDDEN' };
   const op = String(body.op || '');
   const admin = /^admin$/i.test(String(session.role || ''));
@@ -15712,6 +15723,7 @@ function paperVisits_(cfg, fresh) {
   const out = { rows: rows.slice(0, 4000), more: Math.max(0, rows.length - 4000), from: set.from, cats: set.cats,
     at: new Date().toISOString(), ms: Date.now() - t0 };
   repCachePut_(PAPER_VKEY_, out);
+  repCachePut_(PAPER_VLAST_, out, 21600);   // the last list, for My dashboard (refreshed every 30 minutes)
   console.log('Paper records: ' + rows.length + ' visit(s) without a record, in ' + out.ms + ' ms');
   return Object.assign({ ok: true }, out);
 }
@@ -15735,6 +15747,74 @@ function paperResolve_(cfg, body, session) {
     byUid: String(session.uid || ''), at: now });
   cache.remove(PAPER_VKEY_);
   return { ok: true, res: { status: status, note: note, by: String(session.name || ''), at: now } };
+}
+
+/* ---------- My dashboard: my visits without a record ---------- */
+
+const PAPER_VLAST_ = 'paper_visits_last_v1';
+
+// The person logged in, and the name they go by in the appointment book
+function paperMe_(session) {
+  const s = getStaffDocs_().filter(function (x) { return x.id === session.uid; })[0];
+  if (!s) return null;
+  const sc = staffSchedClean_(s.schedule).schedule;
+  return { name: String(s.name || ''), appt: sc && sc.apptName ? String(sc.apptName) : '' };
+}
+// "Dr Teh" / "Jacquie" on the Day Sheet = this person? (their appointment book name wins if it's set)
+function paperIsMine_(me, dayName) {
+  return me.appt ? kitNameKey_(dayName) === kitNameKey_(me.appt) : kitSameStaff_(dayName, me.name);
+}
+
+// The saved list (refreshed every 30 minutes), with anything sorted out since taken off
+function paperVisitList_(cfg) {
+  const data = repCacheGet_(PAPER_VKEY_) || repCacheGet_(PAPER_VLAST_) || paperVisits_(cfg, false);
+  const sorted = {};
+  fsListAll_(cfg, PAPER_VISITS_, ['key']).forEach(function (d) {
+    const f = fromFields_(d.fields || {});
+    if (f.key) sorted[String(f.key)] = true;
+  });
+  return { data: data, rows: (data.rows || []).filter(function (v) { return !v.res && !sorted[v.key]; }) };
+}
+
+function paperMine_(cfg, session) {
+  const me = paperMe_(session);
+  if (!me) return { ok: true, rows: [], count: 0 };
+  const L = paperVisitList_(cfg);
+  const rows = L.rows.filter(function (v) {
+    return (v.staff || []).some(function (n) { return paperIsMine_(me, n); });
+  });
+  return { ok: true, rows: rows.slice(0, 100), count: rows.length, from: L.data.from || '', at: L.data.at || '' };
+}
+
+// "No record needed" from My dashboard: only for one of their own visits
+function paperMineResolve_(cfg, body, session) {
+  const key = String(body.key || '');
+  const me = paperMe_(session);
+  const v = me && paperVisitList_(cfg).rows.filter(function (x) { return x.key === key; })[0];
+  if (!v || !(v.staff || []).some(function (n) { return paperIsMine_(me, n); })) {
+    return { ok: true, problem: "That visit isn't one of yours, or it's already been sorted out." };
+  }
+  if (['none', 'elsewhere'].indexOf(String(body.status || '')) === -1) return { ok: false, error: 'BAD_REQUEST' };
+  return paperResolve_(cfg, body, session);
+}
+
+// Every 30 minutes (7 am to 8 pm): works the list out again, so dashboards never wait for it
+function warmPaperVisits() {
+  const h = Number(Utilities.formatDate(new Date(), REC_TZ_, 'H'));
+  if (h < 7 || h >= 20) return;
+  CacheService.getScriptCache().remove(PAPER_VKEY_);
+  const r = paperVisits_(getConfig_(), false);
+  console.log('Visits without a record: ' + (r.rows || []).length + ' (' + r.ms + ' ms)');
+}
+
+// Run ONCE from the editor
+function installPaperWarm() {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return t.getHandlerFunction() === 'warmPaperVisits'; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('warmPaperVisits').timeBased().everyMinutes(30).create();
+  paperVisits_(getConfig_(), true);
+  console.log('Visits without a record: refreshed every 30 minutes.');
 }
 
 /* ---------- Filing a scan on the patient's page ---------- */

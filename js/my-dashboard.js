@@ -20,6 +20,7 @@ import { renderDayCard } from "./staff-days.js";
 import { openStartOfDayKit } from "./start-of-day.js";
 import { mountMyNotes } from "./my-notes.js";
 import { mountRecordingJobs } from "./recording-bar.js";
+import { mountMyVisits } from "./my-visits.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(1));
@@ -55,13 +56,14 @@ const quiet = (title, text, href = "") => (href
   ? `<a class="md-card md-quiet" href="${href}"><strong>${esc(title)}</strong><span>${esc(text)}</span><i aria-hidden="true">›</i></a>`
   : `<div class="md-card md-quiet"><strong>${esc(title)}</strong><span>${esc(text)}</span></div>`);
 
-// The cards, in their default order. "notes" is for everyone; the rest need their dash.* tick.
+// The cards, in their default order. "notes" is for everyone; "visits" for anyone who records treatments; the rest need their dash.* tick.
 const DASH_CARDS = [
-  ["attention", "Needs you now"], ["appts", "My appointments & notes"], ["tasks", "Tasks"], ["notes", "My notes"],
-  ["days", "Start & end of day"], ["kit", "My kit"], ["records", "My records"], ["usage", "What I used"],
+  ["attention", "Needs you now"], ["visits", "Visits without a record"], ["appts", "My appointments & notes"], ["tasks", "Tasks"],
+  ["notes", "My notes"], ["days", "Start & end of day"], ["kit", "My kit"], ["records", "My records"], ["usage", "What I used"],
   ["requests", "My requests"], ["stock", "Stock I use"], ["overview", "Clinic overview"],
 ];
-const allowedCard = (k) => k === "notes" || can(`dash.${k}`);
+const SIDE_CARDS = new Set(["notes", "kit", "requests", "stock"]);
+const allowedCard = (k) => k === "notes" || (k === "visits" ? can("consult.record") : can(`dash.${k}`));
 
 // Per person, on this device: hidden cards, collapsed cards and the card order
 const readSet = (key) => { try { return new Set(JSON.parse(localStorage.getItem(key) || "[]")); } catch { return new Set(); } };
@@ -72,9 +74,18 @@ const orderKey = (uid) => `dm.dash.order.${uid}`;
 const readOrder = (uid) => { try { const a = JSON.parse(localStorage.getItem(orderKey(uid)) || "[]"); return Array.isArray(a) ? a : []; } catch { return []; } };
 const writeOrder = (uid, list) => { try { localStorage.setItem(orderKey(uid), JSON.stringify(list)); } catch { /* private mode */ } };
 // Saved order first; cards that are new since then keep their default place at the end
+// Saved order first. A card that's new since then goes straight after the card before it in the default order.
 const byOrder = (list, order) => {
-  const pos = (k) => { const i = order.indexOf(k); return i === -1 ? 1000 + DASH_CARDS.findIndex(([x]) => x === k) : i; };
-  return [...list].sort((a, b) => pos(a[0]) - pos(b[0]));
+  const keys = DASH_CARDS.map(([k]) => k);
+  if (!order.length) return [...list].sort((a, b) => keys.indexOf(a[0]) - keys.indexOf(b[0]));
+  const seq = order.filter((k) => keys.includes(k));
+  keys.forEach((k, i) => {
+    if (seq.includes(k)) return;
+    let at = 0;
+    for (let j = i - 1; j >= 0; j--) { const p = seq.indexOf(keys[j]); if (p !== -1) { at = p + 1; break; } }
+    seq.splice(at, 0, k);
+  });
+  return [...list].sort((a, b) => seq.indexOf(a[0]) - seq.indexOf(b[0]));
 };
 
 // Today's appointments for this staff member (matched on their name in the schedule)
@@ -212,7 +223,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
       </div>
     </div>
     <div data-role="rec-jobs" class="md-rec-slot" hidden></div>
-    <div data-role="body"><div class="skeleton" style="height:320px;border-radius:14px"></div></div>`;
+    <div data-role="body"></div>`;
   container.replaceChildren(root);
   const body = root.querySelector('[data-role="body"]');
   mountRecordingJobs(root.querySelector('[data-role="rec-jobs"]'));   // live; outside body, so Refresh doesn't redraw it
@@ -225,6 +236,57 @@ export async function mountMyDashboard(container, { staff } = {}) {
   const canReport = can("menu.reports");
   const canCount = can("inventory.count") || canOrder;
   const safe = (p, fallback) => Promise.resolve(p).catch((err) => { console.warn("Dashboard:", err); return fallback; });
+  /* ---------- While it loads: every card in place, each saying "Loading…" ---------- */
+  const LOADING = '<div class="mv-loading"><span class="mv-spin" aria-hidden="true"></span>Loading…</div>';
+  function shellHtml() {
+    const me = myUid();
+    const hidden = readSet(hideKey(me));
+    const here = (k) => allowedCard(k) && !hidden.has(k)
+      && !(k === "kit" && !canKit) && !(k === "overview" && !(canOrder || canJt)) && !(k === "days" && !isAdmin());
+    const list = byOrder(DASH_CARDS, readOrder(me)).filter(([k]) => here(k));
+    const box = ([k, label]) => (k === "visits" ? '<section class="md-card" data-role="visits"></section>'
+      : `<section class="md-card is-loading"><div class="md-card-head"><h3>${esc(label)}</h3></div>${LOADING}</section>`);
+    const main = list.filter(([k]) => !SIDE_CARDS.has(k));
+    const side = list.filter(([k]) => SIDE_CARDS.has(k));
+    const kpis = `<div class="md-kpis">${[0, 1, 2].map(() => `<div class="md-kpi is-loading">
+      <span class="md-kpi-l">Loading…</span><span class="md-kpi-v">—</span><span class="md-kpi-s">&nbsp;</span></div>`).join("")}</div>`;
+    return `${kpis}<div class="md-layout${side.length ? "" : " is-single"}">
+        <div class="md-col md-main">${main.map(box).join("")}</div>
+        ${side.length ? `<div class="md-col md-side">${side.map(box).join("")}</div>` : ""}
+      </div>`;
+  }
+  // Shows the shells, and starts the visits card straight away (it loads on its own)
+  function showShell() {
+    body.innerHTML = shellHtml();
+    placeVisits();
+  }
+
+  /* ---------- Visits without a record: made once, so it keeps its place and doesn't reload with the rest ---------- */
+  let visitsCard = null;
+  let visitsCtl = null;
+  function visitsSection() {
+    if (visitsCard) return visitsCard;
+    visitsCard = document.createElement("section");
+    visitsCard.className = "md-card md-visits-card";
+    visitsCard.innerHTML = `<div class="md-card-head"><h3>Visits without a record</h3>
+        <span class="md-count" data-role="vcount" hidden></span>
+        ${can("paper.enter") ? '<a class="md-link" href="#/paper">Open Paper records</a>' : ""}</div>
+      <div data-role="vbody"></div>`;
+    visitsCtl = mountMyVisits(visitsCard.querySelector('[data-role="vbody"]'), {
+      onCount: (n) => {
+        const b = visitsCard.querySelector('[data-role="vcount"]');
+        b.hidden = !n;
+        b.textContent = n ? String(n) : "";
+      },
+    });
+    return visitsCard;
+  }
+  function placeVisits() {
+    const slot = body.querySelector('[data-role="visits"]');
+    if (slot && allowedCard("visits")) slot.replaceWith(visitsSection());
+  }
+
+  showShell();
 
   let drawTasks = () => {};
   let loadedAt = 0;
@@ -741,8 +803,9 @@ export async function mountMyDashboard(container, { staff } = {}) {
       <div class="md-qagrid">${qa.join("")}</div></section>` : "";
 
     /* ---------- The cards: work on the left, tools on the right, each in this person's order ---------- */
-    const SIDE = new Set(["notes", "kit", "requests", "stock"]);
-    const CARDS = [["attention", attentionHtml], ["appts", apptHtml], ["tasks", tasksHtml], ["notes", notesHtml], ["days", daysHtml],
+    const SIDE = SIDE_CARDS;
+    const CARDS = [["attention", attentionHtml], ["visits", '<section class="md-card" data-role="visits"></section>'],
+      ["appts", apptHtml], ["tasks", tasksHtml], ["notes", notesHtml], ["days", daysHtml],
       ["kit", kitHtml], ["records", recordsHtml], ["usage", usedHtml], ["requests", reqHtml], ["stock", stockHtml], ["overview", overviewHtml]];
     const shown = byOrder(CARDS, readOrder(me)).filter(([k, h]) => h && show(k));
     const mainCards = shown.filter(([k]) => !SIDE.has(k));
@@ -757,6 +820,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
 
     const grid = body.querySelector(".md-layout");
     if (grid) {
+      placeVisits();
       const tag = (col, list) => {
         if (!col) return;
         [...col.querySelectorAll(":scope > .md-card:not(.md-qa-card)")].forEach((el, i) => { if (list[i]) el.dataset.card = list[i][0]; });
@@ -764,11 +828,15 @@ export async function mountMyDashboard(container, { staff } = {}) {
       tag(grid.querySelector(".md-main"), mainCards);
       tag(grid.querySelector(".md-side"), sideCards);
       const notesEl = grid.querySelector('[data-role="notes"]');
-      if (notesEl) mountMyNotes(notesEl);
+      if (notesEl) {
+        notesEl.innerHTML = `<div class="md-card-head"><h3>My notes</h3></div>${LOADING}`;
+        mountMyNotes(notesEl);
+      }
       addFolds(grid, me);
     }
     // Start & end of day fills itself in a moment later: give it its ⌄ button once its header appears
     const daysEl = body.querySelector('[data-role="days"]');
+    if (daysEl && isAdmin() && !daysEl.innerHTML.trim()) daysEl.innerHTML = `<div class="md-card-head"><h3>Start &amp; end of day</h3></div>${LOADING}`;
     renderDayCard(daysEl); // Admins only; does nothing if the card is hidden
     if (grid && daysEl) {
       if (daysEl.querySelector(".md-card-head")) {
@@ -951,7 +1019,8 @@ export async function mountMyDashboard(container, { staff } = {}) {
       return;
     }
     if (e.target.closest('[data-act="refresh"]')) {
-      body.innerHTML = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
+      showShell();
+      if (visitsCtl) visitsCtl.reload();
       load();
       return;
     }
@@ -1019,7 +1088,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
       writeSet(hideKey(me), new Set(list.filter((r) => !r.on).map((r) => r.k)));
       writeOrder(me, list.map((r) => r.k));
       dlg.close();
-      body.innerHTML = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
+      showShell();
       load();
     });
     dlg.showModal();
