@@ -4304,6 +4304,7 @@ function handleInventory_(body) {
   const ordering = can_(session, 'inventory.order') || can_(session, 'inventory.manage');
   const okId = function (v) { return /^[A-Za-z0-9_-]{10,40}$/.test(String(v || '')); };
   try {
+    if (op === 'kitDay') return invKitDay_(body, session);
     if (op === 'notifyRequest') {
       if (!can_(session, 'inventory.request')) return { ok: false, error: 'FORBIDDEN' };
       if (!okId(body.requestId)) return { ok: false, error: 'BAD_REQUEST' };
@@ -15915,4 +15916,104 @@ function testPaperFolder() {
   const it = f.getFiles();
   while (it.hasNext() && n < 2000) { const x = it.next(); if (PAPER_MIME_[x.getMimeType()]) n++; }
   console.log('Paper records folder "' + f.getName() + '": ' + n + ' scan(s) at the top level.');
+}
+
+// ===================== Kit days: the old app's records for one injector and day =====================
+// StartOfDayLog (the old app's sheet: start counts, restocks, borrows) and wr_treatment_record (who it was used on).
+// Read only. The portal's own records are read by the portal.
+
+const OLD_KIT_SHEET_ = 'StartOfDayLog';
+const OLD_WR_COL_ = 'wr_treatment_record';
+
+// "Dr Joanna Teh" = "Joanna Teh" = "Dr Teh" = "Joanna"; "Jacquie" = "Jacquie Smith"
+function kitNameKey_(s) {
+  return String(s || '').toLowerCase().replace(/\bdr\.?\s+/g, ' ').replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+function kitSameStaff_(a, b) {
+  const x = kitNameKey_(a), y = kitNameKey_(b);
+  if (!x || !y) return false;
+  if (x === y) return true;
+  const xs = x.split(' '), ys = y.split(' ');
+  if (xs.length === 1) return ys.indexOf(xs[0]) !== -1;
+  if (ys.length === 1) return xs.indexOf(ys[0]) !== -1;
+  return xs[0] === ys[0] && xs[xs.length - 1] === ys[ys.length - 1];
+}
+
+// Every row of StartOfDayLog, remembered 15 minutes
+function oldKitRows_() {
+  const hit = repCacheGet_('old_kit_rows_v1');
+  if (hit) return hit;
+  const id = String(PropertiesService.getScriptProperties().getProperty('OLD_APP_SHEET_ID') || '').trim();
+  if (!id) throw new Error('Add OLD_APP_SHEET_ID (the Team App V2 ESSENTIALS spreadsheet) in Script Properties.');
+  const ss = SpreadsheetApp.openById(id);
+  const sh = ss.getSheetByName(OLD_KIT_SHEET_);
+  if (!sh) throw new Error('Sheet tab not found: ' + OLD_KIT_SHEET_);
+  const tz = ss.getSpreadsheetTimeZone();
+  const last = sh.getLastRow();
+  const num = function (v) { const n = Number(String(v == null ? '' : v).replace(/[^\d.-]/g, '')); return isFinite(n) ? n : 0; };
+  const txt = function (v) { return v instanceof Date ? Utilities.formatDate(v, tz, 'MM/yyyy') : String(v == null ? '' : v).trim(); };
+  const rows = last < 2 ? [] : sh.getRange(2, 1, last - 1, 12).getValues().map(function (r) {
+    const logId = String(r[0] || '').trim();
+    const ms = (/-(\d{13})$/.exec(logId) || [])[1];
+    return {
+      id: logId,
+      kind: (/^(SOD|EOD|RESTOCK|BORROW-IN|BORROW-OUT|VOID)/.exec(logId.toUpperCase()) || [''])[0],
+      date: sheetDateKey_(r[1], tz), staff: String(r[2] || '').trim(),
+      count: num(r[3]), batch: txt(r[4]), expiry: txt(r[5]), note: String(r[6] || '').trim(),
+      used: r[7] === '' ? null : num(r[7]), left: r[8] === '' ? null : num(r[8]), status: String(r[9] || '').trim(),
+      at: ms ? Number(ms) : 0,
+    };
+  }).filter(function (x) { return x.id && x.kind && x.date; });
+  repCachePut_('old_kit_rows_v1', rows, 900);
+  return rows;
+}
+
+// The old app's Wrinkle Relaxer records on one day. The time comes from the Record ID (WR-20251212-091611).
+function oldWrRecords_(cfg, key) {
+  return fsQuery_(cfg, OLD_WR_COL_, quoteField_('Record Date'), 'EQUAL', key, 500).map(function (r) {
+    const m = /\d{8}-(\d{2})(\d{2})\d{2}/.exec(String(r['Record ID'] || ''));
+    const lines = (Array.isArray(r.treatment_details_map) ? r.treatment_details_map : []).map(function (d) {
+      d = d || {};
+      return {
+        area: String(d['Area Selected'] || '').trim(), batch: String(d['Batch Number'] || '').trim(),
+        expiry: String(d['Expiry Date'] || '').trim(), type: String(d.Type || '').trim(),
+        units: Number(String(d['Total Units'] == null ? '' : d['Total Units']).replace(/[^\d.]/g, '')) || 0,
+      };
+    }).filter(function (d) { return d.units > 0; });
+    return {
+      id: r._id, recordId: String(r['Record ID'] || ''), patientName: String(r['Patient Name'] || ''),
+      staff: String(r.Staff || ''), time: m ? m[1] + ':' + m[2] : '', lines: lines,
+      units: Math.round(lines.reduce(function (a, d) { return a + d.units; }, 0) * 10) / 10,
+    };
+  }).filter(function (r) { return r.units > 0; });
+}
+
+// One injector's old-app day: the sheet's rows that day, their next start count, and their WR records
+function invKitDay_(body, session) {
+  const key = String(body.date || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) return { ok: false, error: 'BAD_REQUEST' };
+  const uid = String(body.staffUid || session.uid);
+  const all = can_(session, 'inventory.manage') || can_(session, 'inventory.jt');
+  if (uid !== session.uid && !all) return { ok: false, error: 'FORBIDDEN' };
+  const s = getStaffDocs_().filter(function (x) { return x.id === uid; })[0];
+  if (!s) return { ok: true, problem: "That staff member isn't on the staff list." };
+
+  const out = { ok: true, staffName: s.name, sheet: [], next: null, wr: [], problem: '' };
+  try {
+    const mine = oldKitRows_().filter(function (r) { return kitSameStaff_(r.staff, s.name); });
+    out.sheet = mine.filter(function (r) { return r.date === key; });
+    const later = mine.filter(function (r) { return r.kind === 'SOD' && r.date > key; })
+      .sort(function (a, b) { return a.date.localeCompare(b.date); })[0];
+    if (later) {
+      const same = mine.filter(function (r) { return r.kind === 'SOD' && r.date === later.date; });
+      out.next = { date: later.date, count: same.reduce(function (a, r) { return a + r.count; }, 0) };
+    }
+  } catch (e) { out.problem = String(e && e.message ? e.message : e).slice(0, 200); }
+  try {
+    out.wr = oldWrRecords_(getConfig_(), key).filter(function (r) { return kitSameStaff_(r.staff, s.name); });
+  } catch (e) {
+    out.problem = (out.problem ? out.problem + ' ' : '') + "The old app's treatment records couldn't be read: " +
+      String(e && e.message ? e.message : e).slice(0, 150);
+  }
+  return out;
 }

@@ -7,6 +7,7 @@ import {
   LOAN_STATUS, listLoans, answerLoan, listShortUsage,
 } from "./inventory-api.js";
 import { callApi } from "./appointments.js";
+import { openKitDays } from "./kit-days.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 
@@ -223,7 +224,7 @@ export async function renderKits(body, { staff, products, lots, canKit, canJt, c
       </article>`;
   }
   const myKitHtml = () => !canKit ? "" : `
-    <section class="kit-sec"><h3>My kit</h3>${kitProducts.length
+    <section class="kit-sec"><h3 class="kit-h">My kit <button type="button" class="rc-link" data-kit="days">See my kit days</button></h3>${kitProducts.length
       ? `<div class="kit-cards">${kitProducts.map(myCard).join("")}</div>`
       : '<div class="tm-empty">No products are carried in kits yet. In Products, edit Xeomin and set <strong>How it\'s used</strong> to <strong>Carried in injectors\' kits</strong>.</div>'}</section>`;
 
@@ -271,7 +272,7 @@ export async function renderKits(body, { staff, products, lots, canKit, canJt, c
       </div>`).join("")}</section>`;
 
   const allKitsHtml = () => !canApprove ? "" : `
-    <section class="kit-sec"><h3>Everyone's kits</h3>${kits.length
+    <section class="kit-sec"><h3 class="kit-h">Everyone's kits <button type="button" class="rc-link" data-kit="days">Kit days</button></h3>${kits.length
       ? `<table class="inv-table"><thead><tr><th>Staff</th><th>Product</th><th>Batch / Lot</th><th>Expiry</th><th>Opened</th><th>Unopened</th><th>Total</th><th>Updated</th></tr></thead><tbody>${
         kits.slice().sort((a, b) => a.staffName.localeCompare(b.staffName) || a.productName.localeCompare(b.productName)).map((k) => `<tr>
           <td>${esc(k.staffName)}</td><td>${esc(k.productName)}</td><td>${esc(k.batch || "—")}</td>
@@ -371,6 +372,7 @@ export async function renderKits(body, { staff, products, lots, canKit, canJt, c
     const k = b.dataset.id ? kits.find((x) => x.id === b.dataset.id) : null;
     const r = b.dataset.rel ? rels.find((x) => x.id === b.dataset.rel) : null;
     const l = b.dataset.loan ? loans.find((x) => x.id === b.dataset.loan) : null;
+    if (act === "days") { openKitDays({ staff, canAll: canApprove }); return; }
     if (act === "take" && p) run(takeFromShelfDialog(p, staff, lots));
     else if (act === "borrow" && p) run(borrowDialog(p, staff));
     else if (act === "request" && p) requestDialog(p);

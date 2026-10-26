@@ -9028,3 +9028,33 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 }
 .cs-line.is-short .cs-restock:hover,
 .cs-line .cs-restock.is-out:hover { background: #fee2e2; }
+
+/* Inventory → Kits → Kit days */
+.kit-h { display: flex; align-items: baseline; gap: 12px; }
+.kit-h .rc-link { font-size: 14px; font-weight: 500; }
+.kd-dlg { width: min(760px, 96vw); padding: 20px; }
+.kd-head { display: flex; align-items: center; margin-bottom: 10px; }
+.kd-head h3 { margin: 0; }
+.kd-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; }
+.kd-tools .fb-select { min-width: 200px; }
+.kd-sec { border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px 16px; margin-bottom: 14px; background: #fff; }
+.kd-sec-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 6px; }
+.kd-row { display: grid; grid-template-columns: 70px 1fr 96px; gap: 10px; align-items: start; padding: 9px 0; border-top: 1px solid #f1f5f9; font-size: 14px; }
+.kd-row.is-count { font-size: 14px; }
+.kd-row.is-sum { border-top: 1px solid #cbd5e1; color: #475569; }
+.kd-row.is-info { color: #64748b; font-style: italic; }
+.kd-t { color: #64748b; font-size: 12px; padding-top: 2px; }
+.kd-main { display: grid; gap: 3px; min-width: 0; }
+.kd-main small { color: #64748b; font-size: 12px; }
+.kd-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.kd-tag { font-size: 11px; padding: 1px 7px; border-radius: 6px; background: #f1f5f9; color: #475569; }
+.kd-tag.is-warn { background: #fef3c7; color: #92400e; }
+.kd-n { text-align: right; font-weight: 600; white-space: nowrap; }
+.kd-n.is-in { color: #047857; }
+.kd-n.is-out { color: #b91c1c; }
+.kd-n.is-off { color: #94a3b8; text-decoration: line-through; }
+.kd-verdict { margin: 10px 0 0; padding: 9px 12px; border-radius: 8px; background: #f8fafc; color: #475569; font-size: 14px; }
+.kd-verdict.is-ok { background: #ecfdf5; color: #047857; }
+.kd-verdict.is-warn { background: #fffbeb; color: #92400e; }
+.kd-note { margin: 0 0 10px; font-size: 13px; color: #475569; }
+.kd-note.is-warn { color: #92400e; }

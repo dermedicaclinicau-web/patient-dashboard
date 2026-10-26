@@ -4543,3 +4543,83 @@ export async function listReturns({ productId = "" } = {}) {
       at: toDate(x.at), creditedAt: toDate(x.creditedAt) };
   }).sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0));
 }
+
+/* ===================== Kit days: one injector's day, from the start count to the end count ===================== */
+// The portal's records for one injector and day: their Start / End of Day counts, and every line that went in or
+// out of their kit (restocks, returns, discards, admin adjustments, units taken from or by a colleague), plus every
+// treatment record with a kit product, with the patient. units: + into the kit, − out of it.
+// Opened vials in JT storage (Dr Teh) are listed with countsInKit: false.
+export async function kitDayLedger(staffUid, key) {
+  const inDay = (d) => !!d && dayKey(d) === key;
+  const [daySnap, byThem, forThem, loans, useSnap, products] = await Promise.all([
+    getDoc(doc(db, "inv_kitdays", kitDayId(staffUid, key))),
+    getDocs(query(collection(db, "inv_moves"), where("byUid", "==", staffUid))),
+    getDocs(query(collection(db, "inv_moves"), where("staffUid", "==", staffUid))).catch(() => ({ docs: [] })),
+    listAllLoans().catch(() => []),
+    getDocs(query(collection(db, "inv_usage"), where("byUid", "==", staffUid))),
+    listProducts(),
+  ]);
+  const per = new Map(products.map((p) => [p.id, Number(p.dosePer) || 0]));
+  const day = daySnap.exists() ? normaliseKitDay(daySnap) : null;
+  const events = [];
+  const seen = new Set();
+
+  [...byThem.docs, ...forThem.docs].forEach((d) => {
+    if (seen.has(d.id)) return;
+    seen.add(d.id);
+    const m = d.data() || {};
+    const at = toDate(m.at);
+    if (!inDay(at)) return;
+    const kitLines = (Array.isArray(m.lines) ? m.lines : []).filter((l) => l.loc === "kit");
+    const kd = kitLines.reduce((a, l) => a + (Number(l.delta) || 0), 0);
+    const each = per.get(m.productId) || 0;
+    let units = 0, text = "";
+    if (m.type === "kit-take") { units = kd * each; text = "Restock: taken from the Shelf"; }
+    else if (m.type === "kit-return") { units = kd * each; text = "Returned to the Shelf"; }
+    else if (m.type === "kit-discard") {
+      const du = Number(m.discardUnits);
+      units = -(Number.isFinite(du) ? du : Math.abs(kd) * each);
+      text = `Discarded${m.reason ? `: ${m.reason}` : ""}`;
+    } else if (m.type === "kit-count" && m.staffUid === staffUid) {
+      units = Number(m.deltaUnits) || 0;
+      text = m.reason === "Kit set by admin" ? `Kit set by ${m.by || "an admin"}` : `Count difference accepted by ${m.by || "an admin"}`;
+    } else if (m.type === "kit-correct") { units = kd; text = `Usage corrected by ${m.by || "an admin"}`; }
+    else return;
+    if (!units) return;
+    events.push({ at, productId: m.productId, units: round1(units), kind: m.type, text,
+      batch: (kitLines[0] || {}).batch || "", note: String(m.note || ""), countsInKit: true });
+  });
+
+  loans.forEach((l) => {
+    if (!inDay(l.createdAt)) return;
+    const u = round1(l.units);
+    if (!u) return;
+    if (l.toUid === staffUid) events.push({ at: l.createdAt, productId: l.productId, units: u, kind: "take-in",
+      text: `Taken from ${l.fromName || "a colleague"}'s opened vial`, status: l.status, batch: l.batch || "", countsInKit: true });
+    if (l.fromUid === staffUid) events.push({ at: l.createdAt, productId: l.productId, units: -u, kind: "take-out",
+      text: `Taken by ${l.toName || "a colleague"}`, status: l.status, batch: l.batch || "", countsInKit: true });
+  });
+
+  useSnap.docs.forEach((d) => {
+    const u = d.data() || {};
+    const at = toDate(u.at);
+    const k = KEY_RE.test(u.recordDate || "") ? u.recordDate : at ? dayKey(at) : "";
+    if (k !== key) return;
+    (Array.isArray(u.lines) ? u.lines : []).forEach((l) => {
+      if (l.kind !== "kit" && l.kind !== "vial") return;
+      const total = round1(l.total);
+      if (!total) return;
+      const batches = [...new Set((l.rows || []).map((r) => r.batch).filter(Boolean))];
+      events.push({
+        at, productId: l.productId, units: -total, kind: "use", countsInKit: l.kind === "kit",
+        from: l.kind === "vial" ? ((l.rows || [])[0] || {}).from || "jt" : "kit",
+        patientName: String(u.patientName || ""), patientId: String(u.patientId || ""),
+        formName: String(u.formName || ""), submissionId: String(u.submissionId || ""),
+        paper: u.source === "paper", short: round1(l.short), batch: batches.join(", "),
+      });
+    });
+  });
+
+  events.sort((a, b) => (a.at ? a.at.getTime() : 0) - (b.at ? b.at.getTime() : 0));
+  return { day, events };
+}
