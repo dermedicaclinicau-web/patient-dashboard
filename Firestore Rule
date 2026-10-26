@@ -165,6 +165,7 @@ service cloud.firestore {
     function validTaskType(d) {
       return d.keys().hasOnly(['name', 'description', 'category', 'channel', 'status', 'fields',
                                'recipients', 'subject', 'body', 'format', 'style', 'attachments', 'schedule',
+                               'useFor',
                                'createdAt', 'createdBy', 'createdByUid',
                                'updatedAt', 'updatedBy', 'updatedByUid'])
         && d.name is string && d.name.size() > 0 && d.name.size() <= 120
@@ -177,7 +178,9 @@ service cloud.firestore {
         && d.body is string && d.body.size() <= 60000
         && d.get('format', 'rich') in ['rich', 'text']
         && d.get('style', {}) is map
-        && d.get('schedule', {}) is map;
+        && d.get('schedule', {}) is map
+        && d.get('useFor', '') in ['', 'treatmentInfo']
+        && (d.get('useFor', '') == '' || d.category == 'patient');
     }
 
     function validBankImage(d) {

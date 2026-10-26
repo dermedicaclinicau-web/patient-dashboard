@@ -21,6 +21,8 @@
                   "./js/clinical-profile.js",
                   "./js/consumables-field.js",
                   "./js/count-card.js",
+                  "./js/dash-arrange.js",
+                  "./js/dash-prefs.js",
                   "./js/data-uploader.js",
                   "./js/data.js",
                   "./js/date-tokens.js",
@@ -82,6 +84,7 @@
                   "./js/my-dashboard.js",
                   "./js/my-notes.js",
                   "./js/my-photo.js",
+                  "./js/my-visits.js",
                   "./js/new-patient.js",
                   "./js/notifications.js",
                   "./js/notify-api.js",
@@ -179,6 +182,7 @@
                   "./js/task-types.js",
                   "./js/topbar.js",
                   "./js/transcripts.js",
+                  "./js/treatment-email-template.js",
                   "./js/ui-text-settings.js",
                   "./js/ui-text.js",
                   "./js/upcoming-appts.js",
@@ -190,6 +194,6 @@
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261026-214540",
-    "v":  "20261026-214540"
+    "version":  "20261026-223810",
+    "v":  "20261026-223810"
 }
