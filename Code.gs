@@ -15024,16 +15024,17 @@ function repCacheGet_(key) {
   if (!keys.every(function (k) { return got[k]; })) return null;
   try { return JSON.parse(keys.map(function (k) { return got[k]; }).join('')); } catch (e) { return null; }
 }
-function repCachePut_(key, val) {
+function repCachePut_(key, val, secs) {
   try {
     const json = JSON.stringify(val);
     if (json.length > 6000000) return;
+    const ttl = Math.max(60, Math.min(21600, Number(secs) || 600));
     const parts = {};
     let n = 0;
     for (let i = 0; i < json.length; i += 45000) parts[key + '_' + (n++)] = json.slice(i, i + 45000);
     const c = CacheService.getScriptCache();
-    c.putAll(parts, 600);
-    c.put(key, String(n), 600);
+    c.putAll(parts, ttl);
+    c.put(key, String(n), ttl);
   } catch (e) { console.warn('Report not remembered: ' + e); }
 }
 
@@ -15293,7 +15294,7 @@ function paperList_(cfg, fresh) {
       }
     };
     walk(DriveApp.getFolderById(paperRootId_()), '', 0);
-    repCachePut_(PAPER_FKEY_, files);
+    repCachePut_(PAPER_FKEY_, files, 1800);
   }
   const st = {};
   fsListAll_(cfg, PAPER_SCANS_, ['status', 'note', 'reason', 'patientId', 'patientName', 'recordDate', 'by', 'at', 'filedAs',
@@ -15322,7 +15323,7 @@ function paperList_(cfg, fresh) {
 function paperLinked_(cfg) {
   const hit = repCacheGet_('paper_linked_v1');
   if (hit) return hit;
-  const pts = recallPatients_(cfg);
+  const pts = paperPts_(cfg);
   const out = {};
   Object.keys(REC_LEGACY_).forEach(function (kind) {
     const def = REC_LEGACY_[kind];
@@ -15339,7 +15340,7 @@ function paperLinked_(cfg) {
       });
     });
   });
-  repCachePut_('paper_linked_v1', out);
+  repCachePut_('paper_linked_v1', out, 21600);
   return out;
 }
 
@@ -15504,63 +15505,176 @@ function paperSelect_(cfg, col, field, value, fields) {
   return out;
 }
 
+// Patients from the Patient List index (a few documents, remembered 6 hours), with the same find / doc as
+// recallPatients_. Patients added since the index was built are looked up one at a time (up to 40).
+function paperPts_(cfg) {
+  let rows = null;
+  try {
+    const meta = fsGetDoc_(cfg, 'patient_index/meta');
+    const age = meta ? Date.now() - (Date.parse(String(meta.builtAt || '')) || 0) : Infinity;
+    if (meta && Number(meta.parts) > 0 && age < 3 * 864e5) {
+      const ck = 'paper_pts_' + flowHash_(String(meta.build));
+      rows = repCacheGet_(ck);
+      if (!rows) {
+        const paths = [];
+        for (let i = 0; i < Number(meta.parts); i++) paths.push('patient_index/p' + i);
+        const got = fsBatchGet_(cfg, paths);
+        rows = [];
+        paths.forEach(function (p) {
+          const part = got[p];
+          if (!part || part.build !== meta.build) throw new Error('the index is being rebuilt');
+          JSON.parse(String(part.data || '[]')).forEach(function (r) {
+            const f = r[1] || {};
+            rows.push([String(r[0]), String(f.PttID == null ? '' : f.PttID).trim(), String(f['Patient Name'] || ''),
+              String(f['First Name'] || ''), String(f['Last Name'] || ''), String(f.MergedInto || '')]);
+          });
+        });
+        repCachePut_(ck, rows, 21600);
+      }
+    }
+  } catch (e) { console.warn('Patient index not used: ' + e); rows = null; }
+  if (!rows) return recallPatients_(cfg);
+
+  const byId = Object.create(null);
+  const byPtt = Object.create(null);
+  const put = function (id, ptt, name, first, last, merged) {
+    byId[id] = { 'Patient Name': name, 'First Name': first, 'Last Name': last, MergedInto: merged, PttID: ptt };
+    if (ptt) byPtt[ptt.toLowerCase()] = id;
+    if (!byPtt[id.toLowerCase()]) byPtt[id.toLowerCase()] = id;
+  };
+  rows.forEach(function (r) { put(r[0], r[1], r[2], r[3], r[4], r[5]); });
+
+  const tried = Object.create(null);
+  let lookups = 0;
+  const lookUp = function (k, raw) {
+    if (k in tried || lookups >= 40) return '';
+    tried[k] = true;
+    lookups++;
+    try {
+      let hit = fsQuery_(cfg, 'patient_list', 'PttID', 'EQUAL', raw, 1)[0] || null;
+      if (!hit && recDocIdOk_(raw)) {
+        const d = fsGetDoc_(cfg, 'patient_list/' + encodeURIComponent(raw));
+        if (d) { d._id = raw; hit = d; }
+      }
+      if (!hit) return '';
+      put(hit._id, String(hit.PttID == null ? '' : hit.PttID).trim(), String(hit['Patient Name'] || ''),
+        String(hit['First Name'] || ''), String(hit['Last Name'] || ''), String(hit.MergedInto || ''));
+      byPtt[k] = hit._id;
+      return hit._id;
+    } catch (e) { return ''; }
+  };
+  const kept = function (id) {
+    for (let i = 0; i < 5 && byId[id] && byId[id].MergedInto && byId[byId[id].MergedInto]; i++) id = byId[id].MergedInto;
+    return byId[id] ? id : '';
+  };
+  return {
+    find: function (ptt) {
+      const raw = String(ptt == null ? '' : ptt).trim();
+      if (!raw) return '';
+      const k = raw.toLowerCase();
+      const id = byPtt[k] || lookUp(k, raw);
+      return id ? kept(id) : '';
+    },
+    doc: function (id) { return byId[id] || null; },
+  };
+}
+
+// The slow part: past visits for the chosen treatments, and older treatment records. Worked out again only after
+// a new PCN update reaches the portal (sync_meta/pcn), a new day, or a settings change. Remembered up to 6 hours.
+function paperVisitBase_(cfg, set, today, pts, fresh) {
+  let synced = '';
+  try { const m = fsGetDoc_(cfg, 'sync_meta/pcn'); synced = String((m && m.syncedAt) || ''); } catch (e) { /* worked out again */ }
+  const key = 'paper_vbase_' + flowHash_([today, synced, set.from, set.cats.join(','), set.skip.join(',')].join('|'));
+  if (!fresh) { const hit = repCacheGet_(key); if (hit) return hit; }
+
+  const wantCat = {};
+  set.cats.forEach(function (c) { wantCat[c.toLowerCase()] = true; });
+  const skip = recallSkipFn_(set.skip);
+  const visits = Object.create(null);
+  const yest = flowAddDaysKey_(today, -1);
+
+  // 1. Past visits, from the portal's copy of the appointment book (only the days since "Check visits from")
+  let start = set.from;
+  for (let page = 0; page < 30 && start <= yest; page++) {
+    const days = schedApptDays_(cfg, start, yest, 150);
+    days.forEach(function (d) {
+      const dk = String(d.date || '');
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(dk) || dk >= today) return;
+      (d.appointments || []).forEach(function (a) {
+        if (!pcnStatusOk_(a.status, 'full')) return;   // cancelled, no-show, DNA
+        const svcs = [];
+        const cats = [];
+        (Array.isArray(a.services) ? a.services : []).forEach(function (s) {
+          s = String(s == null ? '' : s).trim();
+          if (!s || REP_NOT_VISIT_.test(s) || skip(s)) return;
+          const c = pcnCategory_(dk, s);                // the same rule as the Day Sheet's column N
+          if (!wantCat[c.toLowerCase()]) return;
+          svcs.push(s);
+          if (cats.indexOf(c) === -1) cats.push(c);
+        });
+        if (!svcs.length) return;
+        const ptt = String(a.patientId || '').trim();
+        const pid = ptt ? pts.find(ptt) : '';
+        const name = String(a.patientName || '').trim();
+        const k = dk + '|' + (pid || ('n:' + name.toLowerCase()));
+        const v = visits[k] || (visits[k] = { key: k, date: dk, pid: pid, ptt: ptt, name: name, staff: [], services: [], cats: [] });
+        const who = String(a.staff || '').trim();
+        if (who && !SCHED_NOT_PERSON_.test(who) && v.staff.indexOf(who) === -1) v.staff.push(who);
+        svcs.forEach(function (s) { if (v.services.indexOf(s) === -1 && v.services.length < 6) v.services.push(s); });
+        cats.forEach(function (c) { if (v.cats.indexOf(c) === -1) v.cats.push(c); });
+      });
+    });
+    if (days.length < 150) break;
+    start = flowAddDaysKey_(String(days[days.length - 1].date), 1);
+  }
+  const list = Object.keys(visits).map(function (k) {
+    const v = visits[k];
+    const d = v.pid ? pts.doc(v.pid) : null;
+    if (d) v.name = flowWho_(d).name || v.name;
+    return v;
+  });
+
+  // 2. Older treatment records from the sheets (scans filed here are counted fresh, from paper_scans)
+  const legacy = Object.create(null);
+  fsListAll_(cfg, 'treatment_records', ['Patient ID', 'Record Date']).forEach(function (d) {
+    if (d.name.split('/').pop().indexOf('paper_') === 0) return;
+    const f = fromFields_(d.fields || {});
+    const dk = sheetDateKey_(f['Record Date'], REC_TZ_);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dk) || dk < set.from) return;   // can't cover a visit we check
+    const pid = pts.find(String(f['Patient ID'] || '').trim());
+    if (pid) (legacy[pid] = legacy[pid] || []).push(dk);
+  });
+
+  const out = { visits: list, legacy: legacy };
+  repCachePut_(key, out, 21600);
+  return out;
+}
+
 function paperVisits_(cfg, fresh) {
   if (!fresh) {
     const hit = repCacheGet_(PAPER_VKEY_);
     if (hit) return Object.assign({ ok: true, cached: true }, hit);
   }
-  const cache = CacheService.getScriptCache();
-  if (cache.get('up_ds_active') || cache.get('pcn_run_active')) {
-    return { ok: true, problem: 'A Day Sheet upload or PCN update is running. Try again in a few minutes.' };
-  }
   const t0 = Date.now();
   const set = paperSettings_(cfg);
-  const ctx = pcnCtx_();
-  const wantCat = {};
-  set.cats.forEach(function (c) { wantCat[c.toLowerCase()] = true; });
-  const skip = recallSkipFn_(set.skip);
-  const pts = recallPatients_(cfg);
-  const keyOf = Object.create(null);
-  const visits = Object.create(null);
+  const today = flowKey_(Date.now());
+  const pts = paperPts_(cfg);
+  const base = paperVisitBase_(cfg, set, today, pts, fresh);
 
-  // 1. Past visits for the chosen treatments (cancellations and no-shows left out)
-  pcnReadAppts_(ctx).forEach(function (r) {
-    if (!pcnIsDate_(r[0]) || r[0].getTime() >= ctx.today || !pcnStatusOk_(r[7], 'full')) return;
-    const dk = Utilities.formatDate(r[0], ctx.tz, 'yyyy-MM-dd');
-    if (dk < set.from) return;
-    const cat = String(r[13] == null ? '' : r[13]).trim();
-    if (!wantCat[cat.toLowerCase()]) return;
-    const svc = String(r[9] == null ? '' : r[9]).trim();
-    if (REP_NOT_VISIT_.test(svc) || skip(svc)) return;
-    const ptt = String(r[14] == null ? '' : r[14]).trim();
-    if (ptt && !(ptt in keyOf)) keyOf[ptt] = pts.find(ptt);
-    const pid = ptt ? keyOf[ptt] : '';
-    const name = String(r[1] == null ? '' : r[1]).trim();
-    const k = dk + '|' + (pid || ('n:' + name.toLowerCase()));
-    const v = visits[k] || (visits[k] = { key: k, date: dk, pid: pid, ptt: ptt, name: name, staff: [], services: [], cats: [] });
-    const who = String(r[8] == null ? '' : r[8]).trim();
-    if (who && !SCHED_NOT_PERSON_.test(who) && v.staff.indexOf(who) === -1) v.staff.push(who);
-    if (svc && v.services.indexOf(svc) === -1 && v.services.length < 6) v.services.push(svc);
-    if (cat && v.cats.indexOf(cat) === -1) v.cats.push(cat);
-  });
-
-  // 2. Every treatment record: patient → the days they have one
+  // Records: older ones (from the base), plus portal forms and scans, read fresh
   const rec = Object.create(null);
   const addRec = function (pid, dk) { if (pid && /^\d{4}-\d{2}-\d{2}$/.test(dk)) (rec[pid] = rec[pid] || {})[dk] = true; };
+  Object.keys(base.legacy).forEach(function (pid) { base.legacy[pid].forEach(function (dk) { addRec(pid, dk); }); });
   paperSelect_(cfg, 'form_submissions', 'category', 'treatment', ['patientId', 'patientPttId', 'recordDate']).forEach(function (s) {
     addRec(pts.find(String(s.patientId || '')) || pts.find(String(s.patientPttId || '')), String(s.recordDate || ''));
   });
-  fsListAll_(cfg, 'treatment_records', ['Patient ID', 'Record Date']).forEach(function (d) {
+  fsListAll_(cfg, PAPER_SCANS_, ['status', 'patientId', 'recordDate', 'filedAs']).forEach(function (d) {
     const f = fromFields_(d.fields || {});
-    const pid = pts.find(String(f['Patient ID'] || '').trim());
-    if (pid) addRec(pid, sheetDateKey_(f['Record Date'], REC_TZ_));
-  });
-  fsListAll_(cfg, PAPER_SCANS_, ['status', 'patientId', 'recordDate']).forEach(function (d) {
-    const f = fromFields_(d.fields || {});
-    if (f.status === 'entered') addRec(pts.find(String(f.patientId || '')) || String(f.patientId || ''), String(f.recordDate || ''));
+    const isRecord = f.status === 'entered' || (f.status === 'filed' && f.filedAs && f.filedAs.kind === 'treatment');
+    if (isRecord) addRec(pts.find(String(f.patientId || '')) || String(f.patientId || ''), String(f.recordDate || ''));
   });
 
-  // 3. Visits staff have sorted out (no treatment given, recorded somewhere else)
+  // Visits staff have sorted out (no treatment given, recorded somewhere else)
   const res = Object.create(null);
   fsListAll_(cfg, PAPER_VISITS_).forEach(function (d) {
     const f = fromFields_(d.fields || {});
@@ -15573,10 +15687,9 @@ function paperVisits_(cfg, fresh) {
     for (let i = 0; i <= 3; i++) if (r[flowAddDaysKey_(v.date, i)]) return true;
     return false;
   };
-  const rows = Object.keys(visits).map(function (k) { return visits[k]; }).filter(function (v) { return !covered(v); })
+  const rows = base.visits.filter(function (v) { return !covered(v); })
     .map(function (v) {
-      const d = v.pid ? pts.doc(v.pid) : null;
-      return { key: v.key, date: v.date, pid: v.pid, ptt: v.ptt, name: (d && flowWho_(d).name) || v.name,
+      return { key: v.key, date: v.date, pid: v.pid, ptt: v.ptt, name: v.name,
         staff: v.staff, services: v.services, cats: v.cats, res: res[v.key] || null };
     })
     .sort(function (a, b) { return b.date.localeCompare(a.date) || a.name.localeCompare(b.name); });
@@ -15586,7 +15699,6 @@ function paperVisits_(cfg, fresh) {
   console.log('Paper records: ' + rows.length + ' visit(s) without a record, in ' + out.ms + ' ms');
   return Object.assign({ ok: true }, out);
 }
-
 // No treatment given / recorded somewhere else, or "clear" to put it back on the list
 function paperResolve_(cfg, body, session) {
   const key = String(body.key || '');

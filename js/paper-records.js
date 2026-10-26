@@ -156,10 +156,14 @@ const LOC_NAME = { kit: "Your kit", shelf: "The Shelf", jt: "JT storage" };
 const csSummary = (lines) => lines.map((l) => `${l.name}: ${l.rows.map((r) =>
   `${consumableAmountText(l, r, false)}${r.batch ? ` (${l.batchLabel || "Batch"} ${r.batch})` : ""}`).join(" + ")}`);
 
+// The last lists loaded, so coming back to the page shows them straight away while they update
+const keep = { files: null, visits: null, vMeta: null, thumbs: {} };
+
 export function mountPaperRecords(container, { staff } = {}) {
   const isAdmin = /^admin$/i.test(String((staff && staff.role) || ""));
-  const st = { tab: "scans", files: null, visits: null, vMeta: { from: "", cats: [] }, q: "", vq: "", vStaff: "all", vCat: "all",
-    showSorted: false, thumbs: {}, sFrom: "", sTo: "", sort: "old", sLink: "all", cfg: null };
+  const st = { tab: "scans", files: keep.files, visits: keep.visits, vMeta: keep.vMeta || { from: "", cats: [] },
+    q: "", vq: "", vStaff: "all", vCat: "all", fBusy: false, vBusy: false,
+    showSorted: false, thumbs: keep.thumbs, sFrom: "", sTo: "", sort: "old", sLink: "all", cfg: null };
   let cfgJob = null;
   let staffJob = null;
   const loadStaff = () => staffJob || (staffJob = callApi({ action: "staffList" })
@@ -262,7 +266,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       : st.sFrom ? `from ${niceDay(st.sFrom)}` : `up to ${niceDay(st.sTo)}`;
     body.innerHTML = `
       ${st.tab === "scans" ? `<div class="ppr-progress" aria-hidden="true"><span style="width:${total ? Math.round((done / total) * 100) : 0}%"></span></div>
-        <p class="muted ppr-sum">${done} of ${total} scan${total === 1 ? "" : "s"} sorted</p>` : ""}
+        <p class="muted ppr-sum">${done} of ${total} scan${total === 1 ? "" : "s"} sorted${st.fBusy ? " · Updating…" : ""}</p>` : ""}
       <div class="ppr-tools">
         <input type="search" class="fe-input" data-f="q" placeholder="Filter by file name or patient" value="${esc(st.q)}" />
         <select class="fb-select" data-f="sRange" aria-label="Uploaded">
@@ -311,7 +315,8 @@ export function mountPaperRecords(container, { staff } = {}) {
     const opt = (v, cur) => `<option value="${esc(v)}"${v === cur ? " selected" : ""}>${esc(v)}</option>`;
     body.innerHTML = `
       <p class="muted ppr-sum">${open} visit${open === 1 ? "" : "s"} since ${esc(niceDay(st.vMeta.from))} with no treatment record${
-        noId ? ` · ${noId} with no Patient ID on the Day Sheet` : ""}. Checking: ${esc((st.vMeta.cats || []).join(", "))}.</p>
+        noId ? ` · ${noId} with no Patient ID on the Day Sheet` : ""}. Checking: ${esc((st.vMeta.cats || []).join(", "))}.${
+        st.vBusy ? " <strong>Updating…</strong>" : ""}</p>
       <div class="ppr-tools">
         <input type="search" class="fe-input" data-f="vq" placeholder="Filter by patient" value="${esc(st.vq)}" />
         <select class="fb-select" data-f="vStaff" aria-label="Clinician"><option value="all">Any clinician</option>${staffs.map((s) => opt(s, st.vStaff)).join("")}</select>
@@ -324,6 +329,7 @@ export function mountPaperRecords(container, { staff } = {}) {
   }
 
   function draw() {
+    Object.assign(keep, { files: st.files, visits: st.visits, vMeta: st.vMeta, thumbs: st.thumbs });
     drawTabs();
     if (st.tab === "visits") drawVisits(); else drawScans();
   }
@@ -348,6 +354,8 @@ export function mountPaperRecords(container, { staff } = {}) {
   }
 
   async function loadScans(fresh = false) {
+    st.fBusy = true;
+    if (st.files && container.isConnected) draw();
     try {
       const r = await callApi({ action: "paper", op: "list", fresh });
       if (r.problem) throw new Error(r.problem);
@@ -362,10 +370,13 @@ export function mountPaperRecords(container, { staff } = {}) {
       st.files = st.files || [];
       if (container.isConnected) showToast(err.message || "Couldn't load the scans.");
     }
+    st.fBusy = false;
     if (container.isConnected) draw();
   }
 
   async function loadVisits(fresh = false) {
+    st.vBusy = true;
+    if (st.visits && container.isConnected && st.tab === "visits") draw();
     try {
       const r = await callApi({ action: "paper", op: "visits", fresh });
       if (r.problem) throw new Error(r.problem);
@@ -376,6 +387,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       if (!st.visits) st.visits = [];
       if (container.isConnected) showToast(err.message || "Couldn't check the visits.");
     }
+    st.vBusy = false;
     if (container.isConnected) draw();
   }
 
@@ -1434,7 +1446,6 @@ export function mountPaperRecords(container, { staff } = {}) {
     if (vu) { undoVisit(vu.dataset.vundo); return; }
     const act = e.target.closest("[data-act]");
     if (act && act.dataset.act === "refresh") {
-      st.files = null; st.visits = null; draw();
       loadScans(true); loadVisits(true);
       return;
     }
