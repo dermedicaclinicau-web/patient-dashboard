@@ -29,6 +29,12 @@ const FILE_NAME = Object.fromEntries(FILE_TYPES);
 const FILE_WHERE = { treatment: "Treatment Records", consent: "Consent Records", rx: "Product Prescriptions", billing: "Billing" };
 const DONE = ["entered", "skip", "filed"];
 const OTHER = "__other";
+// A reply that isn't a real save → a message saying why
+const notSaved = (r) => (r && r.error === "BAD_REQUEST"
+  ? "It wasn't saved: the portal's Apps Script doesn't have Paper records filing yet. Deploy the latest Code.gs as a new version, then try again."
+  : r && r.error === "FORBIDDEN" ? "It wasn't saved: your access doesn't include Paper records."
+  : r && r.error === "UNAUTHORIZED" ? "It wasn't saved: your login has expired. Refresh the page and log in again."
+  : `It wasn't saved${r && r.error ? ` (${r.error})` : ""}. Try again.`);
 const LINK_KIND = { treatment: "Treatment record", consent: "Consent" };
 const linkText = (l) => `${LINK_KIND[l.kind] || "Record"}${l.title ? `: ${l.title}` : ""} · ${l.patientName || "Unknown patient"}${
   l.date ? ` · ${niceDay(l.date)}` : ""}`;
@@ -496,6 +502,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       try {
         const r = await callApi(body);
         if (r.problem) { prog.fail(); fail(r.problem); return; }
+        if (!r || r.ok !== true || r.status !== "filed") { console.warn("Filing reply:", r); prog.fail(); fail(notSaved(r)); return; }
         ok = true;
         Object.assign(f, { status: "filed", filedKind: ft.type, filedTitle: (r.filedAs && r.filedAs.title) || "", reason: "",
           note: body.note.trim(), patientId: r.patientId, patientName: r.patientName, recordDate: r.recordDate, by: r.by || "", at: r.at || "" });
@@ -541,6 +548,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       try {
         const r = await callApi({ action: "paper", op: "mark", fileId: f.id, status, ...extra });
         if (r.problem) { prog.fail(); fail(r.problem); return; }
+        if (!r || r.ok !== true || r.status !== status) { console.warn("Save reply:", r); prog.fail(); fail(notSaved(r)); return; }
         ok = true;
         Object.assign(f, { status, filedKind: "", filedTitle: "", note: extra.note || "", reason: extra.reason || "", patientId: r.patientId || "",
           patientName: r.patientName || "", recordDate: r.recordDate || "", by: r.by || "", at: r.at || "" });

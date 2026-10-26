@@ -15303,7 +15303,7 @@ function paperList_(cfg, fresh) {
     return Object.assign({}, f, {
       linked: linked[f.id] || null,
       filedKind: s.filedAs ? String(s.filedAs.kind || '') : '', filedTitle: s.filedAs ? String(s.filedAs.title || '') : '',
-      status: PAPER_STATUSES_.indexOf(s.status) !== -1 ? s.status : 'todo',
+      status: PAPER_STATUSES_.indexOf(s.status) !== -1 ? s.status : (s.filedAs && s.filedAs.kind ? 'filed' : 'todo'),
       note: String(s.note || ''), reason: String(s.reason || ''), patientId: String(s.patientId || ''),
       patientName: String(s.patientName || ''), recordDate: String(s.recordDate || ''), by: String(s.by || ''), at: String(s.at || ''),
     });
@@ -15669,6 +15669,12 @@ function paperFileAs_(cfg, body, session) {
     history: (Array.isArray(cur.history) ? cur.history : []).concat([{ at: now.toISOString(), by: who, what: what, note: note }]).slice(-30),
   });
   CacheService.getScriptCache().removeAll([PAPER_VKEY_, 'paper_linked_v1']);
+  const check = fsGetDoc_(cfg, path);   // only say it's filed once it really is
+  if (!check || check.status !== 'filed') {
+    console.error('Paper scan ' + id + ' filed, but its status read back as ' + JSON.stringify(check && check.status));
+    return { ok: true, problem: "It was added to the patient's page, but the scan's status didn't save. Try again." };
+  }
+  console.log('Paper scan ' + id + ' filed as ' + as + ' for ' + w.name + ' by ' + who);
   return { ok: true, status: 'filed', filedAs: filedAs, patientId: p._id, patientName: w.name, recordDate: date, by: who, at: now.toISOString() };
 }
 
