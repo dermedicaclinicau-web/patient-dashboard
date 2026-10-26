@@ -9189,3 +9189,7 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 .md-kpi.is-loading { opacity: .6; pointer-events: none; }
 .md-kpi.is-loading .md-kpi-v { color: #cbd5e1; }
 .md-visits-card .md-count { margin-left: 8px; }
+
+.md-count[hidden] { display: none; }
+.md-ph-head { display: flex; align-items: center; margin-bottom: 6px; }
+.md-ph-head h3 { margin: 0; font-size: 15px; color: #0f172a; }

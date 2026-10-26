@@ -73,7 +73,6 @@ const foldKey = (uid) => `dm.dash.collapsed.${uid}`;
 const orderKey = (uid) => `dm.dash.order.${uid}`;
 const readOrder = (uid) => { try { const a = JSON.parse(localStorage.getItem(orderKey(uid)) || "[]"); return Array.isArray(a) ? a : []; } catch { return []; } };
 const writeOrder = (uid, list) => { try { localStorage.setItem(orderKey(uid), JSON.stringify(list)); } catch { /* private mode */ } };
-// Saved order first; cards that are new since then keep their default place at the end
 // Saved order first. A card that's new since then goes straight after the card before it in the default order.
 const byOrder = (list, order) => {
   const keys = DASH_CARDS.map(([k]) => k);
@@ -829,14 +828,14 @@ export async function mountMyDashboard(container, { staff } = {}) {
       tag(grid.querySelector(".md-side"), sideCards);
       const notesEl = grid.querySelector('[data-role="notes"]');
       if (notesEl) {
-        notesEl.innerHTML = `<div class="md-card-head"><h3>My notes</h3></div>${LOADING}`;
+        notesEl.innerHTML = `<div class="md-ph-head"><h3>My notes</h3></div>${LOADING}`;
         mountMyNotes(notesEl);
       }
       addFolds(grid, me);
     }
     // Start & end of day fills itself in a moment later: give it its ⌄ button once its header appears
     const daysEl = body.querySelector('[data-role="days"]');
-    if (daysEl && isAdmin() && !daysEl.innerHTML.trim()) daysEl.innerHTML = `<div class="md-card-head"><h3>Start &amp; end of day</h3></div>${LOADING}`;
+    if (daysEl && isAdmin() && !daysEl.innerHTML.trim()) daysEl.innerHTML = `<div class="md-ph-head"><h3>Start &amp; end of day</h3></div>${LOADING}`;
     renderDayCard(daysEl); // Admins only; does nothing if the card is hidden
     if (grid && daysEl) {
       if (daysEl.querySelector(".md-card-head")) {
