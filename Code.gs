@@ -4305,6 +4305,11 @@ function handleInventory_(body) {
   const okId = function (v) { return /^[A-Za-z0-9_-]{10,40}$/.test(String(v || '')); };
   try {
     if (op === 'kitDay') return invKitDay_(body, session);
+    if (op === 'oldKitLedgerAll') {
+      if (!can_(session, 'menu.reports') && !can_(session, 'inventory.manage')) return { ok: false, error: 'FORBIDDEN' };
+      try { return Object.assign({ ok: true }, oldKitLedgerAll_(body.fresh === true)); }
+      catch (e) { return { ok: true, problem: String(e && e.message ? e.message : e).slice(0, 300) }; }
+    }
     if (op === 'oldKitLedger') {
       if (!can_(session, 'menu.reports') && !can_(session, 'inventory.manage')) return { ok: false, error: 'FORBIDDEN' };
       try { return Object.assign({ ok: true }, oldKitLedger_(body.names, body.fresh === true)); }
@@ -16204,6 +16209,69 @@ function oldKitLedger_(namesIn, fresh) {
     });
 
   const res = { staffName: names[0], rows: rows, records: records, at: new Date().toISOString() };
+  repCachePut_(key, res, 900);
+  return res;
+}
+
+// Reporting → Kit reconciliation → Day by day: every injector's old-app ledger in one go.
+// Grouped like oldKitRecon_ (old names matched to the staff list), so each person's key matches their table row:
+// their staff ID, or "old:<name>" when the name isn't on the staff list. Read only. Remembered 15 minutes.
+function oldKitLedgerAll_(fresh) {
+  const key = 'old_kit_ledger_all_v1';
+  if (!fresh) { const hit = repCacheGet_(key); if (hit) return hit; }
+
+  const staff = getStaffDocs_();
+  const who = {};
+  const people = {};
+  const personOf = function (name) {
+    if (!(name in who)) {
+      const hits = staff.filter(function (s) { return kitSameStaff_(s.name, name); });
+      who[name] = hits.length === 1 ? { key: hits[0].id, uid: hits[0].id, name: hits[0].name } : { key: 'old:' + name, uid: '', name: name };
+    }
+    const w = who[name];
+    const p = people[w.key] || (people[w.key] = { key: w.key, staffUid: w.uid, staffName: w.name, oldNames: [], rows: [], records: [] });
+    if (p.oldNames.indexOf(name) === -1) p.oldNames.push(name);
+    return p;
+  };
+
+  const sheet = oldKitRows_();
+  const voided = {};
+  sheet.forEach(function (r) {
+    const m = r.kind === 'VOID' ? /^VOID-(.+)$/i.exec(r.id) : null;
+    if (m) voided[m[1].toUpperCase()] = true;
+  });
+  const seen = {};
+  sheet.forEach(function (r) {
+    if (!r.staff) return;
+    const k = [r.id, r.date, r.staff, r.count, r.batch].join('|');
+    if (seen[k]) return;
+    seen[k] = true;
+    personOf(r.staff).rows.push({ id: r.id, kind: r.kind, date: r.date, at: r.at, count: r.count, batch: r.batch,
+      expiry: r.expiry, note: r.note, voided: r.kind === 'RESTOCK' && !!voided[r.id.toUpperCase()] });
+  });
+
+  fsListAll_(getConfig_(), OLD_WR_COL_, ['Staff', 'Patient Name', 'Record Date', 'Record ID', 'treatment_details_map'])
+    .forEach(function (d) {
+      const f = fromFields_(d.fields || {});
+      const name = String(f.Staff || '').replace(/\s+/g, ' ').trim();
+      const date = String(f['Record Date'] || '').trim();
+      if (!name || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
+      const t = /\d{8}-(\d{2})(\d{2})\d{2}/.exec(String(f['Record ID'] || ''));
+      const lines = (Array.isArray(f.treatment_details_map) ? f.treatment_details_map : []).map(function (x) {
+        x = x || {};
+        return {
+          area: String(x['Area Selected'] || '').trim(), batch: String(x['Batch Number'] || '').trim(),
+          expiry: String(x['Expiry Date'] || '').trim(), type: String(x.Type || '').trim(),
+          units: Number(String(x['Total Units'] == null ? '' : x['Total Units']).replace(/[^\d.]/g, '')) || 0,
+        };
+      }).filter(function (x) { return x.units > 0; });
+      const units = Math.round(lines.reduce(function (a, x) { return a + x.units; }, 0) * 10) / 10;
+      if (!(units > 0)) return;
+      personOf(name).records.push({ recordId: String(f['Record ID'] || ''), date: date, time: t ? t[1] + ':' + t[2] : '',
+        patientName: String(f['Patient Name'] || '').trim(), lines: lines, units: units });
+    });
+
+  const res = { people: Object.keys(people).map(function (k) { return people[k]; }), at: new Date().toISOString() };
   repCachePut_(key, res, 900);
   return res;
 }

@@ -13,7 +13,7 @@ import { MOODS } from "./end-of-day-api.js";
 import { mountPatientReport, PATIENT_TABS } from "./patient-reports.js";
 import { mountRetention } from "./retention-report.js";
 import { callApi } from "./appointments.js";
-import { openKitLedger } from "./kit-ledger.js";
+import { mountKitDays } from "./kit-ledger.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(2));
@@ -1024,7 +1024,7 @@ function oldKitRows(list, products) {
 
 function mountKitRecon(body) {
   const st = { portal: [], old: [], oldProblem: "", source: "both", gapsOnly: false, noKit: false,
-    products: [], moves: [], loans: [] };
+    products: [], moves: [], loans: [], view: "summary", focus: "", ledgers: {} };
   const n = (v) => (v ? fmt(v) : "—");
   const dateOf = (k) => esc(shortDate(parseKey(k)) || "—");
   const isNoKit = (r) => r.old && !r.hasKit;
@@ -1053,6 +1053,23 @@ function mountKitRecon(body) {
     }
   }
 
+  const seg = (name, f, cur, opts) => `<div class="fe-seg">${opts.map(([v, l]) =>
+    `<label class="fe-seg-btn"><input type="radio" name="${name}" data-f="${f}" value="${v}"${cur === v ? " checked" : ""} /><span>${esc(l)}</span></label>`).join("")}</div>`;
+
+  function toolbar(extra = "") {
+    const noKitN = pool().filter(isNoKit).length;
+    return `<div class="inv-tools">
+        ${seg("rp-view", "view", st.view, [["summary", "Summary"], ["days", "Day by day"]])}
+        ${seg("rp-src", "source", st.source, [["portal", "Portal"], ["old", "Old app"], ["both", "Both"]])}
+        ${extra}
+        ${noKitN ? `<label class="fe-check"><input type="checkbox" data-f="nokit"${st.noKit ? " checked" : ""} /> Show staff with no kit (${noKitN})</label>` : ""}
+        <span class="inv-spacer"></span>
+        <button type="button" class="ff-btn" data-act="refresh">Refresh</button>
+        ${st.view === "summary" ? '<button type="button" class="ff-btn" data-act="csv">Export CSV</button>' : ""}
+      </div>
+      ${st.source !== "portal" && st.oldProblem ? `<p class="tb-bad rp-note">Old app: ${esc(st.oldProblem)}</p>` : ""}`;
+  }
+
   function rowHtml(r) {
     const noKit = isNoKit(r);
     const opening = r.old
@@ -1069,33 +1086,21 @@ function mountKitRecon(body) {
       <td>${n(r.taken)}</td><td>${n(r.borrowedIn)}</td><td>${n(r.lentOut)}</td><td>${n(r.used)}</td>
       <td>${n(r.discarded)}</td><td>${n(r.returned)}</td>
       <td>${opening}</td><td>${r.expected === null ? "—" : esc(fmt(r.expected))}</td><td>${now}</td><td>${gap}</td>
-      <td><button type="button" class="lh-btn" data-hist="${esc(r.key)}">History</button></td></tr>`;
+      <td><button type="button" class="lh-btn" data-hist="${esc(r.key)}">Day by day</button></td></tr>`;
   }
 
-  function draw() {
+  function drawSummary() {
     const all = shown();
-    const noKitN = pool().filter(isNoKit).length;
     const gaps = all.filter((r) => !r.ok);
     const rows = st.gapsOnly ? gaps : all;
     const priced = gaps.filter((r) => r.gapValue !== null);
     const gapValue = priced.reduce((a, r) => a + Math.abs(r.gapValue), 0);
-    const withOld = st.source !== "portal";
     body.innerHTML = `
-      <div class="inv-tools">
-        <div class="fe-seg">${[["portal", "Portal"], ["old", "Old app"], ["both", "Both"]].map(([v, l]) =>
-          `<label class="fe-seg-btn"><input type="radio" name="rp-src" data-f="source" value="${v}"${st.source === v ? " checked" : ""} /><span>${esc(l)}</span></label>`).join("")}</div>
-        <label class="fe-check"><input type="checkbox" data-f="gaps"${st.gapsOnly ? " checked" : ""} /> Only show gaps</label>
-        ${noKitN ? `<label class="fe-check"><input type="checkbox" data-f="nokit"${st.noKit ? " checked" : ""} /> Show staff with no kit (${noKitN})</label>` : ""}
-        <span class="inv-spacer"></span>
-        <button type="button" class="ff-btn" data-act="refresh">Refresh</button>
-        <button type="button" class="ff-btn" data-act="csv">Export CSV</button>
-      </div>
+      ${toolbar(`<label class="fe-check"><input type="checkbox" data-f="gaps"${st.gapsOnly ? " checked" : ""} /> Only show gaps</label>`)}
       ${st.source !== "old" ? `<p class="muted rp-range">Portal, since each kit started: <strong>taken + borrowed in − lent out − used − discarded − returned ± counts accepted</strong>
         should equal what's in the kit now.</p>` : ""}
-      ${withOld ? `<p class="muted rp-range">Old app: <strong>first start count + restocked + borrowed in − lent out − units on Wrinkle Relaxer records</strong>
+      ${st.source !== "portal" ? `<p class="muted rp-range">Old app: <strong>first start count + restocked + borrowed in − lent out − units on Wrinkle Relaxer records</strong>
         should equal their last start count.</p>` : ""}
-      <p class="muted rp-range">Press <strong>History</strong> to see an injector's kit day by day: every count, who each unit was used on, and the likely cause of any difference.</p>
-      ${withOld && st.oldProblem ? `<p class="tb-bad rp-note">Old app: ${esc(st.oldProblem)}</p>` : ""}
       <div class="inv-stats">
         <div class="inv-stat"><strong>${new Set(all.map((r) => r.uid)).size}</strong><span>Injectors</span></div>
         <div class="inv-stat"><strong>${all.filter((r) => r.ok && !isNoKit(r)).length}</strong><span>Kits that add up</span></div>
@@ -1111,16 +1116,29 @@ function mountKitRecon(body) {
           : st.source === "old" ? "No old app kit records found." : "No kit activity yet."}</div>`}`;
   }
 
-  // History: the injector's ledger, with both sources when they have both
-  function openLedger(r) {
-    const rows = [];
-    const p = st.portal.find((x) => x.uid === r.uid && x.productId === r.productId);
-    const o = st.old.find((x) => x.uid === r.uid);
-    if (p) rows.push({ src: "portal", row: p });
-    if (o) rows.push({ src: "old", row: o });
-    if (!rows.length) rows.push({ src: r.old ? "old" : "portal", row: r });
-    openKitLedger({ rows, start: r.old ? "old" : "portal", products: st.products, moves: st.moves, loans: st.loans, csv: downloadCsv });
+  // One entry per injector, with their Portal and Old app rows
+  function injectors() {
+    const m = new Map();
+    shown().forEach((r) => {
+      const x = m.get(r.uid) || { uid: r.uid, name: r.staffName, portal: null, old: null };
+      if (r.old) x.old = r; else if (!x.portal) x.portal = r;
+      m.set(r.uid, x);
+    });
+    return [...m.values()].sort((a, b) => a.name.localeCompare(b.name, "en-AU"));
   }
+
+  function drawDays() {
+    body.innerHTML = `${toolbar()}
+      <p class="muted rp-range">One row per injector per day. Each count is checked against the balance before it;
+        press a row to see every entry and who each unit was used on.</p>
+      <div data-role="days"></div>`;
+    mountKitDays(body.querySelector('[data-role="days"]'), {
+      injectors: injectors(), products: st.products, moves: st.moves, loans: st.loans, source: st.source,
+      focus: st.focus, cache: st.ledgers, csv: downloadCsv, onFocus: (u) => { st.focus = u; },
+    });
+  }
+
+  const draw = () => (st.view === "days" ? drawDays() : drawSummary());
 
   function exportCsv() {
     const all = shown();
@@ -1139,10 +1157,10 @@ function mountKitRecon(body) {
     const h = e.target.closest("[data-hist]");
     if (h) {
       const r = pool().find((x) => x.key === h.dataset.hist);
-      if (r) openLedger(r);
+      if (r) { st.view = "days"; st.focus = r.uid; draw(); }
       return;
     }
-    if (e.target.closest('[data-act="refresh"]')) { load(true); return; }
+    if (e.target.closest('[data-act="refresh"]')) { st.ledgers = { fresh: true }; load(true); return; }
     if (e.target.closest('[data-act="csv"]')) exportCsv();
   });
   body.addEventListener("change", (e) => {
@@ -1150,6 +1168,7 @@ function mountKitRecon(body) {
     if (f === "gaps") { st.gapsOnly = e.target.checked; draw(); }
     else if (f === "nokit") { st.noKit = e.target.checked; draw(); }
     else if (f === "source") { st.source = e.target.value; draw(); }
+    else if (f === "view") { st.view = e.target.value; if (st.view === "summary") st.focus = ""; draw(); }
   });
   load();
 }

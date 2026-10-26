@@ -9090,3 +9090,17 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 .kl-why td { background: #fff7ed; color: #9a3412; font-size: 13px; }
 .kl-why ul { margin: 4px 0 0; padding-left: 18px; }
 .kl-more { display: block; margin: 6px auto 0; }
+
+/* Kit reconciliation → Day by day */
+.kd2-tools { margin-top: 4px; }
+.kd2-table td { vertical-align: top; }
+.kd2-table .n { text-align: right; white-space: nowrap; }
+.kd2-table td small { display: block; color: #64748b; margin-top: 2px; }
+.kd2-table td small.kl-bad { color: #b91c1c; font-weight: 600; }
+.kd2-table td small.kl-ok { color: #15803d; }
+.kd2-row { cursor: pointer; }
+.kd2-row:hover td { background: #f8fafc; }
+.kd2-row.is-open td { background: #f0fdfa; }
+.kd2-why { max-width: 280px; }
+.kd2-why small { color: #9a3412 !important; }
+.kd2-detail { padding: 6px 4px 10px; }

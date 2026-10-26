@@ -1,8 +1,9 @@
-// Reporting → Kit reconciliation → History: one injector's kit, day by day, like a ledger.
-// Every count (start and end of day), everything that came in or went out, and who each unit was used on.
-// The running balance is checked at every count; a difference shows with its likely causes.
+// Reporting → Kit reconciliation → Day by day: every injector's kit, one row per day, like a ledger.
+// Each row: the start count and batch in use, what came in, what was used and on how many patients, what went out,
+// the end count, and any difference with its likely cause. Details opens the day: every entry, who each unit was used on.
+// Each count resets the running balance; the difference is the count minus the balance just before it.
 // Portal: Start / End of Day, kit activity, units taken between colleagues, treatment records.
-// Old app: StartOfDayLog and its Wrinkle Relaxer records (read by Apps Script: op "oldKitLedger").
+// Old app: StartOfDayLog and its Wrinkle Relaxer records (Apps Script: op "oldKitLedgerAll").
 import { listUsageByStaff, listKitDaysFor, dayKey, plural } from "./inventory-api.js";
 import { callApi } from "./appointments.js";
 
@@ -27,7 +28,8 @@ const atTime = (key, hhmm) => {
   return d.getTime();
 };
 const uniqJoin = (list, map = (x) => x) => [...new Set(list.filter(Boolean).map(map))].join(", ");
-const RANGES = [["all", "All dates"], ["30", "Last 30 days"], ["90", "Last 90 days"], ["custom", "Choose dates"]];
+const SKEL = '<div class="skeleton" style="height:240px;border-radius:14px"></div>';
+const RANGES = [["7", "Last 7 days"], ["30", "Last 30 days"], ["90", "Last 90 days"], ["all", "All dates"], ["custom", "Choose dates"]];
 
 /* ---------- Entries ----------
    { src, date, ms, ord (0 counts at the start of a day, 1 activity, 2 end of day), kind: count | move | info,
@@ -156,7 +158,7 @@ function oldEntries(data) {
   return out;
 }
 
-// Puts the entries in order and runs the balance. Each count resets it; the difference is the count minus the balance.
+// Puts the entries in order and runs the balance. Each count resets it.
 function buildLedger(entries) {
   const tOf = (e) => {
     if (e.ms !== null && e.ms !== undefined && dayKey(new Date(e.ms)) === e.date) return e.ms;
@@ -206,39 +208,118 @@ function groupDays(entries) {
       hasDiff: diffs.length > 0, diff: r1(diffs.reduce((a, e) => a + e.diff, 0)),
       close: L[L.length - 1].balance,
     };
-  }).reverse();
+  });
 }
 
-/* ---------- The dialog ---------- */
-// rows: [{ src: "portal" | "old", row }] for one injector (rows from the Kit reconciliation table)
-export function openKitLedger({ rows, start = "portal", products = [], moves = [], loans = [], csv = null }) {
-  if (!rows || !rows.length) return;
-  const pick = (src) => (rows.find((x) => x.src === src) || rows[0]).row;
-  const st = { src: rows.some((x) => x.src === start) ? start : rows[0].src, range: "all", from: "", to: "",
-    diffOnly: false, limit: 30, data: {}, seq: 0 };
-  const first = pick(st.src);
-  const product = products.find((p) => p.id === first.productId)
-    || { id: first.productId || "", name: first.productName || "Xeomin", doseUnit: first.unit || "units", dosePer: 100, stockUnit: "vial" };
-  const unit = product.doseUnit || "units";
-  const per = Number(product.dosePer) || 0;
+// The likely reasons for a difference at a count. P: { unit, per }
+function causes(e, P) {
+  const { unit, per } = P;
+  const diff = e.diff;
+  const abs = Math.abs(diff);
+  const near = (a, b) => Math.abs(a - b) < 0.6;
+  const period = e.period || [];
+  const moved = period.filter(inKit);
+  const uses = moved.filter((x) => x.cat === "use" && !x.label);
+  const out = [];
+  const vials = per ? Math.round(abs / per) : 0;
+  if (vials >= 1 && near(abs, vials * per)) {
+    out.push(diff < 0
+      ? `Exactly ${plural(vials, "vial")} less (${fmt(vials * per)} ${unit}): a vial returned, thrown away or taken by a colleague may not have been logged.`
+      : `Exactly ${plural(vials, "vial")} more (${fmt(vials * per)} ${unit}): a restock, or a vial from a colleague, may not have been logged.`);
+  }
+  const same = uses.find((x) => near(-x.units, abs));
+  if (same) {
+    out.push(diff > 0
+      ? `Same as ${same.patientName || "a patient"}'s treatment on ${shortDay(same.date)} (${fmt(-same.units)} ${unit}): that record may be under the wrong injector or date, saved twice, or have the wrong amount.`
+      : `About one treatment's worth (like ${same.patientName || "a patient"}'s ${fmt(-same.units)} ${unit}): a treatment may not have been recorded.`);
+  }
+  if (diff < 0 && !uses.length) {
+    out.push("Units went down but there are no treatment records since the last count: a treatment may not have been recorded, or was recorded under another injector.");
+  }
+  const fromStore = period.filter((x) => x.cat === "use" && x.counts === false);
+  if (diff < 0 && fromStore.length) {
+    out.push(`${plural(fromStore.length, "treatment")} in this time came from an opened vial in storage, not the kit. If the units really came from the kit, that explains it.`);
+  }
+  if (e.prev && (e.batches || []).length && (e.prev.batches || []).length) {
+    const had = new Set(e.prev.batches.map((b) => normB(b.batch)).filter(Boolean));
+    const cameIn = new Set(moved.filter((x) => x.units > 0).flatMap((x) => String(x.batch || "").split(",").map(normB)).filter(Boolean));
+    const fresh = e.batches.map((b) => b.batch).filter((b) => normB(b) && !had.has(normB(b)) && !cameIn.has(normB(b)));
+    if (fresh.length) out.push(`Batch ${fresh.join(", ")} was counted, but it wasn't in the last count and no restock of it was logged.`);
+  }
+  if (!out.length) {
+    out.push(diff < 0
+      ? "Less than expected: look for a treatment not recorded, units thrown away, or units a colleague took without logging it."
+      : "More than expected: units came in without being logged (a restock or a colleague's units), or a treatment record has more units than were used.");
+  }
+  const gap = e.prev ? daysBetween(e.prev.date, e.date) : 0;
+  if (gap > 1) out.push(`${gap} days since the last count (${shortDay(e.prev.date)}): the difference could be from any day in between.`);
+  return out;
+}
 
-  const dlg = document.createElement("dialog");
-  dlg.className = "lh-dialog kl-dlg";
-  dlg.innerHTML = `<div class="kl-wrap">
-    <div class="kl-head"><div><h3>${esc(first.staffName)} · ${esc(product.name)}</h3>
-      <p class="muted">Day by day: every count, everything in and out, and who each unit was used on.</p></div>
-      <span class="inv-spacer"></span><button type="button" class="hx-x" data-act="close" aria-label="Close">×</button></div>
-    <div class="kl-tools" data-role="tools"></div>
-    <div class="kl-body" data-role="body"><div class="skeleton sm"></div></div></div>`;
-  document.body.appendChild(dlg);
-  dlg.addEventListener("close", () => dlg.remove());
-  dlg.showModal();
-  const tools = dlg.querySelector('[data-role="tools"]');
-  const body = dlg.querySelector('[data-role="body"]');
+// One entry in a day's details
+function entryHtml(e, P) {
+  const { unit } = P;
+  const t = e.ms && dayKey(new Date(e.ms)) === e.date ? timeOf(e.ms) : "";
+  const bex = [e.batch, e.expiry ? `Exp ${expMY(e.expiry)}` : ""].filter(Boolean).join(" · ");
+  if (e.kind === "count") {
+    const bad = isDiff(e);
+    const batches = (e.batches || []).filter((b) => b.batch || b.units).map((b) => [b.batch || "No number",
+      b.expiry ? `Exp ${expMY(b.expiry)}` : "", b.units !== undefined && b.units !== null ? `${fmt(b.units)} ${unit}` : "",
+      b.inUse ? "in use" : ""].filter(Boolean).join(" · "));
+    const check = e.diff === null ? "<small>The ledger starts from this count.</small>"
+      : `<small class="${bad ? "kl-bad" : "kl-ok"}">Expected ${fmt(e.expected)} · ${bad ? `difference ${signed(e.diff)} ${esc(unit)}` : "matches ✓"}${
+        e.prev ? ` · since ${esc(shortDay(e.prev.date))}` : ""}</small>`;
+    return `<tr class="is-count${bad ? " is-bad" : ""}"><td>${esc(t)}</td>
+        <td><strong>${esc(e.label)}</strong>${check}${e.note ? `<small>${esc(e.note)}</small>` : ""}</td>
+        <td>${batches.length ? batches.map((x) => `<small>${esc(x)}</small>`).join("") : "—"}</td>
+        <td class="n"></td><td class="n"></td><td class="n"><strong>${fmt(e.value)}</strong></td></tr>
+      ${bad ? `<tr class="kl-why"><td></td><td colspan="5"><strong>Possible causes</strong><ul>${causes(e, P).map((c) => `<li>${esc(c)}</li>`).join("")}</ul></td></tr>` : ""}`;
+  }
+  const off = e.kind === "info" || e.counts === false || e.voided;
+  let what;
+  if (e.cat === "use" && !e.label) {
+    const who = e.patientId
+      ? `<a href="#/patient/${encodeURIComponent(e.patientId)}" target="_blank" rel="noopener">${esc(e.patientName || "a patient")}</a>`
+      : `<strong>${esc(e.patientName || "a patient")}</strong>`;
+    const form = e.submissionId
+      ? `<a href="#/form-record/${encodeURIComponent(e.submissionId)}" target="_blank" rel="noopener">${esc(e.formName || "Treatment record")}</a>`
+      : esc(e.formName || "");
+    const details = [esc(e.areas || ""), esc(e.type || ""), form, esc(e.recordId || "")].filter(Boolean).join(" · ");
+    const flags = [e.paper ? "From a paper record" : "", e.corrected ? "Corrected" : "",
+      e.short > 0 ? `Saved short by ${fmt(e.short)}` : "", e.from ? `From ${e.from}'s opened vial, not the kit` : ""].filter(Boolean);
+    what = `Used on ${who}${details ? `<small>${details}</small>` : ""}${flags.length ? `<small class="kl-flag">${esc(flags.join(" · "))}</small>` : ""}`;
+  } else {
+    what = `${esc(e.label || "")}${e.status ? `<small class="kl-flag">${esc(e.status)}</small>` : ""}${e.note ? `<small>${esc(e.note)}</small>` : ""}`;
+  }
+  const mv = e.kind === "move";
+  return `<tr class="${off ? "is-muted" : ""}"><td>${esc(t)}</td><td>${what}</td><td>${esc(bex || "—")}</td>
+    <td class="n">${mv && e.units > 0 ? `+${fmt(e.units)}` : ""}</td>
+    <td class="n">${mv && e.units < 0 ? fmt(-e.units) : ""}</td>
+    <td class="n">${off || e.balance === null ? "" : fmt(e.balance)}</td></tr>`;
+}
+
+/* ---------- The Day by day view ----------
+   injectors: [{ uid, name, portal: row | null, old: row | null }] (rows from the Kit reconciliation table)
+   source: "portal" | "old" | "both". cache: kept by the caller, so switching views doesn't load it again
+   ({ fresh: true } reloads the old app). onFocus(uid): the injector chosen here. */
+export function mountKitDays(host, { injectors = [], products = [], moves = [], loans = [], source = "both", focus = "",
+  cache = {}, csv = null, onFocus = null } = {}) {
+  const srcs = source === "both" ? ["portal", "old"] : [source];
+  const st = { focus: injectors.some((x) => x.uid === focus) ? focus : "", range: focus ? "all" : "30", from: "", to: "",
+    diffOnly: false, limit: 60, open: new Set(), seq: 0, problem: "" };
+  const row0 = injectors.map((x) => x.portal || x.old).find(Boolean);
+  const product = (row0 && products.find((p) => p.id === row0.productId)) || products.find((p) => p.usage === "kit")
+    || { id: "", name: "Xeomin", doseUnit: "units", dosePer: 100, stockUnit: "vial" };
+  const P = { unit: product.doseUnit || "units", per: Number(product.dosePer) || 0 };
+  const ck = (src, uid) => `${src === "old" ? "o" : "p"}:${uid}`;
+
+  host.innerHTML = '<div class="inv-tools kd2-tools" data-role="tools"></div><div data-role="out"></div>';
+  const tools = host.querySelector('[data-role="tools"]');
+  const out = host.querySelector('[data-role="out"]');
 
   const bounds = () => {
     const today = dayKey();
-    if (st.range === "30" || st.range === "90") {
+    if (["7", "30", "90"].includes(st.range)) {
       const d = new Date();
       d.setDate(d.getDate() - Number(st.range) + 1);
       return [dayKey(d), today];
@@ -250,216 +331,166 @@ export function openKitLedger({ rows, start = "portal", products = [], moves = [
 
   function drawTools() {
     tools.innerHTML = `
-      ${rows.length > 1 ? `<div class="fe-seg">${rows.map((x) => `<label class="fe-seg-btn"><input type="radio" name="kl-src" data-f="src"
-        value="${x.src}"${st.src === x.src ? " checked" : ""} /><span>${x.src === "old" ? "Old app" : "Portal"}</span></label>`).join("")}</div>` : ""}
+      <select class="fb-select" data-f="who" aria-label="Injector">
+        <option value="">All injectors</option>
+        ${injectors.map((x) => `<option value="${esc(x.uid)}"${st.focus === x.uid ? " selected" : ""}>${esc(x.name)}</option>`).join("")}
+      </select>
       <select class="fb-select" data-f="range" aria-label="Dates">${RANGES.map(([v, l]) =>
         `<option value="${v}"${st.range === v ? " selected" : ""}>${l}</option>`).join("")}</select>
       ${st.range === "custom" ? `<label class="rp-from">From <input class="fe-in" type="date" data-f="from" value="${esc(st.from)}" /></label>
         <label class="rp-from">To <input class="fe-in" type="date" data-f="to" value="${esc(st.to)}" /></label>` : ""}
       <label class="fe-check"><input type="checkbox" data-f="diff"${st.diffOnly ? " checked" : ""} /> Only days with a difference</label>
       <span class="inv-spacer"></span>
-      ${csv ? '<button type="button" class="ff-btn" data-act="csv">Export CSV</button>' : ""}`;
+      ${csv ? '<button type="button" class="ff-btn" data-kd="csv">Export CSV</button>' : ""}`;
   }
 
   async function load() {
     const my = ++st.seq;
-    const src = st.src;
-    if (!st.data[src]) {
-      body.innerHTML = '<div class="skeleton sm"></div>';
-      try {
-        const row = pick(src);
-        let entries;
-        if (src === "old") {
-          const r = await callApi({ action: "inventory", op: "oldKitLedger",
-            names: row.oldNames && row.oldNames.length ? row.oldNames : [row.staffName] });
+    out.innerHTML = SKEL;
+    st.problem = "";
+    const fresh = cache.fresh === true;
+    delete cache.fresh;
+    const jobs = [];
+    if (srcs.includes("old") && !cache.old) {
+      jobs.push(callApi({ action: "inventory", op: "oldKitLedgerAll", fresh })
+        .then((r) => {
           if (r && r.problem) throw new Error(r.problem);
-          entries = oldEntries(r || {});
-        } else {
-          const [usage, days] = await Promise.all([listUsageByStaff(row.uid), listKitDaysFor(row.uid)]);
-          entries = portalEntries({ uid: row.uid, product, moves, loans, usage, days });
-        }
-        st.data[src] = buildLedger(entries);
-      } catch (err) {
-        console.error("Kit ledger failed:", err);
-        if (my === st.seq && dlg.isConnected) {
-          body.innerHTML = `<div class="tm-empty is-error">${esc(err && err.code === "permission-denied"
-            ? "You don't have access to these records." : (err && err.message) || "Couldn't load the ledger. Try again.")}</div>`;
-        }
-        return;
-      }
+          cache.old = new Map(((r && r.people) || []).map((p) => [p.key, p]));
+        })
+        .catch((e) => { st.problem = `Old app: ${(e && e.message) || "couldn't be read."}`; }));
     }
-    if (my === st.seq && dlg.isConnected) draw();
+    if (srcs.includes("portal")) {
+      injectors.filter((x) => x.portal && !cache[ck("portal", x.uid)]).forEach((x) => {
+        jobs.push(Promise.all([listUsageByStaff(x.uid), listKitDaysFor(x.uid)])
+          .then(([usage, days]) => {
+            cache[ck("portal", x.uid)] = buildLedger(portalEntries({ uid: x.uid, product, moves, loans, usage, days }));
+          })
+          .catch((e) => {
+            console.error("Kit days failed for", x.name, e);
+            st.problem = `Couldn't load ${x.name}'s portal records${e && e.code === "permission-denied" ? " (no access)" : ""}.`;
+          }));
+      });
+    }
+    await Promise.all(jobs);
+    if (cache.old) {
+      injectors.forEach((x) => {
+        const k = ck("old", x.uid);
+        if (x.old && !cache[k]) { const p = cache.old.get(x.uid); cache[k] = p ? buildLedger(oldEntries(p)) : []; }
+      });
+    }
+    if (my === st.seq && host.isConnected) draw();
   }
 
-  function summary(list) {
-    const counts = list.filter((e) => e.kind === "count");
-    const diffs = counts.filter(isDiff);
-    const uses = list.filter((e) => inKit(e) && e.cat === "use" && !e.label);
-    return {
-      counts: counts.length, diffs: diffs.length, net: r1(diffs.reduce((x, e) => x + e.diff, 0)),
-      inn: r1(list.filter((e) => inKit(e) && e.units > 0).reduce((x, e) => x + e.units, 0)),
-      out: r1(-list.filter((e) => inKit(e) && e.units < 0 && e.cat !== "use").reduce((x, e) => x + e.units, 0)),
-      used: r1(-list.filter((e) => inKit(e) && e.cat === "use").reduce((x, e) => x + e.units, 0)),
-      records: uses.length, patients: new Set(uses.filter((e) => e.patientName).map((e) => e.patientName.toLowerCase().trim())).size,
-      notKit: r1(-list.filter((e) => e.cat === "use" && e.counts === false).reduce((x, e) => x + e.units, 0)),
-    };
+  function allDays() {
+    const list = [];
+    injectors.forEach((x) => {
+      if (st.focus && x.uid !== st.focus) return;
+      srcs.forEach((src) => {
+        if (!x[src]) return;
+        const L = cache[ck(src, x.uid)];
+        if (!L) return;
+        groupDays(L.filter(inRange)).forEach((d) => list.push({ ...d, uid: x.uid, name: x.name, src, id: `${src}|${x.uid}|${d.date}` }));
+      });
+    });
+    return list.sort((a, b) => b.date.localeCompare(a.date) || a.name.localeCompare(b.name, "en-AU")
+      || Number(a.src === "old") - Number(b.src === "old"));
   }
 
-  const statsHtml = (s) => `<div class="inv-stats">
-      <div class="inv-stat"><strong>${s.counts}</strong><span>Counts</span></div>
-      <div class="inv-stat ${s.diffs ? "is-bad" : ""}"><strong>${s.diffs}</strong><span>With a difference${s.diffs ? ` (${signed(s.net)} ${esc(unit)})` : ""}</span></div>
-      <div class="inv-stat"><strong>+${fmt(s.inn)}</strong><span>In (restocks, from colleagues)${s.out ? ` · out ${fmt(s.out)}` : ""}</span></div>
-      <div class="inv-stat"><strong>${fmt(s.used)}</strong><span>${esc(unit)} used · ${plural(s.records, "record")}, ${plural(s.patients, "patient")}</span></div>
-    </div>
-    ${s.notKit ? `<p class="muted rp-note">Also ${fmt(s.notKit)} ${esc(unit)} from opened vials in storage (not the kit). They're shown greyed and don't change the kit balance.</p>` : ""}`;
-
-  // The likely reasons for a difference at a count
-  function causes(e) {
-    const diff = e.diff;
-    const abs = Math.abs(diff);
-    const near = (a, b) => Math.abs(a - b) < 0.6;
-    const period = e.period || [];
-    const moved = period.filter(inKit);
-    const uses = moved.filter((x) => x.cat === "use" && !x.label);
-    const out = [];
-    const vials = per ? Math.round(abs / per) : 0;
-    if (vials >= 1 && near(abs, vials * per)) {
-      out.push(diff < 0
-        ? `Exactly ${plural(vials, "vial")} less (${fmt(vials * per)} ${unit}): a vial returned, thrown away or taken by a colleague may not have been logged.`
-        : `Exactly ${plural(vials, "vial")} more (${fmt(vials * per)} ${unit}): a restock, or a vial from a colleague, may not have been logged.`);
-    }
-    const same = uses.find((x) => near(-x.units, abs));
-    if (same) {
-      out.push(diff > 0
-        ? `Same as ${same.patientName || "a patient"}'s treatment on ${shortDay(same.date)} (${fmt(-same.units)} ${unit}): that record may be under the wrong injector or date, saved twice, or have the wrong amount.`
-        : `About one treatment's worth (like ${same.patientName || "a patient"}'s ${fmt(-same.units)} ${unit}): a treatment may not have been recorded.`);
-    }
-    if (diff < 0 && !uses.length) {
-      out.push("Units went down but there are no treatment records since the last count: a treatment may not have been recorded, or was recorded under another injector.");
-    }
-    const fromStore = period.filter((x) => x.cat === "use" && x.counts === false);
-    if (diff < 0 && fromStore.length) {
-      out.push(`${plural(fromStore.length, "treatment")} in this time came from an opened vial in storage, not the kit. If the units really came from the kit, that explains it.`);
-    }
-    if (e.prev && (e.batches || []).length && (e.prev.batches || []).length) {
-      const had = new Set(e.prev.batches.map((b) => normB(b.batch)).filter(Boolean));
-      const cameIn = new Set(moved.filter((x) => x.units > 0).flatMap((x) => String(x.batch || "").split(",").map(normB)).filter(Boolean));
-      const fresh = e.batches.map((b) => b.batch).filter((b) => normB(b) && !had.has(normB(b)) && !cameIn.has(normB(b)));
-      if (fresh.length) out.push(`Batch ${fresh.join(", ")} was counted, but it wasn't in the last count and no restock of it was logged.`);
-    }
-    if (!out.length) {
-      out.push(diff < 0
-        ? "Less than expected: look for a treatment not recorded, units thrown away, or units a colleague took without logging it."
-        : "More than expected: units came in without being logged (a restock or a colleague's units), or a treatment record has more units than were used.");
-    }
-    const gap = e.prev ? daysBetween(e.prev.date, e.date) : 0;
-    if (gap > 1) out.push(`${gap} days since the last count (${shortDay(e.prev.date)}): the difference could be from any day in between.`);
-    return out;
-  }
-
-  function entryHtml(e) {
-    const t = e.ms && dayKey(new Date(e.ms)) === e.date ? timeOf(e.ms) : "";
-    const bex = [e.batch, e.expiry ? `Exp ${expMY(e.expiry)}` : ""].filter(Boolean).join(" · ");
-    if (e.kind === "count") {
-      const bad = isDiff(e);
-      const batches = (e.batches || []).filter((b) => b.batch || b.units).map((b) => [b.batch || "No number",
-        b.expiry ? `Exp ${expMY(b.expiry)}` : "", b.units !== undefined && b.units !== null ? `${fmt(b.units)} ${unit}` : "",
-        b.inUse ? "in use" : ""].filter(Boolean).join(" · "));
-      const check = e.diff === null ? "<small>The ledger starts from this count.</small>"
-        : `<small class="${bad ? "kl-bad" : "kl-ok"}">Expected ${fmt(e.expected)} · ${bad ? `difference ${signed(e.diff)} ${esc(unit)}` : "matches ✓"}${
-          e.prev ? ` · since ${esc(shortDay(e.prev.date))}` : ""}</small>`;
-      return `<tr class="is-count${bad ? " is-bad" : ""}"><td>${esc(t)}</td>
-          <td><strong>${esc(e.label)}</strong>${check}${e.note ? `<small>${esc(e.note)}</small>` : ""}</td>
-          <td>${batches.length ? batches.map((x) => `<small>${esc(x)}</small>`).join("") : "—"}</td>
-          <td class="n"></td><td class="n"></td><td class="n"><strong>${fmt(e.value)}</strong></td></tr>
-        ${bad ? `<tr class="kl-why"><td></td><td colspan="5"><strong>Possible causes</strong><ul>${causes(e).map((c) => `<li>${esc(c)}</li>`).join("")}</ul></td></tr>` : ""}`;
-    }
-    const off = e.kind === "info" || e.counts === false || e.voided;
-    let what;
-    if (e.cat === "use" && !e.label) {
-      const who = e.patientId
-        ? `<a href="#/patient/${encodeURIComponent(e.patientId)}" target="_blank" rel="noopener">${esc(e.patientName || "a patient")}</a>`
-        : `<strong>${esc(e.patientName || "a patient")}</strong>`;
-      const form = e.submissionId
-        ? `<a href="#/form-record/${encodeURIComponent(e.submissionId)}" target="_blank" rel="noopener">${esc(e.formName || "Treatment record")}</a>`
-        : esc(e.formName || "");
-      const details = [esc(e.areas || ""), esc(e.type || ""), form, esc(e.recordId || "")].filter(Boolean).join(" · ");
-      const flags = [e.paper ? "From a paper record" : "", e.corrected ? "Corrected" : "",
-        e.short > 0 ? `Saved short by ${fmt(e.short)}` : "", e.from ? `From ${e.from}'s opened vial, not the kit` : ""].filter(Boolean);
-      what = `Used on ${who}${details ? `<small>${details}</small>` : ""}${flags.length ? `<small class="kl-flag">${esc(flags.join(" · "))}</small>` : ""}`;
-    } else {
-      what = `${esc(e.label || "")}${e.status ? `<small class="kl-flag">${esc(e.status)}</small>` : ""}${e.note ? `<small>${esc(e.note)}</small>` : ""}`;
-    }
-    const mv = e.kind === "move";
-    return `<tr class="${off ? "is-muted" : ""}"><td>${esc(t)}</td><td>${what}</td><td>${esc(bex || "—")}</td>
-      <td class="n">${mv && e.units > 0 ? `+${fmt(e.units)}` : ""}</td>
-      <td class="n">${mv && e.units < 0 ? fmt(-e.units) : ""}</td>
-      <td class="n">${off || e.balance === null ? "" : fmt(e.balance)}</td></tr>`;
-  }
-
-  function dayHtml(d) {
-    const chip = (t, cls = "") => `<span class="kl-chip ${cls}">${t}</span>`;
-    const chips = [
-      d.start ? chip(`Start <b>${fmt(d.start.value)}</b>`) : "",
-      d.inn ? chip(`In <b>+${fmt(d.inn)}</b>`) : "",
-      d.used ? chip(`Used <b>${fmt(d.used)}</b> on ${plural(d.patients, "patient")}`) : "",
-      d.out ? chip(`Out <b>${fmt(d.out)}</b>`) : "",
-      d.end ? chip(`End <b>${fmt(d.end.value)}</b>`) : d.close !== null && d.close !== undefined ? chip(`Balance <b>${fmt(d.close)}</b>`) : "",
-      d.hasDiff ? chip(`Difference ${signed(d.diff)} ${esc(unit)}`, "is-bad") : d.counted ? chip("Adds up ✓", "is-ok") : "",
-    ].join("");
-    return `<section class="kl-day${d.hasDiff ? " is-diff" : ""}">
-      <div class="kl-day-head"><strong>${esc(niceDay(d.date))}</strong><span class="kl-chips">${chips}</span></div>
-      <div class="rp-scroll"><table class="inv-table kl-table"><thead><tr><th class="kl-t">Time</th><th>What happened</th><th>Batch / expiry</th>
-        <th class="n">In</th><th class="n">Out</th><th class="n">Balance</th></tr></thead>
-        <tbody>${d.list.map(entryHtml).join("")}</tbody></table></div></section>`;
+  function rowHtml(d) {
+    const open = st.open.has(d.id);
+    const cnt = (c) => (!c ? "—" : `<strong>${fmt(c.value)}</strong>${isDiff(c)
+      ? `<small class="kl-bad">expected ${fmt(c.expected)} · ${signed(c.diff)}</small>`
+      : c.diff === null ? "<small>first count</small>" : '<small class="kl-ok">matches</small>'}`);
+    const b = (d.start && d.start.batches) || [];
+    const used = b.filter((x) => x.inUse);
+    const list = (used.length ? used : b).filter((x) => x.batch);
+    const batch = list.length
+      ? list.slice(0, 2).map((x) => `<div>${esc(x.batch)}${x.expiry ? ` <small>Exp ${esc(expMY(x.expiry))}</small>` : ""}</div>`).join("")
+        + (list.length > 2 ? `<small>+${list.length - 2} more</small>` : "")
+      : "—";
+    const bad = d.list.find(isDiff);
+    const why = bad ? causes(bad, P)[0] : "";
+    const end = d.end ? cnt(d.end)
+      : d.close !== null && d.close !== undefined ? `<span class="muted">${fmt(d.close)}</span><small>balance, not counted</small>` : "—";
+    return `<tr class="kd2-row${d.hasDiff ? " is-diff" : ""}${open ? " is-open" : ""}" data-day="${esc(d.id)}">
+        <td><strong>${esc(niceDay(d.date))}</strong></td>
+        <td>${esc(d.name)} <span class="inv-flag ${d.src === "old" ? "is-info" : "is-ok"}">${d.src === "old" ? "Old app" : "Portal"}</span></td>
+        <td>${batch}</td>
+        <td>${cnt(d.start)}</td>
+        <td class="n">${d.inn ? `+${fmt(d.inn)}` : "—"}</td>
+        <td class="n">${d.used ? `<strong>${fmt(d.used)}</strong><small>${plural(d.patients, "patient")}</small>` : "—"}</td>
+        <td class="n">${d.out ? fmt(d.out) : "—"}</td>
+        <td>${end}</td>
+        <td>${d.hasDiff ? `<strong class="rp-neg">${signed(d.diff)}</strong>` : d.counted ? '<span class="rp-ok">✓</span>' : "—"}</td>
+        <td class="kd2-why">${why ? `<small>${esc(why)}</small>` : ""}</td>
+        <td><button type="button" class="lh-btn" data-open="${esc(d.id)}">${open ? "Hide" : "Details"}</button></td></tr>
+      ${open ? `<tr class="rp-sub"><td colspan="11"><div class="kd2-detail"><table class="inv-table kl-table">
+        <thead><tr><th class="kl-t">Time</th><th>What happened</th><th>Batch / expiry</th><th class="n">In</th><th class="n">Out</th><th class="n">Balance</th></tr></thead>
+        <tbody>${d.list.map((e) => entryHtml(e, P)).join("")}</tbody></table></div></td></tr>` : ""}`;
   }
 
   function draw() {
-    const list = (st.data[st.src] || []).filter(inRange);
-    let days = groupDays(list);
-    if (st.diffOnly) days = days.filter((d) => d.hasDiff);
-    const left = days.length - st.limit;
-    body.innerHTML = !list.length ? '<div class="tm-empty">Nothing recorded in these dates.</div>'
-      : `${statsHtml(summary(list))}
-        ${days.slice(0, st.limit).map(dayHtml).join("") || '<div class="tm-empty">No days with a difference in these dates. 👍</div>'}
-        ${left > 0 ? `<button type="button" class="ff-btn kl-more" data-act="more">Show ${Math.min(30, left)} more days (${left} left)</button>` : ""}`;
+    const days = allDays();
+    const shown = st.diffOnly ? days.filter((d) => d.hasDiff) : days;
+    const bad = days.filter((d) => d.hasDiff);
+    const net = r1(bad.reduce((a, d) => a + d.diff, 0));
+    const left = shown.length - st.limit;
+    out.innerHTML = `
+      ${st.problem ? `<p class="tb-bad rp-note">${esc(st.problem)}</p>` : ""}
+      <div class="inv-stats">
+        <div class="inv-stat"><strong>${days.length}</strong><span>Injector days</span></div>
+        <div class="inv-stat"><strong>${days.filter((d) => d.counted).length}</strong><span>Days with a count</span></div>
+        <div class="inv-stat ${bad.length ? "is-bad" : ""}"><strong>${bad.length}</strong><span>With a difference${bad.length ? ` (${signed(net)} ${esc(P.unit)})` : ""}</span></div>
+        <div class="inv-stat"><strong>${fmt(days.reduce((a, d) => a + d.used, 0))}</strong><span>${esc(P.unit)} used on records</span></div>
+      </div>
+      ${shown.length ? `<section class="tb-card"><div class="rp-scroll"><table class="inv-table rp-table kd2-table">
+        <thead><tr><th>Date</th><th>Injector</th><th>Batch in use</th><th>Start</th><th class="n">In</th><th class="n">Used</th>
+          <th class="n">Out</th><th>End</th><th>Difference</th><th>Likely cause</th><th></th></tr></thead>
+        <tbody>${shown.slice(0, st.limit).map(rowHtml).join("")}</tbody></table></div>
+        ${left > 0 ? `<button type="button" class="ff-btn kl-more" data-kd="more">Show ${Math.min(60, left)} more days (${left} left)</button>` : ""}
+        </section>`
+        : `<div class="tm-empty">${st.diffOnly ? "No days with a difference in these dates. 👍" : "Nothing recorded in these dates."}</div>`}`;
   }
 
   function exportCsv() {
-    const list = (st.data[st.src] || []).filter(inRange);
-    if (!list.length || !csv) return;
-    const name = String(first.staffName || "injector").toLowerCase().replace(/[^a-z0-9]+/g, "-");
-    csv(`kit-ledger-${name}-${st.src === "old" ? "old-app" : "portal"}-${dayKey()}.csv`, [
-      ["Date", "Time", "What", "Patient", "Details", "Batch / Lot", "Expiry", "In", "Out", "Counted", "Expected", "Difference",
-        "Balance", "Counts in the kit", "Source"],
-      ...list.map((e) => {
-        const c = e.kind === "count";
-        return [e.date, e.ms && dayKey(new Date(e.ms)) === e.date ? timeOf(e.ms) : "",
-          e.label || (e.cat === "use" ? "Used in treatment" : ""), e.patientName || "",
-          [e.areas, e.type, e.formName, e.recordId, e.status, e.note].filter(Boolean).join(" · "),
-          c ? (e.batches || []).map((b) => b.batch).filter(Boolean).join(", ") : e.batch || "",
-          c ? (e.batches || []).map((b) => expMY(b.expiry)).filter(Boolean).join(", ") : e.expiry || "",
-          e.kind === "move" && e.units > 0 ? r1(e.units) : "", e.kind === "move" && e.units < 0 ? r1(-e.units) : "",
-          c ? e.value : "", c && e.expected !== null ? e.expected : "", c && e.diff !== null ? e.diff : "",
-          e.balance === null ? "" : e.balance, e.kind === "info" || e.counts === false || e.voided ? "No" : "Yes",
-          e.src === "old" ? "Old app" : "Portal"];
+    const days = allDays().filter((d) => !st.diffOnly || d.hasDiff);
+    if (!days.length || !csv) return;
+    const v = (c, k) => (c && c[k] !== null && c[k] !== undefined ? c[k] : "");
+    csv(`kit-day-by-day-${dayKey()}.csv`, [
+      ["Date", "Injector", "Source", "Batch in use", "Start count", "Start expected", "Start difference", "In", "Used", "Patients",
+        "Out", "End count", "End expected", "End difference", "Difference", "Likely cause"],
+      ...days.map((d) => {
+        const b = ((d.start && d.start.batches) || []).filter((x) => x.batch);
+        const bad = d.list.find(isDiff);
+        return [d.date, d.name, d.src === "old" ? "Old app" : "Portal",
+          b.map((x) => `${x.batch}${x.expiry ? ` (${expMY(x.expiry)})` : ""}`).join(", "),
+          v(d.start, "value"), v(d.start, "expected"), v(d.start, "diff"), d.inn || "", d.used || "", d.patients || "",
+          d.out || "", v(d.end, "value"), v(d.end, "expected"), v(d.end, "diff"), d.hasDiff ? d.diff : "",
+          bad ? causes(bad, P).join(" ") : ""];
       }),
     ]);
   }
 
-  dlg.addEventListener("click", (ev) => {
-    const a = ev.target.closest("[data-act]");
-    if (!a) return;
-    if (a.dataset.act === "close") dlg.close();
-    else if (a.dataset.act === "more") { st.limit += 30; draw(); }
-    else if (a.dataset.act === "csv") exportCsv();
+  host.addEventListener("click", (ev) => {
+    if (ev.target.closest("a")) return;
+    const k = ev.target.closest("[data-kd]");
+    if (k) {
+      if (k.dataset.kd === "more") { st.limit += 60; draw(); }
+      else if (k.dataset.kd === "csv") exportCsv();
+      return;
+    }
+    const row = ev.target.closest("[data-open], tr.kd2-row");
+    if (!row) return;
+    const id = row.dataset.open || row.dataset.day;
+    if (st.open.has(id)) st.open.delete(id); else st.open.add(id);
+    draw();
   });
-  dlg.addEventListener("change", (ev) => {
+  host.addEventListener("change", (ev) => {
     const f = ev.target.dataset.f;
-    if (f === "src") { st.src = ev.target.value; st.limit = 30; load(); }
-    else if (f === "range") { st.range = ev.target.value; st.limit = 30; drawTools(); if (st.data[st.src]) draw(); }
-    else if (f === "from" || f === "to") { st[f] = ev.target.value; if (st.data[st.src]) draw(); }
-    else if (f === "diff") { st.diffOnly = ev.target.checked; st.limit = 30; if (st.data[st.src]) draw(); }
+    if (f === "who") { st.focus = ev.target.value; st.limit = 60; if (onFocus) onFocus(st.focus); draw(); }
+    else if (f === "range") { st.range = ev.target.value; st.limit = 60; drawTools(); draw(); }
+    else if (f === "from" || f === "to") { st[f] = ev.target.value; draw(); }
+    else if (f === "diff") { st.diffOnly = ev.target.checked; st.limit = 60; draw(); }
   });
 
   drawTools();
