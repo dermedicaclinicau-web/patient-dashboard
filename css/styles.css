@@ -8941,6 +8941,13 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 .ppr-linked { color: #047857 !important; font-weight: 600; }
 .ppr-onfile { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid #a7f3d0; border-radius: 10px; background: #ecfdf5; font-size: 13px; color: #065f46; }
 .ppr-onfile .lh-btn { align-self: flex-start; margin-top: 6px; }
+.ppr-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ppr-tools > input[type="search"] { flex: 1 1 260px; min-width: 200px; }
+.ppr-date { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #475569; white-space: nowrap; }
+.ppr-date .fe-input { flex: none; min-width: 0; width: 150px; }
+.ppr-linked { color: #047857 !important; font-weight: 600; }
+.ppr-onfile { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid #a7f3d0; border-radius: 10px; background: #ecfdf5; font-size: 13px; color: #065f46; }
+.ppr-onfile .lh-btn { align-self: flex-start; margin-top: 6px; }
 @media (max-width: 860px) {
   .ppr-split { grid-template-columns: 1fr; height: auto; }
   .ppr-view { border-right: 0; border-bottom: 1px solid #e2e8f0; }

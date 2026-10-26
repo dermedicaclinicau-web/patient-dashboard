@@ -28,6 +28,15 @@ const linkText = (l) => `${LINK_KIND[l.kind] || "Record"}${l.title ? `: ${l.titl
   l.date ? ` · ${niceDay(l.date)}` : ""}`;
 const isLinked = (f) => !!(f.linked && f.linked.length);
 const RES = { none: "No treatment given", elsewhere: "Recorded somewhere else" };
+const RANGES = [["7", "Last 7 days"], ["30", "Last 30 days"], ["month", "This month"], ["lastmonth", "Last month"]];
+// [from, to] for a quick choice ("" = any time)
+function rangeDates(k) {
+  const t = new Date();
+  if (k === "7" || k === "30") return [addDays(todayKey(), -(Number(k) - 1)), todayKey()];
+  if (k === "month") return [keyOf(new Date(t.getFullYear(), t.getMonth(), 1)), todayKey()];
+  if (k === "lastmonth") return [keyOf(new Date(t.getFullYear(), t.getMonth() - 1, 1)), keyOf(new Date(t.getFullYear(), t.getMonth(), 0))];
+  return ["", ""];
+}
 const ICON_FILE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
 
 export function mountPaperRecords(container, { staff } = {}) {
@@ -71,7 +80,7 @@ export function mountPaperRecords(container, { staff } = {}) {
   function rowHtml(f) {
     const [label, tone] = STATUS[f.status] || STATUS.todo;
     const th = st.thumbs[f.id];
-    const sub = [`Scanned ${niceAt(f.created)}`, f.folder, f.kind === "pdf" ? "PDF" : "Photo"].filter(Boolean).join(" · ");
+    const sub = [`Uploaded ${niceAt(f.created)}`, f.folder, f.kind === "pdf" ? "PDF" : "Photo"].filter(Boolean).join(" · ");
     const extra = f.status === "entered" ? `${f.patientName} · treatment on ${niceDay(f.recordDate)}`
       : f.status === "skip" ? f.reason : f.status === "help" ? `“${f.note}”` : "";
     return `<li class="ppr-row">
@@ -125,7 +134,14 @@ export function mountPaperRecords(container, { staff } = {}) {
         <p class="muted ppr-sum">${done} of ${total} scan${total === 1 ? "" : "s"} sorted</p>` : ""}
       <div class="ppr-tools">
         <input type="search" class="fe-input" data-f="q" placeholder="Filter by file name or patient" value="${esc(st.q)}" />
-        <label class="ppr-date">Scanned from <input type="date" class="fe-input" data-f="sFrom" min="${esc(first)}" max="${esc(st.sTo || last)}" value="${esc(st.sFrom)}" /></label>
+        <select class="fb-select" data-f="sRange" aria-label="Uploaded">
+          <option value="">Uploaded any time</option>
+          ${RANGES.map(([k, l]) => { const [a, b] = rangeDates(k);
+            return `<option value="${k}"${dated && st.sFrom === a && st.sTo === b ? " selected" : ""}>${esc(l)}</option>`; }).join("")}
+          ${dated && !RANGES.some(([k]) => { const [a, b] = rangeDates(k); return st.sFrom === a && st.sTo === b; })
+            ? '<option value="custom" selected disabled>Your own dates</option>' : ""}
+        </select>
+        <label class="ppr-date">Uploaded from <input type="date" class="fe-input" data-f="sFrom" min="${esc(first)}" max="${esc(st.sTo || last)}" value="${esc(st.sFrom)}" /></label>
         <label class="ppr-date">to <input type="date" class="fe-input" data-f="sTo" min="${esc(st.sFrom || first)}" max="${esc(last)}" value="${esc(st.sTo)}" /></label>
         ${dated ? '<button type="button" class="rc-link" data-act="clear-dates">Clear dates</button>' : ""}
         ${st.tab === "scans" ? `<select class="fb-select" data-f="sLink" aria-label="On a patient's file">
@@ -138,7 +154,7 @@ export function mountPaperRecords(container, { staff } = {}) {
           <option value="old"${st.sort === "old" ? " selected" : ""}>Oldest first</option>
           <option value="new"${st.sort === "new" ? " selected" : ""}>Newest first</option></select>` : ""}
       </div>
-      ${dated ? `<p class="muted ppr-sum">${list.length} scan${list.length === 1 ? "" : "s"} ${esc(range)}</p>` : ""}
+      ${dated ? `<p class="muted ppr-sum">${list.length} scan${list.length === 1 ? "" : "s"} uploaded ${esc(range)}</p>` : ""}
       ${list.length ? `<ul class="ppr-list">${list.slice(0, 300).map(rowHtml).join("")}</ul>${
         list.length > 300 ? `<p class="muted ppr-sum">Showing 300 of ${list.length}. Filter to find the others.</p>` : ""}`
         : `<div class="tm-empty">${st.tab === "scans" ? (total ? "Every scan is sorted. 👍" : "No scans in the folder yet.")
@@ -646,6 +662,12 @@ export function mountPaperRecords(container, { staff } = {}) {
   body.addEventListener("change", (e) => {
     const k = e.target.dataset.f;
     if (k === "vStaff" || k === "vCat" || k === "sort" || k === "sLink") { st[k] = e.target.value; draw(); }
+    if (k === "sRange") {
+      [st.sFrom, st.sTo] = rangeDates(e.target.value);
+      if (st.sFrom) st.sort = "new";   // recent scans: newest first
+      draw();
+      return;
+    }
     if (k === "sFrom" || k === "sTo") {
       st[k] = e.target.value;
       if (st.sFrom && st.sTo && st.sFrom > st.sTo) st[k === "sFrom" ? "sTo" : "sFrom"] = e.target.value;   // dates the wrong way round

@@ -77,6 +77,9 @@ const els = {
   profileSave: $("profile-save"),
 };
 
+// Raise this each time paper-records.js changes, so browsers don't keep using an old copy
+const PAPER_V = 3;
+
 let currentStaff = null;
 initFormPicker(els.content, { getStaff: () => currentStaff });
 initTopbar();
@@ -310,7 +313,7 @@ const PAGES = {
   help: (el, param) => mountKnowledge(el, { param, staff: currentStaff }),
   scanner: (el) => mountScanner(el, { staff: currentStaff }),
   // Loaded only when needed, so a problem here can't stop the rest of the portal
-  paper: (el) => import("./paper-records.js")
+  paper: (el) => import(`./paper-records.js?v=${PAPER_V}`)
     .then((m) => m.mountPaperRecords(el, { staff: currentStaff }))
     .catch((err) => {
       console.error("Paper records failed to load:", err);
