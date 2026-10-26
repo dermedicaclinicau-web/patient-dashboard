@@ -24,6 +24,18 @@ function patientIdFromHash() {
 
 const fillHref = (pid, id) => `#/fill/${encodeURIComponent(pid)}/${encodeURIComponent(id)}`;
 
+// Opens the form in a new tab, so the patient dashboard stays open behind it.
+// The new tab shares the login. If the browser blocks the new tab, the form opens in this tab instead.
+function openFill(pid, id) {
+  const href = fillHref(pid, id);
+  const w = window.open(`${location.pathname}${location.search}${href}`, "_blank");
+  if (w) {
+    try { w.focus(); } catch { /* ignore */ }
+    return;
+  }
+  location.hash = href;
+}
+
 export function closeFormPicker(returnFocus = false) {
   if (menu) { menu.remove(); menu = null; }
   if (anchor) {
@@ -98,7 +110,7 @@ async function open(trigger, category, staff, group, rxKind = "") {
     const inGroup = forms.filter((t) => formGroup(t) === groupInfo.key);
     if (inGroup.length === 1) {
       closeFormPicker();
-      location.hash = fillHref(patientId, inGroup[0].id);
+      openFill(patientId, inGroup[0].id);
       return;
     }
     if (inGroup.length) forms = inGroup;
@@ -111,7 +123,7 @@ async function open(trigger, category, staff, group, rxKind = "") {
     const mine = forms.filter((t) => rxKindOf(t) === rxKind);
     if (mine.length === 1) {
       closeFormPicker();
-      location.hash = fillHref(patientId, mine[0].id);
+      openFill(patientId, mine[0].id);
       return;
     }
     if (mine.length) { forms = mine; grouped = false; }
@@ -168,7 +180,7 @@ async function open(trigger, category, staff, group, rxKind = "") {
     if (!item) return;
     const id = item.dataset.fill;
     closeFormPicker();
-    location.hash = fillHref(patientId, id);
+    openFill(patientId, id);
   });
 
   menu.addEventListener("keydown", (e) => {

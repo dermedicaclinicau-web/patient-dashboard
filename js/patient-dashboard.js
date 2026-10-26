@@ -434,6 +434,32 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   mountBillingRx(root, patient);
   mountClinicalHistory(root, patient, staff);
 
+  // A form saved for this patient in another tab: refresh what it affects
+  const myIds = new Set([patient.id, ...patientIds(patient)]);
+  const onFormSavedElsewhere = (m) => {
+    if (!root.isConnected) { stopListening(); return; }
+    if (!m || m.type !== "form-saved" || !myIds.has(m.patientId)) return;
+    mountFormRecords(root, patient);   // Other forms
+    loadPastForms();                   // Tx / Cons / Rx badges and the "No Tx Record" warning
+    showToast("A form was saved in another tab. This page has been updated.");
+  };
+  let savedBc = null;
+  const onSavedStorage = (e) => {
+    if (e.key !== "dm.formSaved" || !e.newValue) return;
+    try { onFormSavedElsewhere(JSON.parse(e.newValue)); } catch { /* ignore */ }
+  };
+  try {
+    savedBc = new BroadcastChannel("dm-forms");
+    savedBc.onmessage = (e) => onFormSavedElsewhere(e.data);
+  } catch {
+    savedBc = null;
+    window.addEventListener("storage", onSavedStorage);   // older browsers
+  }
+  function stopListening() {
+    if (savedBc) { savedBc.close(); savedBc = null; }
+    window.removeEventListener("storage", onSavedStorage);
+  }
+
   // Treatment plan + Social history, both from appointment_transcripts (fetched once)
   async function loadTranscriptSections() {
     const socialCard = root.querySelector('details[data-key="social-history"]');
