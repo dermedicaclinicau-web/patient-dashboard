@@ -309,6 +309,14 @@ const PAGES = {
   },
   help: (el, param) => mountKnowledge(el, { param, staff: currentStaff }),
   scanner: (el) => mountScanner(el, { staff: currentStaff }),
+  // Loaded only when needed, so a problem here can't stop the rest of the portal
+  paper: (el) => import("./paper-records.js")
+    .then((m) => m.mountPaperRecords(el, { staff: currentStaff }))
+    .catch((err) => {
+      console.error("Paper records failed to load:", err);
+      el.innerHTML = `<section class="page"><div class="state error"><strong>Paper records couldn't load</strong>
+        ${escapeHtml(err && err.message ? err.message : "Refresh and try again.")}</div></section>`;
+    }),
 };
 
 // Which permission each page needs ("admin" = Admins only)
@@ -317,7 +325,7 @@ const PAGE_PERM = {
   ssp: "ssp.create", calendar: "menu.calendar", forms: "menu.forms",
   "image-bank": "forms.build", "aftercare-bank": "forms.build", "specialist-bank": "menu.forms", "ssp-products": "ssp.config",
   tasks: "menu.tasks", inventory: "menu.inventory", reports: "menu.reports", staff: "admin", settings: "admin",
-  scanner: "menu.scanner",
+  scanner: "menu.scanner", paper: "paper.enter",
 };
 
 // Email flow builders who aren't Admins can open System configuration, but only its Email flows

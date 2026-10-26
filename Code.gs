@@ -23,6 +23,7 @@ function doPost(e) {
     // Non-login requests
     if (body.action === 'renewSession') return json_(handleRenewSession_(body)); // expired session, still signed in
     if (body.action === 'reports') return json_(handleReports_(body));
+    if (body.action === 'paper') return json_(handlePaper_(body));
     if (body.action === 'appointments') return json_(handleAppointments_(body));
     if (body.action === 'preconsult') return json_(handlePreconsult_(body));
     if (body.action === 'processRecording') return json_(handleProcessRecording_(body));
@@ -3250,6 +3251,7 @@ const PERMS_ = [
   ['patients.edit', 'Patients', 'Add and edit patient details'],
   ['patients.merge', 'Patients', 'Merge duplicate patients'],
   ['records.move', 'Patients', 'Move records to another patient'],
+  ['paper.enter', 'Patients', 'Paper records: enter scanned treatment records and sort out visits without one'],
   ['clinical.view', 'Patients', 'See clinical notes, treatment plans and social history'],
   ['billing.view', 'Patients', 'See billing and prescriptions'],
   ['consult.record', 'Consultations', 'Record consultations and edit notes'],
@@ -15180,4 +15182,361 @@ function recallCheckPauses() {
   });
   console.log(willPause + ' will pause at the next full check (press "Check for due patients now"). ' +
     noId + " can't be paused: link their name in Daily uploads, then fill in the missing Patient IDs.");
+}
+
+// ===================== Paper records: scanned treatment records (a Google Drive folder) =====================
+// The scans sit in one Drive folder (Script Property PAPER_FOLDER_ID, or the default below). Staff work through them on
+// the portal's Paper records page. Each scan's status (to enter, entered, not a record, need help) is in paper_scans/{fileId}.
+// "Visits without a record": Day Sheet visits for the chosen treatments with no treatment record that day or up to
+// 3 days after (a portal form, an older record from the sheets, or a scan marked as entered). Staff can mark a visit
+// as needing no record (paper_visits). Only Apps Script reads and writes paper_scans, paper_visits and paper_settings.
+
+const PAPER_FOLDER_DEFAULT_ = '1ze3pomQ8y_ZbhkhqeO_dnq8fZ5kFq5ee';
+const PAPER_SCANS_ = 'paper_scans';
+const PAPER_VISITS_ = 'paper_visits';
+const PAPER_SET_ = 'paper_settings/config';
+const PAPER_MIME_ = { 'application/pdf': 'pdf', 'image/jpeg': 'image', 'image/png': 'image', 'image/webp': 'image',
+  'image/heic': 'image', 'image/heif': 'image' };
+const PAPER_MAX_BYTES_ = 15 * 1024 * 1024;
+const PAPER_STATUSES_ = ['todo', 'help', 'skip', 'entered'];
+const PAPER_CATS_DEFAULT_ = ['Wrinkle Relaxer', 'Filler/Radiesse', 'Other Injectables'];
+const PAPER_SKIP_DEFAULT_ = ['Review', 'Consult'];
+const PAPER_FROM_DEFAULT_ = '2026-07-01';
+const PAPER_VKEY_ = 'paper_visits_v1';
+const PAPER_FKEY_ = 'paper_files_v1';
+
+function paperRootId_() {
+  return String(PropertiesService.getScriptProperties().getProperty('PAPER_FOLDER_ID') || PAPER_FOLDER_DEFAULT_).trim();
+}
+
+function handlePaper_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!can_(session, 'paper.enter')) return { ok: false, error: 'FORBIDDEN' };
+  const op = String(body.op || '');
+  const admin = /^admin$/i.test(String(session.role || ''));
+  try {
+    const cfg = getConfig_();
+    if (op === 'list') return paperList_(cfg, body.fresh === true);
+    if (op === 'thumbs') return paperThumbs_(body.ids);
+    if (op === 'file') return paperFile_(String(body.fileId || ''));
+    if (op === 'mark') return paperMark_(cfg, body, session);
+    if (op === 'visits') return paperVisits_(cfg, body.fresh === true);
+    if (op === 'resolve') return paperResolve_(cfg, body, session);
+    if (op === 'settings') return Object.assign({ ok: true, allCats: paperAllCats_() }, paperSettings_(cfg));
+    if (op === 'saveSettings') {
+      if (!admin) return { ok: false, error: 'FORBIDDEN' };
+      return paperSettingsSave_(cfg, body, session);
+    }
+  } catch (err) {
+    console.error('Paper ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+    const msg = String(err && err.message ? err.message : err);
+    return { ok: true, problem: /not found|no item with the given id|access denied|permission/i.test(msg)
+      ? "The paper records folder can't be opened. Share it with the account that runs the portal's Apps Script."
+      : 'Something went wrong: ' + msg.slice(0, 200) };
+  }
+  return { ok: false, error: 'BAD_REQUEST' };
+}
+
+/* ---------- The folder ---------- */
+
+// Is the file inside the paper records folder (any depth up to 6)? Not cached, so it can't leak into the Image Bank's checks.
+function paperInside_(rootId, file) {
+  const seen = {};
+  const stack = [];
+  const ps = file.getParents();
+  while (ps.hasNext()) stack.push({ f: ps.next(), d: 0 });
+  while (stack.length) {
+    const x = stack.pop();
+    const id = x.f.getId();
+    if (id === rootId) return true;
+    if (seen[id] || x.d >= 6) continue;
+    seen[id] = true;
+    const up = x.f.getParents();
+    while (up.hasNext()) stack.push({ f: up.next(), d: x.d + 1 });
+  }
+  return false;
+}
+
+function paperFileOf_(id) {
+  if (!DRIVE_ID_RE_.test(String(id || ''))) return null;
+  let f;
+  try { f = DriveApp.getFileById(id); } catch (e) { return null; }
+  if (f.isTrashed() || !PAPER_MIME_[f.getMimeType()] || !paperInside_(paperRootId_(), f)) return null;
+  return f;
+}
+
+// Every scan in the folder (and two levels of subfolders), remembered 10 minutes, with its status
+function paperList_(cfg, fresh) {
+  let files = fresh ? null : repCacheGet_(PAPER_FKEY_);
+  if (!files) {
+    files = [];
+    const walk = function (folder, path, depth) {
+      const it = folder.getFiles();
+      while (it.hasNext() && files.length < 5000) {
+        const f = it.next();
+        const mime = f.getMimeType();
+        if (f.isTrashed() || !PAPER_MIME_[mime]) continue;
+        files.push({ id: f.getId(), name: f.getName(), kind: PAPER_MIME_[mime], size: f.getSize(),
+          created: f.getDateCreated().toISOString(), folder: path });
+      }
+      if (depth >= 2) return;
+      const fi = folder.getFolders();
+      while (fi.hasNext()) {
+        const sub = fi.next();
+        if (!sub.isTrashed()) walk(sub, path ? path + ' / ' + sub.getName() : sub.getName(), depth + 1);
+      }
+    };
+    walk(DriveApp.getFolderById(paperRootId_()), '', 0);
+    repCachePut_(PAPER_FKEY_, files);
+  }
+  const st = {};
+  fsListAll_(cfg, PAPER_SCANS_, ['status', 'note', 'reason', 'patientId', 'patientName', 'recordDate', 'by', 'at'])
+    .forEach(function (d) { st[d.name.split('/').pop()] = fromFields_(d.fields || {}); });
+  const out = files.map(function (f) {
+    const s = st[f.id] || {};
+    return Object.assign({}, f, {
+      status: PAPER_STATUSES_.indexOf(s.status) !== -1 ? s.status : 'todo',
+      note: String(s.note || ''), reason: String(s.reason || ''), patientId: String(s.patientId || ''),
+      patientName: String(s.patientName || ''), recordDate: String(s.recordDate || ''), by: String(s.by || ''), at: String(s.at || ''),
+    });
+  }).sort(function (a, b) { return a.created.localeCompare(b.created); });   // oldest first: work through the backlog in order
+  return { ok: true, files: out, folderUrl: 'https://drive.google.com/drive/folders/' + paperRootId_() };
+}
+
+function paperThumbs_(ids) {
+  const out = {};
+  (Array.isArray(ids) ? ids : []).slice(0, 12).forEach(function (raw) {
+    const id = String(raw || '');
+    const f = paperFileOf_(id);
+    out[id] = f ? bankThumb_(f) : '';
+  });
+  return { ok: true, thumbs: out };
+}
+
+function paperFile_(id) {
+  const f = paperFileOf_(id);
+  if (!f) return { ok: true, problem: "That scan isn't in the paper records folder any more." };
+  if (f.getSize() > PAPER_MAX_BYTES_) {
+    return { ok: true, problem: 'That scan is too big to show here. Open it in Google Drive.', url: f.getUrl() };
+  }
+  return { ok: true, name: f.getName(), mime: f.getMimeType(), url: f.getUrl(),
+    data: Utilities.base64Encode(f.getBlob().getBytes()) };
+}
+
+/* ---------- A scan's status ---------- */
+
+function paperMark_(cfg, body, session) {
+  const id = String(body.fileId || '');
+  const f = paperFileOf_(id);
+  if (!f) return { ok: true, problem: "That scan isn't in the paper records folder any more." };
+  const status = String(body.status || '');
+  if (PAPER_STATUSES_.indexOf(status) === -1) return { ok: false, error: 'BAD_REQUEST' };
+  const note = String(body.note || '').replace(/\r/g, '').trim().slice(0, 500);
+  const reason = String(body.reason || '').trim().slice(0, 80);
+  let pid = '', pname = '', date = '';
+  if (status === 'entered') {
+    const p = flowPatient_(cfg, String(body.patientId || ''));
+    if (!p) return { ok: true, problem: 'Choose the patient.' };
+    pid = p._id;
+    pname = flowWho_(p).name;
+    date = String(body.recordDate || '');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || date > flowKey_(Date.now())) return { ok: true, problem: 'Choose the date of the treatment.' };
+  }
+  if (status === 'help' && !note) return { ok: true, problem: 'Add a note saying what you need help with.' };
+  if (status === 'skip' && !reason) return { ok: true, problem: "Choose why it isn't a record." };
+
+  const path = PAPER_SCANS_ + '/' + id;
+  const cur = fsGetDoc_(cfg, path) || {};
+  const now = new Date().toISOString();
+  const who = String(session.name || '');
+  const what = status === 'entered' ? 'Entered for ' + pname + ' (' + date + ')' : status === 'skip' ? 'Not a record: ' + reason
+    : status === 'help' ? 'Needs help' : 'Back on the list';
+  fsPatch_(cfg, path, {
+    fileId: id, fileName: f.getName(), status: status, note: note, reason: reason,
+    patientId: pid, patientName: pname, recordDate: date, submissionId: String(body.submissionId || '').slice(0, 60),
+    by: who, byUid: String(session.uid || ''), at: now,
+    history: (Array.isArray(cur.history) ? cur.history : []).concat([{ at: now, by: who, what: what, note: note }]).slice(-30),
+  });
+  CacheService.getScriptCache().remove(PAPER_VKEY_);   // an entered scan counts as a record
+  return { ok: true, status: status, patientId: pid, patientName: pname, recordDate: date, by: who, at: now };
+}
+
+/* ---------- Visits without a record ---------- */
+
+function paperSettings_(cfg) {
+  let d = null;
+  try { d = fsGetDoc_(cfg, PAPER_SET_); } catch (e) { console.warn('Paper settings not read: ' + e); }
+  d = d || {};
+  let from = /^\d{4}-\d{2}-\d{2}$/.test(String(d.from || '')) ? String(d.from) : '';
+  if (!from) {
+    try {
+      const r = fsGetDoc_(cfg, 'ui_settings/records');
+      if (r && /^\d{4}-\d{2}-\d{2}$/.test(String(r.txCheckFrom || ''))) from = String(r.txCheckFrom);
+    } catch (e) { /* the default */ }
+  }
+  return {
+    from: from || PAPER_FROM_DEFAULT_,
+    cats: Array.isArray(d.cats) && d.cats.length ? d.cats.map(String) : PAPER_CATS_DEFAULT_,
+    skip: Array.isArray(d.skip) ? d.skip.map(String) : PAPER_SKIP_DEFAULT_,
+  };
+}
+
+function paperAllCats_() {
+  return uniq_(PCN_CATEGORY_RULES_.map(function (r) { return r[1]; }).concat(['Other']))
+    .filter(function (c) { return !/^consultation|^vibro$|^led$/i.test(c); });
+}
+
+function paperSettingsSave_(cfg, body, session) {
+  const from = String(body.from || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) return { ok: true, problem: 'Choose the date to check from.' };
+  const cats = uniq_((Array.isArray(body.cats) ? body.cats : []).map(function (s) { return String(s).trim().slice(0, 80); })
+    .filter(Boolean)).slice(0, 20);
+  if (!cats.length) return { ok: true, problem: 'Tick at least one treatment.' };
+  const skip = uniq_((Array.isArray(body.skip) ? body.skip : []).map(function (s) { return String(s).replace(/\s+/g, ' ').trim().slice(0, 40); })
+    .filter(function (s) { return s.replace(/[^A-Za-z0-9]/g, '').length >= 3; })).slice(0, 30);
+  fsPatch_(cfg, PAPER_SET_, { from: from, cats: cats, skip: skip, updatedAt: new Date().toISOString(), updatedBy: String(session.name || '') });
+  CacheService.getScriptCache().remove(PAPER_VKEY_);
+  return { ok: true };
+}
+
+// A collection filtered on one field, only some fields (form_submissions hold signatures: never read them whole)
+function paperSelect_(cfg, col, field, value, fields) {
+  const out = [];
+  let after = null;
+  for (let page = 0; page < 40; page++) {
+    const sq = {
+      from: [{ collectionId: col }],
+      select: { fields: fields.map(function (f) { return { fieldPath: quoteField_(f) }; }) },
+      where: { fieldFilter: { field: { fieldPath: field }, op: 'EQUAL', value: toValue_(value) } },
+      orderBy: [{ field: { fieldPath: '__name__' } }],
+      limit: 1000,
+    };
+    if (after) sq.startAt = { values: [{ referenceValue: after }], before: false };
+    const res = UrlFetchApp.fetch('https://firestore.googleapis.com/v1/' + fsBase_(cfg) + ':runQuery', {
+      method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+      headers: { Authorization: 'Bearer ' + getAccessToken_(cfg) },
+      payload: JSON.stringify({ structuredQuery: sq }),
+    });
+    if (res.getResponseCode() !== 200) throw new Error(col + ' not read (' + res.getResponseCode() + '): ' + res.getContentText().slice(0, 200));
+    const docs = JSON.parse(res.getContentText()).filter(function (r) { return r.document; }).map(function (r) { return r.document; });
+    docs.forEach(function (d) { const o = fromFields_(d.fields || {}); o._id = d.name.split('/').pop(); out.push(o); });
+    if (docs.length < 1000) break;
+    after = docs[docs.length - 1].name;
+  }
+  return out;
+}
+
+function paperVisits_(cfg, fresh) {
+  if (!fresh) {
+    const hit = repCacheGet_(PAPER_VKEY_);
+    if (hit) return Object.assign({ ok: true, cached: true }, hit);
+  }
+  const cache = CacheService.getScriptCache();
+  if (cache.get('up_ds_active') || cache.get('pcn_run_active')) {
+    return { ok: true, problem: 'A Day Sheet upload or PCN update is running. Try again in a few minutes.' };
+  }
+  const t0 = Date.now();
+  const set = paperSettings_(cfg);
+  const ctx = pcnCtx_();
+  const wantCat = {};
+  set.cats.forEach(function (c) { wantCat[c.toLowerCase()] = true; });
+  const skip = recallSkipFn_(set.skip);
+  const pts = recallPatients_(cfg);
+  const keyOf = Object.create(null);
+  const visits = Object.create(null);
+
+  // 1. Past visits for the chosen treatments (cancellations and no-shows left out)
+  pcnReadAppts_(ctx).forEach(function (r) {
+    if (!pcnIsDate_(r[0]) || r[0].getTime() >= ctx.today || !pcnStatusOk_(r[7], 'full')) return;
+    const dk = Utilities.formatDate(r[0], ctx.tz, 'yyyy-MM-dd');
+    if (dk < set.from) return;
+    const cat = String(r[13] == null ? '' : r[13]).trim();
+    if (!wantCat[cat.toLowerCase()]) return;
+    const svc = String(r[9] == null ? '' : r[9]).trim();
+    if (REP_NOT_VISIT_.test(svc) || skip(svc)) return;
+    const ptt = String(r[14] == null ? '' : r[14]).trim();
+    if (ptt && !(ptt in keyOf)) keyOf[ptt] = pts.find(ptt);
+    const pid = ptt ? keyOf[ptt] : '';
+    const name = String(r[1] == null ? '' : r[1]).trim();
+    const k = dk + '|' + (pid || ('n:' + name.toLowerCase()));
+    const v = visits[k] || (visits[k] = { key: k, date: dk, pid: pid, ptt: ptt, name: name, staff: [], services: [], cats: [] });
+    const who = String(r[8] == null ? '' : r[8]).trim();
+    if (who && !SCHED_NOT_PERSON_.test(who) && v.staff.indexOf(who) === -1) v.staff.push(who);
+    if (svc && v.services.indexOf(svc) === -1 && v.services.length < 6) v.services.push(svc);
+    if (cat && v.cats.indexOf(cat) === -1) v.cats.push(cat);
+  });
+
+  // 2. Every treatment record: patient → the days they have one
+  const rec = Object.create(null);
+  const addRec = function (pid, dk) { if (pid && /^\d{4}-\d{2}-\d{2}$/.test(dk)) (rec[pid] = rec[pid] || {})[dk] = true; };
+  paperSelect_(cfg, 'form_submissions', 'category', 'treatment', ['patientId', 'patientPttId', 'recordDate']).forEach(function (s) {
+    addRec(pts.find(String(s.patientId || '')) || pts.find(String(s.patientPttId || '')), String(s.recordDate || ''));
+  });
+  fsListAll_(cfg, 'treatment_records', ['Patient ID', 'Record Date']).forEach(function (d) {
+    const f = fromFields_(d.fields || {});
+    const pid = pts.find(String(f['Patient ID'] || '').trim());
+    if (pid) addRec(pid, sheetDateKey_(f['Record Date'], REC_TZ_));
+  });
+  fsListAll_(cfg, PAPER_SCANS_, ['status', 'patientId', 'recordDate']).forEach(function (d) {
+    const f = fromFields_(d.fields || {});
+    if (f.status === 'entered') addRec(pts.find(String(f.patientId || '')) || String(f.patientId || ''), String(f.recordDate || ''));
+  });
+
+  // 3. Visits staff have sorted out (no treatment given, recorded somewhere else)
+  const res = Object.create(null);
+  fsListAll_(cfg, PAPER_VISITS_).forEach(function (d) {
+    const f = fromFields_(d.fields || {});
+    if (f.key) res[String(f.key)] = { status: String(f.status || ''), note: String(f.note || ''), by: String(f.by || ''), at: String(f.at || '') };
+  });
+
+  const covered = function (v) {
+    const r = v.pid && rec[v.pid];
+    if (!r) return false;
+    for (let i = 0; i <= 3; i++) if (r[flowAddDaysKey_(v.date, i)]) return true;
+    return false;
+  };
+  const rows = Object.keys(visits).map(function (k) { return visits[k]; }).filter(function (v) { return !covered(v); })
+    .map(function (v) {
+      const d = v.pid ? pts.doc(v.pid) : null;
+      return { key: v.key, date: v.date, pid: v.pid, ptt: v.ptt, name: (d && flowWho_(d).name) || v.name,
+        staff: v.staff, services: v.services, cats: v.cats, res: res[v.key] || null };
+    })
+    .sort(function (a, b) { return b.date.localeCompare(a.date) || a.name.localeCompare(b.name); });
+  const out = { rows: rows.slice(0, 4000), more: Math.max(0, rows.length - 4000), from: set.from, cats: set.cats,
+    at: new Date().toISOString(), ms: Date.now() - t0 };
+  repCachePut_(PAPER_VKEY_, out);
+  console.log('Paper records: ' + rows.length + ' visit(s) without a record, in ' + out.ms + ' ms');
+  return Object.assign({ ok: true }, out);
+}
+
+// No treatment given / recorded somewhere else, or "clear" to put it back on the list
+function paperResolve_(cfg, body, session) {
+  const key = String(body.key || '');
+  if (!/^\d{4}-\d{2}-\d{2}\|[^|]{1,200}$/.test(key)) return { ok: false, error: 'BAD_REQUEST' };
+  const status = String(body.status || '');
+  const path = PAPER_VISITS_ + '/v_' + flowHash_(key);
+  const cache = CacheService.getScriptCache();
+  if (status === 'clear') {
+    commitWrites_(cfg, [deleteWrite_(cfg, path)]);
+    cache.remove(PAPER_VKEY_);
+    return { ok: true };
+  }
+  if (['none', 'elsewhere'].indexOf(status) === -1) return { ok: false, error: 'BAD_REQUEST' };
+  const note = String(body.note || '').replace(/\r/g, '').trim().slice(0, 500);
+  if (!note) return { ok: true, problem: 'Add a note saying what happened.' };
+  const now = new Date().toISOString();
+  fsPatch_(cfg, path, { key: key, status: status, note: note, by: String(session.name || ''),
+    byUid: String(session.uid || ''), at: now });
+  cache.remove(PAPER_VKEY_);
+  return { ok: true, res: { status: status, note: note, by: String(session.name || ''), at: now } };
+}
+
+// Run ONCE from the editor: checks the folder can be read (and approves Drive access)
+function testPaperFolder() {
+  const f = DriveApp.getFolderById(paperRootId_());
+  let n = 0;
+  const it = f.getFiles();
+  while (it.hasNext() && n < 2000) { const x = it.next(); if (PAPER_MIME_[x.getMimeType()]) n++; }
+  console.log('Paper records folder "' + f.getName() + '": ' + n + ' scan(s) at the top level.');
 }
