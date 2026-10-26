@@ -15222,6 +15222,7 @@ function handlePaper_(body) {
     if (op === 'file') return paperFile_(String(body.fileId || ''));
     if (op === 'mark') return paperMark_(cfg, body, session);
     if (op === 'markLinked') return paperMarkLinked_(cfg, body, session);
+    if (op === 'products') return paperProductsDone_(cfg, body, session);
     if (op === 'fileAs') return paperFileAs_(cfg, body, session);
     if (op === 'visits') return paperVisits_(cfg, body.fresh === true);
     if (op === 'resolve') return paperResolve_(cfg, body, session);
@@ -15295,7 +15296,8 @@ function paperList_(cfg, fresh) {
     repCachePut_(PAPER_FKEY_, files);
   }
   const st = {};
-  fsListAll_(cfg, PAPER_SCANS_, ['status', 'note', 'reason', 'patientId', 'patientName', 'recordDate', 'by', 'at', 'filedAs'])
+  fsListAll_(cfg, PAPER_SCANS_, ['status', 'note', 'reason', 'patientId', 'patientName', 'recordDate', 'by', 'at', 'filedAs',
+    'productsDone', 'productsTaken', 'products', 'productsAt'])
     .forEach(function (d) { st[d.name.split('/').pop()] = fromFields_(d.fields || {}); });
   const linked = paperLinked_(cfg);
   const out = files.map(function (f) {
@@ -15306,6 +15308,8 @@ function paperList_(cfg, fresh) {
       status: PAPER_STATUSES_.indexOf(s.status) !== -1 ? s.status : (s.filedAs && s.filedAs.kind ? 'filed' : 'todo'),
       note: String(s.note || ''), reason: String(s.reason || ''), patientId: String(s.patientId || ''),
       patientName: String(s.patientName || ''), recordDate: String(s.recordDate || ''), by: String(s.by || ''), at: String(s.at || ''),
+      productsDone: s.productsDone === true, productsTaken: s.productsTaken === true,
+      products: Array.isArray(s.products) ? s.products.map(String) : [], productsAt: String(s.productsAt || ''),
     });
   }).sort(function (a, b) { return a.created.localeCompare(b.created); });   // oldest first: work through the backlog in order
   return { ok: true, files: out, folderUrl: 'https://drive.google.com/drive/folders/' + paperRootId_() };
@@ -15412,6 +15416,7 @@ function paperMark_(cfg, body, session) {
 
   const path = PAPER_SCANS_ + '/' + id;
   const cur = fsGetDoc_(cfg, path) || {};
+  if (cur.productsTaken === true) return { ok: true, problem: PAPER_STOCK_LOCKED_ };
   if (cur.filedAs) paperUnfile_(cfg, cur.filedAs, session);   // no longer filed on the patient's page
   const now = new Date().toISOString();
   const who = String(session.name || '');
@@ -15420,6 +15425,7 @@ function paperMark_(cfg, body, session) {
   fsPatch_(cfg, path, {
     fileId: id, fileName: f.getName(), status: status, note: note, reason: reason,
     filedAs: null, patientId: pid, patientName: pname, recordDate: date, submissionId: String(body.submissionId || '').slice(0, 60),
+    productsDone: false, productsTaken: false, products: [],
     by: who, byUid: String(session.uid || ''), at: now,
     history: (Array.isArray(cur.history) ? cur.history : []).concat([{ at: now, by: who, what: what, note: note }]).slice(-30),
   });
@@ -15444,6 +15450,8 @@ function paperSettings_(cfg) {
     from: from || PAPER_FROM_DEFAULT_,
     cats: Array.isArray(d.cats) && d.cats.length ? d.cats.map(String) : PAPER_CATS_DEFAULT_,
     skip: Array.isArray(d.skip) ? d.skip.map(String) : PAPER_SKIP_DEFAULT_,
+    // Treatments before this date never change stock (the portal's stock hadn't started)
+    stockFrom: /^\d{4}-\d{2}-\d{2}$/.test(String(d.stockFrom || '')) ? String(d.stockFrom) : (from || PAPER_FROM_DEFAULT_),
   };
 }
 
@@ -15460,7 +15468,10 @@ function paperSettingsSave_(cfg, body, session) {
   if (!cats.length) return { ok: true, problem: 'Tick at least one treatment.' };
   const skip = uniq_((Array.isArray(body.skip) ? body.skip : []).map(function (s) { return String(s).replace(/\s+/g, ' ').trim().slice(0, 40); })
     .filter(function (s) { return s.replace(/[^A-Za-z0-9]/g, '').length >= 3; })).slice(0, 30);
-  fsPatch_(cfg, PAPER_SET_, { from: from, cats: cats, skip: skip, updatedAt: new Date().toISOString(), updatedBy: String(session.name || '') });
+  const stockFrom = String(body.stockFrom || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(stockFrom)) return { ok: true, problem: 'Choose the date the portal\'s stock started.' };
+  fsPatch_(cfg, PAPER_SET_, { from: from, cats: cats, skip: skip, stockFrom: stockFrom,
+    updatedAt: new Date().toISOString(), updatedBy: String(session.name || '') });
   CacheService.getScriptCache().remove(PAPER_VKEY_);
   return { ok: true };
 }
@@ -15627,6 +15638,7 @@ function paperFileAs_(cfg, body, session) {
 
   const path = PAPER_SCANS_ + '/' + id;
   const cur = fsGetDoc_(cfg, path) || {};
+  if (cur.productsTaken === true) return { ok: true, problem: PAPER_STOCK_LOCKED_ };
   if (cur.filedAs) paperUnfile_(cfg, cur.filedAs, session);   // filed before as something else
 
   const who = String(session.name || '');
@@ -15666,6 +15678,7 @@ function paperFileAs_(cfg, body, session) {
   fsPatch_(cfg, path, {
     fileId: id, fileName: f.getName(), status: 'filed', note: note, reason: '', patientId: p._id, patientName: w.name,
     recordDate: date, filedAs: filedAs, by: who, byUid: String(session.uid || ''), at: now.toISOString(),
+    productsDone: false, productsTaken: false, products: [],
     history: (Array.isArray(cur.history) ? cur.history : []).concat([{ at: now.toISOString(), by: who, what: what, note: note }]).slice(-30),
   });
   CacheService.getScriptCache().removeAll([PAPER_VKEY_, 'paper_linked_v1']);
@@ -15689,6 +15702,46 @@ function paperUnfile_(cfg, fa, session) {
       commitWrites_(cfg, [deleteWrite_(cfg, fa.col + '/' + fa.id)]);
     }
   } catch (e) { console.warn('Filed copy not removed (' + fa.col + '/' + fa.id + '): ' + e); }
+}
+
+const PAPER_STOCK_LOCKED_ = "Products were taken off stock for this scan, so it can't be changed here. " +
+  'Correct the products used in Inventory first (Manage inventory).';
+
+// After the portal takes the products off stock (inv_usage, submissionId "paper_<fileId>"): noted on the scan and the record.
+// taken: what came off stock. noted: written on the paper, but stock wasn't changed (counted since, or before the stock started).
+function paperProductsDone_(cfg, body, session) {
+  const id = String(body.fileId || '');
+  if (!DRIVE_ID_RE_.test(id)) return { ok: false, error: 'BAD_REQUEST' };
+  const path = PAPER_SCANS_ + '/' + id;
+  const cur = fsGetDoc_(cfg, path);
+  if (!cur || cur.status !== 'filed' || !cur.filedAs || cur.filedAs.kind !== 'treatment') {
+    return { ok: true, problem: 'File the scan as a treatment record first.' };
+  }
+  const clean = function (a) {
+    return (Array.isArray(a) ? a : []).slice(0, 40)
+      .map(function (s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, 200); }).filter(Boolean);
+  };
+  const taken = clean(body.taken);
+  const noted = clean(body.noted);
+  // Only say it came off stock once it really has
+  if (taken.length && !fsQuery_(cfg, 'inv_usage', 'submissionId', 'EQUAL', 'paper_' + id, 1).length) {
+    return { ok: true, problem: "The stock change wasn't found. Try again." };
+  }
+  const none = body.none === true && !taken.length && !noted.length;
+  const lines = taken.concat(noted.map(function (s) { return s + ' (noted, stock not changed)'; }));
+  const now = new Date().toISOString();
+  const who = String(session.name || '');
+  const what = none ? 'Products: not written on the paper'
+    : 'Products used saved: ' + taken.length + ' taken off stock' + (noted.length ? ', ' + noted.length + ' noted only' : '');
+  fsPatch_(cfg, path, {
+    productsDone: true, productsTaken: taken.length > 0, products: lines, productsAt: now, productsBy: who,
+    history: (Array.isArray(cur.history) ? cur.history : []).concat([{ at: now, by: who, what: what, note: '' }]).slice(-30),
+  });
+  try {
+    fsPatch_(cfg, cur.filedAs.col + '/' + cur.filedAs.id, { 'Products Used': none ? 'Not written on the paper' : lines.join('\n') });
+  } catch (e) { console.warn('Products not added to the record ' + cur.filedAs.id + ': ' + e); }
+  console.log('Paper scan ' + id + ': ' + what + ' by ' + who);
+  return { ok: true, status: 'products', taken: taken.length > 0, products: lines, none: none, at: now };
 }
 
 // A picture of the scan in Firebase Storage (page 1 for PDFs), with a download link like the Scanner's photos

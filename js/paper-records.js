@@ -1,7 +1,13 @@
 // Paper records (#/paper): scanned treatment records from the Google Drive folder, and Day Sheet visits with no record
 import { callApi } from "./appointments.js";
 import { searchPatients, warmPatients } from "./patient-list.js";
-import { listPublishedForms } from "./form-templates.js";
+import { listPublishedForms, getFormTemplate, getFormVersion } from "./form-templates.js";
+import { normaliseField } from "./form-fields.js";
+import { mountConsumablesField, consumableAmountText } from "./consumables-field.js";
+import { consumeInTx } from "./inventory-api.js";
+import { db } from "./firebase-config.js";
+import { runTransaction, collection, query, where, getDocs, limit }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { escapeHtml as esc, showToast, formatDobLong, formatMobile } from "./utils.js";
 import { confirmDialog } from "./dialog.js";
 import { rxProductList } from "./rx-products.js";
@@ -51,10 +57,46 @@ function rangeDates(k) {
 }
 const ICON_FILE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
 
+// Products used on a paper treatment record: linked to the scan, so it's never taken off twice
+const paperSubId = (fileId) => `paper_${fileId}`;
+async function usageExists(subId) {
+  const s = await getDocs(query(collection(db, "inv_usage"), where("submissionId", "==", subId), limit(1)));
+  return !s.empty;
+}
+// Stock counted after a day: { "productId|loc": "2026-10-25" } (the first count after it). Kit checks: only this person's kit.
+const countMemo = {};
+function countsAfter(dateKey, uid) {
+  const k = `${dateKey}|${uid}`;
+  if (!countMemo[k]) {
+    countMemo[k] = getDocs(query(collection(db, "inv_counts"), where("dateKey", ">", dateKey))).then((snap) => {
+      const out = {};
+      snap.forEach((d) => {
+        const c = d.data();
+        if (c.superseded === true || (c.kind === "kit" && c.byUid !== uid)) return;
+        (c.lines || []).forEach((l) => {
+          const key = `${l.productId}|${c.kind === "kit" ? "kit" : l.loc}`;
+          if (!out[key] || c.dateKey < out[key]) out[key] = c.dateKey;
+        });
+      });
+      return out;
+    });
+    countMemo[k].catch(() => { delete countMemo[k]; });
+  }
+  return countMemo[k];
+}
+const LOC_NAME = { kit: "Your kit", shelf: "The Shelf", jt: "JT storage" };
+// "Radiesse: 1.5 mL (1 syringe) (Lot A00263050)"
+const csSummary = (lines) => lines.map((l) => `${l.name}: ${l.rows.map((r) =>
+  `${consumableAmountText(l, r, false)}${r.batch ? ` (${l.batchLabel || "Batch"} ${r.batch})` : ""}`).join(" + ")}`);
+
 export function mountPaperRecords(container, { staff } = {}) {
   const isAdmin = /^admin$/i.test(String((staff && staff.role) || ""));
   const st = { tab: "scans", files: null, visits: null, vMeta: { from: "", cats: [] }, q: "", vq: "", vStaff: "all", vCat: "all",
-    showSorted: false, thumbs: {}, sFrom: "", sTo: "", sort: "old", sLink: "all" };
+    showSorted: false, thumbs: {}, sFrom: "", sTo: "", sort: "old", sLink: "all", cfg: null };
+  let cfgJob = null;
+  const loadCfg = () => cfgJob || (cfgJob = callApi({ action: "paper", op: "settings" })
+    .then((r) => { st.cfg = r && !r.problem ? r : null; return st.cfg; })
+    .catch((e) => { cfgJob = null; throw e; }));
 
   container.innerHTML = `
     <section class="page wide ppr-page">
@@ -92,6 +134,9 @@ export function mountPaperRecords(container, { staff } = {}) {
   function rowHtml(f) {
     const [label, tone] = STATUS[f.status] || STATUS.todo;
     const th = st.thumbs[f.id];
+    const prodLine = f.status === "filed" && f.filedKind === "treatment"
+      ? (f.productsDone ? (f.products && f.products.length ? `Products: ${f.products.join(" · ")}` : "Products: not written on the paper")
+        : "Products used not saved yet") : "";
     const sub = [`Uploaded ${niceAt(f.created)}`, f.folder, f.kind === "pdf" ? "PDF" : "Photo"].filter(Boolean).join(" · ");
     const extra = f.status === "filed" ? `${FILE_NAME[f.filedKind] || "Filed"}${f.filedTitle ? `: ${f.filedTitle}` : ""} · ${f.patientName} · ${niceDay(f.recordDate)}`
       : f.status === "entered" ? `${f.patientName} · treatment on ${niceDay(f.recordDate)}`
@@ -101,6 +146,7 @@ export function mountPaperRecords(container, { staff } = {}) {
         th ? `<img src="${esc(th)}" alt="" loading="lazy" />` : ICON_FILE}</button>
       <div class="ppr-main"><strong>${esc(f.name)}</strong><small>${esc(sub)}</small>${
         extra ? `<small class="ppr-extra">${esc(extra)}${f.by ? ` · ${esc(f.by)}` : ""}</small>` : ""}${
+        prodLine ? `<small class="ppr-extra ppr-prodline${f.productsDone ? "" : " is-warn"}">${esc(prodLine)}</small>` : ""}${
         isLinked(f) && f.status === "todo" ? `<small class="ppr-linked">On file: ${esc(linkText(f.linked[0]))}${
           f.linked.length > 1 ? ` (+${f.linked.length - 1} more)` : ""}</small>` : ""}</div>
       <span class="ppr-pill is-${isLinked(f) && f.status === "todo" ? "ok" : tone}">${esc(isLinked(f) && f.status === "todo" ? "Already on file" : label)}</span>
@@ -406,6 +452,8 @@ export function mountPaperRecords(container, { staff } = {}) {
           prog.textContent = next || "";
           prog.hidden = !next;
         },
+        // The next step (e.g. "Taking the products off stock…")
+        say(t) { timers.forEach(clearTimeout); text = t; show(); },
         // A problem: everything back as it was
         fail() {
           stop();
@@ -423,19 +471,194 @@ export function mountPaperRecords(container, { staff } = {}) {
     const ft = { type: f.filedKind || "treatment", formId: "", consent: "", ctitle: "",
       rx: [{ product: "", custom: !rxList.length, name: "" }] };
     let forms = null;
+
+    /* ---------- Products used (treatment records) ---------- */
+    // The form's own Consumables fields, mounted into prodEl (which moves with the treatment section)
+    const cs = { formId: "", fields: [], loading: false, err: "", mode: "stock", force: {}, counted: null };
+    const prodEl = document.createElement("div");
+    prodEl.className = "ppr-cs-wrap";
+    let csSeq = 0, csTimer = 0, lastType = "";
+    const csWraps = () => [...prodEl.querySelectorAll("[data-csf]")];
+    const csPlanAll = () => (cs.mode === "none" ? [] : csWraps().flatMap((w) => (w.csPlan ? w.csPlan() : [])));
+    const csProblemAny = () => { for (const w of csWraps()) { const m = w.csProblem && w.csProblem(); if (m) return m; } return ""; };
+    const stockFrom = () => (st.cfg && st.cfg.stockFrom) || "";
+    const beforeStock = (date) => !!(stockFrom() && date && date < stockFrom());
+    const noteCsSoon = () => { clearTimeout(csTimer); csTimer = setTimeout(noteCs, 250); };
+
+    async function loadProducts(tid) {
+      cs.formId = tid; cs.fields = []; cs.err = ""; cs.loading = !!tid; cs.force = {};
+      drawProducts();
+      if (!tid) { drawType(); return; }
+      try {
+        const tpl = await getFormTemplate(tid);
+        const ver = tpl && tpl.version ? await getFormVersion(tid, tpl.version) : null;
+        if (cs.formId !== tid) return;
+        cs.fields = ver ? (ver.fields || []).map(normaliseField).filter((x) => x && x.type === "consumables") : [];
+      } catch (ex) {
+        console.warn("Form products not loaded:", ex);
+        if (cs.formId === tid) cs.err = "Couldn't load this form's products. Close and open the scan again.";
+      }
+      if (cs.formId !== tid || !dlg.isConnected) return;
+      cs.loading = false;
+      drawProducts();
+      drawType();
+    }
+
+    function drawProducts() {
+      if (f.productsDone) {
+        const list = f.products || [];
+        prodEl.innerHTML = `<div class="ppr-cs is-done"><div class="ppr-cs-head"><strong>Products used</strong>
+          <span class="ppr-pill is-ok">${f.productsTaken ? "Taken off stock" : "Saved"}</span></div>
+          ${list.length ? `<ul class="ppr-cs-list">${list.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>`
+            : '<p class="fe-note">Not written on the paper.</p>'}
+          ${f.productsTaken ? '<small class="fe-note">To change these, correct the products used in Inventory (Manage inventory).</small>' : ""}</div>`;
+        return;
+      }
+      if (!cs.formId) { prodEl.innerHTML = ""; return; }
+      if (cs.loading) { prodEl.innerHTML = '<div class="ppr-cs"><p class="bk-none">Loading the products on this form…</p></div>'; return; }
+      if (cs.err) { prodEl.innerHTML = `<div class="ppr-cs"><p class="lh-error">${esc(cs.err)}</p></div>`; return; }
+      if (!cs.fields.length) { prodEl.innerHTML = '<p class="fe-note ppr-cs-none">This form has no Products used, so stock isn\'t changed.</p>'; return; }
+      prodEl.innerHTML = `<div class="ppr-cs">
+        <div class="ppr-cs-head"><strong>Products used</strong>
+          <div class="ppr-seg" role="group" aria-label="Products used">
+            <button type="button" data-csmode="stock" aria-pressed="${cs.mode === "stock"}">Take off stock</button>
+            <button type="button" data-csmode="none" aria-pressed="${cs.mode === "none"}">Not written on the paper</button>
+          </div></div>
+        <p class="fe-note" data-role="cs-when"></p>
+        <div class="ppr-cs-fields"${cs.mode === "none" ? " hidden" : ""}>${cs.fields.map((x) => `<div class="ppr-cs-field" data-csf="${esc(x.id)}">
+          ${cs.fields.length > 1 && x.label ? `<span class="lh-label">${esc(x.label)}</span>` : ""}<div data-cs-host></div></div>`).join("")}</div>
+        <div data-role="cs-notes"></div>
+      </div>`;
+      cs.fields.forEach((x) => mountConsumablesField(prodEl.querySelector(`[data-csf="${CSS.escape(x.id)}"]`), x, { staff, onChange: noteCsSoon }));
+      noteCs();
+    }
+
+    function syncCsMode() {
+      prodEl.querySelectorAll("[data-csmode]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.csmode === cs.mode)));
+      const box = prodEl.querySelector(".ppr-cs-fields");
+      if (box) box.hidden = cs.mode === "none";
+    }
+
+    // When it comes off, and anything that was counted since (the count already took it off)
+    async function noteCs() {
+      const host = prodEl.querySelector('[data-role="cs-notes"]');
+      const when = prodEl.querySelector('[data-role="cs-when"]');
+      if (!host) return;
+      const date = dateIn.value;
+      if (when) {
+        when.textContent = cs.mode === "none" ? "Nothing is taken off stock. The record notes that no products were written."
+          : !date ? "Choose the date of treatment first."
+          : beforeStock(date) ? `Before the portal's stock started (${niceDay(stockFrom())}): noted on the record, stock isn't changed.`
+          : `Taken off stock as used on ${niceDay(date)}.`;
+      }
+      const plan = csPlanAll();
+      if (!date || !plan.length || beforeStock(date)) { host.innerHTML = ""; return; }
+      const my = ++csSeq;
+      let counted;
+      try { counted = await countsAfter(date, staff.uid); }
+      catch (ex) {
+        console.warn("Counts not checked:", ex);
+        if (my === csSeq) { cs.counted = null; host.innerHTML = '<p class="ppr-cs-note is-warn">Couldn\'t check the stock counts since then. Check your connection.</p>'; }
+        return;
+      }
+      if (my !== csSeq || !host.isConnected) return;
+      cs.counted = counted;
+      host.innerHTML = plan.filter((l) => counted[`${l.productId}|${l.loc}`]).map((l) => {
+        const k = `${l.productId}|${l.loc}`;
+        return `<div class="ppr-cs-note"><span><strong>${esc(l.name)}</strong>: ${esc(LOC_NAME[l.loc] || "Stock")} was counted on
+          ${esc(niceDay(counted[k]))}, after this treatment. That count already took it off, so stock isn't changed again.</span>
+          <label class="fe-check"><input type="checkbox" data-csforce="${esc(k)}"${cs.force[k] ? " checked" : ""} /> Take it off anyway</label></div>`;
+      }).join("");
+    }
+
+    // Ready to save? "" or what to fix
+    async function csReady() {
+      if (cs.mode === "none") return "";
+      const m = csProblemAny();
+      if (m) return m;
+      if (!st.cfg) { try { await loadCfg(); } catch { return "Couldn't load the Paper records settings. Try again."; } }
+      await noteCs();
+      if (csPlanAll().length && !beforeStock(dateIn.value) && cs.counted === null) {
+        return "Couldn't check the stock counts since the treatment. Check your connection and try again.";
+      }
+      return "";
+    }
+    // What comes off stock, and what's only noted (counted since, or before the stock started)
+    function splitPlan(date) {
+      const take = [], note = [];
+      csPlanAll().forEach((l) => {
+        const k = `${l.productId}|${l.loc}`;
+        (beforeStock(date) || (cs.counted && cs.counted[k] && !cs.force[k]) ? note : take).push(l);
+      });
+      return { take, note };
+    }
+    // Takes it off (once), then tells Apps Script, which checks it's there
+    async function saveCs(split, { formName, patientId, patientName, recordDate }) {
+      const subId = paperSubId(f.id);
+      if (split.take.length && !(await usageExists(subId))) {
+        await runTransaction(db, (tx) => consumeInTx(tx, {
+          submissionId: subId, lines: split.take, patientId, patientName, formName, recordDate, staff,
+        }));
+      }
+      const r = await callApi({ action: "paper", op: "products", fileId: f.id,
+        taken: csSummary(split.take), noted: csSummary(split.note), none: cs.mode === "none" });
+      if (r.problem) throw new Error(r.problem);
+      if (!r || r.ok !== true || r.status !== "products") throw new Error(notSaved(r));
+      Object.assign(f, { productsDone: true, productsTaken: !!r.taken, products: r.products || [], productsAt: r.at || "" });
+      return r;
+    }
+
+    // Already filed: just the products
+    async function saveProducts(btn) {
+      if (saving) return;
+      err.hidden = true;
+      const t = (forms || []).find((x) => x.id === ft.formId);
+      if (!t || !cs.fields.length) { fail("Choose the treatment record it was filed as."); return; }
+      if (!chosen || chosen.id !== f.patientId) { fail(`This scan was filed for ${f.patientName}. Choose them, or file it again.`); return; }
+      if (dateIn.value !== f.recordDate) { fail(`This scan was filed for ${niceDay(f.recordDate)}. Change the date back, or file it again.`); return; }
+      const p = await csReady();
+      if (p) { fail(p); return; }
+      const split = splitPlan(f.recordDate);
+      saving = true;
+      const prog = startProgress(btn, [[0, split.take.length ? "Taking the products off stock…" : "Saving…"], [8000, "Still working…"]]);
+      try {
+        await saveCs(split, { formName: t.name, patientId: f.patientId, patientName: f.patientName, recordDate: f.recordDate });
+        const msg = split.take.length ? `${split.take.length} product${split.take.length === 1 ? "" : "s"} taken off stock` : "Products used saved";
+        prog.done("Saved", `${msg}. Opening the next scan…`);
+        showToast(msg);
+        draw();
+        await pause(900);
+        goNext();
+      } catch (ex) {
+        console.error("Products not saved:", ex);
+        prog.fail();
+        fail(ex.message || "Couldn't save the products. Try again.");
+      } finally {
+        saving = false;
+      }
+    }
     const byName = (a, b) => String(a.name).localeCompare(String(b.name));
 
     function typeBody() {
       if (ft.type === "treatment") {
         const tx = (forms || []).filter((t) => t.category === "treatment").sort(byName);
+        const filedTx = f.status === "filed" && f.filedKind === "treatment";
+        const needProducts = filedTx && !f.productsDone && cs.fields.length > 0 && cs.formId === ft.formId;
+        const action = f.productsTaken
+          ? '<small class="fe-note">Products were taken off stock for this scan, so it can\'t be filed again here.</small>'
+          : needProducts
+            ? `<button type="button" class="lh-btn is-primary ppr-wide" data-act="stock">Save products used</button>
+               <small class="fe-note">The scan is already filed. This saves what was used${cs.mode === "stock" ? " and takes it off stock" : ""}.</small>`
+            : '<button type="button" class="lh-btn is-primary ppr-wide" data-act="file">File the scan as the record</button>';
         return `<label class="lh-field"><span class="lh-label">Which treatment record</span>
-            <select class="fb-select" name="form" data-ft="formId">${!forms ? '<option value="">Loading forms…</option>'
+            <select class="fb-select" name="form" data-ft="formId"${f.productsTaken ? " disabled" : ""}>${!forms ? '<option value="">Loading forms…</option>'
               : `<option value="">Choose…</option>${tx.map((t) => `<option value="${esc(t.id)}"${t.id === ft.formId ? " selected" : ""}>${esc(t.name)}</option>`).join("")}`}</select></label>
-          <button type="button" class="lh-btn is-primary ppr-wide" data-act="file">File the scan as the record</button>
-          <small class="fe-note">Or type it in instead:</small>
+          <div data-role="prod-slot"></div>
+          ${action}
+          ${f.productsTaken ? "" : `<small class="fe-note">Or type it in instead:</small>
           <div class="ppr-formrow"><button type="button" class="lh-btn" data-act="openform">Enter it on the form ↗</button>
             <button type="button" class="lh-btn" data-act="entered">Mark as entered</button></div>
-          <small class="fe-note">On the form, set the record date to the date of treatment and leave Products used empty for now.</small>`;
+          <small class="fe-note">On the form, set the record date to the date of treatment and add the products there, then press Mark as entered.</small>`}`;
       }
       if (ft.type === "consent") {
         const cs = (forms || []).filter((t) => t.category === "consent").sort(byName);
@@ -468,8 +691,21 @@ export function mountPaperRecords(container, { staff } = {}) {
         b.setAttribute("aria-pressed", String(on));
       });
       $('[data-role="typebody"]').innerHTML = typeBody();
+      const slot = $('[data-role="prod-slot"]');
+      if (slot) slot.replaceWith(prodEl);   // the same element: what's been typed stays
+      if (ft.type === "treatment" && lastType && lastType !== "treatment") drawProducts();   // back from another type
+      lastType = ft.type;
     }
-    listPublishedForms().then((list) => { forms = list || []; if (dlg.isConnected) drawType(); })
+    listPublishedForms().then((list) => {
+      forms = list || [];
+      // Filed as a treatment record before: that form, so its products can be saved
+      if (ft.type === "treatment" && !ft.formId && f.filedKind === "treatment" && f.filedTitle) {
+        const hit = forms.find((x) => x.category === "treatment" && x.name === f.filedTitle);
+        if (hit) { ft.formId = hit.id; loadProducts(hit.id); }
+      }
+      if (f.productsDone) drawProducts();
+      if (dlg.isConnected) drawType();
+    })
       .catch(() => { forms = []; if (dlg.isConnected) drawType(); showToast("Couldn't load the forms."); });
 
     async function fileAs(btn) {
@@ -479,10 +715,11 @@ export function mountPaperRecords(container, { staff } = {}) {
       if (!dateIn.value) { fail("Choose the date on the paper."); return; }
       const body = { action: "paper", op: "fileAs", fileId: f.id, as: ft.type, patientId: chosen.id, recordDate: dateIn.value,
         clinician: $('[name="who"]').value, note: $('[name="note"]').value };
+      let formName = "";
       if (ft.type === "treatment") {
         const t = (forms || []).find((x) => x.id === ft.formId);
         if (!t) { fail("Choose which treatment record it is."); return; }
-        body.title = t.name;
+        body.title = formName = t.name;
       } else if (ft.type === "consent") {
         body.title = (ft.consent === OTHER ? ft.ctitle : ft.consent).trim();
         if (!body.title) { fail("Choose which consent it is."); return; }
@@ -490,6 +727,15 @@ export function mountPaperRecords(container, { staff } = {}) {
         body.items = ft.rx.map((it) => ({ product: String(it.custom ? it.name : it.product).trim(), custom: !!it.custom }))
           .filter((it) => it.product);
         if (!body.items.length) { fail("Choose what was prescribed."); return; }
+      }
+      // Products used: checked before anything is saved
+      const withCs = ft.type === "treatment" && cs.formId === ft.formId && cs.fields.length > 0;
+      let split = { take: [], note: [] };
+      if (withCs) {
+        if (cs.loading) { fail("The form's products are still loading. Try again in a moment."); return; }
+        const p = await csReady();
+        if (p) { fail(p); return; }
+        split = splitPlan(dateIn.value);
       }
       saving = true;
       const pic = ft.type === "billing" || ft.type === "rx";
@@ -505,14 +751,31 @@ export function mountPaperRecords(container, { staff } = {}) {
         if (!r || r.ok !== true || r.status !== "filed") { console.warn("Filing reply:", r); prog.fail(); fail(notSaved(r)); return; }
         ok = true;
         Object.assign(f, { status: "filed", filedKind: ft.type, filedTitle: (r.filedAs && r.filedAs.title) || "", reason: "",
-          note: body.note.trim(), patientId: r.patientId, patientName: r.patientName, recordDate: r.recordDate, by: r.by || "", at: r.at || "" });
+          note: body.note.trim(), patientId: r.patientId, patientName: r.patientName, recordDate: r.recordDate, by: r.by || "", at: r.at || "",
+          productsDone: false, productsTaken: false, products: [] });
         if (ft.type === "treatment" && st.visits) {
           st.visits = st.visits.filter((v) => !(v.pid === r.patientId && v.date <= r.recordDate && r.recordDate <= addDays(v.date, 3)));
         }
-        const where = `Filed under ${FILE_WHERE[ft.type]} on ${r.patientName}'s page`;
+        draw();
+        if (withCs) {
+          prog.say(split.take.length ? "Taking the products off stock…" : "Saving the products used…");
+          try {
+            await saveCs(split, { formName, patientId: r.patientId, patientName: r.patientName, recordDate: r.recordDate });
+          } catch (ex) {
+            console.error("Products not saved:", ex);
+            prog.fail();
+            drawType();   // shows Save products used
+            fail(`It's filed, but the products used weren't saved (${ex.message || "try again"}). Press Save products used to try again.`);
+            draw();
+            return;
+          }
+          draw();
+        }
+        const taken = split.take.length;
+        const where = `Filed under ${FILE_WHERE[ft.type]} on ${r.patientName}'s page${
+          taken ? `, ${taken} product${taken === 1 ? "" : "s"} taken off stock` : ""}`;
         prog.done("Filed", `${where}. Opening the next scan…`);
         showToast(where);
-        draw();
         await pause(900);   // long enough to see it worked
         goNext();
       } catch (ex) {
@@ -573,7 +836,8 @@ export function mountPaperRecords(container, { staff } = {}) {
 
     dlg.addEventListener("change", (e) => {
       const t = e.target;
-      if (t.dataset.ft === "formId") ft.formId = t.value;
+      if (t.dataset.ft === "formId") { ft.formId = t.value; loadProducts(t.value); return; }
+      if (t.dataset.csforce) { cs.force[t.dataset.csforce] = t.checked; return; }
       if (t.dataset.ft === "consent") { ft.consent = t.value; drawType(); return; }
       if (t.dataset.rxf === "product") {
         const it = ft.rx[Number(t.closest("[data-rx]").dataset.rx)];
@@ -605,7 +869,7 @@ export function mountPaperRecords(container, { staff } = {}) {
         }
       }, 250);
     });
-    dateIn.addEventListener("change", drawPatientVisits);
+    dateIn.addEventListener("change", () => { drawPatientVisits(); noteCsSoon(); });
 
     dlg.addEventListener("click", (e) => {
       const pick = e.target.closest("[data-pick]");
@@ -621,9 +885,12 @@ export function mountPaperRecords(container, { staff } = {}) {
         const v = (st.visits || []).find((x) => x.pid === (chosen && chosen.id) && x.date === vd.dataset.vdate);
         const whoIn = $('[name="who"]');
         if (v && whoIn && !whoIn.value) whoIn.value = v.staff.join(" and ");   // the clinician from the Day Sheet
+        noteCsSoon();
         drawPatientVisits();
         return;
       }
+      const csm = e.target.closest("[data-csmode]");
+      if (csm) { cs.mode = csm.dataset.csmode; syncCsMode(); noteCsSoon(); drawType(); return; }
       const ty = e.target.closest("[data-type]");
       if (ty) { ft.type = ty.dataset.type; err.hidden = true; drawType(); return; }
       const actEl = e.target.closest("[data-act]");
@@ -631,6 +898,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       if (!act || saving) return;
       if (act === "close") { dlg.close(); return; }
       if (act === "file") { fileAs(actEl); return; }
+      if (act === "stock") { saveProducts(actEl); return; }
       if (act === "rx-add") { ft.rx.push({ product: "", custom: !rxList.length, name: "" }); drawType(); return; }
       if (act === "rx-x") { ft.rx.splice(Number(e.target.closest("[data-rx]").dataset.rx), 1); drawType(); return; }
       if (act === "next") { goNext(); return; }
@@ -770,6 +1038,9 @@ export function mountPaperRecords(container, { staff } = {}) {
     dlg.innerHTML = `<form class="lh-form" novalidate>
       <div class="lh-dialog-head"><h3>Visits without a record</h3><p>Which Day Sheet visits should have a treatment record.</p></div>
       <label class="lh-field"><span class="lh-label">Check visits from</span><input type="date" class="fe-input" name="from" value="${esc(s.from)}" /></label>
+      <label class="lh-field"><span class="lh-label">Take products off stock for treatments from</span>
+        <input type="date" class="fe-input" name="stockFrom" value="${esc(s.stockFrom || "")}" />
+        <small class="fe-note">The day the portal's stock counts started. Paper records from before this note the products but never change stock.</small></label>
       <div class="lh-field"><span class="lh-label">Treatments that need a record</span>
         <div class="ppr-cats">${(s.allCats || []).map((c) => `<label class="fe-check"><input type="checkbox" name="cat" value="${esc(c)}"${
           (s.cats || []).includes(c) ? " checked" : ""} /> ${esc(c)}</label>`).join("")}</div></div>
@@ -789,12 +1060,14 @@ export function mountPaperRecords(container, { staff } = {}) {
       btn.disabled = true;
       try {
         const r = await callApi({
-          action: "paper", op: "saveSettings", from: form.elements.from.value,
+          action: "paper", op: "saveSettings", from: form.elements.from.value, stockFrom: form.elements.stockFrom.value,
           cats: [...form.querySelectorAll('[name="cat"]:checked')].map((x) => x.value),
           skip: form.elements.skip.value.split(",").map((x) => x.trim()).filter(Boolean),
         });
         if (r.problem) { err.textContent = r.problem; err.hidden = false; btn.disabled = false; return; }
         dlg.close();
+        cfgJob = null;
+        loadCfg().catch(() => {});
         showToast("Saved. Checking the visits again…");
         st.visits = null;
         draw();
@@ -865,4 +1138,5 @@ export function mountPaperRecords(container, { staff } = {}) {
   draw();
   loadScans();
   loadVisits();
+  loadCfg().catch(() => {});
 }

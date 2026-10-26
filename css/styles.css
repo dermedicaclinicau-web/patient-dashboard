@@ -8967,3 +8967,20 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 @keyframes ppr-spin { to { transform: rotate(360deg); } }
 .ppr-prog { margin: 0; font-size: 13px; color: #475569; }
 
+
+.ppr-cs-wrap:empty { display: none; }
+.ppr-cs { margin: 4px 0 12px; padding: 14px; border: 1px solid #e2e8f0; border-radius: 14px; background: #f8fafc; display: grid; gap: 10px; }
+.ppr-cs.is-done { background: #f0fdfa; border-color: #99f6e4; }
+.ppr-cs-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.ppr-cs-head strong { font-size: 15px; }
+.ppr-seg { display: inline-flex; padding: 3px; border-radius: 999px; background: #e2e8f0; gap: 2px; }
+.ppr-seg button { border: 0; background: transparent; padding: 6px 12px; border-radius: 999px; font: inherit; font-size: 13px; color: #475569; cursor: pointer; }
+.ppr-seg button[aria-pressed="true"] { background: #fff; color: #0f766e; font-weight: 600; box-shadow: 0 1px 2px rgba(15, 23, 42, .12); }
+.ppr-cs-fields { display: grid; gap: 12px; }
+.ppr-cs-field { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 10px; overflow-x: auto; }
+.ppr-cs-note { display: grid; gap: 6px; padding: 10px 12px; border-radius: 10px; background: #fffbeb; border: 1px solid #fde68a; color: #92400e; font-size: 13px; }
+.ppr-cs-note.is-warn { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+.ppr-cs-list { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 14px; }
+.ppr-cs-none { margin: 2px 0 10px; }
+.ppr-prodline { color: #0f766e; }
+.ppr-prodline.is-warn { color: #b45309; }
