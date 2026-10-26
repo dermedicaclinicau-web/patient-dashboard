@@ -1,6 +1,8 @@
 import { fetchDayAppointments } from "./appointments.js";
 import { fetchDayBadges } from "./calendar-badges.js";
 import { logout } from "./auth.js";
+import { openEndOfDay, endOfDayStatus } from "./end-of-day.js";
+import { minToText } from "./shift.js";
 import {
   escapeHtml, hueFromString, toDateKey, parseDateKey, addDays,
   formatLongDate, formatShortDate, formatUpdated,
@@ -125,9 +127,28 @@ export function mountCalendar(container, param) {
     board.innerHTML = `<div class="cal-columns">${
       sortStaff([...byStaff.keys()]).map((name) => staffColumn(name, byStaff.get(name))).join("")
     }</div>`;
-    
+
+    paintEod();
     loadBadges(appts);
   }
+
+  // The red End of Day button under the logged-in clinician's column (today only)
+  function paintEod() {
+    if (!board.isConnected) return;
+    const slots = [...board.querySelectorAll(".cal-eod-slot")];
+    slots.forEach((el) => { el.innerHTML = ""; });
+    const s = endOfDayStatus();
+    if (!s.show || !s.name || dateKey !== toDateKey()) return;
+    const slot = slots.find((el) => isMyColumn(el.dataset.eodCol, s.name, s.apptName));
+    if (slot) slot.innerHTML = eodButtonHtml(s);
+  }
+
+  // Follows the day as it goes: red → flashing → Day ended (checked every minute, and straight after saving)
+  const onEodStatus = () => {
+    if (!board.isConnected) { window.removeEventListener("eod:status", onEodStatus); return; }
+    paintEod();
+  };
+  window.addEventListener("eod:status", onEodStatus);
 
     // Badges load after the schedule is shown, so they never slow it down
   async function loadBadges(appts) {
@@ -182,6 +203,7 @@ export function mountCalendar(container, param) {
     if (!btn) return;
     if (btn.dataset.action === "retry") load(true);
     if (btn.dataset.action === "relogin") logout();
+    if (btn.dataset.action === "eod") openEndOfDay();
   });
 
   load();
@@ -217,7 +239,7 @@ function staffColumn(name, appts) {
   return `
     <div class="cal-col" style="--col-bg:${bg};--col-line:${line}">
       <div class="cal-col-head">${escapeHtml(name)}</div>
-      <div class="cal-col-body">${appts.map(apptCard).join("")}</div>
+      <div class="cal-col-body">${appts.map(apptCard).join("")}<div class="cal-eod-slot" data-eod-col="${escapeHtml(name)}"></div></div>
     </div>`;
 }
 
@@ -273,6 +295,42 @@ function apptCard(a) {
   return a.patientId
     ? `<a class="${classes}"${idx} href="#/patient/${encodeURIComponent(a.patientId)}" title="${title}">${inner}</a>`
     : `<div class="${classes}"${idx} title="${title}">${inner}</div>`;
+}
+
+/* ---------- End of Day button ---------- */
+
+const NAME_TITLES = new Set(["dr", "doctor", "prof", "mr", "mrs", "ms", "miss", "nurse"]);
+const nameWords = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()
+  .split(" ").filter((w) => w && !NAME_TITLES.has(w));
+
+// "Dr Teh" is Dr Joanna Teh's column: every word of the column (ignoring titles) is in her name.
+// A short form also counts ("Jess" for Jessica). Rooms and Unassigned are never anyone's.
+function isMyColumn(column, myName, apptName = "") {
+  // Set in Staff → Edit → Work schedule: that column exactly (capitals, dots and spaces don't matter)
+  if (apptName) return normName(column) === normName(apptName);
+  const c = nameWords(column);
+  const m = nameWords(myName);
+  if (!c.length || !m.length) return false;
+  if (c.join(" ") === "unassigned" || c.includes("room") || c.includes("clinician")) return false;
+  return c.every((w) => m.some((x) => x === w || (w.length >= 3 && x.startsWith(w))));
+}
+
+const ICON_MOON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+const ICON_TICK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
+
+function eodButtonHtml(s) {
+  if (s.ended) {
+    const at = s.endedAt instanceof Date && !isNaN(s.endedAt)
+      ? ` ${s.endedAt.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" })}` : "";
+    return `<button type="button" class="cal-eod is-done" data-action="eod" title="See what you entered today">${ICON_TICK}<span>Day ended${escapeHtml(at)}</span></button>`;
+  }
+  const n = new Date();
+  const left = s.finish - (n.getHours() * 60 + n.getMinutes());
+  const sub = s.urgent
+    ? (left > 0 ? `Finish in ${left} min` : "Time to end your day")
+    : `You finish at ${minToText(s.finish)}`;
+  return `<button type="button" class="cal-eod${s.urgent ? " is-urgent" : ""}" data-action="eod">${ICON_MOON}
+    <span>End of Day</span><small>${escapeHtml(sub)}</small></button>`;
 }
 
 function skeletonBoard() {

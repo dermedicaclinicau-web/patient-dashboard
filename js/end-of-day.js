@@ -49,6 +49,22 @@ function snooze(mins = 15) {
 // Started today and not ended yet (for the logout check)
 export const endOfDayPending = () => !!me && st.show && !st.ended;
 
+// For the calendar's End of Day button. urgent: 10 minutes or less before they finish (or later)
+const URGENT_MIN = 10;
+export function endOfDayStatus() {
+  const finish = st.finish ?? hhmmToMin(st.cfg && st.cfg.finishTime) ?? 17 * 60 + 30;
+  const show = !!me && st.show;
+  return {
+    show, ended: st.ended, finish, endedAt: st.endedAt || null,
+    urgent: show && !st.ended && nowMin() >= finish - URGENT_MIN,
+    name: me ? String(me.name || "") : "",   // the calendar finds their column by name
+    apptName: me ? st.apptName || "" : "",   // or, if it's set in Staff, by their name in the appointment book
+  };
+}
+function emitStatus() {
+  window.dispatchEvent(new CustomEvent("eod:status", { detail: endOfDayStatus() }));
+}
+
 // Pulse "End my day" from shortly before they finish, until the day is ended
 function syncNudge() {
   if (!btn) return;
@@ -71,8 +87,11 @@ async function plan() {
   st.planAt = Date.now() + 15 * 60000;   // worked out again every 15 minutes (appointments and settings change)
   try { st.finish = (await myFinish(me, st.cfg)).finish; }
   catch (err) { console.warn("Finish time not worked out:", err); }
-  try { const r = await callApi({ action: "staff", op: "mySchedule" }); st.popup = r.popup !== false; }
-  catch (err) { console.warn("Pop-up setting not read:", err); }
+  try {
+    const r = await callApi({ action: "staff", op: "mySchedule" });
+    st.popup = r.popup !== false;
+    st.apptName = String((r.schedule && r.schedule.apptName) || "").trim();   // their column on the calendar
+  } catch (err) { console.warn("Pop-up setting not read:", err); }
 }
 
 // Opens End of day by itself once it's time, but never on top of another window or during a recording
@@ -91,6 +110,7 @@ async function tickFn() {
   if (Date.now() > st.planAt) await plan();
   if (g !== gen || !me) return;
   syncNudge();
+  emitStatus();
   maybePrompt();
 }
 
@@ -138,6 +158,8 @@ export async function initEndOfDay(staff, { onLogout: lo } = {}) {
 
 function setLabel(ended, at = null) {
   st.ended = ended;
+  st.endedAt = ended ? at : null;
+  queueMicrotask(emitStatus);   // the calendar button follows
   if (!btn) return;
   btn.classList.toggle("is-done", ended);
   btn.innerHTML = ended
@@ -175,10 +197,11 @@ export function teardownEndOfDay() {
   me = null;
   clearInterval(tick);
   tick = null;
-  Object.assign(st, { cfg: null, show: false, started: false, ended: false, finish: null, popup: true, planAt: 0, dayKey: "" });
+  Object.assign(st, { cfg: null, show: false, started: false, ended: false, finish: null, popup: true, planAt: 0, dayKey: "", apptName: "" });
   if (btn) { btn.hidden = true; btn.innerHTML = ""; btn.classList.remove("is-done", "is-nudge"); }
   btn = null;
   document.querySelectorAll("dialog.eod-dlg, dialog.eod-ask").forEach((d) => d.remove());
+  emitStatus();   // hides the calendar button on logout
 }
 
 window.addEventListener("kitday:changed", () => { if (me) refreshDay(); });

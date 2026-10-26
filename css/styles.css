@@ -8765,3 +8765,28 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
   .fe-blocks { width: 100%; }
   .fe-blk-list { grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); }
 }
+
+/* Calendar: End of Day under the logged-in clinician's column */
+.cal-eod {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: 100%; margin-top: 10px; padding: 12px 14px;
+  border: 0; border-radius: 12px; cursor: pointer;
+  background: #dc2626; color: #fff; font: inherit; font-weight: 700;
+  box-shadow: 0 2px 8px rgba(220, 38, 38, .25);
+}
+.cal-eod:hover { background: #b91c1c; }
+.cal-eod svg { width: 18px; height: 18px; }
+.cal-eod small { font-weight: 500; opacity: .9; }
+.cal-eod.is-urgent { animation: cal-eod-flash 1s ease-in-out infinite; }
+.cal-eod.is-done {
+  background: #ecfdf5; color: #047857; box-shadow: none; animation: none;
+  border: 1px solid #a7f3d0; font-weight: 600;
+}
+@keyframes cal-eod-flash {
+  0%, 100% { background: #dc2626; box-shadow: 0 0 0 0 rgba(220, 38, 38, .55); }
+  50%      { background: #f87171; box-shadow: 0 0 0 8px rgba(220, 38, 38, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cal-eod.is-urgent { animation: none; outline: 3px solid #fca5a5; }
+}
+.cal-eod-slot:empty { display: none; }
