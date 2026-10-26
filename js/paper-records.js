@@ -4,7 +4,7 @@ import { searchPatients, warmPatients } from "./patient-list.js";
 import { listPublishedForms, getFormTemplate, getFormVersion } from "./form-templates.js";
 import { normaliseField } from "./form-fields.js";
 import { mountConsumablesField, consumableAmountText } from "./consumables-field.js";
-import { consumeInTx } from "./inventory-api.js";
+import { consumeInTx, backdateCounts, getBaseline } from "./inventory-api.js";
 import { db } from "./firebase-config.js";
 import { runTransaction, collection, query, where, getDocs, limit }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -59,9 +59,12 @@ const ICON_FILE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 
 // Products used on a paper treatment record: linked to the scan, so it's never taken off twice
 const paperSubId = (fileId) => `paper_${fileId}`;
-async function usageExists(subId) {
+// The stock change already made for this scan: { id, lines }, or null
+async function usageOf(subId) {
   const s = await getDocs(query(collection(db, "inv_usage"), where("submissionId", "==", subId), limit(1)));
-  return !s.empty;
+  if (s.empty) return null;
+  const d = s.docs[0];
+  return { id: d.id, lines: Array.isArray(d.data().lines) ? d.data().lines : [] };
 }
 // Counts after a day, per "productId|loc": { date, adjusted, open }
 //   adjusted: a shortfall there was accepted, so the digital count already has it off
@@ -81,8 +84,15 @@ function countsAfter(dateKey, uid) {
           const x = out[key] || (out[key] = { date: c.dateKey, adjusted: false, adjDate: "", open: false, openDate: "" });
           if (c.dateKey < x.date) x.date = c.dateKey;
           if (!((Number(l.variance) || 0) < 0)) return;   // only a shortfall matters
-          if (l.status === "open") { x.open = true; if (!x.openDate || c.dateKey < x.openDate) x.openDate = c.dateKey; }
-          else { x.adjusted = true; if (!x.adjDate || c.dateKey < x.adjDate) x.adjDate = c.dateKey; }
+          // Accepted, or set as starting stock: the digital count was lowered then, so it's already off
+          if (["accepted", "baseline"].includes(l.status)) {
+            x.adjusted = true;
+            if (!x.adjDate || c.dateKey < x.adjDate) x.adjDate = c.dateKey;
+          } else if (["open", "investigating"].includes(l.status)) {
+            // Still waiting: taking it off now and correcting the count explains it
+            x.open = true;
+            if (!x.openDate || c.dateKey < x.openDate) x.openDate = c.dateKey;
+          }
         });
       });
       return out;
@@ -561,7 +571,8 @@ export function mountPaperRecords(container, { staff } = {}) {
     const csWraps = () => [...prodEl.querySelectorAll("[data-csf]")];
     const csPlanAll = () => (cs.mode === "none" ? [] : csWraps().flatMap((w) => (w.csPlan ? w.csPlan() : [])));
     const csProblemAny = () => { for (const w of csWraps()) { const m = w.csProblem && w.csProblem(); if (m) return m; } return ""; };
-    const stockFrom = () => (st.cfg && st.cfg.stockFrom) || "";
+    // Inventory's "Starting stock set" date wins; the Paper records setting is only used if it was never set
+    const stockFrom = () => (st.baseline && st.baseline.dateKey) || (st.cfg && st.cfg.stockFrom) || "";
     const beforeStock = (date) => !!(stockFrom() && date && date < stockFrom());
     const noteCsSoon = () => { clearTimeout(csTimer); csTimer = setTimeout(noteCs, 250); };
 
@@ -655,7 +666,7 @@ export function mountPaperRecords(container, { staff } = {}) {
         }
         if (c && c.open) {
           return `<div class="ppr-cs-note is-info"><span><strong>${esc(l.name)}</strong>: the ${where} count on ${esc(niceDay(c.openDate))}
-            found a shortfall that hasn't been reviewed yet. Taking this off brings the digital count in line, so mention this record when it's reviewed.</span></div>`;
+            came up short. This record explains it: the count is corrected, and if it's being investigated, that closes by itself as "Used before the count".</span></div>`;
         }
         return "";
       }).join("");
@@ -692,13 +703,32 @@ export function mountPaperRecords(container, { staff } = {}) {
       });
       return { take, note };
     }
-    // Takes it off (once), then tells Apps Script, which checks it's there
+    // 1. Takes it off stock (once), dated the treatment day. 2. Corrects opening counts done since.
+    // 3. Tells Apps Script, which checks it's there and puts the usage under the clinician.
     async function saveCs(split, { formName, patientId, patientName, recordDate }) {
       const subId = paperSubId(f.id);
-      if (split.take.length && !(await usageExists(subId))) {
-        await runTransaction(db, (tx) => consumeInTx(tx, {
-          submissionId: subId, lines: split.take, patientId, patientName, formName, recordDate, staff,
+      let corrected = null;
+      if (split.take.length) {
+        let u = await usageOf(subId);   // a retry never takes it off twice
+        if (!u) {
+          const res = await runTransaction(db, (tx) => consumeInTx(tx, {
+            submissionId: subId, lines: split.take, patientId, patientName, formName, recordDate, staff, paper: true,
+          }));
+          u = { id: res.usageId, lines: res.lines };
+        }
+        // What left the Shelf / JT storage, per batch (kit lines aren't in opening counts)
+        const applied = [];
+        u.lines.forEach((l, li) => (l.rows || []).forEach((row, ri) => {
+          const n = l.kind === "storage" ? Number(row.taken) || 0
+            : (l.kind === "vial" || l.kind === "shared") && row.opened ? 1 : 0;
+          if (!n || !["shelf", "jt"].includes(row.from)) return;
+          applied.push({ saleId: `${u.id}:${li}:${ri}`, productId: l.productId, date: recordDate, loc: row.from,
+            rows: [{ batch: row.batch || "", expiry: row.expiry || "", taken: n }] });
         }));
+        if (applied.length && recordDate < todayKey()) {
+          corrected = await backdateCounts(applied, staff, { kind: "use" })
+            .catch((ex) => { console.warn("Counts not corrected:", ex); return null; });
+        }
       }
       const r = await callApi({ action: "paper", op: "products", fileId: f.id, clinicianId: whoId(),
         taken: csSummary(split.take), noted: csSummary(split.note), none: cs.mode === "none" });
@@ -706,8 +736,12 @@ export function mountPaperRecords(container, { staff } = {}) {
       if (!r || r.ok !== true || r.status !== "products") throw new Error(notSaved(r));
       Object.assign(f, { productsDone: true, productsTaken: !!r.taken, products: r.products || [], productsAt: r.at || "",
         productsFor: r.clinician || "" });
-      return r;
+      return { ...r, corrected };
     }
+    // "2 count lines corrected, 1 investigation closed"
+    const correctedText = (c) => (c && c.lines
+      ? ` · ${c.lines} count line${c.lines === 1 ? "" : "s"} corrected${c.closed ? `, ${c.closed} investigation${c.closed === 1 ? "" : "s"} closed` : ""}`
+      : "");
 
     // Already filed: just the products
     async function saveProducts(btn) {
@@ -723,8 +757,9 @@ export function mountPaperRecords(container, { staff } = {}) {
       saving = true;
       const prog = startProgress(btn, [[0, split.take.length ? "Taking the products off stock…" : "Saving…"], [8000, "Still working…"]]);
       try {
-        await saveCs(split, { formName: t.name, patientId: f.patientId, patientName: f.patientName, recordDate: f.recordDate });
-        const msg = split.take.length ? `${split.take.length} product${split.take.length === 1 ? "" : "s"} taken off stock` : "Products used saved";
+        const cr = await saveCs(split, { formName: t.name, patientId: f.patientId, patientName: f.patientName, recordDate: f.recordDate });
+        const msg = (split.take.length ? `${split.take.length} product${split.take.length === 1 ? "" : "s"} taken off stock`
+          : "Products used saved") + correctedText(cr.corrected);
         prog.done("Saved", `${msg}. Opening the next scan…`);
         showToast(msg);
         draw();
@@ -861,7 +896,8 @@ export function mountPaperRecords(container, { staff } = {}) {
         if (withCs) {
           prog.say(split.take.length ? "Taking the products off stock…" : "Saving the products used…");
           try {
-            await saveCs(split, { formName, patientId: r.patientId, patientName: r.patientName, recordDate: r.recordDate });
+            const cr = await saveCs(split, { formName, patientId: r.patientId, patientName: r.patientName, recordDate: r.recordDate });
+            split.corrected = cr.corrected;
           } catch (ex) {
             console.error("Products not saved:", ex);
             prog.fail();
@@ -874,7 +910,7 @@ export function mountPaperRecords(container, { staff } = {}) {
         }
         const taken = split.take.length;
         const where = `Filed under ${FILE_WHERE[ft.type]} on ${r.patientName}'s page${
-          taken ? `, ${taken} product${taken === 1 ? "" : "s"} taken off stock` : ""}`;
+          taken ? `, ${taken} product${taken === 1 ? "" : "s"} taken off stock` : ""}${correctedText(split.corrected)}`;
         prog.done("Filed", `${where}. Opening the next scan…`);
         showToast(where);
         await pause(900);   // long enough to see it worked
@@ -1240,4 +1276,5 @@ export function mountPaperRecords(container, { staff } = {}) {
   loadScans();
   loadVisits();
   loadCfg().catch(() => {});
+  getBaseline().then((b) => { st.baseline = b; }).catch(() => {});
 }

@@ -1727,8 +1727,12 @@ export async function answerLoan(loan, ok, note, staff) {
 // Runs inside the transaction that saves the treatment record (reads first, then writes).
 // Stock never goes below zero: anything missing is saved as "short" so the team can sort it out.
 // The record always keeps the amount given to the patient.
-export async function consumeInTx(tx, { submissionId, lines, patientId, patientName, formName, recordDate, staff }) {
+// paper: a treatment recorded from paper after the day. The usage and its activity are dated the treatment day
+// (effectiveDate), so reports see it then and a count saved today doesn't treat it as moved after counting.
+export async function consumeInTx(tx, { submissionId, lines, patientId, patientName, formName, recordDate, staff, paper = false }) {
   const me = uid();
+  const uRef = doc(collection(db, "inv_usage"));
+  const late = paper && KEY_RE.test(recordDate || "") ? { effectiveDate: recordDate, ref: uRef.id, lateRecord: true } : {};
   const kitSnaps = new Map(), lotSnaps = new Map(), prodSnaps = new Map(), openSnaps = new Map();
   const getOnce = async (map, col, id) => { if (id && !map.has(id)) map.set(id, await tx.get(doc(db, col, id))); };
   for (const l of lines) {
@@ -1909,6 +1913,7 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
     if (l.kind === "vial") {
       const opened = l.rows.filter((r) => r.opened);
       logMove(tx, staff, {
+        ...late,
         type: "use", productId: l.productId, productName: l.name, unit: l.stockUnit || "vial",
         lines: opened.map((r) => ({ loc: r.from, batch: r.batch, expiry: r.expiry, delta: -1 })),
         reason: "Treatment",
@@ -1921,6 +1926,7 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
       const opened = l.rows.filter((r) => r.opened);
       if (opened.length) {
         logMove(tx, staff, {
+          ...late,
           type: "shared-open", productId: l.productId, productName: l.name, unit: l.unit,
           lines: opened.map((r) => ({ loc: r.from, batch: r.batch, expiry: r.expiry, delta: -1 })),
           reason: "Treatment", note: `Opened for ${patientName} · ${formName}`.slice(0, 500),
@@ -1931,6 +1937,7 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
     const moved = l.rows.filter((r) => r.taken);
     if (!moved.length) return;
     logMove(tx, staff, {
+      ...late,
       type: l.kind === "kit" ? "kit-use" : "use", productId: l.productId, productName: l.name, unit: l.unit,
       lines: moved.map((r) => ({ loc: r.from, batch: r.batch, expiry: r.expiry, delta: -r.taken })),
       reason: "Treatment", note: [`${patientName} · ${formName}`,
@@ -1940,18 +1947,21 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
   });
 
   const saved = out.map(({ fid, block, ...l }) => ({ ...l, rows: l.rows.map(({ ref, ...r }) => r) }));
-  const uRef = doc(collection(db, "inv_usage"));
   const isShort = saved.some((l) => l.short > 0);
   tx.set(uRef, {
     submissionId, patientId: clip(patientId, 150), patientName: clip(patientName, 150), formName: clip(formName, 150),
     recordDate: KEY_RE.test(recordDate || "") ? recordDate : "", lines: saved, short: isShort,
-    by: who(staff), byUid: me, at: serverTimestamp(),
+    by: who(staff), byUid: me,
+    // Paper: dated midday on the treatment day (like recordPaperUse), with when it was really entered
+    ...(late.effectiveDate
+      ? { source: "paper", at: Timestamp.fromDate(new Date(`${recordDate}T12:00:00`)), enteredAt: serverTimestamp() }
+      : { at: serverTimestamp() }),
   });
   if (isShort) tx.set(doc(collection(db, "notify_outbox")), outboxDoc("usage.short", { usageId: uRef.id }, me));
 
   const answers = {};
   out.forEach(({ fid }, i) => { (answers[fid] = answers[fid] || { lines: [] }).lines.push(saved[i]); });
-  return { answers };
+  return { answers, usageId: uRef.id, lines: saved };
 }
 
 
@@ -3845,7 +3855,7 @@ export async function applyInvoiceSales(rows, staff, onProgress = () => {}) {
 // applied: [{ saleId, productId, date, loc ("shelf" if missing), rows: [{ batch, expiry, taken }] }]
 // kind: "sale" (Timely invoices, sales recorded by hand) or "use" (treatments recorded from paper)
 // before: only counts saved before this moment (e.g. a write-off that already took the stock off digital)
-async function backdateCounts(applied, staff, { kind = "sale", before = null } = {}) {
+export async function backdateCounts(applied, staff, { kind = "sale", before = null } = {}) {
   const out = { lines: 0, closed: 0, skipped: [], failed: 0 };
   const list = applied.filter((a) => (a.rows || []).some((r) => Number(r.taken) > 0));
   if (!list.length) return out;
