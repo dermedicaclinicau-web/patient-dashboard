@@ -25,6 +25,10 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    match /staff_prefs/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
     // Reporting → patient lists: who's been contacted (one per list and patient)
     match /report_contacts/{id} {
       allow read: if can('reports.patients');
@@ -1348,7 +1352,7 @@ match /inv_count_drafts/{id} {
       allow delete: if false;
     }
 
-    
+
     // ===================== Safety net =====================
     // Anything not allowed by a rule above stays locked
     // (this includes staff_roles and staff_audit, which only Apps Script writes)

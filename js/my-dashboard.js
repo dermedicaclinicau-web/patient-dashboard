@@ -21,6 +21,8 @@ import { openStartOfDayKit } from "./start-of-day.js";
 import { mountMyNotes } from "./my-notes.js";
 import { mountRecordingJobs } from "./recording-bar.js";
 import { mountMyVisits } from "./my-visits.js";
+import { getDashPrefs, saveDashPrefs, syncDashPrefs } from "./dash-prefs.js";
+import { enableDashArrange } from "./dash-arrange.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const fmt = (n) => String(+Number(n || 0).toFixed(1));
@@ -65,14 +67,16 @@ const DASH_CARDS = [
 const SIDE_CARDS = new Set(["notes", "kit", "requests", "stock"]);
 const allowedCard = (k) => k === "notes" || (k === "visits" ? can("consult.record") : can(`dash.${k}`));
 
-// Per person, on this device: hidden cards, collapsed cards and the card order
-const readSet = (key) => { try { return new Set(JSON.parse(localStorage.getItem(key) || "[]")); } catch { return new Set(); } };
-const writeSet = (key, set) => { try { localStorage.setItem(key, JSON.stringify([...set])); } catch { /* private mode */ } };
-const hideKey = (uid) => `dm.dash.hidden.${uid}`;
-const foldKey = (uid) => `dm.dash.collapsed.${uid}`;
-const orderKey = (uid) => `dm.dash.order.${uid}`;
-const readOrder = (uid) => { try { const a = JSON.parse(localStorage.getItem(orderKey(uid)) || "[]"); return Array.isArray(a) ? a : []; } catch { return []; } };
-const writeOrder = (uid, list) => { try { localStorage.setItem(orderKey(uid), JSON.stringify(list)); } catch { /* private mode */ } };
+// Per person: hidden and collapsed cards, the order, columns and colours (dash-prefs.js: this device and their login)
+const hideKey = (uid) => ({ uid, f: "hidden" });
+const foldKey = (uid) => ({ uid, f: "folded" });
+const readSet = (k) => new Set(getDashPrefs(k.uid)[k.f]);
+const writeSet = (k, set) => saveDashPrefs(k.uid, { [k.f]: [...set] });
+const readOrder = (uid) => getDashPrefs(uid).order;
+const writeOrder = (uid, list) => saveDashPrefs(uid, { order: list });
+// Left or right column: where they've put it, otherwise its usual place
+const sideOf = (uid, k) => { const c = getDashPrefs(uid).cols[k]; return c ? c === "side" : SIDE_CARDS.has(k); };
+const colorAttr = (uid, k) => { const c = getDashPrefs(uid).colors[k]; return c ? ` data-mdc="${c}"` : ""; };
 // Saved order first. A card that's new since then goes straight after the card before it in the default order.
 const byOrder = (list, order) => {
   const keys = DASH_CARDS.map(([k]) => k);
@@ -217,6 +221,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
         <p class="muted">${esc(new Date().toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long", year: "numeric" }))}
           · <span data-role="updated">loading…</span></p></div>
       <div class="fb-head-actions">
+        <button type="button" class="btn-ghost" data-act="arrange" aria-pressed="false">Arrange</button>
         <button type="button" class="btn-ghost" data-act="customise">Customise</button>
         <button type="button" class="btn-ghost" data-act="refresh">${svg(ICON.refresh)} Refresh</button>
       </div>
@@ -244,9 +249,9 @@ export async function mountMyDashboard(container, { staff } = {}) {
       && !(k === "kit" && !canKit) && !(k === "overview" && !(canOrder || canJt)) && !(k === "days" && !isAdmin());
     const list = byOrder(DASH_CARDS, readOrder(me)).filter(([k]) => here(k));
     const box = ([k, label]) => (k === "visits" ? '<section class="md-card" data-role="visits"></section>'
-      : `<section class="md-card is-loading"><div class="md-card-head"><h3>${esc(label)}</h3></div>${LOADING}</section>`);
-    const main = list.filter(([k]) => !SIDE_CARDS.has(k));
-    const side = list.filter(([k]) => SIDE_CARDS.has(k));
+      : `<section class="md-card is-loading"${colorAttr(me, k)}><div class="md-card-head"><h3>${esc(label)}</h3></div>${LOADING}</section>`);
+    const main = list.filter(([k]) => !sideOf(me, k));
+    const side = list.filter(([k]) => sideOf(me, k));
     const kpis = `<div class="md-kpis">${[0, 1, 2].map(() => `<div class="md-kpi is-loading">
       <span class="md-kpi-l">Loading…</span><span class="md-kpi-v">—</span><span class="md-kpi-s">&nbsp;</span></div>`).join("")}</div>`;
     return `${kpis}<div class="md-layout${side.length ? "" : " is-single"}">
@@ -286,7 +291,31 @@ export async function mountMyDashboard(container, { staff } = {}) {
   }
 
   showShell();
+  // Arrange: drag cards and choose colours
+  const arrange = enableDashArrange(root, {
+    uid: () => myUid(),
+    onMove: ({ main, side }) => {
+      const me = myUid();
+      const p = getDashPrefs(me);
+      const cols = { ...p.cols };
+      main.forEach((k) => { cols[k] = "main"; });
+      side.forEach((k) => { cols[k] = "side"; });
+      const seen = new Set([...main, ...side]);
+      const rest = byOrder(DASH_CARDS, p.order).map(([k]) => k).filter((k) => !seen.has(k));
+      saveDashPrefs(me, { order: [...main, ...side, ...rest], cols });
+    },
+    onColor: (k, c) => {
+      const me = myUid();
+      const colors = { ...getDashPrefs(me).colors };
+      if (c) colors[k] = c; else delete colors[k];
+      saveDashPrefs(me, { colors });
+    },
+  });
 
+  // Their layout from their login (e.g. set up on another iPad): redraw if it's different from this device's
+  syncDashPrefs(myUid()).then((changed) => {
+    if (changed && root.isConnected) { showShell(); load(); }
+  });
   let drawTasks = () => {};
   let loadedAt = 0;
   let taskMap = new Map();
@@ -807,16 +836,15 @@ export async function mountMyDashboard(container, { staff } = {}) {
       ["appts", apptHtml], ["tasks", tasksHtml], ["notes", notesHtml], ["days", daysHtml],
       ["kit", kitHtml], ["records", recordsHtml], ["usage", usedHtml], ["requests", reqHtml], ["stock", stockHtml], ["overview", overviewHtml]];
     const shown = byOrder(CARDS, readOrder(me)).filter(([k, h]) => h && show(k));
-    const mainCards = shown.filter(([k]) => !SIDE.has(k));
-    const sideCards = shown.filter(([k]) => SIDE.has(k));
+    const mainCards = shown.filter(([k]) => !sideOf(me, k));
+    const sideCards = shown.filter(([k]) => sideOf(me, k));
     const hasSide = !!(qaCard || sideCards.length);
     body.innerHTML = `${kpiHtml}${qaTop}${shown.length || qaCard
       ? `<div class="md-layout${hasSide ? "" : " is-single"}">
           <div class="md-col md-main">${mainCards.map(([, h]) => h).join("")}</div>
-          ${hasSide ? `<div class="md-col md-side">${qaCard}${sideCards.map(([, h]) => h).join("")}</div>` : ""}
+          <div class="md-col md-side">${qaCard}${sideCards.map(([, h]) => h).join("")}</div>
         </div>`
       : '<div class="tm-empty">Nothing to show yet. Use <strong>Customise</strong> to choose your cards, or ask an Admin to turn some on for you.</div>'}`;
-
     const grid = body.querySelector(".md-layout");
     if (grid) {
       placeVisits();
@@ -871,7 +899,9 @@ export async function mountMyDashboard(container, { staff } = {}) {
       b.innerHTML = svg(ICON.chev);
       head.appendChild(b);
     });
+    arrange.decorate(grid);
   }
+
   function setFolded(k, fold) {
     const me = myUid();
     const folded = readSet(foldKey(me));
@@ -1076,14 +1106,17 @@ export async function mountMyDashboard(container, { staff } = {}) {
       [list[i], list[j]] = [list[j], list[i]];
       draw(`[data-mv="${b.dataset.mv}"][data-i="${j}"]`);
     });
+    let resetAll = false;
     dlg.querySelector('[data-act="reset"]').addEventListener("click", () => {
       list = DASH_CARDS.filter(([k]) => allowedCard(k)).map(([k, label]) => ({ k, label, on: true }));
+      resetAll = true;
       draw();
     });
     dlg.addEventListener("close", () => dlg.remove());
     dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
     dlg.querySelector("form").addEventListener("submit", (ev) => {
       ev.preventDefault();
+      if (resetAll) saveDashPrefs(me, { cols: {}, colors: {} });
       writeSet(hideKey(me), new Set(list.filter((r) => !r.on).map((r) => r.k)));
       writeOrder(me, list.map((r) => r.k));
       dlg.close();
