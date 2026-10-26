@@ -9119,3 +9119,16 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 .kr-hist .n { text-align: right; white-space: nowrap; }
 .kr-hist tfoot td { font-weight: 600; background: #f8fafc; }
 .kr-more { display: block; margin: 8px auto 0; }
+
+.kr-staff { position: relative; }
+.kr-staff > summary { list-style: none; cursor: pointer; min-width: 170px; user-select: none; }
+.kr-staff > summary::-webkit-details-marker { display: none; }
+.kr-staff > summary::after { content: "▾"; float: right; margin-left: 10px; color: #64748b; }
+.kr-staff-panel {
+  position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; min-width: 220px; max-height: 320px; overflow: auto;
+  padding: 8px; background: #fff; border: 1px solid #cbd5e1; border-radius: 10px; box-shadow: 0 8px 24px rgba(15, 23, 42, .12);
+}
+.kr-staff-acts { display: flex; gap: 6px; padding: 0 2px 6px; margin-bottom: 4px; border-bottom: 1px solid #e2e8f0; }
+.kr-staff-opt { display: flex; align-items: center; gap: 8px; padding: 6px 4px; border-radius: 6px; cursor: pointer; font-weight: 400; }
+.kr-staff-opt:hover { background: #f0fdfa; }
+.kr-staff-opt small { color: #64748b; }

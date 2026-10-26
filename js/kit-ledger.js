@@ -175,8 +175,8 @@ function groupDays(entries) {
 
 /* ---------- Reporting → Kit reconciliation ---------- */
 export function mountKitReconciliation(body, { csv = null } = {}) {
-  const st = { staff: "", product: "", from: daysAgo(89), to: "", limit: 100, open: new Set(), people: [], products: [],
-    problem: "", oldProblem: "", loadingOld: false, base: null, old: {}, seq: 0 };
+  const st = { staff: new Set(), staffOpen: false, product: "", from: daysAgo(89), to: "", limit: 100, open: new Set(), people: [],
+    products: [], problem: "", oldProblem: "", loadingOld: false, base: null, old: {}, seq: 0 };
 
   // Portal records: read once
   async function load() {
@@ -268,6 +268,12 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
         });
       }
     });
+    // Only staff ticked as an Injector in Staff management are shown
+    people.forEach((p) => {
+      const s = b.byId.get(p.uid);
+      p.injector = !!(s && s.injector);
+      p.role = (s && s.role) || "";
+    });
     st.people = people;
   }
   
@@ -275,7 +281,9 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
     const a = st.from || "0000-00-00", b = st.to || "9999-99-99";
     const out = [];
     st.people.forEach((p) => {
-      if ((st.product && p.product.id !== st.product) || (st.staff && p.uid !== st.staff)) return;
+      if (!p.injector) return;
+      if (st.product && p.product.id !== st.product) return;
+      if (st.staff.size && !st.staff.has(p.uid)) return;
       groupDays(p.L.filter((e) => e.date >= a && e.date <= b)).forEach((d) => {
         const empty = (c) => !c || (!c.value && !(c.batches || []).some((x) => x.batch));
         if (empty(d.start) && empty(d.end) && !d.uses.length && !d.restocks.length && !d.colleagues.length) return;
@@ -299,12 +307,34 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
   }
 
   function toolsHtml() {
+    // Injectors only, one per person (the same person can appear once per product)
     const staff = new Map();
-    st.people.filter((p) => !st.product || p.product.id === st.product).forEach((p) => staff.set(p.uid, p.name));
+    st.people.filter((p) => p.injector).forEach((p) => staff.set(p.uid, { name: p.name, role: p.role }));
+    const list = [...staff].sort((a, b) => a[1].name.localeCompare(b[1].name, "en-AU"));
+    const dup = {};
+    list.forEach(([, s]) => { dup[s.name] = (dup[s.name] || 0) + 1; });
+    const label = (uid, s) => esc(s.name) + (dup[s.name] > 1 && s.role ? ` <small>(${esc(s.role)})</small>` : "");
+
+    const picked = list.filter(([uid]) => st.staff.has(uid));
+    const summary = !picked.length ? "All injectors"
+      : picked.length <= 2 ? picked.map(([, s]) => s.name).join(", ")
+      : `${picked.length} injectors`;
+
     return `<div class="inv-tools kr-tools">
-        <label class="rp-from">Staff <select class="fb-select" data-f="staff"><option value="">All staff</option>
-          ${[...staff].sort((a, b) => a[1].localeCompare(b[1], "en-AU")).map(([uid, name]) =>
-            `<option value="${esc(uid)}"${st.staff === uid ? " selected" : ""}>${esc(name)}</option>`).join("")}</select></label>
+        <div class="rp-from">Staff
+          <details class="kr-staff"${st.staffOpen ? " open" : ""}>
+            <summary class="fb-select">${esc(summary)}</summary>
+            <div class="kr-staff-panel">
+              <div class="kr-staff-acts">
+                <button type="button" class="lh-btn" data-act="kr-staff-all">All</button>
+                <button type="button" class="lh-btn" data-act="kr-staff-none">Clear</button>
+              </div>
+              ${list.length ? list.map(([uid, s]) => `<label class="kr-staff-opt">
+                  <input type="checkbox" data-staff="${esc(uid)}"${st.staff.has(uid) ? " checked" : ""} /> ${label(uid, s)}
+                </label>`).join("") : '<p class="muted">No staff are ticked as an Injector yet.</p>'}
+            </div>
+          </details>
+        </div>
         <label class="rp-from">From <input class="fe-in" type="date" data-f="from" value="${esc(st.from)}" /></label>
         <label class="rp-from">To <input class="fe-in" type="date" data-f="to" value="${esc(st.to)}" /></label>
         <label class="rp-from">Product <select class="fb-select" data-f="product"><option value="">All products</option>
@@ -392,6 +422,10 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
 
   body.addEventListener("click", (ev) => {
     if (ev.target.closest("a")) return;
+    // Clicking anywhere else closes the Staff list
+    const dd = body.querySelector(".kr-staff");
+    if (dd && dd.open && !ev.target.closest(".kr-staff")) { dd.open = false; st.staffOpen = false; }
+
     const h = ev.target.closest("[data-hist]");
     if (h) {
       const id = h.dataset.hist;
@@ -399,14 +433,33 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
       draw();
       return;
     }
+    if (ev.target.closest('[data-act="kr-staff-all"]')) {
+      st.people.filter((p) => p.injector).forEach((p) => st.staff.add(p.uid));
+      st.limit = 100;
+      draw();
+      return;
+    }
+    if (ev.target.closest('[data-act="kr-staff-none"]')) { st.staff.clear(); st.limit = 100; draw(); return; }
     if (ev.target.closest('[data-act="kr-more"]')) { st.limit += 100; draw(); return; }
     if (ev.target.closest('[data-act="kr-csv"]')) exportCsv();
   });
+
+  // Remember whether the Staff list is open (the table is drawn again after each tick)
+  body.addEventListener("toggle", (ev) => {
+    if (ev.target.classList && ev.target.classList.contains("kr-staff")) st.staffOpen = ev.target.open;
+  }, true);
+
   body.addEventListener("change", (ev) => {
+    const uid = ev.target.dataset.staff;
+    if (uid !== undefined) {
+      if (ev.target.checked) st.staff.add(uid); else st.staff.delete(uid);
+      st.limit = 100;
+      draw();
+      return;
+    }
     const f = ev.target.dataset.f;
-    if (!["staff", "from", "to", "product"].includes(f)) return;
+    if (!["from", "to", "product"].includes(f)) return;
     st[f] = ev.target.value;
-    if (f === "product") st.staff = "";
     st.limit = 100;
     if (f === "from" || f === "to") loadOld(false); else draw();
   });
