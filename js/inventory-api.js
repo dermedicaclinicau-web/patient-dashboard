@@ -1753,8 +1753,8 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
 
     // Kit products in JT storage / on the Shelf (e.g. Xeomin): units come out of that place's opened vial.
   // When it runs out, the next vial (oldest expiry first) is opened automatically. Nothing is thrown away.
-  function vialLine(l) {
-    const r0 = l.rows[0] || {};
+  function vialLine(l) { return (l.rows || []).flatMap((r0) => vialRow(l, r0 || {})); }
+  function vialRow(l, r0) {
     const loc = l.loc === "jt" ? "jt" : "shelf";
     const size = Number(l.dosePer) || 0;
     let left = round1(Math.max(0, Number(r0.amount) || 0));

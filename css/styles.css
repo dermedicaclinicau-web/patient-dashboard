@@ -9058,3 +9058,5 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 .kd-verdict.is-warn { background: #fffbeb; color: #92400e; }
 .kd-note { margin: 0 0 10px; font-size: 13px; color: #475569; }
 .kd-note.is-warn { color: #92400e; }
+.cs-vrun { display: block; margin-top: 4px; font-size: 12px; color: #92400e; }
+.cs-table.is-vial select.fe-in { min-width: 220px; }
