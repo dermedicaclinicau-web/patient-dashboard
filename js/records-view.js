@@ -152,6 +152,17 @@ export function mountRecords(root, patient) {
   });
   if (highlightId && !txCard.open) txCard.open = true; // just saved a record: show it
   if (txCard.open) load();
+
+  // Loads the records again, e.g. after a form is saved in another tab.
+  // Waits for a load already in progress, so the newer record isn't missed.
+  async function reload() {
+    if (!grid.isConnected) return;
+    if (loading) await loading;
+    loaded = false;
+    txBody.innerHTML = csBody.innerHTML = '<div class="skeleton sm"></div>';
+    return load();
+  }
+  return { reload };
 }
 
 /* ===================== Templates ===================== */

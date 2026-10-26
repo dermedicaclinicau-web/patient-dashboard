@@ -211,6 +211,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   let pastFormsLoaded = false;
   let transcriptRecords = [];  // consultations, newest first (for the master plan)
   let planView = null;         // the Treatment Plan overview
+  let recordsView = null;      // Treatment Records + Consent Records
 
   root.addEventListener("click", (e) => {
     const t = e.target;
@@ -427,7 +428,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   notesView = mountPersonalNotes(root, patient, staff);
   loadTranscriptSections();
   mountSkincare(root, patient, staff);
-  mountRecords(root, patient);
+  recordsView = mountRecords(root, patient);
   mountFormRecords(root, patient);
   mountHistory(root, patient);  
   tasksView = mountPatientTasks(root, patient);
@@ -441,6 +442,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     if (!m || m.type !== "form-saved" || !myIds.has(m.patientId)) return;
     mountFormRecords(root, patient);   // Other forms
     loadPastForms();                   // Tx / Cons / Rx badges and the "No Tx Record" warning
+    if (recordsView && ["consent", "treatment"].includes(m.category)) recordsView.reload(); // Treatment / Consent Records
     showToast("A form was saved in another tab. This page has been updated.");
   };
   let savedBc = null;
@@ -515,6 +517,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       loadToday(), loadPreconsultData(), loadReminders(), loadTranscriptSections(), loadPastForms(),
       notesView ? notesView.reload() : null,
       tasksView ? tasksView.reload() : null,
+      recordsView ? recordsView.reload() : null,
     ]);
     if (btn.isConnected) {
       btn.disabled = false;
