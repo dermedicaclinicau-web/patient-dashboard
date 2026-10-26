@@ -65,6 +65,25 @@ function position() {
   }
 }
 
+// Another script adds a search box to long lists. This menu has its own, so any other one is removed
+// (whenever it appears), and the menu's own search keeps the focus.
+function keepOwnSearch(el) {
+  const tidy = () => {
+    const extra = [...el.querySelectorAll("input")].filter((i) => !i.classList.contains("fp-search"));
+    if (!extra.length) return;
+    const refocus = extra.includes(document.activeElement);
+    extra.forEach((i) => {
+      const box = i.parentElement;
+      i.remove();
+      // Its wrapper too, if that's all the wrapper held
+      if (box && box !== el && !box.matches(".fp-body, .fp-list, .fp-head") && !box.children.length && !box.textContent.trim()) box.remove();
+    });
+    const own = el.querySelector(".fp-search");
+    if (refocus && own) own.focus();
+  };
+  new MutationObserver(tidy).observe(el, { childList: true, subtree: true });
+}
+
 function items() {
   return menu ? [...menu.querySelectorAll(".fp-item:not([hidden])")] : [];
 }
@@ -88,6 +107,8 @@ async function open(trigger, category, staff, group, rxKind = "") {
   menu.className = "fp-menu";
   menu.setAttribute("role", "dialog");
   menu.setAttribute("aria-label", label);
+  menu.dataset.noAutoSearch = "true";   // this menu has its own search
+  keepOwnSearch(thisMenu);
   menu.innerHTML = `<div class="fp-head">${esc(label)}</div><div class="fp-body"><div class="fp-loading">Loading forms…</div></div>`;
   document.body.appendChild(menu);
   position();
