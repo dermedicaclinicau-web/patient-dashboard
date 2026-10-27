@@ -191,6 +191,8 @@ export function mountPaperRecords(container, { staff } = {}) {
     </section>`;
   const tabsEl = container.querySelector(".ppr-tabs");
   const body = container.querySelector('[data-role="body"]');
+  // Still showing this page? (The container is reused by other pages, so isConnected isn't enough)
+  const alive = () => body.isConnected;
 
   /* ---------- Drawing ---------- */
 
@@ -365,7 +367,7 @@ export function mountPaperRecords(container, { staff } = {}) {
     const my = ++thumbJob;
     const need = list.map((f) => f.id).filter((id) => !(id in st.thumbs));
     for (let i = 0; i < need.length; i += 12) {
-      if (my !== thumbJob || !container.isConnected) return;
+      if (my !== thumbJob || !alive()) return;
       try {
         const r = await callApi({ action: "paper", op: "thumbs", ids: need.slice(i, i + 12) });
         Object.entries(r.thumbs || {}).forEach(([id, url]) => {
@@ -379,28 +381,28 @@ export function mountPaperRecords(container, { staff } = {}) {
 
   async function loadScans(fresh = false) {
     st.fBusy = true;
-    if (st.files && container.isConnected) draw();
+    if (st.files && alive()) draw();
     try {
       const r = await callApi({ action: "paper", op: "list", fresh });
       if (r.problem) throw new Error(r.problem);
       st.files = (r.files || []).map((f) => ({ ...f, day: f.created ? keyOf(new Date(f.created)) : "" }));
-      if (r.folderUrl) {
-        const a = container.querySelector('[data-role="folder"]');
+      const a = container.querySelector('[data-role="folder"]');
+      if (r.folderUrl && a) {
         a.href = r.folderUrl;
         a.hidden = false;
       }
     } catch (err) {
       console.error("Paper scans:", err);
       st.files = st.files || [];
-      if (container.isConnected) showToast(err.message || "Couldn't load the scans.");
+      if (alive()) showToast(err.message || "Couldn't load the scans.");
     }
     st.fBusy = false;
-    if (container.isConnected) draw();
+    if (alive()) draw();
   }
-
+  
   async function loadVisits(fresh = false) {
     st.vBusy = true;
-    if (st.visits && container.isConnected && st.tab === "visits") draw();
+    if (st.visits && alive() && st.tab === "visits") draw();
     try {
       const r = await callApi({ action: "paper", op: "visits", fresh });
       if (r.problem) throw new Error(r.problem);
@@ -409,10 +411,10 @@ export function mountPaperRecords(container, { staff } = {}) {
     } catch (err) {
       console.error("Visits without a record:", err);
       if (!st.visits) st.visits = [];
-      if (container.isConnected) showToast(err.message || "Couldn't check the visits.");
+      if (alive()) showToast(err.message || "Couldn't check the visits.");
     }
     st.vBusy = false;
-    if (container.isConnected) draw();
+    if (alive()) draw();
   }
 
   /* ---------- A scan: view it and sort it ---------- */
