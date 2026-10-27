@@ -1125,8 +1125,9 @@ function paRecHtml(r, cls, text) {
     return `<button type="button" class="${cls}" data-pa-summary="${escapeHtml(r.summaryId)}" title="${title}">${text}</button>`;
   }
   if (!r.href) return `<span class="${cls}" title="${title} (no file attached)">${text}</span>`;
-  const external = /^https?:\/\//i.test(r.href) ? ' target="_blank" rel="noopener noreferrer"' : "";
-  return `<a class="${cls}" href="${escapeHtml(r.href)}"${external} title="${title}">${inner}</a>`;
+  // Every record opens in a new tab, so staff can keep the patient page open
+  const rel = /^https?:\/\//i.test(r.href) ? "noopener noreferrer" : "noopener";
+  return `<a class="${cls}" href="${escapeHtml(r.href)}" target="_blank" rel="${rel}" title="${title}">${text}</a>`;
 }
 
 function paBadgesHtml(recs, missing) {
