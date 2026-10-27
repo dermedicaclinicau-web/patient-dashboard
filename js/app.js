@@ -36,6 +36,10 @@ import { openMyPhoto } from "./my-photo.js";
 import "./menu-search.js";
 import "./mobile-nav.js";
 import "./force-refresh.js";   // first, so it can see recordings start
+import { freshReload } from "./fresh-reload.js";
+
+// Remember every file the portal loads (the default list stops at 250), so "Get latest version" can refresh them all
+try { performance.setResourceTimingBufferSize(2000); } catch { /* older browsers */ }
 
 // iPad: menu links can't be lifted and dragged (works even if the menu is added later)
 document.addEventListener("dragstart", (e) => {
@@ -215,7 +219,23 @@ if (myPhotoBtn) myPhotoBtn.addEventListener("click", () => {
     catch (err) { console.warn("Login token not refreshed:", err); }
   });
 });
-
+// Get latest version: fresh copies of every file, then reload.
+// Not while recording or with unsaved notes, so nothing is lost.
+const meRefresh = $("me-refresh");
+if (meRefresh) meRefresh.addEventListener("click", async () => {
+  closeTopbarMenu();
+  if (isRecorderBusy() || hasPendingUploads()) {
+    showToast("Wait until the recording has finished uploading, then try again.");
+    return;
+  }
+  if (hasUnsavedNotes()) {
+    showToast("Save your clinical notes first, then try again.");
+    return;
+  }
+  meRefresh.disabled = true;
+  showToast("Getting the latest version…");
+  await freshReload();
+});
 els.profileCancel.addEventListener("click", () => els.profileDialog.close());
 
 els.profileForm.addEventListener("submit", async (e) => {
