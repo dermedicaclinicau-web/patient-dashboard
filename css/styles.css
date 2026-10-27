@@ -9328,3 +9328,7 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 
 .appt.is-visit .appt-time { display: flex; flex-wrap: wrap; align-items: center; gap: .2rem .45rem; }
 .appt.is-visit .appt-count { margin-left: 0; }
+
+/* Consent records: the prescription tag can be clicked */
+a.rc-badge { text-decoration: none; cursor: pointer; }
+a.rc-badge:hover { filter: brightness(.96); text-decoration: underline; }

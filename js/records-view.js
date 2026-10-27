@@ -1,6 +1,9 @@
 import { fetchPatientRecords, CATEGORIES, OTHER_CATEGORY } from "./records.js";
-import { escapeHtml } from "./utils.js";
-import { getSubmission } from "./form-submissions.js";
+import { escapeHtml, parseDateKey } from "./utils.js";
+import { getSubmission, listSubmissionsForPatient } from "./form-submissions.js";
+import { fetchBillingAndRx } from "./billing-rx-view.js";
+import { patientIds } from "./patients.js";
+import { getFormVersion, listPublishedForms } from "./form-templates.js";
 import { openMoveRecordDialog, canMoveRecords } from "./record-move.js";
 
 const svg = (p, cls = "") =>
@@ -26,6 +29,151 @@ function isOpenSaved(key, fallback) {
     const s = JSON.parse(localStorage.getItem("pd-open-sections")) || {};
     return key in s ? !!s[key] : fallback;
   } catch { return fallback; }
+}
+/* ===================== Prescriptions on consent records ===================== */
+// Portal consents: the form's Prescription check (set in Form Builder) decides. Its result was saved with the consent;
+// if no prescription was on file then, one saved since still counts.
+// Old-app consents (PDFs) aren't linked to a form, so injectables consents look for any prescription close to the day.
+
+const RX_AFTER_DAYS = 3;    // a prescription up to this many days after the consent still counts
+const RX_LEGACY_DAYS = 3;   // old-app consents: this many days either side
+const DAY_MS = 864e5;
+const dayNo = (d) => Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / DAY_MS);
+const isDate = (d) => d instanceof Date && !isNaN(d);
+
+// The meaningful part of a form name, the same way the live form's Prescription check matches them
+// ("2026 S4 Xeomin Prescription" and "Xeomin" both become "xeomin")
+const NAME_NOISE = new Set(["consent", "consents", "form", "forms", "record", "records", "version", "new", "updated",
+  "copy", "of", "for", "and", "the", "patient", "prescription", "prescriptions", "script", "scripts", "rx", "s4"]);
+function coreName(s) {
+  return String(s || "").toLowerCase()
+    .replace(/\bwr\b/g, "wrinkle relaxer")
+    .replace(/[^a-z0-9]+/g, " ")
+    .split(" ")
+    .filter((w) => w && !NAME_NOISE.has(w) && !/^(19|20)\d{2}$/.test(w) && !/^v\d+$/.test(w))
+    .join(" ");
+}
+
+// Old-app consents only: injectables need a prescription
+function legacyNeedsRx(c) {
+  if (c.category === "wr") return true;
+  const cat = ALL_CATS.find((x) => x.key === c.category);
+  return /wrinkle|filler|radiesse|injectable/i.test(cat ? cat.title : "");
+}
+
+// A published form version's questions (null if it couldn't be read), fetched once each
+const verCache = new Map();
+function versionFields(templateId, version) {
+  const k = `${templateId}|${version}`;
+  if (!verCache.has(k)) {
+    verCache.set(k, getFormVersion(templateId, version).then((v) => (v ? v.fields : [])).catch(() => null));
+  }
+  return verCache.get(k);
+}
+
+// Every prescription for this patient, the patient's saved forms (for the consents' saved checks), and the published forms
+async function fetchPrescriptions(patient) {
+  const [scripts, subs, forms] = await Promise.allSettled([
+    fetchBillingAndRx(patient),
+    listSubmissionsForPatient([patient.id, ...patientIds(patient)]),
+    listPublishedForms(),
+  ]);
+  const list = [];
+  if (scripts.status === "fulfilled") {
+    // Portal ones come from the saved forms below, so they aren't counted twice
+    [...(scripts.value.rx || []), ...(scripts.value.injectables || [])].filter((r) => !r.portalId).forEach((r) => {
+      if (!isDate(r.date)) return;
+      list.push({ date: r.date, title: r.title || "Prescription", templateId: "",
+        href: /^https:\/\//i.test(r.link || "") ? r.link : "" });
+    });
+  } else {
+    console.warn("Consent prescriptions: older records failed:", scripts.reason);
+  }
+  const allSubs = subs.status === "fulfilled" ? subs.value : [];
+  if (subs.status !== "fulfilled") console.warn("Consent prescriptions: portal forms failed:", subs.reason);
+  allSubs.forEach((s) => {
+    const cat = String(s.category || "").toLowerCase();
+    const isRx = cat === "rx" || cat === "prescription" || /prescription/i.test(s.templateName || "");
+    const d = isRx ? parseDateKey(s.recordDate) : null;
+    if (d) list.push({ date: d, title: s.templateName || "Prescription", templateId: s.templateId,
+      href: `#/form-record/${encodeURIComponent(s.id)}` });
+  });
+  return {
+    list,
+    subs: allSubs,
+    forms: forms.status === "fulfilled" ? forms.value : [],
+    ok: scripts.status === "fulfilled" && subs.status === "fulfilled",
+  };
+}
+
+// The prescription closest to the consent day, from `monthsBefore` months before it up to RX_AFTER_DAYS after
+function closestRx(list, date, monthsBefore, daysAfter = RX_AFTER_DAYS) {
+  const from = new Date(date);
+  from.setMonth(from.getMonth() - monthsBefore);
+  const lo = dayNo(from);
+  const hi = dayNo(date) + daysAfter;
+  const day = dayNo(date);
+  let best = null;
+  let gap = Infinity;
+  list.forEach((p) => {
+    const n = dayNo(p.date);
+    if (n < lo || n > hi) return;
+    const g = Math.abs(n - day);
+    if (g < gap) { best = p; gap = g; }
+  });
+  return best;
+}
+
+// Sets c.rxState ("ok" | "none" | "unknown") and c.rx on the consents that need a prescription
+async function markPrescriptions(consents, rx) {
+  const subById = new Map(rx.subs.map((s) => [s.id, s]));
+  const formById = new Map(rx.forms.map((t) => [t.id, t]));
+
+  await Promise.all(consents.map(async (c) => {
+    if (c.portalId) {
+      const sub = subById.get(c.portalId);
+      if (!sub) return;   // couldn't be read: no tag rather than a wrong one
+      // The Prescription check on the version it was filled in on, or on the form as it is now (older consents)
+      const saved = await versionFields(sub.templateId, sub.version);
+      const now = formById.get(sub.templateId);
+      const isCheck = (x) => x && x.type === "prescription_status";
+      const f = (saved || []).find(isCheck) || ((now && now.fields) || []).find(isCheck);
+      if (!f) {
+        if (saved === null && !now) c.rxState = "unknown";
+        return;   // this consent form doesn't ask for a prescription
+      }
+
+      // Found when the consent was saved
+      const a = sub.answers && sub.answers[f.id];
+      if (a && a.found) {
+        c.rxState = "ok";
+        c.rx = {
+          date: parseDateKey(a.date) || c.date,
+          title: a.name || "Prescription",
+          href: a.submissionId ? `#/form-record/${encodeURIComponent(a.submissionId)}`
+            : /^https:\/\//i.test(a.link || "") ? a.link : "",
+        };
+        return;
+      }
+
+      // Not on file then: one of that prescription form saved since?
+      if (!isDate(c.date)) { c.rxState = "unknown"; return; }
+      const tpl = formById.get(f.consentFormId);
+      const want = tpl ? coreName(tpl.name) : "";
+      const mine = rx.list.filter((p) => (f.consentFormId && p.templateId === f.consentFormId) || (want && coreName(p.title) === want));
+      c.rx = closestRx(mine, c.date, Number(f.months) || 6);
+      c.rxState = c.rx ? "ok" : rx.ok ? "none" : "unknown";
+      return;
+    }
+
+    // Old-app consents: the prescription closest to the day, up to RX_LEGACY_DAYS either side
+    if (!legacyNeedsRx(c)) return;
+    if (!isDate(c.date)) { c.rxState = "unknown"; return; }
+    const day = dayNo(c.date);
+    const gap = (p) => Math.abs(dayNo(p.date) - day);
+    c.rx = rx.list.filter((p) => gap(p) <= RX_LEGACY_DAYS).sort((a, b) => gap(a) - gap(b))[0] || null;
+    c.rxState = c.rx ? "ok" : rx.ok ? "none" : "unknown";
+  }));
 }
 
 // Set by the fill-in page after saving, so the new record is opened and highlighted
@@ -87,7 +235,14 @@ export function mountRecords(root, patient) {
     if (loaded || loading) return loading;
     loading = (async () => {
       try {
-        const { treatments, consents } = await fetchPatientRecords(patient);
+        const [{ treatments, consents }, rx] = await Promise.all([
+          fetchPatientRecords(patient),
+          fetchPrescriptions(patient).catch((err) => {
+            console.warn("Consent prescriptions failed:", err);
+            return { list: [], subs: [], forms: [], ok: false };
+          }),
+        ]);
+        await markPrescriptions(consents, rx).catch((err) => console.warn("Consent prescriptions not marked:", err));
         if (!grid.isConnected) return;
         loaded = true;
         lists = { treatment: treatments, consent: consents };
@@ -181,7 +336,7 @@ function viewLink(link) {
 }
 
 const portalView = (r) =>
-  `<a class="rc-act" href="#/form-record/${encodeURIComponent(r.portalId)}">${ICONS.view}View</a>` +
+`<a class="rc-act" href="#/form-record/${encodeURIComponent(r.portalId)}" target="_blank" rel="noopener">${ICONS.view}View</a>`
   (canMoveRecords() ? `<button type="button" class="rc-act" data-move-sub="${escapeHtml(r.portalId)}">${ICONS.move}Move</button>` : "");
 
 const legacyMove = (kind, r) => (canMoveRecords()
@@ -235,7 +390,15 @@ function consentsHtml(consents) {
     .map((cat) => categoryHtml(cat, groups.get(cat.key), consentItemHtml))
     .join("");
 }
-
+function rxBadge(c) {
+  if (!c.rxState) return "";   // this consent doesn't need a prescription
+  if (c.rxState === "unknown") return `<span class="rc-badge warn">Prescription status unknown</span>`;
+  if (c.rxState === "none") return `<span class="rc-badge warn">⚠ No prescription found</span>`;
+  const text = `✓ Prescription on file · ${escapeHtml(fmt(c.rx))}`;
+  return c.rx.href
+    ? `<a class="rc-badge ok" href="${escapeHtml(c.rx.href)}" target="_blank" rel="noopener" title="${escapeHtml(c.rx.title)}">${text}</a>`
+    : `<span class="rc-badge ok" title="${escapeHtml(c.rx.title)} (no file attached)">${text}</span>`;
+}
 function consentBadge(t) {
   if (t.consent === undefined) return `<span class="rc-badge warn">Consent status unknown (no record date)</span>`;
   if (t.consent) return `<span class="rc-badge ok">✓ Consent on file · ${escapeHtml(fmt(t.consent))}</span>`;
@@ -275,7 +438,7 @@ function consentItemHtml(c) {
     return `
       <article class="rc-item" data-sub="${escapeHtml(c.portalId)}">
         <div class="rc-item-top"><h4>${escapeHtml(c.title)}</h4><span class="rc-date">${escapeHtml(fmt(c))}</span></div>
-        <div class="rc-badges"><span class="rc-badge portal">Portal form</span></div>
+        <div class="rc-badges"><span class="rc-badge portal">Portal form</span>${rxBadge(c)}</div>
         ${c.staff ? `<p class="rc-staff">${escapeHtml(c.staff)}</p>` : ""}
         <div class="rc-actions">${portalView(c)}</div>
       </article>`;
@@ -283,6 +446,7 @@ function consentItemHtml(c) {
   return `
     <article class="rc-item">
       <div class="rc-item-top"><h4>${escapeHtml(c.title)}</h4><span class="rc-date">${escapeHtml(fmt(c))}</span></div>
+      ${rxBadge(c)}
       ${c.staff ? `<p class="rc-staff">${escapeHtml(c.staff)}</p>` : ""}
       ${movedNote(c)}
       <div class="rc-actions">
