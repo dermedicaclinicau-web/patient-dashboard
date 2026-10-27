@@ -9281,3 +9281,7 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 .pt-pick-actions { display: flex; gap: 8px; }
 .pt-pick-actions .btn-primary { display: inline-flex; align-items: center; gap: 6px; }
 .pt-pick-actions svg { width: 16px; height: 16px; }
+/* Paper records: visit name with its label on one line */
+.ppr-vname { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.ppr-vname .ppr-pill { flex: none; width: auto; align-self: center; }
+.ppr-pill.is-info { background: #e0f2fe; color: #0369a1; }

@@ -156,6 +156,39 @@ const LOC_NAME = { kit: "Your kit", shelf: "The Shelf", jt: "JT storage" };
 const csSummary = (lines) => lines.map((l) => `${l.name}: ${l.rows.map((r) =>
   `${consumableAmountText(l, r, false)}${r.batch ? ` (${l.batchLabel || "Batch"} ${r.batch})` : ""}`).join(" + ")}`);
 
+/* ---------- Day Sheet visits with no Patient ID ---------- */
+// "Rebekah Snadden - STAFF", "Tahlya Flamini STAFF", "Jo Bloggs (staff)" → the name on its own
+const STAFF_TAG = /[\s\-–—:|/]*\(?\b(staff|stf|employee)\b\)?\.?/gi;
+const cleanVisitName = (s) => String(s || "").replace(STAFF_TAG, " ").replace(/\s+/g, " ").trim();
+// The same tidy-up the Patients search uses: no accents, apostrophes or punctuation
+const nameKey = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+  .replace(/['’`.]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+
+// Links a visit to a patient only when exactly one patient has that full name. Returns how many were linked.
+async function matchVisitNames(rows) {
+  const memo = new Map();
+  let linked = 0;
+  for (const v of rows) {
+    if (v.pid || !v.name) continue;
+    const clean = cleanVisitName(v.name);
+    const k = nameKey(clean);
+    if (k.split(" ").length < 2) continue;          // a first name on its own isn't enough
+    if (!memo.has(k)) {
+      const found = await searchPatients(clean, 8).catch(() => []);
+      memo.set(k, found.filter((p) => [p.name, `${p.firstName} ${p.lastName}`, `${p.lastName} ${p.firstName}`]
+        .some((x) => nameKey(x) === k)));
+    }
+    const hits = memo.get(k);
+    if (hits.length === 1) {
+      Object.assign(v, { pid: hits[0].id, pidGuess: true, pidName: hits[0].name });
+      linked++;
+    } else if (hits.length > 1) {
+      v.nameHits = hits.length;
+    }
+  }
+  return linked;
+}
+
 // The last lists loaded, so coming back to the page shows them straight away while they update
 const keep = { files: null, visits: null, vMeta: null, thumbs: {} };
 
@@ -231,11 +264,19 @@ export function mountPaperRecords(container, { staff } = {}) {
   }
 
   function visitHtml(v) {
+    const nameEl = v.pid
+      ? `<a href="#/patient/${encodeURIComponent(v.pid)}" target="_blank" rel="noopener">${esc(v.pidGuess ? v.pidName : v.name)}</a>`
+      : `<strong>${esc(v.name)}</strong>`;
+    const tag = v.pidGuess
+      ? `<span class="ppr-pill is-info" title="${esc(`The Day Sheet says “${v.name}” with no Patient ID. Matched by name: check it's the right person.`)}">Matched by name</span>`
+      : !v.pid
+        ? `<span class="ppr-pill is-warn"${v.nameHits ? ` title="${esc(`${v.nameHits} patients are called ${cleanVisitName(v.name)}, so it isn't linked.`)}"` : ""}>${
+            v.nameHits ? `${v.nameHits} patients with this name` : "No Patient ID"}</span>`
+        : "";
     return `<li class="ppr-row ppr-vrow${v.res ? " is-sorted" : ""}">
       <div class="ppr-vdate"><b>${esc(shortDay(v.date))}</b><small>${esc(ago(v.date))}</small></div>
-      <div class="ppr-main">${v.pid
-        ? `<a href="#/patient/${encodeURIComponent(v.pid)}" target="_blank" rel="noopener">${esc(v.name)}</a>`
-        : `<strong>${esc(v.name)}</strong> <span class="ppr-pill is-warn">No Patient ID</span>`}
+      <div class="ppr-main">
+        <div class="ppr-vname">${nameEl}${tag}</div>
         <small>${esc([v.services.join(", "), v.staff.join(" and ")].filter(Boolean).join(" · "))}</small>
         ${v.res ? `<small class="ppr-extra">${esc(RES[v.res.status] || "Sorted")}: “${esc(v.res.note)}” · ${esc(v.res.by)}</small>` : ""}</div>
       <div class="ppr-acts">${v.res
@@ -312,10 +353,12 @@ export function mountPaperRecords(container, { staff } = {}) {
       && (!qq || v.name.toLowerCase().includes(qq)));
     const open = all.filter((v) => !v.res).length;
     const noId = all.filter((v) => !v.res && !v.pid).length;
+    const byName = all.filter((v) => !v.res && v.pidGuess).length;
     const opt = (v, cur) => `<option value="${esc(v)}"${v === cur ? " selected" : ""}>${esc(v)}</option>`;
     body.innerHTML = `
       <p class="muted ppr-sum">${open} visit${open === 1 ? "" : "s"} since ${esc(niceDay(st.vMeta.from))} with no treatment record${
-        noId ? ` · ${noId} with no Patient ID on the Day Sheet` : ""}. Checking: ${esc((st.vMeta.cats || []).join(", "))}.${
+        noId ? ` · ${noId} with no Patient ID on the Day Sheet` : ""}${
+        byName ? ` · ${byName} matched by name` : ""}. Checking: ${esc((st.vMeta.cats || []).join(", "))}.${
         st.vBusy ? " <strong>Updating…</strong>" : ""}</p>
       <div class="ppr-tools">
         <input type="search" class="fe-input" data-f="vq" placeholder="Filter by patient" value="${esc(st.vq)}" />
@@ -380,8 +423,13 @@ export function mountPaperRecords(container, { staff } = {}) {
     try {
       const r = await callApi({ action: "paper", op: "visits", fresh });
       if (r.problem) throw new Error(r.problem);
-      st.visits = r.rows || [];
+      const rows = r.rows || [];
+      st.visits = rows;
       st.vMeta = r;
+      // Visits with no Patient ID: matched to the patient list by name (in the background)
+      matchVisitNames(rows)
+        .then((n) => { if (n && st.visits === rows && container.isConnected) draw(); })
+        .catch((ex) => console.warn("Visit names not matched:", ex));
     } catch (err) {
       console.error("Visits without a record:", err);
       if (!st.visits) st.visits = [];
