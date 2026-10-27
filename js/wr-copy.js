@@ -134,9 +134,75 @@ export function buildWrCopy(d, fields, sets = []) {
     notes.push(`The old record says ${fmt(said)} units in total, but its marks add up to ${fmt(total)}. Check the areas.`);
   }
   if (!points.length) notes.push("The old record has no marks to copy.");
-  return { marks, imageQs, notes, total };
+  const ans = wrAnswers(d, fields);
+  return { marks, imageQs, answers: ans.answers, notes: [...ans.notes, ...notes], total };
+}
+/* ---------- Answers: the areas treated, and "Mark digitally" ---------- */
+
+// Every area on the old record: "Area Selected" plus each picture's area
+export function oldWrAreas(d) {
+  const out = [];
+  const add = (s) => { const t = String(s || "").trim(); if (t && !out.some((x) => norm(x) === norm(t))) out.push(t); };
+  list(d && d.treatment_details_map).forEach((vial) => {
+    String((vial && vial["Area Selected"]) || "").split(/[,;\n]/).forEach(add);
+    list(vial && vial.Areas).forEach((a) => add(a && a.Area));
+  });
+  return out;
 }
 
+// The choice on the portal form for an old area: the same name, or one of its other names
+function optionFor(area, options) {
+  const a = norm(area);
+  const words = [a, ...(ALIASES[a] || [])];
+  return options.find((o) => norm(o) === a)
+    || options.find((o) => words.some((w) => w && norm(o) === w))
+    || options.find((o) => words.some((w) => w && (norm(o).includes(w) || w.includes(norm(o)))) && norm(o).length > 2)
+    || null;
+}
+
+// The tick-box question that lists the areas: the one matching the most old areas ("Select Area/s to Treat")
+function areaQuestion(fields, areas) {
+  let best = null, score = 0;
+  (fields || []).filter((f) => f && ["checkboxes", "checkbox_notes"].includes(f.type)).forEach((f) => {
+    const opts = (f.options || []).filter((o) => String(o).trim());
+    const n = areas.filter((a) => optionFor(a, opts)).length + (/area/i.test(f.label || "") ? 0.5 : 0);
+    if (n > score) { best = f; score = n; }
+  });
+  return score >= 1 ? best : null;
+}
+
+// "Do you want to Mark digitally or Scan the Paper Copy?": the question with a "digital" choice
+function modeQuestion(fields) {
+  for (const f of fields || []) {
+    if (!f || !["single_choice", "dropdown"].includes(f.type)) continue;
+    const opt = (f.options || []).find((o) => /digital/i.test(o));
+    if (opt) return { f, opt };
+  }
+  return null;
+}
+
+function wrAnswers(d, fields) {
+  const answers = {}, notes = [];
+  const areas = oldWrAreas(d);
+  const q = areaQuestion(fields, areas);
+  if (q) {
+    const opts = (q.options || []).filter((o) => String(o).trim());
+    const ticked = [], missed = [];
+    areas.forEach((a) => {
+      const o = optionFor(a, opts);
+      if (o) { if (!ticked.includes(o)) ticked.push(o); } else missed.push(a);
+    });
+    if (ticked.length) {
+      answers[q.id] = q.type === "checkbox_notes" ? ticked.map((o) => ({ option: o, note: "" })) : ticked;
+    }
+    if (missed.length) notes.push(`${missed.join(", ")} ${missed.length === 1 ? "isn't a choice" : "aren't choices"} in “${q.label}”, so tick ${missed.length === 1 ? "it" : "them"} by hand.`);
+  } else if (areas.length) {
+    notes.push("The areas couldn't be ticked, because this form has no question listing them.");
+  }
+  const m = modeQuestion(fields);
+  if (m) answers[m.f.id] = m.opt;   // "Mark Digital": the copied marks are digital
+  return { answers, notes };
+}
 /* ---------- The button ---------- */
 
 async function readOld(record) {
@@ -178,7 +244,7 @@ export async function copyOldWrRecord({ patientId, record }) {
     const c = buildWrCopy(old, pick.ver.fields, sets);
     localStorage.setItem(COPY_KEY, JSON.stringify({
       p: patientId, t: pick.t.id, at: Date.now(), fromLabel: wrCopyLabel(old),
-      marks: c.marks, imageQs: c.imageQs, answers: {}, notes: c.notes,
+      marks: c.marks, imageQs: c.imageQs, answers: c.answers, notes: c.notes,
     }));
     const hash = `#/fill/${encodeURIComponent(patientId)}/${encodeURIComponent(pick.t.id)}`;
     if (tab) tab.location.href = `${location.pathname}${location.search}${hash}`;
