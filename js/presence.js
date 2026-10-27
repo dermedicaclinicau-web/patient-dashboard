@@ -3,14 +3,14 @@
 // Online = any tab active in the last 5 minutes. Away = open but hidden, or untouched for 10 minutes.
 import { db } from "./firebase-config.js";
 import {
-  collection, doc, setDoc, updateDoc, onSnapshot, serverTimestamp, deleteField,
+  collection, doc, getDoc, setDoc, updateDoc, onSnapshot, serverTimestamp, deleteField,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const BEAT = 2 * 60 * 1000;            // "I'm here", at least this often
 const STALE = 5 * 60 * 1000;           // no word from a tab for this long: it's gone (closed, asleep, no signal)
 const IDLE = 10 * 60 * 1000;           // untouched for this long: away
 const TICK = 30 * 1000;
-const PRUNE = 24 * 60 * 60 * 1000;     // tabs not heard from in a day are removed
+const MAX_TABS = 25;                   // the Firestore rule allows 30: stay well under it
 const ACT = ["pointerdown", "keydown", "wheel", "touchstart", "mousemove"];
 const toMs = (v) => (v && typeof v.toMillis === "function" ? v.toMillis() : 0);
 
@@ -39,9 +39,31 @@ let lastWrite = 0;
 let lastActivity = Date.now();
 let timer = null;
 let skew = 0;           // Firestore's clock minus this device's clock
-let pruned = false;
+let lastPrune = 0;
 
-function write(next) {
+// Other tabs to remove: closed, or not heard from in 5 minutes, plus the oldest if there are still too many
+function dropList(devices, now) {
+  const others = Object.entries(devices || {}).filter(([k]) => k !== tabId);
+  const live = others.filter(([, t]) => t && t.state !== "offline" && now - toMs(t.at) < STALE)
+    .sort((a, b) => toMs(b[1].at) - toMs(a[1].at));
+  const keep = new Set(live.slice(0, MAX_TABS - 1).map(([k]) => k));
+  return others.map(([k]) => k).filter((k) => !keep.has(k));
+}
+
+// A save was refused (too many tabs on record): tidy up first. True if anything was removed.
+async function tidy() {
+  if (!me) return false;
+  const ref = doc(db, "presence", me.uid);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) return false;
+  const drop = dropList((snap.data({ serverTimestamps: "estimate" }) || {}).devices, Date.now() + skew);
+  if (!drop.length) return false;
+  await updateDoc(ref, Object.fromEntries(drop.map((k) => [`devices.${k}`, deleteField()])));
+  lastPrune = Date.now();
+  return true;
+}
+
+function write(next, retried = false) {
   if (!me) return;
   state = next;
   lastWrite = Date.now();
@@ -49,7 +71,23 @@ function write(next) {
     name: String(me.name || "").slice(0, 120),
     devices: { [tabId]: { state: next, at: serverTimestamp(), device: deviceName() } },
     updatedAt: serverTimestamp(),
-  }, { merge: true }).catch((err) => console.warn("Presence not saved:", err));
+  }, { merge: true }).catch((err) => {
+    if (err && err.code === "permission-denied" && !retried) {
+      tidy()
+        .then((did) => { if (did) write(next, true); else console.warn("Presence not saved:", err); })
+        .catch((e) => console.warn("Presence not tidied:", e));
+      return;
+    }
+    console.warn("Presence not saved:", err);
+  });
+}
+
+// This tab is closing (or logging out): take it off the record
+function removeTab() {
+  if (!me) return;
+  state = "";
+  updateDoc(doc(db, "presence", me.uid), { [`devices.${tabId}`]: deleteField(), updatedAt: serverTimestamp() })
+    .catch((err) => console.warn("Presence not cleared:", err));
 }
 
 const wanted = () => (document.hidden || Date.now() - lastActivity > IDLE ? "away" : "active");
@@ -69,7 +107,7 @@ function onShow() {
   if (!document.hidden) lastActivity = Date.now();
   tick();
 }
-const onLeave = () => write("offline");
+const onLeave = () => removeTab();
 
 export function startPresence(staff) {
   if (!staff || !staff.uid) return;
@@ -77,7 +115,7 @@ export function startPresence(staff) {
   stopPresence();
   me = staff;
   state = "";
-  pruned = false;
+  lastPrune = 0;
   lastActivity = Date.now();
   tick();
   timer = setInterval(tick, TICK);
@@ -89,7 +127,7 @@ export function startPresence(staff) {
 
 export function stopPresence() {
   if (!me) return;
-  write("offline");
+  removeTab();
   clearInterval(timer);
   timer = null;
   document.removeEventListener("visibilitychange", onShow);
@@ -106,7 +144,7 @@ export function summarise(x, now = Date.now() + skew) {
   const tabs = Object.values((x && x.devices) || {}).map((t) => ({
     state: String((t && t.state) || ""), at: toMs(t && t.at), device: String((t && t.device) || ""),
   }));
-  const lastAt = tabs.reduce((m, t) => Math.max(m, t.at), 0);
+  const lastAt = tabs.reduce((m, t) => Math.max(m, t.at), toMs(x && x.updatedAt));
   const live = tabs.filter((t) => t.at && t.state !== "offline" && now - t.at < STALE).sort((a, b) => b.at - a.at);
   const act = live.find((t) => t.state === "active");
   if (act) return { status: "online", device: act.device, lastAt };
@@ -114,14 +152,15 @@ export function summarise(x, now = Date.now() + skew) {
   return { status: "offline", device: "", lastAt };
 }
 
-// My own tabs from more than a day ago are removed (once per visit)
+// My closed and silent tabs are removed (at most every 10 minutes, and only once there are a few)
 function prune(mine) {
-  if (pruned || !me || !mine) return;
-  pruned = true;
-  const now = Date.now() + skew;
-  const old = Object.entries(mine.devices || {}).filter(([k, t]) => k !== tabId && now - toMs(t && t.at) > PRUNE);
-  if (!old.length) return;
-  updateDoc(doc(db, "presence", me.uid), Object.fromEntries(old.map(([k]) => [`devices.${k}`, deleteField()])))
+  if (!me || !mine || Date.now() - lastPrune < 10 * 60 * 1000) return;
+  const devices = mine.devices || {};
+  if (Object.keys(devices).length < 8) return;
+  const drop = dropList(devices, Date.now() + skew);
+  if (!drop.length) return;
+  lastPrune = Date.now();
+  updateDoc(doc(db, "presence", me.uid), Object.fromEntries(drop.map((k) => [`devices.${k}`, deleteField()])))
     .catch((err) => console.warn("Old presence not removed:", err));
 }
 
