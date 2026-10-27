@@ -9332,3 +9332,14 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 /* Consent records: the prescription tag can be clicked */
 a.rc-badge { text-decoration: none; cursor: pointer; }
 a.rc-badge:hover { filter: brightness(.96); text-decoration: underline; }
+
+
+/* Add reminder dialog: tidy layout */
+.rm-dialog .rm-quick { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.rm-dialog .rm-chip { padding: 6px 11px; font-size: .82rem; white-space: nowrap; }
+.rm-dialog .rm-date-row { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.rm-dialog .rm-date-row input[type="date"] { flex: 0 0 190px; width: 190px; }
+.rm-dialog .rm-when { color: #475569; font-size: .85rem; font-weight: 500; }
+.rm-dialog input[type="date"],
+.rm-dialog select.rm-assign { min-height: 44px; box-sizing: border-box; }
+.rm-dialog .em-error:empty { display: none; }

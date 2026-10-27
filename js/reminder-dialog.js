@@ -40,8 +40,25 @@ let dlg = null;
 let ctx = null;
 
 function markActiveChip() {
-  const value = dlg.querySelector("input[name='due']").value;
+  const input = dlg.querySelector("input[name='due']");
+  const value = input ? input.value : "";
   dlg.querySelectorAll(".rm-chip").forEach((c) => c.classList.toggle("active", c.dataset.due === value));
+  const when = dlg.querySelector("[data-role='due-when']");
+  if (when) when.textContent = dueText(value);
+}
+
+// "2026-10-29" → "Thursday 29 October 2026 · tomorrow"
+function dueText(key) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
+  if (!m) return "";
+  const d = new Date(+m[1], +m[2] - 1, +m[3]);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const days = Math.round((d - today) / 864e5);
+  const label = d.toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  const rel = days === 0 ? "today" : days === 1 ? "tomorrow" : days > 1 ? `in ${days} days`
+    : `${-days} day${days === -1 ? "" : "s"} ago`;
+  return `${label} · ${rel}`;
 }
 
 function ensureDialog() {
@@ -94,9 +111,10 @@ export function openReminderDialog({ patient, staff }) {
           <div class="rm-quick">
             ${QUICK.map(([label, fn]) => `<button type="button" class="rm-chip" data-due="${fn()}">${label}</button>`).join("")}
           </div>
-          <input type="date" name="due" value="${tomorrow}" min="${plusDays(0)}" />
-        </div>
-          <input type="date" name="due" value="${tomorrow}" min="${plusDays(0)}" />
+          <div class="rm-date-row">
+            <input type="date" name="due" value="${tomorrow}" min="${plusDays(0)}" />
+            <small class="rm-when" data-role="due-when"></small>
+          </div>
         </div>
 
         <label class="em-field"><span>Assign to</span>
@@ -141,7 +159,8 @@ async function onSubmit(e) {
   if (!ctx) return;
   const form = e.target;
   const text = form.elements.text.value.trim();
-  const due = form.elements.due.value;
+  const dueInput = form.querySelector("input[name='due']");
+  const due = dueInput ? dueInput.value : "";
   const errEl = dlg.querySelector(".em-error");
   const btn = dlg.querySelector(".em-send");
 
