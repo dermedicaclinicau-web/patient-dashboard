@@ -5,9 +5,10 @@
 // Audio stays on this device (IndexedDB) until its job is created, so a closed tab or a logout loses nothing.
 import { storage, db, auth } from "./firebase-config.js";
 import { ref, uploadBytesResumable } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
-import { doc, setDoc, serverTimestamp, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { doc, getDoc, setDoc, serverTimestamp, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
 import { toDateKey } from "./utils.js";
+
 
 /* ===================== State ===================== */
 
@@ -66,17 +67,26 @@ const DB_NAME = "dermedica-recordings";
 const CHUNKS = "chunks";
 const META = "meta";
 
+let dbPromise = null;   // one connection, reused (it used to open a new one every time)
+
 function openDb() {
-  return new Promise((resolve, reject) => {
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, 1);
     req.onupgradeneeded = () => {
       const d = req.result;
       d.createObjectStore(CHUNKS, { keyPath: ["recId", "seq"] });
       d.createObjectStore(META, { keyPath: "recId" });
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      const d = req.result;
+      d.onversionchange = () => { d.close(); dbPromise = null; };
+      d.onclose = () => { dbPromise = null; };
+      resolve(d);
+    };
+    req.onerror = () => { dbPromise = null; reject(req.error); };
   });
+  return dbPromise;
 }
 
 async function withStore(name, mode, fn) {
@@ -97,11 +107,18 @@ const putMeta = (meta) => withStore(META, "readwrite", (s) => s.put(meta));
 const getMeta = (recId) => withStore(META, "readonly", (s) => s.get(recId));
 const getAllMeta = () => withStore(META, "readonly", (s) => s.getAll());
 
+// The audio and its details go together, or not at all
 async function deleteRecording(recId) {
-  await withStore(CHUNKS, "readwrite", (s) => s.delete(chunkRange(recId)));
-  await withStore(META, "readwrite", (s) => s.delete(recId));
+  const d = await openDb();
+  await new Promise((resolve, reject) => {
+    const tx = d.transaction([CHUNKS, META], "readwrite");
+    tx.objectStore(CHUNKS).delete(chunkRange(recId));
+    tx.objectStore(META).delete(recId);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
 }
-
 function metaFromLive() {
   return {
     recId: live.recId, patient: live.patient, staff: live.staff,
@@ -306,7 +323,7 @@ export async function suspendRecorder() {
     await stopRecorder();
     await putMeta(metaFromLive()).catch(() => {});
   }
-  uploads.forEach((task) => { try { task.cancel(); } catch { /* already finished */ } });
+  uploads.forEach((task) => { try { if (task) task.cancel(); } catch { /* already finished */ } });
   uploads.clear();
   watchers.forEach((stop) => stop());
   watchers.clear();
@@ -322,10 +339,46 @@ export function uploadNow(recId) {
   const j = jobs.get(recId);
   if (j && ["recovered", "error"].includes(j.status)) runUpload(recId);
 }
+// Is this recording already on the server? (The device copy wasn't cleared last time.)
+// → "ready" | "deleted" | the job's status | null (not there, or couldn't check)
+async function serverCopy(recId) {
+  try {
+    const job = await getDoc(doc(db, "recording_jobs", recId));
+    if (job.exists()) return String(job.data().status || "uploaded");
+  } catch (err) { console.warn("Recording job not checked:", err); }
+  try {
+    const tr = await getDoc(doc(db, "appointment_transcripts", recId));
+    if (tr.exists()) return "ready";
+  } catch (err) { console.warn("Transcript not checked:", err); }
+  try {
+    const del = await getDoc(doc(db, "deleted_records", recId));
+    if (del.exists()) return "deleted";   // deleted by staff: never upload it again
+  } catch { /* not readable here: fine */ }
+  return null;
+}
 
+// Already uploaded: clear the device copy, and either drop the chip or follow its notes
+async function settleUploaded(recId, status) {
+  await deleteRecording(recId).catch((err) => console.warn("Device copy not cleared:", err));
+  uploads.delete(recId);
+  if (!jobs.has(recId)) return;
+  if (status === "ready" || status === "deleted") {
+    stopWatching(recId);
+    jobs.delete(recId);
+    saveTracked();
+    emit();
+    return;
+  }
+  setJob(recId, { status: "processing", stage: status, progress: 1, error: "" });
+  watchJob(recId);
+}
 async function runUpload(recId) {
   if (!jobs.has(recId) || uploads.has(recId)) return;
   setJob(recId, { status: "uploading", progress: 0, error: "" });
+  uploads.set(recId, null);   // claims it while we check, so it isn't started twice
+  const already = await serverCopy(recId);
+  if (already) { await settleUploaded(recId, already); return; }
+  if (!jobs.has(recId)) { uploads.delete(recId); return; }   // logged out while checking
   try {
     const meta = await getMeta(recId);
     if (!meta) throw new Error("This recording isn't on this device any more.");
@@ -379,6 +432,9 @@ async function runUpload(recId) {
   } catch (err) {
     uploads.delete(recId);
     if (!jobs.has(recId) || (err && err.code === "storage/canceled")) return;
+    // Refused because it's already there (e.g. another tab finished it first): not a failure
+    const already = await serverCopy(recId);
+    if (already) { await settleUploaded(recId, already); return; }
     console.error("Recording upload failed:", err);
     setJob(recId, {
       status: "error",
@@ -479,6 +535,8 @@ export async function checkForUnfinished() {
       if (!m || !m.recId || m.recId === live.recId || jobs.has(m.recId)) return;
       addJob({ ...m, at: Date.parse(m.startedAt) || Date.now() }, "recovered");
       if (m.staff && m.staff.uid === me) runUpload(m.recId);
+      // On the server already: forget the device copy (their notes are theirs to review)
+      else serverCopy(m.recId).then((s) => { if (s) settleUploaded(m.recId, "ready"); });
     });
   } catch (err) {
     console.warn("Recording recovery check failed:", err);
