@@ -1,38 +1,38 @@
 import { loginWithPin, logout, watchAuth, updateStaffName, warmUpLogin } from "./auth.js";
-import { mountPatientList, clearPatientCache } from "./patient-list.js";
-import { mountCalendar } from "./calendar.js";
-import { mountPatientDashboard } from "./patient-dashboard.js";
+//import { mountPatientList, clearPatientCache } from "./patient-list.js";
+//import { mountCalendar } from "./calendar.js";
+//import { mountPatientDashboard } from "./patient-dashboard.js";
 import { escapeHtml, getInitials, showToast } from "./utils.js";
 import { maybeShowStartOfDay, closeStartOfDay, refreshStartOfDayButton, hideStartOfDayButton } from "./start-of-day.js";
 import { initRecordingBar, setRecordingPatient } from "./recording-bar.js";
 import { isRecorderBusy, hasPendingUploads, suspendRecorder } from "./recorder.js";
 import { initSoapPanel, closeSoapPanel, hasUnsavedNotes } from "./soap-panel.js";
 import { confirmDialog } from "./dialog.js";
-import { mountFormBuilder } from "./form-builder.js";
-import { mountFormFill, mountFormRecord } from "./form-fill.js";
+//import { mountFormBuilder } from "./form-builder.js";
+//import { mountFormFill, mountFormRecord } from "./form-fill.js";
 import { initFormPicker, closeFormPicker } from "./form-picker.js";
-import { mountImageBank } from "./image-bank.js";
-import { mountTaskManager } from "./task-manager.js";
-import { mountAftercareBank } from "./aftercare-bank.js";
-import { mountSpecialistBank } from "./specialist-bank.js";
-import { mountSspProductsPage } from "./ssp-products.js";
-import { mountSspBuilder } from "./ssp-builder.js";
-import { mountStaffManager } from "./staff-manager.js";
-import { mountInventory } from "./inventory.js";
+//import { mountImageBank } from "./image-bank.js";
+//import { mountTaskManager } from "./task-manager.js";
+////import { mountAftercareBank } from "./aftercare-bank.js";
+//import { mountSpecialistBank } from "./specialist-bank.js";
+//import { mountSspProductsPage } from "./ssp-products.js";
+//import { mountSspBuilder } from "./ssp-builder.js";
+//import { mountStaffManager } from "./staff-manager.js";
+//import { mountInventory } from "./inventory.js";
 import { setPerms, can, isAdmin as isAdminNow, refreshAccess, refreshLoginToken } from "./perms.js";
 import { initUpdateCheck } from "./updates.js";
-import { mountMyDashboard } from "./my-dashboard.js";
-import { mountReports } from "./reports.js";
-import { mountSettings } from "./settings.js";
+//import { mountMyDashboard } from "./my-dashboard.js";
+//import { mountReports } from "./reports.js";
+//import { mountSettings } from "./settings.js";
 import { initEndOfDay, teardownEndOfDay, endOfDayPending, askEndBeforeLogout, openEndOfDay } from "./end-of-day.js";
-import { mountStaffDays } from "./staff-days.js";
+//import { mountStaffDays } from "./staff-days.js";
 import { initTopbar, closeTopbarMenu } from "./topbar.js";
 import { initChat, teardownChat } from "./chat.js";
 import { openMyPhoto } from "./my-photo.js";
-import { mountKnowledge } from "./knowledge.js";
-import { mountScanner } from "./scanner.js";
-import { mountRecall } from "./recall.js";
-import { mountRecallSettings } from "./recall-settings.js";
+//import { mountKnowledge } from "./knowledge.js";
+//import { mountScanner } from "./scanner.js";
+//import { mountRecall } from "./recall.js";
+//import { mountRecallSettings } from "./recall-settings.js";
 import "./menu-search.js";
 import "./mobile-nav.js";
 import "./force-refresh.js";   // first, so it can see recordings start
@@ -249,79 +249,106 @@ function placeholderPage(title, message, backLink = "") {
     </section>`;
 }
 
+/* ===================== Pages load when they're first opened ===================== */
+// A new tab only downloads the page it shows. Pages already opened in this tab open instantly.
+const loadedPages = new Map();   // path → the loaded page
+let routeSeq = 0;                // goes up on every page change, so a slow page never replaces a newer one
+
+function lazyPage(path, label, run) {
+  return (el, param) => {
+    const seq = routeSeq;
+    const ready = loadedPages.get(path);
+    if (ready) return run(ready, el, param);
+    // Only show "loading" if it takes long enough to notice
+    const slow = setTimeout(() => {
+      if (seq === routeSeq) el.innerHTML = '<section class="page"><div class="skeleton sm"></div></section>';
+    }, 150);
+    return import(path)
+      .then((m) => {
+        clearTimeout(slow);
+        loadedPages.set(path, m);
+        if (seq === routeSeq) return run(m, el, param);
+      })
+      .catch((err) => {
+        clearTimeout(slow);
+        console.error(`${label} failed to load:`, err);
+        if (seq === routeSeq) {
+          el.innerHTML = `<section class="page"><div class="state error"><strong>${escapeHtml(label)} couldn't load</strong>
+            ${escapeHtml(err && err.message ? err.message : "Refresh and try again.")}</div></section>`;
+        }
+      });
+  };
+}
+
+// The pages most people use, loaded quietly once the portal is open (so moving around stays instant)
+function warmPages() {
+  const go = () => ["./patient-dashboard.js", "./my-dashboard.js", "./patient-list.js", "./calendar.js"].forEach((p) => {
+    if (!loadedPages.has(p)) import(p).then((m) => loadedPages.set(p, m)).catch(() => {});
+  });
+  if ("requestIdleCallback" in window) requestIdleCallback(go, { timeout: 5000 });
+  else setTimeout(go, 3000);
+}
+
+const recallPage = lazyPage("./recall.js", "Recall", (m, el) => m.mountRecall(el, { staff: currentStaff }));
+const recallSettingsPage = lazyPage("./recall-settings.js", "Recall settings",
+  (m, el) => m.mountRecallSettings(el, { staff: currentStaff }));
+const settingsPage = lazyPage("./settings.js", "System configuration",
+  (m, el, param) => m.mountSettings(el, { param, staff: currentStaff }));
+
 const PAGES = {
   home: (el, param) => (String(param || "").split("/")[0] === "days"
-    ? mountStaffDays(el)
-    : mountMyDashboard(el, { staff: currentStaff })),
-  patients: (el) => mountPatientList(el),
-  calendar: (el, param) => mountCalendar(el, param),
-  forms: (el, param) => mountFormBuilder(el, { isAdmin: can("forms.build"), staff: currentStaff, templateId: param }),
-  patient: (el, id) => mountPatientDashboard(el, id, { staff: currentStaff, onBack: goBack }),
-  fill: (el, param) => mountFormFill(el, param, { staff: currentStaff }),
-  "form-record": (el, id) => mountFormRecord(el, id, { staff: currentStaff }),
-  "image-bank": (el) => mountImageBank(el, { isAdmin: can("forms.build") }),
-  "aftercare-bank": (el) => mountAftercareBank(el, { isAdmin: can("forms.build"), staff: currentStaff }),
-  "specialist-bank": (el) => mountSpecialistBank(el, { staff: currentStaff }),
-  "ssp-products": (el) => mountSspProductsPage(el, { isAdmin: can("ssp.config"), staff: currentStaff }),
-  ssp: (el, param) => {
+    ? lazyPage("./staff-days.js", "Start & end of day", (m, e) => m.mountStaffDays(e))(el, param)
+    : lazyPage("./my-dashboard.js", "My dashboard", (m, e) => m.mountMyDashboard(e, { staff: currentStaff }))(el, param)),
+  patients: lazyPage("./patient-list.js", "The Patient List", (m, el) => m.mountPatientList(el)),
+  calendar: lazyPage("./calendar.js", "The Calendar", (m, el, param) => m.mountCalendar(el, param)),
+  forms: lazyPage("./form-builder.js", "Form Builder",
+    (m, el, param) => m.mountFormBuilder(el, { isAdmin: can("forms.build"), staff: currentStaff, templateId: param })),
+  patient: lazyPage("./patient-dashboard.js", "The patient page",
+    (m, el, id) => m.mountPatientDashboard(el, id, { staff: currentStaff, onBack: goBack })),
+  fill: lazyPage("./form-fill.js", "The form", (m, el, param) => m.mountFormFill(el, param, { staff: currentStaff })),
+  "form-record": lazyPage("./form-fill.js", "The record", (m, el, id) => m.mountFormRecord(el, id, { staff: currentStaff })),
+  "image-bank": lazyPage("./image-bank.js", "The Image Bank", (m, el) => m.mountImageBank(el, { isAdmin: can("forms.build") })),
+  "aftercare-bank": lazyPage("./aftercare-bank.js", "The Aftercare Bank",
+    (m, el) => m.mountAftercareBank(el, { isAdmin: can("forms.build"), staff: currentStaff })),
+  "specialist-bank": lazyPage("./specialist-bank.js", "The Specialist Bank",
+    (m, el) => m.mountSpecialistBank(el, { staff: currentStaff })),
+  "ssp-products": lazyPage("./ssp-products.js", "Skin Script products",
+    (m, el) => m.mountSspProductsPage(el, { isAdmin: can("ssp.config"), staff: currentStaff })),
+  ssp: lazyPage("./ssp-builder.js", "The Skin Script builder", (m, el, param) => {
     const [, pid = ""] = String(param || "").split("/"); // #/ssp/new/<patientId>
-    mountSspBuilder(el, { patientId: pid, staff: currentStaff, isAdmin: can("ssp.config") });
-  },
-  tasks: (el, param) => mountTaskManager(el, { param, isAdmin: can("tasks.build"), staff: currentStaff }),
-  inventory: (el, param) => mountInventory(el, { param, staff: currentStaff }),
-  reports: (el, param) => mountReports(el, { param, staff: currentStaff }),
-  staff: (el) => mountStaffManager(el, { staff: currentStaff }),
+    m.mountSspBuilder(el, { patientId: pid, staff: currentStaff, isAdmin: can("ssp.config") });
+  }),
+  tasks: lazyPage("./task-manager.js", "Task Manager",
+    (m, el, param) => m.mountTaskManager(el, { param, isAdmin: can("tasks.build"), staff: currentStaff })),
+  inventory: lazyPage("./inventory.js", "Inventory", (m, el, param) => m.mountInventory(el, { param, staff: currentStaff })),
+  reports: lazyPage("./reports.js", "Reporting", (m, el, param) => m.mountReports(el, { param, staff: currentStaff })),
+  staff: lazyPage("./staff-manager.js", "Staff", (m, el) => m.mountStaffManager(el, { staff: currentStaff })),
   recall: (el, param) => {
     const sub = String(param || "").split("/")[0];
-    const lazy = sub === "messages" ? ["./recall-messages.js", "mountRecallMessages", "Texts & emails"]
-      : sub === "results" ? ["./recall-results.js", "mountRecallResults", "Recall results"] : null;
-    if (!lazy) return mountRecall(el, { staff: currentStaff });
-    // Loaded only when needed, so a problem here can't stop the rest of the portal
-    return import(lazy[0])
-      .then((m) => m[lazy[1]](el, { staff: currentStaff }))
-      .catch((err) => {
-        console.error(`${lazy[2]} failed to load:`, err);
-        el.innerHTML = `<section class="page"><div class="state error"><strong>${escapeHtml(lazy[2])} couldn't load</strong>
-          ${escapeHtml(err && err.message ? err.message : "Refresh and try again.")}</div></section>`;
-      });
+    if (sub === "messages") return lazyPage("./recall-messages.js", "Texts & emails",
+      (m, e) => m.mountRecallMessages(e, { staff: currentStaff }))(el, param);
+    if (sub === "results") return lazyPage("./recall-results.js", "Recall results",
+      (m, e) => m.mountRecallResults(e, { staff: currentStaff }))(el, param);
+    return recallPage(el, param);
   },
-  
   settings: (el, param) => {
-    if (String(param || "").split("/")[0] === "recall") {
-      const sub = String(param).split("/")[1] || "";
-      const lazy = sub === "flow" ? ["./recall-flow.js", "mountRecallFlow", "recall flow"]
-        : sub === "emails" ? ["./recall-emails.js", "mountRecallEmails", "email templates"] : null;
-      if (!lazy) return mountRecallSettings(el, { staff: currentStaff });
-      return import(lazy[0])
-        .then((m) => m[lazy[1]](el, { staff: currentStaff }))
-        .catch((err) => {
-          console.error(`Recall ${lazy[2]} failed to load:`, err);
-          el.innerHTML = `<section class="page"><div class="state error"><strong>The ${lazy[2]} couldn't load</strong>
-            ${escapeHtml(err && err.message ? err.message : "Refresh and try again.")}</div></section>`;
-        });
+    const [top, sub = ""] = String(param || "").split("/");
+    if (top === "recall") {
+      if (sub === "flow") return lazyPage("./recall-flow.js", "The recall flow",
+        (m, e) => m.mountRecallFlow(e, { staff: currentStaff }))(el, param);
+      if (sub === "emails") return lazyPage("./recall-emails.js", "The email templates",
+        (m, e) => m.mountRecallEmails(e, { staff: currentStaff }))(el, param);
+      return recallSettingsPage(el, param);
     }
-    if (String(param || "").split("/")[0] !== "flows") return mountSettings(el, { param, staff: currentStaff });
-    // Loaded only when needed, so a problem here can't stop the rest of the portal
-    return import("./email-flows.js")
-      .then((m) => m.mountEmailFlows(el, { param, staff: currentStaff }))
-      .catch((err) => {
-        console.error("Email flows failed to load:", err);
-        el.innerHTML = `<section class="page"><div class="state error"><strong>Email flows couldn't load</strong>
-          ${escapeHtml(err && err.message ? err.message : "Refresh and try again.")}</div></section>`;
-      });
+    if (top === "flows") return lazyPage("./email-flows.js", "Email flows",
+      (m, e, p) => m.mountEmailFlows(e, { param: p, staff: currentStaff }))(el, param);
+    return settingsPage(el, param);
   },
-  help: (el, param) => mountKnowledge(el, { param, staff: currentStaff }),
-  scanner: (el) => mountScanner(el, { staff: currentStaff }),
-  // Loaded only when needed, so a problem here can't stop the rest of the portal
-  paper: (el) => import(`./paper-records.js?v=${PAPER_V}`)
-    .then((m) => m.mountPaperRecords(el, { staff: currentStaff }))
-    .catch((err) => {
-      console.error("Paper records failed to load:", err);
-      el.innerHTML = `<section class="page"><div class="state error"><strong>Paper records couldn't load</strong>
-        ${escapeHtml(err && err.message ? err.message : "Refresh and try again.")}</div></section>`;
-    }),
+  help: lazyPage("./knowledge.js", "Help & how-to", (m, el, param) => m.mountKnowledge(el, { param, staff: currentStaff })),
+  scanner: lazyPage("./scanner.js", "The Scanner", (m, el) => m.mountScanner(el, { staff: currentStaff })),
+  paper: lazyPage(`./paper-records.js?v=${PAPER_V}`, "Paper records",
+    (m, el) => m.mountPaperRecords(el, { staff: currentStaff })),
 };
-
 // Which permission each page needs ("admin" = Admins only)
 const PAGE_PERM = {
   patients: "menu.patients", patient: "menu.patients", fill: "menu.patients", "form-record": "menu.patients",
@@ -381,6 +408,7 @@ function router() {
 
   window.scrollTo(0, 0);
   if (page !== "patient") setRecordingPatient(null); // "Ready to record" only shows on a patient page
+  routeSeq++;
   PAGES[page](els.content, param);
 }
 
@@ -461,6 +489,7 @@ watchAuth((staff) => {
     initRecordingBar(staff);
     initSoapPanel(staff);
     router();
+    warmPages();
     maybeShowStartOfDay(staff);
     initEndOfDay(staff, { onLogout: () => els.logoutBtn.click() }); // runs the usual "recording in progress" checks
     initChat(staff);
@@ -472,7 +501,7 @@ watchAuth((staff) => {
     clearInterval(accessTimer);
     currentStaff = null;
     els.content.innerHTML = ""; // remove patient data from the page on logout
-    clearPatientCache();
+    import("./patient-list.js").then((m) => m.clearPatientCache()).catch(() => {});
     closeStartOfDay();
     teardownEndOfDay();
     teardownChat();
