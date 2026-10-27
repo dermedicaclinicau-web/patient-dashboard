@@ -30,7 +30,8 @@ const segDist = (px, py, ax, ay, bx, by) => {
 // sets: the marking sets staff can use on this picture (in the order they were ticked).
 // marks: the older single-set option, still accepted.
 // compact: one toolbar row (values, then Freehand icons), with the total shown in headTotal (the Compact bar)
-export function createAnnotator(box, src, { base = "", sets = null, marks = null, compact = false, headTotal = null } = {}) {
+export function createAnnotator(box, src, { base = "", sets = null, marks = null, compact = false, headTotal = null,
+  initial = null, onInitial = null } = {}) {
   const order = (Array.isArray(sets) ? sets : marks ? [marks] : [])
     .filter((s) => s && Array.isArray(s.values) && s.values.length);
   const marking = order.length > 0;
@@ -120,6 +121,39 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
     canvas.width = W;
     canvas.height = H;
     redraw();
+    loadInitial();
+  }
+
+  // Marks copied from an earlier record ({ x, y } as 0 to 1 of the picture). Each becomes a normal mark from
+  // this picture's own marking sets, so it can be moved, changed or removed. Marks with no matching value are left out.
+  function loadInitial() {
+    if (!initial || !W) return;
+    const list = Array.isArray(initial) ? initial : [];
+    initial = null;
+    const skipped = [];
+    list.forEach((m) => {
+      if (!m || !(m.x >= 0 && m.x <= 1 && m.y >= 0 && m.y <= 1)) return;
+      let si = order.findIndex((s) => s.id && s.id === m.setId);
+      if (si < 0 && m.set) si = order.findIndex((s) => String(s.name).toLowerCase() === String(m.set).toLowerCase());
+      if (si < 0) si = order.findIndex((s) => (m.code ? s.type === "label" : s.type !== "label"));
+      const s = order[si];
+      const vi = !s ? -1 : s.type === "label"
+        ? s.values.findIndex((x) => x.code === m.code)
+        : s.values.findIndex((x) => Math.abs(Number(x.v) - Number(m.v)) < 0.001);
+      if (vi < 0) { skipped.push(m.code || `${fmt(m.v)}${primary && primary.unit ? ` ${primary.unit}` : ""}`); return; }
+      const keep = [active, sel[si], tagSel[si]];
+      active = si;
+      sel[si] = vi;
+      tagSel[si] = Math.max(0, tagsOf(s).findIndex((t) => String(t).toLowerCase().replace(/[^a-z]/g, "")
+        === String(m.tag || "").toLowerCase().replace(/[^a-z]/g, "")));
+      const op = makeMark({ x: m.x * W, y: m.y * H, r: markRadius() });
+      [active, sel[si], tagSel[si]] = keep;
+      ops.push(op);
+      history.push({ add: op });
+    });
+    redraw();
+    box.dispatchEvent(new Event("input", { bubbles: true }));   // the form picks up the total (Calculations, products used)
+    if (onInitial) onInitial(skipped);
   }
   img.addEventListener("load", setup);
   img.src = src;
@@ -418,7 +452,7 @@ export function createAnnotator(box, src, { base = "", sets = null, marks = null
 }
 
 // Sets up drawing (and marks) on every drawable picture on a page. Returns { fieldId: annotator }.
-export function attachAnnotators(root, fields, { markSets = [] } = {}) {
+export function attachAnnotators(root, fields, { markSets = [], initial = null, onInitial = null } = {}) {
   const map = {};
   (fields || []).forEach((f) => {
     if (f.type !== "image" || !f.annotate || f.source === "staff" || !f.fileId) return;
@@ -432,7 +466,8 @@ export function attachAnnotators(root, fields, { markSets = [] } = {}) {
         if (!box.isConnected) return;
         const chart = f.chartLayout === "header";
         const head = chart && box.closest(".fe-chart") ? box.closest(".fe-chart").querySelector("[data-chart-total]") : null;
-        map[f.id] = createAnnotator(box, src, { sets, compact: chart, headTotal: head });
+        map[f.id] = createAnnotator(box, src, { sets, compact: chart, headTotal: head,
+          initial: initial && initial[f.id], onInitial: onInitial && ((s) => onInitial(f, s)) });
         if (wantsMarks && sets.length < ids.length) {
           box.insertAdjacentHTML("afterbegin", `<p class="an-warn">${sets.length
             ? "One of this picture's marking sets has been deleted."

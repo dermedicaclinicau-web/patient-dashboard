@@ -9310,3 +9310,7 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 
 .ppr-linked.is-dup { color: #b45309; }
 .ppr-onfile.is-dup { background: #fffbeb; border-color: #fcd34d; }
+
+.ff-copied { margin: 0 0 14px; padding: 12px 16px; border-radius: 12px; background: #f0fdfa; border: 1px solid #99f6e4; color: #134e4a; }
+.ff-copied strong { display: block; margin-bottom: 2px; }
+.ff-copied ul { margin: 8px 0 0; padding-left: 18px; color: #92400e; }

@@ -1346,6 +1346,11 @@ match /inv_count_drafts/{id} {
       }
     }
 
+      match /wr_treatment_record/{id} {
+        allow read: if isStaff();
+        allow write: if false;   // still written by the old app
+      }
+
     // Saved forms moved to another patient (written by Apps Script only)
     match /record_moves/{id} {
       allow read: if can('records.move');

@@ -38,6 +38,7 @@ import { can } from "./perms.js";
 import { openSmsDialog } from "./sms-dialog.js";
 import { db } from "./firebase-config.js";
 import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { copyOldWrRecord } from "./wr-copy.js";
 
 /* ===================== Config ===================== */
 
@@ -217,6 +218,13 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     const t = e.target;
     // Buttons inside a section header must not also open/close that section
     if (t.closest("summary button")) e.preventDefault();
+    const wc = t.closest("[data-wrcopy]");
+    if (wc) {
+      e.preventDefault();   // the record row may be a link or open a panel: only copy
+      e.stopPropagation();
+      copyOldWrRecord({ patientId: patient.id, record: wc.dataset.wrcopy });
+      return;
+    }
     const refreshBtn = t.closest("[data-action='refresh-pc']");
     if (refreshBtn) { refreshAll(refreshBtn); return; }
     if (t.closest("[data-action='merge-info']")) { mergeInfo(); return; }

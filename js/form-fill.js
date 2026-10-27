@@ -119,7 +119,20 @@ function readReturn() {
 }
 function writeReturn(r) { try { sessionStorage.setItem(RETURN_KEY, JSON.stringify(r)); } catch { /* storage full or private mode */ } }
 function clearReturn() { try { sessionStorage.removeItem(RETURN_KEY); } catch { /* ignore */ } }
-
+// "Copy and create new": answers and marks from an earlier record, waiting for the form to open.
+// localStorage, so it reaches the new tab. Taken once, and only within 10 minutes.
+const COPY_KEY = "dm.copyInto";
+export function queueCopy(c) {
+  try { localStorage.setItem(COPY_KEY, JSON.stringify({ ...c, at: Date.now() })); return true; } catch { return false; }
+}
+function takeCopy(pid, tid) {
+  try {
+    const c = JSON.parse(localStorage.getItem(COPY_KEY) || "null");
+    if (!c || c.p !== pid || c.t !== tid) return null;
+    localStorage.removeItem(COPY_KEY);
+    return Date.now() - Number(c.at || 0) < 10 * 60000 ? c : null;
+  } catch { return null; }
+}
 // "Open in new tab": the consent tab knows what it was opened for from its window name,
 // and tells the other tabs when a form is saved (BroadcastChannel, or localStorage on older browsers)
 const TAB_PREFIX = "dm-consent:";
@@ -394,6 +407,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
   const ret = embedded || tabMode ? null : readReturn();
   const isConsentLeg = !!(ret && ret.patientId === pid && ret.consentId === tid);   // filling in the consent
   const isReturnLeg = !!(ret && ret.patientId === pid && ret.templateId === tid && !isConsentLeg); // back on the treatment form
+  const copy = embedded || tabMode || isReturnLeg ? null : takeCopy(pid, tid);   // "Copy and create new"
   const handSaved = embedded || tabMode ? "" : readHand(pid, tid); // locked for the patient before a refresh
   const exitHref = isConsentLeg ? ret.returnHash : patientHref;
   const back = embedded ? "" : `<a class="back-link" href="${patientHref}">← Back to patient</a>`;
@@ -433,7 +447,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
 
   const fields = ver.fields.map(normaliseField).filter(Boolean);
   const showAlerts = ALERT_CATEGORIES.includes(tpl.category) && can("clinical.view");
-  const offerLast = tpl.category !== "consent" && !isReturnLeg; // consent is always given fresh
+  const offerLast = tpl.category !== "consent" && !isReturnLeg && !copy; // consent is always given fresh
   const offerHand = !embedded && fields.some((f) => forPatient(f)
     && !LAYOUT.includes(f.type) && !["patient", "calculation", "image"].includes(f.type));
   root.innerHTML = `
@@ -465,6 +479,9 @@ export async function mountFormFill(container, param, { staff, embedded = null }
           When you save, this tab closes and that form updates.
           <button type="button" class="ff-btn is-quiet ff-profile" data-act="open-profile">Patient profile ↗</button></p>` : ""}      
         </div>
+      ${copy ? `<div class="ff-copied" data-role="copied"><strong>Copied from ${esc(copy.fromLabel || "an earlier record")}</strong>
+        <span>Check every area, mark and answer before saving. Batch numbers, products used and signatures are today's, so they aren't copied.</span>
+        ${(copy.notes || []).length ? `<ul>${copy.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}</div>` : ""}
       ${offerLast ? '<div class="ff-last" data-role="last" hidden></div>' : ""}
       ${showAlerts ? `<div data-role="alerts">${clinicalBannerHtml(null)}</div>` : ""}
       ${offerHand ? `<div class="ho-bar" data-role="ho-bar" hidden>
@@ -506,7 +523,18 @@ export async function mountFormFill(container, param, { staff, embedded = null }
         if (root.isConnected) host.innerHTML = clinicalBannerHtml(null, { error: true });
       });
   }
-  const annots = attachAnnotators(sheet, fields, { markSets });
+  const annots = attachAnnotators(sheet, fields, {
+    markSets,
+    initial: copy && copy.marks,
+    onInitial: (f, skipped) => {
+      if (!skipped.length) return;
+      const box = root.querySelector('[data-role="copied"]');
+      const list = box && (box.querySelector("ul") || box.appendChild(document.createElement("ul")));
+      if (list) list.insertAdjacentHTML("beforeend", `<li>${esc(f.label || "A picture")}: ${skipped.length} mark${
+        skipped.length === 1 ? "" : "s"} (${esc([...new Set(skipped)].join(", "))}) couldn't be placed, because the marking set has no such value. Add ${
+        skipped.length === 1 ? "it" : "them"} by hand.</li>`);
+    },
+  });
   const msgEl = root.querySelector('[data-role="msg"]');
   const progressEl = root.querySelector('[data-role="progress"]');
   const saveBtns = $all(root, "[data-save]");
@@ -749,6 +777,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
       writeField(f, w, a[f.id]);
       writeExtras(f, w, a[`${f.id}__x`]);
     });
+
     $all(sheet, "[data-linked]").forEach((el) => { if (el.value) el.dataset.touched = "1"; });
     clearReturn();
     dirty = Object.keys(a).length > 0;
@@ -756,6 +785,15 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     showToast(redo
       ? "Welcome back. Your answers are restored. Add any signatures, photos or aftercare again."
       : "Welcome back. Your answers are restored.");
+  }
+  if (copy) {
+    restoreAnswers(copy.answers || {});
+    Object.entries(copy.imageQs || {}).forEach(([id, qs]) => {
+      const f = fields.find((x) => x.id === id);
+      const w = wrap(id);
+      if (f && w) writeImageQs(f, w, qs);   // e.g. "Treatment or touch-up?" under the picture
+    });
+    dirty = true;
   }
   refresh();
 
@@ -864,7 +902,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
   // An earlier draft of this form for this patient: offer to put it back
   (async () => {
     pruneDrafts();
-    const old = isReturnLeg ? null : readDraft(pid, tid);
+    const old = isReturnLeg || copy ? null : readDraft(pid, tid);
     if (old && Object.keys(old.answers).length) {
       const resume = handSaved ? true : await askResumeDraft(old, { updated: Number(old.version) !== Number(ver.version) });
       if (!root.isConnected) return;

@@ -14,6 +14,7 @@ const ICONS = {
   move: svg('<polyline points="15 14 20 9 15 4"/><path d="M4 20v-7a4 4 0 0 1 4-4h12"/>'),
   trash: svg('<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>'),
   plus: svg('<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>'),
+  copy: svg('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'),
 };
 
 const ALL_CATS = [...CATEGORIES, OTHER_CATEGORY];
@@ -183,9 +184,12 @@ const portalView = (r) =>
   `<a class="rc-act" href="#/form-record/${encodeURIComponent(r.portalId)}">${ICONS.view}View</a>` +
   (canMoveRecords() ? `<button type="button" class="rc-act" data-move-sub="${escapeHtml(r.portalId)}">${ICONS.move}Move</button>` : "");
 
-  const legacyMove = (kind, r) => (canMoveRecords()
+const legacyMove = (kind, r) => (canMoveRecords()
   ? `<button type="button" class="rc-act" data-move-legacy="${kind}" data-id="${escapeHtml(r.id)}">${ICONS.move}Move</button>` : "");
-
+// Old-app Wrinkle Relaxer records: start a new portal record with the same markings
+const wrCopyBtn = (t) => (t.category === "wr" && t.recordId
+  ? `<button type="button" class="rc-act" data-wrcopy="${escapeHtml(t.recordId)}" title="Open a new Wrinkle Relaxer record with these markings">${ICONS.copy}Copy and create new</button>`
+  : "");
 function movedNote(r) {
   const m = r.moves && r.moves[r.moves.length - 1];
   if (!m) return "";
@@ -257,6 +261,7 @@ function txItemHtml(t) {
       ${movedNote(t)}
       <div class="rc-actions">
         ${viewLink(t.link)}
+        ${wrCopyBtn(t)}
         ${legacyMove("treatment", t)}
         <button type="button" class="rc-act" data-soon="Edit record">${ICONS.edit}Edit Record</button>
         <button type="button" class="rc-act" data-soon="Rename record">${ICONS.rename}Rename</button>
