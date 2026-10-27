@@ -45,6 +45,8 @@ const LINK_KIND = { treatment: "Treatment record", consent: "Consent" };
 const linkText = (l) => `${LINK_KIND[l.kind] || "Record"}${l.title ? `: ${l.title}` : ""} · ${l.patientName || "Unknown patient"}${
   l.date ? ` · ${niceDay(l.date)}` : ""}`;
 const isLinked = (f) => !!(f.linked && f.linked.length);
+const dupText = (d) => [d.kind ? FILE_NAME[d.kind] : (STATUS[d.status] || STATUS.todo)[0], d.patientName,
+  d.recordDate && niceDay(d.recordDate), d.by].filter(Boolean).join(" · ");
 const RES = { none: "No treatment given", elsewhere: "Recorded somewhere else" };
 const RANGES = [["7", "Last 7 days"], ["30", "Last 30 days"], ["month", "This month"], ["lastmonth", "Last month"]];
 // [from, to] for a quick choice ("" = any time)
@@ -226,8 +228,10 @@ export function mountPaperRecords(container, { staff } = {}) {
         extra ? `<small class="ppr-extra">${esc(extra)}${f.by ? ` · ${esc(f.by)}` : ""}</small>` : ""}${
         prodLine ? `<small class="ppr-extra ppr-prodline${f.productsDone ? "" : " is-warn"}">${esc(prodLine)}</small>` : ""}${
         isLinked(f) && f.status === "todo" ? `<small class="ppr-linked">On file: ${esc(linkText(f.linked[0]))}${
-          f.linked.length > 1 ? ` (+${f.linked.length - 1} more)` : ""}</small>` : ""}</div>
-      <span class="ppr-pill is-${isLinked(f) && f.status === "todo" ? "ok" : tone}">${esc(isLinked(f) && f.status === "todo" ? "Already on file" : label)}</span>
+          f.linked.length > 1 ? ` (+${f.linked.length - 1} more)` : ""}</small>` : ""}${
+        f.dupOf && f.status === "todo" ? `<small class="ppr-linked is-dup">Same file as one already sorted: ${esc(dupText(f.dupOf))}</small>` : ""}</div>
+      <span class="ppr-pill is-${f.dupOf && f.status === "todo" ? "warn" : isLinked(f) && f.status === "todo" ? "ok" : tone}">${esc(
+        f.dupOf && f.status === "todo" ? "Possible duplicate" : isLinked(f) && f.status === "todo" ? "Already on file" : label)}</span>
       <button type="button" class="lh-btn" data-open="${esc(f.id)}">${f.status === "todo" || f.status === "help" ? "Enter" : "View"}</button>
     </li>`;
   }
@@ -441,6 +445,9 @@ export function mountPaperRecords(container, { staff } = {}) {
           <div class="ppr-canvas" data-role="canvas"><div class="skeleton sm"></div></div>
         </div>
         <div class="ppr-side">
+          ${f.dupOf && f.status === "todo" ? `<div class="ppr-onfile is-dup"><strong>Looks like a duplicate</strong>
+            <span>The same file (same name and size) was already sorted: ${esc(dupText(f.dupOf))}.</span>
+            <button type="button" class="lh-btn" data-act="dup">Mark as a duplicate</button></div>` : ""}
           ${isLinked(f) ? `<div class="ppr-onfile"><strong>Already on file</strong>${f.linked.map((l) => `<span>${esc(linkText(l))}${
             l.patientId ? ` · <a href="#/patient/${encodeURIComponent(l.patientId)}" target="_blank" rel="noopener">Open their page ↗</a>` : ""}</span>`).join("")}
             ${f.status === "todo" ? '<button type="button" class="lh-btn" data-act="onfile">Mark as already on file</button>' : ""}</div>` : ""}
@@ -1297,6 +1304,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       if (act === "onfile") mark("skip", { reason: "Already on the patient's file", note: linkText(f.linked[0]) }, actEl);
       if (act === "help") mark("help", { note: $('[name="note"]').value }, actEl);
       if (act === "todo") mark("todo", {}, actEl);
+      if (act === "dup") mark("skip", { reason: "Duplicate scan", note: "Same file as: " + dupText(f.dupOf) }, actEl);
     });
     dlg.addEventListener("cancel", (e) => { if (saving) e.preventDefault(); });
     dlg.addEventListener("close", () => { if (url) URL.revokeObjectURL(url); dlg.remove(); });

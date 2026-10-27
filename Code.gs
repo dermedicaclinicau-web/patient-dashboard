@@ -4313,6 +4313,11 @@ function handleInventory_(body) {
       try { return Object.assign({ ok: true }, oldKitLedgerAll_(body.fresh === true, String(body.from || ''), String(body.to || ''))); }
       catch (e) { return { ok: true, problem: String(e && e.message ? e.message : e).slice(0, 300) }; }
     }
+    if (op === 'oldKitExplain') {
+      if (!can_(session, 'menu.reports') && !can_(session, 'inventory.manage')) return { ok: false, error: 'FORBIDDEN' };
+      try { return Object.assign({ ok: true }, oldKitExplain_(body)); }
+      catch (e) { return { ok: true, problem: String(e && e.message ? e.message : e).slice(0, 300) }; }
+    }
     if (op === 'oldKitLedger') {
       if (!can_(session, 'menu.reports') && !can_(session, 'inventory.manage')) return { ok: false, error: 'FORBIDDEN' };
       try { return Object.assign({ ok: true }, oldKitLedger_(body.names, body.fresh === true)); }
@@ -15345,6 +15350,14 @@ function paperList_(cfg, fresh) {
       productsFor: String(s.productsFor || ''),
     });
   }).sort(function (a, b) { return a.created.localeCompare(b.created); });   // oldest first: work through the backlog in order
+  // The same name and size as a scan already sorted: almost certainly the same file uploaded again
+  const dupKey = function (f) { return String(f.name).toLowerCase().replace(/\s+/g, ' ').trim() + '|' + f.size; };
+  const sorted = {};
+  out.forEach(function (f) { if (f.status !== 'todo' && !sorted[dupKey(f)]) sorted[dupKey(f)] = f; });
+  out.forEach(function (f) {
+    const d = f.status === 'todo' ? sorted[dupKey(f)] : null;
+    if (d) f.dupOf = { id: d.id, status: d.status, kind: d.filedKind, patientName: d.patientName, recordDate: d.recordDate, by: d.by };
+  });
   return { ok: true, files: out, folderUrl: 'https://drive.google.com/drive/folders/' + paperRootId_() };
 }
 
@@ -16564,4 +16577,114 @@ function oldKitLedgerAll_(fresh, from, to) {
     };
   }).filter(function (p) { return p.rows.length || p.records.length; });
   return { people: people, at: base.at };
+}
+
+// Reporting → Kit reconciliation → Explain: one injector's booked Wrinkle Relaxer visits from one start count
+// to the next (from inclusive, to not), compared with the old app's records. Read only.
+function oldKitExplain_(body) {
+  const names = uniq_((Array.isArray(body.names) ? body.names : []).concat([body.staffName || ''])
+    .map(function (s) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, 80); })
+    .filter(Boolean)).slice(0, 8);
+  const from = String(body.from || ''), to = String(body.to || '');
+  if (!names.length || !/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || to <= from) {
+    throw new Error('Choose a counted day that has a later count.');
+  }
+  if (flowDays_(from, to) > 120) throw new Error('That stretch is longer than 120 days. Check it a part at a time.');
+
+  const cfg = getConfig_();
+  const base = oldKitBase_(false);
+  const isMine = function (n) { return names.some(function (x) { return kitSameStaff_(n, x); }); };
+  const person = base.people.filter(function (p) {
+    return p.oldNames.some(function (n) { return names.indexOf(n) !== -1; }) || isMine(p.staffName);
+  })[0] || null;
+  const key = function (s) { return ptClean_(s); };
+
+  // The old app's records in the stretch
+  const recs = (person ? person.records : []).filter(function (x) { return x[0] >= from && x[0] < to; })
+    .map(function (x) { return { date: x[0], time: x[1], name: x[2], units: x[3], areas: x[4], pid: x[8] || '', used: false }; });
+
+  // Their booked Wrinkle Relaxer visits (cancelled and no-shows left out), one per patient per day
+  const pts = paperPts_(cfg);
+  const seen = {};
+  const appts = [];
+  schedApptDays_(cfg, from, flowAddDaysKey_(to, -1), 200).forEach(function (d) {
+    const dk = String(d.date || '');
+    (d.appointments || []).forEach(function (a) {
+      if (!isMine(String(a.staff || '')) || !pcnStatusOk_(a.status, 'full')) return;
+      const svcs = (a.services || []).map(function (s) { return String(s || '').trim(); })
+        .filter(function (s) { return s && !REP_NOT_VISIT_.test(s) && pcnCategory_(dk, s) === 'Wrinkle Relaxer'; });
+      if (!svcs.length) return;
+      const ptt = String(a.patientId || '').trim();
+      const pid = ptt ? pts.find(ptt) : '';
+      const name = String(a.patientName || '').trim();
+      const k = dk + '|' + (pid || key(name));
+      if (seen[k]) { svcs.forEach(function (s) { if (seen[k].services.indexOf(s) === -1) seen[k].services.push(s); }); return; }
+      seen[k] = { date: dk, time: String(a.time || ''), name: name, pid: pid, services: svcs, used: false };
+      appts.push(seen[k]);
+    });
+  });
+
+  const same = function (a, r) {
+    if (a.pid && r.pid) return a.pid === r.pid;
+    const x = key(a.name);
+    return !!x && x === key(r.name);
+  };
+  let matched = 0;
+  // 1. The same day
+  appts.forEach(function (a) {
+    const r = recs.filter(function (r) { return !r.used && r.date === a.date && same(a, r); })[0];
+    if (r) { r.used = a.used = true; matched++; }
+  });
+  // 2. Within 3 days (recorded on the wrong day)
+  const moved = [];
+  appts.forEach(function (a) {
+    if (a.used) return;
+    const r = recs.filter(function (r) { return !r.used && same(a, r) && Math.abs(flowDays_(a.date, r.date)) <= 3; })[0];
+    if (!r) return;
+    r.used = a.used = true;
+    matched++;
+    moved.push({ apptDate: a.date, recDate: r.date, name: a.name || r.name, pid: a.pid || r.pid, units: r.units });
+  });
+
+  // Booked, no record: about how many units, from their last three records (touch-ups from their touch-ups)
+  const estimate = function (a, touchUp) {
+    const list = [];
+    base.people.forEach(function (p) {
+      p.records.forEach(function (x) {
+        if (x[0] >= a.date) return;
+        const hit = a.pid && x[8] ? x[8] === a.pid : (key(x[2]) && key(x[2]) === key(a.name));
+        if (hit && (/touch/i.test(String(x[5] || '')) === touchUp)) list.push({ date: x[0], units: Number(x[3]) || 0 });
+      });
+    });
+    const last = list.sort(function (p, q) { return q.date.localeCompare(p.date); }).slice(0, 3)
+      .map(function (x) { return x.units; }).sort(function (p, q) { return p - q; });
+    if (!last.length) return null;
+    const m = Math.floor(last.length / 2);
+    return Math.round((last.length % 2 ? last[m] : (last[m - 1] + last[m]) / 2) * 10) / 10;
+  };
+  const missing = appts.filter(function (a) { return !a.used; }).map(function (a) {
+    const touchUp = a.services.every(function (s) { return /touch\s*-?\s*up|top\s*-?\s*up/i.test(s); });
+    return { date: a.date, time: a.time, name: a.name, pid: a.pid, services: a.services, touchUp: touchUp, est: estimate(a, touchUp) };
+  });
+  const unbooked = recs.filter(function (r) { return !r.used; })
+    .map(function (r) { return { date: r.date, time: r.time, name: r.name, pid: r.pid, units: r.units, areas: r.areas }; });
+
+  return {
+    from: from, to: to, appts: appts.length, records: recs.length, matched: matched,
+    missing: missing, moved: moved, unbooked: unbooked,
+    estTotal: Math.round(missing.reduce(function (t, m) { return t + (m.est || 0); }, 0) * 10) / 10,
+    unknown: missing.filter(function (m) { return m.est === null; }).length,
+  };
+}
+
+// Run from the editor: every scan whose name contains this, with its status
+function paperWhy() {
+  const want = '2026-10-26_SERVICES';   // part of the file name
+  const files = paperList_(getConfig_(), true).files
+    .filter(function (f) { return f.name.toLowerCase().indexOf(want.toLowerCase()) !== -1; });
+  files.forEach(function (f) {
+    console.log([f.id, f.size + ' bytes', 'uploaded ' + f.created, f.folder || '(top folder)', 'status: ' + f.status,
+      f.patientName || '', f.by || ''].join(' | '));
+  });
+  console.log(files.length + ' file(s) with that name');
 }

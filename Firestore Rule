@@ -1323,6 +1323,28 @@ match /inv_count_drafts/{id} {
         && request.resource.data.note.size() > 0 && request.resource.data.note.size() <= 500;
       allow update, delete: if false;
     }
+    // Reporting → Kit reconciliation: differences marked as checked. Every change has a log entry, and the log can't be changed.
+    match /kit_recon_checks/{id} {
+      allow read: if can('menu.reports') || can('inventory.manage');
+      allow create, update: if (can('menu.reports') || can('inventory.manage'))
+        && request.resource.data.keys().hasOnly(['staffKey', 'staffName', 'from', 'to', 'gap', 'status', 'reason',
+             'note', 'explain', 'logId', 'by', 'byUid', 'at', 'count'])
+        && request.resource.data.status in ['checked', 'open']
+        && request.resource.data.note is string && request.resource.data.note.size() >= 3 && request.resource.data.note.size() <= 500
+        && request.resource.data.explain is string && request.resource.data.explain.size() <= 600
+        && request.resource.data.byUid == request.auth.uid
+        && existsAfter(/databases/$(database)/documents/kit_recon_checks/$(id)/log/$(request.resource.data.logId));
+      allow delete: if false;
+
+      match /log/{logId} {
+        allow read: if can('menu.reports') || can('inventory.manage');
+        allow create: if (can('menu.reports') || can('inventory.manage'))
+          && request.resource.data.byUid == request.auth.uid
+          && request.resource.data.action in ['checked', 'reopened']
+          && getAfter(/databases/$(database)/documents/kit_recon_checks/$(id)).data.logId == logId;
+        allow update, delete: if false;
+      }
+    }
 
     // Saved forms moved to another patient (written by Apps Script only)
     match /record_moves/{id} {
