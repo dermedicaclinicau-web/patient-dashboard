@@ -243,6 +243,17 @@ export function mountRecords(root, patient) {
           }),
         ]);
         await markPrescriptions(consents, rx).catch((err) => console.warn("Consent prescriptions not marked:", err));
+        // TEMPORARY: what the prescription check decided (remove once it's working)
+        console.log("Prescriptions found for this patient:", rx.ok ? "all loaded" : "SOME FAILED TO LOAD",
+          rx.list.map((p) => `${p.date.toDateString()} · ${p.title}`));
+        console.table(consents.map((c) => ({
+          consent: c.title,
+          date: c.date ? c.date.toDateString() : "(no date)",
+          from: c.portalId ? "portal" : "old app",
+          category: c.category,
+          result: c.rxState || "not checked",
+          prescription: c.rx ? `${c.rx.title} · ${c.rx.date ? c.rx.date.toDateString() : ""}` : "",
+        })));
         if (!grid.isConnected) return;
         loaded = true;
         lists = { treatment: treatments, consent: consents };
