@@ -50,6 +50,7 @@ const DOC_ACTIONS = [
   ["Summary", "summary"],
   ["General note", "note"],
   ["Personal note", "lock", "add-note"],
+  ["Add reminder", "bell", "add-reminder"],
 ];
 
 // Order and look of the Pre-Consultation section.
