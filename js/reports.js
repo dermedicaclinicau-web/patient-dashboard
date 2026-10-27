@@ -99,7 +99,7 @@ export function mountReports(container, { param = "", staff = null } = {}) {
   else if (tab === "wastage") mountWastage(body);
   else if (tab === "usage") mountUsage(body, staff);
   else if (tab === "opened") mountOpened(body);
-  else if (tab === "kits") mountKitRecon(body);
+  else if (tab === "kits") mountKitRecon(body, staff);
   else if (tab === "plans") renderPlanReports(body, { staff });
   else if (PATIENT_TABS.some(([k]) => k === tab)) mountPatientReport(body, tab, staff);
   else if (tab === "retention") mountRetention(body);
@@ -1022,8 +1022,8 @@ function oldKitRows(list, products) {
   });
 }
 
-function mountKitRecon(body) {
-  mountKitReconciliation(body, { csv: downloadCsv });
+function mountKitRecon(body, staff) {
+  mountKitReconciliation(body, { csv: downloadCsv, staff });
 }
 /* ===================== Start & end of day ===================== */
 

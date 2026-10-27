@@ -53,11 +53,12 @@ export function checkBadgeHtml(seg) {
 export function checkToolsHtml(seg) {
   if (!seg || !seg.to || r1(seg.gap) === 0) return "";
   const c = checkOf(seg);
-  const data = esc(JSON.stringify({ k: seg.staffKey, n: seg.staffName, o: seg.oldNames || [], f: seg.from, t: seg.to, g: r1(seg.gap) }));
+  const data = esc(JSON.stringify({ k: seg.staffKey, n: seg.staffName, o: seg.oldNames || [], f: seg.from, t: seg.to,
+    g: r1(seg.gap), x: seg.noExplain ? 1 : 0 }));
   return `<div class="kc-tools" data-kc-seg="${data}">
     <div class="kc-row">${checkBadgeHtml(seg)}
       <span class="kc-btns">
-        <button type="button" class="lh-btn is-quiet" data-kc="explain">Explain</button>
+        ${seg.noExplain ? "" : '<button type="button" class="lh-btn is-quiet" data-kc="explain">Explain</button>'}
         <button type="button" class="lh-btn${c && c.status === "checked" ? " is-quiet" : ""}" data-kc="check">${
           c && c.status === "checked" ? "Reopen" : "Mark as checked"}</button>
         ${c ? '<button type="button" class="rc-link" data-kc="history">History</button>' : ""}
@@ -223,7 +224,7 @@ export function bindKitChecks(root, { staff, onChange } = {}) {
     e.preventDefault();
     e.stopPropagation();   // so the row's own click doesn't fire too
     const s = JSON.parse(box.dataset.kcSeg);
-    const seg = { staffKey: s.k, staffName: s.n, oldNames: s.o, from: s.f, to: s.t, gap: s.g };
+    const seg = { staffKey: s.k, staffName: s.n, oldNames: s.o, from: s.f, to: s.t, gap: s.g, noExplain: !!s.x };
     const id = checkId(seg.staffKey, seg.from, seg.to);
     const redraw = () => {
       const keepOpen = box.querySelector(".kc-out:not([hidden])");

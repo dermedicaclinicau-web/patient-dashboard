@@ -6,6 +6,7 @@ import {
   listProducts, listKits, listKitMoves, listAllLoans, listUsageByStaff, listKitDaysFor, dayKey, plural,
 } from "./inventory-api.js";
 import { callApi } from "./appointments.js";
+import { loadChecks, checkOf, checkToolsHtml, bindKitChecks } from "./kit-recon-checks.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const r1 = (n) => Math.round((Number(n) || 0) * 10) / 10;
@@ -155,10 +156,13 @@ function buildLedger(entries) {
   entries.forEach((e) => { e.t = tOf(e); });
   entries.sort((a, b) => a.t - b.t || a.ord - b.ord);
   let bal = null;
+  let lastCount = null;
   entries.forEach((e) => {
     if (e.kind === "count") {
       e.expected = bal;
+      e.prevDate = lastCount ? lastCount.date : "";   // the count it's compared with (for Explain)
       bal = e.value;
+      lastCount = e;
     } else if (e.kind === "move" && e.counts !== false && bal !== null) {
       bal = r1(bal + e.units);
     }
@@ -199,11 +203,33 @@ function groupDays(entries) {
   });
 }
 
+// A start count that didn't match: one difference, from the count before it up to this one
+function segOf(p, d) {
+  if (!bad(d.startDiff) || !d.start || !d.start.prevDate) return null;
+  const from = d.start.prevDate, to = d.date;
+  return {
+    staffKey: `${p.uid}_${p.product.id}`, staffName: p.name, oldNames: p.oldNames || [], from, to, gap: d.startDiff,
+    noExplain: d.start.src !== "old" || !(to > from),   // Explain reads the old app's records only
+  };
+}
+
+// Marked as checked, and not changed since: it no longer needs checking
+function withChecks(p, list) {
+  return list.map((d) => {
+    const seg = segOf(p, d);
+    const c = seg ? checkOf(seg) : null;
+    const done = !!(c && c.status === "checked" && r1(c.gap) === r1(seg.gap));
+    const check = (bad(d.startDiff) && !done) || bad(d.gap) || d.expired.length > 0 || d.uncounted || d.loansOpen.length > 0;
+    return { ...d, seg, done, check };
+  });
+}
+
 function checkList(d) {
   const out = [];
   if (d.uncounted) out.push({ t: "Not counted", bad: false });
   if (bad(d.gap)) out.push(d.gap < 0 ? { t: `${fmt(-d.gap)} not on a patient`, bad: true } : { t: `${fmt(d.gap)} more than expected`, bad: false });
-  if (bad(d.startDiff)) out.push({ t: `Start ${d.startDiff > 0 ? "+" : "−"}${fmt(Math.abs(d.startDiff))}`, bad: d.startDiff < 0 });
+  if (bad(d.startDiff)) out.push({ t: `Start ${d.startDiff > 0 ? "+" : "−"}${fmt(Math.abs(d.startDiff))}${d.done ? " · checked ✓" : ""}`,
+    bad: d.startDiff < 0 && !d.done });
   if (d.expired.length) out.push({ t: `Expired batch used${d.expired.length > 1 ? ` ×${d.expired.length}` : ""}`, bad: true });
   d.loansOpen.forEach((e) => out.push(e.status === "disputed" ? { t: "Handover disputed", bad: true } : { t: "Handover not confirmed", bad: false }));
   return out;
@@ -334,13 +360,16 @@ function helpHtml() {
 }
 
 /* ---------- Reporting → Kit reconciliation ---------- */
-export function mountKitReconciliation(body, { csv = null } = {}) {
+export function mountKitReconciliation(body, { csv = null, staff = null } = {}) {
   const st = {
     view: "days", staff: new Set(), staffOpen: false, product: "", from: daysAgo(89), to: "", onlyCheck: false, limit: 100,
     help: false,
     open: new Set(), people: [], products: [], problem: "", oldProblem: "", loadingOld: false, base: null, old: {}, seq: 0,
-    q: "", allPeople: null, loadingAll: false, allProblem: "",
+    q: "", allPeople: null, loadingAll: false, allProblem: "", checksProblem: "",
   };
+
+  // Explain, Mark as checked and History on each difference (one listener for the whole page)
+  bindKitChecks(body, { staff, onChange: () => draw() });
 
   // Portal records: read once
   async function load() {
@@ -349,6 +378,11 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
       const [products, kits, moves, loans, staffRes] = await Promise.all([
         listProducts(), listKits(), listKitMoves(), listAllLoans(),
         callApi({ action: "staffList" }).catch(() => ({ staff: [] })),
+        loadChecks(true).catch((e) => {
+          console.warn("Kit checks not loaded:", e);
+          st.checksProblem = "Saved checks couldn't be loaded, so every difference shows as unchecked.";
+          return null;
+        }),
       ]);
       const kitPs = products.filter((p) => p.usage === "kit" && p.dosePer);
       if (!kitPs.length) { body.innerHTML = '<div class="tm-empty">No products are carried in kits yet.</div>'; return; }
@@ -444,12 +478,13 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
         const o = oldBy.get(x.uid);
         const pe = portalEntries({ uid: x.uid, product, moves: b.moves, loans: b.loans, usage: x.usage, days: x.days });
         const oe = product === b.oldProduct && o ? oldEntries(o) : [];
-        if (pe.length || oe.length) people.push({ uid: x.uid, name: x.name, product, L: mergeSources(pe, oe) });
+        if (pe.length || oe.length) people.push({ uid: x.uid, name: x.name, product, oldNames: (o && o.oldNames) || [], L: mergeSources(pe, oe) });
       });
       if (product === b.oldProduct) {
         oldBy.forEach((o, key) => {
           if (have.has(key)) return;
-          people.push({ uid: key, name: (b.byId.get(key) || {}).name || o.staffName, product, L: mergeSources([], oldEntries(o)) });
+          people.push({ uid: key, name: (b.byId.get(key) || {}).name || o.staffName, product, oldNames: o.oldNames || [],
+            L: mergeSources([], oldEntries(o)) });
         });
       }
     });
@@ -474,7 +509,7 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
     const out = [];
     const empty = (c) => !c || (!c.value && !(c.batches || []).some((x) => x.batch));
     visible().forEach((p) => {
-      groupDays(p.L.filter((e) => e.date >= a && e.date <= b)).forEach((d) => {
+      withChecks(p, groupDays(p.L.filter((e) => e.date >= a && e.date <= b))).forEach((d) => {
         if (empty(d.start) && empty(d.end) && !d.uses.length && !d.restocks.length && !d.colleagues.length) return;
         if (st.onlyCheck && !d.check) return;
         out.push({ ...d, p, id: `${p.product.id}|${p.uid}|${d.date}` });
@@ -511,7 +546,7 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
         .reduce((x, e) => x + e.units, 0));
       gap = r1(last.value - expected);
     }
-    const days = groupDays(L);
+    const days = withChecks(p, groupDays(L));
 
     // What's in their kit now (their latest start count, any date), and what expires within 60 days
     const allStarts = p.L.filter((e) => e.kind === "count" && e.cat === "start");
@@ -623,6 +658,7 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
       </div>
       ${st.problem ? `<p class="tb-bad rp-note">${esc(st.problem)}</p>` : ""}
       ${st.oldProblem ? `<p class="tb-bad rp-note">${esc(st.oldProblem)}</p>` : ""}
+      ${st.checksProblem ? `<p class="tb-bad rp-note">${esc(st.checksProblem)}</p>` : ""}
       ${st.loadingOld ? `<p class="muted rp-note">Loading the old app's records for these dates…</p>` : ""}`;
   }
 
@@ -669,6 +705,7 @@ export function mountKitReconciliation(body, { csv = null } = {}) {
         <td>${restock || "—"}</td>
         <td>${checks.length ? checks.map(flagHtml).join(" ") : '<span class="kr-ok">✓</span>'}</td>
         <td><button type="button" class="lh-btn" data-hist="${esc(d.id)}">${open ? "Hide" : "History"}</button></td></tr>
+      ${d.seg ? `<tr class="kr-chk"><td colspan="11">${checkToolsHtml(d.seg)}</td></tr>` : ""}
       ${open ? `<tr class="rp-sub"><td colspan="11">${historyHtml(d)}</td></tr>` : ""}`;
   }
 

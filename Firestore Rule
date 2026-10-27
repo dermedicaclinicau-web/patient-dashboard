@@ -1389,5 +1389,12 @@ match /inv_count_drafts/{id} {
     match /{document=**} {
       allow read, write: if false;
     }
+    match /kit_recon_checks/{id} {
+      allow read, write: if isStaff();
+      match /log/{logId} {
+        allow read, create: if isStaff();
+        allow update, delete: if false;   // the history can't be changed
+      }
+    }    
   }
 }
