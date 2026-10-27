@@ -308,7 +308,7 @@ function staffColumn(name, appts) {
       <div class="cal-col-head">${escapeHtml(name)}${can("calendar.book") && !/^unassigned$/i.test(name)
         ? `<button type="button" class="cal-col-add" data-action="mappt-add" data-staff="${escapeHtml(name)}"
             aria-label="Add a booking with ${escapeHtml(name)}" title="Add a booking with ${escapeHtml(name)}">+</button>` : ""}</div>
-      <div class="cal-col-body">${appts.map(apptCard).join("")}<div class="cal-eod-slot" data-eod-col="${escapeHtml(name)}"></div></div>
+      <div class="cal-col-body">${groupVisits(appts).map((g) => (g.length > 1 ? visitCard(g) : apptCard(g[0]))).join("")}<div class="cal-eod-slot" data-eod-col="${escapeHtml(name)}"></div></div>
     </div>`;
 }
 
@@ -324,7 +324,83 @@ function parseBalance(b) {
   const n = Number(String(b || "").replace(/[^0-9.-]/g, ""));
   return isFinite(n) ? n : 0;
 }
+/* ---------- One card per visit ---------- */
 
+// A later booking for the same patient in the same column joins their visit
+// if it starts within this many minutes of their previous booking
+const VISIT_GAP_MIN = 90;
+
+// Who a booking is for. Portal bookings ("") always get their own card, for Edit and Remove.
+function visitKey(a) {
+  if (a.manual) return "";
+  const id = String(a.patientId || "").trim();
+  if (id) return "id:" + id;
+  const n = String(a.patientName || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return n && n !== "unknown patient" ? "n:" + n : "";
+}
+
+// appts are already in time order. Returns [[a], [a, a, a], …] in order of each visit's first booking.
+function groupVisits(appts) {
+  const out = [];
+  const open = new Map();   // patient → their latest visit
+  for (const a of appts) {
+    const k = visitKey(a);
+    const g = k ? open.get(k) : null;
+    if (g && a.sortMinutes - g[g.length - 1].sortMinutes <= VISIT_GAP_MIN) { g.push(a); continue; }
+    const visit = [a];
+    out.push(visit);
+    if (k) open.set(k, visit);
+  }
+  return out;
+}
+
+// "1:00 pm - 1:15 pm" → "1:15 pm" (falls back to the start time)
+function endTime(a) {
+  const m = String(a.timeRange || "").match(/[-–]\s*([0-9].*)$/);
+  return m ? m[1].trim() : (a.time || "");
+}
+
+// Several bookings in a row: one card, each treatment with its own time
+function visitCard(group) {
+  const first = group[0];
+  const last = group[group.length - 1];
+  const lineCls = group.map((a) => statusClass(a.status));
+  const cls = lineCls.every((c) => c === "is-cancelled") ? "is-cancelled"
+    : lineCls.every((c) => c === "is-done") ? "is-done" : "";
+
+  const statuses = [...new Set(group.map((a) => String(a.status || "").trim()).filter(Boolean))];
+  const perLine = statuses.length > 1;   // different statuses: show each one on its line
+
+  const lines = group.map((a, i) => {
+    const svc = (a.services || []).join(", ") || "Appointment";
+    const off = lineCls[i] === "is-cancelled";
+    const st = perLine && a.status
+      ? ` <em class="appt-sstat ${lineCls[i]}">${escapeHtml(a.status)}</em>` : "";
+    return `<span class="appt-service is-timed${off ? " is-off" : ""}"><b>${escapeHtml(a.time || "—")}</b><span>${escapeHtml(svc)}${st}</span></span>`;
+  }).join("");
+
+  const balance = Math.max(0, ...group.map((a) => parseBalance(a.balance)));   // the balance repeats on each booking
+  const extras = [
+    !perLine && statuses.length ? `<span class="appt-status ${cls}">${escapeHtml(statuses[0])}</span>` : "",
+    balance > 0 ? `<span class="appt-balance">$${balance.toFixed(2)} owing</span>` : "",
+  ].join("");
+
+  const inner = `
+    <span class="appt-time">${escapeHtml(first.time || "—")} – ${escapeHtml(endTime(last))}<span class="appt-count">${group.length} bookings</span></span>
+    <span class="appt-name">${escapeHtml(first.patientName || "Unknown patient")}</span>
+    <span class="appt-badges"></span>
+    <span class="appt-services is-visit">${lines}</span>
+    ${extras ? `<span class="appt-extras">${extras}</span>` : ""}`;
+
+  const title = escapeHtml(group.map((a) =>
+    [a.timeRange || a.time, (a.services || []).join(", "), a.resources].filter(Boolean).join(" · ")).join("\n"));
+  const classes = `appt is-visit ${cls}`.trim();
+  const idx = Number.isInteger(first._i) ? ` data-i="${first._i}"` : "";   // badges: same patient for every booking
+
+  return first.patientId
+    ? `<a class="${classes}"${idx} href="#/patient/${encodeURIComponent(first.patientId)}" title="${title}">${inner}</a>`
+    : `<div class="${classes}"${idx} title="${title}">${inner}</div>`;
+}
 const BADGES = {
   plan: ["Plan", "cb-plan"],
   summary: ["Summary", "cb-summary"],
