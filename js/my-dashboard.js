@@ -1004,6 +1004,13 @@ export async function mountMyDashboard(container, { staff } = {}) {
   }
 
   root.addEventListener("click", (e) => {
+    // Patient names open the patient's page in a new tab, so My dashboard stays open
+    const pl = e.target.closest('a[href^="#/patient/"]');
+    if (pl && e.button === 0 && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      window.open(location.pathname + location.search + pl.getAttribute("href"), "_blank", "noopener");
+      return;
+    }
     const fb = e.target.closest("[data-fold]");
     if (fb) {
       const el = fb.closest("[data-card]");
