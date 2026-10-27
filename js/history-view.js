@@ -281,7 +281,7 @@ function badgeHtml(b) {
   if (b.type === "tx" || b.type === "consent") {
     // Made in the portal: open the saved form (same as the Past appointments badges)
     if (b.portalId) {
-      return `<a class="hv-badge b-${b.type}" href="#/form-record/${encodeURIComponent(b.portalId)}">${inner}</a>`;
+      return `<a class="hv-badge b-${b.type}" href="#/form-record/${encodeURIComponent(b.portalId)}" target="_blank" rel="noopener">${inner}</a>`;
     }
     // From the old app: open its PDF in a new tab
     if (/^https:\/\//i.test(b.link || "")) {

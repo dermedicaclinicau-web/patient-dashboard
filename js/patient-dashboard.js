@@ -1126,7 +1126,7 @@ function paRecHtml(r, cls, text) {
   }
   if (!r.href) return `<span class="${cls}" title="${title} (no file attached)">${text}</span>`;
   const external = /^https?:\/\//i.test(r.href) ? ' target="_blank" rel="noopener noreferrer"' : "";
-  return `<a class="${cls}" href="${escapeHtml(r.href)}"${external} title="${title}">${text}</a>`;
+  return `<a class="${cls}" href="${escapeHtml(r.href)}"${external} title="${title}">${inner}</a>`;
 }
 
 function paBadgesHtml(recs, missing) {
@@ -1284,6 +1284,36 @@ function consultPlanOf(r) {
 }
 
 /* ===================== Treatment Plan section ===================== */
+// The notes panel saves a hidden copy of the plan inside the notes (<!-- STRUCTURED_SIDECAR:… -->)
+// so it can reopen it exactly. It's for the editor, not for reading: leave it out of everything shown here.
+// (Apply to master plan still reads it from the full notes, which aren't changed.)
+const isSidecarLine = (s) => /<!--|-->|STRUCTURED_SIDECAR/i.test(String(s || ""));
+const cleanLines = (arr) => (Array.isArray(arr) ? arr.filter((l) => !isSidecarLine(l)) : []);
+
+function cleanPlan(p) {
+  const parsed = p.parsed || {};
+  return {
+    ...p,
+    plan: String(p.plan || "")
+      .replace(/<!--[\s\S]*?-->/g, "")
+      .replace(/^.*STRUCTURED_SIDECAR.*$/gm, "")
+      .trim(),
+    parsed: {
+      ...parsed,
+      intro: cleanLines(parsed.intro),
+      timeline: cleanLines(parsed.timeline),
+      concerns: (parsed.concerns || []).map((c) => ({
+        ...c,
+        description: cleanLines(c.description),
+        area: cleanLines(c.area),
+        treatment: cleanLines(c.treatment),
+        frequency: cleanLines(c.frequency),
+        quote: cleanLines(c.quote),
+        comments: cleanLines(c.comments),
+      })),
+    },
+  };
+}
 
 function treatmentPlansSectionHtml() {
   return `
@@ -1307,7 +1337,7 @@ function renderTreatmentPlans(root, records) {
   const section = root.querySelector('details[data-key="tp-section"]');
   if (!section) return;
 
-  const plans = allTreatmentPlans(records);
+  const plans = allTreatmentPlans(records).map(cleanPlan);
   const dates = new Set(plans.map((p) => (p.date ? toDateKey(p.date) : p.dateText)));
   const newest = plans.find((p) => p.date);
   section.querySelector(".tp-hist-count").textContent = plans.length
