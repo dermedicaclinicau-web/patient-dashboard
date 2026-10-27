@@ -9325,3 +9325,6 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 .appt-sstat.is-done { background: #ecfdf5; color: #047857; }
 .appt-sstat.is-cancelled { background: #f1f5f9; color: #64748b; }
 .appt-count { white-space: nowrap; }
+
+.appt.is-visit .appt-time { display: flex; flex-wrap: wrap; align-items: center; gap: .2rem .45rem; }
+.appt.is-visit .appt-count { margin-left: 0; }

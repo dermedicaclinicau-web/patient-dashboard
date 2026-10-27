@@ -378,7 +378,7 @@ function visitCard(group) {
       ? ` <em class="appt-sstat ${lineCls[i]}">${escapeHtml(a.status)}</em>` : "";
     return `<span class="appt-service${off ? " is-off" : ""}"><span>${escapeHtml(svc)}</span>${st}</span>`;
   }).join("");
-
+  
   const balance = Math.max(0, ...group.map((a) => parseBalance(a.balance)));   // the balance repeats on each booking
   const extras = [
     !perLine && statuses.length ? `<span class="appt-status ${cls}">${escapeHtml(statuses[0])}</span>` : "",
