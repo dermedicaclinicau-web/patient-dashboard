@@ -2,6 +2,8 @@ import { addReminder } from "./reminders.js";
 import { escapeHtml, toDateKey } from "./utils.js";
 import { fetchStaffList } from "./task-types.js";
 
+const VERSION = "v3";   // shows in the console, so you can check the browser has this copy
+
 const svg = (p) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const I = {
@@ -36,21 +38,10 @@ const QUICK = [
   ["6 months", () => plusMonths(6)],
 ];
 
-let dlg = null;
-let ctx = null;
-
-function markActiveChip() {
-  const input = dlg.querySelector("input[name='due']");
-  const value = input ? input.value : "";
-  dlg.querySelectorAll(".rm-chip").forEach((c) => c.classList.toggle("active", c.dataset.due === value));
-  const when = dlg.querySelector("[data-role='due-when']");
-  if (when) when.textContent = dueText(value);
-}
-
 // "2026-10-29" → "Thursday 29 October 2026 · tomorrow"
 function dueText(key) {
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(key || "");
-  if (!m) return "";
+  if (!m) return "Choose a date";
   const d = new Date(+m[1], +m[2] - 1, +m[3]);
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -61,10 +52,34 @@ function dueText(key) {
   return `${label} · ${rel}`;
 }
 
+let dlg = null;
+let ctx = null;
+
+const dueInput = () => dlg.querySelector("input[name='due']");
+
+function markActiveChip() {
+  const input = dueInput();
+  const value = input ? input.value : "";
+  dlg.querySelectorAll(".rm-chip").forEach((c) => c.classList.toggle("active", c.dataset.due === value));
+  const when = dlg.querySelector("[data-role='due-when']");
+  if (when) when.textContent = dueText(value);
+}
+
+// Under Assign to: where the reminder will show
+function updateAssignHint() {
+  const sel = dlg.querySelector("select[name='assign']");
+  const hint = dlg.querySelector("[data-role='assign-hint']");
+  if (!sel || !hint || hint.dataset.locked) return;
+  const opt = sel.selectedOptions[0];
+  hint.textContent = sel.value && opt
+    ? `Shows on ${opt.dataset.name || "their"}'s dashboard under Tasks → Mine.`
+    : "Not assigned: it only shows under Tasks → Everyone once it's due.";
+}
+
 function ensureDialog() {
   if (dlg) return;
   dlg = document.createElement("dialog");
-  dlg.className = "em-dialog rm-dialog";
+  dlg.className = "em-dialog rm-dialog rm-add";
   dlg.setAttribute("aria-label", "Add reminder");
   document.body.appendChild(dlg);
 
@@ -72,11 +87,12 @@ function ensureDialog() {
     if (e.target.closest("[data-rm='close']")) { dlg.close(); return; }
     const chip = e.target.closest(".rm-chip");
     if (chip) {
-      dlg.querySelector("input[name='due']").value = chip.dataset.due;
+      dueInput().value = chip.dataset.due;
       markActiveChip();
     }
   });
   dlg.addEventListener("input", (e) => { if (e.target.name === "due") markActiveChip(); });
+  dlg.addEventListener("change", (e) => { if (e.target.name === "assign") updateAssignHint(); });
   dlg.addEventListener("submit", onSubmit);
   dlg.addEventListener("close", () => {
     if (ctx) ctx.resolve(ctx.saved);
@@ -89,6 +105,7 @@ function ensureDialog() {
 export function openReminderDialog({ patient, staff }) {
   ensureDialog();
   if (dlg.open) dlg.close();
+  console.info(`Add reminder dialog ${VERSION}`);
 
   return new Promise((resolve) => {
     ctx = { patient, staff, resolve, saved: false };
@@ -107,22 +124,24 @@ export function openReminderDialog({ patient, staff }) {
             placeholder="e.g. Call to book a review 2 weeks after Ulthera"></textarea>
         </label>
 
-        <div class="em-field"><span>Due date</span>
-          <div class="rm-quick">
+        <div class="em-field"><span>Quick pick</span>
+          <div class="rm-quick" role="group" aria-label="Quick due dates">
             ${QUICK.map(([label, fn]) => `<button type="button" class="rm-chip" data-due="${fn()}">${label}</button>`).join("")}
-          </div>
-          <div class="rm-date-row">
-            <input type="date" name="due" value="${tomorrow}" min="${plusDays(0)}" />
-            <small class="rm-when" data-role="due-when"></small>
           </div>
         </div>
 
-        <label class="em-field"><span>Assign to</span>
-          <select name="assign" class="fb-select rm-assign">
-            <option value="">Anyone (the whole team)</option>
-          </select>
-          <small class="rm-hint" data-role="assign-hint">It shows on their dashboard under Tasks → Mine.</small>
-        </label>
+        <div class="rm-two">
+          <label class="em-field"><span>Due date</span>
+            <input type="date" name="due" class="rm-input" value="${tomorrow}" min="${plusDays(0)}" />
+            <small class="rm-sub is-strong" data-role="due-when"></small>
+          </label>
+          <label class="em-field"><span>Assign to</span>
+            <select name="assign" class="rm-input">
+              <option value="">Anyone (the whole team)</option>
+            </select>
+            <small class="rm-sub" data-role="assign-hint"></small>
+          </label>
+        </div>
 
         <p class="em-error" role="alert"></p>
 
@@ -134,6 +153,7 @@ export function openReminderDialog({ patient, staff }) {
 
     dlg.showModal();
     markActiveChip();
+    updateAssignHint();
     dlg.querySelector("textarea").focus();
 
     // Staff to assign to (loaded in the background; "Anyone" works straight away)
@@ -149,7 +169,7 @@ export function openReminderDialog({ patient, staff }) {
       .catch((err) => {
         console.warn("Staff list failed:", err);
         const hint = dlg.querySelector('[data-role="assign-hint"]');
-        if (hint) hint.textContent = "Couldn't load the staff list. It will be saved for anyone.";
+        if (hint) { hint.dataset.locked = "1"; hint.textContent = "Couldn't load the staff list. It will be saved for anyone."; }
       });
   });
 }
@@ -159,20 +179,20 @@ async function onSubmit(e) {
   if (!ctx) return;
   const form = e.target;
   const text = form.elements.text.value.trim();
-  const dueInput = form.querySelector("input[name='due']");
-  const due = dueInput ? dueInput.value : "";
+  const input = form.querySelector("input[name='due']");
+  const due = input ? input.value : "";
   const errEl = dlg.querySelector(".em-error");
   const btn = dlg.querySelector(".em-send");
 
   if (!text) { errEl.textContent = "Please describe the reminder."; form.elements.text.focus(); return; }
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(due)) { errEl.textContent = "Please choose a due date."; return; }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(due)) { errEl.textContent = "Please choose a due date."; input && input.focus(); return; }
 
   btn.disabled = true;
   btn.textContent = "Saving…";
   errEl.textContent = "";
 
   try {
-    const sel = form.elements.assign;
+    const sel = form.querySelector("select[name='assign']");
     const opt = sel && sel.selectedOptions[0];
     await addReminder(ctx.patient, {
       taskText: text, dueDate: due,

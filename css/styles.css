@@ -9333,13 +9333,16 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 a.rc-badge { text-decoration: none; cursor: pointer; }
 a.rc-badge:hover { filter: brightness(.96); text-decoration: underline; }
 
-
-/* Add reminder dialog: tidy layout */
-.rm-dialog .rm-quick { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
-.rm-dialog .rm-chip { padding: 6px 11px; font-size: .82rem; white-space: nowrap; }
-.rm-dialog .rm-date-row { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
-.rm-dialog .rm-date-row input[type="date"] { flex: 0 0 190px; width: 190px; }
-.rm-dialog .rm-when { color: #475569; font-size: .85rem; font-weight: 500; }
-.rm-dialog input[type="date"],
-.rm-dialog select.rm-assign { min-height: 44px; box-sizing: border-box; }
-.rm-dialog .em-error:empty { display: none; }
+/* ---------- Add reminder dialog ---------- */
+.rm-add { width: min(600px, calc(100% - 2rem)); }
+.rm-add .em-form { gap: .9rem; }
+.rm-add .rm-quick { display: flex; flex-wrap: wrap; gap: 5px; }
+.rm-add .rm-chip { padding: 5px 10px; font-size: .8rem; white-space: nowrap; }
+.rm-add .rm-two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
+.rm-add .em-field .rm-input { width: 100%; height: 44px; margin: 0; padding: 0 .75rem; box-sizing: border-box;
+  border: 1px solid var(--border); border-radius: 10px; background: #f8fafc; font: inherit; font-size: .95rem; color: var(--text); }
+.rm-add .em-field .rm-input:focus { outline: none; border-color: #6366f1; box-shadow: 0 0 0 3px #e0e7ff; background: #fff; }
+.rm-add .rm-sub { display: block; min-height: 1.2em; font-size: .78rem; line-height: 1.35; color: var(--muted); }
+.rm-add .rm-sub.is-strong { color: #4338ca; font-weight: 600; }
+.rm-add .em-error:empty { display: none; }
+@media (max-width: 520px) { .rm-add .rm-two { grid-template-columns: 1fr; } }
