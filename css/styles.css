@@ -9319,12 +9319,9 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 /* Calendar: one card per visit */
 .appt-count { display: inline-block; margin-left: .45rem; padding: .05rem .5rem; border-radius: 999px;
   background: #e0f2fe; color: #075985; font-size: .68rem; font-weight: 700; vertical-align: 1px; }
-.appt-services.is-visit { gap: .3rem; }
-.appt-service.is-timed { display: grid; grid-template-columns: 4.4rem minmax(0, 1fr); gap: .4rem; align-items: baseline; }
-.appt-service.is-timed::before { content: none; }
-.appt-service.is-timed > b { font-weight: 600; color: #0f172a; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .appt-service.is-off > span { text-decoration: line-through; color: #94a3b8; }
 .appt-sstat { margin-left: .3rem; padding: 0 .4rem; border-radius: 999px; background: #f1f5f9; color: #475569;
   font-size: .66rem; font-style: normal; font-weight: 600; }
 .appt-sstat.is-done { background: #ecfdf5; color: #047857; }
 .appt-sstat.is-cancelled { background: #f1f5f9; color: #64748b; }
+.appt-count { white-space: nowrap; }

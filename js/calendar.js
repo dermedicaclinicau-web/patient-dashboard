@@ -376,7 +376,7 @@ function visitCard(group) {
     const off = lineCls[i] === "is-cancelled";
     const st = perLine && a.status
       ? ` <em class="appt-sstat ${lineCls[i]}">${escapeHtml(a.status)}</em>` : "";
-    return `<span class="appt-service is-timed${off ? " is-off" : ""}"><b>${escapeHtml(a.time || "—")}</b><span>${escapeHtml(svc)}${st}</span></span>`;
+    return `<span class="appt-service${off ? " is-off" : ""}"><span>${escapeHtml(svc)}</span>${st}</span>`;
   }).join("");
 
   const balance = Math.max(0, ...group.map((a) => parseBalance(a.balance)));   // the balance repeats on each booking
@@ -389,7 +389,7 @@ function visitCard(group) {
     <span class="appt-time">${escapeHtml(first.time || "—")} – ${escapeHtml(endTime(last))}<span class="appt-count">${group.length} bookings</span></span>
     <span class="appt-name">${escapeHtml(first.patientName || "Unknown patient")}</span>
     <span class="appt-badges"></span>
-    <span class="appt-services is-visit">${lines}</span>
+    <span class="appt-services">${lines}</span>
     ${extras ? `<span class="appt-extras">${extras}</span>` : ""}`;
 
   const title = escapeHtml(group.map((a) =>
