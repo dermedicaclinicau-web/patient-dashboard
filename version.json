@@ -66,6 +66,7 @@
                   "./js/kit-count.js",
                   "./js/kit-days.js",
                   "./js/kit-ledger.js",
+                  "./js/kit-recon-checks.js",
                   "./js/knowledge-content.js",
                   "./js/knowledge.js",
                   "./js/manual-appts.js",
@@ -190,10 +191,11 @@
                   "./js/updates.js",
                   "./js/utils.js",
                   "./js/version.js",
+                  "./js/wr-copy.js",
                   "./css/scan-app.css",
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261027-083958",
-    "v":  "20261027-083958"
+    "version":  "20261027-122432",
+    "v":  "20261027-122432"
 }
