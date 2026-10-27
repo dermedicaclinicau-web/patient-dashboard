@@ -156,38 +156,7 @@ const LOC_NAME = { kit: "Your kit", shelf: "The Shelf", jt: "JT storage" };
 const csSummary = (lines) => lines.map((l) => `${l.name}: ${l.rows.map((r) =>
   `${consumableAmountText(l, r, false)}${r.batch ? ` (${l.batchLabel || "Batch"} ${r.batch})` : ""}`).join(" + ")}`);
 
-/* ---------- Day Sheet visits with no Patient ID ---------- */
-// "Rebekah Snadden - STAFF", "Tahlya Flamini STAFF", "Jo Bloggs (staff)" → the name on its own
-const STAFF_TAG = /[\s\-–—:|/]*\(?\b(staff|stf|employee)\b\)?\.?/gi;
-const cleanVisitName = (s) => String(s || "").replace(STAFF_TAG, " ").replace(/\s+/g, " ").trim();
-// The same tidy-up the Patients search uses: no accents, apostrophes or punctuation
-const nameKey = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")
-  .replace(/['’`.]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
 
-// Links a visit to a patient only when exactly one patient has that full name. Returns how many were linked.
-async function matchVisitNames(rows) {
-  const memo = new Map();
-  let linked = 0;
-  for (const v of rows) {
-    if (v.pid || !v.name) continue;
-    const clean = cleanVisitName(v.name);
-    const k = nameKey(clean);
-    if (k.split(" ").length < 2) continue;          // a first name on its own isn't enough
-    if (!memo.has(k)) {
-      const found = await searchPatients(clean, 8).catch(() => []);
-      memo.set(k, found.filter((p) => [p.name, `${p.firstName} ${p.lastName}`, `${p.lastName} ${p.firstName}`]
-        .some((x) => nameKey(x) === k)));
-    }
-    const hits = memo.get(k);
-    if (hits.length === 1) {
-      Object.assign(v, { pid: hits[0].id, pidGuess: true, pidName: hits[0].name });
-      linked++;
-    } else if (hits.length > 1) {
-      v.nameHits = hits.length;
-    }
-  }
-  return linked;
-}
 
 // The last lists loaded, so coming back to the page shows them straight away while they update
 const keep = { files: null, visits: null, vMeta: null, thumbs: {} };
@@ -264,24 +233,32 @@ export function mountPaperRecords(container, { staff } = {}) {
   }
 
   function visitHtml(v) {
+    const day = v.dayName || v.name;
     const nameEl = v.pid
-      ? `<a href="#/patient/${encodeURIComponent(v.pid)}" target="_blank" rel="noopener">${esc(v.pidGuess ? v.pidName : v.name)}</a>`
+      ? `<a href="#/patient/${encodeURIComponent(v.pid)}" target="_blank" rel="noopener">${esc(v.name)}</a>`
       : `<strong>${esc(v.name)}</strong>`;
-    const tag = v.pidGuess
-      ? `<span class="ppr-pill is-info" title="${esc(`The Day Sheet says “${v.name}” with no Patient ID. Matched by name: check it's the right person.`)}">Matched by name</span>`
-      : !v.pid
-        ? `<span class="ppr-pill is-warn"${v.nameHits ? ` title="${esc(`${v.nameHits} patients are called ${cleanVisitName(v.name)}, so it isn't linked.`)}"` : ""}>${
-            v.nameHits ? `${v.nameHits} patients with this name` : "No Patient ID"}</span>`
+    const tag = v.how === "link"
+      ? `<span class="ppr-pill is-ok" title="${esc(`“${day}” on the Day Sheet is linked to this patient.`)}">Linked</span>`
+      : v.how === "name"
+        ? `<span class="ppr-pill is-info" title="${esc(`The Day Sheet says “${day}” with no Patient ID. Matched by name: check it's the right person.`)}">Matched by name</span>`
+        : !v.pid
+          ? `<span class="ppr-pill is-warn">${v.many ? `${v.many} patients with this name` : "No Patient ID"}</span>`
+          : "";
+    const linkBtn = v.res ? ""
+      : v.how === "link" ? `<button type="button" class="rc-link" data-vunlink="${esc(v.key)}">Unlink</button>`
+      : !v.pid || v.how === "name"
+        ? `<button type="button" class="lh-btn is-quiet" data-vlink="${esc(v.key)}">${v.pid ? "Wrong patient?" : "Link to a patient…"}</button>`
         : "";
     return `<li class="ppr-row ppr-vrow${v.res ? " is-sorted" : ""}">
       <div class="ppr-vdate"><b>${esc(shortDay(v.date))}</b><small>${esc(ago(v.date))}</small></div>
       <div class="ppr-main">
         <div class="ppr-vname">${nameEl}${tag}</div>
+        ${v.how && v.how !== "id" && day !== v.name ? `<small class="ppr-dayname">On the Day Sheet as “${esc(day)}”</small>` : ""}
         <small>${esc([v.services.join(", "), v.staff.join(" and ")].filter(Boolean).join(" · "))}</small>
         ${v.res ? `<small class="ppr-extra">${esc(RES[v.res.status] || "Sorted")}: “${esc(v.res.note)}” · ${esc(v.res.by)}</small>` : ""}</div>
       <div class="ppr-acts">${v.res
         ? `<button type="button" class="rc-link" data-vundo="${esc(v.key)}">Undo</button>`
-        : `${v.pid ? `<button type="button" class="lh-btn" data-vrecord="${esc(v.pid)}">Record now</button>` : ""}
+        : `${linkBtn}${v.pid ? `<button type="button" class="lh-btn" data-vrecord="${esc(v.pid)}">Record now</button>` : ""}
            <button type="button" class="lh-btn is-quiet" data-vsort="${esc(v.key)}">No record needed…</button>`}</div>
     </li>`;
   }
@@ -353,7 +330,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       && (!qq || v.name.toLowerCase().includes(qq)));
     const open = all.filter((v) => !v.res).length;
     const noId = all.filter((v) => !v.res && !v.pid).length;
-    const byName = all.filter((v) => !v.res && v.pidGuess).length;
+    const byName = all.filter((v) => !v.res && (v.how === "name" || v.how === "link")).length;
     const opt = (v, cur) => `<option value="${esc(v)}"${v === cur ? " selected" : ""}>${esc(v)}</option>`;
     body.innerHTML = `
       <p class="muted ppr-sum">${open} visit${open === 1 ? "" : "s"} since ${esc(niceDay(st.vMeta.from))} with no treatment record${
@@ -423,13 +400,8 @@ export function mountPaperRecords(container, { staff } = {}) {
     try {
       const r = await callApi({ action: "paper", op: "visits", fresh });
       if (r.problem) throw new Error(r.problem);
-      const rows = r.rows || [];
-      st.visits = rows;
+      st.visits = r.rows || [];
       st.vMeta = r;
-      // Visits with no Patient ID: matched to the patient list by name (in the background)
-      matchVisitNames(rows)
-        .then((n) => { if (n && st.visits === rows && container.isConnected) draw(); })
-        .catch((ex) => console.warn("Visit names not matched:", ex));
     } catch (err) {
       console.error("Visits without a record:", err);
       if (!st.visits) st.visits = [];
@@ -1368,7 +1340,104 @@ export function mountPaperRecords(container, { staff } = {}) {
       btn.disabled = false;
     }
   }
+  /* ---------- Visits: link a Day Sheet name to a patient ---------- */
 
+  function linkVisit(key) {
+    const v = (st.visits || []).find((x) => x.key === key);
+    if (!v) return;
+    const day = v.dayName || v.name;
+    warmPatients();
+    let found = [], seq = 0, timer = 0, busy = false;
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog inv-dlg";
+    dlg.innerHTML = `<div class="lh-form">
+      <div class="lh-dialog-head"><h3>Link to a patient</h3>
+        <p>The Day Sheet says <strong>“${esc(day)}”</strong>${v.ptt ? "" : " with no Patient ID"}. Choose who it is.
+          Every visit under this name is linked, and future Day Sheet uploads fill in their Patient ID.</p></div>
+      <input class="fe-input" type="search" data-role="q" autocomplete="off" placeholder="Name or mobile"
+        value="${esc(day.replace(/[\s\-–—:|/]*\(?\b(staff|stf|employee)\b\)?\.?/gi, " ").replace(/\s+/g, " ").trim())}" />
+      <div class="bk-results" data-role="results"></div>
+      <p class="lh-error" role="alert" hidden></p>
+      <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button></div></div>`;
+    document.body.appendChild(dlg);
+    const q = dlg.querySelector('[data-role="q"]');
+    const box = dlg.querySelector('[data-role="results"]');
+    const err = dlg.querySelector(".lh-error");
+    const show = (msg) => {
+      box.innerHTML = msg ? `<p class="bk-none">${esc(msg)}</p>` : found.map((p, i) => `
+        <button type="button" class="bk-res" data-pick="${i}"><strong>${esc(p.name)}</strong>
+          <small>${esc([formatDobLong(p.dobKey), p.mobile && formatMobile(p.mobile), p.pttId].filter(Boolean).join(" · "))}</small></button>`).join("");
+    };
+    const search = () => {
+      clearTimeout(timer);
+      const t = q.value.trim();
+      if (t.length < 2) { found = []; show("Type at least 2 letters."); return; }
+      timer = setTimeout(async () => {
+        const my = ++seq;
+        show("Searching…");
+        try {
+          const r = await searchPatients(t, 8);
+          if (my !== seq) return;
+          found = r;
+          show(r.length ? "" : "No patients match. Try their surname or mobile.");
+        } catch (ex) {
+          if (my === seq) show("Couldn't search. Try again.");
+        }
+      }, 250);
+    };
+    q.addEventListener("input", search);
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
+    dlg.addEventListener("close", () => dlg.remove());
+    box.addEventListener("click", async (e) => {
+      const b = e.target.closest("[data-pick]");
+      const p = b && found[Number(b.dataset.pick)];
+      if (!p || busy) return;
+      busy = true;
+      err.hidden = true;
+      box.querySelectorAll("button").forEach((x) => { x.disabled = true; });
+      b.querySelector("small").textContent = "Linking…";
+      try {
+        const r = await callApi({ action: "paper", op: "linkName", name: day, patientId: p.id });
+        if (r.problem) throw new Error(r.problem);
+        // Every visit under this name, straight away (the full list is worked out again below)
+        (st.visits || []).forEach((x) => {
+          if ((x.dayName || x.name) === day && (!x.pid || x.how === "name")) Object.assign(x, { pid: p.id, name: p.name, how: "link", many: 0 });
+        });
+        dlg.close();
+        showToast(`“${day}” is linked to ${p.name}`);
+        draw();
+        loadVisits();
+      } catch (ex) {
+        busy = false;
+        err.textContent = ex.message || "Couldn't link. Try again.";
+        err.hidden = false;
+        show();
+      }
+    });
+    dlg.showModal();
+    q.focus();
+    q.select();
+    search();
+  }
+
+  async function unlinkVisit(key) {
+    const v = (st.visits || []).find((x) => x.key === key);
+    if (!v) return;
+    const day = v.dayName || v.name;
+    const ok = await confirmDialog({
+      title: `Unlink “${day}”?`,
+      message: `It won't be linked to ${v.name} any more, here or in future Day Sheet uploads. Patient IDs already filled in on the Day Sheet stay as they are.`,
+      confirmLabel: "Unlink", tone: "warning",
+    });
+    if (!ok) return;
+    try {
+      const r = await callApi({ action: "paper", op: "linkName", name: day, remove: true });
+      if (r.problem) throw new Error(r.problem);
+      showToast("Unlinked");
+      loadVisits();
+    } catch (ex) { showToast(ex.message || "Couldn't unlink. Try again."); }
+  }
   /* ---------- Visits: no record needed ---------- */
 
   function sortVisit(key) {
@@ -1492,6 +1561,10 @@ export function mountPaperRecords(container, { staff } = {}) {
     if (vs) { sortVisit(vs.dataset.vsort); return; }
     const vu = e.target.closest("[data-vundo]");
     if (vu) { undoVisit(vu.dataset.vundo); return; }
+    const vl = e.target.closest("[data-vlink]");
+    if (vl) { linkVisit(vl.dataset.vlink); return; }
+    const vn = e.target.closest("[data-vunlink]");
+    if (vn) { unlinkVisit(vn.dataset.vunlink); return; }
     const act = e.target.closest("[data-act]");
     if (act && act.dataset.act === "refresh") {
       loadScans(true); loadVisits(true);

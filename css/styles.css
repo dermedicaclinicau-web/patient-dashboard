@@ -9285,3 +9285,4 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 .ppr-vname { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .ppr-vname .ppr-pill { flex: none; width: auto; align-self: center; }
 .ppr-pill.is-info { background: #e0f2fe; color: #0369a1; }
+.ppr-dayname { color: #94a3b8; font-style: italic; }

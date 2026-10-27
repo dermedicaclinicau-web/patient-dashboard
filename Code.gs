@@ -15258,6 +15258,7 @@ function handlePaper_(body) {
     if (op === 'fileAs') return paperFileAs_(cfg, body, session);
     if (op === 'visits') return paperVisits_(cfg, body.fresh === true);
     if (op === 'resolve') return paperResolve_(cfg, body, session);
+    if (op === 'linkName') return paperLinkName_(cfg, body, session);
     if (op === 'settings') return Object.assign({ ok: true, allCats: paperAllCats_() }, paperSettings_(cfg));
     if (op === 'saveSettings') {
       if (!admin) return { ok: false, error: 'FORBIDDEN' };
@@ -15608,13 +15609,67 @@ function paperPts_(cfg) {
     doc: function (id) { return byId[id] || null; },
   };
 }
+// Day Sheet names with no Patient ID: a name linked by staff (patient_name_links) first, then the patient
+// with that exact name ("- STAFF" and the like ignored), only when exactly one patient has it
+function paperNameFinder_() {
+  let links = {};
+  try { links = ptLinks_(); } catch (e) { console.warn('Name links not read: ' + e); }
+  let map = null;
+  const keyOf = function (s) {
+    return ptClean_(s).replace(/\b(staff|stf|employee)\b/g, ' ').replace(/\s+/g, ' ').trim();
+  };
+  const build = function () {
+    map = Object.create(null);
+    try {
+      ptFsEntries_().list.forEach(function (p) {
+        p[1].forEach(function (n) {
+          const k = keyOf(n);
+          if (!k) return;
+          const a = map[k] || (map[k] = []);
+          if (a.indexOf(p[0]) === -1) a.push(p[0]);
+        });
+      });
+    } catch (e) { console.warn('Patient names not read for matching: ' + e); }
+  };
+  return {
+    sig: flowHash_(JSON.stringify(links)),
+    // → { ptt, how: 'link' | 'name' } · { many: n } · {}
+    find: function (raw) {
+      const lk = ptLinkKey_(raw);
+      if (Object.prototype.hasOwnProperty.call(links, lk)) return links[lk] === '-' ? {} : { ptt: links[lk], how: 'link' };
+      const k = keyOf(raw);
+      if (k.split(' ').length < 2) return {};
+      if (!map) build();
+      const hits = map[k] || [];
+      return hits.length === 1 ? { ptt: hits[0], how: 'name' } : hits.length > 1 ? { many: hits.length } : {};
+    },
+  };
+}
 
+// "Link to a patient" (or Unlink) from Paper records → Visits without a record
+function paperLinkName_(cfg, body, session) {
+  const name = String(body.name || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  if (!name) return { ok: false, error: 'BAD_REQUEST' };
+  let r;
+  if (body.remove === true) {
+    r = upPtLink_({ name: name, remove: true }, session);
+  } else {
+    const p = flowPatient_(cfg, String(body.patientId || ''));
+    if (!p) return { ok: true, problem: 'Choose the patient.' };
+    r = upPtLink_({ name: name, pttId: String(p.PttID || p._id) }, session);
+  }
+  if (r && r.problem) return r;
+  CacheService.getScriptCache().remove(PAPER_VKEY_);
+  console.log('Paper records: "' + name + '" ' + (body.remove === true ? 'unlinked' : 'linked') + ' by ' + session.name);
+  return { ok: true };
+}
 // The slow part: past visits for the chosen treatments, and older treatment records. Worked out again only after
 // a new PCN update reaches the portal (sync_meta/pcn), a new day, or a settings change. Remembered up to 6 hours.
 function paperVisitBase_(cfg, set, today, pts, fresh) {
   let synced = '';
   try { const m = fsGetDoc_(cfg, 'sync_meta/pcn'); synced = String((m && m.syncedAt) || ''); } catch (e) { /* worked out again */ }
-  const key = 'paper_vbase_' + flowHash_([today, synced, set.from, set.cats.join(','), set.skip.join(',')].join('|'));
+  const finder = paperNameFinder_();
+  const key = 'paper_vbase_' + flowHash_([today, synced, set.from, set.cats.join(','), set.skip.join(','), finder.sig].join('|'));
   if (!fresh) { const hit = repCacheGet_(key); if (hit) return hit; }
 
   const wantCat = {};
@@ -15644,10 +15699,18 @@ function paperVisitBase_(cfg, set, today, pts, fresh) {
         });
         if (!svcs.length) return;
         const ptt = String(a.patientId || '').trim();
-        const pid = ptt ? pts.find(ptt) : '';
         const name = String(a.patientName || '').trim();
+        let pid = ptt ? pts.find(ptt) : '';
+        let how = pid ? 'id' : '';
+        let many = 0;
+        if (!pid && name) {   // no Patient ID: a linked name, or one patient with that exact name
+          const m = finder.find(name);
+          if (m.ptt) { pid = pts.find(m.ptt); if (pid) how = m.how; }
+          else if (m.many) many = m.many;
+        }
         const k = dk + '|' + (pid || ('n:' + name.toLowerCase()));
-        const v = visits[k] || (visits[k] = { key: k, date: dk, pid: pid, ptt: ptt, name: name, staff: [], services: [], cats: [] });
+        const v = visits[k] || (visits[k] = { key: k, date: dk, pid: pid, ptt: ptt, name: name, dayName: name,
+          how: how, many: many, staff: [], services: [], cats: [] });
         const who = String(a.staff || '').trim();
         if (who && !SCHED_NOT_PERSON_.test(who) && v.staff.indexOf(who) === -1) v.staff.push(who);
         svcs.forEach(function (s) { if (v.services.indexOf(s) === -1 && v.services.length < 6) v.services.push(s); });
@@ -15719,7 +15782,8 @@ function paperVisits_(cfg, fresh) {
   };
   const rows = base.visits.filter(function (v) { return !covered(v); })
     .map(function (v) {
-      return { key: v.key, date: v.date, pid: v.pid, ptt: v.ptt, name: v.name,
+      return { key: v.key, date: v.date, pid: v.pid, ptt: v.ptt, name: v.name, dayName: v.dayName || v.name,
+        how: v.how || '', many: v.many || 0,
         staff: v.staff, services: v.services, cats: v.cats, res: res[v.key] || null };
     })
     .sort(function (a, b) { return b.date.localeCompare(a.date) || a.name.localeCompare(b.name); });
