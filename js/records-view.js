@@ -244,16 +244,19 @@ export function mountRecords(root, patient) {
         ]);
         await markPrescriptions(consents, rx).catch((err) => console.warn("Consent prescriptions not marked:", err));
         // TEMPORARY: what the prescription check decided (remove once it's working)
-        console.log("Prescriptions found for this patient:", rx.ok ? "all loaded" : "SOME FAILED TO LOAD",
-          rx.list.map((p) => `${p.date.toDateString()} · ${p.title}`));
-        console.table(consents.map((c) => ({
-          consent: c.title,
-          date: c.date ? c.date.toDateString() : "(no date)",
-          from: c.portalId ? "portal" : "old app",
-          category: c.category,
-          result: c.rxState || "not checked",
-          prescription: c.rx ? `${c.rx.title} · ${c.rx.date ? c.rx.date.toDateString() : ""}` : "",
-        })));
+        try {
+          const ds = (d) => (d instanceof Date && !isNaN(d) ? d.toDateString() : "(no date)");
+          console.log("Prescriptions found for this patient:", rx.ok ? "all loaded" : "SOME FAILED TO LOAD",
+            rx.list.map((p) => `${ds(p.date)} · ${p.title}`));
+          console.table(consents.map((c) => ({
+            consent: c.title,
+            date: ds(c.date),
+            from: c.portalId ? "portal" : "old app",
+            category: c.category,
+            result: c.rxState || "not checked",
+            prescription: c.rx ? `${c.rx.title} · ${ds(c.rx.date)}` : "",
+          })));
+        } catch (e) { console.warn("Prescription debug failed:", e); }
         if (!grid.isConnected) return;
         loaded = true;
         lists = { treatment: treatments, consent: consents };
@@ -346,9 +349,14 @@ function viewLink(link) {
     : `<span class="rc-act is-disabled" title="No file attached">${ICONS.view}View</span>`;
 }
 
-const portalView = (r) =>
-  `<a class="rc-act" href="#/form-record/${encodeURIComponent(r.portalId)}" target="_blank" rel="noopener">${ICONS.view}View</a>` +
-  (canMoveRecords() ? `<button type="button" class="rc-act" data-move-sub="${escapeHtml(r.portalId)}">${ICONS.move}Move</button>` : "");
+function portalView(r) {
+  const id = encodeURIComponent(r.portalId);
+  let html = '<a class="rc-act" href="#/form-record/' + id + '" target="_blank" rel="noopener">' + ICONS.view + 'View</a>';
+  if (canMoveRecords()) {
+    html += '<button type="button" class="rc-act" data-move-sub="' + escapeHtml(r.portalId) + '">' + ICONS.move + 'Move</button>';
+  }
+  return html;
+}
 
 const legacyMove = (kind, r) => (canMoveRecords()
   ? `<button type="button" class="rc-act" data-move-legacy="${kind}" data-id="${escapeHtml(r.id)}">${ICONS.move}Move</button>` : "");
