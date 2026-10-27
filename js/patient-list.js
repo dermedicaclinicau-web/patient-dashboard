@@ -10,6 +10,7 @@ const CLIENT_PAGE = 24;   // cards per page
 const LIST_PAGE = 60;     // rows per page in List view
 const GROUP_PAGE = 15;
 const VIEW_KEY = "dm.patients.view";
+const MAX_PICK = 5;       // patients that can be picked to merge at once
 
 const svg = (p) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -21,6 +22,8 @@ const ICONS = {
   phone: svg('<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.57 2.81.7A2 2 0 0 1 22 16.92z"/>'),
   grid: svg('<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>'),
   list: svg('<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>'),
+  merge: svg('<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/>'),
+  check: svg('<polyline points="20 6 9 17 4 12"/>'),
 };
 
 const PLACEHOLDERS = {
@@ -227,6 +230,8 @@ export function mountPatientList(container) {
         <div class="pt-title"><h2>Patients</h2><span class="pt-total"></span></div>
         <div class="pt-actions">
           <button type="button" class="icon-btn pt-refresh" title="Refresh" aria-label="Refresh">${ICONS.refresh}</button>
+          <button type="button" class="btn-ghost pt-merge-mode" hidden aria-pressed="false"
+            title="Choose patients to merge into one record">${ICONS.merge}Merge patients</button>
           <button type="button" class="pt-new">${ICONS.plus}New Patient</button>
         </div>
       </div>
@@ -267,6 +272,16 @@ export function mountPatientList(container) {
       <p class="pt-meta" aria-live="polite"></p>
       <div class="pt-results"></div>
       <div class="pt-footer"><button type="button" class="btn-ghost pt-more" hidden>Load more</button></div>
+      <div class="pt-pickbar" hidden role="region" aria-label="Patients to merge">
+        <div class="pt-pick-info">
+          <strong class="pt-pick-count"></strong>
+          <div class="pt-pick-chips"></div>
+        </div>
+        <div class="pt-pick-actions">
+          <button type="button" class="btn-ghost" data-pick-act="cancel">Cancel</button>
+          <button type="button" class="btn-primary" data-pick-act="merge" disabled>${ICONS.merge}Merge…</button>
+        </div>
+      </div>
     </section>`;
 
   const q = (s) => container.querySelector(s);
@@ -279,12 +294,15 @@ export function mountPatientList(container) {
   const results = q(".pt-results");
   const moreBtn = q(".pt-more");
   const refreshBtn = q(".pt-refresh");
-
+  const mergeModeBtn = q(".pt-merge-mode");
+  const pickBar = q(".pt-pickbar");
   const state = {
     mode: "name", term: "", birthday: "all", age: "all", contact: "all", seq: 0, view: readView(),
+    pick: null,
     client: { list: [], shown: CLIENT_PAGE, groups: null, shownGroups: GROUP_PAGE },
   };
   const pageSize = () => (state.view === "list" ? LIST_PAGE : CLIENT_PAGE);
+  const card = (p) => cardHtml(p, state.pick);
 
   function applyView() {
     results.classList.toggle("is-list", state.view === "list");
@@ -310,6 +328,7 @@ export function mountPatientList(container) {
   let isAdmin = false;
   isAdminUser().then((v) => {
     isAdmin = v;
+    if (mergeModeBtn.isConnected) mergeModeBtn.hidden = !isAdmin;
     if (state.mode === "dupes" && state.client.groups) renderGroups();
   });
 
@@ -367,7 +386,7 @@ export function mountPatientList(container) {
   function renderClientPage() {
     const { list, shown } = state.client;
     results.innerHTML = list.length
-      ? `${state.view === "list" ? LIST_HEAD : ""}<ul class="pt-grid">${list.slice(0, shown).map(cardHtml).join("")}</ul>`
+      ? `${state.view === "list" ? LIST_HEAD : ""}<ul class="pt-grid">${list.slice(0, shown).map(card).join("")}</ul>`
       : emptyState();
     moreBtn.hidden = list.length <= shown;
 
@@ -387,9 +406,9 @@ export function mountPatientList(container) {
               <span class="pt-dupe-tag">${escapeHtml(g.label)}</span>
               <span>${escapeHtml(g.display)}</span>
               <span class="pt-dupe-count">· ${g.list.length} records</span>
-              ${isAdmin ? `<button type="button" class="pt-merge" data-merge="${i}">Merge…</button>` : ""}
+              ${isAdmin && !state.pick ? `<button type="button" class="pt-merge" data-merge="${i}">Merge…</button>` : ""}
             </p>
-            <ul class="pt-grid">${g.list.map(cardHtml).join("")}</ul>
+            <ul class="pt-grid">${g.list.map(card).join("")}</ul>
           </section>`).join("")
       : `<div class="state"><strong>No duplicates found</strong>No patients share the same name and date of birth, email or phone.</div>`;
     moreBtn.hidden = groups.length <= shownGroups;
@@ -402,7 +421,95 @@ export function mountPatientList(container) {
       : "Try a different filter.";
     return `<div class="state"><strong>No patients found</strong>${tip}</div>`;
   }
+  /* ---------- picking patients to merge (Admins) ---------- */
+  function redraw() {
+    if (!allCache) return;
+    if (state.mode === "dupes") { if (state.client.groups) renderGroups(); }
+    else renderClientPage();
+  }
 
+  function setPicking(on) {
+    state.pick = on ? new Map() : null;
+    mergeModeBtn.classList.toggle("is-on", on);
+    mergeModeBtn.setAttribute("aria-pressed", String(on));
+    results.classList.toggle("is-picking", on);
+    renderPickBar();
+    redraw();
+  }
+
+  function togglePick(id) {
+    if (!state.pick) return;
+    if (state.pick.has(id)) state.pick.delete(id);
+    else {
+      const p = (byId && byId.get(id)) || (allCache || []).find((x) => x.id === id);
+      if (!p) return;
+      if (state.pick.size >= MAX_PICK) { showToast(`You can merge up to ${MAX_PICK} patients at a time.`); return; }
+      state.pick.set(id, p);
+    }
+    const on = state.pick.has(id);
+    // The same patient can show in more than one duplicate group
+    results.querySelectorAll(`[data-pick="${CSS.escape(id)}"]`).forEach((a) => {
+      a.classList.toggle("is-picked", on);
+      a.setAttribute("aria-pressed", String(on));
+    });
+    renderPickBar();
+  }
+
+  function renderPickBar() {
+    pickBar.hidden = !state.pick;
+    if (!state.pick) return;
+    const picked = [...state.pick.values()];
+    const n = picked.length;
+    pickBar.querySelector(".pt-pick-count").textContent =
+      n === 0 ? "Tap the patients to merge" : n === 1 ? "1 selected. Choose at least one more." : `${n} selected`;
+    pickBar.querySelector(".pt-pick-chips").innerHTML = picked.map((p) => `
+      <span class="pt-pick-chip">
+        <span><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(
+          [p.pttId || p.id, p.dobKey ? formatDobLong(p.dobKey) : ""].filter(Boolean).join(" · "))}</small></span>
+        <button type="button" data-unpick="${escapeHtml(p.id)}" aria-label="Remove ${escapeHtml(p.name)}">×</button>
+      </span>`).join("");
+    pickBar.querySelector('[data-pick-act="merge"]').disabled = n < 2;
+  }
+
+  async function mergePicked(btn) {
+    const list = [...state.pick.values()];
+    if (list.length < 2) return;
+    btn.disabled = true;
+    try {
+      const merged = await openMergeDialog(list);
+      if (merged) {
+        showToast("Records merged");
+        setPicking(false);
+        loadCount();
+        run(); // the list reloads without the merged records
+      }
+    } catch (err) {
+      console.error("Merge failed:", err);
+      showToast(err && err.code === "permission-denied"
+        ? "You don't have permission to merge patients."
+        : "Couldn't merge. Please try again.");
+    } finally {
+      if (state.pick) btn.disabled = state.pick.size < 2;
+    }
+  }
+
+  mergeModeBtn.addEventListener("click", () => setPicking(!state.pick));
+
+  pickBar.addEventListener("click", (e) => {
+    const un = e.target.closest("[data-unpick]");
+    if (un) { togglePick(un.dataset.unpick); return; }
+    const act = e.target.closest("[data-pick-act]");
+    if (!act) return;
+    if (act.dataset.pickAct === "cancel") setPicking(false);
+    else mergePicked(act);
+  });
+
+  // Esc stops picking (and the listener tidies itself up when you leave the page)
+  const onKey = (e) => {
+    if (!container.contains(pickBar)) { document.removeEventListener("keydown", onKey); return; }
+    if (e.key === "Escape" && state.pick && !document.querySelector("dialog[open]")) setPicking(false);
+  };
+  document.addEventListener("keydown", onKey);
   /* ---------- events ---------- */
   let debounce;
   input.addEventListener("input", () => {
@@ -474,6 +581,8 @@ export function mountPatientList(container) {
   });
 
   results.addEventListener("click", async (e) => {
+    const pickCard = state.pick && e.target.closest("[data-pick]");
+    if (pickCard) { e.preventDefault(); togglePick(pickCard.dataset.pick); return; }
     if (e.target.closest("[data-action='retry']")) { run(); return; }
     const mergeBtn = e.target.closest("[data-merge]");
     if (!mergeBtn) return;
@@ -562,12 +671,15 @@ function findDuplicates(list) {
 /* ===================== Templates ===================== */
 
 // The same card is used for both views; List view lays it out as one row with CSS
-function cardHtml(p) {
+function cardHtml(p, pick = null) {
   const age = calcAge(p.dobKey);
   const dob = p.dobKey ? `${formatDobLong(p.dobKey)}${age !== null ? ` · ${age} yrs` : ""}` : "";
+  const on = !!pick && pick.has(p.id);
   return `
     <li>
-      <a class="pt-card" href="#/patient/${encodeURIComponent(p.id)}">
+      <a class="pt-card${on ? " is-picked" : ""}" href="#/patient/${encodeURIComponent(p.id)}"${
+        pick ? ` data-pick="${escapeHtml(p.id)}" aria-pressed="${on}"` : ""}>
+        ${pick ? `<span class="pt-pickbox" aria-hidden="true">${ICONS.check}</span>` : ""}
         <div class="pt-card-top">
           <span class="pt-avatar" style="--h:${hueFromString(p.name)}">${escapeHtml(getInitials(p.name))}</span>
           <div class="pt-ident">

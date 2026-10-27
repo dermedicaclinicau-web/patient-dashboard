@@ -9242,3 +9242,42 @@ dialog.lh-dialog.fe-blk-dlg { width: min(480px, calc(100vw - 2rem)); }
 .em-preview.is-designed { padding: 0; background: transparent; }
 .em-tpl-note { color: #0f766e; }
 .tb-txmail { margin-top: 10px; }
+
+/* Patient list: picking patients to merge */
+.pt-merge-mode { display: inline-flex; align-items: center; gap: 6px; }
+.pt-merge-mode svg { width: 16px; height: 16px; }
+.pt-merge-mode.is-on { background: #ccfbf1; border-color: #14b8a6; color: #0f766e; }
+
+.pt-results.is-picking .pt-card { position: relative; cursor: pointer; padding-left: 44px; }
+.pt-pickbox {
+  position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+  width: 22px; height: 22px; border-radius: 6px; border: 2px solid #cbd5e1; background: #fff;
+  display: grid; place-items: center; color: transparent; transition: all .12s;
+}
+.pt-pickbox svg { width: 14px; height: 14px; stroke-width: 3; }
+.pt-card.is-picked { outline: 2px solid #14b8a6; background: #f0fdfa; }
+.pt-card.is-picked .pt-pickbox { background: #14b8a6; border-color: #14b8a6; color: #fff; }
+
+.pt-pickbar {
+  position: sticky; bottom: 12px; z-index: 20; margin-top: 16px;
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 12px 16px; border-radius: 14px; background: #fff;
+  border: 1px solid #99f6e4; box-shadow: 0 10px 30px rgba(15, 23, 42, .15);
+}
+.pt-pickbar[hidden] { display: none; }
+.pt-pick-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.pt-pick-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.pt-pick-chip {
+  display: inline-flex; align-items: center; gap: 8px; padding: 4px 6px 4px 10px;
+  border-radius: 999px; background: #f0fdfa; border: 1px solid #99f6e4; font-size: 13px;
+}
+.pt-pick-chip > span { display: flex; flex-direction: column; line-height: 1.2; }
+.pt-pick-chip small { color: #64748b; font-size: 11px; }
+.pt-pick-chip button {
+  border: 0; background: transparent; cursor: pointer; font-size: 16px; line-height: 1;
+  width: 22px; height: 22px; border-radius: 50%; color: #475569;
+}
+.pt-pick-chip button:hover { background: #ccfbf1; }
+.pt-pick-actions { display: flex; gap: 8px; }
+.pt-pick-actions .btn-primary { display: inline-flex; align-items: center; gap: 6px; }
+.pt-pick-actions svg { width: 16px; height: 16px; }
