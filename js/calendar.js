@@ -361,6 +361,7 @@ function endTime(a) {
 }
 
 // Several bookings in a row: one card, each treatment with its own time
+// Several bookings in a row: one card, the treatments listed as bullets
 function visitCard(group) {
   const first = group[0];
   const last = group[group.length - 1];
@@ -369,7 +370,7 @@ function visitCard(group) {
     : lineCls.every((c) => c === "is-done") ? "is-done" : "";
 
   const statuses = [...new Set(group.map((a) => String(a.status || "").trim()).filter(Boolean))];
-  const perLine = statuses.length > 1;   // different statuses: show each one on its line
+  const perLine = statuses.length > 1;   // different statuses: show each one beside its treatment
 
   const lines = group.map((a, i) => {
     const svc = (a.services || []).join(", ") || "Appointment";
@@ -378,7 +379,7 @@ function visitCard(group) {
       ? ` <em class="appt-sstat ${lineCls[i]}">${escapeHtml(a.status)}</em>` : "";
     return `<span class="appt-service${off ? " is-off" : ""}"><span>${escapeHtml(svc)}</span>${st}</span>`;
   }).join("");
-  
+
   const balance = Math.max(0, ...group.map((a) => parseBalance(a.balance)));   // the balance repeats on each booking
   const extras = [
     !perLine && statuses.length ? `<span class="appt-status ${cls}">${escapeHtml(statuses[0])}</span>` : "",
@@ -392,15 +393,17 @@ function visitCard(group) {
     <span class="appt-services">${lines}</span>
     ${extras ? `<span class="appt-extras">${extras}</span>` : ""}`;
 
+  // Hovering over the card shows each booking's time
   const title = escapeHtml(group.map((a) =>
     [a.timeRange || a.time, (a.services || []).join(", "), a.resources].filter(Boolean).join(" · ")).join("\n"));
   const classes = `appt is-visit ${cls}`.trim();
-  const idx = Number.isInteger(first._i) ? ` data-i="${first._i}"` : "";   // badges: same patient for every booking
+  const idx = Number.isInteger(first._i) ? ` data-i="${first._i}"` : "";
 
   return first.patientId
     ? `<a class="${classes}"${idx} href="#/patient/${encodeURIComponent(first.patientId)}" title="${title}">${inner}</a>`
     : `<div class="${classes}"${idx} title="${title}">${inner}</div>`;
 }
+
 const BADGES = {
   plan: ["Plan", "cb-plan"],
   summary: ["Summary", "cb-summary"],

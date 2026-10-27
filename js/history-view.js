@@ -126,10 +126,10 @@ async function buildVisits(patient) {
   // Badges
   if (recs) {
     recs.treatments.forEach((t) => {
-      if (t.date) visit(toDateKey(t.date)).badges.push({ type: "tx", label: "Treatment record", link: t.link });
+      if (t.date) visit(toDateKey(t.date)).badges.push({ type: "tx", label: "Treatment record", link: t.link, portalId: t.portalId || "" });
     });
     recs.consents.forEach((c) => {
-      if (c.date) visit(toDateKey(c.date)).badges.push({ type: "consent", label: `Consent Form · ${c.title}`, link: c.link });
+      if (c.date) visit(toDateKey(c.date)).badges.push({ type: "consent", label: `Consent Form · ${c.title}`, link: c.link, portalId: c.portalId || "" });
     });
   }
   (transcripts || []).forEach((t) => {
@@ -278,8 +278,15 @@ function badgeHtml(b) {
   const icon = { tx: ICONS.doc, consent: ICONS.consent, summary: ICONS.summary, plan: ICONS.plan, ssp: ICONS.ssp }[b.type];
   const inner = `${icon}<span>${escapeHtml(b.label)}</span>`;
 
-  if ((b.type === "tx" || b.type === "consent") && /^https:\/\//i.test(b.link || "")) {
-    return `<a class="hv-badge b-${b.type}" href="${escapeHtml(b.link)}" target="_blank" rel="noopener noreferrer">${inner}</a>`;
+  if (b.type === "tx" || b.type === "consent") {
+    // Made in the portal: open the saved form (same as the Past appointments badges)
+    if (b.portalId) {
+      return `<a class="hv-badge b-${b.type}" href="#/form-record/${encodeURIComponent(b.portalId)}">${inner}</a>`;
+    }
+    // From the old app: open its PDF in a new tab
+    if (/^https:\/\//i.test(b.link || "")) {
+      return `<a class="hv-badge b-${b.type}" href="${escapeHtml(b.link)}" target="_blank" rel="noopener noreferrer">${inner}</a>`;
+    }
   }
   if (b.type === "plan") return `<button type="button" class="hv-badge b-plan" data-hv-jump="plan">${inner}</button>`;
   if (b.type === "ssp") return `<button type="button" class="hv-badge b-ssp" data-hv-jump="ssp">${inner}</button>`;
