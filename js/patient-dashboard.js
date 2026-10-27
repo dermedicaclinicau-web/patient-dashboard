@@ -1222,36 +1222,49 @@ function setPastApptRecords(root, list, formsLoaded) {
 
 function remindersHtml(tasks) {
   const today = toDateKey();
+  const todayDate = parseDateKey(today);
 
   return `<ul class="task-list">${tasks.map((t) => {
     const dueKey = String(t.dueDate || "").trim();
     const due = parseDateKey(dueKey);
-    const overdue = !!due && dueKey < today;
+    const days = due && todayDate ? Math.round((due - todayDate) / 864e5) : null;
+    const overdue = days !== null && days < 0;
+    const tone = !due ? "is-none" : overdue ? "is-late" : days === 0 ? "is-today" : "";
+    const dueLabel = !due ? (dueKey ? `Due ${dueKey}` : "No due date")
+      : overdue ? `${-days} day${days === -1 ? "" : "s"} overdue`
+      : days === 0 ? "Due today" : days === 1 ? "Due tomorrow" : `Due in ${days} days`;
     const status = String(t.status || "Open").trim();
     const comments = Array.isArray(t.notes) ? t.notes.length : 0;
+    const who = String(t.assignedToName || "").trim();
+
+    const badge = due
+      ? `<span class="rmd-date ${tone}"><b>${due.getDate()}</b><small>${escapeHtml(
+          due.toLocaleDateString("en-AU", { month: "short" }))}</small></span>`
+      : `<span class="rmd-date is-none"><b>–</b><small>Date</small></span>`;
 
     const meta = [
-      due ? `Due ${formatShortDate(due)}` : (dueKey ? `Due ${dueKey}` : "No due date"),
-      t.assignedToName ? `For ${t.assignedToName}` : "For anyone",
-      t.createdBy ? `Added by ${t.createdBy}` : "",
-      comments ? `${comments} comment${comments === 1 ? "" : "s"}` : "",
-    ].filter(Boolean).map(escapeHtml).join(" · ");
-
-    const flags =
-      (overdue ? `<span class="task-flag">Overdue</span>` : "") +
-      (status.toLowerCase() !== "open" ? statusPillHtml(t) : "");
+      `<span class="rmd-due ${tone}">${escapeHtml(dueLabel)}</span>`,
+      who
+        ? `<span class="rmd-who"><span class="tk-av" style="--h:${hueFromString(who)}">${escapeHtml(getInitials(who))}</span>For ${escapeHtml(who)}</span>`
+        : `<span class="rmd-who">For anyone</span>`,
+      t.createdBy ? `<span>Added by ${escapeHtml(t.createdBy)}</span>` : "",
+      comments ? `<span>${comments} comment${comments === 1 ? "" : "s"}</span>` : "",
+      status.toLowerCase() !== "open" ? statusPillHtml(t) : "",
+    ].filter(Boolean).join("");
 
     return `
-      <li class="task has-action${overdue ? " is-overdue" : ""}">
+      <li class="task has-action rmd${overdue ? " is-overdue" : ""}">
+        ${badge}
         <div class="task-main is-clickable" data-action="task-open" data-id="${escapeHtml(t.id)}" role="button" tabindex="0"
-          title="Open this task">
+          title="Open this reminder">
           <span class="task-text">${escapeHtml(t.taskText || "Untitled reminder")}</span>
-          <span class="task-meta">${meta}${flags}</span>
+          <span class="rmd-meta">${meta}</span>
         </div>
         <button type="button" class="task-done" data-action="task-done" data-id="${escapeHtml(t.id)}" title="Mark as done">${ICONS.tick}Done</button>
       </li>`;
   }).join("")}</ul>`;
 }
+
 /* ===================== Social history ===================== */
 
 // "Aug 13, 2026"

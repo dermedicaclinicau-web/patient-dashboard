@@ -9346,3 +9346,27 @@ a.rc-badge:hover { filter: brightness(.96); text-decoration: underline; }
 .rm-add .rm-sub.is-strong { color: #4338ca; font-weight: 600; }
 .rm-add .em-error:empty { display: none; }
 @media (max-width: 520px) { .rm-add .rm-two { grid-template-columns: 1fr; } }
+
+/* ---------- Pre-consultation → Reminders ---------- */
+.task.has-action { flex-direction: row; }   /* was centring everything */
+.task.rmd { align-items: center; gap: .85rem; padding: .7rem .85rem; background: #fff; }
+.task.rmd.is-overdue { border-color: #fecaca; background: #fff; box-shadow: inset 3px 0 0 #dc2626; }
+.rmd-date { flex: none; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  width: 46px; height: 50px; border-radius: 10px; background: #eef2ff; color: #4338ca; line-height: 1.05; }
+.rmd-date b { font-size: 1.15rem; }
+.rmd-date small { font-size: .66rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.rmd-date.is-today { background: #fef3c7; color: #92400e; }
+.rmd-date.is-late { background: #fee2e2; color: #b91c1c; }
+.rmd-date.is-none { background: #f1f5f9; color: #64748b; }
+.rmd .task-text { font-size: .95rem; font-weight: 600; }
+.rmd-meta { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .75rem; margin-top: .2rem; font-size: .78rem; color: var(--muted); }
+.rmd-due { font-weight: 600; color: #4338ca; }
+.rmd-due.is-today { color: #b45309; }
+.rmd-due.is-late { color: #b91c1c; }
+.rmd-who { display: inline-flex; align-items: center; gap: .3rem; }
+.rmd-who .tk-av { width: 20px; height: 20px; font-size: .58rem; }
+.rmd .task-done { margin-left: auto; }
+@media (max-width: 560px) {
+  .task.rmd { flex-wrap: wrap; }
+  .rmd .task-done { width: 100%; justify-content: center; }
+}
