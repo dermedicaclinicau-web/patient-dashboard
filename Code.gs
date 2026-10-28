@@ -37,6 +37,7 @@ function doPost(e) {
     if (body.action === 'sendTaskEmail') return json_(handleSendTaskEmail_(body));
     if (body.action === 'sendAftercareEmail') return json_(handleSendAftercareEmail_(body));
     if (body.action === 'printPdf') return json_(handlePrintPdf_(body));
+    if (body.action === 'billingSheets') return json_(handleBillingSheets_(body));
     if (body.action === 'inventory') return json_(handleInventory_(body));
     if (body.action === 'ssp') return json_(handleSsp_(body));
     if (body.action === 'staff') return json_(handleStaff_(body));
@@ -2571,7 +2572,71 @@ function handlePrintPdf_(body) {
   console.log('PDF "' + fileName + '" sent to the printer by ' + session.name);
   return { ok: true };
 }
+// ===================== Calendar → Print billing sheets → Email =====================
+// The merged PDF (made in the browser) to staff chosen by ID (their saved email), plus one other address if typed.
+// Problems come back as { ok: true, problem } so the window can show them.
+function handleBillingSheets_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!can_(session, 'menu.calendar') || !can_(session, 'send.patients')) return { ok: false, error: 'FORBIDDEN' };
+  if (String(body.op || '') !== 'email') return { ok: false, error: 'BAD_REQUEST' };
 
+  const bytes = pdfBytes_(body.pdf);
+  if (!bytes) return { ok: true, problem: "The PDF didn't arrive properly. Make it again." };
+
+  const byId = {};
+  getStaffDocs_().forEach(function (s) { byId[s.id] = s; });
+  const to = [];
+  const names = [];
+  (Array.isArray(body.staffIds) ? body.staffIds : []).slice(0, 20).forEach(function (id) {
+    const s = byId[String(id)];
+    if (s && s.active !== false && isEmail_(s.email)) { to.push(s.email); names.push({ name: s.name, email: s.email }); }
+  });
+  const extra = String(body.to || '').trim();
+  if (extra) {
+    if (!isEmail_(extra)) return { ok: true, problem: 'Check the other email address.' };
+    to.push(extra);
+    names.push({ name: extra, email: extra });
+  }
+  const list = uniq_(to.map(function (e) { return e.toLowerCase(); }));
+  if (!list.length) return { ok: true, problem: 'Choose who to send it to.' };
+
+  const cache = CacheService.getScriptCache();
+  const rlKey = 'mail_' + session.uid;
+  const sentThisHour = Number(cache.get(rlKey) || 0);
+  if (sentThisHour + list.length > MAIL_LIMIT_PER_HOUR_) return { ok: false, error: 'RATE_LIMITED' };
+  if (MailApp.getRemainingDailyQuota() < list.length) return { ok: false, error: 'QUOTA' };
+
+  const fileName = cleanFileName_(body.fileName, 'Billing sheets');
+  const dayText = String(body.dayText || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+  const count = Math.max(0, Math.floor(Number(body.count) || 0));
+  const note = String(body.note || '').replace(/\r/g, '').trim().slice(0, 2000);
+  const who = String(session.name || '');
+  const subject = 'Billing sheets' + (dayText ? ': ' + dayText : '');
+  const html = invEmailWrap_(
+    '<h2 style="margin:0 0 6px;font-size:20px;color:#0f766e">Billing sheets' + (dayText ? ' for ' + invEsc_(dayText) : '') + '</h2>' +
+    '<p style="margin:0 0 12px;color:#475569">' + (count ? count + ' sheet' + (count === 1 ? '' : 's') + ', ' : '') +
+      'attached as one PDF, grouped by clinician then time. Sent by <strong>' + invEsc_(who) + '</strong>.</p>' +
+    (note ? '<p style="margin:0;padding:10px 12px;border-radius:8px;background:#f8fafc;white-space:pre-wrap">' + invEsc_(note) + '</p>' : ''),
+    'calendar', 'Open the Calendar');
+
+  MailApp.sendEmail({
+    to: list.join(','), subject: subject, name: 'Dermedica Portal', htmlBody: html, body: emailHtmlToText_(html),
+    attachments: [Utilities.newBlob(bytes, MimeType.PDF, fileName)],
+  });
+  cache.put(rlKey, String(sentThisHour + list.length), 3600);
+
+  try {
+    commitWrites_(getConfig_(), [updateWrite_(getConfig_(), 'task_runs/run_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20), {
+      taskId: '', taskName: 'Billing sheets (emailed)', category: 'staff', patientId: '', patientName: '',
+      recipients: names, cc: '', subject: subject, html: html.slice(0, 100000), attachments: [fileName],
+      sentAt: new Date().toISOString(), sentBy: who, sentByUid: String(session.uid || ''),
+    })]);
+  } catch (e) { console.warn('Billing sheets emailed, but the history log failed: ' + e); }
+
+  console.log('Billing sheets (' + count + ') emailed to ' + list.join(', ') + ' by ' + who);
+  return { ok: true, sent: list.length, to: list };
+}
 // ===================== Skin Script Protocol: product catalogue =====================
 
 const SSP_PRODUCTS_SHEET_NAME = 'product_info';

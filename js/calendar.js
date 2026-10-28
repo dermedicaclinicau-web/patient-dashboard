@@ -11,6 +11,7 @@ import { can } from "./perms.js";
 import { confirmDialog } from "./dialog.js";
 import { openBookingDialog } from "./booking-dialog.js";
 import { removeManualAppt } from "./manual-appts.js";
+import { openBillingSheets } from "./billing-sheets.js";
 
 // Column order, left to right. Each entry matches any staff name that CONTAINS it as whole words
 // (capitals, dots and spaces don't matter): "Teh" matches "Dr Joanna Teh" and "Dr. Teh".
@@ -54,6 +55,7 @@ export function mountCalendar(container, param) {
 
         <div class="cal-actions">
           ${can("calendar.book") ? '<button type="button" class="btn-primary cal-addbook" data-addbook>+ Add booking</button>' : ""}
+          <button type="button" class="btn-ghost" data-printsheets>Print billing sheets</button>
           <button type="button" class="btn-ghost cal-refresh">${ICON_REFRESH}<span>Refresh</span></button>
         </div>
       </div>
@@ -204,6 +206,7 @@ export function mountCalendar(container, param) {
   });
 
   refreshBtn.addEventListener("click", () => load(true));
+  q("[data-printsheets]").addEventListener("click", () => openBillingSheets({ dateKey, appts: shown }));
 
   /* ---------- Bookings added here ---------- */
   // Names and services from the days already looked at, for the suggestions
