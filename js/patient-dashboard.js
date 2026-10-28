@@ -39,6 +39,7 @@ import { openSmsDialog } from "./sms-dialog.js";
 import { db } from "./firebase-config.js";
 import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { copyOldWrRecord } from "./wr-copy.js";
+import { listTaskTypes } from "./task-types.js";
 
 /* ===================== Config ===================== */
 
@@ -51,6 +52,7 @@ const DOC_ACTIONS = [
   ["General note", "note"],
   ["Personal note", "lock", "add-note"],
   ["Add reminder", "bell", "add-reminder"],
+  ["Staff task", "staff", "staff-task"],
 ];
 
 // Order and look of the Pre-Consultation section.
@@ -164,6 +166,7 @@ const ICONS = {
   lock: svg('<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>'),
   pin: svg('<line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"/>'),
   user: svg('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
+  staff: svg('<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>'),
   clock: svg('<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>'),
   layers: svg('<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>'),
   alert: svg('<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>'),
@@ -230,6 +233,8 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     if (refreshBtn) { refreshAll(refreshBtn); return; }
     if (t.closest("[data-action='merge-info']")) { mergeInfo(); return; }
     if (t.closest("[data-action='add-reminder']")) { addReminderFlow(); return; }
+    const staffTaskBtn = t.closest("[data-action='staff-task']");
+    if (staffTaskBtn) { openStaffTaskMenu(staffTaskBtn); return; }
     if (t.closest("[data-action='sms']")) { openSmsDialog({ patient }); return; }
     if (t.closest("[data-action='create-ssp']")) { location.hash = `#/ssp/new/${encodeURIComponent(patient.id)}`; return; }
     const openT = t.closest("[data-action='task-open']");
@@ -319,7 +324,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     <div>
       <p class="eyebrow">Clinical documentation</p>
       <div class="doc-tiles">
-        ${DOC_ACTIONS.map(([label, icon, action]) =>
+        ${DOC_ACTIONS.filter(([, , action]) => action !== "staff-task" || (can("tasks.run") && can("tasks.staff"))).map(([label, icon, action]) =>
           `<button type="button" class="doc-tile" ${action ? `data-action="${action}"` : `data-soon="${escapeHtml(label)}"`}>${ICONS[icon]}<span>${escapeHtml(label)}</span></button>`
         ).join("")}
       </div>
@@ -675,6 +680,93 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       showToast(err.code === "not-admin" || err.code === "permission-denied"
         ? "Only Admins can undo a merge."
         : "Couldn't undo the merge. Please try again.");
+    }
+  }
+  // Staff task: the published To Staff tasks, opened with this patient already chosen
+  let staffMenu = null;
+  function closeStaffMenu() {
+    if (!staffMenu) return;
+    const m = staffMenu;
+    staffMenu = null;
+    m.el.remove();
+    m.btn.setAttribute("aria-expanded", "false");
+    document.removeEventListener("pointerdown", m.outside, true);
+    document.removeEventListener("keydown", m.key, true);
+    window.removeEventListener("resize", closeStaffMenu);
+    window.removeEventListener("hashchange", closeStaffMenu);
+  }
+
+  async function openStaffTaskMenu(btn) {
+    if (staffMenu && staffMenu.btn === btn) { closeStaffMenu(); return; }
+    closeStaffMenu();
+    const el = document.createElement("div");
+    el.className = "fp-menu st-menu";
+    el.setAttribute("role", "dialog");
+    el.setAttribute("aria-label", "Choose a staff task");
+    el.innerHTML = `<div class="fp-head">Staff task about ${escapeHtml(patient.firstName || patient.name)}</div>
+      <div class="fp-body"><p class="fp-loading">Loading tasks…</p></div>`;
+    document.body.appendChild(el);
+
+    // Under the tile, or above it when there isn't room below
+    const r = btn.getBoundingClientRect();
+    const w = Math.min(360, window.innerWidth - 16);
+    el.style.width = `${w}px`;
+    el.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - w - 8))}px`;
+    const below = window.innerHeight - r.bottom - 14;
+    if (below >= 260 || below >= r.top) {
+      el.style.top = `${r.bottom + 6}px`;
+      el.style.maxHeight = `${Math.max(200, below)}px`;
+    } else {
+      el.style.bottom = `${window.innerHeight - r.top + 6}px`;
+      el.style.maxHeight = `${r.top - 14}px`;
+    }
+
+    btn.setAttribute("aria-expanded", "true");
+    const outside = (e) => { if (!el.contains(e.target) && !btn.contains(e.target)) closeStaffMenu(); };
+    const key = (e) => { if (e.key === "Escape") { closeStaffMenu(); btn.focus(); } };
+    staffMenu = { el, btn, outside, key };
+    document.addEventListener("pointerdown", outside, true);
+    document.addEventListener("keydown", key, true);
+    window.addEventListener("resize", closeStaffMenu);
+    window.addEventListener("hashchange", closeStaffMenu);
+
+    const body = el.querySelector(".fp-body");
+    let tasks;
+    try {
+      tasks = (await listTaskTypes({ isAdmin: false })).filter((x) => x.category === "staff" && !x.useFor);
+    } catch (err) {
+      console.error("Staff tasks failed:", err);
+      if (staffMenu && staffMenu.el === el) body.innerHTML = '<p class="fp-empty">Couldn\'t load the tasks. Check your connection and try again.</p>';
+      return;
+    }
+    if (!staffMenu || staffMenu.el !== el) return;   // closed while loading
+
+    if (!tasks.length) {
+      const admin = /^admin$/i.test(String((staff && staff.role) || ""));
+      body.innerHTML = `<p class="fp-empty">No To Staff tasks are published yet.${admin ? ' <a href="#/tasks/types">Set one up in Task types</a>.' : " Ask an Admin to set one up."}</p>`;
+      return;
+    }
+    // Tasks about a patient first, then by name
+    tasks.sort((a, b) => (Number(b.recipients.aboutPatient) - Number(a.recipients.aboutPatient)) || a.name.localeCompare(b.name, "en-AU"));
+    body.innerHTML = `${tasks.length > 6 ? '<input type="search" class="fp-search" placeholder="Search tasks" aria-label="Search tasks" />' : ""}
+      <div class="fp-list">${tasks.map((x) => `
+        <a class="fp-item" href="#/tasks/run/${encodeURIComponent(x.id)}/${encodeURIComponent(patient.id)}" data-find="${escapeHtml(`${x.name} ${x.description}`.toLowerCase())}">
+          <span>${escapeHtml(x.name)}${x.recipients.aboutPatient ? ' <em class="st-menu-tag">Patient filled in</em>' : ""}</span>
+          <small>${escapeHtml(x.description || (x.recipients.aboutPatient ? `About ${patient.name}` : "Email to staff"))}</small>
+        </a>`).join("")}</div>
+      <p class="fp-empty" data-role="none" hidden>No tasks match that search.</p>`;
+    const search = body.querySelector(".fp-search");
+    if (search) {
+      search.focus();
+      search.addEventListener("input", () => {
+        const q = search.value.trim().toLowerCase();
+        let any = false;
+        body.querySelectorAll("[data-find]").forEach((a) => { a.hidden = !!q && !a.dataset.find.includes(q); if (!a.hidden) any = true; });
+        body.querySelector('[data-role="none"]').hidden = any;
+      });
+    } else {
+      const first = body.querySelector(".fp-item");
+      if (first) first.focus();
     }
   }
   async function addReminderFlow() {

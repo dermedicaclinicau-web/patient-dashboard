@@ -9370,3 +9370,12 @@ a.rc-badge:hover { filter: brightness(.96); text-decoration: underline; }
   .task.rmd { flex-wrap: wrap; }
   .rmd .task-done { width: 100%; justify-content: center; }
 }
+
+/* ---------- Patient page → Staff task menu ---------- */
+.st-menu .fp-body { flex: 1; min-height: 0; }
+.st-menu .fp-search { margin: 0 .75rem .5rem; }
+a.fp-item { color: inherit; text-decoration: none; }
+a.fp-item[hidden] { display: none; }
+.st-menu-tag { margin-left: .35rem; padding: .05rem .45rem; border-radius: 999px; background: #ede9fe; color: #6d28d9;
+  font-size: .68rem; font-style: normal; font-weight: 700; white-space: nowrap; }
+.st-menu .fp-empty a { color: var(--primary); font-weight: 600; }
