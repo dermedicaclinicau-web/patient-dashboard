@@ -10,6 +10,8 @@ export const EOD_TYPES = [
   { key: "short", label: "Short answer" },
   { key: "long", label: "Long answer" },
   { key: "number", label: "Number" },
+  { key: "tasks", label: "Task list (one per line)" },
+  { key: "taskflags", label: "Challenging or need help (from their task list)" },
 ];
 export const MOODS = [[1, "😞", "Rough"], [2, "🙁", "Not great"], [3, "😐", "Okay"], [4, "🙂", "Good"], [5, "😄", "Great"]];
 
@@ -95,11 +97,16 @@ export async function getEndOfDaySettings() {
 }
 
 export async function saveEndOfDaySettings(cfg, staff) {
-  const check = (list, where) => (Array.isArray(list) ? list : []).forEach((q, i) => {
-    const c = cleanQuestion(q);
-    if (!c.label) throw new Error(`${where}: question ${i + 1} needs its wording.`);
-    if (c.type === "choice" && c.options.length < 2) throw new Error(`${where}: question ${i + 1} (“${c.label}”) needs at least 2 choices.`);
-  });
+  const check = (list, where) => {
+    let hasTasks = false;
+    (Array.isArray(list) ? list : []).forEach((q, i) => {
+      const c = cleanQuestion(q);
+      if (!c.label) throw new Error(`${where}: question ${i + 1} needs its wording.`);
+      if (c.type === "choice" && c.options.length < 2) throw new Error(`${where}: question ${i + 1} (“${c.label}”) needs at least 2 choices.`);
+      if (c.type === "tasks") hasTasks = true;
+      if (c.type === "taskflags" && !hasTasks) throw new Error(`${where}: “${c.label}” needs a Task list question above it.`);
+    });
+  };
   check(cfg && cfg.questions, "Everyone");
   ((cfg && cfg.sets) || []).forEach((x, i) => {
     const name = clip(x.name, 60);
@@ -122,5 +129,6 @@ export function answerText(q, v) {
   if (v === "" || v === null || v === undefined) return "";
   if (q.type === "mood") { const m = MOODS.find(([n]) => n === Number(v)); return m ? `${m[1]} ${m[2]}` : String(v); }
   if (q.type === "rating") return `${v} / 5`;
+  if (q.type === "tasks") return String(v).split("\n").map((s) => s.trim()).filter(Boolean).join(" · ");
   return String(v);
 }

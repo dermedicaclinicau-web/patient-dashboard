@@ -297,7 +297,23 @@ function kitHtml(kit) {
     <div class="kc-list">${kitCountHtml(kit)}</div></section>`;
 }
 
-function questionHtml(q, i) {
+// "Challenging or need help": each task from the Task list question above it
+const TFLAGS = [["ok", "Fine"], ["hard", "Challenging"], ["help", "Need help"]];
+const taskLines = (s) => [...new Set(String(s || "").split("\n").map((x) => x.trim()).filter(Boolean))].slice(0, 20);
+function readFlags(box) {
+  const m = new Map();
+  box.querySelectorAll('input[type="radio"]:checked').forEach((r) => m.set(r.dataset.task, r.value));
+  return m;
+}
+function tflagsHtml(tasks, name, keep) {
+  if (!tasks.length) return '<small class="muted">Your tasks show here once you list them above.</small>';
+  return tasks.map((t, k) => `<div class="eod-tf-row"><span class="eod-tf-task">${esc(t)}</span>
+    <div class="eod-tf-opts" role="radiogroup" aria-label="${esc(t)}">${TFLAGS.map(([v, l]) =>
+      `<label class="eod-tf-opt is-${v}"><input type="radio" name="${name}-${k}" value="${v}" data-task="${esc(t)}"${
+        (keep.get(t) || "ok") === v ? " checked" : ""} /><span>${l}</span></label>`).join("")}</div></div>`).join("");
+}
+
+function questionHtml(q, i, all = []) {
   const name = `q-${i}`;
   const head = `<legend class="eod-q-label">${esc(q.label)}${q.required ? ' <span class="eod-req" aria-label="required">*</span>' : ""}</legend>
     ${q.help ? `<small class="muted eod-q-help">${esc(q.help)}</small>` : ""}`;
@@ -315,6 +331,14 @@ function questionHtml(q, i) {
       `<label class="fe-check"><input type="radio" name="${name}" value="${esc(o)}" /> ${esc(o)}</label>`).join("")}</div>`; break;
     case "long": input = `<textarea class="fe-input" name="${name}" rows="3" maxlength="2000"></textarea>`; break;
     case "number": input = `<input class="fe-input eod-num" type="number" name="${name}" inputmode="decimal" />`; break;
+    case "tasks": input = `<textarea class="fe-input eod-tasks" name="${name}" data-tasks="${i}" rows="4" maxlength="2000"
+      placeholder="One task per line&#10;e.g. Confirmed tomorrow's bookings&#10;Called the recall list"></textarea>`; break;
+    case "taskflags": {
+      let src = -1;
+      for (let j = i - 1; j >= 0; j--) if (all[j] && all[j].type === "tasks") { src = j; break; }
+      input = `<div class="eod-tflags" data-from="${src}" data-name="${name}">${tflagsHtml([], name, new Map())}</div>`;
+      break;
+    }
     default: input = `<input class="fe-input" name="${name}" maxlength="300" />`;
   }
   return `<fieldset class="eod-q" data-q="${i}">${head}${input}</fieldset>`;
@@ -327,9 +351,21 @@ function readAnswer(form, q, i) {
     if (!c) return "";
     return ["mood", "rating"].includes(q.type) ? Number(c.value) : c.value;
   }
+  if (q.type === "taskflags") {
+    const box = form.querySelector(`.eod-tflags[data-name="${name}"]`);
+    const rows = box ? [...readFlags(box)] : [];
+    if (!rows.length) return "";
+    const help = rows.filter(([, f]) => f === "help").map(([t]) => t);
+    const hard = rows.filter(([, f]) => f === "hard").map(([t]) => t);
+    const parts = [];
+    if (help.length) parts.push(`Need help: ${help.join(", ")}`);
+    if (hard.length) parts.push(`Challenging: ${hard.join(", ")}`);
+    return parts.join(" · ") || "All going fine";
+  }
   const el = form.elements[name];
   const v = el ? el.value.trim() : "";
   if (q.type === "number") return v === "" ? "" : Number(v);
+  if (q.type === "tasks") return taskLines(v).join("\n");
   return v;
 }
 
@@ -361,6 +397,13 @@ function renderForm(dlg, staff, cfg, day, kit, lead = "") {
   dlg.querySelector(".eod-edit")?.addEventListener("click", () => dlg.close());
   form.addEventListener("input", () => showErr(""));
   wireKitCount(form);
+  form.addEventListener("input", (e) => {
+    const ta = e.target.closest && e.target.closest("[data-tasks]");
+    if (!ta) return;
+    form.querySelectorAll(`.eod-tflags[data-from="${ta.dataset.tasks}"]`).forEach((box) => {
+      box.innerHTML = tflagsHtml(taskLines(ta.value), box.dataset.name, readFlags(box));   // keeps what they've marked
+    });
+  });
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();

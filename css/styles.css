@@ -9547,3 +9547,22 @@ dialog.lh-dialog.bs-dlg.is-wide { width: min(1240px, calc(100vw - 2rem)); }
   .eod-split { grid-template-columns: 1fr; }
   .eod-preview { position: static; }
 }
+
+/* End of day: task list and how each task went */
+.eod-tflags { display: grid; gap: .4rem; }
+.eod-tf-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .4rem .75rem;
+  padding: .5rem .65rem; background: #fff; border: 1px solid var(--border); border-radius: 10px; }
+.eod-tf-task { flex: 1 1 180px; min-width: 0; font-size: .88rem; font-weight: 500; }
+.eod-tf-opts { display: inline-flex; overflow: hidden; border: 1px solid var(--border); border-radius: 999px; }
+.eod-tf-opt { position: relative; cursor: pointer; }
+.eod-tf-opt input { position: absolute; opacity: 0; pointer-events: none; }
+.eod-tf-opt > span { display: block; padding: .3rem .7rem; font-size: .78rem; font-weight: 600; color: #475569; }
+.eod-tf-opt + .eod-tf-opt > span { border-left: 1px solid var(--border); }
+.eod-tf-opt.is-ok input:checked + span { color: #0f172a; background: #f1f5f9; }
+.eod-tf-opt.is-hard input:checked + span { color: #92400e; background: #fef3c7; }
+.eod-tf-opt.is-help input:checked + span { color: #b91c1c; background: #fee2e2; }
+.eod-tf-opt input:focus-visible + span { box-shadow: inset 0 0 0 2px #0f766e; }
+.eod-pv-lines { display: grid; align-content: start; gap: .15rem; padding: .4rem .55rem; font-size: .75rem; color: #64748b; }
+.eod-pv .eod-tf-row { padding: .4rem .5rem; }
+.eod-pv .eod-tf-task { font-size: .78rem; }
+.eod-pv .eod-tf-opt > span { padding: .2rem .45rem; font-size: .68rem; }

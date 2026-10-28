@@ -52,6 +52,8 @@ export function mountEndOfDaySettings(container, { staff = null, embedded = fals
       </div>
       ${q.type === "choice" ? `<label class="lh-field"><span class="lh-label">Choices (one per line)</span>
         <textarea class="fe-input" data-k="options" rows="3" placeholder="Quiet&#10;Steady&#10;Flat out">${esc(q.options.join("\n"))}</textarea></label>` : ""}
+      ${q.type === "taskflags" ? `<small class="muted">Lists each task from the nearest <b>Task list</b> question above this one.
+        Staff mark each Fine, Challenging or Need help.</small>` : ""}
       <div class="eod-qe-acts">
         <button type="button" class="lh-btn is-quiet" data-act="up" aria-label="Move up"${i === 0 ? " disabled" : ""}>↑</button>
         <button type="button" class="lh-btn is-quiet" data-act="down" aria-label="Move down"${i === n - 1 ? " disabled" : ""}>↓</button>
@@ -83,6 +85,13 @@ export function mountEndOfDaySettings(container, { staff = null, embedded = fals
         `<span class="fe-check"><input type="radio" disabled /> ${esc(o)}</span>`).join("") || '<small class="muted">Add the choices</small>'}</div>`; break;
       case "long": input = '<div class="eod-pv-box is-long"></div>'; break;
       case "number": input = '<div class="eod-pv-box is-num"></div>'; break;
+      case "tasks": input = `<div class="eod-pv-box is-long eod-pv-lines"><span>Confirmed tomorrow's bookings</span>
+        <span>Called the recall list</span></div>`; break;
+      case "taskflags": input = `<div class="eod-tflags">${[["Confirmed tomorrow's bookings", "ok"], ["Called the recall list", "help"]]
+        .map(([t, on]) => `<div class="eod-tf-row"><span class="eod-tf-task">${t}</span><div class="eod-tf-opts">${
+          [["ok", "Fine"], ["hard", "Challenging"], ["help", "Need help"]].map(([v, l]) =>
+            `<span class="eod-tf-opt is-${v}"><input type="radio" disabled${v === on ? " checked" : ""} /><span>${l}</span></span>`).join("")
+        }</div></div>`).join("")}</div>`; break;
       default: input = '<div class="eod-pv-box"></div>';
     }
     return `<div class="eod-q eod-pv-q">${head}${input}</div>`;
