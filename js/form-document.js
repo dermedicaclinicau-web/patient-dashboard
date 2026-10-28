@@ -530,6 +530,10 @@ export function buildFormDocument({ sub, ver, letterhead: lh, images = {}, blank
           ? `${esc(sub.patientName)}${sub.recordDate ? ` · ${esc(niceDate(sub.recordDate))}` : ""}`
           : 'Patient: <span class="bl-in" style="width:240px"></span> &nbsp;&nbsp; Date: <span class="bl-in" style="width:120px"></span>'}</p>` : ""}
     ${body}
+    ${sub.original && sub.original.recordDate && sub.original.recordDate !== sub.recordDate
+      ? `<p style="margin:16px 0 0;font-size:8.5pt;color:#64748b;">Record date corrected from ${esc(niceDate(sub.original.recordDate))}${
+          Array.isArray(sub.edits) && sub.edits.length && sub.edits[sub.edits.length - 1].by
+            ? ` by ${esc(sub.edits[sub.edits.length - 1].by)}` : ""}.</p>` : ""}
     ${Array.isArray(sub.moves) && sub.moves.length
       ? `<p style="margin:16px 0 0;font-size:8.5pt;color:#64748b;">Patient details corrected on ${esc(fmtIso(sub.moves[sub.moves.length - 1].at))}.</p>` : ""}`;
 

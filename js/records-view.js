@@ -9,6 +9,7 @@ import { db, auth } from "./firebase-config.js";
 import { doc, getDoc, updateDoc, arrayUnion, increment, serverTimestamp }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { showToast } from "./utils.js";
+import { answerTagText } from "./form-live.js";
 
 const svg = (p, cls = "") =>
   `<svg ${cls ? `class="${cls}" ` : ""}viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -366,14 +367,39 @@ export function mountRecords(root, patient, staff = null) {
       const snap = await getDoc(ref);
       if (!snap.exists()) { showToast("This record no longer exists."); return; }
       const cur = snap.data();
-      if (cur.recordDate === res.date) { showToast("That's already the record's date."); return; }
+      const answers = { ...(cur.answers || {}) };
+
+      // The form's own Record date question: shown on the form, the PDF and print, so it changes too
+      const fields = (await versionFields(cur.templateId, cur.version)) || [];
+      const dateQ = fields.find((f) => f && f.type === "record_date" && answers[f.id] === cur.recordDate)
+        || fields.find((f) => f && f.type === "record_date");
+      const answerOld = dateQ && typeof answers[dateQ.id] === "string" ? answers[dateQ.id] : "";
+
+      if (cur.recordDate === res.date && (!dateQ || answerOld === res.date)) {
+        showToast("That's already the record's date.");
+        return;
+      }
+      if (dateQ) {
+        answers[dateQ.id] = res.date;
+        // Tags saved with the form that showed the old date ("28 October 2026")
+        if (answers.__tags && typeof answers.__tags === "object") {
+          const tags = { ...answers.__tags };
+          const olds = new Set([cur.recordDate, answerOld].filter(Boolean).map((d) => answerTagText(dateQ, d)));
+          const now = answerTagText(dateQ, res.date);
+          Object.keys(tags).forEach((k) => { if (olds.has(tags[k])) tags[k] = now; });
+          answers.__tags = tags;
+        }
+      }
+
       const by = (staff && staff.name) || "";
       const byUid = (auth.currentUser && auth.currentUser.uid) || "";
       await updateDoc(ref, {
         recordDate: res.date,
+        ...(dateQ ? { answers } : {}),
         original: cur.original || { recordDate: cur.recordDate },
         edits: arrayUnion({
           field: "recordDate", from: cur.recordDate, to: res.date, reason: res.reason,
+          fieldId: dateQ ? dateQ.id : "", answerFrom: answerOld,
           at: new Date().toISOString(), by, byUid,
         }),
         editCount: increment(1),
@@ -521,7 +547,6 @@ function editDateDialog(r) {
       const reason = form.querySelector('textarea[name="reason"]').value.trim();
       if (!parseDateKey(date)) { err.textContent = "Choose a date."; return; }
       if (date > today) { err.textContent = "The date can't be in the future."; return; }
-      if (date === r.dateText) { err.textContent = "That's the date it already has."; return; }
       if (reason.length < 3) { err.textContent = "Add a short reason for the change."; return; }
       picked = { date, reason };
       dlg.close();

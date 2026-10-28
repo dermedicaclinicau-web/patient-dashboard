@@ -744,8 +744,32 @@ match /inv_count_drafts/{id} {
         && request.resource.data.category in ['treatment', 'consent']
         && request.resource.data.recordChanges is list
         && request.resource.data.recordChanges.size() <= 50;
+      // Date corrections: a reason every time, a log of each change, and the first original date can never change.
+      // The form's own Record date answer (and its saved tags) may follow, and nothing else in the answers.
+      function dateEditOk() {
+        let e = request.resource.data.edits[request.resource.data.edits.size() - 1];
+        let changed = request.resource.data.answers.diff(resource.data.answers).affectedKeys();
+        return e.to == request.resource.data.recordDate
+          && (changed.size() == 0
+            || (e.get('fieldId', '') != ''
+              && changed.hasOnly([e.fieldId, '__tags'])
+              && request.resource.data.answers[e.fieldId] == request.resource.data.recordDate));
+      }
+      allow update: if can('records.move')
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['recordDate', 'answers', 'original', 'edits', 'editCount', 'editedAt', 'editedBy', 'editedByUid'])
+        && request.resource.data.recordDate is string
+        && request.resource.data.recordDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && request.resource.data.original is map
+        && request.resource.data.original.recordDate is string
+        && (!('original' in resource.data) || request.resource.data.original == resource.data.original)
+        && request.resource.data.edits is list
+        && request.resource.data.edits.size() > 0 && request.resource.data.edits.size() <= 30
+        && request.resource.data.editCount == resource.data.get('editCount', 0) + 1
+        && request.resource.data.editedByUid == request.auth.uid
+        && request.resource.data.editedAt == request.time
+        && dateEditOk();
     }
-
     // ===================== Task Manager =====================
 
     // Task types. Task builders build them; other staff can only see live ones.
