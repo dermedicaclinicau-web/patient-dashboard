@@ -141,7 +141,7 @@ export async function fetchPatientRecords(patient) {
 
 // A portal record's category: one chosen with the Category button wins; then a form name that names a treatment
 // ("Wrinkle Relaxer Treatment Record"); then the category it was saved under; otherwise "other"
-function portalCategory(s) {
+export function portalCategory(s) {
   if (s.groupFixed === true && GROUP_KEYS.includes(s.group)) return s.group;
   const byName = categorize(s.templateName);
   if (byName !== "other") {

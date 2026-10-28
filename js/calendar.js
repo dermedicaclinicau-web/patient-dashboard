@@ -404,17 +404,21 @@ function visitCard(group) {
     : `<div class="${classes}"${idx} title="${title}">${inner}</div>`;
 }
 
+// [label, class, what it is (shown on hover)]
 const BADGES = {
-  plan: ["Plan", "cb-plan"],
-  summary: ["Summary", "cb-summary"],
-  tx: ["TxR", "cb-tx"],
-  consent: ["ConsentR", "cb-consent"],
-  rx: ["Prex", "cb-rx"],
+  plan: ["TPlan", "cb-plan", "Treatment plan"],
+  summary: ["Summary", "cb-summary", "Appointment summary"],
+  tx: ["Tx", "cb-tx", "Treatment record"],
+  consent: ["Cons", "cb-consent", "Consent record"],
+  rx: ["Rx", "cb-rx", "Prescription"],
 };
 
-function badgeHtml(type) {
-  const [label, cls] = BADGES[type];
-  return `<span class="cb ${cls}">${label}</span>`;
+// "Tx WR": the record type, then the treatment it's for. Hover shows the full names.
+function badgeHtml(b) {
+  const [label, cls, full] = BADGES[b.type] || [b.type, "", b.type];
+  const tip = [`${full}${b.catTitle ? ` · ${b.catTitle}` : ""}`, ...(b.titles || [])].join("\n");
+  return `<span class="cb ${cls}" title="${escapeHtml(tip)}">${label}${
+    b.code ? `<b class="cb-code">${escapeHtml(b.code)}</b>` : ""}</span>`;
 }
 
 // A booking added in the portal: tagged, with Edit and Remove

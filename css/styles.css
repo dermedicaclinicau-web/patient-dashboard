@@ -9394,3 +9394,6 @@ dialog.lh-dialog.rc-cat-dlg { width: min(460px, calc(100vw - 2rem)); }
 .rc-cat-h { font-size: .72rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
 .rc-cat-opts.is-two { grid-template-columns: 1fr 1fr; }
 .rc-cat-opt small.is-sug { color: #6d28d9; }
+
+/* Calendar badges: "Tx WR" */
+.cb .cb-code { margin-left: .25em; font-weight: 800; letter-spacing: .02em; }

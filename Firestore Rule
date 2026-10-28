@@ -744,6 +744,7 @@ match /inv_count_drafts/{id} {
         && request.resource.data.category in ['treatment', 'consent']
         && request.resource.data.recordChanges is list
         && request.resource.data.recordChanges.size() <= 50;
+    }
 
     // ===================== Task Manager =====================
 

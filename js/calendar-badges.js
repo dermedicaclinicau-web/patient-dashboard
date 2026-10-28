@@ -3,11 +3,18 @@ import { collection, query, where, getDocs, getDoc, doc, FieldPath }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { parseDateKey } from "./utils.js";
 import { extractSection } from "./transcripts.js";
+import { categorize, portalCategory, CATEGORIES, OTHER_CATEGORY } from "./records.js";
 
 const MONTHS_LONG = ["January", "February", "March", "April", "May", "June", "July",
   "August", "September", "October", "November", "December"];
 const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const ORDER = ["plan", "summary", "tx", "consent", "rx"];
+
+// The short code after Tx / Cons ("Tx WR"). "Other" has no code.
+export const CAT_CODES = { wr: "WR", filler: "FL", cc: "CC", mn: "MN", firm: "FM", peel: "PL", body: "BS" };
+const ALL_CATS = [...CATEGORIES, OTHER_CATEGORY];
+const CAT_RANK = new Map(ALL_CATS.map((c, i) => [c.key, i]));
+const CAT_TITLE = new Map(ALL_CATS.map((c) => [c.key, c.title]));
 
 // "Jan BRAY", "Jan Bray #1" -> "jan bray"
 const norm = (s) => String(s || "").toLowerCase().replace(/[^\p{L}\s]/gu, " ").replace(/\s+/g, " ").trim();
@@ -37,6 +44,12 @@ async function byExactDate(col, field, variants) {
   return snap.docs.map((d) => d.data());
 }
 
+// Forms filled in on the portal that day (recordDate is always YYYY-MM-DD)
+async function portalFormsOn(dateKey) {
+  const snap = await getDocs(query(collection(db, "form_submissions"), where("recordDate", "==", dateKey)));
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
 // Transcript dates may include a time ("October 7, 2026 10:30 AM"), so match by prefix
 async function transcriptsOn(dateKey) {
   const d = parseDateKey(dateKey);
@@ -62,7 +75,8 @@ async function transcriptsOn(dateKey) {
 }
 
 /**
- * Loads every record for one day and returns badgesFor(appointment) -> ["plan","summary",...]
+ * Loads every record for one day and returns badgesFor(appointment) ->
+ * [{ type, cat, code, catTitle, titles }] in display order
  */
 export async function fetchDayBadges(dateKey, appts) {
   const variants = dateVariants(dateKey);
@@ -73,25 +87,44 @@ export async function fetchDayBadges(dateKey, appts) {
     byExactDate("consent_records", "Record Date", variants),
     byExactDate("prescription_record", "Record Date", variants),
     transcriptsOn(dateKey),
+    portalFormsOn(dateKey),
   ]);
   const ok = (r, label) => {
     if (r.status === "fulfilled") return r.value;
     console.warn(`Calendar badges: ${label} failed`, r.reason);
     return [];
   };
-  const [tx, consent, rx, transcripts] = [
+  const [tx, consent, rx, transcripts, portal] = [
     ok(results[0], "treatment records"), ok(results[1], "consents"),
-    ok(results[2], "prescriptions"), ok(results[3], "transcripts"),
+    ok(results[2], "prescriptions"), ok(results[3], "transcripts"), ok(results[4], "portal forms"),
   ];
 
   const records = [];
-  tx.forEach((r) => records.push({ type: "tx", id: r["Patient ID"], name: r["Patient Name"] }));
-  consent.forEach((r) => records.push({ type: "consent", id: r["Patient ID"], name: "" }));
-  rx.forEach((r) => records.push({ type: "rx", id: r["Patient ID"], name: "" }));
+  const add = (type, id, name, title = "", cat = "") => records.push({ type, id, name, title: String(title || ""), cat });
+
+  // Old app
+  tx.forEach((r) => {
+    const title = r["Treatment Record Type"] || "Treatment record";
+    add("tx", r["Patient ID"], r["Patient Name"], title, categorize(title));
+  });
+  consent.forEach((r) => {
+    const title = r["Consent Type"] || "Consent";
+    add("consent", r["Patient ID"], r["Patient Name"], title, categorize(title));
+  });
+  rx.forEach((r) => add("rx", r["Patient ID"], r["Patient Name"], r["Prescription Type"] || r["Prescription"] || "Prescription"));
   transcripts.forEach((r) => {
-    records.push({ type: "summary", id: r["Patient ID"], name: r["Patient Name"] });
-    if (extractSection(r["Gemini SOAP"], "TREATMENT PLAN")) {
-      records.push({ type: "plan", id: r["Patient ID"], name: r["Patient Name"] });
+    add("summary", r["Patient ID"], r["Patient Name"], "Consultation notes");
+    if (extractSection(r["Gemini SOAP"], "TREATMENT PLAN")) add("plan", r["Patient ID"], r["Patient Name"], "Treatment plan");
+  });
+
+  // Portal forms: the same category as the Records cards (a Type & category correction wins)
+  portal.forEach((s) => {
+    const c = String(s.category || "").toLowerCase();
+    const id = s.patientPttId || s.patientId;
+    if (c === "treatment") add("tx", id, s.patientName, s.templateName, portalCategory(s));
+    else if (c === "consent") add("consent", id, s.patientName, s.templateName, portalCategory(s));
+    else if (c === "rx" || c === "prescription" || /prescription/i.test(s.templateName || "")) {
+      add("rx", id, s.patientName, s.templateName);
     }
   });
   records.forEach((r) => { r.id = String(r.id || "").trim(); r.name = norm(r.name); });
@@ -113,20 +146,32 @@ export async function fetchDayBadges(dateKey, appts) {
   return function badgesFor(appt) {
     const pid = String(appt.patientId || "").trim();
     const pname = norm(appt.patientName);
-    const types = new Set();
+    const found = new Map();   // "tx|wr" -> badge
+
+    const take = (r) => {
+      const cat = r.type === "tx" || r.type === "consent" ? (r.cat || "other") : "";
+      const key = `${r.type}|${cat}`;
+      if (!found.has(key)) {
+        found.set(key, { type: r.type, cat, code: CAT_CODES[cat] || "", catTitle: cat ? CAT_TITLE.get(cat) || "" : "", titles: [] });
+      }
+      const b = found.get(key);
+      if (r.title && !b.titles.includes(r.title)) b.titles.push(r.title);
+    };
 
     records.forEach((r) => {
       const a = alias.get(r.id);
       // Which appointment ID (if any) this record clearly belongs to
       const resolved = apptIds.has(r.id) ? r.id : (a && apptIds.has(a.pttId) ? a.pttId : "");
       if (resolved) {
-        if (resolved === pid) types.add(r.type);
+        if (resolved === pid) take(r);
         return; // ID-matched records never fall back to name
       }
       const rName = r.name || (a && a.name) || "";
-      if (rName && rName === pname) types.add(r.type);
+      if (rName && rName === pname) take(r);
     });
 
-    return ORDER.filter((t) => types.has(t));
+    return [...found.values()].sort((x, y) =>
+      ORDER.indexOf(x.type) - ORDER.indexOf(y.type)
+      || (CAT_RANK.get(x.cat) ?? 99) - (CAT_RANK.get(y.cat) ?? 99));
   };
 }
