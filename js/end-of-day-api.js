@@ -28,6 +28,8 @@ export const DEFAULT_EOD = {
 
 const clip = (v, n) => String(v ?? "").trim().slice(0, n);
 export const newQid = () => `q_${Math.random().toString(36).slice(2, 9)}`;
+export const newSetId = () => `set_${Math.random().toString(36).slice(2, 9)}`;
+const cleanList = (a, max, len) => [...new Set((Array.isArray(a) ? a : []).map((x) => clip(x, len)).filter(Boolean))].slice(0, max);
 
 export function cleanQuestion(q = {}) {
   const type = EOD_TYPES.some((t) => t.key === q.type) ? q.type : "short";
@@ -42,7 +44,26 @@ export function cleanQuestion(q = {}) {
   };
 }
 
+// A question set: given to roles and/or particular people
+export function cleanSet(x = {}) {
+  return {
+    id: clip(x.id, 40) || newSetId(),
+    name: clip(x.name, 60),
+    roles: cleanList(x.roles, 20, 40),
+    staffIds: cleanList(x.staffIds, 60, 80),
+    questions: (Array.isArray(x.questions) ? x.questions : []).map(cleanQuestion).filter((q) => q.label).slice(0, 30),
+  };
+}
+
 export function cleanEodSettings(s = {}) {
+  // A role or person belongs to one set only (the first one keeps them)
+  const takenRoles = new Set();
+  const takenPeople = new Set();
+  const sets = (Array.isArray(s.sets) ? s.sets : []).map(cleanSet).slice(0, 12).map((x) => {
+    x.roles = x.roles.filter((r) => !takenRoles.has(r.toLowerCase()) && takenRoles.add(r.toLowerCase()));
+    x.staffIds = x.staffIds.filter((id) => !takenPeople.has(id) && takenPeople.add(id));
+    return x;
+  });
   return {
     who: "all",   // End of day is always for everyone
     kitCheck: s.kitCheck !== false,
@@ -50,7 +71,22 @@ export function cleanEodSettings(s = {}) {
     remindBefore: [0, 5, 10, 15, 30, 45, 60].includes(Number(s.remindBefore)) ? Number(s.remindBefore) : 15,
     finishTime: /^([01]\d|2[0-3]):[0-5]\d$/.test(s.finishTime || "") ? s.finishTime : "17:30",
     questions: (Array.isArray(s.questions) ? s.questions : []).map(cleanQuestion).filter((q) => q.label).slice(0, 30),
+    sets,
   };
+}
+
+// Which set a person gets: one given to them by name, then their role's, otherwise none (Everyone's questions)
+export function setFor(cfg, { uid = "", role = "" } = {}) {
+  const sets = (cfg && cfg.sets) || [];
+  const r = String(role || "").toLowerCase();
+  return sets.find((x) => uid && x.staffIds.includes(uid))
+    || sets.find((x) => r && x.roles.some((y) => y.toLowerCase() === r))
+    || null;
+}
+
+export function questionsFor(cfg, staff) {
+  const set = setFor(cfg, { uid: staff && staff.uid, role: staff && (staff.role || staff.staffRole) });
+  return set ? set.questions : (cfg.questions || []);
 }
 
 export async function getEndOfDaySettings() {
@@ -59,11 +95,17 @@ export async function getEndOfDaySettings() {
 }
 
 export async function saveEndOfDaySettings(cfg, staff) {
-  const list = Array.isArray(cfg && cfg.questions) ? cfg.questions : [];
-  list.forEach((q, i) => {
+  const check = (list, where) => (Array.isArray(list) ? list : []).forEach((q, i) => {
     const c = cleanQuestion(q);
-    if (!c.label) throw new Error(`Question ${i + 1} needs its wording.`);
-    if (c.type === "choice" && c.options.length < 2) throw new Error(`Question ${i + 1} (“${c.label}”) needs at least 2 choices.`);
+    if (!c.label) throw new Error(`${where}: question ${i + 1} needs its wording.`);
+    if (c.type === "choice" && c.options.length < 2) throw new Error(`${where}: question ${i + 1} (“${c.label}”) needs at least 2 choices.`);
+  });
+  check(cfg && cfg.questions, "Everyone");
+  ((cfg && cfg.sets) || []).forEach((x, i) => {
+    const name = clip(x.name, 60);
+    if (!name) throw new Error(`Question set ${i + 1} needs a name.`);
+    if (!(x.roles || []).length && !(x.staffIds || []).length) throw new Error(`“${name}” isn't given to anyone yet. Tick a role or a person.`);
+    check(x.questions, name);
   });
   const clean = cleanEodSettings(cfg);
   await setDoc(doc(db, "app_settings", "end_of_day"), {

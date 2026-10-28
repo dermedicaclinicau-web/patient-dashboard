@@ -9487,3 +9487,63 @@ dialog.lh-dialog.bs-dlg.is-wide { width: min(1240px, calc(100vw - 2rem)); }
 .bs-size-in { display: flex; align-items: center; gap: .35rem; }
 .bs-size-in input { width: 100%; }
 .bs-size-in em { font-size: .75rem; font-style: normal; font-weight: 400; color: var(--muted); }
+
+/* End of day settings: question sets and preview */
+.eod-top { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+.eod-top .tb-card { margin: 0; }
+.eod-qcard-head h4 { margin: 0 0 .2rem; }
+.eod-qcard-head p { margin: 0 0 .9rem; font-size: .85rem; }
+.eod-tabs { display: flex; gap: .6rem; overflow-x: auto; padding: .15rem .1rem .6rem; margin-bottom: .9rem; border-bottom: 1px solid var(--border); }
+.eod-tab { flex: 0 0 auto; display: grid; gap: .1rem; min-width: 170px; max-width: 240px; padding: .65rem .85rem; text-align: left;
+  font: inherit; background: #fff; border: 1px solid var(--border); border-radius: 12px; cursor: pointer;
+  transition: border-color .15s, box-shadow .15s, background .15s; }
+.eod-tab:hover { border-color: #94a3b8; }
+.eod-tab b { font-size: .9rem; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.eod-tab small { font-size: .74rem; color: var(--muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.eod-tab-n { justify-self: start; margin-top: .25rem; padding: .1rem .5rem; font-size: .7rem; font-weight: 700;
+  color: #0f766e; background: #f0fdfa; border-radius: 999px; }
+.eod-tab.is-on { border-color: #0f766e; background: #f0fdfa; box-shadow: 0 0 0 3px rgba(15, 118, 110, .12); }
+.eod-tab.is-on .eod-tab-n { background: #0f766e; color: #fff; }
+.eod-tab.is-add { border-style: dashed; color: #0f766e; background: #fff; }
+.eod-split { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 1.25rem; align-items: start; }
+.eod-editor { display: grid; gap: .75rem; min-width: 0; }
+.eod-editor > .ff-btn { justify-self: start; }
+.eod-note { margin: 0; padding: .6rem .8rem; font-size: .85rem; color: #475569; background: #f8fafc; border-radius: 10px; }
+.eod-setbox { display: grid; gap: .8rem; padding: .9rem; background: #f8fafc; border: 1px solid var(--border); border-radius: 12px; }
+.eod-chips { display: flex; flex-wrap: wrap; gap: .4rem; }
+.eod-chip { position: relative; display: inline-flex; align-items: center; gap: .35rem; padding: .35rem .7rem;
+  font-size: .82rem; background: #fff; border: 1px solid var(--border); border-radius: 999px; cursor: pointer; }
+.eod-chip input { position: absolute; opacity: 0; pointer-events: none; }
+.eod-chip em { font-size: .7rem; font-style: normal; color: var(--muted); }
+.eod-chip:has(input:checked) { color: #fff; background: #0f766e; border-color: #0f766e; }
+.eod-chip:has(input:checked) em { color: #ccfbf1; }
+.eod-chip:has(input:focus-visible) { box-shadow: 0 0 0 3px rgba(15, 118, 110, .25); }
+.eod-chip.is-taken { opacity: .5; cursor: not-allowed; }
+.eod-people summary { cursor: pointer; font-size: .85rem; font-weight: 600; }
+.eod-people summary small { margin-left: .35rem; font-weight: 400; color: var(--muted); }
+.eod-people .eod-chips { margin-top: .6rem; max-height: 220px; overflow: auto; }
+.eod-setacts { display: flex; flex-wrap: wrap; gap: .5rem; justify-content: space-between; }
+.eod-danger { color: #b91c1c; }
+.eod-preview { position: sticky; top: 1rem; display: grid; gap: .6rem; }
+.eod-pv-label { font-size: .72rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.eod-pv { overflow: hidden; background: #fff; border: 1px solid var(--border); border-radius: 16px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, .1); }
+.eod-pv-head { display: grid; gap: .15rem; padding: .9rem 1rem .7rem; border-bottom: 1px solid var(--border); }
+.eod-pv-head b { font-size: 1rem; }
+.eod-pv-head span { font-size: .8rem; color: var(--muted); }
+.eod-pv-body { display: grid; gap: .9rem; max-height: 52vh; overflow: auto; padding: .9rem 1rem; }
+.eod-pv-q { margin: 0; padding: 0; border: 0; pointer-events: none; }
+.eod-pv-q .eod-q-label { font-size: .85rem; font-weight: 600; margin-bottom: .35rem; }
+.eod-pv-box { height: 32px; background: #fff; border: 1px solid var(--border); border-radius: 8px; }
+.eod-pv-box.is-long { height: 64px; }
+.eod-pv-box.is-num { width: 110px; }
+.eod-pv-acts { display: flex; justify-content: flex-end; gap: .5rem; padding: .7rem 1rem; background: #f8fafc; border-top: 1px solid var(--border); }
+.eod-pv-acts span { padding: .35rem .8rem; font-size: .78rem; font-weight: 600; color: #475569; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+.eod-pv-acts .is-pri { color: #fff; background: #0f766e; border-color: #0f766e; }
+.eod-pv-who { display: grid; gap: .4rem; font-size: .82rem; }
+.eod-pv-names { display: flex; flex-wrap: wrap; gap: .3rem; }
+.eod-pv-names span { padding: .15rem .55rem; font-size: .75rem; background: #f1f5f9; border-radius: 999px; }
+@media (max-width: 960px) {
+  .eod-split { grid-template-columns: 1fr; }
+  .eod-preview { position: static; }
+}

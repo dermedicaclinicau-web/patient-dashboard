@@ -1,6 +1,6 @@
 // "End my day": the day pill in the top bar. Injectors count their kit (blind, typed from the labels);
 // everyone answers the admin's questions.
-import { getEndOfDaySettings, MOODS, answerText } from "./end-of-day-api.js";
+import { getEndOfDaySettings, MOODS, answerText, questionsFor } from "./end-of-day-api.js";
 import { listProducts, listKits, isKitProduct, getMyKitDay, saveKitDayEnd, listMyUsage, dayKey, plural } from "./inventory-api.js";
 import { can } from "./perms.js";
 import { escapeHtml, showToast } from "./utils.js";
@@ -263,6 +263,7 @@ export async function openEndOfDay({ prompted = false } = {}) {
   let cfg, day, kit = [];
   try {
     [cfg, day] = await Promise.all([getEndOfDaySettings(), getMyKitDay()]);
+    cfg = { ...cfg, questions: questionsFor(cfg, staff) };   // their role's (or their own) question set
     setLabel(!!(day && day.end), day && day.end ? day.end.at : null); // also resets the label after midnight
     if (day && day.end) { if (dlg.open) summary(dlg, day); return; }
     if (cfg.kitCheck && staff.injector === true) kit = await kitForEnd(day);
