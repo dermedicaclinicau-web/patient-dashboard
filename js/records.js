@@ -77,6 +77,7 @@ async function portalRecords(patient) {
         staff: s.createdBy,
         link: "",
         recordId: s.id,
+        group: s.group || "",
         matchedByName: false,
       }));
   } catch (err) {

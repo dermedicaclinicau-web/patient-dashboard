@@ -243,20 +243,21 @@ export function mountRecords(root, patient) {
           }),
         ]);
         await markPrescriptions(consents, rx).catch((err) => console.warn("Consent prescriptions not marked:", err));
-        // TEMPORARY: what the prescription check decided (remove once it's working)
+        // TEMPORARY: which category each record went into (remove once checked)
         try {
           const ds = (d) => (d instanceof Date && !isNaN(d) ? d.toDateString() : "(no date)");
-          console.log("Prescriptions found for this patient:", rx.ok ? "all loaded" : "SOME FAILED TO LOAD",
-            rx.list.map((p) => `${ds(p.date)} · ${p.title}`));
-          console.table(consents.map((c) => ({
-            consent: c.title,
-            date: ds(c.date),
-            from: c.portalId ? "portal" : "old app",
-            category: c.category,
-            result: c.rxState || "not checked",
-            prescription: c.rx ? `${c.rx.title} · ${ds(c.rx.date)}` : "",
+          console.log("TREATMENT RECORDS");
+          console.table(treatments.map((t) => ({
+            record: t.title, date: ds(t.date), from: t.portalId ? "portal" : "old app",
+            savedGroup: t.portalId ? (t.group || "(none)") : "", shownUnder: t.category,
           })));
-        } catch (e) { console.warn("Prescription debug failed:", e); }
+          console.log("CONSENT RECORDS");
+          console.table(consents.map((c) => ({
+            consent: c.title, date: ds(c.date), from: c.portalId ? "portal" : "old app",
+            savedGroup: c.portalId ? (c.group || "(none)") : "", shownUnder: c.category,
+            prescription: c.rxState || "not checked",
+          })));
+        } catch (e) { console.warn("Records debug failed:", e); }
         if (!grid.isConnected) return;
         loaded = true;
         lists = { treatment: treatments, consent: consents };
