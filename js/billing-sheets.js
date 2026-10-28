@@ -19,7 +19,8 @@ const SET = ["form_settings", "billing_sheet"];
 
 export const BS_DEFAULTS = {
   headerNote: "!SCAN THIS INTO BILLING SHEET FOLDER AT THE END OF DAY",
-  fontSize: 9,
+  font: "poppins",     // "poppins" (like the original sheet) or "arial"
+  fontSize: 8,
   serviceRows: 5,      // rows under Services done today (more if they have more services)
   sspRows: 2,          // blank rows under their Skin Script products
   nextRows: 5,         // Next appt rows (the first is always blank)
@@ -27,7 +28,7 @@ export const BS_DEFAULTS = {
   buyingLabel: "BUYING PKG TODAY",
   sideLabel: "LED/ANAESTHETIC APPS/ROOM & TIME",
   consumablesLabel: "CONSUMABLE USED:",
-  payLine: "PINPYMNT   ZIP   EFT   CASH   TYRO REF#:",
+  payLine: "PINPYMNT ZIP EFT CASH TYRO REF#:",
   ticks: ["TO REBOOK", "SEND REBOOKED SCHEDULE"],
 };
 
@@ -39,6 +40,7 @@ export function cleanBs(x = {}) {
   const pick = (k, n) => (x[k] === undefined ? D[k] : line(x[k], n));
   return {
     headerNote: pick("headerNote", 150),
+    font: x.font === "arial" ? "arial" : "poppins",
     fontSize: int(x.fontSize, 7, 12, D.fontSize),
     serviceRows: int(x.serviceRows, 1, 12, D.serviceRows),
     sspRows: int(x.sspRows, 0, 12, D.sspRows),
@@ -51,101 +53,94 @@ export function cleanBs(x = {}) {
   };
 }
 
-let cache = null;
-export async function getBillingSheetSettings(force = false) {
-  if (cache && !force) return cache;
-  const s = await getDoc(doc(db, ...SET));
-  cache = cleanBs(s.exists() ? s.data() : {});
-  return cache;
-}
-
-export async function saveBillingSheetSettings(x, staff) {
-  const uid = auth.currentUser && auth.currentUser.uid;
-  if (!uid) throw new Error("Your session has ended. Log in again.");
-  const clean = cleanBs(x);
-  await setDoc(doc(db, ...SET), {
-    ...clean, updatedAt: new Date().toISOString(), updatedBy: String((staff && staff.name) || "").slice(0, 120), updatedByUid: uid,
-  });
-  cache = clean;
-  return clean;
-}
-
 /* ===================== The sheet ===================== */
 
-// 7 columns, so Prov and Fee line up in every section
-const COLS = "<colgroup>" + [23, 8, 16, 12, 8, 8, 25].map((w) => `<col style="width:${w}%">`).join("") + "</colgroup>";
+// 7 columns, measured from the clinic's original sheet, so every section lines up
+const COLS = "<colgroup>" + [23.5, 7.5, 18.9, 10.8, 6.8, 8.8, 23.7]
+  .map((w) => `<col style="width:${w}%">`).join("") + "</colgroup>";
+const POPPINS = "https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap";
 
 function css(s) {
   const f = s.fontSize;
+  const font = s.font === "arial" ? "Arial, Helvetica, sans-serif" : "'Poppins', Arial, Helvetica, sans-serif";
   return `
-  @page { size: A4 portrait; margin: 9mm; }
+  @page { size: A4 portrait; margin: 0; }
   * { box-sizing: border-box; }
-  body { margin: 0; font-family: Arial, Helvetica, sans-serif; color: #000; }
-  .bs-page { font-size: ${f}pt; break-after: page; page-break-after: always; }
+  html, body { margin: 0; padding: 0; }
+  body { font-family: ${font}; color: #000; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .bs-page { width: 210mm; min-height: 297mm; padding: 5mm 6mm; font-size: ${f}pt; line-height: 1.2;
+    break-after: page; page-break-after: always; }
   .bs-page:last-child { break-after: auto; page-break-after: auto; }
-  .bs-note { font-size: ${f - 2.5}pt; font-weight: bold; }
+  .bs-note { font-size: ${f - 3}pt; font-weight: 700; line-height: 1.1; }
   .bs-head { display: flex; justify-content: space-between; align-items: baseline; gap: 4mm;
-    font-weight: bold; font-size: ${f + 4}pt; margin: 0.5mm 0 1mm; }
+    font-weight: 700; font-size: ${f + 3}pt; line-height: 1.15; margin: 0 0 0.3mm; }
   table.bs { width: 100%; border-collapse: collapse; table-layout: fixed; }
-  .bs td, .bs th { border: 1px solid #000; padding: 0.8mm 1.5mm; vertical-align: top; overflow-wrap: anywhere; }
-  .bs th { font-weight: bold; text-align: center; }
-  .bs tr.r td { height: 6.2mm; }
-  .bs .c { text-align: center; vertical-align: middle; }
-  .bs .nw { white-space: nowrap; font-size: ${f - 1}pt; padding-left: 0.5mm; padding-right: 0.5mm; }
-  .bs .sm { font-size: ${f - 1.5}pt; }
-  .bs .tiny { font-size: ${f - 3}pt; }
-  .bs .lab { text-align: right; font-weight: bold; vertical-align: bottom; }
-  .bs .pay { font-size: ${f - 2.5}pt; font-weight: bold; vertical-align: bottom; }
-  table.bs.nx { margin-top: 2mm; }
-  .bs.nx tr.r td { height: 15mm; }
-  .bs-ticks { margin-top: 3mm; font-weight: bold; font-size: ${f - 0.5}pt; line-height: 2; }
-  .bs-ticks i { display: inline-block; width: 3mm; height: 3mm; border: 1px solid #000; margin-right: 1.5mm; vertical-align: -0.3mm; }
-  .bs-foot { margin-top: 1mm; font-weight: bold; font-size: ${f - 1}pt; }
-  .bs-pg { margin-top: 1mm; text-align: right; font-size: ${Math.max(6, f - 3)}pt; color: #64748b; }
+  .bs td, .bs th { border: 0.75pt solid #000; padding: 0.4mm 1mm; vertical-align: middle;
+    overflow-wrap: break-word; word-break: normal; }
+  .bs th { font-weight: 700; text-align: center; font-size: ${f}pt; line-height: 1.1; }
+  .bs th.nw { white-space: nowrap; font-size: ${f - 1}pt; padding-left: 0.3mm; padding-right: 0.3mm; }
+  .bs tr.r td { height: 7mm; }
+  .bs tr.p td { height: 5.2mm; }
+  .bs tr.o td { height: 7.5mm; }
+  .bs tr.y td { height: 5.6mm; }
+  .bs .c { text-align: center; }
+  .bs .notes { vertical-align: top; text-align: left; font-size: ${f - 0.5}pt; }
+  .bs .prod { text-align: center; font-size: ${f - 1.5}pt; font-weight: 600; line-height: 1.1; }
+  .bs .st { text-align: center; font-size: ${f - 2}pt; line-height: 1.1; }
+  .bs .side { vertical-align: top; font-size: ${f - 3.5}pt; line-height: 1.2; }
+  .bs .owe { text-align: right; vertical-align: bottom; font-weight: 700; font-size: ${f - 0.5}pt; }
+  .bs .lab { text-align: right; vertical-align: bottom; font-weight: 700; font-size: ${f - 1.5}pt; }
+  .bs .dol { vertical-align: top; font-weight: 700; font-size: ${f - 2.5}pt; }
+  .bs .pay { vertical-align: bottom; font-weight: 700; font-size: ${f - 2.5}pt; word-spacing: 3.5mm; }
+  .bs .pref { font-weight: 700; font-size: ${f - 2.5}pt; padding-top: 0.2mm; padding-bottom: 0.2mm; }
+  .bs .who { font-size: ${f - 2}pt; line-height: 1.1; }
+  table.bs.nx { margin-top: -0.75pt; }
+  .bs.nx tr.n td { height: 20mm; }
+  .bs-ticks { margin-top: 3mm; font-weight: 700; font-size: ${f - 1.5}pt; line-height: 1.9; }
+  .bs-ticks i { display: inline-block; width: 2.6mm; height: 2.6mm; border: 0.75pt solid #000;
+    margin-right: 1.5mm; vertical-align: -0.2mm; }
+  .bs-foot { margin-top: 0.5mm; font-weight: 700; font-size: ${f - 1.5}pt; }
   @media screen {
     body { background: #e2e8f0; padding: 12px; }
-    .bs-page { width: 210mm; min-height: 297mm; margin: 0 auto 12px; padding: 9mm; background: #fff;
-      box-shadow: 0 4px 18px rgba(15, 23, 42, .15); }
+    .bs-page { margin: 0 auto 12px; background: #fff; box-shadow: 0 4px 18px rgba(15, 23, 42, .15); }
   }
   body.cap { background: #fff; padding: 0; }
   body.cap .bs-page { margin: 0; box-shadow: none; }`;
 }
 
-// d: { patientName, whenText, notes, services[], ssp: { dateText, items[{ name, ampm, status }] } | null, next[], tag }
+// d: { patientName, whenText, notes, services[], ssp: { dateText, items[{ name, ampm, status }] } | null, next[] }
 function sheetHtml(d, s) {
   const svcN = Math.max(s.serviceRows, d.services.length);
   let t = `<tr><th>APPT NOTES</th><th colspan="2">SERVICES DONE TODAY</th><th>PKG #</th><th>PROV</th><th>FEE</th>` +
     `<th>${esc(s.buyingLabel)}</th></tr>`;
   for (let i = 0; i < svcN; i++) {
-    t += `<tr class="r">${i === 0 ? `<td rowspan="${svcN}" class="sm">${esc(d.notes).replace(/\n/g, "<br>")}</td>` : ""}` +
+    t += `<tr class="r">${i === 0 ? `<td rowspan="${svcN}" class="notes">${esc(d.notes).replace(/\n/g, "<br>")}</td>` : ""}` +
       `<td colspan="2" class="c">${esc(d.services[i] || "")}</td><td></td><td></td><td></td><td></td></tr>`;
   }
 
-  const owing = `<td colspan="5" class="lab">Owing (To Pay today):</td><td></td>`;
+  const owing = ["o", `<td colspan="5" class="owe">Owing (To Pay today):</td><td></td>`];
   if (s.showSsp) {
     const items = d.ssp ? d.ssp.items : [];
     const rows = Math.max(1, items.length + s.sspRows);
     t += `<tr><th>${esc(d.ssp ? `SSP ${d.ssp.dateText}` : "SSP: none on file")}</th><th class="nw">AM/PM</th>` +
-      `<th colspan="2">Purchase Status</th><th>Prov</th><th>Fee</th><td rowspan="${rows + 2}" class="tiny">${esc(s.sideLabel)}</td></tr>`;
+      `<th colspan="2">Purchase Status</th><th>Prov</th><th>Fee</th>` +
+      `<td rowspan="${rows + 2}" class="side">${esc(s.sideLabel)}</td></tr>`;
     for (let i = 0; i < rows; i++) {
       const it = items[i];
-      t += `<tr class="r"><td class="c sm">${esc(it ? it.name : "")}</td><td class="c tiny">${esc(it && s.fillAmPm ? it.ampm : "")}</td>` +
-        `<td colspan="2" class="c tiny">${esc(it ? it.status : "")}</td><td></td><td></td></tr>`;
+      t += `<tr class="p"><td class="prod">${esc(it ? it.name : "")}</td><td class="st">${esc(it && s.fillAmPm ? it.ampm : "")}</td>` +
+        `<td colspan="2" class="st">${esc(it ? it.status : "")}</td><td></td><td></td></tr>`;
     }
-    t += `<tr class="r">${owing}</tr>`;
+    t += `<tr class="${owing[0]}">${owing[1]}</tr>`;
   }
 
   if (s.showPayment) {
-    const labels = ["GRAND TOTAL:", "USE ACCOUNT'S CREDIT (minus from total amount to pay):", "TOTAL AMOUNT TO PAY:"];
-    const n = (s.showSsp ? 0 : 1) + labels.length + 2;
-    const side = `<td rowspan="${n}" class="tiny"><b>${esc(s.consumablesLabel)}</b></td>`;
-    const rows = [];
-    if (!s.showSsp) rows.push(owing);
-    labels.forEach((l) => rows.push(`<td colspan="4" class="lab sm">${esc(l)}</td><td colspan="2" class="tiny">$</td>`));
-    rows.push(`<td colspan="4" class="pay">${esc(s.payLine)}</td><td colspan="2" class="tiny">$</td>`);
-    rows.push(`<td colspan="4" class="pay">${esc(s.payLine)}</td><td colspan="2" class="tiny">$</td>`);
-    t += rows.map((r, i) => `<tr class="r">${r}${i === 0 ? side : ""}</tr>`).join("");
-    t += `<tr><td colspan="7" class="pay">PREFERRED TIME/DAY:</td></tr>`;
+    const rows = s.showSsp ? [] : [owing];
+    ["GRAND TOTAL:", "USE ACCOUNT'S CREDIT (minus from total amount to pay):", "TOTAL AMOUNT TO PAY:"]
+      .forEach((l) => rows.push(["y", `<td colspan="4" class="lab">${esc(l)}</td><td colspan="2" class="dol">$</td>`]));
+    for (let i = 0; i < 2; i++) rows.push(["y", `<td colspan="4" class="pay">${esc(s.payLine)}</td><td colspan="2" class="dol">$</td>`]);
+    const side = `<td rowspan="${rows.length}" class="side"><b>${esc(s.consumablesLabel)}</b></td>`;
+    t += rows.map(([cls, r], i) => `<tr class="${cls}">${r}${i === 0 ? side : ""}</tr>`).join("");
+    t += `<tr><td colspan="7" class="pref">PREFERRED TIME/DAY:</td></tr>`;
   }
 
   let next = "";
@@ -155,8 +150,8 @@ function sheetHtml(d, s) {
     const rows = Math.max(s.nextRows, 1 + d.next.length);
     for (let i = 0; i < rows; i++) {
       const x = i === 0 ? null : d.next[i - 1];   // the first row is always left blank
-      next += `<tr class="r"><td class="c">${esc(x ? x.when : "")}</td><td colspan="3" class="c">${esc(x ? x.service : "")}</td>` +
-        `<td class="c sm">${esc(x ? x.staff : "")}</td><td></td><td></td></tr>`;
+      next += `<tr class="n"><td class="c">${esc(x ? x.when : "")}</td><td colspan="3" class="c">${esc(x ? x.service : "")}</td>` +
+        `<td class="c who">${esc(x ? x.staff : "")}</td><td></td><td></td></tr>`;
     }
     next += "</table>";
   }
@@ -167,15 +162,15 @@ function sheetHtml(d, s) {
     <div class="bs-note">${esc(s.headerNote)}</div>
     <div class="bs-head"><span>${esc(d.patientName)}</span><span>${esc(d.whenText)}</span></div>
     <table class="bs">${COLS}${t}</table>${next}${ticks}
-    <div class="bs-foot">PATIENT NAME: ${esc(String(d.patientName || "").toUpperCase())}</div>
-    ${d.tag ? `<div class="bs-pg">${esc(d.tag)}</div>` : ""}</div>`;
+    <div class="bs-foot">PATIENT NAME: ${esc(String(d.patientName || "").toUpperCase())}</div></div>`;
 }
 
 export function buildBillingSheetsHtml(list, s, capture = false) {
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Billing sheets</title><style>${css(s)}</style></head>` +
+  const font = s.font === "arial" ? "" :
+    `<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="${POPPINS}">`;
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Billing sheets</title>${font}<style>${css(s)}</style></head>` +
     `<body${capture ? ' class="cap"' : ""}>${list.map((d) => sheetHtml(d, s)).join("")}</body></html>`;
 }
-
 /* ===================== The data ===================== */
 
 const CANCELLED = /cancel|no.?show|\bdna\b|did not attend/i;
@@ -334,16 +329,20 @@ async function makePdf(list, s, onPage) {
   try {
     await new Promise((res) => { f.onload = res; f.srcdoc = buildBillingSheetsHtml(list, s, true); });
     const d = f.contentDocument;
+    if (s.font !== "arial" && d.fonts && d.fonts.load) {
+      await Promise.all(["400", "600", "700"].map((w) => d.fonts.load(`${w} 10px Poppins`).catch(() => null)));
+    }
     if (d.fonts && d.fonts.ready) await d.fonts.ready;
     const pages = [...d.querySelectorAll(".bs-page")];
     const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait", compress: true });
     for (let i = 0; i < pages.length; i++) {
       const c = await html2canvas(pages[i], { scale: 1.6, backgroundColor: "#ffffff", logging: false, windowWidth: 820 });
+      // The page's own 5–6 mm margins are in the picture, so it fills the A4 page (shrunk only if the sheet ran long)
       const ratio = c.height / c.width;
       let w = 210, h = 210 * ratio;
       if (h > 297) { h = 297; w = 297 / ratio; }
       if (i) pdf.addPage("a4", "portrait");
-      pdf.addImage(c.toDataURL("image/jpeg", 0.85), "JPEG", (210 - w) / 2, 0, w, h, undefined, "FAST");
+      pdf.addImage(c.toDataURL("image/jpeg", 0.88), "JPEG", (210 - w) / 2, 0, w, h, undefined, "FAST");
       c.width = 0; c.height = 0;   // frees the memory (iPads run out on long days)
       if (onPage) onPage(i + 1, pages.length);
     }
@@ -480,15 +479,8 @@ export function openBillingSheets({ dateKey, appts, staff = null }) {
           msg.textContent = `Getting details ${++done} of ${chosen.length}…`;
         }
       }));
-      // "Dr Teh · 2 of 5" in the corner of each sheet
       const counts = {};
       chosen.forEach((v) => { counts[staffName(v)] = (counts[staffName(v)] || 0) + 1; });
-      const seen = {};
-      out.forEach((d, i) => {
-        const k = staffName(chosen[i]);
-        seen[k] = (seen[k] || 0) + 1;
-        d.tag = `${k} · ${seen[k]} of ${counts[k]}`;
-      });
 
       const pdf = await makePdf(out, s, (n, t) => { msg.textContent = `Making page ${n} of ${t}…`; });
       if (result) URL.revokeObjectURL(result.url);
@@ -623,7 +615,9 @@ export async function openBillingSheetDesign({ staff = null } = {}) {
     <div class="bs-design-body">
       <form class="bs-design-form" novalidate>
         ${text("headerNote", "Line at the very top", 150)}
-        <label class="f"><span>Text size</span><select data-k="fontSize">${[7, 8, 9, 10, 11, 12].map((n) => `<option value="${n}">${n} pt</option>`).join("")}</select></label>
+        <label class="f"><span>Font</span><select data-k="font">
+          <option value="poppins">Poppins (like the original sheet)</option><option value="arial">Arial</option></select></label>
+        <label class="f"><span>Text size</span><select data-k="fontSize">${[7, 8, 9, 10, 11, 12].map((n) => `<option value="${n}">${n} pt${n === 8 ? " (original)" : ""}</option>`).join("")}</select></label>
         <h4>Rows</h4>
         ${num("serviceRows", "Services done today (at least)", 1, 12)}
         ${num("sspRows", "Blank rows under the Skin Script", 0, 12)}

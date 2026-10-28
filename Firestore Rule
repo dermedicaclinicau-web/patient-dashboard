@@ -716,7 +716,7 @@ match /inv_count_drafts/{id} {
     match /form_settings/billing_sheet {
       allow read: if isStaff();
       allow write: if can('forms.build')
-        && request.resource.data.keys().hasOnly(['headerNote', 'fontSize', 'serviceRows', 'sspRows', 'nextRows',
+        && request.resource.data.keys().hasOnly(['headerNote', 'font', 'fontSize', 'serviceRows', 'sspRows', 'nextRows',
              'showSsp', 'fillAmPm', 'showPayment', 'showNext', 'showTicks',
              'buyingLabel', 'sideLabel', 'consumablesLabel', 'payLine', 'ticks', 'updatedAt', 'updatedBy', 'updatedByUid'])
         && request.resource.data.fontSize is int && request.resource.data.fontSize >= 7 && request.resource.data.fontSize <= 12
