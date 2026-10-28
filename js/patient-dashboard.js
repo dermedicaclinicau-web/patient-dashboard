@@ -235,7 +235,12 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     const staffTaskBtn = t.closest("[data-action='staff-task']");
     if (staffTaskBtn) { openStaffTaskMenu(staffTaskBtn); return; }
     if (t.closest("[data-action='sms']")) { openSmsDialog({ patient }); return; }
-    if (t.closest("[data-action='create-ssp']")) { location.hash = `#/ssp/new/${encodeURIComponent(patient.id)}`; return; }
+    if (t.closest("[data-action='create-ssp']")) {
+      // Its own tab, so the patient page stays open
+      const hash = `#/ssp/new/${encodeURIComponent(patient.id)}`;
+      if (!window.open(`${location.href.split("#")[0]}${hash}`, "_blank")) location.hash = hash;   // pop-ups blocked: same tab
+      return;
+    }
     const openT = t.closest("[data-action='task-open']");
     if (openT && !t.closest("a")) { openTask(openT.dataset.id); return; }
     const doneBtn = t.closest("[data-action='task-done']");
