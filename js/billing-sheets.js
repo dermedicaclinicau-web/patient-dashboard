@@ -18,7 +18,29 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
 const SET = ["form_settings", "billing_sheet"];
 
 /* ===================== Design settings ===================== */
-
+// Text sizes per part of the sheet: [key, label in Design, size compared with the main Text size]
+// A part with no size of its own follows the main Text size (e.g. products: 8 pt − 1.5 = 6.5 pt).
+const SIZE_PARTS = [
+  ["name", "Patient name and date", 3],
+  ["note", "Line at the very top", -3],
+  ["heads", "Column headings", 0],
+  ["notes", "Appt notes", -0.5],
+  ["services", "Services done today", 0],
+  ["products", "Skin Script products", -1.5],
+  ["status", "AM/PM and Purchase Status", -2],
+  ["owing", "Owing (To Pay today)", -0.5],
+  ["totals", "Grand total, credit and amount to pay", -1.5],
+  ["pay", "Payment and Preferred time lines", -2.5],
+  ["side", "Side boxes (LED…, Consumables)", -3.5],
+  ["next", "Next appointments", 0],
+  ["nextSmall", "Next appt Prov and Dur", -2],
+  ["ticks", "Tick boxes and patient name", -1.5],
+];
+const autoSize = (s, k) => {
+  const p = SIZE_PARTS.find((x) => x[0] === k);
+  return Math.max(4, s.fontSize + (p ? p[2] : 0));
+};
+const sz = (s, k) => (s.sizes && s.sizes[k] != null ? s.sizes[k] : autoSize(s, k));
 export const BS_DEFAULTS = {
   headerNote: "!SCAN THIS INTO BILLING SHEET FOLDER AT THE END OF DAY",
   font: "poppins",     // "poppins" (like the original sheet) or "arial"
@@ -32,6 +54,7 @@ export const BS_DEFAULTS = {
   consumablesLabel: "CONSUMABLE USED:",
   payLine: "PINPYMNT ZIP EFT CASH TYRO REF#:",
   ticks: ["TO REBOOK", "SEND REBOOKED SCHEDULE"],
+  sizes: {},           // { products: 7.5, … } only for parts given their own size
 };
 
 const int = (v, lo, hi, d) => { const n = parseInt(v, 10); return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : d; };
@@ -52,7 +75,20 @@ export function cleanBs(x = {}) {
     buyingLabel: pick("buyingLabel", 60), sideLabel: pick("sideLabel", 80),
     consumablesLabel: pick("consumablesLabel", 60), payLine: pick("payLine", 120),
     ticks: (Array.isArray(x.ticks) ? x.ticks : D.ticks).map((t) => line(t, 60)).filter(Boolean).slice(0, 6),
+    sizes: cleanSizes(x.sizes),
   };
+}
+
+// 4 to 16 pt, in half points. Blank = follows the main Text size.
+function cleanSizes(raw) {
+  const out = {};
+  if (!raw || typeof raw !== "object") return out;
+  SIZE_PARTS.forEach(([k]) => {
+    if (raw[k] === "" || raw[k] == null) return;
+    const n = parseFloat(raw[k]);
+    if (Number.isFinite(n)) out[k] = Math.min(16, Math.max(4, Math.round(n * 2) / 2));
+  });
+  return out;
 }
 
 let cache = null;
@@ -83,6 +119,7 @@ const POPPINS = "https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;7
 
 function css(s) {
   const f = s.fontSize;
+  const z = (k) => `${sz(s, k)}pt`;
   const font = s.font === "arial" ? "Arial, Helvetica, sans-serif" : "'Poppins', Arial, Helvetica, sans-serif";
   return `
   @page { size: A4 portrait; margin: 0; }
@@ -92,35 +129,37 @@ function css(s) {
   .bs-page { width: 210mm; min-height: 297mm; padding: 5mm 6mm; font-size: ${f}pt; line-height: 1.2;
     break-after: page; page-break-after: always; }
   .bs-page:last-child { break-after: auto; page-break-after: auto; }
-  .bs-note { font-size: ${f - 3}pt; font-weight: 700; line-height: 1.1; }
+  .bs-note { font-size: ${z("note")}; font-weight: 700; line-height: 1.1; }
   .bs-head { display: flex; justify-content: space-between; align-items: baseline; gap: 4mm;
-    font-weight: 700; font-size: ${f + 3}pt; line-height: 1.15; margin: 0 0 0.3mm; }
+    font-weight: 700; font-size: ${z("name")}; line-height: 1.15; margin: 0 0 0.3mm; }
   table.bs { width: 100%; border-collapse: collapse; table-layout: fixed; }
   .bs td, .bs th { border: 0.75pt solid #000; padding: 0.4mm 1mm; vertical-align: middle;
     overflow-wrap: break-word; word-break: normal; }
-  .bs th { font-weight: 700; text-align: center; font-size: ${f}pt; line-height: 1.1; white-space: nowrap; }
-  .bs th.nw { white-space: nowrap; font-size: ${f - 1}pt; padding-left: 0.3mm; padding-right: 0.3mm; }
+  .bs th { font-weight: 700; text-align: center; font-size: ${z("heads")}; line-height: 1.1; white-space: nowrap; }
+  .bs th.nw { font-size: ${Math.max(4, sz(s, "heads") - 1)}pt; padding-left: 0.3mm; padding-right: 0.3mm; }
   .bs tr.r td { height: 7mm; }
   .bs tr.p td { height: 5.2mm; }
   .bs tr.o td { height: 7.5mm; }
   .bs tr.y td { height: 5.6mm; }
   .bs .c { text-align: center; }
-  .bs .notes { vertical-align: top; text-align: left; font-size: ${f - 0.5}pt; }
-  .bs .prod { text-align: center; font-size: ${f - 1.5}pt; font-weight: 600; line-height: 1.1; }
-  .bs .st { text-align: center; font-size: ${f - 2}pt; line-height: 1.1; }
-  .bs .side { vertical-align: top; font-size: ${f - 3.5}pt; line-height: 1.2; }
-  .bs .owe { text-align: right; vertical-align: bottom; font-weight: 700; font-size: ${f - 0.5}pt; }
-  .bs .lab { text-align: right; vertical-align: bottom; font-weight: 700; font-size: ${f - 1.5}pt; }
-  .bs .dol { vertical-align: top; font-weight: 700; font-size: ${f - 2.5}pt; }
-  .bs .pay { vertical-align: bottom; font-weight: 700; font-size: ${f - 2.5}pt; word-spacing: 3.5mm; }
-  .bs .pref { font-weight: 700; font-size: ${f - 2.5}pt; padding-top: 0.2mm; padding-bottom: 0.2mm; }
-  .bs .who { font-size: ${f - 2}pt; line-height: 1.1; }
+  .bs .svc { font-size: ${z("services")}; }
+  .bs .notes { vertical-align: top; text-align: left; font-size: ${z("notes")}; }
+  .bs .prod { text-align: center; font-size: ${z("products")}; font-weight: 600; line-height: 1.1; }
+  .bs .st { text-align: center; font-size: ${z("status")}; line-height: 1.1; }
+  .bs .side { vertical-align: top; font-size: ${z("side")}; line-height: 1.2; }
+  .bs .owe { text-align: right; vertical-align: bottom; font-weight: 700; font-size: ${z("owing")}; }
+  .bs .lab { text-align: right; vertical-align: bottom; font-weight: 700; font-size: ${z("totals")}; }
+  .bs .dol { vertical-align: top; font-weight: 700; font-size: ${z("pay")}; }
+  .bs .pay { vertical-align: bottom; font-weight: 700; font-size: ${z("pay")}; word-spacing: 3.5mm; }
+  .bs .pref { font-weight: 700; font-size: ${z("pay")}; padding-top: 0.2mm; padding-bottom: 0.2mm; }
+  .bs .nxt { font-size: ${z("next")}; }
+  .bs .who { font-size: ${z("nextSmall")}; line-height: 1.1; }
   table.bs.nx { margin-top: -0.75pt; }
   .bs.nx tr.n td { height: 20mm; }
-  .bs-ticks { margin-top: 3mm; font-weight: 700; font-size: ${f - 1.5}pt; line-height: 1.9; }
+  .bs-ticks { margin-top: 3mm; font-weight: 700; font-size: ${z("ticks")}; line-height: 1.9; }
   .bs-ticks i { display: inline-block; width: 2.6mm; height: 2.6mm; border: 0.75pt solid #000;
     margin-right: 1.5mm; vertical-align: -0.2mm; }
-  .bs-foot { margin-top: 0.5mm; font-weight: 700; font-size: ${f - 1.5}pt; }
+  .bs-foot { margin-top: 0.5mm; font-weight: 700; font-size: ${z("ticks")}; }
   @media screen {
     body { background: #e2e8f0; padding: 12px; }
     .bs-page { margin: 0 auto 12px; background: #fff; box-shadow: 0 4px 18px rgba(15, 23, 42, .15); }
@@ -137,7 +176,7 @@ function sheetHtml(d, s) {
     `<th>${esc(s.buyingLabel)}</th></tr>`;
   for (let i = 0; i < svcN; i++) {
     t += `<tr class="r">${i === 0 ? `<td rowspan="${svcN}" class="notes">${esc(d.notes).replace(/\n/g, "<br>")}</td>` : ""}` +
-      `<td colspan="2" class="c">${esc(d.services[i] || "")}</td><td></td><td></td><td></td><td></td></tr>`;
+      `<td colspan="2" class="c svc">${esc(d.services[i] || "")}</td><td></td><td></td><td></td><td></td></tr>`;
   }
 
   const owing = ["o", `<td colspan="5" class="owe">Owing (To Pay today):</td><td></td>`];
@@ -172,8 +211,8 @@ function sheetHtml(d, s) {
     const rows = Math.max(s.nextRows, 1 + d.next.length);
     for (let i = 0; i < rows; i++) {
       const x = i === 0 ? null : d.next[i - 1];   // the first row is always left blank
-      next += `<tr class="n"><td class="c">${x ? esc(x.when).replace(/\n/g, "<br>") : ""}</td>` +
-        `<td colspan="3" class="c">${esc(x ? x.service : "")}</td><td class="c who">${esc(x ? x.staff : "")}</td>` +
+      next += `<tr class="n"><td class="c nxt">${x ? esc(x.when).replace(/\n/g, "<br>") : ""}</td>` +
+        `<td colspan="3" class="c nxt">${esc(x ? x.service : "")}</td><td class="c who">${esc(x ? x.staff : "")}</td>` +
         `<td class="c who">${esc(x ? x.dur || "" : "")}</td><td></td></tr>`;
     }
     next += "</table>";
@@ -840,7 +879,7 @@ export function openBillingSheets({ dateKey, appts, staff = null }) {
     }
   }
 
-  
+
   async function loadStaff() {
     if (staffLoaded) return;
     const box = q('[data-role="staff"]');
@@ -970,6 +1009,12 @@ export async function openBillingSheetDesign({ staff = null } = {}) {
         <label class="f"><span>Font</span><select data-k="font">
           <option value="poppins">Poppins (like the original sheet)</option><option value="arial">Arial</option></select></label>
         <label class="f"><span>Text size</span><select data-k="fontSize">${[7, 8, 9, 10, 11, 12].map((n) => `<option value="${n}">${n} pt${n === 8 ? " (original)" : ""}</option>`).join("")}</select></label>
+        <h4>Text sizes</h4>
+        <p class="fe-note">Leave a box blank to follow the Text size above. The grey number is the size it uses now.</p>
+        ${SIZE_PARTS.map(([k, label]) => `
+          <label class="f bs-size"><span>${label}</span>
+            <span class="bs-size-in"><input data-size="${k}" type="number" min="4" max="16" step="0.5" inputmode="decimal" /><em>pt</em></span>
+          </label>`).join("")}
         <h4>Rows</h4>
         ${num("serviceRows", "Services done today (at least)", 1, 12)}
         ${num("sspRows", "Blank rows under the Skin Script", 0, 12)}
@@ -1004,23 +1049,34 @@ export async function openBillingSheetDesign({ staff = null } = {}) {
   const err = dlg.querySelector(".lh-error");
   let timer = null;
 
-  const fill = () => form.querySelectorAll("[data-k]").forEach((el) => {
-    const v = st[el.dataset.k];
-    if (el.type === "checkbox") el.checked = v !== false;
-    else if (el.dataset.k === "ticks") el.value = (v || []).join("\n");
-    else el.value = v ?? "";
+  const hints = () => form.querySelectorAll("[data-size]").forEach((el) => {
+    el.placeholder = `${autoSize(st, el.dataset.size)} (auto)`;
   });
+  const fill = () => {
+    form.querySelectorAll("[data-k]").forEach((el) => {
+      const v = st[el.dataset.k];
+      if (el.type === "checkbox") el.checked = v !== false;
+      else if (el.dataset.k === "ticks") el.value = (v || []).join("\n");
+      else el.value = v ?? "";
+    });
+    form.querySelectorAll("[data-size]").forEach((el) => {
+      const v = st.sizes && st.sizes[el.dataset.size];
+      el.value = v != null ? String(v) : "";
+    });
+    hints();
+  };
   const read = () => {
-    const x = {};
+    const x = { sizes: {} };
     form.querySelectorAll("[data-k]").forEach((el) => {
       x[el.dataset.k] = el.type === "checkbox" ? el.checked : el.dataset.k === "ticks" ? el.value.split(/\n+/) : el.value;
     });
+    form.querySelectorAll("[data-size]").forEach((el) => { if (el.value.trim() !== "") x.sizes[el.dataset.size] = el.value; });
     return cleanBs(x);
   };
   const draw = () => { frame.srcdoc = buildBillingSheetsHtml([SAMPLE], st); };
   fill();
   draw();
-  form.addEventListener("input", () => { st = read(); clearTimeout(timer); timer = setTimeout(draw, 200); });
+  form.addEventListener("input", () => { st = read(); hints(); clearTimeout(timer); timer = setTimeout(draw, 200); });
   form.addEventListener("submit", (e) => e.preventDefault());
   if (!canSave) form.querySelectorAll("input, select, textarea").forEach((el) => { el.disabled = true; });
 

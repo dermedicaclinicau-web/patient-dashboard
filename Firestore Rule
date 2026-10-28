@@ -718,7 +718,9 @@ match /inv_count_drafts/{id} {
       allow write: if can('forms.build')
         && request.resource.data.keys().hasOnly(['headerNote', 'font', 'fontSize', 'serviceRows', 'sspRows', 'nextRows',
              'showSsp', 'fillAmPm', 'showPayment', 'showNext', 'showTicks',
-             'buyingLabel', 'sideLabel', 'consumablesLabel', 'payLine', 'ticks', 'updatedAt', 'updatedBy', 'updatedByUid'])
+             'buyingLabel', 'sideLabel', 'buyingLabel', 'consumablesLabel', 'payLine', 'ticks', 'sizes', 'updatedAt', 'updatedBy', 'updatedByUid'])
+        && request.resource.data.get('sizes', {}) is map
+        && request.resource.data.get('sizes', {}).size() <= 20
         && request.resource.data.fontSize is int && request.resource.data.fontSize >= 7 && request.resource.data.fontSize <= 12
         && request.resource.data.serviceRows is int && request.resource.data.serviceRows <= 12
         && request.resource.data.sspRows is int && request.resource.data.sspRows <= 12

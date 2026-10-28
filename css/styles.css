@@ -9482,3 +9482,8 @@ dialog.lh-dialog.bs-dlg.is-wide { width: min(1240px, calc(100vw - 2rem)); }
   .bs-review { grid-template-columns: 1fr; }
   .bs-rlist { max-height: 170px; }
 }
+
+.bs-design-form .bs-size { grid-template-columns: 1fr 96px; align-items: center; }
+.bs-size-in { display: flex; align-items: center; gap: .35rem; }
+.bs-size-in input { width: 100%; }
+.bs-size-in em { font-size: .75rem; font-style: normal; font-weight: 400; color: var(--muted); }
