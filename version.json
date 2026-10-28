@@ -53,6 +53,7 @@
                   "./js/form-submissions.js",
                   "./js/form-tags.js",
                   "./js/form-templates.js",
+                  "./js/fresh-reload.js",
                   "./js/history-view.js",
                   "./js/image-bank-api.js",
                   "./js/image-bank.js",
@@ -196,6 +197,6 @@
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261027-220446",
-    "v":  "20261027-220446"
+    "version":  "20261028-083123",
+    "v":  "20261028-083123"
 }

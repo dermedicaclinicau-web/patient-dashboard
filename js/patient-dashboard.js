@@ -48,11 +48,10 @@ const DOC_ACTIONS = [
   ["Treatment record", "treatment"],
   ["Prescription", "rx"],
   ["Skin script (SSP)", "ssp", "create-ssp"],
-  ["Summary", "summary"],
   ["General note", "note"],
   ["Personal note", "lock", "add-note"],
-  ["Add reminder", "bell", "add-reminder"],
-  ["Send Task to Staff", "staff", "staff-task"],
+  ["+ Reminder", "bell", "add-reminder"],
+  ["+ Staff Task", "staff", "staff-task"],
 ];
 
 // Order and look of the Pre-Consultation section.
