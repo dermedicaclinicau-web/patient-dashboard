@@ -216,7 +216,16 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   let transcriptRecords = [];  // consultations, newest first (for the master plan)
   let planView = null;         // the Treatment Plan overview
   let recordsView = null;      // Treatment Records + Consent Records
-
+  // Skin script (SSP): the tile and the Skincare section's "Create new SSP" open the builder in a new tab.
+  // Caught first (capture phase), so no other click handler also opens it in this tab.
+  root.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-action='create-ssp']");
+    if (!b || !root.contains(b) || !patient) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const hash = `#/ssp/new/${encodeURIComponent(patient.id)}`;
+    if (!window.open(`${location.href.split("#")[0]}${hash}`, "_blank")) location.hash = hash;   // pop-ups blocked: same tab
+  }, true);
   root.addEventListener("click", (e) => {
     const t = e.target;
     // Buttons inside a section header must not also open/close that section
@@ -235,12 +244,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     const staffTaskBtn = t.closest("[data-action='staff-task']");
     if (staffTaskBtn) { openStaffTaskMenu(staffTaskBtn); return; }
     if (t.closest("[data-action='sms']")) { openSmsDialog({ patient }); return; }
-    if (t.closest("[data-action='create-ssp']")) {
-      // Its own tab, so the patient page stays open
-      const hash = `#/ssp/new/${encodeURIComponent(patient.id)}`;
-      if (!window.open(`${location.href.split("#")[0]}${hash}`, "_blank")) location.hash = hash;   // pop-ups blocked: same tab
-      return;
-    }
+
     const openT = t.closest("[data-action='task-open']");
     if (openT && !t.closest("a")) { openTask(openT.dataset.id); return; }
     const doneBtn = t.closest("[data-action='task-done']");
