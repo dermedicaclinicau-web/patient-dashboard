@@ -52,7 +52,7 @@ const DOC_ACTIONS = [
   ["General note", "note"],
   ["Personal note", "lock", "add-note"],
   ["Add reminder", "bell", "add-reminder"],
-  ["Staff task", "staff", "staff-task"],
+  ["Send Task to Staff", "staff", "staff-task"],
 ];
 
 // Order and look of the Pre-Consultation section.
