@@ -714,7 +714,8 @@ match /inv_count_drafts/{id} {
     }
 
     // Completed forms. Saved once and never edited or deleted (clinical records).
-    // The one exception: staff who can move records may fix which card and treatment a form is listed under.
+    // Exceptions, both for staff who can move records and both logged: fixing which card and treatment a form
+    // is listed under (Type & category), and correcting its date (Edit date). Answers and signatures stay locked.
     // The send log ('deliveries') is added by Apps Script only, never by the browser.
     match /form_submissions/{subId} {
       allow read: if isStaff();

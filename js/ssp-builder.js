@@ -9,6 +9,7 @@ import { openSspPreview } from "./ssp-send.js";
 import { getSspSettings, openSspSettings, SSP_DEFAULTS } from "./ssp-settings.js";
 import { takeSspIntent, updateSspRecord, describeSspChanges } from "./ssp-edit.js";
 import { callApi } from "./appointments.js";
+import { sspShelfStock } from "./ssp-stock.js";
 
 const DAYS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -60,6 +61,37 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
 
   const VALID_MONTHS = settings.validMonths || 3;
   let savedRecord = null; // once saved (from Save or from the preview)
+  let stock = null;       // Skin Script product id → its Shelf stock in Inventory (null until loaded)
+
+  // "Shelf · 4 in stock (last counted Oct 27, 2026)"
+  function stockHtml(id) {
+    if (!stock) return "";
+    const s = stock.get(id);
+    if (!s) {
+      return isAdmin
+        ? '<span class="ssp-stock is-none" title="No Inventory product has this name and size">Not linked to Inventory stock</span>'
+        : "";
+    }
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s.countedKey);
+    const counted = m
+      ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+      : "";
+    const tone = s.shelf <= 0 ? " is-out" : s.reorder !== null && s.reorder !== undefined && s.shelf <= s.reorder ? " is-low" : "";
+    return `<span class="ssp-stock${tone}" title="${esc(`Inventory: ${s.name}`)}">Shelf · ${
+      s.shelf > 0 ? `${s.shelf} in stock` : "none in stock"}<em> (${counted ? `last counted ${esc(counted)}` : "not counted yet"})</em></span>`;
+  }
+
+  // Loads after the table is shown, so it never slows the builder down
+  async function loadStock() {
+    try {
+      stock = await sspShelfStock(products);
+    } catch (err) {
+      console.warn("Skin Script stock not loaded:", err);
+      return;   // no stock lines rather than wrong ones
+    }
+    if (!root.isConnected) return;
+    root.querySelectorAll("[data-stock]").forEach((el) => { el.innerHTML = stockHtml(el.dataset.stock); });
+  }
 
   /* ---------- State: one row per product per step ---------- */
   const rows = new Map(); // "STEP:productId" -> row
@@ -142,7 +174,8 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
     const ta = (f, v, label) => `${label ? `<span class="ssp-sublbl">${label}</span>` : ""}<textarea class="ssp-text" data-f="${f}" rows="2" aria-label="${label || "Instruction"} for ${esc(p.name)}">${esc(v)}</textarea>`;
     return `
       <div class="ssp-row${selected(r) ? " is-sel" : ""}" data-key="${esc(r.key)}" data-find="${esc((p.name + " " + p.size).toLowerCase())}">
-        <div class="ssp-prod"><strong>${esc(p.name)}</strong>${p.size ? `<small>${esc(p.size)}</small>` : ""}</div>
+        <div class="ssp-prod"><strong>${esc(p.name)}</strong>${p.size ? `<small>${esc(p.size)}</small>` : ""}
+          <span class="ssp-stock-slot" data-stock="${esc(p.id)}">${stockHtml(p.id)}</span></div>
         <div class="ssp-ins">
           <div class="ssp-ins-main">
             <div class="ssp-ins-texts">${r.split ? ta("amText", r.amText, "AM") + ta("pmText", r.pmText, "PM") : ta("text", r.text, "")}</div>
@@ -400,7 +433,7 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
         productMap = byId();
         ensureRows();
         rows.forEach((r) => { if (!r.edited) r.text = r.amText = r.pmText = baseText(r); });
-        if (root.isConnected) renderAll();
+        if (root.isConnected) { renderAll(); loadStock(); }
       } catch (err) { console.warn("Couldn't refresh products:", err); }
     });
     dlg.showModal();
@@ -574,6 +607,7 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
   }
   if (!root.isConnected) return;
   renderAll();
+  loadStock();
 
   if (!intent) {
     listSspRecords([patient.id, ...patientIds(patient)])

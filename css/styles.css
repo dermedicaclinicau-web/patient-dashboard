@@ -9405,3 +9405,11 @@ dialog.lh-dialog.rc-cat-dlg { width: min(460px, calc(100vw - 2rem)); }
 .rc-edit-f textarea { resize: vertical; }
 .rc-edit-err { margin: 0; color: #b91c1c; font-size: .82rem; }
 .rc-edit-err:empty { display: none; }
+
+/* Skin Script builder: Shelf stock under each product */
+.ssp-prod .ssp-stock-slot { display: block; }
+.ssp-prod .ssp-stock { display: block; margin-top: .35rem; font-size: .76rem; font-weight: 600; color: #047857; }
+.ssp-prod .ssp-stock em { font-style: normal; font-weight: 400; color: var(--muted); }
+.ssp-prod .ssp-stock.is-low { color: #b45309; }
+.ssp-prod .ssp-stock.is-out { color: #b91c1c; }
+.ssp-prod .ssp-stock.is-none { font-weight: 400; font-style: italic; color: var(--muted); }
