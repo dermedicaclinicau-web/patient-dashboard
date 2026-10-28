@@ -1,4 +1,5 @@
 // Tells open portals when a new version has been deployed (version.json, written by deploy.ps1).
+import { freshReload } from "./fresh-reload.js";
 const CHECK_EVERY = 5 * 60 * 1000;
 let loaded = null;     // the version this page started with
 let lastCheck = 0;
@@ -17,9 +18,10 @@ async function refreshNow(v) {
     const btn = banner.querySelector('[data-act="refresh"]');
     if (btn) { btn.disabled = true; btn.textContent = "Updating…"; }
   }
+  // The files deploy.ps1 listed, then every file this tab has loaded (freshReload reloads the page when done)
   const files = Array.isArray(v && v.files) ? v.files : [];
   await Promise.allSettled(files.map((f) => fetch(f, { cache: "reload" })));
-  location.reload();
+  await freshReload();
 }
 
 function showBanner(v) {
