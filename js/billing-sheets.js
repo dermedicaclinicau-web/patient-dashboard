@@ -98,7 +98,7 @@ function css(s) {
   table.bs { width: 100%; border-collapse: collapse; table-layout: fixed; }
   .bs td, .bs th { border: 0.75pt solid #000; padding: 0.4mm 1mm; vertical-align: middle;
     overflow-wrap: break-word; word-break: normal; }
-  .bs th { font-weight: 700; text-align: center; font-size: ${f}pt; line-height: 1.1; }
+  .bs th { font-weight: 700; text-align: center; font-size: ${f}pt; line-height: 1.1; white-space: nowrap; }
   .bs th.nw { white-space: nowrap; font-size: ${f - 1}pt; padding-left: 0.3mm; padding-right: 0.3mm; }
   .bs tr.r td { height: 7mm; }
   .bs tr.p td { height: 5.2mm; }
@@ -391,6 +391,8 @@ async function sheetData(v, dateKey, nextMap) {
 }
 
 /* ===================== One PDF ===================== */
+// Drawn as real lines and text from the previewed sheets (with any edits), not as pictures,
+// so it's crisp, thin-lined like the original and small. Poppins is embedded; Helvetica if Arial is chosen.
 
 const loaded = {};
 function loadScript(src) {
@@ -406,11 +408,8 @@ function loadScript(src) {
   return loaded[src];
 }
 async function pdfTools() {
-  await Promise.all([
-    window.jspdf || loadScript("https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"),
-    window.html2canvas || loadScript("https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"),
-  ]);
-  return { jsPDF: window.jspdf.jsPDF, html2canvas: window.html2canvas };
+  if (!window.jspdf) await loadScript("https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js");
+  return window.jspdf.jsPDF;
 }
 
 async function fontsReady(d, font) {
@@ -420,34 +419,172 @@ async function fontsReady(d, font) {
   if (d.fonts && d.fonts.ready) await d.fonts.ready;
 }
 
-// html: the sheets (as previewed and edited). Each sheet becomes one A4 page (shrunk only if it ran long).
-async function makePdf(html, font, onPage) {
-  const { jsPDF, html2canvas } = await pdfTools();
-  const f = document.createElement("iframe");
-  f.setAttribute("aria-hidden", "true");
-  f.style.cssText = "position:fixed;left:-10000px;top:0;width:820px;height:1200px;border:0;";
-  document.body.appendChild(f);
-  try {
-    await new Promise((res) => { f.onload = res; f.srcdoc = html; });
-    const d = f.contentDocument;
-    d.body.classList.add("cap");
-    await fontsReady(d, font);
-    const pages = [...d.querySelectorAll(".bs-page")];
-    const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait", compress: true });
-    for (let i = 0; i < pages.length; i++) {
-      const c = await html2canvas(pages[i], { scale: 1.6, backgroundColor: "#ffffff", logging: false, windowWidth: 820 });
-      const ratio = c.height / c.width;
-      let w = 210, h = 210 * ratio;
-      if (h > 297) { h = 297; w = 297 / ratio; }
-      if (i) pdf.addPage("a4", "portrait");
-      pdf.addImage(c.toDataURL("image/jpeg", 0.88), "JPEG", (210 - w) / 2, 0, w, h, undefined, "FAST");
-      c.width = 0; c.height = 0;   // frees the memory (iPads run out on long days)
-      if (onPage) onPage(i + 1, pages.length);
-    }
-    return pdf;
-  } finally {
-    f.remove();
+const POPPINS_TTF = (w) => `https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/poppins/Poppins-${w}.ttf`;
+let poppinsFiles = null;   // loaded once per visit
+function toB64(buf) {
+  const bytes = new Uint8Array(buf);
+  let s = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+function loadPoppins() {
+  if (!poppinsFiles) {
+    poppinsFiles = Promise.all(["Regular", "SemiBold", "Bold"].map(async (w) => {
+      const r = await fetch(POPPINS_TTF(w));
+      if (!r.ok) throw new Error(`Poppins ${w} not loaded (${r.status})`);
+      return [w, toB64(await r.arrayBuffer())];
+    })).catch((e) => { poppinsFiles = null; throw e; });
   }
+  return poppinsFiles;
+}
+
+// The PDF's fonts → (weight) => [family, style]
+async function pdfFonts(pdf, font) {
+  if (font !== "arial") {
+    try {
+      (await loadPoppins()).forEach(([w, data]) => {
+        const file = `Poppins-${w}.ttf`;
+        pdf.addFileToVFS(file, data);
+        pdf.addFont(file, "Poppins", w.toLowerCase());
+      });
+      return (wt) => ["Poppins", wt >= 650 ? "bold" : wt >= 550 ? "semibold" : "regular"];
+    } catch (e) { console.warn("Poppins couldn't load for the PDF, so Helvetica is used:", e); }
+  }
+  return (wt) => ["helvetica", wt >= 550 ? "bold" : "normal"];
+}
+
+const PT = 0.352778;   // mm in one point
+
+const textOf = (el) => String(el.innerText || el.textContent || "")
+  .replace(/\u00a0/g, " ").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+
+// How an element's text looks in the preview, in PDF sizes (mmk = mm per screen pixel)
+function styleOf(el, win, mmk) {
+  const cs = win.getComputedStyle(el);
+  let wt = parseInt(cs.fontWeight, 10) || 400;
+  const only = el.children.length === 1 && /^(B|STRONG)$/.test(el.children[0].tagName) &&
+    el.textContent.trim() === el.children[0].textContent.trim();
+  if (only) wt = Math.max(wt, 700);   // e.g. CONSUMABLE USED:
+  return {
+    size: (parseFloat(cs.fontSize) * mmk) / PT, wt,
+    align: cs.textAlign, valign: cs.verticalAlign,
+    nowrap: cs.whiteSpace === "nowrap",
+    wordSpace: (parseFloat(cs.wordSpacing) || 0) * mmk,
+  };
+}
+
+// Text inside a box (mm), wrapped by words like the preview. Shrinks a little if a word won't fit.
+function drawText(pdf, text, b, st, fontOf) {
+  const [fam, sty] = fontOf(st.wt);
+  pdf.setFont(fam, sty);
+  const paras = text.split("\n");
+  const width = (t) => pdf.getTextWidth(t) + (st.wordSpace ? st.wordSpace * (t.split(" ").length - 1) : 0);
+  const wrap = (size) => {
+    pdf.setFontSize(size);
+    if (st.nowrap) return paras;
+    const out = [];
+    paras.forEach((p) => {
+      let cur = "";
+      p.split(/\s+/).filter(Boolean).forEach((w) => {
+        const t = cur ? `${cur} ${w}` : w;
+        if (!cur || width(t) <= b.w + 0.01) cur = t;
+        else { out.push(cur); cur = w; }
+      });
+      out.push(cur);
+    });
+    return out;
+  };
+  let size = st.size;
+  let lines = wrap(size);
+  for (let n = 0; n < 14; n++) {
+    const wide = Math.max(0, ...lines.map(width));
+    const tall = lines.length * size * PT * 1.2;
+    const tooWide = wide > b.w + 0.01;
+    const tooTall = b.h > 0 && tall > b.h + 0.6;
+    if ((!tooWide && !tooTall) || size <= 4.5) break;
+    size = Math.max(4.5, size * (tooWide ? Math.max(0.6, b.w / wide) : 0.93));
+    lines = wrap(size);
+  }
+  pdf.setFontSize(size);
+  const lh = size * PT * 1.2;
+  const total = lines.length * lh;
+  let y = st.valign === "middle" ? b.y + (b.h - total) / 2 : st.valign === "bottom" ? b.y + b.h - total : b.y;
+  lines.forEach((ln) => {
+    const w = width(ln);
+    const x = st.align === "center" ? b.x + (b.w - w) / 2
+      : st.align === "right" || st.align === "end" ? b.x + b.w - w : b.x;
+    if (st.wordSpace) {
+      let cx = x;
+      ln.split(" ").forEach((wd) => { pdf.text(wd, cx, y + lh / 2, { baseline: "middle" }); cx += pdf.getTextWidth(`${wd} `) + st.wordSpace; });
+    } else {
+      pdf.text(ln, x, y + lh / 2, { baseline: "middle" });
+    }
+    y += lh;
+  });
+}
+
+// One sheet from the preview → one A4 page (a sheet that ran long is shrunk to fit)
+function drawPage(pdf, page, fontOf) {
+  const win = page.ownerDocument.defaultView;
+  const pr = page.getBoundingClientRect();
+  const mm = 210 / pr.width;
+  const k = Math.min(1, 297 / (pr.height * mm));
+  const mmk = mm * k;
+  const ox = (210 - 210 * k) / 2;
+  const X = (px) => ox + (px - pr.left) * mmk;
+  const Y = (py) => (py - pr.top) * mmk;
+  const inner = (el) => {
+    const r = el.getBoundingClientRect();
+    const cs = win.getComputedStyle(el);
+    const pl = parseFloat(cs.paddingLeft) || 0, prt = parseFloat(cs.paddingRight) || 0;
+    const pt = parseFloat(cs.paddingTop) || 0, pb = parseFloat(cs.paddingBottom) || 0;
+    return { x: X(r.left + pl), y: Y(r.top + pt), w: (r.width - pl - prt) * mmk, h: (r.height - pt - pb) * mmk };
+  };
+
+  pdf.setDrawColor(0, 0, 0);
+  pdf.setTextColor(0, 0, 0);
+  pdf.setLineWidth(0.25);
+
+  // Table cells: the border, then the text
+  page.querySelectorAll("td, th").forEach((cell) => {
+    const r = cell.getBoundingClientRect();
+    pdf.rect(X(r.left), Y(r.top), r.width * mmk, r.height * mmk, "S");
+    const t = textOf(cell);
+    if (t) drawText(pdf, t, inner(cell), styleOf(cell, win, mmk), fontOf);
+  });
+  // The top line, name and date, and the patient name at the bottom
+  page.querySelectorAll(".bs-note, .bs-head > span, .bs-foot").forEach((el) => {
+    const t = textOf(el);
+    if (t) drawText(pdf, t, inner(el), styleOf(el, win, mmk), fontOf);
+  });
+  // Tick boxes
+  page.querySelectorAll(".bs-ticks > div").forEach((row) => {
+    const box = row.querySelector("i");
+    let start = inner(row).x;
+    if (box) {
+      const r = box.getBoundingClientRect();
+      pdf.rect(X(r.left), Y(r.top), r.width * mmk, r.height * mmk, "S");
+      start = X(r.right) + 1.5 * k;
+    }
+    const t = textOf(row);
+    if (!t) return;
+    const b = inner(row);
+    drawText(pdf, t, { x: start, y: b.y, w: b.x + b.w - start, h: b.h }, { ...styleOf(row, win, mmk), valign: "middle" }, fontOf);
+  });
+}
+
+// pages: the .bs-page elements in the preview (sheets left out are not passed)
+async function makePdf(pages, font, onPage) {
+  const jsPDF = await pdfTools();
+  const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait", compress: true });
+  const fontOf = await pdfFonts(pdf, font);
+  for (let i = 0; i < pages.length; i++) {
+    if (i) pdf.addPage("a4", "portrait");
+    drawPage(pdf, pages[i], fontOf);
+    if (onPage) onPage(i + 1, pages.length);
+    await new Promise((r) => setTimeout(r, 0));   // keeps the window responsive on long days
+  }
+  return pdf;
 }
 
 const SEND_ERR = {
@@ -672,15 +809,14 @@ export function openBillingSheets({ dateKey, appts, staff = null }) {
   async function makeTheHtmlPdf() {
     const fd = frame.contentDocument;
     if (!fd) return;
-    const clone = fd.documentElement.cloneNode(true);
-    clone.querySelector("body").removeAttribute("contenteditable");
-    clone.querySelectorAll(".bs-page[data-skip]").forEach((p) => p.remove());
-    clone.querySelectorAll(".bs-page.is-on").forEach((p) => p.classList.remove("is-on"));
-    const kept = [...clone.querySelectorAll(".bs-page")].map((p) => chosen[Number(p.dataset.i)]).filter(Boolean);
+    const pages = [...fd.querySelectorAll(".bs-page:not([data-skip])")];
+    const kept = pages.map((p) => chosen[Number(p.dataset.i)]).filter(Boolean);
     if (!kept.length) { msg.textContent = "Tick Print on at least one sheet."; return; }
     setBusy(true);
     try {
-      const pdf = await makePdf(`<!DOCTYPE html>${clone.outerHTML}`, s.font, (n, t) => { msg.textContent = `Making page ${n} of ${t}…`; });
+      if (fd.activeElement && fd.activeElement.blur) fd.activeElement.blur();
+      msg.textContent = "Making the PDF…";
+      const pdf = await makePdf(pages, s.font, (n, t) => { msg.textContent = `Making page ${n} of ${t}…`; });
       if (result) URL.revokeObjectURL(result.url);
       const blob = pdf.output("blob");
       result = { blob, url: URL.createObjectURL(blob), b64: pdf.output("datauristring").split(",")[1], count: kept.length };
@@ -704,6 +840,7 @@ export function openBillingSheets({ dateKey, appts, staff = null }) {
     }
   }
 
+  
   async function loadStaff() {
     if (staffLoaded) return;
     const box = q('[data-role="staff"]');
