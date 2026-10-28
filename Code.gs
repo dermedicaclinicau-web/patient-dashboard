@@ -2578,8 +2578,17 @@ function handlePrintPdf_(body) {
 function handleBillingSheets_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  const op = String(body.op || '');
+  if (op === 'next') {
+    if (!can_(session, 'menu.calendar')) return { ok: false, error: 'FORBIDDEN' };
+    try { return bsNextVisits_(body); }
+    catch (err) {
+      console.error('Billing sheets: booked visits failed: ' + (err && err.stack ? err.stack : err));
+      return { ok: true, problem: String(err && err.message ? err.message : err).slice(0, 200) };
+    }
+  }
   if (!can_(session, 'menu.calendar') || !can_(session, 'send.patients')) return { ok: false, error: 'FORBIDDEN' };
-  if (String(body.op || '') !== 'email') return { ok: false, error: 'BAD_REQUEST' };
+  if (op !== 'email') return { ok: false, error: 'BAD_REQUEST' };
 
   const bytes = pdfBytes_(body.pdf);
   if (!bytes) return { ok: true, problem: "The PDF didn't arrive properly. Make it again." };
@@ -2636,6 +2645,66 @@ function handleBillingSheets_(body) {
 
   console.log('Billing sheets (' + count + ') emailed to ' + list.join(', ') + ' by ' + who);
   return { ok: true, sent: list.length, to: list };
+}
+
+// Billing sheets → Next appt: each patient's booked visits after a day, with the time and length.
+// From the future-visits tab (the same bookings as Timely). One visit per patient per day: from its first start to its last finish.
+function bsNextVisits_(body) {
+  const from = String(body.from || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) return { ok: false, error: 'BAD_REQUEST' };
+  const ids = uniq_((Array.isArray(body.patientIds) ? body.patientIds : [])
+    .map(function (s) { return String(s == null ? '' : s).trim().toLowerCase(); }).filter(Boolean)).slice(0, 300);
+  const idx = bsFutureIndex_();
+  const out = {};
+  ids.forEach(function (id) {
+    const list = (idx.by[id] || []).filter(function (v) { return v.date > from; }).slice(0, 8);
+    if (list.length) out[id] = list;
+  });
+  return { ok: true, next: out, at: idx.at };
+}
+
+// future-visits, by Patient ID. Remembered 10 minutes (cleared by Run PCN update).
+function bsFutureIndex_() {
+  const hit = repCacheGet_('bs_future_v1');
+  if (hit) return hit;
+  const ss = SpreadsheetApp.openById(APPTS_SHEET_ID);
+  const sh = ss.getSheetByName(FUTURE_VISITS_SHEET_NAME);
+  if (!sh) throw new Error('Sheet tab not found: ' + FUTURE_VISITS_SHEET_NAME);
+  const tz = ss.getSpreadsheetTimeZone();
+  const days = {};
+  // A Date | B Name | C Balance | D Contact | E Resources | F Symbol | G Time | H Status | I Staff | J Service | K Patient ID | L Category
+  readRows_(sh, 12).forEach(function (r) {
+    const v = r.values, d = r.display;
+    const date = sheetDateKey_(v[0], tz);
+    if (!date || !pcnStatusOk_(d[7], 'full')) return;
+    const svc = d[9].trim();
+    if (REP_NOT_VISIT_.test(svc)) return;
+    const id = d[10].trim().toLowerCase();
+    if (!id) return;
+    const parts = d[6].split('-');
+    const s = toMinutes_(parts[0]);
+    const e = parts[1] ? toMinutes_(parts[1]) : 9999;
+    const k = id + '|' + date;
+    const x = days[k] || (days[k] = { id: id, date: date, start: 9999, end: 0, services: [], staff: [] });
+    if (s < 9999 && s < x.start) x.start = s;
+    if (e < 9999 && e > x.end) x.end = e;
+    if (svc && x.services.indexOf(svc) === -1) x.services.push(svc);
+    const st = d[8].trim();
+    if (st && !SCHED_NOT_PERSON_.test(st) && x.staff.indexOf(st) === -1) x.staff.push(st);
+  });
+  const by = {};
+  Object.keys(days).forEach(function (k) {
+    const x = days[k];
+    (by[x.id] = by[x.id] || []).push({
+      date: x.date, start: x.start < 9999 ? x.start : null,
+      mins: x.start < 9999 && x.end > x.start ? x.end - x.start : null,
+      services: x.services.slice(0, 6), staff: x.staff.slice(0, 3),
+    });
+  });
+  Object.keys(by).forEach(function (id) { by[id].sort(function (a, b) { return a.date.localeCompare(b.date); }); });
+  const res = { by: by, at: new Date().toISOString() };
+  repCachePut_('bs_future_v1', res, 600);
+  return res;
 }
 // ===================== Skin Script Protocol: product catalogue =====================
 
@@ -9900,6 +9969,7 @@ function pcnStepVisits_(ctx) {
   pcnWrite_(pcnSheet_(ctx, PAST_VISITS_SHEET_NAME), 12, past);
   pcnWrite_(pcnSheet_(ctx, FUTURE_VISITS_SHEET_NAME), 12, future);
   SpreadsheetApp.flush();
+  CacheService.getScriptCache().remove('bs_future_v1');   // billing sheets read the new bookings straight away
   return { today: todays.length, past: past.length, future: future.length };
 }
 

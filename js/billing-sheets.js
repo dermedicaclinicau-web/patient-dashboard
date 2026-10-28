@@ -1,10 +1,12 @@
-// Billing sheets: one sheet per patient booked on a day (Calendar → Print billing sheets), merged into one PDF,
-// grouped by clinician then time. The PDF can be opened, downloaded, sent to the clinic printer or emailed to staff.
+// Billing sheets: one sheet per patient booked on a day (Calendar → Print billing sheets).
+// Staff tick the patients, preview every sheet (and can change any text on it), then make one PDF,
+// grouped by clinician then time, to open, download, send to the clinic printer or email to staff.
 // The look is set in Billing sheet design (Firestore form_settings/billing_sheet).
 // The Scanner reads these sheets once they're scanned, so the headings it relies on never change:
 // the name and date at the top, SERVICES DONE TODAY, FEE, Purchase Status and Prov.
 import { db, auth } from "./firebase-config.js";
-import { doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { doc, getDoc, setDoc, collection, query, where, getDocs }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { getPatient, patientIds } from "./patients.js";
 import { listSspRecords } from "./ssp-api.js";
 import { callApi } from "./appointments.js";
@@ -51,6 +53,25 @@ export function cleanBs(x = {}) {
     consumablesLabel: pick("consumablesLabel", 60), payLine: pick("payLine", 120),
     ticks: (Array.isArray(x.ticks) ? x.ticks : D.ticks).map((t) => line(t, 60)).filter(Boolean).slice(0, 6),
   };
+}
+
+let cache = null;
+export async function getBillingSheetSettings(force = false) {
+  if (cache && !force) return cache;
+  const s = await getDoc(doc(db, ...SET));
+  cache = cleanBs(s.exists() ? s.data() : {});
+  return cache;
+}
+
+export async function saveBillingSheetSettings(x, staff) {
+  const uid = auth.currentUser && auth.currentUser.uid;
+  if (!uid) throw new Error("Your session has ended. Log in again.");
+  const clean = cleanBs(x);
+  await setDoc(doc(db, ...SET), {
+    ...clean, updatedAt: new Date().toISOString(), updatedBy: String((staff && staff.name) || "").slice(0, 120), updatedByUid: uid,
+  });
+  cache = clean;
+  return clean;
 }
 
 /* ===================== The sheet ===================== */
@@ -108,7 +129,8 @@ function css(s) {
   body.cap .bs-page { margin: 0; box-shadow: none; }`;
 }
 
-// d: { patientName, whenText, notes, services[], ssp: { dateText, items[{ name, ampm, status }] } | null, next[] }
+// d: { patientName, whenText, notes, services[], ssp: { dateText, items[{ name, ampm, status }] } | null,
+//      next[{ when, service, staff, dur }] }
 function sheetHtml(d, s) {
   const svcN = Math.max(s.serviceRows, d.services.length);
   let t = `<tr><th>APPT NOTES</th><th colspan="2">SERVICES DONE TODAY</th><th>PKG #</th><th>PROV</th><th>FEE</th>` +
@@ -150,8 +172,9 @@ function sheetHtml(d, s) {
     const rows = Math.max(s.nextRows, 1 + d.next.length);
     for (let i = 0; i < rows; i++) {
       const x = i === 0 ? null : d.next[i - 1];   // the first row is always left blank
-      next += `<tr class="n"><td class="c">${esc(x ? x.when : "")}</td><td colspan="3" class="c">${esc(x ? x.service : "")}</td>` +
-        `<td class="c who">${esc(x ? x.staff : "")}</td><td></td><td></td></tr>`;
+      next += `<tr class="n"><td class="c">${x ? esc(x.when).replace(/\n/g, "<br>") : ""}</td>` +
+        `<td colspan="3" class="c">${esc(x ? x.service : "")}</td><td class="c who">${esc(x ? x.staff : "")}</td>` +
+        `<td class="c who">${esc(x ? x.dur || "" : "")}</td><td></td></tr>`;
     }
     next += "</table>";
   }
@@ -165,12 +188,13 @@ function sheetHtml(d, s) {
     <div class="bs-foot">PATIENT NAME: ${esc(String(d.patientName || "").toUpperCase())}</div></div>`;
 }
 
-export function buildBillingSheetsHtml(list, s, capture = false) {
+export function buildBillingSheetsHtml(list, s) {
   const font = s.font === "arial" ? "" :
     `<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="${POPPINS}">`;
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Billing sheets</title>${font}<style>${css(s)}</style></head>` +
-    `<body${capture ? ' class="cap"' : ""}>${list.map((d) => sheetHtml(d, s)).join("")}</body></html>`;
+    `<body>${list.map((d) => sheetHtml(d, s)).join("")}</body></html>`;
 }
+
 /* ===================== The data ===================== */
 
 const CANCELLED = /cancel|no.?show|\bdna\b|did not attend/i;
@@ -178,9 +202,36 @@ const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").tr
 const docKey = (s) => String(s || "").trim().replace(/\//g, "_");
 const isKey = (k) => /^\d{4}-\d{2}-\d{2}$/.test(k || "");
 const keyDate = (k) => { const [y, m, d] = k.split("-").map(Number); return new Date(y, m - 1, d); };
+const toKey = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const dmy = (k) => (isKey(k) ? `${k.slice(8, 10)}/${k.slice(5, 7)}/${k.slice(0, 4)}` : "");
 const usDate = (k, month) => (isKey(k) ? keyDate(k).toLocaleDateString("en-US", { month, day: "numeric", year: "numeric" }) : "");
 const staffName = (v) => String(v.staff || "").trim() || "Unassigned";
+
+// 840 → "2:00PM"
+function hm(min) {
+  if (min == null || !Number.isFinite(min)) return "";
+  const h = Math.floor(min / 60), m = min % 60;
+  return `${h % 12 || 12}:${String(m).padStart(2, "0")}${h < 12 ? "AM" : "PM"}`;
+}
+// 75 → "1hr 15mins"
+function durText(mins) {
+  if (!mins || mins <= 0) return "";
+  if (mins < 60) return `${mins}mins`;
+  return `${Math.floor(mins / 60)}hr${mins % 60 ? ` ${mins % 60}mins` : ""}`;
+}
+// A date in any of the shapes the older records use → "YYYY-MM-DD"
+function anyKey(v) {
+  if (!v) return "";
+  if (typeof v.toDate === "function") return toKey(v.toDate());
+  if (v instanceof Date) return isNaN(v) ? "" : toKey(v);
+  const s = String(v).trim();
+  let m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+  m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(s);   // Australian: day first
+  if (m) return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+  const d = new Date(s);
+  return isNaN(d) ? "" : toKey(d);
+}
 
 // "Dermedica Pro B Plus" = "Dermedica Pro B Plus." = "Dermedica Pro B Plus 30ml"
 function sameProduct(a, b) {
@@ -244,8 +295,40 @@ function latestSsp(portal, sk) {
   return list[0] || null;
 }
 
-// pcn_results futureVisits: "5/11/2026 - Review 15 (Dr Teh), Wrinkle Relaxer Frown (Dr Teh)"
-function nextVisits(pre, dateKey) {
+// Prescriptions given to them: Scanner prescriptions, the old app's records and portal prescription forms.
+// → [{ name, date, loose }]  (loose: a form name, matched if it contains the product's name)
+async function prescriptionsOf(ids, dateKey) {
+  const list = ids.slice(0, 10);
+  const out = [];
+  if (!list.length) return out;
+  const add = (name, date, loose = false) => { if (name && isKey(date) && date <= dateKey) out.push({ name: String(name), date, loose }); };
+  await Promise.all([
+    getDocs(query(collection(db, "scans"), where("patientIds", "array-contains-any", list))).then((snap) => snap.forEach((x) => {
+      const r = x.data();
+      if (r.kind !== "rx" || r.status === "deleted") return;
+      const date = anyKey(r.recordDate || r.dateKey);
+      (r.items || []).forEach((it) => { add(it.product, date); add(it.medicine, date); });
+    })).catch((e) => console.warn("Billing sheet: scanned prescriptions not read", e)),
+    getDocs(query(collection(db, "prescription_record"), where("Patient ID", "in", list))).then((snap) => snap.forEach((x) => {
+      const r = x.data();
+      const date = anyKey(r["Record Date"] || r["Prescription Date"] || r.Date || r["Created At"]);
+      ["Prescription Type", "Product", "Product Name", "Medication", "Item"].forEach((k) => add(r[k], date));
+    })).catch((e) => console.warn("Billing sheet: older prescriptions not read", e)),
+    getDocs(query(collection(db, "form_submissions"), where("patientId", "in", list), where("category", "==", "prescription")))
+      .then((snap) => snap.forEach((x) => { const r = x.data(); add(r.templateName, anyKey(r.recordDate), true); }))
+      .catch((e) => console.warn("Billing sheet: prescription forms not read", e)),
+  ]);
+  return out;
+}
+
+function givenDate(rx, name) {
+  const n = norm(name);
+  return rx.filter((p) => (p.loose ? n.length >= 5 && norm(p.name).includes(n) : sameProduct(p.name, name)))
+    .map((p) => p.date).sort().pop() || "";
+}
+
+// Fallback when the booking times can't be read: the pre-consultation list (no times or lengths)
+function nextVisitsFallback(pre, dateKey) {
   return String((pre && pre.futureVisits) || "").split(/\r?\n/).map((l) => {
     const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})\s*-\s*(.*)$/.exec(l.trim());
     if (!m) return null;
@@ -259,11 +342,12 @@ function nextVisits(pre, dateKey) {
       if (n) svcs.push(n);
       if (w && w[2].trim() && !who.includes(w[2].trim())) who.push(w[2].trim());
     });
-    return { key, when: dmy(key), service: svcs.join(", "), staff: who.join(", ") };
+    return { key, when: dmy(key), service: svcs.join(", "), staff: who.join(", "), dur: "" };
   }).filter(Boolean).sort((a, b) => a.key.localeCompare(b.key));
 }
 
-async function sheetData(v, dateKey) {
+// nextMap: { pttId (lower case): [{ date, start, mins, services, staff }] } from Apps Script, or null if it couldn't be read
+async function sheetData(v, dateKey, nextMap) {
   const time = String(v.time || "").replace(/\s*(am|pm)\b/i, (x, ap) => ap.toUpperCase()).replace(/\s+/g, "");
   const d = {
     patientName: v.patientName || "Patient",
@@ -275,8 +359,9 @@ async function sheetData(v, dateKey) {
   try { patient = await getPatient(v.patientId); } catch (e) { console.warn("Billing sheet: patient not read", e); }
   const ids = [...new Set([v.patientId, ...(patient ? [patient.id, ...patientIds(patient)] : [])].filter(Boolean))];
   const keys = [...new Set(ids.map(docKey))];
-  const [portal, sk, pre] = await Promise.all([
-    listSspRecords(ids).catch(() => []), firstDoc("skincare", keys), firstDoc("pcn_results", keys),
+  const [portal, sk, pre, rx] = await Promise.all([
+    listSspRecords(ids).catch(() => []), firstDoc("skincare", keys),
+    nextMap ? null : firstDoc("pcn_results", keys), prescriptionsOf(ids, dateKey),
   ]);
   if (patient && patient.name) d.patientName = patient.name;
 
@@ -287,12 +372,21 @@ async function sheetData(v, dateKey) {
     d.ssp = {
       dateText: usDate(ssp.date, "long") + (isKey(ssp.validUntil) && ssp.validUntil < dateKey ? " (expired)" : ""),
       items: ssp.items.filter((it) => it.name && !seen.has(norm(it.name)) && seen.add(norm(it.name))).map((it) => {
-        const last = buys.filter((p) => sameProduct(p.product, it.name)).map((p) => p.date).sort().pop();
-        return { ...it, status: last ? `Purchased ${dmy(last)}` : "Not Purchased" };
+        const given = givenDate(rx, it.name);
+        const bought = buys.filter((p) => sameProduct(p.product, it.name)).map((p) => p.date).sort().pop() || "";
+        const status = given && given >= bought ? `Given ${dmy(given)}`
+          : bought ? `Purchased ${dmy(bought)}` : "Not Purchased";
+        return { ...it, status };
       }),
     };
   }
-  d.next = nextVisits(pre, dateKey);
+
+  d.next = nextMap
+    ? (nextMap[String(v.patientId).toLowerCase()] || []).filter((x) => x.date > dateKey).map((x) => ({
+      when: dmy(x.date) + (x.start != null ? `\n${hm(x.start)}` : ""),
+      service: (x.services || []).join(", "), staff: (x.staff || []).join(", "), dur: durText(x.mins),
+    }))
+    : nextVisitsFallback(pre, dateKey);
   return d;
 }
 
@@ -319,25 +413,29 @@ async function pdfTools() {
   return { jsPDF: window.jspdf.jsPDF, html2canvas: window.html2canvas };
 }
 
-// Each sheet becomes one A4 page (a long sheet is shrunk to fit its page), all in one PDF
-async function makePdf(list, s, onPage) {
+async function fontsReady(d, font) {
+  if (font !== "arial" && d.fonts && d.fonts.load) {
+    await Promise.all(["400", "600", "700"].map((w) => d.fonts.load(`${w} 10px Poppins`).catch(() => null)));
+  }
+  if (d.fonts && d.fonts.ready) await d.fonts.ready;
+}
+
+// html: the sheets (as previewed and edited). Each sheet becomes one A4 page (shrunk only if it ran long).
+async function makePdf(html, font, onPage) {
   const { jsPDF, html2canvas } = await pdfTools();
   const f = document.createElement("iframe");
   f.setAttribute("aria-hidden", "true");
   f.style.cssText = "position:fixed;left:-10000px;top:0;width:820px;height:1200px;border:0;";
   document.body.appendChild(f);
   try {
-    await new Promise((res) => { f.onload = res; f.srcdoc = buildBillingSheetsHtml(list, s, true); });
+    await new Promise((res) => { f.onload = res; f.srcdoc = html; });
     const d = f.contentDocument;
-    if (s.font !== "arial" && d.fonts && d.fonts.load) {
-      await Promise.all(["400", "600", "700"].map((w) => d.fonts.load(`${w} 10px Poppins`).catch(() => null)));
-    }
-    if (d.fonts && d.fonts.ready) await d.fonts.ready;
+    d.body.classList.add("cap");
+    await fontsReady(d, font);
     const pages = [...d.querySelectorAll(".bs-page")];
     const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait", compress: true });
     for (let i = 0; i < pages.length; i++) {
       const c = await html2canvas(pages[i], { scale: 1.6, backgroundColor: "#ffffff", logging: false, windowWidth: 820 });
-      // The page's own 5–6 mm margins are in the picture, so it fills the A4 page (shrunk only if the sheet ran long)
       const ratio = c.height / c.width;
       let w = 210, h = 210 * ratio;
       if (h > 297) { h = 297; w = 297 / ratio; }
@@ -362,6 +460,16 @@ const SEND_ERR = {
 const sendErr = (e) => SEND_ERR[e && e.code] || (e && e.message) || "Couldn't send it. Try again.";
 const MAX_SEND = 19000000;   // Apps Script accepts PDFs up to about 15 MB
 
+// Shown only in the preview (not in the PDF)
+const EDIT_CSS = `
+  body[contenteditable] { outline: none; }
+  .bs-page { position: relative; cursor: text; }
+  .bs-page[data-skip] { opacity: .3; }
+  .bs-page[data-skip]::before { content: "Left out of the PDF"; position: absolute; top: 40%; left: 0; right: 0;
+    text-align: center; font: 700 22pt Arial, sans-serif; color: #b91c1c; opacity: 1; }
+  .bs-page.is-on { outline: 3px solid #0f766e; outline-offset: 4px; }
+  .bs td:focus, .bs th:focus { outline: 2px solid #0f766e; }`;
+
 /* ===================== Calendar → Print billing sheets ===================== */
 
 export function openBillingSheets({ dateKey, appts, staff = null }) {
@@ -371,12 +479,15 @@ export function openBillingSheets({ dateKey, appts, staff = null }) {
   const dayLong = day.toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
   const dayShort = day.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" });
   const fileName = `Billing sheets ${dayShort}.pdf`;
-  const groups = [];
-  visits.forEach((v, i) => {
-    let g = groups[groups.length - 1];
-    if (!g || g.name !== staffName(v)) { g = { name: staffName(v), list: [] }; groups.push(g); }
-    g.list.push([v, i]);
-  });
+  const groupsOf = (list) => {
+    const out = [];
+    list.forEach((v, i) => {
+      let g = out[out.length - 1];
+      if (!g || g.name !== staffName(v)) { g = { name: staffName(v), list: [] }; out.push(g); }
+      g.list.push([v, i]);
+    });
+    return out;
+  };
 
   const dlg = document.createElement("dialog");
   dlg.className = "lh-dialog bs-dlg";
@@ -386,10 +497,20 @@ export function openBillingSheets({ dateKey, appts, staff = null }) {
         <p>${esc(dayLong)} · one sheet per patient, merged into one PDF by clinician, then time.</p></div>
       <div data-view="pick">
         <label class="fe-check"><input type="checkbox" data-role="all" checked /> All ${visits.length} patients</label>
-        <div class="bs-pick">${groups.map((g) => `
+        <div class="bs-pick">${groupsOf(visits).map((g) => `
           <div class="bs-grp"><h4>${esc(g.name)} · ${g.list.length}</h4>${g.list.map(([v, i]) => `
             <label class="fe-check"><input type="checkbox" name="v" value="${i}" checked />
               <span>${esc(v.time)} · ${esc(v.patientName)}</span><small>${esc(v.services.join(", "))}</small></label>`).join("")}</div>`).join("")}</div>
+      </div>
+      <div data-view="review" hidden>
+        <div class="bs-review">
+          <div class="bs-rlist" data-role="rlist"></div>
+          <div class="bs-rprev">
+            <p class="bs-rtip">Click any text on a sheet to change it, or untick <b>Print</b> to leave a sheet out.
+              Changes are only made on this PDF, not on the patient's records.</p>
+            <iframe title="Billing sheets preview"></iframe>
+          </div>
+        </div>
       </div>
       <div data-view="done" hidden>
         <div class="bs-file">
@@ -416,7 +537,8 @@ export function openBillingSheets({ dateKey, appts, staff = null }) {
         <button type="button" class="lh-btn is-quiet" data-act="back" hidden>Back</button>
         <span style="flex:1"></span>
         <button type="button" class="lh-btn is-quiet" data-act="cancel">Close</button>
-        <button type="submit" class="lh-btn is-primary" data-role="make">Make PDF</button>
+        <button type="submit" class="lh-btn is-primary" data-role="next">Preview sheets</button>
+        <button type="button" class="lh-btn is-primary" data-act="makepdf" hidden>Make PDF</button>
       </div>
     </form>`;
   document.body.appendChild(dlg);
@@ -425,86 +547,162 @@ export function openBillingSheets({ dateKey, appts, staff = null }) {
   const q = (sel) => dlg.querySelector(sel);
   const msg = q('[data-role="msg"]');
   const all = q('[data-role="all"]');
-  const make = q('[data-role="make"]');
+  const frame = q(".bs-rprev iframe");
   const boxes = () => [...form.querySelectorAll('[name="v"]')];
+  let current = "pick";
   let busy = false;
+  let s = null;
+  let chosen = [];
+  let edited = false;
   let result = null;   // { blob, b64, url, count }
   let staffLoaded = false;
 
   const view = (name) => {
-    q('[data-view="pick"]').hidden = name !== "pick";
-    q('[data-view="done"]').hidden = name !== "done";
-    make.hidden = name !== "pick";
-    q('[data-act="back"]').hidden = name !== "done";
+    current = name;
+    ["pick", "review", "done"].forEach((v) => { q(`[data-view="${v}"]`).hidden = v !== name; });
+    q('[data-role="next"]').hidden = name !== "pick";
+    q('[data-act="makepdf"]').hidden = name !== "review";
+    q('[data-act="back"]').hidden = name === "pick";
     const design = q('[data-act="design"]');
     if (design) design.hidden = name !== "pick";
+    dlg.classList.toggle("is-wide", name === "review");
     msg.textContent = "";
   };
   const setBusy = (on) => {
     busy = on;
-    form.querySelectorAll("button, input, textarea").forEach((el) => {
-      if (el.dataset.act !== "cancel") el.disabled = on;
-    });
+    form.querySelectorAll("button, input, textarea").forEach((el) => { if (el.dataset.act !== "cancel") el.disabled = on; });
   };
 
   all.addEventListener("change", () => boxes().forEach((b) => { b.checked = all.checked; }));
   form.addEventListener("change", (e) => {
-    if (e.target.name !== "v") return;
-    const n = boxes().filter((b) => b.checked).length;
-    all.checked = n === boxes().length;
-    all.indeterminate = n > 0 && n < boxes().length;
+    if (e.target.name === "v") {
+      const n = boxes().filter((b) => b.checked).length;
+      all.checked = n === boxes().length;
+      all.indeterminate = n > 0 && n < boxes().length;
+    }
+    if (e.target.dataset.keep !== undefined) {
+      const page = frame.contentDocument && frame.contentDocument.querySelector(`.bs-page[data-i="${e.target.dataset.keep}"]`);
+      if (page) page.toggleAttribute("data-skip", !e.target.checked);
+    }
   });
 
-  // Make PDF
+  // Step 1 → 2: get everyone's details and show the sheets
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    if (busy) return;
-    const chosen = boxes().filter((b) => b.checked).map((b) => visits[Number(b.value)]);
+    if (busy || current !== "pick") return;
+    chosen = boxes().filter((b) => b.checked).map((b) => visits[Number(b.value)]);
     if (!chosen.length) { msg.textContent = "Tick at least one patient."; return; }
     setBusy(true);
     try {
-      const s = await getBillingSheetSettings(true).catch(() => cleanBs({}));
+      s = await getBillingSheetSettings(true).catch(() => cleanBs({}));
+      let nextMap = null;
+      msg.textContent = "Checking their booked visits…";
+      try {
+        const r = await callApi({ action: "billingSheets", op: "next", from: dateKey,
+          patientIds: [...new Set(chosen.map((v) => v.patientId).filter(Boolean))] });
+        if (!r.problem) nextMap = r.next || {};
+        else console.warn("Booked visits not read:", r.problem);
+      } catch (err) { console.warn("Booked visits not read:", err); }
+
       const out = new Array(chosen.length);
       let done = 0;
       const queue = chosen.map((v, i) => [v, i]);
-      msg.textContent = `Getting details 0 of ${chosen.length}…`;
       await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
         while (queue.length) {
           const [v, i] = queue.shift();
-          try { out[i] = await sheetData(v, dateKey); }
+          try { out[i] = await sheetData(v, dateKey, nextMap); }
           catch (err) {
             console.warn("Billing sheet details failed for", v.patientName, err);
-            out[i] = await sheetData({ ...v, patientId: "" }, dateKey);
+            out[i] = await sheetData({ ...v, patientId: "" }, dateKey, nextMap);
           }
           msg.textContent = `Getting details ${++done} of ${chosen.length}…`;
         }
       }));
-      const counts = {};
-      chosen.forEach((v) => { counts[staffName(v)] = (counts[staffName(v)] || 0) + 1; });
+      await showReview(out);
+      view("review");
+      if (!nextMap) msg.textContent = "Booked visit times couldn't be checked, so DUR is blank. You can type it in.";
+    } catch (err) {
+      console.error("Billing sheets preview failed:", err);
+      msg.textContent = (err && err.message) || "Couldn't prepare the sheets. Try again.";
+    } finally {
+      setBusy(false);
+    }
+  });
 
-      const pdf = await makePdf(out, s, (n, t) => { msg.textContent = `Making page ${n} of ${t}…`; });
+  async function showReview(out) {
+    edited = false;
+    q('[data-role="rlist"]').innerHTML = groupsOf(chosen).map((g) => `
+      <h4>${esc(g.name)}</h4>${g.list.map(([v, i]) => `
+        <div class="bs-ritem" data-i="${i}">
+          <button type="button" class="bs-rgo" data-go="${i}"><b>${esc(v.patientName)}</b>
+            <small>${esc(v.time)}<em data-edited hidden>Edited</em></small></button>
+          <label class="bs-rkeep"><input type="checkbox" data-keep="${i}" checked /> Print</label>
+        </div>`).join("")}`).join("");
+    await new Promise((res) => {
+      frame.onload = res;
+      frame.srcdoc = buildBillingSheetsHtml(out, s).replace("</style>", `${EDIT_CSS}</style>`);
+    });
+    const fd = frame.contentDocument;
+    fd.querySelectorAll(".bs-page").forEach((p, i) => { p.dataset.i = String(i); });
+    fd.body.setAttribute("contenteditable", "true");
+    fd.body.spellcheck = false;
+    fd.addEventListener("input", () => {
+      const sel = fd.getSelection();
+      const node = sel && sel.anchorNode;
+      const el = node && (node.nodeType === 1 ? node : node.parentElement);
+      const page = el && el.closest(".bs-page");
+      if (!page) return;
+      edited = true;
+      const tag = q(`.bs-ritem[data-i="${page.dataset.i}"] [data-edited]`);
+      if (tag) tag.hidden = false;
+    });
+    await fontsReady(fd, s.font).catch(() => null);
+  }
+
+  function goTo(i) {
+    const fd = frame.contentDocument;
+    if (!fd) return;
+    fd.querySelectorAll(".bs-page.is-on").forEach((p) => p.classList.remove("is-on"));
+    const page = fd.querySelector(`.bs-page[data-i="${i}"]`);
+    if (page) { page.classList.add("is-on"); page.scrollIntoView({ behavior: "smooth", block: "start" }); }
+    dlg.querySelectorAll(".bs-ritem").forEach((r) => r.classList.toggle("is-on", r.dataset.i === String(i)));
+  }
+
+  // Step 2 → 3: the PDF, from the sheets as they are now (with any changes)
+  async function makeTheHtmlPdf() {
+    const fd = frame.contentDocument;
+    if (!fd) return;
+    const clone = fd.documentElement.cloneNode(true);
+    clone.querySelector("body").removeAttribute("contenteditable");
+    clone.querySelectorAll(".bs-page[data-skip]").forEach((p) => p.remove());
+    clone.querySelectorAll(".bs-page.is-on").forEach((p) => p.classList.remove("is-on"));
+    const kept = [...clone.querySelectorAll(".bs-page")].map((p) => chosen[Number(p.dataset.i)]).filter(Boolean);
+    if (!kept.length) { msg.textContent = "Tick Print on at least one sheet."; return; }
+    setBusy(true);
+    try {
+      const pdf = await makePdf(`<!DOCTYPE html>${clone.outerHTML}`, s.font, (n, t) => { msg.textContent = `Making page ${n} of ${t}…`; });
       if (result) URL.revokeObjectURL(result.url);
       const blob = pdf.output("blob");
-      result = { blob, url: URL.createObjectURL(blob), b64: pdf.output("datauristring").split(",")[1], count: chosen.length };
-      const mb = (blob.size / 1048576).toFixed(1);
+      result = { blob, url: URL.createObjectURL(blob), b64: pdf.output("datauristring").split(",")[1], count: kept.length };
+      const counts = {};
+      kept.forEach((v) => { counts[staffName(v)] = (counts[staffName(v)] || 0) + 1; });
       q('[data-role="finfo"]').textContent =
-        `${chosen.length} sheet${chosen.length === 1 ? "" : "s"} · ${Object.entries(counts).map(([k, n]) => `${k} ${n}`).join(" · ")} · ${mb} MB`;
-      const tooBig = result.b64.length > MAX_SEND;
-      q('[data-act="printer"]').disabled = tooBig;
-      q('[data-act="email"]').disabled = tooBig;
+        `${kept.length} sheet${kept.length === 1 ? "" : "s"} · ${Object.entries(counts).map(([k, n]) => `${k} ${n}`).join(" · ")} · ` +
+        `${(blob.size / 1048576).toFixed(1)} MB`;
       view("done");
-      if (tooBig) msg.textContent = "It's too big to send. Download it, or make it with fewer patients at a time.";
     } catch (err) {
       console.error("Billing sheets PDF failed:", err);
       msg.textContent = (err && err.message) || "Couldn't make the PDF. Try again.";
     } finally {
       setBusy(false);
-      if (result && !q('[data-view="done"]').hidden && result.b64.length > MAX_SEND) {
-        q('[data-act="printer"]').disabled = true;
-        q('[data-act="email"]').disabled = true;
+      if (result && current === "done") {
+        const tooBig = result.b64.length > MAX_SEND;
+        q('[data-act="printer"]').disabled = tooBig;
+        q('[data-act="email"]').disabled = tooBig;
+        if (tooBig) msg.textContent = "It's too big to send. Download it, or make it with fewer patients at a time.";
       }
     }
-  });
+  }
 
   async function loadStaff() {
     if (staffLoaded) return;
@@ -526,13 +724,26 @@ export function openBillingSheets({ dateKey, appts, staff = null }) {
   }
 
   dlg.addEventListener("click", async (e) => {
+    const go = e.target.closest("[data-go]");
+    if (go) { goTo(go.dataset.go); return; }
     const a = e.target.closest("[data-act]");
     if (!a || a.disabled) return;
     const act = a.dataset.act;
-    if (act === "cancel") { if (!busy) dlg.close(); return; }
+    if (act === "cancel") {
+      if (busy) return;
+      if (edited && current !== "done" && !confirm("Close without making the PDF? Your changes to the sheets will be lost.")) return;
+      dlg.close();
+      return;
+    }
     if (busy) return;
     if (act === "design") { openBillingSheetDesign({ staff }); return; }
-    if (act === "back") { view("pick"); return; }
+    if (act === "back") {
+      if (current === "done") { view("review"); return; }
+      if (edited && !confirm("Go back to the patient list? Your changes to the sheets will be lost.")) return;
+      view("pick");
+      return;
+    }
+    if (act === "makepdf") { makeTheHtmlPdf(); return; }
     if (!result) return;
 
     if (act === "open") {
@@ -591,14 +802,18 @@ export function openBillingSheets({ dateKey, appts, staff = null }) {
 
 const SAMPLE = {
   patientName: "Jane Sample", whenText: "Oct 29, 2026 11:30AM | Dr Teh", notes: "To Rv Dg + Radiesse",
-  services: ["Review 15(post treatment)"], tag: "Dr Teh · 1 of 4",
+  services: ["Review 15(post treatment)"],
   ssp: { dateText: "August 6, 2026", items: [
     { name: "Dermedica Essential Cleanser", ampm: "AM & PM", status: "Not Purchased" },
     { name: "Dermedica Vitamin A Plus serum", ampm: "PM", status: "Not Purchased" },
     { name: "Dermedica Pro B Plus", ampm: "AM", status: "Purchased 17/09/2026" },
     { name: "Dermedica Sunscreen", ampm: "AM", status: "Purchased 30/04/2026" },
+    { name: "Fading cream", ampm: "PM", status: "Given 12/10/2026" },
   ] },
-  next: [{ when: "05/11/2026", service: "Wrinkle Relaxer Frown", staff: "Dr Teh" }],
+  next: [
+    { when: "05/11/2026\n2:00PM", service: "Wrinkle Relaxer Frown", staff: "Dr Teh", dur: "15mins" },
+    { when: "19/11/2026\n10:30AM", service: "Clear Complexion Laser LITE Face, Review 15(post treatment)", staff: "Jacquie", dur: "1hr 15mins" },
+  ],
 };
 
 export async function openBillingSheetDesign({ staff = null } = {}) {

@@ -9459,3 +9459,26 @@ dialog.lh-dialog.bs-design { width: min(1200px, calc(100vw - 2rem)); padding: 0;
 .bs-mail .f { display: grid; gap: .25rem; font-size: .82rem; font-weight: 600; }
 .bs-mail .f input, .bs-mail .f textarea { font: inherit; font-weight: 400; padding: .45rem .6rem; border: 1px solid var(--border); border-radius: 8px; }
 
+
+
+/* Billing sheets: preview and edit */
+dialog.lh-dialog.bs-dlg.is-wide { width: min(1240px, calc(100vw - 2rem)); }
+.bs-review { display: grid; grid-template-columns: 230px 1fr; gap: 1rem; }
+.bs-rlist { display: grid; align-content: start; gap: .1rem; max-height: calc(100vh - 17rem); overflow: auto; padding-right: .25rem; }
+.bs-rlist h4 { margin: .5rem 0 .2rem; font-size: .72rem; font-weight: 700; text-transform: uppercase; color: var(--muted); }
+.bs-rlist h4:first-child { margin-top: 0; }
+.bs-ritem { display: flex; align-items: center; gap: .35rem; padding: 0 .3rem; border-radius: 8px; }
+.bs-ritem.is-on { background: #f0fdfa; }
+.bs-rgo { flex: 1; min-width: 0; padding: .35rem .2rem; border: 0; background: none; font: inherit; text-align: left; cursor: pointer; }
+.bs-rgo b { display: block; overflow: hidden; font-size: .85rem; white-space: nowrap; text-overflow: ellipsis; }
+.bs-rgo small { font-size: .74rem; color: var(--muted); }
+.bs-rgo em { margin-left: .4rem; font-size: .68rem; font-style: normal; font-weight: 700; color: #b45309; }
+.bs-rkeep { display: flex; align-items: center; gap: .25rem; font-size: .74rem; color: #475569; white-space: nowrap; }
+.bs-rprev { display: grid; gap: .5rem; min-width: 0; }
+.bs-rtip { margin: 0; font-size: .8rem; color: #475569; }
+.bs-rprev iframe { width: 100%; height: calc(100vh - 19rem); min-height: 420px; border: 1px solid var(--border);
+  border-radius: 10px; background: #e2e8f0; }
+@media (max-width: 860px) {
+  .bs-review { grid-template-columns: 1fr; }
+  .bs-rlist { max-height: 170px; }
+}
