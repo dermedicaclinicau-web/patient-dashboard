@@ -714,6 +714,7 @@ match /inv_count_drafts/{id} {
     }
 
     // Completed forms. Saved once and never edited or deleted (clinical records).
+    // The one exception: staff who can move records may fix which card and treatment a form is listed under.
     // The send log ('deliveries') is added by Apps Script only, never by the browser.
     match /form_submissions/{subId} {
       allow read: if isStaff();
@@ -733,8 +734,16 @@ match /inv_count_drafts/{id} {
         && request.resource.data.signatures is map
         && request.resource.data.createdByUid == request.auth.uid
         && request.resource.data.createdAt == request.time;
-      allow update, delete: if false;
-    }
+      allow delete: if false;
+      // Type & category: only where it's listed. The answers, signatures, patient and dates can never change.
+      allow update: if can('records.move')
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['group', 'groupFixed', 'category', 'recordChanges'])
+        && request.resource.data.group in ['wr', 'filler', 'cc', 'mn', 'firm', 'peel', 'body', 'other']
+        && request.resource.data.groupFixed == true
+        && resource.data.category in ['treatment', 'consent']
+        && request.resource.data.category in ['treatment', 'consent']
+        && request.resource.data.recordChanges is list
+        && request.resource.data.recordChanges.size() <= 50;
 
     // ===================== Task Manager =====================
 

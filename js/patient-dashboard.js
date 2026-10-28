@@ -441,7 +441,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   notesView = mountPersonalNotes(root, patient, staff);
   loadTranscriptSections();
   mountSkincare(root, patient, staff);
-  recordsView = mountRecords(root, patient);
+  recordsView = mountRecords(root, patient, staff);
   mountFormRecords(root, patient);
   mountHistory(root, patient);  
   tasksView = mountPatientTasks(root, patient);

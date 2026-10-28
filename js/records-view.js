@@ -1,10 +1,13 @@
-import { fetchPatientRecords, CATEGORIES, OTHER_CATEGORY } from "./records.js";
+import { fetchPatientRecords, CATEGORIES, OTHER_CATEGORY, categorize } from "./records.js";
 import { escapeHtml, parseDateKey } from "./utils.js";
 import { getSubmission, listSubmissionsForPatient } from "./form-submissions.js";
 import { fetchBillingAndRx } from "./billing-rx-view.js";
 import { patientIds } from "./patients.js";
 import { getFormVersion, listPublishedForms } from "./form-templates.js";
 import { openMoveRecordDialog, canMoveRecords } from "./record-move.js";
+import { db, auth } from "./firebase-config.js";
+import { doc, updateDoc, arrayUnion } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { showToast } from "./utils.js";
 
 const svg = (p, cls = "") =>
   `<svg ${cls ? `class="${cls}" ` : ""}viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -18,6 +21,7 @@ const ICONS = {
   trash: svg('<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>'),
   plus: svg('<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>'),
   copy: svg('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'),
+  tag: svg('<path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/>'),
 };
 
 const ALL_CATS = [...CATEGORIES, OTHER_CATEGORY];
@@ -206,7 +210,7 @@ export function recordsSectionHtml() {
 
 /* ===================== Behaviour ===================== */
 
-export function mountRecords(root, patient) {
+export function mountRecords(root, patient, staff = null) {
   const grid = root.querySelector(".rc-grid");
   if (!grid) return;
   const [txCard, csCard] = grid.querySelectorAll(".rc-card");
@@ -243,21 +247,6 @@ export function mountRecords(root, patient) {
           }),
         ]);
         await markPrescriptions(consents, rx).catch((err) => console.warn("Consent prescriptions not marked:", err));
-        // TEMPORARY: which category each record went into (remove once checked)
-        try {
-          const ds = (d) => (d instanceof Date && !isNaN(d) ? d.toDateString() : "(no date)");
-          console.log("TREATMENT RECORDS");
-          console.table(treatments.map((t) => ({
-            record: t.title, date: ds(t.date), from: t.portalId ? "portal" : "old app",
-            savedGroup: t.portalId ? (t.group || "(none)") : "", shownUnder: t.category,
-          })));
-          console.log("CONSENT RECORDS");
-          console.table(consents.map((c) => ({
-            consent: c.title, date: ds(c.date), from: c.portalId ? "portal" : "old app",
-            savedGroup: c.portalId ? (c.group || "(none)") : "", shownUnder: c.category,
-            prescription: c.rxState || "not checked",
-          })));
-        } catch (e) { console.warn("Records debug failed:", e); }
         if (!grid.isConnected) return;
         loaded = true;
         lists = { treatment: treatments, consent: consents };
@@ -321,6 +310,46 @@ export function mountRecords(root, patient) {
       b.disabled = false;
     }
   });
+  // Category: put a portal record under the right treatment (only where it's listed; the form isn't changed)
+  grid.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-recat]");
+    if (!b || b.disabled) return;
+    e.preventDefault();
+    const r = [...lists.treatment, ...lists.consent].find((x) => x.portalId === b.dataset.recat);
+    if (!r) return;
+    const pick = await pickCategory(r);
+    if (!pick || !grid.isConnected) return;
+    const kindChanged = pick.kind !== r.kind;
+    const groupChanged = pick.group !== r.category;
+    if (!kindChanged && !groupChanged) return;
+    b.disabled = true;
+    try {
+      await updateDoc(doc(db, "form_submissions", r.portalId), {
+        group: pick.group,
+        groupFixed: true,
+        ...(kindChanged ? { category: pick.kind } : {}),
+        recordChanges: arrayUnion({
+          fromKind: r.kind, toKind: pick.kind, fromGroup: r.category, toGroup: pick.group,
+          at: new Date().toISOString(),
+          by: (staff && staff.name) || "", byUid: (auth.currentUser && auth.currentUser.uid) || "",
+        }),
+      });
+      const catTitle = (ALL_CATS.find((c) => c.key === pick.group) || {}).title || pick.group;
+      showToast(kindChanged
+        ? `Now a ${pick.kind === "consent" ? "consent" : "treatment"} record under ${catTitle}`
+        : `Moved to ${catTitle}`);
+      loaded = false;
+      txBody.innerHTML = csBody.innerHTML = '<div class="skeleton sm"></div>';
+      load();
+    } catch (err) {
+      console.error("Category change failed:", err);
+      showToast(err.code === "permission-denied"
+        ? "Changing the category is blocked. The form_submissions Firestore rule needs updating."
+        : "Couldn't change the category. Try again.");
+    } finally {
+      b.disabled = false;
+    }
+  });
   if (highlightId && !txCard.open) txCard.open = true; // just saved a record: show it
   if (txCard.open) load();
 
@@ -355,8 +384,64 @@ function portalView(r) {
   let html = '<a class="rc-act" href="#/form-record/' + id + '" target="_blank" rel="noopener">' + ICONS.view + 'View</a>';
   if (canMoveRecords()) {
     html += '<button type="button" class="rc-act" data-move-sub="' + escapeHtml(r.portalId) + '">' + ICONS.move + 'Move</button>';
+    html += '<button type="button" class="rc-act" data-recat="' + escapeHtml(r.portalId) + '" title="Change whether it\'s a treatment or consent record, and which treatment it\'s under">' + ICONS.tag + 'Type &amp; category</button>';
   }
   return html;
+}
+
+// The window for a record's type and category. Resolves with { kind, group }, or null.
+function pickCategory(r) {
+  return new Promise((resolve) => {
+    let picked = null;
+    const suggested = categorize(r.title);
+    const kinds = [["treatment", "Treatment record"], ["consent", "Consent record"]];
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog rc-cat-dlg";
+    dlg.innerHTML = `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>Type &amp; category</h3>
+          <p>${escapeHtml(r.title)} · ${escapeHtml(fmt(r))}</p></div>
+
+        <div class="rc-cat-sec">
+          <span class="rc-cat-h">Type</span>
+          <div class="rc-cat-opts is-two">${kinds.map(([k, label]) => `
+            <label class="rc-cat-opt">
+              <input type="radio" name="kind" value="${k}"${k === r.kind ? " checked" : ""} />
+              <span>${label}</span>${k === r.kind ? "<small>Now</small>" : ""}
+            </label>`).join("")}</div>
+        </div>
+
+        <div class="rc-cat-sec">
+          <span class="rc-cat-h">Category</span>
+          <div class="rc-cat-opts">${ALL_CATS.map((c) => `
+            <label class="rc-cat-opt">
+              <input type="radio" name="cat" value="${c.key}"${c.key === r.category ? " checked" : ""} />
+              <span class="rc-dot" style="background:${c.color}"></span>
+              <span>${escapeHtml(c.title)}</span>
+              ${c.key === r.category ? "<small>Now</small>"
+                : c.key === suggested && suggested !== "other" ? '<small class="is-sug">Suggested from the form name</small>' : ""}
+            </label>`).join("")}</div>
+        </div>
+
+        <p class="fe-note">Only changes where it's listed. The form and its answers stay exactly as they are.</p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">Save</button>
+        </div>
+      </form>`;
+    const form = dlg.querySelector("form");
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const kind = (form.querySelector('input[name="kind"]:checked') || {}).value || r.kind;
+      const group = (form.querySelector('input[name="cat"]:checked') || {}).value || r.category;
+      picked = { kind, group };
+      dlg.close();
+    });
+    dlg.addEventListener("close", () => { dlg.remove(); resolve(picked); });
+    document.body.appendChild(dlg);
+    dlg.showModal();
+  });
 }
 
 const legacyMove = (kind, r) => (canMoveRecords()

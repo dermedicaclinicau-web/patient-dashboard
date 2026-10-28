@@ -9379,3 +9379,18 @@ a.fp-item[hidden] { display: none; }
 .st-menu-tag { margin-left: .35rem; padding: .05rem .45rem; border-radius: 999px; background: #ede9fe; color: #6d28d9;
   font-size: .68rem; font-style: normal; font-weight: 700; white-space: nowrap; }
 .st-menu .fp-empty a { color: var(--primary); font-weight: 600; }
+
+/* ---------- Records: Change category ---------- */
+dialog.lh-dialog.rc-cat-dlg { width: min(460px, calc(100vw - 2rem)); }
+.rc-cat-opts { display: grid; gap: .35rem; }
+.rc-cat-opt { display: flex; align-items: center; gap: .6rem; padding: .55rem .75rem; border: 1px solid var(--border);
+  border-radius: 10px; font-size: .9rem; cursor: pointer; }
+.rc-cat-opt:hover { border-color: #94a3b8; }
+.rc-cat-opt:has(input:checked) { border-color: var(--primary); background: var(--primary-soft); }
+.rc-cat-opt input { accent-color: var(--primary); }
+.rc-cat-opt small { margin-left: auto; font-size: .72rem; font-weight: 600; color: var(--muted); }
+
+.rc-cat-sec { display: grid; gap: .4rem; }
+.rc-cat-h { font-size: .72rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.rc-cat-opts.is-two { grid-template-columns: 1fr 1fr; }
+.rc-cat-opt small.is-sug { color: #6d28d9; }

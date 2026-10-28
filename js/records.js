@@ -71,7 +71,7 @@ async function portalRecords(patient) {
         portalId: s.id,
         kind: s.category,
         title: s.templateName,
-        category: GROUP_KEYS.includes(s.group) ? s.group : categorize(s.templateName),
+        category: portalCategory(s),
         date: keyDate(s.recordDate),
         dateText: s.recordDate,
         staff: s.createdBy,
@@ -137,4 +137,18 @@ export async function fetchPatientRecords(patient) {
   });
 
   return { treatments, consents };
+}
+
+// A portal record's category: one chosen with the Category button wins; then a form name that names a treatment
+// ("Wrinkle Relaxer Treatment Record"); then the category it was saved under; otherwise "other"
+function portalCategory(s) {
+  if (s.groupFixed === true && GROUP_KEYS.includes(s.group)) return s.group;
+  const byName = categorize(s.templateName);
+  if (byName !== "other") {
+    if (s.group && GROUP_KEYS.includes(s.group) && s.group !== byName) {
+      console.warn(`Portal form "${s.templateName}" (${s.id}) was saved under "${s.group}"; showing it under "${byName}".`);
+    }
+    return byName;
+  }
+  return GROUP_KEYS.includes(s.group) ? s.group : "other";
 }
