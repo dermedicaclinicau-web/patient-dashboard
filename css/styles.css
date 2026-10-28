@@ -9422,15 +9422,30 @@ dialog.lh-dialog.bs-dlg { width: min(640px, calc(100vw - 2rem)); }
 .bs-grp small { margin-left: auto; max-width: 50%; text-align: right; font-size: .75rem; color: var(--muted); }
 .bs-msg { margin: 0; font-size: .85rem; color: #475569; }
 .bs-msg:empty { display: none; }
-dialog.lh-dialog.bs-design { width: min(1200px, calc(100vw - 2rem)); }
-.bs-design-body { display: grid; grid-template-columns: 340px 1fr; gap: 1rem; }
-.bs-design-form { display: grid; align-content: start; gap: .65rem; max-height: 70vh; overflow: auto; padding-right: .25rem; }
-.bs-design-form h4 { margin: .4rem 0 0; font-size: .75rem; font-weight: 700; text-transform: uppercase; color: var(--muted); }
-.bs-design-form .f { display: grid; gap: .25rem; font-size: .82rem; font-weight: 600; }
+dialog.lh-dialog.bs-design { width: min(1200px, calc(100vw - 2rem)); padding: 0; overflow: hidden; }
+.bs-design-wrap { display: grid; gap: 1rem; padding: 1.25rem 1.5rem; }
+.bs-design-wrap .lh-dialog-head h3 { margin: 0 0 .2rem; }
+.bs-design-wrap .lh-dialog-head p { margin: 0; color: var(--muted); }
+.bs-design-wrap .lh-error { margin: 0; }
+.bs-design-wrap .lh-actions { display: flex; align-items: center; gap: .5rem; margin: 0; padding-top: .9rem; border-top: 1px solid var(--border); }
+.bs-design-body { display: grid; grid-template-columns: 320px 1fr; gap: 1.25rem; min-height: 0; }
+.bs-design-form { display: grid; align-content: start; gap: .7rem; height: calc(100vh - 16rem); max-height: 760px;
+  overflow: auto; padding: .1rem .9rem .5rem .1rem; }
+.bs-design-form h4 { margin: .5rem 0 0; padding-top: .75rem; border-top: 1px solid var(--border);
+  font-size: .72rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.bs-design-form .f { display: grid; gap: .3rem; font-size: .82rem; font-weight: 600; }
 .bs-design-form .f input, .bs-design-form .f select, .bs-design-form .f textarea {
-  font: inherit; font-weight: 400; padding: .45rem .6rem; border: 1px solid var(--border); border-radius: 8px; }
-.bs-design-prev iframe { width: 100%; height: 70vh; border: 1px solid var(--border); border-radius: 10px; background: #e2e8f0; }
-@media (max-width: 860px) { .bs-design-body { grid-template-columns: 1fr; } }
+  width: 100%; font: inherit; font-weight: 400; padding: .5rem .65rem; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+.bs-design-form .fe-check { display: flex; align-items: center; gap: .55rem; margin: 0; font-size: .85rem; font-weight: 400; }
+.bs-design-form .fe-note { margin: .25rem 0 0; padding: .6rem .75rem; border-radius: 8px; background: #f8fafc; font-size: .78rem; color: #475569; }
+.bs-design-prev { min-width: 0; }
+.bs-design-prev iframe { display: block; width: 100%; height: calc(100vh - 16rem); max-height: 760px;
+  border: 1px solid var(--border); border-radius: 10px; background: #e2e8f0; }
+@media (max-width: 860px) {
+  .bs-design-body { grid-template-columns: 1fr; }
+  .bs-design-form, .bs-design-prev iframe { height: auto; max-height: none; }
+  .bs-design-prev iframe { height: 70vh; }
+}
 
 .bs-file { display: flex; align-items: center; gap: .75rem; padding: .75rem; border: 1px solid var(--border); border-radius: 10px; }
 .bs-file-ico { display: grid; place-items: center; width: 44px; height: 52px; border-radius: 6px;
@@ -9443,3 +9458,4 @@ dialog.lh-dialog.bs-design { width: min(1200px, calc(100vw - 2rem)); }
 .bs-mail-staff { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: .2rem .75rem; max-height: 180px; overflow: auto; font-size: .85rem; }
 .bs-mail .f { display: grid; gap: .25rem; font-size: .82rem; font-weight: 600; }
 .bs-mail .f input, .bs-mail .f textarea { font: inherit; font-weight: 400; padding: .45rem .6rem; border: 1px solid var(--border); border-radius: 8px; }
+

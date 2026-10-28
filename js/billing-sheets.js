@@ -73,7 +73,7 @@ export async function saveBillingSheetSettings(x, staff) {
 /* ===================== The sheet ===================== */
 
 // 7 columns, so Prov and Fee line up in every section
-const COLS = "<colgroup>" + [23, 7, 17, 12, 8, 8, 25].map((w) => `<col style="width:${w}%">`).join("") + "</colgroup>";
+const COLS = "<colgroup>" + [23, 8, 16, 12, 8, 8, 25].map((w) => `<col style="width:${w}%">`).join("") + "</colgroup>";
 
 function css(s) {
   const f = s.fontSize;
@@ -91,6 +91,7 @@ function css(s) {
   .bs th { font-weight: bold; text-align: center; }
   .bs tr.r td { height: 6.2mm; }
   .bs .c { text-align: center; vertical-align: middle; }
+  .bs .nw { white-space: nowrap; font-size: ${f - 1}pt; padding-left: 0.5mm; padding-right: 0.5mm; }
   .bs .sm { font-size: ${f - 1.5}pt; }
   .bs .tiny { font-size: ${f - 3}pt; }
   .bs .lab { text-align: right; font-weight: bold; vertical-align: bottom; }
@@ -124,7 +125,7 @@ function sheetHtml(d, s) {
   if (s.showSsp) {
     const items = d.ssp ? d.ssp.items : [];
     const rows = Math.max(1, items.length + s.sspRows);
-    t += `<tr><th>${esc(d.ssp ? `SSP ${d.ssp.dateText}` : "SSP: none on file")}</th><th>AM/PM</th>` +
+    t += `<tr><th>${esc(d.ssp ? `SSP ${d.ssp.dateText}` : "SSP: none on file")}</th><th class="nw">AM/PM</th>` +
       `<th colspan="2">Purchase Status</th><th>Prov</th><th>Fee</th><td rowspan="${rows + 2}" class="tiny">${esc(s.sideLabel)}</td></tr>`;
     for (let i = 0; i < rows; i++) {
       const it = items[i];
@@ -616,7 +617,7 @@ export async function openBillingSheetDesign({ staff = null } = {}) {
   const text = (k, label, max) => `<label class="f"><span>${label}</span><input data-k="${k}" maxlength="${max}" /></label>`;
   const num = (k, label, lo, hi) => `<label class="f"><span>${label}</span><input data-k="${k}" type="number" min="${lo}" max="${hi}" step="1" /></label>`;
   const tick = (k, label) => `<label class="fe-check"><input type="checkbox" data-k="${k}" /> ${label}</label>`;
-  dlg.innerHTML = `
+  dlg.innerHTML = `<div class="bs-design-wrap">
     <div class="lh-dialog-head"><h3>Billing sheet design</h3>
       <p>How the sheets made from the Calendar look. The preview shows a sample patient.</p></div>
     <div class="bs-design-body">
@@ -650,7 +651,7 @@ export async function openBillingSheetDesign({ staff = null } = {}) {
       <span style="flex:1"></span>
       <button type="button" class="lh-btn is-quiet" data-act="cancel">${canSave ? "Cancel" : "Close"}</button>
       ${canSave ? '<button type="button" class="lh-btn is-primary" data-act="save">Save</button>' : ""}
-    </div>`;
+    </div></div>`;
   document.body.appendChild(dlg);
   const form = dlg.querySelector("form");
   const frame = dlg.querySelector("iframe");
