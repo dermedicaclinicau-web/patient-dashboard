@@ -78,6 +78,7 @@ async function portalRecords(patient) {
         link: "",
         recordId: s.id,
         group: s.group || "",
+        dateWas: (s.original && s.original.recordDate) || "",
         matchedByName: false,
       }));
   } catch (err) {

@@ -1,12 +1,13 @@
 import { fetchPatientRecords, CATEGORIES, OTHER_CATEGORY, categorize } from "./records.js";
-import { escapeHtml, parseDateKey } from "./utils.js";
+import { escapeHtml, parseDateKey, toDateKey } from "./utils.js";
 import { getSubmission, listSubmissionsForPatient } from "./form-submissions.js";
 import { fetchBillingAndRx } from "./billing-rx-view.js";
 import { patientIds } from "./patients.js";
 import { getFormVersion, listPublishedForms } from "./form-templates.js";
 import { openMoveRecordDialog, canMoveRecords } from "./record-move.js";
 import { db, auth } from "./firebase-config.js";
-import { doc, updateDoc, arrayUnion } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { doc, getDoc, updateDoc, arrayUnion, increment, serverTimestamp }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { showToast } from "./utils.js";
 
 const svg = (p, cls = "") =>
@@ -350,6 +351,49 @@ export function mountRecords(root, patient, staff = null) {
       b.disabled = false;
     }
   });
+  // Edit date: correct a portal record's date. The first original date and every change are kept.
+  grid.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-edit-sub]");
+    if (!b || b.disabled) return;
+    e.preventDefault();
+    const r = [...lists.treatment, ...lists.consent].find((x) => x.portalId === b.dataset.editSub);
+    if (!r) return;
+    const res = await editDateDialog(r);
+    if (!res || !grid.isConnected) return;
+    b.disabled = true;
+    try {
+      const ref = doc(db, "form_submissions", r.portalId);
+      const snap = await getDoc(ref);
+      if (!snap.exists()) { showToast("This record no longer exists."); return; }
+      const cur = snap.data();
+      if (cur.recordDate === res.date) { showToast("That's already the record's date."); return; }
+      const by = (staff && staff.name) || "";
+      const byUid = (auth.currentUser && auth.currentUser.uid) || "";
+      await updateDoc(ref, {
+        recordDate: res.date,
+        original: cur.original || { recordDate: cur.recordDate },
+        edits: arrayUnion({
+          field: "recordDate", from: cur.recordDate, to: res.date, reason: res.reason,
+          at: new Date().toISOString(), by, byUid,
+        }),
+        editCount: increment(1),
+        editedAt: serverTimestamp(),
+        editedBy: by,
+        editedByUid: byUid,
+      });
+      showToast(`Date changed to ${fmt({ date: parseDateKey(res.date) })}`);
+      loaded = false;
+      txBody.innerHTML = csBody.innerHTML = '<div class="skeleton sm"></div>';
+      load();
+    } catch (err) {
+      console.error("Date change failed:", err);
+      showToast(err.code === "permission-denied"
+        ? "Changing the date is blocked. Check the form_submissions Firestore rule and your Move records access."
+        : "Couldn't change the date. Try again.");
+    } finally {
+      b.disabled = false;
+    }
+  });
   if (highlightId && !txCard.open) txCard.open = true; // just saved a record: show it
   if (txCard.open) load();
 
@@ -383,6 +427,7 @@ function portalView(r) {
   const id = encodeURIComponent(r.portalId);
   let html = '<a class="rc-act" href="#/form-record/' + id + '" target="_blank" rel="noopener">' + ICONS.view + 'View</a>';
   if (canMoveRecords()) {
+    html += '<button type="button" class="rc-act" data-edit-sub="' + escapeHtml(r.portalId) + '" title="Correct the record date">' + ICONS.edit + 'Edit date</button>';
     html += '<button type="button" class="rc-act" data-move-sub="' + escapeHtml(r.portalId) + '">' + ICONS.move + 'Move</button>';
     html += '<button type="button" class="rc-act" data-recat="' + escapeHtml(r.portalId) + '" title="Change whether it\'s a treatment or consent record, and which treatment it\'s under">' + ICONS.tag + 'Type &amp; category</button>';
   }
@@ -443,7 +488,56 @@ function pickCategory(r) {
     dlg.showModal();
   });
 }
+// The Edit date window. Resolves with { date, reason }, or null.
+function editDateDialog(r) {
+  return new Promise((resolve) => {
+    let picked = null;
+    const today = toDateKey();
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog rc-cat-dlg";
+    dlg.innerHTML = `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>Edit record date</h3>
+          <p>${escapeHtml(r.title)} · saved as ${escapeHtml(fmt(r))}</p></div>
+        <label class="rc-edit-f"><span>Correct date</span>
+          <input type="date" name="date" value="${escapeHtml(r.dateText || "")}" max="${today}" required /></label>
+        <label class="rc-edit-f"><span>Reason for the change</span>
+          <textarea name="reason" rows="2" maxlength="300" required
+            placeholder="e.g. Filled in the day after the treatment"></textarea></label>
+        <p class="rc-edit-err" role="alert"></p>
+        <p class="fe-note">Only the date changes. The answers and signatures stay exactly as they are,
+          and the original date is kept with the record.</p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">Save</button>
+        </div>
+      </form>`;
+    const form = dlg.querySelector("form");
+    const err = dlg.querySelector(".rc-edit-err");
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const date = form.querySelector('input[name="date"]').value;
+      const reason = form.querySelector('textarea[name="reason"]').value.trim();
+      if (!parseDateKey(date)) { err.textContent = "Choose a date."; return; }
+      if (date > today) { err.textContent = "The date can't be in the future."; return; }
+      if (date === r.dateText) { err.textContent = "That's the date it already has."; return; }
+      if (reason.length < 3) { err.textContent = "Add a short reason for the change."; return; }
+      picked = { date, reason };
+      dlg.close();
+    });
+    dlg.addEventListener("close", () => { dlg.remove(); resolve(picked); });
+    document.body.appendChild(dlg);
+    dlg.showModal();
+  });
+}
 
+// "Date corrected · first saved as 27 Oct 2026"
+function dateEditedNote(r) {
+  if (!r.dateWas || r.dateWas === r.dateText) return "";
+  const d = parseDateKey(r.dateWas);
+  return `<p class="rc-moved">Date corrected · first saved as ${escapeHtml(d ? fmt({ date: d }) : r.dateWas)}</p>`;
+}
 const legacyMove = (kind, r) => (canMoveRecords()
   ? `<button type="button" class="rc-act" data-move-legacy="${kind}" data-id="${escapeHtml(r.id)}">${ICONS.move}Move</button>` : "");
 // Old-app Wrinkle Relaxer records: start a new portal record with the same markings
@@ -517,6 +611,7 @@ function txItemHtml(t) {
         <div class="rc-item-top"><h4>${escapeHtml(t.title)}</h4><span class="rc-date">${escapeHtml(fmt(t))}</span></div>
         <div class="rc-badges"><span class="rc-badge portal">Portal form</span>${consentBadge(t)}</div>
         ${t.staff ? `<p class="rc-staff">${escapeHtml(t.staff)}</p>` : ""}
+        ${dateEditedNote(t)}
         <div class="rc-actions">${portalView(t)}</div>
       </article>`;
   }
@@ -545,6 +640,7 @@ function consentItemHtml(c) {
         <div class="rc-item-top"><h4>${escapeHtml(c.title)}</h4><span class="rc-date">${escapeHtml(fmt(c))}</span></div>
         <div class="rc-badges"><span class="rc-badge portal">Portal form</span>${rxBadge(c)}</div>
         ${c.staff ? `<p class="rc-staff">${escapeHtml(c.staff)}</p>` : ""}
+        ${dateEditedNote(c)}
         <div class="rc-actions">${portalView(c)}</div>
       </article>`;
   }

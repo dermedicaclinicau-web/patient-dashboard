@@ -9397,3 +9397,11 @@ dialog.lh-dialog.rc-cat-dlg { width: min(460px, calc(100vw - 2rem)); }
 
 /* Calendar badges: "Tx WR" */
 .cb .cb-code { margin-left: .25em; font-weight: 800; letter-spacing: .02em; }
+
+/* Records: Edit date window */
+.rc-edit-f { display: grid; gap: .35rem; font-size: .85rem; font-weight: 600; }
+.rc-edit-f input, .rc-edit-f textarea { font: inherit; font-weight: 400; padding: .55rem .7rem;
+  border: 1px solid var(--border); border-radius: 10px; min-height: 44px; box-sizing: border-box; width: 100%; }
+.rc-edit-f textarea { resize: vertical; }
+.rc-edit-err { margin: 0; color: #b91c1c; font-size: .82rem; }
+.rc-edit-err:empty { display: none; }
