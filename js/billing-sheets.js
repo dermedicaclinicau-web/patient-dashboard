@@ -49,6 +49,8 @@ export const BS_DEFAULTS = {
   serviceRows: 5,      // rows under Services done today (more if they have more services)
   sspRows: 2,          // blank rows under their Skin Script products
   nextRows: 5,         // Next appt rows (the first is always blank)
+  sspTotal: 0,         // Skin Script rows in total (0 = their products + the blank rows above)
+  rxProducts: ["Fading Cream"],   // shown as "NA" (not "Not Purchased") when no given date is found
   showSsp: true, fillAmPm: true, showPayment: true, showNext: true, showTicks: true,
   buyingLabel: "BUYING PKG TODAY",
   sideLabel: "LED/ANAESTHETIC APPS/ROOM & TIME",
@@ -71,6 +73,9 @@ export function cleanBs(x = {}) {
     serviceRows: int(x.serviceRows, 1, 12, D.serviceRows),
     sspRows: int(x.sspRows, 0, 12, D.sspRows),
     nextRows: int(x.nextRows, 1, 10, D.nextRows),
+    sspTotal: int(x.sspTotal, 0, 20, D.sspTotal),
+    rxProducts: (Array.isArray(x.rxProducts) ? x.rxProducts : D.rxProducts)
+      .map((t) => line(t, 120)).filter(Boolean).slice(0, 60),
     showSsp: x.showSsp !== false, fillAmPm: x.fillAmPm !== false, showPayment: x.showPayment !== false,
     showNext: x.showNext !== false, showTicks: x.showTicks !== false,
     buyingLabel: pick("buyingLabel", 60), sideLabel: pick("sideLabel", 80),
@@ -184,7 +189,8 @@ function sheetHtml(d, s) {
   const owing = ["o", `<td colspan="5" class="owe">Owing (To Pay today):</td><td></td>`];
   if (s.showSsp) {
     const items = d.ssp ? d.ssp.items : [];
-    const rows = Math.max(1, items.length + s.sspRows);
+    // A set total (never fewer than their products), or their products plus the blank rows
+    const rows = s.sspTotal > 0 ? Math.max(s.sspTotal, items.length) : Math.max(1, items.length + s.sspRows);
     t += `<tr><th>${esc(d.ssp ? `SSP ${d.ssp.dateText}` : "SSP: none on file")}</th><th class="nw">AM/PM</th>` +
       `<th colspan="2">Purchase Status</th><th>Prov</th><th>Fee</th>` +
       `<td rowspan="${rows + 2}" class="side">${esc(s.sideLabel)}</td></tr>`;
@@ -394,7 +400,7 @@ function nextVisitsFallback(pre, dateKey) {
 }
 
 // nextMap: { pttId (lower case): [{ date, start, mins, services, staff }] } from Apps Script, or null if it couldn't be read
-async function sheetData(v, dateKey, nextMap) {
+async function sheetData(v, dateKey, nextMap, s = BS_DEFAULTS) {
   const time = String(v.time || "").replace(/\s*(am|pm)\b/i, (x, ap) => ap.toUpperCase()).replace(/\s+/g, "");
   const d = {
     patientName: v.patientName || "Patient",
@@ -421,8 +427,10 @@ async function sheetData(v, dateKey, nextMap) {
       items: ssp.items.filter((it) => it.name && !seen.has(norm(it.name)) && seen.add(norm(it.name))).map((it) => {
         const given = givenDate(rx, it.name);
         const bought = buys.filter((p) => sameProduct(p.product, it.name)).map((p) => p.date).sort().pop() || "";
+        const isRx = (s.rxProducts || []).some((n) =>
+          sameProduct(n, it.name) || (norm(n).length >= 5 && norm(it.name).includes(norm(n))));
         const status = given && given >= bought ? `Given ${dmy(given)}`
-          : bought ? `Purchased ${dmy(bought)}` : "Not Purchased";
+          : bought ? `Purchased ${dmy(bought)}` : isRx ? "NA" : "Not Purchased";
         return { ...it, status };
       }),
     };
@@ -795,10 +803,10 @@ export function openBillingSheets({ dateKey, appts, staff = null }) {
       await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
         while (queue.length) {
           const [v, i] = queue.shift();
-          try { out[i] = await sheetData(v, dateKey, nextMap); }
+          try { out[i] = await sheetData(v, dateKey, nextMap, s); }
           catch (err) {
             console.warn("Billing sheet details failed for", v.patientName, err);
-            out[i] = await sheetData({ ...v, patientId: "" }, dateKey, nextMap);
+            out[i] = await sheetData({ ...v, patientId: "" }, dateKey, nextMap, s);
           }
           msg.textContent = `Getting details ${++done} of ${chosen.length}…`;
         }
@@ -1027,7 +1035,8 @@ export async function openBillingSheetDesign({ staff = null } = {}) {
           </label>`).join("")}
         <h4>Rows</h4>
         ${num("serviceRows", "Services done today (at least)", 1, 12)}
-        ${num("sspRows", "Blank rows under the Skin Script", 0, 12)}
+        ${num("sspTotal", "Skin Script rows in total (0 = their products + the blank rows below)", 0, 20)}
+        ${num("sspRows", "Blank rows under the Skin Script (when the total is 0)", 0, 12)}
         ${num("nextRows", "Next appt rows (the first is always blank, later bookings are left off)", 1, 10)}
         <h4>Show</h4>
         ${tick("showSsp", "Skin Script products and purchase status")}
@@ -1040,6 +1049,8 @@ export async function openBillingSheetDesign({ staff = null } = {}) {
         ${text("sideLabel", "Box beside the Skin Script", 80)}
         ${text("consumablesLabel", "Box beside the totals", 60)}
         ${text("payLine", "Payment line", 120)}
+        <label class="f"><span>Prescription products (one per line). Shown as NA when no given date is found</span>
+          <textarea data-k="rxProducts" rows="3"></textarea></label>
         <label class="f"><span>Tick boxes (one per line)</span><textarea data-k="ticks" rows="3"></textarea></label>
         <p class="fe-note">The Scanner reads the patient name and date at the top, SERVICES DONE TODAY, FEE, Prov and
           Purchase Status, so those always stay the same.</p>
@@ -1066,7 +1077,7 @@ export async function openBillingSheetDesign({ staff = null } = {}) {
     form.querySelectorAll("[data-k]").forEach((el) => {
       const v = st[el.dataset.k];
       if (el.type === "checkbox") el.checked = v !== false;
-      else if (el.dataset.k === "ticks") el.value = (v || []).join("\n");
+      else if (el.dataset.k === "ticks" || el.dataset.k === "rxProducts") el.value = (v || []).join("\n");
       else el.value = v ?? "";
     });
     form.querySelectorAll("[data-size]").forEach((el) => {
@@ -1078,7 +1089,8 @@ export async function openBillingSheetDesign({ staff = null } = {}) {
   const read = () => {
     const x = { sizes: {} };
     form.querySelectorAll("[data-k]").forEach((el) => {
-      x[el.dataset.k] = el.type === "checkbox" ? el.checked : el.dataset.k === "ticks" ? el.value.split(/\n+/) : el.value;
+      x[el.dataset.k] = el.type === "checkbox" ? el.checked
+        : el.dataset.k === "ticks" || el.dataset.k === "rxProducts" ? el.value.split(/\n+/) : el.value;
     });
     form.querySelectorAll("[data-size]").forEach((el) => { if (el.value.trim() !== "") x.sizes[el.dataset.size] = el.value; });
     return cleanBs(x);
