@@ -4,8 +4,8 @@ import { searchPatients, warmPatients } from "./patient-list.js";
 import { listPublishedForms, getFormTemplate, getFormVersion } from "./form-templates.js";
 import { normaliseField } from "./form-fields.js";
 import { mountConsumablesField, consumableAmountText } from "./consumables-field.js";
-import { consumeInTx, backdateCounts, getBaseline, listProducts, listMoves, undoMove, dayKey, isKitProduct, kitId }
-  from "./inventory-api.js";
+import { consumeInTx, backdateCounts, getBaseline, listProducts, listMoves, undoMove, dayKey, isKitProduct, kitId,
+  getUsage, correctUsage } from "./inventory-api.js";
 import { db } from "./firebase-config.js";
 import { runTransaction, collection, query, where, getDocs, getDoc, doc, limit }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -774,7 +774,10 @@ export function mountPaperRecords(container, { staff } = {}) {
           ${list.length ? `<ul class="ppr-cs-list">${list.map((p) => `<li>${esc(p)}</li>`).join("")}</ul>`
             : '<p class="fe-note">Not written on the paper.</p>'}
           ${f.productsFor ? `<small class="fe-note">Recorded as used by <strong>${esc(f.productsFor)}</strong>.</small>` : ""}
-          ${f.productsTaken ? '<small class="fe-note">To change these, correct the products used in Inventory (Manage inventory).</small>' : ""}</div>`;
+          ${f.productsTaken ? (can("inventory.manage")
+            ? '<button type="button" class="lh-btn" data-act="fix-products">Correct the amounts</button>'
+            : '<small class="fe-note">To change these, ask someone with Manage inventory to correct them.</small>') : ""}</div>`;
+        if (f.productsTaken) liveProducts();   // what the record says now, corrections included
         return;
       }
       if (!cs.formId) { prodEl.innerHTML = ""; return; }
@@ -798,6 +801,98 @@ export function mountPaperRecords(container, { staff } = {}) {
         { staff, kitFor: kitOwner(), onChange: noteCsSoon }));
       noteCs();
       drawExtra();
+    }
+
+    // The usage record as it is now (the scan's saved summary doesn't change when it's corrected)
+    async function liveProducts() {
+      try {
+        const x = await usageOf(paperSubId(f.id));
+        const u = x && await getUsage(x.id);
+        const ul = prodEl.querySelector(".ppr-cs-list");
+        if (!u || !dlg.isConnected) return;
+        const list = csSummary(u.lines.filter((l) => (Number(l.total) || 0) > 0));
+        if (ul) ul.innerHTML = list.map((t) => `<li>${esc(t)}</li>`).join("");
+        if (u.corrected && !prodEl.querySelector('[data-role="corrected"]')) {
+          const c = (u.corrections || [])[u.corrections.length - 1] || {};
+          prodEl.querySelector(".ppr-cs-head").insertAdjacentHTML("beforeend",
+            `<span class="ppr-pill is-info" data-role="corrected" title="${esc(c.reason || "")}">Corrected${c.by ? ` by ${esc(c.by)}` : ""}</span>`);
+        }
+      } catch (ex) { console.warn("Products used not loaded:", ex); }
+    }
+
+    // Correct what was entered: the difference goes back into (or comes out of) the same kit or batch
+    async function fixProducts() {
+      if (saving) return;
+      let u = null;
+      try {
+        const x = await usageOf(paperSubId(f.id));
+        u = x && await getUsage(x.id);
+      } catch (ex) { console.error("Usage not loaded:", ex); }
+      if (!u) { showToast("Couldn't find the products used for this scan."); return; }
+      const items = [];
+      u.lines.forEach((l, li) => (l.rows || []).forEach((r, ri) => {
+        if (l.kind === "kit" || l.kind === "storage") items.push({ l, r, li, ri });
+      }));
+      if (!items.length) { showToast("These products are shared or from an opened vial, so they can't be corrected here yet."); return; }
+
+      const d2 = document.createElement("dialog");
+      d2.className = "lh-dialog inv-dlg";
+      d2.innerHTML = `<form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>Correct the products used</h3>
+          <p>${esc(f.patientName)} · ${esc(niceDay(f.recordDate))}. Enter what the paper says. The difference goes back into,
+            or comes out of, the same kit or batch. The original amounts are kept on the record.</p></div>
+        ${items.map((x, i) => {
+          const kit = x.l.kind === "kit";
+          return `<div class="lh-field"><span class="lh-label">${esc(x.l.name)}${x.r.batch ? ` · ${esc(x.l.batchLabel || "Batch")} ${esc(x.r.batch)}` : ""}
+              <small> Recorded: ${esc(consumableAmountText(x.l, x.r, false))}</small></span>
+            <div class="inv-two">
+              <span class="fe-num"><input class="fe-input" type="number" min="0" step="${kit ? "0.5" : "1"}" inputmode="decimal"
+                data-i="${i}" data-k="amount" value="${esc(x.r.amount)}" aria-label="${esc(x.l.name)} amount" /><span>${esc(x.l.unit)}</span></span>
+              ${!kit && x.l.doseUnit ? `<span class="fe-num"><input class="fe-input" type="number" min="0" step="0.1" inputmode="decimal"
+                data-i="${i}" data-k="dose" value="${esc(x.r.dose)}" aria-label="${esc(x.l.doseUnit)} given" /><span>${esc(x.l.doseUnit)} given</span></span>` : ""}
+            </div></div>`;
+        }).join("")}
+        <label class="lh-field"><span class="lh-label">Reason</span>
+          <input class="fe-input" name="reason" maxlength="300" placeholder="e.g. Entered 17.5, the paper says 16" /></label>
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="x-cancel">Cancel</button>
+          <button type="submit" class="lh-btn is-primary">Save correction</button>
+        </div></form>`;
+      document.body.appendChild(d2);
+      d2.addEventListener("close", () => d2.remove());
+      d2.querySelector('[data-act="x-cancel"]').addEventListener("click", () => d2.close());
+      const form = d2.querySelector("form");
+      const e2 = d2.querySelector(".lh-error");
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        e2.hidden = true;
+        const val = (i, k) => { const el = form.querySelector(`[data-i="${i}"][data-k="${k}"]`); return el ? el.value : null; };
+        const changes = items.map((x, i) => ({
+          li: x.li, ri: x.ri, amount: Number(val(i, "amount")) || 0,
+          dose: val(i, "dose") === null ? Number(x.r.dose) || 0 : Number(val(i, "dose")) || 0,
+        }));
+        const btn = form.querySelector('[type="submit"]');
+        btn.disabled = true;
+        btn.textContent = "Saving…";
+        try {
+          await correctUsage(u.id, changes, form.elements.reason.value, staff);
+          const nu = await getUsage(u.id);
+          f.products = csSummary(nu.lines.filter((l) => (Number(l.total) || 0) > 0));   // this session's list row
+          d2.close();
+          drawProducts();
+          draw();
+          showToast("Products used corrected. Stock updated.");
+        } catch (ex) {
+          console.error("Correction failed:", ex);
+          e2.textContent = ex && ex.code === "permission-denied" ? "Correcting needs Manage inventory access." : (ex && ex.message) || "Couldn't save. Try again.";
+          e2.hidden = false;
+          btn.disabled = false;
+          btn.textContent = "Save correction";
+        }
+      });
+      d2.showModal();
+      form.querySelector('[data-k="amount"]').focus();
     }
 
     function syncCsMode() {
@@ -1404,6 +1499,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       if (act === "close") { dlg.close(); return; }
       if (act === "file") { fileAs(actEl); return; }
       if (act === "stock") { saveProducts(actEl); return; }
+      if (act === "fix-products") { fixProducts(); return; }
       if (act === "rx-add") { ft.rx.push({ product: "", custom: !rxList.length, name: "" }); drawType(); return; }
       if (act === "rx-x") { ft.rx.splice(Number(e.target.closest("[data-rx]").dataset.rx), 1); drawType(); return; }
       if (act === "next") { goNext(); return; }

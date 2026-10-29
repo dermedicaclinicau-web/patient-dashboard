@@ -73,7 +73,7 @@ function portalEntries({ uid, product, moves, loans, usage, days }) {
       // Entered by someone else from this kit: a paper record for a colleague, or one not moved over to them yet
       const [patientName = ""] = String(m.note || "").split(" · ");
       add({ ...base, kind: "move", sub: "use", units: kd, patientName, type: "Treatment", paper: true, areas: "" });
-    } else if (m.type === "kit-correct" && m.staffUid === uid && kd) {
+    } else if (m.type === "kit-correct" && m.staffUid === uid && kd && !ImmutableOwn(ownUse, m)) {
       add({ ...base, kind: "move", sub: "fix", units: kd });
     }
   });

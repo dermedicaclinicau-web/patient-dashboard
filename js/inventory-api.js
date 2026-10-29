@@ -2757,6 +2757,8 @@ export async function correctUsage(id, changes, reason, staff) {
     work.filter((w) => w.move).forEach((w) => logMove(tx, staff, {
       type: w.kit ? "kit-correct" : "use-correct", productId: w.l.productId, productName: w.l.name, unit: w.l.unit,
       ...(w.kit ? { staffUid: w.kitOwner } : {}),
+      // The units really used were the corrected amount, on the treatment day
+      ...(KEY_RE.test(u.recordDate || "") ? { effectiveDate: u.recordDate } : {}),
       lines: [{ loc: w.kit ? "kit" : w.loc, batch: w.r.batch || "", expiry: w.r.expiry || "", delta: -w.move }],
       reason: "Usage corrected", ref: id,
       note: [`${u.patientName || ""} · ${u.formName || ""}`, changeText(w), w.kit ? `${ownerName}'s kit` : "", why]
@@ -3338,7 +3340,7 @@ function kitFlowEvents(moves, loans, staffUid, productsById, since, until = null
     const kitDelta = (m.lines || []).filter((l) => l.loc === "kit").reduce((a, l) => a + (Number(l.delta) || 0), 0);
     let units;
     if (m.type === "kit-take" || m.type === "kit-return") units = kitDelta * per(m.productId);   // vials → units
-    else if (m.type === "kit-use") units = kitDelta;                                             // already units
+    else if (m.type === "kit-use" || m.type === "kit-correct") units = kitDelta;                 // already units
     else if (m.type === "kit-discard") {
       const d = Number(m.discardUnits);
       units = -(Number.isFinite(d) ? d : Math.abs(kitDelta) * per(m.productId));
@@ -4649,7 +4651,10 @@ export async function kitDayLedger(staffUid, key) {
     } else if (m.type === "kit-count" && m.staffUid === staffUid) {
       units = Number(m.deltaUnits) || 0;
       text = m.reason === "Kit set by admin" ? `Kit set by ${m.by || "an admin"}` : `Count difference accepted by ${m.by || "an admin"}`;
-    } else if (m.type === "kit-correct") { units = kd; text = `Usage corrected by ${m.by || "an admin"}`; }
+    } else if (m.type === "kit-correct" && m.staffUid === staffUid && !useIds.has(String(m.ref || ""))) {
+      // Their own records already show the corrected amount; this is for a record under someone else, from this kit
+      units = kd; text = `Usage corrected by ${m.by || "an admin"}`;
+    }
     else if (m.type === "kit-use" && m.staffUid === staffUid && !useIds.has(String(m.ref || ""))) {
       units = kd;   // a paper record for another clinician, taken from this kit
       text = `Used on another clinician's paper record (entered by ${m.by || "an admin"})`;
