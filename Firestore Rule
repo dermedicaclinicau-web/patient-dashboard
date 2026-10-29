@@ -1464,7 +1464,7 @@ match /inv_count_drafts/{id} {
       allow delete: if can('seo.manage');
     }
     match /seo_health/{id} { allow read: if can('menu.seo'); allow write: if false; }
-
+    match /seo_audience/{id} { allow read: if can('menu.seo'); allow write: if false; }
     match /seo_opps/{id} {
       allow read: if can('menu.seo');
       allow create, update: if can('seo.work')

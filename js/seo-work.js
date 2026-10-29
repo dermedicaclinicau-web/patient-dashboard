@@ -6,6 +6,7 @@ import {
   doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, collection, query, where, getDocs, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { loadHealth, viewHealth, healthPanelHtml } from "./seo-health.js";
+import { loadAudience, viewAudience } from "./seo-audience.js";
 
 const BRAND = "__brand", OTHER = "__other", ALL = "__all";
 const EXP_CTR = [0.28, 0.16, 0.11, 0.08, 0.06, 0.045]; // rough click rate for positions 1–6
@@ -15,6 +16,7 @@ const OPP = {
   ctr:      { label: "Low click rate", tone: "amber" },
   decay:    { label: "Losing clicks", tone: "red" },
   cannibal: { label: "Pages competing", tone: "violet" },
+  area: { label: "Local area", tone: "green" },
 };
 const STATUS = { open: "To do", doing: "Doing", done: "Done", ignored: "Ignored" };
 const LOG_TYPES = ["Content", "Title / meta", "New page", "Technical", "Links", "Other"];
@@ -23,6 +25,7 @@ const LOG_TITLE = {
   ctr: (o) => `Rewrote title and description for “${o.title}”`,
   decay: (o) => `Refreshed ${o.title}`,
   cannibal: (o) => `Fixed pages competing for “${o.title}”`,
+  area: (o) => `Improved local content for ${o.title}`,
 };
 const SUGGESTED = {
   topics: [
@@ -100,7 +103,7 @@ export async function loadWork(force) {
   if (wcache.v && !force) return wcache.v;
   if (wcache.pending) return wcache.pending;
   wcache.pending = (async () => {
-    const w = { queries: [], qs: null, settings: null, opps: {}, log: [], errors: {}, prefill: null, health: null };
+    const w = { queries: [], qs: null, settings: null, opps: {}, log: [], errors: {}, prefill: null, health: null, audience: null };
     const safe = async (k, fn) => { try { await fn(); } catch (e) { w.errors[k] = e.message || String(e); } };
     await Promise.all([
       safe("queries", async () => {
@@ -113,6 +116,7 @@ export async function loadWork(force) {
           .forEach((c) => JSON.parse(c.rows || "[]").forEach((r) => w.queries.push(rowToQ(r))));
       }),
       safe("health", async () => { w.health = await loadHealth(); }),
+      safe("audience", async () => { w.audience = await loadAudience(); }),
       safe("settings", async () => {
         const s = await getDoc(doc(db, "seo_settings", "main"));
         if (s.exists()) w.settings = s.data();
@@ -199,7 +203,7 @@ export function renderWorkTab(tab, body, c) {
   const wrap = document.createElement("div");
   wrap.className = "seo-w";
   body.replaceChildren(wrap);
-  ({ keywords: viewKeywords, opps: viewOpps, health: viewHealth, log: viewLog, settings: viewSettings }[tab] || viewKeywords)(wrap, c, ui);
+  ({ keywords: viewKeywords, opps: viewOpps, health: viewHealth, audience: viewAudience, log: viewLog, settings: viewSettings }[tab] || viewKeywords)(wrap, c, ui);
 }
 
 /* ---------- shared bits ---------- */
@@ -346,7 +350,14 @@ function viewKeywords(wrap, c, ui) {
 
 function buildOpps(c) {
   const { work: w, data } = c;
-  const by = { striking: [], ctr: [], decay: [], cannibal: [] };
+  const by = { striking: [], ctr: [], decay: [], cannibal: [], area: [] };
+  // Areas people search for, where the site isn't on page 1
+  for (const a of w.audience?.areas || []) {
+    const s = a.search;
+    if (!s?.cur || s.cur.i < 50 || s.cur.pos == null || s.cur.pos <= 8) continue;
+    by.area.push({ type: "area", key: "area:" + a.name, title: a.name, url: s.queries?.[0]?.[4] || "",
+      gain: Math.max(0, Math.round(s.cur.i * EXP_CTR[2] - s.cur.c)), area: a });
+  }
   for (const q of w.queries) {
     if (q.topic === BRAND || q.pos == null) continue;
     if (q.pos >= 8 && q.pos <= 20 && q.i >= 50) {
@@ -410,6 +421,13 @@ function oppBody(o, c) {
       ${Array.isArray(p.weekly) ? `<div class="seo-w-spark">${h.sparkline(p.weekly, 160, 30)} <span class="seo-note">clicks, last 12 weeks</span></div>` : ""}
       ${todo("Open the page details to see which searches it lost. Refresh the content, check it loads quickly, and make sure related pages still link to it.")}`;
   }
+  if (o.type === "area") {
+    const s = o.area.search;
+    return `<p>Searches mentioning <strong>${h.esc(o.title)}</strong> were seen ${h.fmtInt(s.cur.i)} times (${h.fmtInt(s.cur.c)} clicks),
+        at an average position of <strong>${h.fmtPos(s.cur.pos)}</strong>.</p>
+      <p class="seo-note">Top searches: ${s.queries.slice(0, 3).map((q) => h.esc(q[0])).join(" · ")}</p>
+      ${todo("Add a section or page for this area: name the suburbs you see patients from, travel time and parking, and link to it from your treatment pages. A Google Business Profile post mentioning the area helps too.")}`;
+  }
   if (o.type === "cannibal") {
     return `<p>${q.pages.length} pages show for this search (${h.fmtInt(q.i)} impressions), so Google splits between them.</p>
       ${pagesList(q.pages, c)}
@@ -435,7 +453,7 @@ function oppCard(o, c) {
       ${o.gain > 0 ? `<span class="seo-w-gain">≈ +${h.fmtInt(o.gain)} clicks / 28 days</span>` : ""}</header>
     <h4>${quoted}</h4>
     ${oppBody(o, c)}
-    ${(o.type === "striking" || o.type === "ctr" || o.stale) && o.url
+    ${(o.type === "striking" || o.type === "ctr" || o.type === "area" || o.stale) && o.url
       ? `<p class="seo-note">Page: ${pg ? `<button class="seo-w-link" data-open="${pg.id}">${h.esc(o.url)}</button>` : h.esc(o.url)}</p>` : ""}
     ${o.type === "decay" && pg && !o.stale ? `<p><button class="seo-w-link" data-open="${pg.id}">Open page details</button></p>` : ""}
     ${o.st ? `<p class="seo-note">${STATUS[o.status] || ""} · ${h.esc(o.st.byName || "someone")}${at ? " · " + at.toLocaleDateString("en-AU", { day: "numeric", month: "short" }) : ""}</p>` : ""}
@@ -801,8 +819,8 @@ function viewSettings(wrap, c) {
       t.disabled = true;
       try {
         const data = { topics: clean, brand: brands, keyPages: pages, compliance: wordList.slice(0, 200) };
-        await setDoc(doc(db, "seo_settings", "main"), { ...data, updatedBy: uid(), updatedAt: serverTimestamp() });
-        w.settings = data;
+        await setDoc(doc(db, "seo_settings", "main"), { ...data, updatedBy: uid(), updatedAt: serverTimestamp() }, { merge: true });
+        w.settings = { ...(w.settings || {}), ...data };
         classify(w);
         if (w.ui) w.ui.topic = ALL;
         const s2 = settingsOf(w);

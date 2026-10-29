@@ -12,6 +12,7 @@ const TABS = [
   { id: "keywords", label: "Keywords" },
   { id: "opps", label: "Opportunities" },
   { id: "health", label: "Site health" },
+  { id: "audience", label: "Audience" },
   { id: "log", label: "Change log" },
   { id: "settings", label: "Settings", manage: true },
 ];
