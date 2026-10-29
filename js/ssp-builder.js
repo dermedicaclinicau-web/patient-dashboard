@@ -121,6 +121,7 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
   /* ---------- Page ---------- */
   root.innerHTML = `
     <div class="ssp-wrap">
+      <div class="ssp-sticky">
       <div class="ff-bar" role="region" aria-label="Skin Script actions">
         <div class="ff-bar-inner">
           <a class="ff-back" href="${backHref}" aria-label="Back to patient" title="Back to patient">${I.back}</a>
@@ -153,14 +154,27 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
       <div data-role="banner"></div>
       <p class="ssp-hint">Tick AM / PM for the protocol. Tick Maint. to switch to the maintenance instruction.</p>
 
-      <div class="ssp-table">
+      <div class="ssp-table ssp-table-head">
         <div class="ssp-thead"><span>Step</span><span>Product</span><span>Instruction</span><span>AM</span><span>PM</span><span>Maint.</span></div>
+      </div>
+      </div>
+      <div class="ssp-table ssp-table-body">
         <div data-role="body"></div>
       </div>
     </div>`;
 
   const $ = (s) => root.querySelector(s);
   const body = $('[data-role="body"]');
+
+  // The sticky block sits just under the portal's top bar when that bar stays on screen
+  const setStickyTop = () => {
+    if (!root.isConnected) { window.removeEventListener("resize", setStickyTop); return; }
+    const tb = document.querySelector(".topbar");
+    const pos = tb ? getComputedStyle(tb).position : "";
+    root.style.setProperty("--ssp-top", pos === "sticky" || pos === "fixed" ? `${tb.offsetHeight}px` : "0px");
+  };
+  setStickyTop();
+  window.addEventListener("resize", setStickyTop);
   const qEl = $('[data-role="q"]');
   const selOnly = $('[data-role="selonly"]');
   const msgEl = $('[data-role="msg"]');
