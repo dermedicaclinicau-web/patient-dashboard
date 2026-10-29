@@ -210,7 +210,7 @@ function sheetHtml(d, s) {
   if (s.showNext) {
     next = `<table class="bs nx">${COLS}<tr><th>NEXT APPT (DATE/TIME)</th><th colspan="3">SERVICE</th><th>PROV</th><th>DUR</th>` +
       `<th>APPT. NOTES</th></tr>`;
-    const rows = Math.max(s.nextRows, 1 + d.next.length);
+    const rows = s.nextRows;   // exactly as set in Billing sheet design: later bookings don't fit, so they're left off
     for (let i = 0; i < rows; i++) {
       const x = i === 0 ? null : d.next[i - 1];   // the first row is always left blank
       next += `<tr class="n"><td class="c nxt">${x ? esc(x.when).replace(/\n/g, "<br>") : ""}</td>` +
@@ -1028,7 +1028,7 @@ export async function openBillingSheetDesign({ staff = null } = {}) {
         <h4>Rows</h4>
         ${num("serviceRows", "Services done today (at least)", 1, 12)}
         ${num("sspRows", "Blank rows under the Skin Script", 0, 12)}
-        ${num("nextRows", "Next appt rows (the first is always blank)", 1, 10)}
+        ${num("nextRows", "Next appt rows (the first is always blank, later bookings are left off)", 1, 10)}
         <h4>Show</h4>
         ${tick("showSsp", "Skin Script products and purchase status")}
         ${tick("fillAmPm", "Fill in AM/PM from their Skin Script")}
