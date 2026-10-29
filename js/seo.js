@@ -165,7 +165,7 @@ const CSS = `
 .seo-tab{background:none;border:0;padding:10px 14px;cursor:pointer;font:inherit;color:var(--text-muted,#6b7280);border-bottom:2px solid transparent;margin-bottom:-1px}
 .seo-tab.on{color:inherit;border-bottom-color:var(--accent,#2563eb);font-weight:600}
 .seo-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
-.seo-row .sp{flex:1}
+.seo-row .seo-sp{flex:1}
 .seo-kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-bottom:16px}
 .seo-kpi,.seo-card{background:var(--card,#fff);border:1px solid var(--border,#e5e7eb);border-radius:10px}
 .seo-kpi{padding:12px}
@@ -327,7 +327,7 @@ export async function mountSeo(el, { param } = {}) {
       <div class="seo-kpis">${kpis}</div>
       <div class="seo-card">
         <div class="seo-row">
-          <h3 style="margin:0">Weekly trend</h3><span class="sp"></span>
+          <h3 style="margin:0">Weekly trend</h3><span class="seo-sp"></span>
           ${Object.entries(METRICS).map(([k, v]) => `<button class="seo-btn ${ui.metric === k ? "on" : ""}" data-metric="${k}">${v.label}</button>`).join("")}
         </div>
         <div class="seo-chart">${lineChart(weeks, m)}</div>
@@ -359,7 +359,7 @@ export async function mountSeo(el, { param } = {}) {
       <div class="seo-row">
         <input class="seo-input" data-filter placeholder="Filter pages, e.g. pigmentation" value="${esc(ui.filter)}">
         <label class="seo-check"><input type="checkbox" data-hidezero ${ui.hideZero ? "checked" : ""}> Hide pages with no activity</label>
-        <span class="sp"></span><span class="seo-note" data-count></span>
+        <span class="seo-sp"></span><span class="seo-note" data-count></span>
       </div>
       <div class="seo-table-wrap" data-table></div>
       <div class="seo-note" style="margin-top:8px">Last 28 complete days of search data vs the 28 before. Organic sessions and key events from GA4.</div>`;
