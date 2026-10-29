@@ -1033,7 +1033,10 @@ async function mountReports(container) {
     const k = e.target.dataset.r;
     if (!k) return;
     st[k] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
-    if (k === "range" && st.range === "custom" && !st.from) [st.from, st.to] = span();
+    if (k === "range" && st.range === "custom" && !st.from) { st.from = addDays(today, -89); st.to = today; }
+    if ((k === "from" || k === "to") && st.from && st.to && st.from > st.to) {   // dates the wrong way round
+      if (k === "from") st.to = st.from; else st.from = st.to;
+    }
     draw();
   });
   root.addEventListener("click", (e) => { if (e.target.closest('[data-act="csv"]')) downloadCsv(); });

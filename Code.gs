@@ -17807,7 +17807,9 @@ function prosStagesCheck_(cfg, ctx) {
           move = order.indexOf(b.stage) > order.indexOf(String(p.stage || 'new'));
         }
         if (move) {
-          Object.assign(patch, { stage: b.stage, stageAt: now, waitingSince: '' });
+          // When it actually happened: the visit date, or now for a booking that's still to come
+          const at = b.at && b.at < today ? new Date(b.at + 'T12:00:00+08:00').toISOString() : now;
+          Object.assign(patch, { stage: b.stage, stageAt: at, waitingSince: '' });
           if (revive) Object.assign(patch, { lostReason: '', lostNote: '' });
           entries.push({ kind: 'stage', what: (revive ? 'Back from Lost, moved to ' : 'Moved to ') +
             PROS_STAGE_NAME_[b.stage] + ': ' + prosStageNote_(days, b) });
