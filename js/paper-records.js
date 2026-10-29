@@ -11,6 +11,7 @@ import { runTransaction, collection, query, where, getDocs, getDoc, doc, limit }
 import { escapeHtml as esc, showToast, formatDobLong, formatMobile } from "./utils.js";
 import { confirmDialog } from "./dialog.js";
 import { rxProductList } from "./rx-products.js";
+import { can } from "./perms.js";
 
 const pad = (n) => String(n).padStart(2, "0");
 const keyOf = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -457,14 +458,14 @@ export function mountPaperRecords(container, { staff } = {}) {
           <div data-role="pvisits"></div>
           <label class="lh-field"><span class="lh-label">Date of treatment</span>
             <input type="date" class="fe-input" name="date" max="${todayKey()}" value="${esc(f.recordDate || "")}" /></label>
-          <div class="lh-field"><span class="lh-label">What is it?</span>
-            <div class="ppr-types">${FILE_TYPES.map(([k, l]) =>
-              `<button type="button" class="ppr-type" data-type="${k}" aria-pressed="false">${esc(l)}</button>`).join("")}</div></div>
-          <div data-role="typebody"></div>
           <label class="lh-field"><span class="lh-label">Clinician</span>
             <select class="fb-select" name="whoId"><option value="">Loading staff…</option></select>
             <input class="fe-input" name="who" maxlength="80" placeholder="Their name, as written on the paper" hidden />
             <small class="fe-note" data-role="who-note">Products used are recorded under this person.</small></label>
+          <div class="lh-field"><span class="lh-label">What is it?</span>
+            <div class="ppr-types">${FILE_TYPES.map(([k, l]) =>
+              `<button type="button" class="ppr-type" data-type="${k}" aria-pressed="false">${esc(l)}</button>`).join("")}</div></div>
+          <div data-role="typebody"></div>
           <p class="lh-error" role="alert" hidden></p>
           <p class="ppr-prog" data-role="prog" aria-live="polite" hidden></p>
           <details class="ppr-more"${f.status === "help" ? " open" : ""}><summary>Not a treatment record, or need help?</summary>
@@ -611,13 +612,26 @@ export function mountPaperRecords(container, { staff } = {}) {
       const s = staffList.find((x) => x.id === sel.value);
       return s ? s.name : "";
     };
+    // Whose kit and kit checks the products field shows: the chosen clinician, or you
+    // (if nobody is chosen, or it's someone not on the staff list)
+    const kitOwner = () => {
+      const s = staffList.find((x) => x.id === whoId());
+      return s ? { ...staff, uid: s.id, name: s.name, role: s.role, injector: s.injector === true } : staff;
+    };
     function syncWho() {
       const sel = whoSel();
+      // A different clinician: the products field is rebuilt for them (their kit, their kit checks)
+      if (typeof cs !== "undefined" && cs.owner !== kitOwner().uid && !f.productsDone && cs.fields.length) {
+        cs.owner = kitOwner().uid;
+        cs.counted = {};
+        drawProducts();
+        drawType();
+      }
       whoTxt().hidden = !sel || sel.value !== OTHER;
       const note = $('[data-role="who-note"]');
       if (note) note.textContent = sel && sel.value === OTHER
         ? "Someone not on the staff list: products used stay recorded under you."
-        : "Products used are recorded under this person.";
+        : "Products used (and their kit) are shown and recorded for this person. Choose them before entering products.";
     }
     function drawWho() {
       const sel = whoSel();
@@ -654,7 +668,7 @@ export function mountPaperRecords(container, { staff } = {}) {
 
     /* ---------- Products used (treatment records) ---------- */
     // The form's own Consumables fields, mounted into prodEl (which moves with the treatment section)
-    const cs = { formId: "", fields: [], loading: false, err: "", mode: "stock", force: {}, counted: {}, extra: [] };
+    const cs = { formId: "", fields: [], loading: false, err: "", mode: "stock", force: {}, counted: {}, extra: [], owner: "" };
     const prodEl = document.createElement("div");
     prodEl.className = "ppr-cs-wrap";
     let csSeq = 0, csTimer = 0, lastType = "";
@@ -712,7 +726,9 @@ export function mountPaperRecords(container, { staff } = {}) {
           <div data-role="extra"></div></div>
         <div data-role="cs-notes"></div>
       </div>`;
-      cs.fields.forEach((x) => mountConsumablesField(prodEl.querySelector(`[data-csf="${CSS.escape(x.id)}"]`), x, { staff, onChange: noteCsSoon }));
+      const owner = kitOwner();
+      cs.owner = owner.uid;
+      cs.fields.forEach((x) => mountConsumablesField(prodEl.querySelector(`[data-csf="${CSS.escape(x.id)}"]`), x, { staff: owner, onChange: noteCsSoon }));
       noteCs();
       drawExtra();
     }
@@ -739,7 +755,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       if (!date || !plan.length || beforeStock(date)) { host.innerHTML = ""; return; }
       const my = ++csSeq;
       let counted;
-      try { counted = await countsAfter(date, staff.uid); }
+      try { counted = await countsAfter(date, kitOwner().uid); }
       catch (ex) {
         console.warn("Counts not checked:", ex);
         if (my === csSeq) { cs.counted = null; host.innerHTML = '<p class="ppr-cs-note is-warn">Couldn\'t check the stock counts since then. Check your connection.</p>'; }
@@ -896,8 +912,8 @@ export function mountPaperRecords(container, { staff } = {}) {
           ? "Products have to be recorded under someone on the staff list. Choose them, or if they've left, choose who's entering it."
           : "Choose who did the treatment, so the products are recorded under them.";
         const kitLine = csPlanAll().find((l) => l.loc === "kit");
-        if (kitLine && whoId() !== staff.uid) {
-          return `${kitLine.name} comes from your own kit here, so it can't be recorded for ${whoName()}. Choose the Shelf or JT storage, or ask ${whoName()} to enter it.`;
+        if (kitLine && whoId() !== staff.uid && !can("inventory.manage")) {
+          return `${kitLine.name} comes from ${whoName()}'s kit, which needs Manage inventory access. Choose the Shelf or JT storage, or ask ${whoName()} to enter it.`;
         }
       }
       if (!st.cfg) { try { await loadCfg(); } catch { return "Couldn't load the Paper records settings. Try again."; } }

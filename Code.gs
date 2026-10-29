@@ -17084,20 +17084,26 @@ function prosAddEnquiry_(cfg, set, f, session, forceNew) {
 
   const ex = forceNew ? null : prosFindExisting_(cfg, keys.phoneKey, keys.emailKey);
   if (ex) {
+    const lastAt = String(ex.lastEnquiryAt || '');
     const patch = {
-      enquiries: (Array.isArray(ex.enquiries) ? ex.enquiries : []).concat([enq]).slice(-30),
-      enquiryCount: Number(ex.enquiryCount || 1) + 1, lastEnquiryAt: at, waitingSince: at, updatedAt: now,
+      enquiries: (Array.isArray(ex.enquiries) ? ex.enquiries : []).concat([enq])
+        .sort(function (a, b) { return String(a.at).localeCompare(String(b.at)); }).slice(-30),
+      enquiryCount: Number(ex.enquiryCount || 1) + 1,
+      lastEnquiryAt: at > lastAt ? at : lastAt,
+      waitingSince: f.quiet ? String(ex.waitingSince || '') : at,
+      updatedAt: now,
       log: (Array.isArray(ex.log) ? ex.log : []).concat([{ at: at, by: who, byUid: uid, kind: 'enquiry',
         what: 'Another enquiry' + (enq.source ? ' (' + enq.source + ')' : '') + (enq.concern ? ': ' + enq.concern : ''),
         note: enq.message }]).slice(-150),
     };
-    if (ex.stage === 'lost') {
+    if (ex.stage === 'lost' && !f.quiet) {
       Object.assign(patch, { stage: 'new', stageAt: now, lostReason: '', lostNote: '' });
       patch.log.push({ at: now, by: 'Prospects', byUid: '', kind: 'stage', what: 'Back to New enquiry (they enquired again)', note: '' });
     }
     if (!ex.phone && f.phone) { patch.phone = String(f.phone); patch.phoneKey = keys.phoneKey; }
     if (!ex.email && keys.emailKey) { patch.email = keys.emailKey; patch.emailKey = keys.emailKey; }
     if (!ex.concern && enq.concern) patch.concern = enq.concern;
+    if (!f.historic) patch.historic = false;   // a recent enquiry brings an older one back onto the board
     fsPatch_(cfg, PROS_COL_ + '/' + ex._id, patch);
     return { id: ex._id, again: true, name: ex.name, assignedToId: String(ex.assignedToId || ''),
       concern: enq.concern, message: enq.message };
@@ -17107,23 +17113,25 @@ function prosAddEnquiry_(cfg, set, f, session, forceNew) {
   const pt = prosFindPatient_(cfg, keys.phoneKey, keys.emailKey);
   let to = null;
   if (f.assignTo) to = getStaffDocs_().filter(function (s) { return s.id === String(f.assignTo) && s.active !== false; })[0] || null;
-  else if (!session) to = prosShareTo_(cfg, set);
+  else if (!session && !f.quiet) to = prosShareTo_(cfg, set);   // older enquiries aren't shared out
   const log = [{ at: at, by: who, byUid: uid, kind: 'enquiry', what: what, note: enq.message }];
   if (pt.patientId) {
     log.push({ at: now, by: 'Prospects', byUid: '', kind: 'link',
       what: 'Already a patient: ' + pt.patientName + ' (same ' + pt.how + ')', note: '' });
   }
   if (to) log.push({ at: now, by: session ? who : 'Prospects', byUid: uid, kind: 'assign', what: 'Given to ' + to.name, note: '' });
+  if (f.quiet) log.push({ at: now, by: 'Prospects', byUid: '', kind: 'edit', what: 'Imported from older emails', note: '' });
 
   const p = Object.assign({
     name: prosTidyName_(f.name) || 'No name', firstName: (prosTidyName_(f.name) || '').split(' ')[0],
     phone: String(f.phone || ''), email: keys.emailKey,
     pref: prosPref_(f.pref) || '', ageGroup: clip_(f.age, 40), concern: enq.concern, message: enq.message,
-    source: enq.source || 'Other', stage: 'new', stageAt: now, lostReason: '', lostNote: '',
+    source: enq.source || 'Other', historic: f.historic === true,
+    stage: 'new', stageAt: now, lostReason: '', lostNote: '',
     assignedToId: to ? to.id : '', assignedToName: to ? String(to.name || '') : '',
     nextFollowUp: '', followNote: '',
     patientId: pt.patientId || '', pttId: pt.pttId || '', patientName: pt.patientName || '', patientMany: pt.many || 0,
-    enquiries: [enq], enquiryCount: 1, lastEnquiryAt: at, waitingSince: at,
+    enquiries: [enq], enquiryCount: 1, lastEnquiryAt: at, waitingSince: f.quiet ? '' : at,
     contacts: 0, firstContactAt: '', lastContactAt: '',
     createdAt: at, createdBy: who, createdByUid: uid, updatedAt: now,
   }, keys);
@@ -17142,6 +17150,7 @@ function prosAddEnquiry_(cfg, set, f, session, forceNew) {
   commitWrites_(cfg, [updateWrite_(cfg, PROS_COL_ + '/' + id, p)]);
   return { id: id, again: false, name: p.name, assignedToId: p.assignedToId, concern: p.concern, message: p.message, p: p };
 }
+
 
 // A new web enquiry: the person it's given to, and the staff chosen in Prospect settings
 function prosNotify_(cfg, set, r, f) {
@@ -17165,33 +17174,47 @@ function prosNotify_(cfg, set, r, f) {
 
 /* ---------- Importing the web form emails (runNotifications, every 5 minutes) ---------- */
 
-function prosImport_(cfg, max, days) {
+// Imports the web form emails. days: how far back. olderThan: skip anything newer than this (the background import).
+// More than 3 days old: quiet (no staff email, not shared out, not flagged). More than 90 days old: an Older enquiry.
+function prosImport_(cfg, max, days, olderThan) {
+  const deadline = Date.now() + 4.5 * 60000;   // stops in time, rather than being cut off at 6 minutes
   const label = GmailApp.getUserLabelByName(PROS_LABEL_) || GmailApp.createLabel(PROS_LABEL_);
-  const threads = GmailApp.search('subject:"Att. Prospect Team" newer_than:' + (days || 14) + 'd -label:' + PROS_LABEL_, 0, max || 30);
+  const threads = GmailApp.search('subject:"Att. Prospect Team" newer_than:' + (days || 14) + 'd' +
+    (olderThan ? ' older_than:' + olderThan + 'd' : '') + ' -label:' + PROS_LABEL_, 0, max || 30);
   if (!threads.length) return 0;
   const set = prosSettings_(cfg);
   let n = 0;
-  threads.forEach(function (th) {
+  let more = false;
+  for (let t = 0; t < threads.length; t++) {
+    if (Date.now() > deadline) { more = true; break; }
+    const th = threads[t];
+    let done = true;
     try {
-      th.getMessages().forEach(function (msg) {
-        if (!PROS_SUBJECT_RE_.test(msg.getSubject() || '')) return;
+      const msgs = th.getMessages();
+      for (let i = 0; i < msgs.length; i++) {
+        if (Date.now() > deadline) { done = false; more = true; break; }
+        const msg = msgs[i];
+        if (!PROS_SUBJECT_RE_.test(msg.getSubject() || '')) continue;
         const mid = msg.getId();
-        if (fsGetDoc_(cfg, PROS_MAIL_ + '/' + mid)) return;   // already imported
+        if (fsGetDoc_(cfg, PROS_MAIL_ + '/' + mid)) continue;   // already imported
         const f = prosFromEmail_(msg);
+        const age = Date.now() - msg.getDate().getTime();
+        f.quiet = age > 3 * 864e5;      // more than 3 days old: no staff email, not shared out, not flagged
+        f.historic = age > 90 * 864e5;  // more than 90 days old: an Older enquiry (hidden from the board)
         if (!f.name && !f.phone && !f.email) {
           console.warn('Prospect email ' + mid + ' had no name, mobile or email: left for a person to check');
           commitWrites_(cfg, [updateWrite_(cfg, PROS_MAIL_ + '/' + mid, { at: new Date().toISOString(), prospectId: '', skipped: true })]);
-          return;
+          continue;
         }
         const r = prosAddEnquiry_(cfg, set, f, null, false);
         commitWrites_(cfg, [updateWrite_(cfg, PROS_MAIL_ + '/' + mid, { at: new Date().toISOString(), prospectId: r.id })]);
-        prosNotify_(cfg, set, r, f);
+        if (!f.quiet) prosNotify_(cfg, set, r, f);
         n++;
-      });
-      th.addLabel(label);
+      }
+      if (done) th.addLabel(label);   // only once every email in it is in
     } catch (e) { console.error('Prospect email thread ' + th.getId() + ': ' + (e && e.stack ? e.stack : e)); }
-  });
-  if (n) console.log('Prospects: ' + n + ' enquiry email(s) imported.');
+  }
+  if (n || more) console.log('Prospects: ' + n + ' enquiry email(s) imported.' + (more ? ' More are left: run it again.' : ''));
   return n;
 }
 
@@ -17426,6 +17449,7 @@ function prosAction_(cfg, op, id, body, session) {
   } else {
     return { ok: false, error: 'BAD_REQUEST' };
   }
+  patch.historic = false;
   patch.log = log.slice(-150);
   patch.updatedAt = now;
   fsPatch_(cfg, path, patch);
@@ -17460,7 +17484,76 @@ function testProspectEmail() {
   console.log(JSON.stringify(f, null, 2));
 }
 
-// Imports older enquiries (change the days if you want more or fewer)
+// Imports the last 14 days now, instead of waiting for the 5-minute import.
+// (Older enquiries: run prospectBackfillStart.)
 function prospectImportOlder() {
-  console.log(prosImport_(getConfig_(), 200, 90) + ' enquiry email(s) imported.');
+  prosImport_(getConfig_(), 100, 14);
+}
+
+// Run ONCE: the prospects already in the portal are marked as current (so the board finds them)
+function prospectMarkCurrent() {
+  const cfg = getConfig_();
+  const writes = [];
+  fsListAll_(cfg, PROS_COL_, ['historic']).forEach(function (d) {
+    const f = fromFields_(d.fields || {});
+    if (typeof f.historic !== 'boolean') writes.push(patchWrite_(cfg, d.name.split('/documents/')[1], { historic: false }));
+  });
+  if (writes.length) commitWrites_(cfg, writes, 200);
+  console.log(writes.length + ' prospect(s) marked as current.');
+}
+
+// Run ONCE: imports every older enquiry in the background, every 10 minutes, and stops itself when it's done
+function prospectBackfillStart() {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return t.getHandlerFunction() === 'prospectBackfillRun'; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  PropertiesService.getScriptProperties().setProperty('PROS_BACKFILL_RUNS', '0');
+  ScriptApp.newTrigger('prospectBackfillRun').timeBased().everyMinutes(10).create();
+  prospectBackfillRun();
+}
+
+function prospectBackfillRun() {
+  const cache = CacheService.getScriptCache();
+  if (cache.get('pros_backfill')) return;   // the last run is still going
+  cache.put('pros_backfill', '1', 600);
+  const props = PropertiesService.getScriptProperties();
+  const stop = function (why) {
+    ScriptApp.getProjectTriggers()
+      .filter(function (t) { return t.getHandlerFunction() === 'prospectBackfillRun'; })
+      .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+    console.log('Prospect import finished: ' + why);
+  };
+  try {
+    const runs = Number(props.getProperty('PROS_BACKFILL_RUNS') || 0) + 1;
+    props.setProperty('PROS_BACKFILL_RUNS', String(runs));
+    // Older than 14 days only: the 5-minute import looks after the last 14 days, so the two never overlap
+    const n = prosImport_(getConfig_(), 300, 1825, 14);
+    const left = GmailApp.search('subject:"Att. Prospect Team" newer_than:1825d older_than:14d -label:' + PROS_LABEL_, 0, 1).length;
+    if (!left) stop('every older enquiry is in.');
+    else if (runs >= 60) stop('stopped after 60 runs. Run prospectEmailCheck to see what is left.');
+    else console.log(n + ' imported this run. More left: it carries on in 10 minutes.');
+  } finally {
+    cache.remove('pros_backfill');
+  }
+}
+
+// Run ONCE: older web enquiries already imported lose the "Not contacted" flag.
+// Ones that were shared out automatically go back to "Nobody yet".
+function prospectQuietOlder() {
+  const cfg = getConfig_();
+  const cut = new Date(Date.now() - 3 * 864e5).toISOString();
+  const now = new Date().toISOString();
+  const writes = [];
+  fsQuery_(cfg, PROS_COL_, 'createdBy', 'EQUAL', 'Web form', 3000).forEach(function (p) {
+    if (String(p.lastEnquiryAt || '') >= cut || Number(p.contacts || 0) > 0) return;
+    const log = Array.isArray(p.log) ? p.log : [];
+    const auto = log.some(function (l) { return l && l.kind === 'assign' && l.by === 'Prospects'; });
+    const patch = { waitingSince: '', updatedAt: now,
+      log: log.concat([{ at: now, by: 'Prospects', byUid: '', kind: 'edit',
+        what: 'Imported from older emails' + (auto && p.assignedToId ? ' (no longer given to ' + p.assignedToName + ')' : ''), note: '' }]).slice(-150) };
+    if (auto) Object.assign(patch, { assignedToId: '', assignedToName: '' });
+    writes.push(patchWrite_(cfg, PROS_COL_ + '/' + p._id, patch));
+  });
+  if (writes.length) commitWrites_(cfg, writes, 100);
+  console.log(writes.length + ' older enquiry/enquiries tidied up.');
 }

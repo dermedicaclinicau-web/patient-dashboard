@@ -2,7 +2,7 @@
 // People who've enquired but aren't patients yet: from web form emails, and added by hand.
 // Read from Firestore; every change goes through Apps Script (action "prospects"), so it's logged on the prospect.
 import { db, auth } from "./firebase-config.js";
-import { collection, getDocs, getDoc, doc, query, orderBy, limit }
+import { collection, getDocs, getDoc, doc, query, orderBy, limit, where }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
 import { can } from "./perms.js";
@@ -53,9 +53,12 @@ async function api(op, data = {}) {
   if (r && r.problem) throw new Error(r.problem);
   return r;
 }
-async function loadAll() {
-  const snap = await getDocs(query(collection(db, "prospects"), orderBy("updatedAt", "desc"), limit(2000)));
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+// Current prospects; the older enquiries (over 90 days, never worked) only when asked for
+async function loadAll(withOld = false) {
+  const qs = [getDocs(query(collection(db, "prospects"), where("historic", "==", false), limit(3000)))];
+  if (withOld) qs.push(getDocs(query(collection(db, "prospects"), where("historic", "==", true), limit(5000))));
+  const snaps = await Promise.all(qs);
+  return snaps.flatMap((s) => s.docs.map((d) => ({ id: d.id, ...d.data() })));
 }
 async function loadSettings() {
   try { const s = await getDoc(doc(db, "prospect_settings", "config")); return s.exists() ? s.data() : {}; }
@@ -156,7 +159,7 @@ async function mountBoard(container, { view, staff }) {
   container.replaceChildren(root);
   const me = auth.currentUser && auth.currentUser.uid;
   const work = can("prospects.work") || can("prospects.manage");
-  const st = { view, q: "", source: "", who: "all", due: false, showLost: false };
+  const st = { view, q: "", source: "", who: "all", due: false, showLost: false, old: false };
   let all = [];
   let set = {};
   root.innerHTML = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
@@ -197,6 +200,7 @@ async function mountBoard(container, { view, staff }) {
       <select class="fe-input" data-role="source"><option value="">All sources</option>${opts(srcList, "")}</select>
       <select class="fe-input" data-role="who"><option value="all">Everyone's</option><option value="me">Mine</option><option value="none">Not given to anyone</option></select>
       <label class="fe-check pr-due"><input type="checkbox" data-role="due" /> Needs action</label>
+      <button type="button" class="lh-btn is-quiet" data-act="old">Show older enquiries</button>
     </div>
     <div data-role="body"></div>`;
 
@@ -294,6 +298,15 @@ async function mountBoard(container, { view, staff }) {
     const a = e.target.closest("[data-act]");
     if (!a) return;
     if (a.dataset.act === "lost") { st.showLost = !st.showLost; drawBody(); }
+    if (a.dataset.act === "old") {
+      st.old = !st.old;
+      a.disabled = true;
+      a.textContent = st.old ? "Loading…" : "Show older enquiries";
+      loadAll(st.old)
+        .then((list) => { all = list; a.textContent = st.old ? "Hide older enquiries" : "Show older enquiries"; drawBody(); })
+        .catch(() => { st.old = !st.old; showToast("Couldn't load them. Try again."); })
+        .finally(() => { a.disabled = false; });
+    }
     if (a.dataset.act === "new") newDialog(all, (id) => { location.hash = `#/prospects/${enc(id)}`; });
     if (a.dataset.act === "settings") settingsDialog(set, async () => { set = await loadSettings(); });
   });
@@ -511,6 +524,8 @@ async function mountProspect(container, id, staff) {
             ${p.pref ? `<span class="pr-chip">Prefers ${esc(p.pref)}</span>` : ""}
             ${p.ageGroup ? `<span class="pr-chip">Age ${esc(p.ageGroup)}</span>` : ""}
             ${p.patientId ? `<a class="pr-chip is-pt" href="#/patient/${enc(p.patientId)}">${I(IC.user)}Patient: ${esc(p.patientName)}</a>` : ""}
+            ${p.historic ? '<span class="pr-tag">Older</span>' : ""}
+            
           </div>
         </div>
         <span class="pr-pill is-${s.tone} is-lg">${esc(s.name)}</span>
