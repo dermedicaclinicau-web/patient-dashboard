@@ -1639,8 +1639,8 @@ export async function recordKitFromShelf({ staffUid, staffName, product, lot, vi
       type: "kit-count", productId: product.id, productName: product.name, unit, staffUid: target,
       deltaUnits: -round1(n * per), lines: [{ ...kitLine, delta: -n }],
       reason: "Kit set by admin",
-      note: `Correction: ${plural(n, product.stockUnit)} set by hand came from the Shelf (now recorded as taken). `
-        + `${name}'s kit itself doesn't change.`.slice(0, 500),
+      note: (`Correction: ${plural(n, product.stockUnit)} set by hand came from the Shelf (now recorded as taken). `
+        + `${name}'s kit itself doesn't change.`).slice(0, 500),
     });
   });
 }
