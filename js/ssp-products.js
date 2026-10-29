@@ -75,12 +75,13 @@ export function createProductsConfig(host, { staff = null, isAdmin = false, sele
           <label class="sp-f"><span>Shop link</span>
             <input class="fe-input" name="shopLink" type="url" maxlength="500" placeholder="https://…" value="${esc(p.shopLink)}" /></label>
           <div class="sp-f"><span>Inventory product <small>(for the Shelf stock in the Skin Script builder)</small></span>
-            <div class="sp-inv-search">
-              <input type="search" class="fe-input" data-role="invq" placeholder="Search Inventory products…"
-                aria-label="Search Inventory products" autocomplete="off" />
-              <small class="muted" data-role="invcount"></small>
+            <div class="sp-combo" data-role="inv">
+              <input type="hidden" name="invProductId" value="${esc(p.invProductId)}" />
+              <input type="text" class="fe-input sp-combo-input" data-role="invq" value="Loading Inventory…" readonly
+                role="combobox" aria-label="Inventory product" aria-expanded="false" aria-autocomplete="list"
+                aria-controls="sp-inv-list" autocomplete="off" spellcheck="false" />
+              <div class="sp-combo-list" id="sp-inv-list" role="listbox" data-role="invlist"></div>
             </div>
-            <select class="fb-select" name="invProductId" data-role="inv" aria-label="Inventory product"><option value="${esc(p.invProductId)}">Loading Inventory…</option></select>
             <small class="fe-note" data-role="invnote"></small></div>
           <label class="fe-check"><input type="checkbox" name="published"${p.published ? " checked" : ""} /> Show in the Skin Script builder</label>
         </fieldset>
@@ -136,68 +137,147 @@ export function createProductsConfig(host, { staff = null, isAdmin = false, sele
     if (revert) revert.addEventListener("click", () => renderForm(current || blank()));
   }
 
-  // The Inventory picker: a search box over the list. The chosen product always stays in the list.
+  // The Inventory picker: one searchable dropdown. The chosen id is kept in the hidden invProductId field.
   function fillInv(form, p) {
-    const sel = form.querySelector('[data-role="inv"]');
+    const box = form.querySelector('[data-role="inv"]');
     const note = form.querySelector('[data-role="invnote"]');
-    const q = form.querySelector('[data-role="invq"]');
-    const count = form.querySelector('[data-role="invcount"]');
-    if (!sel || !inv) return;
+    if (!box || !inv) return;
+    const hid = box.querySelector('input[name="invProductId"]');
+    const q = box.querySelector('[data-role="invq"]');
+    const list = box.querySelector('[data-role="invlist"]');
+
     if (!inv.length) {
-      sel.innerHTML = `<option value="${esc(p.invProductId)}">${p.invProductId ? "Linked (Inventory couldn't be loaded)" : "Not linked"}</option>`;
+      q.value = p.invProductId ? "Linked (Inventory couldn't be loaded)" : "Not linked";
       note.textContent = "Inventory couldn't be loaded, so the link can't be changed right now.";
-      if (q) q.closest(".sp-inv-search").hidden = true;
       return;
     }
 
+    const NONE = "Not linked: match by name";
     const opts = inv.filter((x) => x.active || x.id === p.invProductId);
+    const byId = new Map(opts.map((x) => [x.id, x]));
     const low = (s) => String(s || "").toLowerCase();
-    const words = () => low(q && q.value).split(/\s+/).filter(Boolean);
     const hit = (x, w) => w.every((t) => low(`${x.name} ${x.brand || ""} ${x.category || ""}`).includes(t));
-
-    const draw = () => {
-      const cur = sel.value;                       // the first time: the saved link (from the Loading option)
-      const w = words();
-      const matches = w.length ? opts.filter((x) => hit(x, w)) : opts;
-      const shown = matches.some((x) => x.id === cur) ? matches
-        : opts.filter((x) => x.id === cur).concat(matches);   // keep the chosen one at the top
-      sel.innerHTML = '<option value="">Not linked: match by name</option>' + shown.map((x) =>
-        `<option value="${esc(x.id)}"${x.id === cur ? " selected" : ""}>${esc(x.name)}${x.active ? "" : " (inactive)"}</option>`).join("");
-      sel.value = shown.some((x) => x.id === cur) ? cur : "";
-      if (count) count.textContent = w.length ? (matches.length ? `${matches.length} match${matches.length === 1 ? "" : "es"}` : "No matches") : "";
-      return matches;
+    const label = (id) => {
+      if (!id) return NONE;
+      const x = byId.get(id);
+      return x ? x.name + (x.active ? "" : " (inactive)") : "Linked product no longer exists";
     };
 
-    if (q) {
-      // Searching isn't a change to the product, so it doesn't mark the form as unsaved
-      q.addEventListener("input", (e) => { e.stopPropagation(); draw(); });
-      // Enter picks the first match (and never submits the form)
-      q.addEventListener("keydown", (e) => {
-        if (e.key === "ArrowDown") { e.preventDefault(); sel.focus(); return; }
-        if (e.key !== "Enter") return;
-        e.preventDefault();
-        const first = draw()[0];
-        if (first && sel.value !== first.id) {
-          sel.value = first.id;
-          dirty = true;
-          sel.dispatchEvent(new Event("change", { bubbles: true }));
-        }
-      });
-    }
-    sel.addEventListener("change", () => { if (q && sel.value) q.value = ""; draw(); });
+    let shown = [];
+    let active = -1;
+    const isOpen = () => box.classList.contains("is-open");
 
-    draw();
-    const linked = p.invProductId ? inv.find((x) => x.id === p.invProductId) : null;
-    if (p.invProductId && !linked) {
-      note.textContent = "The linked Inventory product no longer exists. Choose another.";
-    } else if (p.invProductId) {
-      note.textContent = linked.active ? "Linked: the Shelf stock always comes from this product." : "This Inventory product is inactive. Choose the one in use.";
-    } else {
-      const m = inventoryMatcher(all, inv)(p);
-      note.textContent = m.product
-        ? `Matched by name to “${m.product.name}”. Choose it to keep them linked even if a name changes.`
-        : "No Inventory product has this name. Choose one to link it.";
-    }
+    const mark = () => {
+      const els = list.querySelectorAll(".sp-combo-opt");
+      els.forEach((el, i) => el.classList.toggle("is-on", i === active));
+      const el = els[active];
+      if (!el) return;
+      q.setAttribute("aria-activedescendant", el.id);
+      if (el.offsetTop < list.scrollTop) list.scrollTop = el.offsetTop;
+      else if (el.offsetTop + el.offsetHeight > list.scrollTop + list.clientHeight) {
+        list.scrollTop = el.offsetTop + el.offsetHeight - list.clientHeight;
+      }
+    };
+
+    const draw = (text) => {
+      const w = low(text).split(/\s+/).filter(Boolean);
+      shown = w.length ? opts.filter((x) => hit(x, w)) : [{ id: "", name: NONE, none: true }].concat(opts);
+      active = w.length ? (shown.length ? 0 : -1) : Math.max(0, shown.findIndex((x) => x.id === hid.value));
+      list.innerHTML = shown.length
+        ? shown.map((x, i) => `<div class="sp-combo-opt${x.none ? " is-none" : ""}${x.id === hid.value ? " is-sel" : ""}"
+            role="option" id="sp-inv-opt-${i}" aria-selected="${x.id === hid.value}" data-i="${i}">${esc(x.name)}${
+            x.active === false ? " <small>(inactive)</small>" : ""}</div>`).join("")
+        : '<div class="sp-combo-empty">No Inventory products match.</div>';
+      list.scrollTop = 0;
+      mark();
+    };
+
+    const setNote = () => {
+      const id = hid.value;
+      if (id !== p.invProductId) {
+        note.textContent = id ? `Will be linked to “${label(id)}” when you save.` : "Will match by name when you save.";
+        return;
+      }
+      const linked = id ? inv.find((x) => x.id === id) : null;
+      if (id && !linked) note.textContent = "The linked Inventory product no longer exists. Choose another.";
+      else if (id) note.textContent = linked.active ? "Linked: the Shelf stock always comes from this product." : "This Inventory product is inactive. Choose the one in use.";
+      else {
+        const m = inventoryMatcher(all, inv)(p);
+        note.textContent = m.product
+          ? `Matched by name to “${m.product.name}”. Choose it to keep them linked even if a name changes.`
+          : "No Inventory product has this name. Choose one to link it.";
+      }
+    };
+
+    const open = () => {
+      if (isOpen() || q.disabled) return;
+      // Opens upwards when there isn't room below (inside the scrolling form)
+      const sc = box.closest(".sp-main");
+      const area = sc ? sc.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
+      const r = q.getBoundingClientRect();
+      const below = Math.min(window.innerHeight, area.bottom) - r.bottom;
+      box.classList.toggle("is-up", below < 260 && r.top - area.top > below);
+      box.classList.add("is-open");
+      q.setAttribute("aria-expanded", "true");
+      draw("");
+      q.select();
+    };
+
+    const close = () => {
+      box.classList.remove("is-open", "is-up");
+      q.setAttribute("aria-expanded", "false");
+      q.removeAttribute("aria-activedescendant");
+      q.value = label(hid.value);
+    };
+
+    const pick = (i) => {
+      const x = shown[i];
+      if (!x) return;
+      if (hid.value !== x.id) {
+        hid.value = x.id;
+        dirty = true;
+        setNote();
+      }
+      close();
+    };
+
+    q.readOnly = false;
+    q.placeholder = "Search Inventory products…";
+    q.value = label(hid.value);
+    setNote();
+
+    q.addEventListener("focus", open);
+    q.addEventListener("click", open);
+    q.addEventListener("blur", close);
+    // Typing is searching, not a change to the product, so it doesn't mark the form as unsaved
+    q.addEventListener("input", (e) => {
+      e.stopPropagation();
+      if (!isOpen()) open();
+      draw(q.value);
+    });
+    q.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        if (!isOpen()) { open(); return; }
+        if (!shown.length) return;
+        active = (active + (e.key === "ArrowDown" ? 1 : -1) + shown.length) % shown.length;
+        mark();
+      } else if (e.key === "Enter") {
+        e.preventDefault();                       // never submits the form
+        if (isOpen()) pick(active); else open();
+      } else if (e.key === "Escape" && isOpen()) {
+        e.preventDefault();
+        e.stopPropagation();                      // closes the list, not the Products Config window
+        close();
+        q.select();
+      }
+    });
+    // mousedown keeps the focus in the box, so blur doesn't close the list before the pick
+    list.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      const o = e.target.closest("[data-i]");
+      if (o) pick(Number(o.dataset.i));
+    });
   }
   
   async function select(id) {

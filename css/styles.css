@@ -9601,6 +9601,27 @@ dialog.lh-dialog.bs-dlg.is-wide { width: min(1240px, calc(100vw - 2rem)); }
 .ssp-stock-link { border: 0; background: none; padding: 0; font: inherit; cursor: pointer; text-decoration: underline dotted; }
 .ssp-stock-link:hover { color: #0f766e; }
 
-.sp-inv-search { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-.sp-inv-search .fe-input { flex: 1; min-width: 0; }
-.sp-inv-search small { white-space: nowrap; }
+.sp-combo { position: relative; }
+.sp-combo-input {
+  width: 100%;
+  padding-right: 36px;
+  cursor: pointer;
+  background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E") no-repeat right 12px center / 14px;
+}
+.sp-combo.is-open .sp-combo-input { cursor: text; border-color: #0f766e; box-shadow: 0 0 0 3px rgba(15, 118, 110, .12); }
+.sp-combo-list {
+  display: none;
+  position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 40;
+  max-height: 300px; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  padding: 4px; background: #fff;
+  border: 1px solid #cbd5e1; border-radius: 10px;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, .16);
+}
+.sp-combo.is-open .sp-combo-list { display: block; }
+.sp-combo.is-up .sp-combo-list { top: auto; bottom: calc(100% + 4px); }
+.sp-combo-opt { padding: 8px 10px; border-radius: 6px; cursor: pointer; line-height: 1.35; }
+.sp-combo-opt.is-on { background: #f0fdfa; }
+.sp-combo-opt.is-sel { font-weight: 600; color: #0f766e; }
+.sp-combo-opt.is-none { color: #64748b; font-style: italic; }
+.sp-combo-opt small { color: #94a3b8; font-weight: 400; }
+.sp-combo-empty { padding: 10px; color: #64748b; }
