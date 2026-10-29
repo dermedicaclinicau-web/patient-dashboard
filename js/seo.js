@@ -238,12 +238,23 @@ export async function mountSeo(el, { param } = {}) {
       </div>
       <div class="seo-tabs">${TABS.map((t) => `<button class="seo-tab" data-tab="${t.id}">${t.label}</button>`).join("")}</div>
       <div data-body></div>
-      <aside class="seo-panel" data-panel hidden></aside>
+      <div class="seo-panel" data-panel hidden></div>
     </div>`;
 
   const $ = (s) => el.querySelector(s);
   const body = $("[data-body]");
   const panel = $("[data-panel]");
+
+  const onKey = (e) => {
+    if (!document.body.contains(el.querySelector("[data-panel]"))) { document.removeEventListener("keydown", onKey); return; }
+    if (e.key === "Escape") panel.hidden = true;
+  };
+  document.addEventListener("keydown", onKey);
+
+  document.addEventListener("click", function outside(e) {
+    if (!document.body.contains(panel)) { document.removeEventListener("click", outside); return; }
+    if (!panel.hidden && !panel.contains(e.target) && !e.target.closest("[data-open]")) panel.hidden = true;
+  });
 
   function setTabs() {
     el.querySelectorAll("[data-tab]").forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
