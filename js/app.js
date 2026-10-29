@@ -368,6 +368,7 @@ const PAGES = {
   scanner: lazyPage("./scanner.js", "The Scanner", (m, el) => m.mountScanner(el, { staff: currentStaff })),
   paper: lazyPage(`./paper-records.js?v=${PAPER_V}`, "Paper records",
     (m, el) => m.mountPaperRecords(el, { staff: currentStaff })),
+  seo: lazyPage("./seo.js", "SEO", (m, el, param) => m.mountSeo(el, { param, staff: currentStaff })),
 };
 // Which permission each page needs ("admin" = Admins only)
 const PAGE_PERM = {
@@ -375,7 +376,7 @@ const PAGE_PERM = {
   ssp: "ssp.create", calendar: "menu.calendar", forms: "menu.forms",
   "image-bank": "forms.build", "aftercare-bank": "forms.build", "specialist-bank": "menu.forms", "ssp-products": "ssp.config",
   tasks: "menu.tasks", inventory: "menu.inventory", reports: "menu.reports", staff: "admin", settings: "admin",
-  scanner: "menu.scanner", paper: "paper.enter",
+  scanner: "menu.scanner", paper: "paper.enter", seo: "menu.seo",
 };
 
 // Email flow builders who aren't Admins can open System configuration, but only its Email flows

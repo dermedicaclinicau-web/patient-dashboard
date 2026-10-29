@@ -1432,7 +1432,34 @@ match /inv_count_drafts/{id} {
       allow delete: if false;
     }
 
+    // ===================== SEO =====================
+    // Everything here is written by Apps Script only (runSeoNightly / crawler).
+    // The SEO team reads it; the service account bypasses these rules when writing.
 
+    // Overview (16 months of daily totals, build id) and the last nightly run status
+    match /seo_state/{id} {
+      allow read: if can('menu.seo');
+      allow write: if false;
+    }
+
+    // One document per page: last 28 days vs previous 28, weekly clicks, GA4 organic sessions
+    match /seo_pages/{id} {
+      allow read: if can('menu.seo');
+      allow write: if false;
+    }
+
+    // Search queries, chunked like patient_index (Phase 2)
+    match /seo_queries/{id} {
+      allow read: if can('menu.seo');
+      allow write: if false;
+    }
+
+    // Site health issues from the crawler (Phase 3)
+    match /seo_issues/{id} {
+      allow read: if can('menu.seo');
+      allow write: if false;
+    }
+    
     // ===================== Safety net =====================
     // Anything not allowed by a rule above stays locked
     // (this includes staff_roles and staff_audit, which only Apps Script writes)

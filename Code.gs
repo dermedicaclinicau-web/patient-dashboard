@@ -3447,6 +3447,9 @@ const ROLE_DEFAULTS_ = {
     'menu.inventory', 'inventory.view', 'inventory.request', 'inventory.receive', 'inventory.order', 'inventory.count', 'menu.reports',
     'menu.scanner', 'scanner.billing', 'scanner.docket',
     'dash.attention', 'dash.appts', 'dash.tasks', 'dash.requests', 'dash.overview', 'recall.work'],
+    ['menu.seo',   'SEO', 'SEO menu (see search performance, pages and site health)'],
+    ['seo.work',   'SEO', 'Work SEO opportunities and log site changes'],
+    ['seo.manage', 'SEO', 'SEO settings: topics, key pages, compliance words'],
 };
 
 
