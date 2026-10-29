@@ -39,6 +39,20 @@ const HELP = {
   cwv_inp: "Too much JavaScript is running. Remove unused plugins, sliders and chat widgets, or load them later.",
   cwv_cls: "Give images, embeds and banners a fixed size so the page doesn't shift while they load.",
   score: "Open the page in pagespeed.web.dev to see the biggest problems. Large images and too many plugins are the usual causes.",
+  g_not_indexed: "Open the page in URL Inspection (the Inspect link) and press Request indexing. 'Crawled – currently not indexed' means Google saw it but didn't think it was worth adding: make it more useful and clearly different from your other pages, and link to it from the menu or related pages. 'Discovered – currently not indexed' or 'URL is unknown' means Google hasn't visited yet: make sure it's in the sitemap and linked from other pages.",
+  g_blocked: "Something tells Google not to index this page. Turn off 'noindex' in the page's SEO settings (in Yoast: Advanced → Allow search engines to show this page).",
+  g_robots: "robots.txt stops Google visiting this page. Open dermedica.com.au/robots.txt and remove the Disallow line that matches it (in Yoast: Tools → File editor).",
+  g_fetch: "Google couldn't load the page the last time it tried. Check it opens, isn't password protected and doesn't redirect in a loop, then Request indexing.",
+  g_canonical: "Google treats a different address as the main version, so this one won't show in search. Make the canonical tag, menu links and sitemap all use the same address, and redirect the other version to it.",
+  g_stale: "Google hasn't visited for a while. Link to the page from the home page or menu, update it, and Request indexing in URL Inspection.",
+  g_sitemap_missing: "Add the page to the sitemap. Yoast and Rank Math do this automatically unless the page is set to noindex or excluded in their settings.",
+  g_rich: "Fix the structured data (schema). Test the page at search.google.com/test/rich-results to see exactly what's wrong.",
+  g_error: "Google's URL Inspection didn't answer for this page. It's checked again tomorrow.",
+  sm_none: "Submit your sitemap in Search Console → Sitemaps. With Yoast it's usually https://dermedica.com.au/sitemap_index.xml.",
+  sm_errors: "Open Search Console → Sitemaps and click the sitemap to see the problems.",
+  sm_stale: "Google hasn't read the sitemap recently. Resubmit it in Search Console → Sitemaps.",
+  sm_pages_out: "These pages are in the sitemap but not in Google. Check each in the In Google view: improve thin or duplicate pages, and take pages nobody should find (tags, old offers, test pages) out of the sitemap.",
+  sm_clicks_missing: "These pages get clicks but aren't in the sitemap. Add them. If they're old addresses, redirect them to the current page.",
 };
 const LIMITS = { lcp: [2500, 4000], inp: [200, 500], cls: [0.1, 0.25] };
 
@@ -90,6 +104,70 @@ function metricsOf(sp) {
   };
 }
 
+/* ---------- Google indexing (Seo5.gs → seo_index/main) ---------- */
+
+const STATE = {
+  BLOCKED_BY_META_TAG: "a noindex tag", BLOCKED_BY_HTTP_HEADER: "a noindex header", BLOCKED_BY_ROBOTS_TXT: "robots.txt",
+  NOT_FOUND: "Not found (404)", SOFT_404: "Looks like an empty or error page (soft 404)", ACCESS_DENIED: "Access denied (401)",
+  ACCESS_FORBIDDEN: "Forbidden (403)", SERVER_ERROR: "Server error (5xx)", REDIRECT_ERROR: "Redirect error",
+  BLOCKED_ROBOTS_TXT: "Blocked by robots.txt", INVALID_URL: "Invalid address", BLOCKED_4XX: "Another 4xx error",
+  INTERNAL_CRAWL_ERROR: "Google had an internal error",
+};
+const stateText = (s) => STATE[s] || String(s || "").toLowerCase().replace(/_/g, " ");
+const normU = (u) => String(u || "").toLowerCase().replace(/^https?:\/\/(www\.)?/, "").replace(/#.*$/, "").replace(/\/+$/, "");
+const shortU = (u) => String(u || "").replace(/^https?:\/\/[^/]+/i, "") || "/";
+const daysSince = (iso) => { const t = Date.parse(iso || ""); return t ? Math.max(0, Math.floor((Date.now() - t) / 864e5)) : null; };
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+
+function googleIssues(r, inSitemap) {
+  const out = [];
+  const add = (sev, code, msg, detail, key) => out.push({ group: "index", sev, code, msg, detail: detail || "", key: key || code });
+  if (!r) return out;
+  if (r.err) { add("low", "g_error", "Google's URL Inspection didn't answer", r.err); return out; }
+  if (r.rb === "DISALLOWED") add("high", "g_robots", "Google is blocked by robots.txt");
+  if (/^BLOCKED/.test(r.is || "")) add("high", "g_blocked", "Google is told not to index it", "Set by " + stateText(r.is));
+  if (r.pf && !/^(SUCCESSFUL|PAGE_FETCH_STATE_UNSPECIFIED)$/.test(r.pf)) add("high", "g_fetch", "Google couldn't load it last time", stateText(r.pf));
+  if (r.v !== "PASS") add("high", "g_not_indexed", "Not in Google", r.cs || "Unknown to Google");
+  else if (r.gc && r.uc && normU(r.gc) !== normU(r.uc)) add("medium", "g_canonical", "Google chose a different main version", "Google uses " + r.gc);
+  const d = daysSince(r.lc);
+  if (d != null && d > 60) add("low", "g_stale", `Google last visited ${d} days ago`);
+  if (inSitemap === false) add("low", "g_sitemap_missing", "Not in the sitemap");
+  for (const x of r.rr || []) if (x.e) add("medium", "g_rich", `Structured data error: ${x.t}`, x.m, "g_rich:" + x.t);
+  return out;
+}
+
+function attachIndex(out) {
+  const X = out.index?.data;
+  if (!X) return;
+  const missing = new Set(X.keyNotInSitemap || []);
+  for (const p of out.pages) {
+    p.google = X.key?.[p.path] || null;
+    p.issues = (p.issues || []).concat(googleIssues(p.google, X.sitemapUrls ? !missing.has(p.path) : null));
+  }
+  const site = [];
+  const add = (sev, code, msg, detail, key) => site.push({ group: "index", sev, code, msg, detail: detail || "", key: key || code });
+  if (!X.sitemaps?.length) {
+    add("medium", "sm_none", X.sitemapUrls ? "Sitemap not submitted to Search Console" : "No sitemap found",
+      X.sitemapUrls ? `One was ${X.sitemapSource || "found"} with ${X.sitemapUrls} pages, but Search Console doesn't have it.` : "None in Search Console, robots.txt or the usual addresses.");
+  }
+  for (const s of X.sitemaps || []) {
+    if (s.errors) add("high", "sm_errors", `Sitemap has ${plural(s.errors, "error")}`, s.path, "sm_errors:" + s.path);
+    if (s.warnings) add("low", "sm_errors", `Sitemap has ${plural(s.warnings, "warning")}`, s.path, "sm_warn:" + s.path);
+    const d = daysSince(s.downloaded);
+    if (d != null && d > 14) add("low", "sm_stale", `Google last read the sitemap ${d} days ago`, s.path, "sm_stale:" + s.path);
+  }
+  const outOf = Object.entries(X.others || {}).filter(([, r]) => r && !r.err && r.v && r.v !== "PASS");
+  if (outOf.length) {
+    add("medium", "sm_pages_out", `${plural(outOf.length, "sitemap page")} ${outOf.length === 1 ? "isn't" : "aren't"} in Google`,
+      outOf.slice(0, 8).map(([p, r]) => `${p} (${r.cs || "unknown"})`).join(" · ") + (outOf.length > 8 ? ` and ${outOf.length - 8} more` : ""));
+  }
+  if (X.notInSitemap?.length) {
+    add("low", "sm_clicks_missing", `${plural(X.notInSitemap.length, "page")} with clicks ${X.notInSitemap.length === 1 ? "isn't" : "aren't"} in the sitemap`,
+      X.notInSitemap.slice(0, 8).map(([p]) => p).join(", "));
+  }
+  out.site = { path: "Whole site", url: "https://search.google.com/search-console", issues: site };
+}
+
 /* ---------- data ---------- */
 
 export async function loadHealth() {
@@ -102,13 +180,20 @@ export async function loadHealth() {
     getDocs(collection(db, "seo_issues"))
       .then((snap) => snap.docs.forEach((d) => { out.status[d.id] = d.data(); }))
       .catch((e) => console.warn("SEO issue statuses not read:", e)),
+    getDoc(doc(db, "seo_index", "main")).then((x) => {
+      if (!x.exists()) return;
+      const d = x.data();
+      out.index = { state: d, data: null };
+      try { out.index.data = d.json ? JSON.parse(d.json) : null; } catch { /* unreadable: shown as not checked */ }
+    }).catch((e) => console.warn("SEO index not read:", e)),
   ];
   if (out.state.build) {
     jobs.push(getDocs(query(collection(db, "seo_health"), where("build", "==", out.state.build)))
       .then((snap) => { out.pages = snap.docs.map((d) => ({ id: d.id, ...d.data() })); }));
   }
   await Promise.all(jobs);
-  for (const p of out.pages) {
+  attachIndex(out);
+  for (const p of out.pages.concat(out.site ? [out.site] : [])) {
     for (const i of p.issues || []) {
       i.path = p.path;
       i.url = p.url;
@@ -139,7 +224,9 @@ export function healthPanelHtml(H, p) {
   if (!k) return `<p class="seo-note" style="margin-top:14px">Site health doesn't check this page. Add it under Settings → Key pages to check its speed, titles, links and wording every night.</p>`;
   const m = metricsOf(k.speed);
   const open = (k.issues || []).filter((i) => i.status === "open").sort((a, b) => SEV[a.sev].rank - SEV[b.sev].rank);
-  return `<h3>Site health</h3>
+  const g = k.google;
+  const gLine = g && !g.err ? `<p class="seo-note">In Google: ${g.v === "PASS" ? '<span class="seo-h-good">yes</span>' : '<span class="seo-h-poor">no</span>'}${g.cs ? " · " + esc(g.cs) : ""}${g.lc ? " · Google last visited " + daysSince(g.lc) + " days ago" : ""}${g.link ? ` · <a class="seo-w-link" href="${esc(g.link)}" target="_blank" rel="noopener">Inspect ↗</a>` : ""}</p>` : "";
+  return `<h3>Site health</h3>${gLine}
     ${m ? `<p class="seo-note">Mobile score ${val("score", m.score)} · LCP ${val("lcp", m.lcp)} · INP ${val("inp", m.inp)} · CLS ${val("cls", m.cls)} · ${esc(m.from)}</p>`
       : `<p class="seo-note">Speed not checked yet.</p>`}
     ${open.length
@@ -176,6 +263,10 @@ export function viewHealth(wrap, c, ui) {
       ${tile("Medium", `<span class="seo-h-ni">${n("medium")}</span>`, "open issues")}
       ${tile("Low", n("low"), "open issues")}
       ${tile("Avg mobile score", avg == null ? "—" : val("score", avg), "out of 100")}
+      ${H.index?.data ? tile("In Google", (() => {
+        const k = H.pages.filter((p) => p.google && !p.google.err);
+        return k.length ? `${k.filter((p) => p.google.v === "PASS").length}/${k.length}` : "—";
+      })(), "key pages indexed") : ""}
       ${tile("Core Web Vitals", real.length ? `${real.filter((m) => m.pass).length}/${real.length}` : "—",
         real.length ? "pages passing (real visitors)" : "not enough visits yet")}
     </div>`;
@@ -244,8 +335,71 @@ export function viewHealth(wrap, c, ui) {
         “Real visitors” is Chrome data from the last 28 days. Pages without enough visits show Google's lab test instead (no INP).</p>`;
   }
 
+  function indexHtml() {
+    const I = H.index;
+    if (!I?.data) {
+      return `<div class="seo-empty">${I?.state?.error ? esc(I.state.error)
+        : "No Google indexing data yet. In Apps Script, run <code>runSeoIndex()</code> once, then <code>installSeoIndexTrigger()</code>."}</div>`;
+    }
+    const X = I.data;
+    const yes = (b) => (b ? `<span class="seo-h-good">Yes</span>` : `<span class="seo-h-poor">No</span>`);
+    const day = (iso) => { const d = daysSince(iso); return d == null ? "—" : d === 0 ? "today" : d + " days ago"; };
+    const missing = new Set(X.keyNotInSitemap || []);
+    const inspect = (r) => (r?.link ? `<a class="seo-w-link" href="${esc(r.link)}" target="_blank" rel="noopener">Inspect ↗</a>` : "");
+
+    const keyRows = H.pages.map((p) => {
+      const r = p.google;
+      const pg = c.byPath.get(p.path);
+      const name = pg ? `<button class="seo-w-link" data-open="${pg.id}">${esc(p.path)}</button>` : esc(p.path);
+      if (!r) return `<tr><td>${name}</td><td colspan="7" class="seo-note">Not checked yet</td></tr>`;
+      if (r.err) return `<tr><td>${name}</td><td colspan="7" class="seo-note">${esc(r.err)}</td></tr>`;
+      const diff = r.gc && r.uc && normU(r.gc) !== normU(r.uc);
+      const rich = (r.rr || []).map((x) => esc(x.t) + (x.e ? ` <span class="seo-h-poor">${plural(x.e, "error")}</span>` : "")).join(", ");
+      return `<tr><td>${name}</td><td>${yes(r.v === "PASS")}</td><td class="seo-note">${esc(r.cs || "")}</td><td>${day(r.lc)}</td>
+        <td>${diff ? `<span class="seo-h-ni" title="${esc(r.gc)}">${esc(shortU(r.gc))}</span>` : `<span class="seo-note">Same</span>`}</td>
+        <td>${X.sitemapUrls ? yes(!missing.has(p.path)) : "—"}</td><td class="seo-note">${rich || "—"}</td><td>${inspect(r)}</td></tr>`;
+    }).join("");
+
+    const fmtD = (iso) => (iso ? new Date(iso).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : "—");
+    const smRows = (X.sitemaps || []).map((s) => `<tr><td>${esc(shortU(s.path))}${s.pending ? ' <span class="seo-note">(waiting for Google)</span>' : ""}</td>
+      <td>${fmtD(s.submitted)}</td><td>${fmtD(s.downloaded)}</td><td>${s.urls ? c.h.fmtInt(s.urls) : "—"}</td>
+      <td>${s.errors ? `<span class="seo-h-poor">${s.errors}</span>` : "0"}</td><td>${s.warnings || 0}</td></tr>`).join("");
+
+    const others = Object.entries(X.others || {});
+    const outOf = others.filter(([, r]) => r && !r.err && r.v && r.v !== "PASS");
+    const otherRows = outOf.slice(0, 100).map(([p, r]) =>
+      `<tr><td><a class="seo-w-link" href="${esc((H.pages[0]?.url || "").replace(/^(https?:\/\/[^/]+).*$/, "$1") + p)}" target="_blank" rel="noopener">${esc(p)}</a></td>
+        <td class="seo-note">${esc(r.cs || "")}</td><td>${day(r.lc)}</td><td class="seo-note">${esc(r.at || "")}</td><td>${inspect(r)}</td></tr>`).join("");
+
+    return `
+      ${I.state.ok === false && I.state.error ? `<div class="seo-warn">${esc(I.state.error)}</div>` : ""}
+      ${X.quota ? `<div class="seo-warn">Google's daily URL Inspection limit was reached. The rest are checked tomorrow.</div>` : ""}
+      <div class="seo-card"><h3>Key pages in Google</h3>
+        <div class="seo-table-wrap" style="max-height:none"><table class="seo-table">
+          <thead><tr><th>Page</th><th>In Google</th><th>Google says</th><th>Google's last visit</th><th>Main version</th><th>In sitemap</th><th>Rich results</th><th></th></tr></thead>
+          <tbody>${keyRows}</tbody></table></div>
+        <p class="seo-note" style="margin-top:6px">From Search Console's URL Inspection. “Main version” is the address Google treats as the real one. If it isn't this page, this page won't show in search.</p>
+      </div>
+      <div class="seo-card"><h3>Sitemaps</h3>
+        ${smRows ? `<table class="seo-table"><thead><tr><th>Sitemap</th><th>Submitted</th><th>Google last read it</th><th>Pages</th><th>Errors</th><th>Warnings</th></tr></thead><tbody>${smRows}</tbody></table>`
+          : `<p class="seo-note">No sitemap submitted to Search Console.${X.sitemapUrls ? ` One was ${esc(X.sitemapSource || "found")} with ${c.h.fmtInt(X.sitemapUrls)} pages.` : ""}</p>`}
+        <p class="seo-note" style="margin-top:6px">${c.h.fmtInt(X.sitemapUrls || 0)} pages in the sitemap: ${c.h.fmtInt(X.sitemapSeen || 0)} are in Google (they had search impressions),
+          ${c.h.fmtInt(others.length)} more checked with URL Inspection so far (up to 60 a day), ${c.h.fmtInt(outOf.length)} not in Google.</p>
+      </div>
+      <div class="seo-card"><h3>Sitemap pages not in Google</h3>
+        ${otherRows ? `<table class="seo-table"><thead><tr><th>Page</th><th>Google says</th><th>Google's last visit</th><th>Checked</th><th></th></tr></thead><tbody>${otherRows}</tbody></table>
+            ${outOf.length > 100 ? `<p class="seo-note">and ${outOf.length - 100} more</p>` : ""}`
+          : `<p class="seo-note">${others.length ? "None found so far. 👍" : "Not checked yet."}</p>`}
+      </div>
+      ${X.notInSitemap?.length ? `<div class="seo-card"><h3>Pages with clicks that aren't in the sitemap</h3>
+        <ul class="seo-h-plist">${X.notInSitemap.map(([p, n]) => {
+          const pg = c.byPath.get(p);
+          return `<li>${pg ? `<button class="seo-w-link" data-open="${pg.id}">${esc(p)}</button>` : esc(p)} <span class="seo-note">· ${plural(n, "click")} in 28 days</span></li>`;
+        }).join("")}</ul></div>` : ""}`;
+  }
+
   function draw() {
-    const all = H.pages.flatMap((p) => p.issues || []);
+    const all = H.pages.concat(H.site ? [H.site] : []).flatMap((p) => p.issues || []);
     byId = new Map(all.map((i) => [i.id, i]));
     const st = H.state;
     wrap.innerHTML = `
@@ -256,10 +410,11 @@ export function viewHealth(wrap, c, ui) {
       <div class="seo-row">
         <button class="seo-btn ${ui.hview === "issues" ? "on" : ""}" data-h-view="issues">Issues</button>
         <button class="seo-btn ${ui.hview === "speed" ? "on" : ""}" data-h-view="speed">Speed</button>
+        <button class="seo-btn ${ui.hview === "index" ? "on" : ""}" data-h-view="index">In Google</button>
         <span class="seo-sp"></span>
         <span class="seo-note">${st.linksChecked != null ? `${st.linksChecked} of ${st.linksFound} internal links checked · ` : ""}${c.can("seo.manage") ? `Choose pages in <a href="#/seo/settings">Settings</a>` : ""}</span>
       </div>
-      ${ui.hview === "speed" ? speedHtml() : issuesHtml(all)}`;
+      ${ui.hview === "speed" ? speedHtml() : ui.hview === "index" ? indexHtml() : issuesHtml(all)}`;
   }
 
   wrap.onclick = async (e) => {

@@ -1489,7 +1489,8 @@ match /inv_count_drafts/{id} {
         && request.resource.data.by == resource.data.by;
       allow delete: if can('seo.manage') || (can('seo.work') && resource.data.by == request.auth.uid);
     }
-
+    match /seo_index/{id} { allow read: if can('menu.seo'); allow write: if false; }
+    
     match /seo_settings/{id} {
       allow read: if can('menu.seo');
       allow write: if can('seo.manage');
