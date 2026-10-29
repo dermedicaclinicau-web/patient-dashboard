@@ -2883,8 +2883,9 @@ export async function investigationEvidence(x) {
   };
 }
 
-// Step 2: the blind recount, by someone other than the first counter (unless an admin allowed it).
-// It's compared with digital at the moment of saving. A match closes it as a count error.
+// Step 2: the blind recount, by someone other than the first counter (unless an admin allowed it),
+// and never by someone who has seen the numbers. It's compared with digital at the moment of saving.
+// A match closes it as a count error, and the line on the original count is marked resolved.
 export async function saveRecount(id, counted, staff) {
   const n = parseInt(counted, 10);
   if (!(n >= 0)) throw new Error("Enter how many you counted (0 if there are none).");
@@ -2892,6 +2893,7 @@ export async function saveRecount(id, counted, staff) {
   const by = who(staff);
   const iRef = doc(db, "inv_investigations", id);
   let result = null;
+  let inv = null;
   await runTransaction(db, async (tx) => {
     const s = await tx.get(iRef);
     if (!s.exists()) throw new Error("This investigation no longer exists.");
@@ -2900,6 +2902,9 @@ export async function saveRecount(id, counted, staff) {
     if (x.status !== "recount") throw new Error("The recount has already been done. Reload to see it.");
     if (x.openedByUid === me && x.aloneApproved !== true) {
       throw new Error("Someone else needs to do the recount. If you're the only one on site, ask an admin to allow it.");
+    }
+    if ((Array.isArray(x.peekedByUids) ? x.peekedByUids : []).includes(me)) {
+      throw new Error("You've seen the numbers, so someone else needs to do the recount.");
     }
     const pSnap = await tx.get(doc(db, "inv_products", x.productId));
     const lSnap = await tx.get(doc(db, "inv_lots", String(x.ref || "")));
@@ -2924,9 +2929,15 @@ export async function saveRecount(id, counted, staff) {
         note: `Recounted ${n}, digital ${digital}` }),
     });
     if (!matched) tx.set(doc(collection(db, "notify_outbox")), outboxDoc("investigation.confirmed", { id }, me));
+    inv = { ...x, id };
     result = { matched, digital, diff };
   });
-  if (!result.matched) pingNotify();
+  if (result.matched) {
+    await settleCountLine(inv, "count-error", "The recount matched the portal, so the first count was wrong.", 0, staff)
+      .catch((err) => console.warn("Count line not updated:", err));
+  } else {
+    pingNotify();
+  }
   return result;
 }
 
@@ -2941,6 +2952,7 @@ export async function allowAloneRecount(id, staff) {
 
 // Step 3: an admin closes it. Outcomes that adjust apply the confirmed difference to today's stock
 // (like Accept: not "set to the counted number", as stock may have moved since).
+// The line on the original count is then marked resolved.
 export async function closeInvestigation(id, { outcome, note = "", cctvChecked = false, cctvNote = "" }, staff) {
   const o = INV_OUTCOMES[outcome];
   if (!o || o.system) throw new Error("Choose what happened.");
@@ -2949,6 +2961,8 @@ export async function closeInvestigation(id, { outcome, note = "", cctvChecked =
   const me = uid();
   const by = who(staff);
   const iRef = doc(db, "inv_investigations", id);
+  let inv = null;
+  let appliedOut = 0;
   await runTransaction(db, async (tx) => {
     // ---- Reads ----
     const s = await tx.get(iRef);
@@ -2996,6 +3010,42 @@ export async function closeInvestigation(id, { outcome, note = "", cctvChecked =
       closedAt: serverTimestamp(), closedBy: by, closedByUid: me, updatedAt: serverTimestamp(),
       events: arrayUnion({ at: new Date().toISOString(), by, action: `Closed: ${o.label}`,
         note: applied ? `${locLabel(loc)} adjusted by ${applied > 0 ? "+" : ""}${applied}` : "Stock not changed" }),
+    });
+    inv = { ...x, id };
+    appliedOut = applied;
+  });
+  await settleCountLine(inv, outcome, text, appliedOut, staff)
+    .catch((err) => console.warn("Count line not updated:", err));
+}
+
+// An admin looks at the numbers before the recount. From then on they can't do the recount themselves.
+export async function peekInvestigation(id, staff) {
+  await updateDoc(doc(db, "inv_investigations", id), {
+    peekedByUids: arrayUnion(uid()), updatedAt: serverTimestamp(),
+    events: arrayUnion({ at: new Date().toISOString(), by: who(staff),
+      action: "Saw the numbers before the recount", note: "They can't do the recount themselves" }),
+  });
+}
+
+// When an investigation closes, its line on the original count stops showing as "investigating".
+// Accepted when stock was changed, explained otherwise. Kit overnight investigations have no count line.
+async function settleCountLine(inv, outcome, note, applied, staff) {
+  if (!inv || !inv.countId || !(Number(inv.line) >= 0)) return;
+  const ref = doc(db, "inv_counts", inv.countId);
+  const o = INV_OUTCOMES[outcome] || {};
+  await runTransaction(db, async (tx) => {
+    const s = await tx.get(ref);
+    if (!s.exists()) return;
+    const lines = (Array.isArray(s.data().lines) ? s.data().lines : []).map((l) => ({ ...l }));
+    const l = lines[inv.line];
+    if (!l || l.investigationId !== inv.id || l.status !== "investigating") return;
+    lines[inv.line] = {
+      ...l, status: o.adjust && applied ? "accepted" : "explained",
+      note: clip(`${o.label || "Investigated"}: ${note}`, 500), applied: Number(applied) || 0, investigationOutcome: outcome,
+      resolvedBy: who(staff), resolvedByUid: uid(), resolvedAt: new Date().toISOString(),
+    };
+    tx.update(ref, {
+      lines, openCount: lines.filter((q) => q.status === "open").length, updatedAt: serverTimestamp(), updatedBy: who(staff),
     });
   });
 }

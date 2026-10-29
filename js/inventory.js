@@ -1780,6 +1780,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     if (inv) return `<small class="ivx-cl is-bad">Counted ${c.counted} on ${esc(d)} · <a href="#/inventory/investigations/${esc(inv.id)}">Investigating</a></small>`;
     if (c.statuses.includes("open")) return `<small class="ivx-cl is-warn">Counted ${c.counted} on ${esc(d)} · difference to review</small>`;
     if (c.statuses.includes("investigating")) return `<small class="ivx-cl">Counted ${c.counted} on ${esc(d)} · investigated</small>`;
+    if (c.statuses.some((s) => s === "accepted" || s === "explained")) return `<small class="ivx-cl">Counted ${c.counted} on ${esc(d)} · difference resolved</small>`;
     return `<small class="ivx-cl is-ok">Counted ${c.counted} on ${esc(d)} ✓ matched</small>`;
   }
 
