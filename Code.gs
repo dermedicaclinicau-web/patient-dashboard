@@ -17045,13 +17045,15 @@ function prosFindExisting_(cfg, phoneKey, emailKey) {
   })[0] || null;
 }
 
-// The patient with the same mobile or email. Only linked when exactly one patient matches.
-function prosFindPatient_(cfg, phoneKey, emailKey) {
-  const found = {};
-  if (phoneKey) {
-    try { ptFsEntries_().list.forEach(function (p) { if (prosPhoneKey_(p[2]) === phoneKey) found[p[0]] = 'mobile'; }); }
-    catch (e) { console.warn('Prospect: patients not read by mobile: ' + e); }
-  }
+// The patient with the same mobile or email; failing that, the only patient with the same full name.
+// Several share a mobile or email: the one with the same name. Only linked when exactly one patient fits.
+function prosFindPatient_(cfg, phoneKey, emailKey, name) {
+  let entries = [];
+  try { entries = ptFsEntries_().list; } catch (e) { console.warn('Prospect: patients not read: ' + e); }
+  const namesOf = {};
+  entries.forEach(function (p) { namesOf[p[0]] = p[1]; });
+  let found = {};
+  if (phoneKey) entries.forEach(function (p) { if (prosPhoneKey_(p[2]) === phoneKey) found[p[0]] = 'mobile'; });
   if (emailKey) {
     ['EmailKey', 'Email'].forEach(function (f) {
       try {
@@ -17062,7 +17064,18 @@ function prosFindPatient_(cfg, phoneKey, emailKey) {
       } catch (e) { console.warn('Prospect: patients not read by email: ' + e); }
     });
   }
-  const keys = Object.keys(found);
+  let keys = Object.keys(found);
+  if (keys.length > 1 && name) {
+    const named = keys.filter(function (k) { return (namesOf[k] || []).some(function (n) { return prosSameName_(name, n); }); });
+    if (named.length === 1) { const h = found[named[0]]; found = {}; found[named[0]] = 'name and ' + h; keys = named; }
+  }
+  if (!keys.length && name) {
+    const nk = ptClean_(name);
+    if (nk.split(' ').length >= 2) {
+      entries.forEach(function (p) { if (p[1].some(function (n) { return ptClean_(n) === nk; })) found[p[0]] = 'name'; });
+      keys = Object.keys(found);
+    }
+  }
   if (keys.length !== 1) return { many: keys.length };
   const doc = flowPatient_(cfg, keys[0]);
   return doc ? { patientId: doc._id, pttId: String(doc.PttID || doc._id), patientName: flowWho_(doc).name, how: found[keys[0]] }
@@ -17128,7 +17141,7 @@ function prosAddEnquiry_(cfg, set, f, session, forceNew) {
   }
 
   const id = 'pr_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20);
-  const pt = prosFindPatient_(cfg, keys.phoneKey, keys.emailKey);
+  const pt = prosFindPatient_(cfg, keys.phoneKey, keys.emailKey, f.name);
   let to = null;
   if (f.assignTo) to = getStaffDocs_().filter(function (s) { return s.id === String(f.assignTo) && s.active !== false; })[0] || null;
   else if (!session && !f.quiet) to = prosShareTo_(cfg, set);   // older enquiries aren't shared out
@@ -17149,6 +17162,7 @@ function prosAddEnquiry_(cfg, set, f, session, forceNew) {
     assignedToId: to ? to.id : '', assignedToName: to ? String(to.name || '') : '',
     nextFollowUp: '', followNote: '',
     patientId: pt.patientId || '', pttId: pt.pttId || '', patientName: pt.patientName || '', patientMany: pt.many || 0,
+    linkWeak: pt.how === 'name',
     enquiries: [enq], enquiryCount: 1, lastEnquiryAt: at, waitingSince: f.quiet ? '' : at,
     contacts: 0, firstContactAt: '', lastContactAt: '',
     createdAt: at, createdBy: who, createdByUid: uid, updatedAt: now,
@@ -17456,13 +17470,15 @@ function prosAction_(cfg, op, id, body, session) {
     const ptt = String(body.pttId || '').trim();
     if (!ptt) {
       if (!p.patientId) return { ok: true, prospect: Object.assign({ id: id }, p) };
-      Object.assign(patch, { patientId: '', pttId: '', patientName: '' });
-      add('link', 'No longer linked to ' + (p.patientName || 'the patient'), '');
+      Object.assign(patch, { patientId: '', pttId: '', patientName: '', linkWeak: false, wasPatient: false, noAutoLink: true });
+      add('link', 'No longer linked to ' + (p.patientName || 'the patient') + ' (it won\'t be linked again by itself)', '');
     } else {
       const d = flowPatient_(cfg, ptt);
       if (!d) return { ok: true, problem: "That patient couldn't be found." };
-      Object.assign(patch, { patientId: d._id, pttId: String(d.PttID || d._id), patientName: flowWho_(d).name, patientMany: 0 });
-      add('link', 'Linked to the patient ' + flowWho_(d).name, '');
+      const same = d._id === p.patientId;
+      Object.assign(patch, { patientId: d._id, pttId: String(d.PttID || d._id), patientName: flowWho_(d).name,
+        patientMany: 0, linkWeak: false, noAutoLink: false });
+      add('link', (same ? 'Checked: it is the patient ' : 'Linked to the patient ') + flowWho_(d).name, '');
     }
   } else {
     return { ok: false, error: 'BAD_REQUEST' };
@@ -17587,7 +17603,7 @@ const PROS_CONSULT_RE_ = /consult/i;
 const PROS_NOT_TX_RE_ = /\b(review|follow[\s-]?up|check[\s-]?up|touch[\s-]?up|top[\s-]?up|medicare)\b/i;
 const PROS_AUTO_ = 'Appointment book';
 
-// Every patient: find(PttID), doc(id), kept(id) after merges, and who has each mobile and email
+// Every patient: find(PttID), doc(id), kept(id) after merges, and who has each mobile, email and full name
 function prosPatientIndex_(cfg) {
   const byId = Object.create(null);
   const byPtt = Object.create(null);
@@ -17606,6 +17622,7 @@ function prosPatientIndex_(cfg) {
   };
   const byPhone = Object.create(null);
   const byEmail = Object.create(null);
+  const byName = Object.create(null);
   const add = function (map, k, id) {
     if (!k) return;
     const a = map[k] || (map[k] = []);
@@ -17614,12 +17631,17 @@ function prosPatientIndex_(cfg) {
   Object.keys(byId).forEach(function (id) {
     const k = kept(id);
     if (!k) return;
-    add(byPhone, prosPhoneKey_(byId[id].Mobile), k);
-    const e = mktEmail_(byId[id].Email);
+    const d = byId[id];
+    add(byPhone, prosPhoneKey_(d.Mobile), k);
+    const e = mktEmail_(d.Email);
     if (isEmail_(e)) add(byEmail, e, k);
+    [d['Patient Name'], (d['First Name'] || '') + ' ' + (d['Last Name'] || '')].forEach(function (n) {
+      const nk = ptClean_(n);
+      if (nk.split(' ').length >= 2) add(byName, nk, k);   // first and last name, at least
+    });
   });
   return {
-    kept: kept, byPhone: byPhone, byEmail: byEmail,
+    kept: kept, byPhone: byPhone, byEmail: byEmail, byName: byName,
     doc: function (id) { return byId[id] || null; },
     find: function (ptt) { const id = byPtt[String(ptt == null ? '' : ptt).trim().toLowerCase()]; return id ? kept(id) : ''; },
   };
@@ -17633,16 +17655,22 @@ function prosSameName_(a, b) {
   return x.length < 2 || y.length < 2 || x[x.length - 1] === y[y.length - 1];
 }
 
-// { id, how } when it's clear who they are, { many } when it isn't, or null
+// { id, how, weak } when it's clear who they are, { many } when it isn't, or null.
+// weak: matched by name only (the card says "Check match" until someone confirms it)
 function prosLinkFor_(ix, p) {
   const ph = p.phoneKey ? (ix.byPhone[p.phoneKey] || []) : [];
   const em = p.emailKey ? (ix.byEmail[p.emailKey] || []) : [];
   const c = uniq_(ph.concat(em));
   const how = function (id) { return ph.indexOf(id) !== -1 ? 'mobile' : 'email'; };
   if (c.length === 1) return { id: c[0], how: how(c[0]) };
-  if (!c.length) return null;
-  const named = c.filter(function (id) { const d = ix.doc(id); return d && prosSameName_(p.name, flowWho_(d).name); });
-  return named.length === 1 ? { id: named[0], how: 'name and ' + how(named[0]) } : { many: c.length };
+  if (c.length > 1) {
+    const named = c.filter(function (id) { const d = ix.doc(id); return d && prosSameName_(p.name, flowWho_(d).name); });
+    return named.length === 1 ? { id: named[0], how: 'name and ' + how(named[0]) } : { many: c.length };
+  }
+  const nk = ptClean_(p.name);
+  const byN = nk.split(' ').length >= 2 ? (ix.byName[nk] || []) : [];
+  if (byN.length === 1) return { id: byN[0], how: 'name', weak: true };
+  return byN.length > 1 ? { many: byN.length } : null;
 }
 
 // Consultation and treatment days for the patients in want: { patientId: { 'yyyy-MM-dd': { consult, tx, svcs, staff } } }
@@ -17715,21 +17743,21 @@ function prosStagesCheck_(cfg, ctx) {
   const now = new Date().toISOString();
   const ix = prosPatientIndex_(cfg);
   const list = fsListAll_(cfg, PROS_COL_, ['name', 'stage', 'stageAt', 'createdAt', 'patientId', 'phoneKey', 'emailKey',
-    'historic', 'milestones', 'nextAppt', 'lastVisit', 'patientMany'])
+    'historic', 'milestones', 'nextAppt', 'lastVisit', 'patientMany', 'linkWeak', 'noAutoLink', 'wasPatient'])
     .map(function (d) { const f = fromFields_(d.fields || {}); f._id = d.name.split('/').pop(); return f; });
-  const sum = { prospects: list.length, linked: 0, moved: 0, revived: 0, backOnBoard: 0, written: 0 };
+  const sum = { prospects: list.length, linked: 0, byNameOnly: 0, moved: 0, revived: 0, backOnBoard: 0, written: 0 };
 
-  // 1. Who each prospect is
+  // 1. Who each prospect is (never linked again by itself once staff have unlinked it)
   const links = {};
   const want = Object.create(null);
   list.forEach(function (p) {
     let pid = p.patientId ? ix.kept(String(p.patientId)) : '';
-    if (!pid) {
+    if (!pid && p.noAutoLink !== true) {
       const l = prosLinkFor_(ix, p);
       if (l && l.id) { pid = l.id; links[p._id] = l; }
       else if (l && l.many && Number(p.patientMany || 0) !== l.many) links[p._id] = l;
-    } else if (pid !== p.patientId) {
-      links[p._id] = { id: pid, how: 'merged' };   // their patient record was merged into another
+    } else if (pid && pid !== p.patientId) {
+      links[p._id] = { id: pid, how: 'merged', weak: p.linkWeak === true };   // their record was merged into another
     }
     p._pid = pid;
     if (pid) want[pid] = true;
@@ -17747,10 +17775,13 @@ function prosStagesCheck_(cfg, ctx) {
     if (l && l.id) {
       const d = ix.doc(l.id);
       const nm = d ? flowWho_(d).name : '';
-      Object.assign(patch, { patientId: l.id, pttId: String((d && d.PttID) || l.id), patientName: nm, patientMany: 0 });
+      Object.assign(patch, { patientId: l.id, pttId: String((d && d.PttID) || l.id), patientName: nm, patientMany: 0,
+        linkWeak: l.weak === true });
       if (l.how !== 'merged') {
-        entries.push({ kind: 'link', what: 'Linked to the patient ' + nm + ' (same ' + l.how + ')' });
+        entries.push({ kind: 'link', what: 'Linked to the patient ' + nm +
+          (l.weak ? ' (same name only: check it\'s them)' : ' (same ' + l.how + ')') });
         sum.linked++;
+        if (l.weak) sum.byNameOnly++;
       }
     } else if (l && l.many) {
       patch.patientMany = l.many;
@@ -17760,6 +17791,8 @@ function prosStagesCheck_(cfg, ctx) {
       const from = flowKey_(Date.parse(String(p.createdAt || '')) || Date.now());
       const days = visits[p._pid];
       const b = prosBookStage_(days, from, today);
+      const was = Object.keys(days || {}).some(function (k) { return k < from; });   // in before they enquired
+      if (was !== (p.wasPatient === true)) patch.wasPatient = was;
       if (JSON.stringify(b.ms) !== JSON.stringify(p.milestones || {})) patch.milestones = b.ms;
       if (b.next !== String(p.nextAppt || '')) patch.nextAppt = b.next;
       if (b.last !== String(p.lastVisit || '')) patch.lastVisit = b.last;
@@ -17779,7 +17812,6 @@ function prosStagesCheck_(cfg, ctx) {
           entries.push({ kind: 'stage', what: (revive ? 'Back from Lost, moved to ' : 'Moved to ') +
             PROS_STAGE_NAME_[b.stage] + ': ' + prosStageNote_(days, b) });
           if (revive) sum.revived++; else sum.moved++;
-          // An older enquiry comes back onto the board when there's something recent to work on
           if (p.historic === true && b.stage !== 'active' && (b.next || b.last >= flowAddDaysKey_(today, -90))) {
             patch.historic = false;
             sum.backOnBoard++;
@@ -17793,7 +17825,6 @@ function prosStagesCheck_(cfg, ctx) {
     if (entries.length) patch.updatedAt = now;
     const w = patchWrite_(cfg, PROS_COL_ + '/' + p._id, patch);
     if (entries.length) {
-      // Added to the timeline without rewriting it, so nothing a staff member saves at the same time is lost
       w.updateTransforms = [{ fieldPath: 'log', appendMissingElements: { values: entries.map(function (e) {
         return toValue_({ at: now, by: PROS_AUTO_, byUid: '', kind: e.kind, what: e.what, note: '' });
       }) } }];
@@ -17805,6 +17836,7 @@ function prosStagesCheck_(cfg, ctx) {
   sum.ms = Date.now() - t0;
   return sum;
 }
+
 
 function prosStagesRun_(force) {
   const cache = CacheService.getScriptCache();

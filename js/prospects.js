@@ -95,6 +95,7 @@ const IC = {
   check: '<polyline points="20 6 9 17 4 12"/>',
   gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
   trophy: '<path d="M8 21h8"/><path d="M12 17v4"/><path d="M7 4h10v5a5 5 0 0 1-10 0z"/><path d="M17 5h3v2a3 3 0 0 1-3 3"/><path d="M7 5H4v2a3 3 0 0 0 3 3"/>',
+  chart: '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
 };
 const KIND_IC = { enquiry: "inbox", contact: "phone", text: "text", email: "mail", note: "note", stage: "flag",
   follow: "clock", assign: "user", link: "link", edit: "note" };
@@ -150,6 +151,7 @@ const opts = (list, cur, blank = "") => (blank ? `<option value="">${esc(blank)}
 /* ===================== Routes ===================== */
 
 export function mountProspects(container, { param = "", staff = null } = {}) {
+  if (parts[0] === "reports") { mountReports(container); return; }
   const parts = String(param || "").split("/").filter(Boolean);
   if (parts[0] && parts[0] !== "list") { mountProspect(container, decodeURIComponent(parts[0]), staff); return; }
   mountBoard(container, { view: parts[0] === "list" ? "list" : "board", staff });
@@ -191,6 +193,7 @@ async function mountBoard(container, { view, staff }) {
     <div class="pr-top">
       <div><h2>Prospect Dashboard</h2><p class="muted">Everyone who's enquired, from first contact to becoming a patient.</p></div>
       <div class="pr-top-acts">
+        <a class="lh-btn is-quiet" href="#/prospects/reports">${I(IC.chart)} Reports</a>
         ${can("prospects.manage") ? `<button type="button" class="lh-btn is-quiet" data-act="settings">${I(IC.gear)} Settings</button>` : ""}
         ${work ? `<button type="button" class="lh-btn is-primary" data-act="new">${I(IC.plus)} New prospect</button>` : ""}
       </div>
@@ -232,7 +235,8 @@ async function mountBoard(container, { view, staff }) {
       ${p.concern ? `<small class="pr-card-concern">${esc(p.concern)}</small>` : ""}
       <span class="pr-tags">
         <span class="pr-tag">${esc(p.source || "Other")}</span>
-        ${p.patientId ? '<span class="pr-tag is-pt">Patient</span>' : ""}
+        ${p.patientId ? `<span class="pr-tag is-pt">${p.wasPatient ? "Existing patient" : "Patient"}</span>` : ""}
+        ${p.patientId && p.linkWeak ? '<span class="pr-tag is-warn">Check match</span>' : ""}
         ${p.nextAppt && OPEN.includes(p.stage) ? `<span class="pr-tag is-pt">Booked ${esc(niceDay(p.nextAppt))}</span>` : ""}
         ${late ? '<span class="pr-tag is-bad">Not contacted</span>' : ""}
         ${fs === "overdue" ? '<span class="pr-tag is-bad">Follow-up overdue</span>'
@@ -256,12 +260,15 @@ async function mountBoard(container, { view, staff }) {
           const s = stageOf(p.stage);
           const fs = followState(p);
           return `<tr data-href="#/prospects/${enc(p.id)}">
-            <td><a href="#/prospects/${enc(p.id)}"><strong>${esc(p.name)}</strong></a>${notContacted(p, set) ? ' <span class="pr-tag is-bad">Not contacted</span>' : ""}</td>
-            <td><span class="pr-pill is-${s.tone}">${esc(s.name)}</span></td>
-            <td>${esc(p.concern || "")}</td><td>${esc(p.source || "")}</td><td>${esc(p.assignedToName || "")}</td>
-            <td class="${fs === "overdue" ? "is-bad" : fs === "today" ? "is-warn" : ""}">${esc(niceDay(p.nextFollowUp))}</td>
-            <td>${esc(niceDay(p.nextAppt))}</td>
-            <td>${esc(p.lastContactAt ? ago(p.lastContactAt) : "")}</td><td>${esc(niceDay(keyOf(p.createdAt)))}</td></tr>`;
+            <td data-label="Name"><a href="#/prospects/${enc(p.id)}"><strong>${esc(p.name)}</strong></a>${notContacted(p, set) ? ' <span class="pr-tag is-bad">Not contacted</span>' : ""}</td>
+            <td data-label="Stage"><span class="pr-pill is-${s.tone}">${esc(s.name)}</span></td>
+            <td data-label="Interested in">${esc(p.concern || "")}</td>
+            <td data-label="Source">${esc(p.source || "")}</td>
+            <td data-label="With">${esc(p.assignedToName || "")}</td>
+            <td data-label="Follow up" class="${fs === "overdue" ? "is-bad" : fs === "today" ? "is-warn" : ""}">${esc(niceDay(p.nextFollowUp))}</td>
+            <td data-label="Next appointment">${esc(niceDay(p.nextAppt))}</td>
+            <td data-label="Last contact">${esc(p.lastContactAt ? ago(p.lastContactAt) : "")}</td>
+            <td data-label="Enquired">${esc(niceDay(keyOf(p.createdAt)))}</td></tr>`;
         }).join("")}</tbody></table></div>`
         : '<p class="pr-empty">No prospects match.</p>';
       return;
@@ -529,7 +536,7 @@ async function mountProspect(container, id, staff) {
             ${p.email ? `<a class="pr-chip" href="mailto:${esc(p.email)}">${I(IC.mail)}${esc(p.email)}</a>` : ""}
             ${p.pref ? `<span class="pr-chip">Prefers ${esc(p.pref)}</span>` : ""}
             ${p.ageGroup ? `<span class="pr-chip">Age ${esc(p.ageGroup)}</span>` : ""}
-            ${p.patientId ? `<a class="pr-chip is-pt" href="#/patient/${enc(p.patientId)}">${I(IC.user)}Patient: ${esc(p.patientName)}</a>` : ""}
+            ${p.patientId ? `<a class="pr-chip is-pt" href="#/patient/${enc(p.patientId)}">${I(IC.user)}${p.wasPatient ? "Existing patient" : "Patient"}: ${esc(p.patientName)}</a>` : ""}
             ${p.nextAppt ? `<span class="pr-chip">${I(IC.clock)}Next appointment ${esc(fullDay(p.nextAppt))}</span>` : ""}
             ${p.historic ? '<span class="pr-tag">Older</span>' : ""}
             
@@ -570,10 +577,13 @@ async function mountProspect(container, id, staff) {
           ${work ? `<section class="pr-sec"><h3>${I(IC.user)} Given to</h3>
             <div class="pr-row"><select class="fe-input" data-role="assign"><option>${esc(p.assignedToName || "Nobody yet")}</option></select></div></section>` : ""}
           <section class="pr-sec"><h3>${I(IC.link)} Patient record</h3>
-            ${p.patientId ? `<p><a href="#/patient/${enc(p.patientId)}"><strong>${esc(p.patientName)}</strong></a></p>
-              ${work ? '<button type="button" class="lh-btn is-quiet" data-act="unlink">Unlink</button>' : ""}`
-              : `${p.patientMany > 1 ? `<p class="muted">${p.patientMany} patients have the same mobile or email. Choose the right one.</p>`
-                : '<p class="muted">Not linked to a patient yet. When they book, link them here.</p>'}
+            ${p.patientId ? `<p><a href="#/patient/${enc(p.patientId)}"><strong>${esc(p.patientName)}</strong></a>${
+                p.wasPatient ? ' <span class="pr-tag is-pt">Already a patient when they enquired</span>' : ""}</p>
+              ${p.linkWeak ? `<p class="pr-warnline">${I(IC.alert)} Matched by name only. Check it's the same person.</p>` : ""}
+              ${work ? `<div class="pr-row">${p.linkWeak ? '<button type="button" class="lh-btn" data-act="confirmlink">Yes, that\'s them</button>' : ""}
+                <button type="button" class="lh-btn is-quiet" data-act="unlink">${p.linkWeak ? "Not them: unlink" : "Unlink"}</button></div>` : ""}`
+              : `${p.patientMany > 1 ? `<p class="muted">${p.patientMany} patients could be them (same mobile, email or name). Choose the right one.</p>`
+                : '<p class="muted">Not linked yet. They\'re linked by themselves when their mobile, email or full name matches one patient, or link them here.</p>'}
               ${work ? `<input type="search" class="fe-input" data-role="ptq" placeholder="Search the Patient List" value="${esc(p.name)}" />
                 <div class="pr-hits" data-role="hits"></div>` : ""}`}
           </section>
@@ -662,6 +672,7 @@ async function mountProspect(container, id, staff) {
     if (act === "log") logDialog();
     if (act === "lost") lostDialog(p, set, (np) => { p = np; render(); });
     if (act === "unlink") { try { await save("link", { pttId: "" }, "Unlinked"); } catch (err) { showToast(errText(err)); } }
+    if (act === "confirmlink") { try { await save("link", { pttId: p.patientId }, "Confirmed"); } catch (err) { showToast(errText(err)); } }
     if (act === "note") {
       openDialog({ title: "Add a note", submit: "Save note",
         body: '<label class="lh-field"><span class="lh-label">Note</span><textarea name="note" rows="4" maxlength="1000" class="fe-input"></textarea></label>',
@@ -728,4 +739,301 @@ Dermedica</textarea></label>${followHtml(fuStart(p.nextFollowUp, addDays(todayKe
   });
 
   render();
+}
+
+/* ===================== Reports (#/prospects/reports) ===================== */
+// Everything is worked out here from the prospects (current and older), so filters change instantly.
+
+const REP_RANGES = [["30", "Last 30 days"], ["90", "Last 3 months"], ["180", "Last 6 months"], ["365", "Last 12 months"],
+  ["all", "All time"], ["custom", "Choose dates"]];
+const ORDER = ["new", "contacted", "consult_booked", "consulted", "tx_booked", "treated", "active"];
+const FUNNEL = ["Enquired", "Contacted", "Consultation booked", "Consulted", "Treatment booked", "Treated", "Active patient"];
+const SPEED = [["Within 1 hour", 1], ["1 to 4 hours", 4], ["4 to 24 hours", 24], ["1 to 3 days", 72], ["Over 3 days", Infinity]];
+const DOW = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const pct = (n, d) => (d ? Math.round((n / d) * 100) : 0);
+const median = (a) => {
+  if (!a.length) return null;
+  const s = a.slice().sort((x, y) => x - y);
+  const m = s.length >> 1;
+  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+};
+const dayDiff = (a, b) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 864e5);
+const repDay = (k) => { if (!/^\d{4}-\d{2}-\d{2}$/.test(k || "")) return ""; const [y, m, d] = k.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }); };
+const monthName = (m, withYear) => { const [y, mo] = m.split("-").map(Number);
+  return new Date(y, mo - 1, 1).toLocaleDateString("en-AU", withYear ? { month: "short", year: "2-digit" } : { month: "short" }); };
+const addMonths = (m, n) => { const [y, mo] = m.split("-").map(Number); return new Date(Date.UTC(y, mo - 1 + n, 1)).toISOString().slice(0, 7); };
+const hrsText = (h) => (h == null ? "–" : h < 1 ? `${Math.max(1, Math.round(h * 60))} min` : h < 48 ? `${Math.round(h)} h` : `${Math.round(h / 24)} days`);
+const PERTH_PARTS = new Intl.DateTimeFormat("en-AU", { timeZone: "Australia/Perth", weekday: "short", hour: "2-digit", hourCycle: "h23" });
+const whenParts = (iso) => {
+  const o = {};
+  PERTH_PARTS.formatToParts(new Date(iso)).forEach((x) => { o[x.type] = x.value; });
+  return { d: DOW.indexOf(String(o.weekday || "").slice(0, 3)), h: Number(o.hour) % 24 };
+};
+// The furthest stage reached: 0 enquired … 6 active (the stage now, and the appointment book's dates)
+function reachOf(p) {
+  let i = p.stage === "lost" ? 0 : Math.max(0, ORDER.indexOf(p.stage));
+  const m = p.milestones || {};
+  ORDER.forEach((k, j) => { if (m[k]) i = Math.max(i, j); });
+  if (i < 1 && (Number(p.contacts) > 0 || p.firstContactAt)) i = 1;
+  return i;
+}
+const wasImported = (p) => (p.log || []).some((l) => l && l.what === "Imported from older emails");
+const hoursToContact = (p) => (p.firstContactAt && p.createdAt ? (Date.parse(p.firstContactAt) - Date.parse(p.createdAt)) / 36e5 : null);
+const daysToAppt = (p) => {
+  const k = (p.milestones || {}).consult_booked;
+  const d = k && p._day ? dayDiff(p._day, k) : null;
+  return d !== null && d >= 0 ? d : null;
+};
+function groupBy(list, keyFn) {
+  const g = new Map();
+  list.forEach((p) => { const k = keyFn(p); if (!g.has(k)) g.set(k, []); g.get(k).push(p); });
+  return [...g.entries()].map(([k, l]) => ({ k, l })).sort((a, b) => b.l.length - a.l.length);
+}
+const cellBar = (v) => `<span class="pr-cb"><i style="width:${v}%"></i></span>${v}%`;
+function hbars(rows, empty = "Nothing in this period.") {
+  if (!rows.length) return `<p class="muted">${esc(empty)}</p>`;
+  const max = Math.max(1, ...rows.map((x) => x.n));
+  return rows.map((x) => `<div class="pr-hb${x.tone ? ` is-${x.tone}` : ""}"><span class="pr-hb-l">${esc(x.label)}</span>
+    <span class="pr-hb-t"><i style="width:${x.n ? Math.max(2, pct(x.n, max)) : 0}%"></i></span><b>${x.text ?? x.n}</b></div>`).join("");
+}
+
+function trendSvg(rows) {
+  const W = 640, H = 230, L = 30, R = 36, T = 12, B = 28;
+  const ih = H - T - B;
+  const max = Math.max(1, ...rows.map((x) => x.n));
+  const bw = (W - L - R) / Math.max(1, rows.length);
+  const y = (v) => T + ih * (1 - v / max);
+  const yp = (v) => T + ih * (1 - v / 100);
+  const every = Math.ceil(rows.length / 12);
+  const pts = rows.map((x, i) => [L + i * bw + bw / 2, yp(pct(x.booked, x.n))]);
+  return `<svg class="pr-trend" viewBox="0 0 ${W} ${H}" role="img" aria-label="Enquiries, bookings and new patients by month">
+    ${[0, 50, 100].map((v) => `<line x1="${L}" x2="${W - R}" y1="${yp(v)}" y2="${yp(v)}" class="pr-t-grid"/>
+      <text x="${W - R + 4}" y="${yp(v) + 4}" class="pr-t-ax">${v}%</text>`).join("")}
+    <text x="${L - 4}" y="${y(max) + 4}" class="pr-t-ax" text-anchor="end">${max}</text>
+    <text x="${L - 4}" y="${y(0) + 4}" class="pr-t-ax" text-anchor="end">0</text>
+    ${rows.map((x, i) => {
+      const x0 = L + i * bw + bw * 0.16;
+      const w = bw * 0.68;
+      return `<g><title>${monthName(x.m, true)}: ${x.n} enquiries · ${x.booked} booked (${pct(x.booked, x.n)}%) · ${x.treated} became patients</title>
+        <rect x="${x0}" y="${y(x.n)}" width="${w}" height="${Math.max(0, H - B - y(x.n))}" rx="3" class="pr-t-all"/>
+        <rect x="${x0}" y="${y(x.treated)}" width="${w}" height="${Math.max(0, H - B - y(x.treated))}" rx="3" class="pr-t-won"/>
+        ${i % every === 0 ? `<text x="${L + i * bw + bw / 2}" y="${H - 9}" text-anchor="middle" class="pr-t-ax">${
+          monthName(x.m, i === 0 || x.m.endsWith("-01"))}</text>` : ""}</g>`;
+    }).join("")}
+    ${pts.length > 1 ? `<polyline points="${pts.map((p) => p.join(",")).join(" ")}" class="pr-t-line"/>` : ""}
+    ${pts.map((p) => `<circle cx="${p[0]}" cy="${p[1]}" r="3" class="pr-t-dot"/>`).join("")}
+  </svg>`;
+}
+
+function funnelHtml(list) {
+  const c = FUNNEL.map((_, i) => list.filter((p) => p._reach >= i).length);
+  return `<div class="pr-fn">${FUNNEL.map((name, i) => `<div class="pr-fn-row is-s${i}">
+    <span class="pr-fn-l">${esc(name)}</span>
+    <span class="pr-fn-t"><i style="width:${c[i] ? Math.max(2, pct(c[i], c[0])) : 0}%"></i></span>
+    <span class="pr-fn-v"><b>${c[i]}</b> · ${pct(c[i], c[0])}%${i ? `<small>${pct(c[i], c[i - 1])}% of the step before</small>` : ""}</span>
+  </div>`).join("")}</div>`;
+}
+
+function heatHtml(list) {
+  const g = DOW.map(() => Array(12).fill(0));
+  list.forEach((p) => { if (!p.createdAt) return; const w = whenParts(p.createdAt); if (w.d >= 0) g[w.d][Math.floor(w.h / 2)]++; });
+  const max = Math.max(1, ...g.flat());
+  const hr = (h) => (h === 0 ? "12am" : h < 12 ? `${h}am` : h === 12 ? "12pm" : `${h - 12}pm`);
+  return `<div class="pr-heat"><span></span>${g[0].map((_, i) => `<small>${i % 3 === 0 ? hr(i * 2) : ""}</small>`).join("")}
+    ${g.map((row, d) => `<small>${DOW[d]}</small>${row.map((n, i) =>
+      `<i title="${DOW[d]} ${hr(i * 2)} to ${hr((i * 2 + 2) % 24)}: ${n} enquir${n === 1 ? "y" : "ies"}" style="--a:${n ? (0.15 + 0.85 * n / max).toFixed(2) : 0}"></i>`).join("")}`).join("")}</div>`;
+}
+
+async function mountReports(container) {
+  const root = document.createElement("section");
+  root.className = "page wide pr-page pr-rep";
+  container.replaceChildren(root);
+  const back = '<a class="back-link" href="#/prospects">← Prospects</a>';
+  root.innerHTML = `${back}<div class="skeleton" style="height:420px;border-radius:14px"></div>`;
+  let all = [];
+  let set = {};
+  try { [all, set] = await Promise.all([loadAll(true), loadSettings()]); }
+  catch (err) {
+    console.error("Prospect reports failed:", err);
+    root.innerHTML = `${back}<div class="state"><strong>Couldn't load the reports</strong>Check your connection and try again.</div>`;
+    return;
+  }
+  if (!root.isConnected) return;
+
+  const today = todayKey();
+  all.forEach((p) => { p._day = keyOf(p.createdAt); p._reach = reachOf(p); p._imp = wasImported(p); });
+  const firstDay = all.map((p) => p._day).filter(Boolean).sort()[0] || today;
+  const sources = [...new Set(all.map((p) => p.source || "Other"))].sort();
+  const people = [...new Set(all.map((p) => p.assignedToName).filter(Boolean))].sort();
+  const st = { range: "90", from: "", to: "", source: "", who: "", newOnly: false };
+
+  const span = () => (st.range === "custom" ? [st.from || firstDay, st.to || today]
+    : st.range === "all" ? [firstDay, today] : [addDays(today, -(Number(st.range) - 1)), today]);
+  const keep = (p) => (!st.source || (p.source || "Other") === st.source)
+    && (!st.who || (st.who === "-" ? !p.assignedToName : p.assignedToName === st.who))
+    && (!st.newOnly || p.wasPatient !== true);
+  const cohort = (a, b) => all.filter((p) => p._day && p._day >= a && p._day <= b && keep(p));
+
+  function stats(list) {
+    const live = list.filter((p) => !p._imp);
+    const hrs = live.map(hoursToContact).filter((h) => h != null && h >= 0);
+    return {
+      n: list.length,
+      booked: list.filter((p) => p._reach >= 2).length,
+      treated: list.filter((p) => p._reach >= 5).length,
+      active: list.filter((p) => p._reach >= 6).length,
+      lost: list.filter((p) => p.stage === "lost").length,
+      live: live.length, hrs: median(hrs), fast: hrs.filter((h) => h <= hoursOf(set)).length,
+      appt: median(list.map(daysToAppt).filter((d) => d != null)),
+    };
+  }
+  // ▲ / ▼ against the same length of time before. pts: a change in percentage points.
+  const delta = (now, was, kind, upGood = true) => {
+    if (now == null || was == null) return "";
+    const d = kind === "pts" ? now - was : was ? ((now - was) / was) * 100 : null;
+    if (d == null || !isFinite(d)) return "";
+    if (Math.round(d) === 0) return '<span class="pr-delta">No change</span>';
+    return `<span class="pr-delta ${(d > 0) === upGood ? "is-up" : "is-down"}">${d > 0 ? "▲" : "▼"} ${Math.abs(Math.round(d))}${kind === "pts" ? " pts" : "%"}</span>`;
+  };
+  const kpi = (label, big, sub, d = "") => `<div class="pr-kpi"><span>${esc(label)}</span><strong>${big}</strong>
+    <small>${sub}</small>${d}</div>`;
+
+  function draw() {
+    const [a, b] = span();
+    const len = dayDiff(a, b) + 1;
+    const list = cohort(a, b);
+    const s = stats(list);
+    const ps = st.range === "all" ? null : stats(cohort(addDays(a, -len), addDays(a, -1)));
+    const rate = (x, n) => pct(x, n);
+    const prev = (k) => (ps ? rate(ps[k], ps.n) : null);
+    const lostTop = groupBy(list.filter((p) => p.stage === "lost"), (p) => p.lostReason || "No reason")[0];
+
+    // Months: the range (at least 6, at most 36)
+    let m0 = a.slice(0, 7);
+    const m1 = b.slice(0, 7);
+    if (addMonths(m0, 5) > m1) m0 = addMonths(m1, -5);
+    const months = [];
+    for (let m = m0; m <= m1 && months.length < 60; m = addMonths(m, 1)) months.push(m);
+    const trend = months.slice(-36).map((m) => {
+      const l = all.filter((p) => p._day && p._day.startsWith(m) && keep(p));
+      return { m, n: l.length, booked: l.filter((p) => p._reach >= 2).length, treated: l.filter((p) => p._reach >= 5).length };
+    });
+
+    // Now (not the date range): open prospects on the board
+    const open = all.filter((p) => !p.historic && OPEN.includes(p.stage) && keep(p));
+    const nowMs = Date.now();
+    const pipe = STAGES.filter((x) => OPEN.includes(x.key)).map((x) => {
+      const l = open.filter((p) => p.stage === x.key);
+      const stuck = l.filter((p) => nowMs - Date.parse(p.stageAt || p.createdAt || "") > 14 * 864e5).length;
+      return { label: x.name, n: l.length, tone: x.tone, text: `${l.length}${stuck ? ` <small class="is-warn">${stuck} over 14 days</small>` : ""}` };
+    });
+
+    const live = list.filter((p) => !p._imp);
+    const speed = SPEED.map(([label, max], i) => ({
+      label, n: live.filter((p) => { const h = hoursToContact(p); return h != null && h >= 0 && h <= max && (i === 0 || h > SPEED[i - 1][1]); }).length,
+    })).concat([{ label: "No contact logged", n: live.filter((p) => hoursToContact(p) == null).length, tone: "slate" }]);
+
+    const linked = list.filter((p) => p.patientId);
+    const oldPt = linked.filter((p) => p.wasPatient).length;
+    const newPt = linked.length - oldPt;
+    const none = list.length - linked.length;
+    const seg = (n, cls, label) => (n ? `<i class="${cls}" style="flex:${n}" title="${esc(label)}: ${n}"></i>` : "");
+
+    const srcRows = groupBy(list, (p) => p.source || "Other").map(({ k, l }) => { const x = stats(l); return `<tr>
+      <td data-label="Source"><strong>${esc(k)}</strong></td><td data-label="Enquiries">${x.n}</td>
+      <td data-label="Booked a consult">${cellBar(rate(x.booked, x.n))}</td><td data-label="Became patients">${cellBar(rate(x.treated, x.n))}</td>
+      <td data-label="Lost">${rate(x.lost, x.n)}%</td><td data-label="Days to 1st appointment">${x.appt == null ? "–" : Math.round(x.appt)}</td></tr>`; }).join("");
+    const teamRows = groupBy(list, (p) => p.assignedToName || "Nobody yet").map(({ k, l }) => {
+      const x = stats(l);
+      const lv = l.filter((p) => !p._imp);
+      return `<tr><td data-label="Team member"><strong>${esc(k)}</strong></td><td data-label="Prospects">${x.n}</td>
+        <td data-label="Contacted">${lv.length ? cellBar(rate(lv.filter((p) => Number(p.contacts) > 0).length, lv.length)) : "–"}</td>
+        <td data-label="First contact">${hrsText(x.hrs)}</td>
+        <td data-label="Booked a consult">${cellBar(rate(x.booked, x.n))}</td><td data-label="Became patients">${cellBar(rate(x.treated, x.n))}</td>
+        <td data-label="Lost">${rate(x.lost, x.n)}%</td></tr>`;
+    }).join("");
+    const concerns = groupBy(list, (p) => String(p.concern || "Not given").split(/[,;]/)[0].trim() || "Not given").slice(0, 8)
+      .map(({ k, l }) => ({ label: k, n: l.length, text: `${l.length} <small>${rate(l.filter((p) => p._reach >= 5).length, l.length)}% became patients</small>` }));
+    const lost = groupBy(list.filter((p) => p.stage === "lost"), (p) => p.lostReason || "No reason").map(({ k, l }) => ({ label: k, n: l.length, tone: "slate" }));
+    const optsR = (list2, cur) => list2.map(([v, l]) => `<option value="${esc(v)}"${v === cur ? " selected" : ""}>${esc(l)}</option>`).join("");
+
+    root.innerHTML = `${back}
+      <div class="pr-top"><div><h2>Prospect reports</h2><p class="muted">Enquiries from ${esc(repDay(a))} to ${esc(repDay(b))}${
+        ps ? ` · ▲▼ compared with the ${len} days before` : ""}</p></div>
+        <div class="pr-top-acts"><button type="button" class="lh-btn is-quiet" data-act="csv">Download CSV</button></div></div>
+      <div class="pr-rep-tools">
+        <select class="fe-input" data-r="range" aria-label="Dates">${optsR(REP_RANGES, st.range)}</select>
+        ${st.range === "custom" ? `<input type="date" class="fe-input" data-r="from" value="${esc(st.from || a)}" max="${today}" aria-label="From" />
+          <input type="date" class="fe-input" data-r="to" value="${esc(st.to || b)}" max="${today}" aria-label="To" />` : ""}
+        <select class="fe-input" data-r="source" aria-label="Source"><option value="">All sources</option>${optsR(sources.map((x) => [x, x]), st.source)}</select>
+        <select class="fe-input" data-r="who" aria-label="Team member"><option value="">Everyone</option>
+          <option value="-"${st.who === "-" ? " selected" : ""}>Nobody yet</option>${optsR(people.map((x) => [x, x]), st.who)}</select>
+        <label class="fe-check"><input type="checkbox" data-r="newOnly"${st.newOnly ? " checked" : ""} /> Leave out people who were already patients</label>
+      </div>
+      <div class="pr-kpis">
+        ${kpi("Enquiries", s.n, `${s.live} since the dashboard started`, delta(s.n, ps && ps.n, "%"))}
+        ${kpi("Booked a consultation", `${rate(s.booked, s.n)}%`, `${s.booked} people`, delta(rate(s.booked, s.n), prev("booked"), "pts"))}
+        ${kpi("Became patients", `${rate(s.treated, s.n)}%`, `${s.treated} treated`, delta(rate(s.treated, s.n), prev("treated"), "pts"))}
+        ${kpi("Active patients", `${rate(s.active, s.n)}%`, `${s.active} came back again`, delta(rate(s.active, s.n), prev("active"), "pts"))}
+        ${kpi("First contact", hrsText(s.hrs), `${rate(s.fast, s.live)}% within ${hoursOf(set)} hours`, delta(s.hrs, ps && ps.hrs, "%", false))}
+        ${kpi("Enquiry to first appointment", s.appt == null ? "–" : `${Math.round(s.appt)} days`, "Middle value", delta(s.appt, ps && ps.appt, "%", false))}
+        ${kpi("Lost", `${rate(s.lost, s.n)}%`, lostTop ? `Mostly: ${esc(lostTop.k)}` : "None lost", delta(rate(s.lost, s.n), prev("lost"), "pts", false))}
+      </div>
+      <div class="pr-rep-grid">
+        <section class="pr-panel is-wide"><h3>Enquiries by month</h3>
+          <ul class="pr-legend"><li><i class="is-all"></i>Enquiries</li><li><i class="is-won"></i>Became patients</li><li><i class="is-line"></i>Booked a consultation (%)</li></ul>
+          ${trendSvg(trend)}</section>
+        <section class="pr-panel"><h3>From enquiry to patient</h3>${funnelHtml(list)}
+          <p class="pr-note">Enquiries imported from before the dashboard only count as contacted once they've booked.
+            Recent enquiries may still book, so their rates can look lower.</p></section>
+        <section class="pr-panel"><h3>Open prospects now</h3>${hbars(pipe, "No open prospects.")}
+          <p class="pr-note">${open.filter((p) => notContacted(p, set)).length} not contacted in ${hoursOf(set)} hours ·
+            ${open.filter((p) => followState(p) === "overdue").length} follow-ups overdue · this part isn't affected by the dates.</p></section>
+        <section class="pr-panel is-wide"><h3>By source</h3>${srcRows ? `<div class="pr-rt-wrap"><table class="pr-rtable"><thead><tr>
+          <th>Source</th><th>Enquiries</th><th>Booked a consult</th><th>Became patients</th><th>Lost</th><th>Days to 1st appointment</th>
+          </tr></thead><tbody>${srcRows}</tbody></table></div>` : '<p class="muted">Nothing in this period.</p>'}</section>
+        <section class="pr-panel is-wide"><h3>By team member</h3>${teamRows ? `<div class="pr-rt-wrap"><table class="pr-rtable"><thead><tr>
+          <th>Team member</th><th>Prospects</th><th>Contacted</th><th>First contact</th><th>Booked a consult</th><th>Became patients</th><th>Lost</th>
+          </tr></thead><tbody>${teamRows}</tbody></table></div>` : '<p class="muted">Nothing in this period.</p>'}</section>
+        <section class="pr-panel"><h3>How quickly they're contacted</h3>${hbars(speed.filter((x) => x.n), "No enquiries since the dashboard started.")}
+          <p class="pr-note">Enquiries since the dashboard started, from the first call, text or email logged.</p></section>
+        <section class="pr-panel"><h3>Why they were lost</h3>${hbars(lost, "Nobody lost in this period. 👍")}</section>
+        <section class="pr-panel"><h3>What they're interested in</h3>${hbars(concerns)}</section>
+        <section class="pr-panel"><h3>New or existing patients</h3>
+          <div class="pr-stack">${seg(newPt, "is-new", "New to the clinic")}${seg(oldPt, "is-old", "Already patients")}${seg(none, "is-none", "Not linked to a patient yet")}</div>
+          <ul class="pr-legend"><li><i class="is-new"></i>New to the clinic: ${newPt}</li><li><i class="is-old"></i>Already patients: ${oldPt}</li>
+            <li><i class="is-none"></i>Not linked yet: ${none}</li></ul>
+          <p class="pr-note">Already patients: they'd been in before they enquired.</p></section>
+        <section class="pr-panel is-wide"><h3>When enquiries come in</h3>${heatHtml(list)}
+          <p class="pr-note">Perth time. Darker means more enquiries, which helps with who's on to reply.</p></section>
+      </div>`;
+  }
+
+  function downloadCsv() {
+    const [a, b] = span();
+    const list = cohort(a, b);
+    const head = ["Name", "Enquired", "Source", "Interested in", "Stage", "Given to", "Contacts", "First contact",
+      "First appointment", "First treatment", "Active from", "Lost reason", "Already a patient"];
+    const rows = list.map((p) => { const m = p.milestones || {}; return [p.name, p._day, p.source, p.concern, stageOf(p.stage).name,
+      p.assignedToName, p.contacts || 0, p.firstContactAt ? keyOf(p.firstContactAt) : "", m.consult_booked || "", m.treated || "",
+      m.active || "", p.lostReason || "", p.wasPatient ? "Yes" : p.patientId ? "No" : ""]; });
+    const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const blob = new Blob(["\ufeff" + [head, ...rows].map((r) => r.map(q).join(",")).join("\r\n")], { type: "text/csv" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = `prospects-${a}-to-${b}.csv`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 2000);
+  }
+
+  root.addEventListener("change", (e) => {
+    const k = e.target.dataset.r;
+    if (!k) return;
+    st[k] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+    if (k === "range" && st.range === "custom" && !st.from) [st.from, st.to] = span();
+    draw();
+  });
+  root.addEventListener("click", (e) => { if (e.target.closest('[data-act="csv"]')) downloadCsv(); });
+  draw();
 }
