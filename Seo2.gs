@@ -111,7 +111,7 @@ function seo2Token_() {
 
 function seo2Project_() {
   const p = PropertiesService.getScriptProperties();
-  const v = p.getProperty('SEO_FS_PROJECT') || p.getProperty('FIREBASE_PROJECT_ID') || p.getProperty('FIREBASE_PROJECT')
+  const v = p.getProperty('SEO_FS_PROJECT') || p.getProperty('FIRESTORE_PROJECT_ID') || p.getProperty('FIREBASE_PROJECT_ID') || p.getProperty('FIREBASE_PROJECT')
     || p.getProperty('FIRESTORE_PROJECT') || p.getProperty('PROJECT_ID');
   if (v) return v;
   if (typeof seoCfg_ === 'function') {

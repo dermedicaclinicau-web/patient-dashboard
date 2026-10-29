@@ -368,7 +368,7 @@ const PAGES = {
   scanner: lazyPage("./scanner.js", "The Scanner", (m, el) => m.mountScanner(el, { staff: currentStaff })),
   paper: lazyPage(`./paper-records.js?v=${PAPER_V}`, "Paper records",
     (m, el) => m.mountPaperRecords(el, { staff: currentStaff })),
-  seo: lazyPage("./seo.js", "SEO", (m, el, param) => m.mountSeo(el, { param, staff: currentStaff, can: (k) => canDo(k) })),
+  seo: lazyPage("./seo.js", "SEO", (m, el, param) => m.mountSeo(el, { param, staff: currentStaff, can: (k) => can(k) })),
 };
 // Which permission each page needs ("admin" = Admins only)
 const PAGE_PERM = {
