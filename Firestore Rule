@@ -1454,10 +1454,34 @@ match /inv_count_drafts/{id} {
       allow write: if false;
     }
 
-    // Site health issues from the crawler (Phase 3)
-    match /seo_issues/{id} {
+    match /seo_issues/{id} { allow read: if can('menu.seo'); allow write: if false; }
+
+    match /seo_opps/{id} {
       allow read: if can('menu.seo');
-      allow write: if false;
+      allow create, update: if can('seo.work')
+        && request.resource.data.keys().hasOnly(['key','type','label','url','status','note','by','byName','at'])
+        && request.resource.data.status in ['open','doing','done','ignored']
+        && request.resource.data.by == request.auth.uid
+        && request.resource.data.note is string && request.resource.data.note.size() <= 2000;
+      allow delete: if can('seo.manage');
+    }
+
+    match /seo_log/{id} {
+      allow read: if can('menu.seo');
+      allow create: if can('seo.work')
+        && request.resource.data.keys().hasOnly(['date','type','title','url','note','by','byName','createdAt','updatedAt','oppId'])
+        && request.resource.data.by == request.auth.uid
+        && request.resource.data.title is string && request.resource.data.title.size() > 0 && request.resource.data.title.size() <= 200
+        && request.resource.data.date is string && request.resource.data.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
+      allow update: if (can('seo.manage') || (can('seo.work') && resource.data.by == request.auth.uid))
+        && request.resource.data.keys().hasOnly(['date','type','title','url','note','by','byName','createdAt','updatedAt','oppId'])
+        && request.resource.data.by == resource.data.by;
+      allow delete: if can('seo.manage') || (can('seo.work') && resource.data.by == request.auth.uid);
+    }
+
+    match /seo_settings/{id} {
+      allow read: if can('menu.seo');
+      allow write: if can('seo.manage');
     }
     
     // ===================== Safety net =====================

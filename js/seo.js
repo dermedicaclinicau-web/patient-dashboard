@@ -4,10 +4,15 @@
 // ⚠️ Make these match recall.js exactly (same Firebase version, same db instance)
 import { db } from "./firebase-config.js";
 import { doc, getDoc, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan } from "./seo-work.js";
 
 const TABS = [
   { id: "overview", label: "Overview" },
   { id: "pages", label: "Pages" },
+  { id: "keywords", label: "Keywords" },
+  { id: "opps", label: "Opportunities" },
+  { id: "log", label: "Change log" },
+  { id: "settings", label: "Settings", manage: true },
 ];
 
 const METRICS = {
@@ -111,7 +116,7 @@ function bars(vals, labels, w = 400, h = 120) {
 }
 
 /** Weekly line chart. points: [{ label, v }] */
-function lineChart(points, { invert = false, fmt = fmtInt } = {}) {
+function lineChart(points, { invert = false, fmt = fmtInt, marks = [] } = {}) {
   const W = 820, H = 230, L = 52, R = 12, T = 12, B = 28;
   const w = W - L - R, h = H - T - B;
   const vals = points.map((p) => p.v).filter((v) => v != null);
@@ -149,7 +154,17 @@ function lineChart(points, { invert = false, fmt = fmtInt } = {}) {
   const hits = points.map((p, i) =>
     `<rect x="${(x(i) - step / 2).toFixed(1)}" y="${T}" width="${step.toFixed(1)}" height="${h}" fill="transparent"><title>${esc(p.label)}: ${esc(p.v == null ? "—" : fmt(p.v))}</title></rect>`).join("");
 
-  return `<svg viewBox="0 0 ${W} ${H}">${grid}${xl}<path d="${path}" class="seo-line"/>${hits}</svg>`;
+  const byIdx = {};
+  for (const mk of marks) {
+    const i = points.findIndex((p) => p.end && mk.date <= p.end && mk.date >= addDays(p.end, -6));
+    if (i >= 0) (byIdx[i] = byIdx[i] || []).push(mk.title);
+  }
+  const mks = Object.entries(byIdx).map(([i, titles]) => {
+    const xx = x(+i).toFixed(1);
+    return `<g class="seo-mark"><line x1="${xx}" x2="${xx}" y1="${T}" y2="${T + h}"/><circle cx="${xx}" cy="${T + 5}" r="5"/><title>${esc(titles.join("\n"))}</title></g>`;
+  }).join("");
+
+  return `<svg viewBox="0 0 ${W} ${H}">${grid}${xl}<path d="${path}" class="seo-line"/>${hits}${mks}</svg>`;
 }
 
 /* ---------- styles ---------- */
@@ -222,10 +237,14 @@ function injectCss() {
 
 /* ---------- page ---------- */
 
-export async function mountSeo(el, { param } = {}) {
+export async function mountSeo(el, opts = {}) {
+  const { param } = opts;
   injectCss();
 
-  let tab = TABS.some((t) => t.id === param) ? param : "overview";
+  const can = makeCan(opts);
+  const tabs = TABS.filter((t) => !t.manage || can("seo.manage"));
+  let work = null;
+  let tab = tabs.some((t) => t.id === param) ? param : "overview";
   const ui = { range: 28, metric: "clicks", sortKey: "clicks", sortDir: -1, filter: "", hideZero: true, limit: 100 };
   let data = null;
 
@@ -236,7 +255,7 @@ export async function mountSeo(el, { param } = {}) {
         <div class="seo-meta" data-meta></div>
         <button class="seo-btn" data-reload>Refresh</button>
       </div>
-      <div class="seo-tabs">${TABS.map((t) => `<button class="seo-tab" data-tab="${t.id}">${t.label}</button>`).join("")}</div>
+      <div class="seo-tabs">${tabs.map((t) => `<button class="seo-tab" data-tab="${t.id}">${t.label}</button>`).join("")}</div>
       <div data-body></div>
       <div class="seo-panel" data-panel hidden></div>
     </div>`;
@@ -253,7 +272,7 @@ export async function mountSeo(el, { param } = {}) {
   async function load(force) {
     body.innerHTML = `<div class="seo-empty">Loading…</div>`;
     try {
-      data = await loadData(force);
+      [data, work] = await Promise.all([loadData(force), loadWork(force)]);
       renderMeta();
       render();
     } catch (e) {
@@ -270,10 +289,20 @@ export async function mountSeo(el, { param } = {}) {
       (at ? ` · updated ${at.toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })}` : "");
   }
 
+  function ctx() {
+    return {
+      data, work, can, staff: opts.staff,
+      h: { esc, fmtInt, fmtPct, fmtPos, delta, addDays, fmtDate, sumRange, sparkline },
+      byPath: new Map(data.pages.map((p) => [p.path, p])),
+      setTab: (id) => { tab = id; history.replaceState(null, "", "#/seo/" + id); render(); },
+    };
+  }
+
   function render() {
     setTabs();
     const warn = data.run && data.run.ok === false
       ? `<div class="seo-warn">The last nightly update failed, so these numbers may be out of date: ${esc(data.run.error || "")}</div>` : "";
+    if (tab !== "overview" && tab !== "pages") { renderWorkTab(tab, body, ctx()); return; }
     body.innerHTML = warn + (tab === "overview" ? overviewHtml() : pagesShellHtml());
     if (tab === "pages") renderTable();
   }
@@ -330,7 +359,8 @@ export async function mountSeo(el, { param } = {}) {
           <h3 style="margin:0">Weekly trend</h3><span class="seo-sp"></span>
           ${Object.entries(METRICS).map(([k, v]) => `<button class="seo-btn ${ui.metric === k ? "on" : ""}" data-metric="${k}">${v.label}</button>`).join("")}
         </div>
-        <div class="seo-chart">${lineChart(weeks, m)}</div>
+        <div class="seo-chart">${lineChart(weeks, { ...m, marks: logMarks(work) })}</div>
+        ${work?.log?.length ? `<div class="seo-note">Orange dotted lines are changes from the Change log. Hover the dot to see them.</div>` : ""}
         ${m.invert ? `<div class="seo-note">Position axis is flipped: up means ranking higher.</div>` : ""}
       </div>
       <div class="seo-grid2">
@@ -431,14 +461,14 @@ export async function mountSeo(el, { param } = {}) {
       </table>
       <h3 style="font-size:14px;margin:16px 0 6px">Clicks per week</h3>
       ${bars(p.weekly, weekLabels)}
-      <p class="seo-note" style="margin-top:16px">Search queries for this page, issues and speed arrive in the next phases.</p>`;
+      ${pagePanelExtras(work, p, { esc, fmtInt, fmtPos, fmtDate }, can)}`;
     panel.hidden = false;
   }
 
   /* ----- events (delegated) ----- */
 
   el.addEventListener("click", (e) => {
-    const t = e.target.closest("[data-tab],[data-range],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload]");
+    const t = e.target.closest("[data-tab],[data-range],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage]");
     if (!t || !el.contains(t)) return;
     const ds = t.dataset;
 
@@ -460,6 +490,13 @@ export async function mountSeo(el, { param } = {}) {
     else if (ds.close !== undefined) panel.hidden = true;
     else if (ds.more !== undefined) { ui.limit = Infinity; renderTable(); }
     else if (ds.reload !== undefined) { panel.hidden = true; load(true); }
+    else if (ds.logpage !== undefined) {
+      panel.hidden = true;
+      if (work) work.prefill = { url: ds.logpage };
+      tab = "log";
+      history.replaceState(null, "", "#/seo/log");
+      render();
+    }
   });
 
   el.addEventListener("input", (e) => {
