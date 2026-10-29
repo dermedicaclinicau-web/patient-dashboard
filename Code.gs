@@ -696,7 +696,7 @@ function syncAppointments_(ss, cfg, deadline) {
 function collectAppointments_(sheet, tz, days, groups, skipDates, extended) {
   if (!sheet) return;
   const cell = function (row, i) { return String(row[i] || '').trim(); };
-  const numCols = Math.min(12, sheet.getMaxColumns()); // today's sheet may have fewer columns
+  const numCols = Math.min(13, sheet.getMaxColumns()); // today's sheet may have fewer columns
 
   readRows_(sheet, numCols).forEach(function (r) {
     const v = r.values, d = r.display;
@@ -729,6 +729,13 @@ function collectAppointments_(sheet, tz, days, groups, skipDates, extended) {
       (days[dateKey] = days[dateKey] || []).push(groups[key]);
     }
     if (service && groups[key].services.indexOf(service) === -1) groups[key].services.push(service);
+    // M: Appointment notes. A booking is one row per service, usually with the same note: each note is kept once.
+    const note = cell(d, 12);
+    if (note) {
+      const g = groups[key];
+      if (!g.note) g.note = note;
+      else if (g.note.split('\n').indexOf(note) === -1) g.note = (g.note + '\n' + note).slice(0, 1000);
+    }
   });
 }
 
@@ -2665,15 +2672,16 @@ function bsNextVisits_(body) {
 
 // future-visits, by Patient ID. Remembered 10 minutes (cleared by Run PCN update).
 function bsFutureIndex_() {
-  const hit = repCacheGet_('bs_future_v1');
+  const hit = repCacheGet_('bs_future_v2');
   if (hit) return hit;
   const ss = SpreadsheetApp.openById(APPTS_SHEET_ID);
   const sh = ss.getSheetByName(FUTURE_VISITS_SHEET_NAME);
   if (!sh) throw new Error('Sheet tab not found: ' + FUTURE_VISITS_SHEET_NAME);
   const tz = ss.getSpreadsheetTimeZone();
   const days = {};
-  // A Date | B Name | C Balance | D Contact | E Resources | F Symbol | G Time | H Status | I Staff | J Service | K Patient ID | L Category
-  readRows_(sh, 12).forEach(function (r) {
+  // A Date | B Name | C Balance | D Contact | E Resources | F Symbol | G Time | H Status | I Staff | J Service
+  // K Patient ID | L Category | M Appt notes
+  readRows_(sh, Math.min(13, sh.getMaxColumns())).forEach(function (r) {
     const v = r.values, d = r.display;
     const date = sheetDateKey_(v[0], tz);
     if (!date || !pcnStatusOk_(d[7], 'full')) return;
@@ -2685,12 +2693,14 @@ function bsFutureIndex_() {
     const s = toMinutes_(parts[0]);
     const e = parts[1] ? toMinutes_(parts[1]) : 9999;
     const k = id + '|' + date;
-    const x = days[k] || (days[k] = { id: id, date: date, start: 9999, end: 0, services: [], staff: [] });
+    const x = days[k] || (days[k] = { id: id, date: date, start: 9999, end: 0, services: [], staff: [], notes: [] });
     if (s < 9999 && s < x.start) x.start = s;
     if (e < 9999 && e > x.end) x.end = e;
     if (svc && x.services.indexOf(svc) === -1) x.services.push(svc);
     const st = d[8].trim();
     if (st && !SCHED_NOT_PERSON_.test(st) && x.staff.indexOf(st) === -1) x.staff.push(st);
+    const note = String(d[12] || '').trim();
+    if (note && x.notes.indexOf(note) === -1) x.notes.push(note);
   });
   const by = {};
   Object.keys(days).forEach(function (k) {
@@ -2698,14 +2708,15 @@ function bsFutureIndex_() {
     (by[x.id] = by[x.id] || []).push({
       date: x.date, start: x.start < 9999 ? x.start : null,
       mins: x.start < 9999 && x.end > x.start ? x.end - x.start : null,
-      services: x.services.slice(0, 6), staff: x.staff.slice(0, 3),
+      services: x.services.slice(0, 6), staff: x.staff.slice(0, 3), notes: x.notes.slice(0, 3),
     });
   });
   Object.keys(by).forEach(function (id) { by[id].sort(function (a, b) { return a.date.localeCompare(b.date); }); });
   const res = { by: by, at: new Date().toISOString() };
-  repCachePut_('bs_future_v1', res, 600);
+  repCachePut_('bs_future_v2', res, 600);
   return res;
 }
+
 // ===================== Skin Script Protocol: product catalogue =====================
 
 const SSP_PRODUCTS_SHEET_NAME = 'product_info';
@@ -9289,7 +9300,21 @@ function upDsRow_(r, tz, match, stats) {
     upMoney_(cell(12)),                                         // M Price
     pcnCategory_(rawDate, cell(9)),                             // N PCN Categories
     m.id || '',                                                 // O Patient ID (blank when not sure)
+    tidyApptNote_(cell(13)),                                    // P Appointment notes (already picked out by the portal)
   ];
+}
+
+/* ===================== Appointment notes from the Day Sheet ===================== */
+
+
+function tidyApptNote_(t) {
+  t = String(t || '')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+    .replace(/^[,;\s]+|[,;\s]+$/g, '');
+  return t.length > 500 ? t.slice(0, 499) + '…' : t;
 }
 
 // Checks the size, clears A2:R and gets the rows and formats ready
@@ -9313,12 +9338,12 @@ function upDsStart_(body, session) {
         problem: 'This file has ' + total + ' rows, but alltimeappts has ' + before + ' now. ' +
           'Check it is the "All time" export. Replace it anyway?' };
     }
-    if (sheet.getMaxColumns() < 15) sheet.insertColumnsAfter(sheet.getMaxColumns(), 15 - sheet.getMaxColumns());
+    if (sheet.getMaxColumns() < 16) sheet.insertColumnsAfter(sheet.getMaxColumns(), 16 - sheet.getMaxColumns());
     const maxCols = Math.min(18, sheet.getMaxColumns());
     if (sheet.getLastRow() >= 2) sheet.getRange(2, 1, sheet.getLastRow() - 1, maxCols).clearContent(); // A2:R, header kept
     if (sheet.getMaxRows() < total + 1) sheet.insertRowsAfter(sheet.getMaxRows(), total + 1 - sheet.getMaxRows());
     sheet.getRange(2, 2, total, 11).setNumberFormat('@');           // B:L as text (mobiles keep their 0)
-    sheet.getRange(2, 14, total, 2).setNumberFormat('@');           // N:O as text
+    sheet.getRange(2, 14, total, 3).setNumberFormat('@');           // N:P as text (a note starting with "=" stays text)
     sheet.getRange(2, 1, total, 1).setNumberFormat('d/m/yyyy');     // A
     sheet.getRange(2, 3, total, 1).setNumberFormat('$#,##0.00');    // C
     sheet.getRange(2, 13, total, 1).setNumberFormat('$#,##0.00');   // M
@@ -9364,7 +9389,7 @@ function upDsChunk_(body, session) {
   const match = ptMatcher_(s.ss, UPLOAD_TABS_.patients);
   const stats = { unmatched: {}, ambiguous: {}, skipped: 0, badDates: 0, dates: {} };
   const out = rows.map(function (r) { return upDsRow_(Array.isArray(r) ? r : [], tz, match, stats); });
-  s.sheet.getRange(2 + offset, 1, out.length, 15).setValues(out);
+  s.sheet.getRange(2 + offset, 1, out.length, 16).setValues(out);
   SpreadsheetApp.flush();
   st.done[offset] = out.length;
   cache.put(UP_DS_CACHE_ + token, JSON.stringify(st), 21600);
@@ -9879,8 +9904,9 @@ function pcnSheet_(ctx, name) {
 function pcnReadAppts_(ctx) {
   const sh = pcnSheet_(ctx, UPLOAD_TABS_.daysheet);
   const last = sh.getLastRow();
-  return last < 2 ? [] : sh.getRange(2, 1, last - 1, 15).getValues(); // A:O
+  return last < 2 ? [] : sh.getRange(2, 1, last - 1, Math.min(16, sh.getMaxColumns())).getValues(); // A:P
 }
+
 function pcnKey_(v) { return String(v == null ? '' : v).toLowerCase().trim(); }
 function pcnIsDate_(v) { return v instanceof Date && !isNaN(v); }
 function pcnFmt_(ctx, t) { return Utilities.formatDate(new Date(t), ctx.tz, 'd/M/yyyy'); }
@@ -9894,7 +9920,9 @@ function pcnStatusOk_(raw, mode) {
 }
 
 // Clears A2:<cols> to the bottom of the tab, then writes the rows
+// Clears A2:<cols> to the bottom of the tab, then writes the rows (adds columns if the tab is too narrow)
 function pcnWrite_(sheet, cols, rows) {
+  if (sheet.getMaxColumns() < cols) sheet.insertColumnsAfter(sheet.getMaxColumns(), cols - sheet.getMaxColumns());
   const max = sheet.getMaxRows();
   if (max >= 2) sheet.getRange(2, 1, max - 1, cols).clearContent();
   if (!rows.length) return;
@@ -9948,7 +9976,6 @@ function pcnHistory_(ctx, appts, keys, opt) {
 }
 
 /* ---- Step: visits (updateTodayVisits + getpttidcolk, updatePastVisits, updateFutureVisits) ---- */
-
 function pcnStepVisits_(ctx) {
   const data = pcnReadAppts_(ctx);
   const past = [];
@@ -9958,26 +9985,26 @@ function pcnStepVisits_(ctx) {
     if (!pcnIsDate_(r[0])) return;
     const t = r[0].getTime();
     const status = String(r[7] == null ? '' : r[7]).trim();
-    // Today: A–J, then K = the Patient ID from column O. Only "Cancelled" left out (as before).
+    const note = r[15] == null ? '' : r[15];   // P: Appointment notes
+    // Today: A–J, K = Patient ID (O), L blank, M = notes. Only "Cancelled" left out (as before).
     if (t >= ctx.today && t < ctx.tomorrow && status !== 'Cancelled') {
-      todays.push([r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[14]]);
+      todays.push([r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[14], '', note]);
     }
     if (status === 'Cancelled' || status === 'Did not show') return;
-    // Past / future: A–J, K = O (Patient ID), L = N (category)
-    (t < ctx.today ? past : future).push([r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[14], r[13]]);
+    // Past / future: A–J, K = Patient ID (O), L = category (N), M = notes (P)
+    (t < ctx.today ? past : future).push([r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[14], r[13], note]);
   });
   past.sort(function (a, b) { return a[0] - b[0]; });
   future.sort(function (a, b) { return a[0] - b[0]; });
   todays.sort(function (a, b) { return toMinutes_(String(a[6] || '')) - toMinutes_(String(b[6] || '')); }); // by start time
 
-  pcnWrite_(pcnSheet_(ctx, APPTS_SHEET_NAME), 11, todays);
-  pcnWrite_(pcnSheet_(ctx, PAST_VISITS_SHEET_NAME), 12, past);
-  pcnWrite_(pcnSheet_(ctx, FUTURE_VISITS_SHEET_NAME), 12, future);
+  pcnWrite_(pcnSheet_(ctx, APPTS_SHEET_NAME), 13, todays);
+  pcnWrite_(pcnSheet_(ctx, PAST_VISITS_SHEET_NAME), 13, past);
+  pcnWrite_(pcnSheet_(ctx, FUTURE_VISITS_SHEET_NAME), 13, future);
   SpreadsheetApp.flush();
-  CacheService.getScriptCache().remove('bs_future_v1');   // billing sheets read the new bookings straight away
+  CacheService.getScriptCache().remove('bs_future_v2');   // billing sheets read the new bookings straight away
   return { today: todays.length, past: past.length, future: future.length };
 }
-
 /* ---- Step: overdue (generateOverdueList + fillOverdueCategoryColumnE) and cancelledAppointmentsReport ---- */
 
 function pcnStepOverdue_(ctx) {

@@ -34,6 +34,7 @@ const SIZE_PARTS = [
   ["side", "Side boxes (LED…, Consumables)", -3.5],
   ["next", "Next appointments", 0],
   ["nextSmall", "Next appt Prov and Dur", -2],
+  ["nextNotes", "Next appt notes", -1.5],
   ["ticks", "Tick boxes and patient name", -1.5],
 ];
 const autoSize = (s, k) => {
@@ -154,6 +155,7 @@ function css(s) {
   .bs .pref { font-weight: 700; font-size: ${z("pay")}; padding-top: 0.2mm; padding-bottom: 0.2mm; }
   .bs .nxt { font-size: ${z("next")}; }
   .bs .who { font-size: ${z("nextSmall")}; line-height: 1.1; }
+  .bs .nnote { vertical-align: top; text-align: left; font-size: ${z("nextNotes")}; line-height: 1.15; }
   table.bs.nx { margin-top: -0.75pt; }
   .bs.nx tr.n td { height: 20mm; }
   .bs-ticks { margin-top: 3mm; font-weight: 700; font-size: ${z("ticks")}; line-height: 1.9; }
@@ -213,7 +215,8 @@ function sheetHtml(d, s) {
       const x = i === 0 ? null : d.next[i - 1];   // the first row is always left blank
       next += `<tr class="n"><td class="c nxt">${x ? esc(x.when).replace(/\n/g, "<br>") : ""}</td>` +
         `<td colspan="3" class="c nxt">${esc(x ? x.service : "")}</td><td class="c who">${esc(x ? x.staff : "")}</td>` +
-        `<td class="c who">${esc(x ? x.dur || "" : "")}</td><td></td></tr>`;
+        `<td class="c who">${esc(x ? x.dur || "" : "")}</td>` +
+        `<td class="nnote">${x ? esc(x.note || "").replace(/\n/g, "<br>") : ""}</td></tr>`;
     }
     next += "</table>";
   }
@@ -258,6 +261,10 @@ function durText(mins) {
   if (mins < 60) return `${mins}mins`;
   return `${Math.floor(mins / 60)}hr${mins % 60 ? ` ${mins % 60}mins` : ""}`;
 }
+
+// The Next appt notes cell is small, so long notes are cut (the PDF also shrinks text to fit)
+const clipNote = (t, n) => { t = String(t || "").trim(); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
+
 // A date in any of the shapes the older records use → "YYYY-MM-DD"
 function anyKey(v) {
   if (!v) return "";
@@ -293,7 +300,8 @@ export function visitsOfDay(appts) {
     const v = by.get(k) || { key: k, patientId: id, patientName: name, time: a.time || "", staff: a.staff || "",
       sortMinutes: Number(a.sortMinutes) || 0, services: [], notes: [] };
     (a.services || []).forEach((s) => { s = String(s || "").trim(); if (s && !v.services.includes(s)) v.services.push(s); });
-    if (a.note) v.notes.push(String(a.note));
+    const note = String(a.note || "").trim();
+    if (note && !v.notes.includes(note)) v.notes.push(note);
     by.set(k, v);
   });
   return [...by.values()];
@@ -424,6 +432,7 @@ async function sheetData(v, dateKey, nextMap) {
     ? (nextMap[String(v.patientId).toLowerCase()] || []).filter((x) => x.date > dateKey).map((x) => ({
       when: dmy(x.date) + (x.start != null ? `\n${hm(x.start)}` : ""),
       service: (x.services || []).join(", "), staff: (x.staff || []).join(", "), dur: durText(x.mins),
+      note: clipNote(Array.isArray(x.notes) ? x.notes.join("\n") : x.note, 300),
     }))
     : nextVisitsFallback(pre, dateKey);
   return d;
@@ -985,10 +994,11 @@ const SAMPLE = {
     { name: "Dermedica Pro B Plus", ampm: "AM", status: "Purchased 17/09/2026" },
     { name: "Dermedica Sunscreen", ampm: "AM", status: "Purchased 30/04/2026" },
     { name: "Fading cream", ampm: "PM", status: "Given 12/10/2026" },
+    
   ] },
   next: [
-    { when: "05/11/2026\n2:00PM", service: "Wrinkle Relaxer Frown", staff: "Dr Teh", dur: "15mins" },
-    { when: "19/11/2026\n10:30AM", service: "Clear Complexion Laser LITE Face, Review 15(post treatment)", staff: "Jacquie", dur: "1hr 15mins" },
+    { when: "05/11/2026\n2:00PM", service: "Wrinkle Relaxer Frown", staff: "Dr Teh", dur: "15mins", note: "Top up if needed" },
+    { when: "19/11/2026\n10:30AM", service: "Clear Complexion Laser LITE Face, Review 15(post treatment)", staff: "Jacquie", dur: "1hr 15mins", note: "" },
   ],
 };
 

@@ -13,6 +13,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const MAX_BYTES = 1024 * 1024 * 1024; // 1 GB
 const KEEP = 13;                      // columns A–M
+const HEAD_ROWS = 300;                // rows that keep every column (to find the header and the notes column)
 const BATCH = 8000;                   // Day Sheet rows per request
 const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const num = (n) => Number(n || 0).toLocaleString("en-AU");
@@ -44,12 +45,63 @@ function invDay(v) {
 }
 const KINDS = [
   { key: "daysheet", title: "Day Sheet (all time)", ready: true, sniff: [/status/, /service/],
-    blurb: "Every appointment from Timely, including cancelled. Replaces everything in alltimeappts, then fills in the PCN category (N) and Patient ID (O)." },
+    blurb: "Every appointment from Timely, including cancelled. Replaces everything in alltimeappts, then fills in the PCN category (N), Patient ID (O) and Appointment notes (P)." },
   { key: "invoices", title: "Invoice Record (yesterday)", ready: true, sniff: [/invoice/, /customer/, /description|product/],
     blurb: "Yesterday's invoices from Timely. Added to the bottom of INVOICE RECORD (invoices already there are skipped), with Patient IDs and tidy product names." },
   { key: "packages", title: "Customer Packages", ready: true, sniff: [/customer/, /package/],
     blurb: "Patients' packages from Timely. Replaces everything in customer_packages (A to M), then fills in the Patient ID (M)." },
 ];
+
+/* ---------- Appointment notes ---------- */
+// Timely puts several kinds of notes in one cell: "Alerts: … Appointment notes: … Customer notes: …".
+// Only the Appointment notes part is kept. Alerts and Customer notes never leave this computer.
+const NOTE_LABELS = ["Alerts", "Appointment notes", "Customer notes", "Booking notes", "Customer alerts", "Medical notes", "Internal notes"];
+const NOTE_HEAD = new RegExp(`(^|[\\s,;.])(${NOTE_LABELS.map((l) => l.replace(/ /g, "\\s+")).join("|")})\\s*:`, "g");
+const NOTE_ANY = new RegExp(NOTE_HEAD.source);   // the same, for a yes/no test
+
+function tidyNote(t) {
+  t = String(t || "")
+    .replace(/[ \t]+/g, " ").replace(/ *\n */g, "\n").replace(/\n{3,}/g, "\n\n")
+    .trim().replace(/^[,;\s]+|[,;\s]+$/g, "");
+  return t.length > 500 ? `${t.slice(0, 499)}…` : t;
+}
+
+export function apptNoteOnly(raw) {
+  const s = String(raw ?? "").replace(/\r\n?/g, "\n").replace(/\u00a0/g, " ");
+  if (!s.trim()) return "";
+  const marks = [...s.matchAll(NOTE_HEAD)].map((m) => ({
+    label: m[2].replace(/\s+/g, " ").toLowerCase(),
+    start: m.index + m[1].length,     // where the heading starts (the end of the section before it)
+    body: m.index + m[0].length,      // where its text starts
+  }));
+  const parts = [];
+  marks.forEach((m, i) => {
+    if (m.label !== "appointment notes") return;
+    const t = tidyNote(s.slice(m.body, i + 1 < marks.length ? marks[i + 1].start : s.length));
+    if (t && !parts.includes(t)) parts.push(t);
+  });
+  return tidyNote(parts.join("\n"));   // no "Appointment notes:" heading → blank
+}
+
+// Day Sheet header: Timely names some columns "Textbox14" etc., so it's found by G, H and J
+const isDsHeader = (r) => /^\s*start\s*time\s*$/i.test(r[6] || "") && /^\s*status\s*$/i.test(r[7] || "") && /service/i.test(r[9] || "");
+
+// Which column after M holds the notes: the one with the most note headings, else one named "…note…". -1 if none.
+function findNotesCol(rows) {
+  const h = rows.slice(0, 30).findIndex(isDsHeader);
+  if (h < 0) return -1;
+  const head = rows[h];
+  const sample = rows.slice(h + 1, HEAD_ROWS);
+  const width = Math.max(head.length, ...sample.map((r) => r.length));
+  let best = -1;
+  let hits = 0;
+  for (let c = KEEP; c < width; c++) {
+    const n = sample.filter((r) => NOTE_ANY.test(String(r[c] || ""))).length;
+    if (n > hits) { hits = n; best = c; }
+  }
+  if (best >= 0) return best;
+  return head.findIndex((x, i) => i >= KEEP && /note/i.test(String(x || "")));
+}
 
 /* ---------- Reading the CSV ---------- */
 
@@ -63,16 +115,21 @@ async function sniffDelim(file) {
 }
 
 // Reads the CSV in pieces (quotes, separators and new lines inside quotes).
-// The first 30 rows keep every column (to find the header); after that only A–M are kept.
-async function readCsv(file, delim, onProgress) {
+// The first HEAD_ROWS rows keep every column (to find the header and the notes column). After that only
+// A–M are kept, plus any columns pickExtra(firstRows) asks for. Each value stays at its own column number.
+async function readCsv(file, delim, onProgress, pickExtra = null) {
   const rows = [];
   let field = "", row = [], col = 0, fresh = true, inQ = false, afterQ = false, seen = 0, first = true, pieces = 0;
   let keep = true;
-  const setKeep = () => { keep = col < KEEP || rows.length < 30; };
-  const endField = () => { if (keep) row.push(field); col++; field = ""; fresh = true; setKeep(); };
+  let extra = null;   // Set of columns after M to keep, decided after the first HEAD_ROWS rows
+  const setKeep = () => { keep = col < KEEP || rows.length < HEAD_ROWS || (!!extra && extra.has(col)); };
+  const endField = () => { if (keep) row[col] = field; col++; field = ""; fresh = true; setKeep(); };
   const endRow = () => {
     endField();
-    if (row.some((x) => x !== "")) rows.push(row);
+    if (row.some((x) => x !== "")) {
+      rows.push(row);
+      if (rows.length === HEAD_ROWS && !extra) extra = new Set((pickExtra && pickExtra(rows)) || []);
+    }
     row = []; col = 0; setKeep();
   };
   const eat = (text) => {
@@ -538,21 +595,23 @@ function wire(card, k, staff) {
     }
   }
 
-  async function readFile(share) {
+  async function readFile(share, pickExtra = null) {
     setMsg("Reading the file…");
     setBar(0);
     const delim = await sniffDelim(file);
-    const all = await readCsv(file, delim, (p) => { setBar(p * share); setMsg(`Reading the file… ${Math.round(p * 100)}%`); });
+    const all = await readCsv(file, delim, (p) => { setBar(p * share); setMsg(`Reading the file… ${Math.round(p * 100)}%`); }, pickExtra);
     return { all, delim };
   }
-
   /* ---------- 1) Day Sheet ---------- */
 
   async function runDaySheet() {
-    const { all, delim } = await readFile(0.3);
-    // Timely names some columns "Textbox14" etc., so the header is found by the ones with real names (G, H and J)
-    const isHeader = (r) => /^\s*start\s*time\s*$/i.test(r[6] || "") && /^\s*status\s*$/i.test(r[7] || "") && /service/i.test(r[9] || "");
-    const h = all.slice(0, 30).findIndex(isHeader);
+    let noteCol = null;
+    const { all, delim } = await readFile(0.3, (firstRows) => {
+      noteCol = findNotesCol(firstRows);
+      return noteCol >= 0 ? [noteCol] : [];
+    });
+    if (noteCol === null) noteCol = findNotesCol(all);   // a short file: every column was kept
+    const h = all.slice(0, 30).findIndex(isDsHeader);
     if (h < 0) throw headerError(all, delim, "StartTime in G, Status in H, ServiceName in J");
     const sample = all.slice(h + 1, h + 21).filter((r) => String(r[0] || "").trim());
     const datey = sample.filter((r) => /\d{1,4}[\/.-]\d{1,2}[\/.-]\d{1,4}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}/.test(String(r[0]))).length;
@@ -560,7 +619,15 @@ function wire(card, k, staff) {
       throw new Error(`Column A doesn't look like appointment dates (it starts with "${String(sample[0][0]).slice(0, 30)}"). ` +
         `The header row has ${colList(all[h])}. Nothing was changed. Copy this message for whoever looks after the portal.`);
     }
-    const rows = all.slice(h + 1).map((r) => { r = r.slice(0, KEEP); while (r.length < KEEP) r.push(""); return r; });
+    // A–M as they are, then the appointment note only (→ alltimeappts P)
+    let notes = 0;
+    const rows = all.slice(h + 1).map((r) => {
+      const out = Array.from({ length: KEEP }, (_, i) => r[i] ?? "");
+      const note = noteCol >= 0 ? apptNoteOnly(r[noteCol]) : "";
+      if (note) notes++;
+      out.push(note);
+      return out;
+    });
     all.length = 0;
     if (!rows.length) throw new Error("The file has no appointments in it.");
 
@@ -574,7 +641,7 @@ function wire(card, k, staff) {
     if (start.problem) throw new Error(start.problem);
     wroteSome = true;
 
-    const sum = { unmatched: {}, ambiguous: {}, skipped: 0, badDates: 0 };
+    const sum = { unmatched: {}, ambiguous: {}, skipped: 0, badDates: 0, notes, noteCol };
     for (let i = 0; i < rows.length; i += BATCH) {
       const part = rows.slice(i, i + BATCH);
       setMsg(`Writing ${num(Math.min(i + part.length, rows.length))} of ${num(rows.length)}… keep this page open.`);
@@ -605,6 +672,9 @@ function wire(card, k, staff) {
         <strong>Done. ${num(res.rows)} appointments are in alltimeappts.</strong>
         <div>Took ${Math.max(1, Math.round((res.ms || 0) / 1000))} seconds${res.before ? ` · it had ${num(res.before)} rows before` : ""}.</div>
         ${sum.badDates ? `<div class="du-warn">${num(sum.badDates)} rows had a date that couldn't be read, so it was kept as text.</div>` : ""}
+        ${sum.noteCol < 0
+          ? '<div class="du-warn">No notes column was found in this file, so appointment notes weren\'t added.</div>'
+          : `<div class="muted">Appointment notes kept for ${plural(sum.notes, "appointment")} (column P). Alerts and Customer notes were left out.</div>`}
         ${sum.skipped ? `<div class="muted">${plural(sum.skipped, "staff booking")} left out (not patients).</div>` : ""}
         ${fixLists({ amb: sampleOf(sum.ambiguous), ambN: Object.keys(sum.ambiguous).length,
           un: sampleOf(sum.unmatched), unN: Object.keys(sum.unmatched).length })}
