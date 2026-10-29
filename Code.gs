@@ -3434,7 +3434,11 @@ const PERMS_ = [
   ['dash.requests', 'My dashboard', 'My requests'],
   ['dash.stock', 'My dashboard', 'Stock I use'],
   ['dash.overview', 'My dashboard', 'Clinic overview'],
+  ['menu.seo',   'SEO', 'SEO menu (see search performance, pages and site health)'],
+  ['seo.work',   'SEO', 'Work SEO opportunities and log site changes'],
+  ['seo.manage', 'SEO', 'SEO settings: topics, key pages, compliance words'],
 ];
+
 const PERMS_ALL_ = PERMS_.map(function (p) { return p[0]; });
 const ROLE_DEFAULTS_ = {
   Clinician: ['menu.patients', 'menu.calendar', 'menu.tasks', 'patients.edit', 'clinical.view', 'billing.view',
@@ -3447,9 +3451,6 @@ const ROLE_DEFAULTS_ = {
     'menu.inventory', 'inventory.view', 'inventory.request', 'inventory.receive', 'inventory.order', 'inventory.count', 'menu.reports',
     'menu.scanner', 'scanner.billing', 'scanner.docket',
     'dash.attention', 'dash.appts', 'dash.tasks', 'dash.requests', 'dash.overview', 'recall.work'],
-    ['menu.seo',   'SEO', 'SEO menu (see search performance, pages and site health)'],
-    ['seo.work',   'SEO', 'Work SEO opportunities and log site changes'],
-    ['seo.manage', 'SEO', 'SEO settings: topics, key pages, compliance words'],
 };
 
 

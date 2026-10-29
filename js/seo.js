@@ -2,7 +2,7 @@
 // Reads: seo_state/overview, seo_state/run, seo_pages (current build only)
 
 // ⚠️ Make these match recall.js exactly (same Firebase version, same db instance)
-import { db } from "./firebase.js";
+import { db } from "./firebase-config.js";
 import { doc, getDoc, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const TABS = [
