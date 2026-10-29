@@ -1,5 +1,5 @@
 // Inventory → Kits: an admin sets an injector's kit to what they physically have
-import { setKitBalance, isKitProduct, batchName, batchText, plural, lotId, listAllLots, recordKitFromShelf } from "./inventory-api.js";
+import { setKitBalance, isKitProduct, batchName, plural, lotId, listAllLots, recordKitFromShelf } from "./inventory-api.js";
 import { escapeHtml as esc, showToast } from "./utils.js";
 
 // injectors: [{ uid, name }]  products: listProducts()  kits: listKits() (everyone's)
@@ -68,7 +68,7 @@ export function openSetKitDialog({ staff, injectors, products, kits, days = [], 
     }
     return null;
   };
-  const unitPluralOf = (p) => (/(s|x|ch|sh)$/i.test(p.stockUnit || "") ? `${p.stockUnit}es` : `${p.stockUnit || "unit"}s`);
+
   const render = () => {
     const p = product();
     const s = who();
@@ -185,6 +185,7 @@ export async function openKitFromShelfDialog({ staff, injectors, products, kits,
   const showErr = (m) => { err.textContent = m || ""; err.hidden = !m; };
   const product = () => kitProducts.find((p) => p.id === $('[data-f="product"]').value);
   const who = () => injectors.find((s) => s.uid === $('[data-f="who"]').value);
+  const unitsWord = (p) => (/(s|x|ch|sh)$/i.test(p.stockUnit || "") ? `${p.stockUnit}es` : `${p.stockUnit || "unit"}s`);
   let rows = [];
 
   const render = () => {
@@ -193,18 +194,25 @@ export async function openKitFromShelfDialog({ staff, injectors, products, kits,
     rows = kits.filter((k) => k.staffUid === s.uid && k.productId === p.id).map((k) => ({
       k, lot: lots.find((l) => l.id === lotId(p.id, "shelf", k.batch, k.expiry) && l.qty > 0) || null,
     }));
-    $('[data-role="rows"]').innerHTML = rows.length ? `<table class="inv-table kit-set-table">
-        <thead><tr><th>${esc(batchName(p))}</th><th>In ${esc(s.name)}'s kit</th><th>On the Shelf</th>
-          <th style="width:9rem;white-space:nowrap">How many came from it</th></tr></thead>
+    $('[data-role="rows"]').innerHTML = rows.length ? `<table class="inv-table kit-shelf-table" style="width:100%;table-layout:auto">
+        <thead><tr>
+          <th>${esc(batchName(p))}</th><th>In ${esc(s.name)}'s kit</th><th>On the Shelf</th>
+          <th style="width:11rem;white-space:nowrap">How many came from it</th>
+        </tr></thead>
         <tbody>${rows.map((r, i) => `<tr>
           <td>${esc(r.k.batch || "-")}${r.k.expiry ? ` <span class="muted">exp ${esc(r.k.expiry)}</span>` : ""}</td>
           <td>${r.k.sealed} unopened${r.k.open ? ` + ${r.k.open} ${esc(p.doseUnit)}` : ""}</td>
           <td>${r.lot ? esc(plural(r.lot.qty, p.stockUnit)) : '<span class="muted">None of this batch</span>'}</td>
-          <td style="white-space:nowrap">${r.lot ? `<span class="fe-num" style="display:inline-flex;align-items:center;gap:.4rem">
-            <input class="fe-input" type="number" min="0" max="${r.lot.qty}" step="1" inputmode="numeric"
-              data-i="${i}" placeholder="0" style="width:5rem;min-width:5rem;text-align:center" />
-            <span>${esc(unitPluralOf(p))}</span></span>` : ""}</td></tr>`).join("")}</tbody></table>`
+          <td style="width:11rem;white-space:nowrap">${r.lot ? `
+            <span style="display:inline-flex;align-items:center;gap:.5rem">
+              <input class="fe-input" type="number" min="0" max="${r.lot.qty}" step="1" inputmode="numeric"
+                data-i="${i}" placeholder="0"
+                style="width:5.5rem;min-width:5.5rem;height:2.5rem;padding:0 .5rem;text-align:center;font-size:1rem" />
+              <span class="muted">${esc(unitsWord(p))}</span>
+            </span>` : ""}</td></tr>`).join("")}</tbody></table>`
       : `<p class="inv-hint">${esc(s.name)} has none of this in their kit.</p>`;
+    const first = dlg.querySelector("[data-i]");
+    if (first) first.focus();
   };
 
   dlg.addEventListener("change", (e) => { if (e.target.matches('[data-f="who"], [data-f="product"]')) { showErr(""); render(); } });
