@@ -1954,7 +1954,10 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
     });
   });
 
-  const saved = out.map(({ fid, block, kitUid, ...l }) => ({ ...l, rows: l.rows.map(({ ref, ...r }) => r) }));
+  // kitUid stays on kit lines: whose kit the units came out of (a colleague's, on a paper record)
+  const saved = out.map(({ fid, block, kitUid, ...l }) => ({
+    ...l, ...(l.kind === "kit" && kitUid ? { kitUid } : {}), rows: l.rows.map(({ ref, ...r }) => r),
+  }));
   const isShort = saved.some((l) => l.short > 0);
   tx.set(uRef, {
     submissionId, patientId: clip(patientId, 150), patientName: clip(patientName, 150), formName: clip(formName, 150),
@@ -2669,7 +2672,8 @@ export async function correctUsage(id, changes, reason, staff) {
       if (pid && !prodSnaps.has(pid)) prodSnaps.set(pid, await tx.get(doc(db, "inv_products", pid)));
       if (!w.move) continue;
       if (w.kit) {
-        w.ref = kitId(owner, pid, w.r.batch, w.r.expiry);
+        w.kitOwner = String(w.l.kitUid || owner);   // a colleague's kit, if it came from theirs
+        w.ref = kitId(w.kitOwner, pid, w.r.batch, w.r.expiry);
         if (!kitSnaps.has(w.ref)) kitSnaps.set(w.ref, await tx.get(doc(db, "inv_kits", w.ref)));
       } else {
         w.loc = w.r.from === "jt" ? "jt" : "shelf";
@@ -2752,7 +2756,7 @@ export async function correctUsage(id, changes, reason, staff) {
 
     work.filter((w) => w.move).forEach((w) => logMove(tx, staff, {
       type: w.kit ? "kit-correct" : "use-correct", productId: w.l.productId, productName: w.l.name, unit: w.l.unit,
-      ...(w.kit ? { staffUid: owner } : {}),
+      ...(w.kit ? { staffUid: w.kitOwner } : {}),
       lines: [{ loc: w.kit ? "kit" : w.loc, batch: w.r.batch || "", expiry: w.r.expiry || "", delta: -w.move }],
       reason: "Usage corrected", ref: id,
       note: [`${u.patientName || ""} · ${u.formName || ""}`, changeText(w), w.kit ? `${ownerName}'s kit` : "", why]
@@ -3328,7 +3332,9 @@ function kitFlowEvents(moves, loans, staffUid, productsById, since, until = null
   const inWin = (d) => !!d && d > since && (!until || d <= until);
   const out = [];
   moves.forEach((m) => {
-    if ((m.staffUid || m.byUid) !== staffUid || !inWin(m.at) || (productId && m.productId !== productId)) return;
+    // A paper record: it physically left the kit on the treatment day, so that's when it counts
+    const at = KEY_RE.test(m.effectiveDate || "") ? keyDate(m.effectiveDate) : m.at;
+    if ((m.staffUid || m.byUid) !== staffUid || !inWin(at) || (productId && m.productId !== productId)) return;
     const kitDelta = (m.lines || []).filter((l) => l.loc === "kit").reduce((a, l) => a + (Number(l.delta) || 0), 0);
     let units;
     if (m.type === "kit-take" || m.type === "kit-return") units = kitDelta * per(m.productId);   // vials → units
@@ -3338,7 +3344,7 @@ function kitFlowEvents(moves, loans, staffUid, productsById, since, until = null
       units = -(Number.isFinite(d) ? d : Math.abs(kitDelta) * per(m.productId));
     } else return;
     if (!units) return;
-    out.push({ at: m.at, type: m.type, productId: m.productId, units: round1(units), by: m.by || "",
+    out.push({ at, type: m.type, productId: m.productId, units: round1(units), by: m.by || "",
       note: [m.reason, m.note].filter(Boolean).join(" · ") });
   });
   loans.forEach((l) => {
@@ -4621,13 +4627,15 @@ export async function kitDayLedger(staffUid, key) {
   const day = daySnap.exists() ? normaliseKitDay(daySnap) : null;
   const events = [];
   const seen = new Set();
+  const useIds = new Set(useSnap.docs.map((d) => d.id));   // their own records (already listed below)
 
   [...byThem.docs, ...forThem.docs].forEach((d) => {
     if (seen.has(d.id)) return;
     seen.add(d.id);
     const m = d.data() || {};
     const at = toDate(m.at);
-    if (!inDay(at)) return;
+    const k = KEY_RE.test(m.effectiveDate || "") ? m.effectiveDate : at ? dayKey(at) : "";
+    if (k !== key) return;
     const kitLines = (Array.isArray(m.lines) ? m.lines : []).filter((l) => l.loc === "kit");
     const kd = kitLines.reduce((a, l) => a + (Number(l.delta) || 0), 0);
     const each = per.get(m.productId) || 0;
@@ -4642,6 +4650,10 @@ export async function kitDayLedger(staffUid, key) {
       units = Number(m.deltaUnits) || 0;
       text = m.reason === "Kit set by admin" ? `Kit set by ${m.by || "an admin"}` : `Count difference accepted by ${m.by || "an admin"}`;
     } else if (m.type === "kit-correct") { units = kd; text = `Usage corrected by ${m.by || "an admin"}`; }
+    else if (m.type === "kit-use" && m.staffUid === staffUid && !useIds.has(String(m.ref || ""))) {
+      units = kd;   // a paper record for another clinician, taken from this kit
+      text = `Used on another clinician's paper record (entered by ${m.by || "an admin"})`;
+    }
     else return;
     if (!units) return;
     events.push({ at, productId: m.productId, units: round1(units), kind: m.type, text,
@@ -4669,7 +4681,10 @@ export async function kitDayLedger(staffUid, key) {
       if (!total) return;
       const batches = [...new Set((l.rows || []).map((r) => r.batch).filter(Boolean))];
       events.push({
-        at, productId: l.productId, units: -total, kind: "use", countsInKit: l.kind === "kit",
+        at, productId: l.productId, units: -total, kind: "use",
+        // From a colleague's kit (paper record): shown here, but it came out of their kit, not this one
+        countsInKit: l.kind === "kit" && (!l.kitUid || l.kitUid === staffUid),
+        fromOtherKit: l.kind === "kit" && !!l.kitUid && l.kitUid !== staffUid,
         from: l.kind === "vial" ? ((l.rows || [])[0] || {}).from || "jt" : "kit",
         patientName: String(u.patientName || ""), patientId: String(u.patientId || ""),
         formName: String(u.formName || ""), submissionId: String(u.submissionId || ""),

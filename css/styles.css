@@ -10084,3 +10084,9 @@ dialog.lh-dialog.bs-dlg.is-wide { width: min(1240px, calc(100vw - 2rem)); }
   .pr-grid2 { grid-template-columns: 1fr; }
   .pr-col { flex-basis: 230px; }
 }
+
+.pr-journey { margin: 0 0 8px; display: grid; gap: 6px; }
+.pr-journey > div { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line, #e5e7eb); }
+.pr-journey > div:last-child { border-bottom: 0; }
+.pr-journey dt { color: var(--muted, #64748b); font-size: 13px; }
+.pr-journey dd { margin: 0; font-size: 13px; text-align: right; }

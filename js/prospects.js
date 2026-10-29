@@ -35,6 +35,10 @@ const todayKey = () => new Date().toLocaleDateString("en-CA", PERTH);
 const addDays = (k, n) => { const [y, m, d] = k.split("-").map(Number); return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10); };
 const niceDay = (k) => { if (!/^\d{4}-\d{2}-\d{2}$/.test(k || "")) return ""; const [y, m, d] = k.split("-").map(Number);
   return new Date(y, m - 1, d).toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" }); };
+const fullDay = (k) => { if (!/^\d{4}-\d{2}-\d{2}$/.test(k || "")) return ""; const [y, m, d] = k.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }); };
+const JOURNEY = [["consult_booked", "First appointment"], ["consulted", "First visit"], ["tx_booked", "First treatment appointment"],
+  ["treated", "First treatment"], ["active", "Active patient from"]];
 const when = (iso) => { const d = new Date(iso); return isNaN(d) ? "" : d.toLocaleString("en-AU", { ...PERTH, day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" }); };
 const ago = (iso) => {
   const ms = Date.now() - Date.parse(iso || "");
@@ -229,6 +233,7 @@ async function mountBoard(container, { view, staff }) {
       <span class="pr-tags">
         <span class="pr-tag">${esc(p.source || "Other")}</span>
         ${p.patientId ? '<span class="pr-tag is-pt">Patient</span>' : ""}
+        ${p.nextAppt && OPEN.includes(p.stage) ? `<span class="pr-tag is-pt">Booked ${esc(niceDay(p.nextAppt))}</span>` : ""}
         ${late ? '<span class="pr-tag is-bad">Not contacted</span>' : ""}
         ${fs === "overdue" ? '<span class="pr-tag is-bad">Follow-up overdue</span>'
           : fs === "today" ? '<span class="pr-tag is-warn">Follow up today</span>'
@@ -246,7 +251,7 @@ async function mountBoard(container, { view, staff }) {
     if (st.view === "list") {
       const rows = list.slice().sort(byUrgency);
       box.innerHTML = rows.length ? `<div class="pr-table-wrap"><table class="pr-table"><thead><tr>
-          <th>Name</th><th>Stage</th><th>Interested in</th><th>Source</th><th>With</th><th>Follow up</th><th>Last contact</th><th>Enquired</th>
+<th>Name</th><th>Stage</th><th>Interested in</th><th>Source</th><th>With</th><th>Follow up</th><th>Next appointment</th><th>Last contact</th><th>Enquired</th>
         </tr></thead><tbody>${rows.map((p) => {
           const s = stageOf(p.stage);
           const fs = followState(p);
@@ -255,6 +260,7 @@ async function mountBoard(container, { view, staff }) {
             <td><span class="pr-pill is-${s.tone}">${esc(s.name)}</span></td>
             <td>${esc(p.concern || "")}</td><td>${esc(p.source || "")}</td><td>${esc(p.assignedToName || "")}</td>
             <td class="${fs === "overdue" ? "is-bad" : fs === "today" ? "is-warn" : ""}">${esc(niceDay(p.nextFollowUp))}</td>
+            <td>${esc(niceDay(p.nextAppt))}</td>
             <td>${esc(p.lastContactAt ? ago(p.lastContactAt) : "")}</td><td>${esc(niceDay(keyOf(p.createdAt)))}</td></tr>`;
         }).join("")}</tbody></table></div>`
         : '<p class="pr-empty">No prospects match.</p>';
@@ -524,6 +530,7 @@ async function mountProspect(container, id, staff) {
             ${p.pref ? `<span class="pr-chip">Prefers ${esc(p.pref)}</span>` : ""}
             ${p.ageGroup ? `<span class="pr-chip">Age ${esc(p.ageGroup)}</span>` : ""}
             ${p.patientId ? `<a class="pr-chip is-pt" href="#/patient/${enc(p.patientId)}">${I(IC.user)}Patient: ${esc(p.patientName)}</a>` : ""}
+            ${p.nextAppt ? `<span class="pr-chip">${I(IC.clock)}Next appointment ${esc(fullDay(p.nextAppt))}</span>` : ""}
             ${p.historic ? '<span class="pr-tag">Older</span>' : ""}
             
           </div>
@@ -570,6 +577,14 @@ async function mountProspect(container, id, staff) {
               ${work ? `<input type="search" class="fe-input" data-role="ptq" placeholder="Search the Patient List" value="${esc(p.name)}" />
                 <div class="pr-hits" data-role="hits"></div>` : ""}`}
           </section>
+          ${p.patientId ? `<section class="pr-sec"><h3>${I(IC.flag)} Journey</h3>
+            ${JOURNEY.some(([k]) => (p.milestones || {})[k]) || p.nextAppt || p.lastVisit ? `<dl class="pr-journey">
+              ${JOURNEY.filter(([k]) => (p.milestones || {})[k]).map(([k, l]) =>
+                `<div><dt>${esc(l)}</dt><dd>${esc(fullDay(p.milestones[k]))}</dd></div>`).join("")}
+              ${p.lastVisit ? `<div><dt>Last visit</dt><dd>${esc(fullDay(p.lastVisit))}</dd></div>` : ""}
+              ${p.nextAppt ? `<div><dt>Next appointment</dt><dd><strong>${esc(fullDay(p.nextAppt))}</strong></dd></div>` : ""}
+            </dl><small class="muted">From the appointment book, since they enquired. Updated after each PCN update.</small>`
+              : '<p class="muted">No appointments since they enquired.</p>'}</section>` : ""}
           ${work ? `<section class="pr-sec"><h3>${I(IC.note)} Details</h3>
             <form data-role="details" novalidate class="pr-details">
               <label class="lh-field"><span class="lh-label">Name</span><input name="name" class="fe-input" value="${esc(p.name)}" /></label>

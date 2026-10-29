@@ -45,12 +45,14 @@ const expEnd = (s) => {
 const isExpired = (exp, date) => String(exp || "").split(",").some((x) => { const k = expEnd(x); return !!k && k < date; });
 
 /* ---------- Entries (one per thing that happened) ---------- */
-
+// Is this kit-use move one of the injector's own usage records? (Those are counted from the usage itself.)
+const ImmutableOwn = (ownUse, m) => ownUse.has(String(m.ref || ""));
 function portalEntries({ uid, product, moves, loans, usage, days }) {
   const pid = product.id;
   const per = Number(product.dosePer) || 0;
   const out = [];
   const add = (e) => { if (e.date) out.push({ src: "portal", ord: 1, counts: true, ...e }); };
+  const ownUse = new Set(usage.map((u) => u.id));   // their own records (counted from the usage below)
 
   moves.forEach((m) => {
     if (m.productId !== pid || (m.byUid !== uid && m.staffUid !== uid)) return;
@@ -67,6 +69,10 @@ function portalEntries({ uid, product, moves, loans, usage, days }) {
     } else if (m.type === "kit-count" && m.staffUid === uid) {
       const after = Number((/→\s*([\d.]+)/.exec(m.note || "") || [])[1]);
       if (/Kit set by admin/i.test(m.reason || "") && Number.isFinite(after)) add({ ...base, kind: "count", cat: "start", ord: 0, value: r1(after) });
+    } else if (m.type === "kit-use" && m.staffUid === uid && !ImmutableOwn(ownUse, m)) {
+      // Entered by someone else from this kit: a paper record for a colleague, or one not moved over to them yet
+      const [patientName = ""] = String(m.note || "").split(" · ");
+      add({ ...base, kind: "move", sub: "use", units: kd, patientName, type: "Treatment", paper: true, areas: "" });
     } else if (m.type === "kit-correct" && m.staffUid === uid && kd) {
       add({ ...base, kind: "move", sub: "fix", units: kd });
     }
@@ -88,12 +94,15 @@ function portalEntries({ uid, product, moves, loans, usage, days }) {
     const rows = l.rows || [];
     const date = /^\d{4}-\d{2}-\d{2}$/.test(u.recordDate || "") ? u.recordDate : keyOf(u.at);
     const form = String(u.formName || "");
+    const otherKit = l.kind === "kit" && !!l.kitUid && l.kitUid !== uid;   // a paper record, from a colleague's kit
     add({
-      ms: keyOf(u.at) === date ? msOf(u.at) : null, date, kind: "move", sub: "use", units: -total, counts: l.kind === "kit",
+      ms: keyOf(u.at) === date ? msOf(u.at) : null, date, kind: "move", sub: "use", units: -total,
+      counts: l.kind === "kit" && !otherKit,
       patientName: u.patientName || "", patientId: u.patientId || "", submissionId: u.submissionId || "",
       type: /touch/i.test(form) ? "Touch up" : "Treatment", paper: /paper/i.test(u.source || ""), areas: "",
       batch: uniqJoin(rows.map((r) => r.batch)), expiry: uniqJoin(rows.map((r) => r.expiry), expMY),
-      from: l.kind === "vial" ? ((rows[0] || {}).from === "shelf" ? "the Shelf" : "JT storage") : "",
+      from: l.kind === "vial" ? ((rows[0] || {}).from === "shelf" ? "the Shelf" : "JT storage")
+        : otherKit ? "a colleague's kit" : "",
     });
   }));
 
@@ -172,7 +181,8 @@ function buildLedger(entries) {
 
 // The portal on the days it has records, the old app on every other day
 function mergeSources(portal, old) {
-  const pDays = new Set(portal.map((e) => e.date));
+  // Paper records are always added: they were never in the old app, so they don't make it a portal day
+  const pDays = new Set(portal.filter((e) => !e.paper).map((e) => e.date));
   return buildLedger(portal.concat(old.filter((e) => !pDays.has(e.date))));
 }
 

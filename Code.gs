@@ -17557,3 +17557,279 @@ function prospectQuietOlder() {
   if (writes.length) commitWrites_(cfg, writes, 100);
   console.log(writes.length + ' older enquiry/enquiries tidied up.');
 }
+
+// ===================== Prospects: stages from the appointment book =====================
+// Hourly (installProspectStages). The full check runs once after each PCN update reaches the portal (sync_meta/pcn)
+// and once a day. Unlinked prospects are matched to patients by mobile or email (the name decides between
+// family members sharing a mobile). Visits from the enquiry date onwards move the stage forward, never back.
+
+const PROS_TX_CATS_ = ['Wrinkle Relaxer', 'Filler/Radiesse', 'Body Sculpting', 'RestoraGlow/RF/DermaGlow/Skin Needling',
+  'Laser/OPL/Peel', 'Firm/Ulthera/eST', 'Hydrarepair/SkinRemod/CG', 'Collagen activator', 'Other Injectables', 'LED', 'Vibro'];
+const PROS_CONSULT_RE_ = /consult/i;
+const PROS_NOT_TX_RE_ = /\b(review|follow[\s-]?up|check[\s-]?up|touch[\s-]?up|top[\s-]?up|medicare)\b/i;
+const PROS_AUTO_ = 'Appointment book';
+
+// Every patient: find(PttID), doc(id), kept(id) after merges, and who has each mobile and email
+function prosPatientIndex_(cfg) {
+  const byId = Object.create(null);
+  const byPtt = Object.create(null);
+  fsListAll_(cfg, 'patient_list', ['PttID', 'Patient Name', 'First Name', 'Last Name', 'Mobile', 'Email', 'MergedInto'])
+    .forEach(function (d) {
+      const f = fromFields_(d.fields || {});
+      const id = d.name.split('/').pop();
+      byId[id] = f;
+      const ptt = String(f.PttID == null ? '' : f.PttID).trim().toLowerCase();
+      if (ptt) byPtt[ptt] = id;
+      if (!byPtt[id.toLowerCase()]) byPtt[id.toLowerCase()] = id;
+    });
+  const kept = function (id) {
+    for (let i = 0; i < 5 && byId[id] && byId[id].MergedInto && byId[String(byId[id].MergedInto)]; i++) id = String(byId[id].MergedInto);
+    return byId[id] ? id : '';
+  };
+  const byPhone = Object.create(null);
+  const byEmail = Object.create(null);
+  const add = function (map, k, id) {
+    if (!k) return;
+    const a = map[k] || (map[k] = []);
+    if (a.indexOf(id) === -1) a.push(id);
+  };
+  Object.keys(byId).forEach(function (id) {
+    const k = kept(id);
+    if (!k) return;
+    add(byPhone, prosPhoneKey_(byId[id].Mobile), k);
+    const e = mktEmail_(byId[id].Email);
+    if (isEmail_(e)) add(byEmail, e, k);
+  });
+  return {
+    kept: kept, byPhone: byPhone, byEmail: byEmail,
+    doc: function (id) { return byId[id] || null; },
+    find: function (ptt) { const id = byPtt[String(ptt == null ? '' : ptt).trim().toLowerCase()]; return id ? kept(id) : ''; },
+  };
+}
+
+// Same first name, and the same surname when both have one
+function prosSameName_(a, b) {
+  const x = ptClean_(a).split(' ').filter(Boolean);
+  const y = ptClean_(b).split(' ').filter(Boolean);
+  if (!x.length || !y.length || x[0] !== y[0]) return false;
+  return x.length < 2 || y.length < 2 || x[x.length - 1] === y[y.length - 1];
+}
+
+// { id, how } when it's clear who they are, { many } when it isn't, or null
+function prosLinkFor_(ix, p) {
+  const ph = p.phoneKey ? (ix.byPhone[p.phoneKey] || []) : [];
+  const em = p.emailKey ? (ix.byEmail[p.emailKey] || []) : [];
+  const c = uniq_(ph.concat(em));
+  const how = function (id) { return ph.indexOf(id) !== -1 ? 'mobile' : 'email'; };
+  if (c.length === 1) return { id: c[0], how: how(c[0]) };
+  if (!c.length) return null;
+  const named = c.filter(function (id) { const d = ix.doc(id); return d && prosSameName_(p.name, flowWho_(d).name); });
+  return named.length === 1 ? { id: named[0], how: 'name and ' + how(named[0]) } : { many: c.length };
+}
+
+// Consultation and treatment days for the patients in want: { patientId: { 'yyyy-MM-dd': { consult, tx, svcs, staff } } }
+function prosVisits_(ctx, ix, want) {
+  const out = Object.create(null);
+  const keyOf = Object.create(null);
+  pcnReadAppts_(ctx).forEach(function (r) {
+    if (!pcnIsDate_(r[0]) || !pcnStatusOk_(r[7], 'full')) return;   // cancelled, no-show, DNA
+    const svc = String(r[9] == null ? '' : r[9]).trim();
+    if (!svc || REP_NOT_VISIT_.test(svc)) return;
+    const ptt = String(r[14] == null ? '' : r[14]).trim();
+    if (!ptt) return;
+    if (!(ptt in keyOf)) keyOf[ptt] = ix.find(ptt);
+    const pid = keyOf[ptt];
+    if (!pid || !want[pid]) return;
+    const cat = String(r[13] == null ? '' : r[13]).trim();
+    const consult = cat === 'Consultation New Patient' || PROS_CONSULT_RE_.test(svc);
+    const tx = !consult && PROS_TX_CATS_.indexOf(cat) !== -1 && !PROS_NOT_TX_RE_.test(svc);
+    if (!consult && !tx) return;
+    const dk = Utilities.formatDate(r[0], ctx.tz, 'yyyy-MM-dd');
+    const days = out[pid] || (out[pid] = Object.create(null));
+    const v = days[dk] || (days[dk] = { consult: false, tx: false, svcs: [], staff: '' });
+    if (consult) v.consult = true;
+    if (tx) v.tx = true;
+    if (v.svcs.length < 3 && v.svcs.indexOf(svc) === -1) v.svcs.push(svc);
+    const st = String(r[8] == null ? '' : r[8]).trim();
+    if (!v.staff && st && !SCHED_NOT_PERSON_.test(st)) v.staff = st;
+  });
+  return out;
+}
+
+// The stage the appointment book shows, from the enquiry date (from) onwards. Today's appointments count as booked.
+function prosBookStage_(days, from, today) {
+  days = days || {};
+  const keys = Object.keys(days).filter(function (k) { return k >= from; }).sort();
+  const isTx = function (k) { return days[k].tx; };
+  const past = keys.filter(function (k) { return k < today; });
+  const fut = keys.filter(function (k) { return k >= today; });
+  const pTx = past.filter(isTx);
+  const fTx = fut.filter(isTx);
+  const ms = {};
+  if (keys.length) ms.consult_booked = keys[0];
+  if (past.length) ms.consulted = past[0];
+  const allTx = keys.filter(isTx);
+  if (allTx.length) ms.tx_booked = allTx[0];
+  if (pTx.length) ms.treated = pTx[0];
+  let stage = '', at = '', why = '';
+  if (pTx.length >= 2) { stage = 'active'; at = pTx[1]; why = 'second'; }
+  else if (pTx.length && fut.length) { stage = 'active'; at = fut[0]; why = 'again'; }
+  else if (pTx.length) { stage = 'treated'; at = pTx[0]; }
+  else if (fTx.length) { stage = 'tx_booked'; at = fTx[0]; }
+  else if (past.length) { stage = 'consulted'; at = past[0]; }
+  else if (fut.length) { stage = 'consult_booked'; at = fut[0]; }
+  if (stage === 'active') ms.active = at;
+  return { stage: stage, at: at, why: why, ms: ms, next: fut[0] || '', last: past[past.length - 1] || '' };
+}
+
+function prosStageNote_(days, b) {
+  const v = (days || {})[b.at] || {};
+  const what = (v.svcs || []).join(', ');
+  const when = recLongDate_(b.at);
+  if (b.why === 'second') return 'second treatment visit' + (what ? ' (' + what + ')' : '') + ' on ' + when;
+  if (b.why === 'again') return 'treated, and booked again for ' + when;
+  return (what || 'appointment') + (v.staff ? ' with ' + v.staff : '') + ' on ' + when;
+}
+
+function prosStagesCheck_(cfg, ctx) {
+  const t0 = Date.now();
+  const today = ctx.todayKey;
+  const now = new Date().toISOString();
+  const ix = prosPatientIndex_(cfg);
+  const list = fsListAll_(cfg, PROS_COL_, ['name', 'stage', 'stageAt', 'createdAt', 'patientId', 'phoneKey', 'emailKey',
+    'historic', 'milestones', 'nextAppt', 'lastVisit', 'patientMany'])
+    .map(function (d) { const f = fromFields_(d.fields || {}); f._id = d.name.split('/').pop(); return f; });
+  const sum = { prospects: list.length, linked: 0, moved: 0, revived: 0, backOnBoard: 0, written: 0 };
+
+  // 1. Who each prospect is
+  const links = {};
+  const want = Object.create(null);
+  list.forEach(function (p) {
+    let pid = p.patientId ? ix.kept(String(p.patientId)) : '';
+    if (!pid) {
+      const l = prosLinkFor_(ix, p);
+      if (l && l.id) { pid = l.id; links[p._id] = l; }
+      else if (l && l.many && Number(p.patientMany || 0) !== l.many) links[p._id] = l;
+    } else if (pid !== p.patientId) {
+      links[p._id] = { id: pid, how: 'merged' };   // their patient record was merged into another
+    }
+    p._pid = pid;
+    if (pid) want[pid] = true;
+  });
+
+  // 2. Their visits, and the stage they show
+  const visits = prosVisits_(ctx, ix, want);
+  const order = PROS_OPEN_.concat(['active']);
+  const cache = CacheService.getScriptCache();
+  const writes = [];
+  list.forEach(function (p) {
+    const patch = {};
+    const entries = [];
+    const l = links[p._id];
+    if (l && l.id) {
+      const d = ix.doc(l.id);
+      const nm = d ? flowWho_(d).name : '';
+      Object.assign(patch, { patientId: l.id, pttId: String((d && d.PttID) || l.id), patientName: nm, patientMany: 0 });
+      if (l.how !== 'merged') {
+        entries.push({ kind: 'link', what: 'Linked to the patient ' + nm + ' (same ' + l.how + ')' });
+        sum.linked++;
+      }
+    } else if (l && l.many) {
+      patch.patientMany = l.many;
+    }
+
+    if (p._pid) {
+      const from = flowKey_(Date.parse(String(p.createdAt || '')) || Date.now());
+      const days = visits[p._pid];
+      const b = prosBookStage_(days, from, today);
+      if (JSON.stringify(b.ms) !== JSON.stringify(p.milestones || {})) patch.milestones = b.ms;
+      if (b.next !== String(p.nextAppt || '')) patch.nextAppt = b.next;
+      if (b.last !== String(p.lastVisit || '')) patch.lastVisit = b.last;
+      if (b.stage) {
+        let move = false;
+        let revive = false;
+        if (p.stage === 'lost') {
+          const lostKey = p.stageAt ? flowKey_(Date.parse(String(p.stageAt))) : '';
+          revive = Object.keys(days || {}).some(function (k) { return k >= from && k > lostKey; });
+          move = revive;
+        } else {
+          move = order.indexOf(b.stage) > order.indexOf(String(p.stage || 'new'));
+        }
+        if (move) {
+          Object.assign(patch, { stage: b.stage, stageAt: now, waitingSince: '' });
+          if (revive) Object.assign(patch, { lostReason: '', lostNote: '' });
+          entries.push({ kind: 'stage', what: (revive ? 'Back from Lost, moved to ' : 'Moved to ') +
+            PROS_STAGE_NAME_[b.stage] + ': ' + prosStageNote_(days, b) });
+          if (revive) sum.revived++; else sum.moved++;
+          // An older enquiry comes back onto the board when there's something recent to work on
+          if (p.historic === true && b.stage !== 'active' && (b.next || b.last >= flowAddDaysKey_(today, -90))) {
+            patch.historic = false;
+            sum.backOnBoard++;
+          }
+        }
+      }
+    }
+
+    if (!Object.keys(patch).length) return;
+    if (cache.get('stl_pr_' + p._id)) return;   // a staff member is saving it right now: picked up next time
+    if (entries.length) patch.updatedAt = now;
+    const w = patchWrite_(cfg, PROS_COL_ + '/' + p._id, patch);
+    if (entries.length) {
+      // Added to the timeline without rewriting it, so nothing a staff member saves at the same time is lost
+      w.updateTransforms = [{ fieldPath: 'log', appendMissingElements: { values: entries.map(function (e) {
+        return toValue_({ at: now, by: PROS_AUTO_, byUid: '', kind: e.kind, what: e.what, note: '' });
+      }) } }];
+    }
+    writes.push(w);
+  });
+  if (writes.length) commitWrites_(cfg, writes, 200);
+  sum.written = writes.length;
+  sum.ms = Date.now() - t0;
+  return sum;
+}
+
+function prosStagesRun_(force) {
+  const cache = CacheService.getScriptCache();
+  if (cache.get('up_ds_active') || cache.get('pcn_run_active')) return { later: true, why: 'A Day Sheet upload or PCN update is running.' };
+  if (ScriptApp.getProjectTriggers().some(function (t) { return t.getHandlerFunction() === 'prospectBackfillRun'; })) {
+    return { later: true, why: 'Waiting for the older enquiries to finish importing.' };
+  }
+  if (cache.get('pros_stage_run')) return { later: true, why: 'Already checking.' };
+  cache.put('pros_stage_run', '1', 600);
+  try {
+    const cfg = getConfig_();
+    const ctx = pcnCtx_();
+    let synced = '';
+    try { const m = fsGetDoc_(cfg, 'sync_meta/pcn'); synced = String((m && m.syncedAt) || ''); } catch (e) { /* checked anyway */ }
+    const props = PropertiesService.getScriptProperties();
+    const sig = ctx.todayKey + '|' + synced;
+    if (!force && props.getProperty('PROS_STAGE_SIG') === sig) return { quick: true };
+    const res = prosStagesCheck_(cfg, ctx);
+    props.setProperty('PROS_STAGE_SIG', sig);
+    return res;
+  } finally {
+    cache.remove('pros_stage_run');
+  }
+}
+
+// The hourly trigger
+function runProspectStages() {
+  try {
+    const r = prosStagesRun_(false);
+    if (!r.quick) console.log('Prospect stages: ' + JSON.stringify(r));
+  } catch (e) { console.error('Prospect stages: ' + (e && e.stack ? e.stack : e)); }
+}
+
+// Run from the editor to check straight away
+function prospectStagesNow() {
+  console.log('Prospect stages: ' + JSON.stringify(prosStagesRun_(true)));
+}
+
+// Run ONCE from the editor: checks every hour, and does the first check now
+function installProspectStages() {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return t.getHandlerFunction() === 'runProspectStages'; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  ScriptApp.newTrigger('runProspectStages').timeBased().everyHours(1).create();
+  prospectStagesNow();
+}

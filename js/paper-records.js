@@ -4,7 +4,8 @@ import { searchPatients, warmPatients } from "./patient-list.js";
 import { listPublishedForms, getFormTemplate, getFormVersion } from "./form-templates.js";
 import { normaliseField } from "./form-fields.js";
 import { mountConsumablesField, consumableAmountText } from "./consumables-field.js";
-import { consumeInTx, backdateCounts, getBaseline, listProducts, listMoves, undoMove, dayKey } from "./inventory-api.js";
+import { consumeInTx, backdateCounts, getBaseline, listProducts, listMoves, undoMove, dayKey, isKitProduct, kitId }
+  from "./inventory-api.js";
 import { db } from "./firebase-config.js";
 import { runTransaction, collection, query, where, getDocs, getDoc, doc, limit }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -107,9 +108,74 @@ async function whyEmpty(p, lot, qty, date) {
   if (cnt) return { plan: "counted", move: cnt.m, text: `A count on ${niceDay(dayKey(cnt.m.at))} already took it off the digital count, so it's noted on the record only.` };
   return { plan: "short", text: "Nothing in the activity explains why it ran out, so it's saved short for the ordering team to check. Nothing goes below zero." };
 }
+// Every batch of this product in anyone's kit, empty ones too
+async function kitBatchesEver(pid) {
+  const s = await getDocs(query(collection(db, "inv_kits"), where("productId", "==", pid)));
+  return s.docs.map((d) => {
+    const x = d.data() || {};
+    const sealed = Math.max(0, parseInt(x.sealed, 10) || 0);
+    const open = Math.max(0, Number(x.open) || 0);
+    return { id: d.id, staffUid: String(x.staffUid || ""), staffName: String(x.staffName || ""),
+      batch: String(x.batch || ""), expiry: String(x.expiry || ""),
+      units: Math.round((sealed * (Number(x.dosePer) || 0) + open) * 10) / 10 };
+  }).sort((a, b) => (a.expiry || "9999").localeCompare(b.expiry || "9999"));
+}
 
+// A kit batch from the paper that isn't in the clinician's kit now: what happened to it?
+// → { plan: "stop" | "counted" | "colleague" | "unknown" | "short", text, kit, kitUid, ref, batch, expiry, other }
+async function whyNotInKit(p, owner, batch, expiry, units, date) {
+  const nb = normBatch(batch);
+  const same = (x) => normBatch(x.batch) === nb && (!expiry || !x.expiry || x.expiry === expiry);
+  const [kits, lots, counted, moves] = await Promise.all([
+    kitBatchesEver(p.id), batchesEver(p.id),
+    countsAfter(date, owner.uid).catch(() => ({})),
+    listMoves({ productId: p.id, max: 1000 }).catch(() => []),
+  ]);
+  const where = `${owner.name}'s kit`;
+  const mine = kits.find((k) => k.staffUid === owner.uid && same(k));
+  if (mine && mine.units > 0) {
+    return { plan: "stop", text: `That batch is still in ${where} (${mine.units} ${p.doseUnit}). Choose it in the products list instead.` };
+  }
+  const base = { kit: true, kitUid: owner.uid, ref: mine ? mine.id : kitId(owner.uid, p.id, batch, expiry),
+    batch: mine ? mine.batch : batch, expiry: mine ? mine.expiry : expiry };
+
+  // The kit was already brought down after the treatment: an accepted kit difference, or an admin set it
+  const c = counted[`${p.id}|kit`];
+  const set = moves.find((m) => m.type === "kit-count" && m.staffUid === owner.uid && m.at
+    && dayKey(m.at) >= date && (Number(m.deltaUnits) || 0) < 0);
+  if ((c && c.adjusted) || set) {
+    const when = set ? dayKey(set.at) : c.adjDate;
+    return { ...base, plan: "counted", text: `${where} was ${set ? `set by ${set.by || "an admin"}` : "counted and the shortfall accepted"} on ${
+      niceDay(when)}, after this treatment. The kit already has it off, so it's noted on the record only.` };
+  }
+
+  // Used a colleague's vial
+  const other = kits.find((k) => k.staffUid !== owner.uid && same(k) && k.units >= units);
+  if (other) return { ...base, plan: "colleague", other, batch: other.batch, expiry: other.expiry, text: "" };
+
+  // It's in storage, not a kit
+  const store = lots.find((l) => same(l) && l.qty > 0);
+  if (store) {
+    const from = store.loc === "jt" ? "JT storage" : "the Shelf";
+    return { plan: "stop", text: `That batch is in ${from}, not in a kit. If it came from there, change ${p.name} in the products list: Restock → From ${from} (Admins).` };
+  }
+
+  if (!kits.some(same) && !lots.some(same)) {
+    return { ...base, plan: "unknown", text: "This batch was never in the inventory, so it's noted on the record only. Check it's read right off the paper." };
+  }
+  return { ...base, plan: "short", text: `Nothing in the activity explains why it isn't in ${where}, so it's saved short for the ordering team to check. Nothing goes below zero.${
+    c && c.open ? ` It may explain ${owner.name}'s kit difference from ${niceDay(c.openDate)}: mention this record when you review it in Count differences.` : ""}` };
+}
 // One of these as a products-used line (the same shape the products field gives consumeInTx)
 function extraLine(x, fid) {
+  if (x.kit) {   // from a kit: kitUid says whose (the clinician's, or a colleague's)
+    return {
+      fid, productId: x.p.id, name: x.p.name, kind: "kit", unit: x.p.doseUnit, doseUnit: x.p.doseUnit, dosePer: 0,
+      batchLabel: x.p.batchLabel, loc: "kit", block: false, kitUid: x.kitUid,
+      rows: [{ ref: x.ref, batch: x.batch, expiry: x.expiry, amount: x.qty, dose: x.qty }],
+      extra: x,
+    };
+  }
   return {
     fid, productId: x.p.id, name: x.p.name, kind: "storage", unit: x.p.stockUnit, stockUnit: x.p.stockUnit,
     loc: x.lot.loc, dosePer: x.p.dosePer, doseUnit: x.p.doseUnit, batchLabel: x.p.batchLabel, block: false,
@@ -624,6 +690,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       if (typeof cs !== "undefined" && cs.owner !== ownerUid() && !f.productsDone && cs.fields.length) {
         cs.owner = ownerUid();
         cs.counted = {};
+        cs.extra = cs.extra.filter((x) => !x.kit);   // checked against the previous clinician's kit
         drawProducts();
         drawType();
       }
@@ -782,16 +849,16 @@ export function mountPaperRecords(container, { staff } = {}) {
 
     /* ---------- A batch that's no longer in stock ---------- */
     const usedOn = () => dateIn.value;
-    const XTAG = { writeoff: "is-info", counted: "", short: "is-warn", unknown: "" };
+    const XTAG = { writeoff: "is-info", colleague: "is-info", counted: "", short: "is-warn", unknown: "" };
     function drawExtra() {
       const host = prodEl.querySelector('[data-role="extra"]');
       if (!host) return;
       host.innerHTML = `${cs.extra.map((x, i) => `
         <div class="ppr-cs-note ${XTAG[x.plan]}"><span><strong>${esc(x.p.name)}</strong> · ${esc(x.lot.batch || "No number")}${
-          x.lot.expiry ? ` · Exp ${esc(niceDay(x.lot.expiry))}` : ""} · ${x.qty} ${esc(x.p.stockUnit)}${
+          x.lot.expiry ? ` · Exp ${esc(niceDay(x.lot.expiry))}` : ""} · ${x.qty} ${esc(x.kit ? x.p.doseUnit : x.p.stockUnit)}${
           x.dose ? ` (${esc(x.dose)} ${esc(x.p.doseUnit)} given)` : ""}<br><small>${esc(x.text)}</small></span>
           <button type="button" class="lh-btn is-quiet" data-xrm="${i}">Remove</button></div>`).join("")}
-        <button type="button" class="hx-add" data-act="x-add">+ A batch that's no longer in stock</button>`;
+        <button type="button" class="hx-add" data-act="x-add">+ A batch that's no longer in stock or in the kit</button>`;
     }
     prodEl.addEventListener("click", (e) => {
       if (saving) return;
@@ -804,18 +871,19 @@ export function mountPaperRecords(container, { staff } = {}) {
       const date = usedOn();
       if (!date) { fail("Choose the date of treatment first."); return; }
       let ps;
-      try { ps = (await productsOnce()).filter((p) => p.active && p.usage === "storage"); }
+      try { ps = (await productsOnce()).filter((p) => p.active && (p.usage === "storage" || isKitProduct(p))); }
       catch { showToast("Couldn't load the products. Try again."); return; }
+      const owner = kitOwner();
       let batches = [];
       const d2 = document.createElement("dialog");
       d2.className = "lh-dialog inv-dlg";
       d2.innerHTML = `
         <form class="lh-form" novalidate>
-          <div class="lh-dialog-head"><h3>A batch that's no longer in stock</h3>
+          <div class="lh-dialog-head"><h3>A batch that's no longer in stock or in the kit</h3>
             <p>Used on ${esc(niceDay(date))}. Enter it as it's written on the paper. The portal checks what happened to that batch.</p></div>
           <label class="lh-field"><span class="lh-label">Product</span>
             <select class="fb-select" name="pid"><option value="">Choose…</option>${ps.map((p) =>
-              `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></label>
+              `<option value="${esc(p.id)}">${esc(p.name)}${isKitProduct(p) ? " (kit)" : ""}</option>`).join("")}</select></label>
           <label class="lh-field" data-role="lotrow" hidden><span class="lh-label">Batch</span><select class="fb-select" name="lot"></select></label>
           <div class="inv-two" data-role="typed" hidden>
             <label class="lh-field"><span class="lh-label">Batch number</span><input class="fe-input" name="batch" maxlength="40" autocomplete="off" /></label>
@@ -823,7 +891,7 @@ export function mountPaperRecords(container, { staff } = {}) {
           </div>
           <div class="inv-two">
             <label class="lh-field"><span class="lh-label" data-role="qtylbl">How many</span>
-              <input class="fe-input" name="qty" type="number" min="1" max="20" step="1" value="1" inputmode="numeric" /></label>
+              <input class="fe-input" name="qty" type="number" min="0" max="20" step="1" value="1" inputmode="decimal" /></label>
             <label class="lh-field" data-role="doserow" hidden><span class="lh-label" data-role="doselbl">Amount given</span>
               <input class="fe-input" name="dose" type="number" min="0" step="any" inputmode="decimal" /></label>
           </div>
@@ -842,19 +910,33 @@ export function mountPaperRecords(container, { staff } = {}) {
       const $2 = (r) => d2.querySelector(`[data-role="${r}"]`);
       const prod = () => ps.find((p) => p.id === fe.pid.value) || null;
       const syncTyped = () => { $2("typed").hidden = fe.lot.value !== "typed"; };
+      const typedOpt = '<option value="typed">Not listed: type it in</option>';
 
       fe.pid.addEventListener("change", async () => {
         const p = prod();
+        const kit = !!p && isKitProduct(p);
         $2("lotrow").hidden = !p;
-        $2("doserow").hidden = !(p && p.doseUnit);
+        $2("doserow").hidden = !(p && p.doseUnit && !kit);
         if (!p) return;
-        $2("qtylbl").textContent = `How many (${p.stockUnit})`;
+        $2("qtylbl").textContent = kit ? `${p.doseUnit} used` : `How many (${p.stockUnit})`;
         $2("doselbl").textContent = `Amount given (${p.doseUnit})`;
+        fe.qty.step = kit ? "0.5" : "1";
+        fe.qty.max = kit ? "1000" : "20";
         fe.lot.innerHTML = "<option>Loading…</option>";
-        try { batches = (await batchesEver(p.id)).filter((l) => l.qty === 0); } catch { batches = []; }
-        fe.lot.innerHTML = batches.map((l, i) => `<option value="${i}">${esc(`${l.loc === "jt" ? "JT storage" : "Shelf"} · ${
-          l.batch || "No number"}${l.expiry ? ` · Exp ${niceDay(l.expiry)}` : ""} · none left`)}</option>`).join("")
-          + '<option value="typed">Not listed: type it in</option>';
+        if (kit) {
+          if (!owner) {
+            fe.lot.innerHTML = '<option value="">Choose who did the treatment first</option>';
+            return;
+          }
+          try { batches = (await kitBatchesEver(p.id)).filter((k) => k.staffUid === owner.uid && !(k.units > 0)); }
+          catch { batches = []; }
+          fe.lot.innerHTML = batches.map((k, i) => `<option value="${i}">${esc(`${owner.name}'s kit · ${k.batch || "No number"}${
+            k.expiry ? ` · Exp ${niceDay(k.expiry)}` : ""} · none left`)}</option>`).join("") + typedOpt;
+        } else {
+          try { batches = (await batchesEver(p.id)).filter((l) => l.qty === 0); } catch { batches = []; }
+          fe.lot.innerHTML = batches.map((l, i) => `<option value="${i}">${esc(`${l.loc === "jt" ? "JT storage" : "Shelf"} · ${
+            l.batch || "No number"}${l.expiry ? ` · Exp ${niceDay(l.expiry)}` : ""} · none left`)}</option>`).join("") + typedOpt;
+        }
         syncTyped();
       });
       fe.lot.addEventListener("change", syncTyped);
@@ -864,16 +946,24 @@ export function mountPaperRecords(container, { staff } = {}) {
         e.preventDefault();
         e2.hidden = true;
         const p = prod();
-        const qty = parseInt(fe.qty.value, 10);
-        const dose = p && p.doseUnit && fe.dose.value !== "" ? Math.max(0, Number(fe.dose.value) || 0) : 0;
-        let lot = null;
+        const kit = !!p && isKitProduct(p);
+        const qty = kit ? Math.round((Number(fe.qty.value) || 0) * 10) / 10 : parseInt(fe.qty.value, 10);
+        const dose = !kit && p && p.doseUnit && fe.dose.value !== "" ? Math.max(0, Number(fe.dose.value) || 0) : 0;
+        let lot = null, pick = null;
         try {
           if (!p) throw new Error("Choose the product.");
-          if (!(qty >= 1)) throw new Error("Enter how many.");
-          if (fe.lot.value === "typed") {
+          if (!(qty > 0)) throw new Error("Enter how much was used.");
+          const typed = fe.lot.value === "typed";
+          if (kit) {
+            if (!owner) throw new Error("Choose who did the treatment first. Kit products come out of their kit.");
+            if (!can("inventory.manage")) throw new Error("Recording from someone's kit needs Manage inventory access.");
+            const k = typed ? null : batches[Number(fe.lot.value)];
+            if (!typed && !k) throw new Error("Choose the batch.");
+            pick = typed ? { batch: fe.batch.value.trim(), expiry: fe.expiry.value || "" } : { batch: k.batch, expiry: k.expiry };
+            if (typed && (!pick.batch || (p.tracked && !pick.expiry))) throw new Error("Enter the batch number and expiry date from the paper.");
+          } else if (typed) {
             const b = fe.batch.value.trim();
             if (p.tracked && (!b || !fe.expiry.value)) throw new Error("Enter the batch number and expiry date from the paper.");
-            // A typed batch the inventory had (any capitals or spacing) is that batch
             const all = await batchesEver(p.id);
             lot = all.find((l) => normBatch(l.batch) === normBatch(b) && (!fe.expiry.value || l.expiry === fe.expiry.value))
               || { id: "", loc: "shelf", batch: b, expiry: fe.expiry.value || "", qty: 0 };
@@ -885,10 +975,31 @@ export function mountPaperRecords(container, { staff } = {}) {
         } catch (ex) { e2.textContent = ex.message; e2.hidden = false; return; }
 
         const btn = form.querySelector('[type="submit"]');
+        const reset = () => { btn.disabled = false; btn.textContent = "Add"; };
         btn.disabled = true;
         btn.textContent = "Checking…";
         try {
-          const why = await whyEmpty(p, lot, qty, date);
+          let why;
+          if (kit) {
+            why = await whyNotInKit(p, owner, pick.batch, pick.expiry, qty, date);
+            if (why.plan === "stop") { e2.textContent = why.text; e2.hidden = false; reset(); return; }
+            if (why.plan === "colleague") {
+              const o = why.other;
+              const yes = await confirmDialog({
+                title: `Take it from ${o.staffName}'s kit?`,
+                message: `${o.batch || "That batch"} is in ${o.staffName}'s kit (${o.units} ${p.doseUnit}), not ${owner.name}'s. `
+                  + `If ${owner.name} used ${o.staffName}'s vial, take it from there. Otherwise it's saved short against ${owner.name}'s kit.`,
+                confirmLabel: `Take from ${o.staffName}'s kit`, tone: "info",
+              });
+              why = yes
+                ? { ...why, kitUid: o.staffUid, ref: o.id, text: `Taken from ${o.staffName}'s kit: ${owner.name} used a vial from it.` }
+                : { ...why, plan: "short", ref: kitId(owner.uid, p.id, pick.batch, pick.expiry), batch: pick.batch, expiry: pick.expiry,
+                    text: `Saved short against ${owner.name}'s kit for the ordering team to check. Nothing goes below zero.` };
+            }
+            lot = { id: why.ref, loc: "kit", batch: why.batch, expiry: why.expiry, qty: 0 };
+          } else {
+            why = await whyEmpty(p, lot, qty, date);
+          }
           cs.extra.push({ p, lot, qty, dose, ...why });
           d2.close();
           drawExtra();
@@ -896,8 +1007,7 @@ export function mountPaperRecords(container, { staff } = {}) {
           console.error("Batch check failed:", ex);
           e2.textContent = "Couldn't check that batch's history. Try again.";
           e2.hidden = false;
-          btn.disabled = false;
-          btn.textContent = "Add";
+          reset();
         }
       });
     }

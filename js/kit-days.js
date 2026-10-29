@@ -154,7 +154,8 @@ export async function openKitDays({ staff, canAll = false, staffUid = "", date =
       x.batch ? `<span class="kd-tag">Batch ${esc(x.batch)}</span>` : "",
       x.status ? `<span class="kd-tag">${esc(x.status === "unconfirmed" ? "Waiting for confirmation" : x.status === "disputed" ? "Disputed" : "Confirmed")}</span>` : "",
       x.short > 0 ? `<span class="kd-tag is-warn">Saved short by ${fmt(x.short)}</span>` : "",
-      x.countsInKit === false ? `<span class="kd-tag">From ${x.from === "shelf" ? "the Shelf's" : "JT storage's"} opened vial, not a kit</span>` : "",
+      x.fromOtherKit ? '<span class="kd-tag">From a colleague\'s kit, not this one</span>'
+        : x.countsInKit === false ? `<span class="kd-tag">From ${x.from === "shelf" ? "the Shelf's" : "JT storage's"} opened vial, not a kit</span>` : "",
     ].join("");
     let main;
     if (x.kind === "use") {
