@@ -151,12 +151,11 @@ const opts = (list, cur, blank = "") => (blank ? `<option value="">${esc(blank)}
 /* ===================== Routes ===================== */
 
 export function mountProspects(container, { param = "", staff = null } = {}) {
-  if (parts[0] === "reports") { mountReports(container); return; }
   const parts = String(param || "").split("/").filter(Boolean);
+  if (parts[0] === "reports") { mountReports(container); return; }
   if (parts[0] && parts[0] !== "list") { mountProspect(container, decodeURIComponent(parts[0]), staff); return; }
   mountBoard(container, { view: parts[0] === "list" ? "list" : "board", staff });
 }
-
 /* ===================== The board and the list ===================== */
 
 async function mountBoard(container, { view, staff }) {
@@ -184,8 +183,11 @@ async function mountBoard(container, { view, staff }) {
     ["alert", all.filter((p) => notContacted(p, set)).length, `Not contacted in ${hoursOf(set)} hours`, "bad"],
     ["inbox", all.filter((p) => Date.now() - Date.parse(p.createdAt || "") < 7 * 864e5).length, "New enquiries this week", "sky"],
     ["clock", all.filter((p) => ["today", "overdue"].includes(followState(p))).length, "Follow-ups due", "amber"],
-    ["trophy", all.filter((p) => ["treated", "active"].includes(p.stage) && keyOf(p.stageAt).slice(0, 7) === month).length,
-      "Became patients this month", "green"],
+    // The date of their first treatment (from the appointment book), or when staff moved them there by hand
+    ["trophy", all.filter((p) => {
+      const d = (p.milestones || {}).treated || (["treated", "active"].includes(p.stage) ? keyOf(p.stageAt) : "");
+      return d.slice(0, 7) === month;
+    }).length, "Became patients this month", "green"],
   ];
   const srcList = [...new Set(all.map((p) => p.source).filter(Boolean))].sort();
 
