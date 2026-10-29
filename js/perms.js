@@ -4,7 +4,7 @@ import { signInWithCustomToken } from "https://www.gstatic.com/firebasejs/10.12.
 import { callApi } from "./appointments.js";
 
 export const PERM_KEYS = [
-  "menu.patients", "menu.calendar", "menu.forms", "menu.tasks",
+  "menu.patients", "menu.calendar", "calendar.billing","menu.forms", "menu.tasks",
   "patients.edit", "patients.merge", "clinical.view", "billing.view",
   "consult.record", "consult.delete", "send.patients",
   "tasks.run", "tasks.patient", "tasks.staff", "tasks.print", "tasks.history",
