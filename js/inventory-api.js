@@ -1593,6 +1593,57 @@ export async function setKitBalance({ staffUid, staffName, product, rows, note =
   return result;
 }
 
+// Admin: vials already in an injector's kit (set by hand) that were never taken off the Shelf.
+// The Shelf goes down; the kit itself doesn't change. Logged as "Taken into kit", with a matching
+// correction to the earlier "Kit set by admin", so Kit reconciliation counts the vial in once.
+export async function recordKitFromShelf({ staffUid, staffName, product, lot, vials, note = "" }, staff) {
+  if (!isKitProduct(product)) throw new Error("This product isn't carried in kits.");
+  const target = clip(staffUid, 128);
+  if (!target) throw new Error("Choose the injector.");
+  if (!lot || lot.loc !== "shelf") throw new Error("Choose a batch on the Shelf.");
+  const n = Math.max(1, parseInt(vials, 10) || 0);
+  const why = clip(note, 300);
+  if (!why) throw new Error("Add a note, e.g. Took it from the Shelf on 27 Oct; her kit was set by hand.");
+  const name = clip(staffName, 120) || "the injector";
+  const per = Number(product.dosePer) || 0;
+  const unit = product.doseUnit || "units";
+  const pRef = doc(db, "inv_products", product.id);
+  const lRef = doc(db, "inv_lots", lot.id);
+  const kRef = doc(db, "inv_kits", kitId(target, product.id, lot.batch, lot.expiry));
+
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    const pSnap = await tx.get(pRef);
+    const lSnap = await tx.get(lRef);
+    const kSnap = await tx.get(kRef);
+    if (!pSnap.exists()) throw new Error("This product no longer exists.");
+    if (!kSnap.exists()) {
+      throw new Error(`${name}'s kit doesn't have ${batchText(product, lot.batch) || "this batch"}. Choose the batch that's in their kit.`);
+    }
+    const have = lSnap.exists() ? Number(lSnap.data().qty) || 0 : 0;
+    if (have < n) throw new Error(`There ${have === 1 ? "is" : "are"} only ${plural(have, product.stockUnit)} of that batch on the Shelf.`);
+
+    // ---- Writes: the Shelf only ----
+    const s = pSnap.data().stock || {};
+    tx.update(lRef, { qty: have - n, updatedAt: serverTimestamp() });
+    tx.update(pRef, { stock: { shelf: Math.max(0, (Number(s.shelf) || 0) - n), jt: Number(s.jt) || 0 }, stockAt: serverTimestamp() });
+
+    const kitLine = { loc: "kit", batch: lot.batch, expiry: lot.expiry };
+    logMove(tx, staff, {
+      type: "kit-take", productId: product.id, productName: product.name, unit: product.stockUnit, staffUid: target,
+      lines: [{ loc: "shelf", batch: lot.batch, expiry: lot.expiry, delta: -n }, { ...kitLine, delta: n }],
+      reason: "Already in kit",
+      note: `${n * per} ${unit} into ${name}'s kit (it was set by hand earlier) · ${why}`.slice(0, 500),
+    });
+    logMove(tx, staff, {
+      type: "kit-count", productId: product.id, productName: product.name, unit, staffUid: target,
+      deltaUnits: -round1(n * per), lines: [{ ...kitLine, delta: -n }],
+      reason: "Kit set by admin",
+      note: `Correction: ${plural(n, product.stockUnit)} set by hand came from the Shelf (now recorded as taken). `
+        + `${name}'s kit itself doesn't change.`.slice(0, 500),
+    });
+  });
+}
 /* ---------- JT storage releases: an injector asks, Dr Teh approves, it moves JT → Shelf ---------- */
 
 export const REL_STATUS = { pending: "Waiting", approved: "On the Shelf", declined: "Declined", cancelled: "Cancelled" };

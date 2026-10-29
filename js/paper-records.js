@@ -1349,6 +1349,11 @@ export function mountPaperRecords(container, { staff } = {}) {
         if (r.problem) { prog.fail(); fail(r.problem); return; }
         if (!r || r.ok !== true || r.status !== "filed") { console.warn("Filing reply:", r); prog.fail(); fail(notSaved(r)); return; }
         ok = true;
+        if (r.name) {
+          f.name = r.name;                                          // renamed in Drive
+          const head = dlg.querySelector(".ppr-dlg-head strong");
+          if (head) head.textContent = r.name;
+        }
         Object.assign(f, { status: "filed", filedKind: ft.type, filedTitle: (r.filedAs && r.filedAs.title) || "", reason: "",
           note: body.note.trim(), patientId: r.patientId, patientName: r.patientName, recordDate: r.recordDate, by: r.by || "", at: r.at || "",
           productsDone: false, productsTaken: false, products: [] });
@@ -1843,3 +1848,4 @@ export function mountPaperRecords(container, { staff } = {}) {
   loadCfg().catch(() => {});
   getBaseline().then((b) => { st.baseline = b; }).catch(() => {});
 }
+

@@ -12,7 +12,7 @@ import {
   recordPatientReturn, recordSupplierReturn, markReturnCredited, listReturns, RETURN_REASONS, RETURN_STATUS,
 } from "./inventory-api.js";
 import { searchPatients } from "./task-runner.js";
-import { openSetKitDialog } from "./kit-admin.js";
+import { openSetKitDialog, openKitFromShelfDialog } from "./kit-admin.js";
 import { renderInvestigations, mountInvestigation } from "./investigations.js";
 import { mountPurchaseOrder } from "./purchase-order.js";
 import { fetchStaffList } from "./task-types.js";
@@ -246,6 +246,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       <div class="inv-tools kit-admin-bar">
         <p class="muted">Moving someone over from the old app, or their kit is wrong? Set it to what they physically have.</p>
         <span class="inv-spacer"></span>
+        <button type="button" class="ff-btn" data-act="kit-from-shelf">Already in a kit, still on the Shelf</button>
         <button type="button" class="ff-btn is-primary" data-act="set-kit">Set an injector's kit</button>
       </div>
       <div data-role="kits"></div>`;
@@ -253,8 +254,11 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   }
 
   // Injectors from the staff list, their kit records, and anyone who counted a kit in the last 30 days
-  async function openSetKit(uid = "") {
-    const btn = body.querySelector('[data-act="set-kit"]');
+  // mode "set": Set an injector's kit · "shelf": already in a kit, still on the Shelf
+  async function openSetKit(uid = "", mode = "set") {
+    const act = mode === "shelf" ? "kit-from-shelf" : "set-kit";
+    const label = mode === "shelf" ? "Already in a kit, still on the Shelf" : "Set an injector's kit";
+    const btn = body.querySelector(`[data-act="${act}"]`);
     if (btn) { btn.disabled = true; btn.textContent = "Loading…"; }
     try {
       const [kits, staffList, days] = await Promise.all([
@@ -269,12 +273,13 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       kits.forEach((k) => add(k.staffUid, k.staffName));
       counted.forEach((d) => add(d.staffUid, d.staffName));
       const injectors = [...people.values()].sort((a, b) => a.name.localeCompare(b.name, "en-AU"));
-      openSetKitDialog({ staff, injectors, products: st.products, kits, days: counted, uid, onSaved: load });
+      if (mode === "shelf") await openKitFromShelfDialog({ staff, injectors, products: st.products, kits, uid, onSaved: load });
+      else openSetKitDialog({ staff, injectors, products: st.products, kits, days: counted, uid, onSaved: load });
     } catch (err) {
-      console.error("Set kit failed to open:", err);
+      console.error("Kit window failed to open:", err);
       showToast(errText(err, "Couldn't load the kits. Try again."));
     } finally {
-      if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = "Set an injector's kit"; }
+      if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = label; }
     }
   }
   /* ---------- Stock ---------- */
@@ -2847,6 +2852,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   root.addEventListener("click", (e) => {
     if (tab === "receive" && body.contains(e.target)) return;   // the receiving screen handles its own clicks
     if (e.target.closest('[data-act="set-kit"]')) { openSetKit(); return; }
+    if (e.target.closest('[data-act="kit-from-shelf"]')) { openSetKit("", "shelf"); return; }
     if (e.target.closest('[data-act="quick"]')) { toggleQuick(); return; }
     if (e.target.closest('[data-act="quick-discard"]')) { st.qv.clear(); renderStockList(); syncQuickBar(); return; }
     const qs = e.target.closest('[data-act="quick-save"]');

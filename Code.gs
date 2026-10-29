@@ -15518,7 +15518,7 @@ function paperList_(cfg, fresh) {
     repCachePut_(PAPER_FKEY_, files, 1800);
   }
   const st = {};
-  fsListAll_(cfg, PAPER_SCANS_, ['status', 'note', 'reason', 'patientId', 'patientName', 'recordDate', 'by', 'at', 'filedAs',
+  fsListAll_(cfg, PAPER_SCANS_, ['status', 'note', 'reason', 'patientId', 'patientName', 'recordDate', 'by', 'at', 'filedAs', 'origName',
     'productsDone', 'productsTaken', 'products', 'productsAt', 'productsFor'])
     .forEach(function (d) { st[d.name.split('/').pop()] = fromFields_(d.fields || {}); });
   const linked = paperLinked_(cfg);
@@ -15533,10 +15533,12 @@ function paperList_(cfg, fresh) {
       productsDone: s.productsDone === true, productsTaken: s.productsTaken === true,
       products: Array.isArray(s.products) ? s.products.map(String) : [], productsAt: String(s.productsAt || ''),
       productsFor: String(s.productsFor || ''),
+      origName: String(s.origName || ''),
     });
   }).sort(function (a, b) { return a.created.localeCompare(b.created); });   // oldest first: work through the backlog in order
   // The same name and size as a scan already sorted: almost certainly the same file uploaded again
-  const dupKey = function (f) { return String(f.name).toLowerCase().replace(/\s+/g, ' ').trim() + '|' + f.size; };
+  // Filed scans are renamed, so they're compared by the name they arrived with
+  const dupKey = function (f) { return String(f.origName || f.name).toLowerCase().replace(/\s+/g, ' ').trim() + '|' + f.size; };
   const sorted = {};
   out.forEach(function (f) { if (f.status !== 'todo' && !sorted[dupKey(f)]) sorted[dupKey(f)] = f; });
   out.forEach(function (f) {
@@ -15648,7 +15650,14 @@ function paperMark_(cfg, body, session) {
   const path = PAPER_SCANS_ + '/' + id;
   const cur = fsGetDoc_(cfg, path) || {};
   if (cur.productsTaken === true) return { ok: true, problem: PAPER_STOCK_LOCKED_ };
-  if (cur.filedAs) paperUnfile_(cfg, cur.filedAs, session);   // no longer filed on the patient's page
+  if (cur.filedAs) {
+    paperUnfile_(cfg, cur.filedAs, session);   // no longer filed on the patient's page
+    // Back to the scanner's name, since it no longer says what it was filed as
+    if (cur.origName && f.getName() !== String(cur.origName)) {
+      try { f.setName(String(cur.origName)); paperCacheName_(id, String(cur.origName)); }
+      catch (e) { console.warn('Scan ' + id + ' name not put back: ' + e); }
+    }
+  }
   const now = new Date().toISOString();
   const who = String(session.name || '');
   const what = status === 'entered' ? 'Entered for ' + pname + ' (' + date + ')' : status === 'skip' ? 'Not a record: ' + reason
@@ -15661,7 +15670,7 @@ function paperMark_(cfg, body, session) {
     history: (Array.isArray(cur.history) ? cur.history : []).concat([{ at: now, by: who, what: what, note: note }]).slice(-30),
   });
   CacheService.getScriptCache().removeAll([PAPER_VKEY_, 'paper_linked_v1']);   // an entered scan counts as a record
-  return { ok: true, status: status, patientId: pid, patientName: pname, recordDate: date, by: who, at: now };
+  return { ok: true, status: status, patientId: pid, patientName: pname, recordDate: date, by: who, at: now, name: f.getName() };
 }
 
 /* ---------- Visits without a record ---------- */
@@ -16149,8 +16158,9 @@ function paperFileAs_(cfg, body, session) {
 
   const what = 'Filed as ' + PAPER_FILE_AS_[as].toLowerCase() + (filedAs.title ? ' (' + filedAs.title + ')' : '') +
     ' for ' + w.name + ' (' + date + ')';
+  const origName = String(cur.origName || f.getName());   // the scanner's name, kept from the first filing
   fsPatch_(cfg, path, {
-    fileId: id, fileName: f.getName(), status: 'filed', note: note, reason: '', patientId: p._id, patientName: w.name,
+    fileId: id, fileName: f.getName(), origName: origName, status: 'filed', note: note, reason: '', patientId: p._id, patientName: w.name,
     recordDate: date, filedAs: filedAs, by: who, byUid: String(session.uid || ''), at: now.toISOString(),
     productsDone: false, productsTaken: false, products: [],
     history: (Array.isArray(cur.history) ? cur.history : []).concat([{ at: now.toISOString(), by: who, what: what, note: note }]).slice(-30),
@@ -16161,8 +16171,16 @@ function paperFileAs_(cfg, body, session) {
     console.error('Paper scan ' + id + ' filed, but its status read back as ' + JSON.stringify(check && check.status));
     return { ok: true, problem: "It was added to the patient's page, but the scan's status didn't save. Try again." };
   }
-  console.log('Paper scan ' + id + ' filed as ' + as + ' for ' + w.name + ' by ' + who);
-  return { ok: true, status: 'filed', filedAs: filedAs, patientId: p._id, patientName: w.name, recordDate: date, by: who, at: now.toISOString() };
+  
+  // The file in Drive now says what it is (never stops the filing)
+  const rn = paperRename_(id, { kind: as, title: title, patientName: w.name, recordDate: date });
+  if (rn.name && rn.name !== rn.oldName) {
+    try { fsPatch_(cfg, path, { fileName: rn.name }); } catch (e) { console.warn('Scan ' + id + ' renamed, name not saved: ' + e); }
+    paperCacheName_(id, rn.name);
+  }
+  console.log('Paper scan ' + id + ' filed as ' + as + ' for ' + w.name + ' by ' + who + (rn.name ? ' → ' + rn.name : ''));
+  return { ok: true, status: 'filed', filedAs: filedAs, patientId: p._id, patientName: w.name, recordDate: date,
+    by: who, at: now.toISOString(), name: rn.name || f.getName() };
 }
 
 // Takes a filed copy off the patient's page (scans are marked deleted, like the Scanner's; records are removed)
@@ -17832,4 +17850,51 @@ function installProspectStages() {
     .forEach(function (t) { ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger('runProspectStages').timeBased().everyHours(1).create();
   prospectStagesNow();
+}
+
+// A filed scan gets a name that says what it is:
+// "2026-10-29 Lynette Jackson - Wrinkle Relaxer Treatment Record.pdf".
+// Returns { name, oldName }. Never throws: a scan that can't be renamed is still filed.
+function paperRename_(fileId, o) {
+  try {
+    const file = DriveApp.getFileById(fileId);
+    const old = file.getName();
+    const ext = (old.match(/\.[A-Za-z0-9]{2,5}$/) || [""])[0];
+    const KIND = { treatment: "Treatment record", consent: "Consent", rx: "Prescription", billing: "Billing sheet" };
+    const clean = (s) => String(s || "").replace(/[\\/:*?"<>|#%\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
+    const what = (o.kind === "rx" || o.kind === "billing") ? KIND[o.kind] : (clean(o.title) || KIND[o.kind] || "Record");
+    const base = clean(`${[o.recordDate, o.patientName].filter(Boolean).join(" ")} - ${what}`).slice(0, 150);
+    let name = base + ext;
+    if (name === old) return { name: old, oldName: old };
+
+    // Another file in the same folder already has this name: (2), (3)…
+    const parents = file.getParents();
+    if (parents.hasNext()) {
+      const folder = parents.next();
+      let n = 2;
+      while (n < 50 && paperNameTaken_(folder, name, fileId)) name = `${base} (${n++})${ext}`;
+    }
+    file.setName(name);
+    return { name, oldName: old };
+  } catch (e) {
+    console.warn(`Scan ${fileId} not renamed: ${e}`);
+    return { name: "", oldName: "" };
+  }
+}
+
+function paperNameTaken_(folder, name, exceptId) {
+  const it = folder.getFilesByName(name);
+  while (it.hasNext()) if (it.next().getId() !== exceptId) return true;
+  return false;
+}
+
+// The cached scan list shows the new name straight away (the next full read picks it up anyway)
+function paperCacheName_(id, name) {
+  try {
+    const files = repCacheGet_(PAPER_FKEY_);
+    if (!files) return;
+    let hit = false;
+    files.forEach(function (x) { if (x.id === id) { x.name = name; hit = true; } });
+    if (hit) repCachePut_(PAPER_FKEY_, files, 1800);
+  } catch (e) { /* not essential */ }
 }

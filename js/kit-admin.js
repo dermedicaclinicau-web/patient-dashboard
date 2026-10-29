@@ -1,5 +1,5 @@
 // Inventory → Kits: an admin sets an injector's kit to what they physically have
-import { setKitBalance, isKitProduct, batchName } from "./inventory-api.js";
+import { setKitBalance, isKitProduct, batchName, batchText, plural, lotId, listAllLots, recordKitFromShelf } from "./inventory-api.js";
 import { escapeHtml as esc, showToast } from "./utils.js";
 
 // injectors: [{ uid, name }]  products: listProducts()  kits: listKits() (everyone's)
@@ -137,6 +137,109 @@ export function openSetKitDialog({ staff, injectors, products, kits, days = [], 
         : (ex && ex.message) || "Couldn't save. Try again.");
       btn.disabled = false;
       btn.textContent = "Save kit";
+    }
+  });
+
+  dlg.addEventListener("close", () => dlg.remove());
+  render();
+  dlg.showModal();
+}
+
+// Vials already in an injector's kit (set by hand) that were never taken off the Shelf
+export async function openKitFromShelfDialog({ staff, injectors, products, kits, uid = "", productId = "", onSaved = () => {} }) {
+  const kitProducts = products.filter((p) => p.active && isKitProduct(p));
+  if (!kitProducts.length || !injectors.length) { showToast("No injectors or kit products found."); return; }
+  let lots;
+  try { lots = await listAllLots(); }
+  catch (ex) { console.error("Lots not loaded:", ex); showToast("Couldn't load the Shelf stock. Try again."); return; }
+
+  const dlg = document.createElement("dialog");
+  dlg.className = "lh-dialog inv-dlg kit-set-dlg";
+  dlg.innerHTML = `<form class="lh-form" novalidate>
+      <div class="lh-dialog-head">
+        <h3>Taken from the Shelf, already in their kit</h3>
+        <p>For vials you added to someone's kit by hand that are still showing on the Shelf. The Shelf goes down;
+          their kit doesn't change. It's recorded as taken into their kit.</p>
+      </div>
+      <div class="lh-two">
+        <label class="lh-field"><span class="lh-label">Injector</span>
+          <select class="fb-select" data-f="who">${injectors.map((s) =>
+            `<option value="${esc(s.uid)}"${s.uid === uid ? " selected" : ""}>${esc(s.name)}</option>`).join("")}</select></label>
+        <label class="lh-field"><span class="lh-label">Product</span>
+          <select class="fb-select" data-f="product">${kitProducts.map((p) =>
+            `<option value="${esc(p.id)}"${p.id === productId ? " selected" : ""}>${esc(p.name)}</option>`).join("")}</select></label>
+      </div>
+      <div data-role="rows"></div>
+      <label class="lh-field"><span class="lh-label">Note</span>
+        <input class="fe-input" data-f="note" maxlength="300" placeholder="e.g. Took it from the Shelf on 27 Oct; her kit was set by hand" /></label>
+      <p class="lh-error" role="alert" hidden></p>
+      <div class="lh-actions">
+        <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+        <button type="submit" class="lh-btn is-primary">Take off the Shelf</button>
+      </div>
+    </form>`;
+  document.body.appendChild(dlg);
+
+  const $ = (s) => dlg.querySelector(s);
+  const err = $(".lh-error");
+  const showErr = (m) => { err.textContent = m || ""; err.hidden = !m; };
+  const product = () => kitProducts.find((p) => p.id === $('[data-f="product"]').value);
+  const who = () => injectors.find((s) => s.uid === $('[data-f="who"]').value);
+  let rows = [];
+
+  const render = () => {
+    const p = product();
+    const s = who();
+    rows = kits.filter((k) => k.staffUid === s.uid && k.productId === p.id).map((k) => ({
+      k, lot: lots.find((l) => l.id === lotId(p.id, "shelf", k.batch, k.expiry) && l.qty > 0) || null,
+    }));
+    $('[data-role="rows"]').innerHTML = rows.length ? `<table class="inv-table kit-set-table">
+        <thead><tr><th>${esc(batchName(p))}</th><th>In ${esc(s.name)}'s kit</th><th>On the Shelf</th><th>Take off the Shelf</th></tr></thead>
+        <tbody>${rows.map((r, i) => `<tr>
+          <td>${esc(r.k.batch || "-")}${r.k.expiry ? ` <span class="muted">exp ${esc(r.k.expiry)}</span>` : ""}</td>
+          <td>${r.k.sealed} unopened${r.k.open ? ` + ${r.k.open} ${esc(p.doseUnit)}` : ""}</td>
+          <td>${r.lot ? esc(plural(r.lot.qty, p.stockUnit)) : '<span class="muted">None of this batch</span>'}</td>
+          <td>${r.lot ? `<input class="fe-input" type="number" min="0" max="${r.lot.qty}" step="1" inputmode="numeric"
+            data-i="${i}" placeholder="0" />` : ""}</td></tr>`).join("")}</tbody></table>`
+      : `<p class="inv-hint">${esc(s.name)} has none of this in their kit.</p>`;
+  };
+
+  dlg.addEventListener("change", (e) => { if (e.target.matches('[data-f="who"], [data-f="product"]')) { showErr(""); render(); } });
+  dlg.addEventListener("input", () => showErr(""));
+  $('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+
+  $("form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const p = product();
+    const s = who();
+    const work = [...dlg.querySelectorAll("[data-i]")]
+      .map((el) => ({ r: rows[+el.dataset.i], n: parseInt(el.value, 10) || 0 }))
+      .filter((w) => w.n > 0);
+    if (!work.length) { showErr("Enter how many came from the Shelf."); return; }
+    const bad = work.find((w) => w.n > w.r.lot.qty);
+    if (bad) { showErr(`Only ${plural(bad.r.lot.qty, p.stockUnit)} of ${bad.r.k.batch} on the Shelf.`); return; }
+    const note = $('[data-f="note"]').value.trim();
+    if (!note) { showErr("Add a note saying what happened."); return; }
+
+    const btn = $('[type="submit"]');
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+    let done = 0;
+    try {
+      for (const w of work) {
+        await recordKitFromShelf({ staffUid: s.uid, staffName: s.name, product: p, lot: w.r.lot, vials: w.n, note }, staff);
+        done += w.n;
+      }
+      showToast(`${plural(done, p.stockUnit)} taken off the Shelf. ${s.name}'s kit didn't change.`);
+      dlg.close();
+      onSaved();
+    } catch (ex) {
+      console.error("Kit from Shelf failed:", ex);
+      showErr((done ? `${plural(done, p.stockUnit)} done, then: ` : "") + (ex && ex.code === "permission-denied"
+        ? "Couldn't save. This needs Manage inventory access."
+        : (ex && ex.message) || "Couldn't save. Try again."));
+      btn.disabled = false;
+      btn.textContent = "Take off the Shelf";
     }
   });
 
