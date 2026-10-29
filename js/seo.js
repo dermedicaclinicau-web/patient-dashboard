@@ -245,16 +245,6 @@ export async function mountSeo(el, { param } = {}) {
   const body = $("[data-body]");
   const panel = $("[data-panel]");
 
-  const onKey = (e) => {
-    if (!document.body.contains(el.querySelector("[data-panel]"))) { document.removeEventListener("keydown", onKey); return; }
-    if (e.key === "Escape") panel.hidden = true;
-  };
-  document.addEventListener("keydown", onKey);
-
-  document.addEventListener("click", function outside(e) {
-    if (!document.body.contains(panel)) { document.removeEventListener("click", outside); return; }
-    if (!panel.hidden && !panel.contains(e.target) && !e.target.closest("[data-open]")) panel.hidden = true;
-  });
 
   function setTabs() {
     el.querySelectorAll("[data-tab]").forEach((b) => b.classList.toggle("on", b.dataset.tab === tab));
@@ -475,6 +465,17 @@ export async function mountSeo(el, { param } = {}) {
   el.addEventListener("input", (e) => {
     if (e.target.matches("[data-filter]")) { ui.filter = e.target.value; ui.limit = 100; renderTable(); }
     else if (e.target.matches("[data-hidezero]")) { ui.hideZero = e.target.checked; renderTable(); }
+  });
+
+  const onKey = (e) => {
+    if (!document.body.contains(panel)) { document.removeEventListener("keydown", onKey); return; }
+    if (e.key === "Escape") panel.hidden = true;
+  };
+  document.addEventListener("keydown", onKey);
+
+  document.addEventListener("click", function outside(e) {
+    if (!document.body.contains(panel)) { document.removeEventListener("click", outside); return; }
+    if (!panel.hidden && !panel.contains(e.target) && !e.target.closest("[data-open]")) panel.hidden = true;
   });
 
   setTabs();
