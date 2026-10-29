@@ -3385,6 +3385,8 @@ function kitFlowEvents(moves, loans, staffUid, productsById, since, until = null
   const inWin = (d) => !!d && d > since && (!until || d <= until);
   const out = [];
   moves.forEach((m) => {
+    // Already in the kit (set by hand), only taken off the Shelf later: nothing physically went into the kit
+    if (m.type === "kit-take" && m.reason === "Already in kit") return;
     // A paper record: it physically left the kit on the treatment day, so that's when it counts
     const at = KEY_RE.test(m.effectiveDate || "") ? keyDate(m.effectiveDate) : m.at;
     if ((m.staffUid || m.byUid) !== staffUid || !inWin(at) || (productId && m.productId !== productId)) return;

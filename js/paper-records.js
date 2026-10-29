@@ -1418,6 +1418,7 @@ export function mountPaperRecords(container, { staff } = {}) {
         if (r.problem) { prog.fail(); fail(r.problem); return; }
         if (!r || r.ok !== true || r.status !== status) { console.warn("Save reply:", r); prog.fail(); fail(notSaved(r)); return; }
         ok = true;
+        if (r.name) f.name = r.name;   // Drive name restored after unfiling
         Object.assign(f, { status, filedKind: "", filedTitle: "", note: extra.note || "", reason: extra.reason || "", patientId: r.patientId || "",
           patientName: r.patientName || "", recordDate: r.recordDate || "", by: r.by || "", at: r.at || "" });
         // An entered scan counts as that visit's record
