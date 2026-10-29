@@ -261,6 +261,7 @@ export async function mountSeo(el, opts = {}) {
     </div>`;
 
   const $ = (s) => el.querySelector(s);
+  const root = $(".seo");            // listeners go here, not on #content, so they're removed with the page
   const body = $("[data-body]");
   const panel = $("[data-panel]");
 
@@ -467,9 +468,9 @@ export async function mountSeo(el, opts = {}) {
 
   /* ----- events (delegated) ----- */
 
-  el.addEventListener("click", (e) => {
+  root.addEventListener("click", (e) => {
     const t = e.target.closest("[data-tab],[data-range],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage]");
-    if (!t || !el.contains(t)) return;
+    if (!t || !root.contains(t)) return;
     const ds = t.dataset;
 
     if (ds.tab !== undefined) {
@@ -499,7 +500,7 @@ export async function mountSeo(el, opts = {}) {
     }
   });
 
-  el.addEventListener("input", (e) => {
+  root.addEventListener("input", (e) => {
     if (e.target.matches("[data-filter]")) { ui.filter = e.target.value; ui.limit = 100; renderTable(); }
     else if (e.target.matches("[data-hidezero]")) { ui.hideZero = e.target.checked; renderTable(); }
   });

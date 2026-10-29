@@ -388,7 +388,7 @@ const pageAllowed = (p, param = "") => {
   if (!need) return true;
   return need === "admin" ? isAdminNow() : can(need);
 };
-const firstAllowedPage = () => ["calendar", "patients", "tasks", "recall", "inventory", "scanner", "reports", "forms", "staff", "help"].find(pageAllowed) || "";
+const firstAllowedPage = () => ["calendar", "patients", "tasks", "recall", "inventory", "scanner", "reports", "seo", "forms", "staff", "help"].find(pageAllowed) || "";
 const currentPage = () => location.hash.split("/")[1] || "";
 const currentParam = () => { try { return decodeURIComponent(location.hash.split("/").slice(2).join("/")); } catch { return ""; } };
 
