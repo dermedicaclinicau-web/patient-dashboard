@@ -9600,3 +9600,7 @@ dialog.lh-dialog.bs-dlg.is-wide { width: min(1240px, calc(100vw - 2rem)); }
 
 .ssp-stock-link { border: 0; background: none; padding: 0; font: inherit; cursor: pointer; text-decoration: underline dotted; }
 .ssp-stock-link:hover { color: #0f766e; }
+
+.sp-inv-search { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.sp-inv-search .fe-input { flex: 1; min-width: 0; }
+.sp-inv-search small { white-space: nowrap; }

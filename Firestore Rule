@@ -243,11 +243,13 @@ service cloud.firestore {
 
     function validSspProduct(d) {
       return d.keys().hasOnly(['name', 'steps', 'defaultInstruction', 'maintenanceInstruction', 'size', 'price',
-                               'details', 'shopLink', 'published', 'sheetRow',
+                               'details', 'shopLink', 'published', 'sheetRow', 'invProductId',
                                'createdAt', 'createdBy', 'updatedAt', 'updatedBy', 'updatedByUid'])
         && d.name is string && d.name.size() > 0 && d.name.size() <= 150
         && d.steps is list && d.steps.size() <= 7
-        && d.published is bool;
+        && d.published is bool
+        && d.get('invProductId', '') is string
+        && d.get('invProductId', '').size() <= 80;
     }
 
     // ===================== Inventory =====================

@@ -74,9 +74,14 @@ export function createProductsConfig(host, { staff = null, isAdmin = false, sele
             <textarea class="fe-input" name="details" rows="4" maxlength="3000">${esc(p.details)}</textarea></label>
           <label class="sp-f"><span>Shop link</span>
             <input class="fe-input" name="shopLink" type="url" maxlength="500" placeholder="https://…" value="${esc(p.shopLink)}" /></label>
-          <label class="sp-f"><span>Inventory product <small>(for the Shelf stock in the Skin Script builder)</small></span>
-            <select class="fb-select" name="invProductId" data-role="inv"><option value="${esc(p.invProductId)}">Loading Inventory…</option></select>
-            <small class="fe-note" data-role="invnote"></small></label>
+          <div class="sp-f"><span>Inventory product <small>(for the Shelf stock in the Skin Script builder)</small></span>
+            <div class="sp-inv-search">
+              <input type="search" class="fe-input" data-role="invq" placeholder="Search Inventory products…"
+                aria-label="Search Inventory products" autocomplete="off" />
+              <small class="muted" data-role="invcount"></small>
+            </div>
+            <select class="fb-select" name="invProductId" data-role="inv" aria-label="Inventory product"><option value="${esc(p.invProductId)}">Loading Inventory…</option></select>
+            <small class="fe-note" data-role="invnote"></small></div>
           <label class="fe-check"><input type="checkbox" name="published"${p.published ? " checked" : ""} /> Show in the Skin Script builder</label>
         </fieldset>
         <p class="lh-error" role="alert" hidden></p>
@@ -120,7 +125,7 @@ export function createProductsConfig(host, { staff = null, isAdmin = false, sele
       } catch (err) {
         console.error("Save product failed:", err);
         errEl.textContent = err.code === "permission-denied"
-          ? "Only admins can change products. Check the ssp_products rule has been published."
+          ? "Firestore refused the save. Either your account can't change products, or the ssp_products rule doesn't allow one of the fields (e.g. invProductId). Check the rule in Firebase."
           : err.code ? "Couldn't save. Try again." : err.message;
         errEl.hidden = false;
         btn.disabled = false;
@@ -131,20 +136,58 @@ export function createProductsConfig(host, { staff = null, isAdmin = false, sele
     if (revert) revert.addEventListener("click", () => renderForm(current || blank()));
   }
 
-  // The Inventory picker: linked product selected; otherwise says what the name match finds
+  // The Inventory picker: a search box over the list. The chosen product always stays in the list.
   function fillInv(form, p) {
     const sel = form.querySelector('[data-role="inv"]');
     const note = form.querySelector('[data-role="invnote"]');
+    const q = form.querySelector('[data-role="invq"]');
+    const count = form.querySelector('[data-role="invcount"]');
     if (!sel || !inv) return;
     if (!inv.length) {
       sel.innerHTML = `<option value="${esc(p.invProductId)}">${p.invProductId ? "Linked (Inventory couldn't be loaded)" : "Not linked"}</option>`;
       note.textContent = "Inventory couldn't be loaded, so the link can't be changed right now.";
+      if (q) q.closest(".sp-inv-search").hidden = true;
       return;
     }
+
+    const opts = inv.filter((x) => x.active || x.id === p.invProductId);
+    const low = (s) => String(s || "").toLowerCase();
+    const words = () => low(q && q.value).split(/\s+/).filter(Boolean);
+    const hit = (x, w) => w.every((t) => low(`${x.name} ${x.brand || ""} ${x.category || ""}`).includes(t));
+
+    const draw = () => {
+      const cur = sel.value;                       // the first time: the saved link (from the Loading option)
+      const w = words();
+      const matches = w.length ? opts.filter((x) => hit(x, w)) : opts;
+      const shown = matches.some((x) => x.id === cur) ? matches
+        : opts.filter((x) => x.id === cur).concat(matches);   // keep the chosen one at the top
+      sel.innerHTML = '<option value="">Not linked: match by name</option>' + shown.map((x) =>
+        `<option value="${esc(x.id)}"${x.id === cur ? " selected" : ""}>${esc(x.name)}${x.active ? "" : " (inactive)"}</option>`).join("");
+      sel.value = shown.some((x) => x.id === cur) ? cur : "";
+      if (count) count.textContent = w.length ? (matches.length ? `${matches.length} match${matches.length === 1 ? "" : "es"}` : "No matches") : "";
+      return matches;
+    };
+
+    if (q) {
+      // Searching isn't a change to the product, so it doesn't mark the form as unsaved
+      q.addEventListener("input", (e) => { e.stopPropagation(); draw(); });
+      // Enter picks the first match (and never submits the form)
+      q.addEventListener("keydown", (e) => {
+        if (e.key === "ArrowDown") { e.preventDefault(); sel.focus(); return; }
+        if (e.key !== "Enter") return;
+        e.preventDefault();
+        const first = draw()[0];
+        if (first && sel.value !== first.id) {
+          sel.value = first.id;
+          dirty = true;
+          sel.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      });
+    }
+    sel.addEventListener("change", () => { if (q && sel.value) q.value = ""; draw(); });
+
+    draw();
     const linked = p.invProductId ? inv.find((x) => x.id === p.invProductId) : null;
-    sel.innerHTML = '<option value="">Not linked: match by name</option>' +
-      inv.filter((x) => x.active || x.id === p.invProductId).map((x) =>
-        `<option value="${esc(x.id)}"${x.id === p.invProductId ? " selected" : ""}>${esc(x.name)}${x.active ? "" : " (inactive)"}</option>`).join("");
     if (p.invProductId && !linked) {
       note.textContent = "The linked Inventory product no longer exists. Choose another.";
     } else if (p.invProductId) {
@@ -156,7 +199,7 @@ export function createProductsConfig(host, { staff = null, isAdmin = false, sele
         : "No Inventory product has this name. Choose one to link it.";
     }
   }
-
+  
   async function select(id) {
     if (dirty && !(await confirmDialog({
       title: "Discard your changes?",
