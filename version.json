@@ -11,6 +11,7 @@
                   "./js/billing-check.js",
                   "./js/billing-rx-view.js",
                   "./js/billing-scans.js",
+                  "./js/billing-sheets.js",
                   "./js/booking-dialog.js",
                   "./js/calendar-badges.js",
                   "./js/calendar.js",
@@ -115,6 +116,7 @@
                   "./js/presence.js",
                   "./js/print-queue.js",
                   "./js/print-task.js",
+                  "./js/prospects.js",
                   "./js/public-form.js",
                   "./js/purchase-order.js",
                   "./js/recall-email.js",
@@ -146,6 +148,10 @@
                   "./js/scanner-review.js",
                   "./js/scanner-rx.js",
                   "./js/scanner.js",
+                  "./js/seo-audience.js",
+                  "./js/seo-health.js",
+                  "./js/seo-work.js",
+                  "./js/seo.js",
                   "./js/service-links.js",
                   "./js/settings.js",
                   "./js/shift.js",
@@ -166,6 +172,7 @@
                   "./js/ssp-products.js",
                   "./js/ssp-send.js",
                   "./js/ssp-settings.js",
+                  "./js/ssp-stock.js",
                   "./js/staff-days.js",
                   "./js/staff-details.js",
                   "./js/staff-manager.js",
@@ -197,6 +204,6 @@
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261028-092317",
-    "v":  "20261028-092317"
+    "version":  "20261029-221714",
+    "v":  "20261029-221714"
 }
