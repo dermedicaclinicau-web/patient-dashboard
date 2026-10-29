@@ -2773,7 +2773,7 @@ function sspProductsSheet_() {
 function sspImportProducts_() {
   const cfg = getConfig_();
   const rows = readRows_(sspProductsSheet_(), 8);
-  const existing = fsListAll_(cfg, 'ssp_products', ['name', 'size', 'sheetRow', 'published', 'createdAt', 'createdBy'])
+  const existing = fsListAll_(cfg, 'ssp_products', ['name', 'size', 'sheetRow', 'published', 'createdAt', 'createdBy', 'invProductId'])
     .map(function (d) { return { id: d.name.split('/').pop(), f: fromFields_(d.fields || {}) }; });
   const byKey = {};
   const byRow = {};
@@ -2804,6 +2804,7 @@ function sspImportProducts_() {
       details: String(d[6] || '').trim().slice(0, 3000),
       shopLink: String(d[7] || '').trim().slice(0, 500),
       published: hit ? hit.f.published !== false : true,
+      invProductId: hit && hit.f.invProductId ? String(hit.f.invProductId) : '',
       sheetRow: rowNum,
       createdAt: hit && hit.f.createdAt ? hit.f.createdAt : now,
       createdBy: hit && hit.f.createdBy ? hit.f.createdBy : 'Imported from product_info',

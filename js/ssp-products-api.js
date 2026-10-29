@@ -32,6 +32,7 @@ function toProduct(d) {
     details: String(x.details || ""),
     shopLink: String(x.shopLink || ""),
     published: x.published !== false,
+    invProductId: String(x.invProductId || ""),
     sheetRow: Number(x.sheetRow || 0),
     updatedAt: String(x.updatedAt || ""),
     updatedBy: String(x.updatedBy || ""),
@@ -62,6 +63,7 @@ export function cleanProduct(p) {
     details: clip(p.details, 3000).trim(),
     shopLink: clip(p.shopLink, 500).trim(),
     published: p.published !== false,
+    invProductId: /^[A-Za-z0-9_-]{1,80}$/.test(String(p.invProductId || "")) ? String(p.invProductId) : "",
   };
 }
 

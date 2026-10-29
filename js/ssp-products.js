@@ -2,15 +2,22 @@
 import { SSP_STEPS, listSspProducts, saveSspProduct, importSspProducts } from "./ssp-products-api.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
+import { listProducts } from "./inventory-api.js";
+import { inventoryMatcher } from "./ssp-stock.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const blank = () => ({
   id: "", name: "", steps: [], size: "", price: "", defaultInstruction: "", maintenanceInstruction: "",
-  details: "", shopLink: "", published: true, sheetRow: 0,
+  details: "", shopLink: "", published: true, sheetRow: 0, invProductId: "",
 });
 
-export function createProductsConfig(host, { staff = null, isAdmin = false } = {}) {
+export function createProductsConfig(host, { staff = null, isAdmin = false, selectId = null } = {}) {
+  // Inventory products, for the link picker (loaded once, in the background)
+  let inv = null;
+  const invReady = listProducts()
+    .then((l) => { inv = [...l].sort((a, b) => String(a.name).localeCompare(String(b.name), "en-AU", { numeric: true })); })
+    .catch((err) => { console.warn("Inventory products not loaded:", err); inv = []; });
   host.innerHTML = `
     <div class="sp-cfg">
       <aside class="sp-side">
@@ -67,6 +74,9 @@ export function createProductsConfig(host, { staff = null, isAdmin = false } = {
             <textarea class="fe-input" name="details" rows="4" maxlength="3000">${esc(p.details)}</textarea></label>
           <label class="sp-f"><span>Shop link</span>
             <input class="fe-input" name="shopLink" type="url" maxlength="500" placeholder="https://…" value="${esc(p.shopLink)}" /></label>
+          <label class="sp-f"><span>Inventory product <small>(for the Shelf stock in the Skin Script builder)</small></span>
+            <select class="fb-select" name="invProductId" data-role="inv"><option value="${esc(p.invProductId)}">Loading Inventory…</option></select>
+            <small class="fe-note" data-role="invnote"></small></label>
           <label class="fe-check"><input type="checkbox" name="published"${p.published ? " checked" : ""} /> Show in the Skin Script builder</label>
         </fieldset>
         <p class="lh-error" role="alert" hidden></p>
@@ -80,6 +90,7 @@ export function createProductsConfig(host, { staff = null, isAdmin = false } = {
     dirty = false;
     const form = formHost.querySelector("form");
     form.addEventListener("input", () => { dirty = true; });
+    invReady.then(() => { if (form.isConnected) fillInv(form, p); });
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const errEl = formHost.querySelector(".lh-error");
@@ -95,6 +106,7 @@ export function createProductsConfig(host, { staff = null, isAdmin = false } = {
         details: form.elements.details.value,
         shopLink: form.elements.shopLink.value,
         published: form.elements.published.checked,
+        invProductId: form.elements.invProductId.value,
       };
       if (!draft.name.trim()) { errEl.textContent = "Give the product a name."; errEl.hidden = false; return; }
       if (!draft.steps.length) { errEl.textContent = "Tick at least one step."; errEl.hidden = false; return; }
@@ -117,6 +129,32 @@ export function createProductsConfig(host, { staff = null, isAdmin = false } = {
     });
     const revert = form.querySelector('[data-act="revert"]');
     if (revert) revert.addEventListener("click", () => renderForm(current || blank()));
+  }
+
+  // The Inventory picker: linked product selected; otherwise says what the name match finds
+  function fillInv(form, p) {
+    const sel = form.querySelector('[data-role="inv"]');
+    const note = form.querySelector('[data-role="invnote"]');
+    if (!sel || !inv) return;
+    if (!inv.length) {
+      sel.innerHTML = `<option value="${esc(p.invProductId)}">${p.invProductId ? "Linked (Inventory couldn't be loaded)" : "Not linked"}</option>`;
+      note.textContent = "Inventory couldn't be loaded, so the link can't be changed right now.";
+      return;
+    }
+    const linked = p.invProductId ? inv.find((x) => x.id === p.invProductId) : null;
+    sel.innerHTML = '<option value="">Not linked: match by name</option>' +
+      inv.filter((x) => x.active || x.id === p.invProductId).map((x) =>
+        `<option value="${esc(x.id)}"${x.id === p.invProductId ? " selected" : ""}>${esc(x.name)}${x.active ? "" : " (inactive)"}</option>`).join("");
+    if (p.invProductId && !linked) {
+      note.textContent = "The linked Inventory product no longer exists. Choose another.";
+    } else if (p.invProductId) {
+      note.textContent = linked.active ? "Linked: the Shelf stock always comes from this product." : "This Inventory product is inactive. Choose the one in use.";
+    } else {
+      const m = inventoryMatcher(all, inv)(p);
+      note.textContent = m.product
+        ? `Matched by name to “${m.product.name}”. Choose it to keep them linked even if a name changes.`
+        : "No Inventory product has this name. Choose one to link it.";
+    }
   }
 
   async function select(id) {
@@ -156,7 +194,7 @@ export function createProductsConfig(host, { staff = null, isAdmin = false } = {
     if (e.target.closest('[data-act="new"]')) select("");
   });
 
-  load(true);
+  load(true, selectId);
   return { reload: () => load(true), isDirty: () => dirty };
 }
 

@@ -67,9 +67,10 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
   function stockHtml(id) {
     if (!stock) return "";
     const s = stock.get(id);
-    if (!s) {
+    if (!s || s.broken) {
       return isAdmin
-        ? '<span class="ssp-stock is-none" title="No Inventory product has this name and size">Not linked to Inventory stock</span>'
+        ? `<button type="button" class="ssp-stock is-none ssp-stock-link" data-act="link-stock" data-pid="${esc(id)}"
+            title="Choose its Inventory product in Products Config">${s ? "Linked Inventory product is missing · Fix" : "Not linked to Inventory stock · Link"}</button>`
         : "";
     }
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s.countedKey);
@@ -77,7 +78,7 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
       ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
       : "";
     const tone = s.shelf <= 0 ? " is-out" : s.reorder !== null && s.reorder !== undefined && s.shelf <= s.reorder ? " is-low" : "";
-    return `<span class="ssp-stock${tone}" title="${esc(`Inventory: ${s.name}`)}">Shelf · ${
+    return `<span class="ssp-stock${tone}" title="${esc(`Inventory: ${s.name}${s.how === "link" ? " (linked)" : " (matched by name)"}`)}">Shelf · ${
       s.shelf > 0 ? `${s.shelf} in stock` : "none in stock"}<em> (${counted ? `last counted ${esc(counted)}` : "not counted yet"})</em></span>`;
   }
 
@@ -365,6 +366,7 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
     }
     const act = e.target.closest("[data-act]");
     if (!act) return;
+    if (act.dataset.act === "link-stock") { openProductsConfig(act.dataset.pid); return; }
     if (act.dataset.act === "split") {
       if (r.split) { r.text = r.amText; r.split = false; }
       else { r.amText = r.pmText = r.text; r.split = true; }
@@ -425,7 +427,7 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
   });
 
   /* ---------- Products Config (admins) ---------- */
-  function openProductsConfig() {
+  function openProductsConfig(selectId = null) {
     const dlg = document.createElement("dialog");
     dlg.className = "lh-dialog ssp-cfg-dlg";
     dlg.innerHTML = `
@@ -433,7 +435,7 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
         <button type="button" class="lh-btn is-quiet" data-act="close">Close</button></div>
       <div data-role="cfg"></div>`;
     document.body.appendChild(dlg);
-    const cfg = createProductsConfig(dlg.querySelector('[data-role="cfg"]'), { staff, isAdmin });
+    const cfg = createProductsConfig(dlg.querySelector('[data-role="cfg"]'), { staff, isAdmin, selectId });
     const close = async () => {
       if (cfg.isDirty() && !(await confirmDialog({ title: "Discard your changes?", message: "The product you're editing hasn't been saved.", confirmLabel: "Discard changes", tone: "warning" }))) return;
       dlg.close();
