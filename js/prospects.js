@@ -79,6 +79,9 @@ function followState(p) {
 }
 // A follow-up date to start a form with: overdue ones are left blank (only today onwards can be saved)
 const fuStart = (d, fallback = "") => (d && d >= todayKey() ? d : fallback);
+// Booked, then cancelled or didn't come, and nothing booked since
+const cancelOpen = (p) => p.cancelOpen === true && OPEN.includes(p.stage);
+const cancelWord = (p) => (p.lastCancel && p.lastCancel.kind === "noshow" ? "Didn't come" : "Cancelled");
 const I = (p) => `<svg class="pr-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const IC = {
   plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
@@ -98,7 +101,7 @@ const IC = {
   chart: '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
 };
 const KIND_IC = { enquiry: "inbox", contact: "phone", text: "text", email: "mail", note: "note", stage: "flag",
-  follow: "clock", assign: "user", link: "link", edit: "note" };
+  follow: "clock", assign: "user", link: "link", edit: "note", cancel: "alert" };
 
 /* ---------- A small dialog ---------- */
 function openDialog({ title, sub = "", body, submit = "Save", onOpen, onSubmit }) {
@@ -181,6 +184,7 @@ async function mountBoard(container, { view, staff }) {
   const month = t.slice(0, 7);
   const tiles = [
     ["alert", all.filter((p) => notContacted(p, set)).length, `Not contacted in ${hoursOf(set)} hours`, "bad"],
+    ["flag", all.filter(cancelOpen).length, "Cancelled, not rebooked", "bad"],
     ["inbox", all.filter((p) => Date.now() - Date.parse(p.createdAt || "") < 7 * 864e5).length, "New enquiries this week", "sky"],
     ["clock", all.filter((p) => ["today", "overdue"].includes(followState(p))).length, "Follow-ups due", "amber"],
     // The date of their first treatment (from the appointment book), or when staff moved them there by hand
@@ -217,13 +221,13 @@ async function mountBoard(container, { view, staff }) {
     if (st.source && p.source !== st.source) return false;
     if (st.who === "me" && p.assignedToId !== me) return false;
     if (st.who === "none" && p.assignedToId) return false;
-    if (st.due && !(notContacted(p, set) || ["today", "overdue"].includes(followState(p)))) return false;
+    if (st.due && !(notContacted(p, set) || cancelOpen(p) || ["today", "overdue"].includes(followState(p)))) return false;
     if (!st.q) return true;
     const digits = st.q.replace(/\D/g, "");
     return `${p.name} ${p.email} ${p.concern} ${p.patientName || ""}`.toLowerCase().includes(st.q) ||
       (digits.length >= 3 && String(p.phoneKey || "").includes(digits));
   };
-  const urgency = (p) => (notContacted(p, set) ? 0 : followState(p) === "overdue" ? 1 : followState(p) === "today" ? 2 : 3);
+  const urgency = (p) => (notContacted(p, set) ? 0 : cancelOpen(p) ? 1 : followState(p) === "overdue" ? 2 : followState(p) === "today" ? 3 : 4);
   const byUrgency = (a, b) => urgency(a) - urgency(b) ||
     String(a.nextFollowUp || "9").localeCompare(String(b.nextFollowUp || "9")) ||
     String(b.lastEnquiryAt || "").localeCompare(String(a.lastEnquiryAt || ""));
@@ -241,6 +245,7 @@ async function mountBoard(container, { view, staff }) {
         ${p.patientId && p.linkWeak ? '<span class="pr-tag is-warn">Check match</span>' : ""}
         ${p.nextAppt && OPEN.includes(p.stage) ? `<span class="pr-tag is-pt">Booked ${esc(niceDay(p.nextAppt))}</span>` : ""}
         ${late ? '<span class="pr-tag is-bad">Not contacted</span>' : ""}
+        ${cancelOpen(p) ? `<span class="pr-tag is-bad">${cancelWord(p)}, not rebooked</span>` : ""}
         ${fs === "overdue" ? '<span class="pr-tag is-bad">Follow-up overdue</span>'
           : fs === "today" ? '<span class="pr-tag is-warn">Follow up today</span>'
           : fs === "later" ? `<span class="pr-tag">${esc(niceDay(p.nextFollowUp))}</span>` : ""}
@@ -262,7 +267,7 @@ async function mountBoard(container, { view, staff }) {
           const s = stageOf(p.stage);
           const fs = followState(p);
           return `<tr data-href="#/prospects/${enc(p.id)}">
-            <td data-label="Name"><a href="#/prospects/${enc(p.id)}"><strong>${esc(p.name)}</strong></a>${notContacted(p, set) ? ' <span class="pr-tag is-bad">Not contacted</span>' : ""}</td>
+            <td data-label="Name"><a href="#/prospects/${enc(p.id)}"><strong>${esc(p.name)}</strong></a>${notContacted(p, set) ? ' <span class="pr-tag is-bad">Not contacted</span>' : ""}${cancelOpen(p) ? ` <span class="pr-tag is-bad">${cancelWord(p)}, not rebooked</span>` : ""}</td>
             <td data-label="Stage"><span class="pr-pill is-${s.tone}">${esc(s.name)}</span></td>
             <td data-label="Interested in">${esc(p.concern || "")}</td>
             <td data-label="Source">${esc(p.source || "")}</td>
@@ -549,6 +554,8 @@ async function mountProspect(container, id, staff) {
       ${p.stage === "lost" ? `<div class="pr-banner is-lost">${I(IC.flag)}<div><strong>Lost: ${esc(p.lostReason || "")}</strong>${
         p.lostNote ? `<small>${esc(p.lostNote)}</small>` : ""}</div>${work ? '<button type="button" class="lh-btn" data-stage="contacted">Reopen</button>' : ""}</div>` : ""}
       ${late ? `<div class="pr-banner is-bad">${I(IC.alert)}<div><strong>Not contacted yet</strong><small>They enquired ${esc(ago(p.waitingSince))}.</small></div></div>` : ""}
+      ${cancelOpen(p) ? `<div class="pr-banner is-bad">${I(IC.alert)}<div><strong>${cancelWord(p)} on ${esc(fullDay(p.lastCancel.date))}, not rebooked yet</strong>${
+        p.lastCancel.svcs && p.lastCancel.svcs.length ? `<small>${esc(p.lastCancel.svcs.join(", "))}</small>` : ""}</div></div>` : ""}
       ${stepper()}
       ${work ? `<div class="pr-actions">
         ${tel ? `<a class="lh-btn" href="${esc(tel)}" data-act="call">${I(IC.phone)} Call</a>` : ""}
@@ -590,11 +597,13 @@ async function mountProspect(container, id, staff) {
                 <div class="pr-hits" data-role="hits"></div>` : ""}`}
           </section>
           ${p.patientId ? `<section class="pr-sec"><h3>${I(IC.flag)} Journey</h3>
-            ${JOURNEY.some(([k]) => (p.milestones || {})[k]) || p.nextAppt || p.lastVisit ? `<dl class="pr-journey">
+            ${JOURNEY.some(([k]) => (p.milestones || {})[k]) || p.nextAppt || p.lastVisit || p.cancels ? `<dl class="pr-journey">
               ${JOURNEY.filter(([k]) => (p.milestones || {})[k]).map(([k, l]) =>
                 `<div><dt>${esc(l)}</dt><dd>${esc(fullDay(p.milestones[k]))}</dd></div>`).join("")}
               ${p.lastVisit ? `<div><dt>Last visit</dt><dd>${esc(fullDay(p.lastVisit))}</dd></div>` : ""}
               ${p.nextAppt ? `<div><dt>Next appointment</dt><dd><strong>${esc(fullDay(p.nextAppt))}</strong></dd></div>` : ""}
+              ${p.cancels ? `<div><dt>Cancelled or didn't come</dt><dd>${p.cancels} time${p.cancels === 1 ? "" : "s"} · last ${esc(fullDay(p.lastCancel && p.lastCancel.date))}${
+                p.cancelOpen ? ' <span class="pr-tag is-bad">Not rebooked</span>' : ""}</dd></div>` : ""}
             </dl><small class="muted">From the appointment book, since they enquired. Updated after each PCN update.</small>`
               : '<p class="muted">No appointments since they enquired.</p>'}</section>` : ""}
           ${work ? `<section class="pr-sec"><h3>${I(IC.note)} Details</h3>
@@ -888,6 +897,9 @@ async function mountReports(container) {
       lost: list.filter((p) => p.stage === "lost").length,
       live: live.length, hrs: median(hrs), fast: hrs.filter((h) => h <= hoursOf(set)).length,
       appt: median(list.map(daysToAppt).filter((d) => d != null)),
+      everBooked: list.filter((p) => p._reach >= 2 || Number(p.cancels) > 0).length,
+      cancelled: list.filter((p) => Number(p.cancels) > 0).length,
+      cancelOpen: list.filter((p) => p.cancelOpen === true).length,
     };
   }
   // ▲ / ▼ against the same length of time before. pts: a change in percentage points.
@@ -981,7 +993,9 @@ async function mountReports(container) {
         ${kpi("First contact", hrsText(s.hrs), `${rate(s.fast, s.live)}% within ${hoursOf(set)} hours`, delta(s.hrs, ps && ps.hrs, "%", false))}
         ${kpi("Enquiry to first appointment", s.appt == null ? "–" : `${Math.round(s.appt)} days`, "Middle value", delta(s.appt, ps && ps.appt, "%", false))}
         ${kpi("Lost", `${rate(s.lost, s.n)}%`, lostTop ? `Mostly: ${esc(lostTop.k)}` : "None lost", delta(rate(s.lost, s.n), prev("lost"), "pts", false))}
-      </div>
+        ${kpi("Cancelled after booking", `${rate(s.cancelled, s.everBooked)}%`, `${s.cancelOpen} not rebooked`,
+          delta(rate(s.cancelled, s.everBooked), ps ? rate(ps.cancelled, ps.everBooked) : null, "pts", false))}
+        </div>
       <div class="pr-rep-grid">
         <section class="pr-panel is-wide"><h3>Enquiries by month</h3>
           <ul class="pr-legend"><li><i class="is-all"></i>Enquiries</li><li><i class="is-won"></i>Became patients</li><li><i class="is-line"></i>Booked a consultation (%)</li></ul>
@@ -1001,6 +1015,13 @@ async function mountReports(container) {
         <section class="pr-panel"><h3>How quickly they're contacted</h3>${hbars(speed.filter((x) => x.n), "No enquiries since the dashboard started.")}
           <p class="pr-note">Enquiries since the dashboard started, from the first call, text or email logged.</p></section>
         <section class="pr-panel"><h3>Why they were lost</h3>${hbars(lost, "Nobody lost in this period. 👍")}</section>
+        <section class="pr-panel"><h3>Booked, then cancelled</h3>${hbars([
+          { label: "Cancelled, then rebooked", n: list.filter((p) => Number(p.cancels) > 0 && !p.cancelOpen).length, tone: "green" },
+          { label: "Cancelled, not rebooked", n: list.filter((p) => p.cancelOpen === true && !(p.lastCancel && p.lastCancel.kind === "noshow")).length, tone: "orange" },
+          { label: "Didn't come, not rebooked", n: list.filter((p) => p.cancelOpen === true && p.lastCancel && p.lastCancel.kind === "noshow").length, tone: "slate" },
+        ].filter((x) => x.n), "No cancellations in this period. 👍")}
+          <p class="pr-note">Consultations and treatments cancelled, or not attended, after they enquired.
+            ${list.filter((p) => cancelOpen(p)).length} still open on the board to call.</p></section>
         <section class="pr-panel"><h3>What they're interested in</h3>${hbars(concerns)}</section>
         <section class="pr-panel"><h3>New or existing patients</h3>
           <div class="pr-stack">${seg(newPt, "is-new", "New to the clinic")}${seg(oldPt, "is-old", "Already patients")}${seg(none, "is-none", "Not linked to a patient yet")}</div>
@@ -1016,10 +1037,11 @@ async function mountReports(container) {
     const [a, b] = span();
     const list = cohort(a, b);
     const head = ["Name", "Enquired", "Source", "Interested in", "Stage", "Given to", "Contacts", "First contact",
-      "First appointment", "First treatment", "Active from", "Lost reason", "Already a patient"];
+      "First appointment", "First treatment", "Active from", "Lost reason", "Cancelled", "Already a patient"];
     const rows = list.map((p) => { const m = p.milestones || {}; return [p.name, p._day, p.source, p.concern, stageOf(p.stage).name,
       p.assignedToName, p.contacts || 0, p.firstContactAt ? keyOf(p.firstContactAt) : "", m.consult_booked || "", m.treated || "",
-      m.active || "", p.lostReason || "", p.wasPatient ? "Yes" : p.patientId ? "No" : ""]; });
+      m.active || "", p.lostReason || "", p.cancels ? `${p.cancels}${p.cancelOpen ? " (not rebooked)" : ""}` : "",
+      p.wasPatient ? "Yes" : p.patientId ? "No" : ""]; });
     const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
     const blob = new Blob(["\ufeff" + [head, ...rows].map((r) => r.map(q).join(",")).join("\r\n")], { type: "text/csv" });
     const link = document.createElement("a");

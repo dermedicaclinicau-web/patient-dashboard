@@ -83,7 +83,8 @@ const els = {
 
 // Raise this each time paper-records.js changes, so browsers don't keep using an old copy
 const PAPER_V = 12;
-
+// Raise this each time prospects.js changes, so browsers don't keep using an old copy
+const PROSPECTS_V = 3;
 let currentStaff = null;
 initFormPicker(els.content, { getStaff: () => currentStaff });
 initTopbar();
@@ -351,7 +352,7 @@ const PAGES = {
       (m, e) => m.mountRecallResults(e, { staff: currentStaff }))(el, param);
     return recallPage(el, param);
   },
-  prospects: lazyPage("./prospects.js", "The Prospect Dashboard",
+  prospects: lazyPage(`./prospects.js?v=${PROSPECTS_V}`, "The Prospect Dashboard",
     (m, el, param) => m.mountProspects(el, { param, staff: currentStaff })),
   settings: (el, param) => {
     const [top, sub = ""] = String(param || "").split("/");

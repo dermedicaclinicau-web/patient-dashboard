@@ -17674,31 +17674,50 @@ function prosLinkFor_(ix, p) {
 }
 
 // Consultation and treatment days for the patients in want: { patientId: { 'yyyy-MM-dd': { consult, tx, svcs, staff } } }
-function prosVisits_(ctx, ix, want) {
+// cancels (optional): filled with the appointments they cancelled or didn't come to:
+//   { patientId: { 'yyyy-MM-dd': { kind: 'cancelled' | 'noshow', svcs, staff } } }
+function prosVisits_(ctx, ix, want, cancels) {
   const out = Object.create(null);
   const keyOf = Object.create(null);
   pcnReadAppts_(ctx).forEach(function (r) {
-    if (!pcnIsDate_(r[0]) || !pcnStatusOk_(r[7], 'full')) return;   // cancelled, no-show, DNA
+    if (!pcnIsDate_(r[0])) return;
     const svc = String(r[9] == null ? '' : r[9]).trim();
-    if (!svc || REP_NOT_VISIT_.test(svc)) return;
+    if (!svc) return;
     const ptt = String(r[14] == null ? '' : r[14]).trim();
     if (!ptt) return;
     if (!(ptt in keyOf)) keyOf[ptt] = ix.find(ptt);
     const pid = keyOf[ptt];
     if (!pid || !want[pid]) return;
     const cat = String(r[13] == null ? '' : r[13]).trim();
+    const noShowSvc = REP_NOT_VISIT_.test(svc);   // "NO SHOW" typed as the service
     const consult = cat === 'Consultation New Patient' || PROS_CONSULT_RE_.test(svc);
     const tx = !consult && PROS_TX_CATS_.indexOf(cat) !== -1 && !PROS_NOT_TX_RE_.test(svc);
-    if (!consult && !tx) return;
     const dk = Utilities.formatDate(r[0], ctx.tz, 'yyyy-MM-dd');
+    const st = String(r[8] == null ? '' : r[8]).trim();
+    if (!pcnStatusOk_(r[7], 'full') || noShowSvc) {
+      // Booked, then cancelled or didn't come
+      if (!cancels || !(consult || tx || noShowSvc)) return;
+      const c = cancels[pid] || (cancels[pid] = Object.create(null));
+      const v = c[dk] || (c[dk] = { kind: 'cancelled', svcs: [], staff: '' });
+      if (/no[\s-]?show|did not (show|attend)|\bdna\b/i.test(String(r[7] || '') + ' ' + svc)) v.kind = 'noshow';
+      if (!noShowSvc && v.svcs.length < 3 && v.svcs.indexOf(svc) === -1) v.svcs.push(svc);
+      if (!v.staff && st && !SCHED_NOT_PERSON_.test(st)) v.staff = st;
+      return;
+    }
+    if (!consult && !tx) return;
     const days = out[pid] || (out[pid] = Object.create(null));
     const v = days[dk] || (days[dk] = { consult: false, tx: false, svcs: [], staff: '' });
     if (consult) v.consult = true;
     if (tx) v.tx = true;
     if (v.svcs.length < 3 && v.svcs.indexOf(svc) === -1) v.svcs.push(svc);
-    const st = String(r[8] == null ? '' : r[8]).trim();
     if (!v.staff && st && !SCHED_NOT_PERSON_.test(st)) v.staff = st;
   });
+  // Cancelled one time but came in at another that day: moved, not cancelled
+  if (cancels) {
+    Object.keys(cancels).forEach(function (pid) {
+      Object.keys(cancels[pid]).forEach(function (dk) { if (out[pid] && out[pid][dk]) delete cancels[pid][dk]; });
+    });
+  }
   return out;
 }
 
@@ -17743,9 +17762,10 @@ function prosStagesCheck_(cfg, ctx) {
   const now = new Date().toISOString();
   const ix = prosPatientIndex_(cfg);
   const list = fsListAll_(cfg, PROS_COL_, ['name', 'stage', 'stageAt', 'createdAt', 'patientId', 'phoneKey', 'emailKey',
-    'historic', 'milestones', 'nextAppt', 'lastVisit', 'patientMany', 'linkWeak', 'noAutoLink', 'wasPatient'])
+    'historic', 'milestones', 'nextAppt', 'lastVisit', 'patientMany', 'linkWeak', 'noAutoLink', 'wasPatient',
+    'cancels', 'cancelOpen', 'lastCancel', 'nextFollowUp'])
     .map(function (d) { const f = fromFields_(d.fields || {}); f._id = d.name.split('/').pop(); return f; });
-  const sum = { prospects: list.length, linked: 0, byNameOnly: 0, moved: 0, revived: 0, backOnBoard: 0, written: 0 };
+  const sum = { prospects: list.length, linked: 0, byNameOnly: 0, moved: 0, revived: 0, backOnBoard: 0, cancelled: 0, written: 0 };
 
   // 1. Who each prospect is (never linked again by itself once staff have unlinked it)
   const links = {};
@@ -17764,7 +17784,8 @@ function prosStagesCheck_(cfg, ctx) {
   });
 
   // 2. Their visits, and the stage they show
-  const visits = prosVisits_(ctx, ix, want);
+  const cancels = Object.create(null);
+  const visits = prosVisits_(ctx, ix, want, cancels);
   const order = PROS_OPEN_.concat(['active']);
   const cache = CacheService.getScriptCache();
   const writes = [];
@@ -17818,6 +17839,26 @@ function prosStagesCheck_(cfg, ctx) {
             patch.historic = false;
             sum.backOnBoard++;
           }
+        }
+      // Booked, then cancelled or didn't come
+      const cx = cancels[p._pid] || {};
+      const ck = Object.keys(cx).filter(function (k) { return k >= from; }).sort();
+      const lastC = ck[ck.length - 1] || '';
+      const rebooked = !!lastC && (!!b.next || Object.keys(days || {}).some(function (k) { return k > lastC; }));
+      const cOpen = !!lastC && !rebooked;
+      const lc = lastC ? { date: lastC, kind: cx[lastC].kind, svcs: cx[lastC].svcs } : null;
+      if (ck.length !== Number(p.cancels || 0)) patch.cancels = ck.length;
+      if (cOpen !== (p.cancelOpen === true)) patch.cancelOpen = cOpen;
+      if (JSON.stringify(lc) !== JSON.stringify(p.lastCancel || null)) patch.lastCancel = lc;
+      const seen = String((p.lastCancel && p.lastCancel.date) || '');
+      if (lastC && lastC > seen && lastC >= flowAddDaysKey_(today, -60)) {   // a new one, in the last 60 days
+        entries.push({ kind: 'cancel', what: (lc.kind === 'noshow' ? "Didn't come to their appointment on " : 'Cancelled their appointment on ') +
+          recLongDate_(lastC) + (lc.svcs.length ? ' (' + lc.svcs.join(', ') + ')' : '') + (cOpen ? ': not rebooked yet' : ': rebooked') });
+        sum.cancelled++;
+        if (cOpen && PROS_OPEN_.indexOf(String(patch.stage || p.stage || 'new')) !== -1 && !p.nextFollowUp) {
+          Object.assign(patch, { nextFollowUp: today,
+            followNote: (lc.kind === 'noshow' ? "Didn't come" : 'Cancelled') + ' on ' + recLongDate_(lastC) + ': call to rebook' });
+        }
         }
       }
     }
