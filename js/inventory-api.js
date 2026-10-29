@@ -1398,8 +1398,14 @@ export async function listKits({ mine = false } = {}) {
 }
 
 export async function listMyKitMoves(max = 30) {
-  const snap = await getDocs(query(collection(db, "inv_moves"), where("byUid", "==", uid())));
-  return snap.docs
+  const me = uid();
+  const [a, b] = await Promise.all([
+    getDocs(query(collection(db, "inv_moves"), where("byUid", "==", me))),
+    getDocs(query(collection(db, "inv_moves"), where("staffUid", "==", me))).catch(() => ({ docs: [] })),
+  ]);
+  const seen = new Set();
+  return [...a.docs, ...b.docs]
+    .filter((d) => !seen.has(d.id) && seen.add(d.id))
     .map((d) => { const x = d.data() || {}; return { id: d.id, ...x, at: toDate(x.at) }; })
     .filter((m) => /^kit-/.test(m.type) || m.type === "release")
     .sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0))
@@ -1842,7 +1848,7 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
       let taken = 0, from = l.kind === "kit" ? "kit" : (l.loc === "jt" ? "jt" : "shelf");
       if (l.kind === "kit") {
         const snap = r.ref ? kitSnaps.get(r.ref) : null;
-        if (snap && snap.exists() && snap.data().staffUid === me) {
+        if (snap && snap.exists() && snap.data().staffUid === (l.kitUid || me)) {
           const d = snap.data();
           const s = kits.get(r.ref) || { sealed: parseInt(d.sealed, 10) || 0, open: round1(d.open), dosePer: Number(d.dosePer) || 0, opened: 0 };
           while (want > s.open + 0.001 && s.sealed > 0 && s.dosePer > 0) { s.sealed -= 1; s.open = round1(s.open + s.dosePer); s.opened += 1; }
@@ -1874,7 +1880,8 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
       stockUnit: clip(l.stockUnit || "", 30),
       unit: clip(l.unit, 30), batchLabel: clip(l.batchLabel || "", 20), doseUnit: clip(l.doseUnit || "", 20),
       doseTotal: r2(rows.reduce((a, r) => a + r.dose, 0)), waste: r2(rows.reduce((a, r) => a + r.waste, 0)),
-      total, short, rows, block: l.block === true };
+      total, short, rows, block: l.block === true,
+      kitUid: l.kind === "kit" ? clip(l.kitUid || "", 128) : "" };
   });
 
   const blocked = out.find((l) => l.block && l.short > 0);
@@ -1938,6 +1945,7 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
     if (!moved.length) return;
     logMove(tx, staff, {
       ...late,
+      ...(l.kitUid && l.kitUid !== me ? { staffUid: l.kitUid } : {}),
       type: l.kind === "kit" ? "kit-use" : "use", productId: l.productId, productName: l.name, unit: l.unit,
       lines: moved.map((r) => ({ loc: r.from, batch: r.batch, expiry: r.expiry, delta: -r.taken })),
       reason: "Treatment", note: [`${patientName} · ${formName}`,
@@ -1946,7 +1954,7 @@ export async function consumeInTx(tx, { submissionId, lines, patientId, patientN
     });
   });
 
-  const saved = out.map(({ fid, block, ...l }) => ({ ...l, rows: l.rows.map(({ ref, ...r }) => r) }));
+  const saved = out.map(({ fid, block, kitUid, ...l }) => ({ ...l, rows: l.rows.map(({ ref, ...r }) => r) }));
   const isShort = saved.some((l) => l.short > 0);
   tx.set(uRef, {
     submissionId, patientId: clip(patientId, 150), patientName: clip(patientName, 150), formName: clip(formName, 150),
@@ -3320,7 +3328,7 @@ function kitFlowEvents(moves, loans, staffUid, productsById, since, until = null
   const inWin = (d) => !!d && d > since && (!until || d <= until);
   const out = [];
   moves.forEach((m) => {
-    if (m.byUid !== staffUid || !inWin(m.at) || (productId && m.productId !== productId)) return;
+    if ((m.staffUid || m.byUid) !== staffUid || !inWin(m.at) || (productId && m.productId !== productId)) return;
     const kitDelta = (m.lines || []).filter((l) => l.loc === "kit").reduce((a, l) => a + (Number(l.delta) || 0), 0);
     let units;
     if (m.type === "kit-take" || m.type === "kit-return") units = kitDelta * per(m.productId);   // vials → units

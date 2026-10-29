@@ -51,10 +51,15 @@ const RS_ICON = {
 // Shared by every Consumables field on the same form (reloaded for each new form)
 let stockJob = null;
 let stockAt = 0;
-function loadStock(force = false) {
-  if (!stockJob || force || Date.now() - stockAt > 10000) {
+let stockFor = "";   // whose kit is loaded ("" = mine)
+function loadStock(force = false, kitUid = "") {
+  if (!stockJob || force || stockFor !== kitUid || Date.now() - stockAt > 10000) {
     stockAt = Date.now();
-    stockJob = Promise.all([listProducts(), listAllLots(), listKits({ mine: true }).catch(() => []),
+    stockFor = kitUid;
+    const kitsJob = kitUid
+      ? listKits().then((ks) => ks.filter((k) => k.staffUid === kitUid))
+      : listKits({ mine: true });
+    stockJob = Promise.all([listProducts(), listAllLots(), kitsJob.catch(() => []),
       listOpenContainers().catch(() => []), listReleases().catch(() => [])])
       .then(([products, lots, kits, open, rels]) => ({ products, lots, kits, open, rels }));
     stockJob.catch(() => { stockJob = null; });
@@ -165,16 +170,22 @@ function restockDialog(p, opts) {
 
 // linked(fieldId): the current total of a marked picture / Calculation / Number on the form (or null)
 // linkLabel(fieldId): its name, shown as "Filled in from …"
-export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked = null, linkLabel = null } = {}) {
+export function mountConsumablesField(w, f, { staff, kitFor = null, onChange = () => {}, linked = null, linkLabel = null } = {}) {
   const host = w && w.querySelector("[data-cs-host]");
   if (!host) return;
-  const canKit = isInjector();
+  // kitFor: { uid, name, injector }: record from someone else's kit (Paper records). Needs Manage inventory.
+  const me = myUid();
+  const forOther = !!(kitFor && kitFor.uid && kitFor.uid !== me);
+  const kitUid = forOther ? kitFor.uid : "";
+  const yourKit = forOther ? `${kitFor.name || "their"}'s kit` : "your kit";
+  const canKit = forOther ? (kitFor.injector === true && can("inventory.manage")) : isInjector();
+  const ownKit = canKit && !forOther;   // only your own kit can be restocked from here
   const adminStore = isAdmin();
   // Stock numbers: Manage inventory (and Admins) only. Everyone else counts blind.
   const seeStock = can("inventory.manage");
   // Form Builder → Consumables → "Can use more than one batch" (on unless it's been turned off)
   const multiOf = (l) => !(l.item && l.item.multi === false);
-  const defLoc = isTeh(staff) ? "jt" : "shelf";
+  const defLoc = isTeh(forOther ? kitFor : staff) ? "jt" : "shelf";
   let stock = null, failed = false;
   // use: shared products only (null = not decided yet)
   const newRow = (preset = null) => ({ ref: "", amount: "", dose: "", auto: true, preset, use: null, finish: false, seeded: false, openId: "" });
@@ -467,7 +478,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     const cu = clinicalUnit(p);
     if (max && total > max) return `<span class="cs-warn">${fmt(total)} ${esc(cu)} is more than the ${esc(max)} allowed. Check the amount.</span>`;
     if (short > 0 && !seeStock) {   // blind: say there isn't enough, never how much there is
-      return `<span class="cs-warn">Not enough ${isKit(p) ? "in your kit" : `in ${esc(whereOf(l))}`} for this amount. ${isKit(p)
+      return `<span class="cs-warn">Not enough ${isKit(p) ? `in ${esc(yourKit)}` : `in ${esc(whereOf(l))}`} for this amount. ${isKit(p)
         ? "Press Restock to take more, otherwise it's saved and flagged."
         : f.ifShort === "block" ? "Ask the ordering team to restock before saving." : "It will be saved and flagged for the ordering team."}</span>`;
     }
@@ -504,7 +515,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     const pick = kit || p.tracked
       ? `<select class="fe-in" data-f="ref" aria-label="Batch">${src.length
           ? src.map((s) => `<option value="${esc(s.ref)}"${s.ref === r.ref ? " selected" : ""}>${esc(seeStock ? s.label : s.plain)}</option>`).join("")
-          : `<option value="">${kit ? "Nothing in your kit" : "None in stock here"}</option>`}</select>`
+          : `<option value="">${kit ? `Nothing in ${esc(yourKit)}` : "None in stock here"}</option>`}</select>`
       : `<span class="cs-src">${esc(src[0] ? (seeStock ? src[0].label : src[0].plain) : "")}</span>`;
     const del = l.rows.length > 1 ? '<button type="button" class="hx-x" data-cs="remove-row" aria-label="Remove">×</button>' : "<span></span>";
     if (dosed(p)) {
@@ -595,7 +606,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
   const leftText = (p, src) => `${availText(p, { avail: src.reduce((a, s) => a + s.avail, 0) })} left`;
 
   function cardsHtml(l, p, src) {
-    if (!src.length) return `<p class="cs-none">${isKit(p) ? "Nothing in your kit" : `None in ${esc(whereOf(l))}`}</p>`;
+    if (!src.length) return `<p class="cs-none">${isKit(p) ? `Nothing in ${esc(yourKit)}` : `None in ${esc(whereOf(l))}`}</p>`;
     const used = new Set(l.rows.map((r) => r.ref));
     const max = Math.max(1, ...src.map((s) => s.avail));
     return `<div class="cs-cards">${src.map((s) => {
@@ -615,7 +626,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     const cu = clinicalUnit(p);
     const opt = (r) => (src.length
       ? src.map((x) => `<option value="${esc(x.ref)}"${x.ref === r.ref ? " selected" : ""}>${esc(seeStock ? x.label : x.plain)}</option>`).join("")
-      : `<option value="">${isKit(p) ? "Nothing in your kit" : "None in stock here"}</option>`);
+      : `<option value="">${isKit(p) ? `Nothing in ${esc(yourKit)}` : "None in stock here"}</option>`);
     return `<table class="cs-table"><thead><tr><th>${esc(batchName(p))}</th><th>Expiry</th><th>${esc(cu)} used</th>${
       dz ? `<th>${esc(unitPlural(p.stockUnit))} opened</th>` : ""}<th></th></tr></thead><tbody>${l.rows.map((r, j) => {
       const s = src.find((x) => x.ref === r.ref);
@@ -645,15 +656,17 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
     const rawKit = isKitProduct(p);
     if (kit && !canKit) {
       return `<div class="cs-line" data-i="${i}"><div class="cs-head"><strong>${esc(p.name)}${req}</strong></div>
-        <p class="fe-help">${esc(p.name)} comes from injectors' own kits. Ask an Admin to give you kit access in Staff.</p></div>`;
+        <p class="fe-help">${esc(p.name)} comes from injectors' own kits. ${forOther
+          ? `${esc(kitFor.name || "This clinician")} doesn't carry a kit (Staff → Injector), or you need Manage inventory access.`
+          : "Ask an Admin to give you kit access in Staff."}</p></div>`;
     }
     const src = sources(l);
     const info = kit
-      ? `${fmt(stock.kits.filter((k) => k.productId === p.id).reduce((a, k) => a + kitUnits(k), 0))} ${p.doseUnit} in your kit`
+      ? `${fmt(stock.kits.filter((k) => k.productId === p.id).reduce((a, k) => a + kitUnits(k), 0))} ${p.doseUnit} in ${yourKit}`
       : `${whereOf(l)}: ${plural(p.stock[l.loc], p.stockUnit)}${dosed(p) ? ` · ${fmt(p.dosePer)} ${p.doseUnit} each` : ""}`;
     // Kit products: where it comes from is changed with Restock. Other products: Shelf or JT storage.
     const locSel = rawKit
-      ? `<small class="cs-from">${esc(l.loc === "kit" ? "From your kit" : `From ${whereOf(l)} · opened ${p.stockUnit}`)}${
+      ? `<small class="cs-from">${esc(l.loc === "kit" ? `From ${yourKit}` : `From ${whereOf(l)} · opened ${p.stockUnit}`)}${
           pendingRel(p) ? ' · <span class="cs-pending">JT storage release requested · waiting for approval</span>' : ""}</small>`
       : `<select class="fe-in cs-loc" data-f="loc" aria-label="Taken from">
           <option value="shelf"${l.loc === "shelf" ? " selected" : ""}>Shelf</option>
@@ -680,7 +693,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
           <strong>${esc(p.name)}${req}</strong>${linkNoteHtml(l)}
           ${locSel}
           ${rawKit || seeStock ? `<button type="button" class="cs-restock" data-cs="restock" title="${rawKit
-            ? "Take more into your kit" : "Ask the ordering team for more"}">Restock${seeStock ? ` · ${esc(leftText(p, src))}` : ""}</button>` : ""}
+            ? (forOther ? "Use the Shelf or JT storage instead" : "Take more into your kit") : "Ask the ordering team for more"}">Restock${seeStock ? ` · ${esc(leftText(p, src))}` : ""}</button>` : ""}
           ${l.extra ? '<button type="button" class="hx-x" data-cs="remove-line" aria-label="Remove">×</button>' : ""}
         </div>
         ${cardsHtml(l, p, src)}
@@ -733,7 +746,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
 
   async function refresh(force = false) {
     try {
-      stock = await loadStock(force);
+      stock = await loadStock(force, kitUid);
       failed = false;
     } catch (err) {
       console.error("Stock load failed:", err);
@@ -745,7 +758,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
   }
   const onStock = () => {
     if (!host.isConnected) { document.removeEventListener("cs:stock", onStock); return; }
-    loadStock().then((s) => { stock = s; draw(); }).catch(() => {});
+    loadStock(false, kitUid).then((s) => { stock = s; draw(); }).catch(() => {});
   };
   document.addEventListener("cs:stock", onStock);
 
@@ -914,6 +927,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
 
   // Where Restock can take a kit product from, for this person
   function restockOptions(l) {
+    const canKit = ownKit;
     const p = rawProduct(l);
     const shelfN = num(p.stock && p.stock.shelf);
     const jtN = num(p.stock && p.stock.jt);
@@ -949,6 +963,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
 
   // Restock: kit products → the overlay; everything else → an order request
   async function restock(l) {
+    const canKit = ownKit;
     const p0 = rawProduct(l);
     if (!p0) return;
     if (!isKitProduct(p0)) { await orderMore(l); return; }
@@ -1097,6 +1112,7 @@ export function mountConsumablesField(w, f, { staff, onChange = () => {}, linked
       unit: kit ? p.doseUnit : p.stockUnit, doseUnit: kit || dosed(p) ? p.doseUnit : "",
       dosePer: dosed(p) ? p.dosePer : 0, batchLabel: batchName(p),
       loc: kit ? "kit" : l.loc, block: f.ifShort === "block", rows,
+      ...(kit ? { kitUid: kitUid || me } : {}),
     };
   }).filter(Boolean));
 

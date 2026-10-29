@@ -612,17 +612,17 @@ export function mountPaperRecords(container, { staff } = {}) {
       const s = staffList.find((x) => x.id === sel.value);
       return s ? s.name : "";
     };
-    // Whose kit and kit checks the products field shows: the chosen clinician, or you
-    // (if nobody is chosen, or it's someone not on the staff list)
+    // The chosen clinician, for their kit. null = you (nobody chosen, or someone not on the staff list)
     const kitOwner = () => {
       const s = staffList.find((x) => x.id === whoId());
-      return s ? { ...staff, uid: s.id, name: s.name, role: s.role, injector: s.injector === true } : staff;
+      return s ? { uid: s.id, name: s.name, injector: s.injector === true } : null;
     };
+    const ownerUid = () => (kitOwner() || { uid: staff.uid }).uid;
     function syncWho() {
       const sel = whoSel();
       // A different clinician: the products field is rebuilt for them (their kit, their kit checks)
-      if (typeof cs !== "undefined" && cs.owner !== kitOwner().uid && !f.productsDone && cs.fields.length) {
-        cs.owner = kitOwner().uid;
+      if (typeof cs !== "undefined" && cs.owner !== ownerUid() && !f.productsDone && cs.fields.length) {
+        cs.owner = ownerUid();
         cs.counted = {};
         drawProducts();
         drawType();
@@ -726,9 +726,9 @@ export function mountPaperRecords(container, { staff } = {}) {
           <div data-role="extra"></div></div>
         <div data-role="cs-notes"></div>
       </div>`;
-      const owner = kitOwner();
-      cs.owner = owner.uid;
-      cs.fields.forEach((x) => mountConsumablesField(prodEl.querySelector(`[data-csf="${CSS.escape(x.id)}"]`), x, { staff: owner, onChange: noteCsSoon }));
+      cs.owner = ownerUid();
+      cs.fields.forEach((x) => mountConsumablesField(prodEl.querySelector(`[data-csf="${CSS.escape(x.id)}"]`), x,
+        { staff, kitFor: kitOwner(), onChange: noteCsSoon }));
       noteCs();
       drawExtra();
     }
@@ -755,7 +755,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       if (!date || !plan.length || beforeStock(date)) { host.innerHTML = ""; return; }
       const my = ++csSeq;
       let counted;
-      try { counted = await countsAfter(date, kitOwner().uid); }
+      try { counted = await countsAfter(date, ownerUid()); }
       catch (ex) {
         console.warn("Counts not checked:", ex);
         if (my === csSeq) { cs.counted = null; host.innerHTML = '<p class="ppr-cs-note is-warn">Couldn\'t check the stock counts since then. Check your connection.</p>'; }
@@ -766,7 +766,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       host.innerHTML = plan.map((l) => {
         const k = `${l.productId}|${l.loc}`;
         const c = counted[k];
-        const where = esc(LOC_NAME[l.loc] || "Stock");
+        const where = esc(l.loc === "kit" && kitOwner() ? `${kitOwner().name}'s kit` : LOC_NAME[l.loc] || "Stock");
         if (c && c.adjusted) {
           return `<div class="ppr-cs-note"><span><strong>${esc(l.name)}</strong>: ${where} was counted on ${esc(niceDay(c.adjDate))},
             after this treatment, and the shortfall was accepted. The digital count already has it off, so it's noted on the record only.</span>
