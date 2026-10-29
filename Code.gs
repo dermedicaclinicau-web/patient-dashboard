@@ -2586,6 +2586,7 @@ function handleBillingSheets_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
   const op = String(body.op || '');
+  if (!can_(session, 'calendar.billing')) return { ok: false, error: 'FORBIDDEN' };
   if (op === 'next') {
     if (!can_(session, 'menu.calendar')) return { ok: false, error: 'FORBIDDEN' };
     try { return bsNextVisits_(body); }
@@ -3395,6 +3396,7 @@ const PERMS_ = [
   ['menu.patients', 'Menus', 'Patient List'],
   ['menu.calendar', 'Menus', 'Calendar'],
   ['calendar.book', 'Menus', 'Calendar: add last-minute bookings (until the next Day Sheet upload)'],
+  ['calendar.billing', 'Menus', 'Calendar: print billing sheets'],
   ['menu.forms', 'Menus', 'Form Builder (see forms)'],
   ['menu.tasks', 'Menus', 'Task Manager'],
   ['patients.edit', 'Patients', 'Add and edit patient details'],

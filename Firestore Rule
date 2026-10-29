@@ -718,19 +718,25 @@ match /inv_count_drafts/{id} {
     match /form_settings/billing_sheet {
       allow read: if isStaff();
       allow write: if can('forms.build')
-        && request.resource.data.keys().hasOnly(['headerNote', 'font', 'fontSize', 'serviceRows', 'sspRows', 'nextRows',
+        && request.resource.data.keys().hasOnly(['headerNote', 'font', 'fontSize', 'serviceRows', 'sspRows', 'sspTotal', 'nextRows',
              'showSsp', 'fillAmPm', 'showPayment', 'showNext', 'showTicks',
-             'buyingLabel', 'sideLabel', 'buyingLabel', 'consumablesLabel', 'payLine', 'ticks', 'sizes', 'updatedAt', 'updatedBy', 'updatedByUid'])
+             'buyingLabel', 'sideLabel', 'consumablesLabel', 'payLine', 'ticks', 'rxProducts', 'sizes',
+             'updatedAt', 'updatedBy', 'updatedByUid'])
         && request.resource.data.get('sizes', {}) is map
         && request.resource.data.get('sizes', {}).size() <= 20
         && request.resource.data.fontSize is int && request.resource.data.fontSize >= 7 && request.resource.data.fontSize <= 12
         && request.resource.data.serviceRows is int && request.resource.data.serviceRows <= 12
         && request.resource.data.sspRows is int && request.resource.data.sspRows <= 12
+        && request.resource.data.get('sspTotal', 0) is int
+        && request.resource.data.get('sspTotal', 0) >= 0 && request.resource.data.get('sspTotal', 0) <= 20
         && request.resource.data.nextRows is int && request.resource.data.nextRows <= 10
         && request.resource.data.ticks is list && request.resource.data.ticks.size() <= 6
+        && request.resource.data.get('rxProducts', []) is list
+        && request.resource.data.get('rxProducts', []).size() <= 60
         && request.resource.data.updatedByUid == request.auth.uid;
     }
-    // Completed forms. Saved once and never edited or deleted (clinical records).
+    
+        // Completed forms. Saved once and never edited or deleted (clinical records).
     // Exceptions, both for staff who can move records and both logged: fixing which card and treatment a form
     // is listed under (Type & category), and correcting its date (Edit date). Answers and signatures stay locked.
     // The send log ('deliveries') is added by Apps Script only, never by the browser.

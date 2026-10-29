@@ -666,6 +666,7 @@ const EDIT_CSS = `
 /* ===================== Calendar → Print billing sheets ===================== */
 
 export function openBillingSheets({ dateKey, appts, staff = null }) {
+  if (!can("calendar.billing")) { showToast("Only Admins can print billing sheets for now."); return; }
   const visits = visitsOfDay(appts).sort(byStaffThenTime);
   if (!visits.length) { showToast("Nobody is booked on this day."); return; }
   const day = keyDate(dateKey);

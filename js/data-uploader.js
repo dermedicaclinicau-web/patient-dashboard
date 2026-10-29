@@ -55,8 +55,22 @@ const KINDS = [
 /* ---------- Appointment notes ---------- */
 // Timely puts several kinds of notes in one cell: "Alerts: … Appointment notes: … Customer notes: …".
 // Only the Appointment notes part is kept. Alerts and Customer notes never leave this computer.
-const NOTE_LABELS = ["Alerts", "Appointment notes", "Customer notes", "Booking notes", "Customer alerts", "Medical notes", "Internal notes"];
-const NOTE_HEAD = new RegExp(`(^|[\\s,;.])(${NOTE_LABELS.map((l) => l.replace(/ /g, "\\s+")).join("|")})\\s*:`, "g");
+// Every heading Timely can put in the notes cell. Only "Appointment notes" is kept; the others just mark where it ends.
+const NOTE_LABELS = [
+  "Alerts", "Appointment notes", "Booking notes", "Medical notes", "Internal notes",
+  "Customer notes", "Customer alerts", "Customer address", "Customer phone", "Customer mobile", "Customer email",
+  "Customer details", "Customer birthday", "Customer date of birth", "Customer DOB", "Customer gender",
+  "Customer tags", "Customer referral", "Customer referred by", "Customer occupation", "Customer company",
+];
+// Each heading as Timely writes it ("Customer address"), in title case ("Customer Address") or in capitals.
+// The first letter is always a capital, so ordinary words in a note ("see alerts:") aren't taken as headings.
+const NOTE_FORMS = [...new Set(NOTE_LABELS.flatMap((l) => [
+  l,
+  l.replace(/\b[a-z]/g, (c) => c.toUpperCase()),
+  l.toUpperCase(),
+]))].sort((a, b) => b.length - a.length);   // longest first, so "Customer date of birth" isn't cut short
+const NOTE_HEAD = new RegExp(`(^|[\\s,;.])(${NOTE_FORMS
+  .map((l) => l.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+")).join("|")})\\s*:`, "g");
 const NOTE_ANY = new RegExp(NOTE_HEAD.source);   // the same, for a yes/no test
 
 function tidyNote(t) {
