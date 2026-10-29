@@ -204,7 +204,7 @@ service cloud.firestore {
     // Specialist Bank: everyone can read, add and correct; archiving needs Form Builder access
     match /specialists/{id} {
       function canBuild() {
-        return request.auth.token.get('perms', []).hasAny(['forms.build']);
+        return can('forms.build');
       }
       function validSpecialist(d) {
         return d.keys().hasOnly(['name', 'nameKey', 'speciality', 'practice', 'phone', 'email', 'address', 'notes', 'active',
@@ -1502,6 +1502,16 @@ match /inv_count_drafts/{id} {
       allow write: if can('seo.manage');
     }
     
+        // Prospect Dashboard: prospects and their settings (written by Apps Script only)
+    match /prospects/{id} {
+      allow read: if can('menu.prospects');
+      allow write: if false;
+    }
+    match /prospect_settings/{id} {
+      allow read: if can('menu.prospects');
+      allow write: if false;
+    }
+
     // ===================== Safety net =====================
     // Anything not allowed by a rule above stays locked
     // (this includes staff_roles and staff_audit, which only Apps Script writes)

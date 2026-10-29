@@ -57,6 +57,7 @@ function doPost(e) {
     if (body.action === 'sms') return json_(handleSms_(body));
     if (body.action === 'marketingPublic') return json_(handleMarketingPublic_(body)); // the unsubscribe page (no login)
     if (body.action === 'publicForm') return json_(handlePublicForm_(body)); // a patient's online form (no login)
+    if (body.action === 'prospects') return json_(handleProspects_(body));
 
     const pin = String(body.pin || '').trim();
 
@@ -77,7 +78,7 @@ function doPost(e) {
       staffPhoto: staff.photo,
       staffEmail: staff.email,
       injector: staff.injector === true,
-      perms: effectivePerms_(staff),
+      perms: /^admin$/i.test(String(staff.role || '')) ? [] : effectivePerms_(staff),   // Admins have everything anyway
     });
 
     const session = createSession_(staff);
@@ -2577,6 +2578,15 @@ function handlePrintPdf_(body) {
   });
   cache.put(rlKey, String(sentThisHour + 1), 3600);
   console.log('PDF "' + fileName + '" sent to the printer by ' + session.name);
+  // Task history: who sent what to the printer, and when
+  try {
+    commitWrites_(cfg, [updateWrite_(cfg, 'task_runs/run_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20), {
+      taskId: '', taskName: 'Print: ' + fileName.replace(/\.pdf$/i, ''), category: 'print',
+      patientId: '', patientName: '', recipients: [{ name: 'Clinic printer', email: to }], cc: '',
+      subject: fileName.replace(/\.pdf$/i, ''), html: '<p>Sent to the clinic printer.</p>', attachments: [fileName],
+      sentAt: new Date().toISOString(), sentBy: String(session.name || ''), sentByUid: String(session.uid || ''),
+    })]);
+  } catch (e) { console.warn('Printed, but the history log failed: ' + e); }
   return { ok: true };
 }
 // ===================== Calendar → Print billing sheets → Email =====================
@@ -3451,6 +3461,9 @@ const PERMS_ = [
   ['menu.seo',   'SEO', 'SEO menu (see search performance, pages and site health)'],
   ['seo.work',   'SEO', 'Work SEO opportunities and log site changes'],
   ['seo.manage', 'SEO', 'SEO settings: topics, key pages, compliance words'],
+  ['menu.prospects', 'Prospects', 'Prospect Dashboard (see prospects)'],
+  ['prospects.work', 'Prospects', 'Work prospects: add, contact, follow up and move them along'],
+  ['prospects.manage', 'Prospects', 'Prospect settings: who is told, sharing out and reasons'],
 ];
 
 const PERMS_ALL_ = PERMS_.map(function (p) { return p[0]; });
@@ -3464,7 +3477,8 @@ const ROLE_DEFAULTS_ = {
     'tasks.patient', 'tasks.staff', 'tasks.print', 'tasks.history',
     'menu.inventory', 'inventory.view', 'inventory.request', 'inventory.receive', 'inventory.order', 'inventory.count', 'menu.reports',
     'menu.scanner', 'scanner.billing', 'scanner.docket',
-    'dash.attention', 'dash.appts', 'dash.tasks', 'dash.requests', 'dash.overview', 'recall.work'],
+    'dash.attention', 'dash.appts', 'dash.tasks', 'dash.requests', 'dash.overview', 'recall.work',
+    'menu.prospects', 'prospects.work'],
 };
 
 
@@ -3606,7 +3620,7 @@ function staffMe_(session) {
   try { s = getStaffDocs_().filter(function (x) { return x.id === session.uid; })[0]; }
   catch (e) { console.warn('Access check skipped: ' + e); return { ok: false, error: 'BUSY' }; }
   if (!s) return { ok: false, error: 'UNAUTHORIZED' };
-  const perms = effectivePerms_(s);
+  const perms = /^admin$/i.test(String(s.role || '')) ? [] : effectivePerms_(s);   // Admins have everything anyway
   const token = createCustomToken_(s.id, {
     staffName: s.name, staffRole: s.role, staffPhoto: s.photo, staffEmail: s.email,
     injector: s.injector === true, perms: perms,
@@ -4860,6 +4874,8 @@ function runNotifications() {
   try { eodReminders_(cfg, now); } catch (e) { console.error('End of day reminders: ' + (e && e.stack ? e.stack : e)); }
   try { recallReplies_(cfg); } catch (e) { console.error('Recall replies: ' + (e && e.stack ? e.stack : e)); }
   try { scanJobsSweep_(cfg); } catch (e) { console.error('Scan jobs: ' + (e && e.stack ? e.stack : e)); }
+  try { prosImport_(cfg, 30, 14); } catch (e) { console.error('Prospect emails: ' + (e && e.stack ? e.stack : e)); }
+  try { prosDaily_(cfg, now); } catch (e) { console.error('Prospect reminders: ' + (e && e.stack ? e.stack : e)); }
 }
 
 // Run ONCE from the editor to start notifications
@@ -16856,4 +16872,595 @@ function paperWhy() {
       f.patientName || '', f.by || ''].join(' | '));
   });
   console.log(files.length + ' file(s) with that name');
+}
+
+// ===================== Prospect Dashboard =====================
+// People who've enquired but aren't patients yet: prospects/{id}. Web form emails to info@ ("Att. Prospect Team …")
+// are imported every 5 minutes (runNotifications); staff add the others by hand. Every change goes through
+// handleProspects_, so it's logged on the prospect. Only Apps Script writes prospects.
+
+const PROS_COL_ = 'prospects';
+const PROS_SET_ = 'prospect_settings/config';
+const PROS_MAIL_ = 'prospect_mail';                    // one per imported email, so none is read twice
+const PROS_LABEL_ = 'Portal-prospect-imported';
+const PROS_SUBJECT_RE_ = /^\s*att\.?\s*prospect\s*team\b/i;
+const PROS_STAGES_ = ['new', 'contacted', 'consult_booked', 'consulted', 'tx_booked', 'treated', 'active', 'lost'];
+const PROS_OPEN_ = ['new', 'contacted', 'consult_booked', 'consulted', 'tx_booked', 'treated'];
+const PROS_STAGE_NAME_ = {
+  new: 'New enquiry', contacted: 'Contacted', consult_booked: 'Consultation booked', consulted: 'Consulted',
+  tx_booked: 'Treatment booked', treated: 'Treated', active: 'Active patient', lost: 'Lost',
+};
+const PROS_SOURCES_ = ['Web form', 'Phone call', 'Walk-in', 'Online chat', 'Instagram', 'Facebook', 'Referral', 'Other'];
+const PROS_LOST_ = ['Too expensive', 'Went elsewhere', 'No response', 'Not suitable', 'Just browsing', 'Other'];
+const PROS_OUTCOMES_ = { spoke: 'Spoke to them', no_answer: 'No answer', voicemail: 'Left voicemail', met: 'Met in clinic', note: 'Note' };
+
+/* ---------- Small helpers ---------- */
+
+// "0402 468 467", "+61402468467", "402468467" → "0402468467" (landlines too); "" if it isn't a phone number
+function prosPhoneKey_(s) {
+  let d = String(s || '').replace(/\D/g, '');
+  if (/^61\d{9}$/.test(d)) d = '0' + d.slice(2);
+  else if (/^[2-478]\d{8}$/.test(d)) d = '0' + d;
+  return d.length >= 8 && d.length <= 12 ? d : '';
+}
+// "phoebe lynch" → "Phoebe Lynch" (names typed with capitals are left as they are)
+function prosTidyName_(s) {
+  return String(s || '').replace(/\s+/g, ' ').trim().slice(0, 120).split(' ').map(function (w) {
+    return /^[a-z][a-z'-]*$/.test(w) ? w.charAt(0).toUpperCase() + w.slice(1) : w;
+  }).join(' ');
+}
+function prosPref_(s) {
+  s = String(s || '').toLowerCase();
+  return /sms|text/.test(s) ? 'SMS' : /mail/.test(s) ? 'Email' : /call|phone/.test(s) ? 'Call' : '';
+}
+function prosSearchKeys_(name, phone, email) {
+  const k = recallKeys_(name, phone, email);
+  return { nameKey: k.nameKey, nameKeyR: k.nameKeyR, phoneKey: prosPhoneKey_(phone), emailKey: isEmail_(email) ? mktEmail_(email) : '' };
+}
+
+function prosSettings_(cfg) {
+  let d = null;
+  try { d = fsGetDoc_(cfg, PROS_SET_); } catch (e) { console.warn('Prospect settings not read: ' + e); }
+  d = d || {};
+  const ids = function (v) { return (Array.isArray(v) ? v : []).map(String).filter(Boolean).slice(0, 30); };
+  return {
+    notify: ids(d.notify), team: ids(d.team),
+    respondHours: Math.max(1, Math.min(168, Math.floor(Number(d.respondHours) || 24))),
+    lostReasons: (Array.isArray(d.lostReasons) && d.lostReasons.length ? d.lostReasons : PROS_LOST_)
+      .map(function (s) { return String(s).replace(/\s+/g, ' ').trim().slice(0, 60); }).filter(Boolean).slice(0, 20),
+  };
+}
+
+/* ---------- Reading a web form email ---------- */
+// The form puts each heading on its own line with the answer underneath (or "Heading: answer").
+
+const PROS_FIELDS_ = [
+  ['message', /^(please share.*|message|comments?|your message|enquiry|questions?)$/],
+  ['first', /^first name$/],
+  ['last', /^(last name|surname)$/],
+  ['name', /^(full name|name|your name)$/],
+  ['email', /^(e-?mail|e-?mail address|your e-?mail)$/],
+  ['phone', /^(mobile\s*\/\s*contact\s*#?|mobile( number)?|phone( number)?|contact( number| #)?)$/],
+  ['pref', /^(primary contact|preferred contact( method)?|best way to contact.*)$/],
+  ['age', /^age( group| range)?$/],
+  ['concern', /^(primary concern|concern|treatment( of interest)?|interested in)$/],
+];
+
+function prosLabel_(line) {
+  const k = String(line).replace(/^[-–—*=\s]+|[-–—*=:\s]+$/g, '').replace(/\s+/g, ' ').toLowerCase();
+  if (!k || k.length > 220) return '';
+  for (let i = 0; i < PROS_FIELDS_.length; i++) if (PROS_FIELDS_[i][1].test(k)) return PROS_FIELDS_[i][0];
+  return '';
+}
+
+function prosAddVal_(out, k, v) {
+  if (k === 'message') {
+    // The rest of the form's own question, when it wraps onto more lines
+    if (/^(the more details you provide|if you.?re ready to book|and we.?ll find a suitable opening)/i.test(v) ||
+        /find a suitable opening for you\.?$/i.test(v)) return;
+    out.message = out.message ? out.message + '\n' + v : v;
+  } else if (!out[k]) {
+    out[k] = v;
+  } else if (k === 'concern') {
+    out.concern += ', ' + v;
+  }
+}
+
+function prosParse_(text) {
+  const out = { name: '', first: '', last: '', email: '', phone: '', pref: '', age: '', concern: '', message: '', found: 0 };
+  const lines = String(text || '').replace(/\r/g, '').replace(/\u00a0/g, ' ').split('\n').map(function (l) { return l.trim(); });
+  let cur = '';
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (!l || /^[-–—_=*\s]+$/.test(l)) continue;
+    if (/^(sent from|powered by|this (email|message) was sent|you received this|unsubscribe)/i.test(l)) break;
+    let lab = prosLabel_(l);
+    if (lab) { cur = lab; out.found++; continue; }
+    const m = /^([^:]{2,60}):\s*(.+)$/.exec(l);
+    if (m && (lab = prosLabel_(m[1]))) { cur = lab; out.found++; prosAddVal_(out, cur, m[2]); continue; }
+    if (cur) prosAddVal_(out, cur, l);
+  }
+  const em = /[^\s<>"'(),;:]+@[^\s<>"'(),;:]+\.[a-z]{2,}/i.exec(out.email);
+  out.email = em ? em[0].toLowerCase() : '';
+  const ph = /\+?\d[\d\s()-]{6,}\d/.exec(out.phone);
+  out.phone = ph ? ph[0].replace(/[^\d+]/g, '') : '';
+  if (!out.name) out.name = [out.first, out.last].filter(Boolean).join(' ');
+  out.name = prosTidyName_(out.name);
+  out.pref = prosPref_(out.pref);
+  out.concern = out.concern.slice(0, 150);
+  out.age = out.age.slice(0, 40);
+  out.message = out.message.trim().slice(0, 2000);
+  return out;
+}
+
+function prosFromEmail_(msg) {
+  const plain = String(msg.getPlainBody() || '');
+  let f = prosParse_(plain);
+  if (f.found < 2) {
+    const fromHtml = prosParse_(emailHtmlToText_(msg.getBody() || ''));
+    if (fromHtml.found > f.found) f = fromHtml;
+  }
+  // The subject repeats the name and concern: "Att. Prospect Team - Phoebe lynch (Other Concern/Treatment query)"
+  const sub = /^\s*att\.?\s*prospect\s*team\s*[-–—:]\s*(.*?)\s*(?:\(([^()]*)\))?\s*$/i.exec(msg.getSubject() || '');
+  if (!f.name && sub && sub[1]) f.name = prosTidyName_(sub[1]);
+  if (!f.concern && sub && sub[2]) f.concern = sub[2].slice(0, 150);
+  if (!f.email) {
+    const m = /[^\s<>"]+@[^\s<>"]+\.[a-z]{2,}/i.exec(String(msg.getReplyTo() || ''));
+    if (m && !/dermedica/i.test(m[0])) f.email = m[0].toLowerCase();
+  }
+  return Object.assign(f, {
+    source: 'Web form', at: msg.getDate().toISOString(), gmailId: msg.getId(),
+    link: msg.getThread().getPermalink(), raw: plain.slice(0, 4000),
+  });
+}
+
+/* ---------- Finding the same person ---------- */
+
+// An existing prospect with the same mobile or email (an open one first, then the most recent)
+function prosFindExisting_(cfg, phoneKey, emailKey) {
+  let hits = [];
+  if (phoneKey) hits = hits.concat(fsQuery_(cfg, PROS_COL_, 'phoneKey', 'EQUAL', phoneKey, 10));
+  if (emailKey) hits = hits.concat(fsQuery_(cfg, PROS_COL_, 'emailKey', 'EQUAL', emailKey, 10));
+  const closed = function (p) { return PROS_OPEN_.indexOf(p.stage) === -1 ? 1 : 0; };
+  return hits.sort(function (a, b) {
+    return closed(a) - closed(b) || String(b.lastEnquiryAt || '').localeCompare(String(a.lastEnquiryAt || ''));
+  })[0] || null;
+}
+
+// The patient with the same mobile or email. Only linked when exactly one patient matches.
+function prosFindPatient_(cfg, phoneKey, emailKey) {
+  const found = {};
+  if (phoneKey) {
+    try { ptFsEntries_().list.forEach(function (p) { if (prosPhoneKey_(p[2]) === phoneKey) found[p[0]] = 'mobile'; }); }
+    catch (e) { console.warn('Prospect: patients not read by mobile: ' + e); }
+  }
+  if (emailKey) {
+    ['EmailKey', 'Email'].forEach(function (f) {
+      try {
+        fsQuery_(cfg, 'patient_list', f, 'EQUAL', emailKey, 5).forEach(function (d) {
+          const k = String(d.PttID || d._id);
+          if (!d.MergedInto && !found[k]) found[k] = 'email';
+        });
+      } catch (e) { console.warn('Prospect: patients not read by email: ' + e); }
+    });
+  }
+  const keys = Object.keys(found);
+  if (keys.length !== 1) return { many: keys.length };
+  const doc = flowPatient_(cfg, keys[0]);
+  return doc ? { patientId: doc._id, pttId: String(doc.PttID || doc._id), patientName: flowWho_(doc).name, how: found[keys[0]] }
+    : { many: 0 };
+}
+
+// New web enquiries, shared in turn: the team member with the fewest open prospects (working today)
+function prosShareTo_(cfg, set) {
+  if (!set.team.length) return null;
+  const today = flowKey_(Date.now());
+  const team = getStaffDocs_().filter(function (s) {
+    return set.team.indexOf(s.id) !== -1 && s.active !== false && recallAvailable_(s, today);
+  });
+  if (!team.length) return null;
+  const load = {};
+  team.forEach(function (s) { load[s.id] = 0; });
+  fsQuery_(cfg, PROS_COL_, 'stage', 'IN', PROS_OPEN_, 3000).forEach(function (p) {
+    if (p.assignedToId in load) load[p.assignedToId]++;
+  });
+  return team.sort(function (a, b) { return load[a.id] - load[b.id] || String(a.name).localeCompare(String(b.name)); })[0];
+}
+
+/* ---------- Adding an enquiry (a new prospect, or another enquiry from someone already here) ---------- */
+// f: { name, phone, email, pref, age, concern, message, source, at, gmailId, link, assignTo, spoke, followUp, followNote }
+
+function prosAddEnquiry_(cfg, set, f, session, forceNew) {
+  const now = new Date().toISOString();
+  const at = f.at || now;
+  const who = session ? String(session.name || 'Staff') : 'Web form';
+  const uid = session ? String(session.uid || '') : '';
+  const keys = prosSearchKeys_(f.name, f.phone, f.email);
+  const enq = {
+    at: at, source: String(f.source || ''), concern: clip_(f.concern, 150), message: clip_(f.message, 2000),
+    gmailId: String(f.gmailId || ''), link: String(f.link || ''), by: who,
+  };
+  const what = 'Enquiry' + (enq.source ? ' (' + enq.source + ')' : '') + (enq.concern ? ': ' + enq.concern : '');
+
+  const ex = forceNew ? null : prosFindExisting_(cfg, keys.phoneKey, keys.emailKey);
+  if (ex) {
+    const patch = {
+      enquiries: (Array.isArray(ex.enquiries) ? ex.enquiries : []).concat([enq]).slice(-30),
+      enquiryCount: Number(ex.enquiryCount || 1) + 1, lastEnquiryAt: at, waitingSince: at, updatedAt: now,
+      log: (Array.isArray(ex.log) ? ex.log : []).concat([{ at: at, by: who, byUid: uid, kind: 'enquiry',
+        what: 'Another enquiry' + (enq.source ? ' (' + enq.source + ')' : '') + (enq.concern ? ': ' + enq.concern : ''),
+        note: enq.message }]).slice(-150),
+    };
+    if (ex.stage === 'lost') {
+      Object.assign(patch, { stage: 'new', stageAt: now, lostReason: '', lostNote: '' });
+      patch.log.push({ at: now, by: 'Prospects', byUid: '', kind: 'stage', what: 'Back to New enquiry (they enquired again)', note: '' });
+    }
+    if (!ex.phone && f.phone) { patch.phone = String(f.phone); patch.phoneKey = keys.phoneKey; }
+    if (!ex.email && keys.emailKey) { patch.email = keys.emailKey; patch.emailKey = keys.emailKey; }
+    if (!ex.concern && enq.concern) patch.concern = enq.concern;
+    fsPatch_(cfg, PROS_COL_ + '/' + ex._id, patch);
+    return { id: ex._id, again: true, name: ex.name, assignedToId: String(ex.assignedToId || ''),
+      concern: enq.concern, message: enq.message };
+  }
+
+  const id = 'pr_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20);
+  const pt = prosFindPatient_(cfg, keys.phoneKey, keys.emailKey);
+  let to = null;
+  if (f.assignTo) to = getStaffDocs_().filter(function (s) { return s.id === String(f.assignTo) && s.active !== false; })[0] || null;
+  else if (!session) to = prosShareTo_(cfg, set);
+  const log = [{ at: at, by: who, byUid: uid, kind: 'enquiry', what: what, note: enq.message }];
+  if (pt.patientId) {
+    log.push({ at: now, by: 'Prospects', byUid: '', kind: 'link',
+      what: 'Already a patient: ' + pt.patientName + ' (same ' + pt.how + ')', note: '' });
+  }
+  if (to) log.push({ at: now, by: session ? who : 'Prospects', byUid: uid, kind: 'assign', what: 'Given to ' + to.name, note: '' });
+
+  const p = Object.assign({
+    name: prosTidyName_(f.name) || 'No name', firstName: (prosTidyName_(f.name) || '').split(' ')[0],
+    phone: String(f.phone || ''), email: keys.emailKey,
+    pref: prosPref_(f.pref) || '', ageGroup: clip_(f.age, 40), concern: enq.concern, message: enq.message,
+    source: enq.source || 'Other', stage: 'new', stageAt: now, lostReason: '', lostNote: '',
+    assignedToId: to ? to.id : '', assignedToName: to ? String(to.name || '') : '',
+    nextFollowUp: '', followNote: '',
+    patientId: pt.patientId || '', pttId: pt.pttId || '', patientName: pt.patientName || '', patientMany: pt.many || 0,
+    enquiries: [enq], enquiryCount: 1, lastEnquiryAt: at, waitingSince: at,
+    contacts: 0, firstContactAt: '', lastContactAt: '',
+    createdAt: at, createdBy: who, createdByUid: uid, updatedAt: now,
+  }, keys);
+
+  if (session && f.spoke === true) {   // added after a phone call, walk-in or chat: they've been spoken to
+    log.push({ at: now, by: who, byUid: uid, kind: 'contact', what: 'Spoke to them', note: '' });
+    Object.assign(p, { stage: 'contacted', contacts: 1, firstContactAt: now, lastContactAt: now, waitingSince: '' });
+  }
+  const fu = String(f.followUp || '');
+  if (/^\d{4}-\d{2}-\d{2}$/.test(fu) && fu >= flowKey_(Date.now())) {
+    p.nextFollowUp = fu;
+    p.followNote = clip_(f.followNote, 300);
+    log.push({ at: now, by: who, byUid: uid, kind: 'follow', what: 'Follow up on ' + recLongDate_(fu), note: p.followNote });
+  }
+  p.log = log;
+  commitWrites_(cfg, [updateWrite_(cfg, PROS_COL_ + '/' + id, p)]);
+  return { id: id, again: false, name: p.name, assignedToId: p.assignedToId, concern: p.concern, message: p.message, p: p };
+}
+
+// A new web enquiry: the person it's given to, and the staff chosen in Prospect settings
+function prosNotify_(cfg, set, r, f) {
+  try {
+    const ids = uniq_([r.assignedToId].concat(set.notify).filter(Boolean));
+    const to = uniq_(getStaffDocs_().filter(function (s) { return ids.indexOf(s.id) !== -1 && s.active !== false && isEmail_(s.email); })
+      .map(function (s) { return s.email; }));
+    if (!to.length || MailApp.getRemainingDailyQuota() < 5) return;
+    const rows = [['Mobile', f.phone], ['Email', f.email], ['Prefers', prosPref_(f.pref)], ['Age group', f.age], ['Interested in', r.concern]]
+      .filter(function (x) { return x[1]; })
+      .map(function (x) { return '<tr><td style="padding:2px 12px 2px 0;color:#64748b">' + x[0] + '</td><td>' + invEsc_(x[1]) + '</td></tr>'; }).join('');
+    const html = invEmailWrap_(
+      '<h2 style="margin:0 0 6px;font-size:20px;color:#0f766e">' + (r.again ? 'Another enquiry from ' : 'New enquiry: ') + invEsc_(r.name) + '</h2>' +
+      '<table style="margin:0 0 12px;font-size:14px">' + rows + '</table>' +
+      (r.message ? '<p style="margin:0;padding:10px 12px;border-radius:8px;background:#f8fafc;white-space:pre-wrap">' + invEsc_(r.message) + '</p>' : ''),
+      'prospects/' + r.id, 'Open the prospect');
+    MailApp.sendEmail({ to: to.join(','), name: 'Dermedica Portal', htmlBody: html, body: emailHtmlToText_(html),
+      subject: (r.again ? 'Enquiry again: ' : 'New enquiry: ') + r.name + (r.concern ? ' (' + r.concern + ')' : '') });
+  } catch (e) { console.warn('Prospect email to staff not sent: ' + e); }
+}
+
+/* ---------- Importing the web form emails (runNotifications, every 5 minutes) ---------- */
+
+function prosImport_(cfg, max, days) {
+  const label = GmailApp.getUserLabelByName(PROS_LABEL_) || GmailApp.createLabel(PROS_LABEL_);
+  const threads = GmailApp.search('subject:"Att. Prospect Team" newer_than:' + (days || 14) + 'd -label:' + PROS_LABEL_, 0, max || 30);
+  if (!threads.length) return 0;
+  const set = prosSettings_(cfg);
+  let n = 0;
+  threads.forEach(function (th) {
+    try {
+      th.getMessages().forEach(function (msg) {
+        if (!PROS_SUBJECT_RE_.test(msg.getSubject() || '')) return;
+        const mid = msg.getId();
+        if (fsGetDoc_(cfg, PROS_MAIL_ + '/' + mid)) return;   // already imported
+        const f = prosFromEmail_(msg);
+        if (!f.name && !f.phone && !f.email) {
+          console.warn('Prospect email ' + mid + ' had no name, mobile or email: left for a person to check');
+          commitWrites_(cfg, [updateWrite_(cfg, PROS_MAIL_ + '/' + mid, { at: new Date().toISOString(), prospectId: '', skipped: true })]);
+          return;
+        }
+        const r = prosAddEnquiry_(cfg, set, f, null, false);
+        commitWrites_(cfg, [updateWrite_(cfg, PROS_MAIL_ + '/' + mid, { at: new Date().toISOString(), prospectId: r.id })]);
+        prosNotify_(cfg, set, r, f);
+        n++;
+      });
+      th.addLabel(label);
+    } catch (e) { console.error('Prospect email thread ' + th.getId() + ': ' + (e && e.stack ? e.stack : e)); }
+  });
+  if (n) console.log('Prospects: ' + n + ' enquiry email(s) imported.');
+  return n;
+}
+
+/* ---------- The daily reminder (after 8 am Perth, once a day) ---------- */
+
+function prosDaily_(cfg, now) {
+  const p = new Date(now + SCH_PERTH_);
+  if (p.getUTCHours() < 8) return;
+  const today = flowKey_(now);
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('PROS_DIGEST_DAY') === today) return;
+  props.setProperty('PROS_DIGEST_DAY', today);
+
+  const set = prosSettings_(cfg);
+  const staff = getStaffDocs_().filter(function (s) { return s.active !== false && isEmail_(s.email); });
+  const admins = staff.filter(function (s) { return /^admin$/i.test(String(s.role || '')); }).map(function (s) { return s.id; });
+  const fallback = set.notify.length ? set.notify : admins;
+  const by = {};
+  const add = function (uid, line) { (by[uid] = by[uid] || []).push(line); };
+  fsQuery_(cfg, PROS_COL_, 'stage', 'IN', PROS_OPEN_, 3000).forEach(function (x) {
+    const due = x.nextFollowUp && String(x.nextFollowUp) <= today;
+    const waiting = x.waitingSince && now - Date.parse(String(x.waitingSince)) > set.respondHours * 3600000;
+    if (!due && !waiting) return;
+    const line = '<li style="margin:0 0 4px"><a href="' + PORTAL_URL_ + '#/prospects/' + x._id + '" style="color:#0f766e"><strong>' +
+      invEsc_(x.name) + '</strong></a>' + (x.concern ? ' · ' + invEsc_(x.concern) : '') + ' · ' +
+      (waiting ? '<span style="color:#b91c1c">not contacted yet</span>'
+        : String(x.nextFollowUp) < today ? '<span style="color:#b91c1c">follow-up overdue (' + invEsc_(recLongDate_(x.nextFollowUp)) + ')</span>'
+        : 'follow up today') + (x.followNote ? ' · ' + invEsc_(x.followNote) : '') + '</li>';
+    if (x.assignedToId) add(x.assignedToId, line);
+    else fallback.forEach(function (uid) { add(uid, line); });
+  });
+  Object.keys(by).forEach(function (uid) {
+    const s = staff.filter(function (x) { return x.id === uid; })[0];
+    if (!s || MailApp.getRemainingDailyQuota() < 5) return;
+    const list = by[uid];
+    const html = invEmailWrap_('<h2 style="margin:0 0 6px;font-size:20px;color:#0f766e">Prospects to follow up today</h2>' +
+      '<ul style="margin:0 0 6px;padding-left:20px">' + list.slice(0, 40).join('') + '</ul>' +
+      (list.length > 40 ? '<p style="margin:0;color:#64748b">and ' + (list.length - 40) + ' more</p>' : ''),
+      'prospects', 'Open the Prospect Dashboard');
+    MailApp.sendEmail({ to: s.email, name: 'Dermedica Portal', subject: 'Prospects to follow up today: ' + list.length,
+      htmlBody: html, body: emailHtmlToText_(html) });
+  });
+}
+
+/* ---------- From the portal ---------- */
+
+function handleProspects_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!can_(session, 'menu.prospects')) return { ok: false, error: 'FORBIDDEN' };
+  const op = String(body.op || '');
+  const manage = can_(session, 'prospects.manage');
+  const work = manage || can_(session, 'prospects.work');
+  try {
+    const cfg = getConfig_();
+    if (op === 'ptSearch') return upPtSearch_(body);
+    if (!work) return { ok: false, error: 'FORBIDDEN' };
+    if (op === 'add') return prosAdd_(cfg, body, session);
+    if (op === 'importNow' || op === 'saveSettings') {
+      if (!manage) return { ok: false, error: 'FORBIDDEN' };
+      if (op === 'importNow') return { ok: true, imported: prosImport_(cfg, 50, Math.max(1, Math.min(90, Number(body.days) || 14))) };
+      return prosSaveSettings_(cfg, body, session);
+    }
+    const id = String(body.id || '');
+    if (!/^pr_[A-Za-z0-9]{10,40}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
+    const unlock = staffTaskLock_('pr_' + id);
+    if (!unlock) return { ok: true, problem: 'Someone else is saving this prospect. Try again.' };
+    try { return prosAction_(cfg, op, id, body, session); }
+    finally { unlock(); }
+  } catch (err) {
+    console.error('Prospects ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: true, problem: 'Something went wrong: ' + String(err && err.message ? err.message : err).slice(0, 200) };
+  }
+}
+
+function prosAdd_(cfg, body, session) {
+  const name = prosTidyName_(body.name);
+  const phone = String(body.phone || '').replace(/[^\d+ ()-]/g, '').trim().slice(0, 30);
+  const email = String(body.email || '').trim().toLowerCase().slice(0, 254);
+  if (!name) return { ok: true, problem: 'Add their name.' };
+  if (!prosPhoneKey_(phone) && !email) return { ok: true, problem: 'Add a mobile number or an email address, so they can be contacted.' };
+  if (email && !isEmail_(email)) return { ok: true, problem: 'Check the email address.' };
+  const source = PROS_SOURCES_.indexOf(body.source) !== -1 ? body.source : 'Other';
+  if (body.force !== true) {
+    const ex = prosFindExisting_(cfg, prosPhoneKey_(phone), isEmail_(email) ? email : '');
+    if (ex) return { ok: true, duplicate: { id: ex._id, name: String(ex.name || ''), stage: String(ex.stage || 'new') } };
+  }
+  const r = prosAddEnquiry_(cfg, prosSettings_(cfg), {
+    name: name, phone: phone, email: email, pref: body.pref, age: body.age, concern: body.concern, message: body.message,
+    source: source, at: new Date().toISOString(), assignTo: String(body.assignTo || ''),
+    spoke: body.spoke === true, followUp: String(body.followUp || ''), followNote: String(body.followNote || ''),
+  }, session, body.force === true);
+  return { ok: true, id: r.id };
+}
+
+function prosAction_(cfg, op, id, body, session) {
+  const path = PROS_COL_ + '/' + id;
+  const p = fsGetDoc_(cfg, path);
+  if (!p) return { ok: true, problem: "That prospect couldn't be found. Refresh and try again." };
+  const now = new Date().toISOString();
+  const today = flowKey_(Date.now());
+  const who = String(session.name || 'Staff');
+  const uid = String(session.uid || '');
+  const note = String(body.note || '').replace(/\r/g, '').trim().slice(0, 1000);
+  const log = (Array.isArray(p.log) ? p.log : []).slice(-149);
+  const add = function (kind, what, n) { log.push({ at: now, by: who, byUid: uid, kind: kind, what: what, note: n === undefined ? note : n }); };
+  const patch = {};
+  const dateOk = function (d) { return d === '' || (/^\d{4}-\d{2}-\d{2}$/.test(d) && d >= today && flowDays_(today, d) <= 365); };
+  // A contact: counted, the "not contacted" flag clears, and a New enquiry becomes Contacted
+  const contacted = function () {
+    patch.contacts = Number(p.contacts || 0) + 1;
+    patch.lastContactAt = now;
+    patch.waitingSince = '';
+    if (!p.firstContactAt) patch.firstContactAt = now;
+    if (p.stage === 'new') { patch.stage = 'contacted'; patch.stageAt = now; add('stage', 'Moved to Contacted', ''); }
+  };
+  const followUp = function () {
+    if (!('followUp' in body)) return '';
+    const d = String(body.followUp || '');
+    if (!dateOk(d)) return 'Choose a follow-up date from today onwards.';
+    patch.nextFollowUp = d;
+    patch.followNote = String(body.followNote || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+    add('follow', d ? 'Follow up on ' + recLongDate_(d) : 'Follow-up cleared', patch.followNote);
+    return '';
+  };
+
+  if (op === 'log') {
+    const out = String(body.outcome || '');
+    if (!PROS_OUTCOMES_[out]) return { ok: false, error: 'BAD_REQUEST' };
+    if (out === 'note' && !note) return { ok: true, problem: 'Write the note first.' };
+    add(out === 'note' ? 'note' : 'contact', PROS_OUTCOMES_[out]);
+    if (out !== 'note') contacted();
+    const bad = followUp();
+    if (bad) return { ok: true, problem: bad };
+  } else if (op === 'text') {
+    const auth = tmAuth_();
+    if (!auth) return { ok: true, problem: "Texts aren't set up yet. Add the Textmagic details in Script Properties." };
+    const phone61 = recallPhone61_(p.phone);
+    if (!phone61) return { ok: true, problem: "There's no Australian mobile number for them." };
+    const h = Number(Utilities.formatDate(new Date(), REC_TZ_, 'H'));
+    if (h < 8 || h >= 20) return { ok: true, problem: 'Texts can only be sent between 8 am and 8 pm.' };
+    if (p.emailKey) { const s = mktSuppressed_(cfg, p.emailKey); if (s && s.reason !== 'bounced') return { ok: true, problem: "They've asked not to be contacted." }; }
+    const text = String(body.text || '').replace(/\r/g, '').trim();
+    if (text.length < 5) return { ok: true, problem: 'Write the message first.' };
+    if (text.length > 612) return { ok: true, problem: 'The message is too long. Keep it under 612 characters.' };
+    const cache = CacheService.getScriptCache();
+    const rk = 'pr_sms_' + uid;
+    const used = Number(cache.get(rk) || 0);
+    if (used >= 60) return { ok: true, problem: "You've sent a lot of texts in the last hour. Try again a bit later." };
+    try { tmSend_(auth, phone61, text); }
+    catch (e) { return { ok: true, problem: "The text wasn't sent: " + String(e && e.message ? e.message : e).slice(0, 200) }; }
+    cache.put(rk, String(used + 1), 3600);
+    add('text', 'Text sent', text);
+    contacted();
+    const bad = followUp();
+    if (bad) return { ok: true, problem: bad };
+  } else if (op === 'email') {
+    const to = String(p.email || '');
+    if (!isEmail_(to)) return { ok: true, problem: "There's no email address for them." };
+    const sup = mktSuppressed_(cfg, to);
+    if (sup && sup.reason === 'bounced') return { ok: true, problem: 'Emails to this address bounce. Check it with them.' };
+    if (sup) return { ok: true, problem: "They've asked not to be contacted." };
+    const subject = String(body.subject || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+    const message = String(body.message || '').replace(/\r/g, '').trim().slice(0, 5000);
+    if (!subject || message.length < 5) return { ok: true, problem: 'Add a subject and a message.' };
+    if (MailApp.getRemainingDailyQuota() < 5) return { ok: true, problem: "The clinic's daily email limit is used up. Try again tomorrow." };
+    const cache = CacheService.getScriptCache();
+    const rk = 'pr_mail_' + uid;
+    const used = Number(cache.get(rk) || 0);
+    if (used >= MAIL_LIMIT_PER_HOUR_) return { ok: true, problem: "You've sent a lot of emails in the last hour. Try again a bit later." };
+    const html = textToEmailHtml_(message);
+    MailApp.sendEmail({ to: to, subject: subject, htmlBody: html, body: message, name: 'Dermedica Clinic' });
+    cache.put(rk, String(used + 1), 3600);
+    add('email', 'Email sent: ' + subject, message.slice(0, 1000));
+    contacted();
+    const bad = followUp();
+    if (bad) return { ok: true, problem: bad };
+  } else if (op === 'stage') {
+    const to = String(body.stage || '');
+    if (PROS_STAGES_.indexOf(to) === -1) return { ok: false, error: 'BAD_REQUEST' };
+    if (to === p.stage) return { ok: true, prospect: Object.assign({ id: id }, p) };
+    if (to === 'lost') {
+      const reason = String(body.reason || '');
+      if (prosSettings_(cfg).lostReasons.indexOf(reason) === -1) return { ok: true, problem: 'Choose why they were lost.' };
+      Object.assign(patch, { lostReason: reason, lostNote: note, nextFollowUp: '', followNote: '', waitingSince: '' });
+      add('stage', 'Lost: ' + reason);
+    } else {
+      Object.assign(patch, { lostReason: '', lostNote: '' });
+      add('stage', (p.stage === 'lost' ? 'Reopened: ' : 'Moved to ') + PROS_STAGE_NAME_[to]);
+    }
+    patch.stage = to;
+    patch.stageAt = now;
+  } else if (op === 'followUp') {
+    if (!('followUp' in body)) return { ok: false, error: 'BAD_REQUEST' };
+    const bad = followUp();
+    if (bad) return { ok: true, problem: bad };
+  } else if (op === 'assign') {
+    const toId = String(body.toId || '');
+    if (toId === String(p.assignedToId || '')) return { ok: true, prospect: Object.assign({ id: id }, p) };
+    const s = toId ? getStaffDocs_().filter(function (x) { return x.id === toId && x.active !== false; })[0] : null;
+    if (toId && !s) return { ok: true, problem: "That staff member isn't on the staff list." };
+    Object.assign(patch, { assignedToId: s ? s.id : '', assignedToName: s ? String(s.name || '') : '' });
+    add('assign', s ? 'Given to ' + s.name : 'Not given to anyone', '');
+  } else if (op === 'update') {
+    const name = prosTidyName_(body.name);
+    const phone = String(body.phone || '').replace(/[^\d+ ()-]/g, '').trim().slice(0, 30);
+    const email = String(body.email || '').trim().toLowerCase().slice(0, 254);
+    if (!name) return { ok: true, problem: 'Add their name.' };
+    if (email && !isEmail_(email)) return { ok: true, problem: 'Check the email address.' };
+    const next = {
+      name: name, firstName: name.split(' ')[0], phone: phone, email: email,
+      concern: clip_(body.concern, 150), source: PROS_SOURCES_.indexOf(body.source) !== -1 ? body.source : String(p.source || 'Other'),
+      ageGroup: clip_(body.age, 40), pref: prosPref_(body.pref),
+    };
+    const names = { name: 'name', phone: 'mobile', email: 'email', concern: 'interest', source: 'source', ageGroup: 'age group', pref: 'preferred contact' };
+    const changed = Object.keys(names).filter(function (k) { return String(p[k] || '') !== String(next[k] || ''); });
+    if (!changed.length) return { ok: true, prospect: Object.assign({ id: id }, p) };
+    Object.assign(patch, next, prosSearchKeys_(name, phone, email));
+    add('edit', 'Details changed: ' + changed.map(function (k) { return names[k]; }).join(', '), '');
+  } else if (op === 'link') {
+    const ptt = String(body.pttId || '').trim();
+    if (!ptt) {
+      if (!p.patientId) return { ok: true, prospect: Object.assign({ id: id }, p) };
+      Object.assign(patch, { patientId: '', pttId: '', patientName: '' });
+      add('link', 'No longer linked to ' + (p.patientName || 'the patient'), '');
+    } else {
+      const d = flowPatient_(cfg, ptt);
+      if (!d) return { ok: true, problem: "That patient couldn't be found." };
+      Object.assign(patch, { patientId: d._id, pttId: String(d.PttID || d._id), patientName: flowWho_(d).name, patientMany: 0 });
+      add('link', 'Linked to the patient ' + flowWho_(d).name, '');
+    }
+  } else {
+    return { ok: false, error: 'BAD_REQUEST' };
+  }
+  patch.log = log.slice(-150);
+  patch.updatedAt = now;
+  fsPatch_(cfg, path, patch);
+  return { ok: true, prospect: Object.assign({ id: id }, p, patch) };
+}
+
+function prosSaveSettings_(cfg, body, session) {
+  const active = {};
+  getStaffDocs_().forEach(function (s) { if (s.active !== false) active[s.id] = true; });
+  const ids = function (v) { return uniq_((Array.isArray(v) ? v : []).map(String).filter(function (x) { return active[x]; })).slice(0, 30); };
+  const reasons = uniq_((Array.isArray(body.lostReasons) ? body.lostReasons : [])
+    .map(function (s) { return String(s).replace(/\s+/g, ' ').trim().slice(0, 60); }).filter(Boolean)).slice(0, 20);
+  commitWrites_(cfg, [updateWrite_(cfg, PROS_SET_, {
+    notify: ids(body.notify), team: ids(body.team),
+    respondHours: Math.max(1, Math.min(168, Math.floor(Number(body.respondHours) || 24))),
+    lostReasons: reasons.length ? reasons : PROS_LOST_,
+    updatedAt: new Date().toISOString(), updatedBy: String(session.name || ''), updatedByUid: String(session.uid || ''),
+  })]);
+  return { ok: true };
+}
+
+/* ---------- Run from the editor ---------- */
+
+// Shows how the newest prospect email is read (nothing is saved)
+function testProspectEmail() {
+  const th = GmailApp.search('subject:"Att. Prospect Team"', 0, 1)[0];
+  if (!th) { console.log('No "Att. Prospect Team" emails found in ' + Session.getEffectiveUser().getEmail()); return; }
+  const msg = th.getMessages().pop();
+  const f = prosFromEmail_(msg);
+  delete f.raw;
+  console.log('Mailbox: ' + Session.getEffectiveUser().getEmail());
+  console.log(JSON.stringify(f, null, 2));
+}
+
+// Imports older enquiries (change the days if you want more or fewer)
+function prospectImportOlder() {
+  console.log(prosImport_(getConfig_(), 200, 90) + ' enquiry email(s) imported.');
 }

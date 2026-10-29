@@ -351,6 +351,8 @@ const PAGES = {
       (m, e) => m.mountRecallResults(e, { staff: currentStaff }))(el, param);
     return recallPage(el, param);
   },
+  prospects: lazyPage("./prospects.js", "The Prospect Dashboard",
+    (m, el, param) => m.mountProspects(el, { param, staff: currentStaff })),
   settings: (el, param) => {
     const [top, sub = ""] = String(param || "").split("/");
     if (top === "recall") {
@@ -376,7 +378,7 @@ const PAGE_PERM = {
   ssp: "ssp.create", calendar: "menu.calendar", forms: "menu.forms",
   "image-bank": "forms.build", "aftercare-bank": "forms.build", "specialist-bank": "menu.forms", "ssp-products": "ssp.config",
   tasks: "menu.tasks", inventory: "menu.inventory", reports: "menu.reports", staff: "admin", settings: "admin",
-  scanner: "menu.scanner", paper: "paper.enter", seo: "menu.seo",
+  scanner: "menu.scanner", paper: "paper.enter", seo: "menu.seo", prospects: "menu.prospects",
 };
 
 // Email flow builders who aren't Admins can open System configuration, but only its Email flows
@@ -388,7 +390,7 @@ const pageAllowed = (p, param = "") => {
   if (!need) return true;
   return need === "admin" ? isAdminNow() : can(need);
 };
-const firstAllowedPage = () => ["calendar", "patients", "tasks", "recall", "inventory", "scanner", "reports", "seo", "forms", "staff", "help"].find(pageAllowed) || "";
+const firstAllowedPage = () => ["calendar", "patients", "tasks", "recall", "prospects", "inventory", "scanner", "reports", "seo", "forms", "staff", "help"].find(pageAllowed) || "";
 const currentPage = () => location.hash.split("/")[1] || "";
 const currentParam = () => { try { return decodeURIComponent(location.hash.split("/").slice(2).join("/")); } catch { return ""; } };
 
