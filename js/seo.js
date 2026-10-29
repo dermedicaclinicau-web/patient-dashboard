@@ -11,6 +11,7 @@ const TABS = [
   { id: "pages", label: "Pages" },
   { id: "keywords", label: "Keywords" },
   { id: "opps", label: "Opportunities" },
+  { id: "health", label: "Site health" },
   { id: "log", label: "Change log" },
   { id: "settings", label: "Settings", manage: true },
 ];

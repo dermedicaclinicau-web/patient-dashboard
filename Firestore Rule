@@ -1454,7 +1454,16 @@ match /inv_count_drafts/{id} {
       allow write: if false;
     }
 
-    match /seo_issues/{id} { allow read: if can('menu.seo'); allow write: if false; }
+    match /seo_issues/{id} {
+      allow read: if can('menu.seo');
+      allow create, update: if can('seo.work')
+        && request.resource.data.keys().hasOnly(['key','label','path','status','note','by','byName','at'])
+        && request.resource.data.status in ['open','ignored']
+        && request.resource.data.by == request.auth.uid
+        && request.resource.data.note is string && request.resource.data.note.size() <= 1000;
+      allow delete: if can('seo.manage');
+    }
+    match /seo_health/{id} { allow read: if can('menu.seo'); allow write: if false; }
 
     match /seo_opps/{id} {
       allow read: if can('menu.seo');

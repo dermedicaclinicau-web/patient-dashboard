@@ -5,6 +5,7 @@ import { db, auth } from "./firebase-config.js";
 import {
   doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, collection, query, where, getDocs, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { loadHealth, viewHealth, healthPanelHtml } from "./seo-health.js";
 
 const BRAND = "__brand", OTHER = "__other", ALL = "__all";
 const EXP_CTR = [0.28, 0.16, 0.11, 0.08, 0.06, 0.045]; // rough click rate for positions 1–6
@@ -37,6 +38,18 @@ const SUGGESTED = {
   ],
   brand: ["dermedica"],
 };
+// Same starting list as SEO3_COMPLIANCE_ in Seo3.gs
+const COMPLIANCE = [
+  ["botox", "Prescription medicine brand name (TGA)"], ["dysport", "Prescription medicine brand name (TGA)"],
+  ["xeomin", "Prescription medicine brand name (TGA)"], ["letybo", "Prescription medicine brand name (TGA)"],
+  ["relatox", "Prescription medicine brand name (TGA)"], ["botulinum", "Prescription medicine (TGA)"],
+  ["guarantee", "Promises a result (AHPRA)"], ["guaranteed", "Promises a result (AHPRA)"],
+  ["risk-free", "Downplays risk (AHPRA)"], ["risk free", "Downplays risk (AHPRA)"],
+  ["pain-free", "Downplays risk (AHPRA)"], ["pain free", "Downplays risk (AHPRA)"], ["painless", "Downplays risk (AHPRA)"],
+  ["no downtime", "Downplays risk (AHPRA)"], ["completely safe", "Downplays risk (AHPRA)"], ["100% safe", "Downplays risk (AHPRA)"],
+  ["miracle", "Creates unrealistic expectations (AHPRA)"], ["permanent results", "Creates unrealistic expectations (AHPRA)"],
+  ["lunchtime", "Trivialises a procedure (AHPRA)"],
+].map(([word, why]) => ({ word, why }));
 
 /* ---------- small helpers ---------- */
 
@@ -87,7 +100,7 @@ export async function loadWork(force) {
   if (wcache.v && !force) return wcache.v;
   if (wcache.pending) return wcache.pending;
   wcache.pending = (async () => {
-    const w = { queries: [], qs: null, settings: null, opps: {}, log: [], errors: {}, prefill: null };
+    const w = { queries: [], qs: null, settings: null, opps: {}, log: [], errors: {}, prefill: null, health: null };
     const safe = async (k, fn) => { try { await fn(); } catch (e) { w.errors[k] = e.message || String(e); } };
     await Promise.all([
       safe("queries", async () => {
@@ -99,6 +112,7 @@ export async function loadWork(force) {
         snap.docs.map((d) => d.data()).sort((a, b) => a.n - b.n)
           .forEach((c) => JSON.parse(c.rows || "[]").forEach((r) => w.queries.push(rowToQ(r))));
       }),
+      safe("health", async () => { w.health = await loadHealth(); }),
       safe("settings", async () => {
         const s = await getDoc(doc(db, "seo_settings", "main"));
         if (s.exists()) w.settings = s.data();
@@ -134,6 +148,10 @@ function settingsOf(w) {
       .map((t) => ({ name: String(t.name || "").trim(), words: (t.words || []).map(norm).filter(Boolean) }))
       .filter((t) => t.name),
     brand: (s.brand || []).map(norm).filter(Boolean),
+    keyPages: (Array.isArray(s.keyPages) ? s.keyPages : []).map(String).filter(Boolean),
+    compliance: Array.isArray(s.compliance)   // null = never saved (the suggested list applies)
+      ? s.compliance.map((x) => ({ word: String(x?.word || "").trim(), why: String(x?.why || "").trim() })).filter((x) => x.word)
+      : null,
   };
 }
 
@@ -159,7 +177,7 @@ export function pagePanelExtras(w, p, h, can) {
   for (const q of w.queries) { const x = q.pages.find((y) => y.path === p.path); if (x) qs.push({ q: q.q, ...x }); }
   qs.sort((a, b) => b.i - a.i);
   const logs = w.log.filter((e) => e.url === p.path);
-  return `<div class="seo-w-panel">
+  return `<div class="seo-w-panel">${healthPanelHtml(w.health, p)}
     <h3>Top searches for this page <small class="seo-note">(28 days)</small></h3>
     ${qs.length
       ? `<table class="seo-kv"><tr><th>Search</th><th>Clicks</th><th>Impr.</th><th>Pos.</th></tr>${qs.slice(0, 15).map((x) =>
@@ -181,7 +199,7 @@ export function renderWorkTab(tab, body, c) {
   const wrap = document.createElement("div");
   wrap.className = "seo-w";
   body.replaceChildren(wrap);
-  ({ keywords: viewKeywords, opps: viewOpps, log: viewLog, settings: viewSettings }[tab] || viewKeywords)(wrap, c, ui);
+  ({ keywords: viewKeywords, opps: viewOpps, health: viewHealth, log: viewLog, settings: viewSettings }[tab] || viewKeywords)(wrap, c, ui);
 }
 
 /* ---------- shared bits ---------- */
@@ -526,7 +544,7 @@ function viewLog(wrap, c) {
 
   function formHtml() {
     const f = edit || {
-      date: todayPerth(), type: pre?.opp?.type === "ctr" ? "Title / meta" : "Content",
+      date: todayPerth(), type: pre?.type || (pre?.opp?.type === "ctr" ? "Title / meta" : "Content"),
       title: pre?.title || "", url: pre?.url || "", note: "",
     };
     return `<form class="seo-card seo-w-form" data-w-form>
@@ -647,36 +665,67 @@ function viewSettings(wrap, c) {
   const { work: w, h } = c;
   if (!c.can("seo.manage")) { wrap.innerHTML = `<div class="seo-empty">Only people with SEO settings access can change these.</div>`; return; }
   const st = settingsOf(w);
+  const wordsText = (list) => list.map((x) => (x.why ? `${x.word} | ${x.why}` : x.word)).join("\n");
   let topics = st.topics.map((t) => ({ name: t.name, words: t.words.join(", ") }));
   let brand = st.brand.join(", ");
+  let keyPages = st.keyPages.join("\n");
+  let words = wordsText(st.compliance || COMPLIANCE);
   let dirty = false;
+
+  const topPages = () => [...new Set(["/", ...c.data.pages.filter((p) => p.m28.clicks > 0)
+    .sort((a, b) => b.m28.clicks - a.m28.clicks).map((p) => p.path)])].slice(0, 16).join("\n");
+  const lines = (s) => s.split(/\n+/).map((x) => x.trim()).filter(Boolean);
 
   function draw() {
     const other = w.queries.filter((q) => q.topic === OTHER).sort((a, b) => b.i - a.i).slice(0, 30);
     wrap.innerHTML = `<div class="seo-w-set">
-      <div class="seo-card">
-        <h3 style="margin:0 0 4px">Topics</h3>
-        <p class="seo-note">A search goes into the first topic with a matching word, so put specific topics above general ones.
-          Words match anywhere in the search: “peel” matches “chemical peel perth”.</p>
-        <div class="seo-w-tlist">${topics.map((t, i) => `
-          <div class="seo-w-trow">
-            <input class="seo-input" data-w-ti="${i}" data-w-tf="name" value="${h.esc(t.name)}" placeholder="Topic name" maxlength="60">
-            <input class="seo-input" data-w-ti="${i}" data-w-tf="words" value="${h.esc(t.words)}" placeholder="Words, separated by commas">
-            <button class="seo-btn" type="button" data-w-up="${i}" title="Move up" ${i ? "" : "disabled"}>↑</button>
-            <button class="seo-btn" type="button" data-w-rm="${i}" title="Remove">✕</button>
-          </div>`).join("") || `<p class="seo-note">No topics yet.</p>`}</div>
-        <div class="seo-w-acts">
-          <button class="seo-btn" type="button" data-w-add>Add topic</button>
-          <button class="seo-btn" type="button" data-w-suggest>${topics.length ? "Replace with suggested topics" : "Start with suggested topics"}</button>
+      <div>
+        <div class="seo-card">
+          <h3 style="margin:0 0 4px">Topics</h3>
+          <p class="seo-note">A search goes into the first topic with a matching word, so put specific topics above general ones.
+            Words match anywhere in the search: “peel” matches “chemical peel perth”.</p>
+          <div class="seo-w-tlist">${topics.map((t, i) => `
+            <div class="seo-w-trow">
+              <input class="seo-input" data-w-ti="${i}" data-w-tf="name" value="${h.esc(t.name)}" placeholder="Topic name" maxlength="60">
+              <input class="seo-input" data-w-ti="${i}" data-w-tf="words" value="${h.esc(t.words)}" placeholder="Words, separated by commas">
+              <button class="seo-btn" type="button" data-w-up="${i}" title="Move up" ${i ? "" : "disabled"}>↑</button>
+              <button class="seo-btn" type="button" data-w-rm="${i}" title="Remove">✕</button>
+            </div>`).join("") || `<p class="seo-note">No topics yet.</p>`}</div>
+          <div class="seo-w-acts">
+            <button class="seo-btn" type="button" data-w-add>Add topic</button>
+            <button class="seo-btn" type="button" data-w-suggest>${topics.length ? "Replace with suggested topics" : "Start with suggested topics"}</button>
+          </div>
+          <h3 style="margin:18px 0 4px">Brand words</h3>
+          <p class="seo-note">Searches containing these are grouped as Brand and left out of Opportunities.</p>
+          <input class="seo-input seo-w-full" data-w-brand value="${h.esc(brand)}" placeholder="dermedica">
         </div>
-        <h3 style="margin:18px 0 4px">Brand words</h3>
-        <p class="seo-note">Searches containing these are grouped as Brand and left out of Opportunities.</p>
-        <input class="seo-input seo-w-full" data-w-brand value="${h.esc(brand)}" placeholder="dermedica">
-        <div class="seo-w-acts" style="margin-top:14px">
+
+        <div class="seo-card">
+          <h3 style="margin:0 0 4px">Key pages</h3>
+          <p class="seo-note">The pages Site health checks every night: speed, titles, links and advertising wording.
+            One per line, up to 30, e.g. <code>/melasma-treatment-perth/</code>. Leave it empty to check the home page and the 15 busiest pages.</p>
+          <textarea class="seo-input seo-w-full seo-w-ta" rows="9" data-w-keypages placeholder="/book-now/">${h.esc(keyPages)}</textarea>
+          <div class="seo-w-acts">
+            <button class="seo-btn" type="button" data-w-top>Use the busiest pages</button>
+            <span class="seo-note" data-w-kpn>${lines(keyPages).length} page${lines(keyPages).length === 1 ? "" : "s"}</span>
+          </div>
+        </div>
+
+        <div class="seo-card">
+          <h3 style="margin:0 0 4px">Advertising wording</h3>
+          <p class="seo-note">Words and phrases Site health looks for on the key pages, including titles, descriptions and image alt text.
+            One per line, with the reason after a <code>|</code> if you like. Matches whole words only, so “guarantee” doesn't match “guaranteed”.
+            This is a starting list, not legal advice: have it checked by your compliance adviser.</p>
+          <textarea class="seo-input seo-w-full seo-w-ta" rows="10" data-w-words>${h.esc(words)}</textarea>
+          <div class="seo-w-acts"><button class="seo-btn" type="button" data-w-wdefault>Reset to the suggested list</button></div>
+        </div>
+
+        <div class="seo-w-acts">
           <button class="seo-btn on" type="button" data-w-save>Save settings</button>
           <span class="seo-note" data-w-dirty>${dirty ? "Unsaved changes" : ""}</span>
         </div>
       </div>
+
       <div class="seo-card">
         <h3 style="margin:0 0 4px">Busiest searches not in a topic</h3>
         <p class="seo-note">Use these to decide which words to add. The list updates after you save.</p>
@@ -697,6 +746,13 @@ function viewSettings(wrap, c) {
     const t = e.target;
     if (t.dataset.wTi !== undefined) { topics[+t.dataset.wTi][t.dataset.wTf] = t.value; mark(); }
     else if (t.matches("[data-w-brand]")) { brand = t.value; mark(); }
+    else if (t.matches("[data-w-keypages]")) {
+      keyPages = t.value; mark();
+      const n = lines(keyPages).length;
+      const el = wrap.querySelector("[data-w-kpn]");
+      if (el) el.textContent = `${n} page${n === 1 ? "" : "s"}${n > 30 ? " (only 30 are checked)" : ""}`;
+    }
+    else if (t.matches("[data-w-words]")) { words = t.value; mark(); }
   };
 
   wrap.onclick = async (e) => {
@@ -717,22 +773,45 @@ function viewSettings(wrap, c) {
       topics = SUGGESTED.topics.map((x) => ({ name: x.name, words: x.words.join(", ") }));
       if (!brand.trim()) brand = SUGGESTED.brand.join(", ");
       mark(); draw();
+    } else if (d.wTop !== undefined) {
+      if (lines(keyPages).length && !confirm("Replace the key pages with the home page and the 15 busiest pages?")) return;
+      keyPages = topPages(); mark(); draw();
+    } else if (d.wWdefault !== undefined) {
+      if (!confirm("Replace the advertising wording list with the suggested list?")) return;
+      words = wordsText(COMPLIANCE); mark(); draw();
     } else if (d.wSave !== undefined) {
       const clean = topics
         .map((x) => ({ name: x.name.trim().slice(0, 60), words: [...new Set(x.words.split(",").map(norm).filter(Boolean))].slice(0, 60) }))
         .filter((x) => x.name);
       if (clean.some((x) => !x.words.length)) { toast("Every topic needs at least one word.", true); return; }
       const brands = [...new Set(brand.split(",").map(norm).filter(Boolean))];
+      const pages = [...new Set(lines(keyPages)
+        .map((s) => s.replace(/^https?:\/\/[^/]+/i, "").split("#")[0].trim())
+        .map((s) => (s.startsWith("/") ? s : "/" + s)))];
+      if (pages.length > 30) { toast(`That's ${pages.length} key pages. Keep it to 30.`, true); return; }
+      const wordList = [];
+      const seenW = new Set();
+      for (const l of lines(words)) {
+        const [wd, ...rest] = l.split("|");
+        const word = norm(wd);
+        if (!word || seenW.has(word)) continue;
+        seenW.add(word);
+        wordList.push({ word: word.slice(0, 80), why: rest.join("|").trim().slice(0, 150) });
+      }
       t.disabled = true;
       try {
-        await setDoc(doc(db, "seo_settings", "main"), { topics: clean, brand: brands, updatedBy: uid(), updatedAt: serverTimestamp() });
-        w.settings = { topics: clean, brand: brands };
+        const data = { topics: clean, brand: brands, keyPages: pages, compliance: wordList.slice(0, 200) };
+        await setDoc(doc(db, "seo_settings", "main"), { ...data, updatedBy: uid(), updatedAt: serverTimestamp() });
+        w.settings = data;
         classify(w);
         if (w.ui) w.ui.topic = ALL;
-        topics = clean.map((x) => ({ name: x.name, words: x.words.join(", ") }));
-        brand = brands.join(", ");
+        const s2 = settingsOf(w);
+        topics = s2.topics.map((x) => ({ name: x.name, words: x.words.join(", ") }));
+        brand = s2.brand.join(", ");
+        keyPages = s2.keyPages.join("\n");
+        words = wordsText(s2.compliance || []);
         dirty = false;
-        toast("Settings saved");
+        toast("Settings saved. Key page and wording changes show after the next nightly check.");
         draw();
       } catch (err) { t.disabled = false; toast(errMsg(err), true); }
     }
