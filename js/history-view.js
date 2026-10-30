@@ -2,8 +2,10 @@ import { fetchPreconsult, fetchDayAppointments } from "./appointments.js";
 import { fetchPatientRecords } from "./records.js";
 import { fetchTranscriptRecords, extractSection } from "./transcripts.js";
 import { fetchSkincare } from "./skincare.js";
-import { escapeHtml, toDateKey, parseDateKey } from "./utils.js";
+import { escapeHtml, toDateKey, parseDateKey, showToast } from "./utils.js";
 import { showSoapPanel } from "./soap-panel.js";
+import { callApi } from "./appointments.js";
+import { confirmDialog } from "./dialog.js";
 import { patientIds } from "./patients.js";
 
 const PAGE = 10;
@@ -23,6 +25,7 @@ const ICONS = {
   summary: svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>'),
   plan: svg('<polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'),
   ssp: svg('<path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>'),
+  merge: svg('<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/>'),
 };
 
 function isOpenSaved(key, fallback) {
@@ -132,11 +135,35 @@ async function buildVisits(patient) {
       if (c.date) visit(toDateKey(c.date)).badges.push({ type: "consent", label: `Consent Form · ${c.title}`, link: c.link, portalId: c.portalId || "" });
     });
   }
+  // Consultation summaries, grouped by day + clinician so same-day recordings can be merged.
+  // Clinician = staff UID when the record has one; older records fall back to the first name.
+  const groups = new Map();
   (transcripts || []).forEach((t) => {
     if (!t.date) return;
-    const v = visit(toDateKey(t.date));
-    v.badges.push({ type: "summary", label: `Summary${t.staff ? ` · ${t.staff}` : ""}`, id: t.id });
-    if (extractSection(t.soap, "TREATMENT PLAN")) v.badges.push({ type: "plan", label: "Treatment plan" });
+    const key = toDateKey(t.date);
+    const clin = t.staffUid || String(t.staff || "").trim().split(/\s+/)[0].toLowerCase();
+    const gk = `${key}|${clin}`;
+    if (!groups.has(gk)) groups.set(gk, { key, items: [] });
+    groups.get(gk).items.push(t);
+  });
+  groups.forEach(({ key, items }) => {
+    const v = visit(key);
+    items.sort((a, b) => a.date.getTime() - b.date.getTime()); // earliest recording first
+    items.forEach((t) => {
+      const n = (t.mergedFrom || []).length + 1;
+      v.badges.push({
+        type: "summary", id: t.id,
+        label: `Summary${t.staff ? ` · ${t.staff}` : ""}${n > 1 ? ` (${n} recordings)` : ""}`,
+      });
+    });
+    // Only Drafts can be merged (the server refuses Reviewed notes)
+    const allDraft = items.every((t) => !/^reviewed$/i.test(t.status || "Draft"));
+    if (items.length > 1 && allDraft) {
+      v.badges.push({ type: "merge", label: `Merge ${items.length} summaries`, ids: items.map((t) => t.id) });
+    }
+    if (items.some((t) => extractSection(t.soap, "TREATMENT PLAN")) && !v.badges.some((b) => b.type === "plan")) {
+      v.badges.push({ type: "plan", label: "Treatment plan" });
+    }
   });
   ((skincare && skincare.protocols) || []).forEach((p) => {
     if (!parseDateKey(p.date)) return;
@@ -249,6 +276,8 @@ export function mountHistory(root, patient) {
       render();
       return;
     }
+    const merge = e.target.closest("[data-hv-merge]");
+    if (merge) { mergeSummaries(merge); return; }
     const summary = e.target.closest("[data-hv-summary]");
     if (summary && summary.dataset.hvSummary) { showSoapPanel(summary.dataset.hvSummary); return; }
     const jump = e.target.closest("[data-hv-jump]");
@@ -256,6 +285,54 @@ export function mountHistory(root, patient) {
   });
 
   if (section.open) load();
+}
+
+// Same patient, same day, same clinician: one set of notes from all the transcripts
+async function mergeSummaries(btn) {
+  let ids = [];
+  try { ids = JSON.parse(btn.dataset.hvMerge || "[]"); } catch { /* malformed */ }
+  if (ids.length < 2) return;
+
+  if (!(await confirmDialog({
+    title: `Merge ${ids.length} consultation summaries?`,
+    message: "The transcripts will be combined and the notes written again as one Draft.\n\n" +
+      "Nothing is deleted: the later recordings are kept and marked as merged into the first one.",
+    confirmLabel: "Merge",
+    tone: "info",
+  }))) return;
+
+  const label = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = "Merging…";
+
+  const run = async (force) => {
+    try {
+      const res = await callApi({ action: "mergeConsults", recordIds: ids, force: !!force });
+      showToast("Summaries merged");
+      // Reload the patient page so every section (history, plans, social history) picks up the kept record
+      if (location.hash.startsWith("#/patient/")) window.dispatchEvent(new HashChangeEvent("hashchange"));
+      if (res && res.transcriptId) showSoapPanel(res.transcriptId, { mode: "open" });
+    } catch (err) {
+      console.error("Merge failed:", err.code || "(no code)", err.detail || "", err);
+      if (err.code === "DIFFERENT_DAY_OR_STAFF" && !force && await confirmDialog({
+        title: "Not the same day or clinician",
+        message: "The server doesn't see these as the same consultation (different day, or the clinician name doesn't match).\n\nMerge them anyway?",
+        confirmLabel: "Merge anyway",
+        tone: "warning",
+      })) { await run(true); return; }
+      const messages = {
+        REVIEWED: "Reviewed notes can't be merged. Save them as Draft first.",
+        DIFFERENT_DAY_OR_STAFF: "These recordings aren't from the same day and clinician.",
+        BUSY: "One of these records is being worked on. Please try again in a moment.",
+        NOT_FOUND: "One of these records no longer exists.",
+        GEMINI_FAILED: "Gemini couldn't write the merged notes just now. Please try again.",
+        UNAUTHORIZED: "Your session has expired. Please log in again.",
+      };
+      showToast(messages[err.code] || `Couldn't merge${err.detail ? `: ${err.detail}` : ""}. Please try again.`);
+      if (btn.isConnected) { btn.disabled = false; btn.innerHTML = label; }
+    }
+  };
+  await run(false);
 }
 
 function jumpTo(root, target) {
@@ -275,7 +352,8 @@ function jumpTo(root, target) {
 const STATUS_LABEL = { past: "Past visit", today: "Today's visit", upcoming: "Upcoming" };
 
 function badgeHtml(b) {
-  const icon = { tx: ICONS.doc, consent: ICONS.consent, summary: ICONS.summary, plan: ICONS.plan, ssp: ICONS.ssp }[b.type];
+  
+  const icon = { tx: ICONS.doc, consent: ICONS.consent, summary: ICONS.summary, plan: ICONS.plan, ssp: ICONS.ssp, merge: ICONS.merge }[b.type];
   const inner = `${icon}<span>${escapeHtml(b.label)}</span>`;
 
   if (b.type === "tx" || b.type === "consent") {
@@ -291,6 +369,7 @@ function badgeHtml(b) {
   if (b.type === "plan") return `<button type="button" class="hv-badge b-plan" data-hv-jump="plan">${inner}</button>`;
   if (b.type === "ssp") return `<button type="button" class="hv-badge b-ssp" data-hv-jump="ssp">${inner}</button>`;
   if (b.type === "summary") return `<button type="button" class="hv-badge b-summary" data-hv-summary="${escapeHtml(b.id || "")}">${inner}</button>`;
+  if (b.type === "merge") return `<button type="button" class="hv-badge b-merge" data-hv-merge="${escapeHtml(JSON.stringify(b.ids || []))}" title="Combine these recordings into one set of notes">${inner}</button>`;
   return `<span class="hv-badge b-${b.type}">${inner}</span>`;
 }
 

@@ -30,6 +30,7 @@ function doPost(e) {
     if (body.action === 'deleteRecording') return json_(handleDeleteRecording_(body));
     if (body.action === 'sendTreatmentEmail') return json_(handleSendTreatmentEmail_(body));
     if (body.action === 'regenerateSoap') return json_(handleRegenerateSoap_(body));
+    if (body.action === 'mergeConsults') return json_(handleMergeConsults_(body));
     if (body.action === 'emailFromPlan') return json_(handleEmailFromPlan_(body));
     if (body.action === 'sendFormPdf') return json_(handleSendFormPdf_(body));
     if (body.action === 'imageBank') return json_(handleImageBank_(body));
@@ -1043,9 +1044,12 @@ function processJob_(id, manual) {
       return { ok: true, next: true }; // notes are written in a separate run
     }
 
-    writeNotesStage_(cfg, job);
-    fsPatch_(cfg, jobPath, { status: 'ready', stageAt: new Date().toISOString(), transcriptId: id, error: '' });
-    return { ok: true, transcriptId: id };
+    const openId = writeNotesStage_(cfg, job) || id;   // the record kept, if this recording joined an earlier one
+    fsPatch_(cfg, jobPath, {
+      status: 'ready', stageAt: new Date().toISOString(), transcriptId: openId,
+      mergedInto: openId === id ? '' : openId, error: '',
+    });
+    return { ok: true, transcriptId: openId, merged: openId !== id };
   } catch (err) {
     console.error('Recording ' + id + ' failed at ' + stage + ': ' + (err && err.stack ? err.stack : err));
     const failedStage = (stage === 'writing' && !err.retranscribe) ? 'writing' : 'transcribing';
@@ -1115,6 +1119,10 @@ function transcribeStage_(cfg, job) {
     'Patient Doc ID': job.patientDocId || '',
     'Patient Name': job.patientName || '',
     'Staff Name': job.staffName || '',
+    'Staff Uid': String(job.createdByUid || ''),
+    'Record Date': Utilities.formatDate(started, REC_TZ_, 'yyyy-MM-dd'),
+    'Merged Into': '',
+    'Merged From': [],
     'DeepGram Transcript': dg.formatted,  // same as the Recorder: formatted, speaker-labelled transcript
     'Full Raw Transcript': dg.formatted,
     'DeepGram Summary': dg.summary || '',
@@ -1197,19 +1205,29 @@ function writeNotesStage_(cfg, job) {
     throw e;
   }
 
-  const dateObj = job.startedAt ? new Date(job.startedAt) : new Date();
-  const soapJson = cleanSoapJson_(callGeminiComplex(transcript.replace(/<[^>]*>?/gm, '\n'), dateObj));
-
   // Recording rules (System configuration): reminders, highlights and note lines. Never stops the notes.
+  // Checked on this recording's own transcript, so a merge never makes the same reminder twice.
   let ruleHits = [];
   let ruleError = '';
-  try {
-    ruleHits = recApplyRules_(cfg, job, transcript);
-    recAddToNotes_(soapJson, ruleHits);
-  } catch (e) {
+  try { ruleHits = recApplyRules_(cfg, job, transcript); }
+  catch (e) {
     console.error('Recording rules failed for ' + id + ': ' + (e && e.stack ? e.stack : e));
     ruleError = String((e && e.message) || e).slice(0, 300);
   }
+
+  // Same patient, same clinician, same day, and the earlier notes are still a Draft: this recording joins them
+  const target = consultMergeTarget_(cfg, id, rec);
+  if (target) {
+    rec._id = id;
+    const tid = consultMergeInto_(cfg, target, [{ rec: rec, hits: ruleHits }], 'Automatic');
+    fsPatch_(cfg, docPath, { 'Rule Hits': ruleHits, 'Rules Checked At': new Date().toISOString(), 'Rule Error': ruleError });
+    return tid;   // the referral email is not sent again (the first recording of the day already did)
+  }
+
+  const dateObj = job.startedAt ? new Date(job.startedAt) : new Date();
+  const soapJson = cleanSoapJson_(callGeminiComplex(transcript.replace(/<[^>]*>?/gm, '\n'), dateObj));
+  try { recAddToNotes_(soapJson, ruleHits); }
+  catch (e) { console.warn('Rule lines not added for ' + id + ': ' + e); }
 
   fsPatch_(cfg, docPath, {
     'Status': 'Draft',
@@ -1225,6 +1243,7 @@ function writeNotesStage_(cfg, job) {
   // Same referral email as the Recorder (non-fatal if it fails)
   sendReferralNotification_(job.patientName || '', job.patientId || job.patientDocId || '',
     soapJson.referral, job.staffName || '');
+  return id;
 }
 
 
@@ -1691,6 +1710,143 @@ function handleRegenerateSoap_(body) {
   }
 }
 
+// ===================== Consultations: one set of notes per patient, clinician and day =====================
+// A second recording for the same patient, by the same clinician, on the same day joins the first while it's still a
+// Draft: the transcripts are put together, the notes are written again from both, and the later record is marked
+// "Merged" (kept, never deleted). Reviewed notes are never merged into or out of. Staff can also merge by hand
+// (action "mergeConsults"), e.g. older recordings, or when the name was spelt differently.
+
+const CONSULT_MERGE_SEP_ = '<div><br><b class="text-amber-700">— Next recording —</b><br></div><br>';
+
+function consultDateKey_(rec) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(rec['Record Date'] || ''))) return String(rec['Record Date']);
+  const d = new Date(String(rec['Record Date and Time'] || '').replace(/\s+at\s+/i, ' '));
+  return isNaN(d) ? '' : Utilities.formatDate(d, REC_TZ_, 'yyyy-MM-dd');
+}
+
+// The same clinician: by login when both records have it, otherwise by name ("Bethany" = "Bethany Staff")
+function consultSameStaff_(a, b) {
+  const ua = String(a['Staff Uid'] || ''), ub = String(b['Staff Uid'] || '');
+  if (ua && ub) return ua === ub;
+  return kitSameStaff_(a['Staff Name'], b['Staff Name']);
+}
+
+function consultMergeable_(r) {
+  return String(r.Status || '') === 'Draft' && !r['Merged Into'] && !!String(r['Full Raw Transcript'] || '').trim();
+}
+
+// The Draft consultation a new recording joins (same patient, clinician and day), or null
+function consultMergeTarget_(cfg, id, rec) {
+  const pid = String(rec['Patient ID'] || '').trim();
+  const day = consultDateKey_(rec);
+  if (!pid || !day) return null;
+  let list;
+  try { list = fsQuery_(cfg, 'appointment_transcripts', quoteField_('Patient ID'), 'EQUAL', pid, 100); }
+  catch (e) { console.warn('Merge check skipped for ' + id + ': ' + e); return null; }
+  return list.filter(function (r) {
+    return r._id !== id && String(r.Source || '') === 'Dashboard recording' && consultMergeable_(r)
+      && consultDateKey_(r) === day && consultSameStaff_(r, rec);
+  }).sort(function (a, b) { return String(a['Created At'] || '').localeCompare(String(b['Created At'] || '')); })[0] || null;
+}
+
+// Puts the later recordings into the one kept. others: [{ rec (with _id), hits }]. Returns the kept record's id.
+function consultMergeInto_(cfg, target, others, by) {
+  const tid = target._id;
+  const list = others.slice().sort(function (a, b) {
+    return String(a.rec['Created At'] || '').localeCompare(String(b.rec['Created At'] || ''));
+  });
+  const all = [target].concat(list.map(function (o) { return o.rec; }));
+  const transcript = all.map(function (r) { return String(r['Full Raw Transcript'] || '').trim(); })
+    .filter(Boolean).join(CONSULT_MERGE_SEP_);
+  const dateObj = new Date(String(target['Record Date and Time'] || '').replace(/\s+at\s+/i, ' '));
+  const soapJson = cleanSoapJson_(callGeminiComplex(transcript.replace(/<[^>]*>?/gm, '\n'), isNaN(dateObj) ? new Date() : dateObj));
+
+  let hits = Array.isArray(target['Rule Hits']) ? target['Rule Hits'].slice() : [];
+  list.forEach(function (o) {
+    hits = hits.concat(Array.isArray(o.hits) ? o.hits : Array.isArray(o.rec['Rule Hits']) ? o.rec['Rule Hits'] : []);
+  });
+  try { recAddToNotes_(soapJson, hits); } catch (e) { console.warn('Rule lines not added on merge: ' + e); }
+
+  const now = new Date().toISOString();
+  const ids = list.map(function (o) { return o.rec._id; });
+  fsPatch_(cfg, 'appointment_transcripts/' + tid, {
+    'Full Raw Transcript': transcript,
+    'DeepGram Transcript': transcript,
+    'DeepGram Summary': all.map(function (r) { return String(r['DeepGram Summary'] || '').trim(); }).filter(Boolean).join('\n\n'),
+    'Gemini SOAP': formatSoapFromJSON(soapJson),
+    'Previous Gemini SOAP': String(target['Gemini SOAP'] || ''),   // kept, so it can be restored
+    'Suggested Personal Notes': Array.isArray(soapJson.personal_notes)
+      ? soapJson.personal_notes.map(String).filter(Boolean) : [],
+    'Rule Hits': hits,
+    'Duration Sec': all.reduce(function (t, r) { return t + (Number(r['Duration Sec']) || 0); }, 0),
+    'Audio Paths': uniq_([String(target['Audio Path'] || '')]
+      .concat(Array.isArray(target['Audio Paths']) ? target['Audio Paths'] : [])
+      .concat(list.map(function (o) { return String(o.rec['Audio Path'] || ''); }))),
+    'Merged From': (Array.isArray(target['Merged From']) ? target['Merged From'] : []).concat(ids),
+    'Merged At': now,
+    'Merged By': String(by || ''),
+    'Status': 'Draft',
+  });
+  list.forEach(function (o) {
+    fsPatch_(cfg, 'appointment_transcripts/' + o.rec._id, {
+      'Status': 'Merged', 'Merged Into': tid, 'Merged At': now, 'Merged By': String(by || ''),
+    });
+  });
+  console.log('Consultation ' + ids.join(', ') + ' merged into ' + tid + ' (' + by + ')');
+  return tid;
+}
+
+// From the portal: merge two or more recordings by hand. Same patient always; same day and clinician unless force.
+function handleMergeConsults_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!can_(session, 'consult.record')) return { ok: false, error: 'FORBIDDEN' };
+  const ids = uniq_((Array.isArray(body.recordIds) ? body.recordIds : []).map(String)
+    .filter(function (s) { return /^[A-Za-z0-9_-]{3,80}$/.test(s); })).slice(0, 10);
+  if (ids.length < 2) return { ok: false, error: 'BAD_REQUEST' };
+
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(20000)) return { ok: false, error: 'BUSY' };
+  try {
+    const cfg = getConfig_();
+    const recs = ids.map(function (id) {
+      const r = fsGetDoc_(cfg, 'appointment_transcripts/' + id);
+      if (r) r._id = id;
+      return r;
+    });
+    if (recs.some(function (r) { return !r; })) return { ok: false, error: 'NOT_FOUND' };
+    if (recs.some(function (r) { return /^reviewed$/i.test(String(r.Status || '')); })) return { ok: false, error: 'REVIEWED' };
+    if (recs.some(function (r) { return !consultMergeable_(r); })) return { ok: false, error: 'NOT_MERGEABLE' };
+    const pid = String(recs[0]['Patient ID'] || '').trim();
+    if (!pid || recs.some(function (r) { return String(r['Patient ID'] || '').trim() !== pid; })) {
+      return { ok: false, error: 'DIFFERENT_PATIENT' };
+    }
+    if (body.force !== true && recs.some(function (r) {
+      return consultDateKey_(r) !== consultDateKey_(recs[0]) || !consultSameStaff_(r, recs[0]);
+    })) return { ok: false, error: 'DIFFERENT_DAY_OR_STAFF' };
+
+    recs.sort(function (a, b) { return String(a['Created At'] || '').localeCompare(String(b['Created At'] || '')); });
+    const keepId = String(body.keepId || '');
+    const target = recs.filter(function (r) { return r._id === keepId; })[0] || recs[0];
+    const others = recs.filter(function (r) { return r !== target; }).map(function (r) { return { rec: r }; });
+
+    const cache = CacheService.getScriptCache();   // one regenerate or merge at a time per record
+    const busyKey = 'regen_' + target._id;
+    if (cache.get(busyKey)) return { ok: false, error: 'BUSY' };
+    cache.put(busyKey, '1', 600);
+    try {
+      const tid = consultMergeInto_(cfg, target, others, String(session.name || 'Staff'));
+      return { ok: true, transcriptId: tid, merged: others.length };
+    } catch (err) {
+      console.error('Merge failed: ' + (err && err.stack ? err.stack : err));
+      return { ok: false, error: 'GEMINI_FAILED' };
+    } finally {
+      cache.remove(busyKey);
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
 
 // ===================== Rebuild "Treatment Info to Email" from the treatment plan =====================
 

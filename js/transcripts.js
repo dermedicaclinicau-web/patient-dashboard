@@ -78,12 +78,19 @@ export async function fetchTranscriptRecords(patient) {
     const pid = String(data["Patient ID"] || "").trim();
     if (!byId && pid && !ids.includes(pid)) continue;
 
+    // Folded into an earlier recording of the same consultation: its notes live on the kept record
+    const status = String(data["Status"] || "Draft");
+    if (/^merged$/i.test(status) || String(data["Merged Into"] || "").trim()) continue;
+
     records.push({
       id: d.id,
       soap: String(data["Gemini SOAP"] || ""),
       date: parseRecordDate(data["Record Date and Time"]),
       dateText: String(data["Record Date and Time"] || ""),
       staff: String(data["Staff Name"] || ""),
+      staffUid: String(data["Staff Uid"] || ""),
+      status,
+      mergedFrom: Array.isArray(data["Merged From"]) ? data["Merged From"] : [],
       recordId: String(data["Record ID"] || ""),
       matchedByName: !byId,
     });

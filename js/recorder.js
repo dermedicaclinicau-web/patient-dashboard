@@ -143,7 +143,7 @@ function saveTracked() {
   if (!me) return;
   const mine = [...jobs.values()].filter((j) => ["processing", "failed", "ready"].includes(j.status))
     .map((j) => ({ recId: j.recId, patient: j.patient, staff: j.staff, elapsedMs: j.elapsedMs, at: j.at,
-      announced: !!j.announced, uid: me }));
+      merged: !!j.merged, announced: !!j.announced, uid: me }));
   // Someone else's on a shared iPad are kept (for a day)
   const others = readTracked().filter((t) => t.uid !== me && Date.now() - (t.at || 0) < DAY);
   try { localStorage.setItem(TRACK_KEY, JSON.stringify([...others, ...mine].slice(-40))); } catch { /* not essential */ }
@@ -155,7 +155,7 @@ function addJob(meta, status) {
   jobs.set(meta.recId, {
     recId: meta.recId, patient: meta.patient || null, staff: meta.staff || null, elapsedMs: meta.elapsedMs || 0,
     startedAt: meta.startedAt || "", at: meta.at || Date.now(), status, stage: "", progress: 0, error: "",
-    transcriptId: "", announced: !!meta.announced,
+    transcriptId: "", merged: !!meta.merged, announced: !!meta.announced,
   });
 }
 
@@ -462,7 +462,7 @@ function watchJob(recId) {
     const job = snap.data();
     if (job.status === "ready") {
       stopWatching(recId);
-      setJob(recId, { status: "ready", transcriptId: job.transcriptId || recId, error: "" });
+      setJob(recId, { status: "ready", transcriptId: job.transcriptId || recId, merged: !!job.mergedInto, error: "" });
     } else if (job.status === "failed") {
       setJob(recId, { status: "failed", error: job.error || "Processing failed." });
     } else {

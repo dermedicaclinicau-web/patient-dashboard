@@ -704,6 +704,9 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .b-summary { color: #fff; border-color: #d97706; background: #d97706; }
 .b-plan { color: #7c3aed; border-color: #ddd6fe; background: #f5f3ff; }
 .b-ssp { color: #047857; border-color: #a7f3d0; background: #ecfdf5; }
+.b-merge { color: #4338ca; border-color: #c7d2fe; background: #eef2ff; border-style: dashed; }
+.b-merge:hover { border-style: solid; }
+.b-merge:disabled { opacity: .6; cursor: wait; }
 
 .hv-more { width: 100%; padding: .7rem; border-radius: 10px; border: 1px solid var(--border);
   background: var(--surface-2); font-weight: 600; cursor: pointer; }

@@ -271,6 +271,10 @@ function render() {
              <button type="button" class="sp-link" data-sp="undo-regen">Restore previous version</button></p>`
         : ""}
       ${!hasSoap ? `<p class="sp-banner warn">Clinical notes haven't been generated for this record yet. You can still type notes below.</p>` : ""}
+      ${Array.isArray(d["Merged From"]) && d["Merged From"].length
+        ? `<p class="sp-banner info">These notes combine ${d["Merged From"].length + 1} recordings of this consultation${
+            d["Merged By"] ? ` (merged: ${escapeHtml(String(d["Merged By"]))})` : ""}. The raw transcript below contains all of them.</p>`
+        : ""}
       ${rulesHtml(d)}
 
       <details class="sp-raw">

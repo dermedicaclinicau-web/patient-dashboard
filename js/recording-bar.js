@@ -217,7 +217,7 @@ function jobHtml(j) {
       break;
     case "ready":
       cls = "is-ready";
-      st = `${ICONS.check}<span>Notes ready</span>`;
+      st = `${ICONS.check}<span>${j.merged ? "Added to the earlier consultation" : "Notes ready"}</span>`;
       acts = btn("job-review", "Review", true) + hide("Hide");
       break;
     case "failed":
