@@ -4875,6 +4875,7 @@ function runNotifications() {
   try { recallReplies_(cfg); } catch (e) { console.error('Recall replies: ' + (e && e.stack ? e.stack : e)); }
   try { scanJobsSweep_(cfg); } catch (e) { console.error('Scan jobs: ' + (e && e.stack ? e.stack : e)); }
   try { prosImport_(cfg, 30, 14); } catch (e) { console.error('Prospect emails: ' + (e && e.stack ? e.stack : e)); }
+  try { prosContactCheck_(cfg); } catch (e) { console.error('Prospect contact check: ' + (e && e.stack ? e.stack : e)); }
   try { prosDaily_(cfg, now); } catch (e) { console.error('Prospect reminders: ' + (e && e.stack ? e.stack : e)); }
 }
 
@@ -17434,21 +17435,29 @@ function prosAction_(cfg, op, id, body, session) {
     if (sup && sup.reason === 'bounced') return { ok: true, problem: 'Emails to this address bounce. Check it with them.' };
     if (sup) return { ok: true, problem: "They've asked not to be contacted." };
     const subject = String(body.subject || '').replace(/\s+/g, ' ').trim().slice(0, 200);
-    const message = String(body.message || '').replace(/\r/g, '').trim().slice(0, 5000);
-    if (!subject || message.length < 5) return { ok: true, problem: 'Add a subject and a message.' };
+    const rich = sanitizeEmailHtml_(body.html);
+    const plain = String(body.message || '').replace(/\r/g, '').trim().slice(0, 5000);
+    const text = rich ? emailHtmlToText_(rich) : plain;
+    if (!subject || text.replace(/\s+/g, '').length < 5) return { ok: true, problem: 'Add a subject and a message.' };
+    if (rich.length > 300000) return { ok: true, problem: 'The email is too long.' };
     if (MailApp.getRemainingDailyQuota() < 5) return { ok: true, problem: "The clinic's daily email limit is used up. Try again tomorrow." };
     const cache = CacheService.getScriptCache();
     const rk = 'pr_mail_' + uid;
     const used = Number(cache.get(rk) || 0);
     if (used >= MAIL_LIMIT_PER_HOUR_) return { ok: true, problem: "You've sent a lot of emails in the last hour. Try again a bit later." };
-    const html = textToEmailHtml_(message);
-    MailApp.sendEmail({ to: to, subject: subject, htmlBody: html, body: message, name: 'Dermedica Clinic' });
+    const html = rich
+      ? '<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.55;color:#1e293b">' + rich + '</div>'
+      : textToEmailHtml_(plain);
+    const inl = inlineTaskImages_(cfg, html);
+    const mail = { to: to, subject: subject, htmlBody: inl.html, body: emailHtmlToText_(inl.html), name: 'Dermedica Clinic' };
+    if (Object.keys(inl.images).length) mail.inlineImages = inl.images;
+    MailApp.sendEmail(mail);
     cache.put(rk, String(used + 1), 3600);
-    add('email', 'Email sent: ' + subject, message.slice(0, 1000));
+    add('email', 'Email sent: ' + subject, text.slice(0, 1000));
     contacted();
     const bad = followUp();
     if (bad) return { ok: true, problem: bad };
-  } else if (op === 'stage') {
+    } else if (op === 'stage') {
     const to = String(body.stage || '');
     if (PROS_STAGES_.indexOf(to) === -1) return { ok: false, error: 'BAD_REQUEST' };
     if (to === p.stage) return { ok: true, prospect: Object.assign({ id: id }, p) };
@@ -17947,6 +17956,122 @@ function prosStagesCheck_(cfg, ctx, ixIn) {
   return sum;
 }
 
+/* ---------- Prospects: emails (Gmail) and texts (TextMagic) sent outside the portal count as contact ---------- */
+const PROS_CC_DAYS_ = 3;              // how far back to look
+const PROS_CC_GAP_MS_ = 15 * 60000;   // a message this soon after a contact logged in the portal is that same contact
+
+function prosTmAuth_() {
+  const pr = PropertiesService.getScriptProperties();
+  const user = pr.getProperty('TextMagicUser');
+  const key = pr.getProperty('TextMagic');
+  return user && key ? { user: user, key: key } : null;
+}
+
+function prosContactCheck_(cfg, force) {
+  const cache = CacheService.getScriptCache();
+  if (!force && cache.get('pros_cc')) return { skipped: 'ran in the last 10 minutes' };
+  cache.put('pros_cc', '1', 600);
+  const t0 = Date.now();
+  const now = new Date().toISOString();
+  const sum = { emails: 0, texts: 0, prospects: 0, written: 0, errors: [] };
+  const k9 = function (s) { return String(s || '').replace(/\D/g, '').slice(-9); };   // last 9 digits of a mobile
+
+  const list = fsListAll_(cfg, PROS_COL_, ['name', 'email', 'emailKey', 'phoneKey', 'stage', 'createdAt',
+    'lastContactAt', 'firstContactAt'])
+    .map(function (d) { const f = fromFields_(d.fields || {}); f._id = d.name.split('/').pop(); return f; })
+    .filter(function (p) { return p.stage !== 'lost'; });
+  const byId = Object.create(null), byEmail = Object.create(null), byPhone = Object.create(null);
+  list.forEach(function (p) {
+    byId[p._id] = p;
+    const e = String(p.email || p.emailKey || '').trim().toLowerCase();
+    if (e) (byEmail[e] = byEmail[e] || []).push(p);
+    const ph = k9(p.phoneKey);
+    if (ph.length === 9) (byPhone[ph] = byPhone[ph] || []).push(p);
+  });
+
+  // Only messages after they enquired, and after the last contact already logged
+  const found = Object.create(null);
+  const add = function (p, m) {
+    const after = Math.max(Date.parse(p.createdAt || '') || 0, (Date.parse(p.lastContactAt || '') || 0) + PROS_CC_GAP_MS_);
+    if (!(Date.parse(m.at) > after)) return false;
+    (found[p._id] = found[p._id] || []).push(m);
+    return true;
+  };
+
+  // 1. Gmail: emails sent from info@ by a person (campaigns, flows and recall emails have an unsubscribe link: left out)
+  try {
+    GmailApp.search('in:sent newer_than:' + PROS_CC_DAYS_ + 'd -unsubscribe -subject:"[Test]"', 0, 200).forEach(function (th) {
+      th.getMessages().forEach(function (m) {
+        if (m.isDraft()) return;
+        if (/unsubscribe\.html|\[Test\]/i.test(m.getSubject() + ' ' + m.getBody())) return;   // automatic, or a test
+        const from = String(m.getFrom() || '').toLowerCase();
+        const to = (String(m.getTo() || '') + ',' + String(m.getCc() || '')).toLowerCase();
+        const at = m.getDate().toISOString();
+        (to.match(/[a-z0-9._%+'-]+@[a-z0-9.-]+\.[a-z]{2,}/g) || []).forEach(function (e) {
+          if (from.indexOf(e) !== -1) return;   // their own email in the thread
+          (byEmail[e] || []).forEach(function (p) {
+            if (add(p, { at: at, kind: 'email', by: 'Gmail', what: 'Emailed from Gmail', note: m.getSubject() || '(no subject)' })) sum.emails++;
+          });
+        });
+      });
+    });
+  } catch (e) { sum.errors.push('Gmail: ' + e.message); }
+
+  // 2. TextMagic: texts sent from the website, the app or the portal
+  const tm = prosTmAuth_();
+  if (!tm) sum.errors.push('TextMagic: no username or API key found in Script Properties');
+  else {
+    try {
+      const since = Date.now() - PROS_CC_DAYS_ * 864e5;
+      for (let page = 1; page <= 5; page++) {
+        const r = UrlFetchApp.fetch('https://rest.textmagic.com/api/v2/messages?page=' + page + '&limit=100&orderBy=id&direction=desc',
+          { headers: { 'X-TM-Username': tm.user, 'X-TM-Key': tm.key }, muteHttpExceptions: true });
+        if (r.getResponseCode() !== 200) { sum.errors.push('TextMagic: ' + r.getResponseCode() + ' ' + r.getContentText().slice(0, 200)); break; }
+        const res = JSON.parse(r.getContentText()).resources || [];
+        let old = false;
+        res.forEach(function (m) {
+          const t = Date.parse(String(m.messageTime || '').replace(/([+-]\d{2})(\d{2})$/, '$1:$2'));
+          if (!(t >= since)) { old = true; return; }
+          if (/reply\s+stop\s+to\s+opt\s+out/i.test(String(m.text || ''))) return;   // a Recall text, not a person
+          (byPhone[k9(m.receiver)] || []).forEach(function (p) {
+            if (add(p, { at: new Date(t).toISOString(), kind: 'text', by: 'TextMagic', what: 'Texted from TextMagic',
+              note: String(m.text || '').trim() })) sum.texts++;
+          });
+        });
+        if (old || res.length < 100) break;
+      }
+    } catch (e) { sum.errors.push('TextMagic: ' + e.message); }
+  }
+
+  // 3. Save: counted as contact, on the Timeline, and New enquiry moves to Contacted
+  const writes = [];
+  Object.keys(found).forEach(function (id) {
+    if (cache.get('stl_pr_' + id)) return;   // a staff member is saving it right now: picked up next time
+    const p = byId[id];
+    const ms = found[id].sort(function (a, b) { return a.at.localeCompare(b.at); });
+    const first = ms[0].at;
+    const last = ms[ms.length - 1].at;
+    const patch = { lastContactAt: last, waitingSince: '', updatedAt: now };
+    if (!p.firstContactAt) patch.firstContactAt = first;
+    const entries = ms.map(function (m) { return { at: m.at, by: m.by, byUid: '', kind: m.kind, what: m.what, note: m.note }; });
+    if (String(p.stage || 'new') === 'new') {
+      Object.assign(patch, { stage: 'contacted', stageAt: first });
+      entries.push({ at: now, by: PROS_AUTO_, byUid: '', kind: 'stage', note: '',
+        what: 'Moved to ' + PROS_STAGE_NAME_.contacted + ': ' + (ms[0].kind === 'text' ? 'texted' : 'emailed') + ' outside the portal' });
+    }
+    const w = patchWrite_(cfg, PROS_COL_ + '/' + id, patch);
+    w.updateTransforms = [
+      { fieldPath: 'contacts', increment: { integerValue: String(ms.length) } },
+      { fieldPath: 'log', appendMissingElements: { values: entries.map(function (e) { return toValue_(e); }) } },
+    ];
+    writes.push(w);
+  });
+  if (writes.length) commitWrites_(cfg, writes, 200);
+  sum.prospects = Object.keys(found).length;
+  sum.written = writes.length;
+  sum.ms = Date.now() - t0;
+  return sum;
+}
 
 function prosStagesRun_(force) {
   const cache = CacheService.getScriptCache();
@@ -18176,4 +18301,9 @@ function paperCacheName_(id, name) {
     files.forEach(function (x) { if (x.id === id) { x.name = name; hit = true; } });
     if (hit) repCachePut_(PAPER_FKEY_, files, 1800);
   } catch (e) { /* not essential */ }
+}
+
+
+function prospectContactCheckNow() {
+  console.log(JSON.stringify(prosContactCheck_(getConfig_(), true)));
 }

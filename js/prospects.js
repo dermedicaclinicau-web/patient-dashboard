@@ -7,6 +7,16 @@ import { collection, getDocs, getDoc, doc, query, orderBy, limit, where }
 import { callApi } from "./appointments.js";
 import { can } from "./perms.js";
 import { showToast } from "./utils.js";
+import { openProspectCompose } from "./prospect-compose.js?v=1";
+
+openProspectCompose({
+  prospect: p,
+  kind: "email",                       // or "text"
+  myName: me.name,                     // the person logged in
+  send: (body) => callApi("prospects", { ...body, id: p.id }),
+  onSent: (updated) => { if (updated) { Object.assign(p, updated); render(); } },
+  toast: (msg) => showToast(msg),
+});
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const enc = encodeURIComponent;
