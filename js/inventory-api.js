@@ -3018,13 +3018,15 @@ export async function listLotsForProduct(productId) {
   return snap.docs.map(normaliseLot).sort(fefo);
 }
 
-// Admin: which batch a Shelf / JT storage line on a usage really came from, chosen after the fact.
-// to: { ref: <lot id> }, or { batch, expiry } typed in (recorded only: stock isn't changed).
+// Admin: which batch a line on a usage really came from, chosen after the fact.
+// Shelf / JT storage products: a batch in stock. Kit products (Xeomin): a batch in an injector's kit.
+// to: { ref: <lot id, or kit record id> }, or { batch, expiry } typed in (recorded only: stock isn't changed).
 //  · Still short (taken < amount): the missing part comes off the chosen batch now, dated the treatment day.
-//  · Already taken from a batch: it goes back there and comes off the chosen batch instead.
+//  · Already taken from a batch: it goes back there and comes off the chosen batch instead (another injector's
+//    kit, if that's where it really came from).
 //  · Taken before the product tracked batches (no batch on the line): the batch is written on the record only.
 //    That stock was already accounted for when batch tracking was turned on.
-// Opening counts done since the treatment day are corrected, like a paper record entered late.
+// Shelf / JT storage: opening counts done since the treatment day are corrected, like a paper record entered late.
 export async function setUsageBatch(id, li, ri, to, reason, staff) {
   const why = clip(reason, 300);
   if (why.length < 3) throw new Error("Add a reason.");
@@ -3043,60 +3045,96 @@ export async function setUsageBatch(id, li, ri, to, reason, staff) {
     const l = lines[li];
     const r = l && l.rows[ri];
     if (!r) throw new Error("This record has changed. Reload and try again.");
-    if (l.kind !== "storage") throw new Error(`${l.name}: only Shelf / JT storage products can have their batch changed here.`);
+    if (l.kind !== "storage" && l.kind !== "kit") throw new Error(`${l.name} came from an opened container, so its batch can't be changed here.`);
+    const kit = l.kind === "kit";
     const pSnap = await tx.get(doc(db, "inv_products", l.productId));
     if (!pSnap.exists()) throw new Error("This product no longer exists.");
     const pd = pSnap.data();
     const tracked = pd.tracked === true;
-    const unit = String(pd.stockUnit || l.unit || "item");
-    const amount = Math.max(0, Math.round(Number(r.amount) || 0));
-    const taken = Math.max(0, Math.round(Number(r.taken) || 0));
-    const oldLoc = r.from === "jt" ? "jt" : "shelf";
+    const unit = kit ? String(pd.doseUnit || l.unit || "units") : String(pd.stockUnit || l.unit || "item");
+    const num = (v) => (kit ? round1(Math.max(0, Number(v) || 0)) : Math.max(0, Math.round(Number(v) || 0)));
+    const amount = num(r.amount), taken = num(r.taken);
+    const oldLoc = kit ? "kit" : (r.from === "jt" ? "jt" : "shelf");
+    const oldOwner = kit ? String(l.kitUid || u.byUid || "") : "";
     const oldBatch = String(r.batch || ""), oldExp = String(r.expiry || "");
 
-    // The batch it's going to
+    // Where it's going
     const typed = !(to && to.ref);
-    let nb, ne, nloc, newRef = null, newSnap = null;
+    let nb, ne, nloc = oldLoc, newOwner = oldOwner, newOwnerName = "", newRef = null, newSnap = null;
     if (typed) {
       nb = clip(to && to.batch, 40);
       ne = KEY_RE.test((to && to.expiry) || "") ? to.expiry : "";
-      nloc = oldLoc;
       if (!nb) throw new Error("Enter the batch number.");
     } else {
-      newRef = doc(db, "inv_lots", clip(to.ref, 200));
+      newRef = doc(db, kit ? "inv_kits" : "inv_lots", clip(to.ref, 200));
       newSnap = await tx.get(newRef);
-      if (!newSnap.exists() || String(newSnap.data().productId || "") !== l.productId) throw new Error("Choose which batch it came from.");
+      if (!newSnap.exists() || String(newSnap.data().productId || "") !== l.productId) {
+        throw new Error(kit ? "Choose which batch, in whose kit, it came from." : "Choose which batch it came from.");
+      }
       const d = newSnap.data();
-      nb = String(d.batch || ""); ne = String(d.expiry || ""); nloc = d.loc === "jt" ? "jt" : "shelf";
+      nb = String(d.batch || ""); ne = String(d.expiry || "");
+      if (kit) { newOwner = String(d.staffUid || ""); newOwnerName = String(d.staffName || ""); }
+      else nloc = d.loc === "jt" ? "jt" : "shelf";
     }
-    const annotate = taken > 0 && !oldBatch && tracked;
+    const annotate = !kit && taken > 0 && !oldBatch && tracked;
     const giveBack = taken > 0 && !annotate;
-    const want = typed ? 0 : (giveBack ? amount : amount - taken);
-    const same = nb === oldBatch && ne === oldExp && nloc === oldLoc;
+    const want = typed ? 0 : (giveBack ? amount : num(amount - taken));
+    const same = nb === oldBatch && ne === oldExp && nloc === oldLoc && newOwner === oldOwner;
     if (same && (typed || taken >= amount)) throw new Error("Nothing has changed.");
-    const oldRef = giveBack ? doc(db, "inv_lots", lotId(l.productId, oldLoc, oldBatch, oldExp)) : null;
+    const oldRef = !giveBack ? null
+      : kit ? doc(db, "inv_kits", kitId(oldOwner, l.productId, oldBatch, oldExp))
+      : doc(db, "inv_lots", lotId(l.productId, oldLoc, oldBatch, oldExp));
     const oldSnap = !oldRef ? null : (newRef && oldRef.id === newRef.id) ? newSnap : await tx.get(oldRef);
 
     // ---- Work it out ----
-    const lots = new Map();
-    const touch = (ref, snap, loc, batch, expiry, delta) => {
-      const cur = lots.get(ref.id) || { ref, exists: snap.exists(), qty: snap.exists() ? Number(snap.data().qty) || 0 : 0, loc, batch, expiry };
-      cur.qty += delta;
-      lots.set(ref.id, cur);
-    };
-    const stock = { shelf: 0, jt: 0 };
-    if (giveBack) { touch(oldRef, oldSnap, oldLoc, oldBatch, oldExp, taken); stock[oldLoc] += taken; }
     let took = 0;
-    if (want > 0) {
-      const have = (lots.get(newRef.id) || { qty: Number(newSnap.data().qty) || 0 }).qty;
-      took = Math.min(want, have);
-      if (took > 0) { touch(newRef, newSnap, nloc, nb, ne, -took); stock[nloc] -= took; }
+    const stock = { shelf: 0, jt: 0 };
+    const lots = new Map();   // Shelf / JT storage batches touched
+    const kits = new Map();   // kit records touched
+    const lotState = (ref, snap, loc, batch, expiry) => {
+      const cur = lots.get(ref.id);
+      if (cur) return cur;
+      const s = { ref, exists: snap.exists(), qty: snap.exists() ? Number(snap.data().qty) || 0 : 0, loc, batch, expiry };
+      lots.set(ref.id, s);
+      return s;
+    };
+    const kitState = (ref, snap, owner, batch, expiry) => {
+      const cur = kits.get(ref.id);
+      if (cur) return cur;
+      const d = snap && snap.exists() ? snap.data() : null;
+      const s = { ref, exists: !!d, sealed: d ? parseInt(d.sealed, 10) || 0 : 0, open: d ? round1(d.open) : 0,
+        dosePer: d ? Number(d.dosePer) || 0 : Number(pd.dosePer) || 0, staffUid: owner,
+        staffName: d ? String(d.staffName || "") : (owner === String(u.byUid || "") ? String(u.by || "") : ""), batch, expiry };
+      kits.set(ref.id, s);
+      return s;
+    };
+    if (kit) {
+      if (giveBack) { const s = kitState(oldRef, oldSnap, oldOwner, oldBatch, oldExp); s.open = round1(s.open + taken); }
+      if (want > 0) {
+        const s = kitState(newRef, newSnap, newOwner, nb, ne);
+        while (want > s.open + 0.001 && s.sealed > 0 && s.dosePer > 0) { s.sealed -= 1; s.open = round1(s.open + s.dosePer); }
+        took = round1(Math.min(want, s.open));
+        s.open = round1(s.open - took);
+      }
+    } else {
+      if (giveBack) { const s = lotState(oldRef, oldSnap, oldLoc, oldBatch, oldExp); s.qty += taken; stock[oldLoc] += taken; }
+      if (want > 0) {
+        const s = lotState(newRef, newSnap, nloc, nb, ne);
+        took = Math.min(want, s.qty);
+        if (took > 0) { s.qty -= took; stock[nloc] -= took; }
+      }
     }
-    const newTaken = giveBack ? took : taken + took;
+    const newTaken = giveBack ? took : num(taken + took);
 
     // ---- Writes ----
     lots.forEach((s) => tx.set(s.ref, {
       productId: l.productId, loc: s.loc, batch: s.batch, expiry: s.expiry, qty: Math.max(0, s.qty),
+      updatedAt: serverTimestamp(), ...(s.exists ? {} : { createdAt: serverTimestamp() }),
+    }, { merge: true }));
+    kits.forEach((s) => tx.set(s.ref, {
+      staffUid: s.staffUid, staffName: s.staffName, productId: l.productId, productName: l.name,
+      batch: s.batch, expiry: s.expiry, dosePer: s.dosePer, doseUnit: unit,
+      sealed: Math.max(0, s.sealed), open: Math.max(0, round1(s.open)),
       updatedAt: serverTimestamp(), ...(s.exists ? {} : { createdAt: serverTimestamp() }),
     }, { merge: true }));
     if (stock.shelf || stock.jt) {
@@ -3108,25 +3146,29 @@ export async function setUsageBatch(id, li, ri, to, reason, staff) {
     }
     const eff = KEY_RE.test(u.recordDate || "") ? { effectiveDate: u.recordDate } : {};
     const who2 = `${u.patientName || ""} · ${u.formName || ""}`;
+    const amtText = (n) => (kit ? `${n} ${unit}` : plural(n, unit));
     if (giveBack) {
       logMove(tx, staff, {
-        type: "use-correct", productId: l.productId, productName: l.name, unit, ...eff,
+        type: kit ? "kit-correct" : "use-correct", productId: l.productId, productName: l.name, unit, ...eff,
+        ...(kit ? { staffUid: oldOwner } : {}),
         lines: [{ loc: oldLoc, batch: oldBatch, expiry: oldExp, delta: taken }],
         reason: "Batch corrected", ref: id,
-        note: `${who2} · ${oldBatch || "no batch"} → ${nb} · ${why}`.slice(0, 500),
+        note: `${who2} · ${oldBatch || "no batch"} → ${nb}${kit && newOwner !== oldOwner ? ` (${newOwnerName || "another injector"}'s kit)` : ""} · ${why}`.slice(0, 500),
       });
     }
     if (took) {
       logMove(tx, staff, {
-        type: "use", productId: l.productId, productName: l.name, unit, ...eff,
+        type: kit ? "kit-use" : "use", productId: l.productId, productName: l.name, unit, ...eff,
+        ...(kit ? { staffUid: newOwner } : {}),
         lines: [{ loc: nloc, batch: nb, expiry: ne, delta: -took }],
         reason: giveBack ? "Treatment (batch corrected)" : "Treatment (taken off stock later)", ref: id,
         note: `${who2} · ${why}`.slice(0, 500),
       });
     }
     Object.assign(r, { batch: nb, expiry: ne, from: nloc, taken: newTaken });
-    l.short = l.rows.reduce((a, x) => a + Math.max(0, (Number(x.amount) || 0) - (Number(x.taken) || 0)), 0);
-    const stillShort = amount - newTaken;
+    if (kit) { if (newOwner && newOwner !== String(u.byUid || "")) l.kitUid = newOwner; else delete l.kitUid; }
+    l.short = num(l.rows.reduce((a, x) => a + Math.max(0, (Number(x.amount) || 0) - (Number(x.taken) || 0)), 0));
+    const stillShort = num(amount - newTaken);
     const bl = l.batchLabel || "Batch";
     tx.update(uRef, {
       lines, short: lines.some((x) => (Number(x.short) || 0) > 0),
@@ -3135,16 +3177,18 @@ export async function setUsageBatch(id, li, ri, to, reason, staff) {
       corrections: arrayUnion({
         at: new Date().toISOString(), by, byUid: me, reason: why,
         changes: [`${l.name}: ${oldBatch ? `${bl} ${oldBatch}` : "no batch"} → ${bl} ${nb}${
-          took ? ` (${plural(took, unit)} off stock)` : " (stock not changed)"}${stillShort > 0 ? `, still short by ${stillShort}` : ""}`],
+          kit && newOwner !== oldOwner ? ` in ${newOwnerName || "another injector"}'s kit` : ""}${
+          took ? ` (${amtText(took)} off stock)` : " (stock not changed)"}${stillShort > 0 ? `, still short by ${stillShort}` : ""}`],
       }),
     });
-    result = { took, gaveBack: giveBack ? taken : 0, stillShort, productId: l.productId,
+    result = { kit, took, gaveBack: giveBack ? taken : 0, stillShort, productId: l.productId, ownerName: newOwnerName,
       date: KEY_RE.test(u.recordDate || "") ? u.recordDate : "", nloc, nb, ne, oldLoc, oldBatch, oldExp };
   });
 
+  // Shelf / JT storage: opening counts done since the treatment day are corrected (kit checks compare at the moment, so not kits)
   const x = result;
   let backdated = { lines: 0, closed: 0, skipped: [], failed: 0 };
-  if (x.date && x.date < dayKey()) {
+  if (!x.kit && x.date && x.date < dayKey()) {
     try {
       if (x.took) backdated = await backdateCounts([{ saleId: `${id}:${li}:${ri}:take`, productId: x.productId, date: x.date, loc: x.nloc,
         rows: [{ batch: x.nb, expiry: x.ne, taken: x.took }] }], staff, { kind: "use" });
