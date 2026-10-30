@@ -4479,6 +4479,19 @@ function handleInventory_(body) {
       try { return Object.assign({ ok: true }, oldKitLedgerAll_(body.fresh === true, String(body.from || ''), String(body.to || ''))); }
       catch (e) { return { ok: true, problem: String(e && e.message ? e.message : e).slice(0, 300) }; }
     }
+    if (op === 'treatmentCheck') {
+      if (!can_(session, 'menu.reports') && !can_(session, 'inventory.manage')) return { ok: false, error: 'FORBIDDEN' };
+      try { return Object.assign({ ok: true }, tcRows_(String(body.from || ''), String(body.to || ''))); }
+      catch (e) { console.error('Treatment check: ' + (e && e.stack ? e.stack : e)); return { ok: true, problem: String(e && e.message ? e.message : e).slice(0, 300) }; }
+    }
+    if (op === 'legacyAlias') {
+      if (!can_(session, 'inventory.manage')) return { ok: false, error: 'FORBIDDEN' };
+      return tcAliasSave_(body, session);
+    }
+    if (op === 'legacyLog') {
+      if (!can_(session, 'menu.reports') && !can_(session, 'inventory.manage')) return { ok: false, error: 'FORBIDDEN' };
+      return tcLegacyLog_(body, session);
+    }
     if (op === 'kitBookings') {
       if (!can_(session, 'menu.reports') && !can_(session, 'inventory.manage')) return { ok: false, error: 'FORBIDDEN' };
       try { return Object.assign({ ok: true }, kitBookings_(String(body.from || ''), String(body.to || ''))); }
@@ -18482,4 +18495,333 @@ function paperCacheName_(id, name) {
 
 function prospectContactCheckNow() {
   console.log(JSON.stringify(prosContactCheck_(getConfig_(), true)));
+}
+
+// ===================== Reporting → Treatment check =====================
+// One row per visit: booking (a service linked to a product in Inventory → Service links) → record → products → stock.
+// Records: portal forms (form_submissions), scans filed in Paper records and the old app's scans (both in treatment_records,
+// with the Consumables the old app read), and the old app's Wrinkle Relaxer records. Products on a portal record come from
+// inv_usage; on an old scan from its Consumables, matched to the product list by name (Match to product saves an alias).
+// Batches typed in from a scan go to inv_usage_legacy, which never changes stock.
+
+const TC_LEGACY_ = 'inv_usage_legacy';
+const TC_ALIAS_DOC_ = 'inv_settings/legacy_products';
+const TC_STATUSES_ = ['none', 'noneed', 'noproduct', 'notstock', 'before', 'ok'];
+
+// "RADIESSE + LIDOCAINE 1.5 mL" → "radiesse"
+function tcNorm_(s) {
+  return String(s == null ? '' : s).toLowerCase()
+    .replace(/\+\s*lido\w*|w(?:ith)?\/?\s*lido\w*/g, ' ')
+    .replace(/\d+(?:\.\d+)?\s*(?:ml|mg|iu|g|u|units?|cc)\b/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function tcAliases_(cfg) {
+  const d = fsGetDoc_(cfg, TC_ALIAS_DOC_) || {};
+  return d.aliases && typeof d.aliases === 'object' ? d.aliases : {};
+}
+
+function tcProducts_(cfg) {
+  const list = fsListAll_(cfg, 'inv_products', ['name', 'brand', 'stockUnit', 'doseUnit', 'usage', 'active'])
+    .map(function (d) { const f = fromFields_(d.fields || {}); f._id = d.name.split('/').pop(); return f; });
+  const byNorm = {};
+  const byId = {};
+  list.forEach(function (p) {
+    byId[p._id] = p;
+    [p.name, p.brand ? p.brand + ' ' + p.name : ''].forEach(function (n) { const k = tcNorm_(n); if (k && !byNorm[k]) byNorm[k] = p._id; });
+  });
+  return { list: list, byNorm: byNorm, byId: byId };
+}
+
+// A name the old app wrote → a product id. Exact, then a saved alias, then the one product whose name is inside it.
+function tcMatch_(name, prods, aliases) {
+  const k = tcNorm_(name);
+  if (!k) return '';
+  if (aliases[k]) return String(aliases[k]);
+  if (prods.byNorm[k]) return prods.byNorm[k];
+  const ids = uniq_(Object.keys(prods.byNorm)
+    .filter(function (n) { return n.length >= 4 && (k.indexOf(n) !== -1 || n.indexOf(k) !== -1); })
+    .map(function (n) { return prods.byNorm[n]; }));
+  return ids.length === 1 ? ids[0] : '';
+}
+
+// The Consumables the old app read: a JSON string of { product, amount, lotNumber, expiry }
+function tcConsumables_(raw) {
+  let list = raw;
+  if (typeof raw === 'string') { try { list = JSON.parse(raw); } catch (e) { return null; } }
+  if (!Array.isArray(list)) return null;
+  return list.map(function (c) {
+    c = c || {};
+    const amt = String(c.amount || '').trim();
+    const m = /^x?\s*(\d+(?:\.\d+)?)\s*([a-z]*)/i.exec(amt);
+    return { product: String(c.product || '').trim(), amountText: amt, amount: m ? Number(m[1]) : 1, unit: m && m[2] ? m[2] : '',
+      batch: String(c.lotNumber || c.lot || c.batch || '').trim(), expiry: String(c.expiry || '').trim() };
+  }).filter(function (c) { return c.product; });
+}
+
+// Service links (Inventory → Service links): normalised service name → [product ids]. Tolerant of the shape it's saved in.
+function tcServiceLinks_(cfg) {
+  const d = fsGetDoc_(cfg, 'inv_settings/service_links') || {};
+  const out = {};
+  const add = function (svc, ids) {
+    const k = tcNorm_(svc);
+    const list = (Array.isArray(ids) ? ids : ids ? [ids] : []).map(String).filter(Boolean);
+    if (k && list.length) out[k] = uniq_((out[k] || []).concat(list));
+  };
+  if (Array.isArray(d.links)) {
+    d.links.forEach(function (l) { l = l || {}; add(l.service || l.name || l.label, l.productIds || l.products || l.productId); });
+  } else if (d.links && typeof d.links === 'object') {
+    Object.keys(d.links).forEach(function (k) { const v = d.links[k]; add(k, v && v.productIds ? v.productIds : v); });
+  } else {
+    Object.keys(d).forEach(function (k) { if (Array.isArray(d[k])) add(k, d[k]); });
+  }
+  const keys = Object.keys(out);
+  return {
+    configured: keys.length > 0,
+    // The products a service expects: an exact match, otherwise the linked service names found inside it
+    of: function (svc) {
+      const k = tcNorm_(svc);
+      if (!k) return [];
+      if (out[k]) return out[k];
+      return uniq_([].concat.apply([], keys.filter(function (n) { return n.length >= 4 && k.indexOf(n) !== -1; }).map(function (n) { return out[n]; })));
+    },
+  };
+}
+
+function tcRows_(from, to) {
+  const ok = function (k) { return /^\d{4}-\d{2}-\d{2}$/.test(k); };
+  const today = flowKey_(Date.now());
+  to = ok(to) && to < today ? to : today;
+  if (!ok(from) || flowDays_(from, to) > 400) from = flowAddDaysKey_(to, -400);
+  const cfg = getConfig_();
+  const links = tcServiceLinks_(cfg);
+  if (!links.configured) return { problem: 'No services are linked to products yet. Link them in Inventory → Service links.' };
+  const prods = tcProducts_(cfg);
+  const aliases = tcAliases_(cfg);
+  const pts = paperPts_(cfg);
+  const stockFrom = paperSettings_(cfg).stockFrom;
+  const staff = getStaffDocs_();
+  const uidOf = {};
+  const uidFor = function (name) {
+    if (!(name in uidOf)) { const h = staff.filter(function (s) { return kitSameStaff_(s.name, name); }); uidOf[name] = h.length === 1 ? h[0].id : ''; }
+    return uidOf[name];
+  };
+  const nk = function (s) { return ptClean_(s); };
+  const rows = {};
+  const rowFor = function (date, pid, name) {
+    const key = date + '|' + (pid || ('n:' + String(name || '').toLowerCase()));
+    return rows[key] || (rows[key] = { key: key, date: date, time: '', patientId: pid || '', patientName: name || '', staff: '', staffUid: '',
+      booked: [], expects: [], records: [], products: [], unmatched: [], res: null });
+  };
+  // Name-only rows: a record under the same name on the same day joins the booking's row
+  const byName = {};
+  const find = function (date, pid, name) {
+    if (pid && rows[date + '|' + pid]) return rows[date + '|' + pid];
+    const n = nk(name);
+    if (n && byName[date + '|' + n]) return byName[date + '|' + n];
+    const r = rowFor(date, pid, name);
+    if (n) byName[date + '|' + n] = r;
+    return r;
+  };
+
+  // 1. Bookings
+  let start = from;
+  for (let page = 0; page < 10 && start <= to; page++) {
+    const list = schedApptDays_(cfg, start, to, 150);
+    list.forEach(function (d) {
+      const dk = String(d.date || '');
+      if (!ok(dk)) return;
+      (d.appointments || []).forEach(function (a) {
+        if (!pcnStatusOk_(a.status, 'full')) return;
+        const svcs = [];
+        let expects = [];
+        (Array.isArray(a.services) ? a.services : []).forEach(function (s) {
+          s = String(s == null ? '' : s).trim();
+          if (!s || REP_NOT_VISIT_.test(s)) return;
+          const ids = links.of(s);
+          if (!ids.length) return;
+          svcs.push(s);
+          expects = expects.concat(ids);
+        });
+        if (!svcs.length) return;
+        const ptt = String(a.patientId || '').trim();
+        const r = find(dk, ptt ? pts.find(ptt) : '', String(a.patientName || '').trim());
+        svcs.forEach(function (s) { if (r.booked.indexOf(s) === -1) r.booked.push(s); });
+        r.expects = uniq_(r.expects.concat(expects));
+        if (!r.time) r.time = String(a.time || '');
+        const st = String(a.staff || '').trim();
+        if (!r.staff && st && !SCHED_NOT_PERSON_.test(st)) { r.staff = st; r.staffUid = uidFor(st); }
+      });
+    });
+    if (list.length < 150) break;
+    start = flowAddDaysKey_(String(list[list.length - 1].date), 1);
+  }
+
+  // 2. Portal forms
+  paperSelect_(cfg, 'form_submissions', 'category', 'treatment', ['patientId', 'patientPttId', 'patientName', 'recordDate', 'templateName', 'createdBy'])
+    .forEach(function (s) {
+      const dk = String(s.recordDate || '');
+      if (dk < from || dk > to) return;
+      const pid = pts.find(String(s.patientId || '')) || pts.find(String(s.patientPttId || '')) || String(s.patientId || '');
+      const r = find(dk, pid, String(s.patientName || ''));
+      r.records.push({ kind: 'portal', id: s._id, label: String(s.templateName || 'Treatment record'), link: '#/form-record/' + encodeURIComponent(s._id) });
+      if (!r.staff && s.createdBy) { r.staff = String(s.createdBy); r.staffUid = uidFor(r.staff); }
+    });
+
+  // 3. Scans: the old app's (with Consumables) and ones filed from Paper records
+  fsQuery_(cfg, 'treatment_records', quoteField_('Record Date'), 'GREATER_THAN_OR_EQUAL', from, 5000).forEach(function (f) {
+    const dk = String(f['Record Date'] || '');
+    if (dk > to) return;
+    const pid = pts.find(String(f['Patient ID'] || '').trim());
+    const r = find(dk, pid, String(f['Patient Name'] || ''));
+    const filed = f._id.indexOf('paper_') === 0;
+    r.records.push({ kind: filed ? 'paper' : 'scan', id: f._id, label: String(f['Treatment Record Type'] || 'Scanned record') + (filed ? ' (scan)' : ' (old app)'),
+      link: String(f['File PDF Link'] || ''), cons: filed ? null : tcConsumables_(f.Consumables), staff: String(f.Staff || '') });
+    if (!r.staff && f.Staff) { r.staff = String(f.Staff); r.staffUid = uidFor(r.staff); }
+  });
+
+  // 4. The old app's Wrinkle Relaxer records
+  const base = oldKitBase_(false);
+  const xeo = prods.list.filter(function (p) { return p.usage === 'kit' && /xeomin/i.test(String(p.name || '')); })[0] || null;
+  base.people.forEach(function (p) {
+    p.records.forEach(function (x) {
+      const dk = x[0];
+      if (dk < from || dk > to) return;
+      const r = find(dk, x[8] || '', x[2]);
+      r.records.push({ kind: 'oldwr', id: '', label: 'Wrinkle Relaxer (old app)', link: x[9] || '' });
+      r.products.push({ productId: xeo ? xeo._id : '', name: xeo ? xeo.name : 'Xeomin', amount: Number(x[3]) || 0, unit: 'units',
+        batch: x[6] || '', expiry: x[7] || '', src: 'oldwr', short: 0 });
+      if (!r.staff && p.staffName) { r.staff = p.staffName; r.staffUid = p.staffUid || ''; }
+    });
+  });
+
+  // 5. Products on portal records (inv_usage), by submission, otherwise by patient and day
+  const since = new Date(Date.parse(from + 'T00:00:00+08:00') - 90 * 864e5);
+  const bySub = {};
+  const byDay = {};
+  fsQuery_(cfg, 'inv_usage', 'at', 'GREATER_THAN_OR_EQUAL', since, 5000).forEach(function (u) {
+    const dk = ok(String(u.recordDate || '')) ? String(u.recordDate) : flowKey_(Date.parse(String(u.at || '')) || 0);
+    if (dk < from || dk > to) return;
+    if (u.submissionId) (bySub[String(u.submissionId)] = bySub[String(u.submissionId)] || []).push(u);
+    const pid = pts.find(String(u.patientId || '')) || String(u.patientId || '');
+    (byDay[dk + '|' + pid] = byDay[dk + '|' + pid] || []).push(u);
+  });
+  const usageLines = function (u) {
+    return (Array.isArray(u.lines) ? u.lines : []).map(function (l) {
+      const rowsL = Array.isArray(l.rows) ? l.rows : [];
+      return { productId: String(l.productId || ''), name: String(l.name || ''), amount: Number(l.total) || Number(l.doseTotal) || 0,
+        unit: String(l.kind === 'kit' ? l.unit : (l.doseUnit || l.unit || '')), batch: uniq_(rowsL.map(function (x) { return String(x.batch || ''); })).join(', '),
+        expiry: uniq_(rowsL.map(function (x) { return String(x.expiry || ''); })).join(', '), src: 'usage', short: Number(l.short) || 0, usageId: u._id };
+    });
+  };
+
+  // 6. Batches logged against old scans, and decisions made in Paper records
+  const legacy = {};
+  fsListAll_(cfg, TC_LEGACY_).forEach(function (d) { legacy[d.name.split('/').pop()] = fromFields_(d.fields || {}); });
+  const res = {};
+  fsListAll_(cfg, PAPER_VISITS_, ['key', 'status', 'note', 'by', 'at']).forEach(function (d) {
+    const f = fromFields_(d.fields || {});
+    if (f.key) res[String(f.key)] = { status: String(f.status || ''), note: String(f.note || ''), by: String(f.by || '') };
+  });
+
+  // 7. Each row's products and status
+  const unmatched = {};
+  const out = Object.keys(rows).map(function (k) {
+    const r = rows[k];
+    const seenUsage = {};
+    const addUsage = function (u) { if (!seenUsage[u._id]) { seenUsage[u._id] = true; r.products = r.products.concat(usageLines(u)); } };
+    r.records.forEach(function (rec) {
+      if (rec.kind === 'portal' || rec.kind === 'paper') (bySub[rec.kind === 'paper' ? rec.id : rec.id] || []).forEach(addUsage);
+      if (rec.kind === 'scan') {
+        const lg = legacy[rec.id];
+        if (lg && Array.isArray(lg.lines)) {
+          lg.lines.forEach(function (l) { r.products.push(Object.assign({}, l, { src: 'legacy', short: 0 })); });
+        } else if (rec.cons) {
+          rec.cons.forEach(function (c) {
+            const pid = tcMatch_(c.product, prods, aliases);
+            if (!pid) { unmatched[c.product] = (unmatched[c.product] || 0) + 1; r.unmatched.push(c.product); return; }
+            r.products.push({ productId: pid, name: prods.byId[pid].name, amount: c.amount, unit: c.unit || prods.byId[pid].stockUnit || '',
+              batch: c.batch, expiry: c.expiry, src: 'scan', short: 0 });
+          });
+        } else if (rec.cons === null && !lg) {
+          rec.noCons = true;
+        }
+        rec.legacyId = rec.id;
+        rec.logged = !!lg;
+      }
+    });
+    if (!r.products.length && r.patientId) {   // a usage saved without the record's id, or recorded straight from the paper
+      const day = byDay[r.date + '|' + r.patientId] || [];
+      day.forEach(addUsage);
+      if (!r.records.length && day.length) r.records.push({ kind: 'usage', id: day[0]._id, label: 'Used on a patient (recorded on paper)', link: '' });
+    }
+    r.res = res[r.key] || null;
+    let status;
+    if (!r.records.length) status = r.res && r.res.status ? 'noneed' : 'none';
+    else if (!r.products.length) status = 'noproduct';
+    else if (r.date < stockFrom) status = 'before';
+    else if (r.products.some(function (p) { return p.src !== 'usage' || p.short > 0; })) status = 'notstock';
+    else status = 'ok';
+    r.status = status;
+    r.unbooked = !r.booked.length;
+    r.different = r.expects.length > 0 && r.products.length > 0 && !r.products.some(function (p) { return r.expects.indexOf(p.productId) !== -1; });
+    r.expectsNames = r.expects.map(function (id) { return prods.byId[id] ? prods.byId[id].name : ''; }).filter(Boolean);
+    return r;
+  }).sort(function (a, b) { return b.date.localeCompare(a.date) || String(a.patientName).localeCompare(String(b.patientName)); });
+
+  return {
+    rows: out, from: from, to: to, stockFrom: stockFrom,
+    products: prods.list.filter(function (p) { return p.active !== false; }).map(function (p) { return { id: p._id, name: p.name, unit: p.stockUnit || '', usage: p.usage || 'storage' }; })
+      .sort(function (a, b) { return a.name.localeCompare(b.name); }),
+    unmatched: Object.keys(unmatched).map(function (n) { return { name: n, n: unmatched[n] }; }).sort(function (a, b) { return b.n - a.n; }),
+  };
+}
+
+// Match to product: an old name → a portal product, for every record that uses it
+function tcAliasSave_(body, session) {
+  const k = tcNorm_(body.name);
+  const pid = String(body.productId || '').trim();
+  if (!k) return { ok: false, error: 'BAD_REQUEST' };
+  const cfg = getConfig_();
+  const d = fsGetDoc_(cfg, TC_ALIAS_DOC_) || {};
+  const aliases = d.aliases && typeof d.aliases === 'object' ? d.aliases : {};
+  if (pid) {
+    if (!fsGetDoc_(cfg, 'inv_products/' + pid)) return { ok: true, problem: "That product isn't on the product list." };
+    aliases[k] = pid;
+  } else {
+    delete aliases[k];
+  }
+  commitWrites_(cfg, [updateWrite_(cfg, TC_ALIAS_DOC_, { aliases: aliases, updatedAt: new Date().toISOString(), updatedBy: String(session.name || '') })]);
+  return { ok: true };
+}
+
+// Log batch: the products (and lots) on an old scan, typed in from the PDF. Replaces what the scan said for that record.
+function tcLegacyLog_(body, session) {
+  const id = String(body.recordId || '').trim();
+  if (!recDocIdOk_(id) || id.indexOf('paper_') === 0) return { ok: false, error: 'BAD_REQUEST' };
+  const cfg = getConfig_();
+  const rec = fsGetDoc_(cfg, 'treatment_records/' + encodeURIComponent(id));
+  if (!rec) return { ok: true, problem: "That record couldn't be found." };
+  const prods = tcProducts_(cfg);
+  const lines = (Array.isArray(body.lines) ? body.lines : []).slice(0, 20).map(function (l) {
+    l = l || {};
+    const pid = String(l.productId || '').trim();
+    const p = prods.byId[pid];
+    if (!p) return null;
+    return { productId: pid, name: String(p.name || ''), amount: Math.max(0, Number(l.amount) || 0) || 1,
+      unit: String(l.unit || p.stockUnit || '').slice(0, 20),
+      batch: String(l.batch || '').replace(/\s+/g, ' ').trim().slice(0, 60), expiry: String(l.expiry || '').trim().slice(0, 10) };
+  }).filter(Boolean);
+  if (!lines.length) return { ok: true, problem: 'Choose at least one product.' };
+  const bad = lines.filter(function (l) { return l.expiry && !/^\d{4}-\d{2}(-\d{2})?$/.test(l.expiry); });
+  if (bad.length) return { ok: true, problem: 'Expiry dates need to be YYYY-MM or YYYY-MM-DD.' };
+  const pts = paperPts_(cfg);
+  const now = new Date().toISOString();
+  commitWrites_(cfg, [updateWrite_(cfg, TC_LEGACY_ + '/' + id, {
+    recordId: id, patientId: pts.find(String(rec['Patient ID'] || '').trim()) || '', patientName: String(rec['Patient Name'] || ''),
+    date: String(rec['Record Date'] || ''), staff: String(rec.Staff || ''), link: String(rec['File PDF Link'] || ''),
+    lines: lines, note: String(body.note || '').slice(0, 300), source: 'Logged from the scan',
+    by: String(session.name || ''), byUid: String(session.uid || ''), at: now,
+  })]);
+  return { ok: true };
 }

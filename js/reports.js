@@ -33,7 +33,7 @@ const timeOf = (d) => (d ? d.toLocaleTimeString("en-AU", { hour: "numeric", minu
 const monthLabel = (k) => { const [y, m] = k.split("-").map(Number); return new Date(y, m - 1, 1).toLocaleDateString("en-AU", { month: "long", year: "numeric" }); };
 const daysAgoKey = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return dayKey(d); };
 const SKELETON = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
-const TABS = [["variance", "Count differences"], ["investigations", "Investigations"], ["notrecorded", "Not recorded"], ["wastage", "Wastage"],
+const TABS = [["variance", "Count differences"], ["investigations", "Investigations"], ["check", "Treatment check"], ["notrecorded", "Not recorded"], ["wastage", "Wastage"],
   ["kits", "Kit reconciliation"], ["usage", "Usage"], ["opened", "Opened containers"], ["short", "Saved short"], ["plans", "Treatment plans"],
   ["retention", "Retention"]];
 const errText = (err, fallback) => (err && err.code === "permission-denied"
@@ -95,6 +95,7 @@ export function mountReports(container, { param = "", staff = null } = {}) {
   const body = root.querySelector('[data-role="body"]');
   if (tab === "variance") mountVariance(body, staff);
   else if (tab === "investigations") mountInvestigationReport(body);
+  else if (tab === "check") mountTreatmentCheck(body, staff);
   else if (tab === "notrecorded") mountNotRecorded(body);
   else if (tab === "wastage") mountWastage(body);
   else if (tab === "usage") mountUsage(body, staff);
@@ -631,6 +632,209 @@ function mountNotRecorded(body) {
   });
 }
 
+/* ===================== Treatment check (booking → record → products → stock) ===================== */
+
+const TC_STATUS = {
+  none: ["No record", "is-bad"], noneed: ["No record needed", "is-info"], noproduct: ["Record, no product", "is-warn"],
+  notstock: ["Not taken off stock", "is-warn"], before: ["Before stock started", "is-info"], ok: ["Accounted for", "is-ok"],
+};
+const tcLabel = (s) => (TC_STATUS[s] || ["Unknown", ""])[0];
+const tcPill = (s) => `<span class="inv-flag ${(TC_STATUS[s] || ["", ""])[1]}">${esc(tcLabel(s))}</span>`;
+
+function mountTreatmentCheck(body, staff) {
+  let products = [];
+  let rowsByKey = new Map();
+  const canAlias = can("inventory.manage");
+  const nameOf = (pid) => ((products.find((p) => p.id === pid) || {}).name || "product");
+  const recordHtml = (e) => (e.records.length ? e.records.map((r) => (r.link
+    ? `<a href="${esc(r.link)}" target="_blank" rel="noopener noreferrer">${esc(r.label)}</a>`
+    : esc(r.label)) + (r.noCons ? ' <small class="muted">no products read</small>' : "")).join("<br>") : '<span class="muted">—</span>');
+  const productsHtml = (e) => {
+    const lines = e.products.map((p) => `<div>${esc(p.name)} × ${esc(fmt(p.amount))}${p.unit ? ` ${esc(p.unit)}` : ""}${
+      p.batch ? `<small class="muted">Batch ${esc(p.batch)}${p.expiry ? ` · Exp ${esc(p.expiry)}` : ""}</small>` : '<small class="rp-neg">No batch</small>'}${
+      p.short > 0 ? `<small class="rp-neg">saved short · ${esc(fmt(p.short))}</small>` : ""}${
+      p.src === "scan" ? '<small class="muted">read from the scan</small>' : p.src === "legacy" ? '<small class="muted">logged from the scan</small>' : ""}</div>`);
+    e.unmatched.forEach((n) => lines.push(`<div class="muted">${esc(n)}${canAlias ? ` <button type="button" class="kr-link" data-alias="${esc(n)}">Match to product</button>` : ""}</div>`));
+    return lines.join("") || '<span class="muted">—</span>';
+  };
+  const actionHtml = (e) => {
+    const scan = e.records.find((r) => r.kind === "scan");
+    const out = [];
+    if (e.status === "none") out.push(`<a href="#/paper" target="_blank" rel="noopener">Enter from paper</a>`,
+      `<button type="button" class="kr-link" data-noneed="${esc(e.key)}">No record needed</button>`);
+    if (scan && (e.status === "noproduct" || e.products.some((p) => p.src !== "usage" && !p.batch))) {
+      out.push(`<button type="button" class="kr-link" data-logbatch="${esc(scan.id)}">${scan.logged ? "Edit logged batch" : "Log batch"}</button>`);
+    }
+    if ((e.status === "none" || e.status === "noproduct") && e.patientId) {
+      e.expects.filter((pid) => !["kit", "shared"].includes((products.find((p) => p.id === pid) || {}).usage)).slice(0, 3)
+        .forEach((pid) => out.push(`<button type="button" class="kr-link" data-use="${esc(pid)}">Record ${esc(nameOf(pid))}</button>`));
+    }
+    if (e.status === "notstock" && e.products.some((p) => p.short > 0)) out.push('<a href="#/reports/short">Open Saved short</a>');
+    if (e.different) out.push(`<small class="muted">Booked for ${esc(e.expectsNames.join(" / "))}</small>`);
+    if (e.unbooked) out.push('<small class="muted">Not in the appointment book</small>');
+    return out.join(" · ");
+  };
+
+  mountRangeReport(body, {
+    name: "Treatment check", file: "treatment-check",
+    groups: [["type", "Status"], ["product", "Product"], ["clinician", "Clinician"], ["patient", "Patient"], ["month", "Month"]],
+    findPlaceholder: "Filter: patient, product, batch or status",
+    empty: "No bookings of a linked service in these dates.",
+    async load(r) {
+      const res = await callApi({ action: "inventory", op: "treatmentCheck", from: dayKey(r.from), to: dayKey(lastDay(r)) });
+      if (!res || res.problem) throw new Error((res && res.problem) || "The check couldn't be run.");
+      products = res.products || [];
+      rowsByKey = new Map((res.rows || []).map((row) => [row.key, row]));
+      return (res.rows || []).map((row) => {
+        const first = row.products[0] || null;
+        const pname = (first && first.name) || row.expectsNames[0] || row.booked[0] || "Unlinked";
+        return { ...row, at: parseKey(row.date), by: row.staff || "Unassigned", patient: row.patientName || "",
+          typeLabel: tcLabel(row.status), productId: (first && first.productId) || row.expects[0] || pname, productName: pname, value: 0 };
+      });
+    },
+    searchText: (e) => [e.patientName, e.by, e.booked.join(" "), e.typeLabel, e.productName,
+      e.products.map((p) => `${p.name} ${p.batch}`).join(" "), e.unmatched.join(" ")].join(" "),
+    statsHtml(ev) {
+      const n = (s) => ev.filter((e) => e.status === s).length;
+      return `<div class="inv-stats">
+        <div class="inv-stat"><strong>${n("ok")}</strong><span>Accounted for</span></div>
+        <div class="inv-stat ${n("none") ? "is-bad" : ""}"><strong>${n("none")}</strong><span>No record</span></div>
+        <div class="inv-stat ${n("noproduct") ? "is-warn" : ""}"><strong>${n("noproduct")}</strong><span>Record, no product</span></div>
+        <div class="inv-stat ${n("notstock") ? "is-warn" : ""}"><strong>${n("notstock")}</strong><span>Not taken off stock</span></div>
+        <div class="inv-stat"><strong>${n("before") + n("noneed")}</strong><span>Before stock started · no record needed</span></div>
+      </div>`;
+    },
+    summaryHead: (label) => `<thead><tr><th>${esc(label)}</th><th>Visits</th><th>Accounted for</th><th>No record</th><th>Record, no product</th><th>Not taken off stock</th></tr></thead>`,
+    summaryRow: (g) => {
+      const n = (s) => g.events.filter((e) => e.status === s).length;
+      return `<tr><td><strong>${esc(g.label)}</strong></td><td>${g.events.length}</td><td>${n("ok") || "—"}</td>
+        <td>${n("none") ? `<span class="rp-neg">${n("none")}</span>` : "—"}</td><td>${n("noproduct") || "—"}</td><td>${n("notstock") || "—"}</td></tr>`;
+    },
+    summaryFoot: (ev) => {
+      const n = (s) => ev.filter((e) => e.status === s).length;
+      return `<tr><th>Total</th><th>${ev.length}</th><th>${n("ok")}</th><th>${n("none")}</th><th>${n("noproduct")}</th><th>${n("notstock")}</th></tr>`;
+    },
+    detailHead: "<thead><tr><th>Date</th><th>Patient</th><th>Clinician</th><th>Booked</th><th>Record</th><th>Product on record</th><th>Status</th></tr></thead>",
+    detailRow: (e) => `<tr class="${e.status === "none" || e.status === "notstock" || e.status === "noproduct" ? "is-diff" : ""}" data-key="${esc(e.key)}">
+      <td>${esc(shortDate(e.at))}${e.time ? ` <small class="muted">${esc(e.time)}</small>` : ""}</td>
+      <td>${e.patientId ? `<a href="#/patient/${encodeURIComponent(e.patientId)}" target="_blank" rel="noopener">${esc(e.patient || "Patient")}</a>` : esc(e.patient || "—")}</td>
+      <td>${esc(e.by)}</td>
+      <td>${esc(e.booked.join(", ") || "—")}${e.expectsNames.length ? `<small class="muted">expects ${esc(e.expectsNames.join(" / "))}</small>` : ""}</td>
+      <td>${recordHtml(e)}</td><td>${productsHtml(e)}</td>
+      <td>${tcPill(e.status)}${e.res && e.res.note ? `<small class="muted">${esc(e.res.note)}</small>` : ""}<small>${actionHtml(e)}</small></td></tr>`,
+    csvHead: ["Date", "Time", "Patient", "Patient ID", "Clinician", "Booked", "Expected product", "Record", "Products", "Batches", "Status", "Note"],
+    csvRow: (e) => [e.date, e.time, e.patient, e.patientId, e.by, e.booked.join("; "), e.expectsNames.join("; "),
+      e.records.map((r) => r.label).join("; "), e.products.map((p) => `${p.name} x${fmt(p.amount)} ${p.unit}`.trim()).join("; "),
+      e.products.map((p) => p.batch).filter(Boolean).join("; "), e.typeLabel, e.res ? e.res.note : ""],
+    onClick(ev, reload) {
+      const nn = ev.target.closest("[data-noneed]");
+      if (nn) {
+        const note = window.prompt("Why is no record needed? (e.g. review only, no injection given)");
+        if (note && note.trim()) {
+          callApi({ action: "paper", op: "resolve", key: nn.dataset.noneed, status: "none", note: note.trim() })
+            .then((r) => { if (r && r.problem) showToast(r.problem); else reload(); })
+            .catch(() => showToast("Couldn't save it. You need Paper records access to mark a visit as needing no record."));
+        }
+        return true;
+      }
+      const use = ev.target.closest("[data-use]");
+      if (use) {
+        const tr = use.closest("tr[data-key]");
+        const row = tr ? rowsByKey.get(tr.dataset.key) : null;
+        if (!row) return true;
+        const rec = row.records.find((r) => r.kind === "portal") || null;
+        import("./inventory.js")
+          .then((m) => m.openPaperUse({ productId: use.dataset.use, patientId: row.patientId, patientName: row.patientName,
+            date: row.date, submissionId: rec ? rec.id : "", formName: rec ? rec.label : "", staff }))
+          .then((saved) => { if (saved) reload(); })
+          .catch((e) => showToast((e && e.message) || "Couldn't open it. Try again."));
+        return true;
+      }
+      const al = ev.target.closest("[data-alias]");
+      if (al) { tcAliasDialog(al.dataset.alias, products, reload); return true; }
+      const lb = ev.target.closest("[data-logbatch]");
+      if (lb) {
+        const tr = lb.closest("tr[data-key]");
+        tcLogDialog(lb.dataset.logbatch, tr ? tr.dataset.key : "", products, reload);
+        return true;
+      }
+      return false;
+    },
+  });
+}
+
+function tcAliasDialog(name, products, onDone) {
+  const dlg = openDialog(`<form class="lh-form" novalidate>
+    <div class="lh-dialog-head"><h3>Match to product</h3><p>The old app wrote <strong>${esc(name)}</strong>. Which product is it? Every record with that name will use it.</p></div>
+    <label class="lh-field"><span class="lh-label">Product</span><select class="fb-select" name="productId">
+      <option value="">Not a stocked product (leave as text)</option>
+      ${products.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></label>
+    <p class="lh-error" role="alert" hidden></p>
+    <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+      <button type="submit" class="lh-btn is-primary">Save</button></div></form>`);
+  const form = dlg.querySelector("form");
+  const err = dlg.querySelector(".lh-error");
+  dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = form.querySelector('[type="submit"]');
+    btn.disabled = true;
+    try {
+      const r = await callApi({ action: "inventory", op: "legacyAlias", name, productId: form.elements.productId.value });
+      if (r && r.problem) throw new Error(r.problem);
+      dlg.close();
+      showToast("Saved");
+      onDone();
+    } catch (ex) {
+      err.textContent = (ex && ex.message) || "Couldn't save. Try again.";
+      err.hidden = false;
+      btn.disabled = false;
+    }
+  });
+}
+
+function tcLogDialog(recordId, key, products, onDone) {
+  const opts = products.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
+  const line = () => `<div class="rp-cin tc-line">
+    <select class="fb-select" data-k="productId"><option value="">Product…</option>${opts}</select>
+    <input class="fe-in" type="number" min="0" step="0.1" data-k="amount" value="1" style="width:5em" aria-label="Amount" />
+    <input class="fe-in" data-k="batch" placeholder="Batch / lot" aria-label="Batch" />
+    <input class="fe-in" data-k="expiry" placeholder="Exp YYYY-MM" aria-label="Expiry" style="width:8em" /></div>`;
+  const dlg = openDialog(`<form class="lh-form" novalidate>
+    <div class="lh-dialog-head"><h3>Log batch from the scan</h3>
+      <p>Open the PDF beside this, and type what's on the paper. It's kept against the record for Batch lookup and this check. Stock isn't changed.</p></div>
+    <div data-role="lines">${line()}</div>
+    <button type="button" class="lh-btn" data-act="more">+ Another product</button>
+    <label class="lh-field"><span class="lh-label">Note (optional)</span><input name="note" maxlength="300" placeholder="e.g. lot read from the sticker on page 2" /></label>
+    <p class="lh-error" role="alert" hidden></p>
+    <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+      <button type="submit" class="lh-btn is-primary">Save</button></div></form>`);
+  const form = dlg.querySelector("form");
+  const err = dlg.querySelector(".lh-error");
+  dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+  dlg.querySelector('[data-act="more"]').addEventListener("click", () => form.querySelector('[data-role="lines"]').insertAdjacentHTML("beforeend", line()));
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const lines = [...form.querySelectorAll(".tc-line")].map((el) => ({
+      productId: el.querySelector('[data-k="productId"]').value, amount: Number(el.querySelector('[data-k="amount"]').value) || 1,
+      batch: el.querySelector('[data-k="batch"]').value.trim(), expiry: el.querySelector('[data-k="expiry"]').value.trim(),
+    })).filter((l) => l.productId);
+    if (!lines.length) { err.textContent = "Choose at least one product."; err.hidden = false; return; }
+    const btn = form.querySelector('[type="submit"]');
+    btn.disabled = true;
+    try {
+      const r = await callApi({ action: "inventory", op: "legacyLog", recordId, lines, note: form.elements.note.value });
+      if (r && r.problem) throw new Error(r.problem);
+      dlg.close();
+      showToast("Logged");
+      onDone();
+    } catch (ex) {
+      err.textContent = (ex && ex.message) || "Couldn't save. Try again.";
+      err.hidden = false;
+      btn.disabled = false;
+    }
+  });
+}
 /* ===================== Wastage ===================== */
 
 // One entry per thing thrown away: filler left in syringes, kit discards and write-offs

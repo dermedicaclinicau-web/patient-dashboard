@@ -1371,7 +1371,11 @@ match /inv_count_drafts/{id} {
              'status', 'creditReceived', 'creditNoteNo', 'creditNote', 'creditedBy', 'creditedByUid', 'creditedAt']);
       allow delete: if false;
     }
-
+    // Treatment check: batches logged against the old app's scans (Apps Script only). Never changes stock.
+    match /inv_usage_legacy/{id} {
+      allow read: if isStaff();
+      allow write: if false;
+    }
     // Billing check: "Mark checked" notes, one per mismatch. Saved once, never changed.
     match /inv_billing_checks/{id} {
       allow read: if isStaff();

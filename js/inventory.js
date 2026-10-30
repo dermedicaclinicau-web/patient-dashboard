@@ -89,6 +89,154 @@ function movesHtml(moves, showProduct = true, labelOf = () => "Batch", acts = fa
     </li>`).join("")}</ul>`;
 }
 
+// Used on a patient, recorded on paper. from: a write-off to turn into this instead.
+function paperUseDialogFor(p, lots, staff, from = null, prefill = null) {
+      const today = dayKey();
+      const unit = p.stockUnit;
+      const avail = lots.filter((l) => l.qty > 0);
+      // A write-off's note often says when and who: "Usage: 22/10 Dianne Anderson"
+      let guessDate = today, guessName = "";
+      if (prefill && /^\d{4}-\d{2}-\d{2}$/.test(prefill.date || "") && prefill.date <= today) guessDate = prefill.date;
+      if (from) {
+        const t = String(from.note || "");
+        const dm = /(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/.exec(t);
+        if (dm) {
+          const y = dm[3] ? (dm[3].length === 2 ? 2000 + +dm[3] : +dm[3]) : new Date().getFullYear();
+          let k = `${y}-${String(+dm[2]).padStart(2, "0")}-${String(+dm[1]).padStart(2, "0")}`;
+          if (!dm[3] && k > today) k = `${y - 1}${k.slice(4)}`;
+          if (/^\d{4}-\d{2}-\d{2}$/.test(k) && k <= today && niceDate(k)) guessDate = k;
+        }
+        guessName = t.replace(/\d{1,2}\/\d{1,2}(?:\/\d{2,4})?/g, " ").replace(/\b(usage|used|use|on|for)\b:?/gi, " ")
+          .replace(/[·:,]/g, " ").replace(/\s+/g, " ").trim();
+      }
+      const whereHtml = from
+        ? `<p class="inv-hint">From the write-off on ${esc(when(from.at))}: ${esc(linesText(from, batchName(p)))}. It's already off stock,
+            so stock doesn't change: the write-off is undone and it becomes this patient's usage instead.</p>`
+        : p.tracked
+          ? (avail.length ? `<label class="lh-field"><span class="lh-label">Which one</span><select class="fb-select" name="lot">${avail.map((l, i) =>
+              `<option value="${i}">${esc(`${locLabel(l.loc)} · ${batchText(p, l.batch)} · Exp ${niceDate(l.expiry)} · ${plural(l.qty, unit)}`)}</option>`).join("")}</select></label>`
+            : '<p class="tb-none">There is no stock to take it from.</p>')
+          : `<div class="lh-field"><span class="lh-label">Taken from</span>${seg("loc", LOCATIONS.map((l) => [l.key, `${l.label} (${p.stock[l.key]})`]),
+              p.stock.shelf > 0 ? "shelf" : "jt")}</div>`;
+      const canSave = !!from || !p.tracked || avail.length > 0;
+
+      return new Promise((resolve) => {
+        let saved = false, found = [], timer = null, seq = 0;
+        let chosen = prefill && prefill.patientId ? { id: prefill.patientId, name: prefill.patientName || "Patient", dob: "", pttId: "" } : null;
+        const d2 = openDialog("inv-dlg", `
+          <form class="lh-form" novalidate>
+            <div class="lh-dialog-head"><h3>Used on a patient: ${esc(p.name)}</h3>
+              <p>For a treatment recorded on paper (or a form outside the portal). It's saved to the patient's usage on the day it was
+                used, so it counts as usage, not waste, and opening counts done since are corrected.</p></div>
+            <label class="lh-field" data-role="find"><span class="lh-label">Patient</span>
+              <input type="search" name="q" placeholder="Search by name" autocomplete="off" value="${esc(guessName)}" /></label>
+            <div class="ef-test-hits" data-role="hits"></div>
+            <div data-role="pick"></div>
+            <div class="inv-two">
+              <label class="lh-field"><span class="lh-label">Date used</span>
+                <input type="date" name="date" value="${guessDate}" max="${today}" /></label>
+              ${from ? "" : `<label class="lh-field"><span class="lh-label">How many</span>
+                <div class="fe-num"><input class="fe-input" name="qty" type="number" min="1" max="99" step="1" value="1" inputmode="numeric" />
+                  <span>${esc(unitPlural(unit))}</span></div></label>`}
+            </div>
+            ${whereHtml}
+            ${p.doseUnit ? `<label class="lh-field"><span class="lh-label">Amount given (${esc(p.doseUnit)}), optional</span>
+              <input name="dose" type="number" min="0" step="any" inputmode="decimal" placeholder="e.g. ${esc(fmtN(p.dosePer || 1))}" /></label>` : ""}
+            <label class="lh-field"><span class="lh-label">Note (optional)</span>
+              <input name="note" maxlength="300" placeholder="e.g. Paper consent and treatment record, Dr Teh" /></label>
+            <p class="lh-error" role="alert" hidden></p>
+            <div class="lh-actions">
+              <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+              ${canSave ? `<button type="submit" class="lh-btn is-primary">${from ? "Move to their record" : "Record it"}</button>` : ""}
+            </div>
+          </form>`);
+        const form = d2.querySelector("form");
+        const f = form.elements;
+        const err = d2.querySelector(".lh-error");
+        const hits = d2.querySelector('[data-role="hits"]');
+        const pick = d2.querySelector('[data-role="pick"]');
+        const findBox = d2.querySelector('[data-role="find"]');
+
+        const showPick = () => {
+          pick.innerHTML = chosen ? `<div class="ef-chosen"><span><strong>${esc(chosen.name)}</strong><br>
+            <small class="muted">${esc([chosen.dob && `DOB ${chosen.dob}`, chosen.pttId && `ID ${chosen.pttId}`].filter(Boolean).join(" · "))}</small></span>
+            <button type="button" class="lh-btn is-quiet" data-act="unpick">Change</button></div>` : "";
+          findBox.hidden = !!chosen;
+          if (chosen) hits.innerHTML = "";
+        };
+        const search = () => {
+          clearTimeout(timer);
+          const q = f.q.value;
+          if (q.trim().length < 2) { hits.innerHTML = ""; return; }
+          const my = ++seq;
+          timer = setTimeout(async () => {
+            try { found = await searchPatients(q); } catch (ex) { console.warn(ex); found = []; }
+            if (my !== seq || !d2.open) return;
+            hits.innerHTML = found.length ? found.map((x, i) => `<button type="button" class="ef-hit" data-hit="${i}">
+              <strong>${esc(x.name)}</strong><small>${esc([x.dob && `DOB ${x.dob}`, x.email].filter(Boolean).join(" · "))}</small></button>`).join("")
+              : '<p class="tb-none">No patients found. Try their last name.</p>';
+          }, 250);
+        };
+        f.q.addEventListener("input", search);
+        if (guessName) search();
+        if (chosen) showPick();
+        if (prefill && prefill.formName && !f.note.value) f.note.value = `Products for: ${prefill.formName}`;
+
+        d2.addEventListener("click", (e) => {
+          if (e.target.closest('[data-act="cancel"]')) { d2.close(); return; }
+          if (e.target.closest('[data-act="unpick"]')) { chosen = null; showPick(); f.q.focus(); return; }
+          const h = e.target.closest("[data-hit]");
+          if (h) { chosen = found[Number(h.dataset.hit)] || null; showPick(); }
+        });
+
+        form.addEventListener("submit", async (e) => {
+          e.preventDefault();
+          err.hidden = true;
+          if (!chosen) { err.textContent = "Choose the patient."; err.hidden = false; return; }
+          if (!f.date.value || f.date.value > today) { err.textContent = "Choose the date it was used. It can't be in the future."; err.hidden = false; return; }
+          const lot = !from && p.tracked ? avail[Number(f.lot.value)] : null;
+          const btn = form.querySelector('[type="submit"]');
+          btn.disabled = true;
+          btn.textContent = "Saving…";
+          try {
+            const r = await recordPaperUse(p, {
+              patientId: chosen.id, patientName: chosen.name, date: f.date.value,
+              loc: lot ? lot.loc : (f.loc ? f.loc.value : "shelf"), batch: lot ? lot.batch : "", expiry: lot ? lot.expiry : "",
+              qty: f.qty ? f.qty.value : 1, dose: f.dose ? f.dose.value : "", note: f.note.value, fromMove: from,
+              submissionId: prefill ? prefill.submissionId || "" : "", formName: prefill ? prefill.formName || "" : "",
+            }, staff);
+            saved = true;
+            d2.close();
+            const bd = r.backdated || {};
+            showToast([
+              `Recorded on ${chosen.name}'s usage for ${niceDate(f.date.value)}${from ? ", and the write-off undone" : ""}.`,
+              bd.lines ? `${bd.lines} count line${bd.lines === 1 ? "" : "s"} corrected${bd.closed ? `, ${bd.closed} investigation${bd.closed === 1 ? "" : "s"} closed` : ""}.` : "",
+              bd.skipped && bd.skipped.length ? `Already accepted, so not changed: ${bd.skipped.join(", ")}.` : "",
+            ].filter(Boolean).join(" "));
+          } catch (ex) {
+            console.error("Paper use failed:", ex);
+            err.textContent = errText(ex, "Couldn't save. Try again.");
+            err.hidden = false;
+            btn.disabled = false;
+            btn.textContent = from ? "Move to their record" : "Record it";
+          }
+        });
+        d2.addEventListener("close", () => { clearTimeout(timer); resolve(saved); });
+        f.q.focus();
+      });
+    }
+
+// Reporting → Treatment check: "Record <product>" on a visit whose record has no product. Opens Used on a patient, pre-filled.
+export async function openPaperUse({ productId, patientId, patientName, date, submissionId = "", formName = "", staff = null }) {
+  const [products, lots] = await Promise.all([listProducts(), listAllLots()]);
+  const p = products.find((x) => x.id === productId);
+  if (!p) throw new Error("That product isn't on the product list any more.");
+  if (isKitProduct(p) || isSharedProduct(p)) throw new Error(`${p.name} is used from a kit or an opened container, so it's recorded there, not here.`);
+  uiStaff = staff;
+  return paperUseDialogFor(p, lots.filter((l) => l.productId === p.id).sort(fefo), staff, null,
+    { patientId, patientName, date, submissionId, formName });
+}
+
 export function mountInventory(container, { param = "", staff = null } = {}) {
   uiStaff = staff;
   const parts = String(param || "").split("/");
@@ -1960,137 +2108,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       });
     }
     
-    // Used on a patient, recorded on paper. from: a write-off to turn into this instead.
-    function paperUseDialog(p, from = null) {
-      const today = dayKey();
-      const unit = p.stockUnit;
-      const avail = lotsOf(p.id).filter((l) => l.qty > 0);
-      // A write-off's note often says when and who: "Usage: 22/10 Dianne Anderson"
-      let guessDate = today, guessName = "";
-      if (from) {
-        const t = String(from.note || "");
-        const dm = /(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?/.exec(t);
-        if (dm) {
-          const y = dm[3] ? (dm[3].length === 2 ? 2000 + +dm[3] : +dm[3]) : new Date().getFullYear();
-          let k = `${y}-${String(+dm[2]).padStart(2, "0")}-${String(+dm[1]).padStart(2, "0")}`;
-          if (!dm[3] && k > today) k = `${y - 1}${k.slice(4)}`;
-          if (/^\d{4}-\d{2}-\d{2}$/.test(k) && k <= today && niceDate(k)) guessDate = k;
-        }
-        guessName = t.replace(/\d{1,2}\/\d{1,2}(?:\/\d{2,4})?/g, " ").replace(/\b(usage|used|use|on|for)\b:?/gi, " ")
-          .replace(/[·:,]/g, " ").replace(/\s+/g, " ").trim();
-      }
-      const whereHtml = from
-        ? `<p class="inv-hint">From the write-off on ${esc(when(from.at))}: ${esc(linesText(from, batchName(p)))}. It's already off stock,
-            so stock doesn't change: the write-off is undone and it becomes this patient's usage instead.</p>`
-        : p.tracked
-          ? (avail.length ? `<label class="lh-field"><span class="lh-label">Which one</span><select class="fb-select" name="lot">${avail.map((l, i) =>
-              `<option value="${i}">${esc(`${locLabel(l.loc)} · ${batchText(p, l.batch)} · Exp ${niceDate(l.expiry)} · ${plural(l.qty, unit)}`)}</option>`).join("")}</select></label>`
-            : '<p class="tb-none">There is no stock to take it from.</p>')
-          : `<div class="lh-field"><span class="lh-label">Taken from</span>${seg("loc", LOCATIONS.map((l) => [l.key, `${l.label} (${p.stock[l.key]})`]),
-              p.stock.shelf > 0 ? "shelf" : "jt")}</div>`;
-      const canSave = !!from || !p.tracked || avail.length > 0;
-
-      return new Promise((resolve) => {
-        let saved = false, chosen = null, found = [], timer = null, seq = 0;
-        const d2 = openDialog("inv-dlg", `
-          <form class="lh-form" novalidate>
-            <div class="lh-dialog-head"><h3>Used on a patient: ${esc(p.name)}</h3>
-              <p>For a treatment recorded on paper (or a form outside the portal). It's saved to the patient's usage on the day it was
-                used, so it counts as usage, not waste, and opening counts done since are corrected.</p></div>
-            <label class="lh-field" data-role="find"><span class="lh-label">Patient</span>
-              <input type="search" name="q" placeholder="Search by name" autocomplete="off" value="${esc(guessName)}" /></label>
-            <div class="ef-test-hits" data-role="hits"></div>
-            <div data-role="pick"></div>
-            <div class="inv-two">
-              <label class="lh-field"><span class="lh-label">Date used</span>
-                <input type="date" name="date" value="${guessDate}" max="${today}" /></label>
-              ${from ? "" : `<label class="lh-field"><span class="lh-label">How many</span>
-                <div class="fe-num"><input class="fe-input" name="qty" type="number" min="1" max="99" step="1" value="1" inputmode="numeric" />
-                  <span>${esc(unitPlural(unit))}</span></div></label>`}
-            </div>
-            ${whereHtml}
-            ${p.doseUnit ? `<label class="lh-field"><span class="lh-label">Amount given (${esc(p.doseUnit)}), optional</span>
-              <input name="dose" type="number" min="0" step="any" inputmode="decimal" placeholder="e.g. ${esc(fmtN(p.dosePer || 1))}" /></label>` : ""}
-            <label class="lh-field"><span class="lh-label">Note (optional)</span>
-              <input name="note" maxlength="300" placeholder="e.g. Paper consent and treatment record, Dr Teh" /></label>
-            <p class="lh-error" role="alert" hidden></p>
-            <div class="lh-actions">
-              <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
-              ${canSave ? `<button type="submit" class="lh-btn is-primary">${from ? "Move to their record" : "Record it"}</button>` : ""}
-            </div>
-          </form>`);
-        const form = d2.querySelector("form");
-        const f = form.elements;
-        const err = d2.querySelector(".lh-error");
-        const hits = d2.querySelector('[data-role="hits"]');
-        const pick = d2.querySelector('[data-role="pick"]');
-        const findBox = d2.querySelector('[data-role="find"]');
-
-        const showPick = () => {
-          pick.innerHTML = chosen ? `<div class="ef-chosen"><span><strong>${esc(chosen.name)}</strong><br>
-            <small class="muted">${esc([chosen.dob && `DOB ${chosen.dob}`, chosen.pttId && `ID ${chosen.pttId}`].filter(Boolean).join(" · "))}</small></span>
-            <button type="button" class="lh-btn is-quiet" data-act="unpick">Change</button></div>` : "";
-          findBox.hidden = !!chosen;
-          if (chosen) hits.innerHTML = "";
-        };
-        const search = () => {
-          clearTimeout(timer);
-          const q = f.q.value;
-          if (q.trim().length < 2) { hits.innerHTML = ""; return; }
-          const my = ++seq;
-          timer = setTimeout(async () => {
-            try { found = await searchPatients(q); } catch (ex) { console.warn(ex); found = []; }
-            if (my !== seq || !d2.open) return;
-            hits.innerHTML = found.length ? found.map((x, i) => `<button type="button" class="ef-hit" data-hit="${i}">
-              <strong>${esc(x.name)}</strong><small>${esc([x.dob && `DOB ${x.dob}`, x.email].filter(Boolean).join(" · "))}</small></button>`).join("")
-              : '<p class="tb-none">No patients found. Try their last name.</p>';
-          }, 250);
-        };
-        f.q.addEventListener("input", search);
-        if (guessName) search();
-
-        d2.addEventListener("click", (e) => {
-          if (e.target.closest('[data-act="cancel"]')) { d2.close(); return; }
-          if (e.target.closest('[data-act="unpick"]')) { chosen = null; showPick(); f.q.focus(); return; }
-          const h = e.target.closest("[data-hit]");
-          if (h) { chosen = found[Number(h.dataset.hit)] || null; showPick(); }
-        });
-
-        form.addEventListener("submit", async (e) => {
-          e.preventDefault();
-          err.hidden = true;
-          if (!chosen) { err.textContent = "Choose the patient."; err.hidden = false; return; }
-          if (!f.date.value || f.date.value > today) { err.textContent = "Choose the date it was used. It can't be in the future."; err.hidden = false; return; }
-          const lot = !from && p.tracked ? avail[Number(f.lot.value)] : null;
-          const btn = form.querySelector('[type="submit"]');
-          btn.disabled = true;
-          btn.textContent = "Saving…";
-          try {
-            const r = await recordPaperUse(p, {
-              patientId: chosen.id, patientName: chosen.name, date: f.date.value,
-              loc: lot ? lot.loc : (f.loc ? f.loc.value : "shelf"), batch: lot ? lot.batch : "", expiry: lot ? lot.expiry : "",
-              qty: f.qty ? f.qty.value : 1, dose: f.dose ? f.dose.value : "", note: f.note.value, fromMove: from,
-            }, staff);
-            saved = true;
-            d2.close();
-            const bd = r.backdated || {};
-            showToast([
-              `Recorded on ${chosen.name}'s usage for ${niceDate(f.date.value)}${from ? ", and the write-off undone" : ""}.`,
-              bd.lines ? `${bd.lines} count line${bd.lines === 1 ? "" : "s"} corrected${bd.closed ? `, ${bd.closed} investigation${bd.closed === 1 ? "" : "s"} closed` : ""}.` : "",
-              bd.skipped && bd.skipped.length ? `Already accepted, so not changed: ${bd.skipped.join(", ")}.` : "",
-            ].filter(Boolean).join(" "));
-          } catch (ex) {
-            console.error("Paper use failed:", ex);
-            err.textContent = errText(ex, "Couldn't save. Try again.");
-            err.hidden = false;
-            btn.disabled = false;
-            btn.textContent = from ? "Move to their record" : "Record it";
-          }
-        });
-        d2.addEventListener("close", () => { clearTimeout(timer); resolve(saved); });
-        f.q.focus();
-      });
-    }
+    const paperUseDialog = (p, from = null) => paperUseDialogFor(p, lotsOf(p.id), staff, from);
     const f2focus = (form) => { const q = form.elements.qty; if (q) { q.focus(); q.select(); } };
 
     function finishSharedDialog(c, p) {
