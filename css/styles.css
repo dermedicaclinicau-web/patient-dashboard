@@ -3330,6 +3330,10 @@ a.tm-task:hover { border-color: var(--primary); }
 .inv-stat span { font-size: .8rem; color: var(--muted); }
 .inv-stat.is-warn strong { color: #b45309; }
 .inv-stat.is-bad strong { color: var(--danger); }
+.inv-stat[data-pick] { cursor: pointer; transition: box-shadow .15s; }
+.inv-stat[data-pick]:hover, .inv-stat[data-pick]:focus-visible { box-shadow: inset 0 0 0 2px #cbd5e1; outline: none; }
+.inv-stat.is-active { box-shadow: inset 0 0 0 2px #0f766e; }
+.rp-pick { margin-left: 4px; }
 .inv-tools { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; margin-bottom: 1rem; }
 .inv-find { flex: 1 1 260px; max-width: 420px; }
 .inv-find input { width: 100%; }

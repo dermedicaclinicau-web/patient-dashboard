@@ -442,7 +442,7 @@ function amountsText(ev, withNames, pick = (e) => ({ n: e.amount, unit: e.unit, 
 
 // A report over a date range: toolbar, totals, a table by group, and every entry
 function mountRangeReport(body, cfg) {
-  const st = { range: "month", from: daysAgoKey(29), to: dayKey(), group: cfg.groups[0][0], q: "", events: [], r: null };
+  const st = { range: "month", from: daysAgoKey(29), to: dayKey(), group: cfg.groups[0][0], q: "", pick: "", events: [], r: null };
   body.innerHTML = `<div data-role="tools"></div><div data-role="out">${SKELETON}</div>`;
   const toolsEl = body.querySelector('[data-role="tools"]');
   const out = body.querySelector('[data-role="out"]');
@@ -467,6 +467,9 @@ function mountRangeReport(body, cfg) {
     const q = st.q.trim().toLowerCase();
     return q ? st.events.filter((e) => cfg.searchText(e).toLowerCase().includes(q)) : st.events;
   };
+  // A stat card clicked (data-pick="a,b"): only entries whose status is one of those
+  const pickOf = cfg.pickOf || ((e) => e.status);
+  const picked = (list) => (st.pick ? list.filter((e) => st.pick.split(",").includes(String(pickOf(e) || ""))) : list);
 
   async function load() {
     out.innerHTML = SKELETON;
@@ -483,7 +486,8 @@ function mountRangeReport(body, cfg) {
   }
 
   function draw() {
-    const ev = visible();
+    const all = visible();
+    const ev = picked(all);
     const key = KEY[st.group];
     const map = new Map();
     ev.forEach((e) => {
@@ -495,9 +499,12 @@ function mountRangeReport(body, cfg) {
     const rows = [...map.values()].map((g) => ({ ...g, value: sumValue(g.events) }))
       .sort(key.sort || ((a, b) => (b.value || 0) - (a.value || 0) || a.label.localeCompare(b.label, "en-AU")));
     const missingCost = ev.some((e) => e.value === null);
+    const pill = st.pick ? ` · showing <strong>${esc(cfg.pickLabel ? cfg.pickLabel(st.pick) : st.pick)}</strong>
+      <button type="button" class="kr-link rp-pick" data-act="unpick">Show all</button>` : "";
     out.innerHTML = `
-      <p class="muted rp-range">${esc(rangeText(st.r))} · ${ev.length} entr${ev.length === 1 ? "y" : "ies"}${st.q.trim() ? ` matching “${esc(st.q.trim())}”` : ""}</p>
-      ${ev.length ? `${cfg.statsHtml(ev)}
+      <p class="muted rp-range">${esc(rangeText(st.r))} · ${ev.length} entr${ev.length === 1 ? "y" : "ies"}${st.q.trim() ? ` matching “${esc(st.q.trim())}”` : ""}${pill}</p>
+      ${all.length ? cfg.statsHtml(all, st.pick) : ""}
+      ${ev.length ? `
         <section class="tb-card">
           <h4>By ${esc(groupName().toLowerCase())}</h4>
           <div class="rp-scroll"><table class="inv-table rp-table">
@@ -507,12 +514,12 @@ function mountRangeReport(body, cfg) {
           </table></div>
           ${missingCost ? '<p class="muted rp-note">Value leaves out products with no cost. Add costs in Inventory → Products.</p>' : ""}
         </section>
-        <details class="tb-card rp-detail"><summary>Every entry (${ev.length})</summary>
+        <details class="tb-card rp-detail"${st.pick ? " open" : ""}><summary>Every entry (${ev.length})</summary>
           <div class="rp-scroll"><table class="inv-table rp-table">${cfg.detailHead}
             <tbody>${ev.slice(0, 500).map(cfg.detailRow).join("")}</tbody></table></div>
           ${ev.length > 500 ? `<p class="muted rp-note">Showing the latest 500. Export CSV for all ${ev.length}.</p>` : ""}
         </details>`
-      : `<div class="tm-empty">${esc(cfg.empty)}</div>`}`;
+      : `<div class="tm-empty">${esc(all.length ? "Nothing with that status in these dates. Click the card again to show everything." : cfg.empty)}</div>`}`;
   }
 
   body.addEventListener("change", (e) => {
@@ -537,12 +544,22 @@ function mountRangeReport(body, cfg) {
     clearTimeout(qTimer);
     qTimer = setTimeout(() => { if (st.r) draw(); }, 200);
   });
+  const setPick = (p) => { st.pick = st.pick === p ? "" : p; if (st.r) draw(); };
   body.addEventListener("click", (e) => {
+    const card = e.target.closest("[data-pick]");
+    if (card) { setPick(card.dataset.pick); return; }
+    if (e.target.closest('[data-act="unpick"]')) { st.pick = ""; if (st.r) draw(); return; }
     if (cfg.onClick && cfg.onClick(e, load)) return;
     if (!e.target.closest('[data-act="csv"]')) return;
-    const ev = visible();
+    const ev = picked(visible());
     if (!ev.length) { showToast("Nothing to export."); return; }
     downloadCsv(`${cfg.file}-${fileDates(st.r)}.csv`, [cfg.csvHead, ...ev.map(cfg.csvRow)]);
+  });
+
+  // The cards work from the keyboard too
+  body.addEventListener("keydown", (e) => {
+    const card = e.target.closest && e.target.closest("[data-pick]");
+    if (card && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); setPick(card.dataset.pick); }
   });
 
   drawTools();
@@ -710,14 +727,17 @@ function mountTreatmentCheck(body, staff) {
     },
     searchText: (e) => [e.patientName, e.by, e.booked.join(" "), e.typeLabel, e.productName,
       e.products.map((p) => `${p.name} ${p.batch}`).join(" "), e.unmatched.join(" ")].join(" "),
-    statsHtml(ev) {
+    pickLabel: (p) => p.split(",").map(tcLabel).join(" · "),
+    statsHtml(ev, pick) {
       const n = (s) => ev.filter((e) => e.status === s).length;
+      const card = (keys, cls, num, label) => `<div class="inv-stat ${cls}${pick === keys ? " is-active" : ""}" data-pick="${keys}"
+        role="button" tabindex="0" title="${pick === keys ? "Show everything" : "Show only these"}"><strong>${num}</strong><span>${esc(label)}</span></div>`;
       return `<div class="inv-stats">
-        <div class="inv-stat"><strong>${n("ok")}</strong><span>Accounted for</span></div>
-        <div class="inv-stat ${n("none") ? "is-bad" : ""}"><strong>${n("none")}</strong><span>No record</span></div>
-        <div class="inv-stat ${n("noproduct") ? "is-warn" : ""}"><strong>${n("noproduct")}</strong><span>Record, no product</span></div>
-        <div class="inv-stat ${n("notstock") ? "is-warn" : ""}"><strong>${n("notstock")}</strong><span>Not taken off stock</span></div>
-        <div class="inv-stat"><strong>${n("before") + n("noneed")}</strong><span>Before stock started · no record needed</span></div>
+        ${card("ok", "", n("ok"), "Accounted for")}
+        ${card("none", n("none") ? "is-bad" : "", n("none"), "No record")}
+        ${card("noproduct", n("noproduct") ? "is-warn" : "", n("noproduct"), "Record, no product")}
+        ${card("notstock", n("notstock") ? "is-warn" : "", n("notstock"), "Not taken off stock")}
+        ${card("before,noneed", "", n("before") + n("noneed"), "Before stock started · no record needed")}
       </div>`;
     },
     summaryHead: (label) => `<thead><tr><th>${esc(label)}</th><th>Visits</th><th>Accounted for</th><th>No record</th><th>Record, no product</th><th>Not taken off stock</th></tr></thead>`,
