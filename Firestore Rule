@@ -381,7 +381,8 @@ service cloud.firestore {
         ) || (
           can('inventory.manage')
           && request.resource.data.diff(resource.data).affectedKeys()
-               .hasOnly(['lines', 'short', 'original', 'corrected', 'corrections', 'correctedAt', 'correctedBy', 'correctedByUid'])
+               .hasOnly(['lines', 'short', 'original', 'corrected', 'corrections', 'correctedAt', 'correctedBy', 'correctedByUid',
+                         'deleted', 'deletedAt', 'deletedBy', 'deletedByUid', 'deleteReason'])
           && request.resource.data.corrected == true
           && request.resource.data.correctedByUid == request.auth.uid
           && (!('original' in resource.data) || request.resource.data.original == resource.data.original)
@@ -793,6 +794,33 @@ match /inv_count_drafts/{id} {
         && request.resource.data.editedByUid == request.auth.uid
         && request.resource.data.editedAt == request.time
         && dateEditOk();
+      // Admins: change the answers (and the record date) of a saved form. Signatures, the patient, the template
+      // and the first original are locked. Every edit is logged with a reason.
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['recordDate', 'answers', 'original', 'edits', 'editCount', 'editedAt', 'editedBy', 'editedByUid'])
+        && request.resource.data.recordDate is string
+        && request.resource.data.recordDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && request.resource.data.original is map
+        && request.resource.data.original.recordDate is string
+        && (!('original' in resource.data) || request.resource.data.original == resource.data.original)
+        && request.resource.data.edits is list
+        && request.resource.data.edits.size() > 0 && request.resource.data.edits.size() <= 30
+        && request.resource.data.edits[request.resource.data.edits.size() - 1].get('kind', '') == 'answers'
+        && request.resource.data.edits[request.resource.data.edits.size() - 1].reason is string
+        && request.resource.data.editCount == resource.data.get('editCount', 0) + 1
+        && request.resource.data.editedByUid == request.auth.uid
+        && request.resource.data.editedAt == request.time;
+      // Admins: delete (and restore) a record. It's hidden, never removed, with who and why.
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys()
+             .hasOnly(['deleted', 'deletedAt', 'deletedBy', 'deletedByUid', 'deleteReason', 'deleteLog'])
+        && request.resource.data.deleted is bool
+        && request.resource.data.deletedByUid == request.auth.uid
+        && request.resource.data.deleteReason is string
+        && request.resource.data.deleteReason.size() >= 3 && request.resource.data.deleteReason.size() <= 500
+        && request.resource.data.deleteLog is list && request.resource.data.deleteLog.size() <= 20;
+
     }
     // ===================== Task Manager =====================
 

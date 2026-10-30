@@ -2043,7 +2043,7 @@ export async function listMyUsage(days = 31) {
   const since = Date.now() - days * 864e5;
   return snap.docs
     .map((d) => { const x = d.data() || {}; return { id: d.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [], at: toDate(x.at) }; })
-    .filter((u) => u.at && u.at.getTime() > since)
+    .filter((u) => u.at && u.at.getTime() > since && u.deleted !== true)
     .sort((a, b) => b.at - a.at);
 }
 
@@ -2612,6 +2612,7 @@ export async function listUsageBetween(from, to) {
   const snap = await getDocs(query(collection(db, "inv_usage"), where("at", ">=", from), where("at", "<", to)));
   return snap.docs
     .map((d) => { const x = d.data() || {}; return { id: d.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [], at: toDate(x.at) }; })
+    .filter((u) => u.deleted !== true)
     .sort((a, b) => (b.at ? b.at.getTime() : 0) - (a.at ? a.at.getTime() : 0));
 }
 
@@ -2827,6 +2828,229 @@ export async function correctUsage(id, changes, reason, staff) {
       }),
     });
   });
+}
+
+/* ---------- Admin: the wrong product was recorded, or a usage that shouldn't be there ---------- */
+
+// Every usage record saved with one treatment form (normally one), oldest first
+export async function listUsageForSubmission(submissionId) {
+  const sid = String(submissionId || "");
+  if (!sid) return [];
+  const snap = await getDocs(query(collection(db, "inv_usage"), where("submissionId", "==", sid)));
+  return snap.docs.map((d) => {
+    const x = d.data() || {};
+    return { id: d.id, ...x, lines: Array.isArray(x.lines) ? x.lines : [], at: toDate(x.at), deletedAt: toDate(x.deletedAt),
+      corrections: Array.isArray(x.corrections) ? x.corrections : [] };
+  }).sort((a, b) => (a.at ? a.at.getTime() : 0) - (b.at ? b.at.getTime() : 0));
+}
+
+// Where each row of a usage took its stock from, read inside the transaction (reads come before writes).
+// Kit units go back into that batch in the clinician's kit; items go back into their batch on the Shelf / in JT storage.
+// Shared products and opened vials came from an opened container, so there's nothing to put back on the Shelf.
+async function giveBackReads(tx, u, lines) {
+  const owner = String(u.byUid || "");
+  const items = [];
+  const prods = new Map();
+  for (const l of lines) {
+    for (const r of l.rows || []) {
+      const n = l.kind === "kit" ? round1(r.taken) : Math.round(Number(r.taken) || 0);
+      if (!(n > 0)) continue;
+      if (l.kind === "kit") {
+        const kitOwner = String(l.kitUid || owner);
+        const ref = doc(db, "inv_kits", kitId(kitOwner, l.productId, r.batch, r.expiry));
+        items.push({ l, r, n, ref, snap: await tx.get(ref), kitOwner });
+      } else if (l.kind === "storage") {
+        const loc = r.from === "jt" ? "jt" : "shelf";
+        const ref = doc(db, "inv_lots", lotId(l.productId, loc, r.batch, r.expiry));
+        items.push({ l, r, n, ref, snap: await tx.get(ref), loc });
+        if (!prods.has(l.productId)) prods.set(l.productId, await tx.get(doc(db, "inv_products", l.productId)));
+      }
+    }
+  }
+  return { items, prods };
+}
+
+// ...and puts it back, with one activity line per product. Returns the lines whose stock went back.
+function giveBackWrites(tx, u, usageId, g, staff, reason, why) {
+  const byLine = new Map();
+  const stock = new Map();
+  g.items.forEach((it) => {
+    const line = { loc: it.loc || "kit", batch: String(it.r.batch || ""), expiry: String(it.r.expiry || ""), delta: it.n };
+    if (it.l.kind === "kit") {
+      const d = it.snap.exists() ? it.snap.data() : null;
+      tx.set(it.ref, {
+        staffUid: it.kitOwner, staffName: String(d ? d.staffName || "" : (it.l.kitUid ? "" : u.by || "")),
+        productId: it.l.productId, productName: it.l.name, batch: line.batch, expiry: line.expiry,
+        dosePer: d ? Number(d.dosePer) || 0 : 0, doseUnit: String(d ? d.doseUnit || "units" : it.l.unit || "units"),
+        sealed: d ? parseInt(d.sealed, 10) || 0 : 0, open: round1((d ? Number(d.open) || 0 : 0) + it.n),
+        updatedAt: serverTimestamp(), ...(d ? {} : { createdAt: serverTimestamp() }),
+      }, { merge: true });
+    } else {
+      const have = it.snap.exists() ? Number(it.snap.data().qty) || 0 : 0;
+      tx.set(it.ref, {
+        productId: it.l.productId, loc: it.loc, batch: line.batch, expiry: line.expiry, qty: have + it.n,
+        updatedAt: serverTimestamp(), ...(it.snap.exists() ? {} : { createdAt: serverTimestamp() }),
+      }, { merge: true });
+      const s = stock.get(it.l.productId) || { shelf: 0, jt: 0 };
+      s[it.loc] += it.n;
+      stock.set(it.l.productId, s);
+    }
+    if (!byLine.has(it.l)) byLine.set(it.l, { lines: [], kitOwner: it.kitOwner || "" });
+    byLine.get(it.l).lines.push(line);
+  });
+  stock.forEach((s, pid) => {
+    const snap = g.prods.get(pid);
+    if (!snap || !snap.exists()) return;
+    const st = snap.data().stock || {};
+    tx.update(snap.ref, {
+      stock: { shelf: Math.max(0, (Number(st.shelf) || 0) + s.shelf), jt: Math.max(0, (Number(st.jt) || 0) + s.jt) },
+      stockAt: serverTimestamp(),
+    });
+  });
+  byLine.forEach((v, l) => logMove(tx, staff, {
+    type: l.kind === "kit" ? "kit-correct" : "use-correct", productId: l.productId, productName: l.name, unit: l.unit,
+    ...(l.kind === "kit" ? { staffUid: v.kitOwner } : {}),
+    ...(KEY_RE.test(u.recordDate || "") ? { effectiveDate: u.recordDate } : {}),
+    lines: v.lines, reason, ref: usageId,
+    note: [`${u.patientName || ""} · ${u.formName || ""}`, why].filter(Boolean).join(" · ").slice(0, 500),
+  }));
+  return new Set(byLine.keys());
+}
+
+// Admin: the wrong product was recorded. Its stock goes back where it came from, and the right product comes off
+// the batch (or the clinician's kit) chosen. The line keeps what it used to say.
+// to: { productId, ref (a lot id, or a kit record id for kit products), amount, dose }
+export async function changeUsageProduct(id, li, to, reason, staff) {
+  const why = clip(reason, 300);
+  if (why.length < 3) throw new Error("Add a reason for the change.");
+  const pid = clip(to && to.productId, 60);
+  if (!pid) throw new Error("Choose the product that was actually used.");
+  const me = uid();
+  const by = who(staff);
+  const uRef = doc(db, "inv_usage", id);
+
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    const uSnap = await tx.get(uRef);
+    if (!uSnap.exists()) throw new Error("This record no longer exists.");
+    const u = uSnap.data();
+    if (u.deleted === true) throw new Error("This usage has been removed.");
+    const lines = (Array.isArray(u.lines) ? u.lines : []).map((l) => ({ ...l, rows: (l.rows || []).map((r) => ({ ...r })) }));
+    const l = lines[li];
+    if (!l) throw new Error("This record has changed. Reload and try again.");
+    if (l.kind === "shared" || l.kind === "vial") throw new Error(`${l.name} came from an opened container, so it can't be swapped here.`);
+    if (l.productId === pid) throw new Error("That's the same product. Use Correct amount to change how much was used.");
+    if (lines.some((x, i) => i !== li && x.productId === pid)) throw new Error("That product is already on this record. Correct its amount instead.");
+    const pSnap = await tx.get(doc(db, "inv_products", pid));
+    if (!pSnap.exists()) throw new Error("That product no longer exists.");
+    const pd = pSnap.data();
+    if (pd.usage === "shared") throw new Error(`${pd.name} is shared across patients, so it's recorded on a treatment form, not here.`);
+    const kit = pd.usage === "kit" && Number(pd.dosePer) > 0;
+    const amount = kit ? round1(Math.max(0, Number(to.amount) || 0)) : Math.max(0, Math.round(Number(to.amount) || 0));
+    if (!(amount > 0)) throw new Error("Enter how much was used.");
+    const srcRef = doc(db, kit ? "inv_kits" : "inv_lots", clip(to.ref, 200) || "-");
+    const srcSnap = await tx.get(srcRef);
+    if (!srcSnap.exists() || String(srcSnap.data().productId || "") !== pid) {
+      throw new Error(kit ? "Choose which batch in the clinician's kit it came from." : "Choose which batch it came from.");
+    }
+    const src = srcSnap.data();
+    const back = await giveBackReads(tx, u, [l]);
+
+    // ---- Writes: the old product back, the right one off ----
+    giveBackWrites(tx, u, id, back, staff, "Product changed", `${l.name} → ${pd.name} · ${why}`);
+    let taken, from, kitOwner = "";
+    if (kit) {
+      kitOwner = String(src.staffUid || "");
+      let sealed = parseInt(src.sealed, 10) || 0, open = round1(src.open);
+      const per = Number(src.dosePer) || Number(pd.dosePer) || 0;
+      while (amount > open + 0.001 && sealed > 0 && per > 0) { sealed -= 1; open = round1(open + per); }
+      taken = round1(Math.min(amount, open));
+      tx.update(srcRef, { sealed, open: round1(open - taken), updatedAt: serverTimestamp() });
+      from = "kit";
+    } else {
+      const have = Number(src.qty) || 0;
+      taken = Math.min(amount, have);
+      from = src.loc === "jt" ? "jt" : "shelf";
+      tx.update(srcRef, { qty: have - taken, updatedAt: serverTimestamp() });
+      if (taken) {
+        const st = pd.stock || {};
+        const stock = { shelf: Number(st.shelf) || 0, jt: Number(st.jt) || 0 };
+        stock[from] = Math.max(0, stock[from] - taken);
+        tx.update(pSnap.ref, { stock, stockAt: serverTimestamp() });
+      }
+    }
+    const per = Number(pd.dosePer) || 0;
+    const dose = kit ? amount : pd.doseUnit ? Math.round(Math.max(0, Number(to.dose) || 0) * 100) / 100 : 0;
+    const waste = !kit && per && dose ? Math.max(0, Math.round((amount * per - dose) * 100) / 100) : 0;
+    const short = kit ? round1(amount - taken) : amount - taken;
+    const row = { batch: String(src.batch || ""), expiry: String(src.expiry || ""), amount, taken, from, dose, waste };
+    const unit = kit ? String(pd.doseUnit || "units") : String(pd.stockUnit || "item");
+    lines[li] = {
+      productId: pid, name: String(pd.name || ""), kind: kit ? "kit" : "storage", stockUnit: String(pd.stockUnit || "item"), unit,
+      batchLabel: String(pd.batchLabel || "Batch"), doseUnit: kit || pd.doseUnit ? String(pd.doseUnit || "") : "",
+      doseTotal: dose, waste, total: amount, short, rows: [row],
+      ...(kit ? { kitUid: kitOwner } : {}), replaced: { productId: l.productId, name: l.name },
+    };
+    if (taken > 0) {
+      logMove(tx, staff, {
+        type: kit ? "kit-use" : "use", ...(kit ? { staffUid: kitOwner } : {}), productId: pid, productName: lines[li].name, unit,
+        ...(KEY_RE.test(u.recordDate || "") ? { effectiveDate: u.recordDate } : {}),
+        lines: [{ loc: from, batch: row.batch, expiry: row.expiry, delta: -taken }],
+        reason: "Treatment (product corrected)", ref: id,
+        note: `${u.patientName || ""} · ${u.formName || ""} · was ${l.name} · ${why}`.slice(0, 500),
+      });
+    }
+    tx.update(uRef, {
+      lines, short: lines.some((x) => (Number(x.short) || 0) > 0),
+      ...(u.original ? {} : { original: u.lines }),
+      corrected: true, correctedAt: serverTimestamp(), correctedBy: by, correctedByUid: me,
+      corrections: arrayUnion({
+        at: new Date().toISOString(), by, byUid: me, reason: why,
+        changes: [`${l.name} → ${pd.name}: ${kit ? `${amount} ${unit}` : plural(amount, unit)}${short ? ` (short by ${short})` : ""}`],
+      }),
+    });
+  });
+}
+
+// Admin: a usage that shouldn't be there (the wrong patient, or it never happened). Kit units and Shelf items go
+// back where they came from. The record stays, marked removed, and leaves the reports and the Treatment check.
+// Returns { skipped }: products used from an opened container, which can't be put back.
+export async function deleteUsage(id, reason, staff) {
+  const why = clip(reason, 300);
+  if (why.length < 3) throw new Error("Add a reason.");
+  const me = uid();
+  const by = who(staff);
+  const uRef = doc(db, "inv_usage", id);
+  const skipped = [];
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    skipped.length = 0;
+    const uSnap = await tx.get(uRef);
+    if (!uSnap.exists()) throw new Error("This record no longer exists.");
+    const u = uSnap.data();
+    if (u.deleted === true) throw new Error("This usage has already been removed.");
+    const lines = (Array.isArray(u.lines) ? u.lines : []).map((l) => ({ ...l, rows: (l.rows || []).map((r) => ({ ...r })) }));
+    const back = await giveBackReads(tx, u, lines);
+
+    // ---- Writes ----
+    const done = giveBackWrites(tx, u, id, back, staff, "Usage removed", why);
+    lines.forEach((l) => { if (!done.has(l) && l.rows.some((r) => Number(r.taken) > 0)) skipped.push(l.name); });
+    const cleared = lines.map((l) => ({
+      ...l, total: 0, short: 0, doseTotal: 0, waste: 0,
+      rows: l.rows.map((r) => ({ ...r, amount: 0, taken: 0, dose: 0, waste: 0 })),
+    }));
+    tx.update(uRef, {
+      lines: cleared, short: false,
+      ...(u.original ? {} : { original: u.lines }),
+      corrected: true, correctedAt: serverTimestamp(), correctedBy: by, correctedByUid: me,
+      deleted: true, deletedAt: serverTimestamp(), deletedBy: by, deletedByUid: me, deleteReason: why,
+      corrections: arrayUnion({
+        at: new Date().toISOString(), by, byUid: me, reason: `Removed: ${why}`.slice(0, 300),
+        changes: [`Usage removed: nothing used, stock put back${skipped.length ? ` (not ${skipped.join(", ")}: used from an opened container)` : ""}`],
+      }),
+    });
+  });
+  return { skipped };
 }
 
 /* ===================== Investigations: when a count doesn't match the digital count ===================== */

@@ -9,6 +9,9 @@ import { db, auth } from "./firebase-config.js";
 import { doc, getDoc, updateDoc, arrayUnion, increment, serverTimestamp }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { showToast } from "./utils.js";
+import { isAdmin } from "./perms.js";
+import { callApi } from "./appointments.js";
+import { deleteUsage, listUsageForSubmission } from "./inventory-api.js";
 import { answerTagText } from "./form-live.js";
 
 const svg = (p, cls = "") =>
@@ -420,6 +423,29 @@ export function mountRecords(root, patient, staff = null) {
       b.disabled = false;
     }
   });
+  // Delete (Admins): a record is hidden, never removed. Portal forms also put their products back into stock.
+  grid.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-del-sub], [data-del-legacy]");
+    if (!b || b.disabled) return;
+    e.preventDefault();
+    b.disabled = true;
+    try {
+      let done = false;
+      if (b.dataset.delSub) {
+        const sub = await getSubmission(b.dataset.delSub);
+        if (sub) done = await openDeleteRecordDialog({ sub, staff });
+      } else {
+        const kind = b.dataset.delLegacy;
+        const r = (lists[kind] || []).find((x) => !x.portalId && x.id === b.dataset.id);
+        if (r) done = await openDeleteRecordDialog({ legacy: { kind, id: r.id, title: r.title, dateText: fmt(r) }, staff });
+      }
+      if (done && grid.isConnected) reload();
+    } catch (err) {
+      console.error("Delete failed:", err);
+    } finally {
+      b.disabled = false;
+    }
+  });
   if (highlightId && !txCard.open) txCard.open = true; // just saved a record: show it
   if (txCard.open) load();
 
@@ -434,7 +460,85 @@ export function mountRecords(root, patient, staff = null) {
   }
   return { reload };
 }
-
+// Delete or restore a record (Admins). Portal forms: hidden with who and why; their products go back into stock.
+// Older records (PDFs from the old app): marked by Apps Script. Resolves true once done.
+export function openDeleteRecordDialog({ sub = null, legacy = null, restore = false, staff = null } = {}) {
+  if (!isAdmin()) { showToast("Only an Admin can delete a record."); return Promise.resolve(false); }
+  const title = sub ? sub.templateName : legacy.title;
+  const dateText = sub ? fmt({ date: parseDateKey(sub.recordDate) }) : legacy.dateText;
+  const verb = restore ? "Restore" : "Delete";
+  return new Promise((resolve) => {
+    let done = false, usage = [];
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog rc-cat-dlg";
+    dlg.innerHTML = `
+      <form class="lh-form" novalidate>
+        <div class="lh-dialog-head"><h3>${verb} this record?</h3>
+          <p>${escapeHtml(title)} · ${escapeHtml(dateText)}${legacy ? " · older record (PDF)" : ""}</p></div>
+        <p class="fe-note">${restore ? "It goes back on the patient's page and into the reports."
+          : "It's hidden from the patient's page, the badges and the reports, and an Admin can restore it from the record itself. Nothing is ever removed."}</p>
+        <div data-role="usage"></div>
+        <label class="rc-edit-f"><span>Reason</span>
+          <textarea name="reason" rows="2" maxlength="500" placeholder="${restore ? "e.g. Deleted by mistake" : "e.g. Saved twice; this is the duplicate"}"></textarea></label>
+        <p class="rc-edit-err" role="alert"></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="submit" class="lh-btn ${restore ? "is-primary" : "is-danger"}">${verb} record</button>
+        </div>
+      </form>`;
+    const form = dlg.querySelector("form");
+    const err = dlg.querySelector(".rc-edit-err");
+    if (sub && !restore) {
+      listUsageForSubmission(sub.id).then((list) => {
+        usage = list.filter((u) => !u.deleted && u.lines.some((l) => Number(l.total) > 0));
+        const box = dlg.querySelector('[data-role="usage"]');
+        if (box && usage.length) {
+          const names = [...new Set(usage.flatMap((u) => u.lines.filter((l) => Number(l.total) > 0).map((l) => l.name)))];
+          box.innerHTML = `<label class="fe-check"><input type="checkbox" name="stock" checked /> Also put the products used back into stock (${escapeHtml(names.join(", "))})</label>`;
+        }
+      }).catch((e) => console.warn("Usage not checked:", e));
+    }
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const reason = form.querySelector("textarea").value.trim();
+      if (reason.length < 3) { err.textContent = "Add a short reason."; return; }
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      err.textContent = "";
+      try {
+        const by = (staff && staff.name) || "";
+        const byUid = (auth.currentUser && auth.currentUser.uid) || "";
+        if (sub) {
+          await updateDoc(doc(db, "form_submissions", sub.id), {
+            deleted: !restore, deletedAt: serverTimestamp(), deletedBy: by, deletedByUid: byUid, deleteReason: reason,
+            deleteLog: arrayUnion({ action: restore ? "restored" : "deleted", at: new Date().toISOString(), by, byUid, reason }),
+          });
+          if (!restore && form.elements.stock && form.elements.stock.checked) {
+            for (const u of usage) {
+              await deleteUsage(u.id, `Record deleted: ${reason}`, staff)
+                .catch((ex) => { console.warn("Usage not removed:", ex); showToast(`The products weren't put back: ${ex.message || "try it from Reporting → Usage"}`); });
+            }
+          }
+        } else {
+          await callApi({ action: "records", op: "deleteLegacy", kind: legacy.kind, recordId: legacy.id, restore, reason });
+        }
+        done = true;
+        showToast(restore ? "Record restored" : "Record deleted");
+        dlg.close();
+      } catch (ex) {
+        console.error("Delete record failed:", ex);
+        err.textContent = ex.code === "permission-denied" ? "Blocked. Check the form_submissions Firestore rule for Admin deletes has been published."
+          : ex.code === "INVALID_PIN" || ex.code === "BAD_REQUEST" ? "The server hasn't been updated yet. Deploy a new Apps Script version."
+          : ex.message || "Couldn't do that. Try again.";
+        btn.disabled = false;
+      }
+    });
+    dlg.addEventListener("close", () => { dlg.remove(); resolve(done); });
+    document.body.appendChild(dlg);
+    dlg.showModal();
+  });
+}
 /* ===================== Templates ===================== */
 
 function groupBy(items) {
@@ -457,6 +561,7 @@ function portalView(r) {
     html += '<button type="button" class="rc-act" data-move-sub="' + escapeHtml(r.portalId) + '">' + ICONS.move + 'Move</button>';
     html += '<button type="button" class="rc-act" data-recat="' + escapeHtml(r.portalId) + '" title="Change whether it\'s a treatment or consent record, and which treatment it\'s under">' + ICONS.tag + 'Type &amp; category</button>';
   }
+  if (isAdmin()) html += '<button type="button" class="rc-act danger" data-del-sub="' + escapeHtml(r.portalId) + '" title="Hide this record (Admins). It can be restored.">' + ICONS.trash + 'Delete</button>';
   return html;
 }
 
@@ -653,7 +758,7 @@ function txItemHtml(t) {
         ${legacyMove("treatment", t)}
         <button type="button" class="rc-act" data-soon="Edit record">${ICONS.edit}Edit Record</button>
         <button type="button" class="rc-act" data-soon="Rename record">${ICONS.rename}Rename</button>
-        <button type="button" class="rc-act danger" data-soon="Delete record">${ICONS.trash}Delete</button>
+        ${isAdmin() ? `<button type="button" class="rc-act danger" data-del-legacy="treatment" data-id="${escapeHtml(t.id)}">${ICONS.trash}Delete</button>` : ""}
       </div>
     </article>`;
 }
@@ -679,7 +784,7 @@ function consentItemHtml(c) {
         ${viewLink(c.link)}
         ${legacyMove("consent", c)}
         <button type="button" class="rc-act" data-soon="Edit consent">${ICONS.edit}Edit</button>
-        <button type="button" class="rc-act danger" data-soon="Delete consent">${ICONS.trash}Delete</button>
+        ${isAdmin() ? `<button type="button" class="rc-act danger" data-del-legacy="consent" data-id="${escapeHtml(c.id)}">${ICONS.trash}Delete</button>` : ""}
       </div>
     </article>`;
 }

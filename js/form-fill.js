@@ -3,7 +3,7 @@
 import { getFormTemplate, getFormVersion, getLetterhead, categoryLabel, listPublishedForms } from "./form-templates.js";
 import { fetchPatientRecords } from "./records.js";
 import { fetchBillingAndRx } from "./billing-rx-view.js";
-import { esc, svg, ICONS, renderField, normaliseField, watermarkHtml, canRequire,
+import { esc, svg, ICONS, FIELD_TYPES, renderField, normaliseField, watermarkHtml, canRequire,
   choiceList, otherLabel, syncChoiceExtras, readExtras, writeExtras, readImageQs, writeImageQs, STAFF_FILLS,
   tableCols, tableMax, tableRowHtml, syncTableRows, tableClick, tableTotal, tableRecalc, spanClass, syncButtons,
   readTableDisc, readTablePays, tableInvRead, tableInvWrite, tableInvoice } from "./form-fields.js";
@@ -17,7 +17,7 @@ import { showToast, formatDobLong, formatMobile } from "./utils.js";
 import { queueDelivery, takeDelivery, openEmailComposer, sendToPrinter, deliveriesHtml, deliveryError } from "./form-delivery.js";
 import { conditionPasses, visibleIds } from "./form-conditions.js";
 import { formGroup } from "./form-templates.js";
-import { highlightRecord } from "./records-view.js";
+import { highlightRecord, openDeleteRecordDialog } from "./records-view.js";
 import { formTitleHtml } from "./form-fields.js";
 import { hydrateBankImages } from "./image-bank-api.js";
 import { attachAnnotators } from "./form-annotate.js";
@@ -25,7 +25,7 @@ import { bankImage } from "./image-bank-api.js";
 import { mountAftercareField } from "./aftercare-field.js";
 import { mountPhotoField } from "./photo-field.js";
 import { mountConsumablesField, consumablesViewHtml } from "./consumables-field.js";
-import { consumeInTx } from "./inventory-api.js";
+import { consumeInTx, listUsageForSubmission } from "./inventory-api.js";
 import { listStaffDetails, staffDetailsFor } from "./staff-details.js";
 import { mountSpecialistField } from "./specialist-field.js";
 import { tagValues, collectTagNodes, applyTagNodes, fillTags, formFieldTags } from "./form-tags.js";
@@ -35,7 +35,9 @@ import { signaturePad, readField, applyVisibility, isBlank, fieldTagValues, ONLI
 import { readDraft, writeDraft, clearDraft, pruneDrafts, askResumeDraft } from "./form-draft.js";
 export { readField, applyVisibility, answerTagText, fieldTagValues } from "./form-live.js";
 import { loadClinicalAlerts, clinicalBannerHtml, allergyChipText } from "./clinical-alerts.js";
-import { can } from "./perms.js";
+import { can, isAdmin } from "./perms.js";
+import { db, auth } from "./firebase-config.js";
+import { doc, getDoc, updateDoc, arrayUnion, increment, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const ic = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const BAR_ICONS = {
@@ -45,6 +47,8 @@ const BAR_ICONS = {
   check: ic('<polyline points="20 6 9 17 4 12"/>'),
   send: ic('<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>'),
   hand: ic('<rect x="5" y="2" width="14" height="20" rx="2"/><line x1="12" y1="18" x2="12.01" y2="18"/>'),
+  edit: ic('<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>'),
+  trash: ic('<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>'),
 };
 
 const LAYOUT = ["text_block", "space", "letterhead", "watermark", "button"]; // nothing is saved for these
@@ -396,20 +400,107 @@ async function checkConsents(consentFields, patient) {
   return out;
 }
 
+// Editing a saved form: the parts that can't be changed are shown as they were saved
+function showSavedViews(sheet, fields, sub) {
+  fields.forEach((f) => {
+    const w = sheet.querySelector(`[data-fid="${CSS.escape(f.id)}"]`);
+    if (!w) return;
+    const v = sub.answers[f.id];
+    if (f.type === "image" && f.source === "staff") { mountPhotoField(w, f, { saved: v || null }); return; }
+    if (f.type === "image" && f.annotate && f.fileId) {
+      const saved = v && typeof v === "object" ? v : {};
+      const sum = markSummary(saved);
+      const fig = w.querySelector("figure");
+      if (sum && fig) fig.insertAdjacentHTML("beforeend", `<p class="an-sum">${esc(sum)}</p>`);
+      const box = w.querySelector("[data-annot-img]");
+      if (box) {
+        bankImage(f.fileId)
+          .then((src) => {
+            if (box.isConnected) box.innerHTML = `<span class="an-view"><img src="${esc(src)}" alt="" />${
+              PNG_RE.test(saved.drawing || "") ? `<img class="an-over" src="${esc(saved.drawing)}" alt="Markings" />` : ""}</span>`;
+          })
+          .catch(() => { if (box.isConnected) box.innerHTML = '<span class="fe-img-missing">This picture is missing from the Image Bank</span>'; });
+      }
+      return;
+    }
+    if (f.type === "aftercare") { mountAftercareField(w, f, { saved: v || null }); return; }
+    if (f.type === "consumables") {
+      const host = w.querySelector("[data-cs-host]");
+      if (host) host.outerHTML = consumablesViewHtml(v) + '<p class="fe-help">Products used are corrected from the saved record page, so stock follows the change.</p>';
+    }
+  });
+}
 
+// The reason for an edit, asked before it's saved. Resolves the text, or null.
+function editReasonDialog() {
+  return new Promise((resolve) => {
+    let out = null;
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog fe-confirm";
+    dlg.innerHTML = `<form class="lh-form" novalidate>
+      <div class="lh-dialog-head"><h3>Save the changes?</h3><p>The reason is kept on the record with what changed, and shows on the PDF.</p></div>
+      <textarea class="fe-input" rows="3" maxlength="300" placeholder="e.g. Wrong area ticked; corrected after checking with Dr Teh"></textarea>
+      <p class="lh-error" role="alert" hidden></p>
+      <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="no">Cancel</button>
+        <button type="submit" class="lh-btn is-primary">Save changes</button></div></form>`;
+    const ta = dlg.querySelector("textarea");
+    const err = dlg.querySelector(".lh-error");
+    dlg.querySelector('[data-act="no"]').addEventListener("click", () => dlg.close());
+    dlg.querySelector("form").addEventListener("submit", (e) => {
+      e.preventDefault();
+      const v = ta.value.trim();
+      if (v.length < 3) { err.textContent = "Add a short reason."; err.hidden = false; return; }
+      out = v;
+      dlg.close();
+    });
+    dlg.addEventListener("close", () => { dlg.remove(); resolve(out); });
+    document.body.appendChild(dlg);
+    dlg.showModal();
+    ta.focus();
+  });
+}
+
+// Edits made after a form was saved, shown on the record page
+function editsHtml(list) {
+  const edits = (Array.isArray(list) ? list : []).filter((e) => e && e.kind === "answers");
+  if (!edits.length) return "";
+  const when = (iso) => { const d = new Date(iso); return isNaN(d) ? "" : d.toLocaleString("en-AU", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" }); };
+  return `<ul class="ff-log rm-log">${edits.slice().reverse().map((e) => `<li>Edited by <strong>${esc(e.by || "staff")}</strong>, ${esc(when(e.at))}${
+    e.reason ? ` · ${esc(e.reason)}` : ""}${(e.changes || []).length ? `: ${esc(e.changes.join(", "))}` : ""}</li>`).join("")}</ul>`;
+}
+
+// The record page's Products used: from the stock records (where corrections are made), not the answers saved with the form
+async function renderUsage(w, sub, staff) {
+  let list = [];
+  try { list = await listUsageForSubmission(sub.id); } catch (err) { console.warn("Usage not loaded:", err); return; }
+  if (!w.isConnected || !list.length) return;
+  const u = list[0];
+  const last = u.corrections[u.corrections.length - 1] || {};
+  const note = u.deleted
+    ? `<p class="fe-help tb-bad">Products removed by ${esc(u.deletedBy || "")}${u.deleteReason ? `: ${esc(u.deleteReason)}` : ""}. Stock was put back.</p>`
+    : u.corrected ? `<p class="fe-help">Corrected by ${esc(u.correctedBy || "")}${last.reason ? `: ${esc(last.reason)}` : ""}.</p>` : "";
+  const html = (u.deleted ? '<p class="fe-help">Nothing used (removed).</p>' : consumablesViewHtml({ lines: u.lines })) + note
+    + (can("inventory.manage") && !u.deleted ? '<button type="button" class="lh-btn" data-act="correct-usage">Correct products used…</button>' : "");
+  const old = w.querySelector(".cs-usage") || w.querySelector(".cs-view");
+  if (old) old.outerHTML = `<div class="cs-usage">${html}</div>`;
+  else w.insertAdjacentHTML("beforeend", `<div class="cs-usage">${html}</div>`);
+  const b = w.querySelector('[data-act="correct-usage"]');
+  if (b) b.addEventListener("click", () => import("./reports.js").then((m) => m.openCorrection(u.id, staff, () => renderUsage(w, sub, staff))));
+}
 /* ===================== Fill in ===================== */
 
 // embedded (Task Manager overlay): { onSaved(submissionId), onCancel(), saveLabel }
 export async function mountFormFill(container, param, { staff, embedded = null } = {}) {
-  const [pid = "", tid = ""] = String(param || "").split("/");
+  const [pid = "", tid = "", mode = "", editId = ""] = String(param || "").split("/");
+  const editing = !embedded && mode === "edit" && !!editId;   // #/fill/<patient>/<form>/edit/<record>: an Admin changing a saved form
   const patientHref = `#/patient/${encodeURIComponent(pid)}`;
-  const tabMode = embedded ? null : readTabMode(pid, tid);   // opened with "Open in new tab"
-  const ret = embedded || tabMode ? null : readReturn();
+  const tabMode = embedded || editing ? null : readTabMode(pid, tid);   // opened with "Open in new tab"
+  const ret = embedded || tabMode || editing ? null : readReturn();
   const isConsentLeg = !!(ret && ret.patientId === pid && ret.consentId === tid);   // filling in the consent
   const isReturnLeg = !!(ret && ret.patientId === pid && ret.templateId === tid && !isConsentLeg); // back on the treatment form
-  const copy = embedded || tabMode || isReturnLeg ? null : takeCopy(pid, tid);   // "Copy and create new"
-  const handSaved = embedded || tabMode ? "" : readHand(pid, tid); // locked for the patient before a refresh
-  const exitHref = isConsentLeg ? ret.returnHash : patientHref;
+  const copy = embedded || tabMode || isReturnLeg || editing ? null : takeCopy(pid, tid);   // "Copy and create new"
+  const handSaved = embedded || tabMode || editing ? "" : readHand(pid, tid); // locked for the patient before a refresh
+  const exitHref = editing ? `#/form-record/${encodeURIComponent(editId)}` : isConsentLeg ? ret.returnHash : patientHref;
   const back = embedded ? "" : `<a class="back-link" href="${patientHref}">← Back to patient</a>`;
   const root = document.createElement("section");
   root.className = "page wide";
@@ -421,19 +512,25 @@ export async function mountFormFill(container, param, { staff, embedded = null }
   };
   if (!pid || !tid) { fail("Form not found", "Go back to the patient and choose a form again."); return; }
 
-  let tpl, patient, ver, letterhead, markSets = [];
+  let tpl, patient, ver, letterhead, markSets = [], sub = null;
   try {
-    [tpl, patient] = await Promise.all([
+    [tpl, patient, sub] = await Promise.all([
       getFormTemplate(tid).catch((err) => { if (err && err.code === "permission-denied") return null; throw err; }),
       getPatient(pid),
+      editing ? getSubmission(editId) : null,
     ]);
     if (!patient) { fail("Patient not found", "Go back to the patient list and try again."); return; }
-    if (!tpl || tpl.status !== "live" || !tpl.version) {
+    if (editing) {
+      if (!isAdmin()) { fail("Admins only", "Only an Admin can change a saved form."); return; }
+      if (!sub || sub.templateId !== tid || sub.patientId !== pid) { fail("Record not found", "It may have been moved to another patient. Open it from their page."); return; }
+      if (sub.deleted) { fail("This record was deleted", "Restore it from the record page first."); return; }
+      if (!tpl) tpl = { category: sub.category, status: "", version: sub.version };
+    } else if (!tpl || tpl.status !== "live" || !tpl.version) {
       fail("This form isn't available", "It may have been unpublished. Go back to the patient and choose another.");
       return;
     }
     [ver, letterhead, markSets] = await Promise.all([
-      getFormVersion(tid, tpl.version),
+      getFormVersion(tid, editing ? sub.version : tpl.version),   // the version it was filled in on
       getLetterhead().catch(() => DEFAULT_LETTERHEAD),
       listMarkingSets().catch(() => []),
     ]);
@@ -447,8 +544,8 @@ export async function mountFormFill(container, param, { staff, embedded = null }
 
   const fields = ver.fields.map(normaliseField).filter(Boolean);
   const showAlerts = ALERT_CATEGORIES.includes(tpl.category) && can("clinical.view");
-  const offerLast = tpl.category !== "consent" && !isReturnLeg && !copy; // consent is always given fresh
-  const offerHand = !embedded && fields.some((f) => forPatient(f)
+  const offerLast = tpl.category !== "consent" && !isReturnLeg && !copy && !editing; // consent is always given fresh
+  const offerHand = !embedded && !editing && fields.some((f) => forPatient(f)
     && !LAYOUT.includes(f.type) && !["patient", "calculation", "image"].includes(f.type));
   root.innerHTML = `
     <div class="ff-wrap">
@@ -458,14 +555,16 @@ export async function mountFormFill(container, param, { staff, embedded = null }
             ? `<button type="button" class="ff-back" data-act="emb-cancel" aria-label="Cancel" title="Cancel">${BAR_ICONS.back}</button>`
             : `<a class="ff-back" href="${exitHref}" aria-label="Back" title="Back">${BAR_ICONS.back}</a>`}
           <div class="ff-bar-title">
-            <strong>${esc(ver.name)}</strong>
-            <span>${esc(patient.name)} · ${esc(categoryLabel(tpl.category))} · Version ${ver.version}</span>
+            <strong>${editing ? "Editing: " : ""}${esc(ver.name)}</strong>
+            <span>${esc(patient.name)} · ${esc(categoryLabel(tpl.category))} · Version ${ver.version}${editing ? ` · saved ${esc(niceDate(sub.recordDate))}` : ""}</span>
             ${showAlerts ? '<button type="button" class="ff-allergy" data-role="allergy-chip" hidden></button>' : ""}
           </div>
           <span class="ff-progress" data-role="progress" hidden></span>
           <div class="ff-bar-actions">${embedded ? `
             <button type="button" class="ff-btn is-quiet" data-act="emb-cancel">Cancel</button>
-            <button type="button" class="ff-btn is-primary" data-save="save">${BAR_ICONS.check}<span>${esc(embedded.saveLabel || "Save")}</span></button>` : `
+            <button type="button" class="ff-btn is-primary" data-save="save">${BAR_ICONS.check}<span>${esc(embedded.saveLabel || "Save")}</span></button>` : editing ? `
+            <a class="ff-btn is-quiet" href="${exitHref}">Cancel</a>
+            <button type="button" class="ff-btn is-primary" data-save="save">${BAR_ICONS.check}<span>Save changes</span></button>` : `
             <a class="ff-btn is-quiet" href="${exitHref}">Cancel</a>
             ${offerHand ? `<button type="button" class="ff-btn" data-act="handover">${BAR_ICONS.hand}<span>Hand to patient</span></button>` : ""}
             <button type="button" class="ff-btn" data-save="print">${BAR_ICONS.print}<span>Save &amp; print</span></button>
@@ -474,6 +573,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
           </div>
         </div>
         <p class="ff-msg" data-role="msg" aria-live="polite"></p>
+        ${editing ? '<p class="ff-return">Changing a saved form. Signatures, photos, drawings, aftercare and products used stay as they were (products are corrected from the record page). Each save needs a reason and is kept on the record.</p>' : ""}
         ${isConsentLeg ? `<p class="ff-return">${esc(ret.kind || "Consent")} for <strong>${esc(ret.templateName)}</strong>. When you save, you'll go back to it.</p>` : ""}
         ${tabMode ? `<p class="ff-return">${esc(tabMode.k || "Consent")} for <strong>${esc(tabMode.n)}</strong>, which is open in your other tab.
           When you save, this tab closes and that form updates.
@@ -523,7 +623,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
         if (root.isConnected) host.innerHTML = clinicalBannerHtml(null, { error: true });
       });
   }
-  const annots = attachAnnotators(sheet, fields, {
+  const annots = editing ? {} : attachAnnotators(sheet, fields, {
     markSets,
     initial: copy && copy.marks,
     onInitial: (f, skipped) => {
@@ -538,6 +638,10 @@ export async function mountFormFill(container, param, { staff, embedded = null }
   const msgEl = root.querySelector('[data-role="msg"]');
   const progressEl = root.querySelector('[data-role="progress"]');
   const saveBtns = $all(root, "[data-save]");
+  // Editing: these keep what was saved. They're shown, not changed.
+  const locked = new Set(editing ? fields.filter((f) => ["aftercare", "consumables", "photo"].includes(f.type)
+    || (f.type === "image" && (f.source === "staff" || f.annotate))).map((f) => f.id) : []);
+  if (editing) showSavedViews(sheet, fields, sub);
   const wrap = (id) => sheet.querySelector(`[data-fid="${CSS.escape(id)}"]`);
   // Hidden from staff: hidden with a class, not `hidden`, so calculations, tags and show-when rules still read the answer
   fields.forEach((f) => { if (f.liveHide) { const w = wrap(f.id); if (w) w.classList.add("is-livehide"); } });
@@ -562,16 +666,27 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     const w = wrap(f.id);
     if (!w) return;
     if (f.type === "signature") {
-      const host = w.querySelector(".fe-sig");
+      let host = w.querySelector(".fe-sig");
       if (!host) return;
-      pads[f.id] = signaturePad(host);
+      const savedSig = editing && PNG_RE.test((sub.signatures || {})[f.id] || "") ? sub.signatures[f.id] : "";
+      const savedA = editing && sub.answers[f.id] && typeof sub.answers[f.id] === "object" ? sub.answers[f.id] : null;
+      if (savedSig) {   // a signature already given stays exactly as it was
+        host.insertAdjacentHTML("afterend", `<img class="sig-img" src="${esc(savedSig)}" alt="Signature" />`);
+        host.remove();
+        host = w.querySelector(".sig-img");
+        pads[f.id] = { isEmpty: () => false, toDataURL: () => savedSig };
+      } else {
+        pads[f.id] = signaturePad(host);
+      }
       if (f.showNameDate !== false) {
         const fixed = f.signer === "practitioner" ? ((staff && staff.name) || "")
           : (f.signer || "patient") === "patient" ? (patient.name || "") : "";
+        const name = savedA && savedA.name ? savedA.name : fixed;
+        const date = savedA && savedA.date ? savedA.date : todayIso();
         host.insertAdjacentHTML("afterend", `
           <div class="sig-meta">
-            <label><small>Name</small><input class="fe-in" type="text" data-sig-name maxlength="120" value="${esc(fixed)}"${fixed ? " readonly" : ' placeholder="Name of the person signing"'} /></label>
-            <label><small>Date</small><input class="fe-in" type="date" data-sig-date value="${todayIso()}" readonly /></label>
+            <label><small>Name</small><input class="fe-in" type="text" data-sig-name maxlength="120" value="${esc(name)}"${fixed || savedSig ? " readonly" : ' placeholder="Name of the person signing"'} /></label>
+            <label><small>Date</small><input class="fe-in" type="date" data-sig-date value="${esc(date)}" readonly /></label>
           </div>`);
       }
     }
@@ -581,12 +696,12 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     }
   });
   // Aftercare panels
-  fields.filter((f) => f.type === "aftercare").forEach((f) => {
+  fields.filter((f) => f.type === "aftercare" && !locked.has(f.id)).forEach((f) => {
     mountAftercareField(wrap(f.id), f, { onChange: () => { dirty = true; }, patient, staff, actions: true });
   });
 
     // Photo questions
-  fields.filter((f) => f.type === "image" && f.source === "staff").forEach((f) => {
+  fields.filter((f) => f.type === "image" && f.source === "staff" && !locked.has(f.id)).forEach((f) => {
     mountPhotoField(wrap(f.id), f, { patient, onChange: () => { dirty = true; } });
   });
 
@@ -607,7 +722,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     const src = fields.find((x) => x.id === id);
     return !src ? "the form" : src.type === "image" ? (src.label || src.fileName || "the picture") : (src.label || "the form");
   };
-  fields.filter((f) => f.type === "consumables").forEach((f) => {
+  fields.filter((f) => f.type === "consumables" && !locked.has(f.id)).forEach((f) => {
     mountConsumablesField(wrap(f.id), f, { staff, onChange: () => { dirty = true; }, linked: linkedValue, linkLabel: linkedLabel });
   });
   // Referral specialist: from the Specialist Bank. Staff can add or correct one here.
@@ -757,7 +872,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     let need = 0, done = 0;
     fields.forEach((f) => {
       if (!f.required || !canRequire(f.type) || LAYOUT.includes(f.type) || f.type === "photo") return;
-      if (!shown.has(f.id) || f.liveHide) return;
+      if (!shown.has(f.id) || f.liveHide || locked.has(f.id)) return;;
       const w = wrap(f.id);
       if (!w) return;
       need++;
@@ -786,6 +901,15 @@ export async function mountFormFill(container, param, { staff, embedded = null }
       ? "Welcome back. Your answers are restored. Add any signatures, photos or aftercare again."
       : "Welcome back. Your answers are restored.");
   }
+  if (editing) {   // the saved answers, back in the boxes
+    restoreAnswers(sub.answers || {});
+    fields.forEach((f) => {
+      const v = sub.answers[f.id];
+      const w = wrap(f.id);
+      if (f.type === "image" && w && v && typeof v === "object") writeImageQs(f, w, v.questions);
+    });
+    dirty = false;
+  }
   if (copy) {
     restoreAnswers(copy.answers || {});
     Object.entries(copy.imageQs || {}).forEach(([id, qs]) => {
@@ -804,7 +928,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
   let consentJob = null;
   const paintConsents = () => consentFields.forEach((f) => {
     const el = wrap(f.id) && wrap(f.id).querySelector(".fe-consent");
-    if (el) el.outerHTML = consentHtml(f, consent[f.id], { canStart: !embedded, waiting: waitingFor.has(f.consentFormId) }); // no leaving the overlay mid-task
+    if (el) el.outerHTML = consentHtml(f, consent[f.id], { canStart: !embedded && !editing, waiting: waitingFor.has(f.consentFormId) }); // no leaving the overlay mid-task
   });
   function runConsentCheck(again = false) {
     if (!consentFields.length) return Promise.resolve();
@@ -830,9 +954,13 @@ export async function mountFormFill(container, param, { staff, embedded = null }
       });
     return consentJob;
   }
-  runConsentCheck();
+  if (editing) {   // the checks stay as they were when it was saved
+    consentFields.forEach((f) => { consent[f.id] = sub.answers[f.id] || { found: false, date: "", submissionId: "", name: "" }; });
+    consentReady = true;
+    paintConsents();
+  } else runConsentCheck();
 
-  if (consentFields.length && !embedded) {
+  if (consentFields.length && !embedded && !editing) {
     // A consent or prescription saved for this patient in another tab: check again
     const offSaved = onFormSaved((m) => {
       if (!root.isConnected) { offSaved(); return; }
@@ -899,8 +1027,8 @@ export async function mountFormFill(container, param, { staff, embedded = null }
   window.addEventListener("pagehide", saveDraftNow);
   window.addEventListener("hashchange", onDraftLeave);
 
-  // An earlier draft of this form for this patient: offer to put it back
-  (async () => {
+  // An earlier draft of this form for this patient: offer to put it back (not when editing a saved one)
+  if (!editing) (async () => {
     pruneDrafts();
     const old = isReturnLeg || copy ? null : readDraft(pid, tid);
     if (old && Object.keys(old.answers).length) {
@@ -1169,6 +1297,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
       if (LAYOUT.includes(f.type) || f.type === "photo") return;
       if (!shown.has(f.id)) return; // hidden questions are never required
       if (f.liveHide) return;       // staff can't see it, so they can't be asked to fix it
+      if (locked.has(f.id)) return;  // kept as saved
       const w = wrap(f.id);
       if (!w) return;
       const v = readField(f, w, rctx());
@@ -1301,7 +1430,19 @@ export async function mountFormFill(container, param, { staff, embedded = null }
     const rd = fields.find((f) => f.type === "record_date" && shown.has(f.id));
     let recordDate = rd ? answers[rd.id] : "";
     if (!/^\d{4}-\d{2}-\d{2}$/.test(recordDate || "")) recordDate = todayIso();
-
+    if (editing) {
+      locked.forEach((id) => {
+        const f = fields.find((x) => x.id === id);
+        const was = sub.answers[id];
+        if (f && f.type === "image" && f.source !== "staff" && was && typeof was === "object") {
+          const qs = readImageQs(f, wrap(id));   // the questions under the picture can change; the markings can't
+          const { questions, ...rest } = was;
+          answers[id] = qs.length ? { ...rest, questions: qs } : rest;
+        } else if (was !== undefined) answers[id] = was;
+      });
+      await saveEdit(answers, recordDate);
+      return;
+    }
     // Products used: taken off stock in the same save as the record
     const csLines = fields.filter((f) => f.type === "consumables" && shown.has(f.id))
       .flatMap((f) => { const w = wrap(f.id); return w && w.csPlan ? w.csPlan() : []; });
@@ -1362,6 +1503,54 @@ export async function mountFormFill(container, param, { staff, embedded = null }
       if (lbl) lbl.textContent = label;
     } finally {
       saving = false;
+    }
+  }
+
+  // Editing: the new answers replace the saved ones. The reason and what changed are kept on the record.
+  async function saveEdit(answers, recordDate) {
+    const reason = await editReasonDialog();
+    if (!reason) return;
+    saving = true;
+    saveBtns.forEach((b) => { b.disabled = true; });
+    msgEl.textContent = "Saving…";
+    try {
+      const ref = doc(db, "form_submissions", editId);
+      const snap = await getDoc(ref);
+      if (!snap.exists()) throw new Error("This record no longer exists.");
+      const cur = snap.data();
+      if (cur.deleted === true) throw new Error("This record has been deleted.");
+      const before = cur.answers || {};
+      const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+      const changed = [...new Set([...Object.keys(before), ...Object.keys(answers)])].filter((k) => k !== "__tags" && !same(before[k], answers[k]));
+      if (!changed.length && recordDate === (cur.recordDate || "")) { msgEl.textContent = "Nothing has changed."; return; }
+      const labelOf = (k) => { const f = fields.find((x) => x.id === k.replace(/__(x|d|p)$/, "")); return f ? (f.label || FIELD_TYPES[f.type].name) : k; };
+      const clipV = (v) => { const s = typeof v === "string" ? v : JSON.stringify(v ?? null); return s.length > 1000 ? `${s.slice(0, 1000)}…` : s; };
+      const labels = [...new Set(changed.map(labelOf))];
+      if (recordDate !== cur.recordDate) labels.unshift(`Record date ${cur.recordDate} → ${recordDate}`);
+      const by = (staff && staff.name) || "";
+      const byUid = (auth.currentUser && auth.currentUser.uid) || "";
+      await updateDoc(ref, {
+        answers, recordDate,
+        original: cur.original || { recordDate: cur.recordDate },
+        edits: arrayUnion({
+          kind: "answers", reason, at: new Date().toISOString(), by, byUid, from: cur.recordDate, to: recordDate,
+          changes: labels.slice(0, 40),
+          diff: Object.fromEntries(changed.slice(0, 40).map((k) => [k, { from: clipV(before[k]), to: clipV(answers[k]) }])),
+        }),
+        editCount: increment(1), editedAt: serverTimestamp(), editedBy: by, editedByUid: byUid,
+      });
+      dirty = false;
+      announceSaved({ type: "form-saved", patientId: patient.id, templateId: tid, category: tpl.category, submissionId: editId });
+      showToast("Changes saved. The edit is kept on the record.");
+      location.hash = exitHref;
+    } catch (err) {
+      console.error("Edit form failed:", err);
+      msgEl.textContent = err.code === "permission-denied"
+        ? "Couldn't save. Check the form_submissions Firestore rule for Admin edits has been published."
+        : err.code ? "Couldn't save. Check your connection and try again." : err.message;
+    } finally {
+      saving = false;
+      if (root.isConnected) saveBtns.forEach((b) => { b.disabled = false; });
     }
   }
   saveBtns.forEach((b) => b.addEventListener("click", () => save(b.dataset.save)));
@@ -1449,11 +1638,17 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
             <button type="button" class="ff-btn" data-act="printer">${BAR_ICONS.send}<span>Send to printer</span></button>
             <button type="button" class="ff-btn" data-act="print">${BAR_ICONS.print}<span>Print here</span></button>
             ${canMoveRecords() ? `<button type="button" class="ff-btn" data-act="move" title="Saved to the wrong patient? Move it">${BAR_ICONS.send}<span>Move</span></button>` : ""}
+            ${isAdmin() && !sub.deleted ? `<a class="ff-btn" href="#/fill/${encodeURIComponent(sub.patientId)}/${encodeURIComponent(sub.templateId)}/edit/${encodeURIComponent(sub.id)}" title="Change the answers (Admins only)">${BAR_ICONS.edit}<span>Edit</span></a>` : ""}
+            ${isAdmin() ? `<button type="button" class="ff-btn" data-act="${sub.deleted ? "restore" : "delete"}">${BAR_ICONS.trash}<span>${sub.deleted ? "Restore" : "Delete"}</span></button>` : ""}
           </div>
         </div>
       </div>
       <div data-role="log">${deliveriesHtml(sub.deliveries)}</div>
       <div data-role="moves">${movesHtml(sub.moves)}</div>
+      <div data-role="edits">${editsHtml(sub.edits)}</div>
+      ${sub.deleted ? `<div class="ff-online ff-deleted"><strong>This record was deleted</strong><span>${esc(sub.deletedBy || "")}${
+        sub.deletedAt ? ` · ${esc(sub.deletedAt.toLocaleString("en-AU", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" }))}` : ""}${
+        sub.deleteReason ? `: ${esc(sub.deleteReason)}` : ""}. It's hidden from the patient's page and the reports.</span></div>` : ""}
       ${sub.online ? `<div class="ff-online"><strong>Filled in online by the patient</strong>${
         Array.isArray(sub.online.changed) && sub.online.changed.length
           ? `<span>They changed their details on the form. Their record hasn't been changed: ${sub.online.changed.map((c) =>
@@ -1560,6 +1755,9 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
   applyTagNodes(collectTagNodes(sheet), savedTags);
   syncButtons(sheet, fields, savedTags);
   $all(sheet, "[data-tadd], [data-trm], [data-tpayadd], [data-tpayrm]").forEach((b) => b.remove()); // a saved form can't change
+  // Products used: the stock record, with Correct for Manage inventory. One form has one stock record, shown under its first products field.
+  const csWrap = fields.filter((f) => f.type === "consumables" && shownIds.has(f.id)).map((f) => sheet.querySelector(`[data-fid="${CSS.escape(f.id)}"]`)).find(Boolean);
+  if (csWrap) renderUsage(csWrap, sub, staff);
   $all(sheet, "input, textarea, select").forEach((el) => { el.disabled = true; });
 
   /* ---------- Email / send to printer / print here ---------- */
@@ -1592,6 +1790,11 @@ export async function mountFormRecord(container, submissionId, { staff } = {}) {
     if (e.target.closest('[data-act="email"]')) emailFlow();
     else if (e.target.closest('[data-act="printer"]')) printerFlow();
     else if (e.target.closest('[data-act="print"]')) window.print();
+    else if (e.target.closest('[data-act="delete"], [data-act="restore"]')) {
+      openDeleteRecordDialog({ sub, restore: !!sub.deleted, staff }).then((done) => {
+        if (done && container.isConnected) mountFormRecord(container, submissionId, { staff });
+      });
+    }
     else if (e.target.closest('[data-act="move"]')) {
       openMoveRecordDialog({ sub }).then((res) => {
         if (res && container.isConnected) mountFormRecord(container, submissionId, { staff }); // show it on the new patient

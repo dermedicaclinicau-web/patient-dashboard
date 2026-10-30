@@ -43,9 +43,11 @@ async function byPatient(colName, patient, nameField) {
   ]);
 
   const out = new Map();
-  if (idSnap) idSnap.forEach((d) => out.set(d.id, { id: d.id, data: d.data(), byName: false }));
+  if (idSnap) idSnap.forEach((d) => {
+    if (d.data().deleted !== true) out.set(d.id, { id: d.id, data: d.data(), byName: false });
+  });
   if (nameSnap) nameSnap.forEach((d) => {
-    if (out.has(d.id)) return;
+    if (out.has(d.id) || d.data().deleted === true) return;
     const pid = String(d.data()["Patient ID"] || "").trim();
     if (pid && !ids.includes(pid)) return;
     out.set(d.id, { id: d.id, data: d.data(), byName: true });

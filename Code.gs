@@ -7012,6 +7012,7 @@ function handleRecords_(body) {
       if (!def || !recDocIdOk_(rid)) return { ok: false, error: 'BAD_REQUEST' };
       return op === 'legacyCheck' ? recLegacyCheck_(def, rid) : recMoveLegacy_(def, kind, rid, body, session);
     }
+    if (op === 'deleteLegacy') return recordsDeleteLegacy_(body, session);
     const id = String(body.submissionId || '').trim();
     if (!/^[A-Za-z0-9_-]{10,40}$/.test(id)) return { ok: false, error: 'BAD_REQUEST' };
     if (op === 'moveCheck') return recMoveCheck_(id);
@@ -15955,9 +15956,10 @@ function paperVisitBase_(cfg, set, today, pts, fresh) {
 
   // 2. Older treatment records from the sheets (scans filed here are counted fresh, from paper_scans)
   const legacy = Object.create(null);
-  fsListAll_(cfg, 'treatment_records', ['Patient ID', 'Record Date']).forEach(function (d) {
+  fsListAll_(cfg, 'treatment_records', ['Patient ID', 'Record Date', 'deleted']).forEach(function (d) {
     if (d.name.split('/').pop().indexOf('paper_') === 0) return;
     const f = fromFields_(d.fields || {});
+    if (f.deleted === true) return;
     const dk = sheetDateKey_(f['Record Date'], REC_TZ_);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dk) || dk < set.from) return;   // can't cover a visit we check
     const pid = pts.find(String(f['Patient ID'] || '').trim());
@@ -15984,7 +15986,8 @@ function paperVisits_(cfg, fresh) {
   const rec = Object.create(null);
   const addRec = function (pid, dk) { if (pid && /^\d{4}-\d{2}-\d{2}$/.test(dk)) (rec[pid] = rec[pid] || {})[dk] = true; };
   Object.keys(base.legacy).forEach(function (pid) { base.legacy[pid].forEach(function (dk) { addRec(pid, dk); }); });
-  paperSelect_(cfg, 'form_submissions', 'category', 'treatment', ['patientId', 'patientPttId', 'recordDate']).forEach(function (s) {
+  paperSelect_(cfg, 'form_submissions', 'category', 'treatment', ['patientId', 'patientPttId', 'recordDate', 'deleted']).forEach(function (s) {
+    if (s.deleted === true) return;   // a deleted record doesn't cover a visit
     addRec(pts.find(String(s.patientId || '')) || pts.find(String(s.patientPttId || '')), String(s.recordDate || ''));
   });
   fsListAll_(cfg, PAPER_SCANS_, ['status', 'patientId', 'recordDate', 'filedAs']).forEach(function (d) {
@@ -18658,8 +18661,9 @@ function tcRows_(from, to) {
   }
 
   // 2. Portal forms
-  paperSelect_(cfg, 'form_submissions', 'category', 'treatment', ['patientId', 'patientPttId', 'patientName', 'recordDate', 'templateName', 'createdBy'])
+  paperSelect_(cfg, 'form_submissions', 'category', 'treatment', ['patientId', 'patientPttId', 'patientName', 'recordDate', 'templateName', 'createdBy', 'deleted'])
     .forEach(function (s) {
+      if (s.deleted === true) return
       const dk = String(s.recordDate || '');
       if (dk < from || dk > to) return;
       const pid = pts.find(String(s.patientId || '')) || pts.find(String(s.patientPttId || '')) || String(s.patientId || '');
@@ -18670,6 +18674,7 @@ function tcRows_(from, to) {
 
   // 3. Scans: the old app's (with Consumables) and ones filed from Paper records
   fsQuery_(cfg, 'treatment_records', quoteField_('Record Date'), 'GREATER_THAN_OR_EQUAL', from, 5000).forEach(function (f) {
+    if (f.deleted === true) return;
     const dk = String(f['Record Date'] || '');
     if (dk > to) return;
     const pid = pts.find(String(f['Patient ID'] || '').trim());
@@ -18700,6 +18705,7 @@ function tcRows_(from, to) {
   const bySub = {};
   const byDay = {};
   fsQuery_(cfg, 'inv_usage', 'at', 'GREATER_THAN_OR_EQUAL', since, 5000).forEach(function (u) {
+    if (u.deleted === true) return;
     const dk = ok(String(u.recordDate || '')) ? String(u.recordDate) : flowKey_(Date.parse(String(u.at || '')) || 0);
     if (dk < from || dk > to) return;
     if (u.submissionId) (bySub[String(u.submissionId)] = bySub[String(u.submissionId)] || []).push(u);
@@ -18823,5 +18829,29 @@ function tcLegacyLog_(body, session) {
     lines: lines, note: String(body.note || '').slice(0, 300), source: 'Logged from the scan',
     by: String(session.name || ''), byUid: String(session.uid || ''), at: now,
   })]);
+  return { ok: true };
+}
+
+// Records → Delete (Admins): an old-app record (treatment_records / consent_records) is hidden, never removed
+function recordsDeleteLegacy_(body, session) {
+  if (!/^admin$/i.test(String(session.role || session.staffRole || ''))) return { ok: false, error: 'FORBIDDEN' };
+  const kind = body.kind === 'consent' ? 'consent' : 'treatment';
+  const id = String(body.recordId || '').trim();
+  const reason = String(body.reason || '').trim().slice(0, 500);
+  if (!id || reason.length < 3) return { ok: false, error: 'BAD_REQUEST' };
+  const cfg = getConfig_();
+  const path = (kind === 'consent' ? 'consent_records' : 'treatment_records') + '/' + encodeURIComponent(id);
+  const rec = fsGetDoc_(cfg, path);
+  if (!rec) return { ok: false, error: 'NOT_FOUND' };
+  const restore = body.restore === true;
+  const by = String(session.name || '');
+  const log = (Array.isArray(rec.deleteLog) ? rec.deleteLog : []).concat([{
+    action: restore ? 'restored' : 'deleted', at: new Date().toISOString(), by: by, byUid: String(session.uid || ''), reason: reason,
+  }]).slice(-20);
+  // Only these fields change. (updateWrite_ has no mask and would replace the whole record.)
+  fsPatch_(cfg, path, {
+    deleted: !restore, deletedAt: new Date().toISOString(), deletedBy: by, deletedByUid: String(session.uid || ''),
+    deleteReason: reason, deleteLog: log,
+  });
   return { ok: true };
 }

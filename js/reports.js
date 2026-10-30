@@ -1,7 +1,7 @@
 import {
   listProducts, listCounts, resolveCountLine, listUsageBetween, listMovesBetween,
   listKits, listKitMoves, listAllLoans, listShortAll, resolveShort, kitUnits,
-  getUsage, correctUsage, correctionMove,
+  getUsage, correctUsage, correctionMove, changeUsageProduct, deleteUsage, listAllLots, isKitProduct, fefo,
   batchName, plural, unitPlural, dayKey, COUNT_STATUS,listInvestigations, INV_OUTCOMES, INV_STATUS,
   listUnrecordedTreatments, listContainersBetween, expectedUses,
   getBaseline, baselinePlan, setBaseline, listCountsOn, listKitDays,
@@ -76,6 +76,21 @@ function openDialog(html) {
   return dlg;
 }
 
+// The tabs in two labelled rows, so none are hidden off the right-hand edge
+const TAB_GROUPS = [
+  ["Stock & kits", ["variance", "investigations", "check", "notrecorded", "wastage", "kits", "usage", "opened", "short"]],
+  ["Patients", ["plans", "retention"]],   // every other tab (the patient reports) joins this row
+];
+function tabGroupsHtml(tabs, cur) {
+  const placed = new Set(TAB_GROUPS.flatMap(([, keys]) => keys));
+  const link = ([k, l]) => `<a href="#/reports/${k}"${k === cur ? ' class="active" aria-current="page"' : ""}>${esc(l)}</a>`;
+  return `<div class="rp-tabgroups">${TAB_GROUPS.map(([name, keys], i) => {
+    const list = tabs.filter(([k]) => keys.includes(k) || (i === TAB_GROUPS.length - 1 && !placed.has(k)));
+    return list.length ? `<div class="rp-tabgroup"><small>${esc(name)}</small>
+      <nav class="pt-tabs inv-tabs rp-tabs" aria-label="Reporting: ${esc(name)}">${list.map(link).join("")}</nav></div>` : "";
+  }).join("")}</div>`;
+}
+
 export function mountReports(container, { param = "", staff = null } = {}) {
   const first = String(param || "").split("/")[0];
   const tabs = can("reports.patients") ? TABS.concat(PATIENT_TABS) : TABS;
@@ -89,8 +104,7 @@ export function mountReports(container, { param = "", staff = null } = {}) {
   }
   root.innerHTML = `
     <div class="fb-head"><div><h2>Reporting</h2><p class="muted">Count differences, wastage, kits and usage.</p></div></div>
-    <nav class="pt-tabs inv-tabs" aria-label="Reporting">${tabs.map(([k, l]) =>
-      `<a href="#/reports/${k}"${k === tab ? ' class="active" aria-current="page"' : ""}>${esc(l)}</a>`).join("")}</nav>
+    ${tabGroupsHtml(tabs, tab)}
     <div data-role="body">${SKELETON}</div>`;
   const body = root.querySelector('[data-role="body"]');
   if (tab === "variance") mountVariance(body, staff);
@@ -653,7 +667,8 @@ function mountTreatmentCheck(body, staff) {
     const lines = e.products.map((p) => `<div>${esc(p.name)} × ${esc(fmt(p.amount))}${p.unit ? ` ${esc(p.unit)}` : ""}${
       p.batch ? `<small class="muted">Batch ${esc(p.batch)}${p.expiry ? ` · Exp ${esc(p.expiry)}` : ""}</small>` : '<small class="rp-neg">No batch</small>'}${
       p.short > 0 ? `<small class="rp-neg">saved short · ${esc(fmt(p.short))}</small>` : ""}${
-      p.src === "scan" ? '<small class="muted">read from the scan</small>' : p.src === "legacy" ? '<small class="muted">logged from the scan</small>' : ""}</div>`);
+      p.src === "scan" ? '<small class="muted">read from the scan</small>' : p.src === "legacy" ? '<small class="muted">logged from the scan</small>'
+      : p.src === "usage" && p.usageId && canAlias ? ` <button type="button" class="kr-link" data-correct="${esc(p.usageId)}">Correct</button>` : ""}</div>`);
     e.unmatched.forEach((n) => lines.push(`<div class="muted">${esc(n)}${canAlias ? ` <button type="button" class="kr-link" data-alias="${esc(n)}">Match to product</button>` : ""}</div>`));
     return lines.join("") || '<span class="muted">—</span>';
   };
@@ -750,6 +765,9 @@ function mountTreatmentCheck(body, staff) {
           .catch((e) => showToast((e && e.message) || "Couldn't open it. Try again."));
         return true;
       }
+
+      const cu = ev.target.closest("[data-correct]");
+      if (cu) { openCorrection(cu.dataset.correct, staff, reload); return true; }
       const al = ev.target.closest("[data-alias]");
       if (al) { tcAliasDialog(al.dataset.alias, products, reload); return true; }
       const lb = ev.target.closest("[data-logbatch]");
@@ -1446,10 +1464,11 @@ function mountShort(body, staff) {
 
 /* ===================== Correct usage (Manage inventory) ===================== */
 
-async function openCorrection(id, staff, onDone) {
+export async function openCorrection(id, staff, onDone) {
   let u;
   try { u = await getUsage(id); } catch (err) { console.error(err); showToast(errText(err, "Couldn't open this record.")); return; }
   if (!u) { showToast("This record no longer exists."); return; }
+  if (u.deleted) { showToast(`This usage was removed${u.deletedBy ? ` by ${u.deletedBy}` : ""}${u.deleteReason ? `: ${u.deleteReason}` : ""}.`); return; }
 
   const items = u.lines.flatMap((l, li) => (l.kind === "shared" ? [] : (l.rows || []).map((r, ri) => ({ l, r, li, ri, kit: l.kind === "kit", dosed: l.kind !== "kit" && !!l.doseUnit }))));
   if (!items.length) { showToast("There's nothing to correct on this record."); return; }
@@ -1466,7 +1485,8 @@ async function openCorrection(id, staff, onDone) {
         <tbody>${items.map((x, i) => {
           const short = (Number(x.r.amount) || 0) - (Number(x.r.taken) || 0);
           return `<tr data-i="${i}">
-            <td><strong>${esc(x.l.name)}</strong><br><small class="muted">${esc([x.r.batch ? `${x.l.batchLabel || "Batch"} ${x.r.batch}` : "", whereTxt(x)].filter(Boolean).join(" · "))}</small></td>
+            <td><strong>${esc(x.l.name)}</strong>${x.l.replaced ? ` <small class="muted">(was ${esc(x.l.replaced.name)})</small>` : ""}<br><small class="muted">${esc([x.r.batch ? `${x.l.batchLabel || "Batch"} ${x.r.batch}` : "", whereTxt(x)].filter(Boolean).join(" · "))}</small>${
+              x.ri === 0 && (x.l.kind === "kit" || x.l.kind === "storage") ? `<br><button type="button" class="kr-link" data-swap="${x.li}">Wrong product? Change it…</button>` : ""}</td>
             <td>${esc(amtTxt(x, x.r.amount))}${x.dosed ? `<br><small class="muted">${esc(fmt(x.r.dose))} ${esc(x.l.doseUnit)} given</small>` : ""}${
               short > 0.001 ? `<br><small class="rp-neg">${esc(fmt(short))} short</small>` : ""}</td>
             <td><label class="rp-cin"><input class="fe-in" type="number" min="0" step="${x.kit ? "0.1" : "1"}" data-k="amount" value="${esc(fmt(x.r.amount))}" />
@@ -1481,6 +1501,8 @@ async function openCorrection(id, staff, onDone) {
         `<li>${esc(shortDate(toDateSafe(c.at)))} · ${esc(c.by || "")}: ${esc((c.changes || []).join("; "))}${c.reason ? ` · <em>${esc(c.reason)}</em>` : ""}</li>`).join("")}</ul></div>` : ""}
       <p class="lh-error" role="alert" hidden></p>
       <div class="lh-actions">
+        <button type="button" class="lh-btn is-quiet st-danger" data-act="delete" title="It shouldn't be here at all: stock goes back and it leaves the reports">Remove usage…</button>
+        <span class="inv-spacer"></span>
         <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
         <button type="submit" class="lh-btn is-primary">Save correction</button>
       </div>
@@ -1506,6 +1528,15 @@ async function openCorrection(id, staff, onDone) {
   });
   form.addEventListener("input", preview);
   dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+  dlg.addEventListener("click", async (e) => {
+    const sw = e.target.closest("[data-swap]");
+    if (sw) {
+      const x = items.find((it) => it.li === Number(sw.dataset.swap) && it.ri === 0);
+      if (x && await swapProductDialog(u, x, staff)) { dlg.close(); if (onDone) onDone(); }
+      return;
+    }
+    if (e.target.closest('[data-act="delete"]') && await deleteUsageDialog(u, staff)) { dlg.close(); if (onDone) onDone(); }
+  });
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -1538,6 +1569,110 @@ async function openCorrection(id, staff, onDone) {
       err.hidden = false;
       btn.disabled = false;
     }
+  });
+}
+// The wrong product was recorded on a line. Every batch on that line goes back; the right product comes off the batch chosen.
+async function swapProductDialog(u, x, staff) {
+  let products, lots, kits;
+  try { [products, lots, kits] = await Promise.all([listProducts(), listAllLots(), listKits().catch(() => [])]); }
+  catch (err) { showToast(errText(err, "Couldn't load the products.")); return false; }
+  const owner = x.l.kitUid || u.byUid || "";
+  const choices = products.filter((p) => p.active && p.usage !== "shared" && p.id !== x.l.productId);
+  const byExpiry = (a, b) => (a.expiry || "9999").localeCompare(b.expiry || "9999");
+  const srcOptions = (p) => (isKitProduct(p)
+    ? kits.filter((k) => k.productId === p.id && k.staffUid === owner && kitUnits(k) > 0).sort(byExpiry).map((k) => ({
+        ref: k.id, label: `${k.batch || "No number"} · Exp ${niceDate(k.expiry)} · ${fmt(kitUnits(k))} ${k.doseUnit} in ${k.staffName || "their"}'s kit` }))
+    : lots.filter((l) => l.productId === p.id).sort(fefo).map((l) => ({
+        ref: l.id, label: `${LOC[l.loc]} · ${l.batch || "No number"} · Exp ${niceDate(l.expiry)} · ${plural(l.qty, p.stockUnit)}` })));
+  const was = x.kit ? `${fmt(x.r.amount)} ${x.l.unit}` : plural(+fmt(x.r.amount), x.l.unit);
+  return new Promise((resolve) => {
+    let saved = false;
+    const dlg = openDialog(`<form class="lh-form" novalidate>
+      <div class="lh-dialog-head"><h3>Change product</h3>
+        <p><strong>${esc(x.l.name)}</strong> (${esc(was)}) on ${esc(u.patientName || "this record")} · ${esc(u.formName || "")}. It goes back where it came from,
+          and the product that was really used comes off the batch you choose. Both changes are logged.</p></div>
+      <label class="lh-field"><span class="lh-label">Product actually used</span>
+        <select class="fb-select" name="productId"><option value="">Choose…</option>${choices.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("")}</select></label>
+      <label class="lh-field"><span class="lh-label">From</span><select class="fb-select" name="ref"><option value="">Choose the product first</option></select></label>
+      <div class="inv-two">
+        <label class="lh-field"><span class="lh-label" data-role="amtlbl">Amount</span><input class="fe-in" name="amount" type="number" min="0" step="any" value="${esc(fmt(x.r.amount))}" /></label>
+        <label class="lh-field" data-role="doserow" hidden><span class="lh-label" data-role="doselbl">Given</span><input class="fe-in" name="dose" type="number" min="0" step="any" value="${esc(fmt(x.r.dose || 0))}" /></label>
+      </div>
+      <label class="lh-field"><span class="lh-label">Reason</span>
+        <textarea name="reason" rows="2" maxlength="300" placeholder="e.g. Belotero was used, not Radiesse (checked the box in the sharps bin)"></textarea></label>
+      <p class="lh-error" role="alert" hidden></p>
+      <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+        <button type="submit" class="lh-btn is-primary">Change product</button></div></form>`);
+    const form = dlg.querySelector("form");
+    const f = form.elements;
+    const err = dlg.querySelector(".lh-error");
+    const sync = () => {
+      const p = choices.find((c) => c.id === f.productId.value);
+      const opts = p ? srcOptions(p) : [];
+      f.ref.innerHTML = opts.length ? opts.map((o) => `<option value="${esc(o.ref)}">${esc(o.label)}</option>`).join("")
+        : `<option value="">${!p ? "Choose the product first" : isKitProduct(p) ? "Nothing of this in the clinician's kit" : "None in stock"}</option>`;
+      dlg.querySelector('[data-role="amtlbl"]').textContent = p ? `Amount (${isKitProduct(p) ? p.doseUnit : unitPlural(p.stockUnit)})` : "Amount";
+      dlg.querySelector('[data-role="doserow"]').hidden = !(p && !isKitProduct(p) && p.doseUnit);
+      if (p && p.doseUnit) dlg.querySelector('[data-role="doselbl"]').textContent = `${p.doseUnit} given`;
+    };
+    f.productId.addEventListener("change", sync);
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      try {
+        await changeUsageProduct(u.id, x.li, { productId: f.productId.value, ref: f.ref.value, amount: f.amount.value, dose: f.dose.value }, f.reason.value, staff);
+        saved = true;
+        dlg.close();
+        showToast("Product changed. Stock updated both ways.");
+      } catch (ex) {
+        console.error("Change product failed:", ex);
+        err.textContent = errText(ex, "Couldn't change it. Try again.");
+        err.hidden = false;
+        btn.disabled = false;
+      }
+    });
+    dlg.addEventListener("close", () => resolve(saved));
+  });
+}
+
+// A usage that shouldn't exist: stock back, record kept and marked removed
+function deleteUsageDialog(u, staff) {
+  return new Promise((resolve) => {
+    let saved = false;
+    const dlg = openDialog(`<form class="lh-form" novalidate>
+      <div class="lh-dialog-head"><h3>Remove this usage?</h3>
+        <p><strong>${esc(u.patientName || "Patient")}</strong> · ${esc(u.formName || "")} · ${esc(shortDate(u.at))}. Everything on it goes back into stock
+          (kit units into the opened vial, items into their batch) and it leaves the Usage report and Treatment check. The record itself stays, marked removed.
+          ${u.submissionId ? "The treatment form isn't changed: delete that from the patient's page if it's wrong too." : ""}</p></div>
+      <label class="lh-field"><span class="lh-label">Reason</span>
+        <textarea name="reason" rows="2" maxlength="300" placeholder="e.g. Recorded on the wrong patient; entered again on the right one"></textarea></label>
+      <p class="lh-error" role="alert" hidden></p>
+      <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+        <button type="submit" class="lh-btn is-danger">Remove usage</button></div></form>`);
+    const form = dlg.querySelector("form");
+    const err = dlg.querySelector(".lh-error");
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      try {
+        const r = await deleteUsage(u.id, form.elements.reason.value, staff);
+        saved = true;
+        dlg.close();
+        showToast(r.skipped.length ? `Removed. Stock put back, except ${r.skipped.join(", ")} (used from an opened container).` : "Removed. Stock put back.");
+      } catch (ex) {
+        console.error("Remove usage failed:", ex);
+        err.textContent = errText(ex, "Couldn't remove it. Try again.");
+        err.hidden = false;
+        btn.disabled = false;
+      }
+    });
+    dlg.addEventListener("close", () => resolve(saved));
   });
 }
 const toDateSafe = (v) => { const d = v ? new Date(v) : null; return d && !isNaN(d) ? d : null; };

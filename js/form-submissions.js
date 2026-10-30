@@ -19,6 +19,7 @@ function normalise(snap) {
     templateName: d.templateName || "Untitled form",
     category: d.category || "",
     group: d.group || "",
+    groupFixed: d.groupFixed === true,
     version: Number(d.version || 0),
     patientId: d.patientId || "",
     patientPttId: d.patientPttId || "",
@@ -31,6 +32,13 @@ function normalise(snap) {
     online: d.online && typeof d.online === "object" ? d.online : null,
     createdAt: toDate(d.createdAt),
     createdBy: d.createdBy || "",
+    original: d.original && typeof d.original === "object" ? d.original : null,
+    edits: Array.isArray(d.edits) ? d.edits : [],
+    editCount: Number(d.editCount || 0),
+    deleted: d.deleted === true,
+    deletedBy: d.deletedBy || "",
+    deletedAt: toDate(d.deletedAt),
+    deleteReason: d.deleteReason || "",
   };
 }
 
@@ -60,11 +68,11 @@ export async function getSubmission(id) {
 }
 
 // Every completed form for a patient (including merged records), newest first
-export async function listSubmissionsForPatient(ids) {
+export async function listSubmissionsForPatient(ids, { includeDeleted = false } = {}) {
   const clean = [...new Set((ids || []).filter(Boolean).map(String))].slice(0, 30);
   if (!clean.length) return [];
   const snap = await getDocs(query(collection(db, COL), where("patientId", "in", clean)));
-  return snap.docs.map(normalise).sort((a, b) =>
+  return snap.docs.map(normalise).filter((s) => includeDeleted || !s.deleted).sort((a, b) =>
     b.recordDate.localeCompare(a.recordDate) ||
     ((b.createdAt ? b.createdAt.getTime() : 0) - (a.createdAt ? a.createdAt.getTime() : 0)));
 }
@@ -76,6 +84,6 @@ export async function listMySubmissions(days = 31) {
   const snap = await getDocs(query(collection(db, COL), where("createdByUid", "==", uid)));
   const since = Date.now() - days * 864e5;
   return snap.docs.map(normalise)
-    .filter((s) => s.createdAt && s.createdAt.getTime() > since)
+    .filter((s) => s.createdAt && s.createdAt.getTime() > since && !s.deleted)
     .sort((a, b) => b.createdAt - a.createdAt);
 }
