@@ -84,7 +84,7 @@ const els = {
 // Raise this each time paper-records.js changes, so browsers don't keep using an old copy
 const PAPER_V = 12;
 // Raise this each time prospects.js changes, so browsers don't keep using an old copy
-const PROSPECTS_V = 4;
+const PROSPECTS_V = 5;
 let currentStaff = null;
 initFormPicker(els.content, { getStaff: () => currentStaff });
 initTopbar();

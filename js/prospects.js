@@ -22,7 +22,7 @@ export const STAGES = [
   { key: "lost", name: "Lost", tone: "slate" },
 ];
 const OPEN = ["new", "contacted", "consult_booked", "consulted", "tx_booked", "treated"];
-const SOURCES = ["Web form", "Phone call", "Walk-in", "Online chat", "Instagram", "Facebook", "Referral", "Other"];
+const SOURCES = ["Web form", "Phone call", "Walk-in", "Online chat", "Instagram", "Facebook", "Referral", "Booked directly", "Other"];
 const AGES = ["Under 22", "22 to 30", "31 to 40", "41 to 50", "51 to 60", "Over 60"];
 const PREFS = ["SMS", "Call", "Email"];
 const OUTCOMES = [["spoke", "Spoke to them"], ["no_answer", "No answer"], ["voicemail", "Left voicemail"], ["met", "Met in clinic"]];
@@ -963,7 +963,7 @@ async function mountReports(container) {
   const today = todayKey();
   all.forEach((p) => { p._day = keyOf(p.createdAt); p._reach = reachOf(p); p._imp = wasImported(p); });
   const firstDay = all.map((p) => p._day).filter(Boolean).sort()[0] || today;
-const SOURCES = ["Web form", "Phone call", "Walk-in", "Online chat", "Instagram", "Facebook", "Referral", "Booked directly", "Other"];
+  const sources = [...new Set(all.map((p) => p.source || "Other"))].sort();
   const people = [...new Set(all.map((p) => p.assignedToName).filter(Boolean))].sort();
   const st = { range: "90", from: "", to: "", source: "", who: "", kind: "" };
 
