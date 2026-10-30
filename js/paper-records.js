@@ -775,7 +775,7 @@ export function mountPaperRecords(container, { staff } = {}) {
             : '<p class="fe-note">Not written on the paper.</p>'}
           ${f.productsFor ? `<small class="fe-note">Recorded as used by <strong>${esc(f.productsFor)}</strong>.</small>` : ""}
           ${f.productsTaken ? (can("inventory.manage")
-            ? '<button type="button" class="lh-btn" data-act="fix-products">Correct the amounts</button>'
+            ? '<button type="button" class="lh-btn" data-act="fix-products">Correct products used…</button>'
             : '<small class="fe-note">To change these, ask someone with Manage inventory to correct them.</small>') : ""}</div>`;
         if (f.productsTaken) liveProducts();   // what the record says now, corrections included
         return;
@@ -810,7 +810,9 @@ export function mountPaperRecords(container, { staff } = {}) {
         const u = x && await getUsage(x.id);
         const ul = prodEl.querySelector(".ppr-cs-list");
         if (!u || !dlg.isConnected) return;
-        const list = csSummary(u.lines.filter((l) => (Number(l.total) || 0) > 0));
+        const list = u.deleted
+          ? [`Removed${u.deletedBy ? ` by ${u.deletedBy}` : ""}${u.deleteReason ? `: ${u.deleteReason}` : ""}`]
+          : csSummary(u.lines.filter((l) => (Number(l.total) || 0) > 0));
         if (ul) ul.innerHTML = list.map((t) => `<li>${esc(t)}</li>`).join("");
         if (u.corrected && !prodEl.querySelector('[data-role="corrected"]')) {
           const c = (u.corrections || [])[u.corrections.length - 1] || {};
@@ -833,7 +835,9 @@ export function mountPaperRecords(container, { staff } = {}) {
       m.openCorrection(u.id, staff, async () => {
         try {
           const nu = await getUsage(u.id);
-          f.products = csSummary(nu.lines.filter((l) => (Number(l.total) || 0) > 0));   // this session's list row
+          f.products = nu.deleted
+            ? [`Removed${nu.deletedBy ? ` by ${nu.deletedBy}` : ""}${nu.deleteReason ? `: ${nu.deleteReason}` : ""}`]
+            : csSummary(nu.lines.filter((l) => (Number(l.total) || 0) > 0));   // this session's list row
         } catch (ex) { console.warn("Products used not reloaded:", ex); }
         drawProducts();
         draw();
