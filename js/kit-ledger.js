@@ -179,11 +179,15 @@ function buildLedger(entries) {
   return entries;
 }
 
-// The portal on the days it has records, the old app on every other day
+// Both apps together. A treatment saved in both (same patient, same day) is counted once, from the portal.
+// Counts and restocks: the portal's on the days it has them, otherwise the old app's.
 function mergeSources(portal, old) {
-  // Paper records are always added: they were never in the old app, so they don't make it a portal day
-  const pDays = new Set(portal.filter((e) => !e.paper).map((e) => e.date));
-  return buildLedger(portal.concat(old.filter((e) => !pDays.has(e.date))));
+  const pUses = portal.filter((e) => e.sub === "use");
+  const pDays = new Set(portal.filter((e) => !e.paper && e.sub !== "use").map((e) => e.date));
+  return buildLedger(portal.concat(old.filter((e) => {
+    if (e.sub === "use") return !pUses.some((u) => u.date === e.date && samePt(u, e));
+    return !pDays.has(e.date);
+  })));
 }
 
 // One day, and the checks on it
@@ -275,8 +279,8 @@ const HELP_SECTIONS = [
     <p>Kit reconciliation shows everything that happened to each injector's kit, day by day: what they started with,
     what came in, what was used on patients and what they finished with. If the numbers don't add up, it tells you where.</p>
     <p>It brings together the <strong>old app</strong> (start-of-day counts and Wrinkle Relaxer records, February to October 2026)
-    and the <strong>portal</strong> (from October 2026) as one record. On a day the portal has records, only the portal is used,
-    so a treatment saved in both is never counted twice.</p>`],
+    and the <strong>portal</strong> (from October 2026) as one record. A treatment saved in both for the same patient on the
+    same day is counted once, from the portal.</p>`],
 
   ["The filters", `
     <ul>
