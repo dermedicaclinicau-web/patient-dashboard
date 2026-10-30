@@ -239,6 +239,15 @@ export function mountSkincare(root, patient, staff = null) {
       if (!p) return;
       if (ed.dataset.skEd === "edit" && p.portal) {
         setSspIntent({ mode: "edit", patientId: patient.id, recordId: p.portal.id });
+      } else if (ed.dataset.skEd === "edit") {
+        // Old protocol from the sheet: saved into the portal once (same record ID and date), then edited there
+        busyBtn(ed, async () => {
+          const rec = await sheetRecord(p, patient);
+          const id = await createSspRecord(rec, staff);
+          setSspIntent({ mode: "edit", patientId: patient.id, recordId: id });
+          location.hash = `#/ssp/new/${encodeURIComponent(patient.id)}`;
+        });
+        return;
       } else {
         setSspIntent({
           mode: "copy", patientId: patient.id,
@@ -376,7 +385,7 @@ function protocolHtml(p, isLatest, lastMap, idx = 0) {
 
   const canEdit = can("ssp.create");
   const editBtns = canEdit
-    ? `${p.portal ? `<button type="button" class="ssp-btn" data-sk-ed="edit" data-idx="${idx}" title="Change this protocol">${ICONS.edit}Edit</button>` : ""}
+    ? `<button type="button" class="ssp-btn" data-sk-ed="edit" data-idx="${idx}" title="${p.portal ? "Change this protocol" : "Saves this older protocol into the portal, then opens it for editing"}">${ICONS.edit}Edit</button>
        <button type="button" class="ssp-btn" data-sk-ed="copy" data-idx="${idx}" title="Start a new protocol from this one">${ICONS.copy}Duplicate</button>`
     : "";
   const actions = p.portal
