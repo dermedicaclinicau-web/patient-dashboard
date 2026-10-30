@@ -16960,10 +16960,15 @@ const PROS_FIELDS_ = [
   ['name', /^(full name|name|your name)$/],
   ['email', /^(e-?mail|e-?mail address|your e-?mail)$/],
   ['phone', /^(mobile\s*\/\s*contact\s*#?|mobile( number)?|phone( number)?|contact( number| #)?)$/],
-  ['pref', /^(primary contact|preferred contact( method)?|best way to contact.*)$/],
+  ['pref2', /^(secondary contact( method)?|other contact( method)?)$/],
+  ['pref', /^(primary contact( method)?|preferred contact( method)?|best way to contact.*)$/],
   ['age', /^age( group| range)?$/],
   ['concern', /^(primary concern|concern|treatment( of interest)?|interested in)$/],
 ];
+// Their answer is a word like "Email" or "Phone", which also looks like a heading
+const PROS_METHOD_ANSWER_ = /^(e-?mail|sms|text( message)?|call|phone( call)?|mobile|any)$/i;
+const PROS_EMAIL_RE_ = /[^\s<>"'(),;:]+@[^\s<>"'(),;:]+\.[a-z]{2,}/gi;
+
 
 function prosLabel_(line) {
   const k = String(line).replace(/^[-–—*=\s]+|[-–—*=:\s]+$/g, '').replace(/\s+/g, ' ').toLowerCase();
@@ -16978,34 +16983,58 @@ function prosAddVal_(out, k, v) {
     if (/^(the more details you provide|if you.?re ready to book|and we.?ll find a suitable opening)/i.test(v) ||
         /find a suitable opening for you\.?$/i.test(v)) return;
     out.message = out.message ? out.message + '\n' + v : v;
-  } else if (!out[k]) {
-    out[k] = v;
-  } else if (k === 'concern') {
-    out.concern += ', ' + v;
+    return;
   }
+  if (k === 'email' && v.indexOf('@') === -1) return;                       // only an email address fills it
+  if (k === 'phone' && String(v).replace(/\D/g, '').length < 8) return;   // only a phone number fills it
+  if (!out[k]) out[k] = v;
+  else if (k === 'concern') out.concern += ', ' + v;
 }
 
+
 function prosParse_(text) {
-  const out = { name: '', first: '', last: '', email: '', phone: '', pref: '', age: '', concern: '', message: '', found: 0 };
+  const out = { name: '', first: '', last: '', email: '', phone: '', pref: '', pref2: '', age: '', concern: '', message: '', found: 0 };
   const lines = String(text || '').replace(/\r/g, '').replace(/\u00a0/g, ' ').split('\n').map(function (l) { return l.trim(); });
   let cur = '';
+  let fresh = false;   // just read a heading, no answer yet
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     if (!l || /^[-–—_=*\s]+$/.test(l)) continue;
     if (/^(sent from|powered by|this (email|message) was sent|you received this|unsubscribe)/i.test(l)) break;
+    // "Primary Contact" → "Email": the answer, not the Email heading
+    if (fresh && (cur === 'pref' || cur === 'pref2') && PROS_METHOD_ANSWER_.test(l)) {
+      prosAddVal_(out, cur, l);
+      fresh = false;
+      continue;
+    }
     let lab = prosLabel_(l);
-    if (lab) { cur = lab; out.found++; continue; }
+    if (lab) { cur = lab; fresh = true; out.found++; continue; }
     const m = /^([^:]{2,60}):\s*(.+)$/.exec(l);
-    if (m && (lab = prosLabel_(m[1]))) { cur = lab; out.found++; prosAddVal_(out, cur, m[2]); continue; }
-    if (cur) prosAddVal_(out, cur, l);
+    if (m && (lab = prosLabel_(m[1]))) { cur = lab; fresh = false; out.found++; prosAddVal_(out, cur, m[2]); continue; }
+    if (cur) { prosAddVal_(out, cur, l); fresh = false; }
   }
+
   const em = /[^\s<>"'(),;:]+@[^\s<>"'(),;:]+\.[a-z]{2,}/i.exec(out.email);
   out.email = em ? em[0].toLowerCase() : '';
+  if (!out.email) {   // backup: any address in the email that isn't the clinic's or the website's
+    const hit = (String(text || '').match(PROS_EMAIL_RE_) || []).filter(function (e) {
+      return !/dermedica|wordpress|no-?reply|mailer|wix|squarespace/i.test(e);
+    })[0];
+    if (hit) out.email = hit.toLowerCase();
+  }
   const ph = /\+?\d[\d\s()-]{6,}\d/.exec(out.phone);
   out.phone = ph ? ph[0].replace(/[^\d+]/g, '') : '';
+  if (!out.phone) {   // backup: the first Australian mobile in the email
+    const mob = (String(text || '').match(/(?:\+?61[\s-]?|0)4[\d\s-]{8,11}/g) || [])
+      .map(function (s) { return s.replace(/[^\d+]/g, ''); })
+      .filter(function (s) { return /^04\d{8}$/.test(prosPhoneKey_(s)); })[0];
+    if (mob) out.phone = mob;
+  }
+
   if (!out.name) out.name = [out.first, out.last].filter(Boolean).join(' ');
   out.name = prosTidyName_(out.name);
-  out.pref = prosPref_(out.pref);
+  out.pref = prosPref_(out.pref) || prosPref_(out.pref2);
+  out.pref2 = prosPref_(out.pref2);
   out.concern = out.concern.slice(0, 150);
   out.age = out.age.slice(0, 40);
   out.message = out.message.trim().slice(0, 2000);
@@ -17557,6 +17586,52 @@ function prospectImportOlder() {
   prosImport_(getConfig_(), 100, 14);
 }
 
+// Run from the editor: fills in the email, mobile and preferred contact that earlier imports missed,
+// by reading each prospect's original web form email again. Safe to run more than once.
+function prospectFixContacts() {
+  const cfg = getConfig_();
+  const cache = CacheService.getScriptCache();
+  const deadline = Date.now() + 5 * 60000;
+  const now = new Date().toISOString();
+  const list = fsListAll_(cfg, PROS_COL_, ['name', 'email', 'phone', 'pref', 'enquiries'])
+    .map(function (d) { const f = fromFields_(d.fields || {}); f._id = d.name.split('/').pop(); return f; })
+    .filter(function (p) {
+      return (!p.email || !p.phone || !p.pref) && (p.enquiries || []).some(function (q) { return q && q.gmailId; });
+    });
+  const writes = [];
+  let checked = 0;
+  let left = 0;
+  for (let i = 0; i < list.length; i++) {
+    if (Date.now() > deadline) { left = list.length - i; break; }
+    const p = list[i];
+    checked++;
+    let email = '', phone = '', pref = '';
+    (p.enquiries || []).forEach(function (q) {
+      if (!q || !q.gmailId || (email && phone && pref)) return;
+      let msg = null;
+      try { msg = GmailApp.getMessageById(q.gmailId); } catch (e) { return; }
+      if (!msg) return;
+      const f = prosFromEmail_(msg);
+      if (!email && isEmail_(f.email)) email = f.email;
+      if (!phone && prosPhoneKey_(f.phone)) phone = f.phone;
+      if (!pref && f.pref) pref = f.pref;
+    });
+    const patch = {};
+    const what = [];
+    if (!p.email && email) { patch.email = email; patch.emailKey = email; what.push('email'); }
+    if (!p.phone && phone) { patch.phone = phone; patch.phoneKey = prosPhoneKey_(phone); what.push('mobile'); }
+    if (!p.pref && pref) { patch.pref = pref; what.push('preferred contact'); }
+    if (!what.length || cache.get('stl_pr_' + p._id)) continue;
+    patch.updatedAt = now;
+    const w = patchWrite_(cfg, PROS_COL_ + '/' + p._id, patch);
+    w.updateTransforms = [{ fieldPath: 'log', appendMissingElements: { values: [toValue_({
+      at: now, by: 'Prospects', byUid: '', kind: 'edit', what: 'Filled in from their web form: ' + what.join(', '), note: '' })] } }];
+    writes.push(w);
+  }
+  if (writes.length) commitWrites_(cfg, writes, 100);
+  console.log('Checked ' + checked + ', filled in ' + writes.length + '.' +
+    (left ? ' ' + left + ' left: run it again.' : ' All done.'));
+}
 // Run ONCE: the prospects already in the portal are marked as current (so the board finds them)
 function prospectMarkCurrent() {
   const cfg = getConfig_();
