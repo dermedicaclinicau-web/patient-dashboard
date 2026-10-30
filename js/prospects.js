@@ -9,14 +9,6 @@ import { can } from "./perms.js";
 import { showToast } from "./utils.js";
 import { openProspectCompose } from "./prospect-compose.js?v=1";
 
-openProspectCompose({
-  prospect: p,
-  kind: "email",                       // or "text"
-  myName: me.name,                     // the person logged in
-  send: (body) => callApi("prospects", { ...body, id: p.id }),
-  onSent: (updated) => { if (updated) { Object.assign(p, updated); render(); } },
-  toast: (msg) => showToast(msg),
-});
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const enc = encodeURIComponent;
@@ -636,7 +628,6 @@ async function mountProspect(container, id, staff) {
             ${onRecall(p) ? `<span class="pr-chip is-recall">${I(IC.clock)}On recall: ${esc(p.recall.category)}</span>` : ""}
             ${p.nextAppt ? `<span class="pr-chip">${I(IC.clock)}Next appointment ${esc(fullDay(p.nextAppt))}</span>` : ""}
             ${p.historic ? '<span class="pr-tag">Older</span>' : ""}
-            
           </div>
         </div>
         <span class="pr-pill is-${s.tone} is-lg">${esc(s.name)}</span>
@@ -759,6 +750,21 @@ async function mountProspect(container, id, staff) {
     });
   }
 
+  // The Email / Text window (prospect-compose.js)
+  function openCompose(kind) {
+    openProspectCompose({
+      prospect: p,
+      kind,
+      myName: (staff && staff.name) || "",
+      send: async ({ op, ...rest }) => {
+        try { return await api(op, { id: p.id, ...rest }); }
+        catch (err) { throw new Error(errText(err, "It wasn't sent. Try again.")); }
+      },
+      onSent: (np) => { if (np) { p = np; render(); } },
+      toast: showToast,
+    });
+  }
+
   root.addEventListener("click", async (e) => {
     const hit = e.target.closest("[data-link]");
     if (hit) {
@@ -778,6 +784,7 @@ async function mountProspect(container, id, staff) {
     const act = a.dataset.act;
     if (act === "call") setTimeout(() => logDialog("spoke"), 400);   // the phone opens, then the log
     if (act === "log") logDialog();
+    if (act === "text" || act === "email") openCompose(act);
     if (act === "lost") lostDialog(p, set, (np) => { p = np; render(); });
     if (act === "unlink") { try { await save("link", { pttId: "" }, "Unlinked"); } catch (err) { showToast(errText(err)); } }
     if (act === "confirmlink") { try { await save("link", { pttId: p.patientId }, "Confirmed"); } catch (err) { showToast(errText(err)); } }
@@ -786,39 +793,6 @@ async function mountProspect(container, id, staff) {
         body: '<label class="lh-field"><span class="lh-label">Note</span><textarea name="note" rows="4" maxlength="1000" class="fe-input"></textarea></label>',
         onOpen: (c) => c.form.elements.note.focus(),
         onSubmit: async (c) => { await save("log", { outcome: "note", note: c.form.elements.note.value }, "Note saved"); c.close(); } });
-    }
-    if (act === "text") {
-      const about = p.concern && !/^other/i.test(p.concern) ? ` about ${p.concern.toLowerCase()}` : "";
-      openDialog({ title: `Text ${p.name}`, sub: p.phone, submit: "Send text",
-        body: `<label class="lh-field"><span class="lh-label">Message</span>
-          <textarea name="text" rows="5" maxlength="612" class="fe-input">Hi ${esc(p.firstName || "there")}, it's Dermedica. Thanks for your enquiry${esc(about)}. </textarea>
-          <small class="muted" data-role="n"></small></label>${followHtml(fuStart(p.nextFollowUp, addDays(todayKey(), 2)), p.followNote || "")}`,
-        onOpen: (c) => {
-          const ta = c.form.elements.text;
-          const n = c.form.querySelector('[data-role="n"]');
-          const upd = () => { n.textContent = `${ta.value.length} characters · ${Math.max(1, Math.ceil(ta.value.length / 153))} text${ta.value.length > 160 ? "s" : ""}`; };
-          ta.addEventListener("input", upd); upd(); ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
-        },
-        onSubmit: async (c) => {
-          const f = c.form.elements;
-          await save("text", { text: f.text.value, followUp: f.followUp.value, followNote: f.followNote.value }, "Text sent");
-          c.close();
-        } });
-    }
-    if (act === "email") {
-      openDialog({ title: `Email ${p.name}`, sub: p.email, submit: "Send email",
-        body: `<label class="lh-field"><span class="lh-label">Subject</span><input name="subject" class="fe-input" maxlength="200" value="Your enquiry with Dermedica" /></label>
-          <label class="lh-field"><span class="lh-label">Message</span><textarea name="message" rows="8" maxlength="5000" class="fe-input">Hi ${esc(p.firstName || "there")},
-
-Thank you for your enquiry${esc(p.concern && !/^other/i.test(p.concern) ? ` about ${p.concern.toLowerCase()}` : "")}.
-
-Kind regards,
-Dermedica</textarea></label>${followHtml(fuStart(p.nextFollowUp, addDays(todayKey(), 3)), p.followNote || "")}`,
-        onSubmit: async (c) => {
-          const f = c.form.elements;
-          await save("email", { subject: f.subject.value, message: f.message.value, followUp: f.followUp.value, followNote: f.followNote.value }, "Email sent");
-          c.close();
-        } });
     }
   });
 
@@ -848,7 +822,6 @@ Dermedica</textarea></label>${followHtml(fuStart(p.nextFollowUp, addDays(todayKe
 
   render();
 }
-
 /* ===================== Reports (#/prospects/reports) ===================== */
 // Everything is worked out here from the prospects (current and older), so filters change instantly.
 
