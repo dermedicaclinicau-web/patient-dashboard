@@ -401,7 +401,7 @@ async function checkConsents(consentFields, patient) {
 }
 
 // Editing a saved form: the parts that can't be changed are shown as they were saved
-function showSavedViews(sheet, fields, sub) {
+function showSavedViews(sheet, fields, sub, staff) {
   fields.forEach((f) => {
     const w = sheet.querySelector(`[data-fid="${CSS.escape(f.id)}"]`);
     if (!w) return;
@@ -426,7 +426,8 @@ function showSavedViews(sheet, fields, sub) {
     if (f.type === "aftercare") { mountAftercareField(w, f, { saved: v || null }); return; }
     if (f.type === "consumables") {
       const host = w.querySelector("[data-cs-host]");
-      if (host) host.outerHTML = consumablesViewHtml(v) + '<p class="fe-help">Products used are corrected from the saved record page, so stock follows the change.</p>';
+      if (host) host.outerHTML = consumablesViewHtml(v) + '<p class="fe-help">Products used are corrected with the button below (amount, product, or which batch it came from), so stock follows the change.</p>';
+      renderUsage(w, sub, staff);   // the live stock record, with Correct products used…
     }
   });
 }
@@ -573,7 +574,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
           </div>
         </div>
         <p class="ff-msg" data-role="msg" aria-live="polite"></p>
-        ${editing ? '<p class="ff-return">Changing a saved form. Signatures, photos, drawings, aftercare and products used stay as they were (products are corrected from the record page). Each save needs a reason and is kept on the record.</p>' : ""}
+        ${editing ? '<p class="ff-return">Changing a saved form. Signatures, photos, drawings and aftercare stay as they were. Products used are corrected with the button under their table, so stock follows. Each save needs a reason and is kept on the record.</p>' : ""}
         ${isConsentLeg ? `<p class="ff-return">${esc(ret.kind || "Consent")} for <strong>${esc(ret.templateName)}</strong>. When you save, you'll go back to it.</p>` : ""}
         ${tabMode ? `<p class="ff-return">${esc(tabMode.k || "Consent")} for <strong>${esc(tabMode.n)}</strong>, which is open in your other tab.
           When you save, this tab closes and that form updates.
@@ -641,7 +642,7 @@ export async function mountFormFill(container, param, { staff, embedded = null }
   // Editing: these keep what was saved. They're shown, not changed.
   const locked = new Set(editing ? fields.filter((f) => ["aftercare", "consumables", "photo"].includes(f.type)
     || (f.type === "image" && (f.source === "staff" || f.annotate))).map((f) => f.id) : []);
-  if (editing) showSavedViews(sheet, fields, sub);
+  if (editing) showSavedViews(sheet, fields, sub, staff);
   const wrap = (id) => sheet.querySelector(`[data-fid="${CSS.escape(id)}"]`);
   // Hidden from staff: hidden with a class, not `hidden`, so calculations, tags and show-when rules still read the answer
   fields.forEach((f) => { if (f.liveHide) { const w = wrap(f.id); if (w) w.classList.add("is-livehide"); } });

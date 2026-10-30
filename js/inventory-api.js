@@ -3012,6 +3012,149 @@ export async function changeUsageProduct(id, li, to, reason, staff) {
   });
 }
 
+// Every batch record of one product, including empty ones (for choosing where a usage really came from)
+export async function listLotsForProduct(productId) {
+  const snap = await getDocs(query(collection(db, "inv_lots"), where("productId", "==", productId)));
+  return snap.docs.map(normaliseLot).sort(fefo);
+}
+
+// Admin: which batch a Shelf / JT storage line on a usage really came from, chosen after the fact.
+// to: { ref: <lot id> }, or { batch, expiry } typed in (recorded only: stock isn't changed).
+//  · Still short (taken < amount): the missing part comes off the chosen batch now, dated the treatment day.
+//  · Already taken from a batch: it goes back there and comes off the chosen batch instead.
+//  · Taken before the product tracked batches (no batch on the line): the batch is written on the record only.
+//    That stock was already accounted for when batch tracking was turned on.
+// Opening counts done since the treatment day are corrected, like a paper record entered late.
+export async function setUsageBatch(id, li, ri, to, reason, staff) {
+  const why = clip(reason, 300);
+  if (why.length < 3) throw new Error("Add a reason.");
+  const me = uid();
+  const by = who(staff);
+  const uRef = doc(db, "inv_usage", id);
+  let result = null;
+
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    const uSnap = await tx.get(uRef);
+    if (!uSnap.exists()) throw new Error("This record no longer exists.");
+    const u = uSnap.data();
+    if (u.deleted === true) throw new Error("This usage has been removed.");
+    const lines = (Array.isArray(u.lines) ? u.lines : []).map((l) => ({ ...l, rows: (l.rows || []).map((r) => ({ ...r })) }));
+    const l = lines[li];
+    const r = l && l.rows[ri];
+    if (!r) throw new Error("This record has changed. Reload and try again.");
+    if (l.kind !== "storage") throw new Error(`${l.name}: only Shelf / JT storage products can have their batch changed here.`);
+    const pSnap = await tx.get(doc(db, "inv_products", l.productId));
+    if (!pSnap.exists()) throw new Error("This product no longer exists.");
+    const pd = pSnap.data();
+    const tracked = pd.tracked === true;
+    const unit = String(pd.stockUnit || l.unit || "item");
+    const amount = Math.max(0, Math.round(Number(r.amount) || 0));
+    const taken = Math.max(0, Math.round(Number(r.taken) || 0));
+    const oldLoc = r.from === "jt" ? "jt" : "shelf";
+    const oldBatch = String(r.batch || ""), oldExp = String(r.expiry || "");
+
+    // The batch it's going to
+    const typed = !(to && to.ref);
+    let nb, ne, nloc, newRef = null, newSnap = null;
+    if (typed) {
+      nb = clip(to && to.batch, 40);
+      ne = KEY_RE.test((to && to.expiry) || "") ? to.expiry : "";
+      nloc = oldLoc;
+      if (!nb) throw new Error("Enter the batch number.");
+    } else {
+      newRef = doc(db, "inv_lots", clip(to.ref, 200));
+      newSnap = await tx.get(newRef);
+      if (!newSnap.exists() || String(newSnap.data().productId || "") !== l.productId) throw new Error("Choose which batch it came from.");
+      const d = newSnap.data();
+      nb = String(d.batch || ""); ne = String(d.expiry || ""); nloc = d.loc === "jt" ? "jt" : "shelf";
+    }
+    const annotate = taken > 0 && !oldBatch && tracked;
+    const giveBack = taken > 0 && !annotate;
+    const want = typed ? 0 : (giveBack ? amount : amount - taken);
+    const same = nb === oldBatch && ne === oldExp && nloc === oldLoc;
+    if (same && (typed || taken >= amount)) throw new Error("Nothing has changed.");
+    const oldRef = giveBack ? doc(db, "inv_lots", lotId(l.productId, oldLoc, oldBatch, oldExp)) : null;
+    const oldSnap = !oldRef ? null : (newRef && oldRef.id === newRef.id) ? newSnap : await tx.get(oldRef);
+
+    // ---- Work it out ----
+    const lots = new Map();
+    const touch = (ref, snap, loc, batch, expiry, delta) => {
+      const cur = lots.get(ref.id) || { ref, exists: snap.exists(), qty: snap.exists() ? Number(snap.data().qty) || 0 : 0, loc, batch, expiry };
+      cur.qty += delta;
+      lots.set(ref.id, cur);
+    };
+    const stock = { shelf: 0, jt: 0 };
+    if (giveBack) { touch(oldRef, oldSnap, oldLoc, oldBatch, oldExp, taken); stock[oldLoc] += taken; }
+    let took = 0;
+    if (want > 0) {
+      const have = (lots.get(newRef.id) || { qty: Number(newSnap.data().qty) || 0 }).qty;
+      took = Math.min(want, have);
+      if (took > 0) { touch(newRef, newSnap, nloc, nb, ne, -took); stock[nloc] -= took; }
+    }
+    const newTaken = giveBack ? took : taken + took;
+
+    // ---- Writes ----
+    lots.forEach((s) => tx.set(s.ref, {
+      productId: l.productId, loc: s.loc, batch: s.batch, expiry: s.expiry, qty: Math.max(0, s.qty),
+      updatedAt: serverTimestamp(), ...(s.exists ? {} : { createdAt: serverTimestamp() }),
+    }, { merge: true }));
+    if (stock.shelf || stock.jt) {
+      const st = pd.stock || {};
+      tx.update(pSnap.ref, {
+        stock: { shelf: Math.max(0, (Number(st.shelf) || 0) + stock.shelf), jt: Math.max(0, (Number(st.jt) || 0) + stock.jt) },
+        stockAt: serverTimestamp(),
+      });
+    }
+    const eff = KEY_RE.test(u.recordDate || "") ? { effectiveDate: u.recordDate } : {};
+    const who2 = `${u.patientName || ""} · ${u.formName || ""}`;
+    if (giveBack) {
+      logMove(tx, staff, {
+        type: "use-correct", productId: l.productId, productName: l.name, unit, ...eff,
+        lines: [{ loc: oldLoc, batch: oldBatch, expiry: oldExp, delta: taken }],
+        reason: "Batch corrected", ref: id,
+        note: `${who2} · ${oldBatch || "no batch"} → ${nb} · ${why}`.slice(0, 500),
+      });
+    }
+    if (took) {
+      logMove(tx, staff, {
+        type: "use", productId: l.productId, productName: l.name, unit, ...eff,
+        lines: [{ loc: nloc, batch: nb, expiry: ne, delta: -took }],
+        reason: giveBack ? "Treatment (batch corrected)" : "Treatment (taken off stock later)", ref: id,
+        note: `${who2} · ${why}`.slice(0, 500),
+      });
+    }
+    Object.assign(r, { batch: nb, expiry: ne, from: nloc, taken: newTaken });
+    l.short = l.rows.reduce((a, x) => a + Math.max(0, (Number(x.amount) || 0) - (Number(x.taken) || 0)), 0);
+    const stillShort = amount - newTaken;
+    const bl = l.batchLabel || "Batch";
+    tx.update(uRef, {
+      lines, short: lines.some((x) => (Number(x.short) || 0) > 0),
+      ...(u.original ? {} : { original: u.lines }),
+      corrected: true, correctedAt: serverTimestamp(), correctedBy: by, correctedByUid: me,
+      corrections: arrayUnion({
+        at: new Date().toISOString(), by, byUid: me, reason: why,
+        changes: [`${l.name}: ${oldBatch ? `${bl} ${oldBatch}` : "no batch"} → ${bl} ${nb}${
+          took ? ` (${plural(took, unit)} off stock)` : " (stock not changed)"}${stillShort > 0 ? `, still short by ${stillShort}` : ""}`],
+      }),
+    });
+    result = { took, gaveBack: giveBack ? taken : 0, stillShort, productId: l.productId,
+      date: KEY_RE.test(u.recordDate || "") ? u.recordDate : "", nloc, nb, ne, oldLoc, oldBatch, oldExp };
+  });
+
+  const x = result;
+  let backdated = { lines: 0, closed: 0, skipped: [], failed: 0 };
+  if (x.date && x.date < dayKey()) {
+    try {
+      if (x.took) backdated = await backdateCounts([{ saleId: `${id}:${li}:${ri}:take`, productId: x.productId, date: x.date, loc: x.nloc,
+        rows: [{ batch: x.nb, expiry: x.ne, taken: x.took }] }], staff, { kind: "use" });
+      if (x.gaveBack) await backdateCounts([{ saleId: `${id}:${li}:${ri}:back`, productId: x.productId, date: x.date, loc: x.oldLoc,
+        rows: [{ batch: x.oldBatch, expiry: x.oldExp, taken: x.gaveBack }] }], staff, { kind: "return" });
+    } catch (err) { console.warn("Counts not corrected:", err); backdated.failed = 1; }
+  }
+  return { ...x, backdated };
+}
+
 // Admin: a usage that shouldn't be there (the wrong patient, or it never happened). Kit units and Shelf items go
 // back where they came from. The record stays, marked removed, and leaves the reports and the Treatment check.
 // Returns { skipped }: products used from an opened container, which can't be put back.

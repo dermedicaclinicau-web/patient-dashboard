@@ -2,6 +2,7 @@ import {
   listProducts, listCounts, resolveCountLine, listUsageBetween, listMovesBetween,
   listKits, listKitMoves, listAllLoans, listShortAll, resolveShort, kitUnits,
   getUsage, correctUsage, correctionMove, changeUsageProduct, deleteUsage, listAllLots, isKitProduct, fefo,
+  listLotsForProduct, setUsageBatch,
   batchName, plural, unitPlural, dayKey, COUNT_STATUS,listInvestigations, INV_OUTCOMES, INV_STATUS,
   listUnrecordedTreatments, listContainersBetween, expectedUses,
   getBaseline, baselinePlan, setBaseline, listCountsOn, listKitDays,
@@ -1486,7 +1487,8 @@ export async function openCorrection(id, staff, onDone) {
           const short = (Number(x.r.amount) || 0) - (Number(x.r.taken) || 0);
           return `<tr data-i="${i}">
             <td><strong>${esc(x.l.name)}</strong>${x.l.replaced ? ` <small class="muted">(was ${esc(x.l.replaced.name)})</small>` : ""}<br><small class="muted">${esc([x.r.batch ? `${x.l.batchLabel || "Batch"} ${x.r.batch}` : "", whereTxt(x)].filter(Boolean).join(" · "))}</small>${
-              x.ri === 0 && (x.l.kind === "kit" || x.l.kind === "storage") ? `<br><button type="button" class="kr-link" data-swap="${x.li}">Wrong product? Change it…</button>` : ""}</td>
+              x.ri === 0 && (x.l.kind === "kit" || x.l.kind === "storage") ? `<br><button type="button" class="kr-link" data-swap="${x.li}">Wrong product? Change it…</button>` : ""}${
+              x.l.kind === "storage" ? ` <button type="button" class="kr-link" data-batch="${i}" title="Which batch it came from, or take it off stock now if it was saved short">Batch / stock…</button>` : ""}</td>
             <td>${esc(amtTxt(x, x.r.amount))}${x.dosed ? `<br><small class="muted">${esc(fmt(x.r.dose))} ${esc(x.l.doseUnit)} given</small>` : ""}${
               short > 0.001 ? `<br><small class="rp-neg">${esc(fmt(short))} short</small>` : ""}</td>
             <td><label class="rp-cin"><input class="fe-in" type="number" min="0" step="${x.kit ? "0.1" : "1"}" data-k="amount" value="${esc(fmt(x.r.amount))}" />
@@ -1529,6 +1531,12 @@ export async function openCorrection(id, staff, onDone) {
   form.addEventListener("input", preview);
   dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
   dlg.addEventListener("click", async (e) => {
+    const bt = e.target.closest("[data-batch]");
+    if (bt) {
+      const x = items[Number(bt.dataset.batch)];
+      if (x && await batchDialog(u, x, staff)) { dlg.close(); if (onDone) onDone(); }
+      return;
+    }
     const sw = e.target.closest("[data-swap]");
     if (sw) {
       const x = items.find((it) => it.li === Number(sw.dataset.swap) && it.ri === 0);
@@ -1571,6 +1579,79 @@ export async function openCorrection(id, staff, onDone) {
     }
   });
 }
+// Which batch a Shelf / JT storage line really came from. A line saved short comes off that batch now.
+async function batchDialog(u, x, staff) {
+  let product, lots;
+  try {
+    const [products, list] = await Promise.all([listProducts(), listLotsForProduct(x.l.productId)]);
+    product = products.find((p) => p.id === x.l.productId) || null;
+    lots = list;
+  } catch (err) { showToast(errText(err, "Couldn't load the batches.")); return false; }
+  const unit = (product && product.stockUnit) || x.l.unit || "item";
+  const bl = x.l.batchLabel || batchName(product);
+  const amount = Number(x.r.amount) || 0, taken = Number(x.r.taken) || 0, short = amount - taken;
+  const tracked = !!(product && product.tracked);
+  const annotate = taken > 0 && !x.r.batch && tracked;
+  const swap = taken > 0 && !annotate;
+  const now = x.r.batch ? `${bl} ${x.r.batch}` : "no batch";
+  const whenText = niceDate(u.recordDate) || "the treatment day";
+  const what = annotate
+    ? `Taken before this product tracked batches, so only the ${bl.toLowerCase()} is written on the record. Stock isn't changed.`
+    : swap ? `${plural(taken, unit)} go back to ${esc(now)} and come off the batch you choose instead${short > 0 ? `, and the ${plural(short, unit)} still short come off it too` : ""}.`
+    : `${plural(short, unit)} were never taken off stock. They come off the batch you choose now, dated ${esc(whenText)}, and any count done since is corrected.`;
+  return new Promise((resolve) => {
+    let saved = false;
+    const dlg = openDialog(`<form class="lh-form" novalidate>
+      <div class="lh-dialog-head"><h3>Batch / stock: ${esc(x.l.name)}</h3>
+        <p><strong>${esc(u.patientName || "Patient")}</strong> · ${esc(u.formName || "")} · ${esc(whenText)}. Recorded: ${esc(plural(amount, unit))}, ${esc(now)}${short > 0 ? `, <strong class="rp-neg">short by ${esc(fmt(short))}</strong>` : ""}.</p>
+        <p class="muted">${what}</p></div>
+      <label class="lh-field"><span class="lh-label">It came from</span>
+        <select class="fb-select" name="ref">
+          ${lots.length ? lots.map((l) => `<option value="${esc(l.id)}">${esc(LOC[l.loc] || l.loc)} · ${esc(l.batch || "No number")} · Exp ${esc(niceDate(l.expiry) || "—")} · ${esc(plural(l.qty, unit))} in stock</option>`).join("")
+            : '<option value="" disabled>No batches of this product are in stock</option>'}
+          <option value="">Type the ${esc(bl.toLowerCase())} in (stock isn't changed)</option>
+        </select></label>
+      <div class="inv-two" data-role="typed" hidden>
+        <label class="lh-field"><span class="lh-label">${esc(bl)} number</span><input class="fe-in" name="batch" maxlength="40" /></label>
+        <label class="lh-field"><span class="lh-label">Expiry</span><input class="fe-in" name="expiry" type="date" /></label>
+      </div>
+      <label class="lh-field"><span class="lh-label">Reason</span>
+        <textarea name="reason" rows="2" maxlength="300" placeholder="e.g. Delivery arrived after the treatment; used from lot 8812"></textarea></label>
+      <p class="lh-error" role="alert" hidden></p>
+      <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+        <button type="submit" class="lh-btn is-primary">Save</button></div></form>`);
+    const form = dlg.querySelector("form");
+    const f = form.elements;
+    const err = dlg.querySelector(".lh-error");
+    const typedBox = dlg.querySelector('[data-role="typed"]');
+    const sync = () => { typedBox.hidden = !!f.ref.value; };
+    f.ref.addEventListener("change", sync);
+    sync();
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      try {
+        const to = f.ref.value ? { ref: f.ref.value } : { batch: f.batch.value, expiry: f.expiry.value };
+        const r = await setUsageBatch(u.id, x.li, x.ri, to, f.reason.value, staff);
+        saved = true;
+        dlg.close();
+        showToast(r.took ? `${plural(r.took, unit)} taken off ${bl} ${r.nb}.${r.stillShort > 0 ? ` Still short by ${r.stillShort}.` : ""}${
+          r.backdated && r.backdated.lines ? ` ${r.backdated.lines} count line${r.backdated.lines === 1 ? "" : "s"} corrected.` : ""}`
+          : `${bl} ${r.nb} recorded. Stock not changed.${r.stillShort > 0 ? ` Still short by ${r.stillShort}.` : ""}`);
+      } catch (ex) {
+        console.error("Batch change failed:", ex);
+        err.textContent = errText(ex, "Couldn't save it. Try again.");
+        err.hidden = false;
+        btn.disabled = false;
+      }
+    });
+    dlg.addEventListener("close", () => resolve(saved));
+  });
+}
+
 // The wrong product was recorded on a line. Every batch on that line goes back; the right product comes off the batch chosen.
 async function swapProductDialog(u, x, staff) {
   let products, lots, kits;
