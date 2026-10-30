@@ -7,7 +7,7 @@ import {
 } from "./inventory-api.js";
 import { callApi } from "./appointments.js";
 import { loadChecks, checkOf, checkToolsHtml, bindKitChecks } from "./kit-recon-checks.js";
-
+import { showToast } from "./utils.js";
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const r1 = (n) => Math.round((Number(n) || 0) * 10) / 10;
 const fmt = (n) => String(r1(n));
@@ -150,7 +150,7 @@ function oldEntries(data) {
   (data.records || []).forEach((w) => {
     add({ ms: atTime(w.date, w.time), date: w.date, kind: "move", sub: "use", units: -r1(w.units),
       patientName: w.patientName || "", patientId: w.patientId || "", type: w.type || "Treatment", areas: w.areas || "",
-      batch: w.batch || "", expiry: w.expiry || "" });
+      batch: w.batch || "", expiry: w.expiry || "", pdf: w.pdf || "" });
   });
   return out;
 }
@@ -223,20 +223,43 @@ function segOf(p, d) {
   };
 }
 
-// Marked as checked, and not changed since: it no longer needs checking
-function withChecks(p, list) {
-  return list.map((d) => {
-    const seg = segOf(p, d);
-    const c = seg ? checkOf(seg) : null;
-    const done = !!(c && c.status === "checked" && r1(c.gap) === r1(seg.gap));
-    const check = (bad(d.startDiff) && !done) || bad(d.gap) || d.expired.length > 0 || d.uncounted || d.loansOpen.length > 0;
-    return { ...d, seg, done, check };
+// Booked for the kit product that day, matched to the records by patient (ID, otherwise name),
+// on the same day or within 3 days (a record saved on the wrong date)
+const nameKey = (s) => String(s || "").toLowerCase().replace(/\([^)]*\)/g, " ").replace(/[^a-z ]/g, " ").replace(/\s+/g, " ").trim();
+const samePt = (a, b) => (a.patientId && b.patientId ? a.patientId === b.patientId
+  : !!nameKey(a.patientName) && nameKey(a.patientName) === nameKey(b.patientName));
+const daysApart = (a, b) => Math.abs((keyDate(a) - keyDate(b)) / 864e5);
+const emptyDay = (date) => ({ date, uses: [], start: null, end: null, kitUsed: 0, other: 0, gap: null, startDiff: null,
+  colleagues: [], loansOpen: [], expired: [], uncounted: false, used: 0, restocks: [], check: false });
+
+function bookingsOf(p, d, booked) {
+  if (!booked) return [];
+  const uses = p.L.filter((e) => e.sub === "use");
+  d.uses.forEach((e) => { e.unbooked = !booked.some((b) => samePt(e, b)); });
+  return booked.filter((b) => !d.uses.some((e) => samePt(e, b))).map((b) => {
+    const other = uses.find((e) => e.date !== d.date && daysApart(e.date, d.date) <= 3 && samePt(e, b));
+    return { ...b, other: other ? other.date : "" };
   });
 }
 
+// Marked as checked, and not changed since: it no longer needs checking. bk: the appointment book, per injector and day
+function withChecks(p, list, bk) {
+  const days = new Map(list.map((d) => [d.date, d]));
+  if (bk) bk.days(p.uid).forEach((date) => { if (!days.has(date)) days.set(date, emptyDay(date)); });
+  return [...days.values()].sort((a, b) => a.date.localeCompare(b.date)).map((d) => {
+    const seg = segOf(p, d);
+    const c = seg ? checkOf(seg) : null;
+    const done = !!(c && c.status === "checked" && r1(c.gap) === r1(seg.gap));
+    const noRecord = bookingsOf(p, d, bk ? bk.on(p.uid, d.date) : null);
+    const missing = noRecord.filter((b) => !b.other && !(b.res && b.res.status));
+    const check = (bad(d.startDiff) && !done) || bad(d.gap) || d.expired.length > 0 || d.uncounted || d.loansOpen.length > 0 || missing.length > 0;
+    return { ...d, seg, done, noRecord, missing, check };
+  });
+}
 function checkList(d) {
   const out = [];
   if (d.uncounted) out.push({ t: "Not counted", bad: false });
+  if (d.missing && d.missing.length) out.push({ t: `${d.missing.length} booked, no record`, bad: true });
   if (bad(d.gap)) out.push(d.gap < 0 ? { t: `${fmt(-d.gap)} not on a patient`, bad: true } : { t: `${fmt(d.gap)} more than expected`, bad: false });
   if (bad(d.startDiff)) out.push({ t: `Start ${d.startDiff > 0 ? "+" : "−"}${fmt(Math.abs(d.startDiff))}${d.done ? " · checked ✓" : ""}`,
     bad: d.startDiff < 0 && !d.done });
@@ -376,6 +399,7 @@ export function mountKitReconciliation(body, { csv = null, staff = null } = {}) 
     help: false,
     open: new Set(), people: [], products: [], problem: "", oldProblem: "", loadingOld: false, base: null, old: {}, seq: 0,
     q: "", allPeople: null, loadingAll: false, allProblem: "", checksProblem: "",
+    q: "", allPeople: null, loadingAll: false, allProblem: "", checksProblem: "", book: {}, bookProblem: "",
   };
 
   // Explain, Mark as checked and History on each difference (one listener for the whole page)
@@ -447,6 +471,16 @@ export function mountKitReconciliation(body, { csv = null, staff = null } = {}) 
       } catch (e) {
         st.oldProblem = `Old app records: ${(e && e.message) || "couldn't be read."} Try a shorter date range.`;
       }
+      if (!(k in st.book) || fresh) {
+        try {
+          const rb = await callApi({ action: "inventory", op: "kitBookings", from: st.from || "", to: st.to || "" });
+          if (rb && rb.problem) throw new Error(rb.problem);
+          if (rb && rb.days) st.book[k] = rb;
+          st.bookProblem = "";
+        } catch (e) {
+          st.bookProblem = `Appointment book: ${(e && e.message) || "couldn't be read."} Bookings with no record aren't shown.`;
+        }
+      }
       if (my !== st.seq) return;
       st.loadingOld = false;
       if (people) st.old[k] = people;
@@ -509,7 +543,11 @@ export function mountKitReconciliation(body, { csv = null, staff = null } = {}) 
 
   const range = () => [st.from || "0000-00-00", st.to || "9999-99-99"];
   const unitOf = (p) => (p && p.product && p.product.doseUnit) || "units";
-
+  const bookKey = () => `${st.from || ""}|${st.to || ""}`;
+  const bk = {
+    days: (uid) => { const b = st.book[bookKey()]; return b ? Object.keys(b.days).filter((dk) => b.days[dk].some((x) => x.staffUid === uid)) : []; },
+    on: (uid, date) => { const b = st.book[bookKey()]; return b && date >= b.from && date <= b.to ? (b.days[date] || []).filter((x) => x.staffUid === uid) : null; },
+  };
   function visible() {
     return st.people.filter((p) => p.injector && (!st.product || p.product.id === st.product) && (!st.staff.size || st.staff.has(p.uid)));
   }
@@ -519,8 +557,8 @@ export function mountKitReconciliation(body, { csv = null, staff = null } = {}) 
     const out = [];
     const empty = (c) => !c || (!c.value && !(c.batches || []).some((x) => x.batch));
     visible().forEach((p) => {
-      withChecks(p, groupDays(p.L.filter((e) => e.date >= a && e.date <= b))).forEach((d) => {
-        if (empty(d.start) && empty(d.end) && !d.uses.length && !d.restocks.length && !d.colleagues.length) return;
+      withChecks(p, groupDays(p.L.filter((e) => e.date >= a && e.date <= b)), bk).forEach((d) => {
+        if (empty(d.start) && empty(d.end) && !d.uses.length && !d.restocks.length && !d.colleagues.length && !d.noRecord.length) return;
         if (st.onlyCheck && !d.check) return;
         out.push({ ...d, p, id: `${p.product.id}|${p.uid}|${d.date}` });
       });
@@ -556,7 +594,7 @@ export function mountKitReconciliation(body, { csv = null, staff = null } = {}) 
         .reduce((x, e) => x + e.units, 0));
       gap = r1(last.value - expected);
     }
-    const days = withChecks(p, groupDays(L));
+    const days = withChecks(p, groupDays(L), bk);
 
     // What's in their kit now (their latest start count, any date), and what expires within 60 days
     const allStarts = p.L.filter((e) => e.kind === "count" && e.cat === "start");
@@ -580,6 +618,7 @@ export function mountKitReconciliation(body, { csv = null, staff = null } = {}) 
       uncounted: days.filter((d) => d.uncounted).length,
       expired: days.reduce((x, d) => x + d.expired.length, 0),
       loansOpen: days.reduce((x, d) => x + d.loansOpen.length, 0),
+      noRecord: days.reduce((x, d) => x + d.missing.length, 0),
     };
   }
 
@@ -606,6 +645,7 @@ export function mountKitReconciliation(body, { csv = null, staff = null } = {}) 
         if (s.expired) flags.push(flagHtml({ t: `Expired batch used ×${s.expired}`, bad: true }));
         if (s.uncounted) flags.push(flagHtml({ t: `${plural(s.uncounted, "day")} not counted`, bad: false }));
         if (s.loansOpen) flags.push(flagHtml({ t: `${plural(s.loansOpen, "handover")} not confirmed`, bad: false }));
+        if (s.noRecord) flags.push(flagHtml({ t: `${plural(s.noRecord, "booking")} with no record`, bad: true }));
         s.expiring.forEach((x) => flags.push(flagHtml({
           t: `${x.batch} ${x.end < s.today ? "expired" : "expires"} ${expMY(x.expiry) || x.end}`, bad: x.end < s.today })));
         return `<tr>
@@ -669,26 +709,48 @@ export function mountKitReconciliation(body, { csv = null, staff = null } = {}) 
       ${st.problem ? `<p class="tb-bad rp-note">${esc(st.problem)}</p>` : ""}
       ${st.oldProblem ? `<p class="tb-bad rp-note">${esc(st.oldProblem)}</p>` : ""}
       ${st.checksProblem ? `<p class="tb-bad rp-note">${esc(st.checksProblem)}</p>` : ""}
+      ${st.bookProblem ? `<p class="tb-bad rp-note">${esc(st.bookProblem)}</p>` : ""}
       ${st.loadingOld ? `<p class="muted rp-note">Loading the old app's records for these dates…</p>` : ""}`;
   }
 
   function historyHtml(d) {
-    if (!d.uses.length) return '<p class="muted rp-note">No treatments recorded this day.</p>';
     const unit = unitOf(d.p);
-    return `<table class="inv-table kr-hist"><thead><tr><th>Time</th><th>Patient Name</th><th>Type of Record</th><th>Area</th>
-        <th class="n">Total Units</th></tr></thead><tbody>${d.uses.map((e) => {
-      const who = e.patientId
-        ? `<a href="#/patient/${encodeURIComponent(e.patientId)}" target="_blank" rel="noopener">${esc(e.patientName || "Patient")}</a>`
-        : esc(e.patientName || "—");
-      const type = esc(e.type || "Treatment") + (e.paper ? " (paper)" : "");
+    const who = (e) => (e.patientId
+      ? `<a href="#/patient/${encodeURIComponent(e.patientId)}" target="_blank" rel="noopener">${esc(e.patientName || "Patient")}</a>`
+      : esc(e.patientName || "—"));
+    // The record itself: a portal form, a filed paper scan in Drive, or the old app's PDF
+    const recLink = (e) => (e.submissionId
+      ? (/^paper_/.test(e.submissionId)
+        ? `https://drive.google.com/file/d/${encodeURIComponent(e.submissionId.slice(6))}/view`
+        : `#/form-record/${encodeURIComponent(e.submissionId)}`)
+      : e.pdf || "");
+    const useRows = d.uses.map((e) => {
+      const type = esc(e.type || "Treatment") + (e.paper ? " (paper)" : e.src === "old" ? " (old app)" : "");
+      const link = recLink(e);
       const notes = [e.from ? `From ${e.from}` : "", e.batch ? `Batch ${e.batch}` : "", e.expiry ? `Exp ${e.expiry}` : ""].filter(Boolean).join(" · ");
       const expired = isExpired(e.expiry, e.date);
       return `<tr><td>${e.ms && dayKey(new Date(e.ms)) === e.date ? esc(timeOf(e.ms)) : "—"}</td>
-        <td>${who}</td>
-        <td>${e.submissionId ? `<a href="#/form-record/${encodeURIComponent(e.submissionId)}" target="_blank" rel="noopener">${type}</a>` : type}</td>
+        <td>${who(e)}</td>
+        <td>${link ? `<a href="${esc(link)}" target="_blank" rel="noopener noreferrer">${type}</a>` : type}${
+          e.unbooked ? '<small class="kr-warn">Not in the appointment book</small>' : ""}</td>
         <td>${esc(e.areas || "—")}${notes ? `<small>${esc(notes)}</small>` : ""}${expired ? '<small class="kr-bad">Expired batch</small>' : ""}</td>
         <td class="n"><strong>${fmt(-e.units)}</strong> ${esc(unit)}</td></tr>`;
-    }).join("")}</tbody><tfoot><tr><td colspan="4">Total · ${plural(d.uses.length, "record")}</td>
+    });
+    const bookRows = (d.noRecord || []).map((b) => {
+      const state = b.res && b.res.status
+        ? `<span class="kr-flag">No record needed</span><small>${esc([b.res.note, b.res.by].filter(Boolean).join(" · "))}</small>`
+        : b.other ? `<span class="kr-flag">Recorded on ${esc(shortDay(b.other))}</span><small>Check the date on the record</small>`
+        : `<span class="kr-flag is-bad">No record</span>
+           <small><a href="#/paper" target="_blank" rel="noopener">Enter from paper</a> ·
+           <button type="button" class="kr-link" data-noneed="${esc(b.key)}">No record needed</button></small>`;
+      return `<tr class="kr-booked"><td>${esc(b.time || "—")}</td><td>${who(b)}</td><td>${state}</td>
+        <td>${esc(b.services.join(", "))}<small>Booked${b.touchUp ? " · touch up" : ""}</small></td><td class="n">—</td></tr>`;
+    });
+    if (!useRows.length && !bookRows.length) return '<p class="muted rp-note">No treatments recorded this day.</p>';
+    return `<table class="inv-table kr-hist"><thead><tr><th>Time</th><th>Patient Name</th><th>Type of Record</th><th>Area</th>
+        <th class="n">Total Units</th></tr></thead><tbody>${useRows.join("")}${bookRows.join("")}</tbody>
+      <tfoot><tr><td colspan="4">Total · ${plural(d.uses.length, "record")}${
+        d.missing && d.missing.length ? ` · <span class="kr-bad">${plural(d.missing.length, "booking")} with no record</span>` : ""}</td>
         <td class="n"><strong>${fmt(d.used)}</strong> ${esc(unit)}</td></tr></tfoot></table>`;
   }
 
@@ -891,7 +953,8 @@ export function mountKitReconciliation(body, { csv = null, staff = null } = {}) 
         d.end ? d.end.value : "", d.used || "",
         d.restocks.map((e) => `+${fmt(e.units)} ${e.batch} ${expMY(e.expiry)}`.trim()).join("; "),
         checkList(d).map((f) => f.t).join("; ")];
-      if (!d.uses.length) { out.push(day.concat(["", "", "", "", ""])); return; }
+      (d.missing || []).forEach((b) => out.push(day.concat([b.time || "", b.patientName || "", "Booked, no record", b.services.join(", "), ""])));
+      if (!d.uses.length) { if (!(d.missing || []).length) out.push(day.concat(["", "", "", "", ""])); return; }
       d.uses.forEach((e) => out.push(day.concat([e.ms && dayKey(new Date(e.ms)) === e.date ? timeOf(e.ms) : "",
         e.patientName || "", e.type || "Treatment", e.areas || "", r1(-e.units)])));
     });
@@ -932,6 +995,19 @@ export function mountKitReconciliation(body, { csv = null, staff = null } = {}) 
     const chk = ev.target.closest("[data-check]");
     if (chk) { st.staff = new Set([chk.dataset.check]); st.onlyCheck = true; st.limit = 100; draw(); return; }
 
+    const nn = ev.target.closest("[data-noneed]");
+    if (nn) {
+      const note = window.prompt("Why is no record needed? (e.g. review only, no injection given)");
+      if (!note || !note.trim()) return;
+      callApi({ action: "paper", op: "resolve", key: nn.dataset.noneed, status: "none", note: note.trim() })
+        .then((r) => {
+          if (r && r.problem) { showToast(r.problem); return; }
+          delete st.book[bookKey()];
+          loadOld(false);
+        })
+        .catch(() => showToast("Couldn't save it. You need Paper records access to mark a visit as needing no record."));
+      return;
+    }
     const h = ev.target.closest("[data-hist]");
     if (h) {
       const id = h.dataset.hist;

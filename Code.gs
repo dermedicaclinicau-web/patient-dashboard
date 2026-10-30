@@ -4479,6 +4479,11 @@ function handleInventory_(body) {
       try { return Object.assign({ ok: true }, oldKitLedgerAll_(body.fresh === true, String(body.from || ''), String(body.to || ''))); }
       catch (e) { return { ok: true, problem: String(e && e.message ? e.message : e).slice(0, 300) }; }
     }
+    if (op === 'kitBookings') {
+      if (!can_(session, 'menu.reports') && !can_(session, 'inventory.manage')) return { ok: false, error: 'FORBIDDEN' };
+      try { return Object.assign({ ok: true }, kitBookings_(String(body.from || ''), String(body.to || ''))); }
+      catch (e) { return { ok: true, problem: String(e && e.message ? e.message : e).slice(0, 300) }; }
+    }
     if (op === 'oldKitExplain') {
       if (!can_(session, 'menu.reports') && !can_(session, 'inventory.manage')) return { ok: false, error: 'FORBIDDEN' };
       try { return Object.assign({ ok: true }, oldKitExplain_(body)); }
@@ -16346,7 +16351,34 @@ function oldKitRows_() {
   repCachePut_('old_kit_rows_v1', rows, 900);
   return rows;
 }
+// Units on one treatment_details_map entry. Older records carry 'Total Units';
+// newer ones put the units on each marker (Areas[].Markers[].Units) or on each area.
+function oldWrUnits_(x) {
+  x = x || {};
+  const total = Number(String(x['Total Units'] == null ? '' : x['Total Units']).replace(/[^\d.]/g, ''));
+  if (total > 0) return total;
+  let sum = 0;
+  (Array.isArray(x.Areas) ? x.Areas : []).forEach(function (a) {
+    a = a || {};
+    const mk = Array.isArray(a.Markers) ? a.Markers : [];
+    if (mk.length) mk.forEach(function (m) { sum += Number(m && m.Units) || 0; });
+    else sum += Number(a.Units) || 0;
+  });
+  return Math.round(sum * 10) / 10;
+}
 
+// "Forehead 5 · Crow's feet 6 · Frown 12": per area from the markers; otherwise the area text as written
+function oldWrAreaText_(x, units) {
+  x = x || {};
+  const parts = [];
+  (Array.isArray(x.Areas) ? x.Areas : []).forEach(function (a) {
+    a = a || {};
+    const mk = Array.isArray(a.Markers) ? a.Markers : [];
+    const n = mk.length ? mk.reduce(function (t, m) { return t + (Number(m && m.Units) || 0); }, 0) : (Number(a.Units) || 0);
+    if (n > 0) parts.push(String(a.Area || 'Area').trim() + ' ' + Math.round(n * 10) / 10);
+  });
+  return parts.length ? parts.join(' · ') : (String(x['Area Selected'] || 'Area').trim() + ' ' + units);
+}
 // The old app's Wrinkle Relaxer records on one day. The time comes from the Record ID (WR-20251212-091611).
 function oldWrRecords_(cfg, key) {
   return fsQuery_(cfg, OLD_WR_COL_, quoteField_('Record Date'), 'EQUAL', key, 500).map(function (r) {
@@ -16356,7 +16388,7 @@ function oldWrRecords_(cfg, key) {
       return {
         area: String(d['Area Selected'] || '').trim(), batch: String(d['Batch Number'] || '').trim(),
         expiry: String(d['Expiry Date'] || '').trim(), type: String(d.Type || '').trim(),
-        units: Number(String(d['Total Units'] == null ? '' : d['Total Units']).replace(/[^\d.]/g, '')) || 0,
+        units: oldWrUnits_(d),
       };
     }).filter(function (d) { return d.units > 0; });
     return {
@@ -16426,8 +16458,7 @@ function oldKitRecon_(fresh) {
   const wr = fsListAll_(cfg, OLD_WR_COL_, ['Staff', 'Record Date', 'treatment_details_map']).map(function (d) {
     const f = fromFields_(d.fields || {});
     const units = (Array.isArray(f.treatment_details_map) ? f.treatment_details_map : []).reduce(function (a, x) {
-      x = x || {};
-      return a + (Number(String(x['Total Units'] == null ? '' : x['Total Units']).replace(/[^\d.]/g, '')) || 0);
+      return a + oldWrUnits_(x);
     }, 0);
     return { staff: String(f.Staff || '').trim(), date: String(f['Record Date'] || '').trim(), units: units };
   }).filter(function (x) { return x.staff && /^\d{4}-\d{2}-\d{2}$/.test(x.date) && x.units > 0; });
@@ -16563,7 +16594,7 @@ function oldKitLedger_(namesIn, fresh) {
         return {
           area: String(x['Area Selected'] || '').trim(), batch: String(x['Batch Number'] || '').trim(),
           expiry: String(x['Expiry Date'] || '').trim(), type: String(x.Type || '').trim(),
-          units: Number(String(x['Total Units'] == null ? '' : x['Total Units']).replace(/[^\d.]/g, '')) || 0,
+          units: oldWrUnits_(x),
         };
       }).filter(function (x) { return x.units > 0; });
       const units = Math.round(lines.reduce(function (a, x) { return a + x.units; }, 0) * 10) / 10;
@@ -16706,7 +16737,16 @@ function oldKitBaseBuild_() {
   });
 
   /* ---------- wr_treatment_record ---------- */
-
+  // The old app's PDF for a record, when it also wrote a treatment_records row with the same Record ID
+  const pdfOf = {};
+  try {
+    fsListAll_(cfg, 'treatment_records', ['Record ID', 'File PDF Link']).forEach(function (d) {
+      const f = fromFields_(d.fields || {});
+      const rid = String(f['Record ID'] || '').trim();
+      const link = String(f['File PDF Link'] || '').trim();
+      if (rid && /^https:\/\//i.test(link) && !pdfOf[rid]) pdfOf[rid] = link;
+    });
+  } catch (e) { console.warn('Old kits: treatment_records not read, so History will not link to PDFs: ' + e); }
   // The old app's Patient ID ("221", "FB92A107") → the patient's page in the portal
   let pts = null;
   try { pts = paperPts_(cfg); }
@@ -16727,7 +16767,8 @@ function oldKitBaseBuild_() {
           batch: String(x['Batch Number'] || '').trim(),
           expiry: my(x['Expiry Date']),
           type: typeOf(x.Type),
-          units: Number(String(x['Total Units'] == null ? '' : x['Total Units']).replace(/[^\d.]/g, '')) || 0,
+          units: oldWrUnits_(x),
+          areaText: oldWrAreaText_(x, oldWrUnits_(x)),
         };
       }).filter(function (x) { return x.units > 0; });
 
@@ -16743,11 +16784,12 @@ function oldKitBaseBuild_() {
         t ? t[1] + ':' + t[2] : '',
         String(f['Patient Name'] || '').trim(),
         units,
-        lines.map(function (x) { return (x.area || 'Area') + ' ' + x.units; }).join(' · '),
+        lines.map(function (x) { return x.areaText; }).join(' · '),
         join(lines.map(function (x) { return x.type; })),
         join(lines.map(function (x) { return x.batch; })),
         join(lines.map(function (x) { return x.expiry; })),
         pid,
+        pdfOf[String(f['Record ID'] || '').trim()] || '',
       ]);
     });
 
@@ -16776,13 +16818,72 @@ function oldKitLedgerAll_(fresh, from, to) {
       }),
       records: p.records.filter(function (x) { return inRange(x[0]); }).map(function (x) {
         return { date: x[0], time: x[1], patientName: x[2], units: x[3], areas: x[4], type: x[5], batch: x[6], expiry: x[7],
-          patientId: x[8] || '' };
+          patientId: x[8] || '', pdf: x[9] || '' };
       }),
     };
   }).filter(function (p) { return p.rows.length || p.records.length; });
   return { people: people, at: base.at };
 }
+// Reporting → Kit reconciliation → History: Wrinkle Relaxer bookings per day (cancelled and no-shows left out),
+// matched to the injector on the staff list, so each day can show who was booked but has no record.
+// Also returns any "no record needed" decisions already made in Paper records (paper_visits), by the same key.
+// → { days: { 'yyyy-MM-dd': [{ staffUid, staff, patientId, patientName, time, services, touchUp, key, res }] }, from, to }
+function kitBookings_(from, to) {
+  const ok = function (k) { return /^\d{4}-\d{2}-\d{2}$/.test(k); };
+  const today = flowKey_(Date.now());
+  to = ok(to) && to < today ? to : today;
+  if (!ok(from) || flowDays_(from, to) > 400) from = flowAddDaysKey_(to, -400);   // at most about 13 months at a time
+  const cfg = getConfig_();
+  const staff = getStaffDocs_();
+  const uidOf = {};
+  const uidFor = function (name) {
+    if (!(name in uidOf)) {
+      const hits = staff.filter(function (s) { return kitSameStaff_(s.name, name); });
+      uidOf[name] = hits.length === 1 ? hits[0].id : '';
+    }
+    return uidOf[name];
+  };
+  const pts = paperPts_(cfg);
+  const res = {};
+  try {
+    fsListAll_(cfg, PAPER_VISITS_, ['key', 'status', 'note', 'by', 'at']).forEach(function (d) {
+      const f = fromFields_(d.fields || {});
+      if (f.key) res[String(f.key)] = { status: String(f.status || ''), note: String(f.note || ''), by: String(f.by || ''), at: String(f.at || '') };
+    });
+  } catch (e) { console.warn('Kit bookings: paper_visits not read: ' + e); }
 
+  const days = {};
+  const seen = {};
+  let start = from;
+  for (let page = 0; page < 10 && start <= to; page++) {
+    const list = schedApptDays_(cfg, start, to, 150);
+    list.forEach(function (d) {
+      const dk = String(d.date || '');
+      if (!ok(dk)) return;
+      (d.appointments || []).forEach(function (a) {
+        if (!pcnStatusOk_(a.status, 'full')) return;
+        const svcs = (Array.isArray(a.services) ? a.services : []).map(function (s) { return String(s == null ? '' : s).trim(); })
+          .filter(function (s) { return s && !REP_NOT_VISIT_.test(s) && pcnCategory_(dk, s) === 'Wrinkle Relaxer'; });
+        if (!svcs.length) return;
+        const st = String(a.staff || '').trim();
+        if (!st || SCHED_NOT_PERSON_.test(st)) return;
+        const uid = uidFor(st);
+        const ptt = String(a.patientId || '').trim();
+        const pid = ptt ? pts.find(ptt) : '';
+        const name = String(a.patientName || '').trim();
+        const k = dk + '|' + (uid || st) + '|' + (pid || name.toLowerCase());
+        if (seen[k]) { svcs.forEach(function (s) { if (seen[k].services.indexOf(s) === -1) seen[k].services.push(s); }); return; }
+        const vkey = dk + '|' + (pid || ('n:' + name.toLowerCase()));   // the same key Paper records uses
+        seen[k] = { staffUid: uid, staff: st, patientId: pid, patientName: name, time: String(a.time || ''), services: svcs,
+          touchUp: svcs.every(function (s) { return /touch\s*-?\s*up|top\s*-?\s*up/i.test(s); }), key: vkey, res: res[vkey] || null };
+        (days[dk] = days[dk] || []).push(seen[k]);
+      });
+    });
+    if (list.length < 150) break;
+    start = flowAddDaysKey_(String(list[list.length - 1].date), 1);
+  }
+  return { days: days, from: from, to: to };
+}
 // Reporting → Kit reconciliation → Explain: one injector's booked Wrinkle Relaxer visits from one start count
 // to the next (from inclusive, to not), compared with the old app's records. Read only.
 function oldKitExplain_(body) {
