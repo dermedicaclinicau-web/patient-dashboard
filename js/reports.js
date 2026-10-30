@@ -2,7 +2,7 @@ import {
   listProducts, listCounts, resolveCountLine, listUsageBetween, listMovesBetween,
   listKits, listKitMoves, listAllLoans, listShortAll, resolveShort, kitUnits,
   getUsage, correctUsage, correctionMove, changeUsageProduct, deleteUsage, listAllLots, isKitProduct, fefo,
-  listLotsForProduct, setUsageBatch,
+  listLotsForProduct, setUsageBatch, listOpenContainers,
   batchName, plural, unitPlural, dayKey, COUNT_STATUS,listInvestigations, INV_OUTCOMES, INV_STATUS,
   listUnrecordedTreatments, listContainersBetween, expectedUses,
   getBaseline, baselinePlan, setBaseline, listCountsOn, listKitDays,
@@ -1491,9 +1491,12 @@ export async function openCorrection(id, staff, onDone) {
   if (!u) { showToast("This record no longer exists."); return; }
   if (u.deleted) { showToast(`This usage was removed${u.deletedBy ? ` by ${u.deletedBy}` : ""}${u.deleteReason ? `: ${u.deleteReason}` : ""}.`); return; }
 
-  const items = u.lines.flatMap((l, li) => (l.kind === "shared" ? [] : (l.rows || []).map((r, ri) => ({ l, r, li, ri, kit: l.kind === "kit", dosed: l.kind !== "kit" && !!l.doseUnit }))));
+  // kit: amounts are in dose units (a kit line, or a kit product used from an opened vial in storage)
+  const items = u.lines.flatMap((l, li) => (l.kind === "shared" ? [] : (l.rows || []).map((r, ri) => ({
+    l, r, li, ri, kit: l.kind === "kit" || l.kind === "vial", vial: l.kind === "vial",
+    dosed: l.kind !== "kit" && l.kind !== "vial" && !!l.doseUnit }))));
   if (!items.length) { showToast("There's nothing to correct on this record."); return; }
-  const whereTxt = (x) => (x.kit ? `${u.by || "Injector"}'s kit` : LOC[x.r.from] || x.r.from || "Shelf");
+  const whereTxt = (x) => (x.vial ? `the opened vial in ${LOC[x.r.from] || "JT storage"}` : x.kit ? `${u.by || "Injector"}'s kit` : LOC[x.r.from] || x.r.from || "Shelf");
   const amtTxt = (x, n) => (x.kit ? `${fmt(n)} ${x.l.unit}` : plural(+fmt(n), x.l.unit));
 
   const dlg = openDialog(`
@@ -1508,7 +1511,7 @@ export async function openCorrection(id, staff, onDone) {
           return `<tr data-i="${i}">
             <td><strong>${esc(x.l.name)}</strong>${x.l.replaced ? ` <small class="muted">(was ${esc(x.l.replaced.name)})</small>` : ""}<br><small class="muted">${esc([x.r.batch ? `${x.l.batchLabel || "Batch"} ${x.r.batch}` : "", whereTxt(x)].filter(Boolean).join(" · "))}</small>${
               x.ri === 0 && (x.l.kind === "kit" || x.l.kind === "storage") ? `<br><button type="button" class="kr-link" data-swap="${x.li}">Wrong product? Change it…</button>` : ""}${
-              x.l.kind === "storage" || x.l.kind === "kit" ? ` <button type="button" class="kr-link" data-batch="${i}" title="Which batch it came from, or take it off stock now if it was saved short">Batch / stock…</button>` : ""}</td>
+              x.l.kind !== "shared" ? ` <button type="button" class="kr-link" data-batch="${i}" title="Which batch it came from, or take it off stock now if it was saved short">Batch / stock…</button>` : ""}</td>
             <td>${esc(amtTxt(x, x.r.amount))}${x.dosed ? `<br><small class="muted">${esc(fmt(x.r.dose))} ${esc(x.l.doseUnit)} given</small>` : ""}${
               short > 0.001 ? `<br><small class="rp-neg">${esc(fmt(short))} short</small>` : ""}</td>
             <td><label class="rp-cin"><input class="fe-in" type="number" min="0" step="${x.kit ? "0.1" : "1"}" data-k="amount" value="${esc(fmt(x.r.amount))}" />
@@ -1599,41 +1602,48 @@ export async function openCorrection(id, staff, onDone) {
     }
   });
 }
-// Which batch a line really came from: a Shelf / JT storage batch, or a batch in an injector's kit.
-// A line saved short comes off that batch now.
+// Which batch a line really came from: a Shelf / JT storage batch, a batch in an injector's kit,
+// or (a kit product used from storage) a different opened vial. A line saved short comes off that batch now.
 async function batchDialog(u, x, staff) {
-  const kit = x.l.kind === "kit";
+  const kind = x.l.kind || (x.r.from === "kit" ? "kit" : "storage");
+  const kit = kind === "kit", vial = kind === "vial", dosey = kit || vial;
   const owner = kit ? (x.l.kitUid || u.byUid || "") : "";
-  let product, lots = [], kitsL = [];
+  let product, lots = [], kitsL = [], opens = [];
   try {
-    const [products, list] = await Promise.all([listProducts(), kit ? listKits() : listLotsForProduct(x.l.productId)]);
+    const [products, list] = await Promise.all([listProducts(),
+      kit ? listKits() : vial ? listOpenContainers({ productId: x.l.productId }) : listLotsForProduct(x.l.productId)]);
     product = products.find((p) => p.id === x.l.productId) || null;
     if (kit) {
       // The record's injector first, then the others
       kitsL = list.filter((k) => k.productId === x.l.productId)
         .sort((a, b) => (a.staffUid === owner ? 0 : 1) - (b.staffUid === owner ? 0 : 1)
           || String(a.staffName).localeCompare(String(b.staffName)) || (a.expiry || "9999").localeCompare(b.expiry || "9999"));
-    } else lots = list;
+    } else if (vial) opens = list.filter((c) => c.kind === "vial");
+    else lots = list;
   } catch (err) { showToast(errText(err, "Couldn't load the batches.")); return false; }
-  const unit = kit ? (x.l.unit || (product && product.doseUnit) || "units") : ((product && product.stockUnit) || x.l.unit || "item");
-  const amtText = (n) => (kit ? `${fmt(n)} ${unit}` : plural(n, unit));
+  const unit = dosey ? (x.l.unit || (product && product.doseUnit) || "units") : ((product && product.stockUnit) || x.l.unit || "item");
+  const amtText = (n) => (dosey ? `${fmt(n)} ${unit}` : plural(n, unit));
   const bl = x.l.batchLabel || batchName(product);
   const amount = Number(x.r.amount) || 0, taken = Number(x.r.taken) || 0, short = Math.round((amount - taken) * 10) / 10;
   const tracked = !!(product && product.tracked);
-  const annotate = !kit && taken > 0 && !x.r.batch && tracked;
+  const annotate = !dosey && taken > 0 && !x.r.batch && tracked;
   const swap = taken > 0 && !annotate;
   const now = x.r.batch ? `${bl} ${x.r.batch}` : "no batch";
   const whenText = niceDate(u.recordDate) || "the treatment day";
-  const where = kit ? "the kit batch you choose" : "the batch you choose";
+  const where = kit ? "the kit batch you choose" : vial ? "the opened vial you choose" : "the batch you choose";
+  const outOf = dosey ? "out of" : "off";
   const what = annotate
     ? `Taken before this product tracked batches, so only the ${bl.toLowerCase()} is written on the record. Stock isn't changed.`
-    : swap ? `${amtText(taken)} go back to ${esc(now)}${kit ? " in the injector's kit" : ""} and come off ${where} instead${
-        short > 0 ? `, and the ${amtText(short)} still short come off it too` : ""}.${kit ? " Choose another injector's batch if it really came from their kit." : ""}`
-    : `${amtText(short)} were never taken ${kit ? "out of a kit" : "off stock"}. They come off ${where} now, dated ${esc(whenText)}${
-        kit ? " (the opened vial goes down, and a sealed vial is opened if it needs to)" : ", and any count done since is corrected"}.`;
+    : swap ? `${amtText(taken)} go back ${vial ? "into the opened vial they came from" : `to ${esc(now)}${kit ? " in the injector's kit" : ""}`} and come ${outOf} ${where} instead${
+        short > 0 ? `, and the ${amtText(short)} still short come ${outOf} it too` : ""}.${kit ? " Choose another injector's batch if it really came from their kit." : ""}`
+    : `${amtText(short)} were never taken ${kit ? "out of a kit" : vial ? "out of an opened vial" : "off stock"}. They come ${outOf} ${where} now, dated ${esc(whenText)}${
+        kit ? " (the opened vial goes down, and a sealed vial is opened if it needs to)" : vial ? "" : ", and any count done since is corrected"}.`;
   const options = kit
     ? kitsL.map((k) => `<option value="${esc(k.id)}">${esc(k.staffName || "Injector")}'s kit · ${esc(k.batch || "No number")} · Exp ${esc(niceDate(k.expiry) || "—")} · ${esc(fmt(kitUnits(k)))} ${esc(k.doseUnit || unit)} in kit</option>`)
+    : vial
+    ? opens.map((c) => `<option value="${esc(c.id)}">${esc(LOC[c.from] || c.from)} · ${esc(c.batch || "No number")} · Exp ${esc(niceDate(c.expiry) || "—")} · ${esc(fmt(Math.max(0, c.size - c.used)))} ${esc(c.doseUnit || unit)} left in the vial</option>`)
     : lots.map((l) => `<option value="${esc(l.id)}">${esc(LOC[l.loc] || l.loc)} · ${esc(l.batch || "No number")} · Exp ${esc(niceDate(l.expiry) || "—")} · ${esc(plural(l.qty, unit))} in stock</option>`);
+  const none = kit ? "No batches of this product are in anyone's kit" : vial ? "No opened vials of this product in storage" : "No batches of this product are in stock";
   return new Promise((resolve) => {
     let saved = false;
     const dlg = openDialog(`<form class="lh-form" novalidate>
@@ -1642,15 +1652,15 @@ async function batchDialog(u, x, staff) {
         <p class="muted">${what}</p></div>
       <label class="lh-field"><span class="lh-label">It came from</span>
         <select class="fb-select" name="ref">
-          ${options.length ? options.join("") : `<option value="" disabled>${kit ? "No batches of this product are in anyone's kit" : "No batches of this product are in stock"}</option>`}
-          <option value="">Type the ${esc(bl.toLowerCase())} in (stock isn't changed)</option>
+          ${options.length ? options.join("") : `<option value="" disabled>${esc(none)}</option>`}
+          <option value="">Type the ${esc(bl.toLowerCase())} in (written on the record only, stock isn't changed)</option>
         </select></label>
       <div class="inv-two" data-role="typed" hidden>
         <label class="lh-field"><span class="lh-label">${esc(bl)} number</span><input class="fe-in" name="batch" maxlength="40" /></label>
         <label class="lh-field"><span class="lh-label">Expiry</span><input class="fe-in" name="expiry" type="date" /></label>
       </div>
       <label class="lh-field"><span class="lh-label">Reason</span>
-        <textarea name="reason" rows="2" maxlength="300" placeholder="${kit ? "e.g. Used from the new vial opened that morning; batch wasn't chosen on the form" : "e.g. Delivery arrived after the treatment; used from lot 8812"}"></textarea></label>
+        <textarea name="reason" rows="2" maxlength="300" placeholder="${dosey ? "e.g. Used from the new vial opened that morning; batch wasn't chosen on the form" : "e.g. Delivery arrived after the treatment; used from lot 8812"}"></textarea></label>
       <p class="lh-error" role="alert" hidden></p>
       <div class="lh-actions"><button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
         <button type="submit" class="lh-btn is-primary">Save</button></div></form>`);
@@ -1672,7 +1682,7 @@ async function batchDialog(u, x, staff) {
         const r = await setUsageBatch(u.id, x.li, x.ri, to, f.reason.value, staff);
         saved = true;
         dlg.close();
-        showToast(r.took ? `${amtText(r.took)} taken off ${bl} ${r.nb}${r.kit && r.ownerName ? ` in ${r.ownerName}'s kit` : ""}.${
+        showToast(r.took ? `${amtText(r.took)} taken ${r.vial ? "out of the opened vial" : "off"} ${bl} ${r.nb}${r.kit && r.ownerName ? ` in ${r.ownerName}'s kit` : ""}.${
           r.stillShort > 0 ? ` Still short by ${r.stillShort}.` : ""}${
           r.backdated && r.backdated.lines ? ` ${r.backdated.lines} count line${r.backdated.lines === 1 ? "" : "s"} corrected.` : ""}`
           : `${bl} ${r.nb} recorded. Stock not changed.${r.stillShort > 0 ? ` Still short by ${r.stillShort}.` : ""}`);
@@ -1686,6 +1696,7 @@ async function batchDialog(u, x, staff) {
     dlg.addEventListener("close", () => resolve(saved));
   });
 }
+
 // The wrong product was recorded on a line. Every batch on that line goes back; the right product comes off the batch chosen.
 async function swapProductDialog(u, x, staff) {
   let products, lots, kits;
