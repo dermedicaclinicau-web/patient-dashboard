@@ -77,16 +77,17 @@ function stamp(staff, created = false) {
   };
 }
 
-// "1 vial", "3 vials", "2 boxes"
+// "vials", "boxes". A unit that already ends in s ("units") is left as it is.
 export function unitPlural(unit) {
   const u = String(unit || "unit");
-  return /(s|x|ch|sh)$/i.test(u) ? `${u}es` : `${u}s`;
+  return /s$/i.test(u) ? u : /(x|z|ch|sh)$/i.test(u) ? `${u}es` : `${u}s`;
 }
+// "1 vial", "3 vials", "2 boxes", "7 units"
 export const plural = (n, unit) => {
   const u = String(unit || "item");
-  const one = Number(n) === 1;
-  if (one) return `${fmt(n)} ${u}`;
-  return `${fmt(n)} ${/(s|x|z|ch|sh)$/i.test(u) ? u : u + "s"}`;
+  const v = Number(n);
+  const num = Number.isFinite(v) ? String(+v.toFixed(2)) : String(n);
+  return `${num} ${v === 1 ? u : unitPlural(u)}`;
 };
 
 // "" (fine or no expiry), "soon" (within 60 days) or "expired"
