@@ -308,7 +308,8 @@ function stepLetter(step) {
 // Morning / evening placement: portal protocols say exactly; sheet ones are worked out
 function slots(item) {
   if (item.slotAm !== undefined) return { am: item.slotAm, pm: item.slotPm };
-  const when = String(item.whenToUse || item.when || "").toLowerCase();
+  // Old sheet protocols: the PROTOCOL column ("AM", "PM", "AM/PM") says when, the AM/PM cells hold any wording
+  const when = String(item.protocol || item.whenToUse || item.when || "").toLowerCase();
   const has = (v) => String(v || "").trim() !== "";   // a tick (✓, Y, x) counts, not just wording
   let am = has(item.am) || /\b(am|morning|day|both)\b/.test(when);
   const pm = has(item.pm) || /\b(pm|evening|night|both)\b/.test(when);
