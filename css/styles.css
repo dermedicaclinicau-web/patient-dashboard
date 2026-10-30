@@ -10180,3 +10180,34 @@ dialog.lh-dialog.bs-dlg.is-wide { width: min(1240px, calc(100vw - 2rem)); }
   .pr-table td:first-child::before, .pr-rtable td:first-child::before { content: none; }
   .pr-table td:empty { display: none; }
 }
+
+/* Prospects: tiles as filters, dates, Show chips, past patients and recall */
+button.pr-tile { font: inherit; text-align: left; cursor: pointer; transition: border-color .15s, box-shadow .15s; }
+button.pr-tile:hover { border-color: #94a3b8; }
+.pr-tile.is-on { border-color: #0f766e; box-shadow: 0 0 0 3px rgba(15, 118, 110, .15); }
+.pr-tile:focus-visible { outline: 2px solid #0f766e; outline-offset: 2px; }
+.pr-dates { display: inline-flex; align-items: center; gap: 6px; color: #64748b; font-size: 13px; }
+.pr-dates[hidden] { display: none; }
+.pr-tools .pr-dates .fe-input { width: auto; min-width: 0; }
+.pr-show { display: flex; flex-wrap: wrap; gap: 6px; margin: -2px 0 14px; }
+.pr-show-chip { display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px; border: 1px solid #e2e8f0;
+  border-radius: 999px; background: #fff; color: #334155; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+  transition: background .15s, border-color .15s, color .15s; }
+.pr-show-chip em { min-width: 20px; padding: 0 6px; border-radius: 999px; background: #f1f5f9; color: #475569;
+  font-size: 11px; font-style: normal; line-height: 20px; text-align: center; }
+.pr-show-chip:hover { border-color: #94a3b8; }
+.pr-show-chip.is-on { background: #0f766e; border-color: #0f766e; color: #fff; }
+.pr-show-chip.is-on em { background: rgba(255, 255, 255, .25); color: #fff; }
+.pr-show-chip.is-zero { opacity: .5; }
+.pr-show-chip:focus-visible { outline: 2px solid #0f766e; outline-offset: 2px; }
+.pr-tag.is-old { background: #ede9fe; color: #5b21b6; }
+.pr-tag.is-recall, .pr-chip.is-recall { background: #fef3c7; color: #92400e; }
+.pr-recall { border-color: #fde68a; background: #fffcf0; }
+.pr-recall p { margin: 0 0 6px; }
+@media (max-width: 640px) {
+  .pr-show { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; scrollbar-width: none; }
+  .pr-show::-webkit-scrollbar { display: none; }
+  .pr-show-chip { flex: none; }
+  .pr-tools .pr-dates { flex: 1 1 100%; }
+  .pr-tools .pr-dates .fe-input { flex: 1 1 0; width: auto; }
+}

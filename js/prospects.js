@@ -82,6 +82,28 @@ const fuStart = (d, fallback = "") => (d && d >= todayKey() ? d : fallback);
 // Booked, then cancelled or didn't come, and nothing booked since
 const cancelOpen = (p) => p.cancelOpen === true && OPEN.includes(p.stage);
 const cancelWord = (p) => (p.lastCancel && p.lastCancel.kind === "noshow" ? "Didn't come" : "Cancelled");
+const isPast = (p) => p.wasPatient === true || !!p.prev;
+const onRecall = (p) => !!(p.recall && p.recall.id);
+const monthYear = (k) => { if (!/^\d{4}-\d{2}/.test(k || "")) return ""; const [y, m] = k.split("-").map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString("en-AU", { month: "short", year: "numeric" }); };
+const prevText = (pv) => (pv ? `${pv.count} visit${pv.count === 1 ? "" : "s"} before they enquired, last on ${fullDay(pv.last)}${
+  pv.svcs && pv.svcs.length ? ` (${pv.svcs.join(", ")})` : ""}${pv.staff ? ` with ${pv.staff}` : ""}` : "");
+// The "Show" chips on the board, and the "Who" filter on the reports
+const SHOW = [
+  ["", "All", () => true],
+  ["action", "Needs action", (p, set) => notContacted(p, set) || cancelOpen(p) || ["today", "overdue"].includes(followState(p))],
+  ["new", "New to the clinic", (p) => !isPast(p)],
+  ["past", "Past patients", isPast],
+  ["recall", "Also on recall", onRecall],
+  ["cancel", "Cancelled, not rebooked", (p) => cancelOpen(p)],
+  ["nocontact", "Not contacted", (p, set) => notContacted(p, set)],
+  ["follow", "Follow-ups due", (p) => ["today", "overdue"].includes(followState(p))],
+  ["booked", "Booked directly", (p) => p.fromBook === true],
+  ["check", "Check match", (p) => !!p.patientId && p.linkWeak === true],
+];
+const showOf = (k) => (SHOW.find((x) => x[0] === k) || SHOW[0])[2];
+const RANGES = [["", "Enquired: any time"], ["7", "Enquired: last 7 days"], ["30", "Enquired: last 30 days"],
+  ["90", "Enquired: last 3 months"], ["365", "Enquired: last 12 months"], ["custom", "Enquired: choose dates"]];
 const I = (p) => `<svg class="pr-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
 const IC = {
   plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
@@ -167,7 +189,7 @@ async function mountBoard(container, { view, staff }) {
   container.replaceChildren(root);
   const me = auth.currentUser && auth.currentUser.uid;
   const work = can("prospects.work") || can("prospects.manage");
-  const st = { view, q: "", source: "", who: "all", due: false, showLost: false, old: false };
+  const st = { view, q: "", source: "", who: "all", show: "", range: "", from: "", to: "", showLost: false, old: false };
   let all = [];
   let set = {};
   root.innerHTML = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
@@ -183,16 +205,21 @@ async function mountBoard(container, { view, staff }) {
   const t = todayKey();
   const month = t.slice(0, 7);
   const tiles = [
-    ["alert", all.filter((p) => notContacted(p, set)).length, `Not contacted in ${hoursOf(set)} hours`, "bad"],
-    ["flag", all.filter(cancelOpen).length, "Cancelled, not rebooked", "bad"],
-    ["inbox", all.filter((p) => Date.now() - Date.parse(p.createdAt || "") < 7 * 864e5).length, "New enquiries this week", "sky"],
-    ["clock", all.filter((p) => ["today", "overdue"].includes(followState(p))).length, "Follow-ups due", "amber"],
+    { ic: "alert", n: all.filter((p) => notContacted(p, set)).length, l: `Not contacted in ${hoursOf(set)} hours`, tone: "bad", show: "nocontact" },
+    { ic: "flag", n: all.filter(cancelOpen).length, l: "Cancelled, not rebooked", tone: "bad", show: "cancel" },
+    { ic: "inbox", n: all.filter((p) => Date.now() - Date.parse(p.createdAt || "") < 7 * 864e5).length, l: "New enquiries this week", tone: "sky", range: "7" },
+    { ic: "clock", n: all.filter((p) => ["today", "overdue"].includes(followState(p))).length, l: "Follow-ups due", tone: "amber", show: "follow" },
     // The date of their first treatment (from the appointment book), or when staff moved them there by hand
-    ["trophy", all.filter((p) => {
+    { ic: "trophy", n: all.filter((p) => {
       const d = (p.milestones || {}).treated || (["treated", "active"].includes(p.stage) ? keyOf(p.stageAt) : "");
       return d.slice(0, 7) === month;
-    }).length, "Became patients this month", "green"],
+    }).length, l: "Became patients this month", tone: "green" },
   ];
+  const tileHtml = (x) => {
+    const attr = x.show ? ` data-show="${x.show}"` : x.range ? ` data-range="${x.range}"` : "";
+    const tag = attr ? "button" : "div";
+    return `<${tag}${attr ? ` type="button"${attr} title="Show these"` : ""} class="pr-tile is-${x.tone}">${I(IC[x.ic])}<div><strong>${x.n}</strong><span>${esc(x.l)}</span></div></${tag}>`;
+  };
   const srcList = [...new Set(all.map((p) => p.source).filter(Boolean))].sort();
 
   root.innerHTML = `
@@ -204,24 +231,35 @@ async function mountBoard(container, { view, staff }) {
         ${work ? `<button type="button" class="lh-btn is-primary" data-act="new">${I(IC.plus)} New prospect</button>` : ""}
       </div>
     </div>
-    <div class="pr-tiles">${tiles.map(([ic, n, l, tone]) =>
-      `<div class="pr-tile is-${tone}">${I(IC[ic])}<div><strong>${n}</strong><span>${esc(l)}</span></div></div>`).join("")}</div>
+    <div class="pr-tiles">${tiles.map(tileHtml).join("")}</div>
     <div class="pr-tools">
       <div class="fe-seg">${[["board", "Board"], ["list", "List"]].map(([v, l]) =>
         `<label class="fe-seg-btn"><input type="radio" name="pr-view" value="${v}"${st.view === v ? " checked" : ""} /><span>${l}</span></label>`).join("")}</div>
       <input type="search" class="fe-input pr-q" data-role="q" placeholder="Search name, mobile, email or interest" />
+      <select class="fe-input" data-role="range" aria-label="Enquired">${RANGES.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("")}</select>
+      <span class="pr-dates" data-role="dates" hidden>
+        <input type="date" class="fe-input" data-role="from" max="${t}" aria-label="From" /><span>to</span>
+        <input type="date" class="fe-input" data-role="to" max="${t}" aria-label="To" /></span>
       <select class="fe-input" data-role="source"><option value="">All sources</option>${opts(srcList, "")}</select>
       <select class="fe-input" data-role="who"><option value="all">Everyone's</option><option value="me">Mine</option><option value="none">Not given to anyone</option></select>
-      <label class="fe-check pr-due"><input type="checkbox" data-role="due" /> Needs action</label>
       <button type="button" class="lh-btn is-quiet" data-act="old">Show older enquiries</button>
     </div>
+    <div class="pr-show" data-role="show" role="group" aria-label="Show"></div>
     <div data-role="body"></div>`;
 
-  const match = (p) => {
+  // Enquired between: their first enquiry, or any enquiry since
+  const rangeOf = () => (st.range === "custom" ? [st.from || "0000-01-01", st.to || t]
+    : st.range ? [addDays(t, -(Number(st.range) - 1)), t] : ["", ""]);
+  const inRange = (p) => {
+    const [a, b] = rangeOf();
+    if (!a) return true;
+    return [keyOf(p.createdAt)].concat((p.enquiries || []).map((q) => keyOf(q.at))).some((d) => d && d >= a && d <= b);
+  };
+  const base = (p) => {
     if (st.source && p.source !== st.source) return false;
     if (st.who === "me" && p.assignedToId !== me) return false;
     if (st.who === "none" && p.assignedToId) return false;
-    if (st.due && !(notContacted(p, set) || cancelOpen(p) || ["today", "overdue"].includes(followState(p)))) return false;
+    if (!inRange(p)) return false;
     if (!st.q) return true;
     const digits = st.q.replace(/\D/g, "");
     return `${p.name} ${p.email} ${p.concern} ${p.patientName || ""}`.toLowerCase().includes(st.q) ||
@@ -232,6 +270,11 @@ async function mountBoard(container, { view, staff }) {
     String(a.nextFollowUp || "9").localeCompare(String(b.nextFollowUp || "9")) ||
     String(b.lastEnquiryAt || "").localeCompare(String(a.lastEnquiryAt || ""));
 
+  const typeTags = (p) => `${p.patientId ? (isPast(p)
+      ? `<span class="pr-tag is-old" title="${esc(prevText(p.prev) || "Had a visit before they enquired")}">Past patient${p.prev && p.prev.last ? ` · last ${esc(monthYear(p.prev.last))}` : ""}</span>`
+      : '<span class="pr-tag is-pt">Patient</span>') : ""}
+    ${onRecall(p) ? `<span class="pr-tag is-recall" title="${esc(`${p.recall.category}, due ${fullDay(p.recall.due)}`)}">On recall</span>` : ""}`;
+
   const card = (p) => {
     const fs = followState(p);
     const late = notContacted(p, set);
@@ -241,7 +284,7 @@ async function mountBoard(container, { view, staff }) {
       ${p.concern ? `<small class="pr-card-concern">${esc(p.concern)}</small>` : ""}
       <span class="pr-tags">
         <span class="pr-tag">${esc(p.source || "Other")}</span>
-        ${p.patientId ? `<span class="pr-tag is-pt">${p.wasPatient ? "Existing patient" : "Patient"}</span>` : ""}
+        ${typeTags(p)}
         ${p.patientId && p.linkWeak ? '<span class="pr-tag is-warn">Check match</span>' : ""}
         ${p.nextAppt && OPEN.includes(p.stage) ? `<span class="pr-tag is-pt">Booked ${esc(niceDay(p.nextAppt))}</span>` : ""}
         ${late ? '<span class="pr-tag is-bad">Not contacted</span>' : ""}
@@ -257,7 +300,16 @@ async function mountBoard(container, { view, staff }) {
   };
 
   function drawBody() {
-    const list = all.filter(match);
+    const pool = all.filter(base);
+    root.querySelector('[data-role="show"]').innerHTML = SHOW.map(([k, l, f]) => {
+      const n = k ? pool.filter((p) => f(p, set)).length : pool.length;
+      const on = st.show === k;
+      return `<button type="button" class="pr-show-chip${on ? " is-on" : ""}${!n && !on && k ? " is-zero" : ""}" data-show="${k}" aria-pressed="${on}">${esc(l)} <em>${n}</em></button>`;
+    }).join("");
+    root.querySelectorAll(".pr-tile[data-show]").forEach((x) => x.classList.toggle("is-on", x.dataset.show === st.show));
+    root.querySelectorAll(".pr-tile[data-range]").forEach((x) => x.classList.toggle("is-on", x.dataset.range === st.range));
+    const pred = showOf(st.show);
+    const list = pool.filter((p) => pred(p, set));
     const box = root.querySelector('[data-role="body"]');
     if (st.view === "list") {
       const rows = list.slice().sort(byUrgency);
@@ -267,7 +319,7 @@ async function mountBoard(container, { view, staff }) {
           const s = stageOf(p.stage);
           const fs = followState(p);
           return `<tr data-href="#/prospects/${enc(p.id)}">
-            <td data-label="Name"><a href="#/prospects/${enc(p.id)}"><strong>${esc(p.name)}</strong></a>${notContacted(p, set) ? ' <span class="pr-tag is-bad">Not contacted</span>' : ""}${cancelOpen(p) ? ` <span class="pr-tag is-bad">${cancelWord(p)}, not rebooked</span>` : ""}</td>
+            <td data-label="Name"><a href="#/prospects/${enc(p.id)}"><strong>${esc(p.name)}</strong></a> ${typeTags(p)}${notContacted(p, set) ? ' <span class="pr-tag is-bad">Not contacted</span>' : ""}${cancelOpen(p) ? ` <span class="pr-tag is-bad">${cancelWord(p)}, not rebooked</span>` : ""}</td>
             <td data-label="Stage"><span class="pr-pill is-${s.tone}">${esc(s.name)}</span></td>
             <td data-label="Interested in">${esc(p.concern || "")}</td>
             <td data-label="Source">${esc(p.source || "")}</td>
@@ -293,6 +345,24 @@ async function mountBoard(container, { view, staff }) {
   }
   drawBody();
 
+  // Older enquiries (over 90 days, never worked): loaded when asked for, or when the dates go back that far
+  async function setOld(on) {
+    if (on === st.old) return;
+    const btn = root.querySelector('[data-act="old"]');
+    btn.disabled = true;
+    btn.textContent = on ? "Loading…" : "Show older enquiries";
+    try { all = await loadAll(on); st.old = on; }
+    catch { showToast("Couldn't load them. Try again."); }
+    finally { btn.disabled = false; btn.textContent = st.old ? "Hide older enquiries" : "Show older enquiries"; drawBody(); }
+  }
+  const maybeOld = () => { const [a] = rangeOf(); if (a && a < addDays(t, -90) && !st.old) setOld(true); };
+  const syncDates = () => {
+    const box = root.querySelector('[data-role="dates"]');
+    box.hidden = st.range !== "custom";
+    box.querySelector('[data-role="from"]').value = st.from;
+    box.querySelector('[data-role="to"]').value = st.to;
+  };
+
   const replace = (p) => { const i = all.findIndex((x) => x.id === p.id); if (i >= 0) all[i] = p; else all.unshift(p); drawBody(); };
   async function move(id, to) {
     const p = all.find((x) => x.id === id);
@@ -306,27 +376,37 @@ async function mountBoard(container, { view, staff }) {
   }
 
   root.addEventListener("change", (e) => {
+    const r = e.target.dataset.role;
     if (e.target.name === "pr-view") { st.view = e.target.value; history.replaceState(null, "", st.view === "list" ? "#/prospects/list" : "#/prospects"); drawBody(); }
-    if (e.target.dataset.role === "source") { st.source = e.target.value; drawBody(); }
-    if (e.target.dataset.role === "who") { st.who = e.target.value; drawBody(); }
-    if (e.target.dataset.role === "due") { st.due = e.target.checked; drawBody(); }
+    if (r === "source") { st.source = e.target.value; drawBody(); }
+    if (r === "who") { st.who = e.target.value; drawBody(); }
+    if (r === "range") {
+      st.range = e.target.value;
+      if (st.range === "custom" && !st.from) { st.from = addDays(t, -29); st.to = t; }
+      syncDates(); maybeOld(); drawBody();
+    }
+    if (r === "from" || r === "to") {
+      st[r] = e.target.value;
+      if (st.from && st.to && st.from > st.to) { if (r === "from") st.to = st.from; else st.from = st.to; }   // the wrong way round
+      syncDates(); maybeOld(); drawBody();
+    }
   });
   root.addEventListener("input", (e) => { if (e.target.dataset.role === "q") { st.q = e.target.value.trim().toLowerCase(); drawBody(); } });
   root.addEventListener("click", (e) => {
     const tr = e.target.closest("tr[data-href]");
     if (tr && !e.target.closest("a")) { location.hash = tr.dataset.href; return; }
+    const sh = e.target.closest("[data-show]");
+    if (sh) { st.show = st.show === sh.dataset.show ? "" : sh.dataset.show; drawBody(); return; }
+    const rg = e.target.closest("[data-range]");
+    if (rg) {
+      st.range = st.range === rg.dataset.range ? "" : rg.dataset.range;
+      root.querySelector('[data-role="range"]').value = st.range;
+      syncDates(); drawBody(); return;
+    }
     const a = e.target.closest("[data-act]");
     if (!a) return;
     if (a.dataset.act === "lost") { st.showLost = !st.showLost; drawBody(); }
-    if (a.dataset.act === "old") {
-      st.old = !st.old;
-      a.disabled = true;
-      a.textContent = st.old ? "Loading…" : "Show older enquiries";
-      loadAll(st.old)
-        .then((list) => { all = list; a.textContent = st.old ? "Hide older enquiries" : "Show older enquiries"; drawBody(); })
-        .catch(() => { st.old = !st.old; showToast("Couldn't load them. Try again."); })
-        .finally(() => { a.disabled = false; });
-    }
+    if (a.dataset.act === "old") setOld(!st.old);
     if (a.dataset.act === "new") newDialog(all, (id) => { location.hash = `#/prospects/${enc(id)}`; });
     if (a.dataset.act === "settings") settingsDialog(set, async () => { set = await loadSettings(); });
   });
@@ -361,7 +441,6 @@ async function mountBoard(container, { view, staff }) {
     });
   }
 }
-
 /* ===================== Dialogs ===================== */
 
 async function newDialog(all, onDone) {
@@ -374,7 +453,7 @@ async function newDialog(all, onDone) {
     body: `
       <div class="pr-grid2">
         <label class="lh-field"><span class="lh-label">Full name</span><input name="name" class="fe-input" maxlength="120" required /></label>
-        <label class="lh-field"><span class="lh-label">How they got in touch</span><select name="source" class="fe-input">${opts(SOURCES.filter((s) => s !== "Web form"), "Phone call")}</select></label>
+        <label class="lh-field"><span class="lh-label">How they got in touch</span><select name="source" class="fe-input">${opts(SOURCES.filter((s) => !["Web form", "Booked directly"].includes(s)), "Phone call")}</select></label>
         <label class="lh-field"><span class="lh-label">Mobile</span><input name="phone" class="fe-input" inputmode="tel" maxlength="30" /></label>
         <label class="lh-field"><span class="lh-label">Email</span><input name="email" type="email" class="fe-input" maxlength="254" /></label>
         <label class="lh-field"><span class="lh-label">Interested in</span><input name="concern" class="fe-input" maxlength="150" list="pr-concerns" placeholder="e.g. Wrinkle Relaxer, acne scars" />
@@ -543,7 +622,8 @@ async function mountProspect(container, id, staff) {
             ${p.email ? `<a class="pr-chip" href="mailto:${esc(p.email)}">${I(IC.mail)}${esc(p.email)}</a>` : ""}
             ${p.pref ? `<span class="pr-chip">Prefers ${esc(p.pref)}</span>` : ""}
             ${p.ageGroup ? `<span class="pr-chip">Age ${esc(p.ageGroup)}</span>` : ""}
-            ${p.patientId ? `<a class="pr-chip is-pt" href="#/patient/${enc(p.patientId)}">${I(IC.user)}${p.wasPatient ? "Existing patient" : "Patient"}: ${esc(p.patientName)}</a>` : ""}
+            ${p.patientId ? `<a class="pr-chip is-pt" href="#/patient/${enc(p.patientId)}">${I(IC.user)}${isPast(p) ? "Past patient" : "Patient"}: ${esc(p.patientName)}</a>` : ""}
+            ${onRecall(p) ? `<span class="pr-chip is-recall">${I(IC.clock)}On recall: ${esc(p.recall.category)}</span>` : ""}
             ${p.nextAppt ? `<span class="pr-chip">${I(IC.clock)}Next appointment ${esc(fullDay(p.nextAppt))}</span>` : ""}
             ${p.historic ? '<span class="pr-tag">Older</span>' : ""}
             
@@ -588,6 +668,7 @@ async function mountProspect(container, id, staff) {
           <section class="pr-sec"><h3>${I(IC.link)} Patient record</h3>
             ${p.patientId ? `<p><a href="#/patient/${enc(p.patientId)}"><strong>${esc(p.patientName)}</strong></a>${
                 p.wasPatient ? ' <span class="pr-tag is-pt">Already a patient when they enquired</span>' : ""}</p>
+              ${p.prev ? `<p class="muted pr-small">${esc(prevText(p.prev))}.</p>` : ""}
               ${p.linkWeak ? `<p class="pr-warnline">${I(IC.alert)} Matched by name only. Check it's the same person.</p>` : ""}
               ${work ? `<div class="pr-row">${p.linkWeak ? '<button type="button" class="lh-btn" data-act="confirmlink">Yes, that\'s them</button>' : ""}
                 <button type="button" class="lh-btn is-quiet" data-act="unlink">${p.linkWeak ? "Not them: unlink" : "Unlink"}</button></div>` : ""}`
@@ -596,6 +677,12 @@ async function mountProspect(container, id, staff) {
               ${work ? `<input type="search" class="fe-input" data-role="ptq" placeholder="Search the Patient List" value="${esc(p.name)}" />
                 <div class="pr-hits" data-role="hits"></div>` : ""}`}
           </section>
+          ${onRecall(p) ? `<section class="pr-sec pr-recall"><h3>${I(IC.clock)} Also on recall</h3>
+            <p><strong>${esc(p.recall.category)}</strong> · due ${esc(fullDay(p.recall.due))}${p.recall.status === "booked" ? " · booked" : ""}</p>
+            <p class="muted pr-small">${p.recall.with ? `With ${esc(p.recall.with)} on the recall team.` : "Not given to anyone on the recall team yet."}${
+              p.recall.more ? ` ${p.recall.more} more recall${p.recall.more === 1 ? "" : "s"} due.` : ""}
+              The recall team can see they enquired. Agree who's calling them, so they only hear from one of you.</p>
+            ${can("recall.work") || can("recall.manage") ? '<a class="lh-btn" href="#/recall">Open Recall</a>' : ""}</section>` : ""}
           ${p.patientId ? `<section class="pr-sec"><h3>${I(IC.flag)} Journey</h3>
             ${JOURNEY.some(([k]) => (p.milestones || {})[k]) || p.nextAppt || p.lastVisit || p.cancels ? `<dl class="pr-journey">
               ${JOURNEY.filter(([k]) => (p.milestones || {})[k]).map(([k, l]) =>
@@ -757,6 +844,7 @@ Dermedica</textarea></label>${followHtml(fuStart(p.nextFollowUp, addDays(todayKe
 
 const REP_RANGES = [["30", "Last 30 days"], ["90", "Last 3 months"], ["180", "Last 6 months"], ["365", "Last 12 months"],
   ["all", "All time"], ["custom", "Choose dates"]];
+const REP_KINDS = [["", "Everyone"], ["new", "New to the clinic"], ["past", "Past patients"], ["recall", "Also on recall"], ["booked", "Booked directly"]];
 const ORDER = ["new", "contacted", "consult_booked", "consulted", "tx_booked", "treated", "active"];
 const FUNNEL = ["Enquired", "Contacted", "Consultation booked", "Consulted", "Treatment booked", "Treated", "Active patient"];
 const SPEED = [["Within 1 hour", 1], ["1 to 4 hours", 4], ["4 to 24 hours", 24], ["1 to 3 days", 72], ["Over 3 days", Infinity]];
@@ -875,19 +963,19 @@ async function mountReports(container) {
   const today = todayKey();
   all.forEach((p) => { p._day = keyOf(p.createdAt); p._reach = reachOf(p); p._imp = wasImported(p); });
   const firstDay = all.map((p) => p._day).filter(Boolean).sort()[0] || today;
-  const sources = [...new Set(all.map((p) => p.source || "Other"))].sort();
+const SOURCES = ["Web form", "Phone call", "Walk-in", "Online chat", "Instagram", "Facebook", "Referral", "Booked directly", "Other"];
   const people = [...new Set(all.map((p) => p.assignedToName).filter(Boolean))].sort();
-  const st = { range: "90", from: "", to: "", source: "", who: "", newOnly: false };
+  const st = { range: "90", from: "", to: "", source: "", who: "", kind: "" };
 
   const span = () => (st.range === "custom" ? [st.from || firstDay, st.to || today]
     : st.range === "all" ? [firstDay, today] : [addDays(today, -(Number(st.range) - 1)), today]);
   const keep = (p) => (!st.source || (p.source || "Other") === st.source)
     && (!st.who || (st.who === "-" ? !p.assignedToName : p.assignedToName === st.who))
-    && (!st.newOnly || p.wasPatient !== true);
+        && showOf(st.kind)(p, set);
   const cohort = (a, b) => all.filter((p) => p._day && p._day >= a && p._day <= b && keep(p));
 
   function stats(list) {
-    const live = list.filter((p) => !p._imp);
+    const live = list.filter((p) => !p._imp && !p.fromBook);
     const hrs = live.map(hoursToContact).filter((h) => h != null && h >= 0);
     return {
       n: list.length,
@@ -896,7 +984,7 @@ async function mountReports(container) {
       active: list.filter((p) => p._reach >= 6).length,
       lost: list.filter((p) => p.stage === "lost").length,
       live: live.length, hrs: median(hrs), fast: hrs.filter((h) => h <= hoursOf(set)).length,
-      appt: median(list.map(daysToAppt).filter((d) => d != null)),
+      appt: median(list.filter((p) => !p.fromBook).map(daysToAppt).filter((d) => d != null)),
       everBooked: list.filter((p) => p._reach >= 2 || Number(p.cancels) > 0).length,
       cancelled: list.filter((p) => Number(p.cancels) > 0).length,
       cancelOpen: list.filter((p) => p.cancelOpen === true).length,
@@ -943,7 +1031,7 @@ async function mountReports(container) {
       return { label: x.name, n: l.length, tone: x.tone, text: `${l.length}${stuck ? ` <small class="is-warn">${stuck} over 14 days</small>` : ""}` };
     });
 
-    const live = list.filter((p) => !p._imp);
+    const live = list.filter((p) => !p._imp && !p.fromBook);
     const speed = SPEED.map(([label, max], i) => ({
       label, n: live.filter((p) => { const h = hoursToContact(p); return h != null && h >= 0 && h <= max && (i === 0 || h > SPEED[i - 1][1]); }).length,
     })).concat([{ label: "No contact logged", n: live.filter((p) => hoursToContact(p) == null).length, tone: "slate" }]);
@@ -960,7 +1048,7 @@ async function mountReports(container) {
       <td data-label="Lost">${rate(x.lost, x.n)}%</td><td data-label="Days to 1st appointment">${x.appt == null ? "–" : Math.round(x.appt)}</td></tr>`; }).join("");
     const teamRows = groupBy(list, (p) => p.assignedToName || "Nobody yet").map(({ k, l }) => {
       const x = stats(l);
-      const lv = l.filter((p) => !p._imp);
+      const lv = l.filter((p) => !p._imp && !p.fromBook);
       return `<tr><td data-label="Team member"><strong>${esc(k)}</strong></td><td data-label="Prospects">${x.n}</td>
         <td data-label="Contacted">${lv.length ? cellBar(rate(lv.filter((p) => Number(p.contacts) > 0).length, lv.length)) : "–"}</td>
         <td data-label="First contact">${hrsText(x.hrs)}</td>
@@ -983,7 +1071,7 @@ async function mountReports(container) {
         <select class="fe-input" data-r="source" aria-label="Source"><option value="">All sources</option>${optsR(sources.map((x) => [x, x]), st.source)}</select>
         <select class="fe-input" data-r="who" aria-label="Team member"><option value="">Everyone</option>
           <option value="-"${st.who === "-" ? " selected" : ""}>Nobody yet</option>${optsR(people.map((x) => [x, x]), st.who)}</select>
-        <label class="fe-check"><input type="checkbox" data-r="newOnly"${st.newOnly ? " checked" : ""} /> Leave out people who were already patients</label>
+        <select class="fe-input" data-r="kind" aria-label="Who">${optsR(REP_KINDS, st.kind)}</select>
       </div>
       <div class="pr-kpis">
         ${kpi("Enquiries", s.n, `${s.live} since the dashboard started`, delta(s.n, ps && ps.n, "%"))}
@@ -1013,7 +1101,7 @@ async function mountReports(container) {
           <th>Team member</th><th>Prospects</th><th>Contacted</th><th>First contact</th><th>Booked a consult</th><th>Became patients</th><th>Lost</th>
           </tr></thead><tbody>${teamRows}</tbody></table></div>` : '<p class="muted">Nothing in this period.</p>'}</section>
         <section class="pr-panel"><h3>How quickly they're contacted</h3>${hbars(speed.filter((x) => x.n), "No enquiries since the dashboard started.")}
-          <p class="pr-note">Enquiries since the dashboard started, from the first call, text or email logged.</p></section>
+          <p class="pr-note">Enquiries since the dashboard started, from the first call, text or email logged. Booked directly isn't counted: they booked themselves.</p></section>
         <section class="pr-panel"><h3>Why they were lost</h3>${hbars(lost, "Nobody lost in this period. 👍")}</section>
         <section class="pr-panel"><h3>Booked, then cancelled</h3>${hbars([
           { label: "Cancelled, then rebooked", n: list.filter((p) => Number(p.cancels) > 0 && !p.cancelOpen).length, tone: "green" },
@@ -1037,11 +1125,14 @@ async function mountReports(container) {
     const [a, b] = span();
     const list = cohort(a, b);
     const head = ["Name", "Enquired", "Source", "Interested in", "Stage", "Given to", "Contacts", "First contact",
-      "First appointment", "First treatment", "Active from", "Lost reason", "Cancelled", "Already a patient"];
+      "First appointment", "First treatment", "Active from", "Lost reason", "Cancelled", "Already a patient",
+      "Past patient", "On recall"];
     const rows = list.map((p) => { const m = p.milestones || {}; return [p.name, p._day, p.source, p.concern, stageOf(p.stage).name,
       p.assignedToName, p.contacts || 0, p.firstContactAt ? keyOf(p.firstContactAt) : "", m.consult_booked || "", m.treated || "",
       m.active || "", p.lostReason || "", p.cancels ? `${p.cancels}${p.cancelOpen ? " (not rebooked)" : ""}` : "",
-      p.wasPatient ? "Yes" : p.patientId ? "No" : ""]; });
+      p.wasPatient ? "Yes" : p.patientId ? "No" : "",
+      p.prev ? `Yes, last visit ${p.prev.last}` : "",
+      p.recall ? `${p.recall.category} (due ${p.recall.due})` : ""]; });
     const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
     const blob = new Blob(["\ufeff" + [head, ...rows].map((r) => r.map(q).join(",")).join("\r\n")], { type: "text/csv" });
     const link = document.createElement("a");

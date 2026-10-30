@@ -16908,7 +16908,7 @@ const PROS_STAGE_NAME_ = {
   new: 'New enquiry', contacted: 'Contacted', consult_booked: 'Consultation booked', consulted: 'Consulted',
   tx_booked: 'Treatment booked', treated: 'Treated', active: 'Active patient', lost: 'Lost',
 };
-const PROS_SOURCES_ = ['Web form', 'Phone call', 'Walk-in', 'Online chat', 'Instagram', 'Facebook', 'Referral', 'Other'];
+const PROS_SOURCES_ = ['Web form', 'Phone call', 'Walk-in', 'Online chat', 'Instagram', 'Facebook', 'Referral', 'Booked directly', 'Other'];
 const PROS_LOST_ = ['Too expensive', 'Went elsewhere', 'No response', 'Not suitable', 'Just browsing', 'Other'];
 const PROS_OUTCOMES_ = { spoke: 'Spoke to them', no_answer: 'No answer', voicemail: 'Left voicemail', met: 'Met in clinic', note: 'Note' };
 
@@ -17098,6 +17098,25 @@ function prosShareTo_(cfg, set) {
   return team.sort(function (a, b) { return load[a.id] - load[b.id] || String(a.name).localeCompare(String(b.name)); })[0];
 }
 
+// Their visits before they enquired, from the pre-consult list (one read, so it's quick enough at import)
+function prosPrevFromPcn_(cfg, pttId, beforeKey) {
+  const key = docId_(pttId);
+  if (!key) return null;
+  let pre = null;
+  try { pre = fsGetDoc_(cfg, 'pcn_results/' + encodeURIComponent(key)); } catch (e) { return null; }
+  if (!pre) return null;
+  const v = planVisits_(pre, [], beforeKey).filter(function (x) { return x.dateKey < beforeKey; });
+  if (!v.length) return null;
+  const last = v[v.length - 1];
+  return { count: v.length, last: last.dateKey, svcs: last.services.slice(0, 3), staff: '' };
+}
+
+function prosPrevText_(prev) {
+  return 'Past patient: ' + prev.count + ' visit' + (prev.count === 1 ? '' : 's') + ' before they enquired, last on ' +
+    recLongDate_(prev.last) + (prev.svcs && prev.svcs.length ? ' (' + prev.svcs.join(', ') + ')' : '');
+}
+
+
 /* ---------- Adding an enquiry (a new prospect, or another enquiry from someone already here) ---------- */
 // f: { name, phone, email, pref, age, concern, message, source, at, gmailId, link, assignTo, spoke, followUp, followNote }
 
@@ -17150,6 +17169,9 @@ function prosAddEnquiry_(cfg, set, f, session, forceNew) {
     log.push({ at: now, by: 'Prospects', byUid: '', kind: 'link',
       what: 'Already a patient: ' + pt.patientName + ' (same ' + pt.how + ')', note: '' });
   }
+  const prev = pt.patientId ? prosPrevFromPcn_(cfg, pt.pttId, flowKey_(Date.parse(at) || Date.now())) : null;
+  if (prev) log.push({ at: now, by: 'Prospects', byUid: '', kind: 'link', what: prosPrevText_(prev), note: '' });
+
   if (to) log.push({ at: now, by: session ? who : 'Prospects', byUid: uid, kind: 'assign', what: 'Given to ' + to.name, note: '' });
   if (f.quiet) log.push({ at: now, by: 'Prospects', byUid: '', kind: 'edit', what: 'Imported from older emails', note: '' });
 
@@ -17163,6 +17185,7 @@ function prosAddEnquiry_(cfg, set, f, session, forceNew) {
     nextFollowUp: '', followNote: '',
     patientId: pt.patientId || '', pttId: pt.pttId || '', patientName: pt.patientName || '', patientMany: pt.many || 0,
     linkWeak: pt.how === 'name',
+    prev: prev, wasPatient: !!prev,
     enquiries: [enq], enquiryCount: 1, lastEnquiryAt: at, waitingSince: f.quiet ? '' : at,
     contacts: 0, firstContactAt: '', lastContactAt: '',
     createdAt: at, createdBy: who, createdByUid: uid, updatedAt: now,
@@ -17180,7 +17203,7 @@ function prosAddEnquiry_(cfg, set, f, session, forceNew) {
   }
   p.log = log;
   commitWrites_(cfg, [updateWrite_(cfg, PROS_COL_ + '/' + id, p)]);
-  return { id: id, again: false, name: p.name, assignedToId: p.assignedToId, concern: p.concern, message: p.message, p: p };
+  return { id: id, again: false, name: p.name, assignedToId: p.assignedToId, concern: p.concern, message: p.message, p: p, prev: prev };
 }
 
 
@@ -17191,7 +17214,8 @@ function prosNotify_(cfg, set, r, f) {
     const to = uniq_(getStaffDocs_().filter(function (s) { return ids.indexOf(s.id) !== -1 && s.active !== false && isEmail_(s.email); })
       .map(function (s) { return s.email; }));
     if (!to.length || MailApp.getRemainingDailyQuota() < 5) return;
-    const rows = [['Mobile', f.phone], ['Email', f.email], ['Prefers', prosPref_(f.pref)], ['Age group', f.age], ['Interested in', r.concern]]
+    const rows = [['Past patient', r.prev ? 'Yes, last visit ' + recLongDate_(r.prev.last) + (r.prev.svcs.length ? ' (' + r.prev.svcs.join(', ') + ')' : '') : ''],
+      ['Mobile', f.phone], ['Email', f.email], ['Prefers', prosPref_(f.pref)], ['Age group', f.age], ['Interested in', r.concern]]
       .filter(function (x) { return x[1]; })
       .map(function (x) { return '<tr><td style="padding:2px 12px 2px 0;color:#64748b">' + x[0] + '</td><td>' + invEsc_(x[1]) + '</td></tr>'; }).join('');
     const html = invEmailWrap_(
@@ -17756,16 +17780,16 @@ function prosStageNote_(days, b) {
   return (what || 'appointment') + (v.staff ? ' with ' + v.staff : '') + ' on ' + when;
 }
 
-function prosStagesCheck_(cfg, ctx) {
+function prosStagesCheck_(cfg, ctx, ixIn) {
   const t0 = Date.now();
   const today = ctx.todayKey;
   const now = new Date().toISOString();
-  const ix = prosPatientIndex_(cfg);
+  const ix = ixIn || prosPatientIndex_(cfg);
   const list = fsListAll_(cfg, PROS_COL_, ['name', 'stage', 'stageAt', 'createdAt', 'patientId', 'phoneKey', 'emailKey',
     'historic', 'milestones', 'nextAppt', 'lastVisit', 'patientMany', 'linkWeak', 'noAutoLink', 'wasPatient',
-    'cancels', 'cancelOpen', 'lastCancel', 'nextFollowUp'])
+    'cancels', 'cancelOpen', 'lastCancel', 'nextFollowUp','prev', 'recall', 'lastEnquiryAt', 'fromBook'])
     .map(function (d) { const f = fromFields_(d.fields || {}); f._id = d.name.split('/').pop(); return f; });
-  const sum = { prospects: list.length, linked: 0, byNameOnly: 0, moved: 0, revived: 0, backOnBoard: 0, cancelled: 0, written: 0 };
+  const sum = { prospects: list.length, linked: 0, byNameOnly: 0, moved: 0, revived: 0, backOnBoard: 0, cancelled: 0, recallTold: 0, written: 0 };
 
   // 1. Who each prospect is (never linked again by itself once staff have unlinked it)
   const links = {};
@@ -17786,6 +17810,14 @@ function prosStagesCheck_(cfg, ctx) {
   // 2. Their visits, and the stage they show
   const cancels = Object.create(null);
   const visits = prosVisits_(ctx, ix, want, cancels);
+  // Open recall cards, by patient
+  const recalls = Object.create(null);
+  fsQuery_(cfg, RECALL_COL_, 'status', 'IN', ['open', 'booked'], 10000).forEach(function (c) {
+    if (c.patientId) (recalls[c.patientId] = recalls[c.patientId] || []).push(c);
+  });
+  const recallBusy = !!CacheService.getScriptCache().get('recall_run');
+  const recentIso = new Date(Date.now() - 90 * 864e5).toISOString();
+  const recallWrites = [];
   const order = PROS_OPEN_.concat(['active']);
   const cache = CacheService.getScriptCache();
   const writes = [];
@@ -17814,9 +17846,39 @@ function prosStagesCheck_(cfg, ctx) {
       const b = prosBookStage_(days, from, today);
       const was = Object.keys(days || {}).some(function (k) { return k < from; });   // in before they enquired
       if (was !== (p.wasPatient === true)) patch.wasPatient = was;
+
+      // What they had before they enquired
+      const before = Object.keys(days || {}).filter(function (k) { return k < from; }).sort();
+      const lastB = before[before.length - 1];
+      const prev = lastB ? { count: before.length, last: lastB, svcs: days[lastB].svcs, staff: days[lastB].staff } : null;
+      if (JSON.stringify(prev) !== JSON.stringify(p.prev || null)) {
+        patch.prev = prev;
+        if (prev && !p.prev && p.historic !== true) entries.push({ kind: 'link', what: prosPrevText_(prev) });
+      }
+
+      // Their recall card (most overdue first), and a note on it for the recall team (once per prospect)
+      const rc = (recalls[p._pid] || []).slice().sort(function (a, b) { return String(a.dueDate).localeCompare(String(b.dueDate)); });
+      const rl = rc.length ? { id: rc[0]._id, category: String(rc[0].category || ''), due: String(rc[0].dueDate || ''),
+        status: String(rc[0].status || ''), with: String(rc[0].assignedToName || ''), more: rc.length - 1 } : null;
+      if (JSON.stringify(rl) !== JSON.stringify(p.recall || null)) patch.recall = rl;
+      const live = PROS_OPEN_.indexOf(String(patch.stage || p.stage || 'new')) !== -1 && p.fromBook !== true &&
+        String(p.lastEnquiryAt || p.createdAt || '') >= recentIso;
+      if (live && !recallBusy) {
+        rc.forEach(function (c) {
+          if (c.status !== 'open' || c.prospectId === p._id) return;
+          const rw = patchWrite_(cfg, RECALL_COL_ + '/' + c._id, { prospectId: p._id, prospectAt: now });
+          rw.updateTransforms = [{ fieldPath: 'log', appendMissingElements: { values: [toValue_({
+            at: now, by: 'Prospects', byUid: '', kind: 'auto',
+            what: 'They also enquired (' + (p.name || 'prospect') + '). Check the Prospect Dashboard before calling.', note: '' })] } }];
+          recallWrites.push(rw);
+          sum.recallTold++;
+        });
+      }
+
       if (JSON.stringify(b.ms) !== JSON.stringify(p.milestones || {})) patch.milestones = b.ms;
       if (b.next !== String(p.nextAppt || '')) patch.nextAppt = b.next;
       if (b.last !== String(p.lastVisit || '')) patch.lastVisit = b.last;
+
       if (b.stage) {
         let move = false;
         let revive = false;
@@ -17840,7 +17902,9 @@ function prosStagesCheck_(cfg, ctx) {
             sum.backOnBoard++;
           }
         }
-      // Booked, then cancelled or didn't come
+      }
+
+      // Booked, then cancelled or didn't come (checked even when they've had no visits)
       const cx = cancels[p._pid] || {};
       const ck = Object.keys(cx).filter(function (k) { return k >= from; }).sort();
       const lastC = ck[ck.length - 1] || '';
@@ -17859,8 +17923,10 @@ function prosStagesCheck_(cfg, ctx) {
           Object.assign(patch, { nextFollowUp: today,
             followNote: (lc.kind === 'noshow' ? "Didn't come" : 'Cancelled') + ' on ' + recLongDate_(lastC) + ': call to rebook' });
         }
-        }
       }
+    } else if (p.prev || p.wasPatient || p.recall) {
+      // No longer linked to a patient: their past-patient and recall details go too
+      Object.assign(patch, { prev: null, wasPatient: false, recall: null });
     }
 
     if (!Object.keys(patch).length) return;
@@ -17875,6 +17941,7 @@ function prosStagesCheck_(cfg, ctx) {
     writes.push(w);
   });
   if (writes.length) commitWrites_(cfg, writes, 200);
+  if (recallWrites.length) commitWrites_(cfg, recallWrites, 200);
   sum.written = writes.length;
   sum.ms = Date.now() - t0;
   return sum;
@@ -17897,7 +17964,10 @@ function prosStagesRun_(force) {
     const props = PropertiesService.getScriptProperties();
     const sig = ctx.todayKey + '|' + synced;
     if (!force && props.getProperty('PROS_STAGE_SIG') === sig) return { quick: true };
-    const res = prosStagesCheck_(cfg, ctx);
+    const ix = prosPatientIndex_(cfg);
+    const book = prosFromBook_(cfg, ctx, ix, false);
+    const res = prosStagesCheck_(cfg, ctx, ix);
+    res.fromBook = book.made;
     props.setProperty('PROS_STAGE_SIG', sig);
     return res;
   } finally {
@@ -17918,6 +17988,31 @@ function prospectStagesNow() {
   console.log('Prospect stages: ' + JSON.stringify(prosStagesRun_(true)));
 }
 
+// Run from the editor: checks stages now, even while the older enquiries are still importing.
+// (prospectStagesNow waits for that import to finish.)
+function prospectStagesEvenWhileImporting() {
+  const cache = CacheService.getScriptCache();
+  if (cache.get('up_ds_active') || cache.get('pcn_run_active')) {
+    console.log('A Day Sheet upload or PCN update is running. Try again when it has finished.');
+    return;
+  }
+  if (cache.get('pros_stage_run')) { console.log('A stage check is already running. Try again in a minute.'); return; }
+  cache.put('pros_stage_run', '1', 600);
+  try {
+    const cfg = getConfig_();
+    const ctx = pcnCtx_();
+    const ix = prosPatientIndex_(cfg);
+    const book = prosFromBook_(cfg, ctx, ix, false);
+    const res = prosStagesCheck_(cfg, ctx, ix);
+    res.fromBook = book.made;
+    // PROS_STAGE_SIG is left alone on purpose: once the import finishes, the hourly check runs
+    // again and picks up the prospects imported since.
+    console.log('Prospect stages: ' + JSON.stringify(res));
+  } finally {
+    cache.remove('pros_stage_run');
+  }
+}
+
 // Run ONCE from the editor: checks every hour, and does the first check now
 function installProspectStages() {
   ScriptApp.getProjectTriggers()
@@ -17925,6 +18020,115 @@ function installProspectStages() {
     .forEach(function (t) { ScriptApp.deleteTrigger(t); });
   ScriptApp.newTrigger('runProspectStages').timeBased().everyHours(1).create();
   prospectStagesNow();
+}
+
+// ===================== Prospects: new patients who booked a consultation directly =====================
+// A patient whose first booking is a consultation (no visit before it) is added as a prospect, unless one
+// already matches them. Runs with the stage check, after each PCN update and once a day.
+
+const PROS_BOOK_SOURCE_ = 'Booked directly';
+const PROS_BOOK_FROM_ = '2024-01-01';   // consultations from this date (the first run adds the past ones)
+
+function prosFromBook_(cfg, ctx, ix, dryRun) {
+  const today = ctx.todayKey;
+  const from = PROS_BOOK_FROM_;
+
+  // 1. Each patient's first visit, and their first consultation booking (any status)
+  const per = Object.create(null);
+  const keyOf = Object.create(null);
+  pcnReadAppts_(ctx).forEach(function (r) {
+    if (!pcnIsDate_(r[0])) return;
+    const ptt = String(r[14] == null ? '' : r[14]).trim();
+    if (!ptt) return;
+    if (!(ptt in keyOf)) keyOf[ptt] = ix.find(ptt);
+    const pid = keyOf[ptt];
+    if (!pid) return;
+    const svc = String(r[9] == null ? '' : r[9]).trim();
+    const cat = String(r[13] == null ? '' : r[13]).trim();
+    const dk = Utilities.formatDate(r[0], ctx.tz, 'yyyy-MM-dd');
+    const x = per[pid] || (per[pid] = { came: '', consult: '', svcs: [], staff: '' });
+    if (pcnStatusOk_(r[7], 'full') && !REP_NOT_VISIT_.test(svc) && (!x.came || dk < x.came)) x.came = dk;
+    if (!(cat === 'Consultation New Patient' || PROS_CONSULT_RE_.test(svc))) return;
+    if (!x.consult || dk < x.consult) { x.consult = dk; x.svcs = []; x.staff = ''; }
+    if (dk !== x.consult) return;
+    if (svc && x.svcs.length < 3 && x.svcs.indexOf(svc) === -1) x.svcs.push(svc);
+    const st = String(r[8] == null ? '' : r[8]).trim();
+    if (!x.staff && st && !SCHED_NOT_PERSON_.test(st)) x.staff = st;
+  });
+
+  // 2. Prospects already in the portal
+  const ids = {};
+  const byPid = {};
+  const byKey = {};
+  const put = function (k, p) { (byKey[k] = byKey[k] || []).push(p); };
+  fsListAll_(cfg, PROS_COL_, ['name', 'patientId', 'phoneKey', 'emailKey']).forEach(function (d) {
+    const p = fromFields_(d.fields || {});
+    ids[d.name.split('/').pop()] = true;
+    if (p.patientId) byPid[ix.kept(String(p.patientId)) || String(p.patientId)] = true;
+    if (p.phoneKey) put('ph:' + p.phoneKey, p);
+    if (p.emailKey) put('em:' + p.emailKey, p);
+    const nk = ptClean_(p.name);
+    if (nk) put('nm:' + nk, p);
+  });
+
+  // 3. New patients whose first booking is a consultation, not already a prospect
+  const now = new Date().toISOString();
+  const oldKey = flowAddDaysKey_(today, -90);
+  const writes = [];
+  const sample = [];
+  let past = 0;
+  let future = 0;
+  Object.keys(per).forEach(function (pid) {
+    const x = per[pid];
+    if (!x.consult || x.consult < from || (x.came && x.came < x.consult)) return;
+    if (byPid[pid]) return;
+    const id = 'pr_bk' + flowHash_(pid);
+    if (ids[id]) return;   // made before (and since unlinked by staff)
+    const d = ix.doc(pid);
+    if (!d) return;
+    const w = flowWho_(d);
+    const email = mktEmail_(d.Email);
+    const keys = prosSearchKeys_(w.name, d.Mobile, isEmail_(email) ? email : '');
+    const same = function (k) {
+      return (byKey[k] || []).some(function (p) { return prosSameName_(p.name, w.name); });
+    };
+    if ((keys.phoneKey && same('ph:' + keys.phoneKey)) || (keys.emailKey && same('em:' + keys.emailKey)) ||
+        (keys.nameKey && same('nm:' + ptClean_(w.name)))) return;
+
+    const isPast = x.consult < today;
+    if (isPast) past++; else future++;
+    const at = isPast ? new Date(x.consult + 'T12:00:00+08:00').toISOString() : now;
+    const what = x.svcs.join(', ') || 'Consultation';
+    if (sample.length < 20) sample.push(w.name + ' · ' + x.consult + ' · ' + what + (x.staff ? ' with ' + x.staff : ''));
+    if (dryRun) return;
+
+    writes.push(updateWrite_(cfg, PROS_COL_ + '/' + id, Object.assign({
+      name: w.name || 'No name', firstName: (w.name || '').split(' ')[0],
+      phone: String(d.Mobile || ''), email: keys.emailKey, pref: '', ageGroup: '',
+      concern: what.slice(0, 150), message: '', source: PROS_BOOK_SOURCE_, fromBook: true,
+      historic: x.consult < oldKey,
+      stage: 'new', stageAt: at, lostReason: '', lostNote: '',
+      assignedToId: '', assignedToName: '', nextFollowUp: '', followNote: '',
+      patientId: pid, pttId: String(d.PttID || pid), patientName: w.name, patientMany: 0, linkWeak: false,
+      enquiries: [{ at: at, source: PROS_BOOK_SOURCE_, concern: what.slice(0, 150), message: '', gmailId: '', link: '', by: PROS_AUTO_ }],
+      enquiryCount: 1, lastEnquiryAt: at, waitingSince: '',
+      contacts: 0, firstContactAt: '', lastContactAt: '',
+      createdAt: at, createdBy: PROS_AUTO_, createdByUid: '', updatedAt: now,
+      log: [{ at: at, by: PROS_AUTO_, byUid: '', kind: 'enquiry',
+        what: 'Booked a consultation directly: ' + what + ' on ' + recLongDate_(x.consult) + (x.staff ? ' with ' + x.staff : ''), note: '' }],
+    }, keys)));
+  });
+  if (writes.length) commitWrites_(cfg, writes, 100);
+  return { made: dryRun ? 0 : writes.length, found: past + future, past: past, future: future, from: from, sample: sample };
+}
+
+// Run from the editor first: shows who would be added (nothing is saved)
+function prospectBookPreview() {
+  const cfg = getConfig_();
+  const r = prosFromBook_(cfg, pcnCtx_(), prosPatientIndex_(cfg), true);
+  console.log('Consultations from ' + r.from + ': ' + r.found + ' new patient(s) would be added (' +
+    r.past + ' already been in, ' + r.future + ' still to come).');
+  r.sample.forEach(function (s) { console.log('  ' + s); });
 }
 
 // A filed scan gets a name that says what it is:
