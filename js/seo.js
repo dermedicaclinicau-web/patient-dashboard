@@ -325,6 +325,15 @@ const CSS = `
 .seo-movers .seo-path small{display:block;font-size:11.5px;color:var(--text-muted,#6b7280);overflow:hidden;text-overflow:ellipsis}
 .seo-mv-n{white-space:nowrap}
 .seo-card h3 small{font-weight:400;margin-left:4px}
+.seo-wc{background:#fbfdff}
+.seo-wc-list{list-style:none;margin:0;padding:0;font-size:13.5px;line-height:1.5}
+.seo-wc-list li{position:relative;padding:6px 0 6px 22px;border-top:1px solid var(--border,#e5e7eb)}
+.seo-wc-list li:first-child{border-top:0}
+.seo-wc-list li::before{position:absolute;left:3px;top:7px;font-size:11px;font-weight:700}
+.seo-wc-list li.is-up::before{content:"▲";color:#16a34a}
+.seo-wc-list li.is-down::before{content:"▼";color:#dc2626}
+.seo-wc-list li.is-flat::before{content:"•";color:#94a3b8}
+.seo-wc-list li.is-note::before{content:"✎";color:#d97706}
 .seo-chart svg{width:100%;height:auto;display:block}
 .seo-chart text,.seo-bars text{font-size:11px;fill:var(--text-muted,#6b7280)}
 .seo-grid{stroke:var(--border,#e5e7eb);stroke-width:1}
@@ -565,6 +574,71 @@ export async function mountSeo(el, opts = {}) {
     const moveRange = !hasDaily ? "last 28 days vs the 28 before"
       : `${fmtDate(r.from, false)} – ${fmtDate(r.to)}${prev ? ` vs ${fmtDate(cmp.from, false)} – ${fmtDate(cmp.to)}` : ""}`;
 
+    // "What changed": a few plain sentences about what moved, worked out from the numbers on this page
+    const changedHtml = (() => {
+      if (!prev) return "";
+      const pct = (a, b) => (b ? Math.round(((a - b) / b) * 100) : null);
+      const signed = (n) => (n > 0 ? "+" : n < 0 ? "−" : "") + fmtInt(Math.abs(n));
+      const shortT = (s) => (s.length > 40 ? s.slice(0, 39) + "…" : s);
+      const lines = [];
+
+      // 1. Clicks, and the pages behind the change (only when the page lists match these dates)
+      const dc = cur.clicks - prev.clicks, pc = pct(cur.clicks, prev.clicks);
+      const dir = dc > 0 ? "up" : dc < 0 ? "down" : "flat";
+      const driversOk = hasDaily || (ui.preset === "28" && ui.compare === "prev");
+      const drivers = driversOk && dir !== "flat" ? (dc > 0 ? winners : losers).slice(0, 2) : [];
+      const name = (m) => `<button class="seo-w-link" type="button" data-open="${esc(m.p.id)}">${esc(shortT(titleOf(work, data, m.p.path)))}</button> (${signed(m.now - m.was)})`;
+      lines.push([dir, `Clicks ${dir === "flat" ? "held steady" : `${dir} ${Math.abs(pc ?? 0)}%`} (${fmtInt(cur.clicks)} vs ${fmtInt(prev.clicks)})${
+        drivers.length ? `, mostly ${drivers.map(name).join(" and ")}` : ""}.`]);
+
+      // 2. Brand searches (people who already know the clinic) or treatment searches (SEO)
+      if (hasBrand && prev.nonBrand != null && dc !== 0) {
+        const db = cur.brandClicks - prev.brandClicks, dn = cur.nonBrand - prev.nonBrand;
+        const tot = Math.abs(db) + Math.abs(dn);
+        if (tot >= 5) {
+          const share = Math.abs(db) / tot;
+          if (share >= 0.6) lines.push([db >= 0 ? "up" : "down", `Most of that is brand searches, people looking for the clinic by name (${signed(db)}). Treatment searches: ${signed(dn)}.`]);
+          else if (share <= 0.4) lines.push([dn >= 0 ? "up" : "down", `Most of that is treatment searches (${signed(dn)}), so it's coming from SEO rather than people who already know the clinic. Brand searches: ${signed(db)}.`]);
+        }
+      }
+
+      // 3. Seen more or less often, and whether people clicked
+      const pi = pct(cur.impressions, prev.impressions);
+      if (pi != null && Math.abs(pi) >= 15) {
+        const ctrDown = cur.ctr < prev.ctr * 0.85, ctrUp = cur.ctr > prev.ctr * 1.15;
+        lines.push([pi > 0 ? "up" : "down", `Seen ${pi > 0 ? "more" : "less"} often in Google (impressions ${pi > 0 ? "+" : "−"}${Math.abs(pi)}%)${
+          ctrDown ? `, but a smaller share clicked (CTR ${fmtPct(prev.ctr)} → ${fmtPct(cur.ctr)}). That usually means showing for new searches where the site ranks lower.`
+          : ctrUp ? `, and a bigger share clicked (CTR ${fmtPct(prev.ctr)} → ${fmtPct(cur.ctr)}).` : "."}`]);
+      }
+
+      // 4. Average position, when it moved a full place or more
+      if (cur.position != null && prev.position != null && Math.abs(cur.position - prev.position) >= 1) {
+        const better = cur.position < prev.position;
+        lines.push([better ? "up" : "down", `Average position ${better ? "improved" : "slipped"} from ${fmtPos(prev.position)} to ${fmtPos(cur.position)}.`]);
+      }
+
+      // 5. Bookings and enquiries from Google visitors (GA4 key events)
+      const pk = pct(cur.conversions, prev.conversions);
+      if (pk != null && Math.abs(pk) >= 25 && Math.abs(cur.conversions - prev.conversions) >= 5) {
+        lines.push([pk > 0 ? "up" : "down", `Key events from Google visitors (bookings and enquiries tracked in GA4) ${pk > 0 ? "rose" : "fell"} ${Math.abs(pk)}%: ${fmtInt(cur.conversions)} vs ${fmtInt(prev.conversions)}.`]);
+      }
+
+      // 6. Changes logged in these dates (including tasks the website check finished)
+      const logged = (work?.log || []).filter((e) => e.date >= r.from && e.date <= r.to);
+      if (logged.length) {
+        const tasks = logged.filter((e) => e.taskId).length;
+        lines.push(["note", `${logged.length} change${logged.length === 1 ? "" : "s"} logged in these dates${
+          tasks ? `, including ${tasks} task${tasks === 1 ? "" : "s"} confirmed on the website` : ""}. <button class="seo-w-link" type="button" data-tab="log">See the Change log</button>`]);
+      }
+
+      return `<div class="seo-card seo-wc">
+        <div class="seo-row" style="margin:0 0 4px"><h3 style="margin:0">What changed</h3>
+          <span class="seo-note">${esc(fmtDate(r.from, false))} – ${esc(fmtDate(r.to))} vs ${esc(cmp.name.toLowerCase())}</span></div>
+        <ul class="seo-wc-list">${lines.slice(0, 6).map(([d, t]) => `<li class="is-${d}">${t}</li>`).join("")}</ul>
+        ${fresh ? `<p class="seo-note" style="margin:6px 0 0">The last ${fresh} day${fresh === 1 ? "" : "s"} may still change while Search Console settles.</p>` : ""}
+      </div>`;
+    })();
+
     return `
       <div class="seo-row seo-range">
         ${PRESETS.map(([k, l]) => `<button class="seo-btn ${ui.preset === k ? "on" : ""}" data-preset="${k}">${l}</button>`).join("")}
@@ -582,6 +656,7 @@ export async function mountSeo(el, opts = {}) {
       </div>
       ${fresh ? `<p class="seo-note" style="margin:-4px 0 12px">The last ${fresh} day${fresh === 1 ? "" : "s"} may still change: Search Console takes about 3 days to settle. They're shaded on the chart.</p>` : ""}
       <div class="seo-kpis">${kpis}</div>
+      ${changedHtml}
       ${priorityCardHtml(ctx(), prc)}
       <div class="seo-card">
         <div class="seo-row">
