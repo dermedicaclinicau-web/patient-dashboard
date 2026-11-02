@@ -1542,12 +1542,23 @@ match /inv_count_drafts/{id} {
         && request.resource.data.steps is map
         && request.resource.data.order is list && request.resource.data.order.size() <= 60;
       allow update: if seoTeam()
-        && request.resource.data.status == resource.data.status
         && request.resource.data.path == resource.data.path
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-             'steps', 'order', 'title', 'group', 'gain', 'updatedAt',
-             'skipUntil', 'skipNote', 'skipBy', 'skipByName', 'skipAt'])
-        && request.resource.data.order.size() <= 60;
+        && (
+          (request.resource.data.status == resource.data.status
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                 'steps', 'order', 'title', 'group', 'gain', 'updatedAt',
+                 'skipUntil', 'skipNote', 'skipBy', 'skipByName', 'skipAt'])
+            && request.resource.data.order.size() <= 60)
+          // AI suggestions can be dismissed, with a reason and who did it
+          || (resource.data.get('source', '') == 'ai'
+            && resource.data.status == 'open'
+            && request.resource.data.status == 'dismissed'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                 'status', 'dismissNote', 'dismissBy', 'dismissByName', 'dismissAt', 'updatedAt'])
+            && request.resource.data.dismissNote is string
+            && request.resource.data.dismissNote.size() >= 3 && request.resource.data.dismissNote.size() <= 300
+            && request.resource.data.dismissBy == request.auth.uid)
+        );
       allow delete: if false;
     }
 
@@ -1573,12 +1584,16 @@ match /inv_count_drafts/{id} {
       allow read: if can('menu.seo');
       allow create: if seoTeam()
         && request.resource.data.keys().hasOnly(['taskId','path','taskTitle','stepId','text','note','action','by','byName','role','day','at'])
-        && request.resource.data.action in ['tick', 'done', 'untick', 'skip', 'unskip', 'add', 'plan']
+        && request.resource.data.action in ['tick', 'done', 'untick', 'skip', 'unskip', 'add', 'plan', 'dismiss']
         && request.resource.data.by == request.auth.uid
         && request.resource.data.at == request.time
         && request.resource.data.note is string && request.resource.data.note.size() <= 500;
       allow update, delete: if false;
     }
+    
+    // AI suggestions: each night's run (what was added and what was dropped, with reasons). Apps Script only.
+    match /seo_ai_runs/{id}  { allow read: if can('menu.seo'); allow write: if false; }
+    match /seo_ai_state/{id} { allow read, write: if false; }
     
         // Prospect Dashboard: prospects and their settings (written by Apps Script only)
     match /prospects/{id} {

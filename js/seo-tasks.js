@@ -20,6 +20,7 @@ const GROUPS = {
   content: { order: 3, factor: 0.4, title: () => "Add what people search for" },
   speed:   { order: 4, factor: 0.1, title: () => "Speed and images" },
   off:     { order: 5, factor: 0.1, title: () => "Promote it off the site" },
+  ai:      { order: 1.5, factor: 1, title: () => "" },   // made by Seo7.gs (Claude), after "match", before "connect"
 };
 const CHECK = {
   title: "Page title", titleMax: "Page title", titleNot: "Other page's title", h1: "Main heading", desc: "Description",
@@ -216,7 +217,7 @@ async function load(S) {
 
 const isPri = (c, path) => !!priorityOf(c.work, path);
 const started = (t) => (t.order || []).some((id) => t.steps[id] && t.steps[id].status !== "todo");
-const isLive = (c, t) => t.status !== "done" && (isPri(c, t.path) || started(t));
+const isLive = (c, t) => t.status !== "done" && t.status !== "dismissed" && (isPri(c, t.path) || started(t));
 
 function rankOf(c) {
   const tone = new Map((c.prRows ? c.prRows() : []).map((r) => [npath(r.path), r.rank]));
@@ -394,12 +395,17 @@ export async function renderTasks(body, c) {
     const head = `<div class="seo-t-chead">${ring(t)}
       <div style="min-width:0">
         <div class="seo-t-page">${isPri(c, t.path) ? `<span class="seo-star is-on">★</span>` : ""}${esc(title)}</div>
-        <div class="seo-t-title">${esc(t.title)}</div>
+        <div class="seo-t-title">${t.source === "ai" ? `<span class="seo-t-ai" title="Suggested by Claude${t.score ? `, quality ${t.score}/5` : ""}">AI</span>` : ""}${esc(t.title)}</div>
+        ${t.why ? `<div class="seo-note">${esc(t.why)}</div>` : ""}
       </div>
       <div class="seo-t-side">${t.gain ? `<div class="seo-t-gain">≈ +${t.gain} clicks</div>` : ""}<div class="seo-note">${n}/${st.length} steps</div></div>
     </div>`;
     if (t.status === "done") {
       return `<div class="seo-t-card is-done">${head}<p class="seo-note">Finished ${esc(when(t.doneAt))}. In the Change log, so its effect shows there.</p></div>`;
+    }
+    if (t.status === "dismissed") {
+      return `<div class="seo-t-card is-skipped">${head}
+        <p class="seo-note"><span class="seo-pr-pill is-grey">Dismissed</span> ${esc(t.dismissNote || "")} · by ${esc(t.dismissByName || "someone")}</p></div>`;
     }
     if (skipped) {
       return `<div class="seo-t-card is-skipped">${head}
@@ -419,6 +425,7 @@ export async function renderTasks(body, c) {
           <button class="seo-btn" type="button" data-t-copy="${t.id}">Copy brief</button>
           ${pid ? `<button class="seo-btn" type="button" data-open="${esc(pid)}">Open the page's plan</button>` : ""}
           <span class="seo-sp"></span>
+          ${S.canDo && t.source === "ai" ? `<button class="seo-btn" type="button" data-t-dismiss="${t.id}">Dismiss</button>` : ""}
           ${S.canDo ? `<button class="seo-btn" type="button" data-t-skip="${t.id}">Skip for today</button>` : ""}</div>`}
     </div>`;
   }
@@ -486,7 +493,7 @@ export async function renderTasks(body, c) {
             const st = stepsOf(t);
             const skipped = t.skipUntil && t.skipUntil > day;
             return `<div class="seo-t-row">
-              <div style="min-width:0"><div>${esc(t.title)}</div>
+              <div style="min-width:0"><div>${t.source === "ai" ? `<span class="seo-t-ai">AI</span>` : ""}${esc(t.title)}</div>
                 <div class="seo-note">${plural(st.length, "step")}${st.filter(doneish).length ? ` · ${st.filter(doneish).length} done` : ""}${
                   skipped ? ` · skipped until ${esc(fmtDay(t.skipUntil))}: ${esc(t.skipNote || "")}` : ""}</div></div>
               ${t.gain ? `<span class="seo-t-gain">≈ +${t.gain}</span>` : "<span></span>"}
@@ -549,7 +556,7 @@ export async function renderTasks(body, c) {
 
     const ICON = {
       tick: ["◷", "is-y"], done: ["✓", "is-b"], untick: ["↺", ""], confirm: ["✓", "is-g"], missing: ["⚠", "is-y"], skip: ["⏭", "is-r"],
-      unskip: ["↩", ""], add: ["+", ""], plan: ["☰", ""], taskdone: ["★", "is-g"],
+      unskip: ["↩", ""], add: ["+", ""], plan: ["☰", ""], taskdone: ["★", "is-g"], dismiss: ["✕", "is-r"],
     };
     const line = (l) => {
       const q = (s) => `“${esc(s)}”`;
@@ -561,6 +568,7 @@ export async function renderTasks(body, c) {
         unskip: `${who} brought back ${q(l.taskTitle)}`,
         add: l.taskTitle ? `${who} added ${q(l.taskTitle)} to today` : `${who} topped up today's list`,
         plan: `${who} made the day's list`, taskdone: `Task finished: ${q(l.taskTitle)}`,
+        dismiss: `${who} dismissed the AI task ${q(l.taskTitle)}`,
       }[l.action] || esc(l.action);
     };
     const feed = S.log.slice(0, 80).map((l) => {
@@ -586,6 +594,20 @@ export async function renderTasks(body, c) {
           <span class="seo-note">${esc(fmtDay(x.d).split(",")[0])}</span></div>`).join("")}</div>
       </div>
       <div class="seo-card"><h3>Priority pages: how far through their plans</h3>${pages || `<p class="seo-note">No priority pages yet.</p>`}</div>
+      ${(() => {
+        const all = [...S.tasks.values()];
+        const sum = (L) => ({ n: L.length, done: L.filter((t) => t.status === "done").length, dis: L.filter((t) => t.status === "dismissed").length });
+        const a = sum(all.filter((t) => t.source === "ai")), r = sum(all.filter((t) => t.source !== "ai"));
+        if (!a.n) return `<div class="seo-card"><h3>AI suggestions</h3><p class="seo-note">None yet. Claude reviews a few priority pages each night (Settings → Tasks).</p></div>`;
+        const pct = (x, n) => (n ? Math.round((x / n) * 100) + "%" : "—");
+        const reasons = S.log.filter((l) => l.action === "dismiss").slice(0, 5);
+        return `<div class="seo-card"><h3>AI suggestions vs rule-based tasks</h3>
+          <table class="seo-w-mini"><thead><tr><th></th><th>Made</th><th>Finished</th><th>Dismissed</th></tr></thead><tbody>
+            <tr><td><span class="seo-t-ai">AI</span> Claude</td><td>${a.n}</td><td>${a.done} (${pct(a.done, a.n)})</td><td>${a.dis} (${pct(a.dis, a.n)})</td></tr>
+            <tr><td>Rule-based</td><td>${r.n}</td><td>${r.done} (${pct(r.done, r.n)})</td><td>—</td></tr></tbody></table>
+          ${reasons.length ? `<p class="seo-note" style="margin-top:8px">Recent reasons for dismissing: ${reasons.map((l) => `“${esc(l.note || "")}”`).join(" · ")}</p>` : ""}
+          <p class="seo-note">Each finished task has a Change log entry, which shows its effect on clicks.</p></div>`;
+      })()}
       <div class="seo-card"><h3>Activity</h3>${feed || `<p class="seo-note">Nothing yet.</p>`}</div>`;
   }
 
@@ -675,6 +697,21 @@ export async function renderTasks(body, c) {
       } catch (err) { t0.disabled = false; toast(errMsg(err), true); }
       return;
     }
+    if (d.tDismiss) {
+      if (!S.canDo) { toast("Only the SEO team and admins can change tasks.", true); return; }
+      const t = S.tasks.get(d.tDismiss);
+      const why = prompt(`Dismiss “${t.title}”? Claude is told the reason next time. Why?`, "");
+      if (why === null) return;
+      if (why.trim().length < 3) { toast("Add a short reason.", true); return; }
+      t0.disabled = true;
+      try {
+        await act(c, S, t, { status: "dismissed", dismissNote: why.trim().slice(0, 300), dismissBy: uid(), dismissByName: myName(c),
+          dismissAt: new Date().toISOString() }, { action: "dismiss", note: why.trim().slice(0, 300) });
+        toast("Dismissed");
+        draw();
+      } catch (e2) { t0.disabled = false; toast(errMsg(e2), true); }
+      return;
+    }
     if (d.tSkip) { ui.skip = d.tSkip; draw(); wrap.querySelector("[data-t-why]")?.focus(); return; }
     if (d.tSkipno !== undefined) { ui.skip = ""; draw(); return; }
     if (d.tSkipok) {
@@ -743,6 +780,7 @@ const CSS = `
 .seo-t-title{font-size:15px;font-weight:600;margin-top:1px}
 .seo-t-side{text-align:right}
 .seo-t-gain{font-size:12px;font-weight:600;color:#16a34a;white-space:nowrap}
+.seo-t-ai{display:inline-block;margin-right:6px;padding:0 6px;border-radius:999px;background:#f5f3ff;color:#6d28d9;font-size:10.5px;font-weight:700;letter-spacing:.03em;vertical-align:2px}
 .seo-t-steps{margin-top:8px}
 .seo-t-step{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:10px;align-items:start;padding:8px 0;border-top:1px solid var(--border,#e5e7eb);font-size:13px}
 .seo-t-step.is-confirmed .seo-t-sm > div:first-child{color:var(--text-muted,#6b7280)}
