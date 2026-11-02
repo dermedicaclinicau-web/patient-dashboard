@@ -216,16 +216,50 @@ export async function mountTaskHistory(main, { patientId = "" } = {}) {
     if (list.isConnected) render();
   }
 
+  // What the row says while the server works
+  const BUSY_LABEL = { cancel: "Cancelling…", sendNow: "Sending…", reschedule: "Saving…" };
+
   async function change(btn, payload, done) {
-    btn.disabled = true;
+    const row = btn.closest("[data-sched]");
+    const pill = row && row.querySelector(".th-pill");
+    const btns = row ? [...row.querySelectorAll("button")] : [btn];
+    const before = { label: btn.textContent, pill: pill ? pill.textContent : "" };
+    const busyText = BUSY_LABEL[payload.op] || "Saving…";
+
+    // Straight away: nothing in the row can be pressed twice, and it says what's happening
+    btns.forEach((b) => { b.disabled = true; });
+    btn.textContent = busyText;
+    btn.setAttribute("aria-busy", "true");
+    if (row) row.classList.add("is-busy");
+    if (pill) pill.textContent = busyText;
+
     try {
       await callApi({ action: "scheduleTaskEmail", ...payload });
+      // Shown at once; the list is then read again in the background
+      if (payload.op === "cancel" || payload.op === "sendNow") {
+        sched = (sched || []).filter((s) => s.id !== payload.id);
+      } else if (payload.op === "reschedule") {
+        const ms = Date.parse(payload.sendAt);
+        sched = (sched || [])
+          .map((s) => (s.id === payload.id ? { ...s, sendAtMs: ms, status: "scheduled", lastError: "" } : s))
+          .sort((x, y) => (Number(x.sendAtMs) || 0) - (Number(y.sendAtMs) || 0));
+      }
+      if (list.isConnected) render();
       showToast(done);
-      await load();
+      load().catch(() => {});
     } catch (err) {
       console.error("Scheduled email change failed:", err);
       showToast(schedError(err));
-      if (btn.isConnected) btn.disabled = false;
+      // Put the row back as it was (unless the list has been redrawn meanwhile)
+      if (row && row.isConnected) {
+        row.classList.remove("is-busy");
+        btns.forEach((b) => { b.disabled = false; });
+        if (pill) pill.textContent = before.pill;
+      }
+      if (btn.isConnected) {
+        btn.textContent = before.label;
+        btn.removeAttribute("aria-busy");
+      }
     }
   }
 

@@ -3934,9 +3934,24 @@ function hasAppointments_(cfg, key) {
 // Sends a scheduled task's prepared email. onlyTo = { name, first, email } for a test.
 function sendScheduledTask_(cfg, id, t, slot, onlyTo) {
   const s = t.schedule || {};
-  const htmlRaw = sanitizeEmailHtml_(s.renderedHtml);
-  const subjectRaw = String(s.renderedSubject || '').trim().slice(0, 200);
+  let htmlRaw = sanitizeEmailHtml_(s.renderedHtml);
+  let subjectRaw = String(s.renderedSubject || '').trim().slice(0, 200);
   if (!htmlRaw || !subjectRaw) throw new Error('Open the task in the Task Builder and let it save once.');
+
+  // {Upcoming appointments}: the patient's bookings as they are right now (same as emails scheduled from the run screen)
+  if (SCHED_APPTS_RE_().test(htmlRaw) || SCHED_APPTS_RE_().test(subjectRaw)) {
+    const tr = t.recipients || {};
+    const pid = tr.aboutPatient === true ? String(s.patientId || '') : '';
+    const pdoc = pid ? flowPatient_(cfg, pid) : null;   // follows merges to the record that was kept
+    if (pid && !pdoc) {
+      throw new Error("The patient chosen for automatic sends isn't in the Patient List any more. Choose them again in Schedule (step 7).");
+    }
+    const appts = pdoc
+      ? schedUpcomingHtml_(cfg, pdoc._id, pdoc, { months: s.apptMonths, services: true, staff: true })
+      : '';
+    htmlRaw = htmlRaw.replace(SCHED_APPTS_RE_(), appts);
+    subjectRaw = subjectRaw.replace(SCHED_APPTS_RE_(), '').replace(/\s{2,}/g, ' ').trim();
+  }
   const r = t.recipients || {};
   let recipients;
   if (onlyTo) {
@@ -4233,8 +4248,10 @@ function schedCreate_(body, session) {
 
 // Cancel, change the time, or send now: the person who scheduled it, or someone who builds task types
 function schedChange_(op, id, body, session) {
-  const lock = LockService.getScriptLock();
-  if (!lock.tryLock(20000)) return { ok: false, error: 'BUSY' };
+  // A lock on this one email only. The script lock is held for minutes by the 15-minute trigger,
+  // which made Don't send / Change time / Send now fail as busy.
+  const unlock = staffTaskLock_('sch_' + id);
+  if (!unlock) return { ok: false, error: 'BUSY' };
   try {
     const cfg = getConfig_();
     const rec = fsGetDoc_(cfg, SCHED_COL_ + '/' + id);
@@ -4262,7 +4279,7 @@ function schedChange_(op, id, body, session) {
     const r = schedSendOne_(cfg, rec, Date.now());
     return r.ok ? { ok: true, sent: r.sent } : { ok: false, error: 'SEND_FAILED', detail: r.error };
   } finally {
-    lock.releaseLock();
+    unlock();
   }
 }
 
@@ -4283,7 +4300,17 @@ function runScheduledTaskEmails_(cfg) {
     .slice(0, 40)
     .forEach(function (r) {
       if (Date.now() - started > 4 * 60000) return; // the rest go in the next run
-      schedSendOne_(cfg, r, started);
+      const unlock = staffTaskLock_('sch_' + r._id);
+      if (!unlock) return;   // someone is changing it right now: the next run picks it up
+      try {
+        // Cancelled or moved since the list was read? Then it isn't sent.
+        const cur = fsGetDoc_(cfg, SCHED_COL_ + '/' + r._id);
+        if (!cur || cur.status !== 'scheduled' || Number(cur.sendAtMs || 0) > Date.now()) return;
+        cur._id = r._id;
+        schedSendOne_(cfg, cur, started);
+      } finally {
+        unlock();
+      }
     });
 }
 

@@ -10299,3 +10299,21 @@ body.pc-open { overflow: hidden; }
   .pc-btns .pc-btn { flex: 1; }
   .pc-editor { max-height: none; }
 }
+
+/* Task history → Scheduled: a row that's being cancelled, sent or moved */
+.th-sched.is-busy .th-sched-main,
+.th-sched.is-busy .tm-task-icon { opacity: .55; transition: opacity .15s; }
+.th-sched.is-busy { cursor: progress; }
+
+/* A button that's working: a small spinner before its words */
+.lh-btn[aria-busy="true"] { position: relative; padding-left: 2rem; cursor: progress; opacity: 1; }
+.lh-btn[aria-busy="true"]::before {
+  content: ""; position: absolute; left: .7rem; top: 50%;
+  width: .85rem; height: .85rem; margin-top: -.425rem;
+  border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+  animation: th-spin .7s linear infinite;
+}
+@keyframes th-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .lh-btn[aria-busy="true"]::before { animation-duration: 2s; }
+}
