@@ -11,7 +11,7 @@ import { db, auth } from "./firebase-config.js";
 import {
   doc, getDoc, getDocs, collection, query, orderBy, limit, writeBatch, runTransaction, serverTimestamp, arrayUnion,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { npath, pageStory, priorityOf, prioritySettings, titleOf, complianceWords, renderOppsInto } from "./seo-work.js?v=10";
+import { npath, pageStory, priorityOf, prioritySettings, titleOf, complianceWords, renderOppsInto, taskConfig } from "./seo-work.js?v=11";
 
 const GROUPS = {
   basics:  { order: 0, factor: 1,   title: () => "Fix what's holding it back" },
@@ -272,13 +272,15 @@ async function ensureToday(c, S) {
   if (snap.exists()) { S.day = snap.data(); return; }
   if (!S.canDo) { S.day = null; return; }
   await syncTasks(c, S);
-  const perDay = Math.min(30, Math.max(1, Number(c.work.settings?.tasksPerDay) || 5));
+  const cfg = taskConfig(c.work);
+  const perDay = cfg.perDay;
   const prev = await getDocs(query(collection(db, "seo_task_days"), orderBy("day", "desc"), limit(1)));
   const prevIds = new Set(prev.docs[0]?.data().ids || []);
   const open = [...S.tasks.values()].filter((t) => isLive(c, t) && (!t.skipUntil || t.skipUntil <= day));
   const rank = rankOf(c);
   const carry = open.filter((t) => prevIds.has(t.id) || started(t)).sort(rank);
-  const rest = spread(open.filter((t) => !carry.includes(t)).sort(rank));
+  const ranked = open.filter((t) => !carry.includes(t)).sort(rank);
+  const rest = cfg.spread ? spread(ranked) : ranked;
   const ids = carry.concat(rest).slice(0, Math.min(30, Math.max(perDay, carry.length))).map((t) => t.id);
   let made = false;
   await runTransaction(db, async (tx) => {
@@ -437,7 +439,7 @@ export async function renderTasks(body, c) {
       const k = npath(t.path);
       if (!covered.has(k) && !first.has(k) && isPri(c, t.path)) first.set(k, t);
     }
-    return { missing: [...first.values()], fill: cand.slice(0, Math.max(0, (S.day.perDay || 5) - active)) };
+    return { missing: [...first.values()], fill: cand.slice(0, Math.max(0, taskConfig(c.work).perDay - active)) };
   }
 
   function todayHtml() {
@@ -452,7 +454,7 @@ export async function renderTasks(body, c) {
         <div class="seo-t-hb"><i class="g" style="width:${st.length ? (a / st.length) * 100 : 0}%"></i><i class="y" style="width:${st.length ? (b / st.length) * 100 : 0}%"></i></div>
         <span class="seo-note">${a} done · ${b} checking tonight · ${st.length - a - b} to do</span>
       </div>
-      <p class="seo-note">${plural(list.length, "task")} · up to ${S.day.perDay || 5} a day · list made by ${esc(S.day.builtByName || "the SEO team")}.
+      <p class="seo-note">${plural(list.length, "task")} · up to ${taskConfig(c.work).perDay} a day · list made by ${esc(S.day.builtByName || "the SEO team")}.
         Unfinished tasks carry over to tomorrow. ${S.canDo ? "" : "Only the SEO team and admins can tick steps."}</p>
       ${(() => {
         const g = todayGaps();

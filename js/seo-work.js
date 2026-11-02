@@ -272,6 +272,26 @@ export function pageIndex(w, data) {
 }
 export const titleOf = (w, data, path) => (w && pageIndex(w, data).get(path)?.title) || prettyPath(path);
 
+// Settings → Tasks. Stored in seo_settings/main.tasks (admins only). Older saves used tasksPerDay.
+export function taskConfig(w) {
+  const s = w?.settings || {};
+  const t = s.tasks && typeof s.tasks === "object" ? s.tasks : {};
+  const ai = t.ai && typeof t.ai === "object" ? t.ai : {};
+  const num = (v, d, lo, hi) => Math.min(hi, Math.max(lo, Math.round(Number(v)) || d));
+  return {
+    perDay: num(t.perDay ?? s.tasksPerDay, 30, 1, 30),
+    spread: t.spread !== false,
+    ai: {
+      on: ai.on !== false,
+      every: Number(ai.every) === 14 ? 14 : 7,
+      minImpr: num(ai.minImpr, 30, 10, 500),
+      minScore: num(ai.minScore, 4, 3, 5),
+      perPage: num(ai.perPage, 1, 1, 3),
+      drafts: ai.drafts !== false,
+    },
+  };
+}
+
 // The advertising wording list (Settings), used so tasks never suggest a banned word
 export const complianceWords = (w) => (settingsOf(w).compliance || COMPLIANCE).map((x) => x.word);
 
@@ -1582,11 +1602,8 @@ function viewSettings(wrap, c, ui) {
         <h3 style="margin:0" data-w-pcount>${keyPages.length} of 30 priority pages</h3><span class="seo-sp"></span>
         ${c.isAdmin ? `<button class="seo-btn${pPick ? "" : " on"}" type="button" data-w-ppick>${pPick ? "Close the list" : "+ Add pages"}</button>` : ""}
       </div>
-      ${c.isAdmin ? `<div class="seo-w-tip seo-row" style="margin:6px 0 10px">
-        <strong>Daily tasks</strong>
-        <input class="seo-input" type="number" min="1" max="30" step="1" style="min-width:0;width:72px" data-w-tpd
-          value="${Math.min(30, Math.max(1, Number(w.settings?.tasksPerDay) || 5))}" aria-label="Tasks per day">
-        <span class="seo-note">tasks a day for the SEO team, from these pages' action plans. Changes apply from tomorrow's list.</span></div>` : ""}
+      <p class="seo-note" style="margin:4px 0 8px">Tasks a day and AI suggestions are set in
+        <button class="seo-w-link" type="button" data-w-sset="tasks">Settings → Tasks</button>.</p>
       <p class="seo-note">They show first across SEO, and Site health checks them every night. Dropping pages are listed first.
         Set a page's target search and goal in its ★ box (Open).${c.isAdmin ? "" : " Only admins can change priority pages."}</p>
       ${pPick && c.isAdmin ? `<div class="seo-card seo-w-picker">
@@ -1601,6 +1618,45 @@ function viewSettings(wrap, c, ui) {
       </div>` : ""}
       <div data-w-pcards>${pcardsHtml()}</div>
       <p class="seo-note" style="margin-top:8px">${wpLine}</p>`;
+  }
+
+  /* ----- Tasks ----- */
+
+  function tasksHtml() {
+    const t = taskConfig(w);
+    const ro = c.isAdmin ? "" : " disabled";
+    const row = (title, help, ctl) => `<div class="seo-w-cfgrow"><div><strong>${title}</strong><small>${help}</small></div><div class="seo-w-cfgctl">${ctl}</div></div>`;
+    const sel = (k, opts, v) => `<select class="seo-input" data-w-cfg="${k}"${ro}>${opts.map(([val, l]) =>
+      `<option value="${val}"${String(val) === String(v) ? " selected" : ""}>${l}</option>`).join("")}</select>`;
+    const box = (k, on) => `<label class="seo-w-switch"><input type="checkbox" data-w-cfg="${k}"${on ? " checked" : ""}${ro}><span>${on ? "On" : "Off"}</span></label>`;
+    return `
+      ${c.isAdmin ? "" : `<div class="seo-w-tip">Only admins can change task settings.</div>`}
+      <div class="seo-card">
+        <h3 style="margin:0 0 4px">Daily list</h3>
+        <p class="seo-note">Made each morning from the priority pages' action plans, for the SEO team.</p>
+        ${row("Tasks per day", "Up to 30. Unfinished tasks carry over and count towards it.",
+          `<input type="range" min="1" max="30" step="1" data-w-cfg="perDay" value="${t.perDay}"${ro} aria-label="Tasks per day">
+           <output class="seo-w-cfgn" data-w-cfgout>${t.perDay}</output>`)}
+        ${row("Spread across pages", "Every priority page gets one task before any page gets a second. Dropping pages come first either way.",
+          box("spread", t.spread))}
+        <p class="seo-note" style="margin-top:8px">The website checks ticked steps every night at about 9pm.
+          Changes here apply from the next list. Today's list can be topped up in Tasks → Today.</p>
+      </div>
+      <div class="seo-card">
+        <div class="seo-row" style="margin:0 0 4px"><h3 style="margin:0">AI suggestions</h3><span class="seo-pr-pill is-grey">Coming next</span></div>
+        <p class="seo-note">Claude reviews each priority page quietly at night and suggests extra tasks. A suggestion is kept only if it's
+          backed by real searches, worth the effort, checkable on the website, not already done, and within the advertising rules.</p>
+        ${row("AI suggestions", "Off: only the rule-based tasks are made.", box("ai.on", t.ai.on))}
+        ${row("Review each page", "Sooner if its clicks drop, or it's changed in WordPress.",
+          sel("ai.every", [[7, "Every week"], [14, "Every 2 weeks"]], t.ai.every))}
+        ${row("Backed by at least", "Search impressions (last 28 days) behind the searches a task targets.",
+          `<input class="seo-input seo-w-cfgnum" type="number" min="10" max="500" step="10" data-w-cfg="ai.minImpr" value="${t.ai.minImpr}"${ro}> <span class="seo-note">impressions</span>`)}
+        ${row("Quality bar", "A second, quick review scores each task for SEO value. Lower scores are dropped.",
+          sel("ai.minScore", [[3, "3 out of 5 (more tasks)"], [4, "4 out of 5"], [5, "5 out of 5 (only the best)"]], t.ai.minScore))}
+        ${row("AI tasks per page", "Each time a page is reviewed.", sel("ai.perPage", [[1, "1"], [2, "2"], [3, "3"]], t.ai.perPage))}
+        ${row("Draft wording", "Suggested titles, descriptions and FAQ answers, labelled “Draft from Claude: check before publishing”.",
+          box("ai.drafts", t.ai.drafts))}
+      </div>`;
   }
 
   /* ----- Brand and wording ----- */
@@ -1644,18 +1700,24 @@ function viewSettings(wrap, c, ui) {
   /* ----- the page ----- */
 
   function draw() {
-    const tabs = [["topics", "Topics"], ["pri", `★ Priority pages <span class="seo-w-n">${keyPages.length}</span>`], ["brand", "Brand and wording"]];
+    const tabs = [["topics", "Topics"], ["pri", `★ Priority pages <span class="seo-w-n">${keyPages.length}</span>`],
+      ["tasks", "Tasks"], ["brand", "Brand and wording"]];
     wrap.innerHTML = `
       <div class="seo-row seo-w-stabs">
         ${tabs.map(([k, l]) => `<button class="seo-w-stab ${ui.sset === k ? "is-on" : ""}" type="button" data-w-sset="${k}">${l}</button>`).join("")}
         <span class="seo-sp"></span><span class="seo-note" data-w-sstat>${h.esc(lastStatus)}</span>
       </div>
-      ${ui.sset === "pri" ? priHtml() : ui.sset === "brand" ? brandHtml() : topicsHtml()}`;
+      ${ui.sset === "pri" ? priHtml() : ui.sset === "tasks" ? tasksHtml() : ui.sset === "brand" ? brandHtml() : topicsHtml()}`;
   }
   const refocus = (s) => wrap.querySelector(s)?.focus();
 
   wrap.oninput = (e) => {
     const t = e.target;
+    if (t.dataset.wCfg === "perDay") {   // the number beside the slider follows it; saving happens on release
+      const out = wrap.querySelector("[data-w-cfgout]");
+      if (out) out.textContent = t.value;
+      return;
+    }
     if (t.dataset.wTname !== undefined) { topics[+t.dataset.wTname].name = t.value; }
     else if (t.dataset.wChipin !== undefined && t.value.includes(",")) {
       const [i, k] = t.dataset.wChipin.split("|");
@@ -1669,6 +1731,19 @@ function viewSettings(wrap, c, ui) {
   wrap.onchange = (e) => {
     const t = e.target;
     const row = t.closest(".seo-w-pk");
+    if (t.dataset.wCfg !== undefined) {
+      if (!c.isAdmin) return;
+      const cur = taskConfig(w);
+      const next = { perDay: cur.perDay, spread: cur.spread, ai: { ...cur.ai } };
+      const k = t.dataset.wCfg;
+      const v = t.type === "checkbox" ? t.checked : Number(t.value);
+      if (k.startsWith("ai.")) next.ai[k.slice(3)] = v; else next[k] = v;
+      w.settings = { ...(w.settings || {}), tasks: next };
+      persist({ tasks: next });
+      const lab = t.closest(".seo-w-switch")?.querySelector("span");
+      if (lab) lab.textContent = t.checked ? "On" : "Off";
+      return;
+    }
     if (t.matches("[data-w-tpd]")) {
       const n = Math.min(30, Math.max(1, Math.round(Number(t.value) || 5)));
       t.value = n;
@@ -2001,6 +2076,16 @@ span.seo-star{cursor:default}
 .seo-w-orow > div:first-child{display:flex;justify-content:space-between;gap:8px}
 .seo-w-oacts{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px}
 .seo-w-oacts .seo-input{width:100%;min-width:0;box-sizing:border-box;padding:4px 8px}
+.seo-w-cfgrow{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:center;padding:10px 0;border-top:1px solid var(--border,#e5e7eb)}
+.seo-w-cfgrow strong{display:block;font-size:13px}
+.seo-w-cfgrow small{display:block;margin-top:2px;font-size:12px;line-height:1.4;color:var(--text-muted,#6b7280)}
+.seo-w-cfgctl{display:flex;align-items:center;gap:8px;justify-content:flex-end}
+.seo-w-cfgctl input[type=range]{width:200px}
+.seo-w-cfgctl select.seo-input{min-width:0}
+.seo-w-cfgn{min-width:28px;font-size:18px;font-weight:700;text-align:right}
+.seo-w-cfgnum{min-width:0;width:90px}
+.seo-w-switch{display:inline-flex;align-items:center;gap:6px;font-size:13px;cursor:pointer}
+@media (max-width:640px){.seo-w-cfgrow{grid-template-columns:1fr}.seo-w-cfgctl{justify-content:flex-start}}
 .seo-w-psum{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
 .seo-w-plist th,.seo-w-plist td{text-align:left;vertical-align:top}
 .seo-w-plist td{white-space:normal}
