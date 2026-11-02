@@ -12,7 +12,7 @@
  * fsQuery_, fsListAll_, fromFields_, uniq_).
  */
 
-const SEO3_MAX_PAGES_ = 30;    // key pages checked each night
+const SEO3_MAX_PAGES_ = 100;    // priority pages checked each night
 const SEO3_MAX_LINKS_ = 250;   // internal links checked each night
 const SEO3_HISTORY_ = 90;      // days of speed history kept per page
 const SEO3_SKIP_LINK_ = /\/wp-(admin|login|json|content|includes)\/|\/xmlrpc\.php|\/feed\/?(\?|$)|\/(cart|checkout|my-account)\/?(\?|$)|[?&](add-to-cart|replytocom|s)=|\.(jpe?g|png|gif|webp|avif|svg|ico|pdf|zip|mp4|mov|css|js|xml)(\?|$)/i;

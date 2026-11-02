@@ -7,7 +7,7 @@ import { doc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs
 // Must be exactly the same address seo.js imports seo-work.js from, or the browser loads it twice
 import { npath, pageStory, prioritySettings, priorityOf, suggestPriority, titleOf, logPriority, pageOf } from "./seo-work.js?v=13";
 
-const MAX = 30;
+const MAX = 50;   // priority pages (Site health checks them all each night)
 export const GOALS = [["top3", "Top 3", 3], ["top5", "Top 5", 5], ["page1", "Page 1", 10], ["", "No goal", null]];
 const goalOf = (k) => GOALS.find((g) => g[0] === (k || "")) || GOALS[3];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));

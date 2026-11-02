@@ -11,6 +11,7 @@ import { loadAudience, viewAudience } from "./seo-audience.js";
 const BRAND = "__brand", OTHER = "__other", ALL = "__all", PRI = "__priority";
 const EXP_CTR = [0.28, 0.16, 0.11, 0.08, 0.06, 0.045]; // rough click rate for positions 1–6
 const PER_TYPE = 40;                                     // open opportunities shown per type
+const PRI_MAX = 50;                                      // priority pages (same as MAX in seo-priority.js and SEO3_MAX_PAGES_ in Seo3.gs)
 const OPP = {
   striking: { label: "Close to page 1", tone: "blue" },
   ctr:      { label: "Low click rate", tone: "amber" },
@@ -1346,7 +1347,7 @@ function viewSettings(wrap, c, ui) {
     tTimer = setTimeout(() => { guessed = false; persist({ topics: cleanTopics() }); }, now ? 0 : 500);
   }
   function savePriority() {
-    const pages = [...new Map(keyPages.map((p) => [npath(p), p])).values()].slice(0, 30);
+    const pages = [...new Map(keyPages.map((p) => [npath(p), p])).values()].slice(0, PRI_MAX);
     const { info, paths: before } = prioritySettings(w);
     const keep = new Set(pages.map(npath));
     const had = new Set(before.map(npath));
@@ -1681,7 +1682,7 @@ function viewSettings(wrap, c, ui) {
       : "Page titles show once WordPress is connected (run seoWpSync in Apps Script).";
     return `
       <div class="seo-row" style="margin:0 0 4px">
-        <h3 style="margin:0" data-w-pcount>${keyPages.length} of 30 priority pages</h3><span class="seo-sp"></span>
+        <h3 style="margin:0" data-w-pcount>${keyPages.length} of ${PRI_MAX} priority pages</h3><span class="seo-sp"></span>
         ${c.isAdmin ? `<button class="seo-btn${pPick ? "" : " on"}" type="button" data-w-ppick>${pPick ? "Close the list" : "+ Add pages"}</button>` : ""}
       </div>
       <p class="seo-note" style="margin:4px 0 8px">Tasks a day and AI suggestions are set in
@@ -1848,12 +1849,12 @@ function viewSettings(wrap, c, ui) {
       }
     } else if (t.dataset.wPpage !== undefined && c.isAdmin) {
       const k = npath(t.dataset.wPpage);
-      if (t.checked && keyPages.length >= 30) { t.checked = false; toast("You can have up to 30 priority pages. Remove one first.", true); return; }
+      if (t.checked && keyPages.length >= PRI_MAX) { t.checked = false; toast(`You can have up to ${PRI_MAX} priority pages. Remove one first.`, true); return; }
       keyPages = t.checked ? keyPages.concat([t.dataset.wPpage]) : keyPages.filter((p) => npath(p) !== k);
       row?.classList.toggle("is-on", t.checked);
       savePriority();
       const cnt = wrap.querySelector("[data-w-pcount]");
-      if (cnt) cnt.textContent = `${keyPages.length} of 30 priority pages`;
+      if (cnt) cnt.textContent = `${keyPages.length} of ${PRI_MAX} priority pages`;
       wrap.querySelector("[data-w-pcards]").innerHTML = pcardsHtml();
     }
   };
