@@ -1473,26 +1473,20 @@ match /inv_count_drafts/{id} {
     }
 
     // ===================== SEO =====================
-    // Everything here is written by Apps Script only (runSeoNightly / crawler).
-    // The SEO team reads it; the service account bypasses these rules when writing.
+    // Search data, Site health, audience and the WordPress page list are written by Apps Script only
+    // (the service account bypasses these rules). Staff with the SEO menu read them.
 
-    // Overview (16 months of daily totals, build id) and the last nightly run status
-    match /seo_state/{id} {
-      allow read: if can('menu.seo');
-      allow write: if false;
+    // The SEO team: anyone with the SEO role, and Admins
+    function seoTeam() {
+      return isAdmin() || (isStaff() && request.auth.token.staffRole.lower() == 'seo');
     }
 
-    // One document per page: last 28 days vs previous 28, weekly clicks, GA4 organic sessions
-    match /seo_pages/{id} {
-      allow read: if can('menu.seo');
-      allow write: if false;
-    }
-
-    // Search queries, chunked like patient_index (Phase 2)
-    match /seo_queries/{id} {
-      allow read: if can('menu.seo');
-      allow write: if false;
-    }
+    match /seo_state/{id}    { allow read: if can('menu.seo'); allow write: if false; }
+    match /seo_pages/{id}    { allow read: if can('menu.seo'); allow write: if false; }
+    match /seo_queries/{id}  { allow read: if can('menu.seo'); allow write: if false; }
+    match /seo_health/{id}   { allow read: if can('menu.seo'); allow write: if false; }
+    match /seo_audience/{id} { allow read: if can('menu.seo'); allow write: if false; }
+    match /seo_index/{id}    { allow read: if can('menu.seo'); allow write: if false; }
 
     match /seo_issues/{id} {
       allow read: if can('menu.seo');
@@ -1503,8 +1497,7 @@ match /inv_count_drafts/{id} {
         && request.resource.data.note is string && request.resource.data.note.size() <= 1000;
       allow delete: if can('seo.manage');
     }
-    match /seo_health/{id} { allow read: if can('menu.seo'); allow write: if false; }
-    match /seo_audience/{id} { allow read: if can('menu.seo'); allow write: if false; }
+
     match /seo_opps/{id} {
       allow read: if can('menu.seo');
       allow create, update: if can('seo.work')
@@ -1515,23 +1508,76 @@ match /inv_count_drafts/{id} {
       allow delete: if can('seo.manage');
     }
 
+    // Change log. Entries made by the nightly website check carry taskId.
     match /seo_log/{id} {
       allow read: if can('menu.seo');
       allow create: if can('seo.work')
-        && request.resource.data.keys().hasOnly(['date','type','title','url','note','by','byName','createdAt','updatedAt','oppId'])
+        && request.resource.data.keys().hasOnly(['date','type','title','url','note','by','byName','createdAt','updatedAt','oppId','taskId'])
         && request.resource.data.by == request.auth.uid
         && request.resource.data.title is string && request.resource.data.title.size() > 0 && request.resource.data.title.size() <= 200
         && request.resource.data.date is string && request.resource.data.date.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
       allow update: if (can('seo.manage') || (can('seo.work') && resource.data.by == request.auth.uid))
-        && request.resource.data.keys().hasOnly(['date','type','title','url','note','by','byName','createdAt','updatedAt','oppId'])
+        && request.resource.data.keys().hasOnly(['date','type','title','url','note','by','byName','createdAt','updatedAt','oppId','taskId'])
         && request.resource.data.by == resource.data.by;
       allow delete: if can('seo.manage') || (can('seo.work') && resource.data.by == request.auth.uid);
     }
-    match /seo_index/{id} { allow read: if can('menu.seo'); allow write: if false; }
-    
+
+    // Settings. Topics, brand words, advertising wording and areas: SEO settings access.
+    // Priority pages and the daily task count: Admins only. 'wp' (the WordPress page list) is Apps Script only.
     match /seo_settings/{id} {
       allow read: if can('menu.seo');
-      allow write: if can('seo.manage');
+      allow create: if can('seo.manage') && id == 'main'
+        && (isAdmin() || !request.resource.data.keys().hasAny(['keyPages', 'priorityInfo', 'tasksPerDay']));
+      allow update: if can('seo.manage') && id == 'main'
+        && (isAdmin() || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['keyPages', 'priorityInfo', 'tasksPerDay']));
+      allow delete: if false;
+    }
+
+    // Tasks: one job on one priority page, with its steps. Only the nightly website check finishes a task.
+    match /seo_tasks/{id} {
+      allow read: if can('menu.seo');
+      allow create: if seoTeam() && id.matches('t_[a-z0-9]+')
+        && request.resource.data.status == 'open'
+        && request.resource.data.path is string
+        && request.resource.data.steps is map
+        && request.resource.data.order is list && request.resource.data.order.size() <= 60;
+      allow update: if seoTeam()
+        && request.resource.data.status == resource.data.status
+        && request.resource.data.path == resource.data.path
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+             'steps', 'order', 'title', 'group', 'gain', 'updatedAt',
+             'skipUntil', 'skipNote', 'skipBy', 'skipByName', 'skipAt'])
+        && request.resource.data.order.size() <= 60;
+      allow delete: if false;
+    }
+
+    // Each day's list. Made once a day by the SEO team; tasks can be added during the day, never taken off.
+    match /seo_task_days/{day} {
+      allow read: if can('menu.seo');
+      allow create: if seoTeam()
+        && day.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}')
+        && request.resource.data.day == day
+        && request.resource.data.ids is list && request.resource.data.ids.size() <= 30
+        && request.resource.data.builtBy == request.auth.uid
+        && request.resource.data.builtAt == request.time;
+      allow update: if seoTeam()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ids'])
+        && request.resource.data.ids.hasAll(resource.data.ids)
+        && request.resource.data.ids.size() <= 40;
+      allow delete: if false;
+    }
+
+    // The task trail. People can only log their own actions, at the real time.
+    // "Confirmed", "not found" and "finished" come from the website check only.
+    match /seo_task_log/{id} {
+      allow read: if can('menu.seo');
+      allow create: if seoTeam()
+        && request.resource.data.keys().hasOnly(['taskId','path','taskTitle','stepId','text','note','action','by','byName','role','day','at'])
+        && request.resource.data.action in ['tick', 'done', 'untick', 'skip', 'unskip', 'add', 'plan']
+        && request.resource.data.by == request.auth.uid
+        && request.resource.data.at == request.time
+        && request.resource.data.note is string && request.resource.data.note.size() <= 500;
+      allow update, delete: if false;
     }
     
         // Prospect Dashboard: prospects and their settings (written by Apps Script only)

@@ -272,6 +272,16 @@ export function pageIndex(w, data) {
 }
 export const titleOf = (w, data, path) => (w && pageIndex(w, data).get(path)?.title) || prettyPath(path);
 
+// The advertising wording list (Settings), used so tasks never suggest a banned word
+export const complianceWords = (w) => (settingsOf(w).compliance || COMPLIANCE).map((x) => x.word);
+
+// The old opportunity cards, shown under Tasks → All ideas
+export function renderOppsInto(wrap, c) {
+  const w = c.work;
+  const ui = w.ui || (w.ui = { topic: ALL, qsort: "i", qdir: -1, qfilter: "", qlimit: 100, qopen: null, ostatus: "open", otype: "all" });
+  viewOpps(wrap, c, ui);
+}
+
 export function priorityOf(w, path) {
   const { paths, info } = prioritySettings(w);
   const hit = paths.find((x) => npath(x) === npath(path));
@@ -850,7 +860,8 @@ function buildOpps(c) {
 
   const list = [];
   const pl = priorityLookup(w);
-  const priOf = (o) => (pl.isPage(o.url) || (o.q && (pl.targetOf(o.q.q) || o.q.pages.some((x) => pl.isPage(x.path)))) ? 1 : 0);
+  // Priority = the card's own page is a priority page, or the search is a page's target search
+  const priOf = (o) => (pl.isPage(o.url) || (o.q && pl.targetOf(o.q.q)) ? 1 : 0);
   for (const arr of Object.values(by)) {
     arr.forEach((o) => { o.pri = priOf(o); });
     arr.sort((a, b) => (b.pri - a.pri) || (b.gain || b.score || 0) - (a.gain || a.score || 0));
@@ -1571,6 +1582,11 @@ function viewSettings(wrap, c, ui) {
         <h3 style="margin:0" data-w-pcount>${keyPages.length} of 30 priority pages</h3><span class="seo-sp"></span>
         ${c.isAdmin ? `<button class="seo-btn${pPick ? "" : " on"}" type="button" data-w-ppick>${pPick ? "Close the list" : "+ Add pages"}</button>` : ""}
       </div>
+      ${c.isAdmin ? `<div class="seo-w-tip seo-row" style="margin:6px 0 10px">
+        <strong>Daily tasks</strong>
+        <input class="seo-input" type="number" min="1" max="30" step="1" style="min-width:0;width:72px" data-w-tpd
+          value="${Math.min(30, Math.max(1, Number(w.settings?.tasksPerDay) || 5))}" aria-label="Tasks per day">
+        <span class="seo-note">tasks a day for the SEO team, from these pages' action plans. Changes apply from tomorrow's list.</span></div>` : ""}
       <p class="seo-note">They show first across SEO, and Site health checks them every night. Dropping pages are listed first.
         Set a page's target search and goal in its ★ box (Open).${c.isAdmin ? "" : " Only admins can change priority pages."}</p>
       ${pPick && c.isAdmin ? `<div class="seo-card seo-w-picker">
@@ -1653,6 +1669,12 @@ function viewSettings(wrap, c, ui) {
   wrap.onchange = (e) => {
     const t = e.target;
     const row = t.closest(".seo-w-pk");
+    if (t.matches("[data-w-tpd]")) {
+      const n = Math.min(30, Math.max(1, Math.round(Number(t.value) || 5)));
+      t.value = n;
+      persist({ tasksPerDay: n });
+      return;
+    }
     if (t.dataset.wTname !== undefined) { saveTopics(); draw(); }
     else if (t.matches("[data-w-words]")) saveWording(t.value);
     else if (t.dataset.wTpage !== undefined && topics[sel]) {

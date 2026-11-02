@@ -4,14 +4,15 @@
 // ⚠️ Make these match recall.js exactly (same Firebase version, same db instance)
 import { db } from "./firebase-config.js";
 import { doc, getDoc, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan, titleOf } from "./seo-work.js?v=6";
+import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan, titleOf } from "./seo-work.js?v=10";
+import { renderTasks } from "./seo-tasks.js?v=1";
 import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js?v=2";
 
 const TABS = [
   { id: "overview", label: "Overview" },
   { id: "pages", label: "Pages" },
   { id: "keywords", label: "Keywords" },
-  { id: "opps", label: "Opportunities" },
+  { id: "opps", label: "Tasks" },
   { id: "health", label: "Site health" },
   { id: "audience", label: "Audience" },
   { id: "log", label: "Change log" },
@@ -455,6 +456,7 @@ export async function mountSeo(el, opts = {}) {
     setTabs();
     const warn = data.run && data.run.ok === false
       ? `<div class="seo-warn">The last nightly update failed, so these numbers may be out of date: ${esc(data.run.error || "")}</div>` : "";
+    if (tab === "opps") { renderTasks(body, ctx()); return; }
     if (tab !== "overview" && tab !== "pages") { renderWorkTab(tab, body, ctx()); return; }
     body.innerHTML = warn + (tab === "overview" ? overviewHtml() : pagesShellHtml());
     if (tab === "pages") renderTable();
