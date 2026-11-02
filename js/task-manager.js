@@ -310,17 +310,69 @@ async function renderCategory(main, key, isAdmin) {
     
     const tasks = (await listTaskTypes({ isAdmin: false })).filter((t) => t.category === key && !t.useFor);
     if (!list.isConnected) return;
-    list.innerHTML = tasks.length
-      ? tasks.map((t) => `
-          <button type="button" class="tm-task" data-run="${esc(t.id)}">
-            <span class="tm-task-icon">${I.mail}</span>
-            <span class="tm-task-main"><strong>${esc(t.name)}</strong><small>${esc(t.description || "Email")}${
-              t.schedule && t.schedule.enabled && !t.schedule.paused ? " · 🔁 Also sends automatically" : ""}</small></span>
-            <span class="tm-task-go">${I.chev}</span>
-          </button>`).join("")
-      : `<div class="tm-empty">No ${esc(cat.title)} tasks are published yet.${isAdmin
-          ? ' Set them up in <strong>Task types</strong>.<div class="tm-empty-act"><a class="ff-btn is-primary" href="#/tasks/types">Go to Task types</a></div>'
-          : " Ask an admin to set some up."}</div>`;
+    if (!tasks.length) {
+      list.innerHTML = `<div class="tm-empty">No ${esc(cat.title)} tasks are published yet.${isAdmin
+        ? ' Set them up in <strong>Task types</strong>.<div class="tm-empty-act"><a class="ff-btn is-primary" href="#/tasks/types">Go to Task types</a></div>'
+        : " Ask an admin to set some up."}</div>`;
+      return;
+    }
+
+    const row = (t) => `
+      <button type="button" class="tm-task" data-run="${esc(t.id)}"
+        data-find="${esc(`${t.name} ${t.description || ""}`.toLowerCase())}">
+        <span class="tm-task-icon">${I.mail}</span>
+        <span class="tm-task-main"><strong>${esc(t.name)}</strong><small>${esc(t.description || "Email")}${
+          t.schedule && t.schedule.enabled && !t.schedule.paused ? " · 🔁 Also sends automatically" : ""}</small></span>
+        <span class="tm-task-go">${I.chev}</span>
+      </button>`;
+    const searchable = tasks.length >= 5;
+    list.innerHTML = `
+      ${searchable ? `
+      <div class="pt-tools">
+        <label class="ib-search pt-find">${ic('<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>')}
+          <input type="search" data-role="find" placeholder="Search ${esc(cat.title)} tasks" aria-label="Search ${esc(cat.title)} tasks" autocomplete="off" spellcheck="false" /></label>
+        <small class="muted tm-find-count" data-role="count" aria-live="polite"></small>
+      </div>` : ""}
+      ${tasks.map(row).join("")}
+      <div class="tm-empty" data-role="nomatch" hidden>No tasks match “<span data-role="q"></span>”. Try a different word.</div>`;
+    if (!searchable) return;
+
+    // Search: every word typed must be in the task's name or description (any order).
+    // Remembered for this tab, so it's still there after opening a task and coming back.
+    const findEl = list.querySelector('[data-role="find"]');
+    const countEl = list.querySelector('[data-role="count"]');
+    const nomatch = list.querySelector('[data-role="nomatch"]');
+    const rows = [...list.querySelectorAll("[data-find]")];
+    const SKEY = `dm.tasks.find.${key}`;
+    const apply = () => {
+      const q = findEl.value.trim();
+      const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+      let n = 0;
+      rows.forEach((r) => {
+        const ok = words.every((w) => r.dataset.find.includes(w));
+        r.hidden = !ok;
+        if (ok) n++;
+      });
+      countEl.textContent = words.length ? `${n} of ${rows.length}` : "";
+      nomatch.hidden = n > 0;
+      nomatch.querySelector('[data-role="q"]').textContent = q;
+      try { sessionStorage.setItem(SKEY, q); } catch { /* private mode */ }
+    };
+    findEl.addEventListener("input", apply);
+    findEl.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        const first = rows.find((r) => !r.hidden);
+        if (first) { e.preventDefault(); first.click(); }
+      } else if (e.key === "Escape" && findEl.value) {
+        e.preventDefault();
+        findEl.value = "";
+        apply();
+      }
+    });
+    try { findEl.value = sessionStorage.getItem(SKEY) || ""; } catch { /* private mode */ }
+    if (findEl.value) apply();
+    // On a computer, ready to type. Not on iPads and phones, so the keyboard doesn't cover the list.
+    if (window.matchMedia("(pointer: fine)").matches) findEl.focus({ preventScroll: true });
   } catch (err) {
     console.error("Task list failed:", err);
     if (list.isConnected) list.innerHTML = '<div class="tm-empty is-error">Couldn\'t load the tasks. Check your connection and try again.</div>';

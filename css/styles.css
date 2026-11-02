@@ -10317,3 +10317,7 @@ body.pc-open { overflow: hidden; }
 @media (prefers-reduced-motion: reduce) {
   .lh-btn[aria-busy="true"]::before { animation-duration: 2s; }
 }
+
+/* Task Manager → a category's task list: search */
+.tm-find-count { margin-left: auto; white-space: nowrap; }
+.tm-task[hidden] { display: none !important; }
