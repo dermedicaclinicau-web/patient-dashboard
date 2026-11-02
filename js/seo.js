@@ -5,7 +5,8 @@
 import { db } from "./firebase-config.js";
 import { doc, getDoc, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan, titleOf } from "./seo-work.js?v=10";
-import { renderTasks } from "./seo-tasks.js?v=1";
+import { renderTasks } from "./seo-tasks.js?v=9";
+import { renderClusters } from "./seo-clusters.js?v=1";
 import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js?v=2";
 
 const TABS = [
@@ -380,7 +381,7 @@ export async function mountSeo(el, opts = {}) {
   let work = null;
   let tab = tabs.some((t) => t.id === param) ? param : "overview";
   const ui = { preset: "28", from: "", to: "", compare: "prev", gran: "auto", metric: "clicks",
-    sortKey: "clicks", sortDir: -1, filter: "", hideZero: true, limit: 100 };
+    sortKey: "clicks", sortDir: -1, filter: "", hideZero: true, limit: 100, pview: "table" };
   const OV_KEY = "dm.seo.overview";
   try {
     const s = JSON.parse(sessionStorage.getItem(OV_KEY) || "{}") || {};
@@ -457,6 +458,7 @@ export async function mountSeo(el, opts = {}) {
     const warn = data.run && data.run.ok === false
       ? `<div class="seo-warn">The last nightly update failed, so these numbers may be out of date: ${esc(data.run.error || "")}</div>` : "";
     if (tab === "opps") { renderTasks(body, ctx()); return; }
+    if (tab === "pages" && ui.pview === "clusters") { renderClusters(body, ctx()); return; }
     if (tab !== "overview" && tab !== "pages") { renderWorkTab(tab, body, ctx()); return; }
     body.innerHTML = warn + (tab === "overview" ? overviewHtml() : pagesShellHtml());
     if (tab === "pages") renderTable();
@@ -584,6 +586,8 @@ export async function mountSeo(el, opts = {}) {
   function pagesShellHtml() {
     return `
       <div class="seo-row">
+        <button class="seo-btn on" type="button" data-pview="table">All pages</button>
+        <button class="seo-btn" type="button" data-pview="clusters">Clusters</button>
         <input class="seo-input" data-filter placeholder="Filter pages, e.g. pigmentation" value="${esc(ui.filter)}">
         <label class="seo-check"><input type="checkbox" data-hidezero ${ui.hideZero ? "checked" : ""}> Hide pages with no activity</label>
         <label class="seo-check"><input type="checkbox" data-prionly ${ui.priOnly ? "checked" : ""}> ★ Priority pages only</label>
@@ -677,7 +681,7 @@ export async function mountSeo(el, opts = {}) {
   /* ----- events (delegated) ----- */
 
   root.addEventListener("click", (e) => {
-    const t = e.target.closest("[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
+    const t = e.target.closest("[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
     if (!t || !root.contains(t)) return;
     const ds = t.dataset;
 
@@ -700,6 +704,7 @@ export async function mountSeo(el, opts = {}) {
       }
       ui.preset = ds.preset; saveOv(); render();
     }
+    else if (ds.pview) { ui.pview = ds.pview; render(); }
     else if (ds.gran) { ui.gran = ds.gran; saveOv(); render(); }
     else if (ds.metric) { ui.metric = ds.metric; saveOv(); render(); }
     else if (ds.sort !== undefined) {

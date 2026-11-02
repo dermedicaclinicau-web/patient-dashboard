@@ -1527,7 +1527,7 @@ match /inv_count_drafts/{id} {
     match /seo_settings/{id} {
       allow read: if can('menu.seo');
       allow create: if can('seo.manage') && id == 'main'
-        && (isAdmin() || !request.resource.data.keys().hasAny(['keyPages', 'priorityInfo', 'tasksPerDay', 'tasks']));
+        && (isAdmin() || !request.resource.data.keys().hasAny(['keyPages', 'priorityInfo', 'tasksPerDay', 'tasks', 'clusters', 'clusterDismissed']));
       allow update: if can('seo.manage') && id == 'main'
         && (isAdmin() || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['keyPages', 'priorityInfo', 'tasksPerDay', 'tasks']));
       allow delete: if false;

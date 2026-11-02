@@ -11,7 +11,7 @@
 
 const SEO6_STOP_ = { in: 1, for: 1, the: 1, a: 1, an: 1, of: 1, and: 1, to: 1, on: 1, with: 1, near: 1, me: 1, my: 1, is: 1, are: 1,
   what: 1, how: 1, best: 1 };
-const SEO6_LOG_TYPE_ = { basics: 'Technical', match: 'Title / meta', connect: 'Links', content: 'Content', speed: 'Technical', off: 'Other', ai: 'Content' };
+const SEO6_LOG_TYPE_ = { basics: 'Technical', match: 'Title / meta', connect: 'Links', content: 'Content', speed: 'Technical', off: 'Other', ai: 'Content', cluster: 'Links' };
 
 function runSeoTaskChecks() { seo6Run_(false); }
 
@@ -46,7 +46,7 @@ function seo6Run_(dry) {
     Object.keys(t.steps).forEach(function (id) {
       const s = t.steps[id];
       if (!s || !s.check || s.status === 'confirmed' || s.status === 'done') return;
-      if (['manual', 'speed', 'index'].indexOf(s.check.k) !== -1) return;
+      if (['manual', 'speed', 'index', 'redirect'].indexOf(s.check.k) !== -1) return;
       const p = seo6Path_(s.check.page || t.path);
       urls[seo3Norm_(origin + p)] = origin + p;
     });
@@ -82,6 +82,21 @@ function seo6Run_(dry) {
     return hit && !hit.err ? hit.v : null;
   };
 
+  // Redirects ("merge into the main page"): read without following, once per page. '' = not redirecting, null = no answer.
+  const redirCache = {};
+  const redirectOf = function (path) {
+    const p = seo6Path_(path);
+    if (!(p in redirCache)) {
+      const r = seo3Fetch_([origin + p], false, false)[0];
+      if (!r || r.error) redirCache[p] = null;
+      else if (r.code >= 300 && r.code < 400) {
+        const abs = seo3Abs_(seo3Header_(r.headers, 'location'), origin + p);
+        redirCache[p] = abs ? seo3Short_(abs) : '';
+      } else redirCache[p] = '';
+    }
+    return redirCache[p];
+  };
+
   // When WordPress last saved each page (from SeoWp.gs), for the log
   const wpMod = {};
   try {
@@ -112,7 +127,7 @@ function seo6Run_(dry) {
       if (!s || !s.check || s.status === 'confirmed' || s.status === 'done' || s.check.k === 'manual') return;
       const pagePath = seo6Path_(s.check.page || t.path);
       const pg = pages[seo3Norm_(origin + pagePath)];
-      const pass = seo6Pass_(s.check, pg, { origin: origin, speed: speedOf, index: indexOf });
+      const pass = seo6Pass_(s.check, pg, { origin: origin, speed: speedOf, index: indexOf, redirect: redirectOf });
       if (pass === null) return;   // couldn't read the page tonight: try again tomorrow
       if (pass) {
         const was = s.status;
@@ -188,6 +203,10 @@ function seo6Has_(text, phrase) {
 
 // true = done, false = not done, null = couldn't tell tonight
 function seo6Pass_(k, pg, x) {
+  if (k.k === 'redirect') {
+    const to = x.redirect ? x.redirect(k.page) : null;
+    return to == null ? null : !!to && seo3Norm_(x.origin + seo6Path_(to)) === seo3Norm_(x.origin + seo6Path_(k.to));
+  }
   if (k.k === 'speed') { const s = x.speed(k.page); return s == null ? null : s >= (k.min || 50); }
   if (k.k === 'index') { const v = x.index(k.page); return v == null ? null : v === 'PASS'; }
   if (!pg) return null;

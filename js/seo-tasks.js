@@ -11,8 +11,8 @@ import { db, auth } from "./firebase-config.js";
 import {
   doc, getDoc, getDocs, collection, query, where, orderBy, limit, writeBatch, runTransaction, serverTimestamp, arrayUnion,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { npath, pageStory, priorityOf, prioritySettings, titleOf, complianceWords, renderOppsInto, taskConfig, pageOf, makeSortable }
-  from "./seo-work.js?v=13";
+import { npath, pageStory, priorityOf, prioritySettings, titleOf, complianceWords, renderOppsInto, taskConfig, pageOf, makeSortable,
+  clusterOfMain, linkState, redirectState } from "./seo-work.js?v=15";
 
 const GROUPS = {
   basics:  { order: 0, factor: 1,   title: () => "Fix what's holding it back" },
@@ -22,11 +22,12 @@ const GROUPS = {
   speed:   { order: 4, factor: 0.1, title: () => "Speed and images" },
   off:     { order: 5, factor: 0.1, title: () => "Promote it off the site" },
   ai:      { order: 1.5, factor: 1, title: () => "" },   // made by Seo7.gs (Claude), after "match", before "connect"
+  cluster: { order: 1.8, factor: 0.4, title: (m, r, cl) => `Tidy the ${cl?.name || "page"} cluster` },
 };
 const CHECK = {
   title: "Page title", titleMax: "Page title", titleNot: "Other page's title", h1: "Main heading", desc: "Description",
   heading: "Headings", headingAny: "Headings", text: "Page text", words: "Word count", link: "Links", absent: "Page text",
-  alt: "Images", speed: "Speed", index: "In Google", manual: "Not checked",
+  alt: "Images", speed: "Speed", index: "In Google", manual: "Not checked", redirect: "Redirect",
 };
 const STOPW = new Set(["in", "for", "the", "a", "an", "of", "and", "to", "on", "with", "near", "me", "my", "is", "are", "what", "how", "best"]);
 const QUESTION = /\b(how|what|why|when|does|do|can|is|are|should|which|vs|or|safe|hurt|last|long)\b/;
@@ -120,6 +121,8 @@ function planTasks(c, path) {
   }
   // Not itself, and not the home page: it shares searches with everything, so "link it with Home" isn't useful
   if (rival && (npath(rival) === me || npath(rival) === "/")) rival = "";
+  const cl = clusterOfMain(w, path);
+  if (cl && cl.pages.length) rival = "";   // the cluster's own task links its pages together
   const rTitle = rival ? titleOf(w, c.data, rival) : "";
   const rhp = rival ? hpOf(rival) : null;
 
@@ -173,6 +176,30 @@ function planTasks(c, path) {
     add("connect", "back:" + npath(rival), `Link from this page back to “${rTitle}” (e.g. “Read our full guide”)`, "Quick", { k: "link", ...pg, to: rival });
   }
 
+  /* The cluster: supporting pages link here, competing pages step back, merged pages redirect here */
+  if (cl) {
+    for (const m of cl.pages) {
+      const mt = titleOf(w, c.data, m.path);
+      if (m.role === "merge") {
+        if (redirectState(w, m.path, path) !== true) {
+          add("cluster", "redir:" + npath(m.path), `Merge “${mt}” into this page, then redirect its address here (301)`, "Bigger",
+            { k: "redirect", page: m.path, to: path },
+            `First move anything useful from ${m.path} into this page. Then redirect ${m.path} to ${path} (in Yoast, or a redirect plugin).`);
+        }
+        continue;
+      }
+      if (linkState(w, m.path, path) !== true) {
+        add("cluster", "clink:" + npath(m.path), `On “${mt}”, add a link to this page with the words “${main || "the treatment name"}”`, "Quick",
+          { k: "link", page: m.path, to: path }, "Near the top, and again at the end with “Book a consultation”.");
+      }
+      const mtitle = hpOf(m.path)?.title || w.cpages?.[npath(m.path)]?.title || "";
+      if (main && mtitle && hasWords(mtitle, main)) {
+        add("cluster", "cnot:" + npath(m.path), `Take “${main}” out of “${mt}”'s title, and aim it at its own question`, "Quick",
+          { k: "titleNot", page: m.path, has: main }, `Now: “${mtitle}”`);
+      }
+    }
+  }
+
   /* Content */
   for (const q of questions) {
     add("content", "faq:" + q.q, `Add an FAQ heading that answers “${q.q}”`, "Medium", { k: "heading", ...pg, has: q.q }, "2–3 sentences under the heading.");
@@ -201,7 +228,7 @@ function planTasks(c, path) {
   add("off", "gbp", `Add “${term}” as a service on Google Business Profile, with a link to this page`, "Quick", { k: "manual" });
 
   return Object.entries(g).map(([k, steps]) => ({
-    id: tid(path, k), path, group: k, title: GROUPS[k].title(main, rTitle), main,
+    id: tid(path, k), path, group: k, title: GROUPS[k].title(main, rTitle, cl), main,
     gain: Math.round(gain * GROUPS[k].factor), steps,
   }));
 }

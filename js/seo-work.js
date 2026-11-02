@@ -117,7 +117,7 @@ export async function loadWork(force) {
   if (wcache.v && !force) return wcache.v;
   if (wcache.pending) return wcache.pending;
   wcache.pending = (async () => {
-    const w = { queries: [], qs: null, settings: null, wp: null, opps: {}, log: [], errors: {}, prefill: null, health: null, audience: null };
+    const w = { queries: [], qs: null, settings: null, wp: null, cpages: null, cpagesAt: null, opps: {}, log: [], errors: {}, prefill: null, health: null, audience: null };
     const safe = async (k, fn) => { try { await fn(); } catch (e) { w.errors[k] = e.message || String(e); } };
     await Promise.all([
       safe("queries", async () => {
@@ -134,6 +134,11 @@ export async function loadWork(force) {
       safe("settings", async () => {
         const s = await getDoc(doc(db, "seo_settings", "main"));
         if (s.exists()) w.settings = s.data();
+      }),
+      safe("cpages", async () => {   // the pages in clusters, read each morning (Seo8.gs)
+        const s = await getDoc(doc(db, "seo_state", "clusterpages"));
+        if (!s.exists()) return;
+        try { w.cpages = JSON.parse(s.data().json || "{}"); w.cpagesAt = s.data().at || null; } catch { w.cpages = null; }
       }),
       safe("wp", async () => {   // page titles from WordPress (SeoWp.gs)
         const s = await getDoc(doc(db, "seo_settings", "wp"));
@@ -272,6 +277,33 @@ export function pageIndex(w, data) {
   return w._pidx;
 }
 export const titleOf = (w, data, path) => (w && pageIndex(w, data).get(path)?.title) || prettyPath(path);
+
+// Content clusters: seo_settings/main.clusters = [{ id, name, main, pages: [{ path, role: 'sup' | 'merge' }] }] (admins)
+export function clustersOf(w) {
+  const list = Array.isArray(w?.settings?.clusters) ? w.settings.clusters : [];
+  return list.filter((x) => x && x.main).map((x) => ({
+    id: String(x.id || ""), name: String(x.name || ""), main: String(x.main),
+    pages: (Array.isArray(x.pages) ? x.pages : []).filter((p) => p && p.path && npath(p.path) !== npath(x.main))
+      .map((p) => ({ path: String(p.path), role: p.role === "merge" ? "merge" : "sup" })),
+  }));
+}
+export const clusterOfMain = (w, path) => clustersOf(w).find((x) => npath(x.main) === npath(path)) || null;
+
+// Does "from" link to "to"? true / false, or null when that page hasn't been read yet
+export function linkState(w, from, to) {
+  const t = npath(to);
+  const hp = (w?.health?.pages || []).find((x) => npath(x.path) === npath(from));
+  if (hp && Array.isArray(hp.links)) return hp.links.some((l) => npath(l) === t);
+  const cp = w?.cpages?.[npath(from)];
+  if (cp && Array.isArray(cp.links) && cp.status === 200) return cp.links.some((l) => npath(l) === t);
+  return null;
+}
+// Does "from" redirect to "to"? true / false, or null when not read yet
+export function redirectState(w, from, to) {
+  const cp = w?.cpages?.[npath(from)];
+  if (!cp || !cp.status) return null;
+  return !!cp.redirect && npath(cp.redirect) === npath(to);
+}
 
 // The page with this address. Search Console can list the same page twice (with and without the end slash):
 // use the one with the search data.
