@@ -11,7 +11,7 @@
 
 const SEO6_STOP_ = { in: 1, for: 1, the: 1, a: 1, an: 1, of: 1, and: 1, to: 1, on: 1, with: 1, near: 1, me: 1, my: 1, is: 1, are: 1,
   what: 1, how: 1, best: 1 };
-const SEO6_LOG_TYPE_ = { basics: 'Technical', match: 'Title / meta', connect: 'Links', content: 'Content', speed: 'Technical', off: 'Other', ai: 'Content', cluster: 'Links' };
+const SEO6_LOG_TYPE_ = { basics: 'Technical', match: 'Title / meta', connect: 'Links', content: 'Content', speed: 'Technical', off: 'Other', ai: 'Content', cluster: 'Links', quality: 'Content' };
 
 function runSeoTaskChecks() { seo6Run_(false); }
 
@@ -190,6 +190,7 @@ function seo6Read_(html, url) {
   return {
     title: p.title || '', h1: p.h1Text || '', h1n: p.h1 || 0, desc: String(p.desc || ''),
     text: String(p.text || '').toLowerCase(), words: p.words || 0, noAlt: p.noAlt || 0, heads: heads, links: links,
+    faqSchema: /FAQPage/i.test(String(html)),
   };
 }
 
@@ -226,6 +227,7 @@ function seo6Pass_(k, pg, x) {
       return !re.test(pg.text + ' ' + pg.title.toLowerCase() + ' ' + pg.desc.toLowerCase());
     }
     case 'alt': return pg.noAlt === 0;
+    case 'faqSchema': return !!pg.faqSchema;
   }
   return null;
 }

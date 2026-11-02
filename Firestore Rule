@@ -1605,7 +1605,9 @@ match /inv_count_drafts/{id} {
       allow read: if can('menu.prospects');
       allow write: if false;
     }
-
+    // Site health → Content (Seo9.gs): content checks, duplicate pairs and the whole-site fingerprints. Apps Script only.
+    match /seo_content/{id} { allow read: if can('menu.seo'); allow write: if false; }
+    
     // ===================== Safety net =====================
     // Anything not allowed by a rule above stays locked
     // (this includes staff_roles and staff_audit, which only Apps Script writes)

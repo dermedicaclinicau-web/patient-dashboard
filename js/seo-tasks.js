@@ -12,7 +12,8 @@ import {
   doc, getDoc, getDocs, collection, query, where, orderBy, limit, writeBatch, runTransaction, serverTimestamp, arrayUnion,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { npath, pageStory, priorityOf, prioritySettings, titleOf, complianceWords, renderOppsInto, taskConfig, pageOf, makeSortable,
-  clusterOfMain, linkState, redirectState } from "./seo-work.js?v=15";
+  clusterOfMain, linkState, redirectState }   from "./seo-work.js?v=16";
+import { contentIssues } from "./seo-content.js?v=1";
 
 const GROUPS = {
   basics:  { order: 0, factor: 1,   title: () => "Fix what's holding it back" },
@@ -23,11 +24,12 @@ const GROUPS = {
   off:     { order: 5, factor: 0.1, title: () => "Promote it off the site" },
   ai:      { order: 1.5, factor: 1, title: () => "" },   // made by Seo7.gs (Claude), after "match", before "connect"
   cluster: { order: 1.8, factor: 0.4, title: (m, r, cl) => `Tidy the ${cl?.name || "page"} cluster` },
+  quality: { order: 0.5, factor: 0.2, title: () => "Fix spelling, grammar and wording" },
 };
 const CHECK = {
   title: "Page title", titleMax: "Page title", titleNot: "Other page's title", h1: "Main heading", desc: "Description",
   heading: "Headings", headingAny: "Headings", text: "Page text", words: "Word count", link: "Links", absent: "Page text",
-  alt: "Images", speed: "Speed", index: "In Google", manual: "Not checked", redirect: "Redirect",
+  alt: "Images", speed: "Speed", index: "In Google", manual: "Not checked", redirect: "Redirect", faqSchema: "FAQ schema",
 };
 const STOPW = new Set(["in", "for", "the", "a", "an", "of", "and", "to", "on", "with", "near", "me", "my", "is", "are", "what", "how", "best"]);
 const QUESTION = /\b(how|what|why|when|does|do|can|is|are|should|which|vs|or|safe|hurt|last|long)\b/;
@@ -142,6 +144,22 @@ function planTasks(c, path) {
   for (const i of (hp?.issues || []).filter((x) => x.group === "wording" && x.status !== "ignored")) {
     const word = String(i.key || "").replace(/^word:/, "");
     if (word) add("basics", "absent:" + word, `Remove or reword “${word}” (advertising rules)`, "Quick", { k: "absent", ...pg, word }, i.detail);
+  }
+
+  /* Spelling, grammar and advertising wording (Site health → Content), and FAQs */
+  for (const i of contentIssues(w, path).filter((x) => !x.ignored).slice(0, 10)) {
+    const lab = { spelling: "Spelling", grammar: "Grammar", au: "Australian English" }[i.type];
+    add("quality", "q:" + i.id, i.type === "compliance" ? `Reword “${i.text}” (advertising rules)` : `${lab}: change “${i.text}” to “${i.fix}”`, "Quick",
+      { k: "absent", ...pg, word: String(i.ph || i.text).toLowerCase() },
+      i.type === "compliance" ? `${i.why}${i.fix ? ` Suggested: “${i.fix}”` : ""}` : i.ctx);
+  }
+  const cd = w.health?.content?.deep?.[me];
+  if (cd && !cd.faq) {
+    add("quality", "faqsec", "Add an FAQ section with 3–5 questions people ask", "Medium",
+      { k: "headingAny", ...pg, any: ["faq", "frequently asked", "questions"] }, "Use your SEO plugin's FAQ block, so the page also gets FAQ schema.");
+  } else if (cd && !cd.faqSchema) {
+    add("quality", "faqschema", "Add FAQ schema to the FAQ section", "Quick", { k: "faqSchema", ...pg },
+      "Rebuild the questions with your SEO plugin's FAQ block (Yoast or Rank Math).");
   }
 
   /* Match the target search */

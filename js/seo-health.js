@@ -2,6 +2,7 @@
 // Reads seo_state/health, seo_health (current build) and seo_issues (what staff have ignored).
 
 import { db, auth } from "./firebase-config.js";
+import { contentHtml, contentClick } from "./seo-content.js?v=1";
 import {
   doc, getDoc, setDoc, collection, query, where, getDocs, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
@@ -189,6 +190,12 @@ export async function loadHealth() {
     getDocs(collection(db, "seo_issues"))
       .then((snap) => snap.docs.forEach((d) => { out.status[d.id] = d.data(); }))
       .catch((e) => console.warn("SEO issue statuses not read:", e)),
+    getDoc(doc(db, "seo_state", "content")).then(async (x) => {   // Site health → Content (Seo9.gs)
+      if (!x.exists()) return;
+      const [dp, du] = await Promise.all([getDoc(doc(db, "seo_content", "deep")), getDoc(doc(db, "seo_content", "dups"))]);
+      const j = (d, def) => { try { return d.exists() && d.data().json ? JSON.parse(d.data().json) : def; } catch { return def; } };
+      out.content = { state: x.data(), deep: j(dp, {}), dups: j(du, []) };
+    }).catch((e) => console.warn("SEO content checks not read:", e)),
     getDoc(doc(db, "seo_index", "main")).then((x) => {
       if (!x.exists()) return;
       const d = x.data();
@@ -254,7 +261,7 @@ export function viewHealth(wrap, c, ui) {
       : "No site health data yet. In Apps Script, run <code>runSeoHealth()</code> once (it takes a few minutes), then <code>installSeoHealthTrigger()</code>."}</div>`;
     return;
   }
-  if (!ui.hview) Object.assign(ui, { hview: "issues", hsev: "all", hgroup: "all", hstatus: "open" });
+  if (!ui.hview) Object.assign(ui, { hview: "content", hsev: "all", hgroup: "all", hstatus: "open" });
   const canWork = c.can("seo.work");
   const isPri = priOf(c);
   let byId = new Map();
@@ -418,17 +425,19 @@ export function viewHealth(wrap, c, ui) {
       ${st.speedProblem ? `<div class="seo-warn">${esc(st.speedProblem)}</div>` : ""}
       ${tiles(all)}
       <div class="seo-row">
+        <button class="seo-btn ${ui.hview === "content" ? "on" : ""}" data-h-view="content">Content</button>
         <button class="seo-btn ${ui.hview === "issues" ? "on" : ""}" data-h-view="issues">Issues</button>
         <button class="seo-btn ${ui.hview === "speed" ? "on" : ""}" data-h-view="speed">Speed</button>
         <button class="seo-btn ${ui.hview === "index" ? "on" : ""}" data-h-view="index">In Google</button>
         <span class="seo-sp"></span>
         <span class="seo-note">${st.linksChecked != null ? `${st.linksChecked} of ${st.linksFound} internal links checked · ` : ""}${c.isAdmin ? `Star pages (☆) in the <a href="#/seo/pages">Pages tab</a> to check them` : ""}</span>
       </div>
-      ${ui.hview === "speed" ? speedHtml() : ui.hview === "index" ? indexHtml() : issuesHtml(all)}`;
+      ${ui.hview === "content" ? contentHtml(c, ui) : ui.hview === "speed" ? speedHtml() : ui.hview === "index" ? indexHtml() : issuesHtml(all)}`;
   }
 
   wrap.onclick = async (e) => {
     if (e.target.closest("[data-open]")) return;   // seo.js opens the page panel
+    if (await contentClick(e, c, ui, draw)) return;   // the Content view's buttons
     const t = e.target.closest("[data-h-view],[data-h-sev],[data-h-group],[data-h-status],[data-h-log],[data-h-ignore],[data-h-undo]");
     if (!t) return;
     const d = t.dataset;

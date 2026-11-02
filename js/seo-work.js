@@ -5,7 +5,7 @@ import { db, auth } from "./firebase-config.js";
 import {
   doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, collection, query, where, getDocs, serverTimestamp, writeBatch,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { loadHealth, viewHealth, healthPanelHtml } from "./seo-health.js?v=2";
+import { loadHealth, viewHealth, healthPanelHtml } from "./seo-health.js?v=3";
 import { loadAudience, viewAudience } from "./seo-audience.js";
 
 const BRAND = "__brand", OTHER = "__other", ALL = "__all", PRI = "__priority";
@@ -1325,6 +1325,7 @@ function viewSettings(wrap, c, ui) {
   let guessed = st.topics.some((t) => t.guessed);
   let topics = st.topics.map((t) => ({ name: t.name, concern: t.concern.slice(), treatment: t.treatment.slice(), pages: t.pages.slice() }));
   let brand = st.brand.slice();
+  let spellWords = (Array.isArray(w.settings?.spellWords) ? w.settings.spellWords : []).slice();
   let keyPages = st.keyPages.slice();
   let wording = (st.compliance || COMPLIANCE).map((x) => ({ word: x.word, why: x.why }));
   let sel = -1, tPick = false, tFind = "", tMore = false;
@@ -1786,6 +1787,14 @@ function viewSettings(wrap, c, ui) {
           <input data-w-bin placeholder="Add a brand word, then Enter" maxlength="40" aria-label="Brand word"></div>
       </div>
       <div class="seo-card">
+        <h3 style="margin:0 0 4px">Spelling: words to accept</h3>
+        <p class="seo-note">Names, treatments and products the spelling check shouldn't flag. Common ones (Dermedica, Ultherapy, Cosmelan, HydraFacial and more),
+          your brand words and your topic words are already accepted.</p>
+        <div class="seo-w-chips">${spellWords.map((b, j) => `<span class="seo-w-tag is-b">${h.esc(b)}<button type="button" data-w-swx="${j}"
+            aria-label="Remove ${h.esc(b)}">×</button></span>`).join("")}
+          <input data-w-swin placeholder="Add a word, then Enter" maxlength="40" aria-label="Word to accept"></div>
+      </div>
+      <div class="seo-card">
         <div class="seo-row" style="margin:0 0 4px"><h3 style="margin:0">Advertising wording</h3>
           <span class="seo-note">${plural(wording.length, "word")}</span><span class="seo-sp"></span>
           <button class="seo-btn" type="button" data-w-wedit>${wEdit ? "Done" : "Edit list"}</button></div>
@@ -1901,6 +1910,14 @@ function viewSettings(wrap, c, ui) {
       } else if (e.key === "Backspace" && !ci.value && topics[+i][k].length) {
         topics[+i][k].pop(); saveTopics(); draw(); refocus(`[data-w-chipin="${i}|${k}"]`);
       }
+      return;
+    }
+    const si = e.target.closest?.("[data-w-swin]");
+    if (si && (e.key === "Enter" || e.key === ",")) {
+      e.preventDefault();
+      const add = si.value.split(",").map((x) => norm(x).slice(0, 40)).filter((x) => x && !spellWords.includes(x));
+      if (add.length) { spellWords = spellWords.concat(add).slice(0, 300); persist({ spellWords }); draw(); refocus("[data-w-swin]"); }
+      else si.value = "";
       return;
     }
     const bi = e.target.closest?.("[data-w-bin]");
@@ -2055,6 +2072,7 @@ function viewSettings(wrap, c, ui) {
     }
 
     /* brand and wording */
+    if (d.wSwx !== undefined) { spellWords.splice(+d.wSwx, 1); persist({ spellWords: spellWords.slice() }); draw(); return; }
     if (d.wBx !== undefined) { brand.splice(+d.wBx, 1); persist({ brand: brand.slice() }); draw(); return; }
     if (d.wWedit !== undefined) {
       const ta = wrap.querySelector("[data-w-words]");
