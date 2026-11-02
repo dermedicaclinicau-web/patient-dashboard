@@ -1191,6 +1191,7 @@ function viewSettings(wrap, c, ui) {
   let pPick = false, pFind = "", pFilt = "all", pMore = false;
   let cOpen = "", cMore = false, wEdit = false;
   let groupsBy = new Map();
+  let tMatch = [], tSugList = [];   // pages matching the search, and suggested pages not yet ticked
   let lastStatus = "";
 
   const busy = new Set(idx.list.filter((x) => x.clicks > 0).slice(0, 15).map((x) => npath(x.path)));
@@ -1229,7 +1230,7 @@ function viewSettings(wrap, c, ui) {
     const concern = [...new Set(x.concern.map(norm).filter(Boolean))].slice(0, 60);
     const treatment = [...new Set(x.treatment.map(norm).filter(Boolean))].filter((y) => !concern.includes(y)).slice(0, 60);
     return { name: (x.name.trim() || "Untitled topic").slice(0, 60), concern, treatment, words: [...concern, ...treatment],
-      pages: [...new Set(x.pages)].slice(0, 50) };
+      pages: [...new Set(x.pages)].slice(0, 300) };
   });
   let tTimer = null;
   function saveTopics(now) {   // typing and ticking come in bursts, so wait half a second
@@ -1334,9 +1335,23 @@ function viewSettings(wrap, c, ui) {
     const f = norm(tFind);
     const items = itemsWith(t.pages).filter((x) => matches(x, f)).sort((a, b) =>
       on.has(npath(b.path)) - on.has(npath(a.path)) || sug.has(npath(b.path)) - sug.has(npath(a.path)) || b.clicks - a.clicks);
+    tMatch = f ? items.map((x) => x.path) : [];
+    tSugList = items.filter((x) => !on.has(npath(x.path)) && sug.has(npath(x.path))).map((x) => x.path);
+    const onN = f ? items.filter((x) => on.has(npath(x.path))).length : on.size;
+    const offN = items.length - onN;
+
+    const bar = `<div class="seo-w-pkbar">
+      <span class="seo-note">${f ? `${plural(items.length, "page")} match “${h.esc(tFind.trim())}” · ${h.fmtInt(onN)} ticked`
+        : `${plural(on.size, "page")} ticked`}</span>
+      <span class="seo-sp"></span>
+      ${f ? (offN ? `<button class="seo-btn" type="button" data-w-tall>Tick all ${h.fmtInt(items.length)}</button>` : "")
+        : (tSugList.length ? `<button class="seo-btn" type="button" data-w-tall>Tick all ${h.fmtInt(tSugList.length)} suggested</button>` : "")}
+      ${onN ? `<button class="seo-btn" type="button" data-w-tnone>${f ? "Untick these" : "Untick all"}</button>` : ""}
+    </div>`;
+
+    if (!items.length) return bar + `<p class="seo-note">No pages match.</p>`;
     const lim = tMore ? 300 : f ? 30 : Math.max(8, on.size + Math.min(sug.size, 6));
-    if (!items.length) return `<p class="seo-note">No pages match.</p>`;
-    return `<div class="seo-w-pklist">${pickRows(items.slice(0, lim), (x) => on.has(npath(x.path)), (x) => sug.has(npath(x.path)), "data-w-tpage")}</div>
+    return bar + `<div class="seo-w-pklist">${pickRows(items.slice(0, lim), (x) => on.has(npath(x.path)), (x) => sug.has(npath(x.path)), "data-w-tpage")}</div>
       ${items.length > lim ? `<button class="seo-w-link" type="button" data-w-tmore>Show ${h.fmtInt(items.length - lim)} more</button>` : ""}`;
   }
 
@@ -1627,6 +1642,13 @@ function viewSettings(wrap, c, ui) {
       tp.pages = t.checked ? tp.pages.concat([t.dataset.wTpage]) : tp.pages.filter((p) => npath(p) !== k);
       row?.classList.toggle("is-on", t.checked);
       saveTopics();
+      const bar = wrap.querySelector("[data-w-tlist] .seo-w-pkbar");
+      if (bar) {   // redraw just the bar, so the list doesn't jump around while ticking
+        const tmp = document.createElement("div");
+        tmp.innerHTML = tListHtml(sel);
+        const fresh = tmp.querySelector(".seo-w-pkbar");
+        if (fresh) bar.replaceWith(fresh);
+      }
     } else if (t.dataset.wPpage !== undefined && c.isAdmin) {
       const k = npath(t.dataset.wPpage);
       if (t.checked && keyPages.length >= 30) { t.checked = false; toast("You can have up to 30 priority pages. Remove one first.", true); return; }
@@ -1703,6 +1725,28 @@ function viewSettings(wrap, c, ui) {
     if (d.wTpx !== undefined && topics[sel]) {
       topics[sel].pages = topics[sel].pages.filter((p) => npath(p) !== npath(d.wTpx));
       saveTopics(); draw(); return;
+    }
+    if (d.wTall !== undefined && topics[sel]) {
+      const tp = topics[sel];
+      const have = new Set(tp.pages.map(npath));
+      const add = (tFind.trim() ? tMatch : tSugList).filter((p) => !have.has(npath(p)));
+      if (!add.length) return;
+      tp.pages = tp.pages.concat(add);
+      saveTopics(); draw(); refocus("[data-w-tfind]");
+      toast(`Ticked ${plural(add.length, "page")}`);
+      return;
+    }
+    if (d.wTnone !== undefined && topics[sel]) {
+      const tp = topics[sel];
+      if (tFind.trim()) {
+        const drop = new Set(tMatch.map(npath));
+        tp.pages = tp.pages.filter((p) => !drop.has(npath(p)));
+      } else {
+        if (!confirm(`Untick all ${tp.pages.length} pages from ${tp.name}?`)) return;
+        tp.pages = [];
+      }
+      saveTopics(); draw(); refocus("[data-w-tfind]");
+      return;
     }
     if (d.wTmore !== undefined) { tMore = true; wrap.querySelector("[data-w-tlist]").innerHTML = tListHtml(sel); return; }
     if (d.wGok !== undefined) { guessed = false; saveTopics(true); draw(); return; }
@@ -1896,6 +1940,8 @@ span.seo-star{cursor:default}
 .seo-w-orow > div:first-child{display:flex;justify-content:space-between;gap:8px}
 .seo-w-oacts{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px}
 .seo-w-oacts .seo-input{width:100%;min-width:0;box-sizing:border-box;padding:4px 8px}
+.seo-w-pkbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 6px}
+.seo-w-pkbar .seo-btn{padding:4px 10px;font-size:12px}
 .seo-w-stabs{gap:6px;margin-bottom:14px}
 .seo-w-stab{border:1px solid var(--border,#e5e7eb);background:var(--card,#fff);color:inherit;border-radius:999px;padding:6px 14px;font:inherit;font-size:13px;cursor:pointer}
 .seo-w-stab.is-on{border-color:var(--accent,#2563eb);background:#eff6ff;color:#1d4ed8;font-weight:600}
