@@ -138,10 +138,12 @@ export async function loadWork(force) {
 }
 
 function rowToQ(r) {
-  const [q, c, i, pos, pc, pi, ppos, pages] = r;
+  const [q, c, i, pos, pc, pi, ppos, pages, ppages] = r;
+  const list = (a) => (a || []).map(([path, c2, i2, p2]) => ({ path, c: c2, i: i2, pos: p2 }));
   return {
     q: String(q), c, i, pos, pc, pi, ppos, ctr: i ? c / i : 0,
-    pages: (pages || []).map(([path, c2, i2, p2]) => ({ path, c: c2, i: i2, pos: p2 })),
+    pages: list(pages),
+    ppages: Array.isArray(ppages) ? list(ppages) : null,   // null: data from before this was added
   };
 }
 
@@ -169,6 +171,175 @@ function classify(w) {
   }
 }
 
+/* ---------- Page panel: why a page changed, and the pages it shares searches with ---------- */
+
+const npath = (s) => String(s || "").split("#")[0].split("?")[0].replace(/\/+$/, "").toLowerCase() || "/";
+const signed = (n) => { const r = Math.round(n); return (r > 0 ? "+" : r < 0 ? "−" : "") + Math.abs(r).toLocaleString("en-AU"); };
+const toneOf = (n) => (Math.round(n) > 0 ? "up" : Math.round(n) < 0 ? "down" : "flat");
+
+// Splits a page's click change (last 28 days vs the 28 before) into: fewer/more searches, clicks moving between
+// pages on the site, ranking, and click rate. Only searches Google shows (10+ impressions, top 5 pages each).
+function pageStory(w, p) {
+  const me = npath(p.path);
+  const mine = (list) => (list || []).find((x) => npath(x.path) === me) || null;
+  const b = { demand: 0, shift: 0, rank: 0, ctr: 0 };
+  const shiftBy = new Map();
+  const related = new Map();
+  const moves = [];
+  let seen = 0;
+
+  for (const q of w.queries) {
+    const now = mine(q.pages), was = mine(q.ppages);
+    if (!now && !was) continue;
+    const Pc = now?.c || 0, Pp = was?.c || 0;
+    seen += Pc - Pp;
+
+    // 1. What this page would have got if only the number of searches had changed
+    const expected = q.pi > 0 ? Pp * (q.i / q.pi) : Pp;
+    b.demand += expected - Pp;
+    let rem = Pc - expected;
+
+    // 2. Clicks that moved to (or from) other pages on the site for this search
+    const others = new Map();
+    const put = (x, k) => {
+      const key = npath(x.path);
+      if (key === me) return;
+      const o = others.get(key) || { path: x.path, now: null, was: null };
+      o[k] = x;
+      others.set(key, o);
+    };
+    q.pages.forEach((x) => put(x, "now"));
+    (q.ppages || []).forEach((x) => put(x, "was"));
+    let up = 0, down = 0;
+    for (const o of others.values()) {
+      o.d = (o.now?.c || 0) - (o.was?.c || 0);
+      if (o.d > 0) up += o.d; else down -= o.d;
+    }
+    if (rem < 0 && up > 0) {
+      const take = Math.min(-rem, up);
+      b.shift -= take; rem += take;
+      for (const o of others.values()) if (o.d > 0) shiftBy.set(o.path, (shiftBy.get(o.path) || 0) - (take * o.d) / up);
+    } else if (rem > 0 && down > 0) {
+      const take = Math.min(rem, down);
+      b.shift += take; rem -= take;
+      for (const o of others.values()) if (o.d < 0) shiftBy.set(o.path, (shiftBy.get(o.path) || 0) + (take * -o.d) / down);
+    }
+
+    // 3. What's left: ranking if the position moved half a place or more, otherwise click rate
+    const worse = (was && !now) || (now?.pos != null && was?.pos != null && now.pos - was.pos >= 0.5);
+    const better = (now && !was) || (now?.pos != null && was?.pos != null && was.pos - now.pos >= 0.5);
+    if ((rem < 0 && worse) || (rem > 0 && better)) b.rank += rem; else b.ctr += rem;
+
+    // Pages that show for the same searches
+    for (const o of others.values()) {
+      const k = npath(o.path);
+      const r = related.get(k) || { path: o.path, n: 0, imp: 0, myNow: 0, myWas: 0, thNow: 0, thWas: 0, myPw: 0, myPi: 0, thPw: 0, thPi: 0 };
+      r.n++; r.imp += q.i;
+      r.myNow += Pc; r.myWas += Pp; r.thNow += o.now?.c || 0; r.thWas += o.was?.c || 0;
+      if (now?.pos != null) { r.myPw += now.pos * now.i; r.myPi += now.i; }
+      if (o.now?.pos != null) { r.thPw += o.now.pos * o.now.i; r.thPi += o.now.i; }
+      related.set(k, r);
+    }
+    const rival = [...others.values()].filter((o) => o.now).sort((a, c2) => c2.now.c - a.now.c || c2.now.i - a.now.i)[0] || null;
+    moves.push({ q: q.q, Pc, Pp, now, was, rival });
+  }
+  return { b, seen, shiftBy, moves, related: [...related.values()].sort((a, c2) => c2.imp - a.imp) };
+}
+
+function storyHtml(w, p, h) {
+  if (!w.queries.length) return "";
+  if (!w.queries.some((q) => q.ppages)) {
+    return `<h3>Why it changed</h3><p class="seo-note">In Apps Script, run <code>runSeoQueries()</code> once to see why this page changed and which pages compete with it.</p>`;
+  }
+  const s = pageStory(w, p);
+  if (!s.moves.length) return `<h3>Why it changed</h3><p class="seo-note">No searches with enough impressions to explain it.</p>`;
+
+  const open = (path) => {
+    const id = h.idOf ? h.idOf(path) : "";
+    return id ? `<button class="seo-w-link" data-open="${h.esc(id)}">${h.esc(path)}</button>` : h.esc(path);
+  };
+  const links = new Map((w.health?.pages || []).filter((x) => Array.isArray(x.links))
+    .map((x) => [npath(x.path), new Set(x.links.map(npath))]));
+  const linksTo = (from, to) => { const l = links.get(npath(from)); return l ? l.has(npath(to)) : null; };
+
+  const total = p.m28.clicks - p.prev28.clicks;
+  const shifts = [...s.shiftBy.entries()].filter(([, v]) => Math.abs(v) >= 1)
+    .sort((a, c2) => Math.abs(c2[1]) - Math.abs(a[1])).slice(0, 3);
+  const parts = [
+    ["demand", s.b.demand < 0 ? "Fewer people searching" : "More people searching", s.b.demand,
+      "The searches themselves went " + (s.b.demand < 0 ? "down" : "up")],
+    ["shift", s.b.shift < 0 ? "Moved to other pages on the site" : "Moved here from other pages", s.b.shift,
+      shifts.map(([path, v]) => `${v < 0 ? "→" : "←"} ${open(path)} ${signed(v)}`).join("<br>")],
+    ["rank", s.b.rank < 0 ? "Ranking lower" : "Ranking higher", s.b.rank, "Its position on these searches moved"],
+    ["ctr", s.b.ctr < 0 ? "Fewer people clicking" : "More people clicking", s.b.ctr, "At about the same position"],
+  ].filter((x) => Math.abs(Math.round(x[2])) >= 1);
+
+  // The biggest cause in the same direction as the change
+  const main = parts.filter((x) => Math.sign(x[2]) === Math.sign(s.seen))
+    .sort((a, c2) => Math.abs(c2[2]) - Math.abs(a[2]))[0] || null;
+
+  let tip = "";
+  if (main && s.seen < 0) {
+    if (main[0] === "shift" && shifts.length) {
+      const [rp] = shifts[0];
+      const l = linksTo(rp, p.path);
+      tip = `Google now sends some of these searches to ${open(rp)} instead. If this page is where you want people to land
+        (to book), make it the clear answer: put the search words in its title and main heading, and
+        ${l === false ? `add a link from ${open(rp)} to this page using those words (it doesn't link here at the moment).`
+          : l === true ? `make sure the link from ${open(rp)} to this page uses those words (it already links here).`
+          : `add a link from ${open(rp)} to this page using those words.`}
+        Keep ${open(rp)} as the guide that answers the question, then points people here to book.`;
+    } else if (main[0] === "demand") {
+      tip = "Fewer people searched for these terms, so it isn't something the page did. Compare with the same time last year on the Overview: it may be seasonal.";
+    } else if (main[0] === "rank") {
+      tip = "This page ranks lower for its searches. Check Site health for problems, refresh the content, and look at who ranks above you for the searches below.";
+    } else {
+      tip = "It ranks about the same, but fewer people click. Rewrite the title and description to match these searches, and check whether Google now shows ads, a map or “People also ask” above it.";
+    }
+  }
+
+  const rel = s.related.filter((r) => r.n >= 2 || r.imp >= 50).slice(0, 5);
+  const pos = (pw, pi) => (pi ? h.fmtPos(pw / pi) : "—");
+  const linkCell = (r) => {
+    const a = linksTo(r.path, p.path), b2 = linksTo(p.path, r.path);
+    if (a == null && b2 == null) return `<span class="seo-note">not a key page</span>`;
+    return [a == null ? "" : a ? "links here ✓" : "doesn't link here", b2 == null ? "" : b2 ? "this links to it ✓" : "this doesn't link to it"]
+      .filter(Boolean).join("<br>");
+  };
+
+  const moves = s.moves.filter((m) => m.Pc !== m.Pp)
+    .sort((a, c2) => Math.abs(c2.Pc - c2.Pp) - Math.abs(a.Pc - a.Pp)).slice(0, 6);
+
+  return `
+    <h3>Why it changed <small class="seo-note">(28 days vs the 28 before)</small></h3>
+    ${parts.length ? `<ul class="seo-w-why">${parts.map(([k, label, v, sub]) => `
+      <li class="${main && main[0] === k ? "is-main" : ""}"><span>${h.esc(label)}${sub ? `<small>${sub}</small>` : ""}</span>
+        <span class="n ${toneOf(v)}">${signed(v)}</span></li>`).join("")}</ul>` : ""}
+    ${tip ? `<div class="seo-w-tip"><strong>What to do:</strong> ${tip}</div>` : ""}
+    <p class="seo-note">From searches Google shows (10+ impressions). They explain ${signed(s.seen)} of this page's ${signed(total)} clicks; the rest are rarer searches.</p>
+
+    ${rel.length ? `
+      <h3>Pages showing for the same searches</h3>
+      <table class="seo-w-mini seo-w-rel"><thead><tr><th>Page</th><th>Shared</th><th>This page</th><th>That page</th><th>Position</th><th>Links</th></tr></thead>
+        <tbody>${rel.map((r) => `<tr>
+          <td>${open(r.path)}</td>
+          <td>${h.fmtInt(r.n)}</td>
+          <td>${h.fmtInt(r.myWas)} → <strong>${h.fmtInt(r.myNow)}</strong></td>
+          <td>${h.fmtInt(r.thWas)} → <strong>${h.fmtInt(r.thNow)}</strong></td>
+          <td>${pos(r.myPw, r.myPi)} / ${pos(r.thPw, r.thPi)}</td>
+          <td class="seo-note">${linkCell(r)}</td></tr>`).join("")}</tbody></table>
+      <p class="seo-note">Clicks on the searches they share, before → now. Position: this page / that page.</p>` : ""}
+
+    ${moves.length ? `
+      <h3>Searches that moved</h3>
+      <table class="seo-w-mini"><thead><tr><th>Search</th><th>This page</th><th>Also showing now</th></tr></thead>
+        <tbody>${moves.map((m) => `<tr>
+          <td>${h.esc(m.q)}</td>
+          <td>${h.fmtInt(m.Pp)} → <strong>${h.fmtInt(m.Pc)}</strong><br><span class="seo-note">pos ${h.fmtPos(m.was?.pos ?? null)} → ${h.fmtPos(m.now?.pos ?? null)}</span></td>
+          <td>${m.rival ? `${open(m.rival.path)}<br><span class="seo-note">${h.fmtInt(m.rival.was?.c || 0)} → ${h.fmtInt(m.rival.now.c)} clicks · pos ${h.fmtPos(m.rival.now.pos)}</span>` : `<span class="seo-note">—</span>`}</td>
+        </tr>`).join("")}</tbody></table>` : ""}`;
+}
+
 /* ---------- used by seo.js ---------- */
 
 export function logMarks(w) {
@@ -181,7 +352,7 @@ export function pagePanelExtras(w, p, h, can) {
   for (const q of w.queries) { const x = q.pages.find((y) => y.path === p.path); if (x) qs.push({ q: q.q, ...x }); }
   qs.sort((a, b) => b.i - a.i);
   const logs = w.log.filter((e) => e.url === p.path);
-  return `<div class="seo-w-panel">${healthPanelHtml(w.health, p)}
+  return `<div class="seo-w-panel">${storyHtml(w, p, h)}${healthPanelHtml(w.health, p)}
     <h3>Top searches for this page <small class="seo-note">(28 days)</small></h3>
     ${qs.length
       ? `<table class="seo-kv"><tr><th>Search</th><th>Clicks</th><th>Impr.</th><th>Pos.</th></tr>${qs.slice(0, 15).map((x) =>
@@ -893,6 +1064,15 @@ const CSS = `
 .seo-w-trow{display:grid;grid-template-columns:180px minmax(0,1fr) auto auto;gap:6px;margin-bottom:6px}
 .seo-w-trow .seo-input,.seo-w-full{width:100%;min-width:0;box-sizing:border-box}
 .seo-w-panel h3{margin:18px 0 6px;font-size:14px}
+.seo-w-why{list-style:none;margin:6px 0 8px;padding:0;font-size:13px}
+.seo-w-why li{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;padding:6px 0;border-top:1px solid var(--border,#e5e7eb)}
+.seo-w-why li.is-main{font-weight:600}
+.seo-w-why small{display:block;margin-top:2px;font-weight:400;font-size:12px;color:var(--text-muted,#6b7280)}
+.seo-w-why .n{white-space:nowrap;font-weight:600}
+.seo-w-why .n.up{color:#16a34a}.seo-w-why .n.down{color:#dc2626}.seo-w-why .n.flat{color:var(--text-muted,#6b7280)}
+.seo-w-tip{padding:8px 10px;border-radius:8px;background:#eff6ff;font-size:13px;line-height:1.45;margin:6px 0 8px}
+.seo-w-rel td{vertical-align:top}
+.seo-w-mini td{vertical-align:top}
 .seo-w-plog{margin:0 0 10px;padding-left:18px;font-size:13px}
 .seo-w-plog span{color:var(--text-muted,#6b7280);margin-right:4px}
 .seo-mark line{stroke:#f59e0b;stroke-width:1.5;stroke-dasharray:4 4}

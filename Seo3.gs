@@ -82,6 +82,7 @@ function runSeoHealth() {
         title: p.title || '', desc: p.desc == null ? null : p.desc, canonical: p.canonical || '', robots: p.robots || '',
         h1: p.h1 || 0, h1Text: p.h1Text || '', imgs: p.imgs || 0, noAlt: p.noAlt || 0, words: p.words || 0,
         linksOut: p.hrefs ? p.hrefs.length : 0,
+        links: seo3LinkPaths_(c, origin),   // internal pages this page links to (for "does the guide link here?")
         speed: sNow,
         speedAt: fresh ? new Date() : (prev.speedAt ? new Date(prev.speedAt) : null),
         speedError: sp && sp.error ? sp.error : '',
@@ -303,6 +304,32 @@ function seo3Abs_(href, base) {
 }
 
 function seo3Short_(u) { return String(u).replace(/^https?:\/\/[^\/]+/i, '') || '/'; }
+
+// The site's own pages this page links to, as paths (up to 300)
+function seo3LinkPaths_(c, origin) {
+  const host = origin.replace(/^https?:\/\//i, '').toLowerCase().replace(/^www\./, '');
+  const out = {};
+  ((c.parsed && c.parsed.hrefs) || []).forEach(function (h) {
+    const abs = seo3Abs_(h, c.finalUrl || c.url).replace(/#.*$/, '').split('?')[0];
+    const m = /^https?:\/\/([^\/?#]+)/i.exec(abs);
+    if (!m || m[1].toLowerCase().replace(/^www\./, '') !== host || SEO3_SKIP_LINK_.test(abs)) return;
+    out[seo3Short_(abs)] = 1;
+  });
+  return Object.keys(out).slice(0, 300);
+}
+
+// The site's own pages this page links to, as paths (up to 300)
+function seo3LinkPaths_(c, origin) {
+  const host = origin.replace(/^https?:\/\//i, '').toLowerCase().replace(/^www\./, '');
+  const out = {};
+  ((c.parsed && c.parsed.hrefs) || []).forEach(function (h) {
+    const abs = seo3Abs_(h, c.finalUrl || c.url).replace(/#.*$/, '').split('?')[0];
+    const m = /^https?:\/\/([^\/?#]+)/i.exec(abs);
+    if (!m || m[1].toLowerCase().replace(/^www\./, '') !== host || SEO3_SKIP_LINK_.test(abs)) return;
+    out[seo3Short_(abs)] = 1;
+  });
+  return Object.keys(out).slice(0, 300);
+}
 function seo3Norm_(u) { return String(u || '').toLowerCase().replace(/^https?:\/\/(www\.)?/, '').replace(/#.*$/, '').replace(/\/+$/, ''); }
 function seo3Esc_(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 

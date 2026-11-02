@@ -636,8 +636,14 @@ export async function mountSeo(el, opts = {}) {
       </table>
       <h3 style="font-size:14px;margin:16px 0 6px">Clicks per week</h3>
       ${bars(p.weekly, weekLabels)}
-      ${pagePanelExtras(work, p, { esc, fmtInt, fmtPos, fmtDate }, can)}`;
+      ${pagePanelExtras(work, p, { esc, fmtInt, fmtPos, fmtDate, delta,
+        idOf: (path) => {
+          const n = (s) => String(s || "").split("#")[0].split("?")[0].replace(/\/+$/, "").toLowerCase() || "/";
+          const hit = data.pages.find((x) => x.path === path) || data.pages.find((x) => n(x.path) === n(path));
+          return hit ? hit.id : "";
+        } }, can)}`;
     panel.hidden = false;
+    panel.scrollTop = 0;
   }
 
   /* ----- events (delegated) ----- */

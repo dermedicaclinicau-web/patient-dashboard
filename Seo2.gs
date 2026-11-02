@@ -25,7 +25,7 @@ function runSeoQueries() {
     const from = seo2Add_(to, -27), prevTo = seo2Add_(to, -28), prevFrom = seo2Add_(to, -55);
 
     const map = {};
-    const get = (q) => map[q] || (map[q] = { c: 0, i: 0, pw: 0, pc: 0, pi: 0, ppw: 0, pages: {} });
+    const get = (q) => map[q] || (map[q] = { c: 0, i: 0, pw: 0, pc: 0, pi: 0, ppw: 0, pages: {}, ppages: {} });
 
     seo2Gsc_(site, from, to).forEach((r) => {
       const o = get(r.keys[0]), path = seo2Path_(r.keys[1]);
@@ -34,8 +34,10 @@ function runSeoQueries() {
       p.c += r.clicks; p.i += r.impressions; p.pw += r.position * r.impressions;
     });
     seo2Gsc_(site, prevFrom, prevTo).forEach((r) => {
-      const o = get(r.keys[0]);
+      const o = get(r.keys[0]), path = seo2Path_(r.keys[1]);
       o.pc += r.clicks; o.pi += r.impressions; o.ppw += r.position * r.impressions;
+      const p = o.ppages[path] || (o.ppages[path] = { c: 0, i: 0, pw: 0 });
+      p.c += r.clicks; p.i += r.impressions; p.pw += r.position * r.impressions;
     });
 
     const r1 = (n) => Math.round(n * 10) / 10;
@@ -45,12 +47,12 @@ function runSeoQueries() {
       .slice(0, SEO2_MAX_QUERIES_)
       .map((q) => {
         const o = map[q];
-        const pages = Object.keys(o.pages)
-          .map((p) => { const x = o.pages[p]; return [p, x.c, x.i, x.i ? r1(x.pw / x.i) : null]; })
+        const top = (src) => Object.keys(src)
+          .map((p) => { const x = src[p]; return [p, x.c, x.i, x.i ? r1(x.pw / x.i) : null]; })
           .sort((a, b) => b[2] - a[2])
           .slice(0, SEO2_MAX_PAGES_);
-        // [query, clicks, impressions, position, prevClicks, prevImpressions, prevPosition, pages]
-        return [q, o.c, o.i, o.i ? r1(o.pw / o.i) : null, o.pc, o.pi, o.pi ? r1(o.ppw / o.pi) : null, pages];
+        // [query, clicks, impressions, position, prevClicks, prevImpressions, prevPosition, pages, prevPages]
+        return [q, o.c, o.i, o.i ? r1(o.pw / o.i) : null, o.pc, o.pi, o.pi ? r1(o.ppw / o.pi) : null, top(o.pages), top(o.ppages)];
       });
 
     const now = new Date();
