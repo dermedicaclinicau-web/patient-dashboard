@@ -1531,17 +1531,35 @@ function viewSettings(wrap, c, ui) {
       return `<div class="seo-empty">No priority pages yet, so Site health checks the home page and your 15 busiest pages.${
         c.isAdmin ? `<br><br><button class="seo-btn on" type="button" data-w-ppick>Add pages</button>` : ""}</div>`;
     }
-    return `<div class="seo-w-pcards">${rows.map((r) => `<div class="seo-w-pcard">
-      <div class="seo-w-pch"><span class="seo-star is-on" aria-hidden="true">★</span>
-        <div style="min-width:0;flex:1"><strong class="seo-path" title="${h.esc(r.path)}">${h.esc(titleOf(w, c.data, r.path))}</strong>
-          <div class="seo-note seo-path seo-w-mono">${h.esc(r.path)}</div></div></div>
-      <div class="seo-w-pmeta"><span class="seo-pr-pill is-${r.tone}">${h.esc(r.label)}</span>
-        ${r.pr.target ? `<span class="seo-note seo-path" title="Target search">“${h.esc(r.pr.target)}”</span>` : `<span class="seo-note">No target search</span>`}</div>
-      ${r.why.length ? `<p class="seo-note seo-w-pwhy">${h.esc(r.why[0])}</p>` : ""}
-      <div class="seo-w-acts">
-        ${r.p ? `<button class="seo-btn" type="button" data-open="${h.esc(r.p.id)}">Open</button>` : ""}
-        ${c.isAdmin ? `<button class="seo-btn" type="button" data-w-prm="${h.esc(r.path)}">Remove</button>` : ""}
-      </div></div>`).join("")}</div>`;
+    const n = (tone) => rows.filter((r) => r.tone === tone).length;
+    const noTarget = rows.filter((r) => !r.pr.target).length;
+    const target = (r) => {
+      if (!r.pr.target) return `<span class="seo-note">Not set</span>`;
+      const pos = r.pos == null ? "not showing" : `position ${h.fmtPos(r.pos)}`;
+      const goal = r.goalMax ? (r.goalMet ? ` · <span class="seo-w-ok">✓ ${h.esc(r.goalLabel)}</span>` : ` · goal ${h.esc(r.goalLabel)}`) : "";
+      return `<div class="seo-w-ptitle">“${h.esc(r.pr.target)}”</div>
+        <div class="seo-note">${pos} ${r.pos != null ? h.delta(r.pos, r.ppos, { invert: true, abs: true }) : ""}${goal}</div>`;
+    };
+    return `
+      <div class="seo-w-psum">${[["red", "dropping or not in Google"], ["amber", "need work"], ["green", "on track"], ["grey", "no data yet"]]
+        .filter(([k]) => n(k)).map(([k, l]) => `<span class="seo-pr-pill is-${k}">${n(k)} ${l}</span>`).join("")}</div>
+      ${noTarget && c.isAdmin ? `<div class="seo-w-tip">${plural(noTarget, "page")} ${noTarget === 1 ? "has" : "have"} no target search,
+          so the status can't check a goal. <button class="seo-btn" type="button" data-w-pfill>Suggest target searches</button>
+          <span class="seo-note">Uses each page's busiest search. Change any of them from the page panel.</span></div>` : ""}
+      <div class="seo-table-wrap" style="max-height:none"><table class="seo-table seo-w-plist">
+        <thead><tr><th>Page</th><th>Status</th><th>Target search</th><th>Clicks</th><th>12 weeks</th><th></th></tr></thead>
+        <tbody>${rows.map((r) => `<tr${r.p ? ` data-open="${h.esc(r.p.id)}"` : ""}>
+          <td><div class="seo-w-pt"><span class="seo-star is-on" aria-hidden="true">★</span>
+            <div style="min-width:0"><div class="seo-w-ptitle" title="${h.esc(titleOf(w, c.data, r.path))}"><strong>${h.esc(titleOf(w, c.data, r.path))}</strong></div>
+              <div class="seo-note seo-w-mono seo-w-ptitle">${h.esc(r.path)}</div></div></div></td>
+          <td><span class="seo-pr-pill is-${r.tone}">${h.esc(r.label)}</span>
+            ${r.why.length ? `<div class="seo-w-pwhy">${h.esc(r.why[0])}</div>` : ""}</td>
+          <td>${target(r)}</td>
+          <td>${r.p ? `${h.fmtInt(r.p.m28.clicks)} ${h.delta(r.p.m28.clicks, r.p.prev28.clicks)}` : "—"}</td>
+          <td>${r.p && Array.isArray(r.p.weekly) ? h.sparkline(r.p.weekly) : ""}</td>
+          <td class="seo-w-pact">${c.isAdmin ? `<button class="seo-btn" type="button" data-w-prm="${h.esc(r.path)}">Remove</button>` : ""}</td>
+        </tr>`).join("")}</tbody></table></div>
+      <p class="seo-note" style="margin-top:6px">Last 28 days vs the 28 before. Click a page to open it.</p>`;
   }
 
   function priHtml() {
@@ -1681,9 +1699,11 @@ function viewSettings(wrap, c, ui) {
   };
 
   wrap.onclick = (e) => {
-    if (e.target.closest("[data-open]") || e.target.closest(".seo-w-pk")) return;   // seo.js opens pages; tick boxes use onchange
+    if (e.target.closest(".seo-w-pk")) return;   // tick boxes use onchange
     const t = e.target.closest("button");
-    if (!t) return;
+    if (!t || t.dataset.open !== undefined) return;   // rows and Open buttons: seo.js opens the page panel
+    // Buttons inside a clickable row shouldn't also open the panel
+    if (t.dataset.wPrm !== undefined || t.dataset.wPfill !== undefined) e.stopPropagation();
     commitPending();
     const d = t.dataset;
 
@@ -1796,6 +1816,25 @@ function viewSettings(wrap, c, ui) {
       if (keyPages.length && !confirm("Replace your priority pages with the home page and the 15 busiest pages?")) return;
       keyPages = ["/", ...idx.list.filter((x) => x.clicks > 0 && npath(x.path) !== "/").slice(0, 15).map((x) => x.path)];
       savePriority(); draw(); return;
+    }
+    if (d.wPfill !== undefined && c.isAdmin) {
+      const { paths, info } = prioritySettings(w);
+      const now = new Date().toISOString();
+      let n = 0;
+      const next = paths.map((p) => {
+        const cur = info.find((x) => npath(x.path) === npath(p)) || { path: p, target: "", goal: "", support: "", note: "" };
+        if (cur.target) return cur;   // keep targets someone already chose
+        const s = suggestPriority(w, c.data, p);
+        if (!s.target) return cur;
+        n++;
+        return { ...cur, path: cur.path || p, target: s.target, goal: cur.goal || s.goal, support: cur.support || s.support, by: uid(), at: now };
+      });
+      if (!n) { toast("These pages don't have enough searches yet to suggest one.", true); return; }
+      w.settings = { ...(w.settings || {}), priorityInfo: next };
+      persist({ priorityInfo: next });
+      toast(`Suggested ${plural(n, "target search")}. Check them in each page's panel.`);
+      draw();
+      return;
     }
     if (d.wPrm !== undefined && c.isAdmin) {
       if (!confirm(`Remove ${d.wPrm} from priority pages? Site health stops checking it.`)) return;
@@ -1940,6 +1979,15 @@ span.seo-star{cursor:default}
 .seo-w-orow > div:first-child{display:flex;justify-content:space-between;gap:8px}
 .seo-w-oacts{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px}
 .seo-w-oacts .seo-input{width:100%;min-width:0;box-sizing:border-box;padding:4px 8px}
+.seo-w-psum{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0}
+.seo-w-plist th,.seo-w-plist td{text-align:left;vertical-align:top}
+.seo-w-plist td{white-space:normal}
+.seo-w-plist td:first-child{width:38%;max-width:420px}
+.seo-w-pt{display:flex;gap:6px;align-items:flex-start;min-width:0}
+.seo-w-ptitle{max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.seo-w-pwhy{max-width:260px;margin-top:3px;font-size:12px;line-height:1.4;color:var(--text-muted,#6b7280)}
+.seo-w-ok{color:#047857;font-weight:600}
+.seo-w-pact{text-align:right !important;white-space:nowrap !important}
 .seo-w-pkbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 6px}
 .seo-w-pkbar .seo-btn{padding:4px 10px;font-size:12px}
 .seo-w-stabs{gap:6px;margin-bottom:14px}
