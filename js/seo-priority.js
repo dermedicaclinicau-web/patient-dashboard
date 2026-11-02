@@ -5,7 +5,7 @@
 import { db, auth } from "./firebase-config.js";
 import { doc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 // Must be exactly the same address seo.js imports seo-work.js from, or the browser loads it twice
-import { npath, pageStory, prioritySettings, priorityOf } from "./seo-work.js?v=5";
+import { npath, pageStory, prioritySettings, priorityOf, suggestPriority, titleOf } from "./seo-work.js?v=6";
 
 const MAX = 30;
 export const GOALS = [["top3", "Top 3", 3], ["top5", "Top 5", 5], ["page1", "Page 1", 10], ["", "No goal", null]];
@@ -48,24 +48,7 @@ async function save(c, paths, info) {
     { mergeFields: ["keyPages", "priorityInfo", "updatedBy", "updatedAt"] });
   c.work.settings = { ...(c.work.settings || {}), keyPages, priorityInfo };
 }
-
-// Starting details: the page's busiest non-brand search, and the page it shares the most searches with
-function suggest(c, path) {
-  const w = c.work, me = npath(path);
-  let best = null;
-  for (const q of w.queries) {
-    if (q.topic === "__brand") continue;
-    const x = q.pages.find((y) => npath(y.path) === me);
-    if (x && (!best || x.i > best.i)) best = { q: q.q, i: x.i, pos: x.pos };
-  }
-  let support = "";
-  const p = c.data.pages.find((x) => npath(x.path) === me);
-  if (p && w.queries.some((q) => q.ppages)) {
-    const r = pageStory(w, p).related[0];
-    if (r && r.imp >= 50) support = r.path;
-  }
-  return { target: best ? best.q : "", goal: best && best.pos != null && best.pos <= 5 ? "top3" : "page1", support };
-}
+const suggest = (c, path) => suggestPriority(c.work, c.data, path);
 
 // true = starred, false = unstarred, null = nothing changed
 export async function toggleStar(c, path) {
@@ -200,7 +183,8 @@ export function priorityCardHtml(c) {
     <div class="seo-table-wrap" style="max-height:none"><table class="seo-table seo-pr-t">
       <thead><tr><th>Page</th><th>Target search</th><th>Position</th><th>Clicks</th><th>12 weeks</th><th>Status</th></tr></thead>
       <tbody>${rows.map((r) => `<tr${r.p ? ` data-open="${esc(r.p.id)}"` : ""}>
-        <td><div class="seo-path" title="${esc(r.path)}">${starHtml(c, r.path)}${esc(r.path)}</div>
+        <td><div class="seo-path" title="${esc(r.path)}">${starHtml(c, r.path)}${esc(titleOf(c.work, c.data, r.path))}</div>
+          <div class="seo-note seo-path">${esc(r.path)}</div>
           ${r.pr.note ? `<div class="seo-pr-why">${esc(r.pr.note)}</div>` : ""}</td>
         <td>${r.pr.target ? esc(r.pr.target) : "—"}</td>
         <td>${posCell(r)}</td>

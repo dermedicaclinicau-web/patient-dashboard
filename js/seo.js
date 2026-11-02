@@ -4,8 +4,8 @@
 // ⚠️ Make these match recall.js exactly (same Firebase version, same db instance)
 import { db } from "./firebase-config.js";
 import { doc, getDoc, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan } from "./seo-work.js?v=5";
-import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast } from "./seo-priority.js?v=1";
+import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan, titleOf } from "./seo-work.js?v=6";
+import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast } from "./seo-priority.js?v=2";
 
 const TABS = [
   { id: "overview", label: "Overview" },
@@ -645,7 +645,8 @@ export async function mountSeo(el, opts = {}) {
 
     panel.innerHTML = `
       <button class="seo-btn x" data-close>Close</button>
-      <h2>${esc(p.path)}</h2>
+      <h2>${esc(titleOf(work, data, p.path))}</h2>
+      <div class="seo-note" style="word-break:break-all;margin-bottom:2px">${esc(p.path)}</div>
       <a href="${esc(p.url)}" target="_blank" rel="noopener" class="seo-note">Open page ↗</a>
       ${panelPriorityHtml({ ...ctx(), h: { esc, fmtInt, fmtPos, idOf: (path) => data.pages.find((x) => x.path === path)?.id || "" } }, p, prEdit === p.path)}
       <table class="seo-kv">
