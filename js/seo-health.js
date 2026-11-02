@@ -56,6 +56,15 @@ const HELP = {
 };
 const LIMITS = { lcp: [2500, 4000], inp: [200, 500], cls: [0.1, 0.25] };
 
+// Priority pages (seo_settings/main.keyPages). Read here so this file doesn't import seo-work.js.
+const normP = (s) => String(s || "").split("#")[0].split("?")[0].replace(/\/+$/, "").toLowerCase() || "/";
+function priOf(c) {
+  const s = c.work?.settings || {};
+  const set = new Set((Array.isArray(s.keyPages) ? s.keyPages : []).map(normP));
+  return (path) => (set.has(normP(path)) ? 1 : 0);
+}
+const starMark = (on) => (on ? `<span class="seo-star is-on" title="Priority page">★</span>` : "");
+
 /* ---------- helpers ---------- */
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
@@ -221,7 +230,7 @@ async function setStatus(c, i, status, note) {
 export function healthPanelHtml(H, p) {
   if (!H || !H.state) return "";
   const k = H.pages.find((x) => x.path === p.path);
-  if (!k) return `<p class="seo-note" style="margin-top:14px">Site health doesn't check this page. Add it under Settings → Key pages to check its speed, titles, links and wording every night.</p>`;
+  if (!k) return `<p class="seo-note" style="margin-top:14px">Site health checks priority pages only. Star this page (☆, admins) to check its speed, titles, links and wording every night.</p>`;
   const m = metricsOf(k.speed);
   const open = (k.issues || []).filter((i) => i.status === "open").sort((a, b) => SEV[a.sev].rank - SEV[b.sev].rank);
   const g = k.google;
@@ -247,6 +256,7 @@ export function viewHealth(wrap, c, ui) {
   }
   if (!ui.hview) Object.assign(ui, { hview: "issues", hsev: "all", hgroup: "all", hstatus: "open" });
   const canWork = c.can("seo.work");
+  const isPri = priOf(c);
   let byId = new Map();
 
   function tiles(all) {
@@ -258,7 +268,7 @@ export function viewHealth(wrap, c, ui) {
     const real = ms.filter((m) => m.pass !== null);
     const tile = (l, v, p) => `<div class="seo-kpi"><div class="l">${l}</div><div class="v">${v}</div>${p ? `<div class="p">${p}</div>` : ""}</div>`;
     return `<div class="seo-kpis">
-      ${tile("Key pages checked", H.pages.length, when(H.state.at))}
+      ${tile("Priority pages checked", H.pages.length, when(H.state.at))}
       ${tile("High", `<span class="seo-h-poor">${n("high")}</span>`, "open issues")}
       ${tile("Medium", `<span class="seo-h-ni">${n("medium")}</span>`, "open issues")}
       ${tile("Low", n("low"), "open issues")}
@@ -274,8 +284,8 @@ export function viewHealth(wrap, c, ui) {
 
   function issueRow(i) {
     const pg = c.byPath.get(i.path);
-    const where = pg ? `<button class="seo-w-link" data-open="${pg.id}">${esc(i.path)}</button>`
-      : `<a class="seo-w-link" href="${esc(i.url)}" target="_blank" rel="noopener">${esc(i.path)}</a>`;
+    const where = starMark(isPri(i.path)) + (pg ? `<button class="seo-w-link" data-open="${pg.id}">${esc(i.path)}</button>`
+      : `<a class="seo-w-link" href="${esc(i.url)}" target="_blank" rel="noopener">${esc(i.path)}</a>`);
     const ignored = i.status === "ignored";
     return `<div class="seo-h-issue is-${SEV[i.sev].tone}">
       <div class="seo-h-ihead"><span class="seo-w-pill is-${SEV[i.sev].tone}">${SEV[i.sev].label}</span>
@@ -296,7 +306,7 @@ export function viewHealth(wrap, c, ui) {
     for (const i of inStatus) gcount[i.group] = (gcount[i.group] || 0) + 1;
     const shown = inStatus
       .filter((i) => (ui.hsev === "all" || i.sev === ui.hsev) && (ui.hgroup === "all" || i.group === ui.hgroup))
-      .sort((a, b) => SEV[a.sev].rank - SEV[b.sev].rank || a.path.localeCompare(b.path));
+      .sort((a, b) => (isPri(b.path) - isPri(a.path)) || SEV[a.sev].rank - SEV[b.sev].rank || a.path.localeCompare(b.path));
     const chip = (attr, k, l, on, n) =>
       `<button class="seo-w-chip ${on ? "is-on" : ""}" ${attr}="${k}">${esc(l)}${n != null ? ` <em>${n}</em>` : ""}</button>`;
     return `
@@ -316,7 +326,7 @@ export function viewHealth(wrap, c, ui) {
   }
 
   function speedHtml() {
-    const rows = H.pages.slice().sort((a, b) => (a.speed?.score ?? 999) - (b.speed?.score ?? 999));
+    const rows = H.pages.slice().sort((a, b) => (isPri(b.path) - isPri(a.path)) || (a.speed?.score ?? 999) - (b.speed?.score ?? 999));
     return `<div class="seo-table-wrap"><table class="seo-table">
       <thead><tr><th>Page</th><th>Mobile score</th><th>Loading (LCP)</th><th>Responding (INP)</th><th>Shifting (CLS)</th><th>Measured from</th><th>Trend</th><th>Checked</th></tr></thead>
       <tbody>${rows.map((p) => {
@@ -324,7 +334,7 @@ export function viewHealth(wrap, c, ui) {
         const pg = c.byPath.get(p.path);
         const scores = (p.history || []).map((r) => r.s).filter((v) => v != null);
         return `<tr ${pg ? `data-open="${pg.id}"` : ""}>
-          <td><div class="seo-path" title="${esc(p.url)}">${esc(p.path)}</div></td>
+          <td><div class="seo-path" title="${esc(p.url)}">${starMark(isPri(p.path))}${esc(p.path)}</div></td>
           ${m ? `<td>${val("score", m.score)}</td><td>${val("lcp", m.lcp)}</td><td>${val("inp", m.inp)}</td><td>${val("cls", m.cls)}</td><td>${esc(m.from)}</td>`
             : `<td colspan="5" class="seo-note">${p.speedError ? esc(p.speedError) : "Not checked yet"}</td>`}
           <td>${scores.length > 1 ? c.h.sparkline(scores, 90, 22) : ""}</td>
@@ -374,7 +384,7 @@ export function viewHealth(wrap, c, ui) {
     return `
       ${I.state.ok === false && I.state.error ? `<div class="seo-warn">${esc(I.state.error)}</div>` : ""}
       ${X.quota ? `<div class="seo-warn">Google's daily URL Inspection limit was reached. The rest are checked tomorrow.</div>` : ""}
-      <div class="seo-card"><h3>Key pages in Google</h3>
+      <div class="seo-card"><h3>Priority pages in Google</h3>
         <div class="seo-table-wrap" style="max-height:none"><table class="seo-table">
           <thead><tr><th>Page</th><th>In Google</th><th>Google says</th><th>Google's last visit</th><th>Main version</th><th>In sitemap</th><th>Rich results</th><th></th></tr></thead>
           <tbody>${keyRows}</tbody></table></div>
@@ -412,7 +422,7 @@ export function viewHealth(wrap, c, ui) {
         <button class="seo-btn ${ui.hview === "speed" ? "on" : ""}" data-h-view="speed">Speed</button>
         <button class="seo-btn ${ui.hview === "index" ? "on" : ""}" data-h-view="index">In Google</button>
         <span class="seo-sp"></span>
-        <span class="seo-note">${st.linksChecked != null ? `${st.linksChecked} of ${st.linksFound} internal links checked · ` : ""}${c.can("seo.manage") ? `Choose pages in <a href="#/seo/settings">Settings</a>` : ""}</span>
+        <span class="seo-note">${st.linksChecked != null ? `${st.linksChecked} of ${st.linksFound} internal links checked · ` : ""}${c.isAdmin ? `Star pages (☆) in the <a href="#/seo/pages">Pages tab</a> to check them` : ""}</span>
       </div>
       ${ui.hview === "speed" ? speedHtml() : ui.hview === "index" ? indexHtml() : issuesHtml(all)}`;
   }

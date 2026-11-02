@@ -4,7 +4,7 @@
 // ⚠️ Make these match recall.js exactly (same Firebase version, same db instance)
 import { db } from "./firebase-config.js";
 import { doc, getDoc, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan } from "./seo-work.js?v=4";
+import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan } from "./seo-work.js?v=5";
 import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast } from "./seo-priority.js?v=1";
 
 const TABS = [

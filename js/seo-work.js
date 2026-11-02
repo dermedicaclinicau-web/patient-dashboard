@@ -5,10 +5,10 @@ import { db, auth } from "./firebase-config.js";
 import {
   doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, collection, query, where, getDocs, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { loadHealth, viewHealth, healthPanelHtml } from "./seo-health.js";
+import { loadHealth, viewHealth, healthPanelHtml } from "./seo-health.js?v=2";
 import { loadAudience, viewAudience } from "./seo-audience.js";
 
-const BRAND = "__brand", OTHER = "__other", ALL = "__all";
+const BRAND = "__brand", OTHER = "__other", ALL = "__all", PRI = "__priority";
 const EXP_CTR = [0.28, 0.16, 0.11, 0.08, 0.06, 0.045]; // rough click rate for positions 1–6
 const PER_TYPE = 40;                                     // open opportunities shown per type
 const OPP = {
@@ -183,6 +183,29 @@ export function prioritySettings(w) {
     info: (Array.isArray(s.priorityInfo) ? s.priorityInfo : []).filter((x) => x && x.path),
   };
 }
+// Quick lookups for the tabs: which pages are priority pages, and which searches are their targets
+function priorityLookup(w) {
+  const { paths, info } = prioritySettings(w);
+  const pathSet = new Set(paths.map(npath));
+  const targets = new Map();
+  for (const x of info) if (x.target && pathSet.has(npath(x.path))) targets.set(String(x.target).toLowerCase(), x.path);
+  return {
+    any: pathSet.size > 0,
+    isPage: (path) => !!path && pathSet.has(npath(path)),
+    targetOf: (q) => targets.get(String(q || "").toLowerCase()) || "",
+  };
+}
+
+// ★ next to a page in the tabs. Admins can click it (seo.js handles data-star); everyone else only sees ★.
+function star(c, path) {
+  if (!path) return "";
+  const on = priorityLookup(c.work).isPage(path);
+  const e = c.h.esc;
+  if (!c.isAdmin) return on ? `<span class="seo-star is-on" title="Priority page">★</span>` : "";
+  return `<button type="button" class="seo-star${on ? " is-on" : ""}" data-star="${e(path)}" aria-pressed="${on}"
+    title="${on ? "Priority page. Click to unstar" : "Star as a priority page"}">${on ? "★" : "☆"}</button>`;
+}
+
 export function priorityOf(w, path) {
   const { paths, info } = prioritySettings(w);
   const hit = paths.find((x) => npath(x) === npath(path));
@@ -577,7 +600,7 @@ function pagesList(pages, c) {
   return `<table class="seo-w-mini"><thead><tr><th>Page</th><th>Clicks</th><th>Impressions</th><th>Share</th><th>Position</th></tr></thead>
     <tbody>${pages.map((p) => {
       const pg = c.byPath.get(p.path);
-      const name = pg ? `<button class="seo-w-link" data-open="${pg.id}">${h.esc(p.path)}</button>` : h.esc(p.path);
+      const name = star(c, p.path) + (pg ? `<button class="seo-w-link" data-open="${pg.id}">${h.esc(p.path)}</button>` : h.esc(p.path));
       return `<tr><td>${name}</td><td>${h.fmtInt(p.c)}</td><td>${h.fmtInt(p.i)}</td><td>${Math.round((p.i / tot) * 100)}%</td><td>${h.fmtPos(p.pos)}</td></tr>`;
     }).join("")}</tbody></table>`;
 }
@@ -588,7 +611,10 @@ function viewKeywords(wrap, c, ui) {
   const { work: w, h } = c;
   if (!w.queries.length) { wrap.innerHTML = noQueries(c); return; }
   const qs = w.qs || {};
-  const label = (t) => (t === ALL ? "All searches" : t === BRAND ? "Brand searches" : t === OTHER ? "Not in a topic" : t);
+  const pl = priorityLookup(w);
+  const isPriQ = (q) => !!pl.targetOf(q.q) || pl.isPage(q.pages[0]?.path);
+  const label = (t) => (t === ALL ? "All searches" : t === PRI ? "★ Priority pages' searches" : t === BRAND ? "Brand searches"
+    : t === OTHER ? "Not in a topic" : t);
 
   const COLS = [
     { k: "q", l: "Search", get: (q) => q.q, asc: true },
@@ -602,10 +628,10 @@ function viewKeywords(wrap, c, ui) {
   ];
 
   function groups() {
-    const order = [ALL, ...settingsOf(w).topics.map((t) => t.name), OTHER, BRAND];
+    const order = [ALL, PRI, ...settingsOf(w).topics.map((t) => t.name), OTHER, BRAND];
     const g = new Map(order.map((k) => [k, { k, n: 0, c: 0, i: 0, pw: 0, pc: 0, pi: 0, ppw: 0 }]));
     for (const q of w.queries) {
-      for (const k of [ALL, q.topic]) {
+      for (const k of isPriQ(q) ? [ALL, PRI, q.topic] : [ALL, q.topic]) {
         const a = g.get(k);
         if (!a) continue;
         a.n++; a.c += q.c; a.i += q.i; a.pc += q.pc; a.pi += q.pi;
@@ -643,17 +669,18 @@ function viewKeywords(wrap, c, ui) {
 
   function qRow(q) {
     const row = `<tr data-w-qopen="${h.esc(q.q)}" class="${ui.qopen === q.q ? "is-on" : ""}">
-      <td><div class="seo-path">${h.esc(q.q)}</div></td><td>${h.fmtInt(q.c)}</td><td>${h.delta(q.c, q.pc)}</td>
+      <td><div class="seo-path">${pl.targetOf(q.q) ? `<span class="seo-star is-on" title="Target search for ${h.esc(pl.targetOf(q.q))}">★</span>` : ""}${h.esc(q.q)}</div></td><td>${h.fmtInt(q.c)}</td><td>${h.delta(q.c, q.pc)}</td>
       <td>${h.fmtInt(q.i)}</td><td>${h.fmtPct(q.ctr)}</td><td>${h.fmtPos(q.pos)}</td>
       <td>${h.delta(q.pos, q.ppos, { invert: true, abs: true })}</td>
-      <td><div class="seo-path seo-w-toppage">${h.esc(q.pages[0]?.path || "—")}</div></td></tr>`;
+      <td><div class="seo-path seo-w-toppage">${pl.isPage(q.pages[0]?.path) ? `<span class="seo-star is-on" title="Priority page">★</span>` : ""}${h.esc(q.pages[0]?.path || "—")}</div></td></tr>`;
     return ui.qopen === q.q ? row + `<tr class="seo-w-sub"><td colspan="8">${pagesList(q.pages, c)}</td></tr>` : row;
   }
 
   function drawQ() {
     const f = norm(ui.qfilter);
     const col = COLS.find((x) => x.k === ui.qsort) || COLS[3];
-    let rows = w.queries.filter((q) => (ui.topic === ALL || q.topic === ui.topic) && (!f || q.q.toLowerCase().includes(f)));
+    let rows = w.queries.filter((q) => (ui.topic === ALL || (ui.topic === PRI ? isPriQ(q) : q.topic === ui.topic))
+      && (!f || q.q.toLowerCase().includes(f)));
     rows.sort((a, b) => {
       const va = col.get(a), vb = col.get(b);
       if (va == null && vb == null) return 0;
@@ -733,8 +760,11 @@ function buildOpps(c) {
   }
 
   const list = [];
+  const pl = priorityLookup(w);
+  const priOf = (o) => (pl.isPage(o.url) || (o.q && (pl.targetOf(o.q.q) || o.q.pages.some((x) => pl.isPage(x.path)))) ? 1 : 0);
   for (const arr of Object.values(by)) {
-    arr.sort((a, b) => (b.gain || b.score || 0) - (a.gain || a.score || 0));
+    arr.forEach((o) => { o.pri = priOf(o); });
+    arr.sort((a, b) => (b.pri - a.pri) || (b.gain || b.score || 0) - (a.gain || a.score || 0));
     let shown = 0;
     for (const o of arr) {
       o.id = oppId(o.key);
@@ -747,7 +777,7 @@ function buildOpps(c) {
   const seen = new Set(list.map((o) => o.id));
   for (const [id, s] of Object.entries(w.opps)) {
     if (seen.has(id) || !s.status || s.status === "open") continue;
-    list.push({ id, key: s.key, type: s.type, title: s.label, url: s.url, gain: 0, st: s, status: s.status, stale: true });
+    list.push({ id, key: s.key, type: s.type, title: s.label, url: s.url, gain: 0, st: s, status: s.status, stale: true, pri: pl.isPage(s.url) ? 1 : 0 });
   }
   return list;
 }
@@ -796,13 +826,14 @@ function oppCard(o, c) {
     : btn("open", "Back to to-do");
   const at = tsDate(o.st?.at);
   const quoted = o.type === "decay" ? h.esc(o.title) : `“${h.esc(o.title)}”`;
-  return `<article class="seo-w-card is-${T.tone}">
+  return `<article class="seo-w-card is-${T.tone}${o.pri ? " is-pri" : ""}">
     <header><span class="seo-w-pill is-${T.tone}">${h.esc(T.label)}</span>
+      ${o.pri ? `<span class="seo-w-pill is-pri">★ Priority${o.q && priorityLookup(c.work).targetOf(o.q.q) ? " · target search" : ""}</span>` : ""}
       ${o.gain > 0 ? `<span class="seo-w-gain">≈ +${h.fmtInt(o.gain)} clicks / 28 days</span>` : ""}</header>
     <h4>${quoted}</h4>
     ${oppBody(o, c)}
     ${(o.type === "striking" || o.type === "ctr" || o.type === "area" || o.stale) && o.url
-      ? `<p class="seo-note">Page: ${pg ? `<button class="seo-w-link" data-open="${pg.id}">${h.esc(o.url)}</button>` : h.esc(o.url)}</p>` : ""}
+      ? `<p class="seo-note">Page: ${star(c, o.url)}${pg ? `<button class="seo-w-link" data-open="${pg.id}">${h.esc(o.url)}</button>` : h.esc(o.url)}</p>` : ""}
     ${o.type === "decay" && pg && !o.stale ? `<p><button class="seo-w-link" data-open="${pg.id}">Open page details</button></p>` : ""}
     ${o.st ? `<p class="seo-note">${STATUS[o.status] || ""} · ${h.esc(o.st.byName || "someone")}${at ? " · " + at.toLocaleDateString("en-AU", { day: "numeric", month: "short" }) : ""}</p>` : ""}
     ${canWork
@@ -833,18 +864,20 @@ function viewOpps(wrap, c, ui) {
   function draw() {
     const list = buildOpps(c);
     byId = new Map(list.map((o) => [o.id, o]));
-    const inType = list.filter((o) => ui.otype === "all" || o.type === ui.otype);
+    const inType = list.filter((o) => (ui.otype === "all" || o.type === ui.otype) && (!ui.opri || o.pri));
     const counts = {};
     for (const o of inType) counts[o.status] = (counts[o.status] || 0) + 1;
     const tcount = {};
     for (const o of list) if (o.status === ui.ostatus) tcount[o.type] = (tcount[o.type] || 0) + 1;
-    const show = inType.filter((o) => o.status === ui.ostatus);
+    const show = inType.filter((o) => o.status === ui.ostatus).sort((a, b) => (b.pri || 0) - (a.pri || 0));
 
     wrap.innerHTML = `
       ${staleWarn(c)}
       ${!w.queries.length ? `<div class="seo-warn">Search data isn't loaded yet, so only “Losing clicks” can be worked out. Run <code>runSeoQueries()</code> in Apps Script.</div>` : ""}
       <div class="seo-row">${Object.entries(STATUS).map(([k, l]) =>
-        `<button class="seo-btn ${ui.ostatus === k ? "on" : ""}" data-w-status="${k}">${l} <span class="seo-w-n">${counts[k] || 0}</span></button>`).join("")}</div>
+        `<button class="seo-btn ${ui.ostatus === k ? "on" : ""}" data-w-status="${k}">${l} <span class="seo-w-n">${counts[k] || 0}</span></button>`).join("")}
+        <span class="seo-sp"></span>
+        ${priorityLookup(w).any ? `<button class="seo-w-chip ${ui.opri ? "is-on" : ""}" data-w-opri>★ Priority pages only</button>` : ""}</div>
       <div class="seo-row">${[["all", "All types"], ...Object.entries(OPP).map(([k, v]) => [k, v.label])].map(([k, l]) =>
         `<button class="seo-w-chip ${ui.otype === k ? "is-on" : ""}" data-w-type="${k}">${h.esc(l)}${k !== "all" ? ` <em>${tcount[k] || 0}</em>` : ""}</button>`).join("")}</div>
       <p class="seo-note">Worked out from the last 28 days. Brand searches are left out. Extra clicks are a rough estimate, so use them to pick what to do first.</p>
@@ -853,9 +886,10 @@ function viewOpps(wrap, c, ui) {
 
   wrap.onclick = async (e) => {
     if (e.target.closest("[data-open]")) return;
-    const t = e.target.closest("[data-w-status],[data-w-type],[data-w-ost],[data-w-olog],[data-w-savenote]");
+    const t = e.target.closest("[data-w-opri],[data-w-status],[data-w-type],[data-w-ost],[data-w-olog],[data-w-savenote]");
     if (!t) return;
     const d = t.dataset;
+    if (d.wOpri !== undefined) { ui.opri = !ui.opri; draw(); return; }
     if (d.wStatus) { ui.ostatus = d.wStatus; draw(); return; }
     if (d.wType) { ui.otype = d.wType; draw(); return; }
     const o = byId.get(d.wId || d.wOlog || d.wSavenote);
@@ -899,11 +933,12 @@ function effect(e, c) {
   return ba(b, a, pg ? "Site clicks per week (not enough page history)" : "Site clicks per week, before → after");
 }
 
-function viewLog(wrap, c) {
+function viewLog(wrap, c, ui) {
   const { work: w, h } = c;
   const canWork = c.can("seo.work"), canManage = c.can("seo.manage");
   const me = uid();
-  const paths = c.data.pages.map((p) => p.path).sort();
+  const plL = priorityLookup(w);
+  const paths = c.data.pages.map((p) => p.path).sort((a, b) => (plL.isPage(b) - plL.isPage(a)) || a.localeCompare(b));
   let pre = w.prefill || null;
   let edit = null;
   w.prefill = null;
@@ -924,7 +959,7 @@ function viewLog(wrap, c) {
           <input class="seo-input" name="url" list="seo-w-paths" value="${h.esc(f.url || "")}" placeholder="/melasma-treatment-perth/"></label>
         <label class="is-wide">Notes<textarea class="seo-input" name="note" rows="3" maxlength="2000">${h.esc(f.note || "")}</textarea></label>
       </div>
-      <datalist id="seo-w-paths">${paths.map((p) => `<option value="${h.esc(p)}">`).join("")}</datalist>
+      <datalist id="seo-w-paths">${paths.map((p) => `<option value="${h.esc(p)}"${plL.isPage(p) ? ' label="★ Priority page"' : ""}>`).join("")}</datalist>
       ${pre?.opp && !edit ? `<label class="seo-check"><input type="checkbox" name="done" checked> Mark the opportunity as done</label>` : ""}
       <div class="seo-w-acts">
         <button class="seo-btn on" type="submit">${edit ? "Save changes" : "Save"}</button>
@@ -937,8 +972,10 @@ function viewLog(wrap, c) {
     if (!w.log.length) {
       return `<div class="seo-empty">No changes logged yet. Log title rewrites, content updates, new pages and technical fixes here, so you can see what moved the numbers.</div>`;
     }
+    const entries = ui.lpri ? w.log.filter((e) => plL.isPage(e.url)) : w.log;
+    if (!entries.length) return `<div class="seo-empty">No changes logged for priority pages yet.</div>`;
     let month = "";
-    return w.log.map((e) => {
+    return entries.map((e) => {
       const m = e.date.slice(0, 7);
       const head = m !== month
         ? `<h4 class="seo-w-month">${new Date(e.date + "T00:00:00Z").toLocaleDateString("en-AU", { month: "long", year: "numeric", timeZone: "UTC" })}</h4>` : "";
@@ -949,7 +986,7 @@ function viewLog(wrap, c) {
         <div class="seo-w-edate">${h.fmtDate(e.date)}</div>
         <div class="seo-w-emain">
           <div><span class="seo-w-pill is-grey">${h.esc(e.type || "Other")}</span> <strong>${h.esc(e.title)}</strong></div>
-          <div class="seo-note">${e.url ? (pg ? `<button class="seo-w-link" data-open="${pg.id}">${h.esc(e.url)}</button>` : h.esc(e.url)) : "Site-wide"}</div>
+          <div class="seo-note">${e.url ? star(c, e.url) + (pg ? `<button class="seo-w-link" data-open="${pg.id}">${h.esc(e.url)}</button>` : h.esc(e.url)) : "Site-wide"}</div>
           ${e.note ? `<p class="seo-w-enote">${h.esc(e.note)}</p>` : ""}
           <div class="seo-w-effect">${effect(e, c)}</div>
           ${e.byName ? `<div class="seo-note">${h.esc(e.byName)}</div>` : ""}
@@ -963,7 +1000,8 @@ function viewLog(wrap, c) {
     wrap.innerHTML = `<div class="seo-w-log${canWork ? "" : " is-ro"}">
       ${canWork ? formHtml() : ""}
       <div class="seo-card">
-        <h3 style="margin:0 0 4px">Changes</h3>
+        <div class="seo-row" style="margin:0 0 4px"><h3 style="margin:0">Changes</h3><span class="seo-sp"></span>
+          ${plL.any ? `<button class="seo-w-chip ${ui.lpri ? "is-on" : ""}" type="button" data-w-lpri>★ Priority pages only</button>` : ""}</div>
         <p class="seo-note">Before/after numbers are a rough guide. Seasons, ads and other changes move them too.</p>
         ${listHtml()}
       </div>
@@ -1003,9 +1041,10 @@ function viewLog(wrap, c) {
 
   wrap.onclick = async (e) => {
     if (e.target.closest("[data-open]")) return;
-    const t = e.target.closest("[data-w-edit],[data-w-del],[data-w-cancel]");
+    const t = e.target.closest("[data-w-lpri],[data-w-edit],[data-w-del],[data-w-cancel]");
     if (!t) return;
     const d = t.dataset;
+    if (d.wLpri !== undefined) { ui.lpri = !ui.lpri; draw(); return; }
     if (d.wCancel !== undefined) { edit = null; pre = null; draw(); return; }
     const entry = w.log.find((x) => x.id === (d.wEdit || d.wDel));
     if (!entry) return;
@@ -1067,12 +1106,15 @@ function viewSettings(wrap, c) {
         </div>
 
         <div class="seo-card">
-          <h3 style="margin:0 0 4px">Key pages</h3>
-          <p class="seo-note">The pages Site health checks every night: speed, titles, links and advertising wording.
-            One per line, up to 30, e.g. <code>/melasma-treatment-perth/</code>. Leave it empty to check the home page and the 15 busiest pages.</p>
-          <textarea class="seo-input seo-w-full seo-w-ta" rows="9" data-w-keypages placeholder="/book-now/">${h.esc(keyPages)}</textarea>
+          <h3 style="margin:0 0 4px">★ Priority pages</h3>
+          <p class="seo-note">The pages that matter most. They show first across SEO, and Site health checks them every night:
+            speed, titles, links, advertising wording and whether they're in Google. One per line, up to 30.
+            The easiest way to add one is the ☆ next to a page in the <a href="#/seo/pages">Pages tab</a>, where you can also set its target search and goal.
+            Leave it empty to check the home page and the 15 busiest pages.</p>
+          <textarea class="seo-input seo-w-full seo-w-ta" rows="9" data-w-keypages placeholder="/book-now/"${c.isAdmin ? "" : " readonly"}>${h.esc(keyPages)}</textarea>
+          ${c.isAdmin ? "" : `<p class="seo-note">Only admins can change priority pages.</p>`}
           <div class="seo-w-acts">
-            <button class="seo-btn" type="button" data-w-top>Use the busiest pages</button>
+            ${c.isAdmin ? `<button class="seo-btn" type="button" data-w-top>Use the busiest pages</button>` : ""}
             <span class="seo-note" data-w-kpn>${lines(keyPages).length} page${lines(keyPages).length === 1 ? "" : "s"}</span>
           </div>
         </div>
@@ -1166,7 +1208,8 @@ function viewSettings(wrap, c) {
       }
       t.disabled = true;
       try {
-        const data = { topics: clean, brand: brands, keyPages: pages, compliance: wordList.slice(0, 200) };
+        // Only admins change priority pages; for everyone else the list is left as it is
+        const data = { topics: clean, brand: brands, compliance: wordList.slice(0, 200), ...(c.isAdmin ? { keyPages: pages } : {}) };
         await setDoc(doc(db, "seo_settings", "main"), { ...data, updatedBy: uid(), updatedAt: serverTimestamp() }, { merge: true });
         w.settings = { ...(w.settings || {}), ...data };
         classify(w);
@@ -1266,6 +1309,11 @@ const CSS = `
 .seo-mark circle{fill:#f59e0b;cursor:help}
 .seo-w-toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:2000;padding:10px 16px;border-radius:999px;background:#0f172a;color:#fff;font-size:14px;box-shadow:0 8px 24px rgba(0,0,0,.2)}
 .seo-w-toast.is-bad{background:#b91c1c}
+.seo-star{border:0;background:none;padding:0 5px 0 0;font:inherit;font-size:15px;line-height:1;color:#cbd5e1;cursor:pointer;vertical-align:-1px}
+.seo-star:hover,.seo-star.is-on{color:#f59e0b}
+span.seo-star{cursor:default}
+.seo-w-pill.is-pri{--pbg:#fffbeb;--pfg:#b45309}
+.seo-w-card.is-pri{background:linear-gradient(#fffdf5,#fff 45%)}
 @media (max-width:900px){.seo-w-log,.seo-w-set{grid-template-columns:1fr}}
 @media (max-width:640px){
   .seo-w-entry{grid-template-columns:1fr}

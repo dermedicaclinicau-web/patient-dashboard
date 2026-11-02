@@ -5,7 +5,7 @@
 import { db, auth } from "./firebase-config.js";
 import { doc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 // Must be exactly the same address seo.js imports seo-work.js from, or the browser loads it twice
-import { npath, pageStory, prioritySettings, priorityOf } from "./seo-work.js?v=4";
+import { npath, pageStory, prioritySettings, priorityOf } from "./seo-work.js?v=5";
 
 const MAX = 30;
 export const GOALS = [["top3", "Top 3", 3], ["top5", "Top 5", 5], ["page1", "Page 1", 10], ["", "No goal", null]];
