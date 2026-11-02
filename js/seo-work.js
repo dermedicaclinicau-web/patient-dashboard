@@ -173,13 +173,29 @@ function classify(w) {
 
 /* ---------- Page panel: why a page changed, and the pages it shares searches with ---------- */
 
-const npath = (s) => String(s || "").split("#")[0].split("?")[0].replace(/\/+$/, "").toLowerCase() || "/";
+export const npath = (s) => String(s || "").split("#")[0].split("?")[0].replace(/\/+$/, "").toLowerCase() || "/";
+
+// Priority pages: keyPages (also read by Site health) + priorityInfo [{ path, target, goal, support, note }]
+export function prioritySettings(w) {
+  const s = w?.settings || {};
+  return {
+    paths: (Array.isArray(s.keyPages) ? s.keyPages : []).map(String).filter(Boolean),
+    info: (Array.isArray(s.priorityInfo) ? s.priorityInfo : []).filter((x) => x && x.path),
+  };
+}
+export function priorityOf(w, path) {
+  const { paths, info } = prioritySettings(w);
+  const hit = paths.find((x) => npath(x) === npath(path));
+  if (!hit) return null;
+  const meta = info.find((x) => npath(x.path) === npath(hit)) || {};
+  return { target: "", goal: "", support: "", note: "", ...meta, path: hit };
+}
 const signed = (n) => { const r = Math.round(n); return (r > 0 ? "+" : r < 0 ? "−" : "") + Math.abs(r).toLocaleString("en-AU"); };
 const toneOf = (n) => (Math.round(n) > 0 ? "up" : Math.round(n) < 0 ? "down" : "flat");
 
 // Splits a page's click change (last 28 days vs the 28 before) into: fewer/more searches, clicks moving between
 // pages on the site, ranking, and click rate. Only searches Google shows (10+ impressions, top 5 pages each).
-function pageStory(w, p) {
+export function pageStory(w, p) {
   const me = npath(p.path);
   const mine = (list) => (list || []).find((x) => npath(x.path) === me) || null;
   const b = { demand: 0, shift: 0, rank: 0, ctr: 0 };
@@ -283,16 +299,18 @@ function planHtml(w, p, s, h, open, linksTo) {
   }
   mine.sort((a, b) => b.i - a.i);
   const usable = mine.filter((m) => !flagged(m.q));
-  const main = (usable[0] || {}).q || "";
+  const pri = priorityOf(w, p.path);
+  const target = pri?.target && !flagged(pri.target) ? pri.target : "";
+  const main = target || (usable[0] || {}).q || "";
   const topBad = mine[0] && flagged(mine[0].q) ? mine[0] : null;
-  const others = usable.slice(1, 6).map((m) => m.q);
+  const others = usable.filter((m) => m.q !== main).slice(0, 5).map((m) => m.q);
   const questions = usable.filter((m) => QUESTION.test(m.q)).slice(0, 4).map((m) => m.q);
   const priceQ = usable.find((m) => PRICE.test(m.q));
 
   // The page taking its clicks, or else the related page ranking above it
   const shifts = [...s.shiftBy.entries()].filter(([, v]) => v <= -1).sort((a, b) => a[1] - b[1]);
   const r0 = s.related[0];
-  const rival = shifts[0] ? shifts[0][0]
+  const rival = pri?.support ? pri.support : shifts[0] ? shifts[0][0]
     : r0 && r0.thPi && r0.myPi && r0.thPw / r0.thPi < r0.myPw / r0.myPi ? r0.path : "";
   const rhp = rival ? hpOf(rival) : null;
 
@@ -395,7 +413,7 @@ function planHtml(w, p, s, h, open, linksTo) {
     .filter((x) => x !== null).join("\n");
 
   return `<details class="seo-w-plan"${s.seen < 0 ? " open" : ""}>
-    <summary>Action plan <small>step by step${main ? ` · main search ${q(main)}` : ""}</small></summary>
+    <summary>Action plan <small>step by step${main ? ` · ${target ? "target search" : "main search"} ${q(main)}` : ""}</small></summary>
     ${groups.map(([title, list]) => `<h4>${title}</h4><ol>${list.map((x) =>
       `<li><span class="seo-w-eff is-${x.effort.toLowerCase()}" title="${EFFORT_TIP[x.effort]}">${x.effort}</span> ${x.html}</li>`).join("")}</ol>`).join("")}
     <div class="seo-w-acts"><button class="seo-btn" type="button" data-copyplan>Copy as a brief</button>

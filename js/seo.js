@@ -4,7 +4,8 @@
 // ⚠️ Make these match recall.js exactly (same Firebase version, same db instance)
 import { db } from "./firebase-config.js";
 import { doc, getDoc, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan } from "./seo-work.js";
+import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan } from "./seo-work.js?v=4";
+import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast } from "./seo-priority.js?v=1";
 
 const TABS = [
   { id: "overview", label: "Overview" },
@@ -373,6 +374,7 @@ export async function mountSeo(el, opts = {}) {
   injectCss();
 
   const can = makeCan(opts);
+  const isAdmin = opts.isAdmin === true || /^admin$/i.test(String(opts.staff?.role || opts.staff?.staffRole || ""));
   const tabs = TABS.filter((t) => !t.manage || can("seo.manage"));
   let work = null;
   let tab = tabs.some((t) => t.id === param) ? param : "overview";
@@ -394,6 +396,8 @@ export async function mountSeo(el, opts = {}) {
     return rangeOf(ui, end, d[0]?.date || end, d[d.length - 1]?.date || end);
   };
   let data = null;
+  let panelId = null;   // the page open in the side panel
+  let prEdit = null;    // the priority page whose details are being edited
 
   el.innerHTML = `
     <div class="seo">
@@ -439,7 +443,7 @@ export async function mountSeo(el, opts = {}) {
 
   function ctx() {
     return {
-      data, work, can, staff: opts.staff,
+      data, work, can, isAdmin, staff: opts.staff,
       h: { esc, fmtInt, fmtPct, fmtPos, delta, addDays, fmtDate, sumRange, sparkline },
       byPath: new Map(data.pages.map((p) => [p.path, p])),
       setTab: (id) => { tab = id; history.replaceState(null, "", "#/seo/" + id); render(); },
@@ -510,7 +514,7 @@ export async function mountSeo(el, opts = {}) {
     const losers = ranked.filter((p) => p.dClicks < 0).sort((a, b) => a.dClicks - b.dClicks).slice(0, 6);
     const list = (arr) => arr.length
       ? `<ul class="seo-list">${arr.map((p) => `
-          <li data-open="${p.id}"><span class="seo-path" title="${esc(p.url)}">${esc(p.path)}</span>
+          <li data-open="${p.id}"><span class="seo-path" title="${esc(p.url)}">${starHtml(ctx(), p.path)}${esc(p.path)}</span>
           <span>${fmtInt(p.m28.clicks)} ${delta(p.m28.clicks, p.prev28.clicks)}</span></li>`).join("")}</ul>`
       : `<div class="seo-note">Nothing notable.</div>`;
 
@@ -531,6 +535,7 @@ export async function mountSeo(el, opts = {}) {
       </div>
       ${fresh ? `<p class="seo-note" style="margin:-4px 0 12px">The last ${fresh} day${fresh === 1 ? "" : "s"} may still change: Search Console takes about 3 days to settle. They're shaded on the chart.</p>` : ""}
       <div class="seo-kpis">${kpis}</div>
+      ${priorityCardHtml(ctx())}
       <div class="seo-card">
         <div class="seo-row">
           <h3 style="margin:0">Trend</h3>
@@ -578,6 +583,7 @@ export async function mountSeo(el, opts = {}) {
       <div class="seo-row">
         <input class="seo-input" data-filter placeholder="Filter pages, e.g. pigmentation" value="${esc(ui.filter)}">
         <label class="seo-check"><input type="checkbox" data-hidezero ${ui.hideZero ? "checked" : ""}> Hide pages with no activity</label>
+        <label class="seo-check"><input type="checkbox" data-prionly ${ui.priOnly ? "checked" : ""}> ★ Priority pages only</label>
         <span class="seo-sp"></span><span class="seo-note" data-count></span>
       </div>
       <div class="seo-table-wrap" data-table></div>
@@ -587,7 +593,7 @@ export async function mountSeo(el, opts = {}) {
   function renderTable() {
     const f = ui.filter.trim().toLowerCase();
     let rows = data.pages.filter((p) =>
-      (!f || p.url.toLowerCase().includes(f)) &&
+      (!f || p.url.toLowerCase().includes(f)) && (!ui.priOnly || isPriorityPath(work, p.path)) &&
       (!ui.hideZero || p.m28.clicks || p.m28.impressions || p.m28.sessions));
 
     const col = COLS.find((c) => c.key === ui.sortKey) || COLS[1];
@@ -601,6 +607,7 @@ export async function mountSeo(el, opts = {}) {
 
     const total = rows.length;
     rows = rows.slice(0, ui.limit);
+    const cx = ctx();
     $("[data-count]").textContent = `${fmtInt(total)} pages`;
 
     $("[data-table]").innerHTML = `
@@ -608,7 +615,7 @@ export async function mountSeo(el, opts = {}) {
         <thead><tr>${COLS.map((c) => `<th data-sort="${c.get ? c.key : ""}" class="${ui.sortKey === c.key ? "on" : ""}">${c.label}${ui.sortKey === c.key ? (ui.sortDir > 0 ? " ↑" : " ↓") : ""}</th>`).join("")}</tr></thead>
         <tbody>${rows.map((p) => `
           <tr data-open="${p.id}">
-            <td><div class="seo-path" title="${esc(p.url)}">${esc(p.path)}</div></td>
+            <td><div class="seo-path" title="${esc(p.url)}">${starHtml(cx, p.path)}${esc(p.path)}</div></td>
             <td>${fmtInt(p.m28.clicks)}</td>
             <td>${delta(p.m28.clicks, p.prev28.clicks)}</td>
             <td>${fmtInt(p.m28.impressions)}</td>
@@ -629,6 +636,8 @@ export async function mountSeo(el, opts = {}) {
   function openPanel(id) {
     const p = data.pages.find((x) => x.id === id);
     if (!p) return;
+    panelId = id;
+    if (prEdit && prEdit !== p.path) prEdit = null;
     const end = data.ov.periodEnd;
     const weekLabels = p.weekly.map((_, i) => "Week to " + fmtDate(addDays(end, -7 * (11 - i)), false));
     const row = (label, cur, prev, fmt, opts) =>
@@ -638,6 +647,7 @@ export async function mountSeo(el, opts = {}) {
       <button class="seo-btn x" data-close>Close</button>
       <h2>${esc(p.path)}</h2>
       <a href="${esc(p.url)}" target="_blank" rel="noopener" class="seo-note">Open page ↗</a>
+      ${panelPriorityHtml({ ...ctx(), h: { esc, fmtInt, fmtPos, idOf: (path) => data.pages.find((x) => x.path === path)?.id || "" } }, p, prEdit === p.path)}
       <table class="seo-kv">
         <tr><th></th><th>Last 28d</th><th>Prev 28d</th><th></th></tr>
         ${row("Clicks", p.m28.clicks, p.prev28.clicks, fmtInt)}
@@ -663,9 +673,16 @@ export async function mountSeo(el, opts = {}) {
   /* ----- events (delegated) ----- */
 
   root.addEventListener("click", (e) => {
-    const t = e.target.closest("[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
+    const t = e.target.closest("[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
     if (!t || !root.contains(t)) return;
     const ds = t.dataset;
+
+    // Priority pages (admins only). These come first, because the star sits inside clickable rows.
+    if (ds.star !== undefined || ds.pedit !== undefined || ds.pcancel !== undefined || ds.psave !== undefined) {
+      if (!isAdmin) return;
+      priorityAction(t, ds);
+      return;
+    }
 
     if (ds.tab !== undefined) {
       tab = ds.tab;
@@ -710,6 +727,37 @@ export async function mountSeo(el, opts = {}) {
     }
   });
 
+  // After a priority page changes: redraw the tab, and the panel if it's open
+  function afterPriority() {
+    if (tab === "pages") renderTable(); else render();
+    if (!panel.hidden && panelId) openPanel(panelId);
+  }
+
+  async function priorityAction(t, ds) {
+    if (ds.pedit !== undefined) { prEdit = ds.pedit; if (panelId) openPanel(panelId); return; }
+    if (ds.pcancel !== undefined) { prEdit = null; if (panelId) openPanel(panelId); return; }
+    t.disabled = true;
+    try {
+      if (ds.star !== undefined) {
+        const on = await toggleStar(ctx(), ds.star);
+        if (on === null) return;
+        // Starred from the panel: open the details straight away to check them
+        prEdit = on && !panel.hidden ? ds.star : null;
+      } else {
+        const val = (k) => panel.querySelector(`[data-pf="${k}"]`)?.value || "";
+        await savePriorityDetails(ctx(), ds.psave, { target: val("target"), goal: val("goal"), support: val("support"), note: val("note") });
+        prEdit = null;
+        prToast("Saved");
+      }
+      afterPriority();
+    } catch (err) {
+      console.error("Priority page not saved:", err);
+      prToast(/permission/i.test(err.message || "") ? "You don't have permission to change priority pages." : (err.message || "Couldn't save. Try again."), true);
+    } finally {
+      if (t.isConnected) t.disabled = false;
+    }
+  }
+
   root.addEventListener("change", (e) => {
     const t = e.target;
     if (t.matches("[data-compare]")) { ui.compare = t.value; saveOv(); render(); }
@@ -723,6 +771,7 @@ export async function mountSeo(el, opts = {}) {
   root.addEventListener("input", (e) => {
     if (e.target.matches("[data-filter]")) { ui.filter = e.target.value; ui.limit = 100; renderTable(); }
     else if (e.target.matches("[data-hidezero]")) { ui.hideZero = e.target.checked; renderTable(); }
+    else if (e.target.matches("[data-prionly]")) { ui.priOnly = e.target.checked; renderTable(); }
   });
 
   const onKey = (e) => {
