@@ -25,6 +25,8 @@ const GROUPS = {
   ai:      { order: 1.5, factor: 1, title: () => "" },   // made by Seo7.gs (Claude), after "match", before "connect"
   cluster: { order: 1.8, factor: 0.4, title: (m, r, cl) => `Tidy the ${cl?.name || "page"} cluster` },
   quality: { order: 0.5, factor: 0.2, title: () => "Fix spelling, grammar and wording" },
+  advisor: { order: 0.2, factor: 0, title: () => "" },     // from the Advisor (website steps)
+  marketing: { order: 0.3, factor: 0, title: () => "" },   // from the Advisor (marketing steps, ticked by hand)
 };
 const CHECK = {
   title: "Page title", titleMax: "Page title", titleNot: "Other page's title", h1: "Main heading", desc: "Description",
@@ -264,12 +266,13 @@ async function load(S) {
 
 const isPri = (c, path) => !!priorityOf(c.work, path);
 const started = (t) => (t.order || []).some((id) => t.steps[id] && t.steps[id].status !== "todo");
-const isLive = (c, t) => t.status !== "done" && t.status !== "dismissed" && (isPri(c, t.path) || started(t));
+const isLive = (c, t) => t.status !== "done" && t.status !== "dismissed" && (t.source === "advisor" || isPri(c, t.path) || started(t));
 
 // Priority number first (#1 before #2), then the kind of job, then the expected gain
 function rankOf(c) {
   const num = new Map(prioritySettings(c.work).paths.map((p, i) => [npath(p), i]));
-  return (a, b) => (num.get(npath(a.path)) ?? 999) - (num.get(npath(b.path)) ?? 999)
+  // Tasks from the Advisor (goals and page reviews) come first: someone asked for them
+  return (a, b) => ((b.source === "advisor") - (a.source === "advisor")) || (num.get(npath(a.path)) ?? 999) - (num.get(npath(b.path)) ?? 999)
     || GROUPS[a.group].order - GROUPS[b.group].order || (b.gain || 0) - (a.gain || 0);
 }
 const priNum = (c, path) => {

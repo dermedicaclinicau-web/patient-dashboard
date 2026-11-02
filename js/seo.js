@@ -6,11 +6,13 @@ import { db } from "./firebase-config.js";
 import { doc, getDoc, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan, titleOf } from "./seo-work.js?v=15";
 import { renderTasks } from "./seo-tasks.js?v=9";
-import { renderClusters } from "./seo-clusters.js?v=1";
+import { renderClusters } from "./seo-clusters.js?v=2";
+import { renderAdvisor } from "./seo-advisor.js?v=1";
 import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js?v=9";
 
 const TABS = [
   { id: "overview", label: "Overview" },
+  { id: "advisor", label: "Advisor" },
   { id: "pages", label: "Pages" },
   { id: "keywords", label: "Keywords" },
   { id: "opps", label: "Tasks" },
@@ -479,6 +481,7 @@ export async function mountSeo(el, opts = {}) {
     setTabs();
     const warn = data.run && data.run.ok === false
       ? `<div class="seo-warn">The last nightly update failed, so these numbers may be out of date: ${esc(data.run.error || "")}</div>` : "";
+    if (tab === "advisor") { renderAdvisor(body, ctx()); return; }
     if (tab === "opps") { renderTasks(body, ctx()); return; }
     if (tab === "pages" && ui.pview === "clusters") { renderClusters(body, ctx()); return; }
     if (tab !== "overview" && tab !== "pages") { renderWorkTab(tab, body, ctx()); return; }
@@ -772,6 +775,7 @@ export async function mountSeo(el, opts = {}) {
       <h2>${esc(titleOf(work, data, p.path))}</h2>
       <div class="seo-note" style="word-break:break-all;margin-bottom:2px">${esc(p.path)}</div>
       <a href="${esc(p.url)}" target="_blank" rel="noopener" class="seo-note">Open page ↗</a>
+      <button class="seo-btn" type="button" data-advpage="${esc(p.path)}" style="margin-left:8px">Ask the Advisor about this page</button>
       ${panelPriorityHtml({ ...ctx(), h: { esc, fmtInt, fmtPos, idOf: (path) => data.pages.find((x) => x.path === path)?.id || "" } }, p, prEdit === p.path)}
       <table class="seo-kv">
         <tr><th></th><th>Last 28d</th><th>Prev 28d</th><th></th></tr>
@@ -798,9 +802,18 @@ export async function mountSeo(el, opts = {}) {
   /* ----- events (delegated) ----- */
 
   root.addEventListener("click", (e) => {
-    const t = e.target.closest("[data-prtoggle],[data-prf],[data-prall],[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
+    const t = e.target.closest("[data-advpage],[data-prtoggle],[data-prf],[data-prall],[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
     if (!t || !root.contains(t)) return;
     const ds = t.dataset;
+
+    if (ds.advpage !== undefined) {
+      panel.hidden = true;
+      if (work) work.advPrefill = { page: ds.advpage, mode: "page" };
+      tab = "advisor";
+      history.replaceState(null, "", "#/seo/advisor");
+      render();
+      return;
+    }
 
     // The Overview's Priority pages card
     if (ds.prtoggle !== undefined) { prc.open = !prc.open; savePrc(); render(); return; }

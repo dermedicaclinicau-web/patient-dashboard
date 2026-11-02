@@ -60,10 +60,12 @@ function runSeoHealth() {
     fsListAll_(cfg, 'seo_health', ['speed', 'speedAt', 'history']).forEach(function (d) {
       old[d.name.split('/').pop()] = fromFields_(d.fields || {});
     });
+    const prevState = fsGetDoc_(cfg, 'seo_state/health') || {};   // keeps the speed runs' summary
 
     const checks = seo3Pages_(pages);                          // 1. the pages themselves
     const links = seo3Links_(checks, origin, t0 + 150000);     // 2. links on them (up to 2.5 minutes in)
-    const speed = seo3Speed_(pages, old, deadline);            // 3. PageSpeed, with the time that's left
+    // 3. Speed is measured by runSeoSpeed (its own runs, three times a day). The last results are kept here.
+    const speed = { out: {}, done: 0, problem: '' };
 
     const today = Utilities.formatDate(new Date(), SEO_TZ_, 'yyyy-MM-dd');
     const x = { dupT: seo3Dups_(checks, 'title'), dupD: seo3Dups_(checks, 'desc'), links: links, words: words };
@@ -94,7 +96,8 @@ function runSeoHealth() {
     // Pages first, then the pointer, so the portal never shows half a build
     seoFsCommit_(docs.concat([{ path: 'seo_state/health', data: {
       build: build, ok: true, error: '', at: new Date(), ms: Date.now() - t0, pages: docs.length,
-      speedDone: speed.done, speedTotal: pages.length, speedProblem: speed.problem || '',
+      speedDone: prevState.speedDone || 0, speedTotal: pages.length, speedProblem: prevState.speedProblem || '',
+      speedAt: prevState.speedAt || null, speedLeft: prevState.speedLeft || 0,
       linksFound: links.found, linksChecked: links.checked,
       blocked: checks.filter(function (c) { return c.blocked; }).length,
     } }]));
@@ -362,6 +365,132 @@ function seo3Links_(checks, origin, until) {
 }
 
 /* ===================== PageSpeed Insights ===================== */
+
+/**
+ * Measures priority pages with PageSpeed Insights (mobile), the ones measured longest ago first, 3 at a time.
+ * Saves speed, speedAt, history and speedError on each seo_health page, and a summary on seo_state/health.
+ * Runs three times a day (installSeoSpeedTrigger), so all priority pages are measured daily.
+ */
+function runSeoSpeed() {
+  const cache = CacheService.getScriptCache();
+  if (cache.get('seo_speed_run')) { console.log('Speed checks are already running.'); return; }
+  cache.put('seo_speed_run', '1', 400);
+  const t0 = Date.now(), deadline = t0 + 5 * 60000;
+  const cfg = getConfig_();
+  const project = seo2Project_();
+  try {
+    const key = seoProp_('PSI_KEY');
+    if (!key) {
+      seo2Commit_(project, [seo2Write_(project, 'seo_state/health', { speedProblem: 'PSI_KEY is missing from Script Properties, so speed is not measured.' })]);
+      return;
+    }
+    const origin = seoOrigin_();
+    const set = fsGetDoc_(cfg, 'seo_settings/main') || {};
+    const pages = seo3KeyPages_(cfg, set, origin);
+    const old = {};
+    fsListAll_(cfg, 'seo_health', ['speed', 'speedAt', 'history']).forEach(function (d) {
+      old[d.name.split('/').pop()] = fromFields_(d.fields || {});
+    });
+    const today = Utilities.formatDate(new Date(), SEO_TZ_, 'yyyy-MM-dd');
+    const recent = Date.now() - 20 * 3600000;   // measured in the last 20 hours: skip
+    const lastOf = function (p) { return Date.parse((old[p.id] || {}).speedAt || '') || 0; };
+    const todo = pages.filter(function (p) { return old[p.id] && lastOf(p) < recent; })   // pages Site health has read
+      .sort(function (a, b) { return lastOf(a) - lastOf(b); });
+
+    const writes = [], errors = {};
+    let done = 0, stop = '';
+    for (let i = 0; i < todo.length && !stop; i += 3) {
+      if (Date.now() > deadline - 70000) break;   // leave time to save
+      const part = todo.slice(i, i + 3);
+      const res = seo3PsiFetch_(part.map(function (p) { return seo3PsiReq_(p.url, key); }));
+      part.forEach(function (p, k) {
+        const out = seo3PsiRead_(res[k]);
+        if (out.ok) {
+          done++;
+          const prev = old[p.id] || {};
+          let history = (Array.isArray(prev.history) ? prev.history : []).filter(function (r) { return r && r.d !== today; });
+          history.push(seo3HistRow_(today, out.ok));
+          history = history.slice(-SEO3_HISTORY_);
+          writes.push(seo2Write_(project, 'seo_health/' + p.id, { speed: out.ok, speedAt: new Date(), speedError: '', history: history }));
+        } else {
+          errors[out.err] = (errors[out.err] || 0) + 1;
+          writes.push(seo2Write_(project, 'seo_health/' + p.id, { speedError: out.err }));
+          if (out.stop) stop = out.err;   // wrong key or limit reached: no point trying the rest now
+        }
+      });
+    }
+    const worst = Object.keys(errors).sort(function (a, b) { return errors[b] - errors[a]; })[0] || '';
+    writes.push(seo2Write_(project, 'seo_state/health', {
+      speedDone: done, speedTotal: pages.length, speedLeft: Math.max(0, todo.length - done),
+      speedProblem: !done && worst ? seo3PsiHint_(worst) : '', speedAt: new Date(),
+    }));
+    seo2Commit_(project, writes);
+    console.log('Speed: ' + done + ' measured, ' + Math.max(0, todo.length - done) + ' left for the next run' +
+      (worst ? ' · problems: ' + Object.keys(errors).map(function (e) { return e + ' ×' + errors[e]; }).join(' | ') : '') +
+      ' · ' + Math.round((Date.now() - t0) / 1000) + ' s');
+  } finally {
+    cache.remove('seo_speed_run');
+  }
+}
+
+/** Run once: speed checks at about 12pm, 3pm and 6pm Perth */
+function installSeoSpeedTrigger() {
+  ScriptApp.getProjectTriggers()
+    .filter(function (t) { return t.getHandlerFunction() === 'runSeoSpeed'; })
+    .forEach(function (t) { ScriptApp.deleteTrigger(t); });
+  [12, 15, 18].forEach(function (hr) {
+    ScriptApp.newTrigger('runSeoSpeed').timeBased().everyDays(1).atHour(hr).inTimezone(SEO_TZ_).create();
+  });
+  console.log('runSeoSpeed scheduled daily ~12pm, 3pm and 6pm Perth');
+}
+
+function seo3PsiReq_(url, key) {
+  return {
+    url: 'https://www.googleapis.com/pagespeedonline/v5/runPagespeed?strategy=mobile&category=performance&url=' +
+      encodeURIComponent(url) + '&key=' + encodeURIComponent(key),
+    muteHttpExceptions: true,
+  };
+}
+
+// fetchAll gives up on the whole batch if one page times out: then each page is tried on its own
+function seo3PsiFetch_(reqs) {
+  try { return UrlFetchApp.fetchAll(reqs); }
+  catch (e) {
+    return reqs.map(function (r) {
+      try { return UrlFetchApp.fetch(r.url, r); }
+      catch (e2) { return { exc: String(e2.message || e2) }; }
+    });
+  }
+}
+
+// { ok: speed } or { err, stop }
+function seo3PsiRead_(r) {
+  if (!r) return { err: 'No answer from PageSpeed' };
+  if (r.exc) {
+    return { err: /timeout|timed out|exceeded/i.test(r.exc) ? 'PageSpeed took too long for this page' : 'PageSpeed could not be reached: ' + r.exc.slice(0, 120) };
+  }
+  const code = r.getResponseCode();
+  if (code === 200) {
+    try { return { ok: seo3Psi_(JSON.parse(r.getContentText())) }; }
+    catch (e) { return { err: 'Unreadable answer from PageSpeed' }; }
+  }
+  let msg = '';
+  try { msg = JSON.parse(r.getContentText()).error.message; } catch (e) { msg = r.getContentText().slice(0, 150); }
+  const bad = code === 403 || code === 429 || (code === 400 && /api key/i.test(msg));
+  return { err: 'PageSpeed ' + code + ': ' + String(msg).replace(/\s+/g, ' ').slice(0, 170), stop: bad };
+}
+
+// The error, with what to do about it
+function seo3PsiHint_(err) {
+  const e = String(err);
+  if (/ 403: .*(has not been used|disabled|not enabled)/i.test(e)) return e + ' → In Google Cloud, turn on "PageSpeed Insights API" for the project this key belongs to.';
+  if (/ 403: .*(referer|referrer|blocked|restrict|not authorized)/i.test(e)) return e + ' → The key is restricted. In Google Cloud → Credentials, set Application restrictions to None and API restrictions to "PageSpeed Insights API".';
+  if (/ 400: .*api key/i.test(e)) return e + ' → PSI_KEY in Script Properties is wrong. Copy the key again from Google Cloud → Credentials.';
+  if (/ 429/.test(e)) return e + " → Google's limit was reached. The rest are measured in the next run.";
+  if (/FAILED_DOCUMENT_REQUEST|ERRORED_DOCUMENT_REQUEST|NO_FCP|unable to reliably load/i.test(e)) return e + " → Google's test couldn't load the page. A firewall or security plugin (Cloudflare, Wordfence) may be blocking it.";
+  if (/took too long/.test(e)) return e + '. These pages are tried again in the next run.';
+  return e;
+}
 
 function seo3Speed_(pages, old, deadline) {
   const key = seoProp_('PSI_KEY');

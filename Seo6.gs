@@ -11,7 +11,7 @@
 
 const SEO6_STOP_ = { in: 1, for: 1, the: 1, a: 1, an: 1, of: 1, and: 1, to: 1, on: 1, with: 1, near: 1, me: 1, my: 1, is: 1, are: 1,
   what: 1, how: 1, best: 1 };
-const SEO6_LOG_TYPE_ = { basics: 'Technical', match: 'Title / meta', connect: 'Links', content: 'Content', speed: 'Technical', off: 'Other', ai: 'Content', cluster: 'Links', quality: 'Content' };
+const SEO6_LOG_TYPE_ = { basics: 'Technical', match: 'Title / meta', connect: 'Links', content: 'Content', speed: 'Technical', off: 'Other', ai: 'Content', cluster: 'Links', quality: 'Content', advisor: 'Content', marketing: 'Other' };
 
 function runSeoTaskChecks() { seo6Run_(false); }
 
