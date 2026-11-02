@@ -246,6 +246,164 @@ function pageStory(w, p) {
   return { b, seen, shiftBy, moves, related: [...related.values()].sort((a, c2) => c2.imp - a.imp) };
 }
 
+/* ---------- Action plan: step by step, on and off the page ---------- */
+
+const STOPW = new Set(["in", "for", "the", "a", "an", "of", "and", "to", "on", "with", "near", "me", "my", "is", "are", "what", "how", "best"]);
+const words = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter((t) => t.length > 1 && !STOPW.has(t));
+const hasWords = (text, phrase) => {
+  const t = String(text || "").toLowerCase();
+  const ws = words(phrase);
+  return ws.length > 0 && ws.every((x) => t.includes(x.replace(/s$/, "")));
+};
+const SMALLW = new Set(["in", "for", "and", "of", "the", "to", "with", "on", "a", "or", "vs"]);
+const titleCase = (s) => String(s).replace(/[a-z0-9']+/gi, (m, i) =>
+  (i && SMALLW.has(m.toLowerCase()) ? m.toLowerCase() : m.charAt(0).toUpperCase() + m.slice(1)));
+const QUESTION = /\b(how|what|why|when|does|do|can|is|are|should|which|vs|or|safe|hurt|last|long)\b/;
+const PRICE = /\b(cost|costs|price|prices|pricing|how much|cheap|fee|fees)\b/;
+const EFFORT_TIP = { Quick: "Under 30 minutes", Medium: "A few hours", Bigger: "A day, or the website person" };
+const plainOf = (html) => String(html).replace(/<br\s*\/?>/gi, " ").replace(/<[^>]+>/g, "")
+  .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
+  .replace(/\s+/g, " ").trim();
+
+function planHtml(w, p, s, h, open, linksTo) {
+  const me = npath(p.path);
+  const hpOf = (path) => (w.health?.pages || []).find((x) => npath(x.path) === npath(path)) || null;
+  const hp = hpOf(p.path);
+  const banned = (settingsOf(w).compliance || COMPLIANCE).map((x) => x.word);
+  const flagged = (t) => banned.find((b) =>
+    new RegExp(`(^|[^a-z0-9])${b.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-z0-9]|$)`, "i").test(t)) || "";
+  const q = (t) => `“${h.esc(t)}”`;
+
+  // The searches this page shows for (brand searches left out), busiest first
+  const mine = [];
+  for (const x of w.queries) {
+    if (x.topic === BRAND) continue;
+    const pg = x.pages.find((y) => npath(y.path) === me);
+    if (pg) mine.push({ q: x.q, i: pg.i, c: pg.c, pos: pg.pos });
+  }
+  mine.sort((a, b) => b.i - a.i);
+  const usable = mine.filter((m) => !flagged(m.q));
+  const main = (usable[0] || {}).q || "";
+  const topBad = mine[0] && flagged(mine[0].q) ? mine[0] : null;
+  const others = usable.slice(1, 6).map((m) => m.q);
+  const questions = usable.filter((m) => QUESTION.test(m.q)).slice(0, 4).map((m) => m.q);
+  const priceQ = usable.find((m) => PRICE.test(m.q));
+
+  // The page taking its clicks, or else the related page ranking above it
+  const shifts = [...s.shiftBy.entries()].filter(([, v]) => v <= -1).sort((a, b) => a[1] - b[1]);
+  const r0 = s.related[0];
+  const rival = shifts[0] ? shifts[0][0]
+    : r0 && r0.thPi && r0.myPi && r0.thPw / r0.thPi < r0.myPw / r0.myPi ? r0.path : "";
+  const rhp = rival ? hpOf(rival) : null;
+
+  const on = [], between = [], off = [], then = [];
+  const step = (list, effort, html) => list.push({ effort, html });
+
+  /* On this page (anything that stops the rest working comes first) */
+  const g = hp?.google;
+  if (g && !g.err && g.v !== "PASS") {
+    step(on, "Quick", `Get the page into Google first: in Search Console open URL Inspection for it and press <strong>Request indexing</strong>. Google says: ${h.esc(g.cs || "not indexed")}.${
+      g.link ? ` <a class="seo-w-link" href="${h.esc(g.link)}" target="_blank" rel="noopener">Open it ↗</a>` : ""}`);
+  }
+  const wording = (hp?.issues || []).filter((i) => i.group === "wording" && i.status !== "ignored");
+  if (wording.length) {
+    step(on, "Quick", `Fix the advertising wording first: ${wording.map((i) => h.esc(i.msg)).join("; ")}. Rankings don't matter if the page breaks TGA or AHPRA rules.`);
+  }
+  if (topBad) {
+    step(on, "Quick", `The busiest search for this page is ${q(topBad.q)}, but “${h.esc(flagged(topBad.q))}” can't be used in your advertising. Use the general name (e.g. “anti-wrinkle injections”) in titles and headings instead of chasing that word.`);
+  }
+  if (!hp) {
+    step(on, "Quick", `Add this page to <a class="seo-w-link" href="#/seo/settings">SEO → Settings → Key pages</a> so its title, heading, wording, links and speed are checked every night. Until then, check the steps below yourself.`);
+  }
+  if (main) {
+    const t = titleCase(main);
+    const suggestion = (t + " | Dermedica").length <= 60 ? t + " | Dermedica" : t;
+    if (!hp) step(on, "Quick", `Make sure the page title starts with ${q(main)}, for example ${q(suggestion)}. Keep it under 60 characters.`);
+    else if (!hp.title) step(on, "Quick", `Add a page title, for example ${q(suggestion)}.`);
+    else if (!hasWords(hp.title, main)) {
+      step(on, "Quick", `Change the page title so it starts with the main search, ${q(main)}. Now: ${q(hp.title)}. Try ${q(suggestion)} (${suggestion.length} characters; Google shows about 60).`);
+    } else if (hp.title.length > 60) {
+      step(on, "Quick", `Shorten the title to under 60 characters so Google doesn't cut it off. Now ${hp.title.length}: ${q(hp.title)}.`);
+    }
+    if (hp && (!hp.h1 || !hasWords(hp.h1Text, main))) {
+      step(on, "Quick", hp.h1 ? `Change the main heading (H1) to say ${q(t)}. Now: ${q(hp.h1Text)}.`
+        : `Add one main heading (H1) at the top that says ${q(t)}.`);
+    }
+    const d = hp ? String(hp.desc || "") : "";
+    if (hp && (!d || !hasWords(d, main) || d.length > 160 || d.length < 70)) {
+      step(on, "Quick", `Rewrite the meta description (120–155 characters): who it's for, what the treatment does, and how to book, using ${q(main)}. Don't promise results or say it's painless or risk-free.${
+        d ? ` Now (${d.length} characters): ${q(d)}` : " There isn't one now."}`);
+    }
+  }
+  const rWords = rhp?.words || 0;
+  if (hp && hp.words && (hp.words < 600 || (rWords && hp.words < rWords * 0.7))) {
+    step(on, "Bigger", `Add depth. The page has about ${h.fmtInt(hp.words)} words${rWords ? `; ${open(rival)} has about ${h.fmtInt(rWords)}` : ""}.
+      Treatment pages that rank usually cover what it is, who it suits, how many sessions, downtime, when results show, risks and side effects, cost, and FAQs. Add what's missing, each under its own heading.`);
+  }
+  if (others.length) {
+    step(on, "Medium", `Cover the other searches this page shows for, using the words in a heading or the first sentence of a section: ${others.map(q).join(", ")}.`);
+  }
+  if (questions.length) step(on, "Medium", `Add an FAQ section answering each in 2–3 sentences: ${questions.map(q).join(", ")}.`);
+  if (priceQ) {
+    step(on, "Medium", `People search ${q(priceQ.q)}. Add a “Cost” section with a price range or “from $…”, what changes the price, and whether a consultation is needed first. Prices are fine in health advertising when they're clear and include all costs.`);
+  }
+  step(on, "Quick", `Show who wrote or medically reviewed the page, and when (e.g. “Reviewed by [doctor's name], [qualifications], [month year]”). Google looks for this on health pages.`);
+  const m28 = p.m28 || {};
+  if (m28.sessions >= 30 && m28.conversions / m28.sessions < 0.02) {
+    step(on, "Medium", `Make booking easier: ${h.fmtInt(m28.sessions)} people arrived from Google in 28 days, but only ${h.fmtInt(m28.conversions)} took a key action. Put a Book button and the phone number near the top, and again after the cost and FAQs.`);
+  }
+  const sp = hp?.speed;
+  if (sp && sp.score != null && sp.score < 50) {
+    step(on, "Bigger", `Speed it up (mobile score ${sp.score}/100): compress and resize the top image, use WebP, and remove sliders, pop-ups or plugins the page doesn't need.`);
+  }
+  if (hp?.noAlt) step(on, "Quick", `Add short alt text to ${hp.noAlt} image${hp.noAlt === 1 ? "" : "s"} saying what each shows.`);
+
+  /* Between your pages */
+  if (rival) {
+    const l = linksTo(rival, p.path);
+    step(between, "Quick", `Decide which page should own ${q(main || "these searches")}. Usually it's the treatment page people book from (this one), and ${open(rival)} stays the guide that answers questions.`);
+    step(between, "Quick", `${l === true ? `${open(rival)} already links here: make sure the link text says` : `Add a link from ${open(rival)} to this page with the link text`} ${q(main || "the treatment name")}. Put it near the top and again at the end, with a line like “Ready to treat it? Book a consultation”.`);
+    if (rhp?.title && main && hasWords(rhp.title, main)) {
+      step(between, "Quick", `Take ${q(main)} out of ${open(rival)}'s title and main heading, and aim it at the question instead${
+        questions[0] ? `, like ${q(titleCase(questions[0]))}` : ""}. Now: ${q(rhp.title)}.`);
+    }
+    if (linksTo(p.path, rival) === false) step(between, "Quick", `Link back from this page to ${open(rival)} (“Read our full guide”), so the two pages support each other.`);
+    step(between, "Quick", `Don't delete or redirect ${open(rival)}: it's bringing in visitors. Just make the two pages' jobs clear.`);
+  }
+  const helpers = s.related.filter((r) => npath(r.path) !== npath(rival) && linksTo(r.path, p.path) === false).slice(0, 3);
+  if (helpers.length) {
+    step(between, "Quick", `Add links to this page from ${helpers.map((r) => open(r.path)).join(", ")}. They show for the same searches but don't link here.`);
+  }
+  step(between, "Medium", `Link to this page from 2–3 related blog posts and from the treatments menu, using ${q(main || "the treatment name")} as the link text.`);
+
+  /* Off the site */
+  const term = main ? titleCase(main.replace(/\bperth\b/gi, "").replace(/\s+/g, " ").trim()) || titleCase(main) : "this treatment";
+  step(off, "Quick", `Google Business Profile: add “${h.esc(term)}” as a Service with a short description and a link to this page, and post about it once a month with a photo and the link.`);
+  step(off, "Medium", `Ask patients for a Google review after their treatment (by email or text, with no incentive). Don't copy reviews onto the website or ads: AHPRA doesn't allow testimonials in advertising.`);
+  step(off, "Bigger", `Get a few relevant links to this page: your booking profiles (e.g. HotDoc, HealthEngine), the product suppliers' “find a clinic” pages, and local business or community sites. Avoid paid link schemes.`);
+  if (s.b.demand <= -5) {
+    step(off, "Medium", `Fewer people are searching, so reach the people you already have: send this page to patients interested in ${h.esc(term.toLowerCase())} through Task Manager → Marketing.`);
+  }
+
+  /* Then */
+  step(then, "Quick", `Log each change in the Change log (the button below), so it shows on the Overview chart.`);
+  step(then, "Quick", `After updating the page, press Request indexing in Search Console, then check this panel again in 2–4 weeks. Changes usually take 1–4 weeks to show in Google.`);
+
+  const groups = [["On this page", on], ["Between your pages", between], ["Off the site", off], ["Then", then]].filter(([, l]) => l.length);
+  const brief = [`Action plan: ${p.path}`, main ? `Main search: ${main}` : null]
+    .concat(...groups.map(([title, list]) => ["", title.toUpperCase(), ...list.map((x, i) => `${i + 1}. [${x.effort}] ${plainOf(x.html)}`)]))
+    .filter((x) => x !== null).join("\n");
+
+  return `<details class="seo-w-plan"${s.seen < 0 ? " open" : ""}>
+    <summary>Action plan <small>step by step${main ? ` · main search ${q(main)}` : ""}</small></summary>
+    ${groups.map(([title, list]) => `<h4>${title}</h4><ol>${list.map((x) =>
+      `<li><span class="seo-w-eff is-${x.effort.toLowerCase()}" title="${EFFORT_TIP[x.effort]}">${x.effort}</span> ${x.html}</li>`).join("")}</ol>`).join("")}
+    <div class="seo-w-acts"><button class="seo-btn" type="button" data-copyplan>Copy as a brief</button>
+      <span class="seo-note">Worked out from this page's searches and the last Site health check. Check each step makes sense before doing it.</span></div>
+    <textarea data-plantext hidden>${h.esc(brief)}</textarea>
+  </details>`;
+}
+
 function storyHtml(w, p, h) {
   if (!w.queries.length) return "";
   if (!w.queries.some((q) => q.ppages)) {
@@ -315,7 +473,8 @@ function storyHtml(w, p, h) {
     ${parts.length ? `<ul class="seo-w-why">${parts.map(([k, label, v, sub]) => `
       <li class="${main && main[0] === k ? "is-main" : ""}"><span>${h.esc(label)}${sub ? `<small>${sub}</small>` : ""}</span>
         <span class="n ${toneOf(v)}">${signed(v)}</span></li>`).join("")}</ul>` : ""}
-    ${tip ? `<div class="seo-w-tip"><strong>What to do:</strong> ${tip}</div>` : ""}
+    ${tip ? `<div class="seo-w-tip"><strong>In short:</strong> ${tip}</div>` : ""}
+    ${planHtml(w, p, s, h, open, linksTo)}
     <p class="seo-note">From searches Google shows (10+ impressions). They explain ${signed(s.seen)} of this page's ${signed(total)} clicks; the rest are rarer searches.</p>
 
     ${rel.length ? `
@@ -1072,6 +1231,16 @@ const CSS = `
 .seo-w-why .n.up{color:#16a34a}.seo-w-why .n.down{color:#dc2626}.seo-w-why .n.flat{color:var(--text-muted,#6b7280)}
 .seo-w-tip{padding:8px 10px;border-radius:8px;background:#eff6ff;font-size:13px;line-height:1.45;margin:6px 0 8px}
 .seo-w-rel td{vertical-align:top}
+.seo-w-plan{margin:8px 0 10px;padding:8px 12px;border:1px solid var(--border,#e5e7eb);border-radius:10px;background:var(--card,#fff)}
+.seo-w-plan summary{cursor:pointer;font-weight:600;font-size:14px}
+.seo-w-plan summary small{font-weight:400;color:var(--text-muted,#6b7280)}
+.seo-w-plan h4{margin:12px 0 4px;font-size:11.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted,#6b7280)}
+.seo-w-plan ol{margin:0;padding-left:20px;font-size:13px;line-height:1.5}
+.seo-w-plan li{margin:0 0 7px}
+.seo-w-eff{display:inline-block;padding:0 6px;border-radius:999px;font-size:10.5px;font-weight:600;vertical-align:1px;cursor:help}
+.seo-w-eff.is-quick{background:#ecfdf5;color:#047857}
+.seo-w-eff.is-medium{background:#fffbeb;color:#b45309}
+.seo-w-eff.is-bigger{background:#fef2f2;color:#b91c1c}
 .seo-w-mini td{vertical-align:top}
 .seo-w-plog{margin:0 0 10px;padding-left:18px;font-size:13px}
 .seo-w-plog span{color:var(--text-muted,#6b7280);margin-right:4px}

@@ -184,6 +184,20 @@ function delta(cur, prev, { invert = false, abs = false, digits = 1 } = {}) {
   return `<span class="seo-d ${good ? "up" : "down"}">${arrow} ${txt}</span>`;
 }
 
+// Copies text when navigator.clipboard isn't available (older iPads, non-https)
+function fallbackCopy(txt) {
+  const ta = document.createElement("textarea");
+  ta.value = txt;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  ta.remove();
+  return ok;
+}
+
 function sparkline(vals, w = 84, h = 22) {
   const max = Math.max(1, ...vals);
   const step = w / Math.max(1, vals.length - 1);
@@ -649,7 +663,7 @@ export async function mountSeo(el, opts = {}) {
   /* ----- events (delegated) ----- */
 
   root.addEventListener("click", (e) => {
-    const t = e.target.closest("[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage]");
+    const t = e.target.closest("[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
     if (!t || !root.contains(t)) return;
     const ds = t.dataset;
 
@@ -673,6 +687,15 @@ export async function mountSeo(el, opts = {}) {
       if (ui.sortKey === ds.sort) ui.sortDir *= -1;
       else { ui.sortKey = ds.sort; ui.sortDir = col.asc || col.key === "path" ? 1 : -1; }
       renderTable();
+    }
+    else if (ds.copyplan !== undefined) {
+      const txt = panel.querySelector("[data-plantext]")?.value || "";
+      const done = (ok) => {
+        t.textContent = ok ? "Copied ✓" : "Couldn't copy";
+        setTimeout(() => { if (t.isConnected) t.textContent = "Copy as a brief"; }, 2000);
+      };
+      if (navigator.clipboard?.writeText) navigator.clipboard.writeText(txt).then(() => done(true)).catch(() => done(fallbackCopy(txt)));
+      else done(fallbackCopy(txt));
     }
     else if (ds.open) openPanel(ds.open);
     else if (ds.close !== undefined) panel.hidden = true;
