@@ -1171,46 +1171,85 @@ function wordFor(q, all) {
   return t[0];
 }
 
-function viewSettings(wrap, c) {
+function viewSettings(wrap, c, ui) {
   const { work: w, h } = c;
   if (!c.can("seo.manage")) { wrap.innerHTML = `<div class="seo-empty">Only people with SEO settings access can change these.</div>`; return; }
+  if (!ui.sset) ui.sset = "topics";
   const st = settingsOf(w);
   const idx = pageIndex(w, c.data);
-  const wordsText = (list) => list.map((x) => (x.why ? `${x.word} | ${x.why}` : x.word)).join("\n");
-  const lines = (s) => s.split(/\n+/).map((x) => x.trim()).filter(Boolean);
-  const guessed = st.topics.some((t) => t.guessed);
-  const when = (t) => {
+  const tsWhen = (t) => {
     const d = tsDate(t) || (t ? new Date(t) : null);
     return d && !isNaN(d) ? d.toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "";
   };
 
+  let guessed = st.topics.some((t) => t.guessed);
   let topics = st.topics.map((t) => ({ name: t.name, concern: t.concern.slice(), treatment: t.treatment.slice(), pages: t.pages.slice() }));
-  let brand = st.brand.join(", ");
+  let brand = st.brand.slice();
   let keyPages = st.keyPages.slice();
-  let words = wordsText(st.compliance || COMPLIANCE);
-  let dirty = false;
-  let openT = -1, tFind = "", tMore = false, pFind = "", pFilt = "all", pMore = false;
+  let wording = (st.compliance || COMPLIANCE).map((x) => ({ word: x.word, why: x.why }));
+  let sel = -1, tPick = false, tFind = "", tMore = false;
+  let pPick = false, pFind = "", pFilt = "all", pMore = false;
+  let cOpen = "", cMore = false, wEdit = false;
+  let groupsBy = new Map();
+  let lastStatus = "";
 
   const busy = new Set(idx.list.filter((x) => x.clicks > 0).slice(0, 15).map((x) => npath(x.path)));
-  const brandList = () => [...new Set(brand.split(",").map(norm).filter(Boolean))];
-  // Which topic a search would go into with the words as they are now (-1 none, -2 brand)
-  const previewTopic = (text, brands) => {
-    const l = String(text).toLowerCase();
-    if (brands.some((b) => l.includes(b))) return -2;
-    return topics.findIndex((t) => t.concern.some((x) => l.includes(x)) || t.treatment.some((x) => l.includes(x)));
-  };
-  // Ticked pages that aren't in the list any more still need a row
+  const plural = (n, word) => `${h.fmtInt(n)} ${word}${n === 1 ? "" : "s"}`;
+  const matches = (x, f) => !f || (x.title + " " + x.path).toLowerCase().includes(f);
   const itemsWith = (paths) => {
     const extra = paths.filter((p) => !idx.get(p)).map((p) => ({ path: p, title: "", clicks: 0, impr: 0, wp: idx.hasWp ? false : null }));
     return extra.length ? idx.list.concat(extra) : idx.list;
   };
-  const matches = (x, f) => !f || (x.title + " " + x.path).toLowerCase().includes(f);
-
-  const mark = () => {
-    dirty = true;
-    const el = wrap.querySelector("[data-w-dirty]");
-    if (el) el.textContent = "Unsaved changes";
+  // Which topic a search goes into with the words as they are now (-1 none, -2 brand)
+  const previewTopic = (text) => {
+    const l = String(text).toLowerCase();
+    if (brand.some((b) => l.includes(b))) return -2;
+    return topics.findIndex((t) => t.concern.some((x) => l.includes(x)) || t.treatment.some((x) => l.includes(x)));
   };
+
+  /* ----- saving: every change saves straight away ----- */
+
+  function setStatus(s) {
+    lastStatus = s;
+    const el = wrap.querySelector("[data-w-sstat]");
+    if (el) el.textContent = s;
+  }
+  let queue = Promise.resolve();
+  function persist(fields) {
+    setStatus("Saving…");
+    queue = queue.then(async () => {
+      await setDoc(doc(db, "seo_settings", "main"), { ...fields, updatedBy: uid(), updatedAt: serverTimestamp() }, { merge: true });
+      w.settings = { ...(w.settings || {}), ...fields };
+      if (fields.topics || fields.brand) { classify(w); if (w.ui) w.ui.topic = ALL; }
+      setStatus("Saved ✓");
+    }).catch((err) => { setStatus("Not saved"); toast(errMsg(err), true); });
+    return queue;
+  }
+  const cleanTopics = () => topics.map((x) => {
+    const concern = [...new Set(x.concern.map(norm).filter(Boolean))].slice(0, 60);
+    const treatment = [...new Set(x.treatment.map(norm).filter(Boolean))].filter((y) => !concern.includes(y)).slice(0, 60);
+    return { name: (x.name.trim() || "Untitled topic").slice(0, 60), concern, treatment, words: [...concern, ...treatment],
+      pages: [...new Set(x.pages)].slice(0, 50) };
+  });
+  let tTimer = null;
+  function saveTopics(now) {   // typing and ticking come in bursts, so wait half a second
+    clearTimeout(tTimer);
+    setStatus("Saving…");
+    tTimer = setTimeout(() => { guessed = false; persist({ topics: cleanTopics() }); }, now ? 0 : 500);
+  }
+  function savePriority() {
+    const pages = [...new Map(keyPages.map((p) => [npath(p), p])).values()].slice(0, 30);
+    const { info } = prioritySettings(w);
+    const keep = new Set(pages.map(npath));
+    const have = new Set(info.map((x) => npath(x.path)));
+    const now = new Date().toISOString();
+    const priorityInfo = info.filter((x) => keep.has(npath(x.path)))
+      .concat(pages.filter((p) => !have.has(npath(p))).map((p) => ({ path: p, ...suggestPriority(w, c.data, p), note: "", by: uid(), at: now })));
+    w.settings = { ...(w.settings || {}), keyPages: pages, priorityInfo };   // the cards update straight away
+    return persist({ keyPages: pages, priorityInfo });
+  }
+
+  /* ----- word chips ----- */
 
   function addWords(i, k, text) {
     const t = topics[i];
@@ -1224,18 +1263,35 @@ function viewSettings(wrap, c) {
       t[k].push(x);
       n++;
     }
-    if (n) mark();
+    return n;
+  }
+  function addBrand(text) {
+    let n = 0;
+    for (const raw of String(text).split(",")) {
+      const x = norm(raw).slice(0, 40);
+      if (x && !brand.includes(x)) { brand.push(x); n++; }
+    }
     return n;
   }
   // Words typed but not yet added with Enter
   function commitPending() {
+    let t = 0, b = 0;
     wrap.querySelectorAll("[data-w-chipin]").forEach((el) => {
       if (!el.value.trim()) return;
       const [i, k] = el.dataset.wChipin.split("|");
-      addWords(+i, k, el.value);
+      t += addWords(+i, k, el.value);
       el.value = "";
     });
+    const bi = wrap.querySelector("[data-w-bin]");
+    if (bi && bi.value.trim()) { b += addBrand(bi.value); bi.value = ""; }
+    if (t) saveTopics();
+    if (b) persist({ brand: brand.slice(0, 20) });
   }
+  const chipBox = (i, k, label, ph) => `<div>
+    <div class="seo-note">${label}</div>
+    <div class="seo-w-chips">${topics[i][k].map((x, j) => `<span class="seo-w-tag is-${k[0]}">${h.esc(x)}<button type="button"
+        data-w-chipx="${i}|${k}|${j}" aria-label="Remove ${h.esc(x)}">×</button></span>`).join("")}
+      <input data-w-chipin="${i}|${k}" placeholder="${ph}" maxlength="60" aria-label="${label}"></div></div>`;
 
   /* ----- page tick lists ----- */
 
@@ -1256,10 +1312,9 @@ function viewSettings(wrap, c) {
     const ws = t.concern.concat(t.treatment);
     const out = new Set();
     if (!ws.length) return out;
-    const brands = brandList();
     const by = new Map();
     for (const q of w.queries) {
-      if (previewTopic(q.q, brands) !== i) continue;
+      if (previewTopic(q.q) !== i) continue;
       for (const p of q.pages) by.set(npath(p.path), (by.get(npath(p.path)) || 0) + p.i);
     }
     const tot = [...by.values()].reduce((a, b) => a + b, 0) || 1;
@@ -1289,40 +1344,82 @@ function viewSettings(wrap, c) {
     const on = new Set(keyPages.map(npath));
     const f = norm(pFind);
     let items = itemsWith(keyPages).filter((x) => matches(x, f));
-    if (!c.isAdmin || pFilt === "sel") items = items.filter((x) => on.has(npath(x.path)));
+    if (pFilt === "sel") items = items.filter((x) => on.has(npath(x.path)));
     else if (pFilt === "sug") items = items.filter((x) => !on.has(npath(x.path)) && busy.has(npath(x.path)));
     items.sort((a, b) => on.has(npath(b.path)) - on.has(npath(a.path)) || b.clicks - a.clicks);
     const lim = pMore ? 1000 : f ? 40 : Math.max(12, on.size + 4);
-    if (!items.length) return `<p class="seo-note">${!c.isAdmin ? "No priority pages yet." : pFilt === "sug" ? "Your busiest pages are all ticked." : "No pages match."}</p>`;
-    return `<div class="seo-w-pklist">${pickRows(items.slice(0, lim), (x) => on.has(npath(x.path)),
-        (x) => busy.has(npath(x.path)), "data-w-ppage", !c.isAdmin)}</div>
+    if (!items.length) return `<p class="seo-note">${pFilt === "sug" ? "Your busiest pages are all ticked." : "No pages match."}</p>`;
+    return `<div class="seo-w-pklist">${pickRows(items.slice(0, lim), (x) => on.has(npath(x.path)), (x) => busy.has(npath(x.path)), "data-w-ppage", false)}</div>
       ${items.length > lim ? `<button class="seo-w-link" type="button" data-w-pmore>Show ${h.fmtInt(items.length - lim)} more</button>` : ""}`;
   }
 
-  /* ----- topics ----- */
+  /* ----- Topics ----- */
 
-  const tags = (list, k) => (list.length ? list.map((x) => `<span class="seo-w-tag is-${k}">${h.esc(x)}</span>`).join("") : `<span class="seo-note">—</span>`);
-
-  function topicRow(t, i) {
-    const n = t.pages.length;
-    return `<div class="seo-w-trow2${i === openT ? " is-open" : ""}" data-w-topen="${i}" role="button" tabindex="0" aria-expanded="${i === openT}">
-      <strong>${h.esc(t.name || "New topic")}</strong><span>${tags(t.concern, "c")}</span><span>${tags(t.treatment, "t")}</span>
-      <span class="${n ? "" : "is-none"}">${n ? `${n} page${n === 1 ? "" : "s"}` : "None"}</span></div>`;
+  function stats() {
+    const per = topics.map(() => ({ i: 0, c: 0, n: 0 }));
+    let tot = 0, cov = 0;
+    const rest = [];
+    for (const q of w.queries) {
+      const k = previewTopic(q.q);
+      if (k === -2) continue;
+      tot += q.i;
+      if (k >= 0) { cov += q.i; per[k].i += q.i; per[k].c += q.c; per[k].n++; } else rest.push(q);
+    }
+    return { per, tot, cov, rest };
   }
 
-  const chipBox = (i, k, label, ph) => `<div>
-    <div class="seo-note">${label}</div>
-    <div class="seo-w-chips">${topics[i][k].map((x, j) => `<span class="seo-w-tag is-${k[0]}">${h.esc(x)}<button type="button"
-        data-w-chipx="${i}|${k}|${j}" aria-label="Remove ${h.esc(x)}">×</button></span>`).join("")}
-      <input data-w-chipin="${i}|${k}" placeholder="${ph}" maxlength="60" aria-label="${label}"></div></div>`;
+  function clustersOf(rest) {
+    const all = rest.map((q) => q.q.toLowerCase());
+    const by = new Map();
+    for (const q of rest) {
+      const wd = wordFor(q.q, all);
+      const g = by.get(wd) || { w: wd, qs: [], i: 0 };
+      g.qs.push(q);
+      g.i += q.i;
+      by.set(wd, g);
+    }
+    return [...by.values()].sort((a, b) => b.i - a.i);
+  }
 
-  function topicEditor(t, i) {
+  // The topic whose pages these searches land on (a linked page counts fully, a page whose title has the topic's words counts half)
+  function guessTopic(g) {
+    const score = topics.map(() => 0);
+    let tot = 0;
+    for (const q of g.qs) {
+      for (const p of q.pages) {
+        tot += p.i;
+        const k = npath(p.path);
+        const hay = ((idx.get(p.path)?.title || "") + " " + p.path).toLowerCase().replace(/[-_/]+/g, " ");
+        topics.forEach((t, i) => {
+          if (t.pages.some((x) => npath(x) === k)) score[i] += p.i;
+          else if (t.concern.concat(t.treatment).some((x) => hay.includes(x))) score[i] += p.i * 0.5;
+        });
+      }
+    }
+    let best = -1;
+    score.forEach((s, i) => { if (s > 0 && (best < 0 || s > score[best])) best = i; });
+    return best >= 0 && score[best] >= tot * 0.3 ? best : -1;
+  }
+
+  function cardHtml(t, i, p, maxI) {
+    const nw = t.concern.length + t.treatment.length;
+    const warn = !nw ? "no words yet" : !t.pages.length ? "no pages" : "";
+    return `<button type="button" class="seo-w-tcard${i === sel ? " is-sel" : ""}" data-w-tcard="${i}" aria-expanded="${i === sel}">
+      <span class="seo-w-tch"><strong>${h.esc(t.name || "Untitled topic")}</strong><span class="seo-note" title="Impressions, last 28 days">${h.fmtInt(p.i)}</span></span>
+      <span class="seo-w-bar"><i style="width:${Math.round((p.i / maxI) * 100)}%"></i></span>
+      <span class="seo-note">${t.concern.length} concern · ${t.treatment.length} treatment · ${warn
+        ? `<span class="seo-w-warn">⚠ ${warn}</span>` : plural(t.pages.length, "page")}</span>
+      <span class="seo-note">${plural(p.n, "search")} · ${plural(p.c, "click")}</span></button>`;
+  }
+
+  function editorHtml(i) {
+    const t = topics[i];
     return `<div class="seo-w-tedit">
       <div class="seo-w-tedit-h">
         <input class="seo-input" data-w-tname="${i}" value="${h.esc(t.name)}" placeholder="Topic name" maxlength="60" aria-label="Topic name">
         <span class="seo-sp"></span>
-        <button class="seo-btn" type="button" data-w-up="${i}" title="Move up"${i ? "" : " disabled"}>↑</button>
-        <button class="seo-btn" type="button" data-w-down="${i}" title="Move down"${i < topics.length - 1 ? "" : " disabled"}>↓</button>
+        <button class="seo-btn" type="button" data-w-up="${i}" title="Earlier: checked first"${i ? "" : " disabled"}>↑</button>
+        <button class="seo-btn" type="button" data-w-down="${i}" title="Later"${i < topics.length - 1 ? "" : " disabled"}>↓</button>
         <button class="seo-btn" type="button" data-w-rm="${i}">Delete</button>
         <button class="seo-btn on" type="button" data-w-tclose>Done</button>
       </div>
@@ -1330,143 +1427,215 @@ function viewSettings(wrap, c) {
         ${chipBox(i, "concern", "Concern words: what people have", "melasma, then Enter")}
         ${chipBox(i, "treatment", "Treatment words: what they want done", "cosmelan peel, then Enter")}
       </div>
-      <div class="seo-row" style="margin:12px 0 6px">
-        <strong style="font-size:13px">Pages for this topic</strong>
-        <span class="seo-note" data-w-tcount>${t.pages.length} ticked</span><span class="seo-sp"></span>
-        <input class="seo-input seo-w-find" type="search" data-w-tfind placeholder="Search pages" value="${h.esc(tFind)}">
+      <div class="seo-w-tpages">
+        <strong>Pages</strong>
+        ${t.pages.length ? t.pages.map((p) => `<span class="seo-w-ptag" title="${h.esc(p)}">${h.esc(titleOf(w, c.data, p))}<button type="button"
+            data-w-tpx="${h.esc(p)}" aria-label="Remove ${h.esc(p)}">×</button></span>`).join("") : `<span class="seo-note">None yet</span>`}
+        <span class="seo-sp"></span>
+        <button class="seo-btn" type="button" data-w-tpick>${tPick ? "Close the list" : "Choose pages"}</button>
       </div>
-      <div data-w-tlist>${tListHtml(i)}</div>
-      <p class="seo-note" style="margin-top:6px">A page can belong to more than one topic.</p>
+      ${tPick ? `<div class="seo-row" style="margin:8px 0 6px"><span class="seo-note">Tick the pages for this topic. A page can be in more than one.</span><span class="seo-sp"></span>
+          <input class="seo-input seo-w-find" type="search" data-w-tfind placeholder="Search pages" value="${h.esc(tFind)}"></div>
+        <div data-w-tlist>${tListHtml(i)}</div>` : ""}
     </div>`;
   }
 
-  /* ----- searches not in a topic ----- */
-
-  function otherHtml() {
-    const brands = brandList();
-    const rest = w.queries.filter((q) => previewTopic(q.q, brands) === -1).sort((a, b) => b.i - a.i);
-    const all = rest.map((q) => q.q.toLowerCase());
-    const top = rest.slice(0, 30);
-    if (!top.length) return `<p class="seo-note">${w.queries.length ? "Every search is in a topic." : "No search data yet."}</p>`;
-    const opts = topics.map((t, i) => `<option value="${i}">${h.esc(t.name || "New topic")}</option>`).join("");
-    return top.map((q) => {
-      const wd = wordFor(q.q, all);
-      const kind = guessKind(wd);
-      return `<div class="seo-w-orow" data-w-orow="${h.esc(q.q)}">
-        <div><span class="seo-path">${h.esc(q.q)}</span><span class="seo-note">${h.fmtInt(q.i)} impr.</span></div>
-        <div class="seo-w-oacts">
-          <input class="seo-input" data-w-oword value="${h.esc(wd)}" maxlength="60" aria-label="Word to add">
-          <select class="seo-input" data-w-otopic aria-label="Topic"><option value="">Choose topic</option>${opts}<option value="new">New topic…</option></select>
+  function clustersHtml(groups) {
+    groupsBy = new Map(groups.map((g) => [g.w, g]));
+    if (!w.queries.length) return `<p class="seo-note">No search data yet.</p>`;
+    if (!groups.length) return `<p class="seo-note">Every search is in a topic.</p>`;
+    const lim = cMore ? 60 : 10;
+    const opts = (to) => topics.map((t, i) => `<option value="${i}"${i === to ? " selected" : ""}>${h.esc(t.name || "Untitled topic")}</option>`).join("");
+    return `<div class="seo-w-clist">${groups.slice(0, lim).map((g) => {
+      g.kind = guessKind(g.w);
+      g.to = guessTopic(g);
+      const open = cOpen === g.w;
+      const to = g.to >= 0 ? topics[g.to].name : "";
+      return `<div class="seo-w-cl" data-w-cl="${h.esc(g.w)}">
+        <div class="seo-w-clm">
+          <div><strong>${h.esc(g.w)}</strong> <span class="seo-w-tag is-${g.kind[0]}">${g.kind}</span></div>
+          <div class="seo-note">${plural(g.qs.length, "search")} · ${h.fmtInt(g.i)} impressions${to ? ` → <strong>${h.esc(to)}</strong>` : ""}</div>
+          <div class="seo-note seo-w-clq">${g.qs.slice(0, 3).map((q) => h.esc(q.q)).join(" · ")}${g.qs.length > 3 ? " …" : ""}</div>
+        </div>
+        <div class="seo-w-cla">
+          ${to ? `<button class="seo-btn on" type="button" data-w-cadd>Add</button>` : ""}
+          <button class="seo-btn" type="button" data-w-copen aria-expanded="${open}" title="Change the word or topic">${to ? "⌄" : "Choose topic"}</button>
+        </div>
+        ${open ? `<div class="seo-w-oacts">
+          <input class="seo-input" data-w-oword value="${h.esc(g.w)}" maxlength="60" aria-label="Word to add">
+          <select class="seo-input" data-w-otopic aria-label="Topic"><option value="">Choose topic</option>${opts(g.to)}<option value="new">New topic…</option></select>
           <select class="seo-input" data-w-okind aria-label="Concern or treatment">
-            <option value="concern"${kind === "concern" ? " selected" : ""}>as concern</option>
-            <option value="treatment"${kind === "treatment" ? " selected" : ""}>as treatment</option></select>
-          <button class="seo-btn" type="button" data-w-oadd>Add</button>
-        </div></div>`;
-    }).join("") + (rest.length > 30 ? `<p class="seo-note">and ${h.fmtInt(rest.length - 30)} more</p>` : "");
+            <option value="concern"${g.kind === "concern" ? " selected" : ""}>as concern</option>
+            <option value="treatment"${g.kind === "treatment" ? " selected" : ""}>as treatment</option></select>
+          <button class="seo-btn on" type="button" data-w-oadd>Add</button></div>` : ""}
+      </div>`;
+    }).join("")}</div>
+    ${groups.length > lim ? `<button class="seo-w-link" type="button" data-w-cmore>Show ${h.fmtInt(Math.min(groups.length, 60) - lim)} more</button>` : ""}`;
   }
 
-  /* ----- priority pages ----- */
+  function topicsHtml() {
+    const s = stats();
+    const pct = s.tot ? Math.round((s.cov / s.tot) * 100) : 0;
+    const groups = clustersOf(s.rest);
+    const maxI = Math.max(1, ...s.per.map((x) => x.i));
+    return `
+      <div class="seo-w-cov">
+        <div class="seo-row" style="margin:0">
+          <span class="seo-w-covn">${pct}%</span>
+          <span class="seo-note">of search impressions are in a topic (brand searches left out)</span><span class="seo-sp"></span>
+          <span class="seo-note">${groups.length ? plural(groups.length, "group") + " to sort" : "All sorted"}</span>
+        </div>
+        <div class="seo-w-bar is-big"><i style="width:${pct}%"></i></div>
+      </div>
+      ${guessed ? `<div class="seo-w-tip">Your topic words were sorted into concern and treatment automatically. Open each topic to check them.
+        <button class="seo-btn" type="button" data-w-gok>They look right</button></div>` : ""}
+      <div class="seo-row" style="margin:16px 0 8px">
+        <h3 style="margin:0">Your topics</h3>
+        <span class="seo-w-tag is-c">concern</span><span class="seo-w-tag is-t">treatment</span>
+        <span class="seo-sp"></span>
+        <button class="seo-btn" type="button" data-w-add>+ Add topic</button>
+      </div>
+      ${topics.length ? `
+        <div class="seo-w-tcards">${topics.map((t, i) => cardHtml(t, i, s.per[i], maxI)).join("")}</div>
+        ${sel >= 0 && topics[sel] ? editorHtml(sel) : ""}
+        <p class="seo-note" style="margin-top:8px">A search goes into the first topic that matches, in this order. Open a topic to move it.
+          <button class="seo-w-link" type="button" data-w-suggest>Start again with the suggested topics</button></p>`
+        : `<div class="seo-empty">No topics yet.<br><br><button class="seo-btn on" type="button" data-w-suggest>Start with the suggested topics</button></div>`}
+      <div class="seo-row" style="margin:22px 0 2px">
+        <h3 style="margin:0">Searches to sort</h3>
+        <span class="seo-note">grouped by the word they share, with the topic guessed where it can be</span>
+      </div>
+      ${clustersHtml(groups)}`;
+  }
 
-  function priorityHtml() {
-    const n = keyPages.length;
-    const wpLine = w.wp?.pages?.length ? `Page titles from WordPress, updated ${h.esc(when(w.wp.at))}.`
+  /* ----- Priority pages ----- */
+
+  function pcardsHtml() {
+    const rows = c.prRows ? c.prRows() : [];
+    if (!rows.length) {
+      return `<div class="seo-empty">No priority pages yet, so Site health checks the home page and your 15 busiest pages.${
+        c.isAdmin ? `<br><br><button class="seo-btn on" type="button" data-w-ppick>Add pages</button>` : ""}</div>`;
+    }
+    return `<div class="seo-w-pcards">${rows.map((r) => `<div class="seo-w-pcard">
+      <div class="seo-w-pch"><span class="seo-star is-on" aria-hidden="true">★</span>
+        <div style="min-width:0;flex:1"><strong class="seo-path" title="${h.esc(r.path)}">${h.esc(titleOf(w, c.data, r.path))}</strong>
+          <div class="seo-note seo-path seo-w-mono">${h.esc(r.path)}</div></div></div>
+      <div class="seo-w-pmeta"><span class="seo-pr-pill is-${r.tone}">${h.esc(r.label)}</span>
+        ${r.pr.target ? `<span class="seo-note seo-path" title="Target search">“${h.esc(r.pr.target)}”</span>` : `<span class="seo-note">No target search</span>`}</div>
+      ${r.why.length ? `<p class="seo-note seo-w-pwhy">${h.esc(r.why[0])}</p>` : ""}
+      <div class="seo-w-acts">
+        ${r.p ? `<button class="seo-btn" type="button" data-open="${h.esc(r.p.id)}">Open</button>` : ""}
+        ${c.isAdmin ? `<button class="seo-btn" type="button" data-w-prm="${h.esc(r.path)}">Remove</button>` : ""}
+      </div></div>`).join("")}</div>`;
+  }
+
+  function priHtml() {
+    const wpLine = w.wp?.pages?.length ? `Page titles from WordPress, updated ${h.esc(tsWhen(w.wp.at))}.`
       : w.errors.wp ? `Page titles couldn't be read: ${h.esc(errMsg({ message: w.errors.wp }))}`
       : "Page titles show once WordPress is connected (run seoWpSync in Apps Script).";
-    return `<div class="seo-row" style="margin:0 0 4px"><h3 style="margin:0">★ Priority pages</h3>
-        <span class="seo-note" data-w-pcount>${n} of 30 ticked</span></div>
-      <p class="seo-note">The pages that matter most. They show first across SEO, and Site health checks them every night.
-        Set each page's target search and goal from the ★ box in its page panel.${n ? "" : " None ticked yet, so Site health checks the home page and the 15 busiest pages."}</p>
-      ${c.isAdmin ? `<div class="seo-row">
+    return `
+      <div class="seo-row" style="margin:0 0 4px">
+        <h3 style="margin:0" data-w-pcount>${keyPages.length} of 30 priority pages</h3><span class="seo-sp"></span>
+        ${c.isAdmin ? `<button class="seo-btn${pPick ? "" : " on"}" type="button" data-w-ppick>${pPick ? "Close the list" : "+ Add pages"}</button>` : ""}
+      </div>
+      <p class="seo-note">They show first across SEO, and Site health checks them every night. Dropping pages are listed first.
+        Set a page's target search and goal in its ★ box (Open).${c.isAdmin ? "" : " Only admins can change priority pages."}</p>
+      ${pPick && c.isAdmin ? `<div class="seo-card seo-w-picker">
+        <div class="seo-row">
           ${[["all", "All pages"], ["sel", "Ticked"], ["sug", "Suggested"]].map(([k, l]) =>
             `<button class="seo-w-chip ${pFilt === k ? "is-on" : ""}" type="button" data-w-pf="${k}">${l}</button>`).join("")}
           <span class="seo-sp"></span>
           <input class="seo-input seo-w-find" type="search" data-w-pfind placeholder="Search title or address" value="${h.esc(pFind)}">
-        </div>` : `<p class="seo-note">Only admins can change priority pages.</p>`}
-      <div data-w-plist>${pListHtml()}</div>
-      ${c.isAdmin ? `<div class="seo-w-acts"><button class="seo-btn" type="button" data-w-top>Tick the busiest pages</button></div>` : ""}
-      <p class="seo-note">${wpLine}</p>`;
+        </div>
+        <div data-w-plist>${pListHtml()}</div>
+        <div class="seo-w-acts"><button class="seo-btn" type="button" data-w-top>Tick the busiest pages</button></div>
+      </div>` : ""}
+      <div data-w-pcards>${pcardsHtml()}</div>
+      <p class="seo-note" style="margin-top:8px">${wpLine}</p>`;
+  }
+
+  /* ----- Brand and wording ----- */
+
+  function brandHtml() {
+    return `
+      <div class="seo-card">
+        <h3 style="margin:0 0 4px">Brand words</h3>
+        <p class="seo-note">Searches containing these are grouped as Brand and left out of Opportunities and the coverage meter.</p>
+        <div class="seo-w-chips">${brand.map((b, j) => `<span class="seo-w-tag is-b">${h.esc(b)}<button type="button" data-w-bx="${j}"
+            aria-label="Remove ${h.esc(b)}">×</button></span>`).join("")}
+          <input data-w-bin placeholder="Add a brand word, then Enter" maxlength="40" aria-label="Brand word"></div>
+      </div>
+      <div class="seo-card">
+        <div class="seo-row" style="margin:0 0 4px"><h3 style="margin:0">Advertising wording</h3>
+          <span class="seo-note">${plural(wording.length, "word")}</span><span class="seo-sp"></span>
+          <button class="seo-btn" type="button" data-w-wedit>${wEdit ? "Done" : "Edit list"}</button></div>
+        <p class="seo-note">Site health looks for these on priority pages, including titles, descriptions and image alt text. Whole words only.
+          This is a starting list, not legal advice: have it checked by your compliance adviser.</p>
+        ${wEdit ? `<p class="seo-note">One per line, with the reason after a <code>|</code>. Saves when you click outside the box.</p>
+            <textarea class="seo-input seo-w-full seo-w-ta" rows="12" data-w-words>${h.esc(wording.map((x) => (x.why ? `${x.word} | ${x.why}` : x.word)).join("\n"))}</textarea>
+            <div class="seo-w-acts"><button class="seo-btn" type="button" data-w-wdefault>Reset to the suggested list</button></div>`
+          : `<div>${wording.map((x) => `<span class="seo-w-tag is-r" title="${h.esc(x.why || "")}">${h.esc(x.word)}</span>`).join("")}</div>`}
+      </div>`;
+  }
+
+  function saveWording(text) {
+    const list = [];
+    const seen = new Set();
+    for (const l of String(text).split(/\n+/)) {
+      const [wd, ...rest] = l.split("|");
+      const word = norm(wd);
+      if (!word || seen.has(word)) continue;
+      seen.add(word);
+      list.push({ word: word.slice(0, 80), why: rest.join("|").trim().slice(0, 150) });
+    }
+    wording = list.slice(0, 200);
+    persist({ compliance: wording });
   }
 
   /* ----- the page ----- */
 
   function draw() {
-    wrap.innerHTML = `<div class="seo-w-set">
-      <div>
-        <div class="seo-card">
-          <div class="seo-row" style="margin:0 0 4px"><h3 style="margin:0">Topics</h3><span class="seo-sp"></span>
-            <button class="seo-btn" type="button" data-w-add>Add topic</button>
-            <button class="seo-btn" type="button" data-w-suggest>${topics.length ? "Replace with suggested topics" : "Start with suggested topics"}</button></div>
-          <div class="seo-w-legend"><span><span class="seo-w-tag is-c">concern</span> what people have</span>
-            <span><span class="seo-w-tag is-t">treatment</span> what they want done</span>
-            <span>A search goes into the first topic with a matching word. Click a topic to edit it.</span></div>
-          ${guessed ? `<div class="seo-w-tip">Your topic words were sorted into concern and treatment automatically. Check them, then press Save settings.</div>` : ""}
-          ${topics.length ? `<div class="seo-w-thead"><span>Topic</span><span>Concern words</span><span>Treatment words</span><span>Pages</span></div>
-            ${topics.map((t, i) => topicRow(t, i) + (i === openT ? topicEditor(t, i) : "")).join("")}`
-            : `<p class="seo-note">No topics yet. Start with the suggested topics, then adjust them.</p>`}
-          <h3 style="margin:18px 0 4px">Brand words</h3>
-          <p class="seo-note">Searches containing these are grouped as Brand and left out of Opportunities.</p>
-          <input class="seo-input seo-w-full" data-w-brand value="${h.esc(brand)}" placeholder="dermedica">
-        </div>
-
-        <div class="seo-card">${priorityHtml()}</div>
-
-        <div class="seo-card">
-          <h3 style="margin:0 0 4px">Advertising wording</h3>
-          <p class="seo-note">Words and phrases Site health looks for on priority pages, including titles, descriptions and image alt text.
-            One per line, with the reason after a <code>|</code> if you like. Matches whole words only, so “guarantee” doesn't match “guaranteed”.
-            This is a starting list, not legal advice: have it checked by your compliance adviser.</p>
-          <textarea class="seo-input seo-w-full seo-w-ta" rows="10" data-w-words>${h.esc(words)}</textarea>
-          <div class="seo-w-acts"><button class="seo-btn" type="button" data-w-wdefault>Reset to the suggested list</button></div>
-        </div>
-
-        <div class="seo-w-acts">
-          <button class="seo-btn on" type="button" data-w-save>Save settings</button>
-          <span class="seo-note" data-w-dirty>${dirty ? "Unsaved changes" : ""}</span>
-        </div>
+    const tabs = [["topics", "Topics"], ["pri", `★ Priority pages <span class="seo-w-n">${keyPages.length}</span>`], ["brand", "Brand and wording"]];
+    wrap.innerHTML = `
+      <div class="seo-row seo-w-stabs">
+        ${tabs.map(([k, l]) => `<button class="seo-w-stab ${ui.sset === k ? "is-on" : ""}" type="button" data-w-sset="${k}">${l}</button>`).join("")}
+        <span class="seo-sp"></span><span class="seo-note" data-w-sstat>${h.esc(lastStatus)}</span>
       </div>
-
-      <div class="seo-card">
-        <h3 style="margin:0 0 4px">Busiest searches not in a topic</h3>
-        <p class="seo-note">Add the word that matters to a topic. Edit the word if it should be shorter or longer. Press Save settings to keep it.</p>
-        ${otherHtml()}
-      </div>
-    </div>`;
+      ${ui.sset === "pri" ? priHtml() : ui.sset === "brand" ? brandHtml() : topicsHtml()}`;
   }
-
-  const refocus = (sel) => wrap.querySelector(sel)?.focus();
+  const refocus = (s) => wrap.querySelector(s)?.focus();
 
   wrap.oninput = (e) => {
     const t = e.target;
-    if (t.dataset.wTname !== undefined) { topics[+t.dataset.wTname].name = t.value; mark(); }
+    if (t.dataset.wTname !== undefined) { topics[+t.dataset.wTname].name = t.value; }
     else if (t.dataset.wChipin !== undefined && t.value.includes(",")) {
       const [i, k] = t.dataset.wChipin.split("|");
-      addWords(+i, k, t.value); draw(); refocus(`[data-w-chipin="${i}|${k}"]`);
+      if (addWords(+i, k, t.value)) saveTopics();
+      draw(); refocus(`[data-w-chipin="${i}|${k}"]`);
     }
-    else if (t.matches("[data-w-tfind]")) { tFind = t.value; tMore = false; wrap.querySelector("[data-w-tlist]").innerHTML = tListHtml(openT); }
+    else if (t.matches("[data-w-tfind]")) { tFind = t.value; tMore = false; wrap.querySelector("[data-w-tlist]").innerHTML = tListHtml(sel); }
     else if (t.matches("[data-w-pfind]")) { pFind = t.value; pMore = false; wrap.querySelector("[data-w-plist]").innerHTML = pListHtml(); }
-    else if (t.matches("[data-w-brand]")) { brand = t.value; mark(); }
-    else if (t.matches("[data-w-words]")) { words = t.value; mark(); }
   };
 
   wrap.onchange = (e) => {
     const t = e.target;
     const row = t.closest(".seo-w-pk");
-    if (t.dataset.wTpage !== undefined && topics[openT]) {
-      const tp = topics[openT];
-      const k = npath(t.dataset.wTpage);
+    if (t.dataset.wTname !== undefined) { saveTopics(); draw(); }
+    else if (t.matches("[data-w-words]")) saveWording(t.value);
+    else if (t.dataset.wTpage !== undefined && topics[sel]) {
+      const tp = topics[sel], k = npath(t.dataset.wTpage);
       tp.pages = t.checked ? tp.pages.concat([t.dataset.wTpage]) : tp.pages.filter((p) => npath(p) !== k);
       row?.classList.toggle("is-on", t.checked);
-      const cnt = wrap.querySelector("[data-w-tcount]");
-      if (cnt) cnt.textContent = `${tp.pages.length} ticked`;
-      mark();
+      saveTopics();
     } else if (t.dataset.wPpage !== undefined && c.isAdmin) {
       const k = npath(t.dataset.wPpage);
-      if (t.checked && keyPages.length >= 30) { t.checked = false; toast("You can tick up to 30 pages. Untick one first.", true); return; }
+      if (t.checked && keyPages.length >= 30) { t.checked = false; toast("You can have up to 30 priority pages. Remove one first.", true); return; }
       keyPages = t.checked ? keyPages.concat([t.dataset.wPpage]) : keyPages.filter((p) => npath(p) !== k);
       row?.classList.toggle("is-on", t.checked);
+      savePriority();
       const cnt = wrap.querySelector("[data-w-pcount]");
-      if (cnt) cnt.textContent = `${keyPages.length} of 30 ticked`;
-      mark();
+      if (cnt) cnt.textContent = `${keyPages.length} of 30 priority pages`;
+      wrap.querySelector("[data-w-pcards]").innerHTML = pcardsHtml();
     }
   };
 
@@ -1476,136 +1645,136 @@ function viewSettings(wrap, c) {
       const [i, k] = ci.dataset.wChipin.split("|");
       if (e.key === "Enter" || e.key === ",") {
         e.preventDefault();
-        if (addWords(+i, k, ci.value)) { draw(); refocus(`[data-w-chipin="${i}|${k}"]`); } else ci.value = "";
+        if (addWords(+i, k, ci.value)) { saveTopics(); draw(); refocus(`[data-w-chipin="${i}|${k}"]`); } else ci.value = "";
       } else if (e.key === "Backspace" && !ci.value && topics[+i][k].length) {
-        topics[+i][k].pop(); mark(); draw(); refocus(`[data-w-chipin="${i}|${k}"]`);
+        topics[+i][k].pop(); saveTopics(); draw(); refocus(`[data-w-chipin="${i}|${k}"]`);
       }
       return;
     }
-    const row = e.target.closest?.("[data-w-topen]");
-    if (row && (e.key === "Enter" || e.key === " ") && e.target === row) { e.preventDefault(); row.click(); }
+    const bi = e.target.closest?.("[data-w-bin]");
+    if (bi && (e.key === "Enter" || e.key === ",")) {
+      e.preventDefault();
+      if (addBrand(bi.value)) { persist({ brand: brand.slice(0, 20) }); draw(); refocus("[data-w-bin]"); } else bi.value = "";
+    }
   };
 
-  wrap.onclick = async (e) => {
-    if (e.target.closest(".seo-w-pk")) return;   // tick boxes are handled by onchange
+  wrap.onclick = (e) => {
+    if (e.target.closest("[data-open]") || e.target.closest(".seo-w-pk")) return;   // seo.js opens pages; tick boxes use onchange
     const t = e.target.closest("button");
-    const row = !t && e.target.closest("[data-w-topen]");
-    if (!t && !row) return;
+    if (!t) return;
     commitPending();
-    if (row) {
-      const i = +row.dataset.wTopen;
-      openT = openT === i ? -1 : i; tFind = ""; tMore = false;
+    const d = t.dataset;
+
+    if (d.wSset !== undefined) { ui.sset = d.wSset; draw(); return; }
+
+    /* topics */
+    if (d.wTcard !== undefined) {
+      const i = +d.wTcard;
+      sel = sel === i ? -1 : i; tPick = false; tFind = ""; tMore = false;
       draw();
+      if (sel >= 0) wrap.querySelector(".seo-w-tedit")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
       return;
     }
-    const d = t.dataset;
     if (d.wAdd !== undefined) {
-      topics.push({ name: "", concern: [], treatment: [], pages: [] });
-      openT = topics.length - 1; tFind = ""; mark(); draw();
-      refocus(`[data-w-tname="${openT}"]`);
-    } else if (d.wTclose !== undefined) {
-      const tp = topics[openT];
-      if (tp && !tp.name.trim() && !tp.concern.length && !tp.treatment.length && !tp.pages.length) topics.splice(openT, 1);
-      openT = -1; draw();
-    } else if (d.wChipx !== undefined) {
+      topics.push({ name: "New topic", concern: [], treatment: [], pages: [] });
+      sel = topics.length - 1; tPick = false;
+      saveTopics(); draw();
+      const el = wrap.querySelector(`[data-w-tname="${sel}"]`);
+      el?.focus(); el?.select();
+      return;
+    }
+    if (d.wTclose !== undefined) { sel = -1; draw(); return; }
+    if (d.wChipx !== undefined) {
       const [i, k, j] = d.wChipx.split("|");
-      topics[+i][k].splice(+j, 1); mark(); draw();
-    } else if (d.wRm !== undefined) {
+      topics[+i][k].splice(+j, 1); saveTopics(); draw(); return;
+    }
+    if (d.wRm !== undefined) {
       const i = +d.wRm;
-      if ((topics[i].concern.length || topics[i].treatment.length) && !confirm(`Delete the topic “${topics[i].name || "New topic"}”?`)) return;
-      topics.splice(i, 1); openT = -1; mark(); draw();
-    } else if (d.wUp !== undefined || d.wDown !== undefined) {
+      if (!confirm(`Delete the topic “${topics[i].name || "Untitled topic"}”? Its searches go back to “Searches to sort”.`)) return;
+      topics.splice(i, 1); sel = -1; saveTopics(true); draw(); return;
+    }
+    if (d.wUp !== undefined || d.wDown !== undefined) {
       const i = +(d.wUp ?? d.wDown), j = d.wUp !== undefined ? i - 1 : i + 1;
       if (j < 0 || j >= topics.length) return;
       [topics[i], topics[j]] = [topics[j], topics[i]];
-      openT = j; mark(); draw();
-    } else if (d.wTmore !== undefined) {
-      tMore = true; wrap.querySelector("[data-w-tlist]").innerHTML = tListHtml(openT);
-    } else if (d.wPmore !== undefined) {
-      pMore = true; wrap.querySelector("[data-w-plist]").innerHTML = pListHtml();
-    } else if (d.wPf !== undefined) {
-      pFilt = d.wPf; pMore = false; draw();
-    } else if (d.wSuggest !== undefined) {
+      sel = j; saveTopics(); draw(); return;
+    }
+    if (d.wTpick !== undefined) { tPick = !tPick; tFind = ""; tMore = false; draw(); return; }
+    if (d.wTpx !== undefined && topics[sel]) {
+      topics[sel].pages = topics[sel].pages.filter((p) => npath(p) !== npath(d.wTpx));
+      saveTopics(); draw(); return;
+    }
+    if (d.wTmore !== undefined) { tMore = true; wrap.querySelector("[data-w-tlist]").innerHTML = tListHtml(sel); return; }
+    if (d.wGok !== undefined) { guessed = false; saveTopics(true); draw(); return; }
+    if (d.wSuggest !== undefined) {
       if (topics.length && !confirm("Replace your topics with the suggested list? Pages ticked on topics with the same name are kept.")) return;
       const keep = new Map(topics.map((x) => [x.name.toLowerCase(), x.pages]));
       topics = SUGGESTED.topics.map((x) => ({ name: x.name, concern: x.concern.slice(), treatment: x.treatment.slice(),
         pages: (keep.get(x.name.toLowerCase()) || []).slice() }));
-      if (!brand.trim()) brand = SUGGESTED.brand.join(", ");
-      openT = -1; mark(); draw();
-    } else if (d.wTop !== undefined) {
-      if (keyPages.length && !confirm("Replace the ticked pages with the home page and the 15 busiest pages?")) return;
-      keyPages = ["/", ...idx.list.filter((x) => x.clicks > 0 && npath(x.path) !== "/").slice(0, 15).map((x) => x.path)];
-      pFilt = "all"; mark(); draw();
-    } else if (d.wWdefault !== undefined) {
-      if (!confirm("Replace the advertising wording list with the suggested list?")) return;
-      words = wordsText(COMPLIANCE); mark(); draw();
-    } else if (d.wOadd !== undefined) {
-      const r = t.closest("[data-w-orow]");
-      const wd = norm(r.querySelector("[data-w-oword]").value);
-      const ti = r.querySelector("[data-w-otopic]").value;
-      const kind = r.querySelector("[data-w-okind]").value;
-      if (!wd) { toast("Type the word to add.", true); return; }
-      if (ti === "") { toast("Choose a topic.", true); return; }
-      let i = +ti;
-      if (ti === "new") {
-        const name = prompt("Name for the new topic", titleCase(wd));
-        if (!name || !name.trim()) return;
-        topics.push({ name: name.trim().slice(0, 60), concern: [], treatment: [], pages: [] });
-        i = topics.length - 1;
+      if (!brand.length) { brand = SUGGESTED.brand.slice(); persist({ brand }); }
+      sel = -1; saveTopics(true); draw(); return;
+    }
+
+    /* searches to sort */
+    if (d.wCmore !== undefined) { cMore = true; draw(); return; }
+    const cl = t.closest("[data-w-cl]");
+    const g = cl ? groupsBy.get(cl.dataset.wCl) : null;
+    if (g && d.wCopen !== undefined) { cOpen = cOpen === g.w ? "" : g.w; draw(); return; }
+    if (g && (d.wCadd !== undefined || d.wOadd !== undefined)) {
+      let word = g.w, i = g.to, kind = g.kind;
+      if (d.wOadd !== undefined) {
+        word = norm(cl.querySelector("[data-w-oword]").value);
+        const ti = cl.querySelector("[data-w-otopic]").value;
+        kind = cl.querySelector("[data-w-okind]").value;
+        if (!word) { toast("Type the word to add.", true); return; }
+        if (ti === "") { toast("Choose a topic.", true); return; }
+        if (ti === "new") {
+          const name = prompt("Name for the new topic", titleCase(word));
+          if (!name || !name.trim()) return;
+          topics.push({ name: name.trim().slice(0, 60), concern: [], treatment: [], pages: [] });
+          i = topics.length - 1;
+        } else i = +ti;
       }
-      addWords(i, kind, wd);
-      toast(`Added “${wd}” to ${topics[i].name}. Press Save settings to keep it.`);
+      if (i < 0 || !topics[i]) return;
+      addWords(i, kind, word);
+      cOpen = "";
+      saveTopics(true);
+      toast(`Added “${word}” to ${topics[i].name}`);
       draw();
-    } else if (d.wSave !== undefined) {
-      const named = topics.filter((x) => x.name.trim() || x.concern.length || x.treatment.length);
-      if (named.some((x) => !x.name.trim())) { toast("Give every topic a name.", true); return; }
-      const clean = named.map((x) => {
-        const concern = [...new Set(x.concern.map(norm).filter(Boolean))].slice(0, 60);
-        const treatment = [...new Set(x.treatment.map(norm).filter(Boolean))].filter((y) => !concern.includes(y)).slice(0, 60);
-        return { name: x.name.trim().slice(0, 60), concern, treatment, words: [...concern, ...treatment], pages: [...new Set(x.pages)].slice(0, 50) };
-      });
-      if (clean.some((x) => !x.words.length)) { toast("Every topic needs at least one word.", true); return; }
-      const brands = brandList();
-      const wordList = [];
-      const seenW = new Set();
-      for (const l of lines(words)) {
-        const [wd, ...rest] = l.split("|");
-        const word = norm(wd);
-        if (!word || seenW.has(word)) continue;
-        seenW.add(word);
-        wordList.push({ word: word.slice(0, 80), why: rest.join("|").trim().slice(0, 150) });
-      }
-      const data = { topics: clean, brand: brands, compliance: wordList.slice(0, 200) };
-      if (c.isAdmin) {   // only admins change priority pages; new ones get a suggested target search
-        const pages = [...new Map(keyPages.map((p) => [npath(p), p])).values()].slice(0, 30);
-        const { info } = prioritySettings(w);
-        const keep = new Set(pages.map(npath));
-        const have = new Set(info.map((x) => npath(x.path)));
-        const now = new Date().toISOString();
-        data.keyPages = pages;
-        data.priorityInfo = info.filter((x) => keep.has(npath(x.path)))
-          .concat(pages.filter((p) => !have.has(npath(p)))
-            .map((p) => ({ path: p, ...suggestPriority(w, c.data, p), note: "", by: uid(), at: now })));
-      }
-      t.disabled = true;
-      try {
-        await setDoc(doc(db, "seo_settings", "main"), { ...data, updatedBy: uid(), updatedAt: serverTimestamp() }, { merge: true });
-        w.settings = { ...(w.settings || {}), ...data };
-        classify(w);
-        if (w.ui) w.ui.topic = ALL;
-        const s2 = settingsOf(w);
-        topics = s2.topics.map((x) => ({ name: x.name, concern: x.concern.slice(), treatment: x.treatment.slice(), pages: x.pages.slice() }));
-        brand = s2.brand.join(", ");
-        keyPages = s2.keyPages.slice();
-        words = wordsText(s2.compliance || []);
-        dirty = false; openT = -1;
-        toast("Settings saved. Priority page and wording changes show after the next nightly check.");
-        draw();
-      } catch (err) { t.disabled = false; toast(errMsg(err), true); }
+      return;
+    }
+
+    /* priority pages */
+    if (d.wPpick !== undefined) { pPick = !pPick; pFind = ""; pMore = false; draw(); return; }
+    if (d.wPf !== undefined) { pFilt = d.wPf; pMore = false; draw(); return; }
+    if (d.wPmore !== undefined) { pMore = true; wrap.querySelector("[data-w-plist]").innerHTML = pListHtml(); return; }
+    if (d.wTop !== undefined && c.isAdmin) {
+      if (keyPages.length && !confirm("Replace your priority pages with the home page and the 15 busiest pages?")) return;
+      keyPages = ["/", ...idx.list.filter((x) => x.clicks > 0 && npath(x.path) !== "/").slice(0, 15).map((x) => x.path)];
+      savePriority(); draw(); return;
+    }
+    if (d.wPrm !== undefined && c.isAdmin) {
+      if (!confirm(`Remove ${d.wPrm} from priority pages? Site health stops checking it.`)) return;
+      keyPages = keyPages.filter((p) => npath(p) !== npath(d.wPrm));
+      savePriority(); draw(); return;
+    }
+
+    /* brand and wording */
+    if (d.wBx !== undefined) { brand.splice(+d.wBx, 1); persist({ brand: brand.slice() }); draw(); return; }
+    if (d.wWedit !== undefined) {
+      const ta = wrap.querySelector("[data-w-words]");
+      if (ta) saveWording(ta.value);
+      wEdit = !wEdit; draw(); return;
+    }
+    if (d.wWdefault !== undefined) {
+      if (!confirm("Replace the advertising wording list with the suggested list?")) return;
+      saveWording(COMPLIANCE.map((x) => `${x.word} | ${x.why}`).join("\n"));
+      draw(); return;
     }
   };
   draw();
 }
+
 /* ---------- styles ---------- */
 
 const CSS = `
@@ -1727,7 +1896,47 @@ span.seo-star{cursor:default}
 .seo-w-orow > div:first-child{display:flex;justify-content:space-between;gap:8px}
 .seo-w-oacts{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:6px}
 .seo-w-oacts .seo-input{width:100%;min-width:0;box-sizing:border-box;padding:4px 8px}
+.seo-w-stabs{gap:6px;margin-bottom:14px}
+.seo-w-stab{border:1px solid var(--border,#e5e7eb);background:var(--card,#fff);color:inherit;border-radius:999px;padding:6px 14px;font:inherit;font-size:13px;cursor:pointer}
+.seo-w-stab.is-on{border-color:var(--accent,#2563eb);background:#eff6ff;color:#1d4ed8;font-weight:600}
+.seo-w-cov{padding:12px 14px;border-radius:10px;background:#f8fafc;border:1px solid var(--border,#e5e7eb)}
+.seo-w-covn{font-size:26px;font-weight:700;line-height:1}
+.seo-w-bar{display:block;height:6px;margin:8px 0 6px;border-radius:3px;background:#e5e7eb;overflow:hidden}
+.seo-w-bar.is-big{height:8px;margin-bottom:0}
+.seo-w-bar i{display:block;height:100%;border-radius:3px;background:var(--accent,#2563eb)}
+.seo-w-tcards{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px}
+.seo-w-tcard{display:block;width:100%;padding:12px 14px;border:1px solid var(--border,#e5e7eb);border-radius:10px;background:var(--card,#fff);color:inherit;font:inherit;text-align:left;cursor:pointer}
+.seo-w-tcard:hover{border-color:#93c5fd}
+.seo-w-tcard.is-sel{border-color:var(--accent,#2563eb);box-shadow:0 0 0 1px var(--accent,#2563eb)}
+.seo-w-tcard > .seo-note{display:block;margin-top:2px}
+.seo-w-tch{display:flex;justify-content:space-between;gap:8px;font-size:14px}
+.seo-w-warn{color:#b45309;font-weight:600}
+.seo-w-tedit{margin:10px 0 0;padding:12px 14px;border:1px solid #bfdbfe;border-radius:10px;background:var(--card,#fff)}
+.seo-w-tpages{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:12px;font-size:13px}
+.seo-w-ptag{display:inline-flex;align-items:center;gap:2px;max-width:280px;padding:2px 8px;border:1px solid var(--border,#e5e7eb);border-radius:999px;font-size:12px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.seo-w-ptag button,.seo-w-tag button{border:0;background:none;padding:0 0 0 3px;font:inherit;font-size:14px;line-height:1;color:inherit;cursor:pointer;opacity:.6}
+.seo-w-clist{border:1px solid var(--border,#e5e7eb);border-radius:10px;background:var(--card,#fff);margin-top:8px}
+.seo-w-cl{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 12px;align-items:center;padding:10px 14px;border-top:1px solid var(--border,#e5e7eb);font-size:13px}
+.seo-w-cl:first-child{border-top:0}
+.seo-w-clm{min-width:0}
+.seo-w-clq{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.seo-w-cla{display:flex;gap:6px}
+.seo-w-cl .seo-w-oacts{grid-column:1/-1;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 140px auto;margin:4px 0 0}
+.seo-w-tag.is-b{background:#f1f5f9;color:#334155}
+.seo-w-tag.is-r{background:#fef2f2;color:#b91c1c;cursor:help}
+.seo-w-picker{margin:10px 0}
+.seo-w-pcards{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;margin-top:10px}
+.seo-w-pcard{display:flex;flex-direction:column;gap:6px;padding:12px 14px;border:1px solid var(--border,#e5e7eb);border-radius:10px;background:var(--card,#fff);font-size:13px;min-width:0}
+.seo-w-pch{display:flex;gap:6px;align-items:flex-start}
+.seo-w-mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px}
+.seo-w-pmeta{display:flex;align-items:center;gap:8px;min-width:0}
+.seo-w-pwhy{margin:0;line-height:1.4}
+.seo-w-pcard .seo-w-acts{margin-top:auto}
+.seo-pr-pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;white-space:nowrap}
+.seo-pr-pill.is-red{background:#fef2f2;color:#b91c1c}.seo-pr-pill.is-amber{background:#fffbeb;color:#b45309}
+.seo-pr-pill.is-green{background:#ecfdf5;color:#047857}.seo-pr-pill.is-grey{background:#f1f5f9;color:#475569}
 @media (max-width:900px){.seo-w-log,.seo-w-set{grid-template-columns:1fr}}
+@media (max-width:640px){.seo-w-cl .seo-w-oacts{grid-template-columns:1fr 1fr}}
 @media (max-width:640px){
   .seo-w-thead{display:none}
   .seo-w-trow2{grid-template-columns:1fr}

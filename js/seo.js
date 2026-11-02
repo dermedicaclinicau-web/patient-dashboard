@@ -5,7 +5,7 @@
 import { db } from "./firebase-config.js";
 import { doc, getDoc, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan, titleOf } from "./seo-work.js?v=6";
-import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast } from "./seo-priority.js?v=2";
+import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js?v=2";
 
 const TABS = [
   { id: "overview", label: "Overview" },
@@ -446,6 +446,7 @@ export async function mountSeo(el, opts = {}) {
       data, work, can, isAdmin, staff: opts.staff,
       h: { esc, fmtInt, fmtPct, fmtPos, delta, addDays, fmtDate, sumRange, sparkline },
       byPath: new Map(data.pages.map((p) => [p.path, p])),
+      prRows: () => priorityRows(ctx()),   // priority page status, used by Settings
       setTab: (id) => { tab = id; history.replaceState(null, "", "#/seo/" + id); render(); },
     };
   }
