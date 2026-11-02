@@ -116,6 +116,7 @@
                   "./js/presence.js",
                   "./js/print-queue.js",
                   "./js/print-task.js",
+                  "./js/prospect-compose.js",
                   "./js/prospects.js",
                   "./js/public-form.js",
                   "./js/purchase-order.js",
@@ -204,6 +205,6 @@
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261030-083825",
-    "v":  "20261030-083825"
+    "version":  "20261102-090952",
+    "v":  "20261102-090952"
 }

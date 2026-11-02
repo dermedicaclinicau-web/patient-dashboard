@@ -822,6 +822,10 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
         <label class="tb-field"><span>${s.freq === "once" ? "Send on" : "Starts on"}</span>
           <input class="fe-input" type="date" data-sch="date" value="${esc(s.date)}" /></label>
         ${task.recipients.aboutPatient ? schedPatientHtml() : ""}
+        ${/\{\s*upcoming appointments\s*\}/i.test(`${task.subject} ${task.body}`) ? `
+        <label class="tb-field"><span>Upcoming appointments</span><select class="fb-select" data-sch="apptMonths">
+          ${[3, 6, 12].map((m) => opt(m, `The next ${m} months`, s.apptMonths)).join("")}</select>
+          <small class="muted">Filled in from the appointment book when each email goes, so it's always up to date.</small></label>` : ""}
         ${s.freq !== "once" ? `
         <div class="tb-field"><span>Stops</span>
           ${seg("schend", [["never", "Never"], ["date", "On a date"], ["count", "After a number of sends"]], s.end, 'data-sch="end" data-rerender=""')}
@@ -861,7 +865,8 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     set("Clinic phone", c.phone); set("Clinic email", c.email); set("Clinic address", c.address);
     set("Patient name", p.name); set("Patient first name", p.firstName);
     set("Patient mobile", p.mobile ? formatMobile(p.mobile) : ""); set("Patient email", p.email);
-    ["Upcoming appointments", "Treatment plan", "Treatment info", "Aftercare"].forEach((k) => set(k, ""));
+    set("Upcoming appointments", "{Upcoming appointments}"); // left for Apps Script: filled from the appointment book on the day
+    ["Treatment plan", "Treatment info", "Aftercare"].forEach((k) => set(k, ""));
     task.fields.forEach((f) => { if (String(f.label || "").trim()) set(f.label.trim(), defaultAnswer(f)); });
     s.renderedSubject = fillTemplate(task.subject, vals).replace(/\[\[([^|\]]+)\|[^\]]+\]\]/g, "$1").slice(0, 200);
     s.renderedHtml = emailShell(fillTemplateHtml(task.body, vals), task.style, { clinic: c, hasLogo: !!(letterhead && letterhead.logo) });
@@ -1018,7 +1023,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
         if (s.enabled && task.recipients.mode !== "fixed") { task.recipients.mode = "fixed"; loadStaff(); }
       } else if (el.type === "checkbox") {
         s[k] = el.checked;
-      } else if (["everyWeeks", "everyN", "endCount"].includes(k)) {
+      } else if (["everyWeeks", "everyN", "endCount", "apptMonths"].includes(k)) {
         s[k] = Number(el.value);
       } else {
         s[k] = el.value;

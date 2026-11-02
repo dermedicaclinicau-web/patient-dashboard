@@ -46,7 +46,7 @@ export function defaultSchedule() {
     days: ["Mo"], everyWeeks: 1, monthDay: "1", nth: "1", nthDay: "Mo", everyN: 2,
     end: "never", endDate: "", endCount: 10,
     skipWeekends: false, skipClosed: true, onlyApptDays: false, onSkip: "skip",
-    renderedHtml: "", renderedSubject: "", patientId: "", patientName: "",
+    renderedHtml: "", renderedSubject: "", patientId: "", patientName: "", apptMonths: 6,
   };
 }
 
@@ -76,6 +76,7 @@ export function cleanSchedule(s) {
     renderedSubject: String(x.renderedSubject || "").slice(0, 200),
     patientId: /^[A-Za-z0-9_-]{1,80}$/.test(String(x.patientId || "")) ? String(x.patientId) : "",
     patientName: String(x.patientName || "").slice(0, 120),
+    apptMonths: [3, 6, 12].includes(Number(x.apptMonths)) ? Number(x.apptMonths) : 6,
    };
 }
 
@@ -165,7 +166,7 @@ export function describeSchedule(sched) {
 
 
 // Reasons a scheduled task can't be published yet
-const SMART_RE = /\{\s*(upcoming appointments|treatment plan|treatment info|aftercare)\s*\}/i;
+const SMART_RE = /\{\s*(treatment plan|treatment info|aftercare)\s*\}/i;
 
 // Reasons a scheduled task can't be published yet
 export function scheduleProblems(task) {
@@ -176,7 +177,10 @@ export function scheduleProblems(task) {
   else if (!task.recipients.staffIds.length) out.push("Choose who the scheduled task goes to.");
   if (task.recipients.aboutPatient && !s.patientId) out.push("Choose the patient for automatic sends in Schedule (step 7).");
   if (SMART_RE.test(`${task.subject} ${task.body}`)) {
-    out.push("Automatic sends can't include {Upcoming appointments}, {Treatment plan}, {Treatment info} or {Aftercare}. Remove them, or set Schedule to “Only when someone runs it”.");
+    out.push("Automatic sends can't include {Treatment plan}, {Treatment info} or {Aftercare}. Remove them, or set Schedule to “Only when someone runs it”.");
+  }
+  if (/\{\s*upcoming appointments\s*\}/i.test(`${task.subject} ${task.body}`) && !task.recipients.aboutPatient) {
+    out.push("{Upcoming appointments} needs a patient. Tick “This is about a patient” and choose the patient in Schedule (step 7).");
   }
   if (task.attachments.length) out.push("Scheduled tasks can't include attachments yet. Remove them in Attachments.");
   task.fields.filter((f) => f.required && !String(f.default || "").trim())
