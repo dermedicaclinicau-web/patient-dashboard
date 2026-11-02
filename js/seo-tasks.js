@@ -118,7 +118,8 @@ function planTasks(c, path) {
     const r0 = s.related[0];
     rival = shifts[0] ? shifts[0][0] : r0 && r0.thPi && r0.myPi && r0.thPw / r0.thPi < r0.myPw / r0.myPi ? r0.path : "";
   }
-  if (rival && npath(rival) === me) rival = "";
+  // Not itself, and not the home page: it shares searches with everything, so "link it with Home" isn't useful
+  if (rival && (npath(rival) === me || npath(rival) === "/")) rival = "";
   const rTitle = rival ? titleOf(w, c.data, rival) : "";
   const rhp = rival ? hpOf(rival) : null;
 
@@ -437,15 +438,20 @@ export async function renderTasks(body, c) {
           <button class="seo-btn" type="button" data-t-copy="${t.id}">Copy brief</button>
           ${(() => {
             const seen = seenMap();
-            const cm = S.log.filter((l) => l.action === "comment" && npath(l.path || "") === npath(t.path));
+            const cm = commentsOf(t.path);
             const nw = cm.filter((l) => isNew(l, seen)).length;
-            return `<button class="seo-btn${nw ? " seo-t-newbtn" : ""}" type="button" data-t-cmts="${esc(t.path)}">${
-              nw ? `${nw} new comment${nw === 1 ? "" : "s"}` : cm.length ? `Comments (${cm.length})` : "Comment"}</button>`;
+            const open = ui.thread === t.id;
+            return `<button class="seo-btn${nw && !open ? " seo-t-newbtn" : ""}${open ? " on" : ""}" type="button" data-t-thread="${t.id}" aria-expanded="${open}">${
+              open ? "Hide comments" : nw ? `${nw} new comment${nw === 1 ? "" : "s"}` : cm.length ? `Comments (${cm.length})` : "Comment"}</button>`;
           })()}
           ${pid ? `<button class="seo-btn" type="button" data-open="${esc(pid)}">Open the page's plan</button>` : ""}
           <span class="seo-sp"></span>
           ${S.canDo && t.source === "ai" ? `<button class="seo-btn" type="button" data-t-dismiss="${t.id}">Dismiss</button>` : ""}
           ${S.canDo ? `<button class="seo-btn" type="button" data-t-skip="${t.id}">Skip for today</button>` : ""}</div>`}
+      ${ui.thread === t.id ? `<div class="seo-t-cwrap">
+          <div class="seo-t-chead2"><strong>Comments on this page</strong><span class="seo-sp"></span>
+            <button class="seo-w-link" type="button" data-t-cmts="${esc(t.path)}">See the page's full history</button></div>
+          ${threadHtml(t.path)}</div>` : ""}
     </div>`;
   }
 
@@ -485,8 +491,7 @@ export async function renderTasks(body, c) {
       ${(() => {
         const g = todayGaps();
         if (g.missing.length) {
-          const names = g.missing.slice(0, 4).map((t) => esc(titleOf(c.work, c.data, t.path))).join(", ") + (g.missing.length > 4 ? "…" : "");
-          return `<div class="seo-w-tip">${plural(g.missing.length, "priority page")} ${g.missing.length === 1 ? "isn't" : "aren't"} on today's list yet: ${names}.
+          return `<div class="seo-w-tip seo-row" style="margin:0 0 10px">${plural(g.missing.length, "priority page")} ${g.missing.length === 1 ? "isn't" : "aren't"} on today's list yet.
             <button class="seo-btn" type="button" data-t-addmissing>Add a task for each</button></div>`;
         }
         return g.fill.length ? `<div class="seo-w-tip">Today's list has room for ${plural(g.fill.length, "more task")}.
@@ -548,6 +553,47 @@ export async function renderTasks(body, c) {
     }).join("")}</div>`;
   }
 
+  // A page's comments, oldest first like a chat
+  function commentsOf(p) {
+    const k = npath(p);
+    return (S.trail[k] || S.log).filter((l) => l.action === "comment" && npath(l.path || "") === k)
+      .sort((a, b) => (tsDate(a.at)?.getTime() || 0) - (tsDate(b.at)?.getTime() || 0));
+  }
+
+  function bubble(l) {
+    return `<div class="seo-t-cmt${l.by === uid() ? " is-me" : ""}">
+      <div class="seo-t-cmeta"><strong>${esc(l.by === uid() ? "You" : l.byName || "Someone")}</strong>${l.role ? ` <span class="seo-note">${esc(l.role)}</span>` : ""}
+        <span class="seo-note">· ${esc(when(l.at))}</span></div>
+      <div class="seo-t-ctext">${esc(l.text)}</div></div>`;
+  }
+
+  function threadHtml(p) {
+    const list = commentsOf(p);
+    return `<div class="seo-t-thread">
+      ${list.length ? list.map(bubble).join("") : `<p class="seo-note">No comments yet.</p>`}
+      ${S.canDo ? `<div class="seo-t-cbox">
+          <textarea class="seo-input" rows="2" maxlength="1000"
+            placeholder="Write a comment, e.g. “Jasper, the doctors want this page updated before the spring promo”"></textarea>
+          <div class="seo-w-acts"><button class="seo-btn on" type="button" data-t-cadd="${esc(p)}">Send</button>
+            <span class="seo-note">The SEO team and admins see it. Comments can't be edited or deleted.</span></div>
+          <div class="seo-t-err" data-t-cerr></div></div>` : ""}
+    </div>`;
+  }
+
+  // The page's full trail, loaded once when first needed
+  async function ensureTrail(p) {
+    const k = npath(p);
+    if (S.trail[k]) return;
+    try {
+      const snap = await getDocs(query(collection(db, "seo_task_log"), where("path", "==", p)));
+      S.trail[k] = snap.docs.map((x) => ({ id: x.id, ...x.data() }));
+    } catch (e) {
+      console.warn("Trail not loaded:", e);
+      S.trail[k] = S.log.filter((l) => npath(l.path || "") === k);
+    }
+    draw();
+  }
+
   function trailRow(l) {
     const at = esc(when(l.at));
     if (l.action === "comment") {
@@ -570,28 +616,29 @@ export async function renderTasks(body, c) {
 
   function trailHtml(p) {
     const k = npath(p);
-    const list = (S.trail[k] || S.log.filter((l) => npath(l.path || "") === k)).slice()
+    const acts = (S.trail[k] || S.log.filter((l) => npath(l.path || "") === k))
+      .filter((l) => l.action !== "comment")
       .sort((a, b) => (tsDate(b.at)?.getTime() || 0) - (tsDate(a.at)?.getTime() || 0));
-    const shown = list.slice(0, ui.trailAll ? 500 : 25);
-    return `<div class="seo-t-trail">
-      ${S.canDo ? `<div class="seo-t-cbox">
-          <textarea class="seo-input" data-t-ctext rows="2" maxlength="1000"
-            placeholder="Add a comment for the SEO team, e.g. “Jasper, the doctors want this page updated before the spring promo”"></textarea>
-          <div class="seo-w-acts"><button class="seo-btn on" type="button" data-t-cadd="${esc(p)}">Add comment</button>
-            <span class="seo-note">Comments can't be edited or deleted.</span></div>
-          <div class="seo-t-err" data-t-cerr></div></div>` : ""}
-      ${S.trail[k] ? "" : `<p class="seo-note">Loading the full history…</p>`}
-      ${shown.length ? shown.map(trailRow).join("") : `<p class="seo-note">No comments or activity yet.</p>`}
-      ${list.length > shown.length ? `<button class="seo-w-link" type="button" data-t-trailall>Show all ${list.length}</button>` : ""}
+    const KEY = ["priority", "taskdone", "skip", "unskip", "dismiss", "missing", "untick"];
+    const shown = ui.allActs ? acts : acts.filter((l) => KEY.includes(l.action));
+    return `<div class="seo-t-trail2">
+      <div class="seo-t-tcol"><h4>Comments</h4>${threadHtml(p)}</div>
+      <div class="seo-t-tcol">
+        <div class="seo-row" style="margin:0 0 6px"><h4 style="margin:0">History</h4><span class="seo-sp"></span>
+          <button class="seo-w-chip ${ui.allActs ? "is-on" : ""}" type="button" data-t-allacts>${
+            ui.allActs ? "Key changes only" : `Show every tick and check (${acts.length})`}</button></div>
+        ${S.trail[k] ? "" : `<p class="seo-note">Loading…</p>`}
+        ${shown.length ? shown.slice(0, ui.allActs ? 200 : 40).map(trailRow).join("")
+          : `<p class="seo-note">${ui.allActs ? "Nothing yet." : "No key changes yet. Priority changes, finished tasks, skips and problems show here."}</p>`}
+      </div>
     </div>`;
   }
-
   function pagesHtml() {
     const paths = prioritySettings(c.work).paths;
     if (!paths.length) return `<div class="seo-empty">No priority pages yet. Star pages in the Pages tab or Settings → ★ Priority pages.</div>`;
     const rows = new Map((c.prRows ? c.prRows() : []).map((r) => [npath(r.path), r]));
     const seen = seenMap();
-    return `<p class="seo-note">Tasks follow this order, #1 first. ${c.isAdmin ? "Use the arrows to change it." : "Admins can change the order."}
+    return `<p class="seo-note">Tasks follow this order, #1 first. ${c.isAdmin ? "Drag ⋮⋮ or use the arrows to change it." : "Admins can change the order."}
         Click a page for its comments and history.</p>
       <div class="seo-t-plist">${paths.map((p, i) => {
         const k = npath(p);
@@ -626,13 +673,7 @@ export async function renderTasks(body, c) {
     draw();
     if (!ui.page) return;
     markSeen(k);
-    if (!S.trail[k]) {
-      try {
-        const snap = await getDocs(query(collection(db, "seo_task_log"), where("path", "==", p)));
-        S.trail[k] = snap.docs.map((x) => ({ id: x.id, ...x.data() }));
-      } catch (e) { console.warn("Trail not loaded:", e); S.trail[k] = S.log.filter((l) => npath(l.path || "") === k); }
-      if (ui.page === k && ui.view === "pages") draw();
-    }
+    ensureTrail(p);
   }
 
   function reviewHtml() {
@@ -754,8 +795,19 @@ export async function renderTasks(body, c) {
     if (t0.dataset.open !== undefined) return;   // seo.js opens the page panel
     const d = t0.dataset;
 
-    if (d.tCmts) { ui.view = "pages"; ui.page = ""; openPage(d.tCmts); return; }
-    if (d.tTrailall !== undefined) { ui.trailAll = true; draw(); return; }
+    if (d.tCmts) { ui.view = "pages"; ui.page = ""; ui.thread = ""; openPage(d.tCmts); return; }
+    if (d.tAllacts !== undefined) { ui.allActs = !ui.allActs; draw(); return; }
+    if (d.tThread) {
+      const t = S.tasks.get(d.tThread);
+      ui.thread = ui.thread === d.tThread ? "" : d.tThread;
+      draw();
+      if (ui.thread && t) {
+        markSeen(npath(t.path));
+        ensureTrail(t.path);
+        wrap.querySelector(`[data-t-thread="${d.tThread}"]`)?.closest(".seo-t-card")?.querySelector(".seo-t-cbox textarea")?.focus();
+      }
+      return;
+    }
 
     if (d.tMv) {
       if (!c.isAdmin) { toast("Only admins can change the order.", true); return; }
@@ -788,9 +840,9 @@ export async function renderTasks(body, c) {
 
     if (d.tCadd) {
       if (!S.canDo) { toast("Only the SEO team and admins can comment.", true); return; }
-      const box = wrap.querySelector("[data-t-ctext]");
-      const txt = (box?.value || "").trim();
-      if (txt.length < 2) { const er = wrap.querySelector("[data-t-cerr]"); if (er) er.textContent = "Write a comment first."; return; }
+      const cbox = t0.closest(".seo-t-cbox");
+      const txt = (cbox?.querySelector("textarea")?.value || "").trim();
+      if (txt.length < 2) { const er = cbox?.querySelector("[data-t-cerr]"); if (er) er.textContent = "Write a comment first."; return; }
       t0.disabled = true;
       try {
         const entry = { taskId: "", path: d.tCadd, taskTitle: "", stepId: "", text: txt.slice(0, 1000), note: "",
@@ -996,6 +1048,17 @@ const CSS = `
 .seo-t-cmeta{font-size:12px}
 .seo-t-ctext{margin-top:3px;font-size:13px;line-height:1.45;white-space:pre-wrap;word-break:break-word}
 .seo-t-ev{padding:5px 0;font-size:12.5px;border-top:1px dashed var(--border,#e5e7eb)}
+.seo-t-cwrap{margin-top:10px;padding:10px 12px;border:1px solid var(--border,#e5e7eb);border-radius:10px;background:#f8fafc}
+.seo-t-chead2{display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:13px}
+.seo-t-thread{display:flex;flex-direction:column}
+.seo-t-thread .seo-t-cmt{max-width:85%;align-self:flex-start;margin:6px 0}
+.seo-t-thread .seo-t-cmt.is-me{align-self:flex-end;background:#e0f2fe}
+.seo-t-thread .seo-t-cbox{margin:8px 0 0}
+.seo-t-thread textarea{width:100%;min-width:0;box-sizing:border-box;resize:vertical}
+.seo-t-trail2{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:20px;padding:6px 14px 16px 60px}
+.seo-t-tcol h4{margin:0 0 6px;font-size:11.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--text-muted,#6b7280)}
+.seo-t-tcol .seo-t-ev:first-of-type{border-top:0}
+@media (max-width:900px){.seo-t-trail2{grid-template-columns:1fr;padding-left:14px}}
 @media (max-width:760px){
   .seo-t-pph{grid-template-columns:auto minmax(0,1fr) auto}
   .seo-t-pph .seo-t-move,.seo-t-ppbar{grid-column:2}
