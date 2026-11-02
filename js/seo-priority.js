@@ -5,7 +5,7 @@
 import { db, auth } from "./firebase-config.js";
 import { doc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 // Must be exactly the same address seo.js imports seo-work.js from, or the browser loads it twice
-import { npath, pageStory, prioritySettings, priorityOf, suggestPriority, titleOf, logPriority } from "./seo-work.js?v=12";
+import { npath, pageStory, prioritySettings, priorityOf, suggestPriority, titleOf, logPriority, pageOf } from "./seo-work.js?v=13";
 
 const MAX = 30;
 export const GOALS = [["top3", "Top 3", 3], ["top5", "Top 5", 5], ["page1", "Page 1", 10], ["", "No goal", null]];
@@ -122,7 +122,7 @@ export function priorityRows(c) {
   const order = { red: 0, amber: 1, grey: 2, green: 3 };
   return paths.map((path) => {
     const pr = priorityOf(w, path), me = npath(path);
-    const p = c.data.pages.find((x) => npath(x.path) === me) || null;
+    const p = pageOf(c.data, path);
     const hp = (w.health?.pages || []).find((x) => npath(x.path) === me) || null;
     const tq = pr.target ? w.queries.find((q) => q.q.toLowerCase() === pr.target.toLowerCase()) || null : null;
     const now = tq ? tq.pages.find((x) => npath(x.path) === me) || null : null;

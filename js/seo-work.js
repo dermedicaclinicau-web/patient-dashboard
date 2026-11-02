@@ -272,6 +272,66 @@ export function pageIndex(w, data) {
 }
 export const titleOf = (w, data, path) => (w && pageIndex(w, data).get(path)?.title) || prettyPath(path);
 
+// The page with this address. Search Console can list the same page twice (with and without the end slash):
+// use the one with the search data.
+export function pageOf(data, path) {
+  const me = npath(path);
+  return (data?.pages || []).filter((x) => npath(x.path) === me)
+    .sort((a, b) => (b.m28?.impressions || 0) - (a.m28?.impressions || 0) || (b.m28?.sessions || 0) - (a.m28?.sessions || 0))[0] || null;
+}
+
+// Drag to reorder, with a mouse, a finger or a pen. Rows have data-sort-key; the handle inside a row has data-sort-grip.
+// onDrop(keys in their new order, old position, new position)
+export function makeSortable(box, onDrop) {
+  let drag = null;
+  const rowsOf = (row) => [...row.parentElement.children].filter((r) => r.matches("[data-sort-key]"));
+  const move = (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    e.preventDefault();
+    for (const r of rowsOf(drag.row)) {
+      if (r === drag.row) continue;
+      const b = r.getBoundingClientRect();
+      if (e.clientY > b.top && e.clientY < b.bottom) {
+        const after = e.clientY > b.top + b.height / 2;
+        const ref = after ? r.nextSibling : r;
+        if (ref !== drag.row && ref !== drag.row.nextSibling) { r.parentElement.insertBefore(drag.row, ref); drag.moved = true; }
+        break;
+      }
+    }
+    if (e.clientY < 70) window.scrollBy(0, -14);
+    else if (e.clientY > window.innerHeight - 70) window.scrollBy(0, 14);
+  };
+  const end = (e) => {
+    if (!drag || (e && e.pointerId !== drag.id)) return;
+    const d = drag;
+    drag = null;
+    document.removeEventListener("pointermove", move);
+    document.removeEventListener("pointerup", end);
+    document.removeEventListener("pointercancel", end);
+    d.row.classList.remove("is-dragging");
+    // The click that follows a drag shouldn't open the row too
+    const stop = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
+    window.addEventListener("click", stop, true);
+    setTimeout(() => { window.removeEventListener("click", stop, true); document.body.classList.remove("seo-dragging"); }, 350);
+    const keys = rowsOf(d.row).map((r) => r.dataset.sortKey);
+    const to = keys.indexOf(d.row.dataset.sortKey);
+    if (d.moved && to !== d.from) onDrop(keys, d.from, to);
+  };
+  box.addEventListener("pointerdown", (e) => {
+    const grip = e.target.closest("[data-sort-grip]");
+    if (!grip || !box.contains(grip) || (e.button != null && e.button > 0)) return;
+    const row = grip.closest("[data-sort-key]");
+    if (!row) return;
+    e.preventDefault();
+    drag = { row, id: e.pointerId, from: rowsOf(row).indexOf(row), moved: false };
+    row.classList.add("is-dragging");
+    document.body.classList.add("seo-dragging");
+    document.addEventListener("pointermove", move, { passive: false });
+    document.addEventListener("pointerup", end);
+    document.addEventListener("pointercancel", end);
+  });
+}
+
 // Priority changes go into the page's trail (seo_task_log, action 'priority'). Notes start lower case: "moved to #2 (was #3)".
 export async function logPriority(c, entries) {
   const list = (entries || []).filter((e) => e && e.path).slice(0, 50);
@@ -1599,8 +1659,9 @@ function viewSettings(wrap, c, ui) {
           <span class="seo-note">Uses each page's busiest search. Change any of them from the page panel.</span></div>` : ""}
       <div class="seo-table-wrap" style="max-height:none"><table class="seo-table seo-w-plist">
         <thead><tr><th>Page</th><th>Status</th><th>Target search</th><th>Clicks</th><th>12 weeks</th><th></th></tr></thead>
-        <tbody>${rows.map((r) => `<tr${r.p ? ` data-open="${h.esc(r.p.id)}"` : ""}>
-          <td><div class="seo-w-pt"><span class="seo-w-pnum" title="Priority number">#${numOf.get(npath(r.path)) || "–"}</span>
+        <tbody>${rows.map((r) => `<tr data-sort-key="${h.esc(r.path)}"${pageOf(c.data, r.path) ? ` data-open="${h.esc(pageOf(c.data, r.path).id)}"` : ""}>
+          <td><div class="seo-w-pt">${c.isAdmin ? `<span class="seo-w-grip" data-sort-grip title="Drag to change the order" aria-hidden="true">⋮⋮</span>` : ""}
+            <span class="seo-w-pnum" title="Priority number">#${numOf.get(npath(r.path)) || "–"}</span>
             <div style="min-width:0"><div class="seo-w-ptitle" title="${h.esc(titleOf(w, c.data, r.path))}"><strong>${h.esc(titleOf(w, c.data, r.path))}</strong></div>
               <div class="seo-note seo-w-mono seo-w-ptitle">${h.esc(r.path)}</div></div></div></td>
           <td><span class="seo-pr-pill is-${r.tone}">${h.esc(r.label)}</span>
@@ -1611,7 +1672,7 @@ function viewSettings(wrap, c, ui) {
           <td class="seo-w-pact">${c.isAdmin ? `<button class="seo-btn" type="button" data-w-prm="${h.esc(r.path)}">Remove</button>` : ""}</td>
         </tr>`).join("")}</tbody></table></div>
       <p class="seo-note" style="margin-top:6px">Last 28 days vs the 28 before. Click a page to open it.
-        Change the order, and see each page's comments, in SEO → Tasks → ★ Pages.</p>`;
+        ${c.isAdmin ? "Drag ⋮⋮ to change the order. " : ""}Each page's comments and history are in SEO → Tasks → ★ Pages.</p>`;
   }
 
   function priHtml() {
@@ -1973,6 +2034,16 @@ function viewSettings(wrap, c, ui) {
       draw(); return;
     }
   };
+  // Drag to reorder priority pages (admins)
+  makeSortable(wrap, (keys, from, to) => {
+    if (!c.isAdmin) return;
+    keyPages = keys.slice();
+    savePriority();
+    logPriority(c, [{ path: keys[to], note: `moved to #${to + 1} (was #${from + 1})` }]);
+    const box = wrap.querySelector("[data-w-pcards]");
+    if (box) box.innerHTML = pcardsHtml();   // renumber
+  });
+
   draw();
 }
 
@@ -2116,6 +2187,11 @@ span.seo-star{cursor:default}
 .seo-w-pwhy{max-width:260px;margin-top:3px;font-size:12px;line-height:1.4;color:var(--text-muted,#6b7280)}
 .seo-w-ok{color:#047857;font-weight:600}
 .seo-w-pnum{flex:none;min-width:28px;font-size:12px;font-weight:700;color:#b45309}
+.seo-w-grip,.seo-t-grip{flex:none;padding:2px 4px;margin-left:-4px;color:#94a3b8;font-size:14px;letter-spacing:-2px;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}
+.seo-w-grip:hover,.seo-t-grip:hover{color:#475569}
+[data-sort-key].is-dragging{position:relative;z-index:2;background:#eff6ff !important;box-shadow:0 6px 18px rgba(15,23,42,.15)}
+[data-sort-key].is-dragging td{background:#eff6ff}
+body.seo-dragging,body.seo-dragging *{cursor:grabbing !important;user-select:none !important;-webkit-user-select:none !important}
 .seo-w-pact{text-align:right !important;white-space:nowrap !important}
 .seo-w-pkbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 6px}
 .seo-w-pkbar .seo-btn{padding:4px 10px;font-size:12px}

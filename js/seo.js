@@ -786,6 +786,9 @@ export async function mountSeo(el, opts = {}) {
 
   document.addEventListener("click", function outside(e) {
     if (!document.body.contains(panel)) { document.removeEventListener("click", outside); return; }
+    // A button that redraws the panel (Edit, Save, Cancel, Unstar) is already gone from the page here: that's still a click inside it
+    if (!e.target.isConnected) return;
+    if (document.body.classList.contains("seo-dragging")) return;
     if (!panel.hidden && !panel.contains(e.target) && !e.target.closest("[data-open]")) panel.hidden = true;
   });
 

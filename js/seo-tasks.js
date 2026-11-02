@@ -11,7 +11,8 @@ import { db, auth } from "./firebase-config.js";
 import {
   doc, getDoc, getDocs, collection, query, where, orderBy, limit, writeBatch, runTransaction, serverTimestamp, arrayUnion,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { npath, pageStory, priorityOf, prioritySettings, titleOf, complianceWords, renderOppsInto, taskConfig } from "./seo-work.js?v=12";
+import { npath, pageStory, priorityOf, prioritySettings, titleOf, complianceWords, renderOppsInto, taskConfig, pageOf, makeSortable }
+  from "./seo-work.js?v=13";
 
 const GROUPS = {
   basics:  { order: 0, factor: 1,   title: () => "Fix what's holding it back" },
@@ -363,7 +364,7 @@ export async function renderTasks(body, c) {
   }
 
   const day = todayPerth();
-  const pageId = (path) => c.data.pages.find((x) => npath(x.path) === npath(path))?.id || "";
+  const pageId = (path) => pageOf(c.data, path)?.id || "";
   const stepsOf = (t) => (t.order || []).map((id) => ({ id, ...t.steps[id] })).filter((s) => s.text);
   const doneish = (s) => s.status === "confirmed" || s.status === "done";
   const todayTasks = () => (S.day?.ids || []).map((id) => S.tasks.get(id)).filter(Boolean);
@@ -600,9 +601,9 @@ export async function renderTasks(body, c) {
         const cm = S.log.filter((l) => l.action === "comment" && npath(l.path || "") === k);
         const nw = cm.filter((l) => isNew(l, seen)).length;
         const open = ui.page === k;
-        return `<div class="seo-t-pp${open ? " is-open" : ""}">
+        return `<div class="seo-t-pp${open ? " is-open" : ""}" data-sort-key="${esc(p)}">
           <div class="seo-t-pph" data-t-page="${esc(p)}" role="button" tabindex="0" aria-expanded="${open}">
-            <span class="seo-t-num is-big">#${i + 1}</span>
+            <span class="seo-t-num is-big">${c.isAdmin ? `<span class="seo-t-grip" data-sort-grip title="Drag to change the order" aria-hidden="true">⋮⋮</span>` : ""}#${i + 1}</span>
             ${c.isAdmin ? `<span class="seo-t-move">
               <button class="seo-btn" type="button" data-t-mv="${i}|-1" title="Move up" aria-label="Move up"${i ? "" : " disabled"}>↑</button>
               <button class="seo-btn" type="button" data-t-mv="${i}|1" title="Move down" aria-label="Move down"${i < paths.length - 1 ? "" : " disabled"}>↓</button></span>` : ""}
@@ -764,6 +765,11 @@ export async function renderTasks(body, c) {
       if (j < 0 || j >= paths.length) return;
       [paths[i], paths[j]] = [paths[j], paths[i]];
       t0.disabled = true;
+      await saveOrder(paths, i, j);
+      return;
+    }
+    if (false) {
+      const paths = [], i = 0, j = 0;   // (old code below, kept unreachable so nothing else needs moving)
       try {
         const b = writeBatch(db);
         b.set(doc(db, "seo_settings", "main"), { keyPages: paths, updatedBy: uid(), updatedAt: serverTimestamp() }, { merge: true });
@@ -919,6 +925,25 @@ export async function renderTasks(body, c) {
       } catch (e2) { t0.disabled = false; toast(errMsg(e2), true); }
     }
   });
+
+  // Save a new priority order, and log the page that moved in its trail
+  async function saveOrder(paths, from, to) {
+    try {
+      const b = writeBatch(db);
+      b.set(doc(db, "seo_settings", "main"), { keyPages: paths, updatedBy: uid(), updatedAt: serverTimestamp() }, { merge: true });
+      const entry = { taskId: "", path: paths[to], taskTitle: "", stepId: "", text: "", note: `moved to #${to + 1} (was #${from + 1})`,
+        action: "priority", by: uid(), byName: myName(c), role: roleOf(c), day, at: serverTimestamp() };
+      b.set(doc(collection(db, "seo_task_log")), entry);
+      await b.commit();
+      c.work.settings = { ...(c.work.settings || {}), keyPages: paths };
+      const local = { ...entry, at: new Date() };
+      S.log.unshift(local);
+      if (S.trail[npath(paths[to])]) S.trail[npath(paths[to])].unshift(local);
+    } catch (e2) { toast(errMsg(e2), true); }
+    draw();
+  }
+
+  makeSortable(wrap, (keys, from, to) => { if (c.isAdmin) saveOrder(keys, from, to); });
 
   wrap.addEventListener("keydown", (e) => {   // open a page with the keyboard too
     const ph = e.target.closest?.("[data-t-page]");
