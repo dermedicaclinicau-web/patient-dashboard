@@ -4,10 +4,10 @@
 // ⚠️ Make these match recall.js exactly (same Firebase version, same db instance)
 import { db } from "./firebase-config.js";
 import { doc, getDoc, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan, titleOf } from "./seo-work.js?v=10";
+import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan, titleOf } from "./seo-work.js?v=15";
 import { renderTasks } from "./seo-tasks.js?v=9";
 import { renderClusters } from "./seo-clusters.js?v=1";
-import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js?v=2";
+import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js?v=9";
 
 const TABS = [
   { id: "overview", label: "Overview" },
@@ -49,6 +49,7 @@ async function loadData(force) {
     const snap = await getDocs(query(collection(db, "seo_pages"), where("build", "==", ov.build)));
     const pages = snap.docs.map((d) => {
       const p = { id: d.id, ...d.data() };
+      p.dailyArr = typeof p.daily === "string" ? (p.daily ? p.daily.split(",").map(Number) : []) : null;
       p.dClicks = p.m28.clicks - p.prev28.clicks;
       // positive = moved up (better)
       p.dPos = p.m28.position != null && p.prev28.position != null ? p.prev28.position - p.m28.position : null;
@@ -320,6 +321,10 @@ const CSS = `
 .seo-list li:first-child{border-top:0}
 .seo-list li:hover .seo-path{text-decoration:underline}
 .seo-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.seo-movers li{align-items:flex-start}
+.seo-movers .seo-path small{display:block;font-size:11.5px;color:var(--text-muted,#6b7280);overflow:hidden;text-overflow:ellipsis}
+.seo-mv-n{white-space:nowrap}
+.seo-card h3 small{font-weight:400;margin-left:4px}
 .seo-chart svg{width:100%;height:auto;display:block}
 .seo-chart text,.seo-bars text{font-size:11px;fill:var(--text-muted,#6b7280)}
 .seo-grid{stroke:var(--border,#e5e7eb);stroke-width:1}
@@ -393,6 +398,14 @@ export async function mountSeo(el, opts = {}) {
         compare: ui.compare, gran: ui.gran, metric: ui.metric }));
     } catch { /* private mode */ }
   };
+  // The Overview's Priority pages card: open or collapsed, status filter, show all (remembered on this device)
+  const PR_KEY = "dm.seo.prcard";
+  const prc = (() => {
+    try { return { open: false, filter: "", all: false, ...JSON.parse(localStorage.getItem(PR_KEY) || "{}") }; }
+    catch { return { open: false, filter: "", all: false }; }
+  })();
+  const savePrc = () => { try { localStorage.setItem(PR_KEY, JSON.stringify(prc)); } catch { /* private mode */ } };
+
   const currentRange = () => {
     const d = data.days, end = data.ov.periodEnd;
     return rangeOf(ui, end, d[0]?.date || end, d[d.length - 1]?.date || end);
@@ -514,14 +527,43 @@ export async function mountSeo(el, opts = {}) {
     const rangeText = `${fmtDate(r.from)} – ${fmtDate(r.to)} · ${r.n} day${r.n === 1 ? "" : "s"}` +
       (cmp ? (cmp.ok ? ` · vs ${fmtDate(cmp.from)} – ${fmtDate(cmp.to)}` : ` · no comparison: search data starts ${fmtDate(first)}`) : "");
 
-    const ranked = pages.filter((p) => p.m28.clicks + p.prev28.clicks >= 5);
-    const winners = ranked.filter((p) => p.dClicks > 0).sort((a, b) => b.dClicks - a.dClicks).slice(0, 6);
-    const losers = ranked.filter((p) => p.dClicks < 0).sort((a, b) => a.dClicks - b.dClicks).slice(0, 6);
+    // Pages gaining and losing clicks over the chosen dates, from each page's daily clicks.
+    // Until the nightly job has added those, the last 28 days vs the 28 before.
+    const hasDaily = pages.some((p) => Array.isArray(p.dailyArr));
+    const clicksIn = (p, a, b) => {
+      if (!Array.isArray(p.dailyArr) || !p.dailyFrom) return null;
+      const i0 = Math.max(0, daysBetween(p.dailyFrom, a)), i1 = Math.min(p.dailyArr.length - 1, daysBetween(p.dailyFrom, b));
+      let s = 0;
+      for (let i = i0; i <= i1; i++) s += p.dailyArr[i] || 0;
+      return s;
+    };
+    const keyOf = (p) => String(p.path || "").split("?")[0].replace(/\/+$/, "").toLowerCase() || "/";
+    const byKey = new Map();   // the same page with and without the end slash counts as one
+    for (const p of pages) {
+      const now = hasDaily ? clicksIn(p, r.from, r.to) : p.m28.clicks;
+      const was = hasDaily ? (prev ? clicksIn(p, cmp.from, cmp.to) : null) : p.prev28.clicks;
+      if (now == null) continue;
+      const k = keyOf(p);
+      const x = byKey.get(k);
+      if (!x) { byKey.set(k, { p, now, was, imp: p.m28.impressions || 0 }); continue; }
+      x.now += now;
+      if (was != null) x.was = (x.was || 0) + was;
+      if ((p.m28.impressions || 0) > x.imp) { x.p = p; x.imp = p.m28.impressions || 0; }
+    }
+    const moved = [...byKey.values()].filter((m) => m.now + (m.was || 0) >= 5);
+    const showCmp = hasDaily ? !!prev : true;
+    const winners = showCmp ? moved.filter((m) => m.was != null && m.now > m.was).sort((a, b) => (b.now - b.was) - (a.now - a.was)).slice(0, 8) : [];
+    const losers = showCmp ? moved.filter((m) => m.was != null && m.now < m.was).sort((a, b) => (a.now - a.was) - (b.now - b.was)).slice(0, 8) : [];
+    const top = showCmp ? [] : moved.slice().sort((a, b) => b.now - a.now).slice(0, 8);
+    const cx = ctx();
     const list = (arr) => arr.length
-      ? `<ul class="seo-list">${arr.map((p) => `
-          <li data-open="${p.id}"><span class="seo-path" title="${esc(p.url)}">${starHtml(ctx(), p.path)}${esc(p.path)}</span>
-          <span>${fmtInt(p.m28.clicks)} ${delta(p.m28.clicks, p.prev28.clicks)}</span></li>`).join("")}</ul>`
-      : `<div class="seo-note">Nothing notable.</div>`;
+      ? `<ul class="seo-list seo-movers">${arr.map((m) => `
+          <li data-open="${m.p.id}"><span class="seo-path" title="${esc(m.p.url)}">${starHtml(cx, m.p.path)}${esc(titleOf(work, data, m.p.path))}
+            <small>${esc(m.p.path)}</small></span>
+          <span class="seo-mv-n">${fmtInt(m.now)} ${m.was != null ? delta(m.now, m.was) : ""}</span></li>`).join("")}</ul>`
+      : `<div class="seo-note">Nothing notable for these dates.</div>`;
+    const moveRange = !hasDaily ? "last 28 days vs the 28 before"
+      : `${fmtDate(r.from, false)} – ${fmtDate(r.to)}${prev ? ` vs ${fmtDate(cmp.from, false)} – ${fmtDate(cmp.to)}` : ""}`;
 
     return `
       <div class="seo-row seo-range">
@@ -540,7 +582,7 @@ export async function mountSeo(el, opts = {}) {
       </div>
       ${fresh ? `<p class="seo-note" style="margin:-4px 0 12px">The last ${fresh} day${fresh === 1 ? "" : "s"} may still change: Search Console takes about 3 days to settle. They're shaded on the chart.</p>` : ""}
       <div class="seo-kpis">${kpis}</div>
-      ${priorityCardHtml(ctx())}
+      ${priorityCardHtml(ctx(), prc)}
       <div class="seo-card">
         <div class="seo-row">
           <h3 style="margin:0">Trend</h3>
@@ -560,11 +602,11 @@ export async function mountSeo(el, opts = {}) {
         ${m.invert ? `<div class="seo-note">Position axis is flipped: up means ranking higher.</div>` : ""}
         ${hasBrand ? `<div class="seo-note">Brand = searches with your brand words (SEO → Settings). Non-brand includes rare searches Google hides.</div>` : ""}
       </div>
-      <div class="seo-grid2">
-        <div class="seo-card"><h3>Gaining clicks (28 days vs previous 28)</h3>${list(winners)}</div>
-        <div class="seo-card"><h3>Losing clicks (28 days vs previous 28)</h3>${list(losers)}</div>
-      </div>
-      ${ui.preset !== "28" ? `<p class="seo-note">These two lists always use the last 28 days.</p>` : ""}`;
+      ${showCmp ? `<div class="seo-grid2">
+        <div class="seo-card"><h3>Gaining clicks <small class="seo-note">${esc(moveRange)}</small></h3>${list(winners)}</div>
+        <div class="seo-card"><h3>Losing clicks <small class="seo-note">${esc(moveRange)}</small></h3>${list(losers)}</div>
+      </div>` : `<div class="seo-card"><h3>Pages with the most clicks <small class="seo-note">${esc(moveRange)}</small></h3>${list(top)}</div>`}
+      ${hasDaily ? "" : `<p class="seo-note">These lists use the last 28 days until the nightly update adds each page's daily clicks.</p>`}`;
   }
 
 
@@ -681,9 +723,14 @@ export async function mountSeo(el, opts = {}) {
   /* ----- events (delegated) ----- */
 
   root.addEventListener("click", (e) => {
-    const t = e.target.closest("[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
+    const t = e.target.closest("[data-prtoggle],[data-prf],[data-prall],[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
     if (!t || !root.contains(t)) return;
     const ds = t.dataset;
+
+    // The Overview's Priority pages card
+    if (ds.prtoggle !== undefined) { prc.open = !prc.open; savePrc(); render(); return; }
+    if (ds.prf !== undefined) { prc.filter = prc.filter === ds.prf ? "" : ds.prf; prc.open = true; prc.all = false; savePrc(); render(); return; }
+    if (ds.prall !== undefined) { prc.all = !prc.all; savePrc(); render(); return; }
 
     // Priority pages (admins only). These come first, because the star sits inside clickable rows.
     if (ds.star !== undefined || ds.pedit !== undefined || ds.pcancel !== undefined || ds.psave !== undefined) {
@@ -704,7 +751,6 @@ export async function mountSeo(el, opts = {}) {
       }
       ui.preset = ds.preset; saveOv(); render();
     }
-    else if (ds.pview) { ui.pview = ds.pview; render(); }
     else if (ds.gran) { ui.gran = ds.gran; saveOv(); render(); }
     else if (ds.metric) { ui.metric = ds.metric; saveOv(); render(); }
     else if (ds.sort !== undefined) {

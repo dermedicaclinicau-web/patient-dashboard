@@ -5,7 +5,7 @@
 import { db, auth } from "./firebase-config.js";
 import { doc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 // Must be exactly the same address seo.js imports seo-work.js from, or the browser loads it twice
-import { npath, pageStory, prioritySettings, priorityOf, suggestPriority, titleOf, logPriority, pageOf } from "./seo-work.js?v=13";
+import { npath, pageStory, prioritySettings, priorityOf, suggestPriority, titleOf, logPriority, pageOf } from "./seo-work.js?v=15";
 
 const MAX = 50;   // priority pages (Site health checks them all each night)
 export const GOALS = [["top3", "Top 3", 3], ["top5", "Top 5", 5], ["page1", "Page 1", 10], ["", "No goal", null]];
@@ -153,7 +153,7 @@ export function priorityRows(c) {
       if (issues.length) why.push(`${issues.length} Site health issue${issues.length === 1 ? "" : "s"} to fix.`);
       if (why.length) { tone = "amber"; label = "Needs work"; }
     }
-    if (!hp) why.push("Site health checks it from the next nightly run.");
+    if (!hp && !why.length) why.push("Site health checks it from the next nightly run.");
     return { path, pr, p, pos, ppos, goalLabel, goalMax, goalMet, tone, label, why, rank: order[tone] };
   }).sort((a, b) => a.rank - b.rank || (b.p?.m28.clicks || 0) - (a.p?.m28.clicks || 0));
 }
@@ -162,7 +162,8 @@ const pill = (r) => `<span class="seo-pr-pill is-${r.tone}">${esc(r.label)}</spa
 
 /* ---------- Overview card ---------- */
 
-export function priorityCardHtml(c) {
+// opt: { open, filter: '' | 'red' | 'amber' | 'green' | 'grey', all }
+export function priorityCardHtml(c, opt = {}) {
   injectCss();
   const h = c.h;
   const rows = priorityRows(c);
@@ -171,35 +172,51 @@ export function priorityCardHtml(c) {
       <p class="seo-note">Star (☆) the pages that matter most, like your main treatment pages, in the Pages tab or a page's panel.
         They show here with how they're doing, appear first across SEO, and Site health checks them every night.</p></div>` : "";
   }
+  const open = !!opt.open, f = opt.filter || "";
+  const num = new Map(prioritySettings(c.work).paths.map((p, i) => [npath(p), i + 1]));
   const n = (t) => rows.filter((r) => r.tone === t).length;
+  const pill = (t, label) => (n(t) ? `<button type="button" class="seo-pr-pill is-${t} seo-pr-fbtn${f === t ? " is-on" : ""}" data-prf="${t}"
+      title="${f === t ? "Show all" : "Show only these"}">${n(t)} ${label}</button>` : "");
+  const head = `<div class="seo-row seo-pr-head">
+      <button type="button" class="seo-pr-tog" data-prtoggle aria-expanded="${open}"><span class="seo-pr-car">${open ? "▾" : "▸"}</span>★ Priority pages</button>
+      ${pill("red", "dropping or not in Google")}${pill("amber", "need work")}${pill("green", "on track")}${pill("grey", "no data yet")}
+      <span class="seo-sp"></span><span class="seo-note">Last 28 days vs the 28 before</span></div>`;
+
+  if (!open) {
+    const urgent = rows.filter((r) => r.tone === "red").slice(0, 3);
+    return `<div class="seo-card seo-pr-card">${head}
+      ${urgent.length ? `<div class="seo-pr-mini"><span class="seo-note">Most urgent:</span> ${urgent.map((r) => r.p
+        ? `<button type="button" class="seo-w-link" data-open="${esc(r.p.id)}">${esc(titleOf(c.work, c.data, r.path))}</button>`
+        : esc(titleOf(c.work, c.data, r.path))).join(`<span class="seo-note"> · </span>`)}</div>` : ""}</div>`;
+  }
+
+  const list = f ? rows.filter((r) => r.tone === f) : rows;
+  const shown = opt.all ? list : list.slice(0, 10);
   const posCell = (r) => {
     if (!r.pr.target) return c.isAdmin ? `<span class="seo-note">Set a target</span>` : "—";
     if (r.pos == null) return `<span class="seo-note">not showing</span>`;
     return `${h.fmtPos(r.pos)} ${h.delta(r.pos, r.ppos, { invert: true, abs: true })}${
-      r.goalMax ? `<div class="seo-note">${r.goalMet ? "✓ " : "goal: "}${esc(r.goalLabel)}</div>` : ""}`;
+      r.goalMax ? `<div class="seo-note">${r.goalMet ? "✓ " : "goal: "}${h.esc(r.goalLabel)}</div>` : ""}`;
   };
-  return `<div class="seo-card">
-    <div class="seo-row">
-      <h3 style="margin:0">★ Priority pages</h3>
-      ${n("red") ? `<span class="seo-pr-pill is-red">${n("red")} dropping or not in Google</span>` : ""}
-      ${n("amber") ? `<span class="seo-pr-pill is-amber">${n("amber")} need work</span>` : ""}
-      ${n("green") ? `<span class="seo-pr-pill is-green">${n("green")} on track</span>` : ""}
-      <span class="seo-sp"></span><span class="seo-note">Last 28 days vs the 28 before · click a page for its plan</span>
-    </div>
+  return `<div class="seo-card seo-pr-card">${head}
+    ${f ? `<p class="seo-note" style="margin:0 0 6px">Showing only these ${list.length}. Click the label again to see all.</p>` : ""}
     <div class="seo-table-wrap" style="max-height:none"><table class="seo-table seo-pr-t">
       <thead><tr><th>Page</th><th>Target search</th><th>Position</th><th>Clicks</th><th>12 weeks</th><th>Status</th></tr></thead>
-      <tbody>${rows.map((r) => `<tr${r.p ? ` data-open="${esc(r.p.id)}"` : ""}>
-        <td><div class="seo-path" title="${esc(r.path)}">${starHtml(c, r.path)}${esc(titleOf(c.work, c.data, r.path))}</div>
+      <tbody>${shown.map((r) => `<tr${r.p ? ` data-open="${esc(r.p.id)}"` : ""}>
+        <td><div class="seo-path" title="${esc(r.path)}"><span class="seo-pr-num">#${num.get(npath(r.path)) || "–"}</span>${esc(titleOf(c.work, c.data, r.path))}</div>
           <div class="seo-note seo-path">${esc(r.path)}</div>
           ${r.pr.note ? `<div class="seo-pr-why">${esc(r.pr.note)}</div>` : ""}</td>
         <td>${r.pr.target ? esc(r.pr.target) : "—"}</td>
         <td>${posCell(r)}</td>
         <td>${r.p ? `${h.fmtInt(r.p.m28.clicks)} ${h.delta(r.p.m28.clicks, r.p.prev28.clicks)}` : "—"}</td>
         <td>${r.p && Array.isArray(r.p.weekly) ? h.sparkline(r.p.weekly) : ""}</td>
-        <td>${pill(r)}${r.why.length ? `<div class="seo-pr-why">${esc(r.why.join(" "))}</div>` : ""}</td>
+        <td>${pill2(r)}${r.why.length ? `<div class="seo-pr-why">${esc(r.why.join(" "))}</div>` : ""}</td>
       </tr>`).join("")}</tbody></table></div>
+    ${list.length > 10 ? `<div class="seo-pr-more"><button class="seo-btn" type="button" data-prall>${opt.all ? "Show fewer" : `Show all ${list.length}`}</button></div>` : ""}
   </div>`;
 }
+const pill2 = (r) => `<span class="seo-pr-pill is-${r.tone}">${esc(r.label)}</span>`;
+
 
 /* ---------- Page panel ---------- */
 
@@ -268,6 +285,16 @@ const CSS = `
 .seo-star.is-on{color:#f59e0b}
 span.seo-star{cursor:default}
 .seo-pr-t th,.seo-pr-t td{text-align:left;vertical-align:top}
+.seo-pr-head{margin:0 0 8px;gap:6px}
+.seo-pr-card .seo-pr-head:last-child{margin-bottom:0}
+.seo-pr-tog{display:inline-flex;align-items:center;gap:6px;padding:2px 6px 2px 0;border:0;background:none;color:inherit;font:inherit;font-size:15px;font-weight:600;cursor:pointer}
+.seo-pr-car{display:inline-block;width:14px;color:var(--text-muted,#6b7280)}
+.seo-pr-fbtn{border:1px solid transparent;font:inherit;font-size:11px;font-weight:600;cursor:pointer}
+.seo-pr-fbtn:hover{filter:brightness(.96)}
+.seo-pr-fbtn.is-on{border-color:currentColor}
+.seo-pr-mini{display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin-top:4px;font-size:13px}
+.seo-pr-num{display:inline-block;min-width:26px;margin-right:4px;font-size:12px;font-weight:700;color:#b45309}
+.seo-pr-more{padding:10px 0 0;text-align:center}
 .seo-pr-t td:first-child{white-space:normal}
 .seo-pr-pill{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:600;white-space:nowrap}
 .seo-pr-pill.is-red{background:#fef2f2;color:#b91c1c}

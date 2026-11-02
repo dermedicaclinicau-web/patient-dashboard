@@ -25,6 +25,7 @@ const SEO_SCOPES_ = [
 ].join(' ');
 const SEO_TOKEN_CACHE_ = 'seo_token_v2';
 const SEO_LAG_DAYS_ = 3; // GSC data settles after ~3 days; period comparisons end here
+const SEO_DAILY_DAYS_ = 480; // daily clicks kept per page (Search Console keeps about 16 months)
 const SEO_DAY_COLS_ = ['date', 'clicks', 'impressions', 'position', 'sessions', 'engaged', 'conversions', 'aiSessions',
   'brandClicks', 'brandImpressions'];
 
@@ -258,8 +259,12 @@ function seoBuildPages_(build) {
   const prvS = seoDate_(SEO_LAG_DAYS_ + 55), prvE = seoDate_(SEO_LAG_DAYS_ + 28);
   const wkS = seoDate_(SEO_LAG_DAYS_ + 83);
   const wkStartMs = Date.parse(wkS + 'T00:00:00Z');
+  // Daily clicks per page, so the Overview can use any dates (same days as the Overview chart)
+  const dS = seoDate_(SEO_DAILY_DAYS_), dE = seoDate_(1);
+  const dStartMs = Date.parse(dS + 'T00:00:00Z');
+  const nDays = Math.round((Date.parse(dE + 'T00:00:00Z') - dStartMs) / 864e5) + 1;
 
-  const cur = {}, prv = {}, weekly = {};
+  const cur = {}, prv = {}, weekly = {}, daily = {};
 
   seoGsc_({ startDate: curS, endDate: curE, dimensions: ['page'] })
     .forEach(function (r) { seoAgg_(cur, seoNormUrl_(r.keys[0]), r); });
@@ -267,10 +272,16 @@ function seoBuildPages_(build) {
   seoGsc_({ startDate: prvS, endDate: prvE, dimensions: ['page'] })
     .forEach(function (r) { seoAgg_(prv, seoNormUrl_(r.keys[0]), r); });
 
-  seoGsc_({ startDate: wkS, endDate: curE, dimensions: ['page', 'date'] }).forEach(function (r) {
+  // One page × day query gives both the daily clicks and the 12 weekly buckets
+  seoGsc_({ startDate: dS, endDate: dE, dimensions: ['page', 'date'] }).forEach(function (r) {
+    if (!r.clicks) return;   // days without clicks stay 0
     const u = seoNormUrl_(r.keys[0]);
-    const w = Math.floor((Date.parse(r.keys[1] + 'T00:00:00Z') - wkStartMs) / (7 * 864e5));
-    if (w < 0 || w > 11) return;
+    const t = Date.parse(r.keys[1] + 'T00:00:00Z');
+    const di = Math.round((t - dStartMs) / 864e5);
+    if (di >= 0 && di < nDays) (daily[u] || (daily[u] = new Array(nDays).fill(0)))[di] += r.clicks;
+    if (r.keys[1] > curE || t < wkStartMs) return;   // weekly buckets: the 12 weeks ending where the 28-day periods end
+    const w = Math.floor((t - wkStartMs) / (7 * 864e5));
+    if (w > 11) return;
     (weekly[u] || (weekly[u] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))[w] += r.clicks;
   });
 
@@ -308,6 +319,8 @@ function seoBuildPages_(build) {
         m28: m28,
         prev28: seoFin_(prv[u]),
         weekly: weekly[u] || [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        daily: daily[u] ? daily[u].join(',').replace(/(,0)+$/, '') : '',   // clicks per day from dailyFrom, as "3,0,5,…"
+        dailyFrom: dS,
         updatedAt: new Date(),
       },
     };
