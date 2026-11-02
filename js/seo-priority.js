@@ -5,7 +5,7 @@
 import { db, auth } from "./firebase-config.js";
 import { doc, setDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 // Must be exactly the same address seo.js imports seo-work.js from, or the browser loads it twice
-import { npath, pageStory, prioritySettings, priorityOf, suggestPriority, titleOf } from "./seo-work.js?v=6";
+import { npath, pageStory, prioritySettings, priorityOf, suggestPriority, titleOf, logPriority } from "./seo-work.js?v=12";
 
 const MAX = 30;
 export const GOALS = [["top3", "Top 3", 3], ["top5", "Top 5", 5], ["page1", "Page 1", 10], ["", "No goal", null]];
@@ -56,6 +56,7 @@ export async function toggleStar(c, path) {
   if (paths.some((x) => npath(x) === npath(path))) {
     if (!confirm(`Unstar ${path}?\n\nIt stops being a priority page, and Site health stops checking it every night.`)) return null;
     await save(c, paths.filter((x) => npath(x) !== npath(path)), info);
+    logPriority(c, [{ path, note: "removed from priority pages" }]);
     prToast("Unstarred");
     return false;
   }
@@ -73,6 +74,9 @@ export async function toggleStar(c, path) {
   const added = list.filter((x) => !info.some((i) => npath(i.path) === npath(x)))
     .map((x) => ({ path: x, ...suggest(c, x), note: "", by, at: now }));
   await save(c, list.slice(0, MAX), info.concat(added));
+  const had = new Set(paths.map(npath));
+  logPriority(c, list.slice(0, MAX).filter((p) => !had.has(npath(p)))
+    .map((p) => ({ path: p, note: `added as priority page #${list.indexOf(p) + 1}` })));
   prToast(!paths.length && list.length > 1 ? `Starred ${list.length} pages` : "Starred. Check its target search in the page's panel.");
   return true;
 }
@@ -93,6 +97,8 @@ export async function savePriorityDetails(c, path, v) {
     by: auth.currentUser?.uid || "", at: new Date().toISOString(),
   };
   await save(c, paths, info.filter((x) => npath(x.path) !== npath(hit)).concat([entry]));
+  logPriority(c, [{ path: hit, note: (entry.target ? `set the target search to “${entry.target}”` : "cleared the target search") +
+    (entry.goal ? `, goal ${goalOf(entry.goal)[1]}` : "") + (entry.support ? `, supporting page ${entry.support}` : "") }]);
 }
 
 /* ---------- how each priority page is doing (last 28 days vs the 28 before) ---------- */

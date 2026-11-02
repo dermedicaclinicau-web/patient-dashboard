@@ -9,9 +9,9 @@
 
 import { db, auth } from "./firebase-config.js";
 import {
-  doc, getDoc, getDocs, collection, query, orderBy, limit, writeBatch, runTransaction, serverTimestamp, arrayUnion,
+  doc, getDoc, getDocs, collection, query, where, orderBy, limit, writeBatch, runTransaction, serverTimestamp, arrayUnion,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { npath, pageStory, priorityOf, prioritySettings, titleOf, complianceWords, renderOppsInto, taskConfig } from "./seo-work.js?v=11";
+import { npath, pageStory, priorityOf, prioritySettings, titleOf, complianceWords, renderOppsInto, taskConfig } from "./seo-work.js?v=12";
 
 const GROUPS = {
   basics:  { order: 0, factor: 1,   title: () => "Fix what's holding it back" },
@@ -209,7 +209,7 @@ function planTasks(c, path) {
 async function load(S) {
   const [ts, lg] = await Promise.all([
     getDocs(collection(db, "seo_tasks")),
-    getDocs(query(collection(db, "seo_task_log"), orderBy("at", "desc"), limit(400))),
+    getDocs(query(collection(db, "seo_task_log"), orderBy("at", "desc"), limit(800))),
   ]);
   S.tasks = new Map(ts.docs.map((d) => [d.id, { steps: {}, order: [], ...d.data(), id: d.id }]));
   S.log = lg.docs.map((d) => ({ id: d.id, ...d.data() }));
@@ -219,11 +219,22 @@ const isPri = (c, path) => !!priorityOf(c.work, path);
 const started = (t) => (t.order || []).some((id) => t.steps[id] && t.steps[id].status !== "todo");
 const isLive = (c, t) => t.status !== "done" && t.status !== "dismissed" && (isPri(c, t.path) || started(t));
 
+// Priority number first (#1 before #2), then the kind of job, then the expected gain
 function rankOf(c) {
-  const tone = new Map((c.prRows ? c.prRows() : []).map((r) => [npath(r.path), r.rank]));
-  return (a, b) => (tone.get(npath(a.path)) ?? 9) - (tone.get(npath(b.path)) ?? 9)
+  const num = new Map(prioritySettings(c.work).paths.map((p, i) => [npath(p), i]));
+  return (a, b) => (num.get(npath(a.path)) ?? 999) - (num.get(npath(b.path)) ?? 999)
     || GROUPS[a.group].order - GROUPS[b.group].order || (b.gain || 0) - (a.gain || 0);
 }
+const priNum = (c, path) => {
+  const i = prioritySettings(c.work).paths.findIndex((p) => npath(p) === npath(path));
+  return i >= 0 ? i + 1 : 0;
+};
+
+// Comments you haven't seen yet (remembered on this device)
+const seenKey = () => "dm.seo.seen." + uid();
+const seenMap = () => { try { return JSON.parse(localStorage.getItem(seenKey()) || "{}") || {}; } catch { return {}; } };
+const markSeen = (k) => { try { const m = seenMap(); m[k] = Date.now(); localStorage.setItem(seenKey(), JSON.stringify(m)); } catch { /* private mode */ } };
+const isNew = (l, seen) => l.action === "comment" && l.by !== uid() && (tsDate(l.at)?.getTime() || 0) > (seen[npath(l.path || "")] || 0);
 
 // Keeps the ranking, but takes each page's best task first, then each page's second, and so on
 function spread(list) {
@@ -339,7 +350,7 @@ export async function renderTasks(body, c) {
   body.replaceChildren(wrap);
   wrap.innerHTML = `<div class="seo-empty">Loading tasks…</div>`;
   const ui = c.work.tui || (c.work.tui = { view: "today", skip: "", expand: "" });
-  const S = { tasks: new Map(), log: [], day: null, canDo: canDo(c) };
+  const S = { tasks: new Map(), log: [], day: null, canDo: canDo(c), trail: {} };
   try {
     await load(S);
     if (S.canDo) await syncTasks(c, S, true);   // new priority pages and plan steps show up straight away
@@ -394,7 +405,7 @@ export async function renderTasks(body, c) {
     const title = titleOf(c.work, c.data, t.path);
     const head = `<div class="seo-t-chead">${ring(t)}
       <div style="min-width:0">
-        <div class="seo-t-page">${isPri(c, t.path) ? `<span class="seo-star is-on">★</span>` : ""}${esc(title)}</div>
+        <div class="seo-t-page">${priNum(c, t.path) ? `<span class="seo-t-num">#${priNum(c, t.path)}</span>` : ""}${esc(title)}</div>
         <div class="seo-t-title">${t.source === "ai" ? `<span class="seo-t-ai" title="Suggested by Claude${t.score ? `, quality ${t.score}/5` : ""}">AI</span>` : ""}${esc(t.title)}</div>
         ${t.why ? `<div class="seo-note">${esc(t.why)}</div>` : ""}
       </div>
@@ -423,6 +434,13 @@ export async function renderTasks(body, c) {
           <div class="seo-t-err" data-t-err></div></div>`
         : `<div class="seo-w-acts">
           <button class="seo-btn" type="button" data-t-copy="${t.id}">Copy brief</button>
+          ${(() => {
+            const seen = seenMap();
+            const cm = S.log.filter((l) => l.action === "comment" && npath(l.path || "") === npath(t.path));
+            const nw = cm.filter((l) => isNew(l, seen)).length;
+            return `<button class="seo-btn${nw ? " seo-t-newbtn" : ""}" type="button" data-t-cmts="${esc(t.path)}">${
+              nw ? `${nw} new comment${nw === 1 ? "" : "s"}` : cm.length ? `Comments (${cm.length})` : "Comment"}</button>`;
+          })()}
           ${pid ? `<button class="seo-btn" type="button" data-open="${esc(pid)}">Open the page's plan</button>` : ""}
           <span class="seo-sp"></span>
           ${S.canDo && t.source === "ai" ? `<button class="seo-btn" type="button" data-t-dismiss="${t.id}">Dismiss</button>` : ""}
@@ -529,6 +547,93 @@ export async function renderTasks(body, c) {
     }).join("")}</div>`;
   }
 
+  function trailRow(l) {
+    const at = esc(when(l.at));
+    if (l.action === "comment") {
+      return `<div class="seo-t-cmt${l.by === uid() ? " is-me" : ""}">
+        <div class="seo-t-cmeta"><strong>${esc(l.byName || "Someone")}</strong>${l.role ? ` <span class="seo-note">${esc(l.role)}</span>` : ""}
+          <span class="seo-note">· ${at}</span></div>
+        <div class="seo-t-ctext">${esc(l.text)}</div></div>`;
+    }
+    const q = (s) => `“${esc(s)}”`;
+    const what = {
+      priority: esc(l.note), tick: `ticked ${q(l.text)}`, done: `marked done ${q(l.text)}`,
+      untick: `undid the tick on ${q(l.text)}${l.note ? ": " + esc(l.note) : ""}`, confirm: `Website confirmed ${q(l.text)}`,
+      missing: `Not found on the website: ${q(l.text)}`, skip: `skipped ${q(l.taskTitle)}: ${esc(l.note)}`,
+      unskip: `brought back ${q(l.taskTitle)}`, add: `added ${q(l.taskTitle)} to the day's list`,
+      taskdone: `Task finished: ${q(l.taskTitle)}`, dismiss: `dismissed the AI task ${q(l.taskTitle)}: ${esc(l.note)}`,
+    }[l.action] || esc(l.action);
+    const system = l.by === "website" || ["confirm", "missing", "taskdone"].includes(l.action);
+    return `<div class="seo-t-ev"><span class="seo-note">${at}</span> ${system ? "" : `<strong>${esc(l.byName || "Someone")}</strong> `}${what}</div>`;
+  }
+
+  function trailHtml(p) {
+    const k = npath(p);
+    const list = (S.trail[k] || S.log.filter((l) => npath(l.path || "") === k)).slice()
+      .sort((a, b) => (tsDate(b.at)?.getTime() || 0) - (tsDate(a.at)?.getTime() || 0));
+    const shown = list.slice(0, ui.trailAll ? 500 : 25);
+    return `<div class="seo-t-trail">
+      ${S.canDo ? `<div class="seo-t-cbox">
+          <textarea class="seo-input" data-t-ctext rows="2" maxlength="1000"
+            placeholder="Add a comment for the SEO team, e.g. “Jasper, the doctors want this page updated before the spring promo”"></textarea>
+          <div class="seo-w-acts"><button class="seo-btn on" type="button" data-t-cadd="${esc(p)}">Add comment</button>
+            <span class="seo-note">Comments can't be edited or deleted.</span></div>
+          <div class="seo-t-err" data-t-cerr></div></div>` : ""}
+      ${S.trail[k] ? "" : `<p class="seo-note">Loading the full history…</p>`}
+      ${shown.length ? shown.map(trailRow).join("") : `<p class="seo-note">No comments or activity yet.</p>`}
+      ${list.length > shown.length ? `<button class="seo-w-link" type="button" data-t-trailall>Show all ${list.length}</button>` : ""}
+    </div>`;
+  }
+
+  function pagesHtml() {
+    const paths = prioritySettings(c.work).paths;
+    if (!paths.length) return `<div class="seo-empty">No priority pages yet. Star pages in the Pages tab or Settings → ★ Priority pages.</div>`;
+    const rows = new Map((c.prRows ? c.prRows() : []).map((r) => [npath(r.path), r]));
+    const seen = seenMap();
+    return `<p class="seo-note">Tasks follow this order, #1 first. ${c.isAdmin ? "Use the arrows to change it." : "Admins can change the order."}
+        Click a page for its comments and history.</p>
+      <div class="seo-t-plist">${paths.map((p, i) => {
+        const k = npath(p);
+        const r = rows.get(k);
+        const st = [...S.tasks.values()].filter((t) => npath(t.path) === k && t.status !== "dismissed").flatMap(stepsOf);
+        const d = st.filter(doneish).length, y = st.filter((s) => s.status === "ticked").length;
+        const cm = S.log.filter((l) => l.action === "comment" && npath(l.path || "") === k);
+        const nw = cm.filter((l) => isNew(l, seen)).length;
+        const open = ui.page === k;
+        return `<div class="seo-t-pp${open ? " is-open" : ""}">
+          <div class="seo-t-pph" data-t-page="${esc(p)}" role="button" tabindex="0" aria-expanded="${open}">
+            <span class="seo-t-num is-big">#${i + 1}</span>
+            ${c.isAdmin ? `<span class="seo-t-move">
+              <button class="seo-btn" type="button" data-t-mv="${i}|-1" title="Move up" aria-label="Move up"${i ? "" : " disabled"}>↑</button>
+              <button class="seo-btn" type="button" data-t-mv="${i}|1" title="Move down" aria-label="Move down"${i < paths.length - 1 ? "" : " disabled"}>↓</button></span>` : ""}
+            <div style="min-width:0"><strong class="seo-path" style="display:block">${esc(titleOf(c.work, c.data, p))}</strong>
+              <span class="seo-note seo-path" style="display:block">${esc(p)}</span></div>
+            ${r ? `<span class="seo-pr-pill is-${r.tone}">${esc(r.label)}</span>` : "<span></span>"}
+            <div class="seo-t-ppbar"><div class="seo-t-hb"><i class="g" style="width:${st.length ? (d / st.length) * 100 : 0}%"></i><i class="y" style="width:${st.length ? (y / st.length) * 100 : 0}%"></i></div>
+              <span class="seo-note">${d}/${st.length} steps</span></div>
+            <span class="seo-t-cm${nw ? " is-new" : ""}">${nw ? `${nw} new` : cm.length ? `${cm.length} comment${cm.length === 1 ? "" : "s"}` : ""}</span>
+          </div>
+          ${open ? trailHtml(p) : ""}
+        </div>`;
+      }).join("")}</div>`;
+  }
+
+  async function openPage(p) {
+    const k = npath(p);
+    ui.page = ui.page === k ? "" : k;
+    ui.trailAll = false;
+    draw();
+    if (!ui.page) return;
+    markSeen(k);
+    if (!S.trail[k]) {
+      try {
+        const snap = await getDocs(query(collection(db, "seo_task_log"), where("path", "==", p)));
+        S.trail[k] = snap.docs.map((x) => ({ id: x.id, ...x.data() }));
+      } catch (e) { console.warn("Trail not loaded:", e); S.trail[k] = S.log.filter((l) => npath(l.path || "") === k); }
+      if (ui.page === k && ui.view === "pages") draw();
+    }
+  }
+
   function reviewHtml() {
     const since = addDays(day, -6);
     const recent = S.log.filter((l) => (l.day || "") >= since);
@@ -618,7 +723,10 @@ export async function renderTasks(body, c) {
       checking: [...S.tasks.values()].flatMap(stepsOf).filter((s) => s.status === "ticked").length,
       done: [...S.tasks.values()].filter((t) => t.status === "done").length,
     };
-    const tabs = [["today", "Today", counts.today], ["next", "Up next", counts.next], ["checking", "Checking", counts.checking],
+    const seen = seenMap();
+    const newCm = S.log.filter((l) => isNew(l, seen) && isPri(c, l.path || "")).length;
+    const tabs = [["today", "Today", counts.today], ["pages", newCm ? `★ Pages <span class="seo-t-dot">${newCm} new</span>` : "★ Pages", null],
+      ["next", "Up next", counts.next], ["checking", "Checking", counts.checking],
       ["done", "Done", counts.done], ["review", "Review", null], ["ideas", "All ideas", null]];
     wrap.innerHTML = `
       <div class="seo-row seo-t-head">
@@ -626,7 +734,7 @@ export async function renderTasks(body, c) {
         <span class="seo-note">SEO team</span><span class="seo-sp"></span>
         ${tabs.map(([k, l, n]) => `<button class="seo-w-stab ${ui.view === k ? "is-on" : ""}" type="button" data-t-view="${k}">${l}${n != null ? ` <span class="seo-w-n">${n}</span>` : ""}</button>`).join("")}
       </div>
-      <div data-t-body>${ui.view === "next" ? nextHtml() : ui.view === "checking" ? checkingHtml() : ui.view === "done" ? doneHtml()
+      <div data-t-body>${ui.view === "pages" ? pagesHtml() : ui.view === "next" ? nextHtml() : ui.view === "checking" ? checkingHtml() : ui.view === "done" ? doneHtml()
         : ui.view === "review" ? reviewHtml() : ui.view === "ideas" ? "" : todayHtml()}</div>`;
     if (ui.view === "ideas") {
       const box = wrap.querySelector("[data-t-body]");
@@ -637,8 +745,63 @@ export async function renderTasks(body, c) {
 
   wrap.addEventListener("click", async (e) => {
     const t0 = e.target.closest("button");
-    if (!t0 || t0.dataset.open !== undefined) return;   // seo.js opens the page panel
+    if (!t0) {
+      const ph = e.target.closest("[data-t-page]");
+      if (ph) openPage(ph.dataset.tPage);
+      return;
+    }
+    if (t0.dataset.open !== undefined) return;   // seo.js opens the page panel
     const d = t0.dataset;
+
+    if (d.tCmts) { ui.view = "pages"; ui.page = ""; openPage(d.tCmts); return; }
+    if (d.tTrailall !== undefined) { ui.trailAll = true; draw(); return; }
+
+    if (d.tMv) {
+      if (!c.isAdmin) { toast("Only admins can change the order.", true); return; }
+      const [i, dir] = d.tMv.split("|").map(Number);
+      const paths = prioritySettings(c.work).paths.slice();
+      const j = i + dir;
+      if (j < 0 || j >= paths.length) return;
+      [paths[i], paths[j]] = [paths[j], paths[i]];
+      t0.disabled = true;
+      try {
+        const b = writeBatch(db);
+        b.set(doc(db, "seo_settings", "main"), { keyPages: paths, updatedBy: uid(), updatedAt: serverTimestamp() }, { merge: true });
+        const entry = { taskId: "", path: paths[j], taskTitle: "", stepId: "", text: "", note: `moved to #${j + 1} (was #${i + 1})`,
+          action: "priority", by: uid(), byName: myName(c), role: roleOf(c), day, at: serverTimestamp() };
+        b.set(doc(collection(db, "seo_task_log")), entry);
+        await b.commit();
+        c.work.settings = { ...(c.work.settings || {}), keyPages: paths };
+        const local = { ...entry, at: new Date() };
+        S.log.unshift(local);
+        if (S.trail[npath(paths[j])]) S.trail[npath(paths[j])].unshift(local);
+        draw();
+      } catch (e2) { t0.disabled = false; toast(errMsg(e2), true); }
+      return;
+    }
+
+    if (d.tCadd) {
+      if (!S.canDo) { toast("Only the SEO team and admins can comment.", true); return; }
+      const box = wrap.querySelector("[data-t-ctext]");
+      const txt = (box?.value || "").trim();
+      if (txt.length < 2) { const er = wrap.querySelector("[data-t-cerr]"); if (er) er.textContent = "Write a comment first."; return; }
+      t0.disabled = true;
+      try {
+        const entry = { taskId: "", path: d.tCadd, taskTitle: "", stepId: "", text: txt.slice(0, 1000), note: "",
+          action: "comment", by: uid(), byName: myName(c), role: roleOf(c), day, at: serverTimestamp() };
+        const b = writeBatch(db);
+        b.set(doc(collection(db, "seo_task_log")), entry);
+        await b.commit();
+        const local = { ...entry, at: new Date() };
+        S.log.unshift(local);
+        const k = npath(d.tCadd);
+        (S.trail[k] || (S.trail[k] = [])).unshift(local);
+        markSeen(k);
+        toast("Comment added");
+        draw();
+      } catch (e2) { t0.disabled = false; toast(errMsg(e2), true); }
+      return;
+    }
     if (d.tView) { ui.view = d.tView; ui.skip = ""; draw(); return; }
     if (d.tLog !== undefined) { c.setTab("log"); return; }
     if (d.tCopy) {
@@ -757,6 +920,11 @@ export async function renderTasks(body, c) {
     }
   });
 
+  wrap.addEventListener("keydown", (e) => {   // open a page with the keyboard too
+    const ph = e.target.closest?.("[data-t-page]");
+    if (ph && e.target === ph && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openPage(ph.dataset.tPage); }
+  });
+  
   draw();
 }
 
@@ -780,6 +948,34 @@ const CSS = `
 .seo-t-title{font-size:15px;font-weight:600;margin-top:1px}
 .seo-t-side{text-align:right}
 .seo-t-gain{font-size:12px;font-weight:600;color:#16a34a;white-space:nowrap}
+.seo-t-num{display:inline-block;margin-right:6px;font-weight:700;color:#b45309}
+.seo-t-num.is-big{min-width:34px;margin:0;font-size:16px}
+.seo-t-newbtn{border-color:#f59e0b !important;background:#fffbeb !important;color:#b45309 !important;font-weight:600}
+.seo-t-dot{margin-left:4px;padding:0 6px;border-radius:999px;background:#f59e0b;color:#fff;font-size:11px;font-weight:700}
+.seo-t-plist{border:1px solid var(--border,#e5e7eb);border-radius:12px;background:var(--card,#fff);overflow:hidden}
+.seo-t-pp{border-top:1px solid var(--border,#e5e7eb)}
+.seo-t-pp:first-child{border-top:0}
+.seo-t-pp.is-open{background:#fafbff}
+.seo-t-pph{display:grid;grid-template-columns:auto auto minmax(0,1fr) auto 170px 90px;gap:12px;align-items:center;padding:10px 14px;cursor:pointer}
+.seo-t-pph:hover{background:#f8fafc}
+.seo-t-move{display:flex;gap:2px}
+.seo-t-move .seo-btn{padding:2px 8px}
+.seo-t-ppbar{display:flex;align-items:center;gap:8px}
+.seo-t-cm{font-size:12px;color:var(--text-muted,#6b7280);text-align:right}
+.seo-t-cm.is-new{color:#b45309;font-weight:700}
+.seo-t-trail{padding:4px 14px 14px 60px}
+.seo-t-cbox{margin:4px 0 10px}
+.seo-t-cbox textarea{width:100%;min-width:0;box-sizing:border-box;resize:vertical}
+.seo-t-cmt{margin:8px 0;padding:8px 12px;border-radius:10px;background:#eff6ff;max-width:640px}
+.seo-t-cmt.is-me{background:#f1f5f9}
+.seo-t-cmeta{font-size:12px}
+.seo-t-ctext{margin-top:3px;font-size:13px;line-height:1.45;white-space:pre-wrap;word-break:break-word}
+.seo-t-ev{padding:5px 0;font-size:12.5px;border-top:1px dashed var(--border,#e5e7eb)}
+@media (max-width:760px){
+  .seo-t-pph{grid-template-columns:auto minmax(0,1fr) auto}
+  .seo-t-pph .seo-t-move,.seo-t-ppbar{grid-column:2}
+  .seo-t-trail{padding-left:14px}
+}
 .seo-t-ai{display:inline-block;margin-right:6px;padding:0 6px;border-radius:999px;background:#f5f3ff;color:#6d28d9;font-size:10.5px;font-weight:700;letter-spacing:.03em;vertical-align:2px}
 .seo-t-steps{margin-top:8px}
 .seo-t-step{display:grid;grid-template-columns:24px minmax(0,1fr) auto;gap:10px;align-items:start;padding:8px 0;border-top:1px solid var(--border,#e5e7eb);font-size:13px}

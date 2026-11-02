@@ -14,6 +14,9 @@
  * seo3Esc_, seo3Words_), Seo6.gs (seo6Read_, seo6Pass_, seo6Path_) and Code.gs (getConfig_, fsGetDoc_, fsQuery_, fsListAll_, fromFields_).
  */
 
+// Claude models. Script Properties CLAUDE_MODEL / CLAUDE_FAST_MODEL override these if they exist.
+const SEO7_MODEL_ = 'claude-sonnet-5-5';       // writes the suggestions
+const SEO7_FAST_MODEL_ = 'claude-haiku-5-5';   // the quick second opinion
 const SEO7_CHECKS_ = ['title', 'titleMax', 'titleNot', 'h1', 'desc', 'heading', 'headingAny', 'text', 'words', 'link', 'alt'];
 const SEO7_CTR_ = [0.28, 0.16, 0.11, 0.08, 0.06, 0.045, 0.035, 0.03, 0.025, 0.02];   // rough click rate by position
 const SEO7_MAX_PAGES_ = 4;        // pages reviewed per night at most
@@ -44,9 +47,8 @@ function seo7Run_(opt) {
   if (!ai.on && !opt.force) { console.log('AI suggestions are off (SEO → Settings → Tasks).'); return; }
 
   const props = PropertiesService.getScriptProperties();
-  const model = String(props.getProperty('CLAUDE_MODEL') || '').trim();
-  const fast = String(props.getProperty('CLAUDE_FAST_MODEL') || '').trim() || model;
-  if (!model) throw new Error('Script Property CLAUDE_MODEL is missing.');
+  const model = String(props.getProperty('CLAUDE_MODEL') || '').trim() || SEO7_MODEL_;
+  const fast = String(props.getProperty('CLAUDE_FAST_MODEL') || '').trim() || SEO7_FAST_MODEL_;
 
   const origin = seoOrigin_();
   const project = seo2Project_();
@@ -429,10 +431,23 @@ function seo7ReviewSystem_() {
     'Be strict. Reply with JSON only: {"scores":[{"i":0,"score":4,"reason":"one short sentence"}]}',
   ].join('\n');
 }
+// The Claude API key, whatever quotes, spaces or capitals its property name has: ClaudeApi, 'ClaudeApi', "ClaudeApi"…
+function seo7ClaudeKey_() {
+  const all = PropertiesService.getScriptProperties().getProperties();
+  const want = ['claudeapi', 'claude_api_key', 'anthropic_api_key'];
+  const clean = (s) => String(s).replace(/['"\s]/g, '').toLowerCase();
+  for (const name of Object.keys(all)) {
+    if (want.indexOf(clean(name)) !== -1) {
+      const v = String(all[name] || '').replace(/^['"\s]+|['"\s]+$/g, '');   // quotes round the value are trimmed too
+      if (v) return v;
+    }
+  }
+  return '';
+}
 
 function seo7Claude_(model, system, user, maxTokens) {
-  const key = String(PropertiesService.getScriptProperties().getProperty('ClaudeApi') || '').trim();
-  if (!key) throw new Error('Script Property ClaudeApi is missing.');
+  const key = seo7ClaudeKey_();
+  if (!key) throw new Error('No Claude API key found. Run seoListProps() to see the property names.');
   const payload = JSON.stringify({ model: model, max_tokens: maxTokens, system: system, messages: [{ role: 'user', content: user }] });
   for (let a = 0; a < 3; a++) {
     const r = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {

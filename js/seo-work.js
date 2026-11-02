@@ -3,7 +3,7 @@
 
 import { db, auth } from "./firebase-config.js";
 import {
-  doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, collection, query, where, getDocs, serverTimestamp,
+  doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, collection, query, where, getDocs, serverTimestamp, writeBatch,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { loadHealth, viewHealth, healthPanelHtml } from "./seo-health.js?v=2";
 import { loadAudience, viewAudience } from "./seo-audience.js";
@@ -271,6 +271,22 @@ export function pageIndex(w, data) {
   return w._pidx;
 }
 export const titleOf = (w, data, path) => (w && pageIndex(w, data).get(path)?.title) || prettyPath(path);
+
+// Priority changes go into the page's trail (seo_task_log, action 'priority'). Notes start lower case: "moved to #2 (was #3)".
+export async function logPriority(c, entries) {
+  const list = (entries || []).filter((e) => e && e.path).slice(0, 50);
+  if (!list.length) return;
+  const b = writeBatch(db);
+  const day = todayPerth();
+  const role = String(c.staff?.role || c.staff?.staffRole || (c.isAdmin ? "Admin" : ""));
+  for (const e of list) {
+    b.set(doc(collection(db, "seo_task_log")), {
+      taskId: "", path: e.path, taskTitle: "", stepId: "", text: "", note: String(e.note || "").slice(0, 500),
+      action: "priority", by: uid(), byName: myName(c), role, day, at: serverTimestamp(),
+    });
+  }
+  try { await b.commit(); } catch (err) { console.warn("Priority change not logged:", err); }
+}
 
 // Settings → Tasks. Stored in seo_settings/main.tasks (admins only). Older saves used tasksPerDay.
 export function taskConfig(w) {
@@ -1271,8 +1287,11 @@ function viewSettings(wrap, c, ui) {
   }
   function savePriority() {
     const pages = [...new Map(keyPages.map((p) => [npath(p), p])).values()].slice(0, 30);
-    const { info } = prioritySettings(w);
+    const { info, paths: before } = prioritySettings(w);
     const keep = new Set(pages.map(npath));
+    const had = new Set(before.map(npath));
+    logPriority(c, pages.filter((p) => !had.has(npath(p))).map((p) => ({ path: p, note: `added as priority page #${pages.indexOf(p) + 1}` }))
+      .concat(before.filter((p) => !keep.has(npath(p))).map((p) => ({ path: p, note: "removed from priority pages" }))));
     const have = new Set(info.map((x) => npath(x.path)));
     const now = new Date().toISOString();
     const priorityInfo = info.filter((x) => keep.has(npath(x.path)))
@@ -1557,7 +1576,8 @@ function viewSettings(wrap, c, ui) {
   /* ----- Priority pages ----- */
 
   function pcardsHtml() {
-    const rows = c.prRows ? c.prRows() : [];
+    const numOf = new Map(keyPages.map((p, i) => [npath(p), i + 1]));
+    const rows = (c.prRows ? c.prRows() : []).slice().sort((a, b) => (numOf.get(npath(a.path)) || 99) - (numOf.get(npath(b.path)) || 99));
     if (!rows.length) {
       return `<div class="seo-empty">No priority pages yet, so Site health checks the home page and your 15 busiest pages.${
         c.isAdmin ? `<br><br><button class="seo-btn on" type="button" data-w-ppick>Add pages</button>` : ""}</div>`;
@@ -1580,7 +1600,7 @@ function viewSettings(wrap, c, ui) {
       <div class="seo-table-wrap" style="max-height:none"><table class="seo-table seo-w-plist">
         <thead><tr><th>Page</th><th>Status</th><th>Target search</th><th>Clicks</th><th>12 weeks</th><th></th></tr></thead>
         <tbody>${rows.map((r) => `<tr${r.p ? ` data-open="${h.esc(r.p.id)}"` : ""}>
-          <td><div class="seo-w-pt"><span class="seo-star is-on" aria-hidden="true">★</span>
+          <td><div class="seo-w-pt"><span class="seo-w-pnum" title="Priority number">#${numOf.get(npath(r.path)) || "–"}</span>
             <div style="min-width:0"><div class="seo-w-ptitle" title="${h.esc(titleOf(w, c.data, r.path))}"><strong>${h.esc(titleOf(w, c.data, r.path))}</strong></div>
               <div class="seo-note seo-w-mono seo-w-ptitle">${h.esc(r.path)}</div></div></div></td>
           <td><span class="seo-pr-pill is-${r.tone}">${h.esc(r.label)}</span>
@@ -1590,7 +1610,8 @@ function viewSettings(wrap, c, ui) {
           <td>${r.p && Array.isArray(r.p.weekly) ? h.sparkline(r.p.weekly) : ""}</td>
           <td class="seo-w-pact">${c.isAdmin ? `<button class="seo-btn" type="button" data-w-prm="${h.esc(r.path)}">Remove</button>` : ""}</td>
         </tr>`).join("")}</tbody></table></div>
-      <p class="seo-note" style="margin-top:6px">Last 28 days vs the 28 before. Click a page to open it.</p>`;
+      <p class="seo-note" style="margin-top:6px">Last 28 days vs the 28 before. Click a page to open it.
+        Change the order, and see each page's comments, in SEO → Tasks → ★ Pages.</p>`;
   }
 
   function priHtml() {
@@ -2094,6 +2115,7 @@ span.seo-star{cursor:default}
 .seo-w-ptitle{max-width:380px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .seo-w-pwhy{max-width:260px;margin-top:3px;font-size:12px;line-height:1.4;color:var(--text-muted,#6b7280)}
 .seo-w-ok{color:#047857;font-weight:600}
+.seo-w-pnum{flex:none;min-width:28px;font-size:12px;font-weight:700;color:#b45309}
 .seo-w-pact{text-align:right !important;white-space:nowrap !important}
 .seo-w-pkbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 6px}
 .seo-w-pkbar .seo-btn{padding:4px 10px;font-size:12px}

@@ -1584,9 +1584,10 @@ match /inv_count_drafts/{id} {
       allow read: if can('menu.seo');
       allow create: if seoTeam()
         && request.resource.data.keys().hasOnly(['taskId','path','taskTitle','stepId','text','note','action','by','byName','role','day','at'])
-        && request.resource.data.action in ['tick', 'done', 'untick', 'skip', 'unskip', 'add', 'plan', 'dismiss']
+        && request.resource.data.action in ['tick', 'done', 'untick', 'skip', 'unskip', 'add', 'plan', 'dismiss', 'comment', 'priority']
         && request.resource.data.by == request.auth.uid
         && request.resource.data.at == request.time
+        && request.resource.data.text is string && request.resource.data.text.size() <= 1000
         && request.resource.data.note is string && request.resource.data.note.size() <= 500;
       allow update, delete: if false;
     }
@@ -1594,7 +1595,7 @@ match /inv_count_drafts/{id} {
     // AI suggestions: each night's run (what was added and what was dropped, with reasons). Apps Script only.
     match /seo_ai_runs/{id}  { allow read: if can('menu.seo'); allow write: if false; }
     match /seo_ai_state/{id} { allow read, write: if false; }
-    
+
         // Prospect Dashboard: prospects and their settings (written by Apps Script only)
     match /prospects/{id} {
       allow read: if can('menu.prospects');
