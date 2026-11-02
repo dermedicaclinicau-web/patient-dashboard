@@ -25,7 +25,8 @@ const SEO_SCOPES_ = [
 ].join(' ');
 const SEO_TOKEN_CACHE_ = 'seo_token_v2';
 const SEO_LAG_DAYS_ = 3; // GSC data settles after ~3 days; period comparisons end here
-const SEO_DAY_COLS_ = ['date', 'clicks', 'impressions', 'position', 'sessions', 'engaged', 'conversions', 'aiSessions'];
+const SEO_DAY_COLS_ = ['date', 'clicks', 'impressions', 'position', 'sessions', 'engaged', 'conversions', 'aiSessions',
+  'brandClicks', 'brandImpressions'];
 
 function seoProp_(name) {
   return (PropertiesService.getScriptProperties().getProperty(name) || '').trim();
@@ -168,7 +169,7 @@ function seoFsCommit_(docs) {
 /** 16 months of daily totals: GSC + GA4 Organic Search + GA4 AI Assistant. Rows follow SEO_DAY_COLS_. */
 function seoBuildDays_(start, end) {
   const by = {};
-  function row(d) { return by[d] || (by[d] = [d, 0, 0, null, 0, 0, 0, 0]); }
+  function row(d) { return by[d] || (by[d] = [d, 0, 0, null, 0, 0, 0, 0, null, null]); }
 
   seoGsc_({ startDate: start, endDate: end, dimensions: ['date'] }).forEach(function (r) {
     const x = row(r.keys[0]);
@@ -191,7 +192,41 @@ function seoBuildDays_(start, end) {
     else x[7] = r.m[0];
   });
 
+  // Brand searches per day (SEO → Settings → Brand words). Google hides very rare searches, so these are a little low,
+  // and "non-brand" (all clicks minus brand) includes those hidden searches.
+  const brand = seoBrandWords_();
+  if (brand.length) {
+    try {
+      Object.keys(by).forEach(function (k) { by[k][8] = 0; by[k][9] = 0; });
+      const re = '(?i)(' + brand.map(function (w) { return w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }).join('|') + ')';
+      seoGsc_({
+        startDate: start, endDate: end, dimensions: ['date'],
+        dimensionFilterGroups: [{ filters: [{ dimension: 'query', operator: 'includingRegex', expression: re }] }],
+      }).forEach(function (r) {
+        const x = row(r.keys[0]);
+        x[8] = r.clicks;
+        x[9] = r.impressions;
+      });
+      Object.keys(by).forEach(function (k) { if (by[k][8] == null) { by[k][8] = 0; by[k][9] = 0; } });
+    } catch (e) {
+      console.warn('SEO: brand searches not read, so the brand split is left out: ' + e);
+      Object.keys(by).forEach(function (k) { by[k][8] = null; by[k][9] = null; });
+    }
+  }
+
   return Object.keys(by).sort().map(function (k) { return by[k]; });
+}
+
+// The brand words saved in SEO → Settings ("dermedica" until they're saved)
+function seoBrandWords_() {
+  try {
+    const s = fsGetDoc_(getConfig_(), 'seo_settings/main') || {};
+    const list = Array.isArray(s.brand) ? s.brand : ['dermedica'];
+    return list.map(function (w) { return String(w || '').trim().toLowerCase(); }).filter(Boolean).slice(0, 20);
+  } catch (e) {
+    console.warn('SEO: brand words not read, using "dermedica": ' + e);
+    return ['dermedica'];
+  }
 }
 
 /** GSC reports jump links (#section) as separate URLs; fold them into their page */

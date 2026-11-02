@@ -23,6 +23,7 @@ const METRICS = {
   ctr:         { label: "CTR",              fmt: (v) => fmtPct(v) },
   position:    { label: "Avg position",     fmt: (v) => fmtPos(v), invert: true },
   sessions:    { label: "Organic sessions", fmt: (v) => fmtInt(v) },
+  nonBrand:    { label: "Non-brand clicks", fmt: (v) => fmtInt(v), brand: true },
 };
 
 /* ---------- data (cached for the session; Refresh reloads) ---------- */
@@ -69,22 +70,106 @@ function addDays(iso, n) {
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
 }
+const daysBetween = (a, b) => Math.round((Date.parse(b + "T00:00:00Z") - Date.parse(a + "T00:00:00Z")) / 864e5);
+
+function addYears(iso, n) {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(Date.UTC(y + n, m - 1, d));
+  if (dt.getUTCMonth() !== m - 1) dt.setUTCDate(0);   // 29 Feb → 28 Feb
+  return dt.toISOString().slice(0, 10);
+}
+
+const PRESETS = [
+  ["7", "7 days"], ["28", "28 days"], ["90", "90 days"], ["thisMonth", "This month"], ["lastMonth", "Last month"],
+  ["ytd", "This year"], ["12m", "12 months"], ["custom", "Custom"],
+];
+
+/** The chosen dates. end = last settled day; first / last = the data's first and last days */
+function rangeOf(ui, end, first, last) {
+  const clamp = (d) => (d < first ? first : d > last ? last : d);
+  const L = new Date(last + "T00:00:00Z");
+  let from, to = end;
+  switch (ui.preset) {
+    case "7": case "28": case "90": from = addDays(end, -(Number(ui.preset) - 1)); break;
+    case "thisMonth": from = last.slice(0, 8) + "01"; to = last; break;
+    case "lastMonth":
+      from = new Date(Date.UTC(L.getUTCFullYear(), L.getUTCMonth() - 1, 1)).toISOString().slice(0, 10);
+      to = new Date(Date.UTC(L.getUTCFullYear(), L.getUTCMonth(), 0)).toISOString().slice(0, 10);
+      break;
+    case "ytd": from = last.slice(0, 4) + "-01-01"; to = last; break;
+    case "12m": from = addDays(addYears(end, -1), 1); break;
+    default: from = ui.from || addDays(end, -27); to = ui.to || end;
+  }
+  from = clamp(from); to = clamp(to);
+  if (from > to) [from, to] = [to, from];
+  return { from, to, n: daysBetween(from, to) + 1 };
+}
+
+function compareOf(r, mode, first) {
+  if (mode === "none") return null;
+  let from, to;
+  if (mode === "year") { from = addYears(r.from, -1); to = addYears(r.to, -1); }
+  else { to = addDays(r.from, -1); from = addDays(to, -(r.n - 1)); }
+  return { from, to, ok: from >= first, name: mode === "year" ? "Same time last year" : "Previous period" };
+}
+
+const autoGran = (n) => (n <= 45 ? "day" : n <= 400 ? "week" : "month");
+
+/** Days, weeks (ending on the last day) or calendar months between two dates */
+function buckets(from, to, gran) {
+  const out = [];
+  if (gran === "day") {
+    for (let d = from; d <= to; d = addDays(d, 1)) out.push({ start: d, end: d });
+  } else if (gran === "week") {
+    for (let e = to; e >= from;) {
+      const s = addDays(e, -6) < from ? from : addDays(e, -6);
+      out.unshift({ start: s, end: e });
+      e = addDays(s, -1);
+    }
+  } else {
+    for (let s = from; s <= to;) {
+      const [y, m] = s.split("-").map(Number);
+      const me = new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
+      const e = me > to ? to : me;
+      out.push({ start: s, end: e });
+      s = addDays(e, 1);
+    }
+  }
+  return out;
+}
+
+function bucketLabel(b, gran) {
+  const len = daysBetween(b.start, b.end) + 1;
+  const f = (iso, o) => new Date(iso + "T00:00:00Z").toLocaleDateString("en-AU", { ...o, timeZone: "UTC" });
+  if (gran === "day") return f(b.start, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+  if (gran === "month") {
+    const full = b.start.endsWith("-01") && addDays(b.end, 1).endsWith("-01");
+    return f(b.start, { month: "long", year: "numeric" }) + (full ? "" : ` (${fmtDate(b.start, false)} – ${fmtDate(b.end, false)})`);
+  }
+  return `${fmtDate(b.start, false)} – ${fmtDate(b.end)}${len < 7 ? ` (${len} days)` : ""}`;
+}
+
 function fmtDate(iso, withYear = true) {
   return new Date(iso + "T00:00:00Z").toLocaleDateString("en-AU",
     { day: "numeric", month: "short", ...(withYear ? { year: "numeric" } : {}), timeZone: "UTC" });
 }
 
-/** Totals over [from, to]; position is impression-weighted */
+/** Totals over [from, to]; position is impression-weighted. nonBrand is null unless every day has brand data. */
 function sumRange(days, from, to) {
-  const t = { clicks: 0, impressions: 0, posW: 0, posI: 0, sessions: 0, engaged: 0, conversions: 0, aiSessions: 0 };
+  const t = { clicks: 0, impressions: 0, posW: 0, posI: 0, sessions: 0, engaged: 0, conversions: 0, aiSessions: 0,
+    brandClicks: 0, brandImpressions: 0, days: 0, brandDays: 0 };
   for (const d of days) {
     if (d.date < from || d.date > to) continue;
+    t.days++;
     t.clicks += d.clicks; t.impressions += d.impressions;
     if (d.position != null && d.impressions) { t.posW += d.position * d.impressions; t.posI += d.impressions; }
     t.sessions += d.sessions; t.engaged += d.engaged; t.conversions += d.conversions; t.aiSessions += d.aiSessions;
+    if (d.brandClicks != null) { t.brandClicks += d.brandClicks; t.brandImpressions += d.brandImpressions || 0; t.brandDays++; }
   }
   t.ctr = t.impressions ? t.clicks / t.impressions : 0;
   t.position = t.posI ? t.posW / t.posI : null;
+  t.nonBrand = t.days && t.brandDays === t.days ? t.clicks - t.brandClicks : null;
+  t.brandShare = t.nonBrand != null && t.clicks ? t.brandClicks / t.clicks : null;
   return t;
 }
 
@@ -117,24 +202,27 @@ function bars(vals, labels, w = 400, h = 120) {
   <text x="0" y="${h + 14}">${esc(labels[0])}</text><text x="${w}" y="${h + 14}" text-anchor="end">${esc(labels[labels.length - 1])}</text></svg>`;
 }
 
-/** Weekly line chart. points: [{ label, v }] */
-function lineChart(points, { invert = false, fmt = fmtInt, marks = [] } = {}) {
-  const W = 820, H = 230, L = 52, R = 12, T = 12, B = 28;
+/** Line chart. points: [{ start, end, label, v }]. cmp: [{ label, v }] (same length) or null */
+function lineChart(points, { invert = false, fmt = fmtInt, marks = [], cmp = null, freshAfter = "", gran = "week" } = {}) {
+  const W = 820, H = 240, L = 52, R = 12, T = 12, B = 28;
   const w = W - L - R, h = H - T - B;
-  const vals = points.map((p) => p.v).filter((v) => v != null);
-  if (!vals.length) return `<div class="seo-empty">No data</div>`;
+  const vals = points.concat(cmp || []).map((p) => p.v).filter((v) => v != null);
+  if (!vals.length) return `<div class="seo-empty">No data for these dates</div>`;
   let min = Math.min(...vals), max = Math.max(...vals);
   if (!invert) min = Math.min(0, min);
   if (max === min) max = min + 1;
-  const x = (i) => L + (points.length === 1 ? w / 2 : (i / (points.length - 1)) * w);
+  const n = points.length;
+  const x = (i) => L + (n === 1 ? w / 2 : (i / (n - 1)) * w);
   const y = (v) => T + (invert ? (v - min) / (max - min) : 1 - (v - min) / (max - min)) * h;
-
-  let path = "", pen = false;
-  points.forEach((p, i) => {
-    if (p.v == null) { pen = false; return; }
-    path += (pen ? "L" : "M") + x(i).toFixed(1) + "," + y(p.v).toFixed(1);
-    pen = true;
-  });
+  const path = (arr) => {
+    let d = "", pen = false;
+    arr.forEach((p, i) => {
+      if (p.v == null) { pen = false; return; }
+      d += (pen ? "L" : "M") + x(i).toFixed(1) + "," + y(p.v).toFixed(1);
+      pen = true;
+    });
+    return d;
+  };
 
   const grid = [0, 1, 2, 3, 4].map((k) => {
     const v = min + ((max - min) * k) / 4;
@@ -142,23 +230,38 @@ function lineChart(points, { invert = false, fmt = fmtInt, marks = [] } = {}) {
       <text x="${L - 6}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end">${esc(fmt(v))}</text>`;
   }).join("");
 
-  let lastMonth = "";
+  // About 7 labels along the bottom, whatever the length
+  const every = Math.max(1, Math.ceil(n / 7));
   const xl = points.map((p, i) => {
-    const m = p.end.slice(0, 7);
-    if (m === lastMonth) return "";
-    lastMonth = m;
-    if (i === 0) return "";
-    const d = new Date(p.end + "T00:00:00Z");
-    return `<text x="${x(i).toFixed(1)}" y="${H - 8}" text-anchor="middle">${d.toLocaleDateString("en-AU", { month: "short", timeZone: "UTC" })}${d.getUTCMonth() === 0 ? " " + String(d.getUTCFullYear()).slice(2) : ""}</text>`;
+    if (i % every) return "";
+    const d = new Date(p.start + "T00:00:00Z");
+    const t = gran === "month"
+      ? d.toLocaleDateString("en-AU", { month: "short", year: "2-digit", timeZone: "UTC" })
+      : d.toLocaleDateString("en-AU", { day: "numeric", month: "short", timeZone: "UTC" });
+    return `<text x="${x(i).toFixed(1)}" y="${H - 8}" text-anchor="${i === 0 ? "start" : "middle"}">${esc(t)}</text>`;
   }).join("");
 
-  const step = w / Math.max(1, points.length - 1);
-  const hits = points.map((p, i) =>
-    `<rect x="${(x(i) - step / 2).toFixed(1)}" y="${T}" width="${step.toFixed(1)}" height="${h}" fill="transparent"><title>${esc(p.label)}: ${esc(p.v == null ? "—" : fmt(p.v))}</title></rect>`).join("");
+  const step = n > 1 ? w / (n - 1) : w;
+
+  // Days Search Console is still settling (after the last complete day)
+  const fi = freshAfter ? points.findIndex((p) => p.end > freshAfter) : -1;
+  const fx = fi >= 0 ? Math.max(L, x(fi) - step / 2) : 0;
+  const fresh = fi >= 0
+    ? `<rect class="seo-fresh" x="${fx.toFixed(1)}" y="${T}" width="${(W - R - fx).toFixed(1)}" height="${h}"><title>Search Console may still update these days</title></rect>`
+    : "";
+
+  const dots = n <= 62 ? points.map((p, i) => (p.v == null ? ""
+    : `<circle class="seo-dot" cx="${x(i).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="${n <= 31 ? 2.5 : 1.8}"/>`)).join("") : "";
+
+  const hits = points.map((p, i) => {
+    const c = cmp && cmp[i];
+    const tip = `${p.label}: ${p.v == null ? "—" : fmt(p.v)}` + (c ? `\n${c.label}: ${c.v == null ? "—" : fmt(c.v)}` : "");
+    return `<rect x="${(x(i) - step / 2).toFixed(1)}" y="${T}" width="${step.toFixed(1)}" height="${h}" fill="transparent"><title>${esc(tip)}</title></rect>`;
+  }).join("");
 
   const byIdx = {};
   for (const mk of marks) {
-    const i = points.findIndex((p) => p.end && mk.date <= p.end && mk.date >= addDays(p.end, -6));
+    const i = points.findIndex((p) => mk.date >= p.start && mk.date <= p.end);
     if (i >= 0) (byIdx[i] = byIdx[i] || []).push(mk.title);
   }
   const mks = Object.entries(byIdx).map(([i, titles]) => {
@@ -166,8 +269,9 @@ function lineChart(points, { invert = false, fmt = fmtInt, marks = [] } = {}) {
     return `<g class="seo-mark"><line x1="${xx}" x2="${xx}" y1="${T}" y2="${T + h}"/><circle cx="${xx}" cy="${T + 5}" r="5"/><title>${esc(titles.join("\n"))}</title></g>`;
   }).join("");
 
-  return `<svg viewBox="0 0 ${W} ${H}">${grid}${xl}<path d="${path}" class="seo-line"/>${hits}${mks}</svg>`;
+  return `<svg viewBox="0 0 ${W} ${H}">${fresh}${grid}${xl}${cmp ? `<path d="${path(cmp)}" class="seo-line-cmp"/>` : ""}<path d="${path(points)}" class="seo-line"/>${dots}${hits}${mks}</svg>`;
 }
+
 
 /* ---------- styles ---------- */
 
@@ -203,6 +307,17 @@ const CSS = `
 .seo-chart text,.seo-bars text{font-size:11px;fill:var(--text-muted,#6b7280)}
 .seo-grid{stroke:var(--border,#e5e7eb);stroke-width:1}
 .seo-line{fill:none;stroke:var(--accent,#2563eb);stroke-width:2}
+.seo-line-cmp{fill:none;stroke:#94a3b8;stroke-width:1.5;stroke-dasharray:5 4}
+.seo-dot{fill:var(--accent,#2563eb)}
+.seo-fresh{fill:#f1f5f9}
+.seo-range{gap:6px}
+.seo-range label{display:flex;align-items:center;gap:6px}
+.seo-date,.seo-select{min-width:0;padding:5px 8px}
+.seo-btn:disabled{opacity:.45;cursor:not-allowed}
+.seo-legend{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;color:var(--text-muted,#6b7280);margin-top:6px}
+.seo-legend span{display:inline-block;width:22px;height:0;border-top:2px solid var(--accent,#2563eb);margin-left:10px}
+.seo-legend span:first-child{margin-left:0}
+.seo-legend .is-cmp{border-top:2px dashed #94a3b8}
 .seo-bars{width:100%;height:auto}
 .seo-bars rect{fill:var(--accent,#2563eb);opacity:.8}
 .seo-spark{color:var(--accent,#2563eb);vertical-align:middle}
@@ -247,7 +362,23 @@ export async function mountSeo(el, opts = {}) {
   const tabs = TABS.filter((t) => !t.manage || can("seo.manage"));
   let work = null;
   let tab = tabs.some((t) => t.id === param) ? param : "overview";
-  const ui = { range: 28, metric: "clicks", sortKey: "clicks", sortDir: -1, filter: "", hideZero: true, limit: 100 };
+  const ui = { preset: "28", from: "", to: "", compare: "prev", gran: "auto", metric: "clicks",
+    sortKey: "clicks", sortDir: -1, filter: "", hideZero: true, limit: 100 };
+  const OV_KEY = "dm.seo.overview";
+  try {
+    const s = JSON.parse(sessionStorage.getItem(OV_KEY) || "{}") || {};
+    ["preset", "from", "to", "compare", "gran", "metric"].forEach((k) => { if (typeof s[k] === "string") ui[k] = s[k]; });
+  } catch { /* private mode */ }
+  const saveOv = () => {
+    try {
+      sessionStorage.setItem(OV_KEY, JSON.stringify({ preset: ui.preset, from: ui.from, to: ui.to,
+        compare: ui.compare, gran: ui.gran, metric: ui.metric }));
+    } catch { /* private mode */ }
+  };
+  const currentRange = () => {
+    const d = data.days, end = data.ov.periodEnd;
+    return rangeOf(ui, end, d[0]?.date || end, d[d.length - 1]?.date || end);
+  };
   let data = null;
 
   el.innerHTML = `
@@ -314,33 +445,51 @@ export async function mountSeo(el, opts = {}) {
 
   function overviewHtml() {
     const { ov, days, pages } = data;
-    const end = ov.periodEnd, n = ui.range;
-    const cur = sumRange(days, addDays(end, -(n - 1)), end);
-    const prev = sumRange(days, addDays(end, -(2 * n - 1)), addDays(end, -n));
+    const first = days[0]?.date || ov.periodEnd, last = days[days.length - 1]?.date || ov.periodEnd;
+    const r = rangeOf(ui, ov.periodEnd, first, last);
+    const cmp = compareOf(r, ui.compare, first);
+    const cur = sumRange(days, r.from, r.to);
+    const prev = cmp && cmp.ok ? sumRange(days, cmp.from, cmp.to) : null;
+    const hasBrand = cur.nonBrand != null;
 
-    const tile = (label, value, d, note = "") =>
-      `<div class="seo-kpi"><div class="l">${label}</div><div class="v">${value}</div>${d}${note ? `<div class="p">${note}</div>` : ""}</div>`;
+    const tile = (label, value, d, notes) => {
+      const ns = notes.filter(Boolean);
+      return `<div class="seo-kpi"><div class="l">${label}</div><div class="v">${value}</div>${d || ""}${ns.length ? `<div class="p">${ns.join(" · ")}</div>` : ""}</div>`;
+    };
+    const kpi = (label, key, f, opts = {}, note = "") => tile(label, f(cur[key]),
+      prev ? delta(cur[key], prev[key], opts) : "",
+      [prev && prev[key] != null ? `vs ${f(prev[key])}` : "", note]);
 
     const kpis = [
-      tile("Clicks", fmtInt(cur.clicks), delta(cur.clicks, prev.clicks)),
-      tile("Impressions", fmtInt(cur.impressions), delta(cur.impressions, prev.impressions)),
-      tile("CTR", fmtPct(cur.ctr), delta(cur.ctr, prev.ctr)),
-      tile("Avg position", fmtPos(cur.position), delta(cur.position, prev.position, { invert: true, abs: true }), "lower is better"),
-      tile("Organic sessions", fmtInt(cur.sessions), delta(cur.sessions, prev.sessions), "GA4"),
-      tile("Organic key events", fmtInt(cur.conversions), delta(cur.conversions, prev.conversions), "GA4"),
-      tile("AI assistant visits", fmtInt(cur.aiSessions), delta(cur.aiSessions, prev.aiSessions), "ChatGPT, Perplexity…"),
+      kpi("Clicks", "clicks", fmtInt),
+      ...(hasBrand ? [
+        kpi("Non-brand clicks", "nonBrand", fmtInt, {}, "treatment searches"),
+        kpi("Brand clicks", "brandClicks", fmtInt, {}, cur.brandShare != null ? Math.round(cur.brandShare * 100) + "% of clicks" : ""),
+      ] : []),
+      kpi("Impressions", "impressions", fmtInt),
+      kpi("CTR", "ctr", fmtPct),
+      kpi("Avg position", "position", fmtPos, { invert: true, abs: true }, "lower is better"),
+      kpi("Organic sessions", "sessions", fmtInt, {}, "GA4"),
+      kpi("Organic key events", "conversions", fmtInt, {}, "GA4"),
+      kpi("AI assistant visits", "aiSessions", fmtInt, {}, "ChatGPT, Perplexity…"),
     ].join("");
 
-    // Weekly series, full weeks only, ending at periodEnd
-    const weeks = [];
-    const first = days.length ? days[0].date : end;
-    for (let i = 0; i < 70; i++) {
-      const e = addDays(end, -7 * i), s = addDays(e, -6);
-      if (s < first) break;
-      const t = sumRange(days, s, e);
-      weeks.unshift({ end: e, label: `Week to ${fmtDate(e)}`, v: t[ui.metric] });
-    }
-    const m = METRICS[ui.metric];
+    // The chart: days, weeks or months across the chosen dates, and the comparison lined up underneath
+    let gran = ui.gran === "auto" ? autoGran(r.n) : ui.gran;
+    if ((gran === "day" && r.n > 120) || (gran === "month" && r.n < 45)) gran = autoGran(r.n);
+    const mk = METRICS[ui.metric] && (!METRICS[ui.metric].brand || hasBrand) ? ui.metric : "clicks";
+    const m = METRICS[mk];
+    const bks = buckets(r.from, r.to, gran);
+    const off = prev ? daysBetween(cmp.from, r.from) : 0;
+    const points = bks.map((b) => ({ ...b, label: bucketLabel(b, gran), v: sumRange(days, b.start, b.end)[mk] }));
+    const cpts = prev ? bks.map((b) => {
+      const s = addDays(b.start, -off), e = addDays(b.end, -off);
+      return { label: bucketLabel({ start: s, end: e }, gran), v: sumRange(days, s, e)[mk] };
+    }) : null;
+
+    const fresh = r.to > ov.periodEnd ? daysBetween(ov.periodEnd, r.to) : 0;
+    const rangeText = `${fmtDate(r.from)} – ${fmtDate(r.to)} · ${r.n} day${r.n === 1 ? "" : "s"}` +
+      (cmp ? (cmp.ok ? ` · vs ${fmtDate(cmp.from)} – ${fmtDate(cmp.to)}` : ` · no comparison: search data starts ${fmtDate(first)}`) : "");
 
     const ranked = pages.filter((p) => p.m28.clicks + p.prev28.clicks >= 5);
     const winners = ranked.filter((p) => p.dClicks > 0).sort((a, b) => b.dClicks - a.dClicks).slice(0, 6);
@@ -352,25 +501,48 @@ export async function mountSeo(el, opts = {}) {
       : `<div class="seo-note">Nothing notable.</div>`;
 
     return `
-      <div class="seo-row">
-        ${[7, 28, 90].map((r) => `<button class="seo-btn ${ui.range === r ? "on" : ""}" data-range="${r}">${r} days</button>`).join("")}
-        <span class="seo-note">${fmtDate(addDays(end, -(n - 1)), false)} – ${fmtDate(end)} vs the ${n} days before</span>
+      <div class="seo-row seo-range">
+        ${PRESETS.map(([k, l]) => `<button class="seo-btn ${ui.preset === k ? "on" : ""}" data-preset="${k}">${l}</button>`).join("")}
       </div>
+      <div class="seo-row seo-range">
+        ${ui.preset === "custom" ? `
+          <label class="seo-note">From <input type="date" class="seo-input seo-date" data-from min="${first}" max="${last}" value="${r.from}"></label>
+          <label class="seo-note">To <input type="date" class="seo-input seo-date" data-to min="${first}" max="${last}" value="${r.to}"></label>` : ""}
+        <label class="seo-note">Compare to
+          <select class="seo-input seo-select" data-compare>
+            ${[["prev", "Previous period"], ["year", "Same time last year"], ["none", "No comparison"]].map(([k, l]) =>
+              `<option value="${k}"${ui.compare === k ? " selected" : ""}>${l}</option>`).join("")}
+          </select></label>
+        <span class="seo-note">${esc(rangeText)}</span>
+      </div>
+      ${fresh ? `<p class="seo-note" style="margin:-4px 0 12px">The last ${fresh} day${fresh === 1 ? "" : "s"} may still change: Search Console takes about 3 days to settle. They're shaded on the chart.</p>` : ""}
       <div class="seo-kpis">${kpis}</div>
       <div class="seo-card">
         <div class="seo-row">
-          <h3 style="margin:0">Weekly trend</h3><span class="seo-sp"></span>
-          ${Object.entries(METRICS).map(([k, v]) => `<button class="seo-btn ${ui.metric === k ? "on" : ""}" data-metric="${k}">${v.label}</button>`).join("")}
+          <h3 style="margin:0">Trend</h3>
+          ${[["day", "Daily"], ["week", "Weekly"], ["month", "Monthly"]].map(([k, l]) => {
+            const off2 = (k === "day" && r.n > 120) || (k === "month" && r.n < 45);
+            return `<button class="seo-btn ${gran === k ? "on" : ""}" data-gran="${k}"${off2
+              ? ` disabled title="${k === "day" ? "Choose 120 days or fewer" : "Choose at least 45 days"}"` : ""}>${l}</button>`;
+          }).join("")}
+          <span class="seo-sp"></span>
+          ${Object.entries(METRICS).filter(([, v]) => !v.brand || hasBrand)
+            .map(([k, v]) => `<button class="seo-btn ${mk === k ? "on" : ""}" data-metric="${k}">${v.label}</button>`).join("")}
         </div>
-        <div class="seo-chart">${lineChart(weeks, { ...m, marks: logMarks(work) })}</div>
+        <div class="seo-chart">${lineChart(points, { ...m, marks: logMarks(work), cmp: cpts, freshAfter: ov.periodEnd, gran })}</div>
+        ${cpts ? `<div class="seo-legend"><span></span>${esc(fmtDate(r.from, false))} – ${esc(fmtDate(r.to))}
+          <span class="is-cmp"></span>${esc(cmp.name)}: ${esc(fmtDate(cmp.from, false))} – ${esc(fmtDate(cmp.to))}</div>` : ""}
         ${work?.log?.length ? `<div class="seo-note">Orange dotted lines are changes from the Change log. Hover the dot to see them.</div>` : ""}
         ${m.invert ? `<div class="seo-note">Position axis is flipped: up means ranking higher.</div>` : ""}
+        ${hasBrand ? `<div class="seo-note">Brand = searches with your brand words (SEO → Settings). Non-brand includes rare searches Google hides.</div>` : ""}
       </div>
       <div class="seo-grid2">
         <div class="seo-card"><h3>Gaining clicks (28 days vs previous 28)</h3>${list(winners)}</div>
         <div class="seo-card"><h3>Losing clicks (28 days vs previous 28)</h3>${list(losers)}</div>
-      </div>`;
+      </div>
+      ${ui.preset !== "28" ? `<p class="seo-note">These two lists always use the last 28 days.</p>` : ""}`;
   }
+
 
   /* ----- Pages ----- */
 
@@ -471,7 +643,7 @@ export async function mountSeo(el, opts = {}) {
   /* ----- events (delegated) ----- */
 
   root.addEventListener("click", (e) => {
-    const t = e.target.closest("[data-tab],[data-range],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage]");
+    const t = e.target.closest("[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage]");
     if (!t || !root.contains(t)) return;
     const ds = t.dataset;
 
@@ -480,8 +652,15 @@ export async function mountSeo(el, opts = {}) {
       // replaceState doesn't fire hashchange, so the router won't remount the page
       history.replaceState(null, "", "#/seo" + (tab === "overview" ? "" : "/" + tab));
       if (data) render(); else setTabs();
-    } else if (ds.range) { ui.range = +ds.range; render(); }
-    else if (ds.metric) { ui.metric = ds.metric; render(); }
+    } else if (ds.preset) {
+      if (ds.preset === "custom" && data) {   // start Custom from the dates showing now
+        const r = currentRange();
+        ui.from = r.from; ui.to = r.to;
+      }
+      ui.preset = ds.preset; saveOv(); render();
+    }
+    else if (ds.gran) { ui.gran = ds.gran; saveOv(); render(); }
+    else if (ds.metric) { ui.metric = ds.metric; saveOv(); render(); }
     else if (ds.sort !== undefined) {
       if (!ds.sort) return; // the sparkline column isn't sortable
       const col = COLS.find((c) => c.key === ds.sort);
@@ -499,6 +678,16 @@ export async function mountSeo(el, opts = {}) {
       tab = "log";
       history.replaceState(null, "", "#/seo/log");
       render();
+    }
+  });
+
+  root.addEventListener("change", (e) => {
+    const t = e.target;
+    if (t.matches("[data-compare]")) { ui.compare = t.value; saveOv(); render(); }
+    else if (t.matches("[data-from],[data-to]")) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(t.value)) return;
+      ui[t.matches("[data-from]") ? "from" : "to"] = t.value;
+      saveOv(); render();
     }
   });
 
