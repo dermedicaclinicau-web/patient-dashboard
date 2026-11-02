@@ -224,8 +224,19 @@ function rankOf(c) {
     || GROUPS[a.group].order - GROUPS[b.group].order || (b.gain || 0) - (a.gain || 0);
 }
 
+// Keeps the ranking, but takes each page's best task first, then each page's second, and so on
+function spread(list) {
+  const seen = new Map();
+  return list.map((t, i) => {
+    const k = npath(t.path);
+    const n = seen.get(k) || 0;
+    seen.set(k, n + 1);
+    return { t, i, n };
+  }).sort((a, b) => a.n - b.n || a.i - b.i).map((x) => x.t);
+}
+
 // New tasks and new steps are added; existing steps (and anything ticked) are never touched
-async function syncTasks(c, S) {
+async function syncTasks(c, S, light) {   // light: only new tasks and steps (no estimate refresh)
   const { paths } = prioritySettings(c.work);
   let batch = writeBatch(db), n = 0;
   const flush = async () => { if (n) { await batch.commit(); batch = writeBatch(db); n = 0; } };
@@ -242,7 +253,7 @@ async function syncTasks(c, S) {
         order.push(id);
       }
       const hasNew = Object.keys(fresh).length > 0;
-      if (ex && !hasNew && ex.title === t.title && ex.gain === t.gain) continue;
+      if (ex && !hasNew && ex.title === t.title && (light || ex.gain === t.gain)) continue;
       const d = { path, group: t.group, title: t.title, gain: t.gain, order, updatedAt: serverTimestamp() };
       if (hasNew) d.steps = fresh;
       if (!ex) Object.assign(d, { status: "open", skipUntil: "", skipNote: "", createdAt: serverTimestamp() });
@@ -267,7 +278,7 @@ async function ensureToday(c, S) {
   const open = [...S.tasks.values()].filter((t) => isLive(c, t) && (!t.skipUntil || t.skipUntil <= day));
   const rank = rankOf(c);
   const carry = open.filter((t) => prevIds.has(t.id) || started(t)).sort(rank);
-  const rest = open.filter((t) => !carry.includes(t)).sort(rank);
+  const rest = spread(open.filter((t) => !carry.includes(t)).sort(rank));
   const ids = carry.concat(rest).slice(0, Math.min(30, Math.max(perDay, carry.length))).map((t) => t.id);
   let made = false;
   await runTransaction(db, async (tx) => {
@@ -328,6 +339,7 @@ export async function renderTasks(body, c) {
   const S = { tasks: new Map(), log: [], day: null, canDo: canDo(c) };
   try {
     await load(S);
+    if (S.canDo) await syncTasks(c, S, true);   // new priority pages and plan steps show up straight away
     await ensureToday(c, S);
   } catch (e) {
     console.error("Tasks not loaded:", e);
@@ -411,6 +423,23 @@ export async function renderTasks(body, c) {
 
   /* views */
 
+  // Priority pages with nothing on today's list, and the tasks that would fill it to the daily limit
+  function todayGaps() {
+    if (!S.day || !S.canDo) return { missing: [], fill: [] };
+    const inToday = new Set(S.day.ids || []);
+    const skippedNow = (t) => t.skipUntil && t.skipUntil > day;
+    const active = todayTasks().filter((t) => t.status !== "done" && !skippedNow(t)).length;
+    const cand = spread([...S.tasks.values()]
+      .filter((t) => isLive(c, t) && !inToday.has(t.id) && !skippedNow(t)).sort(rankOf(c)));
+    const covered = new Set(todayTasks().map((t) => npath(t.path)));
+    const first = new Map();
+    for (const t of cand) {
+      const k = npath(t.path);
+      if (!covered.has(k) && !first.has(k) && isPri(c, t.path)) first.set(k, t);
+    }
+    return { missing: [...first.values()], fill: cand.slice(0, Math.max(0, (S.day.perDay || 5) - active)) };
+  }
+
   function todayHtml() {
     if (!S.day) {
       return `<div class="seo-empty">Today's list is made when someone in the SEO team opens Tasks.</div>`;
@@ -425,6 +454,16 @@ export async function renderTasks(body, c) {
       </div>
       <p class="seo-note">${plural(list.length, "task")} · up to ${S.day.perDay || 5} a day · list made by ${esc(S.day.builtByName || "the SEO team")}.
         Unfinished tasks carry over to tomorrow. ${S.canDo ? "" : "Only the SEO team and admins can tick steps."}</p>
+      ${(() => {
+        const g = todayGaps();
+        if (g.missing.length) {
+          const names = g.missing.slice(0, 4).map((t) => esc(titleOf(c.work, c.data, t.path))).join(", ") + (g.missing.length > 4 ? "…" : "");
+          return `<div class="seo-w-tip">${plural(g.missing.length, "priority page")} ${g.missing.length === 1 ? "isn't" : "aren't"} on today's list yet: ${names}.
+            <button class="seo-btn" type="button" data-t-addmissing>Add a task for each</button></div>`;
+        }
+        return g.fill.length ? `<div class="seo-w-tip">Today's list has room for ${plural(g.fill.length, "more task")}.
+          <button class="seo-btn" type="button" data-t-topup>Fill it up</button></div>` : "";
+      })()}
       ${list.length ? list.map(taskCard).join("") : `<div class="seo-empty">No tasks today. Star more priority pages, or add tasks from Up next.</div>`}`;
   }
 
@@ -517,7 +556,8 @@ export async function renderTasks(body, c) {
         tick: `${who} ticked ${q(l.text)}`, done: `${who} marked done ${q(l.text)} (can't be checked)`,
         untick: `${who} undid the tick on ${q(l.text)}`, confirm: `Website confirmed ${q(l.text)}`,
         missing: `Not found on the website: ${q(l.text)}`, skip: `${who} skipped ${q(l.taskTitle)}`,
-        unskip: `${who} brought back ${q(l.taskTitle)}`, add: `${who} added ${q(l.taskTitle)} to today`,
+        unskip: `${who} brought back ${q(l.taskTitle)}`,
+        add: l.taskTitle ? `${who} added ${q(l.taskTitle)} to today` : `${who} topped up today's list`,
         plan: `${who} made the day's list`, taskdone: `Task finished: ${q(l.taskTitle)}`,
       }[l.action] || esc(l.action);
     };
@@ -585,7 +625,29 @@ export async function renderTasks(body, c) {
       toast(ok ? "Brief copied" : "Couldn't copy", !ok);
       return;
     }
-    if (!S.canDo && (d.tCk || d.tSkip || d.tAdd || d.tUnskip)) { toast("Only the SEO team and admins can change tasks.", true); return; }
+    if (!S.canDo && (d.tCk || d.tSkip || d.tAdd || d.tUnskip || d.tAddmissing !== undefined || d.tTopup !== undefined)) {
+      toast("Only the SEO team and admins can change tasks.", true); return;
+    }
+
+    if (d.tAddmissing !== undefined || d.tTopup !== undefined) {
+      const g = todayGaps();
+      const add = (d.tTopup !== undefined ? g.fill : g.missing).map((t) => t.id).slice(0, Math.max(0, 40 - (S.day.ids || []).length));
+      if (!add.length) return;
+      const note = `${plural(add.length, "task")} added: ${add.map((id) => S.tasks.get(id)?.title || "").join(", ")}`.slice(0, 500);
+      t0.disabled = true;
+      try {
+        const b = writeBatch(db);
+        b.update(doc(db, "seo_task_days", day), { ids: arrayUnion(...add) });
+        b.set(doc(collection(db, "seo_task_log")), { taskId: "", path: "", taskTitle: "", stepId: "", text: "", action: "add", note,
+          by: uid(), byName: myName(c), role: roleOf(c), day, at: serverTimestamp() });
+        await b.commit();
+        S.day.ids = [...(S.day.ids || []), ...add];
+        S.log.unshift({ action: "add", note, byName: myName(c), at: new Date(), day });
+        toast(`Added ${plural(add.length, "task")} to today`);
+        draw();
+      } catch (e2) { t0.disabled = false; toast(errMsg(e2), true); }
+      return;
+    }
 
     if (d.tCk) {
       const [taskId, stepId] = d.tCk.split("|");
