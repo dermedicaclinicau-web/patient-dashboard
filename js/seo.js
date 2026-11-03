@@ -898,7 +898,7 @@ export async function mountSeo(el, opts = {}) {
           : pageMode && !points.concat(...(multi || []).map((s) => s.pts)).some((p) => p.v)
             ? `<div class="seo-tp-nochart"><b>No ${esc(m.label.toLowerCase())} from Google for ${ui.tpages.length === 1 ? "this page" : "these pages"} in these dates.</b><br>
                 Google may not be showing ${ui.tpages.length === 1 ? "it" : "them"} yet. Try a longer date range.</div>`
-            : lineChart(points, { ...m, marks: trendMarks, cmp: cpts, freshAfter: ov.periodEnd, gran, multi, color: lineColor, name: lineName })}</div>`
+            : lineChart(points, { ...m, marks: trendMarks, cmp: cpts, freshAfter: ov.periodEnd, gran, multi, color: lineColor, name: lineName })}</div>
         ${pageMode ? pageLegend : cpts ? `<div class="seo-legend"><span></span>${esc(fmtDate(r.from, false))} – ${esc(fmtDate(r.to))}
           <span class="is-cmp"></span>${esc(cmp.name)}: ${esc(fmtDate(cmp.from, false))} – ${esc(fmtDate(cmp.to))}</div>` : ""}
         ${pageMode && ui.tmode === "sep" && prev ? `<div class="seo-note">Choose Combined to compare these pages with ${esc(cmp.name.toLowerCase())}.</div>` : ""}
