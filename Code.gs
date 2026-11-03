@@ -59,6 +59,7 @@ function doPost(e) {
     if (body.action === 'marketingPublic') return json_(handleMarketingPublic_(body)); // the unsubscribe page (no login)
     if (body.action === 'publicForm') return json_(handlePublicForm_(body)); // a patient's online form (no login)
     if (body.action === 'prospects') return json_(handleProspects_(body));
+    if (body.action === 'wordpress') return json_(handleWordpress_(body));
 
     const pin = String(body.pin || '').trim();
 
@@ -3617,6 +3618,8 @@ const PERMS_ = [
   ['menu.seo',   'SEO', 'SEO menu (see search performance, pages and site health)'],
   ['seo.work',   'SEO', 'Work SEO opportunities and log site changes'],
   ['seo.manage', 'SEO', 'SEO settings: topics, key pages, compliance words'],
+  ['seo.pages',  'SEO', 'Website: edit page titles, SEO titles, descriptions and draft blog posts'],
+  ['seo.publish', 'SEO', 'Website: publish, unpublish, bin pages, change addresses and hide pages from Google'],
   ['menu.prospects', 'Prospects', 'Prospect Dashboard (see prospects)'],
   ['prospects.work', 'Prospects', 'Work prospects: add, contact, follow up and move them along'],
   ['prospects.manage', 'Prospects', 'Prospect settings: who is told, sharing out and reasons'],

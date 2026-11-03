@@ -10,12 +10,14 @@ import { renderClusters } from "./seo-clusters.js?v=2";
 import { renderAdvisor } from "./seo-advisor.js?v=2";
 import { drillHtml, loadWindows } from "./seo-drill.js?v=4";
 import { compareHtml } from "./seo-compare.js?v=1";
+import { mountSeoSite } from "./seo-site.js?v=1";
 import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js?v=9";
 
 const TABS = [
   { id: "overview", label: "Overview" },
   { id: "advisor", label: "Advisor" },
   { id: "pages", label: "Pages" },
+  { id: "website", label: "Website" },
   { id: "keywords", label: "Keywords" },
   { id: "opps", label: "Tasks" },
   { id: "health", label: "Site health" },
@@ -503,7 +505,9 @@ export async function mountSeo(el, opts = {}) {
   const isAdmin = opts.isAdmin === true || /^admin$/i.test(String(opts.staff?.role || opts.staff?.staffRole || ""));
   const tabs = TABS.filter((t) => !t.manage || can("seo.manage"));
   let work = null;
-  let tab = tabs.some((t) => t.id === param) ? param : "overview";
+  const [param0, ...paramRest] = String(param || "").split("/");
+  let tab = tabs.some((t) => t.id === param0) ? param0 : "overview";
+  let siteParam = tab === "website" ? paramRest.join("/") : "";   // which page the Website tab opens
   const ui = { preset: "28", from: "", to: "", compare: "prev", gran: "auto", metric: "clicks",
     sortKey: "clicks", sortDir: -1, filter: "", hideZero: true, limit: 100, pview: "table", kpi: "", drtab: "", drOpen: "" };
   let W = null;          // the Overview drill-downs (seo_windows), loaded the first time a card is opened
@@ -656,6 +660,7 @@ export async function mountSeo(el, opts = {}) {
     const warn = data.run && data.run.ok === false
       ? `<div class="seo-warn">The last nightly update failed, so these numbers may be out of date: ${esc(data.run.error || "")}</div>` : "";
     if (tab === "advisor") { renderAdvisor(body, ctx()); return; }
+    if (tab === "website") { const sp = siteParam; siteParam = ""; mountSeoSite(body, { param: sp }); return; }
     if (tab === "opps") { renderTasks(body, ctx()); return; }
     if (tab === "pages" && ui.pview === "clusters") { renderClusters(body, ctx()); return; }
     if (tab !== "overview" && tab !== "pages") { renderWorkTab(tab, body, ctx()); return; }
@@ -1040,6 +1045,7 @@ export async function mountSeo(el, opts = {}) {
       <div class="seo-note" style="word-break:break-all;margin-bottom:2px">${esc(p.path)}</div>
       <a href="${esc(p.url)}" target="_blank" rel="noopener" class="seo-note">Open page ↗</a>
       <button class="seo-btn" type="button" data-advpage="${esc(p.path)}" style="margin-left:8px">Ask the Advisor about this page</button>
+      <button class="seo-btn" type="button" data-wsedit="${esc(p.path)}" style="margin-left:8px">Edit title and description</button>
       ${panelPriorityHtml({ ...ctx(), h: { esc, fmtInt, fmtPos, idOf: (path) => data.pages.find((x) => x.path === path)?.id || "" } }, p, prEdit === p.path)}
       <table class="seo-kv">
         <tr><th></th><th>Last 28d</th><th>Prev 28d</th><th></th></tr>
@@ -1066,9 +1072,19 @@ export async function mountSeo(el, opts = {}) {
   /* ----- events (delegated) ----- */
 
   root.addEventListener("click", (e) => {
-    const t = e.target.closest("[data-tnum],[data-cmp2],[data-cmpcl],[data-tpick],[data-tshow],[data-tprm],[data-tquick],[data-tclear],[data-tmode],[data-drx],[data-kpi],[data-drtab],[data-drclose],[data-kq],[data-drask],[data-advpage],[data-prtoggle],[data-prf],[data-prall],[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
+    const t = e.target.closest("[data-wsedit],[data-tnum],[data-cmp2],[data-cmpcl],[data-tpick],[data-tshow],[data-tprm],[data-tquick],[data-tclear],[data-tmode],[data-drx],[data-kpi],[data-drtab],[data-drclose],[data-kq],[data-drask],[data-advpage],[data-prtoggle],[data-prf],[data-prall],[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
     if (!t || !root.contains(t)) return;
     const ds = t.dataset;
+
+    // Page panel → the Website tab, with this page open in the editor
+    if (ds.wsedit !== undefined) {
+      panel.hidden = true;
+      tab = "website";
+      siteParam = "path:" + ds.wsedit;
+      history.replaceState(null, "", "#/seo/website");
+      render();
+      return;
+    }
 
     // Overview drill-downs
     if (ds.tnum !== undefined) { ui.tnum = !ui.tnum; saveTr(); render(); return; }
