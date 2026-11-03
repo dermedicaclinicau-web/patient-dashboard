@@ -38,16 +38,38 @@ const ADJUST = {
 
 /* ---------- Reading the old record ---------- */
 
+// The old app could save the same markings under more than one vial entry (e.g. when a second vial was opened).
+// A vial entry with exactly the same areas and marks as an earlier one is a repeat, so it's read once.
+const vialKey = (v) => JSON.stringify(list(v && v.Areas).map((a) => [
+  norm(a && a.Area), letters(a && a.Type),
+  list(a && a.Markers).map((m) => [norm(m && m.Area), num(m && m.X), num(m && m.Y), num(m && m.Units)]),
+]));
+function uniqueVials(d) {
+  const seen = new Set();
+  return list(d && d.treatment_details_map).filter((v) => {
+    const k = vialKey(v);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+// One injection is one mark: the same area, spot and units twice is a repeat, so it's counted once
 export function oldWrPoints(d) {
   const out = [];
-  list(d && d.treatment_details_map).forEach((vial) => {
+  const seen = new Set();
+  uniqueVials(d).forEach((vial) => {
     list(vial && vial.Areas).forEach((a) => {
       const area = String((a && a.Area) || "").trim();
       const type = String((a && a.Type) || "").trim();
       list(a && a.Markers).forEach((m) => {
         const x = num(m && m.X), y = num(m && m.Y);
         if (x === null || y === null) return;
-        out.push({ area: String(m.Area || area).trim(), units: num(m.Units) || 0, x, y, type });
+        const p = { area: String(m.Area || area).trim(), units: num(m.Units) || 0, x, y, type };
+        const k = `${norm(p.area)}|${x.toFixed(2)}|${y.toFixed(2)}|${p.units}|${letters(type)}`;
+        if (seen.has(k)) return;
+        seen.add(k);
+        out.push(p);
       });
     });
   });
@@ -55,7 +77,7 @@ export function oldWrPoints(d) {
 }
 
 export function oldWrTotal(d) {
-  const said = list(d && d.treatment_details_map).map((v) => num(v && v["Total Units"])).filter((n) => n !== null);
+  const said = uniqueVials(d).map((v) => num(v && v["Total Units"])).filter((n) => n !== null);
   return said.length ? said.reduce((a, n) => a + n, 0) : null;
 }
 
