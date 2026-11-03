@@ -96,6 +96,7 @@ add_action('rest_api_init', function () {
   $r('/item/(?P<id>\d+)/trash', 'POST', 'dpc_trash');
   $r('/item/(?P<id>\d+)/restore', 'POST', 'dpc_restore');
   $r('/terms', 'GET', 'dpc_terms');
+  $r('/media', 'POST', 'dpc_media');
 });
 
 /* ---------- SEO fields: Yoast and All in One SEO ---------- */
@@ -185,7 +186,8 @@ function dpc_out($p, $full = false) {
     'date' => $p->post_date, 'modified' => $p->post_modified, 'link' => $link, 'path' => wp_make_link_relative($link),
     'author' => get_the_author_meta('display_name', $p->post_author),
     'elementor' => get_post_meta($id, '_elementor_edit_mode', true) === 'builder',
-    'featured' => (string) get_the_post_thumbnail_url($id, 'medium'), 'seo' => dpc_seo_get($id),
+    'featured' => (string) get_the_post_thumbnail_url($id, 'medium'), 'featuredId' => (int) get_post_thumbnail_id($id),
+    'seo' => dpc_seo_get($id),
     'editUrl' => admin_url('post.php?post=' . $id . '&action=edit'),
   ];
   if ($o['elementor']) $o['elementorUrl'] = admin_url('post.php?post=' . $id . '&action=elementor');
@@ -317,4 +319,28 @@ function dpc_redirect($from, $to) {
   $res = Red_Item::create(['url' => $from, 'action_data' => ['url' => $to], 'action_type' => 'url',
     'action_code' => 301, 'match_type' => 'url', 'group_id' => $gid]);
   return is_wp_error($res) ? ['ok' => false, 'why' => $res->get_error_message()] : ['ok' => true, 'from' => $from, 'to' => $to];
+}
+
+/* ---------- Images from the portal ---------- */
+
+function dpc_media(WP_REST_Request $r) {
+  if (!current_user_can('upload_files')) return new WP_Error('dpc_cap', 'The portal user cannot upload images.', ['status' => 403]);
+  $b = (array) $r->get_json_params();
+  $bytes = base64_decode((string) ($b['data'] ?? ''), true);
+  if (!$bytes || strlen($bytes) > 8 * 1024 * 1024) return new WP_Error('dpc_bad', 'The image is missing or too big.', ['status' => 400]);
+  $info = @getimagesizefromstring($bytes);
+  $types = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp', 'image/gif' => 'gif'];
+  if (!$info || !isset($types[$info['mime']])) return new WP_Error('dpc_bad', 'Only JPEG, PNG, WebP or GIF images.', ['status' => 400]);
+  $base = sanitize_file_name(pathinfo((string) ($b['name'] ?? 'image'), PATHINFO_FILENAME)) ?: 'image';
+  $name = $base . '.' . $types[$info['mime']];
+  require_once ABSPATH . 'wp-admin/includes/file.php';
+  require_once ABSPATH . 'wp-admin/includes/image.php';
+  require_once ABSPATH . 'wp-admin/includes/media.php';
+  $tmp = wp_tempnam($name);
+  file_put_contents($tmp, $bytes);
+  $id = media_handle_sideload(['name' => $name, 'tmp_name' => $tmp], absint($b['post'] ?? 0), sanitize_text_field($b['title'] ?? ''));
+  if (is_wp_error($id)) { @unlink($tmp); return $id; }
+  $alt = sanitize_text_field($b['alt'] ?? '');
+  if ($alt) update_post_meta($id, '_wp_attachment_image_alt', $alt);
+  return ['ok' => true, 'id' => $id, 'url' => wp_get_attachment_image_url($id, 'large') ?: wp_get_attachment_url($id)];
 }

@@ -8,6 +8,7 @@ import {
   doc, collection, query, where, orderBy, limit, onSnapshot, writeBatch, updateDoc, getDocs, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { npath, titleOf, pageIndex, pageOf } from "./seo-work.js?v=16";
+import { stashPostDraft } from "./seo-post.js?v=1";
 
 const MODES = [["auto", "Anything"], ["goal", "A goal"], ["page", "A page"], ["question", "A question"]];
 const EXAMPLES = [
@@ -97,7 +98,50 @@ function faqSchema(d) {
     mainEntity: (d.items || []).map((x) => ({ "@type": "Question", name: x.q, acceptedAnswer: { "@type": "Answer", text: x.a } })) }, null, 2)}\n</script>`;
 }
 
-function draftHtmlView(d, msgId) {
+// Drafts that can start a blog post in SEO → Website
+const POSTABLE = new Set(["faq", "section", "outline", "text"]);
+
+// "# " / "## " headings, "### " subheadings, "- " bullets, "1. " numbered lists, **bold**, paragraphs
+function mdToHtml(text) {
+  const inl = (s) => esc(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  const out = [];
+  let list = null, kind = "";
+  const flush = () => { if (list) { out.push(`<${kind}>${list.map((x) => `<li>${inl(x)}</li>`).join("")}</${kind}>`); list = null; } };
+  String(text || "").split(/\n/).forEach((l) => {
+    const t = l.trim();
+    let m;
+    if (!t) { flush(); return; }
+    if ((m = /^(#{1,3})\s+(.*)$/.exec(t))) { flush(); const lv = m[1].length === 3 ? 3 : 2; out.push(`<h${lv}>${inl(m[2])}</h${lv}>`); }
+    else if ((m = /^[-•*]\s+(.*)$/.exec(t))) { if (kind !== "ul") flush(); kind = "ul"; (list ||= []).push(m[1]); }
+    else if ((m = /^\d+[.)]\s+(.*)$/.exec(t))) { if (kind !== "ol") flush(); kind = "ol"; (list ||= []).push(m[1]); }
+    else { flush(); out.push(`<p>${inl(t)}</p>`); }
+  });
+  flush();
+  return out.join("");
+}
+
+// An Advisor draft → a new blog post (title, words, and the answer's title + description if it has one)
+function postFromDraft(d, a, thTitle) {
+  let text = String(d.text || "");
+  let title = "";
+  const m = /^\s*#\s+(.+)\n?/.exec(text);
+  if (m) { title = m[1].trim(); text = text.slice(m[0].length); }
+  const html = d.type === "faq"
+    ? `<h2>Frequently asked questions</h2>${(d.items || []).map((x) => `<h3>${esc(x.q)}</h3><p>${esc(x.a)}</p>`).join("")}`
+    : mdToHtml(text);
+  const tm = (a.drafts || []).find((x) => x && x.type === "title_meta");
+  return {
+    title: title || (d.type === "faq" ? `${thTitle}: your questions answered` : d.label || thTitle),
+    html, seoTitle: tm ? tm.title || "" : "", desc: tm ? tm.description || "" : "",
+    note: [`From the Advisor: “${thTitle}” (${d.label}).`,
+      d.type === "outline" ? "It's an outline: write each section before publishing." : "",
+      d.clinical ? "It states clinical facts, so a clinician needs to check it." : "",
+      d.warn ? `Advertising check: ${d.warn}` : "",
+      "Check every fact before publishing."].filter(Boolean).join(" "),
+  };
+}
+
+function draftHtmlView(d, msgId, canWp = false) {
   let bodyHtml;
   if (d.type === "faq") {
     bodyHtml = (d.items || []).map((x) => `<h4>${esc(x.q)}</h4><p>${esc(x.a)}</p>`).join("");
@@ -118,6 +162,8 @@ function draftHtmlView(d, msgId) {
       <button class="seo-btn" type="button" data-adv-copy="${msgId}|${d.i}|text">Copy text</button>
       <button class="seo-btn" type="button" data-adv-copy="${msgId}|${d.i}|html">Copy HTML</button>
       ${d.type === "faq" ? `<button class="seo-btn" type="button" data-adv-copy="${msgId}|${d.i}|schema">Copy FAQ schema</button>` : ""}
+      ${canWp && POSTABLE.has(d.type) ? `<button class="seo-btn seo-fixit" type="button" data-adv-wp="${msgId}|${d.i}">Send to WordPress as a draft</button>` : ""}
+      ${canWp && d.type === "title_meta" ? `<button class="seo-btn seo-fixit" type="button" data-adv-tm="${msgId}|${d.i}">Use on the page</button>` : ""}
       <span class="seo-note">Draft from Claude: check before publishing.${d.type === "faq" ? " Paste each question into your SEO plugin's FAQ block for the schema." : ""}</span>
     </div></div>`;
 }
@@ -135,6 +181,7 @@ export function renderAdvisor(body, c) {
     w.advPrefill = null;
   }
   const can = canAsk(c);
+  const canWp = typeof c.can === "function" && c.can("seo.pages");   // Website: edit pages
   const idx = pageIndex(w, c.data);
   const S = { threads: [], msgs: [], threadsReady: false, msgsReady: false };
 
@@ -325,11 +372,11 @@ export function renderAdvisor(body, c) {
               ${s.detail ? `<div class="seo-note">${esc(s.detail)}</div>` : ""}
               <div class="seo-note">${s.page ? `On ${pageBtn(s.page)}` : ""}${s.check ? `${s.page ? " · " : ""}<span class="seo-adv-chk">✓ Checked on the website</span>` : ""}</div>
               ${(s.drafts || []).map((di) => a.drafts[di]).filter(Boolean).map((d) => `<details class="seo-adv-dd"${(s.drafts || [])[0] === d.i && i === 0 ? " open" : ""}>
-                <summary>Draft ready: ${esc(d.label)}</summary>${draftHtmlView(d, m.id)}</details>`).join("")}
+                <summary>Draft ready: ${esc(d.label)}</summary>${draftHtmlView(d, m.id, canWp)}</details>`).join("")}
             </div></div>`).join("")}</div></div>`).join("")}</div></div>` : ""}
 
       ${a.drafts.filter((d) => !used.has(d.i)).length ? `<div class="seo-adv-sec"><h4>Drafts</h4>
-        ${a.drafts.filter((d) => !used.has(d.i)).map((d) => draftHtmlView(d, m.id)).join("")}</div>` : ""}
+        ${a.drafts.filter((d) => !used.has(d.i)).map((d) => draftHtmlView(d, m.id, canWp)).join("")}</div>` : ""}
 
       ${a.targets.length ? `<div class="seo-adv-sec"><h4>Targets</h4><div class="seo-adv-targets">${a.targets.map((t) =>
         `<div class="seo-adv-target"><span class="seo-note">${esc(t.label)}</span><strong>${esc(t.value)}</strong></div>`).join("")}</div></div>` : ""}
@@ -491,6 +538,28 @@ export function renderAdvisor(body, c) {
       t.disabled = true;
       await toTasks(m);
       t.disabled = false;
+      return;
+    }
+    if (d.advWp || d.advTm) {
+      const [mid, di] = (d.advWp || d.advTm).split("|");
+      const m = S.msgs.find((x) => x.id === mid);
+      let a = null;
+      try { a = JSON.parse(m?.answer || "{}"); } catch { a = null; }
+      const dr = a?.drafts?.[+di];
+      if (!dr) return;
+      const th = thread() || {};
+      if (d.advWp) {   // a new blog post with this draft in it
+        stashPostDraft(postFromDraft(dr, a, th.title || "Advisor draft"));
+        location.hash = "#/seo/website/new";
+        return;
+      }
+      // Title + description → the page it was written for
+      const step = (a.steps || []).find((s) => (s.drafts || []).includes(+di) && s.page);
+      const path = (step && step.page) || th.page || (a.pages && a.pages[0] && a.pages[0].path) || "";
+      if (!path) { toast("This draft isn't linked to a page. Open the page in SEO → Website and paste it in.", true); return; }
+      try { sessionStorage.setItem("dm.seo.setmeta", JSON.stringify({ path, seoTitle: dr.title || "", desc: dr.description || "" })); }
+      catch { toast("Couldn't pass it on. Copy it instead.", true); return; }
+      location.hash = "#/seo/website/set";
       return;
     }
     if (d.advCopy) {

@@ -59,6 +59,10 @@ function handleWordpress_(body) {
     }
     if (op === 'save') return wpSave_(body, session);
     if (op === 'suggest') return wpSuggest_(body, session);
+    if (op === 'create') return wpCreate_(body, session);
+    if (op === 'media') return wpMedia_(body, session);
+    if (op === 'terms') return wpTerms_();
+    if (op === 'check') return wpCheck_(body, session);
   } catch (err) {
     console.error('WordPress ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
     return { ok: true, problem: String(err && err.message ? err.message : err).slice(0, 300) };
@@ -78,66 +82,126 @@ function wpList_(body) {
   return Object.assign({ ok: true }, out);
 }
 
-// Page title, SEO title, description, focus keyphrase (seo.pages); address and hide from Google (seo.publish)
+// Saves a page or post. seo.pages: titles, SEO, words of drafts, categories, tags, images, drafts and "ready for review".
+// seo.publish: publishing, scheduling, unpublishing, the words of live posts, addresses of live pages, hiding from Google.
+// Publishing a post, or changing the words of a live one, needs a clinician's name (reviewedBy).
 function wpSave_(body, session) {
   const id = Math.floor(Number(body.id));
   if (!(id > 0)) return { ok: false, error: 'BAD_REQUEST' };
   if (!can_(session, 'seo.pages')) return { ok: false, error: 'FORBIDDEN' };
+  const pub = can_(session, 'seo.publish');
   const f = body.fields || {};
   const one = function (v, n) { return String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, n); };
+  const problem = function (m) { return { ok: true, problem: m }; };
+  const reviewedBy = one(f.reviewedBy, 80);
+  let cur = null;
+  const getCur = function () { return cur || (cur = wpCall_('GET', '/item/' + id).item); };
+  const live = function (s) { return s === 'publish' || s === 'future' || s === 'private'; };
   const out = {};
+
   if ('title' in f) {
     out.title = one(f.title, 200);
-    if (!out.title) return { ok: true, problem: 'The page title can\'t be empty.' };
+    if (!out.title) return problem('The title can\'t be empty.');
   }
+  if ('excerpt' in f) out.excerpt = one(f.excerpt, 600);
+  if ('content' in f) {
+    const html = String(f.content || '');
+    if (html.length > 300000) return problem('The post is too long to save from the portal.');
+    const c = getCur();
+    if (c.elementor) return problem('This is built with Elementor. Edit its words in Elementor.');
+    if (live(c.status) && !pub) return problem('Changing the words of a live post needs "Website: publish and remove".');
+    out.content = html;
+  }
+  if ('categories' in f) out.categories = (Array.isArray(f.categories) ? f.categories : []).map(Number).filter(function (n) { return n > 0; }).slice(0, 10);
+  if ('tags' in f) out.tags = (Array.isArray(f.tags) ? f.tags : []).map(function (t) { return one(t, 60); }).filter(Boolean).slice(0, 20);
+  if ('featured' in f) out.featured = Math.max(0, Math.floor(Number(f.featured) || 0));
+
   const seo = {};
   if (f.seo && 'title' in f.seo) seo.title = one(f.seo.title, 200);
   if (f.seo && 'description' in f.seo) seo.description = one(f.seo.description, 320);
   if (f.seo && 'focus' in f.seo) seo.focus = one(f.seo.focus, 120);
-  if ('slug' in f || (f.seo && 'noindex' in f.seo)) {
-    if (!can_(session, 'seo.publish')) {
-      return { ok: true, problem: 'Changing a page\'s address or hiding it from Google needs "Website: publish and remove".' };
-    }
-    if ('slug' in f) {
-      out.slug = String(f.slug || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 190);
-      if (!out.slug) return { ok: true, problem: 'The address can\'t be empty.' };
-      const cur = wpCall_('GET', '/item/' + id).item;
-      if (cur.slug === out.slug) delete out.slug;
-      else if (cur.status === 'publish' && !wpInfo_().redirection) {
-        return { ok: true, problem: 'Turn on a redirect plugin before changing a published page\'s address, so the old address doesn\'t become a broken link.' };
-      } else out.redirectOld = true;   // the old address sends people to the new one
-    }
-    if (f.seo && 'noindex' in f.seo) seo.noindex = f.seo.noindex === true;
+  if (f.seo && 'noindex' in f.seo) {
+    if (!pub) return problem('Hiding a page from Google needs "Website: publish and remove".');
+    seo.noindex = f.seo.noindex === true;
   }
   if (Object.keys(seo).length) out.seo = seo;
-  if (!Object.keys(out).length) return { ok: true, problem: 'Nothing to save.' };
+
+  if ('slug' in f) {
+    const slug = String(f.slug || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 190);
+    if (!slug) return problem('The address can\'t be empty.');
+    const c = getCur();
+    if (c.slug !== slug) {
+      if (c.status === 'publish') {
+        if (!pub) return problem('Changing a live page\'s address needs "Website: publish and remove".');
+        if (!wpInfo_().redirection) return problem('Turn on a redirect plugin before changing a published page\'s address, so the old address doesn\'t become a broken link.');
+        out.redirectOld = true;   // the old address sends people to the new one
+      }
+      out.slug = slug;
+    }
+  }
+
+  if ('status' in f) {
+    const st = String(f.status || '');
+    if (['draft', 'pending', 'publish', 'future', 'private'].indexOf(st) === -1) return { ok: false, error: 'BAD_REQUEST' };
+    const c = getCur();
+    if (st !== c.status) {
+      if ((live(st) || live(c.status)) && !pub) return problem('Publishing, scheduling and unpublishing need "Website: publish and remove".');
+      if (st === 'future') {
+        const d = String(f.date || '');
+        const ms = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(d) ? Utilities.parseDate(d, 'Australia/Perth', 'yyyy-MM-dd HH:mm').getTime() : 0;
+        if (!ms || ms < Date.now() + 5 * 60000) return problem('Choose a time at least 5 minutes from now.');
+        if (ms > Date.now() + 365 * 864e5) return problem('Choose a time in the next 12 months.');
+        out.date = d + ':00';
+      }
+      if ((st === 'publish' || st === 'future') && c.type === 'post' && !reviewedBy) {
+        return problem('Tick that a clinician has checked the medical content, and choose who, before publishing.');
+      }
+      out.status = st;
+    }
+  }
+  if (out.content && live(getCur().status) && getCur().type === 'post' && !out.status && !reviewedBy) {
+    return problem('The words of a live post changed: tick that a clinician has checked them, and choose who.');
+  }
+  if (!Object.keys(out).length) return { ok: true, item: getCur(), unchanged: true };
 
   const r = wpCall_('POST', '/item/' + id, out);
-  try { wpLogChange_(r.before, r.item, out, r.redirect, session); } catch (e) { console.warn('Saved, but the Change log entry failed: ' + e); }
+  try { wpLogChange_(r.before, r.item, out, r.redirect, session, reviewedBy); } catch (e) { console.warn('Saved, but the Change log entry failed: ' + e); }
   CacheService.getScriptCache().remove(WP_LIST_CACHE_);
-  console.log('WordPress ' + id + ' saved by ' + session.name);
+  console.log('WordPress ' + id + ' saved by ' + session.name + (out.status ? ' (' + out.status + ')' : ''));
   return { ok: true, item: r.item, redirect: r.redirect || null };
 }
 
-// Every change goes in SEO → Change log, so its effect shows on the Overview chart
-function wpLogChange_(before, after, sent, redirect, session) {
-  const seoOf = function (x) { const s = (x && x.seo) || {}; return s.yoast || s.aioseo || {}; };
+// Changes to live pages and posts go in SEO → Change log (drafts don't), so their effect shows on the Overview chart
+function wpLogChange_(before, after, sent, redirect, session, reviewedBy) {
+  const isLive = after.status === 'publish' || after.status === 'future';
+  const wasLive = before.status === 'publish';
+  if (!isLive && !wasLive) return;
+  const seoOf = function (x) { const s = (x && x.seo) || {}; return s.aioseo || s.yoast || {}; };
   const b = seoOf(before), a = seoOf(after);
   const parts = [];
-  if ('title' in sent && before.title !== after.title) parts.push('Page title: "' + before.title + '" → "' + after.title + '"');
+  let type = 'Title / meta';
+  if (sent.status && before.status !== after.status) {
+    type = 'Content';
+    parts.push(after.status === 'publish' ? (after.type === 'post' ? 'Published the blog post' : 'Published the page')
+      : after.status === 'future' ? 'Scheduled for ' + String(after.date || '').slice(0, 16)
+      : after.status === 'private' ? 'Made private' : 'Unpublished (back to a draft)');
+  }
+  if ('content' in sent && wasLive && before.content !== after.content) { type = 'Content'; parts.push('Updated the words'); }
+  if ('title' in sent && before.title !== after.title) parts.push('Title: "' + before.title + '" → "' + after.title + '"');
   if (sent.seo && 'title' in sent.seo && b.title !== a.title) parts.push('SEO title: "' + (b.title || '(default)') + '" → "' + (a.title || '(default)') + '"');
   if (sent.seo && 'description' in sent.seo && b.description !== a.description) parts.push('Description changed');
   if (sent.seo && 'focus' in sent.seo && b.focus !== a.focus) parts.push('Focus keyphrase: "' + (b.focus || '') + '" → "' + (a.focus || '') + '"');
   if (sent.seo && 'noindex' in sent.seo && b.noindex !== a.noindex) parts.push(a.noindex ? 'Hidden from Google' : 'Shown in Google again');
   if ('slug' in sent && before.path !== after.path) {
+    type = 'Technical';
     parts.push('Address: ' + before.path + ' → ' + after.path + (redirect && redirect.ok ? ' (old address redirects)' : redirect ? ' (redirect NOT made: ' + redirect.why + ')' : ''));
   }
   if (!parts.length) return;
+  if (reviewedBy && type === 'Content') parts.push('Medical content checked by ' + reviewedBy);
   const cfg = getConfig_();
-  const type = ('slug' in sent) ? 'Technical' : 'Title / meta';
   commitWrites_(cfg, [updateWrite_(cfg, 'seo_log/wp_' + Date.now() + '_' + Utilities.getUuid().slice(0, 8), {
     date: Utilities.formatDate(new Date(), REC_TZ_, 'yyyy-MM-dd'), type: type, url: String(after.path || before.path || ''),
-    title: parts[0].slice(0, 200), note: parts.join('\n').slice(0, 1000),
+    title: (after.title + ': ' + parts[0]).slice(0, 200), note: parts.join('\n').slice(0, 1000),
     by: String(session.uid || ''), byName: String(session.name || ''), at: new Date(), source: 'website', wpId: Number(after.id || 0),
   })]);
 }
@@ -344,10 +408,10 @@ function wpFlags_(text, avoid) {
 }
 
 // One Claude call that answers in JSON (the same key as the SEO Advisor)
-function wpClaude_(system, user, schema) {
-  const model = PropertiesService.getScriptProperties().getProperty('CLAUDE_MODEL') || 'claude-sonnet-5-5';
+function wpClaude_(system, user, schema, modelIn) {
+  const model = modelIn || PropertiesService.getScriptProperties().getProperty('CLAUDE_MODEL') || 'claude-sonnet-5-5';
   const body = {
-    model: model, max_tokens: 3000, system: system,
+    model: model, max_tokens: 4000, system: system,
     messages: [{ role: 'user', content: user }],
     output_config: { format: { type: 'json_schema', schema: schema }, effort: 'low' },
   };
@@ -376,4 +440,136 @@ function wpTestSuggest() {
   const id = 0;   // a page id: open the page in the Website tab, it's in the address (#/seo/website/<id>)
   const s = createSession_({ id: 'test', name: 'Test', role: 'Admin' });
   console.log(JSON.stringify(wpSuggest_({ session: s, id: id }, getSession_(s)), null, 2));
+}
+
+/* ===================== Blog posts: new drafts, images, categories and the check ===================== */
+
+// A new post, always as a draft. The rest (categories, publishing…) is saved straight after with wpSave_.
+function wpCreate_(body, session) {
+  if (!can_(session, 'seo.pages')) return { ok: false, error: 'FORBIDDEN' };
+  const f = body.fields || {};
+  const one = function (v, n) { return String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, n); };
+  const html = String(f.content || '');
+  if (html.length > 300000) return { ok: true, problem: 'The post is too long to save from the portal.' };
+  const seo = {};
+  if (f.seo) ['title', 'description', 'focus'].forEach(function (k) {
+    if (f.seo[k]) seo[k] = one(f.seo[k], k === 'description' ? 320 : 200);
+  });
+  const r = wpCall_('POST', '/items', {
+    type: 'post', status: 'draft', title: one(f.title, 200) || 'Untitled post', content: html,
+    excerpt: one(f.excerpt, 600), seo: seo,
+  });
+  CacheService.getScriptCache().remove(WP_LIST_CACHE_);
+  console.log('New blog post draft ' + (r.item && r.item.id) + ' by ' + session.name);
+  return { ok: true, item: r.item };
+}
+
+function wpMedia_(body, session) {
+  if (!can_(session, 'seo.pages')) return { ok: false, error: 'FORBIDDEN' };
+  const data = String(body.data || '');
+  if (!data) return { ok: false, error: 'BAD_REQUEST' };
+  if (data.length > 11 * 1024 * 1024) return { ok: true, problem: 'The image is too big. Use one under 8 MB.' };
+  const one = function (v, n) { return String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, n); };
+  const r = wpCall_('POST', '/media', {
+    data: data, name: one(body.name, 120) || 'image', alt: one(body.alt, 200), title: one(body.alt, 200),
+    post: Math.max(0, Math.floor(Number(body.post) || 0)),
+  });
+  console.log('Image ' + r.id + ' uploaded by ' + session.name);
+  return { ok: true, id: r.id, url: r.url };
+}
+
+function wpTerms_() {
+  const hit = repCacheGet_('wp_terms_v1');
+  if (hit) return Object.assign({ ok: true }, hit);
+  const out = { categories: wpCall_('GET', '/terms').categories || [] };
+  repCachePut_('wp_terms_v1', out, 600);
+  return Object.assign({ ok: true }, out);
+}
+
+const WP_CHECK_PROMPT_ = [
+  'You check a blog post for Dermedica, a doctor-led cosmetic and skin clinic in Perth, Western Australia, before it is published.',
+  'Find these problems:',
+  '- spelling: misspelt words, and American spellings that should be Australian (color → colour, optimize → optimise, center → centre).',
+  '- grammar: clear grammar mistakes only, not style preferences.',
+  '- advertising: anything against Australian advertising rules for health services (AHPRA and TGA): prescription medicine',
+  '  names or brands (Botox, Dysport, Xeomin, Letybo…), testimonials or reviews, before-and-after promises, superlatives',
+  '  (best, leading, number one), guarantees, claims of no risk, no pain or permanent results, pressure or inducements',
+  '  (limited time, discounts, free gifts), or anything that creates unrealistic expectations or plays down risks.',
+  '- claim: a medical or results claim that needs evidence or a clinician to check it (for example "reduces wrinkles by 80%",',
+  '  "results last 2 years").',
+  '- clarity: a sentence that is very hard to follow. At most 3 of these.',
+  '',
+  'RULES',
+  '- quote: the exact words from the text, copied character for character, as short as possible (1 to 12 words).',
+  '- fix: the corrected words, or a compliant way to say it. Empty if it should simply be removed.',
+  '- why: one short plain sentence.',
+  '- Don\'t flag names of people, places, the clinic, generic treatment names, or the accepted words.',
+  '- If there are no problems, return no issues. Never invent problems.',
+].join('\n');
+
+const WP_CHECK_SCHEMA_ = { type: 'object', additionalProperties: false, required: ['issues'], properties: {
+  issues: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['type', 'quote', 'fix', 'why'], properties: {
+    type: { type: 'string', enum: ['spelling', 'grammar', 'advertising', 'claim', 'clarity'] },
+    quote: { type: 'string' }, fix: { type: 'string' }, why: { type: 'string' },
+  } } },
+} };
+
+// Spelling, grammar and the advertising rules for a post's words. Every quote must be the post's own words.
+function wpCheck_(body, session) {
+  if (!can_(session, 'seo.pages')) return { ok: false, error: 'FORBIDDEN' };
+  const cache = CacheService.getScriptCache();
+  const rk = 'ws_chk_' + session.uid;
+  const used = Number(cache.get(rk) || 0);
+  if (used >= 60) return { ok: true, problem: 'You\'ve run a lot of checks in the last hour. Try again a bit later.' };
+  cache.put(rk, String(used + 1), 3600);
+  const flat = String(body.text || '').replace(/\s+/g, ' ').trim().slice(0, 24000);
+  if (flat.replace(/\s/g, '').length < 20) return { ok: true, issues: [] };
+  const accept = wpSpellWords_();
+  const avoid = wpAvoidWords_();
+  const sys = WP_CHECK_PROMPT_
+    + (accept.length ? '\n\nACCEPTED WORDS (spelt correctly for this clinic): ' + accept.join(', ') : '')
+    + (avoid.length ? '\n\nTHE CLINIC\'S OWN WORDS TO AVOID (always an advertising problem): ' + avoid.join(', ') : '');
+  let out;
+  try { out = wpClaude_(sys, flat, WP_CHECK_SCHEMA_, PropertiesService.getScriptProperties().getProperty('CLAUDE_FAST_MODEL') || 'claude-haiku-5-5'); }
+  catch (e) { console.warn('Post check failed: ' + e); return { ok: true, problem: 'The check couldn\'t run just now. Try again in a minute.' }; }
+
+  const ok = {};
+  accept.forEach(function (w) { ok[w.toLowerCase()] = true; });
+  const seen = {};
+  const issues = [];
+  const push = function (x) {
+    const k = x.type + '|' + x.quote.toLowerCase();
+    if (!seen[k] && issues.length < 80) { seen[k] = true; issues.push(x); }
+  };
+  (out.issues || []).forEach(function (o) {
+    const quote = String(o.quote || '').replace(/\s+/g, ' ').trim();
+    if (!quote || quote.length > 200 || flat.indexOf(quote) === -1) return;
+    if (o.type === 'spelling' && ok[quote.toLowerCase()]) return;
+    push({ type: String(o.type), quote: quote, fix: String(o.fix || '').replace(/\s+/g, ' ').trim().slice(0, 200), why: String(o.why || '').slice(0, 200) });
+  });
+  // The fixed rules apply whatever Claude found
+  WP_FLAG_RULES_.forEach(function (r) {
+    const re = new RegExp(r[0].source, 'gi');
+    let m;
+    while ((m = re.exec(flat))) push({ type: 'advertising', quote: m[0], fix: '', why: r[1] + '.' });
+  });
+  avoid.forEach(function (w) {
+    const re = new RegExp('(^|[^a-z])(' + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')($|[^a-z])', 'i');
+    const m = re.exec(flat);
+    if (m) push({ type: 'advertising', quote: m[2], fix: '', why: 'On the clinic\'s list of words to avoid.' });
+  });
+  return { ok: true, issues: issues };
+}
+
+// SEO → Settings → Brand and wording → Spelling: words to accept (remembered 10 minutes)
+function wpSpellWords_() {
+  const hit = repCacheGet_('ws_spell_v1');
+  if (hit) return hit;
+  let out = [];
+  try {
+    const d = fsGetDoc_(getConfig_(), 'seo_settings/main') || {};
+    out = uniq_((Array.isArray(d.spellWords) ? d.spellWords : []).map(function (w) { return String(w || '').trim(); }).filter(Boolean)).slice(0, 400);
+  } catch (e) { console.warn('Spelling words not read: ' + e); }
+  repCachePut_('ws_spell_v1', out, 600);
+  return out;
 }

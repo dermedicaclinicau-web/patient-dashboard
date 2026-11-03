@@ -5,6 +5,7 @@
 import { callApi } from "./appointments.js";
 import { can } from "./perms.js";
 import { showToast } from "./utils.js";
+import { openPostEditor, takePostDraft } from "./seo-post.js?v=1";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const SITE = "Dermedica";
@@ -115,7 +116,8 @@ export async function mountSeoSite(container, { param = "" } = {}) {
       <div><h3>Website pages and posts</h3>
         <p class="muted">How each page shows in Google. Changes go live on the website straight away, and are added to the Change log.</p></div>
       <div class="ws-acts"><small class="muted" data-role="at"></small>
-        <button type="button" class="lh-btn is-quiet" data-act="refresh">Refresh</button></div>
+        <button type="button" class="lh-btn is-quiet" data-act="refresh">Refresh</button>
+        ${edit ? '<button type="button" class="lh-btn is-primary" data-act="newpost">+ New blog post</button>' : ""}</div>
     </div>
     <div class="ws-tools">
       <input type="search" class="fe-input" data-role="q" placeholder="Search a title or address" aria-label="Search" />
@@ -165,6 +167,19 @@ export async function mountSeoSite(container, { param = "" } = {}) {
 
   const byId = (id) => cache.items.find((x) => String(x.id) === String(id));
   const openId = (id, opts) => { const it = byId(id); if (it) openEditor(it, opts); };
+  // A saved post goes back into the list (new ones at the top)
+  const upsert = (item) => {
+    const i = cache.items.findIndex((x) => x.id === item.id);
+    if (i >= 0) cache.items[i] = { ...cache.items[i], ...item }; else cache.items.unshift(item);
+    if (root.isConnected) drawBody();
+  };
+  // Clicking a row: blog posts open the full post editor, pages (and Elementor posts) the SEO window
+  const openRow = (id) => {
+    const it = byId(id);
+    if (!it) return;
+    if (edit && it.type === "post" && !it.elementor) openPostEditor({ id: it.id, onSaved: upsert });
+    else openEditor(it);
+  };
 
   root.addEventListener("input", (e) => {
     if (e.target.dataset.role === "q") { st.q = e.target.value.trim().toLowerCase(); st.n = PAGE; drawBody(); }
@@ -175,7 +190,7 @@ export async function mountSeoSite(container, { param = "" } = {}) {
   });
   root.addEventListener("keydown", (e) => {
     const tr = e.target.closest && e.target.closest("tr[data-id]");
-    if (tr && e.target === tr && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openId(tr.dataset.id); }
+    if (tr && e.target === tr && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openRow(tr.dataset.id); }
   });
   root.addEventListener("click", async (e) => {
     const fx = e.target.closest("[data-fix]");
@@ -183,10 +198,11 @@ export async function mountSeoSite(container, { param = "" } = {}) {
     const ch = e.target.closest("[data-chk]");
     if (ch) { st.chk = st.chk === ch.dataset.chk ? "" : ch.dataset.chk; st.n = PAGE; drawBody(); return; }
     const tr = e.target.closest("tr[data-id]");
-    if (tr) { openId(tr.dataset.id); return; }
+    if (tr) { openRow(tr.dataset.id); return; }
     const a = e.target.closest("[data-act]");
     if (!a) return;
     if (a.dataset.act === "more") { st.n += PAGE; drawBody(); }
+    if (a.dataset.act === "newpost") openPostEditor({ onSaved: upsert });
     if (a.dataset.act === "refresh") {
       a.disabled = true;
       a.textContent = "Reading the website…";
@@ -266,6 +282,12 @@ export async function mountSeoSite(container, { param = "" } = {}) {
     if (edit && opts.target && opts.target[0] !== "!" && !f.focus.value) f.focus.value = opts.target;
     const start = JSON.stringify(val());
     const dirty = () => JSON.stringify(val()) !== start;
+    if (edit && opts.preset) {   // from the Advisor: its title and description, ready to check and save
+      if (opts.preset.seoTitle) f.seoTitle.value = opts.preset.seoTitle;
+      if (opts.preset.desc) f.desc.value = opts.preset.desc;
+      P("note").textContent = "From the Advisor: check the title and description, then Save.";
+      P("note").hidden = false;
+    }
     const count = (el, n, lim) => { el.textContent = n ? `${n} characters` : ""; el.className = n ? countClass(n, lim) : "ws-count"; };
 
     function update() {
@@ -410,6 +432,15 @@ export async function mountSeoSite(container, { param = "" } = {}) {
   const pv = String(param || "");
   const byPath = (p) => { const want = normPath(p); return cache.items.find((x) => normPath(x.path) === want) || cache.items.find((x) => normPath(x.link) === want); };
   const notFound = () => showToast("That page isn't in WordPress's list of pages and posts (it may be a category or archive page).");
+  if (pv === "new" && edit) { openPostEditor({ draft: takePostDraft(), onSaved: upsert }); return; }
+  if (pv === "set") {   // from the Advisor's "Use on the page"
+    let s = null;
+    try { s = JSON.parse(sessionStorage.getItem("dm.seo.setmeta") || "null"); sessionStorage.removeItem("dm.seo.setmeta"); } catch { s = null; }
+    const it = s && byPath(s.path);
+    if (it) openEditor(it, { preset: { seoTitle: s.seoTitle || "", desc: s.desc || "" } });
+    else if (s) notFound();
+    return;
+  }
   const fm = /^fix:(title|desc|both)?:([^:]*):(.*)$/.exec(pv);
   if (/^\d+$/.test(pv)) openId(pv);
   else if (fm) {
