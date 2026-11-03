@@ -1,4 +1,6 @@
 // seo-drill.js — Overview: click a number card to see the searches and pages behind it.
+// Click a search or page row to open it: a search shows its numbers over 7, 28 and 90 days and the pages Google shows for it;
+// a page shows the searches that bring people to it.
 // Searches, landing pages and AI assistant visits come from seo_windows (Seo11.gs: the last 7, 28 and 90 days, the period
 // before each, and the same dates last year). Page clicks use each page's daily clicks, so they match any dates.
 
@@ -40,12 +42,14 @@ function pickWindow(W, r, preset) {
 }
 
 /**
- * o: { key, label, r, cmp (null when there's no comparison), compareMode ('prev' | 'year'), preset, W, tab, cur, prev }
+ * o: { key, label, r, cmp (null when there's no comparison), compareMode ('prev' | 'year'), preset, W, tab, cur, prev,
+ *      open ('q:<search>' or 'p:<path>': the row that's open) }
  */
 export function drillHtml(c, o) {
   injectCss();
   const h = c.h, esc = h.esc;
-  const pick = pickWindow(o.W || {}, o.r, o.preset);
+  const W = o.W || {};
+  const pick = pickWindow(W, o.r, o.preset);
   const mode = o.cmp ? o.compareMode : "none";
   const ci = mode === "year" ? 7 : mode === "prev" ? 4 : -1;
   const ai = mode === "year" ? 4 : mode === "prev" ? 3 : -1;
@@ -66,30 +70,42 @@ export function drillHtml(c, o) {
     const v = Math.round(n);
     return `<span class="seo-d ${v > 0 ? "up" : v < 0 ? "down" : "flat"}">${v > 0 ? "+" : v < 0 ? "−" : ""}${h.fmtInt(Math.abs(v))}</span>`;
   };
+  const moved = (now, was) => (was == null || now == null ? `<span class="seo-note">—</span>`
+    : `<span class="seo-d ${was - now > 0 ? "up" : was - now < 0 ? "down" : "flat"}">${was - now > 0 ? "▲ " : was - now < 0 ? "▼ " : ""}${Math.abs(was - now).toFixed(1)}</span>`);
   const pageFor = (path) => c.data.pages.filter((p) => keyOf(p.path) === keyOf(path))
     .sort((a, b) => (b.m28?.impressions || 0) - (a.m28?.impressions || 0))[0] || null;
+  const pageName = (path) => esc(short(titleOf(c.work, c.data, path)));
   const pageLink = (path) => {
     const p = pageFor(path);
-    const t = short(titleOf(c.work, c.data, path));
-    return p ? `<button class="seo-w-link" type="button" data-open="${esc(p.id)}" title="${esc(path)}">${esc(t)}</button>` : esc(t);
+    return p ? `<button class="seo-w-link" type="button" data-open="${esc(p.id)}" title="${esc(path)}">${pageName(path)}</button>` : pageName(path);
   };
-  const qLink = (q) => `<button class="seo-w-link" type="button" data-kq="${esc(q)}">${esc(q)}</button>`;
-  const table = (cols, rows) => {
+
+  // A table. keys[i] makes row i open (and shows ▸ / ▾): 'q:<search>' or 'p:<path>'
+  const table = (cols, rows, keys = []) => {
     if (!rows.length) return `<p class="seo-note" style="margin:8px 0">Nothing notable for these dates.</p>`;
     const g = `grid-template-columns:minmax(0,1fr)${" 92px".repeat(cols.length - 1)}`;
     return `<div class="seo-dr-t"><div class="seo-dr-r is-h" style="${g}">${cols.map((x) => `<span>${x}</span>`).join("")}</div>
-      ${rows.map((r) => `<div class="seo-dr-r" style="${g}">${r.map((x) => `<span>${x}</span>`).join("")}</div>`).join("")}</div>`;
+      ${rows.map((r, i) => {
+        const k = keys[i] || "";
+        const open = !!k && o.open === k;
+        const cells = r.map((x, j) => `<span>${j === 0 && k ? `<i class="seo-dr-car">${open ? "▾" : "▸"}</i>` : ""}${x}</span>`).join("");
+        return `<div class="seo-dr-r${k ? " is-x" : ""}${open ? " is-open" : ""}" style="${g}"${k
+          ? ` data-drx="${esc(k)}" role="button" tabindex="0" aria-expanded="${open}" title="Click to see more"` : ""}>${cells}</div>${open ? detail(k) : ""}`;
+      }).join("")}</div>`;
   };
   const sortCmp = (arr) => arr.sort((a, b) => (hasCmp ? Math.abs(b.now - (b.was || 0)) - Math.abs(a.now - (a.was || 0)) : b.now - a.now));
-  const cmpTable = (head, items, name, fmt = h.fmtInt) => table(
+  const cmpTable = (head, items, name, keyFn, fmt = h.fmtInt) => table(
     hasCmp ? [head, "Now", "Before", "Change"] : [head, "Now"],
-    items.map((x) => (hasCmp ? [name(x), fmt(x.now), `<span class="seo-note">${fmt(x.was || 0)}</span>`, signed(x.now - (x.was || 0))] : [name(x), fmt(x.now)])));
+    items.map((x) => (hasCmp ? [name(x), fmt(x.now), `<span class="seo-note">${fmt(x.was || 0)}</span>`, signed(x.now - (x.was || 0))] : [name(x), fmt(x.now)])),
+    keyFn ? items.map(keyFn) : []);
   const totalLine = (label, a, b, fmt) => {
     if (b == null) return `${label}: ${fmt(a)}.`;
     if (a === b) return `${label} held steady (${fmt(a)}).`;
     const p = b ? Math.abs(Math.round(((a - b) / b) * 100)) : null;
     return `${label} ${a > b ? "rose" : "fell"}${p != null ? ` ${p}%` : ""} (${fmt(a)} vs ${fmt(b)}).`;
   };
+  const qKey = (x) => "q:" + x.q;
+  const pKey = (x) => "p:" + x.path;
 
   // Clicks to each page for exactly these dates (the same page with and without the end slash counts as one)
   const pageClicks = () => {
@@ -112,11 +128,80 @@ export function drillHtml(c, o) {
     return [...by.values()].filter((x) => x.now + (x.was || 0) > 0);
   };
 
+  /* ----- an open row ----- */
+  function detail(k) {
+    return `<div class="seo-dr-x">${k.startsWith("q:") ? searchDetail(k.slice(2)) : pageDetail(k.slice(2))}</div>`;
+  }
+
+  // A search: its numbers for 7, 28 and 90 days, and the pages Google shows for it
+  function searchDetail(q) {
+    const lq = q.toLowerCase();
+    const per = [["w7", "Last 7 days"], ["w28", "Last 28 days"], ["w90", "Last 90 days"]].map(([wk, label]) => {
+      const r = (W[wk]?.q || []).find((x) => String(x[0]).toLowerCase() === lq);
+      return r ? [label, h.fmtInt(r[1] || 0), h.fmtInt(r[2] || 0), h.fmtPos(r[3]), `<span class="seo-note">${h.fmtPos(r[6])}</span>`,
+        `<span class="seo-note">${h.fmtPos(r[9])}</span>`] : [label, "—", "—", "—", "—", "—"];
+    });
+    const row = (c.work.queries || []).find((x) => String(x.q).toLowerCase() === lq);
+    const pages = (row?.pages || []).slice().sort((a, b) => (b.i || 0) - (a.i || 0)).slice(0, 6);
+    const prevOf = (path) => (row?.ppages || []).find((p) => keyOf(p.path) === keyOf(path));
+    const g6 = "grid-template-columns:minmax(0,1fr) 70px 80px 70px 80px 80px";
+    const g5 = "grid-template-columns:minmax(0,1fr) 70px 80px 70px 80px";
+    return `
+      <div class="seo-dr-xh">Over time</div>
+      <div class="seo-dr-mini">
+        <div class="seo-dr-mr is-h" style="${g6}"><span></span><span>Clicks</span><span>Impr.</span><span>Position</span><span>Before</span><span>Last year</span></div>
+        ${per.map((r) => `<div class="seo-dr-mr" style="${g6}">${r.map((x) => `<span>${x}</span>`).join("")}</div>`).join("")}
+      </div>
+      <div class="seo-dr-xh">Pages Google shows for it <span class="seo-note">(last 28 days)</span></div>
+      ${pages.length ? `<div class="seo-dr-mini">
+        <div class="seo-dr-mr is-h" style="${g5}"><span>Page</span><span>Clicks</span><span>Impr.</span><span>Position</span><span>Moved</span></div>
+        ${pages.map((p) => `<div class="seo-dr-mr" style="${g5}"><span>${pageLink(p.path)}</span><span>${h.fmtInt(p.c || 0)}</span>
+          <span>${h.fmtInt(p.i || 0)}</span><span>${h.fmtPos(p.pos)}</span><span>${moved(p.pos, prevOf(p.path)?.pos ?? null)}</span></div>`).join("")}
+      </div>
+      ${pages.length > 1 ? `<p class="seo-dr-warn">Google splits this search between ${pages.length} pages, so they may be competing. Usually one page should own it.</p>` : ""}`
+      : `<p class="seo-note">Not in the last 28 days of search data.</p>`}
+      <div class="seo-w-acts">
+        <button class="seo-btn" type="button" data-kq="${esc(q)}">Open in Keywords</button>
+        <button class="seo-btn" type="button" data-drask="${esc(`How can we rank better for “${q}”, and which page should own it?`)}">Ask the Advisor about this search</button>
+      </div>`;
+  }
+
+  // A page: the searches that bring people to it (sorted by what matters for this card)
+  function pageDetail(path) {
+    const k = keyOf(path);
+    const list = (c.work.queries || []).map((x) => {
+      const me = (x.pages || []).find((p) => keyOf(p.path) === k);
+      if (!me) return null;
+      const was = (x.ppages || []).find((p) => keyOf(p.path) === k);
+      return { q: x.q, c: me.c || 0, i: me.i || 0, pos: me.pos, pc: was?.c || 0, ppos: was?.pos ?? null };
+    }).filter(Boolean);
+    const byClicks = ["clicks", "nonBrand", "brandClicks", "sessions", "conversions", "aiSessions"].includes(o.key);
+    list.sort((a, b) => (byClicks ? Math.abs(b.c - b.pc) - Math.abs(a.c - a.pc) || b.c - a.c
+      : o.key === "position" ? Math.abs((b.ppos ?? b.pos) - b.pos) - Math.abs((a.ppos ?? a.pos) - a.pos) : b.i - a.i));
+    const top = list.slice(0, 10);
+    const p = pageFor(path);
+    const g = "grid-template-columns:minmax(0,1fr) 64px 72px 80px 70px 70px";
+    return `
+      <div class="seo-dr-xh">Searches that bring people here <span class="seo-note">(last 28 days vs the 28 before)</span></div>
+      ${top.length ? `<div class="seo-dr-mini">
+        <div class="seo-dr-mr is-h" style="${g}"><span>Search</span><span>Clicks</span><span>Change</span><span>Impr.</span><span>Position</span><span>Moved</span></div>
+        ${top.map((x) => `<div class="seo-dr-mr" style="${g}"><span><button class="seo-w-link" type="button" data-kq="${esc(x.q)}">${esc(x.q)}</button></span>
+          <span>${h.fmtInt(x.c)}</span><span>${signed(x.c - x.pc)}</span><span>${h.fmtInt(x.i)}</span><span>${h.fmtPos(x.pos)}</span>
+          <span>${moved(x.pos, x.ppos)}</span></div>`).join("")}
+      </div>${list.length > 10 ? `<p class="seo-note" style="margin:4px 0 0">${list.length - 10} more searches. Open the page details to see them all.</p>` : ""}`
+      : `<p class="seo-note">No searches in the last 28 days of search data.</p>`}
+      <div class="seo-w-acts">
+        ${p ? `<button class="seo-btn" type="button" data-open="${esc(p.id)}">Open page details</button>` : ""}
+        <button class="seo-btn" type="button" data-advpage="${esc(path)}">Ask the Advisor about this page</button>
+      </div>`;
+  }
+
   /* ----- each card ----- */
   const key = o.key;
   const tabs = TABS[key] || ["Searches"];
   const tab = tabs.includes(o.tab) ? o.tab : tabs[0];
-  let title = o.label, sum = "", tip = "", body = "", notes = [];
+  let title = o.label, sum = "", tip = "", body = "";
+  const notes = [];
   const searchesNote = () => {
     if (!pick.w) return "Search details aren't ready yet. They're added by the next morning's update.";
     const wr = pick.w.ranges;
@@ -130,10 +215,9 @@ export function drillHtml(c, o) {
     const curV = o.cur[key], prevV = o.prev ? o.prev[key] : null;
     title = key === "clicks" ? "Where the clicks came from" : key === "nonBrand" ? "Treatment searches (non-brand)" : "Brand searches";
     if (tab === "Pages") {
-      const pg = sortCmp(pageClicks()).slice(0, 12);
-      body = cmpTable("Page", pg, (x) => pageLink(x.path));
+      body = cmpTable("Page", sortCmp(pageClicks()).slice(0, 12), (x) => pageName(x.path), pKey);
     } else {
-      body = cmpTable("Search", qs, (x) => qLink(x.q));
+      body = cmpTable("Search", qs, (x) => esc(x.q), qKey);
       notes.push(searchesNote());
     }
     const drivers = (key === "clicks" ? sortCmp(pageClicks()) : qs)
@@ -143,76 +227,74 @@ export function drillHtml(c, o) {
     tip = key === "brandClicks"
       ? "Brand searches follow how well people know the clinic (campaigns, Google Business Profile, word of mouth), so they aren't really SEO wins or losses."
       : hasCmp && prevV != null && curV < prevV
-        ? "Start with the page or search that lost the most: open it to see why, or ask the Advisor what to do."
-        : "Look at what's working on the pages that gained, and do the same on similar pages.";
+        ? "Open the page or search that lost the most to see why, or ask the Advisor what to do."
+        : "Open the pages that gained to see which searches are working, and do the same on similar pages.";
   }
 
   else if (key === "impressions") {
     title = "Where the site is being seen";
-    const fresh = Q.filter((x) => hasCmp && (x.pi || 0) === 0 && x.i >= 50);
+    const fresh = Q.filter((x) => hasCmp && (x.pi || 0) === 0 && x.i >= 50).sort((a, b) => b.i - a.i);
     if (tab === "Pages") {
       const pg = c.data.pages.map((p) => ({ path: p.path, now: p.m28?.impressions || 0, was: hasCmp ? p.prev28?.impressions || 0 : null }));
-      body = cmpTable("Page", sortCmp(pg.filter((x) => x.now + (x.was || 0) > 0)).slice(0, 12), (x) => pageLink(x.path));
+      body = cmpTable("Page", sortCmp(pg.filter((x) => x.now + (x.was || 0) > 0)).slice(0, 12), (x) => pageName(x.path), pKey);
       notes.push("Pages: the last 28 days vs the 28 before.");
     } else {
       const qs = sortCmp(Q.filter((x) => x.i + (x.pi || 0) > 0).map((x) => ({ ...x, now: x.i, was: x.pi }))).slice(0, 12);
-      body = cmpTable("Search", qs, (x) => qLink(x.q) + ((x.pi || 0) === 0 && hasCmp && x.i > 0 ? ` <span class="seo-pr-pill is-green">new</span>` : ""));
+      body = cmpTable("Search", qs, (x) => esc(x.q) + ((x.pi || 0) === 0 && hasCmp && x.i > 0 ? ` <span class="seo-pr-pill is-green">new</span>` : ""), qKey);
       notes.push(searchesNote());
     }
     sum = esc(totalLine("Impressions", o.cur.impressions, hasCmp ? o.prev?.impressions : null, h.fmtInt)) +
       (fresh.length ? ` ${fresh.length} search${fresh.length === 1 ? " is" : "es are"} new, with 50 or more impressions.` : "");
     tip = fresh.length
-      ? `New searches can show growing demand. If a big one (like “${esc(fresh.sort((a, b) => b.i - a.i)[0].q)}”) has no page that answers it well, ask the Advisor for a page or FAQ.`
+      ? `New searches can show growing demand. If a big one (like “${esc(fresh[0].q)}”) has no page that answers it well, ask the Advisor for a page or FAQ.`
       : "Impressions show demand. Searches seen more often but not clicked are worth a better title and description.";
   }
 
   else if (key === "ctr") {
     title = "Seen near the top of Google, but rarely clicked";
     const missed = (i, cl, pos) => Math.max(0, Math.round(i * EXP_CTR[Math.max(0, Math.min(9, Math.round(pos) - 1))] - cl));
+    let extra = "";
     if (tab === "Pages") {
       const pg = c.data.pages.filter((p) => (p.m28?.impressions || 0) >= 200 && p.m28?.position != null && p.m28.position <= 10)
-        .map((p) => ({ p, miss: missed(p.m28.impressions, p.m28.clicks, p.m28.position) })).filter((x) => x.miss > 0)
+        .map((p) => ({ p, path: p.path, miss: missed(p.m28.impressions, p.m28.clicks, p.m28.position) })).filter((x) => x.miss > 0)
         .sort((a, b) => b.miss - a.miss).slice(0, 12);
-      body = table(["Page", "Impr.", "Position", "CTR", "Missed clicks"], pg.map((x) => [pageLink(x.p.path), h.fmtInt(x.p.m28.impressions),
-        h.fmtPos(x.p.m28.position), h.fmtPct(x.p.m28.ctr), `<b>≈ ${h.fmtInt(x.miss)}</b>`]));
+      body = table(["Page", "Impr.", "Position", "CTR", "Missed clicks"], pg.map((x) => [pageName(x.path), h.fmtInt(x.p.m28.impressions),
+        h.fmtPos(x.p.m28.position), h.fmtPct(x.p.m28.ctr), `<b>≈ ${h.fmtInt(x.miss)}</b>`]), pg.map(pKey));
       notes.push("Pages: the last 28 days.");
     } else {
       const qs = Q.filter((x) => !x.brand && x.i >= 100 && x.pos != null && x.pos <= 10)
         .map((x) => ({ ...x, miss: missed(x.i, x.c, x.pos) }))
         .filter((x) => x.c / x.i < EXP_CTR[Math.max(0, Math.round(x.pos) - 1)] * 0.5).sort((a, b) => b.miss - a.miss).slice(0, 12);
-      body = table(["Search", "Impr.", "Position", "CTR", "Missed clicks"], qs.map((x) => [qLink(x.q), h.fmtInt(x.i), h.fmtPos(x.pos),
-        h.fmtPct(x.i ? x.c / x.i : 0), `<b>≈ ${h.fmtInt(x.miss)}</b>`]));
+      body = table(["Search", "Impr.", "Position", "CTR", "Missed clicks"], qs.map((x) => [esc(x.q), h.fmtInt(x.i), h.fmtPos(x.pos),
+        h.fmtPct(x.i ? x.c / x.i : 0), `<b>≈ ${h.fmtInt(x.miss)}</b>`]), qs.map(qKey));
       notes.push(searchesNote());
-      sum = qs.length ? `${qs.length} search${qs.length === 1 ? " is" : "es are"} seen on page 1 but rarely clicked: about ${h.fmtInt(qs.reduce((a, x) => a + x.miss, 0))} clicks are being missed.` : "";
+      if (qs.length) extra = ` ${qs.length} search${qs.length === 1 ? " is" : "es are"} seen on page 1 but rarely clicked: about ${h.fmtInt(qs.reduce((a, x) => a + x.miss, 0))} clicks are being missed.`;
     }
-    sum = esc(totalLine("CTR", o.cur.ctr, hasCmp ? o.prev?.ctr : null, h.fmtPct)) + (sum ? " " + esc(sum) : "");
-    tip = "Rewriting the title and description for these is quick, and often adds clicks within a few weeks. The Advisor can draft them.";
+    sum = esc(totalLine("CTR", o.cur.ctr, hasCmp ? o.prev?.ctr : null, h.fmtPct) + extra);
+    tip = "Rewriting the title and description for these is quick, and often adds clicks within a few weeks. Open a row to see which page Google shows, then ask the Advisor for drafts.";
   }
 
   else if (key === "position") {
     title = "How rankings moved";
     const close = Q.filter((x) => !x.brand && x.i >= 50 && x.pos != null && x.pos >= 8 && x.pos <= 20).length;
-    const moved = (now, was) => (was == null || now == null ? "" : `<span class="seo-d ${was - now > 0 ? "up" : was - now < 0 ? "down" : "flat"}">${
-      was - now > 0 ? "▲ " : was - now < 0 ? "▼ " : ""}${Math.abs(was - now).toFixed(1)}</span>`);
     if (tab === "Pages") {
       const pg = c.data.pages.filter((p) => (p.m28?.impressions || 0) >= 100 && p.m28?.position != null && p.prev28?.position != null)
         .sort((a, b) => Math.abs(b.prev28.position - b.m28.position) - Math.abs(a.prev28.position - a.m28.position)).slice(0, 12);
-      body = table(["Page", "Now", "Before", "Moved"], pg.map((p) => [pageLink(p.path), h.fmtPos(p.m28.position),
-        `<span class="seo-note">${h.fmtPos(p.prev28.position)}</span>`, moved(p.m28.position, p.prev28.position)]));
+      body = table(["Page", "Now", "Before", "Moved"], pg.map((p) => [pageName(p.path), h.fmtPos(p.m28.position),
+        `<span class="seo-note">${h.fmtPos(p.prev28.position)}</span>`, moved(p.m28.position, p.prev28.position)]), pg.map(pKey));
       notes.push("Pages: the last 28 days vs the 28 before.");
     } else {
       const qs = Q.filter((x) => !x.brand && x.i >= 50 && x.pos != null && (!hasCmp || x.ppos != null))
         .sort((a, b) => (hasCmp ? Math.abs(b.ppos - b.pos) - Math.abs(a.ppos - a.pos) : b.i - a.i)).slice(0, 12);
       body = table(hasCmp ? ["Search", "Now", "Before", "Moved"] : ["Search", "Position", "Impr."], qs.map((x) => hasCmp
-        ? [qLink(x.q), h.fmtPos(x.pos), `<span class="seo-note">${h.fmtPos(x.ppos)}</span>`, moved(x.pos, x.ppos)]
-        : [qLink(x.q), h.fmtPos(x.pos), h.fmtInt(x.i)]));
+        ? [esc(x.q), h.fmtPos(x.pos), `<span class="seo-note">${h.fmtPos(x.ppos)}</span>`, moved(x.pos, x.ppos)]
+        : [esc(x.q), h.fmtPos(x.pos), h.fmtInt(x.i)]), qs.map(qKey));
       notes.push(searchesNote());
     }
     const a = o.cur.position, b = hasCmp ? o.prev?.position : null;
-    sum = a == null ? "" : b == null ? `Average position: ${h.fmtPos(a)}.`
-      : `Average position ${a < b ? "improved" : a > b ? "slipped" : "held"} (${h.fmtPos(a)} vs ${h.fmtPos(b)}; lower is better).`;
-    sum = esc(sum);
-    tip = close ? `${close} search${close === 1 ? " sits" : "es sit"} between positions 8 and 20, where a small push brings many more clicks. Opportunities and the Advisor can plan them.`
+    sum = esc(a == null ? "" : b == null ? `Average position: ${h.fmtPos(a)}.`
+      : `Average position ${a < b ? "improved" : a > b ? "slipped" : "held"} (${h.fmtPos(a)} vs ${h.fmtPos(b)}; lower is better).`);
+    tip = close ? `${close} search${close === 1 ? " sits" : "es sit"} between positions 8 and 20, where a small push brings many more clicks. Open a row to see which page ranks, then ask the Advisor how to push it.`
       : "Positions move a little every week. Watch the searches that matter for your priority pages.";
   }
 
@@ -223,9 +305,9 @@ export function drillHtml(c, o) {
     body = table(hasCmp ? ["Landing page", "Now", "Before", "Change", isK ? "Per 100 visits" : "Engaged"] : ["Landing page", "Now", isK ? "Per 100 visits" : "Engaged"],
       rows.map((x) => {
         const extra = isK ? (x.s ? (Math.round((x.k / x.s) * 1000) / 10).toFixed(1) : "—") : (x.s ? Math.round((x.e / x.s) * 100) + "%" : "—");
-        return hasCmp ? [pageLink(x.path), h.fmtInt(x.now), `<span class="seo-note">${h.fmtInt(x.was || 0)}</span>`, signed(x.now - (x.was || 0)), extra]
-          : [pageLink(x.path), h.fmtInt(x.now), extra];
-      }));
+        return hasCmp ? [pageName(x.path), h.fmtInt(x.now), `<span class="seo-note">${h.fmtInt(x.was || 0)}</span>`, signed(x.now - (x.was || 0)), extra]
+          : [pageName(x.path), h.fmtInt(x.now), extra];
+      }), rows.map(pKey));
     notes.push(searchesNote().replace("Search details", "Landing page details"));
     const cs = isK ? o.cur.conversions : o.cur.sessions, ps = hasCmp ? (isK ? o.prev?.conversions : o.prev?.sessions) : null;
     sum = esc(totalLine(isK ? "Key events from Google visitors" : "Visits from Google", cs, ps, h.fmtInt));
@@ -234,8 +316,8 @@ export function drillHtml(c, o) {
     tip = isK
       ? (keyDrop <= -0.4 && sessDrop > -0.15
         ? "<b>Key events fell much more than visits.</b> That usually means a booking button, form or GA4 key event stopped working. Test a booking on the website, and check GA4 → Admin → Key events."
-        : "These pages bring bookings and enquiries. Link to them from your guides and blog posts.")
-      : "Pages with a low engaged rate may not match what people expected. Check that the first screen answers the search.";
+        : "These pages bring bookings and enquiries. Open one to see which searches lead there, and link to it from your guides.")
+      : "Pages with a low engaged rate may not match what people expected. Open one to see which searches bring people there.";
   }
 
   else if (key === "aiSessions") {
@@ -243,7 +325,7 @@ export function drillHtml(c, o) {
     if (tab === "Pages") {
       const by = new Map();
       A.forEach((x) => { const k = keyOf(x.path); const y = by.get(k) || { path: x.path, now: 0, was: hasCmp ? 0 : null }; y.now += x.s; if (hasCmp) y.was += x.ps || 0; by.set(k, y); });
-      body = cmpTable("Page", sortCmp([...by.values()]).slice(0, 12), (x) => pageLink(x.path));
+      body = cmpTable("Page", sortCmp([...by.values()]).slice(0, 12), (x) => pageName(x.path), pKey);
     } else {
       const by = new Map();
       A.forEach((x) => { const y = by.get(x.src) || { src: x.src, now: 0, was: hasCmp ? 0 : null }; y.now += x.s; if (hasCmp) y.was += x.ps || 0; by.set(x.src, y); });
@@ -267,7 +349,7 @@ export function drillHtml(c, o) {
     ${notes.filter(Boolean).length ? `<p class="seo-note" style="margin:6px 0 0">${esc(notes.filter(Boolean).join(" "))}</p>` : ""}
     ${tip ? `<div class="seo-dr-tip">${tip}</div>` : ""}
     <div class="seo-w-acts"><button class="seo-btn on" type="button" data-drask="${esc(ask)}">Ask the Advisor about this</button>
-      <span class="seo-note">Click a search to see it in Keywords, or a page for its details.</span></div>
+      <span class="seo-note">Click a row to see what's behind it.</span></div>
   </div>`;
 }
 
@@ -285,8 +367,27 @@ const CSS = `
 .seo-dr-r.is-h{background:#f8fafc;font-size:12px;color:var(--text-muted,#6b7280);font-weight:600}
 .seo-dr-r > span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .seo-dr-r > span:not(:first-child){text-align:right}
+.seo-dr-r.is-x{cursor:pointer}
+.seo-dr-r.is-x:hover{background:#f8fbff}
+.seo-dr-r.is-x:focus-visible{outline:2px solid var(--accent,#2563eb);outline-offset:-2px}
+.seo-dr-r.is-open{background:#eff6ff;font-weight:600}
+.seo-dr-car{display:inline-block;width:14px;font-style:normal;color:var(--text-muted,#6b7280)}
+.seo-dr-x{padding:10px 14px 12px 30px;background:#f8fbff;border-top:1px solid #dbeafe}
+.seo-dr-xh{margin:6px 0 4px;font-size:12px;font-weight:700;color:var(--text-muted,#6b7280)}
+.seo-dr-xh:first-child{margin-top:0}
+.seo-dr-mini{border:1px solid var(--border,#e5e7eb);border-radius:8px;background:var(--card,#fff);overflow:hidden}
+.seo-dr-mr{display:grid;gap:8px;align-items:center;padding:5px 10px;border-top:1px solid var(--border,#e5e7eb);font-size:12.5px}
+.seo-dr-mr:first-child{border-top:0}
+.seo-dr-mr.is-h{background:#f8fafc;font-size:11.5px;color:var(--text-muted,#6b7280);font-weight:600}
+.seo-dr-mr > span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.seo-dr-mr > span:not(:first-child){text-align:right}
+.seo-dr-warn{margin:6px 0 0;padding:6px 10px;border-radius:6px;background:#fffbeb;color:#92400e;font-size:12.5px}
 .seo-dr-tip{margin-top:10px;padding:8px 12px;border-radius:8px;background:#fffbeb;border:1px solid #fde68a;font-size:13px;line-height:1.5}
-@media (max-width:640px){.seo-dr-r{grid-template-columns:minmax(0,1fr) 70px 70px !important}.seo-dr-r > span:nth-child(n+4){display:none}}
+@media (max-width:640px){
+  .seo-dr-r{grid-template-columns:minmax(0,1fr) 70px 70px !important}.seo-dr-r > span:nth-child(n+4){display:none}
+  .seo-dr-mr{grid-template-columns:minmax(0,1fr) 60px 60px !important}.seo-dr-mr > span:nth-child(n+4){display:none}
+  .seo-dr-x{padding-left:14px}
+}
 `;
 
 function injectCss() {

@@ -8,7 +8,7 @@ import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan, titleOf } 
 import { renderTasks } from "./seo-tasks.js?v=9";
 import { renderClusters } from "./seo-clusters.js?v=2";
 import { renderAdvisor } from "./seo-advisor.js?v=2";
-import { drillHtml, loadWindows } from "./seo-drill.js?v=1";
+import { drillHtml, loadWindows } from "./seo-drill.js?v=2";
 import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js?v=9";
 
 const TABS = [
@@ -401,7 +401,7 @@ export async function mountSeo(el, opts = {}) {
   let work = null;
   let tab = tabs.some((t) => t.id === param) ? param : "overview";
   const ui = { preset: "28", from: "", to: "", compare: "prev", gran: "auto", metric: "clicks",
-    sortKey: "clicks", sortDir: -1, filter: "", hideZero: true, limit: 100, pview: "table", kpi: "", drtab: "" };
+    sortKey: "clicks", sortDir: -1, filter: "", hideZero: true, limit: 100, pview: "table", kpi: "", drtab: "", drOpen: "" };
   let W = null;          // the Overview drill-downs (seo_windows), loaded the first time a card is opened
   let wForce = false;
   const OV_KEY = "dm.seo.overview";
@@ -671,7 +671,7 @@ export async function mountSeo(el, opts = {}) {
       <div class="seo-kpis">${kpis}</div>
       ${ui.kpi && LABELS[ui.kpi] ? (W
         ? drillHtml(ctx(), { key: ui.kpi, label: LABELS[ui.kpi], r, cmp: cmp && cmp.ok ? cmp : null, compareMode: ui.compare,
-            preset: ui.preset, W, tab: ui.drtab, cur, prev })
+            preset: ui.preset, W, tab: ui.drtab, cur, prev, open: ui.drOpen })
         : (loadWindows(wForce).then((x) => { W = x; wForce = false; if (tab === "overview") render(); })
             .catch((e) => { console.warn("Drill-downs not loaded:", e); W = {}; if (tab === "overview") render(); }),
           `<div class="seo-card seo-empty">Loading…</div>`)) : ""}
@@ -818,13 +818,14 @@ export async function mountSeo(el, opts = {}) {
   /* ----- events (delegated) ----- */
 
   root.addEventListener("click", (e) => {
-    const t = e.target.closest("[data-kpi],[data-drtab],[data-drclose],[data-kq],[data-drask],[data-advpage],[data-prtoggle],[data-prf],[data-prall],[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
+    const t = e.target.closest("[data-drx],[data-kpi],[data-drtab],[data-drclose],[data-kq],[data-drask],[data-advpage],[data-prtoggle],[data-prf],[data-prall],[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
     if (!t || !root.contains(t)) return;
     const ds = t.dataset;
 
     // Overview drill-downs
-    if (ds.kpi !== undefined) { ui.kpi = ui.kpi === ds.kpi ? "" : ds.kpi; ui.drtab = ""; render(); return; }
-    if (ds.drtab !== undefined) { ui.drtab = ds.drtab; render(); return; }
+    if (ds.drx !== undefined) { ui.drOpen = ui.drOpen === ds.drx ? "" : ds.drx; render(); return; }
+    if (ds.kpi !== undefined) { ui.kpi = ui.kpi === ds.kpi ? "" : ds.kpi; ui.drtab = ""; ui.drOpen = ""; render(); return; }
+    if (ds.drtab !== undefined) { ui.drtab = ds.drtab; ui.drOpen = ""; render(); return; }
     if (ds.drclose !== undefined) { ui.kpi = ""; render(); return; }
     if (ds.kq !== undefined) {   // a search: open it in Keywords
       work.ui = work.ui || { topic: "__all", qsort: "i", qdir: -1, qfilter: "", qlimit: 100, qopen: null, ostatus: "open", otype: "all" };
@@ -955,6 +956,9 @@ export async function mountSeo(el, opts = {}) {
   const onKey = (e) => {
     if (!document.body.contains(panel)) { document.removeEventListener("keydown", onKey); return; }
     if (e.key === "Escape") panel.hidden = true;
+    // Enter or Space on a drill-down row opens it
+    const row = e.target.closest?.("[data-drx]");
+    if (row && root.contains(row) && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); row.click(); }
   };
   document.addEventListener("keydown", onKey);
 
