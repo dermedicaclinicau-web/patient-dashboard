@@ -399,7 +399,22 @@ button.seo-kpi.is-on{border-color:var(--accent,#2563eb);box-shadow:0 0 0 1px var
 .seo-tp-chip i{width:10px;height:10px;border-radius:50%}
 .seo-tp-chip button{border:0;background:none;padding:0 6px;font-size:15px;line-height:1;cursor:pointer;color:var(--text-muted,#6b7280)}
 .seo-tp-chip button:hover{color:#dc2626}
-.seo-tp-add{min-width:220px;padding:4px 10px;border-radius:999px}
+.seo-tp-combo{position:relative}
+.seo-tp-add{min-width:280px;padding:6px 12px;border-radius:999px}
+.seo-tp-add:focus{outline:none;border-color:var(--accent,#2563eb);box-shadow:0 0 0 3px rgba(37,99,235,.15)}
+.seo-tp-res{display:none;position:absolute;left:0;top:calc(100% + 6px);z-index:30;width:min(460px,90vw);max-height:360px;overflow:auto;
+  padding:6px;border:1px solid var(--border,#e5e7eb);border-radius:12px;background:var(--card,#fff);box-shadow:0 12px 32px rgba(15,23,42,.14)}
+.seo-tp-combo:focus-within .seo-tp-res{display:block}
+.seo-tp-src{padding:4px 8px 6px;font-size:11.5px;color:var(--text-muted,#6b7280)}
+.seo-tp-opt{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:1px 10px;width:100%;padding:8px 10px;border:0;border-radius:8px;
+  background:none;font:inherit;text-align:left;cursor:pointer;color:inherit}
+.seo-tp-opt:hover,.seo-tp-opt.is-on{background:#eff6ff}
+.seo-tp-opt .t{font-size:13.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.seo-tp-opt .n{font-size:12px;color:var(--text-muted,#6b7280);white-space:nowrap;align-self:center}
+.seo-tp-opt .p{grid-column:1 / -1;font-size:11.5px;color:var(--text-muted,#6b7280);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.seo-tp-star{color:#f59e0b;font-weight:400;margin-right:4px}
+.seo-tp-empty,.seo-tp-more{padding:10px;font-size:12.5px;color:var(--text-muted,#6b7280)}
+.seo-tp-more{border-top:1px solid var(--border,#e5e7eb);margin-top:4px}
 .seo-bars{width:100%;height:auto}
 .seo-bars rect{fill:var(--accent,#2563eb);opacity:.8}
 .seo-spark{color:var(--accent,#2563eb);vertical-align:middle}
@@ -469,6 +484,44 @@ export async function mountSeo(el, opts = {}) {
     ui.tmode = s.tmode === "sum" ? "sum" : "sep";
   } catch { ui.tshow = "site"; ui.tpages = []; ui.tmode = "sep"; }
   const saveTr = () => { try { localStorage.setItem(TR_KEY, JSON.stringify({ tshow: ui.tshow, tpages: ui.tpages, tmode: ui.tmode })); } catch { /* private mode */ } };
+  // The page search in the Trend card: every WordPress page and post, plus any page Google knows
+  let tpActive = 0, tpLast = [];
+  const tpAll = () => {
+    const m = new Map();
+    const typeName = (t) => (!t || t === "page" ? "Page" : t === "post" ? "Blog post" : String(t).replace(/[-_]/g, " ").replace(/^./, (ch) => ch.toUpperCase()));
+    (work?.wp?.pages || []).forEach((p) => {
+      if (!p || !p.path) return;
+      m.set(tkey(p.path), { path: p.path, title: p.title || titleOf(work, data, p.path), type: typeName(p.type), clicks: 0 });
+    });
+    data.pages.forEach((p) => {
+      const k = tkey(p.path);
+      const x = m.get(k);
+      if (x) x.clicks += p.m28.clicks;
+      else if (p.m28.impressions > 0) m.set(k, { path: p.path, title: titleOf(work, data, p.path), type: "Page", clicks: p.m28.clicks });
+    });
+    return [...m.values()];
+  };
+  const tpResults = (q) => {
+    const chosen = new Set(ui.tpages.map(tkey));
+    const ws = String(q || "").toLowerCase().split(/\s+/).filter(Boolean);
+    const all = tpAll();
+    const hits = all.filter((x) => !chosen.has(tkey(x.path)) && ws.every((w) => (x.title + " " + x.path).toLowerCase().includes(w)))
+      .sort((a, b) => b.clicks - a.clicks || a.title.localeCompare(b.title));
+    tpLast = hits.slice(0, 8);
+    if (tpActive >= tpLast.length) tpActive = Math.max(0, tpLast.length - 1);
+    if (!tpLast.length) return `<div class="seo-tp-empty">No pages match “${esc(q)}”.</div>`;
+    return `<div class="seo-tp-src">${ws.length ? `${fmtInt(hits.length)} match${hits.length === 1 ? "" : "es"}` : `${fmtInt(all.length)} pages from WordPress and Google · busiest first`}</div>` +
+      tpLast.map((x, i) => `<button type="button" class="seo-tp-opt${i === tpActive ? " is-on" : ""}" role="option" aria-selected="${i === tpActive}" data-tpick="${esc(x.path)}">
+        <span class="t">${isPriorityPath(work, x.path) ? `<b class="seo-tp-star">★</b>` : ""}${esc(x.title)}</span>
+        <span class="n">${x.clicks ? `${fmtInt(x.clicks)} clicks` : esc(x.type)}</span>
+        <span class="p">${esc(x.path)}</span></button>`).join("") +
+      (hits.length > 8 ? `<div class="seo-tp-more">${fmtInt(hits.length - 8)} more. Keep typing to narrow it down.</div>` : "");
+  };
+  const tpRefresh = (input) => {
+    const box = input.closest(".seo-tp-combo")?.querySelector("[data-tpres]");
+    if (box) box.innerHTML = tpResults(input.value);
+  };
+
   const addTPages = (paths) => {
     const seen = new Set(ui.tpages.map(tkey));
     for (const p of paths) {
@@ -644,15 +697,18 @@ export async function mountSeo(el, opts = {}) {
     }
 
     // The page picker (Trend card, Pages)
-    const tOpts = data.pages.filter((p) => p.m28.impressions > 0).sort((a, b) => b.m28.clicks - a.m28.clicks).slice(0, 300);
+    tpActive = 0;
     const tClusters = (Array.isArray(work?.settings?.clusters) ? work.settings.clusters : []).filter((x) => x && x.main);
     const tTopics = (Array.isArray(work?.settings?.topics) ? work.settings.topics : []).filter((x) => x && Array.isArray(x.pages) && x.pages.length);
     const pickerHtml = ui.tshow !== "pages" ? "" : `<div class="seo-tp">
       <div class="seo-tp-chips">
         ${ui.tpages.map((p, i) => `<span class="seo-tp-chip"><i style="background:${TCOLORS[i % TCOLORS.length]}"></i>${esc(shortT(titleOf(work, data, p)))}
           <button type="button" data-tprm="${esc(p)}" aria-label="Remove ${esc(titleOf(work, data, p))}">×</button></span>`).join("")}
-        ${ui.tpages.length < TMAX ? `<input class="seo-input seo-tp-add" list="seo-tp-list" data-tpadd placeholder="+ Add a page" aria-label="Add a page to the chart">
-          <datalist id="seo-tp-list">${tOpts.map((p) => `<option value="${esc(titleOf(work, data, p.path) + " — " + p.path)}">`).join("")}</datalist>` : ""}
+        ${ui.tpages.length < TMAX ? `<div class="seo-tp-combo">
+            <input class="seo-input seo-tp-add" data-tpq placeholder="+ Add a page: type its name" autocomplete="off" spellcheck="false"
+              role="combobox" aria-autocomplete="list" aria-controls="seo-tp-res" aria-label="Add a page to the chart">
+            <div class="seo-tp-res" id="seo-tp-res" role="listbox" data-tpres>${tpResults("")}</div>
+          </div>` : `<span class="seo-note">Up to ${TMAX} pages. Remove one to add another.</span>`}
       </div>
       <div class="seo-row" style="margin:8px 0 0">
         <span class="seo-note">Quick picks:</span>
@@ -952,12 +1008,17 @@ export async function mountSeo(el, opts = {}) {
   /* ----- events (delegated) ----- */
 
   root.addEventListener("click", (e) => {
-    const t = e.target.closest("[data-tshow],[data-tprm],[data-tquick],[data-tclear],[data-tmode],[data-drx],[data-kpi],[data-drtab],[data-drclose],[data-kq],[data-drask],[data-advpage],[data-prtoggle],[data-prf],[data-prall],[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
+    const t = e.target.closest("[data-tpick],[data-tshow],[data-tprm],[data-tquick],[data-tclear],[data-tmode],[data-drx],[data-kpi],[data-drtab],[data-drclose],[data-kq],[data-drask],[data-advpage],[data-prtoggle],[data-prf],[data-prall],[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
     if (!t || !root.contains(t)) return;
     const ds = t.dataset;
 
     // Overview drill-downs
     // The Trend card: pages
+    if (ds.tpick !== undefined) {
+      addTPages([ds.tpick]);
+      root.querySelector("[data-tpq]")?.focus();   // ready for the next one
+      return;
+    }
     if (ds.tshow !== undefined) { ui.tshow = ds.tshow; saveTr(); render(); return; }
     if (ds.tprm !== undefined) { ui.tpages = ui.tpages.filter((p) => tkey(p) !== tkey(ds.tprm)); saveTr(); render(); return; }
     if (ds.tclear !== undefined) { ui.tpages = []; saveTr(); render(); return; }
@@ -1106,9 +1167,31 @@ export async function mountSeo(el, opts = {}) {
   });
 
   root.addEventListener("input", (e) => {
-    if (e.target.matches("[data-filter]")) { ui.filter = e.target.value; ui.limit = 100; renderTable(); }
+    if (e.target.matches("[data-tpq]")) { tpActive = 0; tpRefresh(e.target); }
+    else if (e.target.matches("[data-filter]")) { ui.filter = e.target.value; ui.limit = 100; renderTable(); }
     else if (e.target.matches("[data-hidezero]")) { ui.hideZero = e.target.checked; renderTable(); }
     else if (e.target.matches("[data-prionly]")) { ui.priOnly = e.target.checked; renderTable(); }
+  });
+
+  // The page search: keep the box focused while a result is clicked (Safari doesn't focus buttons), and the keyboard
+  root.addEventListener("mousedown", (e) => { if (e.target.closest("[data-tpick]")) e.preventDefault(); });
+  root.addEventListener("keydown", (e) => {
+    const input = e.target.closest?.("[data-tpq]");
+    if (!input) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!tpLast.length) return;
+      tpActive = (tpActive + (e.key === "ArrowDown" ? 1 : -1) + tpLast.length) % tpLast.length;
+      tpRefresh(input);
+      input.closest(".seo-tp-combo")?.querySelector(".seo-tp-opt.is-on")?.scrollIntoView({ block: "nearest" });
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      const pick = tpLast[tpActive];
+      if (pick) { addTPages([pick.path]); root.querySelector("[data-tpq]")?.focus(); }
+    } else if (e.key === "Escape") {
+      input.value = "";
+      input.blur();
+    }
   });
 
   const onKey = (e) => {
