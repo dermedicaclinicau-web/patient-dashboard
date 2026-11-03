@@ -8,7 +8,7 @@ import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan, titleOf } 
 import { renderTasks } from "./seo-tasks.js?v=9";
 import { renderClusters } from "./seo-clusters.js?v=2";
 import { renderAdvisor } from "./seo-advisor.js?v=2";
-import { drillHtml, loadWindows } from "./seo-drill.js?v=2";
+import { drillHtml, loadWindows } from "./seo-drill.js?v=3";
 import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js?v=9";
 
 const TABS = [

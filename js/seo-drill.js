@@ -15,6 +15,21 @@ const TABS = {
   sessions: ["Landing pages"], conversions: ["Landing pages"], aiSessions: ["Assistants", "Pages"],
 };
 
+// What people search for: each group, by the words in the search (a search can be in more than one)
+const THEMES = [
+  { k: "causes", label: "Causes and “what is”", color: "#7F77DD", re: /\b(causes?|caused|why|what is|what are|what's|meaning|reasons?)\b/ },
+  { k: "treat", label: "Treatment options", color: "#1D9E75", re: /\b(treatments?|treat|treating|laser|removal|remove|get rid|cure|fix|therapy|cream|peel|clinic)\b/ },
+  { k: "cost", label: "Cost and price", color: "#BA7517", re: /\b(cost|costs|price|prices|pricing|how much|cheap|affordable|afterpay|payment plan)\b/ },
+  { k: "local", label: "Local (Perth and suburbs)", color: "#378ADD", re: /\b(perth|near me|wa|western australia|subiaco|nedlands|claremont|cottesloe|joondalup|fremantle|scarborough|leederville|mount lawley|applecross|cbd)\b/ },
+  { k: "compare", label: "Comparisons", color: "#D85A30", re: /\b(vs|versus|or|compared|comparison|difference|better)\b/ },
+  { k: "safety", label: "Safety, pain and downtime", color: "#D4537E", re: /\b(hurt|hurts|pain|painful|side effects?|safe|safety|risks?|downtime|recovery|swelling|bruising)\b/ },
+  { k: "results", label: "Results and how long", color: "#639922", re: /\b(results?|before and after|how long|last|lasts|sessions?|how many|work|works|worth it|effective)\b/ },
+];
+const QUESTION_RE = /\b(how|what|why|when|does|do|can|is|are|should|which)\b|\?$/;
+const WORD_STOP = new Set(["the", "and", "for", "with", "what", "how", "does", "can", "are", "you", "your", "from", "after", "best", "get",
+  "why", "when", "which", "that", "this", "near", "into", "without", "much", "long", "will", "have", "has", "who"]);
+const TAG_TONE = { Content: "grey", Cost: "amber", FAQ: "blue", Careful: "red", Local: "green", Growing: "green" };
+
 const wcache = { v: null, p: null };
 export async function loadWindows(force) {
   if (wcache.v && !force) return wcache.v;
@@ -336,6 +351,109 @@ export function drillHtml(c, o) {
     tip = "These pages are being recommended by AI assistants like ChatGPT and Perplexity. Keep them accurate and up to date, with clear answers near the top.";
   }
 
+  // "What people are searching for" and "Worth considering" (treatment searches only)
+  function themesHtml() {
+    const nb = Q.filter((x) => !x.brand);
+    const list = nb.filter((x) => x.i > 0);
+    if (list.length < 10) return "";
+    const tot = list.reduce((a, x) => a + x.i, 0) || 1;
+    const pct = (s) => Math.round(s * 100) + "%";
+    const rows = THEMES.map((t) => {
+      const m = nb.filter((x) => t.re.test(x.q.toLowerCase()));
+      const now = m.filter((x) => x.i > 0).sort((a, b) => b.i - a.i);
+      const imp = now.reduce((a, x) => a + x.i, 0);
+      const pimp = hasCmp ? m.reduce((a, x) => a + (x.pi || 0), 0) : null;
+      return { ...t, imp, pimp, share: imp / tot, ex: now.slice(0, 3).map((x) => x.q) };
+    }).filter((r) => r.imp > 0).sort((a, b) => b.imp - a.imp);
+    if (!rows.length) return "";
+    const T = Object.fromEntries(rows.map((r) => [r.k, r]));
+    const change = (r) => {
+      if (r.pimp == null) return "";
+      if (!r.pimp) return ` <span class="seo-pr-pill is-green">new</span>`;
+      const p = Math.round((r.imp / r.pimp - 1) * 100);
+      return p ? `<div class="seo-d ${p > 0 ? "up" : "down"}">${p > 0 ? "▲" : "▼"} ${Math.abs(p)}%</div>` : `<div class="seo-d flat">no change</div>`;
+    };
+    const growing = (r) => (r.pimp && r.imp >= r.pimp * 1.2 ? " and growing" : "");
+
+    // The most common words, weighted by impressions
+    const wc = new Map();
+    list.forEach((x) => {
+      new Set(x.q.toLowerCase().split(/[^a-z0-9']+/)).forEach((w) => {
+        if (w.length < 3 || WORD_STOP.has(w) || /^\d+$/.test(w)) return;
+        wc.set(w, (wc.get(w) || 0) + x.i);
+      });
+    });
+    const words = [...wc.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([w]) => w);
+
+    // The pages Google shows for searches in a group (last 28 days)
+    const pagesFor = (re) => {
+      const by = new Map();
+      (c.work.queries || []).forEach((q) => {
+        const l = String(q.q).toLowerCase();
+        if (q.topic === "__brand" || isBrand(l) || !re.test(l)) return;
+        (q.pages || []).forEach((p) => {
+          const k = keyOf(p.path);
+          const x = by.get(k) || { path: p.path, i: 0 };
+          x.i += p.i || 0;
+          by.set(k, x);
+        });
+      });
+      return [...by.values()].sort((a, b) => b.i - a.i).slice(0, 3);
+    };
+
+    // Worth considering: [weight, tag, text]
+    const sugg = [];
+    if (T.causes && T.causes.share >= 0.15) {
+      sugg.push([T.causes.share, "Content", `<b>${pct(T.causes.share)} of searches ask what causes it or what it is${growing(T.causes)}.</b> Open the main pages with a short, clear answer, and link those guides to the treatment pages.`]);
+    }
+    if (T.cost && T.cost.share >= 0.04) {
+      const pg = pagesFor(THEMES.find((t) => t.k === "cost").re);
+      sugg.push([T.cost.share + 0.05, "Cost", `<b>Cost searches are ${pct(T.cost.share)}${growing(T.cost)}</b>${pg.length ? `, landing mostly on ${pg.map((x) => pageLink(x.path)).join(", ")}` : ""}. Check those pages have a cost section with “from [your price]” and what changes the price.`]);
+    }
+    if (T.compare && T.compare.share >= 0.04) {
+      sugg.push([T.compare.share, "FAQ", `<b>Comparison searches</b> like “${esc(T.compare.ex[0])}” are ${pct(T.compare.share)}. A short comparison section or FAQ on the treatment page can win them.`]);
+    }
+    const qShare = list.filter((x) => QUESTION_RE.test(x.q.toLowerCase())).reduce((a, x) => a + x.i, 0) / tot;
+    const deep = c.work.health?.content?.deep || {};
+    const noFaq = (c.work.settings?.keyPages || []).filter((p) => deep[keyOf(p)] && !deep[keyOf(p)].faq).length;
+    if (qShare >= 0.15 && noFaq) {
+      sugg.push([qShare, "FAQ", `<b>${pct(qShare)} of searches are questions, but ${noFaq} priority page${noFaq === 1 ? " has" : "s have"} no FAQ section.</b> FAQs answer them directly and can show in Google. Site health → Content lists the pages.`]);
+    }
+    if (T.safety && T.safety.share >= 0.03) {
+      sugg.push([T.safety.share, "Careful", `<b>Questions about pain, side effects and downtime are ${pct(T.safety.share)}${growing(T.safety)}.</b> Answer them honestly on the page: the advertising rules don't allow playing them down.`]);
+    }
+    if (T.results && T.results.share >= 0.04) {
+      sugg.push([T.results.share * 0.9, "Careful", `<b>People ask about results and how long they last (${pct(T.results.share)}).</b> Explain what to expect and how many sessions, without promising results.`]);
+    }
+    if (T.local && T.local.share >= 0.08) {
+      sugg.push([T.local.share * 0.8, "Local", `<b>${pct(T.local.share)} of searches name Perth or a suburb.</b> Keep “Perth” in treatment page titles, and keep your Google Business Profile services and posts up to date.`]);
+    }
+    const grow = rows.filter((r) => r.pimp >= 100 && r.imp >= r.pimp * 1.3).sort((a, b) => b.imp / b.pimp - a.imp / a.pimp)[0];
+    if (grow) {
+      sugg.push([1, "Growing", `<b>“${esc(grow.label)}” searches grew ${Math.round((grow.imp / grow.pimp - 1) * 100)}%</b>, for example “${esc(grow.ex[0])}”. Make sure a page answers them well.`]);
+    }
+    const top = sugg.sort((a, b) => b[0] - a[0]).slice(0, 4);
+
+    const askThemes = `People's treatment searches between ${fmtDay(o.r.from)} and ${fmtDay(o.r.to)}: ${rows.slice(0, 6).map((r) => `${r.label} ${pct(r.share)}`).join(", ")}. ` +
+      `Most common words: ${words.join(", ")}. What should we add or change on our pages to answer these searches better? Write drafts where useful.`;
+
+    return `<div class="seo-dr-th">
+      <div class="seo-row" style="margin:0 0 4px"><h4>What people are searching for</h4>
+        <span class="seo-note">${h.fmtInt(list.length)} treatment searches · share of impressions${hasCmp ? " · change vs before" : ""}</span></div>
+      ${rows.map((r) => `<div class="seo-dr-tr"><span>${esc(r.label)}</span>
+        <div style="min-width:0"><div class="seo-dr-track"><i style="width:${Math.max(2, Math.round(r.share * 100))}%;background:${r.color}"></i></div>
+          <div class="seo-note seo-dr-ex">${r.ex.map(esc).join(" · ")}</div></div>
+        <span><b>${pct(r.share)}</b>${change(r)}</span></div>`).join("")}
+      ${words.length ? `<p class="seo-note" style="margin:6px 0 0">Most common words: <b>${words.map(esc).join(" · ")}</b></p>` : ""}
+      <p class="seo-note" style="margin:2px 0 0">A search can be in more than one group. Brand searches are left out.</p>
+      ${top.length ? `<h4 style="margin-top:14px">Worth considering</h4>
+        ${top.map(([, tag, txt], i) => `<div class="seo-dr-do"><span class="seo-dr-n">${i + 1}</span>
+          <div>${txt} <span class="seo-pr-pill is-${TAG_TONE[tag] || "grey"}">${tag}</span></div></div>`).join("")}` : ""}
+      <div class="seo-w-acts"><button class="seo-btn" type="button" data-drask="${esc(askThemes)}">Ask the Advisor to plan these</button></div>
+    </div>`;
+  }
+  const themes = ["clicks", "nonBrand", "impressions", "ctr", "position"].includes(key) && pick.w ? themesHtml() : "";
+
   const ask = hasCmp
     ? `Why did our ${o.label.toLowerCase()} change between ${fmtDay(o.r.from)} and ${fmtDay(o.r.to)} compared with ${mode === "year" ? "the same time last year" : "the period before"}, and what should we do about it?`
     : `What's driving our ${o.label.toLowerCase()} between ${fmtDay(o.r.from)} and ${fmtDay(o.r.to)}, and how can we improve it?`;
@@ -350,6 +468,7 @@ export function drillHtml(c, o) {
     ${tip ? `<div class="seo-dr-tip">${tip}</div>` : ""}
     <div class="seo-w-acts"><button class="seo-btn on" type="button" data-drask="${esc(ask)}">Ask the Advisor about this</button>
       <span class="seo-note">Click a row to see what's behind it.</span></div>
+    ${themes}
   </div>`;
 }
 
@@ -383,6 +502,19 @@ const CSS = `
 .seo-dr-mr > span:not(:first-child){text-align:right}
 .seo-dr-warn{margin:6px 0 0;padding:6px 10px;border-radius:6px;background:#fffbeb;color:#92400e;font-size:12.5px}
 .seo-dr-tip{margin-top:10px;padding:8px 12px;border-radius:8px;background:#fffbeb;border:1px solid #fde68a;font-size:13px;line-height:1.5}
+.seo-dr-th{margin-top:16px;padding-top:14px;border-top:1px dashed var(--border,#e5e7eb)}
+.seo-dr-th h4{margin:0;font-size:14px}
+.seo-dr-tr{display:grid;grid-template-columns:190px minmax(0,1fr) 72px;gap:12px;align-items:center;padding:7px 0;border-top:1px solid var(--border,#e5e7eb);font-size:13px}
+.seo-dr-tr:first-of-type{border-top:0}
+.seo-dr-tr > span:last-child{text-align:right}
+.seo-dr-track{height:8px;border-radius:4px;background:#f1f5f9;overflow:hidden}
+.seo-dr-track i{display:block;height:100%;border-radius:4px}
+.seo-dr-ex{margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.seo-dr-do{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-top:1px solid var(--border,#e5e7eb);font-size:13px;line-height:1.5}
+.seo-dr-do:first-of-type{border-top:0}
+.seo-dr-n{flex:none;width:22px;height:22px;border-radius:50%;background:#eff6ff;color:#1d4ed8;font-size:12px;font-weight:700;display:flex;align-items:center;justify-content:center}
+.seo-dr .seo-pr-pill.is-blue{background:#eff6ff;color:#1d4ed8}
+@media (max-width:640px){.seo-dr-tr{grid-template-columns:120px minmax(0,1fr) 56px}}
 @media (max-width:640px){
   .seo-dr-r{grid-template-columns:minmax(0,1fr) 70px 70px !important}.seo-dr-r > span:nth-child(n+4){display:none}
   .seo-dr-mr{grid-template-columns:minmax(0,1fr) 60px 60px !important}.seo-dr-mr > span:nth-child(n+4){display:none}
