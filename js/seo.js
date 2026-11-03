@@ -307,7 +307,13 @@ function lineChart(points, { invert = false, fmt = fmtInt, marks = [], cmp = nul
 const TCOLORS = ["#2563eb", "#16a34a", "#ea580c", "#9333ea", "#db2777", "#0891b2"];
 const TMAX = 6;
 const PAGE_METRICS = ["clicks", "impressions", "ctr", "position"];
-const tkey = (p) => String(p || "").split("#")[0].split("?")[0].replace(/\/+$/, "").toLowerCase() || "/";
+// A page's address for matching: no website address in front, no ?query or #part, no end slash, lower case
+const tkey = (p) => {
+  let s = String(p || "").trim().replace(/^https?:\/\/[^/]+/i, "").split("#")[0].split("?")[0];
+  try { s = decodeURIComponent(s); } catch { /* as is */ }
+  if (!s.startsWith("/")) s = "/" + s;
+  return s.replace(/\/+$/, "").toLowerCase() || "/";
+};
 const shortT = (s, n = 34) => (String(s).length > n ? String(s).slice(0, n - 1) + "…" : String(s));
 
 /** Clicks, impressions, CTR or position for some pages over [from, to], from their daily numbers */
@@ -400,6 +406,10 @@ button.seo-kpi.is-on{border-color:var(--accent,#2563eb);box-shadow:0 0 0 1px var
 .seo-tp-chip button{border:0;background:none;padding:0 6px;font-size:15px;line-height:1;cursor:pointer;color:var(--text-muted,#6b7280)}
 .seo-tp-chip button:hover{color:#dc2626}
 .seo-tp-combo{position:relative}
+.seo-tp-msg{margin:0 0 8px;padding:8px 12px;border-radius:8px;background:#eff6ff;border:1px solid #bfdbfe;font-size:13px}
+.seo-tp-nochart{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;min-height:200px;padding:20px;
+  border:1px dashed var(--border,#e5e7eb);border-radius:10px;text-align:center;font-size:13.5px;color:var(--text-muted,#6b7280);line-height:1.6}
+.seo-tp-nochart b{color:var(--text,#1e293b)}
 .seo-tp-add{min-width:280px;padding:6px 12px;border-radius:999px}
 .seo-tp-add:focus{outline:none;border-color:var(--accent,#2563eb);box-shadow:0 0 0 3px rgba(37,99,235,.15)}
 .seo-tp-res{display:none;position:absolute;left:0;top:calc(100% + 6px);z-index:30;width:min(460px,90vw);max-height:360px;overflow:auto;
@@ -490,13 +500,15 @@ export async function mountSeo(el, opts = {}) {
     const m = new Map();
     const typeName = (t) => (!t || t === "page" ? "Page" : t === "post" ? "Blog post" : String(t).replace(/[-_]/g, " ").replace(/^./, (ch) => ch.toUpperCase()));
     (work?.wp?.pages || []).forEach((p) => {
-      if (!p || !p.path) return;
-      m.set(tkey(p.path), { path: p.path, title: p.title || titleOf(work, data, p.path), type: typeName(p.type), clicks: 0 });
+      const raw = p && (p.path || p.url || p.link);
+      if (!raw) return;
+      const path = String(raw).replace(/^https?:\/\/[^/]+/i, "") || "/";
+      m.set(tkey(path), { path, title: p.title || titleOf(work, data, path), type: typeName(p.type), clicks: 0 });
     });
     data.pages.forEach((p) => {
       const k = tkey(p.path);
       const x = m.get(k);
-      if (x) x.clicks += p.m28.clicks;
+      if (x) { x.clicks += p.m28.clicks; x.path = p.path; }   // use Google's version of the address
       else if (p.m28.impressions > 0) m.set(k, { path: p.path, title: titleOf(work, data, p.path), type: "Page", clicks: p.m28.clicks });
     });
     return [...m.values()];
@@ -655,11 +667,12 @@ export async function mountSeo(el, opts = {}) {
     // The chart: days, weeks or months across the chosen dates, and the comparison lined up underneath
     let gran = ui.gran === "auto" ? autoGran(r.n) : ui.gran;
     if ((gran === "day" && r.n > 120) || (gran === "month" && r.n < 45)) gran = autoGran(r.n);
-    const pageMode = ui.tshow === "pages" && ui.tpages.length > 0;
-    const hasPI = data.pages.some((p) => Array.isArray(p.dailyIArr));
-    const pageOk = (k) => PAGE_METRICS.includes(k) && (hasPI || k === "clicks");
-    let mk = METRICS[ui.metric] && (!METRICS[ui.metric].brand || hasBrand) ? ui.metric : "clicks";
-    if (pageMode && !pageOk(mk)) mk = "clicks";
+    const hasPI = data.pages.some((p) => Array.isArray(p.dailyIArr) && p.dailyIArr.length);
+    const mk = METRICS[ui.metric] && (!METRICS[ui.metric].brand || hasBrand) ? ui.metric : "clicks";
+    const wantPages = ui.tshow === "pages" && ui.tpages.length > 0;
+    const siteOnly = wantPages && !PAGE_METRICS.includes(mk);   // e.g. Organic sessions: only recorded for the whole site
+    const pageMode = wantPages && !siteOnly;
+    const pageWaiting = pageMode && mk !== "clicks" && !hasPI;   // page impressions and position not saved yet
     const m = METRICS[mk];
     const bks = buckets(r.from, r.to, gran);
     const off = prev ? daysBetween(cmp.from, r.from) : 0;
@@ -872,13 +885,20 @@ export async function mountSeo(el, opts = {}) {
           }).join("")}
           <span class="seo-sp"></span>
           ${Object.entries(METRICS).filter(([, v]) => !v.brand || hasBrand).map(([k, v]) => {
-            const off3 = ui.tshow === "pages" && !pageOk(k);
-            return `<button class="seo-btn ${mk === k ? "on" : ""}" data-metric="${k}"${off3
-              ? ` disabled title="${PAGE_METRICS.includes(k) ? "Available after the next nightly update" : "Not available for single pages"}"` : ""}>${v.label}</button>`;
+            const tip = ui.tshow === "pages" && !PAGE_METRICS.includes(k) ? ` title="Shown for the whole site: not recorded for single pages"` : "";
+            return `<button class="seo-btn ${mk === k ? "on" : ""}" data-metric="${k}"${tip}>${v.label}</button>`;
           }).join("")}
         </div>
         ${pickerHtml}
-        <div class="seo-chart">${lineChart(points, { ...m, marks: trendMarks, cmp: cpts, freshAfter: ov.periodEnd, gran, multi, color: lineColor, name: lineName })}</div>
+        ${siteOnly ? `<div class="seo-tp-msg">${esc(m.label)} isn't recorded for single pages, so this shows <b>the whole site</b>.
+          Choose Clicks, Impressions, CTR or Avg position to compare your pages.</div>` : ""}
+        <div class="seo-chart">${pageWaiting
+          ? `<div class="seo-tp-nochart"><b>${esc(m.label)} for single pages isn't saved yet.</b><br>
+              The nightly update adds it. To see it now, run <code>runSeoNightly</code> once in Apps Script, then press Refresh.</div>`
+          : pageMode && !points.concat(...(multi || []).map((s) => s.pts)).some((p) => p.v)
+            ? `<div class="seo-tp-nochart"><b>No ${esc(m.label.toLowerCase())} from Google for ${ui.tpages.length === 1 ? "this page" : "these pages"} in these dates.</b><br>
+                Google may not be showing ${ui.tpages.length === 1 ? "it" : "them"} yet. Try a longer date range.</div>`
+            : lineChart(points, { ...m, marks: trendMarks, cmp: cpts, freshAfter: ov.periodEnd, gran, multi, color: lineColor, name: lineName })}</div>`
         ${pageMode ? pageLegend : cpts ? `<div class="seo-legend"><span></span>${esc(fmtDate(r.from, false))} – ${esc(fmtDate(r.to))}
           <span class="is-cmp"></span>${esc(cmp.name)}: ${esc(fmtDate(cmp.from, false))} – ${esc(fmtDate(cmp.to))}</div>` : ""}
         ${pageMode && ui.tmode === "sep" && prev ? `<div class="seo-note">Choose Combined to compare these pages with ${esc(cmp.name.toLowerCase())}.</div>` : ""}
