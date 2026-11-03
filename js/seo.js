@@ -7,7 +7,8 @@ import { doc, getDoc, collection, query, where, getDocs } from "https://www.gsta
 import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan, titleOf } from "./seo-work.js?v=15";
 import { renderTasks } from "./seo-tasks.js?v=9";
 import { renderClusters } from "./seo-clusters.js?v=2";
-import { renderAdvisor } from "./seo-advisor.js?v=1";
+import { renderAdvisor } from "./seo-advisor.js?v=2";
+import { drillHtml, loadWindows } from "./seo-drill.js?v=1";
 import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js?v=9";
 
 const TABS = [
@@ -310,6 +311,9 @@ const CSS = `
 .seo-kpis{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-bottom:16px}
 .seo-kpi,.seo-card{background:var(--card,#fff);border:1px solid var(--border,#e5e7eb);border-radius:10px}
 .seo-kpi{padding:12px}
+button.seo-kpi{display:block;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;transition:border-color .15s,box-shadow .15s}
+button.seo-kpi:hover{border-color:#93c5fd}
+button.seo-kpi.is-on{border-color:var(--accent,#2563eb);box-shadow:0 0 0 1px var(--accent,#2563eb)}
 .seo-kpi .l{font-size:12px;color:var(--text-muted,#6b7280)}
 .seo-kpi .v{font-size:22px;font-weight:600;margin:4px 0}
 .seo-kpi .p{font-size:11px;color:var(--text-muted,#6b7280)}
@@ -397,7 +401,9 @@ export async function mountSeo(el, opts = {}) {
   let work = null;
   let tab = tabs.some((t) => t.id === param) ? param : "overview";
   const ui = { preset: "28", from: "", to: "", compare: "prev", gran: "auto", metric: "clicks",
-    sortKey: "clicks", sortDir: -1, filter: "", hideZero: true, limit: 100, pview: "table" };
+    sortKey: "clicks", sortDir: -1, filter: "", hideZero: true, limit: 100, pview: "table", kpi: "", drtab: "" };
+  let W = null;          // the Overview drill-downs (seo_windows), loaded the first time a card is opened
+  let wForce = false;
   const OV_KEY = "dm.seo.overview";
   try {
     const s = JSON.parse(sessionStorage.getItem(OV_KEY) || "{}") || {};
@@ -451,6 +457,7 @@ export async function mountSeo(el, opts = {}) {
     body.innerHTML = `<div class="seo-empty">Loading…</div>`;
     try {
       [data, work] = await Promise.all([loadData(force), loadWork(force)]);
+      if (force) { W = null; wForce = true; }
       renderMeta();
       render();
     } catch (e) {
@@ -500,13 +507,16 @@ export async function mountSeo(el, opts = {}) {
     const prev = cmp && cmp.ok ? sumRange(days, cmp.from, cmp.to) : null;
     const hasBrand = cur.nonBrand != null;
 
-    const tile = (label, value, d, notes) => {
+    const LABELS = {};
+    const tile = (label, value, d, notes, key) => {
       const ns = notes.filter(Boolean);
-      return `<div class="seo-kpi"><div class="l">${label}</div><div class="v">${value}</div>${d || ""}${ns.length ? `<div class="p">${ns.join(" · ")}</div>` : ""}</div>`;
+      LABELS[key] = label;
+      return `<button type="button" class="seo-kpi${ui.kpi === key ? " is-on" : ""}" data-kpi="${key}" aria-expanded="${ui.kpi === key}"
+        title="See what's behind this number"><div class="l">${label}</div><div class="v">${value}</div>${d || ""}${ns.length ? `<div class="p">${ns.join(" · ")}</div>` : ""}</button>`;
     };
     const kpi = (label, key, f, opts = {}, note = "") => tile(label, f(cur[key]),
       prev ? delta(cur[key], prev[key], opts) : "",
-      [prev && prev[key] != null ? `vs ${f(prev[key])}` : "", note]);
+      [prev && prev[key] != null ? `vs ${f(prev[key])}` : "", note], key);
 
     const kpis = [
       kpi("Clicks", "clicks", fmtInt),
@@ -659,6 +669,12 @@ export async function mountSeo(el, opts = {}) {
       </div>
       ${fresh ? `<p class="seo-note" style="margin:-4px 0 12px">The last ${fresh} day${fresh === 1 ? "" : "s"} may still change: Search Console takes about 3 days to settle. They're shaded on the chart.</p>` : ""}
       <div class="seo-kpis">${kpis}</div>
+      ${ui.kpi && LABELS[ui.kpi] ? (W
+        ? drillHtml(ctx(), { key: ui.kpi, label: LABELS[ui.kpi], r, cmp: cmp && cmp.ok ? cmp : null, compareMode: ui.compare,
+            preset: ui.preset, W, tab: ui.drtab, cur, prev })
+        : (loadWindows(wForce).then((x) => { W = x; wForce = false; if (tab === "overview") render(); })
+            .catch((e) => { console.warn("Drill-downs not loaded:", e); W = {}; if (tab === "overview") render(); }),
+          `<div class="seo-card seo-empty">Loading…</div>`)) : ""}
       ${changedHtml}
       ${priorityCardHtml(ctx(), prc)}
       <div class="seo-card">
@@ -802,10 +818,29 @@ export async function mountSeo(el, opts = {}) {
   /* ----- events (delegated) ----- */
 
   root.addEventListener("click", (e) => {
-    const t = e.target.closest("[data-advpage],[data-prtoggle],[data-prf],[data-prall],[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
+    const t = e.target.closest("[data-kpi],[data-drtab],[data-drclose],[data-kq],[data-drask],[data-advpage],[data-prtoggle],[data-prf],[data-prall],[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
     if (!t || !root.contains(t)) return;
     const ds = t.dataset;
 
+    // Overview drill-downs
+    if (ds.kpi !== undefined) { ui.kpi = ui.kpi === ds.kpi ? "" : ds.kpi; ui.drtab = ""; render(); return; }
+    if (ds.drtab !== undefined) { ui.drtab = ds.drtab; render(); return; }
+    if (ds.drclose !== undefined) { ui.kpi = ""; render(); return; }
+    if (ds.kq !== undefined) {   // a search: open it in Keywords
+      work.ui = work.ui || { topic: "__all", qsort: "i", qdir: -1, qfilter: "", qlimit: 100, qopen: null, ostatus: "open", otype: "all" };
+      Object.assign(work.ui, { topic: "__all", qfilter: ds.kq, qopen: ds.kq, qlimit: 100 });
+      tab = "keywords";
+      history.replaceState(null, "", "#/seo/keywords");
+      render();
+      return;
+    }
+    if (ds.drask !== undefined) {   // ask the Advisor, with the question written
+      work.advPrefill = { mode: "question", text: ds.drask };
+      tab = "advisor";
+      history.replaceState(null, "", "#/seo/advisor");
+      render();
+      return;
+    }
     if (ds.advpage !== undefined) {
       panel.hidden = true;
       if (work) work.advPrefill = { page: ds.advpage, mode: "page" };

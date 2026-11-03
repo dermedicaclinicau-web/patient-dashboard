@@ -1630,6 +1630,8 @@ match /inv_count_drafts/{id} {
         && request.resource.data.text.size() > 0 && request.resource.data.text.size() <= 2000;
       allow update, delete: if false;
     }
+        // Overview drill-downs (Seo11.gs): searches, landing pages and AI assistant visits for 7, 28 and 90 days
+    match /seo_windows/{id} { allow read: if can('menu.seo'); allow write: if false; }
     
     // ===================== Safety net =====================
     // Anything not allowed by a rule above stays locked

@@ -130,7 +130,10 @@ export function renderAdvisor(body, c) {
   (w.advUnsub || []).forEach((f) => { try { f(); } catch { /* already stopped */ } });
   w.advUnsub = [];
   const ui = w.aui || (w.aui = { thread: "", mode: "auto", page: "", text: "", ex: {} });
-  if (w.advPrefill) { ui.thread = ""; ui.mode = w.advPrefill.mode || "page"; ui.page = w.advPrefill.page || ""; ui.text = ""; w.advPrefill = null; }
+  if (w.advPrefill) {
+    ui.thread = ""; ui.mode = w.advPrefill.mode || "page"; ui.page = w.advPrefill.page || ""; ui.text = w.advPrefill.text || "";
+    w.advPrefill = null;
+  }
   const can = canAsk(c);
   const idx = pageIndex(w, c.data);
   const S = { threads: [], msgs: [], threadsReady: false, msgsReady: false };
