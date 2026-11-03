@@ -228,8 +228,8 @@ function bars(vals, labels, w = 400, h = 120) {
 
 /** Line chart. points: [{ start, end, label, v }]. cmp: [{ label, v }] (same length) or null */
 // multi: more lines [{ label, color, pts: [{ v }] }]; color / name: the main line's colour and name (for pages)
-function lineChart(points, { invert = false, fmt = fmtInt, marks = [], cmp = null, freshAfter = "", gran = "week", multi = null, color = "", name = "" } = {}) {
-  const W = 820, H = 240, L = 52, R = 12, T = 12, B = 28;
+function lineChart(points, { invert = false, fmt = fmtInt, marks = [], cmp = null, freshAfter = "", gran = "week", multi = null, color = "", name = "", labels = false } = {}) {
+  const W = 820, H = 240, L = 52, R = 12, T = labels ? 24 : 12, B = 28;   // more room at the top for the numbers
   const w = W - L - R, h = H - T - B;
   const vals = points.concat(cmp || [], ...(multi || []).map((s) => s.pts)).map((p) => p.v).filter((v) => v != null);
   if (!vals.length) return `<div class="seo-empty">No data for these dates</div>`;
@@ -299,7 +299,39 @@ function lineChart(points, { invert = false, fmt = fmtInt, marks = [], cmp = nul
     return `<g class="seo-mark"><line x1="${xx}" x2="${xx}" y1="${T}" y2="${T + h}"/><circle cx="${xx}" cy="${T + 5}" r="5"/><title>${esc(titles.join("\n"))}</title></g>`;
   }).join("");
 
-  return `<svg viewBox="0 0 ${W} ${H}">${fresh}${grid}${xl}${cmp ? `<path d="${path(cmp)}" class="seo-line-cmp"/>` : ""}${more}<path d="${path(points)}" class="seo-line"${color ? ` style="stroke:${color}"` : ""}/>${dots}${hits}${mks}</svg>`;
+  // Numbers on the chart: each line's peaks (highest first, skipping any that would overlap) and its latest point.
+  // With 14 points or fewer, every point. "Peak" means highest on screen, so for position it's the best (lowest) number.
+  const placed = [];
+  const labelLine = (arr, col) => {
+    const P = arr.map((p, i) => (p.v == null ? null : { i, v: p.v, X: x(i), Y: y(p.v) }));
+    const real = P.filter(Boolean);
+    if (!real.length) return;
+    let pick;
+    if (n <= 14) pick = real;
+    else {
+      pick = real.filter((p) => {
+        const a = P[p.i - 1], b = P[p.i + 1];
+        return (!a || p.Y <= a.Y) && (!b || p.Y <= b.Y) && ((a && p.Y < a.Y) || (b && p.Y < b.Y));
+      });
+      const last = real[real.length - 1];
+      if (!pick.includes(last)) pick.push(last);
+    }
+    pick.sort((p, q) => p.Y - q.Y);
+    let count = 0;
+    for (const p of pick) {
+      if (count >= 10 && n > 14) break;
+      if (placed.some((o) => Math.abs(o.X - p.X) < 28 && Math.abs(o.Y - p.Y) < 16)) continue;
+      placed.push({ X: p.X, Y: p.Y, txt: fmt(p.v), col });
+      count++;
+    }
+  };
+  if (labels) {
+    labelLine(points, color || "var(--accent,#2563eb)");
+    (multi || []).forEach((s) => labelLine(s.pts, s.color));
+  }
+  const vlabs = placed.map((l) => `<text class="seo-vlab" x="${l.X.toFixed(1)}" y="${Math.max(T - 6, l.Y - 8).toFixed(1)}" text-anchor="middle" style="fill:${l.col}">${esc(l.txt)}</text>`).join("");
+
+  return `<svg viewBox="0 0 ${W} ${H}">${fresh}${grid}${xl}${cmp ? `<path d="${path(cmp)}" class="seo-line-cmp"/>` : ""}${more}<path d="${path(points)}" class="seo-line"${color ? ` style="stroke:${color}"` : ""}/>${dots}${vlabs}${hits}${mks}</svg>`;
 }
 
 
@@ -388,6 +420,7 @@ button.seo-kpi.is-on{border-color:var(--accent,#2563eb);box-shadow:0 0 0 1px var
 .seo-line{fill:none;stroke:var(--accent,#2563eb);stroke-width:2}
 .seo-line-cmp{fill:none;stroke:#94a3b8;stroke-width:1.5;stroke-dasharray:5 4}
 .seo-dot{fill:var(--accent,#2563eb)}
+.seo-chart text.seo-vlab{font-size:11px;font-weight:700;paint-order:stroke;stroke:var(--card,#fff);stroke-width:3px;stroke-linejoin:round;pointer-events:none}
 .seo-fresh{fill:#f1f5f9}
 .seo-range{gap:6px}
 .seo-range label{display:flex;align-items:center;gap:6px}
@@ -493,8 +526,9 @@ export async function mountSeo(el, opts = {}) {
     ui.tshow = s.tshow === "pages" ? "pages" : "site";
     ui.tpages = Array.isArray(s.tpages) ? s.tpages.filter((x) => typeof x === "string").slice(0, TMAX) : [];
     ui.tmode = s.tmode === "sum" ? "sum" : "sep";
-  } catch { ui.tshow = "site"; ui.tpages = []; ui.tmode = "sep"; }
-  const saveTr = () => { try { localStorage.setItem(TR_KEY, JSON.stringify({ tshow: ui.tshow, tpages: ui.tpages, tmode: ui.tmode })); } catch { /* private mode */ } };
+    ui.tnum = s.tnum !== false;   // numbers on the chart: on unless turned off
+  } catch { ui.tshow = "site"; ui.tpages = []; ui.tmode = "sep"; ui.tnum = true; }
+  const saveTr = () => { try { localStorage.setItem(TR_KEY, JSON.stringify({ tshow: ui.tshow, tpages: ui.tpages, tmode: ui.tmode, tnum: ui.tnum })); } catch { /* private mode */ } };
   // The page search in the Trend card: every WordPress page and post, plus any page Google knows
   let tpActive = 0, tpLast = [];
   const tpAll = () => {
@@ -884,6 +918,7 @@ export async function mountSeo(el, opts = {}) {
             return `<button class="seo-btn ${gran === k ? "on" : ""}" data-gran="${k}"${off2
               ? ` disabled title="${k === "day" ? "Choose 120 days or fewer" : "Choose at least 45 days"}"` : ""}>${l}</button>`;
           }).join("")}
+          <button type="button" class="seo-btn ${ui.tnum ? "on" : ""}" data-tnum aria-pressed="${ui.tnum}" title="Show the numbers on the chart">123 Numbers</button>
           <span class="seo-sp"></span>
           ${Object.entries(METRICS).filter(([, v]) => !v.brand || hasBrand).map(([k, v]) => {
             const tip = ui.tshow === "pages" && !PAGE_METRICS.includes(k) ? ` title="Shown for the whole site: not recorded for single pages"` : "";
@@ -899,7 +934,7 @@ export async function mountSeo(el, opts = {}) {
           : pageMode && !points.concat(...(multi || []).map((s) => s.pts)).some((p) => p.v)
             ? `<div class="seo-tp-nochart"><b>No ${esc(m.label.toLowerCase())} from Google for ${ui.tpages.length === 1 ? "this page" : "these pages"} in these dates.</b><br>
                 Google may not be showing ${ui.tpages.length === 1 ? "it" : "them"} yet. Try a longer date range.</div>`
-            : lineChart(points, { ...m, marks: trendMarks, cmp: cpts, freshAfter: ov.periodEnd, gran, multi, color: lineColor, name: lineName })}</div>
+            : lineChart(points, { ...m, marks: trendMarks, cmp: cpts, freshAfter: ov.periodEnd, gran, multi, color: lineColor, name: lineName, labels: ui.tnum })}</div>
         ${pageMode ? pageLegend : cpts ? `<div class="seo-legend"><span></span>${esc(fmtDate(r.from, false))} – ${esc(fmtDate(r.to))}
           <span class="is-cmp"></span>${esc(cmp.name)}: ${esc(fmtDate(cmp.from, false))} – ${esc(fmtDate(cmp.to))}</div>` : ""}
         ${pageMode && ui.tmode === "sep" && prev ? `<div class="seo-note">Choose Combined to compare these pages with ${esc(cmp.name.toLowerCase())}.</div>` : ""}
@@ -1031,11 +1066,13 @@ export async function mountSeo(el, opts = {}) {
   /* ----- events (delegated) ----- */
 
   root.addEventListener("click", (e) => {
-    const t = e.target.closest("[data-cmp2],[data-cmpcl],[data-tpick],[data-tshow],[data-tprm],[data-tquick],[data-tclear],[data-tmode],[data-drx],[data-kpi],[data-drtab],[data-drclose],[data-kq],[data-drask],[data-advpage],[data-prtoggle],[data-prf],[data-prall],[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
+    const t = e.target.closest("[data-tnum],[data-cmp2],[data-cmpcl],[data-tpick],[data-tshow],[data-tprm],[data-tquick],[data-tclear],[data-tmode],[data-drx],[data-kpi],[data-drtab],[data-drclose],[data-kq],[data-drask],[data-advpage],[data-prtoggle],[data-prf],[data-prall],[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
     if (!t || !root.contains(t)) return;
     const ds = t.dataset;
 
     // Overview drill-downs
+    if (ds.tnum !== undefined) { ui.tnum = !ui.tnum; saveTr(); render(); return; }
+
     // Head to head: open 2 pages in the Trend card (from Site health duplicates, drill-downs…)
     if (ds.cmp2 !== undefined) {
       const [a, b] = ds.cmp2.split("|");
