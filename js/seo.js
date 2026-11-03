@@ -53,6 +53,8 @@ async function loadData(force) {
     const pages = snap.docs.map((d) => {
       const p = { id: d.id, ...d.data() };
       p.dailyArr = typeof p.daily === "string" ? (p.daily ? p.daily.split(",").map(Number) : []) : null;
+      p.dailyIArr = typeof p.dailyI === "string" ? (p.dailyI ? p.dailyI.split(",").map(Number) : []) : null;
+      p.dailyPArr = typeof p.dailyP === "string" ? (p.dailyP ? p.dailyP.split(",").map((v) => Number(v) / 10) : []) : null;
       p.dClicks = p.m28.clicks - p.prev28.clicks;
       // positive = moved up (better)
       p.dPos = p.m28.position != null && p.prev28.position != null ? p.prev28.position - p.m28.position : null;
@@ -224,10 +226,11 @@ function bars(vals, labels, w = 400, h = 120) {
 }
 
 /** Line chart. points: [{ start, end, label, v }]. cmp: [{ label, v }] (same length) or null */
-function lineChart(points, { invert = false, fmt = fmtInt, marks = [], cmp = null, freshAfter = "", gran = "week" } = {}) {
+// multi: more lines [{ label, color, pts: [{ v }] }]; color / name: the main line's colour and name (for pages)
+function lineChart(points, { invert = false, fmt = fmtInt, marks = [], cmp = null, freshAfter = "", gran = "week", multi = null, color = "", name = "" } = {}) {
   const W = 820, H = 240, L = 52, R = 12, T = 12, B = 28;
   const w = W - L - R, h = H - T - B;
-  const vals = points.concat(cmp || []).map((p) => p.v).filter((v) => v != null);
+  const vals = points.concat(cmp || [], ...(multi || []).map((s) => s.pts)).map((p) => p.v).filter((v) => v != null);
   if (!vals.length) return `<div class="seo-empty">No data for these dates</div>`;
   let min = Math.min(...vals), max = Math.max(...vals);
   if (!invert) min = Math.min(0, min);
@@ -271,12 +274,17 @@ function lineChart(points, { invert = false, fmt = fmtInt, marks = [], cmp = nul
     ? `<rect class="seo-fresh" x="${fx.toFixed(1)}" y="${T}" width="${(W - R - fx).toFixed(1)}" height="${h}"><title>Search Console may still update these days</title></rect>`
     : "";
 
-  const dots = n <= 62 ? points.map((p, i) => (p.v == null ? ""
-    : `<circle class="seo-dot" cx="${x(i).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="${n <= 31 ? 2.5 : 1.8}"/>`)).join("") : "";
+  const dotStyle = color ? ` style="fill:${color}"` : "";
+  const dots = n <= 62 && !(multi && multi.length) ? points.map((p, i) => (p.v == null ? ""
+    : `<circle class="seo-dot" cx="${x(i).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="${n <= 31 ? 2.5 : 1.8}"${dotStyle}/>`)).join("") : "";
+  const more = (multi || []).map((s) => `<path d="${path(s.pts)}" class="seo-line" style="stroke:${s.color}"/>`).join("");
 
   const hits = points.map((p, i) => {
     const c = cmp && cmp[i];
-    const tip = `${p.label}: ${p.v == null ? "—" : fmt(p.v)}` + (c ? `\n${c.label}: ${c.v == null ? "—" : fmt(c.v)}` : "");
+    const val = (v) => (v == null ? "—" : fmt(v));
+    const tip = multi && multi.length
+      ? [p.label, `${name}: ${val(p.v)}`, ...multi.map((s) => `${s.label}: ${val(s.pts[i]?.v)}`)].join("\n")
+      : `${p.label}${name ? ` · ${name}` : ""}: ${val(p.v)}` + (c ? `\n${c.label}: ${val(c.v)}` : "");
     return `<rect x="${(x(i) - step / 2).toFixed(1)}" y="${T}" width="${step.toFixed(1)}" height="${h}" fill="transparent"><title>${esc(tip)}</title></rect>`;
   }).join("");
 
@@ -290,9 +298,36 @@ function lineChart(points, { invert = false, fmt = fmtInt, marks = [], cmp = nul
     return `<g class="seo-mark"><line x1="${xx}" x2="${xx}" y1="${T}" y2="${T + h}"/><circle cx="${xx}" cy="${T + 5}" r="5"/><title>${esc(titles.join("\n"))}</title></g>`;
   }).join("");
 
-  return `<svg viewBox="0 0 ${W} ${H}">${fresh}${grid}${xl}${cmp ? `<path d="${path(cmp)}" class="seo-line-cmp"/>` : ""}<path d="${path(points)}" class="seo-line"/>${dots}${hits}${mks}</svg>`;
+  return `<svg viewBox="0 0 ${W} ${H}">${fresh}${grid}${xl}${cmp ? `<path d="${path(cmp)}" class="seo-line-cmp"/>` : ""}${more}<path d="${path(points)}" class="seo-line"${color ? ` style="stroke:${color}"` : ""}/>${dots}${hits}${mks}</svg>`;
 }
 
+
+/* ---------- the Trend card's pages ---------- */
+
+const TCOLORS = ["#2563eb", "#16a34a", "#ea580c", "#9333ea", "#db2777", "#0891b2"];
+const TMAX = 6;
+const PAGE_METRICS = ["clicks", "impressions", "ctr", "position"];
+const tkey = (p) => String(p || "").split("#")[0].split("?")[0].replace(/\/+$/, "").toLowerCase() || "/";
+const shortT = (s, n = 34) => (String(s).length > n ? String(s).slice(0, n - 1) + "…" : String(s));
+
+/** Clicks, impressions, CTR or position for some pages over [from, to], from their daily numbers */
+function pageVal(pgs, from, to, metric) {
+  let c = 0, i = 0, pw = 0;
+  for (const p of pgs) {
+    if (!Array.isArray(p.dailyArr) || !p.dailyFrom) continue;
+    const i0 = Math.max(0, daysBetween(p.dailyFrom, from)), i1 = daysBetween(p.dailyFrom, to);
+    for (let d = i0; d <= i1; d++) {
+      c += p.dailyArr[d] || 0;
+      const imp = p.dailyIArr ? p.dailyIArr[d] || 0 : 0;
+      i += imp;
+      if (p.dailyPArr && imp) pw += (p.dailyPArr[d] || 0) * imp;
+    }
+  }
+  if (metric === "clicks") return c;
+  if (metric === "impressions") return i;
+  if (metric === "ctr") return i ? c / i : null;
+  return i ? pw / i : null;
+}
 
 /* ---------- styles ---------- */
 
@@ -355,6 +390,16 @@ button.seo-kpi.is-on{border-color:var(--accent,#2563eb);box-shadow:0 0 0 1px var
 .seo-legend span{display:inline-block;width:22px;height:0;border-top:2px solid var(--accent,#2563eb);margin-left:10px}
 .seo-legend span:first-child{margin-left:0}
 .seo-legend .is-cmp{border-top:2px dashed #94a3b8}
+.seo-seg{display:inline-flex;gap:3px;padding:3px;border-radius:10px;background:#f1f5f9}
+.seo-seg button{border:0;background:none;padding:5px 12px;border-radius:8px;font:inherit;font-size:13px;cursor:pointer;color:inherit}
+.seo-seg button.on{background:var(--card,#fff);box-shadow:0 1px 2px rgba(0,0,0,.08);font-weight:600}
+.seo-tp{margin:0 0 10px;padding:10px 12px;border:1px solid var(--border,#e5e7eb);border-radius:10px;background:#fafbfc}
+.seo-tp-chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.seo-tp-chip{display:inline-flex;align-items:center;gap:6px;padding:3px 4px 3px 10px;border:1px solid var(--border,#e5e7eb);border-radius:999px;background:var(--card,#fff);font-size:12.5px}
+.seo-tp-chip i{width:10px;height:10px;border-radius:50%}
+.seo-tp-chip button{border:0;background:none;padding:0 6px;font-size:15px;line-height:1;cursor:pointer;color:var(--text-muted,#6b7280)}
+.seo-tp-chip button:hover{color:#dc2626}
+.seo-tp-add{min-width:220px;padding:4px 10px;border-radius:999px}
 .seo-bars{width:100%;height:auto}
 .seo-bars rect{fill:var(--accent,#2563eb);opacity:.8}
 .seo-spark{color:var(--accent,#2563eb);vertical-align:middle}
@@ -415,6 +460,28 @@ export async function mountSeo(el, opts = {}) {
         compare: ui.compare, gran: ui.gran, metric: ui.metric }));
     } catch { /* private mode */ }
   };
+  // The Trend card: whole site or pages, which pages, separate lines or combined (remembered on this device)
+  const TR_KEY = "dm.seo.trend";
+  try {
+    const s = JSON.parse(localStorage.getItem(TR_KEY) || "{}") || {};
+    ui.tshow = s.tshow === "pages" ? "pages" : "site";
+    ui.tpages = Array.isArray(s.tpages) ? s.tpages.filter((x) => typeof x === "string").slice(0, TMAX) : [];
+    ui.tmode = s.tmode === "sum" ? "sum" : "sep";
+  } catch { ui.tshow = "site"; ui.tpages = []; ui.tmode = "sep"; }
+  const saveTr = () => { try { localStorage.setItem(TR_KEY, JSON.stringify({ tshow: ui.tshow, tpages: ui.tpages, tmode: ui.tmode })); } catch { /* private mode */ } };
+  const addTPages = (paths) => {
+    const seen = new Set(ui.tpages.map(tkey));
+    for (const p of paths) {
+      if (ui.tpages.length >= TMAX) break;
+      if (!p || seen.has(tkey(p))) continue;
+      seen.add(tkey(p));
+      ui.tpages.push(p);
+    }
+    ui.tshow = "pages";
+    saveTr();
+    render();
+  };
+
   // The Overview's Priority pages card: open or collapsed, status filter, show all (remembered on this device)
   const PR_KEY = "dm.seo.prcard";
   const prc = (() => {
@@ -535,15 +602,74 @@ export async function mountSeo(el, opts = {}) {
     // The chart: days, weeks or months across the chosen dates, and the comparison lined up underneath
     let gran = ui.gran === "auto" ? autoGran(r.n) : ui.gran;
     if ((gran === "day" && r.n > 120) || (gran === "month" && r.n < 45)) gran = autoGran(r.n);
-    const mk = METRICS[ui.metric] && (!METRICS[ui.metric].brand || hasBrand) ? ui.metric : "clicks";
+    const pageMode = ui.tshow === "pages" && ui.tpages.length > 0;
+    const hasPI = data.pages.some((p) => Array.isArray(p.dailyIArr));
+    const pageOk = (k) => PAGE_METRICS.includes(k) && (hasPI || k === "clicks");
+    let mk = METRICS[ui.metric] && (!METRICS[ui.metric].brand || hasBrand) ? ui.metric : "clicks";
+    if (pageMode && !pageOk(mk)) mk = "clicks";
     const m = METRICS[mk];
     const bks = buckets(r.from, r.to, gran);
     const off = prev ? daysBetween(cmp.from, r.from) : 0;
-    const points = bks.map((b) => ({ ...b, label: bucketLabel(b, gran), v: sumRange(days, b.start, b.end)[mk] }));
-    const cpts = prev ? bks.map((b) => {
-      const s = addDays(b.start, -off), e = addDays(b.end, -off);
-      return { label: bucketLabel({ start: s, end: e }, gran), v: sumRange(days, s, e)[mk] };
-    }) : null;
+    let points, cpts = null, multi = null, lineColor = "", lineName = "", pageLegend = "", trendMarks = logMarks(work);
+    if (!pageMode) {
+      points = bks.map((b) => ({ ...b, label: bucketLabel(b, gran), v: sumRange(days, b.start, b.end)[mk] }));
+      cpts = prev ? bks.map((b) => {
+        const s = addDays(b.start, -off), e = addDays(b.end, -off);
+        return { label: bucketLabel({ start: s, end: e }, gran), v: sumRange(days, s, e)[mk] };
+      }) : null;
+    } else {
+      const groups = ui.tpages.map((path, i) => ({ path, color: TCOLORS[i % TCOLORS.length], title: titleOf(work, data, path),
+        pages: data.pages.filter((p) => tkey(p.path) === tkey(path)) }));
+      const keys = new Set(ui.tpages.map(tkey));
+      trendMarks = (work?.log || []).filter((e) => e.date && keys.has(tkey(e.url || ""))).map((e) => ({ date: e.date, title: e.title || "Change" }));
+      if (ui.tmode === "sum") {
+        const all = groups.flatMap((g) => g.pages);
+        lineColor = "#7c3aed";
+        lineName = `${groups.length} page${groups.length === 1 ? "" : "s"} combined`;
+        points = bks.map((b) => ({ ...b, label: bucketLabel(b, gran), v: pageVal(all, b.start, b.end, mk) }));
+        cpts = prev ? bks.map((b) => {
+          const s = addDays(b.start, -off), e = addDays(b.end, -off);
+          return { label: bucketLabel({ start: s, end: e }, gran), v: pageVal(all, s, e, mk) };
+        }) : null;
+        pageLegend = `<div class="seo-legend"><span style="border-top-color:${lineColor}"></span>${esc(lineName)}: ${esc(fmtDate(r.from, false))} – ${esc(fmtDate(r.to))}
+          ${cpts ? `<span class="is-cmp"></span>${esc(cmp.name)}: ${esc(fmtDate(cmp.from, false))} – ${esc(fmtDate(cmp.to))}` : ""}</div>`;
+      } else {
+        const ser = groups.map((g) => ({ label: shortT(g.title), color: g.color, pts: bks.map((b) => ({ v: pageVal(g.pages, b.start, b.end, mk) })) }));
+        lineColor = ser[0].color;
+        lineName = ser[0].label;
+        points = bks.map((b, i) => ({ ...b, label: bucketLabel(b, gran), v: ser[0].pts[i].v }));
+        multi = ser.slice(1);
+        pageLegend = `<div class="seo-legend">${ser.map((s) => `<span style="border-top-color:${s.color}"></span>${esc(s.label)}`).join("")}</div>`;
+      }
+    }
+
+    // The page picker (Trend card, Pages)
+    const tOpts = data.pages.filter((p) => p.m28.impressions > 0).sort((a, b) => b.m28.clicks - a.m28.clicks).slice(0, 300);
+    const tClusters = (Array.isArray(work?.settings?.clusters) ? work.settings.clusters : []).filter((x) => x && x.main);
+    const tTopics = (Array.isArray(work?.settings?.topics) ? work.settings.topics : []).filter((x) => x && Array.isArray(x.pages) && x.pages.length);
+    const pickerHtml = ui.tshow !== "pages" ? "" : `<div class="seo-tp">
+      <div class="seo-tp-chips">
+        ${ui.tpages.map((p, i) => `<span class="seo-tp-chip"><i style="background:${TCOLORS[i % TCOLORS.length]}"></i>${esc(shortT(titleOf(work, data, p)))}
+          <button type="button" data-tprm="${esc(p)}" aria-label="Remove ${esc(titleOf(work, data, p))}">×</button></span>`).join("")}
+        ${ui.tpages.length < TMAX ? `<input class="seo-input seo-tp-add" list="seo-tp-list" data-tpadd placeholder="+ Add a page" aria-label="Add a page to the chart">
+          <datalist id="seo-tp-list">${tOpts.map((p) => `<option value="${esc(titleOf(work, data, p.path) + " — " + p.path)}">`).join("")}</datalist>` : ""}
+      </div>
+      <div class="seo-row" style="margin:8px 0 0">
+        <span class="seo-note">Quick picks:</span>
+        <button class="seo-btn" type="button" data-tquick="pri">★ Top 5 priority pages</button>
+        ${tClusters.length ? `<select class="seo-input seo-select" data-tcluster aria-label="Pick a cluster"><option value="">A cluster…</option>
+          ${tClusters.map((x, i) => `<option value="${i}">${esc(x.name || titleOf(work, data, x.main))}</option>`).join("")}</select>` : ""}
+        ${tTopics.length ? `<select class="seo-input seo-select" data-ttopic aria-label="Pick a topic"><option value="">A topic…</option>
+          ${tTopics.map((x, i) => `<option value="${i}">${esc(x.name || "Topic")}</option>`).join("")}</select>` : ""}
+        ${ui.tpages.length ? `<button class="seo-btn" type="button" data-tclear>Clear</button>` : ""}
+        <span class="seo-sp"></span>
+        <span class="seo-seg">
+          <button type="button" class="${ui.tmode === "sep" ? "on" : ""}" data-tmode="sep">Separate lines</button>
+          <button type="button" class="${ui.tmode === "sum" ? "on" : ""}" data-tmode="sum">Combined</button></span>
+      </div>
+      ${!ui.tpages.length ? `<p class="seo-note" style="margin:6px 0 0">Choose up to ${TMAX} pages to compare.</p>` : ""}
+      ${!hasPI ? `<p class="seo-note" style="margin:6px 0 0">Impressions, CTR and Position for pages appear after the next nightly update. Clicks work now.</p>` : ""}
+    </div>`;
 
     const fresh = r.to > ov.periodEnd ? daysBetween(ov.periodEnd, r.to) : 0;
     const rangeText = `${fmtDate(r.from)} – ${fmtDate(r.to)} · ${r.n} day${r.n === 1 ? "" : "s"}` +
@@ -680,18 +806,26 @@ export async function mountSeo(el, opts = {}) {
       <div class="seo-card">
         <div class="seo-row">
           <h3 style="margin:0">Trend</h3>
+          <span class="seo-seg">
+            <button type="button" class="${ui.tshow !== "pages" ? "on" : ""}" data-tshow="site">Whole site</button>
+            <button type="button" class="${ui.tshow === "pages" ? "on" : ""}" data-tshow="pages">Pages</button></span>
           ${[["day", "Daily"], ["week", "Weekly"], ["month", "Monthly"]].map(([k, l]) => {
             const off2 = (k === "day" && r.n > 120) || (k === "month" && r.n < 45);
             return `<button class="seo-btn ${gran === k ? "on" : ""}" data-gran="${k}"${off2
               ? ` disabled title="${k === "day" ? "Choose 120 days or fewer" : "Choose at least 45 days"}"` : ""}>${l}</button>`;
           }).join("")}
           <span class="seo-sp"></span>
-          ${Object.entries(METRICS).filter(([, v]) => !v.brand || hasBrand)
-            .map(([k, v]) => `<button class="seo-btn ${mk === k ? "on" : ""}" data-metric="${k}">${v.label}</button>`).join("")}
+          ${Object.entries(METRICS).filter(([, v]) => !v.brand || hasBrand).map(([k, v]) => {
+            const off3 = ui.tshow === "pages" && !pageOk(k);
+            return `<button class="seo-btn ${mk === k ? "on" : ""}" data-metric="${k}"${off3
+              ? ` disabled title="${PAGE_METRICS.includes(k) ? "Available after the next nightly update" : "Not available for single pages"}"` : ""}>${v.label}</button>`;
+          }).join("")}
         </div>
-        <div class="seo-chart">${lineChart(points, { ...m, marks: logMarks(work), cmp: cpts, freshAfter: ov.periodEnd, gran })}</div>
-        ${cpts ? `<div class="seo-legend"><span></span>${esc(fmtDate(r.from, false))} – ${esc(fmtDate(r.to))}
+        ${pickerHtml}
+        <div class="seo-chart">${lineChart(points, { ...m, marks: trendMarks, cmp: cpts, freshAfter: ov.periodEnd, gran, multi, color: lineColor, name: lineName })}</div>
+        ${pageMode ? pageLegend : cpts ? `<div class="seo-legend"><span></span>${esc(fmtDate(r.from, false))} – ${esc(fmtDate(r.to))}
           <span class="is-cmp"></span>${esc(cmp.name)}: ${esc(fmtDate(cmp.from, false))} – ${esc(fmtDate(cmp.to))}</div>` : ""}
+        ${pageMode && ui.tmode === "sep" && prev ? `<div class="seo-note">Choose Combined to compare these pages with ${esc(cmp.name.toLowerCase())}.</div>` : ""}
         ${work?.log?.length ? `<div class="seo-note">Orange dotted lines are changes from the Change log. Hover the dot to see them.</div>` : ""}
         ${m.invert ? `<div class="seo-note">Position axis is flipped: up means ranking higher.</div>` : ""}
         ${hasBrand ? `<div class="seo-note">Brand = searches with your brand words (SEO → Settings). Non-brand includes rare searches Google hides.</div>` : ""}
@@ -818,11 +952,23 @@ export async function mountSeo(el, opts = {}) {
   /* ----- events (delegated) ----- */
 
   root.addEventListener("click", (e) => {
-    const t = e.target.closest("[data-drx],[data-kpi],[data-drtab],[data-drclose],[data-kq],[data-drask],[data-advpage],[data-prtoggle],[data-prf],[data-prall],[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
+    const t = e.target.closest("[data-tshow],[data-tprm],[data-tquick],[data-tclear],[data-tmode],[data-drx],[data-kpi],[data-drtab],[data-drclose],[data-kq],[data-drask],[data-advpage],[data-prtoggle],[data-prf],[data-prall],[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
     if (!t || !root.contains(t)) return;
     const ds = t.dataset;
 
     // Overview drill-downs
+    // The Trend card: pages
+    if (ds.tshow !== undefined) { ui.tshow = ds.tshow; saveTr(); render(); return; }
+    if (ds.tprm !== undefined) { ui.tpages = ui.tpages.filter((p) => tkey(p) !== tkey(ds.tprm)); saveTr(); render(); return; }
+    if (ds.tclear !== undefined) { ui.tpages = []; saveTr(); render(); return; }
+    if (ds.tmode !== undefined) { ui.tmode = ds.tmode === "sum" ? "sum" : "sep"; saveTr(); render(); return; }
+    if (ds.tquick === "pri") {
+      const pri = Array.isArray(work?.settings?.keyPages) ? work.settings.keyPages : [];
+      if (!pri.length) { prToast("There are no priority pages yet.", true); return; }
+      ui.tpages = [];
+      addTPages(pri.slice(0, 5));
+      return;
+    }
     if (ds.drx !== undefined) { ui.drOpen = ui.drOpen === ds.drx ? "" : ds.drx; render(); return; }
     if (ds.kpi !== undefined) { ui.kpi = ui.kpi === ds.kpi ? "" : ds.kpi; ui.drtab = ""; ui.drOpen = ""; render(); return; }
     if (ds.drtab !== undefined) { ui.drtab = ds.drtab; ui.drOpen = ""; render(); return; }
@@ -940,6 +1086,18 @@ export async function mountSeo(el, opts = {}) {
   root.addEventListener("change", (e) => {
     const t = e.target;
     if (t.matches("[data-compare]")) { ui.compare = t.value; saveOv(); render(); }
+    else if (t.matches("[data-tpadd]")) {
+      const mm = /—\s*(\/\S*)$/.exec(t.value);
+      if (mm) addTPages([mm[1]]);
+    }
+    else if (t.matches("[data-tcluster]") && t.value !== "") {
+      const cl = (work?.settings?.clusters || []).filter((x) => x && x.main)[+t.value];
+      if (cl) { ui.tpages = []; addTPages([cl.main, ...(cl.pages || []).map((p) => p.path)]); }
+    }
+    else if (t.matches("[data-ttopic]") && t.value !== "") {
+      const tp = (work?.settings?.topics || []).filter((x) => x && Array.isArray(x.pages) && x.pages.length)[+t.value];
+      if (tp) { ui.tpages = []; addTPages(tp.pages); }
+    }
     else if (t.matches("[data-from],[data-to]")) {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(t.value)) return;
       ui[t.matches("[data-from]") ? "from" : "to"] = t.value;

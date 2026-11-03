@@ -264,7 +264,7 @@ function seoBuildPages_(build) {
   const dStartMs = Date.parse(dS + 'T00:00:00Z');
   const nDays = Math.round((Date.parse(dE + 'T00:00:00Z') - dStartMs) / 864e5) + 1;
 
-  const cur = {}, prv = {}, weekly = {}, daily = {};
+  const cur = {}, prv = {}, weekly = {}, daily = {}, dailyI = {}, dailyPW = {};
 
   seoGsc_({ startDate: curS, endDate: curE, dimensions: ['page'] })
     .forEach(function (r) { seoAgg_(cur, seoNormUrl_(r.keys[0]), r); });
@@ -272,14 +272,19 @@ function seoBuildPages_(build) {
   seoGsc_({ startDate: prvS, endDate: prvE, dimensions: ['page'] })
     .forEach(function (r) { seoAgg_(prv, seoNormUrl_(r.keys[0]), r); });
 
-  // One page × day query gives both the daily clicks and the 12 weekly buckets
+  // One page × day query gives the daily clicks, impressions and position, and the 12 weekly buckets
   seoGsc_({ startDate: dS, endDate: dE, dimensions: ['page', 'date'] }).forEach(function (r) {
-    if (!r.clicks) return;   // days without clicks stay 0
     const u = seoNormUrl_(r.keys[0]);
     const t = Date.parse(r.keys[1] + 'T00:00:00Z');
     const di = Math.round((t - dStartMs) / 864e5);
-    if (di >= 0 && di < nDays) (daily[u] || (daily[u] = new Array(nDays).fill(0)))[di] += r.clicks;
-    if (r.keys[1] > curE || t < wkStartMs) return;   // weekly buckets: the 12 weeks ending where the 28-day periods end
+    if (di >= 0 && di < nDays) {
+      if (r.clicks) (daily[u] || (daily[u] = new Array(nDays).fill(0)))[di] += r.clicks;
+      if (r.impressions) {
+        (dailyI[u] || (dailyI[u] = new Array(nDays).fill(0)))[di] += r.impressions;
+        (dailyPW[u] || (dailyPW[u] = new Array(nDays).fill(0)))[di] += r.position * r.impressions;   // weighted, like Google
+      }
+    }
+    if (!r.clicks || r.keys[1] > curE || t < wkStartMs) return;   // weekly buckets: the 12 weeks ending where the 28-day periods end
     const w = Math.floor((t - wkStartMs) / (7 * 864e5));
     if (w > 11) return;
     (weekly[u] || (weekly[u] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))[w] += r.clicks;
@@ -320,6 +325,9 @@ function seoBuildPages_(build) {
         prev28: seoFin_(prv[u]),
         weekly: weekly[u] || [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         daily: daily[u] ? daily[u].join(',').replace(/(,0)+$/, '') : '',   // clicks per day from dailyFrom, as "3,0,5,…"
+        dailyI: dailyI[u] ? dailyI[u].join(',').replace(/(,0)+$/, '') : '',   // impressions per day
+        dailyP: dailyI[u] ? dailyI[u].map(function (imp, n) { return imp ? Math.round((dailyPW[u][n] / imp) * 10) : 0; })
+          .join(',').replace(/(,0)+$/, '') : '',   // average position per day × 10 (0 = not shown that day)
         dailyFrom: dS,
         updatedAt: new Date(),
       },
