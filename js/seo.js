@@ -8,7 +8,8 @@ import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan, titleOf } 
 import { renderTasks } from "./seo-tasks.js?v=9";
 import { renderClusters } from "./seo-clusters.js?v=2";
 import { renderAdvisor } from "./seo-advisor.js?v=2";
-import { drillHtml, loadWindows } from "./seo-drill.js?v=3";
+import { drillHtml, loadWindows } from "./seo-drill.js?v=4";
+import { compareHtml } from "./seo-compare.js?v=1";
 import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js?v=9";
 
 const TABS = [
@@ -874,7 +875,7 @@ export async function mountSeo(el, opts = {}) {
       ${priorityCardHtml(ctx(), prc)}
       <div class="seo-card">
         <div class="seo-row">
-          <h3 style="margin:0">Trend</h3>
+          <h3 style="margin:0" data-trend>Trend</h3>
           <span class="seo-seg">
             <button type="button" class="${ui.tshow !== "pages" ? "on" : ""}" data-tshow="site">Whole site</button>
             <button type="button" class="${ui.tshow === "pages" ? "on" : ""}" data-tshow="pages">Pages</button></span>
@@ -902,6 +903,8 @@ export async function mountSeo(el, opts = {}) {
         ${pageMode ? pageLegend : cpts ? `<div class="seo-legend"><span></span>${esc(fmtDate(r.from, false))} – ${esc(fmtDate(r.to))}
           <span class="is-cmp"></span>${esc(cmp.name)}: ${esc(fmtDate(cmp.from, false))} – ${esc(fmtDate(cmp.to))}</div>` : ""}
         ${pageMode && ui.tmode === "sep" && prev ? `<div class="seo-note">Choose Combined to compare these pages with ${esc(cmp.name.toLowerCase())}.</div>` : ""}
+        ${wantPages && ui.tpages.length === 2 ? compareHtml(ctx(), { a: ui.tpages[0], b: ui.tpages[1], r, colors: TCOLORS, pageVal, hasPI }) : ""}
+        ${wantPages && ui.tpages.length > 2 ? `<p class="seo-note" style="margin-top:8px">Choose exactly 2 pages to see them head to head.</p>` : ""}
         ${work?.log?.length ? `<div class="seo-note">Orange dotted lines are changes from the Change log. Hover the dot to see them.</div>` : ""}
         ${m.invert ? `<div class="seo-note">Position axis is flipped: up means ranking higher.</div>` : ""}
         ${hasBrand ? `<div class="seo-note">Brand = searches with your brand words (SEO → Settings). Non-brand includes rare searches Google hides.</div>` : ""}
@@ -1028,11 +1031,41 @@ export async function mountSeo(el, opts = {}) {
   /* ----- events (delegated) ----- */
 
   root.addEventListener("click", (e) => {
-    const t = e.target.closest("[data-tpick],[data-tshow],[data-tprm],[data-tquick],[data-tclear],[data-tmode],[data-drx],[data-kpi],[data-drtab],[data-drclose],[data-kq],[data-drask],[data-advpage],[data-prtoggle],[data-prf],[data-prall],[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
+    const t = e.target.closest("[data-cmp2],[data-cmpcl],[data-tpick],[data-tshow],[data-tprm],[data-tquick],[data-tclear],[data-tmode],[data-drx],[data-kpi],[data-drtab],[data-drclose],[data-kq],[data-drask],[data-advpage],[data-prtoggle],[data-prf],[data-prall],[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
     if (!t || !root.contains(t)) return;
     const ds = t.dataset;
 
     // Overview drill-downs
+    // Head to head: open 2 pages in the Trend card (from Site health duplicates, drill-downs…)
+    if (ds.cmp2 !== undefined) {
+      const [a, b] = ds.cmp2.split("|");
+      if (!a || !b) return;
+      ui.tshow = "pages"; ui.tpages = [a, b]; ui.tmode = "sep"; saveTr();
+      panel.hidden = true;
+      tab = "overview";
+      history.replaceState(null, "", "#/seo");
+      render();
+      root.querySelector("[data-trend]")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    // Head to head → Clusters, with the roles filled in (an admin saves it)
+    if (ds.cmpcl !== undefined) {
+      const [keep, other, role] = ds.cmpcl.split("|");
+      const cls = Array.isArray(work?.settings?.clusters) ? work.settings.clusters : [];
+      const hit = cls.find((x) => x && x.main && [x.main, ...(x.pages || []).map((p) => p.path)].some((p) => tkey(p) === tkey(keep) || tkey(p) === tkey(other)));
+      work.cui = {
+        sel: hit ? String(hit.id || "") : "", node: 0, find: "", adding: false,
+        draft: hit ? null : { id: "c_" + Date.now().toString(36), name: shortT(titleOf(work, data, keep), 40), main: keep,
+          pages: [{ path: other, role: role === "merge" ? "merge" : "sup" }], isNew: true },
+      };
+      if (hit) prToast(`These pages are already in the “${hit.name || "…"}” cluster, so it's opened.`);
+      ui.pview = "clusters";
+      tab = "pages";
+      history.replaceState(null, "", "#/seo/pages");
+      render();
+      return;
+    }
+
     // The Trend card: pages
     if (ds.tpick !== undefined) {
       addTPages([ds.tpick]);

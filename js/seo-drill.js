@@ -173,7 +173,8 @@ export function drillHtml(c, o) {
         ${pages.map((p) => `<div class="seo-dr-mr" style="${g5}"><span>${pageLink(p.path)}</span><span>${h.fmtInt(p.c || 0)}</span>
           <span>${h.fmtInt(p.i || 0)}</span><span>${h.fmtPos(p.pos)}</span><span>${moved(p.pos, prevOf(p.path)?.pos ?? null)}</span></div>`).join("")}
       </div>
-      ${pages.length > 1 ? `<p class="seo-dr-warn">Google splits this search between ${pages.length} pages, so they may be competing. Usually one page should own it.</p>` : ""}`
+      ${pages.length > 1 ? `<p class="seo-dr-warn">Google splits this search between ${pages.length} pages, so they may be competing. Usually one page should own it.
+        <button class="seo-w-link" type="button" data-cmp2="${esc(pages[0].path)}|${esc(pages[1].path)}">Compare the top 2 head to head</button></p>` : ""}`
       : `<p class="seo-note">Not in the last 28 days of search data.</p>`}
       <div class="seo-w-acts">
         <button class="seo-btn" type="button" data-kq="${esc(q)}">Open in Keywords</button>

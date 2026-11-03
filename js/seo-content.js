@@ -179,6 +179,7 @@ function dupsHtml(c, list, canWork) {
     <p class="seo-note" style="margin:6px 0 0">Google usually shows only one of two near-identical pages. Make one the main page and merge the other
       into it (SEO → Pages → Clusters), or rewrite one so it answers a different question.</p>
     ${x.ignored ? `<p class="seo-note">Ignored by ${esc(x.st?.byName || "someone")}${x.st?.note ? `: ${esc(x.st.note)}` : ""}</p>` : ""}
+    <div class="seo-w-acts"><button class="seo-btn on" type="button" data-cmp2="${esc(x.a)}|${esc(x.b)}">Compare them head to head</button></div>
     ${canWork ? `<div class="seo-w-acts">${x.ignored ? `<button class="seo-btn" type="button" data-ch-undo="${esc(x.id)}">Back to open</button>`
       : `<button class="seo-btn" type="button" data-ch-ign="${esc(x.id)}">Ignore</button>`}</div>` : ""}
   </div>`).join("");
