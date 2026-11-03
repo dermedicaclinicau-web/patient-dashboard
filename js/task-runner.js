@@ -209,6 +209,21 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
   }
   const isEmpty = (v) => v == null || v === "" || (Array.isArray(v) && !v.length);
 
+  // The answers, saved on task_runs so email flows can use them ({Task: Field} blanks and "An answer on the task" rules).
+  // text keeps [[name|link]] markers; the server turns them into links in emails and plain names in to-dos.
+  function answersPayload() {
+    return task.fields.filter((f) => String(f.label || "").trim()).map((f) => {
+      const v = st.answers[f.id];
+      return {
+        id: f.id,
+        label: f.label.trim(),
+        type: f.type,
+        value: Array.isArray(v) ? v.map(String) : v == null ? "" : String(v),
+        text: String(answerText(f) || "").slice(0, 3000),
+      };
+    });
+  }
+
   /* ---------- {Skin Script}: the patient's protocol, attached as a PDF ---------- */
   const chosenSsp = () => (st.ssp.list || []).find((r) => r.id === st.ssp.id) || null;
 
@@ -1089,6 +1104,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     cc: ccEl.value.trim(),
     staffIds: fixedStaff ? [] : [...st.staffSel],
     todo: task.category === "staff" ? { on: st.todo.on, due: st.todo.due } : null,
+    answers: answersPayload(),
   });
 
   async function buildAttachments(btn) {
@@ -1117,9 +1133,9 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
       const res = await callApi({ action: "sendTaskEmail", ...whoFor(),
         subject: subjectEl.value.trim(), html: shell(await withSsp(bodyHtml())), attachments });
       st.touched = false;
-      showToast(task.category === "patient"
-        ? `Sent to ${st.patient.name}`
-        : `Sent to ${res.sent} staff member${res.sent === 1 ? "" : "s"}`);
+      const started = (res.flows || []).map((f) => f.name + (f.test ? " (testing)" : ""));
+      showToast((task.category === "patient" ? `Sent to ${st.patient.name}` : `Sent to ${res.sent} staff member${res.sent === 1 ? "" : "s"}`)
+        + (started.length ? `. Also started: ${started.join(", ")}` : ""));
       location.hash = patientId ? backHref : "#/tasks/history";
     } catch (err) {
       console.error("Task send failed:", err);

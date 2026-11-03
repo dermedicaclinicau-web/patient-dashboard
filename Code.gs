@@ -2508,7 +2508,10 @@ function handleSendTaskEmail_(body) {
   const inlined = inlineTaskImages_(cfg, htmlRaw);
   const hasImages = Object.keys(inlined.images).length > 0;
 
-  // One email per person, with their own name filled in (staff tasks)
+  // One email per person, with their own name filled in (staff tasks). Sent through Gmail, so replies can be seen.
+  const answers = taskAnswersClean_(body.answers);
+  const sentMs = Date.now();
+  const threadIds = [];
   recipients.forEach(function (r) {
     const subject = subjectRaw.replace(/\{First name\}/gi, r.first).replace(/\{Full name\}/gi, r.name);
     const html = fillPersonTagsInLinks_(inlined.html, { 'first name': r.first, 'full name': r.name })
@@ -2517,7 +2520,7 @@ function handleSendTaskEmail_(body) {
     if (cc) mail.cc = cc;
     if (attachments.length) mail.attachments = attachments;
     if (hasImages) mail.inlineImages = inlined.images;
-    MailApp.sendEmail(mail);
+    threadIds.push(taskSendMail_(mail));
   });
   cache.put(rlKey, String(sentThisHour + recipients.length), 3600);
 
@@ -2538,8 +2541,23 @@ function handleSendTaskEmail_(body) {
       sentAt: new Date().toISOString(),
       sentBy: String(session.name || ''),
       sentByUid: String(session.uid || ''),
+      answers: answers,
+      threadIds: threadIds.filter(Boolean),
     })]);
   } catch (e) { console.warn('Task sent, but the history log failed: ' + e); }
+
+  // Email flows that start when this task is sent
+  let flowsStarted = [];
+  if (patientId) {
+    try {
+      flowsStarted = flowEnrolTask_(cfg, {
+        taskId: taskId, taskName: String(task.name || ''), runId: runId, patientId: patientId,
+        answers: answers, threadIds: threadIds.filter(Boolean), sentMs: sentMs,
+        sentBy: String(session.name || ''), sentByUid: String(session.uid || ''),
+      });
+      if (flowsStarted.length) fsPatch_(cfg, 'task_runs/' + runId, { flows: flowsStarted });
+    } catch (e) { console.warn('Task sent, but email flows not started: ' + e); }
+  }
 
   let todos = 0;
   const todo = staffTodoOpts_(body.todo);
@@ -2551,7 +2569,7 @@ function handleSendTaskEmail_(body) {
     });
   }
   console.log('Task "' + task.name + '" sent to ' + recipients.length + ' recipient(s) by ' + session.name);
-  return { ok: true, runId: runId, sent: recipients.length, todos: todos };
+  return { ok: true, runId: runId, sent: recipients.length, todos: todos, flows: flowsStarted };
 }
 
 // ===================== Task emails: pictures inside the email =====================
@@ -4238,6 +4256,7 @@ function schedCreate_(body, session) {
     patientId: patientId, patientName: patientName, to: to, cc: cc, staffIds: staffIds,
     subject: subject, html: html, attachments: atts,
     todo: task.category === 'staff' ? staffTodoOpts_(body.todo) : { on: false, due: '' },
+    answers: taskAnswersClean_(body.answers),
     appts: { months: [3, 6, 12].indexOf(Number(a.months)) !== -1 ? Number(a.months) : 6,
       services: a.services !== false, staff: a.staff !== false },
     fillsLater: SCHED_APPTS_RE_().test(html) || SCHED_TODAY_RE_().test(html) || SCHED_TODAY_RE_().test(subject),
@@ -4395,6 +4414,8 @@ function schedDeliver_(cfg, rec) {
   const escH = function (s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); };
   const inlined = inlineTaskImages_(cfg, html);
   const hasImages = Object.keys(inlined.images).length > 0;
+  const sentMs = Date.now();
+  const threadIds = [];
   recipients.forEach(function (r) {
     const subj = subject.replace(/\{First name\}/gi, r.first).replace(/\{Full name\}/gi, r.name);
     const body = fillPersonTagsInLinks_(inlined.html, { 'first name': r.first, 'full name': r.name })
@@ -4403,7 +4424,7 @@ function schedDeliver_(cfg, rec) {
     if (cc) mail.cc = cc;
     if (attachments.length) mail.attachments = attachments;
     if (hasImages) mail.inlineImages = inlined.images;
-    MailApp.sendEmail(mail);
+    threadIds.push(taskSendMail_(mail));
   });
 
   const runId = 'run_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20);
@@ -4417,8 +4438,19 @@ function schedDeliver_(cfg, rec) {
       sentAt: new Date().toISOString(),
       sentBy: String(rec.createdBy || '') + ' (scheduled)', sentByUid: String(rec.createdByUid || ''),
       scheduled: true, scheduledId: String(rec._id || ''),
+      answers: taskAnswersClean_(rec.answers), threadIds: threadIds.filter(Boolean),
     })]);
   } catch (e) { console.warn('Scheduled email sent, but the history log failed: ' + e); }
+  if (pid) {
+    try {
+      const fl = flowEnrolTask_(cfg, {
+        taskId: String(rec.taskId || ''), taskName: String(rec.taskName || ''), runId: runId, patientId: pid,
+        answers: taskAnswersClean_(rec.answers), threadIds: threadIds.filter(Boolean), sentMs: sentMs,
+        sentBy: String(rec.createdBy || ''), sentByUid: String(rec.createdByUid || ''),
+      });
+      if (fl.length) fsPatch_(cfg, 'task_runs/' + runId, { flows: fl });
+    } catch (e) { console.warn('Scheduled email sent, but email flows not started: ' + e); }
+  }
   const todo = staffTodoOpts_(rec.todo);
   if (rec.category === 'staff' && todo.on) {
     staffTodoCreate_(cfg, {
@@ -7754,7 +7786,7 @@ function flowFind_(list, id, parents) {
     const s = list[i];
     if (!s) continue;
     if (s.id === id) return { list: list, i: i, parents: parents };
-    if (s.type === 'branch') {
+    if (s.type === 'branch' || s.type === 'reply') {
       const c = s.cfg || {};
       const up = parents.concat([{ list: list, i: i }]);
       const r = flowFind_(c.yes, id, up) || flowFind_(c.no, id, up);
@@ -8035,6 +8067,10 @@ function flowFact_(cfg, key, run, ctx) {
     case 'pt.email': v = isEmail_(ctx.who.email); break;
     case 'pt.mobile': v = String(ctx.doc.Mobile || '').replace(/\D/g, '').length >= 8; break;
     case 'pt.marketing': v = mktCanEmail_(cfg, ctx.doc, ctx.who.email); break;
+    case 'task.replied':
+      v = !!run.reply || (Array.isArray(run.threadIds) && run.threadIds.length > 0 &&
+        !!taskReplyCheck_(run.threadIds, Number(run.taskSentMs) || Date.parse(String(run.startedAt || '')) || 0));
+      break;
   }
   ctx._f[key] = v;
   return v;
@@ -8043,6 +8079,7 @@ function flowFact_(cfg, key, run, ctx) {
 function flowRuleOk_(cfg, r, run, ctx) {
   const type = FLOW_FIELD_TYPE_[r && r.field];
   if (!type) return false;
+  if (type === 'answer') return flowTaskAnswerPass_(r, run.taskAnswers);
   if (type === 'names' || r.field === 'rc.due_between') return recallRuleOk_(cfg, r, run, ctx);
   if (type === 'birthday') return flowBirthdayOk_(cfg, r, run, ctx);
   if (type === 'year') return flowBirthYearOk_(cfg, r, run, ctx);
@@ -8177,6 +8214,7 @@ function flowTriggerWhyNot_(cfg, flow, run, ctx, memo) {
     return "the visit wasn't for one of the flow's chosen services";
   }
   if (ev === 'daily' && !flowHasRules_(t.rules)) return 'the daily check has no rules yet';
+  if (ev === 'task' && !(Array.isArray(t.taskIds) && t.taskIds.length)) return 'no task is chosen';
   if (flowHasRules_(t.rules) && !flowGroupOk_(cfg, t.rules, run, ctx)) {
     return ev === 'daily' ? "the patient doesn't match the daily check today" : "the patient doesn't match the start rules";
   }
@@ -8194,6 +8232,7 @@ function flowVals_(cfg, run, ctx, memo, forStaff) {
     (item ? [item.am && 'Morning: ' + item.am, item.pm && 'Evening: ' + item.pm].filter(Boolean).join('\n') : '');
   return {
     'first name': w.first, 'full name': w.name, 'patient name': w.name, 'patient mobile': w.mobile, 'patient email': w.email,
+    'email': w.email, 'mobile': w.mobile, 'date of birth': recLongDate_(ctx.doc.DobKey) || String(ctx.doc.DOB || ''),
     'product name': String(run.product || ''), 'purchase date': recLongDate_(run.purchaseDate) || String(run.purchaseDate || ''),
     'sold by': String(run.soldBy || ''), 'how to use': how,
     'visit date': run.visitDate ? (recLongDate_(run.visitDate) || run.visitDate) : '',
@@ -8256,11 +8295,17 @@ function flowSendPatient_(cfg, flow, step, run, ctx, memo, tester) {
     throw e;
   }
   const vals = flowVals_(cfg, run, ctx, memo, false);
-  let body = String(c.html);
+  const tctx = flowTaskCtx_(run);
+  let body = flowTaskTokens_(String(c.html), tctx, true);
+  if (SCHED_APPTS_RE_().test(body)) {
+    body = body.replace(SCHED_APPTS_RE_(), schedUpcomingHtml_(cfg, ctx.pid, ctx.doc,
+      { months: Number(c.apptMonths) || 6, services: true, staff: true }));
+  }
   if (FLOW_SSP_TABLE_RE_().test(body)) body = flowInsertSspTable_(body, flowSspTableHtml_(cfg, ctx, memo, (flow.style || {}).accent));
   let html = sanitizeEmailHtml_(flowFillHtml_(body, vals), c.mode === 'html');
   if (c.promo) html += mktFooterHtml_(tester ? '' : ctx.pid, tester ? tester.email : ctx.who.email, tester ? 'test' : 'flow_' + flow._id);
-  let subject = flowFill_(String(c.subject || '').replace(FLOW_SSP_TABLE_RE_(), ''), vals, false)
+  let subject = flowFill_(flowTaskTokens_(String(c.subject || ''), tctx, false)
+    .replace(FLOW_SSP_TABLE_RE_(), '').replace(SCHED_APPTS_RE_(), ''), vals, false)
     .replace(/\s+/g, ' ').trim().slice(0, 200) || 'A message from Dermedica';
   let to = ctx.who.email;
   if (tester) {
@@ -8367,9 +8412,11 @@ function flowSendStaff_(cfg, flow, step, run, ctx, memo, tester) {
   const c = step.cfg || {};
   const vals = flowVals_(cfg, run, ctx, memo, true);
   const intended = flowStaffTo_(step, run, ctx);
-  const subject0 = flowFill_(c.subject, vals, false).replace(/\s+/g, ' ').trim().slice(0, 200) || 'Email flow: ' + flow.name;
+  const tctx = flowTaskCtx_(run);
+  const subject0 = flowTaskTokens_(flowFill_(c.subject, vals, false), tctx, false)
+    .replace(/\s+/g, ' ').trim().slice(0, 200) || 'Email flow: ' + flow.name;
   let inner = '<h2 style="margin:0 0 10px;font-size:19px;color:#0f766e">' + invEsc_(subject0) + '</h2>' +
-    '<p style="margin:0">' + invEsc_(flowFill_(c.message, vals, false)).replace(/\n/g, '<br>') + '</p>' +
+    '<p style="margin:0">' + invEsc_(flowTaskTokens_(flowFill_(c.message, vals, false), tctx, false)).replace(/\n/g, '<br>') + '</p>' +
     '<p style="margin:14px 0 0;font-size:13px;color:#64748b">From the email flow “' + invEsc_(flow.name) + '”.</p>';
   let subject = subject0;
   let to = intended;
@@ -8831,7 +8878,50 @@ function flowStep_(cfg, flow, run, memo, deadline) {
       continue;
     }
 
-    if (s.type === 'email') {
+    if (s.type === 'reply') {
+      const threads = Array.isArray(run.threadIds) ? run.threadIds.filter(Boolean) : [];
+      const first = !(run.replyWait && run.replyWait.card === s.id);
+      const w = first ? { card: s.id, until: flowAddWait_(Date.now(), c) } : run.replyWait;
+      let rep = run.reply || null;
+      if (!rep && threads.length) rep = taskReplyCheck_(threads, Number(run.taskSentMs) || Date.parse(String(run.startedAt || '')) || 0);
+      if (!rep && threads.length && Date.now() < Number(w.until)) {
+        if (first) note('Waiting up to ' + flowWaitText_(c) + ' for a reply');
+        save({ next: next, replyWait: w, dueAt: Math.min(Number(w.until), Date.now() + 3600000) });   // checked every hour
+        return;
+      }
+      if (rep) {
+        run.reply = rep;
+        ctx._f['task.replied'] = true;
+        note('They replied' + (rep.text ? ': "' + String(rep.text).slice(0, 150) + '"' : ''));
+      } else {
+        note(threads.length ? 'No reply within ' + flowWaitText_(c) : "No reply to wait for: the task email wasn't tracked");
+      }
+      const replyPath = (rep ? c.yes : c.no) || [];
+      next = replyPath.length ? String(replyPath[0].id || '') : afterId;
+      save(Object.assign({ next: next, replyWait: null, dueAt: Date.now() }, rep ? { reply: rep } : {}));
+      continue;
+    }
+
+    if (s.type === 'todo') {
+      const who = flowTodoTo_(c, run, tester);
+      let text = flowTaskTokens_(flowFill_(String(c.text || ''), flowVals_(cfg, run, ctx, memo, true), false), flowTaskCtx_(run), false)
+        .replace(/\s+/g, ' ').trim().slice(0, 480) || 'Follow up with ' + ctx.who.name;
+      if (tester) text = '[Test] ' + text;
+      const due = flowAddDaysKey_(flowKey_(Date.now()), Math.max(0, Math.floor(Number(c.dueDays) || 0)));
+      const made = who.length ? staffTodoCreate_(cfg, {
+        recipients: who, text: text, due: due, patientId: ctx.pid, patientName: ctx.who.name,
+        taskId: String(run.taskId || ''), taskName: 'Email flow: ' + String(flow.name || ''), runId: String(run._id || ''),
+        by: 'Email flow', byUid: '',
+      }) : 0;
+      if (made) flowTodoTell_(cfg, who, text, ctx, flow);
+      note(made ? 'To-do added for ' + who.map(function (x) { return x.name; }).join(', ') + (tester ? ' (testing)' : '')
+        : 'Add a staff to-do: nobody to give it to');
+      next = afterId;
+      save({ next: next, dueAt: Date.now() });
+      continue;
+    }
+
+    if (s.type === 'email' || s.type === 'task') {
       const why = flowStopWhy_(cfg, flow, run, ctx, !!tester);
       if (why) { note('Stopped: ' + why); save({ status: 'stopped', reason: why, next: '' }); return; }
       if (c.promo && !tester && !mktCanEmail_(cfg, ctx.doc, ctx.who.email)) {
@@ -8968,10 +9058,29 @@ function flowTestRun_(body, session) {
     visitStaff: ev === 'visit' ? [String(session.name || '')] : [],
     sourceKey: docId_(doc.PttID || doc._id), patientId: doc._id, mode: 'test',
   };
+  if (ev === 'task') {
+    // The answers and email from the last time one of these tasks went to this patient
+    const tids = ((flow.trigger || {}).taskIds || []).map(String);
+    const last = fsQuery_(cfg, 'task_runs', 'patientId', 'EQUAL', doc._id, 200)
+      .filter(function (x) { return tids.indexOf(String(x.taskId || '')) !== -1; })
+      .sort(function (a, b) { return String(b.sentAt || '').localeCompare(String(a.sentAt || '')); })[0];
+    Object.assign(run, {
+      taskId: last ? String(last.taskId) : String(tids[0] || ''), taskName: last ? String(last.taskName || '') : '',
+      taskAnswers: last && Array.isArray(last.answers) ? last.answers : [],
+      threadIds: last && Array.isArray(last.threadIds) ? last.threadIds : [],
+      taskSentMs: last ? Date.parse(String(last.sentAt || '')) || 0 : 0,
+      taskSentBy: String(session.name || ''), taskSentByUid: String(session.uid || ''),
+    });
+    const fake = String(body.reply || '').trim().slice(0, 500);
+    if (fake) run.reply = { at: new Date().toISOString(), text: fake, from: 'test', name: 'Test' };
+    run._note = last ? 'Using the answers from "' + (last.taskName || 'the task') + '" sent on ' + String(last.sentAt || '').slice(0, 10) + '.'
+      : "That task hasn't been sent to them yet, so the task's blanks are empty.";
+  }
   const ctx = flowCtx_(cfg, run, memo);
   run.apptKeys = ctx.upcoming();
 
   const steps = [];
+  if (run._note) steps.push(run._note);
   const whyNot = flowTriggerWhyNot_(cfg, flow, run, ctx, memo);
   steps.push(whyNot
     ? "Heads up: the real flow wouldn't start for them (" + whyNot + '). The test carries on so you can see the emails.'
@@ -9002,7 +9111,23 @@ function flowTestRun_(body, session) {
       next = afterId;
       continue;
     }
-    if (s.type === 'email') {
+    if (s.type === 'reply') {
+      const yes = !!run.reply;
+      steps.push('Wait for a reply (up to ' + flowWaitText_(c) + ') → ' + (yes ? 'Replied: "' + String(run.reply.text).slice(0, 100) + '"'
+        : 'No reply (type a pretend reply in the test window to try the Replied path)'));
+      const rp = (yes ? c.yes : c.no) || [];
+      next = rp.length ? String(rp[0].id || '') : afterId;
+      continue;
+    }
+    if (s.type === 'todo') {
+      const who = flowTodoTo_(c, run, null);
+      const text = flowTaskTokens_(flowFill_(String(c.text || ''), flowVals_(cfg, run, ctx, memo, true), false), flowTaskCtx_(run), false);
+      steps.push('Add a staff to-do for ' + (who.map(function (x) { return x.name; }).join(', ') || 'nobody') +
+        ': "' + text.slice(0, 200) + '" (not added in a test)');
+      next = afterId;
+      continue;
+    }
+    if (s.type === 'email' || s.type === 'task') {
       const why = flowStopWhy_(cfg, flow, run, ctx, false);
       if (why) { steps.push('Stop rule: ' + why + ' The real flow would stop here.'); ended = true; break; }
       const sd = Math.max(0, Math.floor(Number(c.skipDays) || 0));
@@ -9234,6 +9359,9 @@ function flowRestart_(body, session) {
       invoiceId: String(old.invoiceId || ''), soldBy: String(old.soldBy || ''), visitDate: String(old.visitDate || ''),
       visitServices: Array.isArray(old.visitServices) ? old.visitServices : [], visitStaff: Array.isArray(old.visitStaff) ? old.visitStaff : [],
       sourceKey: String(old.sourceKey || ''), sourceId: String(old.sourceId || ''),
+      taskId: String(old.taskId || ''), taskName: String(old.taskName || ''), taskRunId: String(old.taskRunId || ''),
+      taskAnswers: Array.isArray(old.taskAnswers) ? old.taskAnswers : [], threadIds: Array.isArray(old.threadIds) ? old.threadIds : [],
+      taskSentMs: Number(old.taskSentMs) || 0, taskSentBy: String(old.taskSentBy || ''), taskSentByUid: String(old.taskSentByUid || ''),
       apptKeys: (flow.stop || {}).booking === true ? flowUpcoming_(cfg, doc, memo) : [],
       events: [{ at: new Date().toISOString(), what: 'Started again by ' + String(session.name || 'staff') + '.' }],
     }))]);
@@ -19041,3 +19169,235 @@ function recordsDeleteLegacy_(body, session) {
   });
   return { ok: true };
 }
+
+/* ===================== Task → Email flows ===================== */
+
+// Sends through Gmail and returns the thread, so replies can be found later.
+// opts: cc, bcc, name, replyTo, from, attachments (blobs), inlineImages — same as GmailApp.sendEmail.
+function sendTrackedEmail_(to, subject, html, opts) {
+  var o = opts || {};
+  var options = { htmlBody: html };
+  ['cc', 'bcc', 'name', 'replyTo', 'from', 'attachments', 'inlineImages'].forEach(function (k) {
+    if (o[k] && (!Array.isArray(o[k]) || o[k].length)) options[k] = o[k];
+  });
+  var plain = String(html || '')
+    .replace(/<(br|\/p|\/div|\/h\d|\/li|\/tr)\b[^>]*>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/g, ' ').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, '&')
+    .replace(/\n{3,}/g, '\n\n').trim();
+  var msg = GmailApp.createDraft(to, subject, plain, options).send();
+  return { threadId: msg.getThread().getId(), messageId: msg.getId() };
+}
+
+var TASK_REPLY_ME_ = null;
+function taskReplyMe_() {
+  if (TASK_REPLY_ME_) return TASK_REPLY_ME_;
+  var out = {};
+  [Session.getEffectiveUser().getEmail()].concat(GmailApp.getAliases())
+    .forEach(function (e) { if (e) out[String(e).toLowerCase()] = true; });
+  TASK_REPLY_ME_ = out;
+  return out;
+}
+
+// The first real reply after sinceMs on any of these threads, or null.
+// Skips the clinic's own messages, auto-replies (out of office) and bounces.
+function taskReplyCheck_(threadIds, sinceMs) {
+  var ids = (Array.isArray(threadIds) ? threadIds : [threadIds]).filter(Boolean);
+  if (!ids.length) return null;
+  var me = taskReplyMe_();
+  for (var i = 0; i < ids.length; i++) {
+    var th = null;
+    try { th = GmailApp.getThreadById(ids[i]); } catch (e) { th = null; }
+    if (!th) continue;
+    var msgs = th.getMessages();
+    for (var j = 0; j < msgs.length; j++) {
+      var m = msgs[j];
+      if (m.getDate().getTime() <= sinceMs) continue;
+      var raw = String(m.getFrom() || '');
+      var from = ((raw.match(/<([^>]+)>/) || [])[1] || raw).trim().toLowerCase();
+      if (me[from] || /mailer-daemon|postmaster|no-?reply/.test(from)) continue;
+      var auto = String(m.getHeader('Auto-Submitted') || '').toLowerCase();
+      if ((auto && auto !== 'no') || /^(automatic reply|auto(-| )?reply|out of (the )?office)/i.test(m.getSubject())) continue;
+      var body = String(m.getPlainBody() || '')
+        .split(/\r?\n\s*(?:On .{0,300}wrote:|-{2,}\s*Original Message|From: .+)/i)[0];
+      return {
+        at: m.getDate().toISOString(),
+        from: from,
+        name: raw.replace(/<[^>]+>/, '').replace(/"/g, '').trim().slice(0, 120),
+        text: body.replace(/^>.*$/gm, '').replace(/\s+/g, ' ').trim().slice(0, 500),
+        threadId: ids[i],
+      };
+    }
+  }
+  return null;
+}
+
+// The answers sent from the task runner, tidied before they're saved on task_runs / task_scheduled
+function taskAnswersClean_(a) {
+  if (!Array.isArray(a)) return [];
+  return a.slice(0, 40).map(function (x) {
+    x = x || {};
+    return {
+      id: String(x.id || '').slice(0, 40),
+      label: String(x.label || '').slice(0, 120),
+      type: String(x.type || '').slice(0, 20),
+      value: Array.isArray(x.value)
+        ? x.value.slice(0, 60).map(function (v) { return String(v).slice(0, 200); })
+        : String(x.value == null ? '' : x.value).slice(0, 3000),
+      text: String(x.text || '').slice(0, 3000),
+    };
+  }).filter(function (x) { return x.id && x.label; });
+}
+
+// Fills {Task: Field name}, {Task name} and {Reply}. asHtml=true for emails, false for to-dos.
+function flowTaskTokens_(text, ctx, asHtml) {
+  var c = ctx || {};
+  var esc = function (s) {
+    return String(s).replace(/[&<>"']/g, function (ch) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
+    });
+  };
+  var fmt = function (v) {
+    v = String(v || '');
+    if (!asHtml) return v.replace(/\[\[([^|\]]+)\|[^\]]+\]\]/g, '$1');
+    var links = [];
+    var t = v.replace(/\[\[([^|\]]{1,200})\|(https?:\/\/[^\]\s]{1,500})\]\]/g, function (_, l, u) {
+      links.push([l, u]); return '\u0003' + (links.length - 1) + '\u0003';
+    });
+    return esc(t).replace(/\u0003(\d+)\u0003/g, function (_, i) {
+      return '<a href="' + esc(links[+i][1]) + '">' + esc(links[+i][0]) + '</a>';
+    }).replace(/\n/g, '<br>');
+  };
+  var byLabel = {};
+  (c.answers || []).forEach(function (a) { byLabel[String(a.label).trim().toLowerCase()] = a.text; });
+  return String(text || '')
+    .replace(/\{\s*task\s*:\s*([^{}\n]{1,120}?)\s*\}/gi, function (_, label) {
+      var v = byLabel[label.toLowerCase()];
+      return v === undefined ? '' : fmt(v);
+    })
+    .replace(/\{\s*task name\s*\}/gi, function () { return fmt(c.taskName || ''); })
+    .replace(/\{\s*reply\s*\}/gi, function () { return fmt(c.reply ? c.reply.text : ''); });
+}
+
+// The "An answer on the task" rule (task.answer). task.replied is simply !!run.reply.
+function flowTaskAnswerPass_(r, answers) {
+  var a = (answers || []).filter(function (x) { return x.id === r.fieldId; })[0];
+  var vals = !a ? [] : Array.isArray(a.value) ? a.value : [String(a.value || '')];
+  var list = vals.map(function (v) { return String(v).trim().toLowerCase(); }).filter(Boolean);
+  var want = String(r.value || '').trim().toLowerCase();
+  switch (r.op) {
+    case 'filled': return list.length > 0;
+    case 'empty': return list.length === 0;
+    case 'is': return list.indexOf(want) >= 0;
+    case 'contains': return list.some(function (v) { return v.indexOf(want) >= 0; });
+    case 'not_contains': return !list.some(function (v) { return v.indexOf(want) >= 0; });
+    default: return false;
+  }
+}
+
+/* ===================== Task → Email flows: starting flows, and the new cards ===================== */
+
+// A task email, through Gmail so replies can be seen. If that fails it's sent the old way (no reply tracking).
+function taskSendMail_(mail) {
+  try {
+    return sendTrackedEmail_(mail.to, mail.subject, mail.htmlBody, {
+      cc: mail.cc, name: mail.name, attachments: mail.attachments, inlineImages: mail.inlineImages,
+    }).threadId;
+  } catch (e) {
+    console.warn('Tracked send failed, sent without reply tracking: ' + e);
+    MailApp.sendEmail(mail);
+    return '';
+  }
+}
+
+function flowTaskCtx_(run) {
+  return { answers: Array.isArray(run.taskAnswers) ? run.taskAnswers : [], taskName: String(run.taskName || ''), reply: run.reply || null };
+}
+
+// A task was sent: starts every live flow whose trigger is that task. Never stops the send.
+// info: { taskId, taskName, runId, patientId, answers, threadIds, sentMs, sentBy, sentByUid } → [{ flowId, name, test }]
+function flowEnrolTask_(cfg, info) {
+  const out = [];
+  if (!info.patientId || !info.taskId) return out;
+  const flows = fsQuery_(cfg, 'email_flows', 'status', 'EQUAL', 'live', 50).filter(function (f) {
+    const t = f.trigger || {};
+    return t.event === 'task' && (Array.isArray(t.taskIds) ? t.taskIds : []).map(String).indexOf(String(info.taskId)) !== -1
+      && Array.isArray(f.steps) && f.steps.length;
+  });
+  if (!flows.length) return out;
+  const doc = flowPatient_(cfg, info.patientId);
+  if (!doc) return out;
+  const memo = { pts: {} };
+  memo.pts[doc._id] = doc;
+  const now = new Date().toISOString();
+  flows.forEach(function (f) {
+    try {
+      if (flowHeld_(cfg, memo, f._id, doc._id)) return;
+      const t = f.trigger || {};
+      const base = {
+        kind: 'task', purchaseDate: flowKey_(Date.now()), sourceKey: docId_(doc.PttID || doc._id), sourceId: String(doc.PttID || doc._id),
+        taskId: String(info.taskId), taskName: String(info.taskName || ''), taskRunId: String(info.runId || ''),
+        taskAnswers: info.answers || [], threadIds: info.threadIds || [], taskSentMs: Number(info.sentMs) || Date.now(),
+        taskSentBy: String(info.sentBy || ''), taskSentByUid: String(info.sentByUid || ''),
+      };
+      const trun = Object.assign({ patientId: doc._id }, base);
+      if (flowHasRules_(t.rules)) {
+        const ctx = flowCtx_(cfg, trun, memo);
+        if (!ctx || !flowGroupOk_(cfg, t.rules, trun, ctx)) return;
+      }
+      const earlier = fsQuery_(cfg, FLOW_RUNS_, 'patientId', 'EQUAL', doc._id, 100)
+        .filter(function (r) { return r.flowId === f._id && r.status === 'active'; });
+      if (earlier.length && t.again === 'ignore') return;
+      const writes = earlier.map(function (r) {
+        return patchWrite_(cfg, FLOW_RUNS_ + '/' + r._id, {
+          status: 'stopped', reason: 'The task was sent again, so the flow started over.', next: '', updatedAt: now,
+        });
+      });
+      const id = flowPart_(f._id) + '__' + flowPart_(doc._id) + '__' + flowPart_(info.runId);
+      writes.push(updateWrite_(cfg, FLOW_RUNS_ + '/' + id, flowNewRun_(f, doc, Object.assign({}, base, {
+        apptKeys: (f.stop || {}).booking === true ? flowUpcoming_(cfg, doc, memo) : [],
+        events: [{ at: now, what: 'Started: "' + String(info.taskName || 'the task') + '" was sent' + (info.sentBy ? ' by ' + info.sentBy : '') }],
+      }))));
+      commitWrites_(cfg, writes);
+      out.push({ flowId: f._id, name: String(f.name || ''), test: f.sendMode !== 'real' });
+    } catch (e) { console.warn('Flow ' + f._id + ' not started for the task: ' + e); }
+  });
+  return out;
+}
+
+// Who a "Add a staff to-do" card goes to. Nobody found: the Admins. Testing: the person testing.
+function flowTodoTo_(c, run, tester) {
+  const all = getStaffDocs_().filter(function (s) { return s.active !== false; });
+  const pick = function (list) { return list.slice(0, 10).map(function (s) { return { id: s.id, name: String(s.name || '') }; }); };
+  if (tester) return pick(all.filter(function (s) { return s.id === String(run.testUid || ''); }));
+  let list = [];
+  if (c.to === 'sender') {
+    list = all.filter(function (s) { return s.id === String(run.taskSentByUid || ''); });
+  } else if (c.to === 'staff') {
+    const ids = (c.staffIds || []).map(String);
+    list = all.filter(function (s) { return ids.indexOf(s.id) !== -1; });
+  } else if (c.to === 'roles') {
+    const roles = (c.roles || []).map(function (r) { return String(r).toLowerCase(); });
+    list = all.filter(function (s) { return roles.indexOf(String(s.role || '').toLowerCase()) !== -1; });
+  }
+  if (!list.length) list = all.filter(function (s) { return /^admin$/i.test(String(s.role || '')); });
+  return pick(list);
+}
+
+// "Task for you" emails (sent by runNotifications within 5 minutes)
+function flowTodoTell_(cfg, who, text, ctx, flow) {
+  const at = new Date().toISOString();
+  const writes = who.map(function (w) {
+    return updateWrite_(cfg, STAFF_TASK_MAIL_ + '/m_' + Date.now() + '_' + Utilities.getUuid().slice(0, 8), {
+      toUid: w.id, subject: 'Task for you: ' + text.slice(0, 80),
+      heading: 'A task for you from the email flow "' + String(flow.name || '') + '"',
+      extra: '', taskText: text, patientName: ctx.who.name, at: at,
+    });
+  });
+  if (writes.length) commitWrites_(cfg, writes);
+}
+
+Object.assign(FLOW_FIELD_TYPE_, { 'task.answer': 'answer', 'task.replied': 'bool' });
+FLOW_RULE_COST_['task.answer'] = 0;
+FLOW_RULE_COST_['task.replied'] = 2;

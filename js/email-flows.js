@@ -10,17 +10,18 @@ import { callApi } from "./appointments.js";
 import { searchPatients } from "./task-runner.js";
 import {
   blankGroup, cleanGroup, groupProblem, describeGroup, ruleCount, loadProductNames, loadServiceNames,
-  mountRuleBuilder, mountProductPicker,
+  mountRuleBuilder, mountProductPicker, TASK_RULE_KEYS,
 } from "./flow-rules.js";
+import { loadSource } from "./task-sources.js";
 
 import { createRichEditor } from "./rich-editor.js";
 import { hydrateRichImages } from "./rich-html.js";
 import { openImagePicker } from "./image-bank.js";
 import { getLetterhead } from "./form-templates.js";
 import {
-  fillTemplate, fillTemplateHtml, emailShell, clinicDetails, subjectHtml, EMAIL_BACKGROUNDS, EMAIL_ACCENTS,
+  fillTemplate, fillTemplateHtml, emailShell, clinicDetails, subjectHtml, EMAIL_BACKGROUNDS, EMAIL_ACCENTS, formatChoice,
 } from "./task-tokens.js";
-import { fetchStaffList } from "./task-types.js";
+import { fetchStaffList, listTaskTypes, TASK_CHOICE_TYPES } from "./task-types.js";
 import { confirmDialog } from "./dialog.js";
 import { showToast } from "./utils.js";
 import { settingsHeaderHtml } from "./settings.js";
@@ -51,23 +52,33 @@ const I = {
   up: ic('<polyline points="18 15 12 9 6 15"/>'),
   down: ic('<polyline points="6 9 12 15 18 9"/>'),
   chev: ic('<polyline points="9 18 15 12 9 6"/>'),
+  reply: ic('<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>'),
+  check: ic('<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'),
+  doc: ic('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>'),
 };
 
 const TYPES = {
   email: { label: "Send email to patient", short: "Send email", icon: "mail", tone: "is-patient" },
+  task: { label: "Send a task's email", short: "Task email", icon: "doc", tone: "is-patient" },
   wait: { label: "Wait", short: "Wait", icon: "clock", tone: "" },
+  reply: { label: "Wait for a reply", short: "Wait for reply", icon: "reply", tone: "is-branch" },
   branch: { label: "If / else", short: "If / else", icon: "branch", tone: "is-branch" },
   staff: { label: "Notify staff", short: "Notify staff", icon: "bell", tone: "is-staff" },
+  todo: { label: "Add a staff to-do", short: "Staff to-do", icon: "check", tone: "is-staff" },
   stop: { label: "End flow", short: "End flow", icon: "stop", tone: "" },
 };
-const ADDABLE = ["email", "wait", "branch", "staff", "stop"];
+const ADDABLE = ["email", "task", "wait", "reply", "branch", "staff", "todo", "stop"];
 const TRIGGERS = [
   ["purchase", "A product is purchased", false],
   ["visit", "A patient has been in for a visit", false],
   ["daily", "A daily check finds patients who match", false],
+  ["task", "A task is sent from Task Manager", false],
   ["ssp_created", "A Skin Script is created", true],
 ];
-const TRIG_ICON = { purchase: "cart", visit: "cal", daily: "sun" };
+const TRIG_ICON = { purchase: "cart", visit: "cal", daily: "sun", task: "doc" };
+const TODO_TO = [["sender", "Whoever sent the task"], ["staff", "Chosen staff"], ["roles", "Everyone in a role"]];
+const DUE_DAYS = [[0, "Today"], [1, "Tomorrow"], [2, "In 2 days"], [3, "In 3 days"], [7, "In a week"]];
+const REPLY_PATHS = (s) => (s.type === "branch" || s.type === "reply");
 const SCOPES = [["any", "Any product"], ["catalogue", "Only Skin Script catalogue products"], ["list", "Only these products"]];
 const VISIT_SCOPES = [["any", "Any visit"], ["some", "Only visits for these services"]];
 const REPEATS = [[0, "Once only"], [30, "Again after 30 days"], [60, "Again after 60 days"], [90, "Again after 90 days"],
@@ -173,6 +184,9 @@ function blank(type) {
     : type === "wait" ? { num: 1, unit: "weeks" }
     : type === "branch" ? { cond: "in_ssp", rules: blankGroup(), yes: [], no: [] }
     : type === "staff" ? { to: "ssp_creator", roles: [], staffIds: [], subject: "", message: "" }
+    : type === "reply" ? { num: 3, unit: "days", yes: [], no: [] }
+    : type === "todo" ? { to: "sender", roles: [], staffIds: [], text: "", dueDays: 1 }
+    : type === "task" ? { taskId: "", taskName: "", taskUpdatedMs: 0, answers: {}, subject: "", html: "", apptMonths: 6, promo: false, skipDays: 0 }
     : {};
   return { id: newId(), type, cfg };
 }
@@ -181,11 +195,13 @@ function cleanSteps(list) {
   return (Array.isArray(list) ? list : []).filter((s) => s && TYPES[s.type]).map((s) => {
     const b = blank(s.type);
     const cfg = { ...b.cfg, ...(s.cfg || {}) };
-    if (s.type === "branch") { cfg.yes = cleanSteps(cfg.yes); cfg.no = cleanSteps(cfg.no); cfg.rules = cleanGroup(cfg.rules); }
-    if (s.type === "staff") {
+    if (REPLY_PATHS(s)) { cfg.yes = cleanSteps(cfg.yes); cfg.no = cleanSteps(cfg.no); }
+    if (s.type === "branch") cfg.rules = cleanGroup(cfg.rules);
+    if (s.type === "staff" || s.type === "todo") {
       cfg.roles = Array.isArray(cfg.roles) ? cfg.roles.map(String) : [];
       cfg.staffIds = Array.isArray(cfg.staffIds) ? cfg.staffIds.map(String) : [];
     }
+    if (s.type === "task") cfg.answers = cfg.answers && typeof cfg.answers === "object" ? cfg.answers : {};
     return { id: String(s.id || b.id), type: s.type, cfg };
   });
 }
@@ -195,7 +211,7 @@ function find(list, id, depth = 1) {
   for (let i = 0; i < list.length; i++) {
     const s = list[i];
     if (s.id === id) return { list, i, depth };
-    if (s.type === "branch") {
+    if (REPLY_PATHS(s)) {
       const r = find(s.cfg.yes, id, depth + 1) || find(s.cfg.no, id, depth + 1);
       if (r) return r;
     }
@@ -205,7 +221,7 @@ function find(list, id, depth = 1) {
 function walk(list, fn, depth = 1) {
   list.forEach((s) => {
     fn(s, depth);
-    if (s.type === "branch") { walk(s.cfg.yes, fn, depth + 1); walk(s.cfg.no, fn, depth + 1); }
+    if (REPLY_PATHS(s)) { walk(s.cfg.yes, fn, depth + 1); walk(s.cfg.no, fn, depth + 1); }
   });
 }
 function count(list) { let n = 0; walk(list || [], () => n++); return n; }
@@ -224,6 +240,9 @@ function summary(s) {
     const to = c.to === "roles" && c.roles.length ? c.roles.join(", ") : STAFF_SHORT[c.to] || "Staff";
     return c.subject.trim() ? `To ${to} · ${c.subject.trim()}` : `To ${to}`;
   }
+  if (s.type === "reply") return `Up to ${Number(c.num) || 0} ${unitWord(c.num, c.unit)}`;
+  if (s.type === "todo") return (String(c.text || "").trim() || "No to-do written yet").slice(0, 90);
+  if (s.type === "task") return c.taskName ? `${c.taskName}${c.subject ? ` · ${c.subject}` : ""}` : "Choose a task";
   return "No more cards on this path";
 }
 
@@ -233,7 +252,7 @@ function stepProblems(s, depth) {
   if (s.type === "email") {
     if (!c.subject.trim()) out.push("Add a subject");
     if (c.mode === "html" ? !String(c.code || "").trim() : !plainText(c.body)) out.push("Write the message");
-  } else if (s.type === "wait") {
+  } else if (s.type === "wait" || s.type === "reply") {
     const max = (UNITS.find((u) => u[0] === c.unit) || UNITS[0])[2];
     const n = Number(c.num);
     if (!Number.isInteger(n) || n < 1 || n > max) out.push(`Choose 1 to ${max} ${c.unit}`);
@@ -242,19 +261,28 @@ function stepProblems(s, depth) {
     if (c.to === "staff" && !c.staffIds.length) out.push("Choose at least one staff member");
     if (!c.subject.trim()) out.push("Add a subject");
     if (!c.message.trim()) out.push("Write the message");
-  } else if (s.type === "branch") {
+  } else if (s.type === "todo") {
+    if (!String(c.text || "").trim()) out.push("Write the to-do");
+    if (c.to === "roles" && !c.roles.length) out.push("Choose at least one role");
+    if (c.to === "staff" && !c.staffIds.length) out.push("Choose at least one staff member");
+  } else if (s.type === "task") {
+    if (!c.taskId) out.push("Choose a task");
+    else if (!String(c.html || "").trim()) out.push("Open this card so it can prepare the email");
+  }
+  if (REPLY_PATHS(s)) {
     if (depth > MAX_DEPTH) out.push(`If / else can only go ${MAX_DEPTH} deep`);
     if (c.cond === "rules") { const p = groupProblem(c.rules, true); if (p) out.push(p); }
   }
   return out;
 }
 
-function flowProblems(flow) {
+function flowProblems(flow, tasks) {
   const out = [];
   const t = flow.trigger;
   if (!flow.name.trim()) out.push("Give the flow a name.");
   if (t.event === "purchase" && t.scope === "list" && !t.products.length) out.push("Choose at least one product for the trigger, or pick Any product.");
   if (t.event === "visit" && t.serviceScope === "some" && !t.services.length) out.push("Choose at least one service for the trigger, or pick Any visit.");
+  if (t.event === "task" && !t.taskIds.length) out.push("Choose which task starts the flow.");
   const tp = groupProblem(t.rules, t.event === "daily");
   if (tp) out.push(t.event === "daily" ? `Daily check: ${tp}.` : `Start rules: ${tp}.`);
   const sp = groupProblem(flow.stop.rules, false);
@@ -265,11 +293,19 @@ function flowProblems(flow) {
   walk(flow.steps, (s, depth) => {
     n++;
     const p = stepProblems(s, depth);
+    if (s.type === "reply" && t.event !== "task") p.push("Only works when the flow starts from a task");
+    if (s.type === "task" && s.cfg.taskId && Array.isArray(tasks)) {
+      const tt = tasks.find((x) => x.id === s.cfg.taskId);
+      if (!tt) p.push("The task isn't published any more");
+      else tt.fields.forEach((f) => {
+        const v = (s.cfg.answers || {})[f.id];
+        if (f.required && (v == null || v === "" || (Array.isArray(v) && !v.length))) p.push(`Answer “${f.label}”`);
+      });
+    }
     if (p.length) out.push(`Card ${n} (${TYPES[s.type].short}): ${p[0]}.`);
   });
   return out;
 }
-
 /* ===================== Saving ===================== */
 
 const cleanNames = (list) => (Array.isArray(list) ? list : []).map(String).filter(Boolean).slice(0, 40);
@@ -279,8 +315,8 @@ function snapshot(d = {}) {
     name: String(d.name || ""),
     description: String(d.description || ""),
     trigger: {
-      event: "purchase", scope: "any", serviceScope: "any", repeatDays: 0, dailyMax: 25, existing: false, ...t,
-      products: cleanNames(t.products), services: cleanNames(t.services), rules: cleanGroup(t.rules),
+      event: "purchase", scope: "any", serviceScope: "any", repeatDays: 0, dailyMax: 25, existing: false, again: "restart", ...t,
+      products: cleanNames(t.products), services: cleanNames(t.services), taskIds: cleanNames(t.taskIds), rules: cleanGroup(t.rules),
     },
     steps: cleanSteps(d.steps),
     stop: { rebuy: true, booking: false, gapDays: 3, ...st, rules: cleanGroup(st.rules) },
@@ -570,6 +606,8 @@ async function mountFlowEditor(container, { id, staff }) {
   let matchData = null;    // the last "See who's next" answer
   let buyData = null, buyDays = 14;   // the last "See recent purchases" answer
   let holds = null, holdsErr = false, holdsLoading = false;
+  let taskTypes = null;              // published tasks (for the task trigger and the Task email card)
+  const taskSrc = {}, taskSrcAsked = new Set();
   const lhReady = getLetterhead().then((lh) => { letterhead = lh || {}; }).catch(() => { letterhead = {}; });
   let editor = null, lastText = null;
   let dirty = false, saving = false, saveTimer = null;
@@ -700,7 +738,7 @@ async function mountFlowEditor(container, { id, staff }) {
   // How wide a path needs to be (an If / else needs room for both of its paths)
   function measure(list) {
     let w = CW;
-    for (const s of list) if (s.type === "branch") w = Math.max(w, measure(s.cfg.yes) + HG + measure(s.cfg.no));
+    for (const s of list) if (REPLY_PATHS(s)) w = Math.max(w, measure(s.cfg.yes) + HG + measure(s.cfg.no));
     return w;
   }
 
@@ -721,13 +759,15 @@ async function mountFlowEditor(container, { id, staff }) {
         line(`M${cx} ${prev}V${top}`);
         L.cards.push({ s, depth, x: cx - CW / 2, y: top });
         if (s.type === "stop") return bot;
-        if (s.type !== "branch") { prev = bot; key = "after:" + s.id; continue; }
+        if (!REPLY_PATHS(s)) { prev = bot; key = "after:" + s.id; continue; }
 
         const wy = measure(s.cfg.yes), wn = measure(s.cfg.no), total = wy + HG + wn;
         const lx = cx - total / 2 + wy / 2, rx = cx + total / 2 - wn / 2;
         const sy = bot + SPLIT, cy = bot + LBL;
         line(`M${cx} ${bot}V${sy}M${lx} ${sy}H${rx}M${lx} ${sy}V${cy}M${rx} ${sy}V${cy}`);
-        L.labels.push({ yes: true, x: lx, y: (sy + cy) / 2 }, { yes: false, x: rx, y: (sy + cy) / 2 });
+        const rep = s.type === "reply";
+        L.labels.push({ yes: true, x: lx, y: (sy + cy) / 2, t: rep ? "Replied" : "Yes" },
+          { yes: false, x: rx, y: (sy + cy) / 2, t: rep ? "No reply" : "No" });
         const ey = place(s.cfg.yes, lx, cy, `start:${s.id}:yes`, depth + 1);
         const en = place(s.cfg.no, rx, cy, `start:${s.id}:no`, depth + 1);
         if (i === items.length - 1) return Math.max(ey, en);
@@ -757,6 +797,10 @@ async function mountFlowEditor(container, { id, staff }) {
     if (t.event === "visit") {
       const n = t.services.length;
       return "A patient has been in" + (t.serviceScope === "some" ? ` (${n} service${n === 1 ? "" : "s"})` : "") + rules;
+    }
+    if (t.event === "task") {
+      const names = (taskTypes || []).filter((x) => t.taskIds.includes(x.id)).map((x) => x.name);
+      return (names.length ? `“${names.join("”, “")}” is sent` : "A task is sent (choose which)") + rules;
     }
     if (t.event === "daily") return "Daily check" + (r ? rules : " · no rules yet");
     const n = t.products.length;
@@ -798,7 +842,7 @@ async function mountFlowEditor(container, { id, staff }) {
           <strong>${esc(triggerText())}</strong></span>
       </div>
       ${L.cards.map((c) => cardHtml(c.s, c.depth, c.x, c.y)).join("")}
-      ${L.labels.map((b) => `<span class="ef-bl${b.yes ? " is-yes" : ""}" style="left:${b.x}px;top:${b.y}px">${b.yes ? "Yes" : "No"}</span>`).join("")}
+      ${L.labels.map((b) => `<span class="ef-bl${b.yes ? " is-yes" : ""}" style="left:${b.x}px;top:${b.y}px">${esc(b.t)}</span>`).join("")}
       ${L.plus.map((p) => `<button type="button" class="ef-plus${p.key === menuAt ? " is-open" : ""}" style="left:${p.x}px;top:${p.y}px"
         data-add="${esc(p.key)}" aria-label="Add a card here" aria-expanded="${p.key === menuAt}">${I.plus}</button>`).join("")}
       ${menu ? `<div class="ef-menu" style="left:${menu.x}px;top:${menu.y + 22}px">${ADDABLE.map((t) =>
@@ -900,7 +944,7 @@ async function mountFlowEditor(container, { id, staff }) {
       if (!r) return;
       list = r.list[r.i].cfg[sideKey]; idx = 0; depth = r.depth + 1;
     }
-    if (type === "branch" && depth > MAX_DEPTH) { showToast(`If / else can only go ${MAX_DEPTH} deep.`); return; }
+    if ((type === "branch" || type === "reply") && depth > MAX_DEPTH) { showToast(`If / else can only go ${MAX_DEPTH} deep.`); return; }
     if (type === "stop" && idx < list.length) { showToast("End flow goes at the bottom of a path. Add it after the last card."); return; }
     const s = blank(type);
     list.splice(idx, 0, s);
@@ -915,8 +959,8 @@ async function mountFlowEditor(container, { id, staff }) {
   function palAdd(type) {
     if (!sel || sel === "trigger") {
       const last = flow.steps[flow.steps.length - 1];
-      if (last && (last.type === "stop" || last.type === "branch")) {
-        showToast(last.type === "branch" ? "Click a card inside Yes or No first, then add." : "The flow already ends here. Click a card first, then add.");
+      if (last && (last.type === "stop" || REPLY_PATHS(last))) {
+        showToast(REPLY_PATHS(last) ? "Click a card inside one of its paths first, then add." : "The flow already ends here. Click a card first, then add.");
         return;
       }
       insertAt(last ? "after:" + last.id : "start:root", type);
@@ -925,7 +969,7 @@ async function mountFlowEditor(container, { id, staff }) {
     const r = find(flow.steps, sel);
     if (!r) return;
     const cur = r.list[r.i];
-    if (cur.type === "branch") { insertAt(`start:${cur.id}:yes`, type); return; }
+    if (REPLY_PATHS(cur)) { insertAt(`start:${cur.id}:yes`, type); return; }
     if (cur.type === "stop") { showToast("Nothing can go after End flow."); return; }
     insertAt("after:" + cur.id, type);
   }
@@ -972,10 +1016,119 @@ async function mountFlowEditor(container, { id, staff }) {
     <div class="tb-chipgroup"><span>${esc(g.title)}</span>
       <div class="fe-chiprow">${g.tokens.map((t) => `<button type="button" class="fe-ins${g.smart ? " is-smart" : ""}" data-token="${esc(t)}">{${esc(t)}}</button>`).join("")}</div>
     </div>`).join("")}</div>`;
-  const editorGroups = () => PATIENT_TOKENS.map((g) => ({ title: g.title, tokens: g.tokens.map((name) => ({ name, kind: g.smart ? "smart" : "", hint: "" })) }));
+  // Task flows: the task's answers as blanks ({Task: Refund amount}), {Task name} and {Reply}
+  function taskFieldList() {
+    const ids = flow.trigger.taskIds || [];
+    const seen = new Set();
+    const out = [];
+    (taskTypes || []).filter((x) => ids.includes(x.id)).forEach((x) => x.fields.forEach((f) => {
+      const raw = String(f.label || "").trim();
+      if (!raw || seen.has(f.id)) return;
+      seen.add(f.id);
+      out.push({ id: f.id, raw, label: ids.length > 1 ? `${x.name}: ${raw}` : raw,
+        options: TASK_CHOICE_TYPES.includes(f.type) && (f.source || "list") === "list"
+          ? (f.options || []).map((o) => o.label).filter(Boolean) : [] });
+    }));
+    return out;
+  }
+  const ruleOpts = () => (flow.trigger.event === "task"
+    ? { only: TASK_RULE_KEYS, lists: { "task.answer": taskFieldList() } } : {});
+  const tokensFor = (forStaff) => {
+    const base = forStaff ? STAFF_TOKENS : PATIENT_TOKENS;
+    if (flow.trigger.event !== "task") return base;
+    const raws = [...new Set(taskFieldList().map((f) => f.raw))];
+    return [...base, { title: "The task", tokens: ["Task name", ...raws.map((r) => `Task: ${r}`), "Reply"], smart: true }];
+  };
+  const editorGroups = () => tokensFor(false).map((g) => ({ title: g.title, tokens: g.tokens.map((name) => ({ name, kind: g.smart ? "smart" : "", hint: "" })) }));
+
+  /* ---------- Task email card ---------- */
+  const niceDateKey = (k) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(k || "");
+    return m ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" }) : (k || "");
+  };
+  function loadTaskSource(src) {
+    if (taskSrcAsked.has(src)) return;
+    taskSrcAsked.add(src);
+    loadSource(src).then((o) => { taskSrc[src] = o; }).catch(() => { taskSrc[src] = null; })
+      .finally(() => { if (root.isConnected && !editor) renderSide(); });
+  }
+  const taskOpts = (f) => ((f.source || "list") === "list" ? (f.options || []) : (taskSrc[f.source] || []));
+  const taskChosen = (f, v) => (Array.isArray(v) ? v : v ? [v] : []).map((l) => taskOpts(f).find((o) => o.label === l) || { label: l, link: "" });
+  function taskAnswerText(f, v) {
+    if (TASK_CHOICE_TYPES.includes(f.type)) return formatChoice(f, taskChosen(f, v));
+    if (f.type === "date") return niceDateKey(v);
+    return v == null ? "" : String(v);
+  }
+  // The task's own email, with these answers. The patient's details are filled in when it's sent.
+  function buildTaskEmail(s) {
+    const t = (taskTypes || []).find((x) => x.id === s.cfg.taskId);
+    if (!t) { s.cfg.html = ""; s.cfg.subject = ""; return; }
+    if (!letterhead) lhReady.then(() => { buildTaskEmail(s); changed(); renderPreview(); });
+    const lh = letterhead || {};
+    const c = clinicDetails(lh);
+    const vals = new Map();
+    const set = (k, v) => vals.set(k.toLowerCase(), v == null ? "" : String(v));
+    set("Staff name", "The Dermedica team");
+    set("Clinic phone", c.phone); set("Clinic email", c.email); set("Clinic address", c.address);
+    ["Treatment plan", "Aftercare", "Treatment info"].forEach((k) => set(k, ""));
+    const tx = t.fields.find((f) => TASK_CHOICE_TYPES.includes(f.type) && f.source === "treatments");
+    if (tx) set("Treatment info", formatChoice({ ...tx, display: "links" }, taskChosen(tx, s.cfg.answers[tx.id])));
+    t.fields.forEach((f) => { if (String(f.label || "").trim()) set(f.label.trim(), taskAnswerText(f, s.cfg.answers[f.id])); });
+    s.cfg.taskName = t.name;
+    s.cfg.taskUpdatedMs = t.updatedAt ? t.updatedAt.getTime() : 0;
+    s.cfg.subject = fillTemplate(t.subject, vals).replace(/\[\[([^|\]]+)\|[^\]]+\]\]/g, "$1").slice(0, 200);
+    s.cfg.html = emailShell(fillTemplateHtml(t.body, vals), t.style, { clinic: c, hasLogo: !!lh.logo });
+  }
+  function taskFieldHtml(f, v) {
+    const id = esc(f.id);
+    const head = `<span>${esc(f.label)}${f.required ? ' <small class="muted">(required)</small>' : ""}</span>`;
+    if (f.type === "long_text") return `<label class="tb-field">${head}<textarea class="fe-input" data-tans="${id}" rows="3" maxlength="3000">${esc(v || "")}</textarea></label>`;
+    if (!TASK_CHOICE_TYPES.includes(f.type)) {
+      const type = f.type === "number" ? "number" : f.type === "date" ? "date" : "text";
+      return `<label class="tb-field">${head}<input class="fe-input" type="${type}" data-tans="${id}" maxlength="500" value="${esc(v || "")}" /></label>`;
+    }
+    const src = f.source || "list";
+    if (src !== "list" && taskSrc[src] === undefined) { loadTaskSource(src); return `<div class="tb-field">${head}<p class="tb-none">Loading the list…</p></div>`; }
+    const opts = taskOpts(f);
+    if (f.type === "dropdown") {
+      return `<label class="tb-field">${head}<select class="fb-select" data-tans="${id}"><option value="">Choose one</option>${
+        opts.map((o) => `<option value="${esc(o.label)}"${v === o.label ? " selected" : ""}>${esc(o.label)}</option>`).join("")}</select></label>`;
+    }
+    const multi = f.type === "checkboxes";
+    const picked = new Set(Array.isArray(v) ? v : v ? [v] : []);
+    return `<div class="tb-field">${head}<div class="ef-checks">${opts.map((o) => `<label class="fe-check">
+      <input type="${multi ? "checkbox" : "radio"}" name="tans-${id}" data-tans="${id}" value="${esc(o.label)}"${picked.has(o.label) ? " checked" : ""} />
+      ${esc(o.label)}</label>`).join("") || '<p class="tb-none">No choices.</p>'}</div></div>`;
+  }
+  // Roles or staff to tick (Staff to-do)
+  function pickWhoHtml(c) {
+    if (c.to !== "roles" && c.to !== "staff") return "";
+    if (staffList === null) return `<p class="tb-none">${staffError ? "Couldn't load the staff list. Refresh to try again." : "Loading staff…"}</p>`;
+    if (c.to === "roles") {
+      const roles = [...new Set(["Admin", ...staffList.map((x) => x.role).filter(Boolean)])];
+      return `<div class="ef-checks">${roles.map((r) => `<label class="fe-check"><input type="checkbox" data-rolecheck="${esc(r)}"${c.roles.includes(r) ? " checked" : ""} /> ${esc(r)}</label>`).join("")}</div>`;
+    }
+    return `<div class="ef-checks">${staffList.map((x) => `<label class="fe-check"><input type="checkbox" data-staffcheck="${esc(x.id)}"${c.staffIds.includes(x.id) ? " checked" : ""} />
+      ${esc(x.name)} <small class="muted">${esc(x.role || "")}</small></label>`).join("")}</div>`;
+  }
 
   function triggerHtml() {
     const t = flow.trigger;
+    if (t.event === "task") {
+      const usable = (taskTypes || []).filter((x) => x.useFor !== "treatmentInfo" && (x.category === "patient" || x.recipients.aboutPatient));
+      const list = taskTypes === null ? '<p class="tb-none">Loading tasks…</p>'
+        : !usable.length ? '<p class="tb-none">No published tasks yet. Publish one in Task Manager → Task types.</p>'
+        : `<div class="ef-checks">${usable.map((x) => `<label class="fe-check"><input type="checkbox" data-trigtask="${esc(x.id)}"${
+            t.taskIds.includes(x.id) ? " checked" : ""} /> ${esc(x.name)} <small class="muted">${x.category === "staff" ? "To Staff, about a patient" : "To Patient"}</small></label>`).join("")}</div>`;
+      return `
+        <div class="tb-field"><span>Which tasks</span>${list}</div>
+        <div class="tb-field"><span>Only start for patients who… <small>(optional)</small></span><div data-role="trig-rules"></div></div>
+        <label class="tb-field"><span>If the same task is sent to them again</span>
+          <select class="fb-select" data-f="trigger.again">${opt([["restart", "Start the flow over"], ["ignore", "Leave the flow they're already in"]], t.again)}</select></label>
+        <p class="tb-info">Starts as soon as the task is sent, for the patient it's sent to (or the patient a To Staff task is about), including
+          tasks scheduled for later. Use the task's answers as blanks, like {Task: Refund amount}, and in rules (An answer on the task).
+          Add <strong>Wait for a reply</strong> to do something when the patient replies to the task email.</p>`;
+    }
     if (t.event === "visit") {
       return `
         <label class="tb-field"><span>Which visits</span>
@@ -1069,11 +1222,12 @@ async function mountFlowEditor(container, { id, staff }) {
     if (ts) mountProductPicker(ts, flow.trigger.services, { onChange: ruleChange, names: serviceNames,
       placeholder: "Type a service or a word like Peel", none: "No services chosen yet" });
     const tr = side.querySelector('[data-role="trig-rules"]');
-    if (tr) mountRuleBuilder(tr, flow.trigger.rules, { onChange: ruleChange, names: productNames,
+    if (tr) mountRuleBuilder(tr, flow.trigger.rules, { ...ruleOpts(), onChange: ruleChange, names: productNames,
       empty: flow.trigger.event === "daily" ? "Add at least one rule, e.g. Has a future appointment booked: No."
-        : flow.trigger.event === "visit" ? "Anyone who comes in starts the flow." : "Anyone who makes a matching purchase starts the flow." });
+        : flow.trigger.event === "visit" ? "Anyone who comes in starts the flow."
+        : flow.trigger.event === "task" ? "Everyone the task is sent to starts the flow." : "Anyone who makes a matching purchase starts the flow." });
     const sr = side.querySelector('[data-role="stop-rules"]');
-    if (sr) mountRuleBuilder(sr, flow.stop.rules, { onChange: ruleChange, names: productNames, empty: "No extra stop rules." });
+    if (sr) mountRuleBuilder(sr, flow.stop.rules, { ...ruleOpts(), onChange: ruleChange, names: productNames, empty: "No extra stop rules." });
   }
 
   function stepBodyHtml(s) {
@@ -1098,7 +1252,7 @@ async function mountFlowEditor(container, { id, staff }) {
                 Scripts and forms are removed when it's sent.</small>`
             : '<div data-role="editor"></div>'}
           </div>
-          ${chipsHtml(PATIENT_TOKENS)}
+          ${chipsHtml(tokensFor(false))}
           ${dateInsertHtml()}
           <small class="muted">Tap a blank to add it where your cursor is. Blanks fill in with each patient's details when it's sent.
             Dates like {Today + 30 days} are worked out on the day it goes out.</small>
@@ -1150,9 +1304,65 @@ async function mountFlowEditor(container, { id, staff }) {
           <label class="tb-field"><span>Subject</span><input class="fe-input" data-k="subject" data-tokens maxlength="200" value="${esc(c.subject)}" /></label>
           <label class="tb-field"><span>Message</span>
             <textarea class="fe-input" data-k="message" data-tokens rows="6" maxlength="3000">${esc(c.message)}</textarea></label>
-          ${chipsHtml(STAFF_TOKENS)}
+          ${chipsHtml(tokensFor(true))}
           <small class="muted">Staff emails include a button that opens the patient's page.</small>
         </section>`;
+    }
+    if (s.type === "reply") {
+      return `
+        <section class="ef-sec">
+          <div class="tb-field"><span>Wait up to</span>
+            <div class="fe-num ef-wait">
+              <input class="fe-input" type="number" min="1" max="365" step="1" data-k="num" value="${esc(c.num)}" />
+              <select class="fb-select" data-k="unit">${opt(UNITS, c.unit)}</select>
+            </div></div>
+          <p class="tb-info">Checked every hour. As soon as they reply to the task email, they go down <strong>Replied</strong>,
+            and {Reply} holds what they wrote. No reply in time: <strong>No reply</strong>.</p>
+          ${flow.trigger.event !== "task" ? '<div class="tb-problems">This only works when the flow starts from a task (When this happens → A task is sent).</div>' : ""}
+          <small class="muted">Out-of-office replies and bounces don't count. Only task emails sent from now on can be watched for replies.</small>
+        </section>`;
+    }
+    if (s.type === "todo") {
+      return `
+        <section class="ef-sec">
+          <label class="tb-field"><span>Give it to</span><select class="fb-select" data-k="to" data-rerender>${opt(TODO_TO, c.to)}</select></label>
+          ${pickWhoHtml(c)}
+          ${c.to === "sender" ? '<small class="muted">If nobody sent a task (other flows), it goes to the Admins.</small>' : ""}
+          <label class="tb-field"><span>To-do</span>
+            <textarea class="fe-input" data-k="text" data-tokens rows="4" maxlength="480" placeholder="e.g. {Patient name} replied about their refund: {Reply}">${esc(c.text)}</textarea></label>
+          ${chipsHtml(tokensFor(true))}
+          <label class="tb-field"><span>Due</span><select class="fb-select" data-k="dueDays">${opt(DUE_DAYS, c.dueDays)}</select></label>
+          <p class="tb-info">It goes on their task list (My dashboard → Tasks), linked to the patient, and they get an email.
+            While the flow is testing, it goes to you instead, marked [Test].</p>
+        </section>`;
+    }
+    if (s.type === "task") {
+      if (taskTypes === null) return '<section class="ef-sec"><p class="tb-none">Loading tasks…</p></section>';
+      const usable = taskTypes.filter((x) => x.category === "patient" && x.useFor !== "treatmentInfo");
+      const why = (x) => (x.attachments.length ? "has attachments"
+        : /\{\s*skin script\s*\}/i.test(`${x.subject} ${x.body}`) ? "uses {Skin Script}" : "");
+      const t = usable.find((x) => x.id === c.taskId);
+      const drift = t && c.taskUpdatedMs && t.updatedAt && t.updatedAt.getTime() !== c.taskUpdatedMs;
+      return `
+        <section class="ef-sec">
+          <label class="tb-field"><span>Task</span><select class="fb-select" data-taskpick>
+            <option value="">Choose a task…</option>
+            ${usable.map((x) => `<option value="${esc(x.id)}"${x.id === c.taskId ? " selected" : ""}${why(x) ? " disabled" : ""}>${esc(x.name)}${
+              why(x) ? ` (${why(x)}, so it can't be sent from a flow)` : ""}</option>`).join("")}
+          </select></label>
+          ${c.taskId && !t ? '<div class="tb-problems">This task isn\'t published any more. Choose another, or publish it again.</div>' : ""}
+          ${drift ? '<p class="tb-info">This task has been changed since this card was set up. <button type="button" class="lh-btn is-quiet" data-act="task-refresh">Use the new wording</button></p>' : ""}
+          <small class="muted">To Patient tasks without attachments. The email keeps the task's own design.</small>
+        </section>
+        ${t ? `<section class="ef-sec"><h4>Answers <small>(the same for every patient)</small></h4>
+          ${t.fields.filter((f) => String(f.label || "").trim()).map((f) => taskFieldHtml(f, c.answers[f.id])).join("") || '<p class="tb-none">This task has nothing to fill in.</p>'}
+          ${/\{\s*upcoming appointments\s*\}/i.test(`${t.subject} ${t.body}`) ? `<label class="tb-field"><span>Upcoming appointments</span>
+            <select class="fb-select" data-k="apptMonths">${opt([[3, "The next 3 months"], [6, "The next 6 months"], [12, "The next 12 months"]], c.apptMonths || 6)}</select></label>` : ""}
+          <label class="fe-check"><input type="checkbox" data-k="promo" data-rerender${c.promo ? " checked" : ""} /> This is promotional</label>
+          <label class="tb-field"><span>Don't send if they've had this email in the last</span>
+            <select class="fb-select" data-k="skipDays">${opt(SKIP_REPEAT, Number(c.skipDays) || 0)}</select></label>
+        </section>
+        <section class="ef-sec"><h4>Preview <small>(with example details)</small></h4><div data-role="prev"></div></section>` : ""}`;
     }
     return '<section class="ef-sec"><p class="tb-info">This path stops here. Paths without End flow also stop after their last card.</p></section>';
   }
@@ -1202,10 +1412,11 @@ async function mountFlowEditor(container, { id, staff }) {
     }
     if (s.type === "branch" && s.cfg.cond === "rules") {
       mountRuleBuilder(side.querySelector('[data-role="branch-rules"]'), s.cfg.rules, {
-        onChange: ruleChange, names: productNames, empty: "Add a rule to decide who goes down Yes.",
+        ...ruleOpts(), onChange: ruleChange, names: productNames, empty: "Add a rule to decide who goes down Yes.",
       });
     }
-    if (s.type === "staff" && (s.cfg.to === "roles" || s.cfg.to === "staff")) loadStaff();
+    if ((s.type === "staff" || s.type === "todo") && (s.cfg.to === "roles" || s.cfg.to === "staff")) loadStaff();
+    if (s.type === "task") renderPreview();
   }
 
   function sampleVals() {
@@ -1214,12 +1425,21 @@ async function mountFlowEditor(container, { id, staff }) {
     m.set("clinic phone", c.phone || "");
     m.set("clinic email", c.email || "");
     m.set("clinic address", c.address || "");
+    m.set("email", "jane@example.com");
+    m.set("mobile", "0412 345 678");
+    m.set("date of birth", "1 January 1990");
+    m.set("upcoming appointments", { html: "• <strong>Thu 22 Oct 2026, 10:30 am</strong>: Skin review", text: "Thu 22 Oct 2026" });
+    if (flow.trigger.event === "task") {
+      m.set("task name", (taskTypes || []).filter((x) => flow.trigger.taskIds.includes(x.id)).map((x) => x.name)[0] || "Refund Task");
+      taskFieldList().forEach((f) => m.set(`task: ${f.raw.toLowerCase()}`, `[${f.raw}]`));
+      m.set("reply", "[What they wrote back]");
+    }
     return m;
   }
   function renderPreview() {
     const box = side.querySelector('[data-role="prev"]');
     const s = selStep();
-    if (!box || !s || s.type !== "email") return;
+    if (!box || !s || (s.type !== "email" && s.type !== "task")) return;
     const vals = sampleVals();
     const lh = letterhead || {};
     const head = `
@@ -1228,6 +1448,12 @@ async function mountFlowEditor(container, { id, staff }) {
     const fill = (html) => insertSspTable(fillTemplateHtml(fillDateTokens(html || ""), vals), sampleSspTable(flow.style.accent)) + (s.cfg.promo ? UNSUB : "");
     const shell = (inner) => emailShell(inner, flow.style, { clinic: clinicDetails(lh), hasLogo: !!lh.logo });
 
+    if (s.type === "task") {
+      box.innerHTML = `<div class="tb-mail">${head}<div class="tb-mail-body tb-mail-shell" data-role="shell">${
+        s.cfg.html ? fillTemplateHtml(fillDateTokens(s.cfg.html), vals) + (s.cfg.promo ? UNSUB : "") : '<p class="tb-none">Choose a task first.</p>'}</div></div>`;
+      hydrateRichImages(box.querySelector('[data-role="shell"]'), { logo: lh.logo || "" });
+      return;
+    }
     if (s.cfg.mode === "html") {
       // Your own HTML: shown in a frame of its own, so its styles can't affect the portal
       const inner = fill(s.cfg.code);
@@ -1292,11 +1518,33 @@ async function mountFlowEditor(container, { id, staff }) {
       changed();
       return;
     }
+    if (el.dataset.trigtask !== undefined) {
+      const set = new Set(flow.trigger.taskIds);
+      if (el.checked) set.add(el.dataset.trigtask); else set.delete(el.dataset.trigtask);
+      flow.trigger.taskIds = [...set];
+      changed(); renderCanvas(); renderSide();
+      return;
+    }
     const s = selStep();
     if (!s) return;
+    if (el.dataset.taskpick !== undefined) {
+      Object.assign(s.cfg, { taskId: el.value, answers: {}, html: "", subject: "", taskName: "" });
+      buildTaskEmail(s);
+      changed(); renderCanvas(); renderSide();
+      return;
+    }
+    if (el.dataset.tans !== undefined) {
+      const fid = el.dataset.tans;
+      s.cfg.answers[fid] = el.type === "checkbox"
+        ? [...side.querySelectorAll(`[data-tans="${CSS.escape(fid)}"]:checked`)].map((x) => x.value) : el.value;
+      buildTaskEmail(s);
+      changed(); renderCanvas(); previewSoon();
+      return;
+    }
     if (el.dataset.k) {
       const k = el.dataset.k;
-      s.cfg[k] = el.type === "checkbox" ? el.checked : k === "num" || k === "skipDays" ? Number(el.value) : el.value;
+      s.cfg[k] = el.type === "checkbox" ? el.checked
+        : ["num", "skipDays", "dueDays", "apptMonths"].includes(k) ? Number(el.value) : el.value;
     } else if (el.dataset.rolecheck !== undefined) {
       const set = new Set(s.cfg.roles);
       if (el.checked) set.add(el.dataset.rolecheck); else set.delete(el.dataset.rolecheck);
@@ -1311,7 +1559,7 @@ async function mountFlowEditor(container, { id, staff }) {
     changed();
     renderCanvas();
     if (el.dataset.rerender !== undefined) renderSide();
-    else if (s.type === "email") previewSoon();
+    else if (s.type === "email" || s.type === "task") previewSoon();
   });
 
   // "Who matches today?" for a daily check
@@ -1735,6 +1983,11 @@ async function mountFlowEditor(container, { id, staff }) {
       changed(); renderCanvas(); renderSide();
       return;
     }
+    if (e.target.closest('[data-act="task-refresh"]')) {
+      const s = selStep();
+      if (s && s.type === "task") { buildTaskEmail(s); changed(); renderCanvas(); renderSide(); showToast("Updated to the task's new wording."); }
+      return;
+    }
     if (e.target.closest('[data-act="close"]')) { sel = null; renderCanvas(); renderSide(); return; }
 
     const mv = e.target.closest("[data-move]");
@@ -1755,7 +2008,7 @@ async function mountFlowEditor(container, { id, staff }) {
       const r = find(flow.steps, sel);
       if (!r) return;
       const s = r.list[r.i];
-      const inside = s.type === "branch" ? count(s.cfg.yes) + count(s.cfg.no) : 0;
+      const inside = REPLY_PATHS(s) ? count(s.cfg.yes) + count(s.cfg.no) : 0;
       if (inside && !(await confirmDialog({
         title: "Remove this If / else?",
         message: `The ${inside} card${inside === 1 ? "" : "s"} inside Yes and No will be removed too.`,
@@ -1797,6 +2050,7 @@ async function mountFlowEditor(container, { id, staff }) {
 
   function runWhat(r) {
     if (r.kind === "visit") return [`Visit on ${r.visitDate || r.purchaseDate || ""}`, (r.visitServices || []).join(", ")];
+    if (r.kind === "task") return [`“${r.taskName || "Task"}” sent ${String(r.startedAt || "").slice(0, 10)}`, r.reply ? "Replied" : ""];
     if (r.kind === "daily") return [`Daily check · started ${String(r.startedAt || "").slice(0, 10)}`];
     return [r.product, r.purchaseDate && `bought ${r.purchaseDate}`];
   }
@@ -1836,7 +2090,8 @@ async function mountFlowEditor(container, { id, staff }) {
     const n = (k) => runs.filter((r) => r.status === k).length;
     const list = runs.slice(0, 12);
     const ev = flow.trigger.event;
-    const waiting = ev === "visit" ? "Patients start the flow the morning after a matching visit."
+    const waiting = ev === "task" ? "Patients start the flow when the task is sent to them."
+      : ev === "visit" ? "Patients start the flow the morning after a matching visit."
       : ev === "daily" ? "Patients start the flow when the morning check finds them."
       : "Patients start the flow when the invoice sync brings in a matching purchase.";
     box.innerHTML = `
@@ -1873,6 +2128,10 @@ async function mountFlowEditor(container, { id, staff }) {
         <label class="lh-field"><span class="lh-label">Services at the visit <small>(optional, separate with commas)</small></span>
           <input type="text" name="extra" maxlength="300" list="ef-test-list" placeholder="e.g. DermaGlow Peel" /></label>
         <datalist id="ef-test-list">${serviceNames.map((n) => `<option value="${esc(n)}"></option>`).join("")}</datalist>`
+      : ev === "task" ? `
+        <p class="tb-info">Uses the answers from the last time the task was sent to this patient.</p>
+        <label class="lh-field"><span class="lh-label">Pretend they replied with <small>(optional)</small></span>
+          <input type="text" name="extra" maxlength="300" placeholder="Leave empty to try the No reply path" /></label>`
       : '<p class="tb-info">The patient is checked against the daily rules now, then the whole flow runs.</p>';
     const dlg = document.createElement("dialog");
     dlg.className = "lh-dialog ef-test-dlg";
@@ -1936,7 +2195,7 @@ async function mountFlowEditor(container, { id, staff }) {
       err.hidden = true;
       const extraVal = form.elements.extra ? form.elements.extra.value.trim() : "";
       const problem = !chosen ? "Choose a patient."
-        : ev === "purchase" && !extraVal ? "Type the product they bought." : flowProblems(flow)[0] || "";
+        : ev === "purchase" && !extraVal ? "Type the product they bought." : flowProblems(flow, taskTypes)[0] || "";
       if (problem) { err.textContent = problem; err.hidden = false; return; }
       runBtn.disabled = true;
       runBtn.textContent = "Running…";
@@ -1944,7 +2203,8 @@ async function mountFlowEditor(container, { id, staff }) {
       try {
         await settle();
         const res = await callApi({ action: "emailFlow", op: "test", flowId: id, patientId: chosen.id,
-          product: ev === "purchase" ? extraVal : "", services: ev === "visit" ? extraVal : "" });
+          product: ev === "purchase" ? extraVal : "", services: ev === "visit" ? extraVal : "",
+          reply: ev === "task" ? extraVal : "" });
         out.innerHTML = `<div class="tb-ready">${res.sent} test email${res.sent === 1 ? "" : "s"} sent to ${esc(res.to)}</div>
           <ol class="ef-steps">${(res.steps || []).map((s) => `<li>${esc(s)}</li>`).join("")}</ol>`;
       } catch (ex) {
@@ -2002,13 +2262,14 @@ async function mountFlowEditor(container, { id, staff }) {
         } catch (err) { console.error(err); showToast("Couldn't turn it off. Try again."); }
         return;
       }
-      const problems = flowProblems(flow);
+      const problems = flowProblems(flow, taskTypes);
       if (problems.length) {
         msgEl.textContent = problems[0] + (problems.length > 1 ? ` (and ${problems.length - 1} more: look for the orange cards)` : "");
         return;
       }
       const ev = flow.trigger.event;
-      const who = ev === "visit" ? "Patients who come in from today start the flow the next morning"
+      const who = ev === "task" ? "Patients start the flow as soon as the task is sent to them"
+        : ev === "visit" ? "Patients who come in from today start the flow the next morning"
         : ev === "daily" ? (flow.trigger.existing
           ? `From the next morning check, patients who match start the flow (up to ${flow.trigger.dailyMax} a day)`
           : "The first morning check only notes who already matches. From the day after, patients who newly match start the flow")
@@ -2065,6 +2326,10 @@ async function mountFlowEditor(container, { id, staff }) {
   renderBar();
   renderCanvas();
   renderSide();
+  listTaskTypes({ isAdmin: false })
+    .then((l) => { taskTypes = l; })
+    .catch((err) => { console.warn("Task types not loaded:", err); taskTypes = []; })
+    .finally(() => { if (root.isConnected) { renderCanvas(); if (!editor) renderSide(); } });
   lhReady.finally(() => { if (root.isConnected) renderPreview(); });
   Promise.all([loadProductNames(), loadServiceNames()]).then(([p, s]) => {
     productNames = p;

@@ -87,6 +87,7 @@ function openEmail(r, scheduled) {
       <div><span>To</span>${esc(to)}</div>
       ${r.cc ? `<div><span>CC</span>${esc(r.cc)}</div>` : ""}
       ${r.patientName ? `<div><span>Patient</span>${esc(r.patientName)}</div>` : ""}
+      ${!scheduled && (r.flows || []).length ? `<div><span>Started</span>${esc(r.flows.map((f) => f.name + (f.test ? " (testing)" : "")).join(", "))}</div>` : ""}
       ${atts.length ? `<div><span>Attached</span>${atts.map((a) => `<span class="tb-att">${I.doc}${esc(a)}</span>`).join(" ")}</div>` : ""}
       ${scheduled && r.fillsLater ? '<div><span>Note</span>Blanks still showing, like {Upcoming appointments}, are filled in when it\'s sent.</div>' : ""}
     </div>
@@ -137,7 +138,9 @@ export async function mountTaskHistory(main, { patientId = "" } = {}) {
         <span class="tm-task-icon">${r.scheduled ? I.clock : r.category === "staff" ? I.staff : I.mail}</span>
         <span class="tm-task-main"><strong>${esc(r.taskName || "Task")}</strong>
           <small>${esc([`To ${toText(r)}`, r.sentBy && `by ${r.sentBy}`, when(r.sentAt),
-            (r.attachments || []).length ? plural(r.attachments.length, "attachment") : ""].filter(Boolean).join(" · "))}</small></span>
+            (r.attachments || []).length ? plural(r.attachments.length, "attachment") : "",
+            (r.flows || []).length ? `Started ${r.flows.map((f) => f.name + (f.test ? " (testing)" : "")).join(", ")}` : ""]
+            .filter(Boolean).join(" · "))}</small></span>
         <span class="tm-task-go">${I.chev}</span>
       </button>`).join("") : '<div class="tm-empty">Nothing matches that search.</div>';
   }

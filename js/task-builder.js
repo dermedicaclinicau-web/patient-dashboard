@@ -22,6 +22,8 @@ import {
 import { searchPatients } from "./task-runner.js";
 import { getPatient } from "./patients.js";
 import { callApi } from "./appointments.js";
+import { db } from "./firebase-config.js";
+import { collection, getDocs, query, where } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -340,6 +342,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   let closedDays = [];
   let schedState = null; // the scheduler's record for this task (count, last send, problems)
   let schedPatient = null; // the patient automatic sends are about
+  let usedBy = null; // email flows started by this task (only readable with Build email flows)
   let schSeq = 0, schTimer = null;
   task.schedule = cleanSchedule(task.schedule);
 
@@ -508,6 +511,9 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
         ${task.useFor === "treatmentInfo" ? `<p class="tb-info">When it's published, the notes pop-up uses this email.
           Put <strong>{Treatment details}</strong> where the treatments should go. It isn't listed in Create new task,
           because it's sent from the notes.</p>` : ""}` : ""}
+        ${usedBy && usedBy.length ? `<p class="tb-info">Sending this task also starts:
+          <strong>${usedBy.map((f) => esc(f.name) + (f.status === "live" ? "" : " (draft)")).join(", ")}</strong>.
+          If you rename or remove a field, check those flows' rules and {Task: …} blanks.</p>` : ""}
       </section>`;
   }
 
@@ -1245,6 +1251,12 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   if (task.category === "staff" && task.recipients.mode === "fixed") loadStaff();
 
   getClosedDays().then((d) => { closedDays = d; }).catch(() => {}).finally(() => { if (root.isConnected) renderForm(); });
+  getDocs(query(collection(db, "email_flows"), where("trigger.taskIds", "array-contains", id)))
+    .then((snap) => {
+      usedBy = snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((f) => f.status !== "archived");
+      if (root.isConnected && usedBy.length) renderForm();
+    })
+    .catch(() => { usedBy = null; }); // no Build email flows permission: nothing shown
   listScheduleStates().then((m) => { schedState = m.get(id) || null; if (root.isConnected) renderScheduleInfo(); });
   if (task.schedule.patientId) {
     getPatient(task.schedule.patientId)

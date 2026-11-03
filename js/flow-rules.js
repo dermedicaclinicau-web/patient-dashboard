@@ -66,6 +66,10 @@ export const RULE_FIELDS = [
   { key: "visit.service", group: "This visit", label: "A service at this visit", type: "text", hint: "e.g. Peel" },
   { key: "visit.staff", group: "This visit", label: "Seen by", type: "text", hint: "Staff name" },
 
+  // Task flows only (task: true): the task that started the flow
+  { key: "task.answer", group: "This task", label: "An answer on the task", type: "answer", task: true },
+  { key: "task.replied", group: "This task", label: "They replied to the task email", type: "bool", task: true },
+
   { key: "hist.bought", group: "Purchase history", label: "Has ever bought", type: "products" },
   { key: "hist.bought_between", group: "Purchase history", label: "Purchases between two dates", type: "prange",
     ops: [["last", "last bought between"], ["any", "bought between"], ["none", "didn't buy between"]] },
@@ -105,7 +109,11 @@ export const RULE_FIELDS = [
 const FIELD = Object.fromEntries(RULE_FIELDS.map((f) => [f.key, f]));
 // What the Recall flow offers: this recall, plus everything about the patient (not "this purchase" or "this visit")
 export const RECALL_RULE_KEYS = RULE_FIELDS
-  .filter((f) => f.recall || (!["This purchase", "This visit"].includes(f.group) && f.key !== "hist.times"))
+  .filter((f) => f.recall || (!f.task && !["This purchase", "This visit"].includes(f.group) && f.key !== "hist.times"))
+  .map((f) => f.key);
+// What a "A task is sent" flow offers: this task, plus everything about the patient
+export const TASK_RULE_KEYS = RULE_FIELDS
+  .filter((f) => !f.recall && !["This purchase", "This visit"].includes(f.group) && f.key !== "hist.times")
   .map((f) => f.key);
 
 const OPS = {
@@ -116,13 +124,15 @@ const OPS = {
   names: [["any", "is one of"], ["none", "is not one of"]],
   choice: [["is", "is"], ["not", "is not"]],
   form: [["has", "has one named"], ["none", "has none named"]],
+  answer: [["is", "is"], ["contains", "contains"], ["not_contains", "doesn't contain"], ["filled", "has an answer"], ["empty", "is empty"]],
 };
 const opsFor = (f) => f.ops || OPS[f.type] || OPS.bool;
 function defaults(f) {
   const list = f.type === "products" || f.type === "names" || f.type === "prange";
   return { op: opsFor(f)[0][0], value: list ? [] : f.type === "choice" ? f.options[0][0] : "", days: "",
     ...(f.type === "range" || f.type === "prange" ? { from: "", to: "" } : {}),
-    ...(f.type === "year" ? { value2: "" } : {}) };
+    ...(f.type === "year" ? { value2: "" } : {}),
+    ...(f.type === "answer" ? { fieldId: "", fieldLabel: "" } : {}) };
 }
 export const blankGroup = () => ({ match: "all", rules: [] });
 // Groups: { id, type: "group", match, rules: [rules] } inside a set of rules (one level deep)
@@ -149,6 +159,10 @@ function cleanRule(r) {
   const out = { id: String(r.id || rid()), field: f.key, op, value, days };
   if (f.type === "range" || f.type === "prange") { out.from = isIso(r.from) ? r.from : ""; out.to = isIso(r.to) ? r.to : ""; }
   if (f.type === "year") out.value2 = r.value2 === "" || r.value2 === null || r.value2 === undefined ? "" : Number(r.value2);
+  if (f.type === "answer") {
+    out.fieldId = String(r.fieldId || "").slice(0, 40);
+    out.fieldLabel = String(r.fieldLabel || "").slice(0, 120);
+  }
   return out;
 }
 
@@ -177,6 +191,10 @@ function ruleProblem(r) {
     const now = new Date().getFullYear();
     const ok = (v) => v !== "" && Number.isInteger(Number(v)) && Number(v) >= 1900 && Number(v) <= now;
     if (!ok(r.value) || (r.op === "between" && !ok(r.value2))) return `Type a year, like 1985, for "${f.label}"`;
+  }
+  if (f.type === "answer") {
+    if (!r.fieldId) return 'Choose which answer to check in "An answer on the task"';
+    if (!["empty", "filled"].includes(r.op) && !String(r.value || "").trim()) return `Fill in what "${r.fieldLabel || "the answer"}" should be`;
   }
   if ((f.type === "text" || f.type === "form") && !String(r.value || "").trim()) return `Fill in "${f.label}"`;
   if (f.type === "products" && !(Array.isArray(r.value) && r.value.length)) return `Choose a product for "${f.label}"`;
@@ -236,6 +254,10 @@ export function describeRule(r) {
   if (f.type === "products" || f.type === "names") {
     const list = Array.isArray(r.value) ? r.value : [];
     return `${f.label} ${op} ${list.length ? (list.length > 2 ? `${list.slice(0, 2).join(", ")} +${list.length - 2}` : list.join(", ")) : "…"}`;
+  }
+  if (f.type === "answer") {
+    const who = `Answer to "${r.fieldLabel || "…"}"`;
+    return r.op === "empty" || r.op === "filled" ? `${who} ${op}` : `${who} ${op} "${r.value || "…"}"`;
   }
   if (f.type === "form") return `${f.label} ${op} "${r.value || "…"}"${r.days ? ` in the last ${r.days} days` : ""}`;
   return `${f.label} ${op} "${r.value || "…"}"`;
@@ -337,7 +359,7 @@ export function mountProductPicker(host, arr, { onChange = () => {}, names = [],
 // A rule list can hold groups (one level): { type: "group", match, rules }.
 // only: the field keys to offer. lists: the choices for "names" rules, e.g. { "rc.category": [...] }
 export function mountRuleBuilder(host, group, { onChange = () => {}, names = [], empty = "", only = null, lists = {} } = {}) {
-  const fields = Array.isArray(only) ? RULE_FIELDS.filter((f) => only.includes(f.key)) : RULE_FIELDS.filter((f) => !f.recall);
+  const fields = Array.isArray(only) ? RULE_FIELDS.filter((f) => only.includes(f.key)) : RULE_FIELDS.filter((f) => !f.recall && !f.task);
   const groups = [...new Set(fields.map((f) => f.group))];
   const firstKey = fields.some((f) => f.key === "appt.has_future") ? "appt.has_future" : fields[0].key;
   const MAX = 20, TOTAL = 40;
@@ -363,6 +385,7 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       `<option value="${v}"${v === r.op ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
     let val = "";
     let quick = "";
+    let pre = "";
     if (f.type === "number") {
       val = `<input class="fe-input fr-num" type="number" min="0" step="1" inputmode="numeric" data-rv="${p}" value="${esc(r.value)}" aria-label="Number" />
         ${f.unit ? `<span class="fr-unit">${esc(f.unit)}</span>` : ""}`;
@@ -381,6 +404,20 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
     } else if (f.type === "choice") {
       val = `<select class="fb-select fr-val" data-rv="${p}" aria-label="Value">${f.options.map(([v, l]) =>
         `<option value="${v}"${v === r.value ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+    } else if (f.type === "answer") {
+      // lists["task.answer"]: the task's fields, [{ id, label, options: ["…"] }]
+      const fl = lists[r.field] || [];
+      const cur = fl.find((x) => x.id === r.fieldId);
+      pre = `<select class="fb-select fr-field" data-rk="${p}" aria-label="Which answer">
+        <option value="">Choose a field…</option>
+        ${fl.map((x) => `<option value="${esc(x.id)}"${x.id === r.fieldId ? " selected" : ""}>${esc(x.label)}</option>`).join("")}
+        ${r.fieldId && !cur ? `<option value="${esc(r.fieldId)}" selected>${esc(r.fieldLabel || "A field that's been removed")} (removed)</option>` : ""}
+      </select>`;
+      if (r.op !== "empty" && r.op !== "filled") {
+        const dl = cur && Array.isArray(cur.options) && cur.options.length ? `fa_${rid()}` : "";
+        val = `<input class="fe-input fr-val" data-rv="${p}" maxlength="120" placeholder="e.g. Yes" value="${esc(r.value)}" aria-label="Answer"${dl ? ` list="${dl}"` : ""} />
+          ${dl ? `<datalist id="${dl}">${cur.options.map((o) => `<option value="${esc(o)}"></option>`).join("")}</datalist>` : ""}`;
+      }
     } else if (f.type === "form") {
       val = `<input class="fe-input fr-val" data-rv="${p}" maxlength="80" placeholder="e.g. Consent" value="${esc(r.value)}" aria-label="Form name" />
         <span class="fr-unit">in the last</span>
@@ -408,6 +445,7 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
     return `<div class="fr-rule">
       ${join ? `<span class="fr-join">${join}</span>` : ""}
       <div class="fr-row">${fieldSel}</div>
+      ${pre ? `<div class="fr-row">${pre}</div>` : ""}
       <div class="fr-row">${opSel}${val}
         <button type="button" class="fr-x" data-rx="${p}" aria-label="Remove this rule" title="Remove">×</button></div>
       ${quick}
@@ -501,6 +539,15 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       onChange();
       return;
     }
+    if (d.rk !== undefined) {
+      const r = ruleAt(d.rk);
+      if (!r) return;
+      r.fieldId = el.value;
+      r.fieldLabel = el.value ? String(el.selectedOptions[0].textContent || "").replace(/\s*\(removed\)$/, "").trim() : "";
+      render();
+      onChange();
+      return;
+    }
     const p = d.ro ?? d.rv ?? d.rd;
     if (p === undefined) return;
     const r = ruleAt(p);
@@ -511,6 +558,7 @@ export function mountRuleBuilder(host, group, { onChange = () => {}, names = [],
       // Birthday: the days box only shows for "in the next" and "in the past"
       if (ft === "birthday") { if ((r.op === "next" || r.op === "last") && r.value === "") r.value = 7; render(); }
       if (ft === "year") render();   // shows or hides the second year box
+      if (ft === "answer") render(); // "has an answer" / "is empty" have no value box
     }
     else if (d.rd !== undefined) r.days = el.value === "" ? "" : Number(el.value);
     else r.value = ft === "number" || ft === "birthday" || ft === "year" ? (el.value === "" ? "" : Number(el.value)) : el.value;
