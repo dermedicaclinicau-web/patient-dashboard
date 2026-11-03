@@ -153,12 +153,28 @@ export function priorityRows(c) {
       if (issues.length) why.push(`${issues.length} Site health issue${issues.length === 1 ? "" : "s"} to fix.`);
       if (why.length) { tone = "amber"; label = "Needs work"; }
     }
+    if (p && tone !== "grey") {
+      const bw = bounceWhy(p);
+      if (bw) { why.push(bw); if (tone === "green") { tone = "amber"; label = "Needs work"; } }
+    }
     if (!hp && !why.length) why.push("Site health checks it from the next nightly run.");
     return { path, pr, p, pos, ppos, goalLabel, goalMax, goalMet, tone, label, why, rank: order[tone] };
   }).sort((a, b) => a.rank - b.rank || (b.p?.m28.clicks || 0) - (a.p?.m28.clicks || 0));
 }
 
 const pill = (r) => `<span class="seo-pr-pill is-${r.tone}">${esc(r.label)}</span>`;
+
+// High bounce rate (Seo12.gs engagement, last 28 days): a reason, or ""
+function bounceWhy(p) {
+  const e = p && p.eng;
+  if (!e || e.c[0] < 20) return "";
+  const b = 1 - e.c[1] / e.c[0];
+  if (b <= 0.65) return "";
+  const mob = e.m[0] >= 10 ? 1 - e.m[1] / e.m[0] : null;
+  const desk = e.d[0] >= 10 ? 1 - e.d[1] / e.d[0] : null;
+  return `High bounce: ${Math.round(b * 100)}% of Google visitors leave straight away${
+    mob != null && desk != null && mob - desk >= 0.1 ? ` (${Math.round(mob * 100)}% on phones)` : ""}.`;
+}
 
 /* ---------- Overview card ---------- */
 

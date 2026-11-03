@@ -57,6 +57,13 @@ const HELP = {
 };
 const LIMITS = { lcp: [2500, 4000], inp: [200, 500], cls: [0.1, 0.25] };
 
+// Bounce rate (Seo12.gs): [sessions, engaged, seconds, …] → 0–1
+const bRate = (a) => (a && a[0] ? 1 - a[1] / a[0] : null);
+const pctB = (r) => (r == null ? "—" : Math.round(r * 100) + "%");
+const durB = (s) => (s == null || !isFinite(s) ? "—" : s < 60 ? `${Math.round(s)}s` : `${Math.floor(s / 60)}m ${String(Math.round(s % 60)).padStart(2, "0")}s`);
+const chipB = (r, n) => (r == null || n < 10 ? '<span class="seo-note">—</span>'
+  : `<span class="seo-bnc is-${r <= 0.45 ? "good" : r <= 0.65 ? "ok" : "high"}"${n < 20 ? ' title="Fewer than 20 visits: not much to go on"' : ""}>${pctB(r)}</span>`);
+
 // Fix it (SEO → Website): the issues it can write a suggestion for
 const FIX = { no_title: "title", title_long: "title", title_short: "title", dup_title: "title",
   no_desc: "desc", desc_long: "desc", desc_short: "desc", dup_desc: "desc" };
@@ -271,6 +278,13 @@ export function viewHealth(wrap, c, ui) {
   const canWork = c.can("seo.work");
   const isPri = priOf(c);
   let byId = new Map();
+  // A page's engagement from SEO's data (any version of its address)
+  const engOf = (path) => {
+    const k = normP(path);
+    const p = (c.data?.pages || []).find((x) => x.eng && normP(x.path) === k);
+    return p ? p.eng : null;
+  };
+  const highBounce = (e) => !!e && e.c[0] >= 20 && bRate(e.c) > 0.65;
 
   function tiles(all) {
     const open = all.filter((i) => i.status === "open");
@@ -292,6 +306,10 @@ export function viewHealth(wrap, c, ui) {
       })(), "key pages indexed") : ""}
       ${tile("Core Web Vitals", real.length ? `${real.filter((m) => m.pass).length}/${real.length}` : "—",
         real.length ? "pages passing (real visitors)" : "not enough visits yet")}
+      ${c.data?.eng ? (() => {
+        const n = H.pages.filter((p) => highBounce(engOf(p.path))).length;
+        return tile("High bounce", n ? `<span class="seo-h-poor">${n}</span>` : "0", "priority pages over 65%");
+      })() : ""}
     </div>`;
   }
 
@@ -424,7 +442,52 @@ export function viewHealth(wrap, c, ui) {
           return `<li>${pg ? `<button class="seo-w-link" data-open="${pg.id}">${esc(p)}</button>` : esc(p)} <span class="seo-note">· ${plural(n, "click")} in 28 days</span></li>`;
         }).join("")}</ul></div>` : ""}`;
   }
-
+  // Engagement: how many Google visitors each priority page keeps, and what to try
+  function engageHtml() {
+    const E = c.data?.eng;
+    if (!E) {
+      return `<div class="seo-empty">No engagement data yet. In Apps Script, run <code>runSeoEngagement()</code> once, then <code>installSeoEngagementTrigger()</code>.</div>`;
+    }
+    const s = E.site.c, dev = E.site.dev || {};
+    const dRow = (k, l) => (dev[k] && dev[k][0] ? `<span>${l} ${chipB(bRate(dev[k]), dev[k][0])}</span>` : "");
+    const tipsOf = (hp, e) => {
+      if (!highBounce(e)) return "";
+      const out = [];
+      const mob = e.m[0] >= 10 ? bRate(e.m) : null, desk = e.d[0] >= 10 ? bRate(e.d) : null;
+      const m = metricsOf(hp.speed);
+      if (mob != null && desk != null && mob - desk >= 0.1) out.push("Check it on a phone: the top should load fast, with the Book button showing straight away.");
+      if (m && m.score != null && m.score < 50) out.push(`It's slow on phones (score ${m.score}): compress the top image.`);
+      if (e.c[2] / e.c[0] < 20) out.push("People leave within seconds: make the first screen answer what they searched for.");
+      if (hp.words && hp.words < 400) out.push(`Only about ${hp.words} words: add what people want to know (cost, downtime, results).`);
+      if (!out.length) out.push("Add a short answer near the top, and links to related treatments, so people read on.");
+      return out.slice(0, 2).join(" ");
+    };
+    const rows = H.pages.map((hp) => ({ hp, e: engOf(hp.path) })).sort((a, b) => {
+      const ok = (x) => (x.e && x.e.c[0] >= 20 ? 1 : 0);
+      return ok(b) - ok(a) || (bRate(b.e?.c) ?? -1) - (bRate(a.e?.c) ?? -1);
+    });
+    return `
+      <div class="seo-card"><div class="seo-row" style="margin:0;gap:14px">
+        <strong>Google visitors who left straight away: ${chipB(bRate(s), s[0])}</strong>
+        ${dRow("mobile", "Phones")}${dRow("desktop", "Computers")}${dRow("tablet", "Tablets")}
+        <span class="seo-sp"></span><span class="seo-note">${esc(E.from || "")} to ${esc(E.to || "")} · ${c.h.fmtInt(s[0])} visits from Google</span></div>
+        ${E.state && E.state.ok === false ? `<div class="seo-warn" style="margin:8px 0 0">The last engagement update failed: ${esc(E.state.error || "")}</div>` : ""}
+      </div>
+      <div class="seo-table-wrap"><table class="seo-table seo-h-eng">
+        <thead><tr><th>Page</th><th>Visits</th><th>Bounce</th><th>vs before</th><th>Engaged time</th><th>Phones</th><th>Computers</th><th>Key events</th><th>What to try</th></tr></thead>
+        <tbody>${rows.map(({ hp, e }) => {
+          const pg = c.byPath.get(hp.path);
+          const name = starMark(isPri(hp.path)) + (pg ? `<button class="seo-w-link" data-open="${pg.id}">${esc(hp.path)}</button>` : esc(hp.path));
+          if (!e || !e.c[0]) return `<tr><td>${name}</td><td colspan="8" class="seo-note">No visits from Google in the last 28 days.</td></tr>`;
+          const b = bRate(e.c), was = e.p[0] >= 20 ? bRate(e.p) : null;
+          return `<tr><td>${name}</td><td>${c.h.fmtInt(e.c[0])}</td><td>${chipB(b, e.c[0])}</td>
+            <td>${was == null || e.c[0] < 20 ? "—" : c.h.delta(b * 100, was * 100, { invert: true, abs: true, digits: 0 })}</td>
+            <td>${durB(e.c[2] / e.c[0])}</td><td>${chipB(bRate(e.m), e.m[0])}</td><td>${chipB(bRate(e.d), e.d[0])}</td>
+            <td>${c.h.fmtInt(e.c[3] || 0)}</td><td class="seo-h-try">${esc(tipsOf(hp, e))}</td></tr>`;
+        }).join("")}</tbody></table></div>
+      <p class="seo-note" style="margin-top:8px">A bounce is a visit from Google that left without engaging: under 10 seconds, no second page, no booking or enquiry.
+        Green up to 45%, red over 65%. “vs before” is in points against the 28 days before. Pages with fewer than 20 visits aren't judged.</p>`;
+  }
   function draw() {
     const all = H.pages.concat(H.site ? [H.site] : []).flatMap((p) => p.issues || []);
     byId = new Map(all.map((i) => [i.id, i]));
@@ -438,11 +501,13 @@ export function viewHealth(wrap, c, ui) {
         <button class="seo-btn ${ui.hview === "content" ? "on" : ""}" data-h-view="content">Content</button>
         <button class="seo-btn ${ui.hview === "issues" ? "on" : ""}" data-h-view="issues">Issues</button>
         <button class="seo-btn ${ui.hview === "speed" ? "on" : ""}" data-h-view="speed">Speed</button>
+        <button class="seo-btn ${ui.hview === "engage" ? "on" : ""}" data-h-view="engage">Engagement</button>
         <button class="seo-btn ${ui.hview === "index" ? "on" : ""}" data-h-view="index">In Google</button>
         <span class="seo-sp"></span>
         <span class="seo-note">${st.linksChecked != null ? `${st.linksChecked} of ${st.linksFound} internal links checked · ` : ""}${c.isAdmin ? `Star pages (☆) in the <a href="#/seo/pages">Pages tab</a> to check them` : ""}</span>
       </div>
-      ${ui.hview === "content" ? contentHtml(c, ui) : ui.hview === "speed" ? speedHtml() : ui.hview === "index" ? indexHtml() : issuesHtml(all)}`;
+      ${ui.hview === "content" ? contentHtml(c, ui) : ui.hview === "speed" ? speedHtml() : ui.hview === "engage" ? engageHtml()
+        : ui.hview === "index" ? indexHtml() : issuesHtml(all)}`;
   }
 
   wrap.onclick = async (e) => {

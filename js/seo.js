@@ -32,6 +32,7 @@ const METRICS = {
   ctr:         { label: "CTR",              fmt: (v) => fmtPct(v) },
   position:    { label: "Avg position",     fmt: (v) => fmtPos(v), invert: true },
   sessions:    { label: "Organic sessions", fmt: (v) => fmtInt(v) },
+  bounce:      { label: "Bounce rate",      fmt: (v) => fmtB(v), invert: true },
   nonBrand:    { label: "Non-brand clicks", fmt: (v) => fmtInt(v), brand: true },
 };
 
@@ -43,9 +44,10 @@ async function loadData(force) {
   if (cache.data && !force) return cache.data;
   if (cache.pending) return cache.pending;
   cache.pending = (async () => {
-    const [ovSnap, runSnap] = await Promise.all([
+    const [ovSnap, runSnap, engSnap] = await Promise.all([
       getDoc(doc(db, "seo_state", "overview")),
       getDoc(doc(db, "seo_state", "run")),
+      getDoc(doc(db, "seo_state", "engagement")).catch(() => null),   // Seo12.gs: bounce rate by page and device
     ]);
     if (!ovSnap.exists()) throw new Error("No SEO data yet. Run runSeoNightly() in Apps Script.");
     const ov = ovSnap.data();
@@ -64,7 +66,12 @@ async function loadData(force) {
       return p;
     });
 
-    cache.data = { ov, days, pages, run: runSnap.exists() ? runSnap.data() : null };
+    let eng = null;
+    try {
+      if (engSnap && engSnap.exists() && engSnap.data().json) eng = { ...JSON.parse(engSnap.data().json), state: engSnap.data() };
+    } catch (e) { console.warn("Engagement not read:", e); }
+    for (const p of pages) p.eng = eng && eng.pages ? eng.pages[tkey(p.path)] || null : null;
+    cache.data = { ov, days, pages, eng, run: runSnap.exists() ? runSnap.data() : null };
     return cache.data;
   })();
   try { return await cache.pending; } finally { cache.pending = null; }
@@ -76,6 +83,17 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 const fmtInt = (n) => Math.round(n || 0).toLocaleString("en-AU");
 const fmtPct = (r) => ((r || 0) * 100).toFixed(2) + "%";
 const fmtPos = (p) => (p == null ? "—" : p.toFixed(1));
+
+/* Bounce rate: visits from Google that left without engaging (GA4). [sessions, engaged, seconds…] → 0–1 */
+const fmtB = (r) => (r == null ? "—" : Math.round(r * 100) + "%");
+const fmtDur = (s) => (s == null || !isFinite(s) ? "—" : s < 60 ? `${Math.round(s)}s` : `${Math.floor(s / 60)}m ${String(Math.round(s % 60)).padStart(2, "0")}s`);
+const bRate = (a) => (a && a[0] ? 1 - a[1] / a[0] : null);
+const bTone = (r) => (r == null ? "" : r <= 0.45 ? "good" : r <= 0.65 ? "ok" : "high");
+// A page's bounce rate, last 28 days: from the engagement update, otherwise from the nightly numbers
+const pageBounce = (p) => (p.eng && p.eng.c[0] ? bRate(p.eng.c) : p.m28.sessions ? 1 - (p.m28.engaged || 0) / p.m28.sessions : null);
+const pageTime = (p) => (p.eng && p.eng.c[0] ? p.eng.c[2] / p.eng.c[0] : null);
+const bChip = (r, n) => (r == null ? `<span class="seo-note">—</span>`
+  : `<span class="seo-bnc is-${bTone(r)}"${n != null && n < 20 ? ' title="Fewer than 20 visits: not much to go on"' : ""}>${fmtB(r)}</span>`);
 
 function addDays(iso, n) {
   const d = new Date(iso + "T00:00:00Z");
@@ -179,6 +197,7 @@ function sumRange(days, from, to) {
     if (d.brandClicks != null) { t.brandClicks += d.brandClicks; t.brandImpressions += d.brandImpressions || 0; t.brandDays++; }
   }
   t.ctr = t.impressions ? t.clicks / t.impressions : 0;
+  t.bounce = t.sessions ? 1 - t.engaged / t.sessions : null;
   t.position = t.posI ? t.posW / t.posI : null;
   t.nonBrand = t.days && t.brandDays === t.days ? t.clicks - t.brandClicks : null;
   t.brandShare = t.nonBrand != null && t.clicks ? t.brandClicks / t.clicks : null;
@@ -668,6 +687,64 @@ export async function mountSeo(el, opts = {}) {
     if (tab === "pages") renderTable();
   }
 
+    /* ----- Overview → Bounce rate: what's behind it ----- */
+  function bounceHtml(cur, prev, cmp) {
+    const E = data.eng;
+    const head = `<div class="seo-row" style="margin:0 0 6px"><h3 style="margin:0">Bounce rate: what's behind it</h3><span class="seo-sp"></span>
+      <button class="seo-btn" type="button" data-drclose>Close</button></div>`;
+    const what = `<details class="seo-bn-what"><summary>What counts as a bounce?</summary>
+      <p>A visit from Google where the person left without engaging: under 10 seconds, no second page, and no booking or enquiry.
+      Lower is better. For treatment pages, under 45% is good, and over 65% usually means the page isn't giving people what they searched for.</p></details>`;
+    const sentence = cur.bounce == null ? "" : `<p class="seo-bn-sum"><strong>${fmtB(cur.bounce)}</strong> of visits from Google left straight away in these dates${
+      prev && prev.bounce != null ? ` (${fmtB(prev.bounce)} ${esc(cmp.name.toLowerCase())})` : ""}: about <strong>${fmtInt(cur.sessions * cur.bounce)}</strong> of ${fmtInt(cur.sessions)} visits.</p>`;
+    if (!E) {
+      return `<div class="seo-card seo-bn">${head}${sentence}<p class="seo-note">Pages and phone vs computer numbers appear once the engagement update has run.
+        In Apps Script, run <code>runSeoEngagement</code> once, then <code>installSeoEngagementTrigger</code>.</p>${what}</div>`;
+    }
+    // Phones and computers
+    const dev = E.site.dev || {};
+    const tot = Object.values(dev).reduce((a, x) => a + x[0], 0) || 1;
+    const devRow = (k, l) => {
+      const x = dev[k];
+      if (!x || !x[0]) return "";
+      const share = Math.round((x[0] / tot) * 100);
+      return `<div class="seo-bn-dev"><span>${l}</span><span class="seo-bn-bar"><i style="width:${share}%"></i></span>
+        <span class="seo-note">${share}% of visits</span>${bChip(bRate(x), x[0])}<span class="seo-note">${fmtDur(x[2] / x[0])} engaged</span></div>`;
+    };
+    const mob = dev.mobile, desk = dev.desktop;
+    const gap = mob && desk && mob[0] >= 30 && desk[0] >= 30 ? bRate(mob) - bRate(desk) : 0;
+    // Pages losing the most visitors (each address once)
+    const byK = new Map();
+    for (const p of data.pages) if (p.eng && !byK.has(tkey(p.path))) byK.set(tkey(p.path), p);
+    const rows = [...byK.values()].filter((p) => p.eng.c[0] >= 20)
+      .map((p) => ({ p, b: bRate(p.eng.c), was: p.eng.p[0] >= 20 ? bRate(p.eng.p) : null, lost: p.eng.c[0] - p.eng.c[1] }))
+      .sort((a, b) => b.lost - a.lost).slice(0, 15);
+    const table = rows.length ? `<div class="seo-table-wrap" style="max-height:none"><table class="seo-table">
+      <thead><tr><th>Page</th><th>Visits</th><th>Bounce</th><th>vs before</th><th>Engaged time</th><th>Mobile</th><th>Desktop</th></tr></thead>
+      <tbody>${rows.map(({ p, b, was }) => `<tr data-open="${esc(p.id)}">
+        <td><div class="seo-path" title="${esc(p.path)}">${starHtml(ctx(), p.path)}${esc(titleOf(work, data, p.path))}</div></td>
+        <td>${fmtInt(p.eng.c[0])}</td><td>${bChip(b, p.eng.c[0])}</td>
+        <td>${was == null ? "—" : delta(b * 100, was * 100, { invert: true, abs: true, digits: 0 })}</td>
+        <td>${fmtDur(p.eng.c[2] / p.eng.c[0])}</td>
+        <td>${p.eng.m[0] >= 10 ? bChip(bRate(p.eng.m), p.eng.m[0]) : "—"}</td>
+        <td>${p.eng.d[0] >= 10 ? bChip(bRate(p.eng.d), p.eng.d[0]) : "—"}</td></tr>`).join("")}</tbody></table></div>`
+      : `<p class="seo-note">Not enough visits per page yet (20 or more).</p>`;
+    const tips = [];
+    if (gap >= 0.1) tips.push(`Visitors on phones leave ${Math.round(gap * 100)} points more often than on computers. Open your main pages on a phone: does the top load fast, and is the next step (Book a consultation) clear without scrolling?`);
+    if (rows[0] && rows[0].b > 0.65) tips.push(`Start with “${titleOf(work, data, rows[0].p.path)}”: it loses the most visitors. Make sure its first screen answers what people searched for.`);
+    const at = E.at ? new Date(E.at).toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "";
+    return `<div class="seo-card seo-bn">${head}${sentence}
+      ${E.state && E.state.ok === false ? `<div class="seo-warn">The last engagement update failed: ${esc(E.state.error || "")}</div>` : ""}
+      <h4 class="seo-bn-h">Phones and computers <span class="seo-note">· last 28 days</span></h4>
+      ${devRow("mobile", "Mobile")}${devRow("desktop", "Desktop")}${devRow("tablet", "Tablet")}
+      <h4 class="seo-bn-h">Pages losing the most visitors <span class="seo-note">· last 28 days, vs the 28 before (points)</span></h4>${table}
+      ${tips.length ? `<div class="seo-bn-tips">${tips.map((x) => `<p>💡 ${esc(x)}</p>`).join("")}</div>` : ""}
+      <div class="seo-w-acts" style="margin-top:10px">
+        <button class="seo-btn" type="button" data-drask="${esc("Which pages have the highest bounce rate from Google visitors, and what should we change on them to keep people reading and booking?")}">Ask the Advisor about this</button>
+        <span class="seo-note">${at ? `Updated ${esc(at)}` : ""}</span></div>
+      ${what}</div>`;
+  }
+
   /* ----- Overview ----- */
 
   function overviewHtml() {
@@ -700,6 +777,10 @@ export async function mountSeo(el, opts = {}) {
       kpi("CTR", "ctr", fmtPct),
       kpi("Avg position", "position", fmtPos, { invert: true, abs: true }, "lower is better"),
       kpi("Organic sessions", "sessions", fmtInt, {}, "GA4"),
+      tile("Bounce rate", fmtB(cur.bounce),
+        prev && cur.bounce != null && prev.bounce != null
+          ? delta(cur.bounce * 100, prev.bounce * 100, { invert: true, abs: true, digits: 1 }).replace(/<\/span>$/, " pts</span>") : "",
+        [prev && prev.bounce != null ? `vs ${fmtB(prev.bounce)}` : "", "left straight away · lower is better"], "bounce"),
       kpi("Organic key events", "conversions", fmtInt, {}, "GA4"),
       kpi("AI assistant visits", "aiSessions", fmtInt, {}, "ChatGPT, Perplexity…"),
     ].join("");
@@ -904,7 +985,7 @@ export async function mountSeo(el, opts = {}) {
       </div>
       ${fresh ? `<p class="seo-note" style="margin:-4px 0 12px">The last ${fresh} day${fresh === 1 ? "" : "s"} may still change: Search Console takes about 3 days to settle. They're shaded on the chart.</p>` : ""}
       <div class="seo-kpis">${kpis}</div>
-      ${ui.kpi && LABELS[ui.kpi] ? (W
+      ${ui.kpi === "bounce" ? bounceHtml(cur, prev, cmp) : ui.kpi && LABELS[ui.kpi] ? (W
         ? drillHtml(ctx(), { key: ui.kpi, label: LABELS[ui.kpi], r, cmp: cmp && cmp.ok ? cmp : null, compareMode: ui.compare,
             preset: ui.preset, W, tab: ui.drtab, cur, prev, open: ui.drOpen })
         : (loadWindows(wForce).then((x) => { W = x; wForce = false; if (tab === "overview") render(); })
@@ -969,6 +1050,8 @@ export async function mountSeo(el, opts = {}) {
     { key: "dPos",        label: "Moved",        get: (p) => p.dPos },
     { key: "sessions",    label: "Org. sessions", get: (p) => p.m28.sessions },
     { key: "conversions", label: "Key events",   get: (p) => p.m28.conversions },
+    { key: "bounce",      label: "Bounce",       get: (p) => pageBounce(p), nullsLast: true },
+    { key: "engTime",     label: "Engaged time", get: (p) => pageTime(p), nullsLast: true },
     { key: "weekly",      label: "12 weeks",     get: null },
   ];
 
@@ -983,7 +1066,8 @@ export async function mountSeo(el, opts = {}) {
         <span class="seo-sp"></span><span class="seo-note" data-count></span>
       </div>
       <div class="seo-table-wrap" data-table></div>
-      <div class="seo-note" style="margin-top:8px">Last 28 complete days of search data vs the 28 before. Organic sessions and key events from GA4.</div>`;
+      <div class="seo-note" style="margin-top:8px">Last 28 complete days of search data vs the 28 before. Organic sessions and key events from GA4.
+        Bounce: visits from Google that left straight away (green up to 45%, red over 65%). Engaged time: per visit.</div>`;
   }
 
   function renderTable() {
@@ -1020,6 +1104,8 @@ export async function mountSeo(el, opts = {}) {
             <td>${delta(p.m28.position, p.prev28.position, { invert: true, abs: true })}</td>
             <td>${fmtInt(p.m28.sessions)}</td>
             <td>${fmtInt(p.m28.conversions)}</td>
+            <td>${bChip(pageBounce(p), p.eng ? p.eng.c[0] : p.m28.sessions)}</td>
+            <td>${fmtDur(pageTime(p))}</td>
             <td>${sparkline(p.weekly)}</td>
           </tr>`).join("")}</tbody>
       </table>
@@ -1057,6 +1143,21 @@ export async function mountSeo(el, opts = {}) {
         ${row("Engaged sessions", p.m28.engaged, null, fmtInt)}
         ${row("Key events", p.m28.conversions, null, fmtInt)}
       </table>
+      ${(() => {
+        const b = pageBounce(p);
+        if (b == null) return "";
+        const e = p.eng;
+        const was = e && e.p[0] >= 20 ? bRate(e.p) : null;
+        const mob = e && e.m[0] >= 10 ? bRate(e.m) : null, desk = e && e.d[0] >= 10 ? bRate(e.d) : null;
+        const tip = b <= 0.65 ? "" : mob != null && desk != null && mob - desk >= 0.1
+          ? "Visitors on phones leave much more often: check how the top of the page looks and loads on a phone."
+          : "Most Google visitors leave straight away: make sure the first screen answers what they searched for, with a clear next step.";
+        return `<div class="seo-bn-panel"><div class="seo-row" style="margin:0"><strong>Bounce rate</strong>${bChip(b, e ? e.c[0] : p.m28.sessions)}
+            ${was != null ? `${delta(b * 100, was * 100, { invert: true, abs: true, digits: 0 })}<span class="seo-note">points vs the 28 days before</span>` : ""}</div>
+          <p class="seo-note" style="margin:4px 0 0">${[e && e.c[0] ? `Engaged time ${fmtDur(e.c[2] / e.c[0])} a visit` : "",
+            mob != null ? `Mobile ${fmtB(mob)}` : "", desk != null ? `Desktop ${fmtB(desk)}` : ""].filter(Boolean).join(" · ")}</p>
+          ${tip ? `<p class="seo-bn-tip">💡 ${esc(tip)}</p>` : ""}</div>`;
+      })()}
       <h3 style="font-size:14px;margin:16px 0 6px">Clicks per week</h3>
       ${bars(p.weekly, weekLabels)}
       ${pagePanelExtras(work, p, { esc, fmtInt, fmtPos, fmtDate, delta,

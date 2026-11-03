@@ -21,6 +21,7 @@ const GROUPS = {
   connect: { order: 2, factor: 0.3, title: (m, r) => `Link it with ${r}` },
   content: { order: 3, factor: 0.4, title: () => "Add what people search for" },
   speed:   { order: 4, factor: 0.1, title: () => "Speed and images" },
+  engage:  { order: 2.5, factor: 0.25, title: () => "Keep Google visitors on the page" },
   off:     { order: 5, factor: 0.1, title: () => "Promote it off the site" },
   ai:      { order: 1.5, factor: 1, title: () => "" },   // made by Seo7.gs (Claude), after "match", before "connect"
   cluster: { order: 1.8, factor: 0.4, title: (m, r, cl) => `Tidy the ${cl?.name || "page"} cluster` },
@@ -244,6 +245,22 @@ function planTasks(c, path) {
       "Compress and resize the top image, use WebP, remove sliders or plugins it doesn't need.");
   }
   if (hp?.noAlt) add("speed", "alt", `Add alt text to ${plural(hp.noAlt, "image")}`, "Quick", { k: "alt", ...pg });
+
+  /* Keep visitors on the page: over 65% of Google visitors leaving straight away (Seo12.gs, last 28 days) */
+  const eg = p && p.eng;
+  if (eg && eg.c[0] >= 20 && 1 - eg.c[1] / eg.c[0] > 0.65) {
+    const b = Math.round((1 - eg.c[1] / eg.c[0]) * 100);
+    const mob = eg.m[0] >= 10 ? 1 - eg.m[1] / eg.m[0] : null, desk = eg.d[0] >= 10 ? 1 - eg.d[1] / eg.d[0] : null;
+    const facts = `${b}% of ${eg.c[0]} visits from Google left straight away in the last 28 days.`;
+    add("engage", "eng:top", `Make the first screen answer “${main || titleOf(w, c.data, path)}”, with a Book a consultation button`, "Medium",
+      { k: "manual" }, `${facts} Put a 2–3 sentence answer and the button above the first image.`);
+    if (mob != null && desk != null && mob - desk >= 0.1) {
+      add("engage", "eng:mobile", "Check the page on a phone: the top loads fast and the Book button shows without scrolling", "Quick",
+        { k: "manual" }, `Phones ${Math.round(mob * 100)}% vs computers ${Math.round(desk * 100)}%.`);
+    }
+    add("engage", "eng:links", "Add links to 2–3 related treatments or guides, so people read on", "Quick",
+      { k: "manual" }, "One part-way down, and the rest at the end next to “Book a consultation”.");
+  }
 
   /* Off the site */
   const term = main ? titleCase(main.replace(/\bperth\b/gi, "").replace(/\s+/g, " ").trim()) || titleCase(main) : titleOf(w, c.data, path);
