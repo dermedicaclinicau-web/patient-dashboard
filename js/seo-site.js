@@ -1,6 +1,7 @@
 // SEO → Website: every page and blog post on the website, with how each one shows in Google.
 // Read and saved through Apps Script (action "wordpress"), which talks to the Dermedica Portal Connector plugin.
 // Changes go live straight away, and each one is added to the Change log.
+// Fix it: Claude suggests titles and descriptions from the page's text and its Google searches, checked against the advertising rules.
 import { callApi } from "./appointments.js";
 import { can } from "./perms.js";
 import { showToast } from "./utils.js";
@@ -30,6 +31,11 @@ const errText = (err) => (err && err.code === "FORBIDDEN"
   ? "You don't have access to do that. Ask an Admin for Website access in Staff → Roles and access."
   : (err && err.message) || "Something went wrong. Try again.");
 
+/** A Fix it button for Site health, Tasks or anywhere in SEO. what: "title", "desc" or "both" */
+export function fixItHtml(path, what = "both", target = "") {
+  return `<button type="button" class="seo-btn ws-fixit" data-wsfix="${esc(`${path}|${what}|${target}`)}" title="Open the page with suggestions written">✨ Fix it</button>`;
+}
+
 /* ---------- SEO details ---------- */
 const aio = (it) => (it.seo && (it.seo.aioseo || it.seo.yoast)) || {};
 const live = (it) => (it.seo && it.seo.live) || {};
@@ -57,6 +63,13 @@ function checksOf(it) {
   return out;
 }
 const hasCheck = (it, k) => (k === "attn" ? checksOf(it).some((c) => c[2] !== "info") : checksOf(it).some((c) => c[0] === k));
+// What Fix it should write for this page: "title", "desc", "both" or "" (nothing to fix)
+function fixOf(it) {
+  const c = checksOf(it).map((x) => x[0]);
+  const t = c.includes("title-long");
+  const d = c.some((k) => ["no-desc", "desc-long", "desc-short"].includes(k));
+  return t && d ? "both" : t ? "title" : d ? "desc" : "";
+}
 
 /* ---------- Small helpers ---------- */
 const cut = (s, n) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
@@ -69,6 +82,8 @@ const lenTag = (n, [lo, hi], none = "None") => (!n ? `<span class="ws-len is-bad
   : `<span class="ws-len is-${n > hi ? "warn" : n < lo ? "info" : "good"}" title="${n} characters">${n}</span>`);
 const hostOf = (url) => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return "dermedica.com.au"; } };
 const prefixOf = (it) => (/\?/.test(it.path || "") ? "/" : String(it.path || "/").replace(/[^/]+\/?$/, "") || "/");
+const normPath = (s) => String(s || "").replace(/^https?:\/\/[^/]+/i, "").split(/[?#]/)[0].replace(/\/+$/, "").toLowerCase() || "/";
+const countClass = (n, [lo, hi]) => `ws-count is-${n > hi ? "warn" : n < lo ? "info" : "good"}`;
 
 /* ===================== The list ===================== */
 
@@ -128,10 +143,11 @@ export async function mountSeoSite(container, { param = "" } = {}) {
     const rows = list.filter((it) => !st.chk || hasCheck(it, st.chk));
     if (!rows.length) { $("body").innerHTML = '<p class="ws-empty">Nothing matches.</p>'; return; }
     $("body").innerHTML = `<div class="ws-wrap"><table class="ws-table"><thead><tr>
-        <th>Page</th><th>Status</th><th>How it shows in Google</th><th>Description</th><th class="ws-hide-sm">Focus keyphrase</th><th class="ws-hide-sm">Edited</th>
+        <th>Page</th><th>Status</th><th>How it shows in Google</th><th>Description</th><th class="ws-hide-sm">Focus keyphrase</th><th class="ws-hide-sm">Edited</th>${edit ? "<th></th>" : ""}
       </tr></thead><tbody>${rows.slice(0, st.n).map((it) => {
         const a = aio(it);
         const t = seoTitle(it);
+        const fx = edit ? fixOf(it) : "";
         return `<tr data-id="${it.id}" tabindex="0">
           <td><strong>${esc(it.title || "(no title)")}</strong><small>${esc(it.path)}</small>
             ${it.type === "post" ? '<span class="ws-badge">Blog post</span>' : ""}${it.elementor ? '<span class="ws-badge is-el">Elementor</span>' : ""}
@@ -140,13 +156,15 @@ export async function mountSeoSite(container, { param = "" } = {}) {
           <td class="ws-st">${lenTag(t.length, LIM.title)} ${esc(cut(t, 70))}${a.title ? "" : '<small>Default title</small>'}</td>
           <td>${lenTag((a.description || "").length, LIM.desc)}</td>
           <td class="ws-hide-sm">${a.focus ? esc(a.focus) : '<span class="muted">None</span>'}</td>
-          <td class="ws-hide-sm">${esc(niceDate(it.modified))}</td></tr>`;
+          <td class="ws-hide-sm">${esc(niceDate(it.modified))}</td>
+          ${edit ? `<td>${fx ? `<button type="button" class="lh-btn ws-fix" data-fix="${it.id}" data-what="${fx}">✨ Fix it</button>` : ""}</td>` : ""}</tr>`;
       }).join("")}</tbody></table></div>
       ${rows.length > st.n ? `<button type="button" class="lh-btn is-quiet ws-more" data-act="more">Show ${Math.min(PAGE, rows.length - st.n)} more of ${rows.length - st.n}</button>` : ""}`;
   }
   drawBody();
 
-  const openId = (id) => { const it = cache.items.find((x) => String(x.id) === String(id)); if (it) openEditor(it); };
+  const byId = (id) => cache.items.find((x) => String(x.id) === String(id));
+  const openId = (id, opts) => { const it = byId(id); if (it) openEditor(it, opts); };
 
   root.addEventListener("input", (e) => {
     if (e.target.dataset.role === "q") { st.q = e.target.value.trim().toLowerCase(); st.n = PAGE; drawBody(); }
@@ -160,6 +178,8 @@ export async function mountSeoSite(container, { param = "" } = {}) {
     if (tr && e.target === tr && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openId(tr.dataset.id); }
   });
   root.addEventListener("click", async (e) => {
+    const fx = e.target.closest("[data-fix]");
+    if (fx) { openId(fx.dataset.fix, { fix: fx.dataset.what || "both" }); return; }
     const ch = e.target.closest("[data-chk]");
     if (ch) { st.chk = st.chk === ch.dataset.chk ? "" : ch.dataset.chk; st.n = PAGE; drawBody(); return; }
     const tr = e.target.closest("tr[data-id]");
@@ -177,8 +197,9 @@ export async function mountSeoSite(container, { param = "" } = {}) {
   });
 
   /* ===================== One page ===================== */
+  // opts.fix: "title", "desc" or "both" starts the suggestions as soon as it opens
 
-  function openEditor(it) {
+  function openEditor(it, opts = {}) {
     const a = aio(it);
     const isPub = it.status === "publish";
     const slugOpen = pub && (!isPub || (info && info.redirection));
@@ -191,20 +212,26 @@ export async function mountSeoSite(container, { param = "" } = {}) {
     dlg.innerHTML = `<form class="lh-form" novalidate>
       <div class="lh-dialog-head"><h3>${esc(it.title || "(no title)")}</h3>
         <p>${esc([TYPE[it.type], STATUS[it.status] || it.status, `edited ${niceDate(it.modified)}${it.author ? ` by ${it.author}` : ""}`].join(" · "))}</p></div>
-      <div class="ws-prev" aria-label="How it may look in Google"><small>Google preview</small>
+      <div class="ws-prev" aria-label="How it may look in Google">
+        <div class="ws-prev-head"><small>Google preview</small>
+          ${edit ? '<button type="button" class="lh-btn ws-ai-btn" data-act="suggest">✨ Write suggestions</button>' : ""}</div>
         <span class="ws-prev-url" data-p="url"></span><span class="ws-prev-t" data-p="t"></span><span class="ws-prev-d" data-p="d"></span></div>
+      <p class="ws-sug-note" data-p="note" hidden></p>
       <label class="lh-field"><span class="lh-label">Page title</span>
         <input name="title" class="fe-input" maxlength="200" value="${esc(it.title)}"${ro} />
         <small class="fe-note">The page's name in WordPress.${it.elementor ? " The heading people see on the page is set in Elementor." : ""}</small></label>
       <label class="lh-field"><span class="lh-label">SEO title <em data-c="t"></em></span>
         <input name="seoTitle" class="fe-input" maxlength="200" value="${esc(a.title || "")}"${ro} />
         <small class="fe-note">What Google shows as the link. Leave it blank to use the default (shown in grey). Aim for 50 to 60 characters.</small></label>
+      <div class="ws-sug" data-sug="title"></div>
       ${/#\w+/.test(a.title || "") ? '<p class="ws-warn">This uses All in One SEO tags (like #post_title). Typing your own title replaces them.</p>' : ""}
       <label class="lh-field"><span class="lh-label">Description <em data-c="d"></em></span>
         <textarea name="desc" class="fe-input" rows="3" maxlength="320"${ro}>${esc(a.description || "")}</textarea>
         <small class="fe-note">The text under the link in Google. Aim for 120 to 160 characters.</small></label>
+      <div class="ws-sug" data-sug="desc"></div>
       <label class="lh-field"><span class="lh-label">Focus keyphrase</span>
         <input name="focus" class="fe-input" maxlength="120" value="${esc(a.focus || "")}" placeholder="e.g. neck pigmentation"${ro} /></label>
+      <div class="ws-sch" data-p="sch"></div>
       <ul class="ws-kp" data-p="kp"></ul>
       <label class="lh-field"><span class="lh-label">Address</span>
         <span class="ws-slug"><span>${esc(prefixOf(it))}</span><input name="slug" class="fe-input" maxlength="190" value="${esc(it.slug)}"${slugOpen ? "" : " disabled"} /><span>/</span></span>
@@ -225,6 +252,7 @@ export async function mountSeoSite(container, { param = "" } = {}) {
     const f = form.elements;
     const err = dlg.querySelector(".lh-error");
     const P = (k) => dlg.querySelector(`[data-p="${k}"]`);
+    const S = (k) => dlg.querySelector(`[data-sug="${k}"]`);
 
     const val = () => ({
       title: f.title.value.replace(/\s+/g, " ").trim(),
@@ -234,12 +262,11 @@ export async function mountSeoSite(container, { param = "" } = {}) {
       slug: slugify(f.slug.value),
       noindex: f.noindex ? f.noindex.checked : !!a.noindex,
     });
+    // From a task step: its words become the focus keyphrase, if there isn't one yet
+    if (edit && opts.target && opts.target[0] !== "!" && !f.focus.value) f.focus.value = opts.target;
     const start = JSON.stringify(val());
     const dirty = () => JSON.stringify(val()) !== start;
-    const count = (el, n, [lo, hi]) => {
-      el.textContent = n ? `${n} characters` : "";
-      el.className = n ? `ws-count is-${n > hi ? "warn" : n < lo ? "info" : "good"}` : "ws-count";
-    };
+    const count = (el, n, lim) => { el.textContent = n ? `${n} characters` : ""; el.className = n ? countClass(n, lim) : "ws-count"; };
 
     function update() {
       const v = val();
@@ -258,11 +285,75 @@ export async function mountSeoSite(container, { param = "" } = {}) {
         ["In the description", desc.toLowerCase().includes(kp)],
         ["In the address", v.slug.includes(slugify(kp))]]
         .map(([l, ok]) => `<li class="${ok ? "is-ok" : ""}">${ok ? "✓" : "✗"} ${esc(l)}</li>`).join("") : "";
+      // The suggestion in use is marked
+      dlg.querySelectorAll("[data-use]").forEach((b) => {
+        const cur = b.dataset.use === "title" ? v.seoTitle : v.desc;
+        b.classList.toggle("is-on", !!cur && b.dataset.text === cur);
+      });
     }
+
+    /* ----- Suggestions (Fix it) ----- */
+    let busy = false;
+    const optHtml = (k, o) => {
+      const n = o.text.length;
+      const lim = k === "title" ? LIM.title : LIM.desc;
+      return `<button type="button" class="ws-opt${o.flags.length ? " is-flag" : ""}" data-use="${k}" data-text="${esc(o.text)}">
+        <span class="ws-opt-t">${esc(o.text)}</span>
+        <span class="ws-opt-m"><span class="${countClass(n, lim)}">${n} characters</span>${o.why ? ` · ${esc(o.why)}` : ""}</span>
+        ${o.flags.map((x) => `<span class="ws-flag">⚠ ${esc(x)}. Check before using.</span>`).join("")}</button>`;
+    };
+    async function suggest() {
+      if (busy) return;
+      busy = true;
+      const b = dlg.querySelector('[data-act="suggest"]');
+      if (b) { b.disabled = true; b.textContent = "Writing suggestions…"; }
+      const fix = opts.fix || "both";
+      ["title", "desc"].forEach((k) => {
+        S(k).innerHTML = fix === "both" || fix === k ? '<p class="ws-sug-wait">Reading the page and its Google searches…</p>' : "";
+      });
+      P("note").hidden = true;
+      try {
+        const r = await api("suggest", { id: it.id, fix, target: opts.target || "" });
+        if (!dlg.isConnected) return;
+        S("title").innerHTML = (r.titles || []).length
+          ? `<p class="ws-sug-h">Suggested SEO titles: click one to use it</p>${r.titles.map((o) => optHtml("title", o)).join("")}` : "";
+        S("desc").innerHTML = (r.descriptions || []).length
+          ? `<p class="ws-sug-h">Suggested descriptions: click one to use it</p>${r.descriptions.map((o) => optHtml("desc", o)).join("")}` : "";
+        const sch = r.searches || [];
+        P("sch").innerHTML = sch.length ? `<p class="ws-sug-h">Searches that show this page in Google (last 90 days): click one to make it the focus keyphrase</p>
+          <div class="ws-sch-list">${sch.map((q) => `<button type="button" class="ws-chip" data-kp="${esc(q.q)}"
+            title="${q.impressions} times in Google · ${q.clicks} clicks · position ${q.position}">${esc(q.q)}<em>${q.impressions}</em></button>`).join("")}</div>` : "";
+        P("note").textContent = [r.searchNote, "Suggestions are a starting point: check they're accurate for this page before saving."].filter(Boolean).join(" ");
+        P("note").hidden = false;
+        update();
+        const firstBox = fix === "desc" ? S("desc") : S("title");
+        if (firstBox && firstBox.firstElementChild) firstBox.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      } catch (ex) {
+        S("title").innerHTML = "";
+        S("desc").innerHTML = `<p class="ws-sug-err">${esc(errText(ex))}</p>`;
+      } finally {
+        busy = false;
+        if (b && b.isConnected) { b.disabled = false; b.textContent = "✨ Write new suggestions"; }
+      }
+    }
+
     update();
     form.addEventListener("input", (e) => {
       if (e.target.name === "desc" && /\n/.test(e.target.value)) e.target.value = e.target.value.replace(/\n+/g, " ");
       update();
+    });
+    dlg.addEventListener("click", (e) => {
+      const use = e.target.closest("[data-use]");
+      if (use && edit) {
+        const field = use.dataset.use === "title" ? f.seoTitle : f.desc;
+        field.value = use.dataset.text;
+        update();
+        field.focus();
+        return;
+      }
+      const kp = e.target.closest("[data-kp]");
+      if (kp && edit) { f.focus.value = kp.dataset.kp; update(); return; }
+      if (e.target.closest('[data-act="suggest"]')) suggest();
     });
 
     const close = () => { if (!edit || !dirty() || confirm("Close without saving your changes?")) dlg.close(); };
@@ -309,16 +400,23 @@ export async function mountSeoSite(container, { param = "" } = {}) {
       }
     });
     dlg.showModal();
+    if (edit && opts.fix) suggest();
   }
 
-  // #/seo/website/<id>, or "path:/address/" from a page's panel: opens that page in the editor
+  // Opening a page straight away:
+  //   #/seo/website/<id>            that page
+  //   "path:/address/"              from a page's panel in Pages
+  //   "fix:<what>:/address/"        from a Fix it button: opens it and writes suggestions
   const pv = String(param || "");
-  const norm = (s) => String(s || "").replace(/^https?:\/\/[^/]+/i, "").split(/[?#]/)[0].replace(/\/+$/, "").toLowerCase() || "/";
+  const byPath = (p) => { const want = normPath(p); return cache.items.find((x) => normPath(x.path) === want) || cache.items.find((x) => normPath(x.link) === want); };
+  const notFound = () => showToast("That page isn't in WordPress's list of pages and posts (it may be a category or archive page).");
+  const fm = /^fix:(title|desc|both)?:([^:]*):(.*)$/.exec(pv);
   if (/^\d+$/.test(pv)) openId(pv);
-  else if (pv.startsWith("path:")) {
-    const want = norm(pv.slice(5));
-    const it = cache.items.find((x) => norm(x.path) === want) || cache.items.find((x) => norm(x.link) === want);
-    if (it) openEditor(it);
-    else showToast("That page isn't in WordPress's list of pages and posts (it may be a category or archive page).");
+  else if (fm) {
+    const it = byPath(fm[3]);
+    let target = "";
+    try { target = decodeURIComponent(fm[2]); } catch { target = ""; }
+    if (it) openEditor(it, { fix: edit ? fm[1] || "both" : "", target }); else notFound();
   }
+  else if (pv.startsWith("path:")) { const it = byPath(pv.slice(5)); if (it) openEditor(it); else notFound(); }
 }

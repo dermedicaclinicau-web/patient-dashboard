@@ -57,6 +57,12 @@ const HELP = {
 };
 const LIMITS = { lcp: [2500, 4000], inp: [200, 500], cls: [0.1, 0.25] };
 
+// Fix it (SEO → Website): the issues it can write a suggestion for
+const FIX = { no_title: "title", title_long: "title", title_short: "title", dup_title: "title",
+  no_desc: "desc", desc_long: "desc", desc_short: "desc", dup_desc: "desc" };
+const fixBtn = (path, what, target = "") =>
+  `<button class="seo-btn seo-fixit" type="button" data-wsfix="${esc(`${path}|${what}|${target}`)}" title="Open the page with a suggestion written">✨ Fix it</button>`;
+
 // Priority pages (seo_settings/main.keyPages). Read here so this file doesn't import seo-work.js.
 const normP = (s) => String(s || "").split("#")[0].split("?")[0].replace(/\/+$/, "").toLowerCase() || "/";
 function priOf(c) {
@@ -300,9 +306,13 @@ export function viewHealth(wrap, c, ui) {
       <div><strong>${esc(i.msg)}</strong>${i.detail ? `<div class="seo-note seo-h-detail">${esc(i.detail)}</div>` : ""}</div>
       ${HELP[i.code] ? `<details class="seo-h-help"><summary>How to fix</summary><p>${esc(HELP[i.code])}</p></details>` : ""}
       ${ignored ? `<p class="seo-note">Ignored by ${esc(i.st?.byName || "someone")}${i.st?.at ? " · " + esc(when(i.st.at)) : ""}${i.st?.note ? ": " + esc(i.st.note) : ""}</p>` : ""}
-      ${canWork ? `<div class="seo-w-acts">${ignored
-        ? `<button class="seo-btn" data-h-undo="${i.id}">Back to open</button>`
-        : `<button class="seo-btn" data-h-log="${i.id}">Log a fix</button><button class="seo-btn" data-h-ignore="${i.id}">Ignore</button>`}</div>` : ""}
+      ${(() => {
+        const fix = !ignored && FIX[i.code] && i.path !== "Whole site" && c.can("seo.pages") ? fixBtn(i.path, FIX[i.code]) : "";
+        const acts = canWork ? (ignored
+          ? `<button class="seo-btn" data-h-undo="${i.id}">Back to open</button>`
+          : `<button class="seo-btn" data-h-log="${i.id}">Log a fix</button><button class="seo-btn" data-h-ignore="${i.id}">Ignore</button>`) : "";
+        return fix || acts ? `<div class="seo-w-acts">${fix}${acts}</div>` : "";
+      })()}
     </div>`;
   }
 

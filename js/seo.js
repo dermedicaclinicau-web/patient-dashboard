@@ -1072,9 +1072,22 @@ export async function mountSeo(el, opts = {}) {
   /* ----- events (delegated) ----- */
 
   root.addEventListener("click", (e) => {
-    const t = e.target.closest("[data-wsedit],[data-tnum],[data-cmp2],[data-cmpcl],[data-tpick],[data-tshow],[data-tprm],[data-tquick],[data-tclear],[data-tmode],[data-drx],[data-kpi],[data-drtab],[data-drclose],[data-kq],[data-drask],[data-advpage],[data-prtoggle],[data-prf],[data-prall],[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
+    const t = e.target.closest("[data-wsfix],[data-wsedit],[data-tnum],[data-cmp2],[data-cmpcl],[data-tpick],[data-tshow],[data-tprm],[data-tquick],[data-tclear],[data-tmode],[data-drx],[data-kpi],[data-drtab],[data-drclose],[data-kq],[data-drask],[data-advpage],[data-prtoggle],[data-prf],[data-prall],[data-pview],[data-star],[data-pedit],[data-pcancel],[data-psave],[data-tab],[data-preset],[data-gran],[data-metric],[data-sort],[data-open],[data-close],[data-more],[data-reload],[data-logpage],[data-copyplan]");
     if (!t || !root.contains(t)) return;
     const ds = t.dataset;
+
+    // A Fix it button (Site health, Tasks…) → the Website tab, the page open, suggestions being written.
+    // data-wsfix = "path|title, desc or both|words to use (or !words to keep out)"
+    if (ds.wsfix !== undefined) {
+      const [path, what, ...rest] = ds.wsfix.split("|");
+      if (!path) return;
+      panel.hidden = true;
+      tab = "website";
+      siteParam = `fix:${["title", "desc", "both"].includes(what) ? what : "both"}:${encodeURIComponent(rest.join("|"))}:${path}`;
+      history.replaceState(null, "", "#/seo/website");
+      render();
+      return;
+    }
 
     // Page panel → the Website tab, with this page open in the editor
     if (ds.wsedit !== undefined) {

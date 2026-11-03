@@ -58,6 +58,7 @@ function handleWordpress_(body) {
       return { ok: true, item: wpCall_('GET', '/item/' + id).item };
     }
     if (op === 'save') return wpSave_(body, session);
+    if (op === 'suggest') return wpSuggest_(body, session);
   } catch (err) {
     console.error('WordPress ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
     return { ok: true, problem: String(err && err.message ? err.message : err).slice(0, 300) };
@@ -162,4 +163,217 @@ function wpInfo_() {
   const out = { redirection: p.redirection === true, aioseo: p.aioseo === true, yoast: p.yoast === true, elementor: p.elementor === true };
   repCachePut_('wp_info_v1', out, 600);
   return out;
+}
+
+/* ===================== Fix it: suggested SEO titles and descriptions ===================== */
+// Claude writes options from the page's own text and the searches Google shows it for (Search Console, last 90 days).
+// Every option is checked here against the advertising rules and the clinic's own words to avoid.
+
+const WP_SUGGEST_PROMPT_ = [
+  'You write Google search titles and meta descriptions for Dermedica, a doctor-led cosmetic and skin clinic in Perth,',
+  'Western Australia. Write 3 SEO titles and 3 meta descriptions for the page you are given.',
+  '',
+  'TITLES',
+  '- 50 to 60 characters, ending with " - Dermedica". Drop that ending only if the title cannot fit otherwise.',
+  '- Lead with what the page is about, using the words people actually search for (searches), naturally.',
+  '- Include "Perth" when the page is about a treatment, a concern or the clinic.',
+  '- Each option takes a different angle: the concern, the treatment, or the question people ask.',
+  '',
+  'DESCRIPTIONS',
+  '- 140 to 158 characters. One or two plain sentences.',
+  '- Say what the page covers and who it helps. Use the focus keyphrase or the top search once, naturally.',
+  '- End with a gentle next step, such as "Book a consultation." or "Learn about your options."',
+  '',
+  'RULES: Australian advertising rules for health services (AHPRA and TGA). Never break these.',
+  '- No prescription medicine names or brands (for example Botox, Dysport, Xeomin, Letybo). Say "anti-wrinkle injections".',
+  '- No superlatives or claims that cannot be proven: best, leading, top, number one, #1, guaranteed, permanent,',
+  '  painless, pain-free, risk-free, safe, miracle, cure, instant results.',
+  '- No testimonials or reviews, no before-and-after promises, no promises about how long results last.',
+  '- No pressure or inducements: no "limited time", "cheap", discounts or free gifts.',
+  '- Nothing the page text does not support: no made-up prices, numbers, results or years of experience.',
+  '- Australian English. No emoji. No quotation marks around the text. Not in capitals.',
+  '',
+  'MUST USE AND KEEP OUT',
+  '- If must_use is given, every option must contain those words. In titles, start with them when it reads naturally.',
+  '- If keep_out_of_the_title is given, no title may contain those words: another page is the main one for that search.',
+  '',
+  'why: one short sentence (under 15 words) saying what this option does differently.',
+].join('\n');
+
+const WP_SUGGEST_SCHEMA_ = (function () {
+  const opt = { type: 'array', items: { type: 'object', additionalProperties: false, required: ['text', 'why'],
+    properties: { text: { type: 'string' }, why: { type: 'string' } } } };
+  return { type: 'object', additionalProperties: false, required: ['titles', 'descriptions'],
+    properties: { titles: opt, descriptions: opt } };
+})();
+
+// Checked on every suggestion: [pattern, what it is]
+const WP_FLAG_RULES_ = [
+  [/\b(botox|dysport|xeomin|letybo|relatox|botulinum)\b/i, 'Names a prescription medicine'],
+  [/\b(best|leading|top-rated|number one|no\.?\s?1)\b|#1\b/i, 'A superlative'],
+  [/\bguarantee[ds]?\b/i, 'A guarantee'],
+  [/\b(permanent(ly)?|painless|pain-free|risk-free|miracle|cure[sd]?|instant results?)\b/i, 'A claim that may not be allowed'],
+  [/\b(cheap|discount(ed)?|limited time|free gift)\b/i, 'An inducement'],
+];
+
+function wpSuggest_(body, session) {
+  if (!can_(session, 'seo.pages')) return { ok: false, error: 'FORBIDDEN' };
+  const id = Math.floor(Number(body.id));
+  if (!(id > 0)) return { ok: false, error: 'BAD_REQUEST' };
+  const cache = CacheService.getScriptCache();
+  const rk = 'ws_sug_' + session.uid;
+  const used = Number(cache.get(rk) || 0);
+  if (used >= 40) return { ok: true, problem: 'You\'ve asked for a lot of suggestions in the last hour. Try again a bit later.' };
+  cache.put(rk, String(used + 1), 3600);
+
+  const it = wpCall_('GET', '/item/' + id).item;
+  const page = wpPageText_(it);
+  let searches = [];
+  let searchNote = '';
+  try { searches = wpSearches_(it.link); }
+  catch (e) {
+    console.warn('Search Console not read for ' + it.link + ': ' + e);
+    searchNote = 'Google\'s searches for this page couldn\'t be read, so these are based on the page text only.';
+  }
+  const avoid = wpAvoidWords_();
+  const s = (it.seo && (it.seo.aioseo || it.seo.yoast)) || {};
+  const live = (it.seo && it.seo.live) || {};
+  const fix = ['title', 'desc'].indexOf(String(body.fix)) !== -1 ? String(body.fix) : 'both';
+
+  const input = {
+    page_title: it.title, type: it.type === 'post' ? 'blog post' : 'page', address: it.path,
+    focus_keyphrase: s.focus || '', current_seo_title: live.title || s.title || '', current_description: s.description || '',
+    what_to_fix: fix === 'title' ? 'The SEO title' : fix === 'desc' ? 'The description' : 'The SEO title and the description',
+    headings: page.h1.concat(page.h2), page_text: page.body,
+    searches: searches.slice(0, 15).map(function (q) {
+      return { search: q.q, impressions: q.impressions, clicks: q.clicks, position: q.position };
+    }),
+  };
+  // From a task step: words every option must use, or ("!…") words to keep out of the title
+  const target = String(body.target || '').replace(/\s+/g, ' ').trim().slice(0, 121);
+  if (target.charAt(0) === '!') { if (target.length > 1) input.keep_out_of_the_title = target.slice(1); }
+  else if (target) input.must_use = target;
+  const out = wpClaude_(WP_SUGGEST_PROMPT_ + (avoid.length ? '\n\nTHE CLINIC\'S OWN WORDS TO AVOID: ' + avoid.join(', ') : ''),
+    JSON.stringify(input), WP_SUGGEST_SCHEMA_);
+
+  const tidy = function (list, max) {
+    return (Array.isArray(list) ? list : []).map(function (o) {
+      const text = String((o && o.text) || '').replace(/^["'“‘]+|["'”’]+$/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
+      return text ? { text: text, why: String((o && o.why) || '').slice(0, 140), flags: wpFlags_(text, avoid) } : null;
+    }).filter(Boolean).slice(0, 4);
+  };
+  console.log('Suggestions for ' + it.path + ' by ' + session.name);
+  return { ok: true, titles: tidy(out.titles, 90), descriptions: tidy(out.descriptions, 220),
+    searches: searches.slice(0, 10), searchNote: searchNote };
+}
+
+// The page's headings and text: the live page when it's published, otherwise its saved content
+function wpPageText_(it) {
+  let html = '';
+  if (it.status === 'publish') {
+    try {
+      const r = UrlFetchApp.fetch(it.link, { muteHttpExceptions: true, followRedirects: true });
+      if (r.getResponseCode() === 200) html = r.getContentText();
+    } catch (e) { console.warn('Page not read: ' + it.link + ': ' + e); }
+  }
+  if (!html && it.content) html = String(it.content);
+  const clean = function (s) {
+    return String(s).replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+      .replace(/&#8217;|&rsquo;/g, '\'').replace(/&#8211;|&ndash;/g, '-').replace(/&[a-z#0-9]+;/gi, ' ')
+      .replace(/\s+/g, ' ').trim();
+  };
+  const pick = function (re, n) { return (html.match(re) || []).map(clean).filter(Boolean).slice(0, n); };
+  const main = html.replace(/<(script|style|noscript|svg|header|footer|nav|form)\b[\s\S]*?<\/\1>/gi, ' ');
+  return {
+    h1: pick(/<h1\b[^>]*>[\s\S]*?<\/h1>/gi, 2),
+    h2: pick(/<h2\b[^>]*>[\s\S]*?<\/h2>/gi, 12),
+    body: clean(main).slice(0, 3500),
+  };
+}
+
+// The searches Google showed this page for in the last 90 days, most impressions first
+function wpSearches_(link) {
+  const site = String(PropertiesService.getScriptProperties().getProperty('SEO_SITE') || '').trim();
+  if (!site || !link) return [];
+  const f = function (ms) { return Utilities.formatDate(new Date(ms), 'Australia/Perth', 'yyyy-MM-dd'); };
+  const base = String(link).split(/[?#]/)[0].replace(/\/+$/, '');
+  const res = UrlFetchApp.fetch('https://www.googleapis.com/webmasters/v3/sites/' + encodeURIComponent(site) + '/searchAnalytics/query', {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+    payload: JSON.stringify({
+      startDate: f(Date.now() - 93 * 864e5), endDate: f(Date.now() - 3 * 864e5), dimensions: ['query'], rowLimit: 25,
+      dimensionFilterGroups: [{ filters: [{ dimension: 'page', operator: 'includingRegex',
+        expression: '^' + base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '/?$' }] }],
+    }),
+  });
+  if (res.getResponseCode() !== 200) throw new Error('Search Console ' + res.getResponseCode() + ': ' + res.getContentText().slice(0, 200));
+  return (JSON.parse(res.getContentText()).rows || []).map(function (r) {
+    return { q: String(r.keys[0]), clicks: Math.round(r.clicks || 0), impressions: Math.round(r.impressions || 0),
+      position: Math.round((r.position || 0) * 10) / 10 };
+  }).sort(function (a, b) { return b.impressions - a.impressions; });
+}
+
+// The clinic's own words to avoid (SEO → Settings), remembered 10 minutes
+function wpAvoidWords_() {
+  const hit = repCacheGet_('ws_avoid_v1');
+  if (hit) return hit;
+  const words = [];
+  try {
+    const d = fsGetDoc_(getConfig_(), 'seo_settings/main') || {};
+    Object.keys(d).forEach(function (k) {
+      if (!/complian|banned|avoid|forbid/i.test(k) || !Array.isArray(d[k])) return;
+      d[k].forEach(function (x) {
+        const w = typeof x === 'string' ? x : x && (x.word || x.term || x.text || x.phrase);
+        if (w && String(w).trim().length >= 3) words.push(String(w).trim().toLowerCase());
+      });
+    });
+  } catch (e) { console.warn('Words to avoid not read: ' + e); }
+  const out = uniq_(words).slice(0, 200);
+  repCachePut_('ws_avoid_v1', out, 600);
+  return out;
+}
+
+function wpFlags_(text, avoid) {
+  const out = [];
+  WP_FLAG_RULES_.forEach(function (r) { const m = r[0].exec(text); if (m) out.push(r[1] + ': "' + m[0] + '"'); });
+  (avoid || []).forEach(function (w) {
+    const re = new RegExp('(^|[^a-z])' + w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '($|[^a-z])', 'i');
+    if (re.test(text)) out.push('On the clinic\'s list of words to avoid: "' + w + '"');
+  });
+  return uniq_(out).slice(0, 3);
+}
+
+// One Claude call that answers in JSON (the same key as the SEO Advisor)
+function wpClaude_(system, user, schema) {
+  const model = PropertiesService.getScriptProperties().getProperty('CLAUDE_MODEL') || 'claude-sonnet-5-5';
+  const body = {
+    model: model, max_tokens: 3000, system: system,
+    messages: [{ role: 'user', content: user }],
+    output_config: { format: { type: 'json_schema', schema: schema }, effort: 'low' },
+  };
+  const thinking = claudeThinking_(model);
+  if (thinking) body.thinking = thinking;
+  const opts = {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    headers: { 'x-api-key': seo7ClaudeKey_(), 'anthropic-version': '2026-10-21' },
+    payload: JSON.stringify(body),
+  };
+  let data = null;
+  for (let attempt = 0; ; attempt++) {
+    const r = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', opts);
+    const code = r.getResponseCode();
+    if (code === 200) { data = JSON.parse(r.getContentText()); break; }
+    if ((code === 429 || code === 529 || code >= 500) && attempt < 2) { Utilities.sleep(1000 * (attempt + 1)); continue; }
+    throw new Error('Claude ' + code + ': ' + r.getContentText().slice(0, 200));
+  }
+  if (data.stop_reason === 'refusal') throw new Error('Claude declined to write suggestions for this page.');
+  const text = (data.content || []).filter(function (b) { return b.type === 'text'; }).map(function (b) { return b.text; }).join('');
+  return JSON.parse(text);
+}
+
+/** Run from the editor: suggestions for one page (change the id), nothing saved */
+function wpTestSuggest() {
+  const id = 0;   // a page id: open the page in the Website tab, it's in the address (#/seo/website/<id>)
+  const s = createSession_({ id: 'test', name: 'Test', role: 'Admin' });
+  console.log(JSON.stringify(wpSuggest_({ session: s, id: id }, getSession_(s)), null, 2));
 }

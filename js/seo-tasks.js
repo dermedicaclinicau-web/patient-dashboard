@@ -34,6 +34,8 @@ const CHECK = {
   alt: "Images", speed: "Speed", index: "In Google", manual: "Not checked", redirect: "Redirect", faqSchema: "FAQ schema",
 };
 const STOPW = new Set(["in", "for", "the", "a", "an", "of", "and", "to", "on", "with", "near", "me", "my", "is", "are", "what", "how", "best"]);
+// Fix it (SEO → Website): steps that change a title or description, and what to write
+const FIXK = { title: "title", titleMax: "title", titleNot: "title", desc: "desc" };
 const QUESTION = /\b(how|what|why|when|does|do|can|is|are|should|which|vs|or|safe|hurt|last|long)\b/;
 const PRICE = /\b(cost|costs|price|prices|pricing|how much|cheap|fee|fees)\b/;
 const SMALLW = new Set(["in", "for", "and", "of", "the", "to", "with", "on", "a", "or", "vs"]);
@@ -414,6 +416,16 @@ export async function renderTasks(body, c) {
 
   const day = todayPerth();
   const pageId = (path) => pageOf(c.data, path)?.id || "";
+  const canFix = typeof c.can === "function" ? c.can("seo.pages") : S.canDo;
+  // ✨ Fix it on a step: opens the page (the other page, for "take it out of …'s title") with suggestions written
+  const fixOfStep = (t, s) => {
+    const what = FIXK[s.check?.k];
+    if (!what || !canFix || (s.status && s.status !== "todo")) return "";
+    const path = s.check.page || t.path;
+    const target = s.check.k === "titleNot" ? (s.check.has ? "!" + s.check.has : "") : s.check.has || "";
+    return `<div class="seo-t-fix"><button class="seo-btn seo-fixit" type="button" data-wsfix="${esc(`${path}|${what}|${target}`)}"
+      title="Open the page with suggestions written">✨ Fix it</button></div>`;
+  };
   const stepsOf = (t) => (t.order || []).map((id) => ({ id, ...t.steps[id] })).filter((s) => s.text);
   const doneish = (s) => s.status === "confirmed" || s.status === "done";
   const todayTasks = () => (S.day?.ids || []).map((id) => S.tasks.get(id)).filter(Boolean);
@@ -443,6 +455,7 @@ export async function renderTasks(body, c) {
         <div>${esc(s.text)} <span class="seo-w-eff is-${String(s.effort || "quick").toLowerCase()}">${esc(s.effort || "Quick")}</span></div>
         ${s.detail ? `<div class="seo-note">${esc(s.detail)}</div>` : ""}
         ${who ? `<div class="seo-note">${who}</div>` : ""}
+        ${fixOfStep(t, s)}
       </div>
       <span class="seo-note seo-t-chk" title="What tonight's website check looks at">${esc(CHECK[s.check?.k] || "")}</span>
     </div>`;
