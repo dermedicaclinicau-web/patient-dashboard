@@ -402,7 +402,7 @@ export async function mountInvestigation(container, { id, staff } = {}) {
 
   const stepperHtml = () => `<ol class="ivx-steps">${stepsOf(x).map((s, i) => `<li class="is-${s.state}">
     <span class="ivx-dot">${s.state === "done" ? I(IC.check) : s.state === "skip" ? "–" : i + 1}</span>
-    <span class="ivx-step-t"><b>${esc(s.label)}</b><small>${esc(s.state === "skip" ? "Not needed" : s.state === "now" ? "Now" : s.sub)}</small></span></li>`).join("")}</ol>`;
+    <span class="ivx-step-t"><b>${esc(s.label)}</b><small>${esc(s.state === "skip" ? "Not needed" : s.state === "now" ? "Now" : s.sub) || "&nbsp;"}</small></span></li>`).join("")}</ol>`;
 
   function nextHtml() {
     const n = nextOf(x, me, canManage);

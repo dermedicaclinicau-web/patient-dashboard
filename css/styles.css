@@ -4043,30 +4043,7 @@ dialog:has([name="dosePer"]) .inv-dose .inv-dose-row { grid-template-columns: mi
   margin-top: .15rem; color: #0f766e; font-size: .8rem; font-weight: 600; }
 .cs-linknote .cs-link { font-size: .8rem; }
 
-/* ---------- Investigations ---------- */
-.ivx-wrap { max-width: 1040px; display: flex; flex-direction: column; gap: 1rem; }
-.ivx-wrap .fb-head { align-items: flex-start; }
-.ivx-wrap .tb-card h4 small { font-weight: 400; color: var(--muted); }
-.ivx-blind { padding: .85rem 1rem; border: 1px solid #fde68a; border-radius: 12px; background: #fffbeb; color: #92400e; font-size: .9rem; }
-.ivx-blind .lh-btn { margin-left: .4rem; }
-.ivx-row { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; }
-.ivx-row .fe-num { max-width: 220px; }
-.ivx-flags { margin-top: .6rem; padding: .65rem .85rem; border: 1px solid #fde68a; border-radius: 10px; background: #fffbeb; font-size: .88rem; }
-.ivx-flags ul { margin: .35rem 0 0; padding-left: 1.1rem; display: grid; gap: .25rem; }
-.ivx-flags a { color: var(--primary); font-weight: 600; }
-.ivx-none { margin: .6rem 0 0; padding: .55rem .8rem; border-radius: 10px; background: var(--surface-2); font-size: .88rem; color: #334155; }
-.ivx-cctv { padding: .65rem .85rem; border: 1px solid #c7d2fe; border-radius: 10px; background: #eef2ff; color: #3730a3; font-size: .88rem; line-height: 1.6; }
-.ivx-outcomes { display: grid; gap: .4rem; }
-.ivx-outcome { display: flex; align-items: flex-start; gap: .6rem; padding: .6rem .75rem; border: 1px solid var(--border); border-radius: 10px; cursor: pointer; }
-.ivx-outcome input { margin-top: .2rem; accent-color: var(--primary); }
-.ivx-outcome small { display: block; margin-top: .1rem; color: var(--muted); font-size: .8rem; }
-.ivx-outcome:has(input:checked) { border-color: var(--primary); background: var(--primary-soft); }
-.ivx-closed p { margin: 0 0 .35rem; }
-.ivx-cl { display: block; margin-top: .2rem; font-size: .74rem; color: var(--muted); }
-.ivx-cl.is-ok { color: #027a48; }
-.ivx-cl.is-warn { color: #b45309; }
-.ivx-cl.is-bad { color: #b91c1c; }
-.ivx-cl a { color: inherit; font-weight: 700; }
+
 
 /* ---------- Service links ---------- */
 .sl-list { display: flex; flex-direction: column; gap: .4rem; }
@@ -5048,11 +5025,7 @@ body.no-consult-record #tb-rec{display:none !important}
 
 .topbar{z-index:50}
 
-/* Investigation: overnight kit difference */
-.ivx-ov{grid-template-columns:repeat(5,minmax(0,1fr))}
-.ivx-sum{margin:0 0 .75rem;font-size:.92rem;line-height:1.65}
-.ivx-ov-edge td{background:var(--surface-2)}
-@media (max-width:900px){.ivx-ov{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
 
 .sod-k-opts{display:flex;flex-wrap:wrap;gap:.1rem 1rem;margin-left:auto}
 .sod-kp.is-empty .sod-kscroll,.sod-kp.is-empty [data-act="add"]{opacity:.4}
@@ -10410,3 +10383,66 @@ body.pc-open { overflow: hidden; }
 .seo-t-fix{margin-top:6px}
 .seo-fixit{border-color:#5eead4;background:#f0fdfa;color:#0f766e;font-weight:600}
 .seo-fixit:hover{background:#ccfbf1}
+
+/* ===== Investigations: the recount box stays inside its card ===== */
+.ivx-wrap .ivx-recount {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 340px);
+  gap: 24px;
+  align-items: start;
+}
+.ivx-wrap .ivx-recount-what,
+.ivx-wrap .ivx-recount-form {
+  min-width: 0;                 /* lets grid columns shrink instead of overflowing */
+}
+.ivx-wrap .ivx-recount-form {
+  width: 100%;
+  box-sizing: border-box;
+}
+.ivx-wrap .ivx-qty {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 48px;
+  gap: 8px;
+  width: 100%;
+}
+.ivx-wrap .ivx-qty input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.ivx-wrap .ivx-qty button {
+  width: 48px;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.ivx-wrap .ivx-wide {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* Steps: every label lines up at the top */
+.ivx-wrap .ivx-steps li { justify-content: flex-start; align-self: flex-start; }
+
+/* Phones and narrow windows: the recount box goes under the instructions */
+@media (max-width: 760px) {
+  .ivx-wrap .ivx-recount { grid-template-columns: 1fr; }
+}
+
+/* ===== Investigations: fixes ===== */
+/* Recount: the box stays inside its card */
+.ivx-wrap .ivx-recount { grid-template-columns: minmax(0, 1fr) minmax(240px, 300px); }
+.ivx-wrap .ivx-recount-what,
+.ivx-wrap .ivx-recount-form { min-width: 0; }
+.ivx-wrap .ivx-recount-form { grid-template-columns: minmax(0, 1fr); }   /* don't grow to the number box's natural width */
+.ivx-wrap .ivx-qty { grid-template-columns: 52px minmax(0, 1fr) 52px; }
+.ivx-wrap .ivx-qty input { width: 100%; min-width: 0; box-sizing: border-box; }
+.ivx-wrap .ivx-qty button { min-width: 0; }
+.ivx-wrap .ivx-wide { width: 100%; box-sizing: border-box; }
+
+/* Steps: every label lines up at the top */
+.ivx-wrap .ivx-steps li { align-content: start; }
+
+/* Phones and narrow windows: the recount box goes under the instructions */
+@media (max-width: 760px) {
+  .ivx-wrap .ivx-recount { grid-template-columns: minmax(0, 1fr); }
+}
