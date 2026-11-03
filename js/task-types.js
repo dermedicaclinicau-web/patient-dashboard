@@ -21,6 +21,7 @@ export const TASK_FIELD_TYPES = {
   long_text: "Long answer",
   number: "Number",
   date: "Date",
+  datetime: "Date and time",
   dropdown: "Dropdown",
   single_choice: "Single choice",
   checkboxes: "Checkboxes",

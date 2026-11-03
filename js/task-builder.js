@@ -6,7 +6,7 @@ import {
 } from "./task-types.js";
 import {
   tokenGroups, taskProblems, fillTemplate, sampleValues, subjectHtml, clinicDetails,
-  fillTemplateHtml, emailShell, EMAIL_BACKGROUNDS, EMAIL_ACCENTS, formatChoice,
+  fillTemplateHtml, emailShell, EMAIL_BACKGROUNDS, EMAIL_ACCENTS, formatChoice, formatDateTime,
 } from "./task-tokens.js";
 import { SOURCES, loadSource } from "./task-sources.js";
 import { createRichEditor } from "./rich-editor.js";
@@ -603,6 +603,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
         <input class="fe-input tb-help" data-fi="${i}" data-fk="help" maxlength="300" placeholder="Help text for staff (optional)" value="${esc(f.help)}" />
         ${task.category === "staff" && task.schedule.enabled ? `<input class="fe-input tb-help" data-fi="${i}" data-fk="default" maxlength="500"
           placeholder="Answer used for automatic sends${TASK_CHOICE_TYPES.includes(f.type) ? " (choice names, separated by commas)" : ""}${
+            f.type === "datetime" ? " (e.g. 2026-11-05 14:30)" : ""}${
             f.required ? " (required)" : ""}" value="${esc(f.default || "")}" />` : ""}
         </div>`;
   }
@@ -881,6 +882,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   // A field's answer for automatic sends. For choice fields, names that match the list become links.
   function defaultAnswer(f) {
     const raw = String(f.default || "").trim();
+    if (f.type === "datetime") return formatDateTime(raw);
     if (!raw || !TASK_CHOICE_TYPES.includes(f.type)) return raw;
     const opts = (f.source || "list") === "list" ? (f.options || []) : (sources[f.source] || []);
     const find = (w) => opts.find((o) => String(o.label || "").trim().toLowerCase() === w.toLowerCase());

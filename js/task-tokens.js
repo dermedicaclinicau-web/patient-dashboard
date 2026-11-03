@@ -12,6 +12,17 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
 
 const todayLong = () => new Date().toLocaleDateString("en-AU", { day: "numeric", month: "long", year: "numeric" });
 
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"];
+// "2026-11-05T14:30" (or "2026-11-05 14:30") → "November 5, 2026 2:30 PM". Anything else is shown as typed.
+export function formatDateTime(v) {
+  const s = String(v ?? "").trim();
+  const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{1,2}):(\d{2})/.exec(s);
+  if (!m || Number(m[2]) < 1 || Number(m[2]) > 12) return s;
+  const h = Number(m[4]);
+  return `${MONTH_NAMES[Number(m[2]) - 1]} ${Number(m[3])}, ${m[1]} ${h % 12 || 12}:${m[5]} ${h < 12 ? "AM" : "PM"}`;
+}
+
 // Phone, email and address from the letterhead
 export function clinicDetails(lh) {
   const line1 = String((lh && lh.line1) || "");

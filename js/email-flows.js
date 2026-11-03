@@ -19,7 +19,7 @@ import { hydrateRichImages } from "./rich-html.js";
 import { openImagePicker } from "./image-bank.js";
 import { getLetterhead } from "./form-templates.js";
 import {
-  fillTemplate, fillTemplateHtml, emailShell, clinicDetails, subjectHtml, EMAIL_BACKGROUNDS, EMAIL_ACCENTS, formatChoice,
+  fillTemplate, fillTemplateHtml, emailShell, clinicDetails, subjectHtml, EMAIL_BACKGROUNDS, EMAIL_ACCENTS, formatChoice, formatDateTime,
 } from "./task-tokens.js";
 import { fetchStaffList, listTaskTypes, TASK_CHOICE_TYPES } from "./task-types.js";
 import { confirmDialog } from "./dialog.js";
@@ -1057,6 +1057,7 @@ async function mountFlowEditor(container, { id, staff }) {
   function taskAnswerText(f, v) {
     if (TASK_CHOICE_TYPES.includes(f.type)) return formatChoice(f, taskChosen(f, v));
     if (f.type === "date") return niceDateKey(v);
+    if (f.type === "datetime") return formatDateTime(v);
     return v == null ? "" : String(v);
   }
   // The task's own email, with these answers. The patient's details are filled in when it's sent.
@@ -1084,7 +1085,7 @@ async function mountFlowEditor(container, { id, staff }) {
     const head = `<span>${esc(f.label)}${f.required ? ' <small class="muted">(required)</small>' : ""}</span>`;
     if (f.type === "long_text") return `<label class="tb-field">${head}<textarea class="fe-input" data-tans="${id}" rows="3" maxlength="3000">${esc(v || "")}</textarea></label>`;
     if (!TASK_CHOICE_TYPES.includes(f.type)) {
-      const type = f.type === "number" ? "number" : f.type === "date" ? "date" : "text";
+      const type = f.type === "number" ? "number" : f.type === "date" ? "date" : f.type === "datetime" ? "datetime-local" : "text";
       return `<label class="tb-field">${head}<input class="fe-input" type="${type}" data-tans="${id}" maxlength="500" value="${esc(v || "")}" /></label>`;
     }
     const src = f.source || "list";

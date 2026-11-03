@@ -13,7 +13,7 @@ import { getLetterhead, listPublishedForms } from "./form-templates.js";
 import { db } from "./firebase-config.js";
 import { collection, query, where, limit, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { showToast, formatDobLong, formatMobile } from "./utils.js";
-import { formatChoice, fillTemplate, fillTemplateHtml, emailShell, clinicDetails, EMAIL_RE } from "./task-tokens.js";
+import { formatChoice, fillTemplate, fillTemplateHtml, emailShell, clinicDetails, EMAIL_RE, formatDateTime } from "./task-tokens.js";
 import { createRichEditor } from "./rich-editor.js";
 import { openImagePicker } from "./image-bank.js";
 import { upcomingAppointments, formatUpcoming, upcomingLines, niceDay } from "./upcoming-appts.js";
@@ -205,6 +205,7 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
     if (TASK_CHOICE_TYPES.includes(f.type)) return formatChoice(f, chosen(f));
     const v = st.answers[f.id];
     if (f.type === "date") return niceDate(v);
+    if (f.type === "datetime") return formatDateTime(v);
     return v == null ? "" : String(v);
   }
   const isEmpty = (v) => v == null || v === "" || (Array.isArray(v) && !v.length);
@@ -689,6 +690,8 @@ export async function mountTaskRunner(container, { taskId, patientId = "", staff
         return `<label class="tb-field">${head}<input class="fe-input" type="number" data-ans="${id}" value="${esc(v ?? "")}" />${help}</label>`;
       case "date":
         return `<label class="tb-field">${head}<input class="fe-input tr-date" type="date" data-ans="${id}" value="${esc(v || "")}" />${help}</label>`;
+      case "datetime":
+        return `<label class="tb-field">${head}<input class="fe-input tr-date" type="datetime-local" data-ans="${id}" value="${esc(v || "")}" />${help}</label>`;
     }
     const opts = optionsOf(f);
     if (f.source !== "list" && st.sources[f.source] === undefined) return `<div class="tb-field">${head}<p class="tb-none">Loading the list…</p></div>`;
