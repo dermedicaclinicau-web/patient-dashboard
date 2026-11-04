@@ -10595,3 +10595,17 @@ body.ws-pe-open { overflow: hidden; }
 @keyframes pn-nudge { 0%, 100% { transform: none; } 20% { transform: translateX(-6px); } 40% { transform: translateX(4px); } 60% { transform: translateX(-2px); } }
 @media (max-width: 600px) { .pn-stack { right: 12px; left: 12px; bottom: 12px; width: auto; } }
 @media (prefers-reduced-motion: reduce) { .pn.is-new { animation: none; } }
+
+/* Nudges: a colour for each kind */
+.pn.is-teal   { border-left-color: #0f766e; } .pn.is-teal .pn-ic   { background: #f0fdfa; color: #0f766e; }
+.pn.is-violet { border-left-color: #7c3aed; } .pn.is-violet .pn-ic { background: #f5f3ff; color: #7c3aed; }
+.pn.is-sky    { border-left-color: #0284c7; } .pn.is-sky .pn-ic    { background: #f0f9ff; color: #0284c7; }
+.pn.is-amber  { border-left-color: #d97706; } .pn.is-amber .pn-ic  { background: #fffbeb; color: #b45309; }
+.pn.is-green  { border-left-color: #16a34a; } .pn.is-green .pn-ic  { background: #f0fdf4; color: #15803d; }
+.pn-more { pointer-events: auto; align-self: flex-end; border: 0; cursor: pointer; font: inherit; font-size: .8rem; }
+/* "Get these when the portal is in the background?" */
+.pn-offer { border-left-color: #334155; background: #f8fafc; }
+.pn-offer .pn-main { cursor: default; padding-right: 0; }
+.pn-offer .pn-acts { gap: .4rem; }
+.pn-acts .is-primary { background: #0f766e; color: #fff; }
+.pn-acts .is-primary:hover { background: #115e59; }
