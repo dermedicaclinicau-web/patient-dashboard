@@ -5593,3 +5593,32 @@ export async function productLedger({ product, fromKey, start = null, invoiceRow
   }
   return { fromKey, days: out, startAt, source, digitalStart };
 }
+
+// Invoice names that aren't linked yet: the product each one most likely is, ignoring sizes ("30ml", "50 g")
+// and capitals. Several equally close products (e.g. 30ml and 50ml of the same cream) are listed to choose from.
+const sizeless = (s) => invoiceNameKey(s)
+  .replace(/\b\d+(\.\d+)?\s?(ml|mls|g|gm|gr|mg|kg|l|oz|pcs|pc|pack|caps|tabs)\b/g, " ").replace(/\s+/g, " ").trim();
+
+export function suggestInvoiceLinks(unlinked, products) {
+  const ps = products.filter((p) => p.active !== false).map((p) => {
+    const k = sizeless(p.name);
+    return { p, k, words: new Set(k.split(" ").filter((w) => w.length > 1)) };
+  });
+  return unlinked.map((u) => {
+    const k = sizeless(u.name);
+    const words = new Set(k.split(" ").filter((w) => w.length > 1));
+    const scored = ps.map((x) => {
+      let s;
+      if (x.k === k) s = 1;
+      else if (k && (x.k.startsWith(`${k} `) || k.startsWith(`${x.k} `))) s = 0.9;
+      else {
+        const same = [...words].filter((w) => x.words.has(w)).length;
+        s = same / Math.max(1, words.size, x.words.size);
+      }
+      return { p: x.p, s };
+    }).filter((x) => x.s >= 0.75).sort((a, b) => b.s - a.s);
+    const top = scored.length ? scored[0].s : 0;
+    const best = scored.filter((x) => x.s === top).map((x) => x.p);
+    return { ...u, product: best.length === 1 ? best[0] : null, candidates: best.length > 1 ? best : [] };
+  });
+}

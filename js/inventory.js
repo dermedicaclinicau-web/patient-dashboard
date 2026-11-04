@@ -11,7 +11,7 @@ import {
   listKits, listKitDays, recordManualSale, undoMove, recordPaperUse, isKitProduct,
   recordPatientReturn, recordSupplierReturn, markReturnCredited, listReturns, RETURN_REASONS, RETURN_STATUS,
   rebuildPlan, applyRebuild, listCountsOn, getInvoiceSettings, saveInvoiceSettings,
-  listBaseCounts, saveBaseCount, planFromBases, productLedger,
+  listBaseCounts, saveBaseCount, planFromBases, productLedger, suggestInvoiceLinks, invoiceNameKey,
 } from "./inventory-api.js";
 import { searchPatients } from "./task-runner.js";
 import { openSetKitDialog, openKitFromShelfDialog } from "./kit-admin.js";
@@ -1111,7 +1111,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     let fromKey = shared.length === 1 ? shared[0] : `${today.slice(0, 4)}-01-01`;
     const typed = new Map();          // "productId|loc" → what's typed
     const auto = new Set();           // boxes filled in for the chosen date (cleared when the date changes)
-    let plan = null, busy = false, prefilled = "";
+    let plan = null, busy = false, prefilled = "", lastPast = true;
     const dlg = openDialog("inv-dlg inv-spdlg inv-rbdlg", '<div class="lh-form" data-role="rb"></div>');
     const box = dlg.querySelector('[data-role="rb"]');
     dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
@@ -1207,9 +1207,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           <p>${plan.fromBases ? "From each product's base count" : `From what was counted on ${esc(niceDate(plan.fromKey))}`}, plus everything since.
             ${off ? `<strong>${plural(off, "product")}</strong> ${off === 1 ? "is" : "are"} off.` : "Everything matches. 👍"}
             Tick the ones to set digital to “Should be now”.</p></div>
-        ${plan.unlinked.length ? `<div class="inv-hint is-warn"><strong>${plan.unlinked.length} product name${plan.unlinked.length === 1 ? "" : "s"} on invoices aren't linked to a product</strong>,
-          so their sales aren't counted: ${esc(plan.unlinked.slice(0, 12).map((u) => `${u.name} (${u.n})`).join(", "))}${plan.unlinked.length > 12 ? "…" : ""}.
-          If any are these products, link them in <strong>Products → Invoice links</strong>, then check again.</div>` : ""}
+        ${unlinkedHtml()}
         <div class="inv-rb-list">${plan.rows.map(card).join("") || '<p class="tb-none">Nothing to check.</p>'}</div>
         ${!cfg.startDate ? `<label class="fe-check"><input type="checkbox" name="setStart" checked />
           From now on, take invoice sales off stock automatically (sets the invoice start date to ${esc(niceDate(plan.fromKey))})</label>` : ""}
@@ -1222,6 +1220,62 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           <button type="button" class="lh-btn is-primary" data-act="apply">Set digital</button>
         </div>`;
     }
+
+        // Invoice names that aren't linked: the ones that look like these products first, each with a Link button
+    function unlinkedHtml() {
+      if (!plan.unlinked.length) return "";
+      const mine = new Set(list.map((p) => p.id));
+      plan.sugg = suggestInvoiceLinks(plan.unlinked, st.products);
+      const near = plan.sugg.map((u, i) => ({ ...u, i }))
+        .filter((u) => (u.product && mine.has(u.product.id)) || u.candidates.some((c) => mine.has(c.id)));
+      const rest = plan.sugg.filter((u) => !near.some((x) => x.name === u.name));
+      const pick = (u) => (u.product
+        ? `<strong>${esc(u.product.name)}</strong>`
+        : `<select class="fb-select" data-linkpick="${u.i}">${u.candidates.map((c) =>
+            `<option value="${esc(c.id)}"${mine.has(c.id) ? " selected" : ""}>${esc(c.name)}</option>`).join("")}</select>`);
+      return `<div class="inv-hint is-warn">
+        ${near.length ? `<strong>${plural(near.length, "invoice name")} look${near.length === 1 ? "s" : ""} like ${list.length === 1 ? "this product" : "these products"}
+          but ${near.length === 1 ? "isn't" : "aren't"} linked</strong>, so ${near.length === 1 ? "its" : "their"} sales aren't counted:
+          <div class="inv-rb-links">${near.map((u) => `<div class="inv-rb-link">
+            <span>“${esc(u.name)}” <small>(${plural(u.n, "sale")})</small> → ${pick(u)}</span>
+            <button type="button" class="lh-btn" data-link="${u.i}">Link</button></div>`).join("")}</div>
+          ${near.length > 1 ? '<button type="button" class="lh-btn is-primary" data-act="link-all">Link all of these</button>' : ""}` : ""}
+        ${rest.length ? `<details class="inv-rb-more"${near.length ? "" : " open"}><summary>${plural(rest.length, "other invoice name")} not linked</summary>
+          <p>${esc(rest.slice(0, 30).map((u) => `${u.name} (${u.n})${u.product ? ` → ${u.product.name}?` : ""}`).join(", "))}${rest.length > 30 ? "…" : ""}.
+          Link them in <strong>Products → Invoice links</strong> if they're stock products.</p></details>` : ""}
+        <small>Linking also means future invoice uploads take that product off the Shelf.</small></div>`;
+    }
+
+    async function linkNames(pairs, btn) {
+      if (!pairs.length) return;
+      busy = true;
+      if (btn) { btn.disabled = true; btn.textContent = "Linking…"; }
+      try {
+        const cur = await getInvoiceSettings();
+        const keys = new Set(pairs.map((x) => invoiceNameKey(x.name)));
+        await saveInvoiceSettings({
+          startDate: cur.startDate,
+          links: [...cur.links.filter((l) => !keys.has(invoiceNameKey(l.name))), ...pairs],
+        }, staff);
+        showToast(`Linked ${plural(pairs.length, "invoice name")}. Checking again…`);
+      } catch (ex) {
+        console.error("Link failed:", ex);
+        showToast(errText(ex, "Couldn't save the link. Try again."));
+        busy = false;
+        if (btn) { btn.disabled = false; btn.textContent = "Link"; }
+        return;
+      }
+      busy = false;
+      if (plan.fromBases) workBases(); else work(null);
+    }
+
+    const linkPair = (i) => {
+      const u = plan.sugg && plan.sugg[i];
+      if (!u) return null;
+      const sel = box.querySelector(`[data-linkpick="${i}"]`);
+      const productId = sel ? sel.value : u.product ? u.product.id : "";
+      return productId ? { name: u.name, productId } : null;
+    };
 
     function readCounted() {
       const counted = new Map();
@@ -1267,10 +1321,12 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     async function work(btn) {
       let counted;
       try { counted = readCounted(); } catch (ex) { drawAsk(ex.message); return; }
-      const past = box.querySelector('[name="past"]').checked;
+      const pastEl = box.querySelector('[name="past"]');
+      const past = pastEl ? pastEl.checked : lastPast;
+      lastPast = past;
       busy = true;
-      btn.disabled = true;
-      btn.textContent = "Adding it all up…";
+      if (btn) { btn.disabled = true; btn.textContent = "Adding it all up…"; }
+      else box.querySelector(".inv-rb-list").innerHTML = '<div class="skeleton" style="height:160px;border-radius:12px"></div>';
       try {
         const [p2, cfg] = await Promise.all([
           fetchRows(fromKey).then((rows) => rebuildPlan({ fromKey, products: list, allProducts: st.products, counted, pos: st.pos, invoiceRows: rows, includePast: past })),
@@ -1360,6 +1416,13 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       if (next) { next.focus(); next.select(); }
     });
     box.addEventListener("click", (e) => {
+      const lk = e.target.closest("[data-link]");
+      if (lk && plan && !busy) { const pr = linkPair(Number(lk.dataset.link)); if (pr) linkNames([pr], lk); return; }
+      if (e.target.closest('[data-act="link-all"]') && plan && !busy) {
+        const btns = [...box.querySelectorAll("[data-link]")];
+        linkNames(btns.map((b) => linkPair(Number(b.dataset.link))).filter(Boolean), e.target.closest('[data-act="link-all"]'));
+        return;
+      }
       const lg = e.target.closest("[data-ledger]");
       if (lg && plan) {
         const r = plan.rows[Number(lg.dataset.ledger)];

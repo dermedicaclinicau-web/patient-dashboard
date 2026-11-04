@@ -10691,3 +10691,11 @@ body.ws-pe-open { overflow: hidden; }
 .inv-lg-n.is-neg { color: #b91c1c; }
 .inv-lg-n.is-pos { color: #047857; }
 .inv-rb-top { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+
+.lh-dialog.inv-rbdlg { width: min(1100px, 97vw); max-width: none; }   /* the Change column fits without scrolling */
+.inv-rb-links { display: grid; gap: .35rem; margin: .5rem 0; }
+.inv-rb-link { display: flex; align-items: center; justify-content: space-between; gap: .75rem;
+  background: #fff; border: 1px solid #fde68a; border-radius: 10px; padding: .35rem .5rem; }
+.inv-rb-link .fb-select { max-width: 320px; }
+.inv-rb-more { margin-top: .4rem; }
+.inv-rb-more summary { cursor: pointer; font-weight: 600; }
