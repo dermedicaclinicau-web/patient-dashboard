@@ -10532,3 +10532,26 @@ body.ws-pe-open { overflow: hidden; }
 .tb-formpick { display: flex; flex-direction: column; gap: .35rem; margin-top: .6rem; padding-top: .6rem; border-top: 1px dashed var(--border); }
 .tb-formpick-label { font-size: .85rem; font-weight: 600; color: var(--muted, #64748b); }
 .tb-formpick select { width: 100%; }
+
+/* Task Builder: edit a button in the message */
+.tb-linkbar { position: fixed; z-index: 1200; display: flex; align-items: center; gap: .35rem; padding: .35rem .45rem;
+  background: #fff; border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 24px rgba(15,23,42,.14); font-size: .85rem; }
+.tb-linkbar-name { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #475569; padding: 0 .3rem; }
+.tb-linkbar button { border: 0; background: #f1f5f9; border-radius: 7px; padding: .3rem .6rem; font: inherit; cursor: pointer; }
+.tb-linkbar button:hover { background: #e2e8f0; }
+.tb-linkbar .tb-linkbar-del { color: #b91c1c; }
+
+.tb-btn-overlay { position: fixed; inset: 0; z-index: 1300; display: flex; align-items: center; justify-content: center;
+  padding: 1rem; background: rgba(15,23,42,.35); backdrop-filter: blur(3px); }
+.tb-btn-dialog { width: min(480px, 100%); max-height: calc(100vh - 2rem); overflow: auto; display: flex; flex-direction: column; gap: .7rem;
+  background: #fff; border-radius: 18px; padding: 1.5rem; box-shadow: 0 20px 50px rgba(15,23,42,.25); }
+.tb-btn-dialog h3 { margin: 0 0 .2rem; font-size: 1.25rem; }
+.tb-btn-field { display: flex; flex-direction: column; gap: .35rem; }
+.tb-btn-field span { font-size: .85rem; font-weight: 600; color: #64748b; }
+.tb-btn-field input { padding: .7rem .9rem; border: 1px solid var(--border); border-radius: 10px; font: inherit; }
+.tb-btn-actions { display: flex; align-items: center; gap: .5rem; margin-top: .4rem; }
+.tb-btn-actions span { flex: 1; }
+.tb-btn-actions button { border: 0; border-radius: 10px; padding: .6rem 1.1rem; font: inherit; font-weight: 600; cursor: pointer; background: none; }
+.tb-btn-cancel { color: #475569; }
+.tb-btn-save { background: #0f766e; color: #fff; }
+.tb-btn-del { color: #b91c1c; padding-left: 0 !important; }

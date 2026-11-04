@@ -1294,7 +1294,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   formPickObs.observe(document.body, { childList: true, subtree: true });
 
   function addFormPicker(dlg) {
-    if (!/\b(add|edit) a button\b/i.test(dlg.textContent || "")) return;
+    if (!/\b(add|edit) a (button|link)\b/i.test(dlg.textContent || "")) return;
     dlg.dataset.formpick = "1";
     if (task.category !== "patient") return;
 
@@ -1352,6 +1352,120 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     anchor.after(box);
   }
 
+  // Editing a button or link that's already in the message: click it → Edit / Remove
+  let linkBar = null;
+  const closeLinkBar = () => { if (linkBar) { linkBar.remove(); linkBar = null; } };
+  const isButtonLink = (a) => a.hasAttribute("data-button") || /\b(btn|button)\b/i.test(a.className || "") ||
+    /background/i.test(a.getAttribute("style") || "");
+  const LINK_OK = /^(https?:\/\/|mailto:|tel:|\{)/i;
+
+  root.addEventListener("click", (e) => {
+    const a = e.target.closest("a");
+    const ed = a && a.closest('[contenteditable="true"]');
+    if (!a || !ed || !root.contains(ed)) return;
+    e.preventDefault();
+    showLinkBar(a, ed);
+  }, true);
+  const outside = (e) => {
+    if (!root.isConnected) { document.removeEventListener("mousedown", outside, true); closeLinkBar(); return; }
+    if (linkBar && !linkBar.contains(e.target) && !e.target.closest('[contenteditable="true"] a')) closeLinkBar();
+  };
+  document.addEventListener("mousedown", outside, true);
+  window.addEventListener("scroll", closeLinkBar, true);
+
+  function showLinkBar(a, ed) {
+    closeLinkBar();
+    const btn = isButtonLink(a);
+    const label = (a.textContent || "").trim() || a.getAttribute("href") || "";
+    linkBar = document.createElement("div");
+    linkBar.className = "tb-linkbar";
+    linkBar.innerHTML = `<span class="tb-linkbar-name" title="${esc(a.getAttribute("href") || "")}">${btn ? "Button" : "Link"}: ${esc(label.slice(0, 40))}</span>
+      <button type="button" data-k="edit">Edit</button><button type="button" data-k="remove" class="tb-linkbar-del">Remove</button>`;
+    document.body.appendChild(linkBar);
+    const r = a.getBoundingClientRect();
+    const w = linkBar.offsetWidth;
+    linkBar.style.top = `${Math.min(r.bottom + 6, window.innerHeight - linkBar.offsetHeight - 8)}px`;
+    linkBar.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - w - 8))}px`;
+    linkBar.querySelector('[data-k="edit"]').addEventListener("click", () => { closeLinkBar(); openLinkEditor(a, ed); });
+    linkBar.querySelector('[data-k="remove"]').addEventListener("click", () => { closeLinkBar(); removeLink(a, ed); });
+  }
+
+  function editorChanged(ed) {
+    ed.dispatchEvent(new Event("input", { bubbles: true }));
+    renderFormLinks();
+  }
+
+  // A button on its own line takes its line with it; a link in a sentence keeps its words
+  function removeLink(a, ed) {
+    if (isButtonLink(a)) {
+      let el = a;
+      while (el.parentElement && el.parentElement !== ed && el.parentElement.children.length === 1 &&
+        el.parentElement.textContent.trim() === a.textContent.trim()) el = el.parentElement;
+      el.remove();
+    } else {
+      a.replaceWith(...a.childNodes);
+    }
+    editorChanged(ed);
+    showToast(isButtonLink(a) ? "Button removed." : "Link removed.");
+  }
+
+  function setLinkText(a, text) {
+    const nodes = [];
+    const walk = document.createTreeWalker(a, NodeFilter.SHOW_TEXT);
+    while (walk.nextNode()) if (walk.currentNode.nodeValue.trim()) nodes.push(walk.currentNode);
+    if (nodes.length === 1) nodes[0].nodeValue = text;   // keeps bold, colours etc.
+    else a.textContent = text;
+  }
+
+  function openLinkEditor(a, ed) {
+    const btn = isButtonLink(a);
+    const ov = document.createElement("div");
+    ov.className = "tb-btn-overlay";
+    ov.innerHTML = `
+      <div class="lh-dialog fe-confirm tb-btn-dialog" role="dialog" aria-modal="true">
+        <h3>Edit a ${btn ? "button" : "link"}</h3>
+        <label class="tb-btn-field"><span>${btn ? "Button text" : "Link text"}</span><input type="text" data-k="text" maxlength="80"></label>
+        <label class="tb-btn-field"><span>Web address it opens</span><input type="url" data-k="url" placeholder="https://"></label>
+        <small class="muted">You can use blanks, e.g. https://dermedica.com.au/book?name={First name}, or {Booking link} on its own.</small>
+        <p class="tb-none tb-bad" data-k="err" hidden></p>
+        <div class="tb-btn-actions">
+          <button type="button" class="tb-btn-del" data-k="remove">Remove</button>
+          <span></span>
+          <button type="button" class="tb-btn-cancel" data-k="cancel">Cancel</button>
+          <button type="button" class="tb-btn-save" data-k="save">Save</button>
+        </div>
+      </div>`;
+    const q = (k) => ov.querySelector(`[data-k="${k}"]`);
+    q("text").value = (a.textContent || "").trim();
+    q("url").value = a.getAttribute("href") || "";
+    document.body.appendChild(ov);   // the form picker is added by the watcher above
+
+    const close = () => { ov.remove(); document.removeEventListener("keydown", onKey, true); };
+    const save = () => {
+      const text = q("text").value.trim();
+      const url = q("url").value.trim();
+      const err = !text ? `Add the ${btn ? "button" : "link"} text.` : !LINK_OK.test(url) ? "The web address must start with https://" : "";
+      q("err").hidden = !err;
+      q("err").textContent = err;
+      if (err) return;
+      setLinkText(a, text);
+      a.setAttribute("href", url);
+      close();
+      editorChanged(ed);
+      showToast(btn ? "Button updated." : "Link updated.");
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.stopPropagation(); close(); }
+      if (e.key === "Enter" && e.target.tagName === "INPUT") { e.preventDefault(); save(); }
+    };
+    document.addEventListener("keydown", onKey, true);
+    q("save").addEventListener("click", save);
+    q("cancel").addEventListener("click", close);
+    q("remove").addEventListener("click", () => { close(); removeLink(a, ed); });
+    ov.addEventListener("mousedown", (e) => { if (e.target === ov) close(); });
+    setTimeout(() => q("text").focus(), 0);
+  }
+  
   getLetterhead()
     .then((lh) => { letterhead = lh; })
     .catch(() => { letterhead = {}; })
