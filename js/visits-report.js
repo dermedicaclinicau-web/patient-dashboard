@@ -39,13 +39,21 @@ export function mountVisitsReport(body, { csv } = {}) {
   const panelEl = body.querySelector('[data-role="panel"]');
   const out = body.querySelector('[data-role="out"]');
 
-  function setPreset(p) {
-    st.preset = p;
-    if (p === "custom") return;
-    st.to = yesterday;
-    st.from = p === "year" ? `${today.slice(0, 4)}-01-01` : addDays(yesterday, -(Number(p) - 1));
-    if (st.from > st.to) st.from = st.to;
-  }
+const VR_PRESETS = [
+  ["30", "Last 30 days"], ["90", "Last 3 months"], ["180", "Last 6 months"],
+  ["365", "Last 12 months"], ["year", "This year"], ["custom", "Choose dates"],
+];
+const kOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+function setPreset(v) {
+  st.preset = v;
+  if (v === "custom") return;
+  const end = parse(yesterday);
+  const start = v === "year"
+    ? new Date(end.getFullYear(), 0, 1)
+    : new Date(end.getFullYear(), end.getMonth(), end.getDate() - Number(v) + 1);
+  st.from = kOf(start) > yesterday ? yesterday : kOf(start);   // 1 January: "This year" is just yesterday
+  st.to = yesterday;
+}
 
     // Choose dates: keeps what's typed, and says (without redrawing) whether Show will work
   function typedDate() {
@@ -63,6 +71,7 @@ export function mountVisitsReport(body, { csv } = {}) {
     }
     return why;
   }
+
   function applyDates() {
     const why = typedDate();
     if (why) {
@@ -76,6 +85,31 @@ export function mountVisitsReport(body, { csv } = {}) {
     drawTools();
     load();
   }
+
+  toolsEl.addEventListener("click", (e) => {
+  const p = e.target.closest("[data-preset]");
+  if (p) {
+    if (p.dataset.preset === st.preset) return;
+    setPreset(p.dataset.preset);
+    st.typedFrom = st.from;
+    st.typedTo = st.to;
+    drawTools();
+    if (st.preset === "custom") toolsEl.querySelector('[data-f="from"]')?.focus();
+    else load();
+    return;
+  }
+  if (e.target.closest('[data-act="reset"]')) {
+    st.svcs.clear();
+    st.svcQ = ""; st.staff = -1; st.next = "all"; st.q = ""; st.hideDnc = false; st.panel = false;
+    st.show = 300;
+    setPreset("90");
+    st.typedFrom = st.from;
+    st.typedTo = st.to;
+    drawTools();
+    drawPanel();
+    load();
+  }
+});
 
   async function load(fresh = false) {
     out.innerHTML = SKELETON;
@@ -99,39 +133,72 @@ export function mountVisitsReport(body, { csv } = {}) {
     }
   }
 
-  function drawTools() {
-    const d = st.data;
-    const staffOpts = d ? d.staff.map((n, i) => [i, n]).filter(([i, n]) => i > 0 && n)
-      .sort((a, b) => a[1].localeCompare(b[1])) : [];
-    const svcLabel = !st.svcs.size ? "Any service" : st.svcs.size === 1 ? d.services[[...st.svcs][0]] : `${st.svcs.size} services`;
-    toolsEl.innerHTML = `<div class="inv-tools rp-tools vr-tools">
-      <select class="fb-select" data-f="preset" aria-label="Dates">${PRESETS.map(([v, l]) =>
-        `<option value="${v}"${st.preset === v ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
-      ${st.preset === "custom" ? `
-        <span class="vr-dates">
-          <label class="rp-from">From <input class="fe-in" type="date" data-f="from" value="${esc(st.typedFrom || st.from)}"
-            min="${MIN_DAY}" max="${esc(yesterday)}" /></label>
-          <label class="rp-from">To <input class="fe-in" type="date" data-f="to" value="${esc(st.typedTo || st.to)}"
-            min="${MIN_DAY}" max="${esc(yesterday)}" /></label>
-          <button type="button" class="lh-btn is-primary" data-act="apply-dates">Show</button>
-          <small class="vr-datemsg" data-role="datemsg" aria-live="polite"></small>
-        </span>`
-        : `<span class="muted">${esc(nice(st.from))} – ${esc(nice(st.to))}</span>`}
-      <button type="button" class="ff-btn${st.svcs.size ? " is-primary" : ""}" data-act="panel" aria-expanded="${st.panel}">
-        Services: ${esc(svcLabel)} ▾</button>
-      <select class="fb-select" data-f="staff" aria-label="Clinician"><option value="-1">Any clinician</option>${staffOpts.map(([i, n]) =>
-        `<option value="${i}"${st.staff === i ? " selected" : ""}>${esc(n)}</option>`).join("")}</select>
-      <select class="fb-select" data-f="next" aria-label="Upcoming visit">
-        <option value="all"${st.next === "all" ? " selected" : ""}>Upcoming visit: anyone</option>
-        <option value="yes"${st.next === "yes" ? " selected" : ""}>Has an upcoming visit</option>
-        <option value="no"${st.next === "no" ? " selected" : ""}>No upcoming visit</option></select>
-      <input type="search" class="fe-input rp-find" data-f="q" placeholder="Name, mobile or email" value="${esc(st.q)}" aria-label="Search" />
-      <label class="fe-check"><input type="checkbox" data-f="dnc"${st.hideDnc ? " checked" : ""} /> Hide do-not-contact</label>
-      <span class="inv-spacer"></span>
-      <button type="button" class="ff-btn" data-act="refresh" title="Read the appointment book again">Refresh</button>
-      <button type="button" class="ff-btn" data-act="csv">Export CSV</button>
+function drawTools() {
+  const nSvc = st.svcs.size;
+  const staffList = (st.data && st.data.staff) || [];
+  const datesHtml = st.preset === "custom" ? `
+      <span class="vr-dates">
+        <label class="rp-from">From <input class="fe-in" type="date" data-f="from" value="${esc(st.typedFrom || st.from)}"
+          min="${MIN_DAY}" max="${esc(yesterday)}" /></label>
+        <label class="rp-from">To <input class="fe-in" type="date" data-f="to" value="${esc(st.typedTo || st.to)}"
+          min="${MIN_DAY}" max="${esc(yesterday)}" /></label>
+        <button type="button" class="lh-btn is-primary" data-act="apply-dates">Show</button>
+        <small class="vr-datemsg" data-role="datemsg" aria-live="polite"></small>
+      </span>`
+    : `<p class="vr-step-note">From <strong>${esc(nice(st.from))}</strong> to <strong>${esc(nice(st.to))}</strong></p>`;
+
+  toolsEl.innerHTML = `
+    <div class="vr-steps">
+      <div class="vr-step">
+        <div class="vr-step-head"><span class="vr-num">1</span>
+          <div><strong>When did they visit?</strong><small>Pick a time period</small></div></div>
+        <div class="vr-chips" role="group" aria-label="Time period">${VR_PRESETS.map(([v, l]) =>
+          `<button type="button" class="vr-chip${st.preset === v ? " is-on" : ""}" data-preset="${v}" aria-pressed="${st.preset === v}">${l}</button>`).join("")}
+        </div>
+        ${datesHtml}
+      </div>
+
+      <div class="vr-step">
+        <div class="vr-step-head"><span class="vr-num">2</span>
+          <div><strong>What treatment did they have?</strong><small>Leave as is for every treatment</small></div></div>
+        <button type="button" class="vr-pick${nSvc ? " is-set" : ""}" data-act="panel" aria-expanded="${!!st.panel}">
+          <strong>${nSvc ? `${nSvc} treatment${nSvc === 1 ? "" : "s"} chosen` : "Any treatment"}</strong>
+          <span>${st.panel ? "Close ▴" : "Choose ▾"}</span>
+        </button>
+        <p class="vr-step-note">${nSvc
+          ? "Shows patients who had <strong>at least one</strong> of these."
+          : "Press <strong>Choose</strong> to pick treatments, e.g. Wrinkle Relaxer."}</p>
+      </div>
+
+      <div class="vr-step">
+        <div class="vr-step-head"><span class="vr-num">3</span>
+          <div><strong>Narrow it down</strong><small>Optional</small></div></div>
+        <div class="vr-narrow">
+          <label class="vr-field">Seen by
+            <select class="fb-select" data-f="staff">
+              <option value="-1"${st.staff < 0 ? " selected" : ""}>Any clinician</option>
+              ${staffList.map((n, i) => `<option value="${i}"${String(st.staff) === String(i) ? " selected" : ""}>${esc(n)}</option>`).join("")}
+            </select></label>
+          <label class="vr-field">Next visit
+            <select class="fb-select" data-f="next">
+              <option value="all"${st.next !== "yes" && st.next !== "no" ? " selected" : ""}>Anyone</option>
+              <option value="yes"${st.next === "yes" ? " selected" : ""}>Has one booked</option>
+              <option value="no"${st.next === "no" ? " selected" : ""}>Nothing booked</option>
+            </select></label>
+          <label class="vr-field is-wide">Find a patient
+            <input type="search" class="fe-in" data-f="q" value="${esc(st.q || "")}" placeholder="Type a name, mobile or email" /></label>
+          <label class="fe-check is-wide"><input type="checkbox" data-f="dnc"${st.hideDnc ? " checked" : ""} />
+            Hide patients marked do not contact</label>
+        </div>
+      </div>
+    </div>
+    <div class="vr-actbar">
+      <button type="button" class="lh-btn is-quiet" data-act="reset">↺ Start again</button>
+      <span class="vr-spacer"></span>
+      <button type="button" class="lh-btn" data-act="refresh">Refresh</button>
+      <button type="button" class="lh-btn" data-act="csv">⬇ Download list</button>
     </div>`;
-  }
+}
 
   // How many patients had each service in these dates
   function serviceCounts() {

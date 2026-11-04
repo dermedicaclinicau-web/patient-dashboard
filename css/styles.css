@@ -10753,3 +10753,32 @@ body.ws-pe-open { overflow: hidden; }
 .vr-dates { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
 .vr-datemsg { flex-basis: 100%; font-size: .8rem; color: #64748b; min-height: 1em; }
 .vr-datemsg.is-bad { color: #b91c1c; }
+
+.vr-tools { display: block; }
+.vr-steps { display: grid; grid-template-columns: minmax(300px, 1.35fr) minmax(240px, .9fr) minmax(300px, 1.3fr); gap: .75rem; }
+@media (max-width: 1100px) { .vr-steps { grid-template-columns: 1fr; } }
+.vr-step { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: .9rem 1rem; display: flex; flex-direction: column; gap: .65rem; }
+.vr-step-head { display: flex; gap: .6rem; align-items: flex-start; }
+.vr-step-head strong { display: block; font-size: 1rem; color: #0f172a; }
+.vr-step-head small { color: #64748b; font-size: .8rem; }
+.vr-num { flex: none; width: 1.7rem; height: 1.7rem; border-radius: 50%; background: #e6f4f1; color: #0f766e;
+  font-weight: 700; font-size: .85rem; display: grid; place-items: center; }
+.vr-chips { display: flex; flex-wrap: wrap; gap: .4rem; }
+.vr-chip { border: 1px solid #cbd5e1; background: #fff; color: #334155; border-radius: 999px; padding: .45rem .85rem;
+  font: inherit; font-size: .88rem; cursor: pointer; transition: background .15s, border-color .15s; }
+.vr-chip:hover { border-color: #0f766e; color: #0f766e; }
+.vr-chip.is-on { background: #0f766e; border-color: #0f766e; color: #fff; font-weight: 600; }
+.vr-step-note { margin: 0; font-size: .84rem; color: #64748b; }
+.vr-step-note strong { color: #334155; }
+.vr-pick { display: flex; justify-content: space-between; align-items: center; gap: .5rem; width: 100%; text-align: left;
+  border: 1px solid #cbd5e1; border-radius: 10px; background: #fff; padding: .7rem .9rem; font: inherit; cursor: pointer; }
+.vr-pick:hover { border-color: #0f766e; }
+.vr-pick.is-set { border-color: #0f766e; background: #f0fdfa; }
+.vr-pick span { color: #0f766e; font-size: .85rem; font-weight: 600; white-space: nowrap; }
+.vr-narrow { display: grid; grid-template-columns: 1fr 1fr; gap: .6rem; }
+.vr-field { display: flex; flex-direction: column; gap: .3rem; font-size: .8rem; font-weight: 600; color: #475569; }
+.vr-field select, .vr-field input { width: 100%; font-weight: 400; }
+.vr-narrow .is-wide { grid-column: 1 / -1; }
+.vr-actbar { display: flex; align-items: center; gap: .5rem; margin: .7rem 0 .2rem; }
+.vr-spacer { flex: 1; }
+.vr-dates { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
