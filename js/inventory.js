@@ -11,7 +11,7 @@ import {
   listKits, listKitDays, recordManualSale, undoMove, recordPaperUse, isKitProduct,
   recordPatientReturn, recordSupplierReturn, markReturnCredited, listReturns, RETURN_REASONS, RETURN_STATUS,
   rebuildPlan, applyRebuild, listCountsOn, getInvoiceSettings, saveInvoiceSettings,
-  listBaseCounts, saveBaseCount, planFromBases,
+  listBaseCounts, saveBaseCount, planFromBases, productLedger,
 } from "./inventory-api.js";
 import { searchPatients } from "./task-runner.js";
 import { openSetKitDialog, openKitFromShelfDialog } from "./kit-admin.js";
@@ -1185,9 +1185,12 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       const card = (r, i) => {
         const any = Object.values(r.locs).some((x) => x.change);
         return `<section class="inv-rb">
-          <label class="fe-check inv-rb-pick"><input type="checkbox" data-pick-rb="${i}"${any && !r.p.tracked ? " checked" : ""}${r.p.tracked ? " disabled" : ""} />
-            <strong>${esc(r.p.name)}</strong> <small class="muted">· counted ${esc(niceDate(r.fromKey))}</small>${
-            !any ? ' <span class="inv-flag is-info">Already right</span>' : ""}</label>
+          <div class="inv-rb-top">
+            <label class="fe-check inv-rb-pick"><input type="checkbox" data-pick-rb="${i}"${any && !r.p.tracked ? " checked" : ""}${r.p.tracked ? " disabled" : ""} />
+              <strong>${esc(r.p.name)}</strong> <small class="muted">· counted ${esc(niceDate(r.fromKey))}</small>${
+              !any ? ' <span class="inv-flag is-info">Already right</span>' : ""}</label>
+            <button type="button" class="lh-btn is-quiet" data-ledger="${i}">Day by day</button>
+          </div>
           <table class="inv-table inv-rb-table">${head}<tbody>${Object.entries(r.locs).map(([loc, x]) => `<tr>
             <td>${esc(locLabel(loc))}</td><td>${x.start}</td><td>${sgn(x.received + x.pastIn)}${x.pastIn ? `<small> (${x.pastIn} before the portal)</small>` : ""}</td>
             <td>${sgn(x.sold + x.unapplied)}${x.unapplied ? `<small> (${-x.unapplied} not taken off yet)</small>` : ""}</td>
@@ -1357,6 +1360,13 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       if (next) { next.focus(); next.select(); }
     });
     box.addEventListener("click", (e) => {
+      const lg = e.target.closest("[data-ledger]");
+      if (lg && plan) {
+        const r = plan.rows[Number(lg.dataset.ledger)];
+        if (r) ledgerDialog(r.p, { fromKey: r.fromKey, start: {
+          shelf: r.locs.shelf ? r.locs.shelf.start : null, jt: r.locs.jt ? r.locs.jt.start : null } });
+        return;
+      }
       const a = e.target.closest("[data-act]");
       if (!a || busy) return;
       if (a.dataset.act === "cancel") dlg.close();
@@ -1370,7 +1380,181 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     else { drawAsk(); prefill(); }
   }
 
+  // Day by day: one product from a starting point to today. Where did it stop matching?
+  // start: { shelf, jt } typed or from a rebuild (otherwise the base count, or digital that day)
+  function ledgerDialog(p, { fromKey: fk = "", start = null } = {}) {
+    const today = dayKey();
+    const base = st.bases.get(p.id) || null;
+    const s = {
+      fromKey: fk || (base ? base.dateKey : dayKey(new Date(Date.now() - 30 * 864e5))),
+      source: start ? "given" : base ? "base" : "digital",
+      loc: p.stock.jt > 0 && !p.stock.shelf ? "jt" : "shelf",
+      quiet: false, open: new Set(), data: null, busy: false, err: "",
+    };
+    const givenKey = s.fromKey;
+    const rowsCache = new Map();
+    const dlg = openDialog("inv-dlg inv-lgdlg", '<div class="lh-form" data-role="lg"></div>');
+    const box = dlg.querySelector('[data-role="lg"]');
+    const sgn = (v) => (v > 0 ? `+${fmtN(v)}` : v < 0 ? `−${fmtN(-v)}` : "");
+    const dayLabel = (k) => { const [y, m, d] = k.split("-").map(Number);
+      return new Date(y, m - 1, d).toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short" }); };
+    const timeOf = (d) => (d ? d.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" }) : "");
 
+    const startFor = () => (s.source === "given" ? start
+      : s.source === "base" && base && base.dateKey === s.fromKey ? { shelf: base.shelf, jt: base.jt } : null);
+
+    async function run() {
+      s.busy = true; s.err = ""; draw();
+      try {
+        if (!rowsCache.has(s.fromKey)) {
+          const res = await callApi({ action: "inventory", op: "invoiceLines", from: s.fromKey, to: today });
+          if (res.problem) throw new Error(res.problem);
+          rowsCache.set(s.fromKey, res.rows || []);
+        }
+        s.data = await productLedger({ product: p, fromKey: s.fromKey, start: startFor(), invoiceRows: rowsCache.get(s.fromKey),
+          allProducts: st.products, pos: st.pos });
+      } catch (ex) {
+        console.error("Day by day failed:", ex);
+        s.err = errText(ex, "Couldn't work it out. Try again.");
+        s.data = null;
+      }
+      s.busy = false;
+      draw();
+    }
+
+    function eventsHtml(x, loc) {
+      const L = x.locs[loc];
+      const list = x.events.filter((e) => e.lines.some((l) => l.loc === loc));
+      const items = list.map((e) => {
+        const n = e.lines.filter((l) => l.loc === loc).reduce((a, l) => a + l.delta, 0);
+        return { at: e.at, html: `<li class="is-${e.kind}"><span class="inv-lg-t">${esc(timeOf(e.at)) || "—"}</span>
+          <span><strong>${esc(e.label)}</strong> <b class="inv-lg-n ${n < 0 ? "is-neg" : "is-pos"}">${sgn(n) || "0"}</b>${
+            e.kind === "fix" ? ' <span class="inv-flag">Digital corrected</span>' : ""}${
+            e.kind === "unsold" ? ' <span class="inv-flag is-warn">Not taken off stock yet</span>' : ""}${
+            e.undone ? ' <span class="inv-flag">Undone</span>' : ""}${
+            e.entered ? ` <span class="inv-flag is-info">Entered ${esc(niceDate(e.entered))}</span>` : ""}
+            <small>${esc([e.note, e.by].filter(Boolean).join(" · "))}</small></span></li>` };
+      });
+      const c = L.count;
+      if (c) {
+        const i = items.findIndex((it) => !it.at || it.at > c.at);
+        items.splice(i < 0 ? items.length : i, 0, { html: `<li class="is-count"><span class="inv-lg-t">${esc(timeOf(c.at))}</span>
+          <span><strong>Opening count${c.by ? ` by ${esc(c.by)}` : ""}: ${c.counted}</strong>
+          <small>Should have been ${fmtN(c.expected)} at that moment · digital said ${c.system}${
+            c.diff ? ` · <b class="${c.diff < 0 ? "rp-neg" : ""}">${sgn(c.diff)}</b>` : " · matched"}</small></span></li>` });
+      }
+      return items.length ? `<ul class="inv-lg-ev">${items.map((it) => it.html).join("")}</ul>` : '<p class="tb-none">Nothing happened this day.</p>';
+    }
+
+    function draw() {
+      const loc = s.loc;
+      const baseOk = base && base.dateKey === s.fromKey;
+      const srcItems = [
+        ...(s.source === "given" && s.fromKey === givenKey ? [["given", "The count I typed"]] : []),
+        ...(baseOk ? [["base", "Base count"]] : []),
+        ["digital", "Digital that day"],
+      ];
+      const head = `
+        <div class="inv-pd-head"><div><h3>Day by day: ${esc(p.name)}</h3>
+          <p class="muted">What should have been there each day, next to digital and the opening counts.
+            The first day they stop matching is where to look. Click a day to see what happened.</p></div>
+          <button type="button" class="ib-tool" data-act="close" aria-label="Close" title="Close">×</button></div>
+        <div class="inv-tools inv-lg-tools">
+          <label class="lh-field"><span class="lh-label">From</span><input type="date" name="from" value="${s.fromKey}" max="${today}" /></label>
+          <div class="lh-field"><span class="lh-label">Start from</span>${seg("lg-src", srcItems, s.source)}</div>
+          <div class="lh-field"><span class="lh-label">Where</span>${seg("lg-loc", LOCATIONS.map((l) => [l.key, l.label]), loc)}</div>
+          <label class="fe-check"><input type="checkbox" name="quiet"${s.quiet ? " checked" : ""} /> Show quiet days</label>
+        </div>
+        ${base && !baseOk ? `<p class="inv-hint">This product's base count is on ${esc(niceDate(base.dateKey))}.
+          <button type="button" class="rc-link" data-act="use-base">Start from it</button></p>` : ""}`;
+
+      if (s.busy) { box.innerHTML = `${head}<div class="skeleton" style="height:300px;border-radius:12px"></div>`; return; }
+      if (s.err || !s.data) { box.innerHTML = `${head}<div class="tm-empty is-error">${esc(s.err || "Nothing to show.")}</div>`; return; }
+
+      const d = s.data;
+      const tot = (k) => d.days.reduce((a, x) => a + x.locs[loc][k], 0);
+      const last = d.days[d.days.length - 1].locs[loc];
+      const unsoldN = -tot("unsold");
+      const diffs = d.days.filter((x) => x.locs[loc].count && x.locs[loc].count.diff);
+      const counted = d.days.filter((x) => x.locs[loc].count).length;
+      const gap = last.digital - last.end;
+      const tile = (label, v, cls = "") => `<div class="inv-stat ${cls}"><strong>${esc(String(v))}</strong><span>${esc(label)}</span></div>`;
+
+      // Quiet days are folded away (the first and last day always show)
+      let skipped = 0;
+      const body2 = [];
+      const flush = () => { if (skipped) body2.push(`<tr class="inv-lg-gap"><td colspan="11">${plural(skipped, "quiet day")}</td></tr>`); skipped = 0; };
+      d.days.forEach((x, i) => {
+        if (!s.quiet && x.quiet && i && i !== d.days.length - 1) { skipped++; return; }
+        flush();
+        const L = x.locs[loc];
+        const c = L.count;
+        const isOpen = s.open.has(x.key);
+        body2.push(`<tr class="inv-lg-row${c && c.diff ? " is-diff" : ""}${isOpen ? " is-open" : ""}" data-day="${x.key}">
+          <td>${esc(dayLabel(x.key))}</td><td>${fmtN(L.start)}</td><td>${sgn(L.received)}</td>
+          <td>${sgn(L.sold + L.unsold)}${L.unsold ? '<small title="Not taken off stock yet">*</small>' : ""}</td>
+          <td>${sgn(L.used)}</td><td>${sgn(L.wasted)}</td><td>${sgn(L.other)}</td>
+          <td><strong>${fmtN(L.end)}</strong></td>
+          <td class="${L.digital !== L.end ? "is-off" : ""}">${fmtN(L.digital)}${L.fix ? ` <small>(${sgn(L.fix)} fixed)</small>` : ""}</td>
+          <td>${c ? c.counted : ""}</td>
+          <td>${c ? `<span class="inv-rb-chg is-${c.diff < 0 ? "neg" : c.diff > 0 ? "pos" : "zero"}">${c.diff ? sgn(c.diff) : "✓"}</span>` : ""}</td></tr>
+          ${isOpen ? `<tr class="inv-lg-detail"><td colspan="11">${eventsHtml(x, loc)}</td></tr>` : ""}`);
+      });
+      flush();
+
+      box.innerHTML = `${head}
+        <div class="inv-stats inv-lg-sum">
+          ${tile(`Started (${d.source[loc] === "counted" ? "counted" : "digital"})`, fmtN(d.startAt[loc]))}
+          ${tile("Delivered", sgn(tot("received")) || "0")}
+          ${tile(unsoldN ? `Sold (${unsoldN} not off stock)` : "Sold", sgn(tot("sold") + tot("unsold")) || "0")}
+          ${tile("Used", sgn(tot("used")) || "0")}
+          ${tile("Written off", sgn(tot("wasted")) || "0")}
+          ${tile("Other", sgn(tot("other")) || "0")}
+          ${tile("Should be now", fmtN(last.end))}
+          ${tile("Digital now", fmtN(last.digital), gap ? "is-warn" : "")}
+        </div>
+        <p class="inv-hint${diffs.length ? " is-warn" : ""}">${diffs.length
+          ? `<strong>${plural(diffs.length, "opening count")} didn't match</strong> what should have been there. The first was
+             ${esc(dayLabel(diffs[0].key))} (${sgn(diffs[0].locs[loc].count.diff)}).
+             <button type="button" class="rc-link" data-jump="${diffs[0].key}">Show it</button>`
+          : counted ? `Every opening count since then matched what should have been there. 👍` : "No opening counts in this period."}
+          ${gap ? ` Digital is ${sgn(gap)} against what should be there now.` : ""}</p>
+        <div class="inv-lg-scroll"><table class="inv-table inv-lg-table">
+          <thead><tr><th>Day</th><th>Start</th><th>In</th><th>Sold</th><th>Used</th><th>Written off</th><th>Other</th>
+            <th>Should be</th><th>Digital</th><th>Counted</th><th>Difference</th></tr></thead>
+          <tbody>${body2.join("")}</tbody></table></div>
+        <small class="fe-note">Start is the start of the day. Difference compares the opening count with what should have been there when it was counted.
+          Corrections (counts, starting stock, investigations) change Digital but not Should be. * includes invoice sales not taken off stock yet.</small>`;
+    }
+
+    box.addEventListener("click", (e) => {
+      if (e.target.closest('[data-act="close"]')) { dlg.close(); return; }
+      if (s.busy) return;
+      if (e.target.closest('[data-act="use-base"]')) { s.fromKey = base.dateKey; s.source = "base"; run(); return; }
+      const j = e.target.closest("[data-jump]");
+      if (j) {
+        s.open.add(j.dataset.jump);
+        draw();
+        const row = box.querySelector(`[data-day="${j.dataset.jump}"]`);
+        if (row) row.scrollIntoView({ behavior: "smooth", block: "center" });
+        return;
+      }
+      const r = e.target.closest("[data-day]");
+      if (r) { const k = r.dataset.day; if (s.open.has(k)) s.open.delete(k); else s.open.add(k); draw(); }
+    });
+    box.addEventListener("change", (e) => {
+      const t = e.target;
+      if (t.name === "from" && /^\d{4}-\d{2}-\d{2}$/.test(t.value) && t.value <= today) {
+        s.fromKey = t.value;
+        s.source = s.source === "given" && s.fromKey === givenKey ? "given" : base && base.dateKey === s.fromKey ? "base" : "digital";
+        s.open.clear();
+        run();
+      } else if (t.name === "lg-src") { s.source = t.value; run(); }
+      else if (t.name === "lg-loc") { s.loc = t.value; s.open.clear(); draw(); }
+      else if (t.name === "quiet") { s.quiet = t.checked; draw(); }
+    });
+    run();
+  }
   /* ---------- Suppliers ---------- */
   function renderSuppliers() {
     if (!st.suppliers.length) {
@@ -2714,6 +2898,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           ${canRequest ? '<button type="button" class="lh-btn" data-act="request">Request more</button>' : ""}
           ${canManage ? `<button type="button" class="lh-btn" data-stock="count">Count</button>
             <button type="button" class="lh-btn" data-stock="writeoff">Write off</button>
+            <button type="button" class="lh-btn" data-act="ledger">Day by day</button>
             <button type="button" class="lh-btn is-quiet" data-act="edit">Edit product</button>` : ""}
         </div>` : ""}
         ${isSharedProduct(p) ? sharedSecHtml(p) : ""}
@@ -2817,6 +3002,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         return;
       }
       if (e.target.closest('[data-act="edit"]')) { dlg.close(); editProduct(p); return; }
+      if (e.target.closest('[data-act="ledger"]')) { ledgerDialog(p); return; }
       if (e.target.closest('[data-act="base-check"]')) { dlg.close(); rebuildDialog([p], p.name, { fromBases: true }); return; }
       if (e.target.closest('[data-act="base-set"]')) { dlg.close(); rebuildDialog([p], p.name); return; }
       if (e.target.closest('[data-act="request"]')) { dlg.close(); location.hash = `#/tasks/order/${encodeURIComponent(id)}`; return; }

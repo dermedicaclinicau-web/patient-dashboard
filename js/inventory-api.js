@@ -5443,3 +5443,151 @@ export async function planFromBases({ products, allProducts, pos = [], bases, fe
     unlinked: [...unlinked.values()].sort((a, b) => b.n - a.n),
   };
 }
+
+/* ===================== Day by day: one product, from a starting point to today ===================== */
+// Each day: what should have been there (start + deliveries − sales − treatments − write-offs ± moves), what digital
+// said at the end of the day, and the opening count against what should have been there when it was counted.
+// Corrections (counts, starting stock, investigations) change digital, but not what should have been there.
+const LEDGER_FIX = ["count", "baseline", "investigation", "tracking"];
+const ledgerKind = (t) => (t === "receive" ? "received" : t === "sale" ? "sold" : REBUILD_USED.includes(t) ? "used"
+  : t === "writeoff" ? "wasted" : LEDGER_FIX.includes(t) ? "fix" : "other");
+
+// start: { shelf, jt } counted at the start of fromKey (null for a place = start from digital that day)
+export async function productLedger({ product, fromKey, start = null, invoiceRows = [], allProducts = [], pos = [], includePast = true }) {
+  const today = dayKey();
+  if (!KEY_RE.test(fromKey || "") || fromKey > today) throw new Error("Choose a start day. It can't be in the future.");
+  if (fromKey < addDaysKey(today, -730)) throw new Error("Choose a start day within the last two years.");
+  const pid = product.id;
+  const [moves, cfg, salesSnap, recSnap, counts] = await Promise.all([
+    listMoves({ productId: pid, max: 20000 }),
+    getInvoiceSettings(),
+    getDocs(query(collection(db, "inv_sales"), where("apptDate", ">=", fromKey))),
+    includePast ? getDocs(query(collection(db, "inv_receipts"), where("historical", "==", true))) : Promise.resolve({ docs: [] }),
+    listCounts({ from: fromKey }),
+  ]);
+  const blank = () => ({ received: 0, sold: 0, unsold: 0, used: 0, wasted: 0, other: 0, fix: 0 });
+  const days = new Map();
+  const dayOf = (k) => {
+    if (!days.has(k)) days.set(k, { real: { shelf: blank(), jt: blank() }, digital: { shelf: 0, jt: 0 }, events: [], counts: {} });
+    return days.get(k);
+  };
+  const onLoc = (l) => l.loc === "shelf" || l.loc === "jt";
+  const since = { shelf: 0, jt: 0 };   // every change to digital from fromKey on
+
+  // 1. The activity log
+  moves.forEach((m) => {
+    if (!m.at) return;
+    const lines = (m.lines || []).filter(onLoc)
+      .map((l) => ({ loc: l.loc, delta: Number(l.delta) || 0, batch: String(l.batch || "") })).filter((l) => l.delta);
+    if (!lines.length) return;
+    const atKey = dayKey(m.at);
+    const eff = KEY_RE.test(m.effectiveDate || "") ? m.effectiveDate : atKey;
+    const kind = ledgerKind(m.type);
+    if (atKey >= fromKey) lines.forEach((l) => { dayOf(atKey).digital[l.loc] += l.delta; since[l.loc] += l.delta; });
+    const on = kind === "fix" ? atKey : eff;   // corrections: the day digital changed. Everything else: the day it happened
+    if (on < fromKey) return;
+    const d = dayOf(on);
+    lines.forEach((l) => { d.real[l.loc][kind] += l.delta; });
+    d.events.push({ at: m.at, kind, label: MOVE_TYPES[m.type] || m.type, by: String(m.by || ""), undone: !!m.undone,
+      note: [m.reason, m.note].filter(Boolean).join(" · "), lines, entered: eff !== atKey ? atKey : "",
+      timed: kind !== "fix" && eff === atKey });   // its time is known, so it can go before or after a count
+  });
+
+  // 2. Deliveries recorded as received before the portal (digital was never changed for them)
+  recSnap.docs.forEach((s) => {
+    const r = s.data() || {};
+    const k = String(r.receivedAt || "").slice(0, 10);
+    if (!KEY_RE.test(k) || k < fromKey) return;
+    const po = pos.find((x) => x.id === r.poId);
+    (Array.isArray(r.lines) ? r.lines : []).forEach((l) => {
+      if (l.productId !== pid) return;
+      const line = po ? po.lines.find((x) => x.key === l.key) : null;
+      const loc = line && line.loc === "jt" ? "jt" : "shelf";
+      const n = (Number(l.arrived) || 0) * Math.max(1, Number(l.packSize) || 1);
+      if (!n) return;
+      const d = dayOf(k);
+      d.real[loc].received += n;
+      d.events.push({ at: null, kind: "received", label: "Received before the portal", by: String(r.receivedBy || r.by || ""),
+        note: [r.poNumber, r.docketNo && `Docket ${r.docketNo}`, "Recorded only: digital wasn't changed"].filter(Boolean).join(" · "),
+        lines: [{ loc, delta: n, batch: "" }], entered: "", timed: false });
+    });
+  });
+
+  // 3. Invoice sales: ones a rebuild counted (saved without changing stock), and ones not taken off stock yet
+  const recorded = new Set();
+  salesSnap.docs.forEach((s) => {
+    recorded.add(s.id);
+    const x = s.data() || {};
+    if (x.source !== "invoice" || x.deducted !== false || !KEY_RE.test(x.apptDate || "")) return;
+    const n = (Array.isArray(x.lines) ? x.lines : []).filter((l) => l.productId === pid).reduce((a, l) => a + (Number(l.qty) || 0), 0);
+    if (!n) return;
+    const d = dayOf(x.apptDate);
+    d.real.shelf.sold -= n;
+    d.events.push({ at: null, kind: "sold", label: "Sold (invoice)", by: String(x.provider || ""),
+      note: [x.invoiceId && `Invoice ${x.invoiceId}`, x.patientName, "Counted when stock was rebuilt"].filter(Boolean).join(" · "),
+      lines: [{ loc: "shelf", delta: -n, batch: "" }], entered: "", timed: false });
+  });
+  const link = new Map((allProducts.length ? allProducts : [product]).filter((x) => x.active !== false).map((x) => [invoiceNameKey(x.name), x.id]));
+  cfg.links.forEach((l) => link.set(invoiceNameKey(l.name), l.productId));
+  const unsold = new Map();
+  invoiceRows.forEach(([invoiceId, date, patientName, name]) => {
+    if (!KEY_RE.test(date || "") || date < fromKey || link.get(invoiceNameKey(name)) !== pid) return;
+    const id = `invoice__${slug(invoiceId)}__${pid}`;
+    if (recorded.has(id)) return;
+    const s = unsold.get(id) || { invoiceId, date, patientName, qty: 0 };
+    s.qty++;
+    unsold.set(id, s);
+  });
+  unsold.forEach((s) => {
+    const d = dayOf(s.date);
+    d.real.shelf.unsold -= s.qty;
+    d.events.push({ at: null, kind: "unsold", label: "Sold (invoice)", by: "",
+      note: [`Invoice ${s.invoiceId}`, s.patientName].filter(Boolean).join(" · "),
+      lines: [{ loc: "shelf", delta: -s.qty, batch: "" }], entered: "", timed: false });
+  });
+
+  // 4. Opening counts (the latest one each day wins; batches added together)
+  counts.filter((c) => c.kind === "opening" && !c.superseded && c.at).sort((a, b) => a.at - b.at).forEach((c) => {
+    const per = {};
+    c.lines.forEach((l) => {
+      if (l.productId !== pid || !onLoc(l)) return;
+      const x = per[l.loc] || (per[l.loc] = { counted: 0, system: 0 });
+      x.counted += Number(l.counted) || 0;
+      x.system += Number(l.system) || 0;
+    });
+    Object.entries(per).forEach(([loc, x]) => { dayOf(c.dateKey).counts[loc] = { ...x, at: c.at, by: String(c.by || "") }; });
+  });
+
+  // 5. Day by day
+  const digitalStart = { shelf: product.stock.shelf - since.shelf, jt: product.stock.jt - since.jt };
+  const startAt = {}, source = {};
+  LOCATIONS.forEach(({ key }) => {
+    const v = start && start[key] !== null && start[key] !== undefined ? Number(start[key]) : NaN;
+    startAt[key] = Number.isFinite(v) ? v : digitalStart[key];
+    source[key] = Number.isFinite(v) ? "counted" : "digital";
+  });
+  const should = { ...startAt }, dig = { ...digitalStart };
+  const out = [];
+  for (let k = fromKey; k <= today; k = addDaysKey(k, 1)) {
+    const d = days.get(k);
+    const events = d ? d.events.sort((a, b) => (a.at ? a.at.getTime() : 9e15) - (b.at ? b.at.getTime() : 9e15)) : [];
+    const row = { key: k, quiet: !d, events, locs: {} };
+    LOCATIONS.forEach(({ key: loc }) => {
+      const r = d ? d.real[loc] : blank();
+      const begin = should[loc];
+      should[loc] = begin + r.received + r.sold + r.unsold + r.used + r.wasted + r.other;
+      dig[loc] += d ? d.digital[loc] : 0;
+      const c = d && d.counts[loc];
+      let count = null;
+      if (c) {
+        const before = events.filter((e) => e.timed && e.at < c.at)
+          .reduce((a, e) => a + e.lines.filter((l) => l.loc === loc).reduce((t, l) => t + l.delta, 0), 0);
+        const expected = begin + before;
+        count = { counted: c.counted, expected, system: c.system, diff: c.counted - expected, by: c.by, at: c.at };
+      }
+      row.locs[loc] = { start: begin, ...r, end: should[loc], digital: dig[loc], count };
+    });
+    out.push(row);
+  }
+  return { fromKey, days: out, startAt, source, digitalStart };
+}

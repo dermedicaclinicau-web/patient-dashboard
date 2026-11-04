@@ -10658,3 +10658,30 @@ body.ws-pe-open { overflow: hidden; }
 
 .inv-pd-base { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
 .inv-pd-base p { margin: .15rem 0 0; }
+
+/* Inventory → Day by day */
+.inv-lgdlg { max-width: min(1100px, 97vw); }
+.inv-lg-tools { align-items: flex-end; gap: .75rem; flex-wrap: wrap; }
+.inv-lg-tools .lh-field { margin: 0; }
+.inv-lg-sum { grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); }
+.inv-lg-scroll { max-height: 55vh; overflow: auto; border: 1px solid var(--border, #e5e7eb); border-radius: 12px; }
+.inv-lg-table { margin: 0; }
+.inv-lg-table thead th { position: sticky; top: 0; background: var(--card, #fff); z-index: 1; }
+.inv-lg-table td, .inv-lg-table th { white-space: nowrap; font-size: .85rem; text-align: right; }
+.inv-lg-table td:first-child, .inv-lg-table th:first-child { text-align: left; }
+.inv-lg-row { cursor: pointer; }
+.inv-lg-row:hover { background: #f8fafc; }
+.inv-lg-row.is-diff { background: #fef2f2; }
+.inv-lg-row.is-open { background: #f1f5f9; }
+.inv-lg-table td.is-off { color: #b45309; font-weight: 600; }
+.inv-lg-gap td { text-align: center !important; color: #94a3b8; font-size: .78rem; padding: .25rem; }
+.inv-lg-detail td { text-align: left !important; white-space: normal; background: #f8fafc; }
+.inv-lg-ev { list-style: none; margin: .25rem 0; padding: 0; display: grid; gap: .35rem; }
+.inv-lg-ev li { display: grid; grid-template-columns: 70px 1fr; gap: .5rem; align-items: baseline; }
+.inv-lg-ev li small { display: block; color: #64748b; }
+.inv-lg-ev li.is-count { background: #eff6ff; border-radius: 8px; padding: .3rem .4rem; }
+.inv-lg-ev li.is-fix { opacity: .8; }
+.inv-lg-t { color: #64748b; font-size: .78rem; }
+.inv-lg-n.is-neg { color: #b91c1c; }
+.inv-lg-n.is-pos { color: #047857; }
+.inv-rb-top { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
