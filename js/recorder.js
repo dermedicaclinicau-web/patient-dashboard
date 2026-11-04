@@ -304,7 +304,9 @@ export async function startRecording(patient, staff) {
   }
 
   if (!(await holdLock(MIC_LOCK))) {
-    throw new Error(`A recording${remote && remote.patient ? ` for ${remote.patient.name}` : ""} is running in another tab. Complete or cancel it there first.`);
+    const busyErr = new Error(`A recording${remote && remote.patient ? ` for ${remote.patient.name}` : ""} is running in another tab. Complete or cancel it there first.`);
+    busyErr.code = "BUSY_ELSEWHERE";
+    throw busyErr;
   }
   const mime = pickMime();
   try {

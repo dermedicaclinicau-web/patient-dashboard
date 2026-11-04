@@ -5,7 +5,7 @@ import {
 } from "./recorder.js";
 import { setRecordingPatient } from "./recording-bar.js";
 import { getPatient } from "./patients.js";
-import { showSoapPanel } from "./soap-panel.js";
+import { showSoapPanel, detachSoapPanel } from "./soap-panel.js";
 import { SECTIONS } from "./soap.js";
 import { confirmDialog } from "./dialog.js";
 import { auth, db } from "./firebase-config.js";
@@ -34,6 +34,10 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
   const root = document.createElement("section");
   root.className = "page wide cs-page";
   container.replaceChildren(root);
+  // The view is redrawn as the recording moves along; the notes area never is, so the notes stay put
+  root.innerHTML = '<div data-role="view"></div><div class="cs-notes" data-role="notes"></div>';
+  const viewEl = root.querySelector('[data-role="view"]');
+  const notesEl = root.querySelector('[data-role="notes"]');
 
 
   document.body.classList.add("is-consult");   // hides the recording bar: this page has its own controls
@@ -50,6 +54,7 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
   let starting = false;
   let startError = "";
   let ended = "";            // "deleted" after Cancel or Discard
+  let blocked = false;       // another tab was already recording when this one tried to start
   const me = () => ({ uid: (staff && staff.uid) || (auth.currentUser && auth.currentUser.uid) || "", name: (staff && staff.name) || "" });
 
   function viewOf(s) {
@@ -58,7 +63,10 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
     if (recId && L.recId === recId && L.status !== "idle") return { kind: "live", L };
     const j = recId ? s.jobs.find((x) => x.recId === recId) : null;
     if (j) return { kind: "job", j };
+    // This consultation is being recorded in another tab (a copy of the tab, or its link opened again)
+    if (recId && s.remote && s.remote.recId === recId) return { kind: "elsewhere" };
     if (server) return server.status === "missing" ? { kind: "missing" } : { kind: "server", j: server };
+    if (!recId && blocked) return { kind: "blocked", remote: s.remote };
     return { kind: recId ? "lookup" : "starting" };
   }
 
@@ -127,6 +135,23 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
 
   function bodyHtml(v) {
     if (v.kind === "ended") return stateHtml("Recording deleted", "No notes were written. You can close this tab.");
+    if (v.kind === "elsewhere") {
+      return stateHtml("This consultation is recording in another tab",
+        "Pause or complete it in that tab. Once it's uploaded, this tab shows its progress and notes too.",
+        '<button type="button" class="lh-btn" data-cs="close-tab">Close this tab</button>');
+    }
+    if (v.kind === "blocked") {
+      const who = v.remote && v.remote.patient ? ` for ${v.remote.patient.name}` : "";
+      return v.remote
+        ? stateHtml(`Another recording${who} is already running`,
+            "Only one appointment can be recorded at a time. Complete or cancel it in its tab, then start this one.",
+            `<div class="cs-state-btns"><button type="button" class="lh-btn" data-cs="close-tab">Close this tab</button>
+              <button type="button" class="lh-btn is-primary" data-cs="retry-start">Try again</button></div>`)
+        : stateHtml("The other recording has finished",
+            "You can start this one now.",
+            `<div class="cs-state-btns"><button type="button" class="lh-btn" data-cs="close-tab">Close this tab</button>
+              <button type="button" class="btn-primary" data-cs="retry-start">Start recording</button></div>`);
+    }
     if (v.kind === "missing") return stateHtml("This consultation couldn't be found", "It may have been deleted. Open the patient's page to see their notes.");
     if (v.kind === "lookup") return stateHtml("Finding this consultation…", "");
     if (v.kind === "starting") {
@@ -142,8 +167,8 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
     if (j.status === "ready") {
       return `${stepsHtml(j)}<div class="cs-ready"><div>
           <strong>${j.merged ? "Added to the earlier consultation's notes" : "The notes are ready"}</strong>
-          <p class="muted">Review them, then save as Draft or Reviewed. You can close this tab when you're done.</p></div>
-        <button type="button" class="btn-primary" data-cs="open-notes">Open the notes</button></div>`;
+          <p class="muted">They're below. Review them, then press Save as Draft or Save as Reviewed. You can close this tab when you're done.</p></div>
+        <button type="button" class="lh-btn" data-cs="open-notes">Show the notes</button></div>`;
     }
     const mine = v.kind === "job";
     let msg = '<p class="cs-note">Keep this tab open and carry on in the patient\'s page. The notes appear here by themselves, usually within a few minutes.</p>';
@@ -183,17 +208,17 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
     if (v.kind === "lookup") watchServer();
     if (!patient) patient = (v.L && v.L.patient) || (v.j && v.j.patient) || null;
     const key = [v.kind, v.L && v.L.status, v.j && v.j.status, v.j && v.j.stage, v.j && v.j.transcriptId,
-      starting, startError, patient && patient.name].join("|");
+      starting, startError, patient && patient.name, s.remote ? s.remote.recId : ""].join("|");
     if (key !== lastKey) {
       lastKey = key;
-      root.innerHTML = headHtml(v) + bodyHtml(v);
+      viewEl.innerHTML = headHtml(v) + bodyHtml(v);
     }
     tick(s, v);
     // Notes ready: open them here, once
     if (v.j && v.j.status === "ready" && v.j.transcriptId && opened !== v.j.transcriptId) {
       opened = v.j.transcriptId;
       if (v.kind === "job") markAnnounced(v.j.recId);
-      showSoapPanel(v.j.transcriptId, { mode: "max" });
+      showSoapPanel(v.j.transcriptId, { mode: "page", host: notesEl });
     }
   }
 
@@ -201,6 +226,7 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
     if (starting || recId) return;
     starting = true;
     startError = "";
+    blocked = false;
     draw(getState());
     try {
       if (!me().uid) throw new Error("Your session has ended. Log in again.");
@@ -211,8 +237,8 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
       recId = getState().live.recId;
       history.replaceState(null, "", `#/consult/${encodeURIComponent(recId)}`);   // a refresh won't start a second one
     } catch (err) {
-      console.error("Consultation didn't start:", err);
-      startError = micText(err);
+      if (err && err.code === "BUSY_ELSEWHERE") blocked = true;   // not a fault: another tab has the microphone
+      else { console.error("Consultation didn't start:", err); startError = micText(err); }
     }
     starting = false;
     draw(getState());
@@ -237,10 +263,14 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
           message: "The audio is deleted and no notes are written. This can't be undone.",
           confirmLabel: "Delete recording", tone: "danger",
         })) { await cancelRecording(); ended = "deleted"; }
-      } else if (a === "retry-start") begin();
+      }       else if (a === "retry-start") begin();
+      else if (a === "close-tab") {
+        window.close();   // works for tabs the portal opened
+        setTimeout(() => { if (!window.closed) showToast("You can close this tab now."); }, 300);
+      }
       else if (a === "open-notes") {
         const v = viewOf(getState());
-        if (v.j && v.j.transcriptId) showSoapPanel(v.j.transcriptId, { mode: "max" });
+        if (v.j && v.j.transcriptId) showSoapPanel(v.j.transcriptId, { mode: "page", host: notesEl });
       } else if (a === "upload") uploadNow(recId);
       else if (a === "process") retryProcessing(recId);
       else if (a === "discard") {
@@ -266,6 +296,7 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
     if (stopServer) stopServer();
     window.removeEventListener("hashchange", onHash);
     document.body.classList.remove("is-consult");
+    detachSoapPanel();
     document.title = startTitle;
   }
 

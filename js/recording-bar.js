@@ -149,6 +149,7 @@ export function setRecordingPatient(patient) {
 
 // Not recording: the notes tab slides out. Recording someone else: just a toast, so nothing covers the consultation.
 function announce(s) {
+  if (document.body.classList.contains("is-consult")) return;   // the Consultation tab shows its own notes
   const ready = s.jobs.filter((j) => j.status === "ready" && !j.announced && j.transcriptId);
   if (!ready.length) return;
   if (s.live.status === "idle") {

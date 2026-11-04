@@ -51,6 +51,7 @@ let tab = null;
 let content = null; // the panel's re-rendered area (resize handles live outside it)
 let mode = "min";
 let current = null; // { id, data, parsed, original, extras, dirty }
+let host = null;    // the Consultation tab: the notes sit inside the page there (mode "page")
 
 /* ===================== Public API ===================== */
 
@@ -75,9 +76,10 @@ export function closeSoapPanel() {
   try { sessionStorage.removeItem(STORE_KEY); } catch { /* ignore */ }
 }
 
-export async function showSoapPanel(recordId, { mode: wanted = "open" } = {}) {
+export async function showSoapPanel(recordId, { mode: wanted = "open", host: into = null } = {}) {
   if (!recordId) return;
   ensureDom();
+  if (into) host = into;
   if (current && current.id !== recordId && current.dirty && !(await confirmDialog({
     title: "Discard unsaved changes?",
     message: "You have unsaved changes to the notes that are open. Opening other notes will discard them.",
@@ -163,15 +165,26 @@ function ensureDom() {
 }
 
 function setMode(next) {
+  if (next === "page" && !(host && host.isConnected)) next = "max";   // the page has gone: full size instead
   mode = next;
+  // In page mode the notes live inside the Consultation page; otherwise on top of everything
+  const home = mode === "page" ? host : document.body;
+  if (panel.parentNode !== home) home.appendChild(panel);
   panel.hidden = mode === "min";
   panel.classList.toggle("is-max", mode === "max");
+  panel.classList.toggle("is-page", mode === "page");
   applyLayout();
   updateTab();
   if (!panel.hidden) requestAnimationFrame(autosizeAll);
   try {
     if (current && current.id) sessionStorage.setItem(STORE_KEY, JSON.stringify({ id: current.id, mode }));
   } catch { /* ignore */ }
+}
+
+// Leaving the Consultation page: the notes go back to being the usual panel (kept open as the Notes tab)
+export function detachSoapPanel() {
+  if (panel && mode === "page") setMode(current ? "min" : "open");
+  host = null;
 }
 
 function updateTab() {
@@ -968,6 +981,12 @@ function fitToViewport() {
 
 function applyLayout() {
   if (!panel) return;
+  if (mode === "page") {   // part of the page: no position or size of its own
+    panel.classList.remove("is-floating");
+    const st = panel.style;
+    st.left = st.top = st.width = st.height = st.right = st.bottom = "";
+    return;
+  }
   const floating = !layout.docked && mode !== "max" && !isSmall();
   panel.classList.toggle("is-floating", floating);
 
@@ -993,7 +1012,7 @@ function applyLayout() {
 }
 
 function toggleDock() {
-  if (isSmall()) return;
+  if (isSmall() || mode === "page") return;
   if (mode === "max") setMode("open");
   layout.docked = !layout.docked;
   applyLayout();
@@ -1001,7 +1020,7 @@ function toggleDock() {
 }
 
 function onPointerDown(e) {
-  if (e.button !== 0 || isSmall() || mode === "max") return;
+  if (e.button !== 0 || isSmall() || mode === "max" || mode === "page") return;
   const handle = e.target.closest(".sp-rz");
   const head = !handle && e.target.closest(".sp-head");
   if (!handle && !head) return;
