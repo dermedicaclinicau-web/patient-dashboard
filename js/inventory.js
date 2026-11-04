@@ -1158,7 +1158,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
             <strong>base count</strong> (stock doesn't change), or work out what should be there now: the base count, plus deliveries,
             Timely invoices, treatments, write-offs and returns since.</p></div>
         <label class="lh-field"><span class="lh-label">Counted on</span>
-          <input type="date" name="from" value="${fromKey}" max="${today}" /></label>
+          <input type="date" name="from" value="${fromKey}" max="${today}" />
+          <small class="fe-note"><strong>${esc(niceDate(fromKey))}</strong> (at the start of that day)</small></label>
         ${prefilled ? `<p class="inv-hint">${esc(prefilled)}</p>` : ""}
         <div class="inv-sp-list">${list.map((p) => {
           const b = bases.get(p.id);
@@ -1522,7 +1523,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           <p class="muted">What should have been there each day, next to digital and the opening counts. Click a day to see what happened.</p></div>
           <button type="button" class="ib-tool" data-act="close" aria-label="Close" title="Close">×</button></div>
         <div class="inv-tools inv-lg-tools">
-          <label class="lh-field"><span class="lh-label">From</span><input type="date" name="from" value="${s.fromKey}" max="${today}" /></label>
+          <label class="lh-field"><span class="lh-label">From</span><input type="date" name="from" value="${s.fromKey}" max="${today}" />
+            <small class="fe-note">${esc(niceDate(s.fromKey))}</small></label>
           <div class="lh-field"><span class="lh-label">Start from</span>${seg("lg-src", srcItems, s.source)}</div>
           <div class="lh-field"><span class="lh-label">Where</span>${seg("lg-loc", LOCATIONS.map((l) => [l.key, l.label]), loc)}</div>
           <label class="fe-check"><input type="checkbox" name="quiet"${s.quiet ? " checked" : ""} /> Show quiet days</label>
