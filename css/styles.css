@@ -10728,3 +10728,8 @@ body.ws-pe-open { overflow: hidden; }
 .ppr-up-item.is-fail small b { color: #b91c1c; }
 .ppr-up-state { text-align: center; font-weight: 700; color: #047857; }
 .ppr-up-item.is-fail .ppr-up-state { color: #b91c1c; }
+
+.ppr-del { display: grid; gap: .25rem; margin-top: .75rem; padding-top: .75rem; border-top: 1px dashed #e2e8f0; }
+.ppr-del .fe-note { color: #64748b; }
+.lh-btn.is-danger { color: #b91c1c; border-color: #fecaca; background: #fff; }
+.lh-btn.is-danger:hover { background: #fef2f2; }

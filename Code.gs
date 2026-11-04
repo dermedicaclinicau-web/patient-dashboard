@@ -15917,6 +15917,7 @@ function handlePaper_(body) {
     if (op === 'thumbs') return paperThumbs_(body.ids);
     if (op === 'file') return paperFile_(String(body.fileId || ''));
     if (op === 'upload') return paperUpload_(body, session);
+    if (op === 'trash') return paperTrash_(cfg, body, session);
     if (op === 'mark') return paperMark_(cfg, body, session);
     if (op === 'markLinked') return paperMarkLinked_(cfg, body, session);
     if (op === 'products') return paperProductsDone_(cfg, body, session);
@@ -20199,4 +20200,35 @@ function paperUpload_(body, session) {
 // The folder Paper records reads (Script Property PAPER_FOLDER_ID), the same one the scan list uses
 function paperUploadFolder_() {
   return DriveApp.getFolderById(paperRootId_());
+}
+
+// Paper records → Delete this file: only a scan nobody has assigned. It goes to the Drive Bin (kept 30 days).
+function paperTrash_(cfg, body, session) {
+  const id = String(body.fileId || '');
+  const f = paperFileOf_(id);
+  if (!f) return { ok: true, problem: "That scan isn't in the paper records folder any more." };
+  const path = PAPER_SCANS_ + '/' + id;
+  const cur = fsGetDoc_(cfg, path) || {};
+  if (cur.productsTaken === true || cur.filedAs || cur.status === 'filed' || cur.status === 'entered' || cur.patientId) {
+    return { ok: true, problem: "It's assigned to a patient, so it can't be deleted. Put it back on the list first." };
+  }
+  if ((paperLinked_(cfg)[id] || []).length) {
+    return { ok: true, problem: "A patient's record links to this file, so it can't be deleted." };
+  }
+  try { f.setTrashed(true); }
+  catch (e) {
+    console.warn('Scan ' + id + ' not deleted: ' + e);
+    return { ok: true, problem: "Google Drive didn't let the portal delete it. Only the file's owner can: delete it in Drive instead." };
+  }
+  const now = new Date().toISOString();
+  const who = String(session.name || '');
+  fsPatch_(cfg, path, {
+    fileId: id, fileName: f.getName(), status: 'deleted', deletedAt: now, deletedBy: who, deletedByUid: String(session.uid || ''),
+    history: (Array.isArray(cur.history) ? cur.history : []).concat([{ at: now, by: who, what: 'Deleted (moved to the Drive Bin)', note: '' }]).slice(-30),
+  });
+  // The cached list drops it straight away
+  const files = repCacheGet_(PAPER_FKEY_);
+  if (files) repCachePut_(PAPER_FKEY_, files.filter(function (x) { return x.id !== id; }), 1800);
+  console.log('Paper scan ' + id + ' (' + f.getName() + ') deleted by ' + who);
+  return { ok: true };
 }

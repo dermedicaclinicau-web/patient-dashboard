@@ -47,6 +47,8 @@ const LINK_KIND = { treatment: "Treatment record", consent: "Consent" };
 const linkText = (l) => `${LINK_KIND[l.kind] || "Record"}${l.title ? `: ${l.title}` : ""} · ${l.patientName || "Unknown patient"}${
   l.date ? ` · ${niceDay(l.date)}` : ""}`;
 const isLinked = (f) => !!(f.linked && f.linked.length);
+// Only a scan nobody has assigned: not filed, entered, marked on file, or linked from an older record
+const canDelete = (f) => ["todo", "help", "skip"].includes(f.status) && !f.patientId && !isLinked(f) && !f.productsTaken;
 const dupText = (d) => [d.kind ? FILE_NAME[d.kind] : (STATUS[d.status] || STATUS.todo)[0], d.patientName,
   d.recordDate && niceDay(d.recordDate), d.by].filter(Boolean).join(" · ");
 const RES = { none: "No treatment given", elsewhere: "Recorded somewhere else" };
@@ -592,6 +594,8 @@ export function mountPaperRecords(container, { staff } = {}) {
                 esc(f.status === "help" ? f.note : "")}</textarea></label>
             <button type="button" class="lh-btn" data-act="help">Ask for help</button>
             ${f.status !== "todo" ? '<button type="button" class="rc-link" data-act="todo">Put it back on the list</button>' : ""}
+            ${canDelete(f) ? `<div class="ppr-del"><button type="button" class="lh-btn is-danger" data-act="trash">Delete this file</button>
+              <small class="fe-note">For a blank page, a wrong upload or a copy. It goes to the Google Drive Bin, where it's kept for 30 days.</small></div>` : ""}
           </details>
         </div>
       </div>`;
@@ -1445,6 +1449,40 @@ export function mountPaperRecords(container, { staff } = {}) {
       }
     }
 
+        async function trashScan(btn) {
+      if (saving) return;
+      const ok = await confirmDialog({
+        title: `Delete ${f.name}?`,
+        message: "It's moved to the Google Drive Bin, where it's kept for 30 days and can be restored. It leaves the Paper records list.",
+        confirmLabel: "Delete", tone: "warning",
+      });
+      if (!ok) return;
+      err.hidden = true;
+      saving = true;
+      const prog = startProgress(btn, [[0, "Deleting…"], [6000, "Still working…"]]);
+      try {
+        const r = await callApi({ action: "paper", op: "trash", fileId: f.id });
+        if (r.problem) { prog.fail(); fail(r.problem); return; }
+        if (!r || r.ok !== true) { prog.fail(); fail(notSaved(r)); return; }
+        const n = nextFile();   // before it's taken out of the list
+        st.files = (st.files || []).filter((x) => x.id !== f.id);
+        delete st.thumbs[f.id];
+        prog.done("Deleted", n ? "Opening the next scan…" : "");
+        showToast("Deleted. It's in the Google Drive Bin for 30 days.");
+        draw();
+        await pause(600);
+        moving = true;
+        dlg.close();
+        if (n) openScan(n.id);
+      } catch (ex) {
+        console.error("Scan not deleted:", ex);
+        prog.fail();
+        fail(ex.message || "Couldn't delete it. Try again.");
+      } finally {
+        saving = false;
+      }
+    }
+
     dlg.addEventListener("change", (e) => {
       const t = e.target;
       if (t.dataset.ft === "formId") { ft.formId = t.value; loadProducts(t.value); return; }
@@ -1511,6 +1549,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       if (act === "file") { fileAs(actEl); return; }
       if (act === "stock") { saveProducts(actEl); return; }
       if (act === "fix-products") { fixProducts(); return; }
+      if (act === "trash") { trashScan(actEl); return; }
       if (act === "rx-add") { ft.rx.push({ product: "", custom: !rxList.length, name: "" }); drawType(); return; }
       if (act === "rx-x") { ft.rx.splice(Number(e.target.closest("[data-rx]").dataset.rx), 1); drawType(); return; }
       if (act === "next") { goNext(); return; }
