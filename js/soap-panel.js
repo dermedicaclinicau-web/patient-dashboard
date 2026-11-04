@@ -76,10 +76,24 @@ export function closeSoapPanel() {
   try { sessionStorage.removeItem(STORE_KEY); } catch { /* ignore */ }
 }
 
+// Summaries open full page in their own tab (#/notes/<id>). One tab per set of notes: opening it again goes to that tab.
+const OPEN_IN_TAB = true;
+function openInTab(recordId) {
+  if (!OPEN_IN_TAB || !recordId) return false;
+  const url = `${location.href.split("#")[0]}#/notes/${encodeURIComponent(recordId)}`;
+  let w = null;
+  try { w = window.open(url, `dm-notes-${String(recordId).replace(/[^A-Za-z0-9_-]/g, "")}`); } catch { w = null; }
+  if (!w) return false;            // pop-ups blocked: the panel instead
+  try { w.focus(); } catch { /* the browser decides */ }
+  return true;
+}
+
 export async function showSoapPanel(recordId, { mode: wanted = "open", host: into = null } = {}) {
   if (!recordId) return;
   ensureDom();
   if (into) host = into;
+  // Opened from a badge, a recording or My dashboard: its own tab, full page
+  if (!into && (wanted === "open" || wanted === "max") && openInTab(recordId)) return;
   if (current && current.id !== recordId && current.dirty && !(await confirmDialog({
     title: "Discard unsaved changes?",
     message: "You have unsaved changes to the notes that are open. Opening other notes will discard them.",
@@ -116,7 +130,11 @@ function ensureDom() {
   tab.hidden = true;
   document.body.appendChild(tab);
 
-  tab.addEventListener("click", () => setMode("open"));
+  tab.addEventListener("click", () => {
+    // Unsaved edits here stay in this panel; otherwise the notes open full page in their own tab
+    if (current && current.id && !current.dirty && openInTab(current.id)) { closeSoapPanel(); return; }
+    setMode("open");
+  });
   panel.addEventListener("click", onClick);
   // Move + resize
   panel.addEventListener("pointerdown", onPointerDown);
@@ -325,6 +343,10 @@ function render() {
     </div>`;
 
   if (!panel.hidden) requestAnimationFrame(autosizeAll);
+  // Own tab: its title says whose notes, and whether they're reviewed
+  if (mode === "page" && !document.body.classList.contains("is-consult")) {
+    document.title = `${reviewed ? "✓ Reviewed" : "Draft"} · ${d["Patient Name"] || "Patient"}`;
+  }
 }
 
 // What the recording rules did on this recording (System configuration → Recording rules)
@@ -505,6 +527,12 @@ async function save(status, btn) {
     loadPersonalNotes();
     updateTab();
     showToast(status === "Reviewed" ? "Notes saved as Reviewed" : "Draft saved");
+    // The patient's page in another tab updates its Summary badge (Draft / Reviewed)
+    try {
+      const ch = new BroadcastChannel("dm-notes");
+      ch.postMessage({ type: "notes-saved", id: current.id, status: status === "Reviewed" ? "reviewed" : "draft" });
+      ch.close();
+    } catch { /* older browsers: the badge updates on the next reload */ }
   } catch (err) {
     console.error("Saving notes failed:", err);
     showToast(err.code === "permission-denied"

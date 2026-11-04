@@ -10863,3 +10863,6 @@ body.is-consult #rec-bar, body.is-consult #tb-rec { display: none !important; }
 .sp.is-page .sp-foot { position: sticky; bottom: 0; z-index: 2; border-radius: 0 0 16px 16px; }
 .sp.is-page .sp-rz,
 .sp.is-page [data-sp="float"], .sp.is-page [data-sp="max"], .sp.is-page [data-sp="min"] { display: none; }
+
+/* Notes full page: the browser tab is how you close them */
+.sp.is-page .sp-head [data-sp="close"] { display: none; }

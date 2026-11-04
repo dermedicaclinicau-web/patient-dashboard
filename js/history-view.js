@@ -263,6 +263,20 @@ export function mountHistory(root, patient) {
 
   section.addEventListener("toggle", () => { if (section.open) load(); });
 
+  // Notes saved in their own tab: this badge changes to Draft / Reviewed straight away
+  let notesBc = null;
+  try { notesBc = new BroadcastChannel("dm-notes"); } catch { notesBc = null; }
+  if (notesBc) notesBc.onmessage = (e) => {
+    if (!section.isConnected) { notesBc.close(); return; }
+    const m = e.data || {};
+    if (m.type !== "notes-saved" || !data) return;
+    let hit = false;
+    data.all.forEach((v) => v.badges.forEach((b) => {
+      if (b.type === "summary" && b.id === m.id && b.status !== m.status) { b.status = m.status; hit = true; }
+    }));
+    if (hit) render();
+  };
+
   let debounce;
   input.addEventListener("input", () => {
     clearTimeout(debounce);

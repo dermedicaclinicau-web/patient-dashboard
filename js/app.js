@@ -330,6 +330,7 @@ const PAGES = {
     (m, el, id) => m.mountPatientDashboard(el, id, { staff: currentStaff, onBack: goBack })),
   consult: lazyPage("./consult-page.js", "The consultation",
     (m, el, param) => m.mountConsultPage(el, param, { staff: currentStaff })),
+  notes: lazyPage("./notes-page.js", "The notes", (m, el, id) => m.mountNotesPage(el, id)),
   fill: lazyPage("./form-fill.js", "The form", (m, el, param) => m.mountFormFill(el, param, { staff: currentStaff })),
   "form-record": lazyPage("./form-fill.js", "The record", (m, el, id) => m.mountFormRecord(el, id, { staff: currentStaff })),
   "image-bank": lazyPage("./image-bank.js", "The Image Bank", (m, el) => m.mountImageBank(el, { isAdmin: can("forms.build") })),
@@ -380,6 +381,7 @@ const PAGES = {
 // Which permission each page needs ("admin" = Admins only)
 const PAGE_PERM = {
   patients: "menu.patients", patient: "menu.patients", fill: "menu.patients", "form-record": "menu.patients",
+  notes: "menu.patients",
   ssp: "ssp.create", calendar: "menu.calendar", forms: "menu.forms",
   "image-bank": "forms.build", "aftercare-bank": "forms.build", "specialist-bank": "menu.forms", "ssp-products": "ssp.config",
   tasks: "menu.tasks", inventory: "menu.inventory", reports: "menu.reports", staff: "admin", settings: "admin",
@@ -424,7 +426,7 @@ function router() {
     return;
   }
 
-  const navKey = ["patient", "fill", "form-record", "ssp", "consult"].includes(page) ? "patients"
+  const navKey = ["patient", "fill", "form-record", "ssp", "consult", "notes"].includes(page) ? "patients"
     : ["image-bank", "aftercare-bank", "ssp-products", "specialist-bank"].includes(page) ? "forms"
     : page === "settings" && param.split("/")[0] === "recall" ? "recall" : page;
     els.navItems.forEach((a) => {
