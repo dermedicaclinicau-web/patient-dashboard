@@ -21,7 +21,18 @@ export function mountVisitsReport(body, { csv } = {}) {
     preset: "90", from: addDays(yesterday, -89), to: yesterday, data: null,
     svcs: new Set(), svcQ: "", panel: false, staff: -1, next: "all", q: "", hideDnc: false,
     sort: "lastDay", dir: -1, show: 300,
+    typedFrom: "", typedTo: "",   // Choose dates: what's in the boxes, used when Show is pressed
   };
+  const MIN_DAY = "2015-01-01";
+  // "" when the typed dates can be used, otherwise why not
+  function datesProblem(from, to) {
+    const ok = (k) => /^\d{4}-\d{2}-\d{2}$/.test(k) && k >= MIN_DAY && k <= yesterday && !!parse(k);
+    if (!from || !to) return "Choose both dates.";
+    if (!ok(from) || !ok(to)) return `Dates need to be between ${nice(MIN_DAY)} and yesterday.`;
+    if (from > to) return "The From date needs to be before the To date.";
+    if ((parse(to) - parse(from)) / 864e5 > 731) return "Choose up to two years at a time.";
+    return "";
+  }
 
   body.innerHTML = `<div data-role="tools"></div><div data-role="panel"></div><div data-role="out">${SKELETON}</div>`;
   const toolsEl = body.querySelector('[data-role="tools"]');
@@ -34,6 +45,36 @@ export function mountVisitsReport(body, { csv } = {}) {
     st.to = yesterday;
     st.from = p === "year" ? `${today.slice(0, 4)}-01-01` : addDays(yesterday, -(Number(p) - 1));
     if (st.from > st.to) st.from = st.to;
+  }
+
+    // Choose dates: keeps what's typed, and says (without redrawing) whether Show will work
+  function typedDate() {
+    const fromEl = toolsEl.querySelector('[data-f="from"]');
+    const toEl = toolsEl.querySelector('[data-f="to"]');
+    if (!fromEl || !toEl) return "";
+    st.typedFrom = fromEl.value;
+    st.typedTo = toEl.value;
+    const why = datesProblem(st.typedFrom, st.typedTo);
+    const msg = toolsEl.querySelector('[data-role="datemsg"]');
+    const same = st.typedFrom === st.from && st.typedTo === st.to;
+    if (msg) {
+      msg.textContent = why && st.typedFrom && st.typedTo ? why : !why && !same ? "Press Show to update the report." : "";
+      msg.classList.toggle("is-bad", !!why && !!st.typedFrom && !!st.typedTo);
+    }
+    return why;
+  }
+  function applyDates() {
+    const why = typedDate();
+    if (why) {
+      const msg = toolsEl.querySelector('[data-role="datemsg"]');
+      if (msg) { msg.textContent = why; msg.classList.add("is-bad"); }
+      return;
+    }
+    if (st.typedFrom === st.from && st.typedTo === st.to && st.data) return;
+    st.from = st.typedFrom;
+    st.to = st.typedTo;
+    drawTools();
+    load();
   }
 
   async function load(fresh = false) {
@@ -67,8 +108,14 @@ export function mountVisitsReport(body, { csv } = {}) {
       <select class="fb-select" data-f="preset" aria-label="Dates">${PRESETS.map(([v, l]) =>
         `<option value="${v}"${st.preset === v ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>
       ${st.preset === "custom" ? `
-        <label class="rp-from">From <input class="fe-in" type="date" data-f="from" value="${esc(st.from)}" max="${esc(yesterday)}" /></label>
-        <label class="rp-from">To <input class="fe-in" type="date" data-f="to" value="${esc(st.to)}" max="${esc(yesterday)}" /></label>`
+        <span class="vr-dates">
+          <label class="rp-from">From <input class="fe-in" type="date" data-f="from" value="${esc(st.typedFrom || st.from)}"
+            min="${MIN_DAY}" max="${esc(yesterday)}" /></label>
+          <label class="rp-from">To <input class="fe-in" type="date" data-f="to" value="${esc(st.typedTo || st.to)}"
+            min="${MIN_DAY}" max="${esc(yesterday)}" /></label>
+          <button type="button" class="lh-btn is-primary" data-act="apply-dates">Show</button>
+          <small class="vr-datemsg" data-role="datemsg" aria-live="polite"></small>
+        </span>`
         : `<span class="muted">${esc(nice(st.from))} – ${esc(nice(st.to))}</span>`}
       <button type="button" class="ff-btn${st.svcs.size ? " is-primary" : ""}" data-act="panel" aria-expanded="${st.panel}">
         Services: ${esc(svcLabel)} ▾</button>
@@ -213,16 +260,15 @@ export function mountVisitsReport(body, { csv } = {}) {
       draw();
       return;
     }
-    if (f === "preset") { setPreset(t.value); drawTools(); if (st.preset !== "custom") load(); return; }
-    if (f === "from" || f === "to") {
-      st[f] = t.value;
-      if (parse(st.from) && parse(st.to)) {
-        if (st.from > st.to) [st.from, st.to] = [st.to, st.from];
-        drawTools();
-        load();
-      }
+    if (f === "preset") {
+      setPreset(t.value);
+      st.typedFrom = st.from;
+      st.typedTo = st.to;
+      drawTools();
+      if (st.preset !== "custom") load();
       return;
     }
+    if (f === "from" || f === "to") { typedDate(); return; }   // nothing reloads while a date is being typed
     if (f === "staff") { st.staff = Number(t.value); st.show = 300; draw(); return; }
     if (f === "next") { st.next = t.value; st.show = 300; draw(); return; }
     if (f === "dnc") { st.hideDnc = t.checked; draw(); }
@@ -258,6 +304,7 @@ export function mountVisitsReport(body, { csv } = {}) {
     const a = e.target.closest("[data-act]");
     if (!a) return;
     const act = a.dataset.act;
+    if (act === "apply-dates") { applyDates(); return; }
     if (act === "panel") { st.panel = !st.panel; drawTools(); drawPanel(); if (st.panel) panelEl.querySelector('[data-f="svcQ"]')?.focus(); }
     else if (act === "svc-all") {
       const q = st.svcQ.trim().toLowerCase();
@@ -270,10 +317,17 @@ export function mountVisitsReport(body, { csv } = {}) {
   });
 
   body.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.target.dataset.f === "from" || e.target.dataset.f === "to")) {
+      e.preventDefault();
+      applyDates();
+      return;
+    }
     const nx = e.target.closest && e.target.closest("[data-next]");
     if (nx && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); nx.click(); }
   });
 
+  st.typedFrom = st.from;
+  st.typedTo = st.to;
   drawTools();
   load();
 }

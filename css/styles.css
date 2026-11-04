@@ -10749,3 +10749,7 @@ body.ws-pe-open { overflow: hidden; }
 .vr-sort { cursor: pointer; user-select: none; white-space: nowrap; }
 .vr-sort.is-on { color: #0f766e; }
 .inv-stat[data-next] { cursor: pointer; }
+
+.vr-dates { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
+.vr-datemsg { flex-basis: 100%; font-size: .8rem; color: #64748b; min-height: 1em; }
+.vr-datemsg.is-bad { color: #b91c1c; }
