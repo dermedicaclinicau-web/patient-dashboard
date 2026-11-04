@@ -279,6 +279,7 @@ export function mountPaperRecords(container, { staff } = {}) {
     showSorted: false, thumbs: keep.thumbs, sFrom: "", sTo: "", sort: "old", sLink: "all", cfg: null };
   let cfgJob = null;
   let staffJob = null;
+  let upQueue = [];   // scans just uploaded, sorted one after another (in upload order)
   const loadStaff = () => staffJob || (staffJob = callApi({ action: "staffList" })
     .then((r) => (r && Array.isArray(r.staff) ? r.staff.filter((s) => s.name) : []))
     .catch((e) => { staffJob = null; throw e; }));
@@ -536,12 +537,16 @@ export function mountPaperRecords(container, { staff } = {}) {
     let chosen = f.patientId ? { id: f.patientId, name: f.patientName, meta: "" } : null;
     let found = [], seq = 0, timer = 0, url = "", rot = 0, saving = false, isImage = false;
     const [label, tone] = STATUS[f.status] || STATUS.todo;
+    const fresh = upQueue.includes(f.id);
+    const after = upQueue.filter((id) => id !== f.id).length;
+    let moving = false;   // going on to the next scan (not closed by the person)
 
     const dlg = document.createElement("dialog");
     dlg.className = "lh-dialog ppr-dlg";
     dlg.innerHTML = `
       <div class="ppr-dlg-head">
         <strong>${esc(f.name)}</strong><span class="ppr-pill is-${tone}">${esc(label)}</span>
+        ${fresh ? `<span class="ppr-pill is-info">Just uploaded${after ? ` · ${after} more after this` : ""}</span>` : ""}
         <span class="inv-spacer"></span>
         <button type="button" class="lh-btn is-quiet" data-act="next">Next scan →</button>
         <button type="button" class="hx-x" data-act="close" aria-label="Close">×</button>
@@ -1387,15 +1392,24 @@ export function mountPaperRecords(container, { staff } = {}) {
 
     // The next scan still to sort (after this one, in the list's order)
     const nextFile = () => {
+      // Just uploaded: the rest of those first, in the order they went up
+      upQueue = upQueue.filter((id) => {
+        const x = (st.files || []).find((y) => y.id === id);
+        return id !== f.id && x && x.status === "todo";
+      });
+      if (upQueue.length) return st.files.find((x) => x.id === upQueue[0]);
       const list = (st.files || []).filter((x) => x.status === "todo" && x.id !== f.id
         && (!st.sFrom || x.day >= st.sFrom) && (!st.sTo || x.day <= st.sTo));
-      const at = (st.files || []).indexOf(f);
+      const at = (st.files || []).findIndex((x) => x.id === f.id);
       return list.find((x) => st.files.indexOf(x) > at) || list[0] || null;
     };
     const goNext = () => {
+      const wasQueue = fresh;
       const n = nextFile();
+      moving = true;
       dlg.close();
-      if (n) openScan(n.id); else showToast("That was the last scan to sort. 👍");
+      if (n) openScan(n.id);
+      else showToast(wasQueue ? "All the scans you uploaded are sorted. 👍" : "That was the last scan to sort. 👍");
     };
 
     async function mark(status, extra = {}, btn = null) {
@@ -1528,7 +1542,11 @@ export function mountPaperRecords(container, { staff } = {}) {
       if (act === "dup") mark("skip", { reason: "Duplicate scan", note: "Same file as: " + dupText(f.dupOf) }, actEl);
     });
     dlg.addEventListener("cancel", (e) => { if (saving) e.preventDefault(); });
-    dlg.addEventListener("close", () => { if (url) URL.revokeObjectURL(url); dlg.remove(); });
+    dlg.addEventListener("close", () => {
+      if (url) URL.revokeObjectURL(url);
+      if (!moving) upQueue = [];   // closed by the person: the rest wait in Scans to enter
+      dlg.remove();
+    });
     document.body.appendChild(dlg);
     drawPt();
     drawType();
@@ -1780,8 +1798,9 @@ export function mountPaperRecords(container, { staff } = {}) {
     /* ---------- Upload scans ---------- */
 
   function uploadDialog() {
-    const items = [];   // { file, name, preview, state: "ready" | "up" | "done" | "fail", msg, id }
+    const items = [];   // { file, name, preview, state: "ready" | "up" | "done" | "fail", msg, id, saved }
     let busy = false;
+    let reloaded = false;   // the list has already been loaded with the new scans
     const dlg = document.createElement("dialog");
     dlg.className = "lh-dialog inv-dlg ppr-up";
     dlg.innerHTML = `<div class="lh-form">
@@ -1795,7 +1814,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       <label class="lh-btn ppr-cam">Take a photo
         <input type="file" accept="image/*" capture="environment" hidden data-role="cam" /></label>
       <ul class="ppr-up-list" data-role="list"></ul>
-      <label class="fe-check"><input type="checkbox" name="openFirst" checked /> Open the first one to enter when it's done</label>
+      <label class="fe-check"><input type="checkbox" name="openFirst" checked /> Open them one by one to sort, as soon as they're uploaded</label>
       <p class="lh-error" role="alert" hidden></p>
       <div class="lh-actions">
         <button type="button" class="lh-btn is-quiet" data-act="up-cancel">Cancel</button>
@@ -1856,7 +1875,8 @@ export function mountPaperRecords(container, { staff } = {}) {
           const r = await callApi({ action: "paper", op: "upload", name: it.name.trim(), mime, data: await toBase64(blob) });
           if (r && r.problem) throw new Error(r.problem);
           if (!r || r.ok !== true || !r.id) throw new Error(notSaved(r));
-          Object.assign(it, { state: "done", id: r.id, msg: blob !== it.file ? `Uploaded (shrunk to ${sizeText(blob.size)})` : "Uploaded" });
+          Object.assign(it, { state: "done", id: r.id, saved: r.name || it.name, mime,
+            msg: blob !== it.file ? `Uploaded (shrunk to ${sizeText(blob.size)})` : "Uploaded" });
         } catch (ex) {
           console.error("Upload failed:", it.name, ex);
           Object.assign(it, { state: "fail", msg: ex.message || "Couldn't upload. Try again." });
@@ -1870,12 +1890,27 @@ export function mountPaperRecords(container, { staff } = {}) {
       if (!done.length) return;
       showToast(`${done.length} scan${done.length === 1 ? "" : "s"} uploaded${failed ? `, ${failed} didn't` : ""}`);
       await loadScans(true);
+      reloaded = true;
+      // Drive can take a moment to list a new file: any it hasn't listed yet are added here, so they can be sorted now
+      const now = new Date().toISOString();
+      st.files = st.files || [];
+      done.forEach((it) => {
+        if (st.files.some((x) => x.id === it.id)) return;
+        st.files.push({
+          id: it.id, name: it.saved || it.name, kind: it.mime === "application/pdf" ? "pdf" : "image", size: it.file.size,
+          created: now, day: todayKey(), folder: "", status: "todo", note: "", reason: "", patientId: "", patientName: "",
+          recordDate: "", by: "", at: "", linked: null, productsDone: false, productsTaken: false, products: [], productsFor: "",
+        });
+      });
       st.tab = "scans";
       draw();
       if (failed) { err.textContent = "Some didn't upload. Press Try again, or remove them."; err.hidden = false; return; }
-      const openFirst = $u('[name="openFirst"]').checked;
+      const openNow = $u('[name="openFirst"]').checked;
       dlg.close();
-      if (openFirst && (st.files || []).some((x) => x.id === done[0].id)) openScan(done[0].id);
+      if (openNow) {
+        upQueue = done.map((it) => it.id);
+        openScan(done[0].id);
+      }
     }
 
     // Drop, choose, camera
@@ -1904,8 +1939,8 @@ export function mountPaperRecords(container, { staff } = {}) {
     dlg.addEventListener("close", () => {
       items.forEach((it) => { if (it.preview) URL.revokeObjectURL(it.preview); });
       dlg.remove();
-      // Closed after some went up: the list shows them
-      if (items.some((it) => it.state === "done")) loadScans(true);
+      // Closed after some went up (and the list wasn't loaded with them yet): the list shows them
+      if (!reloaded && items.some((it) => it.state === "done")) loadScans(true);
     });
     drawList();
     dlg.showModal();

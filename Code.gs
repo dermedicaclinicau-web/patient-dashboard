@@ -20196,7 +20196,7 @@ function paperUpload_(body, session) {
   return { ok: true, id: file.getId(), name: file.getName(), size: file.getSize() };
 }
 
-// The folder Paper records reads. Point this at the same folder your op 'list' uses.
+// The folder Paper records reads (Script Property PAPER_FOLDER_ID), the same one the scan list uses
 function paperUploadFolder_() {
-  return DriveApp.getFolderById(PAPER_FOLDER_ID);
+  return DriveApp.getFolderById(paperRootId_());
 }
