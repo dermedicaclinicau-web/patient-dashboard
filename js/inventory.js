@@ -12,6 +12,7 @@ import {
   recordPatientReturn, recordSupplierReturn, markReturnCredited, listReturns, RETURN_REASONS, RETURN_STATUS,
   rebuildPlan, applyRebuild, listCountsOn, getInvoiceSettings, saveInvoiceSettings,
   listBaseCounts, saveBaseCount, planFromBases, productLedger, suggestInvoiceLinks, invoiceNameKey,
+  removeBaseCount, canUndoCorrection, undoCorrection,
 } from "./inventory-api.js";
 import { searchPatients } from "./task-runner.js";
 import { openSetKitDialog, openKitFromShelfDialog } from "./kit-admin.js";
@@ -77,7 +78,7 @@ function linesText(m, label = "Batch") {
 // acts: Undo on write-offs and paper records that haven't been undone; "Used on a patient…" on write-offs (Manage inventory)
 function movesHtml(moves, showProduct = true, labelOf = () => "Batch", acts = false) {
   if (!moves.length) return '<p class="tb-none">No stock changes yet.</p>';
-  const undoable = (m) => !!m.id && !m.undone && (m.type === "writeoff" || (m.type === "use" && m.paper === true));
+  const undoable = (m) => !!m.id && !m.undone && (m.type === "writeoff" || (m.type === "use" && m.paper === true) || canUndoCorrection(m));
   return `<ul class="inv-moves">${moves.map((m) => `
     <li${m.undone ? ' class="is-undone"' : ""}>
       <span class="inv-m-when">${esc(when(m.at))}</span>
@@ -2630,24 +2631,30 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
     function undoDialog(p, m) {
       const paper = m.type === "use";
+      const fix = canUndoCorrection(m);
+      const back = (m.lines || []).filter((l) => l.loc === "shelf" || l.loc === "jt")
+        .map((l) => `${locLabel(l.loc)} ${-l.delta > 0 ? "+" : "−"}${Math.abs(l.delta)}`).join(" · ");
       return new Promise((resolve) => {
         let saved = false;
         const d2 = openDialog("inv-dlg", `
           <form class="lh-form" novalidate>
-            <div class="lh-dialog-head"><h3>${paper ? "Undo this paper record?" : "Undo this write-off?"}</h3>
+            <div class="lh-dialog-head"><h3>${fix ? "Undo this correction?" : paper ? "Undo this paper record?" : "Undo this write-off?"}</h3>
               <p>${esc(when(m.at))}${m.by ? ` by ${esc(m.by)}` : ""}: ${esc(linesText(m, batchName(p)))}${m.reason ? ` · ${esc(m.reason)}` : ""}${
                 m.note ? ` · ${esc(m.note)}` : ""}.</p>
-              <p>${paper
+              <p>${fix
+                ? `Digital goes back by the same amount: <strong>${esc(back)}</strong>. Anything sold or used since stays as it is.
+                   The base count isn't changed: change it in the Base count section if it was wrong too.`
+                : paper
                 ? "It goes back into stock, and the patient's usage is cleared (the original stays on their record, with your reason). Opening counts corrected for it aren't changed back: check Count differences afterwards."
                 : "It goes back into stock, and the write-off is marked Undone (and left out of wastage)."}</p></div>
             <label class="lh-field"><span class="lh-label">Why</span>
-              <input name="why" maxlength="300" placeholder="${paper ? "e.g. Recorded on the wrong patient" : "e.g. Written off by mistake"}" /></label>
-            ${paper ? "" : `<p class="inv-hint">Was it actually used on a patient? Close this and choose <strong>Used on a patient…</strong>,
+              <input name="why" maxlength="300" placeholder="${fix ? "e.g. Wrong base count date" : paper ? "e.g. Recorded on the wrong patient" : "e.g. Written off by mistake"}" /></label>
+            ${paper || fix ? "" : `<p class="inv-hint">Was it actually used on a patient? Close this and choose <strong>Used on a patient…</strong>,
               so it's on their record and counts as usage.</p>`}
             <p class="lh-error" role="alert" hidden></p>
             <div class="lh-actions">
               <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
-              <button type="submit" class="lh-btn is-primary">${paper ? "Undo paper record" : "Undo write-off"}</button>
+              <button type="submit" class="lh-btn is-primary">${fix ? "Undo correction" : paper ? "Undo paper record" : "Undo write-off"}</button>
             </div>
           </form>`);
         const form = d2.querySelector("form");
@@ -2659,10 +2666,12 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           const btn = form.querySelector('[type="submit"]');
           btn.disabled = true;
           try {
-            await undoMove(m, form.elements.why.value, staff);
+            if (fix) await undoCorrection(m, form.elements.why.value, staff);
+            else await undoMove(m, form.elements.why.value, staff);
             saved = true;
             d2.close();
-            showToast(paper ? "Paper record undone. It's back in stock and off the patient's usage." : "Write-off undone. It's back in stock.");
+            showToast(fix ? "Correction undone. Digital is back to what it was."
+              : paper ? "Paper record undone. It's back in stock and off the patient's usage." : "Write-off undone. It's back in stock.");
           } catch (ex) {
             console.error("Undo failed:", ex);
             err.textContent = errText(ex, "Couldn't undo it. Try again.");
@@ -3036,12 +3045,17 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           }).join("")}</div>` : ""}
         ${canManage ? (() => {
           const b = st.bases.get(p.id);
-          const nums = b ? [b.shelf !== null && `Shelf ${b.shelf}`, b.jt !== null && `JT storage ${b.jt}`].filter(Boolean).join(" · ") : "";
+          const nums = (x) => [x.shelf !== null && x.shelf !== undefined && `Shelf ${x.shelf}`,
+            x.jt !== null && x.jt !== undefined && `JT storage ${x.jt}`].filter(Boolean).join(" · ");
+          const hist = b ? b.history.filter((h) => /^\d{4}-\d{2}-\d{2}$/.test(h.dateKey || "")).slice(-3).reverse() : [];
           return `<div class="inv-pd-sec inv-pd-base"><div><h4>Base count</h4>
-            <p class="muted">${b ? `${esc(nums)} on ${esc(niceDate(b.dateKey))}${b.by ? ` · saved by ${esc(b.by)}` : ""}`
-              : "No starting point saved yet. Save what was there on a day you know, and digital can be checked against it at any time."}</p></div>
+            <p class="muted">${b ? `${esc(nums(b))} on <strong>${esc(niceDate(b.dateKey))}</strong>${b.by ? ` · saved by ${esc(b.by)}` : ""}`
+              : "No starting point saved yet. Save what was there on a day you know, and digital can be checked against it at any time."}</p>
+            ${hist.length ? `<ul class="inv-base-hist">${hist.map((h, i) => `<li><span>Before: ${esc(nums(h) || "—")} on ${esc(niceDate(h.dateKey))}${
+              h.by ? ` · ${esc(h.by)}` : ""}</span><button type="button" class="rc-link" data-base-restore="${i}">Use again</button></li>`).join("")}</ul>` : ""}</div>
             <span class="kit-acts">${b ? '<button type="button" class="lh-btn" data-act="base-check">Check digital</button>' : ""}
-              <button type="button" class="lh-btn${b ? " is-quiet" : ""}" data-act="base-set">${b ? "Change" : "Set base count"}</button></span></div>`;
+              <button type="button" class="lh-btn${b ? " is-quiet" : ""}" data-act="base-set">${b ? "Change" : "Set base count"}</button>
+              ${b ? '<button type="button" class="lh-btn is-quiet" data-act="base-remove">Remove</button>' : ""}</span></div>`;
         })() : ""}
         <div data-role="returns"></div>
         <div class="inv-pd-sec"><h4>Recent activity</h4><div data-role="moves"><p class="tb-none">Loading…</p></div></div>`;
@@ -3111,6 +3125,28 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       if (e.target.closest('[data-act="ledger"]')) { ledgerDialog(p); return; }
       if (e.target.closest('[data-act="base-check"]')) { dlg.close(); rebuildDialog([p], p.name, { fromBases: true }); return; }
       if (e.target.closest('[data-act="base-set"]')) { dlg.close(); rebuildDialog([p], p.name); return; }
+      if (e.target.closest('[data-act="base-remove"]')) {
+        const ok = await confirmDialog({ title: `Remove the base count for ${p.name}?`,
+          message: "Stock doesn't change. It's kept in the history, and you can set a new one at any time.", confirmLabel: "Remove", tone: "warning" });
+        if (!ok) return;
+        try { await removeBaseCount(p, staff); showToast("Base count removed"); await load(); if (dlg.open) draw(); }
+        catch (err) { console.error(err); showToast(errText(err, "Couldn't remove it. Try again.")); }
+        return;
+      }
+      const rs = e.target.closest("[data-base-restore]");
+      if (rs) {
+        const b = st.bases.get(p.id);
+        const hist = b ? b.history.filter((h) => /^\d{4}-\d{2}-\d{2}$/.test(h.dateKey || "")).slice(-3).reverse() : [];
+        const h = hist[Number(rs.dataset.baseRestore)];
+        if (!h) return;
+        try {
+          await saveBaseCount(p, { dateKey: h.dateKey, shelf: h.shelf, jt: h.jt, note: "Earlier base count used again" }, staff);
+          showToast(`Base count is ${niceDate(h.dateKey)} again. Stock wasn't changed.`);
+          await load();
+          if (dlg.open) draw();
+        } catch (err) { console.error(err); showToast(errText(err, "Couldn't save. Try again.")); }
+        return;
+      }
       if (e.target.closest('[data-act="request"]')) { dlg.close(); location.hash = `#/tasks/order/${encodeURIComponent(id)}`; return; }
       const s = e.target.closest("[data-stock]");
       if (s && await stockAction(p, s.dataset.stock)) {

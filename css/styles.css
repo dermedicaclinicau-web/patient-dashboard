@@ -10703,3 +10703,6 @@ body.ws-pe-open { overflow: hidden; }
 .inv-rb-why { margin-top: .5rem; padding: .5rem .7rem; background: #f8fafc; border-radius: 10px; font-size: .85rem; }
 .inv-rb-why ul { margin: .25rem 0 0; padding-left: 1.1rem; }
 .inv-rb-why li { margin: .15rem 0; }
+
+.inv-base-hist { list-style: none; margin: .35rem 0 0; padding: 0; font-size: .82rem; color: #64748b; }
+.inv-base-hist li { display: flex; gap: .5rem; align-items: baseline; }

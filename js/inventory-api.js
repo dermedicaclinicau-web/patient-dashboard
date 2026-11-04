@@ -5288,7 +5288,7 @@ export async function rebuildPlan({ fromKey, products, allProducts, counted, pos
     if (!want.has(m.productId)) return;
     const atKey = m.at ? dayKey(m.at) : "";
     const eff = KEY_RE.test(m.effectiveDate || "") ? m.effectiveDate : atKey;
-    const fix = REBUILD_SKIP.includes(m.type);
+    const fix = REBUILD_SKIP.includes(m.type) || (m.type === "undo" && m.undoKind === "fix");
     const kind = m.type === "receive" ? "received" : m.type === "sale" ? "sold"
       : REBUILD_USED.includes(m.type) ? "used" : m.type === "writeoff" ? "wasted" : "other";
     (m.lines || []).forEach((l) => {
@@ -5398,7 +5398,7 @@ export async function listBaseCounts() {
   const m = new Map();
   snap.docs.forEach((d) => {
     const x = d.data() || {};
-    if (!KEY_RE.test(x.dateKey || "")) return;
+    if (!KEY_RE.test(x.dateKey || "") || x.removed === true) return;
     const shelf = countOrNull(x.shelf), jt = countOrNull(x.jt);
     m.set(d.id, {
       productId: d.id, dateKey: x.dateKey, shelf: Number.isNaN(shelf) ? null : shelf, jt: Number.isNaN(jt) ? null : jt,
@@ -5425,7 +5425,7 @@ export async function saveBaseCount(product, { dateKey, shelf = null, jt = null,
   if (s === null && j === null) throw new Error(`${product.name}: enter the Shelf or JT storage count.`);
   const by = who(staff);
   await setDoc(ref, {
-    productId: product.id, productName: product.name, dateKey, shelf: s, jt: j, note: clip(note, 300),
+    productId: product.id, productName: product.name, dateKey, shelf: s, jt: j, note: clip(note, 300), removed: false,
     by, byUid: uid(), at: serverTimestamp(),
     ...(p ? { history: arrayUnion({ dateKey: String(p.dateKey || ""), shelf: p.shelf ?? null, jt: p.jt ?? null,
       by: String(p.by || ""), replacedAt: new Date().toISOString() }) } : {}),
@@ -5498,7 +5498,7 @@ export async function productLedger({ product, fromKey, start = null, invoiceRow
     if (!lines.length) return;
     const atKey = dayKey(m.at);
     const eff = KEY_RE.test(m.effectiveDate || "") ? m.effectiveDate : atKey;
-    const kind = ledgerKind(m.type);
+    const kind = m.type === "undo" && m.undoKind === "fix" ? "fix" : ledgerKind(m.type);
     if (atKey >= fromKey) lines.forEach((l) => { dayOf(atKey).digital[l.loc] += l.delta; since[l.loc] += l.delta; });
     const on = kind === "fix" ? atKey : eff;   // corrections: the day digital changed. Everything else: the day it happened
     if (on < fromKey) return;
@@ -5636,5 +5636,73 @@ export function suggestInvoiceLinks(unlinked, products) {
     const top = scored.length ? scored[0].s : 0;
     const best = scored.filter((x) => x.s === top).map((x) => x.p);
     return { ...u, product: best.length === 1 ? best[0] : null, candidates: best.length > 1 ? best : [] };
+  });
+}
+
+// Remove a product's base count. Stock doesn't change; the one removed is kept in its history.
+export async function removeBaseCount(product, staff) {
+  const ref = doc(db, "inv_baselines", product.id);
+  const s = await getDoc(ref);
+  if (!s.exists()) return;
+  const p = s.data();
+  await setDoc(ref, {
+    removed: true, by: who(staff), byUid: uid(), at: serverTimestamp(),
+    history: arrayUnion({ dateKey: String(p.dateKey || ""), shelf: p.shelf ?? null, jt: p.jt ?? null,
+      by: String(p.by || ""), replacedAt: new Date().toISOString(), removed: true }),
+  }, { merge: true });
+}
+
+/* ---------- Undoing a correction: Set digital (rebuild), Set starting stock, a stock count ---------- */
+// Only corrections typed in by hand (not ones made from an opening count or an investigation).
+// Digital goes back by the same amount in the same batches; anything sold or used since stays. Only once.
+export const canUndoCorrection = (m) => !!m && !!m.id && !m.undone && !m.ref
+  && (m.type === "baseline" || m.type === "count")
+  && (m.lines || []).some((l) => (l.loc === "shelf" || l.loc === "jt") && Number(l.delta));
+
+export async function undoCorrection(move, reason, staff) {
+  if (!canUndoCorrection(move)) throw new Error("This can't be undone here.");
+  const why = clip(reason, 300);
+  if (!why) throw new Error("Add a reason, e.g. Wrong base count date.");
+  const lines = (move.lines || []).filter((l) => l.loc === "shelf" || l.loc === "jt")
+    .map((l) => ({ loc: l.loc, batch: String(l.batch || ""), expiry: String(l.expiry || ""), delta: -(Number(l.delta) || 0) }))
+    .filter((l) => l.delta);
+  const me = uid();
+  const by = who(staff);
+  const pRef = doc(db, "inv_products", move.productId);
+  const refs = lines.map((l) => doc(db, "inv_lots", lotId(move.productId, l.loc, l.batch, l.expiry)));
+  const undoRef = doc(db, "inv_moves", `undo__${move.id}`);
+
+  await runTransaction(db, async (tx) => {
+    // ---- Reads ----
+    if ((await tx.get(undoRef)).exists()) throw new Error("This has already been undone. Reload to see it.");
+    const pSnap = await tx.get(pRef);
+    if (!pSnap.exists()) throw new Error("This product no longer exists.");
+    const snaps = [];
+    for (const r of refs) snaps.push(await tx.get(r));
+
+    // ---- Writes ----
+    const pd = pSnap.data();
+    const unit = String(pd.stockUnit || move.unit || "item");
+    const s = pd.stock || {};
+    const stock = { shelf: Number(s.shelf) || 0, jt: Number(s.jt) || 0 };
+    lines.forEach((l, i) => {
+      const have = snaps[i].exists() ? Number(snaps[i].data().qty) || 0 : 0;
+      if (have + l.delta < 0) {
+        throw new Error(`Only ${plural(have, unit)} in ${locLabel(l.loc)}${l.batch ? ` (${l.batch})` : ""} now, so ${-l.delta} can't be taken off. `
+          + "Stock has been used since: do a count instead.");
+      }
+      tx.set(refs[i], {
+        productId: move.productId, loc: l.loc, batch: l.batch, expiry: l.expiry, qty: have + l.delta,
+        updatedAt: serverTimestamp(), ...(snaps[i].exists() ? {} : { createdAt: serverTimestamp() }),
+      }, { merge: true });
+      stock[l.loc] = Math.max(0, stock[l.loc] + l.delta);
+    });
+    tx.update(pRef, { stock, stockAt: serverTimestamp() });
+    tx.set(undoRef, {
+      type: "undo", undoOf: move.id, undoKind: "fix", productId: move.productId,
+      productName: String(pd.name || move.productName || ""), unit, lines,
+      reason: `${move.reason || (move.type === "count" ? "Stock count" : "Starting stock set")} undone`.slice(0, 60),
+      note: why, ref: "", by, byUid: me, at: serverTimestamp(),
+    });
   });
 }
