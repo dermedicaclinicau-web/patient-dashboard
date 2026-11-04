@@ -4724,6 +4724,10 @@ function handleInventory_(body) {
   const okId = function (v) { return /^[A-Za-z0-9_-]{10,40}$/.test(String(v || '')); };
   try {
     if (op === 'kitDay') return invKitDay_(body, session);
+    if (op === 'invoiceLines') {
+      if (!can_(session, 'inventory.manage')) return { ok: false, error: 'FORBIDDEN' };
+      return invInvoiceLines_(String(body.from || ''), String(body.to || ''));
+    }
     if (op === 'oldKitLedgerAll') {
       if (!can_(session, 'menu.reports') && !can_(session, 'inventory.manage')) return { ok: false, error: 'FORBIDDEN' };
       try { return Object.assign({ ok: true }, oldKitLedgerAll_(body.fresh === true, String(body.from || ''), String(body.to || ''))); }
@@ -4824,6 +4828,33 @@ function handleInventory_(body) {
 }
 
 function invReqNumber_(id) { return 'R-' + String(id).slice(0, 6).toUpperCase(); }
+// Inventory → Rebuild from a count: every product line in INVOICE RECORD between two dates.
+// One row per product sold (the sheet has one line per item): [invoiceId, "yyyy-MM-dd", customer, product]
+function invInvoiceLines_(from, to) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from)) return { ok: true, problem: 'Choose the date.' };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(to)) to = flowKey_(Date.now());
+  const ck = 'inv_lines_' + from + '_' + to;
+  const hit = repCacheGet_(ck);
+  if (hit) return Object.assign({ ok: true }, hit);
+  const ss = SpreadsheetApp.openById(SSP_SHEET_ID);
+  const sh = ss.getSheetByName(UP_INV_TAB_);
+  if (!sh) return { ok: true, problem: 'The INVOICE RECORD tab is missing.' };
+  const tz = ss.getSpreadsheetTimeZone();
+  const last = sh.getLastRow();
+  const rows = [];
+  if (last >= 2) {
+    sh.getRange(2, 1, last - 1, 6).getValues().forEach(function (r) {   // A id · B date · C customer · D Patient ID · E staff · F product
+      const d = sheetDateKey_(r[1], tz);
+      const id = String(r[0] == null ? '' : r[0]).trim();
+      const p = String(r[5] == null ? '' : r[5]).trim();
+      if (!d || d < from || d > to || !id || !p) return;
+      rows.push([id.slice(0, 60), d, String(r[2] == null ? '' : r[2]).trim().slice(0, 80), p.slice(0, 150)]);
+    });
+  }
+  const out = { rows: rows.slice(0, 60000), more: Math.max(0, rows.length - 60000) };
+  repCachePut_(ck, out, 600);
+  return Object.assign({ ok: true }, out);
+}
 function invEsc_(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 function invQty_(n, unit) {
   const u = String(unit || 'unit');

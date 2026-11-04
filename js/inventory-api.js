@@ -5246,3 +5246,116 @@ export async function listKitDaysFor(staffUid) {
   const snap = await getDocs(query(collection(db, "inv_kitdays"), where("staffUid", "==", staffUid)));
   return snap.docs.map(normaliseKitDay);
 }
+
+/* ===================== Rebuild from a count: digital as it should be, from a day you know ===================== */
+// Starts from what was counted on that day, then adds everything that really moved since: deliveries, sales,
+// treatments, write-offs, returns and moves. Earlier corrections (counts, starting stock, investigations) are left out,
+// because the rebuild replaces them. Timely invoice lines since that day that haven't come off stock yet are taken off too.
+
+const REBUILD_SKIP = ["count", "baseline", "investigation", "tracking"];
+const REBUILD_USED = ["use", "use-correct", "shared-open", "vial-open", "kit-take", "kit-return"];
+
+// counted: Map(productId → { shelf: n | null, jt: n | null })   (null = leave that place as it is)
+// invoiceRows: [[invoiceId, date, customer, product]] from Apps Script (op "invoiceLines")
+export async function rebuildPlan({ fromKey, products, allProducts, counted, pos = [], invoiceRows = [], includePast = true }) {
+  if (!KEY_RE.test(fromKey || "") || fromKey > dayKey()) throw new Error("Choose the day it was counted. It can't be in the future.");
+  const want = new Set(products.map((p) => p.id));
+  const [moves, cfg, salesSnap, recSnap] = await Promise.all([
+    listMovesBetween(keyDate(fromKey), new Date(Date.now() + 60000)),
+    getInvoiceSettings(),
+    getDocs(query(collection(db, "inv_sales"), where("apptDate", ">=", fromKey))),
+    includePast ? getDocs(query(collection(db, "inv_receipts"), where("historical", "==", true))) : Promise.resolve({ docs: [] }),
+  ]);
+  const recorded = new Set(salesSnap.docs.map((d) => d.id));
+
+  // The same name matching as invoice uploads: exact product names, then the saved Invoice links
+  const link = new Map((allProducts || products).filter((p) => p.active !== false).map((p) => [invoiceNameKey(p.name), p.id]));
+  cfg.links.forEach((l) => link.set(invoiceNameKey(l.name), l.productId));
+
+  const b = new Map();   // productId|loc → { received, pastIn, sold, unapplied, used, wasted, other }
+  const bucket = (pid, loc) => {
+    const k = `${pid}|${loc}`;
+    if (!b.has(k)) b.set(k, { received: 0, pastIn: 0, sold: 0, unapplied: 0, used: 0, wasted: 0, other: 0 });
+    return b.get(k);
+  };
+
+  // 1. What moved in the portal since that day (dated when it happened, e.g. an invoice uploaded the next day)
+  moves.forEach((m) => {
+    if (!want.has(m.productId) || REBUILD_SKIP.includes(m.type)) return;
+    const eff = KEY_RE.test(m.effectiveDate || "") ? m.effectiveDate : m.at ? dayKey(m.at) : "";
+    if (eff < fromKey) return;
+    const kind = m.type === "receive" ? "received" : m.type === "sale" ? "sold"
+      : REBUILD_USED.includes(m.type) ? "used" : m.type === "writeoff" ? "wasted" : "other";
+    (m.lines || []).forEach((l) => {
+      if (l.loc !== "shelf" && l.loc !== "jt") return;
+      bucket(m.productId, l.loc)[kind] += Number(l.delta) || 0;
+    });
+  });
+
+  // 2. Deliveries recorded as received before the portal (they never changed stock)
+  recSnap.docs.forEach((d) => {
+    const r = d.data() || {};
+    if (String(r.receivedAt || "").slice(0, 10) < fromKey) return;
+    const po = pos.find((x) => x.id === r.poId);
+    (Array.isArray(r.lines) ? r.lines : []).forEach((l) => {
+      if (!want.has(l.productId)) return;
+      const line = po ? po.lines.find((x) => x.key === l.key) : null;
+      bucket(l.productId, line && line.loc === "jt" ? "jt" : "shelf").pastIn += (Number(l.arrived) || 0) * Math.max(1, Number(l.packSize) || 1);
+    });
+  });
+
+  // 3. Invoice lines since that day that haven't come off stock yet
+  const sales = new Map();   // productId → Map(saleId → { saleId, invoiceId, date, patientName, qty })
+  const unlinked = new Map();
+  invoiceRows.forEach(([invoiceId, date, patientName, name]) => {
+    if (!date || date < fromKey) return;
+    const key = invoiceNameKey(name);
+    const pid = link.get(key);
+    if (pid === INVOICE_NOT_STOCK) return;
+    if (!pid) { const u = unlinked.get(key) || { name, n: 0 }; u.n++; unlinked.set(key, u); return; }
+    if (!want.has(pid)) return;
+    const saleId = `invoice__${slug(invoiceId)}__${pid}`;
+    if (recorded.has(saleId)) return;   // already taken off: it's in step 1
+    const m = sales.get(pid) || new Map();
+    const s = m.get(saleId) || { saleId, invoiceId, date, patientName, qty: 0 };
+    s.qty++;
+    m.set(saleId, s);
+    sales.set(pid, m);
+  });
+
+  const rows = products.filter((p) => counted.has(p.id)).map((p) => {
+    const c = counted.get(p.id);
+    const list = [...(sales.get(p.id) || new Map()).values()];
+    const unapplied = list.reduce((a, s) => a + s.qty, 0);
+    const locs = {};
+    LOCATIONS.forEach(({ key }) => {
+      if (c[key] === null || c[key] === undefined) return;
+      const x = bucket(p.id, key);
+      if (key === "shelf") x.unapplied = -unapplied;
+      const raw = c[key] + x.received + x.pastIn + x.sold + x.unapplied + x.used + x.wasted + x.other;
+      const expected = Math.max(0, Math.round(raw));
+      locs[key] = { start: c[key], ...x, raw, expected, now: p.stock[key], change: expected - p.stock[key] };
+    });
+    return { p, locs, sales: list, unapplied };
+  });
+  return { fromKey, rows, unlinked: [...unlinked.values()].sort((a, b2) => b2.n - a.n) };
+}
+
+// Sets one product to its rebuilt numbers, and records the invoice sales it included
+// (without changing stock), so they're never taken off again by an upload.
+export async function applyRebuild(row, staff, fromKey) {
+  const p = row.p;
+  if (p.tracked) throw new Error(`${p.name} tracks batches: count it by batch instead.`);
+  const targets = Object.entries(row.locs).map(([loc, x]) => ({ loc, qty: x.expected }));
+  const note = `Counted ${Object.entries(row.locs).map(([loc, x]) => `${locLabel(loc)} ${x.start}`).join(", ")} on ${fromKey}, then everything since`;
+  const changed = await setStartingStock(p, targets, staff, { type: "baseline", reason: "Rebuilt from a count", note });
+  let marked = 0;
+  for (const s of row.sales) {
+    const r = await recordSale({
+      source: "invoice", invoiceId: s.invoiceId, patientName: s.patientName, apptDate: s.date,
+      note: "Included when stock was rebuilt", lines: [{ productId: p.id, qty: s.qty }],
+    }, staff, { saleId: s.saleId, deduct: false });
+    if (!r.already) marked++;
+  }
+  return { changed, marked };
+}

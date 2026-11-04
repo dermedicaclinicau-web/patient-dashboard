@@ -10,6 +10,7 @@ import {
   setStartingStock, PO_EMAIL_TAGS, fillPoTemplate, poNumberBase, PO_ORDER_TAG_RE, setTracking, correctLot,
   listKits, listKitDays, recordManualSale, undoMove, recordPaperUse, isKitProduct,
   recordPatientReturn, recordSupplierReturn, markReturnCredited, listReturns, RETURN_REASONS, RETURN_STATUS,
+  rebuildPlan, applyRebuild, listCountsOn, getInvoiceSettings, saveInvoiceSettings,
 } from "./inventory-api.js";
 import { searchPatients } from "./task-runner.js";
 import { openSetKitDialog, openKitFromShelfDialog } from "./kit-admin.js";
@@ -647,6 +648,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         <button type="button" class="lh-btn" data-bulk="category">Change category</button>
         <button type="button" class="lh-btn" data-bulk="count">Opening count</button>
         <button type="button" class="lh-btn" data-bulk="start">Set starting stock</button>
+        <button type="button" class="lh-btn" data-bulk="rebuild">Rebuild from a count</button>
         <button type="button" class="lh-btn" data-bulk="active">Make active</button>
         <button type="button" class="lh-btn" data-bulk="inactive">Make inactive</button>
         <button type="button" class="lh-btn is-quiet" data-bulk="clear">Clear selection</button>
@@ -751,6 +753,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
     if (kind === "count") { bulkCount(list, many); return; }
     if (kind === "start") { bulkStart(list, many); return; }
+    if (kind === "rebuild") { rebuildDialog(list, many); return; }
     if (kind !== "category" && !st.suppliers.length) { showToast("Add a supplier first, in the Suppliers tab."); return; }
     const choices = kind === "remove"
       ? st.suppliers.filter((s) => list.some((p) => suppliesProduct(p, s.id)))
@@ -1092,6 +1095,188 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
     const first = form.querySelector("[data-sp]");
     if (first) first.focus();
+  }
+
+  // Rebuild from a count: what was there on a day, plus everything since = what should be there now
+  function rebuildDialog(list, many) {
+    const today = dayKey();
+    let fromKey = `${today.slice(0, 4)}-01-01`;
+    const typed = new Map();          // "productId|loc" → what's typed
+    let plan = null, busy = false, prefilled = "";
+    const dlg = openDialog("inv-dlg inv-spdlg inv-rbdlg", '<div class="lh-form" data-role="rb"></div>');
+    const box = dlg.querySelector('[data-role="rb"]');
+    dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
+    const sgn = (v) => (v > 0 ? `+${fmtN(v)}` : v < 0 ? `−${fmtN(-v)}` : "0");
+
+    // An opening count on that day fills in the empty boxes
+    async function prefill() {
+      prefilled = "";
+      try {
+        const counts = (await listCountsOn(fromKey)).filter((c) => c.kind === "opening")
+          .sort((a, b) => (a.at ? a.at.getTime() : 0) - (b.at ? b.at.getTime() : 0));
+        const byRef = new Map();
+        counts.forEach((c) => c.lines.forEach((l) => { if (l.loc !== "kit") byRef.set(l.ref, l); }));   // the latest count of each spot
+        const sum = new Map();
+        byRef.forEach((l) => { const k = `${l.productId}|${l.loc}`; sum.set(k, (sum.get(k) || 0) + (Number(l.counted) || 0)); });
+        let n = 0;
+        list.forEach((p) => LOCATIONS.forEach((l) => {
+          const k = `${p.id}|${l.key}`;
+          if (sum.has(k) && !typed.get(k)) { typed.set(k, String(sum.get(k))); n++; }
+        }));
+        if (n) prefilled = `Filled in ${plural(n, "box")} from the opening count on ${niceDate(fromKey)}. Check them.`;
+      } catch (err) { console.warn("Opening count not read:", err); }
+      if (!plan) drawAsk();
+    }
+
+    function drawAsk(errMsg = "") {
+      box.innerHTML = `
+        <div class="lh-dialog-head"><h3>Rebuild from a count: ${esc(many)}</h3>
+          <p>Choose a day you know how much was there, like a stocktake or the start of the year. The portal adds up everything since:
+            deliveries, Timely invoices, treatments, write-offs and returns. Then it shows what should be there now, before anything changes.</p></div>
+        <label class="lh-field"><span class="lh-label">Counted on</span>
+          <input type="date" name="from" value="${fromKey}" max="${today}" /></label>
+        ${prefilled ? `<p class="inv-hint">${esc(prefilled)}</p>` : ""}
+        <div class="inv-sp-list">${list.map((p) => `<div class="inv-sp">
+          <div class="inv-sp-name"><strong>${esc(p.name)}</strong><small>${esc(unitPlural(p.stockUnit))}${p.tracked ? " · batch &amp; expiry" : ""}</small></div>
+          <div class="inv-sp-locs">${LOCATIONS.map((l) => `<label class="inv-sp-loc"><span>${esc(l.label)}<small>on that day</small></span>
+            <input class="fe-input inv-num" type="number" min="0" step="1" inputmode="numeric" placeholder="—"
+              data-rb="${esc(p.id)}|${l.key}" value="${esc(typed.get(`${p.id}|${l.key}`) || "")}" /></label>`).join("")}</div></div>`).join("")}</div>
+        <label class="fe-check"><input type="checkbox" name="past" checked /> Add deliveries recorded as “received before the portal”</label>
+        <small class="fe-note">Leave a box empty to leave that place as it is. Enter moves to the next box.</small>
+        <p class="lh-error" role="alert"${errMsg ? "" : " hidden"}>${esc(errMsg)}</p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+          <button type="button" class="lh-btn is-primary" data-act="work">Work it out</button>
+        </div>`;
+    }
+
+    function drawPlan(cfg) {
+      const head = `<thead><tr><th>Where</th><th>Counted</th><th>Delivered</th><th>Sold</th><th>Used</th><th>Written off</th>
+        <th>Other</th><th>Should be now</th><th>Digital now</th><th>Change</th></tr></thead>`;
+      const card = (r, i) => {
+        const any = Object.values(r.locs).some((x) => x.change);
+        return `<section class="inv-rb">
+          <label class="fe-check inv-rb-pick"><input type="checkbox" data-pick-rb="${i}"${any && !r.p.tracked ? " checked" : ""}${r.p.tracked ? " disabled" : ""} />
+            <strong>${esc(r.p.name)}</strong>${!any ? ' <span class="inv-flag is-info">Already right</span>' : ""}</label>
+          <table class="inv-table inv-rb-table">${head}<tbody>${Object.entries(r.locs).map(([loc, x]) => `<tr>
+            <td>${esc(locLabel(loc))}</td><td>${x.start}</td><td>${sgn(x.received + x.pastIn)}${x.pastIn ? `<small> (${x.pastIn} before the portal)</small>` : ""}</td>
+            <td>${sgn(x.sold + x.unapplied)}${x.unapplied ? `<small> (${-x.unapplied} not taken off yet)</small>` : ""}</td>
+            <td>${sgn(x.used)}</td><td>${sgn(x.wasted)}</td><td>${sgn(x.other)}</td>
+            <td><strong>${x.expected}</strong>${x.raw < 0 ? ' <small class="rp-neg">(came to less than 0)</small>' : ""}</td>
+            <td>${x.now}</td><td><span class="inv-rb-chg is-${x.change < 0 ? "neg" : x.change > 0 ? "pos" : "zero"}">${sgn(x.change)}</span></td></tr>`).join("")}
+          </tbody></table>
+          ${r.p.tracked ? `<small class="fe-note">Batch &amp; expiry product: open it and use <strong>Count</strong> to set each batch to these totals.</small>` : ""}
+        </section>`;
+      };
+      box.innerHTML = `
+        <div class="lh-dialog-head"><h3>What should be there now</h3>
+          <p>From what was counted on ${esc(niceDate(plan.fromKey))}, plus everything since. Tick the ones to set digital to “Should be now”.</p></div>
+        ${plan.unlinked.length ? `<div class="inv-hint is-warn"><strong>${plan.unlinked.length} product name${plan.unlinked.length === 1 ? "" : "s"} on invoices aren't linked to a product</strong>,
+          so their sales aren't counted: ${esc(plan.unlinked.slice(0, 12).map((u) => `${u.name} (${u.n})`).join(", "))}${plan.unlinked.length > 12 ? "…" : ""}.
+          If any are these products, link them in <strong>Products → Invoice links</strong>, then work it out again.</div>` : ""}
+        <div class="inv-rb-list">${plan.rows.map(card).join("") || '<p class="tb-none">Type at least one number first.</p>'}</div>
+        ${!cfg.startDate ? `<label class="fe-check"><input type="checkbox" name="setStart" checked />
+          From now on, take invoice sales off stock automatically (sets the invoice start date to ${esc(niceDate(plan.fromKey))})</label>` : ""}
+        <small class="fe-note">Do it when nothing's being sold or used, as stock that moves while you're looking at this isn't included.
+          Any invoice sales counted here are marked as already taken off, so an upload never takes them off twice.</small>
+        <p class="lh-error" role="alert" hidden></p>
+        <div class="lh-actions">
+          <button type="button" class="lh-btn is-quiet" data-act="back">← Change the counts</button>
+          <button type="button" class="lh-btn is-primary" data-act="apply">Set digital</button>
+        </div>`;
+    }
+
+    async function work(btn) {
+      const f = (n) => box.querySelector(`[name="${n}"]`);
+      const counted = new Map();
+      for (const p of list) {
+        const c = { shelf: null, jt: null };
+        for (const l of LOCATIONS) {
+          const v = (typed.get(`${p.id}|${l.key}`) || "").trim();
+          if (v === "") continue;
+          const n = Number(v);
+          if (!Number.isInteger(n) || n < 0) { drawAsk(`${p.name}: enter a whole number of 0 or more.`); return; }
+          c[l.key] = n;
+        }
+        if (c.shelf !== null || c.jt !== null) counted.set(p.id, c);
+      }
+      if (!counted.size) { drawAsk("Type what was there on that day for at least one product."); return; }
+      const past = f("past").checked;
+      busy = true;
+      btn.disabled = true;
+      btn.textContent = "Adding it all up…";
+      try {
+        const res = await callApi({ action: "inventory", op: "invoiceLines", from: fromKey, to: today });
+        if (res.problem) throw new Error(res.problem);
+        const [p2, cfg] = await Promise.all([
+          rebuildPlan({ fromKey, products: list, allProducts: st.products, counted, pos: st.pos, invoiceRows: res.rows || [], includePast: past }),
+          getInvoiceSettings(),
+        ]);
+        plan = p2;
+        drawPlan(cfg);
+      } catch (ex) {
+        console.error("Rebuild failed:", ex);
+        drawAsk(errText(ex, "Couldn't work it out. Try again."));
+      } finally { busy = false; }
+    }
+
+    async function apply(btn) {
+      const picked = [...box.querySelectorAll("[data-pick-rb]:checked")].map((cb) => plan.rows[Number(cb.dataset.pickRb)]);
+      const err = box.querySelector(".lh-error");
+      const setStart = box.querySelector('[name="setStart"]');
+      if (!picked.length && !(setStart && setStart.checked)) { err.textContent = "Tick at least one product."; err.hidden = false; return; }
+      busy = true;
+      btn.disabled = true;
+      let done = 0, places = 0, marked = 0;
+      const failed = [];
+      const queue = picked.slice();
+      await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
+        while (queue.length) {
+          const r = queue.shift();
+          try { const x = await applyRebuild(r, staff, plan.fromKey); places += x.changed; marked += x.marked; }
+          catch (ex) { console.error("Rebuild apply failed:", r.p.name, ex); failed.push(r.p.name); }
+          btn.textContent = `Saving ${++done} of ${picked.length}…`;
+        }
+      }));
+      if (setStart && setStart.checked) {
+        try {
+          const cur = await getInvoiceSettings();
+          if (!cur.startDate) await saveInvoiceSettings({ startDate: plan.fromKey, links: cur.links }, staff);
+        } catch (ex) { console.error("Invoice start date not saved:", ex); failed.push("the invoice start date"); }
+      }
+      busy = false;
+      dlg.close();
+      showToast(failed.length
+        ? `Saved, except: ${failed.slice(0, 3).join(", ")}${failed.length > 3 ? "…" : ""}. Try those again.`
+        : `Digital rebuilt: ${plural(places, "change")} across ${plural(picked.length, "product")}${marked ? `, ${plural(marked, "invoice sale")} marked as counted` : ""}.`);
+      st.sel.clear();
+      await load();
+    }
+
+    box.addEventListener("input", (e) => {
+      if (e.target.dataset.rb) typed.set(e.target.dataset.rb, e.target.value);
+      if (e.target.name === "from" && /^\d{4}-\d{2}-\d{2}$/.test(e.target.value) && e.target.value <= today) {
+        fromKey = e.target.value;
+        prefill();
+      }
+    });
+    box.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" || !e.target.dataset.rb) return;
+      e.preventDefault();
+      const all = [...box.querySelectorAll("[data-rb]")];
+      const next = all[all.indexOf(e.target) + 1];
+      if (next) { next.focus(); next.select(); }
+    });
+    box.addEventListener("click", (e) => {
+      const a = e.target.closest("[data-act]");
+      if (!a || busy) return;
+      if (a.dataset.act === "cancel") dlg.close();
+      else if (a.dataset.act === "work") work(a);
+      else if (a.dataset.act === "back") { plan = null; drawAsk(); }
+      else if (a.dataset.act === "apply") apply(a);
+    });
+    drawAsk();
+    prefill();
   }
 
   /* ---------- Suppliers ---------- */
