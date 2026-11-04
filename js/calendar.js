@@ -159,6 +159,16 @@ export function mountCalendar(container, param) {
   };
   window.addEventListener("eod:status", onEodStatus);
 
+  // Notes saved as Draft or Reviewed in their own tab: this day's badges are read again
+  let notesBc = null;
+  try { notesBc = new BroadcastChannel("dm-notes"); } catch { notesBc = null; }
+  if (notesBc) notesBc.onmessage = (e) => {
+    if (!board.isConnected) { notesBc.close(); return; }
+    if (!e.data || e.data.type !== "notes-saved" || !shown.length) return;
+    badgeCache.delete(dateKey);
+    loadBadges(shown);
+  };
+
     // Badges load after the schedule is shown, so they never slow it down
   async function loadBadges(appts) {
     const key = dateKey;
@@ -417,12 +427,17 @@ const BADGES = {
   rx: ["Rx", "cb-rx", "Prescription"],
 };
 
-// "Tx WR": the record type, then the treatment it's for. Hover shows the full names.
+// "Tx WR": the record type, then the treatment it's for. Summary also shows Draft or ✓ Reviewed. Hover shows the full names.
 function badgeHtml(b) {
   const [label, cls, full] = BADGES[b.type] || [b.type, "", b.type];
-  const tip = [`${full}${b.catTitle ? ` · ${b.catTitle}` : ""}`, ...(b.titles || [])].join("\n");
-  return `<span class="cb ${cls}" title="${escapeHtml(tip)}">${label}${
-    b.code ? `<b class="cb-code">${escapeHtml(b.code)}</b>` : ""}</span>`;
+  const st = b.type === "summary" ? b.status : "";
+  const count = b.drafts + b.reviewed > 1
+    ? `${b.drafts + b.reviewed} summaries: ${[b.drafts && `${b.drafts} draft`, b.reviewed && `${b.reviewed} reviewed`].filter(Boolean).join(", ")}`
+    : st === "reviewed" ? "Reviewed" : st ? "Draft, not reviewed yet" : "";
+  const tip = [`${full}${b.catTitle ? ` · ${b.catTitle}` : ""}`, count, ...(st ? [] : b.titles || [])].filter(Boolean).join("\n");
+  return `<span class="cb ${cls}${st ? ` is-${st}` : ""}" title="${escapeHtml(tip)}">${label}${
+    b.code ? `<b class="cb-code">${escapeHtml(b.code)}</b>` : ""}${
+    st ? `<b class="cb-st">${st === "reviewed" ? "✓" : "Draft"}</b>` : ""}</span>`;
 }
 
 // A booking added in the portal: tagged, with Edit and Remove

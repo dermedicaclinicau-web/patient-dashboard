@@ -100,7 +100,8 @@ export async function fetchDayBadges(dateKey, appts) {
   ];
 
   const records = [];
-  const add = (type, id, name, title = "", cat = "") => records.push({ type, id, name, title: String(title || ""), cat });
+  const add = (type, id, name, title = "", cat = "", status = "") =>
+    records.push({ type, id, name, title: String(title || ""), cat, status });
 
   // Old app
   tx.forEach((r) => {
@@ -113,7 +114,9 @@ export async function fetchDayBadges(dateKey, appts) {
   });
   rx.forEach((r) => add("rx", r["Patient ID"], r["Patient Name"], r["Prescription Type"] || r["Prescription"] || "Prescription"));
   transcripts.forEach((r) => {
-    add("summary", r["Patient ID"], r["Patient Name"], "Consultation notes");
+    if (r["Merged Into"] || r.mergedInto) return;   // a recording merged into another: its notes are the other one's
+    const status = /^reviewed$/i.test(String(r.Status || "")) ? "reviewed" : "draft";
+    add("summary", r["Patient ID"], r["Patient Name"], "Consultation notes", "", status);
     if (extractSection(r["Gemini SOAP"], "TREATMENT PLAN")) add("plan", r["Patient ID"], r["Patient Name"], "Treatment plan");
   });
 
@@ -152,10 +155,16 @@ export async function fetchDayBadges(dateKey, appts) {
       const cat = r.type === "tx" || r.type === "consent" ? (r.cat || "other") : "";
       const key = `${r.type}|${cat}`;
       if (!found.has(key)) {
-        found.set(key, { type: r.type, cat, code: CAT_CODES[cat] || "", catTitle: cat ? CAT_TITLE.get(cat) || "" : "", titles: [] });
+        found.set(key, { type: r.type, cat, code: CAT_CODES[cat] || "", catTitle: cat ? CAT_TITLE.get(cat) || "" : "",
+          titles: [], status: "", drafts: 0, reviewed: 0 });
       }
       const b = found.get(key);
       if (r.title && !b.titles.includes(r.title)) b.titles.push(r.title);
+      // Summaries: Draft if any of the day's notes still needs reviewing
+      if (r.type === "summary") {
+        if (r.status === "reviewed") b.reviewed++; else b.drafts++;
+        b.status = b.drafts ? "draft" : "reviewed";
+      }
     };
 
     records.forEach((r) => {

@@ -10866,3 +10866,27 @@ body.is-consult #rec-bar, body.is-consult #tb-rec { display: none !important; }
 
 /* Notes full page: the browser tab is how you close them */
 .sp.is-page .sp-head [data-sp="close"] { display: none; }
+
+/* Calendar Summary badge: Draft keeps its colour, Reviewed is green */
+.cb.cb-summary.is-reviewed { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
+.cb-st {
+  margin-left: .25rem; padding: 0 .3rem; border-radius: 999px; border: 1px solid currentColor;
+  font-size: .62rem; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; line-height: 1.4;
+  background: rgba(255, 255, 255, .7);
+}
+.cb.cb-summary.is-reviewed .cb-st { border: 0; padding: 0; background: none; font-size: .75rem; }
+
+/* Notes full page: patient name and status stay at the top while scrolling */
+.sp.is-page .sp-head {
+  position: sticky;
+  top: calc(var(--app-top, 64px) + var(--recbar-h, 0px));
+  z-index: 3;
+  background: #fff;
+  border-bottom: 1px solid #e2e8f0;
+  box-shadow: 0 6px 12px -10px rgba(15, 23, 42, .35);
+}
+.sp.is-page,
+.sp.is-page .sp-content { overflow: visible; }   /* sticky stops working inside anything that clips */
+
+/* Consultation tab: once the notes are showing, only the notes header sticks (not both on top of each other) */
+.cs-page:has(.sp.is-page:not([hidden])) .cs-head { position: static; }
