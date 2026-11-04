@@ -37,6 +37,8 @@ import "./menu-search.js";
 import "./mobile-nav.js";
 import "./force-refresh.js";   // first, so it can see recordings start
 import { freshReload } from "./fresh-reload.js";
+import { startProspectNudges } from "./prospect-nudge.js";
+startProspectNudges();
 
 // Remember every file the portal loads (the default list stops at 250), so "Get latest version" can refresh them all
 try { performance.setResourceTimingBufferSize(2000); } catch { /* older browsers */ }
