@@ -87,7 +87,10 @@ function removeTab() {
   if (!me) return;
   state = "";
   updateDoc(doc(db, "presence", me.uid), { [`devices.${tabId}`]: deleteField(), updatedAt: serverTimestamp() })
-    .catch((err) => console.warn("Presence not cleared:", err));
+    .catch((err) => {
+      // Already signed out (logging out, or the tab closing): it drops off on its own within 5 minutes
+      if (!err || err.code !== "permission-denied") console.warn("Presence not cleared:", err);
+    });
 }
 
 const wanted = () => (document.hidden || Date.now() - lastActivity > IDLE ? "away" : "active");

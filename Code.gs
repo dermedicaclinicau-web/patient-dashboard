@@ -87,8 +87,7 @@ function doPost(e) {
     });
 
     const session = createSession_(staff);
-    try { fsPatch_(getConfig_(), STAFF_COLLECTION + '/' + staff.id, { 'Last Login': new Date().toISOString() }); }
-    catch (e) { console.warn('Last login not saved: ' + e); }
+    loginSeen_(staff.id);   // saved to Firestore within 5 minutes, so logging in doesn't wait for it
     return json_({ ok: true, token: token, session: session });
   } catch (err) {
     console.error('Login error:', err && err.stack ? err.stack : err);
@@ -104,7 +103,9 @@ function doGet(e) {
     return ContentService.createTextOutput('');
   }
   if (p.warm) {
-    try { getStaffDocs_(); } catch (err) { console.warn('Warm-up failed: ' + err); }
+    // Everything a PIN login reads, so the first login of the morning is quick
+    try { getStaffDocs_(); rolesData_(); getAccessToken_(getConfig_()); sessionKey_(); pinPepper_(); }
+    catch (err) { console.warn('Warm-up failed: ' + err); }
   }
   return json_({ ok: true, status: 'alive' });
 }
@@ -186,14 +187,17 @@ function field_(fields, key) {
 
 // ===================== Tokens (JWT signing) =====================
 
+let CFG_MEMO_ = null;   // once per request (Apps Script starts fresh for each one)
 function getConfig_() {
+  if (CFG_MEMO_) return CFG_MEMO_;
   const p = PropertiesService.getScriptProperties();
   const email = p.getProperty('FIRESTORE_EMAIL');
   // Keys copied from JSON often contain literal "\n". Convert to real newlines.
   const key = (p.getProperty('FIRESTORE_KEY') || '').replace(/\\n/g, '\n');
   const projectId = p.getProperty('FIRESTORE_PROJECT_ID');
   if (!email || !key || !projectId) throw new Error('Missing Script Properties');
-  return { email: email, key: key, projectId: projectId };
+  CFG_MEMO_ = { email: email, key: key, projectId: projectId };
+  return CFG_MEMO_;
 }
 
 function b64url_(input) {
@@ -275,6 +279,28 @@ function registerFail_() {
 function unlockLogins() {
   CacheService.getScriptCache().remove('pin_fails');
   console.log('Login lockout cleared.');
+}
+
+// Last login: noted in the cache straight away, saved to Firestore by runNotifications (every 5 minutes)
+function loginSeen_(id) {
+  try {
+    const c = CacheService.getScriptCache();
+    const raw = c.get('login_seen_v1');
+    const m = raw ? JSON.parse(raw) : {};
+    m[id] = new Date().toISOString();
+    c.put('login_seen_v1', JSON.stringify(m), 21600);
+  } catch (e) { console.warn('Last login not noted: ' + e); }
+}
+function loginSeenFlush_(cfg) {
+  const c = CacheService.getScriptCache();
+  const raw = c.get('login_seen_v1');
+  if (!raw) return;
+  c.remove('login_seen_v1');
+  const m = JSON.parse(raw);
+  const writes = Object.keys(m).map(function (id) {
+    return patchWrite_(cfg, STAFF_COLLECTION + '/' + id, { 'Last Login': m[id] });
+  });
+  if (writes.length) commitWrites_(cfg, writes);
 }
 
 
@@ -969,7 +995,7 @@ function testSkincareSync() {
 
 // ===================== Staff cache =====================
 
-const STAFF_CACHE_SECONDS = 5 * 60; // new/changed PINs take effect within 5 minutes
+const STAFF_CACHE_SECONDS = 20 * 60; // saving in Staff clears it straight away; changes made directly in Firestore: run clearStaffCache
 
 // Run from the editor after adding staff or changing a PIN, to apply it immediately
 function clearStaffCache() {
@@ -3760,7 +3786,7 @@ function rolesData_() {
 
   const out = { names: names, roles: roles };
   const json = JSON.stringify(out);
-  try { cache.put('roles_cfg_v2', json, 300); } catch (e) { /* not essential */ }
+  try { cache.put('roles_cfg_v2', json, 1200); } catch (e) { /* not essential (Save role access clears it) */ }
   try { if (props.getProperty('ROLES_LAST_GOOD') !== json) props.setProperty('ROLES_LAST_GOOD', json); }
   catch (e) { console.warn('Roles backup not saved: ' + e); }
   return out;
@@ -5107,6 +5133,7 @@ function runNotifications() {
   const cfg = getConfig_();
   const now = Date.now();
   const rules = notifyRules_(cfg);
+  try { loginSeenFlush_(cfg); } catch (e) { console.warn('Last logins: ' + e); }
   try { staffTaskMailRun_(cfg); } catch (e) { console.error('Task emails: ' + (e && e.stack ? e.stack : e)); }
   try { notifyProcessPending_(cfg, 20, rules, true); } catch (e) { console.error('Outbox: ' + (e && e.stack ? e.stack : e)); }
   try { notifyLowScan_(cfg, rules); } catch (e) { console.error('Low stock scan: ' + (e && e.stack ? e.stack : e)); }
@@ -12758,7 +12785,7 @@ function keepWarm() {
   const url = mktWebAppUrl_();
   if (!url) return;
   const h = Number(Utilities.formatDate(new Date(), 'Australia/Perth', 'H'));
-  if (h < 7 || h >= 21) return;   // nobody's opening forms overnight
+  if (h < 6 || h >= 21) return;   // warm before the first login of the day
   try { UrlFetchApp.fetch(url + '?warm=1', { muteHttpExceptions: true, followRedirects: true }); }
   catch (e) { /* not essential */ }
   try { ptFsEntries_(); } catch (e) { console.warn('Patient names not warmed: ' + e); }
@@ -20025,7 +20052,13 @@ function tawkImport_(cfg, body) {
     if (Date.now() > deadline) { sum.left = chats.length - i; break; }
     let r;
     try { r = tawkProcess_(cfg, set, chats[i], { backfill: true, dry: dry }); }
-    catch (e) { console.error('Tawk.to import: ' + (e && e.stack ? e.stack : e)); r = { result: 'skipped', reason: 'Something went wrong' }; }
+    catch (e) {
+      console.error('Tawk.to import: ' + (e && e.stack ? e.stack : e));
+      r = { result: 'skipped', reason: 'Something went wrong' };
+      // Un-claim it, so importing the file again tries this chat again (nothing is doubled: the enquiry check catches it)
+      const cid = String(chats[i].id || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80);
+      if (cid && !dry) { try { commitWrites_(cfg, [deleteWrite_(cfg, TAWK_DONE_ + '/c_' + cid)]); } catch (e2) { /* tried next time */ } }
+    }
     sum[r.result] = (sum[r.result] || 0) + 1;
     if (r.result === 'skipped') sum.reasons[r.reason] = (sum.reasons[r.reason] || 0) + 1;
     if ((r.result === 'new' || r.result === 'again') && sum.sample.length < 8) {
@@ -20094,4 +20127,9 @@ function testTawk() {
       ],
     },
   })));
+}
+
+function testTawkImportRoute() {
+  const s = createSession_({ id: 'test', name: 'Test', role: 'Admin' });
+  console.log(JSON.stringify(handleProspects_({ session: s, op: 'tawkImport', name: 'x.json', data: '' })));
 }
