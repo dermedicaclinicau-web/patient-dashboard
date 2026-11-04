@@ -12757,6 +12757,7 @@ function keepWarm() {
   if (h < 7 || h >= 21) return;   // nobody's opening forms overnight
   try { UrlFetchApp.fetch(url + '?warm=1', { muteHttpExceptions: true, followRedirects: true }); }
   catch (e) { /* not essential */ }
+  try { ptFsEntries_(); } catch (e) { console.warn('Patient names not warmed: ' + e); }
 }
 
 // Run ONCE from the editor
@@ -17574,9 +17575,10 @@ function prosFromEmail_(msg) {
 
 // An existing prospect with the same mobile or email (an open one first, then the most recent)
 function prosFindExisting_(cfg, phoneKey, emailKey) {
-  let hits = [];
-  if (phoneKey) hits = hits.concat(fsQuery_(cfg, PROS_COL_, 'phoneKey', 'EQUAL', phoneKey, 10));
-  if (emailKey) hits = hits.concat(fsQuery_(cfg, PROS_COL_, 'emailKey', 'EQUAL', emailKey, 10));
+  const specs = [];
+  if (phoneKey) specs.push([PROS_COL_, 'phoneKey', 'EQUAL', phoneKey, 10]);
+  if (emailKey) specs.push([PROS_COL_, 'emailKey', 'EQUAL', emailKey, 10]);
+  const hits = [].concat.apply([], fsQueryMany_(cfg, specs));
   const closed = function (p) { return PROS_OPEN_.indexOf(p.stage) === -1 ? 1 : 0; };
   return hits.sort(function (a, b) {
     return closed(a) - closed(b) || String(b.lastEnquiryAt || '').localeCompare(String(a.lastEnquiryAt || ''));
@@ -17585,39 +17587,43 @@ function prosFindExisting_(cfg, phoneKey, emailKey) {
 
 // The patient with the same mobile or email; failing that, the only patient with the same full name.
 // Several share a mobile or email: the one with the same name. Only linked when exactly one patient fits.
+// Direct lookups (mobile, email, name) in parallel, not a read of the whole Patient List.
+// The hourly stage check still catches anyone this misses.
 function prosFindPatient_(cfg, phoneKey, emailKey, name) {
-  let entries = [];
-  try { entries = ptFsEntries_().list; } catch (e) { console.warn('Prospect: patients not read: ' + e); }
-  const namesOf = {};
-  entries.forEach(function (p) { namesOf[p[0]] = p[1]; });
-  let found = {};
-  if (phoneKey) entries.forEach(function (p) { if (prosPhoneKey_(p[2]) === phoneKey) found[p[0]] = 'mobile'; });
-  if (emailKey) {
-    ['EmailKey', 'Email'].forEach(function (f) {
-      try {
-        fsQuery_(cfg, 'patient_list', f, 'EQUAL', emailKey, 5).forEach(function (d) {
-          const k = String(d.PttID || d._id);
-          if (!d.MergedInto && !found[k]) found[k] = 'email';
-        });
-      } catch (e) { console.warn('Prospect: patients not read by email: ' + e); }
+  const specs = [];
+  if (phoneKey) {
+    const core = phoneKey.replace(/^0/, '');
+    const vars = uniq_([phoneKey, core, '61' + core]);
+    specs.push(['patient_list', 'PhoneKey', 'IN', vars, 20], ['patient_list', 'Mobile', 'IN', vars, 20]);
+  }
+  if (emailKey) specs.push(['patient_list', 'EmailKey', 'EQUAL', emailKey, 10], ['patient_list', 'Email', 'EQUAL', emailKey, 10]);
+  const parts = String(name || '').toLowerCase().replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  if (parts.length >= 2) {
+    specs.push(['patient_list', 'NameKey', 'EQUAL', parts[parts.length - 1] + ' ' + parts.slice(0, -1).join(' '), 10]);
+  }
+  if (!specs.length) return { many: 0 };
+
+  const found = {};
+  const docs = {};
+  fsQueryMany_(cfg, specs).forEach(function (list, i) {
+    const f = specs[i][1];
+    const how = f === 'NameKey' ? 'name' : /mail/i.test(f) ? 'email' : 'mobile';
+    list.forEach(function (d) {
+      if (d.MergedInto) return;
+      docs[d._id] = d;
+      if (!found[d._id] || found[d._id] === 'name') found[d._id] = how;
     });
-  }
-  let keys = Object.keys(found);
+  });
+
+  let keys = Object.keys(found).filter(function (k) { return found[k] !== 'name'; });
   if (keys.length > 1 && name) {
-    const named = keys.filter(function (k) { return (namesOf[k] || []).some(function (n) { return prosSameName_(name, n); }); });
-    if (named.length === 1) { const h = found[named[0]]; found = {}; found[named[0]] = 'name and ' + h; keys = named; }
+    const named = keys.filter(function (k) { return prosSameName_(name, flowWho_(docs[k]).name); });
+    if (named.length === 1) { found[named[0]] = 'name and ' + found[named[0]]; keys = named; }
   }
-  if (!keys.length && name) {
-    const nk = ptClean_(name);
-    if (nk.split(' ').length >= 2) {
-      entries.forEach(function (p) { if (p[1].some(function (n) { return ptClean_(n) === nk; })) found[p[0]] = 'name'; });
-      keys = Object.keys(found);
-    }
-  }
+  if (!keys.length) keys = Object.keys(found).filter(function (k) { return found[k] === 'name'; });
   if (keys.length !== 1) return { many: keys.length };
-  const doc = flowPatient_(cfg, keys[0]);
-  return doc ? { patientId: doc._id, pttId: String(doc.PttID || doc._id), patientName: flowWho_(doc).name, how: found[keys[0]] }
-    : { many: 0 };
+  const d = docs[keys[0]];
+  return { patientId: d._id, pttId: String(d.PttID || d._id), patientName: flowWho_(d).name, how: found[keys[0]] };
 }
 
 // New web enquiries, shared in turn: the team member with the fewest open prospects (working today)
@@ -17900,8 +17906,8 @@ function prosAdd_(cfg, body, session) {
     name: name, phone: phone, email: email, pref: body.pref, age: body.age, concern: body.concern, message: body.message,
     source: source, at: new Date().toISOString(), assignTo: String(body.assignTo || ''),
     spoke: body.spoke === true, followUp: String(body.followUp || ''), followNote: String(body.followNote || ''),
-  }, session, body.force === true);
-  return { ok: true, id: r.id };
+  }, session, true);   // already checked for duplicates above, so not again
+  return { ok: true, id: r.id, prospect: r.p ? Object.assign({ id: r.id }, r.p) : null };
 }
 
 function prosAction_(cfg, op, id, body, session) {
@@ -19685,4 +19691,35 @@ function flowApplyDetails_(cfg, c, run, ctx, dry) {
   r.applied = true;
   console.log('Online form: ' + r.changes.length + ' detail(s) updated for ' + ctx.doc._id);
   return r;
+}
+
+/* ---------- Several Firestore queries in one go (in parallel) ---------- */
+// specs: [[collection, field, op, value, max], …] → one list of documents per spec
+function fsQueryMany_(cfg, specs) {
+  if (!specs.length) return [];
+  const token = getAccessToken_(cfg);
+  const url = 'https://firestore.googleapis.com/v1/' + fsBase_(cfg) + ':runQuery';
+  const res = UrlFetchApp.fetchAll(specs.map(function (s) {
+    const v = Array.isArray(s[3]) ? { arrayValue: { values: s[3].map(toValue_) } } : toValue_(s[3]);
+    return {
+      url: url, method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+      headers: { Authorization: 'Bearer ' + token },
+      payload: JSON.stringify({ structuredQuery: {
+        from: [{ collectionId: s[0] }],
+        where: { fieldFilter: { field: { fieldPath: quoteField_(s[1]) }, op: s[2], value: v } },
+        limit: s[4] || 20,
+      } }),
+    };
+  }));
+  return res.map(function (r, i) {
+    if (r.getResponseCode() !== 200) {
+      console.warn('Query ' + specs[i][0] + '.' + specs[i][1] + ' ' + r.getResponseCode() + ': ' + r.getContentText().slice(0, 150));
+      return [];
+    }
+    return JSON.parse(r.getContentText()).filter(function (x) { return x.document; }).map(function (x) {
+      const o = fromFields_(x.document.fields || {});
+      o._id = x.document.name.split('/').pop();
+      return o;
+    });
+  });
 }

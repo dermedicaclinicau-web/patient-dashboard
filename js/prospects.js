@@ -8,6 +8,7 @@ import { callApi } from "./appointments.js";
 import { can } from "./perms.js";
 import { showToast } from "./utils.js";
 import { openProspectCompose } from "./prospect-compose.js?v=1";
+import { fetchPatients, searchPatientsByPhone } from "./patients.js";
 
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -66,9 +67,36 @@ async function loadAll(withOld = false) {
   const snaps = await Promise.all(qs);
   return snaps.flatMap((s) => s.docs.map((d) => ({ id: d.id, ...d.data() })));
 }
-async function loadSettings() {
-  try { const s = await getDoc(doc(db, "prospect_settings", "config")); return s.exists() ? s.data() : {}; }
-  catch { return {}; }
+// Remembered for 5 minutes (Settings → Save reads it again)
+let setCache = null, setAt = 0;
+async function loadSettings(fresh = false) {
+  if (!fresh && setCache && Date.now() - setAt < 300000) return setCache;
+  try {
+    const s = await getDoc(doc(db, "prospect_settings", "config"));
+    setCache = s.exists() ? s.data() : {};
+    setAt = Date.now();
+    return setCache;
+  } catch { return setCache || {}; }
+}
+// A prospect just added: its page opens without reading it again
+const justAdded = new Map();
+
+// Patient search for "Patient record": straight from Firestore (Apps Script only if that isn't allowed)
+const ptCache = new Map();
+async function findPatients(q) {
+  const k = q.toLowerCase();
+  if (ptCache.has(k)) return ptCache.get(k);
+  let list;
+  try {
+    const found = q.replace(/\D/g, "").length >= 6 ? await searchPatientsByPhone(q) : (await fetchPatients({ mode: "name", term: q })).patients;
+    list = found.filter((x) => !x.mergedInto).slice(0, 6)
+      .map((x) => ({ id: x.pttId || x.id, name: x.name, mobile: x.mobile, dob: x.dobKey }));
+  } catch (err) {
+    if (!err || err.code !== "permission-denied") throw err;
+    list = ((await callApi({ action: "prospects", op: "ptSearch", q })).results || []).slice(0, 6);
+  }
+  ptCache.set(k, list);
+  return list;
 }
 let staffCache = null;
 const staffList = () => (staffCache ||= callApi({ action: "staffList" }).then((r) => r.staff || []).catch(() => []));
@@ -370,11 +398,15 @@ async function mountBoard(container, { view, staff }) {
     const p = all.find((x) => x.id === id);
     if (!p || p.stage === to) return;
     if (to === "lost") { lostDialog(p, set, replace); return; }
+    replace({ ...p, stage: to, stageAt: new Date().toISOString() });   // moves now, saves in the background
+    showToast(`${p.name}: ${stageOf(to).name}`);
     try {
       const r = await api("stage", { id, stage: to });
-      replace(r.prospect);
-      showToast(`${p.name}: ${stageOf(to).name}`);
-    } catch (err) { showToast(errText(err)); }
+      if (r && r.prospect) replace(r.prospect);
+    } catch (err) {
+      replace(p);
+      showToast(`${errText(err)} ${p.name} was moved back.`);
+    }
   }
 
   root.addEventListener("change", (e) => {
@@ -410,7 +442,7 @@ async function mountBoard(container, { view, staff }) {
     if (a.dataset.act === "lost") { st.showLost = !st.showLost; drawBody(); }
     if (a.dataset.act === "old") setOld(!st.old);
     if (a.dataset.act === "new") newDialog(all, (id) => { location.hash = `#/prospects/${enc(id)}`; });
-    if (a.dataset.act === "settings") settingsDialog(set, async () => { set = await loadSettings(); });
+    if (a.dataset.act === "settings") settingsDialog(set, async () => { set = await loadSettings(true); });
   });
 
   // Drag a card to another column
@@ -496,6 +528,7 @@ async function newDialog(all, onDone) {
       }
       c.close();
       showToast("Prospect added");
+      if (r.prospect) justAdded.set(r.id, r.prospect);
       onDone(r.id);
     },
   });
@@ -572,9 +605,12 @@ async function mountProspect(container, id, staff) {
   let set = {};
   root.innerHTML = `<a class="back-link" href="#/prospects">← Prospects</a><div class="skeleton" style="height:320px;border-radius:14px"></div>`;
   try {
-    const [snap, s] = await Promise.all([getDoc(doc(db, "prospects", id)), loadSettings()]);
+    const pre = justAdded.get(id);
+    justAdded.delete(id);
+    const [snap, s] = await Promise.all([pre ? null : getDoc(doc(db, "prospects", id)), loadSettings()]);
     set = s;
-    if (snap.exists()) p = { id: snap.id, ...snap.data() };
+    if (pre) p = pre;
+    else if (snap.exists()) p = { id: snap.id, ...snap.data() };
   } catch (err) { console.error("Prospect failed:", err); }
   if (!root.isConnected) return;
   if (!p) { root.innerHTML = `<a class="back-link" href="#/prospects">← Prospects</a><div class="state"><strong>Not found</strong>This prospect couldn't be opened.</div>`; return; }
@@ -586,6 +622,50 @@ async function mountProspect(container, id, staff) {
     if (msg) showToast(msg);
     return r;
   };
+
+  // Quick saves: the page changes straight away and the save runs in the background, one after another
+  // (so two quick changes never clash). If one doesn't save, you're told and the real record is loaded again.
+  let queue = Promise.resolve();
+  let pending = 0;
+  let failed = false;
+  let redraw = false;
+  const meName = (staff && staff.name) || "You";
+  const typing = () => { const a = document.activeElement; return !!a && root.contains(a) && a.matches("input, textarea, select"); };
+  const draw = () => { if (typing()) redraw = true; else { redraw = false; render(); } };
+  root.addEventListener("focusout", () => setTimeout(() => { if (redraw && !typing() && root.isConnected) { redraw = false; render(); } }, 0));
+  window.addEventListener("beforeunload", (e) => { if (pending && root.isConnected) { e.preventDefault(); e.returnValue = ""; } });
+
+  function saveFast(op, data, { patch = {}, log = null, msg = "" } = {}) {
+    const at = new Date().toISOString();
+    p = { ...p, ...patch, log: log ? [...(p.log || []), { at, by: meName, kind: log.kind, what: log.what, note: log.note || "", pending: true }] : p.log };
+    render();
+    if (msg) showToast(msg);
+    pending++;
+    const pid = p.id;
+    queue = queue
+      .then(() => api(op, { id: pid, ...data }))
+      .then((r) => { if (r && r.prospect && pending === 1 && !failed) p = r.prospect; })
+      .catch((err) => { console.error(`Prospect ${op} failed:`, err); failed = true; showToast(`${errText(err)} It wasn't saved.`); })
+      .finally(async () => {
+        pending--;
+        if (!pending && failed) {
+          failed = false;
+          try { const s = await getDoc(doc(db, "prospects", pid)); if (s.exists()) p = { id: s.id, ...s.data() }; } catch { /* keep what's shown */ }
+        }
+        if (root.isConnected && p.id === pid) draw();
+      });
+    return queue;
+  }
+  const contactPatch = () => {
+    const at = new Date().toISOString();
+    const x = { contacts: Number(p.contacts || 0) + 1, lastContactAt: at, waitingSince: "" };
+    if (!p.firstContactAt) x.firstContactAt = at;
+    if (p.stage === "new") Object.assign(x, { stage: "contacted", stageAt: at });
+    return x;
+  };
+  const fuBad = (d) => !!d && d < todayKey();
+  const fuPatch = (d, note) => ({ nextFollowUp: d, followNote: String(note || "").trim().slice(0, 300) });
+  let hitsHtml = "", ptQ = "";
 
   function stepper() {
     const lost = p.stage === "lost";
@@ -600,9 +680,9 @@ async function mountProspect(container, id, staff) {
   function timeline() {
     const list = (p.log || []).slice().reverse();
     return `<section class="pr-sec"><h3>${I(IC.clock)} Timeline</h3>
-      <ol class="pr-tl">${list.map((l) => `<li class="is-${esc(l.kind)}">
+      <ol class="pr-tl">${list.map((l) => `<li class="is-${esc(l.kind)}${l.pending ? " is-pending" : ""}">
         <span class="pr-tl-ic">${I(IC[KIND_IC[l.kind] || "note"])}</span>
-        <div><strong>${esc(l.what)}</strong><small>${esc([when(l.at), l.by].filter(Boolean).join(" · "))}</small>
+        <div><strong>${esc(l.what)}</strong><small>${l.pending ? "Saving…" : esc([when(l.at), l.by].filter(Boolean).join(" · "))}</small>
           ${l.note ? `<p>${esc(l.note)}</p>` : ""}</div></li>`).join("")}</ol></section>`;
   }
 
@@ -675,7 +755,7 @@ async function mountProspect(container, id, staff) {
                 <button type="button" class="lh-btn is-quiet" data-act="unlink">${p.linkWeak ? "Not them: unlink" : "Unlink"}</button></div>` : ""}`
               : `${p.patientMany > 1 ? `<p class="muted">${p.patientMany} patients could be them (same mobile, email or name). Choose the right one.</p>`
                 : '<p class="muted">Not linked yet. They\'re linked by themselves when their mobile, email or full name matches one patient, or link them here.</p>'}
-              ${work ? `<input type="search" class="fe-input" data-role="ptq" placeholder="Search the Patient List" value="${esc(p.name)}" />
+              ${work ? `<input type="search" class="fe-input" data-role="ptq" placeholder="Search the Patient List" value="${esc(ptQ || p.name)}" />
                 <div class="pr-hits" data-role="hits"></div>` : ""}`}
           </section>
           ${onRecall(p) ? `<section class="pr-sec pr-recall"><h3>${I(IC.clock)} Also on recall</h3>
@@ -714,7 +794,11 @@ async function mountProspect(container, id, staff) {
         sel.innerHTML = '<option value="">Nobody yet</option>' + list.map((s) =>
           `<option value="${esc(s.id)}"${s.id === p.assignedToId ? " selected" : ""}>${esc(s.name)}</option>`).join("");
       });
-      if (!p.patientId) searchPt(p.name);
+      if (!p.patientId) {
+        const box = root.querySelector('[data-role="hits"]');
+        if (box && hitsHtml) box.innerHTML = hitsHtml;
+        else searchPt(ptQ || p.name);
+      }
     }
   }
 
@@ -723,17 +807,18 @@ async function mountProspect(container, id, staff) {
     const box = root.querySelector('[data-role="hits"]');
     if (!box) return;
     q = String(q || "").trim();
-    if (q.length < 2) { box.innerHTML = ""; return; }
+    if (q.length < 2) { box.innerHTML = hitsHtml = ""; return; }
     box.innerHTML = '<small class="muted">Searching…</small>';
     try {
-      const r = await callApi({ action: "prospects", op: "ptSearch", q });
-      const list = r.results || [];
-      box.innerHTML = list.length ? list.slice(0, 6).map((x) => `<button type="button" class="pr-hit" data-link="${esc(x.id)}">
+      const list = await findPatients(q);
+      hitsHtml = list.length ? list.map((x) => `<button type="button" class="pr-hit" data-link="${esc(x.id)}">
         <strong>${esc(x.name)}</strong><small>${esc([x.mobile, x.dob].filter(Boolean).join(" · "))}</small></button>`).join("")
         : '<small class="muted">No patients found.</small>';
-    } catch (err) { box.innerHTML = `<small class="muted">${esc(errText(err))}</small>`; }
+    } catch (err) { hitsHtml = `<small class="muted">${esc(errText(err, "Couldn't search. Try again."))}</small>`; }
+    const now = root.querySelector('[data-role="hits"]');
+    if (now) now.innerHTML = hitsHtml;
   }
-
+  
   function logDialog(outcome = "spoke") {
     openDialog({
       title: "Log a call", sub: p.phone ? `${p.name} · ${p.phone}` : p.name, submit: "Save",
@@ -743,9 +828,15 @@ async function mountProspect(container, id, staff) {
         ${followHtml(fuStart(p.nextFollowUp), p.followNote || "")}`,
       onSubmit: async (c) => {
         const f = c.form.elements;
-        await save("log", { outcome: (c.form.querySelector('[name="outcome"]:checked') || {}).value, note: f.note.value,
-          followUp: f.followUp.value, followNote: f.followNote.value }, "Saved");
+        const outcome = (c.form.querySelector('[name="outcome"]:checked') || {}).value;
+        if (!outcome) { c.fail("Choose what happened."); return; }
+        if (fuBad(f.followUp.value)) { c.fail("Choose a follow-up date from today onwards."); return; }
         c.close();
+        saveFast("log", { outcome, note: f.note.value, followUp: f.followUp.value, followNote: f.followNote.value }, {
+          patch: { ...contactPatch(), ...fuPatch(f.followUp.value, f.followNote.value) },
+          log: { kind: "contact", what: (OUTCOMES.find(([k]) => k === outcome) || [, "Call"])[1], note: f.note.value.trim() },
+          msg: "Saved",
+        });
       },
     });
   }
@@ -776,7 +867,11 @@ async function mountProspect(container, id, staff) {
     if (sb && work) {
       const to = sb.dataset.stage;
       if (to === p.stage) return;
-      try { await save("stage", { stage: to }, stageOf(to).name); } catch (err) { showToast(errText(err)); }
+      saveFast("stage", { stage: to }, {
+        patch: { stage: to, stageAt: new Date().toISOString(), ...(p.stage === "lost" ? { lostReason: "", lostNote: "" } : {}) },
+        log: { kind: "stage", what: `${p.stage === "lost" ? "Reopened: " : "Moved to "}${stageOf(to).name}` },
+        msg: stageOf(to).name,
+      });
       return;
     }
     const a = e.target.closest("[data-act]");
@@ -792,32 +887,56 @@ async function mountProspect(container, id, staff) {
       openDialog({ title: "Add a note", submit: "Save note",
         body: '<label class="lh-field"><span class="lh-label">Note</span><textarea name="note" rows="4" maxlength="1000" class="fe-input"></textarea></label>',
         onOpen: (c) => c.form.elements.note.focus(),
-        onSubmit: async (c) => { await save("log", { outcome: "note", note: c.form.elements.note.value }, "Note saved"); c.close(); } });
+        onSubmit: async (c) => {
+          const note = c.form.elements.note.value.trim();
+          if (!note) { c.fail("Write the note first."); return; }
+          c.close();
+          saveFast("log", { outcome: "note", note }, { log: { kind: "note", what: "Note", note }, msg: "Note saved" });
+        } });
     }
   });
 
   root.addEventListener("change", async (e) => {
     if (e.target.dataset.role === "assign") {
-      try { await save("assign", { toId: e.target.value }, e.target.value ? "Given to them" : "Not given to anyone"); }
-      catch (err) { showToast(errText(err)); }
+      const v = e.target.value;
+      const nm = v ? e.target.selectedOptions[0].textContent.trim() : "";
+      e.target.blur();
+      saveFast("assign", { toId: v }, {
+        patch: { assignedToId: v, assignedToName: nm },
+        log: { kind: "assign", what: v ? `Given to ${nm}` : "Not given to anyone" },
+        msg: v ? `Given to ${nm}` : "Not given to anyone",
+      });
     }
   });
   root.addEventListener("input", (e) => {
-    if (e.target.dataset.role === "ptq") { clearTimeout(ptTimer); ptTimer = setTimeout(() => searchPt(e.target.value), 300); }
+    if (e.target.dataset.role === "ptq") { ptQ = e.target.value; clearTimeout(ptTimer); ptTimer = setTimeout(() => searchPt(ptQ), 300); }
   });
-  root.addEventListener("submit", async (e) => {
+  root.addEventListener("submit", (e) => {
     e.preventDefault();
     const form = e.target;
-    const btn = form.querySelector('[type="submit"]');
-    btn.disabled = true;
-    try {
-      const f = form.elements;
-      if (form.dataset.role === "follow") await save("followUp", { followUp: f.followUp.value, followNote: f.followNote.value }, "Follow-up saved");
-      if (form.dataset.role === "details") {
-        await save("update", { name: f.name.value, phone: f.phone.value, email: f.email.value, concern: f.concern.value,
-          source: f.source.value, age: f.age.value, pref: f.pref.value }, "Details saved");
-      }
-    } catch (err) { showToast(errText(err)); btn.disabled = false; }
+    const f = form.elements;
+    if (form.dataset.role === "follow") {
+      const d = f.followUp.value;
+      if (fuBad(d)) { showToast("Choose a follow-up date from today onwards."); return; }
+      document.activeElement.blur();
+      saveFast("followUp", { followUp: d, followNote: f.followNote.value }, {
+        patch: fuPatch(d, f.followNote.value),
+        log: { kind: "follow", what: d ? `Follow up on ${fullDay(d)}` : "Follow-up cleared", note: f.followNote.value.trim() },
+        msg: "Follow-up saved",
+      });
+    }
+    if (form.dataset.role === "details") {
+      const name = f.name.value.trim();
+      const email = f.email.value.trim();
+      if (!name) { showToast("Add their name."); return; }
+      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showToast("Check the email address."); return; }
+      document.activeElement.blur();
+      saveFast("update", { name, phone: f.phone.value, email, concern: f.concern.value, source: f.source.value, age: f.age.value, pref: f.pref.value }, {
+        patch: { name, phone: f.phone.value.trim(), email: email.toLowerCase(), concern: f.concern.value.trim(),
+          source: f.source.value, ageGroup: f.age.value, pref: f.pref.value },
+        msg: "Details saved",
+      });
+    }
   });
 
   render();

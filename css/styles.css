@@ -10555,3 +10555,7 @@ body.ws-pe-open { overflow: hidden; }
 .tb-btn-cancel { color: #475569; }
 .tb-btn-save { background: #0f766e; color: #fff; }
 .tb-btn-del { color: #b91c1c; padding-left: 0 !important; }
+
+/* Prospects: entries still saving */
+.pr-tl li.is-pending { opacity: .6; }
+.pr-tl li.is-pending small { font-style: italic; }
