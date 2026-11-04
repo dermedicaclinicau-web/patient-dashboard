@@ -3811,7 +3811,7 @@ function rolesData_() {
 function rolesConfig_() { return rolesData_().roles; }
 function roleNames_() { return rolesData_().names; }
 // What a staff member can do: their role's ticks, plus "always allow", minus "always block". Admins: everything.
-function effectivePerms_(s) {
+function effectivePermsRaw_(s) {
   if (!s) return [];
   if (/^admin$/i.test(String(s.role || ''))) return PERMS_ALL_.slice();
   const roles = rolesConfig_();
@@ -3823,6 +3823,15 @@ function effectivePerms_(s) {
   (Array.isArray(acc.deny) ? acc.deny : []).forEach(function (p) { delete set[p]; });
   if (s.injector === true) set['inventory.kit'] = true; else delete set['inventory.kit'];
   return PERMS_ALL_.filter(function (p) { return set[p]; });
+}
+
+
+// Someone's access, with one rule on top: any Reporting tab ticked means they can open Reporting.
+function effectivePerms_(s) {
+  const p = (effectivePermsRaw_(s) || []).slice();
+  const hasTab = p.some(function (k) { return String(k).indexOf('reports.tab.') === 0; });
+  if (hasTab && p.indexOf('menu.reports') === -1) p.push('menu.reports');
+  return p;
 }
 
 // The access that goes in the login token: everything except the Reporting tabs (the token has a size limit,

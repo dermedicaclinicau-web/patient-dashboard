@@ -10782,3 +10782,12 @@ body.ws-pe-open { overflow: hidden; }
 .vr-actbar { display: flex; align-items: center; gap: .5rem; margin: .7rem 0 .2rem; }
 .vr-spacer { flex: 1; }
 .vr-dates { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; }
+
+/* Summary badges: Draft keeps the usual colour, Reviewed is green */
+.hv-badge.b-summary.is-reviewed { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
+.hv-badge.b-summary.is-reviewed:hover { background: #d1fae5; }
+.hv-status {
+  margin-left: .35rem; padding: .05rem .45rem; border-radius: 999px;
+  font-style: normal; font-size: .7em; font-weight: 700; letter-spacing: .03em; text-transform: uppercase;
+  line-height: 1.5; border: 1px solid currentColor; background: rgba(255, 255, 255, .65);
+}

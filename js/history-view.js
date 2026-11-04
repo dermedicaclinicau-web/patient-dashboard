@@ -153,6 +153,7 @@ async function buildVisits(patient) {
       const n = (t.mergedFrom || []).length + 1;
       v.badges.push({
         type: "summary", id: t.id,
+        status: /^reviewed$/i.test(String(t.status || "")) ? "reviewed" : "draft",   // anything not Reviewed is still a Draft
         label: `Summary${t.staff ? ` · ${t.staff}` : ""}${n > 1 ? ` (${n} recordings)` : ""}`,
       });
     });
@@ -176,7 +177,8 @@ async function buildVisits(patient) {
     const d = parseDateKey(v.key);
     v.status = v.key > todayKey ? "upcoming" : v.key === todayKey ? "today" : "past";
     v.dateLabel = `${d.getDate()} ${MONTHS_LONG[d.getMonth()]} ${d.getFullYear()}`;
-    v.search = [v.dateLabel, v.key, ...v.services.map((s) => `${s.name} ${s.staff}`), ...v.badges.map((b) => b.label)]
+    v.search = [v.dateLabel, v.key, ...v.services.map((s) => `${s.name} ${s.staff}`),
+      ...v.badges.map((b) => `${b.label} ${b.status || ""}`)]
       .join(" ").toLowerCase();
     return v;
   });
@@ -368,7 +370,11 @@ function badgeHtml(b) {
   }
   if (b.type === "plan") return `<button type="button" class="hv-badge b-plan" data-hv-jump="plan">${inner}</button>`;
   if (b.type === "ssp") return `<button type="button" class="hv-badge b-ssp" data-hv-jump="ssp">${inner}</button>`;
-  if (b.type === "summary") return `<button type="button" class="hv-badge b-summary" data-hv-summary="${escapeHtml(b.id || "")}">${inner}</button>`;
+  if (b.type === "summary") {
+    const reviewed = b.status === "reviewed";
+    return `<button type="button" class="hv-badge b-summary ${reviewed ? "is-reviewed" : "is-draft"}" data-hv-summary="${escapeHtml(b.id || "")}"
+      title="${reviewed ? "Reviewed notes" : "Draft: these notes haven't been reviewed yet"}">${inner}<em class="hv-status">${reviewed ? "Reviewed" : "Draft"}</em></button>`;
+  }
   if (b.type === "merge") return `<button type="button" class="hv-badge b-merge" data-hv-merge="${escapeHtml(JSON.stringify(b.ids || []))}" title="Combine these recordings into one set of notes">${inner}</button>`;
   return `<span class="hv-badge b-${b.type}">${inner}</span>`;
 }
