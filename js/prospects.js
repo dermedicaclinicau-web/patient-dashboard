@@ -709,6 +709,53 @@ function lostDialog(p, set, done) {
     },
   });
 }
+// Prospect settings → Import past chats (the .zip from Tawk.to → Inbox → Export). Checks first, then imports.
+function wireTawkImport(c) {
+  const input = c.form.querySelector('[data-role="tawkfile"]');
+  const box = c.form.querySelector('[data-role="tmsg"]');
+  if (!input || !box) return;
+  const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  const text = (r) => [
+    `${plural(r.found, "chat")} in the file`,
+    r.new && `${r.dry ? "" : "✓ "}${plural(r.new, "new prospect")}`,
+    r.again && `${r.again} added to someone already here`,
+    r.already && `${r.already} already in`,
+    r.skipped && `${r.skipped} skipped (${Object.entries(r.reasons || {}).map(([k, n]) => `${n}: ${k.toLowerCase()}`).join(", ")})`,
+    r.left && `${r.left} not checked yet: choose the file again to finish`,
+  ].filter(Boolean).join(" · ");
+  input.addEventListener("change", async () => {
+    const file = input.files && input.files[0];
+    input.value = "";
+    if (!file) return;
+    if (file.size > 25 * 1024 * 1024) { box.textContent = "That file is too big. Export fewer chats at a time."; return; }
+    box.textContent = "Reading the file…";
+    let data;
+    try {
+      data = await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(String(fr.result).split(",")[1] || "");
+        fr.onerror = () => rej(new Error("The file couldn't be read."));
+        fr.readAsDataURL(file);
+      });
+      box.textContent = "Checking the chats…";
+      const r = await api("tawkImport", { name: file.name, data, dryRun: true });
+      const todo = (r.new || 0) + (r.again || 0);
+      box.innerHTML = `<span>${esc(text(r))}</span>${r.sample && r.sample.length
+        ? `<small class="muted">For example: ${esc(r.sample.slice(0, 4).join(" · "))}</small>` : ""}${todo
+        ? `<button type="button" class="lh-btn is-primary" data-role="tawkgo">Import them</button>` : ""}`;
+      const go = box.querySelector('[data-role="tawkgo"]');
+      if (go) go.addEventListener("click", async () => {
+        go.disabled = true;
+        go.textContent = "Importing…";
+        try {
+          const done = await api("tawkImport", { name: file.name, data, dryRun: false });
+          box.textContent = `Done. ${text(done)}`;
+          showToast("Past chats imported");
+        } catch (err) { box.textContent = errText(err); }
+      });
+    } catch (err) { box.textContent = errText(err, "That file couldn't be imported."); }
+  });
+}
 
 async function settingsDialog(set, onSaved) {
   const list = await staffList();
@@ -724,6 +771,12 @@ async function settingsDialog(set, onSaved) {
       <h4 class="pr-h4">Online chat (Tawk.to)</h4>
       <label class="fe-check"><input type="checkbox" name="tawkSkip"${set.tawkSkipPatients ? " checked" : ""} />
         Skip chats from existing patients <small class="muted">(e.g. moving an appointment)</small></label>
+      <div class="pr-import pr-tawk">
+        <label class="lh-btn">Import past chats…<input type="file" accept=".zip,.json,application/zip,application/json" data-role="tawkfile" hidden /></label>
+        <div class="pr-tawk-msg" data-role="tmsg"></div>
+      </div>
+      <small class="muted">In Tawk.to: Inbox → tick the chats (up to 50 at a time) → Export. Tawk.to emails you a .zip: choose it here.
+        You'll see what it finds before anything is added.</small>
       <label class="lh-field"><span class="lh-label">Flag as "Not contacted" after (hours)</span>
         <input name="hours" type="number" min="1" max="168" class="fe-input" value="${esc(set.respondHours || 24)}" /></label>
       <label class="lh-field"><span class="lh-label">Reasons a prospect is lost (one per line)</span>
@@ -731,6 +784,7 @@ async function settingsDialog(set, onSaved) {
           : ["Too expensive", "Went elsewhere", "No response", "Not suitable", "Just browsing", "Other"]).join("\n"))}</textarea></label>
       <div class="pr-import"><button type="button" class="lh-btn" data-role="import">Check for new web enquiries now</button><small data-role="imsg"></small></div>`,
     onOpen: (c) => {
+      wireTawkImport(c);
       c.form.querySelector('[data-role="import"]').addEventListener("click", async (e) => {
         const b = e.currentTarget;
         const m = c.form.querySelector('[data-role="imsg"]');

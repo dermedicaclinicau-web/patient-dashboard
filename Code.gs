@@ -17683,6 +17683,11 @@ function prosAddEnquiry_(cfg, set, f, session, forceNew) {
 
   const ex = forceNew ? null : prosFindExisting_(cfg, keys.phoneKey, keys.emailKey);
   if (ex) {
+    // The same enquiry again (e.g. a chat sent by the webhook and later imported): nothing changes
+    if ((ex.enquiries || []).some(function (q) { return q && q.at === enq.at && q.source === enq.source; })) {
+      return { id: ex._id, again: true, dup: true, name: ex.name, assignedToId: String(ex.assignedToId || ''),
+        concern: enq.concern, message: enq.message };
+    }
     const lastAt = String(ex.lastEnquiryAt || '');
     const patch = {
       enquiries: (Array.isArray(ex.enquiries) ? ex.enquiries : []).concat([enq])
@@ -17893,6 +17898,10 @@ function handleProspects_(body) {
     if (op === 'ptSearch') return upPtSearch_(body);
     if (!work) return { ok: false, error: 'FORBIDDEN' };
     if (op === 'add') return prosAdd_(cfg, body, session);
+    if (op === 'tawkImport') {
+      if (!manage) return { ok: false, error: 'FORBIDDEN' };
+      return tawkImport_(cfg, body);
+    }
     if (op === 'importNow' || op === 'saveSettings') {
       if (!manage) return { ok: false, error: 'FORBIDDEN' };
       if (op === 'importNow') return { ok: true, imported: prosImport_(cfg, 50, Math.max(1, Math.min(90, Number(body.days) || 14))) };
@@ -19886,18 +19895,52 @@ function tawkName_(raw, email) {
 }
 
 function tawkChat_(body) {
-  const chat = body.chat || {};
-  const id = String(chat.id || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80);
-  if (!id) return { ok: true, skipped: 'no chat id' };
   const cfg = getConfig_();
-  const path = TAWK_DONE_ + '/c_' + id;
-  if (!tawkClaim_(cfg, path, { kind: 'chat', chatId: id })) return { ok: true, already: true };
+  const r = tawkProcess_(cfg, prosSettings_(cfg), tawkNormalise_(body.chat || {}), { notify: true });
+  return { ok: true, result: r.result };
+}
 
-  const msgs = (Array.isArray(chat.messages) ? chat.messages : []).filter(function (m) { return m && m.msg && (m.type || 'msg') === 'msg'; });
+// A chat in any of Tawk.to's shapes (the webhook, or a file from Inbox → Export) → { id, visitor, messages, time }
+const TAWK_SENDER_ = { v: 'v', visitor: 'v', a: 'a', agent: 'a', s: 's', system: 's', bot: 's' };
+function tawkNormalise_(o) {
+  o = o || {};
+  const c = o.chat && typeof o.chat === 'object' ? o.chat : o;
+  const v = c.visitor || o.visitor || {};
+  const raw = Array.isArray(c.messages) ? c.messages : Array.isArray(o.messages) ? o.messages : Array.isArray(c.msgs) ? c.msgs : [];
+  const messages = raw.map(function (m) {
+    m = m || {};
+    const s = m.sender || {};
+    const t = TAWK_SENDER_[String(s.t || s.type || m.senderType || m.st || '').toLowerCase()] || '';
+    const text = m.msg != null ? m.msg : m.message != null ? m.message : m.text != null ? m.text
+      : (m.content && (m.content.text || m.content.msg)) || '';
+    return { sender: { t: t, n: String(s.n || s.name || m.senderName || '') }, type: 'msg',
+      msg: typeof text === 'string' ? text : '', time: String(m.time || m.createdOn || m.created || m.timestamp || '') };
+  }).filter(function (m) { return m.msg; });
+  const visitor = { name: String(v.name || v.n || c.visitorName || ''), email: String(v.email || v.e || c.visitorEmail || '') };
+  let id = String(c.id || c._id || c.chatId || o.chatId || '');
+  if (!id && messages.length) id = 'h' + flowHash_(JSON.stringify([visitor, messages[0].time, messages[0].msg]));
+  return { id: id, visitor: visitor, messages: messages, time: String(c.createdOn || c.time || c.startedOn || o.time || '') };
+}
+
+// One chat → a prospect (or another enquiry). opts: { notify, backfill (an import), dry (only check) }
+// → { result: 'new' | 'again' | 'already' | 'skipped', reason, name, id, at }
+function tawkProcess_(cfg, set, chat, opts) {
+  opts = opts || {};
+  const id = String(chat.id || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80);
+  if (!id) return { result: 'skipped', reason: 'No chat id' };
+  const path = TAWK_DONE_ + '/c_' + id;
+  if (opts.dry) { if (fsGetDoc_(cfg, path)) return { result: 'already' }; }
+  else if (!tawkClaim_(cfg, path, { kind: 'chat', chatId: id, via: opts.backfill ? 'import' : 'webhook' })) return { result: 'already' };
+  const skip = function (reason, extra) {
+    if (!opts.dry) fsPatch_(cfg, path, Object.assign({ status: 'skipped', reason: reason }, extra || {}));
+    return { result: 'skipped', reason: reason };
+  };
+
+  const msgs = (chat.messages || []).filter(function (m) { return m && m.msg; });
   const from = function (m) { return (m.sender && m.sender.t) || ''; };
   const vis = msgs.filter(function (m) { return from(m) === 'v'; });
   const ag = msgs.filter(function (m) { return from(m) === 'a'; });
-  if (!vis.length) { fsPatch_(cfg, path, { status: 'skipped', reason: 'The visitor did not write anything' }); return { ok: true, skipped: 'empty' }; }
+  if (!vis.length) return skip('The visitor did not write anything');
 
   const visText = vis.map(function (m) { return String(m.msg); }).join('\n');
   const formText = msgs.filter(function (m) { return from(m) === 's'; }).map(function (m) { return String(m.msg); }).join('\n');
@@ -19907,38 +19950,90 @@ function tawkChat_(body) {
   const email = isEmail_(mktEmail_(v.email)) ? mktEmail_(v.email) : (sv.email || sf.email);
   const phone = sv.phone || sf.phone;
   const name = tawkName_(v.name, email) || tawkName_(sf.name, '');
-  if (!phone && !email) {
-    fsPatch_(cfg, path, { status: 'skipped', reason: 'No mobile or email to follow up', name: name });
-    return { ok: true, skipped: 'no contact details' };
-  }
-
-  const set = prosSettings_(cfg);
+  if (!phone && !email) return skip('No mobile or email to follow up', { name: name });
   if (set.tawkSkipPatients) {
     const pt = prosFindPatient_(cfg, prosPhoneKey_(phone), email, name);
-    if (pt.patientId) {
-      fsPatch_(cfg, path, { status: 'skipped', reason: 'Already a patient (' + pt.patientName + ')', patientId: pt.patientId });
-      return { ok: true, skipped: 'existing patient' };
-    }
+    if (pt.patientId) return skip('Already a patient', { patientId: pt.patientId });
   }
 
-  // The team member who chatted, if they're in Staff
+  const at = String((vis[0] && vis[0].time) || chat.time || new Date().toISOString());
+  const age = Date.now() - (Date.parse(at) || Date.now());
+  if (opts.dry) {
+    const ex = prosFindExisting_(cfg, prosPhoneKey_(phone), email);
+    const dup = ex && (ex.enquiries || []).some(function (q) { return q && q.at === at && q.source === 'Online chat'; });
+    return { result: dup ? 'already' : ex ? 'again' : 'new', name: name || email || phone, at: at };
+  }
+
   const agent = ag.length ? String((ag[0].sender && ag[0].sender.n) || 'The team') : '';
   const staffHit = agent ? getStaffDocs_().filter(function (s) { return s.active !== false && kitSameStaff_(s.name, agent); }) : [];
   const transcript = msgs.filter(function (m) { return from(m) !== 's'; }).map(function (m) {
     return (from(m) === 'v' ? (name || 'Visitor') : String((m.sender && m.sender.n) || 'Dermedica')) + ': ' + String(m.msg).replace(/\s+/g, ' ').trim();
   }).join('\n').slice(0, 2000);
+  const quiet = !!opts.backfill && age > 3 * 864e5;
 
   const r = prosAddEnquiry_(cfg, set, {
     name: name, phone: phone, email: email, pref: '', age: '', source: 'Online chat',
-    concern: tawkConcern_(visText), message: transcript,
-    at: String((vis[0] && vis[0].time) || body.time || new Date().toISOString()), gmailId: '', link: '',
-    assignTo: staffHit.length === 1 ? staffHit[0].id : '',
+    concern: tawkConcern_(visText), message: transcript, at: at, gmailId: '', link: '',
+    assignTo: !quiet && staffHit.length === 1 ? staffHit[0].id : '',
     chatAgent: agent, chatAgentAt: ag.length ? String(ag[0].time || '') : '',
+    quiet: quiet, historic: !!opts.backfill && age > 90 * 864e5,
   }, null, false);
+  if (r.dup) { fsPatch_(cfg, path, { status: 'already there', prospectId: r.id }); return { result: 'already', name: r.name }; }
   fsPatch_(cfg, path, { status: r.again ? 'added to an existing prospect' : 'added', prospectId: r.id, name: name });
-  if (!agent) prosNotify_(cfg, set, r, { phone: phone, email: email, pref: '', age: '' });   // nobody answered: tell the team
+  if (opts.notify && !agent && !quiet) prosNotify_(cfg, set, r, { phone: phone, email: email, pref: '', age: '' });
   console.log('Tawk.to chat ' + id + ': ' + (r.again ? 'another enquiry for ' : 'new prospect ') + r.name);
-  return { ok: true, prospectId: r.id };
+  return { result: r.again ? 'again' : 'new', name: r.name, id: r.id, at: at };
+}
+
+// The .zip Tawk.to emails from Inbox → Export (or one .json from inside it) → the chats in it
+function tawkFiles_(name, b64) {
+  const bytes = Utilities.base64Decode(b64);
+  const isZip = /\.zip$/i.test(name) || (bytes[0] === 0x50 && bytes[1] === 0x4b);
+  const files = isZip ? Utilities.unzip(Utilities.newBlob(bytes, 'application/zip', name)) : [Utilities.newBlob(bytes, 'application/json', name)];
+  const out = [];
+  files.forEach(function (f) {
+    if (files.length > 1 && !/\.json$/i.test(f.getName())) return;
+    let j;
+    try { j = JSON.parse(f.getDataAsString('UTF-8')); } catch (e) { console.warn('Tawk.to import: ' + f.getName() + ' is not JSON'); return; }
+    const list = Array.isArray(j) ? j : Array.isArray(j.chats) ? j.chats : Array.isArray(j.data) ? j.data : [j];
+    list.forEach(function (x) { if (x && typeof x === 'object') out.push(x); });
+  });
+  return out;
+}
+
+// Prospect settings → Import past chats. dryRun: only says what would happen.
+function tawkImport_(cfg, body) {
+  const name = String(body.name || 'chats.zip');
+  const b64 = String(body.data || '');
+  if (!b64) return { ok: true, problem: 'Choose the file first.' };
+  if (b64.length > 40 * 1024 * 1024) return { ok: true, problem: 'That file is too big. Export fewer chats at a time.' };
+  let raw;
+  try { raw = tawkFiles_(name, b64); }
+  catch (e) { return { ok: true, problem: "That file couldn't be opened. Choose the .zip Tawk.to emailed you, or a .json file from inside it." }; }
+  const chats = raw.map(tawkNormalise_).filter(function (c) { return c.id && c.messages.length; });
+  if (!chats.length) {
+    console.warn('Tawk.to import: nothing recognised. First item keys: ' + (raw[0] ? Object.keys(raw[0]).join(', ') : '(empty)'));
+    return { ok: true, problem: raw.length
+      ? "The chats were found, but their layout wasn't recognised, so nothing was added. Check Apps Script → Executions for the details."
+      : 'No chats were found in that file.' };
+  }
+  const set = prosSettings_(cfg);
+  const dry = body.dryRun === true;
+  const deadline = Date.now() + 4.5 * 60000;
+  const sum = { found: chats.length, new: 0, again: 0, already: 0, skipped: 0, reasons: {}, left: 0, sample: [] };
+  for (let i = 0; i < chats.length; i++) {
+    if (Date.now() > deadline) { sum.left = chats.length - i; break; }
+    let r;
+    try { r = tawkProcess_(cfg, set, chats[i], { backfill: true, dry: dry }); }
+    catch (e) { console.error('Tawk.to import: ' + (e && e.stack ? e.stack : e)); r = { result: 'skipped', reason: 'Something went wrong' }; }
+    sum[r.result] = (sum[r.result] || 0) + 1;
+    if (r.result === 'skipped') sum.reasons[r.reason] = (sum.reasons[r.reason] || 0) + 1;
+    if ((r.result === 'new' || r.result === 'again') && sum.sample.length < 8) {
+      sum.sample.push((r.name || 'No name') + (r.at ? ' · ' + String(r.at).slice(0, 10) : ''));
+    }
+  }
+  if (!dry) console.log('Tawk.to import: ' + JSON.stringify(sum));
+  return Object.assign({ ok: true, dry: dry }, sum);
 }
 
 // An offline message (or a ticket from the widget)

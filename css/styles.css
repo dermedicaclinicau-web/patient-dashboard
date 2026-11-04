@@ -10637,3 +10637,8 @@ body.ws-pe-open { overflow: hidden; }
 /* My dashboard → My follow-ups */
 .md-fu-card .pr-fu-grp:last-child { margin-bottom: 0; }
 .md-fu-card .pr-fu-item { padding: .55rem .7rem; }
+
+/* Prospect settings → Import past chats */
+.pr-tawk { align-items: flex-start; flex-wrap: wrap; gap: .5rem; }
+.pr-tawk-msg { display: flex; flex-direction: column; gap: .35rem; font-size: .85rem; flex: 1; min-width: 200px; }
+.pr-tawk-msg .lh-btn { align-self: flex-start; }
