@@ -20,6 +20,9 @@ function doPost(e) {
   try {
     const body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
 
+    // Tawk.to webhooks (Prospects → Online chat). The secret is in the address: Apps Script can't read headers.
+    if (e && e.parameter && e.parameter.tawk) return json_(handleTawk_(String(e.parameter.tawk), body));
+
     // Non-login requests
     if (body.action === 'renewSession') return json_(handleRenewSession_(body)); // expired session, still signed in
     if (body.action === 'reports') return json_(handleReports_(body));
@@ -17455,6 +17458,7 @@ function prosSettings_(cfg) {
   return {
     notify: ids(d.notify), team: ids(d.team),
     respondHours: Math.max(1, Math.min(168, Math.floor(Number(d.respondHours) || 24))),
+    tawkSkipPatients: d.tawkSkipPatients === true,
     lostReasons: (Array.isArray(d.lostReasons) && d.lostReasons.length ? d.lostReasons : PROS_LOST_)
       .map(function (s) { return String(s).replace(/\s+/g, ' ').trim().slice(0, 60); }).filter(Boolean).slice(0, 20),
   };
@@ -17668,7 +17672,7 @@ function prosPrevText_(prev) {
 function prosAddEnquiry_(cfg, set, f, session, forceNew) {
   const now = new Date().toISOString();
   const at = f.at || now;
-  const who = session ? String(session.name || 'Staff') : 'Web form';
+  const who = session ? String(session.name || 'Staff') : (f.source === 'Online chat' ? 'Online chat' : 'Web form');
   const uid = session ? String(session.uid || '') : '';
   const keys = prosSearchKeys_(f.name, f.phone, f.email);
   const enq = {
@@ -17694,6 +17698,15 @@ function prosAddEnquiry_(cfg, set, f, session, forceNew) {
     if (ex.stage === 'lost' && !f.quiet) {
       Object.assign(patch, { stage: 'new', stageAt: now, lostReason: '', lostNote: '' });
       patch.log.push({ at: now, by: 'Prospects', byUid: '', kind: 'stage', what: 'Back to New enquiry (they enquired again)', note: '' });
+    }
+    if (f.chatAgent) {   // one of the team chatted with them
+      const cAt = f.chatAgentAt || at;
+      patch.contacts = Number(ex.contacts || 0) + 1;
+      patch.lastContactAt = cAt;
+      patch.waitingSince = '';
+      if (!ex.firstContactAt) patch.firstContactAt = cAt;
+      if ((patch.stage || ex.stage) === 'new') { patch.stage = 'contacted'; patch.stageAt = cAt; }
+      patch.log.push({ at: cAt, by: String(f.chatAgent), byUid: '', kind: 'contact', what: 'Chatted online', note: '' });
     }
     if (!ex.phone && f.phone) { patch.phone = String(f.phone); patch.phoneKey = keys.phoneKey; }
     if (!ex.email && keys.emailKey) { patch.email = keys.emailKey; patch.emailKey = keys.emailKey; }
@@ -17739,6 +17752,10 @@ function prosAddEnquiry_(cfg, set, f, session, forceNew) {
   if (session && f.spoke === true) {   // added after a phone call, walk-in or chat: they've been spoken to
     log.push({ at: now, by: who, byUid: uid, kind: 'contact', what: 'Spoke to them', note: '' });
     Object.assign(p, { stage: 'contacted', contacts: 1, firstContactAt: now, lastContactAt: now, waitingSince: '' });
+  } else if (f.chatAgent) {           // one of the team chatted with them online
+    const cAt = f.chatAgentAt || at;
+    log.push({ at: cAt, by: String(f.chatAgent), byUid: '', kind: 'contact', what: 'Chatted online', note: '' });
+    Object.assign(p, { stage: 'contacted', stageAt: cAt, contacts: 1, firstContactAt: cAt, lastContactAt: cAt, waitingSince: '' });
   }
   const fu = String(f.followUp || '');
   if (/^\d{4}-\d{2}-\d{2}$/.test(fu) && fu >= flowKey_(Date.now())) {
@@ -18082,6 +18099,7 @@ function prosSaveSettings_(cfg, body, session) {
     notify: ids(body.notify), team: ids(body.team),
     respondHours: Math.max(1, Math.min(168, Math.floor(Number(body.respondHours) || 24))),
     lostReasons: reasons.length ? reasons : PROS_LOST_,
+    tawkSkipPatients: body.tawkSkipPatients === true,
     updatedAt: new Date().toISOString(), updatedBy: String(session.name || ''), updatedByUid: String(session.uid || ''),
   })]);
   return { ok: true };
@@ -19783,4 +19801,194 @@ function prosFollowDue_(cfg, now) {
   });
   if (n) console.log('Prospects: ' + n + ' follow-up reminder(s) sent.');
   return n;
+}
+
+/* ===================== Prospects: Tawk.to online chat ===================== */
+// Tawk.to → Administration → Webhooks posts here (the web app address + ?tawk=<TAWK_TOKEN>).
+// chat:transcript_created → a prospect (or another enquiry) with the chat · ticket:create → the same, for offline messages.
+// Each chat or ticket is recorded in tawk_chats first, so Tawk.to sending it again never adds it twice.
+
+const TAWK_DONE_ = 'tawk_chats';
+const TAWK_CONCERNS_ = [
+  [/wrinkle|anti.?wrinkle|botox|dysport|xeomin|frown|crow'?s ?feet|forehead lines/i, 'Wrinkle Relaxer'],
+  [/filler|lips?\b|cheek|chin|jaw|tear ?trough|radiesse|volume/i, 'Filler'],
+  [/acne|pimple|breakout|scar/i, 'Acne & scarring'],
+  [/pigment|melasma|sun ?spots?|freckle|age spots?/i, 'Pigmentation'],
+  [/redness|rosacea|vascular|veins?\b|capillar/i, 'Redness & vascular'],
+  [/ulthera|tighten|sagg|hifu|skin lift|laxity/i, 'Skin tightening'],
+  [/laser|ipl|bbl|opl|genesis/i, 'Laser'],
+  [/peel/i, 'Peel'],
+  [/needl|dermaglow|restoraglow|collagen/i, 'Skin needling'],
+  [/fat|body|coolsculpt|trusculpt|vanquish|double chin/i, 'Body sculpting'],
+  [/skin ?care|serum|cream|sunscreen|products?\b/i, 'Skincare'],
+  [/consult/i, 'Consultation'],
+];
+
+function handleTawk_(token, body) {
+  const props = PropertiesService.getScriptProperties();
+  const want = String(props.getProperty('TAWK_TOKEN') || '');
+  if (!want || token !== want) { console.warn('Tawk.to: a webhook arrived with the wrong token. Ignored.'); return { ok: false }; }
+  const prop = String(props.getProperty('TAWK_PROPERTY_ID') || '');
+  if (prop && body.property && String(body.property.id || '') !== prop) return { ok: true, skipped: 'another Tawk.to property' };
+  const ev = String(body.event || '');
+  try {
+    if (ev === 'chat:transcript_created') return tawkChat_(body);
+    if (ev === 'ticket:create') return tawkTicket_(body);
+    return { ok: true, skipped: ev || 'no event' };
+  } catch (err) {
+    console.error('Tawk.to ' + ev + ' failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: false };
+  }
+}
+
+// Recorded first, so a repeat of the same chat is ignored. false: already done.
+function tawkClaim_(cfg, path, data) {
+  return mktCommit_(cfg, [{
+    update: { name: fsBase_(cfg) + '/' + path, fields: toFields_(Object.assign({ at: new Date().toISOString(), status: 'working' }, data)) },
+    currentDocument: { exists: false },
+  }]);
+}
+
+// Mobiles and emails the visitor typed (agents' messages aren't read: they hold the clinic's own details)
+function tawkScrape_(text) {
+  const out = { phone: '', email: '', name: '' };
+  const em = (String(text).match(PROS_EMAIL_RE_) || []).filter(function (e) { return !/dermedica/i.test(e); })[0];
+  if (em) out.email = em.toLowerCase();
+  const mob = (String(text).match(/(?:\+?61[\s-]?|0)4[\d\s-]{8,11}/g) || [])
+    .map(function (s) { return s.replace(/[^\d+]/g, ''); })
+    .filter(function (s) { return /^04\d{8}$/.test(prosPhoneKey_(s)); })[0];
+  if (mob) out.phone = mob;
+  const nm = /(?:^|\n)\s*(?:full )?name\s*[:\-]\s*([^\n]{2,60})/i.exec(String(text));   // pre-chat form answers
+  if (nm) out.name = nm[1].trim();
+  return out;
+}
+const tawkConcern_ = function (text) {
+  const hit = TAWK_CONCERNS_.filter(function (c) { return c[0].test(String(text)); })[0];
+  return hit ? hit[1] : '';
+};
+// Tawk.to's made-up names ("V1561719148780935") don't count; an email can stand in for a name
+function tawkName_(raw, email) {
+  let n = String(raw || '').replace(/\s+/g, ' ').trim();
+  if (/^V\d{6,}$/i.test(n) || /^visitor\b/i.test(n) || /@/.test(n)) n = '';
+  if (!n && email) {
+    const local = String(email).split('@')[0].replace(/[._-]+/g, ' ').replace(/\d+/g, ' ').trim();
+    if (local.split(' ').length >= 2) n = local;
+  }
+  return prosTidyName_(n);
+}
+
+function tawkChat_(body) {
+  const chat = body.chat || {};
+  const id = String(chat.id || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80);
+  if (!id) return { ok: true, skipped: 'no chat id' };
+  const cfg = getConfig_();
+  const path = TAWK_DONE_ + '/c_' + id;
+  if (!tawkClaim_(cfg, path, { kind: 'chat', chatId: id })) return { ok: true, already: true };
+
+  const msgs = (Array.isArray(chat.messages) ? chat.messages : []).filter(function (m) { return m && m.msg && (m.type || 'msg') === 'msg'; });
+  const from = function (m) { return (m.sender && m.sender.t) || ''; };
+  const vis = msgs.filter(function (m) { return from(m) === 'v'; });
+  const ag = msgs.filter(function (m) { return from(m) === 'a'; });
+  if (!vis.length) { fsPatch_(cfg, path, { status: 'skipped', reason: 'The visitor did not write anything' }); return { ok: true, skipped: 'empty' }; }
+
+  const visText = vis.map(function (m) { return String(m.msg); }).join('\n');
+  const formText = msgs.filter(function (m) { return from(m) === 's'; }).map(function (m) { return String(m.msg); }).join('\n');
+  const v = chat.visitor || {};
+  const sv = tawkScrape_(visText);
+  const sf = tawkScrape_(formText);
+  const email = isEmail_(mktEmail_(v.email)) ? mktEmail_(v.email) : (sv.email || sf.email);
+  const phone = sv.phone || sf.phone;
+  const name = tawkName_(v.name, email) || tawkName_(sf.name, '');
+  if (!phone && !email) {
+    fsPatch_(cfg, path, { status: 'skipped', reason: 'No mobile or email to follow up', name: name });
+    return { ok: true, skipped: 'no contact details' };
+  }
+
+  const set = prosSettings_(cfg);
+  if (set.tawkSkipPatients) {
+    const pt = prosFindPatient_(cfg, prosPhoneKey_(phone), email, name);
+    if (pt.patientId) {
+      fsPatch_(cfg, path, { status: 'skipped', reason: 'Already a patient (' + pt.patientName + ')', patientId: pt.patientId });
+      return { ok: true, skipped: 'existing patient' };
+    }
+  }
+
+  // The team member who chatted, if they're in Staff
+  const agent = ag.length ? String((ag[0].sender && ag[0].sender.n) || 'The team') : '';
+  const staffHit = agent ? getStaffDocs_().filter(function (s) { return s.active !== false && kitSameStaff_(s.name, agent); }) : [];
+  const transcript = msgs.filter(function (m) { return from(m) !== 's'; }).map(function (m) {
+    return (from(m) === 'v' ? (name || 'Visitor') : String((m.sender && m.sender.n) || 'Dermedica')) + ': ' + String(m.msg).replace(/\s+/g, ' ').trim();
+  }).join('\n').slice(0, 2000);
+
+  const r = prosAddEnquiry_(cfg, set, {
+    name: name, phone: phone, email: email, pref: '', age: '', source: 'Online chat',
+    concern: tawkConcern_(visText), message: transcript,
+    at: String((vis[0] && vis[0].time) || body.time || new Date().toISOString()), gmailId: '', link: '',
+    assignTo: staffHit.length === 1 ? staffHit[0].id : '',
+    chatAgent: agent, chatAgentAt: ag.length ? String(ag[0].time || '') : '',
+  }, null, false);
+  fsPatch_(cfg, path, { status: r.again ? 'added to an existing prospect' : 'added', prospectId: r.id, name: name });
+  if (!agent) prosNotify_(cfg, set, r, { phone: phone, email: email, pref: '', age: '' });   // nobody answered: tell the team
+  console.log('Tawk.to chat ' + id + ': ' + (r.again ? 'another enquiry for ' : 'new prospect ') + r.name);
+  return { ok: true, prospectId: r.id };
+}
+
+// An offline message (or a ticket from the widget)
+function tawkTicket_(body) {
+  const t = body.ticket || {};
+  const req = body.requester || {};
+  const id = String(t.id || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 80);
+  if (!id) return { ok: true, skipped: 'no ticket id' };
+  if (String(req.type || '') === 'agent') return { ok: true, skipped: 'made by an agent' };
+  const cfg = getConfig_();
+  const path = TAWK_DONE_ + '/t_' + id;
+  if (!tawkClaim_(cfg, path, { kind: 'ticket', ticketId: id })) return { ok: true, already: true };
+
+  const text = [t.subject, t.message].filter(Boolean).join('\n');
+  const sc = tawkScrape_(text);
+  const email = isEmail_(mktEmail_(req.email)) ? mktEmail_(req.email) : sc.email;
+  const phone = sc.phone;
+  const name = tawkName_(req.name, email);
+  if (!phone && !email) { fsPatch_(cfg, path, { status: 'skipped', reason: 'No mobile or email to follow up' }); return { ok: true, skipped: 'no contact details' }; }
+
+  const set = prosSettings_(cfg);
+  if (set.tawkSkipPatients) {
+    const pt = prosFindPatient_(cfg, prosPhoneKey_(phone), email, name);
+    if (pt.patientId) { fsPatch_(cfg, path, { status: 'skipped', reason: 'Already a patient (' + pt.patientName + ')' }); return { ok: true, skipped: 'existing patient' }; }
+  }
+  const r = prosAddEnquiry_(cfg, set, {
+    name: name, phone: phone, email: email, pref: '', age: '', source: 'Online chat',
+    concern: tawkConcern_(text), message: ('Left a message: ' + text).slice(0, 2000),
+    at: String(body.time || new Date().toISOString()), gmailId: '', link: '',
+  }, null, false);
+  fsPatch_(cfg, path, { status: r.again ? 'added to an existing prospect' : 'added', prospectId: r.id, name: name });
+  prosNotify_(cfg, set, r, { phone: phone, email: email, pref: '', age: '' });
+  return { ok: true, prospectId: r.id };
+}
+
+// Run ONCE from the editor: makes the secret and logs the address to paste into Tawk.to
+function setupTawk() {
+  const p = PropertiesService.getScriptProperties();
+  let t = p.getProperty('TAWK_TOKEN');
+  if (!t) { t = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, ''); p.setProperty('TAWK_TOKEN', t); }
+  const url = mktWebAppUrl_();
+  console.log(url
+    ? 'Paste this into Tawk.to → Administration → Webhooks:\n' + url + '?tawk=' + t
+    : 'Add WEBAPP_URL (the web app /exec address) in Script Properties first, then run this again.');
+}
+
+// Run from the editor to try it without Tawk.to (uses a made-up chat, and adds a real prospect)
+function testTawk() {
+  const id = 'test' + Date.now();
+  console.log(JSON.stringify(handleTawk_(PropertiesService.getScriptProperties().getProperty('TAWK_TOKEN'), {
+    event: 'chat:transcript_created', time: new Date().toISOString(),
+    chat: {
+      id: id,
+      visitor: { name: 'Test Chatperson', email: 'test.chatperson@example.com', city: 'Perth', country: 'AU' },
+      messages: [
+        { sender: { t: 'v' }, type: 'msg', msg: 'Hi, how much is anti-wrinkle for my forehead? My mobile is 0412 345 678', time: new Date().toISOString() },
+        { sender: { t: 'a', n: 'Reception' }, type: 'msg', msg: 'Hi! Call us on 08 9000 0000 and we can book a consult.', time: new Date().toISOString() },
+      ],
+    },
+  })));
 }

@@ -581,6 +581,9 @@ async function settingsDialog(set, onSaved) {
       <h4 class="pr-h4">Share new web enquiries in turn between</h4>
       <p class="muted pr-small">The person with the fewest open prospects (working today) gets the next one. Nobody ticked: they wait on the board for anyone.</p>
       ${ticks("team", set.team)}
+      <h4 class="pr-h4">Online chat (Tawk.to)</h4>
+      <label class="fe-check"><input type="checkbox" name="tawkSkip"${set.tawkSkipPatients ? " checked" : ""} />
+        Skip chats from existing patients <small class="muted">(e.g. moving an appointment)</small></label>
       <label class="lh-field"><span class="lh-label">Flag as "Not contacted" after (hours)</span>
         <input name="hours" type="number" min="1" max="168" class="fe-input" value="${esc(set.respondHours || 24)}" /></label>
       <label class="lh-field"><span class="lh-label">Reasons a prospect is lost (one per line)</span>
@@ -602,6 +605,7 @@ async function settingsDialog(set, onSaved) {
       const pick = (n) => [...c.form.querySelectorAll(`[name="${n}"]:checked`)].map((x) => x.value);
       await api("saveSettings", {
         notify: pick("notify"), team: pick("team"), respondHours: c.form.elements.hours.value,
+        tawkSkipPatients: c.form.elements.tawkSkip.checked,
         lostReasons: c.form.elements.reasons.value.split(/\n+/).map((s) => s.trim()).filter(Boolean),
       });
       c.close();
