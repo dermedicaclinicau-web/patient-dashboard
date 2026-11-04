@@ -190,3 +190,33 @@ function seo12Lookup_(input) {
     pagesLosingMostVisitors: losing,
   });
 }
+
+/** Run from the editor: checks PSI_KEY can use PageSpeed Insights */
+function testPsiKey() {
+  const key = String(PropertiesService.getScriptProperties().getProperty('PSI_KEY') || '').trim();
+  if (!key) { console.log('PSI_KEY is missing from Script Properties.'); return; }
+  const url = 'https://www.googleapis.com/pagespeedonline/v5/runPagespeed?strategy=mobile&category=performance&url=' +
+    encodeURIComponent(seoOrigin_() + '/') + '&key=' + encodeURIComponent(key);
+  const r = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  const code = r.getResponseCode();
+  if (code === 200) {
+    const j = JSON.parse(r.getContentText());
+    const s = j.lighthouseResult && j.lighthouseResult.categories.performance.score;
+    console.log('✓ PSI_KEY works. Home page mobile speed score: ' + (s != null ? Math.round(s * 100) : '?'));
+    return;
+  }
+  let err = {};
+  try { err = JSON.parse(r.getContentText()).error || {}; } catch (e) { /* not JSON */ }
+  const info = (err.details || []).filter(function (d) { return d.reason; })[0] || {};
+  const fix = {
+    API_KEY_SERVICE_BLOCKED: 'The key is restricted to other APIs. Credentials → the key → API restrictions: add "PageSpeed Insights API".',
+    SERVICE_DISABLED: 'PageSpeed Insights API is off in the key\'s project. Enable it: ' + ((info.metadata || {}).activationUrl || 'APIs & Services → Library'),
+    API_KEY_HTTP_REFERRER_BLOCKED: 'The key only works from certain websites. Set Application restrictions to None.',
+    API_KEY_IP_ADDRESS_BLOCKED: 'The key only works from certain IP addresses. Set Application restrictions to None.',
+    API_KEY_INVALID: 'The key is wrong or deleted. Copy it again from Credentials.',
+    RATE_LIMIT_EXCEEDED: 'Too many checks today. It resets at midnight Pacific time (about 3–4pm Perth).',
+  }[info.reason] || '';
+  console.log('✗ PageSpeed ' + code + (info.reason ? ' (' + info.reason + ')' : '') + ': ' + String(err.message || r.getContentText()).slice(0, 300));
+  if ((info.metadata || {}).consumer) console.log('  The key belongs to ' + info.metadata.consumer + '. Check you edited that project.');
+  if (fix) console.log('  Fix: ' + fix);
+}

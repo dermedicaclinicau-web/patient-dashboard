@@ -2512,10 +2512,13 @@ function handleSendTaskEmail_(body) {
   const answers = taskAnswersClean_(body.answers);
   const sentMs = Date.now();
   const threadIds = [];
+  const runId = 'run_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20);   // made before sending: the form links use it
   recipients.forEach(function (r) {
     const subject = subjectRaw.replace(/\{First name\}/gi, r.first).replace(/\{Full name\}/gi, r.name);
-    const html = fillPersonTagsInLinks_(inlined.html, { 'first name': r.first, 'full name': r.name })
+    let html = fillPersonTagsInLinks_(inlined.html, { 'first name': r.first, 'full name': r.name })
       .replace(/\{First name\}/gi, escH(r.first)).replace(/\{Full name\}/gi, escH(r.name));
+    // "Open a form" buttons: this patient's own link (once per send). "tk." keeps it apart from campaign counts.
+    if (task.category === 'patient' && patientId) html = mktFormLinks_(html, 'tk.' + runId, patientId);
     const mail = { to: r.email, subject: subject, htmlBody: html, body: emailHtmlToText_(html), name: 'Dermedica Clinic' };
     if (cc) mail.cc = cc;
     if (attachments.length) mail.attachments = attachments;
@@ -2525,7 +2528,6 @@ function handleSendTaskEmail_(body) {
   cache.put(rlKey, String(sentThisHour + recipients.length), 3600);
 
   // Task history (written only here; staff can read it, nobody can change it)
-  const runId = 'run_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20);
   try {
     commitWrites_(cfg, [updateWrite_(cfg, 'task_runs/' + runId, {
       taskId: taskId,
@@ -4416,8 +4418,12 @@ function schedDeliver_(cfg, rec) {
   const hasImages = Object.keys(inlined.images).length > 0;
   const sentMs = Date.now();
   const threadIds = [];
+  const runId = 'run_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20);   // made before sending: the form links use it
   recipients.forEach(function (r) {
     const subj = subject.replace(/\{First name\}/gi, r.first).replace(/\{Full name\}/gi, r.name);
+    let body = fillPersonTagsInLinks_(inlined.html, { 'first name': r.first, 'full name': r.name })
+      .replace(/\{First name\}/gi, escH(r.first)).replace(/\{Full name\}/gi, escH(r.name));
+    if (rec.category === 'patient' && pid) body = mktFormLinks_(body, 'tk.' + runId, pid);
     const body = fillPersonTagsInLinks_(inlined.html, { 'first name': r.first, 'full name': r.name })
       .replace(/\{First name\}/gi, escH(r.first)).replace(/\{Full name\}/gi, escH(r.name));
     const mail = { to: r.email, subject: subj, htmlBody: body, body: emailHtmlToText_(body), name: 'Dermedica Clinic' };
@@ -4427,7 +4433,6 @@ function schedDeliver_(cfg, rec) {
     threadIds.push(taskSendMail_(mail));
   });
 
-  const runId = 'run_' + Utilities.getUuid().replace(/-/g, '').slice(0, 20);
   try {
     commitWrites_(cfg, [updateWrite_(cfg, 'task_runs/' + runId, {
       taskId: String(rec.taskId || ''), taskName: String(rec.taskName || ''), category: String(rec.category || ''),
@@ -8303,6 +8308,7 @@ function flowSendPatient_(cfg, flow, step, run, ctx, memo, tester) {
   }
   if (FLOW_SSP_TABLE_RE_().test(body)) body = flowInsertSspTable_(body, flowSspTableHtml_(cfg, ctx, memo, (flow.style || {}).accent));
   let html = sanitizeEmailHtml_(flowFillHtml_(body, vals), c.mode === 'html');
+  html = mktFormLinks_(html, tester ? 'test' : 'fl.' + run._id, ctx.pid);   // "Open a form" buttons
   if (c.promo) html += mktFooterHtml_(tester ? '' : ctx.pid, tester ? tester.email : ctx.who.email, tester ? 'test' : 'flow_' + flow._id);
   let subject = flowFill_(flowTaskTokens_(String(c.subject || ''), tctx, false)
     .replace(FLOW_SSP_TABLE_RE_(), '').replace(SCHED_APPTS_RE_(), ''), vals, false)

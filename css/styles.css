@@ -10523,3 +10523,7 @@ body.ws-pe-open { overflow: hidden; }
 .seo-h-try{white-space:normal !important;min-width:240px;max-width:360px;font-size:12.5px;line-height:1.4;color:var(--text-muted,#6b7280)}
 @media (max-width:700px){.seo-bn-dev{grid-template-columns:60px 1fr 56px}.seo-bn-dev .seo-note{display:none}}
 
+/* Task Builder: form links for buttons */
+.tb-formlinks { display: flex; flex-direction: column; gap: .4rem; margin-top: .4rem; padding-top: .7rem; border-top: 1px dashed var(--border); }
+.tb-formlinks:empty { display: none; }
+

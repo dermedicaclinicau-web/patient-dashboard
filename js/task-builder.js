@@ -343,6 +343,8 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   let schedState = null; // the scheduler's record for this task (count, last send, problems)
   let schedPatient = null; // the patient automatic sends are about
   let usedBy = null; // email flows started by this task (only readable with Build email flows)
+  let onlineForms = null; // published forms patients can fill in online (for button links)
+  const FORM_PAGE = "https://dermedicaclinicau-web.github.io/patient-dashboard/form.html"; // must match PF_PAGE_ in Code.gs
   let schSeq = 0, schTimer = null;
   task.schedule = cleanSchedule(task.schedule);
 
@@ -374,6 +376,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
             <div class="tb-field"><span>Message</span><div data-role="editor"></div></div>
             <div class="tb-chips" data-role="chips"></div>
             <small class="muted">Tap a blank to add it where your cursor is. Use the toolbar for headings, colours, pictures, buttons and dividers. Staff can still change the wording before sending.</small>
+            <div class="tb-formlinks" data-role="formlinks"></div>
           </section>
           <div class="tb-sec" data-sec="bottom"></div>
         </div>
@@ -425,6 +428,7 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     msgEl.textContent = "";
     renderPreview();
     renderBar();
+    renderFormLinks();
     clearTimeout(saveTimer);
     saveTimer = setTimeout(flush, 800);
   }
@@ -917,10 +921,32 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   }
 
   // Everything except the message editor, which stays put while you work
+  function renderFormLinks() {
+    const box = root.querySelector('[data-role="formlinks"]');
+    if (!box) return;
+    if (task.category !== "patient") {
+      box.innerHTML = '<small class="muted">Form buttons are only personalised in <strong>To Patient</strong> tasks.</small>';
+      return;
+    }
+    if (onlineForms === null) { box.innerHTML = '<small class="muted">Loading forms patients can fill in…</small>'; return; }
+    const used = [...String(task.body || "").matchAll(/form\.html#f=([A-Za-z0-9_-]{10,40})/g)].map((m) => m[1]);
+    const bad = [...new Set(used)].filter((fid) => !onlineForms.some((f) => f.id === fid));
+    box.innerHTML = `
+      <div class="tb-chipgroup"><span>Forms the patient can fill in (for buttons)</span>
+        ${onlineForms.length ? `<div class="fe-chiprow">${onlineForms.map((f) =>
+          `<button type="button" class="fe-ins is-smart" data-formlink="${esc(f.id)}" title="Copy the link, then paste it into a button">🔗 ${esc(f.name)}</button>`).join("")}</div>`
+          : '<p class="tb-none">No forms are set up yet. In Form Builder → Form settings, tick “Patients can fill this in online”, then publish the form.</p>'}
+      </div>
+      <small class="muted">Tap a form to copy its link. Add a button with the toolbar's button tool and paste it as the link.
+        Each patient gets their own link with their details filled in, and what they send is saved to their record.</small>
+      ${bad.length ? `<p class="tb-none tb-bad">${bad.length} button link${bad.length === 1 ? " points" : "s point"} to a form that isn't set up for patients to fill in online, so ${bad.length === 1 ? "it" : "they"} won't work.</p>` : ""}`;
+  }
+
   function renderForm() {
     topSec.innerHTML = aboutHtml() + recipientsHtml() + fieldsHtml();
     bottomSec.innerHTML = designHtml() + attachmentsHtml() + (task.category === "staff" ? scheduleHtml() : "");
     renderChips();
+    renderFormLinks();
   }
 
   /* ---------- Preview ---------- */
@@ -1241,6 +1267,24 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
   renderForm();
   renderPreview();
   loadSources();
+
+  getDocs(query(collection(db, "form_templates"), where("status", "==", "live")))
+    .then((snap) => {
+      onlineForms = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+        .filter((f) => f.online && f.online.on === true && !["treatment", "prescription"].includes(f.category))
+        .map((f) => ({ id: f.id, name: String(f.name || "Form") }))
+        .sort((a, b) => a.name.localeCompare(b.name, "en-AU"));
+    })
+    .catch((err) => { console.warn("Online forms not loaded:", err); onlineForms = []; })
+    .finally(() => { if (root.isConnected) renderFormLinks(); });
+
+  $('[data-role="formlinks"]').addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-formlink]");
+    if (!b) return;
+    const url = `${FORM_PAGE}#f=${b.dataset.formlink}`;
+    try { await navigator.clipboard.writeText(url); showToast("Link copied. Paste it as a button's link."); }
+    catch { window.prompt("Copy this link, then paste it as a button's link:", url); }
+  });
 
   getLetterhead()
     .then((lh) => { letterhead = lh; })
