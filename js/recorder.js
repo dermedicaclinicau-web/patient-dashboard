@@ -41,6 +41,7 @@ export function getState() {
   return {
     ...l,   // older callers read status / patient from the top
     live: l,
+    remote: remote ? { ...remote } : null,   // a recording in another tab
     jobs: [...jobs.values()].sort((a, b) => (a.at || 0) - (b.at || 0)).map((j) => ({ ...j })),
   };
 }
@@ -52,6 +53,8 @@ export function subscribe(fn) {
 }
 
 function emit() {
+  const liveKey = `${live.status}|${live.recId}`;
+  if (liveKey !== lastLiveKey) { lastLiveKey = liveKey; announceLive(); }
   const s = getState();
   listeners.forEach((fn) => fn(s));
 }
@@ -60,6 +63,69 @@ function emit() {
 export const isRecorderBusy = () => LIVE_BUSY.includes(live.status);
 // A finished recording is still on its way up
 export const hasPendingUploads = () => [...jobs.values()].some((j) => j.status === "uploading");
+
+/* ===================== Across tabs ===================== */
+// Locks: one live recording on this computer at a time, and each recording belongs to the tab that's
+// recording or uploading it, so another tab never uploads it too. A lock is let go by itself when its tab closes.
+const MIC_LOCK = "dm-mic";
+const recLock = (recId) => `dm-rec-${recId}`;
+const held = new Map();   // lock name → let it go
+
+function holdLock(name) {
+  if (!navigator.locks) return Promise.resolve(true);   // older browsers: no locks, as before
+  if (held.has(name)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    navigator.locks.request(name, { ifAvailable: true }, (lock) => {
+      if (!lock) { resolve(false); return undefined; }
+      return new Promise((release) => { held.set(name, release); resolve(true); });
+    }).catch(() => resolve(true));
+  });
+}
+function dropLock(name) {
+  const release = held.get(name);
+  if (release) { held.delete(name); release(); }
+}
+function dropAllLocks() { [...held.keys()].forEach(dropLock); }
+
+// Tells the other tabs whether this one is recording (so they show "Recording in another tab")
+const TAB_ID = Math.random().toString(36).slice(2);
+let remote = null;        // { tab, status, recId, patient, at } — a recording in another tab
+let lastLiveKey = "";
+let lastBeat = 0;
+let bc = null;
+try { bc = new BroadcastChannel("dm-rec-live"); } catch { bc = null; }
+
+function announceLive() {
+  if (!bc) return;
+  lastBeat = Date.now();
+  const busy = LIVE_BUSY.includes(live.status);
+  try {
+    bc.postMessage({ type: "live", tab: TAB_ID, status: busy ? live.status : "idle",
+      recId: busy ? live.recId : null, patient: busy ? live.patient : null });
+  } catch { /* not essential */ }
+}
+const beat = () => { if (Date.now() - lastBeat > 4000) announceLive(); };
+
+if (bc) {
+  bc.onmessage = (e) => {
+    const m = e.data || {};
+    if (m.tab === TAB_ID) return;
+    if (m.type === "ask") { if (LIVE_BUSY.includes(live.status)) announceLive(); return; }
+    if (m.type !== "live") return;
+    if (m.status === "idle") { if (remote && remote.tab === m.tab) { remote = null; emit(); } return; }
+    const changed = !remote || remote.recId !== m.recId || remote.status !== m.status;
+    remote = { tab: m.tab, status: m.status, recId: m.recId, patient: m.patient, at: Date.now() };
+    if (changed) emit();
+  };
+  try { bc.postMessage({ type: "ask", tab: TAB_ID }); } catch { /* not essential */ }
+}
+// A tab that crashed never says it stopped: forget it after 15 seconds of silence
+setInterval(() => { if (remote && Date.now() - remote.at > 15000) { remote = null; emit(); } }, 5000);
+window.addEventListener("pagehide", () => {
+  if (bc && LIVE_BUSY.includes(live.status)) {
+    try { bc.postMessage({ type: "live", tab: TAB_ID, status: "idle" }); } catch { /* closing */ }
+  }
+});
 
 /* ===================== IndexedDB: crash-safe chunk storage ===================== */
 
@@ -192,6 +258,7 @@ function stopStream() {
 function startTick() {
   clearInterval(tickTimer);
   tickTimer = setInterval(() => {
+    beat();   // other tabs know this one is still recording (paused too)
     if (live.status !== "recording") return;
     emit();
     if (Date.now() - lastMetaSave > 10_000) {
@@ -236,12 +303,20 @@ export async function startRecording(patient, staff) {
     throw new Error("This browser can't record audio. Please use Chrome, Edge or Safari.");
   }
 
-  stream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
-  });
-
+  if (!(await holdLock(MIC_LOCK))) {
+    throw new Error(`A recording${remote && remote.patient ? ` for ${remote.patient.name}` : ""} is running in another tab. Complete or cancel it there first.`);
+  }
   const mime = pickMime();
-  mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime, audioBitsPerSecond: 32000 } : undefined);
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+    });
+    mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime, audioBitsPerSecond: 32000 } : undefined);
+  } catch (err) {
+    stopStream();
+    dropLock(MIC_LOCK);
+    throw err;
+  }
 
   const recId = `REC-${toDateKey().replace(/-/g, "")}-${Date.now().toString(36).toUpperCase()}`;
   Object.assign(live, {
@@ -252,6 +327,7 @@ export async function startRecording(patient, staff) {
     mime: mediaRecorder.mimeType || mime || "audio/webm",
   });
   chunkSeq = 0;
+  await holdLock(recLock(recId));   // this tab looks after this recording until it's uploaded
   await putMeta(metaFromLive());
 
   // Every chunk is saved to the device as it arrives
@@ -300,6 +376,7 @@ export async function completeRecording() {
   emit();
 
   await stopRecorder();
+  dropLock(MIC_LOCK);          // the microphone is free; the recording itself stays this tab's until uploaded
   const meta = metaFromLive();
   await putMeta(meta).catch(() => {});
   resetLive();                 // ready for the next patient straight away
@@ -313,6 +390,8 @@ export async function cancelRecording() {
   const id = live.recId;
   await stopRecorder();
   await deleteRecording(id).catch(() => {});
+  dropLock(MIC_LOCK);
+  dropLock(recLock(id));
   resetLive();
 }
 
@@ -329,6 +408,7 @@ export async function suspendRecorder() {
   watchers.clear();
   jobs.clear();
   checkedFor = "";
+  dropAllLocks();
   resetLive();
 }
 
@@ -360,6 +440,7 @@ async function serverCopy(recId) {
 // Already uploaded: clear the device copy, and either drop the chip or follow its notes
 async function settleUploaded(recId, status) {
   await deleteRecording(recId).catch((err) => console.warn("Device copy not cleared:", err));
+  dropLock(recLock(recId));
   uploads.delete(recId);
   if (!jobs.has(recId)) return;
   if (status === "ready" || status === "deleted") {
@@ -374,8 +455,15 @@ async function settleUploaded(recId, status) {
 }
 async function runUpload(recId) {
   if (!jobs.has(recId) || uploads.has(recId)) return;
+  uploads.set(recId, null);   // claims it straight away, so this tab doesn't start it twice
+  if (!(await holdLock(recLock(recId)))) {   // another tab is recording or uploading it
+    uploads.delete(recId);
+    jobs.delete(recId);
+    saveTracked();
+    emit();
+    return;
+  }
   setJob(recId, { status: "uploading", progress: 0, error: "" });
-  uploads.set(recId, null);   // claims it while we check, so it isn't started twice
   const already = await serverCopy(recId);
   if (already) { await settleUploaded(recId, already); return; }
   if (!jobs.has(recId)) { uploads.delete(recId); return; }   // logged out while checking
@@ -428,6 +516,7 @@ async function runUpload(recId) {
     });
 
     await deleteRecording(recId); // the device copy is no longer needed
+    dropLock(recLock(recId));
     startProcessing(recId);
   } catch (err) {
     uploads.delete(recId);
@@ -509,6 +598,7 @@ export async function discardJob(recId) {
   const j = jobs.get(recId);
   if (!j || !["recovered", "error"].includes(j.status)) return;
   await deleteRecording(recId).catch(() => {});
+  dropLock(recLock(recId));
   jobs.delete(recId);
   emit();
 }
@@ -531,13 +621,15 @@ export async function checkForUnfinished() {
   // 1. Audio still on this device (never uploaded). Your own goes straight up; anyone else's waits for a tap.
   try {
     const metas = await getAllMeta();
-    metas.forEach((m) => {
-      if (!m || !m.recId || m.recId === live.recId || jobs.has(m.recId)) return;
+    for (const m of metas) {
+      if (!m || !m.recId || m.recId === live.recId || jobs.has(m.recId)) continue;
+      // Still being recorded or uploaded in another tab: not ours to pick up
+      if (!(await holdLock(recLock(m.recId)))) continue;
       addJob({ ...m, at: Date.parse(m.startedAt) || Date.now() }, "recovered");
       if (m.staff && m.staff.uid === me) runUpload(m.recId);
       // On the server already: forget the device copy (their notes are theirs to review)
       else serverCopy(m.recId).then((s) => { if (s) settleUploaded(m.recId, "ready"); });
-    });
+    }
   } catch (err) {
     console.warn("Recording recovery check failed:", err);
   }

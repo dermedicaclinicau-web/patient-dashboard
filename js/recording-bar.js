@@ -164,10 +164,15 @@ function announce(s) {
 
 /* ---------- Drawing ---------- */
 
-function liveParts(L) {
+function liveParts(L, remote) {
   if (L.status === "idle") {
+    if (remote) {
+      return { cls: "", html: "", top: `<span class="tb-rec-btn is-elsewhere"
+        title="Recording${remote.patient ? ` ${escapeHtml(remote.patient.name)}` : ""} in another tab. Complete it there.">
+        <span class="rec-dot"></span><span>Recording in another tab</span></span>` };
+    }
     return { cls: "", html: "", top: context ? `<button type="button" class="tb-rec-btn" data-rec="start"
-      title="Record this appointment for ${escapeHtml(context.name)}">${ICONS.mic}<span>Start appointment</span></button>` : "" };
+      title="Opens a new tab to record ${escapeHtml(context.name)}'s appointment">${ICONS.mic}<span>Start appointment</span></button>` : "" };
   }
   const chip = patientChip(L.patient);
   const warn = otherPatientWarning(L);
@@ -244,7 +249,7 @@ function render(s) {
   if (!bar) return;
   const L = s.live;
   announce(s);
-  const key = [L.status, L.recId, context && context.id,
+  const key = [L.status, L.recId, context && context.id, s.remote ? `${s.remote.recId}:${s.remote.status}` : "",
     s.jobs.map((j) => `${j.recId}:${j.status}:${j.stage}`).join(",")].join("|");
 
   // Same layout: just update the live numbers
@@ -267,7 +272,7 @@ function render(s) {
   }
   lastKey = key;
 
-  const { cls, html, top } = liveParts(L);
+  const { cls, html, top } = liveParts(L, s.remote);
   const liveRow = html ? `<div class="rec-live ${cls}">${html}</div>` : "";
   bar.className = "rec-bar is-stack";
   bar.innerHTML = liveRow;          // only the live recording; the background ones are on My dashboard
@@ -298,6 +303,11 @@ async function onClick(e) {
   try {
     if (action === "start") {
       if (!context) return;
+      if (getState().remote) { showToast("A recording is running in another tab. Complete it there first."); return; }
+      const url = `${location.href.split("#")[0]}#/consult/new/${encodeURIComponent(context.id)}`;
+      if (window.open(url, "_blank")) return;   // the Consultation tab records it
+      // Pop-ups blocked: record in this tab, as before
+      showToast("Pop-ups are blocked, so this appointment is recording in this tab.");
       btn.disabled = true;
       await startRecording(context, staff);
     } else if (action === "pause") {

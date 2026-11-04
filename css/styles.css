@@ -10791,3 +10791,59 @@ body.ws-pe-open { overflow: hidden; }
   font-style: normal; font-size: .7em; font-weight: 700; letter-spacing: .03em; text-transform: uppercase;
   line-height: 1.5; border: 1px solid currentColor; background: rgba(255, 255, 255, .65);
 }
+
+/* Consultation tab */
+body.is-consult #rec-bar, body.is-consult #tb-rec { display: none !important; }
+.tb-rec-btn.is-elsewhere { cursor: default; opacity: .85; }
+.cs-page { max-width: 1100px; }
+.cs-head { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; align-items: center; gap: 1rem;
+  padding: 1rem 1.1rem; margin-bottom: 1rem; background: #fff; border: 1px solid #e2e8f0; border-radius: 16px;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, .05); }
+.cs-av { flex: none; width: 46px; height: 46px; border-radius: 50%; display: grid; place-items: center;
+  font-weight: 700; color: #fff; background: hsl(var(--h) 45% 50%); }
+.cs-who { flex: 1; min-width: 200px; }
+.cs-who h2 { margin: 0; font-size: 1.3rem; }
+.cs-who p { margin: 0; }
+.cs-eyebrow { font-size: .72rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #0f766e; }
+.cs-ctrl { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+.cs-rec { display: inline-flex; align-items: center; gap: .45rem; padding: .45rem .85rem; border-radius: 999px;
+  background: #fef2f2; color: #b91c1c; font-weight: 600; }
+.cs-rec b { font-size: 1.1rem; font-variant-numeric: tabular-nums; }
+.cs-rec small { font-weight: 500; opacity: .8; }
+.cs-rec.is-paused { background: #fffbeb; color: #b45309; }
+.cs-rec.is-busy { background: #f1f5f9; color: #334155; }
+.cs-dot { width: 10px; height: 10px; border-radius: 50%; background: currentColor; animation: cs-pulse 1.2s ease-in-out infinite; }
+.cs-rec.is-paused .cs-dot { animation: none; }
+@keyframes cs-pulse { 50% { opacity: .25; } }
+.cs-steps { list-style: none; display: flex; flex-wrap: wrap; gap: .4rem; padding: 0; margin: 0 0 .9rem; }
+.cs-steps li { flex: 1; min-width: 140px; display: flex; align-items: center; gap: .5rem; padding: .6rem .75rem;
+  border-radius: 12px; background: #f8fafc; border: 1px solid #e2e8f0; color: #94a3b8; font-weight: 600; font-size: .9rem; }
+.cs-steps li span { flex: none; width: 1.5rem; height: 1.5rem; border-radius: 50%; display: grid; place-items: center;
+  font-size: .78rem; background: #e2e8f0; color: #64748b; }
+.cs-steps li small { margin-left: auto; font-weight: 500; }
+.cs-steps li.is-done { color: #047857; background: #ecfdf5; border-color: #a7f3d0; }
+.cs-steps li.is-done span { background: #10b981; color: #fff; }
+.cs-steps li.is-now { color: #0f172a; background: #fff; border-color: #0f766e; }
+.cs-steps li.is-now span { background: #0f766e; color: #fff; animation: cs-pulse 1.4s infinite; }
+.cs-steps li.is-bad { color: #b91c1c; background: #fef2f2; border-color: #fecaca; }
+.cs-steps li.is-bad span { background: #ef4444; color: #fff; }
+.cs-note { margin: 0 0 .9rem; color: #475569; }
+.cs-alert { display: flex; flex-wrap: wrap; align-items: center; gap: .6rem; padding: .8rem 1rem; margin-bottom: .9rem;
+  border-radius: 12px; background: #fef2f2; border: 1px solid #fecaca; }
+.cs-alert p { flex: 1; min-width: 240px; margin: 0; }
+.cs-ready { display: flex; flex-wrap: wrap; align-items: center; gap: 1rem; padding: 1rem 1.1rem; border-radius: 14px;
+  background: #ecfdf5; border: 1px solid #a7f3d0; }
+.cs-ready div { flex: 1; min-width: 240px; }
+.cs-ready p { margin: .2rem 0 0; }
+.cs-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
+.cs-card { min-height: 110px; padding: .9rem 1rem; background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; }
+.cs-card.full { grid-column: 1 / -1; }
+.cs-card h4 { margin: 0 0 .5rem; font-size: .95rem; }
+.cs-card p { margin: 0; color: #94a3b8; font-size: .88rem; }
+.cs-card.is-busy::after { content: ""; display: block; height: 10px; margin-top: .7rem; border-radius: 6px;
+  background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%); background-size: 200% 100%;
+  animation: cs-shimmer 1.4s linear infinite; }
+@keyframes cs-shimmer { to { background-position: -200% 0; } }
+.cs-state { text-align: center; padding: 3rem 1rem; color: #475569; }
+.cs-state strong { display: block; font-size: 1.1rem; color: #0f172a; margin-bottom: .3rem; }
+@media (max-width: 760px) { .cs-grid { grid-template-columns: 1fr; } }
