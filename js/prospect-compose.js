@@ -39,6 +39,8 @@ const addDays = (key, n) => {
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
 };
+const hmText = (hm) => { const m = /^(\d{2}):(\d{2})$/.exec(hm || ""); if (!m) return ""; const h = +m[1]; return `${h % 12 || 12}:${m[2]} ${h < 12 ? "am" : "pm"}`; };
+const nowHm = () => new Date().toLocaleTimeString("en-GB", { timeZone: "Australia/Perth", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
 const longDate = (key) => (/^\d{4}-\d{2}-\d{2}$/.test(key || "")
   ? new Date(`${key}T12:00:00Z`).toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" })
   : "");
@@ -115,7 +117,8 @@ export function openProspectCompose({ prospect, kind = "email", myName = "", sen
           <div class="pc-phone" aria-hidden="true"><div class="pc-bubble pc-bubble-empty">Your text will look like this.</div></div>`}
 
         <div class="pc-follow">
-          <span class="pc-lbl">Follow up${p.nextFollowUp ? ` <em>(now ${esc(longDate(p.nextFollowUp))})</em>` : ""}</span>
+          <span class="pc-lbl">Follow up${p.nextFollowUp ? ` <em>(now ${esc(longDate(p.nextFollowUp))}${
+            p.nextFollowUpTime ? `, ${esc(hmText(p.nextFollowUpTime))}` : ""})</em>` : ""}</span>
           <div class="pc-seg">
             <button type="button" class="is-on" data-fu="keep">Leave as is</button>
             <button type="button" data-fu="2">In 2 days</button>
@@ -124,6 +127,7 @@ export function openProspectCompose({ prospect, kind = "email", myName = "", sen
           </div>
           <div class="pc-fu-more" hidden>
             <input type="date" class="fe-input pc-fu-date" min="${today}">
+            <input type="time" class="fe-input pc-fu-time" step="300" aria-label="Time (optional)" title="Time (optional)">
             <input class="fe-input pc-fu-note" maxlength="300" placeholder="What to follow up (optional)">
           </div>
         </div>
@@ -149,6 +153,7 @@ export function openProspectCompose({ prospect, kind = "email", myName = "", sen
   const fuMore = $(".pc-fu-more");
   const fuDate = $(".pc-fu-date");
   const fuNote = $(".pc-fu-note");
+  const fuTime = $(".pc-fu-time");
   const prevFocus = document.activeElement;
   let dirty = false;
   let busy = false;
@@ -231,7 +236,9 @@ export function openProspectCompose({ prospect, kind = "email", myName = "", sen
     if (fuMode === "keep") return {};
     const d = fuDate.value;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || d < perth().key) { showErr("Choose a follow-up date from today onwards."); return null; }
-    return { followUp: d, followNote: fuNote.value.trim().slice(0, 300) };
+    const tm = fuTime.value;
+    if (tm && d === perth().key && tm <= nowHm()) { showErr("That time has already passed today. Choose a later time."); return null; }
+    return { followUp: d, followTime: tm, followNote: fuNote.value.trim().slice(0, 300) };
   }
 
   /* ---- Sending ---- */

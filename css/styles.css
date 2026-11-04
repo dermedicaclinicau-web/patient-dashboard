@@ -10559,3 +10559,7 @@ body.ws-pe-open { overflow: hidden; }
 /* Prospects: entries still saving */
 .pr-tl li.is-pending { opacity: .6; }
 .pr-tl li.is-pending small { font-style: italic; }
+
+/* Prospects: follow-up time */
+.pr-fu-time { width: 8.5rem; flex: 0 0 auto; }
+.pc-fu-time { width: 8.5rem; }

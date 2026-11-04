@@ -5116,6 +5116,7 @@ function runNotifications() {
   try { prosImport_(cfg, 30, 14); } catch (e) { console.error('Prospect emails: ' + (e && e.stack ? e.stack : e)); }
   try { prosContactCheck_(cfg); } catch (e) { console.error('Prospect contact check: ' + (e && e.stack ? e.stack : e)); }
   try { prosDaily_(cfg, now); } catch (e) { console.error('Prospect reminders: ' + (e && e.stack ? e.stack : e)); }
+  try { prosFollowDue_(cfg, now); } catch (e) { console.error('Prospect follow-up times: ' + (e && e.stack ? e.stack : e)); }
 }
 
 // Run ONCE from the editor to start notifications
@@ -17726,7 +17727,7 @@ function prosAddEnquiry_(cfg, set, f, session, forceNew) {
     source: enq.source || 'Other', historic: f.historic === true,
     stage: 'new', stageAt: now, lostReason: '', lostNote: '',
     assignedToId: to ? to.id : '', assignedToName: to ? String(to.name || '') : '',
-    nextFollowUp: '', followNote: '',
+    nextFollowUp: '', nextFollowUpTime: '', followNote: '',
     patientId: pt.patientId || '', pttId: pt.pttId || '', patientName: pt.patientName || '', patientMany: pt.many || 0,
     linkWeak: pt.how === 'name',
     prev: prev, wasPatient: !!prev,
@@ -17742,8 +17743,10 @@ function prosAddEnquiry_(cfg, set, f, session, forceNew) {
   const fu = String(f.followUp || '');
   if (/^\d{4}-\d{2}-\d{2}$/.test(fu) && fu >= flowKey_(Date.now())) {
     p.nextFollowUp = fu;
+    p.nextFollowUpTime = prosHm_(f.followTime);
     p.followNote = clip_(f.followNote, 300);
-    log.push({ at: now, by: who, byUid: uid, kind: 'follow', what: 'Follow up on ' + recLongDate_(fu), note: p.followNote });
+    log.push({ at: now, by: who, byUid: uid, kind: 'follow', note: p.followNote,
+      what: 'Follow up on ' + recLongDate_(fu) + (p.nextFollowUpTime ? ' at ' + hmText_(p.nextFollowUpTime) : '') });
   }
   p.log = log;
   commitWrites_(cfg, [updateWrite_(cfg, PROS_COL_ + '/' + id, p)]);
@@ -17842,7 +17845,7 @@ function prosDaily_(cfg, now) {
       invEsc_(x.name) + '</strong></a>' + (x.concern ? ' · ' + invEsc_(x.concern) : '') + ' · ' +
       (waiting ? '<span style="color:#b91c1c">not contacted yet</span>'
         : String(x.nextFollowUp) < today ? '<span style="color:#b91c1c">follow-up overdue (' + invEsc_(recLongDate_(x.nextFollowUp)) + ')</span>'
-        : 'follow up today') + (x.followNote ? ' · ' + invEsc_(x.followNote) : '') + '</li>';
+        : 'follow up today' + (x.nextFollowUpTime ? ' at ' + hmText_(x.nextFollowUpTime) : '')) + (x.followNote ? ' · ' + invEsc_(x.followNote) : '') + '</li>';
     if (x.assignedToId) add(x.assignedToId, line);
     else fallback.forEach(function (uid) { add(uid, line); });
   });
@@ -17906,6 +17909,7 @@ function prosAdd_(cfg, body, session) {
     name: name, phone: phone, email: email, pref: body.pref, age: body.age, concern: body.concern, message: body.message,
     source: source, at: new Date().toISOString(), assignTo: String(body.assignTo || ''),
     spoke: body.spoke === true, followUp: String(body.followUp || ''), followNote: String(body.followNote || ''),
+    followTime: String(body.followTime || ''),
   }, session, true);   // already checked for duplicates above, so not again
   return { ok: true, id: r.id, prospect: r.p ? Object.assign({ id: r.id }, r.p) : null };
 }
@@ -17936,8 +17940,10 @@ function prosAction_(cfg, op, id, body, session) {
     const d = String(body.followUp || '');
     if (!dateOk(d)) return 'Choose a follow-up date from today onwards.';
     patch.nextFollowUp = d;
+    patch.nextFollowUpTime = d ? prosHm_(body.followTime) : '';
     patch.followNote = String(body.followNote || '').replace(/\s+/g, ' ').trim().slice(0, 300);
-    add('follow', d ? 'Follow up on ' + recLongDate_(d) : 'Follow-up cleared', patch.followNote);
+    add('follow', d ? 'Follow up on ' + recLongDate_(d) + (patch.nextFollowUpTime ? ' at ' + hmText_(patch.nextFollowUpTime) : '')
+      : 'Follow-up cleared', patch.followNote);
     return '';
   };
 
@@ -18007,7 +18013,7 @@ function prosAction_(cfg, op, id, body, session) {
     if (to === 'lost') {
       const reason = String(body.reason || '');
       if (prosSettings_(cfg).lostReasons.indexOf(reason) === -1) return { ok: true, problem: 'Choose why they were lost.' };
-      Object.assign(patch, { lostReason: reason, lostNote: note, nextFollowUp: '', followNote: '', waitingSince: '' });
+      Object.assign(patch, { lostReason: reason, lostNote: note, nextFollowUp: '', nextFollowUpTime: '', followNote: '', waitingSince: '' });
       add('stage', 'Lost: ' + reason);
     } else {
       Object.assign(patch, { lostReason: '', lostNote: '' });
@@ -18518,7 +18524,7 @@ function prosStagesCheck_(cfg, ctx, ixIn) {
           recLongDate_(lastC) + (lc.svcs.length ? ' (' + lc.svcs.join(', ') + ')' : '') + (cOpen ? ': not rebooked yet' : ': rebooked') });
         sum.cancelled++;
         if (cOpen && PROS_OPEN_.indexOf(String(patch.stage || p.stage || 'new')) !== -1 && !p.nextFollowUp) {
-          Object.assign(patch, { nextFollowUp: today,
+          Object.assign(patch, { nextFollowUp: today, nextFollowUpTime: '',
             followNote: (lc.kind === 'noshow' ? "Didn't come" : 'Cancelled') + ' on ' + recLongDate_(lastC) + ': call to rebook' });
         }
       }
@@ -19722,4 +19728,59 @@ function fsQueryMany_(cfg, specs) {
       return o;
     });
   });
+}
+
+/* ---------- Prospects: follow-ups at a set time ---------- */
+
+// "14:30" (or "") from what the portal sent
+function prosHm_(v) {
+  v = String(v || '').trim();
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(v) ? v : '';
+}
+// "14:30" → "2:30 pm"
+function hmText_(hm) {
+  const m = /^(\d{2}):(\d{2})$/.exec(String(hm || ''));
+  if (!m) return '';
+  const h = Number(m[1]);
+  return (h % 12 || 12) + ':' + m[2] + ' ' + (h < 12 ? 'am' : 'pm');
+}
+
+// Every 5 minutes (runNotifications): a follow-up with a time emails whoever has the prospect, once.
+// Nobody has it: the staff in Prospect settings, or the Admins. Up to an hour late if the trigger was down.
+function prosFollowDue_(cfg, now) {
+  const today = flowKey_(now);
+  const p8 = new Date(now + SCH_PERTH_);
+  const nowMin = p8.getUTCHours() * 60 + p8.getUTCMinutes();
+  const due = fsQuery_(cfg, PROS_COL_, 'nextFollowUp', 'EQUAL', today, 500).filter(function (x) {
+    const m = hmMin_(x.nextFollowUpTime);
+    return PROS_OPEN_.indexOf(x.stage) !== -1 && m !== null && m <= nowMin && nowMin - m <= 60 &&
+      String(x.followRemindedFor || '') !== today + ' ' + x.nextFollowUpTime;
+  });
+  if (!due.length) return 0;
+  const set = prosSettings_(cfg);
+  const staff = getStaffDocs_().filter(function (s) { return s.active !== false && isEmail_(s.email); });
+  const fallback = (set.notify.length ? staff.filter(function (s) { return set.notify.indexOf(s.id) !== -1; })
+    : staff.filter(function (s) { return /^admin$/i.test(String(s.role || '')); })).map(function (s) { return s.email; });
+  let n = 0;
+  due.forEach(function (x) {
+    try {
+      const own = staff.filter(function (s) { return s.id === x.assignedToId; })[0];
+      const to = own ? [own.email] : fallback;
+      if (to.length && MailApp.getRemainingDailyQuota() > 5) {
+        const at = hmText_(x.nextFollowUpTime);
+        const html = invEmailWrap_(
+          '<h2 style="margin:0 0 6px;font-size:20px;color:#0f766e">Follow up now: ' + invEsc_(x.name || 'a prospect') + '</h2>' +
+          '<p style="margin:0 0 12px;color:#475569">Due at <strong>' + invEsc_(at) + '</strong>' +
+            (x.concern ? ' · ' + invEsc_(x.concern) : '') + (x.phone ? ' · ' + invEsc_(x.phone) : '') + '</p>' +
+          (x.followNote ? '<p style="margin:0;padding:10px 12px;border-radius:8px;background:#f8fafc">' + invEsc_(x.followNote) + '</p>' : ''),
+          'prospects/' + x._id, 'Open the prospect');
+        MailApp.sendEmail({ to: uniq_(to).join(','), name: 'Dermedica Portal', htmlBody: html, body: emailHtmlToText_(html),
+          subject: 'Follow up at ' + at + ': ' + (x.name || 'prospect') + (x.concern ? ' (' + x.concern + ')' : '') });
+        n++;
+      }
+      fsPatch_(cfg, PROS_COL_ + '/' + x._id, { followRemindedFor: today + ' ' + x.nextFollowUpTime });
+    } catch (e) { console.warn('Follow-up reminder ' + x._id + ': ' + e); }
+  });
+  if (n) console.log('Prospects: ' + n + ' follow-up reminder(s) sent.');
+  return n;
 }

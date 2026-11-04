@@ -102,11 +102,22 @@ let staffCache = null;
 const staffList = () => (staffCache ||= callApi({ action: "staffList" }).then((r) => r.staff || []).catch(() => []));
 const hoursOf = (set) => Math.max(1, Number(set.respondHours) || 24);
 const notContacted = (p, set) => !!p.waitingSince && OPEN.includes(p.stage) && Date.now() - Date.parse(p.waitingSince) > hoursOf(set) * 3600000;
+// "14:30" in Perth now, and "14:30" → "2:30 pm"
+const nowHm = () => new Date().toLocaleTimeString("en-GB", { ...PERTH, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+const hmText = (hm) => { const m = /^(\d{2}):(\d{2})$/.exec(hm || ""); if (!m) return ""; const h = +m[1]; return `${h % 12 || 12}:${m[2]} ${h < 12 ? "am" : "pm"}`; };
+const fuText = (p) => [niceDay(p.nextFollowUp), hmText(p.nextFollowUpTime)].filter(Boolean).join(", ");
+// Today with a time that has passed counts as overdue
 function followState(p) {
   if (!p.nextFollowUp || !OPEN.includes(p.stage)) return "";
   const t = todayKey();
-  return p.nextFollowUp < t ? "overdue" : p.nextFollowUp === t ? "today" : "later";
+  if (p.nextFollowUp < t) return "overdue";
+  if (p.nextFollowUp > t) return "later";
+  return p.nextFollowUpTime && p.nextFollowUpTime <= nowHm() ? "overdue" : "today";
 }
+// "" if fine, otherwise what's wrong
+const fuProblem = (d, tm) => (!d ? (tm ? "Choose a date for the follow-up time." : "")
+  : d < todayKey() ? "Choose a follow-up date from today onwards."
+  : d === todayKey() && tm && tm <= nowHm() ? "That time has already passed today. Choose a later time." : "");
 // A follow-up date to start a form with: overdue ones are left blank (only today onwards can be saved)
 const fuStart = (d, fallback = "") => (d && d >= todayKey() ? d : fallback);
 // Booked, then cancelled or didn't come, and nothing booked since
@@ -181,6 +192,8 @@ function openDialog({ title, sub = "", body, submit = "Save", onOpen, onSubmit }
     if (!q) return;
     const input = form.querySelector('[name="followUp"]');
     if (input) input.value = q.dataset.days === "" ? "" : addDays(todayKey(), Number(q.dataset.days));
+    const tm = form.querySelector('[name="followTime"]');
+    if (tm && q.dataset.days === "") tm.value = "";
   });
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -192,10 +205,11 @@ function openDialog({ title, sub = "", body, submit = "Save", onOpen, onSubmit }
   if (onOpen) onOpen(ctl);
   return ctl;
 }
-const followHtml = (val = "", note = "") => `
+const followHtml = (val = "", note = "", time = "") => `
   <div class="pr-fu">
-    <span class="lh-label">Follow up on</span>
+    <span class="lh-label">Follow up on <small class="muted">(time optional)</small></span>
     <div class="pr-fu-row"><input type="date" name="followUp" value="${esc(val)}" min="${todayKey()}" class="fe-input" />
+      <input type="time" name="followTime" value="${esc(val ? time : "")}" step="300" class="fe-input pr-fu-time" aria-label="Time (optional)" />
       <span class="pr-quick">${[["Tomorrow", 1], ["3 days", 3], ["1 week", 7], ["2 weeks", 14], ["None", ""]].map(([l, d]) =>
         `<button type="button" class="pr-chip-btn" data-days="${d}">${l}</button>`).join("")}</span></div>
     <input name="followNote" class="fe-input" maxlength="300" placeholder="What to follow up about (optional)" value="${esc(note)}" />
@@ -297,7 +311,7 @@ async function mountBoard(container, { view, staff }) {
   };
   const urgency = (p) => (notContacted(p, set) ? 0 : cancelOpen(p) ? 1 : followState(p) === "overdue" ? 2 : followState(p) === "today" ? 3 : 4);
   const byUrgency = (a, b) => urgency(a) - urgency(b) ||
-    String(a.nextFollowUp || "9").localeCompare(String(b.nextFollowUp || "9")) ||
+    `${a.nextFollowUp || "9"} ${a.nextFollowUpTime || "99"}`.localeCompare(`${b.nextFollowUp || "9"} ${b.nextFollowUpTime || "99"}`) ||
     String(b.lastEnquiryAt || "").localeCompare(String(a.lastEnquiryAt || ""));
 
   const typeTags = (p) => `${p.patientId ? (isPast(p)
@@ -319,9 +333,10 @@ async function mountBoard(container, { view, staff }) {
         ${p.nextAppt && OPEN.includes(p.stage) ? `<span class="pr-tag is-pt">Booked ${esc(niceDay(p.nextAppt))}</span>` : ""}
         ${late ? '<span class="pr-tag is-bad">Not contacted</span>' : ""}
         ${cancelOpen(p) ? `<span class="pr-tag is-bad">${cancelWord(p)}, not rebooked</span>` : ""}
-        ${fs === "overdue" ? '<span class="pr-tag is-bad">Follow-up overdue</span>'
-          : fs === "today" ? '<span class="pr-tag is-warn">Follow up today</span>'
-          : fs === "later" ? `<span class="pr-tag">${esc(niceDay(p.nextFollowUp))}</span>` : ""}
+        ${fs === "overdue" ? `<span class="pr-tag is-bad">Follow-up overdue${p.nextFollowUp === todayKey() && p.nextFollowUpTime
+            ? ` · ${esc(hmText(p.nextFollowUpTime))}` : ""}</span>`
+          : fs === "today" ? `<span class="pr-tag is-warn">Follow up ${p.nextFollowUpTime ? esc(hmText(p.nextFollowUpTime)) : "today"}</span>`
+          : fs === "later" ? `<span class="pr-tag">${esc(fuText(p))}</span>` : ""}
         ${p.stage === "lost" && p.lostReason ? `<span class="pr-tag">${esc(p.lostReason)}</span>` : ""}
       </span>
       <span class="pr-card-foot"><small>${esc(ago(p.lastEnquiryAt || p.createdAt))}</small>${p.contacts
@@ -354,7 +369,7 @@ async function mountBoard(container, { view, staff }) {
             <td data-label="Interested in">${esc(p.concern || "")}</td>
             <td data-label="Source">${esc(p.source || "")}</td>
             <td data-label="With">${esc(p.assignedToName || "")}</td>
-            <td data-label="Follow up" class="${fs === "overdue" ? "is-bad" : fs === "today" ? "is-warn" : ""}">${esc(niceDay(p.nextFollowUp))}</td>
+            <td data-label="Follow up" class="${fs === "overdue" ? "is-bad" : fs === "today" ? "is-warn" : ""}">${esc(fuText(p))}</td>
             <td data-label="Next appointment">${esc(niceDay(p.nextAppt))}</td>
             <td data-label="Last contact">${esc(p.lastContactAt ? ago(p.lastContactAt) : "")}</td>
             <td data-label="Enquired">${esc(niceDay(keyOf(p.createdAt)))}</td></tr>`;
@@ -509,10 +524,12 @@ async function newDialog(all, onDone) {
     },
     onSubmit: async (c) => {
       const f = c.form.elements;
+      const fp = fuProblem(f.followUp.value, f.followTime.value);
+      if (fp) { c.fail(fp); return; }
       const r = await api("add", {
         name: f.name.value, phone: f.phone.value, email: f.email.value, source: f.source.value, concern: f.concern.value,
         age: f.age.value, pref: f.pref.value, assignTo: f.assignTo.value, message: f.message.value,
-        spoke: f.spoke.checked, followUp: f.followUp.value, followNote: f.followNote.value, force,
+        spoke: f.spoke.checked, followUp: f.followUp.value, followNote: f.followNote.value, followTime: f.followTime.value, force,
       });
       if (r.duplicate) {
         const box = c.form.querySelector('[data-role="dup"]');
@@ -663,8 +680,9 @@ async function mountProspect(container, id, staff) {
     if (p.stage === "new") Object.assign(x, { stage: "contacted", stageAt: at });
     return x;
   };
-  const fuBad = (d) => !!d && d < todayKey();
-  const fuPatch = (d, note) => ({ nextFollowUp: d, followNote: String(note || "").trim().slice(0, 300) });
+  const fuPatch = (d, note, tm) => ({ nextFollowUp: d, nextFollowUpTime: d ? (tm || "") : "", followNote: String(note || "").trim().slice(0, 300) });
+  const fuStartTime = () => (fuStart(p.nextFollowUp) ? p.nextFollowUpTime || "" : "");
+  const fuWhat = (d, tm) => (d ? `Follow up on ${fullDay(d)}${tm ? ` at ${hmText(tm)}` : ""}` : "Follow-up cleared");
   let hitsHtml = "", ptQ = "";
 
   function stepper() {
@@ -729,10 +747,10 @@ async function mountProspect(container, id, staff) {
       <div class="pr-grid">
         <div class="pr-main">
           <section class="pr-sec pr-follow is-${fs || "none"}"><h3>${I(IC.clock)} Next follow-up</h3>
-            ${p.nextFollowUp ? `<p class="pr-follow-when"><strong>${esc(niceDay(p.nextFollowUp))}</strong>${
+            ${p.nextFollowUp ? `<p class="pr-follow-when"><strong>${esc(fuText(p))}</strong>${
               fs === "overdue" ? ' <span class="pr-tag is-bad">Overdue</span>' : fs === "today" ? ' <span class="pr-tag is-warn">Today</span>' : ""}</p>
               ${p.followNote ? `<p class="muted">${esc(p.followNote)}</p>` : ""}` : '<p class="muted">No follow-up set.</p>'}
-            ${work ? `<form data-role="follow" novalidate>${followHtml(fuStart(p.nextFollowUp), p.followNote || "")}
+            ${work ? `<form data-role="follow" novalidate>${followHtml(fuStart(p.nextFollowUp), p.followNote || "", fuStartTime())}
               <button type="submit" class="lh-btn is-primary">Save follow-up</button></form>` : ""}
           </section>
           ${timeline()}
@@ -825,15 +843,16 @@ async function mountProspect(container, id, staff) {
       body: `<div class="pr-reasons">${OUTCOMES.map(([k, l]) =>
         `<label class="pr-reason"><input type="radio" name="outcome" value="${k}"${k === outcome ? " checked" : ""} /><span>${esc(l)}</span></label>`).join("")}</div>
         <label class="lh-field"><span class="lh-label">Note</span><textarea name="note" rows="3" maxlength="1000" class="fe-input" placeholder="What was said, what they want, when suits them"></textarea></label>
-        ${followHtml(fuStart(p.nextFollowUp), p.followNote || "")}`,
+        ${followHtml(fuStart(p.nextFollowUp), p.followNote || "", fuStartTime())}`,
       onSubmit: async (c) => {
         const f = c.form.elements;
         const outcome = (c.form.querySelector('[name="outcome"]:checked') || {}).value;
         if (!outcome) { c.fail("Choose what happened."); return; }
-        if (fuBad(f.followUp.value)) { c.fail("Choose a follow-up date from today onwards."); return; }
+        const fp = fuProblem(f.followUp.value, f.followTime.value);
+        if (fp) { c.fail(fp); return; }
         c.close();
-        saveFast("log", { outcome, note: f.note.value, followUp: f.followUp.value, followNote: f.followNote.value }, {
-          patch: { ...contactPatch(), ...fuPatch(f.followUp.value, f.followNote.value) },
+        saveFast("log", { outcome, note: f.note.value, followUp: f.followUp.value, followNote: f.followNote.value, followTime: f.followTime.value }, {
+          patch: { ...contactPatch(), ...fuPatch(f.followUp.value, f.followNote.value, f.followTime.value) },
           log: { kind: "contact", what: (OUTCOMES.find(([k]) => k === outcome) || [, "Call"])[1], note: f.note.value.trim() },
           msg: "Saved",
         });
@@ -857,6 +876,15 @@ async function mountProspect(container, id, staff) {
   }
 
   root.addEventListener("click", async (e) => {
+    const qd = e.target.closest("[data-days]");
+    if (qd) {
+      const form = qd.closest("form");
+      const dIn = form && form.querySelector('[name="followUp"]');
+      const tIn = form && form.querySelector('[name="followTime"]');
+      if (dIn) dIn.value = qd.dataset.days === "" ? "" : addDays(todayKey(), Number(qd.dataset.days));
+      if (tIn && qd.dataset.days === "") tIn.value = "";
+      return;
+    }
     const hit = e.target.closest("[data-link]");
     if (hit) {
       hit.disabled = true;
@@ -917,11 +945,13 @@ async function mountProspect(container, id, staff) {
     const f = form.elements;
     if (form.dataset.role === "follow") {
       const d = f.followUp.value;
-      if (fuBad(d)) { showToast("Choose a follow-up date from today onwards."); return; }
+      const tm = f.followTime.value;
+      const fp = fuProblem(d, tm);
+      if (fp) { showToast(fp); return; }
       document.activeElement.blur();
-      saveFast("followUp", { followUp: d, followNote: f.followNote.value }, {
-        patch: fuPatch(d, f.followNote.value),
-        log: { kind: "follow", what: d ? `Follow up on ${fullDay(d)}` : "Follow-up cleared", note: f.followNote.value.trim() },
+      saveFast("followUp", { followUp: d, followNote: f.followNote.value, followTime: tm }, {
+        patch: fuPatch(d, f.followNote.value, tm),
+        log: { kind: "follow", what: fuWhat(d, tm), note: f.followNote.value.trim() },
         msg: "Follow-up saved",
       });
     }
