@@ -11,6 +11,7 @@ import {
   listKits, listKitDays, recordManualSale, undoMove, recordPaperUse, isKitProduct,
   recordPatientReturn, recordSupplierReturn, markReturnCredited, listReturns, RETURN_REASONS, RETURN_STATUS,
   rebuildPlan, applyRebuild, listCountsOn, getInvoiceSettings, saveInvoiceSettings,
+  listBaseCounts, saveBaseCount, planFromBases,
 } from "./inventory-api.js";
 import { searchPatients } from "./task-runner.js";
 import { openSetKitDialog, openKitFromShelfDialog } from "./kit-admin.js";
@@ -302,7 +303,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     products: [], suppliers: [], lots: [], requests: [], q: "", cat: "", view: "all", flagged: false, showInactive: false,
     reqFilter: "open", reqView: "list", pos: [], poFilter: "sent", lineSup: {},
     sel: new Set(), pq: "", pcat: "", psup: "",  pcount: "",
-    counts: [], invs: [], lastCounts: new Map(), open: [],
+    counts: [], invs: [], lastCounts: new Map(), open: [], bases: new Map(),
     quick: false, qv: new Map(),   // Stock → Update digital count: on/off, and what's been typed ("productId|loc" → "12")
   };
   const supplierOf = (id) => st.suppliers.find((s) => s.id === id) || null;
@@ -345,11 +346,12 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
   async function load() {
     try {
-      [st.products, st.suppliers, st.lots, st.requests, st.pos, st.counts, st.invs, st.open] = await Promise.all([
+      [st.products, st.suppliers, st.lots, st.requests, st.pos, st.counts, st.invs, st.open, st.bases] = await Promise.all([
         listProducts(), listSuppliers(), listAllLots(), listRequests({ max: 300 }).catch(() => []), listPos().catch(() => []),
         listCounts({ from: dayKey(new Date(Date.now() - 120 * 864e5)) }).catch(() => []),
         listInvestigations({ open: true }).catch(() => []),
         listOpenContainers().catch(() => []),
+        listBaseCounts().catch((err) => { console.warn("Base counts not loaded:", err); return new Map(); }),
       ]);
       if (!root.isConnected) return;
       st.lastCounts = lastCountsOf(st.counts);
@@ -636,6 +638,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         </select>
         <label class="fe-check"><input type="checkbox" data-f="showInactive"${st.showInactive ? " checked" : ""} /> Show inactive</label>
         <span class="inv-spacer"></span>
+        ${canManage && st.bases.size ? `<button type="button" class="ff-btn" data-act="base-all">Check against base counts</button>` : ""}
         ${canManage ? `<button type="button" class="ff-btn" data-act="invoice-links">Invoice links</button>
           <button type="button" class="ff-btn" data-act="export-products">Export CSV</button>
           <button type="button" class="ff-btn is-primary" data-act="import-products">Import products</button>` : ""}
@@ -648,7 +651,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         <button type="button" class="lh-btn" data-bulk="category">Change category</button>
         <button type="button" class="lh-btn" data-bulk="count">Opening count</button>
         <button type="button" class="lh-btn" data-bulk="start">Set starting stock</button>
-        <button type="button" class="lh-btn" data-bulk="rebuild">Rebuild from a count</button>
+        <button type="button" class="lh-btn" data-bulk="rebuild">Base count &amp; rebuild</button>
         <button type="button" class="lh-btn" data-bulk="active">Make active</button>
         <button type="button" class="lh-btn" data-bulk="inactive">Make inactive</button>
         <button type="button" class="lh-btn is-quiet" data-bulk="clear">Clear selection</button>
@@ -670,7 +673,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         <span class="inv-name inv-name-pick">${canManage
           ? `<input type="checkbox" class="inv-pick" data-pick="${esc(p.id)}" aria-label="Select ${esc(p.name)}" />` : ""}
           <span><strong>${esc(p.name)}${p.active ? "" : ' <em class="inv-off">Inactive</em>'}</strong>
-          <small>${esc([packText(p), suppliersText(p) || "No supplier yet", p.supplierCode && `Code ${p.supplierCode}`, countText(p)].filter(Boolean).join(" · "))}</small></span></span>
+          <small>${esc([packText(p), suppliersText(p) || "No supplier yet", p.supplierCode && `Code ${p.supplierCode}`, countText(p),
+            st.bases.has(p.id) && `Base count ${niceDate(st.bases.get(p.id).dateKey)}`].filter(Boolean).join(" · "))}</small></span></span>
           <span class="inv-price">${esc([p.cost !== null && `Cost ${money(p.cost)} / ${p.orderUnit}`, p.price !== null && `Retail ${money(p.price)}`].filter(Boolean).join(" · "))}</span>
         ${p.tracked ? '<span class="inv-flag is-info">Batch &amp; expiry</span>' : "<span></span>"}
         ${canManage ? `<button type="button" class="lh-btn" data-edit-product="${esc(p.id)}">Edit</button>` : "<span></span>"}
@@ -1098,19 +1102,37 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
   }
 
   // Rebuild from a count: what was there on a day, plus everything since = what should be there now
-  function rebuildDialog(list, many) {
+  // Base counts and rebuilding. Type what was there on a day: save it as the base count, or work out what should be there now.
+  // fromBases: start from each product's saved base count instead.
+  function rebuildDialog(list, many, { fromBases = false } = {}) {
     const today = dayKey();
-    let fromKey = `${today.slice(0, 4)}-01-01`;
+    const bases = st.bases || new Map();
+    const shared = [...new Set(list.map((p) => (bases.get(p.id) || {}).dateKey).filter(Boolean))];
+    let fromKey = shared.length === 1 ? shared[0] : `${today.slice(0, 4)}-01-01`;
     const typed = new Map();          // "productId|loc" → what's typed
+    const auto = new Set();           // boxes filled in for the chosen date (cleared when the date changes)
     let plan = null, busy = false, prefilled = "";
     const dlg = openDialog("inv-dlg inv-spdlg inv-rbdlg", '<div class="lh-form" data-role="rb"></div>');
     const box = dlg.querySelector('[data-role="rb"]');
     dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
     const sgn = (v) => (v > 0 ? `+${fmtN(v)}` : v < 0 ? `−${fmtN(-v)}` : "0");
+    const fetchRows = async (from) => {
+      const res = await callApi({ action: "inventory", op: "invoiceLines", from, to: today });
+      if (res.problem) throw new Error(res.problem);
+      return res.rows || [];
+    };
 
-    // An opening count on that day fills in the empty boxes
+    // Empty boxes are filled from a base count saved for that day, then from an opening count that day
     async function prefill() {
-      prefilled = "";
+      let fromBase = 0, fromCount = 0;
+      list.forEach((p) => {
+        const b = bases.get(p.id);
+        if (!b || b.dateKey !== fromKey) return;
+        LOCATIONS.forEach((l) => {
+          const k = `${p.id}|${l.key}`;
+          if (b[l.key] !== null && !typed.get(k)) { typed.set(k, String(b[l.key])); auto.add(k); fromBase++; }
+        });
+      });
       try {
         const counts = (await listCountsOn(fromKey)).filter((c) => c.kind === "opening")
           .sort((a, b) => (a.at ? a.at.getTime() : 0) - (b.at ? b.at.getTime() : 0));
@@ -1118,35 +1140,42 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         counts.forEach((c) => c.lines.forEach((l) => { if (l.loc !== "kit") byRef.set(l.ref, l); }));   // the latest count of each spot
         const sum = new Map();
         byRef.forEach((l) => { const k = `${l.productId}|${l.loc}`; sum.set(k, (sum.get(k) || 0) + (Number(l.counted) || 0)); });
-        let n = 0;
         list.forEach((p) => LOCATIONS.forEach((l) => {
           const k = `${p.id}|${l.key}`;
-          if (sum.has(k) && !typed.get(k)) { typed.set(k, String(sum.get(k))); n++; }
+          if (sum.has(k) && !typed.get(k)) { typed.set(k, String(sum.get(k))); auto.add(k); fromCount++; }
         }));
-        if (n) prefilled = `Filled in ${plural(n, "box")} from the opening count on ${niceDate(fromKey)}. Check them.`;
       } catch (err) { console.warn("Opening count not read:", err); }
+      const bits = [fromBase && `${plural(fromBase, "box")} from the saved base count`,
+        fromCount && `${plural(fromCount, "box")} from the opening count on ${niceDate(fromKey)}`].filter(Boolean);
+      prefilled = bits.length ? `Filled in ${bits.join(" and ")}. Check them.` : "";
       if (!plan) drawAsk();
     }
 
     function drawAsk(errMsg = "") {
       box.innerHTML = `
-        <div class="lh-dialog-head"><h3>Rebuild from a count: ${esc(many)}</h3>
-          <p>Choose a day you know how much was there, like a stocktake or the start of the year. The portal adds up everything since:
-            deliveries, Timely invoices, treatments, write-offs and returns. Then it shows what should be there now, before anything changes.</p></div>
+        <div class="lh-dialog-head"><h3>Base count: ${esc(many)}</h3>
+          <p>Type what was physically there on a day you know, like a stocktake or the start of the year. Save it as each product's
+            <strong>base count</strong> (stock doesn't change), or work out what should be there now: the base count, plus deliveries,
+            Timely invoices, treatments, write-offs and returns since.</p></div>
         <label class="lh-field"><span class="lh-label">Counted on</span>
           <input type="date" name="from" value="${fromKey}" max="${today}" /></label>
         ${prefilled ? `<p class="inv-hint">${esc(prefilled)}</p>` : ""}
-        <div class="inv-sp-list">${list.map((p) => `<div class="inv-sp">
-          <div class="inv-sp-name"><strong>${esc(p.name)}</strong><small>${esc(unitPlural(p.stockUnit))}${p.tracked ? " · batch &amp; expiry" : ""}</small></div>
+        <div class="inv-sp-list">${list.map((p) => {
+          const b = bases.get(p.id);
+          return `<div class="inv-sp">
+          <div class="inv-sp-name"><strong>${esc(p.name)}</strong><small>${esc(unitPlural(p.stockUnit))}${p.tracked ? " · batch &amp; expiry" : ""}${
+            b ? ` · base count ${esc(niceDate(b.dateKey))}` : ""}</small></div>
           <div class="inv-sp-locs">${LOCATIONS.map((l) => `<label class="inv-sp-loc"><span>${esc(l.label)}<small>on that day</small></span>
             <input class="fe-input inv-num" type="number" min="0" step="1" inputmode="numeric" placeholder="—"
-              data-rb="${esc(p.id)}|${l.key}" value="${esc(typed.get(`${p.id}|${l.key}`) || "")}" /></label>`).join("")}</div></div>`).join("")}</div>
+              data-rb="${esc(p.id)}|${l.key}" value="${esc(typed.get(`${p.id}|${l.key}`) || "")}" /></label>`).join("")}</div></div>`;
+        }).join("")}</div>
         <label class="fe-check"><input type="checkbox" name="past" checked /> Add deliveries recorded as “received before the portal”</label>
-        <small class="fe-note">Leave a box empty to leave that place as it is. Enter moves to the next box.</small>
+        <small class="fe-note">Leave a box empty to leave that place out. Enter moves to the next box.</small>
         <p class="lh-error" role="alert"${errMsg ? "" : " hidden"}>${esc(errMsg)}</p>
         <div class="lh-actions">
           <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
-          <button type="button" class="lh-btn is-primary" data-act="work">Work it out</button>
+          <button type="button" class="lh-btn" data-act="savebase">Save as base count only</button>
+          <button type="button" class="lh-btn is-primary" data-act="work">Work out what should be there now</button>
         </div>`;
     }
 
@@ -1157,7 +1186,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         const any = Object.values(r.locs).some((x) => x.change);
         return `<section class="inv-rb">
           <label class="fe-check inv-rb-pick"><input type="checkbox" data-pick-rb="${i}"${any && !r.p.tracked ? " checked" : ""}${r.p.tracked ? " disabled" : ""} />
-            <strong>${esc(r.p.name)}</strong>${!any ? ' <span class="inv-flag is-info">Already right</span>' : ""}</label>
+            <strong>${esc(r.p.name)}</strong> <small class="muted">· counted ${esc(niceDate(r.fromKey))}</small>${
+            !any ? ' <span class="inv-flag is-info">Already right</span>' : ""}</label>
           <table class="inv-table inv-rb-table">${head}<tbody>${Object.entries(r.locs).map(([loc, x]) => `<tr>
             <td>${esc(locLabel(loc))}</td><td>${x.start}</td><td>${sgn(x.received + x.pastIn)}${x.pastIn ? `<small> (${x.pastIn} before the portal)</small>` : ""}</td>
             <td>${sgn(x.sold + x.unapplied)}${x.unapplied ? `<small> (${-x.unapplied} not taken off yet)</small>` : ""}</td>
@@ -1168,26 +1198,29 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           ${r.p.tracked ? `<small class="fe-note">Batch &amp; expiry product: open it and use <strong>Count</strong> to set each batch to these totals.</small>` : ""}
         </section>`;
       };
+      const off = plan.rows.filter((r) => Object.values(r.locs).some((x) => x.change)).length;
       box.innerHTML = `
         <div class="lh-dialog-head"><h3>What should be there now</h3>
-          <p>From what was counted on ${esc(niceDate(plan.fromKey))}, plus everything since. Tick the ones to set digital to “Should be now”.</p></div>
+          <p>${plan.fromBases ? "From each product's base count" : `From what was counted on ${esc(niceDate(plan.fromKey))}`}, plus everything since.
+            ${off ? `<strong>${plural(off, "product")}</strong> ${off === 1 ? "is" : "are"} off.` : "Everything matches. 👍"}
+            Tick the ones to set digital to “Should be now”.</p></div>
         ${plan.unlinked.length ? `<div class="inv-hint is-warn"><strong>${plan.unlinked.length} product name${plan.unlinked.length === 1 ? "" : "s"} on invoices aren't linked to a product</strong>,
           so their sales aren't counted: ${esc(plan.unlinked.slice(0, 12).map((u) => `${u.name} (${u.n})`).join(", "))}${plan.unlinked.length > 12 ? "…" : ""}.
-          If any are these products, link them in <strong>Products → Invoice links</strong>, then work it out again.</div>` : ""}
-        <div class="inv-rb-list">${plan.rows.map(card).join("") || '<p class="tb-none">Type at least one number first.</p>'}</div>
+          If any are these products, link them in <strong>Products → Invoice links</strong>, then check again.</div>` : ""}
+        <div class="inv-rb-list">${plan.rows.map(card).join("") || '<p class="tb-none">Nothing to check.</p>'}</div>
         ${!cfg.startDate ? `<label class="fe-check"><input type="checkbox" name="setStart" checked />
           From now on, take invoice sales off stock automatically (sets the invoice start date to ${esc(niceDate(plan.fromKey))})</label>` : ""}
         <small class="fe-note">Do it when nothing's being sold or used, as stock that moves while you're looking at this isn't included.
-          Any invoice sales counted here are marked as already taken off, so an upload never takes them off twice.</small>
+          Invoice sales counted here are marked as already taken off, so an upload never takes them off twice.</small>
         <p class="lh-error" role="alert" hidden></p>
         <div class="lh-actions">
-          <button type="button" class="lh-btn is-quiet" data-act="back">← Change the counts</button>
+          ${plan.fromBases ? '<button type="button" class="lh-btn is-quiet" data-act="cancel">Close</button>'
+            : '<button type="button" class="lh-btn is-quiet" data-act="back">← Change the counts</button>'}
           <button type="button" class="lh-btn is-primary" data-act="apply">Set digital</button>
         </div>`;
     }
 
-    async function work(btn) {
-      const f = (n) => box.querySelector(`[name="${n}"]`);
+    function readCounted() {
       const counted = new Map();
       for (const p of list) {
         const c = { shelf: null, jt: null };
@@ -1195,21 +1228,49 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           const v = (typed.get(`${p.id}|${l.key}`) || "").trim();
           if (v === "") continue;
           const n = Number(v);
-          if (!Number.isInteger(n) || n < 0) { drawAsk(`${p.name}: enter a whole number of 0 or more.`); return; }
+          if (!Number.isInteger(n) || n < 0) throw new Error(`${p.name}: enter a whole number of 0 or more.`);
           c[l.key] = n;
         }
         if (c.shelf !== null || c.jt !== null) counted.set(p.id, c);
       }
-      if (!counted.size) { drawAsk("Type what was there on that day for at least one product."); return; }
-      const past = f("past").checked;
+      if (!counted.size) throw new Error("Type what was there on that day for at least one product.");
+      return counted;
+    }
+
+    async function saveBases(btn) {
+      let counted;
+      try { counted = readCounted(); } catch (ex) { drawAsk(ex.message); return; }
+      busy = true;
+      btn.disabled = true;
+      const queue = list.filter((p) => counted.has(p.id));
+      const total = queue.length;
+      let done = 0;
+      const failed = [];
+      await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
+        while (queue.length) {
+          const p = queue.shift();
+          try { await saveBaseCount(p, { dateKey: fromKey, ...counted.get(p.id) }, staff); }
+          catch (ex) { console.error("Base count failed:", p.name, ex); failed.push(p.name); }
+          btn.textContent = `Saving ${++done} of ${total}…`;
+        }
+      }));
+      busy = false;
+      if (failed.length) { drawAsk(`Couldn't save: ${failed.slice(0, 3).join(", ")}${failed.length > 3 ? "…" : ""}. Try again.`); return; }
+      dlg.close();
+      showToast(`Base count saved for ${plural(total, "product")} (${niceDate(fromKey)}). Stock wasn't changed.`);
+      await load();
+    }
+
+    async function work(btn) {
+      let counted;
+      try { counted = readCounted(); } catch (ex) { drawAsk(ex.message); return; }
+      const past = box.querySelector('[name="past"]').checked;
       busy = true;
       btn.disabled = true;
       btn.textContent = "Adding it all up…";
       try {
-        const res = await callApi({ action: "inventory", op: "invoiceLines", from: fromKey, to: today });
-        if (res.problem) throw new Error(res.problem);
         const [p2, cfg] = await Promise.all([
-          rebuildPlan({ fromKey, products: list, allProducts: st.products, counted, pos: st.pos, invoiceRows: res.rows || [], includePast: past }),
+          fetchRows(fromKey).then((rows) => rebuildPlan({ fromKey, products: list, allProducts: st.products, counted, pos: st.pos, invoiceRows: rows, includePast: past })),
           getInvoiceSettings(),
         ]);
         plan = p2;
@@ -1217,6 +1278,24 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       } catch (ex) {
         console.error("Rebuild failed:", ex);
         drawAsk(errText(ex, "Couldn't work it out. Try again."));
+      } finally { busy = false; }
+    }
+
+    async function workBases() {
+      box.innerHTML = `<div class="lh-dialog-head"><h3>Checking against base counts…</h3>
+        <p>Adding up everything since each product's base count.</p></div><div class="skeleton" style="height:220px;border-radius:12px"></div>`;
+      busy = true;
+      try {
+        const [p2, cfg] = await Promise.all([
+          planFromBases({ products: list, allProducts: st.products, pos: st.pos, bases, fetchInvoiceRows: fetchRows }),
+          getInvoiceSettings(),
+        ]);
+        plan = { ...p2, fromBases: true };
+        drawPlan(cfg);
+      } catch (ex) {
+        console.error("Base check failed:", ex);
+        box.innerHTML = `<div class="tm-empty is-error">${esc(errText(ex, "Couldn't check them. Try again."))}</div>
+          <div class="lh-actions"><button type="button" class="lh-btn" data-act="cancel">Close</button></div>`;
       } finally { busy = false; }
     }
 
@@ -1233,8 +1312,16 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
         while (queue.length) {
           const r = queue.shift();
-          try { const x = await applyRebuild(r, staff, plan.fromKey); places += x.changed; marked += x.marked; }
-          catch (ex) { console.error("Rebuild apply failed:", r.p.name, ex); failed.push(r.p.name); }
+          try {
+            const x = await applyRebuild(r, staff, r.fromKey);
+            places += x.changed;
+            marked += x.marked;
+            // A rebuild from a typed count: that count becomes the product's base count
+            if (!plan.fromBases) {
+              await saveBaseCount(r.p, { dateKey: r.fromKey, shelf: r.locs.shelf ? r.locs.shelf.start : null,
+                jt: r.locs.jt ? r.locs.jt.start : null, note: "Used to rebuild digital" }, staff);
+            }
+          } catch (ex) { console.error("Rebuild apply failed:", r.p.name, ex); failed.push(r.p.name); }
           btn.textContent = `Saving ${++done} of ${picked.length}…`;
         }
       }));
@@ -1248,15 +1335,17 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       dlg.close();
       showToast(failed.length
         ? `Saved, except: ${failed.slice(0, 3).join(", ")}${failed.length > 3 ? "…" : ""}. Try those again.`
-        : `Digital rebuilt: ${plural(places, "change")} across ${plural(picked.length, "product")}${marked ? `, ${plural(marked, "invoice sale")} marked as counted` : ""}.`);
+        : `Digital set: ${plural(places, "change")} across ${plural(picked.length, "product")}${marked ? `, ${plural(marked, "invoice sale")} marked as counted` : ""}.`);
       st.sel.clear();
       await load();
     }
 
     box.addEventListener("input", (e) => {
-      if (e.target.dataset.rb) typed.set(e.target.dataset.rb, e.target.value);
+      if (e.target.dataset.rb) { typed.set(e.target.dataset.rb, e.target.value); auto.delete(e.target.dataset.rb); }
       if (e.target.name === "from" && /^\d{4}-\d{2}-\d{2}$/.test(e.target.value) && e.target.value <= today) {
         fromKey = e.target.value;
+        auto.forEach((k) => typed.delete(k));   // numbers you typed yourself stay
+        auto.clear();
         prefill();
       }
     });
@@ -1271,13 +1360,16 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       const a = e.target.closest("[data-act]");
       if (!a || busy) return;
       if (a.dataset.act === "cancel") dlg.close();
+      else if (a.dataset.act === "savebase") saveBases(a);
       else if (a.dataset.act === "work") work(a);
       else if (a.dataset.act === "back") { plan = null; drawAsk(); }
       else if (a.dataset.act === "apply") apply(a);
     });
-    drawAsk();
-    prefill();
+
+    if (fromBases) workBases();
+    else { drawAsk(); prefill(); }
   }
+
 
   /* ---------- Suppliers ---------- */
   function renderSuppliers() {
@@ -2651,6 +2743,15 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
             return `<p class="inv-pd-sup"><strong>${esc(s.name)}</strong>${t.main ? ' <span class="inv-flag is-info">Main</span>' : ""}${
               bits.map((b) => ` · ${b}`).join("")}</p>`;
           }).join("")}</div>` : ""}
+        ${canManage ? (() => {
+          const b = st.bases.get(p.id);
+          const nums = b ? [b.shelf !== null && `Shelf ${b.shelf}`, b.jt !== null && `JT storage ${b.jt}`].filter(Boolean).join(" · ") : "";
+          return `<div class="inv-pd-sec inv-pd-base"><div><h4>Base count</h4>
+            <p class="muted">${b ? `${esc(nums)} on ${esc(niceDate(b.dateKey))}${b.by ? ` · saved by ${esc(b.by)}` : ""}`
+              : "No starting point saved yet. Save what was there on a day you know, and digital can be checked against it at any time."}</p></div>
+            <span class="kit-acts">${b ? '<button type="button" class="lh-btn" data-act="base-check">Check digital</button>' : ""}
+              <button type="button" class="lh-btn${b ? " is-quiet" : ""}" data-act="base-set">${b ? "Change" : "Set base count"}</button></span></div>`;
+        })() : ""}
         <div data-role="returns"></div>
         <div class="inv-pd-sec"><h4>Recent activity</h4><div data-role="moves"><p class="tb-none">Loading…</p></div></div>`;
       listMoves({ productId: id, max: 15 })
@@ -2716,6 +2817,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         return;
       }
       if (e.target.closest('[data-act="edit"]')) { dlg.close(); editProduct(p); return; }
+      if (e.target.closest('[data-act="base-check"]')) { dlg.close(); rebuildDialog([p], p.name, { fromBases: true }); return; }
+      if (e.target.closest('[data-act="base-set"]')) { dlg.close(); rebuildDialog([p], p.name); return; }
       if (e.target.closest('[data-act="request"]')) { dlg.close(); location.hash = `#/tasks/order/${encodeURIComponent(id)}`; return; }
       const s = e.target.closest("[data-stock]");
       if (s && await stockAction(p, s.dataset.stock)) {
@@ -3077,6 +3180,11 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     if (e.target.closest('[data-act="import-products"]')) { openProductImport({ products: st.products, suppliers: st.suppliers, staff, onDone: load }); return; }
     if (e.target.closest('[data-act="invoice-links"]')) { openInvoiceLinks({ staff }).then((ok) => { if (ok) load(); }); return; }
     if (e.target.closest('[data-act="export-products"]')) { exportProductsCsv(st.products, st.suppliers); return; }
+    if (e.target.closest('[data-act="base-all"]')) {
+      const list = st.products.filter((p) => p.active && st.bases.has(p.id));
+      if (list.length) rebuildDialog(list, plural(list.length, "product"), { fromBases: true });
+      return;
+    }
     if (e.target.closest('[data-act="new-product"]')) { editProduct(null); return; }
     if (e.target.closest('[data-act="new-supplier"]')) { editSupplier(null); return; }
     const pr = e.target.closest("[data-product]");

@@ -5267,6 +5267,8 @@ export async function rebuildPlan({ fromKey, products, allProducts, counted, pos
     includePast ? getDocs(query(collection(db, "inv_receipts"), where("historical", "==", true))) : Promise.resolve({ docs: [] }),
   ]);
   const recorded = new Set(salesSnap.docs.map((d) => d.id));
+  const keptSales = salesSnap.docs.map((d) => d.data() || {})
+    .filter((x) => x.source === "invoice" && x.deducted === false && (x.apptDate || "") >= fromKey);
 
   // The same name matching as invoice uploads: exact product names, then the saved Invoice links
   const link = new Map((allProducts || products).filter((p) => p.active !== false).map((p) => [invoiceNameKey(p.name), p.id]));
@@ -5291,6 +5293,11 @@ export async function rebuildPlan({ fromKey, products, allProducts, counted, pos
       bucket(m.productId, l.loc)[kind] += Number(l.delta) || 0;
     });
   });
+
+  // 1b. Invoice sales an earlier rebuild counted (saved without changing stock): still sold since that day
+  keptSales.forEach((x) => (Array.isArray(x.lines) ? x.lines : []).forEach((l) => {
+    if (want.has(l.productId)) bucket(l.productId, "shelf").sold -= Number(l.qty) || 0;
+  }));
 
   // 2. Deliveries recorded as received before the portal (they never changed stock)
   recSnap.docs.forEach((d) => {
@@ -5336,7 +5343,7 @@ export async function rebuildPlan({ fromKey, products, allProducts, counted, pos
       const expected = Math.max(0, Math.round(raw));
       locs[key] = { start: c[key], ...x, raw, expected, now: p.stock[key], change: expected - p.stock[key] };
     });
-    return { p, locs, sales: list, unapplied };
+    return { p, locs, sales: list, unapplied, fromKey };
   });
   return { fromKey, rows, unlinked: [...unlinked.values()].sort((a, b2) => b2.n - a.n) };
 }
@@ -5358,4 +5365,81 @@ export async function applyRebuild(row, staff, fromKey) {
     if (!r.already) marked++;
   }
   return { changed, marked };
+}
+
+/* ===================== Base counts: a known starting point per product ===================== */
+// inv_baselines/<productId>: what was physically there on one day. Saving one never changes stock;
+// "Check digital" works out what should be there now from it (rebuildPlan) and fixes what's ticked.
+
+const countOrNull = (v) => {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 0 ? n : NaN;
+};
+
+export async function listBaseCounts() {
+  const snap = await getDocs(collection(db, "inv_baselines"));
+  const m = new Map();
+  snap.docs.forEach((d) => {
+    const x = d.data() || {};
+    if (!KEY_RE.test(x.dateKey || "")) return;
+    const shelf = countOrNull(x.shelf), jt = countOrNull(x.jt);
+    m.set(d.id, {
+      productId: d.id, dateKey: x.dateKey, shelf: Number.isNaN(shelf) ? null : shelf, jt: Number.isNaN(jt) ? null : jt,
+      note: String(x.note || ""), by: String(x.by || ""), at: toDate(x.at),
+      history: Array.isArray(x.history) ? x.history : [],
+    });
+  });
+  return m;
+}
+
+// shelf / jt: a count, or null to leave that place out. A place left out on the same day keeps what it had.
+// The one it replaces is kept in history.
+export async function saveBaseCount(product, { dateKey, shelf = null, jt = null, note = "" }, staff) {
+  if (!KEY_RE.test(dateKey || "") || dateKey > dayKey()) throw new Error("Choose the day it was counted. It can't be in the future.");
+  let s = countOrNull(shelf), j = countOrNull(jt);
+  if (Number.isNaN(s) || Number.isNaN(j)) throw new Error(`${product.name}: enter whole numbers of 0 or more.`);
+  const ref = doc(db, "inv_baselines", product.id);
+  const prev = await getDoc(ref);
+  const p = prev.exists() ? prev.data() : null;
+  if (p && p.dateKey === dateKey) {
+    if (s === null) s = countOrNull(p.shelf);
+    if (j === null) j = countOrNull(p.jt);
+  }
+  if (s === null && j === null) throw new Error(`${product.name}: enter the Shelf or JT storage count.`);
+  const by = who(staff);
+  await setDoc(ref, {
+    productId: product.id, productName: product.name, dateKey, shelf: s, jt: j, note: clip(note, 300),
+    by, byUid: uid(), at: serverTimestamp(),
+    ...(p ? { history: arrayUnion({ dateKey: String(p.dateKey || ""), shelf: p.shelf ?? null, jt: p.jt ?? null,
+      by: String(p.by || ""), replacedAt: new Date().toISOString() }) } : {}),
+  }, { merge: true });
+}
+
+// Every product checked against its own base count (bases can have different dates).
+// fetchInvoiceRows(fromKey) returns the invoice lines since the earliest date (Apps Script op "invoiceLines").
+export async function planFromBases({ products, allProducts, pos = [], bases, fetchInvoiceRows }) {
+  const groups = new Map();
+  products.forEach((p) => {
+    const b = bases.get(p.id);
+    if (!b) return;
+    groups.set(b.dateKey, [...(groups.get(b.dateKey) || []), p]);
+  });
+  if (!groups.size) throw new Error("None of these products have a base count yet.");
+  const earliest = [...groups.keys()].sort()[0];
+  const invoiceRows = await fetchInvoiceRows(earliest);
+  const parts = await Promise.all([...groups].map(([k, list]) => rebuildPlan({
+    fromKey: k, products: list, allProducts, pos, invoiceRows,
+    counted: new Map(list.map((p) => [p.id, { shelf: bases.get(p.id).shelf, jt: bases.get(p.id).jt }])),
+  })));
+  const unlinked = new Map();
+  parts.forEach((pt) => pt.unlinked.forEach((u) => {
+    const k = invoiceNameKey(u.name);
+    if (!unlinked.has(k) || unlinked.get(k).n < u.n) unlinked.set(k, u);
+  }));
+  return {
+    fromKey: earliest,
+    rows: parts.flatMap((pt) => pt.rows).sort((a, b) => a.p.name.localeCompare(b.p.name, "en-AU")),
+    unlinked: [...unlinked.values()].sort((a, b) => b.n - a.n),
+  };
 }

@@ -492,6 +492,18 @@ match /inv_settings/count_order {
   allow write: if can('inventory.count') || can('inventory.order') || can('inventory.manage');
 }
 
+    // Base counts: what was physically there on one day, per product. Saving one never changes stock.
+    match /inv_baselines/{productId} {
+      allow read: if isStaff();
+      allow create, update: if invManage()
+        && request.resource.data.productId == productId
+        && request.resource.data.byUid == request.auth.uid
+        && request.resource.data.dateKey is string
+        && request.resource.data.dateKey.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+        && request.resource.data.note is string && request.resource.data.note.size() <= 300;
+      allow delete: if false;
+    }
+
 // Opening count in progress ("Save and finish later"): one per day
 match /inv_count_drafts/{id} {
   allow read, write: if id.matches('opening__[0-9]{4}-[0-9]{2}-[0-9]{2}')

@@ -10655,3 +10655,6 @@ body.ws-pe-open { overflow: hidden; }
 .inv-rb-chg.is-neg { background: #fef2f2; color: #b91c1c; }
 .inv-rb-chg.is-zero { color: #64748b; }
 .inv-hint.is-warn { background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: .5rem .7rem; color: #92400e; }
+
+.inv-pd-base { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
+.inv-pd-base p { margin: .15rem 0 0; }
