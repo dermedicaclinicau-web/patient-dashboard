@@ -5583,9 +5583,11 @@ export async function productLedger({ product, fromKey, start = null, invoiceRow
         const before = events.filter((e) => e.timed && e.at < c.at)
           .reduce((a, e) => a + e.lines.filter((l) => l.loc === loc).reduce((t, l) => t + l.delta, 0), 0);
         const expected = begin + before;
-        count = { counted: c.counted, expected, system: c.system, diff: c.counted - expected, by: c.by, at: c.at };
+        count = { counted: c.counted, expected, before, system: c.system, diff: c.counted - expected, by: c.by, at: c.at };
       }
-      row.locs[loc] = { start: begin, ...r, end: should[loc], digital: dig[loc], count };
+      // Quiet for this place: nothing happened here and it wasn't counted
+      const quiet = !count && !events.some((e) => e.lines.some((l) => l.loc === loc));
+      row.locs[loc] = { start: begin, ...r, end: should[loc], digital: dig[loc], count, quiet };
     });
     out.push(row);
   }

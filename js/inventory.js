@@ -1391,7 +1391,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       loc: p.stock.jt > 0 && !p.stock.shelf ? "jt" : "shelf",
       quiet: false, open: new Set(), data: null, busy: false, err: "",
     };
-    const givenKey = s.fromKey;
+    let givenKey = s.fromKey;
     const rowsCache = new Map();
     const dlg = openDialog("inv-dlg inv-lgdlg", '<div class="lh-form" data-role="lg"></div>');
     const box = dlg.querySelector('[data-role="lg"]');
@@ -1450,14 +1450,13 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       const loc = s.loc;
       const baseOk = base && base.dateKey === s.fromKey;
       const srcItems = [
-        ...(s.source === "given" && s.fromKey === givenKey ? [["given", "The count I typed"]] : []),
+        ...(s.source === "given" && s.fromKey === givenKey ? [["given", "A count"]] : []),
         ...(baseOk ? [["base", "Base count"]] : []),
         ["digital", "Digital that day"],
       ];
       const head = `
         <div class="inv-pd-head"><div><h3>Day by day: ${esc(p.name)}</h3>
-          <p class="muted">What should have been there each day, next to digital and the opening counts.
-            The first day they stop matching is where to look. Click a day to see what happened.</p></div>
+          <p class="muted">What should have been there each day, next to digital and the opening counts. Click a day to see what happened.</p></div>
           <button type="button" class="ib-tool" data-act="close" aria-label="Close" title="Close">×</button></div>
         <div class="inv-tools inv-lg-tools">
           <label class="lh-field"><span class="lh-label">From</span><input type="date" name="from" value="${s.fromKey}" max="${today}" /></label>
@@ -1478,59 +1477,83 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       const diffs = d.days.filter((x) => x.locs[loc].count && x.locs[loc].count.diff);
       const counted = d.days.filter((x) => x.locs[loc].count).length;
       const gap = last.digital - last.end;
-      const tile = (label, v, cls = "") => `<div class="inv-stat ${cls}"><strong>${esc(String(v))}</strong><span>${esc(label)}</span></div>`;
+      const first = diffs[0] || null;
+      const fc = first ? first.locs[loc].count : null;
+
+      // Movement columns only when something happened in them
+      const has = (k) => d.days.some((x) => (k === "sold" ? x.locs[loc].sold + x.locs[loc].unsold : x.locs[loc][k]));
+      const cols = [["received", "In"], ["sold", "Sold"], ["used", "Used"], ["wasted", "Written off"], ["other", "Other"]].filter(([k]) => has(k));
+      const span = 6 + cols.length;
+      const cell = (L, k) => (k === "sold"
+        ? `${sgn(L.sold + L.unsold)}${L.unsold ? '<small title="Not taken off stock yet">*</small>' : ""}` : sgn(L[k]));
 
       // Quiet days are folded away (the first and last day always show)
       let skipped = 0;
-      const body2 = [];
-      const flush = () => { if (skipped) body2.push(`<tr class="inv-lg-gap"><td colspan="11">${plural(skipped, "quiet day")}</td></tr>`); skipped = 0; };
+      const rows = [];
+      const flush = () => { if (skipped) rows.push(`<tr class="inv-lg-gap"><td colspan="${span}">${plural(skipped, "quiet day")}</td></tr>`); skipped = 0; };
       d.days.forEach((x, i) => {
-        if (!s.quiet && x.quiet && i && i !== d.days.length - 1) { skipped++; return; }
-        flush();
         const L = x.locs[loc];
+        if (!s.quiet && L.quiet && i && i !== d.days.length - 1) { skipped++; return; }
+        flush();
         const c = L.count;
         const isOpen = s.open.has(x.key);
-        body2.push(`<tr class="inv-lg-row${c && c.diff ? " is-diff" : ""}${isOpen ? " is-open" : ""}" data-day="${x.key}">
-          <td>${esc(dayLabel(x.key))}</td><td>${fmtN(L.start)}</td><td>${sgn(L.received)}</td>
-          <td>${sgn(L.sold + L.unsold)}${L.unsold ? '<small title="Not taken off stock yet">*</small>' : ""}</td>
-          <td>${sgn(L.used)}</td><td>${sgn(L.wasted)}</td><td>${sgn(L.other)}</td>
+        rows.push(`<tr class="inv-lg-row${c && c.diff ? " is-diff" : ""}${isOpen ? " is-open" : ""}" data-day="${x.key}">
+          <td>${esc(dayLabel(x.key))}</td><td>${fmtN(L.start)}</td>
+          ${cols.map(([k]) => `<td>${cell(L, k)}</td>`).join("")}
           <td><strong>${fmtN(L.end)}</strong></td>
           <td class="${L.digital !== L.end ? "is-off" : ""}">${fmtN(L.digital)}${L.fix ? ` <small>(${sgn(L.fix)} fixed)</small>` : ""}</td>
           <td>${c ? c.counted : ""}</td>
           <td>${c ? `<span class="inv-rb-chg is-${c.diff < 0 ? "neg" : c.diff > 0 ? "pos" : "zero"}">${c.diff ? sgn(c.diff) : "✓"}</span>` : ""}</td></tr>
-          ${isOpen ? `<tr class="inv-lg-detail"><td colspan="11">${eventsHtml(x, loc)}</td></tr>` : ""}`);
+          ${isOpen ? `<tr class="inv-lg-detail"><td colspan="${span}">${eventsHtml(x, loc)}</td></tr>` : ""}`);
       });
       flush();
 
+      const pill = (label, v, cls = "") => `<span class="inv-lg-pill ${cls}"><b>${esc(String(v))}</b> ${esc(label)}</span>`;
       box.innerHTML = `${head}
-        <div class="inv-stats inv-lg-sum">
-          ${tile(`Started (${d.source[loc] === "counted" ? "counted" : "digital"})`, fmtN(d.startAt[loc]))}
-          ${tile("Delivered", sgn(tot("received")) || "0")}
-          ${tile(unsoldN ? `Sold (${unsoldN} not off stock)` : "Sold", sgn(tot("sold") + tot("unsold")) || "0")}
-          ${tile("Used", sgn(tot("used")) || "0")}
-          ${tile("Written off", sgn(tot("wasted")) || "0")}
-          ${tile("Other", sgn(tot("other")) || "0")}
-          ${tile("Should be now", fmtN(last.end))}
-          ${tile("Digital now", fmtN(last.digital), gap ? "is-warn" : "")}
+        <div class="inv-lg-sum">
+          ${pill(d.source[loc] === "counted" ? "counted at the start" : "digital at the start", fmtN(d.startAt[loc]))}
+          ${pill("delivered", sgn(tot("received")) || "0")}
+          ${pill(unsoldN ? `sold (${unsoldN} not off stock)` : "sold", sgn(tot("sold") + tot("unsold")) || "0")}
+          ${tot("used") ? pill("used", sgn(tot("used"))) : ""}
+          ${tot("wasted") ? pill("written off", sgn(tot("wasted"))) : ""}
+          ${tot("other") ? pill("other", sgn(tot("other"))) : ""}
+          <span class="inv-lg-eq">=</span>
+          ${pill("should be now", fmtN(last.end), "is-strong")}
+          ${pill("digital now", fmtN(last.digital), gap ? "is-warn" : "is-strong")}
         </div>
-        <p class="inv-hint${diffs.length ? " is-warn" : ""}">${diffs.length
+        <p class="inv-hint${diffs.length ? " is-warn" : ""}">${first
           ? `<strong>${plural(diffs.length, "opening count")} didn't match</strong> what should have been there. The first was
-             ${esc(dayLabel(diffs[0].key))} (${sgn(diffs[0].locs[loc].count.diff)}).
-             <button type="button" class="rc-link" data-jump="${diffs[0].key}">Show it</button>`
-          : counted ? `Every opening count since then matched what should have been there. 👍` : "No opening counts in this period."}
+             ${esc(dayLabel(first.key))}: counted ${fc.counted}, should have been ${fmtN(fc.expected)} (${sgn(fc.diff)}).
+             <button type="button" class="rc-link" data-jump="${first.key}">Show it</button>
+             ${s.source === "digital" && d.source[loc] === "digital"
+               ? ` · If digital was wrong from the start, <button type="button" class="rc-link" data-act="from-count" data-day="${first.key}">start from this count instead</button>.` : ""}`
+          : counted ? "Every opening count in this period matched what should have been there. 👍" : "No opening counts in this period."}
           ${gap ? ` Digital is ${sgn(gap)} against what should be there now.` : ""}</p>
         <div class="inv-lg-scroll"><table class="inv-table inv-lg-table">
-          <thead><tr><th>Day</th><th>Start</th><th>In</th><th>Sold</th><th>Used</th><th>Written off</th><th>Other</th>
+          <thead><tr><th>Day</th><th>Start</th>${cols.map(([, l]) => `<th>${esc(l)}</th>`).join("")}
             <th>Should be</th><th>Digital</th><th>Counted</th><th>Difference</th></tr></thead>
-          <tbody>${body2.join("")}</tbody></table></div>
+          <tbody>${rows.join("")}</tbody></table></div>
         <small class="fe-note">Start is the start of the day. Difference compares the opening count with what should have been there when it was counted.
-          Corrections (counts, starting stock, investigations) change Digital but not Should be. * includes invoice sales not taken off stock yet.</small>`;
+          Corrections (counts, starting stock, investigations) change Digital but not Should be.${unsoldN ? " * includes invoice sales not taken off stock yet." : ""}</small>`;
     }
-
     box.addEventListener("click", (e) => {
       if (e.target.closest('[data-act="close"]')) { dlg.close(); return; }
       if (s.busy) return;
       if (e.target.closest('[data-act="use-base"]')) { s.fromKey = base.dateKey; s.source = "base"; run(); return; }
+      const fcBtn = e.target.closest('[data-act="from-count"]');
+      if (fcBtn && s.data) {
+        // That morning's count, less anything that moved before it, is what was there at the start of that day
+        const x = s.data.days.find((dd) => dd.key === fcBtn.dataset.day);
+        const c = x && x.locs[s.loc].count;
+        if (!c) return;
+        start = { shelf: null, jt: null, [s.loc]: Math.max(0, c.counted - (c.before || 0)) };
+        s.fromKey = x.key;
+        givenKey = x.key;
+        s.source = "given";
+        s.open.clear();
+        run();
+        return;
+      }
       const j = e.target.closest("[data-jump]");
       if (j) {
         s.open.add(j.dataset.jump);
@@ -1539,7 +1562,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         if (row) row.scrollIntoView({ behavior: "smooth", block: "center" });
         return;
       }
-      const r = e.target.closest("[data-day]");
+      const r = e.target.closest("tr[data-day]");
       if (r) { const k = r.dataset.day; if (s.open.has(k)) s.open.delete(k); else s.open.add(k); draw(); }
     });
     box.addEventListener("change", (e) => {
