@@ -15916,6 +15916,7 @@ function handlePaper_(body) {
     if (op === 'list') return paperList_(cfg, body.fresh === true);
     if (op === 'thumbs') return paperThumbs_(body.ids);
     if (op === 'file') return paperFile_(String(body.fileId || ''));
+    if (op === 'upload') return paperUpload_(body, session);
     if (op === 'mark') return paperMark_(cfg, body, session);
     if (op === 'markLinked') return paperMarkLinked_(cfg, body, session);
     if (op === 'products') return paperProductsDone_(cfg, body, session);
@@ -20163,4 +20164,39 @@ function testTawk() {
 function testTawkImportRoute() {
   const s = createSession_({ id: 'test', name: 'Test', role: 'Admin' });
   console.log(JSON.stringify(handleProspects_({ session: s, op: 'tawkImport', name: 'x.json', data: '' })));
+}
+
+// Paper records → Upload scans: a photo or PDF from the portal goes into the scans folder,
+// exactly like a file dropped into Drive (same list, same duplicate check, same filing).
+function paperUpload_(body, session) {
+  const mime = String(body.mime || '').toLowerCase();
+  if (!/^(image\/(jpeg|png|webp|heic|heif)|application\/pdf)$/.test(mime)) {
+    return { ok: true, problem: 'Only photos (JPG, PNG, HEIC) and PDFs can be uploaded.' };
+  }
+  const data = String(body.data || '');
+  if (!data) return { ok: true, problem: 'The file was empty.' };
+  if (data.length > 34 * 1024 * 1024) {   // about 25 MB once decoded
+    return { ok: true, problem: 'That file is too big (over 25 MB). Scan it at a lower resolution, or split it.' };
+  }
+  const tz = Session.getScriptTimeZone();
+  const ext = mime === 'application/pdf' ? '.pdf' : mime === 'image/png' ? '.png' : mime === 'image/webp' ? '.webp'
+    : /heic|heif/.test(mime) ? '.heic' : '.jpg';
+  let name = String(body.name || '').replace(/[\\/:*?"<>|#%]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+  if (!name) name = 'Scan ' + Utilities.formatDate(new Date(), tz, 'd MMM yyyy HH.mm');
+  if (!/\.(pdf|jpe?g|png|webp|heic|heif)$/i.test(name)) name += ext;
+
+  let bytes;
+  try { bytes = Utilities.base64Decode(data); }
+  catch (e) { return { ok: true, problem: "The file couldn't be read. Try again." }; }
+
+  const folder = paperUploadFolder_();
+  const file = folder.createFile(Utilities.newBlob(bytes, mime, name));
+  file.setDescription('Uploaded in the portal by ' + String(session.name || 'staff') + ' on '
+    + Utilities.formatDate(new Date(), tz, 'd MMM yyyy HH:mm'));
+  return { ok: true, id: file.getId(), name: file.getName(), size: file.getSize() };
+}
+
+// The folder Paper records reads. Point this at the same folder your op 'list' uses.
+function paperUploadFolder_() {
+  return DriveApp.getFolderById(PAPER_FOLDER_ID);
 }

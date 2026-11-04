@@ -10706,3 +10706,25 @@ body.ws-pe-open { overflow: hidden; }
 
 .inv-base-hist { list-style: none; margin: .35rem 0 0; padding: 0; font-size: .82rem; color: #64748b; }
 .inv-base-hist li { display: flex; gap: .5rem; align-items: baseline; }
+
+/* Paper records → Upload scans */
+.ppr-up { width: min(640px, 96vw); }
+.ppr-drop { display: grid; place-items: center; gap: .25rem; padding: 1.4rem 1rem; text-align: center; cursor: pointer;
+  border: 2px dashed #cbd5e1; border-radius: 14px; background: #f8fafc; transition: border-color .15s, background .15s; }
+.ppr-drop:hover, .ppr-drop.is-over { border-color: #0f766e; background: #f0fdfa; }
+.ppr-drop small { color: #64748b; }
+.ppr-cam { justify-self: start; margin-top: .5rem; cursor: pointer; }
+.ppr-up-list { list-style: none; margin: .6rem 0; padding: 0; display: grid; gap: .4rem; max-height: 45vh; overflow: auto; }
+.ppr-up-item { display: grid; grid-template-columns: 48px 1fr 24px 28px; gap: .6rem; align-items: center;
+  padding: .4rem .5rem; border: 1px solid #e2e8f0; border-radius: 10px; }
+.ppr-up-item.is-done { border-color: #a7f3d0; background: #f0fdf4; }
+.ppr-up-item.is-fail { border-color: #fecaca; background: #fef2f2; }
+.ppr-up-thumb { width: 48px; height: 48px; border-radius: 8px; overflow: hidden; background: #f1f5f9; display: grid; place-items: center; }
+.ppr-up-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.ppr-up-thumb svg { width: 22px; height: 22px; color: #94a3b8; }
+.ppr-up-main { display: grid; gap: .15rem; min-width: 0; }
+.ppr-up-main .fe-input { padding: .3rem .45rem; }
+.ppr-up-main small { color: #64748b; }
+.ppr-up-item.is-fail small b { color: #b91c1c; }
+.ppr-up-state { text-align: center; font-weight: 700; color: #047857; }
+.ppr-up-item.is-fail .ppr-up-state { color: #b91c1c; }

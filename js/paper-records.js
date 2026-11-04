@@ -59,6 +59,48 @@ function rangeDates(k) {
   if (k === "lastmonth") return [keyOf(new Date(t.getFullYear(), t.getMonth() - 1, 1)), keyOf(new Date(t.getFullYear(), t.getMonth(), 0))];
   return ["", ""];
 }
+/* ---------- Uploading scans ---------- */
+const UP_MAX = 25 * 1024 * 1024;
+const UP_OK = /^(image\/(jpeg|png|webp|heic|heif)|application\/pdf)$/i;
+
+// Photos are shrunk (to about 2400 px, JPEG) so they upload fast but stay readable. PDFs, and anything the
+// browser can't open (e.g. HEIC outside Safari), go up as they are. A shrunk one that came out bigger isn't used.
+async function shrinkPhoto(file) {
+  if (!/^image\//.test(file.type) || /png$/i.test(file.type)) return file;
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+    const k = Math.min(1, 2400 / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement("canvas");
+    c.width = Math.round(img.naturalWidth * k);
+    c.height = Math.round(img.naturalHeight * k);
+    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+    const blob = await new Promise((res) => c.toBlob(res, "image/jpeg", 0.85));
+    return blob && blob.size < file.size ? blob : file;
+  } catch {
+    return file;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+const toBase64 = (blob) => new Promise((res, rej) => {
+  const r = new FileReader();
+  r.onload = () => res(String(r.result).split(",")[1] || "");
+  r.onerror = () => rej(new Error("The file couldn't be read."));
+  r.readAsDataURL(blob);
+});
+// Camera names ("IMG_4021.jpg", "image.jpg", "PXL_2026…") become "Scan 4 Nov 2026 10.32"
+function niceUploadName(file, i, many) {
+  const base = String(file.name || "").replace(/\.[^.]+$/, "");
+  const camera = !base || /^(img|image|photo|pxl|dsc|dcim|scan|cam|whatsapp image)[\s_-]?[\d_ -]*$/i.test(base)
+    || /^\d{8}[_-]\d{6}/.test(base);
+  if (!camera) return base;
+  const d = new Date(file.lastModified || Date.now());
+  const when = `${d.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" })} ${
+    pad(d.getHours())}.${pad(d.getMinutes())}`;
+  return `Scan ${when}${many ? ` (${i + 1})` : ""}`;
+}
+const sizeText = (n) => (n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 const ICON_FILE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
 
 // Products used on a paper treatment record: linked to the scan, so it's never taken off twice
@@ -252,6 +294,7 @@ export function mountPaperRecords(container, { staff } = {}) {
         <a class="rc-link" data-role="folder" target="_blank" rel="noopener" hidden>Open the Drive folder ↗</a>
         ${isAdmin ? '<button type="button" class="ff-btn" data-act="settings">Settings</button>' : ""}
         <button type="button" class="ff-btn" data-act="refresh">Refresh</button>
+        <button type="button" class="ff-btn is-primary" data-act="upload">Upload scans</button>
       </div>
       <div class="ppr-tabs" role="tablist"></div>
       <div data-role="body"><div class="skeleton sm"></div></div>
@@ -1733,6 +1776,140 @@ export function mountPaperRecords(container, { staff } = {}) {
     });
     dlg.showModal();
   }
+  
+    /* ---------- Upload scans ---------- */
+
+  function uploadDialog() {
+    const items = [];   // { file, name, preview, state: "ready" | "up" | "done" | "fail", msg, id }
+    let busy = false;
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog inv-dlg ppr-up";
+    dlg.innerHTML = `<div class="lh-form">
+      <div class="lh-dialog-head"><h3>Upload scans</h3>
+        <p>Photos or PDFs of paper records. They go into the scans folder and show in <strong>Scans to enter</strong>, the same as ones put in Drive.</p></div>
+      <label class="ppr-drop" data-role="drop">
+        <input type="file" accept="image/*,application/pdf" multiple hidden data-role="pick" />
+        <strong>Drop files here, or tap to choose</strong>
+        <small>Photos (JPG, PNG, HEIC) or PDFs, up to 25 MB each. Several at once is fine.</small>
+      </label>
+      <label class="lh-btn ppr-cam">Take a photo
+        <input type="file" accept="image/*" capture="environment" hidden data-role="cam" /></label>
+      <ul class="ppr-up-list" data-role="list"></ul>
+      <label class="fe-check"><input type="checkbox" name="openFirst" checked /> Open the first one to enter when it's done</label>
+      <p class="lh-error" role="alert" hidden></p>
+      <div class="lh-actions">
+        <button type="button" class="lh-btn is-quiet" data-act="up-cancel">Cancel</button>
+        <button type="button" class="lh-btn is-primary" data-act="up-go" disabled>Upload</button>
+      </div></div>`;
+    document.body.appendChild(dlg);
+    const $u = (s) => dlg.querySelector(s);
+    const err = $u(".lh-error");
+    const list = $u('[data-role="list"]');
+    const go = $u('[data-act="up-go"]');
+
+    function drawList() {
+      list.innerHTML = items.map((it, i) => `<li class="ppr-up-item is-${it.state}">
+        <span class="ppr-up-thumb">${it.preview ? `<img src="${esc(it.preview)}" alt="" />` : ICON_FILE}</span>
+        <span class="ppr-up-main">
+          <input class="fe-input" data-upname="${i}" value="${esc(it.name)}" maxlength="120" aria-label="File name"${it.state === "ready" || it.state === "fail" ? "" : " disabled"} />
+          <small>${esc([it.file.type === "application/pdf" ? "PDF" : "Photo", sizeText(it.file.size)].join(" · "))}${
+            it.msg ? ` · <b>${esc(it.msg)}</b>` : ""}</small></span>
+        <span class="ppr-up-state">${it.state === "up" ? '<span class="ppr-spin" aria-hidden="true"></span>'
+          : it.state === "done" ? "✓" : it.state === "fail" ? "!" : ""}</span>
+        ${it.state === "ready" || it.state === "fail"
+          ? `<button type="button" class="hx-x" data-uprm="${i}" aria-label="Remove">×</button>` : "<span></span>"}</li>`).join("");
+      const todo = items.filter((it) => it.state === "ready" || it.state === "fail").length;
+      go.disabled = busy || !todo;
+      go.textContent = busy ? "Uploading…" : items.some((it) => it.state === "fail") ? `Try again (${todo})`
+        : todo ? `Upload ${todo} file${todo === 1 ? "" : "s"}` : "Upload";
+    }
+
+    function add(files) {
+      err.hidden = true;
+      const fresh = [...files];
+      const bad = [];
+      fresh.forEach((file) => {
+        if (!UP_OK.test(file.type) && !/\.(heic|heif)$/i.test(file.name)) { bad.push(`${file.name}: not a photo or PDF`); return; }
+        if (file.size > UP_MAX) { bad.push(`${file.name}: over 25 MB`); return; }
+        if (items.some((it) => it.file.name === file.name && it.file.size === file.size)) return;   // added twice
+        items.push({ file, name: "", preview: /^image\/(jpeg|png|webp)$/i.test(file.type) ? URL.createObjectURL(file) : "", state: "ready", msg: "" });
+      });
+      const many = items.length > 1;
+      items.forEach((it, i) => { if (!it.name) it.name = niceUploadName(it.file, i, many); });
+      if (bad.length) { err.textContent = `Not added: ${bad.join(" · ")}`; err.hidden = false; }
+      drawList();
+    }
+
+    async function uploadAll() {
+      if (busy) return;
+      busy = true;
+      err.hidden = true;
+      drawList();
+      for (const it of items.filter((x) => x.state === "ready" || x.state === "fail")) {
+        if (!dlg.isConnected) return;
+        it.state = "up";
+        it.msg = "";
+        drawList();
+        try {
+          const blob = await shrinkPhoto(it.file);
+          const mime = blob.type || it.file.type || (/\.heic$/i.test(it.file.name) ? "image/heic" : "application/octet-stream");
+          const r = await callApi({ action: "paper", op: "upload", name: it.name.trim(), mime, data: await toBase64(blob) });
+          if (r && r.problem) throw new Error(r.problem);
+          if (!r || r.ok !== true || !r.id) throw new Error(notSaved(r));
+          Object.assign(it, { state: "done", id: r.id, msg: blob !== it.file ? `Uploaded (shrunk to ${sizeText(blob.size)})` : "Uploaded" });
+        } catch (ex) {
+          console.error("Upload failed:", it.name, ex);
+          Object.assign(it, { state: "fail", msg: ex.message || "Couldn't upload. Try again." });
+        }
+        drawList();
+      }
+      busy = false;
+      const done = items.filter((it) => it.state === "done");
+      const failed = items.filter((it) => it.state === "fail").length;
+      drawList();
+      if (!done.length) return;
+      showToast(`${done.length} scan${done.length === 1 ? "" : "s"} uploaded${failed ? `, ${failed} didn't` : ""}`);
+      await loadScans(true);
+      st.tab = "scans";
+      draw();
+      if (failed) { err.textContent = "Some didn't upload. Press Try again, or remove them."; err.hidden = false; return; }
+      const openFirst = $u('[name="openFirst"]').checked;
+      dlg.close();
+      if (openFirst && (st.files || []).some((x) => x.id === done[0].id)) openScan(done[0].id);
+    }
+
+    // Drop, choose, camera
+    const drop = $u('[data-role="drop"]');
+    ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("is-over"); }));
+    ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("is-over"); }));
+    drop.addEventListener("drop", (e) => { if (!busy && e.dataTransfer) add(e.dataTransfer.files); });
+    $u('[data-role="pick"]').addEventListener("change", (e) => { add(e.target.files); e.target.value = ""; });
+    $u('[data-role="cam"]').addEventListener("change", (e) => { add(e.target.files); e.target.value = ""; });
+    dlg.addEventListener("input", (e) => {
+      const n = e.target.dataset.upname;
+      if (n !== undefined && items[Number(n)]) items[Number(n)].name = e.target.value;
+    });
+    dlg.addEventListener("click", (e) => {
+      const rm = e.target.closest("[data-uprm]");
+      if (rm && !busy) {
+        const [it] = items.splice(Number(rm.dataset.uprm), 1);
+        if (it && it.preview) URL.revokeObjectURL(it.preview);
+        drawList();
+        return;
+      }
+      if (e.target.closest('[data-act="up-cancel"]') && !busy) dlg.close();
+      if (e.target.closest('[data-act="up-go"]')) uploadAll();
+    });
+    dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
+    dlg.addEventListener("close", () => {
+      items.forEach((it) => { if (it.preview) URL.revokeObjectURL(it.preview); });
+      dlg.remove();
+      // Closed after some went up: the list shows them
+      if (items.some((it) => it.state === "done")) loadScans(true);
+    });
+    drawList();
+    dlg.showModal();
+  }
 
   /* ---------- Events ---------- */
 
@@ -1757,6 +1934,7 @@ export function mountPaperRecords(container, { staff } = {}) {
       return;
     }
     if (act && act.dataset.act === "settings") openSettings();
+    if (act && act.dataset.act === "upload") { uploadDialog(); return; }
     if (act && act.dataset.act === "clear-dates") { st.sFrom = ""; st.sTo = ""; draw(); }
     if (act && act.dataset.act === "bulk-linked") bulkLinked(act);
   });
