@@ -1286,6 +1286,72 @@ export async function mountTaskEditor(container, { id, staff } = {}) {
     catch { window.prompt("Copy this link, then paste it as a button's link:", url); }
   });
 
+  // "Add a button": a "Link to a form" choice under the web address (To Patient tasks only)
+  const formPickObs = new MutationObserver(() => {
+    if (!root.isConnected) { formPickObs.disconnect(); return; }
+    document.querySelectorAll(".lh-dialog.fe-confirm:not([data-formpick])").forEach(addFormPicker);
+  });
+  formPickObs.observe(document.body, { childList: true, subtree: true });
+
+  function addFormPicker(dlg) {
+    if (!/\b(add|edit) a button\b/i.test(dlg.textContent || "")) return;
+    dlg.dataset.formpick = "1";
+    if (task.category !== "patient") return;
+
+    const inputs = [...dlg.querySelectorAll("input")];
+    const urlInput = inputs.find((i) => i.type === "url" || /^https?:/i.test(i.value) || /http/i.test(i.placeholder || ""));
+    if (!urlInput) return;
+    const textInput = inputs.find((i) => i !== urlInput && i.type !== "hidden");
+
+    const box = document.createElement("div");
+    box.className = "tb-formpick";
+    const sel = document.createElement("select");
+    sel.className = dlg.querySelector("select")?.className || "";
+    box.innerHTML = '<span class="tb-formpick-label">Or link to a form the patient fills in</span>';
+    box.appendChild(sel);
+    const hint = document.createElement("small");
+    hint.className = "muted";
+    hint.textContent = "Each patient gets their own link, and what they send is saved to their record.";
+    box.appendChild(hint);
+
+    const fill = () => {
+      if (onlineForms === null) { sel.innerHTML = "<option>Loading forms…</option>"; sel.disabled = true; return; }
+      sel.disabled = !onlineForms.length;
+      sel.innerHTML = onlineForms.length
+        ? '<option value="">Choose a form…</option>' + onlineForms.map((f) => `<option value="${esc(f.id)}">${esc(f.name)}</option>`).join("")
+        : "<option>No forms are set up for patients to fill in online</option>";
+      const m = /form\.html#f=([A-Za-z0-9_-]{10,40})/.exec(urlInput.value);
+      if (m && onlineForms.some((f) => f.id === m[1])) sel.value = m[1];
+    };
+    fill();
+    if (onlineForms === null) {
+      const wait = setInterval(() => { if (onlineForms !== null || !dlg.isConnected) { clearInterval(wait); fill(); } }, 300);
+    }
+
+    const set = (input, v) => {
+      input.value = v;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    sel.addEventListener("change", () => {
+      const f = (onlineForms || []).find((x) => x.id === sel.value);
+      if (!f) return;
+      set(urlInput, `${FORM_PAGE}#f=${f.id}`);
+      if (textInput && !textInput.value.trim()) set(textInput, `Fill in your ${f.name}`);
+    });
+    // Typing a different address clears the choice
+    urlInput.addEventListener("input", () => {
+      const m = /form\.html#f=([A-Za-z0-9_-]{10,40})/.exec(urlInput.value);
+      if (!m || m[1] !== sel.value) sel.value = "";
+    });
+
+    // Under the web address and its "Insert a blank" list
+    let anchor = urlInput.closest("label") || urlInput;
+    while (anchor.parentElement && anchor.parentElement !== dlg && anchor.parentElement.children.length === 1) anchor = anchor.parentElement;
+    if (anchor.nextElementSibling?.tagName === "SELECT") anchor = anchor.nextElementSibling;
+    anchor.after(box);
+  }
+
   getLetterhead()
     .then((lh) => { letterhead = lh; })
     .catch(() => { letterhead = {}; })

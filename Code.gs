@@ -4424,8 +4424,6 @@ function schedDeliver_(cfg, rec) {
     let body = fillPersonTagsInLinks_(inlined.html, { 'first name': r.first, 'full name': r.name })
       .replace(/\{First name\}/gi, escH(r.first)).replace(/\{Full name\}/gi, escH(r.name));
     if (rec.category === 'patient' && pid) body = mktFormLinks_(body, 'tk.' + runId, pid);
-    const body = fillPersonTagsInLinks_(inlined.html, { 'first name': r.first, 'full name': r.name })
-      .replace(/\{First name\}/gi, escH(r.first)).replace(/\{Full name\}/gi, escH(r.name));
     const mail = { to: r.email, subject: subj, htmlBody: body, body: emailHtmlToText_(body), name: 'Dermedica Clinic' };
     if (cc) mail.cc = cc;
     if (attachments.length) mail.attachments = attachments;

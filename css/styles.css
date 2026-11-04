@@ -10527,3 +10527,8 @@ body.ws-pe-open { overflow: hidden; }
 .tb-formlinks { display: flex; flex-direction: column; gap: .4rem; margin-top: .4rem; padding-top: .7rem; border-top: 1px dashed var(--border); }
 .tb-formlinks:empty { display: none; }
 
+
+/* Add a button: Link to a form */
+.tb-formpick { display: flex; flex-direction: column; gap: .35rem; margin-top: .6rem; padding-top: .6rem; border-top: 1px dashed var(--border); }
+.tb-formpick-label { font-size: .85rem; font-weight: 600; color: var(--muted, #64748b); }
+.tb-formpick select { width: 100%; }
