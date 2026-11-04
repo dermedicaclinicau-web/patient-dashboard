@@ -10699,3 +10699,7 @@ body.ws-pe-open { overflow: hidden; }
 .inv-rb-link .fb-select { max-width: 320px; }
 .inv-rb-more { margin-top: .4rem; }
 .inv-rb-more summary { cursor: pointer; font-weight: 600; }
+
+.inv-rb-why { margin-top: .5rem; padding: .5rem .7rem; background: #f8fafc; border-radius: 10px; font-size: .85rem; }
+.inv-rb-why ul { margin: .25rem 0 0; padding-left: 1.1rem; }
+.inv-rb-why li { margin: .15rem 0; }

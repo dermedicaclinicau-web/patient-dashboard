@@ -5277,26 +5277,41 @@ export async function rebuildPlan({ fromKey, products, allProducts, counted, pos
   const b = new Map();   // productId|loc → { received, pastIn, sold, unapplied, used, wasted, other }
   const bucket = (pid, loc) => {
     const k = `${pid}|${loc}`;
-    if (!b.has(k)) b.set(k, { received: 0, pastIn: 0, sold: 0, unapplied: 0, used: 0, wasted: 0, other: 0 });
+    if (!b.has(k)) b.set(k, { received: 0, pastIn: 0, sold: 0, unapplied: 0, used: 0, wasted: 0, other: 0,
+      digitalSince: 0, fix: 0, early: 0, kept: 0, fixes: [] });
     return b.get(k);
   };
 
   // 1. What moved in the portal since that day (dated when it happened, e.g. an invoice uploaded the next day)
+  // Every change to digital since that day is kept too, so the difference between digital and "should be" can be explained
   moves.forEach((m) => {
-    if (!want.has(m.productId) || REBUILD_SKIP.includes(m.type)) return;
-    const eff = KEY_RE.test(m.effectiveDate || "") ? m.effectiveDate : m.at ? dayKey(m.at) : "";
-    if (eff < fromKey) return;
+    if (!want.has(m.productId)) return;
+    const atKey = m.at ? dayKey(m.at) : "";
+    const eff = KEY_RE.test(m.effectiveDate || "") ? m.effectiveDate : atKey;
+    const fix = REBUILD_SKIP.includes(m.type);
     const kind = m.type === "receive" ? "received" : m.type === "sale" ? "sold"
       : REBUILD_USED.includes(m.type) ? "used" : m.type === "writeoff" ? "wasted" : "other";
     (m.lines || []).forEach((l) => {
       if (l.loc !== "shelf" && l.loc !== "jt") return;
-      bucket(m.productId, l.loc)[kind] += Number(l.delta) || 0;
+      const n = Number(l.delta) || 0;
+      if (!n) return;
+      const x = bucket(m.productId, l.loc);
+      x.digitalSince += n;
+      if (fix) {
+        x.fix += n;
+        x.fixes.push({ n, day: atKey, by: String(m.by || ""), label: MOVE_TYPES[m.type] || m.type, reason: String(m.reason || "") });
+      } else if (eff < fromKey) x.early += n;   // happened before that day, entered after
+      else x[kind] += n;
     });
   });
 
   // 1b. Invoice sales an earlier rebuild counted (saved without changing stock): still sold since that day
   keptSales.forEach((x) => (Array.isArray(x.lines) ? x.lines : []).forEach((l) => {
-    if (want.has(l.productId)) bucket(l.productId, "shelf").sold -= Number(l.qty) || 0;
+    if (!want.has(l.productId)) return;
+    const n = Number(l.qty) || 0;
+    const x = bucket(l.productId, "shelf");
+    x.sold -= n;
+    x.kept -= n;
   }));
 
   // 2. Deliveries recorded as received before the portal (they never changed stock)
@@ -5341,7 +5356,8 @@ export async function rebuildPlan({ fromKey, products, allProducts, counted, pos
       if (key === "shelf") x.unapplied = -unapplied;
       const raw = c[key] + x.received + x.pastIn + x.sold + x.unapplied + x.used + x.wasted + x.other;
       const expected = Math.max(0, Math.round(raw));
-      locs[key] = { start: c[key], ...x, raw, expected, now: p.stock[key], change: expected - p.stock[key] };
+      locs[key] = { start: c[key], ...x, raw, expected, now: p.stock[key], change: expected - p.stock[key],
+        digitalStart: p.stock[key] - x.digitalSince };
     });
     return { p, locs, sales: list, unapplied, fromKey };
   });

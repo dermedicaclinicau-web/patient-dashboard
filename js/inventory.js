@@ -1200,6 +1200,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
             <td>${x.now}</td><td><span class="inv-rb-chg is-${x.change < 0 ? "neg" : x.change > 0 ? "pos" : "zero"}">${sgn(x.change)}</span></td></tr>`).join("")}
           </tbody></table>
           ${r.p.tracked ? `<small class="fe-note">Batch &amp; expiry product: open it and use <strong>Count</strong> to set each batch to these totals.</small>` : ""}
+          ${whyHtml(r)}
         </section>`;
       };
       const off = plan.rows.filter((r) => Object.values(r.locs).some((x) => x.change)).length;
@@ -1220,6 +1221,23 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
             : '<button type="button" class="lh-btn is-quiet" data-act="back">← Change the counts</button>'}
           <button type="button" class="lh-btn is-primary" data-act="apply">Set digital</button>
         </div>`;
+    }
+        // Why digital isn't "should be": the parts always add up to the difference
+    function whyHtml(r) {
+      return Object.entries(r.locs).filter(([, x]) => x.change).map(([loc, x]) => {
+        const parts = [];
+        const d0 = x.digitalStart - x.start;
+        if (d0) parts.push(`Digital was <b>${fmtN(x.digitalStart)}</b> at the start of ${esc(niceDate(r.fromKey))}, but ${fmtN(x.start)} were counted <b>(${sgn(d0)})</b>`);
+        if (x.fix) parts.push(`<b>${sgn(x.fix)}</b> from corrections to digital since then: ${esc(x.fixes.slice(-4).map((f) =>
+          `${f.label} ${sgn(f.n)} on ${niceDate(f.day)}${f.by ? ` by ${f.by}` : ""}${f.reason ? ` (${f.reason})` : ""}`).join("; "))}${x.fixes.length > 4 ? "…" : ""}`);
+        if (x.early) parts.push(`<b>${sgn(x.early)}</b> entered since then for something that happened before that day`);
+        if (x.unapplied) parts.push(`<b>${sgn(-x.unapplied)}</b>: ${plural(-x.unapplied, "invoice sale")} not taken off digital yet`);
+        if (x.kept) parts.push(`<b>${sgn(-x.kept)}</b>: invoice sales counted by an earlier rebuild`);
+        if (x.pastIn) parts.push(`<b>${sgn(-x.pastIn)}</b>: delivered before the portal, never added to digital`);
+        if (x.raw < 0) parts.push(`Should be came to ${fmtN(x.raw)}, so it's shown as 0`);
+        return `<div class="inv-rb-why"><strong>Why digital (${fmtN(x.now)}) isn't ${fmtN(x.expected)} in ${esc(locLabel(loc))}:</strong>
+          <ul>${parts.map((t) => `<li>${t}</li>`).join("")}</ul></div>`;
+      }).join("");
     }
 
         // Invoice names that aren't linked: the ones that look like these products first, each with a Link button
