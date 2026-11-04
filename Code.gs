@@ -15439,7 +15439,7 @@ function handleReports_(body) {
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
   const op = String(body.op || '');
   if (op === 'visits') {
-    if (!can_(session, 'reports.patients') || !repTab_(session, 'visits')) return { ok: false, error: 'FORBIDDEN' };
+    if (!can_(session, 'menu.reports') || !repTab_(session, 'visits')) return { ok: false, error: 'FORBIDDEN' };
     try { return repVisitList_(body); }
     catch (err) {
       console.error('Report visits failed: ' + (err && err.stack ? err.stack : err));
@@ -15448,8 +15448,8 @@ function handleReports_(body) {
   }
   if (REP_OPS_.indexOf(op) === -1 && op !== 'retention') return { ok: false, error: 'BAD_REQUEST' };
   // Retention is numbers only (no patient details), so Reporting access is enough
-  if (!can_(session, op === 'retention' ? 'menu.reports' : 'reports.patients')) return { ok: false, error: 'FORBIDDEN' };
-  if (!repTab_(session, op)) return { ok: false, error: 'FORBIDDEN' };
+  // Each Reporting tab is its own tick (Staff → Roles & access → Reporting tabs). That tick is all a patient tab needs.
+  if (!can_(session, 'menu.reports') || !repTab_(session, op)) return { ok: false, error: 'FORBIDDEN' };
   const key = 'rep_' + op + '_v4';
   if (body.fresh !== true) {
     const hit = repCacheGet_(key);

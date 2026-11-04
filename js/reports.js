@@ -94,12 +94,13 @@ function tabGroupsHtml(tabs, cur) {
 }
 
 // The tabs this person can see (Staff → Roles & access → Reporting tabs). Admins: all of them (null).
-let tabMemo = null;
-async function allowedTabs() {
+let tabMemo = null;   // { who, at, tabs }
+async function allowedTabs(staff) {
   if (isAdmin()) return null;
-  if (tabMemo && Date.now() - tabMemo.at < 120000) return tabMemo.tabs;
+  const who = (staff && (staff.id || staff.uid)) || "";
+  if (tabMemo && tabMemo.who === who && Date.now() - tabMemo.at < 120000) return tabMemo.tabs;
   const r = await callApi({ action: "staff", op: "reportTabs" });
-  tabMemo = { at: Date.now(), tabs: Array.isArray(r.tabs) ? r.tabs : [] };
+  tabMemo = { who, at: Date.now(), tabs: Array.isArray(r.tabs) ? r.tabs : [] };
   return tabMemo.tabs;
 }
 
@@ -115,9 +116,9 @@ export function mountReports(container, { param = "", staff = null } = {}) {
   const head = '<div class="fb-head"><div><h2>Reporting</h2><p class="muted">Count differences, wastage, kits and usage.</p></div></div>';
   root.innerHTML = `${head}<div>${SKELETON}</div>`;
 
-  allowedTabs().then((allow) => {
+  allowedTabs(staff).then((allow) => {
     if (!root.isConnected) return;
-    const all = can("reports.patients") ? TABS.concat([["visits", "Patient visits"]], PATIENT_TABS) : TABS;
+    const all = TABS.concat([["visits", "Patient visits"]], PATIENT_TABS);   // each tab is its own tick
     const tabs = allow ? all.filter(([k]) => allow.includes(k)) : all;
     if (!tabs.length) {
       root.innerHTML = `${head}<div class="state"><strong>No reports turned on for you</strong>
