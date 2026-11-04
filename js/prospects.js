@@ -2,7 +2,7 @@
 // People who've enquired but aren't patients yet: from web form emails, and added by hand.
 // Read from Firestore; every change goes through Apps Script (action "prospects"), so it's logged on the prospect.
 import { db, auth } from "./firebase-config.js";
-import { collection, getDocs, getDoc, doc, query, orderBy, limit, where }
+import { collection, getDocs, getDoc, doc, query, orderBy, limit, where, onSnapshot }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
 import { can } from "./perms.js";
@@ -217,13 +217,138 @@ const followHtml = (val = "", note = "", time = "") => `
 const opts = (list, cur, blank = "") => (blank ? `<option value="">${esc(blank)}</option>` : "") +
   list.map((v) => `<option value="${esc(v)}"${v === cur ? " selected" : ""}>${esc(v)}</option>`).join("");
 
+
+/* ===================== Follow-ups: the list, and Done / Change / Remove ===================== */
+
+const FU_GROUPS = [["overdue", "Overdue"], ["today", "Today"], ["soon", "Next 7 days"], ["later", "Later"]];
+function fuGroup(p) {
+  const fs = followState(p);
+  if (fs === "overdue" || fs === "today") return fs;
+  return p.nextFollowUp <= addDays(todayKey(), 7) ? "soon" : "later";
+}
+const fuSort = (a, b) => `${a.nextFollowUp} ${a.nextFollowUpTime || "99"}`.localeCompare(`${b.nextFollowUp} ${b.nextFollowUpTime || "99"}`);
+const telOf = (s) => String(s || "").replace(/[^\d+]/g, "");
+
+function followListHtml(list, { showWho = false, work = true } = {}) {
+  const items = list.filter((p) => p.nextFollowUp && OPEN.includes(p.stage)).sort(fuSort);
+  if (!items.length) return '<p class="pr-empty">No follow-ups set. 👍</p>';
+  return FU_GROUPS.map(([g, label]) => {
+    const rows = items.filter((p) => fuGroup(p) === g);
+    if (!rows.length) return "";
+    return `<section class="pr-fu-grp is-${g}"><h4>${esc(label)} <em>${rows.length}</em></h4>${rows.map((p) => `
+      <div class="pr-fu-item" data-id="${esc(p.id)}">
+        <div class="pr-fu-main">
+          <a href="#/prospects/${enc(p.id)}"><strong>${esc(p.name || "No name")}</strong></a>
+          <small><b>${esc(fuText(p))}</b>${p.concern ? ` · ${esc(p.concern)}` : ""}${showWho ? ` · ${esc(p.assignedToName || "Nobody yet")}` : ""}</small>
+          ${p.followNote ? `<small class="pr-fu-note">“${esc(p.followNote)}”</small>` : ""}
+        </div>
+        <div class="pr-fu-acts">
+          ${p.phone ? `<a class="lh-btn is-quiet" href="tel:${esc(telOf(p.phone))}" title="Call ${esc(p.phone)}">${I(IC.phone)}</a>` : ""}
+          ${work ? `<button type="button" class="lh-btn is-primary" data-fu="done">${I(IC.check)} Done</button>
+            <button type="button" class="lh-btn" data-fu="change">Change</button>
+            <button type="button" class="lh-btn is-quiet" data-fu="remove">Remove</button>` : ""}
+        </div>
+      </div>`).join("")}</section>`;
+  }).join("");
+}
+
+// submit(data) saves it: data = { outcome, note, followUp, followTime, followNote }
+function followDoneDialog(p, submit) {
+  openDialog({
+    title: `Follow-up done: ${p.name}`, sub: [fuText(p), p.followNote].filter(Boolean).join(" · "), submit: "Mark as done",
+    body: `<span class="lh-label">What happened? <small class="muted">(optional)</small></span>
+      <div class="pr-reasons">${[["", "Just mark it done"], ...OUTCOMES].map(([k, l], i) =>
+        `<label class="pr-reason"><input type="radio" name="outcome" value="${k}"${i ? "" : " checked"} /><span>${esc(l)}</span></label>`).join("")}</div>
+      <label class="lh-field"><span class="lh-label">Note <small class="muted">(optional)</small></span>
+        <textarea name="note" rows="2" maxlength="1000" class="fe-input" placeholder="What was said, what happens next"></textarea></label>
+      ${followHtml("", "", "")}
+      <small class="muted">Set a date above to book the next follow-up straight away, or leave it empty.</small>`,
+    onSubmit: async (c) => {
+      const f = c.form.elements;
+      const fp = fuProblem(f.followUp.value, f.followTime.value);
+      if (fp) { c.fail(fp); return; }
+      await submit({ outcome: (c.form.querySelector('[name="outcome"]:checked') || {}).value || "", note: f.note.value,
+        followUp: f.followUp.value, followTime: f.followTime.value, followNote: f.followNote.value });
+      c.close();
+    },
+  });
+}
+function followChangeDialog(p, submit) {
+  openDialog({
+    title: `Change the follow-up: ${p.name}`, sub: p.nextFollowUp ? `Now ${fuText(p)}` : "", submit: "Save",
+    body: followHtml(fuStart(p.nextFollowUp), p.followNote || "", fuStart(p.nextFollowUp) ? p.nextFollowUpTime || "" : ""),
+    onSubmit: async (c) => {
+      const f = c.form.elements;
+      if (!f.followUp.value) { c.fail("Choose a date, or use Remove to cancel the follow-up."); return; }
+      const fp = fuProblem(f.followUp.value, f.followTime.value);
+      if (fp) { c.fail(fp); return; }
+      await submit({ followUp: f.followUp.value, followTime: f.followTime.value, followNote: f.followNote.value });
+      c.close();
+    },
+  });
+}
+function followRemoveDialog(p, submit) {
+  openDialog({
+    title: `Remove the follow-up for ${p.name}?`, sub: fuText(p), submit: "Remove follow-up",
+    body: '<p class="muted">It comes off the list and won\'t remind anyone. It\'s noted on their Timeline.</p>',
+    onSubmit: async (c) => { await submit({ followUp: "", followTime: "", followNote: "" }); c.close(); },
+  });
+}
+// From a list (the board's Follow-ups view, My dashboard): saves, then onSaved(prospect)
+function followAction(kind, p, onSaved) {
+  const go = (op, msg) => async (data) => {
+    const r = await api(op, { id: p.id, ...data });
+    showToast(msg);
+    if (onSaved) onSaved(r && r.prospect);
+  };
+  if (kind === "done") followDoneDialog(p, go("followDone", "Follow-up done"));
+  if (kind === "change") followChangeDialog(p, go("followUp", "Follow-up changed"));
+  if (kind === "remove") followRemoveDialog(p, go("followUp", "Follow-up removed"));
+}
+
+// My dashboard → My follow-ups: my prospects' follow-ups, kept up to date. el: an empty element on the page.
+// bare: no header (the dashboard draws its own) · onCount(due, total): for a badge · alive(): false once the page has gone
+export function mountMyFollowUps(el, { bare = false, onCount = null, alive = null } = {}) {
+  const uid = auth.currentUser && auth.currentUser.uid;
+  if (!el) return () => {};
+  if (!uid || !can("menu.prospects")) { el.hidden = true; return () => {}; }
+  const work = can("prospects.work") || can("prospects.manage");
+  const isAlive = alive || (() => el.isConnected);
+  let list = [];
+  let loaded = false;
+  if (!bare) el.classList.add("pr-myfu");
+  el.innerHTML = '<div class="mv-loading"><span class="mv-spin" aria-hidden="true"></span>Loading…</div>';
+  const draw = () => {
+    if (!loaded) return;
+    const open = list.filter((p) => p.nextFollowUp && OPEN.includes(p.stage));
+    const due = open.filter((p) => ["overdue", "today"].includes(followState(p))).length;
+    if (onCount) onCount(due, open.length);
+    el.innerHTML = (bare ? "" : `<div class="pr-myfu-head"><h3>${I(IC.clock)} My follow-ups${due ? ` <em>${due} due</em>` : ""}</h3>
+      <a href="#/prospects/followups">All follow-ups →</a></div>`) + followListHtml(list, { work });
+  };
+  const stop = onSnapshot(query(collection(db, "prospects"), where("assignedToId", "==", uid), where("historic", "==", false)),
+    (snap) => { list = snap.docs.map((d) => ({ id: d.id, ...d.data() })); loaded = true; draw(); },
+    (err) => { console.warn("My follow-ups:", err); el.innerHTML = '<p class="tb-none">Couldn\'t load your follow-ups.</p>'; });
+  el.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-fu]");
+    const row = e.target.closest("[data-id]");
+    const p = b && row && list.find((x) => x.id === row.dataset.id);
+    if (p) followAction(b.dataset.fu, p);   // the list updates by itself
+  });
+  const tick = setInterval(() => {          // "Today" turns into "Overdue" as times pass; stops when the page has gone
+    if (!isAlive()) { stop(); clearInterval(tick); return; }
+    draw();
+  }, 60000);
+  return () => { stop(); clearInterval(tick); };
+}
+
 /* ===================== Routes ===================== */
 
 export function mountProspects(container, { param = "", staff = null } = {}) {
   const parts = String(param || "").split("/").filter(Boolean);
   if (parts[0] === "reports") { mountReports(container); return; }
-  if (parts[0] && parts[0] !== "list") { mountProspect(container, decodeURIComponent(parts[0]), staff); return; }
-  mountBoard(container, { view: parts[0] === "list" ? "list" : "board", staff });
+  if (parts[0] && !["list", "followups"].includes(parts[0])) { mountProspect(container, decodeURIComponent(parts[0]), staff); return; }
+  mountBoard(container, { view: ["list", "followups"].includes(parts[0]) ? parts[0] : "board", staff });
 }
 /* ===================== The board and the list ===================== */
 
@@ -277,7 +402,7 @@ async function mountBoard(container, { view, staff }) {
     </div>
     <div class="pr-tiles">${tiles.map(tileHtml).join("")}</div>
     <div class="pr-tools">
-      <div class="fe-seg">${[["board", "Board"], ["list", "List"]].map(([v, l]) =>
+      <div class="fe-seg">${[["board", "Board"], ["list", "List"], ["followups", "Follow-ups"]].map(([v, l]) =>
         `<label class="fe-seg-btn"><input type="radio" name="pr-view" value="${v}"${st.view === v ? " checked" : ""} /><span>${l}</span></label>`).join("")}</div>
       <input type="search" class="fe-input pr-q" data-role="q" placeholder="Search name, mobile, email or interest" />
       <select class="fe-input" data-role="range" aria-label="Enquired">${RANGES.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("")}</select>
@@ -356,6 +481,10 @@ async function mountBoard(container, { view, staff }) {
     const pred = showOf(st.show);
     const list = pool.filter((p) => pred(p, set));
     const box = root.querySelector('[data-role="body"]');
+    if (st.view === "followups") {
+      box.innerHTML = followListHtml(list, { showWho: true, work });
+      return;
+    }
     if (st.view === "list") {
       const rows = list.slice().sort(byUrgency);
       box.innerHTML = rows.length ? `<div class="pr-table-wrap"><table class="pr-table"><thead><tr>
@@ -426,7 +555,11 @@ async function mountBoard(container, { view, staff }) {
 
   root.addEventListener("change", (e) => {
     const r = e.target.dataset.role;
-    if (e.target.name === "pr-view") { st.view = e.target.value; history.replaceState(null, "", st.view === "list" ? "#/prospects/list" : "#/prospects"); drawBody(); }
+    if (e.target.name === "pr-view") {
+      st.view = e.target.value;
+      history.replaceState(null, "", st.view === "board" ? "#/prospects" : `#/prospects/${st.view}`);
+      drawBody();
+    }
     if (r === "source") { st.source = e.target.value; drawBody(); }
     if (r === "who") { st.who = e.target.value; drawBody(); }
     if (r === "range") {
@@ -444,6 +577,13 @@ async function mountBoard(container, { view, staff }) {
   root.addEventListener("click", (e) => {
     const tr = e.target.closest("tr[data-href]");
     if (tr && !e.target.closest("a")) { location.hash = tr.dataset.href; return; }
+    const fb = e.target.closest("[data-fu]");
+    if (fb) {
+      const row = fb.closest("[data-id]");
+      const p = row && all.find((x) => x.id === row.dataset.id);
+      if (p) followAction(fb.dataset.fu, p, (np) => { if (np) replace(np); });
+      return;
+    }
     const sh = e.target.closest("[data-show]");
     if (sh) { st.show = st.show === sh.dataset.show ? "" : sh.dataset.show; drawBody(); return; }
     const rg = e.target.closest("[data-range]");
@@ -754,8 +894,11 @@ async function mountProspect(container, id, staff) {
             ${p.nextFollowUp ? `<p class="pr-follow-when"><strong>${esc(fuText(p))}</strong>${
               fs === "overdue" ? ' <span class="pr-tag is-bad">Overdue</span>' : fs === "today" ? ' <span class="pr-tag is-warn">Today</span>' : ""}</p>
               ${p.followNote ? `<p class="muted">${esc(p.followNote)}</p>` : ""}` : '<p class="muted">No follow-up set.</p>'}
+            ${work && p.nextFollowUp ? `<div class="pr-row pr-fu-btns">
+              <button type="button" class="lh-btn is-primary" data-act="fu-done">${I(IC.check)} Done</button>
+              <button type="button" class="lh-btn is-quiet" data-act="fu-remove">Remove</button></div>` : ""}
             ${work ? `<form data-role="follow" novalidate>${followHtml(fuStart(p.nextFollowUp), p.followNote || "", fuStartTime())}
-              <button type="submit" class="lh-btn is-primary">Save follow-up</button></form>` : ""}
+              <button type="submit" class="lh-btn${p.nextFollowUp ? "" : " is-primary"}">${p.nextFollowUp ? "Change follow-up" : "Save follow-up"}</button></form>` : ""}
           </section>
           ${timeline()}
         </div>
@@ -909,6 +1052,23 @@ async function mountProspect(container, id, staff) {
     const a = e.target.closest("[data-act]");
     if (!a || !work) return;
     const act = a.dataset.act;
+    if (act === "fu-done") {
+      followDoneDialog(p, (d) => {
+        const o = OUTCOMES.find(([k]) => k === d.outcome);
+        saveFast("followDone", d, {
+          patch: { ...(o ? contactPatch() : {}), ...fuPatch("", "", ""), ...(d.followUp ? fuPatch(d.followUp, d.followNote, d.followTime) : {}) },
+          log: { kind: "follow", what: o ? `Follow-up done: ${o[1]}` : "Follow-up done", note: d.note.trim() },
+          msg: "Follow-up done",
+        });
+      });
+      return;
+    }
+    if (act === "fu-remove") {
+      followRemoveDialog(p, (d) => saveFast("followUp", d, {
+        patch: fuPatch("", "", ""), log: { kind: "follow", what: "Follow-up removed" }, msg: "Follow-up removed",
+      }));
+      return;
+    }
     if (act === "call") setTimeout(() => logDialog("spoke"), 400);   // the phone opens, then the log
     if (act === "log") logDialog();
     if (act === "text" || act === "email") openCompose(act);

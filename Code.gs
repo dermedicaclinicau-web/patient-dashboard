@@ -18023,7 +18023,15 @@ function prosAction_(cfg, op, id, body, session) {
     contacted();
     const bad = followUp();
     if (bad) return { ok: true, problem: bad };
-    } else if (op === 'stage') {
+    } else if (op === 'followDone') {
+    if (!p.nextFollowUp) return { ok: true, problem: "There's no follow-up to mark as done." };
+    const out = String(body.outcome || '');
+    if (out && out !== 'note' && PROS_OUTCOMES_[out]) { add('contact', PROS_OUTCOMES_[out]); contacted(); }
+    add('follow', 'Follow-up done (was ' + recLongDate_(p.nextFollowUp) +
+      (p.nextFollowUpTime ? ' at ' + hmText_(p.nextFollowUpTime) : '') + ')', out ? '' : note);
+    Object.assign(patch, { nextFollowUp: '', nextFollowUpTime: '', followNote: '' });
+    if (body.followUp) { const bad = followUp(); if (bad) return { ok: true, problem: bad }; }   // and the next one
+  } else if (op === 'stage') {
     const to = String(body.stage || '');
     if (PROS_STAGES_.indexOf(to) === -1) return { ok: false, error: 'BAD_REQUEST' };
     if (to === p.stage) return { ok: true, prospect: Object.assign({ id: id }, p) };

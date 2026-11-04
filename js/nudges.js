@@ -70,6 +70,11 @@ const prospects = {
         const href = `#/prospects/${encodeURIComponent(p.id)}`;
         return {
           key: `pr|${p.id}|${p.nextFollowUp}|${p.nextFollowUpTime}`, rank: 1, icon: "clock", tone: "teal", href, page: href,
+          done: async () => {
+            const { callApi } = await import("./appointments.js");
+            const r = await callApi({ action: "prospects", op: "followDone", id: p.id });
+            if (r && r.problem) throw new Error(r.problem);
+          },
           title: `Follow up: ${p.name || "a prospect"}`, note: p.followNote || "", sort: p.nextFollowUpTime,
           sub: [`Due ${hmText(p.nextFollowUpTime)}${lateText(minsPast(p.nextFollowUpTime, now.hm))}`, p.concern].filter(Boolean).join(" · "),
         };
@@ -256,7 +261,8 @@ function draw(due, now = perthNow()) {
           ${it.sub ? `<small>${esc(it.sub)}</small>` : ""}
           ${it.note ? `<small class="pn-note">“${esc(it.note)}”</small>` : ""}</span>
       </button>
-      <div class="pn-acts"><button type="button" data-act="snooze">Snooze 10 min</button></div>
+      <div class="pn-acts">${it.done ? '<button type="button" class="is-primary" data-act="done">Done</button>' : ""}
+        <button type="button" data-act="snooze">Snooze 10 min</button></div>
       <button type="button" class="pn-x" data-act="close" aria-label="Close">×</button>
     </div>`).join("")
     + (more > 0 ? `<button type="button" class="pn-more" data-act="more">+${more} more</button>`
@@ -287,6 +293,18 @@ function onClick(e) {
   const it = card && current.get(card.dataset.k);
   if (!it) return;
   if (act === "open") { openItem(it); return; }
+  if (act === "done" && it.done) {
+    setState(it.key, "closed");
+    card.classList.add("is-out");
+    setTimeout(check, 180);
+    it.done()
+      .then(() => import("./utils.js").then((u) => u.showToast("Follow-up done")))
+      .catch((err) => {
+        console.warn("Follow-up not marked done:", err);
+        import("./utils.js").then((u) => u.showToast("Couldn't mark it done. Open the prospect to try again."));
+      });
+    return;
+  }
   if (act === "close") setState(it.key, "closed");
   if (act === "snooze") {
     setState(it.key, Date.now() + SNOOZE_MS);

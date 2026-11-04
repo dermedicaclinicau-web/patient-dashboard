@@ -21,6 +21,7 @@ import { openStartOfDayKit } from "./start-of-day.js";
 import { mountMyNotes } from "./my-notes.js";
 import { mountRecordingJobs } from "./recording-bar.js";
 import { mountMyVisits } from "./my-visits.js";
+import { mountMyFollowUps } from "./prospects.js";
 import { getDashPrefs, saveDashPrefs, syncDashPrefs } from "./dash-prefs.js";
 import { enableDashArrange } from "./dash-arrange.js";
 
@@ -61,11 +62,13 @@ const quiet = (title, text, href = "") => (href
 // The cards, in their default order. "notes" is for everyone; "visits" for anyone who records treatments; the rest need their dash.* tick.
 const DASH_CARDS = [
   ["attention", "Needs you now"], ["visits", "Visits without a record"], ["appts", "My appointments & notes"], ["tasks", "Tasks"],
+  ["followups", "My follow-ups"],
   ["notes", "My notes"], ["days", "Start & end of day"], ["kit", "My kit"], ["records", "My records"], ["usage", "What I used"],
   ["requests", "My requests"], ["stock", "Stock I use"], ["overview", "Clinic overview"],
 ];
 const SIDE_CARDS = new Set(["notes", "kit", "requests", "stock"]);
-const allowedCard = (k) => k === "notes" || (k === "visits" ? can("consult.record") : can(`dash.${k}`));
+const allowedCard = (k) => k === "notes" || (k === "visits" ? can("consult.record")
+  : k === "followups" ? can("menu.prospects") : can(`dash.${k}`));
 
 // Per person: hidden and collapsed cards, the order, columns and colours (dash-prefs.js: this device and their login)
 const hideKey = (uid) => ({ uid, f: "hidden" });
@@ -249,6 +252,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
       && !(k === "kit" && !canKit) && !(k === "overview" && !(canOrder || canJt)) && !(k === "days" && !isAdmin());
     const list = byOrder(DASH_CARDS, readOrder(me)).filter(([k]) => here(k));
     const box = ([k, label]) => (k === "visits" ? '<section class="md-card" data-role="visits"></section>'
+      : k === "followups" ? '<section class="md-card" data-role="followups"></section>'
       : `<section class="md-card is-loading"${colorAttr(me, k)}><div class="md-card-head"><h3>${esc(label)}</h3></div>${LOADING}</section>`);
     const main = list.filter(([k]) => !sideOf(me, k));
     const side = list.filter(([k]) => sideOf(me, k));
@@ -263,6 +267,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
   function showShell() {
     body.innerHTML = shellHtml();
     placeVisits();
+    placeFollowUps();
   }
 
   /* ---------- Visits without a record: made once, so it keeps its place and doesn't reload with the rest ---------- */
@@ -288,6 +293,33 @@ export async function mountMyDashboard(container, { staff } = {}) {
   function placeVisits() {
     const slot = body.querySelector('[data-role="visits"]');
     if (slot && allowedCard("visits")) slot.replaceWith(visitsSection());
+  }
+
+  /* ---------- My follow-ups (prospects): made once and kept live, like Visits without a record ---------- */
+  let fuCard = null;
+  function followUpsSection() {
+    if (fuCard) return fuCard;
+    fuCard = document.createElement("section");
+    fuCard.className = "md-card md-fu-card";
+    fuCard.innerHTML = `<div class="md-card-head"><h3>My follow-ups</h3>
+        <span class="md-count" data-role="fucount" hidden></span>
+        <a class="md-link" href="#/prospects/followups">All follow-ups</a></div>
+      <div data-role="fubody"></div>`;
+    mountMyFollowUps(fuCard.querySelector('[data-role="fubody"]'), {
+      bare: true,
+      alive: () => root.isConnected,
+      onCount: (due) => {
+        const b = fuCard.querySelector('[data-role="fucount"]');
+        b.hidden = !due;
+        b.textContent = due ? String(due) : "";
+        b.title = due ? `${due} due today or overdue` : "";
+      },
+    });
+    return fuCard;
+  }
+  function placeFollowUps() {
+    const slot = body.querySelector('[data-role="followups"]');
+    if (slot && allowedCard("followups")) slot.replaceWith(followUpsSection());
   }
 
   showShell();
@@ -833,7 +865,8 @@ export async function mountMyDashboard(container, { staff } = {}) {
     /* ---------- The cards: work on the left, tools on the right, each in this person's order ---------- */
     const SIDE = SIDE_CARDS;
     const CARDS = [["attention", attentionHtml], ["visits", '<section class="md-card" data-role="visits"></section>'],
-      ["appts", apptHtml], ["tasks", tasksHtml], ["notes", notesHtml], ["days", daysHtml],
+      ["appts", apptHtml], ["tasks", tasksHtml], ["followups", '<section class="md-card" data-role="followups"></section>'],
+      ["notes", notesHtml], ["days", daysHtml],
       ["kit", kitHtml], ["records", recordsHtml], ["usage", usedHtml], ["requests", reqHtml], ["stock", stockHtml], ["overview", overviewHtml]];
     const shown = byOrder(CARDS, readOrder(me)).filter(([k, h]) => h && show(k));
     const mainCards = shown.filter(([k]) => !sideOf(me, k));
@@ -848,6 +881,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     const grid = body.querySelector(".md-layout");
     if (grid) {
       placeVisits();
+      placeFollowUps();
       const tag = (col, list) => {
         if (!col) return;
         [...col.querySelectorAll(":scope > .md-card:not(.md-qa-card)")].forEach((el, i) => { if (list[i]) el.dataset.card = list[i][0]; });

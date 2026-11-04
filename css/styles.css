@@ -10609,3 +10609,31 @@ body.ws-pe-open { overflow: hidden; }
 .pn-offer .pn-acts { gap: .4rem; }
 .pn-acts .is-primary { background: #0f766e; color: #fff; }
 .pn-acts .is-primary:hover { background: #115e59; }
+
+/* Follow-ups list (board view and My dashboard) */
+.pr-fu-grp { margin: 0 0 1rem; }
+.pr-fu-grp h4 { display: flex; align-items: center; gap: .4rem; margin: 0 0 .45rem; font-size: .85rem; text-transform: uppercase;
+  letter-spacing: .04em; color: #64748b; }
+.pr-fu-grp h4 em { font-style: normal; background: #f1f5f9; border-radius: 999px; padding: 0 .5rem; color: #334155; }
+.pr-fu-grp.is-overdue h4 { color: #b91c1c; } .pr-fu-grp.is-overdue h4 em { background: #fef2f2; color: #b91c1c; }
+.pr-fu-grp.is-today h4 { color: #b45309; }   .pr-fu-grp.is-today h4 em { background: #fffbeb; color: #b45309; }
+.pr-fu-item { display: flex; align-items: center; gap: .75rem; padding: .65rem .8rem; margin: 0 0 .4rem;
+  background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; }
+.pr-fu-grp.is-overdue .pr-fu-item { border-left: 4px solid #dc2626; }
+.pr-fu-grp.is-today .pr-fu-item { border-left: 4px solid #d97706; }
+.pr-fu-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: .15rem; }
+.pr-fu-main a { color: inherit; text-decoration: none; } .pr-fu-main a:hover strong { text-decoration: underline; }
+.pr-fu-main small { color: #64748b; font-size: .82rem; }
+.pr-fu-note { font-style: italic; }
+.pr-fu-acts { display: flex; gap: .35rem; flex-wrap: wrap; justify-content: flex-end; }
+.pr-fu-acts .lh-btn { padding: .35rem .7rem; font-size: .85rem; }
+.pr-fu-btns { margin: .5rem 0 .75rem; gap: .4rem; }
+.pr-myfu-head { display: flex; align-items: baseline; justify-content: space-between; gap: .5rem; margin: 0 0 .6rem; }
+.pr-myfu-head h3 { display: flex; align-items: center; gap: .4rem; margin: 0; font-size: 1.05rem; }
+.pr-myfu-head h3 em { font-style: normal; font-size: .75rem; background: #fef2f2; color: #b91c1c; border-radius: 999px; padding: .1rem .5rem; }
+.pr-myfu-head a { font-size: .85rem; color: #0f766e; }
+@media (max-width: 640px) { .pr-fu-item { flex-direction: column; align-items: stretch; } .pr-fu-acts { justify-content: flex-start; } }
+
+/* My dashboard → My follow-ups */
+.md-fu-card .pr-fu-grp:last-child { margin-bottom: 0; }
+.md-fu-card .pr-fu-item { padding: .55rem .7rem; }
