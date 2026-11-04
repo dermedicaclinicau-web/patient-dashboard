@@ -8218,6 +8218,7 @@ function flowTriggerWhyNot_(cfg, flow, run, ctx, memo) {
   }
   if (ev === 'daily' && !flowHasRules_(t.rules)) return 'the daily check has no rules yet';
   if (ev === 'task' && !(Array.isArray(t.taskIds) && t.taskIds.length)) return 'no task is chosen';
+  if (ev === 'form' && !(Array.isArray(t.formIds) && t.formIds.length)) return 'no form is chosen';
   if (flowHasRules_(t.rules) && !flowGroupOk_(cfg, t.rules, run, ctx)) {
     return ev === 'daily' ? "the patient doesn't match the daily check today" : "the patient doesn't match the start rules";
   }
@@ -8237,7 +8238,7 @@ function flowVals_(cfg, run, ctx, memo, forStaff) {
     'first name': w.first, 'full name': w.name, 'patient name': w.name, 'patient mobile': w.mobile, 'patient email': w.email,
     'email': w.email, 'mobile': w.mobile, 'date of birth': recLongDate_(ctx.doc.DobKey) || String(ctx.doc.DOB || ''),
     'product name': String(run.product || ''), 'purchase date': recLongDate_(run.purchaseDate) || String(run.purchaseDate || ''),
-    'sold by': String(run.soldBy || ''), 'how to use': how,
+    'sold by': String(run.soldBy || ''), 'how to use': how, 'form name': String(run.formName || ''),
     'visit date': run.visitDate ? (recLongDate_(run.visitDate) || run.visitDate) : '',
     'visit services': (Array.isArray(run.visitServices) ? run.visitServices : []).join(', '),
     'visit staff': (Array.isArray(run.visitStaff) ? run.visitStaff : []).join(' and '),
@@ -8925,6 +8926,40 @@ function flowStep_(cfg, flow, run, memo, deadline) {
       continue;
     }
 
+    if (s.type === 'update') {
+      let r = null;
+      try { r = flowApplyDetails_(cfg, c, run, ctx, !!tester); }
+      catch (e) { note('Details not updated: ' + String(e && e.message ? e.message : e).slice(0, 150)); }
+      if (r) {
+        const list = r.changes.map(function (x) { return x.what.toLowerCase(); }).join(', ');
+        if (!r.changes.length) note('Update their details: nothing new on the form');
+        else if (r.applied) {
+          note('Updated their ' + list + ' from "' + String(run.formName || 'the form') + '"');
+          Object.assign(ctx.doc, r.patch);   // later emails go to the new address
+          ctx.who = flowWho_(ctx.doc);
+        } else if (c.mode === 'review') {
+          const who = flowTodoTo_(c, run, tester);
+          const text = ((tester ? '[Test] ' : '') + 'Check and update ' + ctx.who.name + "'s details from " +
+            (run.formName || 'their online form') + ': ' +
+            r.changes.map(function (x) { return x.what + ' ' + (x.from || '(none)') + ' → ' + x.to; }).join('; ')).slice(0, 480);
+          const made = who.length ? staffTodoCreate_(cfg, {
+            recipients: who, text: text, due: flowKey_(Date.now()), patientId: ctx.pid, patientName: ctx.who.name,
+            taskId: '', taskName: 'Email flow: ' + String(flow.name || ''), runId: String(run._id || ''), by: 'Email flow', byUid: '',
+          }) : 0;
+          if (made) flowTodoTell_(cfg, who, text, ctx, flow);
+          note(made ? 'To-do for ' + who.map(function (x) { return x.name; }).join(', ') + ' to check their new ' + list
+            : 'Update their details: nobody to check them');
+        } else {
+          note("Testing, so their record wasn't changed. It would update their " + list + ': ' +
+            r.changes.map(function (x) { return x.what + ' → ' + x.to; }).join('; '));
+        }
+        if (r.bad.length) note('Not used: ' + r.bad.join('; '));
+      }
+      next = afterId;
+      save({ next: next, dueAt: Date.now() });
+      continue;
+    }
+
     if (s.type === 'email' || s.type === 'task') {
       const why = flowStopWhy_(cfg, flow, run, ctx, !!tester);
       if (why) { note('Stopped: ' + why); save({ status: 'stopped', reason: why, next: '' }); return; }
@@ -9080,6 +9115,20 @@ function flowTestRun_(body, session) {
     run._note = last ? 'Using the answers from "' + (last.taskName || 'the task') + '" sent on ' + String(last.sentAt || '').slice(0, 10) + '.'
       : "That task hasn't been sent to them yet, so the task's blanks are empty.";
   }
+  if (ev === 'form') {
+    // What they sent the last time they filled in one of these forms online
+    const fids = ((flow.trigger || {}).formIds || []).map(String);
+    const last = paperSelect_(cfg, 'form_submissions', 'patientId', doc._id, ['templateId', 'templateName', 'online'])
+      .filter(function (x) { return x.online && fids.indexOf(String(x.templateId || '')) !== -1; })
+      .sort(function (a, b) { return String((b.online || {}).at || '').localeCompare(String((a.online || {}).at || '')); })[0];
+    Object.assign(run, {
+      formId: last ? String(last.templateId) : String(fids[0] || ''), formName: last ? String(last.templateName || '') : '',
+      submissionId: last ? last._id : '', formDetails: last && last.online.details ? last.online.details : {},
+    });
+    run._note = !last ? "They haven't filled in that form online yet, so there's nothing to update."
+      : 'Using what they sent on "' + run.formName + '" on ' + String(last.online.at || '').slice(0, 10) + '.' +
+        (last.online.details ? '' : ' It was sent before forms kept the details, so there is nothing to update.');
+  }
   const ctx = flowCtx_(cfg, run, memo);
   run.apptKeys = ctx.upcoming();
 
@@ -9128,6 +9177,14 @@ function flowTestRun_(body, session) {
       const text = flowTaskTokens_(flowFill_(String(c.text || ''), flowVals_(cfg, run, ctx, memo, true), false), flowTaskCtx_(run), false);
       steps.push('Add a staff to-do for ' + (who.map(function (x) { return x.name; }).join(', ') || 'nobody') +
         ': "' + text.slice(0, 200) + '" (not added in a test)');
+      next = afterId;
+      continue;
+    }
+    if (s.type === 'update') {
+      const r = flowDetailChanges_(c, run.formDetails, doc);
+      steps.push('Update their details' + (c.mode === 'review' ? ' (a to-do for staff to check)' : '') + ': ' +
+        (r.changes.length ? r.changes.map(function (x) { return x.what + ' ' + (x.from || '(none)') + ' → ' + x.to; }).join('; ')
+          : 'nothing new on the form') + (r.bad.length ? '. Not used: ' + r.bad.join('; ') : '') + ". Not changed in a test.");
       next = afterId;
       continue;
     }
@@ -9366,6 +9423,8 @@ function flowRestart_(body, session) {
       taskId: String(old.taskId || ''), taskName: String(old.taskName || ''), taskRunId: String(old.taskRunId || ''),
       taskAnswers: Array.isArray(old.taskAnswers) ? old.taskAnswers : [], threadIds: Array.isArray(old.threadIds) ? old.threadIds : [],
       taskSentMs: Number(old.taskSentMs) || 0, taskSentBy: String(old.taskSentBy || ''), taskSentByUid: String(old.taskSentByUid || ''),
+      formId: String(old.formId || ''), formName: String(old.formName || ''), submissionId: String(old.submissionId || ''),
+      formDetails: old.formDetails && typeof old.formDetails === 'object' ? old.formDetails : {},
       apptKeys: (flow.stop || {}).booking === true ? flowUpcoming_(cfg, doc, memo) : [],
       events: [{ at: new Date().toISOString(), what: 'Started again by ' + String(session.name || 'staff') + '.' }],
     }))]);
@@ -12617,7 +12676,8 @@ function pfSubmit_(cfg, tok, L, body, picks) {
     patientId: doc._id, patientPttId: String(doc.PttID || ''), patientName: who.name, recordDate: recordDate,
      answers: answers, signatures: signatures, createdAt: now,
      createdBy: testLive ? 'Patient (online) · Test' : 'Patient (online)', createdByUid: '',
-     online: { campaignId: tok.cid, at: now.toISOString(), changed: changed.slice(0, 5), test: testLive, picked: picked },
+     online: { campaignId: tok.cid, at: now.toISOString(), changed: changed.slice(0, 5), test: testLive, picked: picked,
+       details: pfDetails_(fields, answers) },
   };
   const key = pfDoneKey_(tok, picks);
   if (picks.length) {   // several buttons, one link: a sensible limit
@@ -12634,7 +12694,17 @@ function pfSubmit_(cfg, tok, L, body, picks) {
   ]);
   if (!ok) return { ok: true, problem: fsGetDoc_(cfg, PF_DONE_ + '/' + key) ? 'DONE' : 'SERVER' };
 
-  try { pfNotify_(cfg, L, sub, subId); } catch (e) { console.warn('Online form saved, but staff not told: ' + e); }
+  // Email flows that start when this form is filled in (a test from a template never starts them)
+  let flows = [];
+  if (!testLive) {
+    try {
+      flows = flowEnrolForm_(cfg, {
+        formId: tok.tid, formName: String(L.ver.name || L.tpl.name || 'Form'), submissionId: subId,
+        patientId: doc._id, details: sub.online.details, changed: changed,
+      });
+    } catch (e) { console.warn('Online form saved, but email flows not started: ' + e); }
+  }
+  try { pfNotify_(cfg, L, sub, subId, flows); } catch (e) { console.warn('Online form saved, but staff not told: ' + e); }
   if (!testLive && /^[A-Za-z0-9_-]{10,40}$/.test(tok.cid)) {
     try { mktOnce_(cfg, tok.cid, 'forms', doc._id, { at: now.toISOString(), submissionId: subId }, [mktInc_('stats.forms')]); }
     catch (e) { /* not a campaign (a flow), or not essential */ }
@@ -12644,8 +12714,9 @@ function pfSubmit_(cfg, tok, L, body, picks) {
 }
 
 // The staff chosen in Form settings (nobody chosen: the Admins) get an email, and a to-do if it's ticked
-function pfNotify_(cfg, L, sub, subId) {
+function pfNotify_(cfg, L, sub, subId, flows) {
   const o = L.tpl.online || {};
+  const upd = (flows || []).filter(function (f) { return f.updates; })[0] || null;
   const ids = (Array.isArray(o.notify) ? o.notify : []).map(String);
   const all = getStaffDocs_().filter(function (x) { return x.active !== false; });
   let who = all.filter(function (x) { return ids.indexOf(x.id) !== -1; });
@@ -12657,7 +12728,9 @@ function pfNotify_(cfg, L, sub, subId) {
     '<p style="margin:0 0 12px;color:#475569">Filled in online by the patient, ' + invEsc_(recLongDate_(sub.recordDate)) + '. It\'s saved to their record.</p>' +
     (pk.length ? '<p style="margin:0 0 12px">Chosen from the email: ' + pk.map(function (x) {
       return invEsc_(x.question) + ' → <strong>' + invEsc_(x.answer) + '</strong>'; }).join(', ') + '</p>' : '') +
-    (ch.length ? '<p style="margin:0 0 6px"><strong>They changed their details on the form.</strong> Their record hasn\'t been changed:</p><ul style="margin:0 0 12px;padding-left:20px">' +
+    (ch.length ? '<p style="margin:0 0 6px"><strong>They changed their details on the form.</strong> ' + (upd ? 'The email flow “' + invEsc_(upd.name) + '” ' +
+      (upd.test ? 'is testing, so it only shows what would change' : 'updates their record within 15 minutes')
+      : 'Their record hasn\'t been changed') + ':</p><ul style="margin:0 0 12px;padding-left:20px">' +
       ch.map(function (c) { return '<li>' + invEsc_(c.what) + ': ' + invEsc_(c.from || '(none)') + ' → <strong>' + invEsc_(c.to) + '</strong></li>'; }).join('') + '</ul>' : '');
   const html = invEmailWrap_(inner, 'form-record/' + subId, 'Open the form');
   const to = uniq_(who.map(function (x) { return isEmail_(x.email) ? x.email : ''; }));
@@ -19405,3 +19478,211 @@ function flowTodoTell_(cfg, who, text, ctx, flow) {
 Object.assign(FLOW_FIELD_TYPE_, { 'task.answer': 'answer', 'task.replied': 'bool' });
 FLOW_RULE_COST_['task.answer'] = 0;
 FLOW_RULE_COST_['task.replied'] = 2;
+
+
+/* ===================== Email flows: a patient fills in a form online ===================== */
+
+// The form's questions that are filled in from the patient's details, as the patient sent them
+const PF_DETAIL_FILLS_ = {
+  'patient.name': 'name', 'patient.firstName': 'firstName', 'patient.lastName': 'lastName', 'patient.dob': 'dobKey',
+  'patient.email': 'email', 'patient.mobile': 'mobile', 'patient.address': 'address',
+  'patient.medicare': 'medicare', 'patient.medicareIrn': 'medicareIrn', 'patient.medicareExp': 'medicareExp',
+};
+function pfDetails_(fields, answers) {
+  const out = {};
+  (fields || []).forEach(function (f) {
+    const k = f && PF_DETAIL_FILLS_[f.fill];
+    const v = k ? answers[f.id] : null;
+    if (typeof v === 'string' && v.trim() && !(k in out)) out[k] = v.replace(/\s+/g, ' ').trim().slice(0, 300);
+  });
+  return out;
+}
+
+function flowHasStep_(list, type) {
+  return (Array.isArray(list) ? list : []).some(function (s) {
+    return !!s && (s.type === type || (!!s.cfg && (flowHasStep_(s.cfg.yes, type) || flowHasStep_(s.cfg.no, type))));
+  });
+}
+
+// A form was sent: starts every live flow whose trigger is that form. Never stops the form saving.
+// info: { formId, formName, submissionId, patientId, details, changed } → [{ flowId, name, test, updates }]
+function flowEnrolForm_(cfg, info) {
+  const out = [];
+  if (!info.patientId || !info.formId) return out;
+  const flows = fsQuery_(cfg, 'email_flows', 'status', 'EQUAL', 'live', 50).filter(function (f) {
+    const t = f.trigger || {};
+    return t.event === 'form' && (Array.isArray(t.formIds) ? t.formIds : []).map(String).indexOf(String(info.formId)) !== -1
+      && Array.isArray(f.steps) && f.steps.length;
+  });
+  if (!flows.length) return out;
+  const doc = flowPatient_(cfg, info.patientId);
+  if (!doc) return out;
+  const memo = { pts: {} };
+  memo.pts[doc._id] = doc;
+  const now = new Date().toISOString();
+  flows.forEach(function (f) {
+    try {
+      if (flowHeld_(cfg, memo, f._id, doc._id)) return;
+      const t = f.trigger || {};
+      const base = {
+        kind: 'form', purchaseDate: flowKey_(Date.now()), sourceKey: docId_(doc.PttID || doc._id), sourceId: String(doc.PttID || doc._id),
+        formId: String(info.formId), formName: String(info.formName || ''), submissionId: String(info.submissionId || ''),
+        formDetails: info.details || {}, formChanged: (info.changed || []).slice(0, 10),
+      };
+      const trun = Object.assign({ patientId: doc._id }, base);
+      if (flowHasRules_(t.rules)) {
+        const ctx = flowCtx_(cfg, trun, memo);
+        if (!ctx || !flowGroupOk_(cfg, t.rules, trun, ctx)) return;
+      }
+      const earlier = fsQuery_(cfg, FLOW_RUNS_, 'patientId', 'EQUAL', doc._id, 100)
+        .filter(function (r) { return r.flowId === f._id && r.status === 'active'; });
+      if (earlier.length && t.again === 'ignore') return;
+      const writes = earlier.map(function (r) {
+        return patchWrite_(cfg, FLOW_RUNS_ + '/' + r._id, {
+          status: 'stopped', reason: 'They filled in the form again, so the flow started over.', next: '', updatedAt: now,
+        });
+      });
+      const id = flowPart_(f._id) + '__' + flowPart_(doc._id) + '__' + flowPart_(info.submissionId);
+      writes.push(updateWrite_(cfg, FLOW_RUNS_ + '/' + id, flowNewRun_(f, doc, Object.assign({}, base, {
+        apptKeys: (f.stop || {}).booking === true ? flowUpcoming_(cfg, doc, memo) : [],
+        events: [{ at: now, what: 'Started: they filled in "' + String(info.formName || 'the form') + '" online' }],
+      }))));
+      commitWrites_(cfg, writes);
+      out.push({ flowId: f._id, name: String(f.name || ''), test: f.sendMode !== 'real', updates: flowHasStep_(f.steps, 'update') });
+    } catch (e) { console.warn('Flow ' + f._id + ' not started for the form: ' + e); }
+  });
+  return out;
+}
+
+function flowMedicareOk_(d) {
+  if (!/^[2-6]\d{9}$/.test(d)) return false;
+  const w = [1, 3, 7, 9, 1, 3, 7, 9];
+  let sum = 0;
+  for (let i = 0; i < 8; i++) sum += w[i] * Number(d[i]);
+  return sum % 10 === Number(d[8]);
+}
+// "03/2028", "3/28" or "2028-03" → "2028-03", or ""
+function flowMedicareExp_(s) {
+  s = String(s || '').trim();
+  let m = /^(\d{4})-(\d{1,2})$/.exec(s);
+  let y, mo;
+  if (m) { y = +m[1]; mo = +m[2]; }
+  else {
+    m = /^(\d{1,2})\s*[\/.\- ]\s*(\d{2}|\d{4})$/.exec(s);
+    if (!m) return '';
+    mo = +m[1];
+    y = m[2].length === 2 ? 2000 + Number(m[2]) : Number(m[2]);
+  }
+  return mo >= 1 && mo <= 12 && y >= 2000 && y <= 2100 ? y + '-' + pad2_(mo) : '';
+}
+
+// What the form would change on the patient's record, for the details the card is set to update.
+// → { changes: [{ what, from, to }], patch: { Firestore fields }, bad: [why something wasn't used] }
+function flowDetailChanges_(c, details, p) {
+  const want = (Array.isArray(c && c.fields) ? c.fields : []).map(String);
+  const d = details || {};
+  const out = { changes: [], patch: {}, bad: [] };
+  const low = function (s) { return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); };
+  const has = function (k) { return want.indexOf(k) !== -1; };
+
+  if (has('name') && (d.name || d.firstName || d.lastName)) {
+    let first = d.firstName || '', last = d.lastName || '';
+    if ((!first || !last) && d.name) {
+      const parts = String(d.name).trim().split(/\s+/);
+      if (parts.length >= 2) { first = first || parts.slice(0, -1).join(' '); last = last || parts[parts.length - 1]; }
+    }
+    first = prosTidyName_(first).slice(0, 60);
+    last = prosTidyName_(last).slice(0, 60);
+    if (!first || !last) out.bad.push('Name: it needs a first and last name');
+    else if (first !== String(p['First Name'] || '') || last !== String(p['Last Name'] || '')) {
+      const nk = (last + ' ' + first).toLowerCase();
+      Object.assign(out.patch, { 'First Name': first, 'Last Name': last, 'Patient Name': first + ' ' + last, NameKey: nk });
+      out.changes.push({ what: 'Name', from: flowWho_(p).name, to: first + ' ' + last });
+    }
+  }
+  if (has('mobile') && d.mobile) {
+    const norm = function (s) { let x = String(s || '').replace(/\D/g, ''); if (/^61\d{9}$/.test(x)) x = '0' + x.slice(2); return x; };
+    const mob = norm(d.mobile);
+    if (mob.length < 8 || mob.length > 12) out.bad.push('Mobile: "' + d.mobile + '" doesn\'t look like a phone number');
+    else if (mob !== norm(p.Mobile)) {
+      Object.assign(out.patch, { Mobile: mob, PhoneKey: mob });
+      out.changes.push({ what: 'Mobile', from: recMobile_(p.Mobile), to: recMobile_(mob) });
+    }
+  }
+  if (has('email') && d.email) {
+    const em = mktEmail_(d.email);
+    if (!isEmail_(em)) out.bad.push('Email: "' + d.email + '" isn\'t an email address');
+    else if (em !== mktEmail_(p.Email)) {
+      Object.assign(out.patch, { Email: em, EmailKey: em });
+      out.changes.push({ what: 'Email', from: String(p.Email || ''), to: em });
+    }
+  }
+  if (has('address') && d.address) {
+    const ad = String(d.address).replace(/\s+/g, ' ').trim().slice(0, 200);
+    if (ad.length < 5) out.bad.push('Address: too short');
+    else if (low(ad) !== low(p.Address)) {
+      out.patch.Address = ad;
+      out.changes.push({ what: 'Address', from: String(p.Address || ''), to: ad });
+    }
+  }
+  if (has('dob') && d.dobKey) {
+    const k = upDateKey_(d.dobKey);
+    if (!k || k < '1900-01-01' || k >= flowKey_(Date.now())) out.bad.push('Date of birth: "' + d.dobKey + '" isn\'t a date in the past');
+    else if (k !== String(p.DobKey || '')) {
+      Object.assign(out.patch, { DobKey: k, DOB: recLongDate_(k) });
+      out.changes.push({ what: 'Date of birth', from: recLongDate_(p.DobKey) || String(p.DOB || ''), to: recLongDate_(k) });
+    }
+  }
+  if (has('medicare')) {
+    if (d.medicare) {
+      const no = String(d.medicare).replace(/\D/g, '');
+      if (!flowMedicareOk_(no)) out.bad.push('Medicare number: "' + d.medicare + '" isn\'t a valid Medicare number');
+      else if (no !== String(p['Medicare Number'] || '').replace(/\D/g, '')) {
+        out.patch['Medicare Number'] = no;
+        out.changes.push({ what: 'Medicare number', from: recMedicare_(p['Medicare Number']), to: recMedicare_(no) });
+      }
+    }
+    if (d.medicareIrn) {
+      const irn = String(d.medicareIrn).replace(/\D/g, '');
+      if (!/^[1-9]$/.test(irn)) out.bad.push('Medicare reference number: it\'s one digit, 1 to 9');
+      else if (irn !== String(p['Medicare IRN'] || '')) {
+        out.patch['Medicare IRN'] = irn;
+        out.changes.push({ what: 'Medicare reference number', from: String(p['Medicare IRN'] || ''), to: irn });
+      }
+    }
+    if (d.medicareExp) {
+      const ex = flowMedicareExp_(d.medicareExp);
+      if (!ex) out.bad.push('Medicare expiry: "' + d.medicareExp + '" isn\'t a month and year');
+      else if (ex !== String(p['Medicare Expiry'] || '')) {
+        out.patch['Medicare Expiry'] = ex;
+        out.changes.push({ what: 'Medicare expiry', from: recMedicareExp_(p['Medicare Expiry']), to: recMedicareExp_(ex) });
+      }
+    }
+  }
+  if (out.patch.NameKey !== undefined || out.patch.DobKey !== undefined) {
+    const nk = out.patch.NameKey !== undefined ? out.patch.NameKey : String(p.NameKey || '');
+    const dk = out.patch.DobKey !== undefined ? out.patch.DobKey : String(p.DobKey || '');
+    if (nk) out.patch.IdentityKey = dk ? nk + '|' + dk : nk;
+  }
+  return out;
+}
+
+// Saves the changes to the patient's record ("Straight away"). dry: testing, so nothing is changed.
+function flowApplyDetails_(cfg, c, run, ctx, dry) {
+  const r = flowDetailChanges_(c, run.formDetails, ctx.doc);
+  if (!r.changes.length || dry || c.mode === 'review') return r;
+  const now = new Date();
+  Object.assign(r.patch, {
+    UpdatedAt: now, UpdatedBy: 'Online form (' + String(run.formName || 'form') + ')', UpdatedByUid: '',
+    'Last Online Update': { at: now.toISOString(), form: String(run.formName || ''), submissionId: String(run.submissionId || ''), changes: r.changes },
+  });
+  fsPatch_(cfg, 'patient_list/' + encodeURIComponent(ctx.doc._id), r.patch);
+  CacheService.getScriptCache().remove(PT_CACHE_);   // name matching picks up the new name
+  if (run.submissionId) {
+    try { fsPatch_(cfg, 'form_submissions/' + run.submissionId, { detailsApplied: { at: now.toISOString(), changes: r.changes, by: 'Email flow' } }); }
+    catch (e) { console.warn('Details saved, but not noted on the form: ' + e); }
+  }
+  r.applied = true;
+  console.log('Online form: ' + r.changes.length + ' detail(s) updated for ' + ctx.doc._id);
+  return r;
+}

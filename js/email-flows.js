@@ -55,6 +55,7 @@ const I = {
   reply: ic('<polyline points="9 14 4 9 9 4"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/>'),
   check: ic('<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'),
   doc: ic('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>'),
+  user: ic('<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>'),
 };
 
 const TYPES = {
@@ -65,17 +66,23 @@ const TYPES = {
   branch: { label: "If / else", short: "If / else", icon: "branch", tone: "is-branch" },
   staff: { label: "Notify staff", short: "Notify staff", icon: "bell", tone: "is-staff" },
   todo: { label: "Add a staff to-do", short: "Staff to-do", icon: "check", tone: "is-staff" },
+  update: { label: "Update their details", short: "Update details", icon: "user", tone: "is-staff" },
   stop: { label: "End flow", short: "End flow", icon: "stop", tone: "" },
 };
-const ADDABLE = ["email", "task", "wait", "reply", "branch", "staff", "todo", "stop"];
+const ADDABLE = ["email", "task", "wait", "reply", "branch", "staff", "todo", "update", "stop"];
+const UPDATE_FIELDS = [["name", "Name"], ["mobile", "Mobile"], ["email", "Email"], ["address", "Address"],
+  ["dob", "Date of birth"], ["medicare", "Medicare details"]];
+const UPDATE_MODES = [["auto", "Update their record straight away"], ["review", "Give staff a to-do to check and update it"]];
+const UPDATE_TO = [["roles", "Everyone in a role"], ["staff", "Chosen staff"]];
 const TRIGGERS = [
   ["purchase", "A product is purchased", false],
   ["visit", "A patient has been in for a visit", false],
   ["daily", "A daily check finds patients who match", false],
   ["task", "A task is sent from Task Manager", false],
+  ["form", "A patient fills in a form online", false],
   ["ssp_created", "A Skin Script is created", true],
 ];
-const TRIG_ICON = { purchase: "cart", visit: "cal", daily: "sun", task: "doc" };
+const TRIG_ICON = { purchase: "cart", visit: "cal", daily: "sun", task: "doc", form: "user" };
 const TODO_TO = [["sender", "Whoever sent the task"], ["staff", "Chosen staff"], ["roles", "Everyone in a role"]];
 const DUE_DAYS = [[0, "Today"], [1, "Tomorrow"], [2, "In 2 days"], [3, "In 3 days"], [7, "In a week"]];
 const REPLY_PATHS = (s) => (s.type === "branch" || s.type === "reply");
@@ -186,6 +193,7 @@ function blank(type) {
     : type === "staff" ? { to: "ssp_creator", roles: [], staffIds: [], subject: "", message: "" }
     : type === "reply" ? { num: 3, unit: "days", yes: [], no: [] }
     : type === "todo" ? { to: "sender", roles: [], staffIds: [], text: "", dueDays: 1 }
+    : type === "update" ? { fields: ["name", "mobile", "email", "address"], mode: "auto", to: "roles", roles: ["Admin"], staffIds: [] }
     : type === "task" ? { taskId: "", taskName: "", taskUpdatedMs: 0, answers: {}, subject: "", html: "", apptMonths: 6, promo: false, skipDays: 0 }
     : {};
   return { id: newId(), type, cfg };
@@ -197,7 +205,8 @@ function cleanSteps(list) {
     const cfg = { ...b.cfg, ...(s.cfg || {}) };
     if (REPLY_PATHS(s)) { cfg.yes = cleanSteps(cfg.yes); cfg.no = cleanSteps(cfg.no); }
     if (s.type === "branch") cfg.rules = cleanGroup(cfg.rules);
-    if (s.type === "staff" || s.type === "todo") {
+    if (s.type === "update") cfg.fields = Array.isArray(cfg.fields) ? cfg.fields.map(String) : [];
+    if (s.type === "staff" || s.type === "todo" || s.type === "update") {
       cfg.roles = Array.isArray(cfg.roles) ? cfg.roles.map(String) : [];
       cfg.staffIds = Array.isArray(cfg.staffIds) ? cfg.staffIds.map(String) : [];
     }
@@ -242,6 +251,10 @@ function summary(s) {
   }
   if (s.type === "reply") return `Up to ${Number(c.num) || 0} ${unitWord(c.num, c.unit)}`;
   if (s.type === "todo") return (String(c.text || "").trim() || "No to-do written yet").slice(0, 90);
+  if (s.type === "update") {
+    const f = UPDATE_FIELDS.filter(([k]) => c.fields.includes(k)).map(([, l]) => l).join(", ") || "Nothing chosen";
+    return `${f} · ${c.mode === "review" ? "staff check it" : "straight away"}`;
+  }
   if (s.type === "task") return c.taskName ? `${c.taskName}${c.subject ? ` · ${c.subject}` : ""}` : "Choose a task";
   return "No more cards on this path";
 }
@@ -265,6 +278,10 @@ function stepProblems(s, depth) {
     if (!String(c.text || "").trim()) out.push("Write the to-do");
     if (c.to === "roles" && !c.roles.length) out.push("Choose at least one role");
     if (c.to === "staff" && !c.staffIds.length) out.push("Choose at least one staff member");
+  } else if (s.type === "update") {
+    if (!c.fields.length) out.push("Choose which details to update");
+    if (c.mode === "review" && c.to === "roles" && !c.roles.length) out.push("Choose at least one role");
+    if (c.mode === "review" && c.to === "staff" && !c.staffIds.length) out.push("Choose at least one staff member");
   } else if (s.type === "task") {
     if (!c.taskId) out.push("Choose a task");
     else if (!String(c.html || "").trim()) out.push("Open this card so it can prepare the email");
@@ -283,6 +300,7 @@ function flowProblems(flow, tasks) {
   if (t.event === "purchase" && t.scope === "list" && !t.products.length) out.push("Choose at least one product for the trigger, or pick Any product.");
   if (t.event === "visit" && t.serviceScope === "some" && !t.services.length) out.push("Choose at least one service for the trigger, or pick Any visit.");
   if (t.event === "task" && !t.taskIds.length) out.push("Choose which task starts the flow.");
+  if (t.event === "form" && !t.formIds.length) out.push("Choose which form starts the flow.");
   const tp = groupProblem(t.rules, t.event === "daily");
   if (tp) out.push(t.event === "daily" ? `Daily check: ${tp}.` : `Start rules: ${tp}.`);
   const sp = groupProblem(flow.stop.rules, false);
@@ -294,6 +312,7 @@ function flowProblems(flow, tasks) {
     n++;
     const p = stepProblems(s, depth);
     if (s.type === "reply" && t.event !== "task") p.push("Only works when the flow starts from a task");
+    if (s.type === "update" && t.event !== "form") p.push("Only works when the flow starts from an online form");
     if (s.type === "task" && s.cfg.taskId && Array.isArray(tasks)) {
       const tt = tasks.find((x) => x.id === s.cfg.taskId);
       if (!tt) p.push("The task isn't published any more");
@@ -316,7 +335,8 @@ function snapshot(d = {}) {
     description: String(d.description || ""),
     trigger: {
       event: "purchase", scope: "any", serviceScope: "any", repeatDays: 0, dailyMax: 25, existing: false, again: "restart", ...t,
-      products: cleanNames(t.products), services: cleanNames(t.services), taskIds: cleanNames(t.taskIds), rules: cleanGroup(t.rules),
+      products: cleanNames(t.products), services: cleanNames(t.services), taskIds: cleanNames(t.taskIds),
+      formIds: cleanNames(t.formIds), rules: cleanGroup(t.rules),
     },
     steps: cleanSteps(d.steps),
     stop: { rebuy: true, booking: false, gapDays: 3, ...st, rules: cleanGroup(st.rules) },
@@ -607,6 +627,7 @@ async function mountFlowEditor(container, { id, staff }) {
   let buyData = null, buyDays = 14;   // the last "See recent purchases" answer
   let holds = null, holdsErr = false, holdsLoading = false;
   let taskTypes = null;              // published tasks (for the task trigger and the Task email card)
+  let onlineForms = null;            // forms patients can fill in online (for the form trigger)
   const taskSrc = {}, taskSrcAsked = new Set();
   const lhReady = getLetterhead().then((lh) => { letterhead = lh || {}; }).catch(() => { letterhead = {}; });
   let editor = null, lastText = null;
@@ -801,6 +822,10 @@ async function mountFlowEditor(container, { id, staff }) {
     if (t.event === "task") {
       const names = (taskTypes || []).filter((x) => t.taskIds.includes(x.id)).map((x) => x.name);
       return (names.length ? `“${names.join("”, “")}” is sent` : "A task is sent (choose which)") + rules;
+    }
+    if (t.event === "form") {
+      const names = (onlineForms || []).filter((x) => t.formIds.includes(x.id)).map((x) => x.name);
+      return (names.length ? `“${names.join("”, “")}” is filled in` : "A form is filled in (choose which)") + rules;
     }
     if (t.event === "daily") return "Daily check" + (r ? rules : " · no rules yet");
     const n = t.products.length;
@@ -1035,6 +1060,7 @@ async function mountFlowEditor(container, { id, staff }) {
     ? { only: TASK_RULE_KEYS, lists: { "task.answer": taskFieldList() } } : {});
   const tokensFor = (forStaff) => {
     const base = forStaff ? STAFF_TOKENS : PATIENT_TOKENS;
+    if (flow.trigger.event === "form") return [...base, { title: "The form", tokens: ["Form name"], smart: true }];
     if (flow.trigger.event !== "task") return base;
     const raws = [...new Set(taskFieldList().map((f) => f.raw))];
     return [...base, { title: "The task", tokens: ["Task name", ...raws.map((r) => `Task: ${r}`), "Reply"], smart: true }];
@@ -1115,6 +1141,19 @@ async function mountFlowEditor(container, { id, staff }) {
 
   function triggerHtml() {
     const t = flow.trigger;
+    if (t.event === "form") {
+      const list = onlineForms === null ? '<p class="tb-none">Loading forms…</p>'
+        : !onlineForms.length ? '<p class="tb-none">No forms are set up for patients to fill in online. In Form Builder → Form settings, tick "Patients can fill this in online", then publish the form.</p>'
+        : `<div class="ef-checks">${onlineForms.map((f) => `<label class="fe-check"><input type="checkbox" data-trigform="${esc(f.id)}"${
+            t.formIds.includes(f.id) ? " checked" : ""} /> ${esc(f.name)}</label>`).join("")}</div>`;
+      return `
+        <div class="tb-field"><span>Which forms</span>${list}</div>
+        <div class="tb-field"><span>Only start for patients who… <small>(optional)</small></span><div data-role="trig-rules"></div></div>
+        <label class="tb-field"><span>If they fill in the same form again</span>
+          <select class="fb-select" data-f="trigger.again">${opt([["restart", "Start the flow over"], ["ignore", "Leave the flow they're already in"]], t.again)}</select></label>
+        <p class="tb-info">Starts when a patient sends one of these forms from their own link (an Open a form button in a task or marketing email),
+          within 15 minutes. Add <strong>Update their details</strong> to save what they changed to their record.</p>`;
+    }
     if (t.event === "task") {
       const usable = (taskTypes || []).filter((x) => x.useFor !== "treatmentInfo" && (x.category === "patient" || x.recipients.aboutPatient));
       const list = taskTypes === null ? '<p class="tb-none">Loading tasks…</p>'
@@ -1226,7 +1265,9 @@ async function mountFlowEditor(container, { id, staff }) {
     if (tr) mountRuleBuilder(tr, flow.trigger.rules, { ...ruleOpts(), onChange: ruleChange, names: productNames,
       empty: flow.trigger.event === "daily" ? "Add at least one rule, e.g. Has a future appointment booked: No."
         : flow.trigger.event === "visit" ? "Anyone who comes in starts the flow."
-        : flow.trigger.event === "task" ? "Everyone the task is sent to starts the flow." : "Anyone who makes a matching purchase starts the flow." });
+        : flow.trigger.event === "task" ? "Everyone the task is sent to starts the flow."
+        : flow.trigger.event === "form" ? "Everyone who sends the form starts the flow."
+        : "Anyone who makes a matching purchase starts the flow." });
     const sr = side.querySelector('[data-role="stop-rules"]');
     if (sr) mountRuleBuilder(sr, flow.stop.rules, { ...ruleOpts(), onChange: ruleChange, names: productNames, empty: "No extra stop rules." });
   }
@@ -1337,6 +1378,22 @@ async function mountFlowEditor(container, { id, staff }) {
             While the flow is testing, it goes to you instead, marked [Test].</p>
         </section>`;
     }
+    if (s.type === "update") {
+      return `
+        <section class="ef-sec">
+          <div class="tb-field"><span>Which details to update</span>
+            <div class="ef-checks">${UPDATE_FIELDS.map(([k, l]) => `<label class="fe-check"><input type="checkbox" data-updfield="${k}"${
+              c.fields.includes(k) ? " checked" : ""} /> ${esc(l)}</label>`).join("")}</div></div>
+          <label class="tb-field"><span>What happens</span>
+            <select class="fb-select" data-k="mode" data-rerender>${opt(UPDATE_MODES, c.mode)}</select></label>
+          ${c.mode === "review" ? `<label class="tb-field"><span>Who checks it</span>
+            <select class="fb-select" data-k="to" data-rerender>${opt(UPDATE_TO, c.to)}</select></label>${pickWhoHtml(c)}` : ""}
+          <p class="tb-info">Uses the questions on the form that fill in from the patient's details (their name, mobile, email,
+            address, date of birth or Medicare). Only what they changed is saved. Anything that doesn't look right is left alone and noted.</p>
+          ${flow.trigger.event !== "form" ? '<div class="tb-problems">This only works when the flow starts from an online form (When this happens → A patient fills in a form online).</div>' : ""}
+          <small class="muted">While the flow is testing, their record isn't changed. Patients in this flow shows what would have changed.</small>
+        </section>`;
+    }
     if (s.type === "task") {
       if (taskTypes === null) return '<section class="ef-sec"><p class="tb-none">Loading tasks…</p></section>';
       const usable = taskTypes.filter((x) => x.category === "patient" && x.useFor !== "treatmentInfo");
@@ -1416,7 +1473,8 @@ async function mountFlowEditor(container, { id, staff }) {
         ...ruleOpts(), onChange: ruleChange, names: productNames, empty: "Add a rule to decide who goes down Yes.",
       });
     }
-    if ((s.type === "staff" || s.type === "todo") && (s.cfg.to === "roles" || s.cfg.to === "staff")) loadStaff();
+    if ((s.type === "staff" || s.type === "todo" || (s.type === "update" && s.cfg.mode === "review"))
+      && (s.cfg.to === "roles" || s.cfg.to === "staff")) loadStaff();
     if (s.type === "task") renderPreview();
   }
 
@@ -1430,6 +1488,7 @@ async function mountFlowEditor(container, { id, staff }) {
     m.set("mobile", "0412 345 678");
     m.set("date of birth", "1 January 1990");
     m.set("upcoming appointments", { html: "• <strong>Thu 22 Oct 2026, 10:30 am</strong>: Skin review", text: "Thu 22 Oct 2026" });
+    if (flow.trigger.event === "form") m.set("form name", (onlineForms || []).filter((x) => flow.trigger.formIds.includes(x.id)).map((x) => x.name)[0] || "Update your details");
     if (flow.trigger.event === "task") {
       m.set("task name", (taskTypes || []).filter((x) => flow.trigger.taskIds.includes(x.id)).map((x) => x.name)[0] || "Refund Task");
       taskFieldList().forEach((f) => m.set(`task: ${f.raw.toLowerCase()}`, `[${f.raw}]`));
@@ -1526,6 +1585,13 @@ async function mountFlowEditor(container, { id, staff }) {
       changed(); renderCanvas(); renderSide();
       return;
     }
+    if (el.dataset.trigform !== undefined) {
+      const set = new Set(flow.trigger.formIds);
+      if (el.checked) set.add(el.dataset.trigform); else set.delete(el.dataset.trigform);
+      flow.trigger.formIds = [...set];
+      changed(); renderCanvas();
+      return;
+    }
     const s = selStep();
     if (!s) return;
     if (el.dataset.taskpick !== undefined) {
@@ -1546,6 +1612,10 @@ async function mountFlowEditor(container, { id, staff }) {
       const k = el.dataset.k;
       s.cfg[k] = el.type === "checkbox" ? el.checked
         : ["num", "skipDays", "dueDays", "apptMonths"].includes(k) ? Number(el.value) : el.value;
+    } else if (el.dataset.updfield !== undefined) {
+      const set = new Set(s.cfg.fields);
+      if (el.checked) set.add(el.dataset.updfield); else set.delete(el.dataset.updfield);
+      s.cfg.fields = UPDATE_FIELDS.map(([k]) => k).filter((k) => set.has(k));
     } else if (el.dataset.rolecheck !== undefined) {
       const set = new Set(s.cfg.roles);
       if (el.checked) set.add(el.dataset.rolecheck); else set.delete(el.dataset.rolecheck);
@@ -2052,6 +2122,7 @@ async function mountFlowEditor(container, { id, staff }) {
   function runWhat(r) {
     if (r.kind === "visit") return [`Visit on ${r.visitDate || r.purchaseDate || ""}`, (r.visitServices || []).join(", ")];
     if (r.kind === "task") return [`“${r.taskName || "Task"}” sent ${String(r.startedAt || "").slice(0, 10)}`, r.reply ? "Replied" : ""];
+    if (r.kind === "form") return [`“${r.formName || "Form"}” filled in ${String(r.startedAt || "").slice(0, 10)}`];
     if (r.kind === "daily") return [`Daily check · started ${String(r.startedAt || "").slice(0, 10)}`];
     return [r.product, r.purchaseDate && `bought ${r.purchaseDate}`];
   }
@@ -2091,7 +2162,8 @@ async function mountFlowEditor(container, { id, staff }) {
     const n = (k) => runs.filter((r) => r.status === k).length;
     const list = runs.slice(0, 12);
     const ev = flow.trigger.event;
-    const waiting = ev === "task" ? "Patients start the flow when the task is sent to them."
+    const waiting = ev === "form" ? "Patients start the flow when they send the form."
+      : ev === "task" ? "Patients start the flow when the task is sent to them."
       : ev === "visit" ? "Patients start the flow the morning after a matching visit."
       : ev === "daily" ? "Patients start the flow when the morning check finds them."
       : "Patients start the flow when the invoice sync brings in a matching purchase.";
@@ -2133,6 +2205,7 @@ async function mountFlowEditor(container, { id, staff }) {
         <p class="tb-info">Uses the answers from the last time the task was sent to this patient.</p>
         <label class="lh-field"><span class="lh-label">Pretend they replied with <small>(optional)</small></span>
           <input type="text" name="extra" maxlength="300" placeholder="Leave empty to try the No reply path" /></label>`
+      : ev === "form" ? '<p class="tb-info">Uses what they sent the last time they filled in the form online. Their record isn\'t changed in a test.</p>'
       : '<p class="tb-info">The patient is checked against the daily rules now, then the whole flow runs.</p>';
     const dlg = document.createElement("dialog");
     dlg.className = "lh-dialog ef-test-dlg";
@@ -2269,7 +2342,8 @@ async function mountFlowEditor(container, { id, staff }) {
         return;
       }
       const ev = flow.trigger.event;
-      const who = ev === "task" ? "Patients start the flow as soon as the task is sent to them"
+      const who = ev === "form" ? "Patients start the flow when they send the form online"
+        : ev === "task" ? "Patients start the flow as soon as the task is sent to them"
         : ev === "visit" ? "Patients who come in from today start the flow the next morning"
         : ev === "daily" ? (flow.trigger.existing
           ? `From the next morning check, patients who match start the flow (up to ${flow.trigger.dailyMax} a day)`
@@ -2330,6 +2404,15 @@ async function mountFlowEditor(container, { id, staff }) {
   listTaskTypes({ isAdmin: false })
     .then((l) => { taskTypes = l; })
     .catch((err) => { console.warn("Task types not loaded:", err); taskTypes = []; })
+    .finally(() => { if (root.isConnected) { renderCanvas(); if (!editor) renderSide(); } });
+  getDocs(query(collection(db, "form_templates"), where("status", "==", "live")))
+    .then((snap) => {
+      onlineForms = snap.docs.map((d) => ({ id: d.id, ...d.data() }))
+        .filter((f) => f.online && f.online.on === true && !["treatment", "prescription"].includes(f.category))
+        .map((f) => ({ id: f.id, name: String(f.name || "Form") }))
+        .sort((a, b) => a.name.localeCompare(b.name, "en-AU"));
+    })
+    .catch((err) => { console.warn("Online forms not loaded:", err); onlineForms = []; })
     .finally(() => { if (root.isConnected) { renderCanvas(); if (!editor) renderSide(); } });
   lhReady.finally(() => { if (root.isConnected) renderPreview(); });
   Promise.all([loadProductNames(), loadServiceNames()]).then(([p, s]) => {
