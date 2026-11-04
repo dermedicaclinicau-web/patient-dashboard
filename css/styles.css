@@ -10733,3 +10733,19 @@ body.ws-pe-open { overflow: hidden; }
 .ppr-del .fe-note { color: #64748b; }
 .lh-btn.is-danger { color: #b91c1c; border-color: #fecaca; background: #fff; }
 .lh-btn.is-danger:hover { background: #fef2f2; }
+
+/* Reporting → Patient visits */
+.vr-tools { align-items: center; flex-wrap: wrap; gap: .5rem; }
+.vr-panel { margin: .5rem 0 1rem; }
+.vr-panel-head { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.vr-panel-head .fe-input { flex: 1 1 260px; }
+.vr-hint { margin: .4rem 0; font-size: .82rem; }
+.vr-svcs { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: .2rem .75rem;
+  max-height: 320px; overflow: auto; padding: .25rem 0; }
+.vr-svc { display: flex; align-items: center; gap: .4rem; font-size: .88rem; }
+.vr-svc span { flex: 1; min-width: 0; }
+.vr-svc small { color: #94a3b8; }
+.vr-table td small { display: block; }
+.vr-sort { cursor: pointer; user-select: none; white-space: nowrap; }
+.vr-sort.is-on { color: #0f766e; }
+.inv-stat[data-next] { cursor: pointer; }

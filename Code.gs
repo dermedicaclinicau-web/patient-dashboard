@@ -83,7 +83,7 @@ function doPost(e) {
       staffPhoto: staff.photo,
       staffEmail: staff.email,
       injector: staff.injector === true,
-      perms: /^admin$/i.test(String(staff.role || '')) ? [] : effectivePerms_(staff),   // Admins have everything anyway
+      perms: /^admin$/i.test(String(staff.role || '')) ? [] : tokenPerms_(effectivePerms_(staff)),   // Admins have everything anyway
     });
 
     const session = createSession_(staff);
@@ -3336,6 +3336,10 @@ function handleStaff_(body) {
   if (op === 'me') return staffMe_(session); // anyone logged in
   if (op === 'setPhoto') return staffSetPhoto_(String(body.photo || ''), session); // anyone: their own photo
   if (op === 'mySchedule') return staffMySchedule_(session); // anyone: their own schedule
+  if (op === 'reportTabs') {   // anyone: the Reporting tabs they can see
+    if (/^admin$/i.test(String(session.role || ''))) return { ok: true, all: true, tabs: REP_TABS_.map(function (t) { return t[0]; }) };
+    return { ok: true, tabs: REP_TABS_.map(function (t) { return t[0]; }).filter(function (k) { return repTab_(session, k); }) };
+  }
   if (!/^admin$/i.test(String(session.role || ''))) return { ok: false, error: 'FORBIDDEN' };
   try {
     if (op === 'roles') return rolesGet_();
@@ -3607,6 +3611,16 @@ function staffAuditList_() {
 
 // ===================== Roles & access =====================
 
+// Reporting tabs: one tick each (Staff → Roles & access → Reporting tabs). Keys must match the portal's tab keys.
+const REP_TABS_ = [
+  ['variance', 'Count differences'], ['investigations', 'Investigations'], ['check', 'Treatment check'],
+  ['notrecorded', 'Not recorded'], ['wastage', 'Wastage'], ['kits', 'Kit reconciliation'], ['usage', 'Usage'],
+  ['opened', 'Opened containers'], ['short', 'Saved short'], ['plans', 'Treatment plans'], ['retention', 'Retention'],
+  ['visits', 'Patient visits'], ['packages', 'Packages left'], ['ssp', 'Skin Scripts expiring'], ['newpts', 'New patients not back'],
+];
+// These also need "Reporting: patient lists" (they show contact details)
+const REP_PATIENT_TABS_ = ['visits', 'packages', 'ssp', 'newpts'];
+
 // [key, group, label]
 const PERMS_ = [
   ['menu.patients', 'Menus', 'Patient List'],
@@ -3672,7 +3686,7 @@ const PERMS_ = [
   ['menu.prospects', 'Prospects', 'Prospect Dashboard (see prospects)'],
   ['prospects.work', 'Prospects', 'Work prospects: add, contact, follow up and move them along'],
   ['prospects.manage', 'Prospects', 'Prospect settings: who is told, sharing out and reasons'],
-];
+].concat(REP_TABS_.map(function (t) { return ['reports.tab.' + t[0], 'Reporting tabs', t[1]]; }));
 
 const PERMS_ALL_ = PERMS_.map(function (p) { return p[0]; });
 const ROLE_DEFAULTS_ = {
@@ -3686,7 +3700,9 @@ const ROLE_DEFAULTS_ = {
     'menu.inventory', 'inventory.view', 'inventory.request', 'inventory.receive', 'inventory.order', 'inventory.count', 'menu.reports',
     'menu.scanner', 'scanner.billing', 'scanner.docket',
     'dash.attention', 'dash.appts', 'dash.tasks', 'dash.requests', 'dash.overview', 'recall.work',
-    'menu.prospects', 'prospects.work'],
+    'menu.prospects', 'prospects.work']
+    .concat(REP_TABS_.map(function (t) { return 'reports.tab.' + t[0]; })
+      .filter(function (k) { return REP_PATIENT_TABS_.indexOf(k.slice(12)) === -1; })),
 };
 
 
@@ -3809,6 +3825,13 @@ function effectivePerms_(s) {
   return PERMS_ALL_.filter(function (p) { return set[p]; });
 }
 
+// The access that goes in the login token: everything except the Reporting tabs (the token has a size limit,
+// and the Firestore rules don't use them). The Reporting page asks for its tabs (staff → reportTabs).
+function tokenPerms_(perms) {
+  return (perms || []).filter(function (p) { return String(p).indexOf('reports.tab.') !== 0; });
+}
+function repTab_(session, key) { return can_(session, 'reports.tab.' + key); }
+
 function can_(session, perm) {
   return !!session && (/^admin$/i.test(String(session.role || '')) || (session.perms || []).indexOf(perm) !== -1);
 }
@@ -3828,7 +3851,7 @@ function staffMe_(session) {
   try { s = getStaffDocs_().filter(function (x) { return x.id === session.uid; })[0]; }
   catch (e) { console.warn('Access check skipped: ' + e); return { ok: false, error: 'BUSY' }; }
   if (!s) return { ok: false, error: 'UNAUTHORIZED' };
-  const perms = /^admin$/i.test(String(s.role || '')) ? [] : effectivePerms_(s);   // Admins have everything anyway
+  const perms = /^admin$/i.test(String(s.role || '')) ? [] : tokenPerms_(effectivePerms_(s));   // Admins have everything anyway
   const token = createCustomToken_(s.id, {
     staffName: s.name, staffRole: s.role, staffPhoto: s.photo, staffEmail: s.email,
     injector: s.injector === true, perms: perms,
@@ -4722,6 +4745,10 @@ function handleInventory_(body) {
   const op = String(body.op || '');
   const ordering = can_(session, 'inventory.order') || can_(session, 'inventory.manage');
   const okId = function (v) { return /^[A-Za-z0-9_-]{10,40}$/.test(String(v || '')); };
+  // Reporting tabs that read through here: Manage inventory, or that tab ticked
+  const TAB_OF_ = { treatmentCheck: 'check', legacyLog: 'check', oldKitLedgerAll: 'kits', kitBookings: 'kits',
+    oldKitExplain: 'kits', oldKitLedger: 'kits', oldKitRecon: 'kits' };
+  if (TAB_OF_[op] && !can_(session, 'inventory.manage') && !repTab_(session, TAB_OF_[op])) return { ok: false, error: 'FORBIDDEN' };
   try {
     if (op === 'kitDay') return invKitDay_(body, session);
     if (op === 'invoiceLines') {
@@ -15411,9 +15438,18 @@ function handleReports_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
   const op = String(body.op || '');
+  if (op === 'visits') {
+    if (!can_(session, 'reports.patients') || !repTab_(session, 'visits')) return { ok: false, error: 'FORBIDDEN' };
+    try { return repVisitList_(body); }
+    catch (err) {
+      console.error('Report visits failed: ' + (err && err.stack ? err.stack : err));
+      return { ok: true, problem: "The report couldn't be made: " + String(err && err.message ? err.message : err).slice(0, 200) };
+    }
+  }
   if (REP_OPS_.indexOf(op) === -1 && op !== 'retention') return { ok: false, error: 'BAD_REQUEST' };
   // Retention is numbers only (no patient details), so Reporting access is enough
   if (!can_(session, op === 'retention' ? 'menu.reports' : 'reports.patients')) return { ok: false, error: 'FORBIDDEN' };
+  if (!repTab_(session, op)) return { ok: false, error: 'FORBIDDEN' };
   const key = 'rep_' + op + '_v4';
   if (body.fresh !== true) {
     const hit = repCacheGet_(key);
@@ -20231,4 +20267,123 @@ function paperTrash_(cfg, body, session) {
   if (files) repCachePut_(PAPER_FKEY_, files.filter(function (x) { return x.id !== id; }), 1800);
   console.log('Paper scan ' + id + ' (' + f.getName() + ') deleted by ' + who);
   return { ok: true };
+}
+
+// Reporting → Patient visits: every patient with a visit between two dates (cancelled and no-shows left out),
+// each visit's services and clinician, their last visit of any kind, and their next booking.
+// The portal filters it (services, clinician, upcoming or not). Remembered 10 minutes.
+function repVisitList_(body) {
+  const ok = function (k) { return /^\d{4}-\d{2}-\d{2}$/.test(k); };
+  const from = String(body.from || '');
+  const to = String(body.to || '');
+  if (!ok(from) || !ok(to) || to < from) return { ok: true, problem: 'Choose the dates.' };
+  if (flowDays_(from, to) > 731) return { ok: true, problem: 'Choose up to two years at a time.' };
+  const key = 'rep_visits_v1_' + from + '_' + to;
+  if (body.fresh !== true) {
+    const hit = repCacheGet_(key);
+    if (hit) return Object.assign({ ok: true, cached: true }, hit);
+  }
+  const cache = CacheService.getScriptCache();
+  if (cache.get('up_ds_active') || cache.get('pcn_run_active')) {
+    return { ok: true, problem: 'A Day Sheet upload or PCN update is running. Try again in a few minutes.' };
+  }
+  const t0 = Date.now();
+  const cfg = getConfig_();
+  const ctx = pcnCtx_();
+  const pts = recallPatients_(cfg);
+  const dict = function () {
+    const ix = Object.create(null), list = [];
+    return { list: list, of: function (s) { if (!(s in ix)) { ix[s] = list.length; list.push(s); } return ix[s]; } };
+  };
+  const S = dict(), T = dict();
+  T.of('');   // index 0 = no clinician
+  const per = Object.create(null);
+  const keyOf = Object.create(null);
+
+  pcnReadAppts_(ctx).forEach(function (r) {
+    if (!pcnIsDate_(r[0]) || !pcnStatusOk_(r[7], 'full')) return;
+    const svc = String(r[9] == null ? '' : r[9]).trim();
+    if (!svc || REP_NOT_VISIT_.test(svc)) return;
+    const ptt = String(r[14] == null ? '' : r[14]).trim();
+    if (!ptt) return;   // no Patient ID on the Day Sheet: we can't be sure who it is
+    if (!(ptt in keyOf)) keyOf[ptt] = pts.find(ptt) || ('ptt:' + ptt);
+    const k = keyOf[ptt];
+    const dk = Utilities.formatDate(r[0], ctx.tz, 'yyyy-MM-dd');
+    const p = per[k] || (per[k] = { name: String(r[1] == null ? '' : r[1]).trim(), days: Object.create(null), next: '', nextSvc: [], last: '' });
+    if (r[0].getTime() >= ctx.today) {   // today onwards: booked, not a visit yet
+      if (!p.next || dk < p.next) { p.next = dk; p.nextSvc = []; }
+      if (dk === p.next && p.nextSvc.length < 4 && p.nextSvc.indexOf(svc) === -1) p.nextSvc.push(svc);
+      return;
+    }
+    if (dk > p.last) p.last = dk;
+    if (dk < from || dk > to) return;
+    const v = p.days[dk] || (p.days[dk] = { s: [], t: 0 });
+    const si = S.of(svc);
+    if (v.s.indexOf(si) === -1) v.s.push(si);
+    const st = String(r[8] == null ? '' : r[8]).trim();
+    if (!v.t && st && !SCHED_NOT_PERSON_.test(st)) v.t = T.of(st);
+  });
+
+  let sent = {};
+  try { sent = repSent_(cfg, pts); } catch (e) { console.warn('Patient visits: contacts not read: ' + e); }
+  const out = [];
+  Object.keys(per).forEach(function (k) {
+    const p = per[k];
+    const days = Object.keys(p.days).sort();
+    if (!days.length) return;
+    const w = repWho_(pts, k, p.name);
+    out.push({
+      id: w.id, name: w.name, mobile: w.mobile, email: w.email, dnc: w.dnc,
+      next: p.next, nextSvc: p.nextSvc, last: p.last, sent: (w.id && sent[w.id]) || null,
+      v: days.map(function (d) { return [d, p.days[d].s, p.days[d].t]; }),
+    });
+  });
+  const res = { pts: out, services: S.list, staff: T.list, from: from, to: to, today: ctx.todayKey,
+    at: new Date().toISOString(), ms: Date.now() - t0 };
+  repCachePut_(key, res, 600);
+  console.log('Patient visits ' + from + ' to ' + to + ': ' + out.length + ' patients in ' + res.ms + ' ms');
+  return Object.assign({ ok: true }, res);
+}
+
+// Run ONCE after adding the Reporting tab ticks: everyone who can open Reporting keeps every tab
+// (and the patient tabs if they have patient lists). Untick tabs afterwards in Staff → Roles & access.
+function grantReportTabs() {
+  const cfg = getConfig_();
+  const all = REP_TABS_.map(function (t) { return t[0]; });
+  const tabsFor = function (list) {
+    const has = function (p) { return list.indexOf(p) !== -1; };
+    if (!has('menu.reports')) return [];
+    return all.filter(function (k) { return REP_PATIENT_TABS_.indexOf(k) === -1 || has('reports.patients'); })
+      .map(function (k) { return 'reports.tab.' + k; });
+  };
+  const roleNamesDone = [];
+  const doc = fsGetDoc_(cfg, 'staff_roles/config');
+  if (doc && doc.roles) {
+    const roles = doc.roles;
+    Object.keys(roles).forEach(function (r) {
+      const list = Array.isArray(roles[r]) ? roles[r].slice() : [];
+      const add = tabsFor(list).filter(function (p) { return list.indexOf(p) === -1; });
+      if (!add.length) return;
+      roles[r] = list.concat(add);
+      roleNamesDone.push(r + ' (' + add.length + ')');
+    });
+    fsPatch_(cfg, 'staff_roles/config', { roles: roles, updatedAt: new Date().toISOString(), updatedBy: 'grantReportTabs (editor)' });
+  }
+  // People given "Always allow: Reporting" in their own Edit window
+  let people = 0;
+  staffFresh_().forEach(function (s) {
+    const acc = s.access || {};
+    const allow = Array.isArray(acc.allow) ? acc.allow.slice() : [];
+    const deny = Array.isArray(acc.deny) ? acc.deny.slice() : [];
+    if (allow.indexOf('menu.reports') === -1 && allow.indexOf('reports.patients') === -1) return;
+    const eff = effectivePerms_(s);
+    const add = tabsFor(eff).filter(function (p) { return eff.indexOf(p) === -1 && deny.indexOf(p) === -1; });
+    if (!add.length) return;
+    fsPatch_(cfg, STAFF_COLLECTION + '/' + s.id, { 'Access': { allow: allow.concat(add), deny: deny } });
+    people++;
+  });
+  CacheService.getScriptCache().remove('roles_cfg_v2');
+  CacheService.getScriptCache().remove('staff_docs_v1');
+  console.log('Reporting tabs added to roles: ' + (roleNamesDone.join(', ') || 'none (defaults apply)') +
+    ' · and ' + people + ' person/people with their own exception.');
 }

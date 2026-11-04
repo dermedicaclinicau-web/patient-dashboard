@@ -7,12 +7,13 @@ import {
   listUnrecordedTreatments, listContainersBetween, expectedUses,
   getBaseline, baselinePlan, setBaseline, listCountsOn, listKitDays,
 } from "./inventory-api.js";
-import { can } from "./perms.js";
+import { can, isAdmin } from "./perms.js";
 import { showToast } from "./utils.js";
 import { renderPlanReports } from "./plan-reports.js";
 import { MOODS } from "./end-of-day-api.js";
 import { mountPatientReport, PATIENT_TABS } from "./patient-reports.js";
 import { mountRetention } from "./retention-report.js";
+import { mountVisitsReport } from "./visits-report.js";
 import { callApi } from "./appointments.js";
 import { mountKitReconciliation } from "./kit-ledger.js";
 
@@ -92,10 +93,18 @@ function tabGroupsHtml(tabs, cur) {
   }).join("")}</div>`;
 }
 
+// The tabs this person can see (Staff → Roles & access → Reporting tabs). Admins: all of them (null).
+let tabMemo = null;
+async function allowedTabs() {
+  if (isAdmin()) return null;
+  if (tabMemo && Date.now() - tabMemo.at < 120000) return tabMemo.tabs;
+  const r = await callApi({ action: "staff", op: "reportTabs" });
+  tabMemo = { at: Date.now(), tabs: Array.isArray(r.tabs) ? r.tabs : [] };
+  return tabMemo.tabs;
+}
+
 export function mountReports(container, { param = "", staff = null } = {}) {
   const first = String(param || "").split("/")[0];
-  const tabs = can("reports.patients") ? TABS.concat(PATIENT_TABS) : TABS;
-  const tab = tabs.some(([k]) => k === first) ? first : "variance";
   const root = document.createElement("section");
   root.className = "page wide";
   container.replaceChildren(root);
@@ -103,24 +112,41 @@ export function mountReports(container, { param = "", staff = null } = {}) {
     root.innerHTML = '<div class="state"><strong>No access</strong>Ask an Admin to give you Reporting access in Staff.</div>';
     return;
   }
-  root.innerHTML = `
-    <div class="fb-head"><div><h2>Reporting</h2><p class="muted">Count differences, wastage, kits and usage.</p></div></div>
-    ${tabGroupsHtml(tabs, tab)}
-    <div data-role="body">${SKELETON}</div>`;
-  const body = root.querySelector('[data-role="body"]');
-  if (tab === "variance") mountVariance(body, staff);
-  else if (tab === "investigations") mountInvestigationReport(body);
-  else if (tab === "check") mountTreatmentCheck(body, staff);
-  else if (tab === "notrecorded") mountNotRecorded(body);
-  else if (tab === "wastage") mountWastage(body);
-  else if (tab === "usage") mountUsage(body, staff);
-  else if (tab === "opened") mountOpened(body);
-  else if (tab === "kits") mountKitRecon(body, staff);
-  else if (tab === "plans") renderPlanReports(body, { staff });
-  else if (PATIENT_TABS.some(([k]) => k === tab)) mountPatientReport(body, tab, staff);
-  else if (tab === "retention") mountRetention(body);
-  else mountShort(body, staff);
+  const head = '<div class="fb-head"><div><h2>Reporting</h2><p class="muted">Count differences, wastage, kits and usage.</p></div></div>';
+  root.innerHTML = `${head}<div>${SKELETON}</div>`;
+
+  allowedTabs().then((allow) => {
+    if (!root.isConnected) return;
+    const all = can("reports.patients") ? TABS.concat([["visits", "Patient visits"]], PATIENT_TABS) : TABS;
+    const tabs = allow ? all.filter(([k]) => allow.includes(k)) : all;
+    if (!tabs.length) {
+      root.innerHTML = `${head}<div class="state"><strong>No reports turned on for you</strong>
+        Ask an Admin to tick the Reporting tabs you need in Staff → Roles & access.</div>`;
+      return;
+    }
+    const tab = tabs.some(([k]) => k === first) ? first : tabs[0][0];
+    if (first && first !== tab) history.replaceState(null, "", `#/reports/${tab}`);   // a tab they can't see
+    root.innerHTML = `${head}${tabGroupsHtml(tabs, tab)}<div data-role="body">${SKELETON}</div>`;
+    const body = root.querySelector('[data-role="body"]');
+    if (tab === "variance") mountVariance(body, staff);
+    else if (tab === "investigations") mountInvestigationReport(body);
+    else if (tab === "check") mountTreatmentCheck(body, staff);
+    else if (tab === "notrecorded") mountNotRecorded(body);
+    else if (tab === "wastage") mountWastage(body);
+    else if (tab === "usage") mountUsage(body, staff);
+    else if (tab === "opened") mountOpened(body);
+    else if (tab === "kits") mountKitRecon(body, staff);
+    else if (tab === "plans") renderPlanReports(body, { staff });
+    else if (tab === "visits") mountVisitsReport(body, { csv: downloadCsv });
+    else if (PATIENT_TABS.some(([k]) => k === tab)) mountPatientReport(body, tab, staff);
+    else if (tab === "retention") mountRetention(body);
+    else mountShort(body, staff);
+  }).catch((err) => {
+    console.error("Reporting tabs not loaded:", err);
+    if (root.isConnected) root.innerHTML = `${head}<div class="tm-empty is-error">${esc(errText(err, "Couldn't load Reporting. Try again."))}</div>`;
+  });
 }
+
 
 /* ===================== Count differences ===================== */
 
