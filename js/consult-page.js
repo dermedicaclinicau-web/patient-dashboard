@@ -6,6 +6,7 @@ import {
 import { setRecordingPatient } from "./recording-bar.js";
 import { getPatient } from "./patients.js";
 import { showSoapPanel, detachSoapPanel } from "./soap-panel.js";
+import { setTabIcon } from "./tab-icon.js";
 import { SECTIONS } from "./soap.js";
 import { confirmDialog } from "./dialog.js";
 import { auth, db } from "./firebase-config.js";
@@ -42,7 +43,6 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
 
   document.body.classList.add("is-consult");   // hides the recording bar: this page has its own controls
   setRecordingPatient(null);
-  const startTitle = document.title;
   const [first = "", second = ""] = String(param || "").split("/");
   const newFor = first === "new" ? decodeURIComponent(second) : "";
   let recId = first === "new" ? "" : decodeURIComponent(first);
@@ -188,6 +188,7 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
   // Only the numbers that change every second (the page isn't redrawn for these)
   function tick(s, v) {
     const name = (patient && patient.name) || "Consultation";
+    setTabIcon(v.kind === "live" && s.live.status !== "stopping" ? "recording" : "notes");   // red while recording
     if (v.kind === "live") {
       const txt = fmt(s.live.elapsedMs);
       const t = root.querySelector('[data-role="time"]');
@@ -297,7 +298,6 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
     window.removeEventListener("hashchange", onHash);
     document.body.classList.remove("is-consult");
     detachSoapPanel();
-    document.title = startTitle;
   }
 
   if (newFor) begin();

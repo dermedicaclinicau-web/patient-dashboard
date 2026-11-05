@@ -1,5 +1,6 @@
 // Consultation notes full page, in their own tab (#/notes/<id>): opened from a Summary badge, a recording or My dashboard
 import { showSoapPanel, detachSoapPanel } from "./soap-panel.js";
+import { setTabIcon } from "./tab-icon.js";
 
 const stateHtml = (title, text) => `<div class="cs-state"><strong>${title}</strong><p>${text}</p></div>`;
 
@@ -11,8 +12,8 @@ export function mountNotesPage(container, id = "") {
 
   root.innerHTML = '<div class="cs-notes" data-role="notes"></div>';
   const host = root.querySelector('[data-role="notes"]');
-  const startTitle = document.title;
   document.title = "Consultation notes";
+  setTabIcon("notes");
   showSoapPanel(id, { mode: "page", host });
 
   // Deleted in this tab: say so rather than leave an empty page
@@ -29,7 +30,6 @@ export function mountNotesPage(container, id = "") {
     window.removeEventListener("recording-deleted", onDeleted);
     window.removeEventListener("hashchange", onHash);
     detachSoapPanel();
-    document.title = startTitle;
   }, 0);
   window.addEventListener("hashchange", onHash);
 }

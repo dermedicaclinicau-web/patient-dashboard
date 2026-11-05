@@ -37,6 +37,8 @@ import "./menu-search.js";
 import "./mobile-nav.js";
 import "./force-refresh.js";   // first, so it can see recordings start
 import { freshReload } from "./fresh-reload.js";
+import { resetTabIcon, labelFormRecordTab } from "./tab-icon.js";
+const APP_TITLE = document.title;   // the usual tab title, put back on every page change
 import { startNudges } from "./nudges.js";
 startNudges();
 
@@ -438,8 +440,12 @@ function router() {
 
   window.scrollTo(0, 0);
   if (page !== "patient") setRecordingPatient(null); // "Ready to record" only shows on a patient page
+  // The usual icon and title; notes, recordings and records set their own
+  resetTabIcon();
+  document.title = APP_TITLE;
   routeSeq++;
   PAGES[page](els.content, param);
+  if (page === "form-record") labelFormRecordTab(param);
 }
 
 // Count in-app page changes so "Back" returns to wherever you came from
