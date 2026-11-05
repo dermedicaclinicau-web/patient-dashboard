@@ -12,6 +12,7 @@ import { drillHtml, loadWindows } from "./seo-drill.js?v=4";
 import { compareHtml } from "./seo-compare.js?v=1";
 import { mountSeoSite } from "./seo-site.js?v=4";
 import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js?v=9";
+import { renderAds, clearAds } from "./seo-ads.js?v=1";
 
 const TABS = [
   { id: "overview", label: "Overview" },
@@ -19,6 +20,7 @@ const TABS = [
   { id: "pages", label: "Pages" },
   { id: "website", label: "Website" },
   { id: "keywords", label: "Keywords" },
+  { id: "ads", label: "Ads" },
   { id: "opps", label: "Tasks" },
   { id: "health", label: "Site health" },
   { id: "audience", label: "Audience" },
@@ -647,7 +649,7 @@ export async function mountSeo(el, opts = {}) {
     body.innerHTML = `<div class="seo-empty">Loading…</div>`;
     try {
       [data, work] = await Promise.all([loadData(force), loadWork(force)]);
-      if (force) { W = null; wForce = true; }
+      if (force) { W = null; wForce = true; clearAds(); }
       renderMeta();
       render();
     } catch (e) {
@@ -669,6 +671,7 @@ export async function mountSeo(el, opts = {}) {
       data, work, can, isAdmin, staff: opts.staff,
       h: { esc, fmtInt, fmtPct, fmtPos, delta, addDays, fmtDate, sumRange, sparkline },
       byPath: new Map(data.pages.map((p) => [p.path, p])),
+      kit: { PRESETS, rangeOf, compareOf, buckets, bucketLabel, autoGran, daysBetween, lineChart, tkey },
       prRows: () => priorityRows(ctx()),   // priority page status, used by Settings
       setTab: (id) => { tab = id; history.replaceState(null, "", "#/seo/" + id); render(); },
     };
@@ -679,6 +682,7 @@ export async function mountSeo(el, opts = {}) {
     const warn = data.run && data.run.ok === false
       ? `<div class="seo-warn">The last nightly update failed, so these numbers may be out of date: ${esc(data.run.error || "")}</div>` : "";
     if (tab === "advisor") { renderAdvisor(body, ctx()); return; }
+    if (tab === "ads") { renderAds(body, ctx()); return; }
     if (tab === "website") { const sp = siteParam; siteParam = ""; mountSeoSite(body, { param: sp }); return; }
     if (tab === "opps") { renderTasks(body, ctx()); return; }
     if (tab === "pages" && ui.pview === "clusters") { renderClusters(body, ctx()); return; }
