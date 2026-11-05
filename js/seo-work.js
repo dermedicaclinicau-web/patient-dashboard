@@ -20,7 +20,7 @@ const OPP = {
   area: { label: "Local area", tone: "green" },
 };
 const STATUS = { open: "To do", doing: "Doing", done: "Done", ignored: "Ignored" };
-const LOG_TYPES = ["Content", "Title / meta", "New page", "Technical", "Links", "Other"];
+const LOG_TYPES = ["Content", "Title / meta", "New page", "Technical", "Links", "Google Ads", "Other"];
 const LOG_TITLE = {
   striking: (o) => `Improved the page for “${o.title}”`,
   ctr: (o) => `Rewrote title and description for “${o.title}”`,
@@ -850,6 +850,35 @@ function viewKeywords(wrap, c, ui) {
     { k: "page", l: "Top page", get: (q) => q.pages[0]?.path || "", asc: true },
   ];
 
+  // Google Ads on the same search (Ads tab numbers, last 90 days), when they're loaded
+  const adMap = (() => {
+    const A = c.ads;
+    if (!A || A.none || !Array.isArray(A.kw)) return null;
+    const nk = (s) => String(s || "").toLowerCase().replace(/[+\[\]"]/g, " ").replace(/\s+/g, " ").trim();
+    const m = new Map();
+    A.kw.forEach((k) => {
+      if (k.kw === "(not set)") return;
+      const x = m.get(nk(k.kw)) || { cost: 0, clicks: 0, ke: 0, sess: 0 };
+      x.cost += k.cost; x.clicks += k.clicks; x.ke += k.ke;
+      m.set(nk(k.kw), x);
+    });
+    (A.q || []).forEach((s) => {
+      const x = m.get(nk(s.q)) || { cost: 0, clicks: 0, ke: 0, sess: 0 };
+      x.sess += s.sess;
+      m.set(nk(s.q), x);
+    });
+    return m.size ? { get: (q) => m.get(nk(q)) || null } : null;
+  })();
+  const adCell = (s) => {
+    const a = adMap.get(s);
+    if (!a) return `<span class="seo-note">—</span>`;
+    if (a.cost) {
+      return `<span title="${h.fmtInt(a.clicks)} ad clicks · ${h.fmtInt(a.ke)} key events, last 90 days">$${h.fmtInt(a.cost)}</span>`;
+    }
+    return `<span class="seo-note" title="People clicked an ad after this search (it matched another keyword)">${h.fmtInt(a.sess)} visits</span>`;
+  };
+  if (adMap) COLS.splice(COLS.length - 1, 0, { k: "ad", l: "Ads (90d)", get: (q) => { const a = adMap.get(q.q); return a ? a.cost : null; } });
+
   function groups() {
     const order = [ALL, PRI, ...settingsOf(w).topics.map((t) => t.name), OTHER, BRAND];
     const g = new Map(order.map((k) => [k, { k, n: 0, c: 0, i: 0, pw: 0, pc: 0, pi: 0, ppw: 0 }]));
@@ -871,7 +900,8 @@ function viewKeywords(wrap, c, ui) {
       ${staleWarn(c)}
       <p class="seo-note seo-w-intro">Searches people used to find the site, ${h.fmtDate(qs.from, false)} – ${h.fmtDate(qs.to)} vs the 28 days before ·
         ${h.fmtInt(w.queries.length)} searches. Google hides rare searches, so these won't add up exactly to the Overview totals.
-        ${c.can("seo.manage") ? `Topics are set in <a href="#/seo/settings">Settings</a>.` : ""}</p>
+        ${c.can("seo.manage") ? `Topics are set in <a href="#/seo/settings">Settings</a>.` : ""}
+        ${adMap ? " Ads: what you spent in Google Ads on the same search in the last 90 days." : ""}</p>
       ${noTopics ? `<div class="seo-warn">No topics set up yet, so every search is under “Not in a topic”.${c.can("seo.manage") ? ` Go to <a href="#/seo/settings">Settings</a> and start with the suggested topics.` : ""}</div>` : ""}
       <div class="seo-table-wrap seo-w-topics"><table class="seo-table">
         <thead><tr><th>Topic</th><th>Searches</th><th>Clicks</th><th>vs prev</th><th>Impressions</th><th>Avg position</th><th>Moved</th></tr></thead>
@@ -899,8 +929,9 @@ function viewKeywords(wrap, c, ui) {
       <td><div class="seo-path">${pl.targetOf(q.q) ? `<span class="seo-star is-on" title="Target search for ${h.esc(pl.targetOf(q.q))}">★</span>` : ""}${h.esc(q.q)}</div></td><td>${h.fmtInt(q.c)}</td><td>${h.delta(q.c, q.pc)}</td>
       <td>${h.fmtInt(q.i)}</td><td>${h.fmtPct(q.ctr)}</td><td>${h.fmtPos(q.pos)}</td>
       <td>${h.delta(q.pos, q.ppos, { invert: true, abs: true })}</td>
+      ${adMap ? `<td>${adCell(q.q)}</td>` : ""}
       <td><div class="seo-path seo-w-toppage">${pl.isPage(q.pages[0]?.path) ? `<span class="seo-star is-on" title="Priority page">★</span>` : ""}${h.esc(q.pages[0]?.path || "—")}</div></td></tr>`;
-    return ui.qopen === q.q ? row + `<tr class="seo-w-sub"><td colspan="8">${pagesList(q.pages, c)}</td></tr>` : row;
+    return ui.qopen === q.q ? row + `<tr class="seo-w-sub"><td colspan="${COLS.length}">${pagesList(q.pages, c)}</td></tr>` : row;
   }
 
   function drawQ() {

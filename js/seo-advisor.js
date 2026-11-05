@@ -7,7 +7,7 @@ import { db, auth } from "./firebase-config.js";
 import {
   doc, collection, query, where, orderBy, limit, onSnapshot, writeBatch, updateDoc, getDocs, serverTimestamp,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { npath, titleOf, pageIndex, pageOf } from "./seo-work.js?v=16";
+import { npath, titleOf, pageIndex, pageOf } from "./seo-work.js?v=17";
 import { stashPostDraft } from "./seo-post.js?v=1";
 
 const MODES = [["auto", "Anything"], ["goal", "A goal"], ["page", "A page"], ["question", "A question"]];

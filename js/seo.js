@@ -4,15 +4,15 @@
 // ⚠️ Make these match recall.js exactly (same Firebase version, same db instance)
 import { db } from "./firebase-config.js";
 import { doc, getDoc, collection, query, where, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan, titleOf } from "./seo-work.js?v=15";
-import { renderTasks } from "./seo-tasks.js?v=9";
+import { loadWork, renderWorkTab, pagePanelExtras, logMarks, makeCan, titleOf } from "./seo-work.js?v=17";
+import { renderTasks } from "./seo-tasks.js?v=10";
 import { renderClusters } from "./seo-clusters.js?v=2";
-import { renderAdvisor } from "./seo-advisor.js?v=2";
+import { renderAdvisor } from "./seo-advisor.js?v=3";
 import { drillHtml, loadWindows } from "./seo-drill.js?v=4";
 import { compareHtml } from "./seo-compare.js?v=1";
 import { mountSeoSite } from "./seo-site.js?v=4";
 import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js?v=9";
-import { renderAds, clearAds, loadAds, adsPageHtml } from "./seo-ads.js?v=4";
+import { renderAds, clearAds, loadAds, adsPageHtml, peekAds, adsTotals } from "./seo-ads.js?v=5";
 
 const TABS = [
   { id: "overview", label: "Overview" },
@@ -654,6 +654,11 @@ export async function mountSeo(el, opts = {}) {
       if (force) { W = null; wForce = true; clearAds(); }
       renderMeta();
       render();
+      // The Ads numbers load in the background, then the Overview and Keywords show them
+      if (!peekAds()) {
+        loadAds().then(() => { if (root.isConnected && (tab === "overview" || tab === "keywords")) render(); })
+          .catch(() => { /* no Ads data: those parts just don't show */ });
+      }
     } catch (e) {
       const msg = /permission/i.test(e.message) ? "You don't have access to SEO data (needs the SEO menu permission)." : e.message;
       body.innerHTML = `<div class="seo-empty seo-err">${esc(msg)}</div>`;
@@ -670,7 +675,7 @@ export async function mountSeo(el, opts = {}) {
 
   function ctx() {
     return {
-      data, work, can, isAdmin, staff: opts.staff,
+      data, work, can, isAdmin, staff: opts.staff, ads: peekAds(),
       h: { esc, fmtInt, fmtPct, fmtPos, delta, addDays, fmtDate, sumRange, sparkline },
       byPath: new Map(data.pages.map((p) => [p.path, p])),
       kit: { PRESETS, rangeOf, compareOf, buckets, bucketLabel, autoGran, daysBetween, lineChart, tkey },
@@ -958,6 +963,16 @@ export async function mountSeo(el, opts = {}) {
         lines.push([pk > 0 ? "up" : "down", `Key events from Google visitors (bookings and enquiries tracked in GA4) ${pk > 0 ? "rose" : "fell"} ${Math.abs(pk)}%: ${fmtInt(cur.conversions)} vs ${fmtInt(prev.conversions)}.`]);
       }
 
+      // 5b. Google Ads in the same dates (once its numbers are loaded)
+      const ads = adsTotals(r.from, r.to);
+      const adsWas = ads && cmp.from >= ads.first ? adsTotals(cmp.from, cmp.to) : null;
+      if (ads && (ads.cost || ads.clicks)) {
+        const pa = adsWas ? pct(ads.cost, adsWas.cost) : null;
+        lines.push(["flat", `Google Ads: $${fmtInt(ads.cost)} spent${pa != null && Math.abs(pa) >= 10 ? ` (${pa > 0 ? "+" : "−"}${Math.abs(pa)}%)` : ""}, ${
+          fmtInt(ads.clicks)} ad clicks${ads.enq != null ? `, ${fmtInt(ads.enq)} enquir${ads.enq === 1 ? "y" : "ies"}${
+          ads.enq ? ` ($${fmtInt(ads.cost / ads.enq)} each)` : ""}` : ""}. <button class="seo-w-link" type="button" data-tab="ads">Open Ads</button>`]);
+      }
+
       // 6. Changes logged in these dates (including tasks the website check finished)
       const logged = (work?.log || []).filter((e) => e.date >= r.from && e.date <= r.to);
       if (logged.length) {
@@ -969,7 +984,7 @@ export async function mountSeo(el, opts = {}) {
       return `<div class="seo-card seo-wc">
         <div class="seo-row" style="margin:0 0 4px"><h3 style="margin:0">What changed</h3>
           <span class="seo-note">${esc(fmtDate(r.from, false))} – ${esc(fmtDate(r.to))} vs ${esc(cmp.name.toLowerCase())}</span></div>
-        <ul class="seo-wc-list">${lines.slice(0, 6).map(([d, t]) => `<li class="is-${d}">${t}</li>`).join("")}</ul>
+        <ul class="seo-wc-list">${lines.slice(0, 7).map(([d, t]) => `<li class="is-${d}">${t}</li>`).join("")}</ul>
         ${fresh ? `<p class="seo-note" style="margin:6px 0 0">The last ${fresh} day${fresh === 1 ? "" : "s"} may still change while Search Console settles.</p>` : ""}
       </div>`;
     })();

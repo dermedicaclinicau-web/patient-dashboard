@@ -245,6 +245,10 @@ const SEO_COACH_SYSTEM_ = [
   'negative keywords where money is spent with no enquiries; lowering bids where the clinic already ranks in the top 3 for free;',
   'landing pages where ad visitors leave straight away; gaps in tracking. Only suggest spending more where a campaign is clearly',
   'profitable. If the numbers are too small to judge (under about 10 clicks or $50), say so instead of guessing.',
+  'You also get "seo": the priority pages (each with the search it targets) and website changes from the last 45 days.',
+  'Don\'t suggest cutting ads on a priority page\'s target search until that page ranks in the top 3 for free.',
+  'If a page was changed in the last 4 weeks, say it\'s too soon to judge it, rather than suggesting another change.',
+  'Where ads keep paying for a search a priority page targets, say so: it\'s a reason to finish that page\'s SEO work.',
   '',
   'Only when suggesting ad text (kind "ads"): up to 8 headlines of at most 30 characters and up to 4 descriptions of at most',
   '90 characters. Otherwise leave headlines and descriptions empty.',
@@ -407,7 +411,7 @@ function seoAdsCoach_(by) {
     .sort(function (a, b) { return String(b.at).localeCompare(String(a.at)); }).slice(0, 40)
     .map(function (s) { return { action: s.title, decision: s.st === 'done' ? 'done' : 'declined', on: s.date }; });
   const res = seoCoachClaude_(SEO_COACH_SYSTEM_,
-    JSON.stringify({ today: seoDate_(0), numbers: seoCoachSummary_(ad), alreadyDecided: decided }));
+    JSON.stringify({ today: seoDate_(0), numbers: seoCoachSummary_(ad), seo: seoCoachSeo_(), alreadyDecided: decided }));
 
   const words = seoCoachWords_();
   const clean = function (s, n) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, n); };
@@ -469,20 +473,43 @@ function handleSeoAds_(body) {
       const unlock = staffTaskLock_('adscoach');
       if (!unlock) return { ok: true, problem: 'Someone else is saving a suggestion. Try again.' };
       try {
+        const cfg = getConfig_();
         const cur = seoCoachStatus_();
+        const old = cur[key];
+        const writes = [];
+        let logEntry = null;
+        // Undo, or Not now: its Change log entry comes out (Done again just updates the same entry)
+        const removedLog = old && old.logId && st !== 'done' ? old.logId : '';
+        if (removedLog) writes.push(deleteWrite_(cfg, 'seo_log/' + removedLog));
         if (st === 'undo') delete cur[key];
         else {
-          let title = '';
+          let a = {};
           try {
             const c = seoCoachRead_('seo_state/ads_coach');
-            title = (JSON.parse((c && c.actions) || '[]').filter(function (a) { return a.key === key; })[0] || {}).title || '';
+            a = JSON.parse((c && c.actions) || '[]').filter(function (x) { return x.key === key; })[0] || {};
           } catch (e) { /* the title is only for the history */ }
-          cur[key] = { st: st, at: new Date().toISOString(), date: seoDate_(0), by: String(session.name || ''), title: String(title).slice(0, 160) };
+          const s = { st: st, at: new Date().toISOString(), date: seoDate_(0), by: String(session.name || ''),
+            title: String(a.title || '').slice(0, 160) };
+          if (st === 'done') {
+            const logId = 'ads_' + key;
+            logEntry = {
+              date: s.date, type: 'Google Ads', title: ('Google Ads: ' + (a.title || "Claude's suggestion")).slice(0, 200),
+              url: seoCoachPath_(a.page),
+              note: [a.campaign ? 'Campaign: ' + a.campaign : '', a.keyword ? 'Keyword: ' + a.keyword : '', a.how || '']
+                .filter(Boolean).join('\n').slice(0, 2000),
+              by: String(session.uid || ''), byName: String(session.name || ''), source: 'ads', coachKey: key,
+            };
+            writes.push(updateWrite_(cfg, 'seo_log/' + logId, Object.assign({ createdAt: new Date(), updatedAt: new Date() }, logEntry)));
+            s.logId = logId;
+            logEntry.id = logId;
+          }
+          cur[key] = s;
         }
-        const cut = new Date(Date.now() - 365 * 864e5).toISOString();   // kept a year
+        const cut = new Date(Date.now() - 365 * 864e5).toISOString();   // kept a year (the Change log keeps its entries)
         Object.keys(cur).forEach(function (k) { if (String(cur[k].at || '') < cut) delete cur[k]; });
-        seoFsCommit_([{ path: 'seo_state/ads_coach_status', data: { s: JSON.stringify(cur), updatedAt: new Date() } }]);
-        return { ok: true, status: cur };
+        writes.push(updateWrite_(cfg, 'seo_state/ads_coach_status', { s: JSON.stringify(cur), updatedAt: new Date() }));
+        commitWrites_(cfg, writes);
+        return { ok: true, status: cur, log: logEntry, removedLog: removedLog };
       } finally { unlock(); }
     }
   } catch (err) {
@@ -490,4 +517,32 @@ function handleSeoAds_(body) {
     return { ok: true, problem: String(err && err.message ? err.message : err).slice(0, 300) };
   }
   return { ok: false, error: 'BAD_REQUEST' };
+}
+
+// A page from Claude ("https://dermedica.com.au/laser/" or "laser") → "/laser/", or ""
+function seoCoachPath_(p) {
+  const s = String(p || '').trim().replace(/^https?:\/\/[^/]+/i, '').split('#')[0].split('?')[0];
+  if (!s) return '';
+  return (s.charAt(0) === '/' ? s : '/' + s).slice(0, 300);
+}
+
+// The SEO side, for the coach: priority pages and their target searches, and recent website changes
+function seoCoachSeo_() {
+  const out = { priorityPages: [], recentSiteChanges: [] };
+  const s = seoCoachRead_('seo_settings/main') || {};
+  const info = Array.isArray(s.priorityInfo) ? s.priorityInfo : [];
+  (Array.isArray(s.keyPages) ? s.keyPages : []).slice(0, 30).forEach(function (p) {
+    const i = info.filter(function (x) { return x && String(x.path) === String(p); })[0] || {};
+    out.priorityPages.push({ page: String(p), targetSearch: String(i.target || ''), goal: String(i.goal || '') });
+  });
+  try {
+    const since = flowAddDaysKey_(seoDate_(0), -45);
+    out.recentSiteChanges = fsListAll_(getConfig_(), 'seo_log', ['date', 'type', 'title', 'url'])
+      .map(function (d) { return fromFields_(d.fields || {}); })
+      .filter(function (e) { return String(e.date || '') >= since; })
+      .sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); })
+      .slice(0, 25)
+      .map(function (e) { return { date: e.date, type: String(e.type || ''), change: String(e.title || '').slice(0, 140), page: String(e.url || '') }; });
+  } catch (e) { console.warn('Change log not read for the Ads coach: ' + e); }
+  return out;
 }

@@ -1,7 +1,7 @@
 // seo-ads.js — SEO → Ads: Google Ads numbers through GA4
 // Reads seo_state/ads and seo_state/ads_run (written each morning by runSeoAds in SeoAds.gs)
-import { db } from "./firebase-config.js";
-import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { db, auth } from "./firebase-config.js";
+import { doc, getDoc, collection, writeBatch, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { callApi } from "./appointments.js";
 
 // Apps Script action "seoAds" (SeoAds.gs → handleSeoAds_)
@@ -20,6 +20,16 @@ function coachOf(x) {
 
 const store = { data: null, pending: null };
 export function clearAds() { store.data = null; }
+// The Ads numbers if they're loaded, otherwise null (Keywords and the Overview use them when they're there)
+export const peekAds = () => store.data;
+// Spend, clicks and enquiries between two dates, for the Overview's What changed
+export function adsTotals(from, to) {
+  const A = store.data;
+  if (!A || A.none || !A.days.length) return null;
+  const t = sum(A, from, to);
+  const L = A.leadsFrom && to >= A.leadsFrom ? sumLeads(A, from < A.leadsFrom ? A.leadsFrom : from, to) : null;
+  return { cost: t.cost, clicks: t.clicks, ke: t.ke, enq: L ? L.enq : null, came: L ? L.came : null, first: A.days[0].date };
+}
 
 const J = (s) => { try { const v = JSON.parse(s || "[]"); return Array.isArray(v) ? v : []; } catch { return []; } };
 
@@ -187,6 +197,77 @@ function injectCss() {
   document.head.appendChild(s);
 }
 
+/* ---------- SEO → Tasks, from the Ads tab ---------- */
+
+// The same rule as SEO → Tasks: admins and the SEO team
+const canTask = () => !!C && (C.isAdmin === true || /^seo$/i.test(String(C.staff?.role || C.staff?.staffRole || "")));
+function hashStr(s) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+  return (h >>> 0).toString(36);
+}
+function adsToast(msg, bad) {
+  const t = document.createElement("div");
+  t.className = "seo-w-toast" + (bad ? " is-bad" : "");
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), bad ? 6000 : 2500);
+}
+
+// One task in SEO → Tasks. It comes first in Up next, like the Advisor's tasks.
+async function addAdsTask(o) {   // { key, path, title, why, steps: [{ text, detail, effort, check }] }
+  const id = "t_ads" + hashStr(o.key) + hashStr("#" + o.key);
+  const ref = doc(db, "seo_tasks", id);
+  const ex = await getDoc(ref);
+  if (ex.exists() && !["done", "dismissed"].includes(ex.data().status)) return "already";
+  const steps = {}, order = [];
+  o.steps.forEach((s, i) => {
+    const sid = "s_" + hashStr(id + "|" + i) + hashStr(i + "#" + id);
+    steps[sid] = { text: s.text, detail: s.detail || "", effort: s.effort || "Quick", check: s.check || { k: "manual" },
+      status: "todo", by: "", byName: "", at: "" };
+    order.push(sid);
+  });
+  const role = String(C.staff?.role || C.staff?.staffRole || (C.isAdmin ? "Admin" : ""));
+  const b = writeBatch(db);
+  b.set(ref, { path: o.path, group: "ads", source: "ads", title: o.title, why: o.why || "", gain: 0, order, steps,
+    status: "open", skipUntil: "", skipNote: "", createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+  b.set(doc(collection(db, "seo_task_log")), { taskId: id, path: o.path, taskTitle: o.title, stepId: "", text: "",
+    note: "From the Ads tab", action: "add", by: auth.currentUser?.uid || "", byName: C.staff?.name || "", role,
+    day: new Intl.DateTimeFormat("en-CA", { timeZone: "Australia/Perth" }).format(new Date()), at: serverTimestamp() });
+  await b.commit();
+  return "added";
+}
+
+// "Worth an SEO page": improve the page that already shows in Google for it, or write a new one
+function seoPageTask(k) {
+  const kw = kq(k.kw);
+  const hit = (C.work?.queries || []).find((q) => q.q.toLowerCase() === kw.toLowerCase());
+  const page = hit && hit.pages[0] ? hit.pages[0].path : "";
+  const why = `${keF(k.ke)} key events from Google Ads at ${money(k.ke ? k.cost / k.ke : null)} each, ${
+    k.oPos == null ? "and no page ranks for it" : `but it only ranks ${C.h.fmtPos(k.oPos)} for free`}. A page that ranks could win these without paying.`;
+  if (page) {
+    return { key: "kw:" + kw.toLowerCase(), path: page, title: `Win “${kw}” for free (now paid for in Google Ads)`, why, steps: [
+      { text: `Start the page title with “${kw}”`, effort: "Quick", check: { k: "title", page, has: kw } },
+      { text: `Add a heading and a section that answers “${kw}”`, effort: "Medium", check: { k: "heading", page, has: kw },
+        detail: "What it is, who it suits, results, downtime and cost." },
+      { text: "Link to this page from 2–3 related pages, using those words", effort: "Quick", check: { k: "manual" } },
+    ] };
+  }
+  return { key: "kw:" + kw.toLowerCase(), path: "/", title: `New page for “${kw}” (now paid for in Google Ads)`, why, steps: [
+    { text: `Write a new page that answers “${kw}”`, effort: "Bigger", check: { k: "manual" },
+      detail: "Ask the Advisor for an outline. Publish it, then add it to the treatments menu." },
+    { text: "Link to the new page from 2–3 related pages", effort: "Quick", check: { k: "manual" } },
+  ] };
+}
+
+// Claude's suggestion about a page → a task to do on that page
+function coachTask(a) {
+  const path = String(a.page || "").replace(/^https?:\/\/[^/]+/i, "").split("?")[0] || "/";
+  return { key: "coach:" + a.key, path, title: a.title, why: String(a.why || "").slice(0, 300), steps: [
+    { text: a.title, detail: a.how || "", effort: a.effort === "quick" ? "Quick" : a.effort === "big" ? "Bigger" : "Medium", check: { k: "manual" } },
+  ] };
+}
+
 /* ---------- Claude's suggestions ---------- */
 
 let coachBusy = false, coachErr = "", coachFilter = "todo";
@@ -242,7 +323,8 @@ function coachHtml(h, A) {
       ${(a.flags || []).length ? `<div class="seo-warn">${a.flags.map((f) => `⚠ ${esc(f)}`).join("<br>")}</div>` : ""}
       <div class="seo-row" style="margin:8px 0 0">${acts}
         ${a.page ? `<button class="seo-btn" type="button" data-advpage="${esc(String(a.page).replace(/^https?:\/\/[^/]+/i, "") || "/")}">Ask the Advisor about this page</button>` : ""}
-        ${a.keyword ? `<button class="seo-btn" type="button" data-kq="${esc(kq(a.keyword))}">See it in Keywords</button>` : ""}</div>
+        ${a.keyword ? `<button class="seo-btn" type="button" data-kq="${esc(kq(a.keyword))}">See it in Keywords</button>` : ""}
+        ${a.page && !a.st && canTask() ? `<button class="seo-btn" type="button" data-ads-ctask="${esc(a.key)}">Add to Tasks</button>` : ""}</div>
     </div>`;
   };
   return `<div class="seo-card seo-ad-coach">${head}${err}
@@ -277,6 +359,23 @@ async function coachClick(t) {
   const stillHere = () => B && B.querySelector(".seo-ad-coach");
   if (d.adsCf !== undefined) { coachFilter = d.adsCf; draw(); return; }
   if (d.adsCopy !== undefined) { copyText(d.adsCopy, t); return; }
+  if (d.adsTask !== undefined || d.adsCtask !== undefined) {
+    if (!canTask()) return;
+    let o = null;
+    if (d.adsTask !== undefined) { const k = AD.kw.find((x) => x.kw === d.adsTask); if (k) o = seoPageTask(k); }
+    else { const a = (AD.coach?.actions || []).find((x) => x.key === d.adsCtask); if (a) o = coachTask(a); }
+    if (!o) return;
+    t.disabled = true;
+    try {
+      const r = await addAdsTask(o);
+      adsToast(r === "already" ? "It's already in SEO → Tasks." : "Added to SEO → Tasks (Up next)");
+      t.textContent = "In Tasks ✓";
+    } catch (err) {
+      t.disabled = false;
+      adsToast(/permission/i.test(err?.message || "") ? "You don't have permission to add tasks." : err?.message || "Not added.", true);
+    }
+    return;
+  }
   if (d.adsCoach !== undefined) {
     if (coachBusy) return;
     coachBusy = true; coachErr = "";
@@ -300,7 +399,17 @@ async function coachClick(t) {
     try {
       const r = await api("act", { key, st });
       if (r && r.problem) coachErr = r.problem;
-      else if (r && r.status) { AD.status = r.status; coachErr = ""; }
+      else if (r && r.status) {
+        AD.status = r.status;
+        coachErr = "";
+        // Done went into the Change log (Undo or Not now took it out): the other tabs see it straight away
+        const w = C && C.work;
+        if (w && Array.isArray(w.log)) {
+          w.log = w.log.filter((e) => e.id !== r.removedLog && !(r.log && e.id === r.log.id));
+          if (r.log) w.log.push({ ...r.log, createdAt: new Date(), updatedAt: new Date() });
+          w.log.sort((a, b) => b.date.localeCompare(a.date));
+        }
+      }
     } catch (err) {
       coachErr = (err && err.message) || "Not saved. Try again.";
     }
@@ -489,7 +598,8 @@ function draw() {
   const gap = kwIn.filter((k) => k.ke >= 2 && (k.oPos == null || k.oPos > 10)).sort((a, b) => b.ke - a.ke).slice(0, 6)
     .map((k) => `<li>${kwBtn(k.kw)} · ${keF(k.ke)} key events from ads at ${money(k.cost / k.ke)} each, ${
       k.oPos == null ? "not in Google's organic results" : `organic position ${h.fmtPos(k.oPos)}`}<small>${esc(cname(k))} · ${
-      askBtn(`"${k.kw}" brings bookings from Google Ads but we ${k.oPos == null ? "don't rank for it" : `only rank ${h.fmtPos(k.oPos)}`} organically. Should we write a new page or improve an existing one, and what should it cover?`)}</small></li>`);
+      askBtn(`"${k.kw}" brings bookings from Google Ads but we ${k.oPos == null ? "don't rank for it" : `only rank ${h.fmtPos(k.oPos)}`} organically. Should we write a new page or improve an existing one, and what should it cover?`)}${
+      canTask() ? ` · <button type="button" class="seo-ad-link" data-ads-task="${esc(k.kw)}">Add to Tasks</button>` : ""}</small></li>`);
   const lpBad = A.lp.filter((p) => p.sess >= 30 && 1 - p.eng / p.sess > 0.65).sort((a, b) => b.sess - a.sess).slice(0, 6)
     .map((p) => {
       const pg = byPath.get(K.tkey(p.path));
@@ -563,7 +673,7 @@ function bind(body) {
   if (body.dataset.adsBound) return;
   body.dataset.adsBound = "1";
   body.addEventListener("click", (e) => {
-    const ca = e.target.closest("[data-ads-coach],[data-ads-act],[data-ads-cf],[data-ads-copy]");
+    const ca = e.target.closest("[data-ads-coach],[data-ads-act],[data-ads-cf],[data-ads-copy],[data-ads-task],[data-ads-ctask]");
     if (ca && AD && body.contains(ca)) { coachClick(ca); return; }
     const t = e.target.closest("[data-ads-preset],[data-ads-metric],[data-ads-camp],[data-ads-sort],[data-ads-kwsort],[data-ads-more]");
     if (!t || !AD || !body.contains(t)) return;

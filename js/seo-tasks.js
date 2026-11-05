@@ -12,7 +12,7 @@ import {
   doc, getDoc, getDocs, collection, query, where, orderBy, limit, writeBatch, runTransaction, serverTimestamp, arrayUnion,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { npath, pageStory, priorityOf, prioritySettings, titleOf, complianceWords, renderOppsInto, taskConfig, pageOf, makeSortable,
-  clusterOfMain, linkState, redirectState }   from "./seo-work.js?v=16";
+  clusterOfMain, linkState, redirectState }   from "./seo-work.js?v=17";
 import { contentIssues } from "./seo-content.js?v=1";
 
 const GROUPS = {
@@ -28,6 +28,7 @@ const GROUPS = {
   quality: { order: 0.5, factor: 0.2, title: () => "Fix spelling, grammar and wording" },
   advisor: { order: 0.2, factor: 0, title: () => "" },     // from the Advisor (website steps)
   marketing: { order: 0.3, factor: 0, title: () => "" },   // from the Advisor (marketing steps, ticked by hand)
+  ads: { order: 0.25, factor: 0, title: () => "" },        // from the Ads tab (Add to Tasks)
 };
 const CHECK = {
   title: "Page title", titleMax: "Page title", titleNot: "Other page's title", h1: "Main heading", desc: "Description",
@@ -285,13 +286,15 @@ async function load(S) {
 
 const isPri = (c, path) => !!priorityOf(c.work, path);
 const started = (t) => (t.order || []).some((id) => t.steps[id] && t.steps[id].status !== "todo");
-const isLive = (c, t) => t.status !== "done" && t.status !== "dismissed" && (t.source === "advisor" || isPri(c, t.path) || started(t));
+// Someone asked for these (the Advisor, or Add to Tasks on the Ads tab), so they're live on any page
+const asked = (t) => t.source === "advisor" || t.source === "ads";
+const isLive = (c, t) => t.status !== "done" && t.status !== "dismissed" && (asked(t) || isPri(c, t.path) || started(t));
 
 // Priority number first (#1 before #2), then the kind of job, then the expected gain
 function rankOf(c) {
   const num = new Map(prioritySettings(c.work).paths.map((p, i) => [npath(p), i]));
   // Tasks from the Advisor (goals and page reviews) come first: someone asked for them
-  return (a, b) => ((b.source === "advisor") - (a.source === "advisor")) || (num.get(npath(a.path)) ?? 999) - (num.get(npath(b.path)) ?? 999)
+  return (a, b) => (asked(b) - asked(a)) || (num.get(npath(a.path)) ?? 999) - (num.get(npath(b.path)) ?? 999)
     || GROUPS[a.group].order - GROUPS[b.group].order || (b.gain || 0) - (a.gain || 0);
 }
 const priNum = (c, path) => {
@@ -486,7 +489,8 @@ export async function renderTasks(body, c) {
     const head = `<div class="seo-t-chead">${ring(t)}
       <div style="min-width:0">
         <div class="seo-t-page">${priNum(c, t.path) ? `<span class="seo-t-num">#${priNum(c, t.path)}</span>` : ""}${esc(title)}</div>
-        <div class="seo-t-title">${t.source === "ai" ? `<span class="seo-t-ai" title="Suggested by Claude${t.score ? `, quality ${t.score}/5` : ""}">AI</span>` : ""}${esc(t.title)}</div>
+        <div class="seo-t-title">${t.source === "ai" ? `<span class="seo-t-ai" title="Suggested by Claude${t.score ? `, quality ${t.score}/5` : ""}">AI</span>` : ""}${
+          t.source === "ads" ? `<span class="seo-t-ai" style="background:#eff6ff;color:#1d4ed8" title="Added from the Ads tab">ADS</span>` : ""}${esc(t.title)}</div>
         ${t.why ? `<div class="seo-note">${esc(t.why)}</div>` : ""}
       </div>
       <div class="seo-t-side">${t.gain ? `<div class="seo-t-gain">≈ +${t.gain} clicks</div>` : ""}<div class="seo-note">${n}/${st.length} steps</div></div>
