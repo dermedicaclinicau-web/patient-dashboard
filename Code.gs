@@ -8185,6 +8185,7 @@ function flowRuleOk_(cfg, r, run, ctx) {
   if (type === 'birthday') return flowBirthdayOk_(cfg, r, run, ctx);
   if (type === 'year') return flowBirthYearOk_(cfg, r, run, ctx);
   if (type === 'prange') return flowBoughtBetweenOk_(cfg, r, run, ctx);
+  if (type === 'pdays') return flowBoughtDaysOk_(cfg, r, run, ctx);
   if (type === 'form') {
     const want = flowNorm_(r.value);
     if (!want) return false;
@@ -14821,6 +14822,34 @@ function flowDateTokens_(s) {
 // ===================== Flow rules: Purchases between two dates (Purchase history) =====================
 FLOW_FIELD_TYPE_['hist.bought_between'] = 'prange';
 FLOW_RULE_COST_['hist.bought_between'] = 2;
+FLOW_FIELD_TYPE_['hist.bought_days'] = 'pdays';
+FLOW_RULE_COST_['hist.bought_days'] = 2;
+
+// "Bought … days ago", counted back from today (Perth). No products chosen means any product.
+//  exact:      a purchase exactly N days ago (0 = today)
+//  within:     a purchase in the last N days (today and the N days before)
+//  over:       they've bought it before, but not in the last N days
+//  not_within: no purchase in the last N days (including never)
+function flowBoughtDaysOk_(cfg, r, run, ctx) {
+  if (r.days === '' || r.days === null || r.days === undefined) return false;
+  const n = Math.floor(Number(r.days));
+  if (!(n >= 0 && n <= 730) || (n === 0 && r.op !== 'exact')) return false;
+  const today = flowKey_(Date.now());
+  const want = Array.isArray(r.value) ? r.value.filter(Boolean) : [];
+  const ago = flowPurchases_(cfg, run, ctx)
+    .filter(function (p) {
+      return /^\d{4}-\d{2}-\d{2}$/.test(String(p.date || '')) &&
+        (!want.length || want.some(function (w) { return flowSameProduct_(p.product, w); }));
+    })
+    .map(function (p) { return flowDays_(String(p.date), today); })
+    .filter(function (d) { return d !== null && d >= 0; });   // a future-dated invoice line doesn't count
+  const recent = ago.some(function (d) { return d <= n; });
+  if (r.op === 'exact') return ago.indexOf(n) !== -1;
+  if (r.op === 'within') return recent;
+  if (r.op === 'over') return ago.length > 0 && !recent;
+  if (r.op === 'not_within') return !recent;
+  return false;
+}
 
 // last: their most recent purchase (of these products) was in the range · any: bought in the range · none: didn't
 // No products chosen means any product. Purchases come from the Invoice Record (skincare/{key}.purchases).
