@@ -175,6 +175,7 @@ function seo10Label_(name, i) {
     searches: 'Looking at searches with “' + (i.words || '') + '”',
     site_overview: 'Looking across the whole site',
     change_log: 'Reading the Change log',
+    google_ads: i.path ? 'Checking Google Ads for ' + i.path : i.words ? 'Checking Google Ads for “' + i.words + '”' : 'Checking Google Ads',
     engagement: i.path ? 'Checking how long visitors stay on ' + i.path : 'Checking which pages visitors leave straight away',
   }[name] || 'Looking things up';
 }
@@ -197,6 +198,15 @@ function seo10System_(D, goal) {
     '  title {has} · titleMax {max} · titleNot {page, has} · h1 {has} · desc {has} · heading {has} (new sections, FAQ questions) ·',
     '  headingAny {any: [...]} · text {any: [...]} · words {min} · link {page, to} · alt · faqSchema',
     '- Marketing steps (Google Business Profile, emails, social posts) are welcome. Emails only go to patients who agreed to marketing.',
+    '- The clinic also pays for Google Ads (google_ads tool). Check it whenever the question is about enquiries, bookings, a treatment\'s',
+    '  visitors, or whether the SEO work is worth it. Compare paid and free for the same search: where ads pay for a search a page could',
+    '  rank for, ranking it saves money (say roughly how much); where a page already ranks in the top 3, the ads may be paying for clicks',
+    '  that would come anyway (say so, but leave bid and budget changes to the Ads tab). A bounce over 65% on an ad landing page is a page',
+    '  problem: fix the page. Cost per enquiry and per patient who came in matter more than cost per click.',
+    '  Claude\'s Ads suggestions are in the tool too: build on them, don\'t repeat them.',
+    '- website_enquiries (page_report, site_overview) counts people who arrived on a page and then sent a website enquiry,',
+    '  and how many booked, came in and were treated. It\'s the best sign of what a page is worth, but it only covers website',
+    '  enquiries since tracking began (phone calls and walk-ins aren\'t traced to a page). Say so when the numbers are small.',
     '- Bounce rate (engagement tool, page_report, site_overview): over 65% with 20+ visits means the page isn\'t giving searchers what they wanted.',
     '  Suggest first-screen fixes (a 2–3 sentence answer to the search and a Book a consultation button above the first image), phone fixes when phones bounce',
     '  10+ points more than computers, a faster top image when mobile speed is under 50, and links to related treatments. A high bounce on contact,',
@@ -266,6 +276,10 @@ function seo10Tools_() {
       input_schema: { type: 'object', properties: {} } },
     { name: 'engagement', description: 'Bounce rate and engaged time of visitors from Google search (GA4, last 28 days vs the 28 before), with phones vs computers. Without a path: the whole site and the pages losing the most visitors. With a path: one page.',
       input_schema: { type: 'object', properties: { path: { type: 'string', description: 'e.g. /neck-pigmentation-perth/ (leave out for the whole site)' }, limit: { type: 'integer' } } } },
+    { name: 'google_ads', description: "The clinic's Google Ads for a date range (default: the last 28 days): spend, clicks, visitors from ads, key events, cost per key event, bounce, each campaign, enquiries and patients from ads (with cost per enquiry and per patient who came in), the comparison range if given, and Claude's latest Ads suggestions. With words: the paid keywords (last 90 days, with where each ranks for free) and the searches that brought ad visitors. With path: that page's visitors from ads.",
+      input_schema: { type: 'object', properties: { from: date, to: date, compare_from: date, compare_to: date,
+        words: { type: 'string', description: 'e.g. "laser" (leave out for the overall picture)' },
+        path: { type: 'string', description: 'a landing page, e.g. /laser-hair-removal-perth/' } } } },
     { name: 'change_log', description: 'Changes made to the website between two dates.',
       input_schema: { type: 'object', properties: { from: date, to: date }, required: ['from', 'to'] } },
     { name: 'give_answer', description: 'Give your final answer. Always finish with this.', input_schema: SEO10_ANSWER_SCHEMA_ },
@@ -282,6 +296,7 @@ function seo10Tool_(D, name, i) {
     case 'searches': return seo10Searches_(D, i.words, Math.min(60, Number(i.limit) || 30));
     case 'site_overview': return seo10Overview_(D);
     case 'engagement': return seo12Lookup_(i);
+    case 'google_ads': return seo10Ads_(D, i);
     case 'change_log': return D.log().filter(function (e) { return e.date >= i.from && e.date <= i.to; })
       .sort(function (a, b) { return String(a.date).localeCompare(String(b.date)); }).slice(0, 60)
       .map(function (e) { return { date: e.date, page: e.url || 'site-wide', change: e.title, type: e.type }; });
@@ -334,6 +349,34 @@ function seo10Data_(cfg) {
     },
     tasks: function () { return once('tasks', function () { return fsListAll_(cfg, 'seo_tasks', ['path', 'title', 'status', 'steps']).map(function (d) { return fromFields_(d.fields || {}); }); }); },
     log: function () { return once('log', function () { return fsListAll_(cfg, 'seo_log', ['date', 'title', 'url', 'type']).map(function (d) { return fromFields_(d.fields || {}); }); }); },
+    // Google Ads (SeoAds.gs, updated each night). null when Ads isn't connected.
+    ads: function () {
+      return once('ads', function () {
+        const d = fsGetDoc_(cfg, 'seo_state/ads');
+        if (!d) return null;
+        const j = function (v) { if (Array.isArray(v)) return v; try { return JSON.parse(v || '[]'); } catch (e) { return []; } };
+        const A = { camps: j(d.camps), days: j(d.days), kw: j(d.kw), q: j(d.q), lp: j(d.lp), leads: j(d.leads) };
+        ['leadsFrom', 'from', 'to', 'kwFrom', 'kwTo', 'lpFrom', 'lpTo'].forEach(function (k) { A[k] = String(d[k] || ''); });
+        return A.days.length ? A : null;
+      });
+    },
+    leads: function () {
+      return once('leads', function () {
+        const d = fsGetDoc_(cfg, 'seo_state/leads');
+        let rows = [];
+        try { rows = JSON.parse((d && d.rows) || '[]'); } catch (e) { rows = []; }
+        return { from: d ? String(d.from || '') : '', rows: rows };
+      });
+    },
+    adsCoach: function () {
+      return once('adsCoach', function () {
+        const c = fsGetDoc_(cfg, 'seo_state/ads_coach'), s = fsGetDoc_(cfg, 'seo_state/ads_coach_status');
+        let actions = [], status = {};
+        try { actions = JSON.parse((c && c.actions) || '[]'); } catch (e) { actions = []; }
+        try { status = JSON.parse((s && s.s) || '{}'); } catch (e) { status = {}; }
+        return c ? { at: String(c.at || ''), summary: String(c.summary || ''), actions: actions, status: status } : null;
+      });
+    },
   };
   return D;
 }
@@ -495,6 +538,8 @@ function seo10PageReport_(D, path) {
     recent_changes: D.log().filter(function (e) { return seo10N_(e.url) === k; }).sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); })
       .slice(0, 8).map(function (e) { return { date: e.date, change: e.title }; }),
     engagement: seo10Eng_(path),
+    google_ads: seo10AdsPage_(D, path),
+    website_enquiries: seo10LeadsPage_(D, path),
     live_page: live,
   };
 }
@@ -577,6 +622,8 @@ function seo10Overview_(D) {
     content: { spelling_grammar: spelling, advertising_rules: compliance, pages_without_faq: noFaq, duplicate_pairs: (C.dups || []).slice(0, 8) },
     tasks: { open: T.filter(function (t) { return t.status === 'open'; }).length, done: T.filter(function (t) { return t.status === 'done'; }).length },
     engagement: seo10Eng_(),
+    google_ads_last_28_days: seo10AdsBrief_(D),
+    website_enquiries_last_90_days: seo10LeadsBrief_(D),
   };
 }
 
@@ -669,4 +716,174 @@ function seo10Query_(project, coll, field, value, lim) {
   if (r.getResponseCode() !== 200) throw new Error('Firestore query ' + r.getResponseCode() + ': ' + r.getContentText().slice(0, 200));
   return JSON.parse(r.getContentText()).filter(function (x) { return x.document; })
     .map(function (x) { return { id: x.document.name.split('/').pop(), data: fromFields_(x.document.fields || {}) }; });
+}
+
+/* ===================== Google Ads (from SeoAds.gs) ===================== */
+// seo_state/ads: days [date, campaign #, cost, clicks, impressions, ad visits, engaged, key events]
+// kw [keyword, campaign #, cost, clicks, impressions, visits, engaged, key events, free position, free clicks] (90 days)
+// q [search, visits, engaged, key events, free position, free clicks] · lp [page, visits, engaged, key events, prev visits, prev engaged, prev key events]
+// leads [date, campaign # (-1 unknown), enquiries, consultations booked, came in, treated, lost]
+
+function seo10AddDays_(k, n) { return new Date(Date.parse(k + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10); }
+function seo10R2_(n) { return Math.round(n * 100) / 100; }
+function seo10Words_(s) { return String(s || '').toLowerCase().replace(/[+\[\]"]/g, ' ').split(/\s+/).filter(function (w) { return w.length > 1; }); }
+function seo10Has_(text, ws) { const l = String(text || '').toLowerCase(); return ws.every(function (w) { return l.indexOf(w) !== -1; }); }
+
+function seo10AdsTot_(A, f, t) {
+  const o = { from: f, to: t, cost: 0, clicks: 0, impressions: 0, ad_visits: 0, key_events: 0 };
+  let eng = 0;
+  const byC = {};
+  A.days.forEach(function (d) {
+    if (d[0] < f || d[0] > t) return;
+    const cost = +d[2] || 0, cl = +d[3] || 0, ke = +d[7] || 0;
+    o.cost += cost; o.clicks += cl; o.impressions += +d[4] || 0; o.ad_visits += +d[5] || 0; eng += +d[6] || 0; o.key_events += ke;
+    const c = byC[d[1]] || (byC[d[1]] = { cost: 0, clicks: 0, key_events: 0 });
+    c.cost += cost; c.clicks += cl; c.key_events += ke;
+  });
+  o.cost = seo10R2_(o.cost);
+  o.key_events = seo10R2_(o.key_events);
+  o.cost_per_click = o.clicks ? seo10R2_(o.cost / o.clicks) : null;
+  o.cost_per_key_event = o.key_events ? seo10R2_(o.cost / o.key_events) : null;
+  o.bounce_percent = o.ad_visits ? Math.round((1 - eng / o.ad_visits) * 100) : null;
+  o.campaigns = Object.keys(byC).map(function (k) {
+    const c = byC[k], cm = A.camps[k] || [];
+    return { campaign: String(cm[0] || 'Campaign'), type: String(cm[1] || ''), cost: seo10R2_(c.cost), clicks: c.clicks,
+      key_events: seo10R2_(c.key_events), cost_per_key_event: c.key_events ? seo10R2_(c.cost / c.key_events) : null };
+  }).sort(function (a, b) { return b.cost - a.cost; });
+  // Enquiries from ads (the website's Ad tracking field → Prospect Dashboard)
+  if (A.leadsFrom && t >= A.leadsFrom) {
+    const L = { counted_from: A.leadsFrom, enquiries: 0, consultation_booked: 0, came_in: 0, treated: 0, lost: 0 };
+    A.leads.forEach(function (l) {
+      if (l[0] < f || l[0] > t) return;
+      L.enquiries += +l[2] || 0; L.consultation_booked += +l[3] || 0; L.came_in += +l[4] || 0; L.treated += +l[5] || 0; L.lost += +l[6] || 0;
+    });
+    const spend = A.leadsFrom > f ? seo10AdsTot_(Object.assign({}, A, { leadsFrom: '' }), A.leadsFrom, t).cost : o.cost;
+    L.cost_per_enquiry = L.enquiries ? seo10R2_(spend / L.enquiries) : null;
+    L.cost_per_patient_who_came_in = L.came_in ? seo10R2_(spend / L.came_in) : null;
+    o.enquiries = L;
+  }
+  return o;
+}
+
+function seo10AdsKw_(A, k) {
+  const cm = A.camps[k[1]] || [];
+  const ke = +k[7] || 0;
+  return { keyword: String(k[0]), campaign: String(cm[0] || ''), cost: seo10R2_(+k[2] || 0), clicks: +k[3] || 0,
+    key_events: seo10R2_(ke), cost_per_key_event: ke ? seo10R2_((+k[2] || 0) / ke) : null,
+    free_position: k[8] == null ? null : seo10R2_(+k[8]), free_clicks: k[9] == null ? null : +k[9] };
+}
+
+function seo10Ads_(D, i) {
+  const A = D.ads();
+  if (!A) return { error: "No Google Ads numbers yet: Google Ads isn't connected, or the nightly Ads update hasn't run." };
+  const to = /^\d{4}-\d{2}-\d{2}$/.test(String(i.to || '')) ? i.to : A.to;
+  const from = /^\d{4}-\d{2}-\d{2}$/.test(String(i.from || '')) ? i.from : seo10AddDays_(to, -27);
+  const out = { data_from: A.from, data_to: A.to, range: seo10AdsTot_(A, from, to) };
+  if (i.compare_from && i.compare_to) out.compare = seo10AdsTot_(A, i.compare_from, i.compare_to);
+  const ws = seo10Words_(i.words);
+  const kws = A.kw.filter(function (k) { return String(k[0]) !== '(not set)'; });
+  out.keywords_period = A.kwFrom + ' to ' + A.kwTo;
+  if (ws.length) {
+    out.keywords = kws.filter(function (k) { return seo10Has_(k[0], ws); })
+      .sort(function (a, b) { return (+b[2] || 0) - (+a[2] || 0); }).slice(0, 25).map(function (k) { return seo10AdsKw_(A, k); });
+    out.searches_from_ads = A.q.filter(function (q) { return seo10Has_(q[0], ws); })
+      .sort(function (a, b) { return (+b[1] || 0) - (+a[1] || 0); }).slice(0, 20).map(function (q) {
+        return { search: String(q[0]), ad_visits: +q[1] || 0, bounce_percent: +q[1] ? Math.round((1 - (+q[2] || 0) / +q[1]) * 100) : null,
+          key_events: seo10R2_(+q[3] || 0), free_position: q[4] == null ? null : seo10R2_(+q[4]), free_clicks: q[5] == null ? null : +q[5] };
+      });
+  } else {
+    out.top_spend = kws.slice().sort(function (a, b) { return (+b[2] || 0) - (+a[2] || 0); }).slice(0, 10).map(function (k) { return seo10AdsKw_(A, k); });
+    out.spending_without_results = kws.filter(function (k) { return (+k[2] || 0) >= 50 && !(+k[7]); })
+      .sort(function (a, b) { return (+b[2] || 0) - (+a[2] || 0); }).slice(0, 8).map(function (k) { return seo10AdsKw_(A, k); });
+    out.worth_an_seo_page = kws.filter(function (k) { return (+k[7] || 0) >= 2 && (k[8] == null || +k[8] > 10); })
+      .sort(function (a, b) { return (+b[7] || 0) - (+a[7] || 0); }).slice(0, 8).map(function (k) { return seo10AdsKw_(A, k); });
+  }
+  if (i.path) out.landing_page = seo10AdsPage_(D, i.path) || 'No visitors from ads landed on that page.';
+  const C = D.adsCoach();
+  if (C) {
+    out.claude_ads_suggestions = {
+      written: C.at, summary: C.summary.slice(0, 600),
+      suggestions: C.actions.slice(0, 10).map(function (a) {
+        const st = C.status[a.key];
+        return { title: String(a.title || ''), kind: String(a.kind || ''), campaign: String(a.campaign || ''), keyword: String(a.keyword || ''),
+          page: String(a.page || ''), status: st ? { done: 'Done', later: 'Not now' }[st.st] || st.st : 'To do' };
+      }),
+    };
+  }
+  return out;
+}
+
+// One page's visitors from ads (the last 28 days vs the 28 before), or null
+function seo10AdsPage_(D, path) {
+  let A;
+  try { A = D.ads(); } catch (e) { return null; }
+  if (!A) return null;
+  const k = seo10N_(path);
+  const t = { visits: 0, eng: 0, ke: 0, pv: 0, pe: 0, pk: 0 };
+  A.lp.forEach(function (r) {
+    if (seo10N_(r[0]) !== k) return;
+    t.visits += +r[1] || 0; t.eng += +r[2] || 0; t.ke += +r[3] || 0; t.pv += +r[4] || 0; t.pe += +r[5] || 0; t.pk += +r[6] || 0;
+  });
+  if (!t.visits && !t.pv) return null;
+  const b = function (v, e) { return v ? Math.round((1 - e / v) * 100) : null; };
+  return { period: A.lpFrom + ' to ' + A.lpTo, ad_visits: t.visits, bounce_percent: b(t.visits, t.eng), key_events: seo10R2_(t.ke),
+    previous_ad_visits: t.pv, previous_bounce_percent: b(t.pv, t.pe), previous_key_events: seo10R2_(t.pk) };
+}
+
+// For site_overview: the last 28 days, without the campaign list
+function seo10AdsBrief_(D) {
+  try {
+    const A = D.ads();
+    if (!A) return 'Google Ads is not connected.';
+    const o = seo10AdsTot_(A, seo10AddDays_(A.to, -27), A.to);
+    o.campaigns = o.campaigns.slice(0, 5);
+    return o;
+  } catch (e) { return 'Not available: ' + String(e.message || e).slice(0, 120); }
+}
+
+/* ===================== Website enquiries by page (SeoLeads.gs) ===================== */
+const SEO10_LEAD_KIND_ = { g: 'Google search', s: 'other search engines', a: 'Google Ads', i: 'AI assistants', o: 'social media',
+  e: 'email', r: 'other websites', d: 'direct' };
+
+function seo10LeadTally_(rows) {
+  const t = { enquiries: rows.length, booked_consultation: 0, came_in: 0, treated: 0, how_they_came: {} };
+  rows.forEach(function (r) {
+    const b = Number(r[4]) || 0;
+    if (b & 1) t.booked_consultation++;
+    if (b & 2) t.came_in++;
+    if (b & 4) t.treated++;
+    const k = SEO10_LEAD_KIND_[r[2]] || 'other';
+    t.how_they_came[k] = (t.how_they_came[k] || 0) + 1;
+  });
+  return t;
+}
+
+function seo10LeadsPage_(D, path) {
+  try {
+    const L = D.leads();
+    if (!L.rows.length) return 'No website enquiries tracked yet.';
+    const k = seoLeadsPath_(path);
+    const since = seo10AddDays_(Utilities.formatDate(new Date(), SEO_TZ_, 'yyyy-MM-dd'), -365);
+    const rows = L.rows.filter(function (r) { return r[1] === k && r[0] >= since; });
+    const t = seo10LeadTally_(rows);
+    t.tracked_since = L.from > since ? L.from : since;
+    t.first_found_here_then_enquired_elsewhere = L.rows.filter(function (r) { return r[3] === k && r[1] !== k && r[0] >= since; }).length;
+    return t;
+  } catch (e) { return 'Not available: ' + String(e.message || e).slice(0, 120); }
+}
+
+function seo10LeadsBrief_(D) {
+  try {
+    const L = D.leads();
+    if (!L.rows.length) return 'No website enquiries tracked yet.';
+    const since = seo10AddDays_(Utilities.formatDate(new Date(), SEO_TZ_, 'yyyy-MM-dd'), -89);
+    const rows = L.rows.filter(function (r) { return r[0] >= since; });
+    const t = seo10LeadTally_(rows);
+    const by = {};
+    rows.forEach(function (r) { by[r[1]] = (by[r[1]] || 0) + 1; });
+    t.top_pages = Object.keys(by).sort(function (a, b) { return by[b] - by[a]; }).slice(0, 8)
+      .map(function (p) { return { path: p, title: seo10Title_(D, p), enquiries: by[p] }; });
+    t.tracked_since = L.from;
+    return t;
+  } catch (e) { return 'Not available: ' + String(e.message || e).slice(0, 120); }
 }

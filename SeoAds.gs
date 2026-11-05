@@ -167,6 +167,8 @@ function seoAdsBuild_() {
 // The morning trigger runs this
 function runSeoAds() {
   const t0 = Date.now();
+  // Website enquiries by page (SeoLeads.gs). First, so it still runs if the Ads update fails.
+  try { runSeoLeads(); } catch (e) { console.warn('SEO leads: ' + (e && e.stack ? e.stack : e)); }
   try {
     const a = seoAdsBuild_();
     const doc = {

@@ -17613,8 +17613,41 @@ const PROS_FIELDS_ = [
   ['pref', /^(primary contact( method)?|preferred contact( method)?|best way to contact.*)$/],
   ['age', /^age( group| range)?$/],
   ['concern', /^(primary concern|concern|treatment( of interest)?|interested in)$/],
-  ['adtrack', /^ad tracking$/],
+  ['adtrack', /^(ad|visit) tracking$/],
 ];
+
+// The website's tracking field: where the visit that led to this enquiry came from (any source, not just ads)
+// "...; via=google/organic; vland=/laser/; vseen=2026-11-04; fvia=…; fland=…; fseen=…; form=/contact/"
+const PROS_VIA_NAME_ = { google: 'Google search', search: 'another search engine', ad: 'a Google ad', ai: 'an AI assistant',
+  social: 'social media', email: 'an email', referral: 'another website', direct: 'typing the address or a bookmark' };
+function prosViaKind_(src) {
+  src = String(src || '').toLowerCase();
+  if (!src) return '';
+  if (/\/(cpc|ppc|paid)$/.test(src)) return 'ad';
+  if (/\/organic$/.test(src)) return /^google/.test(src) ? 'google' : 'search';
+  if (/\/ai$/.test(src)) return 'ai';
+  if (/\/social$/.test(src)) return 'social';
+  if (src === 'direct') return 'direct';
+  if (/email|newsletter|mailchimp/.test(src)) return 'email';
+  return 'referral';
+}
+function prosViaParse_(s) {
+  s = String(s || '').trim();
+  if (!s || s === 'dm-adtrack') return null;
+  const o = {};
+  s.split(/;\s*/).forEach(function (part) {
+    const m = /^([a-z]+)=(.*)$/i.exec(part.trim());
+    if (m) o[m[1].toLowerCase()] = m[2].trim().slice(0, 300);
+  });
+  if (!o.via && !o.form) return null;
+  const path = function (p) { p = String(p || '').split('?')[0].split('#')[0].trim(); return /^\/\S{0,299}$/.test(p) ? p : ''; };
+  const day = function (d) { return /^\d{4}-\d{2}-\d{2}$/.test(d || '') ? d : ''; };
+  return {
+    src: String(o.via || '').slice(0, 80), kind: prosViaKind_(o.via), land: path(o.vland), seen: day(o.vseen),
+    firstSrc: String(o.fvia || '').slice(0, 80), firstKind: prosViaKind_(o.fvia), firstLand: path(o.fland), firstSeen: day(o.fseen),
+    form: path(o.form),
+  };
+}
 
 // The website's Ad tracking field: "campaign=123; keyword=laser; source=google/cpc; landing=/laser/; clicked=2026-11-04; click=Cj0…"
 // → { campaign, keyword, source, landing, clicked, click }, or null when they didn't come from an ad
@@ -17830,9 +17863,12 @@ function prosAddEnquiry_(cfg, set, f, session, forceNew) {
     at: at, source: String(f.source || ''), concern: clip_(f.concern, 150), message: clip_(f.message, 2000),
     gmailId: String(f.gmailId || ''), link: String(f.link || ''), by: who,
     ads: prosAdParse_(f.adtrack),
+    via: prosViaParse_(f.adtrack),
   };
   const what = 'Enquiry' + (enq.source ? ' (' + enq.source + ')' : '') + (enq.concern ? ': ' + enq.concern : '') +
-    (enq.ads ? ' · from a Google ad' + (enq.ads.keyword ? ' ("' + enq.ads.keyword + '")' : '') : '');
+    (enq.ads ? ' · from a Google ad' + (enq.ads.keyword ? ' ("' + enq.ads.keyword + '")' : '') : '') +
+    (enq.via && enq.via.kind && enq.via.kind !== 'ad'
+      ? ' · came from ' + PROS_VIA_NAME_[enq.via.kind] + (enq.via.land ? ' (' + enq.via.land + ')' : '') : '');
 
   const ex = forceNew ? null : prosFindExisting_(cfg, keys.phoneKey, keys.emailKey);
   if (ex) {
@@ -17870,6 +17906,7 @@ function prosAddEnquiry_(cfg, set, f, session, forceNew) {
     if (!ex.email && keys.emailKey) { patch.email = keys.emailKey; patch.emailKey = keys.emailKey; }
     if (!ex.concern && enq.concern) patch.concern = enq.concern;
     if (enq.ads && !ex.ads) patch.ads = enq.ads;   // the first ad that brought them
+    if (enq.via && !ex.via) patch.via = enq.via;   // the first tracked visit that led to an enquiry
     if (!f.historic) patch.historic = false;   // a recent enquiry brings an older one back onto the board
     fsPatch_(cfg, PROS_COL_ + '/' + ex._id, patch);
     return { id: ex._id, again: true, name: ex.name, assignedToId: String(ex.assignedToId || ''),
@@ -17896,7 +17933,7 @@ function prosAddEnquiry_(cfg, set, f, session, forceNew) {
     name: prosTidyName_(f.name) || 'No name', firstName: (prosTidyName_(f.name) || '').split(' ')[0],
     phone: String(f.phone || ''), email: keys.emailKey,
     pref: prosPref_(f.pref) || '', ageGroup: clip_(f.age, 40), concern: enq.concern, message: enq.message,
-    source: enq.source || 'Other', historic: f.historic === true, ads: enq.ads || null,
+    source: enq.source || 'Other', historic: f.historic === true, ads: enq.ads || null, via: enq.via || null,
     stage: 'new', stageAt: now, lostReason: '', lostNote: '',
     assignedToId: to ? to.id : '', assignedToName: to ? String(to.name || '') : '',
     nextFollowUp: '', nextFollowUpTime: '', followNote: '',

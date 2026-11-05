@@ -13,6 +13,7 @@ import { compareHtml } from "./seo-compare.js?v=1";
 import { mountSeoSite } from "./seo-site.js?v=4";
 import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js?v=9";
 import { renderAds, clearAds, loadAds, adsPageHtml, peekAds, adsTotals } from "./seo-ads.js?v=5";
+import { loadLeads, peekLeads, clearLeads, leadsPageHtml, leadsTotals } from "./seo-leads.js?v=1";
 
 const TABS = [
   { id: "overview", label: "Overview" },
@@ -508,6 +509,8 @@ button.seo-kpi.is-on{border-color:var(--accent,#2563eb);box-shadow:0 0 0 1px var
 .seo-kv th:first-child,.seo-kv td:first-child{text-align:left;font-weight:400;color:var(--text-muted,#6b7280)}
 .seo-ad-panel{margin:14px 0 0;padding:10px 12px;border:1px solid #c7d2fe;border-radius:10px;background:#f8faff}
 .seo-ad-panel .seo-kv{margin:8px 0 0}
+.seo-ld-panel{margin:14px 0 0;padding:10px 12px;border:1px solid #bbf7d0;border-radius:10px;background:#f0fdf4}
+.seo-ld-panel .seo-kv{margin:8px 0 0}
 `;
 
 function injectCss() {
@@ -651,13 +654,17 @@ export async function mountSeo(el, opts = {}) {
     body.innerHTML = `<div class="seo-empty">Loading…</div>`;
     try {
       [data, work] = await Promise.all([loadData(force), loadWork(force)]);
-      if (force) { W = null; wForce = true; clearAds(); }
+      if (force) { W = null; wForce = true; clearAds(); clearLeads(); }
       renderMeta();
       render();
       // The Ads numbers load in the background, then the Overview and Keywords show them
       if (!peekAds()) {
         loadAds().then(() => { if (root.isConnected && (tab === "overview" || tab === "keywords")) render(); })
           .catch(() => { /* no Ads data: those parts just don't show */ });
+      }
+      if (!peekLeads()) {
+        loadLeads().then(() => { if (root.isConnected && tab === "overview") render(); })
+          .catch(() => { /* no enquiry data yet */ });
       }
     } catch (e) {
       const msg = /permission/i.test(e.message) ? "You don't have access to SEO data (needs the SEO menu permission)." : e.message;
@@ -973,6 +980,16 @@ export async function mountSeo(el, opts = {}) {
           ads.enq ? ` ($${fmtInt(ads.cost / ads.enq)} each)` : ""}` : ""}. <button class="seo-w-link" type="button" data-tab="ads">Open Ads</button>`]);
       }
 
+      // 5c. Website enquiries from free search, by the page they came in on
+      const ld = leadsTotals(r.from, r.to);
+      if (ld && ld.enq) {
+        const was = cmp.from >= ld.first ? leadsTotals(cmp.from, cmp.to) : null;
+        const tone = !was ? "flat" : ld.enq > was.enq ? "up" : ld.enq < was.enq ? "down" : "flat";
+        lines.push([tone, `Enquiries from free search: <strong>${fmtInt(ld.enq)}</strong>${was ? ` (was ${fmtInt(was.enq)})` : ""}${
+          ld.other ? ` · Google ${fmtInt(ld.google)}, other ${fmtInt(ld.other)}` : ""} · ${fmtInt(ld.came)} came in${
+          ld.top ? ` · most from ${esc(ld.top.path)} (${fmtInt(ld.top.n)})` : ""}`]);
+      }
+
       // 6. Changes logged in these dates (including tasks the website check finished)
       const logged = (work?.log || []).filter((e) => e.date >= r.from && e.date <= r.to);
       if (logged.length) {
@@ -984,7 +1001,7 @@ export async function mountSeo(el, opts = {}) {
       return `<div class="seo-card seo-wc">
         <div class="seo-row" style="margin:0 0 4px"><h3 style="margin:0">What changed</h3>
           <span class="seo-note">${esc(fmtDate(r.from, false))} – ${esc(fmtDate(r.to))} vs ${esc(cmp.name.toLowerCase())}</span></div>
-        <ul class="seo-wc-list">${lines.slice(0, 7).map(([d, t]) => `<li class="is-${d}">${t}</li>`).join("")}</ul>
+        <ul class="seo-wc-list">${lines.slice(0, 8).map(([d, t]) => `<li class="is-${d}">${t}</li>`).join("")}</ul>
         ${fresh ? `<p class="seo-note" style="margin:6px 0 0">The last ${fresh} day${fresh === 1 ? "" : "s"} may still change while Search Console settles.</p>` : ""}
       </div>`;
     })();
@@ -1179,6 +1196,7 @@ export async function mountSeo(el, opts = {}) {
             mob != null ? `Mobile ${fmtB(mob)}` : "", desk != null ? `Desktop ${fmtB(desk)}` : ""].filter(Boolean).join(" · ")}</p>
           ${tip ? `<p class="seo-bn-tip">💡 ${esc(tip)}</p>` : ""}</div>`;
       })()}
+      <div data-pleads></div>
       <div data-pads></div>
       <h3 style="font-size:14px;margin:16px 0 6px">Clicks per week</h3>
       ${bars(p.weekly, weekLabels)}
@@ -1195,6 +1213,10 @@ export async function mountSeo(el, opts = {}) {
       const box = panel.querySelector("[data-pads]");
       if (box && panelId === id) box.innerHTML = adsPageHtml(A, p.path, { esc }, tkey);
     }).catch(() => { /* no Ads data: nothing to show */ });
+    loadLeads().then((L) => {
+      const box = panel.querySelector("[data-pleads]");
+      if (box && panelId === id) box.innerHTML = leadsPageHtml(L, p.path, { esc });
+    }).catch(() => { /* no enquiry data yet */ });
   }
 
   /* ----- events (delegated) ----- */
