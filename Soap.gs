@@ -1248,7 +1248,12 @@ function formatSoapFromJSON(data) {
  * shows a one-click "Yes" that creates the relationship via the Team app.
  * Otherwise it only offers "Open in Team app to clarify".
  */
+// Referral emails to the onsite team (info@dermedica.com.au). Off: the referral stays in the notes, no email is sent.
+// Set to true to turn them back on.
+const SEND_REFERRAL_EMAILS = false;
+
 function sendReferralNotification_(patientName, patientId, referral, staffName) {
+  if (!SEND_REFERRAL_EMAILS) return;
   try {
     if (!referral) return;
     const referredBy    = (referral.referred_by    || "").trim();
