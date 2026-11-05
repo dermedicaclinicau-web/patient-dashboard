@@ -128,6 +128,45 @@ const isPast = (p) => p.wasPatient === true || !!p.prev;
 const adText = (a) => (a ? ["Came from a Google ad", a.keyword ? `searched “${a.keyword}”` : "",
   a.landing ? `landed on ${a.landing}` : "", a.clicked ? `clicked ${fullDay(a.clicked)}` : ""].filter(Boolean).join(" · ") : "");
 const onRecall = (p) => !!(p.recall && p.recall.id);
+
+// How they found the website (the website's Visit tracking field → Code.gs prosViaParse_)
+const VIA_NAME = { g: "Google search", google: "Google search", s: "Other search", search: "Other search", bing: "Other search",
+  a: "Google Ads", ad: "Google Ads", ads: "Google Ads", i: "AI assistant", ai: "AI assistant", chatgpt: "AI assistant",
+  o: "Social media", social: "Social media", facebook: "Social media", e: "Email", email: "Email",
+  r: "Another website", referral: "Another website", d: "Typed the address", direct: "Typed the address" };
+const viaKindOf = (src) => {   // "google/organic" → "google", when only the raw source was saved
+  const s = String(src || "").toLowerCase();
+  return /google/.test(s) && /organic/.test(s) ? "google" : /organic/.test(s) ? "search" : s.split("/").pop() || s;
+};
+function viaNorm(v) {
+  if (!v || typeof v !== "object") return null;
+  const kind = String(v.kind || v.via || viaKindOf(v.src) || "").toLowerCase();
+  const land = String(v.land || v.landing || v.page || "");
+  if (!kind && !land) return null;
+  const name = v.name || VIA_NAME[kind] || (kind ? kind[0].toUpperCase() + kind.slice(1) : "The website");
+  const first = v.first ? viaNorm(v.first) : (v.fvia || v.fland) ? viaNorm({ kind: v.fvia, land: v.fland, seen: v.fseen }) : null;
+  return { kind, name, land, seen: v.seen || v.t || "", first };
+}
+// The prospect's own "via", otherwise the latest enquiry that has one
+const viaOfP = (p) => viaNorm(p.via) || viaNorm(((p.enquiries || []).slice().reverse().find((q) => q && q.via) || {}).via);
+const isAdVia = (v) => !!v && ["a", "ad", "ads"].includes(v.kind);
+const isGoogleVia = (v) => !!v && ["g", "google"].includes(v.kind);
+const seenText = (s) => { const d = new Date(typeof s === "number" || /^\d+$/.test(String(s)) ? Number(s) : s); return isNaN(d) ? "" : fullDay(keyOf(d.toISOString())); };
+const viaText = (v) => (v ? [`Found us: ${v.name}${v.land ? ` → ${v.land}` : ""}`, seenText(v.seen) && `visited ${seenText(v.seen)}`,
+  v.first && (v.first.name !== v.name || v.first.land !== v.land) && `first visit: ${v.first.name}${v.first.land ? ` → ${v.first.land}` : ""}`]
+  .filter(Boolean).join(" · ") : "");
+// Show the "Found us" tag unless it would only repeat the Google Ads tag
+const showVia = (p, v) => !!v && !(isAdVia(v) && p.ads);
+
+(function viaCss() {
+  if (typeof document === "undefined" || document.getElementById("pr-via-css")) return;
+  const s = document.createElement("style");
+  s.id = "pr-via-css";
+  s.textContent = `.pr-tag.is-via{background:#dcfce7;color:#166534;border-color:#bbf7d0}
+    .pr-chip.is-via{background:#f0fdf4;color:#166534;border-color:#bbf7d0}
+    .pr-enq-via{display:block;color:#166534;margin-top:2px}`;
+  document.head.appendChild(s);
+})();
 const monthYear = (k) => { if (!/^\d{4}-\d{2}/.test(k || "")) return ""; const [y, m] = k.split("-").map(Number);
   return new Date(y, m - 1, 1).toLocaleDateString("en-AU", { month: "short", year: "numeric" }); };
 const prevText = (pv) => (pv ? `${pv.count} visit${pv.count === 1 ? "" : "s"} before they enquired, last on ${fullDay(pv.last)}${
@@ -144,6 +183,7 @@ const SHOW = [
   ["follow", "Follow-ups due", (p) => ["today", "overdue"].includes(followState(p))],
   ["booked", "Booked directly", (p) => p.fromBook === true],
   ["ads", "From Google Ads", (p) => !!p.ads],
+  ["seo", "From Google search", (p) => isGoogleVia(viaOfP(p))],
   ["check", "Check match", (p) => !!p.patientId && p.linkWeak === true],
 ];
 const showOf = (k) => (SHOW.find((x) => x[0] === k) || SHOW[0])[2];
@@ -447,7 +487,8 @@ async function mountBoard(container, { view, staff }) {
       ? `<span class="pr-tag is-old" title="${esc(prevText(p.prev) || "Had a visit before they enquired")}">Past patient${p.prev && p.prev.last ? ` · last ${esc(monthYear(p.prev.last))}` : ""}</span>`
       : '<span class="pr-tag is-pt">Patient</span>') : ""}
     ${onRecall(p) ? `<span class="pr-tag is-recall" title="${esc(`${p.recall.category}, due ${fullDay(p.recall.due)}`)}">On recall</span>` : ""}
-    ${p.ads ? `<span class="pr-tag is-ad" title="${esc(adText(p.ads))}">Google Ads</span>` : ""}`;
+    ${p.ads ? `<span class="pr-tag is-ad" title="${esc(adText(p.ads))}">Google Ads</span>` : ""}
+    ${(() => { const v = viaOfP(p); return showVia(p, v) ? `<span class="pr-tag is-via" title="${esc(viaText(v))}">${esc(v.name)}</span>` : ""; })()}`;
 
   const card = (p) => {
     const fs = followState(p);
@@ -929,6 +970,8 @@ async function mountProspect(container, id, staff) {
             ${onRecall(p) ? `<span class="pr-chip is-recall">${I(IC.clock)}On recall: ${esc(p.recall.category)}</span>` : ""}
             ${p.nextAppt ? `<span class="pr-chip">${I(IC.clock)}Next appointment ${esc(fullDay(p.nextAppt))}</span>` : ""}
             ${p.ads ? `<span class="pr-chip is-ad" title="${esc(adText(p.ads))}">${I(IC.link)}Google Ads${p.ads.keyword ? `: “${esc(p.ads.keyword)}”` : ""}</span>` : ""}
+            ${(() => { const v = viaOfP(p); return showVia(p, v) ? `<span class="pr-chip is-via" title="${esc(viaText(v))}">${I(IC.link)}Found us: ${esc(v.name)}${
+              v.land ? ` → ${esc(v.land)}` : ""}</span>` : ""; })()}
             ${p.historic ? '<span class="pr-tag">Older</span>' : ""}
           </div>
         </div>
@@ -966,6 +1009,7 @@ async function mountProspect(container, id, staff) {
           <section class="pr-sec"><h3>${I(IC.inbox)} What they asked</h3>
             ${(p.enquiries || []).slice().reverse().map((q) => `<div class="pr-enq">
               <small>${esc(when(q.at))} · ${esc(q.source || "")}${q.concern ? ` · ${esc(q.concern)}` : ""}</small>
+              ${(() => { const v = viaNorm(q.via); return v ? `<small class="pr-enq-via">Came from ${esc(v.name)}${v.land ? ` · landed on ${esc(v.land)}` : ""}</small>` : ""; })()}
               ${q.message ? `<p>${esc(q.message)}</p>` : '<p class="muted">No message.</p>'}
               ${q.link ? `<a href="${esc(q.link)}" target="_blank" rel="noopener">Open the email</a>` : ""}</div>`).join("") || '<p class="muted">Nothing recorded.</p>'}
           </section>
@@ -1414,6 +1458,9 @@ async function mountReports(container) {
     const concerns = groupBy(list, (p) => String(p.concern || "Not given").split(/[,;]/)[0].trim() || "Not given").slice(0, 8)
       .map(({ k, l }) => ({ label: k, n: l.length, text: `${l.length} <small>${rate(l.filter((p) => p._reach >= 5).length, l.length)}% became patients</small>` }));
     const lost = groupBy(list.filter((p) => p.stage === "lost"), (p) => p.lostReason || "No reason").map(({ k, l }) => ({ label: k, n: l.length, tone: "slate" }));
+    const found = groupBy(list.filter((p) => viaOfP(p)), (p) => viaOfP(p).name).map(({ k, l }) => ({
+      label: k, n: l.length, tone: k === "Google search" ? "green" : "",
+      text: `${l.length} <small>${rate(l.filter((p) => p._reach >= 5).length, l.length)}% became patients</small>` }));
     const optsR = (list2, cur) => list2.map(([v, l]) => `<option value="${esc(v)}"${v === cur ? " selected" : ""}>${esc(l)}</option>`).join("");
 
     root.innerHTML = `${back}
@@ -1467,6 +1514,8 @@ async function mountReports(container) {
           <p class="pr-note">Consultations and treatments cancelled, or not attended, after they enquired.
             ${list.filter((p) => cancelOpen(p)).length} still open on the board to call.</p></section>
         <section class="pr-panel"><h3>What they're interested in</h3>${hbars(concerns)}</section>
+        <section class="pr-panel"><h3>How they found the website</h3>${hbars(found, "No tracked web enquiries in this period yet.")}
+          <p class="pr-note">Web form enquiries since visit tracking started. See SEO → Pages for which pages they came in on.</p></section>
         <section class="pr-panel"><h3>New or existing patients</h3>
           <div class="pr-stack">${seg(newPt, "is-new", "New to the clinic")}${seg(oldPt, "is-old", "Already patients")}${seg(none, "is-none", "Not linked to a patient yet")}</div>
           <ul class="pr-legend"><li><i class="is-new"></i>New to the clinic: ${newPt}</li><li><i class="is-old"></i>Already patients: ${oldPt}</li>
@@ -1482,13 +1531,14 @@ async function mountReports(container) {
     const list = cohort(a, b);
     const head = ["Name", "Enquired", "Source", "Interested in", "Stage", "Given to", "Contacts", "First contact",
       "First appointment", "First treatment", "Active from", "Lost reason", "Cancelled", "Already a patient",
-      "Past patient", "On recall"];
+      "Past patient", "On recall", "Found us"];
     const rows = list.map((p) => { const m = p.milestones || {}; return [p.name, p._day, p.source, p.concern, stageOf(p.stage).name,
       p.assignedToName, p.contacts || 0, p.firstContactAt ? keyOf(p.firstContactAt) : "", m.consult_booked || "", m.treated || "",
       m.active || "", p.lostReason || "", p.cancels ? `${p.cancels}${p.cancelOpen ? " (not rebooked)" : ""}` : "",
       p.wasPatient ? "Yes" : p.patientId ? "No" : "",
       p.prev ? `Yes, last visit ${p.prev.last}` : "",
-      p.recall ? `${p.recall.category} (due ${p.recall.due})` : ""]; });
+      p.recall ? `${p.recall.category} (due ${p.recall.due})` : "",
+      (() => { const v = viaOfP(p); return v ? `${v.name}${v.land ? ` → ${v.land}` : ""}` : ""; })()]; });
     const q = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
     const blob = new Blob(["\ufeff" + [head, ...rows].map((r) => r.map(q).join(",")).join("\r\n")], { type: "text/csv" });
     const link = document.createElement("a");
