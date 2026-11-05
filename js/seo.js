@@ -13,7 +13,7 @@ import { compareHtml } from "./seo-compare.js?v=1";
 import { mountSeoSite } from "./seo-site.js?v=4";
 import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js?v=9";
 import { renderAds, clearAds, loadAds, adsPageHtml, peekAds, adsTotals } from "./seo-ads.js?v=5";
-import { loadLeads, peekLeads, clearLeads, leadsPageHtml, leadsTotals } from "./seo-leads.js?v=1";
+import { loadLeads, peekLeads, clearLeads, leadsPageHtml, leadsTotals, leadsByPage } from "./seo-leads.js?v=2";
 
 const TABS = [
   { id: "overview", label: "Overview" },
@@ -663,7 +663,11 @@ export async function mountSeo(el, opts = {}) {
           .catch(() => { /* no Ads data: those parts just don't show */ });
       }
       if (!peekLeads()) {
-        loadLeads().then(() => { if (root.isConnected && tab === "overview") render(); })
+        loadLeads().then(() => {
+          if (!root.isConnected) return;
+          if (tab === "overview") render();
+          else if (tab === "pages" && ui.pview !== "clusters") renderTable();
+        })
           .catch(() => { /* no enquiry data yet */ });
       }
     } catch (e) {
@@ -1078,6 +1082,13 @@ export async function mountSeo(el, opts = {}) {
 
   /* ----- Pages ----- */
 
+  // Website enquiries by page (seo-leads.js): null until they've loaded
+  let LM = null;
+  const leadOf = (p) => (LM ? LM.get(tkey(p.path)) || null : null);
+  const leadCell = (x, k) => (x && x[k]
+    ? `<strong>${fmtInt(x[k])}</strong>${k === "came" && x.enq ? ` <span class="seo-note">${Math.round((x.came / x.enq) * 100)}%</span>` : ""}`
+    : `<span class="seo-note">0</span>`);
+
   const COLS = [
     { key: "path",        label: "Page",         get: (p) => p.path },
     { key: "clicks",      label: "Clicks",       get: (p) => p.m28.clicks },
@@ -1088,6 +1099,10 @@ export async function mountSeo(el, opts = {}) {
     { key: "dPos",        label: "Moved",        get: (p) => p.dPos },
     { key: "sessions",    label: "Org. sessions", get: (p) => p.m28.sessions },
     { key: "conversions", label: "Key events",   get: (p) => p.m28.conversions },
+    { key: "enq",         label: "Enquiries",    get: (p) => (LM ? leadOf(p)?.enq || 0 : null),
+      tip: "People who arrived on this page from anywhere, then sent a website enquiry (last 12 months)" },
+    { key: "came",        label: "Came in",      get: (p) => (LM ? leadOf(p)?.came || 0 : null),
+      tip: "Of those, how many came in for an appointment (and what share of the page's enquiries)" },
     { key: "bounce",      label: "Bounce",       get: (p) => pageBounce(p), nullsLast: true },
     { key: "engTime",     label: "Engaged time", get: (p) => pageTime(p), nullsLast: true },
     { key: "weekly",      label: "12 weeks",     get: null },
@@ -1101,18 +1116,23 @@ export async function mountSeo(el, opts = {}) {
         <input class="seo-input" data-filter placeholder="Filter pages, e.g. pigmentation" value="${esc(ui.filter)}">
         <label class="seo-check"><input type="checkbox" data-hidezero ${ui.hideZero ? "checked" : ""}> Hide pages with no activity</label>
         <label class="seo-check"><input type="checkbox" data-prionly ${ui.priOnly ? "checked" : ""}> ★ Priority pages only</label>
+        <label class="seo-check"><input type="checkbox" data-withleads ${ui.withLeads ? "checked" : ""}> Only pages with enquiries</label>
         <span class="seo-sp"></span><span class="seo-note" data-count></span>
       </div>
       <div class="seo-table-wrap" data-table></div>
       <div class="seo-note" style="margin-top:8px">Last 28 complete days of search data vs the 28 before. Organic sessions and key events from GA4.
-        Bounce: visits from Google that left straight away (green up to 45%, red over 65%). Engaged time: per visit.</div>`;
+        Bounce: visits from Google that left straight away (green up to 45%, red over 65%). Engaged time: per visit.
+        Enquiries and Came in: website enquiries from people who arrived on that page, over the last 12 months (from when tracking began).
+        Phone calls and walk-ins aren't counted.</div>`;
   }
 
   function renderTable() {
+    LM = leadsByPage(peekLeads());
     const f = ui.filter.trim().toLowerCase();
     let rows = data.pages.filter((p) =>
       (!f || p.url.toLowerCase().includes(f)) && (!ui.priOnly || isPriorityPath(work, p.path)) &&
-      (!ui.hideZero || p.m28.clicks || p.m28.impressions || p.m28.sessions));
+      (!ui.withLeads || (leadOf(p)?.enq || 0) > 0) &&
+      (!ui.hideZero || p.m28.clicks || p.m28.impressions || p.m28.sessions || leadOf(p)?.enq));
 
     const col = COLS.find((c) => c.key === ui.sortKey) || COLS[1];
     rows.sort((a, b) => {
@@ -1130,7 +1150,7 @@ export async function mountSeo(el, opts = {}) {
 
     $("[data-table]").innerHTML = `
       <table class="seo-table">
-        <thead><tr>${COLS.map((c) => `<th data-sort="${c.get ? c.key : ""}" class="${ui.sortKey === c.key ? "on" : ""}">${c.label}${ui.sortKey === c.key ? (ui.sortDir > 0 ? " ↑" : " ↓") : ""}</th>`).join("")}</tr></thead>
+        <thead><tr>${COLS.map((c) => `<th data-sort="${c.get ? c.key : ""}" class="${ui.sortKey === c.key ? "on" : ""}"${c.tip ? ` title="${esc(c.tip)}"` : ""}>${c.label}${ui.sortKey === c.key ? (ui.sortDir > 0 ? " ↑" : " ↓") : ""}</th>`).join("")}</tr></thead>
         <tbody>${rows.map((p) => `
           <tr data-open="${p.id}">
             <td><div class="seo-path" title="${esc(p.url)}">${starHtml(cx, p.path)}${esc(p.path)}</div></td>
@@ -1142,6 +1162,8 @@ export async function mountSeo(el, opts = {}) {
             <td>${delta(p.m28.position, p.prev28.position, { invert: true, abs: true })}</td>
             <td>${fmtInt(p.m28.sessions)}</td>
             <td>${fmtInt(p.m28.conversions)}</td>
+            <td>${LM ? leadCell(leadOf(p), "enq") : "—"}</td>
+            <td>${LM ? leadCell(leadOf(p), "came") : "—"}</td>
             <td>${bChip(pageBounce(p), p.eng ? p.eng.c[0] : p.m28.sessions)}</td>
             <td>${fmtDur(pageTime(p))}</td>
             <td>${sparkline(p.weekly)}</td>
@@ -1441,6 +1463,7 @@ export async function mountSeo(el, opts = {}) {
     else if (e.target.matches("[data-filter]")) { ui.filter = e.target.value; ui.limit = 100; renderTable(); }
     else if (e.target.matches("[data-hidezero]")) { ui.hideZero = e.target.checked; renderTable(); }
     else if (e.target.matches("[data-prionly]")) { ui.priOnly = e.target.checked; renderTable(); }
+    else if (e.target.matches("[data-withleads]")) { ui.withLeads = e.target.checked; ui.limit = 100; renderTable(); }
   });
 
   // The page search: keep the box focused while a result is clicked (Safari doesn't focus buttons), and the keyboard

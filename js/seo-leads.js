@@ -39,6 +39,23 @@ function tally(rows) {
   return t;
 }
 
+// The Pages tab: { enq, consult, came, treated } for every page over the last `days` days, keyed by page address
+export function leadsByPage(L, days = 365) {
+  if (!L || L.none || !L.rows.length) return null;
+  const since = iso(new Date(Date.now() - days * 864e5));
+  const m = new Map();
+  L.rows.forEach((r) => {
+    if (r.date < since) return;
+    const x = m.get(r.path) || { enq: 0, consult: 0, came: 0, treated: 0 };
+    x.enq++;
+    if (r.bits & 1) x.consult++;
+    if (r.bits & 2) x.came++;
+    if (r.bits & 4) x.treated++;
+    m.set(r.path, x);
+  });
+  return m;
+}
+
 // For the Overview: enquiries from free search between two dates (null until loaded, or before tracking began)
 export function leadsTotals(from, to) {
   const L = store.data;
