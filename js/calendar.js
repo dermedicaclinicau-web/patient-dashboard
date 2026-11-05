@@ -334,6 +334,11 @@ function statusClass(s) {
   return "";
 }
 
+// The patient's page, in a new tab (so the calendar stays open)
+function patientHref(id) {
+  return `href="#/patient/${encodeURIComponent(id)}" target="_blank"`;
+}
+
 function parseBalance(b) {
   const n = Number(String(b || "").replace(/[^0-9.-]/g, ""));
   return isFinite(n) ? n : 0;
@@ -414,7 +419,7 @@ function visitCard(group) {
   const idx = Number.isInteger(first._i) ? ` data-i="${first._i}"` : "";
 
   return first.patientId
-    ? `<a class="${classes}"${idx} href="#/patient/${encodeURIComponent(first.patientId)}" title="${title}">${inner}</a>`
+    ? `<a class="${classes}"${idx} ${patientHref(first.patientId)} title="${title}">${inner}</a>`
     : `<div class="${classes}"${idx} title="${title}">${inner}</div>`;
 }
 
@@ -448,7 +453,7 @@ function manualCard(a) {
   const id = escapeHtml(a.manualId);
   return `<div class="appt is-manual${a.notInTimely ? " is-missing" : ""}"${idx} title="${escapeHtml([a.timeRange, a.note].filter(Boolean).join(" · "))}">
     <span class="appt-time">${escapeHtml(a.time || "—")}</span>
-    ${a.patientId ? `<a class="appt-name" href="#/patient/${encodeURIComponent(a.patientId)}">${name}</a>` : `<span class="appt-name">${name}</span>`}
+    ${a.patientId ? `<a class="appt-name" ${patientHref(a.patientId)}>${name}</a>` : `<span class="appt-name">${name}</span>`}
     <span class="appt-badges"></span>
     ${services ? `<span class="appt-services">${services}</span>` : ""}
     ${a.note ? `<span class="appt-note">${escapeHtml(a.note)}</span>` : ""}
@@ -484,7 +489,7 @@ function apptCard(a) {
   const idx = Number.isInteger(a._i) ? ` data-i="${a._i}"` : "";
 
   return a.patientId
-    ? `<a class="${classes}"${idx} href="#/patient/${encodeURIComponent(a.patientId)}" title="${title}">${inner}</a>`
+    ? `<a class="${classes}"${idx} ${patientHref(a.patientId)} title="${title}">${inner}</a>`
     : `<div class="${classes}"${idx} title="${title}">${inner}</div>`;
 }
 
