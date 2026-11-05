@@ -26,6 +26,7 @@ function doPost(e) {
     // Non-login requests
     if (body.action === 'renewSession') return json_(handleRenewSession_(body)); // expired session, still signed in
     if (body.action === 'reports') return json_(handleReports_(body));
+    if (body.action === 'seoAds') return json_(handleSeoAds_(body));   // SEO → Ads: Claude's suggestions
     if (body.action === 'paper') return json_(handlePaper_(body));
     if (body.action === 'appointments') return json_(handleAppointments_(body));
     if (body.action === 'preconsult') return json_(handlePreconsult_(body));

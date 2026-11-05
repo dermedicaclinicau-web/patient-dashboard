@@ -2,6 +2,19 @@
 // Reads seo_state/ads and seo_state/ads_run (written each morning by runSeoAds in SeoAds.gs)
 import { db } from "./firebase-config.js";
 import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+// ⚠️ The same helper seo-advisor.js uses to call Apps Script: copy its import line exactly
+import { callApi } from "./api.js";
+
+const api = (op, data = {}) => callApi("seoAds", { op, ...data });
+
+// Claude's suggestions as saved (Firestore) or as sent back by Apps Script
+function coachOf(x) {
+  if (!x) return null;
+  const at = x.at && typeof x.at.toDate === "function" ? x.at.toDate() : x.at ? new Date(x.at) : null;
+  let actions = x.actions;
+  if (typeof actions === "string") { try { actions = JSON.parse(actions); } catch { actions = []; } }
+  return { at, by: x.by || "", summary: x.summary || "", actions: Array.isArray(actions) ? actions : [] };
+}
 
 /* ---------- data (cached for the session; Refresh in SEO clears it) ---------- */
 
@@ -14,15 +27,20 @@ async function loadAds() {
   if (store.data) return store.data;
   if (store.pending) return store.pending;
   store.pending = (async () => {
-    const [a, run] = await Promise.all([
+    const [a, run, cSnap, sSnap] = await Promise.all([
       getDoc(doc(db, "seo_state", "ads")),
       getDoc(doc(db, "seo_state", "ads_run")).catch(() => null),
+      getDoc(doc(db, "seo_state", "ads_coach")).catch(() => null),
+      getDoc(doc(db, "seo_state", "ads_coach_status")).catch(() => null),
     ]);
     const r = run && run.exists() ? run.data() : null;
+    const coach = cSnap && cSnap.exists() ? coachOf(cSnap.data()) : null;
+    let status = {};
+    try { status = sSnap && sSnap.exists() ? JSON.parse(sSnap.data().s || "{}") : {}; } catch { status = {}; }
     if (!a.exists()) return { none: true, run: r, days: [] };
     const x = a.data();
     return {
-      run: r, from: x.from, to: x.to, kwFrom: x.kwFrom, kwTo: x.kwTo, lpFrom: x.lpFrom, lpTo: x.lpTo,
+      coach, status, run: r, from: x.from, to: x.to, kwFrom: x.kwFrom, kwTo: x.kwTo, lpFrom: x.lpFrom, lpTo: x.lpTo,
       updatedAt: x.updatedAt?.toDate ? x.updatedAt.toDate() : null,
       camps: J(x.camps).map((c) => ({ name: String(c[0] || ""), type: String(c[1] || ""), id: String(c[2] || "") })),
       leads: J(x.leads).map((l) => ({ date: l[0], c: l[1], enq: l[2], cb: l[3], came: l[4], tx: l[5], lost: l[6] })),
@@ -125,6 +143,17 @@ const CSS = `
 .seo-ad-steps{margin:8px 0 0;padding-left:20px;line-height:1.7;font-size:14px}
 .seo-ad-link{border:0;background:none;padding:0;color:var(--accent,#2563eb);cursor:pointer;font:inherit;text-align:left}
 .seo-ad-link:hover{text-decoration:underline}
+.seo-ad-coach{border-color:#c7d2fe;background:linear-gradient(180deg,#f8faff,#fff)}
+.seo-ad-sum{margin:0 0 10px;font-size:14px;line-height:1.55}
+.seo-ad-act{border:1px solid var(--border,#e5e7eb);border-left:4px solid #94a3b8;border-radius:10px;padding:10px 12px;margin:8px 0;background:var(--card,#fff)}
+.seo-ad-act.is-high{border-left-color:#16a34a}.seo-ad-act.is-medium{border-left-color:#2563eb}
+.seo-ad-act p{margin:6px 0 0;font-size:13.5px;line-height:1.5}
+.seo-ad-act-h{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.seo-ad-chip{font-size:11.5px;padding:1px 8px;border-radius:999px;background:#f1f5f9;color:#475569}
+.seo-ad-chip.is-high{background:#dcfce7;color:#166534}
+.seo-ad-how{color:#334155}
+.seo-ad-copy{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;margin:8px 0 0;padding:8px 10px;border-radius:8px;background:#f8fafc;font-size:13px}
+.seo-ad-copy ul{margin:4px 0 0;padding-left:18px}
 `;
 function injectCss() {
   if (document.getElementById("seo-ads-css")) return;
@@ -132,6 +161,125 @@ function injectCss() {
   s.id = "seo-ads-css";
   s.textContent = CSS;
   document.head.appendChild(s);
+}
+
+/* ---------- Claude's suggestions ---------- */
+
+let coachBusy = false, coachErr = "", coachFilter = "todo";
+const IMPACT = { high: "Big win", medium: "Worth doing", low: "Small" };
+const EFFORT = { quick: "Quick", medium: "Under an hour", big: "Bigger job" };
+
+// Suggestions marked Done, as markers on the chart
+function doneMarks(A) {
+  return Object.values(A.status || {}).filter((s) => s && s.st === "done" && s.date)
+    .map((s) => ({ date: s.date, title: "Done: " + (s.title || "a suggestion") }));
+}
+
+function coachHtml(h, A) {
+  const esc = h.esc;
+  const c = A.coach, S = A.status || {};
+  const can = typeof C.can === "function" ? C.can("seo.work") : true;
+  const when = c && c.at ? c.at.toLocaleString("en-AU", { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "";
+  const btn = can ? `<button class="seo-btn${c ? "" : " on"}" type="button" data-ads-coach${coachBusy ? " disabled" : ""}>${
+    coachBusy ? "Claude is reading your numbers… (about a minute)" : c ? "Ask again now" : "Ask Claude now"}</button>` : "";
+  const head = `<div class="seo-row" style="margin:0 0 8px"><h3 style="margin:0">✨ Claude's suggestions</h3>
+    ${when ? `<span class="seo-note">${esc(when)}${c.by ? ` · ${esc(c.by)}` : ""}</span>` : ""}<span class="seo-sp"></span>${btn}</div>`;
+  const err = coachErr ? `<div class="seo-warn">${esc(coachErr)}</div>` : "";
+  if (!c) {
+    return `<div class="seo-card seo-ad-coach">${head}${err}<p class="seo-note" style="margin:0">Every Monday morning Claude reads these
+      numbers and suggests what to change to get more patients for your spend.${can ? " Press <b>Ask Claude now</b> for the first set." : ""}</p></div>`;
+  }
+  const all = c.actions.map((a) => ({ ...a, st: S[a.key] || null }));
+  const n = { todo: all.filter((a) => !a.st).length, done: all.filter((a) => a.st && a.st.st === "done").length,
+    later: all.filter((a) => a.st && a.st.st === "later").length };
+  const list = all.filter((a) => (coachFilter === "todo" ? !a.st : a.st && a.st.st === coachFilter));
+  const seg = `<span class="seo-seg">${[["todo", "To do"], ["done", "Done"], ["later", "Not now"]].map(([k, l]) =>
+    `<button type="button" class="${coachFilter === k ? "on" : ""}" data-ads-cf="${k}">${l} (${n[k]})</button>`).join("")}</span>`;
+  const lines = (title, arr, max) => (arr && arr.length ? `<div><b>${title}</b>
+    <button type="button" class="seo-ad-link" data-ads-copy="${esc(arr.join("\n"))}">Copy</button>
+    <ul>${arr.map((x) => `<li>${esc(x)} <span class="seo-note">${x.length}/${max}</span></li>`).join("")}</ul></div>` : "");
+  const item = (a) => {
+    const copy = (a.headlines || []).length || (a.descriptions || []).length
+      ? `<div class="seo-ad-copy">${lines("Headlines", a.headlines, 30)}${lines("Descriptions", a.descriptions, 90)}</div>` : "";
+    const acts = a.st
+      ? `<span class="seo-note">${a.st.st === "done" ? "Done" : "Not now"}${a.st.date ? ` · ${esc(h.fmtDate(a.st.date))}` : ""}${a.st.by ? ` · ${esc(a.st.by)}` : ""}</span>
+         ${can ? `<button class="seo-btn" type="button" data-ads-act="${esc(a.key)}|undo">Undo</button>` : ""}`
+      : can ? `<button class="seo-btn on" type="button" data-ads-act="${esc(a.key)}|done">Done</button>
+         <button class="seo-btn" type="button" data-ads-act="${esc(a.key)}|later">Not now</button>` : "";
+    return `<div class="seo-ad-act is-${esc(a.impact)}">
+      <div class="seo-ad-act-h"><b>${esc(a.title)}</b>
+        <span class="seo-ad-chip is-${esc(a.impact)}">${IMPACT[a.impact] || ""}</span>
+        <span class="seo-ad-chip">${EFFORT[a.effort] || ""}</span>
+        ${a.campaign ? `<span class="seo-ad-chip">${esc(a.campaign)}</span>` : ""}</div>
+      <p>${esc(a.why)}</p>
+      ${a.how ? `<p class="seo-ad-how"><b>How:</b> ${esc(a.how)}</p>` : ""}
+      ${copy}
+      ${a.risk ? `<div class="seo-warn">⚠ ${esc(a.risk)}</div>` : ""}
+      ${(a.flags || []).length ? `<div class="seo-warn">${a.flags.map((f) => `⚠ ${esc(f)}`).join("<br>")}</div>` : ""}
+      <div class="seo-row" style="margin:8px 0 0">${acts}</div>
+    </div>`;
+  };
+  return `<div class="seo-card seo-ad-coach">${head}${err}
+    ${c.summary ? `<p class="seo-ad-sum">${esc(c.summary)}</p>` : ""}
+    <div class="seo-row">${seg}</div>
+    ${list.length ? list.map(item).join("") : `<p class="seo-note">${coachFilter === "todo" ? "Nothing left to do from this set. 👍" : "None yet."}</p>`}
+    <p class="seo-note" style="margin:8px 0 0">Written by Claude from these numbers. Check each suggestion before you change your account,
+      and check any ad text against the advertising rules before you use it.</p>
+  </div>`;
+}
+
+function copyText(txt, btn) {
+  const done = (ok) => {
+    btn.textContent = ok ? "Copied ✓" : "Couldn't copy";
+    setTimeout(() => { if (btn.isConnected) btn.textContent = "Copy"; }, 1800);
+  };
+  const fallback = () => {
+    const ta = document.createElement("textarea");
+    ta.value = txt; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch { ok = false; }
+    ta.remove();
+    return ok;
+  };
+  if (navigator.clipboard?.writeText) navigator.clipboard.writeText(txt).then(() => done(true)).catch(() => done(fallback()));
+  else done(fallback());
+}
+
+async function coachClick(t) {
+  const d = t.dataset;
+  const stillHere = () => B && B.querySelector(".seo-ad-coach");
+  if (d.adsCf !== undefined) { coachFilter = d.adsCf; draw(); return; }
+  if (d.adsCopy !== undefined) { copyText(d.adsCopy, t); return; }
+  if (d.adsCoach !== undefined) {
+    if (coachBusy) return;
+    coachBusy = true; coachErr = "";
+    draw();
+    try {
+      const r = await api("coach");
+      if (r && r.problem) coachErr = r.problem;
+      else if (r && r.coach) { AD.coach = coachOf(r.coach); coachFilter = "todo"; }
+    } catch (err) {
+      console.error("Ads coach:", err);
+      coachErr = (err && err.message) || "Claude couldn't be reached. Try again.";
+    } finally {
+      coachBusy = false;
+      if (stillHere()) draw();
+    }
+    return;
+  }
+  if (d.adsAct !== undefined) {
+    const [key, st] = d.adsAct.split("|");
+    t.disabled = true;
+    try {
+      const r = await api("act", { key, st });
+      if (r && r.problem) coachErr = r.problem;
+      else if (r && r.status) { AD.status = r.status; coachErr = ""; }
+    } catch (err) {
+      coachErr = (err && err.message) || "Not saved. Try again.";
+    }
+    if (stillHere()) draw();
+  }
 }
 
 /* ---------- the tab ---------- */
@@ -268,7 +416,8 @@ function draw() {
   const chart = `<div class="seo-card">
     <div class="seo-row"><h3 style="margin:0">Trend${camp ? ` · ${esc(A.camps[Number(camp)].name)}` : ""}</h3><span class="seo-sp"></span>
       ${Object.entries(METRICS).map(([k, v]) => `<button class="seo-btn ${mk === k ? "on" : ""}" data-ads-metric="${k}">${v.label}</button>`).join("")}</div>
-    <div class="seo-chart">${K.lineChart(points, { fmt: m.fmt, cmp: cpts, gran, labels: true })}</div>
+    <div class="seo-chart">${K.lineChart(points, { fmt: m.fmt, cmp: cpts, gran, labels: true, marks: doneMarks(A) })}</div>
+    ${doneMarks(A).length ? `<div class="seo-note">Orange lines: Claude's suggestions you marked Done. Hover the dot to see which.</div>` : ""}
     ${cpts ? `<div class="seo-legend"><span></span>${esc(h.fmtDate(r.from, false))} – ${esc(h.fmtDate(r.to))}
       <span class="is-cmp"></span>${esc(cmp.name)}: ${esc(h.fmtDate(cmp.from, false))} – ${esc(h.fmtDate(cmp.to))}</div>` : ""}
   </div>`;
@@ -373,7 +522,7 @@ function draw() {
   const at = A.updatedAt ? A.updatedAt.toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "";
   const warn = run && run.ok === false ? `<div class="seo-warn">The last Ads update failed, so these numbers may be out of date: ${esc(run.error || "")}</div>` : "";
 
-  body.innerHTML = `${warn}${controls}<div class="seo-kpis">${kpis}${leadKpis}</div>${leadNote}${share}${oppCard}${chart}${campCard}${kwCard}${qCard}
+  body.innerHTML = `${warn}${controls}<div class="seo-kpis">${kpis}${leadKpis}</div>${leadNote}${coachHtml(h, A)}${share}${oppCard}${chart}${campCard}${kwCard}${qCard}
     <p class="seo-note">These numbers come from GA4, so they can differ a little from the Google Ads screen: key events are counted the way GA4 credits them, not as Google Ads conversions.
       Data to ${esc(h.fmtDate(last))}${at ? ` · updated ${esc(at)}` : ""}.</p>`;
 }
@@ -384,6 +533,8 @@ function bind(body) {
   if (body.dataset.adsBound) return;
   body.dataset.adsBound = "1";
   body.addEventListener("click", (e) => {
+    const ca = e.target.closest("[data-ads-coach],[data-ads-act],[data-ads-cf],[data-ads-copy]");
+    if (ca && AD && body.contains(ca)) { coachClick(ca); return; }
     const t = e.target.closest("[data-ads-preset],[data-ads-metric],[data-ads-camp],[data-ads-sort],[data-ads-kwsort],[data-ads-more]");
     if (!t || !AD || !body.contains(t)) return;
     const d = t.dataset;

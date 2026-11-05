@@ -187,6 +187,8 @@ function runSeoAds() {
     ]);
     console.log('SEO ads OK: ' + a.camps.length + ' campaigns, ' + a.days.length + ' campaign-days, ' +
       a.kw.length + ' keywords, ' + (Date.now() - t0) + ' ms' + (a.warn.length ? '\n' + a.warn.join('\n') : ''));
+    // Claude's suggestions, every Monday (a problem here never stops the update)
+    try { if (seoCoachDue_()) seoAdsCoach_('Every Monday'); } catch (e) { console.warn('Ads coach not run: ' + e.message); }
   } catch (e) {
     try {
       seoFsCommit_([{ path: 'seo_state/ads_run', data: { ok: false, at: new Date(), error: String(e.message || e).slice(0, 500) } }]);
@@ -218,4 +220,274 @@ function testSeoAds() {
   rows.sort(function (a, b) { return b.cost - a.cost; }).forEach(function (r) {
     console.log(r.d[0] + ': $' + seoAdsR2_(r.cost) + ', ' + r.clicks + ' clicks, ' + r.sess + ' visits, ' + seoAdsR2_(r.ke) + ' key events');
   });
+}
+
+/* ===================== Ads coach: Claude's suggestions ===================== */
+// Every Monday (after runSeoAds) and from "Ask Claude now" on the Ads tab.
+// seo_state/ads_coach: the suggestions · seo_state/ads_coach_status: what was marked Done or Not now
+// Script Properties: ClaudeApi (already there). Optional CLAUDE_COACH_MODEL (default: CLAUDE_MODEL, then claude-sonnet-5-5).
+
+const SEO_COACH_SYSTEM_ = [
+  'You are a senior Google Ads strategist advising Dermedica, a doctor-led cosmetic and medical skin clinic in Perth, Western Australia.',
+  'The owner runs the Google Ads account herself. Her goal is more new patients who actually come in, at a sensible cost.',
+  'The best measure is cost per patient who came in, then cost per enquiry. GA4 key events are a rougher guide.',
+  '',
+  'You get a JSON summary: each campaign for the last 28 days and the 28 before (spend in AUD, clicks, visits, key events, bounce,',
+  'and enquiries and patients from the clinic\'s own Prospect Dashboard once tracking has started), the costliest keywords with',
+  'their organic Google position, what people searched, landing pages, and actions she has already done or declined.',
+  '',
+  'Give 4 to 8 actions, most valuable first. Each one must:',
+  '- be specific: name the campaign, keyword or page, and quote the numbers that justify it;',
+  '- say exactly where to do it in Google Ads (e.g. "Campaigns → Laser → Keywords → pause \'laser hair removal cheap\'");',
+  '- be something she can do herself in under an hour, unless the impact is high;',
+  '- not repeat anything in alreadyDecided unless the numbers now clearly say otherwise, and then say why.',
+  'Look first for: moving budget from campaigns with a high cost per patient to ones with a low cost; pausing keywords or adding',
+  'negative keywords where money is spent with no enquiries; lowering bids where the clinic already ranks in the top 3 for free;',
+  'landing pages where ad visitors leave straight away; gaps in tracking. Only suggest spending more where a campaign is clearly',
+  'profitable. If the numbers are too small to judge (under about 10 clicks or $50), say so instead of guessing.',
+  '',
+  'Only when suggesting ad text (kind "ads"): up to 8 headlines of at most 30 characters and up to 4 descriptions of at most',
+  '90 characters. Otherwise leave headlines and descriptions empty.',
+  '',
+  'ADVERTISING RULES (Australia). Every suggestion and every piece of ad text must follow these:',
+  '- Never name or hint at prescription-only medicines (e.g. Botox, Dysport, Xeomin, botulinum toxin, "anti-wrinkle injections").',
+  '  For those treatments, promote a consultation with the doctor about the concern (e.g. frown lines), not the medicine.',
+  '- No testimonials or reviews, no before-and-after claims, no guarantees, and no "permanent", "pain-free", "risk-free" or "no downtime".',
+  '- No discounts, free treatments, time-limited offers or other inducements for cosmetic procedures. No "best" or "cheapest".',
+  '- Don\'t create unrealistic expectations or play down risks. Keep the language factual and calm.',
+  'If an action could raise a compliance question, explain it in "risk". Otherwise "risk" is "".',
+  '',
+  'summary: two or three plain sentences on how the ads are doing and the single most important thing to do. Australian English.',
+].join('\n');
+
+const SEO_COACH_SCHEMA_ = {
+  type: 'object', additionalProperties: false, required: ['summary', 'actions'],
+  properties: {
+    summary: { type: 'string' },
+    actions: { type: 'array', items: {
+      type: 'object', additionalProperties: false,
+      required: ['title', 'why', 'how', 'impact', 'effort', 'kind', 'campaign', 'keyword', 'page', 'headlines', 'descriptions', 'risk'],
+      properties: {
+        title: { type: 'string' }, why: { type: 'string' }, how: { type: 'string' },
+        impact: { type: 'string', enum: ['high', 'medium', 'low'] },
+        effort: { type: 'string', enum: ['quick', 'medium', 'big'] },
+        kind: { type: 'string', enum: ['budget', 'bids', 'keywords', 'negatives', 'ads', 'landing', 'tracking', 'other'] },
+        campaign: { type: 'string' }, keyword: { type: 'string' }, page: { type: 'string' },
+        headlines: { type: 'array', items: { type: 'string' } },
+        descriptions: { type: 'array', items: { type: 'string' } },
+        risk: { type: 'string' },
+      },
+    } },
+  },
+};
+
+// Checked in the ad text Claude writes (flagged, not removed: you decide)
+const SEO_COACH_RISKY_ = [
+  [/\b(botox|dysport|xeomin|relatox|letybo|daxxify|botulinum|toxin|anti[- ]?wrinkle injections?)\b/i, 'names or hints at a prescription medicine'],
+  [/\b(guarantee[ds]?|permanent|pain[- ]?free|risk[- ]?free|no downtime)\b/i, 'a promise about results or risk'],
+  [/\b(best|cheapest|number one)\b|#1/i, 'a "best" or "cheapest" claim'],
+  [/\d+\s*% off|\bfree (consult|consultation|treatment)|\bdiscount|\blimited time|\bspecial offer|\bsale\b/i, 'an offer or inducement'],
+  [/\b(testimonials?|reviews?|before (and|&) after)\b/i, 'testimonials, reviews or before-and-after'],
+];
+
+function seoCoachRead_(path) {
+  try { return fsGetDoc_(getConfig_(), path); } catch (e) { console.warn('Not read: ' + path + ': ' + e); return null; }
+}
+function seoCoachStatus_() {
+  const d = seoCoachRead_('seo_state/ads_coach_status');
+  try { return d && d.s ? JSON.parse(d.s) : {}; } catch (e) { return {}; }
+}
+// Your compliance words (SEO → Settings)
+function seoCoachWords_() {
+  const s = seoCoachRead_('seo_settings/main') || {};
+  return [].concat(s.compliance || [], s.complianceWords || [], s.bannedWords || [])
+    .map(function (w) { return String(w || '').trim().toLowerCase(); })
+    .filter(function (w) { return w.length >= 3; }).slice(0, 100);
+}
+function seoCoachDue_() {
+  if (Utilities.formatDate(new Date(), SEO_TZ_, 'u') !== '1') return false;   // Mondays
+  const c = seoCoachRead_('seo_state/ads_coach');
+  const at = c ? Date.parse(String(c.at || '')) : 0;
+  return !at || Date.now() - at > 5 * 864e5;
+}
+
+// What Claude reads: the last 28 days vs the 28 before, per campaign, plus keywords, searches and landing pages
+function seoCoachSummary_(ad) {
+  const P = function (s) { try { const v = JSON.parse(s || '[]'); return Array.isArray(v) ? v : []; } catch (e) { return []; } };
+  const camps = P(ad.camps), days = P(ad.days), kw = P(ad.kw), q = P(ad.q), lp = P(ad.lp), leads = P(ad.leads);
+  const end = String(ad.to || seoDate_(1));
+  const c0 = flowAddDaysKey_(end, -27), p1 = flowAddDaysKey_(end, -28), p0 = flowAddDaysKey_(end, -55);
+  const r2 = seoAdsR2_;
+  const blank = function () { return { cost: 0, clicks: 0, impr: 0, sess: 0, eng: 0, ke: 0, enq: 0, came: 0 }; };
+  const cur = {}, prv = {};
+  const into = function (m, i) { return m[i] || (m[i] = blank()); };
+  const which = function (d) { return d >= c0 && d <= end ? cur : d >= p0 && d <= p1 ? prv : null; };
+  days.forEach(function (d) {
+    const m = which(d[0]);
+    if (!m) return;
+    const x = into(m, d[1]);
+    x.cost += d[2]; x.clicks += d[3]; x.impr += d[4]; x.sess += d[5]; x.eng += d[6]; x.ke += d[7];
+  });
+  leads.forEach(function (l) {
+    const m = which(l[0]);
+    if (!m) return;
+    const x = into(m, l[1]);
+    x.enq += l[2]; x.came += l[4];
+  });
+  const pc = function (a, b) { return b ? Math.round((1 - a / b) * 100) + '%' : null; };
+  const view = function (x) {
+    if (!x) return null;
+    return { spend: r2(x.cost), clicks: x.clicks, impressions: x.impr, costPerClick: x.clicks ? r2(x.cost / x.clicks) : null,
+      visits: x.sess, bounce: pc(x.eng, x.sess), keyEvents: r2(x.ke), costPerKeyEvent: x.ke ? r2(x.cost / x.ke) : null,
+      enquiries: x.enq, cameIn: x.came, costPerEnquiry: x.enq ? r2(x.cost / x.enq) : null,
+      costPerPatientWhoCameIn: x.came ? r2(x.cost / x.came) : null };
+  };
+  const total = function (m) {
+    const t = blank();
+    Object.keys(m).forEach(function (k) { Object.keys(t).forEach(function (f) { t[f] += m[k][f]; }); });
+    return view(t);
+  };
+  const campaigns = camps.map(function (c, i) { return { name: c[0], type: c[1] || '', last28: view(cur[i]), prev28: view(prv[i]) }; })
+    .filter(function (c) { return c.last28 || c.prev28; });
+  if (cur[-1] || prv[-1]) campaigns.push({ name: '(enquiries from ads where the campaign isn\'t known)', type: '', last28: view(cur[-1]), prev28: view(prv[-1]) });
+  return {
+    dates: { last28: c0 + ' to ' + end, prev28: p0 + ' to ' + p1 },
+    totals: { last28: total(cur), prev28: total(prv) },
+    enquiriesTrackedFrom: ad.leadsFrom || 'not yet: only GA4 key events so far',
+    brandWords: seoBrandWords_(),
+    campaigns: campaigns,
+    keywords90days: kw.slice(0, 40).map(function (k) {
+      return { keyword: k[0], campaign: (camps[k[1]] || [])[0] || '', spend: k[2], clicks: k[3], keyEvents: k[7],
+        costPerKeyEvent: k[7] ? r2(k[2] / k[7]) : null, organicPosition: k[8], organicClicks28days: k[9] };
+    }),
+    searches90days: q.slice(0, 30).map(function (x) {
+      return { search: x[0], visits: x[1], keyEvents: x[3], bounce: pc(x[2], x[1]), organicPosition: x[4] };
+    }),
+    landingPages28days: lp.slice(0, 15).map(function (x) {
+      return { page: x[0], visits: x[1], bounce: pc(x[2], x[1]), keyEvents: x[3], visitsBefore: x[4], bounceBefore: pc(x[5], x[4]) };
+    }),
+  };
+}
+
+function seoCoachClaude_(system, user) {
+  const p = PropertiesService.getScriptProperties();
+  const key = String(p.getProperty('ClaudeApi') || '').trim();
+  if (!key) throw new Error('Add your Claude API key as "ClaudeApi" in Script Properties.');
+  const model = p.getProperty('CLAUDE_COACH_MODEL') || p.getProperty('CLAUDE_MODEL') || 'claude-sonnet-5-5';
+  const opts = {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    headers: { 'x-api-key': key, 'anthropic-version': '2026-10-21' },
+    payload: JSON.stringify({
+      model: model, max_tokens: 8000, system: system,
+      messages: [{ role: 'user', content: user }],
+      output_config: { format: { type: 'json_schema', schema: SEO_COACH_SCHEMA_ } },
+    }),
+  };
+  let data;
+  for (let attempt = 0; ; attempt++) {
+    const r = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', opts);
+    const code = r.getResponseCode();
+    if (code === 200) { data = JSON.parse(r.getContentText()); break; }
+    if ((code === 429 || code === 529 || code >= 500) && attempt < 2) { Utilities.sleep(2000 * (attempt + 1)); continue; }
+    throw new Error('Claude ' + code + ': ' + r.getContentText().slice(0, 300));
+  }
+  if (data.stop_reason === 'refusal') throw new Error('Claude declined this request.');
+  if (data.stop_reason === 'max_tokens') throw new Error('Claude ran out of room. Try again.');
+  const text = (data.content || []).filter(function (b) { return b.type === 'text'; }).map(function (b) { return b.text; }).join('');
+  return { out: JSON.parse(text), model: model };
+}
+
+function seoAdsCoach_(by) {
+  const t0 = Date.now();
+  const ad = seoCoachRead_('seo_state/ads');
+  if (!ad || !ad.days) throw new Error('There are no Ads numbers yet. Run runSeoAds first.');
+  const status = seoCoachStatus_();
+  const decided = Object.keys(status).map(function (k) { return status[k]; })
+    .filter(function (s) { return s && s.title; })
+    .sort(function (a, b) { return String(b.at).localeCompare(String(a.at)); }).slice(0, 40)
+    .map(function (s) { return { action: s.title, decision: s.st === 'done' ? 'done' : 'declined', on: s.date }; });
+  const res = seoCoachClaude_(SEO_COACH_SYSTEM_,
+    JSON.stringify({ today: seoDate_(0), numbers: seoCoachSummary_(ad), alreadyDecided: decided }));
+
+  const words = seoCoachWords_();
+  const clean = function (s, n) { return String(s == null ? '' : s).replace(/\s+/g, ' ').trim().slice(0, n); };
+  const actions = (Array.isArray(res.out.actions) ? res.out.actions : []).slice(0, 10).map(function (a) {
+    const heads = (a.headlines || []).map(function (x) { return clean(x, 80); }).filter(Boolean);
+    const descs = (a.descriptions || []).map(function (x) { return clean(x, 150); }).filter(Boolean);
+    const hOk = heads.filter(function (x) { return x.length <= 30; });
+    const dOk = descs.filter(function (x) { return x.length <= 90; });
+    const flags = [];
+    if (hOk.length < heads.length) flags.push((heads.length - hOk.length) + ' headline(s) were over 30 characters, so they were left out.');
+    if (dOk.length < descs.length) flags.push((descs.length - dOk.length) + ' description(s) were over 90 characters, so they were left out.');
+    const copy = hOk.concat(dOk).join('\n');
+    SEO_COACH_RISKY_.forEach(function (r) { if (r[0].test(copy)) flags.push('The ad text has ' + r[1] + '. Check it before using it.'); });
+    const hit = words.filter(function (w) { return copy.toLowerCase().indexOf(w) !== -1; });
+    if (hit.length) flags.push('The ad text uses words from your compliance list: ' + hit.slice(0, 5).join(', ') + '.');
+    const item = {
+      title: clean(a.title, 160), why: clean(a.why, 1200), how: clean(a.how, 800),
+      impact: ['high', 'medium', 'low'].indexOf(a.impact) !== -1 ? a.impact : 'medium',
+      effort: ['quick', 'medium', 'big'].indexOf(a.effort) !== -1 ? a.effort : 'medium',
+      kind: clean(a.kind, 20) || 'other', campaign: clean(a.campaign, 120), keyword: clean(a.keyword, 120), page: clean(a.page, 200),
+      headlines: hOk.slice(0, 15), descriptions: dOk.slice(0, 4), risk: clean(a.risk, 600), flags: flags,
+    };
+    item.key = seoHash_([item.title.toLowerCase(), item.campaign.toLowerCase(), item.keyword.toLowerCase()].join('|'));
+    return item;
+  }).filter(function (a) { return a.title; });
+
+  const at = new Date();
+  const summary = clean(res.out.summary, 1500);
+  seoFsCommit_([{ path: 'seo_state/ads_coach', data: {
+    at: at, by: String(by || ''), summary: summary, actions: JSON.stringify(actions),
+    model: res.model, basedOn: String(ad.updatedAt || ''), ms: Date.now() - t0,
+  } }]);
+  console.log('Ads coach: ' + actions.length + ' suggestion(s) in ' + (Date.now() - t0) + ' ms (' + res.model + ')');
+  return { at: at.toISOString(), by: String(by || ''), summary: summary, actions: actions };
+}
+
+/* ---------- From the portal: Ask Claude now, Done, Not now ---------- */
+
+function handleSeoAds_(body) {
+  const session = getSession_(String(body.session || ''));
+  if (!session) return { ok: false, error: 'UNAUTHORIZED' };
+  if (!can_(session, 'menu.seo') || !can_(session, 'seo.work')) return { ok: false, error: 'FORBIDDEN' };
+  const op = String(body.op || '');
+  try {
+    if (op === 'coach') {
+      const cache = CacheService.getScriptCache();
+      if (cache.get('adscoach_busy')) return { ok: true, problem: 'Claude is already working on this. Give it a minute, then press Refresh.' };
+      const dk = 'adscoach_n_' + seoDate_(0);
+      const n = Number(cache.get(dk) || 0);
+      if (n >= 6) return { ok: true, problem: 'Claude has been asked 6 times today. Try again tomorrow.' };
+      cache.put('adscoach_busy', '1', 300);
+      cache.put(dk, String(n + 1), 86400);
+      try { return { ok: true, coach: seoAdsCoach_(String(session.name || '')) }; }
+      finally { cache.remove('adscoach_busy'); }
+    }
+    if (op === 'act') {
+      const key = String(body.key || ''), st = String(body.st || '');
+      if (!/^[a-f0-9]{8,40}$/.test(key) || ['done', 'later', 'undo'].indexOf(st) === -1) return { ok: false, error: 'BAD_REQUEST' };
+      const unlock = staffTaskLock_('adscoach');
+      if (!unlock) return { ok: true, problem: 'Someone else is saving a suggestion. Try again.' };
+      try {
+        const cur = seoCoachStatus_();
+        if (st === 'undo') delete cur[key];
+        else {
+          let title = '';
+          try {
+            const c = seoCoachRead_('seo_state/ads_coach');
+            title = (JSON.parse((c && c.actions) || '[]').filter(function (a) { return a.key === key; })[0] || {}).title || '';
+          } catch (e) { /* the title is only for the history */ }
+          cur[key] = { st: st, at: new Date().toISOString(), date: seoDate_(0), by: String(session.name || ''), title: String(title).slice(0, 160) };
+        }
+        const cut = new Date(Date.now() - 365 * 864e5).toISOString();   // kept a year
+        Object.keys(cur).forEach(function (k) { if (String(cur[k].at || '') < cut) delete cur[k]; });
+        seoFsCommit_([{ path: 'seo_state/ads_coach_status', data: { s: JSON.stringify(cur), updatedAt: new Date() } }]);
+        return { ok: true, status: cur };
+      } finally { unlock(); }
+    }
+  } catch (err) {
+    console.error('SEO ads ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
+    return { ok: true, problem: String(err && err.message ? err.message : err).slice(0, 300) };
+  }
+  return { ok: false, error: 'BAD_REQUEST' };
 }
