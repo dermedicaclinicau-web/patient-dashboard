@@ -24,7 +24,9 @@ async function loadAds() {
     return {
       run: r, from: x.from, to: x.to, kwFrom: x.kwFrom, kwTo: x.kwTo, lpFrom: x.lpFrom, lpTo: x.lpTo,
       updatedAt: x.updatedAt?.toDate ? x.updatedAt.toDate() : null,
-      camps: J(x.camps).map((c) => ({ name: String(c[0] || ""), type: String(c[1] || "") })),
+      camps: J(x.camps).map((c) => ({ name: String(c[0] || ""), type: String(c[1] || ""), id: String(c[2] || "") })),
+      leads: J(x.leads).map((l) => ({ date: l[0], c: l[1], enq: l[2], cb: l[3], came: l[4], tx: l[5], lost: l[6] })),
+      leadsFrom: x.leadsFrom || "",
       days: J(x.days).map((d) => ({ date: d[0], c: d[1], cost: d[2], clicks: d[3], impr: d[4], sess: d[5], eng: d[6], ke: d[7] })),
       kw: J(x.kw).map((k) => ({ kw: String(k[0] || ""), c: k[1], cost: k[2], clicks: k[3], impr: k[4], sess: k[5], eng: k[6], ke: k[7], oPos: k[8], oClicks: k[9] || 0 })),
       q: J(x.q).map((k) => ({ q: String(k[0] || ""), sess: k[1], eng: k[2], ke: k[3], oPos: k[4], oClicks: k[5] || 0 })),
@@ -64,6 +66,17 @@ function sum(A, from, to, camp = "") {
   t.ctr = t.impr ? t.clicks / t.impr : null;
   t.cpke = t.ke ? t.cost / t.ke : null;
   t.bounce = t.sess ? 1 - t.eng / t.sess : null;
+  return t;
+}
+
+// Enquiries from ads between two dates (by the day they enquired)
+function sumLeads(A, from, to, camp = "") {
+  const t = { enq: 0, cb: 0, came: 0, tx: 0, lost: 0 };
+  const ci = camp === "" ? null : Number(camp);
+  for (const l of A.leads || []) {
+    if (l.date < from || l.date > to || (ci !== null && l.c !== ci)) continue;
+    t.enq += l.enq; t.cb += l.cb; t.came += l.came; t.tx += l.tx; t.lost += l.lost;
+  }
   return t;
 }
 
@@ -212,6 +225,27 @@ function draw() {
       both(vs(pct0, "bounce"), "left straight away")),
   ].join("");
 
+  /* Enquiries from ads (Prospect Dashboard), from the day tracking started */
+  let leadKpis = "", leadNote = "";
+  if (A.leadsFrom) {
+    const lf = r.from < A.leadsFrom ? A.leadsFrom : r.from;
+    const L = sumLeads(A, lf, r.to, camp);
+    const spend = sum(A, lf, r.to, camp).cost;
+    const Lok = !!prev && cmp.from >= A.leadsFrom;   // only compare periods that were both tracked
+    const Lp = Lok ? sumLeads(A, cmp.from, cmp.to, camp) : null;
+    const cpe = L.enq ? spend / L.enq : null, cpp = L.came ? spend / L.came : null;
+    leadKpis = [
+      tile("Enquiries from ads", num(L.enq), Lp ? chg(h, L.enq, Lp.enq) : "", both(Lp ? `vs ${num(Lp.enq)}` : "", "Prospect Dashboard")),
+      tile("Cost per enquiry", money(cpe), Lp && Lp.enq ? chg(h, cpe, prev.cost / Lp.enq, { invert: true }) : "", "lower is better"),
+      tile("Came in", num(L.came), Lp ? chg(h, L.came, Lp.came) : "", both(`${num(L.cb)} booked a consultation`, `${num(L.tx)} treated`)),
+      tile("Cost per patient who came in", money(cpp), Lp && Lp.came ? chg(h, cpp, prev.cost / Lp.came, { invert: true }) : "", "the number that matters"),
+    ].join("");
+    leadNote = `<p class="seo-note" style="margin:-6px 0 14px">${r.from < A.leadsFrom
+      ? `Enquiries are tracked from ${esc(h.fmtDate(A.leadsFrom))}, so cost per enquiry and per patient use the spend from then. ` : ""}Recent enquiries may not have come in yet, so "Came in" grows over the following weeks.</p>`;
+  } else {
+    leadNote = `<p class="seo-note" style="margin:-6px 0 14px">Cost per enquiry and per new patient appear here once enquiries arrive with the website's Ad tracking field.</p>`;
+  }
+
   /* Ads vs free clicks */
   const ov = ctx.data.ov;
   const org = h.sumRange(ctx.data.days, r.from, r.to);
@@ -244,7 +278,8 @@ function draw() {
     i, name: c.name, type: c.type,
     cur: sum(A, r.from, r.to, String(i)),
     prev: prev ? sum(A, cmp.from, cmp.to, String(i)) : null,
-  })).filter((x) => x.cur.cost || x.cur.sess || (x.prev && x.prev.cost));
+    leads: A.leadsFrom ? sumLeads(A, r.from < A.leadsFrom ? A.leadsFrom : r.from, r.to, String(i)) : null,
+  })).filter((x) => x.cur.cost || x.cur.sess || (x.prev && x.prev.cost) || (x.leads && x.leads.enq));
   const CS = { name: (x) => x.name.toLowerCase(), cost: (x) => x.cur.cost, clicks: (x) => x.cur.clicks, cpc: (x) => x.cur.cpc,
     sess: (x) => x.cur.sess, ke: (x) => x.cur.ke, cpke: (x) => x.cur.cpke, bounce: (x) => x.cur.bounce };
   per.sort(sorter(CS[ui.sort] || CS.cost, ui.dir));
@@ -252,12 +287,14 @@ function draw() {
   const campCard = `<div class="seo-card"><h3>Campaigns <small class="seo-note">click one to see only that campaign</small></h3>
     ${per.length ? `<div class="seo-table-wrap" style="max-height:none"><table class="seo-table">
       <thead><tr>${th("name", "Campaign")}${th("cost", "Spend")}<th>vs before</th>${th("clicks", "Clicks")}${th("cpc", "Cost per click")}
-        ${th("sess", "Visits")}${th("ke", "Key events")}${th("cpke", "Cost per key event")}${th("bounce", "Bounce")}</tr></thead>
+        ${th("sess", "Visits")}${th("ke", "Key events")}${th("cpke", "Cost per key event")}${th("bounce", "Bounce")}
+        ${A.leadsFrom ? `<th>Enquiries</th><th>Came in</th>` : ""}</tr></thead>
       <tbody>${per.map((x) => `<tr data-ads-camp="${x.i}" class="${camp === String(x.i) ? "is-on" : ""}">
         <td><div class="seo-path" title="${esc(x.name)}">${esc(x.name)}${x.type ? ` <span class="seo-note">${esc(x.type)}</span>` : ""}</div></td>
         <td>${money(x.cur.cost)}</td><td>${x.prev ? chg(h, x.cur.cost, x.prev.cost, { neutral: true }) : "—"}</td>
         <td>${num(x.cur.clicks)}</td><td>${money(x.cur.cpc)}</td><td>${num(x.cur.sess)}</td>
-        <td>${keF(x.cur.ke)}</td><td>${money(x.cur.cpke)}</td><td>${pct0(x.cur.bounce)}</td></tr>`).join("")}</tbody>
+        <td>${keF(x.cur.ke)}</td><td>${money(x.cur.cpke)}</td><td>${pct0(x.cur.bounce)}</td>
+        ${x.leads ? `<td>${num(x.leads.enq)}</td><td>${num(x.leads.came)}</td>` : ""}</tr>`).join("")}</tbody>
     </table></div>` : `<p class="seo-note">No campaign activity in these dates.</p>`}</div>`;
 
   /* Opportunities */
@@ -336,7 +373,7 @@ function draw() {
   const at = A.updatedAt ? A.updatedAt.toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "";
   const warn = run && run.ok === false ? `<div class="seo-warn">The last Ads update failed, so these numbers may be out of date: ${esc(run.error || "")}</div>` : "";
 
-  body.innerHTML = `${warn}${controls}<div class="seo-kpis">${kpis}</div>${share}${oppCard}${chart}${campCard}${kwCard}${qCard}
+  body.innerHTML = `${warn}${controls}<div class="seo-kpis">${kpis}${leadKpis}</div>${leadNote}${share}${oppCard}${chart}${campCard}${kwCard}${qCard}
     <p class="seo-note">These numbers come from GA4, so they can differ a little from the Google Ads screen: key events are counted the way GA4 credits them, not as Google Ads conversions.
       Data to ${esc(h.fmtDate(last))}${at ? ` · updated ${esc(at)}` : ""}.</p>`;
 }

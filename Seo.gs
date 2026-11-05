@@ -363,6 +363,10 @@ function runSeoNightly() {
 
     seoFsCommit_([{ path: 'seo_state/run', data: { ok: true, at: new Date(), ms: Date.now() - t0, build: build } }]);
     console.log('SEO nightly OK: ' + days.length + ' days, ' + pages.length + ' pages, ' + (Date.now() - t0) + ' ms');
+
+    // Google Ads numbers (SeoAds.gs), straight after, so they don't need a trigger of their own.
+    // A problem here never stops the SEO update; it's saved in seo_state/ads_run for the Ads tab.
+    try { runSeoAds(); } catch (e) { console.error('SEO ads update failed: ' + (e && e.message ? e.message : e)); }
   } catch (e) {
     try {
       seoFsCommit_([{ path: 'seo_state/run', data: { ok: false, at: new Date(), error: String(e.message || e).slice(0, 500) } }]);

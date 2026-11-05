@@ -17612,7 +17612,23 @@ const PROS_FIELDS_ = [
   ['pref', /^(primary contact( method)?|preferred contact( method)?|best way to contact.*)$/],
   ['age', /^age( group| range)?$/],
   ['concern', /^(primary concern|concern|treatment( of interest)?|interested in)$/],
+  ['adtrack', /^ad tracking$/],
 ];
+
+// The website's Ad tracking field: "campaign=123; keyword=laser; source=google/cpc; landing=/laser/; clicked=2026-11-04; click=Cj0…"
+// → { campaign, keyword, source, landing, clicked, click }, or null when they didn't come from an ad
+function prosAdParse_(s) {
+  s = String(s || '').trim();
+  if (!s || s === 'dm-adtrack') return null;
+  const o = {};
+  s.split(/;\s*/).forEach(function (part) {
+    const m = /^([a-z]+)=(.*)$/i.exec(part.trim());
+    if (m) o[m[1].toLowerCase()] = m[2].trim().slice(0, 200);
+  });
+  if (!o.click && !o.campaign) return null;
+  return { campaign: o.campaign || '', keyword: o.keyword || '', source: o.source || '', landing: o.landing || '',
+    clicked: /^\d{4}-\d{2}-\d{2}$/.test(o.clicked || '') ? o.clicked : '', click: o.click || '' };
+}
 // Their answer is a word like "Email" or "Phone", which also looks like a heading
 const PROS_METHOD_ANSWER_ = /^(e-?mail|sms|text( message)?|call|phone( call)?|mobile|any)$/i;
 const PROS_EMAIL_RE_ = /[^\s<>"'(),;:]+@[^\s<>"'(),;:]+\.[a-z]{2,}/gi;
@@ -17812,8 +17828,10 @@ function prosAddEnquiry_(cfg, set, f, session, forceNew) {
   const enq = {
     at: at, source: String(f.source || ''), concern: clip_(f.concern, 150), message: clip_(f.message, 2000),
     gmailId: String(f.gmailId || ''), link: String(f.link || ''), by: who,
+    ads: prosAdParse_(f.adtrack),
   };
-  const what = 'Enquiry' + (enq.source ? ' (' + enq.source + ')' : '') + (enq.concern ? ': ' + enq.concern : '');
+  const what = 'Enquiry' + (enq.source ? ' (' + enq.source + ')' : '') + (enq.concern ? ': ' + enq.concern : '') +
+    (enq.ads ? ' · from a Google ad' + (enq.ads.keyword ? ' ("' + enq.ads.keyword + '")' : '') : '');
 
   const ex = forceNew ? null : prosFindExisting_(cfg, keys.phoneKey, keys.emailKey);
   if (ex) {
@@ -17850,6 +17868,7 @@ function prosAddEnquiry_(cfg, set, f, session, forceNew) {
     if (!ex.phone && f.phone) { patch.phone = String(f.phone); patch.phoneKey = keys.phoneKey; }
     if (!ex.email && keys.emailKey) { patch.email = keys.emailKey; patch.emailKey = keys.emailKey; }
     if (!ex.concern && enq.concern) patch.concern = enq.concern;
+    if (enq.ads && !ex.ads) patch.ads = enq.ads;   // the first ad that brought them
     if (!f.historic) patch.historic = false;   // a recent enquiry brings an older one back onto the board
     fsPatch_(cfg, PROS_COL_ + '/' + ex._id, patch);
     return { id: ex._id, again: true, name: ex.name, assignedToId: String(ex.assignedToId || ''),
@@ -17876,7 +17895,7 @@ function prosAddEnquiry_(cfg, set, f, session, forceNew) {
     name: prosTidyName_(f.name) || 'No name', firstName: (prosTidyName_(f.name) || '').split(' ')[0],
     phone: String(f.phone || ''), email: keys.emailKey,
     pref: prosPref_(f.pref) || '', ageGroup: clip_(f.age, 40), concern: enq.concern, message: enq.message,
-    source: enq.source || 'Other', historic: f.historic === true,
+    source: enq.source || 'Other', historic: f.historic === true, ads: enq.ads || null,
     stage: 'new', stageAt: now, lostReason: '', lostNote: '',
     assignedToId: to ? to.id : '', assignedToName: to ? String(to.name || '') : '',
     nextFollowUp: '', nextFollowUpTime: '', followNote: '',

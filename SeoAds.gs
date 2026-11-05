@@ -40,18 +40,21 @@ function seoAdsBuild_() {
 
   // Campaigns per day
   const daily = seoAdsPair_(['date', 'sessionGoogleAdsCampaignName'], start, end);
-  const types = {};
+  const types = {}, campIds = {};
   try {
     seoGa4_({
       dateRanges: [{ startDate: start, endDate: end }],
-      dimensions: [{ name: 'sessionGoogleAdsCampaignName' }, { name: 'sessionGoogleAdsCampaignType' }],
+      dimensions: [{ name: 'sessionGoogleAdsCampaignName' }, { name: 'sessionGoogleAdsCampaignType' }, { name: 'sessionGoogleAdsCampaignId' }],
       metrics: [{ name: 'sessions' }], dimensionFilter: SEO_ADS_ONLY_, limit: 1000,
-    }).forEach(function (r) { if (!types[r.d[0]]) types[r.d[0]] = r.d[1] === '(not set)' ? '' : r.d[1]; });
+    }).forEach(function (r) {
+      if (!types[r.d[0]]) types[r.d[0]] = r.d[1] === '(not set)' ? '' : r.d[1];
+      if (!campIds[r.d[0]] && r.d[2] && r.d[2] !== '(not set)') campIds[r.d[0]] = r.d[2];
+    });
   } catch (e) { warn.push('Campaign types not read: ' + e.message); }
 
   const ci = {}, camps = [];
   const idx = function (name) {
-    if (!(name in ci)) { ci[name] = camps.length; camps.push([name, types[name] || '']); }
+    if (!(name in ci)) { ci[name] = camps.length; camps.push([name, types[name] || '', campIds[name] || '']); }
     return ci[name];
   };
   const days = daily.filter(function (x) { return x.cost || x.clicks || x.sess; })
@@ -128,7 +131,36 @@ function seoAdsBuild_() {
       .slice(0, 300);
   } catch (e) { warn.push('Landing pages not read: ' + e.message); }
 
-  return { camps: camps, days: days, kw: kw, q: q, lp: lp, from: start, to: end,
+  // Enquiries that came from an ad (Prospect Dashboard). Counts only: [day, campaign (-1 = not known), enquiries,
+  // booked a consultation, came in, treated, lost]. Clicks tagged TEST… are left out (for trying it).
+  let leads = [], leadsFrom = '';
+  try {
+    const byId = {}, byName = {};
+    camps.forEach(function (c, i) { if (c[2]) byId[String(c[2])] = i; byName[String(c[0]).toLowerCase()] = i; });
+    const agg = {};
+    fsListAll_(getConfig_(), PROS_COL_, ['ads', 'milestones', 'createdAt', 'stage']).forEach(function (d) {
+      const p = fromFields_(d.fields || {});
+      const ad = p.ads;
+      if (!ad || !(ad.click || ad.campaign) || /^test/i.test(String(ad.click || ''))) return;
+      const at = Date.parse(String(p.createdAt || ''));
+      if (!at) return;
+      const day = Utilities.formatDate(new Date(at), SEO_TZ_, 'yyyy-MM-dd');
+      const c = String(ad.campaign || '');
+      const cix = c in byId ? byId[c] : c.toLowerCase() in byName ? byName[c.toLowerCase()] : -1;
+      const ms = p.milestones || {};
+      const x = agg[day + '|' + cix] || (agg[day + '|' + cix] = [day, cix, 0, 0, 0, 0, 0]);
+      x[2]++;
+      if (ms.consult_booked) x[3]++;
+      if (ms.consulted) x[4]++;
+      if (ms.treated) x[5]++;
+      if (p.stage === 'lost') x[6]++;
+      if (!leadsFrom || day < leadsFrom) leadsFrom = day;
+    });
+    leads = Object.keys(agg).map(function (k) { return agg[k]; })
+      .sort(function (a, b) { return a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : a[1] - b[1]; });
+  } catch (e) { warn.push('Enquiries from ads not read: ' + e.message); }
+
+  return { leads: leads, leadsFrom: leadsFrom, camps: camps, days: days, kw: kw, q: q, lp: lp, from: start, to: end,
     kwFrom: kwFrom, kwTo: end, lpFrom: lpFrom, lpTo: end, orgFrom: orgFrom, orgTo: orgTo, warn: warn };
 }
 
@@ -142,6 +174,7 @@ function runSeoAds() {
       q: JSON.stringify(a.q), lp: JSON.stringify(a.lp),
       from: a.from, to: a.to, kwFrom: a.kwFrom, kwTo: a.kwTo, lpFrom: a.lpFrom, lpTo: a.lpTo,
       orgFrom: a.orgFrom, orgTo: a.orgTo, updatedAt: new Date(),
+      leads: JSON.stringify(a.leads), leadsFrom: a.leadsFrom,
     };
     // A Firestore document holds 1 MB: the smaller lists give way first
     const size = function () { return doc.camps.length + doc.days.length + doc.kw.length + doc.q.length + doc.lp.length; };
