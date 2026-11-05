@@ -10890,3 +10890,7 @@ body.is-consult #rec-bar, body.is-consult #tb-rec { display: none !important; }
 
 /* Consultation tab: once the notes are showing, only the notes header sticks (not both on top of each other) */
 .cs-page:has(.sp.is-page:not([hidden])) .cs-head { position: static; }
+
+.cs-switch { margin: 0 0 .9rem; padding: .7rem 1rem; border-radius: 12px; background: #fffbeb; border: 1px solid #fde68a; color: #92400e; }
+.tb-rec-note { margin-left: .35rem; padding: 0 .4rem; border-radius: 999px; background: #fef3c7; color: #92400e;
+  font-size: .7rem; font-style: normal; font-weight: 600; }

@@ -55,6 +55,7 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
   let startError = "";
   let ended = "";            // "deleted" after Cancel or Discard
   let blocked = false;       // another tab was already recording when this one tried to start
+  let replaced = "";         // the patient whose recording was stopped so this one could start
   const me = () => ({ uid: (staff && staff.uid) || (auth.currentUser && auth.currentUser.uid) || "", name: (staff && staff.name) || "" });
 
   function viewOf(s) {
@@ -160,7 +161,9 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
         : stateHtml("Starting the recording…", "Allow the microphone if your browser asks.");
     }
     if (v.kind === "live") {
-      return `<p class="cs-note">Talk as normal. When the appointment ends, press <strong>Complete appointment</strong>.
+      return `${replaced ? `<div class="cs-switch">Stopped recording of <strong>${esc(replaced)}</strong>. It's saved, and its notes
+          are being written in its own tab. <strong>${esc((patient && patient.name) || "This patient")}</strong>'s recording is now running.</div>` : ""}
+        <p class="cs-note">Talk as normal. When the appointment ends, press <strong>Complete appointment</strong>.
           The notes are written and appear in this tab.</p>${grid("Writes itself when you press Complete appointment.", false)}`;
     }
     const j = v.j;
@@ -234,8 +237,12 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
       const p = await getPatient(newFor);
       if (!p) throw new Error("That patient couldn't be found.");
       patient = { id: p.id, pttId: p.pttId || "", name: p.name };
-      await startRecording(p, me());
-      recId = getState().live.recId;
+      const res = await startRecording(p, me(), { takeOver: true });
+      recId = (res && res.recId) || getState().live.recId;
+      if (res && res.stopped) {
+        replaced = res.stopped.name || "the other patient";
+        showToast(`Stopped recording of ${replaced}. ${patient.name}'s recording is now starting.`);
+      }
       history.replaceState(null, "", `#/consult/${encodeURIComponent(recId)}`);   // a refresh won't start a second one
     } catch (err) {
       if (err && err.code === "BUSY_ELSEWHERE") blocked = true;   // not a fault: another tab has the microphone

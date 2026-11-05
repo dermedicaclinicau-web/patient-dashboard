@@ -127,6 +127,12 @@ export function initRecordingBar(currentStaff) {
     bar.dataset.wired = "1";
     bar.addEventListener("click", onClick);
     subscribe(render);
+    // This tab's recording was completed because another one started
+    window.addEventListener("recording-taken-over", (e) => {
+      const { stopped, by } = e.detail || {};
+      showToast(`Stopped recording of ${stopped ? stopped.name : "the last patient"}${
+        by && by.name ? `: ${by.name}'s recording is now starting` : ""}. It's saved and its notes are being written.`);
+    });
     // Notes deleted: their chip goes too
     window.addEventListener("recording-deleted", (e) => {
       const j = getState().jobs.find((x) => x.transcriptId === e.detail.id);
@@ -167,13 +173,20 @@ function announce(s) {
 
 function liveParts(L, remote) {
   if (L.status === "idle") {
-    if (remote) {
+    const sameOne = remote && context && remote.patient && remote.patient.id === context.id;
+    // No patient open, or this patient is the one already recording: just say so
+    if (remote && (!context || sameOne)) {
       return { cls: "", html: "", top: `<span class="tb-rec-btn is-elsewhere"
         title="Recording${remote.patient ? ` ${escapeHtml(remote.patient.name)}` : ""} in another tab. Complete it there.">
         <span class="rec-dot"></span><span>Recording in another tab</span></span>` };
     }
-    return { cls: "", html: "", top: context ? `<button type="button" class="tb-rec-btn" data-rec="start"
-      title="Opens a new tab to record ${escapeHtml(context.name)}'s appointment">${ICONS.mic}<span>Start appointment</span></button>` : "" };
+    if (!context) return { cls: "", html: "", top: "" };
+    const other = remote && remote.patient ? remote.patient.name : "";
+    return { cls: "", html: "", top: `<button type="button" class="tb-rec-btn" data-rec="start"
+      title="${other
+        ? `Stops ${escapeHtml(other)}'s recording (it's kept and becomes notes), then records ${escapeHtml(context.name)}`
+        : `Opens a new tab to record ${escapeHtml(context.name)}'s appointment`}">${ICONS.mic}<span>Start appointment</span>${
+      other ? `<em class="tb-rec-note">stops ${escapeHtml(other.split(" ")[0])}</em>` : ""}</button>` };
   }
   const chip = patientChip(L.patient);
   const warn = otherPatientWarning(L);
@@ -304,13 +317,19 @@ async function onClick(e) {
   try {
     if (action === "start") {
       if (!context) return;
-      if (getState().remote) { showToast("A recording is running in another tab. Complete it there first."); return; }
+      const rem = getState().remote;
+      if (rem && rem.patient && rem.patient.id === context.id) {
+        showToast(`${context.name}'s appointment is already recording in another tab.`);
+        return;
+      }
       const url = `${location.href.split("#")[0]}#/consult/new/${encodeURIComponent(context.id)}`;
-      if (window.open(url, "_blank")) return;   // the Consultation tab records it
+      if (window.open(url, "_blank")) return;   // the Consultation tab records it (and stops the other one)
       // Pop-ups blocked: record in this tab, as before
-      showToast("Pop-ups are blocked, so this appointment is recording in this tab.");
       btn.disabled = true;
-      await startRecording(context, staff);
+      const res = await startRecording(context, staff, { takeOver: true });
+      showToast(res && res.stopped
+        ? `Stopped recording of ${res.stopped.name}. ${context.name}'s recording is now starting.`
+        : "Pop-ups are blocked, so this appointment is recording in this tab.");
     } else if (action === "pause") {
       pauseRecording();
     } else if (action === "resume") {

@@ -111,6 +111,16 @@ if (bc) {
     const m = e.data || {};
     if (m.tab === TAB_ID) return;
     if (m.type === "ask") { if (LIVE_BUSY.includes(live.status)) announceLive(); return; }
+    // Another tab is starting a recording: complete this one (it's kept, uploads and becomes notes as usual)
+    if (m.type === "stop-request") {
+      if (live.status === "recording" || live.status === "paused") {
+        const stopped = live.patient;
+        completeRecording()
+          .then(() => window.dispatchEvent(new CustomEvent("recording-taken-over", { detail: { stopped, by: m.patient || null } })))
+          .catch((err) => console.error("Couldn't stop this recording for the new one:", err));
+      }
+      return;
+    }
     if (m.type !== "live") return;
     if (m.status === "idle") { if (remote && remote.tab === m.tab) { remote = null; emit(); } return; }
     const changed = !remote || remote.recId !== m.recId || remote.status !== m.status;
@@ -295,18 +305,33 @@ async function stopRecorder() {
 
 /* ===================== The live recording ===================== */
 
-export async function startRecording(patient, staff) {
+// takeOver: a recording already running (here or in another tab) is completed first, then this one starts.
+// → { recId, stopped } where stopped is the patient whose recording was completed (or null).
+export async function startRecording(patient, staff, { takeOver = false } = {}) {
+  let stopped = null;
   if (isRecorderBusy()) {
-    throw new Error(`The recording for ${live.patient ? live.patient.name : "another patient"} is still going. Complete or cancel it first.`);
+    if (!takeOver || live.status === "stopping") {
+      throw new Error(`The recording for ${live.patient ? live.patient.name : "another patient"} is still going. Complete or cancel it first.`);
+    }
+    stopped = live.patient;
+    await completeRecording();   // kept: it uploads and becomes notes as usual
   }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === "undefined") {
     throw new Error("This browser can't record audio. Please use Chrome, Edge or Safari.");
   }
 
   if (!(await holdLock(MIC_LOCK))) {
-    const busyErr = new Error(`A recording${remote && remote.patient ? ` for ${remote.patient.name}` : ""} is running in another tab. Complete or cancel it there first.`);
-    busyErr.code = "BUSY_ELSEWHERE";
-    throw busyErr;
+    if (takeOver) {
+      // Ask the tab that's recording to complete it, then wait (up to 10 seconds) for the microphone
+      stopped = (remote && remote.patient) || stopped || { name: "the other patient" };
+      try { if (bc) bc.postMessage({ type: "stop-request", tab: TAB_ID, patient: { name: patient.name } }); } catch { /* no channel */ }
+      for (let i = 0; i < 40 && !(await holdLock(MIC_LOCK)); i++) await new Promise((r) => setTimeout(r, 250));
+    }
+    if (!held.has(MIC_LOCK)) {
+      const busyErr = new Error(`A recording${remote && remote.patient ? ` for ${remote.patient.name}` : ""} is running in another tab. Complete or cancel it there first.`);
+      busyErr.code = "BUSY_ELSEWHERE";
+      throw busyErr;
+    }
   }
   const mime = pickMime();
   try {
@@ -351,6 +376,7 @@ export async function startRecording(patient, staff) {
   acquireWakeLock();
   startTick();
   emit();
+  return { recId, stopped };
 }
 
 export function pauseRecording() {
