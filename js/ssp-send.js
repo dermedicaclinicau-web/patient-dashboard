@@ -8,6 +8,20 @@ import { fillTemplate, fillTemplateHtml, emailShell, clinicDetails, EMAIL_RE } f
 import { createRichEditor } from "./rich-editor.js";
 import { callApi } from "./appointments.js";
 import { showToast } from "./utils.js";
+import { confirmDialog } from "./dialog.js";
+import { showPrintedPopup } from "./print-done.js";
+
+// The last time this protocol went to the printer: { sentAt, sentBy, to }, or null
+const lastPrintOf = (rec) => (Array.isArray(rec && rec.deliveries) ? rec.deliveries : [])
+  .filter((d) => d && d.kind === "print").pop() || null;
+// "at 10:42 am" today, otherwise "on 3 Nov, 10:42 am"
+function whenText(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return "";
+  const time = d.toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" });
+  return d.toDateString() === new Date().toDateString()
+    ? `at ${time}` : `on ${d.toLocaleDateString("en-AU", { day: "numeric", month: "short" })}, ${time}`;
+}
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -64,9 +78,12 @@ export async function openSspPreview({ record, patient = null, staff = null, onS
     const $ = (s) => dlg.querySelector(s);
     const msg = (t) => { $('[data-role="msg"]').textContent = t || ""; };
     let busy = false;
+    let lastPrint = null;   // printed from this window (the saved record may also have an earlier print)
 
     function renderState() {
-      $('[data-role="state"]').textContent = rec.id ? ` · Saved ${longDate(rec.recordDate)}` : " · Not saved yet";
+      const lp = lastPrint || lastPrintOf(rec);
+      $('[data-role="state"]').textContent = (rec.id ? ` · Saved ${longDate(rec.recordDate)}` : " · Not saved yet") +
+        (lp ? ` · Sent to printer ${whenText(lp.sentAt)}` : "");
       $('[data-act="save"]').hidden = !!rec.id || !onSave;
     }
     renderState();
@@ -117,9 +134,25 @@ export async function openSspPreview({ record, patient = null, staff = null, onS
       });
       if (a === "print") run(b, "Sending…", async () => {
         const saved = await ensureSaved();
+        // Already printed? Check before sending a second copy
+        const before = lastPrint || lastPrintOf(saved);
+        if (before) {
+          const again = await confirmDialog({
+            title: "Send it to the printer again?",
+            message: `It was already sent to the printer ${whenText(before.sentAt)}${before.sentBy ? ` by ${before.sentBy}` : ""}. Check the printer first.`,
+            confirmLabel: "Send again", tone: "warning",
+          });
+          if (!again) return;
+        }
         const out = await pdf();
-        await callApi({ action: "ssp", op: "deliver", kind: "print", recordId: saved.id, pdf: out.pdf, fileName: out.fileName });
-        showToast("Sent to the printer");
+        const r = await callApi({ action: "ssp", op: "deliver", kind: "print", recordId: saved.id, pdf: out.pdf, fileName: out.fileName });
+        lastPrint = (r && r.entry) || { sentAt: new Date().toISOString(), sentBy: (staff && staff.name) || "" };
+        renderState();
+        showPrintedPopup({
+          what: "Skin Script Protocol",
+          patient: saved.patientName || (patient && patient.name) || "",
+          to: lastPrint.to || "",
+        });
       });
       if (a === "email") run(b, "Preparing…", async () => {
         const saved = await ensureSaved();
