@@ -8408,6 +8408,7 @@ body.ff-handing { overflow: hidden; }
 .pr-card.is-rose { --tone: #be123c; --tone-bg: #fff1f2; }
 .pr-card.is-violet { --tone: #6d28d9; --tone-bg: #f5f3ff; }
 .pr-card.is-slate { --tone: #475569; --tone-bg: #f1f5f9; }
+.pr-tag.is-ad,.pr-chip.is-ad{background:#e8f0fe;color:#1a56db}
 
 .pr-breaks { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; margin-bottom: 16px; }
 .pr-break { padding: 14px 16px; border: 1px solid #e2e8f0; border-radius: 14px; background: #fff; }
@@ -10894,3 +10895,4 @@ body.is-consult #rec-bar, body.is-consult #tb-rec { display: none !important; }
 .cs-switch { margin: 0 0 .9rem; padding: .7rem 1rem; border-radius: 12px; background: #fffbeb; border: 1px solid #fde68a; color: #92400e; }
 .tb-rec-note { margin-left: .35rem; padding: 0 .4rem; border-radius: 999px; background: #fef3c7; color: #92400e;
   font-size: .7rem; font-style: normal; font-weight: 600; }
+  

@@ -124,6 +124,9 @@ const fuStart = (d, fallback = "") => (d && d >= todayKey() ? d : fallback);
 const cancelOpen = (p) => p.cancelOpen === true && OPEN.includes(p.stage);
 const cancelWord = (p) => (p.lastCancel && p.lastCancel.kind === "noshow" ? "Didn't come" : "Cancelled");
 const isPast = (p) => p.wasPatient === true || !!p.prev;
+// The ad that brought them (the website's Ad tracking field)
+const adText = (a) => (a ? ["Came from a Google ad", a.keyword ? `searched “${a.keyword}”` : "",
+  a.landing ? `landed on ${a.landing}` : "", a.clicked ? `clicked ${fullDay(a.clicked)}` : ""].filter(Boolean).join(" · ") : "");
 const onRecall = (p) => !!(p.recall && p.recall.id);
 const monthYear = (k) => { if (!/^\d{4}-\d{2}/.test(k || "")) return ""; const [y, m] = k.split("-").map(Number);
   return new Date(y, m - 1, 1).toLocaleDateString("en-AU", { month: "short", year: "numeric" }); };
@@ -140,6 +143,7 @@ const SHOW = [
   ["nocontact", "Not contacted", (p, set) => notContacted(p, set)],
   ["follow", "Follow-ups due", (p) => ["today", "overdue"].includes(followState(p))],
   ["booked", "Booked directly", (p) => p.fromBook === true],
+  ["ads", "From Google Ads", (p) => !!p.ads],
   ["check", "Check match", (p) => !!p.patientId && p.linkWeak === true],
 ];
 const showOf = (k) => (SHOW.find((x) => x[0] === k) || SHOW[0])[2];
@@ -442,7 +446,8 @@ async function mountBoard(container, { view, staff }) {
   const typeTags = (p) => `${p.patientId ? (isPast(p)
       ? `<span class="pr-tag is-old" title="${esc(prevText(p.prev) || "Had a visit before they enquired")}">Past patient${p.prev && p.prev.last ? ` · last ${esc(monthYear(p.prev.last))}` : ""}</span>`
       : '<span class="pr-tag is-pt">Patient</span>') : ""}
-    ${onRecall(p) ? `<span class="pr-tag is-recall" title="${esc(`${p.recall.category}, due ${fullDay(p.recall.due)}`)}">On recall</span>` : ""}`;
+    ${onRecall(p) ? `<span class="pr-tag is-recall" title="${esc(`${p.recall.category}, due ${fullDay(p.recall.due)}`)}">On recall</span>` : ""}
+    ${p.ads ? `<span class="pr-tag is-ad" title="${esc(adText(p.ads))}">Google Ads</span>` : ""}`;
 
   const card = (p) => {
     const fs = followState(p);
@@ -923,6 +928,7 @@ async function mountProspect(container, id, staff) {
             ${p.patientId ? `<a class="pr-chip is-pt" href="#/patient/${enc(p.patientId)}">${I(IC.user)}${isPast(p) ? "Past patient" : "Patient"}: ${esc(p.patientName)}</a>` : ""}
             ${onRecall(p) ? `<span class="pr-chip is-recall">${I(IC.clock)}On recall: ${esc(p.recall.category)}</span>` : ""}
             ${p.nextAppt ? `<span class="pr-chip">${I(IC.clock)}Next appointment ${esc(fullDay(p.nextAppt))}</span>` : ""}
+            ${p.ads ? `<span class="pr-chip is-ad" title="${esc(adText(p.ads))}">${I(IC.link)}Google Ads${p.ads.keyword ? `: “${esc(p.ads.keyword)}”` : ""}</span>` : ""}
             ${p.historic ? '<span class="pr-tag">Older</span>' : ""}
           </div>
         </div>

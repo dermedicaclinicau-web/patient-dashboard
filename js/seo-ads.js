@@ -2,10 +2,10 @@
 // Reads seo_state/ads and seo_state/ads_run (written each morning by runSeoAds in SeoAds.gs)
 import { db } from "./firebase-config.js";
 import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-// ⚠️ The same helper seo-advisor.js uses to call Apps Script: copy its import line exactly
-import { callApi } from "./api.js";
+import { callApi } from "./appointments.js";
 
-const api = (op, data = {}) => callApi("seoAds", { op, ...data });
+// Apps Script action "seoAds" (SeoAds.gs → handleSeoAds_)
+const api = (op, data = {}) => callApi({ action: "seoAds", op, ...data });
 
 // Claude's suggestions as saved (Firestore) or as sent back by Apps Script
 function coachOf(x) {
