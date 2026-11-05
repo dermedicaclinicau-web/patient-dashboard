@@ -15,6 +15,7 @@ import { callApi } from "./appointments.js";
 import { confirmDialog } from "./dialog.js";
 import { escapeHtml, showToast, toDateKey } from "./utils.js";
 import { openPlanReview } from "./master-plan-review.js";
+import { setTabTitle } from "./tab-icon.js";
 
 const svg = (p) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -345,7 +346,7 @@ function render() {
   if (!panel.hidden) requestAnimationFrame(autosizeAll);
   // Own tab: its title says whose notes, and whether they're reviewed
   if (mode === "page" && !document.body.classList.contains("is-consult")) {
-    document.title = `${reviewed ? "✓ Reviewed" : "Draft"} · ${d["Patient Name"] || "Patient"}`;
+    setTabTitle(`${reviewed ? "✓ Reviewed" : "Draft"} · ${d["Patient Name"] || "Patient"}`);
   }
 }
 

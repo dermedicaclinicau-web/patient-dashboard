@@ -6,7 +6,7 @@ import {
 import { setRecordingPatient } from "./recording-bar.js";
 import { getPatient } from "./patients.js";
 import { showSoapPanel, detachSoapPanel } from "./soap-panel.js";
-import { setTabIcon } from "./tab-icon.js";
+import { setTabIcon, setTabTitle } from "./tab-icon.js";
 import { SECTIONS } from "./soap.js";
 import { confirmDialog } from "./dialog.js";
 import { auth, db } from "./firebase-config.js";
@@ -193,14 +193,14 @@ export function mountConsultPage(container, param = "", { staff = null } = {}) {
       const txt = fmt(s.live.elapsedMs);
       const t = root.querySelector('[data-role="time"]');
       if (t) t.textContent = txt;
-      document.title = `${s.live.status === "paused" ? "⏸" : "●"} ${txt} · ${name}`;
+      setTabTitle(`${s.live.status === "paused" ? "⏸" : "●"} ${txt} · ${name}`);
       return;
     }
     const pct = root.querySelector('[data-role="pct"]');
     if (pct && v.j) pct.textContent = `${Math.round((v.j.progress || 0) * 100)}%`;
-    document.title = !v.j ? `Consultation · ${name}`
+    setTabTitle(!v.j ? `Consultation · ${name}`
       : v.j.status === "ready" ? `✓ Notes ready · ${name}`
-      : BAD.includes(v.j.status) ? `⚠ Needs attention · ${name}` : `Writing notes… · ${name}`;
+      : BAD.includes(v.j.status) ? `⚠ Needs attention · ${name}` : `Writing notes… · ${name}`);
   }
 
   function draw(s) {

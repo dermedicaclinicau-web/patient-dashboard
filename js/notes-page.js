@@ -1,6 +1,6 @@
 // Consultation notes full page, in their own tab (#/notes/<id>): opened from a Summary badge, a recording or My dashboard
 import { showSoapPanel, detachSoapPanel } from "./soap-panel.js";
-import { setTabIcon } from "./tab-icon.js";
+import { setTabIcon, setTabTitle } from "./tab-icon.js";
 
 const stateHtml = (title, text) => `<div class="cs-state"><strong>${title}</strong><p>${text}</p></div>`;
 
@@ -12,7 +12,7 @@ export function mountNotesPage(container, id = "") {
 
   root.innerHTML = '<div class="cs-notes" data-role="notes"></div>';
   const host = root.querySelector('[data-role="notes"]');
-  document.title = "Consultation notes";
+  setTabTitle("Consultation notes");
   setTabIcon("notes");
   showSoapPanel(id, { mode: "page", host });
 
