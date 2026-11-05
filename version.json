@@ -193,6 +193,7 @@
                   "./js/staff-photo.js",
                   "./js/start-of-day.js",
                   "./js/stock-count.js",
+                  "./js/tab-icon.js",
                   "./js/task-builder.js",
                   "./js/task-history.js",
                   "./js/task-later.js",
@@ -219,6 +220,6 @@
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261105-075659",
-    "v":  "20261105-075659"
+    "version":  "20261105-084115",
+    "v":  "20261105-084115"
 }
