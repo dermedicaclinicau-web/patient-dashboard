@@ -6,6 +6,27 @@ import { listProducts, listCounts, dayKey } from "./inventory-api.js";
 
 const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 
+// How many were physically counted on a count line
+const QTY_FIELDS = ["counted", "qty", "count", "n", "actual", "units"];
+let warned = false;
+function countedQty(l) {
+  for (const k of QTY_FIELDS) {
+    if (l[k] === undefined || l[k] === null || l[k] === "") continue;
+    const v = Number(l[k]);
+    if (Number.isFinite(v)) return v;
+  }
+  if (!warned) {   // tells us the real field name if it's none of the above
+    warned = true;
+    console.warn("Skin Script stock: no counted number found on a count line. Its fields are:", Object.keys(l));
+  }
+  return null;
+}
+const countMs = (c) => {
+  const v = c.at || c.createdAt || c.savedAt || c.doneAt;
+  if (v && typeof v.toMillis === "function") return v.toMillis();
+  return Date.parse(v) || 0;
+};
+
 // → (sspProduct) => { product, how: "link" | "name" | "broken" | "none" }
 export function inventoryMatcher(sspProducts, invProducts) {
   const byId = new Map(invProducts.map((p) => [p.id, p]));
@@ -28,7 +49,8 @@ export function inventoryMatcher(sspProducts, invProducts) {
   };
 }
 
-// Map of Skin Script product id → { productId, name, shelf, unit, reorder, countedKey, how } or { broken: true }
+// Map of Skin Script product id → { productId, name, counted, countedKey, countedBy, unit, reorder, how } or { broken: true }.
+// counted = what staff physically counted on the Shelf in the latest opening count (null = not counted in 6 months).
 export async function sspShelfStock(sspProducts) {
   const [inv, counts] = await Promise.all([
     listProducts(),
@@ -39,12 +61,23 @@ export async function sspShelfStock(sspProducts) {
   ]);
   const match = inventoryMatcher(sspProducts, inv);
 
-  // The last opening count with this product on the Shelf (counts come newest first)
-  const lastCount = new Map();
-  counts.filter((c) => c.kind === "opening" && !c.superseded).forEach((c) => {
-    c.lines.forEach((l) => {
-      if (l.loc === "shelf" && l.productId && !lastCount.has(l.productId)) lastCount.set(l.productId, c.dateKey);
+  // Opening counts, newest first (two on one day: the later one)
+  const opening = counts.filter((c) => c.kind === "opening" && !c.superseded)
+    .sort((a, b) => String(b.dateKey).localeCompare(String(a.dateKey)) || countMs(b) - countMs(a));
+
+  // Each product's Shelf total in the newest opening count that has it
+  const lastCount = new Map();   // productId → { qty, dateKey, by }
+  opening.forEach((c) => {
+    const here = new Map();      // this count's Shelf total per product (a product can be on several lines)
+    (c.lines || []).forEach((l) => {
+      if (l.loc !== "shelf" || !l.productId || lastCount.has(l.productId)) return;
+      const q = countedQty(l);
+      if (q === null) return;
+      here.set(l.productId, (here.get(l.productId) || 0) + q);
     });
+    here.forEach((qty, id) => lastCount.set(id, {
+      qty, dateKey: c.dateKey, by: String(c.byName || c.staffName || c.createdBy || c.by || ""),
+    }));
   });
 
   const out = new Map();
@@ -53,9 +86,11 @@ export async function sspShelfStock(sspProducts) {
     if (m.how === "broken") { out.set(s.id, { broken: true }); return; }
     if (!m.product) return;
     const p = m.product;
+    const lc = lastCount.get(p.id) || null;
     out.set(s.id, {
-      productId: p.id, name: p.name, shelf: p.stock.shelf, unit: p.stockUnit,
-      reorder: p.reorder ? p.reorder.shelf : null, countedKey: lastCount.get(p.id) || "", how: m.how,
+      productId: p.id, name: p.name, unit: p.stockUnit, how: m.how,
+      counted: lc ? lc.qty : null, countedKey: lc ? lc.dateKey : "", countedBy: lc ? lc.by : "",
+      reorder: p.reorder ? p.reorder.shelf : null,
     });
   });
   return out;

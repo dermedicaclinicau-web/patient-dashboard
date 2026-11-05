@@ -63,7 +63,7 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
   let savedRecord = null; // once saved (from Save or from the preview)
   let stock = null;       // Skin Script product id → its Shelf stock in Inventory (null until loaded)
 
-  // "Shelf · 4 in stock (last counted Oct 27, 2026)"
+  // "Shelf · 4 counted (opening count 5 Nov 2026)": what staff physically counted, never the digital stock
   function stockHtml(id) {
     if (!stock) return "";
     const s = stock.get(id);
@@ -73,15 +73,19 @@ export async function mountSspBuilder(container, { patientId, staff = null, isAd
             title="Choose its Inventory product in Products Config">${s ? "Linked Inventory product is missing · Fix" : "Not linked to Inventory stock · Link"}</button>`
         : "";
     }
+    const tip = `Inventory: ${s.name}${s.how === "link" ? " (linked)" : " (matched by name)"}`;
+    if (s.counted === null) {
+      return `<span class="ssp-stock is-none" title="${esc(tip)}">Shelf · not counted yet<em> (no opening count in the last 6 months)</em></span>`;
+    }
     const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s.countedKey);
-    const counted = m
-      ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+    const day = m
+      ? new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" })
       : "";
-    const tone = s.shelf <= 0 ? " is-out" : s.reorder !== null && s.reorder !== undefined && s.shelf <= s.reorder ? " is-low" : "";
-    return `<span class="ssp-stock${tone}" title="${esc(`Inventory: ${s.name}${s.how === "link" ? " (linked)" : " (matched by name)"}`)}">Shelf · ${
-      s.shelf > 0 ? `${s.shelf} in stock` : "none in stock"}<em> (${counted ? `last counted ${esc(counted)}` : "not counted yet"})</em></span>`;
+    const tone = s.counted <= 0 ? " is-out"
+      : s.reorder !== null && s.reorder !== undefined && s.counted <= s.reorder ? " is-low" : "";
+    return `<span class="ssp-stock${tone}" title="${esc(`${tip}${s.countedBy ? ` · counted by ${s.countedBy}` : ""}`)}">Shelf · ${
+      s.counted > 0 ? `${s.counted} counted` : "none counted"}<em> (opening count${day ? ` ${esc(day)}` : ""})</em></span>`;
   }
-
   // Loads after the table is shown, so it never slows the builder down
   async function loadStock() {
     try {
