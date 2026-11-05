@@ -23,7 +23,7 @@ export function clearAds() { store.data = null; }
 
 const J = (s) => { try { const v = JSON.parse(s || "[]"); return Array.isArray(v) ? v : []; } catch { return []; } };
 
-async function loadAds() {
+export async function loadAds() {
   if (store.data) return store.data;
   if (store.pending) return store.pending;
   store.pending = (async () => {
@@ -52,6 +52,30 @@ async function loadAds() {
     };
   })();
   try { store.data = await store.pending; return store.data; } finally { store.pending = null; }
+}
+
+/* ---------- a page's Google Ads visitors (the SEO page panel) ---------- */
+
+export function adsPageHtml(A, path, h, tkey) {
+  if (!A || A.none || !Array.isArray(A.lp)) return "";
+  const k = tkey(path);
+  const t = { sess: 0, eng: 0, ke: 0, psess: 0, peng: 0, pke: 0 };
+  A.lp.filter((x) => tkey(x.path) === k).forEach((x) => {
+    t.sess += x.sess || 0; t.eng += x.eng || 0; t.ke += x.ke || 0;
+    t.psess += x.psess || 0; t.peng += x.peng || 0; t.pke += x.pke || 0;
+  });
+  if (!t.sess && !t.psess) return "";
+  const b = t.sess ? 1 - t.eng / t.sess : null, pb = t.psess ? 1 - t.peng / t.psess : null;
+  const row = (l, a, c) => `<tr><td>${l}</td><td>${a}</td><td>${c}</td></tr>`;
+  const tip = b != null && b > 0.65 && t.sess >= 30
+    ? `<p class="seo-bn-tip">💡 Most ad visitors leave this page straight away. Check the ad promises what the top of the page shows.</p>` : "";
+  return `<div class="seo-ad-panel">
+    <div class="seo-row" style="margin:0"><strong>Google Ads</strong><span class="seo-note">visitors who landed here from an ad</span>
+      <span class="seo-sp"></span><button class="seo-btn" type="button" data-tab="ads">Open Ads</button></div>
+    <table class="seo-kv"><tr><th></th><th>Last 28d</th><th>Prev 28d</th></tr>
+      ${row("Visits from ads", num(t.sess), num(t.psess))}
+      ${row("Bounce", pct0(b), pct0(pb))}
+      ${row("Key events", keF(t.ke), keF(t.pke))}</table>${tip}</div>`;
 }
 
 /* ---------- what's chosen (remembered in this tab) ---------- */
@@ -216,7 +240,9 @@ function coachHtml(h, A) {
       ${copy}
       ${a.risk ? `<div class="seo-warn">⚠ ${esc(a.risk)}</div>` : ""}
       ${(a.flags || []).length ? `<div class="seo-warn">${a.flags.map((f) => `⚠ ${esc(f)}`).join("<br>")}</div>` : ""}
-      <div class="seo-row" style="margin:8px 0 0">${acts}</div>
+      <div class="seo-row" style="margin:8px 0 0">${acts}
+        ${a.page ? `<button class="seo-btn" type="button" data-advpage="${esc(String(a.page).replace(/^https?:\/\/[^/]+/i, "") || "/")}">Ask the Advisor about this page</button>` : ""}
+        ${a.keyword ? `<button class="seo-btn" type="button" data-kq="${esc(kq(a.keyword))}">See it in Keywords</button>` : ""}</div>
     </div>`;
   };
   return `<div class="seo-card seo-ad-coach">${head}${err}
@@ -450,22 +476,26 @@ function draw() {
   const cname = (k) => A.camps[k.c]?.name || "";
   const kwBtn = (k) => (k === "(not set)" ? `<b>${esc(k)}</b>`
     : `<button type="button" class="seo-ad-link" data-kq="${esc(kq(k))}" title="See it in Keywords"><b>${esc(k)}</b></button>`);
+  const askBtn = (q) => `<button type="button" class="seo-ad-link" data-drask="${esc(q)}">Ask the Advisor</button>`;
   const byPath = new Map();
   ctx.data.pages.forEach((p) => { const k = K.tkey(p.path); if (!byPath.has(k)) byPath.set(k, p); });
   const kwIn = A.kw.filter((k) => camp === "" || k.c === Number(camp));
 
   const waste = kwIn.filter((k) => k.cost >= 50 && !k.ke && k.kw !== "(not set)").sort((a, b) => b.cost - a.cost).slice(0, 6)
-    .map((k) => `<li>${kwBtn(k.kw)} · ${money(k.cost)} on ${num(k.clicks)} clicks, no key events<small>${esc(cname(k))}</small></li>`);
+    .map((k) => `<li>${kwBtn(k.kw)} · ${money(k.cost)} on ${num(k.clicks)} clicks, no key events<small>${esc(cname(k))} · ${
+      askBtn(`We spent ${money(k.cost)} on Google Ads for "${k.kw}" with no bookings or enquiries. Which page should that search land on, and what is it missing?`)}</small></li>`);
   const free = kwIn.filter((k) => k.cost >= 20 && k.oPos != null && k.oPos <= 3).sort((a, b) => b.cost - a.cost).slice(0, 6)
     .map((k) => `<li>${kwBtn(k.kw)} · ranks ${h.fmtPos(k.oPos)} for free (${num(k.oClicks)} organic clicks in 28 days), ${money(k.cost)} on ads<small>${esc(cname(k))}</small></li>`);
   const gap = kwIn.filter((k) => k.ke >= 2 && (k.oPos == null || k.oPos > 10)).sort((a, b) => b.ke - a.ke).slice(0, 6)
     .map((k) => `<li>${kwBtn(k.kw)} · ${keF(k.ke)} key events from ads at ${money(k.cost / k.ke)} each, ${
-      k.oPos == null ? "not in Google's organic results" : `organic position ${h.fmtPos(k.oPos)}`}<small>${esc(cname(k))}</small></li>`);
+      k.oPos == null ? "not in Google's organic results" : `organic position ${h.fmtPos(k.oPos)}`}<small>${esc(cname(k))} · ${
+      askBtn(`"${k.kw}" brings bookings from Google Ads but we ${k.oPos == null ? "don't rank for it" : `only rank ${h.fmtPos(k.oPos)}`} organically. Should we write a new page or improve an existing one, and what should it cover?`)}</small></li>`);
   const lpBad = A.lp.filter((p) => p.sess >= 30 && 1 - p.eng / p.sess > 0.65).sort((a, b) => b.sess - a.sess).slice(0, 6)
     .map((p) => {
       const pg = byPath.get(K.tkey(p.path));
       const ob = pg && pg.m28.sessions >= 20 ? 1 - (pg.m28.engaged || 0) / pg.m28.sessions : null;
-      const name = pg ? `<button type="button" class="seo-ad-link" data-open="${esc(pg.id)}"><b>${esc(p.path)}</b></button>` : `<b>${esc(p.path)}</b>`;
+      const name = (pg ? `<button type="button" class="seo-ad-link" data-open="${esc(pg.id)}"><b>${esc(p.path)}</b></button>` : `<b>${esc(p.path)}</b>`) +
+        ` <button type="button" class="seo-ad-link" data-advpage="${esc(p.path)}">Ask the Advisor</button>`;
       return `<li>${name} · ${pct0(1 - p.eng / p.sess)} of ${num(p.sess)} ad visitors left straight away${
         ob != null ? `<small>Visitors from Google search: ${pct0(ob)}${ob < 1 - p.eng / p.sess - 0.1 ? ". The page works for search visitors, so check the ad matches what the page offers" : ""}</small>` : ""}</li>`;
     });

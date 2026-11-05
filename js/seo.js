@@ -12,7 +12,7 @@ import { drillHtml, loadWindows } from "./seo-drill.js?v=4";
 import { compareHtml } from "./seo-compare.js?v=1";
 import { mountSeoSite } from "./seo-site.js?v=4";
 import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js?v=9";
-import { renderAds, clearAds } from "./seo-ads.js?v=3";
+import { renderAds, clearAds, loadAds, adsPageHtml } from "./seo-ads.js?v=4";
 
 const TABS = [
   { id: "overview", label: "Overview" },
@@ -506,6 +506,8 @@ button.seo-kpi.is-on{border-color:var(--accent,#2563eb);box-shadow:0 0 0 1px var
 .seo-kv{width:100%;border-collapse:collapse;font-size:13px;margin:12px 0}
 .seo-kv th,.seo-kv td{padding:6px 4px;border-top:1px solid var(--border,#e5e7eb);text-align:right}
 .seo-kv th:first-child,.seo-kv td:first-child{text-align:left;font-weight:400;color:var(--text-muted,#6b7280)}
+.seo-ad-panel{margin:14px 0 0;padding:10px 12px;border:1px solid #c7d2fe;border-radius:10px;background:#f8faff}
+.seo-ad-panel .seo-kv{margin:8px 0 0}
 `;
 
 function injectCss() {
@@ -1162,6 +1164,7 @@ export async function mountSeo(el, opts = {}) {
             mob != null ? `Mobile ${fmtB(mob)}` : "", desk != null ? `Desktop ${fmtB(desk)}` : ""].filter(Boolean).join(" · ")}</p>
           ${tip ? `<p class="seo-bn-tip">💡 ${esc(tip)}</p>` : ""}</div>`;
       })()}
+      <div data-pads></div>
       <h3 style="font-size:14px;margin:16px 0 6px">Clicks per week</h3>
       ${bars(p.weekly, weekLabels)}
       ${pagePanelExtras(work, p, { esc, fmtInt, fmtPos, fmtDate, delta,
@@ -1172,6 +1175,11 @@ export async function mountSeo(el, opts = {}) {
         } }, can)}`;
     panel.hidden = false;
     panel.scrollTop = 0;
+    // Google Ads visitors to this page (only shown when there are some)
+    loadAds().then((A) => {
+      const box = panel.querySelector("[data-pads]");
+      if (box && panelId === id) box.innerHTML = adsPageHtml(A, p.path, { esc }, tkey);
+    }).catch(() => { /* no Ads data: nothing to show */ });
   }
 
   /* ----- events (delegated) ----- */
@@ -1295,6 +1303,7 @@ export async function mountSeo(el, opts = {}) {
     }
 
     if (ds.tab !== undefined) {
+      panel.hidden = true;
       tab = ds.tab;
       // replaceState doesn't fire hashchange, so the router won't remount the page
       history.replaceState(null, "", "#/seo" + (tab === "overview" ? "" : "/" + tab));
