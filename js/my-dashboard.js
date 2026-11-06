@@ -47,11 +47,21 @@ const ICON = {
   chev: '<polyline points="6 9 12 15 18 9"/>',
   info: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
   chat: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+  grid: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
+  sliders: '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>',
 };
 const svg = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
+// Each card's header icon (coloured with the card's Arrange colour, if it has one)
+const CARD_ICON = {
+  "Needs you now": ICON.alert, "Visits without a record": ICON.note, "My appointments & notes": ICON.cal,
+  Tasks: ICON.ok, "My follow-ups": ICON.chat, "My kit": ICON.kit, "My records": ICON.note,
+  "What I used": ICON.box, "My requests": ICON.box, "Stock I use": ICON.box, "Clinic overview": ICON.info,
+  "Start & end of day": ICON.cal,
+};
+const cardHead = (title) => `${CARD_ICON[title] ? `<span class="md-hic">${svg(CARD_ICON[title])}</span>` : ""}<h3>${esc(title)}</h3>`;
 const card = (title, inner, cls = "", link = "") => `
   <section class="md-card ${cls}">
-    <div class="md-card-head"><h3>${esc(title)}</h3>${link}</div>
+    <div class="md-card-head">${cardHead(title)}${link}</div>
     ${inner}
   </section>`;
 // An empty card shrinks to one line
@@ -219,16 +229,19 @@ export async function mountMyDashboard(container, { staff } = {}) {
   const root = document.createElement("section");
   root.className = "page wide md";
   root.innerHTML = `
-    <div class="fb-head">
-      <div><h2>${greet}${first ? `, ${esc(first)}` : ""}</h2>
-        <p class="muted">${esc(new Date().toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long", year: "numeric" }))}
-          · <span data-role="updated">loading…</span></p></div>
-      <div class="fb-head-actions">
-        <button type="button" class="btn-ghost" data-act="arrange" aria-pressed="false">Arrange</button>
-        <button type="button" class="btn-ghost" data-act="customise">Customise</button>
-        <button type="button" class="btn-ghost" data-act="refresh">${svg(ICON.refresh)} Refresh</button>
+    <header class="md-hero">
+      <div class="md-hero-main">
+        <p class="md-hero-date">${esc(new Date().toLocaleDateString("en-AU", { weekday: "long", day: "numeric", month: "long", year: "numeric" }))}
+          · <span data-role="updated">loading…</span></p>
+        <h2>${greet}${first ? `, ${esc(first)}` : ""}</h2>
+        <p class="md-hero-sum" data-role="summary">Getting your day ready…</p>
       </div>
-    </div>
+      <div class="md-hero-acts">
+        <button type="button" class="btn-ghost" data-act="arrange" aria-pressed="false">${svg(ICON.grid)}<span>Arrange</span></button>
+        <button type="button" class="btn-ghost" data-act="customise">${svg(ICON.sliders)}<span>Customise</span></button>
+        <button type="button" class="btn-ghost" data-act="refresh">${svg(ICON.refresh)}<span>Refresh</span></button>
+      </div>
+    </header>
     <div data-role="rec-jobs" class="md-rec-slot" hidden></div>
     <div data-role="body"></div>`;
   container.replaceChildren(root);
@@ -253,7 +266,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     const list = byOrder(DASH_CARDS, readOrder(me)).filter(([k]) => here(k));
     const box = ([k, label]) => (k === "visits" ? '<section class="md-card" data-role="visits"></section>'
       : k === "followups" ? '<section class="md-card" data-role="followups"></section>'
-      : `<section class="md-card is-loading"${colorAttr(me, k)}><div class="md-card-head"><h3>${esc(label)}</h3></div>${LOADING}</section>`);
+      : `<section class="md-card is-loading"${colorAttr(me, k)}><div class="md-card-head">${cardHead(label)}</div>${LOADING}</section>`);
     const main = list.filter(([k]) => !sideOf(me, k));
     const side = list.filter(([k]) => sideOf(me, k));
     const kpis = `<div class="md-kpis">${[0, 1, 2].map(() => `<div class="md-kpi is-loading">
@@ -277,7 +290,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     if (visitsCard) return visitsCard;
     visitsCard = document.createElement("section");
     visitsCard.className = "md-card md-visits-card";
-    visitsCard.innerHTML = `<div class="md-card-head"><h3>Visits without a record</h3>
+    visitsCard.innerHTML = `<div class="md-card-head">${cardHead("Visits without a record")}
         <span class="md-count" data-role="vcount" hidden></span>
         ${can("paper.enter") ? '<a class="md-link" href="#/paper">Open Paper records</a>' : ""}</div>
       <div data-role="vbody"></div>`;
@@ -301,7 +314,7 @@ export async function mountMyDashboard(container, { staff } = {}) {
     if (fuCard) return fuCard;
     fuCard = document.createElement("section");
     fuCard.className = "md-card md-fu-card";
-    fuCard.innerHTML = `<div class="md-card-head"><h3>My follow-ups</h3>
+    fuCard.innerHTML = `<div class="md-card-head">${cardHead("My follow-ups")}
         <span class="md-count" data-role="fucount" hidden></span>
         <a class="md-link" href="#/prospects/followups">All follow-ups</a></div>
       <div data-role="fubody"></div>`;
@@ -553,6 +566,9 @@ export async function mountMyDashboard(container, { staff } = {}) {
       tone: "warn", text: `Your request ${reqNumber(r)} was declined${r.response ? `: ${r.response}` : ""}`,
       href: "#/inventory/requests", act: "View",
     }));
+    // Most urgent first (Start of Day stays on top); otherwise in the order they were added
+    const RANK = { bad: 0, warn: 1, info: 2, ok: 3 };
+    att.sort((a, b) => (a.sod ? -1 : RANK[a.tone] ?? 2) - (b.sod ? -1 : RANK[b.tone] ?? 2));
     const toneIcon = { bad: ICON.alert, warn: ICON.alert, info: ICON.info, ok: ICON.ok };
     const attAct = (a) => (a.sod
       ? `<button type="button" class="lh-btn is-primary" data-sod="1">${esc(a.act)}</button>`
@@ -909,6 +925,19 @@ export async function mountMyDashboard(container, { staff } = {}) {
         });
         mo.observe(daysEl, { childList: true, subtree: true });
       }
+    }
+    // The line under the greeting
+    const sumEl = root.querySelector('[data-role="summary"]');
+    if (sumEl) {
+      const bits = [];
+      if (show("appts")) bits.push(appts.length ? `${appts.length} appointment${appts.length === 1 ? "" : "s"} today` : "no appointments today");
+      if (show("tasks")) {
+        const due = mineList.filter((t) => t.dueDate && t.dueDate <= todayKey).length;
+        if (due) bits.push(`${due} task${due === 1 ? "" : "s"} due`);
+      }
+      bits.push(att.length ? `${att.length} thing${att.length === 1 ? " needs" : "s need"} you` : "nothing needs you right now");
+      const line = bits.join(" · ");
+      sumEl.textContent = line.charAt(0).toUpperCase() + line.slice(1);
     }
     loadedAt = Date.now();
     tickUpdated();

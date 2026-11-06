@@ -11094,3 +11094,75 @@ details.sub-card.has-items > summary .hint { background: #fef3c7; color: #92400e
 .patient-page details.is-empty:not([open]) > summary { opacity: .6; }
 .patient-page details.is-empty:not([open]) > summary:hover { opacity: 1; }
 .patient-page details.is-empty .sk-badge { background: #f1f5f9; color: #94a3b8; }
+
+/* ===== My dashboard: refreshed look ===== */
+.page.md { --md-line: #e7ecf0; max-width: 1440px; }
+
+/* Welcome banner */
+.md-hero { position: relative; overflow: hidden; display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between;
+  gap: 1rem 1.5rem; margin: 0 0 1.1rem; padding: 1.5rem 1.6rem; border-radius: 22px; color: #fff;
+  background: radial-gradient(120% 140% at 100% 0%, #14b8a6 0%, #0f766e 45%, #134e4a 100%);
+  box-shadow: 0 18px 40px -24px rgba(15, 118, 110, .7); }
+.md-hero::after { content: ""; position: absolute; right: -60px; top: -90px; width: 280px; height: 280px; border-radius: 50%;
+  background: rgba(255, 255, 255, .08); pointer-events: none; }
+.md-hero-main { position: relative; min-width: 0; }
+.md-hero-date { margin: 0 0 .35rem; font-size: .82rem; opacity: .85; }
+.md-hero h2 { margin: 0; font-family: var(--font-serif); font-size: clamp(1.6rem, 3vw, 2.2rem); font-weight: 500; letter-spacing: -.01em; }
+.md-hero-sum { margin: .4rem 0 0; font-size: .98rem; opacity: .95; }
+.md-hero-acts { position: relative; display: flex; flex-wrap: wrap; gap: .4rem; }
+.md-hero-acts .btn-ghost { display: inline-flex; align-items: center; gap: .4rem; height: 38px; padding: 0 .9rem;
+  border-color: rgba(255, 255, 255, .35); background: rgba(255, 255, 255, .12); color: #fff; }
+.md-hero-acts .btn-ghost:hover { background: rgba(255, 255, 255, .22); border-color: rgba(255, 255, 255, .6); }
+.md-hero-acts .btn-ghost svg { width: 16px; height: 16px; }
+.md-hero-acts .btn-ghost.is-on { background: #fff; border-color: #fff; color: #0f766e; }
+
+/* Today tiles */
+.md .md-kpis { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: .8rem; margin-bottom: 1.1rem; }
+.md .md-kpi { gap: .35rem; padding: 1rem 1.1rem; border-color: var(--md-line); border-radius: 16px; box-shadow: 0 1px 2px rgba(15, 23, 42, .04); }
+.md .md-kpi-l { gap: .55rem; font-size: .8rem; }
+.md .md-kpi-l svg { box-sizing: border-box; width: 30px; height: 30px; padding: 7px; border-radius: 10px;
+  background: var(--primary-soft); color: var(--primary); }
+.md .md-kpi-v { font-size: 2rem; }
+.md .md-kpi.is-warn .md-kpi-l svg { background: #fef3c7; color: #b45309; }
+.md .md-kpi.is-bad .md-kpi-l svg { background: #fee2e2; color: #b91c1c; }
+.md .md-kpi.is-ok .md-kpi-l svg { background: #dcfce7; color: #15803d; }
+
+/* Cards */
+.md .md-card { padding: 1.15rem 1.25rem; border-color: var(--md-line); border-radius: 18px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .04), 0 10px 24px -20px rgba(15, 23, 42, .25); }
+.md .md-card[data-mdc] { border-top: 4px solid var(--mdc); }
+.md .md-card-head { gap: .6rem; padding-bottom: .75rem; border-bottom: 1px solid #f1f5f9; }
+.md .md-card.is-collapsed .md-card-head { padding-bottom: 0; border-bottom: 0; }
+.md .md-card-head h3 { font-size: 1rem; }
+.md-hic { display: grid; place-items: center; width: 32px; height: 32px; flex: none; border-radius: 10px;
+  background: color-mix(in srgb, var(--mdc, var(--primary)) 12%, #fff); color: var(--mdc, var(--primary)); }
+.md-hic svg { width: 17px; height: 17px; }
+.md .md-att-card .md-hic { background: #fee2e2; color: #b91c1c; }
+.md .md-link { padding: .25rem .65rem; border-radius: 999px; background: var(--surface-2); font-size: .8rem; }
+.md .md-link:hover { background: var(--primary-soft); }
+
+/* Needs you now: one coloured rail per item */
+.md .md-att { gap: .45rem; }
+.md .md-att li, .md .md-att li:first-child { padding: .65rem .75rem; border: 0; border-left: 4px solid #94a3b8;
+  border-radius: 12px; background: var(--surface-2); }
+.md .md-att li.is-bad { border-left-color: #dc2626; background: #fef2f2; }
+.md .md-att li.is-warn { border-left-color: #f59e0b; background: #fffbeb; }
+.md .md-att li.is-info { border-left-color: #0284c7; background: #f0f9ff; }
+.md .md-att li.is-ok { border-left-color: #16a34a; background: #f0fdf4; }
+.md .md-att li .md-att-ic { background: #fff; }
+
+/* Empty cards: one quiet line */
+.md .md-quiet { border-style: dashed; background: #fbfcfd; box-shadow: none; }
+.md .md-quiet strong { font-size: .9rem; }
+
+/* Quick actions */
+.md .md-qagrid .md-qa { border-color: transparent; border-radius: 14px; background: var(--surface-2); }
+.md .md-qagrid .md-qa svg { box-sizing: border-box; width: 34px; height: 34px; padding: 8px; border-radius: 10px;
+  background: #fff; box-shadow: 0 1px 2px rgba(15, 23, 42, .08); }
+.md .md-qagrid .md-qa:hover { border-color: #99d5cf; background: var(--primary-soft); }
+
+@media (max-width: 640px) {
+  .md-hero { padding: 1.15rem; border-radius: 18px; }
+  .md-hero-acts { width: 100%; }
+  .md-hero-acts .btn-ghost { flex: 1; justify-content: center; padding: 0 .5rem; }
+}
