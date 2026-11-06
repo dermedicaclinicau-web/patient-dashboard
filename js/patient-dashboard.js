@@ -179,20 +179,8 @@ const ICONS = {
 
 /* ===================== Remember open/closed sections ===================== */
 
-const OPEN_KEY = "pd-open-sections"; // layout preferences only, no patient data
-
-function openState() {
-  try { return JSON.parse(localStorage.getItem(OPEN_KEY)) || {}; } catch { return {}; }
-}
-function isOpen(key, fallback) {
-  const s = openState();
-  return key in s ? s[key] : fallback;
-}
-function saveOpen(key, open) {
-  const s = openState();
-  s[key] = open;
-  localStorage.setItem(OPEN_KEY, JSON.stringify(s));
-}
+// Every section starts collapsed each time a patient is opened: staff expand what they need
+function isOpen() { return false; }
 
 /* ===================== Page ===================== */
 
@@ -275,7 +263,6 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   root.addEventListener("toggle", (e) => {
     const d = e.target;
     if (!d.matches || !d.matches("details[data-key]")) return;
-    saveOpen(d.dataset.key, d.open);
     // Category cards side by side open and close together
     if (d.dataset.pair !== undefined) {
       root.querySelectorAll(`details[data-pair="${CSS.escape(d.dataset.pair)}"]`).forEach((o) => {
@@ -361,6 +348,9 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     ${interestsCommsSectionHtml()}
 
     ${dialogHtml()}`;
+
+  // Sections from the other views start collapsed too
+  root.querySelectorAll("details.section-card, details.sub-card, details.tp-history").forEach((d) => { d.open = false; });
 
   const bar = root.querySelector(".patient-bar");
   const todaySlot = root.querySelector(".today-slot");
@@ -497,6 +487,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       pastSummaries = records.filter((r) => r.date && r.soap.trim()).map((r) => ({
         dateKey: toDateKey(r.date), kind: "summary", summaryId: r.id,
         label: `Consultation${r.staff ? ` · ${r.staff}` : ""}`,
+        draft: /draft/i.test(String(r.status ?? r.Status ?? "")),
       }));
       pushPastRecords();
 
@@ -563,7 +554,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
         ? remindersHtml(tasks)
         : `<p class="empty-note">No pending reminders for this patient.</p>`;
       card.classList.toggle("is-empty", !tasks.length);
-      card.open = tasks.length > 0; // open when there's something to see, collapsed when empty
+      card.classList.toggle("has-items", tasks.length > 0);   // the count stands out, but it stays collapsed
     } catch (err) {
       if (!root.isConnected) return;
       console.error("Reminders failed:", err);
@@ -783,7 +774,9 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     showToast("Reminder added");
     const pc = root.querySelector('details[data-key="preconsult"]');
     if (pc) pc.open = true;
-    await loadReminders(); // opens the Reminders card when it has tasks
+    await loadReminders();
+    const rc = root.querySelector('details[data-key="reminders"]');
+    if (rc) rc.open = true;   // show the reminder just added
     if (tasksView) tasksView.reload();
   }
 
@@ -1241,9 +1234,10 @@ function paBadgesHtml(recs, missing) {
   const html = Object.keys(PA_BADGES).filter((k) => by.has(k)).map((k) => {
     const b = PA_BADGES[k];
     const list = by.get(k);
-    if (list.length === 1) return paRecHtml(list[0], `pa-bdg is-${k}`, escapeHtml(b.short));
-    return `<details class="pa-bdg-menu"><summary class="pa-bdg is-${k}">${escapeHtml(b.short)} ×${list.length}</summary>
-      <div class="pa-bdg-pop">${list.map((r) => paRecHtml(r, "pa-pop-item", escapeHtml(r.label || b.full))).join("")}</div></details>`;
+    const draft = list.some((r) => r.draft) ? " is-draft" : "";   // brown while the notes are a draft
+    if (list.length === 1) return paRecHtml(list[0], `pa-bdg is-${k}${draft}`, escapeHtml(b.short));
+    return `<details class="pa-bdg-menu"><summary class="pa-bdg is-${k}${draft}">${escapeHtml(b.short)} ×${list.length}</summary>
+      <div class="pa-bdg-pop">${list.map((r) => paRecHtml(r, `pa-pop-item${r.draft ? " is-draft" : ""}`, escapeHtml(r.label || b.full))).join("")}</div></details>`;
   }).join("") + (missing ? '<span class="pa-bdg is-missing" title="Injectables were booked but there\'s no treatment record for this day">No Tx Record</span>' : "");
   return html ? `<div class="pa-badges">${html}</div>` : "";
 }

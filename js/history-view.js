@@ -386,8 +386,9 @@ function badgeHtml(b) {
   if (b.type === "ssp") return `<button type="button" class="hv-badge b-ssp" data-hv-jump="ssp">${inner}</button>`;
   if (b.type === "summary") {
     const reviewed = b.status === "reviewed";
+    // Drafts are shown by their brown colour, so only Reviewed gets a word
     return `<button type="button" class="hv-badge b-summary ${reviewed ? "is-reviewed" : "is-draft"}" data-hv-summary="${escapeHtml(b.id || "")}"
-      title="${reviewed ? "Reviewed notes" : "Draft: these notes haven't been reviewed yet"}">${inner}<em class="hv-status">${reviewed ? "Reviewed" : "Draft"}</em></button>`;
+      title="${reviewed ? "Reviewed notes" : "Draft: these notes haven't been reviewed yet"}">${inner}${reviewed ? '<em class="hv-status">Reviewed</em>' : ""}</button>`;
   }
   if (b.type === "merge") return `<button type="button" class="hv-badge b-merge" data-hv-merge="${escapeHtml(JSON.stringify(b.ids || []))}" title="Combine these recordings into one set of notes">${inner}</button>`;
   return `<span class="hv-badge b-${b.type}">${inner}</span>`;

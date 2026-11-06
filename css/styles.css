@@ -11033,3 +11033,18 @@ dialog.lh-dialog.pr-dlg.prs-dlg { width: min(820px, calc(100vw - 2rem)); }
 .inv-pd-salescroll { max-height: 320px; overflow: auto; margin-top: 8px; }
 .inv-pd-saletable td small { display: block; }
 .inv-pd-saleacts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+
+/* Draft consultation notes: brown instead of the word "Draft" */
+.pa-bdg.is-summary.is-draft { background: #f4e9dd; color: #7a4a1f; border-color: #d8b38c; }
+.pa-pop-item.is-draft { color: #7a4a1f; }
+.pa-pop-item.is-draft::before {
+  content: ""; display: inline-block; width: 8px; height: 8px; margin-right: 6px;
+  border-radius: 50%; background: #a8693a; vertical-align: middle;
+}
+
+/* A collapsed Reminders bar with something in it: its count stands out */
+details.sub-card.has-items > summary .hint { background: #fef3c7; color: #92400e; font-weight: 600; }
+
+/* Appointment History: draft consultation notes are brown (no "Draft" word) */
+.hv-badge.b-summary.is-draft { background: #f4e9dd; color: #7a4a1f; border-color: #d8b38c; }
+.hv-badge.b-summary.is-draft svg { color: #a8693a; }
