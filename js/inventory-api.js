@@ -3347,6 +3347,8 @@ export const INV_OUTCOMES = {
     help: "A delivery was put away or entered wrongly. Name the purchase order in the note." },
   extra: { label: "Extra stock found", adjust: true, sign: 1,
     help: "More is there than digital shows. Added to stock." },
+  cleared: { label: "Cleared: before counts were reliable", adjust: false,
+    help: "Opened before the portal was being used properly, so the numbers weren't reliable. Stock wasn't changed." },
   "late-invoice": { label: "Sold before the count", adjust: false, system: true,
     help: "Sold before the count, but its invoice was uploaded after it. Closed automatically when the invoices were uploaded." },
   "late-record": { label: "Used before the count", adjust: false, system: true,

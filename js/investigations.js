@@ -69,6 +69,7 @@ const OUT_TEXT = {
   receiving: ["Delivery entered wrong", "Put away or entered wrongly. Name the purchase order in the note."],
   missing: ["Missing or lost", "Can't be found or explained. It's written off."],
   extra: ["Extra stock found", "More is there than the portal knew about. It's added to stock."],
+  cleared: ["Cleared (before counts were reliable)", "Opened before the portal was being used properly. Nothing changes."],
 };
 const outLabel = (k) => (OUT_TEXT[k] || [])[0] || (INV_OUTCOMES[k] || {}).label || "Closed";
 
@@ -237,6 +238,8 @@ export async function renderInvestigations(body, { staff = null } = {}) {
       <div class="fe-seg">${[["all", "All"], ["count", "Opening counts"], ["kit", "Kits"]].map(([v, l]) =>
         `<label class="fe-seg-btn"><input type="radio" name="ivx-kind" value="${v}"${st.kind === v ? " checked" : ""} /><span>${esc(l)}</span></label>`).join("")}</div>
       <label class="ib-search inv-find">${I(IC.search)}<input type="search" data-role="q" placeholder="Search products or people" aria-label="Search" /></label>
+      ${canManage && open.length ? `<span class="inv-spacer"></span>
+        <button type="button" class="lh-btn" data-act="clear-old">${I(IC.check)} Clear old investigations…</button>` : ""}
     </div>
     <div data-role="secs"></div>`;
   drawSecs();
@@ -247,6 +250,7 @@ export async function renderInvestigations(body, { staff = null } = {}) {
     const a = e.target.closest("[data-act]");
     if (!a) return;
     if (a.dataset.act === "older") { st.allClosed = !st.allClosed; drawSecs(); return; }
+    if (a.dataset.act === "clear-old") { clearOldDialog(open, staff, () => renderInvestigations(body, { staff })); return; }
     if (a.dataset.act === "recount-all") {
       const items = list.filter((x) => matches(x) && canRecountX(x, me)).sort(byAge);
       recountAllDialog(items, staff, () => renderInvestigations(body, { staff }));
@@ -325,6 +329,124 @@ function recountAllDialog(items, staff, onDone) {
   dlg.showModal();
   const first = form.querySelector("[data-rc]");
   if (first) first.focus();
+}
+
+// Admins: close every investigation opened on or before a date, in one go (e.g. before the digital count was reset).
+// Each is closed as "Miscounted", so stock doesn't change. Set the right numbers with Base count or Update digital count.
+function clearOldDialog(open, staff, onDone) {
+  const today = dayKey(new Date());
+  const yesterday = dayKey(new Date(Date.now() - 864e5));
+  const off = new Set();   // unticked
+  let cutoff = yesterday;
+  let saved = 0, busy = false, finished = false;
+  const openKey = (x) => (x.openedAt ? dayKey(x.openedAt) : "");
+  const byAge = (a, b) => (a.openedAt ? a.openedAt.getTime() : 0) - (b.openedAt ? b.openedAt.getTime() : 0);
+  const inRange = () => open.filter((x) => !openKey(x) || openKey(x) <= cutoff).sort(byAge);
+  const statusText = (x) => (x.status === "review" ? "Admin review" : isOvernight(x) ? "Admin review" : "Waiting for a recount");
+
+  const dlg = document.createElement("dialog");
+  dlg.className = "lh-dialog inv-dlg ivx-rall ivx-clear";
+  dlg.innerHTML = `<form class="lh-form" novalidate>
+    <div class="lh-dialog-head"><h3>${I(IC.check)} Clear old investigations</h3>
+      <p>For differences found before the portal was being used properly. Each one is closed as
+        <b>Cleared (before counts were reliable)</b>, so <b>stock doesn't change</b>. Set the right numbers afterwards with <b>Base count</b> or <b>Update digital count</b>.</p></div>
+    <label class="lh-field"><span class="lh-label">Opened on or before</span>
+      <input type="date" name="before" value="${yesterday}" max="${today}" />
+      <small class="fe-note">Today's are left out to start with, as today's counts may be real. Change the date to include them.</small></label>
+    <label class="fe-check ivx-clear-all"><input type="checkbox" data-role="all" checked /> <span data-role="alltx"></span></label>
+    <div class="ivx-rall-list" data-role="list"></div>
+    <label class="lh-field"><span class="lh-label">Note kept on each one</span>
+      <input name="note" maxlength="500" value="${esc(`Cleared ${niceKey(today)}: opened before the digital count was reset, so the numbers weren't reliable.`)}" /></label>
+    <p class="lh-error" role="alert" hidden></p>
+    <div class="lh-actions">
+      <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+      <button type="submit" class="lh-btn is-primary" data-role="go">Clear</button>
+    </div></form>`;
+  document.body.appendChild(dlg);
+  const form = dlg.querySelector("form");
+  const err = dlg.querySelector(".lh-error");
+  const btn = dlg.querySelector('[data-role="go"]');
+  const listBox = dlg.querySelector('[data-role="list"]');
+
+  function drawList() {
+    const items = inRange();
+    listBox.innerHTML = items.length ? items.map((x) => {
+      const kit = isOvernight(x);
+      return `<label class="ivx-rall-row ivx-clear-row">
+        <input type="checkbox" data-pick="${esc(x.id)}"${off.has(x.id) ? "" : " checked"} />
+        <span class="ivx-card-ic is-${kit ? "kit" : "count"}">${I(kit ? IC.kit : IC.box)}</span>
+        <span class="ivx-rall-name"><strong>${esc(x.productName)}</strong>
+          <small>${esc(whereText(x))} · ${kit ? "Kit check" : "Opening count"} ${esc(day(x.openedAt))} · ${esc(statusText(x))}</small></span>
+        <span class="ivx-rall-res" data-res="${esc(x.id)}"></span></label>`;
+    }).join("") : '<p class="ivx-empty">Nothing open on or before that date.</p>';
+    sync();
+  }
+  function picked() { return inRange().filter((x) => !off.has(x.id)); }
+  function sync() {
+    if (finished) return;
+    const n = picked().length;
+    const all = inRange().length;
+    const box = dlg.querySelector('[data-role="all"]');
+    box.checked = n > 0 && n === all;
+    box.indeterminate = n > 0 && n < all;
+    dlg.querySelector('[data-role="alltx"]').textContent = all ? `${n} of ${all} ticked` : "None to clear";
+    btn.textContent = n ? `Clear ${n} investigation${n === 1 ? "" : "s"}` : "Clear";
+    btn.disabled = !n || busy;
+  }
+
+  form.addEventListener("change", (e) => {
+    if (busy || finished) return;
+    if (e.target.name === "before" && /^\d{4}-\d{2}-\d{2}$/.test(e.target.value)) { cutoff = e.target.value; drawList(); return; }
+    if (e.target.dataset.role === "all") {
+      inRange().forEach((x) => { if (e.target.checked) off.delete(x.id); else off.add(x.id); });
+      drawList();
+      return;
+    }
+    const pk = e.target.dataset.pick;
+    if (pk) { if (e.target.checked) off.delete(pk); else off.add(pk); sync(); }
+  });
+  dlg.addEventListener("close", () => { dlg.remove(); if (saved) onDone(); });
+  dlg.addEventListener("cancel", (e) => { if (busy) e.preventDefault(); });
+  dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => { if (!busy) dlg.close(); });
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (finished) { dlg.close(); return; }
+    err.hidden = true;
+    const todo = picked();
+    const note = form.elements.note.value.trim();
+    if (!todo.length) return;
+    if (!note) { err.textContent = "Add a note saying why they're being cleared."; err.hidden = false; return; }
+    busy = true;
+    btn.disabled = true;
+    form.querySelectorAll("input").forEach((el) => { el.disabled = true; });
+    let failed = 0;
+    // One at a time: several investigations can be on the same product
+    for (let i = 0; i < todo.length; i++) {
+      const x = todo[i];
+      const res = listBox.querySelector(`[data-res="${CSS.escape(x.id)}"]`);
+      btn.textContent = `Clearing ${i + 1} of ${todo.length}…`;
+      if (res) { res.className = "ivx-rall-res"; res.textContent = "Clearing…"; }
+      try {
+        await closeInvestigation(x.id, { outcome: "cleared", note, cctvChecked: false, cctvNote: "" }, staff);
+        saved++;
+        if (res) { res.className = "ivx-rall-res is-ok"; res.innerHTML = `${I(IC.check)} Cleared`; }
+      } catch (ex) {
+        console.error("Clear investigation failed:", x.id, ex);
+        failed++;
+        if (res) { res.className = "ivx-rall-res is-bad"; res.textContent = errText(ex, "Couldn't clear"); }
+      }
+    }
+    busy = false;
+    finished = true;
+    btn.disabled = false;
+    btn.textContent = "Done";
+    dlg.querySelector('[data-act="cancel"]').hidden = true;
+    showToast(failed ? `${saved} cleared, ${failed} couldn't be. They're marked in the list.` : `${saved} investigation${saved === 1 ? "" : "s"} cleared`);
+  });
+
+  dlg.showModal();
+  drawList();
 }
 
 /* ===================== One investigation ===================== */

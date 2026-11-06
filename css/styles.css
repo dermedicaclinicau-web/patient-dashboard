@@ -11018,3 +11018,9 @@ dialog.lh-dialog.pr-dlg.prs-dlg { width: min(820px, calc(100vw - 2rem)); }
 .pr-refresh:disabled { opacity: .7; cursor: progress; }
 @keyframes pr-spin { to { transform: rotate(360deg); } }
 @media (max-width: 640px) { .pr-refresh-tx { display: none; } }   /* icon only on phones */
+
+/* Investigations → Clear old investigations */
+.ivx-clear .ivx-clear-all { margin: 4px 0 2px; font-weight: 600; }
+.ivx-clear .ivx-clear-row { cursor: pointer; }
+.ivx-clear .ivx-clear-row > input[type="checkbox"] { width: 18px; height: 18px; flex: 0 0 auto; }
+.ivx-clear .ivx-clear-row:has(input:not(:checked)) { opacity: .55; }
