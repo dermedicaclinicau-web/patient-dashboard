@@ -13,6 +13,7 @@ import { isAdmin } from "./perms.js";
 import { callApi } from "./appointments.js";
 import { deleteUsage, listUsageForSubmission } from "./inventory-api.js";
 import { answerTagText } from "./form-live.js";
+import { clearPageCache } from "./page-cache.js";
 
 const svg = (p, cls = "") =>
   `<svg ${cls ? `class="${cls}" ` : ""}viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -257,6 +258,8 @@ export function mountRecords(root, patient, staff = null) {
         lists = { treatment: treatments, consent: consents };
         grid.querySelector(".rc-tx-count").textContent = treatments.length;
         grid.querySelector(".rc-cs-count").textContent = consents.length;
+        txCard.classList.toggle("is-empty", !treatments.length);
+        csCard.classList.toggle("is-empty", !consents.length);
         txBody.innerHTML = treatmentsHtml(treatments);
         csBody.innerHTML = consentsHtml(consents);
         showHighlight();
@@ -304,11 +307,7 @@ export function mountRecords(root, patient, staff = null) {
           } });
         }
       }
-      if (res && grid.isConnected) {
-        loaded = false;
-        txBody.innerHTML = csBody.innerHTML = '<div class="skeleton sm"></div>';
-        load();
-      }
+      if (res && grid.isConnected) reload();
     } catch (err) {
       console.error("Move failed:", err);
     } finally {
@@ -343,9 +342,7 @@ export function mountRecords(root, patient, staff = null) {
       showToast(kindChanged
         ? `Now a ${pick.kind === "consent" ? "consent" : "treatment"} record under ${catTitle}`
         : `Moved to ${catTitle}`);
-      loaded = false;
-      txBody.innerHTML = csBody.innerHTML = '<div class="skeleton sm"></div>';
-      load();
+      reload();
     } catch (err) {
       console.error("Category change failed:", err);
       showToast(err.code === "permission-denied"
@@ -411,9 +408,7 @@ export function mountRecords(root, patient, staff = null) {
         editedByUid: byUid,
       });
       showToast(`Date changed to ${fmt({ date: parseDateKey(res.date) })}`);
-      loaded = false;
-      txBody.innerHTML = csBody.innerHTML = '<div class="skeleton sm"></div>';
-      load();
+      reload();
     } catch (err) {
       console.error("Date change failed:", err);
       showToast(err.code === "permission-denied"
@@ -447,13 +442,16 @@ export function mountRecords(root, patient, staff = null) {
     }
   });
   if (highlightId && !txCard.open) txCard.open = true; // just saved a record: show it
+  // Counts on the collapsed bars: load quietly once the page has drawn (a little after Skin Script, so they don't all start at once)
   if (txCard.open) load();
+  else setTimeout(() => { if (grid.isConnected) load(); }, 900);
 
   // Loads the records again, e.g. after a form is saved in another tab.
   // Waits for a load already in progress, so the newer record isn't missed.
   async function reload() {
     if (!grid.isConnected) return;
     if (loading) await loading;
+    clearPageCache();   // the records changed, or a form was saved: read them again
     loaded = false;
     txBody.innerHTML = csBody.innerHTML = '<div class="skeleton sm"></div>';
     return load();

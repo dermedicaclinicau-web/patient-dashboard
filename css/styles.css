@@ -11084,3 +11084,13 @@ details.sub-card.has-items > summary .hint { background: #fef3c7; color: #92400e
 .patient-bar.is-compact .pb-chips { margin-top: .2rem; }
 .patient-bar.is-compact .round-btn, .patient-bar.is-compact .pb-edit { height: 34px; }
 .patient-bar.is-compact .round-btn { width: 34px; }
+
+/* Patient page: every collapsed section bar the same height */
+.patient-page > details > summary,
+.patient-page > div > details > summary { min-height: 56px; box-sizing: border-box; }
+.patient-page .sk-card, .patient-page .rc-card { padding: .45rem; }
+
+/* Sections with nothing in them sit quietly */
+.patient-page details.is-empty:not([open]) > summary { opacity: .6; }
+.patient-page details.is-empty:not([open]) > summary:hover { opacity: 1; }
+.patient-page details.is-empty .sk-badge { background: #f1f5f9; color: #94a3b8; }

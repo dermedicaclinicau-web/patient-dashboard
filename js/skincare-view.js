@@ -185,6 +185,8 @@ export function mountSkincare(root, patient, staff = null) {
 
     grid.querySelector(".sk-ssp-count").textContent = data.protocols.length;
     grid.querySelector(".sk-pur-count").textContent = data.purchases.length;
+    sspCard.classList.toggle("is-empty", !data.protocols.length);
+    purCard.classList.toggle("is-empty", !data.purchases.length);
 
     sspBody.innerHTML = data.protocols.length
       ? data.protocols.map((p, i) => protocolHtml(p, i === 0, lastMap, i)).join("") + legendHtml() +
@@ -293,7 +295,9 @@ export function mountSkincare(root, patient, staff = null) {
     }
   });
 
+  // Counts on the collapsed bars: load quietly once the page has drawn
   if (sspCard.open) load();
+  else setTimeout(() => { if (grid.isConnected) load(); }, 600);
 }
 
 /* ===================== Skin Script Protocol ===================== */

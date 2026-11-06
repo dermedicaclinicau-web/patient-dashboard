@@ -4,6 +4,7 @@ import { collection, query, where, getDocs, FieldPath }
 import { nameVariants, parseRecordDate } from "./transcripts.js";
 import { listSubmissionsForPatient } from "./form-submissions.js";
 import { patientIds } from "./patients.js";
+import { cachedRead } from "./page-cache.js";
 
 // Order = display order. First match wins, so more specific patterns come first.
 export const CATEGORIES = [
@@ -91,7 +92,11 @@ async function portalRecords(patient) {
 
 const byDateDesc = (a, b) => (b.date ? b.date.getTime() : 0) - (a.date ? a.date.getTime() : 0);
 
-export async function fetchPatientRecords(patient) {
+export function fetchPatientRecords(patient) {
+  return cachedRead(`records|${patient.id}|${patientIds(patient).join(",")}|${patient.name || ""}`, () => loadPatientRecords(patient));
+}
+
+async function loadPatientRecords(patient) {
   const [txDocs, consentDocs, portal] = await Promise.all([
     byPatient("treatment_records", patient, "Patient Name"),
     byPatient("consent_records", patient, null),

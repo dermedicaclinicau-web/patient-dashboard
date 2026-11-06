@@ -3,6 +3,7 @@ import { doc, getDoc, collection, query, where, limit, getDocs }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { patientIds } from "./patients.js";
 import { listManualAppts, mergeDay } from "./manual-appts.js";
+import { cachedRead } from "./page-cache.js";
 
 // "Data last uploaded" info, cached for 60 seconds
 let syncMeta = null;
@@ -116,7 +117,11 @@ export async function callApi(payload, retried = false) {
 }
 
 // Pre-consultation record from Firestore 'pcn_results' (matched by Patient ID, then unique name)
-export async function fetchPreconsult(patient) {
+export function fetchPreconsult(patient) {
+  return cachedRead(`pcn|${patient.id}|${patientIds(patient).join(",")}|${patient.name || ""}`, () => loadPreconsult(patient));
+}
+
+async function loadPreconsult(patient) {
   try {
           const ids = [...new Set(patientIds(patient).map(toDocId).filter(Boolean))];
 

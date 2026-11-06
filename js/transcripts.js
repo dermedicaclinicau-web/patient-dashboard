@@ -2,6 +2,7 @@ import { db } from "./firebase-config.js";
 import { collection, query, where, getDocs, FieldPath }
 from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { patientIds, patientNames } from "./patients.js";
+import { cachedRead } from "./page-cache.js";
 
 const COLLECTION = "appointment_transcripts";
 
@@ -55,7 +56,11 @@ export function parseRecordDate(s) {
 
 // All of a patient's transcript records (matched by ID, then name), newest first.
 // Fetched ONCE per patient page and shared by Treatment plan + Social history.
-export async function fetchTranscriptRecords(patient) {
+export function fetchTranscriptRecords(patient) {
+  return cachedRead(`tx|${patient.id}|${patientIds(patient).join(",")}|${patient.name || ""}`, () => loadTranscriptRecords(patient));
+}
+
+async function loadTranscriptRecords(patient) {
     const ids = patientIds(patient);
     const names = [...new Set(patientNames(patient).flatMap((n, i) =>
       nameVariants(i === 0 ? patient : { name: n })))].slice(0, 30);

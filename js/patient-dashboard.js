@@ -40,6 +40,7 @@ import { db } from "./firebase-config.js";
 import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { copyOldWrRecord } from "./wr-copy.js";
 import { listTaskTypes } from "./task-types.js";
+import { startPageCache, stopPageCache, clearPageCache } from "./page-cache.js";
 
 /* ===================== Config ===================== */
 
@@ -191,6 +192,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   root.className = "page wide patient-page";
   root.innerHTML = `<div class="patient-bar"><div class="skeleton sm"></div></div>`;
   container.replaceChildren(root);
+  const cacheToken = startPageCache();   // sections share one read of each patient's records
 
   let patient = null;
   let todayAppts = [];
@@ -517,6 +519,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   const onFormSavedElsewhere = (m) => {
     if (!root.isConnected) { stopListening(); return; }
     if (!m || m.type !== "form-saved" || !myIds.has(m.patientId)) return;
+    clearPageCache();   // a new record exists
     mountFormRecords(root, patient);   // Other forms
     loadPastForms();                   // Tx / Cons / Rx badges and the "No Tx Record" warning
     if (recordsView && ["consent", "treatment"].includes(m.category)) recordsView.reload(); // Treatment / Consent Records
@@ -543,6 +546,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   const onLeave = () => setTimeout(() => {
     if (root.isConnected) return;   // still here (e.g. a hash change inside the page)
     stopListening();
+    stopPageCache(cacheToken);
     document.removeEventListener("click", closeBadgeMenus);
     window.removeEventListener("master-plan-updated", onPlanUpdated);
     window.removeEventListener("hashchange", onLeave);
@@ -602,6 +606,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     if (btn.disabled) return;
     btn.disabled = true;
     btn.classList.add("is-loading");
+    clearPageCache();   // Refresh means read again
     await Promise.allSettled([
       loadToday(), loadPreconsultData(), loadReminders(), loadTranscriptSections(), loadPastForms(),
       notesView ? notesView.reload() : null,
