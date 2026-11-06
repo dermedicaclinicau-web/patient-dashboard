@@ -17595,6 +17595,7 @@ function prosSettings_(cfg) {
     respondHours: Math.max(1, Math.min(168, Math.floor(Number(d.respondHours) || 24))),
     tawkSkipPatients: d.tawkSkipPatients === true,
     lostReasons: (Array.isArray(d.lostReasons) && d.lostReasons.length ? d.lostReasons : PROS_LOST_)
+    lostIgnore: (Array.isArray(body.lostIgnore) ? body.lostIgnore : []).map(function (s) { return String(s).trim().slice(0, 60); }).filter(String).slice(0, 30),
       .map(function (s) { return String(s).replace(/\s+/g, ' ').trim().slice(0, 60); }).filter(Boolean).slice(0, 20),
   };
 }

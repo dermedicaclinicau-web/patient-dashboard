@@ -31,6 +31,21 @@ const PREFS = ["SMS", "Call", "Email"];
 const OUTCOMES = [["spoke", "Spoke to them"], ["no_answer", "No answer"], ["voicemail", "Left voicemail"], ["met", "Met in clinic"]];
 const stageOf = (k) => STAGES.find((s) => s.key === k) || STAGES[0];
 
+// Lost reasons. Ones switched off in Settings ("Not counted": spam, tests) are left out of the reports and counts.
+const DEFAULT_LOST = ["Too expensive", "Went elsewhere", "No response", "Not suitable", "Just browsing", "Spam", "Test entry", "Other"];
+const lostReasonsOf = (set) => (Array.isArray(set.lostReasons) && set.lostReasons.length ? set.lostReasons : DEFAULT_LOST);
+const normR = (s) => String(s || "").trim().toLowerCase();
+const junkCache = new WeakMap();
+function junkReason(reason, set) {
+  const r = normR(reason);
+  if (!r) return false;
+  if (!set || !Array.isArray(set.lostIgnore)) return /\b(spam|tests?|testing)\b/.test(r);   // until Settings is saved
+  let s = junkCache.get(set);
+  if (!s) { s = new Set(set.lostIgnore.map(normR)); junkCache.set(set, s); }
+  return s.has(r);
+}
+const isJunk = (p, set) => p.stage === "lost" && junkReason(p.lostReason, set);
+
 /* ---------- Dates ---------- */
 const PERTH = { timeZone: "Australia/Perth" };
 const keyOf = (iso) => (iso ? new Date(iso).toLocaleDateString("en-CA", PERTH) : "");
@@ -460,7 +475,7 @@ async function mountBoard(container, { view, staff }) {
   const tilesOf = () => [
     { ic: "alert", n: all.filter((p) => notContacted(p, set)).length, l: `Not contacted in ${hoursOf(set)} hours`, tone: "bad", show: "nocontact" },
     { ic: "flag", n: all.filter(cancelOpen).length, l: "Cancelled, not rebooked", tone: "bad", show: "cancel" },
-    { ic: "inbox", n: all.filter((p) => Date.now() - Date.parse(p.createdAt || "") < 7 * 864e5).length, l: "New enquiries this week", tone: "sky", range: "7" },
+    { ic: "inbox", n: all.filter((p) => !isJunk(p, set) && Date.now() - Date.parse(p.createdAt || "") < 7 * 864e5).length, l: "New enquiries this week", tone: "sky", range: "7" },
     { ic: "clock", n: all.filter((p) => ["today", "overdue"].includes(followState(p))).length, l: "Follow-ups due", tone: "amber", show: "follow" },
     // The date of their first treatment (from the appointment book), or when staff moved them there by hand
     { ic: "trophy", n: all.filter((p) => {
@@ -548,7 +563,7 @@ async function mountBoard(container, { view, staff }) {
             ? ` · ${esc(hmText(p.nextFollowUpTime))}` : ""}</span>`
           : fs === "today" ? `<span class="pr-tag is-warn">Follow up ${p.nextFollowUpTime ? esc(hmText(p.nextFollowUpTime)) : "today"}</span>`
           : fs === "later" ? `<span class="pr-tag">${esc(fuText(p))}</span>` : ""}
-        ${p.stage === "lost" && p.lostReason ? `<span class="pr-tag">${esc(p.lostReason)}</span>` : ""}
+        ${p.stage === "lost" && p.lostReason ? `<span class="pr-tag">${esc(p.lostReason)}${isJunk(p, set) ? " · not counted" : ""}</span>` : ""}
       </span>
       <span class="pr-card-foot"><small>${esc(ago(p.lastEnquiryAt || p.createdAt))}</small>${p.contacts
         ? `<small>${p.contacts} contact${p.contacts === 1 ? "" : "s"}</small>` : "<small>Not contacted</small>"}</span>
@@ -797,11 +812,15 @@ async function newDialog(all, onDone) {
 }
 
 function lostDialog(p, set, done) {
-  const reasons = Array.isArray(set.lostReasons) && set.lostReasons.length ? set.lostReasons
-    : ["Too expensive", "Went elsewhere", "No response", "Not suitable", "Just browsing", "Other"];
+  const reasons = lostReasonsOf(set);
+  const real = reasons.filter((r) => !junkReason(r, set));
+  const junk = reasons.filter((r) => junkReason(r, set));
+  const pill = (r) => `<label class="pr-reason"><input type="radio" name="reason" value="${esc(r)}" /><span>${esc(r)}</span></label>`;
   openDialog({
     title: `Mark ${p.name} as lost`, submit: "Mark as lost",
-    body: `<div class="pr-reasons">${reasons.map((r, i) => `<label class="pr-reason"><input type="radio" name="reason" value="${esc(r)}"${i ? "" : ""} /><span>${esc(r)}</span></label>`).join("")}</div>
+    body: `<div class="pr-reasons">${real.map(pill).join("")}</div>
+      ${junk.length ? `<p class="prs-lost-h">Not a real enquiry <small class="muted">(left out of the reports)</small></p>
+        <div class="pr-reasons is-junk">${junk.map(pill).join("")}</div>` : ""}
       <label class="lh-field"><span class="lh-label">Note (optional)</span><textarea name="note" rows="2" maxlength="1000" class="fe-input"></textarea></label>`,
     onSubmit: async (c) => {
       const reason = (c.form.querySelector('[name="reason"]:checked') || {}).value;
@@ -813,6 +832,7 @@ function lostDialog(p, set, done) {
     },
   });
 }
+
 // Prospect settings → Import past chats (the .zip from Tawk.to → Inbox → Export). Checks first, then imports.
 function wireTawkImport(c) {
   const input = c.form.querySelector('[data-role="tawkfile"]');
@@ -862,70 +882,199 @@ function wireTawkImport(c) {
 }
 
 function settingsDialog(set, onSaved, onImported) {
-  // Opens straight away. The staff ticks fill in when the list arrives (usually already remembered).
-  const ticks = (name) => `<div class="pr-ticks" data-ticks="${name}"><small class="muted">Loading staff…</small></div>`;
-  const fillTicks = (form, list) => {
-    [["notify", set.notify], ["team", set.team]].forEach(([name, chosen]) => {
-      const box = form.querySelector(`[data-ticks="${name}"]`);
-      if (!box) return;
-      box.innerHTML = list.length ? list.map((s) => `<label class="fe-check"><input type="checkbox" name="${name}" value="${esc(s.id)}"${
-        (chosen || []).includes(s.id) ? " checked" : ""} /> ${esc(s.name)}</label>`).join("")
-        : '<small class="muted">The staff list couldn\'t be loaded. Close Settings and open it again.</small>';
-    });
-  };
+  const SUGGEST = ["Spam", "Test entry"];
+  const reasonRow = (name, counts) => `<li class="prs-reason${counts ? "" : " is-off"}">
+      <input class="fe-input" data-f="name" value="${esc(name)}" maxlength="60" aria-label="Reason" />
+      <label class="prs-switch" title="Turn off for spam, tests and anything that wasn't a real enquiry">
+        <input type="checkbox" data-f="counts"${counts ? " checked" : ""} /><span aria-hidden="true"></span>
+        <em>${counts ? "Counts as lost" : "Not counted"}</em></label>
+      <button type="button" class="prs-x" data-del aria-label="Remove this reason">×</button></li>`;
+  const people = (name, label, help) => `<div class="prs-block">
+      <div class="prs-bh"><span class="prs-label">${esc(label)}</span><span class="prs-count" data-count="${name}"></span>
+        <span class="prs-quick"><button type="button" data-pick="${name}" data-on="1">All</button>
+          <button type="button" data-pick="${name}" data-on="">None</button></span></div>
+      ${help ? `<p class="prs-help">${esc(help)}</p>` : ""}
+      <div class="prs-people" data-ticks="${name}"><small class="muted">Loading staff…</small></div></div>`;
+  const sec = (ic, tone, title, sub, inner) => `<section class="prs-sec">
+      <header class="prs-sec-h"><span class="prs-ic is-${tone}">${I(IC[ic])}</span><div><h4>${esc(title)}</h4><p>${esc(sub)}</p></div></header>
+      ${inner}</section>`;
+
   openDialog({
-    title: "Prospect settings", submit: "Save",
-    body: `
-      <h4 class="pr-h4">When a web enquiry arrives, email</h4>${ticks("notify", set.notify)}
-      <h4 class="pr-h4">Share new web enquiries in turn between</h4>
-      <p class="muted pr-small">The person with the fewest open prospects (working today) gets the next one. Nobody ticked: they wait on the board for anyone.</p>
-      ${ticks("team", set.team)}
-      <h4 class="pr-h4">Online chat (Tawk.to)</h4>
-      <label class="fe-check"><input type="checkbox" name="tawkSkip"${set.tawkSkipPatients ? " checked" : ""} />
-        Skip chats from existing patients <small class="muted">(e.g. moving an appointment)</small></label>
-      <div class="pr-import pr-tawk">
-        <label class="lh-btn">Import past chats…<input type="file" accept=".zip,.json,application/zip,application/json" data-role="tawkfile" hidden /></label>
-        <div class="pr-tawk-msg" data-role="tmsg"></div>
-      </div>
-      <small class="muted">In Tawk.to: Inbox → tick the chats (up to 50 at a time) → Export. Tawk.to emails you a .zip: choose it here.
-        You'll see what it finds before anything is added.</small>
-      <label class="lh-field"><span class="lh-label">Flag as "Not contacted" after (hours)</span>
-        <input name="hours" type="number" min="1" max="168" class="fe-input" value="${esc(set.respondHours || 24)}" /></label>
-      <label class="lh-field"><span class="lh-label">Reasons a prospect is lost (one per line)</span>
-        <textarea name="reasons" rows="5" class="fe-input">${esc((set.lostReasons && set.lostReasons.length ? set.lostReasons
-          : ["Too expensive", "Went elsewhere", "No response", "Not suitable", "Just browsing", "Other"]).join("\n"))}</textarea></label>
-      <div class="pr-import"><button type="button" class="lh-btn" data-role="import">Check for new web enquiries now</button><small data-role="imsg"></small></div>`,
+    title: "Prospect settings", sub: "These apply to everyone using the Prospect Dashboard.", submit: "Save settings",
+    body: `<div class="prs-wrap">
+      ${sec("inbox", "teal", "New web enquiries", "Who hears about them, who gets them, and how quickly they should be contacted.",
+        people("notify", "Email these people when one arrives", "")
+        + people("team", "Share them out between",
+          "Each new enquiry goes to whoever on this list is working today and has the fewest open prospects. Nobody chosen: they wait on the board for anyone.")
+        + `<div class="prs-block prs-inline">
+            <div><span class="prs-label">Flag as “Not contacted” after</span>
+              <p class="prs-help">The card turns red if nobody has called, texted or emailed them by then.</p></div>
+            <div class="prs-hours">
+              <button type="button" class="prs-step" data-step="-1" aria-label="Fewer hours">−</button>
+              <input name="hours" type="number" min="1" max="168" inputmode="numeric" class="fe-input" value="${hoursOf(set)}" aria-label="Hours" />
+              <span>hours</span>
+              <button type="button" class="prs-step" data-step="1" aria-label="More hours">+</button>
+            </div>
+            <div class="prs-chips">${[4, 12, 24, 48, 72].map((h) => `<button type="button" class="prs-chip" data-hours="${h}">${h} h</button>`).join("")}</div>
+          </div>
+          <div class="prs-block prs-inline">
+            <div><span class="prs-label">Missed an enquiry?</span>
+              <p class="prs-help">Looks in info@ for web form emails from the last 14 days and adds any that aren't here yet.</p></div>
+            <button type="button" class="lh-btn" data-role="import">Check now</button>
+            <small class="prs-msg" data-role="imsg"></small>
+          </div>`)}
+      ${sec("text", "sky", "Online chat (Tawk.to)", "Chats from the website come in as prospects.",
+        `<div class="prs-block"><label class="prs-toggle"><input type="checkbox" name="tawkSkip"${set.tawkSkipPatients ? " checked" : ""} />
+            <span class="prs-sw" aria-hidden="true"></span>
+            <span><b>Skip chats from existing patients</b><small>For example, someone asking to move an appointment.</small></span></label></div>
+         <div class="prs-block"><span class="prs-label">Import past chats</span>
+           <ol class="prs-steps"><li>In Tawk.to, open <b>Inbox</b>.</li><li>Tick the chats (up to 50 at a time) and choose <b>Export</b>.</li>
+             <li>Tawk.to emails you a .zip. Choose it below.</li></ol>
+           <div class="prs-file"><label class="lh-btn">Choose the .zip…<input type="file" accept=".zip,.json,application/zip,application/json" data-role="tawkfile" hidden /></label>
+             <div class="pr-tawk-msg" data-role="tmsg"></div></div>
+           <p class="prs-help">You'll see what it finds before anything is added.</p></div>`)}
+      ${sec("flag", "slate", "Lost reasons", "The choices when someone is marked as lost.",
+        `<div class="prs-block">
+           <p class="prs-help">Turn off <b>Counts as lost</b> for anything that wasn't a real enquiry, like spam or a test.
+             They stay on the board under Lost, but they're left out of the reports and the board's counts.</p>
+           <ul class="prs-reasons" data-role="reasons">${lostReasonsOf(set).map((r) => reasonRow(r, !junkReason(r, set))).join("")}</ul>
+           <div class="prs-add"><input class="fe-input" data-role="newreason" maxlength="60" placeholder="Add a reason, e.g. Moved away" aria-label="New reason" />
+             <button type="button" class="lh-btn" data-act="addreason">${I(IC.plus)} Add</button></div>
+           <div class="prs-suggest" data-role="suggest" hidden></div>
+         </div>`)}
+    </div>`,
     onOpen: (c) => {
-      c.btn.disabled = true;   // until the staff ticks are in, so nobody is unticked by accident
-      staffList().then((list) => { if (c.dlg.open) { fillTicks(c.form, list); c.btn.disabled = !list.length; } });
+      const f = c.form;
+      c.dlg.classList.add("prs-dlg");
+      c.btn.disabled = true;   // until the staff list is in, so nobody is unticked by accident
+
+      const counts = () => {
+        ["notify", "team"].forEach((n) => {
+          const el = f.querySelector(`[data-count="${n}"]`);
+          const k = f.querySelectorAll(`[name="${n}"]:checked`).length;
+          if (el) { el.textContent = k ? `${k} chosen` : "Nobody"; el.classList.toggle("is-none", !k); }
+        });
+        const h = Number(f.elements.hours.value);
+        f.querySelectorAll("[data-hours]").forEach((b) => b.classList.toggle("is-on", Number(b.dataset.hours) === h));
+      };
+      const names = () => [...f.querySelectorAll('.prs-reason [data-f="name"]')].map((x) => normR(x.value));
+      const suggest = () => {
+        const box = f.querySelector('[data-role="suggest"]');
+        const miss = SUGGEST.filter((s) => !names().includes(normR(s)));
+        box.hidden = !miss.length;
+        box.innerHTML = miss.length ? `Quick add (not counted): ${miss.map((s) =>
+          `<button type="button" class="prs-chip" data-suggest="${esc(s)}">+ ${esc(s)}</button>`).join("")}` : "";
+      };
+      const addReason = (raw, countsIt = true) => {
+        const name = String(raw || "").replace(/\s+/g, " ").trim().slice(0, 60);
+        if (!name) return false;
+        const list = f.querySelector('[data-role="reasons"]');
+        const i = names().indexOf(normR(name));
+        if (i >= 0) {   // already there: point to it
+          const row = list.children[i];
+          row.classList.remove("is-flash"); void row.offsetWidth; row.classList.add("is-flash");
+          return false;
+        }
+        list.insertAdjacentHTML("beforeend", reasonRow(name, countsIt));
+        suggest();
+        return true;
+      };
+      c.addReason = addReason;
+
+      f.addEventListener("click", (e) => {
+        const pk = e.target.closest("[data-pick]");
+        if (pk) { f.querySelectorAll(`[name="${pk.dataset.pick}"]`).forEach((x) => { x.checked = !!pk.dataset.on; }); counts(); return; }
+        const stp = e.target.closest("[data-step]");
+        if (stp) {
+          const inp = f.elements.hours;
+          inp.value = Math.min(168, Math.max(1, (Number(inp.value) || 24) + Number(stp.dataset.step)));
+          counts(); return;
+        }
+        const hb = e.target.closest("[data-hours]");
+        if (hb) { f.elements.hours.value = hb.dataset.hours; counts(); return; }
+        const del = e.target.closest("[data-del]");
+        if (del) { del.closest(".prs-reason").remove(); suggest(); return; }
+        const sg = e.target.closest("[data-suggest]");
+        if (sg) { addReason(sg.dataset.suggest, false); return; }
+        if (e.target.closest('[data-act="addreason"]')) {
+          const inp = f.querySelector('[data-role="newreason"]');
+          if (addReason(inp.value)) inp.value = "";
+          inp.focus();
+        }
+      });
+      f.addEventListener("change", (e) => {
+        const sw = e.target.closest('[data-f="counts"]');
+        if (sw) {
+          const row = sw.closest(".prs-reason");
+          row.classList.toggle("is-off", !sw.checked);
+          row.querySelector(".prs-switch em").textContent = sw.checked ? "Counts as lost" : "Not counted";
+        }
+        counts();
+      });
+      f.addEventListener("input", (e) => { if (e.target.name === "hours") counts(); });
+      f.querySelector('[data-role="newreason"]').addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); if (addReason(e.target.value)) e.target.value = ""; }
+      });
+
+      staffList().then((list) => {
+        if (!c.dlg.open) return;
+        [["notify", set.notify], ["team", set.team]].forEach(([name, chosen]) => {
+          const box = f.querySelector(`[data-ticks="${name}"]`);
+          box.innerHTML = list.length ? list.map((s) => `<label class="prs-person">
+              <input type="checkbox" name="${name}" value="${esc(s.id)}"${(chosen || []).includes(s.id) ? " checked" : ""} />
+              <span class="prs-av">${esc(initials(s.name))}</span><span class="prs-pname">${esc(s.name)}</span></label>`).join("")
+            : '<small class="muted">The staff list couldn\'t be loaded. Close Settings and open it again.</small>';
+        });
+        c.btn.disabled = !list.length;
+        counts();
+      });
+      counts();
+      suggest();
       wireTawkImport(c);
-      c.form.querySelector('[data-role="import"]').addEventListener("click", async (e) => {
+
+      f.querySelector('[data-role="import"]').addEventListener("click", async (e) => {
         const b = e.currentTarget;
-        const m = c.form.querySelector('[data-role="imsg"]');
+        const m = f.querySelector('[data-role="imsg"]');
         b.disabled = true;
         m.textContent = "Checking info@… (this can take up to a minute)";
         try {
           const r = await api("importNow", { days: 14 });
           m.textContent = r.imported ? `${r.imported} new enquiry email(s) added. They're on the board now.` : "No new enquiry emails.";
           if (r.imported && onImported) onImported();
-        }
-        catch (err) { m.textContent = errText(err); }
+        } catch (err) { m.textContent = errText(err); }
         finally { b.disabled = false; }
       });
     },
     onSubmit: async (c) => {
-      const pick = (n) => [...c.form.querySelectorAll(`[name="${n}"]:checked`)].map((x) => x.value);
-      await api("saveSettings", {
-        notify: pick("notify"), team: pick("team"), respondHours: c.form.elements.hours.value,
-        tawkSkipPatients: c.form.elements.tawkSkip.checked,
-        lostReasons: c.form.elements.reasons.value.split(/\n+/).map((s) => s.trim()).filter(Boolean),
+      const f = c.form;
+      const newBox = f.querySelector('[data-role="newreason"]');
+      if (newBox.value.trim()) { c.addReason(newBox.value); newBox.value = ""; }   // typed but not added yet
+      const seen = new Set();
+      const rows = [];
+      f.querySelectorAll(".prs-reason").forEach((li) => {
+        const name = li.querySelector('[data-f="name"]').value.replace(/\s+/g, " ").trim().slice(0, 60);
+        if (!name || seen.has(normR(name))) return;
+        seen.add(normR(name));
+        rows.push({ name, counts: li.querySelector('[data-f="counts"]').checked });
       });
+      if (!rows.some((r) => r.counts)) { c.fail("Keep at least one reason that counts as lost."); return; }
+      const pick = (n) => [...f.querySelectorAll(`[name="${n}"]:checked`)].map((x) => x.value);
+      await api("saveSettings", {
+        notify: pick("notify"), team: pick("team"),
+        respondHours: Math.min(168, Math.max(1, Math.round(Number(f.elements.hours.value) || 24))),
+        tawkSkipPatients: f.elements.tawkSkip.checked,
+        lostReasons: rows.map((r) => r.name),
+        lostIgnore: rows.filter((r) => !r.counts).map((r) => r.name),
+      });
+      const back = await loadSettings(true);
       c.close();
-      showToast("Prospect settings saved");
+      showToast(Array.isArray(back.lostIgnore) ? "Prospect settings saved"
+        : "Saved, but “Not counted” wasn't kept. Apps Script needs the update.");
       onSaved();
     },
   });
 }
+
 
 /* ===================== One prospect ===================== */
 
@@ -1058,7 +1207,7 @@ async function mountProspect(container, id, staff) {
         <span class="pr-pill is-${s.tone} is-lg">${esc(s.name)}</span>
       </div>
       ${p.stage === "lost" ? `<div class="pr-banner is-lost">${I(IC.flag)}<div><strong>Lost: ${esc(p.lostReason || "")}</strong>${
-        p.lostNote ? `<small>${esc(p.lostNote)}</small>` : ""}</div>${work ? '<button type="button" class="lh-btn" data-stage="contacted">Reopen</button>' : ""}</div>` : ""}
+        p.lostNote ? `<small>${esc(p.lostNote)}</small>` : ""}${isJunk(p, set) ? "<small>Not a real enquiry: left out of the reports.</small>" : ""}</div>${work ? '<button type="button" class="lh-btn" data-stage="contacted">Reopen</button>' : ""}</div>` : ""}
       ${late ? `<div class="pr-banner is-bad">${I(IC.alert)}<div><strong>Not contacted yet</strong><small>They enquired ${esc(ago(p.waitingSince))}.</small></div></div>` : ""}
       ${cancelOpen(p) ? `<div class="pr-banner is-bad">${I(IC.alert)}<div><strong>${cancelWord(p)} on ${esc(fullDay(p.lastCancel.date))}, not rebooked yet</strong>${
         p.lastCancel.svcs && p.lastCancel.svcs.length ? `<small>${esc(p.lastCancel.svcs.join(", "))}</small>` : ""}</div></div>` : ""}
@@ -1455,7 +1604,7 @@ async function mountReports(container) {
     : st.range === "all" ? [firstDay, today] : [addDays(today, -(Number(st.range) - 1)), today]);
   const keep = (p) => (!st.source || (p.source || "Other") === st.source)
     && (!st.who || (st.who === "-" ? !p.assignedToName : p.assignedToName === st.who))
-        && showOf(st.kind)(p, set);
+        && showOf(st.kind)(p, set) && !isJunk(p, set);
   const cohort = (a, b) => all.filter((p) => p._day && p._day >= a && p._day <= b && keep(p));
 
   function stats(list) {
@@ -1489,6 +1638,7 @@ async function mountReports(container) {
     const [a, b] = span();
     const len = dayDiff(a, b) + 1;
     const list = cohort(a, b);
+    const junkN = all.filter((p) => p._day && p._day >= a && p._day <= b && isJunk(p, set)).length;
     const s = stats(list);
     const ps = st.range === "all" ? null : stats(cohort(addDays(a, -len), addDays(a, -1)));
     const rate = (x, n) => pct(x, n);
@@ -1549,7 +1699,7 @@ async function mountReports(container) {
 
     root.innerHTML = `${back}
       <div class="pr-top"><div><h2>Prospect reports</h2><p class="muted">Enquiries from ${esc(repDay(a))} to ${esc(repDay(b))}${
-        ps ? ` · ▲▼ compared with the ${len} days before` : ""}</p></div>
+        ps ? ` · ▲▼ compared with the ${len} days before` : ""}${junkN ? ` · ${junkN} spam or test entr${junkN === 1 ? "y" : "ies"} left out` : ""}</p></div>
         <div class="pr-top-acts"><button type="button" class="lh-btn is-quiet" data-act="csv">Download CSV</button></div></div>
       <div class="pr-rep-tools">
         <select class="fe-input" data-r="range" aria-label="Dates">${optsR(REP_RANGES, st.range)}</select>
