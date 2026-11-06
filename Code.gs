@@ -18242,6 +18242,7 @@ function prosAction_(cfg, op, id, body, session) {
       add('stage', 'Lost: ' + reason);
     } else {
       Object.assign(patch, { lostReason: '', lostNote: '' });
+      if (to !== 'new') patch.waitingSince = '';   // moved along by hand: no longer "Not contacted"
       add('stage', (p.stage === 'lost' ? 'Reopened: ' : 'Moved to ') + PROS_STAGE_NAME_[to]);
     }
     patch.stage = to;

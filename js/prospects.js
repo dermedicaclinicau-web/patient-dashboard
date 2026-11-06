@@ -80,6 +80,16 @@ async function loadSettings(fresh = false) {
 }
 // A prospect just added: its page opens without reading it again
 const justAdded = new Map();
+// The board's list, kept for 10 minutes so going back to the board (or into a prospect) is instant.
+// It's refreshed in the background each time, and saves update it straight away.
+let boardCache = null;   // { at, list }
+const COL_MAX = 50;      // cards drawn per board column before "Show more"
+function cacheUpsert(p) {
+  if (!boardCache || !p || !p.id) return;
+  const i = boardCache.list.findIndex((x) => x.id === p.id);
+  if (i >= 0) boardCache.list[i] = p;
+  else if (!p.historic) boardCache.list.unshift(p);
+}
 
 // Patient search for "Patient record": straight from Firestore (Apps Script only if that isn't allowed)
 const ptCache = new Map();
@@ -98,8 +108,24 @@ async function findPatients(q) {
   ptCache.set(k, list);
   return list;
 }
+// The staff list (for "Give to" and Settings). Remembered for this tab, so dialogs open instantly.
+// A failed load isn't kept, so the next try asks again.
 let staffCache = null;
-const staffList = () => (staffCache ||= callApi({ action: "staffList" }).then((r) => r.staff || []).catch(() => []));
+function staffList() {
+  if (!staffCache) {
+    let hit = null;
+    try { hit = JSON.parse(sessionStorage.getItem("pr_staff_v1") || "null"); } catch { /* ignore */ }
+    staffCache = hit && Date.now() - hit.at < 30 * 60000 && Array.isArray(hit.list)
+      ? Promise.resolve(hit.list)
+      : callApi({ action: "staffList" }).then((r) => {
+          const list = r.staff || [];
+          try { sessionStorage.setItem("pr_staff_v1", JSON.stringify({ at: Date.now(), list })); } catch { /* full */ }
+          return list;
+        });
+    staffCache.catch(() => { staffCache = null; });
+  }
+  return staffCache.catch(() => []);
+}
 const hoursOf = (set) => Math.max(1, Number(set.respondHours) || 24);
 const notContacted = (p, set) => !!p.waitingSince && OPEN.includes(p.stage) && Date.now() - Date.parse(p.waitingSince) > hoursOf(set) * 3600000;
 // "14:30" in Perth now, and "14:30" → "2:30 pm"
@@ -241,9 +267,15 @@ function openDialog({ title, sub = "", body, submit = "Save", onOpen, onSubmit }
   });
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
+    if (btn.disabled) return;
+    const label = btn.textContent;
     err.hidden = true;
     btn.disabled = true;
+    btn.textContent = "Saving…";
     try { await onSubmit(ctl); } catch (ex) { console.error(ex); ctl.fail(errText(ex)); }
+    finally {
+      if (dlg.open && btn.textContent === "Saving…") { btn.textContent = label; btn.disabled = false; }
+    }
   });
   dlg.showModal();
   if (onOpen) onOpen(ctl);
@@ -402,22 +434,30 @@ async function mountBoard(container, { view, staff }) {
   container.replaceChildren(root);
   const me = auth.currentUser && auth.currentUser.uid;
   const work = can("prospects.work") || can("prospects.manage");
-  const st = { view, q: "", source: "", who: "all", show: "", range: "", from: "", to: "", showLost: false, old: false };
+  const st = { view, q: "", source: "", who: "all", show: "", range: "", from: "", to: "", showLost: false, old: false, more: {} };
   let all = [];
   let set = {};
-  root.innerHTML = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
-  try { [all, set] = await Promise.all([loadAll(), loadSettings()]); }
-  catch (err) {
-    console.error("Prospects failed:", err);
-    root.innerHTML = `<div class="state"><strong>Couldn't load prospects</strong>${esc(err && err.code === "permission-denied"
-      ? "Check the prospects Firestore rule has been published, and your Prospect access in Staff." : "Check your connection and try again.")}</div>`;
-    return;
+  const cached = boardCache && Date.now() - boardCache.at < 10 * 60000 ? boardCache : null;
+  if (cached) {
+    all = cached.list;
+    set = await loadSettings();
+  } else {
+    root.innerHTML = '<div class="skeleton" style="height:320px;border-radius:14px"></div>';
+    try { [all, set] = await Promise.all([loadAll(), loadSettings()]); }
+    catch (err) {
+      console.error("Prospects failed:", err);
+      root.innerHTML = `<div class="state"><strong>Couldn't load prospects</strong>${esc(err && err.code === "permission-denied"
+        ? "Check the prospects Firestore rule has been published, and your Prospect access in Staff." : "Check your connection and try again.")}</div>`;
+      return;
+    }
+    boardCache = { at: Date.now(), list: all };
   }
   if (!root.isConnected) return;
+  staffList();   // ready for New prospect and Settings
 
   const t = todayKey();
   const month = t.slice(0, 7);
-  const tiles = [
+  const tilesOf = () => [
     { ic: "alert", n: all.filter((p) => notContacted(p, set)).length, l: `Not contacted in ${hoursOf(set)} hours`, tone: "bad", show: "nocontact" },
     { ic: "flag", n: all.filter(cancelOpen).length, l: "Cancelled, not rebooked", tone: "bad", show: "cancel" },
     { ic: "inbox", n: all.filter((p) => Date.now() - Date.parse(p.createdAt || "") < 7 * 864e5).length, l: "New enquiries this week", tone: "sky", range: "7" },
@@ -444,7 +484,7 @@ async function mountBoard(container, { view, staff }) {
         ${work ? `<button type="button" class="lh-btn is-primary" data-act="new">${I(IC.plus)} New prospect</button>` : ""}
       </div>
     </div>
-    <div class="pr-tiles">${tiles.map(tileHtml).join("")}</div>
+    <div class="pr-tiles" data-role="tiles"></div>
     <div class="pr-tools">
       <div class="fe-seg">${[["board", "Board"], ["list", "List"], ["followups", "Follow-ups"]].map(([v, l]) =>
         `<label class="fe-seg-btn"><input type="radio" name="pr-view" value="${v}"${st.view === v ? " checked" : ""} /><span>${l}</span></label>`).join("")}</div>
@@ -516,6 +556,7 @@ async function mountBoard(container, { view, staff }) {
   };
 
   function drawBody() {
+    root.querySelector('[data-role="tiles"]').innerHTML = tilesOf().map(tileHtml).join("");
     const pool = all.filter(base);
     root.querySelector('[data-role="show"]').innerHTML = SHOW.map(([k, l, f]) => {
       const n = k ? pool.filter((p) => f(p, set)).length : pool.length;
@@ -558,12 +599,21 @@ async function mountBoard(container, { view, staff }) {
       const items = list.filter((p) => (p.stage || "new") === s.key).sort(byUrgency);
       return `<section class="pr-col is-${s.tone}" data-stage="${s.key}">
         <header><i></i><b>${esc(s.name)}</b><em>${items.length}</em></header>
-        <div class="pr-col-body">${items.map(card).join("") || '<p class="pr-col-empty">None</p>'}</div></section>`;
+        <div class="pr-col-body">${items.slice(0, st.more[s.key] || COL_MAX).map(card).join("") || '<p class="pr-col-empty">None</p>'}${
+          items.length > (st.more[s.key] || COL_MAX) ? `<button type="button" class="lh-btn is-quiet" data-more="${s.key}">Show ${
+            items.length - (st.more[s.key] || COL_MAX)} more</button>` : ""}</div></section>`;
     }).join("")}</div>
     <button type="button" class="lh-btn is-quiet pr-lost-btn" data-act="lost">${st.showLost ? "Hide lost" : `Show lost (${lostN})`}</button>
     ${work ? '<p class="muted pr-hint">Drag a card to another column to move it along.</p>' : ""}`;
   }
   drawBody();
+  const reload = () => loadAll().then((list) => {
+    if (!root.isConnected || st.old) return;
+    all = list;
+    boardCache = { at: Date.now(), list: all };
+    drawBody();
+  }).catch((err) => console.warn("Prospects refresh:", err));
+  if (cached) reload();   // the remembered list is on screen; get the latest quietly
 
   // Older enquiries (over 90 days, never worked): loaded when asked for, or when the dates go back that far
   async function setOld(on) {
@@ -588,7 +638,7 @@ async function mountBoard(container, { view, staff }) {
     const p = all.find((x) => x.id === id);
     if (!p || p.stage === to) return;
     if (to === "lost") { lostDialog(p, set, replace); return; }
-    replace({ ...p, stage: to, stageAt: new Date().toISOString() });   // moves now, saves in the background
+    replace({ ...p, stage: to, stageAt: new Date().toISOString(), ...(to !== "new" ? { waitingSince: "" } : {}) });   // moves now, saves in the background
     showToast(`${p.name}: ${stageOf(to).name}`);
     try {
       const r = await api("stage", { id, stage: to });
@@ -619,7 +669,13 @@ async function mountBoard(container, { view, staff }) {
       syncDates(); maybeOld(); drawBody();
     }
   });
-  root.addEventListener("input", (e) => { if (e.target.dataset.role === "q") { st.q = e.target.value.trim().toLowerCase(); drawBody(); } });
+  let qTimer = 0;
+  root.addEventListener("input", (e) => {
+    if (e.target.dataset.role !== "q") return;
+    st.q = e.target.value.trim().toLowerCase();
+    clearTimeout(qTimer);
+    qTimer = setTimeout(drawBody, 150);   // redraws once typing pauses, not on every key
+  });
   root.addEventListener("click", (e) => {
     const tr = e.target.closest("tr[data-href]");
     if (tr && !e.target.closest("a")) { location.hash = tr.dataset.href; return; }
@@ -630,6 +686,8 @@ async function mountBoard(container, { view, staff }) {
       if (p) followAction(fb.dataset.fu, p, (np) => { if (np) replace(np); });
       return;
     }
+    const mb = e.target.closest("[data-more]");
+    if (mb) { st.more[mb.dataset.more] = (st.more[mb.dataset.more] || COL_MAX) + COL_MAX * 2; drawBody(); return; }
     const sh = e.target.closest("[data-show]");
     if (sh) { st.show = st.show === sh.dataset.show ? "" : sh.dataset.show; drawBody(); return; }
     const rg = e.target.closest("[data-range]");
@@ -643,7 +701,7 @@ async function mountBoard(container, { view, staff }) {
     if (a.dataset.act === "lost") { st.showLost = !st.showLost; drawBody(); }
     if (a.dataset.act === "old") setOld(!st.old);
     if (a.dataset.act === "new") newDialog(all, (id) => { location.hash = `#/prospects/${enc(id)}`; });
-    if (a.dataset.act === "settings") settingsDialog(set, async () => { set = await loadSettings(true); });
+    if (a.dataset.act === "settings") settingsDialog(set, async () => { set = await loadSettings(true); drawBody(); }, reload);
   });
 
   // Drag a card to another column
@@ -803,10 +861,18 @@ function wireTawkImport(c) {
   });
 }
 
-async function settingsDialog(set, onSaved) {
-  const list = await staffList();
-  const ticks = (name, chosen) => `<div class="pr-ticks">${list.map((s) =>
-    `<label class="fe-check"><input type="checkbox" name="${name}" value="${esc(s.id)}"${(chosen || []).includes(s.id) ? " checked" : ""} /> ${esc(s.name)}</label>`).join("")}</div>`;
+function settingsDialog(set, onSaved, onImported) {
+  // Opens straight away. The staff ticks fill in when the list arrives (usually already remembered).
+  const ticks = (name) => `<div class="pr-ticks" data-ticks="${name}"><small class="muted">Loading staff…</small></div>`;
+  const fillTicks = (form, list) => {
+    [["notify", set.notify], ["team", set.team]].forEach(([name, chosen]) => {
+      const box = form.querySelector(`[data-ticks="${name}"]`);
+      if (!box) return;
+      box.innerHTML = list.length ? list.map((s) => `<label class="fe-check"><input type="checkbox" name="${name}" value="${esc(s.id)}"${
+        (chosen || []).includes(s.id) ? " checked" : ""} /> ${esc(s.name)}</label>`).join("")
+        : '<small class="muted">The staff list couldn\'t be loaded. Close Settings and open it again.</small>';
+    });
+  };
   openDialog({
     title: "Prospect settings", submit: "Save",
     body: `
@@ -830,13 +896,19 @@ async function settingsDialog(set, onSaved) {
           : ["Too expensive", "Went elsewhere", "No response", "Not suitable", "Just browsing", "Other"]).join("\n"))}</textarea></label>
       <div class="pr-import"><button type="button" class="lh-btn" data-role="import">Check for new web enquiries now</button><small data-role="imsg"></small></div>`,
     onOpen: (c) => {
+      c.btn.disabled = true;   // until the staff ticks are in, so nobody is unticked by accident
+      staffList().then((list) => { if (c.dlg.open) { fillTicks(c.form, list); c.btn.disabled = !list.length; } });
       wireTawkImport(c);
       c.form.querySelector('[data-role="import"]').addEventListener("click", async (e) => {
         const b = e.currentTarget;
         const m = c.form.querySelector('[data-role="imsg"]');
         b.disabled = true;
-        m.textContent = "Checking info@…";
-        try { const r = await api("importNow", { days: 14 }); m.textContent = r.imported ? `${r.imported} new enquiry email(s) added.` : "No new enquiry emails."; }
+        m.textContent = "Checking info@… (this can take up to a minute)";
+        try {
+          const r = await api("importNow", { days: 14 });
+          m.textContent = r.imported ? `${r.imported} new enquiry email(s) added. They're on the board now.` : "No new enquiry emails.";
+          if (r.imported && onImported) onImported();
+        }
         catch (err) { m.textContent = errText(err); }
         finally { b.disabled = false; }
       });
@@ -865,13 +937,20 @@ async function mountProspect(container, id, staff) {
   let p = null;
   let set = {};
   root.innerHTML = `<a class="back-link" href="#/prospects">← Prospects</a><div class="skeleton" style="height:320px;border-radius:14px"></div>`;
+  let fresh = null;   // the latest copy, read in the background when the board's copy was used
   try {
     const pre = justAdded.get(id);
     justAdded.delete(id);
-    const [snap, s] = await Promise.all([pre ? null : getDoc(doc(db, "prospects", id)), loadSettings()]);
-    set = s;
-    if (pre) p = pre;
-    else if (snap.exists()) p = { id: snap.id, ...snap.data() };
+    const quick = pre || (boardCache && boardCache.list.find((x) => x.id === id)) || null;
+    if (quick) {
+      p = quick;
+      set = await loadSettings();
+      if (!pre) fresh = getDoc(doc(db, "prospects", id));
+    } else {
+      const [snap, s] = await Promise.all([getDoc(doc(db, "prospects", id)), loadSettings()]);
+      set = s;
+      if (snap.exists()) p = { id: snap.id, ...snap.data() };
+    }
   } catch (err) { console.error("Prospect failed:", err); }
   if (!root.isConnected) return;
   if (!p) { root.innerHTML = `<a class="back-link" href="#/prospects">← Prospects</a><div class="state"><strong>Not found</strong>This prospect couldn't be opened.</div>`; return; }
@@ -949,6 +1028,7 @@ async function mountProspect(container, id, staff) {
   }
 
   function render() {
+    cacheUpsert(p);   // the board shows the change when you go back
     const s = stageOf(p.stage);
     const fs = followState(p);
     const late = notContacted(p, set);
@@ -1147,7 +1227,8 @@ async function mountProspect(container, id, staff) {
       const to = sb.dataset.stage;
       if (to === p.stage) return;
       saveFast("stage", { stage: to }, {
-        patch: { stage: to, stageAt: new Date().toISOString(), ...(p.stage === "lost" ? { lostReason: "", lostNote: "" } : {}) },
+        patch: { stage: to, stageAt: new Date().toISOString(), ...(to !== "new" ? { waitingSince: "" } : {}),
+          ...(p.stage === "lost" ? { lostReason: "", lostNote: "" } : {}) },
         log: { kind: "stage", what: `${p.stage === "lost" ? "Reopened: " : "Moved to "}${stageOf(to).name}` },
         msg: stageOf(to).name,
       });
@@ -1238,6 +1319,9 @@ async function mountProspect(container, id, staff) {
   });
 
   render();
+  if (fresh) fresh.then((s) => {
+    if (s.exists() && !pending && root.isConnected && p.id === id) { p = { id: s.id, ...s.data() }; draw(); }
+  }).catch(() => {});
 }
 /* ===================== Reports (#/prospects/reports) ===================== */
 // Everything is worked out here from the prospects (current and older), so filters change instantly.
