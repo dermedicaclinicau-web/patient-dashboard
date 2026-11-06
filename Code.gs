@@ -17558,7 +17558,7 @@ const PROS_STAGE_NAME_ = {
   tx_booked: 'Treatment booked', treated: 'Treated', active: 'Active patient', lost: 'Lost',
 };
 const PROS_SOURCES_ = ['Web form', 'Phone call', 'Walk-in', 'Online chat', 'Instagram', 'Facebook', 'Referral', 'Booked directly', 'Other'];
-const PROS_LOST_ = ['Too expensive', 'Went elsewhere', 'No response', 'Not suitable', 'Just browsing', 'Other'];
+const PROS_LOST_ = ['Too expensive', 'Went elsewhere', 'No response', 'Not suitable', 'Just browsing', 'Spam', 'Test entry', 'Other'];
 const PROS_OUTCOMES_ = { spoke: 'Spoke to them', no_answer: 'No answer', voicemail: 'Left voicemail', met: 'Met in clinic', note: 'Note' };
 
 /* ---------- Small helpers ---------- */
@@ -17595,7 +17595,6 @@ function prosSettings_(cfg) {
     respondHours: Math.max(1, Math.min(168, Math.floor(Number(d.respondHours) || 24))),
     tawkSkipPatients: d.tawkSkipPatients === true,
     lostReasons: (Array.isArray(d.lostReasons) && d.lostReasons.length ? d.lostReasons : PROS_LOST_)
-    lostIgnore: (Array.isArray(body.lostIgnore) ? body.lostIgnore : []).map(function (s) { return String(s).trim().slice(0, 60); }).filter(String).slice(0, 30),
       .map(function (s) { return String(s).replace(/\s+/g, ' ').trim().slice(0, 60); }).filter(Boolean).slice(0, 20),
   };
 }
@@ -17991,9 +17990,18 @@ function prosNotify_(cfg, set, r, f) {
 
 /* ---------- Importing the web form emails (runNotifications, every 5 minutes) ---------- */
 
-// Imports the web form emails. days: how far back. olderThan: skip anything newer than this (the background import).
-// More than 3 days old: quiet (no staff email, not shared out, not flagged). More than 90 days old: an Older enquiry.
+// Only one import at a time: the Refresh button, the 5-minute trigger and the backfill never read
+// the same email together (that could create the same person twice).
+// The flag lasts 5 minutes, just longer than an import can run (4.5 min), so a crash never leaves it stuck.
 function prosImport_(cfg, max, days, olderThan) {
+  const c = CacheService.getScriptCache();
+  if (c.get('pros_import')) return 0;            // another import is running: it picks these up
+  c.put('pros_import', '1', 300);
+  try { return prosImportRun_(cfg, max, days, olderThan); }
+  finally { c.remove('pros_import'); }
+}
+
+function prosImportRun_(cfg, max, days, olderThan) {
   const deadline = Date.now() + 4.5 * 60000;   // stops in time, rather than being cut off at 6 minutes
   const label = GmailApp.getUserLabelByName(PROS_LABEL_) || GmailApp.createLabel(PROS_LABEL_);
   const threads = GmailApp.search('subject:"Att. Prospect Team" newer_than:' + (days || 14) + 'd' +
@@ -18034,7 +18042,6 @@ function prosImport_(cfg, max, days, olderThan) {
   if (n || more) console.log('Prospects: ' + n + ' enquiry email(s) imported.' + (more ? ' More are left: run it again.' : ''));
   return n;
 }
-
 /* ---------- The daily reminder (after 8 am Perth, once a day) ---------- */
 
 function prosDaily_(cfg, now) {
@@ -18089,6 +18096,7 @@ function handleProspects_(body) {
     const cfg = getConfig_();
     if (op === 'ptSearch') return upPtSearch_(body);
     if (!work) return { ok: false, error: 'FORBIDDEN' };
+    if (op === 'refresh') return prosRefresh_(cfg);
     if (op === 'add') return prosAdd_(cfg, body, session);
     if (op === 'tawkImport') {
       if (!manage) return { ok: false, error: 'FORBIDDEN' };
@@ -18109,6 +18117,20 @@ function handleProspects_(body) {
     console.error('Prospects ' + op + ' failed: ' + (err && err.stack ? err.stack : err));
     return { ok: true, problem: 'Something went wrong: ' + String(err && err.message ? err.message : err).slice(0, 200) };
   }
+}
+
+// Prospect Dashboard → Refresh: new web form emails and outside contact, checked now.
+// Once a minute at most, so several people pressing it don't pile up Gmail reads.
+function prosRefresh_(cfg) {
+  const cache = CacheService.getScriptCache();
+  if (cache.get('pros_refresh')) return { ok: true, imported: 0, contacts: 0, recent: true };
+  cache.put('pros_refresh', '1', 60);
+  const out = { ok: true, imported: 0, contacts: 0 };
+  try { out.imported = prosImport_(cfg, 30, 3); }
+  catch (e) { console.warn('Refresh: enquiry emails not checked: ' + e); out.problem = "New enquiry emails couldn't be checked."; }
+  try { out.contacts = Number((prosContactCheck_(cfg, false) || {}).written || 0); }
+  catch (e) { console.warn('Refresh: contact check failed: ' + e); }
+  return out;
 }
 
 function prosAdd_(cfg, body, session) {
@@ -18305,10 +18327,16 @@ function prosSaveSettings_(cfg, body, session) {
   const ids = function (v) { return uniq_((Array.isArray(v) ? v : []).map(String).filter(function (x) { return active[x]; })).slice(0, 30); };
   const reasons = uniq_((Array.isArray(body.lostReasons) ? body.lostReasons : [])
     .map(function (s) { return String(s).replace(/\s+/g, ' ').trim().slice(0, 60); }).filter(Boolean)).slice(0, 20);
+  const kept = reasons.length ? reasons : PROS_LOST_;
+  // "Not counted" reasons: only ones that are still in the list
+  const ignore = uniq_((Array.isArray(body.lostIgnore) ? body.lostIgnore : [])
+    .map(function (s) { return String(s).replace(/\s+/g, ' ').trim().slice(0, 60); })
+    .filter(function (s) { return s && kept.indexOf(s) !== -1; })).slice(0, 30);
   commitWrites_(cfg, [updateWrite_(cfg, PROS_SET_, {
     notify: ids(body.notify), team: ids(body.team),
     respondHours: Math.max(1, Math.min(168, Math.floor(Number(body.respondHours) || 24))),
-    lostReasons: reasons.length ? reasons : PROS_LOST_,
+    lostReasons: kept,
+    lostIgnore: ignore,
     tawkSkipPatients: body.tawkSkipPatients === true,
     updatedAt: new Date().toISOString(), updatedBy: String(session.name || ''), updatedByUid: String(session.uid || ''),
   })]);

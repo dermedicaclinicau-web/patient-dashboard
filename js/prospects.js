@@ -247,6 +247,7 @@ const IC = {
   gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
   trophy: '<path d="M8 21h8"/><path d="M12 17v4"/><path d="M7 4h10v5a5 5 0 0 1-10 0z"/><path d="M17 5h3v2a3 3 0 0 1-3 3"/><path d="M7 5H4v2a3 3 0 0 0 3 3"/>',
   chart: '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>',
+  refresh: '<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
 };
 const KIND_IC = { enquiry: "inbox", contact: "phone", text: "text", email: "mail", note: "note", stage: "flag",
   follow: "clock", assign: "user", link: "link", edit: "note", cancel: "alert" };
@@ -494,6 +495,8 @@ async function mountBoard(container, { view, staff }) {
     <div class="pr-top">
       <div><h2>Prospect Dashboard</h2><p class="muted">Everyone who's enquired, from first contact to becoming a patient.</p></div>
       <div class="pr-top-acts">
+        <button type="button" class="lh-btn is-quiet pr-refresh" data-act="refresh" title="Check for new enquiries and reload the board">
+          ${I(IC.refresh)} <span class="pr-refresh-tx">Refresh</span></button>
         <a class="lh-btn is-quiet" href="#/prospects/reports">${I(IC.chart)} Reports</a>
         ${can("prospects.manage") ? `<button type="button" class="lh-btn is-quiet" data-act="settings">${I(IC.gear)} Settings</button>` : ""}
         ${work ? `<button type="button" class="lh-btn is-primary" data-act="new">${I(IC.plus)} New prospect</button>` : ""}
@@ -630,6 +633,44 @@ async function mountBoard(container, { view, staff }) {
   }).catch((err) => console.warn("Prospects refresh:", err));
   if (cached) reload();   // the remembered list is on screen; get the latest quietly
 
+  // Refresh: Apps Script checks info@ (and texts and emails sent outside the portal) now, then the board is read again.
+  // People who can only view prospects just get the board reloaded.
+  let refreshing = false;
+  async function refreshNow(btn) {
+    if (refreshing) return;
+    refreshing = true;
+    const tx = btn.querySelector(".pr-refresh-tx");
+    btn.disabled = true;
+    btn.classList.add("is-busy");
+    tx.textContent = "Checking…";
+    let r = {};
+    try {
+      if (work) {
+        try { r = (await api("refresh")) || {}; }
+        catch (err) { r = { problem: `${errText(err, "New emails couldn't be checked.")} The board was reloaded.` }; }
+      }
+      const [list, s] = await Promise.all([loadAll(st.old), loadSettings(true)]);
+      if (!root.isConnected) return;
+      all = list;
+      set = s;
+      boardCache = { at: Date.now(), list: st.old ? all.filter((p) => !p.historic) : all };
+      drawBody();
+      const bits = [];
+      if (r.imported) bits.push(`${r.imported} new enquir${r.imported === 1 ? "y" : "ies"}`);
+      if (r.contacts) bits.push(`${r.contacts} contact${r.contacts === 1 ? "" : "s"} picked up`);
+      showToast(r.problem || (bits.length ? bits.join(" · ")
+        : r.recent ? "Up to date (checked in the last minute)" : "Up to date"));
+    } catch (err) {
+      console.warn("Prospects refresh:", err);
+      showToast("Couldn't reload the board. Check your connection and try again.");
+    } finally {
+      refreshing = false;
+      btn.disabled = false;
+      btn.classList.remove("is-busy");
+      tx.textContent = "Refresh";
+    }
+  }
+
   // Older enquiries (over 90 days, never worked): loaded when asked for, or when the dates go back that far
   async function setOld(on) {
     if (on === st.old) return;
@@ -714,6 +755,7 @@ async function mountBoard(container, { view, staff }) {
     const a = e.target.closest("[data-act]");
     if (!a) return;
     if (a.dataset.act === "lost") { st.showLost = !st.showLost; drawBody(); }
+    if (a.dataset.act === "refresh") { refreshNow(a); return; }
     if (a.dataset.act === "old") setOld(!st.old);
     if (a.dataset.act === "new") newDialog(all, (id) => { location.hash = `#/prospects/${enc(id)}`; });
     if (a.dataset.act === "settings") settingsDialog(set, async () => { set = await loadSettings(true); drawBody(); }, reload);

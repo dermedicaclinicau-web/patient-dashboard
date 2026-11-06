@@ -11011,3 +11011,10 @@ dialog.lh-dialog.pr-dlg.prs-dlg { width: min(820px, calc(100vw - 2rem)); }
   .prs-reason .prs-x { grid-column: 2; grid-row: 1; }
   .prs-reason { grid-template-columns: minmax(0, 1fr) 36px; }
 }
+
+/* Prospect Dashboard → Refresh */
+.pr-refresh .pr-ic { transition: transform .2s; }
+.pr-refresh.is-busy .pr-ic { animation: pr-spin .8s linear infinite; }
+.pr-refresh:disabled { opacity: .7; cursor: progress; }
+@keyframes pr-spin { to { transform: rotate(360deg); } }
+@media (max-width: 640px) { .pr-refresh-tx { display: none; } }   /* icon only on phones */
