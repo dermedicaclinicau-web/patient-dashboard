@@ -11048,3 +11048,20 @@ details.sub-card.has-items > summary .hint { background: #fef3c7; color: #92400e
 /* Appointment History: draft consultation notes are brown (no "Draft" word) */
 .hv-badge.b-summary.is-draft { background: #f4e9dd; color: #7a4a1f; border-color: #d8b38c; }
 .hv-badge.b-summary.is-draft svg { color: #a8693a; }
+
+/* Chips on the collapsed Pre-Consultation header */
+.pc-peek { display: inline-flex; gap: 6px; margin-left: 10px; flex-wrap: wrap; }
+.pc-chip {
+  font: inherit; font-size: 12px; font-weight: 600; padding: 2px 10px; border-radius: 999px;
+  border: 1px solid transparent; cursor: pointer;
+}
+.pc-chip.is-today { background: #e8f7f0; color: #0f7a55; border-color: #bfe8d6; }
+.pc-chip.is-rmd { background: #fef3c7; color: #92400e; border-color: #f6d98b; }
+.pc-card[open] .pc-peek { display: none; }   /* open: the real cards are visible */
+
+/* Expand / Collapse all */
+.pd-toolbar { display: flex; justify-content: flex-end; gap: 8px; margin: 4px 0 -4px; }
+
+@media (max-width: 700px) {
+  .pc-peek { margin: 6px 0 0; width: 100%; }
+}

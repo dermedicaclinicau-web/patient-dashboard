@@ -204,6 +204,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   let transcriptRecords = [];  // consultations, newest first (for the master plan)
   let planView = null;         // the Treatment Plan overview
   let recordsView = null;      // Treatment Records + Consent Records
+  let reminderCount = 0;       // for the chips on the collapsed Pre-Consultation header
   // Skin script (SSP): the tile and the Skincare section's "Create new SSP" open the builder in a new tab.
   // Caught first (capture phase), so no other click handler also opens it in this tab.
   root.addEventListener("click", (e) => {
@@ -223,6 +224,23 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       e.preventDefault();   // the record row may be a link or open a panel: only copy
       e.stopPropagation();
       copyOldWrRecord({ patientId: patient.id, record: wc.dataset.wrcopy });
+      return;
+    }
+    const peek = t.closest("[data-peek]");
+    if (peek) {
+      const pc = root.querySelector('details[data-key="preconsult"]');
+      if (pc) pc.open = true;
+      const target = root.querySelector(peek.dataset.peek);
+      if (target) {
+        if (target.tagName === "DETAILS") target.open = true;
+        target.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+      return;
+    }
+    if (t.closest("[data-action='expand-all']")) { topSections().forEach((d) => { d.open = true; }); return; }
+    if (t.closest("[data-action='collapse-all']")) {
+      root.querySelectorAll("details:not(.pa-bdg-menu)").forEach((d) => { d.open = false; });
+      root.scrollIntoView({ behavior: "smooth", block: "start" });
       return;
     }
     const refreshBtn = t.closest("[data-action='refresh-pc']");
@@ -325,6 +343,11 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       </div>
     </div>
 
+    <div class="pd-toolbar">
+      <button type="button" class="btn-ghost sm" data-action="expand-all">Expand all</button>
+      <button type="button" class="btn-ghost sm" data-action="collapse-all">Collapse all</button>
+    </div>
+
     ${preConsultHtml()}
 
     ${treatmentPlansSectionHtml()}
@@ -349,8 +372,10 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
 
     ${dialogHtml()}`;
 
-  // Sections from the other views start collapsed too
-  root.querySelectorAll("details.section-card, details.sub-card, details.tp-history").forEach((d) => { d.open = false; });
+  // Every section starts collapsed, whichever file draws it
+  try { localStorage.removeItem("pd-open-sections"); } catch { /* private mode */ }   // old saved open/closed state
+  topSections().forEach((d) => { d.open = false; });
+  root.querySelectorAll("details.sub-card, details.tp-history").forEach((d) => { d.open = false; });
 
   const bar = root.querySelector(".patient-bar");
   const todaySlot = root.querySelector(".today-slot");
@@ -369,6 +394,19 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     onReminder: () => { loadReminders(); if (tasksView) tasksView.reload(); },
   });
 
+    // Top-level sections: <details> directly on the page, or one level down (e.g. the Clinical History rows)
+  function topSections() {
+    return [...root.children].flatMap((el) => (el.matches("details") ? [el] : [...el.querySelectorAll(":scope > details")]));
+  }
+  // Chips on the Pre-Consultation header, so the key things show while it's collapsed
+  function renderPeek() {
+    const el = root.querySelector(".pc-peek");
+    if (!el) return;
+    el.innerHTML = [
+      todayAppts.length && `<button type="button" class="pc-chip is-today" data-peek=".today-slot">Appt today ${escapeHtml(todayAppts[0].time || "")}</button>`,
+      reminderCount && `<button type="button" class="pc-chip is-rmd" data-peek='details[data-key="reminders"]'>${reminderCount} reminder${reminderCount === 1 ? "" : "s"}</button>`,
+    ].filter(Boolean).join("");
+  }
   function renderTop() {
     bar.innerHTML = barHtml(patient, todayAppts, preData);
   }
@@ -474,6 +512,16 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     window.removeEventListener("storage", onSavedStorage);
   }
 
+  // Left this patient (or the page reloaded it): drop every page-wide listener straight away
+  const onLeave = () => setTimeout(() => {
+    if (root.isConnected) return;   // still here (e.g. a hash change inside the page)
+    stopListening();
+    document.removeEventListener("click", closeBadgeMenus);
+    window.removeEventListener("master-plan-updated", onPlanUpdated);
+    window.removeEventListener("hashchange", onLeave);
+  }, 0);
+  window.addEventListener("hashchange", onLeave);
+
   // Treatment plan + Social history, both from appointment_transcripts (fetched once)
   async function loadTranscriptSections() {
     const socialCard = root.querySelector('details[data-key="social-history"]');
@@ -555,6 +603,8 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
         : `<p class="empty-note">No pending reminders for this patient.</p>`;
       card.classList.toggle("is-empty", !tasks.length);
       card.classList.toggle("has-items", tasks.length > 0);   // the count stands out, but it stays collapsed
+      reminderCount = tasks.length;
+      renderPeek();
     } catch (err) {
       if (!root.isConnected) return;
       console.error("Reminders failed:", err);
@@ -820,6 +870,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       if (!root.isConnected) return;
       todaySlot.innerHTML = todayHtml(todayAppts);
       renderTop();
+      renderPeek();
       if (planView) planView.redraw();
     } catch (err) {
       if (!root.isConnected) return;
@@ -985,7 +1036,7 @@ function preConsultHtml() {
   return `
     <details class="section-card pc-card" data-key="preconsult" ${isOpen("preconsult", true) ? "open" : ""}>
       <summary>
-        <span class="pc-head">${ICONS.chev}<span class="pc-title">Pre-Consultation Information</span><span class="pc-updated"></span></span>
+        <span class="pc-head">${ICONS.chev}<span class="pc-title">Pre-Consultation Information</span><span class="pc-peek"></span><span class="pc-updated"></span></span>
         <button type="button" class="pc-refresh" data-action="refresh-pc">${ICONS.refresh}<span>Refresh</span></button>
       </summary>
       <div class="section-body pc-body">${blocks}</div>
