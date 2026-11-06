@@ -12,7 +12,7 @@ import {
   recordPatientReturn, recordSupplierReturn, markReturnCredited, listReturns, RETURN_REASONS, RETURN_STATUS,
   rebuildPlan, applyRebuild, listCountsOn, getInvoiceSettings, saveInvoiceSettings,
   listBaseCounts, saveBaseCount, planFromBases, productLedger, suggestInvoiceLinks, invoiceNameKey,
-  removeBaseCount, canUndoCorrection, undoCorrection,
+  removeBaseCount, canUndoCorrection, undoCorrection, productSales, settlePendingSales,
 } from "./inventory-api.js";
 import { searchPatients } from "./task-runner.js";
 import { openSetKitDialog, openKitFromShelfDialog } from "./kit-admin.js";
@@ -2512,6 +2512,136 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     let pdMoves = [];   // the activity shown, for Undo / Used on a patient…
     let pdReturns = [];   // the returns shown, for Credit received
     const canOpen = canMove || can("consult.record");
+
+    // Sales: every sale since a day, and whether it came off stock. Loaded on request (it reads the Timely invoices).
+    const baseKey = () => (st.bases.get(id) || {}).dateKey || "";
+    const sl = { fromKey: baseKey() || dayKey(new Date(Date.now() - 90 * 864e5)), open: false, busy: false, err: "",
+      list: [], startDate: "", only: false, sel: new Set() };
+    const SALE_STATE = { taken: ["Taken off", "is-ok"], short: ["Shelf was short", "is-warn"], pending: ["Not taken off stock", "is-bad"],
+      counted: ["Counted, stock not changed", "is-info"], voided: ["Voided", ""] };
+    const SALE_SRC = { invoice: "Invoice", manual: "By hand", scan: "Billing sheet", pos: "Checkout" };
+
+    async function loadSales() {
+      const p = st.products.find((x) => x.id === id);
+      if (!p) return;
+      sl.busy = true;
+      sl.err = "";
+      drawSales();
+      try {
+        const res = await callApi({ action: "inventory", op: "invoiceLines", from: sl.fromKey, to: dayKey() });
+        if (res.problem) throw new Error(res.problem);
+        const r = await productSales({ product: p, fromKey: sl.fromKey, invoiceRows: res.rows || [], allProducts: st.products });
+        sl.list = r.list;
+        sl.startDate = r.startDate;
+        const cut = baseKey();
+        sl.sel = new Set(r.list.filter((s) => s.state === "pending" && (!cut || s.date >= cut)).map((s) => s.id));
+        sl.open = true;
+      } catch (ex) {
+        console.error("Sales not loaded:", ex);
+        sl.err = errText(ex, "Couldn't load the sales. Try again.");
+      }
+      sl.busy = false;
+      drawSales();
+    }
+
+    function drawSales() {
+      const el = box.querySelector('[data-role="sales"]');
+      const p = st.products.find((x) => x.id === id);
+      if (!el || !p) return;
+      const unit = p.stockUnit;
+      const cut = baseKey();
+      const head = `<div class="inv-pd-salehead"><h4>Sales</h4>
+        <label class="inv-pd-salefrom">Since <input type="date" data-sl="from" value="${sl.fromKey}" max="${dayKey()}" /></label>
+        <button type="button" class="lh-btn${sl.open ? " is-quiet" : ""}" data-sl="load"${sl.busy ? " disabled" : ""}>${
+          sl.busy ? "Checking invoices…" : sl.open ? "Refresh" : "Show sales"}</button></div>`;
+      if (sl.busy) { el.innerHTML = `<div class="inv-pd-sec">${head}<div class="skeleton" style="height:120px;border-radius:12px"></div></div>`; return; }
+      if (sl.err) { el.innerHTML = `<div class="inv-pd-sec">${head}<p class="tb-none tb-bad">${esc(sl.err)}</p></div>`; return; }
+      if (!sl.open) {
+        el.innerHTML = `<div class="inv-pd-sec">${head}<p class="muted">Every sale since ${esc(niceDate(sl.fromKey))}: Timely invoices,
+          billing sheets and sales recorded by hand, and whether each one came off stock.</p></div>`;
+        return;
+      }
+
+      const L = sl.list;
+      const sum = (pred) => L.filter(pred).reduce((a, s) => a + s.qty, 0);
+      const sold = sum((s) => s.state !== "voided");
+      const taken = L.filter((s) => s.state === "taken" || s.state === "short").reduce((a, s) => a + s.taken, 0);
+      const pending = L.filter((s) => s.state === "pending");
+      const pendN = pending.reduce((a, s) => a + s.qty, 0);
+      const shortN = L.filter((s) => s.state === "short").reduce((a, s) => a + s.qty - s.taken, 0);
+      const countedN = sum((s) => s.state === "counted");
+      const after = pending.filter((s) => !cut || s.date >= cut).length;
+      const before = pending.length - after;
+      const rows = sl.only ? L.filter((s) => s.state === "pending" || s.state === "short") : L;
+      const picks = canManage && pending.length;
+      const pill = (label, v, cls = "") => `<span class="inv-lg-pill ${cls}"><b>${esc(String(v))}</b> ${esc(label)}</span>`;
+
+      el.innerHTML = `<div class="inv-pd-sec inv-pd-sales">${head}
+        <div class="inv-lg-sum">
+          ${pill("sold", sold, "is-strong")}
+          ${pill("taken off stock", taken)}
+          ${pendN ? pill("not taken off", pendN, "is-warn") : ""}
+          ${shortN ? pill("the Shelf was short", shortN, "is-warn") : ""}
+          ${countedN ? pill("counted, stock not changed", countedN) : ""}
+        </div>
+        ${!sl.startDate ? `<p class="inv-hint is-warn">Invoice uploads don't take sales off stock yet: there's no invoice start date.
+          Set it in Products → <strong>Invoice links</strong> (the same day as your base counts).</p>` : ""}
+        ${after ? `<p class="inv-hint is-warn"><strong>${plural(after, "sale")}${cut ? ` since the base count (${esc(niceDate(cut))})` : ""}
+          never came off stock.</strong> Usually the invoice name wasn't linked when it was uploaded, or it was before the invoice start date.</p>` : ""}
+        ${before ? `<p class="inv-hint">${plural(before, "sale")} before the base count never came off stock. The base count already
+          reflects them, so <strong>mark them as already counted</strong> rather than taking them off.</p>` : ""}
+        ${L.length ? `<label class="fe-check"><input type="checkbox" data-sl="only"${sl.only ? " checked" : ""} /> Only ones not taken off</label>
+          <div class="inv-pd-salescroll"><table class="inv-table inv-pd-saletable"><thead><tr>${picks ? "<th></th>" : ""}
+            <th>Sold</th><th>From</th><th>Patient</th><th>Qty</th><th>Stock</th></tr></thead><tbody>${rows.map((s) => {
+            const [label, cls] = SALE_STATE[s.state] || [s.state, ""];
+            return `<tr class="${s.state === "pending" ? "is-diff" : ""}">
+              ${picks ? `<td>${s.state === "pending" ? `<input type="checkbox" data-slpick="${esc(s.id)}"${sl.sel.has(s.id) ? " checked" : ""}
+                aria-label="Select ${esc(s.invoiceId || "sale")}" />` : ""}</td>` : ""}
+              <td>${esc(niceDate(s.date))}${cut && s.date < cut ? '<small class="muted">before base count</small>' : ""}</td>
+              <td>${esc(SALE_SRC[s.source] || s.source)}${s.invoiceId ? ` ${esc(s.invoiceId)}` : ""}${s.provider ? `<small class="muted">${esc(s.provider)}</small>` : ""}</td>
+              <td>${esc(s.patientName || "—")}</td><td>${esc(plural(s.qty, unit))}</td>
+              <td><span class="inv-flag ${cls}">${esc(label)}</span>${s.state === "short" ? `<small>${s.qty - s.taken} not taken off</small>` : ""}${
+                s.batches.length ? `<small class="muted">${esc(batchName(p))} ${esc(s.batches.join(", "))}</small>` : ""}</td></tr>`;
+          }).join("") || `<tr><td colspan="${picks ? 6 : 5}" class="tb-none">Nothing still to sort out. 👍</td></tr>`}</tbody></table></div>`
+          : `<p class="tb-none">No sales since ${esc(niceDate(sl.fromKey))}.</p>`}
+        ${picks ? `<div class="inv-pd-saleacts"><small class="muted">${sl.sel.size} ticked</small>
+          <button type="button" class="lh-btn is-primary" data-sl="take"${sl.sel.size ? "" : " disabled"}>Take off stock</button>
+          <button type="button" class="lh-btn" data-sl="mark"${sl.sel.size ? "" : " disabled"}>Mark as already counted</button></div>` : ""}
+        <small class="fe-note">Only invoice names linked to this product are listed. An unlinked name won't show here: link it in Products → Invoice links.</small>
+      </div>`;
+    }
+
+    async function settleSales(deduct, btn) {
+      const p = st.products.find((x) => x.id === id);
+      const items = sl.list.filter((s) => s.state === "pending" && sl.sel.has(s.id));
+      if (!p || !items.length) return;
+      const n = items.reduce((a, s) => a + s.qty, 0);
+      const ok = await confirmDialog({
+        title: deduct ? `Take ${plural(n, p.stockUnit)} off the Shelf?` : `Mark ${plural(items.length, "sale")} as already counted?`,
+        message: deduct
+          ? "Each comes off the Shelf (oldest expiry first), dated the day it was sold. Opening counts done since are corrected."
+          : "Stock doesn't change. They're recorded, so they stop showing as missing and an invoice upload never takes them off.",
+        confirmLabel: deduct ? "Take off stock" : "Mark as counted",
+      });
+      if (!ok) return;
+      btn.disabled = true;
+      btn.textContent = "Saving…";
+      try {
+        const r = await settlePendingSales(p, items, { deduct }, staff);
+        const bd = r.backdated;
+        showToast([
+          deduct ? `${plural(r.done, "sale")} taken off stock.` : `${plural(r.done, "sale")} marked as counted.`,
+          r.short ? `The Shelf was short by ${r.short}.` : "",
+          bd.lines ? `${bd.lines} count line${bd.lines === 1 ? "" : "s"} corrected${bd.closed ? `, ${bd.closed} investigation${bd.closed === 1 ? "" : "s"} closed` : ""}.` : "",
+          r.failed.length ? `Couldn't save: ${r.failed.slice(0, 3).join(", ")}.` : "",
+        ].filter(Boolean).join(" "));
+      } catch (ex) {
+        console.error("Sales not settled:", ex);
+        showToast(errText(ex, "Couldn't save. Try again."));
+      }
+      await load();
+      if (dlg.open) { draw(); await loadSales(); }
+    }
     function sharedSecHtml(p) {
       const list = st.open.filter((c) => c.productId === p.id);
       return `<div class="inv-pd-sec"><h4>Opened now <small>(not counted in stock)</small></h4>${list.length ? `<ul class="inv-open">${list.map((c) => {
@@ -3058,7 +3188,9 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
               ${b ? '<button type="button" class="lh-btn is-quiet" data-act="base-remove">Remove</button>' : ""}</span></div>`;
         })() : ""}
         <div data-role="returns"></div>
+        ${canView ? '<div data-role="sales"></div>' : ""}
         <div class="inv-pd-sec"><h4>Recent activity</h4><div data-role="moves"><p class="tb-none">Loading…</p></div></div>`;
+      drawSales();
       listMoves({ productId: id, max: 15 })
         .then((m) => { pdMoves = m; const el = box.querySelector('[data-role="moves"]'); if (el) el.innerHTML = movesHtml(m, false, labelOf, canManage); })
         .catch(() => { const el = box.querySelector('[data-role="moves"]'); if (el) el.innerHTML = '<p class="tb-none tb-bad">Couldn\'t load the activity.</p>'; });
@@ -3067,8 +3199,24 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         .catch((err) => console.warn("Returns not loaded:", err));
     }
 
+    box.addEventListener("change", (e) => {
+      const t = e.target;
+      if (t.dataset.sl === "from" && /^\d{4}-\d{2}-\d{2}$/.test(t.value) && t.value <= dayKey()) {
+        sl.fromKey = t.value;
+        if (sl.open) loadSales(); else drawSales();
+      } else if (t.dataset.sl === "only") { sl.only = t.checked; drawSales(); }
+      else if (t.dataset.slpick) { if (t.checked) sl.sel.add(t.dataset.slpick); else sl.sel.delete(t.dataset.slpick); drawSales(); }
+    });
+
     box.addEventListener("click", async (e) => {
       if (e.target.closest('[data-act="close"]')) { dlg.close(); return; }
+      const sb = e.target.closest("button[data-sl]");
+      if (sb && !sl.busy) {
+        if (sb.dataset.sl === "load") loadSales();
+        else if (sb.dataset.sl === "take") settleSales(true, sb);
+        else if (sb.dataset.sl === "mark") settleSales(false, sb);
+        return;
+      }
       const p = st.products.find((x) => x.id === id);
       if (!p) return;
       if (e.target.closest('[data-act="sale"]')) {

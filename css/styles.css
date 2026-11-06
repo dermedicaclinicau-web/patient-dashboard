@@ -11024,3 +11024,12 @@ dialog.lh-dialog.pr-dlg.prs-dlg { width: min(820px, calc(100vw - 2rem)); }
 .ivx-clear .ivx-clear-row { cursor: pointer; }
 .ivx-clear .ivx-clear-row > input[type="checkbox"] { width: 18px; height: 18px; flex: 0 0 auto; }
 .ivx-clear .ivx-clear-row:has(input:not(:checked)) { opacity: .55; }
+
+/* Product window → Sales */
+.inv-pd-salehead { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.inv-pd-salehead h4 { margin: 0 auto 0 0; }
+.inv-pd-salefrom { display: flex; align-items: center; gap: 6px; font-size: .85rem; color: var(--muted, #64748b); }
+.inv-pd-sales .inv-lg-sum { margin: 10px 0; }
+.inv-pd-salescroll { max-height: 320px; overflow: auto; margin-top: 8px; }
+.inv-pd-saletable td small { display: block; }
+.inv-pd-saleacts { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }

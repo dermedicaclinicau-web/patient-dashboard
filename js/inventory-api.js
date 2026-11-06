@@ -5656,6 +5656,89 @@ export async function productLedger({ product, fromKey, start = null, invoiceRow
   return { fromKey, days: out, startAt, source, digitalStart };
 }
 
+/* ===================== One product's sales, and the ones that never came off stock ===================== */
+// Recorded sales (invoice, billing sheet, checkout, by hand) since a day, plus Timely invoice lines for this product
+// that were never recorded (so never came off stock). invoiceRows: [[invoiceId, date, patientName, productName]]
+// from Apps Script (op "invoiceLines"). state: taken · short (the Shelf didn't have them all) · counted (recorded
+// without changing stock) · pending (never recorded) · voided
+export async function productSales({ product, fromKey, invoiceRows = [], allProducts = [] }) {
+  if (!KEY_RE.test(fromKey || "")) throw new Error("Choose a start day.");
+  const pid = product.id;
+  const col = collection(db, "inv_sales");
+  const [byAppt, byDay, cfg] = await Promise.all([
+    getDocs(query(col, where("apptDate", ">=", fromKey))),
+    getDocs(query(col, where("dateKey", ">=", fromKey))),   // billing sheet scans have no sale date of their own
+    getInvoiceSettings(),
+  ]);
+  const docs = new Map();
+  [...byAppt.docs, ...byDay.docs].forEach((d) => docs.set(d.id, d));
+  const list = [];
+  docs.forEach((d) => {
+    const x = d.data() || {};
+    const l = (Array.isArray(x.lines) ? x.lines : []).find((y) => y.productId === pid);
+    if (!l) return;
+    const date = KEY_RE.test(x.apptDate || "") ? x.apptDate : String(x.dateKey || "");
+    if (date < fromKey) return;
+    const qty = Number(l.qty) || 0, taken = Number(l.taken) || 0;
+    list.push({
+      id: d.id, date, source: String(x.source || "scan"), invoiceId: String(x.invoiceId || ""),
+      patientName: String(x.patientName || ""), provider: String(x.provider || ""), qty, taken,
+      state: x.voided ? "voided" : x.deducted === false ? "counted" : taken < qty ? "short" : "taken",
+      batches: [...new Set((l.rows || []).map((r) => r.batch).filter(Boolean))],
+    });
+  });
+
+  // Invoice lines never recorded: matched to this product the same way as an upload
+  const link = new Map((allProducts.length ? allProducts : [product]).filter((p) => p.active !== false)
+    .map((p) => [invoiceNameKey(p.name), p.id]));
+  cfg.links.forEach((l) => link.set(invoiceNameKey(l.name), l.productId));
+  const pending = new Map();
+  invoiceRows.forEach(([invoiceId, date, patientName, name]) => {
+    if (!KEY_RE.test(date || "") || date < fromKey || link.get(invoiceNameKey(name)) !== pid) return;
+    const id = `invoice__${slug(invoiceId)}__${pid}`;
+    if (docs.has(id)) return;
+    const s = pending.get(id) || { id, date, source: "invoice", invoiceId: String(invoiceId || ""),
+      patientName: String(patientName || ""), provider: "", qty: 0, taken: 0, state: "pending", batches: [] };
+    s.qty++;
+    pending.set(id, s);
+  });
+
+  return {
+    list: [...list, ...pending.values()].sort((a, b) => b.date.localeCompare(a.date) || a.invoiceId.localeCompare(b.invoiceId)),
+    startDate: cfg.startDate,
+  };
+}
+
+// Invoice lines that never came off stock (from productSales). deduct: off the Shelf now, dated the day they sold,
+// and opening counts done since are corrected. Otherwise they're recorded as already counted (stock doesn't change),
+// e.g. sold before the base count. Either way they're recorded under a fixed id, so an upload never takes them off again.
+export async function settlePendingSales(product, items, { deduct = true } = {}, staff) {
+  const res = { done: 0, already: 0, short: 0, failed: [], backdated: { lines: 0, closed: 0, skipped: [], failed: 0 } };
+  const applied = [];
+  for (const s of items || []) {
+    try {
+      const r = await recordSale({
+        source: "invoice", invoiceId: s.invoiceId, patientName: s.patientName, apptDate: s.date,
+        note: deduct ? "Taken off from the product's sales list" : "Marked as already counted (sold before the base count)",
+        lines: [{ productId: product.id, qty: s.qty }],
+      }, staff, { saleId: s.id, deduct });
+      if (r.already) { res.already++; continue; }
+      res.done++;
+      const l = r.lines[0];
+      if (l && l.short) res.short += l.short;
+      if (deduct && l) applied.push({ saleId: r.id, productId: product.id, date: s.date, rows: l.rows || [] });
+    } catch (err) {
+      console.error("Sale not settled:", s.invoiceId, err);
+      res.failed.push(s.invoiceId || s.id);
+    }
+  }
+  if (applied.length) {
+    res.backdated = await backdateCounts(applied, staff)
+      .catch((err) => { console.warn("Counts not corrected:", err); return { lines: 0, closed: 0, skipped: [], failed: 1 }; });
+  }
+  return res;
+}
+
 // Invoice names that aren't linked yet: the product each one most likely is, ignoring sizes ("30ml", "50 g")
 // and capitals. Several equally close products (e.g. 30ml and 50ml of the same cream) are listed to choose from.
 const sizeless = (s) => invoiceNameKey(s)
