@@ -178,6 +178,22 @@ function renderAll(root) {
   if (st.records === null) return; // wait for consultation records
   root.querySelectorAll(".hx-card").forEach((card) => renderCard(root, card));
   syncPreconsultSocial(root);
+  publishAllergies(root);
+}
+
+// Tells the patient bar what's known about allergies: the team's Current list first, otherwise the latest consultation
+function publishAllergies(root) {
+  const st = stateFor(root);
+  const section = curatedFor(st, "allergies");
+  let texts = null;                                   // null = nothing recorded anywhere
+  if (section) texts = section.items.map((i) => i.text);
+  else {
+    const latest = entriesFor(st, "allergies")[0];
+    if (latest) texts = toBullets(latest.text);
+  }
+  const items = (texts || []).map((t) => String(t).replace(/^\s*[-•*]\s*/, "").replace(/[.;,\s]+$/, "").trim())
+    .filter((t) => t && !NONE_RE.test(t));
+  root.dispatchEvent(new CustomEvent("allergies-ready", { detail: { known: texts !== null, items } }));
 }
 
 function renderCard(root, card) {

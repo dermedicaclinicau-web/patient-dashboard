@@ -205,6 +205,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   let planView = null;         // the Treatment Plan overview
   let recordsView = null;      // Treatment Records + Consent Records
   let reminderCount = 0;       // for the chips on the collapsed Pre-Consultation header
+  let allergies = null;        // { known, items } from Clinical History; null until read
   // Skin script (SSP): the tile and the Skincare section's "Create new SSP" open the builder in a new tab.
   // Caught first (capture phase), so no other click handler also opens it in this tab.
   root.addEventListener("click", (e) => {
@@ -235,6 +236,11 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
         if (target.tagName === "DETAILS") target.open = true;
         target.scrollIntoView({ behavior: "smooth", block: "center" });
       }
+      return;
+    }
+    if (t.closest("[data-action='go-allergies']")) {
+      const card = root.querySelector('.hx-card[data-hx="allergies"]');
+      if (card) { card.open = true; card.scrollIntoView({ behavior: "smooth", block: "center" }); }
       return;
     }
     if (t.closest("[data-action='expand-all']")) { topSections().forEach((d) => { d.open = true; }); return; }
@@ -296,6 +302,12 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     }
   });
 
+    // Allergies for the patient bar (sent by Clinical History once it has read the records)
+  root.addEventListener("allergies-ready", (e) => {
+    allergies = e.detail || null;
+    if (patient && root.querySelector(".patient-bar .pb-top")) renderTop();
+  });
+
   // Close any open record-badge menu (e.g. "Tx Record ×2") when clicking elsewhere
   const closeBadgeMenus = (e) => {
     if (!root.isConnected) { document.removeEventListener("click", closeBadgeMenus); return; } // left this patient
@@ -350,6 +362,8 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
 
     ${preConsultHtml()}
 
+    ${clinicalHistorySectionHtml()}
+
     ${treatmentPlansSectionHtml()}
     
     ${skincareSectionHtml()}
@@ -363,9 +377,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     ${historySectionHtml()}
     
     ${billingRxSectionHtml()}
-    
-    ${clinicalHistorySectionHtml()}
-    
+        
     ${injectableReferralSectionHtml()}
 
     ${interestsCommsSectionHtml()}
@@ -407,8 +419,23 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       reminderCount && `<button type="button" class="pc-chip is-rmd" data-peek='details[data-key="reminders"]'>${reminderCount} reminder${reminderCount === 1 ? "" : "s"}</button>`,
     ].filter(Boolean).join("");
   }
+  
+    // Scrolled down: the patient bar shrinks to name + chips (a gap between the two points stops it flickering)
+  let compact = false, ticking = false;
+  const onScroll = () => {
+    if (ticking) return;
+    ticking = true;
+    requestAnimationFrame(() => {
+      ticking = false;
+      if (!root.isConnected) { window.removeEventListener("scroll", onScroll); return; }
+      const y = window.scrollY;
+      const next = compact ? y > 60 : y > 180;
+      if (next !== compact) { compact = next; bar.classList.toggle("is-compact", compact); }
+    });
+  };
+  window.addEventListener("scroll", onScroll, { passive: true });
   function renderTop() {
-    bar.innerHTML = barHtml(patient, todayAppts, preData);
+    bar.innerHTML = barHtml(patient, todayAppts, preData, allergies);
   }
 
   function openEdit() {
@@ -519,6 +546,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     document.removeEventListener("click", closeBadgeMenus);
     window.removeEventListener("master-plan-updated", onPlanUpdated);
     window.removeEventListener("hashchange", onLeave);
+    window.removeEventListener("scroll", onScroll);
   }, 0);
   window.addEventListener("hashchange", onLeave);
 
@@ -911,12 +939,13 @@ function roundLink(href, icon, label, missingMsg) {
     : `<span class="round-btn is-disabled" aria-disabled="true" title="${missingMsg}">${ICONS[icon]}</span>`;
 }
 
-function barHtml(p, today = [], pre = null) {
+function barHtml(p, today = [], pre = null, allergies = null) {
   const age = calcAge(p.dobKey);
   const dobText = formatDobLong(p.dobKey) || p.dob;
   const tel = toTelHref(p.mobile);
 
   const chips = [
+    allergyChipHtml(allergies),
     p.pttId && `<span class="chip">ID ${escapeHtml(p.pttId)}</span>`,
     p.marketingOk === false && dncChipHtml(p),
     today.length && `<span class="chip chip-today">Appt today ${escapeHtml(today[0].time || "")}</span>`,
@@ -954,6 +983,18 @@ function barHtml(p, today = [], pre = null) {
         p.medicareExp ? ` <span class="pb-age">· Exp ${escapeHtml(formatMedicareExpiry(p.medicareExp))}</span>${
           medicareExpired(p.medicareExp) ? ' <span class="missing">expired</span>' : ""}` : ""}`)}</dd></div>
     </dl>`;
+}
+
+// Allergies: red with the list, green when none, amber when nothing has been recorded
+function allergyChipHtml(al) {
+  if (!al) return "";
+  if (al.items.length) {
+    const shown = al.items.slice(0, 3).join(", ") + (al.items.length > 3 ? ` +${al.items.length - 3}` : "");
+    return `<button type="button" class="chip chip-allergy" data-action="go-allergies" title="${escapeHtml(al.items.join(", "))}">${ICONS.alert}<span>Allergies: ${escapeHtml(shown)}</span></button>`;
+  }
+  return al.known
+    ? `<button type="button" class="chip chip-nka" data-action="go-allergies">No known allergies</button>`
+    : `<button type="button" class="chip chip-allergy-unknown" data-action="go-allergies">Allergies not recorded</button>`;
 }
 
 // "Do not contact" chip: why and when on hover. Care messages are still allowed, so the label says so.

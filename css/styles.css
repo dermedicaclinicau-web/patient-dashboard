@@ -11065,3 +11065,22 @@ details.sub-card.has-items > summary .hint { background: #fef3c7; color: #92400e
 @media (max-width: 700px) {
   .pc-peek { margin: 6px 0 0; width: 100%; }
 }
+
+/* Allergy chips in the patient bar */
+.chip-allergy, .chip-nka, .chip-allergy-unknown { display: inline-flex; align-items: center; gap: .3rem; font: inherit;
+  font-size: .72rem; font-weight: 700; cursor: pointer; }
+.chip-allergy svg { width: 12px; height: 12px; flex: none; }
+.chip-allergy { max-width: 360px; background: #dc2626; border-color: #dc2626; color: #fff; }
+.chip-allergy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-nka { background: #ecfdf5; border-color: #a7f3d0; color: #047857; }
+.chip-allergy-unknown { background: #fffbeb; border-color: #fcd34d; color: #92400e; }
+
+/* Patient bar: compact while scrolled */
+.patient-bar { transition: padding .18s ease; }
+.patient-bar.is-compact { padding: .55rem 1rem; }
+.patient-bar.is-compact .pb-details { display: none; }
+.patient-bar.is-compact .pb-avatar { width: 38px; height: 38px; font-size: .9rem; }
+.patient-bar.is-compact .pb-name { font-size: 1.2rem; }
+.patient-bar.is-compact .pb-chips { margin-top: .2rem; }
+.patient-bar.is-compact .round-btn, .patient-bar.is-compact .pb-edit { height: 34px; }
+.patient-bar.is-compact .round-btn { width: 34px; }
