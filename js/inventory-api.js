@@ -3393,6 +3393,8 @@ export const INV_OUTCOMES = {
     help: "More is there than digital shows. Added to stock." },
   cleared: { label: "Cleared: before counts were reliable", adjust: false,
     help: "Opened before the portal was being used properly, so the numbers weren't reliable. Stock wasn't changed." },
+  matched: { label: "Closed: digital now matches the count", adjust: false,
+    help: "The digital count was corrected (a base count or a digital update) and now matches what was counted. Stock wasn't changed." },
   "late-invoice": { label: "Sold before the count", adjust: false, system: true,
     help: "Sold before the count, but its invoice was uploaded after it. Closed automatically when the invoices were uploaded." },
   "late-record": { label: "Used before the count", adjust: false, system: true,
@@ -3603,6 +3605,52 @@ export async function closeInvestigation(id, { outcome, note = "", cctvChecked =
   });
   await settleCountLine(inv, outcome, text, appliedOut, staff)
     .catch((err) => console.warn("Count line not updated:", err));
+}
+
+// Open investigations where digital now matches the count (the recount if there was one, otherwise the first count).
+// Closed with "matched". Stock isn't changed.
+export async function closeMatchedInvestigations(staff) {
+  const res = { closed: [], failed: 0 };
+  const snap = await getDocs(query(collection(db, "inv_investigations"), where("status", "in", ["recount", "review"])));
+  const open = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  if (!open.length) return res;
+
+  const prods = new Map(), lots = new Map();
+  await Promise.all([...new Set(open.map((x) => x.productId).filter(Boolean))].map(async (pid) => {
+    const [p, l] = await Promise.all([
+      getDoc(doc(db, "inv_products", pid)),
+      getDocs(query(collection(db, "inv_lots"), where("productId", "==", pid))),
+    ]);
+    if (p.exists()) prods.set(pid, p.data());
+    lots.set(pid, l.docs.map(normaliseLot));
+  }));
+
+  for (const x of open) {
+    // Kit investigations (overnight checks) compare a kit with the records, not the Shelf: an admin closes those
+    if (x.loc !== "shelf" && x.loc !== "jt") continue;
+    const p = prods.get(x.productId);
+    if (!p) continue;
+    const rc = x.recount && x.recount.counted !== undefined && x.recount.counted !== null ? Number(x.recount.counted) : null;
+    const counted = rc !== null && Number.isFinite(rc) ? rc : Number(x.counted);
+    if (!Number.isFinite(counted)) continue;
+    // The same digital number a recount is compared with: that batch for tracked products, otherwise the place's total
+    const digital = p.tracked === true
+      ? ((lots.get(x.productId) || []).find((l) => l.id === String(x.ref || "")) || { qty: 0 }).qty
+      : Number((p.stock || {})[x.loc]) || 0;
+    if (digital !== counted) continue;
+    try {
+      await closeInvestigation(x.id, {
+        outcome: "matched",
+        note: `Digital now matches the ${rc !== null ? "recount" : "count"} (${counted}). Closed automatically.`,
+        cctvChecked: false, cctvNote: "",
+      }, staff);
+      res.closed.push({ id: x.id, name: x.productName || p.name || "", counted });
+    } catch (err) {
+      console.warn("Investigation not closed:", x.id, err);
+      res.failed++;
+    }
+  }
+  return res;
 }
 
 // An admin looks at the numbers before the recount. From then on they can't do the recount themselves.
@@ -5957,12 +6005,11 @@ export async function settleInvoiceFixes(product, items, { stock = true } = {}, 
       res.done++;
       res.off += r.took;
       res.back += r.back;
-      res.short += r.took || r.back ? 0 : 0;
+      res.short += Number(r.left) || 0;
       if (r.took) takes.push({ saleId: `${it.id}:fix${Date.now()}`, productId: product.id, date: r.date,
         rows: r.moved.filter((m) => m.delta < 0).map((m) => ({ batch: m.batch, expiry: m.expiry, taken: -m.delta })) });
       if (r.back) gives.push({ saleId: `${it.id}:fixback${Date.now()}`, productId: product.id, date: r.date,
         rows: r.moved.filter((m) => m.delta > 0).map((m) => ({ batch: m.batch, expiry: m.expiry, taken: m.delta })) });
-      if (stock && r.left && r.took !== undefined && r.took < Math.max(0, want)) res.short += 0;
     } catch (err) {
       console.error("Invoice fix not saved:", it.id, err);
       res.failed.push(it.id);

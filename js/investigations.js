@@ -5,7 +5,7 @@
 import {
   INV_OUTCOMES, MOVE_TYPES, PO_STATUS, KIT_FLOW_LABELS, listInvestigations, getInvestigation, investigationEvidence,
   kitOvernightEvidence, saveRecount, allowAloneRecount, closeInvestigation, peekInvestigation,
-  listProducts, plural, unitPlural, myUid, dayKey,
+  listProducts, plural, unitPlural, myUid, dayKey, closeMatchedInvestigations,
 } from "./inventory-api.js";
 import { can } from "./perms.js";
 import { billingCheck, BC_TYPES } from "./billing-check-api.js";
@@ -70,6 +70,7 @@ const OUT_TEXT = {
   missing: ["Missing or lost", "Can't be found or explained. It's written off."],
   extra: ["Extra stock found", "More is there than the portal knew about. It's added to stock."],
   cleared: ["Cleared (before counts were reliable)", "Opened before the portal was being used properly. Nothing changes."],
+  matched: ["Closed (digital now matches the count)", "The digital count was corrected and now matches what was counted. Nothing changes."],
 };
 const outLabel = (k) => (OUT_TEXT[k] || [])[0] || (INV_OUTCOMES[k] || {}).label || "Closed";
 
@@ -142,7 +143,9 @@ const pill = (x) => `<span class="ivx-pill is-${x.status}">${esc(x.status === "c
 
 /* ===================== The list (Inventory → Investigations) ===================== */
 
-export async function renderInvestigations(body, { staff = null } = {}) {
+
+export async function renderInvestigations(body, opts = {}) {
+  const staff = opts.staff || null;
   body.innerHTML = SKEL;
   let list, products;
   try {
@@ -155,6 +158,14 @@ export async function renderInvestigations(body, { staff = null } = {}) {
   if (!body.isConnected) return;
   const me = myUid();
   const canManage = can("inventory.manage");
+  // Investigations where digital has since been corrected to match the count close themselves (once per opening)
+  if (canManage && !opts.autoChecked) {
+    closeMatchedInvestigations(staff).then((r) => {
+      if (!r.closed.length || !body.isConnected) return;
+      showToast(`${r.closed.length} investigation${r.closed.length === 1 ? "" : "s"} closed: digital now matches the count.`);
+      renderInvestigations(body, { staff, autoChecked: true });
+    }).catch((err) => console.warn("Matched investigations not checked:", err));
+  }
   const pById = new Map(products.map((p) => [p.id, p]));
   const st = { kind: "all", q: "", allClosed: false };
   const wrap = document.createElement("div");
@@ -250,10 +261,10 @@ export async function renderInvestigations(body, { staff = null } = {}) {
     const a = e.target.closest("[data-act]");
     if (!a) return;
     if (a.dataset.act === "older") { st.allClosed = !st.allClosed; drawSecs(); return; }
-    if (a.dataset.act === "clear-old") { clearOldDialog(open, staff, () => renderInvestigations(body, { staff })); return; }
+    if (a.dataset.act === "clear-old") { clearOldDialog(open, staff, () => renderInvestigations(body, { staff, autoChecked: true })); return; }
     if (a.dataset.act === "recount-all") {
       const items = list.filter((x) => matches(x) && canRecountX(x, me)).sort(byAge);
-      recountAllDialog(items, staff, () => renderInvestigations(body, { staff }));
+      recountAllDialog(items, staff, () => renderInvestigations(body, { staff, autoChecked: true }));
     }
   });
 }
