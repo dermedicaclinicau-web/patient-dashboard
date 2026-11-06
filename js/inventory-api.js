@@ -2374,7 +2374,8 @@ export async function getBaseline() {
   const s = await getDoc(doc(db, "inv_settings", "counting"));
   const b = s.exists() ? s.data().baseline : null;
   return b && KEY_RE.test(b.dateKey || "")
-    ? { dateKey: b.dateKey, by: String(b.by || ""), at: toDate(b.at), changed: Number(b.changed) || 0 } : null;
+    ? { dateKey: b.dateKey, by: String(b.by || ""), at: toDate(b.at), changed: Number(b.changed) || 0,
+        manual: b.manual === true, cleared: Number(b.cleared) || 0 } : null;
 }
 
 // What setting the starting stock would do. Nothing is changed.
@@ -2548,6 +2549,49 @@ export async function setBaseline(plan, { closeOlder = true } = {}, staff, onPro
   }, { merge: true });
 
   return { changed: changes.length, investigations: inv.size };
+}
+
+/* ---------- Counting from a day, without changing stock ---------- */
+// For when digital was set another way (base counts, Update digital count). Differences still to review from
+// before that day can be cleared at the same time: they're marked Explained with the note, so stock doesn't change
+// and later corrections (late invoices, paper records) leave them alone.
+// includeDay: also clear that day's counts (e.g. counted this morning, before digital was reset).
+export async function setCountingFrom(dateKey, { clear = true, includeDay = false, note = "" } = {}, staff, onProgress = () => {}) {
+  if (!KEY_RE.test(dateKey || "") || dateKey > dayKey()) throw new Error("Choose the day counting starts from. It can't be in the future.");
+  const text = clip(note, 300) || `Before counting started on ${dateKey}: the numbers weren't reliable yet.`;
+  const by = who(staff);
+  const me = uid();
+  const at = new Date().toISOString();
+  let cleared = 0;
+  if (clear) {
+    const old = (await listCounts({ openOnly: true }))
+      .filter((c) => !c.superseded && (includeDay ? (c.dateKey || "") <= dateKey : (c.dateKey || "") < dateKey));
+    for (let i = 0; i < old.length; i += 5) {
+      onProgress(`Clearing… ${i} of ${old.length} counts`);
+      const done = await Promise.all(old.slice(i, i + 5).map((c) => runTransaction(db, async (tx) => {
+        const ref = doc(db, "inv_counts", c.id);
+        const s = await tx.get(ref);
+        if (!s.exists()) return 0;
+        let n = 0;
+        const lines = (Array.isArray(s.data().lines) ? s.data().lines : []).map((l) => {
+          if (l.status !== "open") return l;
+          n++;
+          return { ...l, status: "explained", note: text, cleared: true, resolvedBy: by, resolvedByUid: me, resolvedAt: at };
+        });
+        if (!n) return 0;
+        tx.update(ref, {
+          lines, openCount: lines.filter((l) => l.status === "open").length, updatedAt: serverTimestamp(), updatedBy: by,
+          events: arrayUnion({ at, by, action: "Cleared: before counting started", note: `${n} line${n === 1 ? "" : "s"} · ${dateKey}` }),
+        });
+        return n;
+      })));
+      cleared += done.reduce((a, n) => a + n, 0);
+    }
+  }
+  await setDoc(doc(db, "inv_settings", "counting"), {
+    baseline: { dateKey, at: serverTimestamp(), by, byUid: me, changed: 0, manual: true, cleared },
+  }, { merge: true });
+  return { cleared };
 }
 
 /* ---------- Starting stock typed in (products not in the opening count) ---------- */

@@ -5,7 +5,7 @@ import {
   listLotsForProduct, setUsageBatch, listOpenContainers,
   batchName, plural, unitPlural, dayKey, COUNT_STATUS,listInvestigations, INV_OUTCOMES, INV_STATUS,
   listUnrecordedTreatments, listContainersBetween, expectedUses,
-  getBaseline, baselinePlan, setBaseline, listCountsOn, listKitDays,
+  getBaseline, baselinePlan, setBaseline, setCountingFrom, listCountsOn, listKitDays,
 } from "./inventory-api.js";
 import { can, isAdmin } from "./perms.js";
 import { showToast } from "./utils.js";
@@ -190,18 +190,21 @@ function mountVariance(body, staff) {
   function baseHtml() {
     const b = st.base;
     const again = b && b.dateKey === dayKey();
-    const btn = canBase && st.todayCounted
+    const fromCount = canBase && st.todayCounted
       ? `<button type="button" class="ff-btn${b ? "" : " is-primary"}" data-act="baseline">${again
-        ? "Update the starting stock from today's count" : "Set the starting stock from today's count"}</button>`
-      : canBase ? '<small class="muted">Do today\'s opening count first, then set it as the starting stock here.</small>' : "";
+        ? "Update the starting stock from today's count" : "Set the starting stock from today's count"}</button>` : "";
+    const fromDate = canBase ? '<button type="button" class="ff-btn" data-act="counting-from">Start counting from…</button>' : "";
+    const who = b ? `${b.by ? ` by ${esc(b.by)}` : ""}${b.at ? ` on ${esc(shortDate(b.at))} at ${esc(timeOf(b.at))}` : ""}` : "";
     return `<div class="rp-base${b ? "" : " is-none"}">
       <div>${b
         ? `<strong>Counting from ${esc(niceDate(b.dateKey))}</strong>
-           <small>Starting stock set${b.by ? ` by ${esc(b.by)}` : ""}${b.at ? ` at ${esc(timeOf(b.at))}` : ""}. Differences are compared with stock from then on.</small>`
+           <small>${b.manual
+             ? `Set${who}. Stock wasn't changed here: digital was set with base counts.${b.cleared ? ` ${plural(b.cleared, "earlier difference")} cleared.` : ""}`
+             : `Starting stock set${who}.`} Differences are compared with stock from then on.</small>`
         : `<strong>No starting stock set yet</strong>
-           <small>${canBase ? "Once an opening count is finished, set it as the starting stock so every difference after that is a real one."
-             : "An admin can set it from an opening count."}</small>`}</div>
-      ${btn}</div>`;
+           <small>${canBase ? "Set it from an opening count, or choose the day counting starts from if you've set digital with base counts."
+             : "An admin can set it."}</small>`}</div>
+      <span class="kit-acts">${fromCount}${fromDate}</span></div>`;
   }
 
   function rowHtml(c, l, i) {
@@ -336,6 +339,83 @@ function mountVariance(body, staff) {
     });
   }
 
+  // Counting from a day, without changing stock. Differences from before it can be cleared at the same time.
+  async function openCountingFrom() {
+    const today = dayKey();
+    const dlg = openDialog(`<div class="lh-form"><div class="lh-dialog-head"><h3>Start counting from…</h3>
+      <p>Checking what's still to review…</p></div>${SKELETON}</div>`);
+    let open;
+    try { open = (await listCounts({ openOnly: true })).filter((c) => !c.superseded); }
+    catch (err) {
+      console.error("Counts not loaded:", err);
+      if (dlg.open) dlg.querySelector(".lh-form").innerHTML = `<p class="lh-error">${esc(errText(err, "Couldn't load the counts. Try again."))}</p>
+        <div class="lh-actions"><button type="button" class="lh-btn" data-act="cancel">Close</button></div>`;
+      dlg.querySelector('[data-act="cancel"]')?.addEventListener("click", () => dlg.close());
+      return;
+    }
+    if (!dlg.open) return;
+    const linesOn = (pred) => open.filter((c) => pred(c.dateKey || "")).reduce((a, c) => a + c.lines.filter((l) => l.status === "open").length, 0);
+
+    dlg.innerHTML = `<form class="lh-form" novalidate>
+      <div class="lh-dialog-head"><h3>Start counting from…</h3>
+        <p>For when digital was set with <strong>base counts</strong> or <strong>Update digital count</strong>. This saves the day counting starts from.
+          <strong>Stock isn't changed.</strong></p></div>
+      <label class="lh-field"><span class="lh-label">Counting from</span>
+        <input type="date" name="from" value="${today}" max="${today}" />
+        <small class="fe-note" data-role="nice"></small></label>
+      <label class="fe-check"><input type="checkbox" name="clear" checked /> <span data-role="before"></span></label>
+      <label class="fe-check" data-role="dayrow"><input type="checkbox" name="day" /> <span data-role="on"></span></label>
+      <label class="lh-field"><span class="lh-label">Note kept on each one</span>
+        <input name="note" maxlength="300" value="${esc(`Before counting started on ${niceDate(today)}: the numbers weren't reliable yet.`)}" /></label>
+      <p class="inv-hint">Cleared ones are marked <strong>Explained</strong>, so they're kept on record but leave “To review”.
+        Investigations aren't closed here: use Inventory → Investigations → <strong>Clear old investigations</strong>.</p>
+      <p class="lh-error" role="alert" hidden></p>
+      <div class="lh-actions">
+        <button type="button" class="lh-btn is-quiet" data-act="cancel">Cancel</button>
+        <button type="submit" class="lh-btn is-primary">Save</button>
+      </div></form>`;
+    const form = dlg.querySelector("form");
+    const f = form.elements;
+    const err = dlg.querySelector(".lh-error");
+    const btn = form.querySelector('[type="submit"]');
+    const sync = () => {
+      const k = f.from.value || today;
+      const nb = linesOn((d) => d < k), nd = linesOn((d) => d === k);
+      dlg.querySelector('[data-role="nice"]').textContent = niceDate(k);
+      dlg.querySelector('[data-role="before"]').textContent = nb
+        ? `Also clear ${plural(nb, "difference")} still to review from before ${niceDate(k)}` : `Nothing to review from before ${niceDate(k)}`;
+      f.clear.disabled = !nb;
+      dlg.querySelector('[data-role="dayrow"]').hidden = !nd;
+      dlg.querySelector('[data-role="on"]').textContent =
+        `And the ${plural(nd, "difference")} from ${niceDate(k)} itself (counted before digital was reset)`;
+    };
+    sync();
+    form.addEventListener("change", sync);
+    dlg.querySelector('[data-act="cancel"]').addEventListener("click", () => dlg.close());
+    dlg.addEventListener("cancel", (e) => { if (btn.disabled) e.preventDefault(); });
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      const k = f.from.value;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(k) || k > today) { err.textContent = "Choose a day, today or earlier."; err.hidden = false; return; }
+      btn.disabled = true;
+      btn.textContent = "Saving…";
+      try {
+        const r = await setCountingFrom(k, { clear: f.clear.checked && !f.clear.disabled, includeDay: f.day.checked, note: f.note.value }, staff,
+          (t) => { btn.textContent = t; });
+        dlg.close();
+        showToast(`Counting from ${niceDate(k)}.${r.cleared ? ` ${plural(r.cleared, "earlier difference")} cleared.` : ""} Stock wasn't changed.`);
+        load();
+      } catch (ex) {
+        console.error("Counting from failed:", ex);
+        err.textContent = `${errText(ex, "Couldn't finish.")} It's safe to try again.`;
+        err.hidden = false;
+        btn.disabled = false;
+        btn.textContent = "Try again";
+      }
+    });
+  }
+
   function review(c, i, l, act) {
     const accept = act === "accept";
     const diff = Number(l.variance) || 0;
@@ -399,6 +479,7 @@ function mountVariance(body, staff) {
     if (!a) return;
     if (a.dataset.act === "csv") { exportCsv(); return; }
     if (a.dataset.act === "baseline") { openBaseline(); return; }
+    if (a.dataset.act === "counting-from") { openCountingFrom(); return; }
     const tr = a.closest("tr[data-c]");
     const c = tr && st.counts.find((x) => x.id === tr.dataset.c);
     const i = tr ? Number(tr.dataset.i) : -1;
