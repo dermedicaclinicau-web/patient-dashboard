@@ -6,6 +6,7 @@ import { parseRecordDate } from "./transcripts.js";
 import { patientIds } from "./patients.js";
 import { listSubmissionsForPatient } from "./form-submissions.js";
 import { getFormVersion, rxKindOf } from "./form-templates.js";
+import { cachedRead } from "./page-cache.js";
 
 const PAGE = 6;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -77,7 +78,11 @@ function isOpenSaved(key, fallback) {
 
 /* ===================== Data ===================== */
 
-export async function fetchBillingAndRx(patient) {
+export function fetchBillingAndRx(patient) {
+  return cachedRead(`rxb|${patient.id}|${patientIds(patient).join(",")}`, () => loadBillingAndRx(patient));
+}
+
+async function loadBillingAndRx(patient) {
   const ids = patientIds(patient);
   if (!ids.length) return { billing: [], rx: [], injectables: [] };
 
@@ -197,6 +202,13 @@ export function mountBillingRx(root, patient) {
       data = await fetchBillingAndRx(patient);
       if (!grid.isConnected) return;
       Object.keys(VIEWS).forEach((k) => { if (VIEWS[k]) render(k); });
+    } catch (err) {
+      console.error("Billing / prescriptions load failed:", err);
+      if (!grid.isConnected) return;
+      Object.values(VIEWS).filter(Boolean).forEach((v) => {
+        v.scope.querySelector(v.count).textContent = "!";
+        v.scope.querySelector(v.body).innerHTML = '<p class="rc-empty">Couldn\'t load these. Check your connection and try again.</p>';
+      });
     } finally {
       loading = false;
     }
@@ -207,6 +219,8 @@ export function mountBillingRx(root, patient) {
     const items = data[kind];
     const body = v.scope.querySelector(v.body);
     v.scope.querySelector(v.count).textContent = items ? items.length : "!";
+    const cardEl = body.closest("details");
+    if (cardEl) cardEl.classList.toggle("is-empty", !!items && !items.length);   // dimmed on the closed bar
 
     if (!items) {
       body.innerHTML = `<p class="rc-empty">Couldn't load ${v.what}. Check the Firestore rules.</p>`;
@@ -241,7 +255,9 @@ export function mountBillingRx(root, patient) {
   );
 
   const anyOpen = [grid, irGrid].filter(Boolean).some((g) => g.querySelector(":scope > details[open]"));
+  // Counts on the collapsed bars: load quietly once the page has drawn (after Skin Script and Records)
   if (anyOpen) load();
+  else setTimeout(() => { if (grid.isConnected) load(); }, 1200);
 }
 
 // Cards in the same row open/close together; onOpen runs when the row is opened

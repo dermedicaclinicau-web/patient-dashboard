@@ -4,7 +4,7 @@ import { db, auth } from "./firebase-config.js";
 import {
   collection, addDoc, getDoc, getDocs, doc, query, where, serverTimestamp, runTransaction,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-
+import { cachedRead, clearPageCache } from "./page-cache.js";
 const COL = "form_submissions";
 
 function toDate(v) {
@@ -53,6 +53,7 @@ export async function saveSubmission(data, staff, { consume } = {}) {
   const base = { createdAt: serverTimestamp(), createdBy: (staff && staff.name) || "", createdByUid: uid };
   if (!consume) {
     const ref = await addDoc(collection(db, COL), { ...data, ...base });
+    clearPageCache();   // a new form exists: anything showing this patient's forms reads again
     return ref.id;
   }
   const ref = doc(collection(db, COL));
@@ -60,6 +61,7 @@ export async function saveSubmission(data, staff, { consume } = {}) {
     const res = await consume(tx, ref.id);
     tx.set(ref, { ...data, answers: { ...data.answers, ...((res && res.answers) || {}) }, ...base });
   });
+  clearPageCache();
   return ref.id;
 }
 export async function getSubmission(id) {
@@ -68,13 +70,16 @@ export async function getSubmission(id) {
 }
 
 // Every completed form for a patient (including merged records), newest first
-export async function listSubmissionsForPatient(ids, { includeDeleted = false } = {}) {
+export function listSubmissionsForPatient(ids, { includeDeleted = false } = {}) {
   const clean = [...new Set((ids || []).filter(Boolean).map(String))].slice(0, 30);
-  if (!clean.length) return [];
-  const snap = await getDocs(query(collection(db, COL), where("patientId", "in", clean)));
-  return snap.docs.map(normalise).filter((s) => includeDeleted || !s.deleted).sort((a, b) =>
-    b.recordDate.localeCompare(a.recordDate) ||
-    ((b.createdAt ? b.createdAt.getTime() : 0) - (a.createdAt ? a.createdAt.getTime() : 0)));
+  if (!clean.length) return Promise.resolve([]);
+  // The same IDs in any order are the same read
+  return cachedRead(`subs|${[...clean].sort().join(",")}|${includeDeleted ? 1 : 0}`, async () => {
+    const snap = await getDocs(query(collection(db, COL), where("patientId", "in", clean)));
+    return snap.docs.map(normalise).filter((s) => includeDeleted || !s.deleted).sort((a, b) =>
+      b.recordDate.localeCompare(a.recordDate) ||
+      ((b.createdAt ? b.createdAt.getTime() : 0) - (a.createdAt ? a.createdAt.getTime() : 0)));
+  });
 }
 
 // Forms I saved (default: the last 31 days), newest first
