@@ -9,7 +9,7 @@
 import { listProducts, INV_CATEGORIES, plural } from "./inventory-api.js";
 import { preparePhoto, readBillingSheet, readDocket, readPrescription, startReview, reviewBilling, saveBillingScan,
   earlierScans, findBooking, money, searchPatientsQuick, todaysScans, readAuto, smallCopy,
-  setScanJob, newScanJobId, parkScan, scanJobs, openScanJob, finishScanJob } from "./scanner-api.js";
+  setScanJob, newScanJobId, parkScan, scanJobs, openScanJob, finishScanJob, staffList} from "./scanner-api.js";
 import { mountRxResult } from "./scanner-rx.js";
 import { rxProductList } from "./rx-products.js";
 import { mountDocketResult } from "./scanner-docket.js";
@@ -33,6 +33,7 @@ const niceDate = (key) => {
 const KIND_KEY = "dm.scanKind2";   // the last tab used on this device
 const AUTO_KEY = "dm.scanAuto";   // Auto on or off on this device
 const MAX_PAGES = 3;
+const SHOT_MAX = 2200;   // long edge of a camera photo: it's sent at 1600, and docket pages are joined at up to 1600 wide
 const KIND_TAG = { billing: "Billing", docket: "Docket", rx: "Prescription", auto: "Scan" };
 const AUTO_NAMES = { billing: "Billing sheet", docket: "Delivery docket", rx: "Prescription" };
 const KIND_ICON = {
@@ -109,7 +110,10 @@ const done = (im) => { if (im && im.close) im.close(); };
 // Brightness (0-255) and sharpness (how much the edges change). Checked on a small copy, so it's quick.
 async function photoQuality(blob) {
   try {
-    const im = await decode(blob);
+    // Decoded straight to 320 px where the browser can (much quicker for 12 MP uploads)
+    let im;
+    try { im = await createImageBitmap(blob, { resizeWidth: 320, resizeQuality: "low", imageOrientation: "from-image" }); }
+    catch { im = await decode(blob); }
     const [iw, ih] = dims(im);
     const w = 320, h = Math.max(3, Math.round(ih * (w / iw)));
     const c = document.createElement("canvas");
@@ -217,11 +221,12 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
   const productsReady = listProducts().then((list) => { products = list.filter((p) => p.active); })
     .catch((err) => console.error("Scanner: the product list didn't load", err));
   warmUpLogin();   // wakes Apps Script while the photo is being lined up, so the first scan isn't slow
+  if (can("scanner.docket")) staffList().catch(() => {});   // ready before the first docket is read
 
   const savedKind = readLocal(KIND_KEY);
   const st = {
     mode: "camera", stream: null, track: null, starting: false, zoom: 1, hw: null, torch: false, canTorch: false, canFocus: false,
-    camErr: "", photo: null, photoUrl: "", base64: "", result: null, lines: [], review: null, error: "", fixing: -1, busy: false,
+    camErr: "", photo: null, photoUrl: "", base64: "", thumb: "", result: null, lines: [], review: null, error: "", fixing: -1, busy: false,
     booking: null, patient: null, pickPatient: false, shooting: false,
     kind: KINDS.some(([k]) => k === savedKind) ? savedKind : KINDS[0][0],
     pages: [], pageUrls: [],                      // docket pages taken so far
@@ -590,13 +595,13 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     // Best first. Phones and tablets insist on the back camera; if that fails they fall back gently.
     // Some laptop webcams fail at the full size instead of choosing a smaller one.
     const back = isMobile() ? [
-      { facingMode: { exact: "environment" }, width: { ideal: 4032 }, height: { ideal: 3024 } },
+      { facingMode: { exact: "environment" }, width: { ideal: 2560 }, height: { ideal: 1920 } },
       { facingMode: { exact: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
       { facingMode: { exact: "environment" } },
     ] : [];
     const tries = [
       ...back,
-      { facingMode: { ideal: "environment" }, width: { ideal: 4032 }, height: { ideal: 3024 } },
+      { facingMode: { ideal: "environment" }, width: { ideal: 2560 }, height: { ideal: 1920 } },
       { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
       { facingMode: { ideal: "environment" } },
       true,
@@ -625,7 +630,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
           if (id) {
             try {
               const better = await navigator.mediaDevices.getUserMedia({ audio: false, video: {
-                deviceId: { exact: id }, width: { ideal: 4032 }, height: { ideal: 3024 } } });
+                deviceId: { exact: id }, width: { ideal: 2560 }, height: { ideal: 1920 } } });
               stream.getTracks().forEach((x) => x.stop());
               stream = better;
             } catch (err) { console.warn("Couldn't switch to the back camera:", err); }
@@ -719,9 +724,10 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     const z = st.hw ? 1 : st.zoom;
     const k = Math.max(v.offsetWidth / v.videoWidth, v.offsetHeight / v.videoHeight);
     const sw = v.offsetWidth / k / z, sh = v.offsetHeight / k / z;
+    const out = Math.min(1, SHOT_MAX / Math.max(sw, sh));   // no bigger than what gets read
     const c = document.createElement("canvas");
-    c.width = Math.round(sw);
-    c.height = Math.round(sh);
+    c.width = Math.round(sw * out);
+    c.height = Math.round(sh * out);
     c.getContext("2d").drawImage(v, (v.videoWidth - sw) / 2, (v.videoHeight - sh) / 2, sw, sh, 0, 0, c.width, c.height);
     const vf = root.querySelector('[data-role="vf"]');
     if (vf) { vf.classList.remove("is-flash"); void vf.offsetWidth; vf.classList.add("is-flash"); }
@@ -774,10 +780,12 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     render();
     try {
       const joined = await stitchPages(blobs);
-      const prep = await preparePhoto(joined, blobs.length > 1 ? Math.min(4800, 1600 * blobs.length) : 1600);
+      const wantThumb = st.kind === "auto" && !st.readAs;   // only Auto-detect sorts on the small copy
+      const prep = await preparePhoto(joined, blobs.length > 1 ? Math.min(4800, 1600 * blobs.length) : 1600, 0.8, wantThumb ? 768 : 0);
       URL.revokeObjectURL(st.photoUrl);
       st.photo = prep.blob;
       st.base64 = prep.base64;
+      st.thumb = prep.thumb || "";
       st.photoUrl = URL.createObjectURL(prep.blob);
     } catch (err) {
       st.error = (err && err.message) || "That photo couldn't be used. Try again.";
@@ -853,7 +861,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
       } else {
         // Auto-detect: Apps Script works out what it is, then reads it, in one request
         await productsReady;
-        const thumb = await smallCopy(st.photo).catch(() => "");
+        const thumb = st.thumb || await smallCopy(st.photo).catch(() => "");
         const r = await readAuto(st.base64, thumb, products, rxProductList());
         setScanJob("", job);
         if (!mine()) return;
@@ -942,7 +950,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     stopCamera();
     if (st.photoUrl) URL.revokeObjectURL(st.photoUrl);
     const blob = b64ToBlob(j.image, "image/jpeg");
-    Object.assign(st, { photo: blob, photoUrl: URL.createObjectURL(blob), base64: j.image, readThisSession: true,
+    Object.assign(st, { photo: blob, photoUrl: URL.createObjectURL(blob), base64: j.image, thumb: "", readThisSession: true,
       pendingInfo: null, openJob: id, autoInfo: j.auto || null, error: "", result: null, changing: false });
     if (KINDS.some(([k]) => k === j.kind)) setKind(j.kind);
     st.readAs = st.kind === "auto" && AUTO_NAMES[j.readAs] ? j.readAs : "";
@@ -976,6 +984,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     st.readThisSession = true;
     if (st.photoUrl) URL.revokeObjectURL(st.photoUrl);
     st.photo = p.blob;
+    st.thumb = "";
     st.photoUrl = URL.createObjectURL(p.blob);
     try { st.base64 = await blobToB64(p.blob); }
     catch { showToast("That scan couldn't be opened. Discard it and scan again."); render(); return; }
@@ -1026,7 +1035,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     if (st.photoUrl) URL.revokeObjectURL(st.photoUrl);
     st.pageUrls.forEach((u) => URL.revokeObjectURL(u));
     pendingClear();   // saved, or staff chose to start again
-    Object.assign(st, { mode: "camera", photo: null, photoUrl: "", base64: "", result: null, lines: [], review: null, error: "",
+    Object.assign(st, { mode: "camera", photo: null, photoUrl: "", base64: "", thumb: "", result: null, lines: [], review: null, error: "",
       fixing: -1, camErr: "", booking: null, patient: null, pickPatient: false, shooting: false,
       pages: [], pageUrls: [], step: 0, busyT0: 0, todayAt: 0, pq: "", phits: [], psearching: false,
       readAs: "", autoInfo: null, changing: false, prevMode: "", jobId: "", openJob: "", jobsAt: 0 });

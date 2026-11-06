@@ -14,6 +14,9 @@ const num = (v) => (v === null || v === undefined || v === "" || !Number.isFinit
 const conf = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? 1 : Number(v));
 const intOrNull = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : parseInt(v, 10));
 const normName = (s) => String(s || "").toLowerCase().replace(/[^a-z]+/g, " ").trim();
+// Same order every time: the list is part of the cached prompt in Apps Script, and any change in order misses the cache
+const stableList = (list) => list.slice().sort((a, b) => (String(a.id) < String(b.id) ? -1 : String(a.id) > String(b.id) ? 1 : 0));
+const stableNames = (list) => (Array.isArray(list) ? list.slice().sort() : list);
 export const money = (n) => (n === null || n === undefined ? "" : `$${Number.isInteger(Number(n)) ? Number(n) : Number(n).toFixed(2)}`);
 
 /* ---------- Testing: which AI reads the photo ---------- */
@@ -61,17 +64,28 @@ const toBase64 = (blob) => new Promise((resolve, reject) => {
   fr.readAsDataURL(blob);
 });
 
-// At most 2000px on the long side (plenty for handwriting), as JPEG
-export async function preparePhoto(blob, max = 1600, quality = 0.8) {
+// At most `max` px on the long side, as JPEG. thumbMax: also a small copy (Auto-detect), made from the same decode.
+export async function preparePhoto(blob, max = 1600, quality = 0.8, thumbMax = 0) {
   const img = await loadImage(blob);
   const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
   const c = document.createElement("canvas");
   c.width = Math.round(img.naturalWidth * k);
   c.height = Math.round(img.naturalHeight * k);
   c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-  const out = await new Promise((res) => c.toBlob(res, "image/jpeg", quality));
+  const enc = (cv, q) => new Promise((res) => cv.toBlob(res, "image/jpeg", q));
+  const out = await enc(c, quality);
   if (!out) throw new Error("That photo couldn't be prepared. Try again.");
-  return { blob: out, base64: await toBase64(out) };
+  let thumbBlob = null;
+  if (thumbMax) {
+    const t = Math.min(1, thumbMax / Math.max(c.width, c.height));
+    const tc = document.createElement("canvas");
+    tc.width = Math.round(c.width * t);
+    tc.height = Math.round(c.height * t);
+    tc.getContext("2d").drawImage(c, 0, 0, tc.width, tc.height);
+    thumbBlob = await enc(tc, 0.7);
+  }
+  const [base64, thumb] = await Promise.all([toBase64(out), thumbBlob ? toBase64(thumbBlob) : ""]);
+  return { blob: out, base64, thumb };
 }
 
 /* ---------- Gemini (through Apps Script) ---------- */
@@ -86,7 +100,7 @@ export async function readBillingSheet(base64, products) {
   try {
     res = await scanCall({
       action: "scanner", op: "billing", mime: "image/jpeg", image: base64,
-      products: sellable(products).map((p) => ({ id: p.id, name: p.name, brand: p.brand || "" })),
+      products: stableList(sellable(products)).map((p) => ({ id: p.id, name: p.name, brand: p.brand || "" })),
     });
   } catch (err) {
     if (err && err.code === "UNAUTHORIZED") throw err;   // "Your session has expired…"
@@ -111,8 +125,8 @@ export async function readAuto(base64, thumb, products, rxProducts) {
   try {
     res = await scanCall({
       action: "scanner", op: "auto", mime: "image/jpeg", image: base64, thumb,
-      products: products.map((p) => ({ id: p.id, name: p.name, brand: p.brand || "", sell: sell.has(p.id) })),
-      rxProducts,
+      products: stableList(products).map((p) => ({ id: p.id, name: p.name, brand: p.brand || "", sell: sell.has(p.id) })),
+      rxProducts: stableNames(rxProducts),
     });
   } catch (err) {
     if (err && err.code === "UNAUTHORIZED") throw err;
@@ -398,7 +412,7 @@ export async function readDocket(base64, products) {
   try {
     res = await scanCall({
       action: "scanner", op: "docket", mime: "image/jpeg", image: base64,
-      products: products.map((p) => ({ id: p.id, name: p.name, brand: p.brand || "" })),
+      products: stableList(products).map((p) => ({ id: p.id, name: p.name, brand: p.brand || "" })),
     });
   } catch (err) {
     if (err && err.code === "UNAUTHORIZED") throw err;
@@ -468,9 +482,13 @@ export function rankPos(review, pos) {
 }
 
 // Active staff (names only), for "Received by"
-export async function staffList() {
-  const res = await callApi({ action: "staffList" });
-  return (res && res.staff) || [];
+let staffCache = null;   // once per page load: the docket screen no longer waits on Apps Script for it
+export function staffList() {
+  if (!staffCache) {
+    staffCache = callApi({ action: "staffList" }).then((res) => (res && res.staff) || [])
+      .catch((err) => { staffCache = null; throw err; });
+  }
+  return staffCache;
 }
 
 // The staff member a handwritten name belongs to (first name alone is enough), or null
@@ -547,7 +565,7 @@ export async function markDocketTransferred(scanId, { moved = [], releases = [] 
 export async function readPrescription(base64, rxProducts) {
   let res;
   try {
-    res = await scanCall({ action: "scanner", op: "rx", mime: "image/jpeg", image: base64, rxProducts });
+    res = await scanCall({ action: "scanner", op: "rx", mime: "image/jpeg", image: base64, rxProducts: stableNames(rxProducts) });
   } catch (err) {
     if (err && err.code === "UNAUTHORIZED") throw err;
     console.error("Prescription scanner call failed:", err);
@@ -595,10 +613,8 @@ export async function findRxPatient(review) {
   const words = name.split(" ").filter((w) => w.length > 1);
   const terms = [...new Set([name, words[words.length - 1], words[0]].filter(Boolean))];
   const found = new Map();
-  for (const t of terms) {
-    const r = await fetchPatients({ mode: "name", term: t }).catch(() => ({ patients: [] }));
-    r.patients.forEach((p) => { if (!p.mergedInto) found.set(p.id, p); });
-  }
+  const results = await Promise.all(terms.map((t) => fetchPatients({ mode: "name", term: t }).catch(() => ({ patients: [] }))));
+  results.forEach((r) => (r.patients || []).forEach((p) => { if (!p.mergedInto) found.set(p.id, p); }));
   const pc = review.postcode;
   const scored = [...found.values()].map((p) => {
     let s = nameScore(review.patientName, p.name);
