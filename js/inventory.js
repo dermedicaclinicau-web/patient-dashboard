@@ -2636,14 +2636,14 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         const b = shorts.length ? await settleShortSales(p, shorts.map((s) => s.id), { deduct }, staff) : null;
         const zero = { done: 0, short: 0, failed: [], backdated: { lines: 0, closed: 0 } };
         const A = a || zero, B = b || zero;
-        const r = { done: A.done + B.done, short: A.short + B.short, failed: [...A.failed, ...B.failed],
+        const r = { done: A.done + B.done, short: A.short + B.short, failed: [...A.failed, ...B.failed], error: A.error || B.error,
           backdated: { lines: A.backdated.lines + B.backdated.lines, closed: A.backdated.closed + B.backdated.closed } };
         const bd = r.backdated;
         showToast([
           deduct ? `${plural(r.done, "sale")} taken off stock.` : `${plural(r.done, "sale")} marked as counted.`,
           r.short ? `The Shelf was short by ${r.short}.` : "",
           bd.lines ? `${bd.lines} count line${bd.lines === 1 ? "" : "s"} corrected${bd.closed ? `, ${bd.closed} investigation${bd.closed === 1 ? "" : "s"} closed` : ""}.` : "",
-          r.failed.length ? `Couldn't save: ${r.failed.slice(0, 3).join(", ")}.` : "",
+          r.failed.length ? `Couldn't save ${r.failed.length}: ${errText((b && b.error) || (a && a.error), "try again")}` : "",
         ].filter(Boolean).join(" "));
       } catch (ex) {
         console.error("Sales not settled:", ex);

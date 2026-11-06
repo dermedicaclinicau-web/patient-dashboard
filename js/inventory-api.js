@@ -5820,6 +5820,7 @@ export async function settleShortSales(product, ids, { deduct = true } = {}, sta
     } catch (err) {
       console.error("Short sale not settled:", id, err);
       res.failed.push(id);
+      if (!res.error) res.error = err;
     }
   }
   if (applied.length) {
