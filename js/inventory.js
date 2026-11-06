@@ -12,7 +12,7 @@ import {
   recordPatientReturn, recordSupplierReturn, markReturnCredited, listReturns, RETURN_REASONS, RETURN_STATUS,
   rebuildPlan, applyRebuild, listCountsOn, getInvoiceSettings, saveInvoiceSettings,
   listBaseCounts, saveBaseCount, planFromBases, productLedger, suggestInvoiceLinks, invoiceNameKey,
-  removeBaseCount, canUndoCorrection, undoCorrection, productSales, settlePendingSales,
+  removeBaseCount, canUndoCorrection, undoCorrection, productSales, settlePendingSales, settleShortSales,
 } from "./inventory-api.js";
 import { searchPatients } from "./task-runner.js";
 import { openSetKitDialog, openKitFromShelfDialog } from "./kit-admin.js";
@@ -2520,6 +2520,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const SALE_STATE = { taken: ["Taken off", "is-ok"], short: ["Shelf was short", "is-warn"], pending: ["Not taken off stock", "is-bad"],
       counted: ["Counted, stock not changed", "is-info"], voided: ["Voided", ""] };
     const SALE_SRC = { invoice: "Invoice", manual: "By hand", scan: "Billing sheet", pos: "Checkout" };
+    const fixable = (s) => s.state === "pending" || s.state === "short";
+    const owed = (s) => (s.state === "short" ? s.left : s.qty);   // what still has to come off
 
     async function loadSales() {
       const p = st.products.find((x) => x.id === id);
@@ -2534,7 +2536,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         sl.list = r.list;
         sl.startDate = r.startDate;
         const cut = baseKey();
-        sl.sel = new Set(r.list.filter((s) => s.state === "pending" && (!cut || s.date >= cut)).map((s) => s.id));
+        sl.sel = new Set(r.list.filter((s) => fixable(s) && (!cut || s.date >= cut)).map((s) => s.id));
         sl.open = true;
       } catch (ex) {
         console.error("Sales not loaded:", ex);
@@ -2568,12 +2570,13 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       const taken = L.filter((s) => s.state === "taken" || s.state === "short").reduce((a, s) => a + s.taken, 0);
       const pending = L.filter((s) => s.state === "pending");
       const pendN = pending.reduce((a, s) => a + s.qty, 0);
-      const shortN = L.filter((s) => s.state === "short").reduce((a, s) => a + s.qty - s.taken, 0);
+      const shortN = L.filter((s) => s.state === "short").reduce((a, s) => a + s.left, 0);
       const countedN = sum((s) => s.state === "counted");
-      const after = pending.filter((s) => !cut || s.date >= cut).length;
-      const before = pending.length - after;
-      const rows = sl.only ? L.filter((s) => s.state === "pending" || s.state === "short") : L;
-      const picks = canManage && pending.length;
+      const todo = L.filter(fixable);
+      const after = todo.filter((s) => !cut || s.date >= cut).length;
+      const before = todo.length - after;
+      const rows = sl.only ? todo : L;
+      const picks = canManage && todo.length;
       const pill = (label, v, cls = "") => `<span class="inv-lg-pill ${cls}"><b>${esc(String(v))}</b> ${esc(label)}</span>`;
 
       el.innerHTML = `<div class="inv-pd-sec inv-pd-sales">${head}
@@ -2587,7 +2590,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         ${!sl.startDate ? `<p class="inv-hint is-warn">Invoice uploads don't take sales off stock yet: there's no invoice start date.
           Set it in Products → <strong>Invoice links</strong> (the same day as your base counts).</p>` : ""}
         ${after ? `<p class="inv-hint is-warn"><strong>${plural(after, "sale")}${cut ? ` since the base count (${esc(niceDate(cut))})` : ""}
-          never came off stock.</strong> Usually the invoice name wasn't linked when it was uploaded, or it was before the invoice start date.</p>` : ""}
+          never fully came off stock.</strong> Not linked when uploaded, before the invoice start date, or the Shelf showed 0 when it sold (often a delivery not received yet).</p>` : ""}
         ${before ? `<p class="inv-hint">${plural(before, "sale")} before the base count never came off stock. The base count already
           reflects them, so <strong>mark them as already counted</strong> rather than taking them off.</p>` : ""}
         ${L.length ? `<label class="fe-check"><input type="checkbox" data-sl="only"${sl.only ? " checked" : ""} /> Only ones not taken off</label>
@@ -2595,12 +2598,12 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
             <th>Sold</th><th>From</th><th>Patient</th><th>Qty</th><th>Stock</th></tr></thead><tbody>${rows.map((s) => {
             const [label, cls] = SALE_STATE[s.state] || [s.state, ""];
             return `<tr class="${s.state === "pending" ? "is-diff" : ""}">
-              ${picks ? `<td>${s.state === "pending" ? `<input type="checkbox" data-slpick="${esc(s.id)}"${sl.sel.has(s.id) ? " checked" : ""}
+              ${picks ? `<td>${fixable(s) ?`<input type="checkbox" data-slpick="${esc(s.id)}"${sl.sel.has(s.id) ? " checked" : ""}
                 aria-label="Select ${esc(s.invoiceId || "sale")}" />` : ""}</td>` : ""}
               <td>${esc(niceDate(s.date))}${cut && s.date < cut ? '<small class="muted">before base count</small>' : ""}</td>
               <td>${esc(SALE_SRC[s.source] || s.source)}${s.invoiceId ? ` ${esc(s.invoiceId)}` : ""}${s.provider ? `<small class="muted">${esc(s.provider)}</small>` : ""}</td>
               <td>${esc(s.patientName || "—")}</td><td>${esc(plural(s.qty, unit))}</td>
-              <td><span class="inv-flag ${cls}">${esc(label)}</span>${s.state === "short" ? `<small>${s.qty - s.taken} not taken off</small>` : ""}${
+              <td><span class="inv-flag ${cls}">${esc(label)}</span>${s.state === "short" ? `<small>${s.left} not taken off</small>` : ""}${
                 s.batches.length ? `<small class="muted">${esc(batchName(p))} ${esc(s.batches.join(", "))}</small>` : ""}</td></tr>`;
           }).join("") || `<tr><td colspan="${picks ? 6 : 5}" class="tb-none">Nothing still to sort out. 👍</td></tr>`}</tbody></table></div>`
           : `<p class="tb-none">No sales since ${esc(niceDate(sl.fromKey))}.</p>`}
@@ -2613,9 +2616,9 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
 
     async function settleSales(deduct, btn) {
       const p = st.products.find((x) => x.id === id);
-      const items = sl.list.filter((s) => s.state === "pending" && sl.sel.has(s.id));
+      const items = sl.list.filter((s) => fixable(s) && sl.sel.has(s.id));
       if (!p || !items.length) return;
-      const n = items.reduce((a, s) => a + s.qty, 0);
+      const n = items.reduce((a, s) => a + owed(s), 0);
       const ok = await confirmDialog({
         title: deduct ? `Take ${plural(n, p.stockUnit)} off the Shelf?` : `Mark ${plural(items.length, "sale")} as already counted?`,
         message: deduct
@@ -2627,7 +2630,14 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       btn.disabled = true;
       btn.textContent = "Saving…";
       try {
-        const r = await settlePendingSales(p, items, { deduct }, staff);
+        const pend = items.filter((s) => s.state === "pending");
+        const shorts = items.filter((s) => s.state === "short");
+        const a = pend.length ? await settlePendingSales(p, pend, { deduct }, staff) : null;
+        const b = shorts.length ? await settleShortSales(p, shorts.map((s) => s.id), { deduct }, staff) : null;
+        const zero = { done: 0, short: 0, failed: [], backdated: { lines: 0, closed: 0 } };
+        const A = a || zero, B = b || zero;
+        const r = { done: A.done + B.done, short: A.short + B.short, failed: [...A.failed, ...B.failed],
+          backdated: { lines: A.backdated.lines + B.backdated.lines, closed: A.backdated.closed + B.backdated.closed } };
         const bd = r.backdated;
         showToast([
           deduct ? `${plural(r.done, "sale")} taken off stock.` : `${plural(r.done, "sale")} marked as counted.`,

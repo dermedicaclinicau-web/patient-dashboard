@@ -5680,10 +5680,11 @@ export async function productSales({ product, fromKey, invoiceRows = [], allProd
     const date = KEY_RE.test(x.apptDate || "") ? x.apptDate : String(x.dateKey || "");
     if (date < fromKey) return;
     const qty = Number(l.qty) || 0, taken = Number(l.taken) || 0;
+    const left = l.short !== undefined && l.short !== null ? Math.max(0, Number(l.short) || 0) : Math.max(0, qty - taken);
     list.push({
       id: d.id, date, source: String(x.source || "scan"), invoiceId: String(x.invoiceId || ""),
-      patientName: String(x.patientName || ""), provider: String(x.provider || ""), qty, taken,
-      state: x.voided ? "voided" : x.deducted === false ? "counted" : taken < qty ? "short" : "taken",
+      patientName: String(x.patientName || ""), provider: String(x.provider || ""), qty, taken, left,
+      state: x.voided ? "voided" : x.deducted === false ? "counted" : left > 0 ? "short" : taken < qty ? "counted" : "taken",
       batches: [...new Set((l.rows || []).map((r) => r.batch).filter(Boolean))],
     });
   });
@@ -5698,7 +5699,7 @@ export async function productSales({ product, fromKey, invoiceRows = [], allProd
     const id = `invoice__${slug(invoiceId)}__${pid}`;
     if (docs.has(id)) return;
     const s = pending.get(id) || { id, date, source: "invoice", invoiceId: String(invoiceId || ""),
-      patientName: String(patientName || ""), provider: "", qty: 0, taken: 0, state: "pending", batches: [] };
+      patientName: String(patientName || ""), provider: "", qty: 0, taken: 0, left: 0, state: "pending", batches: [] };
     s.qty++;
     pending.set(id, s);
   });
@@ -5730,6 +5731,95 @@ export async function settlePendingSales(product, items, { deduct = true } = {},
     } catch (err) {
       console.error("Sale not settled:", s.invoiceId, err);
       res.failed.push(s.invoiceId || s.id);
+    }
+  }
+  if (applied.length) {
+    res.backdated = await backdateCounts(applied, staff)
+      .catch((err) => { console.warn("Counts not corrected:", err); return { lines: 0, closed: 0, skipped: [], failed: 1 }; });
+  }
+  return res;
+}
+
+// Sales saved short (the Shelf showed less than was sold). deduct: the rest comes off the Shelf now (oldest expiry first),
+// dated the day it sold, and opening counts done since are corrected. Otherwise the short is cleared without changing
+// stock (sold from stock the portal didn't know about, e.g. before the base count). Each sale is settled once.
+export async function settleShortSales(product, ids, { deduct = true } = {}, staff) {
+  const res = { done: 0, taken: 0, short: 0, failed: [], backdated: { lines: 0, closed: 0, skipped: [], failed: 0 } };
+  const applied = [];
+  const pRef = doc(db, "inv_products", product.id);
+  const by = who(staff);
+  for (const id of ids || []) {
+    try {
+      // The Shelf batches, oldest expiry first (their quantities are read again inside the transaction)
+      const lotIds = deduct
+        ? (await getDocs(query(collection(db, "inv_lots"), where("productId", "==", product.id)))).docs
+          .map(normaliseLot).filter((l) => l.loc === "shelf" && l.qty > 0).sort(fefo).map((l) => l.id)
+        : [];
+      const r = await runTransaction(db, async (tx) => {
+        // ---- Reads ----
+        const sRef = doc(db, "inv_sales", id);
+        const s = await tx.get(sRef);
+        if (!s.exists()) throw new Error("This sale no longer exists.");
+        const x = s.data();
+        if (x.voided) throw new Error("This sale was voided.");
+        const lines = (Array.isArray(x.lines) ? x.lines : []).map((l) => ({ ...l, rows: (l.rows || []).map((q) => ({ ...q })) }));
+        const l = lines.find((y) => y.productId === product.id);
+        if (!l) throw new Error("This product isn't on that sale.");
+        const date = KEY_RE.test(x.apptDate || "") ? x.apptDate : String(x.dateKey || dayKey());
+        const need = l.short !== undefined && l.short !== null ? Math.max(0, Number(l.short) || 0)
+          : Math.max(0, (Number(l.qty) || 0) - (Number(l.taken) || 0));
+        if (!need) return { took: 0, left: 0, rows: [], date, nothing: true };
+        const pSnap = deduct ? await tx.get(pRef) : null;
+        const lots = [];
+        for (const lid of lotIds) lots.push(await tx.get(doc(db, "inv_lots", lid)));
+
+        // ---- Writes ----
+        let left = need;
+        const rows = [];
+        if (deduct) {
+          for (const ls of lots) {
+            if (!left) break;
+            if (!ls.exists()) continue;
+            const have = Number(ls.data().qty) || 0;
+            if (have <= 0) continue;
+            const n = Math.min(have, left);
+            tx.update(ls.ref, { qty: have - n, updatedAt: serverTimestamp() });
+            rows.push({ batch: String(ls.data().batch || ""), expiry: String(ls.data().expiry || ""), taken: n });
+            left -= n;
+          }
+        }
+        const took = need - left;
+        if (took && pSnap && pSnap.exists()) {
+          const st = pSnap.data().stock || {};
+          tx.update(pRef, { stock: { shelf: Math.max(0, (Number(st.shelf) || 0) - took), jt: Number(st.jt) || 0 }, stockAt: serverTimestamp() });
+          logMove(tx, staff, {
+            type: "sale", productId: product.id, productName: String(pSnap.data().name || product.name),
+            unit: String(pSnap.data().stockUnit || product.stockUnit || "item"),
+            lines: rows.map((q) => ({ loc: "shelf", batch: q.batch, expiry: q.expiry, delta: -q.taken })),
+            reason: "Sale: taken off later",
+            note: [`Sold ${date}`, x.invoiceId && `Invoice ${x.invoiceId}`, x.patientName, "The Shelf was short when it sold"]
+              .filter(Boolean).join(" · ").slice(0, 500),
+            ref: id, effectiveDate: date,
+          });
+        }
+        l.taken = (Number(l.taken) || 0) + took;
+        l.rows = [...(l.rows || []), ...rows];
+        l.short = deduct ? left : 0;
+        if (!deduct) l.shortCounted = need;   // cleared without changing stock
+        tx.update(sRef, {
+          lines, short: lines.some((y) => (Number(y.short) || 0) > 0),
+          shortSettledAt: serverTimestamp(), shortSettledBy: by, shortSettledByUid: uid(),
+        });
+        return { took, left: deduct ? left : 0, rows, date };
+      });
+      if (r.nothing) continue;
+      res.done++;
+      res.taken += r.took;
+      res.short += r.left;
+      if (r.took) applied.push({ saleId: `${id}:late`, productId: product.id, date: r.date, rows: r.rows });
+    } catch (err) {
+      console.error("Short sale not settled:", id, err);
+      res.failed.push(id);
     }
   }
   if (applied.length) {
