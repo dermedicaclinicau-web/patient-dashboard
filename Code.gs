@@ -10081,20 +10081,82 @@ function upInvoices_(body, session) {
           'Invoices already in INVOICE RECORD will still be skipped. Add the rest anyway?' };
     }
 
-    // Invoices already in the sheet are skipped (all their lines), and the new rows go after the last Invoice ID
-    const last = sheet.getLastRow();
-    const have = {};
-    let lastA = 1;
-    if (last >= 2) {
-      sheet.getRange(2, 1, last - 1, 1).getDisplayValues().forEach(function (r, i) {
-        const v = txt(r[0]);
-        if (v) { have[v] = true; lastA = i + 2; }
+    // What's in the sheet now: each invoice's rows, date, patient and products (one row per item)
+    const readSheet = function () {
+      const lastRow = sheet.getLastRow();
+      const have = {};
+      let lastA = 1;
+      if (lastRow >= 2) {
+        sheet.getRange(2, 1, lastRow - 1, 6).getValues().forEach(function (r, i) {
+          const v = txt(r[0]);
+          if (!v) return;
+          lastA = i + 2;
+          const h = have[v] || (have[v] = { rows: [], counts: {}, date: sheetDateKey_(r[1], tz), name: txt(r[2]) });
+          h.rows.push(i + 2);
+          const p = txt(r[5]);
+          if (p) h.counts[p] = (h.counts[p] || 0) + 1;
+        });
+      }
+      return { have: have, lastA: lastA };
+    };
+    let S = readSheet();
+
+    // Invoices already in the sheet whose products changed in Timely, and ones no longer in Timely (voided or deleted)
+    const fileBy = {};
+    lines.forEach(function (l) {
+      if (!l.id) return;
+      const f = fileBy[l.id] || (fileBy[l.id] = {});
+      f[l.product] = (f[l.product] || 0) + 1;
+    });
+    const same = function (a, b) {
+      return uniq_(Object.keys(a).concat(Object.keys(b))).every(function (k) { return (a[k] || 0) === (b[k] || 0); });
+    };
+    const changed = Object.keys(fileBy).filter(function (id) { return S.have[id] && !same(S.have[id].counts, fileBy[id]); });
+    const missing = from ? Object.keys(S.have).filter(function (id) {
+      const d = S.have[id].date;
+      return !fileBy[id] && d && d >= from && d <= to;
+    }) : [];
+    const listOf = function (ids, withNow) {
+      return ids.slice(0, 30).map(function (id) {
+        const h = S.have[id];
+        return { id: id, date: h.date, name: h.name, was: h.counts, now: withNow ? fileBy[id] : {} };
       });
+    };
+    const changedList = listOf(changed, true);
+    const missingList = listOf(missing, false);
+    // Removing invoices, or changing a lot of them at once, waits for a yes
+    if ((missing.length || changed.length > 20) && !body.force) {
+      return { ok: true, needsForce: true, changed: changedList, missing: missingList,
+        problem: [
+          changed.length ? changed.length + ' invoice(s) already in INVOICE RECORD have different products or quantities now' : '',
+          missing.length ? missing.length + ' invoice(s) from ' + (from === to ? recLongDate_(from) : recLongDate_(from) + ' to ' + recLongDate_(to)) +
+            " aren't in this file any more (voided or deleted in Timely)" : '',
+        ].filter(Boolean).join(', and ') +
+          '. Update INVOICE RECORD to match this file? OK updates them and adds the new invoices. Cancel stops the upload and changes nothing.' };
     }
+
+    // Their old rows go (bottom up, in runs of neighbouring rows), and the file's lines for them are added below
+    const redo = changed.concat(missing);
+    if (redo.length) {
+      const rowsGone = [].concat.apply([], redo.map(function (id) { return S.have[id].rows; })).sort(function (a, b) { return b - a; });
+      let i = 0;
+      while (i < rowsGone.length) {
+        let j = i;
+        while (j + 1 < rowsGone.length && rowsGone[j + 1] === rowsGone[j] - 1) j++;
+        sheet.deleteRows(rowsGone[j], j - i + 1);
+        i = j + 1;
+      }
+      SpreadsheetApp.flush();
+      S = readSheet();
+      console.log('Invoice Record: ' + changed.length + ' invoice(s) updated, ' + missing.length + ' removed (changed in Timely)');
+    }
+    const have = S.have;
+    const lastA = S.lastA;
     const fresh = lines.filter(function (l) { return !l.id || !have[l.id]; });
     const base = {
       ok: true, from: from, to: to, noProduct: noProduct, badDates: badDates,
       skippedInvoices: uniq_(lines.filter(function (l) { return l.id && have[l.id]; }).map(function (l) { return l.id; })).length,
+      updatedInvoices: changed.length, removedInvoices: missing.length, changed: changedList, missing: missingList,
     };
     if (!fresh.length) return Object.assign(base, { rows: 0 });
 

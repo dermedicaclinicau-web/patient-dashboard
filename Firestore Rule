@@ -1387,16 +1387,29 @@ match /inv_count_drafts/{id} {
       allow delete: if false;
     }
     
-        // Sales: products checked out to patients (Scanner now, the checkout later). Never edited from a browser.
+    // Sales: products checked out to patients (Scanner, invoices, by hand). Saved once.
+    // Manage inventory can: settle a sale saved short, or correct a sale whose invoice changed in Timely.
+    // Only the line amounts change (no lines added or removed), stamped with who did it.
     match /inv_sales/{id} {
       allow read: if isStaff();
       allow create: if invUse() && request.resource.data.byUid == request.auth.uid
         && request.resource.data.lines is list
         && request.resource.data.lines.size() > 0 && request.resource.data.lines.size() <= 40
         && request.resource.data.voided == false;
-      allow update, delete: if false;
+      allow update: if invManage()
+        && resource.data.get('voided', false) != true
+        && request.resource.data.lines is list
+        && request.resource.data.lines.size() == resource.data.lines.size()
+        && ((resource.data.get('short', false) == true
+            && request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly(['lines', 'short', 'shortSettledAt', 'shortSettledBy', 'shortSettledByUid'])
+            && request.resource.data.shortSettledByUid == request.auth.uid)
+          || (request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly(['lines', 'short', 'invoiceFixes', 'fixedAt', 'fixedBy', 'fixedByUid'])
+            && request.resource.data.fixedByUid == request.auth.uid));
+      allow delete: if false;
     }
-
+    
     // Returns: from patients, and back to suppliers. Supplier returns wait for their credit, marked once.
     match /inv_returns/{id} {
       allow read: if isStaff();

@@ -2518,10 +2518,11 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
     const sl = { fromKey: baseKey() || dayKey(new Date(Date.now() - 90 * 864e5)), open: false, busy: false, err: "",
       list: [], startDate: "", only: false, sel: new Set() };
     const SALE_STATE = { taken: ["Taken off", "is-ok"], short: ["Shelf was short", "is-warn"], pending: ["Not taken off stock", "is-bad"],
-      counted: ["Counted, stock not changed", "is-info"], voided: ["Voided", ""] };
+      counted: ["Counted, stock not changed", "is-info"], voided: ["Voided", ""],
+      more: ["Invoice now has more", "is-warn"], fewer: ["Invoice now has fewer", "is-warn"] };
     const SALE_SRC = { invoice: "Invoice", manual: "By hand", scan: "Billing sheet", pos: "Checkout" };
-    const fixable = (s) => s.state === "pending" || s.state === "short";
-    const owed = (s) => (s.state === "short" ? s.left : s.qty);   // what still has to come off
+    const fixable = (s) => ["pending", "short", "more", "fewer"].includes(s.state);
+    const owed = (s) => (s.state === "short" ? s.left : s.state === "more" || s.state === "fewer" ? Math.abs(s.diff) : s.qty);
 
     async function loadSales() {
       const p = st.products.find((x) => x.id === id);
@@ -2535,6 +2536,7 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
         const r = await productSales({ product: p, fromKey: sl.fromKey, invoiceRows: res.rows || [], allProducts: st.products });
         sl.list = r.list;
         sl.startDate = r.startDate;
+        sl.warn = r.warn === true;
         const cut = baseKey();
         sl.sel = new Set(r.list.filter((s) => fixable(s) && (!cut || s.date >= cut)).map((s) => s.id));
         sl.open = true;
@@ -2585,6 +2587,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           ${pill("taken off stock", taken)}
           ${pendN ? pill("not taken off", pendN, "is-warn") : ""}
           ${shortN ? pill("the Shelf was short", shortN, "is-warn") : ""}
+          ${(() => { const c = L.filter((s) => s.state === "more" || s.state === "fewer").length;
+            return c ? pill(c === 1 ? "invoice changed in Timely" : "invoices changed in Timely", c, "is-warn") : ""; })()}
           ${countedN ? pill("counted, stock not changed", countedN) : ""}
         </div>
         ${!sl.startDate ? `<p class="inv-hint is-warn">Invoice uploads don't take sales off stock yet: there's no invoice start date.
@@ -2593,6 +2597,8 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
           never fully came off stock.</strong> Not linked when uploaded, before the invoice start date, or the Shelf showed 0 when it sold (often a delivery not received yet).</p>` : ""}
         ${before ? `<p class="inv-hint">${plural(before, "sale")} before the base count never came off stock. The base count already
           reflects them, so <strong>mark them as already counted</strong> rather than taking them off.</p>` : ""}
+        ${sl.warn ? `<p class="inv-hint is-warn">Most of the invoices taken off stock can't be found in INVOICE RECORD under this product's
+          name any more, so changed invoices aren't checked. Check the name in Products → <strong>Invoice links</strong>.</p>` : ""}
         ${L.length ? `<label class="fe-check"><input type="checkbox" data-sl="only"${sl.only ? " checked" : ""} /> Only ones not taken off</label>
           <div class="inv-pd-salescroll"><table class="inv-table inv-pd-saletable"><thead><tr>${picks ? "<th></th>" : ""}
             <th>Sold</th><th>From</th><th>Patient</th><th>Qty</th><th>Stock</th></tr></thead><tbody>${rows.map((s) => {
@@ -2604,12 +2610,13 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
               <td>${esc(SALE_SRC[s.source] || s.source)}${s.invoiceId ? ` ${esc(s.invoiceId)}` : ""}${s.provider ? `<small class="muted">${esc(s.provider)}</small>` : ""}</td>
               <td>${esc(s.patientName || "—")}</td><td>${esc(plural(s.qty, unit))}</td>
               <td><span class="inv-flag ${cls}">${esc(label)}</span>${s.state === "short" ? `<small>${s.left} not taken off</small>` : ""}${
+                s.state === "more" || s.state === "fewer" ? `<small>${s.sheetQty} on the invoice now (was ${s.qty})</small>` : ""}${
                 s.batches.length ? `<small class="muted">${esc(batchName(p))} ${esc(s.batches.join(", "))}</small>` : ""}</td></tr>`;
           }).join("") || `<tr><td colspan="${picks ? 6 : 5}" class="tb-none">Nothing still to sort out. 👍</td></tr>`}</tbody></table></div>`
           : `<p class="tb-none">No sales since ${esc(niceDate(sl.fromKey))}.</p>`}
         ${picks ? `<div class="inv-pd-saleacts"><small class="muted">${sl.sel.size} ticked</small>
-          <button type="button" class="lh-btn is-primary" data-sl="take"${sl.sel.size ? "" : " disabled"}>Take off stock</button>
-          <button type="button" class="lh-btn" data-sl="mark"${sl.sel.size ? "" : " disabled"}>Mark as already counted</button></div>` : ""}
+          <button type="button" class="lh-btn is-primary" data-sl="take"${sl.sel.size ? "" : " disabled"}>Update stock</button>
+          <button type="button" class="lh-btn" data-sl="mark"${sl.sel.size ? "" : " disabled"}>Don't change stock</button></div>` : ""}
         <small class="fe-note">Only invoice names linked to this product are listed. An unlinked name won't show here: link it in Products → Invoice links.</small>
       </div>`;
     }
@@ -2619,12 +2626,16 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       const items = sl.list.filter((s) => fixable(s) && sl.sel.has(s.id));
       if (!p || !items.length) return;
       const n = items.reduce((a, s) => a + owed(s), 0);
+      const back = items.filter((s) => s.state === "fewer").reduce((a, s) => a + Math.abs(s.diff), 0);
+      const off = n - back;
       const ok = await confirmDialog({
-        title: deduct ? `Take ${plural(n, p.stockUnit)} off the Shelf?` : `Mark ${plural(items.length, "sale")} as already counted?`,
+        title: deduct ? `Update stock for ${plural(items.length, "sale")}?` : `Leave stock as it is for ${plural(items.length, "sale")}?`,
         message: deduct
-          ? "Each comes off the Shelf (oldest expiry first), dated the day it was sold. Opening counts done since are corrected."
-          : "Stock doesn't change. They're recorded, so they stop showing as missing and an invoice upload never takes them off.",
-        confirmLabel: deduct ? "Take off stock" : "Mark as counted",
+          ? [off ? `${plural(off, p.stockUnit)} come off the Shelf (oldest expiry first).` : "",
+             back ? `${plural(back, p.stockUnit)} go back onto the Shelf, into the batches they came from.` : "",
+             "Each is dated the day it was sold, and opening counts done since are corrected."].filter(Boolean).join(" ")
+          : "Stock doesn't change. The sales are recorded to match the invoices, so they stop showing here.",
+        confirmLabel: deduct ? "Update stock" : "Don't change stock",
       });
       if (!ok) return;
       btn.disabled = true;
@@ -2632,18 +2643,22 @@ export function mountInventory(container, { param = "", staff = null } = {}) {
       try {
         const pend = items.filter((s) => s.state === "pending");
         const shorts = items.filter((s) => s.state === "short");
-        const a = pend.length ? await settlePendingSales(p, pend, { deduct }, staff) : null;
-        const b = shorts.length ? await settleShortSales(p, shorts.map((s) => s.id), { deduct }, staff) : null;
-        const zero = { done: 0, short: 0, failed: [], backdated: { lines: 0, closed: 0 } };
-        const A = a || zero, B = b || zero;
-        const r = { done: A.done + B.done, short: A.short + B.short, failed: [...A.failed, ...B.failed], error: A.error || B.error,
-          backdated: { lines: A.backdated.lines + B.backdated.lines, closed: A.backdated.closed + B.backdated.closed } };
+        const fixes = items.filter((s) => s.state === "more" || s.state === "fewer");
+        const parts = [
+          pend.length ? await settlePendingSales(p, pend, { deduct }, staff) : null,
+          shorts.length ? await settleShortSales(p, shorts.map((s) => s.id), { deduct }, staff) : null,
+          fixes.length ? await settleInvoiceFixes(p, fixes.map((s) => ({ id: s.id, sheetQty: s.sheetQty })), { stock: deduct }, staff) : null,
+        ].filter(Boolean);
+        const r = parts.reduce((t, x) => ({
+          done: t.done + x.done, short: t.short + (x.short || 0), failed: [...t.failed, ...x.failed], error: t.error || x.error,
+          backdated: { lines: t.backdated.lines + (x.backdated.lines || 0), closed: t.backdated.closed + (x.backdated.closed || 0) },
+        }), { done: 0, short: 0, failed: [], error: null, backdated: { lines: 0, closed: 0 } });
         const bd = r.backdated;
         showToast([
-          deduct ? `${plural(r.done, "sale")} taken off stock.` : `${plural(r.done, "sale")} marked as counted.`,
+          `${plural(r.done, "sale")} updated${deduct ? "" : ", stock not changed"}.`,
           r.short ? `The Shelf was short by ${r.short}.` : "",
           bd.lines ? `${bd.lines} count line${bd.lines === 1 ? "" : "s"} corrected${bd.closed ? `, ${bd.closed} investigation${bd.closed === 1 ? "" : "s"} closed` : ""}.` : "",
-          r.failed.length ? `Couldn't save ${r.failed.length}: ${errText((b && b.error) || (a && a.error), "try again")}` : "",
+          r.failed.length ? `Couldn't save ${r.failed.length}: ${errText(r.error, "try again")}` : "",
         ].filter(Boolean).join(" "));
       } catch (ex) {
         console.error("Sales not settled:", ex);

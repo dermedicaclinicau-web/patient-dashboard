@@ -5694,9 +5694,11 @@ export async function productSales({ product, fromKey, invoiceRows = [], allProd
     .map((p) => [invoiceNameKey(p.name), p.id]));
   cfg.links.forEach((l) => link.set(invoiceNameKey(l.name), l.productId));
   const pending = new Map();
+  const sheetN = {};   // how many of this product each invoice has in INVOICE RECORD now
   invoiceRows.forEach(([invoiceId, date, patientName, name]) => {
     if (!KEY_RE.test(date || "") || date < fromKey || link.get(invoiceNameKey(name)) !== pid) return;
     const id = `invoice__${slug(invoiceId)}__${pid}`;
+    sheetN[id] = (sheetN[id] || 0) + 1;
     if (docs.has(id)) return;
     const s = pending.get(id) || { id, date, source: "invoice", invoiceId: String(invoiceId || ""),
       patientName: String(patientName || ""), provider: "", qty: 0, taken: 0, left: 0, state: "pending", batches: [] };
@@ -5704,9 +5706,23 @@ export async function productSales({ product, fromKey, invoiceRows = [], allProd
     pending.set(id, s);
   });
 
+  // Invoice sales taken off stock, whose invoice now has a different quantity (changed or voided in Timely)
+  const recorded = list.filter((s) => s.source === "invoice" && /^invoice__/.test(s.id) && ["taken", "short"].includes(s.state));
+  const diffs = recorded.filter((s) => (sheetN[s.id] || 0) !== s.qty);
+  // Most of them gone from the sheet at once is a name mismatch, not real changes: nothing is flagged
+  const gone = diffs.filter((s) => !sheetN[s.id]).length;
+  const warn = gone >= 4 && gone >= recorded.length * 0.5;
+  if (!warn) {
+    diffs.forEach((s) => {
+      s.sheetQty = sheetN[s.id] || 0;
+      s.diff = s.sheetQty - s.qty;
+      s.state = s.diff > 0 ? "more" : "fewer";
+    });
+  }
   return {
     list: [...list, ...pending.values()].sort((a, b) => b.date.localeCompare(a.date) || a.invoiceId.localeCompare(b.invoiceId)),
     startDate: cfg.startDate,
+    warn,
   };
 }
 
@@ -5827,6 +5843,136 @@ export async function settleShortSales(product, ids, { deduct = true } = {}, sta
     res.backdated = await backdateCounts(applied, staff)
       .catch((err) => { console.warn("Counts not corrected:", err); return { lines: 0, closed: 0, skipped: [], failed: 1 }; });
   }
+  return res;
+}
+
+// Invoice sales whose invoice changed in Timely after they came off stock (productSales: state "more" or "fewer").
+// items: [{ id, sheetQty }]. stock: the difference comes off the Shelf (more, oldest expiry first) or goes back into the
+// batches it came from (fewer), dated the day it sold, and opening counts done since are corrected.
+// Otherwise only the sale is corrected to match the invoice, and stock isn't changed.
+export async function settleInvoiceFixes(product, items, { stock = true } = {}, staff) {
+  const res = { done: 0, off: 0, back: 0, short: 0, failed: [], error: null, backdated: { lines: 0, closed: 0, skipped: [], failed: 0 } };
+  const pRef = doc(db, "inv_products", product.id);
+  const by = who(staff);
+  const takes = [], gives = [];
+  for (const it of items || []) {
+    try {
+      const want = Math.max(0, Math.floor(Number(it.sheetQty) || 0));
+      const shelfIds = stock
+        ? (await getDocs(query(collection(db, "inv_lots"), where("productId", "==", product.id)))).docs
+          .map(normaliseLot).filter((l) => l.loc === "shelf" && l.qty > 0).sort(fefo).map((l) => l.id)
+        : [];
+      const r = await runTransaction(db, async (tx) => {
+        // ---- Reads ----
+        const sRef = doc(db, "inv_sales", it.id);
+        const s = await tx.get(sRef);
+        if (!s.exists()) throw new Error("This sale no longer exists.");
+        const x = s.data();
+        if (x.voided) throw new Error("This sale was voided.");
+        const lines = (Array.isArray(x.lines) ? x.lines : []).map((l) => ({ ...l, rows: (l.rows || []).map((q) => ({ ...q })) }));
+        const l = lines.find((y) => y.productId === product.id);
+        if (!l) throw new Error("This product isn't on that sale.");
+        const qty = Number(l.qty) || 0;
+        const d = want - qty;
+        if (!d) return { nothing: true };
+        const date = KEY_RE.test(x.apptDate || "") ? x.apptDate : String(x.dateKey || dayKey());
+        const taken0 = Number(l.taken) || 0;
+        const short0 = l.short !== undefined && l.short !== null ? Math.max(0, Number(l.short) || 0) : Math.max(0, qty - taken0);
+        const pSnap = stock ? await tx.get(pRef) : null;
+        const lots = new Map();
+        const readLot = async (id) => { if (!lots.has(id)) lots.set(id, await tx.get(doc(db, "inv_lots", id))); return lots.get(id); };
+        const rowLot = (q) => lotId(product.id, "shelf", q.batch || "", q.expiry || "");
+        if (stock && d > 0) for (const id of shelfIds) await readLot(id);
+        if (stock && d < 0) for (const q of l.rows) await readLot(rowLot(q));
+
+        // ---- Writes ----
+        const moved = [];   // delta: − off the Shelf, + back onto it
+        let took = 0, back = 0;
+        if (d > 0) {
+          let left = stock ? d : 0;
+          for (const id of shelfIds) {
+            if (!left) break;
+            const ls = lots.get(id);
+            if (!ls || !ls.exists()) continue;
+            const have = Number(ls.data().qty) || 0;
+            if (have <= 0) continue;
+            const n = Math.min(have, left);
+            const b = String(ls.data().batch || ""), e = String(ls.data().expiry || "");
+            tx.update(ls.ref, { qty: have - n, updatedAt: serverTimestamp() });
+            moved.push({ batch: b, expiry: e, delta: -n });
+            l.rows.push({ batch: b, expiry: e, taken: n });
+            left -= n;
+            took += n;
+          }
+          l.short = stock ? short0 + (d - took) : short0;
+        } else {
+          const n = -d;
+          const fromShort = Math.min(short0, n);   // the part that never came off stock goes first
+          let left = stock ? n - fromShort : 0;
+          for (let i = l.rows.length - 1; i >= 0 && left > 0; i--) {
+            const q = l.rows[i];
+            const k = Math.min(Number(q.taken) || 0, left);
+            if (!k) continue;
+            const ls = lots.get(rowLot(q));
+            const have = ls && ls.exists() ? Number(ls.data().qty) || 0 : 0;
+            tx.set(doc(db, "inv_lots", rowLot(q)), {
+              productId: product.id, loc: "shelf", batch: String(q.batch || ""), expiry: String(q.expiry || ""), qty: have + k,
+              updatedAt: serverTimestamp(), ...(ls && ls.exists() ? {} : { createdAt: serverTimestamp() }),
+            }, { merge: true });
+            q.taken = (Number(q.taken) || 0) - k;
+            moved.push({ batch: String(q.batch || ""), expiry: String(q.expiry || ""), delta: k });
+            left -= k;
+            back += k;
+          }
+          l.rows = l.rows.filter((q) => Number(q.taken) > 0);
+          l.short = Math.max(0, short0 - fromShort);
+        }
+        l.qty = want;
+        l.taken = taken0 + took - back;
+        if (!stock) l.short = Math.max(0, Math.min(l.short, want - l.taken));
+
+        if (pSnap && pSnap.exists() && (took || back)) {
+          const st = pSnap.data().stock || {};
+          tx.update(pRef, { stock: { shelf: Math.max(0, (Number(st.shelf) || 0) + back - took), jt: Number(st.jt) || 0 }, stockAt: serverTimestamp() });
+        }
+        if (moved.length) {
+          logMove(tx, staff, {
+            type: "sale", productId: product.id, productName: String((pSnap && pSnap.data().name) || product.name),
+            unit: String((pSnap && pSnap.data().stockUnit) || product.stockUnit || "item"),
+            lines: moved.map((m) => ({ loc: "shelf", batch: m.batch, expiry: m.expiry, delta: m.delta })),
+            reason: "Invoice corrected in Timely",
+            note: [`Sold ${date}`, x.invoiceId && `Invoice ${x.invoiceId}`, x.patientName, `${qty} → ${want} on the invoice`]
+              .filter(Boolean).join(" · ").slice(0, 500),
+            ref: it.id, effectiveDate: date,
+          });
+        }
+        tx.update(sRef, {
+          lines, short: lines.some((y) => (Number(y.short) || 0) > 0),
+          invoiceFixes: arrayUnion({ at: new Date().toISOString(), by, was: qty, now: want, stock: !!stock }),
+          fixedAt: serverTimestamp(), fixedBy: by, fixedByUid: uid(),
+        });
+        return { took, back, left: l.short, date, moved };
+      });
+      if (r.nothing) continue;
+      res.done++;
+      res.off += r.took;
+      res.back += r.back;
+      res.short += r.took || r.back ? 0 : 0;
+      if (r.took) takes.push({ saleId: `${it.id}:fix${Date.now()}`, productId: product.id, date: r.date,
+        rows: r.moved.filter((m) => m.delta < 0).map((m) => ({ batch: m.batch, expiry: m.expiry, taken: -m.delta })) });
+      if (r.back) gives.push({ saleId: `${it.id}:fixback${Date.now()}`, productId: product.id, date: r.date,
+        rows: r.moved.filter((m) => m.delta > 0).map((m) => ({ batch: m.batch, expiry: m.expiry, taken: m.delta })) });
+      if (stock && r.left && r.took !== undefined && r.took < Math.max(0, want)) res.short += 0;
+    } catch (err) {
+      console.error("Invoice fix not saved:", it.id, err);
+      res.failed.push(it.id);
+      if (!res.error) res.error = err;
+    }
+  }
+  const add = (b) => { res.backdated.lines += b.lines || 0; res.backdated.closed += b.closed || 0; };
+  const safe = (p) => p.catch((err) => { console.warn("Counts not corrected:", err); return { lines: 0, closed: 0 }; });
+  if (takes.length) add(await safe(backdateCounts(takes, staff)));
+  if (gives.length) add(await safe(backdateCounts(gives, staff, { kind: "return" })));
   return res;
 }
 
