@@ -98,6 +98,7 @@
                   "./js/page-cache.js",
                   "./js/panel-resize.js",
                   "./js/paper-records.js",
+                  "./js/paste-notes.js",
                   "./js/patient-dashboard.js",
                   "./js/patient-list.js",
                   "./js/patient-reports.js",
@@ -150,6 +151,7 @@
                   "./js/rich-html.js",
                   "./js/rx-products.js",
                   "./js/scan-app.js",
+                  "./js/scan-popup.js",
                   "./js/scanner-api.js",
                   "./js/scanner-docket.js",
                   "./js/scanner-queue.js",
@@ -226,6 +228,6 @@
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261107-090116",
-    "v":  "20261107-090116"
+    "version":  "20261107-110703",
+    "v":  "20261107-110703"
 }
