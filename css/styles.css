@@ -11198,7 +11198,8 @@ details.sub-card.has-items > summary .hint { background: #fef3c7; color: #92400e
 }
 
 /* ===================== Paste consultation notes ===================== */
-dialog.pn { width: min(1440px, 96vw); height: min(940px, 94dvh); max-width: none; max-height: none; padding: 0; border: 0;
+dialog.pn { position: fixed; inset: 0; margin: auto;
+  width: min(1440px, 96vw); height: min(940px, 94dvh); max-width: none; max-height: none; padding: 0; border: 0;
   border-radius: 22px; background: #f6f8fb; color: #0f172a; overflow: hidden; box-shadow: 0 40px 100px rgba(15, 23, 42, .38); }
 dialog.pn[open] { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; animation: pn-in .24s cubic-bezier(.2, .8, .2, 1); }
 dialog.pn::backdrop { background: rgba(15, 23, 42, .55); backdrop-filter: blur(5px); }
