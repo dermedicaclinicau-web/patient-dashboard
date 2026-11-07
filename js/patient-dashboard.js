@@ -186,7 +186,15 @@ const ICONS = {
 
 // Every section starts collapsed each time a patient is opened: staff expand what they need
 function isOpen() { return false; }
-
+// Phone width (cards stacked, menus as bottom sheets)
+const narrow = () => window.matchMedia("(max-width: 760px)").matches;
+const touch = () => window.matchMedia("(pointer: coarse)").matches;
+// Below 860px the category cards sit in one column and the patient bar stops sticking (styles.css)
+const stacked = () => window.matchMedia("(max-width: 860px)").matches;
+// When the browser has a moment (at most 1.2 s), so the first sections draw first
+const whenIdle = (fn) => ("requestIdleCallback" in window
+  ? window.requestIdleCallback(() => fn(), { timeout: 1200 })
+  : setTimeout(fn, 250));
 /* ===================== Page ===================== */
 
 export async function mountPatientDashboard(container, patientId, { staff, onBack } = {}) {
@@ -212,6 +220,8 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   let recordsView = null;      // Treatment Records + Consent Records
   let reminderCount = 0;       // for the chips on the collapsed Pre-Consultation header
   let allergies = null;        // { known, items } from Clinical History; null until read
+  let restMounted = false;     // Skincare, Records, Other forms, History, Tasks, Billing
+  let mountRest = () => {};    // set once the page is drawn (sections opened early call it straight away)
   // Skin script (SSP): the tile and the Skincare section's "Create new SSP" open the builder in a new tab.
   // Caught first (capture phase), so no other click handler also opens it in this tab.
   root.addEventListener("click", (e) => {
@@ -299,9 +309,12 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   // <details> "toggle" doesn't bubble, so listen in the capture phase
   root.addEventListener("toggle", (e) => {
     const d = e.target;
-    if (!d.matches || !d.matches("details[data-key]")) return;
-    // Category cards side by side open and close together
-    if (d.dataset.pair !== undefined) {
+    if (!d.matches || !d.matches("details")) return;
+    if (d.open) mountRest();                                       // opened before the rest had loaded
+    if (!d.matches("details[data-key]")) return;
+    if (d.open && d._pa && d._pa.stale) renderPastAppts(d);        // day cards are drawn when first opened
+    // Category cards side by side open and close together (not when they're stacked)
+    if (d.dataset.pair !== undefined && !stacked()) {
       root.querySelectorAll(`details[data-pair="${CSS.escape(d.dataset.pair)}"]`).forEach((o) => {
         if (o !== d && o.open !== d.open) o.open = d.open;
       });
@@ -445,7 +458,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       ticking = false;
       if (!root.isConnected) { window.removeEventListener("scroll", onScroll); return; }
       const y = window.scrollY;
-      const next = compact ? y > 60 : y > 180;
+      const next = !stacked() && (compact ? y > 60 : y > 180);   // the bar only shrinks while it's sticky      
       if (next !== compact) { compact = next; bar.classList.toggle("is-compact", compact); }
     });
   };
@@ -511,7 +524,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
 
   renderTop();
 
-  // Load everything in parallel
+  // What staff look at first loads straight away
   loadTxCheckFrom();
   loadToday();
   setRecordingPatient(patient); // shows "Ready to record" for this patient
@@ -520,21 +533,27 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
   loadReminders();
   notesView = mountPersonalNotes(root, patient, staff);
   loadTranscriptSections();
-  mountSkincare(root, patient, staff);
-  recordsView = mountRecords(root, patient, staff);
-  mountFormRecords(root, patient);
-  mountHistory(root, patient);  
-  tasksView = mountPatientTasks(root, patient);
-  mountBillingRx(root, patient);
-  mountClinicalHistory(root, patient, staff);
+  mountClinicalHistory(root, patient, staff);   // also sends the allergies to the patient bar
 
+  // The rest once the page has drawn, or straight away if a section is opened first
+  mountRest = () => {
+    if (restMounted || !root.isConnected) return;
+    restMounted = true;
+    mountSkincare(root, patient, staff);
+    recordsView = mountRecords(root, patient, staff);
+    mountFormRecords(root, patient);
+    mountHistory(root, patient);
+    tasksView = mountPatientTasks(root, patient);
+    mountBillingRx(root, patient);
+  };
+  whenIdle(mountRest);
   // A form saved for this patient in another tab: refresh what it affects
   const myIds = new Set([patient.id, ...patientIds(patient)]);
   const onFormSavedElsewhere = (m) => {
     if (!root.isConnected) { stopListening(); return; }
     if (!m || m.type !== "form-saved" || !myIds.has(m.patientId)) return;
     clearPageCache();   // a new record exists
-    mountFormRecords(root, patient);   // Other forms
+    if (restMounted) mountFormRecords(root, patient);   // Other forms (loads fresh anyway if not yet)
     loadPastForms();                   // Tx / Cons / Rx badges and the "No Tx Record" warning
     if (recordsView && ["consent", "treatment"].includes(m.category)) recordsView.reload(); // Treatment / Consent Records
     showToast("A form was saved in another tab. This page has been updated.");
@@ -778,8 +797,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
         : "Couldn't undo the merge. Please try again.");
     }
   }
-  // Staff task: the published To Staff tasks, opened with this patient already chosen
-  let staffMenu = null;
+   let staffMenu = null;
   function closeStaffMenu() {
     if (!staffMenu) return;
     const m = staffMenu;
@@ -788,7 +806,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     m.btn.setAttribute("aria-expanded", "false");
     document.removeEventListener("pointerdown", m.outside, true);
     document.removeEventListener("keydown", m.key, true);
-    window.removeEventListener("resize", closeStaffMenu);
+    window.removeEventListener("resize", m.resize);
     window.removeEventListener("hashchange", closeStaffMenu);
   }
 
@@ -803,27 +821,36 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       <div class="fp-body"><p class="fp-loading">Loading tasks…</p></div>`;
     document.body.appendChild(el);
 
-    // Under the tile, or above it when there isn't room below
-    const r = btn.getBoundingClientRect();
-    const w = Math.min(360, window.innerWidth - 16);
-    el.style.width = `${w}px`;
-    el.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - w - 8))}px`;
-    const below = window.innerHeight - r.bottom - 14;
-    if (below >= 260 || below >= r.top) {
-      el.style.top = `${r.bottom + 6}px`;
-      el.style.maxHeight = `${Math.max(200, below)}px`;
+    if (narrow()) {
+      // A sheet along the bottom of the phone
+      el.classList.add("is-sheet");
+      Object.assign(el.style, { left: "8px", right: "8px", width: "auto", top: "auto", bottom: "8px", maxHeight: "75dvh" });
     } else {
-      el.style.bottom = `${window.innerHeight - r.top + 6}px`;
-      el.style.maxHeight = `${r.top - 14}px`;
+      // Under the tile, or above it when there isn't room below
+      const r = btn.getBoundingClientRect();
+      const w = Math.min(360, window.innerWidth - 16);
+      el.style.width = `${w}px`;
+      el.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - w - 8))}px`;
+      const below = window.innerHeight - r.bottom - 14;
+      if (below >= 260 || below >= r.top) {
+        el.style.top = `${r.bottom + 6}px`;
+        el.style.maxHeight = `${Math.max(200, below)}px`;
+      } else {
+        el.style.bottom = `${window.innerHeight - r.top + 6}px`;
+        el.style.maxHeight = `${r.top - 14}px`;
+      }
     }
 
     btn.setAttribute("aria-expanded", "true");
     const outside = (e) => { if (!el.contains(e.target) && !btn.contains(e.target)) closeStaffMenu(); };
     const key = (e) => { if (e.key === "Escape") { closeStaffMenu(); btn.focus(); } };
-    staffMenu = { el, btn, outside, key };
+    // The phone keyboard opening resizes the window: only a real width change closes the menu
+    const startW = window.innerWidth;
+    const resize = () => { if (Math.abs(window.innerWidth - startW) > 40) closeStaffMenu(); };
+    staffMenu = { el, btn, outside, key, resize };
     document.addEventListener("pointerdown", outside, true);
     document.addEventListener("keydown", key, true);
-    window.addEventListener("resize", closeStaffMenu);
+    window.addEventListener("resize", resize);
     window.addEventListener("hashchange", closeStaffMenu);
 
     const body = el.querySelector(".fp-body");
@@ -853,7 +880,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       <p class="fp-empty" data-role="none" hidden>No tasks match that search.</p>`;
     const search = body.querySelector(".fp-search");
     if (search) {
-      search.focus();
+      if (!touch()) search.focus();
       search.addEventListener("input", () => {
         const q = search.value.trim().toLowerCase();
         let any = false;
@@ -1374,6 +1401,8 @@ function paCardHtml(v, recs, formsLoaded) {
 function renderPastAppts(card) {
   const st = card._pa;
   if (!st) return;
+  if (!card.open) { st.stale = true; return; }   // drawn when it's opened (the visit count is already shown)
+  st.stale = false;
   const limit = card.classList.contains("visit-card") ? PA_SHOW_CATEGORY : PA_SHOW;
   const shown = st.all ? st.visits : st.visits.slice(0, limit);
   const kinds = new Set(shown.flatMap((v) => v.items.map((it) => it.kind)));

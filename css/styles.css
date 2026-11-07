@@ -11397,3 +11397,111 @@ dialog.pn::backdrop { background: rgba(15, 23, 42, .55); backdrop-filter: blur(5
 .pn-card.is-open .pn-peek { display: none; }
 .pn-card:not(.is-open) .pn-ta { display: none; }
 .pn-card.is-open .pn-ta { animation: pn-card-in .18s both; }
+
+/* ===================== Patient page: phones ===================== */
+@media (max-width: 760px) {
+  /* Patient bar */
+  .patient-bar .pb-top { gap: 10px; }
+  .pb-main { flex: 1 1 calc(100% - 110px); }
+  .pb-name { font-size: 20px; line-height: 1.25; overflow-wrap: anywhere; }
+  .pb-chips { gap: 6px; }
+  .pb-actions { order: 3; justify-content: space-between; gap: 8px; }
+  .pb-actions .round-btn { width: 44px; height: 44px; }
+  .pb-actions .pb-edit { margin-left: auto; min-height: 44px; }
+  .pb-details { grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+  .pb-details > div:nth-child(3), .pb-details > div:nth-child(4) { grid-column: 1 / -1; }
+
+  /* Clinical documentation tiles: one swipeable row */
+  .doc-tiles { display: flex; gap: 8px; overflow-x: auto; scroll-snap-type: x mandatory; padding-bottom: 6px;
+    margin-right: -.75rem; padding-right: .75rem; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .doc-tiles::-webkit-scrollbar { display: none; }
+  .doc-tile { flex: 0 0 auto; min-width: 104px; min-height: 76px; scroll-snap-align: start; }
+
+  /* Section headers wrap instead of squashing */
+  .section-card > summary, .sub-card > summary { flex-wrap: wrap; row-gap: 6px; min-height: 48px; }
+  .pc-head { row-gap: 4px; min-width: 0; }
+  .pc-peek { flex-basis: 100%; }
+  .pc-updated { display: none; }
+  .pc-refresh span { display: none; }
+  .pc-refresh { min-width: 40px; min-height: 40px; justify-content: center; }
+  .sum-left { flex-wrap: wrap; }
+  .sum-action { min-height: 36px; padding: 0 12px; }
+
+  /* Past appointments */
+  .pa-grid, .visit-card .pa-grid { grid-template-columns: 1fr; }
+  .pa-badges { flex-wrap: wrap; }
+  .pa-bdg-pop { max-width: calc(100vw - 32px); }
+
+  /* Treatment plan */
+  .tp-record > summary { flex-wrap: wrap; row-gap: 6px; }
+  .tp-sum-right { width: 100%; justify-content: space-between; }
+  .concern-head { flex-wrap: wrap; }
+  .tl-scroll { -webkit-overflow-scrolling: touch; }
+
+  /* Reminders */
+  .rmd .task-main { flex: 1 1 calc(100% - 70px); }
+  .rmd .task-done { min-height: 40px; }
+
+  /* "Overdue treatments" bubble: a card along the bottom */
+  .od-tip { position: fixed; z-index: 60; left: 12px; right: 12px; top: auto;
+    bottom: calc(12px + env(safe-area-inset-bottom)); width: auto; max-width: none; }
+  .od-tip::before { display: none; }
+
+  /* Edit patient details: full screen */
+  dialog.patient-dialog { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; border-radius: 0; }
+  dialog.patient-dialog .dialog-body { max-height: 100dvh; overflow-y: auto; padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
+  dialog.patient-dialog .dialog-actions { position: sticky; bottom: 0; background: #fff; padding-top: 10px; }
+  dialog.patient-dialog input { font-size: 16px; }   /* iPhone doesn't zoom in */
+
+  /* Staff task menu: bottom sheet */
+  .fp-menu.is-sheet { border-radius: 18px; box-shadow: 0 -10px 40px rgba(15, 23, 42, .25);
+    padding-bottom: env(safe-area-inset-bottom); animation: pd-sheet-in .2s ease-out; }
+  .fp-menu.is-sheet .fp-item { min-height: 48px; }
+}
+@media (max-width: 640px) {
+  /* Above the bottom menu bar */
+  .od-tip { bottom: calc(5.25rem + env(safe-area-inset-bottom)); }
+}
+@keyframes pd-sheet-in { from { transform: translateY(24px); opacity: 0; } }
+
+/* Touch screens (iPad too): bigger targets on the patient page only */
+@media (pointer: coarse) {
+  .patient-page :is(.round-btn, .pc-refresh, .pa-more, .sum-action, .task-done, .btn-ghost.sm) { min-height: 40px; }
+  .patient-page .pa-bdg { min-height: 30px; }
+}
+
+/* ===== "pn-" is used by Paste notes, Prospect nudges and Personal notes: keep each to itself ===== */
+dialog.pn { gap: 0; transition: none; }
+dialog.pn[open] { animation: pnd-in .24s cubic-bezier(.2, .8, .2, 1); }
+@keyframes pnd-in { from { opacity: 0; transform: translateY(14px) scale(.985); } }
+/* The nudges' slide-in again (the paste window's version had replaced it) */
+@keyframes pn-in { from { opacity: 0; transform: translateX(40px) scale(.96); } to { opacity: 1; transform: none; } }
+
+/* Close buttons */
+dialog.pn .pn-x { position: static; width: 40px; height: 40px; border-radius: 12px; font-size: inherit; }
+.pn-stack .pn-x { position: absolute; top: .4rem; right: .45rem; display: block; width: 26px; height: 26px;
+  border-radius: 50%; font-size: 1.15rem; }
+
+/* Nudge icons */
+.pn-stack .pn-ic { width: 32px; height: 32px; border-radius: 50%; background: #f0fdfa; color: #0f766e; }
+
+/* Paste window header (was getting Personal notes' small grey text) */
+dialog.pn .pn-meta { align-items: flex-start; margin-top: 0; font-size: 14px; color: inherit; }
+.pn-item .pn-meta { gap: .5rem; }
+
+/* Personal notes' Save / Cancel keep their own size */
+.pn-btns .pn-btn { display: inline-block; height: 34px; padding: 0 .9rem; border-radius: 8px;
+  font-size: .82rem; font-weight: 600; box-shadow: none; }
+.pn-btns .pn-btn.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+
+/* Text sizes in the paste window ("font: … inherit" isn't valid CSS, so those lines were ignored) */
+dialog.pn .pn-field input, dialog.pn .pn-field select { font-size: 14px; font-weight: 500; }
+dialog.pn .pn-tool { font-size: 13px; font-weight: 600; line-height: 1; }
+dialog.pn .pn-chip { font-size: 12.5px; font-weight: 600; line-height: 1; }
+dialog.pn .pn-sel { font-size: 13.5px; font-weight: 700; line-height: 1; }
+dialog.pn .pn-ta { font-size: 14px; line-height: 1.6; }
+dialog.pn .pn-link { font-size: 13px; font-weight: 600; }
+dialog.pn .pn-kbd kbd { font-size: 11px; font-weight: 600; }
+dialog.pn .pn-btn { font-size: 14px; font-weight: 600; line-height: 1; }
+dialog.pn .pn-btn.sm { font-size: 13px; }
+dialog.pn .pn-auto { font-size: 11px; font-weight: 600; line-height: 1.2; }
