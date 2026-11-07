@@ -72,9 +72,46 @@ async function postApi(body) {
   return data;
 }
 
-// The Apps Script session lasts 12 hours. When it has run out but the person is still signed in
-// (e.g. an iPad left asleep overnight), a new one is made from their Firebase login.
-// Several requests failing at once share one renewal.
+// The Apps Script session (12 hours, renewed while in use). Kept in this tab, plus a copy on the device,
+// so reopening the app doesn't have to renew it first (that's a whole extra Apps Script round trip).
+// The copy is only used for the same Firebase user, and only until it expires.
+const SESSION_KEY = "appSession";
+const KEEP_KEY = "dm.appSessionKeep";
+const sessionExpiry = (s) => {
+  const m = /^s1\.[A-Za-z0-9_-]+\.(\d{9,11})\./.exec(String(s || ""));
+  return m ? Number(m[1]) * 1000 : 0;
+};
+function keepSession(s) {
+  const uid = auth.currentUser && auth.currentUser.uid;
+  const exp = sessionExpiry(s);
+  if (!uid || !exp) return;   // older sessions have no expiry: not kept
+  try {
+    const next = JSON.stringify({ uid, s, exp });
+    if (localStorage.getItem(KEEP_KEY) !== next) localStorage.setItem(KEEP_KEY, next);
+  } catch { /* private mode */ }
+}
+function readSession() {
+  const s = sessionStorage.getItem(SESSION_KEY);
+  if (s) { keepSession(s); return s; }
+  try {
+    const k = JSON.parse(localStorage.getItem(KEEP_KEY) || "null");
+    const uid = auth.currentUser && auth.currentUser.uid;
+    if (k && uid && k.uid === uid && typeof k.s === "string" && k.exp > Date.now() + 2 * 60000) {
+      sessionStorage.setItem(SESSION_KEY, k.s);
+      return k.s;
+    }
+  } catch { /* nothing kept */ }
+  return "";
+}
+function saveSession(s) { sessionStorage.setItem(SESSION_KEY, s); keepSession(s); }
+// Signing out, or Switch user: the session goes from the tab and the device
+export function forgetSession() {
+  sessionStorage.removeItem(SESSION_KEY);
+  try { localStorage.removeItem(KEEP_KEY); } catch { /* private mode */ }
+}
+
+// When the session has run out but the person is still signed in (e.g. an iPad left asleep overnight),
+// a new one is made from their Firebase login. Several requests failing at once share one renewal.
 let renewing = null;
 function renewSession() {
   if (!renewing) {
@@ -85,7 +122,7 @@ function renewSession() {
       try { idToken = await user.getIdToken(); } catch { return false; }   // refreshed by Firebase if needed
       const data = await postApi({ action: "renewSession", idToken }).catch(() => null);
       if (!data || !data.ok || !data.session) return false;
-      sessionStorage.setItem("appSession", data.session);
+      saveSession(data.session);
       console.info("Session renewed.");
       return true;
     })().finally(() => { renewing = null; });
@@ -95,14 +132,17 @@ function renewSession() {
 
 // Shared Apps Script caller
 export async function callApi(payload, retried = false) {
-  if (!sessionStorage.getItem("appSession") && !(await renewSession())) throw unauthorized();
-  const data = await postApi({ ...payload, session: sessionStorage.getItem("appSession") });
+  let session = readSession();
+  if (!session && (await renewSession())) session = readSession();
+  if (!session) throw unauthorized();
+  const data = await postApi({ ...payload, session });
 
   // A renewed session (the access check every 5 minutes sends one): kept, so it never runs out while in use
-  if (typeof data.session === "string" && /^s1\./.test(data.session)) sessionStorage.setItem("appSession", data.session);
+  if (typeof data.session === "string" && /^s1\./.test(data.session)) saveSession(data.session);
 
   if (!data.ok) {
     if (data.error === "UNAUTHORIZED") {
+      forgetSession();   // that session was refused: never sent again
       // Refused before anything ran, so trying again once is safe
       if (!retried && await renewSession()) return callApi(payload, true);
       throw unauthorized();
@@ -115,7 +155,6 @@ export async function callApi(payload, retried = false) {
   }
   return data;
 }
-
 // Pre-consultation record from Firestore 'pcn_results' (matched by Patient ID, then unique name)
 export function fetchPreconsult(patient) {
   return cachedRead(`pcn|${patient.id}|${patientIds(patient).join(",")}|${patient.name || ""}`, () => loadPreconsult(patient));

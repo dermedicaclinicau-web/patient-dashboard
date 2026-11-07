@@ -5539,6 +5539,17 @@ body.is-arranging, body.is-arranging *{user-select:none;-webkit-user-select:none
 .scan-fee-in input:focus { outline: 2px solid var(--primary, #0f766e); outline-offset: 1px; }
 .scan-fee-edit small { font-size: 11px; color: var(--muted, #64748b); }
 
+.scan-done { display: grid; gap: 14px; justify-items: center; max-width: 520px; margin: 12px auto; padding: 22px 18px;
+  border-radius: 18px; background: #fff; text-align: center; box-shadow: 0 6px 20px rgba(15, 23, 42, .08); }
+.scan-done.is-ok { border-top: 6px solid #16a34a; }
+.scan-done.is-check { border-top: 6px solid #f59e0b; }
+.scan-done-img { max-width: 100%; max-height: 160px; border-radius: 10px; object-fit: contain; }
+.scan-done-main { display: grid; gap: 4px; }
+.scan-done-main strong { font-size: 20px; color: #0f172a; }
+.scan-done.is-ok .scan-done-main strong { color: #15803d; }
+.scan-done-next { min-height: 1.2em; color: #64748b; }
+.scan-done .scan-acts { justify-content: center; }
+
 /* Patient dashboard: scanned billing sheets */
 .bs-list { display: flex; flex-direction: column; gap: 8px; }
 .bs-item { border: 1px solid var(--border, #e2e8f0); border-radius: 10px; background: #fff; }

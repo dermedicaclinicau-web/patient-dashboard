@@ -9,7 +9,9 @@
 import { listProducts, INV_CATEGORIES, plural } from "./inventory-api.js";
 import { preparePhoto, readBillingSheet, readDocket, readPrescription, startReview, reviewBilling, saveBillingScan,
   earlierScans, findBooking, money, searchPatientsQuick, todaysScans, readAuto, smallCopy,
-  setScanJob, newScanJobId, parkScan, scanJobs, openScanJob, finishScanJob, staffList, warmPatientSearch} from "./scanner-api.js";
+  setScanJob, newScanJobId, parkScan, scanJobs, openScanJob, finishScanJob, staffList, warmPatientSearch,
+  rxToCheck, updateScan} from "./scanner-api.js";
+import { autoRx } from "./scanner-rx-auto.js";
 import { mountRxResult } from "./scanner-rx.js";
 import { rxProductList } from "./rx-products.js";
 import { mountDocketResult } from "./scanner-docket.js";
@@ -221,7 +223,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
   const productsReady = listProducts().then((list) => { products = list.filter((p) => p.active); })
     .catch((err) => console.error("Scanner: the product list didn't load", err));
   warmUpLogin();   // wakes Apps Script while the photo is being lined up, so the first scan isn't slow
-  if (can("scanner.docket")) staffList().catch(() => {});   // ready before the first docket is read
+  if (can("scanner.docket") || can("scanner.rx")) staffList().catch(() => {});   // ready before the first docket or prescription
 
   const savedKind = readLocal(KIND_KEY);
   const st = {
@@ -237,6 +239,8 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     pq: "", phits: [], psearching: false,         // billing: search all patients
     readAs: "", autoInfo: null, changing: false, prevMode: "",   // Auto-detect: what it was read as
     jobId: "", openJob: "", jobs: null, jobsAt: 0,   // Finish later: this read, a parked scan being checked, the list
+    rxDone: null, doneTimer: 0,                   // a prescription just saved (or sent to be checked)
+    checks: null, checksAt: 0,                    // prescriptions waiting to be checked
   };
   // Photos are docket pages: the Docket tab, or Auto-detect after "+ Add a page"
   const collecting = () => st.kind === "docket" || (st.kind === "auto" && st.pages.length > 0);
@@ -297,11 +301,11 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
       const who = s.kind === "docket"
         ? (s.status === "transferred" ? "Internal transfer · JT storage → Shelf"
           : `${s.supplierName || "Delivery docket"}${s.poNumber ? ` · ${s.poNumber}` : ""}`)
-        : (s.patientName || "Patient not read");
+        : (s.patientName || (s.status === "check" ? `“${s.readName || "?"}” (to check)` : "Patient not read"));
       const status = s.kind === "billing" ? (Number(s.flagCount) ? `${s.flagCount} to check` : s.editCount ? "Checked" : "All matched")
         : s.kind === "docket" ? ({ received: "Received", linked: "Linked to an order", unlinked: "No order linked",
             transferred: "Moved to the Shelf" }[s.status] || "")
-        : Array.isArray(s.items) ? plural(s.items.length, "item") : "";
+        : s.status === "check" ? "Needs checking" : Array.isArray(s.items) ? plural(s.items.length, "item") : "";
       return `<li data-scanopen="${esc(s.id)}">
         <span class="scan-today-k is-${esc(s.kind)}">${esc(KIND_TAG[s.kind] || s.kind)}</span>
         <span class="scan-today-main"><strong>${esc(who)}</strong>
@@ -332,6 +336,44 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     }).join("")}</ul></div>`;
   };
 
+  // Prescriptions the scanner wasn't sure about
+  const checksHtml = () => {
+    const c = st.checks;
+    if (!c || !c.length) return "";
+    return `<div class="scan-jobs scan-checks"><strong>To check <small>${c.length}</small></strong><ul>${c.slice(0, 30).map((s) => {
+      const at = s.at && typeof s.at.toDate === "function"
+        ? s.at.toDate().toLocaleString("en-AU", { weekday: "short", hour: "numeric", minute: "2-digit" }) : "";
+      const who = (s.suggested && s.suggested.name) || s.readName || "Patient not read";
+      return `<li><span class="scan-today-k is-rx">Prescription</span>
+        <span class="scan-today-main"><strong>${esc(who)}</strong>
+          <small>${esc([at, s.by && `by ${s.by}`, (s.checkReasons || []).join(" · ")].filter(Boolean).join(" · "))}</small></span>
+        <button type="button" class="scan-pat-btn" data-scanopen="${esc(s.id)}">Check</button></li>`;
+    }).join("")}</ul></div>`;
+  };
+
+  // A prescription saved (or sent to be checked): one line, then back to the camera
+  const rxDoneHtml = () => {
+    const d = st.rxDone || {};
+    const r = d.review || {};
+    const what = [(r.items || []).map((it) => it.product).filter(Boolean).join(", "), r.date && niceDate(r.date)].filter(Boolean).join(" · ");
+    return `${headHtml()}${bannerHtml()}
+      <div class="scan-done ${d.saved ? "is-ok" : "is-check"}" data-role="rxdone">
+        ${st.photoUrl ? `<img class="scan-done-img" src="${st.photoUrl}" alt="" />` : ""}
+        <div class="scan-done-main">
+          ${d.saved
+            ? `<strong>✓ Saved to ${esc((d.patient && d.patient.name) || "the patient")}</strong><small>${esc(what || "Product prescription")}</small>`
+            : `<strong>Sent to ${esc(d.reviewer ? d.reviewer.name : "the team")} to check</strong>
+               <small>${esc((d.reasons || []).join(" · "))}</small>
+               <small class="muted">It isn't on any patient's record until it's checked.</small>`}
+          <small class="scan-done-next" data-role="donenext"></small>
+        </div>
+        <div class="scan-acts">
+          ${d.saved ? '<button type="button" class="lh-btn" data-act="rx-undo">Undo</button>'
+            : '<button type="button" class="lh-btn" data-act="rx-fixnow">Check it now</button>'}
+          <button type="button" class="lh-btn is-primary" data-act="again">Next scan</button>
+        </div>
+      </div>`;
+  };
   const cameraHtml = () => `${headHtml()}
     <div data-role="pending-host">${pendingHtml()}</div>
     ${collecting() && st.pages.length
@@ -354,6 +396,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
       <label class="scan-side">${I.camera}<span>Camera app</span><input type="file" accept="image/*" capture="environment" data-role="file" hidden /></label>
     </div>
     ${isMobile() ? "" : '<p class="scan-keys">Tip: press Space to take the photo.</p>'}
+    <div data-role="check-host">${checksHtml()}</div>
     <div data-role="jobs-host">${jobsHtml()}</div>
     <div data-role="today-host">${todayHtml()}</div>`;
 
@@ -363,7 +406,8 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
       "Preparing the photo",
       !k ? "Working out what it is, then reading it"
         : k === "docket" ? "Reading the docket" : k === "rx" ? "Reading the prescription" : "Reading the handwriting and products",
-      k === "docket" ? "Finding the purchase order" : k === "billing" ? "Matching products and the booking" : "Getting it ready to check",
+      k === "docket" ? "Finding the purchase order" : k === "billing" ? "Matching products and the booking"
+        : k === "rx" ? "Saving it to the patient" : "Getting it ready to check",
     ];
   };
   
@@ -529,6 +573,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
 
   function render() {
     clearInterval(st.secTimer);
+    clearInterval(st.doneTimer);
     if (st.mode === "rx") {   // the prescription screen draws itself
       root.innerHTML = `${headHtml()}${bannerHtml()}<div data-role="rx"></div>`;
       mountRxResult(root.querySelector('[data-role="rx"]'),
@@ -545,11 +590,13 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     const noteEl = root.querySelector('[data-role="note"]');
     const note = noteEl ? noteEl.value : "";
     root.innerHTML = st.mode === "camera" ? cameraHtml() : st.mode === "busy" ? busyHtml()
-      : st.mode === "pages" ? pagesHtml() : st.mode === "error" ? errorHtml() : st.mode === "choose" ? chooseHtml() : resultHtml();
+      : st.mode === "pages" ? pagesHtml() : st.mode === "error" ? errorHtml() : st.mode === "choose" ? chooseHtml()
+      : st.mode === "rxdone" ? rxDoneHtml() : resultHtml();
     const n2 = root.querySelector('[data-role="note"]');
     if (n2 && note) n2.value = note;
-    if (st.mode === "camera") { startCamera(); loadToday(); loadJobs(); }
+    if (st.mode === "camera") { startCamera(); loadToday(); loadJobs(); loadChecks(); }
     if (st.mode === "busy") st.secTimer = setInterval(tickSecs, 1000);
+    if (st.mode === "rxdone") startDoneCountdown();
   }
 
   function rereview() {
@@ -802,13 +849,15 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     st.step = n;
     const el = root.querySelector('[data-role="steps"]');
     if (el) el.innerHTML = stepsHtml();
+    // Saving has started: too late for Finish later
+    if (n >= 2) root.querySelectorAll('[data-act="finish-later"], [data-role="later-tip"]').forEach((x) => { x.hidden = true; });
   }
   function tickSecs() {
     const el = root.querySelector('[data-role="secs"]');
     if (!el || !st.busyT0) { clearInterval(st.secTimer); return; }
     const s = Math.round((Date.now() - st.busyT0) / 1000);
     el.textContent = s >= 3 ? `${s} seconds` : "";
-    if (s >= 10 && st.jobId && st.base64) {   // slow: offer Finish later
+    if (s >= 10 && st.jobId && st.base64 && st.step < 2) {   // slow: offer Finish later (not once it's saving)
       const b = root.querySelector('[data-act="finish-later"]');
       const t = root.querySelector('[data-role="later-tip"]');
       if (b && b.hidden) { b.hidden = false; if (t) t.hidden = false; }
@@ -828,8 +877,25 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
   }
 
   // Gets that kind's result screen ready
-  async function showResult(kind) {
-    if (kind === "rx" || kind === "docket") { st.mode = kind; return; }
+  async function showResult(kind, mine = () => true) {
+    if (kind === "rx") {   // tap and go: saved if the scanner is sure, otherwise sent to be checked
+      try {
+        const done = await autoRx({ photo: st.photo, result: st.result, staff });
+        if (!mine()) return;
+        st.rxDone = done;
+        pendingClear();   // saved: never offered again as "wasn't finished"
+        if (st.openJob) { finishScanJob(st.openJob); st.openJob = ""; }
+        st.mode = "rxdone";
+      } catch (err) {
+        console.error("Prescription not saved automatically:", err);
+        showToast(err && err.code === "permission-denied"
+          ? "You don't have access to save prescriptions. Ask an Admin to tick Scan product prescriptions."
+          : "Couldn't save it automatically. Check it and save it below.");
+        st.mode = "rx";   // the full screen, to save by hand
+      }
+      return;
+    }
+    if (kind === "docket") { st.mode = kind; return; }
     st.lines = startReview(st.result, products);
     rereview();
     // Which booked patient this is. Never stops the scan if it can't be worked out.
@@ -879,7 +945,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
       console.log(`Scanner: ${Math.round(performance.now() - t0)} ms from sending the photo to the answer`);
       if (kind) {
         setStep(2);
-        await showResult(kind);
+        await showResult(kind, mine);
         if (!mine()) return;
       } else {
         st.mode = "choose";   // not sure, something else, or no access: ask
@@ -1009,6 +1075,59 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
         if (h) h.innerHTML = todayHtml();
       });
   }
+    /* ===================== Prescriptions: To check, the done screen, Undo ===================== */
+  function loadChecks(force = false) {
+    if (!can("scanner.rx")) return;
+    if (!force && st.checksAt && Date.now() - st.checksAt < 30000) return;
+    st.checksAt = Date.now();
+    rxToCheck()
+      .then((list) => { st.checks = list; })
+      .catch((err) => { console.warn("To check didn't load:", err); st.checksAt = 0; })
+      .finally(() => {
+        const h = root.querySelector('[data-role="check-host"]');
+        if (h) h.innerHTML = checksHtml();
+      });
+  }
+
+  function startDoneCountdown() {
+    let left = st.rxDone && st.rxDone.saved ? 6 : 4;
+    const tick = () => {
+      const el = root.querySelector('[data-role="donenext"]');
+      if (!el || st.mode !== "rxdone") { clearInterval(st.doneTimer); return; }
+      if (left <= 0) { clearInterval(st.doneTimer); again(); return; }
+      el.textContent = `Next scan in ${left}…`;
+      left--;
+    };
+    tick();
+    st.doneTimer = setInterval(tick, 1000);
+  }
+  // A tap on the card: stay on it (Next scan still works)
+  function holdDone() {
+    clearInterval(st.doneTimer);
+    const el = root.querySelector('[data-role="donenext"]');
+    if (el) el.textContent = "";
+  }
+
+  async function undoRx(btn) {
+    const d = st.rxDone;
+    if (!d || !d.saved || btn.disabled) return;
+    holdDone();
+    btn.disabled = true;
+    btn.textContent = "Undoing…";
+    try {
+      await updateScan(d.id, {}, { reason: "Undone straight after scanning", remove: true }, staff);
+    } catch (err) {
+      console.error("Undo failed:", err);
+      showToast("Couldn't undo it. Open it from Today and delete it there.");
+      btn.disabled = false;
+      btn.textContent = "Undo";
+      return;
+    }
+    showToast("Undone. Check it and save it below.");
+    st.rxDone = null;
+    st.mode = "rx";   // the full prescription screen, to fix and save by hand
+    render();
+  }
 
   /* ===================== Billing: search all patients ===================== */
   let bpTimer = null, bpSeq = 0;
@@ -1031,6 +1150,8 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
 
   /* ===================== Starting again, and saving ===================== */
   function again() {
+    clearInterval(st.doneTimer);
+    st.rxDone = null;
     if (st.openJob) { const id = st.openJob; finishScanJob(id).finally(() => loadJobs(true)); }
     if (st.photoUrl) URL.revokeObjectURL(st.photoUrl);
     st.pageUrls.forEach((u) => URL.revokeObjectURL(u));
@@ -1127,7 +1248,9 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
   function letSleep() { try { if (wake) wake.release(); } catch { /* ignore */ } wake = null; }
 
   /* ===================== Taps, pinch, keys and buttons ===================== */
-  root.addEventListener("pointerdown", () => audio(), { once: true });   // unlocks the shutter sound for Auto
+  root.addEventListener("pointerdown", (e) => {   // touching the "Saved" card keeps it on screen
+    if (st.mode === "rxdone" && e.target.closest('[data-role="rxdone"]') && !e.target.closest('[data-act="again"]')) holdDone();
+  });
 
   const pts = new Map();
   let pinch = null, tap = null;
@@ -1178,7 +1301,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
       if (reviewing) return;
       reviewing = true;
       productsReady
-        .then(() => openScanReview({ id: so.dataset.scanopen, products, onChanged: () => loadToday(true) }))
+        .then(() => openScanReview({ id: so.dataset.scanopen, products, onChanged: () => { loadToday(true); loadChecks(true); } }))
         .finally(() => { reviewing = false; });
       return;
     }
@@ -1285,6 +1408,12 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     else if (act === "again") again();
     else if (act === "retry") analyse();
     else if (act === "finish-later") finishLater(b);
+    else if (act === "rx-undo") undoRx(b);
+    else if (act === "rx-fixnow") {
+      holdDone();
+      const id = st.rxDone && st.rxDone.id;
+      if (id) productsReady.then(() => openScanReview({ id, products, onChanged: () => { loadToday(true); loadChecks(true); } }));
+    }
     else if (act === "save") save(b);
     else if (act === "pickpat") {
       st.pickPatient = !st.pickPatient;
@@ -1369,6 +1498,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     letSleep();
     clearInterval(autoTimer);
     clearInterval(st.secTimer);
+    clearInterval(st.doneTimer);
     window.removeEventListener("hashchange", onHash);
     document.removeEventListener("visibilitychange", onVis);
     document.removeEventListener("keydown", onKey);

@@ -17,6 +17,7 @@ const SESSION_SECONDS = 6 * 60 * 60; // 6 hours (CacheService maximum)
 // ===================== Web app entry points =====================
 
 function doPost(e) {
+  REQ_T0_ = Date.now();
   try {
     const body = JSON.parse((e && e.postData && e.postData.contents) || '{}');
 
@@ -131,9 +132,8 @@ function findStaffByPin_(pin) {
 
 // Staff list from Firestore, cached inside Apps Script (never sent to the browser)
 function getStaffDocs_() {
-  const cache = CacheService.getScriptCache();
-  const cached = cache.get('staff_docs_v1');
-  if (cached) return JSON.parse(cached);
+  const hit = repCacheGet_('staff_docs_v1');   // kept in parts: one cache value holds 100 KB at most
+  if (hit) return hit;
 
   const cfg = getConfig_();
   const url = 'https://firestore.googleapis.com/v1/projects/' + cfg.projectId +
@@ -168,11 +168,7 @@ function getStaffDocs_() {
       eodPopup: !(f['EOD Popup'] && f['EOD Popup'].booleanValue === false),   // missing = on
     };
   });
-  try {
-    cache.put('staff_docs_v1', JSON.stringify(docs), STAFF_CACHE_SECONDS);
-  } catch (err) {
-    console.warn('Staff cache skipped: ' + err); // still works, just uncached
-  }
+  repCachePut_('staff_docs_v1', docs, STAFF_CACHE_SECONDS);
   return docs;
 }
 
@@ -307,7 +303,12 @@ function loginSeenFlush_(cfg) {
 
 // ===================== Response helper =====================
 
+var REQ_T0_ = 0;
 function json_(obj) {
+  // How long this request took inside Apps Script: boot = starting the code, run = doPost itself
+  if (REQ_T0_ && obj && typeof obj === 'object' && !Array.isArray(obj)) {
+    obj._srv = { boot: typeof BOOT_MS_ === 'number' ? REQ_T0_ - BOOT_MS_ : null, run: Date.now() - REQ_T0_ };
+  }
   return ContentService
     .createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);

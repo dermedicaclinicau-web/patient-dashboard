@@ -269,7 +269,7 @@ export async function todaysScans() {
 const SCAN_EDIT_KEYS = {
   billing: ["patientName", "patientPttId", "bookedWith", "bookedAt", "apptDate", "apptTime", "provider",
     "lines", "productsTotal", "flagCount", "status", "note"],
-  rx: ["patientId", "patientPttId", "patientIds", "patientName", "recordDate", "prescriber", "scriptNumber", "items", "note"],
+  rx: ["patientId", "patientPttId", "patientIds", "patientName", "recordDate", "prescriber", "scriptNumber", "items", "note", "status"],
 };
 
 export async function getScan(id) {
@@ -718,7 +718,7 @@ function rankIndex(idx, text, { max = 12, all = true } = {}) {
 export async function findRxPatient(review) {
   const read = String(review.patientName || "");
   const name = normName(read);
-  if (!name) return { match: null, candidates: [] };
+  if (!name) return { match: null, sure: false, candidates: [] };
   const words = name.split(" ").filter((w) => w.length > 1);
   const terms = [...new Set([name, words[words.length - 1], words[0]].filter(Boolean))];
   const [idx, ...results] = await Promise.all([loadPtIndex(),
@@ -730,15 +730,17 @@ export async function findRxPatient(review) {
   const rankOf = new Map(fuzzy.map((p, i) => [p.id, i]));
   const pc = review.postcode;
   const scored = [...found.values()].map((p) => {
-    let s = nameScore(read, p.name);
-    if (pc && String(p.address || "").includes(pc)) s += 0.3;
-    return { p, s, r: rankOf.has(p.id) ? rankOf.get(p.id) : 999 };
+    const n = nameScore(read, p.name);
+    const pcHit = !!pc && String(p.address || "").includes(pc);
+    return { p, n, pcHit, s: n + (pcHit ? 0.3 : 0), r: rankOf.has(p.id) ? rankOf.get(p.id) : 999 };
   }).filter((x) => x.s >= 0.5 || x.r < 999);
   const best = scored.slice().sort((a, b) => b.s - a.s);
   const top = best[0];
   const clear = !!top && top.s >= 0.8 && (!best[1] || best[1].s <= top.s - 0.3);
+  // Sure enough to save with nobody checking: the whole name matches, or most of it and the postcode
+  const sure = clear && (top.n >= 0.99 || (top.n >= 0.66 && top.pcHit));
   scored.sort((a, b) => a.r - b.r || b.s - a.s);   // the list: best name match first
-  return { match: clear ? top.p : null, candidates: scored.slice(0, 8).map((x) => x.p) };
+  return { match: clear ? top.p : null, sure, candidates: scored.slice(0, 8).map((x) => x.p) };
 }
 
 // The search box: name (any order, part of it, small typos), mobile or patient ID
@@ -767,14 +769,19 @@ export async function rxScanExists(scriptNumber) {
   return snap.docs.map((d) => ({ id: d.id, ...d.data() })).find((x) => x.kind === "rx" && x.status !== "deleted") || null;
 }
 
-// Saves the prescription and its photo. Shown on the patient's Product Prescriptions card.
-export async function saveRxScan({ photo, result, review, patient, date, items, note = "" }, staff) {
+// Saves the prescription and its photo, shown on the patient's Product Prescriptions card.
+// auto: saved by the scanner with nobody checking. check: { reasons, guess, taskId, reviewer } → kept as
+// "Needs checking" on no patient's record until someone checks it (Scanner → To check).
+export async function saveRxScan({ photo, result, review, patient = null, date, items, note = "", auto = false, check = null }, staff) {
   const uid = auth.currentUser && auth.currentUser.uid;
   if (!uid) throw new Error("Your session has ended. Log in again.");
+  if (!patient && !check) throw new Error("Choose the patient first.");
   const ref = doc(collection(db, "scans"));
   const key = dayKey();
   const part = (s, n = 40) => String(s || "").trim().replace(/[^A-Za-z0-9-]+/g, "-").replace(/-{2,}/g, "-").replace(/^-+|-+$/g, "").slice(0, n);
-  const fileName = `${date}_${part(patient.name, 40)}${review.scriptNumber ? `_${part(review.scriptNumber, 20)}` : ""}__${ref.id.slice(0, 6)}.jpg`;
+  const guess = check && check.guess ? check.guess : null;
+  const who = patient ? patient.name : `To-check-${(guess && guess.name) || review.patientName || "patient"}`;
+  const fileName = `${date || key}_${part(who, 50)}${review.scriptNumber ? `_${part(review.scriptNumber, 20)}` : ""}__${ref.id.slice(0, 6)}.jpg`;
   let file = null;
   if (photo) {
     try {
@@ -784,11 +791,11 @@ export async function saveRxScan({ photo, result, review, patient, date, items, 
       file = { path, url: await getDownloadURL(r), name: fileName };
     } catch (err) { console.warn("The prescription photo wasn't saved:", err); }
   }
-  await setDoc(ref, {
-    kind: "rx", dateKey: key, status: "saved",
-    patientId: patient.id, patientPttId: String(patient.pttId || ""), patientIds: patientIds(patient),
-    patientName: patient.name, readName: review.patientName,
-    recordDate: date, scriptNumber: review.scriptNumber, prescriber: review.prescriber,
+  const data = {
+    kind: "rx", dateKey: key, status: check ? "check" : "saved",
+    patientId: patient ? patient.id : "", patientPttId: patient ? String(patient.pttId || "") : "",
+    patientIds: patient ? patientIds(patient) : [], patientName: patient ? patient.name : "", readName: review.patientName,
+    recordDate: date || "", scriptNumber: review.scriptNumber, prescriber: review.prescriber,
     items: items.map((it) => ({
       product: it.product, text: it.text, medicine: String(it.medicine || "").trim().slice(0, 200), custom: it.custom === true,
       strengths: String(it.strengths || "").trim().slice(0, 300),
@@ -797,11 +804,28 @@ export async function saveRxScan({ photo, result, review, patient, date, items, 
     })),
     note: String(note || "").trim().slice(0, 1000), photo: file, raw: JSON.stringify(result).slice(0, 20000),
     by: String((staff && staff.name) || "").slice(0, 120), byUid: uid, at: serverTimestamp(),
-  });
+  };
+  if (auto) data.autoSaved = true;
+  if (check) {
+    Object.assign(data, {
+      checkReasons: (check.reasons || []).map(String).slice(0, 8),
+      checkTaskId: String(check.taskId || ""),
+      checkWith: check.reviewer ? String(check.reviewer.name || "") : "",
+      suggested: guess ? { id: String(guess.id || ""), pttId: String(guess.pttId || ""), name: String(guess.name || ""),
+        ids: patientIds(guess) } : null,
+    });
+  }
+  await setDoc(ref, data);
   return { id: ref.id };
 }
 
-
+// Prescriptions waiting to be checked, oldest first
+export async function rxToCheck() {
+  const snap = await getDocs(query(collection(db, "scans"), where("status", "==", "check")));
+  const ms = (v) => (v && typeof v.toMillis === "function" ? v.toMillis() : 0);
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((s) => s.kind === "rx")
+    .sort((a, b) => ms(a.at) - ms(b.at));
+}
 
 /* ---------- Finish later (scan_jobs) ---------- */
 let scanJob = "";

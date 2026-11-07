@@ -7,6 +7,7 @@ import { rxProductList } from "./rx-products.js";
 import { patientIds } from "./patients.js";
 import { can } from "./perms.js";
 import { showToast } from "./utils.js";
+import { callApi } from "./appointments.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const TYPE_IT = "__type";
@@ -47,7 +48,8 @@ export async function openScanReview({ id, products = [], onChanged = () => {} }
   function headHtml() {
     const url = scan.photo && scan.photo.url;
     return `<div class="lh-dialog-head scan-rev-head">
-        <div><h3>${esc(KIND_NAME[scan.kind] || "Scan")}${scan.status === "deleted" ? ' <span class="inv-flag is-bad">Deleted</span>' : ""}</h3>
+        <div><h3>${esc(KIND_NAME[scan.kind] || "Scan")}${scan.status === "deleted" ? ' <span class="inv-flag is-bad">Deleted</span>' : ""}${
+          scan.status === "check" ? ' <span class="inv-flag is-warn">Needs checking</span>' : ""}</h3>
           <p>Saved ${esc(when(scan.at))}${scan.by ? ` by ${esc(scan.by)}` : ""}${
             scan.editCount ? ` · changed ${scan.editCount} time${scan.editCount === 1 ? "" : "s"}` : ""}</p></div>
         <button type="button" class="ib-tool" data-act="close" aria-label="Close" title="Close">×</button>
@@ -76,8 +78,11 @@ export async function openScanReview({ id, products = [], onChanged = () => {} }
 
   function rxView() {
     const items = scan.items || [];
-    return `<dl class="scan-rev-dl">
-        <dt>Patient</dt><dd><strong>${esc(scan.patientName || "")}</strong>${scan.patientPttId ? ` · ID ${esc(scan.patientPttId)}` : ""}
+    const check = scan.status === "check"
+      ? `<p class="scan-err">Needs checking: ${esc((scan.checkReasons || []).join(" · ") || "check it against the photo")}.${
+          scan.suggested ? ` Best guess: <strong>${esc(scan.suggested.name)}</strong>.` : ""} It isn't on any patient's record until it's saved.</p>` : "";
+    return `${check}<dl class="scan-rev-dl">
+        <dt>Patient</dt><dd><strong>${esc(scan.patientName || (scan.status === "check" ? "Not chosen yet" : ""))}</strong>${scan.patientPttId ? ` · ID ${esc(scan.patientPttId)}` : ""}
           ${scan.readName && scan.readName !== scan.patientName ? `<small class="muted">Written as “${esc(scan.readName)}”</small>` : ""}</dd>
         <dt>Date</dt><dd>${esc(niceDate(scan.recordDate) || "Not read")}</dd>
         <dt>Prescriber</dt><dd>${esc([scan.prescriber, scan.scriptNumber && `Script ${scan.scriptNumber}`].filter(Boolean).join(" · ") || "Not read")}</dd>
@@ -141,7 +146,8 @@ export async function openScanReview({ id, products = [], onChanged = () => {} }
       : [p.pttId && `ID ${p.pttId}`];
     return `<section class="rx-sec"><h4>Patient</h4>
       <div class="rx-pat ${p.name ? "is-ok" : "is-no"}"><span>${p.name
-        ? `✓ <strong>${esc(p.name)}</strong><small>${esc(sub.filter(Boolean).join(" · "))}</small>` : "No patient chosen."}</span>
+        ? `✓ <strong>${esc(p.name)}</strong><small>${esc(sub.filter(Boolean).join(" · "))}</small>${
+            p.guess ? "<small class=\"muted\">Best guess from the scan: check it's them, or tap change</small>" : ""}` : "No patient chosen."}</span>
         <button type="button" class="scan-pat-btn" data-act="pick">${st.pick ? "cancel" : "change"}</button></div>
       ${st.pick ? `<div class="rx-find"><div data-role="book">${bookHtml()}</div>
         <input type="search" class="fe-input" data-role="q" placeholder="Search all patients by name or patient ID" value="${esc(st.q)}" autocomplete="off" />
@@ -225,7 +231,8 @@ export async function openScanReview({ id, products = [], onChanged = () => {} }
       return '<button type="button" class="lh-btn is-quiet" data-act="view">Back</button><button type="button" class="lh-btn is-primary scan-rev-del" data-act="delete-go">Delete scan</button>';
     }
     return `<button type="button" class="lh-btn is-quiet" data-act="close">Close</button>${editable()
-      ? '<button type="button" class="lh-btn is-quiet scan-rev-del" data-act="delete">Delete scan</button><button type="button" class="lh-btn is-primary" data-act="edit">Edit</button>' : ""}`;
+      ? `<button type="button" class="lh-btn is-quiet scan-rev-del" data-act="delete">Delete scan</button><button type="button" class="lh-btn is-primary" data-act="edit">${
+          scan.status === "check" ? "Check and save" : "Edit"}</button>` : ""}`;
   }
 
   function draw() {
@@ -252,8 +259,12 @@ export async function openScanReview({ id, products = [], onChanged = () => {} }
       };
     } else {
       st.d = {
-        patient: { id: scan.patientId || "", pttId: scan.patientPttId || "", name: scan.patientName || "", ids: scan.patientIds || [] },
-        recordDate: scan.recordDate || "", note: scan.note || "", reason: "",
+        patient: scan.patientId
+          ? { id: scan.patientId, pttId: scan.patientPttId || "", name: scan.patientName || "", ids: scan.patientIds || [] }
+          : scan.suggested
+            ? { id: scan.suggested.id || "", pttId: scan.suggested.pttId || "", name: scan.suggested.name || "", ids: scan.suggested.ids || [], guess: true }
+            : { id: "", pttId: "", name: "", ids: [] },
+        recordDate: scan.recordDate || "", note: scan.note || "", reason: scan.status === "check" ? "Checked against the photo" : "",
         items: (scan.items || []).map((it) => {
           const custom = !!it.custom || (!!it.product && !rxList.includes(it.product));
           return { ...it, custom, customName: custom ? it.product || "" : "" };
@@ -370,8 +381,16 @@ export async function openScanReview({ id, products = [], onChanged = () => {} }
     }
     const note = d.note.trim().slice(0, 1000);
     if (note !== (scan.note || "")) { changes.note = note; summary.push("Note changed"); }
+    if (scan.status === "check") { changes.status = "saved"; summary.push("Checked and saved to the patient"); }
     return { changes, summary };
   }
+
+  // A checked (or deleted) "Needs checking" scan: its task is marked done
+  const closeCheckTask = (note) => {
+    const id = scan.status === "check" ? String(scan.checkTaskId || "") : "";
+    if (id) callApi({ action: "staffTask", op: "status", id, status: "Completed", note })
+      .catch((err) => console.warn("Check task not closed:", err));
+  };
 
   async function run(fn, done) {
     st.busy = true;
@@ -399,7 +418,10 @@ export async function openScanReview({ id, products = [], onChanged = () => {} }
     catch (ex) { fail(ex.message); return; }
     if (!Object.keys(res.changes).length) { fail("Nothing has changed."); return; }
     if (!st.d.reason.trim()) { fail("Add why it's being changed."); return; }
-    await run(() => updateScan(scan.id, res.changes, { reason: st.d.reason, summary: res.summary }), "Scan updated");
+    await run(async () => {
+      await updateScan(scan.id, res.changes, { reason: st.d.reason, summary: res.summary });
+      closeCheckTask("Checked in the Scanner");
+    }, scan.status === "check" ? "Checked and saved to the patient" : "Scan updated");
   }
 
   /* ---------- Events ---------- */
@@ -416,7 +438,10 @@ export async function openScanReview({ id, products = [], onChanged = () => {} }
     else if (act === "delete") { st.d = { reason: "" }; Object.assign(st, { mode: "delete", err: "" }); draw(); }
     else if (act === "delete-go") {
       if (!st.d.reason.trim()) { fail("Add why it's being deleted."); return; }
-      await run(() => updateScan(scan.id, {}, { reason: st.d.reason, remove: true }), "Scan deleted");
+      await run(async () => {
+        await updateScan(scan.id, {}, { reason: st.d.reason, remove: true });
+        closeCheckTask("Scan deleted: " + st.d.reason);
+      }, "Scan deleted");
     }
     else if (act === "save") save();
     else if (act === "pick") {

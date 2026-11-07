@@ -8,11 +8,15 @@ import { loginWithPin, watchAuth, warmUpLogin } from "./auth.js";
 import { setPerms, can, refreshAccess } from "./perms.js";
 import { mountScanner } from "./scanner.js";
 import { getInitials } from "./utils.js";
+import { forgetSession } from "./appointments.js";
 
 const REMEMBER_KEY = "dm.scanRemember";
 const LOCK_MIN = 10;
 const $ = (id) => document.getElementById(id);
-const remembered = () => { try { return localStorage.getItem(REMEMBER_KEY) === "1"; } catch { return false; } };
+// Ticked unless this device was set not to (e.g. a shared iPad). Kept through Switch user.
+const remembered = () => { try { return localStorage.getItem(REMEMBER_KEY) !== "0"; } catch { return true; } };
+// Asks the browser not to clear this app's storage (the sign-in) when the device is short of space
+const keepStorage = () => { try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {}); } catch { /* not offered */ } };
 const setRemember = (on) => { try { localStorage.setItem(REMEMBER_KEY, on ? "1" : "0"); } catch { /* private mode */ } };
 const views = { boot: $("sa-boot"), login: $("sa-login"), app: $("sa-app") };
 const show = (name) => Object.entries(views).forEach(([k, el]) => { el.hidden = k !== name; });
@@ -53,6 +57,7 @@ async function submit() {
   setRemember(keep);
   try {
     await loginWithPin(pin, { remember: keep });   // watchAuth opens the scanner
+    if (keep) keepStorage();
   } catch (err) {
     setErr((err && err.message) || "Couldn't log in. Try again.");
     shake();
@@ -104,8 +109,7 @@ async function lock(note = "") {
   window.dispatchEvent(new HashChangeEvent("hashchange"));
   $("sa-main").innerHTML = "";
   staff = null;
-  setRemember(false);
-  sessionStorage.removeItem("appSession");
+  forgetSession();   // the device's "keep me signed in" choice stays as it was
   showLogin(note);
   await signOut(auth).catch(() => {});   // this app only: open portal tabs stay logged in
 }
@@ -153,6 +157,7 @@ window.addEventListener("hashchange", () => {
 });
 
 /* ---------- Start ---------- */
+if (remembered()) keepStorage();
 watchAuth((s) => {
   if (!s) {
     if (staff) { stopTimers(); staff = null; $("sa-main").innerHTML = ""; }
