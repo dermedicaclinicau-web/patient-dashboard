@@ -652,6 +652,43 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .rc-act.danger:hover { border-color: #dc2626; color: #dc2626; }
 .rc-act.is-disabled { opacity: .45; pointer-events: none; }
 
+/* ---------- Treatment + Consent records: orange gradient ---------- */
+.rc-grid .rc-card {
+  background: linear-gradient(160deg, #fff7ed 0%, #ffedd5 55%, #fed7aa 100%);
+  border-color: #fdba74;
+  box-shadow: 0 10px 28px -16px rgba(234, 88, 12, .45), 0 1px 2px rgba(124, 45, 18, .06);
+}
+.rc-grid .rc-card > summary {
+  border: 1px solid rgba(194, 65, 12, .22);
+  background: linear-gradient(135deg, #fed7aa 0%, #fdba74 45%, #fb923c 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .55), 0 2px 8px -3px rgba(234, 88, 12, .45);
+  transition: filter .15s, box-shadow .15s;
+}
+.rc-grid .rc-card > summary:hover { filter: brightness(1.03) saturate(1.08); }
+.rc-grid .rc-card > summary:focus-visible { outline: 2px solid #ea580c; outline-offset: 2px; }
+.rc-grid .rc-card[open] > summary {
+  background: linear-gradient(135deg, #fdba74 0%, #fb923c 55%, #f97316 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .45), 0 4px 12px -4px rgba(234, 88, 12, .55);
+}
+.rc-grid .rc-card .rc-title { color: #7c2d12; }
+.rc-grid .rc-card .rc-title .sum-chev { color: #7c2d12; }
+.rc-grid .rc-card .sk-badge {
+  background: rgba(255, 255, 255, .92); color: #9a3412;
+  box-shadow: 0 1px 2px rgba(124, 45, 18, .18);
+}
+
+/* Inside the card */
+.rc-grid .rc-card .rc-body { border-color: #fed7aa; background: #fff; }
+.rc-grid .rc-cat + .rc-cat { border-top-color: #ffedd5; }
+.rc-grid .rc-cat > summary { background: linear-gradient(90deg, #fff7ed 0%, #fffbf7 100%); }
+.rc-grid .rc-cat > summary:hover { background: #ffedd5; }
+.rc-grid .rc-cat-name { color: #9a3412; }
+.rc-grid .rc-cat[open] > summary .rc-chev { color: #ea580c; }
+.rc-grid .rc-link { color: #c2410c; }
+.rc-grid .rc-item { border-color: #fde4cc; transition: border-color .15s; }
+.rc-grid .rc-item:hover { border-color: #fdba74; }
+.rc-grid .rc-act:hover { border-color: #f97316; color: #c2410c; }
+
 /* ---------- Appointment History / Notes ---------- */
 .hv-section { background: #fff; border: 1px solid #fde68a; border-radius: 18px; overflow: hidden; }
 .hv-section > summary { list-style: none; display: flex; align-items: center; justify-content: space-between; gap: .75rem;
