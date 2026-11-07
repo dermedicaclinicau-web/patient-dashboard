@@ -47,6 +47,32 @@ const KIND_ICON = {
 const readLocal = (k) => { try { return localStorage.getItem(k) || ""; } catch { return ""; } };
 const writeLocal = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } };
 
+// After each photo: a clear "it's being saved" message with OK.
+// "Don't show this again" is remembered on this device (a small message shows instead).
+const SAVED_TIP_KEY = "dm.scanSavedTip";
+function savedPopup() {
+  if (readLocal(SAVED_TIP_KEY) === "off") { showToast("Saving in the background."); return Promise.resolve(); }
+  return new Promise((resolve) => {
+    const dlg = document.createElement("dialog");
+    dlg.className = "lh-dialog scan-saved-dlg";
+    dlg.innerHTML = `<form method="dialog" class="lh-form">
+      <div class="scan-saved-icon" aria-hidden="true">✓</div>
+      <h3>Photo taken</h3>
+      <p>It's being saved for you now. <strong>You don't need to wait.</strong></p>
+      <p>Take the next photo whenever you're ready. A message shows at the bottom of the screen when each one is saved.</p>
+      <label class="scan-saved-skip"><input type="checkbox" data-role="skip" /> Don't show this again on this device</label>
+      <div class="lh-actions"><button type="submit" class="lh-btn is-primary" autofocus>OK</button></div>
+    </form>`;
+    document.body.appendChild(dlg);
+    dlg.addEventListener("close", () => {
+      if (dlg.querySelector('[data-role="skip"]').checked) writeLocal(SAVED_TIP_KEY, "off");
+      dlg.remove();
+      resolve();
+    });
+    dlg.showModal();
+  });
+}
+
 // Only one Scanner holds the camera: this switches off the one before
 let releaseCamera = null;
 
@@ -830,7 +856,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     // Read and saved in the background: the camera is ready for the next one straight away
     queueScan(blob, st.kind, staff);
     st.shooting = false;
-    showToast("Saving in the background. Carry on with the next one.");
+    savedPopup();
   }
 
   // Prepares the photo (pages joined), keeps it on the device, then reads it
@@ -1267,6 +1293,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
   function letSleep() { try { if (wake) wake.release(); } catch { /* ignore */ } wake = null; }
 
   /* ===================== Taps, pinch, keys and buttons ===================== */
+  root.addEventListener("pointerdown", () => audio(), { once: true });   // unlocks the shutter sound for Auto
   root.addEventListener("pointerdown", (e) => {   // touching the "Saved" card keeps it on screen
     if (st.mode === "rxdone" && e.target.closest('[data-role="rxdone"]') && !e.target.closest('[data-act="again"]')) holdDone();
   });
