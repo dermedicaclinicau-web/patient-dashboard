@@ -1217,7 +1217,7 @@ function preConsultHtml() {
   return `
     <details class="section-card pc-card" data-key="preconsult" ${isOpen("preconsult", true) ? "open" : ""}>
       <summary>
-        <span class="pc-head">${ICONS.chev}<span class="pc-title">Pre-Consultation Information</span><span class="pc-peek"></span><span class="pc-updated"></span></span>
+        <span class="pc-head">${ICONS.chev}<span class="pc-head-ic">${ICONS.summary}</span><span class="pc-title">Pre-Consultation Information</span><span class="pc-peek"></span><span class="pc-updated"></span></span>
         <button type="button" class="pc-refresh" data-action="refresh-pc">${ICONS.refresh}<span>Refresh</span></button>
       </summary>
       <div class="section-body pc-body">${blocks}</div>
@@ -1246,26 +1246,31 @@ function visitsHtml() {
 
 // list: null = loading, [] = none, [..] = appointments. errorMsg shows an error state.
 function todayHtml(list, errorMsg = "") {
-  let text;
-  if (errorMsg) text = escapeHtml(errorMsg);
-  else if (list === null) text = "Loading…";
-  else if (!list.length) text = "No scheduled appointments today";
-  else {
-    text = list.map((a) =>
-      [a.time, a.staff, (a.services || []).join(", ")].filter(Boolean).map(escapeHtml).join(" · ")
-    ).join("<br>");
+  // Nothing today, still checking, or couldn't load: one quiet line
+  if (errorMsg || list === null || !list.length) {
+    const text = errorMsg ? escapeHtml(errorMsg) : list === null ? "Checking today's bookings…" : "No appointment today";
+    return `
+      <div class="today-card is-quiet${errorMsg ? " error" : ""}">
+        <span class="today-icon">${ICONS.calendar}</span>
+        <div><p class="today-label">Today's appointment</p><p class="today-text">${text}</p></div>
+      </div>`;
   }
-
+  // One row per booking: time · services · clinician
   return `
-    <div class="today-card${errorMsg ? " error" : ""}">
+    <div class="today-card">
       <span class="today-icon">${ICONS.calendar}</span>
-      <div>
-        <p class="today-label">Today's appointment</p>
-        <p class="today-text">${text}</p>
+      <div class="today-main">
+        <p class="today-label">${list.length > 1 ? `Today's appointments · ${list.length}` : "Today's appointment"}</p>
+        <ul class="today-list">${list.map((a) => `
+          <li>
+            ${a.time ? `<b class="today-time">${escapeHtml(a.time)}</b>` : ""}
+            <span class="today-svc">${escapeHtml((a.services || []).join(", ") || "Appointment")}</span>
+            ${a.staff ? `<span class="today-who"><i class="tk-av" style="--h:${hueFromString(a.staff)}">${escapeHtml(getInitials(a.staff))}</i>${escapeHtml(a.staff)}</span>` : ""}
+          </li>`).join("")}
+        </ul>
       </div>
     </div>`;
 }
-
 function dialogHtml() {
   return `
     <dialog class="dialog wide-dialog patient-dialog">

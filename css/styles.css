@@ -11903,3 +11903,100 @@ body.no-patients-edit .pb-add-alt { display: inline; }
   .patient-bar .pb-details > div:nth-child(2) { order: 3; grid-column: 1 / -1; border-left: 0; }
   .patient-bar .pb-details > div:nth-child(3) { order: 4; grid-column: 1 / -1; border-left: 0; }
 }
+
+/* ===================== Pre-Consultation: refreshed ===================== */
+.pc-card { border-color: #c9dcc8; background: linear-gradient(160deg, #f4f9f3 0%, #e7f0e6 55%, #dbe9da 100%);
+  box-shadow: 0 10px 28px -22px rgba(22, 101, 52, .5); }
+.pc-head-ic { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; color: #fff;
+  background: linear-gradient(135deg, #4ade80 0%, #15803d 100%); box-shadow: 0 6px 14px -6px #15803d; }
+.pc-head-ic svg { width: 16px; height: 16px; }
+.pc-card .pc-updated { padding: .1rem .55rem; border-radius: 999px; background: rgba(255, 255, 255, .6); color: #4b5d4b; }
+.pc-card .pc-refresh { height: 34px; padding: 0 .85rem; border-color: #b6cdb5; border-radius: 999px;
+  background: rgba(255, 255, 255, .8); font-weight: 600; }
+.pc-card .pc-refresh:hover { border-color: #15803d; color: #15803d; background: #fff; }
+.pc-card .pc-body { gap: .6rem; }
+
+/* Cards: one colour each */
+.pc-card .sub-card:not(.visit-card) { --c: #64748b; --cs: #f1f5f9; overflow: hidden; border: 1px solid #e4ebe4; border-radius: 14px;
+  background: #fff; box-shadow: 0 1px 2px rgba(15, 23, 42, .04); transition: border-color .15s, box-shadow .15s; }
+.pc-card .sub-card[data-key="reminders"] { --c: #d97706; --cs: #fffbeb; }
+.pc-card .sub-card[data-key="personal-notes"] { --c: #db2777; --cs: #fdf2f8; }
+.pc-card .sub-card[data-key="social-history"] { --c: #2563eb; --cs: #eff6ff; }
+.pc-card .sub-card[data-key="past-appts"] { --c: #059669; --cs: #ecfdf5; }
+.pc-card .sub-card[data-key="future-visits"] { --c: #7c3aed; --cs: #f5f3ff; }
+.pc-card .sub-card[data-key="packages"] { --c: #0d9488; --cs: #f0fdfa; }
+.pc-card .sub-card:not(.visit-card):hover { border-color: color-mix(in srgb, var(--c) 35%, #e4ebe4); }
+.pc-card .sub-card:not(.visit-card)[open] { border-color: color-mix(in srgb, var(--c) 40%, #e4ebe4);
+  box-shadow: 0 12px 26px -20px color-mix(in srgb, var(--c) 70%, transparent); }
+.pc-card .sub-card:not(.visit-card) > summary { min-height: 54px; padding: .6rem .9rem; }
+.pc-card .sub-card:not(.visit-card)[open] > summary { border-bottom-color: color-mix(in srgb, var(--c) 18%, #fff);
+  background: linear-gradient(90deg, var(--cs) 0%, #fff 80%); }
+.pc-card .sub-card .sum-icon { display: grid; place-items: center; width: 32px; height: 32px; flex: none; border-radius: 10px;
+  background: var(--cs); color: var(--c); }
+.pc-card .sub-card .sum-icon svg { width: 16px; height: 16px; }
+.pc-card .sub-card:not(.visit-card) .sum-label { font-size: .95rem; font-weight: 600; letter-spacing: 0; text-transform: none; color: #0f172a; }
+.pc-card .sub-card:not(.visit-card) .hint { padding: .15rem .6rem; border-radius: 999px; background: var(--cs); color: var(--c);
+  font-size: .74rem; font-weight: 700; }
+.pc-card .sub-card.has-items:not(.visit-card) .hint { background: var(--c); color: #fff; }
+.pc-card .sub-card.is-empty:not(.visit-card) .hint { background: #f1f5f9; color: #94a3b8; font-weight: 600; }
+.pc-card .sub-card.is-empty:not(.visit-card) .sum-icon { background: #f1f5f9; color: #94a3b8; }
+.pc-card .sub-card:not(.visit-card) .sub-body { background: #fff; }
+.pc-card .sum-action { height: 32px; padding: 0 .8rem; border-color: color-mix(in srgb, var(--c) 30%, #e2e8f0); border-radius: 999px;
+  background: #fff; color: var(--c); font-weight: 600; }
+.pc-card .sum-action:hover { border-color: var(--c); background: var(--cs); color: var(--c); }
+
+/* Today's appointment */
+.pc-card .today-card { align-items: flex-start; gap: 1rem; padding: .9rem 1rem; border: 1px solid #a7e3d6; border-radius: 14px;
+  background: linear-gradient(120deg, #ecfdf5 0%, #fff 70%); box-shadow: 0 8px 22px -18px rgba(15, 118, 110, .6); }
+.pc-card .today-icon { width: 44px; height: 44px; border-radius: 13px;
+  background: linear-gradient(135deg, #2dd4bf 0%, #0f766e 100%); box-shadow: 0 6px 14px -6px #0f766e; }
+.today-main { flex: 1; min-width: 0; }
+.pc-card .today-label { color: #0f766e; font-size: .7rem; }
+.today-list { display: grid; gap: .35rem; margin: .4rem 0 0; padding: 0; list-style: none; }
+.today-list li { display: flex; flex-wrap: wrap; align-items: center; gap: .35rem .75rem; padding: .45rem .65rem;
+  border: 1px solid #d1f2ea; border-radius: 10px; background: #fff; }
+.today-time { padding: .1rem .55rem; border-radius: 999px; background: #0f766e; color: #fff; font-size: .82rem; font-variant-numeric: tabular-nums; }
+.today-svc { min-width: 0; font-weight: 600; color: #0f172a; }
+.today-who { display: inline-flex; align-items: center; gap: .35rem; margin-left: auto; font-size: .82rem; color: #475569; }
+.today-who .tk-av { width: 22px; height: 22px; font-size: .6rem; font-style: normal; }
+.pc-card .today-card.is-quiet { align-items: center; border: 1px dashed #c9dcc8; background: rgba(255, 255, 255, .6); box-shadow: none; }
+.pc-card .today-card.is-quiet .today-icon { width: 36px; height: 36px; border-radius: 11px; background: #e2e8f0; color: #64748b; box-shadow: none; }
+.pc-card .today-card.is-quiet .today-label { color: #64748b; }
+.pc-card .today-card.is-quiet .today-text { font-size: .9rem; font-weight: 500; color: #64748b; }
+.pc-card .today-card.is-quiet.error { border-color: #fecaca; background: #fef2f2; }
+.pc-card .today-card.is-quiet.error .today-icon { background: #fee2e2; color: #b91c1c; }
+.pc-card .today-card.is-quiet.error .today-text { color: #991b1b; }
+
+/* Recent visits by category */
+.pc-card .visits-label { margin: .7rem 0 .5rem .15rem; font-size: .74rem; color: #3f513f; }
+.pc-card .visit-card { --vc: #64748b; border: 1px solid rgba(15, 23, 42, .05); border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .05); transition: box-shadow .15s, transform .15s; }
+.pc-card .visit-card.tone-mint { --vc: #059669; }
+.pc-card .visit-card.tone-blue { --vc: #2563eb; }
+.pc-card .visit-card.tone-pink { --vc: #db2777; }
+.pc-card .visit-card.tone-grey { --vc: #64748b; }
+.pc-card .visit-card.tone-lavender { --vc: #7c3aed; }
+.pc-card .visit-card.tone-cream { --vc: #d97706; }
+.pc-card .visit-card.tone-peach { --vc: #ea580c; }
+.pc-card .visit-card.tone-tan { --vc: #92400e; }
+.pc-card .visit-card.tone-rose { --vc: #e11d48; }
+.pc-card .visit-card > summary { min-height: 46px; }
+.pc-card .visit-card .sum-left::before { content: ""; width: 8px; height: 8px; flex: none; border-radius: 50%;
+  background: var(--vc); box-shadow: 0 0 0 3px rgba(255, 255, 255, .75); }
+.pc-card .visit-card .sum-label { font-size: .82rem; font-weight: 600; letter-spacing: 0; text-transform: none; color: #1f2937; }
+.pc-card .visit-card .hint { background: #fff; color: var(--vc); font-weight: 700; }
+.pc-card .visit-card:not(.is-empty):hover { transform: translateY(-1px); box-shadow: 0 6px 16px -10px rgba(15, 23, 42, .35); }
+.pc-card .visit-card[open] { box-shadow: 0 10px 24px -18px rgba(15, 23, 42, .4); }
+.pc-card .visit-card.is-empty { background: rgba(255, 255, 255, .55); }
+.pc-card .visit-card.is-empty .sum-left::before { background: #cbd5e1; }
+.pc-card .visit-card.is-empty .sum-label { color: #94a3b8; font-weight: 500; }
+
+/* Past appointment day cards */
+.pc-card .pa-card { border-color: #e6ece6; border-radius: 12px; transition: box-shadow .15s; }
+.pc-card .pa-card:hover { box-shadow: 0 6px 16px -12px rgba(15, 23, 42, .35); }
+
+/* Phones */
+@media (max-width: 760px) {
+  .pc-card .sub-card:not(.visit-card) > summary { padding: .55rem .75rem; }
+  .today-who { margin-left: 0; }
+}
