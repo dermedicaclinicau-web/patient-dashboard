@@ -21,6 +21,7 @@ import { confirmDialog } from "./dialog.js";
 import { warmUpLogin } from "./auth.js";
 import { can } from "./perms.js";
 import { openScanReview } from "./scanner-review.js";
+import { okPopup, popupOff } from "./scan-popup.js";
 
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const svg = (p) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${p}</svg>`;
@@ -51,28 +52,14 @@ const writeLocal = (k, v) => { try { localStorage.setItem(k, v); } catch { /* pr
 // "Don't show this again" is remembered on this device (a small message shows instead).
 const SAVED_TIP_KEY = "dm.scanSavedTip";
 function savedPopup() {
-  if (readLocal(SAVED_TIP_KEY) === "off") { showToast("Saving in the background."); return Promise.resolve(); }
-  return new Promise((resolve) => {
-    const dlg = document.createElement("dialog");
-    dlg.className = "lh-dialog scan-saved-dlg";
-    dlg.innerHTML = `<form method="dialog" class="lh-form">
-      <div class="scan-saved-icon" aria-hidden="true">✓</div>
-      <h3>Photo taken</h3>
-      <p>It's being saved for you now. <strong>You don't need to wait.</strong></p>
-      <p>Take the next photo whenever you're ready. A message shows at the bottom of the screen when each one is saved.</p>
-      <label class="scan-saved-skip"><input type="checkbox" data-role="skip" /> Don't show this again on this device</label>
-      <div class="lh-actions"><button type="submit" class="lh-btn is-primary" autofocus>OK</button></div>
-    </form>`;
-    document.body.appendChild(dlg);
-    dlg.addEventListener("close", () => {
-      if (dlg.querySelector('[data-role="skip"]').checked) writeLocal(SAVED_TIP_KEY, "off");
-      dlg.remove();
-      resolve();
-    });
-    dlg.showModal();
+  if (popupOff(SAVED_TIP_KEY)) { showToast("Saving in the background."); return Promise.resolve(); }
+  return okPopup({
+    title: "Photo taken",
+    text: ["It's being saved for you now. You don't need to wait.",
+      "Take the next photo whenever you're ready. A message shows at the bottom of the screen when each one is saved."],
+    skipKey: SAVED_TIP_KEY,
   });
 }
-
 // Only one Scanner holds the camera: this switches off the one before
 let releaseCamera = null;
 

@@ -5565,6 +5565,9 @@ body.is-arranging, body.is-arranging *{user-select:none;-webkit-user-select:none
   font-size: 14px; color: #64748b; }
 .scan-saved-dlg .lh-actions { justify-content: center; }
 .scan-saved-dlg .lh-btn { min-width: 160px; min-height: 50px; font-size: 18px; }
+.scan-saved-photo { display: block; max-width: 100%; max-height: 180px; margin: 0 auto; border-radius: 10px; object-fit: contain; }
+.scan-saved-dlg.is-warn .scan-saved-icon { background: #fef3c7; color: #b45309; }
+.scan-saved-dlg.is-warn h3 { color: #b45309; }
 
 /* Patient dashboard: scanned billing sheets */
 .bs-list { display: flex; flex-direction: column; gap: 8px; }

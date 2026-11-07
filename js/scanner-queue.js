@@ -8,6 +8,7 @@ import { autoRx, autoBilling } from "./scanner-rx-auto.js";
 import { listProducts } from "./inventory-api.js";
 import { rxProductList } from "./rx-products.js";
 import { showToast } from "./utils.js";
+import { okPopup } from "./scan-popup.js";
 
 const DB = "dm-scan-queue", STORE = "items";
 const AT_ONCE = 2;   // read at the same time
@@ -116,12 +117,29 @@ async function work(it) {
     await finish(it, prep, read);
     forget(it.id);
   } catch (err) {
+    // Signed out mid-save (Switch user, or the iPad locked): no error. It carries on when they sign in again,
+    // using the answer already kept on the server.
+    if (!me() || !mine(it)) { it.status = "waiting"; it.again = true; emit("changed"); return; }
     it.tries++;
     console.warn(`Background scan failed (try ${it.tries}):`, err);
     const code = err && err.code;
-    if (code === "permission-denied") showToast("A scan couldn't be saved: your access doesn't allow it. Ask an Admin.");
-    // Signed out or no access: trying again won't help, so it waits for Try again
-    if (code === "UNAUTHORIZED" || code === "permission-denied" || it.tries >= TRIES) { it.status = "stuck"; emit("changed"); return; }
+    // Signed out, no access, or still failing: trying again won't help yet, so it waits for Try again
+    if (code === "UNAUTHORIZED" || code === "permission-denied" || it.tries >= TRIES) {
+      const first = ![...items.values()].some((x) => x.status === "stuck" && mine(x));   // one pop-up, not one per scan
+      it.status = "stuck";
+      emit("changed");
+      if (first) {
+        okPopup(code === "permission-denied"
+          ? { tone: "warn", title: "A scan couldn't be saved",
+              text: ["Your access doesn't allow saving this kind of scan.", "Ask an Admin to check your access in Staff → Roles & access."] }
+          : code === "UNAUTHORIZED"
+            ? { tone: "warn", title: "Your sign-in has ended",
+                text: ["Sign in again, then tap “Try again” under the camera.", "The photo is kept on this device until then."] }
+            : { tone: "warn", title: "A scan couldn't be sent",
+                text: ["Check the internet connection.", "Then tap “Try again” under the camera. The photo is kept on this device until then."] });
+      }
+      return;
+    }
     it.status = "retry";
     setTimeout(() => {
       if (items.get(it.id) === it && it.status === "retry") { it.status = "waiting"; pump(); }
@@ -177,8 +195,16 @@ async function finish(it, prep, read) {
   }
   // A docket, not sure what it is, or not read: kept under Ready to check, to open and finish
   await parkScan(it.id, prep.base64, it.kind, it.kind === "auto" ? read.kind : "");
-  showToast(ok && read.kind === "docket" ? "Delivery docket read. Open it under Ready to check to receive it."
-    : read.problem ? "A scan couldn't be read. It's under Ready to check to try again."
-    : "Couldn't tell what one photo is. Choose it under Ready to check.");
   emit("parked");
+  // These need someone to do something, so they're a pop-up with the photo, not a message that disappears
+  okPopup(ok && read.kind === "docket"
+    ? { tone: "ok", photo: prep.blob, title: "Delivery docket read",
+        text: ["It still needs receiving into stock.", "In the Scanner, find it under “Ready to check” and tap Open."] }
+    : read.problem
+      ? { tone: "warn", photo: prep.blob, title: "This photo couldn't be read",
+          text: ["Nothing has been saved from it yet.",
+            "In the Scanner, find it under “Ready to check”. Tap Open to try again, or Discard and take a clearer photo."] }
+      : { tone: "warn", photo: prep.blob, title: "What is this photo?",
+          text: ["The scanner couldn't tell if it's a billing sheet, docket or prescription.",
+            "In the Scanner, find it under “Ready to check”, tap Open and choose which it is."] });
 }
