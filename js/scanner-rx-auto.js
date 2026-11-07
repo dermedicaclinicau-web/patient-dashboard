@@ -2,6 +2,7 @@
 // Sure → saved. Not sure → saved as "Needs checking", with a task for whoever checks scans
 // (app_settings/scanner.reviewerUid, else the one active staff member called Bethany).
 // Prescriptions that need checking stay off the patient's record until they're checked.
+// The scan is saved first and the task after it, so a failed save that's tried again never makes a second task.
 import { db, auth } from "./firebase-config.js";
 import { doc, getDoc, setDoc, collection, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { reviewRx, findRxPatient, rxScanExists, saveRxScan, staffList,
@@ -37,11 +38,13 @@ export function scanReviewer() {
 const checkText = (what, name, reasons) =>
   `Check a scanned ${what}${name ? ` for “${name}”` : ""}: ${reasons.join("; ")}. Open the Scanner → To check.`;
 
-async function makeTask({ reviewer, patientId = "", patientName = "", text, staff }) {
+// A new task's place: its ID goes on the scan, and the task itself is written once the scan is saved
+const newTaskRef = () => doc(collection(db, "staff-task-list"));
+
+async function makeTask(ref, { reviewer, patientId = "", patientName = "", text, staff }) {
   const uid = auth.currentUser && auth.currentUser.uid;
-  if (!uid) return "";
+  if (!uid) return;
   const by = String((staff && staff.name) || "Scanner").slice(0, 120);
-  const ref = doc(collection(db, "staff-task-list"));
   await setDoc(ref, {
     patientId: String(patientId || ""), patientName: String(patientName || ""),
     taskText: String(text || "").slice(0, 500), dueDate: dayKey(), status: "Open",
@@ -49,9 +52,8 @@ async function makeTask({ reviewer, patientId = "", patientName = "", text, staf
     createdAt: serverTimestamp(), createdBy: by, createdByUid: uid,
     notes: [], history: [{ at: new Date().toISOString(), by, what: reviewer ? `Assigned to ${reviewer.name}` : "Added" }],
   });
-  return ref.id;
 }
-const taskOrNothing = (p) => p.catch((err) => { console.warn("Check task not made:", err); return ""; });
+const taskOrNothing = (p) => p.catch((err) => console.warn("Check task not made:", err));
 
 /* ---------- Prescriptions ---------- */
 // → { saved: true, id, patient, review }  or  { saved: false, id, reasons, reviewer, guess, review }
@@ -84,12 +86,13 @@ export async function autoRx({ photo, result, staff }) {
   }
   const reviewer = await reviewerLater;
   const guess = pm.match || (pm.candidates || [])[0] || null;
-  const taskId = await taskOrNothing(makeTask({ reviewer, staff,
+  const taskRef = newTaskRef();
+  const saved = await saveRxScan({ photo, result, review, patient: null, date: review.date, items: rxItems,
+    check: { reasons, guess, taskId: taskRef.id, reviewer } }, staff);
+  await taskOrNothing(makeTask(taskRef, { reviewer, staff,
     patientId: pm.match ? String(pm.match.id || "") : "",   // only when the patient is probably right
     patientName: pm.match ? pm.match.name : review.patientName,
     text: checkText("prescription", review.patientName, reasons) }));
-  const saved = await saveRxScan({ photo, result, review, patient: null, date: review.date, items: rxItems,
-    check: { reasons, guess, taskId, reviewer } }, staff);
   return { saved: false, id: saved.id, reasons, reviewer, guess, review };
 }
 
@@ -119,8 +122,9 @@ export async function autoBilling({ photo, result, products, staff }) {
     return { saved: true, id: saved.id, name, review };
   }
   const reviewer = await reviewerLater;
-  const taskId = await taskOrNothing(makeTask({ reviewer, staff, patientName: name,
+  const taskRef = newTaskRef();
+  const saved = await saveBillingScan({ photo, result, review, patient, check: { reasons, taskId: taskRef.id, reviewer } }, staff);
+  await taskOrNothing(makeTask(taskRef, { reviewer, staff, patientName: name,
     text: checkText("billing sheet", name, reasons) }));
-  const saved = await saveBillingScan({ photo, result, review, patient, check: { reasons, taskId, reviewer } }, staff);
   return { saved: false, id: saved.id, name, reasons, reviewer, review };
 }

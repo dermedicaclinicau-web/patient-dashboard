@@ -118,7 +118,10 @@ async function work(it) {
   } catch (err) {
     it.tries++;
     console.warn(`Background scan failed (try ${it.tries}):`, err);
-    if ((err && err.code === "UNAUTHORIZED") || it.tries >= TRIES) { it.status = "stuck"; emit("changed"); return; }
+    const code = err && err.code;
+    if (code === "permission-denied") showToast("A scan couldn't be saved: your access doesn't allow it. Ask an Admin.");
+    // Signed out or no access: trying again won't help, so it waits for Try again
+    if (code === "UNAUTHORIZED" || code === "permission-denied" || it.tries >= TRIES) { it.status = "stuck"; emit("changed"); return; }
     it.status = "retry";
     setTimeout(() => {
       if (items.get(it.id) === it && it.status === "retry") { it.status = "waiting"; pump(); }

@@ -9,6 +9,8 @@ import { setPerms, can, refreshAccess } from "./perms.js";
 import { mountScanner } from "./scanner.js";
 import { getInitials } from "./utils.js";
 import { forgetSession } from "./appointments.js";
+import { queueState } from "./scanner-queue.js";
+import { confirmDialog } from "./dialog.js";
 
 const REMEMBER_KEY = "dm.scanRemember";
 const LOCK_MIN = 10;
@@ -113,16 +115,28 @@ async function lock(note = "") {
   showLogin(note);
   await signOut(auth).catch(() => {});   // this app only: open portal tabs stay logged in
 }
-$("sa-switch").addEventListener("click", () => lock());
+$("sa-switch").addEventListener("click", async () => {
+  const n = queueState().busy;
+  if (n) {
+    const ok = await confirmDialog({
+      title: "Scans still saving",
+      message: `${n === 1 ? "1 scan is" : `${n} scans are`} still saving. If you switch now, ${n === 1 ? "it finishes" : "they finish"} next time you sign in on this device.`,
+      confirmLabel: "Switch anyway", cancelLabel: "Wait", tone: "warning",
+    });
+    if (!ok) return;
+  }
+  lock();
+});
 
 /* ---------- Locking and access ---------- */
-const scanning = () => !!document.querySelector(".scan-busy");
+// Reading a scan on screen, or still saving some in the background: never locked mid-way
+const scanning = () => !!document.querySelector(".scan-busy") || queueState().busy > 0;
 const idle = () => Date.now() - lastActive > LOCK_MIN * 60000;
 ["pointerdown", "keydown", "touchstart"].forEach((ev) =>
   window.addEventListener(ev, () => { lastActive = Date.now(); }, { passive: true, capture: true }));
 document.addEventListener("visibilitychange", () => {
   if (document.hidden || !staff) return;
-  if (!remembered() && idle()) lock(`Locked after ${LOCK_MIN} minutes without use.`);
+  if (!remembered() && idle() && !scanning()) lock(`Locked after ${LOCK_MIN} minutes without use.`);
   else checkAccess();
 });
 
