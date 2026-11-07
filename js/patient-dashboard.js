@@ -180,6 +180,10 @@ const ICONS = {
   route: svg('<circle cx="6" cy="19" r="3"/><path d="M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15"/><circle cx="18" cy="5" r="3"/>'),
   chev: svg('<polyline points="6 9 12 15 18 9"/>', "sum-chev"),
   paste: svg('<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><line x1="9" y1="12" x2="15" y2="12"/><line x1="9" y1="16" x2="13" y2="16"/>'),
+  copy: svg('<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'),
+  mapPin: svg('<path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>'),
+  idCard: svg('<rect x="2" y="5" width="20" height="14" rx="2"/><circle cx="8" cy="12" r="2"/><line x1="13" y1="10" x2="18" y2="10"/><line x1="13" y1="14" x2="17" y2="14"/>'),
+  cake: svg('<path d="M20 21v-8a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8"/><path d="M4 16s.5-1 2-1 2.5 2 4 2 2.5-2 4-2 2.5 2 4 2 2-1 2-1"/><path d="M2 21h20"/><path d="M7 8v3M12 8v3M17 8v3"/>'),
 };
 
 /* ===================== Remember open/closed sections ===================== */
@@ -309,6 +313,17 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     }
     const soon = t.closest("[data-soon]");
     if (soon) { showToast(`${soon.dataset.soon}: coming soon`); return; }
+    // Patient bar: copy a detail, or "+ Add Medicare" opens Edit on that box
+    const copyBtn = t.closest(".patient-bar [data-copy]");
+    if (copyBtn) {
+      const fail = () => showToast("Couldn't copy. Select the text and copy it instead.");
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(copyBtn.dataset.copy).then(() => showToast(`${copyBtn.dataset.what} copied`), fail);
+      } else fail();
+      return;
+    }
+    const addField = t.closest(".patient-bar [data-edit-field]");
+    if (addField) { openEdit(addField.dataset.editField); return; }
     if (t.closest(".pb-edit")) { openEdit(); return; }
     if (t.closest("[data-close]")) { dialog.close(); }
   });
@@ -480,7 +495,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     bar.innerHTML = barHtml(patient, todayAppts, preData, allergies);
   }
 
-  function openEdit() {
+  function openEdit(focus = "") {
     const f = form.elements;
     form.reset();
     f.firstName.value = patient.firstName;
@@ -496,6 +511,7 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
     f.pttId.value = patient.pttId || patient.id;
     formError.textContent = "";
     dialog.showModal();
+    if (focus && f[focus]) f[focus].focus();   // "+ Add Medicare" lands on the Medicare box
   }
 
   form.addEventListener("submit", async (e) => {
@@ -998,49 +1014,114 @@ function roundLink(href, icon, label, missingMsg) {
     : `<span class="round-btn is-disabled" aria-disabled="true" title="${missingMsg}">${ICONS[icon]}</span>`;
 }
 
+// The oldest visit in Past appointments ("Mar 2023"), or "" until that list has loaded
+function patientSince(pre) {
+  if (!pre) return "";
+  const visits = paParse(toLines(pre.other)).visits;   // newest first
+  const first = visits.length ? visits[visits.length - 1].date : null;
+  return first ? first.toLocaleDateString("en-AU", { month: "short", year: "numeric" }) : "";
+}
+
+// "+ Add Medicare": opens Edit on that box. Staff who can't edit see the plain text instead (styles.css).
+const addHtml = (field, label, alt = "Not provided") =>
+  `<button type="button" class="pb-add" data-edit-field="${field}">+ Add ${escapeHtml(label)}</button><span class="missing pb-add-alt">${escapeHtml(alt)}</span>`;
+
+const copyHtml = (value, what) =>
+  `<button type="button" class="pb-copy" data-copy="${escapeHtml(value)}" data-what="${escapeHtml(what)}" aria-label="Copy ${escapeHtml(what.toLowerCase())}" title="Copy">${ICONS.copy}</button>`;
+
+// "Birthday today" / "Birthday in 3 days" (within a week)
+function birthdayChipHtml(dob) {
+  if (!dob) return "";
+  const now = new Date();
+  now.setHours(0, 0, 0, 0);
+  const next = new Date(now.getFullYear(), dob.getMonth(), dob.getDate());
+  if (next < now) next.setFullYear(now.getFullYear() + 1);
+  const days = Math.round((next - now) / 864e5);
+  if (days > 7) return "";
+  const text = days === 0 ? "Birthday today" : days === 1 ? "Birthday tomorrow" : `Birthday in ${days} days`;
+  return `<span class="chip chip-bday">${ICONS.cake}<span>${text}</span></span>`;
+}
+
+// "Today · 9:15 am · Hyalase · Dr Teh": tapping it jumps to today's appointment
+function todayPillHtml(list) {
+  const a = list[0];
+  const svcs = a.services || [];
+  const what = [a.time, svcs.slice(0, 2).join(", ") + (svcs.length > 2 ? ` +${svcs.length - 2}` : ""), a.staff]
+    .filter(Boolean).map(escapeHtml).join(" · ");
+  return `<button type="button" class="pb-today" data-peek=".today-slot" title="Show today's appointment">
+    <b>Today</b><span>${what}</span>${list.length > 1 ? `<em>+${list.length - 1} more</em>` : ""}</button>`;
+}
+
 function barHtml(p, today = [], pre = null, allergies = null) {
   const age = calcAge(p.dobKey);
-  const dobText = formatDobLong(p.dobKey) || p.dob;
+  const dob = p.dobKey ? parseDateKey(p.dobKey) : null;
+  const dobText = dob ? dob.toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric" }) : (p.dob || "");
   const tel = toTelHref(p.mobile);
+  const mobile = p.mobile ? formatMobile(p.mobile) : "";
+  const since = patientSince(pre);
+  const nm = /^(.*\S)\s*(#\d+)$/.exec(p.name || "");   // "Ashley Hanna #1": the "#1" sits with the ID
+  const name = nm ? nm[1] : (p.name || "");
 
-  const chips = [
-    allergyChipHtml(allergies),
-    p.pttId && `<span class="chip">ID ${escapeHtml(p.pttId)}</span>`,
-    p.marketingOk === false && dncChipHtml(p),
-    today.length && `<span class="chip chip-today">Appt today ${escapeHtml(today[0].time || "")}</span>`,
-    pre && pre.overdue && overdueChipHtml(pre.overdue),
-    p.mergedIds && p.mergedIds.length &&
-      `<button type="button" class="chip chip-merged" data-action="merge-info">Merged · ${p.mergedIds.length} other ID${p.mergedIds.length > 1 ? "s" : ""}</button>`,
-    p.redirectedFrom && `<span class="chip">Opened from merged record ${escapeHtml(p.redirectedFrom)}</span>`,
-  ].filter(Boolean).join("");
+  // 31 yrs · born 19 Jan 1995 · patient since Mar 2023
+  const sub = [
+    age != null && `${age} yrs`,
+    dobText ? `born ${escapeHtml(dobText)}` : addHtml("dobKey", "date of birth", "No date of birth"),
+    since && `patient since ${escapeHtml(since)}`,
+  ].filter(Boolean).map((s) => `<span>${s}</span>`).join('<i class="pb-dot" aria-hidden="true"></i>');
+
+  // Today's appointment | things to watch for | other notes
+  const groups = [
+    today.length ? todayPillHtml(today) : "",
+    [allergyChipHtml(allergies), pre && pre.overdue && overdueChipHtml(pre.overdue), p.marketingOk === false && dncChipHtml(p)]
+      .filter(Boolean).join(""),
+    [
+      birthdayChipHtml(dob),
+      p.mergedIds && p.mergedIds.length &&
+        `<button type="button" class="chip chip-merged" data-action="merge-info">Merged · ${p.mergedIds.length} other ID${p.mergedIds.length > 1 ? "s" : ""}</button>`,
+      p.redirectedFrom && `<span class="chip">Opened from merged record ${escapeHtml(p.redirectedFrom)}</span>`,
+    ].filter(Boolean).join(""),
+  ].filter(Boolean);
+
+  const medicare = p.medicareNo
+    ? `<span class="pb-val is-wrap">${escapeHtml(formatMedicare(p.medicareNo))}${
+        p.medicareIrn ? ` <span class="pb-age">· Ref ${escapeHtml(p.medicareIrn)}</span>` : ""}${
+        p.medicareExp ? ` <span class="pb-age">· Exp ${escapeHtml(formatMedicareExpiry(p.medicareExp))}</span>${
+          medicareExpired(p.medicareExp) ? ' <span class="missing">expired</span>' : ""}` : ""}</span>`
+    : addHtml("medicareNo", "Medicare");
 
   return `
     <div class="pb-top">
       <button type="button" class="icon-btn back-btn" aria-label="Back" title="Back">${ICONS.back}</button>
-      <span class="pb-avatar" style="--h:${hueFromString(p.name)}">${escapeHtml(getInitials(p.name))}</span>
+      <span class="pb-avatar" style="--h:${hueFromString(p.name)}">${escapeHtml(getInitials(name))}${
+        today.length ? `<i class="pb-av-badge" title="Appointment today">${ICONS.clock}</i>` : ""}</span>
       <div class="pb-main">
-        <h2 class="pb-name serif">${escapeHtml(p.name)}</h2>
-        ${chips ? `<div class="pb-chips">${chips}</div>` : ""}
+        <div class="pb-name-row">
+          <h2 class="pb-name serif">${escapeHtml(name)}</h2>
+          ${nm || p.pttId ? `<span class="pb-id">${[nm && nm[2], p.pttId && `ID ${p.pttId}`].filter(Boolean).map(escapeHtml).join(" · ")}</span>` : ""}
+        </div>
+        ${sub ? `<p class="pb-sub">${sub}</p>` : ""}
       </div>
       <div class="pb-actions">
-        ${roundLink(tel && `tel:${tel}`, "phone", "Call", "No mobile number on file")}
-        ${tel && can("sms.send")
-          ? `<button type="button" class="round-btn" data-action="sms" aria-label="Text" title="Text">${ICONS.sms}</button>`
-          : roundLink(tel && `sms:${tel}`, "sms", "SMS", "No mobile number on file")}
-        <button type="button" class="round-btn" data-task-picker="patient" data-email="${escapeHtml(p.email || "")}" aria-label="Email" title="Email">${ICONS.mail}</button>
-        <button type="button" class="round-btn" data-action="add-reminder" aria-label="Add reminder" title="Add reminder">${ICONS.bell}</button>
+        <div class="pb-contact" role="group" aria-label="Contact ${escapeHtml(p.firstName || name)}">
+          ${roundLink(tel && `tel:${tel}`, "phone", "Call", "No mobile number on file")}
+          ${tel && can("sms.send")
+            ? `<button type="button" class="round-btn" data-action="sms" aria-label="Text" title="Text">${ICONS.sms}</button>`
+            : roundLink(tel && `sms:${tel}`, "sms", "SMS", "No mobile number on file")}
+          <button type="button" class="round-btn" data-task-picker="patient" data-email="${escapeHtml(p.email || "")}" aria-label="Email" title="Email">${ICONS.mail}</button>
+          <button type="button" class="round-btn" data-action="add-reminder" aria-label="Add reminder" title="Add reminder">${ICONS.bell}</button>
+        </div>
         <button type="button" class="btn-ghost sm pb-edit">${ICONS.edit}<span>Edit</span></button>
       </div>
     </div>
+    ${groups.length ? `<div class="pb-status">${groups.join('<span class="pb-sep" aria-hidden="true"></span>')}</div>` : ""}
     <dl class="pb-details">
-      <div><dt>Date of birth</dt><dd>${show(dobText, `${escapeHtml(dobText)}${age !== null ? ` <span class="pb-age">(${age} yrs)</span>` : ""}`)}</dd></div>
-      <div><dt>Mobile</dt><dd>${show(p.mobile, escapeHtml(formatMobile(p.mobile)))}</dd></div>
-      <div><dt>Email</dt><dd>${show(p.email)}</dd></div>
-      <div><dt>Address</dt><dd>${show(p.address)}</dd></div>
-      <div><dt>Medicare</dt><dd>${show(p.medicareNo, `${escapeHtml(formatMedicare(p.medicareNo))}${
-        p.medicareIrn ? ` <span class="pb-age">· Ref ${escapeHtml(p.medicareIrn)}</span>` : ""}${
-        p.medicareExp ? ` <span class="pb-age">· Exp ${escapeHtml(formatMedicareExpiry(p.medicareExp))}</span>${
-          medicareExpired(p.medicareExp) ? ' <span class="missing">expired</span>' : ""}` : ""}`)}</dd></div>
+      <div><dt>${ICONS.phone}<span>Mobile</span></dt><dd>${mobile
+        ? `<span class="pb-val">${escapeHtml(mobile)}</span>${copyHtml(mobile, "Mobile")}` : addHtml("mobile", "mobile")}</dd></div>
+      <div><dt>${ICONS.mail}<span>Email</span></dt><dd>${p.email
+        ? `<span class="pb-val" title="${escapeHtml(p.email)}">${escapeHtml(p.email)}</span>${copyHtml(p.email, "Email")}` : addHtml("email", "email")}</dd></div>
+      <div><dt>${ICONS.mapPin}<span>Address</span></dt><dd>${p.address
+        ? `<span class="pb-val" title="${escapeHtml(p.address)}">${escapeHtml(p.address)}</span>${copyHtml(p.address, "Address")}` : addHtml("address", "address")}</dd></div>
+      <div><dt>${ICONS.idCard}<span>Medicare</span></dt><dd>${medicare}</dd></div>
     </dl>`;
 }
 
