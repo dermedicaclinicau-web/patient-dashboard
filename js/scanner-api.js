@@ -136,6 +136,18 @@ export async function readAuto(base64, thumb, products, rxProducts) {
   return { auto: res.auto || null, result: res.result || null, problem: res.problem || "" };
 }
 
+
+// Background reads (saved while the next photo is taken): a problem reading the photo comes back
+// as { problem } rather than an error, so only a lost connection is tried again
+export async function readForQueue(kind, base64, products, rxProducts) {
+  const body = kind === "rx"
+    ? { op: "rx", rxProducts: stableNames(rxProducts) }
+    : { op: "billing", products: stableList(sellable(products)).map((p) => ({ id: p.id, name: p.name, brand: p.brand || "" })) };
+  const res = await scanCall({ action: "scanner", mime: "image/jpeg", image: base64, ...body });
+  return { result: (res && res.result) || null,
+    problem: (res && res.problem) || (res && res.result ? "" : "The scanner couldn't read that photo.") };
+}
+
 /* ---------- Matching and checking ---------- */
 // Words that tell products apart. Brand words don't count, so "ZO DPD" never pairs with "ZO Rozatrol" just for being ZO.
 const BRAND_WORDS = new Set(["dermedica", "zo", "skin", "health", "zein", "obagi", "by", "md", "the", "and", "of", "with", "ml"]);
