@@ -11369,3 +11369,31 @@ dialog.pn::backdrop { background: rgba(15, 23, 42, .55); backdrop-filter: blur(5
   .pn-modes { grid-template-columns: 1fr; }
   .pn-kbd { display: none; }
 }
+
+/* Record date taken from the notes */
+.pn-field { position: relative; }
+.pn-auto { position: absolute; top: 100%; left: 0; margin-top: 3px; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
+  font: 600 11px/1.2 inherit; font-style: normal; text-transform: none; letter-spacing: 0; color: #0f766e; }
+.pn-auto.is-back { color: #b45309; }
+.pn-auto button { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
+.pn-field input.is-auto { border-color: #5eead4; background: #f0fdfa; }
+.pn-field input.is-back { border-color: #fcd34d; background: #fffbeb; color: #78350f; }
+.pn-head { padding-bottom: 20px; }   /* room for the note under the date */
+
+/* Collapsible section cards */
+.pn-pane-head .pn-tool[data-a="expand"] { margin-left: 8px; }
+.pn-card-head { cursor: pointer; user-select: none; padding-bottom: 8px; }
+.pn-card.is-open .pn-card-head { padding-bottom: 4px; }
+.pn-fold { display: grid; place-items: center; width: 30px; height: 30px; border: 0; border-radius: 8px; background: transparent;
+  color: #94a3b8; cursor: pointer; }
+.pn-fold:hover { background: #f1f5f9; color: #0f172a; }
+.pn-fold svg { width: 16px; height: 16px; transition: transform .2s ease; }
+.pn-card.is-open .pn-fold svg { transform: rotate(180deg); }
+.pn-icbtn { margin-left: auto; }
+.pn-peek { margin: 0; padding: 0 16px 12px 54px; font-size: 13px; line-height: 1.45; color: #475569; cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pn-peek span { color: #94a3b8; }
+.pn-card:hover:not(.is-open) .pn-peek { color: #0f172a; }
+.pn-card.is-open .pn-peek { display: none; }
+.pn-card:not(.is-open) .pn-ta { display: none; }
+.pn-card.is-open .pn-ta { animation: pn-card-in .18s both; }

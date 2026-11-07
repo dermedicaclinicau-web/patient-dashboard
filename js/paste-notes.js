@@ -1,6 +1,7 @@
 // Paste consultation notes (from Heidi, or written anywhere) → saved exactly like a recording's notes.
 // Left: the pasted text. Right: the sections it goes into, editable. Split is instant and keeps the wording;
 // "Write SOAP with AI" uses the Recorder's note-writer (Apps Script action "pasteNotes"). Nothing saves until a Save button.
+// A date at the top of the notes becomes the consultation date (a backdated record), unless staff set the date themselves.
 import { SECTIONS, parseSoap, assembleSoap } from "./soap.js";
 import { callApi } from "./appointments.js";
 import { confirmDialog } from "./dialog.js";
@@ -90,6 +91,71 @@ function headingInfo(line) {
   return null;
 }
 
+/* ===================== The record date at the top of the notes ===================== */
+
+const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+const pad2 = (n) => String(n).padStart(2, "0");
+// Dates that aren't the consultation (date of birth, expiry, next visit…) are never used
+const NOT_VISIT_DATE_RE = /\b(dob|d\.o\.b|date of birth|birth|born|expir\w*|exp|next|review|follow|due|valid|until|booked for)\b/i;
+const DATE_LABEL_RE = /^(?:(?:consultation|consult|session|record|visit|appointment|appt|treatment|clinic)\s+)?(?:date(?:\s+of\s+(?:consultation|visit|service|treatment))?|dated|on)\s*[:\-–]?\s*/i;
+const monthOf = (w) => MONTHS[String(w || "").slice(0, 3).toLowerCase()] || 0;
+
+// "14:30" from "2:30 pm", "2.30pm", "10am" or "14:30" (or "")
+function timeIn(s) {
+  let x = /\b(\d{1,2})[:.](\d{2})\s*([ap])\.?\s*m\.?(?![a-z])/i.exec(s);
+  if (x && +x[1] >= 1 && +x[1] <= 12 && +x[2] < 60) return `${pad2((+x[1] % 12) + (/p/i.test(x[3]) ? 12 : 0))}:${x[2]}`;
+  x = /\b(\d{1,2})\s*([ap])\.?\s*m\.?(?![a-z])/i.exec(s);
+  if (x && +x[1] >= 1 && +x[1] <= 12) return `${pad2((+x[1] % 12) + (/p/i.test(x[2]) ? 12 : 0))}:00`;
+  x = /\b([01]?\d|2[0-3]):([0-5]\d)\b/.exec(s);
+  return x ? `${pad2(+x[1])}:${x[2]}` : "";
+}
+
+// { dateKey, time } for a real date in the text, from 2000 to today (Australian day first), or null
+function dateIn(s) {
+  let y = 0, m = 0, d = 0, x;
+  if ((x = /\b(\d{4})-(\d{1,2})-(\d{1,2})\b/.exec(s))) { y = +x[1]; m = +x[2]; d = +x[3]; }
+  else if ((x = /\b(\d{1,2})[/.-](\d{1,2})[/.-](\d{4}|\d{2})\b/.exec(s))) { d = +x[1]; m = +x[2]; y = +x[3]; if (y < 100) y += 2000; }
+  else if ((x = /\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?([A-Za-z]{3,9})\.?,?\s+(\d{4})\b/.exec(s)) && monthOf(x[2])) { d = +x[1]; m = monthOf(x[2]); y = +x[3]; }
+  else if ((x = /\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/.exec(s)) && monthOf(x[1])) { m = monthOf(x[1]); d = +x[2]; y = +x[3]; }
+  else return null;
+  const dt = new Date(y, m - 1, d);
+  if (y < 2000 || dt.getFullYear() !== y || dt.getMonth() !== m - 1 || dt.getDate() !== d) return null;
+  const dateKey = `${y}-${pad2(m)}-${pad2(d)}`;
+  if (dateKey > toDateKey()) return null;
+  return { dateKey, time: timeIn(s.slice(x.index + x[0].length)) || timeIn(s) };
+}
+
+const plainLine = (l) => String(l || "").replace(/\*\*|__/g, "").replace(/^#{1,6}\s*/, "").trim();
+
+// The first visit date in the first 8 lines of the notes
+function findNoteDate(text) {
+  const lines = String(text || "").replace(/\r/g, "").split("\n").map(plainLine).filter(Boolean).slice(0, 8);
+  for (const line of lines) {
+    if (NOT_VISIT_DATE_RE.test(line)) continue;
+    const found = dateIn(line);
+    if (found) return found;
+  }
+  return null;
+}
+
+// A line that's only a date ("Date: 03/11/2026", "Tuesday 3 November 2026, 10:30 am")
+function isDateOnlyLine(line) {
+  const s = plainLine(line);
+  if (!s || NOT_VISIT_DATE_RE.test(s) || !dateIn(s)) return false;
+  const left = s.replace(DATE_LABEL_RE, "")
+    .replace(/\b\d{4}-\d{1,2}-\d{1,2}\b|\b\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}\b/g, " ")
+    .replace(/\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b|\b(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\b/gi, " ")
+    .replace(/\b\d{1,2}[:.]\d{2}\b|\b(?:at|of|am|pm|a\.m|p\.m)\b|\b\d{1,4}(?:st|nd|rd|th)?\b/gi, " ")
+    .replace(/[^a-z]/gi, "");
+  return left.length <= 2;
+}
+
+const longDate = (key) => (/^\d{4}-\d{2}-\d{2}$/.test(key || "")
+  ? new Date(`${key}T12:00:00`).toLocaleDateString("en-AU", { weekday: "short", day: "numeric", month: "short", year: "numeric" })
+  : "");
+
+/* ===================== Splitting ===================== */
+
 const tidyLine = (l) => l.replace(/\u00a0/g, " ").replace(/\*\*|__/g, "").replace(/^(\s*)[•‣◦]\s*/, "$1- ").replace(/\s+$/, "");
 
 function splitText(text, nid) {
@@ -97,11 +163,14 @@ function splitText(text, nid) {
   const out = [];
   let cur = { heading: "", key: "clinical", lines: [] };
   let found = 0;
+  let seen = 0;
   const push = () => {
     const t = cur.lines.map(tidyLine).join("\n").replace(/\n{3,}/g, "\n\n").trim();
-    if (t) out.push({ id: nid(), heading: cur.heading, key: cur.key, text: t, orig: t });
+    if (t) out.push({ id: nid(), heading: cur.heading, key: cur.key, text: t, orig: t, open: false });
   };
   lines.forEach((line) => {
+    if (line.trim()) seen++;
+    if (seen <= 8 && isDateOnlyLine(line)) return;   // the date is saved as the record date
     const h = headingInfo(line);
     if (h) { push(); found++; cur = { heading: h.heading, key: h.key, lines: h.rest ? [h.rest] : [] }; return; }
     cur.lines.push(line);
@@ -119,7 +188,7 @@ function looksLikeTranscript(text, found) {
 }
 
 const headingText = (h) => (String(h || "").toUpperCase().replace(/[^A-Z0-9 &/()'-]/g, " ").replace(/\s+/g, " ").trim().slice(0, 60) || "OTHER NOTES");
-const snippet = (t) => { const s = String(t || "").replace(/\s+/g, " ").trim(); return s.length > 90 ? `${s.slice(0, 88)}…` : s; };
+const snippet = (t, n = 140) => { const s = String(t || "").replace(/\s+/g, " ").trim(); return s.length > n ? `${s.slice(0, n - 2)}…` : s; };
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 function autosize(ta) {
@@ -135,6 +204,8 @@ export function openPasteNotes({ patient, staff, onSaved } = {}) {
     text: "", mode: "split", blocks: [], found: 0, transcript: false,
     sidecar: "", aiOrig: null, notes: [],
     busy: false, token: 0, saving: false, rightEdited: false, leftChanged: false,
+    autoDate: null,       // { prevDate, prevTime, dateKey, time } while the date came from the notes
+    dateTouched: false,   // staff changed the date or time themselves: the notes never override it
   };
   let seq = 0;
   const nid = () => `b${++seq}`;
@@ -148,7 +219,53 @@ export function openPasteNotes({ patient, staff, onSaved } = {}) {
   const $ = (s) => dlg.querySelector(s);
   const src = $(".pn-src");
   const drop = $(".pn-drop");
+  const dateEl = $('[data-f="date"]');
+  const timeEl = $('[data-f="time"]');
   const R = (name) => $(`[data-r="${name}"]`);
+
+  /* ---------- The record date ---------- */
+
+  function applyNoteDate() {
+    if (st.dateTouched) return;
+    const found = findNoteDate(st.text);
+    if (found) {
+      if (!st.autoDate) st.autoDate = { prevDate: dateEl.value, prevTime: timeEl.value };
+      const changed = st.autoDate.dateKey !== found.dateKey;
+      dateEl.value = found.dateKey;
+      timeEl.value = found.time || st.autoDate.prevTime;
+      Object.assign(st.autoDate, found);
+      if (changed && found.dateKey < toDateKey()) {
+        showToast(`The notes are dated ${longDate(found.dateKey)}, so that's the consultation date now.`);
+      }
+    } else if (st.autoDate) {
+      dateEl.value = st.autoDate.prevDate;
+      timeEl.value = st.autoDate.prevTime;
+      st.autoDate = null;
+    }
+    renderDateNote();
+  }
+
+  function renderDateNote() {
+    const a = st.autoDate;
+    const back = !!a && dateEl.value < toDateKey();
+    dateEl.classList.toggle("is-auto", !!a && !back);
+    dateEl.classList.toggle("is-back", back);
+    timeEl.classList.toggle("is-auto", !!(a && a.time));
+    const note = R("datenote");
+    note.hidden = !a;
+    note.className = `pn-auto${back ? " is-back" : ""}`;
+    note.innerHTML = !a ? "" : back
+      ? `Backdated · from the notes · <button type="button" data-a="undo-date">Use today</button>`
+      : "From the notes";
+  }
+
+  function undoNoteDate() {
+    if (st.autoDate) { dateEl.value = st.autoDate.prevDate; timeEl.value = st.autoDate.prevTime; }
+    st.autoDate = null;
+    st.dateTouched = true;
+    renderDateNote();
+    renderFoot();
+  }
 
   /* ---------- Rendering ---------- */
 
@@ -183,16 +300,28 @@ export function openPasteNotes({ patient, staff, onSaved } = {}) {
     R("hint").innerHTML = hintFor();
 
     const cards = R("cards");
-    if (st.busy) { cards.innerHTML = busyHtml(); return; }
-    if (!st.text.trim()) { cards.innerHTML = emptyHtml(); return; }
-    cards.innerHTML = st.blocks.map((b, i) => cardHtml(b, i)).join("") + notesHtml();
-    cards.querySelectorAll("textarea.pn-ta").forEach(autosize);
+    if (st.busy) cards.innerHTML = busyHtml();
+    else if (!st.text.trim()) cards.innerHTML = emptyHtml();
+    else {
+      cards.innerHTML = st.blocks.map((b, i) => cardHtml(b, i)).join("") + notesHtml();
+      cards.querySelectorAll(".pn-card.is-open textarea.pn-ta").forEach(autosize);
+    }
+    updateExpandBtn();
+  }
+
+  function updateExpandBtn() {
+    const btn = R("expand");
+    const shown = st.blocks.filter((b) => b.key !== "skip");
+    btn.hidden = st.busy || !st.text.trim() || !shown.length;
+    btn.textContent = shown.length && shown.every((b) => b.open) ? "Collapse all" : "Expand all";
   }
 
   function renderFoot() {
     const n = new Set(live().map((b) => b.key)).size;
+    const d = dateEl.value;
+    const when = d && d !== toDateKey() ? ` · for ${longDate(d)}` : "";
     R("state").innerHTML = st.saving ? "Saving…" : st.busy ? "Waiting for the AI…"
-      : n ? `${ICONS.check}<span>${plural(n, "section")} ready to save${st.mode === "ai" ? " · written by AI" : ""}</span>`
+      : n ? `${ICONS.check}<span>${plural(n, "section")} ready to save${st.mode === "ai" ? " · written by AI" : ""}${escapeHtml(when)}</span>`
       : "Paste the notes to start";
     dlg.querySelectorAll('[data-a="draft"], [data-a="reviewed"]').forEach((b) => { b.disabled = !n || st.busy || st.saving; });
   }
@@ -231,25 +360,49 @@ export function openPasteNotes({ patient, staff, onSaved } = {}) {
       <option value="skip">Leave it out</option></optgroup></select>`;
   }
 
+  const peekHtml = (b) => (b.text.trim()
+    ? `${escapeHtml(snippet(b.text))} <span>· ${plural((b.text.match(/\S+/g) || []).length, "word")}</span>`
+    : "<span>Empty. Open it to type.</span>");
+
   function cardHtml(b, i) {
     if (b.key === "skip") {
       return `<article class="pn-card is-skip" data-id="${b.id}" style="--i:${i}">
         <span class="pn-skip-label">Left out${b.heading ? `: “${escapeHtml(b.heading)}”` : ""}</span>
-        <em>${escapeHtml(snippet(b.text))}</em>
+        <em>${escapeHtml(snippet(b.text, 90))}</em>
         <button type="button" class="pn-link" data-undo="${b.id}">${ICONS.undo}<span>Put it back</span></button></article>`;
     }
     const s = SEC[b.key];
     const from = b.key !== "extra" && b.heading && s && norm(b.heading) !== norm(s.title)
       && !s.aliases.some((a) => norm(a) === norm(b.heading));
-    return `<article class="pn-card pn-tone-${s ? s.tone : "gray"}" data-id="${b.id}" style="--i:${i}">
-      <header class="pn-card-head">
+    return `<article class="pn-card pn-tone-${s ? s.tone : "gray"}${b.open ? " is-open" : ""}" data-id="${b.id}" style="--i:${i}">
+      <header class="pn-card-head" data-toggle="${b.id}">
         <span class="pn-ic">${ICONS[s ? s.icon : "note"]}</span>
         <span class="pn-sel-wrap">${selectHtml(b)}${ICONS.chev}</span>
         ${from ? `<span class="pn-from" title="The heading in the pasted notes">from “${escapeHtml(b.heading)}”</span>` : ""}
         <button type="button" class="pn-icbtn" data-drop="${b.id}" title="Leave this part out" aria-label="Leave this part out">${ICONS.x}</button>
+        <button type="button" class="pn-fold" data-toggle="${b.id}" aria-expanded="${b.open}" aria-label="Open or close this section">${ICONS.chev}</button>
       </header>
+      <p class="pn-peek" data-toggle="${b.id}">${peekHtml(b)}</p>
       <textarea class="pn-ta" data-t="${b.id}" placeholder="Nothing here yet. Type here, or leave it empty.">${escapeHtml(b.text)}</textarea>
     </article>`;
+  }
+
+  // Opens or closes one card without redrawing the others
+  function toggleCard(id, open) {
+    const b = st.blocks.find((x) => x.id === id);
+    if (!b) return;
+    b.open = open === undefined ? !b.open : open;
+    const card = dlg.querySelector(`.pn-card[data-id="${id}"]`);
+    if (card) {
+      card.classList.toggle("is-open", b.open);
+      const fold = card.querySelector(".pn-fold");
+      if (fold) fold.setAttribute("aria-expanded", String(b.open));
+      const peek = card.querySelector(".pn-peek");
+      if (peek) peek.innerHTML = peekHtml(b);
+      const ta = card.querySelector("textarea");
+      if (ta && b.open) autosize(ta);
+    }
+    updateExpandBtn();
   }
 
   function notesHtml() {
@@ -278,7 +431,8 @@ export function openPasteNotes({ patient, staff, onSaved } = {}) {
   /* ---------- Splitting and AI ---------- */
 
   function resplit(force) {
-    if (!force && st.rightEdited) { st.leftChanged = true; renderRight(); return; }
+    applyNoteDate();
+    if (!force && st.rightEdited) { st.leftChanged = true; renderRight(); renderFoot(); return; }
     const r = splitText(st.text, nid);
     Object.assign(st, {
       blocks: r.blocks, found: r.found, transcript: looksLikeTranscript(st.text, r.found),
@@ -314,8 +468,9 @@ export function openPasteNotes({ patient, staff, onSaved } = {}) {
       if (res.problem) { showToast(res.problem); st.mode = "split"; st.busy = false; resplit(true); return; }
       const parsed = parseSoap(res.soap);
       const blocks = SECTIONS.filter((s) => String(parsed.sections[s.key] || "").trim())
-        .map((s) => ({ id: nid(), heading: s.title, key: s.key, text: parsed.sections[s.key], orig: parsed.sections[s.key] }))
-        .concat(parsed.extras.filter((x) => x.text.trim()).map((x) => ({ id: nid(), heading: x.heading, key: "extra", text: x.text, orig: x.text })));
+        .map((s) => ({ id: nid(), heading: s.title, key: s.key, text: parsed.sections[s.key], orig: parsed.sections[s.key], open: false }))
+        .concat(parsed.extras.filter((x) => x.text.trim())
+          .map((x) => ({ id: nid(), heading: x.heading, key: "extra", text: x.text, orig: x.text, open: false })));
       Object.assign(st, {
         blocks, sidecar: parsed.sidecar, rightEdited: false, leftChanged: false, transcript: false,
         aiOrig: { plan: String(parsed.sections.plan || "").trim(), email: String(parsed.sections.email || "").trim() },
@@ -358,7 +513,7 @@ export function openPasteNotes({ patient, staff, onSaved } = {}) {
     if (st.saving || st.busy) return;
     const soap = buildSoap();
     if (!soap) { showToast("There's nothing to save yet."); return; }
-    if (!field("date")) { showToast("Choose the consultation date."); $('[data-f="date"]').focus(); return; }
+    if (!field("date")) { showToast("Choose the consultation date."); dateEl.focus(); return; }
     st.saving = true;
     renderFoot();
     try {
@@ -373,7 +528,7 @@ export function openPasteNotes({ patient, staff, onSaved } = {}) {
         st.saving = false;
         const ok = await confirmDialog({
           title: "Save another set of notes for this day?",
-          message: `${patient.name} already has ${plural(list.length, "consultation note")} on this day (${list.join("; ")}).\n\n` +
+          message: `${patient.name} already has ${plural(list.length, "consultation note")} on ${longDate(field("date"))} (${list.join("; ")}).\n\n` +
             "These notes are saved separately. They aren't merged.",
           confirmLabel: "Save anyway", tone: "warning",
         });
@@ -387,7 +542,8 @@ export function openPasteNotes({ patient, staff, onSaved } = {}) {
         ch.close();
       } catch { /* older browsers */ }
       dlg.close();
-      showToast(status === "Reviewed" ? "Notes saved as Reviewed" : "Notes saved as a Draft");
+      showToast(`${status === "Reviewed" ? "Notes saved as Reviewed" : "Notes saved as a Draft"}${
+        field("date") !== toDateKey() ? ` for ${longDate(field("date"))}` : ""}`);
       if (onSaved) onSaved(res.id, status);
     } catch (err) {
       console.error("Saving pasted notes failed:", err);
@@ -425,9 +581,17 @@ export function openPasteNotes({ patient, staff, onSaved } = {}) {
     st.text = src.value;
     clearTimeout(splitTimer);
     if (st.mode === "split") splitTimer = setTimeout(() => resplit(false), 220);
-    else { st.leftChanged = true; renderRight(); }
+    else { st.leftChanged = true; applyNoteDate(); renderRight(); renderFoot(); }
     renderLeft();
   });
+
+  // Staff set the date or time themselves: the notes don't change it again
+  [dateEl, timeEl].forEach((el) => el.addEventListener("input", () => {
+    st.dateTouched = true;
+    st.autoDate = null;
+    renderDateNote();
+    renderFoot();
+  }));
 
   drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("is-over"); });
   drop.addEventListener("dragleave", () => drop.classList.remove("is-over"));
@@ -470,11 +634,15 @@ export function openPasteNotes({ patient, staff, onSaved } = {}) {
 
   dlg.addEventListener("click", async (e) => {
     const t = e.target;
+    if (t.closest("select")) return;   // the section drop-down never opens or closes the card
     const chip = t.closest("[data-chip]");
     if (chip) {
       const key = chip.dataset.chip;
       let b = st.blocks.find((x) => x.key === key);
-      if (!b) { b = { id: nid(), heading: "", key, text: "", orig: "" }; st.blocks.push(b); st.rightEdited = true; renderRight(); renderFoot(); }
+      if (!b) { b = { id: nid(), heading: "", key, text: "", orig: "", open: true }; st.blocks.push(b); st.rightEdited = true; }
+      b.open = true;
+      renderRight();
+      renderFoot();
       const card = dlg.querySelector(`.pn-card[data-id="${b.id}"]`);
       if (card) {
         card.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -496,6 +664,9 @@ export function openPasteNotes({ patient, staff, onSaved } = {}) {
       if (b) { b.key = b.prev || "clinical"; renderRight(); renderFoot(); }
       return;
     }
+    const tog = t.closest("[data-toggle]");
+    if (tog) { toggleCard(tog.dataset.toggle); return; }
+
     const a = t.closest("[data-a]");
     if (!a || a.disabled) return;
     const act = a.dataset.a;
@@ -504,7 +675,12 @@ export function openPasteNotes({ patient, staff, onSaved } = {}) {
     else if (act === "reviewed") save("Reviewed");
     else if (act === "ai") writeWithAI();
     else if (act === "resplit") resplit(true);
-    else if (act === "cancel-ai") { st.token++; clearInterval(busyTimer); st.busy = false; st.mode = "split"; resplit(true); }
+    else if (act === "undo-date") undoNoteDate();
+    else if (act === "expand") {
+      const shown = st.blocks.filter((b) => b.key !== "skip");
+      const open = !shown.every((b) => b.open);
+      shown.forEach((b) => toggleCard(b.id, open));
+    } else if (act === "cancel-ai") { st.token++; clearInterval(busyTimer); st.busy = false; st.mode = "split"; resplit(true); }
     else if (act === "split") {
       if (st.mode === "split") return;
       if ((st.blocks.length || st.rightEdited) && !(await confirmDialog({
@@ -527,6 +703,7 @@ export function openPasteNotes({ patient, staff, onSaved } = {}) {
         confirmLabel: "Clear", tone: "warning" }))) return;
       st.token++;
       st.busy = false;
+      st.dateTouched = false;   // the next notes can set the date again
       setText("");
       src.focus();
     }
@@ -549,6 +726,7 @@ export function openPasteNotes({ patient, staff, onSaved } = {}) {
   }).catch(() => { /* just "me" */ });
 
   render();
+  renderDateNote();
   dlg.showModal();
   src.focus();
 }
@@ -556,7 +734,7 @@ export function openPasteNotes({ patient, staff, onSaved } = {}) {
 function shellHtml(patient, staff) {
   const now = new Date();
   const today = toDateKey();
-  const time = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  const time = `${pad2(now.getHours())}:${pad2(now.getMinutes())}`;
   return `
     <header class="pn-head">
       <span class="pn-av" style="--h:${hueFromString(patient.name)}">${escapeHtml(getInitials(patient.name))}</span>
@@ -565,7 +743,8 @@ function shellHtml(patient, staff) {
         <p>${escapeHtml(patient.name)}${patient.pttId ? ` <span>· ID ${escapeHtml(patient.pttId)}</span>` : ""}</p>
       </div>
       <div class="pn-meta">
-        <label class="pn-field"><span>Consultation date</span><input type="date" data-f="date" value="${today}" max="${today}" /></label>
+        <label class="pn-field"><span>Consultation date</span><input type="date" data-f="date" value="${today}" max="${today}" />
+          <em class="pn-auto" data-r="datenote" hidden></em></label>
         <label class="pn-field"><span>Time</span><input type="time" data-f="time" value="${time}" /></label>
         <label class="pn-field"><span>Clinician</span><select data-f="staff"><option value="">${escapeHtml((staff && staff.name) || "Me")} (you)</option></select></label>
       </div>
@@ -582,13 +761,18 @@ function shellHtml(patient, staff) {
         </div>
         <div class="pn-drop">
           <textarea class="pn-src" spellcheck="false" maxlength="${MAX_CHARS}" aria-label="Pasted notes"
-            placeholder="Copy the notes from Heidi and paste them here.&#10;&#10;Headings like Subjective, Medications or Plan are found automatically. A transcript works too: choose Write SOAP with AI."></textarea>
+            data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false"
+            placeholder="Copy the notes from Heidi and paste them here.&#10;&#10;Headings like Subjective, Medications or Plan are found automatically. A date at the top becomes the consultation date. A transcript works too: choose Write SOAP with AI."></textarea>
         </div>
         <div class="pn-stats" data-r="stats"></div>
         <div class="pn-modes" data-r="modes"></div>
       </section>
       <section class="pn-pane pn-right">
-        <div class="pn-pane-head"><span class="pn-step">2</span><h3>Check where each part goes</h3><span class="pn-badge" data-r="badge"></span></div>
+        <div class="pn-pane-head">
+          <span class="pn-step">2</span><h3>Check where each part goes</h3>
+          <span class="pn-badge" data-r="badge"></span>
+          <button type="button" class="pn-tool" data-a="expand" data-r="expand" hidden>Expand all</button>
+        </div>
         <div class="pn-chips" data-r="chips"></div>
         <div data-r="hint"></div>
         <div class="pn-cards" data-r="cards"></div>
