@@ -55,9 +55,9 @@ const DOC_ACTIONS = [
   ["Paste Heidi notes", "paste", "paste-notes"],  
   ["+ Reminder", "bell", "add-reminder"],
   ["+ Staff Task", "staff", "staff-task"],
-
 ];
-
+// Shown first on phones; the rest sit behind "Show more" (icon names from DOC_ACTIONS)
+const DOC_TOP = ["consent", "treatment", "rx", "bell"];
 // Order and look of the Pre-Consultation section.
 // field = pcn_results column | unit = pill wording ("one|many", or "value" to show the value itself)
 // tone = colour style | action = [button label, "coming soon" name]
@@ -300,6 +300,13 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
       showSoapPanel(sumBtn.dataset.paSummary); // the Consultation notes panel
       return;
     }
+    const docMore = t.closest("[data-action='doc-more']");
+    if (docMore) {
+      const all = docMore.closest(".doc-tiles").classList.toggle("is-all");
+      docMore.setAttribute("aria-expanded", String(all));
+      docMore.querySelector("span").textContent = all ? "Show fewer" : docMore.dataset.label;
+      return;
+    }
     const soon = t.closest("[data-soon]");
     if (soon) { showToast(`${soon.dataset.soon}: coming soon`); return; }
     if (t.closest(".pb-edit")) { openEdit(); return; }
@@ -374,14 +381,20 @@ export async function mountPatientDashboard(container, patientId, { staff, onBac
 
     <div>
       <p class="eyebrow">Clinical documentation</p>
-      <div class="doc-tiles">
-        ${DOC_ACTIONS.filter(([, , action]) =>
+      ${(() => {
+          const tiles = DOC_ACTIONS.filter(([, , action]) =>
             (action !== "staff-task" || (can("tasks.run") && can("tasks.staff"))) &&
-            (action !== "paste-notes" || can("consult.record"))
-          ).map(([label, icon, action]) =>
-          `<button type="button" class="doc-tile" ${action ? `data-action="${action}"` : `data-soon="${escapeHtml(label)}"`}>${ICONS[icon]}<span>${escapeHtml(label)}</span></button>`
-        ).join("")}
-      </div>
+            (action !== "paste-notes" || can("consult.record")));
+          const extra = tiles.filter(([, icon]) => !DOC_TOP.includes(icon)).length;
+          return `<div class="doc-tiles">
+            ${tiles.map(([label, icon, action]) =>
+              `<button type="button" class="doc-tile is-${icon}${DOC_TOP.includes(icon) ? "" : " is-more"}" ${
+                action ? `data-action="${action}"` : `data-soon="${escapeHtml(label)}"`}>${ICONS[icon]}<span>${escapeHtml(label)}</span></button>`
+            ).join("")}
+            ${extra ? `<button type="button" class="doc-more" data-action="doc-more" aria-expanded="false" data-label="Show ${extra} more">
+              <span>Show ${extra} more</span>${ICONS.chev}</button>` : ""}
+          </div>`;
+        })()}
     </div>
 
     <div class="pd-toolbar">
