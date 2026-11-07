@@ -57,10 +57,13 @@ export async function openScanReview({ id, products = [], onChanged = () => {} }
       ${url ? `<a class="scan-rev-photo" href="${esc(url)}" target="_blank" rel="noopener" title="Open the photo full size">
           <img src="${esc(url)}" alt="The scanned photo" /></a>` : '<p class="tb-none">No photo was saved with this scan.</p>'}`;
   }
+  
+  const checkNote = () => (scan.status === "check"
+    ? `<p class="scan-err">Needs checking: ${esc((scan.checkReasons || []).join(" · ") || "check it against the photo")}.</p>` : "");
 
   function billingView() {
     const lines = scan.lines || [];
-    return `<dl class="scan-rev-dl">
+    return `${checkNote()}<dl class="scan-rev-dl">
         <dt>Patient</dt><dd><strong>${esc(scan.patientName || "Not read")}</strong>${scan.patientPttId ? ` · ID ${esc(scan.patientPttId)}` : ""}
           ${scan.readName && scan.readName !== scan.patientName ? `<small class="muted">Written as “${esc(scan.readName)}”</small>` : ""}
           ${scan.bookedAt ? `<small class="muted">Booked ${esc(scan.bookedAt)}${scan.bookedWith ? ` with ${esc(scan.bookedWith)}` : ""}</small>` : ""}</dd>
@@ -254,7 +257,7 @@ export async function openScanReview({ id, products = [], onChanged = () => {} }
     if (scan.kind === "billing") {
       st.d = {
         patient: { name: scan.patientName || "", pttId: scan.patientPttId || "", staff: scan.bookedWith || "", time: scan.bookedAt || "" },
-        apptDate: scan.apptDate || "", note: scan.note || "", reason: "",
+        apptDate: scan.apptDate || "", note: scan.note || "", reason: scan.status === "check" ? "Checked against the photo" : "",
         lines: (scan.lines || []).map((l) => ({ ...l, take: parseInt(l.take, 10) || 0, fee: l.fee ?? null, feeEdited: false })),
       };
     } else {
@@ -346,7 +349,8 @@ export async function openScanReview({ id, products = [], onChanged = () => {} }
     }
     const note = d.note.trim().slice(0, 1000);
     if (note !== (scan.note || "")) { changes.note = note; summary.push("Note changed"); }
-    if (Object.keys(changes).length) Object.assign(changes, { flagCount: 0, status: "ok" });   // a person has checked it
+    if (scan.status === "check") summary.push("Checked");
+    if (Object.keys(changes).length || scan.status === "check") Object.assign(changes, { flagCount: 0, status: "ok" });   // a person has checked it
     return { changes, summary };
   }
 

@@ -10,7 +10,8 @@ import { listProducts, INV_CATEGORIES, plural } from "./inventory-api.js";
 import { preparePhoto, readBillingSheet, readDocket, readPrescription, startReview, reviewBilling, saveBillingScan,
   earlierScans, findBooking, money, searchPatientsQuick, todaysScans, readAuto, smallCopy,
   setScanJob, newScanJobId, parkScan, scanJobs, openScanJob, finishScanJob, staffList, warmPatientSearch,
-  rxToCheck, updateScan} from "./scanner-api.js";
+  scansToCheck, updateScan} from "./scanner-api.js";
+import { queueScan, queueState, onQueueChange, resumeQueue, retryStuck, dropStuck } from "./scanner-queue.js";
 import { autoRx } from "./scanner-rx-auto.js";
 import { mountRxResult } from "./scanner-rx.js";
 import { rxProductList } from "./rx-products.js";
@@ -223,6 +224,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
   const productsReady = listProducts().then((list) => { products = list.filter((p) => p.active); })
     .catch((err) => console.error("Scanner: the product list didn't load", err));
   warmUpLogin();   // wakes Apps Script while the photo is being lined up, so the first scan isn't slow
+  resumeQueue(staff);   // photos left from before carry on saving
   if (can("scanner.docket") || can("scanner.rx")) staffList().catch(() => {});   // ready before the first docket or prescription
 
   const savedKind = readLocal(KIND_KEY);
@@ -302,7 +304,8 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
         ? (s.status === "transferred" ? "Internal transfer · JT storage → Shelf"
           : `${s.supplierName || "Delivery docket"}${s.poNumber ? ` · ${s.poNumber}` : ""}`)
         : (s.patientName || (s.status === "check" ? `“${s.readName || "?"}” (to check)` : "Patient not read"));
-      const status = s.kind === "billing" ? (Number(s.flagCount) ? `${s.flagCount} to check` : s.editCount ? "Checked" : "All matched")
+      const status = s.status === "check" ? "Needs checking"
+        : s.kind === "billing" ? (Number(s.flagCount) ? `${s.flagCount} to check` : s.editCount ? "Checked" : "All matched")
         : s.kind === "docket" ? ({ received: "Received", linked: "Linked to an order", unlinked: "No order linked",
             transferred: "Moved to the Shelf" }[s.status] || "")
         : s.status === "check" ? "Needs checking" : Array.isArray(s.items) ? plural(s.items.length, "item") : "";
@@ -336,21 +339,33 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     }).join("")}</ul></div>`;
   };
 
-  // Prescriptions the scanner wasn't sure about
+  // Scans the scanner wasn't sure about
   const checksHtml = () => {
     const c = st.checks;
     if (!c || !c.length) return "";
     return `<div class="scan-jobs scan-checks"><strong>To check <small>${c.length}</small></strong><ul>${c.slice(0, 30).map((s) => {
       const at = s.at && typeof s.at.toDate === "function"
         ? s.at.toDate().toLocaleString("en-AU", { weekday: "short", hour: "numeric", minute: "2-digit" }) : "";
-      const who = (s.suggested && s.suggested.name) || s.readName || "Patient not read";
-      return `<li><span class="scan-today-k is-rx">Prescription</span>
+      const who = s.patientName || (s.suggested && s.suggested.name) || s.readName || "Patient not read";
+      return `<li><span class="scan-today-k is-${esc(s.kind)}">${esc(KIND_TAG[s.kind] || "Scan")}</span>
         <span class="scan-today-main"><strong>${esc(who)}</strong>
           <small>${esc([at, s.by && `by ${s.by}`, (s.checkReasons || []).join(" · ")].filter(Boolean).join(" · "))}</small></span>
         <button type="button" class="scan-pat-btn" data-scanopen="${esc(s.id)}">Check</button></li>`;
     }).join("")}</ul></div>`;
   };
 
+  // Photos being read and saved in the background
+  const queueHtml = () => {
+    const q = queueState();
+    if (!q.busy && !q.stuck) return "";
+    return `<div class="scan-queue${q.stuck ? " is-stuck" : ""}" role="status">
+      ${q.busy ? `<span class="scan-queue-spin" aria-hidden="true"></span>
+        <span>Saving ${q.busy === 1 ? "1 scan" : `${q.busy} scans`} in the background</span>` : ""}
+      ${q.stuck ? `<span>${q.stuck === 1 ? "1 scan couldn't" : `${q.stuck} scans couldn't`} be sent</span>
+        <button type="button" class="scan-pat-btn" data-act="q-retry">Try again</button>
+        <button type="button" class="scan-pat-btn" data-act="q-drop">Discard</button>` : ""}
+    </div>`;
+  };
   // A prescription saved (or sent to be checked): one line, then back to the camera
   const rxDoneHtml = () => {
     const d = st.rxDone || {};
@@ -395,6 +410,7 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
       <button type="button" class="scan-shutter" data-act="shoot" aria-label="Take the photo"><span></span></button>
       <label class="scan-side">${I.camera}<span>Camera app</span><input type="file" accept="image/*" capture="environment" data-role="file" hidden /></label>
     </div>
+    <div data-role="queue-host">${queueHtml()}</div>
     ${isMobile() ? "" : '<p class="scan-keys">Tip: press Space to take the photo.</p>'}
     <div data-role="check-host">${checksHtml()}</div>
     <div data-role="jobs-host">${jobsHtml()}</div>
@@ -811,7 +827,10 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
       render();
       return;
     }
-    read([blob]);
+    // Read and saved in the background: the camera is ready for the next one straight away
+    queueScan(blob, st.kind, staff);
+    st.shooting = false;
+    showToast("Saving in the background. Carry on with the next one.");
   }
 
   // Prepares the photo (pages joined), keeps it on the device, then reads it
@@ -1077,11 +1096,11 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
   }
     /* ===================== Prescriptions: To check, the done screen, Undo ===================== */
   function loadChecks(force = false) {
-    if (!can("scanner.rx")) return;
+    if (!can("scanner.rx") && !can("scanner.billing")) return;
     if (!force && st.checksAt && Date.now() - st.checksAt < 30000) return;
     st.checksAt = Date.now();
-    rxToCheck()
-      .then((list) => { st.checks = list; })
+    scansToCheck()
+      .then((list) => { st.checks = list.filter((s) => can(`scanner.${s.kind}`)); })
       .catch((err) => { console.warn("To check didn't load:", err); st.checksAt = 0; })
       .finally(() => {
         const h = root.querySelector('[data-role="check-host"]');
@@ -1409,6 +1428,11 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
     else if (act === "retry") analyse();
     else if (act === "finish-later") finishLater(b);
     else if (act === "rx-undo") undoRx(b);
+    else if (act === "q-retry") retryStuck();
+    else if (act === "q-drop") {
+      confirmDialog({ title: "Discard these scans?", message: "They haven't been saved. Their photos are deleted from this device.",
+        confirmLabel: "Discard", tone: "warning" }).then((ok) => { if (ok) dropStuck(); });
+    }
     else if (act === "rx-fixnow") {
       holdDone();
       const id = st.rxDone && st.rxDone.id;
@@ -1493,7 +1517,17 @@ export function mountScanner(container, { staff = null, kindPicker = true } = {}
   /* ===================== Leaving, hiding and coming back ===================== */
   // The camera is switched off when leaving the page, putting the iPad down, refreshing,
   // or when this Scanner is no longer on screen. It comes back on when you return.
+  // Background saving: the strip, and Today / To check / Ready to check as each one finishes
+  const offQueue = onQueueChange((type) => {
+    if (!root.isConnected) return;
+    const h = root.querySelector('[data-role="queue-host"]');
+    if (h) h.innerHTML = queueHtml();
+    if (type === "saved") { loadToday(true); loadChecks(true); }
+    if (type === "parked") loadJobs(true);
+  });
+
   const cleanup = () => {
+    offQueue();
     stopCamera();
     letSleep();
     clearInterval(autoTimer);

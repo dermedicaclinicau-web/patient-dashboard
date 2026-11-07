@@ -354,10 +354,9 @@ export async function findBooking(review) {
 }
 
 /* ---------- Saving: the billing sheet, kept as a record of what was given ---------- */
-// Stock isn't changed here. It comes off the Shelf when the Timely invoices are uploaded (Daily uploads),
-// and each sheet is compared with that patient's invoice (Reporting → Billing vs invoices).
-// patient: the booking this sheet was matched to { id (Patient ID), name, time, staff }, or null. Returns { id }.
-export async function saveBillingScan({ photo, result, review, note = "", patient = null }, staff) {
+// auto: saved by the scanner with nobody checking. check: { reasons, taskId, reviewer } → saved to the patient,
+// marked Needs checking (Scanner → To check) until someone checks it.
+export async function saveBillingScan({ photo, result, review, note = "", patient = null, auto = false, check = null }, staff) {
   const uid = auth.currentUser && auth.currentUser.uid;
   if (!uid) throw new Error("Your session has ended. Log in again.");
   const ref = doc(collection(db, "scans"));
@@ -373,9 +372,9 @@ export async function saveBillingScan({ photo, result, review, note = "", patien
   }
   const cleanNote = String(note || "").trim().slice(0, 1000);
   const patientName = patient && patient.name ? patient.name : review.patientName;
-  await setDoc(ref, {
-    kind: "billing", dateKey: key, status: review.flagCount ? "flagged" : "ok", flagCount: review.flagCount, note: cleanNote,
-    // The patient: from the booking when matched (shown on their dashboard), and the name exactly as read from the sheet
+  const data = {
+    kind: "billing", dateKey: key, status: check ? "check" : review.flagCount ? "flagged" : "ok",
+    flagCount: review.flagCount, note: cleanNote,
     patientName, readName: review.patientName,
     patientPttId: patient ? String(patient.id || "") : "",
     bookedWith: patient ? String(patient.staff || "") : "",
@@ -384,16 +383,26 @@ export async function saveBillingScan({ photo, result, review, note = "", patien
     lines: review.lines.map((l) => ({
       productId: l.productId, productName: l.product ? l.product.name : "",
       written: l.written.map((w) => w.text).join(" / "), qty: l.qty, fee: l.fee, feeFrom: l.feeFrom || "",
-      seen: l.seen, take: l.take || 0,   // take = how many were given to the patient
+      seen: l.seen, take: l.take || 0,
       seenAs: l.seenText.join(" / ").slice(0, 300), fixed: !!l.fixed, flags: l.flags.map((f) => f[1]),
     })),
     productsTotal: review.productsTotal,
-    stockChanged: false,   // invoices take the stock off, not the scan
+    stockChanged: false,
     photo: file, raw: JSON.stringify(result).slice(0, 20000), saleId: "",
     by: String((staff && staff.name) || "").slice(0, 120), byUid: uid, at: serverTimestamp(),
-  });
+  };
+  if (auto) data.autoSaved = true;
+  if (check) {
+    Object.assign(data, {
+      checkReasons: (check.reasons || []).map(String).slice(0, 8),
+      checkTaskId: String(check.taskId || ""),
+      checkWith: check.reviewer ? String(check.reviewer.name || "") : "",
+    });
+  }
+  await setDoc(ref, data);
   return { id: ref.id };
 }
+
 
 /* ---------- Delivery dockets ---------- */
 const ymd = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(String(v || "")) ? String(v) : "");
@@ -819,14 +828,13 @@ export async function saveRxScan({ photo, result, review, patient = null, date, 
   return { id: ref.id };
 }
 
-// Prescriptions waiting to be checked, oldest first
-export async function rxToCheck() {
+// Prescriptions and billing sheets waiting to be checked, oldest first
+export async function scansToCheck() {
   const snap = await getDocs(query(collection(db, "scans"), where("status", "==", "check")));
   const ms = (v) => (v && typeof v.toMillis === "function" ? v.toMillis() : 0);
-  return snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((s) => s.kind === "rx")
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((s) => s.kind === "rx" || s.kind === "billing")
     .sort((a, b) => ms(a.at) - ms(b.at));
 }
-
 /* ---------- Finish later (scan_jobs) ---------- */
 let scanJob = "";
 // Sets the job ID sent with the next read. Clearing with ("", id) only clears it if it's still that read's.

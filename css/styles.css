@@ -5550,6 +5550,13 @@ body.is-arranging, body.is-arranging *{user-select:none;-webkit-user-select:none
 .scan-done-next { min-height: 1.2em; color: #64748b; }
 .scan-done .scan-acts { justify-content: center; }
 
+.scan-queue { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; padding: 10px 12px;
+  border-radius: 12px; background: #ecfdf5; color: #065f46; font-size: 14px; }
+.scan-queue.is-stuck { background: #fff7ed; color: #9a3412; }
+.scan-queue-spin { width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent;
+  border-radius: 50%; animation: scan-q-spin .8s linear infinite; }
+@keyframes scan-q-spin { to { transform: rotate(360deg); } }
+
 /* Patient dashboard: scanned billing sheets */
 .bs-list { display: flex; flex-direction: column; gap: 8px; }
 .bs-item { border: 1px solid var(--border, #e2e8f0); border-radius: 10px; background: #fff; }
