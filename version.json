@@ -95,6 +95,7 @@
                   "./js/notify-api.js",
                   "./js/nudges.js",
                   "./js/order-request.js",
+                  "./js/page-cache.js",
                   "./js/panel-resize.js",
                   "./js/paper-records.js",
                   "./js/patient-dashboard.js",
@@ -117,6 +118,7 @@
                   "./js/po-deliveries.js",
                   "./js/po-document.js",
                   "./js/presence.js",
+                  "./js/print-done.js",
                   "./js/print-queue.js",
                   "./js/print-task.js",
                   "./js/prospect-compose.js",
@@ -150,9 +152,12 @@
                   "./js/scan-app.js",
                   "./js/scanner-api.js",
                   "./js/scanner-docket.js",
+                  "./js/scanner-queue.js",
                   "./js/scanner-review.js",
+                  "./js/scanner-rx-auto.js",
                   "./js/scanner-rx.js",
                   "./js/scanner.js",
+                  "./js/seo-ads.js",
                   "./js/seo-advisor.js",
                   "./js/seo-audience.js",
                   "./js/seo-clusters.js",
@@ -160,6 +165,7 @@
                   "./js/seo-content.js",
                   "./js/seo-drill.js",
                   "./js/seo-health.js",
+                  "./js/seo-leads.js",
                   "./js/seo-post.js",
                   "./js/seo-priority.js",
                   "./js/seo-site.js",
@@ -220,6 +226,6 @@
                   "./css/styles.css",
                   "./index.html"
               ],
-    "version":  "20261105-084115",
-    "v":  "20261105-084115"
+    "version":  "20261107-090116",
+    "v":  "20261107-090116"
 }
