@@ -455,8 +455,17 @@ function seoAdsCoach_(by) {
 function handleSeoAds_(body) {
   const session = getSession_(String(body.session || ''));
   if (!session) return { ok: false, error: 'UNAUTHORIZED' };
-  if (!can_(session, 'menu.seo') || !can_(session, 'seo.work')) return { ok: false, error: 'FORBIDDEN' };
   const op = String(body.op || '');
+  if (!can_(session, 'menu.seo')) return { ok: false, error: 'FORBIDDEN' };
+  // Read only: anyone who can open SEO (names only with Prospect access)
+  if (op === 'adLeads') {
+    try { return seoAdsLeadList_(session); }
+    catch (err) {
+      console.error('SEO ads leads: ' + (err && err.stack ? err.stack : err));
+      return { ok: true, problem: String(err && err.message ? err.message : err).slice(0, 300) };
+    }
+  }
+  if (!can_(session, 'seo.work')) return { ok: false, error: 'FORBIDDEN' };
   try {
     if (op === 'coach') {
       const cache = CacheService.getScriptCache();
@@ -519,6 +528,42 @@ function handleSeoAds_(body) {
     return { ok: true, problem: String(err && err.message ? err.message : err).slice(0, 300) };
   }
   return { ok: false, error: 'BAD_REQUEST' };
+}
+
+// SEO → Ads → the enquiry cards → People: each enquiry traced to an ad. The same ones (and the same rules)
+// as the counts in seo_state/ads.leads. Names and prospect IDs only for people with Prospect access.
+// Never phone numbers or emails. Remembered 10 minutes.
+function seoAdsLeadList_(session) {
+  const key = 'seo_adleads_v1';
+  let rows = repCacheGet_(key);
+  if (!rows) {
+    rows = [];
+    fsListAll_(getConfig_(), PROS_COL_, ['ads', 'milestones', 'createdAt', 'stage', 'name', 'concern', 'lostReason'])
+      .forEach(function (d) {
+        const p = fromFields_(d.fields || {});
+        const ad = p.ads;
+        if (!ad || !(ad.click || ad.campaign) || /^test/i.test(String(ad.click || ''))) return;
+        const at = Date.parse(String(p.createdAt || ''));
+        if (!at) return;
+        const ms = p.milestones || {};
+        rows.push({
+          id: d.name.split('/').pop(), name: String(p.name || '').slice(0, 120),
+          day: Utilities.formatDate(new Date(at), SEO_TZ_, 'yyyy-MM-dd'),
+          camp: String(ad.campaign || ''), kw: String(ad.keyword || '').slice(0, 120), land: String(ad.landing || '').slice(0, 200),
+          concern: String(p.concern || '').slice(0, 120),
+          stage: String(p.stage || 'new'), lost: p.stage === 'lost' ? String(p.lostReason || '').slice(0, 60) : '',
+          cb: ms.consult_booked ? 1 : 0, came: ms.consulted ? 1 : 0, tx: ms.treated ? 1 : 0,
+        });
+      });
+    rows.sort(function (a, b) { return String(b.day).localeCompare(String(a.day)); });   // newest first
+    repCachePut_(key, rows, 600);
+  }
+  const names = can_(session, 'menu.prospects');
+  return { ok: true, names: names, rows: names ? rows : rows.map(function (r) {
+    const o = Object.assign({}, r);
+    o.id = ''; o.name = '';
+    return o;
+  }) };
 }
 
 // A page from Claude ("https://dermedica.com.au/laser/" or "laser") → "/laser/", or ""

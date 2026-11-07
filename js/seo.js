@@ -12,7 +12,7 @@ import { drillHtml, loadWindows } from "./seo-drill.js?v=4";
 import { compareHtml } from "./seo-compare.js?v=1";
 import { mountSeoSite } from "./seo-site.js?v=4";
 import { priorityCardHtml, panelPriorityHtml, starHtml, toggleStar, savePriorityDetails, isPriorityPath, prToast, priorityRows } from "./seo-priority.js?v=9";
-import { renderAds, clearAds, loadAds, adsPageHtml, peekAds, adsTotals } from "./seo-ads.js?v=5";
+import { renderAds, clearAds, loadAds, adsPageHtml, peekAds, adsTotals } from "./seo-ads.js?v=6";
 import { loadLeads, peekLeads, clearLeads, leadsPageHtml, leadsTotals, leadsByPage } from "./seo-leads.js?v=2";
 
 const TABS = [

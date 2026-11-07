@@ -19,7 +19,7 @@ function coachOf(x) {
 /* ---------- data (cached for the session; Refresh in SEO clears it) ---------- */
 
 const store = { data: null, pending: null };
-export function clearAds() { store.data = null; }
+export function clearAds() { store.data = null; PL.st = ""; PL.rows = []; }
 // The Ads numbers if they're loaded, otherwise null (Keywords and the Overview use them when they're there)
 export const peekAds = () => store.data;
 // Spend, clicks and enquiries between two dates, for the Overview's What changed
@@ -93,7 +93,8 @@ export function adsPageHtml(A, path, h, tkey) {
 const KEY = "dm.seo.ads";
 const ui = (() => {
   const d = { preset: "28", from: "", to: "", compare: "prev", metric: "cost", camp: "",
-    sort: "cost", dir: -1, kwSort: "cost", kwDir: -1, kwAll: false, qAll: false };
+    sort: "cost", dir: -1, kwSort: "cost", kwDir: -1, kwAll: false, qAll: false,
+    kpi: "", kpiTab: "", kpiX: "" };   // the number card that's open, its tab, and the row that's open
   try { return { ...d, ...JSON.parse(sessionStorage.getItem(KEY) || "{}") }; } catch { return d; }
 })();
 const save = () => { try { sessionStorage.setItem(KEY, JSON.stringify(ui)); } catch { /* private mode */ } };
@@ -188,6 +189,37 @@ const CSS = `
 .seo-ad-how{color:#334155}
 .seo-ad-copy{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:10px;margin:8px 0 0;padding:8px 10px;border-radius:8px;background:#f8fafc;font-size:13px}
 .seo-ad-copy ul{margin:4px 0 0;padding-left:18px}
+.seo-adk{border-color:#bfdbfe;box-shadow:0 4px 16px rgba(37,99,235,.06)}
+.seo-adk-sum{margin:4px 0 0;font-size:14px;line-height:1.5}
+.seo-adk-tabs{display:inline-flex;gap:4px;margin:10px 0 6px;padding:3px;border-radius:10px;background:#f1f5f9}
+.seo-adk-tabs button{border:0;background:none;padding:5px 12px;border-radius:8px;font:inherit;font-size:13px;cursor:pointer;color:inherit}
+.seo-adk-tabs button.on{background:var(--card,#fff);box-shadow:0 1px 2px rgba(0,0,0,.08);font-weight:600}
+.seo-adk .seo-table tbody tr.is-open{background:#eff6ff;font-weight:600}
+.seo-adk .seo-table tbody tr.is-x:focus-visible{outline:2px solid var(--accent,#2563eb);outline-offset:-2px}
+.seo-adk .seo-table tbody tr.seo-adk-x,.seo-adk .seo-table tbody tr.seo-adk-x:hover{background:#f8fbff;cursor:default}
+.seo-adk .seo-table tr.seo-adk-x td{white-space:normal;text-align:left;max-width:none;padding:10px 14px 12px 30px;font-weight:400}
+.seo-adk-car{display:inline-block;width:14px;font-style:normal;color:var(--text-muted,#6b7280)}
+.seo-adk-stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:6px 14px;margin:0 0 8px;font-size:13px}
+.seo-adk-stats small{display:block;font-size:11.5px;color:var(--text-muted,#6b7280)}
+.seo-adk-h{margin:8px 0 4px;font-size:12px;font-weight:700;color:var(--text-muted,#6b7280)}
+.seo-adk-ul{margin:0;padding-left:18px;font-size:12.5px;line-height:1.6}
+.seo-adk-say{margin:6px 0;padding:6px 10px;border-radius:6px;font-size:12.5px;line-height:1.45}
+.seo-adk-say.is-red{background:#fef2f2;color:#991b1b}.seo-adk-say.is-green{background:#f0fdf4;color:#166534}
+.seo-adk-say.is-amber{background:#fffbeb;color:#92400e}.seo-adk-say.is-blue{background:#eff6ff;color:#1e40af}
+.seo-adk-acts{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px}
+.seo-adk-acts a.seo-btn{text-decoration:none}
+.seo-adk-tip{margin-top:10px;padding:8px 12px;border-radius:8px;background:#fffbeb;border:1px solid #fde68a;font-size:13px;line-height:1.5}
+.seo-adk-fun{display:grid;grid-template-columns:170px minmax(0,1fr) 90px 110px 80px;gap:12px;align-items:center;padding:7px 0;border-top:1px solid var(--border,#e5e7eb);font-size:13px}
+.seo-adk-fun.is-h{border-top:0;font-size:12px;font-weight:600;color:var(--text-muted,#6b7280)}
+.seo-adk-fun > span:nth-child(n+3){text-align:right}
+.seo-adk-bar{height:10px;border-radius:5px;background:#f1f5f9;overflow:hidden}
+.seo-adk-bar i{display:block;height:100%;border-radius:5px;background:var(--accent,#2563eb)}
+@media (max-width:640px){.seo-adk-fun{grid-template-columns:110px minmax(0,1fr) 60px}.seo-adk-fun > span:nth-child(n+4){display:none}}
+.seo-adk-ok{color:#16a34a;font-weight:700}
+.seo-adk-kw{margin:4px 0 8px;font-size:12.5px;line-height:1.6}
+.seo-adk .seo-table td .seo-path{max-width:240px}
+.seo-adk .seo-table td a{color:var(--accent,#2563eb);text-decoration:none;font-weight:600}
+.seo-adk .seo-table td a:hover{text-decoration:underline}
 `;
 function injectCss() {
   if (document.getElementById("seo-ads-css")) return;
@@ -417,6 +449,418 @@ async function coachClick(t) {
   }
 }
 
+/* ---------- The people behind "Enquiries from ads" (Apps Script: seoAds → adLeads) ---------- */
+// Loaded once, the first time it's needed. st: "" not asked yet · "loading" · "ok" · "err" (Try again resets it)
+const PL = { st: "", rows: [], names: false, err: "" };
+function loadPeople() {
+  if (PL.st) return;
+  PL.st = "loading";
+  PL.err = "";
+  api("adLeads").then((r) => {
+    if (r && r.problem) { PL.st = "err"; PL.err = r.problem; return; }
+    PL.st = "ok";
+    PL.rows = Array.isArray(r && r.rows) ? r.rows : [];
+    PL.names = !!(r && r.names);
+  }).catch((e) => {
+    PL.st = "err";
+    PL.err = (e && e.message) || "The enquiries couldn't be loaded.";
+  }).finally(() => {
+    if (B && B.isConnected && B.querySelector(".seo-adk")) draw();   // still looking at a card
+  });
+}
+// The same matching as SeoAds.gs: the campaign ID from the ad click, otherwise its name. -1 = not known
+function campIndexOf(A, c) {
+  c = String(c || "");
+  if (!c) return -1;
+  const byId = A.camps.findIndex((x) => x.id && x.id === c);
+  return byId >= 0 ? byId : A.camps.findIndex((x) => x.name.toLowerCase() === c.toLowerCase());
+}
+const PR_STAGE = { new: "New enquiry", contacted: "Contacted", consult_booked: "Consultation booked", consulted: "Consulted",
+  tx_booked: "Treatment booked", treated: "Treated", active: "Active patient", lost: "Lost" };
+
+/* ---------- Click a number card: what's behind it ---------- */
+// Campaigns follow the dates you choose. Keywords and searches are always the last 90 days, and landing pages the
+// last 28 days vs the 28 before: that's how SeoAds.gs saves them. Enquiries come from the Prospect Dashboard.
+
+const KPIS = {
+  cost: { label: "Spend", fmt: money, tabs: ["Campaigns", "Keywords"], neutral: true, add: true },
+  clicks: { label: "Ad clicks", fmt: num, tabs: ["Campaigns", "Keywords"], add: true },
+  cpc: { label: "Cost per click", fmt: money, tabs: ["Campaigns", "Keywords"], invert: true },
+  impr: { label: "Impressions", fmt: num, tabs: ["Campaigns", "Keywords"], add: true },
+  ctr: { label: "CTR", fmt: pct, tabs: ["Campaigns", "Keywords"] },
+  sess: { label: "Visits from ads", fmt: num, tabs: ["Campaigns", "Landing pages", "Searches"], add: true },
+  ke: { label: "Key events", fmt: keF, tabs: ["Campaigns", "Keywords", "Landing pages", "Searches"], add: true },
+  cpke: { label: "Cost per key event", fmt: money, tabs: ["Campaigns", "Keywords"], invert: true },
+  bounce: { label: "Bounce rate", fmt: pct0, tabs: ["Landing pages", "Campaigns", "Searches"], invert: true },
+  enq: { label: "Enquiries from ads", fmt: num, tabs: ["Campaigns", "People", "Journey"], lead: true, add: true },
+  cpe: { label: "Cost per enquiry", fmt: money, tabs: ["Campaigns", "People", "Journey"], lead: true, invert: true },
+  came: { label: "Came in", fmt: num, tabs: ["Journey", "People", "Campaigns"], lead: true, add: true },
+  cpp: { label: "Cost per patient who came in", fmt: money, tabs: ["Campaigns", "People", "Journey"], lead: true, invert: true },
+};
+
+// A keyword's value for a card
+function kwV(k, key) {
+  switch (key) {
+    case "cpc": return k.clicks ? k.cost / k.clicks : null;
+    case "ctr": return k.impr ? k.clicks / k.impr : null;
+    case "cpke": return k.ke ? k.cost / k.ke : null;
+    case "bounce": return k.sess ? 1 - k.eng / k.sess : null;
+    default: return k[key] ?? null;
+  }
+}
+// An enquiry card's value. cost: the spend over the same days (null when the campaign isn't known)
+function leadV(L, cost, key) {
+  if (!L) return null;
+  if (key === "enq") return L.enq;
+  if (key === "came") return L.came;
+  if (key === "cpe") return cost != null && L.enq ? cost / L.enq : null;
+  if (key === "cpp") return cost != null && L.came ? cost / L.came : null;
+  return null;
+}
+
+function adsDrillHtml(o) {
+  const { h, K, A, key, r, cmp, prev, cur, camp, per, kwIn, byPath } = o;
+  const esc = h.esc;
+  const m = KPIS[key];
+  if (!m || (m.lead && !A.leadsFrom)) return "";
+  const tab = m.tabs.includes(ui.kpiTab) ? ui.kpiTab : m.tabs[0];
+  const hasCmp = !!prev;
+  const ci = camp === "" ? -1 : Number(camp);
+  const MAX = 15;
+
+  /* ----- small builders ----- */
+  const campName = (i) => (i < 0 ? "Campaign not known" : (A.camps[i] && A.camps[i].name) || "Campaign");
+  const bnc = (s, e) => (s ? 1 - e / s : null);
+  const fmtV = (v, f = m.fmt) => (v == null ? "—" : f(v));
+  const was = (v, f = m.fmt) => `<span class="seo-note">${fmtV(v, f)}</span>`;
+  const change = (now, before) => (now == null || before == null ? `<span class="seo-d flat">—</span>`
+    : key === "bounce" ? h.delta(now * 100, before * 100, { invert: true, abs: true, digits: 0 }).replace(/<\/span>$/, " pts</span>")
+    : chg(h, now, before, { neutral: m.neutral, invert: m.invert }));
+  const signed = (d) => `${d > 0 ? "+" : d < 0 ? "−" : ""}${m.fmt(Math.abs(d))}`;
+  const totalLine = (a, b) => {
+    if (a == null) return "";
+    if (b == null) return `${m.label}: ${m.fmt(a)}.`;
+    if (Math.abs(a - b) < 1e-9) return `${m.label} held steady (${m.fmt(a)}).`;
+    const by = key === "bounce" ? ` ${Math.round(Math.abs(a - b) * 100)} points` : b ? ` ${Math.round(Math.abs((a - b) / b) * 100)}%` : "";
+    return `${m.label} ${a > b ? "rose" : "fell"}${by} (${m.fmt(a)} vs ${m.fmt(b)}).`;
+  };
+  const isOpen = (k) => ui.kpiX === k;
+  const xrow = (k, cells, cols, detail) => `<tr class="is-x${isOpen(k) ? " is-open" : ""}" data-ads-dx="${esc(k)}" tabindex="0" role="button" aria-expanded="${isOpen(k)}">${
+    cells.map((c, i) => `<td>${i === 0 ? `<i class="seo-adk-car">${isOpen(k) ? "▾" : "▸"}</i>` : ""}${c}</td>`).join("")}</tr>${
+    isOpen(k) ? `<tr class="seo-adk-x"><td colspan="${cols}">${detail()}</td></tr>` : ""}`;
+  const table = (head, rows) => `<div class="seo-table-wrap" style="max-height:none"><table class="seo-table"><thead><tr>${
+    head.map((x) => `<th>${x}</th>`).join("")}</tr></thead><tbody>${rows.join("")}</tbody></table></div>`;
+  const stats = (pairs) => `<div class="seo-adk-stats">${pairs.filter(Boolean).map(([l, v]) => `<div><small>${l}</small>${v}</div>`).join("")}</div>`;
+  const say = (tone, html) => `<p class="seo-adk-say is-${tone}">${html}</p>`;
+  const acts = (btns) => `<div class="seo-adk-acts">${btns.filter(Boolean).join("")}</div>`;
+  const btn = (attr, label) => `<button class="seo-btn" type="button" ${attr}>${label}</button>`;
+  const askBtn = (q) => btn(`data-drask="${esc(q)}"`, "Ask the Advisor");
+  const kwLink = (s) => btn(`data-kq="${esc(kq(s))}"`, "See it in Keywords");
+  const more = (n) => (n > MAX ? `<p class="seo-note" style="margin:6px 0 0">Top ${MAX} of ${num(n)}.</p>` : "");
+  const orgOf = (path) => byPath.get(K.tkey(path)) || null;
+  const orgB = (pg) => (!pg ? null : pg.eng && pg.eng.c[0] ? 1 - pg.eng.c[1] / pg.eng.c[0]
+    : pg.m28.sessions ? 1 - (pg.m28.engaged || 0) / pg.m28.sessions : null);
+  const per100 = (k, s) => (s ? (Math.round((k / s) * 1000) / 10).toFixed(1) : "—");
+  // Enquiries traced to a keyword or landing page, since a date (loads the People list the first time)
+  const enqStat = (label, match, since) => {
+    if (!A.leadsFrom) return null;
+    if (!PL.st) loadPeople();
+    if (PL.st !== "ok") return [label, PL.st === "err" ? "—" : "loading…"];
+    const l = PL.rows.filter((x) => x.day >= since && match(x));
+    return [label, l.length ? `${num(l.length)} <span class="seo-note">${num(l.filter((x) => x.came).length)} came in</span>` : "0"];
+  };
+
+  /* ----- an open row ----- */
+  const campDetail = (x) => {
+    const t = x.cur;
+    const by = m.add ? (k) => kwV(k, key) || 0 : (k) => k.cost;
+    const top = A.kw.filter((k) => k.c === x.i && k.kw !== "(not set)").sort((a, b) => by(b) - by(a)).slice(0, 5);
+    return stats([
+      ["Spend", money(t.cost)], ["Clicks", num(t.clicks)], ["Cost per click", money(t.cpc)], ["CTR", pct(t.ctr)],
+      ["Visits", num(t.sess)], ["Bounce", pct0(t.bounce)], ["Key events", keF(t.ke)], ["Cost per key event", money(t.cpke)],
+      x.leads ? ["Enquiries", num(x.leads.enq)] : null, x.leads ? ["Came in", num(x.leads.came)] : null,
+    ]) + (top.length ? `<div class="seo-adk-h">Its keywords <span class="seo-note">(last 90 days)</span></div>
+      <ul class="seo-adk-ul">${top.map((k) => `<li><b>${esc(k.kw)}</b> · ${money(k.cost)} · ${num(k.clicks)} clicks · ${keF(k.ke)} key events${
+        k.oPos != null ? ` · ranks ${h.fmtPos(k.oPos)} for free` : ""}</li>`).join("")}</ul>` : "")
+      + acts([btn(`data-ads-camp="${x.i}"`, camp === String(x.i) ? "Show all campaigns" : "Show only this campaign")]);
+  };
+
+  const kwDetail = (k) => {
+    const gap = k.ke >= 2 && (k.oPos == null || k.oPos > 10);
+    const verdict = k.oPos != null && k.oPos <= 3 && k.cost >= 20
+      ? say("green", `You already rank ${h.fmtPos(k.oPos)} for this for free (${num(k.oClicks)} free clicks in 28 days). Try a lower bid and watch whether total clicks hold.`)
+      : !k.ke && k.cost >= 50 ? say("red", `${money(k.cost)} spent with no key events. Check which searches it shows for and the landing page, or pause it.`)
+      : gap ? say("blue", `It brings bookings from ads, but ${k.oPos == null ? "no page ranks for it" : `it only ranks ${h.fmtPos(k.oPos)}`} for free. A strong page could win these without paying.`)
+      : "";
+    return stats([
+      ["Spend", money(k.cost)], ["Clicks", num(k.clicks)], ["Cost per click", money(kwV(k, "cpc"))], ["CTR", pct(kwV(k, "ctr"))],
+      ["Visits", num(k.sess)], ["Bounce", pct0(kwV(k, "bounce"))], ["Key events", keF(k.ke)], ["Cost per key event", money(kwV(k, "cpke"))],
+      ["Free position", k.oPos == null ? "not ranking" : `${h.fmtPos(k.oPos)} <span class="seo-note">${num(k.oClicks)} clicks</span>`],
+      enqStat("Enquiries from it", (x) => kq(x.kw || "").toLowerCase() === kq(k.kw).toLowerCase(), A.kwFrom || ""),
+    ]) + verdict + acts([
+      kwLink(k.kw),
+      askBtn(`Our Google Ads keyword "${k.kw}" cost ${money(k.cost)} over the last 90 days for ${keF(k.ke)} key events${
+        k.oPos != null ? `, and we rank ${h.fmtPos(k.oPos)} for it for free` : ""}. Is it worth what we pay, and what should we change?`),
+      gap && canTask() ? btn(`data-ads-task="${esc(k.kw)}"`, "Add to Tasks") : "",
+    ]);
+  };
+
+  const pageDetail = (p) => {
+    const pg = orgOf(p.path);
+    const b = bnc(p.sess, p.eng), pb = bnc(p.psess, p.peng), ob = orgB(pg);
+    const verdict = b != null && ob != null && p.sess >= 20 && b > ob + 0.1
+      ? say("amber", `Ad visitors leave much more often than visitors from Google search (${pct0(b)} vs ${pct0(ob)}). The page works for searchers, so check the ad promises what the top of the page shows.`)
+      : b != null && b > 0.65 && p.sess >= 30
+        ? say("red", "Most ad visitors leave straight away. Make sure the first screen answers what the ad promised, with a clear way to book.") : "";
+    return stats([
+      ["Ad visits", `${num(p.sess)} <span class="seo-note">was ${num(p.psess)}</span>`],
+      ["Bounce", `${pct0(b)} <span class="seo-note">was ${pct0(pb)}</span>`],
+      ["Key events", `${keF(p.ke)} <span class="seo-note">was ${keF(p.pke)}</span>`],
+      ["Per 100 ad visits", per100(p.ke, p.sess)],
+      ob != null ? ["Google visitors' bounce", pct0(ob)] : null,
+      pg && pg.m28.sessions ? ["Per 100 Google visitors", per100(pg.m28.conversions || 0, pg.m28.sessions)] : null,
+      enqStat("Enquiries from ad visitors here", (x) => !!x.land && K.tkey(x.land) === K.tkey(p.path), A.lpFrom || ""),
+    ]) + verdict + acts([
+      pg ? btn(`data-open="${esc(pg.id)}"`, "Open page details") : "",
+      btn(`data-advpage="${esc(p.path)}"`, "Ask the Advisor about this page"),
+    ]);
+  };
+
+  const qDetail = (x) => {
+    const b = bnc(x.sess, x.eng);
+    return stats([
+      ["Ad visits", num(x.sess)], ["Bounce", pct0(b)], ["Key events", keF(x.ke)],
+      ["Free position", x.oPos == null ? "not ranking" : `${h.fmtPos(x.oPos)} <span class="seo-note">${num(x.oClicks)} clicks</span>`],
+    ]) + (x.oPos != null && x.oPos <= 3 ? say("green", `You already show ${h.fmtPos(x.oPos)} for this search for free.`) : "")
+      + (x.sess >= 10 && !x.ke && b != null && b > 0.7
+        ? say("amber", "People searching this mostly leave without doing anything. If it isn't something you offer, add it as a negative keyword.") : "")
+      + acts([kwLink(x.q), askBtn(`People searched "${x.q}" before clicking our Google Ad (${num(x.sess)} visits, ${keF(x.ke)} key events). Should we bid on it, add it as a negative keyword, or build a page for it?`)]);
+  };
+
+  let sumLine = "", note = "", tip = "", body = "";
+
+  /* ----- Enquiries, cost per enquiry, came in, cost per patient ----- */
+  if (m.lead) {
+    const lf = r.from < A.leadsFrom ? A.leadsFrom : r.from;
+    const Lok = hasCmp && cmp.from >= A.leadsFrom;
+    const tot = sumLeads(A, lf, r.to, camp), spend = sum(A, lf, r.to, camp).cost;
+    const totP = Lok ? sumLeads(A, cmp.from, cmp.to, camp) : null;
+    const spendP = Lok ? sum(A, cmp.from, cmp.to, camp).cost : null;
+    sumLine = (lf > r.from ? `Counted from ${h.fmtDate(lf)}, when enquiry tracking began. ` : "") +
+      totalLine(leadV(tot, spend, key), totP ? leadV(totP, spendP, key) : null);
+
+    // sum() treats "-1" as all campaigns, so the unknown campaign gets no spend
+    const rows = A.camps.map((_, i) => i).concat([-1]).map((i) => {
+      const L = sumLeads(A, lf, r.to, String(i));
+      const cost = i >= 0 ? sum(A, lf, r.to, String(i)).cost : null;
+      const Lp = Lok ? sumLeads(A, cmp.from, cmp.to, String(i)) : null;
+      const pc = Lok && i >= 0 ? sum(A, cmp.from, cmp.to, String(i)).cost : null;
+      return { i, L, cost, now: leadV(L, cost, key), was: Lp ? leadV(Lp, pc, key) : null };
+    }).filter((y) => y.L.enq || (y.cost || 0) >= 1);
+    const rank = m.invert ? (y) => (y.cost == null ? -1 : y.now == null ? 1e12 + y.cost : y.now) : (y) => y.now || 0;
+    rows.sort((a, b) => rank(b) - rank(a));
+
+    if (tab === "People") {
+      if (!PL.st) loadPeople();
+      if (PL.st !== "ok") {
+        body = PL.st === "err"
+          ? `<p class="seo-note">${esc(PL.err)} <button class="seo-btn" type="button" data-ads-pretry>Try again</button></p>`
+          : `<p class="seo-note">Loading the enquiries…</p>`;
+      } else {
+        const inRange = PL.rows.filter((x) => x.day >= lf && x.day <= r.to && (ci < 0 || campIndexOf(A, x.camp) === ci));
+        const FIL = [["", "Everyone", () => true], ["came", "Came in", (x) => !!x.came],
+          ["wait", "Not in yet", (x) => !x.came && x.stage !== "lost"], ["lost", "Lost", (x) => x.stage === "lost"]];
+        const pf = FIL.some((f) => f[0] === ui.kpiPf) ? ui.kpiPf : "";
+        const ppl = inRange.filter(FIL.find((f) => f[0] === pf)[2]);
+        const SHOW = 50;
+        const byKw = new Map();
+        inRange.forEach((x) => {
+          const k = kq(x.kw || "") || "(no keyword)";
+          const y = byKw.get(k) || { k, n: 0, came: 0 };
+          y.n++;
+          if (x.came) y.came++;
+          byKw.set(k, y);
+        });
+        const kws = [...byKw.values()].sort((a, b) => b.n - a.n || b.came - a.came).slice(0, 6);
+        const tick = (v) => (v ? `<span class="seo-adk-ok">✓</span>` : `<span class="seo-note">–</span>`);
+        const head = ["Enquired", "Name", ...(camp ? [] : ["Campaign"]), "Keyword", "Landed on", "Interested in", "Now", "Booked", "Came in", "Treated"];
+        body = `<div class="seo-adk-tabs">${FIL.map(([k, l, f]) =>
+            `<button type="button" class="${pf === k ? "on" : ""}" data-ads-pf="${k}">${l} (${num(inRange.filter(f).length)})</button>`).join("")}</div>`
+          + (kws.length ? `<p class="seo-adk-kw"><b>Keywords behind them:</b> ${kws.map((y) =>
+              `${esc(y.k)} <span class="seo-note">${y.n}${y.came ? `, ${y.came} came in` : ""}</span>`).join(" · ")}</p>` : "")
+          + (ppl.length ? table(head, ppl.slice(0, SHOW).map((x) => {
+              const i = campIndexOf(A, x.camp);
+              return `<tr style="cursor:default">
+                <td>${esc(h.fmtDate(x.day, false))}</td>
+                <td>${PL.names && x.id ? `<a href="#/prospects/${encodeURIComponent(x.id)}">${esc(x.name || "No name")}</a>`
+                  : `<span class="seo-note">Hidden</span>`}</td>
+                ${camp ? "" : `<td><div class="seo-path" title="${esc(campName(i))}">${esc(campName(i))}</div></td>`}
+                <td><div class="seo-path" title="${esc(x.kw)}">${esc(x.kw || "—")}</div></td>
+                <td><div class="seo-path" title="${esc(x.land)}">${esc(x.land || "—")}</div></td>
+                <td><div class="seo-path" title="${esc(x.concern)}">${esc(x.concern || "—")}</div></td>
+                <td>${esc(x.stage === "lost" ? `Lost${x.lost ? `: ${x.lost}` : ""}` : PR_STAGE[x.stage] || x.stage)}</td>
+                <td>${tick(x.cb)}</td><td>${tick(x.came)}</td><td>${tick(x.tx)}</td></tr>`;
+            })) + (ppl.length > SHOW ? `<p class="seo-note" style="margin:6px 0 0">The latest ${SHOW} of ${num(ppl.length)}.
+              On the Prospect Dashboard, “From Google Ads” shows them all.</p>` : "")
+            : `<p class="seo-note">Nobody here for these dates.</p>`)
+          + `<div class="seo-adk-acts"><a class="seo-btn" href="#/prospects">Open the Prospect Dashboard</a></div>`;
+        note = "Stages here are live from the Prospect Dashboard, so they can be ahead of the numbers above, which update each morning." +
+          (PL.names ? "" : " Names are hidden: they need Prospect access (Staff → Roles & access).");
+      }
+    } else if (tab === "Journey") {
+      const steps = [["Enquired", "enq"], ["Booked a consultation", "cb"], ["Came in", "came"], ["Treated", "tx"]];
+      body = `<div class="seo-adk-fun is-h"><span></span><span></span><span>People</span><span>Spend per person</span><span>${totP ? "vs before" : ""}</span></div>` +
+        steps.map(([l, k]) => {
+          const n = tot[k], w = tot.enq ? Math.round((n / tot.enq) * 100) : 0;
+          return `<div class="seo-adk-fun"><span>${l}</span><span class="seo-adk-bar"><i style="width:${w}%"></i></span>
+            <span><b>${num(n)}</b>${tot.enq && k !== "enq" ? ` <span class="seo-note">${w}%</span>` : ""}</span>
+            <span>${n ? money(spend / n) : "—"}</span><span>${totP ? chg(h, n, totP[k]) : ""}</span></div>`;
+        }).join("") +
+        `<p class="seo-note" style="margin:8px 0 0">${num(tot.lost)} marked lost · ${money(spend)} spent over the same days.</p>
+         <div class="seo-adk-acts"><a class="seo-btn" href="#/prospects">Open the Prospect Dashboard</a></div>`;
+    } else {
+      const head = ["Campaign", "Spend", "Enquiries", "Booked a consult", "Came in", "Treated", "Cost per enquiry", "Cost per patient", ...(Lok ? ["Change"] : [])];
+      body = rows.length ? table(head, rows.map((y) => `<tr${y.i >= 0
+        ? ` data-ads-camp="${y.i}" class="${camp === String(y.i) ? "is-on" : ""}"` : ` style="cursor:default"`}>
+        <td><div class="seo-path">${esc(campName(y.i))}</div></td><td>${fmtV(y.cost, money)}</td><td>${num(y.L.enq)}</td><td>${num(y.L.cb)}</td>
+        <td>${num(y.L.came)}</td><td>${num(y.L.tx)}</td><td>${fmtV(leadV(y.L, y.cost, "cpe"), money)}</td><td>${fmtV(leadV(y.L, y.cost, "cpp"), money)}</td>
+        ${Lok ? `<td>${change(y.now, y.was)}</td>` : ""}</tr>`)) : `<p class="seo-note">No enquiries or spend in these dates.</p>`;
+      note = "Click a campaign to see only that one. “Campaign not known”: enquiries whose ad click couldn't be matched to a campaign.";
+    }
+    if (hasCmp && !Lok) note = (note ? note + " " : "") + `No comparison: enquiries are only tracked from ${h.fmtDate(A.leadsFrom)}.`;
+
+    const ranked = rows.filter((y) => y.now != null && (key === "cpe" ? y.L.enq : y.L.came) >= 2).sort((a, b) => a.now - b.now);
+    tip = key === "came" || key === "cpp"
+      ? "Came in keeps growing for a few weeks after people enquire, so the latest weeks look worse than they'll end up."
+      : spend >= 50 && !tot.enq
+        ? "No enquiries from ads were traced in these dates. If the ads are running, check the website's Ad tracking field still reaches the Prospect Dashboard."
+        : key === "cpe" && ranked.length >= 2
+          ? `${esc(campName(ranked[ranked.length - 1].i))} costs ${money(ranked[ranked.length - 1].now)} per enquiry, against ${money(ranked[0].now)} for ${esc(campName(ranked[0].i))}. Shifting some budget towards the cheaper one is worth testing.`
+          : "";
+  }
+
+  /* ----- Spend, clicks, visits, key events, bounce… ----- */
+  else {
+    sumLine = (camp ? `${campName(ci)}: ` : "") + totalLine(cur[key], prev ? prev[key] : null);
+    if (hasCmp && m.add && !camp && cur[key] !== prev[key]) {
+      const dir = Math.sign(cur[key] - prev[key]);
+      const d = per.filter((x) => x.prev && Math.sign(x.cur[key] - x.prev[key]) === dir)
+        .sort((a, b) => Math.abs(b.cur[key] - b.prev[key]) - Math.abs(a.cur[key] - a.prev[key])).slice(0, 2);
+      if (d.length) sumLine += ` Biggest change${d.length > 1 ? "s" : ""}: ${d.map((x) => `${x.name} (${signed(x.cur[key] - x.prev[key])})`).join(" and ")}.`;
+    }
+
+    if (tab === "Campaigns") {
+      const vol = { cpc: (t) => t.clicks, ctr: (t) => t.impr, bounce: (t) => t.sess }[key];
+      const rows = per.map((x) => ({ x, now: x.cur[key], was: x.prev ? x.prev[key] : null }))
+        .filter((y) => (vol ? vol(y.x.cur) > 0 : key === "cpke" ? y.x.cur.cost > 0 : y.now || y.was));
+      const rank = vol ? (y) => vol(y.x.cur) : key === "cpke" ? (y) => (y.now == null ? 1e12 + y.x.cur.cost : y.now)
+        : hasCmp ? (y) => Math.abs((y.now || 0) - (y.was || 0)) : (y) => y.now || 0;
+      rows.sort((a, b) => rank(b) - rank(a));
+      const all = m.add ? rows.reduce((a, y) => a + (y.now || 0), 0) : 0;
+      const extraHead = vol ? { cpc: "Clicks", ctr: "Impressions", bounce: "Visits" }[key] : key === "cpke" ? "Spend" : "Share";
+      const head = ["Campaign", "Now", ...(hasCmp ? ["Before", "Change"] : []), extraHead];
+      body = rows.length ? table(head, rows.map((y) => {
+        const val = key === "cpke" && y.now == null ? `<span class="seo-note">no key events</span>` : fmtV(y.now);
+        const extra = vol ? num(vol(y.x.cur)) : key === "cpke" ? money(y.x.cur.cost) : all ? Math.round(((y.now || 0) / all) * 100) + "%" : "—";
+        return xrow("c:" + y.x.i, [`${esc(y.x.name)}${camp === String(y.x.i) ? ` <span class="seo-note">(chosen)</span>` : ""}`, val,
+          ...(hasCmp ? [was(y.was), change(y.now, y.was)] : []), extra], head.length, () => campDetail(y.x));
+      })) : `<p class="seo-note">No campaign activity in these dates.</p>`;
+      if (camp) note = "Every campaign is listed. The one you chose is marked.";
+    }
+
+    else if (tab === "Keywords") {
+      let list = kwIn.filter((k) => k.kw !== "(not set)");
+      if (key === "cpc") list = list.filter((k) => k.clicks >= 5);
+      else if (key === "ctr") list = list.filter((k) => k.impr >= 100);
+      else if (key === "cpke") list = list.filter((k) => k.cost >= 10);
+      else list = list.filter((k) => (kwV(k, key) || 0) > 0);
+      const rank = key === "ctr" ? (k) => -(kwV(k, key) || 0)
+        : key === "cpke" ? (k) => (k.ke ? k.cost / k.ke : 1e12 + k.cost) : (k) => kwV(k, key) || 0;
+      list.sort((a, b) => rank(b) - rank(a));
+      const other = ["cost", "clicks", "ke"].filter((x) => x !== key);
+      const head = ["Keyword", m.label, ...other.map((x) => KPIS[x].label), "Free position"];
+      body = list.length ? table(head, list.slice(0, MAX).map((k) => xrow("k:" + k.kw + "|" + k.c, [
+        `${esc(k.kw)}${camp === "" ? ` <span class="seo-note">${esc(campName(k.c))}</span>` : ""}`,
+        key === "cpke" && !k.ke ? `<span class="seo-note">none yet</span>` : fmtV(kwV(k, key)),
+        ...other.map((x) => KPIS[x].fmt(kwV(k, x) || 0)),
+        k.oPos == null ? "—" : h.fmtPos(k.oPos),
+      ], head.length, () => kwDetail(k)))) + more(list.length)
+        : `<p class="seo-note">No keywords with enough data${key === "ctr" ? " (100+ impressions)" : key === "cpc" ? " (5+ clicks)" : ""}.</p>`;
+      const ns = kwIn.filter((k) => k.kw === "(not set)").reduce((a, k) => a + k.cost, 0);
+      note = (key === "ctr" ? "Lowest click rate first (100+ impressions). " : key === "cpke" ? "Keywords spending without key events first. " : "") +
+        (A.kwFrom ? `Keywords: ${h.fmtDate(A.kwFrom, false)} – ${h.fmtDate(A.kwTo)} (always the last 90 days).` : "Keywords: the last 90 days.") +
+        (ns >= 1 ? ` Another ${money(ns)} went on Performance Max and similar campaigns, which don't report keywords.` : "");
+    }
+
+    else if (tab === "Landing pages") {
+      let list = A.lp.filter((p) => p.sess || p.psess);
+      if (key === "bounce") list = list.filter((p) => p.sess >= 10);
+      const rank = key === "ke" ? (p) => p.ke : key === "bounce" ? (p) => p.sess - p.eng : (p) => p.sess;
+      list.sort((a, b) => rank(b) - rank(a));
+      const head = ["Landing page", "Ad visits", "Before", "Bounce", "Key events", "Google visitors' bounce"];
+      body = list.length ? table(head, list.slice(0, MAX).map((p) => xrow("p:" + p.path, [
+        `<div class="seo-path" title="${esc(p.path)}">${esc(p.path)}</div>`, num(p.sess), was(p.psess, num),
+        pct0(bnc(p.sess, p.eng)), keF(p.ke), pct0(orgB(orgOf(p.path))),
+      ], head.length, () => pageDetail(p)))) + more(list.length) : `<p class="seo-note">No landing page data yet.</p>`;
+      note = (key === "bounce" ? "Pages losing the most ad visitors first (10+ visits). " : "") +
+        "Landing pages: the last 28 days vs the 28 before, all campaigns (GA4 doesn't save these by campaign).";
+    }
+
+    else if (tab === "Searches") {
+      let list = A.q.filter((x) => x.sess);
+      if (key === "bounce") list = list.filter((x) => x.sess >= 10);
+      const rank = key === "ke" ? (x) => x.ke : key === "bounce" ? (x) => x.sess - x.eng : (x) => x.sess;
+      list.sort((a, b) => rank(b) - rank(a));
+      const head = ["Search", "Ad visits", "Key events", "Bounce", "Free position"];
+      body = list.length ? table(head, list.slice(0, MAX).map((x) => xrow("q:" + x.q, [
+        `<div class="seo-path" title="${esc(x.q)}">${esc(x.q)}</div>`, num(x.sess), keF(x.ke), pct0(bnc(x.sess, x.eng)),
+        x.oPos == null ? "—" : h.fmtPos(x.oPos),
+      ], head.length, () => qDetail(x)))) + more(list.length) : `<p class="seo-note">No search data yet.</p>`;
+      note = "Searches: the last 90 days, all campaigns. GA4 doesn't report every search.";
+    }
+
+    // Tips
+    const waste = kwIn.filter((k) => k.kw !== "(not set)" && !k.ke && k.cost >= 20);
+    const wasteSum = waste.reduce((a, k) => a + k.cost, 0);
+    const lpBad = A.lp.filter((p) => p.sess >= 30).sort((a, b) => (b.sess - b.eng) - (a.sess - a.eng))[0];
+    const keDrop = prev && prev.ke >= 5 && cur.ke <= prev.ke * 0.6 && prev.sess && cur.sess >= prev.sess * 0.85;
+    const byCpke = per.filter((x) => x.cur.ke >= 2).sort((a, b) => b.cur.cpke - a.cur.cpke);
+    tip = ({
+      cost: wasteSum >= 50 ? `${money(wasteSum)} of the last 90 days' spend went on ${waste.length} keyword${waste.length === 1 ? "" : "s"} with no key events. The Keywords tab here lists them on the Cost per key event card.` : "",
+      cpc: "Cost per click rises when more clinics bid on the same searches, or when Google rates the ad or landing page as less relevant. Open a campaign to see its costliest keywords.",
+      ctr: prev && cur.ctr != null && prev.ctr != null && cur.ctr < prev.ctr * 0.85 && cur.impr > prev.impr
+        ? "The ads were shown more often, but a smaller share clicked. That usually means they're showing for broader searches: check the Searches on the Visits card, and add negative keywords."
+        : "A low click rate usually means the ad text doesn't match the search well. Keywords lists the lowest first.",
+      sess: "GA4 counts visits, which are usually a little lower than ad clicks: some people leave before the page loads.",
+      ke: keDrop
+        ? "<b>Key events fell much more than visits.</b> That usually means a booking button, form or GA4 key event stopped working. Test a booking on the website."
+        : A.leadsFrom ? "Key events are GA4's count. Enquiries from ads is the Prospect Dashboard's own count, and the better guide." : "",
+      cpke: byCpke.length >= 2
+        ? `${esc(byCpke[0].name)} costs ${money(byCpke[0].cur.cpke)} per key event, against ${money(byCpke[byCpke.length - 1].cur.cpke)} for ${esc(byCpke[byCpke.length - 1].name)}. Shifting some budget towards the cheaper one is worth testing.` : "",
+      bounce: lpBad && bnc(lpBad.sess, lpBad.eng) > 0.6
+        ? `Start with ${esc(lpBad.path)}: it loses the most ad visitors (${pct0(bnc(lpBad.sess, lpBad.eng))} of ${num(lpBad.sess)} leave straight away).` : "",
+    })[key] || "";
+  }
+
+  const ask = `Our Google Ads ${m.label.toLowerCase()} for ${h.fmtDate(r.from)} to ${h.fmtDate(r.to)}${camp ? ` (campaign "${campName(ci)}")` : ""}${
+    hasCmp ? `, compared with ${cmp.name.toLowerCase()}` : ""}: what's behind it, and what should we change to get more patients for the spend?`;
+
+  return `<div class="seo-card seo-adk">
+    <div class="seo-row" style="margin:0 0 2px"><h3 style="margin:0">${esc(m.label)}: what's behind it</h3>
+      <span class="seo-note">${esc(h.fmtDate(r.from, false))} – ${esc(h.fmtDate(r.to))}${camp ? ` · ${esc(campName(ci))}` : ""}</span><span class="seo-sp"></span>
+      ${METRICS[key] ? `<button class="seo-btn" type="button" data-ads-metric="${key}">Show on the Trend chart ↓</button>` : ""}
+      <button class="seo-btn" type="button" data-ads-kpi="${key}">Close</button></div>
+    ${sumLine ? `<p class="seo-adk-sum">${esc(sumLine)}</p>` : ""}
+    ${m.tabs.length > 1 ? `<div class="seo-adk-tabs">${m.tabs.map((t) =>
+      `<button type="button" class="${t === tab ? "on" : ""}" data-ads-dtab="${esc(t)}">${esc(t)}</button>`).join("")}</div>` : ""}
+    ${body}
+    ${note ? `<p class="seo-note" style="margin:6px 0 0">${esc(note)}</p>` : ""}
+    ${tip ? `<div class="seo-adk-tip">${tip}</div>` : ""}
+    <div class="seo-adk-acts"><button class="seo-btn on" type="button" data-drask="${esc(ask)}">Ask the Advisor about this</button>
+      ${!["Journey", "People"].includes(tab) ? `<span class="seo-note">Click a row to see more.</span>` : ""}</div>
+  </div>`;
+}
+
 /* ---------- the tab ---------- */
 
 let B = null, C = null, AD = null, lastR = null;
@@ -489,20 +933,22 @@ function draw() {
       <span class="seo-note">${esc(rangeText)}</span>
     </div>`;
 
-  /* Totals */
-  const tile = (label, v, d, note) => `<div class="seo-kpi"><div class="l">${label}</div><div class="v">${v}</div>${d || ""}${note ? `<div class="p">${note}</div>` : ""}</div>`;
+  /* Totals (click one to see what's behind it) */
+  const tile = (key, label, v, d, note) => `<button type="button" class="seo-kpi${ui.kpi === key ? " is-on" : ""}" data-ads-kpi="${key}"
+    aria-expanded="${ui.kpi === key}" title="See what's behind this number"><div class="l">${label}</div><div class="v">${v}</div>${d || ""}${
+    note ? `<div class="p">${note}</div>` : ""}</button>`;
   const vs = (f, k) => (prev && prev[k] != null ? `vs ${f(prev[k])}` : "");
   const both = (...xs) => xs.filter(Boolean).join(" · ");
   const kpis = [
-    tile("Spend", money(cur.cost), prev ? chg(h, cur.cost, prev.cost, { neutral: true }) : "", vs(money, "cost")),
-    tile("Ad clicks", num(cur.clicks), prev ? chg(h, cur.clicks, prev.clicks) : "", vs(num, "clicks")),
-    tile("Cost per click", money(cur.cpc), prev ? chg(h, cur.cpc, prev.cpc, { invert: true }) : "", vs(money, "cpc")),
-    tile("Impressions", num(cur.impr), prev ? chg(h, cur.impr, prev.impr) : "", vs(num, "impr")),
-    tile("CTR", pct(cur.ctr), prev ? chg(h, cur.ctr, prev.ctr) : "", vs(pct, "ctr")),
-    tile("Visits from ads", num(cur.sess), prev ? chg(h, cur.sess, prev.sess) : "", both(vs(num, "sess"), "GA4")),
-    tile("Key events", keF(cur.ke), prev ? chg(h, cur.ke, prev.ke) : "", both(vs(keF, "ke"), "bookings and enquiries")),
-    tile("Cost per key event", money(cur.cpke), prev ? chg(h, cur.cpke, prev.cpke, { invert: true }) : "", both(vs(money, "cpke"), "lower is better")),
-    tile("Bounce rate", pct0(cur.bounce),
+    tile("cost", "Spend", money(cur.cost), prev ? chg(h, cur.cost, prev.cost, { neutral: true }) : "", vs(money, "cost")),
+    tile("clicks", "Ad clicks", num(cur.clicks), prev ? chg(h, cur.clicks, prev.clicks) : "", vs(num, "clicks")),
+    tile("cpc", "Cost per click", money(cur.cpc), prev ? chg(h, cur.cpc, prev.cpc, { invert: true }) : "", vs(money, "cpc")),
+    tile("impr", "Impressions", num(cur.impr), prev ? chg(h, cur.impr, prev.impr) : "", vs(num, "impr")),
+    tile("ctr", "CTR", pct(cur.ctr), prev ? chg(h, cur.ctr, prev.ctr) : "", vs(pct, "ctr")),
+    tile("sess", "Visits from ads", num(cur.sess), prev ? chg(h, cur.sess, prev.sess) : "", both(vs(num, "sess"), "GA4")),
+    tile("ke", "Key events", keF(cur.ke), prev ? chg(h, cur.ke, prev.ke) : "", both(vs(keF, "ke"), "bookings and enquiries")),
+    tile("cpke", "Cost per key event", money(cur.cpke), prev ? chg(h, cur.cpke, prev.cpke, { invert: true }) : "", both(vs(money, "cpke"), "lower is better")),
+    tile("bounce", "Bounce rate", pct0(cur.bounce),
       prev && cur.bounce != null && prev.bounce != null
         ? h.delta(cur.bounce * 100, prev.bounce * 100, { invert: true, abs: true, digits: 1 }).replace(/<\/span>$/, " pts</span>") : "",
       both(vs(pct0, "bounce"), "left straight away")),
@@ -518,10 +964,10 @@ function draw() {
     const Lp = Lok ? sumLeads(A, cmp.from, cmp.to, camp) : null;
     const cpe = L.enq ? spend / L.enq : null, cpp = L.came ? spend / L.came : null;
     leadKpis = [
-      tile("Enquiries from ads", num(L.enq), Lp ? chg(h, L.enq, Lp.enq) : "", both(Lp ? `vs ${num(Lp.enq)}` : "", "Prospect Dashboard")),
-      tile("Cost per enquiry", money(cpe), Lp && Lp.enq ? chg(h, cpe, prev.cost / Lp.enq, { invert: true }) : "", "lower is better"),
-      tile("Came in", num(L.came), Lp ? chg(h, L.came, Lp.came) : "", both(`${num(L.cb)} booked a consultation`, `${num(L.tx)} treated`)),
-      tile("Cost per patient who came in", money(cpp), Lp && Lp.came ? chg(h, cpp, prev.cost / Lp.came, { invert: true }) : "", "the number that matters"),
+      tile("enq", "Enquiries from ads", num(L.enq), Lp ? chg(h, L.enq, Lp.enq) : "", both(Lp ? `vs ${num(Lp.enq)}` : "", "Prospect Dashboard")),
+      tile("cpe", "Cost per enquiry", money(cpe), Lp && Lp.enq ? chg(h, cpe, prev.cost / Lp.enq, { invert: true }) : "", "lower is better"),
+      tile("came", "Came in", num(L.came), Lp ? chg(h, L.came, Lp.came) : "", both(`${num(L.cb)} booked a consultation`, `${num(L.tx)} treated`)),
+      tile("cpp", "Cost per patient who came in", money(cpp), Lp && Lp.came ? chg(h, cpp, prev.cost / Lp.came, { invert: true }) : "", "the number that matters"),
     ].join("");
     leadNote = `<p class="seo-note" style="margin:-6px 0 14px">${r.from < A.leadsFrom
       ? `Enquiries are tracked from ${esc(h.fmtDate(A.leadsFrom))}, so cost per enquiry and per patient use the spend from then. ` : ""}Recent enquiries may not have come in yet, so "Came in" grows over the following weeks.</p>`;
@@ -657,12 +1103,15 @@ function draw() {
     ${A.q.length > 15 ? `<div style="padding:8px 0 0;text-align:center"><button class="seo-btn" data-ads-more="qAll">${ui.qAll ? "Show fewer" : `Show all ${num(A.q.length)}`}</button></div>` : ""}
   </div>` : "";
 
+  /* The number card that's open */
+  const drill = ui.kpi ? adsDrillHtml({ h, K, A, key: ui.kpi, r, cmp, prev, cur, camp, per, kwIn, byPath }) : "";
+
   /* Footer */
   const run = A.run;
   const at = A.updatedAt ? A.updatedAt.toLocaleString("en-AU", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) : "";
   const warn = run && run.ok === false ? `<div class="seo-warn">The last Ads update failed, so these numbers may be out of date: ${esc(run.error || "")}</div>` : "";
 
-  body.innerHTML = `${warn}${controls}<div class="seo-kpis">${kpis}${leadKpis}</div>${leadNote}${coachHtml(h, A)}${share}${oppCard}${chart}${campCard}${kwCard}${qCard}
+  body.innerHTML = `${warn}${controls}<div class="seo-kpis">${kpis}${leadKpis}</div>${leadNote}${drill}${coachHtml(h, A)}${share}${oppCard}${chart}${campCard}${kwCard}${qCard}
     <p class="seo-note">These numbers come from GA4, so they can differ a little from the Google Ads screen: key events are counted the way GA4 credits them, not as Google Ads conversions.
       Data to ${esc(h.fmtDate(last))}${at ? ` · updated ${esc(at)}` : ""}.</p>`;
 }
@@ -675,10 +1124,19 @@ function bind(body) {
   body.addEventListener("click", (e) => {
     const ca = e.target.closest("[data-ads-coach],[data-ads-act],[data-ads-cf],[data-ads-copy],[data-ads-task],[data-ads-ctask]");
     if (ca && AD && body.contains(ca)) { coachClick(ca); return; }
-    const t = e.target.closest("[data-ads-preset],[data-ads-metric],[data-ads-camp],[data-ads-sort],[data-ads-kwsort],[data-ads-more]");
+    const t = e.target.closest("[data-ads-preset],[data-ads-metric],[data-ads-camp],[data-ads-sort],[data-ads-kwsort],[data-ads-more],[data-ads-kpi],[data-ads-dtab],[data-ads-dx],[data-ads-pf],[data-ads-pretry]");
     if (!t || !AD || !body.contains(t)) return;
     const d = t.dataset;
-    if (d.adsPreset !== undefined) {
+    const inner = e.target.closest("button,a");
+    if (d.adsDx !== undefined && inner && inner !== t) return;   // a button inside a row does its own job
+    if (d.adsKpi !== undefined) {
+      ui.kpi = ui.kpi === d.adsKpi ? "" : d.adsKpi;
+      ui.kpiTab = ""; ui.kpiX = "";
+    } else if (d.adsDtab !== undefined) { ui.kpiTab = d.adsDtab; ui.kpiX = ""; }
+    else if (d.adsDx !== undefined) ui.kpiX = ui.kpiX === d.adsDx ? "" : d.adsDx;
+    else if (d.adsPf !== undefined) ui.kpiPf = d.adsPf;
+    else if (d.adsPretry !== undefined) PL.st = "";   // the card asks again when it's drawn
+    else if (d.adsPreset !== undefined) {
       if (d.adsPreset === "custom" && lastR) { ui.from = lastR.from; ui.to = lastR.to; }   // start from what's showing
       ui.preset = d.adsPreset;
     } else if (d.adsMetric !== undefined) ui.metric = d.adsMetric;
@@ -692,6 +1150,11 @@ function bind(body) {
     } else if (d.adsMore !== undefined) ui[d.adsMore] = !ui[d.adsMore];
     save();
     draw();
+  });
+  // Enter or Space on a row opens it (the rows have tabindex)
+  body.addEventListener("keydown", (e) => {
+    const row = e.target.closest && e.target.closest("[data-ads-dx]");
+    if (row && body.contains(row) && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); row.click(); }
   });
   body.addEventListener("change", (e) => {
     const t = e.target;
