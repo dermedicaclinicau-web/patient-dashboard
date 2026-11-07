@@ -7,6 +7,8 @@ import { showSoapPanel } from "./soap-panel.js";
 import { callApi } from "./appointments.js";
 import { confirmDialog } from "./dialog.js";
 import { patientIds } from "./patients.js";
+import { db } from "./firebase-config.js";
+import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const PAGE = 10;
 const MONTHS_LONG = ["January", "February", "March", "April", "May", "June", "July",
@@ -21,7 +23,8 @@ const ICONS = {
   cal: svg('<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>'),
   edit: svg('<path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>'),
   doc: svg('<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/>'),
-  consent: svg('<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>'),
+  consent: svg('<path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M9 14l2 2 4-4"/>'),
+  alert: svg('<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>'),
   summary: svg('<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>'),
   plan: svg('<polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>'),
   ssp: svg('<path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>'),
@@ -36,6 +39,42 @@ function isOpenSaved(key, fallback) {
 }
 
 const pad = (n) => String(n).padStart(2, "0");
+const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+// Injectables visits should have a treatment record (reviews don't)
+const INJ_RE = /wrinkle relaxer|\bWR\b|\bfiller\b|radiesse|belotero|juvederm|profhilo|sculptra|skin ?booster|hydra repair|collagen growth|xeomin|botox|dysport|hyalase/i;
+const REVIEW_RE = /^review\b/i;
+
+// "No treatment record" only from this day: the same setting as Past appointments (ui_settings/records → txCheckFrom, "" = off)
+const TX_CHECK_DEFAULT = "2026-07-01";
+let txCheckLoad = null;
+function loadTxCheckFrom() {
+  if (!txCheckLoad) {
+    txCheckLoad = getDoc(doc(db, "ui_settings", "records"))
+      .then((snap) => {
+        const v = snap.exists() ? snap.data().txCheckFrom : undefined;
+        return v === "" || (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) ? v : TX_CHECK_DEFAULT;
+      })
+      .catch(() => TX_CHECK_DEFAULT);
+  }
+  return txCheckLoad;
+}
+
+// "4 months ago", "in 2 weeks", "Yesterday"
+function relDay(key, todayKey) {
+  const days = Math.round((parseDateKey(key) - parseDateKey(todayKey)) / 864e5);
+  if (days === 0) return "Today";
+  if (days === 1) return "Tomorrow";
+  if (days === -1) return "Yesterday";
+  const n = Math.abs(days);
+  const y = Math.floor(n / 365.25);
+  const txt = n < 14 ? `${n} days`
+    : n < 63 ? `${Math.round(n / 7)} weeks`
+    : n < 365 ? `${Math.max(2, Math.round(n / 30.4))} months`
+    : `${y} year${y === 1 ? "" : "s"}`;
+  return days > 0 ? `in ${txt}` : `${txt} ago`;
+}
 
 /* ===================== Parsing pcn_results visit lines ===================== */
 
@@ -89,9 +128,10 @@ async function buildVisits(patient) {
     fetchPatientRecords(patient),
     fetchTranscriptRecords(patient),
     fetchSkincare(patient),
+    loadTxCheckFrom(),
   ]);
   results.forEach((r) => { if (r.status === "rejected") console.error("History source failed:", r.reason); });
-  const [pre, day, recs, transcripts, skincare] = results.map((r) => (r.status === "fulfilled" ? r.value : null));
+  const [pre, day, recs, transcripts, skincare, txFrom] = results.map((r) => (r.status === "fulfilled" ? r.value : null));
   const failed = results.some((r) => r.status === "rejected");
 
   const map = new Map();
@@ -177,8 +217,17 @@ async function buildVisits(patient) {
     const d = parseDateKey(v.key);
     v.status = v.key > todayKey ? "upcoming" : v.key === todayKey ? "today" : "past";
     v.dateLabel = `${d.getDate()} ${MONTHS_LONG[d.getMonth()]} ${d.getFullYear()}`;
-    v.search = [v.dateLabel, v.key, ...v.services.map((s) => `${s.name} ${s.staff}`),
-      ...v.badges.map((b) => `${b.label} ${b.status || ""}`)]
+    v.day = d.getDate();
+    v.mon = MONTHS_SHORT[d.getMonth()];
+    v.year = d.getFullYear();
+    v.weekday = WEEKDAYS[d.getDay()];
+    v.rel = relDay(v.key, todayKey);
+    v.inj = v.services.some((s) => INJ_RE.test(s.name) && !REVIEW_RE.test(s.name));
+    v.notes = v.badges.some((b) => b.type === "summary");
+    // Only when the treatment records actually loaded, so a failed load never shows false warnings
+    v.missing = !!recs && !!txFrom && v.status === "past" && v.key >= txFrom && v.inj && !v.badges.some((b) => b.type === "tx");
+    v.search = [v.dateLabel, v.key, v.weekday, ...v.services.map((s) => `${s.name} ${s.staff}`),
+      ...v.badges.map((b) => `${b.label} ${b.status || ""}`), v.missing ? "missing no treatment record" : ""]
       .join(" ").toLowerCase();
     return v;
   });
@@ -187,7 +236,7 @@ async function buildVisits(patient) {
   const todayList = all.filter((v) => v.status === "today");
   const past = all.filter((v) => v.status === "past").sort((a, b) => b.key.localeCompare(a.key));
 
-  return { all: [...upcoming, ...todayList, ...past], upcoming, todayList, past, failed };
+  return { all: [...todayList, ...upcoming, ...past], upcoming, todayList, past, failed };
 }
 
 /* ===================== Layout ===================== */
@@ -209,6 +258,7 @@ export function historySectionHtml() {
           ${ICONS.search}
           <input type="search" placeholder="Search appointments or notes…" aria-label="Search appointments or notes" autocomplete="off" />
         </label>
+        <div class="hv-filters" role="group" aria-label="Show"></div>
         <div class="hv-list"><div class="skeleton sm"></div></div>
       </div>
     </details>`;
@@ -216,17 +266,26 @@ export function historySectionHtml() {
 
 /* ===================== Behaviour ===================== */
 
+const FILTERS = [
+  { id: "all", label: "All", test: () => true },
+  { id: "notes", label: "With notes", test: (v) => v.notes },
+  { id: "inj", label: "Injectables", test: (v) => v.inj },
+  { id: "missing", label: "Missing records", test: (v) => v.missing, bad: true },
+];
+
 export function mountHistory(root, patient) {
   const section = root.querySelector(".hv-section");
   if (!section) return;
   const list = section.querySelector(".hv-list");
   const input = section.querySelector(".hv-search input");
   const count = section.querySelector(".hv-count");
+  const filters = section.querySelector(".hv-filters");
 
   let data = null;
   let loading = false;
   let shown = PAGE;
   let term = "";
+  let filter = "all";
 
   async function load() {
     if (data || loading) return;
@@ -235,6 +294,7 @@ export function mountHistory(root, patient) {
       data = await buildVisits(patient);
       if (!section.isConnected) return;
       count.textContent = data.all.length;
+      renderFilters();
       render();
     } catch (err) {
       if (!section.isConnected) return;
@@ -245,20 +305,50 @@ export function mountHistory(root, patient) {
     }
   }
 
-  function render() {
-    const items = term
-      ? data.all.filter((v) => v.search.includes(term))
-      : [...data.upcoming, ...data.todayList, ...data.past.slice(0, shown)];
-    const remaining = term ? 0 : Math.max(0, data.past.length - shown);
+  // Only chips with something in them (and the one chosen) show; just "All" on its own isn't shown
+  function renderFilters() {
+    if (!filters || !data) return;
+    const chips = FILTERS.map((f) => {
+      const n = f.id === "all" ? data.all.length : data.all.filter(f.test).length;
+      if (f.id !== "all" && !n && f.id !== filter) return "";
+      return `<button type="button" class="hv-chip${f.bad && n ? " is-bad" : ""}" data-hv-filter="${f.id}"
+        aria-pressed="${f.id === filter}">${escapeHtml(f.label)}<em>${n}</em></button>`;
+    }).filter(Boolean);
+    filters.innerHTML = chips.length > 1 ? chips.join("") : "";
+  }
 
+  function render() {
+    const test = (FILTERS.find((f) => f.id === filter) || FILTERS[0]).test;
+    const ok = (v) => test(v) && (!term || v.search.includes(term));
+    const soon = [...data.todayList, ...data.upcoming].filter(ok);
+    const pastAll = data.past.filter(ok);
+    const past = term ? pastAll : pastAll.slice(0, shown);
+    const remaining = pastAll.length - past.length;
+
+    // Past visits by year (newest first); the count is the whole year, not just what's shown
+    const perYear = new Map();
+    pastAll.forEach((v) => perYear.set(v.year, (perYear.get(v.year) || 0) + 1));
+    const groups = [];
+    past.forEach((v) => {
+      const g = groups[groups.length - 1];
+      if (g && g.year === v.year) g.items.push(v);
+      else groups.push({ year: v.year, items: [v] });
+    });
+
+    const head = (title, n) => `<h5 class="hv-ghead"><span>${escapeHtml(title)}</span><em>${n} visit${n === 1 ? "" : "s"}</em></h5>`;
+    const grid = (items) => `<div class="hv-grid">${items.map(visitCard).join("")}</div>`;
+    const html = [
+      soon.length ? `<section class="hv-group is-soon">${
+        head(data.todayList.some(ok) ? "Today & coming up" : "Coming up", soon.length)}${grid(soon)}</section>` : "",
+      ...groups.map((g) => `<section class="hv-group">${head(String(g.year), perYear.get(g.year))}${grid(g.items)}</section>`),
+    ].join("");
+
+    const none = term ? "No appointments match your search."
+      : filter !== "all" ? "No visits match this filter." : "No appointment history yet.";
     list.innerHTML =
       (data.failed ? `<p class="hv-note">Some records couldn't be loaded, so badges may be incomplete.</p>` : "") +
-      (items.length
-        ? `<div class="hv-grid">${items.map(visitCard).join("")}</div>`
-        : `<p class="hv-empty">${term ? "No appointments match your search." : "No appointment history yet."}</p>`) +
-      (remaining
-        ? `<button type="button" class="hv-more" data-hv-action="more">Load more (${remaining} remaining)</button>`
-        : "");
+      (html ? `<div class="hv-groups">${html}</div>` : `<p class="hv-empty">${none}</p>`) +
+      (remaining > 0 ? `<button type="button" class="hv-more" data-hv-action="more">Load more (${remaining} remaining)</button>` : "");
   }
 
   section.addEventListener("toggle", () => { if (section.open) load(); });
@@ -287,6 +377,19 @@ export function mountHistory(root, patient) {
   });
 
   section.addEventListener("click", (e) => {
+    const fb = e.target.closest("[data-hv-filter]");
+    if (fb) {
+      const hadFocus = document.activeElement === fb;
+      filter = fb.dataset.hvFilter;
+      shown = PAGE;
+      renderFilters();
+      render();
+      if (hadFocus) {
+        const again = filters.querySelector(`[data-hv-filter="${filter}"]`);
+        if (again) again.focus({ preventScroll: true });   // keyboard users stay on the chip
+      }
+      return;
+    }
     if (e.target.closest("[data-hv-action='more']")) {
       shown += PAGE;
       render();
@@ -365,7 +468,7 @@ function jumpTo(root, target) {
 
 /* ===================== Templates ===================== */
 
-const STATUS_LABEL = { past: "Past visit", today: "Today's visit", upcoming: "Upcoming" };
+const STATUS_LABEL = { today: "Today", upcoming: "Upcoming" };   // past visits sit under their year, so they don't need a tag
 
 function badgeHtml(b) {
   
@@ -401,14 +504,25 @@ function visitCard(v) {
         s.staff ? `<span class="hv-staff"> · ${escapeHtml(s.staff)}</span>` : ""}</span>
     </li>`).join("");
 
+  // The year is only needed when the group header doesn't already say it
+  const year = v.status !== "past" && v.year !== new Date().getFullYear() ? `<small>${v.year}</small>` : "";
+  const rel = v.status === "today" ? "" : v.rel;
+  const missing = v.missing
+    ? `<span class="hv-badge b-missing" title="Injectables were booked but there's no treatment record for this day">${ICONS.alert}<span>No treatment record</span></span>`
+    : "";
+  const badges = v.badges.map(badgeHtml).join("") + missing;
+
   return `
-    <article class="hv-card hv-${v.status}">
-      <header class="hv-head">
-        <h4>${escapeHtml(v.dateLabel)}</h4>
-        <span class="hv-tag hv-tag-${v.status}">${STATUS_LABEL[v.status]}</span>
-        <button type="button" class="hv-edit" data-soon="Edit visit notes" aria-label="Edit visit notes">${ICONS.edit}</button>
-      </header>
-      ${services ? `<ul class="hv-services">${services}</ul>` : ""}
-      ${v.badges.length ? `<div class="hv-badges">${v.badges.map(badgeHtml).join("")}</div>` : ""}
+    <article class="hv-card hv-${v.status}${v.missing ? " is-missing" : ""}" aria-label="${escapeHtml(v.dateLabel)}">
+      <div class="hv-date" title="${escapeHtml(v.dateLabel)}"><b>${v.day}</b><span>${v.mon}</span>${year}</div>
+      <div class="hv-main">
+        <header class="hv-head">
+          <span class="hv-when"><b>${escapeHtml(v.weekday)}</b>${rel ? `<small>${escapeHtml(rel)}</small>` : ""}</span>
+          ${STATUS_LABEL[v.status] ? `<span class="hv-tag hv-tag-${v.status}">${STATUS_LABEL[v.status]}</span>` : ""}
+          <button type="button" class="hv-edit" data-soon="Edit visit notes" aria-label="Edit visit notes">${ICONS.edit}</button>
+        </header>
+        ${services ? `<ul class="hv-services">${services}</ul>` : ""}
+        ${badges ? `<div class="hv-badges">${badges}</div>` : ""}
+      </div>
     </article>`;
 }

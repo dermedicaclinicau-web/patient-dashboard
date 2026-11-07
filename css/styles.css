@@ -805,6 +805,100 @@ details[open] > summary .sum-chev { transform: rotate(180deg); }
 .hv-empty { color: var(--muted); font-style: italic; }
 .hv-note { font-size: .8rem; color: #b45309; }
 
+/* ---------- Appointment History / Notes: refreshed ---------- */
+.hv-section { border-color: #fcd34d; box-shadow: 0 10px 28px -22px rgba(180, 83, 9, .45); }
+.hv-section > summary { background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 60%, #fde68a 100%); }
+.hv-icon { border-radius: 12px; background: linear-gradient(135deg, #fbbf24 0%, #d97706 100%);
+  box-shadow: 0 6px 14px -6px #d97706, inset 0 1px 0 rgba(255, 255, 255, .35); }
+.hv-count { background: #fff; color: #b45309; box-shadow: 0 1px 2px rgba(146, 64, 14, .2); }
+.hv-body { background: #fffdf8; }
+.hv-search input { background: #fff; }
+
+/* Cards in rows: newest first, reading left to right */
+.hv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: .9rem;
+  align-items: start; columns: auto; }
+.hv-card { margin: 0; padding: .95rem 1.05rem; border-color: #e8edf2; border-left-width: 4px; border-radius: 14px;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .04), 0 8px 20px -20px rgba(15, 23, 42, .4);
+  transition: box-shadow .15s, transform .15s; }
+.hv-card:hover { transform: translateY(-1px); box-shadow: 0 12px 26px -18px rgba(15, 23, 42, .4); }
+.hv-card.hv-today { border-color: #fde68a; border-left-color: #f59e0b; background: linear-gradient(180deg, #fffbeb 0%, #fff 65%); }
+.hv-card.hv-upcoming { border-color: #bfdbfe; border-left-color: #3b82f6; background: linear-gradient(180deg, #eff6ff 0%, #fff 65%); }
+.hv-head h4 { font-size: .98rem; color: #0f172a; }
+
+/* Past visit is the usual, so it's quiet: Today and Upcoming stand out */
+.hv-tag-past { background: #f1f5f9; color: #64748b; }
+.hv-tag-today { background: #f59e0b; color: #fff; }
+.hv-tag-upcoming { background: #3b82f6; color: #fff; }
+
+/* Edit button */
+.hv-edit { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; color: #94a3b8;
+  transition: background .15s, color .15s; }
+.hv-edit:hover, .hv-edit:focus-visible { background: var(--primary-soft); color: var(--primary); outline: none; }
+
+/* Services and record badges */
+.hv-services li { line-height: 1.4; }
+.hv-services:last-child { margin-bottom: 0; }
+.hv-badges { padding-top: .6rem; border-top: 1px dashed #e8edf2; }
+.hv-badges:empty { display: none; }
+.hv-badge { padding: .28rem .7rem; border-radius: 999px; font-size: .78rem; font-weight: 600;
+  transition: transform .1s, box-shadow .15s; }
+.hv-badge:hover { filter: none; transform: translateY(-1px); box-shadow: 0 3px 8px -4px rgba(15, 23, 42, .35); }
+.hv-badge:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+/* Load more */
+.hv-more { border: 1px dashed #fcd34d; background: #fff; color: #92400e; transition: background .15s; }
+.hv-more:hover { background: #fffbeb; }
+
+/* ---------- Appointment History: filters, groups, date blocks ---------- */
+.hv-filters { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: -.25rem; }
+.hv-filters:empty { display: none; }
+.hv-chip { display: inline-flex; align-items: center; gap: .4rem; height: 34px; padding: 0 .85rem; border: 1px solid #fde68a;
+  border-radius: 999px; background: #fff; color: #78350f; font: inherit; font-size: .84rem; font-weight: 600; cursor: pointer;
+  transition: background .15s, border-color .15s, color .15s, box-shadow .15s; }
+.hv-chip em { min-width: 20px; padding: 0 .4rem; border-radius: 999px; background: #fef3c7; color: #92400e;
+  font-size: .72rem; font-style: normal; line-height: 20px; text-align: center; }
+.hv-chip:hover { border-color: #f59e0b; }
+.hv-chip.is-bad { border-color: #fecaca; color: #b91c1c; }
+.hv-chip.is-bad em { background: #fee2e2; color: #b91c1c; }
+.hv-chip[aria-pressed="true"] { border-color: #d97706; background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); color: #fff;
+  box-shadow: 0 4px 10px -4px rgba(217, 119, 6, .65); }
+.hv-chip.is-bad[aria-pressed="true"] { border-color: #b91c1c; background: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
+  box-shadow: 0 4px 10px -4px rgba(185, 28, 28, .6); }
+.hv-chip[aria-pressed="true"] em { background: rgba(255, 255, 255, .25); color: #fff; }
+.hv-chip:focus-visible { outline: 2px solid #d97706; outline-offset: 2px; }
+
+/* Groups: Today & coming up, then each year */
+.hv-groups { display: flex; flex-direction: column; gap: 1.1rem; }
+.hv-ghead { display: flex; align-items: center; gap: .6rem; margin: 0 0 .65rem; font-size: .8rem; font-weight: 700;
+  letter-spacing: .06em; text-transform: uppercase; color: #92400e; }
+.hv-ghead::after { content: ""; flex: 1; border-top: 1px solid #fde68a; }
+.hv-ghead em { padding: .05rem .5rem; border-radius: 999px; background: #fef3c7; font-size: .72rem; font-style: normal;
+  font-weight: 600; letter-spacing: 0; text-transform: none; }
+.hv-group.is-soon { padding: .85rem; border: 1px solid #fde68a; border-radius: 16px;
+  background: linear-gradient(135deg, #fffbeb 0%, #fff 70%); box-shadow: 0 8px 22px -20px rgba(180, 83, 9, .5); }
+
+/* Cards: date block on the left */
+.hv-card { display: flex; align-items: flex-start; gap: .85rem; }
+.hv-main { flex: 1; min-width: 0; }
+.hv-date { display: flex; flex: none; flex-direction: column; align-items: center; justify-content: center; width: 52px;
+  padding: .45rem 0 .4rem; border-radius: 12px; background: #ecfdf5; color: #047857; line-height: 1.05; }
+.hv-date b { font-size: 1.35rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.hv-date span { font-size: .68rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.hv-date small { margin-top: .15rem; font-size: .62rem; font-weight: 600; opacity: .8; }
+.hv-today .hv-date { background: linear-gradient(135deg, #fbbf24 0%, #d97706 100%); color: #fff; box-shadow: 0 6px 14px -6px #d97706; }
+.hv-upcoming .hv-date { background: linear-gradient(135deg, #60a5fa 0%, #2563eb 100%); color: #fff; box-shadow: 0 6px 14px -6px #2563eb; }
+.hv-head { flex-wrap: nowrap; margin-bottom: .45rem; }
+.hv-when { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.hv-when b { font-size: .95rem; color: #0f172a; }
+.hv-when small { font-size: .76rem; color: var(--muted); }
+.hv-head .hv-edit { flex: none; margin-left: auto; }
+
+/* Missing treatment record */
+.hv-card.is-missing { border-left-color: #ef4444; }
+.hv-card.is-missing .hv-date { background: #fef2f2; color: #b91c1c; }
+.hv-badge.b-missing { border: 1px dashed #fca5a5; background: #fff; color: #b91c1c; cursor: default; }
+.hv-badge.b-missing:hover { transform: none; box-shadow: none; }
+
 /* Jump targets land below the sticky patient bar */
 .tp-card, .sk-grid { scroll-margin-top: calc(var(--topbar-h) + 150px); }
 
