@@ -6,7 +6,7 @@ import { doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase
 const KINDS = {
   notes: { bg: "#16a34a", dot: true },        // consultation notes: a green dot
   recording: { bg: "#dc2626", dot: true },    // recording right now: a red dot
-  tx: { bg: "#2563eb", text: "TxR", label: "TxR" },
+  tx: { bg: "#f97316", bg2: "#c2410c", text: "TxR", label: "TxR" },   // orange, like the Treatment Records cards
   consent: { bg: "#7c3aed", text: "C", label: "Consent" },
   rx: { bg: "#db2777", text: "Rx", label: "Rx" },
 };
@@ -46,7 +46,14 @@ function drawIcon(kind) {
   g.lineTo(r, 64); g.quadraticCurveTo(0, 64, 0, 64 - r);
   g.lineTo(0, r); g.quadraticCurveTo(0, 0, r, 0);
   g.closePath();
-  g.fillStyle = k.bg;
+  if (k.bg2) {   // a top-left to bottom-right gradient
+    const grad = g.createLinearGradient(0, 0, 64, 64);
+    grad.addColorStop(0, k.bg);
+    grad.addColorStop(1, k.bg2);
+    g.fillStyle = grad;
+  } else {
+    g.fillStyle = k.bg;
+  }
   g.fill();
   g.fillStyle = "#fff";
   g.strokeStyle = "#fff";
@@ -160,17 +167,23 @@ export function formTabKind(category, templateName = "") {
   return "";
 }
 
-// #/form-record/<id>: TxR, C or Rx icon, and "TxR · Jane Smith" as the title
+// A form's tab: TxR, C or Rx icon, and "TxR · Jane Smith" as the title. false = an ordinary form.
+export function setFormTab(category, templateName, patientName) {
+  const kind = formTabKind(category, templateName);
+  if (!kind) return false;
+  setTabIcon(kind);
+  setTabTitle(`${KINDS[kind].label} · ${patientName || "Patient"}`);
+  return true;
+}
+
+// #/form-record/<id>: the saved record's tab
 export async function labelFormRecordTab(id) {
   const hash = location.hash;
   try {
     const snap = await getDoc(doc(db, "form_submissions", id));
     if (location.hash !== hash || !snap.exists()) return;   // moved on, or not found
     const s = snap.data();
-    const kind = formTabKind(s.category, s.templateName);
-    if (!kind) return;
-    setTabIcon(kind);
-    setTabTitle(`${KINDS[kind].label} · ${s.patientName || "Patient"}`);
+    setFormTab(s.category, s.templateName, s.patientName);
   } catch (err) {
     console.warn("Record tab not labelled:", err);
   }

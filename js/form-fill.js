@@ -36,6 +36,7 @@ import { readDraft, writeDraft, clearDraft, pruneDrafts, askResumeDraft } from "
 export { readField, applyVisibility, answerTagText, fieldTagValues } from "./form-live.js";
 import { loadClinicalAlerts, clinicalBannerHtml, allergyChipText } from "./clinical-alerts.js";
 import { can, isAdmin } from "./perms.js";
+import { setFormTab } from "./tab-icon.js";
 import { db, auth } from "./firebase-config.js";
 import { doc, getDoc, updateDoc, arrayUnion, increment, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
@@ -558,6 +559,9 @@ export async function mountFormFill(container, param, { staff, embedded = null }
   }
   if (!root.isConnected) return;
   if (!ver) { fail("Couldn't open this form", "The published copy is missing. Ask an admin to publish it again."); return; }
+
+  // The TxR (or C / Rx) tab icon and title while it's being filled in. Not inside a Task Manager overlay.
+  if (!embedded) setFormTab(tpl.category, ver.name, patient.name);
 
   const fields = ver.fields.map(normaliseField).filter(Boolean);
   const showAlerts = ALERT_CATEGORIES.includes(tpl.category) && can("clinical.view");
